@@ -49,6 +49,253 @@ protected:
     value_t *stack_top() { return exec_stack_peek(vm, 0); }
 };
 
+/* 按类型宽度读取有符号整数（测试辅助） */
+static int64_t read_sint(const value_t *v) {
+    switch (value_type(v)->size) {
+        case 1: return (int64_t)*(const int8_t  *)value_data(v);
+        case 2: return (int64_t)*(const int16_t *)value_data(v);
+        case 4: return (int64_t)*(const int32_t *)value_data(v);
+        default: return *(const int64_t *)value_data(v);
+    }
+}
+
+/* ================================================================ */
+/* 值构造 / 下标访问（construct / set_item / get_item 端到端）         */
+/* ================================================================ */
+
+/* construct 收尾：push_array...seal 留下 [i32;3] 类型位，压 3 个元素后
+   construct 3 弹出成员值 + 类型位，构造出数组值。 */
+TEST_F(ArrayBcodeTest, ConstructArrayValueFromElements) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top)->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_elem(value_type(top)), vm->type_i32);
+    EXPECT_EQ(array_type_len(value_type(top)), (size_t)3);
+}
+
+/* get_item（INDEX_GET）：construct 后 self[index] 弹出并返回元素副本 */
+TEST_F(ArrayBcodeTest, ConstructThenIndexGet) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_i32 1\n"
+        "    index_get\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 20);
+}
+
+/* set_item（INDEX_SET）：self[index] = val 返回 self，随后可再 index_get 验证 */
+TEST_F(ArrayBcodeTest, ConstructThenIndexSetThenGet) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_i32 2\n"
+        "    push_i32 99\n"
+        "    index_set\n"
+        "    push_i32 2\n"
+        "    index_get\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 99);
+}
+
+/* 越界读取（INDEX_GET）：index >= len 触发运行时硬错误并停机 */
+TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsReturnsError) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_i32 3\n"      /* 索引越界（len=3，合法 0..2） */
+        "    index_get\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 越界写入（INDEX_SET）：index >= len 触发运行时硬错误并停机 */
+TEST_F(ArrayBcodeTest, IndexSetOutOfBoundsReturnsError) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_i32 5\n"      /* 越界索引 */
+        "    push_i32 99\n"
+        "    index_set\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 负索引同样视为越界（按无符号读入后 >= len，触发硬错误） */
+TEST_F(ArrayBcodeTest, NegativeIndexIsOutOfBounds) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_i32 -1\n"     /* 负索引 */
+        "    index_get\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 长度查询（LENGTH）：构造 [i32;3] 后 len → u64 元素个数 3 */
+TEST_F(ArrayBcodeTest, LengthReturnsElementCount) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    length\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_u64);
+    EXPECT_EQ(read_sint(top), 3);
+}
+
+/* 长度查询不支持的类型返回硬错误（scalar 无 length 回调） */
+TEST_F(ArrayBcodeTest, LengthOnScalarReturnsError) {
+    const char *src =
+        "    push_i32 42\n"
+        "    length\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 定长数组成员数不匹配立即报错（construct 校验 len） */
+TEST_F(ArrayBcodeTest, ConstructCountMismatchReturnsError) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    construct 2\n"
+        "    halt\n";
+    /* 汇编成功（语法合法），运行时 construct 报错 */
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 非 array 类型走 construct 目前报错（struct/tuple 待后续） */
+TEST_F(ArrayBcodeTest, ConstructNonArrayTypeReturnsError) {
+    const char *src =
+        "    load \"i32\"\n"
+        "    push_i32 1\n"
+        "    construct 1\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 汇编 → 反汇编 稳定往返（CONSTRUCT / INDEX_GET / INDEX_SET 助记符正确编解码）。
+ * index_get / index_set 均消费 self（与 op_call 一致），故每次访问前用
+ * push_value 0 复制数组引用（借用引用，不重复持有 value）。 */
+TEST_F(ArrayBcodeTest, ConstructAndIndexAsmDisasmRoundTrip) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"
+        "    push_value 0\n"     /* dup arr */
+        "    push_i32 2\n"
+        "    push_i32 99\n"
+        "    index_set\n"        /* 写 arr[2]=99，返回 arr */
+        "    push_value 0\n"     /* dup arr */
+        "    push_i32 2\n"
+        "    index_get\n"        /* 读 arr[2] → 99 */
+        "    push_value 1\n"     /* dup arr（index_get 结果在顶，复制其下一位） */
+        "    length\n"           /* len(arr) → 3 */
+        "    pop\n"
+        "    halt\n";
+    ASSERT_TRUE(assemble_and_run(src));
+
+    allocator_t *da = create_allocator(test_alloc, test_free);
+    char *text = bcode_disasm_mem(da, bc, NULL);
+    ASSERT_NE(text, nullptr);
+    EXPECT_NE(strstr(text, "CONSTRUCT 3"), nullptr);
+    EXPECT_NE(strstr(text, "INDEX_GET"), nullptr);
+    EXPECT_NE(strstr(text, "INDEX_SET"), nullptr);
+    EXPECT_NE(strstr(text, "LENGTH"), nullptr);
+    allocator_free(da, (void **)&text);
+    delete_allocator(&da);
+}
+
 /* PUSH_ARRAY / LOAD elem / DEFINE_BOUND N / SEAL 经统一 SEAL 构造出 [i32;3] */
 TEST_F(ArrayBcodeTest, PushArrayDefineBoundSealBuildsArrayType) {
     ASSERT_TRUE(assemble_and_run(

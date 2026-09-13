@@ -68,6 +68,11 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
 
     [BCODE_PUSH_ARRAY]     = { "PUSH_ARRAY",     { BCODE_ASM_OP_NONE } },
     [BCODE_DEFINE_BOUND]   = { "DEFINE_BOUND",   { BCODE_ASM_OP_U32 } },
+
+    [BCODE_CONSTRUCT]      = { "CONSTRUCT",      { BCODE_ASM_OP_U32 } },
+    [BCODE_INDEX_GET]      = { "INDEX_GET",     { BCODE_ASM_OP_NONE } },
+    [BCODE_INDEX_SET]      = { "INDEX_SET",     { BCODE_ASM_OP_NONE } },
+    [BCODE_LENGTH]         = { "LENGTH",        { BCODE_ASM_OP_NONE } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

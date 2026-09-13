@@ -87,6 +87,17 @@ typedef enum {
        仅构造"数组类型"（array type）；数组值由 CONSTRUCT 指令构造。 */
     BCODE_PUSH_ARRAY,      /* 分配空 array type（开放，暂不入池） + 压其 type value */
     BCODE_DEFINE_BOUND,   /* U32：弹栈顶元素 type value → 设为元素类型 + 边界立即数 N（编译期常量） */
+
+    /* ---- 值构造 / 下标访问（对应 construct / set_item / get_item 流程）----
+       值构造（统一多步协议收尾）：类型经栈上构造（push_array...seal）后以
+       type value 形式留在栈顶，随后按类型字段序压入成员值，construct N 收尾。
+       当前仅实现 array 分支（struct / tuple 待后续 Phase）。 */
+    BCODE_CONSTRUCT,        /* U32：成员数量；弹 N 个成员值 + 类型位 → 按类型构造 value */
+    BCODE_INDEX_GET,        /* 弹 self + index，返回 self[index]（get_item） */
+    BCODE_INDEX_SET,        /* 弹 self + index + val，返回 self（set_item） */
+
+    /* ---- 长度查询：代理到 vtable->length（当前仅数组实现，返回 u64 元素个数） ---- */
+    BCODE_LENGTH,           /* 弹 self，返回 value_length(self)（如数组 → u64 元素个数） */
 } bcode_op_t;
 
 /* ================================================================ */

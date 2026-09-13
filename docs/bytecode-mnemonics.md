@@ -83,6 +83,33 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `SEAL` | — | 密封栈顶 type value（统一 SEAL 命令，func/array/struct/tuple 通用）：经 `value_seal` 代理到 `data->vtable->type_seal`，按类型各自池查重 intern（首次成功入池并置基类 `sealed=true`；去重复用则回收开放类型并重定向栈引用）。 |
 | `PUSH_FUNCTION` | `U32`（entry pc，标签） | 弹栈顶签名类型（`SEAL` 产物）→ 构造 `bcode_function_t{entry_pc}` → func value 压栈（函数对象，非签名类型）。 |
 
+### 4.3.1 值构造与下标访问
+
+`CONSTRUCT` / `INDEX_GET` / `INDEX_SET` 对应语言层的 `.<type>{...}` 值构造与
+`a[i]` 下标读写（即 construct / set_item / get_item 协议）。三者均走 value 层
+`vtable` 分派，越界/类型错误以**硬错误 value** 形式返回，由 `exec_drive` 捕获并停机。
+
+| 助记符 | 操作数 | 语义 |
+|--------|--------|------|
+| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。当前仅实现 **array 分支**（`value_make_array`，定长数组成员数须与边界一致，否则报错；非 array 类型暂报错，struct/tuple 待后续 Phase）。 |
+| `INDEX_GET` | — | `get_item`：`self[index]` → 元素副本。栈布局 `…, self, index`（index 在顶），弹 index、self 后分派 `vtable->get_index`。 |
+| `INDEX_SET` | — | `set_item`：`self[index] = val` → 返回 self。栈布局 `…, self, index, val`（val 在顶），弹 val、index、self 后分派 `vtable->set_index`。 |
+
+> **运行期越界检查**：数组 `INDEX_GET` / `INDEX_SET` 在执行时按数组值实际长度
+> （运行时 `vec_len`）校验 `0 <= index < len`，越界（含负索引按无符号读入后
+> `>= len`）一律返回硬错误 `array index N out of bounds (len=M)`，并停机。索引须
+> 为整数类型，否则报 `array index must be an integer`。注意 `INDEX_GET` / `INDEX_SET`
+> **消费** `self`（与 `CALL` 一致），多次访问需 `PUSH_VALUE` 复制引用。
+
+### 4.3.2 长度查询
+
+`LENGTH` 对应语言层的 `len(x)` / `.len` 查询，代理到 value 层的 `value_length`，
+最终分派到类型 vtable 的 `length` 回调。
+
+| 助记符 | 操作数 | 语义 |
+|--------|--------|------|
+| `LENGTH` | — | 弹 `self`，压 `value_length(self)`（即 `vtable->length(self)`）。当前仅数组实现：返回 `u64` 元素个数（shadow 下返回 `u64` shadow）；不支持的类型返回硬错误。 |
+
 ### 4.4 算术 / 逻辑 / 位运算（均弹参、压结果，无操作数）
 
 | 助记符 | 语义 | | 助记符 | 语义 |

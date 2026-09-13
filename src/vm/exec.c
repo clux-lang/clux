@@ -314,6 +314,71 @@ static value_t *op_define_bound(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* ---- 值构造（construct N）：弹 N 个成员值 + 类型位 → value ----
+ * 栈布局（构造期）：[..., type_value, v1, v2, ..., vN]（type 在底、vN 在顶）。
+ * 先弹 type_value（栈上类型构造产物，如 push_array...seal 留下的 array type
+ * value），再逐个弹 N 个成员值（栈顶为 vN，逆序收集为 elems[0..n-1] = v1..vN）。
+ * 按类型种类分派：当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
+static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t n = bcode_read_u32(bc, pc);
+
+    /* 栈上收集 N 个成员值（仅指针，不拥有 value）。VLA 与 op_call 的 args 同款。
+       栈布局：..., type_value, v1, ..., vN（type 在底、vN 在顶），故先弹 vN..v1，
+       逆序写入使 elems[0..n-1] = v1..vN，最后再弹类型位。 */
+    value_t *elems[n > 0 ? n : 1];
+    for (uint32_t i = 0; i < n; i++)
+        elems[n - 1 - i] = exec_stack_pop(vm);
+
+    /* 类型位在 N 个成员值之下 */
+    value_t *type_v = exec_stack_pop(vm);
+    const type_t *t = (type_v && value_type(type_v) == vm->type_type)
+                          ? value_as(type_v, const type_t *) : NULL;
+    if (!t)
+        return value_make_error(vm, "construct: missing type slot");
+
+    /* 仅实现 array 分支 */
+    if (t->kind == TYPE_KIND_ARRAY) {
+        const type_t *et = array_type_elem(t);
+        /* 校验成员数（定长数组须与边界一致；动态数组 SIZE_MAX 不限） */
+        size_t len = array_type_len(t);
+        if (len != SIZE_MAX && len != (size_t)n)
+            return value_make_error(vm,
+                "construct: array element count mismatch");
+        return value_make_array(vm, et, n > 0 ? elems : NULL, n);
+    }
+
+    /* 非 array 类型暂未实现 */
+    return value_make_error(vm,
+        "construct: unsupported type (only array implemented)");
+}
+
+/* ---- 下标读取（get_item）：self[index] -> 元素 ----
+ * 栈布局：..., self, index（index 在顶）。弹 index 再弹 self，分派 vtable->get_index。 */
+static value_t *op_index_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *index = exec_stack_pop(vm);
+    value_t *self  = exec_stack_pop(vm);
+    return value_get_index(vm, self, index);
+}
+
+/* ---- 下标写入（set_item）：self[index] = val -> self ----
+ * 栈布局：..., self, index, val（val 在顶）。弹 val、index、self，分派 vtable->set_index。 */
+static value_t *op_index_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *val   = exec_stack_pop(vm);
+    value_t *index = exec_stack_pop(vm);
+    value_t *self  = exec_stack_pop(vm);
+    return value_set_index(vm, self, index, val);
+}
+
+/* ---- 长度查询（length）：弹 self → value_length(self)（代理到 vtable->length）
+ * 当前仅数组实现：返回 u64 元素个数 shadow 下返回 u64 shadow）。 */
+static value_t *op_length(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *self = exec_stack_pop(vm);
+    return value_length(vm, self);
+}
+
 static value_t *op_push_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* entry_pc 立即数；弹栈顶签名类型（CREATE_FUNC_TYPE 产物），
        构造 bcode_function_t（封装在 bcode_function 模块内） */
@@ -459,6 +524,10 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_HALT]           = op_halt,
     [BCODE_PUSH_ARRAY]      = op_push_array,
     [BCODE_DEFINE_BOUND]    = op_define_bound,
+    [BCODE_CONSTRUCT]       = op_construct,
+    [BCODE_INDEX_GET]       = op_index_get,
+    [BCODE_INDEX_SET]       = op_index_set,
+    [BCODE_LENGTH]          = op_length,
 };
 
 /* ================================================================ */

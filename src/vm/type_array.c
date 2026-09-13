@@ -216,8 +216,15 @@ static value_t *array_get_index(vm_t *vm, value_t *self, value_t *index) {
         return value_make_error(vm, "array index must be an integer");
 
     array_data_t *d = (array_data_t *)value_data(self);
-    if (!d || !d->elems || i >= vec_len(d->elems))
-        return value_make_error(vm, "array index out of bounds");
+    size_t len = (d && d->elems) ? vec_len(d->elems) : 0;
+    /* 越界检查：索引为负数（按无符号读入的大值，或真越界）一律拦下，
+       返回硬错误（exec_drive 据此停机），并给出索引与长度便于定位。 */
+    if (i >= len) {
+        char buf[96];
+        snprintf(buf, sizeof buf,
+                 "array index %zu out of bounds (len=%zu)", i, len);
+        return value_make_error(vm, buf);
+    }
 
     value_t *elem = (value_t *)vec_get(d->elems, i);
     /* 只读访问：返回元素副本（clone 到当前作用域） */
@@ -241,8 +248,14 @@ static value_t *array_set_index(vm_t *vm, value_t *self, value_t *index,
         return value_make_error(vm, "array index must be an integer");
 
     array_data_t *d = (array_data_t *)value_data(self);
-    if (!d || !d->elems || i >= vec_len(d->elems))
-        return value_make_error(vm, "array index out of bounds");
+    size_t len = (d && d->elems) ? vec_len(d->elems) : 0;
+    /* 越界检查：见 array_get_index 同款说明 */
+    if (i >= len) {
+        char buf[96];
+        snprintf(buf, sizeof buf,
+                 "array index %zu out of bounds (len=%zu)", i, len);
+        return value_make_error(vm, buf);
+    }
 
     /* 类型检查：非元素类型尝试隐式转换 */
     const type_t *et = array_type_elem(value_type(self));
