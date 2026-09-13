@@ -15,7 +15,7 @@ ast_node_t *parse_return(parser_t *p) {
         value = parse_expr(p);
         if (!value || value->kind == AST_ERROR) {
             if (!value) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected expression after 'return'");
             }
             return value;
@@ -24,7 +24,7 @@ ast_node_t *parse_return(parser_t *p) {
     }
 
     if (!expect_symbol(p, ";")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after return statement");
     }
 

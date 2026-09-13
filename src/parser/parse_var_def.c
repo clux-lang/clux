@@ -12,7 +12,7 @@ ast_node_t *parse_var_def(parser_t *p) {
 
     /* 变量名：标识符 */
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected variable name after 'var'");
     }
     strslice_t name = token_strslice(cur_token(p));
@@ -29,7 +29,7 @@ ast_node_t *parse_var_def(parser_t *p) {
         type_expr = parse_expr_prec(p, 1);
         if (!type_expr || type_expr->kind == AST_ERROR) {
             if (!type_expr) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected type after ':'");
             }
             return type_expr;
@@ -38,7 +38,7 @@ ast_node_t *parse_var_def(parser_t *p) {
 
     /* 初始化表达式：= expr（必须） */
     if (!check_symbol(p, "=")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected '=' and initializer in var definition");
     }
     advance(p);
@@ -47,7 +47,8 @@ ast_node_t *parse_var_def(parser_t *p) {
     ast_node_t *init = parse_expr(p);
     if (!init || init->kind == AST_ERROR) {
         if (!init) {
-            return ast_error_new(p->arena, tb, p->pos,
+            /* 指向 '=' 之后实际无法解析的 token（parse_expr 失败时不前移） */
+            return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos,
                                  "expected expression after '=' in var definition");
         }
         return init;
@@ -55,7 +56,7 @@ ast_node_t *parse_var_def(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ";")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after var definition");
     }
 

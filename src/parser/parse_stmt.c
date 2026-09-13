@@ -54,7 +54,7 @@ ast_node_t *parse_comptime_stmt(parser_t *p) {
         if (n && n->kind != AST_ERROR) ((ast_func_def_t *)n)->is_comptime = true;
         return n;
     }
-    return ast_error_new(p->arena, tb, p->pos,
+    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                          "expected 'var' or 'func' after 'comptime'");
 }
 
@@ -70,7 +70,7 @@ ast_node_t *parse_break(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ";")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after 'break'");
     }
 
@@ -85,7 +85,7 @@ ast_node_t *parse_continue(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ";")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after 'continue'");
     }
 
@@ -109,10 +109,10 @@ ast_node_t *parse_assign_or_expr_stmt(parser_t *p) {
     skip_trivia(p);
     if (!expect_symbol(p, ";")) {
         if (expr->kind == AST_ASSIGN) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected ';' after assignment");
         }
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after expression statement");
     }
 

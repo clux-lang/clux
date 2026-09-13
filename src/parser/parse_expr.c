@@ -15,6 +15,8 @@
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
+#include "parser/ast_array.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
@@ -121,16 +123,55 @@ ast_node_t *parse_primary(parser_t *p) {
         skip_trivia(p);
         ast_node_t *inner = parse_expr(p);
         if (!inner) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected expression after '('");
         }
         if (inner->kind == AST_ERROR) return inner;
         skip_trivia(p);
         if (!expect_symbol(p, ")")) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected ')' after grouped expression");
         }
         return inner;
+    }
+
+    /* 数组类型表达式：[N]T（N=长度，T=基础类型）。
+     * 仅当 '[' 出现在原子位置时（无 lhs）解析为类型，后缀 '[' 仍归 AST_INDEX。
+     * ']' 与基础类型 T 之间的空格/注释由 skip_trivia 天然容错。 */
+    if (check_symbol(p, "[")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *length = parse_expr(p);
+        if (!length || length->kind == AST_ERROR) {
+            if (!length) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected length expression after '[' in array type");
+            }
+            return length;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, "]")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ']' after array type length");
+        }
+        skip_trivia(p);
+
+        /* base_type 用 parse_unary：支持 const/volatile 修饰、嵌套 [M][N]T */
+        ast_node_t *base_type = parse_unary(p);
+        if (!base_type || base_type->kind == AST_ERROR) {
+            if (!base_type) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected base type after ']' in array type");
+            }
+            return base_type;
+        }
+
+        ast_node_t *node = ast_array_new(p->arena, tb, p->pos);
+        ((ast_array_t *)node)->base_type = base_type;
+        ((ast_array_t *)node)->length    = length;
+        return node;
     }
 
     /* 关键字 → 标识符引用（类型即表达式）：
@@ -163,10 +204,74 @@ ast_node_t *parse_unary(parser_t *p) {
     if (check_symbol(p, "!"))      op_tok = cur_token(p);
     else if (check_symbol(p, "~")) op_tok = cur_token(p);
     else if (check_symbol(p, "-")) op_tok = cur_token(p);
+    else if (check_symbol(p, ".")) op_tok = cur_token(p);
     else if (check_keyword(p, "const"))     op_tok = cur_token(p);
     else if (check_keyword(p, "volatile"))  op_tok = cur_token(p);
 
     if (!op_tok) return parse_primary(p);
+
+    /* 类型字面量前缀：.<type> { fields } → AST_CONSTRUCT。
+     * 构造语法必须 '.' 前导（与 %v 调试输出 '.type{value}' 一致）。
+     * 注意 '.' 在此处仅作为表达式起始前缀；成员访问 '.' 由 parse_postfix 处理，
+     * 不会与前置 '.' 冲突。 */
+    if (token_is(op_tok, ".")) {
+        uint32_t dot_pos = tb;
+        advance(p);                  /* 消费 '.' */
+        skip_trivia(p);
+
+        ast_node_t *type = parse_unary(p);   /* 类型：i32 / [N]T / const i32 / 嵌套 */
+        if (!type || type->kind == AST_ERROR) {
+            if (!type) {
+                return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                     "expected type after '.' in typed literal");
+            }
+            return type;
+        }
+        if (!check_symbol(p, "{")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                 "expected '{' after type in typed literal");
+        }
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *fields = NULL, *fields_last = NULL;
+        if (!check_symbol(p, "}")) {
+            ast_node_t *f = parse_expr(p);
+            if (!f || f->kind == AST_ERROR) {
+                if (!f) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                         "expected expression in construct");
+                }
+                return f;
+            }
+            ast_append(&fields, &fields_last, NULL, f);
+            skip_trivia(p);
+            while (check_symbol(p, ",")) {
+                advance(p);
+                skip_trivia(p);
+                f = parse_expr(p);
+                if (!f || f->kind == AST_ERROR) {
+                    if (!f) {
+                        return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                             "expected expression after ',' in construct");
+                    }
+                    return f;
+                }
+                ast_append(&fields, &fields_last, NULL, f);
+                skip_trivia(p);
+            }
+        }
+        if (!expect_symbol(p, "}")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                 "expected '}' after construct fields");
+        }
+
+        ast_node_t *node = ast_construct_new(p->arena, dot_pos, p->pos);
+        ((ast_construct_t *)node)->type        = type;
+        ((ast_construct_t *)node)->fields      = fields;
+        ((ast_construct_t *)node)->fields_last = fields_last;
+        return node;
+    }
 
     advance(p);
     skip_trivia(p);
@@ -174,7 +279,7 @@ ast_node_t *parse_unary(parser_t *p) {
     ast_node_t *operand = parse_expr_prec(p, PREFIX_RIGHT_PREC);
     if (!operand || operand->kind == AST_ERROR) {
         if (!operand) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected expression after unary operator");
         }
         return operand;
@@ -220,7 +325,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 ast_node_t *arg = parse_expr(p);
                 if (!arg || arg->kind == AST_ERROR) {
                     if (!arg) {
-                        return ast_error_new(p->arena, tb, p->pos,
+                        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                              "expected expression in function call");
                     }
                     return arg;
@@ -234,7 +339,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                     arg = parse_expr(p);
                     if (!arg || arg->kind == AST_ERROR) {
                         if (!arg) {
-                            return ast_error_new(p->arena, tb, p->pos,
+                            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                                  "expected expression after ','");
                         }
                         return arg;
@@ -245,7 +350,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             }
 
             if (!expect_symbol(p, ")")) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected ')' after function call arguments");
             }
 
@@ -264,7 +369,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             skip_trivia(p);
 
             if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected field name after '.'");
             }
             strslice_t field = token_strslice(cur_token(p));
@@ -289,7 +394,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 ast_node_t *idx = parse_expr(p);
                 if (!idx || idx->kind == AST_ERROR) {
                     if (!idx) {
-                        return ast_error_new(p->arena, tb, p->pos,
+                        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                              "expected expression in index");
                     }
                     return idx;
@@ -303,7 +408,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                     idx = parse_expr(p);
                     if (!idx || idx->kind == AST_ERROR) {
                         if (!idx) {
-                            return ast_error_new(p->arena, tb, p->pos,
+                            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                                  "expected expression after ','");
                         }
                         return idx;
@@ -314,7 +419,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             }
 
             if (!expect_symbol(p, "]")) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected ']' after index expression");
             }
 
@@ -353,7 +458,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
 
             /* 左值必须是标识符（目前仅支持 ID_LIT） */
             if (left->kind != AST_IDENT) {
-                return ast_error_new(p->arena, left->tok_begin, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, left->tok_begin, p->pos,
                                      "invalid assignment target");
             }
 
@@ -363,7 +468,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             ast_node_t *value = parse_expr_prec(p, ASSIGN_LEFT_PREC);
             if (!value || value->kind == AST_ERROR) {
                 if (!value) {
-                    return ast_error_new(p->arena, op_pos, p->pos,
+                    return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
                                          "expected expression after assignment operator");
                 }
                 return value;
@@ -405,7 +510,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
         ast_node_t *rhs = parse_expr_prec(p, rp);
         if (!rhs || rhs->kind == AST_ERROR) {
             if (!rhs) {
-                return ast_error_new(p->arena, op_pos, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
                                      "expected expression after operator");
             }
             return rhs;

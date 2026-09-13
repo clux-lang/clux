@@ -13,7 +13,7 @@ ast_node_t *parse_if(parser_t *p) {
 
     /* 条件必须用 () 包裹 */
     if (!expect_symbol(p, "(")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected '(' after 'if'");
     }
     skip_trivia(p);
@@ -21,7 +21,7 @@ ast_node_t *parse_if(parser_t *p) {
     ast_node_t *cond = parse_expr(p);
     if (!cond || cond->kind == AST_ERROR) {
         if (!cond) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected condition after '('");
         }
         return cond;
@@ -29,7 +29,7 @@ ast_node_t *parse_if(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ")")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ')' after if condition");
     }
     skip_trivia(p);
@@ -37,7 +37,7 @@ ast_node_t *parse_if(parser_t *p) {
     ast_node_t *then_body = parse_block(p);
     if (!then_body || then_body->kind == AST_ERROR) {
         if (!then_body) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected '{' after if condition");
         }
         return then_body;
@@ -57,7 +57,7 @@ ast_node_t *parse_if(parser_t *p) {
         }
         if (!else_body || else_body->kind == AST_ERROR) {
             if (!else_body) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected block or 'if' after 'else'");
             }
             return else_body;

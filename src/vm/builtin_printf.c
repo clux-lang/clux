@@ -3,6 +3,7 @@
 #include "vm/function.h"
 #include "vm/type.h"
 #include "vm/type_func.h"
+#include "vm/value_dump.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -46,7 +47,7 @@ static double read_double(const value_t *v) {
 
 /* 格式符判定 */
 static bool is_conv_char(char c) {
-    return c && strchr("diufFeEgGxXocsp", c) != NULL;
+    return c && strchr("diufFeEgGxXocspv", c) != NULL;
 }
 
 value_t *builtin_printf_cfunc(vm_t *vm, func_t *self, size_t argc,
@@ -103,6 +104,18 @@ value_t *builtin_printf_cfunc(vm_t *vm, func_t *self, size_t argc,
         case 'p':
             printf(spec, (void *)read_unsigned(arg));
             break;
+        case 'v': {
+            /* 携带类型输出任意 value：`.type { value }`，复杂类型递归包裹。
+               参数已在进入 switch 前由 line 84-86 读取并自增 ai，此处直接复用，
+               切忌再次 args[ai++] 否则会跳过参数、读取越界导致崩溃。
+               宽度/精度修饰符对 %v 无语义，收集后忽略（spec 不使用）。 */
+            string_t *buf = string_new(vm->alloc);
+            if (!buf) return value_make_error(vm, "printf: out of memory");
+            value_dump_string(vm, arg, buf);
+            fputs(string_cstr(buf), stdout);
+            string_free(&buf);
+            break;
+        }
         default:
             return value_make_error(vm, "printf: unsupported conversion");
         }

@@ -398,6 +398,11 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
                     /* `(` 前：控制流关键字要空格（`if (`），
                      * 函数调用/泛型实例化紧贴（`main(`, `foo(`） */
                     need = need_space_before_paren(prev, tok);
+                } else if (prev && sym_is(prev, ']') &&
+                           is_word_like(token_get_kind(tok))) {
+                    /* 数组类型 [N]T 紧贴（`[1]i32` / `[2][3]i32`），
+                     * ']' 后紧跟类型名时不应插入空格 */
+                    need = false;
                 } else if (!no_space_before(tok) && !no_space_after(prev)) {
                     need = true;   /* 运算符/字面量/标识符等均以单空格分隔 */
                 }

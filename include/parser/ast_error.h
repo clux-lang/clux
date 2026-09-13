@@ -4,8 +4,11 @@
 extern "C" {
 #endif
 
+#include "core/vec.h"
 #include "core/strslice.h"
 #include "parser/ast_node.h"
+#include "parser/lexer.h"
+#include "diag/diagnostic.h"
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -17,34 +20,37 @@ typedef struct {
 /**
  * 创建错误节点（printf 风格格式化消息）。
  * 消息文本会被复制到 arena 上以保证生命周期。
- * 示例：ast_error_new(arena, tb, pos, "expected '%s' but got '%s'", ")", "]");
+ * 示例：ast_error_new(diag, tokens, arena, tb, te, "expected '%s' but got '%s'", ")", "]");
+ *
+ * 若传入非 NULL 的 diag / tokens，错误同时被记录进共享诊断缓冲区
+ * （位置由 tokens[tok_begin] 解析），交由 driver 在流水线出口统一打印。
+ * 二者为 NULL 时（如单测）退化为仅构造节点。
  */
-static inline ast_node_t *ast_error_new(arena_t *arena,
-                                        uint32_t tok_begin, uint32_t tok_end,
-                                        const char *fmt, ...)
-#ifdef __cplusplus
-    __attribute__((format(printf, 4, 5)))
-#elif defined(__GNUC__)
-    __attribute__((format(printf, 4, 5)))
+static inline ast_node_t *ast_error_newv(diag_buf_t *diag, vec_t *tokens,
+                                         arena_t *arena,
+                                         uint32_t tok_begin, uint32_t tok_end,
+                                         const char *fmt, va_list ap)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 6, 0)))
 #endif
 ;
 
 /**
  * va_list 版本，供内部使用。
  */
-static inline ast_node_t *ast_error_newv(arena_t *arena,
-                                         uint32_t tok_begin, uint32_t tok_end,
-                                         const char *fmt, va_list ap)
-#ifdef __cplusplus
-    __attribute__((format(printf, 4, 0)))
-#elif defined(__GNUC__)
-    __attribute__((format(printf, 4, 0)))
+static inline ast_node_t *ast_error_new(diag_buf_t *diag, vec_t *tokens,
+                                        arena_t *arena,
+                                        uint32_t tok_begin, uint32_t tok_end,
+                                        const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 6, 7)))
 #endif
 ;
 
 /* ---- inline 实现 ---- */
 
-static inline ast_node_t *ast_error_newv(arena_t *arena,
+static inline ast_node_t *ast_error_newv(diag_buf_t *diag, vec_t *tokens,
+                                         arena_t *arena,
                                          uint32_t tok_begin, uint32_t tok_end,
                                          const char *fmt, va_list ap) {
     ast_error_t *n = (ast_error_t *)arena_calloc(
@@ -71,15 +77,26 @@ static inline ast_node_t *ast_error_newv(arena_t *arena,
         }
     }
 
+    /* 携带 diag 时，把同一错误记录进共享诊断缓冲区（由 driver 出口统一打印）。
+       diag / tokens 为 NULL 时（如单测）仅构造节点，不影响解析结果。 */
+    if (diag && n->message.ptr && tokens && tok_begin < vec_len(tokens)) {
+        const token_t *tok = (const token_t *)vec_get(tokens, tok_begin);
+        const location_t *loc = token_get_location(tok);
+        location_t l = {0};
+        if (loc) l = *loc;
+        diag_error(diag, l, "%s", n->message.ptr);
+    }
+
     return &n->base;
 }
 
-static inline ast_node_t *ast_error_new(arena_t *arena,
+static inline ast_node_t *ast_error_new(diag_buf_t *diag, vec_t *tokens,
+                                        arena_t *arena,
                                         uint32_t tok_begin, uint32_t tok_end,
                                         const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    ast_node_t *result = ast_error_newv(arena, tok_begin, tok_end, fmt, ap);
+    ast_node_t *result = ast_error_newv(diag, tokens, arena, tok_begin, tok_end, fmt, ap);
     va_end(ap);
     return result;
 }

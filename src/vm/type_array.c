@@ -384,3 +384,22 @@ void array_push(vm_t *vm, value_t *arr, value_t *elem) {
     }
     vec_push(d->elems, vm->alloc, value_clone(vm, e));
 }
+
+/* ================================================================ */
+/* 运行期数组 value 只读访问（供调试/格式化遍历，如 printf %v）        */
+/* ================================================================ */
+
+size_t value_array_count(const value_t *v) {
+    if (!v || value_kind(v) != TYPE_KIND_ARRAY) return 0;
+    array_data_t *d = (array_data_t *)value_data(v);
+    return (d && d->elems) ? vec_len(d->elems) : 0;
+}
+
+const value_t *value_array_at(const value_t *v, size_t i) {
+    if (!v || value_kind(v) != TYPE_KIND_ARRAY) return NULL;
+    array_data_t *d = (array_data_t *)value_data(v);
+    if (!d || !d->elems) return NULL;
+    size_t n = vec_len(d->elems);
+    if (i >= n) return NULL;
+    return (const value_t *)vec_get(d->elems, i);
+}

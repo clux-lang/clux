@@ -28,6 +28,8 @@ extern "C" {
 #include "parser/ast_ident.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_binary.h"
+#include "parser/ast_array.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 }
 
@@ -1366,6 +1368,291 @@ TEST_F(ParseExprTest, Binary_PrefixWithBitAnd) {
 
     auto *unary = (ast_unary_t *)bin->lhs;
     expect_op_text(unary->op, "!");
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* 数组类型表达式 [N]T                                              */
+/* ================================================================ */
+
+/**
+ * Scenario: 一维数组类型 [1]i32
+ * Expected: AST_ARRAY，length=AST_INT_LIT(1)，base_type=AST_IDENT(i32)
+ */
+TEST_F(ParseExprTest, Array_SingleDimension) {
+    parser_t *p = make_parser("[1]i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ARRAY);
+
+    auto *arr = (ast_array_t *)node;
+    ASSERT_NE(arr->length, nullptr);
+    EXPECT_EQ(arr->length->kind, AST_INT_LIT);
+    EXPECT_EQ(((ast_int_lit_t *)arr->length)->value, 1ULL);
+    ASSERT_NE(arr->base_type, nullptr);
+    EXPECT_EQ(arr->base_type->kind, AST_IDENT);
+    EXPECT_EQ(((ast_ident_t *)arr->base_type)->name.len, 3u);
+    EXPECT_EQ(memcmp(((ast_ident_t *)arr->base_type)->name.ptr, "i32", 3), 0);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 多维数组类型 [2][3]i32（嵌套 AST_ARRAY）
+ * Expected: 外层 length=2，base_type 是 AST_ARRAY([3]i32)
+ */
+TEST_F(ParseExprTest, Array_MultiDimension) {
+    parser_t *p = make_parser("[2][3]i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ARRAY);
+
+    auto *outer = (ast_array_t *)node;
+    ASSERT_NE(outer->length, nullptr);
+    EXPECT_EQ(outer->length->kind, AST_INT_LIT);
+    EXPECT_EQ(((ast_int_lit_t *)outer->length)->value, 2ULL);
+
+    ASSERT_NE(outer->base_type, nullptr);
+    ASSERT_EQ(outer->base_type->kind, AST_ARRAY);
+
+    auto *inner = (ast_array_t *)outer->base_type;
+    ASSERT_NE(inner->length, nullptr);
+    EXPECT_EQ(inner->length->kind, AST_INT_LIT);
+    EXPECT_EQ(((ast_int_lit_t *)inner->length)->value, 3ULL);
+    ASSERT_NE(inner->base_type, nullptr);
+    EXPECT_EQ(inner->base_type->kind, AST_IDENT);
+    EXPECT_EQ(((ast_ident_t *)inner->base_type)->name.len, 3u);
+    EXPECT_EQ(memcmp(((ast_ident_t *)inner->base_type)->name.ptr, "i32", 3), 0);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组类型长度可用标识符 [N]i32（长度在 sema 阶段求值）
+ * Expected: AST_ARRAY，length=AST_IDENT(N)
+ */
+TEST_F(ParseExprTest, Array_LengthIsIdentifier) {
+    parser_t *p = make_parser("[N]i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ARRAY);
+
+    auto *arr = (ast_array_t *)node;
+    ASSERT_NE(arr->length, nullptr);
+    EXPECT_EQ(arr->length->kind, AST_IDENT);
+    EXPECT_EQ(((ast_ident_t *)arr->length)->name.len, 1u);
+    EXPECT_EQ(memcmp(((ast_ident_t *)arr->length)->name.ptr, "N", 1), 0);
+    ASSERT_NE(arr->base_type, nullptr);
+    EXPECT_EQ(arr->base_type->kind, AST_IDENT);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组类型内部允许空格与注释容错 [ 1 ] （含注释） i32
+ * Expected: 仍解析为 AST_ARRAY（skip_trivia 天然容错）
+ */
+TEST_F(ParseExprTest, Array_TriviaTolerant) {
+    parser_t *p = make_parser("[ 1 ] /* len */ i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ARRAY);
+
+    auto *arr = (ast_array_t *)node;
+    ASSERT_NE(arr->length, nullptr);
+    EXPECT_EQ(arr->length->kind, AST_INT_LIT);
+    ASSERT_NE(arr->base_type, nullptr);
+    EXPECT_EQ(arr->base_type->kind, AST_IDENT);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组类型缺少长度 [i32 → AST_ERROR
+ * Expected: 返回 AST_ERROR 节点
+ */
+TEST_F(ParseExprTest, Array_MissingLengthReturnsError) {
+    parser_t *p = make_parser("[i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组类型缺少 ']' [1 i32 → AST_ERROR
+ * Expected: 返回 AST_ERROR 节点
+ */
+TEST_F(ParseExprTest, Array_MissingCloseBracketReturnsError) {
+    parser_t *p = make_parser("[1 i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组类型缺少基础类型 [1] → AST_ERROR
+ * Expected: 返回 AST_ERROR 节点
+ */
+TEST_F(ParseExprTest, Array_MissingBaseTypeReturnsError) {
+    parser_t *p = make_parser("[1]");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* 类型字面量构造 .<type> { ... }（'.' 前导）                       */
+/* ================================================================ */
+
+/**
+ * Scenario: 基础构造 .i32{123}
+ * Expected: AST_CONSTRUCT，type=AST_IDENT(i32)，fields=单 int_lit(123)
+ */
+TEST_F(ParseExprTest, Construct_Basic) {
+    parser_t *p = make_parser(".i32{123}");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    ASSERT_NE(c->type, nullptr);
+    EXPECT_EQ(c->type->kind, AST_IDENT);
+    EXPECT_EQ(((ast_ident_t *)c->type)->name.len, 3u);
+    EXPECT_EQ(memcmp(((ast_ident_t *)c->type)->name.ptr, "i32", 3), 0);
+    ASSERT_NE(c->fields, nullptr);
+    EXPECT_EQ(c->fields->kind, AST_INT_LIT);
+    EXPECT_EQ(((ast_int_lit_t *)c->fields)->value, 123ULL);
+    EXPECT_EQ(c->fields->next, nullptr);  /* 单字段 */
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 数组构造 .[1]i32{123}
+ * Expected: AST_CONSTRUCT，type=AST_ARRAY([1]i32)，fields=单 int_lit(123)
+ */
+TEST_F(ParseExprTest, Construct_ArrayType) {
+    parser_t *p = make_parser(".[1]i32{123}");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    ASSERT_NE(c->type, nullptr);
+    ASSERT_EQ(c->type->kind, AST_ARRAY);
+    ASSERT_NE(c->fields, nullptr);
+    EXPECT_EQ(c->fields->kind, AST_INT_LIT);
+    EXPECT_EQ(((ast_int_lit_t *)c->fields)->value, 123ULL);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 多字段构造 .i32{1, 2, 3}
+ * Expected: AST_CONSTRUCT，fields 链表含 3 个 int_lit
+ */
+TEST_F(ParseExprTest, Construct_MultipleFields) {
+    parser_t *p = make_parser(".i32{1, 2, 3}");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    ASSERT_NE(c->fields, nullptr);
+    int count = 0;
+    for (ast_node_t *f = c->fields; f; f = f->next) {
+        EXPECT_EQ(f->kind, AST_INT_LIT);
+        count++;
+    }
+    EXPECT_EQ(count, 3);
+    EXPECT_EQ(c->fields_last->kind, AST_INT_LIT);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 空构造 .i32{} → AST_CONSTRUCT，fields 为 NULL
+ */
+TEST_F(ParseExprTest, Construct_EmptyFields) {
+    parser_t *p = make_parser(".i32{}");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    EXPECT_EQ(c->fields, nullptr);
+    EXPECT_EQ(c->fields_last, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 构造缺少类型 . {123} → AST_ERROR（'.' 后必须是类型）
+ */
+TEST_F(ParseExprTest, Construct_MissingTypeReturnsError) {
+    parser_t *p = make_parser(".{123}");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 构造缺少 '{' .i32 123 → AST_ERROR
+ */
+TEST_F(ParseExprTest, Construct_MissingBraceReturnsError) {
+    parser_t *p = make_parser(".i32 123");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 构造缺少 '}' 闭合 .i32{123 → AST_ERROR
+ */
+TEST_F(ParseExprTest, Construct_MissingCloseBraceReturnsError) {
+    parser_t *p = make_parser(".i32{123");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
 
     cleanup_parser(p);
 }

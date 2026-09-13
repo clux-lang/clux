@@ -14,7 +14,7 @@ ast_node_t *parse_for(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, "(")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected '(' after 'for'");
     }
     skip_trivia(p);
@@ -30,7 +30,7 @@ ast_node_t *parse_for(parser_t *p) {
         }
         if (init && init->kind == AST_ERROR) return init;
         if (!init) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected init statement in for loop");
         }
     } else {
@@ -44,7 +44,7 @@ ast_node_t *parse_for(parser_t *p) {
         cond = parse_expr(p);
         if (!cond || cond->kind == AST_ERROR) {
             if (!cond) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected condition in for loop");
             }
             return cond;
@@ -53,7 +53,7 @@ ast_node_t *parse_for(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ";")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after for condition");
     }
     skip_trivia(p);
@@ -65,7 +65,7 @@ ast_node_t *parse_for(parser_t *p) {
         update = parse_expr(p);
         if (!update || update->kind == AST_ERROR) {
             if (!update) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected expression in for update");
             }
             return update;
@@ -74,7 +74,7 @@ ast_node_t *parse_for(parser_t *p) {
     skip_trivia(p);
 
     if (!expect_symbol(p, ")")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ')' after for clauses");
     }
     skip_trivia(p);
@@ -82,7 +82,7 @@ ast_node_t *parse_for(parser_t *p) {
     ast_node_t *body = parse_block(p);
     if (!body || body->kind == AST_ERROR) {
         if (!body) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected '{' after for clauses");
         }
         return body;

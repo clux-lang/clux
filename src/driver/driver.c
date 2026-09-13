@@ -190,8 +190,9 @@ int driver_run_file(const char *path) {
   }
 
   /* Stage ③: 语法分析 */
-  parser_t *parser = parser_create(alloc, arena, pool);
-  if (!parser) {
+  /* 诊断缓冲区在解析前创建：语法错误由 parser 记入，统一在出口打印 */
+  diag_buf_t *diag = diag_buf_new(alloc);
+  if (!diag) {
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -199,11 +200,24 @@ int driver_run_file(const char *path) {
     return 1;
   }
 
+  parser_t *parser = parser_create(alloc, arena, pool);
+  if (!parser) {
+    diag_buf_destroy(&diag);
+    lexer_close(&lexer);
+    vec_free(alloc, &pool);
+    arena_destroy(alloc, &arena);
+    delete_allocator(&alloc);
+    return 1;
+  }
+  parser->diag = diag;
+
   ast_node_t *ast = parser_parse(parser);
   parser_destroy(&parser);
 
   if (!ast || ast->kind == AST_ERROR) {
-    /* 语法错误，诊断已由 parser 输出 */
+    /* 语法错误：诊断已由 parser 记入 diag，统一打印到 stderr */
+    diag_print_all(diag);
+    diag_buf_destroy(&diag);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -214,15 +228,7 @@ int driver_run_file(const char *path) {
   /* Stage ④: 语义分析（sema，语法通过后才进入；语义错误快速失败） */
   vm_t *vm = vm_new(alloc);
   if (!vm) {
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-  diag_buf_t *diag = diag_buf_new(alloc);
-  if (!diag) {
-    vm_destroy(&vm);
+    diag_buf_destroy(&diag);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -429,16 +435,26 @@ static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) 
     out->pool = pool;
     out->lexer = lexer;
 
+    /* 语法错误由 parser 记入 diag，统一在出口打印 */
+    diag_buf_t *diag = diag_buf_new(alloc);
+    if (!diag) {
+        driver_compiled_dispose(out);
+        return 1;
+    }
+    out->diag = diag;
+
     /* Stage ③：语法分析 */
     parser_t *parser = parser_create(alloc, arena, pool);
     if (!parser) {
         driver_compiled_dispose(out);
         return 1;
     }
+    parser->diag = diag;
     ast_node_t *ast = parser_parse(parser);
     parser_destroy(&parser);
     if (!ast || ast->kind == AST_ERROR) {
-        /* 语法错误，诊断已由 parser 输出 */
+        /* 语法错误：诊断已由 parser 记入 diag，统一打印到 stderr */
+        diag_print_all(diag);
         driver_compiled_dispose(out);
         return 1;
     }
@@ -451,19 +467,13 @@ static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) 
     }
     out->vm = vm;
 
-    diag_buf_t *diag = diag_buf_new(alloc);
-    if (!diag) {
-        driver_compiled_dispose(out);
-        return 1;
-    }
-    out->diag = diag;
-
     sema_t *sema = sema_create(vm, diag, pool, arena);
     if (!sema) {
         driver_compiled_dispose(out);
         return 1;
     }
     bool sema_ok = sema_analyze(sema, ast);
+
     sema_scope_t *scope_tree = sema->global_scope;
     sema_destroy(&sema);
     if (!sema_ok) {

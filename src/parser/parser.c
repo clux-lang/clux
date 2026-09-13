@@ -40,6 +40,7 @@ parser_t *parser_create(allocator_t *alloc, arena_t *arena, vec_t *tokens) {
     p->tokens    = tokens;
     p->pos       = 0;
     p->has_error = false;
+    p->diag      = NULL;
     return p;
 }
 
@@ -100,14 +101,14 @@ ast_node_t *parse_program(parser_t *p) {
                 if (func && func->kind != AST_ERROR)
                     ((ast_var_def_t *)func)->is_comptime = true;
             } else {
-                func = ast_error_new(p->arena, ctb, p->pos,
+                func = ast_error_new(p->diag, p->tokens, p->arena, ctb, p->pos,
                                      "expected 'func' or 'var' after 'comptime'");
             }
         } else {
             func = parse_func_def(p);
         }
         if (!func) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected function definition at top level");
         }
         if (func->kind == AST_ERROR) return func;
@@ -124,10 +125,10 @@ ast_node_t *parse_program(parser_t *p) {
 }
 
 ast_node_t *parser_parse(parser_t *p) {
-    if (!p) return NULL;
+  if (!p) return NULL;
 
-    /* 词法错误检查：有词法错误则不进入解析 */
-    if (has_lexical_errors(p)) return NULL;
+  /* 词法错误检查：有词法错误则不进入解析 */
+  if (has_lexical_errors(p)) return NULL;
 
-    return parse_program(p);
+  return parse_program(p);
 }

@@ -16,7 +16,7 @@ ast_node_t *parse_block(parser_t *p) {
         ast_node_t *stmt = parse_stmt(p);
         if (!stmt || stmt->kind == AST_ERROR) {
             if (!stmt) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected statement in block");
             }
             return stmt;
@@ -26,7 +26,7 @@ ast_node_t *parse_block(parser_t *p) {
     }
 
     if (!expect_symbol(p, "}")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected '}' to close block");
     }
 

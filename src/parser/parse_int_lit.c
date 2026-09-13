@@ -110,7 +110,7 @@ ast_node_t *parse_int_lit(parser_t *p) {
             /* 校验 value 是否在 type 值域内 */
             if (value > ti->max_val) {
                 advance(p);
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "integer literal %llu out of range for type %.*s",
                                      (unsigned long long)value, (int)next.len, next.ptr);
             }

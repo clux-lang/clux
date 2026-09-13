@@ -24,7 +24,7 @@ static ast_node_t *parse_param(parser_t *p) {
 
     /* 参数名：标识符 */
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected parameter name");
     }
     strslice_t name = token_strslice(cur_token(p));
@@ -34,7 +34,7 @@ static ast_node_t *parse_param(parser_t *p) {
     /* 类型标注：:type（必须，类型即表达式，普通表达式解析）。
        min_prec=1 限定：不消费逗号/右括号（调用者处理）。 */
     if (!expect_symbol(p, ":")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ':' and type after parameter name");
     }
     skip_trivia(p);
@@ -42,7 +42,7 @@ static ast_node_t *parse_param(parser_t *p) {
     ast_node_t *type_expr = parse_expr_prec(p, 1);
     if (!type_expr || type_expr->kind == AST_ERROR) {
         if (!type_expr) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected type after ':'");
         }
         return type_expr;
@@ -79,7 +79,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
 
     /* 参数列表：(name:type, name:type, ...) */
     if (!expect_symbol(p, "(")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected '(' after 'func'");
     }
     skip_trivia(p);
@@ -91,7 +91,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         ast_node_t *param = parse_param(p);
         if (!param || param->kind == AST_ERROR) {
             if (!param) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected parameter in function parameter list");
             }
             return param;
@@ -106,7 +106,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
             param = parse_param(p);
             if (!param || param->kind == AST_ERROR) {
                 if (!param) {
-                    return ast_error_new(p->arena, tb, p->pos,
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                          "expected parameter after ','");
                 }
                 return param;
@@ -117,7 +117,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     }
 
     if (!expect_symbol(p, ")")) {
-        return ast_error_new(p->arena, tb, p->pos,
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ')' after function parameters");
     }
     skip_trivia(p);
@@ -125,7 +125,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     if (expected_kind == AST_FUNC_DEF) {
         /* 语句级函数定义：必须有 name */
         if (name.len == 0) {
-            return ast_error_new(p->arena, tb, p->pos,
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected function name after 'func'");
         }
 
@@ -138,7 +138,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
             return_expr = parse_expr_prec(p, 1);
             if (!return_expr || return_expr->kind == AST_ERROR) {
                 if (!return_expr) {
-                    return ast_error_new(p->arena, tb, p->pos,
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                          "expected return type after ':'");
                 }
                 return return_expr;
@@ -149,7 +149,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         ast_node_t *body = parse_block(p);
         if (!body || body->kind == AST_ERROR) {
             if (!body) {
-                return ast_error_new(p->arena, tb, p->pos,
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected '{' for function body");
             }
             return body;
@@ -166,7 +166,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     }
 
     /* M2+: 表达式级匿名函数字面量 */
-    return ast_error_new(p->arena, tb, p->pos,
+    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                          "func literal not supported in M1");
 }
 

@@ -111,6 +111,17 @@ static inline size_t array_type_layout_align(const type_t *t) {
                                              : 0;
 }
 
+/* ---- 运行期数组 value 只读访问（供调试/格式化遍历，如 printf %v） ---- */
+
+/** 前置声明：避免为仅消费指针的访问器引入整个 value.h */
+typedef struct value_t value_t;
+
+/** 返回数组 value 的元素个数（非数组 value 返回 0） */
+size_t value_array_count(const value_t *v);
+
+/** 返回第 i 个元素（只读借用，不 clone；元素由 scope 管理生命周期），越界返回 NULL */
+const value_t *value_array_at(const value_t *v, size_t i);
+
 #ifdef __cplusplus
 }
 #endif
