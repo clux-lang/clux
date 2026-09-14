@@ -13,6 +13,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_volatile.h"
@@ -339,8 +340,15 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     }
     case AST_ARRAY: {
       /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
-         解析为真实类型（边界槽位编译期求值）后返回 type_type shadow，
-         供 as 右值 / sizeof / 嵌套类型构造消费。 */
+         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
+         返回 type_type shadow，供 as 右值 / sizeof / 嵌套类型构造消费。 */
+      const type_t *t = sema_resolve_type_slot(sema, node);
+      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      return value_make_shadow(sema->vm, sema->vm->type_type);
+    }
+    case AST_TYPE_REF: {
+      /* 具名类型引用（sema 登记的 "__type_N"）：重复求值（折叠重访）时
+         命中——解析回类型，返回 type_type shadow。 */
       const type_t *t = resolve_type_expr(sema, *node);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
       return value_make_shadow(sema->vm, sema->vm->type_type);
@@ -351,7 +359,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
          当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
       ast_construct_t *n = (ast_construct_t *)*node;
-      const type_t *t = resolve_type_expr(sema, n->type);
+      const type_t *t = sema_resolve_type_slot(sema, &n->type);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
 
       if (t->kind != TYPE_KIND_ARRAY) {

@@ -168,8 +168,21 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
+  /* 类型提升区（hoist）：JMP 守卫之后、注册段之前。运行时先构造并登记
+     sema->types 中的全部程序类型（BIND_TYPE），注册段/函数体的类型槽位
+     （AST_TYPE_REF → LOAD_TYPE <id>）直接查表。依赖后序递归构造，
+     当前类型图是 DAG（数组 elem / 限定符 sub 无环）；若未来引入指针/
+     自引用类型（成环），须改为拓扑排序或两阶段构造（开放对象先 BIND、
+     密封后再重绑），见 compile_hoist.c 头部注释。 */
+  size_t hoist = bcode_tell(bc);
+  compile_hoist(c);
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
   /* 注册段 */
-  size_t end = bcode_tell(bc);
   size_t fi = 0;
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind != AST_FUNC_DEF) continue;
@@ -186,7 +199,7 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   }
 
   bcode_write_op(bc, BCODE_HALT);
-  bcode_patch_u32(bc, jmp_pc + 4, (uint32_t)end);
+  bcode_patch_u32(bc, jmp_pc + 4, (uint32_t)hoist);
 
   c->bc = NULL; /* 产物移交调用方 */
   return bc;
@@ -197,7 +210,8 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
  * =========================================================================== */
 
 compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
-                         vec_t *tokens, sema_scope_t *global_scope) {
+                         vec_t *tokens, sema_scope_t *global_scope,
+                         vec_t *sema_types) {
   if (!alloc || !vm || !diag) return NULL;
   compiler_t *c = (compiler_t *)allocator_new(alloc, &g_compiler_class, 1);
   if (!c) panic("compiler: out of memory allocating compiler");
@@ -208,6 +222,7 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->tokens        = tokens;
   c->global_scope  = global_scope;
   c->current_scope = global_scope;
+  c->sema_types    = sema_types;
   c->loop_stack    = NULL;
   c->failed        = false;
   return c;

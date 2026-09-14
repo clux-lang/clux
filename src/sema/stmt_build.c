@@ -40,7 +40,7 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     sema_symbol_t init = {
-        .type = resolve_type_expr(sema, vd->type_expr)};
+        .type = sema_resolve_type_slot(sema, &vd->type_expr)};
     if (!sema_scope_define(fscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p),
                  "duplicate parameter '%.*s'", (int)vd->name.len,
@@ -52,8 +52,9 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
   build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
 
   /* 控制流分析：非 void 函数所有路径必须 return（纯结构，不依赖类型） */
-  const type_t *rt = fn->return_expr ? resolve_type_expr(sema, fn->return_expr)
-                                     : NULL;
+  const type_t *rt = fn->return_expr
+                         ? sema_resolve_type_slot(sema, &fn->return_expr)
+                         : NULL;
   if (rt && rt->kind != TYPE_KIND_VOID && !r.definitely_returns) {
     diag_error(sema->diag, sema_loc(sema, &fn->base),
                "function '%.*s' must return a value on all paths",
@@ -76,7 +77,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         ast_var_def_t *vd = (ast_var_def_t *)s;
         const type_t *vt = NULL;
         if (vd->type_expr) {
-          vt = resolve_type_expr(sema, vd->type_expr);
+          vt = sema_resolve_type_slot(sema, &vd->type_expr);
           if (!vt) {
             diag_error(sema->diag, sema_loc(sema, s), "unknown type");
           }
@@ -140,7 +141,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           ast_var_def_t *vd = (ast_var_def_t *)fr->init;
           const type_t *vt = NULL;
           if (vd->type_expr) {
-            vt = resolve_type_expr(sema, vd->type_expr);
+            vt = sema_resolve_type_slot(sema, &vd->type_expr);
             if (!vt) {
               diag_error(sema->diag, sema_loc(sema, fr->init),
                          "unknown type");

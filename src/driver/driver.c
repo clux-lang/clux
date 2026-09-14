@@ -248,14 +248,15 @@ int driver_run_file(const char *path) {
   }
 
   bool sema_ok = sema_analyze(sema, ast);
-  /* 作用域树是持久化数据，编译器（AST → bcode）按名查找符号元数据，
-     必须存活到编译完成；顺序参照生命周期约定：先取树、再销毁 sema、
-     编译结束后再销毁树 */
+  /* 作用域树与类型登记表是持久化数据，编译器（AST → bcode）按名查找符号
+     元数据 / 类型 id，必须存活到编译完成；顺序参照生命周期约定：先取树与
+     types 表、再在编译结束后销毁 sema、随后销毁树与 types */
   sema_scope_t *scope_tree = sema->global_scope;
-  sema_destroy(&sema);
+  vec_t *sema_types = sema->types;
 
   if (!sema_ok) {
     /* 语义诊断已由 sema 记入 diag，统一在出口打印（diag 销毁前） */
+    sema_destroy(&sema);
     diag_print_all(diag);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
@@ -268,8 +269,9 @@ int driver_run_file(const char *path) {
   }
 
   /* Stage ⑤: 编译（AST + sema 作用域树 → 字节码模块） */
-  compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree);
+  compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree, sema_types);
   if (!comp) {
+    sema_destroy(&sema);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
     vm_destroy(&vm);
@@ -281,6 +283,7 @@ int driver_run_file(const char *path) {
   }
   bytecode_t *bc = compiler_compile(comp, ast);
   compiler_destroy(&comp);
+  sema_destroy(&sema); /* types 表已随编译器使用完毕，统一在此销毁 */
 
   if (!bc) {
     /* 编译诊断已记入 diag，统一在出口打印 */
@@ -475,21 +478,25 @@ static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) 
     bool sema_ok = sema_analyze(sema, ast);
 
     sema_scope_t *scope_tree = sema->global_scope;
-    sema_destroy(&sema);
+    vec_t *sema_types = sema->types;
     if (!sema_ok) {
+        sema_destroy(&sema);
         diag_print_all(diag);
         driver_compiled_dispose(out);
         return 1;
     }
 
     /* Stage ⑤：编译（AST + sema 作用域树 → 字节码模块） */
-    compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree);
+    compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree,
+                                    sema_types);
     if (!comp) {
+        sema_destroy(&sema);
         driver_compiled_dispose(out);
         return 1;
     }
     bytecode_t *bc = compiler_compile(comp, ast);
     compiler_destroy(&comp);
+    sema_destroy(&sema); /* types 表已随编译器使用完毕，统一在此销毁 */
     if (!bc) {
         diag_print_all(diag);
         driver_compiled_dispose(out);

@@ -66,6 +66,9 @@ typedef struct type_t {
     size_t          align;      /* 该类型数据的对齐要求 */
     type_kind_t     kind;       /* 粗粒度分类（鸭子类型判断用） */
     bool            sealed;     /* 是否已密封（构造完成后置位；内置基础类型创建即 true） */
+    uint32_t        id;         /* 类型全局唯一 id：内建类型固定（vm_init_builtins 按序），
+                                   程序类型由编译器按 sema 解析的实例指针去重分配。
+                                   LOAD_TYPE <id> 从 vm->types_by_id 查表压栈。 */
 } type_t;
 
 /**
@@ -156,6 +159,36 @@ const type_t *type_volatile_intern(vm_t *vm, const type_t *sub);
 
 /** 将 type 转为 value_t*（type 作为 first-class value） */
 value_t *type_as_value(vm_t *vm, const type_t *t);
+
+/* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
+
+/* 类型 id 分段（type.c / sema.c / compile_hoist.c 共用）：
+   内建类型固定 id 0..(TYPE_ID_BUILTIN_COUNT-1)（vm_register_builtin_types
+   按序登记，error/interrupt 紧随其后）；程序类型 id 由 sema 分配，从
+   TYPE_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
+#define TYPE_ID_BUILTIN_COUNT 17u
+#define TYPE_ID_PROGRAM_BASE   64u
+
+/**
+ * 登记类型到 id 表（vm->types_by_id，索引即 id）。BIND_TYPE <id> 运行期
+ * 用；幂等——同一类型重复登记（多 id 别名）无害。
+ * Panics on out-of-memory.
+ */
+void vm_type_bind(vm_t *vm, uint32_t id, const type_t *t);
+
+/**
+ * 按 id 查类型：id 越界或未登记返回 NULL。LOAD_TYPE <id> 运行期用。
+ */
+const type_t *vm_type_load(vm_t *vm, uint32_t id);
+
+/**
+ * 设置类型的显示名（覆盖默认规范名）。SET_TYPE_NAME 运行期用。
+ *
+ * 语义：仅对程序类型（id 由编译器分配，>= TYPE_ID_PROGRAM_BASE）生效；
+ * 内置类型 name 指向静态存储不可改名，返回 false。旧 name（若为堆分配
+ * 的规范名）先释放，再分配 name 的拷贝并替换。
+ */
+bool type_set_name(vm_t *vm, const type_t *t, strslice_t name);
 
 /**
  * 类型提升（二元运算前协商结果类型）

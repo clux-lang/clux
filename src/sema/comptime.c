@@ -4,13 +4,13 @@
 #include "core/string.h"
 #include "core/strslice.h"
 #include "ctfe/ctfe.h"
-#include "parser/ast_array.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_type_ref.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
 #include "vm/value.h"
@@ -102,37 +102,19 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
 }
 
 /* 从常量类型构造类型表达式 AST（折叠写回 AST_CONSTRUCT 的类型位用）：
-   内置标量类型 → AST_IDENT(类型名)；嵌套数组 → 递归 AST_ARRAY。
+   登记类型到 sema->types 队列 → 产出 AST_TYPE_REF（"__type_N" 名字引用）。
+   hoist 提升区负责构造，编译器零感知；复合类型结构依赖由登记递归覆盖。
    位置借用 origin（折叠节点位置，诊断定位不变）。 */
 static ast_node_t *sema_ct_type_expr(sema_t *sema, const type_t *t,
                                      const ast_node_t *origin) {
   if (!sema || !t) return NULL;
-  arena_t *arena = sema->arena;
-  uint32_t tb = origin->tok_begin;
-  uint32_t te = origin->tok_end;
-
-  if (t->kind == TYPE_KIND_ARRAY) {
-    const type_t *et = array_type_elem(t);
-    size_t len = array_type_len(t);
-    ast_node_t *base = sema_ct_type_expr(sema, et, origin);
-    if (!base) return NULL;
-    ast_node_t *an = ast_array_new(arena, tb, te);
-    if (!an) return NULL;
-    ast_array_t *arr = (ast_array_t *)an;
-    arr->base_type = base;
-    ast_node_t *len_lit = ast_int_lit_new(arena, tb, te);
-    if (!len_lit) return NULL;
-    ((ast_int_lit_t *)len_lit)->value = (uint64_t)len;
-    arr->length = len_lit;
-    return an;
-  }
-
-  /* 标量类型：AST_IDENT 引用类型名（type->name 生命周期 = vm 池） */
-  if (!t->name.ptr) return NULL;
-  ast_node_t *id = ast_ident_new(arena, tb, te);
-  if (!id) return NULL;
-  ((ast_ident_t *)id)->name = t->name;
-  return id;
+  const sema_type_t *st = sema_type_register(sema, t);
+  if (!st) return NULL;
+  ast_node_t *ref =
+      ast_type_ref_new(sema->arena, origin->tok_begin, origin->tok_end);
+  if (!ref) return NULL;
+  ((ast_type_ref_t *)ref)->name = st->name;
+  return ref;
 }
 
 /* 兄弟链连接辅助：返回链头（首个非 NULL 节点） */
@@ -238,7 +220,7 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
      "显式类型校验"语义对齐）。 */
   if (vd->type_expr) {
     if (!sym->type) {
-      sym->type = resolve_type_expr(sema, vd->type_expr);
+      sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
     }
     if (sym->type) {
       value_t *dst = value_make_shadow(sema->vm, sym->type);

@@ -55,6 +55,12 @@ typedef struct vm_t {
     /* ---- 数组类型池（按 elem_type + length 去重 intern，vm 拥有生命周期） ---- */
     vec_t *array_types;    /* array_type_t*，元素为数组类型 */
 
+    /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
+    /* 内建类型固定 id 0..14（vm_init_builtins 登记）；程序类型 id 由编译器
+       分配（>=16），运行期 BIND_TYPE <id> 把构造出的类型登记进本表。
+       同一 intern 实例重复登记幂等（多 id 别名同一 type_t）。 */
+    vec_t *types_by_id;    /* type_t*，索引即类型 id */
+
     /* ---- 函数对象池（func_t / bcode_function_t*，vm 统一持有生命周期） ---- */
     /* 所有函数值共享同一 func_t*（clone 浅拷贝指针），因此 func_t 不能由
      * 某个 value dispose 释放（double free）；归本池统一释放。 */

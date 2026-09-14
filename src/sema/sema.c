@@ -10,11 +10,13 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_program.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
 #include <string.h>
+#include <stdio.h>
 
 /* ===========================================================================
  * 上下文管理
@@ -32,6 +34,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->arena = arena;
   sema->global_scope = NULL;
   sema->funcs = vec_new(vm->alloc, false); /* 元素手动释放（sema_func_t 无 dispose） */
+  sema->types = vec_new(vm->alloc, false); /* 元素手动释放（sema_type_t 无 dispose） */
   sema->func_return_type = NULL;
   sema->func_has_return = false;
   sema->loop_depth = 0;
@@ -48,6 +51,14 @@ void sema_destroy(sema_t **sema) {
       allocator_free(alloc, (void **)&sf);
     }
     vec_free(alloc, &(*sema)->funcs);
+  }
+  if ((*sema)->types) {
+    size_t n = vec_len((*sema)->types);
+    for (size_t i = 0; i < n; i++) {
+      sema_type_t *st = (sema_type_t *)vec_get((*sema)->types, i);
+      allocator_free(alloc, (void **)&st);
+    }
+    vec_free(alloc, &(*sema)->types);
   }
   allocator_free(alloc, (void **)sema);
 }
@@ -132,7 +143,112 @@ static bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
   return true;
 }
 
-const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
+/* ===========================================================================
+ * 类型登记（sema->types 队列）
+ *
+ * 与 funcs 同构：sema 解析出的每个类型登记为 sema_type_t（type 指针 +
+ * "__type_N" 名字 + TYPE_ID_PROGRAM_BASE+index id），驱动编译器 hoist
+ * 类型提升区。AST 类型槽位经 AST_TYPE_REF 名字引用，保持平凡可解耦。
+ *
+ * 名字 "__type_N"（N = 队列下标）由 sema arena 分配（生命周期 = arena，
+ * 存活到编译完成）；id 与名字的 N 一一对应（id = 64 + N），compiler 经
+ * 名字查表拿 id 发 LOAD_TYPE。
+ * =========================================================================== */
+
+/* 复合类型的结构依赖递归登记：数组的元素类型、const/volatile 的 sub。
+ * func 签名类型不在 AST 类型槽位出现（签名在注册段内联构造），跳过。 */
+static void sema_type_register_deps(sema_t *sema, const type_t *t) {
+  if (!t) return;
+  switch (t->kind) {
+    case TYPE_KIND_ARRAY: {
+      const type_t *et = array_type_elem(t);
+      if (et) sema_type_register(sema, et);
+      break;
+    }
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE: {
+      const type_t *sub = type_qualifier_sub(t);
+      if (sub) sema_type_register(sema, sub);
+      break;
+    }
+    default:
+      break; /* 标量/str/bool/type/func/error：无结构依赖 */
+  }
+}
+
+const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
+  if (!sema || !t || !sema->types) return NULL;
+
+  /* 按 type_t 指针去重：同一 intern 实例只登记一次 */
+  const sema_type_t *found = sema_type_find(sema, t);
+  if (found) return found;
+
+  size_t n = vec_len(sema->types);
+  if (n > 0xFFFFFFFFull - TYPE_ID_PROGRAM_BASE) return NULL; /* id 溢出 */
+
+  sema_type_t *st = (sema_type_t *)allocator_new_ex(
+      sema->vm->alloc, "sema_type_t", sizeof(sema_type_t), NULL, NULL, NULL, 1);
+  if (!st) return NULL;
+  memset(st, 0, sizeof(*st));
+  st->type = t;
+  st->id   = (uint32_t)(TYPE_ID_PROGRAM_BASE + n);
+
+  /* 名字 "__type_N"（arena 分配，跨 sema/compile 阶段安全） */
+  char name[32];
+  int nl = snprintf(name, sizeof name, "__type_%zu", n);
+  char *buf = (char *)arena_calloc(sema->arena, 1, (size_t)nl + 1,
+                                   ALIGNOF(max_align_t));
+  if (!buf) {
+    allocator_free(sema->vm->alloc, (void **)&st);
+    return NULL;
+  }
+  memcpy(buf, name, (size_t)nl);
+  st->name = (strslice_t){ buf, (size_t)nl };
+
+  vec_push(sema->types, sema->vm->alloc, st);
+
+  /* 程序类型（复合类型）同步 t->id = st->id：运行时 SET_TYPE_NAME 按
+     t->id >= TYPE_ID_PROGRAM_BASE 判断"可改名"。内建类型 id 固定
+     （vm_init_builtins 按序 0..16），保持不动。 */
+  if (t->kind == TYPE_KIND_ARRAY || t->kind == TYPE_KIND_CONST ||
+      t->kind == TYPE_KIND_VOLATILE) {
+    ((type_t *)t)->id = st->id;
+  }
+
+  /* 结构依赖递归登记（hoist 构造完备性） */
+  sema_type_register_deps(sema, t);
+  return st;
+}
+
+const sema_type_t *sema_type_find(sema_t *sema, const type_t *t) {
+  if (!sema || !sema->types || !t) return NULL;
+  size_t n = vec_len(sema->types);
+  for (size_t i = 0; i < n; i++) {
+    const sema_type_t *st = (const sema_type_t *)vec_get(sema->types, i);
+    if (st && st->type == t) return st;
+  }
+  return NULL;
+}
+
+const sema_type_t *sema_type_find_name(sema_t *sema, strslice_t name) {
+  if (!sema || !sema->types || !name.ptr) return NULL;
+  size_t n = vec_len(sema->types);
+  for (size_t i = 0; i < n; i++) {
+    const sema_type_t *st = (const sema_type_t *)vec_get(sema->types, i);
+    if (st && st->name.len == name.len &&
+        memcmp(st->name.ptr, name.ptr, name.len) == 0)
+      return st;
+  }
+  return NULL;
+}
+
+/* ===========================================================================
+ * 类型表达式求值
+ * =========================================================================== */
+
+/* 纯求值（不登记、不替换槽位）：switch 分派类型表达式节点 → 类型单例。
+ * 由 resolve_type_expr（登记）与递归 sub 解析共用。 */
+static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
   if (!sema || !type_expr) return NULL;
 
   switch (type_expr->kind) {
@@ -144,8 +260,7 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
     }
     case AST_CONST: {
       /* const 类型修饰：嵌套递归（const const T 收敛为 const T） */
-      const type_t *sub =
-          resolve_type_expr(sema, ((ast_const_t *)type_expr)->sub);
+      const type_t *sub = resolve_type_expr(sema, ((ast_const_t *)type_expr)->sub);
       return sub ? type_const_intern(sema->vm, sub) : NULL;
     }
     case AST_VOLATILE: {
@@ -164,12 +279,44 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
       return type_array_intern(sema->vm, base, len);
     }
+    case AST_TYPE_REF: {
+      /* 具名类型引用（sema 登记过的类型，如 "__type_0"）→ 查 types 队列。
+         折叠写回 / 重复解析（Pass 3 复查）时命中。 */
+      ast_type_ref_t *ref = (ast_type_ref_t *)type_expr;
+      const sema_type_t *st = sema_type_find_name(sema, ref->name);
+      return st ? st->type : NULL;
+    }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */
       diag_error(sema->diag, sema_loc(sema, type_expr),
                  "unsupported type expression");
       return NULL;
   }
+}
+
+const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
+  if (!sema || !type_expr) return NULL;
+  const type_t *t = sema_resolve_inner(sema, type_expr);
+  if (t) sema_type_register(sema, t); /* 解析出的类型登记（含递归 sub） */
+  return t;
+}
+
+/* 槽位替换：resolve + 就地替换为 AST_TYPE_REF（携带登记名字）。
+ * 已是 AST_TYPE_REF 时幂等（重新解析 + 同名字引用替换）。 */
+const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
+  if (!sema || !slot || !*slot) return NULL;
+  ast_node_t *old = *slot;
+  const type_t *t = resolve_type_expr(sema, old);
+  if (!t) return NULL;
+  const sema_type_t *st = sema_type_find(sema, t);
+  if (!st) return NULL; /* 理论不可达：刚登记 */
+
+  ast_node_t *ref = ast_type_ref_new(sema->arena, old->tok_begin, old->tok_end);
+  if (!ref) return NULL;
+  ((ast_type_ref_t *)ref)->name = st->name;
+  ref->next = old->next; /* 保留兄弟链 */
+  *slot = ref;
+  return t;
 }
 
 location_t sema_loc(sema_t *sema, ast_node_t *node) {
@@ -256,7 +403,7 @@ static void pass2_types(sema_t *sema) {
       size_t j = 0;
       for (ast_node_t *p = fn->params; p; p = p->next, j++) {
         ast_var_def_t *vd = (ast_var_def_t *)p;
-        const type_t *t = resolve_type_expr(sema, vd->type_expr);
+        const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t) {
           diag_error(sema->diag, sema_loc(sema, p),
                      "unknown type in parameter '%.*s'",
@@ -268,7 +415,7 @@ static void pass2_types(sema_t *sema) {
 
     const type_t *rt = NULL;
     if (fn->return_expr) {
-      rt = resolve_type_expr(sema, fn->return_expr);
+      rt = sema_resolve_type_slot(sema, &fn->return_expr);
       if (!rt) {
         diag_error(sema->diag, sema_loc(sema, f),
                    "unknown return type");

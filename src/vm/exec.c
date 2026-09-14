@@ -138,6 +138,39 @@ static value_t *op_load(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return v; /* type value 借用引用 */
 }
 
+/* ---- 类型 id 指令（LOAD_TYPE / BIND_TYPE / SET_TYPE_NAME） ---- */
+
+/* LOAD_TYPE <id>：从 types_by_id 查表，压入该类型的 type value */
+static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    const type_t *t = vm_type_load(vm, id);
+    if (!t) return value_make_error(vm, "exec: unknown type id");
+    return type_as_value(vm, t);
+}
+
+/* BIND_TYPE <id>：弹栈顶 type value，登记 id→type（幂等；seal 去重后重绑） */
+static value_t *op_bind_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    value_t *tv = exec_stack_pop(vm);
+    if (!tv || value_type(tv) != vm->type_type)
+        return value_make_error(vm, "exec: bind type expects a type value");
+    const type_t *t = *(const type_t **)value_data(tv);
+    vm_type_bind(vm, id, t);
+    return NULL;
+}
+
+/* SET_TYPE_NAME <name>：弹栈顶 type value，设置其显示名（覆盖规范名） */
+static value_t *op_set_type_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *tv = exec_stack_pop(vm);
+    if (!tv || value_type(tv) != vm->type_type)
+        return value_make_error(vm, "exec: set type name expects a type value");
+    const type_t *t = *(const type_t **)value_data(tv);
+    if (!type_set_name(vm, t, name))
+        return value_make_error(vm, "exec: cannot rename this type");
+    return NULL;
+}
+
 static value_t *op_push_undefined(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     return value_make_undefined(vm);
@@ -483,6 +516,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_BOOL]      = op_push_bool,
     [BCODE_PUSH_VALUE]     = op_push_value,
     [BCODE_LOAD]           = op_load,
+    [BCODE_LOAD_TYPE]      = op_load_type,
+    [BCODE_BIND_TYPE]      = op_bind_type,
+    [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,
     [BCODE_DEFINE]         = op_define,
     [BCODE_ADD]            = op_add,

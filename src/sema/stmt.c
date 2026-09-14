@@ -647,7 +647,7 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   if (!sf->scope) return; /* 建树失败（结构错误已诊断），不进入 shadow run */
 
   sema->func_return_type =
-      fn->return_expr ? resolve_type_expr(sema, fn->return_expr) : NULL;
+      fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
   sema->func_has_return = false;
 
   /* 函数级 VM scope（与 fscope 同构）：参数 shadow value 定义到此处，

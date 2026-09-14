@@ -132,6 +132,14 @@ void vec_reserve(vec_t *vec, allocator_t *allocator, size_t additional);
  */
 void vec_shrink_to_fit(vec_t *vec, allocator_t *allocator);
 
+/**
+ * Resize the vec to `new_len` elements. If growing, new slots are filled
+ * with NULL (the vec grows length without touching existing elements).
+ * Shrinking beyond the current length is a no-op.
+ * Panics on out-of-memory. No-op if `vec` is NULL.
+ */
+void vec_resize(vec_t *vec, allocator_t *allocator, size_t new_len);
+
 /* ---- Ownership query ---- */
 
 /**

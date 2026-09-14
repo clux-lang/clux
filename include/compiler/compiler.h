@@ -10,6 +10,7 @@ extern "C" {
 #include "diag/diagnostic.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
+#include "sema/sema.h"
 #include "sema/symbol.h"
 #include "vm/bcode.h"
 #include "vm/vm.h"
@@ -69,6 +70,11 @@ typedef struct compiler_t {
     sema_scope_t   *global_scope;
     sema_scope_t   *current_scope; /* 编译期当前词法作用域（符号元数据查找） */
 
+    /* sema 类型登记表（借用，不拥有）：sema->types（sema_type_t* 数组）。
+       hoist 类型提升区遍历它生成 BIND_TYPE 构造；AST_TYPE_REF 槽位经
+       sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
+    vec_t          *sema_types;
+
     /* 静态平衡追踪 */
     size_t          scope_depth;    /* 当前已 PUSH_SCOPE 未 POP 的层数 */
     int             stack_depth;    /* 静态操作数栈深度（压栈 +1 / 弹栈 -1） */
@@ -86,10 +92,12 @@ typedef struct compiler_t {
  * - diag: 诊断收集器（driver 出口打印）
  * - tokens: token pool（借 driver，节点位置 → location 转换用）
  * - global_scope: sema 作用域树根（借用，符号元数据查找）
+ * - sema_types: sema 类型登记表（借用，hoist 提升 + LOAD_TYPE 槽位查找）
  * 返回 NULL 表示参数无效或 OOM。
  */
 compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
-                         vec_t *tokens, sema_scope_t *global_scope);
+                         vec_t *tokens, sema_scope_t *global_scope,
+                         vec_t *sema_types);
 
 /** 销毁编译器上下文（不释放 vm/diag/tokens/scope 树，均为借用） */
 void compiler_destroy(compiler_t **pc);
@@ -135,6 +143,21 @@ void   compile_expr(compiler_t *c, ast_node_t *node);          /* compile_expr.c
 void   compile_stmt(compiler_t *c, ast_node_t *node);          /* compile_stmt.c */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
 void   compile_func_reg(compiler_t *c, ast_func_def_t *fn, size_t body);
+
+/* ---- hoist 类型提升区（compile_hoist.c） ---- */
+
+/**
+ * 编译类型提升区（JMP 守卫之后、注册段之前）：
+ * 遍历 sema->types，按 type_t 结构单遍递归构造（依赖后序）每个程序类型并
+ * BIND_TYPE <id> 绑定（内建类型已由 vm_register_builtin_types 绑内建 id，
+ * 此处仅 BIND 别名 id）；数组/const/volatile 构造后 BIND 密封实例，槽位
+ * LOAD_TYPE <id> 运行时直接查表。净栈深 0。
+ */
+void compile_hoist(compiler_t *c);
+
+/** 类型登记表查找（AST_TYPE_REF 名字 / type_t 指针 → sema_type_t）。 */
+const sema_type_t *c_sema_type_find_name(vec_t *types, strslice_t name);
+const sema_type_t *c_sema_type_find_ptr(vec_t *types, const type_t *t);
 
 #ifdef __cplusplus
 }

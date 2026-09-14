@@ -25,21 +25,33 @@ static class_t g_vm_class = {
 typedef struct {
     const char *name;
     size_t      slot_off; /* vm_t 中对应 type_t* 字段的偏移（编译期常量） */
+    uint32_t    id;       /* 类型全局唯一 id（固定，LOAD_TYPE 内建段） */
 } builtin_type_entry_t;
 
 static void vm_register_builtin_types(vm_t *vm) {
     static const builtin_type_entry_t entries[] = {
-        { "i8",   offsetof(vm_t, type_i8)   }, { "i16",  offsetof(vm_t, type_i16)  },
-        { "i32",  offsetof(vm_t, type_i32)  }, { "i64",  offsetof(vm_t, type_i64)  },
-        { "u8",   offsetof(vm_t, type_u8)   }, { "u16",  offsetof(vm_t, type_u16)  },
-        { "u32",  offsetof(vm_t, type_u32)  }, { "u64",  offsetof(vm_t, type_u64)  },
-        { "f32",  offsetof(vm_t, type_f32)  }, { "f64",  offsetof(vm_t, type_f64)  },
-        { "bool", offsetof(vm_t, type_bool) }, { "str",  offsetof(vm_t, type_str)  },
-        { "void", offsetof(vm_t, type_void) }, { "type", offsetof(vm_t, type_type) },
-        { "func", offsetof(vm_t, type_func) },
+        { "i8",   offsetof(vm_t, type_i8),    0 },
+        { "i16",  offsetof(vm_t, type_i16),   1 },
+        { "i32",  offsetof(vm_t, type_i32),   2 },
+        { "i64",  offsetof(vm_t, type_i64),   3 },
+        { "u8",   offsetof(vm_t, type_u8),    4 },
+        { "u16",  offsetof(vm_t, type_u16),   5 },
+        { "u32",  offsetof(vm_t, type_u32),   6 },
+        { "u64",  offsetof(vm_t, type_u64),   7 },
+        { "f32",  offsetof(vm_t, type_f32),   8 },
+        { "f64",  offsetof(vm_t, type_f64),   9 },
+        { "bool", offsetof(vm_t, type_bool), 10 },
+        { "str",  offsetof(vm_t, type_str),  11 },
+        { "void", offsetof(vm_t, type_void), 12 },
+        { "type", offsetof(vm_t, type_type), 13 },
+        { "func", offsetof(vm_t, type_func), 14 },
     };
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         const type_t *t = *(type_t **)((char *)vm + entries[i].slot_off);
+
+        /* 登记进类型 id 表（LOAD_TYPE 内建段直接查表，无需运行期构造） */
+        vm_type_bind(vm, entries[i].id, t);
+
         void *data = value_alloc_data_copy(vm->alloc, vm->type_type, &t);
         value_t *tv = value_make_untracked(vm->alloc, vm->type_type, data);
         value_t *stored = scope_define(vm, vm->global_scope, entries[i].name, tv);
@@ -78,8 +90,17 @@ vm_t *vm_new(allocator_t *alloc) {
     vm->const_types = vec_new(alloc, /*owns_element=*/false);
     vm->volatile_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
+       初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
+       BIND_TYPE 动态扩容登记。 */
+    vm->types_by_id = vec_new(alloc, /*owns_element=*/false);
+
     /* 基本类型注册进 global scope（LOAD 指令按名查 type value） */
     vm_register_builtin_types(vm);
+
+    /* error/interrupt 也登记进类型 id 表（id 15/16，内建段） */
+    vm_type_bind(vm, 15, vm->type_error);
+    vm_type_bind(vm, 16, vm->type_interrupt);
 
     /* printf 内置函数（临时注册，M1 硬编码绑定 C printf） */
     vm_register_printf(vm);
@@ -180,6 +201,9 @@ void vm_destroy(vm_t **pvm) {
         }
         vec_free(vm->alloc, &vm->array_types);
     }
+
+    /* 类型 id 表：元素归各类型池，仅释放向量结构 */
+    vec_free(vm->alloc, &vm->types_by_id);
 
     allocator_free(vm->alloc, (void **)pvm);
 }

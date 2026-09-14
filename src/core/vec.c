@@ -212,6 +212,12 @@ void vec_shrink_to_fit(vec_t *vec, allocator_t *allocator) {
   vec->cap = vec->len;
 }
 
+void vec_resize(vec_t *vec, allocator_t *allocator, size_t new_len) {
+  if (!vec || new_len <= vec->len) return;
+  if (new_len > vec->cap) vec_grow(vec, allocator, new_len);
+  while (vec->len < new_len) vec->data[vec->len++] = NULL;
+}
+
 /* ---- Ownership query ---- */
 
 bool vec_owns_element(const vec_t *vec) {

@@ -46,6 +46,25 @@ typedef struct sema_func_t {
     strslice_t    name;   /* 函数名（诊断用） */
 } sema_func_t;
 
+/**
+ * sema_type_t: 语义分析层登记的类型单元（统一登记在 sema->types 队列）
+ *
+ * - type: 类型单例（vm 池 intern，按指针去重：同一类型只登记一次）
+ * - name: 具名类型标识 "__type_N"（arena 分配，AST_TYPE_REF 引用标识；
+ *   不是显示名——显示名保留在 type->name）
+ * - id:   LOAD_TYPE/BIND_TYPE 的 u32 id 操作数（TYPE_ID_PROGRAM_BASE + index）
+ *
+ * 与 funcs 同构（m2-design §comptime"类型提升"）：sema 把解析过的每个
+ * 类型登记到此队列，compiler 据此生成 hoist 类型提升区（BIND_TYPE 两阶段
+ * 构造）并在类型槽位发 LOAD_TYPE <id>——AST 因此保持平凡可解耦（类型槽位
+ * 是 AST_TYPE_REF 名字引用，不关联任何 type_t 指针）。
+ */
+typedef struct sema_type_t {
+    const type_t *type;    /* vm 池 intern 单例 */
+    strslice_t    name;    /* "__type_N"（sema arena 生命周期） */
+    uint32_t      id;      /* TYPE_ID_PROGRAM_BASE + index */
+} sema_type_t;
+
 typedef struct sema_t {
     vm_t         *vm;           /* 复用 VM 类型注册表 + vtable + shadow value */
     diag_buf_t   *diag;         /* 诊断收集器 */
@@ -57,6 +76,11 @@ typedef struct sema_t {
     /* 函数队列：sema 层全部函数（顶层函数 Pass 1 登记；局部函数/泛型实例
        在 Pass 3 解析中追加，队列驱动、可增长）。sema 拥有元素生命周期。 */
     vec_t        *funcs;        /* sema_func_t* */
+
+    /* 类型队列：sema 层解析过的全部类型（resolve_type_expr 登记 + comptime
+       折叠逆向登记），按 type_t 指针去重，驱动编译器 hoist 类型提升区。
+       sema 拥有元素生命周期。 */
+    vec_t        *types;        /* sema_type_t* */
 
     /* 函数上下文（Pass 3 walk 时设置） */
     const type_t *func_return_type; /* NULL = void */
@@ -102,12 +126,38 @@ void sema_destroy(sema_t **sema);
  *
  * 类型槽位 = 普通表达式（type is expression）：AST_IDENT 命名类型
  * （type_lookup 沿作用域链查 type value）、AST_CONST/AST_VOLATILE 修饰
- * （递归 sub + intern）。M2 扩展：数组/元组/func 类型表达式与类型计算
- * 等在此求值。
+ * （递归 sub + intern）、AST_TYPE_REF 具名类型引用（types 队列查表）。
+ * M2 扩展：数组/元组/func 类型表达式与类型计算等在此求值。
  *
- * 失败返回 NULL（已报错）。空指针入参返回 NULL 不报错（表示"无类型"）。
+ * 副作用：每个解析出的类型（含递归 sub）登记进 sema->types（按指针去重），
+ * 供编译器 hoist 提升。失败返回 NULL（已报错）。空指针入参返回 NULL 不报错。
  */
 const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr);
+
+/**
+ * 类型槽位替换：resolve_type_expr + 把 *slot 就地替换为 AST_TYPE_REF
+ * （携带登记的 "__type_N" 名字），返回解析出的类型。
+ *
+ * 下游编译器遇 AST_TYPE_REF 发 LOAD_TYPE <id>，类型构造收敛到 hoist 区——
+ * AST 保持平凡可解耦（不挂 type_t 指针）。slot 已是 AST_TYPE_REF 时幂等
+ * （重新解析 + 同名字引用替换，无重复登记）。
+ */
+const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot);
+
+/**
+ * 类型登记：按 type_t 指针去重，未登记则分配 "__type_N" 名字与
+ * TYPE_ID_PROGRAM_BASE+index id 追加到 sema->types。复合类型（数组/const/
+ * volatile）的结构依赖（elem/sub）一并递归登记，保证 hoist 构造完备。
+ * 返回登记的 sema_type_t*（NULL = OOM）。
+ */
+const sema_type_t *sema_type_register(sema_t *sema, const type_t *t);
+
+/**
+ * 按类型指针 / 名字查找登记的 sema_type_t（线性扫描，类型数量少）。
+ * 未登记返回 NULL。
+ */
+const sema_type_t *sema_type_find(sema_t *sema, const type_t *t);
+const sema_type_t *sema_type_find_name(sema_t *sema, strslice_t name);
 
 /** 将 AST 节点解析为源码位置（经 token pool）。 */
 location_t sema_loc(sema_t *sema, ast_node_t *node);

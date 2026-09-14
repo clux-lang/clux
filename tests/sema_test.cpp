@@ -26,6 +26,7 @@ extern "C" {
 #include "parser/ast_int_lit.h"
 #include "parser/ast_node.h"
 #include "parser/ast_program.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -1030,7 +1031,9 @@ TEST_F(SemaTest, ComptimeVarArrayEncode) {
 
 TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {
     /* comptime func 返回数组 → 调用点折叠为 AST_CONSTRUCT 节点
-       （.<type>{ fields }），类型位递归 AST_ARRAY，字段为折叠字面量 */
+       （.<type>{ fields }），类型位为 AST_TYPE_REF（sema 登记的
+       "__type_N" 名字引用，类型构造收敛到 hoist 提升区），字段为
+       折叠字面量。 */
     EXPECT_TRUE(analyze(
         "comptime func make_arr(): [3]i32 {"
         "  return .[3]i32{ 4, 5, 6 };"
@@ -1057,15 +1060,17 @@ TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {
     ASSERT_NE(vd->init, nullptr);
     EXPECT_EQ(vd->init->kind, AST_CONSTRUCT);
 
-    /* 类型位：AST_ARRAY([3]i32)，base_type = AST_IDENT("i32") */
+    /* 类型位：AST_TYPE_REF（名字引用登记过的 [3]i32），可查回数组类型 */
     ast_construct_t *cn = (ast_construct_t *)vd->init;
     ASSERT_NE(cn->type, nullptr);
-    EXPECT_EQ(cn->type->kind, AST_ARRAY);
-    ast_array_t *arr = (ast_array_t *)cn->type;
-    ASSERT_NE(arr->base_type, nullptr);
-    EXPECT_EQ(arr->base_type->kind, AST_IDENT);
-    ASSERT_NE(arr->length, nullptr);
-    EXPECT_EQ(arr->length->kind, AST_INT_LIT);
+    EXPECT_EQ(cn->type->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)cn->type;
+    const sema_type_t *st = sema_type_find_name(sema_, ref->name);
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->type, nullptr);
+    EXPECT_EQ(st->type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(st->type), 3u);
+    EXPECT_EQ(array_type_elem(st->type), vm_->type_i32);
 
     /* 字段链：3 个折叠的 i32 字面量 */
     int values[3] = {0, 0, 0};
@@ -1082,7 +1087,8 @@ TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {
 
 TEST_F(SemaTest, ComptimeFuncReturnNestedArrayFold) {
     /* 嵌套数组常量：comptime func 返回 [2][3]i32，调用点折叠 AST_CONSTRUCT，
-       字段为嵌套 AST_CONSTRUCT，类型位递归 AST_ARRAY */
+       字段为嵌套 AST_CONSTRUCT，类型位为 AST_TYPE_REF（登记过 [2][3]i32，
+       结构依赖：elem 类型 [3]i32 亦已登记）。 */
     EXPECT_TRUE(analyze(
         "comptime func make_mat(): [2][3]i32 {"
         "  return .[2][3]i32{ .[3]i32{1,2,3}, .[3]i32{4,5,6} };"
@@ -1107,11 +1113,19 @@ TEST_F(SemaTest, ComptimeFuncReturnNestedArrayFold) {
 
     ast_construct_t *cn = (ast_construct_t *)vd->init;
     ASSERT_NE(cn->type, nullptr);
-    EXPECT_EQ(cn->type->kind, AST_ARRAY);
-    /* 元素类型是嵌套数组 → base_type 又是 AST_ARRAY */
-    ast_array_t *outer = (ast_array_t *)cn->type;
-    ASSERT_NE(outer->base_type, nullptr);
-    EXPECT_EQ(outer->base_type->kind, AST_ARRAY);
+    EXPECT_EQ(cn->type->kind, AST_TYPE_REF);
+    /* 类型可查回 [2][3]i32：elem 是 [3]i32（已 intern 的嵌套数组） */
+    ast_type_ref_t *ref = (ast_type_ref_t *)cn->type;
+    const sema_type_t *st = sema_type_find_name(sema_, ref->name);
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->type, nullptr);
+    EXPECT_EQ(st->type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(st->type), 2u);
+    const type_t *elem = array_type_elem(st->type);
+    ASSERT_NE(elem, nullptr);
+    EXPECT_EQ(elem->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(elem), 3u);
+    EXPECT_EQ(array_type_elem(elem), vm_->type_i32);
 
     /* 外层 2 字段，每个是嵌套 AST_CONSTRUCT */
     size_t nf = 0;

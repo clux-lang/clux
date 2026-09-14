@@ -48,6 +48,9 @@ typedef enum {
 
     BCODE_PUSH_VALUE,      /* offset：压入 stack[sp-1-offset] 借用引用 */
     BCODE_LOAD,            /* strtable 索引：从 global scope 查 type value 压栈 */
+    BCODE_LOAD_TYPE,       /* u32 id：从 vm->types_by_id 查表压 type value 栈 */
+    BCODE_BIND_TYPE,       /* u32 id：弹栈顶 type value → 登记 id→type（幂等） */
+    BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名 */
     BCODE_PUSH_UNDEFINED,  /* 压入 void 类型 value（"类型待推导"） */
 
     BCODE_DEFINE,          /* strtable 索引：弹栈定义（永远双弹 [value, type-spec]） */

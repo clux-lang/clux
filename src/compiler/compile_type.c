@@ -3,6 +3,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_volatile.h"
 
 /* ===========================================================================
@@ -30,6 +31,22 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     ast_ident_t *id = (ast_ident_t *)type_expr;
     bcode_write_op(c->bc, BCODE_PUSH);
     bcode_write_str(c->bc, id->name);
+    st_push(c, 1);
+    return;
+  }
+
+  if (type_expr->kind == AST_TYPE_REF) {
+    /* sema 登记的具名类型引用（__type_N）→ 查登记表拿 program id →
+       LOAD_TYPE <id> 查表压栈。类型构造收敛到 hoist 提升区。 */
+    ast_type_ref_t *ref = (ast_type_ref_t *)type_expr;
+    const sema_type_t *st = c_sema_type_find_name(c->sema_types, ref->name);
+    if (!st) {
+      c_error(c, type_expr, "unknown type reference '%.*s'",
+              (int)ref->name.len, ref->name.ptr);
+      return;
+    }
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, st->id);
     st_push(c, 1);
     return;
   }

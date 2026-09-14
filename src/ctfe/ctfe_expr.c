@@ -16,6 +16,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
 #include "sema/symbol.h"
@@ -220,6 +221,18 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return ctfe_err(ctx, "ctfe: array length too large");
         const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
+    }
+    case AST_TYPE_REF: {
+        /* 具名类型引用（sema 登记的 "__type_N"）：查 types 队列拿类型单例，
+           返回 type value。槽位已被 sema 替换为 AST_TYPE_REF（类型构造收敛
+           到 hoist 提升区），ctfe 重复求值时命中此分支。eval 场景
+           （ctx->sema == NULL）无 sema 阶段，不可能出现此节点。 */
+        ast_type_ref_t *n = (ast_type_ref_t *)node;
+        if (!ctx->sema)
+            return ctfe_err(ctx, "ctfe: type reference requires sema context");
+        const sema_type_t *st = sema_type_find_name(ctx->sema, n->name);
+        if (!st) return ctfe_err(ctx, "ctfe: unknown type reference");
+        return type_as_value(vm, st->type);
     }
     case AST_CONSTRUCT: {
         /* 类型字面量构造 .<type>{ fields }：求值类型位为 type value，
