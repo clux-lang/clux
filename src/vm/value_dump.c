@@ -133,7 +133,7 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         size_t n = value_array_count(v);
         for (size_t i = 0; i < n; i++) {
             if (i) string_append_cstr(out, ", ");
-            value_dump_impl(vm, value_array_at(v, i), out);
+            value_dump_impl(vm, value_array_at(vm, v, i), out);
         }
         break;
     }

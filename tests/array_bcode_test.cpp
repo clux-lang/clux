@@ -336,6 +336,145 @@ TEST_F(ArrayBcodeTest, ConstructNestedArray) {
     EXPECT_EQ(array_type_elem(et), vm->type_i32);
 }
 
+/* 复合赋值语义：PUSH_VALUE dup 保留 self/index 引用 → INDEX_GET → op →
+ * INDEX_SET。栈序 [self, index, old, v] → op → [self, index, new] → SET。
+ * 验证复合写回真实生效（对应 compiler compile_assign_index 的展开）。 */
+TEST_F(ArrayBcodeTest, IndexCompoundViaPushValueDup) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    push_i32 10\n"
+        "    push_i32 20\n"
+        "    push_i32 30\n"
+        "    construct 3\n"         /* [arr] */
+        "    push_i32 2\n"          /* [arr, 2] */
+        "    push_value 1\n"        /* dup self → [arr, 2, arr] */
+        "    push_value 1\n"        /* dup index → [arr, 2, arr, 2] */
+        "    index_get\n"           /* [arr, 2, old=30] */
+        "    push_i32 1\n"          /* [arr, 2, 30, 1] */
+        "    add\n"                 /* [arr, 2, 31] */
+        "    index_set\n"           /* 弹 val,index,self → [arr] */
+        "    push_value 0\n"        /* dup arr */
+        "    push_i32 2\n"
+        "    index_get\n"           /* [arr, 31] */
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 31);
+}
+
+/* 越界下标读取（INDEX_GET）：index >= len 触发运行时硬错误并停机 */
+TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsViaExpr) {
+    const char *src =
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_i32 7\n"
+        "    push_i32 8\n"
+        "    construct 2\n"
+        "    push_i32 5\n"          /* 越界索引（len=2） */
+        "    index_get\n"
+        "    halt\n";
+    bcode_destroy(&bc);
+    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
+    value_t *r = exec_run(vm, bc);
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* 多维 SET（借用引用）：m[1] 经 INDEX_GET 返回借用值（data 指向父数组槽位），
+ * INDEX_SET 写回借用 → 直达原数组。序列：
+ *   [m] → 1 → INDEX_GET → [m[1]借用] → 0 → 7 → INDEX_SET → [m[1]借用]
+ *   → 0 → INDEX_GET → [7]（元素副本）——同一数组内写后读验证写回生效 */
+TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
+    ASSERT_TRUE(assemble_and_run(
+        /* 构造外层 [2][2]i32（同 ConstructNestedArray 序列） */
+        "    push_array\n"         /* [open_outer] */
+        "    push_array\n"         /* [open_outer, open_inner] */
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [open_outer, t_inner] */
+        "    define_bound 2\n"     /* 弹 t_inner 设外层元素类型 */
+        "    seal\n"               /* [t_outer] */
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [t_outer, t_inner] */
+        "    push_i32 1\n"
+        "    push_i32 2\n"
+        "    construct 2\n"        /* 内层行0 */
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [t_outer, row0, t_inner] */
+        "    push_i32 3\n"
+        "    push_i32 4\n"
+        "    construct 2\n"        /* 内层行1 */
+        "    construct 2\n"        /* 外层 m */
+        "    push_i32 1\n"
+        "    index_get\n"           /* [m[1]借用] */
+        "    push_i32 0\n"
+        "    push_i32 7\n"
+        "    index_set\n"           /* m[1][0] = 7，返回 self → [m[1]借用] */
+        "    push_value 0\n"        /* dup m[1]借用 → [m[1], m[1]] */
+        "    push_i32 1\n"
+        "    index_get\n"           /* [m[1], 4]（m[1][1] 未被改写） */
+        "    push_value 1\n"        /* dup m[1]借用 → [m[1], 4, m[1]] */
+        "    push_i32 0\n"
+        "    index_get\n"           /* [m[1], 4, 7]（m[1][0] 写回生效） */
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 7);
+}
+
+/* 借用引用（is_own=false）：INDEX_GET 复合元素返回借用 value，data 指向父数组
+ * 槽位。验证 value_is_borrowed + data 指向槽位 + 借用值可继续链式索引。
+ * 绑定 materialize（clone 独立性）由 driver 测试 RunFileMultidimBorrowIsIndependentOnBind
+ * 覆盖（DEFINE → scope_define → value_clone）。 */
+TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_i32 1\n"
+        "    push_i32 2\n"
+        "    construct 2\n"
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_i32 3\n"
+        "    push_i32 4\n"
+        "    construct 2\n"
+        "    construct 2\n"         /* [m] */
+        "    push_i32 1\n"
+        "    index_get\n"           /* [m[1]借用] */
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top)->kind, TYPE_KIND_ARRAY);
+    EXPECT_TRUE(value_is_borrowed(top));       /* 借用引用 */
+    EXPECT_EQ(array_type_len(value_type(top)), (size_t)2);
+}
+
+
 /* 汇编 → 反汇编 稳定往返（CONSTRUCT / INDEX_GET / INDEX_SET 助记符正确编解码）。
  * index_get / index_set 均消费 self（与 op_call 一致），故每次访问前用
  * push_value 0 复制数组引用（借用引用，不重复持有 value）。 */

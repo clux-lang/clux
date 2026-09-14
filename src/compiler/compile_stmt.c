@@ -1,6 +1,7 @@
 #include "compiler/compiler.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -17,6 +18,54 @@
  * 块作用域经 PUSH_SCOPE/POP_SCOPE 成对平衡（scope_depth 静态追踪）；
  * 跳转跨出 N 层块时先发 N 个 POP_SCOPE（balance_scopes_out）。
  * =========================================================================== */
+
+/* ---- 下标左值赋值编译：a[i] = v / a[i] op= v ---- */
+
+/* 栈深静态平衡：compile_expr 内部 st_push 累积 + 指令弹压。
+   简单赋值：object+index+value 压 3 → INDEX_SET 弹 3 压 1 → POP 弹 1。
+   复合赋值：object+index 压 2 → PUSH_VALUE dup self/index 压 2（保留引用）
+             → GET 弹 2 压 1 → value 压 1 → op 弹 2 压 1
+             → SET 弹 3 压 1 → POP 弹 1。
+   复合赋值用 PUSH_VALUE dup 保留 self/index 引用，避免双求值 base 表达式，
+   且栈序保持 [self, index, val]（val 在顶）满足 INDEX_SET 协议。 */
+static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
+  ast_index_t *ix = (ast_index_t *)n->target;
+
+  if (token_is(n->op, "=")) {
+    compile_expr(c, ix->object);    /* 栈: [self] */
+    compile_expr(c, ix->indices);   /* 栈: [self, index] */
+    compile_expr(c, n->value);      /* 栈: [self, index, val] */
+    bcode_write_op(c->bc, BCODE_INDEX_SET); /* 弹 3 压 1（self） */
+    st_push(c, -2);
+    bcode_write_op(c->bc, BCODE_POP);       /* 赋值是语句：丢弃结果 */
+    st_push(c, -1);
+    return;
+  }
+
+  /* 复合赋值 a[i] op= v：保留 self/index → GET → v → op → SET */
+  compile_expr(c, ix->object);      /* 栈: [self] */
+  compile_expr(c, ix->indices);     /* 栈: [self, index] */
+  bcode_write_op(c->bc, BCODE_PUSH_VALUE);
+  bcode_write_u32(c->bc, 1);        /* dup self（peek 1） */
+  st_push(c, 1);                    /* 栈: [self, index, self] */
+  bcode_write_op(c->bc, BCODE_PUSH_VALUE);
+  bcode_write_u32(c->bc, 1);        /* dup index（peek 1） */
+  st_push(c, 1);                    /* 栈: [self, index, self, index] */
+  bcode_write_op(c->bc, BCODE_INDEX_GET);   /* 弹 2 压 1 → [self, index, old] */
+  st_push(c, -1);
+  compile_expr(c, n->value);        /* 栈: [self, index, old, v] */
+  if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+  else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+  else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+  else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+  else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+  else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+  st_push(c, -1);                   /* 弹 2 压 1 → [self, index, new] */
+  bcode_write_op(c->bc, BCODE_INDEX_SET);   /* 弹 3 压 1 → [self] */
+  st_push(c, -2);
+  bcode_write_op(c->bc, BCODE_POP);         /* 语句丢弃 */
+  st_push(c, -1);
+}
 
 void compile_stmt(compiler_t *c, ast_node_t *node) {
   if (!node || c->failed) return;
@@ -38,6 +87,15 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   }
   case AST_ASSIGN: {
     ast_assign_t *n = (ast_assign_t *)node;
+    /* 下标左值赋值：a[i] = v / a[i] op= v（sema 已校验下标合法）。
+       简单赋值 → INDEX_SET；复合赋值 → INDEX_GET → op → INDEX_SET。
+       注：复合赋值双求值 base 表达式（读一次写一次），M2 文档注明
+       base 须无副作用；后续 Phase 以 value_xxx 封装 + 临时变量字节码
+       消除（见 m2-design 索引段）。 */
+    if (n->target->kind == AST_INDEX) {
+      compile_assign_index(c, n);
+      break;
+    }
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */
     strslice_t name = ((ast_ident_t *)n->target)->name;
     if (token_is(n->op, "=") && strslice_eq(name, STRSLICE_LIT("_"))) {

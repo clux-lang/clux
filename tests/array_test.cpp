@@ -155,17 +155,6 @@ TEST_F(ArrayTypeTest, SetIndex) {
     EXPECT_EQ(read_i32(got), 99);
 }
 
-TEST_F(ArrayTypeTest, Push) {
-    value_t *elems[2] = { make_i32(vm, 1), make_i32(vm, 2) };
-    value_t *arr = value_make_array(vm, vm->type_i32, elems, 2);
-    array_push(vm, arr, make_i32(vm, 7));
-    EXPECT_EQ(read_u64(value_length(vm, arr)), 3u);
-    value_t *got = value_get_index(vm, arr, make_i64(vm, 2));
-    ASSERT_NE(got, nullptr);
-    EXPECT_FALSE(value_is_error(vm, got));
-    EXPECT_EQ(read_i32(got), 7);
-}
-
 TEST_F(ArrayTypeTest, CloneIndependent) {
     value_t *elems[2] = { make_i32(vm, 1), make_i32(vm, 2) };
     value_t *arr = value_make_array(vm, vm->type_i32, elems, 2);

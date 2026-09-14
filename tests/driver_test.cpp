@@ -135,6 +135,104 @@ TEST(Driver, RunFileArrayConstructAssignPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileIndexGetPasses) {
+  /* 下标右值读取（INDEX_GET）：一维 + 多维 + 变量下标 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = .[3]i32 { 10, 20, 30 };\n"
+      "  var x = a[0] + a[2];\n"
+      "  var m = .[2][2]i32 { .[2]i32 { 1, 2 }, .[2]i32 { 3, 4 } };\n"
+      "  var y = m[1][0];\n"
+      "  var i = 1;\n"
+      "  var z = a[i];\n"
+      "  return x + y + z;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileIndexSetPasses) {
+  /* 下标左值赋值（INDEX_SET）：直接赋值 + 复合赋值 + 变量下标 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = .[3]i32 { 10, 20, 30 };\n"
+      "  a[1] = 99;\n"
+      "  a[2] += 1;\n"
+      "  a[0] *= 2;\n"
+      "  var i = 1;\n"
+      "  a[i] -= 2;\n"
+      "  var s = a[0] + a[1] + a[2];\n"
+      "  return s;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileMultiIndexSubscriptRejected) {
+  /* a[i,j] 多索引（泛型实参语法预留）落到数组下标 → 诊断 */
+  std::string path = write_temp_file(
+      "func main() {\n"
+      "  var a = .[2]i32 { 1, 2 };\n"
+      "  var x = a[0, 1];\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileIndexNonArrayRejected) {
+  /* 对非数组类型下标 → 诊断 */
+  std::string path = write_temp_file(
+      "func main() {\n"
+      "  var x = 42;\n"
+      "  var y = x[0];\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileIndexStringIndexRejected) {
+  /* 非整数下标 → 诊断 */
+  std::string path = write_temp_file(
+      "func main() {\n"
+      "  var a = .[2]i32 { 1, 2 };\n"
+      "  var x = a[\"k\"];\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileMultidimIndexSetPasses) {
+  /* 多维下标左值赋值（借用引用写回直达原数组）：m[1][0] = 7 应生效 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var m = .[2][2]i32 { .[2]i32 { 1, 2 }, .[2]i32 { 3, 4 } };\n"
+      "  m[1][0] = 7;\n"
+      "  m[0][1] += 10;\n"
+      "  var i = 1;\n"
+      "  var j = 1;\n"
+      "  m[i][j] = 8;\n"
+      "  var s = m[0][0] + m[0][1] + m[1][0] + m[1][1];\n"
+      "  return s;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileMultidimBorrowIsIndependentOnBind) {
+  /* 借用引用绑定变量时 materialize 深拷贝：var row = m[1] 是独立副本，
+     修改 row 不影响 m（用户确认的借用生命周期语义） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var m = .[2][2]i32 { .[2]i32 { 1, 2 }, .[2]i32 { 3, 4 } };\n"
+      "  var row = m[1];\n"
+      "  row[0] = 100;\n"
+      "  var s = m[1][0] + m[1][1];\n"
+      "  return s;\n"   /* m[1] 仍是 3,4 → 7 */
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileMissingReturnsOne) {
   EXPECT_EQ(driver_run_file("no/such/file.cx"), 1);
 }

@@ -6,6 +6,7 @@
 #include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_unary.h"
@@ -201,9 +202,17 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   case AST_MEMBER:
     c_error(c, node, "member access is not supported in M1");
     return;
-  case AST_INDEX:
-    c_error(c, node, "index expression is not supported in M1");
-    return;
+  case AST_INDEX: {
+    /* 右值下标：object → index → INDEX_GET（弹 self+index → 元素副本）。
+       a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），自然编译为两次
+       INDEX_GET 逐维下降。sema 已保证单索引（多索引 = 泛型预留诊断）。 */
+    ast_index_t *n = (ast_index_t *)node;
+    compile_expr(c, n->object);       /* 栈: [self] */
+    compile_expr(c, n->indices);      /* 栈: [self, index] */
+    bcode_write_op(c->bc, BCODE_INDEX_GET);
+    st_push(c, -1);                   /* 弹 2 压 1 */
+    break;
+  }
   default:
     c_error(c, node, "unsupported expression node '%s'", ast_kind_name(node->kind));
     return;

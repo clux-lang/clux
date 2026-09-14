@@ -10,6 +10,7 @@
 #include "parser/ast_error.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_unary.h"
@@ -286,10 +287,56 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       diag_error(sema->diag, sema_loc(sema, *node),
                  "member access is not supported in M1");
       return value_make_shadow(sema->vm, sema->vm->type_void);
-    case AST_INDEX:
-      diag_error(sema->diag, sema_loc(sema, *node),
-                 "indexing is not supported in M1");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+    case AST_INDEX: {
+      /* 下标 / 泛型索引（GAP 延后落点）：parser 只收集 <expr>[<expr,...>
+         的 object + indices 链，此处首次可区分——base 是数组 → 下标（GET）；
+         base 是类型值 → 泛型实例化语法（M2 未实现，占位诊断）。 */
+      ast_index_t *n = (ast_index_t *)*node;
+      value_t *base = sema_expr(sema, &n->object, scope);
+      if (value_is_error(sema->vm, base) ||
+          value_is_type(base, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      const type_t *bt = value_type(base);
+      if (bt && bt->kind == TYPE_KIND_TYPE) {
+        /* 泛型实例化占位：<type>[<expr,...> 与下标语法重叠，延后到 sema
+           才可区分，M2 泛型未实现前明确占位。 */
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "generic instantiation is not implemented (index on a type value)");
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      if (!bt || bt->kind != TYPE_KIND_ARRAY) {
+        char tn[64];
+        sema_type_name(bt, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot index value of type %s", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 数组下标只消费 1 个索引；a[i,j] 多索引 = 泛型实参语法预留。
+         a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），逐维下降天然处理。 */
+      size_t nidx = sema_count_siblings(n->indices);
+      if (nidx != 1) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "array subscript expects exactly 1 index, got %zu", nidx);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      value_t *idx = sema_expr(sema, &n->indices, scope);
+      if (value_is_error(sema->vm, idx) ||
+          value_is_type(idx, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (!value_is_type(idx, TYPE_KIND_INT)) {
+        char tn[64];
+        op_type_name(idx, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, n->indices),
+                   "array index must be an integer, got %s", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      const type_t *et = array_type_elem(bt);
+      return value_make_shadow(sema->vm, et ? et : sema->vm->type_void);
+    }
     case AST_ARRAY: {
       /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
          解析为真实类型（边界槽位编译期求值）后返回 type_type shadow，

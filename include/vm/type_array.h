@@ -12,14 +12,11 @@ extern const vtable_t VTABLE_ARRAY;
 
 /**
  * 构造数组 value：将 count 个元素（全为 elem_type，或可被隐式转换到
- * elem_type）clone 进新建数组，类型 = type_array_intern(elem_type, count)。
- * 返回数组 value（auto-track 到 vm->current_scope）或 error value。
+ * elem_type）深拷贝进新建连续元素块，类型 = type_array_intern(elem_type,
+ * count)。返回数组 value（auto-track 到 vm->current_scope）或 error value。
  */
 value_t *value_make_array(vm_t *vm, const type_t *elem_type,
                           value_t **elems, size_t count);
-
-/** 向数组末尾追加一个元素（类型检查 + clone 到当前作用域） */
-void array_push(vm_t *vm, value_t *arr, value_t *elem);
 
 /* ================================================================ */
 /* 数组类型（array_type_t，继承 type_t）                              */
@@ -40,11 +37,12 @@ void array_push(vm_t *vm, value_t *arr, value_t *elem);
  *   - array_type_seal 计算内存布局（layout_size/layout_align），标记 sealed，
  *     并按 (elem_type, length) 去重（命中已有 sealed 类型则复用并释放本开放类型）。
  *
- * 内存布局（密封时计算，运行时值仍由内部 vec 承载）：
- *   layout_size  = elem_type->size * length（length==SIZE_MAX 时为 0，动态数组无静态布局）
- *   layout_align = elem_type->align
- * base.size / base.align 始终为运行时值存储（array_data_t）的大小与对齐，
- * 与 layout_* 区分：layout_* 用于 sizeof / 结构体内存布局等编译期计算。
+ * 内存布局（密封时计算）：数组 value 的 data 是**连续元素块**（C 数组语义，
+ * M2 设计 §2），元素按固定偏移排列：
+ *   layout_size = base.size  = elem_type->size * length（定长）
+ *   layout_align = base.align = elem_type->align
+ * 借用引用 arr[i] 的 data = arr.data + i * elem_type->size（业务内存）。
+ * length==SIZE_MAX（动态）无静态布局，size=0。
  * 按结构等价判定类型兼容（见 m2-design §11）。
  */
 typedef struct array_type_t {
@@ -116,11 +114,15 @@ static inline size_t array_type_layout_align(const type_t *t) {
 /** 前置声明：避免为仅消费指针的访问器引入整个 value.h */
 typedef struct value_t value_t;
 
-/** 返回数组 value 的元素个数（非数组 value 返回 0） */
+/** 返回数组 value 的元素个数（借用/普通一致，从类型取；非数组 value 返回 0） */
 size_t value_array_count(const value_t *v);
 
-/** 返回第 i 个元素（只读借用，不 clone；元素由 scope 管理生命周期），越界返回 NULL */
-const value_t *value_array_at(const value_t *v, size_t i);
+/**
+ * 返回第 i 个元素的借用引用（data 指向块内偏移业务内存，type = 元素类型），
+ * 越界返回 NULL。供调试/格式化遍历（如 printf %v）递归使用；借用值 auto-track
+ * 到 vm->current_scope。
+ */
+value_t *value_array_at(vm_t *vm, const value_t *v, size_t i);
 
 #ifdef __cplusplus
 }

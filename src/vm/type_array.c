@@ -18,14 +18,28 @@
 /* ================================================================ */
 
 /*
- * 数组 value 的 data 块持有一个元素 vec。vec 不拥有元素（owns_element=false），
- * 元素 value 由 scope 持有生命周期（value_make / value_clone 自动 track）。
- * 数组 clone 时逐元素 clone 到新 scope；数组 dispose 仅释放 vec 结构本身，
- * 元素 data 由 scope 统一释放，避免重复释放。
+ * 数组 value 的 data 块是一段**连续业务内存**（C 数组语义）：
+ *
+ *   data = [elem_0][elem_1]...[elem_{N-1}]
+ *          每块 elem_i 大小为 elem_type->size，对齐 elem_type->align，
+ *          按固定偏移排列（data + i * elem_type->size）。
+ *
+ * 元素在块内是裸数据（无 value_t 头，非引擎对象）：
+ *   - 标量元素：直接是数字字节（i32 等）
+ *   - 嵌套数组元素：递归的连续子块（N * sizeof(子元素) 字节）
+ *   - 字符串元素：string_t* 指针（深拷贝时复制 string_t 本体）
+ *
+ * 借用引用（is_own=false）的 data 直接指向块内偏移（业务内存）：
+ *   arr[i]  →  data = arr.data + i * elem_type->size，type = elem_type
+ *   m[1][0] →  内层借用 data = m.data + 1*sizeof([..]T)，再偏移 0
+ * 读写直达业务内存，与 C 的 &arr[i] 语义一致（M2 设计 §2）。
+ *
+ * 生命周期（用户确认）：借用值只匿名存活于表达式链；绑定变量 / 返回值 /
+ * 赋值（DEFINE / STORE / RET / clone）时经 value_clone materialize 成独立
+ * 深拷贝（is_own=true），故无悬垂引用。借用值 dispose 跳过（data 指向父值
+ * 内部，value_dispose 已处理）。块在构造后固定（M2 数组边界编译期常量，
+ * 无运行时增长），借用存续期间父块不变，安全。
  */
-typedef struct {
-    vec_t *elems;  /* value_t*，owns_element = false */
-} array_data_t;
 
 /* ---- 内部：读取 index value 的整数值（运行时 value，非字面整数） ---- */
 
@@ -75,13 +89,13 @@ static char *array_type_name(allocator_t *alloc, const type_t *elem, size_t len)
 /* 数组类型池（按 elem_type + length 去重 intern）                   */
 /* ================================================================ */
 
-/* ---- 初始化开放数组类型的公共 base 字段（运行时值存储 = array_data_t） ---- */
+/* ---- 初始化开放数组类型的公共 base 字段（运行时值存储 = 连续元素块） ---- */
 
 static void array_type_init_base(array_type_t *at) {
     at->base.vtable = &VTABLE_ARRAY;
     at->base.name   = (strslice_t){ NULL, 0 };   /* 由 seal 填充 */
-    at->base.size   = sizeof(array_data_t);      /* 运行时值存储大小（vec 指针） */
-    at->base.align  = alignof(array_data_t);
+    at->base.size   = 0;      /* 未成形：密封时按 elem_size * length 计算 */
+    at->base.align  = 0;
     at->base.kind   = TYPE_KIND_ARRAY;
     at->elem_type   = NULL;
     at->length      = SIZE_MAX;   /* 未成形：元素数量待定 */
@@ -165,11 +179,14 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
         }
     }
 
-    /* 计算内存布局（运行时值仍由内部 vec 承载，故 layout_* 仅编译期语义） */
+    /* 计算内存布局：数组值是连续元素块，size = elem_size * length，
+       align 跟随元素类型（C 数组语义，M2 设计 §2） */
     at->layout_align = at->elem_type->align;
     at->layout_size  = (at->length == SIZE_MAX)
                           ? 0
                           : at->elem_type->size * at->length;
+    at->base.size    = at->layout_size;    /* 运行时值存储 = 连续元素块 */
+    at->base.align   = at->layout_align;
     at->base.sealed  = true;
 
     /* 重建类型名（含 length：固定长度 [elem; N]，未定长 [elem]） */
@@ -197,19 +214,95 @@ const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count)
 /* vtable 实现                                                      */
 /* ================================================================ */
 
+/* ================================================================ */
+/* 连续块元素操作（业务内存深拷贝 / 资源释放）                        */
+/* ================================================================ */
+
+/*
+ * 块内元素是裸数据（无 value_t 头）。按元素类型递归处理：
+ *   - 标量（int/float/bool 等无指针）：整段 memcpy
+ *   - 字符串：块内存 string_t* 指针，深拷贝复制 string_t 本体
+ *   - 嵌套数组：递归子块（子块内可能含字符串，须递归）
+ * raw 版本操作裸数据块；value 版本先从 value 取 data 再委托 raw。
+ */
+
+static void array_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t);
+static void array_dispose_raw(vm_t *vm, void *raw, const type_t *t);
+
+/* value → 块内偏移（dst 处写入 src value 的深拷贝） */
+static void array_blit_value(vm_t *vm, void *dst, value_t *src, const type_t *t) {
+    if (!dst || !src || !t) return;
+    if (value_is_shadow(src)) {   /* shadow 仅类型计算，块内无数据可拷贝 */
+        memset(dst, 0, t->size);
+        return;
+    }
+    array_blit_raw(vm, dst, value_data(src), t);
+}
+
+static void array_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
+    if (!dst || !src || !t) return;
+    switch (t->kind) {
+        case TYPE_KIND_ARRAY: {
+            const type_t *et = array_type_elem(t);
+            size_t es = et->size;
+            size_t len = array_type_len(t);
+            for (size_t i = 0; i < len; i++)
+                array_blit_raw(vm, (uint8_t *)dst + i * es,
+                               (const uint8_t *)src + i * es, et);
+            break;
+        }
+        case TYPE_KIND_STR: {
+            const string_t *s = *(const string_t *const *)src;
+            string_t *copy = s ? string_from_string(vm->alloc, s) : NULL;
+            if (s && !copy) panic("vm: out of memory copying array element string");
+            *(string_t **)dst = copy;
+            break;
+        }
+        default:
+            memcpy(dst, src, t->size);
+            break;
+    }
+}
+
+/* 释放块内元素持有的资源（标量无资源；字符串释放 string_t；数组递归） */
+static void array_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
+    if (!raw || !t) return;
+    switch (t->kind) {
+        case TYPE_KIND_ARRAY: {
+            const type_t *et = array_type_elem(t);
+            size_t es = et->size;
+            size_t len = array_type_len(t);
+            for (size_t i = 0; i < len; i++)
+                array_dispose_raw(vm, (uint8_t *)raw + i * es, et);
+            break;
+        }
+        case TYPE_KIND_STR: {
+            string_t **sp = (string_t **)raw;
+            if (sp && *sp) string_free(sp);
+            break;
+        }
+        default:
+            break;   /* 标量无资源 */
+    }
+}
+
+/* ================================================================ */
+/* vtable 实现                                                      */
+/* ================================================================ */
+
 /* ---- length: 返回 u64 元素个数 ---- */
 
 static value_t *array_length(vm_t *vm, value_t *self) {
     if (value_is_shadow(self))
         return value_make_shadow(vm, vm->type_u64);
-    array_data_t *d = (array_data_t *)value_data(self);
-    size_t n = (d && d->elems) ? vec_len(d->elems) : 0;
+    /* 借用 self 的 type 也是数组类型（元素类型），length 从类型取 */
+    size_t n = array_type_len(value_type(self));
     void *data = value_alloc_data(vm->alloc, vm->type_u64);
     *(uint64_t *)data = (uint64_t)n;
     return value_make(vm, vm->type_u64, data);
 }
 
-/* ---- get_index: self[index] -> 元素副本 ---- */
+/* ---- get_index: self[index] -> 借用引用（data 指向块内业务内存） ---- */
 
 static value_t *array_get_index(vm_t *vm, value_t *self, value_t *index) {
     if (value_is_error(vm, self)) return self;
@@ -225,8 +318,9 @@ static value_t *array_get_index(vm_t *vm, value_t *self, value_t *index) {
     if (!array_read_index(vm, index, &i))
         return value_make_error(vm, "array index must be an integer");
 
-    array_data_t *d = (array_data_t *)value_data(self);
-    size_t len = (d && d->elems) ? vec_len(d->elems) : 0;
+    const type_t *t = value_type(self);
+    const type_t *et = array_type_elem(t);
+    size_t len = array_type_len(t);
     /* 越界检查：索引为负数（按无符号读入的大值，或真越界）一律拦下，
        返回硬错误（exec_drive 据此停机），并给出索引与长度便于定位。 */
     if (i >= len) {
@@ -236,12 +330,15 @@ static value_t *array_get_index(vm_t *vm, value_t *self, value_t *index) {
         return value_make_error(vm, buf);
     }
 
-    value_t *elem = (value_t *)vec_get(d->elems, i);
-    /* 只读访问：返回元素副本（clone 到当前作用域） */
-    return value_clone(vm, elem);
+    /* 统一返回借用引用（标量与复合元素一致，C 左值语义）：
+       data 直接指向块内业务内存偏移 arr.data + i * elem_size，
+       读即直接解引用该内存，写经 INDEX_SET 直达原数组。 */
+    return value_make_borrowed(vm, et,
+                               (uint8_t *)value_data(self) + i * et->size);
 }
 
-/* ---- set_index: self[index] = val -> self ---- */
+/* ---- set_index: self[index] = val -> self（赋值走独立 INDEX_SET 指令，
+ *     不经过 GET_INDEX 缓存，直接写块内偏移） ---- */
 
 static value_t *array_set_index(vm_t *vm, value_t *self, value_t *index,
                                  value_t *val) {
@@ -257,8 +354,9 @@ static value_t *array_set_index(vm_t *vm, value_t *self, value_t *index,
     if (!array_read_index(vm, index, &i))
         return value_make_error(vm, "array index must be an integer");
 
-    array_data_t *d = (array_data_t *)value_data(self);
-    size_t len = (d && d->elems) ? vec_len(d->elems) : 0;
+    const type_t *t = value_type(self);
+    const type_t *et = array_type_elem(t);
+    size_t len = array_type_len(t);
     /* 越界检查：见 array_get_index 同款说明 */
     if (i >= len) {
         char buf[96];
@@ -268,64 +366,54 @@ static value_t *array_set_index(vm_t *vm, value_t *self, value_t *index,
     }
 
     /* 类型检查：非元素类型尝试隐式转换 */
-    const type_t *et = array_type_elem(value_type(self));
-    if (et && value_type(val) != et) {
-        value_t *casted = value_implicit_cast(vm, val, et);
-        if (value_is_error(vm, casted)) return casted;
-        val = casted;
+    value_t *v = val;
+    if (value_type(val) != et) {
+        v = value_implicit_cast(vm, val, et);
+        if (value_is_error(vm, v)) return v;
     }
 
-    value_t *old = (value_t *)vec_get(d->elems, i);
-    value_t *cloned = value_clone(vm, val);  /* 元素归 scope 持有 */
-    vec_set(d->elems, i, cloned);
-    if (old) value_dispose(vm, old);  /* 释放被替换元素的 data（struct 由 scope 释放） */
+    /* 写块内偏移：先释放旧元素资源，再深拷贝新值到业务内存。
+       self 是借用（多维链）时 data 已指向块内偏移，写直达原数组。 */
+    uint8_t *slot = (uint8_t *)value_data(self) + i * et->size;
+    array_dispose_raw(vm, slot, et);
+    array_blit_value(vm, slot, v, et);
     return self;
 }
 
-/* ---- dispose: 仅释放 vec 结构（元素归 scope 管理） ---- */
+/* ---- dispose: 释放块内元素资源（data 块本身由 value_dispose 释放） ---- */
 
 static void array_dispose(vm_t *vm, value_t *v) {
-    array_data_t *d = (array_data_t *)value_data(v);
-    if (d && d->elems) {
-        vec_free(vm->alloc, &d->elems);  /* 不 owns 元素，仅释放 vec 结构 */
-    }
+    /* 借用引用不拥有 data（指向父数组内部），跳过；由 value_dispose 统一拦截 */
+    if (value_is_borrowed(v)) return;
+    array_dispose_raw(vm, value_data(v), value_type(v));
 }
 
-/* ---- clone: 逐元素 clone（元素 track 到当前作用域） ---- */
+/* ---- clone: 分配新块深拷贝全部元素；借用 → materialize（同路径） ---- */
 
 static value_t *array_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
 
-    array_data_t *src = (array_data_t *)value_data(v);
-    array_data_t *d = (array_data_t *)value_alloc_data(vm->alloc, value_type(v));
-    d->elems = vec_new(vm->alloc, /*owns_element=*/false);
-    if (!d->elems) panic("vm: out of memory cloning array");
-
-    size_t n = src->elems ? vec_len(src->elems) : 0;
-    for (size_t i = 0; i < n; i++) {
-        value_t *e = (value_t *)vec_get(src->elems, i);
-        vec_push(d->elems, vm->alloc, value_clone(vm, e));
-    }
-    return value_make(vm, value_type(v), d);
+    /* 借用/普通数组的 type 均为数组类型；借用 v 的 data 指向块内偏移，
+       按其类型深拷贝该块即 materialize（独立 is_own=true 拷贝）。 */
+    const type_t *t = value_type(v);
+    void *block = value_alloc_data(vm->alloc, t);
+    array_blit_raw(vm, block, value_data(v), t);
+    return value_make(vm, t, block);
 }
 
-/* ---- assign: 释放旧元素 vec，clone 新元素 ---- */
+/* ---- assign: 释放 dst 块内资源，深拷贝 src 块（src 可为借用） ---- */
 
 static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
 
-    array_dispose(vm, dst);  /* 释放 dst 的元素 vec */
-    array_data_t *d = (array_data_t *)value_data(dst);
-    array_data_t *s = (array_data_t *)value_data(src);
-    d->elems = vec_new(vm->alloc, /*owns_element=*/false);
-    if (!d->elems) panic("vm: out of memory assigning array");
-
-    size_t n = s->elems ? vec_len(s->elems) : 0;
-    for (size_t i = 0; i < n; i++) {
-        value_t *e = (value_t *)vec_get(s->elems, i);
-        vec_push(d->elems, vm->alloc, value_clone(vm, e));
+    const type_t *t = value_type(dst);
+    if (value_type(src) != t) {
+        return value_make_error(vm,
+            "assign: array type mismatch on assignment");
     }
+    array_dispose_raw(vm, value_data(dst), t);
+    array_blit_raw(vm, value_data(dst), value_data(src), t);
     return dst;
 }
 
@@ -350,49 +438,23 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
     const type_t *at = type_array_intern(vm, elem_type, count);
     if (!at) return value_make_error(vm, "array: failed to intern array type");
 
-    array_data_t *d = (array_data_t *)value_alloc_data(vm->alloc, at);
-    d->elems = vec_new(vm->alloc, /*owns_element=*/false);
-    if (!d->elems) panic("vm: out of memory creating array");
+    /* 分配连续元素块（at->size = count * elem_type->size，seal 时已计算） */
+    void *block = value_alloc_data(vm->alloc, at);
+    const size_t es = elem_type->size;
 
     for (size_t i = 0; i < count; i++) {
         value_t *e = elems[i];
-        if (value_is_error(vm, e)) {
-            vec_free(vm->alloc, &d->elems);
-            return e;
-        }
+        if (value_is_error(vm, e)) return e;
         /* 类型检查：非元素类型尝试隐式转换 */
         if (value_type(e) != elem_type) {
             value_t *casted = value_implicit_cast(vm, e, elem_type);
-            if (value_is_error(vm, casted)) {
-                vec_free(vm->alloc, &d->elems);
-                return casted;
-            }
+            if (value_is_error(vm, casted)) return casted;
             e = casted;
         }
-        vec_push(d->elems, vm->alloc, value_clone(vm, e));
+        /* 深拷贝元素数据到块内偏移（标量 memcpy；嵌套数组/字符串递归） */
+        array_blit_value(vm, (uint8_t *)block + i * es, e, elem_type);
     }
-    return value_make(vm, at, d);
-}
-
-void array_push(vm_t *vm, value_t *arr, value_t *elem) {
-    if (!vm || !arr || !elem) return;
-    if (value_is_error(vm, elem)) return;
-    if (value_is_shadow(arr) || value_is_shadow(elem)) return;
-
-    array_data_t *d = (array_data_t *)value_data(arr);
-    if (!d) return;
-    if (!d->elems) {
-        d->elems = vec_new(vm->alloc, /*owns_element=*/false);
-        if (!d->elems) panic("vm: out of memory growing array");
-    }
-    const type_t *et = array_type_elem(value_type(arr));
-    value_t *e = elem;
-    if (et && value_type(e) != et) {
-        value_t *casted = value_implicit_cast(vm, e, et);
-        if (value_is_error(vm, casted)) return;  /* 类型错误静默跳过 */
-        e = casted;
-    }
-    vec_push(d->elems, vm->alloc, value_clone(vm, e));
+    return value_make(vm, at, block);
 }
 
 /* ================================================================ */
@@ -401,15 +463,17 @@ void array_push(vm_t *vm, value_t *arr, value_t *elem) {
 
 size_t value_array_count(const value_t *v) {
     if (!v || value_kind(v) != TYPE_KIND_ARRAY) return 0;
-    array_data_t *d = (array_data_t *)value_data(v);
-    return (d && d->elems) ? vec_len(d->elems) : 0;
+    /* 借用 v 的 type 也是数组类型，count 从类型取 */
+    return array_type_len(value_type(v));
 }
 
-const value_t *value_array_at(const value_t *v, size_t i) {
+value_t *value_array_at(vm_t *vm, const value_t *v, size_t i) {
     if (!v || value_kind(v) != TYPE_KIND_ARRAY) return NULL;
-    array_data_t *d = (array_data_t *)value_data(v);
-    if (!d || !d->elems) return NULL;
-    size_t n = vec_len(d->elems);
-    if (i >= n) return NULL;
-    return (const value_t *)vec_get(d->elems, i);
+    const type_t *t = value_type(v);
+    const type_t *et = array_type_elem(t);
+    size_t len = array_type_len(t);
+    if (i >= len) return NULL;
+    /* 返回借用引用（data 指向块内偏移，业务内存），供递归遍历 */
+    return value_make_borrowed(vm, et,
+                               (uint8_t *)value_data(v) + i * et->size);
 }

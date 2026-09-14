@@ -75,6 +75,14 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type);
 /** 判断 value 是否为 shadow（只有类型，无实际数据） */
 bool value_is_shadow(const value_t *v);
 
+/** 构造借用引用：data 指向父值（数组/struct）内部元素槽位（value_t**），
+ * is_own=false。借用值只匿名存活于表达式链；绑定/返回时经 value_clone
+ * materialize 成独立深拷贝（is_own=true）。自动 track 到 vm->current_scope。 */
+value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *slot);
+
+/** 判断 value 是否为借用引用（非 shadow 且不拥有 data） */
+bool value_is_borrowed(const value_t *v);
+
 /* ---- error 构造 ---- */
 
 /** 创建 error value（不带位置信息），message 为 C 字符串 */

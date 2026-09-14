@@ -13,6 +13,7 @@ struct value_t {
     const type_t *type;
     void        *data;
     bool         is_shadow;
+    bool         is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */
 };
 
 /* ---- 内部分配 class_t（value_t 堆分配用） ---- */
@@ -93,6 +94,7 @@ value_t *value_make_untracked(allocator_t *alloc, const type_t *type, void *data
     value_t *v = value_alloc(alloc);
     v->type = type;
     v->data = data;
+    v->is_own = true;   /* 默认拥有 data */
     return v;
 }
 
@@ -100,6 +102,24 @@ value_t *value_make(vm_t *vm, const type_t *type, void *data) {
     value_t *v = value_make_untracked(vm->alloc, type, data);
     scope_track(vm, vm->current_scope, v);
     return v;
+}
+
+/* 借用引用：data 指向父值 data 块内的业务内存偏移（C 语义 &arr[i]），
+   is_own=false，dispose 跳过 data 释放。value 是引擎内部内存对象（含 type/
+   is_own 等元数据），借用引用的 data 指向的是业务数据而非引擎对象。
+   借用值只匿名存活于表达式链中，绑定（DEFINE/STORE/RET/clone）时经
+   value_clone materialize 成独立深拷贝。 */
+value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *data) {
+    value_t *v = value_alloc(vm->alloc);
+    v->type = type;
+    v->data = data;     /* 业务内存：父值 data 块内偏移 */
+    v->is_own = false;
+    scope_track(vm, vm->current_scope, v);
+    return v;
+}
+
+bool value_is_borrowed(const value_t *v) {
+    return v && !v->is_shadow && !v->is_own;
 }
 
 /* ---- shadow value ---- */
@@ -349,12 +369,15 @@ void value_dispose(vm_t *vm, value_t *v) {
     if (v->type) {
         /* shadow 值无 data，跳过 dispose 和 data 释放 */
         if (!v->is_shadow) {
-            if (v->type->vtable && v->type->vtable->dispose) {
-                v->type->vtable->dispose(vm, v);
-            }
-            /* 释放 data 块 */
-            if (v->data) {
-                allocator_free(vm->alloc, (void **)&v->data);
+            /* 借用引用：data 指向父值内部，不拥有，跳过 dispose 与释放 */
+            if (v->is_own) {
+                if (v->type->vtable && v->type->vtable->dispose) {
+                    v->type->vtable->dispose(vm, v);
+                }
+                /* 释放 data 块 */
+                if (v->data) {
+                    allocator_free(vm->alloc, (void **)&v->data);
+                }
             }
         }
         v->type = NULL;

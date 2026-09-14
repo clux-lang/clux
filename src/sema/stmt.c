@@ -1,6 +1,7 @@
 #include "sema/sema.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -11,6 +12,7 @@
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "vm/type_array.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -191,8 +193,16 @@ static value_t *(*compound_binop(const token_t *op))(vm_t *, value_t *,
   return NULL;
 }
 
+static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
+                                sema_scope_t *scope);
+
 static void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
+  /* 左值：下标表达式 a[i] = v（sema 校验下标合法） */
+  if (as->target->kind == AST_INDEX) {
+    shadow_assign_index(sema, as, scope);
+    return;
+  }
   /* 左值必须是标识符表达式（目前仅支持 ID_LIT） */
   if (as->target->kind != AST_IDENT) {
     diag_error(sema->diag, sema_loc(sema, as->target),
@@ -311,6 +321,84 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     /* 复合赋值等价于读+写：变量确定已初始化 */
     sema_symbol_t *sym = sema_lookup(scope, name);
     if (sym) sym->flow_init = true;
+  }
+}
+
+/* ---- 下标左值赋值：a[i] = v / a[i] op= v ---- */
+
+/*
+ * 校验 base 可下标（数组）、索引为整数、元素类型可赋值（value_assign
+ * 单一校验点）。元素非独立符号，不写回 flow_init（无 TDZ 概念）。
+ * 泛型实例化（base 是类型值）不落入此路径——sema_expr 已报占位诊断。
+ * 复合赋值走同一元素类型校验（op 结果可赋回元素）。
+ */
+static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
+                                sema_scope_t *scope) {
+  ast_index_t *ix = (ast_index_t *)as->target;
+
+  /* base 求值 + 可下标校验（多维 m[i][j] = v：ix->object 是 AST_INDEX，
+     sema_expr 递归走右值下标分支返回元素类型，此处对最外层索引校验；
+     vm 层借用引用让写回直达原数组，见 type_array.c 借用引用支持） */
+  value_t *base = sema_expr(sema, &ix->object, scope);
+  bool bad = value_is_error(sema->vm, base) ||
+             value_is_type(base, TYPE_KIND_VOID);
+  const type_t *bt = bad ? NULL : value_type(base);
+  if (!bad && (!bt || bt->kind != TYPE_KIND_ARRAY)) {
+    char tn[64];
+    sema_type_name(bt, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "invalid assignment target: cannot index value of type %s", tn);
+    bad = true;
+  }
+
+  /* 单索引校验（多索引 = 泛型实参语法预留） */
+  if (!bad) {
+    size_t nidx = sema_count_siblings(ix->indices);
+    if (nidx != 1) {
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "array subscript expects exactly 1 index, got %zu", nidx);
+      bad = true;
+    }
+  }
+
+  /* 索引表达式求值 + 整数校验 */
+  if (!bad) {
+    value_t *idx = sema_expr(sema, &ix->indices, scope);
+    if (value_is_error(sema->vm, idx) ||
+        value_is_type(idx, TYPE_KIND_VOID))
+      bad = true;
+    else if (!value_is_type(idx, TYPE_KIND_INT)) {
+      char tn[64];
+      sema_type_name(value_type(idx), tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, ix->indices),
+                 "array index must be an integer, got %s", tn);
+      bad = true;
+    }
+  }
+
+  value_t *rhs = sema_expr(sema, &as->value, scope);
+  if (bad) return; /* 已有诊断，右值已求值（错误恢复） */
+  if (value_is_error(sema->vm, rhs) ||
+      value_is_type(rhs, TYPE_KIND_VOID))
+    return;
+
+  /* const 数组元素不可写 */
+  if (value_has_const(base)) {
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign to element of const array");
+    return;
+  }
+
+  /* 元素类型可赋值性（value_assign 单一校验点） */
+  const type_t *et = array_type_elem(bt);
+  if (!et) return;
+  value_t *dst = value_make_shadow(sema->vm, et);
+  if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
+    char tn[64], rn[64];
+    sema_type_name(et, tn, sizeof(tn));
+    sema_type_name(value_type(rhs), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, as->value),
+               "cannot assign %s to array element of type %s", rn, tn);
   }
 }
 
