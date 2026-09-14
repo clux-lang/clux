@@ -19,11 +19,18 @@ extern "C" {
 #include "diag/diagnostic.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
+#include "parser/ast_array.h"
+#include "parser/ast_block.h"
+#include "parser/ast_construct.h"
+#include "parser/ast_func_def.h"
+#include "parser/ast_int_lit.h"
 #include "parser/ast_node.h"
 #include "parser/ast_program.h"
+#include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
 #include "vm/vm.h"
+#include "vm/type_array.h"
 }
 
 #include "test_common.h"
@@ -998,6 +1005,219 @@ TEST_F(SemaTest, ComptimeFuncWithControlFlow) {
     sema_symbol_t *f = sema_lookup(sema_->global_scope, STRSLICE_LIT("F"));
     ASSERT_NE(f, nullptr);
     EXPECT_EQ(f->ct.i, 120); /* 5! */
+}
+
+TEST_F(SemaTest, ComptimeVarArrayEncode) {
+    /* comptime var 数组常量：递归编码进符号表（elems 连续块 + count） */
+    EXPECT_TRUE(analyze(
+        "comptime var A: [3]i32 = .[3]i32{ 1, 2, 3 };"
+        "func main() { var x = A; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *a = sema_lookup(sema_->global_scope, STRSLICE_LIT("A"));
+    ASSERT_NE(a, nullptr);
+    EXPECT_TRUE(a->ct_valid);
+    ASSERT_NE(a->ct.type, nullptr);
+    EXPECT_EQ(a->ct.type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(a->ct.count, 3u);
+    ASSERT_NE(a->ct.elems, nullptr);
+    EXPECT_EQ(array_type_len(a->ct.type), 3u);
+    EXPECT_EQ(array_type_elem(a->ct.type), vm_->type_i32);
+    EXPECT_EQ(a->ct.elems[0].i, 1);
+    EXPECT_EQ(a->ct.elems[1].i, 2);
+    EXPECT_EQ(a->ct.elems[2].i, 3);
+}
+
+TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {
+    /* comptime func 返回数组 → 调用点折叠为 AST_CONSTRUCT 节点
+       （.<type>{ fields }），类型位递归 AST_ARRAY，字段为折叠字面量 */
+    EXPECT_TRUE(analyze(
+        "comptime func make_arr(): [3]i32 {"
+        "  return .[3]i32{ 4, 5, 6 };"
+        "}"
+        "func main() { var r = make_arr(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* main 函数体首个语句 var r = <AST_CONSTRUCT> */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    /* 找到名为 main 的函数（comptime func 也可能在链上，按名定位） */
+    ast_node_t *walk = prog->funcs;
+    ast_node_t *main_def = nullptr;
+    for (; walk; walk = walk->next) {
+        if (walk->kind == AST_FUNC_DEF &&
+            strslice_eq(((ast_func_def_t *)walk)->name, STRSLICE_LIT("main"))) {
+            main_def = walk;
+            break;
+        }
+    }
+    ASSERT_NE(main_def, nullptr);
+    ast_block_t *body = (ast_block_t *)((ast_func_def_t *)main_def)->body;
+    ASSERT_NE(body->stmts, nullptr);
+    ast_var_def_t *vd = (ast_var_def_t *)body->stmts;
+    ASSERT_NE(vd->init, nullptr);
+    EXPECT_EQ(vd->init->kind, AST_CONSTRUCT);
+
+    /* 类型位：AST_ARRAY([3]i32)，base_type = AST_IDENT("i32") */
+    ast_construct_t *cn = (ast_construct_t *)vd->init;
+    ASSERT_NE(cn->type, nullptr);
+    EXPECT_EQ(cn->type->kind, AST_ARRAY);
+    ast_array_t *arr = (ast_array_t *)cn->type;
+    ASSERT_NE(arr->base_type, nullptr);
+    EXPECT_EQ(arr->base_type->kind, AST_IDENT);
+    ASSERT_NE(arr->length, nullptr);
+    EXPECT_EQ(arr->length->kind, AST_INT_LIT);
+
+    /* 字段链：3 个折叠的 i32 字面量 */
+    int values[3] = {0, 0, 0};
+    size_t nf = 0;
+    for (ast_node_t *fd = cn->fields; fd; fd = fd->next) {
+        ASSERT_EQ(fd->kind, AST_INT_LIT);
+        values[nf++] = (int)((ast_int_lit_t *)fd)->value;
+    }
+    ASSERT_EQ(nf, 3u);
+    EXPECT_EQ(values[0], 4);
+    EXPECT_EQ(values[1], 5);
+    EXPECT_EQ(values[2], 6);
+}
+
+TEST_F(SemaTest, ComptimeFuncReturnNestedArrayFold) {
+    /* 嵌套数组常量：comptime func 返回 [2][3]i32，调用点折叠 AST_CONSTRUCT，
+       字段为嵌套 AST_CONSTRUCT，类型位递归 AST_ARRAY */
+    EXPECT_TRUE(analyze(
+        "comptime func make_mat(): [2][3]i32 {"
+        "  return .[2][3]i32{ .[3]i32{1,2,3}, .[3]i32{4,5,6} };"
+        "}"
+        "func main() { var m = make_mat(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *main_def = nullptr;
+    for (ast_node_t *w = prog->funcs; w; w = w->next) {
+        if (w->kind == AST_FUNC_DEF &&
+            strslice_eq(((ast_func_def_t *)w)->name, STRSLICE_LIT("main"))) {
+            main_def = w;
+            break;
+        }
+    }
+    ASSERT_NE(main_def, nullptr);
+    ast_block_t *body = (ast_block_t *)((ast_func_def_t *)main_def)->body;
+    ast_var_def_t *vd = (ast_var_def_t *)body->stmts;
+    ASSERT_NE(vd->init, nullptr);
+    EXPECT_EQ(vd->init->kind, AST_CONSTRUCT);
+
+    ast_construct_t *cn = (ast_construct_t *)vd->init;
+    ASSERT_NE(cn->type, nullptr);
+    EXPECT_EQ(cn->type->kind, AST_ARRAY);
+    /* 元素类型是嵌套数组 → base_type 又是 AST_ARRAY */
+    ast_array_t *outer = (ast_array_t *)cn->type;
+    ASSERT_NE(outer->base_type, nullptr);
+    EXPECT_EQ(outer->base_type->kind, AST_ARRAY);
+
+    /* 外层 2 字段，每个是嵌套 AST_CONSTRUCT */
+    size_t nf = 0;
+    for (ast_node_t *fd = cn->fields; fd; fd = fd->next) {
+        EXPECT_EQ(fd->kind, AST_CONSTRUCT);
+        nf++;
+    }
+    EXPECT_EQ(nf, 2u);
+}
+
+TEST_F(SemaTest, ComptimeFuncIndexAssignFold) {
+    /* comptime func 内数组下标赋值（= 与复合 +=）后返回数组，调用点折叠
+       AST_CONSTRUCT，字段应为赋值后的最终值。ctfe 语义与运行期一致：
+       object → index → value 求值序，value_set_index 写块内偏移。 */
+    EXPECT_TRUE(analyze(
+        "comptime func make_arr(): [3]i32 {"
+        "  var r = .[3]i32{0,0,0};"
+        "  r[0] = 7;"
+        "  r[1] += 2;"
+        "  r[2] = r[0] * 3;"
+        "  return r;"
+        "}"
+        "func main() { var a = make_arr(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *main_def = nullptr;
+    for (ast_node_t *w = prog->funcs; w; w = w->next) {
+        if (w->kind == AST_FUNC_DEF &&
+            strslice_eq(((ast_func_def_t *)w)->name, STRSLICE_LIT("main"))) {
+            main_def = w;
+            break;
+        }
+    }
+    ASSERT_NE(main_def, nullptr);
+    ast_block_t *body = (ast_block_t *)((ast_func_def_t *)main_def)->body;
+    ast_var_def_t *vd = (ast_var_def_t *)body->stmts;
+    ASSERT_NE(vd->init, nullptr);
+    EXPECT_EQ(vd->init->kind, AST_CONSTRUCT);
+
+    ast_construct_t *cn = (ast_construct_t *)vd->init;
+    int values[3] = {0, 0, 0};
+    size_t nf = 0;
+    for (ast_node_t *fd = cn->fields; fd; fd = fd->next) {
+        ASSERT_EQ(fd->kind, AST_INT_LIT);
+        values[nf++] = (int)((ast_int_lit_t *)fd)->value;
+    }
+    ASSERT_EQ(nf, 3u);
+    EXPECT_EQ(values[0], 7);  /* r[0] = 7 */
+    EXPECT_EQ(values[1], 2);  /* r[1] += 2 → 0+2 */
+    EXPECT_EQ(values[2], 21); /* r[2] = r[0]*3 → 7*3 */
+}
+
+TEST_F(SemaTest, ComptimeFuncNestedIndexAssignFold) {
+    /* 多维数组下标赋值：r[1][2] = v 是链式嵌套下标（((r[1])[2])），
+       ctfe 按运行期 INDEX_GET/INDEX_SET 逐维语义求值 */
+    EXPECT_TRUE(analyze(
+        "comptime func make_mat(): [2][3]i32 {"
+        "  var r = .[2][3]i32{ .[3]i32{1,2,3}, .[3]i32{4,5,6} };"
+        "  r[1][2] = 99;"
+        "  r[0][0] += 10;"
+        "  return r;"
+        "}"
+        "func main() { var m = make_mat(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *main_def = nullptr;
+    for (ast_node_t *w = prog->funcs; w; w = w->next) {
+        if (w->kind == AST_FUNC_DEF &&
+            strslice_eq(((ast_func_def_t *)w)->name, STRSLICE_LIT("main"))) {
+            main_def = w;
+            break;
+        }
+    }
+    ASSERT_NE(main_def, nullptr);
+    ast_block_t *body = (ast_block_t *)((ast_func_def_t *)main_def)->body;
+    ast_var_def_t *vd = (ast_var_def_t *)body->stmts;
+    ASSERT_NE(vd->init, nullptr);
+    EXPECT_EQ(vd->init->kind, AST_CONSTRUCT);
+
+    /* 外层 2 字段；每个是嵌套 AST_CONSTRUCT，其内层元素应含赋值结果。
+       折叠后字段顺序：{{11,2,3},{4,5,99}} */
+    ast_construct_t *cn = (ast_construct_t *)vd->init;
+    size_t nf = 0;
+    for (ast_node_t *fd = cn->fields; fd; fd = fd->next, nf++) {
+        ASSERT_EQ(fd->kind, AST_CONSTRUCT);
+        ast_construct_t *inner = (ast_construct_t *)fd;
+        int vals[3] = {0, 0, 0};
+        size_t ni = 0;
+        for (ast_node_t *ef = inner->fields; ef; ef = ef->next, ni++) {
+            ASSERT_EQ(ef->kind, AST_INT_LIT);
+            vals[ni] = (int)((ast_int_lit_t *)ef)->value;
+        }
+        ASSERT_EQ(ni, 3u);
+        if (nf == 0) {
+            EXPECT_EQ(vals[0], 11); /* r[0][0] += 10 → 1+10 */
+            EXPECT_EQ(vals[1], 2);
+            EXPECT_EQ(vals[2], 3);
+        } else {
+            EXPECT_EQ(vals[0], 4);
+            EXPECT_EQ(vals[1], 5);
+            EXPECT_EQ(vals[2], 99); /* r[1][2] = 99 */
+        }
+    }
+    EXPECT_EQ(nf, 2u);
 }
 
 /* ---- comptime 错误场景 ---- */

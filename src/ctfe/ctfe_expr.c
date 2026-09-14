@@ -3,20 +3,24 @@
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/strslice.h"
+#include "parser/ast_array.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
 #include "sema/symbol.h"
 #include "vm/type.h"
+#include "vm/type_array.h"
 #include "vm/type_error.h"
 #include "vm/value.h"
 
@@ -188,12 +192,76 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (value_is_error(vm, callee)) return callee;
         return ctfe_call_value(ctx, callee, n->args);
     }
+    case AST_ARRAY: {
+        /* 数组类型表达式 [N]T（类型即表达式）：递归求值元素类型 + 编译期
+           边界 N，intern 出数组类型，返回 type value。base_type 可为
+           AST_IDENT（类型名，走 scope_lookup 同变量机制）/ AST_CONST /
+           嵌套 AST_ARRAY；length 为编译期常量表达式。 */
+        ast_array_t *n = (ast_array_t *)node;
+        value_t *bt = ctfe_eval(ctx, n->base_type);
+        if (value_is_error(vm, bt)) return bt;
+        if (!value_is_type(bt, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: array element must be a type");
+        const type_t *elem = value_as(bt, const type_t *);
+
+        value_t *lv = ctfe_eval(ctx, n->length);
+        if (value_is_error(vm, lv)) return lv;
+        const type_t *lt = value_type(lv);
+        if (!lt || lt->kind != TYPE_KIND_INT)
+            return ctfe_err(ctx, "ctfe: array length must be an integer constant");
+        uint64_t raw = 0;
+        switch (lt->size) {
+            case 1: raw = *(const uint8_t  *)value_data(lv); break;
+            case 2: raw = *(const uint16_t *)value_data(lv); break;
+            case 4: raw = *(const uint32_t *)value_data(lv); break;
+            default: raw = *(const uint64_t *)value_data(lv); break;
+        }
+        if (raw > (uint64_t)SIZE_MAX)
+            return ctfe_err(ctx, "ctfe: array length too large");
+        const type_t *at = type_array_intern(vm, elem, (size_t)raw);
+        return type_as_value(vm, at);
+    }
+    case AST_CONSTRUCT: {
+        /* 类型字面量构造 .<type>{ fields }：求值类型位为 type value，
+           逐个求值字段值，按数组语义构造连续块（value_make_array 内含
+           元素类型隐式转换与深拷贝）。当前仅支持数组类型。 */
+        ast_construct_t *n = (ast_construct_t *)node;
+        value_t *ty = ctfe_eval(ctx, n->type);
+        if (value_is_error(vm, ty)) return ty;
+        if (!value_is_type(ty, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: construct type must be a type");
+        const type_t *t = value_as(ty, const type_t *);
+        if (t->kind != TYPE_KIND_ARRAY)
+            return ctfe_err(ctx, "ctfe: construct only supports array types");
+        const type_t *et = array_type_elem(t);
+        size_t len = array_type_len(t);
+
+        size_t nf = ctfe_count_siblings(n->fields);
+        if (len != SIZE_MAX && nf != len)
+            return ctfe_errf(ctx, "ctfe: construct: expected %zu elements for "
+                                  "[..]T, got %zu", len, nf);
+
+        value_t *elems[nf > 0 ? nf : 1];
+        size_t i = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+            elems[i] = ctfe_eval(ctx, f);
+            if (value_is_error(vm, elems[i])) return elems[i];
+            i++;
+        }
+        return value_make_array(vm, et, elems, nf);
+    }
     case AST_UNDEF:
         return ctfe_err(ctx, "ctfe: 'undefined' is not an expression");
-    case AST_MEMBER:
-        return ctfe_err(ctx, "ctfe: member access is not supported in M1");
-    case AST_INDEX:
-        return ctfe_err(ctx, "ctfe: index expression is not supported in M1");
+    case AST_INDEX: {
+        /* 右值下标 a[i]：object → index → value_get_index（与运行期
+           INDEX_GET 语义一致）。indices 由 sema 保证单索引。 */
+        ast_index_t *n = (ast_index_t *)node;
+        value_t *self = ctfe_eval(ctx, n->object);
+        if (value_is_error(vm, self)) return self;
+        value_t *index = ctfe_eval(ctx, n->indices);
+        if (value_is_error(vm, index)) return index;
+        return value_get_index(vm, self, index);
+    }
     default:
         return ctfe_err(ctx, "ctfe: unsupported expression node");
     }

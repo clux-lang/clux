@@ -4,11 +4,14 @@
 #include "core/string.h"
 #include "core/strslice.h"
 #include "ctfe/ctfe.h"
+#include "parser/ast_array.h"
 #include "parser/ast_bool_lit.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "vm/type_array.h"
 #include "vm/type_error.h"
 #include "vm/value.h"
 
@@ -75,7 +78,71 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->s = strslice_from_bytes(buf, len);
     return true;
   }
-  return false; /* void/type/func/复合：不可折叠（M2 复合后置） */
+  if (t->kind == TYPE_KIND_ARRAY) {
+    /* 数组常量：逐个元素递归编码到 arena 连续块（借用引用
+       value_array_at 遍历块内业务内存，元素深拷贝递归）。 */
+    size_t count = value_array_count(v);
+    out->count = count;
+    if (count == 0) {
+      out->elems = NULL;
+      return true;
+    }
+    sema_ct_const_t *es = (sema_ct_const_t *)arena_calloc(
+        sema->arena, count, sizeof(sema_ct_const_t), ALIGNOF(max_align_t));
+    if (!es) return false;
+    for (size_t i = 0; i < count; i++) {
+      value_t *e = value_array_at(vm, v, i);
+      if (!e) return false;
+      if (!sema_ct_encode(sema, e, &es[i])) return false;
+    }
+    out->elems = es;
+    return true;
+  }
+  return false; /* void/type/func/其他复合：不可折叠 */
+}
+
+/* 从常量类型构造类型表达式 AST（折叠写回 AST_CONSTRUCT 的类型位用）：
+   内置标量类型 → AST_IDENT(类型名)；嵌套数组 → 递归 AST_ARRAY。
+   位置借用 origin（折叠节点位置，诊断定位不变）。 */
+static ast_node_t *sema_ct_type_expr(sema_t *sema, const type_t *t,
+                                     const ast_node_t *origin) {
+  if (!sema || !t) return NULL;
+  arena_t *arena = sema->arena;
+  uint32_t tb = origin->tok_begin;
+  uint32_t te = origin->tok_end;
+
+  if (t->kind == TYPE_KIND_ARRAY) {
+    const type_t *et = array_type_elem(t);
+    size_t len = array_type_len(t);
+    ast_node_t *base = sema_ct_type_expr(sema, et, origin);
+    if (!base) return NULL;
+    ast_node_t *an = ast_array_new(arena, tb, te);
+    if (!an) return NULL;
+    ast_array_t *arr = (ast_array_t *)an;
+    arr->base_type = base;
+    ast_node_t *len_lit = ast_int_lit_new(arena, tb, te);
+    if (!len_lit) return NULL;
+    ((ast_int_lit_t *)len_lit)->value = (uint64_t)len;
+    arr->length = len_lit;
+    return an;
+  }
+
+  /* 标量类型：AST_IDENT 引用类型名（type->name 生命周期 = vm 池） */
+  if (!t->name.ptr) return NULL;
+  ast_node_t *id = ast_ident_new(arena, tb, te);
+  if (!id) return NULL;
+  ((ast_ident_t *)id)->name = t->name;
+  return id;
+}
+
+/* 兄弟链连接辅助：返回链头（首个非 NULL 节点） */
+static ast_node_t *sema_ct_link(ast_node_t **head, ast_node_t **last,
+                                ast_node_t *node) {
+  if (!node) return *head;
+  if (*last) (*last)->next = node;
+  else *head = node;
+  *last = node;
+  return *head;
 }
 
 ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
@@ -116,6 +183,28 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     if (!n) return NULL;
     ((ast_string_lit_t *)n)->text = ct->s; /* arena 复制，生命周期 = arena */
     return n;
+  }
+  if (t->kind == TYPE_KIND_ARRAY) {
+    /* 复杂类型常量：写回为 AST_CONSTRUCT（.<type>{ fields }）节点。
+       type 位递归构造类型表达式（[N]T → AST_ARRAY 嵌套），fields 为
+       逐个元素递归折叠的字面量兄弟链。下游 compiler 按标准构造路径
+       （compile_type_expr + CONSTRUCT N）编译，零感知。 */
+    ast_node_t *type_expr = sema_ct_type_expr(sema, t, origin);
+    if (!type_expr) return NULL;
+    ast_node_t *cnode = ast_construct_new(arena, tb, te);
+    if (!cnode) return NULL;
+    ast_construct_t *cn = (ast_construct_t *)cnode;
+    cn->type = type_expr;
+
+    ast_node_t *fhead = NULL, *flast = NULL;
+    for (size_t i = 0; i < ct->count; i++) {
+      ast_node_t *el = sema_ct_lit(sema, origin, &ct->elems[i]);
+      if (!el) return NULL;
+      sema_ct_link(&fhead, &flast, el);
+    }
+    cn->fields = fhead;
+    cn->fields_last = flast;
+    return cnode;
   }
   return NULL;
 }

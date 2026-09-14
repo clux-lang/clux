@@ -36,9 +36,13 @@ typedef struct _sema_scope_t sema_scope_t;
 /*
  * 编译期常量编码（comptime var / comptime func 调用折叠产物）
  *
- * 只支持标量 + 字符串（M2 复合类型后置）。字符串 strslice 指向 arena
- * 复制的缓冲区（生命周期 = sema arena，跨 sema/compile 阶段安全）。
- * type 是 vm 类型池指针（借用，生命周期 = vm）。
+ * 支持标量 + 字符串 + 数组（M2 复合类型按需扩展）。
+ * - 标量：type 决定读取 i/u/f/b/s 哪个字段（u64 → u，其余整数 → i，
+ *   f32/f64 → f，bool → b，str → s）
+ * - 数组：type->kind == TYPE_KIND_ARRAY → elems 是连续元素常量编码
+ *   （arena 分配，count 个，递归），标量字段无效
+ * 字符串 strslice 指向 arena 复制的缓冲区（生命周期 = sema arena，
+ * 跨 sema/compile 阶段安全）。type 是 vm 类型池指针（借用，生命周期 = vm）。
  */
 typedef struct sema_ct_const {
   const type_t *type;  /* 常量类型 */
@@ -47,6 +51,9 @@ typedef struct sema_ct_const {
   double        f;     /* f32/f64 */
   bool          b;     /* bool */
   strslice_t    s;     /* 字符串（arena 复制） */
+  /* 数组（TYPE_KIND_ARRAY）：arena 分配的连续元素编码 */
+  struct sema_ct_const *elems; /* count 个元素常量（arena 分配） */
+  size_t                count; /* 元素个数 */
 } sema_ct_const_t;
 
 /*

@@ -4,6 +4,7 @@
 #include "core/strslice.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_index.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -26,6 +27,34 @@
 
 static value_t *ctfe_assign(ctfe_ctx_t *ctx, ast_assign_t *n) {
     vm_t *vm = ctx->vm;
+
+    /* 下标左值赋值：a[i] = v / a[i] op= v。与运行期语义一致（求值序
+       object → index → value；= → value_set_index；复合赋值 →
+       value_get_index 取旧值 → 运算 → value_set_index 写回）。indices
+       由 sema 保证单索引（与运行期 compile_assign_index 同约定）。 */
+    if (n->target->kind == AST_INDEX) {
+        ast_index_t *ix = (ast_index_t *)n->target;
+        value_t *self = ctfe_eval(ctx, ix->object);
+        if (value_is_error(vm, self)) return self;
+        value_t *index = ctfe_eval(ctx, ix->indices);
+        if (value_is_error(vm, index)) return index;
+        value_t *src = ctfe_eval(ctx, n->value);
+        if (value_is_error(vm, src)) return src;
+        if (token_is(n->op, "="))
+            return value_set_index(vm, self, index, src);
+        value_t *old = value_get_index(vm, self, index);
+        if (value_is_error(vm, old)) return old;
+        value_t *r = NULL;
+        if (token_is(n->op, "+="))      r = value_add(vm, old, src);
+        else if (token_is(n->op, "-=")) r = value_sub(vm, old, src);
+        else if (token_is(n->op, "*=")) r = value_mul(vm, old, src);
+        else if (token_is(n->op, "/=")) r = value_div(vm, old, src);
+        else if (token_is(n->op, "%=")) r = value_mod(vm, old, src);
+        else return ctfe_err(ctx, "ctfe: unsupported assignment operator");
+        if (value_is_error(vm, r)) return r;
+        return value_set_index(vm, self, index, r);
+    }
+
     if (n->target->kind != AST_IDENT)
         return ctfe_err(ctx, "ctfe: invalid assignment target");
     value_t *dst = scope_lookup(vm->current_scope,
