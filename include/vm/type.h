@@ -26,14 +26,15 @@ typedef enum type_kind_t {
     TYPE_KIND_FUNC,
     TYPE_KIND_ERROR,
     TYPE_KIND_INTERRUPT, /* 引擎级控制流哨兵（interrupt 类型） */
+    /* ---- M2 复合类型段（内建标量之后；sema 只登记此段类型） ---- */
     TYPE_KIND_CONST,     /* const 修饰（持 sub） */
     TYPE_KIND_VOLATILE,  /* volatile 修饰（持 sub） */
-    /* ---- M2 预留：复合类型 ---- */
     TYPE_KIND_STRUCT,
     TYPE_KIND_ARRAY,
     TYPE_KIND_TUPLE,
     TYPE_KIND_ENUM,
     TYPE_KIND_CUNION,
+    TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
 
 /**

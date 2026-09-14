@@ -179,6 +179,14 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
 const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   if (!sema || !t || !sema->types) return NULL;
 
+  /* 内建类型跳过登记：id 段 0..16 已由 vm_register_builtin_types 固定绑定，
+     LOAD_TYPE <内建 id> 直接可查，无需 program id 别名。登记了反而让
+     hoist 区发冗余的 LOAD_TYPE→BIND_TYPE 别名绑定（字节码膨胀）。
+     kind 段判断（INTERRUPT < kind < COUNT 即 M2 复合类型段）：复合类型
+     首次登记时 t->id 尚未赋值（仍为 0），不能用 id < TYPE_ID_BUILTIN_COUNT
+     判断，会误伤跳过。 */
+  if (t->kind <= TYPE_KIND_INTERRUPT || t->kind >= TYPE_KIND_COUNT) return NULL;
+
   /* 按 type_t 指针去重：同一 intern 实例只登记一次 */
   const sema_type_t *found = sema_type_find(sema, t);
   if (found) return found;
@@ -207,13 +215,10 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
 
   vec_push(sema->types, sema->vm->alloc, st);
 
-  /* 程序类型（复合类型）同步 t->id = st->id：运行时 SET_TYPE_NAME 按
-     t->id >= TYPE_ID_PROGRAM_BASE 判断"可改名"。内建类型 id 固定
-     （vm_init_builtins 按序 0..16），保持不动。 */
-  if (t->kind == TYPE_KIND_ARRAY || t->kind == TYPE_KIND_CONST ||
-      t->kind == TYPE_KIND_VOLATILE) {
-    ((type_t *)t)->id = st->id;
-  }
+  /* 程序类型（复合段：INTERRUPT < kind < COUNT）同步 t->id = st->id：
+     运行时 SET_TYPE_NAME 按 t->id >= TYPE_ID_PROGRAM_BASE 判断"可改名"。
+     内建类型已在上方过滤，不会到达此处。 */
+  ((type_t *)t)->id = st->id;
 
   /* 结构依赖递归登记（hoist 构造完备性） */
   sema_type_register_deps(sema, t);
@@ -302,14 +307,17 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
 }
 
 /* 槽位替换：resolve + 就地替换为 AST_TYPE_REF（携带登记名字）。
- * 已是 AST_TYPE_REF 时幂等（重新解析 + 同名字引用替换）。 */
+ * 已是 AST_TYPE_REF 时幂等（重新解析 + 同名字引用替换）。
+ * 内建类型不登记（sema_type_register 跳过）→ 找不到登记项，不替换
+ * 槽位：保持原 AST_IDENT 等，编译器走 PUSH <名字> 从作用域查内建
+ * type value 的原有路径，避免冗余的 LOAD_TYPE 别名引用。 */
 const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!sema || !slot || !*slot) return NULL;
   ast_node_t *old = *slot;
   const type_t *t = resolve_type_expr(sema, old);
   if (!t) return NULL;
   const sema_type_t *st = sema_type_find(sema, t);
-  if (!st) return NULL; /* 理论不可达：刚登记 */
+  if (!st) return t; /* 内建类型：不替换，保持原槽位 */
 
   ast_node_t *ref = ast_type_ref_new(sema->arena, old->tok_begin, old->tok_end);
   if (!ref) return NULL;

@@ -78,15 +78,18 @@ static void hoist_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *t = st->type;
   const type_t *elem = array_type_elem(t);
   const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, elem);
-  if (!est) {
-    c_error(c, NULL, "compiler: hoist missing element type registration");
-    return;
-  }
-  hoist_one(c, est, done, count);
 
   bcode_write_op(c->bc, BCODE_PUSH_ARRAY); /* 栈: [open_array_type] */
   st_push(c, 1);
-  emit_load_type(c, est->id);              /* 栈: [open, elem] */
+
+  if (!est) {
+    /* 依赖是内建类型（未登记）：LOAD_TYPE <内建 id> 直接查表 */
+    emit_load_type(c, elem->id);           /* 栈: [open, elem] */
+  } else {
+    hoist_one(c, est, done, count);
+    emit_load_type(c, est->id);            /* 栈: [open, elem] */
+  }
+
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
@@ -101,12 +104,12 @@ static void hoist_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *sub = type_qualifier_sub(t);
   const sema_type_t *sst = c_sema_type_find_ptr(c->sema_types, sub);
   if (!sst) {
-    c_error(c, NULL, "compiler: hoist missing qualifier sub registration");
-    return;
+    /* 依赖是内建类型（未登记）：LOAD_TYPE <内建 id> 直接查表 */
+    emit_load_type(c, sub->id);
+  } else {
+    hoist_one(c, sst, done, count);
+    emit_load_type(c, sst->id);
   }
-  hoist_one(c, sst, done, count);
-
-  emit_load_type(c, sst->id);
   bcode_write_op(c->bc, create_op); /* 弹 sub → intern 密封 → 压回 */
   emit_bind_type(c, st->id);
 }
