@@ -142,12 +142,12 @@ void   compile_type_expr(compiler_t *c, ast_node_t *type_expr); /* compile_type.
 void   compile_expr(compiler_t *c, ast_node_t *node);          /* compile_expr.c */
 void   compile_stmt(compiler_t *c, ast_node_t *node);          /* compile_stmt.c */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
-void   compile_func_reg(compiler_t *c, ast_func_def_t *fn, size_t body);
+size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn);    /* 返回 PUSH_FUNCTION body 操作数字段位置 */
 
 /* ---- hoist 类型提升区（compile_hoist.c） ---- */
 
 /**
- * 编译类型提升区（JMP 守卫之后、注册段之前）：
+ * 编译类型提升区（产物最前、注册段之前）：
  * 遍历 sema->types，按 type_t 结构单遍递归构造（依赖后序）每个程序类型并
  * BIND_TYPE <id> 绑定（内建类型已由 vm_register_builtin_types 绑内建 id，
  * 此处仅 BIND 别名 id）；数组/const/volatile 构造后 BIND 密封实例，槽位

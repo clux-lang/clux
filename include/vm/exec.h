@@ -42,9 +42,9 @@ value_t *exec_drive(vm_t *vm, bytecode_t *bc, size_t start_pc);
  * 执行前清空操作数栈；结束后返回 error（若出错）或 NULL（正常 HALT）。
  * 返回的 error 生命周期挂在 current_scope 下，调用方不手动释放。
  *
- * clux 无顶层语句：exec_run 只执行函数注册段（JMP 守卫 + 函数值构造 +
- * DEFINE_FUNCTION），不执行任何函数体。入口函数（main）由调用方在
- * exec_run 之后 scope_lookup + value_call 显式触发。
+ * clux 无顶层语句：exec_run 只执行类型提升区 + 函数注册段（类型构造 +
+ * 函数值构造 + DEFINE_FUNCTION），不执行任何函数体。入口函数（main）由
+ * 调用方在 exec_run 之后 scope_lookup + value_call 显式触发。
  */
 value_t *exec_run(vm_t *vm, bytecode_t *bc);
 

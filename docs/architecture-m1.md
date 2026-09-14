@@ -726,19 +726,21 @@ bcode_call_cfunc(vm, fn, argc, local_args):
 
 调用点无需区分函数来源——只要函数值是 `func_t` 体系（data 指向 func_t 或其子类），`value_call` 即正确分派。这也是 `CALL` 只保留 `value_call` 一个入口的根本原因。
 
-**函数定义编译模板**（函数体在模块顶层顺序执行时被 `JMP` 守卫跳过，只经 `CALL` 进入；`L_FUNC_START`/`L_FUNC_END` 为地址标签，编译期回填绝对 pc）：
+**函数定义编译模板**（产物布局：类型提升区 → 函数注册段 → `HALT` → 函数体区；函数体在 `HALT` 之后，不顺序执行，只经 `PUSH_FUNCTION` 记录的入口 pc 进入；`L_FUNC_START` 为地址标签，编译期回填绝对 pc）：
 
 ```
 func add(a:i32, b:i32):i32 { return a + b; }
 func main():void { }
 
-  JMP L_FUNC_END                  ; 顺序执行跳过函数体
-L_FUNC_START:                     ; = bcode_function_t.entry_pc
+L_FUNC_START:                     ; = bcode_function_t.entry_pc（函数体区）
   DEFINE "b"                      ; 弹栈顶实参定义参数（倒序：后压先弹）
   DEFINE "a"
   ...函数体...
   RET
-L_FUNC_END:                       ; 构造签名类型 + 函数值，DEFINE 注册
+  ...
+  HALT                            ; 注册段之后停机，拦截落入函数体区
+  ; ---- 函数体区（产物最后，各函数体以 RET 结尾） ----
+  ; 注册段在 HALT 之前：构造签名类型 + 函数值，DEFINE 注册
   PUSH_FUNC_TYPE                  ; 分配空 func type 入池 + 压其 type value
   LOAD "i32"                      ; 参数 a 类型
   FUNC_TYPE_PARAM                 ; 追加为参数
@@ -753,6 +755,8 @@ L_FUNC_END:                       ; 构造签名类型 + 函数值，DEFINE 注�
   ...main 同理...
 ```
 
+（注：注册段先于函数体编译，`PUSH_FUNCTION` 的入口 pc 先写占位，函数体区编译完成后回填；无 JMP 守卫，类型提升区即产物开头，顺序执行直达注册段。）
+
 - **参数不按名绑定，由函数体内弹栈 DEFINE**：`bcode_call_cfunc` 把 local_args 按序压操作数栈（压栈顺序 `a, b` → 栈顶是 `b`），函数体头部编译期生成倒序 `DEFINE "b"; DEFINE "a"` 依次弹栈定义。参数名只在编译期用于生成 DEFINE 指令，运行时函数值不含参数名。
 - **func type 构造（PUSH → SET → SEAL，与 array type 统一）**：`PUSH_FUNC_TYPE` 分配空 `func_type_t`（开放类型，暂不入池）并压其 type value；随后每参数 `LOAD "T"; FUNC_TYPE_PARAM` 按声明顺序追加为参数类型；`LOAD "T"; FUNC_TYPE_RETURN` 设为返回类型；`FUNC_TYPE_VARARG` 标记可变参数（M1 无用户变参函数省略该指令）；`SEAL` 经统一 `value_seal` 代理到 `func_type_seal`，计算规范名 `func(...)`、按签名查重 intern（首次成功才入 `vm->sig_types` 池并置 `sealed=true`；去重复用则回收开放类型并重定向栈引用）。构造全程只操作栈顶的 func type type value，func type 本身始终留在栈上（仅 `PUSH_FUNCTION` 弹栈顶签名类型组装 func value）。`type_func_sig` 仍保留为 C 侧一次性快捷构造（不向 VM 栈压 type value，供 builtin_printf/sema/测试使用）。
 - **void 函数返回 undefined**：为统一性，void 类型函数实际 `return undefined`——函数体末尾（或显式 `return;`）编译为 `PUSH_UNDEFINED; RET;`。`RET` 语义统一为"栈顶即返回值"：非 void 函数返回表达式求值结果，void 函数返回 void 类型的 undefined value。`return expr;` => `...expr...; RET`。
@@ -766,7 +770,7 @@ L_FUNC_END:                       ; 构造签名类型 + 函数值，DEFINE 注�
 
 **closure_scope = 孤立作用域（parent=NULL）**：clux 用**显式闭包捕获**——函数对象创建时 `scope_new(alloc, NULL)` 建孤立 scope，不挂任何作用域树（不随定义点作用域销毁）；`func_vcall` 调用期间临时让 `closure_scope->parent = root_scope` 使函数体可查看到模块变量，调用结束恢复原 parent。该作用域跟随函数对象销毁（`vm_destroy` 释放 functions 时处理）。
 
-**exec_run 只注册不执行（clux 无顶层语句）**：`exec_run` 只驱动函数注册段（`JMP` 守卫跳过的 `PUSH_FUNC_TYPE` / `FUNC_TYPE_PARAM*` / `FUNC_TYPE_RETURN` / `SEAL` / `PUSH_FUNCTION` / `DEFINE` 序列），入口函数由调用方在 `exec_run` 之后 `scope_lookup(vm->current_scope, "main")` + `value_call(vm, fn, NULL, 0)` 显式触发（driver 职责）。
+**exec_run 只注册不执行（clux 无顶层语句）**：`exec_run` 只驱动类型提升区 + 函数注册段（`BIND_TYPE` 类型构造 / `PUSH_FUNC_TYPE` / `FUNC_TYPE_PARAM*` / `FUNC_TYPE_RETURN` / `SEAL` / `PUSH_FUNCTION` / `DEFINE` 序列），入口函数由调用方在 `exec_run` 之后 `scope_lookup(vm->current_scope, "main")` + `value_call(vm, fn, NULL, 0)` 显式触发（driver 职责）。
 
 #### 2.7.7 控制流编译模板
 

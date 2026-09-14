@@ -144,20 +144,35 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   }
   c->bc = bc;
 
-  /* 函数体先编译（JMP 守卫跳过），记录各函数 entry_pc */
-  size_t jmp_pc = bcode_tell(bc);
-  bcode_write_op(bc, BCODE_JMP);
-  bcode_write_u32(bc, 0); /* 占位，注册段起始回填 */
+  /* 产物布局（先定义类型，然后定义函数，最后放置函数体）：
+       1. 类型提升区（hoist）— 运行时先构造并登记全部程序类型
+       2. 函数注册段 — 签名构造 + PUSH_FUNCTION + DEFINE 名字（函数体入口
+          pc 未知，PUSH_FUNCTION 先写占位，函数体区编译后回填）
+       3. HALT — 拦截顺序执行，函数体区不落入
+       4. 函数体区 — 各函数体以 RET 结尾，仅经 PUSH_FUNCTION 记录的
+          body 入口在被调用时进入
+     无 JMP 守卫：hoist 区即产物开头，顺序执行即达注册段。 */
 
+  /* 1. 类型提升区：依赖后序递归构造，当前类型图是 DAG（数组 elem /
+     限定符 sub 无环）；若未来引入指针/自引用类型（成环），须改为拓扑
+     排序或两阶段构造（开放对象先 BIND、密封后再重绑），见 compile_hoist.c
+     头部注释。 */
+  compile_hoist(c);
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
+  /* 2. 函数注册段 */
   size_t nfuncs = 0;
-  size_t bodies[128];
+  size_t body_slots[128];
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    /* 跳过非函数节点 + comptime func（调用点已折叠，不注册到运行时） */
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;
-    if (nfuncs < sizeof(bodies) / sizeof(bodies[0])) {
-      bodies[nfuncs] = compile_func_body(c, fn);
+    if (nfuncs < sizeof(body_slots) / sizeof(body_slots[0])) {
+      body_slots[nfuncs] = compile_func_reg(c, fn);
       nfuncs++;
     }
     if (c->failed) break;
@@ -168,28 +183,20 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
-  /* 类型提升区（hoist）：JMP 守卫之后、注册段之前。运行时先构造并登记
-     sema->types 中的全部程序类型（BIND_TYPE），注册段/函数体的类型槽位
-     （AST_TYPE_REF → LOAD_TYPE <id>）直接查表。依赖后序递归构造，
-     当前类型图是 DAG（数组 elem / 限定符 sub 无环）；若未来引入指针/
-     自引用类型（成环），须改为拓扑排序或两阶段构造（开放对象先 BIND、
-     密封后再重绑），见 compile_hoist.c 头部注释。 */
-  size_t hoist = bcode_tell(bc);
-  compile_hoist(c);
-  if (c->failed) {
-    bcode_destroy(&bc);
-    c->bc = NULL;
-    return NULL;
-  }
+  bcode_write_op(bc, BCODE_HALT);
 
-  /* 注册段 */
+  /* 3. 函数体区（产物最后）：编译各函数体，回填注册段 PUSH_FUNCTION 的
+     body 入口 pc。 */
   size_t fi = 0;
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;
-    compile_func_reg(c, fn, bodies[fi]);
-    fi++;
+    size_t body = compile_func_body(c, fn);
+    if (fi < sizeof(body_slots) / sizeof(body_slots[0])) {
+      bcode_patch_u32(bc, body_slots[fi], (uint32_t)body);
+      fi++;
+    }
     if (c->failed) break;
   }
   if (c->failed) {
@@ -197,9 +204,6 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     c->bc = NULL;
     return NULL;
   }
-
-  bcode_write_op(bc, BCODE_HALT);
-  bcode_patch_u32(bc, jmp_pc + 4, (uint32_t)hoist);
 
   c->bc = NULL; /* 产物移交调用方 */
   return bc;

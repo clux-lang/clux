@@ -13,7 +13,8 @@
  *  - DEFINE 完成后 PUSH_SCOPE：函数体临时变量/块内变量定义到独立子作用域，
  *    与参数隔离（同名不冲突，且临时变量随函数返回销毁）
  *  - body 语句 → POP_SCOPE → return 兜底
- * 返回函数体入口（entry_pc），供注册段 PUSH_FUNCTION 引用。
+ * 返回函数体入口（entry_pc）；调用方（compile.c）在函数体区编译完成后
+ * 回填注册段 PUSH_FUNCTION 的 body 占位。
  */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   size_t body = bcode_tell(c->bc);
@@ -49,8 +50,11 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   return body;
 }
 
-/** 编译函数注册段（JMP 守卫之后）：签名构造 + PUSH_FUNCTION + push_undefined + DEFINE */
-void compile_func_reg(compiler_t *c, ast_func_def_t *fn, size_t body) {
+/** 编译函数注册段（签名构造 + PUSH_FUNCTION + push_undefined + DEFINE）
+ *  返回 PUSH_FUNCTION body 操作数字段位置（opcode+4，emit_jump 同款取样
+ *  时机）。函数体在产物最后（HALT 之后），入口 pc 编译时未知，此处先写
+ *  占位 0，compile.c 编译函数体区后按返回的槽位回填真实入口。 */
+size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
   /* 签名弹栈顺序：[return, param1..argc, is_variadic] */
   /* 1. PUSH_FUNC_TYPE：分配空 func type，压其 type value（构造起点） */
   bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE);
@@ -82,11 +86,14 @@ void compile_func_reg(compiler_t *c, ast_func_def_t *fn, size_t body) {
   st_push(c, 0);  /* 栈顶 func type 不变（已 sealed） */
 
   bcode_write_op(c->bc, BCODE_PUSH_FUNCTION);
-  bcode_write_u32(c->bc, (uint32_t)body);
+  size_t slot = bcode_tell(c->bc); /* 操作数字段（write_op 之后取样） */
+  bcode_write_u32(c->bc, 0);       /* body 占位，函数体编译后回填 */
   st_push(c, 0);  /* 弹 func type，压 func value */
 
   bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
   bcode_write_op(c->bc, BCODE_DEFINE);
   bcode_write_str(c->bc, fn->name);
   st_push(c, -1);
+
+  return slot;
 }

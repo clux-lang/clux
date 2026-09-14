@@ -575,8 +575,9 @@ TEST(Driver, ConvErrorPaths) {
 
 /* ---- 类型提升区（hoist）---- */
 
-/* 编译产物含 hoist 区：类型构造收敛到 JMP 守卫后的提升区，槽位发
-   LOAD_TYPE <id> 引用。driver_build_asm 产出的 .cxs 文本应可见
+/* 编译产物含 hoist 区：类型构造收敛到产物最前的提升区（先定义类型，
+   再定义函数，函数体最后），槽位发 LOAD_TYPE <id> 引用。
+   driver_build_asm 产出的 .cxs 文本应可见
    BIND_TYPE / PUSH_ARRAY / DEFINE_BOUND / SEAL / LOAD_TYPE 指令。 */
 TEST(Driver, BuildAsmHoistSectionPresent) {
   auto dir = std::filesystem::temp_directory_path() / "clux_hoist";
