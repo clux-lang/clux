@@ -5,7 +5,7 @@ _start:
     push "void"
     func_type_return
     seal
-    push_function [main] 64
+    push_function [main]
     bind_func 64
     set_func_name "main"
     push_undefined

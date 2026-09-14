@@ -22,8 +22,8 @@ typedef struct scope_t scope_t;
  *   （clux 显式闭包捕获：不自动捕获定义点块作用域变量，只持有
  *   显式捕获的变量；parent=root_scope 使函数体可查看到模块变量）
  * - base.root_scope：定义时的模块作用域
- * - base.id：编译器分配的全局唯一 id（PUSH_FUNCTION 立即数，>= 程序段）；
- *   BIND_FUNC <id> 运行期登记进 vm->functions_by_id
+ * - base.id：默认 0；BIND_FUNC <id> 运行期填充（编译器分配的全局唯一 id，
+ *   程序段 >= FUNC_ID_PROGRAM_BASE）并登记进 vm->functions_by_id
  * - entry_pc：函数体字节码入口（绝对偏移，函数体内倒序 DEFINE 绑参）
  *
  * 名字由 SET_FUNC_NAME 写入（调试/显示用）：scope 注册用 DEFINE 的
@@ -39,15 +39,15 @@ typedef struct bcode_function_t {
  *
  * - sig_type: 签名类型（CREATE_FUNC_TYPE 产物），不可为 NULL
  * - entry_pc: 函数体字节码入口（绝对偏移）
- * - id: 函数全局唯一 id（编译器分配，程序段 >= FUNC_ID_PROGRAM_BASE）
  * - root_scope: 定义时的模块作用域；closure_scope 由内部创建
  *   （scope_new(alloc, root_scope)，孤立于定义点 current_scope）
+ *   id 默认 0，由后续 BIND_FUNC <id> 填充
  * - 返回 value_t*：data 存 bcode_function_t*，type 即 sig_type；
  *   untracked（调用方管理）：value_dispose(vm, v) 释放 data 块与 value_t，
  *   函数对象本体归 vm->functions，由 vm_destroy 统一释放。
  */
 value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
-                            uint32_t entry_pc, uint32_t id,
+                            uint32_t entry_pc,
                             scope_t *root_scope);
 
 /** 字节码函数执行回调（cfunc_t）：驱动函数体字节码，捕获 RET interrupt 哨兵 */

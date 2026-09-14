@@ -63,8 +63,8 @@ typedef enum {
     BCODE_FUNC_TYPE_VARARG,/* 标记可变参数（无操作数） */
     BCODE_SEAL,            /* 密封栈顶 type value：经 value_seal 分派 vtable->type_seal（func/array/struct/tuple 通用） */
 
-    BCODE_PUSH_FUNCTION,   /* entry pc + id：构造 bcode_function_t + 签名类型 → func value（fn->id = id） */
-    BCODE_BIND_FUNC,       /* u32 id：peek 栈顶 func value → 登记 id→func（幂等，不弹栈） */
+    BCODE_PUSH_FUNCTION,   /* entry pc：构造 bcode_function_t + 签名类型 → func value（id 默认 0，由 BIND_FUNC 填充） */
+    BCODE_BIND_FUNC,       /* u32 id：peek 栈顶 func value → 填充 fn->id + 登记 id→func（幂等，不弹栈） */
     BCODE_SET_FUNC_NAME,   /* strtable 索引：peek 栈顶 func value → 设置函数名（不弹栈） */
 
     BCODE_ADD, BCODE_SUB, BCODE_MUL, BCODE_DIV, BCODE_MOD,

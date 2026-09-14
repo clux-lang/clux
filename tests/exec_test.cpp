@@ -557,7 +557,7 @@ TEST_F(ExecTest, FunctionRegisterAndCallMain) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("main"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -587,7 +587,7 @@ TEST_F(ExecTest, VoidFunctionReturnsUndefined) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("void"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("main"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -646,7 +646,7 @@ TEST_F(ExecTest, CallArgCountMismatchPropagatesError) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)foo_body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)foo_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("foo"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -656,7 +656,7 @@ TEST_F(ExecTest, CallArgCountMismatchPropagatesError) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body); bcode_write_u32(bc, 65);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("main"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -714,7 +714,7 @@ TEST_F(ExecTest, RecursiveFactorial) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)fact_body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)fact_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("fact"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -724,7 +724,7 @@ TEST_F(ExecTest, RecursiveFactorial) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body); bcode_write_u32(bc, 65);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("main"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -762,7 +762,7 @@ TEST_F(ExecTest, FunctionBodySeesModuleVariables) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("main"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -790,12 +790,11 @@ TEST_F(ExecTest, FunctionExpressionDefinedViaPlainDefine) {
 
     size_t end = bcode_tell(bc);
     /* 函数表达式：构造签名 func():i32 → PUSH_FUNCTION → push_undefined → DEFINE "add"
-       匿名函数表达式不写 SET_FUNC_NAME（name 留空），也不强制 BIND_FUNC */
-    bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+       匿名函数表达式不写 SET_FUNC_NAME（name 留空），也不强制 BIND_FUNC */    bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
     bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("add"));
     bcode_write_op(bc, BCODE_HALT);
@@ -949,15 +948,15 @@ TEST_F(ExecTest, SetTypeNameNonTypeValueReturnsError) {
 }
 
 /* ================================================================ */
-/* 9b. 函数 id 指令（PUSH_FUNCTION id / BIND_FUNC / SET_FUNC_NAME） */
+/* 9b. 函数 id 指令（PUSH_FUNCTION / BIND_FUNC 填 id / SET_FUNC_NAME） */
 /* ================================================================ */
 
 /* 函数 id 表：程序函数 id 从 FUNC_ID_PROGRAM_BASE(=64) 起（compiler 分配），
    内建函数（printf）固定 id 0（func_new 自动分配）。以下测试直接写字节码
    驱动三条函数指令（与 compiler 注册段的运行时语义一致）。 */
 
-/* PUSH_FUNCTION <body> <id> 写入 fn->id → BIND_FUNC <id> 登记 → 查表取回
-   同一实例。绑定序列与 compile_func_reg 注册段一致（无 BIND/SET 时仅格式）。 */
+/* PUSH_FUNCTION <body> 构造（id 默认 0）→ BIND_FUNC <id> 填充 fn->id 并
+   登记 → 查表取回同一实例。id 单一来源：只在 BIND_FUNC 出现。 */
 TEST_F(ExecTest, PushFunctionSetsIdAndBindFuncRegisters) {
     size_t jmp_pc = bcode_tell(bc);
     bcode_write_op(bc, BCODE_JMP);
@@ -972,7 +971,7 @@ TEST_F(ExecTest, PushFunctionSetsIdAndBindFuncRegisters) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
     bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("f"));
@@ -1008,7 +1007,7 @@ TEST_F(ExecTest, SetFuncNameOnProgramFunction) {
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("void"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_FUNC_NAME); bcode_write_str(bc, STRSLICE_LIT("greet"));
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);

@@ -417,24 +417,26 @@ static value_t *op_length(vm_t *vm, bytecode_t *bc, size_t *pc) {
 }
 
 static value_t *op_push_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    /* entry_pc + id 立即数；弹栈顶签名类型（CREATE_FUNC_TYPE 产物），
-       构造 bcode_function_t（封装在 bcode_function 模块内，fn->id = id） */
+    /* entry_pc 立即数；弹栈顶签名类型（CREATE_FUNC_TYPE 产物），
+       构造 bcode_function_t（封装在 bcode_function 模块内，id 默认 0） */
     uint32_t entry_pc = bcode_read_u32(bc, pc);
-    uint32_t id       = bcode_read_u32(bc, pc);
     value_t *sig_v = exec_stack_pop(vm);
     const type_t *sig = *(const type_t **)value_data(sig_v);
-    return bcode_function_new(vm, sig, entry_pc, id, vm->root_scope);
+    return bcode_function_new(vm, sig, entry_pc, vm->root_scope);
 }
 
 /* BIND_FUNC <id>：peek 栈顶 func value（不弹栈——注册段 DEFINE 需保留
-   func value 在栈上），登记 id→func 到 functions_by_id（幂等） */
+   func value 在栈上），填充 fn->id 并登记 id→func 到 functions_by_id
+   （幂等）。id 单一来源——只在此出现一次。 */
 static value_t *op_bind_func(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t id = bcode_read_u32(bc, pc);
     value_t *fv = exec_stack_peek(vm, 0);
     const type_t *t = fv ? value_type(fv) : NULL;
     if (!t || t->kind != TYPE_KIND_FUNC)
         return value_make_error(vm, "exec: bind func expects a function value");
-    vm_func_bind(vm, id, *(func_t **)value_data(fv));
+    func_t *fn = *(func_t **)value_data(fv);
+    fn->id = id;
+    vm_func_bind(vm, id, fn);
     return NULL;
 }
 

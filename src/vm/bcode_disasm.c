@@ -41,8 +41,7 @@ static void disasm_emit_escaped(disasm_sink_t *out, strslice_t s) {
 
 /* ---- 标签支持：跳转/函数入口目标 pc 收集为 L0/L1/... ---- */
 
-/* 该 opcode 的 u32 操作数是否为代码地址（可标签化：jmp/jz/jnz/push_function）。
-   仅第一个操作数可标签化（PUSH_FUNCTION 第二操作数是 id，非地址）。 */
+/* 该 opcode 的 u32 操作数是否为代码地址（可标签化：jmp/jz/jnz/push_function）。 */
 static bool op_is_label_addr(bcode_op_t op) {
     return op == BCODE_JMP || op == BCODE_JZ ||
            op == BCODE_JNZ || op == BCODE_PUSH_FUNCTION;
@@ -71,7 +70,7 @@ static void collect_labels(const bytecode_t *bc, vec_t *labels) {
                 bcode_read_u32(bc, &pc);
             } else if (kind == BCODE_ASM_OP_U32) {
                 uint32_t v = bcode_read_u32(bc, &pc);
-                if (op_is_label_addr(op) && k == 0) {
+                if (op_is_label_addr(op)) {
                     uint32_t *tp = (uint32_t *)allocator_new_ex(
                         bc->alloc, "clux.vm.disasm.tgt", sizeof(uint32_t),
                         NULL, NULL, NULL, 1);
@@ -187,7 +186,7 @@ static void disasm_to(const bytecode_t *bc, disasm_sink_t *out) {
                 }
                 case BCODE_ASM_OP_U32: {
                     uint32_t v = bcode_read_u32(bc, &pc);
-                    if (op_is_label_addr(op) && k == 0) {
+                    if (op_is_label_addr(op)) {
                         long li = label_index(labels, v);
                         if (li >= 0) {
                             char buf[32];

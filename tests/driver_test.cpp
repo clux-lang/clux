@@ -511,7 +511,7 @@ TEST(Driver, ConvByContentSniffing) {
         "    push \"void\"\n"
         "    func_type_return\n"
         "    seal\n"
-        "    push_function [main] 64\n"
+        "    push_function [main]\n"
         "    bind_func 64\n"
         "    set_func_name \"main\"\n"
         "    push_undefined\n"

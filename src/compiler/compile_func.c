@@ -56,8 +56,7 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
  *  时机）。函数体在产物最后（HALT 之后），入口 pc 编译时未知，此处先写
  *  占位 0，compile.c 编译函数体区后按返回的槽位回填真实入口。 */
 size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
-  /* 函数 id：compiler 按声明顺序分配（不写回 AST），PUSH_FUNCTION/BIND_FUNC
-     共用同一 id 立即数 */
+  /* 函数 id：compiler 按声明顺序分配（不写回 AST），仅 BIND_FUNC 携带 */
   uint32_t fid = c->func_id_next++;
 
   /* 签名弹栈顺序：[return, param1..argc, is_variadic] */
@@ -93,11 +92,11 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
   bcode_write_op(c->bc, BCODE_PUSH_FUNCTION);
   size_t slot = bcode_tell(c->bc); /* 操作数字段（write_op 之后取样） */
   bcode_write_u32(c->bc, 0);       /* body 占位，函数体编译后回填 */
-  bcode_write_u32(c->bc, fid);     /* 函数唯一 id（运行时写入 fn->id） */
   st_push(c, 0);  /* 弹 func type，压 func value */
 
-  /* 5. BIND_FUNC <id>：登记 id→func 到 functions_by_id（peek 不弹栈——
-     DEFINE 需保留 func value 在栈上） */
+  /* 5. BIND_FUNC <id>：填充 fn->id + 登记 id→func 到 functions_by_id
+     （peek 不弹栈——DEFINE 需保留 func value 在栈上）。id 单一来源，
+     PUSH_FUNCTION 不再携带。 */
   bcode_write_op(c->bc, BCODE_BIND_FUNC);
   bcode_write_u32(c->bc, fid);
 

@@ -76,8 +76,9 @@ typedef struct compiler_t {
     vec_t          *sema_types;
 
     /* 函数 id 分配计数器：编译注册段时按声明顺序从 FUNC_ID_PROGRAM_BASE
-       起递增（PUSH_FUNCTION <id> 立即数），与类型 id 机制对称——但分配在
-       compiler 侧（不写回 AST），运行时 BIND_FUNC 登记进 vm->functions_by_id。 */
+       起递增（仅 BIND_FUNC <id> 携带），与类型 id 机制对称——但分配在
+       compiler 侧（不写回 AST），运行时 BIND_FUNC 填充 fn->id 并登记进
+       vm->functions_by_id。 */
     uint32_t        func_id_next;
 
     /* 静态平衡追踪 */
