@@ -8,6 +8,7 @@ extern "C" {
 #include "vm/exec.h"
 #include "vm/bcode.h"
 #include "vm/type.h"
+#include "vm/type_array.h"
 #include "core/allocator.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -795,4 +796,138 @@ TEST_F(ExecTest, FunctionExpressionDefinedViaPlainDefine) {
     EXPECT_FALSE(value_is_error(vm, r));
     EXPECT_EQ(value_type(r), vm->type_i32);
     EXPECT_EQ(read_sint(r), 1);
+}
+
+/* ================================================================ */
+/* 9. 类型 id 指令（LOAD_TYPE / BIND_TYPE / SET_TYPE_NAME）          */
+/* ================================================================ */
+
+/* 类型 id 表：程序类型 id 从 TYPE_ID_PROGRAM_BASE(=64) 起，内建类型
+   0..16。以下测试直接写字节码驱动三条类型指令（与 compiler hoist
+   提升区 / 槽位 LOAD_TYPE 的运行时语义一致）。 */
+
+/* LOAD_TYPE 内建 id：id=2 是 i32（vm_init_builtins 固定序）。hoist_builtin
+   即发 LOAD_TYPE <内建 id>，此路径验证内建 id 段可直接查表。 */
+TEST_F(ExecTest, LoadTypeBuiltinId) {
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 2);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_type);
+    EXPECT_EQ(value_as(top, const type_t *), vm->type_i32);
+}
+
+/* BIND_TYPE 64 登记程序类型 → LOAD_TYPE 64 查回同一实例。
+   绑定序列与 hoist 区一致：PUSH_ARRAY...SEAL 构造 [i32;3] → BIND_TYPE。 */
+TEST_F(ExecTest, BindThenLoadProgramType) {
+    /* 构造 [i32;3]（同 hoist_array 序列） */
+    bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
+    bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 3);
+    bcode_write_op(bc, BCODE_SEAL);
+    bcode_write_op(bc, BCODE_BIND_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_type);
+
+    const type_t *t = value_as(top, const type_t *);
+    EXPECT_EQ(t->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_elem(t), vm->type_i32);
+    EXPECT_EQ(array_type_len(t), (size_t)3);
+}
+
+/* 重复登记幂等：同一密封实例绑 64/65 两个 id，LOAD_TYPE 两者都返回
+   同一 type_t*（seal 去重 intern 后同一实例多 id 别名）。 */
+TEST_F(ExecTest, BindTypeIdempotentAlias) {
+    bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
+    bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 3);
+    bcode_write_op(bc, BCODE_SEAL);
+    bcode_write_op(bc, BCODE_BIND_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64); /* 复制引用 */
+    bcode_write_op(bc, BCODE_BIND_TYPE); bcode_write_u32(bc, 65); /* 弹顶绑 65 */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    const type_t *t64 = value_as(exec_stack_peek(vm, 1), const type_t *);
+    const type_t *t65 = value_as(exec_stack_peek(vm, 0), const type_t *);
+    ASSERT_NE(t64, nullptr);
+    ASSERT_NE(t65, nullptr);
+    EXPECT_EQ(t64, t65); /* 同一 intern 实例 */
+    EXPECT_TRUE(type_is_sealed(t65));
+}
+
+/* LOAD_TYPE 未登记 id → 硬错误（types_by_id 查表 miss） */
+TEST_F(ExecTest, LoadTypeUnknownIdReturnsError) {
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 100);
+    bcode_write_op(bc, BCODE_HALT);
+
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* BIND_TYPE 栈顶非 type value → 硬错误 */
+TEST_F(ExecTest, BindTypeNonTypeValueReturnsError) {
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 42);
+    bcode_write_op(bc, BCODE_BIND_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_HALT);
+
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* SET_TYPE_NAME：程序类型（id >= TYPE_ID_PROGRAM_BASE）可覆盖显示名。
+   绑定后改名，type 的 name 字段应更新为新名。 */
+TEST_F(ExecTest, SetTypeNameOnProgramType) {
+    bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
+    bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 2);
+    bcode_write_op(bc, BCODE_SEAL);
+    bcode_write_op(bc, BCODE_BIND_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_SET_TYPE_NAME); bcode_write_str(bc, STRSLICE_LIT("Row"));
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    const type_t *t = value_as(top, const type_t *);
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->kind, TYPE_KIND_ARRAY);
+    ASSERT_NE(t->name.ptr, nullptr);
+    EXPECT_EQ(t->name.len, strlen("Row"));
+    EXPECT_EQ(strncmp(t->name.ptr, "Row", 3), 0);
+}
+
+/* SET_TYPE_NAME 内建类型（id < TYPE_ID_PROGRAM_BASE）不可改名 → 硬错误 */
+TEST_F(ExecTest, SetTypeNameOnBuiltinRejected) {
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 2); /* i32 */
+    bcode_write_op(bc, BCODE_SET_TYPE_NAME); bcode_write_str(bc, STRSLICE_LIT("X"));
+    bcode_write_op(bc, BCODE_HALT);
+
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* SET_TYPE_NAME 栈顶非 type value → 硬错误 */
+TEST_F(ExecTest, SetTypeNameNonTypeValueReturnsError) {
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 1);
+    bcode_write_op(bc, BCODE_SET_TYPE_NAME); bcode_write_str(bc, STRSLICE_LIT("X"));
+    bcode_write_op(bc, BCODE_HALT);
+
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
 }

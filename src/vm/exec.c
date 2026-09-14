@@ -148,13 +148,17 @@ static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return type_as_value(vm, t);
 }
 
-/* BIND_TYPE <id>：弹栈顶 type value，登记 id→type（幂等；seal 去重后重绑） */
+/* BIND_TYPE <id>：弹栈顶 type value，登记 id→type（幂等；seal 去重后重绑）。
+   程序 id（>= TYPE_ID_PROGRAM_BASE）同步写 t->id——SET_TYPE_NAME 按 id 判
+   定"可改名"。sema 路径已设 t->id（sema_type_register），此处幂等冗余；
+   asm 手写路径（无 sema）依赖此同步。 */
 static value_t *op_bind_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t id = bcode_read_u32(bc, pc);
     value_t *tv = exec_stack_pop(vm);
     if (!tv || value_type(tv) != vm->type_type)
         return value_make_error(vm, "exec: bind type expects a type value");
     const type_t *t = *(const type_t **)value_data(tv);
+    if (id >= TYPE_ID_PROGRAM_BASE) ((type_t *)t)->id = id;
     vm_type_bind(vm, id, t);
     return NULL;
 }

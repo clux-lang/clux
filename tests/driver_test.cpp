@@ -573,3 +573,74 @@ TEST(Driver, ConvErrorPaths) {
   std::filesystem::remove_all(dir);
 }
 
+/* ---- 类型提升区（hoist）---- */
+
+/* 编译产物含 hoist 区：类型构造收敛到 JMP 守卫后的提升区，槽位发
+   LOAD_TYPE <id> 引用。driver_build_asm 产出的 .cxs 文本应可见
+   BIND_TYPE / PUSH_ARRAY / DEFINE_BOUND / SEAL / LOAD_TYPE 指令。 */
+TEST(Driver, BuildAsmHoistSectionPresent) {
+  auto dir = std::filesystem::temp_directory_path() / "clux_hoist";
+  std::filesystem::create_directories(dir);
+  std::string src = (dir / "prog.cx").string();
+  std::string cxs = (dir / "prog.cxs").string();
+
+  {
+    FILE *fp = fopen(src.c_str(), "wb");
+    const char *code =
+        "func main():i32 {\n"
+        "  var a = .[3]i32 { 1, 2, 3 };\n"
+        "  var s = a[0] + a[1] + a[2];\n"
+        "  return s;\n"
+        "}\n";
+    fwrite(code, 1, std::strlen(code), fp);
+    fclose(fp);
+  }
+
+  ASSERT_EQ(driver_build_asm(src.c_str(), cxs.c_str()), 0);
+  std::string text = slurp(cxs);
+  ASSERT_FALSE(text.empty());
+
+  /* hoist 区：内建别名 BIND_TYPE + 数组 PUSH_ARRAY→DEFINE_BOUND→SEAL→BIND_TYPE */
+  EXPECT_NE(text.find("BIND_TYPE"), std::string::npos);
+  EXPECT_NE(text.find("PUSH_ARRAY"), std::string::npos);
+  EXPECT_NE(text.find("DEFINE_BOUND"), std::string::npos);
+  EXPECT_NE(text.find("SEAL"), std::string::npos);
+  /* 槽位引用：函数体 LOAD_TYPE <id> 查表构造数组 */
+  EXPECT_NE(text.find("LOAD_TYPE"), std::string::npos);
+
+  std::filesystem::remove_all(dir);
+}
+
+/* comptime 折叠写回端到端：comptime func 返回数组，调用点折叠为
+   AST_CONSTRUCT（类型位 AST_TYPE_REF），编译运行全链路通过。
+   hoist 区构造 [3]i32，函数体 LOAD_TYPE 引用，CONSTRUCT 建值，下标求和。 */
+TEST(Driver, RunFileComptimeFoldArraySum) {
+  std::string path = write_temp_file(
+      "comptime func make_arr(): [3]i32 {\n"
+      "  var r = .[3]i32{0, 0, 0};\n"
+      "  r[0] = 4;\n"
+      "  r[1] = 5;\n"
+      "  r[2] = 6;\n"
+      "  return r;\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var a = make_arr();\n"
+      "  return a[0] + a[1] + a[2];\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* const/volatile 类型槽位同样走 hoist 区（CREATE_CONST / CREATE_VOLATILE
+   依赖 LOAD sub → BIND_TYPE 提升序列），编译运行端到端。 */
+TEST(Driver, RunFileQualifierTypesViaHoist) {
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a:const i32 = 7;\n"
+      "  var b:volatile i32 = 3;\n"
+      "  return a + b;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
