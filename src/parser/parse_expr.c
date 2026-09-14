@@ -227,6 +227,9 @@ ast_node_t *parse_unary(parser_t *p) {
             }
             return type;
         }
+        /* type 解析（如 [N] i32）返回后游标可能停在 trivia 上（关键字消费不跳空白），
+         * 检查 '{' 前必须跳过，否则 '}' 前的空格会导致误报。 */
+        skip_trivia(p);
         if (!check_symbol(p, "{")) {
             return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
                                  "expected '{' after type in typed literal");

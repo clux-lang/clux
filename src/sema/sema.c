@@ -1,10 +1,14 @@
 #include "sema/sema.h"
 #include "vm/type_func.h"
+#include "vm/type_array.h"
 #include "core/panic.h"
 #include "core/string.h"
+#include "ctfe/ctfe.h"
+#include "parser/ast_array.h"
 #include "parser/ast_const.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_int_lit.h"
 #include "parser/ast_program.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
@@ -52,6 +56,82 @@ void sema_destroy(sema_t **sema) {
  * 公共工具
  * =========================================================================== */
 
+/* 编译期求值数组边界 N（[N]T 的长度槽位）。
+ *
+ * N 是编译期常量表达式（m2-design §6）：字面量直接读值；复杂表达式
+ * （[2+3]i32 / [sizeof(a)]i32 / comptime var 引用）走 ctfe 真实求值
+ * （vm->comptime 模式）。成功后把非字面量边界折叠为 AST_INT_LIT 写回
+ * （m2-design §comptime"常量折叠写回 AST"）——编译器消费类型槽位时
+ * 直接读立即数，无需再次编译期求值。
+ *
+ * 失败返回 false（诊断已记录），len 不写入。
+ */
+static bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
+                                  size_t *len) {
+  if (!sema || !bound || !*bound) return false;
+  ast_node_t *b = *bound;
+
+  /* 字面量：直接读（折叠目标亦为 AST_INT_LIT，天然命中） */
+  if (b->kind == AST_INT_LIT) {
+    ast_int_lit_t *il = (ast_int_lit_t *)b;
+    if (il->value > (uint64_t)SIZE_MAX) {
+      diag_error(sema->diag, sema_loc(sema, b), "array length %llu too large",
+                 (unsigned long long)il->value);
+      return false;
+    }
+    *len = (size_t)il->value;
+    return true;
+  }
+
+  /* 复杂表达式：ctfe 编译期求值（shadow 值不可用，须真实常量） */
+  vm_t *vm = sema->vm;
+  bool saved = vm->comptime;
+  vm->comptime = true;
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = vm;
+  ctx.sema = sema;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *r = ctfe_eval(&ctx, b);
+  vm->comptime = saved;
+
+  if (!r || value_is_error(vm, r)) {
+    diag_error(sema->diag, sema_loc(sema, b),
+               "array length must be a compile-time constant");
+    return false;
+  }
+  const type_t *t = value_type(r);
+  if (!t || t->kind != TYPE_KIND_INT) {
+    diag_error(sema->diag, sema_loc(sema, b),
+               "array length must be an integer constant");
+    return false;
+  }
+  uint64_t raw = 0;
+  switch (t->size) {
+    case 1: raw = *(const uint8_t  *)value_data(r); break;
+    case 2: raw = *(const uint16_t *)value_data(r); break;
+    case 4: raw = *(const uint32_t *)value_data(r); break;
+    default: raw = *(const uint64_t *)value_data(r); break;
+  }
+  if (raw > (uint64_t)SIZE_MAX) {
+    diag_error(sema->diag, sema_loc(sema, b), "array length %llu too large",
+               (unsigned long long)raw);
+    return false;
+  }
+  *len = (size_t)raw;
+
+  /* 折叠边界为字面量写回（编译器消费立即数，零感知） */
+  ast_node_t *lit = ast_int_lit_new(sema->arena, b->tok_begin, b->tok_end);
+  if (lit) {
+    ((ast_int_lit_t *)lit)->value = raw;
+    /* 类型后缀留空（编译器不编译边界表达式，只读 value） */
+    lit->next = b->next;
+    *bound = lit;
+  }
+  return true;
+}
+
 const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
   if (!sema || !type_expr) return NULL;
 
@@ -73,8 +153,19 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
           resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
       return sub ? type_volatile_intern(sema->vm, sub) : NULL;
     }
+    case AST_ARRAY: {
+      /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →
+         按 (elem_type, length) 去重 intern。边界槽位支持嵌套数组
+         （[2][3]i32 = 元素类型是 [3]i32）。 */
+      ast_array_t *arr = (ast_array_t *)type_expr;
+      const type_t *base = resolve_type_expr(sema, arr->base_type);
+      if (!base) return NULL;
+      size_t len;
+      if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
+      return type_array_intern(sema->vm, base, len);
+    }
     default:
-      /* M2 扩展点：数组/元组/func 类型表达式 + 类型计算 */
+      /* M2 扩展点：元组/func 类型表达式 + 类型计算 */
       diag_error(sema->diag, sema_loc(sema, type_expr),
                  "unsupported type expression");
       return NULL;

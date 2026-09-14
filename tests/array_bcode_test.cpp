@@ -259,6 +259,83 @@ TEST_F(ArrayBcodeTest, ConstructNonArrayTypeReturnsError) {
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
+/* 两次 construct 构造两个数组值：value_make_array 不得残留 type value 到
+ * 操作数栈（回归：type_array_intern 曾经 array_type_push 压栈，导致第二个
+ * construct 后栈顶被残留 type value 占据，此处断言栈顶为第二个数组值）。 */
+TEST_F(ArrayBcodeTest, ConstructTwiceLeavesNoTypeValueOnStack) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_i32 1\n"
+        "    push_i32 2\n"
+        "    construct 2\n"     /* [arr1] */
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"
+        "    push_i32 3\n"
+        "    push_i32 4\n"
+        "    construct 2\n"     /* [arr1, arr2] */
+        "    halt\n"));
+
+    value_t *t2 = stack_top();
+    value_t *t1 = exec_stack_peek(vm, 1);
+    ASSERT_NE(t2, nullptr);
+    ASSERT_NE(t1, nullptr);
+    /* 栈顶必须是第二个数组值，而非 value_make_array 残留的 type value */
+    EXPECT_EQ(value_type(t2)->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(value_type(t2)), (size_t)2);
+    EXPECT_EQ(value_type(t1)->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(value_type(t1)), (size_t)2);
+}
+
+/* 嵌套数组构造（[2][2]i32）：内层 construct 完成后栈上仅剩外层类型位与
+ * 内层数组值，无残留 type value 干扰外层 construct 弹类型位。
+ * 序列与 compiler 生成一致：外层类型先成形（define_bound 弹 t_inner 设给
+ * open_outer），随后每次内层构造前重新 push_array...seal（去重 intern 复用
+ * t_inner，value_seal 重定向栈上引用）。 */
+TEST_F(ArrayBcodeTest, ConstructNestedArray) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"         /* [open_outer] */
+        "    push_array\n"         /* [open_outer, open_inner] */
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [open_outer, t_inner=[i32;2]] */
+        "    define_bound 2\n"     /* 弹 t_inner 设为 open_outer 元素类型 */
+        "    seal\n"               /* [t_outer=[[i32;2];2]] */
+        /* 内层 1：重新压类型位（去重 → t_inner） */
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [t_outer, t_inner] */
+        "    push_i32 1\n"
+        "    push_i32 2\n"
+        "    construct 2\n"        /* [t_outer, arr_inner1] */
+        /* 内层 2 */
+        "    push_array\n"
+        "    load \"i32\"\n"
+        "    define_bound 2\n"
+        "    seal\n"               /* [t_outer, arr_inner1, t_inner2] */
+        "    push_i32 3\n"
+        "    push_i32 4\n"
+        "    construct 2\n"        /* [t_outer, arr_inner1, arr_inner2] */
+        "    construct 2\n"        /* [arr_outer] */
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top)->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(value_type(top)), (size_t)2);
+    /* 外层元素类型是 [i32;2] */
+    const type_t *et = array_type_elem(value_type(top));
+    ASSERT_NE(et, nullptr);
+    EXPECT_EQ(et->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(et), (size_t)2);
+    EXPECT_EQ(array_type_elem(et), vm->type_i32);
+}
+
 /* 汇编 → 反汇编 稳定往返（CONSTRUCT / INDEX_GET / INDEX_SET 助记符正确编解码）。
  * index_get / index_set 均消费 self（与 op_call 一致），故每次访问前用
  * push_value 0 复制数组引用（借用引用，不重复持有 value）。 */

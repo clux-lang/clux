@@ -1,10 +1,12 @@
 #include "sema/sema.h"
 #include "core/string.h"
+#include "parser/ast_array.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
@@ -16,6 +18,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "vm/type_array.h"
 #include "vm/type_error.h"
 
 #include <stdio.h>
@@ -287,6 +290,64 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       diag_error(sema->diag, sema_loc(sema, *node),
                  "indexing is not supported in M1");
       return value_make_shadow(sema->vm, sema->vm->type_void);
+    case AST_ARRAY: {
+      /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
+         解析为真实类型（边界槽位编译期求值）后返回 type_type shadow，
+         供 as 右值 / sizeof / 嵌套类型构造消费。 */
+      const type_t *t = resolve_type_expr(sema, *node);
+      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      return value_make_shadow(sema->vm, sema->vm->type_type);
+    }
+    case AST_CONSTRUCT: {
+      /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
+         fields 数量与元素类型（value_assign 单一校验点），返回该类型
+         的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
+         当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
+      ast_construct_t *n = (ast_construct_t *)*node;
+      const type_t *t = resolve_type_expr(sema, n->type);
+      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      if (t->kind != TYPE_KIND_ARRAY) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "construct: unsupported type (only array implemented)");
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 成员数校验：定长数组须与边界一致 */
+      const type_t *et = array_type_elem(t);
+      size_t nfields = sema_count_siblings(n->fields);
+      size_t len = array_type_len(t);
+      if (len != SIZE_MAX && nfields != len) {
+        char tn[64];
+        sema_type_name(t, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "construct: expected %zu elements for %s, got %zu", len, tn,
+                   nfields);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 逐字段 shadow 求值 + 元素类型校验（经链上指针传递，使 comptime
+         引用折叠就地写回字段链，编译器零感知） */
+      ast_node_t **link = &n->fields;
+      for (size_t i = 0; *link; link = &(*link)->next, i++) {
+        value_t *fv = sema_expr(sema, link, scope);
+        if (value_is_error(sema->vm, fv) ||
+            value_is_type(fv, TYPE_KIND_VOID))
+          continue; /* 错误恢复产物跳过，已有诊断 */
+        if (!et) continue;
+        value_t *dst = value_make_shadow(sema->vm, et);
+        if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+          char tn[64], fn[64];
+          sema_type_name(et, tn, sizeof tn);
+          sema_type_name(value_type(fv), fn, sizeof fn);
+          diag_error(sema->diag, sema_loc(sema, *link),
+                     "cannot initialize array element %zu with %s (element "
+                     "type %s)",
+                     i, fn, tn);
+        }
+      }
+      return value_make_shadow(sema->vm, t);
+    }
     case AST_ERROR:
     default:
       return value_make_shadow(sema->vm, sema->vm->type_void);

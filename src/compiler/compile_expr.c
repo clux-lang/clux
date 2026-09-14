@@ -3,6 +3,7 @@
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
+#include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
@@ -177,6 +178,24 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     bcode_write_op(c->bc, BCODE_CALL);
     bcode_write_u32(c->bc, (uint32_t)argc);
     st_push(c, -((int)argc));       /* callee+args 弹出，结果压入 */
+    break;
+  }
+  case AST_CONSTRUCT: {
+    /* 类型字面量构造 .<type>{ fields }：
+       1. 类型位：compile_type_expr（[N]T → PUSH_ARRAY...SEAL 留类型值栈顶）
+       2. 各字段值按序压栈（栈: [type_value, v1..vN]）
+       3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 数组值（结果压栈）
+       栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。 */
+    ast_construct_t *n = (ast_construct_t *)node;
+    compile_type_expr(c, n->type);              /* 栈: [type_value] */
+    size_t fcount = 0;
+    for (ast_node_t *f = n->fields; f; f = f->next) {
+      compile_expr(c, f);                       /* 栈: [type_value, v1..vN] */
+      fcount++;
+    }
+    bcode_write_op(c->bc, BCODE_CONSTRUCT);
+    bcode_write_u32(c->bc, (uint32_t)fcount);
+    st_push(c, -((int)fcount));                 /* CONSTRUCT 弹 N+1 压 1 */
     break;
   }
   case AST_MEMBER:

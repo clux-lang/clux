@@ -93,16 +93,23 @@ static void array_type_init_base(array_type_t *at) {
 
 /* ---- 构造：push_array / set_elem / set_count / seal ---- */
 
-const type_t *array_type_push(vm_t *vm) {
-    if (!vm) return NULL;
-
-    /* 分配空 array_type（不入池，密封时才加入 vm->array_types） */
+/* 分配开放 array_type（不入池，密封时才加入 vm->array_types），不压栈。
+ * 供字节码路径（array_type_push）与值构造路径（type_array_intern）共用；
+ * 压栈副作用仅由 array_type_push 承担，避免运行时/sema intern 污染操作数栈。 */
+static array_type_t *array_type_create_open(vm_t *vm) {
     array_type_t *at = (array_type_t *)allocator_new_ex(
         vm->alloc, "array_type_t", sizeof(array_type_t), NULL, NULL, NULL, 1);
     if (!at) panic("vm: out of memory allocating array type");
     memset(at, 0, sizeof(array_type_t));
 
     array_type_init_base(at);  /* 未成形、未密封：等 set_elem / set_count / seal */
+    return at;
+}
+
+const type_t *array_type_push(vm_t *vm) {
+    if (!vm) return NULL;
+
+    array_type_t *at = array_type_create_open(vm);
 
     /* 把该 type 对应的 type value 压入操作数栈（对应字节码 push_array） */
     vec_push(vm->stack, vm->alloc, type_as_value(vm, &at->base));
@@ -175,9 +182,12 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count) {
-    /* 一次性快捷：push_array + set_elem + set_count + seal */
-    const type_t *t = array_type_push(vm);
-    if (!t) return NULL;
+    /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
+     * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
+     * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
+     * 压栈只会污染操作数栈（嵌套构造场景曾因此栈布局错位）。 */
+    array_type_t *at = array_type_create_open(vm);
+    const type_t *t = &at->base;
     array_type_set_elem(vm, t, elem_type);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);

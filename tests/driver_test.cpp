@@ -93,6 +93,48 @@ TEST(Driver, RunFileValidReturnsZero) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileNestedArrayConstructPasses) {
+  /* 多维数组构造：内层 construct 的 value_make_array 不得残留 type value
+     到操作数栈（回归：曾因此外层 construct 栈布局错位报 missing type slot）。 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var m = .[2][2]i32 {\n"
+      "    .[2]i32 { 1, 2 },\n"
+      "    .[2]i32 { 3, 4 }\n"
+      "  };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileMultipleArrayConstructsPasses) {
+  /* 同一作用域内多次数组构造（三个独立同类型数组）不应残留 type value */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = .[2]i32 { 1, 2 };\n"
+      "  var b = .[2]i32 { 3, 4 };\n"
+      "  var c = .[2]i32 { 5, 6 };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileArrayConstructAssignPasses) {
+  /* 数组构造 + 数组变量间赋值（不涉及索引） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = .[2]i32 { 1, 2 };\n"
+      "  var b = a;\n"
+      "  var c = .[2]i32 { 3, 4 };\n"
+      "  var d = c;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileMissingReturnsOne) {
   EXPECT_EQ(driver_run_file("no/such/file.cx"), 1);
 }
