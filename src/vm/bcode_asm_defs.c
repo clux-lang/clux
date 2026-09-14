@@ -32,7 +32,9 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_FUNC_TYPE_RETURN]={ "FUNC_TYPE_RETURN",{BCODE_ASM_OP_NONE } },
     [BCODE_FUNC_TYPE_VARARG]= { "FUNC_TYPE_VARARG",{ BCODE_ASM_OP_NONE } },
     [BCODE_SEAL]           = { "SEAL",           { BCODE_ASM_OP_NONE } },
-    [BCODE_PUSH_FUNCTION]  = { "PUSH_FUNCTION",  { BCODE_ASM_OP_U32 } },
+    [BCODE_PUSH_FUNCTION]  = { "PUSH_FUNCTION",  { BCODE_ASM_OP_U32, BCODE_ASM_OP_U32 } },
+    [BCODE_BIND_FUNC]      = { "BIND_FUNC",      { BCODE_ASM_OP_U32 } },
+    [BCODE_SET_FUNC_NAME]  = { "SET_FUNC_NAME",  { BCODE_ASM_OP_STR } },
 
     [BCODE_ADD]            = { "ADD",            { BCODE_ASM_OP_NONE } },
     [BCODE_SUB]            = { "SUB",            { BCODE_ASM_OP_NONE } },

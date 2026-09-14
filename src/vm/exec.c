@@ -417,12 +417,54 @@ static value_t *op_length(vm_t *vm, bytecode_t *bc, size_t *pc) {
 }
 
 static value_t *op_push_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    /* entry_pc 立即数；弹栈顶签名类型（CREATE_FUNC_TYPE 产物），
-       构造 bcode_function_t（封装在 bcode_function 模块内） */
+    /* entry_pc + id 立即数；弹栈顶签名类型（CREATE_FUNC_TYPE 产物），
+       构造 bcode_function_t（封装在 bcode_function 模块内，fn->id = id） */
     uint32_t entry_pc = bcode_read_u32(bc, pc);
+    uint32_t id       = bcode_read_u32(bc, pc);
     value_t *sig_v = exec_stack_pop(vm);
     const type_t *sig = *(const type_t **)value_data(sig_v);
-    return bcode_function_new(vm, sig, entry_pc, vm->root_scope);
+    return bcode_function_new(vm, sig, entry_pc, id, vm->root_scope);
+}
+
+/* BIND_FUNC <id>：peek 栈顶 func value（不弹栈——注册段 DEFINE 需保留
+   func value 在栈上），登记 id→func 到 functions_by_id（幂等） */
+static value_t *op_bind_func(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    value_t *fv = exec_stack_peek(vm, 0);
+    const type_t *t = fv ? value_type(fv) : NULL;
+    if (!t || t->kind != TYPE_KIND_FUNC)
+        return value_make_error(vm, "exec: bind func expects a function value");
+    vm_func_bind(vm, id, *(func_t **)value_data(fv));
+    return NULL;
+}
+
+/* SET_FUNC_NAME <name>：peek 栈顶 func value（不弹栈），拷贝名字到 vm 堆
+   （owns_name=true，func_destroy 释放），覆盖函数显示名 */
+static value_t *op_set_func_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *fv = exec_stack_peek(vm, 0);
+    const type_t *t = fv ? value_type(fv) : NULL;
+    if (!t || t->kind != TYPE_KIND_FUNC)
+        return value_make_error(vm, "exec: set func name expects a function value");
+    func_t *fn = *(func_t **)value_data(fv);
+
+    /* 旧 name（若为 SET_FUNC_NAME 堆拷贝）先释放 */
+    if (fn->owns_name && fn->name.ptr) {
+        char *np = (char *)fn->name.ptr;
+        allocator_free(vm->alloc, (void **)&np);
+        fn->name = (strslice_t){ NULL, 0 };
+        fn->owns_name = false;
+    }
+
+    /* 拷贝新 name（NUL 结尾，vm 拥有生命周期） */
+    char *buf = (char *)allocator_new_ex(vm->alloc, "char", sizeof(char),
+                                         NULL, NULL, NULL, name.len + 1);
+    if (!buf) return value_make_error(vm, "exec: out of memory setting func name");
+    memcpy(buf, name.ptr, name.len);
+    buf[name.len] = '\0';
+    fn->name      = (strslice_t){ buf, name.len };
+    fn->owns_name = true;
+    return NULL;
 }
 
 static value_t *op_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -553,6 +595,8 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_FUNC_TYPE_VARARG] = op_func_type_vararg,
     [BCODE_SEAL]             = op_seal,
     [BCODE_PUSH_FUNCTION]  = op_push_function,
+    [BCODE_BIND_FUNC]      = op_bind_func,
+    [BCODE_SET_FUNC_NAME]  = op_set_func_name,
     [BCODE_CALL]           = op_call,
     [BCODE_RET]            = op_ret,
     [BCODE_JMP]            = op_jmp,

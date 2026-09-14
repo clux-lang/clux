@@ -66,6 +66,13 @@ typedef struct vm_t {
      * 某个 value dispose 释放（double free）；归本池统一释放。 */
     vec_t *functions;    /* func_t*，元素为函数对象（不 owns，vm_destroy 手动释放） */
 
+    /* ---- 函数 id 表（id → func_t*，BIND_FUNC <id> 运行期登记） ---- */
+    /* 内建函数 id 0..(FUNC_ID_BUILTIN_COUNT-1) 由 func_new 自动分配（从 0 起
+       递增，next_builtin_func_id 维护）；程序函数 id 由编译器分配（>=64），
+       PUSH_FUNCTION 立即数写入 fn->id，BIND_FUNC <id> 登记进本表。 */
+    vec_t    *functions_by_id;    /* func_t*，索引即函数 id */
+    uint32_t  next_builtin_func_id; /* func_new 内建 id 分配计数器 */
+
     /* ---- 执行器状态（复用 vm 上下文，不另建 exec_t） ---- */
     vec_t       *stack;   /* 操作数栈：value_t* 借用引用（不拥有，归 scope） */
     bytecode_t  *bc;      /* 当前执行中的字节码模块（嵌套调用时切换） */

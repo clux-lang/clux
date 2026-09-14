@@ -18,7 +18,8 @@ static class_t g_bcode_function_class = {
 };
 
 value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
-                            uint32_t entry_pc, scope_t *root_scope) {
+                            uint32_t entry_pc, uint32_t id,
+                            scope_t *root_scope) {
     if (!vm || !vm->alloc || !sig_type) return NULL;
     bcode_function_t *fn = (bcode_function_t *)allocator_new(
         vm->alloc, &g_bcode_function_class, 1);
@@ -26,6 +27,7 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
     memset(fn, 0, sizeof(bcode_function_t));
     fn->base.cfunc      = bcode_call_cfunc;
     fn->base.root_scope = root_scope;
+    fn->base.id         = id;
     /* 孤立闭包作用域（parent=NULL）：不挂在任何 scope 树下，不随定义点
        作用域销毁。clux 显式闭包捕获——调用期间由 func_vcall 临时接线
        closure_scope->parent = root_scope 使函数体可查看到模块变量，调用

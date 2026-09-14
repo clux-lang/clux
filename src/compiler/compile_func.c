@@ -50,11 +50,16 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   return body;
 }
 
-/** 编译函数注册段（签名构造 + PUSH_FUNCTION + push_undefined + DEFINE）
+/** 编译函数注册段（签名构造 + PUSH_FUNCTION + BIND_FUNC + SET_FUNC_NAME
+ *  + push_undefined + DEFINE）
  *  返回 PUSH_FUNCTION body 操作数字段位置（opcode+4，emit_jump 同款取样
  *  时机）。函数体在产物最后（HALT 之后），入口 pc 编译时未知，此处先写
  *  占位 0，compile.c 编译函数体区后按返回的槽位回填真实入口。 */
 size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
+  /* 函数 id：compiler 按声明顺序分配（不写回 AST），PUSH_FUNCTION/BIND_FUNC
+     共用同一 id 立即数 */
+  uint32_t fid = c->func_id_next++;
+
   /* 签名弹栈顺序：[return, param1..argc, is_variadic] */
   /* 1. PUSH_FUNC_TYPE：分配空 func type，压其 type value（构造起点） */
   bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE);
@@ -88,7 +93,19 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
   bcode_write_op(c->bc, BCODE_PUSH_FUNCTION);
   size_t slot = bcode_tell(c->bc); /* 操作数字段（write_op 之后取样） */
   bcode_write_u32(c->bc, 0);       /* body 占位，函数体编译后回填 */
+  bcode_write_u32(c->bc, fid);     /* 函数唯一 id（运行时写入 fn->id） */
   st_push(c, 0);  /* 弹 func type，压 func value */
+
+  /* 5. BIND_FUNC <id>：登记 id→func 到 functions_by_id（peek 不弹栈——
+     DEFINE 需保留 func value 在栈上） */
+  bcode_write_op(c->bc, BCODE_BIND_FUNC);
+  bcode_write_u32(c->bc, fid);
+
+  /* 6. SET_FUNC_NAME "name"：写入函数显示名（peek 不弹栈）。
+     仅命名函数定义写入；匿名函数表达式（var add = func(){}）不写——
+     该形式 M1 暂不支持（AST_FUNC_LIT 未实现），无分支。 */
+  bcode_write_op(c->bc, BCODE_SET_FUNC_NAME);
+  bcode_write_str(c->bc, fn->name);
 
   bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
   bcode_write_op(c->bc, BCODE_DEFINE);

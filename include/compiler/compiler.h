@@ -75,6 +75,11 @@ typedef struct compiler_t {
        sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
     vec_t          *sema_types;
 
+    /* 函数 id 分配计数器：编译注册段时按声明顺序从 FUNC_ID_PROGRAM_BASE
+       起递增（PUSH_FUNCTION <id> 立即数），与类型 id 机制对称——但分配在
+       compiler 侧（不写回 AST），运行时 BIND_FUNC 登记进 vm->functions_by_id。 */
+    uint32_t        func_id_next;
+
     /* 静态平衡追踪 */
     size_t          scope_depth;    /* 当前已 PUSH_SCOPE 未 POP 的层数 */
     int             stack_depth;    /* 静态操作数栈深度（压栈 +1 / 弹栈 -1） */

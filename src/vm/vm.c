@@ -85,6 +85,12 @@ vm_t *vm_new(allocator_t *alloc) {
        （必须先于 func_new 使用——内置函数注册依赖池存在） */
     vm->functions = vec_new(alloc, /*owns_element=*/false);
 
+    /* 函数 id 表（id → func_t*，索引即 id；元素不 owns，归 functions 池释放）。
+       初始容量预留内建段，程序函数 id 从 64 起由编译器分配，BIND_FUNC 动态
+       扩容登记。内建 id 分配计数器从 0 起（func_new 自动分配 < 程序段）。 */
+    vm->functions_by_id = vec_new(alloc, /*owns_element=*/false);
+    vm->next_builtin_func_id = 0;
+
     /* const/volatile 修饰类型池（type_const_intern / type_volatile_intern
        intern 用；元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->const_types = vec_new(alloc, /*owns_element=*/false);
@@ -140,6 +146,9 @@ void vm_destroy(vm_t **pvm) {
         }
         vec_free(vm->alloc, &vm->functions);
     }
+
+    /* 函数 id 表：元素归 functions 池，仅释放向量结构 */
+    vec_free(vm->alloc, &vm->functions_by_id);
 
     /* 函数签名类型池：单遍释放（M1 签名只引用内置静态类型，无相互依赖） */
     if (vm->sig_types) {

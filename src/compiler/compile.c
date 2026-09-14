@@ -229,6 +229,7 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->sema_types    = sema_types;
   c->loop_stack    = NULL;
   c->failed        = false;
+  c->func_id_next  = FUNC_ID_PROGRAM_BASE;
   return c;
 }
 

@@ -33,7 +33,11 @@ typedef value_t *(*cfunc_t)(vm_t *vm, func_t *self, size_t argc, value_t **args)
  * - cfunc: C 函数指针，引擎通过它执行逻辑
  * - closure_scope: 定义时的词法环境（闭包捕获）
  * - root_scope: 定义时的模块作用域（全局根的子作用域）
- * - name: 函数名（调试/显示用）
+ * - id: 函数全局唯一 id（内建函数由 vm 自动分配 < FUNC_ID_PROGRAM_BASE；
+ *   程序函数由编译器分配 >= FUNC_ID_PROGRAM_BASE，PUSH_FUNCTION 立即数
+ *   写入，BIND_FUNC 登记进 vm->functions_by_id）
+ * - name: 函数名（调试/显示用）。内建函数为静态字面量（owns_name=false）；
+ *   程序函数经 SET_FUNC_NAME 拷贝到 vm 堆（owns_name=true，func_destroy 释放）
  *
  * 签名不存于 func_t：签名类型（func_type_t）由 func_new 传入并成为
  * func value 的 type，调用点经 value_type() 取回（见 func_new）。
@@ -47,10 +51,34 @@ struct func_t {
     cfunc_t         cfunc;
     scope_t        *closure_scope;
     scope_t        *root_scope;
+    uint32_t        id;
     strslice_t      name;
     bool            owns_closure_scope; /* true：closure_scope 由函数对象创建（bcode_function），
                                            随 vm->functions 释放；false：调用方传入（不拥有） */
+    bool            owns_name;          /* true：name 为 SET_FUNC_NAME 堆拷贝，func_destroy 释放 */
 };
+
+/* ---- 函数 id 分段（function.c / compile_func.c 共用） ---- */
+/* 内建函数固定 id 0..(FUNC_ID_BUILTIN_COUNT-1)（vm 自动分配：func_new 内
+   部从 0 起递增，printf=0）；程序函数 id 由编译器分配，从 FUNC_ID_PROGRAM_BASE
+   起（预留扩展空隙，见 vm.h 注释）。 */
+#define FUNC_ID_BUILTIN_COUNT 1u
+#define FUNC_ID_PROGRAM_BASE  64u
+
+/* ---- 函数 id 表（id → func_t*，索引即 id） ---- */
+
+/**
+ * 登记函数到 id 表（vm->functions_by_id，索引即 id）。BIND_FUNC <id> 运行期
+ * 用；幂等——同一函数重复登记（多 id 别名）无害。
+ * Panics on out-of-memory.
+ */
+void vm_func_bind(vm_t *vm, uint32_t id, func_t *fn);
+
+/**
+ * 按 id 查函数：id 越界或未登记返回 NULL。调用方无需手动释放（func_t 归
+ * vm->functions 池）。
+ */
+func_t *vm_func_load(vm_t *vm, uint32_t id);
 
 /* ---- 生命周期 ---- */
 
