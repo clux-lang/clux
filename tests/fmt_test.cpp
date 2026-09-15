@@ -282,3 +282,28 @@ TEST(Fmt, EmptyInput) {
     std::string out = fmt("");
     EXPECT_TRUE(out.empty());
 }
+
+/* extends 关键字运算符：作为 word-like KEYWORD token，两侧按通用规则留单
+ * 空格（`i32 extends i64`），与 as 一致；复合类型操作数两侧同样规整。 */
+TEST(Fmt, ExtendsKeywordOperatorSpaced) {
+    std::string out = fmt("func main():i32{\n"
+                          "var a:bool=i32   extends   i32;\n"
+                          "var b:bool=i64 extends i32;\n"
+                          "var c:bool=[2]i32 extends[2]i32;\n"
+                          "if(a&&!b&&c){return 1;}\n"
+                          "return 0;\n"
+                          "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var a: bool = i32 extends i32;\n"
+              "    var b: bool = i64 extends i32;\n"
+              "    var c: bool = [2]i32 extends [2]i32;\n"
+              "    if (a && !b && c) {\n"
+              "        return 1;\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}

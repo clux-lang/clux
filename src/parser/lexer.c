@@ -67,10 +67,10 @@ static class_t lexer_class = {
 
 static const char *const g_keywords[] = {
     "as",      "bool",   "break",     "comptime",  "const",   "continue",
-    "else",    "f32",    "f64",       "false",     "for",     "func",
-    "i16",     "i32",    "i64",       "i8",        "if",      "return",
-    "str",     "true",   "u16",       "u32",       "u64",     "u8",
-    "undefined", "var",  "void",      "volatile",  "while",
+    "else",    "extends", "f32",      "f64",       "false",   "for",
+    "func",    "i16",    "i32",       "i64",       "i8",      "if",
+    "return",  "str",    "true",      "u16",       "u32",     "u64",
+    "u8",      "undefined", "var",    "void",      "volatile", "while",
 };
 
 /* ---- Internal: character classes ---- */
@@ -104,7 +104,7 @@ static bool is_digit_in_base(UChar32 cp, int base) {
   return false;
 }
 
-/* ---- Internal: keyword lookup (linear scan; 28 entries) ---- */
+/* ---- Internal: keyword lookup (linear scan; 29 entries) ---- */
 
 static bool lookup_keyword(const char *text, size_t len) {
   for (size_t i = 0; i < sizeof(g_keywords) / sizeof(g_keywords[0]); i++) {

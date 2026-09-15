@@ -452,6 +452,58 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     return result;
   }
 
+  /* extends：类型兼容判断（编译期类型计算，ctfe 求值后折叠为常量）。
+     两侧都是类型表达式（类型即表达式），ctfe 在 vm->comptime 模式下真实
+     求值（scope 中的类型值为真实 type value，非 shadow），value_extends
+     分派 vtable->extends → bool。成功后把二元节点折叠为 AST_BOOL_LIT
+     写回（保留兄弟链），下游编译器零感知——纯编译期，无运行时指令。 */
+  if (token_is(b->op, "extends")) {
+    vm_t *vm = sema->vm;
+    bool saved = vm->comptime;
+    vm->comptime = true;
+    ctfe_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.vm = vm;
+    ctx.sema = sema;
+    ctx.budget = 100000;
+    ctx.max_depth = 128;
+    value_t *r = ctfe_eval(&ctx, *node);
+    vm->comptime = saved;
+    if (!r || value_is_error(vm, r)) {
+      const char *msg = NULL;
+      if (r) {
+        error_data_t *ed = (error_data_t *)value_data(r);
+        msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+      }
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "extends: not a compile-time type computation%s%s",
+                 msg ? ": " : "", msg ? msg : "");
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    if (value_type(r) != vm->type_bool) {
+      char tn[64];
+      sema_type_name(value_type(r), tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "extends must yield bool (got %s)", tn);
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    sema_ct_const_t ct;
+    if (!sema_ct_encode(sema, r, &ct)) {
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "extends result cannot be folded");
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    ast_node_t *lit = sema_ct_lit(sema, *node, &ct);
+    if (!lit) {
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "extends result cannot be folded");
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    lit->next = (*node)->next; /* 保留兄弟链 */
+    *node = lit;
+    return value_make_shadow(sema->vm, vm->type_bool);
+  }
+
   /* 短路 && / ||：操作数必须 bool，结果 bool */
   if (token_is(b->op, "&&") || token_is(b->op, "||")) {
     value_t *lhs = sema_expr(sema, &b->lhs, scope);

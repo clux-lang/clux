@@ -647,3 +647,63 @@ TEST(Driver, RunFileQualifierTypesViaHoist) {
   std::remove(path.c_str());
 }
 
+/* ---- extends：编译期类型计算 ---- */
+
+TEST(Driver, RunFileExtendsCompileTimeFold) {
+  /* extends 是纯编译期运算：sema 阶段 ctfe 求值后折叠为 bool 常量，
+     运行期零指令。同类型/数组同型/const 兼容 → true；不同类型/长度不同 → false。 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = i32 extends i32;\n"
+      "  var b = i32 extends i64;\n"
+      "  var c = [2]i32 extends [2]i32;\n"
+      "  var d = [2]i32 extends [3]i32;\n"
+      "  var e = const i32 extends i32;\n"
+      "  if (a && !b && c && !d && e) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileExtendsFoldToBoolConst) {
+  /* 折叠验证：反汇编 .cxs 中 extends 表达式应全部为 PUSH_BOOL 常量，
+     不残留任何运行时类型计算指令。 */
+  auto dir = std::filesystem::temp_directory_path() / "clux_ext_fold";
+  std::filesystem::create_directories(dir);
+  std::string src = (dir / "prog.cx").string();
+  std::string cxs = (dir / "prog.cxs").string();
+
+  {
+    FILE *fp = fopen(src.c_str(), "wb");
+    const char *code = "func main():i32 {\n"
+                       "  var a = i32 extends i32;\n"
+                       "  var b = i32 extends i64;\n"
+                       "  if (a && !b) { return 1; }\n"
+                       "  return 0;\n"
+                       "}\n";
+    fwrite(code, 1, std::strlen(code), fp);
+    fclose(fp);
+  }
+
+  ASSERT_EQ(driver_build_asm(src.c_str(), cxs.c_str()), 0);
+  std::string text = slurp(cxs);
+  ASSERT_FALSE(text.empty());
+  EXPECT_NE(text.find("PUSH_BOOL"), std::string::npos);
+  /* extends 无字节码助记符（纯编译期），折叠后也不得出现 LOAD_TYPE 拉取 */
+  EXPECT_EQ(text.find("EXTENDS"), std::string::npos);
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Driver, RunFileExtendsNonTypeRejected) {
+  /* 非类型操作数：sema 阶段 ctfe 求值失败（value_extends → "extends: type
+     value required"），编译报错退出 1。 */
+  std::string path = write_temp_file("func main():i32 {\n"
+                                     "  var a = 5 extends i32;\n"
+                                     "  return a;\n"
+                                     "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+

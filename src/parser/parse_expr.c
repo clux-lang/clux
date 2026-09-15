@@ -42,6 +42,13 @@ static bool infix_binding(const token_t *tok, int *lp, int *rp) {
         *lp = 21; *rp = 22;
         return true;
     }
+    /* extends：类型兼容判断（类型计算），与 ==/!= 同级比较运算符 */
+    if (s.len == 7 && s.ptr[0] == 'e' && s.ptr[1] == 'x' && s.ptr[2] == 't' &&
+        s.ptr[3] == 'e' && s.ptr[4] == 'n' && s.ptr[5] == 'd' &&
+        s.ptr[6] == 's') {
+        *lp = 11; *rp = 12;
+        return true;
+    }
 
     /* 双字符符号运算符 */
     if (s.len == 2) {

@@ -135,6 +135,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             const type_t *target = value_as(ty, const type_t *);
             return value_explicit_cast(vm, lhs, target);
         }
+        /* extends：类型兼容判断（编译期类型计算）。两侧按普通表达式求值
+           ——都是类型表达式，结果应为 type value（data=type_t*）。分派
+           value_extends → vtable->extends（type value 的 VTABLE_TYPE.extends
+           → value_type_extends：非 type value 报 "extends: type value required"）。 */
+        if (token_is(n->op, "extends")) {
+            value_t *lhs = ctfe_eval(ctx, n->lhs);
+            if (value_is_error(vm, lhs)) return lhs;
+            value_t *rhs = ctfe_eval(ctx, n->rhs);
+            if (value_is_error(vm, rhs)) return rhs;
+            return value_extends(vm, lhs, rhs);
+        }
         value_t *lhs = ctfe_eval(ctx, n->lhs);
         if (value_is_error(vm, lhs)) return lhs;
         value_t *rhs = ctfe_eval(ctx, n->rhs);
