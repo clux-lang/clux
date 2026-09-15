@@ -13,6 +13,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_undef.h"
@@ -402,6 +403,33 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
       return value_make_shadow(sema->vm, t);
+    }
+    case AST_TERNARY: {
+      /* 三元条件表达式：cond 必须 bool；两分支都 shadow 求值（两侧都要
+         类型检查，运行时惰性只执行选中分支）；结果类型要求两分支一致。
+         类型即表达式天然支持：`cond ? i32 : i64` 两侧都是 type_type。 */
+      ast_ternary_t *n = (ast_ternary_t *)*node;
+      value_t *cond = sema_expr(sema, &n->cond, scope);
+      sema_check_bool(sema, n->cond, cond, "ternary condition");
+      value_t *tval = sema_expr(sema, &n->then_branch, scope);
+      value_t *eval = sema_expr(sema, &n->else_branch, scope);
+      if (value_is_error(sema->vm, cond) || value_is_error(sema->vm, tval) ||
+          value_is_error(sema->vm, eval) ||
+          value_is_type(tval, TYPE_KIND_VOID) ||
+          value_is_type(eval, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *tt = value_type(tval);
+      const type_t *et = value_type(eval);
+      if (tt != et) {
+        char tn[64], en[64];
+        op_type_name(tval, tn, sizeof(tn));
+        op_type_name(eval, en, sizeof(en));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "ternary branches must have the same type, got %s and %s",
+                   tn, en);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      return tval; /* shadow，类型 = 两分支共同类型 */
     }
     case AST_ERROR:
     default:

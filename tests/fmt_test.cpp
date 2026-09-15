@@ -307,3 +307,30 @@ TEST(Fmt, ExtendsKeywordOperatorSpaced) {
     /* 幂等性 */
     EXPECT_EQ(out, fmt(out.c_str()));
 }
+
+/* 三元条件表达式：`?` 与 `:` 两侧留空格（`a ? b : c`）；嵌套三元右结合
+ * 同样规整；类型标注冒号（`var x: i32`）不受影响（仍前不插空格）。 */
+TEST(Fmt, TernaryOperatorSpaced) {
+    std::string out = fmt("func main():i32{\n"
+                          "var a:i32=3;\n"
+                          "var b:i32=7;\n"
+                          "var r:i32=(a>b)?a:b;\n"
+                          "var s:i32=(a>b)?a:(a==b)?b:a;\n"
+                          "if((a>b)?true:false){return r;}\n"
+                          "return s;\n"
+                          "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var a: i32 = 3;\n"
+              "    var b: i32 = 7;\n"
+              "    var r: i32 = (a > b) ? a : b;\n"
+              "    var s: i32 = (a > b) ? a : (a == b) ? b : a;\n"
+              "    if ((a > b) ? true : false) {\n"
+              "        return r;\n"
+              "    }\n"
+              "    return s;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}

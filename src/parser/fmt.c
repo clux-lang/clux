@@ -92,7 +92,7 @@ static bool is_operator(const token_t *t) {
         "+", "-", "*", "/", "%",
         "==", "!=", "<", ">", "<=", ">=",
         "&&", "||", "&", "|", "^", "<<", ">>",
-        "!", "~", "->", "=>",
+        "!", "~", "?", ":", "->", "=>",
         NULL,
     };
     for (size_t i = 0; ops[i]; i++) {
@@ -253,6 +253,7 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
     sb_t sb = { alloc, NULL, 0, 0 };
     int  indent = 0;
     int  paren_depth = 0;
+    int  ternary_pending = 0; /* 未配对的 '?' 数量（三元冒号两侧留空格判定） */
     bool at_line_start = true;
     const token_t *prev = NULL;   /* 上一个输出过的实义 token（注释不计） */
     bool prev_unary_prefix = false; /* 上一 token 是否一元前缀（其操作数须紧贴） */
@@ -403,6 +404,11 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
                     /* 数组类型 [N]T 紧贴（`[1]i32` / `[2][3]i32`），
                      * ']' 后紧跟类型名时不应插入空格 */
                     need = false;
+                } else if (sym_is(tok, ':') && ternary_pending > 0) {
+                    /* 三元冒号（与 '?' 配对）：两侧留空格 `a ? b : c`；
+                       类型标注冒号（var x: i32）仍前不插空格（no_space_before） */
+                    ternary_pending--;
+                    need = true;
                 } else if (!no_space_before(tok) && !no_space_after(prev)) {
                     need = true;   /* 运算符/字面量/标识符等均以单空格分隔 */
                 }
@@ -415,6 +421,7 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
 
         if (sym_is(tok, '(')) paren_depth++;
         else if (sym_is(tok, ')') && paren_depth > 0) paren_depth--;
+        if (sym_is(tok, '?')) ternary_pending++;
 
         prev_unary_prefix = is_unary_prefix(prev, tok);
         prev = tok;

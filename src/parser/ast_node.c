@@ -31,6 +31,7 @@ static const char *g_kind_names[] = {
     [AST_UNDEF]      = "undef",
     [AST_CONST]      = "const",
     [AST_VOLATILE]   = "volatile",
+    [AST_TERNARY]    = "ternary",
     [AST_ERROR]      = "error",
 };
 

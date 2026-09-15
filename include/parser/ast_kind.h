@@ -45,6 +45,7 @@ typedef enum {
     AST_CONST,           /* const <type-expr> */
     AST_VOLATILE,        /* volatile <type-expr> */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
+    AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

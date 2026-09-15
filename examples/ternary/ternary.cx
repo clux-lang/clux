@@ -1,0 +1,36 @@
+// ternary.cx — 样例：三元条件表达式 cond ? then : else
+//
+//   优先级：低于所有二元运算符，高于赋值（右结合）
+//   惰性：  只求值选中的分支，未选中分支不求值
+//   类型：  两分支类型必须一致（sema 检查）
+//   折叠：  comptime 上下文中三元在编译期求值（ctfe），零运行时指令
+func main(): i32 {
+    var a: i32 = 3;
+    var b: i32 = 7;
+
+    // 基本三元：取较大者
+    var max: i32 = (a > b) ? a : b;
+    printf("max = %d\n", max); // 7
+
+    // 嵌套三元右结合：a ? b : c ? d : e → a ? b : (c ? d : e)
+    var x: i32 = 0;
+    var y: i32 = 1;
+    var z: i32 = 2;
+    var pick: i32 = (x == 0) ? x : (y == 1) ? y : (z == 2) ? z : 99;
+    printf("pick = %d\n", pick); // 0
+
+    // 惰性求值：cond 为真时 else 分支不求值（1 / 0 若执行会除零报错）
+    var safe: i32 = true ? 1 : (1 / 0);
+    printf("safe = %d\n", safe); // 1
+
+    // 三元结果参与运算与赋值
+    var total: i32 = ((a < b) ? a : b) + ((a > b) ? 1 : 2);
+    printf("total = %d\n", total); // 3 + 2 = 5
+
+    // comptime 折叠：编译期求值，反汇编无 JZ/JMP 残留
+    comptime var ca = (1 < 2) ? 5 : 9;
+    comptime var cb = (3 > 4) ? 11 : 13;
+    printf("ct = %d\n", ca + cb); // 5 + 13 = 18
+
+    return 0;
+}

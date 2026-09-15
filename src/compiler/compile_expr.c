@@ -9,6 +9,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
@@ -227,6 +228,29 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     compile_expr(c, n->indices);      /* 栈: [self, index] */
     bcode_write_op(c->bc, BCODE_INDEX_GET);
     st_push(c, -1);                   /* 弹 2 压 1 */
+    break;
+  }
+  case AST_TERNARY: {
+    /* 三元条件表达式（结果恒在栈上）：
+       cond; JZ L_else; then; JMP L_end; L_else: else; L_end:
+       仿短路 &&/|| 的 label 模式：JZ 弹 cond，false → else 分支；then
+       后 JMP 跳过 else；两分支汇合于 L_end。结果类型由 sema 保证一致，
+       运行时选中分支的值留在栈顶（净 +1，与普通表达式一致）。 */
+    ast_ternary_t *n = (ast_ternary_t *)node;
+    compile_expr(c, n->cond);             /* 栈: [cond] */
+    compile_label_t l_else, l_end;
+    label_init(&l_else);
+    label_init(&l_end);
+    bcode_write_op(c->bc, BCODE_JZ);
+    emit_jump(c, &l_else);                /* 弹 cond，false → else */
+    compile_expr(c, n->then_branch);      /* 栈: [then] */
+    bcode_write_op(c->bc, BCODE_JMP);
+    emit_jump(c, &l_end);
+    label_here(c, &l_else);
+    compile_expr(c, n->else_branch);      /* 栈: [else] */
+    label_here(c, &l_end);
+    /* 结果保留在栈上，净 +1（与普通表达式一致） */
+    st_push(c, 1);
     break;
   }
   default:

@@ -486,6 +486,7 @@ static bool is_single_symbol(UChar32 c) {
   case ',':
   case ':':
   case '.':
+  case '?':
     return true;
   default:
     return false;

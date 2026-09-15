@@ -18,6 +18,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
+#include "parser/ast_ternary.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
 
@@ -98,6 +99,9 @@ static bool infix_binding(const token_t *tok, int *lp, int *rp) {
 
 /** 赋值运算符的绑定力（最低，右结合） */
 #define ASSIGN_LEFT_PREC  0
+
+/** 三元条件表达式的绑定力（与赋值同级，低于所有二元运算符；右结合） */
+#define TERNARY_LEFT_PREC 0
 
 static bool is_assign_op_token(const token_t *tok) {
     if (token_get_kind(tok) != TOKEN_TYPE_SYMBOL) return false;
@@ -457,7 +461,52 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
     for (;;) {
         skip_trivia(p);
 
-        /* 2a. 赋值运算符：最低优先级，右结合
+        /* 2a. 三元条件表达式：cond ? then : else（右结合，C 语义）
+         *     优先级与赋值同级（最低），检查必须先于中缀查表（'?' 不在
+         *     binding 表，否则 break 提前结束循环）。then 分支用
+         *     parse_expr_prec(p, 0) 解析——':' 不是任何运算符，解析天然
+         *     停在 ':'；else 分支同样用 parse_expr_prec(p, 0) 解析完整
+         *     表达式，嵌套三元右结合自然成立（a ? b : c ? d : e →
+         *     else = c ? d : e）。 */
+        if (check_symbol(p, "?")) {
+            if (TERNARY_LEFT_PREC < min_prec) break;
+
+            uint32_t op_pos = p->pos;
+            advance(p);
+            skip_trivia(p);
+
+            ast_node_t *then_branch = parse_expr_prec(p, 0);
+            if (!then_branch || then_branch->kind == AST_ERROR) {
+                if (!then_branch) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
+                                         "expected expression after '?' in ternary");
+                }
+                return then_branch;
+            }
+            skip_trivia(p);
+            if (!expect_symbol(p, ":")) {
+                return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
+                                     "expected ':' in ternary expression");
+            }
+            skip_trivia(p);
+            ast_node_t *else_branch = parse_expr_prec(p, 0);
+            if (!else_branch || else_branch->kind == AST_ERROR) {
+                if (!else_branch) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
+                                         "expected expression after ':' in ternary");
+                }
+                return else_branch;
+            }
+
+            ast_node_t *node = ast_ternary_new(p->arena, left->tok_begin, p->pos);
+            ((ast_ternary_t *)node)->cond         = left;
+            ((ast_ternary_t *)node)->then_branch  = then_branch;
+            ((ast_ternary_t *)node)->else_branch  = else_branch;
+            left = node;
+            continue;
+        }
+
+        /* 2b. 赋值运算符：最低优先级，右结合
          *     左值必须是标识符表达式节点，_ = expr 也是 AST_ASSIGN(target=IDENT "_")
          *     discard 语义由 Sema 处理 */
         if (is_assign_op_token(cur_token(p))) {
@@ -494,7 +543,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             continue;
         }
 
-        /* 2b. 后缀绑定力最高(25)，贪婪消费 */
+        /* 2c. 后缀绑定力最高(25)，贪婪消费 */
         if (check_symbol(p, "(") || check_symbol(p, ".") || check_symbol(p, "[")) {
             if (POSTFIX_LEFT_PREC < min_prec) break;
             left = parse_postfix(p, left);
@@ -502,7 +551,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             continue;
         }
 
-        /* 2c. 中缀运算符查表 */
+        /* 2d. 中缀运算符查表 */
         const token_t *op_tok = cur_token(p);
         int lp, rp;
         if (!infix_binding(op_tok, &lp, &rp)) break;

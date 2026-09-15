@@ -16,6 +16,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
@@ -285,6 +286,19 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         value_t *index = ctfe_eval(ctx, n->indices);
         if (value_is_error(vm, index)) return index;
         return value_get_index(vm, self, index);
+    }
+    case AST_TERNARY: {
+        /* 三元条件表达式：求值 cond → bool，惰性只求值选中分支（与
+           &&/|| 短路一致，未选中分支不求值）。分支值归 scope 管理
+           （value_make 自动 track），直接返回引用即可。 */
+        ast_ternary_t *n = (ast_ternary_t *)node;
+        value_t *cond = ctfe_eval(ctx, n->cond);
+        if (value_is_error(vm, cond)) return cond;
+        if (value_type(cond) != vm->type_bool)
+            return ctfe_err(ctx, "ctfe: ternary condition must be bool");
+        bool c = ctfe_read_bool(vm, cond);
+        return c ? ctfe_eval(ctx, n->then_branch)
+                 : ctfe_eval(ctx, n->else_branch);
     }
     default:
         return ctfe_err(ctx, "ctfe: unsupported expression node");
