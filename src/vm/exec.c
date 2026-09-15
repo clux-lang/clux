@@ -138,7 +138,7 @@ static value_t *op_load(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return v; /* type value 借用引用 */
 }
 
-/* ---- 类型 id 指令（LOAD_TYPE / BIND_TYPE / SET_TYPE_NAME） ---- */
+/* ---- 类型 id 指令（LOAD_TYPE / SEAL / SET_TYPE_NAME） ---- */
 
 /* LOAD_TYPE <id>：从 types_by_id 查表，压入该类型的 type value */
 static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -146,21 +146,6 @@ static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     const type_t *t = vm_type_load(vm, id);
     if (!t) return value_make_error(vm, "exec: unknown type id");
     return type_as_value(vm, t);
-}
-
-/* BIND_TYPE <id>：弹栈顶 type value，登记 id→type（幂等；seal 去重后重绑）。
-   程序 id（>= TYPE_ID_PROGRAM_BASE）同步写 t->id——SET_TYPE_NAME 按 id 判
-   定"可改名"。sema 路径已设 t->id（sema_type_register），此处幂等冗余；
-   asm 手写路径（无 sema）依赖此同步。 */
-static value_t *op_bind_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint32_t id = bcode_read_u32(bc, pc);
-    value_t *tv = exec_stack_pop(vm);
-    if (!tv || value_type(tv) != vm->type_type)
-        return value_make_error(vm, "exec: bind type expects a type value");
-    const type_t *t = *(const type_t **)value_data(tv);
-    if (id >= TYPE_ID_PROGRAM_BASE) ((type_t *)t)->id = id;
-    vm_type_bind(vm, id, t);
-    return NULL;
 }
 
 /* SET_TYPE_NAME <name>：弹栈顶 type value，设置其显示名（覆盖规范名） */
@@ -319,12 +304,23 @@ static value_t *op_func_type_vararg(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
-/* SEAL：密封栈顶 type value（统一 SEAL 命令，func/array/struct/tuple 通用）。
- * 经 value_seal 代理到 type->vtable->type_seal（去重复用时由 value_seal
- * 重定向操作数栈中所有引用旧 type 的 type value，无悬空、零泄漏）。 */
+/* SEAL <id>：**消费**栈顶 type value——弹栈 → value_seal 密封（去重 intern；
+ * 幂等，无开放构造阶段的类型如内建/const/volatile 原样返回）→ 登记
+ * id→sealed type 进 types_by_id（幂等；多 id 别名同一 type_t）。
+ * 程序 id（>= TYPE_ID_PROGRAM_BASE）同步写 t->id——SET_TYPE_NAME 按 id 判
+ * 定"可改名"。sema 路径已设 t->id（sema_type_register），此处幂等冗余；
+ * asm 手写路径（无 sema）依赖此同步。
+ * 统一 SEAL 命令，func/array/struct/tuple 通用；密封后栈被清理（消费），
+ * 需要类型时由后续 LOAD_TYPE <id> 主动拉取，不留残值在栈上。 */
 static value_t *op_seal(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)bc; (void)pc;
-    value_seal(vm, exec_stack_peek(vm, 0));
+    uint32_t id = bcode_read_u32(bc, pc);
+    value_t *tv = exec_stack_pop(vm);
+    if (!tv || value_type(tv) != vm->type_type)
+        return value_make_error(vm, "exec: seal expects a type value");
+    value_seal(vm, tv); /* 密封（去重时 value_seal 已重定向 tv->data） */
+    const type_t *t = value_as(tv, const type_t *);
+    if (id >= TYPE_ID_PROGRAM_BASE) ((type_t *)t)->id = id;
+    vm_type_bind(vm, id, t);
     return NULL;
 }
 
@@ -565,7 +561,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_VALUE]     = op_push_value,
     [BCODE_LOAD]           = op_load,
     [BCODE_LOAD_TYPE]      = op_load_type,
-    [BCODE_BIND_TYPE]      = op_bind_type,
     [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,
     [BCODE_DEFINE]         = op_define,

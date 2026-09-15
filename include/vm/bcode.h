@@ -49,7 +49,6 @@ typedef enum {
     BCODE_PUSH_VALUE,      /* offset：压入 stack[sp-1-offset] 借用引用 */
     BCODE_LOAD,            /* strtable 索引：从 global scope 查 type value 压栈 */
     BCODE_LOAD_TYPE,       /* u32 id：从 vm->types_by_id 查表压 type value 栈 */
-    BCODE_BIND_TYPE,       /* u32 id：弹栈顶 type value → 登记 id→type（幂等） */
     BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名 */
     BCODE_PUSH_UNDEFINED,  /* 压入 void 类型 value（"类型待推导"） */
 
@@ -61,7 +60,7 @@ typedef enum {
     BCODE_FUNC_TYPE_PARAM, /* 弹栈 type value → 追加为下一参数 */
     BCODE_FUNC_TYPE_RETURN,/* 弹栈 type value → 设为返回类型 */
     BCODE_FUNC_TYPE_VARARG,/* 标记可变参数（无操作数） */
-    BCODE_SEAL,            /* 密封栈顶 type value：经 value_seal 分派 vtable->type_seal（func/array/struct/tuple 通用） */
+    BCODE_SEAL,            /* u32 id：弹栈顶 type value → 密封（value_seal 分派 vtable->type_seal）+ 登记 id→type 进 types_by_id（幂等；消费栈，类型由后续 LOAD_TYPE <id> 拉取） */
 
     BCODE_PUSH_FUNCTION,   /* entry pc：构造 bcode_function_t + 签名类型 → func value（id 默认 0，由 BIND_FUNC 填充） */
     BCODE_BIND_FUNC,       /* u32 id：peek 栈顶 func value → 填充 fn->id + 登记 id→func（幂等，不弹栈） */

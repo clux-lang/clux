@@ -80,8 +80,9 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `FUNC_TYPE_VARARG` | — | 标记 func type 为可变参数（无操作数）。 |
 | `PUSH_ARRAY` | — | 分配空**数组类型**（`array_type_t`，处于开放态、暂不入池），压其 type value（构造起点）。 |
 | `DEFINE_BOUND` | `U32`（长度立即数 N） | 弹栈顶元素 type value → 设为 array type 的元素类型，并把立即数 N 设为长度，构造出 `[elem; N]`。 |
-| `SEAL` | — | 密封栈顶 type value（统一 SEAL 命令，func/array/struct/tuple 通用）：经 `value_seal` 代理到 `data->vtable->type_seal`，按类型各自池查重 intern（首次成功入池并置基类 `sealed=true`；去重复用则回收开放类型并重定向栈引用）。 |
-| `PUSH_FUNCTION` | `U32`（entry pc，标签） | 弹栈顶签名类型（`SEAL` 产物）→ 构造 `bcode_function_t{entry_pc}`（`fn->id` 默认 0）→ func value 压栈（函数对象，非签名类型）。函数 id 由编译器分配（程序段 ≥ 64），运行时由 `BIND_FUNC` 填充 `fn->id` 并登记进 `vm->functions_by_id`。 |
+| `LOAD_TYPE` | `U32`（类型 id） | 从 `vm->types_by_id` 按 id 查类型并压其 type value（`SEAL <id>` 登记的产物）。内建 id 0..16 预登记，程序类型 id ≥64 由 `SEAL <id>` 密封时登记。 |
+| `SEAL` | `U32`（类型 id） | 弹栈顶 type value（消费栈，类型不留栈）→ 经 `value_seal` 代理到 `data->vtable->type_seal`，按类型各自池查重 intern（首次成功入池并置基类 `sealed=true`；去重复用则回收开放类型并重定向栈引用）→ 程序类型 id（≥64）写入 `t->id` 并登记进 `vm->types_by_id`（幂等，多 id 别名同一类型）。密封后的类型由后续 `LOAD_TYPE <id>` 主动拉取。 |
+| `PUSH_FUNCTION` | `U32`（entry pc，标签） | 弹栈顶签名类型（`LOAD_TYPE` 拉取的 `SEAL` 产物）→ 构造 `bcode_function_t{entry_pc}`（`fn->id` 默认 0）→ func value 压栈（函数对象，非签名类型）。函数 id 由编译器分配（程序段 ≥ 64），运行时由 `BIND_FUNC` 填充 `fn->id` 并登记进 `vm->functions_by_id`。 |
 | `BIND_FUNC` | `U32`（函数 id） | **peek** 栈顶 func value（不弹栈——注册段 `DEFINE` 需保留函数值）→ 填充 `fn->id = id` 并登记 `id → func` 进 `vm->functions_by_id`（幂等；程序函数 id ≥ `FUNC_ID_PROGRAM_BASE`）。id 单一来源——只在此出现一次。 |
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value（不弹栈）→ 拷贝函数显示名到 vm 堆（`fn->name`，`owns_name=true` 随对象释放）。仅命名函数定义写入；匿名函数表达式不写。 |
 

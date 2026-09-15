@@ -22,7 +22,6 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_VALUE]     = { "PUSH_VALUE",     { BCODE_ASM_OP_U32 } },
     [BCODE_LOAD]           = { "LOAD",           { BCODE_ASM_OP_STR } },
     [BCODE_LOAD_TYPE]      = { "LOAD_TYPE",      { BCODE_ASM_OP_U32 } },
-    [BCODE_BIND_TYPE]      = { "BIND_TYPE",      { BCODE_ASM_OP_U32 } },
     [BCODE_SET_TYPE_NAME]  = { "SET_TYPE_NAME",  { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_UNDEFINED] = { "PUSH_UNDEFINED", { BCODE_ASM_OP_NONE } },
 
@@ -31,7 +30,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_FUNC_TYPE_PARAM]= { "FUNC_TYPE_PARAM",{ BCODE_ASM_OP_NONE } },
     [BCODE_FUNC_TYPE_RETURN]={ "FUNC_TYPE_RETURN",{BCODE_ASM_OP_NONE } },
     [BCODE_FUNC_TYPE_VARARG]= { "FUNC_TYPE_VARARG",{ BCODE_ASM_OP_NONE } },
-    [BCODE_SEAL]           = { "SEAL",           { BCODE_ASM_OP_NONE } },
+    [BCODE_SEAL]           = { "SEAL",           { BCODE_ASM_OP_U32 } },
     [BCODE_PUSH_FUNCTION]  = { "PUSH_FUNCTION",  { BCODE_ASM_OP_U32 } },
     [BCODE_BIND_FUNC]      = { "BIND_FUNC",      { BCODE_ASM_OP_U32 } },
     [BCODE_SET_FUNC_NAME]  = { "SET_FUNC_NAME",  { BCODE_ASM_OP_STR } },

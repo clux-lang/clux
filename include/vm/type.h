@@ -171,8 +171,8 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**
- * 登记类型到 id 表（vm->types_by_id，索引即 id）。BIND_TYPE <id> 运行期
- * 用；幂等——同一类型重复登记（多 id 别名）无害。
+ * 登记类型到 id 表（vm->types_by_id，索引即 id）。SEAL <id> 运行期
+ * 用（密封后登记）；幂等——同一类型重复登记（多 id 别名）无害。
  * Panics on out-of-memory.
  */
 void vm_type_bind(vm_t *vm, uint32_t id, const type_t *t);

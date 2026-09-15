@@ -44,7 +44,7 @@ value_t *type_as_value(vm_t *vm, const type_t *t) {
    程序类型 id 由 sema 分配，从 64 起（预留扩展空隙，见 vm.h 注释）。
    TYPE_ID_BUILTIN_COUNT / TYPE_ID_PROGRAM_BASE 定义于 vm/type.h（sema/编译器共用）。 */
 
-/* BIND_TYPE 登记：扩容至 id+1 后写入。重复登记幂等（同一实例多 id 别名）。
+/* SEAL <id> 登记：扩容至 id+1 后写入。重复登记幂等（同一实例多 id 别名）。
    空洞槽位（内建段与程序段之间 17..63）以 NULL 填充——vec_push 拒绝
    NULL 值（no-op），故用 vec_resize 扩展长度填充。 */
 void vm_type_bind(vm_t *vm, uint32_t id, const type_t *t) {

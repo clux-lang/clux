@@ -181,7 +181,7 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
 
   /* 内建类型跳过登记：id 段 0..16 已由 vm_register_builtin_types 固定绑定，
      LOAD_TYPE <内建 id> 直接可查，无需 program id 别名。登记了反而让
-     hoist 区发冗余的 LOAD_TYPE→BIND_TYPE 别名绑定（字节码膨胀）。
+     hoist 区发冗余的 SEAL→LOAD_TYPE 别名绑定（字节码膨胀）。
      kind 段判断（INTERRUPT < kind < COUNT 即 M2 复合类型段）：复合类型
      首次登记时 t->id 尚未赋值（仍为 0），不能用 id < TYPE_ID_BUILTIN_COUNT
      判断，会误伤跳过。 */

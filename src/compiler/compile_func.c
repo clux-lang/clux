@@ -50,14 +50,27 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   return body;
 }
 
-/** 编译函数注册段（签名构造 + PUSH_FUNCTION + BIND_FUNC + SET_FUNC_NAME
- *  + push_undefined + DEFINE）
+/** 编译函数注册段（签名类型构造 + SEAL <sig_id> 登记 + LOAD_TYPE 拉取 +
+ *  PUSH_FUNCTION + BIND_FUNC + SET_FUNC_NAME + push_undefined + DEFINE）
  *  返回 PUSH_FUNCTION body 操作数字段位置（opcode+4，emit_jump 同款取样
  *  时机）。函数体在产物最后（HALT 之后），入口 pc 编译时未知，此处先写
- *  占位 0，compile.c 编译函数体区后按返回的槽位回填真实入口。 */
+ *  占位 0，compile.c 编译函数体区后按返回的槽位回填真实入口。
+ *
+ *  函数类型（func type，签名）与函数变量（func value）分离：
+ *  - 签名类型：PUSH_FUNC_TYPE...SEAL <sig_id> 构造、密封并登记进
+ *    types_by_id（类型 id 表，sig_id 由 compiler 的 type_id_next 分配）——
+ *    与数组类型同构，可 LOAD_TYPE 拉取。SEAL 消费栈，栈上不残留类型。
+ *  - 函数变量：LOAD_TYPE <sig_id> 主动拉取签名类型 → PUSH_FUNCTION 构造
+ *    func value → BIND_FUNC <fid> 填充函数 id（functions_by_id 表，fid 由
+ *    func_id_next 分配）→ DEFINE 名字绑定到 scope。
+ *  sig_id（类型 id）与 fid（函数 id）分属两张独立表，值域可重叠但互不
+ *  串用。 */
 size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
   /* 函数 id：compiler 按声明顺序分配（不写回 AST），仅 BIND_FUNC 携带 */
   uint32_t fid = c->func_id_next++;
+  /* 签名类型 id：compiler 分配（sema 不登记 func 类型），SEAL 时登记
+     types_by_id，LOAD_TYPE <sig_id> 主动拉取签名类型 */
+  uint32_t sig_id = c->type_id_next++;
 
   /* 签名弹栈顺序：[return, param1..argc, is_variadic] */
   /* 1. PUSH_FUNC_TYPE：分配空 func type，压其 type value（构造起点） */
@@ -85,22 +98,29 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
 
   /* M1 无用户变参函数，省略 FUNC_TYPE_VARARG（func type 默认 is_variadic=false） */
 
-  /* 4. 密封 func type（按签名去重 intern，标记 sealed） */
+  /* 4. SEAL <sig_id>：密封签名类型（按签名去重 intern）+ 登记 types_by_id，
+     并**消费**栈（类型不残留）。签名类型 id 属类型 id 表，与函数 id 独立。 */
   bcode_write_op(c->bc, BCODE_SEAL);
-  st_push(c, 0);  /* 栈顶 func type 不变（已 sealed） */
+  bcode_write_u32(c->bc, sig_id);
+  st_push(c, -1);  /* 弹签名类型（被消费） */
+
+  /* 5. LOAD_TYPE <sig_id>：主动从类型表拉取签名类型（不依赖栈上残留） */
+  bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+  bcode_write_u32(c->bc, sig_id);
+  st_push(c, 1);
 
   bcode_write_op(c->bc, BCODE_PUSH_FUNCTION);
   size_t slot = bcode_tell(c->bc); /* 操作数字段（write_op 之后取样） */
   bcode_write_u32(c->bc, 0);       /* body 占位，函数体编译后回填 */
-  st_push(c, 0);  /* 弹 func type，压 func value */
+  st_push(c, 0);  /* 弹签名类型，压 func value */
 
-  /* 5. BIND_FUNC <id>：填充 fn->id + 登记 id→func 到 functions_by_id
+  /* 6. BIND_FUNC <id>：填充 fn->id + 登记 id→func 到 functions_by_id
      （peek 不弹栈——DEFINE 需保留 func value 在栈上）。id 单一来源，
      PUSH_FUNCTION 不再携带。 */
   bcode_write_op(c->bc, BCODE_BIND_FUNC);
   bcode_write_u32(c->bc, fid);
 
-  /* 6. SET_FUNC_NAME "name"：写入函数显示名（peek 不弹栈）。
+  /* 7. SET_FUNC_NAME "name"：写入函数显示名（peek 不弹栈）。
      仅命名函数定义写入；匿名函数表达式（var add = func(){}）不写——
      该形式 M1 暂不支持（AST_FUNC_LIT 未实现），无分支。 */
   bcode_write_op(c->bc, BCODE_SET_FUNC_NAME);

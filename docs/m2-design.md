@@ -272,7 +272,7 @@ name:                     ; 标签定义（去空白后形如 "name:"，无内�
 
 **单一事实源**：`bcode_asm_defs.c` 的 `BCODE_ASM_TABLE`（助记符 + 操作数布局）同时驱动汇编器（反向查表）与反汇编器（正向解码），新增/改名 opcode 只改此表，保证两侧助记符与操作数布局永远一致。
 
-**手写汇编约定**（示例见 `examples/asm/*.cxs`）：程序入口用引导段 `_start:` 显式注册函数（`PUSH_FUNC_TYPE` + 参数 `FUNC_TYPE_PARAM`* + 返回 `FUNC_TYPE_RETURN` + `SEAL` + `PUSH_FUNCTION [entry]` + `PUSH_UNDEFINED` + `DEFINE`），`HALT` 后由虚拟机调用 `main`；函数体首部按**倒序** `PUSH_UNDEFINED; DEFINE "param"` 绑定参数（与字节码函数定义模板一致）。
+**手写汇编约定**（示例见 `examples/asm/*.cxs`）：程序入口用引导段 `_start:` 显式注册函数（`PUSH_FUNC_TYPE` + 参数 `FUNC_TYPE_PARAM`* + 返回 `FUNC_TYPE_RETURN` + `SEAL <sig_id>` + `LOAD_TYPE <sig_id>` + `PUSH_FUNCTION [entry]` + `PUSH_UNDEFINED` + `DEFINE`），`HALT` 后由虚拟机调用 `main`；函数体首部按**倒序** `PUSH_UNDEFINED; DEFINE "param"` 绑定参数（与字节码函数定义模板一致）。`SEAL <id>` 弹栈消费签名类型并登记 `vm->types_by_id`，`LOAD_TYPE <id>` 主动拉回供 `PUSH_FUNCTION` 组装函数值。
 
 **测试**：`tests/bcode_disasm_test.cpp`（段格式/转义/变长操作数/标签生成/坏路径）、`tests/bcode_asm_test.cpp`（文本往返/操作数往返/字符串转义/大小写无关/标签前向引用/未定义标签/非法输入）、`tests/bcode_serial_test.cpp`（二进制往返/空模块/内嵌控制字节/文件往返/坏 magic·版本·截断拒绝）、`tests/driver_test.cpp`（`Driver.DetectInputByContent` 内容嗅探全类型、`Driver.AsmBinRoundTripStable` 往返字节稳定、`Driver.ConvByContentSniffing` 非标准扩展名互转、`Driver.ConvErrorPaths` 失败路径），并覆盖 5 个 `examples/asm/*.cxs` 示例。
 
@@ -407,13 +407,14 @@ construct 2          ; 弹出 2 个值 + 类型位，完成元组值构造
 
 数组值构造 `.[1]i32{ 0 }`：
 ```asm
-push_array; load "i32"; define_bound 1; seal  ; 内联构造数组类型 [1]i32（SEAL 去重 intern 入池，类型值留栈顶）
+push_array; load "i32"; define_bound 1; seal 64   ; 内联构造数组类型 [1]i32（SEAL 弹栈去重 intern 入池 + 登记 id 64）
+load_type 64         ; 主动拉回类型位（SEAL 已消费栈，类型不留栈）
 push 0
 construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 ```
 
 **统一规则**：
-- `push_struct`/`push_array`/`push_tuple`：压**类型**构造器（开放类型，**暂不入池**，仅压 type value 到栈）；`SEAL` 时才按结构去重 intern 入对应池并标记 `sealed` 锁定，构造期间类型以栈顶 type value 形式被引用/解析
+- `push_struct`/`push_array`/`push_tuple`：压**类型**构造器（开放类型，**暂不入池**，仅压 type value 到栈）；`SEAL <id>` 时才按结构去重 intern 入对应池并标记 `sealed` 锁定，随后**弹栈消费类型位**并登记 `id → type` 进 `vm->types_by_id`，构造期间类型以栈顶 type value 形式被引用/解析（seal 后由 `LOAD_TYPE <id>` 拉回）
 - **三条成分定义指令，按类型结构各自唯一**（互不重叠，均消费栈顶类型值）：
 
   | 指令 | 适用类型 | 参数 | 语义 | 可重复 |
@@ -426,7 +427,7 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 - **`seal` 只用于类型构造完成**：冻结 + 布局计算（C 对齐规则）
 - **`construct N` 用于值构造完成**（新指令，非 seal）：N = 成员数量立即数（struct = 字段数 / tuple = 元素数 / array = 元素个数，须等于类型边界），弹出 N 个成员值 + 类型位，分配数据块按布局写值，校验成员数
 - **下标访问 `INDEX_GET` / `INDEX_SET`（对应 `a[i]` / `a[i] = v`）**：分派 `vtable->get_index` / `set_index`。**运行期越界检查**按数组值实际长度校验 `0 <= index < len`，越界（含负索引）返回硬错误并停机；索引须为整数类型。当前仅数组实现下标访问，struct/tuple 待后续 Phase
-- **值构造类型位统一**：类型位永远是栈顶一个类型值——命名类型 = `load "Test"`，匿名类型 = 先 `push_xxx...seal` 在栈上构造类型值留栈顶（等价于具名 `load`）；随后字段值按类型字段序压栈 → `construct N`。**类型生成发生在类型构造阶段（push_xxx...seal），construct 不负责生成类型**
+- **值构造类型位统一**：类型位永远是栈顶一个类型值——命名类型 = `load "Test"`，匿名类型 = 先 `push_xxx...seal <id>` 在栈上构造类型值再由 `load_type <id>` 拉回（等价于具名 `load`，seal 本身消费栈不留类型位）；随后字段值按类型字段序压栈 → `construct N`。**类型生成发生在类型构造阶段（push_xxx...seal），construct 不负责生成类型**
 - **字段名纯编译期**：具名字段 `.field = v` 的字段名只在编译期用于重排值压栈顺序 + 字段存在性/缺失校验，**不产生运行时指令**（运行时按类型字段序写值，无 store_field）
 - **缺失字段递归补全 0 值**（compiler 职责）：用户只提供部分字段时（`.{ .x = 1 }` 缺 y），编译器按类型字段序对**缺失字段递归生成该字段类型的 0 值构造字节码**，保证 `construct N` 的 N 个字段值齐全——基本类型压 0 立即数；复合类型（struct/array/tuple）递归构造零值对象（复用类型位 + 各子字段 0 值 + construct）。示例 `var p = .Point{ .x = 1 }`：
 ```asm
@@ -451,7 +452,7 @@ load "Point"; push 1; push 0; construct 2   ; y 缺失 → 补 i32 0 值
 
 ### 7. 复合类型
 
-`struct_type_t`/`array_type_t`/`tuple_type_t`/`enum_type_t` 全跟 `func_type_t` C 继承，各列 interning 池 + 独立 vtable。`sealed` 已上移至基类 `type_t`（所有类型统一经 `type_is_sealed` 访问），不再由 `func_type_t` 私有持有；构造期（`PUSH_FUNC_TYPE` + `FUNC_TYPE_PARAM/RETURN/VARARG`）可分步 set，`SEAL` 时才按签名去重 intern 入 `vm->sig_types` 池并标记 `sealed` 锁定。SEAL 经统一 `value_seal(vm, src)` 代理到 `src->data->vtable->type_seal` 回调：seal 中先查重，若已有完全一致的实现则手工回收当前开放类型（`allocator_free`）并改写操作数栈中对它的引用为缓存类型，避免悬空；内置基础类型（i32 等）创建时即 `sealed=true`（无开放构造期、`type_seal` 为 NULL）。构造 API 与访问器集中于 `include/vm/type_func.h`（对标 `type_array.h`）。
+`struct_type_t`/`array_type_t`/`tuple_type_t`/`enum_type_t` 全跟 `func_type_t` C 继承，各列 interning 池 + 独立 vtable。`sealed` 已上移至基类 `type_t`（所有类型统一经 `type_is_sealed` 访问），不再由 `func_type_t` 私有持有；构造期（`PUSH_FUNC_TYPE` + `FUNC_TYPE_PARAM/RETURN/VARARG`）可分步 set，`SEAL <id>` 时才按签名去重 intern 入 `vm->sig_types` 池并标记 `sealed` 锁定。SEAL 经统一 `value_seal(vm, src)` 代理到 `src->data->vtable->type_seal` 回调：seal 中先查重，若已有完全一致的实现则手工回收当前开放类型（`allocator_free`）并改写操作数栈中对它的引用为缓存类型，避免悬空；内置基础类型（i32 等）创建时即 `sealed=true`（无开放构造期、`type_seal` 为 NULL）。`SEAL <id>` 带类型 id 操作数：密封后弹栈消费类型位，程序类型 id（≥64）写入 `t->id` 并登记进 `vm->types_by_id`，类型由后续 `LOAD_TYPE <id>` 主动拉取。构造 API 与访问器集中于 `include/vm/type_func.h`（对标 `type_array.h`）。
 
 - `VTABLE_STRUCT.implicit_cast`：鸭子类型检查（成员名/类型/顺序一致）
 - `VTABLE_ARRAY.implicit_cast`：Array↔Tuple，同元素数+类型
@@ -603,7 +604,7 @@ var arr:[N]i32 = .{};                // N 是 comptime var（全局/局部），
 类型构造（多步协议，见「关键架构决策 3」）：
 - `BCODE_PUSH_STRUCT` / `BCODE_PUSH_ARRAY` / `BCODE_PUSH_TUPLE`（压类型构造器，开放类型**暂不入池**，仅压 type value 到栈）
 - `BCODE_DEFINE_FIELD`（struct：追加具名字段） / `BCODE_APPEND_ELEM`（tuple：追加匿名成员） / `BCODE_DEFINE_BOUND`（array：一次性设定元素类型 + 边界）
-- `BCODE_SEAL`（经统一 `value_seal` 代理到各类型 `type_seal`：去重 intern 入对应池、标记 `sealed` 锁定 + 布局计算）
+- `BCODE_SEAL`（带 u32 类型 id 操作数：经统一 `value_seal` 代理到各类型 `type_seal`：去重 intern 入对应池、标记 `sealed` 锁定 + 布局计算 → **弹栈消费类型位**并登记 `id → type` 进 `vm->types_by_id`，类型由 `LOAD_TYPE <id>` 主动拉取）
 - `BCODE_CONSTRUCT`（值构造：弹 N 个字段/元素值 + 类型位 → 按布局分配写值）
 
 访问与运算：

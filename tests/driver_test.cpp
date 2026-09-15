@@ -510,7 +510,8 @@ TEST(Driver, ConvByContentSniffing) {
         "    push_func_type\n"
         "    push \"void\"\n"
         "    func_type_return\n"
-        "    seal\n"
+        "    seal 64\n"
+        "    load_type 64\n"
         "    push_function [main]\n"
         "    bind_func 64\n"
         "    set_func_name \"main\"\n"
@@ -580,7 +581,7 @@ TEST(Driver, ConvErrorPaths) {
 /* 编译产物含 hoist 区：类型构造收敛到产物最前的提升区（先定义类型，
    再定义函数，函数体最后），槽位发 LOAD_TYPE <id> 引用。
    driver_build_asm 产出的 .cxs 文本应可见
-   BIND_TYPE / PUSH_ARRAY / DEFINE_BOUND / SEAL / LOAD_TYPE 指令。 */
+   SEAL / PUSH_ARRAY / DEFINE_BOUND / LOAD_TYPE 指令。 */
 TEST(Driver, BuildAsmHoistSectionPresent) {
   auto dir = std::filesystem::temp_directory_path() / "clux_hoist";
   std::filesystem::create_directories(dir);
@@ -603,11 +604,10 @@ TEST(Driver, BuildAsmHoistSectionPresent) {
   std::string text = slurp(cxs);
   ASSERT_FALSE(text.empty());
 
-  /* hoist 区：内建别名 BIND_TYPE + 数组 PUSH_ARRAY→DEFINE_BOUND→SEAL→BIND_TYPE */
-  EXPECT_NE(text.find("BIND_TYPE"), std::string::npos);
+  /* hoist 区：内建别名 SEAL <id> + 数组 PUSH_ARRAY→DEFINE_BOUND→SEAL <id> */
+  EXPECT_NE(text.find("SEAL"), std::string::npos);
   EXPECT_NE(text.find("PUSH_ARRAY"), std::string::npos);
   EXPECT_NE(text.find("DEFINE_BOUND"), std::string::npos);
-  EXPECT_NE(text.find("SEAL"), std::string::npos);
   /* 槽位引用：函数体 LOAD_TYPE <id> 查表构造数组 */
   EXPECT_NE(text.find("LOAD_TYPE"), std::string::npos);
 
@@ -635,7 +635,7 @@ TEST(Driver, RunFileComptimeFoldArraySum) {
 }
 
 /* const/volatile 类型槽位同样走 hoist 区（CREATE_CONST / CREATE_VOLATILE
-   依赖 LOAD sub → BIND_TYPE 提升序列），编译运行端到端。 */
+   依赖 LOAD sub → SEAL <id> 提升序列），编译运行端到端。 */
 TEST(Driver, RunFileQualifierTypesViaHoist) {
   std::string path = write_temp_file(
       "func main():i32 {\n"

@@ -230,6 +230,12 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->loop_stack    = NULL;
   c->failed        = false;
   c->func_id_next  = FUNC_ID_PROGRAM_BASE;
+  /* 签名类型 id：sema_types 已占 [PROGRAM_BASE, PROGRAM_BASE+n)，签名类型
+     （func type）从区间末尾起分配——与 sema 类型共占 types_by_id 类型 id
+     表，但由 compiler 侧分配（sema 不登记 func 类型）。函数签名类型 id 与
+     函数 id（func_id_next / functions_by_id）属不同表，严格分离。 */
+  c->type_id_next  = TYPE_ID_PROGRAM_BASE +
+                     (uint32_t)(sema_types ? vec_len(sema_types) : 0);
   return c;
 }
 

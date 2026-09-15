@@ -52,11 +52,11 @@ typedef struct sema_func_t {
  * - type: 类型单例（vm 池 intern，按指针去重：同一类型只登记一次）
  * - name: 具名类型标识 "__type_N"（arena 分配，AST_TYPE_REF 引用标识；
  *   不是显示名——显示名保留在 type->name）
- * - id:   LOAD_TYPE/BIND_TYPE 的 u32 id 操作数（TYPE_ID_PROGRAM_BASE + index）
+ * - id:   LOAD_TYPE/SEAL 的 u32 id 操作数（TYPE_ID_PROGRAM_BASE + index）
  *
  * 与 funcs 同构（m2-design §comptime"类型提升"）：sema 把解析过的每个
- * 类型登记到此队列，compiler 据此生成 hoist 类型提升区（BIND_TYPE 两阶段
- * 构造）并在类型槽位发 LOAD_TYPE <id>——AST 因此保持平凡可解耦（类型槽位
+ * 类型登记到此队列，compiler 据此生成 hoist 类型提升区（SEAL <id> 密封并
+ * 登记）并在类型槽位发 LOAD_TYPE <id>——AST 因此保持平凡可解耦（类型槽位
  * 是 AST_TYPE_REF 名字引用，不关联任何 type_t 指针）。
  */
 typedef struct sema_type_t {

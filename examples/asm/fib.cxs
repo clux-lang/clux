@@ -5,7 +5,8 @@ _start:
     func_type_param
     push "i32"
     func_type_return
-    seal
+    seal 64
+    load_type 64
     push_function [fib]
     bind_func 64
     set_func_name "fib"
@@ -14,7 +15,8 @@ _start:
     push_func_type
     push "void"
     func_type_return
-    seal
+    seal 65
+    load_type 65
     push_function [main]
     bind_func 65
     set_func_name "main"

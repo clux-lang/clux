@@ -8,20 +8,21 @@
  * 类型提升区（hoist）
  *
  * sema 把解析过的类型登记进 sema->types（sema_type_t* 数组），编译器在此
- * 遍历生成运行时构造字节码，把每个类型 BIND_TYPE <id> 绑定到 types_by_id
+ * 遍历生成运行时构造字节码，把每个类型 SEAL <id> 密封并登记到 types_by_id
  * 表。函数体/注册段中的类型槽位（AST_TYPE_REF）随后发 LOAD_TYPE <id>
  * 直接查表——类型构造收敛到提升区，AST 保持平凡可解耦。
  *
  * 构造分派（按 type_t 结构，单遍递归依赖后序）：
  *   - 内建类型（type->id < TYPE_ID_PROGRAM_BASE）：vm_register_builtin_types
  *     已把 type value 绑内建 id 0..16，此处仅 LOAD_TYPE <内建 id> →
- *     BIND_TYPE <sema 分配的 program id>（别名，供槽位统一 LOAD_TYPE
+ *     SEAL <sema 分配的 program id>（别名，供槽位统一 LOAD_TYPE
  *     <program id>）。
  *   - 数组 [N]T：PUSH_ARRAY 开放对象 → LOAD_TYPE <elem id>（elem 已先构造）
- *     → DEFINE_BOUND N → SEAL（去重 intern，可能返回已有密封实例）→
- *     BIND_TYPE <id>（绑定密封实例，无悬垂）。
+ *     → DEFINE_BOUND N → SEAL <id>（去重 intern，可能返回已有密封实例；
+ *     密封+登记一步完成，无悬垂）。
  *   - const/volatile：LOAD_TYPE <sub id>（sub 已先构造）→ CREATE_CONST /
- *     CREATE_VOLATILE（intern 密封）→ BIND_TYPE <id>。
+ *     CREATE_VOLATILE（intern）→ SEAL <id>（无开放构造阶段，value_seal
+ *     幂等原样返回后登记）。
  *
  * 依赖后序：sema 登记时父先入队、依赖递归登记在后，故此处对每个类型递归
  * 构造其依赖（数组 elem / 限定符 sub），保证 LOAD_TYPE <依赖 id> 时依赖已
@@ -65,14 +66,14 @@ static void emit_load_type(compiler_t *c, uint32_t id) {
   st_push(c, 1);
 }
 
-/* 弹栈顶 type value 登记到 id（BIND_TYPE <id>） */
-static void emit_bind_type(compiler_t *c, uint32_t id) {
-  bcode_write_op(c->bc, BCODE_BIND_TYPE);
+/* 弹栈顶 type value → 密封 + 登记到 id（SEAL <id>，消费栈） */
+static void emit_seal_type(compiler_t *c, uint32_t id) {
+  bcode_write_op(c->bc, BCODE_SEAL);
   bcode_write_u32(c->bc, id);
   st_push(c, -1);
 }
 
-/* 数组：依赖 elem 先构造 → PUSH_ARRAY → LOAD elem → DEFINE_BOUND → SEAL → BIND */
+/* 数组：依赖 elem 先构造 → PUSH_ARRAY → LOAD elem → DEFINE_BOUND → SEAL <id> */
 static void hoist_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
                         size_t count) {
   const type_t *t = st->type;
@@ -93,11 +94,10 @@ static void hoist_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
-  bcode_write_op(c->bc, BCODE_SEAL);       /* 开放对象 → 密封实例（可能去重） */
-  emit_bind_type(c, st->id);               /* 绑定密封实例到 program id */
+  emit_seal_type(c, st->id);                /* 开放对象 → 密封实例（可能去重）→ 登记 */
 }
 
-/* 限定符（const/volatile）：依赖 sub 先构造 → LOAD sub → CREATE_* → BIND */
+/* 限定符（const/volatile）：依赖 sub 先构造 → LOAD sub → CREATE_* → SEAL <id> */
 static void hoist_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count, bcode_op_t create_op) {
   const type_t *t = st->type;
@@ -110,14 +110,14 @@ static void hoist_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
     hoist_one(c, sst, done, count);
     emit_load_type(c, sst->id);
   }
-  bcode_write_op(c->bc, create_op); /* 弹 sub → intern 密封 → 压回 */
-  emit_bind_type(c, st->id);
+  bcode_write_op(c->bc, create_op); /* 弹 sub → intern → 压回 */
+  emit_seal_type(c, st->id);
 }
 
-/* 内建类型：LOAD_TYPE <内建 id> → BIND_TYPE <program id>（别名） */
+/* 内建类型：LOAD_TYPE <内建 id> → SEAL <program id>（别名） */
 static void hoist_builtin(compiler_t *c, const sema_type_t *st) {
   emit_load_type(c, st->type->id);
-  emit_bind_type(c, st->id);
+  emit_seal_type(c, st->id);
 }
 
 static void hoist_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
