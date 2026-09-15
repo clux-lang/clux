@@ -84,15 +84,17 @@ static bool is_word_like(token_kind_t k) {
            k == TOKEN_TYPE_CHARACTER;
 }
 
-/* 运算符（两侧留空格） */
+/* 运算符（两侧留空格）。含符号运算符与关键字运算符（extends / as，
+ * 词法器以 KEYWORD 身份产出）。 */
 static bool is_operator(const token_t *t) {
-    if (token_get_kind(t) != TOKEN_TYPE_SYMBOL) return false;
+    if (!t) return false;
     static const char *ops[] = {
         "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
         "+", "-", "*", "/", "%",
         "==", "!=", "<", ">", "<=", ">=",
         "&&", "||", "&", "|", "^", "<<", ">>",
         "!", "~", "?", ":", "->", "=>",
+        "extends", "as",
         NULL,
     };
     for (size_t i = 0; ops[i]; i++) {
@@ -101,9 +103,10 @@ static bool is_operator(const token_t *t) {
     return false;
 }
 
-/* 前一个 token 后是否禁用空格（`(`/`[` 后紧跟内容，`.` 后紧贴成员） */
+/* 前一个 token 后是否禁用空格（`(`/`[` 后紧跟内容，`.` 后紧贴成员，
+ * 类型构造块 `{` 后紧贴元素） */
 static bool no_space_after(const token_t *t) {
-    return sym_is(t, '(') || sym_is(t, '[') || sym_is(t, '.');
+    return sym_is(t, '(') || sym_is(t, '[') || sym_is(t, '{') || sym_is(t, '.');
 }
 
 /* 当前 token 是否为**一元前缀**运算符。
@@ -196,6 +199,26 @@ typedef struct {
     bool           leading_blank;     /* 前面是否出现过空行（>=2 换行） */
 } fmt_item_t;
 
+/* items[i]（应为 '{'）是否为**类型构造块** `.T{...}` / `.[N]T{...}`。
+ *
+ * 从 '{' 向前扫描 token：若在遇到表达式边界（= ; ( , { } 等非类型链
+ * token）之前出现 '.'，则视为类型构造块。类型链 = 类型名（word-like）/
+ * '[' / ']'（如 `.[2][3]i32{`）。构造块应紧凑单行（`.T{1, 2}`），
+ * 区别于控制流/函数体块（展开多行、缩进 +1）。 */
+static bool is_construct_brace(const fmt_item_t *items, size_t i) {
+    size_t j = i;
+    while (j > 0) {
+        j--;
+        const token_t *t = items[j].tok;
+        token_kind_t k = token_get_kind(t);
+        if (sym_is(t, '.')) return true;
+        if (sym_is(t, ']') || sym_is(t, '[')) continue;
+        if (is_word_like(k)) continue;
+        return false;
+    }
+    return false;
+}
+
 /* ---- 预看：tok[i+1] 是否为 '}'（用于空块判定） ---- */
 
 char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
@@ -254,6 +277,7 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
     int  indent = 0;
     int  paren_depth = 0;
     int  ternary_pending = 0; /* 未配对的 '?' 数量（三元冒号两侧留空格判定） */
+    int  construct_depth = 0;     /* 嵌套类型构造块深度（>0 在构造块内） */
     bool at_line_start = true;
     const token_t *prev = NULL;   /* 上一个输出过的实义 token（注释不计） */
     bool prev_unary_prefix = false; /* 上一 token 是否一元前缀（其操作数须紧贴） */
@@ -321,16 +345,29 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
                 }
                 continue;
             }
-            if (indent > 0) indent--;
-            if (!at_line_start) sb_ch(&sb, '\n');
-            sb_indent(&sb, indent);
-            sb_ch(&sb, '}');
-            at_line_start = false;
+            bool inner_construct = construct_depth > 0;  /* 当前 '}' 是否构造块收尾 */
+            if (construct_depth > 0) {
+                /* 类型构造块紧凑结束：紧贴最后元素输出 '}'（{ 处未换行、未增缩进） */
+                construct_depth--;
+                sb_ch(&sb, '}');
+                at_line_start = false;
+            } else {
+                if (indent > 0) indent--;
+                if (!at_line_start) sb_ch(&sb, '\n');
+                sb_indent(&sb, indent);
+                sb_ch(&sb, '}');
+                at_line_start = false;
+            }
             prev = tok;
+            /* 构造块内层 '}' 后紧跟外层 '}'（多维嵌套 .T{.T{...}}）须同行；
+               普通块 '}}' 嵌套仍换行（inner_construct 为 false） */
+            bool next_brace_close = inner_construct && (i + 1 < count) &&
+                                    sym_is(items[i + 1].tok, '}');
             /* '}' 后若为 else 则同行；否则换行（由下一个 token 决定） */
             if (i + 1 < count && !kw_is(items[i + 1].tok, "else") &&
                 !sym_is(items[i + 1].tok, ';') && !sym_is(items[i + 1].tok, ',') &&
-                !sym_is(items[i + 1].tok, ')') && !sym_is(items[i + 1].tok, '.')) {
+                !sym_is(items[i + 1].tok, ')') && !sym_is(items[i + 1].tok, '.') &&
+                !next_brace_close) {
                 sb_ch(&sb, '\n');
                 at_line_start = true;
             }
@@ -350,11 +387,14 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
                 break;
             }
 
+            /* 类型构造块判定：.T{ / .[N]T{ / .[N][M]T{（紧凑单行） */
+            bool construct_brace = is_construct_brace(items, i);
+
             if (at_line_start) {
                 sb_indent(&sb, indent);
                 at_line_start = false;
-            } else if (prev) {
-                /* '{' 跟随前行：前面补一个空格 */
+            } else if (prev && !construct_brace) {
+                /* '{' 跟随前行：前面补一个空格（构造块紧贴类型名，如 `i32{`） */
                 sb_ch(&sb, ' ');
             }
             sb_ch(&sb, '{');
@@ -362,6 +402,10 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
 
             if (empty_block) {
                 at_line_start = false;  /* '}' 将紧跟输出 */
+            } else if (construct_brace) {
+                /* 构造块紧凑：'{' 后不换行，元素跟随同行 */
+                construct_depth++;
+                at_line_start = false;
             } else {
                 sb_ch(&sb, '\n');
                 at_line_start = true;
@@ -399,6 +443,22 @@ char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
                     /* `(` 前：控制流关键字要空格（`if (`），
                      * 函数调用/泛型实例化紧贴（`main(`, `foo(`） */
                     need = need_space_before_paren(prev, tok);
+                } else if (sym_is(tok, '[')) {
+                    /* `[` 前：下标访问/多维数组类型紧贴（`arr[i]` /
+                     * `m[1][0]` / `.[2][2]i32`）；类型标注/运算符后留空格
+                     * （`: [3]i32` / `= [3]i32` / `extends [2]i32`）。
+                     * 注意 `(`/`[`/`.` 后的 `[` 由 no_space_after 紧贴，
+                     * 运算符关键字（extends/as）须留空格 */
+                    need = !(no_space_after(prev) || sym_is(prev, ')') ||
+                             sym_is(prev, ']') ||
+                             (is_word_like(token_get_kind(prev)) &&
+                              !is_operator(prev)));
+                } else if (sym_is(tok, '.')) {
+                    /* `.` 前：成员访问紧贴（`a.b` / `f().b` /
+                     * `arr[0].length`）；类型构造表达式前留空格
+                     * （`= .T{...}` / `, .T{...}`），`.` 是构造起始 */
+                    need = sym_is(prev, ',') || sym_is(prev, ';') ||
+                           sym_is(prev, ':') || is_operator(prev);
                 } else if (prev && sym_is(prev, ']') &&
                            is_word_like(token_get_kind(tok))) {
                     /* 数组类型 [N]T 紧贴（`[1]i32` / `[2][3]i32`），

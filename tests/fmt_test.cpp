@@ -308,6 +308,67 @@ TEST(Fmt, ExtendsKeywordOperatorSpaced) {
     EXPECT_EQ(out, fmt(out.c_str()));
 }
 
+/* 数组类型构造 `.T{...}`：`.T{` 前保留运算符空格（`= .[2]i32`）、
+ * `{` 紧凑单行不展开（`.T{10, 20}`）；多维数组类型 `]` 后 `[` 紧贴
+ * （`.[2][2]i32`）；嵌套构造内层 `}` 后外层 `}` 同行。 */
+TEST(Fmt, ArrayConstructCompact) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var arr=.[2]i32{10,20};\n"
+        "var a=.[2][2]i32{.[2]i32{1,2},.[2]i32{3,4}};\n"
+        "var u=.[2]str{\"a\",\"b\"};\n"
+        "var e=.[0]i32{};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var arr = .[2]i32{10, 20};\n"
+              "    var a = .[2][2]i32{.[2]i32{1, 2}, .[2]i32{3, 4}};\n"
+              "    var u = .[2]str{\"a\", \"b\"};\n"
+              "    var e = .[0]i32{};\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 数组下标 `arr[i]` 紧贴不插空格；下标出现在左值/右值/多维/变量下标
+ * 场景；类型标注 `: [3]i32` 与运算符后的 `[` 仍留空格。 */
+TEST(Fmt, IndexSubscriptGlued) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var a=.[3]i32{10,20,30};\n"
+        "var x=a[0]+a[2];\n"
+        "a[1]=99;\n"
+        "a[2]+=1;\n"
+        "var m=.[2][2]i32{.[2]i32{1,2},.[2]i32{3,4}};\n"
+        "var y=m[1][0];\n"
+        "var i=1;\n"
+        "var z=a[i];\n"
+        "var t:[2]i32=.[2]i32{0,0};\n"
+        "var ok:bool=[2]i32 extends[2]i32;\n"
+        "return x+y+z;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var a = .[3]i32{10, 20, 30};\n"
+              "    var x = a[0] + a[2];\n"
+              "    a[1] = 99;\n"
+              "    a[2] += 1;\n"
+              "    var m = .[2][2]i32{.[2]i32{1, 2}, .[2]i32{3, 4}};\n"
+              "    var y = m[1][0];\n"
+              "    var i = 1;\n"
+              "    var z = a[i];\n"
+              "    var t: [2]i32 = .[2]i32{0, 0};\n"
+              "    var ok: bool = [2]i32 extends [2]i32;\n"
+              "    return x + y + z;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
 /* 三元条件表达式：`?` 与 `:` 两侧留空格（`a ? b : c`）；嵌套三元右结合
  * 同样规整；类型标注冒号（`var x: i32`）不受影响（仍前不插空格）。 */
 TEST(Fmt, TernaryOperatorSpaced) {

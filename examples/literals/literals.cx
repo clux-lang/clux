@@ -38,9 +38,7 @@ func main(): i32 {
 
     printf(text);
 
-    var arr =.[1] i32 {
-        123
-    };
+    var arr = .[1]i32{123};
     printf("arr = %v", arr);
     return 0;
 }
