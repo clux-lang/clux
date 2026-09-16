@@ -7,6 +7,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_const.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_program.h"
@@ -314,6 +315,26 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       size_t len;
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
       return type_array_intern(sema->vm, base, len);
+    }
+    case AST_FUNC_TYPE: {
+      /* 函数签名类型：func(param_types...)->ret。逐参数/返回递归解析
+         （可为任意类型表达式，含嵌套签名）→ type_func_sig 按签名去重
+         intern。返回类型缺省 NULL = void。 */
+      ast_func_type_t *ft = (ast_func_type_t *)type_expr;
+      size_t n = sema_count_siblings(ft->params);
+      const type_t *params_arr[n > 0 ? n : 1];
+      size_t i = 0;
+      for (ast_node_t *pr = ft->params; pr; pr = pr->next, i++) {
+        const type_t *pt = resolve_type_expr(sema, pr);
+        if (!pt) return NULL;
+        params_arr[i] = pt;
+      }
+      const type_t *rt = ft->return_type
+                             ? resolve_type_expr(sema, ft->return_type)
+                             : NULL;
+      if (ft->return_type && !rt) return NULL;
+      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
+                           /*is_variadic=*/false);
     }
     case AST_TYPE_REF: {
       /* 具名类型引用（sema 登记过的类型，如 "__type_0"）→ 查 types 队列。

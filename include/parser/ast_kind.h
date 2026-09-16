@@ -45,6 +45,7 @@ typedef enum {
      * 无顺序约束，const const i32 嵌套重复合法（语义上幂等，消费层收敛）。 */
     AST_CONST,           /* const <type-expr> */
     AST_VOLATILE,        /* volatile <type-expr> */
+    AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
 

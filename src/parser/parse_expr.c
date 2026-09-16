@@ -16,6 +16,7 @@
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
 #include "parser/ast_array.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
@@ -116,8 +117,86 @@ static bool is_assign_op_token(const token_t *tok) {
 
 /* ---- parse_primary: 原子表达式入口 ---- */
 
+/* 函数类型表达式：func(param_types...)->ret（M2 §5 类型构造）。
+ * 参数/返回类型可为任意类型表达式（parse_unary：const/volatile、[N]T、
+ * 嵌套 func(...)->ret 递归）；返回类型缺省 void。
+ * 函数字面量（func(params):type { body }）暂不支持——'func' 后必须 '('。 */
+static ast_node_t *parse_func_type(parser_t *p) {
+    uint32_t tb = p->pos;
+    if (!check_keyword(p, "func")) return NULL;
+    advance(p);
+    skip_trivia(p);
+
+    if (!expect_symbol(p, "(")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected '(' after 'func' in function type");
+    }
+    skip_trivia(p);
+
+    ast_node_t *params = NULL, *params_last = NULL;
+    if (!check_symbol(p, ")")) {
+        ast_node_t *pt = parse_unary(p);
+        if (!pt || pt->kind == AST_ERROR) {
+            if (!pt) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected parameter type in function type");
+            }
+            return pt;
+        }
+        ast_append(&params, &params_last, NULL, pt);
+        skip_trivia(p);
+        while (check_symbol(p, ",")) {
+            advance(p);
+            skip_trivia(p);
+            pt = parse_unary(p);
+            if (!pt || pt->kind == AST_ERROR) {
+                if (!pt) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected parameter type after ',' in function type");
+                }
+                return pt;
+            }
+            ast_append(&params, &params_last, NULL, pt);
+            skip_trivia(p);
+        }
+    }
+    if (!expect_symbol(p, ")")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ')' after parameter types in function type");
+    }
+    skip_trivia(p);
+
+    /* 返回类型：-> type 可选（缺省 void） */
+    ast_node_t *return_type = NULL;
+    if (check_symbol(p, "->")) {
+        advance(p);
+        skip_trivia(p);
+        return_type = parse_unary(p);
+        if (!return_type || return_type->kind == AST_ERROR) {
+            if (!return_type) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected return type after '->' in function type");
+            }
+            return return_type;
+        }
+    }
+
+    ast_node_t *node = ast_func_type_new(p->arena, tb, p->pos);
+    ((ast_func_type_t *)node)->params      = params;
+    ((ast_func_type_t *)node)->params_last = params_last;
+    ((ast_func_type_t *)node)->return_type = return_type;
+    return node;
+}
+
 ast_node_t *parse_primary(parser_t *p) {
     ast_node_t *node;
+
+    /* 函数类型表达式：func(param_types...)->ret（'func' 关键字分支，
+       必须先于末尾 TOKEN_TYPE_KEYWORD 的 AST_IDENT 兜底）。 */
+    if (check_keyword(p, "func")) {
+        node = parse_func_type(p);
+        if (node) return node;
+    }
 
     node = parse_bool_lit(p);    if (node) return node;
     node = parse_float_lit(p);   if (node) return node;

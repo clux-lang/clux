@@ -1091,3 +1091,53 @@ TEST(Driver, RunFileTypeDefTypeValueExpr) {
   std::remove(path.c_str());
 }
 
+/* 函数签名类型端到端：type F = func(i32,i32)->i32（M2 函数类型）。
+   typedef RHS 走 ctfe 求值构造 func 签名 → hoist 区两遍扫描
+   PUSH_FUNC_TYPE/FUNC_TYPE_PARAM/FUNC_TYPE_RETURN/SEAL → DEFINE 绑定。 */
+TEST(Driver, RunFileTypeDefFuncSignature) {
+  std::string path = write_temp_file(
+      "type add_fn_t = func(i32,i32)->i32;\n"
+      "func main():i32 {\n"
+      "  var f:add_fn_t = undefined;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefFuncSignatureNoReturn) {
+  /* 无返回类型 func(i32) → 缺省 void 签名 */
+  std::string path = write_temp_file(
+      "type void_fn_t = func(i32);\n"
+      "func main():i32 {\n"
+      "  var f:void_fn_t = undefined;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefFuncSignatureNested) {
+  /* 嵌套复合签名 func([4]i32)->func(i32)->i32 */
+  std::string path = write_temp_file(
+      "type complex_t = func([4]i32)->func(i32)->i32;\n"
+      "func main():i32 {\n"
+      "  var f:complex_t = undefined;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefFuncSignatureAsParamType) {
+  /* 函数签名类型作为函数参数类型（函数作为值的前置） */
+  std::string path = write_temp_file(
+      "type add_fn_t = func(i32,i32)->i32;\n"
+      "func apply(f:add_fn_t, x:i32, y:i32):i32 { return 0; }\n"
+      "func main():i32 {\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+

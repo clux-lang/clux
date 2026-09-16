@@ -12,6 +12,7 @@
 #include "parser/ast_construct.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_float_lit.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
@@ -24,6 +25,7 @@
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
+#include "vm/type_func.h"
 #include "vm/value.h"
 
 /* ===========================================================================
@@ -234,9 +236,37 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
     }
+    case AST_FUNC_TYPE: {
+        /* 函数签名类型表达式 func(ps...)->ret（类型即表达式）：递归求值
+           参数类型 + 返回类型，type_func_sig 一次性构造（内部去重 intern），
+           返回 type value。 */
+        ast_func_type_t *n = (ast_func_type_t *)node;
+        size_t np = ctfe_count_siblings(n->params);
+        const type_t *params_arr[np > 0 ? np : 1];
+        size_t i = 0;
+        for (ast_node_t *pr = n->params; pr; pr = pr->next, i++) {
+            value_t *pt = ctfe_eval(ctx, pr);
+            if (value_is_error(vm, pt)) return pt;
+            if (!value_is_type(pt, TYPE_KIND_TYPE))
+                return ctfe_err(ctx, "ctfe: func param must be a type");
+            params_arr[i] = value_as(pt, const type_t *);
+        }
+        const type_t *ret = NULL;
+        if (n->return_type) {
+            value_t *rt = ctfe_eval(ctx, n->return_type);
+            if (value_is_error(vm, rt)) return rt;
+            if (!value_is_type(rt, TYPE_KIND_TYPE))
+                return ctfe_err(ctx, "ctfe: func return type must be a type");
+            ret = value_as(rt, const type_t *);
+        }
+        const type_t *sig = type_func_sig(vm, np > 0 ? params_arr : NULL,
+                                          np, ret, /*is_variadic=*/false);
+        if (!sig)
+            return ctfe_err(ctx, "ctfe: failed to construct function signature type");
+        return type_as_value(vm, sig);
+    }
     case AST_TYPE_REF: {
-        /* 具名类型引用（sema 登记的 "__type_N"）：查 types 队列拿类型单例，
-           返回 type value。槽位已被 sema 替换为 AST_TYPE_REF（类型构造收敛
+        /* 具名类型引用（sema 登记的 "__type_N"）：查 types 队列拿类型单例，           返回 type value。槽位已被 sema 替换为 AST_TYPE_REF（类型构造收敛
            到 hoist 提升区），ctfe 重复求值时命中此分支。eval 场景
            （ctx->sema == NULL）无 sema 阶段，不可能出现此节点。 */
         ast_type_ref_t *n = (ast_type_ref_t *)node;

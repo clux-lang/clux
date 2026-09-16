@@ -116,6 +116,37 @@ static void name_to_cstr(strslice_t s, char *buf, size_t cap) {
   buf[n] = '\0';
 }
 
+/* 显式类型槽位兜底重解析：3a 槽位解析可能失败（引用同块后续局部 type /
+   被 type_shadowed_by_local_def 判"待绑定局部遮蔽"推迟）→ 此处定义点兜底。
+   仍失败补报诊断：激活的同名 var/参数遮蔽 → "is a variable, not a type"
+   （完全遮罩语义），其余（拼写错误/前向引用 type def）保持 "unknown type"。
+   返回 true 表示解析成功（或无需解析）。 */
+static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
+                                  sema_scope_t *scope) {
+  sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
+  if (!sym || sym->type || !vd->type_expr) return true;
+  sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
+  if (sym->type) return true;
+
+  /* 提取槽位名字（仅命名类型可判遮蔽来源；复合类型报 unknown） */
+  strslice_t tn = {0};
+  if (vd->type_expr->kind == AST_IDENT) {
+    tn = ((ast_ident_t *)vd->type_expr)->name;
+  } else if (vd->type_expr->kind == AST_TYPE_REF) {
+    tn = ((ast_type_ref_t *)vd->type_expr)->name;
+  }
+  sema_symbol_t *shadow = tn.ptr ? sema_lookup(scope, tn) : NULL;
+  if (shadow && !shadow->ast) {
+    /* 激活的 var/参数遮蔽（ast==NULL 区分于 type def/函数符号）：
+       完全遮罩语义，类型槽位引用的是变量 → 报错 */
+    diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+               "'%.*s' is a variable, not a type", (int)tn.len, tn.ptr);
+  } else {
+    diag_error(sema->diag, sema_loc(sema, vd->type_expr), "unknown type");
+  }
+  return false;
+}
+
 static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
@@ -139,6 +170,8 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                  "cannot infer type of uninitialized variable '%.*s'; "
                  "add an explicit type annotation",
                  (int)vd->name.len, vd->name.ptr);
+    } else {
+      var_type_slot_reparse(sema, vd, scope); /* 3a 推迟的槽位定义点兜底 */
     }
     sym->flow_init = false;
     var_value =
@@ -154,33 +187,8 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     if (vd->type_expr) {
       /* 显式类型：3a 槽位解析可能失败（引用同块后续局部 type/被 var 遮蔽，
          当时未绑定 vm scope）→ 此处兜底重解析（局部 type 已在定义点求值
-         绑定）；仍失败补报诊断：激活的同名 var/参数遮蔽 → "is a variable,
-         not a type"（完全遮罩语义），其余（拼写错误/前向引用 type def）
-         保持 "unknown type"。 */
-      if (!sym->type) {
-        sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
-        if (!sym->type) {
-          /* 提取槽位名字（仅命名类型可判遮蔽来源；复合类型报 unknown） */
-          strslice_t tn = {0};
-          if (vd->type_expr->kind == AST_IDENT) {
-            tn = ((ast_ident_t *)vd->type_expr)->name;
-          } else if (vd->type_expr->kind == AST_TYPE_REF) {
-            tn = ((ast_type_ref_t *)vd->type_expr)->name;
-          }
-          sema_symbol_t *shadow =
-              tn.ptr ? sema_lookup(scope, tn) : NULL;
-          if (shadow && !shadow->ast) {
-            /* 激活的 var/参数遮蔽（ast==NULL 区分于 type def/函数符号）：
-               完全遮罩语义，类型槽位引用的是变量 → 报错 */
-            diag_error(sema->diag, sema_loc(sema, vd->type_expr),
-                       "'%.*s' is a variable, not a type", (int)tn.len,
-                       tn.ptr);
-          } else {
-            diag_error(sema->diag, sema_loc(sema, vd->type_expr),
-                       "unknown type");
-          }
-        }
-      }
+         绑定）；仍失败补报诊断（见 var_type_slot_reparse）。 */
+      var_type_slot_reparse(sema, vd, scope);
       /* value_assign 校验 init 可赋给声明类型（单一校验点） */
       if (!init_bad && sym->type) {
         value_t *dst = value_make_shadow(sema->vm, sym->type);

@@ -15,6 +15,14 @@ func add_pair(a: Pair, b: Pair): Pair {
     return .[2]i32{a[0] + b[0], a[1] + b[1]};
 }
 
+// 函数签名类型：func(param_types...)->ret（M2 函数类型）
+type add_fn_t = func(i32, i32) -> i32;
+
+// 签名可作为函数参数/返回类型（函数作为值的前置）
+func apply(f: add_fn_t, x: i32, y: i32): i32 {
+    return 0;
+}
+
 func main(): void {
     // var 显式类型标注走 type value
     var m: MyInt = 42;
@@ -26,6 +34,9 @@ func main(): void {
 
     var s = add_pair(p, q);
     printf("sum  = %d %d\n", s[0], s[1]);
+
+    // 函数签名类型的变量（函数作为值未实现，暂以 undefined 占位）
+    var fn: add_fn_t = undefined;
 
     // 局部 type def（块作用域遮蔽）
     {

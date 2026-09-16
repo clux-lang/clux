@@ -31,6 +31,7 @@ extern "C" {
 #include "parser/ast_array.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
+#include "parser/ast_func_type.h"
 }
 
 #include "test_common.h"
@@ -1653,6 +1654,122 @@ TEST_F(ParseExprTest, Construct_MissingCloseBraceReturnsError) {
     ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* 函数签名类型 func(...)->ret（M2 函数类型）                        */
+/* ================================================================ */
+
+static void expect_ident_text(ast_node_t *n, const char *expected) {
+    ASSERT_NE(n, nullptr);
+    ASSERT_EQ(n->kind, AST_IDENT);
+    ast_ident_t *id = (ast_ident_t *)n;
+    EXPECT_EQ(id->name.len, strlen(expected));
+    EXPECT_EQ(memcmp(id->name.ptr, expected, id->name.len), 0);
+}
+
+/**
+ * Scenario: func(i32,i32)->i32 基本签名
+ * Expected: AST_FUNC_TYPE，params=[i32,i32]，return_type=i32
+ */
+TEST_F(ParseExprTest, FuncType_Basic) {
+    parser_t *p = make_parser("func(i32,i32)->i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
+
+    auto *ft = (ast_func_type_t *)node;
+    ASSERT_NE(ft->params, nullptr);
+    expect_ident_text(ft->params, "i32");
+    ASSERT_NE(ft->params->next, nullptr);
+    expect_ident_text(ft->params->next, "i32");
+    EXPECT_EQ(ft->params->next->next, nullptr); /* 两参数 */
+    expect_ident_text(ft->return_type, "i32");
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: func(i32) 无返回类型（缺省 void = NULL）
+ * Expected: AST_FUNC_TYPE，params=[i32]，return_type=NULL
+ */
+TEST_F(ParseExprTest, FuncType_NoReturnType) {
+    parser_t *p = make_parser("func(i32)");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
+
+    auto *ft = (ast_func_type_t *)node;
+    ASSERT_NE(ft->params, nullptr);
+    expect_ident_text(ft->params, "i32");
+    EXPECT_EQ(ft->return_type, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: func() 零参数 + 返回类型
+ * Expected: AST_FUNC_TYPE，params=NULL，return_type=i32
+ */
+TEST_F(ParseExprTest, FuncType_ZeroParams) {
+    parser_t *p = make_parser("func()->i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
+
+    auto *ft = (ast_func_type_t *)node;
+    EXPECT_EQ(ft->params, nullptr);
+    expect_ident_text(ft->return_type, "i32");
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 参数含复合类型 func([4]i32)->func(i32)->i32
+ * Expected: AST_FUNC_TYPE，param[0]=AST_ARRAY([4]i32)，return=AST_FUNC_TYPE
+ */
+TEST_F(ParseExprTest, FuncType_CompoundParams) {
+    parser_t *p = make_parser("func([4]i32)->func(i32)->i32");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
+
+    auto *ft = (ast_func_type_t *)node;
+    ASSERT_NE(ft->params, nullptr);
+    ASSERT_EQ(ft->params->kind, AST_ARRAY);
+    ASSERT_NE(ft->return_type, nullptr);
+    EXPECT_EQ(ft->return_type->kind, AST_FUNC_TYPE);
+
+    auto *rt = (ast_func_type_t *)ft->return_type;
+    expect_ident_text(rt->params, "i32");
+    expect_ident_text(rt->return_type, "i32");
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: func 关键字分支优先于 AST_IDENT 兜底
+ * Expected: parse_primary 对 "func" 返回 AST_FUNC_TYPE 而非 AST_IDENT
+ */
+TEST_F(ParseExprTest, FuncType_FuncKeywordNotIdent) {
+    parser_t *p = make_parser("func()");
+    ASSERT_NE(p, nullptr);
+
+    skip_trivia(p);
+
+    ast_node_t *node = parse_primary(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
 
     cleanup_parser(p);
 }

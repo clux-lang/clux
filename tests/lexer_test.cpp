@@ -749,6 +749,7 @@ TEST(Lexer, TwoCharSymbolsMaximalMunch) {
                         "!=",
                         "&&",
                         "||",
+                        "->",
                         "+=",
                         "-=",
                         "*=",

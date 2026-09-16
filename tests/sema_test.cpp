@@ -1424,6 +1424,65 @@ TEST_F(SemaTest, TypeDefRhsNotType) {
     expect_message(0, "must evaluate to a type value, got i32");
 }
 
+TEST_F(SemaTest, TypeDefFuncSignature) {
+    /* 函数签名类型 rhs：func(i32,i32)->i32 → 登记 + 槽位折叠为 AST_TYPE_REF。
+       符号激活，var 显式类型解析到 func 签名（TYPE_KIND_FUNC）。 */
+    EXPECT_TRUE(analyze(
+        "type add_fn_t = func(i32,i32)->i32;"
+        "func main() { var f:add_fn_t = undefined; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *sym =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("add_fn_t"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_TRUE(sym->is_active);
+
+    /* 复合 rhs 折叠为 AST_TYPE_REF，名字指向登记的类型 */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    ASSERT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    const sema_type_t *st = sema_type_find_name(sema_, ref->name);
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->type, nullptr);
+    EXPECT_EQ(st->type->kind, TYPE_KIND_FUNC);
+
+    /* var f:add_fn_t 类型解析到 func 签名 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *f = sema_scope_find_local(fscope, STRSLICE_LIT("f"));
+    ASSERT_NE(f, nullptr);
+    ASSERT_NE(f->type, nullptr);
+    EXPECT_EQ(f->type->kind, TYPE_KIND_FUNC);
+}
+
+TEST_F(SemaTest, TypeDefFuncSignatureNoReturn) {
+    /* 无返回类型 func(i32) → 缺省 void 签名，sema 正常 */
+    EXPECT_TRUE(analyze(
+        "type void_fn_t = func(i32);"
+        "func main() { var f:void_fn_t = undefined; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefFuncSignatureNested) {
+    /* 嵌套复合签名 func([4]i32)->func(i32)->i32 → sema 正常 */
+    EXPECT_TRUE(analyze(
+        "type complex_t = func([4]i32)->func(i32)->i32;"
+        "func main() { var f:complex_t = undefined; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefFuncSignatureInSignature) {
+    /* 函数签名类型作为参数类型：全局 type def 先于函数签名解析 */
+    EXPECT_TRUE(analyze(
+        "type add_fn_t = func(i32,i32)->i32;"
+        "func apply(f:add_fn_t): i32 { return 0; }"
+        "func main() { }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
 TEST_F(SemaTest, TypeDefDuplicate) {
     EXPECT_FALSE(analyze(
         "type A = i32;"

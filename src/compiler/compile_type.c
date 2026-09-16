@@ -1,6 +1,7 @@
 #include "compiler/compiler.h"
 #include "parser/ast_array.h"
 #include "parser/ast_const.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_type_ref.h"
@@ -142,7 +143,56 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     return;
   }
 
-  /* M2 扩展点：元组/func 类型表达式（sema 已保证可达此处时合法） */
+  if (type_expr->kind == AST_FUNC_TYPE) {
+    /* func 签名类型（声明-定义两步模型，与数组同构）：
+       声明：PUSH_FUNC_TYPE 压开放签名 type value → DEFINE_TYPE <tid> 绑定
+       program id + 登记进 types_by_id → LOAD_TYPE <tid> 拉回开放对象（定义
+       起点）。
+       定义：参数类型逐个（递归 compile_type_expr）→ FUNC_TYPE_PARAM 追加
+       → 返回类型 → FUNC_TYPE_RETURN → SEAL 密封（去重 intern）→ LOAD_TYPE
+       <tid> 拉回类型值（保持"类型表达式压类型值"契约）。
+       注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
+       替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
+       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       （types_by_id 幂等），语义无害。 */
+    ast_func_type_t *ft = (ast_func_type_t *)type_expr;
+
+    bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE); /* 栈: [open_func_type] */
+    st_push(c, 1);
+
+    uint32_t tid = c->type_id_next++;
+    bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回开放对象（定义起点） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+
+    for (ast_node_t *pr = ft->params; pr; pr = pr->next) {
+      compile_type_expr(c, pr);                /* 栈: [open, param] */
+      st_push(c, 1);
+      bcode_write_op(c->bc, BCODE_FUNC_TYPE_PARAM); /* 弹 param → 追加进 open */
+      st_push(c, -1);
+    }
+
+    if (ft->return_type) {
+      compile_type_expr(c, ft->return_type);   /* 栈: [open, ret] */
+      st_push(c, 1);
+      bcode_write_op(c->bc, BCODE_FUNC_TYPE_RETURN); /* 弹 ret → 设为返回 */
+      st_push(c, -1);
+    }
+
+    bcode_write_op(c->bc, BCODE_SEAL);         /* 密封（去重 intern） */
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+    return;
+  }
+
+  /* M2 扩展点：元组类型表达式（sema 已保证可达此处时合法） */
   bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
   st_push(c, 1);
 }

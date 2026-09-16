@@ -504,6 +504,7 @@ static token_t *lexer_read_symbol(lexer_t *lexer, stream_pos_t begin) {
       "!=",
       "&&",
       "||",
+      "->",
       "+=",
       "-=",
       "*=",
