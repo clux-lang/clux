@@ -1,34 +1,54 @@
 #include "compiler/compiler.h"
 #include "core/panic.h"
 #include "vm/type_array.h"
+#include "vm/type_func.h"
 
 #include <string.h>
 
 /* ===========================================================================
- * 类型提升区（hoist）
+ * 类型提升区（hoist）——两遍扫描
  *
  * sema 把解析过的类型登记进 sema->types（sema_type_t* 数组），编译器在此
- * 遍历生成运行时构造字节码，把每个类型 SEAL <id> 密封并登记到 types_by_id
- * 表。函数体/注册段中的类型槽位（AST_TYPE_REF）随后发 LOAD_TYPE <id>
- * 直接查表——类型构造收敛到提升区，AST 保持平凡可解耦。
+ * 生成运行时构造字节码，把所有程序类型构造进 types_by_id 表。函数体/注册段
+ * 中的类型槽位（AST_TYPE_REF）随后发 LOAD_TYPE <id> 直接查表——类型构造
+ * 收敛到提升区，AST 保持平凡可解耦。
  *
- * 构造分派（按 type_t 结构，单遍递归依赖后序）：
- *   - 内建类型（type->id < TYPE_ID_PROGRAM_BASE）：vm_register_builtin_types
- *     已把 type value 绑内建 id 0..16，此处仅 LOAD_TYPE <内建 id> →
- *     SEAL <sema 分配的 program id>（别名，供槽位统一 LOAD_TYPE
- *     <program id>）。
- *   - 数组 [N]T：PUSH_ARRAY 开放对象 → LOAD_TYPE <elem id>（elem 已先构造）
- *     → DEFINE_BOUND N → SEAL <id>（去重 intern，可能返回已有密封实例；
- *     密封+登记一步完成，无悬垂）。
- *   - const/volatile：LOAD_TYPE <sub id>（sub 已先构造）→ CREATE_CONST /
- *     CREATE_VOLATILE（intern）→ SEAL <id>（无开放构造阶段，value_seal
- *     幂等原样返回后登记）。
+ * **两遍扫描**（解决类型向前声明，为未来 struct 字段引用后声明类型 /
+ * 指针等自引用类型铺路；func 签名类型亦纳入——签名本质是普通类型，且
+ * 函数指针作参数时签名引用签名，须依赖后序构造）：
  *
- * 依赖后序：sema 登记时父先入队、依赖递归登记在后，故此处对每个类型递归
- * 构造其依赖（数组 elem / 限定符 sub），保证 LOAD_TYPE <依赖 id> 时依赖已
- * 绑定。类型图当前为 DAG（数组/const/volatile 无环）可递归；若未来引入
- * 指针/自引用类型（成环），须改为拓扑排序或两阶段构造（开放对象先 BIND、
- * 密封后再重绑），见 compile.c 拓扑 TODO。
+ *   pass 1（声明所有类型）：遍历全部程序类型，逐个创建开放 type 对象并
+ *     DEFINE_TYPE <id> 登记进 types_by_id（不设字段）。声明完成后所有类型
+ *     id 在表中都有登记（开放或密封），后续任何类型的字段构造都可
+ *     LOAD_TYPE <id> 拿到对象（向前引用安全）。
+ *     - 数组 [N]T：PUSH_ARRAY（开放对象，未成形）→ DEFINE_TYPE <id>
+ *     - func 签名：PUSH_FUNC_TYPE（开放签名对象）→ DEFINE_TYPE <id>
+ *     - const/volatile：PUSH_CONST / PUSH_VOLATILE（开放对象，sub=NULL）→
+ *       DEFINE_TYPE <id>
+ *     - 内建别名（防御分支）：LOAD_TYPE <内建 id> → DEFINE_TYPE <id>
+ *
+ *   pass 2（定义所有类型）：遍历全部程序类型，逐个 LOAD_TYPE <id> 拉回
+ *     开放对象 → 设置字段 → SEAL 封闭计算内存布局。**依赖后序**（递归
+ *     define_one + done 数组去重共享依赖）：数组 SEAL 算布局需 elem 已
+ *     密封（elem->size/align），const/volatile 拷贝 size/align 需 sub 已
+ *     密封，func 签名设参数/返回需依赖已构造（签名可引用签名），故先定义
+ *     依赖再定义自身。
+ *     - 数组：LOAD_TYPE <id> 拉回开放对象 →（递归定义 elem）→
+ *       LOAD_TYPE <elem id> → DEFINE_BOUND N → SEAL（去重 intern 可能
+ *       返回已有密封实例；SEAL 按开放对象自身 id 重绑登记表，无悬垂）
+ *     - func 签名：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（递归
+ *       定义）→ FUNC_TYPE_PARAM → 返回类型 → FUNC_TYPE_RETURN → SEAL
+ *     - const/volatile：LOAD_TYPE <id> 拉回开放对象 →（递归定义 sub）→
+ *       LOAD_TYPE <sub id> → SET_TYPE（设 sub）→ SEAL（intern 创建即密封，
+ *       拷贝 size/align；去重时重绑登记）
+ *     - 内建别名：pass 1 已完成，跳过
+ *
+ * 依赖后序：sema 登记时父先入队、依赖递归登记在后（sema_type_register →
+ * sema_type_register_deps），此处 pass 2 对每个类型递归定义其依赖（数组
+ * elem / 限定符 sub），保证 LOAD_TYPE <依赖 id> 时依赖已密封。类型图当前
+ * 为 DAG（数组/const/volatile 无环）可递归；若未来引入指针/自引用类型
+ * （成环），两遍模型天然支持：pass 1 开放对象已登记，字段构造 LOAD_TYPE
+ * 拿到开放对象（未密封），SEAL 后再重绑——见 compile.c 拓扑 TODO。
  *
  * 净栈深 0：每个类型构造序列弹压平衡，提升区整体对操作数栈无影响。
  * =========================================================================== */
@@ -56,9 +76,6 @@ const sema_type_t *c_sema_type_find_ptr(vec_t *types, const type_t *t) {
   return NULL;
 }
 
-static void hoist_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
-                      size_t count);
-
 /* 按类型 id 压入 type value（LOAD_TYPE <id>） */
 static void emit_load_type(compiler_t *c, uint32_t id) {
   bcode_write_op(c->bc, BCODE_LOAD_TYPE);
@@ -66,82 +83,175 @@ static void emit_load_type(compiler_t *c, uint32_t id) {
   st_push(c, 1);
 }
 
-/* 弹栈顶 type value → 密封 + 登记到 id（SEAL <id>，消费栈） */
-static void emit_seal_type(compiler_t *c, uint32_t id) {
-  bcode_write_op(c->bc, BCODE_SEAL);
+/* 弹栈顶 type value → 声明登记到 id（DEFINE_TYPE <id>，消费栈） */
+static void emit_define_type(compiler_t *c, uint32_t id) {
+  bcode_write_op(c->bc, BCODE_DEFINE_TYPE);
   bcode_write_u32(c->bc, id);
   st_push(c, -1);
 }
 
-/* 数组：依赖 elem 先构造 → PUSH_ARRAY → LOAD elem → DEFINE_BOUND → SEAL <id> */
-static void hoist_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
-                        size_t count) {
+/* 弹栈顶 type value → 密封（SEAL，无操作数，消费栈；封闭算布局） */
+static void emit_seal(compiler_t *c) {
+  bcode_write_op(c->bc, BCODE_SEAL);
+  st_push(c, -1);
+}
+
+/* ===========================================================================
+ * pass 1：声明所有类型
+ *
+ * 顺序无关（开放对象创建不依赖其他类型）；遍历全部程序类型逐一登记。
+ * 内建别名（防御分支）LOAD_TYPE <内建 id> → DEFINE_TYPE <id> 一步登记。
+ * =========================================================================== */
+
+/* 内建类型：LOAD_TYPE <内建 id> → DEFINE_TYPE <program id>（别名登记） */
+static void hoist_builtin(compiler_t *c, const sema_type_t *st) {
+  emit_load_type(c, st->type->id);
+  emit_define_type(c, st->id);
+}
+
+static void declare_one(compiler_t *c, const sema_type_t *st) {
+  if (!st || !st->type) return;
+  switch (st->type->kind) {
+    case TYPE_KIND_ARRAY:
+      /* PUSH_ARRAY 压开放对象 → DEFINE_TYPE <id> 声明登记（不设字段） */
+      bcode_write_op(c->bc, BCODE_PUSH_ARRAY);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_FUNC:
+      /* PUSH_FUNC_TYPE 压开放签名对象 → DEFINE_TYPE <id> 声明登记（不设
+         参数/返回字段；签名引用签名时开放对象已可 LOAD_TYPE 拉回） */
+      bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_CONST:
+      /* PUSH_CONST 压开放对象（sub=NULL，不入池）→ DEFINE_TYPE <id> 声明
+         登记（不设 sub；向前引用安全——sub 可后声明） */
+      bcode_write_op(c->bc, BCODE_PUSH_CONST);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_VOLATILE:
+      /* PUSH_VOLATILE 同上（volatile 修饰） */
+      bcode_write_op(c->bc, BCODE_PUSH_VOLATILE);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    default:
+      hoist_builtin(c, st); /* 内建别名（防御分支） */
+      break;
+  }
+}
+
+/* ===========================================================================
+ * pass 2：定义所有类型（依赖后序）
+ *
+ * 对每个类型递归定义其依赖（数组 elem / 限定符 sub）后再定义自身；
+ * done 数组去重共享依赖。数组 SEAL 算布局需 elem 已密封，const/volatile
+ * intern 需 sub 已密封——依赖先定义保证 LOAD_TYPE <依赖 id> 时已密封。
+ * =========================================================================== */
+
+static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                       size_t count);
+
+/* 依赖类型压栈辅助：内建依赖直接 LOAD_TYPE <内建 id>；程序类型先递归
+ * define_one（依赖后序密封）再 LOAD_TYPE <st->id>。返回后栈顶即依赖类型。 */
+static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
+                          size_t count) {
+  const sema_type_t *dst = c_sema_type_find_ptr(c->sema_types, dep);
+  if (!dst) {
+    /* 依赖是内建类型（未登记）：LOAD_TYPE <内建 id> 直接查表（已密封） */
+    emit_load_type(c, dep->id);
+  } else {
+    define_one(c, dst, done, count);   /* 依赖后序：先定义依赖（密封） */
+    emit_load_type(c, dst->id);
+  }
+}
+
+/* 数组定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 elem 先定义（密封）→
+ * LOAD_TYPE <elem id> → DEFINE_BOUND N → SEAL（按自身 id 幂等更新登记） */
+static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                         size_t count) {
   const type_t *t = st->type;
   const type_t *elem = array_type_elem(t);
-  const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, elem);
 
-  bcode_write_op(c->bc, BCODE_PUSH_ARRAY); /* 栈: [open_array_type] */
-  st_push(c, 1);
-
-  if (!est) {
-    /* 依赖是内建类型（未登记）：LOAD_TYPE <内建 id> 直接查表 */
-    emit_load_type(c, elem->id);           /* 栈: [open, elem] */
-  } else {
-    hoist_one(c, est, done, count);
-    emit_load_type(c, est->id);            /* 栈: [open, elem] */
-  }
-
+  emit_load_type(c, st->id);               /* 栈: [open_array_type] */
+  emit_dep_type(c, elem, done, count);     /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
-  emit_seal_type(c, st->id);                /* 开放对象 → 密封实例（可能去重）→ 登记 */
+  emit_seal(c);                            /* 封闭算布局（去重时重绑登记） */
 }
 
-/* 限定符（const/volatile）：依赖 sub 先构造 → LOAD sub → CREATE_* → SEAL <id> */
-static void hoist_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
-                       size_t count, bcode_op_t create_op) {
+/* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（依赖后序）→
+ * FUNC_TYPE_PARAM 追加 → 返回类型 → FUNC_TYPE_RETURN → SEAL。
+ * 签名引用签名（函数指针作参数）时依赖是另一个 func 类型，递归先定义。 */
+static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                        size_t count) {
+  const type_t *t = st->type;
+
+  emit_load_type(c, st->id);               /* 栈: [open_func_type] */
+
+  size_t nparams = func_type_param_count(t);
+  for (size_t i = 0; i < nparams; i++) {
+    const type_t *pt = func_type_param(t, i);
+    if (!pt) continue; /* NULL = 无类型约束（防御） */
+    emit_dep_type(c, pt, done, count);     /* 栈: [open, param] */
+    bcode_write_op(c->bc, BCODE_FUNC_TYPE_PARAM); /* 弹 param → 追加进 open */
+    st_push(c, -1);
+  }
+
+  const type_t *rt = func_type_return(t);
+  if (rt) {
+    emit_dep_type(c, rt, done, count);     /* 栈: [open, ret] */
+    bcode_write_op(c->bc, BCODE_FUNC_TYPE_RETURN); /* 弹 ret → 设为返回 */
+    st_push(c, -1);
+  }
+
+  /* M1 用户函数签名非 variadic（sema type_func_sig 固定 false），省略
+     FUNC_TYPE_VARARG；未来用户变参函数在此发。 */
+  emit_seal(c);                            /* 密封签名（去重时重绑登记） */
+}
+
+/* 限定符（const/volatile）定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 sub 先
+ * 定义（密封）→ LOAD sub → SET_TYPE（设 sub）→ SEAL 封闭（按 sub 去重
+ * intern，拷贝 size/align，置 sealed；去重时按自身 id 重绑登记） */
+static void define_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                        size_t count) {
   const type_t *t = st->type;
   const type_t *sub = type_qualifier_sub(t);
-  const sema_type_t *sst = c_sema_type_find_ptr(c->sema_types, sub);
-  if (!sst) {
-    /* 依赖是内建类型（未登记）：LOAD_TYPE <内建 id> 直接查表 */
-    emit_load_type(c, sub->id);
-  } else {
-    hoist_one(c, sst, done, count);
-    emit_load_type(c, sst->id);
-  }
-  bcode_write_op(c->bc, create_op); /* 弹 sub → intern → 压回 */
-  emit_seal_type(c, st->id);
+
+  emit_load_type(c, st->id);             /* 栈: [open_qual_type] */
+  emit_dep_type(c, sub, done, count);    /* 栈: [open, sub] */
+  bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 sub → 设进 open */
+  st_push(c, -1);
+  emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
-/* 内建类型：LOAD_TYPE <内建 id> → SEAL <program id>（别名） */
-static void hoist_builtin(compiler_t *c, const sema_type_t *st) {
-  emit_load_type(c, st->type->id);
-  emit_seal_type(c, st->id);
-}
-
-static void hoist_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
-                      size_t count) {
+static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                       size_t count) {
   if (!st) return;
   size_t idx = (size_t)(st->id - TYPE_ID_PROGRAM_BASE);
   if (idx >= count) return;
-  if (done[idx]) return; /* 共享依赖只提升一次 */
+  if (done[idx]) return; /* 共享依赖只定义一次 */
   const type_t *t = st->type;
   if (!t) return;
 
   switch (t->kind) {
     case TYPE_KIND_ARRAY:
-      hoist_array(c, st, done, count);
+      define_array(c, st, done, count);
+      break;
+    case TYPE_KIND_FUNC:
+      define_func(c, st, done, count);
       break;
     case TYPE_KIND_CONST:
-      hoist_qual(c, st, done, count, BCODE_CREATE_CONST);
-      break;
     case TYPE_KIND_VOLATILE:
-      hoist_qual(c, st, done, count, BCODE_CREATE_VOLATILE);
+      define_qual(c, st, done, count);
       break;
     default:
-      hoist_builtin(c, st); /* 内建/其他：仅别名绑定 */
-      break;
+      done[idx] = true; /* 内建别名：pass 1 已完成，无定义 */
+      return;
   }
   done[idx] = true;
 }
@@ -157,10 +267,20 @@ void compile_hoist(compiler_t *c) {
   if (!done) panic("compiler: out of memory allocating hoist done set");
   memset(done, 0, n);
 
+  /* pass 1：声明所有类型（开放对象登记进 types_by_id，顺序无关） */
   for (size_t i = 0; i < n; i++) {
     const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
-    hoist_one(c, st, done, n);
+    declare_one(c, st);
     if (c->failed) break;
+  }
+
+  /* pass 2：定义所有类型（依赖后序递归 + done 去重共享依赖） */
+  if (!c->failed) {
+    for (size_t i = 0; i < n; i++) {
+      const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
+      define_one(c, st, done, n);
+      if (c->failed) break;
+    }
   }
   allocator_free(c->alloc, (void **)&done);
 }

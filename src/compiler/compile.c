@@ -153,10 +153,12 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
           body 入口在被调用时进入
      无 JMP 守卫：hoist 区即产物开头，顺序执行即达注册段。 */
 
-  /* 1. 类型提升区：依赖后序递归构造，当前类型图是 DAG（数组 elem /
-     限定符 sub 无环）；若未来引入指针/自引用类型（成环），须改为拓扑
-     排序或两阶段构造（开放对象先 BIND、密封后再重绑），见 compile_hoist.c
-     头部注释。 */
+  /* 1. 类型提升区：**两遍扫描**（compile_hoist.c）——pass 1 声明所有
+     类型（开放对象 DEFINE_TYPE <id> 登记，不设字段），pass 2 定义所有
+     类型（LOAD_TYPE 拉回 + 设字段 + SEAL，依赖后序）。当前类型图是 DAG
+     （数组 elem / 限定符 sub 无环）；若未来引入指针/自引用类型（成环），
+     两遍模型天然支持向前引用（pass 1 开放对象已登记，字段构造 LOAD_TYPE
+     拿到开放对象，SEAL 后再重绑）。 */
   compile_hoist(c);
   if (c->failed) {
     bcode_destroy(&bc);
@@ -239,10 +241,9 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->loop_stack    = NULL;
   c->failed        = false;
   c->func_id_next  = FUNC_ID_PROGRAM_BASE;
-  /* 签名类型 id：sema_types 已占 [PROGRAM_BASE, PROGRAM_BASE+n)，签名类型
-     （func type）从区间末尾起分配——与 sema 类型共占 types_by_id 类型 id
-     表，但由 compiler 侧分配（sema 不登记 func 类型）。函数签名类型 id 与
-     函数 id（func_id_next / functions_by_id）属不同表，严格分离。 */
+  /* 签名类型 id 由 sema 分配（sema_type_register 登记进 sema->types，
+     id = PROGRAM_BASE + index，已写入 sig->id）；type_id_next 仅作防御
+     分支（compile_type.c AST_ARRAY 未替换场景临时分配 id）。 */
   c->type_id_next  = TYPE_ID_PROGRAM_BASE +
                      (uint32_t)(sema_types ? vec_len(sema_types) : 0);
   return c;

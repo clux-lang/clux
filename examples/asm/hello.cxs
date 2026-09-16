@@ -1,10 +1,16 @@
-; hello.cxs — 最小可运行示例：打印一行字符串
-; 引导段 _start 注册 main，再由虚拟机调用 main
+; hello.cxs - 最小可运行示例：打印一行字符串
+; 类型提升区（hoist 两遍扫描）：pass 1 声明 main 签名（开放对象登记 id 64），
+; pass 2 定义（设返回类型 + SEAL 封闭）；引导段 _start 注册 main，再由虚拟机调用 main
 _start:
+    ; pass 1 声明所有类型
     push_func_type
+    define_type 64
+    ; pass 2 定义所有类型（依赖后序）
+    load_type 64
     push "void"
     func_type_return
-    seal 64
+    seal
+    ; 函数注册段：LOAD_TYPE 拉回密封签名 → PUSH_FUNCTION
     load_type 64
     push_function [main]
     bind_func 64

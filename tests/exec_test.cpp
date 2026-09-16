@@ -550,15 +550,21 @@ TEST_F(ExecTest, FunctionRegisterAndCallMain) {
     bcode_write_op(bc, BCODE_ADD);
     bcode_write_op(bc, BCODE_RET);
 
-    /* 注册段：PUSH_FUNC_TYPE → FUNC_TYPE_RETURN → SEAL <sig_id> 密封+登记
-       签名类型（消费栈）→ LOAD_TYPE <sig_id> 主动拉取 → PUSH_FUNCTION →
-       BIND_FUNC → SET_FUNC_NAME → push_undefined + DEFINE */
+    /* 注册段：签名类型声明-定义两步构造（PUSH_FUNC_TYPE → DEFINE_TYPE
+       <sig_id> 声明登记 → LOAD_TYPE 拉回定义 → FUNC_TYPE_RETURN 设返回 →
+       SEAL 封闭）→ LOAD_TYPE <sig_id> 主动拉取 → PUSH_FUNCTION →
+       BIND_FUNC → SET_FUNC_NAME → push_undefined + DEFINE。
+       注：编译器 hoist 提升区把该序列整体前移为两遍扫描（pass 1 所有签名
+       PUSH_FUNC_TYPE → DEFINE_TYPE 声明、pass 2 逐个 LOAD_TYPE → SEAL 定义），
+       注册段只留 LOAD_TYPE；此处单类型内联两步构造等价于 hoist 区单个签名的
+       完整构造序列，验证 VM 类型指令语义。 */
     size_t end = bcode_tell(bc);
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
-    bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* sig_id：签名类型登记进 types_by_id（类型 id 表） */
+    bcode_write_op(bc, BCODE_SEAL); /* 无操作数：封闭算布局（sig_id 64 已声明登记） */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -587,10 +593,11 @@ TEST_F(ExecTest, VoidFunctionReturnsUndefined) {
 
     size_t end = bcode_tell(bc);
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("void"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -646,12 +653,13 @@ TEST_F(ExecTest, CallArgCountMismatchPropagatesError) {
     size_t end = bcode_tell(bc);
     /* foo: (i32) -> i32 */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* foo 签名类型 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_PARAM);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* foo 签名类型 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)foo_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -660,10 +668,11 @@ TEST_F(ExecTest, CallArgCountMismatchPropagatesError) {
     bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("foo"));
     /* main: () -> i32 */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 65); /* main 签名类型 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 65); /* main 签名类型 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 65);
@@ -718,12 +727,13 @@ TEST_F(ExecTest, RecursiveFactorial) {
     size_t end = bcode_tell(bc);
     /* fact: (i32) -> i32 */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* fact 签名类型 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_PARAM);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* fact 签名类型 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)fact_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -732,10 +742,11 @@ TEST_F(ExecTest, RecursiveFactorial) {
     bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("fact"));
     /* main: () -> i32 */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 65); /* main 签名类型 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 65); /* main 签名类型 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 65);
@@ -772,10 +783,11 @@ TEST_F(ExecTest, FunctionBodySeesModuleVariables) {
     bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("x"));
     /* main: () -> i32 */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)main_body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -804,14 +816,16 @@ TEST_F(ExecTest, FunctionExpressionDefinedViaPlainDefine) {
     bcode_write_op(bc, BCODE_RET);
 
     size_t end = bcode_tell(bc);
-    /* 函数表达式：构造签名 func():i32 → SEAL <64> 登记 → LOAD_TYPE 拉取 →
-       PUSH_FUNCTION → push_undefined → DEFINE "add"
+    /* 函数表达式：构造签名 func():i32（PUSH_FUNC_TYPE → DEFINE_TYPE <64>
+       声明登记 → LOAD_TYPE 拉回定义 → RETURN → SEAL 封闭）→ LOAD_TYPE 拉取
+       → PUSH_FUNCTION → push_undefined → DEFINE "add"
        匿名函数表达式不写 SET_FUNC_NAME（name 留空），也不强制 BIND_FUNC */
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* 签名类型 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* 签名类型 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
@@ -838,8 +852,8 @@ TEST_F(ExecTest, FunctionExpressionDefinedViaPlainDefine) {
 
 /* 类型 id 表：程序类型 id 从 TYPE_ID_PROGRAM_BASE(=64) 起，内建类型
    0..16。以下测试直接写字节码驱动类型指令（与 compiler hoist
-   提升区 / 槽位 LOAD_TYPE 的运行时语义一致）。SEAL <id> 弹栈密封+
-   登记，LOAD_TYPE <id> 主动拉取。 */
+   提升区 / 槽位 LOAD_TYPE 的运行时语义一致）。DEFINE_TYPE <id> 弹栈
+   密封+登记，LOAD_TYPE <id> 主动拉取。 */
 
 /* LOAD_TYPE 内建 id：id=2 是 i32（vm_init_builtins 固定序）。hoist_builtin
    即发 LOAD_TYPE <内建 id>，此路径验证内建 id 段可直接查表。 */
@@ -854,14 +868,17 @@ TEST_F(ExecTest, LoadTypeBuiltinId) {
     EXPECT_EQ(value_as(top, const type_t *), vm->type_i32);
 }
 
-/* SEAL <64> 密封+登记程序类型 → LOAD_TYPE 64 查回同一实例。
-   构造序列与 hoist 区一致：PUSH_ARRAY...SEAL <id>（SEAL 消费栈+登记）。 */
+/* DEFINE_TYPE <64> 声明登记程序类型 → 定义封闭 → LOAD_TYPE 64 查回同一实例。
+   构造序列与 hoist 区一致：PUSH_ARRAY → DEFINE_TYPE <id> 声明 → LOAD_TYPE
+   拉回 → LOAD elem → DEFINE_BOUND → SEAL（无操作数，封闭+按自身 id 重绑）。 */
 TEST_F(ExecTest, BindThenLoadProgramType) {
     /* 构造 [i32;3]（同 hoist_array 序列） */
     bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 3);
-    bcode_write_op(bc, BCODE_SEAL); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_SEAL);
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_HALT);
 
@@ -880,12 +897,14 @@ TEST_F(ExecTest, BindThenLoadProgramType) {
    同一 type_t*（seal 去重 intern 后同一实例多 id 别名）。 */
 TEST_F(ExecTest, BindTypeIdempotentAlias) {
     bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 3);
-    bcode_write_op(bc, BCODE_SEAL); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_SEAL);
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64); /* 复制引用 */
-    bcode_write_op(bc, BCODE_SEAL); bcode_write_u32(bc, 65);       /* 弹顶（同一实例）绑 65 */
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 65); /* 弹顶（同一实例）别名绑 65 */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 65);
     bcode_write_op(bc, BCODE_HALT);
 
@@ -908,10 +927,10 @@ TEST_F(ExecTest, LoadTypeUnknownIdReturnsError) {
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
-/* SEAL 栈顶非 type value → 硬错误 */
+/* SEAL 栈顶非 type value → 硬错误（SEAL 无操作数，只弹栈检查类型） */
 TEST_F(ExecTest, SealNonTypeValueReturnsError) {
     bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 42);
-    bcode_write_op(bc, BCODE_SEAL); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_SEAL);
     bcode_write_op(bc, BCODE_HALT);
 
     value_t *r = run();
@@ -923,9 +942,11 @@ TEST_F(ExecTest, SealNonTypeValueReturnsError) {
    绑定后改名，type 的 name 字段应更新为新名。 */
 TEST_F(ExecTest, SetTypeNameOnProgramType) {
     bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 2);
-    bcode_write_op(bc, BCODE_SEAL); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_SEAL);
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_SET_TYPE_NAME); bcode_write_str(bc, STRSLICE_LIT("Row"));
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
@@ -985,10 +1006,11 @@ TEST_F(ExecTest, PushFunctionSetsIdAndBindFuncRegisters) {
 
     size_t end = bcode_tell(bc);
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id 类型表） */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id 类型表） */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
@@ -1023,10 +1045,11 @@ TEST_F(ExecTest, SetFuncNameOnProgramFunction) {
 
     size_t end = bcode_tell(bc);
     bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("void"));
     bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
     bcode_write_op(bc, BCODE_SEAL);
-    bcode_write_u32(bc, 64); /* 签名类型 id（types_by_id），独立于函数 id */
     bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
     bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
     bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);

@@ -71,8 +71,10 @@ typedef struct compiler_t {
     sema_scope_t   *current_scope; /* 编译期当前词法作用域（符号元数据查找） */
 
     /* sema 类型登记表（借用，不拥有）：sema->types（sema_type_t* 数组）。
-       hoist 类型提升区遍历它生成 SEAL <id> 构造；AST_TYPE_REF 槽位经
-       sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
+       hoist 类型提升区**两遍扫描**遍历它：pass 1 声明所有类型（PUSH_XXXX
+       创建开放对象 → DEFINE_TYPE <id> 登记，不设字段），pass 2 定义所有
+       类型（LOAD_TYPE 拉回 → 设字段 → SEAL 封闭，依赖后序）。AST_TYPE_REF
+       槽位经 sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
     vec_t          *sema_types;
 
     /* 函数 id 分配计数器：编译注册段时按声明顺序从 FUNC_ID_PROGRAM_BASE
@@ -82,12 +84,11 @@ typedef struct compiler_t {
        （types_by_id）独立，勿与 type_id_next 混淆。 */
     uint32_t        func_id_next;
 
-    /* 类型 id 分配计数器：sema_types 占 [TYPE_ID_PROGRAM_BASE,
-       TYPE_ID_PROGRAM_BASE + sema_types 数量)，函数签名类型 id 从该区间
-       末尾起递增（SEAL <id> 密封+登记进 types_by_id）。签名类型 id 属
-       类型 id 表（types_by_id），与函数 id（functions_by_id）独立——区分
-       "函数签名类型"（func type，type value）与"函数变量"（func value，
-       BIND_FUNC 登记的函数对象）。 */
+    /* 类型 id 分配计数器：sema_types 已占 [TYPE_ID_PROGRAM_BASE,
+       TYPE_ID_PROGRAM_BASE + sema_types 数量)（sema_type_register 按登记
+       序分配，签名类型亦登记于此）。本计数器仅作防御分支备用——compile_type.c
+       AST_ARRAY 未替换场景临时分配 id（与 hoist 区同类型可成多 id 别名，
+       types_by_id 幂等，语义无害）。签名类型 id 由 sema 分配（不在此列）。 */
     uint32_t        type_id_next;
 
     /* 静态平衡追踪 */
@@ -163,10 +164,14 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn);    /* 返回 PUSH_FU
 
 /**
  * 编译类型提升区（产物最前、注册段之前）：
- * 遍历 sema->types，按 type_t 结构单遍递归构造（依赖后序）每个程序类型并
- * SEAL <id> 密封+登记（内建类型已由 vm_register_builtin_types 绑内建 id，
- * 此处仅 SEAL 别名 id）；数组/const/volatile 构造后 SEAL <id> 密封登记密封
- * 实例，槽位 LOAD_TYPE <id> 运行时直接查表。净栈深 0。
+ * **两遍扫描**遍历 sema->types，把全部程序类型构造进 types_by_id 表。
+ * pass 1（声明所有类型）：PUSH_XXXX 创建开放类型对象（数组 PUSH_ARRAY /
+ * 签名 PUSH_FUNC_TYPE / 限定符 PUSH_CONST·PUSH_VOLATILE）→ DEFINE_TYPE
+ * <id> 绑定 program id + 登记；内建别名 LOAD_TYPE <内建 id> → DEFINE_TYPE。
+ * 所有类型 id 先登记，向前引用安全。
+ * pass 2（定义所有类型）：LOAD_TYPE <id> 拉回 → 设字段（DEFINE_BOUND /
+ * FUNC_TYPE_PARAM·RETURN / SET_TYPE）→ SEAL 封闭算布局，依赖后序（elem /
+ * sub / 参数·返回先密封）。槽位 LOAD_TYPE <id> 运行时直接查表。净栈深 0。
  */
 void compile_hoist(compiler_t *c);
 

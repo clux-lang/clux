@@ -49,18 +49,29 @@ typedef enum {
     BCODE_PUSH_VALUE,      /* offset：压入 stack[sp-1-offset] 借用引用 */
     BCODE_LOAD,            /* strtable 索引：从 global scope 查 type value 压栈 */
     BCODE_LOAD_TYPE,       /* u32 id：从 vm->types_by_id 查表压 type value 栈 */
-    BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名 */
+    BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名
+                               （未来 struct 等具名类型用，当前无生成） */
     BCODE_PUSH_UNDEFINED,  /* 压入 void 类型 value（"类型待推导"） */
 
     BCODE_DEFINE,          /* strtable 索引：弹栈定义（永远双弹 [value, type-spec]） */
 
-    /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL）----
-       仅构造"函数签名类型"（func type）；函数对象由 BCODE_PUSH_FUNCTION 构造。 */
+    /* ---- 类型声明 / 定义两步模型（docs 2.7.5）----
+       类型声明：PUSH_XXXX 创建开放 type 对象 + 压栈 → DEFINE_TYPE <id>
+       绑定程序 id + 登记进 types_by_id（此后 LOAD_TYPE <id> 可拉回）。
+       类型定义：LOAD_TYPE <id> 拉回开放对象 → SET 系列指令设置字段
+       （元素类型/长度/参数/返回/sub 等）→ SEAL 封闭计算内存布局。
+       const/volatile 亦有开放构造（PUSH_CONST/PUSH_VOLATILE 创建 sub=NULL
+       的开放对象 → DEFINE_TYPE 声明 → LOAD_TYPE 拉回 → SET_TYPE 设 sub →
+       SEAL），获得向前声明能力；内建别名（无开放构造阶段）LOAD_TYPE
+       <内建 id> → DEFINE_TYPE <id> 直接登记。 */
     BCODE_PUSH_FUNC_TYPE,  /* 分配空 func type 入池 + 压其 type value */
     BCODE_FUNC_TYPE_PARAM, /* 弹栈 type value → 追加为下一参数 */
     BCODE_FUNC_TYPE_RETURN,/* 弹栈 type value → 设为返回类型 */
     BCODE_FUNC_TYPE_VARARG,/* 标记可变参数（无操作数） */
-    BCODE_SEAL,            /* u32 id：弹栈顶 type value → 密封（value_seal 分派 vtable->type_seal）+ 登记 id→type 进 types_by_id（幂等；消费栈，类型由后续 LOAD_TYPE <id> 拉取） */
+    BCODE_DEFINE_TYPE,     /* u32 id：弹栈顶 type value → 绑定程序 id + 登记进 types_by_id（幂等） */
+    BCODE_SEAL,            /* 弹栈顶 type value → 密封（value_seal 分派 vtable->type_seal：
+                              去重 intern + 布局计算 + 置 sealed）；密封后按开放对象自身 id 更新
+                              登记（去重复用时重定向到新实例）。不带 id 操作数。 */
 
     BCODE_PUSH_FUNCTION,   /* entry pc：构造 bcode_function_t + 签名类型 → func value（id 默认 0，由 BIND_FUNC 填充） */
     BCODE_BIND_FUNC,       /* u32 id：peek 栈顶 func value → 填充 fn->id + 登记 id→func（幂等，不弹栈） */
@@ -75,6 +86,9 @@ typedef enum {
     BCODE_CAST,            /* 显式转换：类型经栈顶 type value（LOAD 压入），弹 type+值 */
     BCODE_CREATE_CONST,    /* 弹 type value → type_const_intern → type value 压回 */
     BCODE_CREATE_VOLATILE, /* 弹 type value → type_volatile_intern → type value 压回 */
+    BCODE_PUSH_CONST,      /* 分配空 const type（开放，sub=NULL，不入池）+ 压其 type value */
+    BCODE_PUSH_VOLATILE,   /* 分配空 volatile type（开放，sub=NULL，不入池）+ 压其 type value */
+    BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */
 
@@ -87,14 +101,15 @@ typedef enum {
     BCODE_POP,             /* 丢弃栈顶引用（不释放，归 scope） */
     BCODE_HALT,            /* 停止执行 */
 
-    /* ---- array type 构造（与 func type 统一：PUSH → SET → SEAL）----
+    /* ---- array type 构造（与 func type 统一：声明 DEFINE_TYPE + 定义 SEAL）----
        仅构造"数组类型"（array type）；数组值由 CONSTRUCT 指令构造。 */
     BCODE_PUSH_ARRAY,      /* 分配空 array type（开放，暂不入池） + 压其 type value */
     BCODE_DEFINE_BOUND,   /* U32：弹栈顶元素 type value → 设为元素类型 + 边界立即数 N（编译期常量） */
 
     /* ---- 值构造 / 下标访问（对应 construct / set_item / get_item 流程）----
-       值构造（统一多步协议收尾）：类型经栈上构造（push_array...seal）后以
-       type value 形式留在栈顶，随后按类型字段序压入成员值，construct N 收尾。
+       值构造（统一多步协议收尾）：类型经声明-定义两步构造（PUSH_XXXX →
+       DEFINE_TYPE → LOAD_TYPE → ... → SEAL → LOAD_TYPE）后以 type value
+       形式留在栈顶，随后按类型字段序压入成员值，construct N 收尾。
        当前仅实现 array 分支（struct / tuple 待后续 Phase）。 */
     BCODE_CONSTRUCT,        /* U32：成员数量；弹 N 个成员值 + 类型位 → 按类型构造 value */
     BCODE_INDEX_GET,        /* 弹 self + index，返回 self[index]（get_item） */

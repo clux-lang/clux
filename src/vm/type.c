@@ -44,7 +44,8 @@ value_t *type_as_value(vm_t *vm, const type_t *t) {
    程序类型 id 由 sema 分配，从 64 起（预留扩展空隙，见 vm.h 注释）。
    TYPE_ID_BUILTIN_COUNT / TYPE_ID_PROGRAM_BASE 定义于 vm/type.h（sema/编译器共用）。 */
 
-/* SEAL <id> 登记：扩容至 id+1 后写入。重复登记幂等（同一实例多 id 别名）。
+/* DEFINE_TYPE <id> 声明登记（SEAL 密封后按自身 id 幂等重绑）：扩容至
+   id+1 后写入。重复登记幂等（同一实例多 id 别名）。
    空洞槽位（内建段与程序段之间 17..63）以 NULL 填充——vec_push 拒绝
    NULL 值（no-op），故用 vec_resize 扩展长度填充。 */
 void vm_type_bind(vm_t *vm, uint32_t id, const type_t *t) {
@@ -124,6 +125,24 @@ bool type_has_const(const type_t *t) {
     for (const type_t *p = t; p; p = type_qualifier_sub(p))
         if (p->kind == TYPE_KIND_CONST) return true;
     return false;
+}
+
+/* SET_TYPE 运行期用：把 sub 设进开放限定类型（const/volatile 两遍构造的
+   "设字段"一步）。密封后静默忽略（与 array/func 的 set 系列一致）。 */
+void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub) {
+    (void)vm;
+    if (!t || !sub) return;
+    if (type_is_sealed(t)) return;
+    switch (t->kind) {
+        case TYPE_KIND_CONST:
+            ((const_type_t *)t)->sub = sub;
+            break;
+        case TYPE_KIND_VOLATILE:
+            ((volatile_type_t *)t)->sub = sub;
+            break;
+        default:
+            break; /* 非限定类型静默忽略 */
+    }
 }
 
 /* ---- type_promote ---- */

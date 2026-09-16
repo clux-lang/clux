@@ -208,7 +208,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_CONSTRUCT: {
     /* 类型字面量构造 .<type>{ fields }：
-       1. 类型位：compile_type_expr（[N]T → PUSH_ARRAY...SEAL 留类型值栈顶）
+       1. 类型位：compile_type_expr（[N]T → 声明-定义两步构造，LOAD_TYPE 留类型值栈顶）
        2. 各字段值按序压栈（栈: [type_value, v1..vN]）
        3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 数组值（结果压栈）
        栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。 */

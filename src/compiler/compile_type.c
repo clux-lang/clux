@@ -85,11 +85,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
   }
 
   if (type_expr->kind == AST_ARRAY) {
-    /* [N]T 数组类型：PUSH_ARRAY 压开放 array type value → 元素类型
-       （递归 compile_type_expr）→ DEFINE_BOUND N 一次性设元素类型+边界
-       （弹元素类型）→ SEAL <id> 密封+登记（消费栈）→ LOAD_TYPE <id>
-       拉回类型值（保持"类型表达式压类型值"契约，调用方如 CONSTRUCT
-       类型位仍得 +1）。边界 N 已被 sema 折叠为 AST_INT_LIT（编译期常量）。
+    /* [N]T 数组类型（声明-定义两步模型）：
+       声明：PUSH_ARRAY 压开放 array type value → DEFINE_TYPE <tid> 绑定
+       program id + 登记进 types_by_id → LOAD_TYPE <tid> 拉回开放对象（定义
+       起点）。
+       定义：元素类型（递归 compile_type_expr）→ DEFINE_BOUND N 设元素类型
+       +边界（弹元素类型）→ SEAL 封闭（算布局；密封后按自身 id 幂等更新登记）
+       → LOAD_TYPE <tid> 拉回类型值（保持"类型表达式压类型值"契约，调用方
+       如 CONSTRUCT 类型位仍得 +1）。
+       边界 N 已被 sema 折叠为 AST_INT_LIT（编译期常量）。
        注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
        compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
@@ -97,6 +101,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     ast_array_t *arr = (ast_array_t *)type_expr;
 
     bcode_write_op(c->bc, BCODE_PUSH_ARRAY);   /* 栈: [open_array_type] */
+    st_push(c, 1);
+
+    uint32_t tid = c->type_id_next++;
+    bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回开放对象（定义起点） */
+    bcode_write_u32(c->bc, tid);
     st_push(c, 1);
 
     compile_type_expr(c, arr->base_type);      /* 栈: [open, elem_type] */
@@ -120,9 +133,7 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     bcode_write_u32(c->bc, (uint32_t)len);
     st_push(c, -1);
 
-    uint32_t tid = c->type_id_next++;
-    bcode_write_op(c->bc, BCODE_SEAL);         /* 弹 array type → 密封+登记 */
-    bcode_write_u32(c->bc, tid);
+    bcode_write_op(c->bc, BCODE_SEAL);         /* 封闭：算布局（消费栈） */
     st_push(c, -1);
 
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */

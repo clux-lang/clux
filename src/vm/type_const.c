@@ -156,10 +156,11 @@ const vtable_t VTABLE_CONST = {
     .explicit_cast = c_explicit_cast,
     .type_equal = c_type_equal,
     .type_extends = c_type_extends,
+    .type_seal = type_const_seal, /* 开放构造路径（PUSH_CONST → SEAL）密封入口 */
 };
 
 /* ===========================================================================
- * intern
+ * 开放构造（PUSH_CONST / SET_TYPE / SEAL，与 array/func 统一的两遍构造）
  * =========================================================================== */
 
 /* 构造名 "const <sub 名>"（堆分配，vm 拥有） */
@@ -177,32 +178,85 @@ static char *qual_name(allocator_t *alloc, const char *prefix,
     return buf;
 }
 
-const type_t *type_const_intern(vm_t *vm, const type_t *sub) {
-    if (!vm || !sub) return NULL;
-    if (!vm->const_types) return NULL;
-
-    /* 去重扫描 */
-    size_t n = vec_len(vm->const_types);
-    for (size_t i = 0; i < n; i++) {
-        const const_type_t *ct = (const const_type_t *)vec_get(vm->const_types, i);
-        if (ct && ct->sub == sub) return &ct->base;
-    }
-
+/* 分配开放 const_type（sub=NULL，不入池，不压栈）。供字节码路径
+ * （type_const_push）与 intern 快捷（type_const_intern）共用。 */
+static const_type_t *const_type_create_open(vm_t *vm) {
     const_type_t *ct = (const_type_t *)allocator_new_ex(
         vm->alloc, "const_type_t", sizeof(const_type_t), NULL, NULL, NULL, 1);
     if (!ct) panic("vm: out of memory allocating const type");
     memset(ct, 0, sizeof(const_type_t));
-
-    char *name = qual_name(vm->alloc, "const", sub);
-    if (!name) panic("vm: out of memory allocating const type name");
-
     ct->base.vtable = &VTABLE_CONST;
-    ct->base.name = (strslice_t){ name, strlen(name) };
-    ct->base.size = sub->size;
-    ct->base.align = sub->align;
-    ct->base.kind = TYPE_KIND_CONST;
-    ct->sub = sub;
+    ct->base.kind   = TYPE_KIND_CONST;
+    /* name/size/align 由 seal 按 sub 填充；sub 由 SET_TYPE 设定；sealed 置 0 */
+    return ct;
+}
 
-    vec_push(vm->const_types, vm->alloc, ct);
+/* PUSH_CONST：分配开放 const_type（sub=NULL，不入池）+ 压其 type value。
+ * 返回开放 type（未密封），经 SET_TYPE 设 sub → SEAL 密封收尾。 */
+const type_t *type_const_push(vm_t *vm) {
+    if (!vm) return NULL;
+    const_type_t *ct = const_type_create_open(vm);
+    vec_push(vm->stack, vm->alloc, type_as_value(vm, &ct->base));
+    return &ct->base; /* 外部只持有 type_t*，不感知 const_type_t 子类 */
+}
+
+/* SEAL：计算内存布局（size/align 拷贝 sub——const 值存储与 sub 相同），
+ * 按 sub 指针去重 intern，标记 sealed，返回该 const type（允许链式）。
+ * t 须为已设 sub 的开放 const 类型（type_const_push 产物）。 */
+const type_t *type_const_seal(vm_t *vm, const type_t *t) {
+    if (!vm || !t || t->kind != TYPE_KIND_CONST) return NULL;
+    if (type_is_sealed(t)) return t;  /* 已密封直接返回（幂等） */
+
+    const_type_t *ct = (const_type_t *)t;
+
+    /* 必须已设 sub（SET_TYPE） */
+    if (!ct->sub) return NULL;
+
+    if (!vm->const_types) vm->const_types = vec_new(vm->alloc, /*owns_element=*/false);
+
+    /* 去重 intern（按 sub 指针）：命中已有 sealed 类型则复用并手工回收本开放类型 */
+    size_t n = vec_len(vm->const_types);
+    for (size_t i = 0; i < n; i++) {
+        const const_type_t *other = (const const_type_t *)vec_get(vm->const_types, i);
+        if (other && other != ct && type_is_sealed(&other->base) &&
+            other->sub == ct->sub) {
+            /* 本开放类型与已有 sealed 类型重复：复用 other。
+             * 操作数栈中引用本开放类型 ct 的 type value 由 value_seal 负责
+             * 重定向到 other（避免悬空）；此处仅手工回收 ct。 */
+            if (ct->base.name.ptr) {
+                char *np = (char *)ct->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&ct);
+            return &other->base;
+        }
+    }
+
+    /* 计算内存布局：const 值存储与 sub 相同（size/align 拷贝，无额外布局），
+       置 sealed 标志（构造完成后不可再修改 sub） */
+    ct->base.size   = ct->sub->size;
+    ct->base.align  = ct->sub->align;
+    ct->base.sealed = true;
+
+    /* 重建类型名 "const <sub 名>"（sub 密封后名字已定） */
+    char *name = qual_name(vm->alloc, "const", ct->sub);
+    if (!name) panic("vm: out of memory allocating const type name");
+    ct->base.name = (strslice_t){ name, strlen(name) };
+
+    vec_push(vm->const_types, vm->alloc, ct);  /* 密封后入池（去重 intern） */
     return &ct->base;
+}
+
+/* ===========================================================================
+ * intern
+ * =========================================================================== */
+
+const type_t *type_const_intern(vm_t *vm, const type_t *sub) {
+    /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。
+     * 与 type_const_push 的区别：不向操作数栈压入 type value（嵌套构造
+     * 场景避免栈布局污染）。去重 intern 由 type_const_seal 完成。 */
+    if (!vm || !sub) return NULL;
+    const_type_t *ct = const_type_create_open(vm);
+    ct->sub = sub;
+    return type_const_seal(vm, &ct->base);
 }

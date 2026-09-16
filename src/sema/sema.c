@@ -150,14 +150,17 @@ static bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
  * 与 funcs 同构：sema 解析出的每个类型登记为 sema_type_t（type 指针 +
  * "__type_N" 名字 + TYPE_ID_PROGRAM_BASE+index id），驱动编译器 hoist
  * 类型提升区。AST 类型槽位经 AST_TYPE_REF 名字引用，保持平凡可解耦。
+ * 登记覆盖：复合类型（数组/const/volatile）+ **func 签名类型**（签名本质
+ * 是普通类型；函数指针作参数时签名引用签名，须经 hoist 依赖后序构造）。
  *
  * 名字 "__type_N"（N = 队列下标）由 sema arena 分配（生命周期 = arena，
  * 存活到编译完成）；id 与名字的 N 一一对应（id = 64 + N），compiler 经
  * 名字查表拿 id 发 LOAD_TYPE。
  * =========================================================================== */
 
-/* 复合类型的结构依赖递归登记：数组的元素类型、const/volatile 的 sub。
- * func 签名类型不在 AST 类型槽位出现（签名在注册段内联构造），跳过。 */
+/* 复合类型的结构依赖递归登记：数组的元素类型、const/volatile 的 sub、
+ * func 签名类型的参数与返回类型（签名可引用签名——函数指针作参数/返回，
+ * 依赖链递归覆盖）。内建标量无结构依赖。 */
 static void sema_type_register_deps(sema_t *sema, const type_t *t) {
   if (!t) return;
   switch (t->kind) {
@@ -172,8 +175,20 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       if (sub) sema_type_register(sema, sub);
       break;
     }
+    case TYPE_KIND_FUNC: {
+      /* 签名类型的参数/返回类型也是程序类型（含 func——函数指针作参数，
+         签名引用签名）。依赖后序：先登记依赖，hoist pass 2 先定义依赖。 */
+      size_t n = func_type_param_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const type_t *pt = func_type_param(t, i);
+        if (pt) sema_type_register(sema, pt);
+      }
+      const type_t *rt = func_type_return(t);
+      if (rt) sema_type_register(sema, rt);
+      break;
+    }
     default:
-      break; /* 标量/str/bool/type/func/error：无结构依赖 */
+      break; /* 标量/str/bool/type/error：无结构依赖 */
   }
 }
 
@@ -183,10 +198,25 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   /* 内建类型跳过登记：id 段 0..16 已由 vm_register_builtin_types 固定绑定，
      LOAD_TYPE <内建 id> 直接可查，无需 program id 别名。登记了反而让
      hoist 区发冗余的 SEAL→LOAD_TYPE 别名绑定（字节码膨胀）。
-     kind 段判断（INTERRUPT < kind < COUNT 即 M2 复合类型段）：复合类型
-     首次登记时 t->id 尚未赋值（仍为 0），不能用 id < TYPE_ID_BUILTIN_COUNT
-     判断，会误伤跳过。 */
-  if (t->kind <= TYPE_KIND_INTERRUPT || t->kind >= TYPE_KIND_COUNT) return NULL;
+     kind 段判断：内建标量（VOID..ERROR）+ INTERRUPT 哨兵跳过；**FUNC 签名
+     类型除外**——用户函数签名登记（函数指针作参数时签名引用签名，须经
+     hoist 依赖后序构造），复合段（CONST..CUNION）登记。func 签名类型
+     kind=6 ≤ INTERRUPT=8，不能用 kind<=INTERRUPT 一刀切判断，须显式列。 */
+  switch (t->kind) {
+    case TYPE_KIND_VOID:
+    case TYPE_KIND_BOOL:
+    case TYPE_KIND_INT:
+    case TYPE_KIND_FLOAT:
+    case TYPE_KIND_STR:
+    case TYPE_KIND_TYPE:
+    case TYPE_KIND_ERROR:
+    case TYPE_KIND_INTERRUPT:
+      return NULL; /* 内建标量/哨兵 */
+    case TYPE_KIND_FUNC:
+      break; /* 用户函数签名类型：登记（提升进 hoist 区） */
+    default:
+      break; /* 复合段（CONST..CUNION）：登记 */
+  }
 
   /* 按 type_t 指针去重：同一 intern 实例只登记一次 */
   const sema_type_t *found = sema_type_find(sema, t);
@@ -452,10 +482,14 @@ static void pass2_types(sema_t *sema) {
 
     /* 注册签名类型（按签名去重 intern 到 vm 类型池，type_func_sig 复制 params）；
        符号统一记录定义 AST 节点（函数 = AST_FUNC_DEF）；签名类型存于
-       sym->type，调用点经 value_make_shadow(vm, sym->type) 构造 shadow callee */
+       sym->type，调用点经 value_make_shadow(vm, sym->type) 构造 shadow callee。
+       签名类型**登记进 sema->types**（与数组/const 同机制）——签名本质是
+       普通类型，且函数指针作参数时签名引用签名，须经 hoist 两遍扫描
+       依赖后序构造（参数/返回类型已在此前解析登记，父先入队）。 */
     const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
     sym->type = sig;
     sym->ast = f;
+    sema_type_register(sema, sig); /* 签名类型提升：登记 + 递归依赖登记 */
 
     /* params 临时数组已被 type_func_sig 复制，此处释放 */
     if (params) allocator_free(sema->vm->alloc, (void **)&params);

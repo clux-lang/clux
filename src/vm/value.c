@@ -202,7 +202,13 @@ const value_t *value_seal(vm_t *vm, value_t *src) {
         return src;  /* 无开放构造阶段（如内置基础类型已 sealed） */
 
     const type_t *sealed = t->vtable->type_seal(vm, t);
-    if (sealed && sealed != t) {
+    if (!sealed) return src;  /* type_seal 失败（缺字段等），原样返回 */
+
+    /* 统一兜底置位：密封后 sealed 标志必须为 true（各 type_seal 实现内部
+     * 已置位，此处兜底防御，覆盖未来新类型遗漏；幂等无害） */
+    if (!((type_t *)sealed)->sealed) ((type_t *)sealed)->sealed = true;
+
+    if (sealed != t) {
         /* 去重：当前 t 已被 vtable 手工回收，重定向所有引用 t 的 type value
          * 到缓存 sealed（先更新自身，再扫描操作数栈以防多处引用）。 */
         *(const type_t **)value_data(src) = sealed;

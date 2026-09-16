@@ -68,9 +68,11 @@ static int64_t read_sint(const value_t *v) {
 TEST_F(ArrayBcodeTest, ConstructArrayValueFromElements) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -89,9 +91,11 @@ TEST_F(ArrayBcodeTest, ConstructArrayValueFromElements) {
 TEST_F(ArrayBcodeTest, ConstructThenIndexGet) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -111,9 +115,11 @@ TEST_F(ArrayBcodeTest, ConstructThenIndexGet) {
 TEST_F(ArrayBcodeTest, ConstructThenIndexSetThenGet) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -136,9 +142,11 @@ TEST_F(ArrayBcodeTest, ConstructThenIndexSetThenGet) {
 TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsReturnsError) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -158,9 +166,11 @@ TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsReturnsError) {
 TEST_F(ArrayBcodeTest, IndexSetOutOfBoundsReturnsError) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -181,9 +191,11 @@ TEST_F(ArrayBcodeTest, IndexSetOutOfBoundsReturnsError) {
 TEST_F(ArrayBcodeTest, NegativeIndexIsOutOfBounds) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -203,9 +215,11 @@ TEST_F(ArrayBcodeTest, NegativeIndexIsOutOfBounds) {
 TEST_F(ArrayBcodeTest, LengthReturnsElementCount) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -237,9 +251,11 @@ TEST_F(ArrayBcodeTest, LengthOnScalarReturnsError) {
 TEST_F(ArrayBcodeTest, ConstructCountMismatchReturnsError) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -273,17 +289,21 @@ TEST_F(ArrayBcodeTest, ConstructNonArrayTypeReturnsError) {
 TEST_F(ArrayBcodeTest, ConstructTwiceLeavesNoTypeValueOnStack) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 1\n"
         "    push_i32 2\n"
         "    construct 2\n"     /* [arr1] */
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -309,28 +329,36 @@ TEST_F(ArrayBcodeTest, ConstructTwiceLeavesNoTypeValueOnStack) {
 TEST_F(ArrayBcodeTest, ConstructNestedArray) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"         /* [open_outer] */
+        "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
         "    push_array\n"         /* [open_outer, open_inner] */
+        "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
+        "    load_type 64\n"       /* 拉回 open_inner */
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"            /* 弹 t_inner=[i32;2]，密封并登记 id 64 */
+        "    seal\n"               /* 弹 t_inner=[i32;2]，密封（按自身 id 64 重绑登记） */
         "    load_type 64\n"       /* [open_outer, t_inner] */
         "    define_bound 2\n"     /* 弹 t_inner 设为 open_outer 元素类型 */
-        "    seal 65\n"            /* 弹 t_outer=[[i32;2];2]，密封并登记 id 65 */
+        "    seal\n"               /* 弹 t_outer=[[i32;2];2]，密封（按自身 id 65 重绑登记） */
         "    load_type 65\n"       /* [t_outer] */
         /* 内层 1：重新压类型位（去重 → t_inner，id 64 幂等） */
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"       /* [t_outer, t_inner] */
         "    push_i32 1\n"
         "    push_i32 2\n"
         "    construct 2\n"        /* [t_outer, arr_inner1] */
         /* 内层 2 */
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"       /* [t_outer, arr_inner1, t_inner2] */
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -356,9 +384,11 @@ TEST_F(ArrayBcodeTest, ConstructNestedArray) {
 TEST_F(ArrayBcodeTest, IndexCompoundViaPushValueDup) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -386,9 +416,11 @@ TEST_F(ArrayBcodeTest, IndexCompoundViaPushValueDup) {
 TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsViaExpr) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 7\n"
         "    push_i32 8\n"
@@ -411,26 +443,34 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
     ASSERT_TRUE(assemble_and_run(
         /* 构造外层 [2][2]i32（同 ConstructNestedArray 序列） */
         "    push_array\n"         /* [open_outer] */
+        "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
         "    push_array\n"         /* [open_outer, open_inner] */
+        "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
+        "    load_type 64\n"       /* 拉回 open_inner */
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"            /* 弹 t_inner，密封登记 id 64 */
+        "    seal\n"               /* 弹 t_inner，密封（按自身 id 64 重绑登记） */
         "    load_type 64\n"       /* [open_outer, t_inner] */
         "    define_bound 2\n"     /* 弹 t_inner 设外层元素类型 */
-        "    seal 65\n"            /* 弹 t_outer，密封登记 id 65 */
+        "    seal\n"               /* 弹 t_outer，密封（按自身 id 65 重绑登记） */
         "    load_type 65\n"       /* [t_outer] */
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"       /* [t_outer, t_inner] */
         "    push_i32 1\n"
         "    push_i32 2\n"
         "    construct 2\n"        /* 内层行0 */
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"       /* [t_outer, row0, t_inner] */
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -461,27 +501,35 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
  * 覆盖（DEFINE → scope_define → value_clone）。 */
 TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
     ASSERT_TRUE(assemble_and_run(
-        "    push_array\n"
-        "    push_array\n"
+        "    push_array\n"         /* [open_outer] */
+        "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
+        "    push_array\n"         /* [open_outer, open_inner] */
+        "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
+        "    load_type 64\n"       /* 拉回 open_inner */
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"               /* 弹 t_inner，密封（按自身 id 64 重绑登记） */
+        "    load_type 64\n"       /* [open_outer, t_inner] */
+        "    define_bound 2\n"     /* 弹 t_inner 设外层元素类型 */
+        "    seal\n"               /* 弹 t_outer，密封（按自身 id 65 重绑登记） */
+        "    load_type 65\n"       /* [t_outer] */
+        "    push_array\n"
+        "    define_type 64\n"
         "    load_type 64\n"
-        "    define_bound 2\n"
-        "    seal 65\n"
-        "    load_type 65\n"
-        "    push_array\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 1\n"
         "    push_i32 2\n"
         "    construct 2\n"
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 2\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -505,9 +553,11 @@ TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
 TEST_F(ArrayBcodeTest, ConstructAndIndexAsmDisasmRoundTrip) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -537,13 +587,16 @@ TEST_F(ArrayBcodeTest, ConstructAndIndexAsmDisasmRoundTrip) {
     delete_allocator(&da);
 }
 
-/* PUSH_ARRAY / LOAD elem / DEFINE_BOUND N / SEAL 经统一 SEAL 构造出 [i32;3] */
+/* PUSH_ARRAY → DEFINE_TYPE <id> 声明 → LOAD_TYPE 拉回 → LOAD elem →
+   DEFINE_BOUND N → SEAL（无操作数）两步构造出 [i32;3] */
 TEST_F(ArrayBcodeTest, PushArrayDefineBoundSealBuildsArrayType) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    halt\n"));
 
@@ -562,14 +615,18 @@ TEST_F(ArrayBcodeTest, PushArrayDefineBoundSealBuildsArrayType) {
 TEST_F(ArrayBcodeTest, DuplicateArrayTypeInternedOnce) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    halt\n"));
 
@@ -585,14 +642,18 @@ TEST_F(ArrayBcodeTest, DuplicateArrayTypeInternedOnce) {
 TEST_F(ArrayBcodeTest, DistinctElemAndLengthAreDistinct) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 3\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    push_array\n"
+        "    define_type 65\n"
+        "    load_type 65\n"
         "    load \"u8\"\n"
         "    define_bound 4\n"
-        "    seal 65\n"
+        "    seal\n"
         "    load_type 65\n"
         "    halt\n"));
 
@@ -609,9 +670,11 @@ TEST_F(ArrayBcodeTest, DistinctElemAndLengthAreDistinct) {
 TEST_F(ArrayBcodeTest, AsmDisasmRoundTrip) {
     const char *src =
         "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
         "    load \"i32\"\n"
         "    define_bound 5\n"
-        "    seal 64\n"
+        "    seal\n"
         "    load_type 64\n"
         "    halt\n";
     ASSERT_TRUE(assemble_and_run(src));
@@ -622,6 +685,7 @@ TEST_F(ArrayBcodeTest, AsmDisasmRoundTrip) {
     char *text = bcode_disasm_mem(da, bc, NULL);
     ASSERT_NE(text, nullptr);
     EXPECT_NE(strstr(text, "PUSH_ARRAY"), nullptr);
+    EXPECT_NE(strstr(text, "DEFINE_TYPE 64"), nullptr);
     EXPECT_NE(strstr(text, "DEFINE_BOUND 5"), nullptr);
     EXPECT_NE(strstr(text, "SEAL"), nullptr);
     allocator_free(da, (void **)&text); /* delete_allocator 仅报告泄漏、不释放，需显式回收 */

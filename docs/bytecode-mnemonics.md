@@ -80,8 +80,12 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `FUNC_TYPE_VARARG` | — | 标记 func type 为可变参数（无操作数）。 |
 | `PUSH_ARRAY` | — | 分配空**数组类型**（`array_type_t`，处于开放态、暂不入池），压其 type value（构造起点）。 |
 | `DEFINE_BOUND` | `U32`（长度立即数 N） | 弹栈顶元素 type value → 设为 array type 的元素类型，并把立即数 N 设为长度，构造出 `[elem; N]`。 |
-| `LOAD_TYPE` | `U32`（类型 id） | 从 `vm->types_by_id` 按 id 查类型并压其 type value（`SEAL <id>` 登记的产物）。内建 id 0..16 预登记，程序类型 id ≥64 由 `SEAL <id>` 密封时登记。 |
-| `SEAL` | `U32`（类型 id） | 弹栈顶 type value（消费栈，类型不留栈）→ 经 `value_seal` 代理到 `data->vtable->type_seal`，按类型各自池查重 intern（首次成功入池并置基类 `sealed=true`；去重复用则回收开放类型并重定向栈引用）→ 程序类型 id（≥64）写入 `t->id` 并登记进 `vm->types_by_id`（幂等，多 id 别名同一类型）。密封后的类型由后续 `LOAD_TYPE <id>` 主动拉取。 |
+| `PUSH_CONST` | — | 分配空 **const 限定类型**（`const_type_t`，开放态，sub=NULL，不入池），压其 type value（构造起点，供两遍扫描 pass 1 声明）。 |
+| `PUSH_VOLATILE` | — | 分配空 **volatile 限定类型**（`volatile_type_t`，开放态，sub=NULL，不入池），压其 type value（构造起点，供两遍扫描 pass 1 声明）。 |
+| `SET_TYPE` | — | 弹栈顶 type value（sub）→ 设为栈顶开放限定类型的 sub 字段（`type_qual_set_sub`，两遍扫描 pass 2 定义：`LOAD_TYPE <id>` 拉回开放对象 → `LOAD sub` → `SET_TYPE` 设 sub）。 |
+| `DEFINE_TYPE` | `U32`（类型 id） | 弹栈顶 type value（**类型声明**：消费栈）→ 绑定程序 id（≥64）写入 `t->id` 并登记进 `vm->types_by_id`（幂等，多 id 别名同一类型）。声明后 `LOAD_TYPE <id>` 可拉回开放对象继续定义。 |
+| `LOAD_TYPE` | `U32`（类型 id） | 从 `vm->types_by_id` 按 id 查类型并压其 type value。内建 id 0..16 预登记，程序类型 id ≥64 由 `DEFINE_TYPE <id>` 声明登记（开放构造阶段可拉回未密封对象，定义完成后 `SEAL` 密封重绑）。 |
+| `SEAL` | —（无操作数） | 弹栈顶 type value（**类型定义收尾**：消费栈，类型不留栈）→ 经 `value_seal` 代理到 `data->vtable->type_seal`，按类型各自池查重 intern（首次成功入池并置基类 `sealed=true` + 布局计算；去重复用则回收开放类型并重定向栈引用）→ 密封前读开放对象自身 id（`DEFINE_TYPE` 已绑定，≥64），密封后按该 id 幂等更新登记（去重时重绑到新 intern 实例，避免登记表悬垂）。密封后的类型由后续 `LOAD_TYPE <id>` 主动拉取。 |
 | `PUSH_FUNCTION` | `U32`（entry pc，标签） | 弹栈顶签名类型（`LOAD_TYPE` 拉取的 `SEAL` 产物）→ 构造 `bcode_function_t{entry_pc}`（`fn->id` 默认 0）→ func value 压栈（函数对象，非签名类型）。函数 id 由编译器分配（程序段 ≥ 64），运行时由 `BIND_FUNC` 填充 `fn->id` 并登记进 `vm->functions_by_id`。 |
 | `BIND_FUNC` | `U32`（函数 id） | **peek** 栈顶 func value（不弹栈——注册段 `DEFINE` 需保留函数值）→ 填充 `fn->id = id` 并登记 `id → func` 进 `vm->functions_by_id`（幂等；程序函数 id ≥ `FUNC_ID_PROGRAM_BASE`）。id 单一来源——只在此出现一次。 |
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value（不弹栈）→ 拷贝函数显示名到 vm 堆（`fn->name`，`owns_name=true` 随对象释放）。仅命名函数定义写入；匿名函数表达式不写。 |
@@ -138,8 +142,8 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
 | `CAST` | — | 显式转换：类型经栈顶 type value（`LOAD` 压入），弹 type + 值后转换压回。 |
-| `CREATE_CONST` | — | 弹 type value → `type_const_intern` → type value 压回。 |
-| `CREATE_VOLATILE` | — | 弹 type value → `type_volatile_intern` → type value 压回。 |
+| `CREATE_CONST` | — | 弹 type value → `type_const_intern` → type value 压回（一次性快捷：开放构造+立即密封，不走两遍；编译器 hoist 区用 `PUSH_CONST`+`SET_TYPE`+`SEAL` 两遍路径，本指令保留为内联/防御分支）。 |
+| `CREATE_VOLATILE` | — | 弹 type value → `type_volatile_intern` → type value 压回（同上，一次性快捷保留为内联/防御分支）。 |
 
 ### 4.6 调用 / 返回
 

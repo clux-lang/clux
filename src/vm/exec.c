@@ -259,6 +259,37 @@ static value_t *op_create_volatile(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return type_as_value(vm, vt);
 }
 
+/* ---- 限定类型开放构造（PUSH_CONST/PUSH_VOLATILE + SET_TYPE + SEAL） ---- */
+
+/* PUSH_CONST：分配空 const type（开放，sub=NULL，不入池）+ 压其 type value
+ * （type_const_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_const(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_const_push(vm);
+    return NULL;
+}
+
+/* PUSH_VOLATILE：分配空 volatile type（开放，sub=NULL，不入池）+ 压其 type value */
+static value_t *op_push_volatile(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_volatile_push(vm);
+    return NULL;
+}
+
+/* SET_TYPE：弹栈顶 sub type value → peek 栈顶开放对象 → 设为 sub。
+ * 弹 sub 后，栈顶即当前构造的限定类型（由 PUSH_CONST/PUSH_VOLATILE 压入），
+ * 与 DEFINE_BOUND 同款协议。 */
+static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *sub_v = exec_stack_pop(vm);
+    const type_t *sub = *(const type_t **)value_data(sub_v);
+    value_t *open_v = exec_stack_peek(vm, 0);
+    const type_t *open = (open_v && value_type(open_v) == vm->type_type)
+                             ? value_as(open_v, const type_t *) : NULL;
+    type_qual_set_sub(vm, open, sub);
+    return NULL;
+}
+
 /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL） ---- */
 
 /* PUSH_FUNC_TYPE：分配空 func type 入池并压其 type value */
@@ -304,23 +335,42 @@ static value_t *op_func_type_vararg(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
-/* SEAL <id>：**消费**栈顶 type value——弹栈 → value_seal 密封（去重 intern；
- * 幂等，无开放构造阶段的类型如内建/const/volatile 原样返回）→ 登记
- * id→sealed type 进 types_by_id（幂等；多 id 别名同一 type_t）。
- * 程序 id（>= TYPE_ID_PROGRAM_BASE）同步写 t->id——SET_TYPE_NAME 按 id 判
- * 定"可改名"。sema 路径已设 t->id（sema_type_register），此处幂等冗余；
- * asm 手写路径（无 sema）依赖此同步。
- * 统一 SEAL 命令，func/array/struct/tuple 通用；密封后栈被清理（消费），
- * 需要类型时由后续 LOAD_TYPE <id> 主动拉取，不留残值在栈上。 */
-static value_t *op_seal(vm_t *vm, bytecode_t *bc, size_t *pc) {
+/* DEFINE_TYPE <id>：**类型声明**。弹栈顶 type value → 绑定程序 id
+ * （>= TYPE_ID_PROGRAM_BASE 才写 t->id；sema 路径已设 t->id，此处幂等
+ * 冗余；asm 手写路径依赖此同步）→ 登记 id→type 进 types_by_id（幂等；
+ * 多 id 别名同一 type_t）。此后 LOAD_TYPE <id> 可拉回该类型（开放或
+ * 密封均可）。两遍扫描 pass 1 对所有程序类型（数组 / 签名 / const /
+ * volatile 开放对象）发本指令声明登记；内建别名（无开放构造阶段）
+ * LOAD_TYPE <内建 id> 拉回已密封实例后 DEFINE_TYPE <id> 一步登记。 */
+static value_t *op_define_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t id = bcode_read_u32(bc, pc);
     value_t *tv = exec_stack_pop(vm);
     if (!tv || value_type(tv) != vm->type_type)
-        return value_make_error(vm, "exec: seal expects a type value");
-    value_seal(vm, tv); /* 密封（去重时 value_seal 已重定向 tv->data） */
+        return value_make_error(vm, "exec: define type expects a type value");
     const type_t *t = value_as(tv, const type_t *);
     if (id >= TYPE_ID_PROGRAM_BASE) ((type_t *)t)->id = id;
     vm_type_bind(vm, id, t);
+    return NULL;
+}
+
+/* SEAL（无操作数）：**类型定义收尾**。**消费**栈顶 type value——弹栈 →
+ * value_seal 密封（vtable->type_seal 去重 intern + 布局计算；幂等，无开放
+ * 构造阶段的内建类型原样返回）→ 密封前读开放对象自身 id（DEFINE_TYPE
+ * 已登记），密封后按该 id 幂等更新登记——去重复用时 value_seal 已把栈
+ * 引用重定向到缓存实例，此处同步重绑 types_by_id[id]，避免登记表指向
+ * 已被回收的开放对象。统一 SEAL 命令，func/array/const/volatile/struct/
+ * tuple 通用；密封后栈被清理（消费），需要类型时由后续 LOAD_TYPE <id>
+ * 主动拉取，不留残值在栈上。 */
+static value_t *op_seal(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *tv = exec_stack_pop(vm);
+    if (!tv || value_type(tv) != vm->type_type)
+        return value_make_error(vm, "exec: seal expects a type value");
+    const type_t *open = value_as(tv, const type_t *);
+    uint32_t id = (open && open->id >= TYPE_ID_PROGRAM_BASE) ? open->id : 0;
+    value_seal(vm, tv); /* 密封（去重时 value_seal 已重定向 tv->data） */
+    const type_t *t = value_as(tv, const type_t *);
+    if (id != 0) vm_type_bind(vm, id, t); /* 幂等更新登记（去重 → 重绑新实例） */
     return NULL;
 }
 
@@ -586,10 +636,14 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_CAST]           = op_cast,
     [BCODE_CREATE_CONST]   = op_create_const,
     [BCODE_CREATE_VOLATILE]= op_create_volatile,
+    [BCODE_PUSH_CONST]     = op_push_const,
+    [BCODE_PUSH_VOLATILE]  = op_push_volatile,
+    [BCODE_SET_TYPE]       = op_set_type,
     [BCODE_PUSH_FUNC_TYPE]   = op_push_func_type,
     [BCODE_FUNC_TYPE_PARAM]  = op_func_type_param,
     [BCODE_FUNC_TYPE_RETURN] = op_func_type_return,
     [BCODE_FUNC_TYPE_VARARG] = op_func_type_vararg,
+    [BCODE_DEFINE_TYPE]      = op_define_type,
     [BCODE_SEAL]             = op_seal,
     [BCODE_PUSH_FUNCTION]  = op_push_function,
     [BCODE_BIND_FUNC]      = op_bind_func,

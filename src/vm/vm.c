@@ -98,7 +98,7 @@ vm_t *vm_new(allocator_t *alloc) {
 
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
-       SEAL <id> 密封后动态扩容登记。 */
+       DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
     vm->types_by_id = vec_new(alloc, /*owns_element=*/false);
 
     /* 基本类型注册进 global scope（LOAD 指令按名查 type value） */

@@ -153,6 +153,21 @@ const type_t *type_const_intern(vm_t *vm, const type_t *sub);
 /** volatile 类型 intern（按 sub 指针去重，vm 拥有生命周期） */
 const type_t *type_volatile_intern(vm_t *vm, const type_t *sub);
 
+/* const/volatile 类型开放构造（M2 字节码协议 PUSH_CONST / PUSH_VOLATILE +
+ * SET_TYPE + SEAL，与数组/签名类型统一的两遍构造，获得向前声明能力）：
+ *   - type_const_push / type_volatile_push：分配空限定类型（sub=NULL，
+ *     不入池）并压其 type value，返回开放 type（未密封）
+ *   - type_qual_set_sub：设被修饰的底层类型（SET_TYPE 运行期用；密封后
+ *     静默忽略，与 array/func 的 set 系列一致）
+ *   - type_const_seal / type_volatile_seal：密封——按 sub 指针去重 intern +
+ *     拷贝 size/align（const 值存储与 sub 相同）+ 置 sealed + 入池
+ *     （vtable type_seal 槽位；去重复用时手工回收本开放类型） */
+const type_t *type_const_push(vm_t *vm);
+const type_t *type_volatile_push(vm_t *vm);
+void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub);
+const type_t *type_const_seal(vm_t *vm, const type_t *t);
+const type_t *type_volatile_seal(vm_t *vm, const type_t *t);
+
 /* 数组类型构造 API（array_type_push / array_type_set_elem / array_type_set_count /
  * array_type_seal / type_array_intern）与访问器（array_type_elem / array_type_len /
  * array_type_is_sealed / array_type_layout_size / array_type_layout_align）见
@@ -171,8 +186,9 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**
- * 登记类型到 id 表（vm->types_by_id，索引即 id）。SEAL <id> 运行期
- * 用（密封后登记）；幂等——同一类型重复登记（多 id 别名）无害。
+ * 登记类型到 id 表（vm->types_by_id，索引即 id）。DEFINE_TYPE <id> 运行期
+ * 用（类型声明：创建后绑定 id + 登记）；SEAL 密封去重复用时重绑。幂等——
+ * 同一类型重复登记（多 id 别名）无害。
  * Panics on out-of-memory.
  */
 void vm_type_bind(vm_t *vm, uint32_t id, const type_t *t);

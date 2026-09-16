@@ -113,8 +113,25 @@ static ast_node_t *sema_ct_type_expr(sema_t *sema, const type_t *t,
                                      const ast_node_t *origin) {
   if (!sema || !t) return NULL;
   const sema_type_t *st = sema_type_register(sema, t);
-  bool builtin =
-      t->kind <= TYPE_KIND_INTERRUPT || t->kind >= TYPE_KIND_COUNT;
+  /* 内建标量（VOID..ERROR）+ INTERRUPT 哨兵不登记（func 签名类型可登记，
+     但此处只处理数组折叠产物，func 不会到达——保持与 sema_type_register
+     登记策略一致） */
+  bool builtin;
+  switch (t->kind) {
+    case TYPE_KIND_VOID:
+    case TYPE_KIND_BOOL:
+    case TYPE_KIND_INT:
+    case TYPE_KIND_FLOAT:
+    case TYPE_KIND_STR:
+    case TYPE_KIND_TYPE:
+    case TYPE_KIND_ERROR:
+    case TYPE_KIND_INTERRUPT:
+      builtin = true;
+      break;
+    default:
+      builtin = false; /* FUNC / 复合段：登记 */
+      break;
+  }
   if (!st && !builtin) return NULL; /* 复合类型登记失败（OOM） */
   ast_node_t *ref =
       ast_type_ref_new(sema->arena, origin->tok_begin, origin->tok_end);

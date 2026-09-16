@@ -1,24 +1,32 @@
-; arithmetic.cxs — 带参数的函数 add(a, b) 与嵌套调用
-; 引导段先注册 add，再注册 main
+; arithmetic.cxs - 带参数的函数 add(a, b) 与嵌套调用
+; 类型提升区（hoist 两遍扫描）：pass 1 声明全部签名（add id 64 / main id 65），
+; pass 2 定义 + SEAL 封闭（依赖后序）；引导段 LOAD_TYPE 拉回签名注册函数
 _start:
+    ; pass 1 声明所有类型
     push_func_type
+    define_type 64
+    push_func_type
+    define_type 65
+    ; pass 2 定义所有类型（依赖后序）
+    load_type 64
     push "i32"
     func_type_param
     push "i32"
     func_type_param
     push "i32"
     func_type_return
-    seal 64
+    seal
+    load_type 65
+    push "void"
+    func_type_return
+    seal
+    ; 函数注册段
     load_type 64
     push_function [add]
     bind_func 64
     set_func_name "add"
     push_undefined
     define "add"
-    push_func_type
-    push "void"
-    func_type_return
-    seal 65
     load_type 65
     push_function [main]
     bind_func 65
