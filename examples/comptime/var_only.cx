@@ -1,5 +1,5 @@
 comptime var A: i32 = 42;
 
-func main() {
+func main(): void {
     printf("%d\n", A);
 }

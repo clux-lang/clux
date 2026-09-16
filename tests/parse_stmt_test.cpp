@@ -1167,7 +1167,7 @@ TEST_F(ParseStmtTest, FuncDefWithParams) {
 }
 
 TEST_F(ParseStmtTest, FuncDefVoidReturn) {
-    parser_t *p = make_parser("func greet(name:str) { return; }");
+    parser_t *p = make_parser("func greet(name:str): void { return; }");
     ASSERT_NE(p, nullptr);
 
     ast_node_t *node = parse_func_def(p);
@@ -1175,7 +1175,11 @@ TEST_F(ParseStmtTest, FuncDefVoidReturn) {
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
 
     auto *fn = (ast_func_def_t *)node;
-    EXPECT_EQ(fn->return_expr, nullptr);  /* void: 无返回类型 */
+    /* 显式 : void → return_expr 解析为 AST_IDENT("void") */
+    ASSERT_NE(fn->return_expr, nullptr);
+    EXPECT_EQ(fn->return_expr->kind, AST_IDENT);
+    EXPECT_TRUE(strslice_eq(((ast_ident_t *)fn->return_expr)->name,
+                            strslice_from_cstr("void")));
     ASSERT_NE(fn->params, nullptr);
 
     auto *param = (ast_var_def_t *)fn->params;

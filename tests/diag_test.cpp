@@ -165,7 +165,7 @@ TEST_F(DiagTest, PrintSnippetBlockRustStyle) {
     {
         FILE *fp = fopen(path.c_str(), "wb");
         ASSERT_NE(fp, nullptr);
-        fputs("func main() { foo(1, 2); }\n", fp);
+        fputs("func main(): void { foo(1, 2); }\n", fp);
         fclose(fp);
     }
 
@@ -183,7 +183,7 @@ TEST_F(DiagTest, PrintSnippetBlockRustStyle) {
 
     EXPECT_NE(out.find("error: expects 1 arguments, got 2"), std::string::npos);
     EXPECT_NE(out.find(" --> " + path + ":1:18"), std::string::npos);
-    EXPECT_NE(out.find("1 | func main() { foo(1, 2); }"), std::string::npos);
+    EXPECT_NE(out.find("1 | func main(): void { foo(1, 2); }"), std::string::npos);
     EXPECT_NE(out.find("^"), std::string::npos);
 
     std::remove(path.c_str());

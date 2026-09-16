@@ -154,12 +154,12 @@ TEST_F(SemaTest, AnalyzeNullProgram) {
 /* ================================================================ */
 
 TEST_F(SemaTest, EmptyFunction) {
-    EXPECT_TRUE(analyze("func main() { }"));
+    EXPECT_TRUE(analyze("func main(): void { }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, VarInferenceAndUse) {
-    EXPECT_TRUE(analyze("func main() { var x = 1; var y = x; }"));
+    EXPECT_TRUE(analyze("func main(): void { var x = 1; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     /* 作用域树：global → main 函数作用域 */
@@ -177,14 +177,14 @@ TEST_F(SemaTest, VarInferenceAndUse) {
 }
 
 TEST_F(SemaTest, ExplicitTypeAnnotation) {
-    EXPECT_TRUE(analyze("func main() { var x:i64 = 1; var y:f64 = 1.5; }"));
+    EXPECT_TRUE(analyze("func main(): void { var x:i64 = 1; var y:f64 = 1.5; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, ImplicitCastInit) {
     /* 同类别加宽可隐式转换：i32→i64、f32→f64（f32 值经 var 显式标注产生） */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i64 = 1;"
         "  var c:f64 = 1.5;"
         "  var d:f64 = 1.5;"
@@ -204,7 +204,7 @@ TEST_F(SemaTest, ImplicitCastInit) {
 
 TEST_F(SemaTest, BinaryOpsTypeCheck) {
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a = 1 + 2;"
         "  var b = 3.0 * 4.0;"
         "  var c = a < 10;"
@@ -217,14 +217,14 @@ TEST_F(SemaTest, BinaryOpsTypeCheck) {
 
 TEST_F(SemaTest, FunctionOrderFreedom) {
     /* Pass 1 先收集全部函数名：main 可调用定义在后面的 foo */
-    EXPECT_TRUE(analyze("func main() { foo(); } func foo() { }"));
+    EXPECT_TRUE(analyze("func main(): void { foo(); } func foo(): void { }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, CallReturnTypeShadow) {
     EXPECT_TRUE(analyze(
         "func add(a:i32, b:i32):i32 { return a + b; }"
-        "func main() { var r = add(1, 2); }"));
+        "func main(): void { var r = add(1, 2); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
@@ -235,7 +235,7 @@ TEST_F(SemaTest, CallReturnTypeShadow) {
 }
 
 TEST_F(SemaTest, VoidCallAsStatement) {
-    EXPECT_TRUE(analyze("func foo() { } func main() { foo(); }"));
+    EXPECT_TRUE(analyze("func foo(): void { } func main(): void { foo(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
@@ -254,7 +254,7 @@ TEST_F(SemaTest, ReturnThenUnreachableStatement) {
 
 TEST_F(SemaTest, WhileAndForLoops) {
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var i:i32 = 0;"
         "  while (i < 10) { i += 1; }"
         "  for (var j:i32 = 0; j < 5; j = j + 1) { }"
@@ -263,13 +263,13 @@ TEST_F(SemaTest, WhileAndForLoops) {
 }
 
 TEST_F(SemaTest, DiscardUnderscore) {
-    EXPECT_TRUE(analyze("func main() { _ = 1 + 2; }"));
+    EXPECT_TRUE(analyze("func main(): void { _ = 1 + 2; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, BreakContinueInsideLoop) {
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  while (true) { break; }"
         "  for (var i:i32 = 0; i < 3; i = i + 1) { continue; }"
         "}"));
@@ -279,7 +279,7 @@ TEST_F(SemaTest, BreakContinueInsideLoop) {
 TEST_F(SemaTest, ShadowingSelfReferenceResolvesOuter) {
     /* if body 内 var x = x + 1 的 x 在 init 求值时未激活 → 解析到外层 x */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var x = 1;"
         "  if (true) { var x = x + 1; }"
         "}"));
@@ -293,7 +293,7 @@ TEST_F(SemaTest, ShadowingSelfReferenceResolvesOuter) {
 TEST_F(SemaTest, UninitDeclThenAssignThenRead) {
     /* var a = undefined; a = 1; 赋值后读取 OK */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  a = 1;"
         "  var b = a;"
@@ -304,7 +304,7 @@ TEST_F(SemaTest, UninitDeclThenAssignThenRead) {
 TEST_F(SemaTest, UninitDeclReadBeforeAssign) {
     /* var a = undefined; 直接读取 → used before initialization */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  var b = a;"
         "}"));
@@ -314,7 +314,7 @@ TEST_F(SemaTest, UninitDeclReadBeforeAssign) {
 TEST_F(SemaTest, UninitDeclInExpr) {
     /* 未初始化变量参与运算 → used before initialization */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  var b = a + 1;"
         "}"));
@@ -324,14 +324,14 @@ TEST_F(SemaTest, UninitDeclInExpr) {
 TEST_F(SemaTest, UninitDeclNoExplicitType) {
     /* var a = undefined 无显式类型 → 无法推断类型 */
     EXPECT_FALSE(analyze(
-        "func main() { var a = undefined; }"));
+        "func main(): void { var a = undefined; }"));
     expect_message(0, "cannot infer type of uninitialized variable 'a'");
 }
 
 TEST_F(SemaTest, UndefinedOutsideVarInit) {
     /* undefined 只允许作为变量初始化的未初始化声明 */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  a = undefined;"
         "}"));
@@ -341,7 +341,7 @@ TEST_F(SemaTest, UndefinedOutsideVarInit) {
 TEST_F(SemaTest, IfBothBranchesAssignThenRead) {
     /* if 两分支都赋值 → 合并点确定已初始化 → 后读取 OK（用户正确场景） */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { a = 1; } else { a = 2; }"
         "  var b = a;"
@@ -352,7 +352,7 @@ TEST_F(SemaTest, IfBothBranchesAssignThenRead) {
 TEST_F(SemaTest, IfSingleBranchAssignThenReadFails) {
     /* if 单分支赋值 → 合并点仍 UNKNOWN → 后读取报错（用户错误场景，保守） */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { a = 1; } else { }"
         "  var b = a;"
@@ -363,7 +363,7 @@ TEST_F(SemaTest, IfSingleBranchAssignThenReadFails) {
 TEST_F(SemaTest, IfNoElseAssignThenReadFails) {
     /* if 无 else 单分支赋值 → 保守策略：else 视为未赋值 → 报错 */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { a = 1; }"
         "  var b = a;"
@@ -374,7 +374,7 @@ TEST_F(SemaTest, IfNoElseAssignThenReadFails) {
 TEST_F(SemaTest, NestedIfBothBranchesAssignThenRead) {
     /* 嵌套 if：外层两分支各自内层都赋值 → 合并后确定已初始化 */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { if (true) { a = 1; } else { a = 2; } }"
         "  else { if (true) { a = 3; } else { a = 4; } }"
@@ -386,7 +386,7 @@ TEST_F(SemaTest, NestedIfBothBranchesAssignThenRead) {
 TEST_F(SemaTest, NestedIfOneBranchMissesThenReadFails) {
     /* 嵌套 if 内层缺分支 → 外层合并点仍 UNKNOWN */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { if (true) { a = 1; } else { } }"
         "  else { a = 3; }"
@@ -398,7 +398,7 @@ TEST_F(SemaTest, NestedIfOneBranchMissesThenReadFails) {
 TEST_F(SemaTest, WhileBodyAssignDoesNotInitOuter) {
     /* while 体可能执行 0 次：体内赋值不提升确定性 → 循环后读取报错（保守） */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  while (true) { a = 1; }"
         "  var b = a;"
@@ -409,7 +409,7 @@ TEST_F(SemaTest, WhileBodyAssignDoesNotInitOuter) {
 TEST_F(SemaTest, ForBodyAssignDoesNotInitOuter) {
     /* for 体可能执行 0 次：体内赋值不提升确定性 → 循环后读取报错（保守） */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  for (var i:i32 = 0; i < 3; i = i + 1) { a = 1; }"
         "  var b = a;"
@@ -420,7 +420,7 @@ TEST_F(SemaTest, ForBodyAssignDoesNotInitOuter) {
 TEST_F(SemaTest, AssignBeforeIfThenReadInBranches) {
     /* if 前已初始化：分支内重新赋值不影响（读取在分支内） */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = 1;"
         "  if (true) { var b = a; } else { var c = a; }"
         "}"));
@@ -430,7 +430,7 @@ TEST_F(SemaTest, AssignBeforeIfThenReadInBranches) {
 TEST_F(SemaTest, IfBranchAssignExitsUninitInBranch) {
     /* 未初始化变量在分支内赋值后可立即读取（分支内数据流） */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = undefined;"
         "  if (true) { a = 1; var b = a; } else { }"
         "}"));
@@ -442,95 +442,95 @@ TEST_F(SemaTest, IfBranchAssignExitsUninitInBranch) {
 /* ================================================================ */
 
 TEST_F(SemaTest, UndefinedVariable) {
-    EXPECT_FALSE(analyze("func main() { x = 1; }"));
+    EXPECT_FALSE(analyze("func main(): void { x = 1; }"));
     expect_message(0, "undefined variable 'x'");
 }
 
 TEST_F(SemaTest, UndefinedVariableInExpr) {
-    EXPECT_FALSE(analyze("func main() { var y = x + 1; }"));
+    EXPECT_FALSE(analyze("func main(): void { var y = x + 1; }"));
     expect_message(0, "undefined variable 'x'");
 }
 
 TEST_F(SemaTest, SelfReferenceUndefined) {
     /* var x = x + 1 自引用：自身未激活，外层无 x → undefined */
-    EXPECT_FALSE(analyze("func main() { var x = x + 1; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x = x + 1; }"));
     expect_message(0, "undefined variable 'x'");
 }
 
 TEST_F(SemaTest, VarInitTypeMismatch) {
-    EXPECT_FALSE(analyze("func main() { var x:i32 = \"s\"; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x:i32 = \"s\"; }"));
     expect_message(0, "cannot initialize variable 'x' of type i32");
 }
 
 TEST_F(SemaTest, VarInitNotAssignableFloatToInt) {
-    EXPECT_FALSE(analyze("func main() { var x:i32 = 1.5; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x:i32 = 1.5; }"));
     expect_message(0, "cannot initialize variable 'x'");
 }
 
 TEST_F(SemaTest, AssignTypeMismatch) {
-    EXPECT_FALSE(analyze("func main() { var x:i32 = 1; x = \"s\"; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x:i32 = 1; x = \"s\"; }"));
     expect_message(0, "cannot assign str to variable 'x' of type i32");
 }
 
 TEST_F(SemaTest, UndefinedFunctionCall) {
-    EXPECT_FALSE(analyze("func main() { bar(); }"));
+    EXPECT_FALSE(analyze("func main(): void { bar(); }"));
     expect_message(0, "undefined function 'bar'");
 }
 
 TEST_F(SemaTest, CallArgCountMismatch) {
     EXPECT_FALSE(analyze(
-        "func foo(a:i32) { }"
-        "func main() { foo(); }"));
+        "func foo(a:i32): void { }"
+        "func main(): void { foo(); }"));
     expect_message(0, "expects 1 arguments, got 0");
 }
 
 TEST_F(SemaTest, CallArgTooMany) {
     EXPECT_FALSE(analyze(
-        "func foo(a:i32) { }"
-        "func main() { foo(1, 2); }"));
+        "func foo(a:i32): void { }"
+        "func main(): void { foo(1, 2); }"));
     expect_message(0, "expects 1 arguments, got 2");
 }
 
 TEST_F(SemaTest, CallArgTypeMismatch) {
     EXPECT_FALSE(analyze(
-        "func foo(a:i32) { }"
-        "func main() { foo(\"s\"); }"));
+        "func foo(a:i32): void { }"
+        "func main(): void { foo(\"s\"); }"));
     expect_message(0, "cannot convert str to i32");
 }
 
 TEST_F(SemaTest, BinaryTypeMismatch) {
-    EXPECT_FALSE(analyze("func main() { var x = 1 + \"s\"; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x = 1 + \"s\"; }"));
     expect_message(0, "cannot apply '+' to i32 and str");
 }
 
 TEST_F(SemaTest, UnaryTypeMismatch) {
-    EXPECT_FALSE(analyze("func main() { var x = !1; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x = !1; }"));
     expect_message(0, "logical not operand must be bool");
 }
 
 TEST_F(SemaTest, LogicalOpRequiresBool) {
-    EXPECT_FALSE(analyze("func main() { var x = 1 && true; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x = 1 && true; }"));
     expect_message(0, "logical operator operand must be bool");
 }
 
 TEST_F(SemaTest, IfCondRequiresBool) {
-    EXPECT_FALSE(analyze("func main() { if (1) { } }"));
+    EXPECT_FALSE(analyze("func main(): void { if (1) { } }"));
     expect_message(0, "if condition operand must be bool");
 }
 
 TEST_F(SemaTest, WhileCondRequiresBool) {
-    EXPECT_FALSE(analyze("func main() { while (1) { } }"));
+    EXPECT_FALSE(analyze("func main(): void { while (1) { } }"));
     expect_message(0, "while condition operand must be bool");
 }
 
 TEST_F(SemaTest, ForCondRequiresBool) {
     EXPECT_FALSE(analyze(
-        "func main() { for (var i:i32 = 0; i + 1; i = i + 1) { } }"));
+        "func main(): void { for (var i:i32 = 0; i + 1; i = i + 1) { } }"));
     expect_message(0, "for condition operand must be bool");
 }
 
 TEST_F(SemaTest, ExprResultUnused) {
-    EXPECT_FALSE(analyze("func main() { 1 + 2; }"));
+    EXPECT_FALSE(analyze("func main(): void { 1 + 2; }"));
     expect_message(0, "expression result of type i32 is unused");
 }
 
@@ -540,8 +540,8 @@ TEST_F(SemaTest, NonVoidReturnMismatch) {
 }
 
 TEST_F(SemaTest, VoidFunctionReturnsValue) {
-    EXPECT_FALSE(analyze("func f() { return 1; }"));
-    expect_message(0, "void function cannot return a value");
+    EXPECT_FALSE(analyze("func f(): void { return 1; }"));
+    expect_message(0, "cannot return i32 from function returning void");
 }
 
 TEST_F(SemaTest, NonVoidMissingReturnOnAllPaths) {
@@ -597,59 +597,59 @@ TEST_F(SemaTest, UnreachableAfterIfAllPathsReturn) {
 
 TEST_F(SemaTest, BreakInsideLoopIsLegal) {
     EXPECT_TRUE(analyze(
-        "func main() { while (true) { break; } }"));
+        "func main(): void { while (true) { break; } }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, ContinueInsideForIsLegal) {
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  for (var i:i32 = 0; i < 5; i = i + 1) { continue; }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, BreakOutsideLoop) {
-    EXPECT_FALSE(analyze("func main() { break; }"));
+    EXPECT_FALSE(analyze("func main(): void { break; }"));
     expect_message(0, "'break' outside loop");
 }
 
 TEST_F(SemaTest, ContinueOutsideLoop) {
-    EXPECT_FALSE(analyze("func main() { continue; }"));
+    EXPECT_FALSE(analyze("func main(): void { continue; }"));
     expect_message(0, "'continue' outside loop");
 }
 
 TEST_F(SemaTest, DuplicateVariable) {
-    EXPECT_FALSE(analyze("func main() { var x = 1; var x = 2; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x = 1; var x = 2; }"));
     expect_message(0, "duplicate variable 'x'");
 }
 
 TEST_F(SemaTest, DuplicateParameter) {
-    EXPECT_FALSE(analyze("func f(a:i32, a:i32) { }"));
+    EXPECT_FALSE(analyze("func f(a:i32, a:i32): void { }"));
     expect_message(0, "duplicate parameter 'a'");
 }
 
 TEST_F(SemaTest, DuplicateFunction) {
-    EXPECT_FALSE(analyze("func foo() { } func foo() { }"));
+    EXPECT_FALSE(analyze("func foo(): void { } func foo(): void { }"));
     expect_message(0, "duplicate function 'foo'");
 }
 
 TEST_F(SemaTest, NarrowingInitRejected) {
     /* i32 字面量收窄到 i16：隐式转换不允许（VM 只允许同类别加宽） */
-    EXPECT_FALSE(analyze("func main() { var x:i16 = 1; }"));
+    EXPECT_FALSE(analyze("func main(): void { var x:i16 = 1; }"));
     EXPECT_TRUE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, CompoundAssignTypeMismatch) {
     EXPECT_FALSE(analyze(
-        "func main() { var x:i32 = 1; x += \"s\"; }"));
+        "func main(): void { var x:i32 = 1; x += \"s\"; }"));
     expect_message(0, "cannot apply '+=' to i32 and str");
 }
 
 TEST_F(SemaTest, MultipleErrorsAccumulate) {
     /* 两条独立错误：undefined var 不再级联二次 type mismatch */
     EXPECT_FALSE(analyze(
-        "func f() {"
+        "func f(): void {"
         "  var b = missing + 1;"
         "  var c = 1 + \"s\";"
         "}"));
@@ -663,7 +663,7 @@ TEST_F(SemaTest, MultipleErrorsAccumulate) {
 /* ================================================================ */
 
 TEST_F(SemaTest, ScopeTreeGlobalToFunction) {
-    analyze("func main() { } func other() { }");
+    analyze("func main(): void { } func other(): void { }");
 
     ASSERT_EQ(sema_scope_children_count(sema_->global_scope), 2u);
     sema_scope_t *main_scope = sema_scope_child(sema_->global_scope, 0);
@@ -678,7 +678,7 @@ TEST_F(SemaTest, ScopeTreeGlobalToFunction) {
 TEST_F(SemaTest, ScopeTreeNestedBlocks) {
     /* M1 无裸块语句：用 if / while / for 构造嵌套作用域 */
     analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a = 1;"
         "  if (true) { var b = 2; }"
         "  while (true) { var c = 3; }"
@@ -707,7 +707,7 @@ TEST_F(SemaTest, ScopeTreeNestedBlocks) {
 }
 
 TEST_F(SemaTest, ScopeTreeIfElse) {
-    analyze("func main() { if (true) { } else { } }");
+    analyze("func main(): void { if (true) { } else { } }");
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
@@ -717,7 +717,7 @@ TEST_F(SemaTest, ScopeTreeIfElse) {
 }
 
 TEST_F(SemaTest, ScopeTreeElseIfChain) {
-    analyze("func main() { if (true) { } else if (true) { } else { } }");
+    analyze("func main(): void { if (true) { } else if (true) { } else { } }");
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
@@ -726,7 +726,7 @@ TEST_F(SemaTest, ScopeTreeElseIfChain) {
 }
 
 TEST_F(SemaTest, ScopeTreeFor) {
-    analyze("func main() { for (var i:i32 = 0; i < 5; i = i + 1) { } }");
+    analyze("func main(): void { for (var i:i32 = 0; i < 5; i = i + 1) { } }");
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
@@ -747,7 +747,7 @@ TEST_F(SemaTest, ScopeTreeFor) {
 }
 
 TEST_F(SemaTest, ScopeTreeWhileBody) {
-    analyze("func main() { while (true) { var t = 1; } }");
+    analyze("func main(): void { while (true) { var t = 1; } }");
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
@@ -761,7 +761,7 @@ TEST_F(SemaTest, ScopeTreeWhileBody) {
 TEST_F(SemaTest, ShadowingBlocksOuterNotVisible) {
     /* 同名变量在不同作用域：子作用域内遮罩外层（VM scope 链），外层符号类型不受影响 */
     analyze(
-        "func main() {"
+        "func main(): void {"
         "  var x = 1;"
         "  if (true) { var x = 2.5; }"
         "  var y = x;"
@@ -780,7 +780,7 @@ TEST_F(SemaTest, ShadowingBlocksOuterNotVisible) {
 
 TEST_F(SemaTest, BlockVariableDoesNotLeakOut) {
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  if (true) { var x = 1; }"
         "  x = 2;"
         "}"));
@@ -795,7 +795,7 @@ TEST_F(SemaTest, ComptimeVarGlobal) {
     /* 全局 comptime var：符号表编码常量，定义点从语句链摘除（不进运行时） */
     EXPECT_TRUE(analyze(
         "comptime var A: i32 = 42;"
-        "func main() { var x = A; }"));
+        "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *a = sema_lookup(sema_->global_scope, STRSLICE_LIT("A"));
@@ -811,7 +811,7 @@ TEST_F(SemaTest, ComptimeVarInference) {
     /* 无显式类型：从右值推断 */
     EXPECT_TRUE(analyze(
         "comptime var N = 7;"
-        "func main() { var x = N; }"));
+        "func main(): void { var x = N; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *n = sema_lookup(sema_->global_scope, STRSLICE_LIT("N"));
@@ -828,7 +828,7 @@ TEST_F(SemaTest, ComptimeVarTypes) {
         "comptime var F: f64 = 3.5;"
         "comptime var B: bool = true;"
         "comptime var S: str = \"hi\";"
-        "func main() {"
+        "func main(): void {"
         "  var a:i64 = I;"
         "  var b:u64 = U;"
         "  var c:f64 = F;"
@@ -853,7 +853,7 @@ TEST_F(SemaTest, ComptimeVarExprFold) {
     /* 右值可以是任意编译期可计算表达式（二元运算 + 字面量） */
     EXPECT_TRUE(analyze(
         "comptime var X = (1 + 2) * 3 - 4;"
-        "func main() { var y = X; }"));
+        "func main(): void { var y = X; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *x = sema_lookup(sema_->global_scope, STRSLICE_LIT("X"));
@@ -865,7 +865,7 @@ TEST_F(SemaTest, ComptimeFuncDefinition) {
     /* comptime func 定义：符号注册 + is_comptime 标记，不要求调用 */
     EXPECT_TRUE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
-        "func main() { }"));
+        "func main(): void { }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *add = sema_lookup(sema_->global_scope, STRSLICE_LIT("add"));
@@ -879,7 +879,7 @@ TEST_F(SemaTest, ComptimeFuncCallFold) {
     /* 调用点折叠：var r = add(1,2) 类型为返回类型（i32） */
     EXPECT_TRUE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
-        "func main() { var r = add(1, 2); }"));
+        "func main(): void { var r = add(1, 2); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     /* comptime func 不建作用域树（调用点折叠），global_scope 唯一子节点是 main */
@@ -895,7 +895,7 @@ TEST_F(SemaTest, ComptimeVarFromComptimeFunc) {
     EXPECT_TRUE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
         "comptime var SUM = add(1, 2);"
-        "func main() { var x = SUM; }"));
+        "func main(): void { var x = SUM; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *sum = sema_lookup(sema_->global_scope, STRSLICE_LIT("SUM"));
@@ -910,7 +910,7 @@ TEST_F(SemaTest, ComptimeNestedCalls) {
         "comptime func double_(a:i32):i32 { return a * 2; }"
         "comptime func quad(a:i32):i32 { return double_(double_(a)); }"
         "comptime var Q = quad(3);"
-        "func main() { var x = Q; }"));
+        "func main(): void { var x = Q; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *q = sema_lookup(sema_->global_scope, STRSLICE_LIT("Q"));
@@ -926,7 +926,7 @@ TEST_F(SemaTest, ComptimeFuncCallsPlainFunc) {
         "func double_(a:i32):i32 { return a * 2; }"
         "comptime func quad(a:i32):i32 { return double_(a) + double_(a); }"
         "comptime var Q = quad(3);"
-        "func main() { var x = Q; }"));
+        "func main(): void { var x = Q; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *q = sema_lookup(sema_->global_scope, STRSLICE_LIT("Q"));
@@ -942,7 +942,7 @@ TEST_F(SemaTest, ComptimeChainPropagation) {
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
         "comptime func helper(x:i32):i32 { return add(x, 1); }"
         "comptime var R = helper(5);"
-        "func main() { var r = R; }"));
+        "func main(): void { var r = R; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *r = sema_lookup(sema_->global_scope, STRSLICE_LIT("R"));
@@ -955,8 +955,8 @@ TEST_F(SemaTest, ComptimePlainFuncRuntimeArg) {
        comptime func 不注册运行时，运行期实参无法编译期求值 → 诊断 */
     EXPECT_FALSE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
-        "func bad(x:i32) { var y = add(x, 1); }"
-        "func main() { bad(1); }"));
+        "func bad(x:i32): void { var y = add(x, 1); }"
+        "func main(): void { bad(1); }"));
     expect_message(0, "not a compile-time constant");
 }
 
@@ -967,14 +967,14 @@ TEST_F(SemaTest, ComptimeFuncCallsSideEffect) {
         "func p(x:i32):void { }"
         "comptime func f():void { p(1); }"
         "comptime var T = f();"
-        "func main() { }"));
+        "func main(): void { }"));
     expect_message(0, "cannot be folded");
 }
 
 TEST_F(SemaTest, ComptimeLocalVar) {
     /* 局部 comptime var：定义点从语句链摘除，引用点折叠 */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  comptime var L = 10;"
         "  var y = L + 1;"
         "}"));
@@ -1001,7 +1001,7 @@ TEST_F(SemaTest, ComptimeFuncWithControlFlow) {
         "  return r;"
         "}"
         "comptime var F = fact(5);"
-        "func main() { var x = F; }"));
+        "func main(): void { var x = F; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *f = sema_lookup(sema_->global_scope, STRSLICE_LIT("F"));
@@ -1013,7 +1013,7 @@ TEST_F(SemaTest, ComptimeVarArrayEncode) {
     /* comptime var 数组常量：递归编码进符号表（elems 连续块 + count） */
     EXPECT_TRUE(analyze(
         "comptime var A: [3]i32 = .[3]i32{ 1, 2, 3 };"
-        "func main() { var x = A; }"));
+        "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *a = sema_lookup(sema_->global_scope, STRSLICE_LIT("A"));
@@ -1039,7 +1039,7 @@ TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {
         "comptime func make_arr(): [3]i32 {"
         "  return .[3]i32{ 4, 5, 6 };"
         "}"
-        "func main() { var r = make_arr(); }"));
+        "func main(): void { var r = make_arr(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     /* main 函数体首个语句 var r = <AST_CONSTRUCT> */
@@ -1094,7 +1094,7 @@ TEST_F(SemaTest, ComptimeFuncReturnNestedArrayFold) {
         "comptime func make_mat(): [2][3]i32 {"
         "  return .[2][3]i32{ .[3]i32{1,2,3}, .[3]i32{4,5,6} };"
         "}"
-        "func main() { var m = make_mat(); }"));
+        "func main(): void { var m = make_mat(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     ast_program_t *prog = (ast_program_t *)ast_;
@@ -1149,7 +1149,7 @@ TEST_F(SemaTest, ComptimeFuncIndexAssignFold) {
         "  r[2] = r[0] * 3;"
         "  return r;"
         "}"
-        "func main() { var a = make_arr(); }"));
+        "func main(): void { var a = make_arr(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     ast_program_t *prog = (ast_program_t *)ast_;
@@ -1190,7 +1190,7 @@ TEST_F(SemaTest, ComptimeFuncNestedIndexAssignFold) {
         "  r[0][0] += 10;"
         "  return r;"
         "}"
-        "func main() { var m = make_mat(); }"));
+        "func main(): void { var m = make_mat(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     ast_program_t *prog = (ast_program_t *)ast_;
@@ -1240,14 +1240,14 @@ TEST_F(SemaTest, ComptimeFuncNestedIndexAssignFold) {
 TEST_F(SemaTest, ComptimeVarMissingInit) {
     EXPECT_FALSE(analyze(
         "comptime var A: i32 = undefined;"
-        "func main() { }"));
+        "func main(): void { }"));
     expect_message(0, "must have a compile-time initializer");
 }
 
 TEST_F(SemaTest, ComptimeVarNotConstant) {
     /* 右值引用运行期变量 → 非编译期常量 */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var x = 1;"
         "  comptime var A = x;"
         "}"));
@@ -1257,28 +1257,28 @@ TEST_F(SemaTest, ComptimeVarNotConstant) {
 TEST_F(SemaTest, ComptimeVarTypeMismatch) {
     EXPECT_FALSE(analyze(
         "comptime var A: i32 = 1.5;"
-        "func main() { }"));
+        "func main(): void { }"));
     expect_message(0, "cannot initialize comptime variable 'A'");
 }
 
 TEST_F(SemaTest, ComptimeVarAssignForbidden) {
     EXPECT_FALSE(analyze(
         "comptime var A = 1;"
-        "func main() { A = 2; }"));
+        "func main(): void { A = 2; }"));
     expect_message(0, "cannot assign to compile-time constant 'A'");
 }
 
 TEST_F(SemaTest, ComptimeCallArgCountMismatch) {
     EXPECT_FALSE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
-        "func main() { var r = add(1); }"));
+        "func main(): void { var r = add(1); }"));
     expect_message(0, "expects 2 arguments, got 1");
 }
 
 TEST_F(SemaTest, ComptimeCallArgTypeMismatch) {
     EXPECT_FALSE(analyze(
         "comptime func add(a:i32, b:i32):i32 { return a + b; }"
-        "func main() { var r = add(\"s\", 2); }"));
+        "func main(): void { var r = add(\"s\", 2); }"));
     expect_message(0, "cannot convert str to i32");
 }
 
@@ -1286,7 +1286,7 @@ TEST_F(SemaTest, ComptimeFuncNotConstantPath) {
     /* comptime func 内部引用未定义/非编译期实体 → 求值失败诊断 */
     EXPECT_FALSE(analyze(
         "comptime func f():i32 { return g(); }"
-        "func main() { var r = f(); }"));
+        "func main(): void { var r = f(); }"));
     /* g 未定义 → undefined function 诊断（sema 阶段） */
     expect_message(0, "undefined function 'g'");
 }
@@ -1301,7 +1301,7 @@ TEST_F(SemaTest, TypeDefBuiltinRhs) {
        <内建 id>），别名透明。符号激活。 */
     EXPECT_TRUE(analyze(
         "type MyInt = i64;"
-        "func main() { var x:MyInt = 7; var y = x; }"));
+        "func main(): void { var x:MyInt = 7; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *sym =
@@ -1333,7 +1333,7 @@ TEST_F(SemaTest, TypeDefCompositeRhsFoldToRef) {
        折叠幂等：重跑 sema 不重复登记。 */
     EXPECT_TRUE(analyze(
         "type Pair = [2]i32;"
-        "func main() { var p:Pair = .[2]i32{1, 2}; var q = p[0]; }"));
+        "func main(): void { var p:Pair = .[2]i32{1, 2}; var q = p[0]; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     /* 全局 type def 在 funcs 链上（保留，进入字节码） */
@@ -1356,7 +1356,7 @@ TEST_F(SemaTest, TypeDefAliasChain) {
     EXPECT_TRUE(analyze(
         "type A = i64;"
         "type B = A;"
-        "func main() { var x:B = 5; var t = B; var y = x; }"));
+        "func main(): void { var x:B = 5; var t = B; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
@@ -1371,14 +1371,14 @@ TEST_F(SemaTest, TypeDefInFunctionSignature) {
     EXPECT_TRUE(analyze(
         "type MyInt = i64;"
         "func id(v:MyInt):MyInt { return v; }"
-        "func main() { var r = id(42); }"));
+        "func main(): void { var r = id(42); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, TypeDefLocal) {
     /* 局部 type def：3a 延迟解析 var 槽位 → 3b 定义点求值后兜底成功 */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  type Local = i64;"
         "  var x:Local = 7;"
         "  var y = x;"
@@ -1395,7 +1395,7 @@ TEST_F(SemaTest, TypeDefLocal) {
 TEST_F(SemaTest, TypeDefLocalNestedBlock) {
     /* 嵌套块局部 type：块作用域遮蔽，出块不可见（TDZ/未知类型） */
     EXPECT_TRUE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var a:i32 = 1;"
         "  { type Inner = i32; var x:Inner = 2; a = x; }"
         "  var y = a;"
@@ -1407,7 +1407,7 @@ TEST_F(SemaTest, TypeDefTypeValueExpr) {
     /* type value 是真实值（非 shadow）：可作表达式（typeof 桥梁） */
     EXPECT_TRUE(analyze(
         "type T = i32;"
-        "func main() { var t = T; }"));
+        "func main(): void { var t = T; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
@@ -1420,7 +1420,7 @@ TEST_F(SemaTest, TypeDefTypeValueExpr) {
 TEST_F(SemaTest, TypeDefRhsNotType) {
     /* rhs 非类型值 → 报错 */
     EXPECT_FALSE(analyze(
-        "func main() { type NotType = 42; }"));
+        "func main(): void { type NotType = 42; }"));
     expect_message(0, "must evaluate to a type value, got i32");
 }
 
@@ -1429,7 +1429,7 @@ TEST_F(SemaTest, TypeDefFuncSignature) {
        符号激活，var 显式类型解析到 func 签名（TYPE_KIND_FUNC）。 */
     EXPECT_TRUE(analyze(
         "type add_fn_t = func(i32,i32)->i32;"
-        "func main() { var f:add_fn_t = undefined; }"));
+        "func main(): void { var f:add_fn_t = undefined; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_symbol_t *sym =
@@ -1459,18 +1459,25 @@ TEST_F(SemaTest, TypeDefFuncSignature) {
 }
 
 TEST_F(SemaTest, TypeDefFuncSignatureNoReturn) {
-    /* 无返回类型 func(i32) → 缺省 void 签名，sema 正常 */
+    /* 显式 void 返回：func(i32)->void → sema 正常 */
     EXPECT_TRUE(analyze(
-        "type void_fn_t = func(i32);"
-        "func main() { var f:void_fn_t = undefined; }"));
+        "type void_fn_t = func(i32)->void;"
+        "func main(): void { var f:void_fn_t = undefined; }"));
     EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefFuncSignatureNoArrowFails) {
+    /* 无 '->' 返回类型 func(i32) → 不允许隐式 void，解析报错 */
+    EXPECT_FALSE(analyze(
+        "type void_fn_t = func(i32);"
+        "func main(): void { var f:void_fn_t = undefined; }"));
 }
 
 TEST_F(SemaTest, TypeDefFuncSignatureNested) {
     /* 嵌套复合签名 func([4]i32)->func(i32)->i32 → sema 正常 */
     EXPECT_TRUE(analyze(
         "type complex_t = func([4]i32)->func(i32)->i32;"
-        "func main() { var f:complex_t = undefined; }"));
+        "func main(): void { var f:complex_t = undefined; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
@@ -1479,7 +1486,7 @@ TEST_F(SemaTest, TypeDefFuncSignatureInSignature) {
     EXPECT_TRUE(analyze(
         "type add_fn_t = func(i32,i32)->i32;"
         "func apply(f:add_fn_t): i32 { return 0; }"
-        "func main() { }"));
+        "func main(): void { }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
@@ -1487,13 +1494,13 @@ TEST_F(SemaTest, TypeDefDuplicate) {
     EXPECT_FALSE(analyze(
         "type A = i32;"
         "type A = i64;"
-        "func main() { }"));
+        "func main(): void { }"));
     expect_message(0, "duplicate name 'A'");
 }
 
 TEST_F(SemaTest, TypeDefDuplicateLocal) {
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  type A = i32;"
         "  type A = i64;"
         "}"));
@@ -1503,7 +1510,7 @@ TEST_F(SemaTest, TypeDefDuplicateLocal) {
 TEST_F(SemaTest, TypeDefForwardRefFails) {
     /* 前向引用局部 type（定义在后使用）→ unknown type（TDZ） */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var x:Local = 5;"
         "  type Local = i32;"
         "}"));
@@ -1514,7 +1521,7 @@ TEST_F(SemaTest, UndefInitUnknownTypeFails) {
     /* undefined 初始化 + 未知类型标注：3b 兜底重解析须报 unknown type
        （此前静默当 void，无诊断）。 */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var x:NoSuch = undefined;"
         "}"));
     expect_message(0, "unknown type");
@@ -1523,7 +1530,7 @@ TEST_F(SemaTest, UndefInitUnknownTypeFails) {
 TEST_F(SemaTest, UndefInitVarShadowTypeFails) {
     /* undefined 初始化 + 类型名被 var 遮蔽：报 "is a variable, not a type" */
     EXPECT_FALSE(analyze(
-        "func main() {"
+        "func main(): void {"
         "  var T:i32 = 1;"
         "  var x:T = undefined;"
         "}"));
@@ -1534,7 +1541,7 @@ TEST_F(SemaTest, TypeDefUsedBeforeActivation) {
     /* 全局 type def TDZ：函数体内使用在 pass1b 已绑定 → OK */
     EXPECT_TRUE(analyze(
         "type T = i32;"
-        "func main() { var x:T = 1; }"));
+        "func main(): void { var x:T = 1; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
@@ -1542,7 +1549,7 @@ TEST_F(SemaTest, TypeDefVarTypeMismatch) {
     /* 显式类型 + 值类型不匹配：走常规 var 校验路径 */
     EXPECT_FALSE(analyze(
         "type T = i32;"
-        "func main() { var x:T = \"s\"; }"));
+        "func main(): void { var x:T = \"s\"; }"));
     expect_message(0, "cannot initialize variable 'x' of type i32 with str");
 }
 
@@ -1550,7 +1557,7 @@ TEST_F(SemaTest, TypeDefLocalShadowGlobal) {
     /* 局部 type 遮蔽全局同名 type */
     EXPECT_TRUE(analyze(
         "type T = i32;"
-        "func main() {"
+        "func main(): void {"
         "  type T = i64;"
         "  var x:T = 7;"
         "}"));
@@ -1567,7 +1574,7 @@ TEST_F(SemaTest, VarShadowGlobalTypeInTypeSlot) {
     /* var 完全遮罩：定义后类型槽位引用 T → 报 "is a variable, not a type" */
     EXPECT_FALSE(analyze(
         "type T = i32;"
-        "func main() {"
+        "func main(): void {"
         "  var T = 42;"
         "  var t2:T = 5;"
         "}"));
@@ -1578,7 +1585,7 @@ TEST_F(SemaTest, VarShadowGlobalTypeOrderSensitive) {
     /* 完全遮罩顺序敏感：var T 定义前，类型槽位仍见全局 type T=i32 */
     EXPECT_TRUE(analyze(
         "type T = i32;"
-        "func main() {"
+        "func main(): void {"
         "  var t2:T = 5;"
         "  var T = 42;"
         "  var z = T;"
@@ -1596,8 +1603,8 @@ TEST_F(SemaTest, ParamShadowGlobalTypeInTypeSlot) {
     /* 参数遮蔽：func f(T: i64) 内类型槽位 T → "is a variable, not a type" */
     EXPECT_FALSE(analyze(
         "type T = i32;"
-        "func f(T:i64) { var t2:T = 5; }"
-        "func main() { f(7); }"));
+        "func f(T:i64): void { var t2:T = 5; }"
+        "func main(): void { f(7); }"));
     expect_message(0, "'T' is a variable, not a type");
 }
 
@@ -1606,7 +1613,7 @@ TEST_F(SemaTest, VarShadowTypeInTypeRhs) {
        类型计算）→ 报错 */
     EXPECT_FALSE(analyze(
         "type T = i32;"
-        "func main() {"
+        "func main(): void {"
         "  var T = 42;"
         "  type U = T;"
         "}"));
@@ -1621,7 +1628,7 @@ TEST_F(SemaTest, TypeDefExtendsTernaryFoldTrueBranch) {
         "type A = i32;"
         "type B = i64;"
         "type T = A extends i32 ? B : A;"
-        "func main() { var x:T = 5; var y = x; }"));
+        "func main(): void { var x:T = 5; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     /* funcs 链第 3 个节点是 T（A、B、T、main 顺序） */
@@ -1648,7 +1655,7 @@ TEST_F(SemaTest, TypeDefExtendsTernaryFoldFalseBranch) {
         "type A = i32;"
         "type B = i64;"
         "type U = A extends i64 ? B : A;"
-        "func main() { var x:U = 5; var y = x; }"));
+        "func main(): void { var x:U = 5; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     ast_program_t *prog = (ast_program_t *)ast_;
@@ -1672,7 +1679,7 @@ TEST_F(SemaTest, TypeDefExtendsTernaryArrayBranch) {
        （名字查 sema_type_find_name 命中数组类型）。 */
     EXPECT_TRUE(analyze(
         "type V = [2]i32 extends [3]i32 ? [2]i32 : [3]i32;"
-        "func main() { var p:V = .[3]i32{1, 2, 3}; var q = p[0]; }"));
+        "func main(): void { var p:V = .[3]i32{1, 2, 3}; var q = p[0]; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     ast_program_t *prog = (ast_program_t *)ast_;

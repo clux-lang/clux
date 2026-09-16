@@ -444,7 +444,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     expect_symbol(p, ")");
 
     if (expected_kind == AST_FUNC_DEF) {
-        /* 顶层函数定义：:type { body } */
+        /* 顶层函数定义：:type { body }（返回类型必选，不允许隐式 void） */
         strslice_t ret_type = STRSLICE_EMPTY;
         if (match_symbol(p, ":")) {
             ret_type = parse_type_text(p);

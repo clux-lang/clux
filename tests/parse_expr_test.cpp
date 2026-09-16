@@ -1694,21 +1694,16 @@ TEST_F(ParseExprTest, FuncType_Basic) {
 }
 
 /**
- * Scenario: func(i32) 无返回类型（缺省 void = NULL）
- * Expected: AST_FUNC_TYPE，params=[i32]，return_type=NULL
+ * Scenario: func(i32) 无 '->' 返回类型 → 不允许隐式 void 返回值
+ * Expected: AST_ERROR（统一生成式下 func(...) 后无 '->' 即匿名字面量）
  */
-TEST_F(ParseExprTest, FuncType_NoReturnType) {
+TEST_F(ParseExprTest, FuncType_NoReturnTypeFails) {
     parser_t *p = make_parser("func(i32)");
     ASSERT_NE(p, nullptr);
 
     ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
-    ASSERT_EQ(node->kind, AST_FUNC_TYPE);
-
-    auto *ft = (ast_func_type_t *)node;
-    ASSERT_NE(ft->params, nullptr);
-    expect_ident_text(ft->params, "i32");
-    EXPECT_EQ(ft->return_type, nullptr);
+    ASSERT_EQ(node->kind, AST_ERROR);
 
     cleanup_parser(p);
 }
@@ -1759,10 +1754,10 @@ TEST_F(ParseExprTest, FuncType_CompoundParams) {
 
 /**
  * Scenario: func 关键字分支优先于 AST_IDENT 兜底
- * Expected: parse_primary 对 "func" 返回 AST_FUNC_TYPE 而非 AST_IDENT
+ * Expected: parse_primary 对 "func()->void" 返回 AST_FUNC_TYPE 而非 AST_IDENT
  */
 TEST_F(ParseExprTest, FuncType_FuncKeywordNotIdent) {
-    parser_t *p = make_parser("func()");
+    parser_t *p = make_parser("func()->void");
     ASSERT_NE(p, nullptr);
 
     skip_trivia(p);

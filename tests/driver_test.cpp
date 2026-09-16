@@ -33,14 +33,14 @@ std::string write_temp_file(const std::string &content) {
 
 TEST(Driver, LoadSource) {
   allocator_t *alloc = create_allocator(malloc, free);
-  std::string path = write_temp_file("func main() {}");
+  std::string path = write_temp_file("func main(): void {}");
 
   const char *data = NULL;
   size_t len = 0;
   EXPECT_EQ(driver_load_source(alloc, path.c_str(), &data, &len), 0);
   ASSERT_NE(data, nullptr);
-  EXPECT_EQ(len, 14u);
-  EXPECT_EQ(std::string(data, len), "func main() {}");
+  EXPECT_EQ(len, 20u);
+  EXPECT_EQ(std::string(data, len), "func main(): void {}");
 
   allocator_free(alloc, (void **)&data);
   EXPECT_ALLOCATOR_EMPTY_DELETE(&alloc);
@@ -60,7 +60,7 @@ TEST(Driver, LoadSourceMissingFile) {
 
 TEST(Driver, LexFileProducesTokens) {
   allocator_t *alloc = create_allocator(malloc, free);
-  std::string path = write_temp_file("func main() {\n  return 0;\n}\n");
+  std::string path = write_temp_file("func main(): void {\n  return 0;\n}\n");
 
   vec_t *pool = NULL;
   ASSERT_EQ(driver_lex_file(alloc, path.c_str(), &pool), 0);
@@ -88,7 +88,7 @@ TEST(Driver, LexFileProducesTokens) {
 TEST(Driver, RunFileValidReturnsZero) {
   /* 合法程序：词法 + 语法 + 语义全通过。main 无返回类型（void），
      函数体不含 return 值，sema 无诊断。 */
-  std::string path = write_temp_file("func main() { var x = 1; }\n");
+  std::string path = write_temp_file("func main(): void { var x = 1; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -171,7 +171,7 @@ TEST(Driver, RunFileIndexSetPasses) {
 TEST(Driver, RunFileMultiIndexSubscriptRejected) {
   /* a[i,j] 多索引（泛型实参语法预留）落到数组下标 → 诊断 */
   std::string path = write_temp_file(
-      "func main() {\n"
+      "func main(): void {\n"
       "  var a = .[2]i32 { 1, 2 };\n"
       "  var x = a[0, 1];\n"
       "}\n");
@@ -182,7 +182,7 @@ TEST(Driver, RunFileMultiIndexSubscriptRejected) {
 TEST(Driver, RunFileIndexNonArrayRejected) {
   /* 对非数组类型下标 → 诊断 */
   std::string path = write_temp_file(
-      "func main() {\n"
+      "func main(): void {\n"
       "  var x = 42;\n"
       "  var y = x[0];\n"
       "}\n");
@@ -193,7 +193,7 @@ TEST(Driver, RunFileIndexNonArrayRejected) {
 TEST(Driver, RunFileIndexStringIndexRejected) {
   /* 非整数下标 → 诊断 */
   std::string path = write_temp_file(
-      "func main() {\n"
+      "func main(): void {\n"
       "  var a = .[2]i32 { 1, 2 };\n"
       "  var x = a[\"k\"];\n"
       "}\n");
@@ -248,7 +248,7 @@ TEST(Driver, RunFileLexErrorReturnsOne) {
 TEST(Driver, RunFileSemaErrorReturnsOne) {
   /* 语义错误：实参类型不匹配（str → i32），sema 应快速失败返回 1 */
   std::string path =
-      write_temp_file("func foo(a:i32) { } func main() { foo(\"s\"); }\n");
+      write_temp_file("func foo(a:i32): void { } func main(): void { foo(\"s\"); }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
@@ -257,7 +257,7 @@ TEST(Driver, RunFileValidSemaPassesReturnsZero) {
   /* 合法程序：带返回类型（:i32）+ 函数调用 + 变量推断，sema 全通过 */
   std::string path = write_temp_file(
       "func add(a:i32, b:i32):i32 { return a + b; }"
-      "func main() { var x = add(1, 2); }\n");
+      "func main(): void { var x = add(1, 2); }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -292,7 +292,7 @@ TEST(Driver, ConstTdzFirstAssignAllowed) {
 TEST(Driver, ConstReassignAfterInitRejected) {
   /* const 变量已初始化后再赋值 → 语义错误 */
   std::string path = write_temp_file(
-      "func main() { var a:const i32 = undefined; a = 123; a = 456; }\n");
+      "func main(): void { var a:const i32 = undefined; a = 123; a = 456; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
@@ -300,7 +300,7 @@ TEST(Driver, ConstReassignAfterInitRejected) {
 TEST(Driver, ConstInitThenAssignRejected) {
   /* const 变量带初始值定义（flow_init=true）后再赋值 → 语义错误 */
   std::string path =
-      write_temp_file("func main() { var a:const i32 = 1; a = 2; }\n");
+      write_temp_file("func main(): void { var a:const i32 = 1; a = 2; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
@@ -308,7 +308,7 @@ TEST(Driver, ConstInitThenAssignRejected) {
 TEST(Driver, ConstCompoundAssignRejected) {
   /* const 变量复合赋值（读+写）同样禁止 */
   std::string path =
-      write_temp_file("func main() { var a:const i32 = 1; a += 1; }\n");
+      write_temp_file("func main(): void { var a:const i32 = 1; a += 1; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
@@ -340,7 +340,7 @@ TEST(Driver, ConstVolatileCombined) {
 
 TEST(Driver, ConstVolatileReassignRejected) {
   std::string path = write_temp_file(
-      "func main() { var a:volatile const i32 = undefined; a = 1; a = 2; }\n");
+      "func main(): void { var a:volatile const i32 = undefined; a = 1; a = 2; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
@@ -1106,14 +1106,26 @@ TEST(Driver, RunFileTypeDefFuncSignature) {
 }
 
 TEST(Driver, RunFileTypeDefFuncSignatureNoReturn) {
-  /* 无返回类型 func(i32) → 缺省 void 签名 */
+  /* 显式 void 返回：func(i32)->void */
+  std::string path = write_temp_file(
+      "type void_fn_t = func(i32)->void;\n"
+      "func main():i32 {\n"
+      "  var f:void_fn_t = undefined;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefFuncSignatureNoArrowFails) {
+  /* 无 '->' 返回类型 func(i32) → 不允许隐式 void，解析报错 */
   std::string path = write_temp_file(
       "type void_fn_t = func(i32);\n"
       "func main():i32 {\n"
       "  var f:void_fn_t = undefined;\n"
       "  return 0;\n"
       "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
