@@ -1507,14 +1507,21 @@ TEST_F(SemaTest, TypeDefDuplicateLocal) {
     expect_message(0, "duplicate name 'A'");
 }
 
-TEST_F(SemaTest, TypeDefForwardRefFails) {
-    /* 前向引用局部 type（定义在后使用）→ unknown type（TDZ） */
-    EXPECT_FALSE(analyze(
+TEST_F(SemaTest, TypeDefForwardRefHoisted) {
+    /* 局部 type 提升：前向引用（定义在后使用）→ 类型名字块内可见，无 TDZ。
+       var 槽位 3a 推迟解析，3b 块入口提升绑定后兜底重解析成功。 */
+    EXPECT_TRUE(analyze(
         "func main(): void {"
         "  var x:Local = 5;"
         "  type Local = i32;"
         "}"));
-    expect_message(0, "unknown type");
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i32);
 }
 
 TEST_F(SemaTest, UndefInitUnknownTypeFails) {
@@ -1570,6 +1577,68 @@ TEST_F(SemaTest, TypeDefLocalShadowGlobal) {
     EXPECT_EQ(x->type, vm_->type_i64);
 }
 
+TEST_F(SemaTest, TypeDefLocalHoistedShadowGlobalForward) {
+    /* 提升遮蔽：局部 type 定义在引用之后，仍遮蔽全局同名 type（整个块内
+       T 都是局部 i64，而非全局 i32——提升使遮蔽覆盖块内所有位置） */
+    EXPECT_TRUE(analyze(
+        "type T = i32;"
+        "func main(): void {"
+        "  var x:T = 7;"
+        "  type T = i64;"
+        "  var y:T = 9;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+    sema_symbol_t *y = sema_scope_find_local(fscope, STRSLICE_LIT("y"));
+    ASSERT_NE(y, nullptr);
+    EXPECT_EQ(y->type, vm_->type_i64);
+}
+
+TEST_F(SemaTest, TypeDefLocalHoistedNestedBlockUse) {
+    /* 提升跨嵌套块：外层块提升的 type 内层块可见（作用域链查找） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  type A = i32;"
+        "  { var x:A = 2; var y = x; }"
+        "  var z:A = 3;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefLocalHoistedDepOrder) {
+    /* 提升依赖序：type RHS 引用前序 type（声明序求值，与全局 pass1b 一致） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  type A = i32;"
+        "  type B = A;"
+        "  var x:B = 5;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, TypeDefLocalHoistedVarShadowRhsNested) {
+    /* 提升遮蔽预检递归：复合 type RHS 引用块内声明序靠前的 var → 报错 */
+    EXPECT_FALSE(analyze(
+        "type T = i32;"
+        "type A = i64;"
+        "func main(): void {"
+        "  var T = 42;"
+        "  type U = T extends i32 ? A : T;"
+        "}"));
+    expect_message(0, "'T' is a variable, not a type");
+}
+
 TEST_F(SemaTest, VarShadowGlobalTypeInTypeSlot) {
     /* var 完全遮罩：定义后类型槽位引用 T → 报 "is a variable, not a type" */
     EXPECT_FALSE(analyze(
@@ -1609,15 +1678,15 @@ TEST_F(SemaTest, ParamShadowGlobalTypeInTypeSlot) {
 }
 
 TEST_F(SemaTest, VarShadowTypeInTypeRhs) {
-    /* var 完全遮罩：type RHS 引用变量 T → ctfe 求值失败（变量非编译期
-       类型计算）→ 报错 */
+    /* var 完全遮罩：type RHS 引用块内声明序靠前的 var T → 提升预检报错
+       （var 遮蔽平等，type RHS 不可引用被 var 遮罩的名字） */
     EXPECT_FALSE(analyze(
         "type T = i32;"
         "func main(): void {"
         "  var T = 42;"
         "  type U = T;"
         "}"));
-    expect_message(0, "expression is not a compile-time type computation");
+    expect_message(0, "'T' is a variable, not a type");
 }
 
 TEST_F(SemaTest, TypeDefExtendsTernaryFoldTrueBranch) {

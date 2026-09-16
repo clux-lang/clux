@@ -68,6 +68,19 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
   st_push(c, -1);
 }
 
+/* 块体编译：入口提升局部 type 定义（未来局部函数定义语句在此接入）——
+   先按声明序发 type def 字节码（LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE，
+   类型构造在全局 hoist 区，此处仅运行时名字绑定），定义点跳过。
+   类型名字整个块内可见（前向引用安全），与 sema walk_block 提升一致。
+   balance（PUSH_SCOPE）由调用方在调用前发出，DEFINE 落到块作用域。
+   函数体块（compile_func_body）与各控制流块（compile_stmt）共用。 */
+void compile_block_body(compiler_t *c, ast_block_t *b) {
+  for (ast_node_t *s = b->stmts; s; s = s->next)
+    if (s->kind == AST_TYPE_DEF) compile_stmt(c, s);
+  for (ast_node_t *s = b->stmts; s; s = s->next)
+    if (s->kind != AST_TYPE_DEF) compile_stmt(c, s);
+}
+
 void compile_stmt(compiler_t *c, ast_node_t *node) {
   if (!node || c->failed) return;
   switch (node->kind) {
@@ -175,7 +188,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   case AST_BLOCK: {
     ast_block_t *n = (ast_block_t *)node;
     balance_push(c);
-    for (ast_node_t *s = n->stmts; s; s = s->next) compile_stmt(c, s);
+    compile_block_body(c, n);
     balance_pop(c);
     break;
   }
@@ -192,7 +205,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     if (n->then_body->kind == AST_BLOCK) {
       balance_push(c);
       ast_block_t *b = (ast_block_t *)n->then_body;
-      for (ast_node_t *s = b->stmts; s; s = s->next) compile_stmt(c, s);
+      compile_block_body(c, b);
       balance_pop(c);
     } else {
       compile_stmt(c, n->then_body);
@@ -208,7 +221,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       if (n->else_body->kind == AST_BLOCK) {
         balance_push(c);
         ast_block_t *b = (ast_block_t *)n->else_body;
-        for (ast_node_t *s = b->stmts; s; s = s->next) compile_stmt(c, s);
+        compile_block_body(c, b);
         balance_pop(c);
       } else {
         compile_stmt(c, n->else_body);
@@ -241,7 +254,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
 
     balance_push(c);                         /* 循环体块作用域 */
     ast_block_t *b = (ast_block_t *)n->body;
-    for (ast_node_t *s = b->stmts; s; s = s->next) compile_stmt(c, s);
+    compile_block_body(c, b);
     balance_pop(c);
 
     bcode_write_op(c->bc, BCODE_JMP);
@@ -279,7 +292,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     /* 循环体块作用域 */
     balance_push(c);
     ast_block_t *b = (ast_block_t *)n->body;
-    for (ast_node_t *s = b->stmts; s; s = s->next) compile_stmt(c, s);
+    compile_block_body(c, b);
     balance_pop(c);
 
     label_here(c, &loop_cont);               /* continue 目标：update 段 */

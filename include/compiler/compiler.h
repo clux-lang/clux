@@ -9,6 +9,7 @@ extern "C" {
 #include "core/strmap.h"
 #include "core/vec.h"
 #include "diag/diagnostic.h"
+#include "parser/ast_block.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
 #include "sema/sema.h"
@@ -165,6 +166,7 @@ void st_push(compiler_t *c, int delta);
 void   compile_type_expr(compiler_t *c, ast_node_t *type_expr); /* compile_type.c */
 void   compile_expr(compiler_t *c, ast_node_t *node);          /* compile_expr.c */
 void   compile_stmt(compiler_t *c, ast_node_t *node);          /* compile_stmt.c */
+void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c：块体编译 + 局部 type 入口提升 */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
 size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn);    /* 返回 PUSH_FUNCTION body 操作数字段位置 */
 

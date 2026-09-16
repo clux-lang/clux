@@ -1,5 +1,11 @@
 #include "sema/sema.h"
+#include "parser/ast_array.h"
 #include "parser/ast_assign.h"
+#include "parser/ast_binary.h"
+#include "parser/ast_call.h"
+#include "parser/ast_const.h"
+#include "parser/ast_construct.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_block.h"
@@ -8,9 +14,12 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_ternary.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_volatile.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
@@ -610,9 +619,11 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       shadow_var_def(sema, (ast_var_def_t *)stmt, scope);
       break;
     case AST_TYPE_DEF:
-      /* 局部 type 定义：rhs 求值 → 折叠 AST_TYPE_REF → 绑定编译期 vm
-         当前作用域 → 激活符号。定义点不摘除（进入字节码，运行时 DEFINE
-         绑定 type value）。 */
+      /* 局部 type 定义：已在 walk_block 入口提升时求值绑定（作用域入口
+         生效，前向引用安全）。此处保留为防御分支（未来 walk_if 单语句
+         分支等若直接调用 walk_stmt 处理 type def，语义与本分支一致：
+         rhs 求值 → 折叠 AST_TYPE_REF → 绑定 vm 当前作用域 → 激活符号）。
+         定义点不摘除（进入字节码，运行时 DEFINE 绑定 type value）。 */
       sema_eval_type_def(sema, (ast_type_def_t *)stmt, scope);
       break;
     case AST_ASSIGN:
@@ -661,14 +672,131 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
   return r;
 }
 
+/* ---- 提升遮蔽预检（局部 type 定义） ----
+ *
+ * 提升语义下 type RHS 在块入口求值（早于块内 var 绑定到 VM scope），
+ * 若 RHS 引用"块内声明序靠前的 var 名"会错误落到外层同名 type/未定义。
+ * 入口提升循环按声明序累积 prior_vars，此处递归检查 RHS 的 AST_IDENT
+ * 引用（未折叠的名字，折叠产物 AST_TYPE_REF 不在此列）是否命中——
+ * 命中即 var 完全遮罩（遮蔽平等），报错并跳过求值。 */
+
+static const strslice_t *type_rhs_uses_var(const ast_node_t *e,
+                                           const strslice_t *prior_vars,
+                                           size_t prior_n) {
+  if (!e) return NULL;
+  if (e->kind == AST_IDENT) {
+    for (size_t i = 0; i < prior_n; i++) {
+      if (prior_vars[i].len == ((ast_ident_t *)e)->name.len &&
+          memcmp(prior_vars[i].ptr, ((ast_ident_t *)e)->name.ptr,
+                 prior_vars[i].len) == 0)
+        return &prior_vars[i];
+    }
+    return NULL;
+  }
+  const strslice_t *hit = NULL;
+  switch (e->kind) {
+    case AST_ARRAY:
+      hit = type_rhs_uses_var(((ast_array_t *)e)->base_type, prior_vars,
+                              prior_n);
+      if (hit) return hit;
+      return type_rhs_uses_var(((ast_array_t *)e)->length, prior_vars,
+                               prior_n);
+    case AST_CONST:
+      return type_rhs_uses_var(((ast_const_t *)e)->sub, prior_vars, prior_n);
+    case AST_VOLATILE:
+      return type_rhs_uses_var(((ast_volatile_t *)e)->sub, prior_vars,
+                               prior_n);
+    case AST_BINARY:
+      hit = type_rhs_uses_var(((ast_binary_t *)e)->lhs, prior_vars, prior_n);
+      if (hit) return hit;
+      return type_rhs_uses_var(((ast_binary_t *)e)->rhs, prior_vars, prior_n);
+    case AST_UNARY:
+      return type_rhs_uses_var(((ast_unary_t *)e)->operand, prior_vars,
+                               prior_n);
+    case AST_TERNARY: {
+      hit = type_rhs_uses_var(((ast_ternary_t *)e)->cond, prior_vars,
+                              prior_n);
+      if (hit) return hit;
+      hit = type_rhs_uses_var(((ast_ternary_t *)e)->then_branch, prior_vars,
+                              prior_n);
+      if (hit) return hit;
+      return type_rhs_uses_var(((ast_ternary_t *)e)->else_branch, prior_vars,
+                               prior_n);
+    }
+    case AST_CALL: {
+      hit = type_rhs_uses_var(((ast_call_t *)e)->callee, prior_vars,
+                              prior_n);
+      if (hit) return hit;
+      for (ast_node_t *a = ((ast_call_t *)e)->args; a; a = a->next) {
+        hit = type_rhs_uses_var(a, prior_vars, prior_n);
+        if (hit) return hit;
+      }
+      return NULL;
+    }
+    case AST_FUNC_TYPE: {
+      for (ast_node_t *p = ((ast_func_type_t *)e)->params; p; p = p->next) {
+        hit = type_rhs_uses_var(p, prior_vars, prior_n);
+        if (hit) return hit;
+      }
+      return type_rhs_uses_var(((ast_func_type_t *)e)->return_type,
+                               prior_vars, prior_n);
+    }
+    case AST_CONSTRUCT: {
+      hit = type_rhs_uses_var(((ast_construct_t *)e)->type, prior_vars,
+                              prior_n);
+      if (hit) return hit;
+      for (ast_node_t *f = ((ast_construct_t *)e)->fields; f; f = f->next) {
+        hit = type_rhs_uses_var(f, prior_vars, prior_n);
+        if (hit) return hit;
+      }
+      return NULL;
+    }
+    case AST_TYPE_REF:
+    default:
+      return NULL; /* 折叠产物 / 无子节点字面量 */
+  }
+}
+
 static block_result_t walk_block(sema_t *sema, ast_node_t *block,
                                  sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
   ast_block_t *b = (ast_block_t *)block;
+  /* 提升：局部 type 定义（未来局部函数定义语句在此接入）在块入口按声明序
+     绑定——类型名字整个块内可见（无 TDZ，前向引用安全）。rhs 求值仍按
+     声明序（类型引用依赖前序类型，与全局 pass1b 一致）；求值会折叠
+     td->expr 为 AST_TYPE_REF 并激活符号（sema_eval_type_def）。walk 主循环
+     跳过 type def 语句（已处理，避免重复求值）。
+     prior_vars 累积块内声明序靠前的 var 名：type RHS 引用命中 → var 完全
+     遮罩（遮蔽平等），预检报错并跳过求值（不绑定/不激活）。 */
+  strslice_t prior_vars[64];
+  size_t prior_n = 0;
+  for (ast_node_t *s = b->stmts; s; s = s->next) {
+    if (s->kind == AST_VAR_DEF) {
+      if (prior_n < 64) {
+        prior_vars[prior_n++] = ((ast_var_def_t *)s)->name;
+      }
+    } else if (s->kind == AST_TYPE_DEF) {
+      ast_type_def_t *td = (ast_type_def_t *)s;
+      const strslice_t *shadow =
+          type_rhs_uses_var(td->expr, prior_vars, prior_n);
+      if (shadow) {
+        diag_error(sema->diag, sema_loc(sema, td->expr),
+                   "'%.*s' is a variable, not a type", (int)shadow->len,
+                   shadow->ptr);
+        continue; /* 遮蔽：跳过求值，符号保持未激活 */
+      }
+      sema_eval_type_def(sema, td, scope);
+    }
+  }
   /* prev 维护：comptime var 定义点求值后从语句链摘除（不进入运行时）。
      var def 不消费子作用域（3a 只注册符号），摘除不影响索引对齐。 */
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
+    if (s->kind == AST_TYPE_DEF) { /* 入口提升已处理 */
+      prev = &s->next;
+      s = s->next;
+      continue;
+    }
     block_result_t sr = walk_stmt(sema, s, scope, idx);
     if (sr.definitely_returns) {
       r.definitely_returns = true;

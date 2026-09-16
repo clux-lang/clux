@@ -1050,6 +1050,58 @@ TEST(Driver, RunFileTypeDefLocal) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileTypeDefLocalHoisted) {
+  /* 局部 type def 提升：使用在定义之前（前向引用）→ 运行期块入口先 DEFINE
+     类型名，var 槽位解析成功，结果正确 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:Local = 7;\n"
+      "  type Local = i32;\n"
+      "  {\n"
+      "    var y:Inner = 9;\n"
+      "    type Inner = i64;\n"
+      "    x = x + (y as i32);\n"
+      "  }\n"
+      "  return x;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefLocalHoistedLoop) {
+  /* 局部 type def 提升进循环体：每次迭代 PUSH_SCOPE 后入口 DEFINE（幂等），
+     var 使用定义之前的类型名 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var sum:i32 = 0;\n"
+      "  var i:i32 = 0;\n"
+      "  while (i < 3) {\n"
+      "    var v:LoopT = i + 1;\n"
+      "    type LoopT = i32;\n"
+      "    sum = sum + v;\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return sum;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefLocalHoistedExprRef) {
+  /* 提升的 type 名作表达式引用（type value）：运行期块入口 DEFINE 先于
+     使用点——var t = Local 引用定义在后的 type Local */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var t = Local;\n"
+      "  type Local = i32;\n"
+      "  var x:i32 = 7;\n"
+      "  _ = t;\n"
+      "  return x;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileTypeDefRhsNotTypeRejected) {
   /* rhs 非类型值：sema 诊断，退出 1 */
   std::string path = write_temp_file("func main():i32 {\n"

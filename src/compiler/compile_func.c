@@ -36,10 +36,10 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   /* 参数绑定完成 → push 函数体作用域（临时变量与参数隔离，遮蔽语义正确） */
   balance_push(c);
 
-  /* 函数体语句（顶层变量定义到新作用域） */
+  /* 函数体语句（顶层变量定义到新作用域；compile_block_body 做局部
+     type def 入口提升——函数体与块作用域一致，类型名整个函数体可见） */
   if (fn->body && fn->body->kind == AST_BLOCK) {
-    ast_block_t *b = (ast_block_t *)fn->body;
-    for (ast_node_t *s = b->stmts; s; s = s->next) compile_stmt(c, s);
+    compile_block_body(c, (ast_block_t *)fn->body);
   }
 
   balance_pop(c);
