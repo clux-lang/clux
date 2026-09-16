@@ -68,17 +68,32 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
   st_push(c, -1);
 }
 
-/* 块体编译：入口提升局部 type 定义（未来局部函数定义语句在此接入）——
+/* 块体编译：入口提升局部 type 定义与局部函数定义——
    先按声明序发 type def 字节码（LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE，
-   类型构造在全局 hoist 区，此处仅运行时名字绑定），定义点跳过。
-   类型名字整个块内可见（前向引用安全），与 sema walk_block 提升一致。
+   类型构造在全局 hoist 区，此处仅运行时名字绑定），再按声明序提升局部
+   函数注册段（compile_func_reg：LOAD_TYPE <sig_id>; PUSH_FUNCTION;
+   BIND_FUNC; SET_FUNC_NAME; PUSH_UNDEFINED; DEFINE——DEFINE 落到块作用域，
+   名字整个块内可见，前向引用安全，同块互相调用），定义点跳过。
+   局部函数体收集到 compiler_t（local_defs + local_slots），compiler_compile
+   函数体区统一编译回填 PUSH_FUNCTION body 占位（嵌套局部函数在编译外层
+   局部函数体时追加，队列驱动）。comptime 局部函数不进入运行时（调用点
+   sema 折叠），跳过。与 sema walk_block 提升严格一致。
    balance（PUSH_SCOPE）由调用方在调用前发出，DEFINE 落到块作用域。
    函数体块（compile_func_body）与各控制流块（compile_stmt）共用。 */
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
     if (s->kind == AST_TYPE_DEF) compile_stmt(c, s);
+  for (ast_node_t *s = b->stmts; s; s = s->next) {
+    if (s->kind != AST_FUNC_DEF) continue;
+    ast_func_def_t *fn = (ast_func_def_t *)s;
+    if (fn->is_comptime) continue;
+    size_t slot = compile_func_reg(c, fn);
+    if (c->failed) return;
+    vec_push(c->local_defs, c->alloc, fn);
+    vec_push(c->local_slots, c->alloc, (void *)(uintptr_t)slot);
+  }
   for (ast_node_t *s = b->stmts; s; s = s->next)
-    if (s->kind != AST_TYPE_DEF) compile_stmt(c, s);
+    if (s->kind != AST_TYPE_DEF && s->kind != AST_FUNC_DEF) compile_stmt(c, s);
 }
 
 void compile_stmt(compiler_t *c, ast_node_t *node) {
@@ -330,6 +345,10 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     emit_jump(c, c->loop_stack->continue_label);
     break;
   }
+  case AST_FUNC_DEF:
+    /* 局部函数定义：compile_block_body 入口提升已处理（注册段字节码），
+       定义点跳过。 */
+    break;
   case AST_ERROR:
     c_error(c, node, "compile aborted on parse error node");
     return;

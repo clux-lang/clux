@@ -100,6 +100,14 @@ typedef struct compiler_t {
        types_by_id 幂等，语义无害）。签名类型 id 由 sema 分配（不在此列）。 */
     uint32_t        type_id_next;
 
+    /* 局部函数收集（compile_block_body 提升时登记，compiler_compile 函数体区
+       全局函数体编译后统一编译回填）：local_defs = ast_func_def_t*，
+       local_slots = 对应 PUSH_FUNCTION body 占位槽位（size_t，uintptr_t 编码）。
+       队列驱动——嵌套局部函数在编译外层局部函数体时追加，编译循环重取
+       len 自动覆盖。 */
+    vec_t          *local_defs;
+    vec_t          *local_slots;
+
     /* 静态平衡追踪 */
     size_t          scope_depth;    /* 当前已 PUSH_SCOPE 未 POP 的层数 */
     int             stack_depth;    /* 静态操作数栈深度（压栈 +1 / 弹栈 -1） */

@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "core/panic.h"
 #include "parser/ast_block.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
@@ -62,12 +63,20 @@ static bool type_shadowed_by_local_def(sema_t *sema, sema_scope_t *scope,
   return false;
 }
 
-static void build_func(sema_t *sema, sema_func_t *sf) {
+/* 函数作用域树构建（全局 / 局部函数共用）：
+   - parent = 全局作用域（全局函数）/ 定义点块作用域（局部函数——同块
+     局部函数互相可见 + 捕获检查拦截外层局部）
+   - fscope 追加为 parent 的子作用域（3b walk_block 在定义点消费该子作用域
+     索引；sema_scope_destroy 递归回收）
+   - 参数注册（已解析类型；局部类型槽位在 3a 可能解析失败 → 3b 提升补全）
+   - 函数体 block 直接用 fscope（不嵌套） */
+static void build_func_tree(sema_t *sema, sema_func_t *sf,
+                            sema_scope_t *parent) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
 
   sema_scope_t *fscope =
-      sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, sema->global_scope);
-  sema_scope_add_child(sema->global_scope, fscope);
+      sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, parent);
+  sema_scope_add_child(parent, fscope);
   sf->scope = fscope;
 
   /* 注册参数（已解析类型，运行时值在 Pass 3b 进入函数时定义到 VM scope） */
@@ -95,6 +104,51 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
                "function '%.*s' must return a value on all paths",
                (int)fn->name.len, fn->name.ptr);
   }
+}
+
+static void build_func(sema_t *sema, sema_func_t *sf) {
+  build_func_tree(sema, sf, sema->global_scope);
+}
+
+/* 局部函数注册（Pass 3a build_block AST_FUNC_DEF 分支）：
+   - 遮蔽全局函数名 → 显式拒绝（compiler func_ids 是全局平铺名字→fid 映射，
+     局部插入会覆盖全局 fid，导致块外引用错绑；M1 明确不支持）
+   - 注册符号（SEMA_SYM_FUNC，注册即激活——提升语义，与全局函数一致）
+   - 登记 sema_func_t 追加队列（is_local=true；comptime func 入队不建树，
+     与全局一致——调用点 ctfe 求值）
+   - 非 comptime：建 fscope 树（parent = 定义点块作用域） */
+static void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
+  ast_func_def_t *fn = (ast_func_def_t *)s;
+
+  sema_symbol_t *gsym = sema_lookup(sema->global_scope, fn->name);
+  if (gsym && gsym->kind == SEMA_SYM_FUNC) {
+    diag_error(sema->diag, sema_loc(sema, s),
+               "local function '%.*s' shadows a global function (unsupported)",
+               (int)fn->name.len, fn->name.ptr);
+    return; /* 不注册（3b 提升经符号存在性跳过） */
+  }
+
+  sema_symbol_t init = {.kind = SEMA_SYM_FUNC,
+                        .ast = s,
+                        .is_active = true,
+                        .is_comptime = fn->is_comptime};
+  if (!sema_scope_define(scope, fn->name, &init)) {
+    diag_error(sema->diag, sema_loc(sema, s), "duplicate name '%.*s'",
+               (int)fn->name.len, fn->name.ptr);
+    return;
+  }
+
+  sema_func_t *sf = allocator_new_ex(sema->vm->alloc, "sema_func_t",
+                                     sizeof(sema_func_t), NULL, NULL, NULL, 1);
+  if (!sf) panic("sema: out of memory allocating sema_func");
+  sf->def = s;
+  sf->scope = NULL;
+  sf->name = fn->name;
+  sf->is_local = true;
+  vec_push(sema->funcs, sema->vm->alloc, sf);
+
+  if (fn->is_comptime) return; /* comptime：不建树、不 shadow walk */
+  build_func_tree(sema, sf, scope);
 }
 
 static build_result_t build_block(sema_t *sema, ast_block_t *block,
@@ -141,6 +195,12 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         }
         break;
       }
+      case AST_FUNC_DEF:
+        /* 局部函数定义：注册符号 + 登记队列 + 建 fscope 树（提升语义，
+           整个块内可见）。定义点不摘除（进入字节码，运行时 DEFINE 绑定）。
+           3b walk_block 入口提升签名、主循环跳过（消费 fscope 子作用域）。 */
+        build_local_func(sema, s, scope);
+        break;
       case AST_BLOCK: {
         sema_scope_t *child =
             sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);

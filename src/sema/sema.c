@@ -39,6 +39,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->types = vec_new(vm->alloc, false); /* 元素手动释放（sema_type_t 无 dispose） */
   sema->func_return_type = NULL;
   sema->func_has_return = false;
+  sema->local_func_base = NULL;
   sema->loop_depth = 0;
   return sema;
 }
@@ -510,7 +511,10 @@ static void pass2_types(sema_t *sema) {
     const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
     sym->type = sig;
     sym->ast = f;
-    sema_type_register(sema, sig); /* 签名类型提升：登记 + 递归依赖登记 */
+    /* 签名类型提升：登记 + 递归依赖登记；fn->sig_id 记录（compiler
+       compile_func_reg 发 LOAD_TYPE <sig_id>，不再作用域查找） */
+    const sema_type_t *st = sema_type_register(sema, sig);
+    if (st) fn->sig_id = st->id;
 
     /* params 临时数组已被 type_func_sig 复制，此处释放 */
     if (params) allocator_free(sema->vm->alloc, (void **)&params);

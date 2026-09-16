@@ -276,6 +276,25 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
+  /* 3.5 局部函数体区（全局函数体之后）：compile_block_body 提升时收集
+     （local_defs + local_slots），此时统一编译并回填 PUSH_FUNCTION body
+     占位。嵌套局部函数在外层局部函数体编译时追加到队列，while 重取
+     vec_len 自动覆盖。 */
+  size_t li = 0;
+  while (li < vec_len(c->local_defs)) {
+    ast_func_def_t *fn = (ast_func_def_t *)vec_get(c->local_defs, li);
+    size_t slot = (size_t)(uintptr_t)vec_get(c->local_slots, li);
+    size_t body = compile_func_body(c, fn);
+    bcode_patch_u32(bc, slot, (uint32_t)body);
+    li++;
+    if (c->failed) break;
+  }
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
   c->bc = NULL; /* 产物移交调用方 */
   return bc;
 }
@@ -301,6 +320,8 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->loop_stack    = NULL;
   c->failed        = false;
   c->func_id_next  = FUNC_ID_PROGRAM_BASE;
+  c->local_defs    = vec_new(alloc, false);
+  c->local_slots   = vec_new(alloc, false);
   /* 签名类型 id 由 sema 分配（sema_type_register 登记进 sema->types，
      id = PROGRAM_BASE + index，已写入 sig->id）；type_id_next 仅作防御
      分支（compile_type.c AST_ARRAY 未替换场景临时分配 id）。 */
@@ -315,5 +336,7 @@ void compiler_destroy(compiler_t **pc) {
   /* 释放残留 patch 节点（编译中途失败时可能有未回填标签） */
   while (c->loop_stack) c->loop_stack = c->loop_stack->next; /* 仅断链 */
   if (c->func_ids) strmap_free(c->alloc, &c->func_ids);
+  if (c->local_defs) vec_free(c->alloc, &c->local_defs);
+  if (c->local_slots) vec_free(c->alloc, &c->local_slots);
   allocator_free(c->alloc, (void **)pc);
 }

@@ -217,10 +217,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                 value_type(fnv)->vtable->call) {
                 return ctfe_call_value(ctx, fnv, n->args);
             }
-            /* 2. sema 符号表：SYM_FUNC（clux 函数）→ 解释调用 */
+            /* 2. sema 符号表：SYM_FUNC（clux 函数）→ 解释调用。
+               先查当前词法作用域（局部 comptime 函数/变量的符号所在块，
+               沿 parent 链可上溯到 global_scope），再回退 global_scope
+               （顶层 comptime var / 数组边界等无 sema_scope 的求值场景）。 */
             if (ctx->sema && ctx->sema->global_scope) {
                 sema_symbol_t *sym =
-                    sema_lookup(ctx->sema->global_scope, id->name);
+                    ctx->sema_scope
+                        ? sema_lookup(ctx->sema_scope, id->name)
+                        : NULL;
+                if (!sym)
+                    sym = sema_lookup(ctx->sema->global_scope, id->name);
                 if (sym && sym->kind == SEMA_SYM_FUNC) {
                     return ctfe_call_ast_fn(ctx, (ast_func_def_t *)sym->ast,
                                             n->args);

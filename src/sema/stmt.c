@@ -24,6 +24,7 @@
 #include "parser/lexer.h"
 #include "sema/comptime.h"
 #include "vm/type_array.h"
+#include "vm/type_func.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -652,6 +653,10 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
     case AST_BREAK:
     case AST_CONTINUE:
       break; /* 位置检查已在 Pass 3a 完成 */
+    case AST_FUNC_DEF:
+      /* 局部函数定义：入口提升已处理签名，主循环（walk_block）已跳过并
+         消费 fscope 子作用域。防御分支（非块上下文直接调用时零操作）。 */
+      break;
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
       value_t *v = sema_expr(sema, &es->expr, scope);
@@ -757,15 +762,88 @@ static const strslice_t *type_rhs_uses_var(const ast_node_t *e,
   }
 }
 
+/* ---- 局部函数签名解析（3b 提升时） ---- */
+
+/* 按定义 AST 节点反查 sema_func_t（局部函数提升时定位 fscope，补全参数
+   符号 type）。线性扫描，函数数量少。 */
+static sema_func_t *sema_func_find_by_def(sema_t *sema, ast_node_t *def) {
+  size_t n = vec_len(sema->funcs);
+  for (size_t i = 0; i < n; i++) {
+    sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
+    if (sf->def == def) return sf;
+  }
+  return NULL;
+}
+
+/* 局部函数签名解析：与 pass2_types 同构（type_func_sig 建签名 →
+   sema_type_register 登记 → fn->sig_id 记录），但类型槽位在定义点块作用域
+   的 VM 链上解析（局部 type 已由入口提升按声明序绑定，可见）。
+   参数符号 type 一并补全（3a 建树时局部类型槽位可能解析失败为 NULL，
+   函数体 walk 前就绪——sema_walk_function 参数 shadow 用）。 */
+static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
+                                   sema_scope_t *scope) {
+  size_t nparams = sema_count_siblings(fn->params);
+  const type_t **params = NULL;
+  if (nparams > 0) {
+    params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
+                              NULL, NULL, NULL, nparams);
+    size_t j = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, j++) {
+      ast_var_def_t *vd = (ast_var_def_t *)p;
+      const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
+      if (!t) {
+        diag_error(sema->diag, sema_loc(sema, p),
+                   "unknown type in parameter '%.*s'",
+                   (int)vd->name.len, vd->name.ptr);
+      }
+      params[j] = t; /* 失败置 NULL，位置对齐，func_shadow_call 校验时跳过 */
+    }
+  }
+
+  const type_t *rt = NULL;
+  if (fn->return_expr) {
+    rt = sema_resolve_type_slot(sema, &fn->return_expr);
+    if (!rt) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                 "unknown return type");
+    }
+  }
+
+  const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
+  /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */
+  sema_symbol_t *sym = sema_lookup(scope, fn->name);
+  if (sym) {
+    sym->type = sig;
+    sym->ast = (ast_node_t *)fn;
+  }
+  /* 签名类型登记（hoist 构造 + fn->sig_id：compiler LOAD_TYPE <sig_id>） */
+  const sema_type_t *st = sema_type_register(sema, sig);
+  if (st) fn->sig_id = st->id;
+
+  /* 参数符号 type 补全（3a 建树时解析失败的局部类型槽位） */
+  sema_func_t *sf = sema_func_find_by_def(sema, (ast_node_t *)fn);
+  if (sf && sf->scope) {
+    size_t j = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, j++) {
+      ast_var_def_t *vd = (ast_var_def_t *)p;
+      sema_symbol_t *ps = sema_scope_find_local(sf->scope, vd->name);
+      if (ps && !ps->type) ps->type = params ? params[j] : NULL;
+    }
+  }
+
+  if (params) allocator_free(sema->vm->alloc, (void **)&params);
+}
+
 static block_result_t walk_block(sema_t *sema, ast_node_t *block,
                                  sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
   ast_block_t *b = (ast_block_t *)block;
-  /* 提升：局部 type 定义（未来局部函数定义语句在此接入）在块入口按声明序
-     绑定——类型名字整个块内可见（无 TDZ，前向引用安全）。rhs 求值仍按
-     声明序（类型引用依赖前序类型，与全局 pass1b 一致）；求值会折叠
-     td->expr 为 AST_TYPE_REF 并激活符号（sema_eval_type_def）。walk 主循环
-     跳过 type def 语句（已处理，避免重复求值）。
+  /* 提升：局部 type 定义与局部函数定义在块入口按声明序绑定——名字整个
+     块内可见（无 TDZ，前向引用安全，同块局部函数互相调用）。type rhs 求值
+     仍按声明序（类型引用依赖前序类型，与全局 pass1b 一致）；求值会折叠
+     td->expr 为 AST_TYPE_REF 并激活符号（sema_eval_type_def）。局部函数
+     提升解析签名（resolve_local_func_sig：type_func_sig 建签名 → 登记 →
+     fn->sig_id + 符号 type 填充）。walk 主循环跳过这两类语句（已处理）。
      prior_vars 累积块内声明序靠前的 var 名：type RHS 引用命中 → var 完全
      遮罩（遮蔽平等），预检报错并跳过求值（不绑定/不激活）。 */
   strslice_t prior_vars[64];
@@ -786,6 +864,13 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
         continue; /* 遮蔽：跳过求值，符号保持未激活 */
       }
       sema_eval_type_def(sema, td, scope);
+    } else if (s->kind == AST_FUNC_DEF) {
+      ast_func_def_t *fn = (ast_func_def_t *)s;
+      /* 统一解析签名（含 comptime：调用点折叠前符号 type 须就绪——
+         调用点 !sym->type 会误报 "undefined function"）。
+         3a 拒绝（遮蔽全局函数名）的符号未注册 → find_local 为空 → 跳过。 */
+      if (!sema_scope_find_local(scope, fn->name)) continue;
+      resolve_local_func_sig(sema, fn, scope);
     }
   }
   /* prev 维护：comptime var 定义点求值后从语句链摘除（不进入运行时）。
@@ -793,6 +878,15 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
     if (s->kind == AST_TYPE_DEF) { /* 入口提升已处理 */
+      prev = &s->next;
+      s = s->next;
+      continue;
+    }
+    if (s->kind == AST_FUNC_DEF) {
+      /* 入口提升已处理签名；消费 3a 建的 fscope 子作用域（comptime / 被拒
+         无子作用域）——与 3a 建树严格对齐。 */
+      ast_func_def_t *fn = (ast_func_def_t *)s;
+      if (!fn->is_comptime && sema_scope_find_local(scope, fn->name)) (*idx)++;
       prev = &s->next;
       s = s->next;
       continue;
@@ -818,6 +912,11 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
 void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
   if (!sf->scope) return; /* 建树失败（结构错误已诊断），不进入 shadow run */
+
+  /* 捕获检查上下文：局部函数体引用外层局部符号 → 报错（无闭包，运行时
+     函数体查找链只有参数 + 全局）。全局函数不设（fscope parent = 全局，
+     无外层局部可捕获）。 */
+  sema->local_func_base = sf->is_local ? sf->scope : NULL;
 
   sema->func_return_type =
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
@@ -849,4 +948,5 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成 */
   sema->func_return_type = NULL;
+  sema->local_func_base = NULL;
 }

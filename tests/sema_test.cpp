@@ -1893,4 +1893,186 @@ TEST_F(SemaTest, FuncValueComptimeFold) {
     EXPECT_EQ(val->type, vm_->type_i32); /* 折叠后的函数调用返回 i32 */
 }
 
+/* ================================================================ */
+/* 局部函数（local function）                                          */
+/* ================================================================ */
+
+TEST_F(SemaTest, LocalFuncBasic) {
+    /* 局部函数定义：函数体内块作用域注册，无诊断。
+       outer 体内局部函数 inc 只能访问参数 + 全局函数 add。 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func outer(n:i32): i32 {"
+        "  func inc(x:i32): i32 { return x + 1; }"
+        "  func dbl(x:i32): i32 { return x * 2; }"
+        "  return add(dbl(n), inc(n));"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* outer 的 fscope 下应有 inc / dbl 符号（局部函数提升注册） */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *inc = sema_scope_find_local(fscope, STRSLICE_LIT("inc"));
+    ASSERT_NE(inc, nullptr);
+    EXPECT_EQ(inc->kind, SEMA_SYM_FUNC);
+    sema_symbol_t *dbl = sema_scope_find_local(fscope, STRSLICE_LIT("dbl"));
+    ASSERT_NE(dbl, nullptr);
+    EXPECT_EQ(dbl->kind, SEMA_SYM_FUNC);
+}
+
+TEST_F(SemaTest, LocalFuncHoistForwardReference) {
+    /* 提升语义：局部函数调用先于定义点（前向引用），块内名字整个可见 */
+    EXPECT_TRUE(analyze(
+        "func outer(n:i32): i32 {"
+        "  var r = caller(n);" /* 调用先于定义 */
+        "  func caller(x:i32): i32 { return x + 1; }" /* 定义在后 */
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncNestedBlock) {
+    /* 嵌套块局部函数：块内定义 + 调用合法 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  { func inner(x:i32): i32 { return x; } var a = inner(1); }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncNestedBlockOutOfScopeRejected) {
+    /* 出块引用 → undefined function */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  { func inner(x:i32): i32 { return x; } }"
+        "  var a = inner(1);"
+        "}"));
+    expect_message(0, "undefined function");
+}
+
+TEST_F(SemaTest, LocalFuncCallsGlobalFunction) {
+    /* 局部函数体内调用全局函数：合法（函数体查找链 = 参数 + 全局） */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func outer(n:i32): i32 {"
+        "  func inc(x:i32): i32 { return add(x, 1); }"
+        "  return inc(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncRecursionRejected) {
+    /* 局部函数递归：自身调用需闭包捕获，当前不支持 → 编译期报错 */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func dec(x:i32): i32 {"
+        "    if (x <= 0) { return 0; }"
+        "    return dec(x - 1);"
+        "  }"
+        "  return dec(n);"
+        "}"
+        "func main(): void { var r = outer(5); }"));
+    expect_message(0, "local function cannot call sibling or self");
+}
+
+TEST_F(SemaTest, LocalFuncSiblingCallRejected) {
+    /* 局部函数调用兄弟函数：符号只在定义作用域可见，调用需闭包 → 报错 */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func caller(x:i32): i32 { return callee(x) + 1; }"
+        "  func callee(x:i32): i32 { return x * 2; }"
+        "  return caller(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    expect_message(0, "local function cannot call sibling or self");
+}
+
+TEST_F(SemaTest, LocalFuncSiblingValueRefRejected) {
+    /* 局部函数值引用兄弟函数（var f = callee）：同样需闭包 → 报错 */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func caller(x:i32): i32 {"
+        "    var f = callee;"
+        "    return f(x);"
+        "  }"
+        "  func callee(x:i32): i32 { return x * 2; }"
+        "  return caller(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    expect_message(0, "local function cannot reference sibling or self");
+}
+
+TEST_F(SemaTest, LocalFuncCaptureOuterLocalRejected) {
+    /* 局部函数捕获外层局部变量：无闭包 → 报错 */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  var k = 10;"
+        "  func inc(x:i32): i32 { return x + k; }"
+        "  return inc(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    expect_message(0, "local function cannot access outer local");
+}
+
+TEST_F(SemaTest, LocalFuncCaptureOuterParamRejected) {
+    /* 局部函数捕获外层函数参数：无闭包 → 报错 */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func inc(x:i32): i32 { return x + n; }"
+        "  return inc(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    expect_message(0, "local function cannot access outer local");
+}
+
+TEST_F(SemaTest, LocalFuncShadowsGlobalFunctionRejected) {
+    /* 局部函数遮蔽全局函数名：compiler func_ids 平铺表会错绑 → 显式拒绝 */
+    EXPECT_FALSE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func outer(n:i32): i32 {"
+        "  func add(x:i32): i32 { return x; }"
+        "  return add(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    expect_message(0, "shadows a global function");
+}
+
+TEST_F(SemaTest, LocalFuncComptimeSkipped) {
+    /* comptime 局部函数：调用点折叠，不建作用域树、不注册运行时 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  comptime func twice(x:i32): i32 { return x * 2; }"
+        "  var a = twice(3);"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* comptime 局部函数不消费 3a 建的 fscope 子作用域（未建树） */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *a = sema_scope_find_local(fscope, STRSLICE_LIT("a"));
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, LocalFuncSignatureRegistered) {
+    /* 局部函数签名登记进 sema->types + fn->sig_id（compiler LOAD_TYPE 用）：
+       类型表在全局函数注册段之后出现局部签名 */
+    EXPECT_TRUE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func inc(x:i32): i32 { return x + 1; }"
+        "  return inc(n);"
+        "}"
+        "func main(): void { var r = outer(3); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *inc = sema_scope_find_local(fscope, STRSLICE_LIT("inc"));
+    ASSERT_NE(inc, nullptr);
+    EXPECT_EQ(inc->type->kind, TYPE_KIND_FUNC); /* 签名类型 */
+}
+
 } /* namespace */

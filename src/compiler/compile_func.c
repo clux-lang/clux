@@ -3,6 +3,8 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_var_def.h"
 
+#include <string.h>
+
 /* ===========================================================================
  * 函数节点
  * =========================================================================== */
@@ -60,28 +62,39 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
  *  - 签名类型：已由 hoist 类型提升区**两遍扫描**构造（pass 1 PUSH_FUNC_TYPE
  *    → DEFINE_TYPE <id> 声明登记进 types_by_id；pass 2 LOAD_TYPE 拉回 →
  *    设参数/返回 → SEAL 封闭，依赖后序——签名可引用签名，函数指针作参数
- *    时依赖后声明签名）。sema 已把签名类型登记进 sema->types 并写入
- *    sig->id，此处 LOAD_TYPE <sig->id> 直接拉取密封签名类型，不再内联构造。
+ *    时依赖后声明签名）。sema 已把签名类型登记进 sema->types 并把 id 写入
+ *    fn->sig_id，此处 LOAD_TYPE <fn->sig_id> 直接拉取密封签名类型，不再内联
+ *    构造（局部函数签名由 sema 3b 提升解析分配，全局/局部统一走本字段）。
  *  - 函数变量：LOAD_TYPE <sig_id> 主动拉取签名类型 → PUSH_FUNCTION 构造
  *    func value → BIND_FUNC <fid> 填充函数 id（functions_by_id 表，fid 由
- *    func_id_next 分配）→ DEFINE 名字绑定到 scope。
+ *    func_id_next 分配）→ DEFINE 名字绑定到当前 scope（全局 → 全局作用域；
+ *    局部 → 定义点块作用域，compile_block_body 提升时调用）。
  *  sig_id（类型 id，sema 分配）与 fid（函数 id，compiler 分配）分属两张
  *  独立表，值域可重叠但互不串用。 */
 size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
   /* 函数 id：compiler 按声明顺序分配（不写回 AST），仅 BIND_FUNC 携带 */
   uint32_t fid = c->func_id_next++;
 
-  /* 签名类型：从 sema 登记的全局函数符号取（sym->type 即签名类型，id 由
-     sema_type_register 写入 sig->id）。hoist 已构造密封，LOAD_TYPE 拉回。 */
-  const sema_symbol_t *sym = sema_lookup(c->global_scope, fn->name);
-  const type_t *sig = sym ? sym->type : NULL;
-  if (!sig || sig->kind != TYPE_KIND_FUNC) {
+  /* 签名类型 id：sema 填充（pass2 全局 / 3b 提升局部，sema_type_register
+     分配写入 fn->sig_id）。LOAD_TYPE <sig_id> 直接拉取密封签名类型，替代
+     作用域查找——compiler 不镜像 sema 作用域树，局部函数在 global 查不到
+     符号（全局函数经 sig->id 查询与 sig_id 同值，统一走本字段）。 */
+  uint32_t sig_id = fn->sig_id;
+  if (sig_id == 0) {
     c_error(c, (const ast_node_t *)fn,
             "internal: missing signature type for function '%.*s'",
             (int)fn->name.len, fn->name.ptr);
     return 0;
   }
-  uint32_t sig_id = sig->id;
+
+  /* 登记名字 → fid（LOAD_FUNCTION 编译用）：全局函数已由 compiler_compile
+     预建（id+1 编码），此处幂等重插同值；局部函数在块入口提升时动态插入
+     （早于块体编译，AST_FUNC_REF 查表时已就绪）。 */
+  char nb[256];
+  size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
+  memcpy(nb, fn->name.ptr, n);
+  nb[n] = '\0';
+  strmap_insert(c->func_ids, c->alloc, nb, (void *)(uintptr_t)(fid + 1u));
 
   /* 1. LOAD_TYPE <sig_id>：主动从类型表拉取密封签名类型 */
   bcode_write_op(c->bc, BCODE_LOAD_TYPE);

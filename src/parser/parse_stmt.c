@@ -22,6 +22,7 @@
 ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
     if (check_keyword(p, "var"))    return parse_var_def(p);
+    if (check_keyword(p, "func"))   return parse_func_def(p);
     if (check_keyword(p, "type"))   return parse_type_def(p);
     if (check_keyword(p, "if"))     return parse_if(p);
     if (check_keyword(p, "while"))  return parse_while(p);

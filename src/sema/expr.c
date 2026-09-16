@@ -153,6 +153,19 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          是非法用法（调用点在 AST_CALL 折叠）。 */
       if (sym && sym->kind == SEMA_SYM_FUNC && sym->type &&
           sym->type->kind == TYPE_KIND_FUNC) {
+        /* 局部函数体内引用兄弟/自身函数值：运行时函数体查找链只有参数 +
+           全局（closure_scope 为空、调用时临时接 root_scope），兄弟/自身
+           符号在定义点块作用域，不可见（需闭包）。FUNC 分支改写 AST_FUNC_REF
+           → LOAD_FUNCTION 查 functions_by_id 全局表，会绕过作用域可见性
+           ——在此显式拦截。全局函数（global_scope 符号）放行。 */
+        if (sema->local_func_base &&
+            sema_lookup(sema->global_scope, n->name) != sym) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "local function cannot reference sibling or self '%.*s' "
+                     "(closures not supported)",
+                     (int)n->name.len, n->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
         if (sym->is_comptime) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "comptime function '%.*s' cannot be used as a value",
@@ -183,6 +196,22 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           *node = lit;
           return value_make_shadow(sema->vm, sym->ct.type);
         }
+      }
+      /* 捕获检查（无闭包）：局部函数体内引用外层局部符号（外层块/外层函数
+         的变量、参数、类型名）→ 运行时函数体查找链只有参数 + 全局
+         （closure_scope 为空、调用时临时接 root_scope），外层局部不可见。
+         fscope parent = 定义点块作用域（同块局部函数互相可见）——沿链命中的
+         "非 fscope 直系、非 global"符号即外层局部。全局符号（sema_lookup
+         global 命中）、函数名（FUNC 分支已先行返回）、comptime 符号（上方
+         已折叠，不捕获）合法。 */
+      if (sema->local_func_base && sym &&
+          sema_scope_find_local(sema->local_func_base, n->name) != sym &&
+          sema_lookup(sema->global_scope, n->name) != sym) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "local function cannot access outer local '%.*s' "
+                   "(closures not supported)",
+                   (int)n->name.len, n->name.ptr);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
       }
       value_t *v = scope_lookup(sema->vm->current_scope, n->name);
       if (!v) {
@@ -301,6 +330,19 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
                    "cannot call '%.*s' of type %s", (int)name->name.len,
                    name->name.ptr, tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 局部函数体内调用兄弟/自身：callee 保持 AST_IDENT → 编译器发
+         PUSH name（运行时作用域查找），而函数体查找链只有参数 + 全局，
+         兄弟/自身符号在定义点块作用域，不可见（需闭包）——编译期拦截。
+         全局函数（global_scope 符号）经作用域查找可见，放行。 */
+      if (sema->local_func_base &&
+          sema_lookup(sema->global_scope, name->name) != sym) {
+        diag_error(sema->diag, sema_loc(sema, &call->base),
+                   "local function cannot call sibling or self '%.*s' "
+                   "(closures not supported)",
+                   (int)name->name.len, name->name.ptr);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 

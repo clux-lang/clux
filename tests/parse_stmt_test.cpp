@@ -1078,6 +1078,42 @@ TEST_F(ParseStmtTest, Stmt_DispatchReturn) {
 }
 
 /**
+ * Scenario: parse_stmt dispatches to local function def
+ */
+TEST_F(ParseStmtTest, Stmt_DispatchLocalFunc) {
+    parser_t *p = make_parser("func inc(x:i32):i32 { return x + 1; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_FUNC_DEF);
+
+    auto *fn = (ast_func_def_t *)node;
+    EXPECT_TRUE(strslice_eq(fn->name, strslice_from_cstr("inc")));
+    EXPECT_FALSE(fn->is_comptime);
+    ASSERT_NE(fn->params, nullptr);
+    EXPECT_TRUE(strslice_eq(((ast_var_def_t *)fn->params)->name,
+                            strslice_from_cstr("x")));
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: parse_stmt dispatches to comptime local function def
+ */
+TEST_F(ParseStmtTest, Stmt_DispatchLocalComptimeFunc) {
+    parser_t *p = make_parser("comptime func twice(x:i32):i32 { return x * 2; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_FUNC_DEF);
+    EXPECT_TRUE(((ast_func_def_t *)node)->is_comptime);
+
+    cleanup_parser(p);
+}
+
+/**
  * Scenario: parse_stmt dispatches to break
  */
 TEST_F(ParseStmtTest, Stmt_DispatchBreak) {

@@ -205,6 +205,16 @@ static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return NULL;
     }
 
+    /* 显式类型标注（spec 是 type value）且 init 类型不同：按声明类型
+       implicit_cast init（sema 已校验转换合法，运行时与 int_assign 同语义；
+       var x:i64 = 7 的 7 是 i32 字面量，须拓宽为 i64 后定义，否则运行时
+       x 实为 i32，与 sema 符号表类型不一致）。同类型或类型推断时跳过。 */
+    if (value_type(spec) == vm->type_type && value_type(init) != decl_type) {
+        value_t *casted = value_implicit_cast(vm, init, decl_type);
+        if (value_is_error(vm, casted)) return casted;
+        init = casted;
+    }
+
     value_t *stored = scope_define(vm, vm->current_scope, name.ptr, init);
     if (value_is_error(vm, stored)) return stored;
     return NULL;

@@ -16,6 +16,8 @@ typedef struct {
     ast_node_t *return_expr; /* 返回类型表达式（NULL = void） */
     ast_node_t *body;        /* AST_BLOCK */
     bool        is_comptime; /* comptime func：调用点编译期求值折叠为常量，不注册到运行时 */
+    uint32_t    sig_id;      /* 签名类型 id（sema 3b 填充，compiler LOAD_TYPE <sig_id> 用；
+                                全局函数经 sema_type_register 分配，局部函数提升时解析分配） */
 } ast_func_def_t;
 
 static inline ast_node_t *ast_func_def_new(arena_t *arena,

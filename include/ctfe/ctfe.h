@@ -43,6 +43,8 @@ typedef enum {
 typedef struct ctfe_ctx {
     vm_t        *vm;        /* 求值上下文：value 构造/运算 + scope 生命周期 */
     sema_t      *sema;      /* 符号表（函数调用查 AST_FUNC_DEF）；可 NULL（eval 场景） */
+    sema_scope_t *sema_scope; /* 当前 sema 词法作用域（局部 comptime 函数/变量
+                                 符号所在块）；NULL 时函数调用回退 global_scope */
     size_t       budget;    /* 剩余求值步数（每节点 -1，耗尽报错，防死循环） */
     size_t       depth;     /* 当前递归深度（ctfe_eval 嵌套层数） */
     size_t       max_depth; /* 递归深度上限（函数嵌套/表达式嵌套） */

@@ -296,6 +296,7 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
   ctx.sema = sema;
+  ctx.sema_scope = scope; /* 局部符号（函数/变量）按当前词法作用域解析 */
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, vd->init);
@@ -361,9 +362,10 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
   }
 
   /* 1.5 签名校验：shadow callee + value_call（与普通调用一致，ctfe 前先
-     报参数数量/类型错误，避免落入模糊的"非编译期常量"诊断） */
+     报参数数量/类型错误，避免落入模糊的"非编译期常量"诊断）。
+     按调用点作用域查符号（局部 comptime 函数符号在定义块，非全局） */
   ast_ident_t *name = (ast_ident_t *)call->callee;
-  sema_symbol_t *csym = sema_lookup(sema->global_scope, name->name);
+  sema_symbol_t *csym = sema_lookup(scope, name->name);
   if (csym && csym->type) {
     value_t *callee_shadow = value_make_shadow(vm, csym->type);
     value_t *chk = value_call(vm, callee_shadow, arg_shadows, argc);
@@ -383,6 +385,7 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
   ctx.sema = sema;
+  ctx.sema_scope = scope; /* 局部 comptime 函数符号按当前词法作用域解析 */
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, *node);

@@ -1,0 +1,51 @@
+// func_value.cx — 样例：函数值（函数名作为值）
+//
+// 函数名本身就是值：可赋给变量、传参、作返回值、经变量调用。
+// 函数值类型即函数签名类型 func(...)->...：
+//
+//   - var f = add;          函数名赋给变量，类型推断为签名 func(i32,i32)->i32
+//   - f(3, 4)               经变量调用：按签名交验参数
+//   - apply(add, 10, 20)    函数值作实参（形参声明 func(i32,i32)->i32）
+//   - get_add() 返回 add    函数值作返回值
+//   - 显式类型标注：var g: func(i32,i32)->i32 = add; 重新赋值另一函数
+//   - 变量遮蔽函数名：var add = ...; 后 add 是变量，函数名不可见
+
+func add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+func sub(a: i32, b: i32): i32 {
+    return a - b;
+}
+
+// 函数值作参数：形参类型即签名类型
+func apply(f: func(i32, i32) -> i32, x: i32, y: i32): i32 {
+    return f(x, y);
+}
+
+// 函数值作返回值
+func get_add(): func(i32, i32) -> i32 {
+    return add;
+}
+
+func main(): i32 {
+    // 函数名赋值给变量：类型推断为函数签名类型
+    var f = add;
+    var v = f(3, 4); // 经变量调用
+    printf("f(3,4) = %d\n", v);
+
+    // 函数值传参
+    printf("apply(add,10,20) = %d\n", apply(add, 10, 20));
+    printf("apply(sub,10,20) = %d\n", apply(sub, 10, 20));
+
+    // 函数值作返回值，再经变量调用
+    var g = get_add();
+    printf("g(1,2) = %d\n", g(1, 2));
+
+    // 显式类型标注 + 重新赋值另一同签名函数
+    var h: func(i32, i32) -> i32 = add;
+    h = sub;
+    printf("h(5,3) = %d\n", h(5, 3));
+
+    return 0;
+}

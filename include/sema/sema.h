@@ -44,6 +44,8 @@ typedef struct sema_func_t {
     ast_node_t   *def;    /* AST_FUNC_DEF（借用） */
     sema_scope_t *scope;  /* 函数作用域树（Pass 3 填充） */
     strslice_t    name;   /* 函数名（诊断用） */
+    bool          is_local; /* 局部函数（块内定义）：3b walk_block 提升签名
+                               + 捕获检查（fscope parent = 定义点块作用域） */
 } sema_func_t;
 
 /**
@@ -87,6 +89,13 @@ typedef struct sema_t {
     /* 函数上下文（Pass 3 walk 时设置） */
     const type_t *func_return_type; /* NULL = void */
     bool          func_has_return;
+
+    /* 捕获检查上下文（Pass 3b walk 时设置）：非 NULL = 正在 walk 局部函数体，
+       fscope parent = 定义点块作用域（同块局部函数互相可见）。sema_expr
+       引用外层局部符号（非 fscope 直系、非 global）时据此报"无闭包"——
+       运行时函数体查找链只有参数 + 全局（closure_scope 为空，调用时临时接
+       root_scope），外层局部不可见。 */
+    sema_scope_t *local_func_base;
 
     /* 循环上下文 */
     int           loop_depth;       /* 0 = 不在循环中 */

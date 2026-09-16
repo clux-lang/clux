@@ -361,7 +361,46 @@ TEST(Driver, ConstValueCopyToNonConst) {
   std::remove(path.c_str());
 }
 
-/* ---- 落盘格式互转：.cxs ⇄ .cxb ---- */
+TEST(Driver, RunFileAnnotatedWideVarKeepsDeclaredType) {
+  /* 显式类型标注 + 默认宽度字面量初始化：DEFINE 须按声明类型 implicit_cast
+     init（var x:i64 = 7 的 7 是 i32 字面量，须拓宽为 i64）。此前 DEFINE 直接
+     clone init 原值，运行时 x 实为 i32 与 sema 符号表 i64 不一致，后续
+     `x = 9 as i64`（同类型赋值）误报 not a widening conversion。 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:i64 = 7;\n"
+      "  x = 9 as i64;\n"
+      "  x = x + 5;\n"
+      "  printf(\"%d\\n\", x as i32);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileAnnotatedWideVarInferenceMatchesDeclared) {
+  /* var t = x（推断自显式标注的 i64 变量）→ t 运行时亦为 i64，
+     与 sema 推断一致；赋值 i64 值合法 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:i64 = 7;\n"
+      "  var t = x;\n"
+      "  t = 9 as i64;\n"
+      "  printf(\"%d\\n\", t as i32);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileAnnotatedWideVarNarrowLiteralRejected) {
+  /* 显式 i64 标注 + 不可 widening 的初始化（i64 → i8 收窄）：
+     sema 应拦截，运行期不执行 */
+  std::string path = write_temp_file(
+      "func main(): void { var x:i8 = 300; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
 
 namespace {
 
@@ -1084,6 +1123,146 @@ TEST(Driver, RunFileTypeDefLocalHoistedLoop) {
       "  return sum;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ================================================================ */
+/* 局部函数（local function）端到端                                      */
+/* ================================================================ */
+
+TEST(Driver, RunFileLocalFuncBasic) {
+  /* 局部函数定义 + 调用：函数体内块作用域注册，运行期块入口提升 DEFINE，
+     调用经 PUSH name 作用域查找（外层函数体内可见） */
+  std::string path = write_temp_file(
+      "func outer(n:i32):i32 {\n"
+      "  func inc(x:i32): i32 { return x + 1; }\n"
+      "  func dbl(x:i32): i32 { return x * 2; }\n"
+      "  return inc(dbl(n));\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(10);\n"   /* inc(dbl(10)) = 21 */
+      "  _ = r;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncHoistedForwardReference) {
+  /* 提升语义：局部函数定义在后，外层函数体内调用先于定义点（块入口
+     先 DEFINE 全部局部函数，前向引用安全） */
+  std::string path = write_temp_file(
+      "func outer(n:i32):i32 {\n"
+      "  var r = caller(n);\n" /* 调用先于定义 */
+      "  func caller(x:i32): i32 { return x + 1; }\n" /* 定义在后 */
+      "  return r;\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(3);\n"
+      "  _ = r;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncCallsGlobal) {
+  /* 局部函数体内调用全局函数：函数体查找链 = 参数 + 全局，合法 */
+  std::string path = write_temp_file(
+      "func g():i32 { return 100; }\n"
+      "func add(a:i32, b:i32):i32 { return a + b; }\n"
+      "func outer(n:i32):i32 {\n"
+      "  func inc(x:i32): i32 { return x + g(); }\n"
+      "  return add(inc(n), 1);\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(5);\n"   /* inc(5)=105, add(105,1)=106 */
+      "  _ = r;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncNestedBlock) {
+  /* 嵌套块局部函数：块作用域内定义 + 调用 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var acc:i32 = 0;\n"
+      "  {\n"
+      "    func twice(x:i32): i32 { return x * 2; }\n"
+      "    acc = twice(3);\n"
+      "  }\n"
+      "  _ = acc;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncSiblingCallRejected) {
+  /* 局部函数体内调用兄弟函数：需闭包，编译期拒绝 */
+  std::string path = write_temp_file(
+      "func outer(n:i32):i32 {\n"
+      "  func caller(x:i32): i32 { return callee(x); }\n"
+      "  func callee(x:i32): i32 { return x; }\n"
+      "  return caller(n);\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(3);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncRecursionRejected) {
+  /* 局部函数递归：需闭包，编译期拒绝 */
+  std::string path = write_temp_file(
+      "func outer(n:i32):i32 {\n"
+      "  func dec(x:i32): i32 {\n"
+      "    if (x <= 0) { return 0; }\n"
+      "    return dec(x - 1);\n"
+      "  }\n"
+      "  return dec(n);\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(5);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncCaptureOuterRejected) {
+  /* 局部函数捕获外层局部变量：需闭包，编译期拒绝 */
+  std::string path = write_temp_file(
+      "func outer(n:i32):i32 {\n"
+      "  var k = 10;\n"
+      "  func inc(x:i32): i32 { return x + k; }\n"
+      "  return inc(n);\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(3);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncShadowsGlobalRejected) {
+  /* 局部函数遮蔽全局函数名：显式拒绝 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 { return a + b; }\n"
+      "func outer(n:i32):i32 {\n"
+      "  func add(x:i32): i32 { return x; }\n"
+      "  return add(n);\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r = outer(3);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
