@@ -162,9 +162,10 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
       /* 类型即表达式：内建/自定义类型值注册在作用域链（global/root/current），
-         与变量同机制查找，命中 type value 返回 type 类型 shadow（类型引用）。 */
+         与变量同机制查找。命中 type value 直接返回该真实值（type value 是
+         编译期实体，data 恒为 type_t*——无 shadow 形态，见 sema 注释）。 */
       if (value_type(v) == sema->vm->type_type)
-        return value_make_shadow(sema->vm, sema->vm->type_type);
+        return v;
       return value_make_shadow(sema->vm, value_type(v));
     }
     case AST_CONST: {
@@ -179,7 +180,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "'const' requires a type operand");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      return value_make_shadow(sema->vm, sema->vm->type_type);
+      /* type value 恒真实（编译期实体）：取 data 里的类型指针 intern 后
+         返回新的 type value（auto-track 当前 scope） */
+      const type_t *sub_t = value_as(sub, const type_t *);
+      const type_t *ct = type_const_intern(sema->vm, sub_t);
+      return type_as_value(sema->vm, ct);
     }
     case AST_VOLATILE: {
       ast_volatile_t *n = (ast_volatile_t *)*node;
@@ -191,7 +196,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "'volatile' requires a type operand");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      return value_make_shadow(sema->vm, sema->vm->type_type);
+      const type_t *sub_t = value_as(sub, const type_t *);
+      const type_t *vt = type_volatile_intern(sema->vm, sub_t);
+      return type_as_value(sema->vm, vt);
     }
     case AST_UNDEF:
       /* undefined 只允许作为 var 初始化的"未初始化声明"（shadow_var_def
@@ -342,17 +349,18 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     case AST_ARRAY: {
       /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
          解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
-         返回 type_type shadow，供 as 右值 / sizeof / 嵌套类型构造消费。 */
+         返回真实 type value（data=type_t*，auto-track 当前 scope），供
+         type 定义 / as 右值 / sizeof / 嵌套类型构造消费。 */
       const type_t *t = sema_resolve_type_slot(sema, node);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      return value_make_shadow(sema->vm, sema->vm->type_type);
+      return type_as_value(sema->vm, t);
     }
     case AST_TYPE_REF: {
       /* 具名类型引用（sema 登记的 "__type_N"）：重复求值（折叠重访）时
-         命中——解析回类型，返回 type_type shadow。 */
+         命中——解析回类型，返回真实 type value。 */
       const type_t *t = resolve_type_expr(sema, *node);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      return value_make_shadow(sema->vm, sema->vm->type_type);
+      return type_as_value(sema->vm, t);
     }
     case AST_CONSTRUCT: {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验

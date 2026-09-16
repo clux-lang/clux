@@ -26,6 +26,7 @@ extern "C" {
 #include "parser/ast_int_lit.h"
 #include "parser/ast_node.h"
 #include "parser/ast_program.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
@@ -1288,6 +1289,325 @@ TEST_F(SemaTest, ComptimeFuncNotConstantPath) {
         "func main() { var r = f(); }"));
     /* g 未定义 → undefined function 诊断（sema 阶段） */
     expect_message(0, "undefined function 'g'");
+}
+
+/* ================================================================ */
+/* type 定义（type name = <type-expr>;）：type value 绑定             */
+/* ================================================================ */
+
+TEST_F(SemaTest, TypeDefBuiltinRhs) {
+    /* 内建类型 rhs：type MyInt = i64。内建也折叠为 AST_TYPE_REF
+       （名字 = 规范名 "i64"，编译器经 type_lookup 兜底 → LOAD_TYPE
+       <内建 id>），别名透明。符号激活。 */
+    EXPECT_TRUE(analyze(
+        "type MyInt = i64;"
+        "func main() { var x:MyInt = 7; var y = x; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *sym =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("MyInt"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_TRUE(sym->is_active);
+    EXPECT_TRUE(sym->flow_init);
+
+    /* 符号类型槽为空：type def 的值在编译期 vm scope（type_lookup 路径），
+       不经 sym->type。验证 var 显式类型解析到 i64。 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+
+    /* 内建 rhs 槽位折叠为 AST_TYPE_REF（名字 = 内建规范名） */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    EXPECT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    EXPECT_TRUE(strslice_eq(ref->name, STRSLICE_LIT("i64")));
+}
+
+TEST_F(SemaTest, TypeDefCompositeRhsFoldToRef) {
+    /* 复合类型 rhs：[2]i32 → 登记 + 槽位折叠为 AST_TYPE_REF（名字引用）。
+       折叠幂等：重跑 sema 不重复登记。 */
+    EXPECT_TRUE(analyze(
+        "type Pair = [2]i32;"
+        "func main() { var p:Pair = .[2]i32{1, 2}; var q = p[0]; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* 全局 type def 在 funcs 链上（保留，进入字节码） */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    EXPECT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    const sema_type_t *st = sema_type_find_name(sema_, ref->name);
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->type, nullptr);
+    EXPECT_EQ(st->type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(st->type), 2u);
+    EXPECT_EQ(array_type_elem(st->type), vm_->type_i32);
+}
+
+TEST_F(SemaTest, TypeDefAliasChain) {
+    /* type 别名链：B = A = i64；var 显式类型与推断都走 type value */
+    EXPECT_TRUE(analyze(
+        "type A = i64;"
+        "type B = A;"
+        "func main() { var x:B = 5; var t = B; var y = x; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+}
+
+TEST_F(SemaTest, TypeDefInFunctionSignature) {
+    /* 全局 type def 先于函数签名解析（pass1b）：参数/返回类型可引用 */
+    EXPECT_TRUE(analyze(
+        "type MyInt = i64;"
+        "func id(v:MyInt):MyInt { return v; }"
+        "func main() { var r = id(42); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefLocal) {
+    /* 局部 type def：3a 延迟解析 var 槽位 → 3b 定义点求值后兜底成功 */
+    EXPECT_TRUE(analyze(
+        "func main() {"
+        "  type Local = i64;"
+        "  var x:Local = 7;"
+        "  var y = x;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+}
+
+TEST_F(SemaTest, TypeDefLocalNestedBlock) {
+    /* 嵌套块局部 type：块作用域遮蔽，出块不可见（TDZ/未知类型） */
+    EXPECT_TRUE(analyze(
+        "func main() {"
+        "  var a:i32 = 1;"
+        "  { type Inner = i32; var x:Inner = 2; a = x; }"
+        "  var y = a;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefTypeValueExpr) {
+    /* type value 是真实值（非 shadow）：可作表达式（typeof 桥梁） */
+    EXPECT_TRUE(analyze(
+        "type T = i32;"
+        "func main() { var t = T; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *t = sema_scope_find_local(fscope, STRSLICE_LIT("t"));
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->type, vm_->type_type); /* 推断为 type 类型 */
+}
+
+TEST_F(SemaTest, TypeDefRhsNotType) {
+    /* rhs 非类型值 → 报错 */
+    EXPECT_FALSE(analyze(
+        "func main() { type NotType = 42; }"));
+    expect_message(0, "must evaluate to a type value, got i32");
+}
+
+TEST_F(SemaTest, TypeDefDuplicate) {
+    EXPECT_FALSE(analyze(
+        "type A = i32;"
+        "type A = i64;"
+        "func main() { }"));
+    expect_message(0, "duplicate name 'A'");
+}
+
+TEST_F(SemaTest, TypeDefDuplicateLocal) {
+    EXPECT_FALSE(analyze(
+        "func main() {"
+        "  type A = i32;"
+        "  type A = i64;"
+        "}"));
+    expect_message(0, "duplicate name 'A'");
+}
+
+TEST_F(SemaTest, TypeDefForwardRefFails) {
+    /* 前向引用局部 type（定义在后使用）→ unknown type（TDZ） */
+    EXPECT_FALSE(analyze(
+        "func main() {"
+        "  var x:Local = 5;"
+        "  type Local = i32;"
+        "}"));
+    expect_message(0, "unknown type");
+}
+
+TEST_F(SemaTest, TypeDefUsedBeforeActivation) {
+    /* 全局 type def TDZ：函数体内使用在 pass1b 已绑定 → OK */
+    EXPECT_TRUE(analyze(
+        "type T = i32;"
+        "func main() { var x:T = 1; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefVarTypeMismatch) {
+    /* 显式类型 + 值类型不匹配：走常规 var 校验路径 */
+    EXPECT_FALSE(analyze(
+        "type T = i32;"
+        "func main() { var x:T = \"s\"; }"));
+    expect_message(0, "cannot initialize variable 'x' of type i32 with str");
+}
+
+TEST_F(SemaTest, TypeDefLocalShadowGlobal) {
+    /* 局部 type 遮蔽全局同名 type */
+    EXPECT_TRUE(analyze(
+        "type T = i32;"
+        "func main() {"
+        "  type T = i64;"
+        "  var x:T = 7;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+}
+
+TEST_F(SemaTest, VarShadowGlobalTypeInTypeSlot) {
+    /* var 完全遮罩：定义后类型槽位引用 T → 报 "is a variable, not a type" */
+    EXPECT_FALSE(analyze(
+        "type T = i32;"
+        "func main() {"
+        "  var T = 42;"
+        "  var t2:T = 5;"
+        "}"));
+    expect_message(0, "'T' is a variable, not a type");
+}
+
+TEST_F(SemaTest, VarShadowGlobalTypeOrderSensitive) {
+    /* 完全遮罩顺序敏感：var T 定义前，类型槽位仍见全局 type T=i32 */
+    EXPECT_TRUE(analyze(
+        "type T = i32;"
+        "func main() {"
+        "  var t2:T = 5;"
+        "  var T = 42;"
+        "  var z = T;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *t2 = sema_scope_find_local(fscope, STRSLICE_LIT("t2"));
+    ASSERT_NE(t2, nullptr);
+    EXPECT_EQ(t2->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, ParamShadowGlobalTypeInTypeSlot) {
+    /* 参数遮蔽：func f(T: i64) 内类型槽位 T → "is a variable, not a type" */
+    EXPECT_FALSE(analyze(
+        "type T = i32;"
+        "func f(T:i64) { var t2:T = 5; }"
+        "func main() { f(7); }"));
+    expect_message(0, "'T' is a variable, not a type");
+}
+
+TEST_F(SemaTest, VarShadowTypeInTypeRhs) {
+    /* var 完全遮罩：type RHS 引用变量 T → ctfe 求值失败（变量非编译期
+       类型计算）→ 报错 */
+    EXPECT_FALSE(analyze(
+        "type T = i32;"
+        "func main() {"
+        "  var T = 42;"
+        "  type U = T;"
+        "}"));
+    expect_message(0, "expression is not a compile-time type computation");
+}
+
+TEST_F(SemaTest, TypeDefExtendsTernaryFoldTrueBranch) {
+    /* extends+三元选择类型：type RHS 经 ctfe 真实求值（extends 二元折叠
+       为 bool，三元按真值选 then 分支 i64），整个 rhs 收敛为
+       AST_TYPE_REF（名字 = 规范名）。 */
+    EXPECT_TRUE(analyze(
+        "type A = i32;"
+        "type B = i64;"
+        "type T = A extends i32 ? B : A;"
+        "func main() { var x:T = 5; var y = x; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* funcs 链第 3 个节点是 T（A、B、T、main 顺序） */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    for (int i = 0; i < 2 && td; i++) td = td->next;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    ASSERT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    EXPECT_TRUE(strslice_eq(ref->name, STRSLICE_LIT("i64")));
+
+    /* var x:T 显式类型解析到 i64（选择分支生效） */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i64);
+}
+
+TEST_F(SemaTest, TypeDefExtendsTernaryFoldFalseBranch) {
+    /* extends 条件为假选 else 分支（i32） */
+    EXPECT_TRUE(analyze(
+        "type A = i32;"
+        "type B = i64;"
+        "type U = A extends i64 ? B : A;"
+        "func main() { var x:U = 5; var y = x; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    for (int i = 0; i < 2 && td; i++) td = td->next;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    ASSERT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    EXPECT_TRUE(strslice_eq(ref->name, STRSLICE_LIT("i32")));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, TypeDefExtendsTernaryArrayBranch) {
+    /* extends 操作数是数组类型：cond 为假选 [3]i32 分支，折叠为登记引用
+       （名字查 sema_type_find_name 命中数组类型）。 */
+    EXPECT_TRUE(analyze(
+        "type V = [2]i32 extends [3]i32 ? [2]i32 : [3]i32;"
+        "func main() { var p:V = .[3]i32{1, 2, 3}; var q = p[0]; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *td = prog->funcs;
+    ASSERT_NE(td, nullptr);
+    ASSERT_EQ(td->kind, AST_TYPE_DEF);
+    ASSERT_EQ(((ast_type_def_t *)td)->expr->kind, AST_TYPE_REF);
+    ast_type_ref_t *ref = (ast_type_ref_t *)((ast_type_def_t *)td)->expr;
+    const sema_type_t *st = sema_type_find_name(sema_, ref->name);
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(st->type, nullptr);
+    EXPECT_EQ(st->type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(st->type), 3u);
+    EXPECT_EQ(array_type_elem(st->type), vm_->type_i32);
 }
 
 } /* namespace */

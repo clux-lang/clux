@@ -707,6 +707,137 @@ TEST(Driver, RunFileExtendsNonTypeRejected) {
   std::remove(path.c_str());
 }
 
+/* ---- extends + 三元选择类型：type RHS 编译期折叠 ---- */
+
+TEST(Driver, RunFileTypeDefExtendsTernary) {
+  /* 需求 2 核心：type RHS 用 extends + 三元选择类型。extends 二元遇到
+     即折叠为 bool（ctfe 求值），三元按真实 bool 惰性选分支——选中的分支
+     是类型值，整个 rhs 收敛为 LOAD_TYPE。真/假两分支与内建/别名/数组
+     操作数全覆盖。 */
+  std::string path = write_temp_file(
+      "type A = i32;\n"
+      "type B = i64;\n"
+      "type T = A extends i32 ? B : A;\n"   // true → i64
+      "type U = A extends i64 ? B : A;\n"   // false → i32
+      "type V = B extends i64 ? i32 : f64;\n" // true → i32
+      "func main():i32 {\n"
+      "  var t:T = 100;\n"
+      "  var u:U = 5;\n"
+      "  var v:V = 3;\n"
+      "  if (t != 100 || u != 5 || v != 3) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefExtendsTernaryFalseBranch) {
+  /* extends 条件为假选 else 分支：别名操作数 + f32/f64 分支类型区分。
+     Alt=f64：Alt extends i32 为 false → 选 f32（f64 字面量赋 f32 会报错，
+     用 1.5f32 验证类型确实选中 f32 分支）。 */
+  std::string path = write_temp_file(
+      "type Alt = f64;\n"
+      "type P = Alt extends i32 ? i64 : f32;\n"   // false → f32
+      "type Q = Alt extends f64 ? i64 : f32;\n"   // true → i64
+      "func main():i32 {\n"
+      "  var p:P = 1.5f32;\n"
+      "  var q:Q = 2;\n"
+      "  if (p != 1.5 || q != 2) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefExtendsTernaryArray) {
+  /* 数组操作数：同型 extends true，长度不同 false → 三元选对应分支 */
+  std::string path = write_temp_file(
+      "type A = [2]i32;\n"
+      "type T = A extends [2]i32 ? i64 : f32;\n"  // true → i64
+      "type U = A extends [3]i32 ? i64 : f32;\n"  // false → f32
+      "func main():i32 {\n"
+      "  var t:T = 2;\n"
+      "  var u:U = 1.5f32;\n"
+      "  if (t != 2 || u != 1.5) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefExtendsTernarySignature) {
+  /* 选择出的类型用于函数签名（参数/返回类型），别名透明 */
+  std::string path = write_temp_file(
+      "type A = i32;\n"
+      "type R = A extends i32 ? i64 : i32;\n"
+      "func double_it(v:R):R { return v * 2; }\n"
+      "func main():i32 {\n"
+      "  var r = double_it(21);\n"
+      "  if (r != 42) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefExtendsTernaryAliasChain) {
+  /* 三元两分支引用其它 type def（别名链），选中的分支即目标类型 */
+  std::string path = write_temp_file(
+      "type Base = i32;\n"
+      "type Alt = f64;\n"
+      "type Pick1 = Base extends i32 ? Base : Alt;\n"  // true → i32
+      "type Pick2 = Alt extends i32 ? Base : Alt;\n"   // false → f64
+      "func main():i32 {\n"
+      "  var p1:Pick1 = 3;\n"
+      "  var p2:Pick2 = 1.5f64;\n"
+      "  if (p1 != 3 || p2 != 1.5) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ---- extends + 三元混合运算（普通值上下文） ---- */
+
+TEST(Driver, RunFileExtendsTernaryMixedValue) {
+  /* 用户场景：var val = i32 extends i32 ? 1 : 0。extends 折叠为 bool
+     字面量 → 三元 cond 编译期确定 → 运行期返回选中分支值。内建/别名/
+     数组操作数 + 真/假分支全覆盖。 */
+  std::string path = write_temp_file(
+      "type A = i32;\n"
+      "type B = f64;\n"
+      "func main():i32 {\n"
+      "  var val  = i32 extends i32 ? 1 : 0;\n"
+      "  var val2 = i32 extends i64 ? 1 : 0;\n"
+      "  var val3 = [2]i32 extends [2]i32 ? 1 : 0;\n"
+      "  var val4 = [2]i32 extends [3]i32 ? 1 : 0;\n"
+      "  var a = A extends i32 ? 100 : 200;\n"
+      "  var b = A extends f64 ? 100 : 200;\n"
+      "  var c = B extends f64 ? 1 : 0;\n"
+      "  if (val != 1 || val2 != 0 || val3 != 1 || val4 != 0 ||\n"
+      "      a != 100 || b != 200 || c != 1) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileExtendsTernaryNestedAndIf) {
+  /* extends 折叠后用于嵌套三元与 if 条件：cond 均编译期确定 */
+  std::string path = write_temp_file(
+      "type A = i32;\n"
+      "type B = f64;\n"
+      "func main():i32 {\n"
+      "  var d = (A extends i32) ? (B extends f64 ? 5 : 6) : 7;\n"
+      "  var r:i32 = 0;\n"
+      "  if (A extends i32) { r = 42; }\n"
+      "  if (d != 5 || r != 42) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 /* ---- 三元条件表达式 cond ? a : b ---- */
 
 TEST(Driver, RunFileTernaryRuntime) {
@@ -788,6 +919,91 @@ TEST(Driver, RunFileTernaryCondNotBoolRejected) {
                                      "  return r;\n"
                                      "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefGlobal) {
+  /* 全局 type def：内建 rhs（PUSH 内建名）→ var 显式类型标注与运算 */
+  std::string path = write_temp_file(
+      "type MyInt = i64;\n"
+      "func main():i32 {\n"
+      "  var x:MyInt = 42;\n"
+      "  var y = x + 1;\n"
+      "  return y as i32;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefCompositeAndAlias) {
+  /* 复合类型 rhs 折叠 LOAD_TYPE + 别名链 + 函数签名引用 */
+  std::string path = write_temp_file(
+      "type Pair = [2]i32;\n"
+      "type Alias = Pair;\n"
+      "func first(p:Pair):i32 { return p[0]; }\n"
+      "func main():i32 {\n"
+      "  var p:Alias = .[2]i32{10, 20};\n"
+      "  return first(p);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefLocal) {
+  /* 局部 type def：块作用域遮蔽 + var 显式类型 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  type Local = i32;\n"
+      "  var x:Local = 7;\n"
+      "  {\n"
+      "    type Inner = i64;\n"
+      "    var y:Inner = 9;\n"
+      "    x = x + (y as i32);\n"
+      "  }\n"
+      "  return x;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefRhsNotTypeRejected) {
+  /* rhs 非类型值：sema 诊断，退出 1 */
+  std::string path = write_temp_file("func main():i32 {\n"
+                                     "  type Bad = 42;\n"
+                                     "  return 0;\n"
+                                     "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefDuplicateRejected) {
+  /* 重复定义：sema 诊断，退出 1 */
+  std::string path = write_temp_file("type A = i32;\n"
+                                     "type A = i64;\n"
+                                     "func main():i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefUnknownTypeRejected) {
+  /* var 显式类型引用不存在的类型：3b 兜底 "unknown type"，退出 1 */
+  std::string path = write_temp_file("func main():i32 {\n"
+                                     "  var x:Nope = 5;\n"
+                                     "  return 0;\n"
+                                     "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeDefTypeValueExpr) {
+  /* type value 是真实值：可作表达式（var t = T 推断为 type 类型） */
+  std::string path = write_temp_file(
+      "type T = i32;\n"
+      "func main():i32 {\n"
+      "  var t = T;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 

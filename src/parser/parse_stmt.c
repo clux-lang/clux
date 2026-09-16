@@ -5,6 +5,7 @@
 #include "parser/ast_assign.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
 #include "parser/ast_if.h"
@@ -21,6 +22,7 @@
 ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
     if (check_keyword(p, "var"))    return parse_var_def(p);
+    if (check_keyword(p, "type"))   return parse_type_def(p);
     if (check_keyword(p, "if"))     return parse_if(p);
     if (check_keyword(p, "while"))  return parse_while(p);
     if (check_keyword(p, "for"))    return parse_for(p);

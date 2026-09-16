@@ -85,10 +85,16 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn) {
     st_push(c, 0);  /* 弹参数 type value，追加到 func type（func type 仍在栈） */
   }
 
-  /* 3. 返回类型：void 兜底用 PUSH "void"，否则编译返回类型表达式 */
+  /* 3. 返回类型：void 兜底用 LOAD_TYPE <void_id>（内建 void 编译期直解析，
+     不再 PUSH 运行时作用域查找），否则编译返回类型表达式 */
   if (!fn->return_expr) {
-    bcode_write_op(c->bc, BCODE_PUSH);
-    bcode_write_str(c->bc, STRSLICE_LIT("void"));
+    const type_t *vt = type_lookup(c->vm, STRSLICE_LIT("void"));
+    if (!vt) {
+      c_error(c, NULL, "internal: builtin type 'void' not registered");
+      return 0;
+    }
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, vt->id);
     st_push(c, 1);
   } else {
     compile_type_expr(c, fn->return_expr);

@@ -10,9 +10,11 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
+#include "vm/type_type.h"
 #include "vm/value.h"
 
 #include <string.h>
@@ -102,18 +104,22 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
 }
 
 /* 从常量类型构造类型表达式 AST（折叠写回 AST_CONSTRUCT 的类型位用）：
-   登记类型到 sema->types 队列 → 产出 AST_TYPE_REF（"__type_N" 名字引用）。
-   hoist 提升区负责构造，编译器零感知；复合类型结构依赖由登记递归覆盖。
+   登记类型到 sema->types 队列 → 产出 AST_TYPE_REF。程序类型名字 =
+   登记名（"__type_N"），hoist 提升区负责构造，编译器零感知；内建类型
+   不登记 → 名字 = 内建规范名（"i32"），编译器经 type_lookup 兜底 →
+   LOAD_TYPE <内建 id>（别名透明）。复合类型结构依赖由登记递归覆盖。
    位置借用 origin（折叠节点位置，诊断定位不变）。 */
 static ast_node_t *sema_ct_type_expr(sema_t *sema, const type_t *t,
                                      const ast_node_t *origin) {
   if (!sema || !t) return NULL;
   const sema_type_t *st = sema_type_register(sema, t);
-  if (!st) return NULL;
+  bool builtin =
+      t->kind <= TYPE_KIND_INTERRUPT || t->kind >= TYPE_KIND_COUNT;
+  if (!st && !builtin) return NULL; /* 复合类型登记失败（OOM） */
   ast_node_t *ref =
       ast_type_ref_new(sema->arena, origin->tok_begin, origin->tok_end);
   if (!ref) return NULL;
-  ((ast_type_ref_t *)ref)->name = st->name;
+  ((ast_type_ref_t *)ref)->name = st ? st->name : t->name;
   return ref;
 }
 
@@ -370,4 +376,93 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
   lit->next = (*node)->next; /* 保留兄弟链 */
   *node = lit;
   return value_make_shadow(vm, ct.type);
+}
+
+/* ===========================================================================
+ * type 定义求值（type name = <type-expr>;）
+ *
+ * type 定义不是创建新类型，而是创建新的 type value 绑定到当前作用域：
+ * rhs（类型表达式）在 sema 阶段即真实求值（type value 恒非 shadow，
+ * data 为 type_t*），校验为类型值后：
+ *   1. rhs 折叠为 AST_TYPE_REF（"__type_N" 名字引用，内建类型保持原
+ *      AST_IDENT——编译器对 AST_IDENT 发 PUSH 从作用域查内建 type value）
+ *   2. 绑定 type value 到编译期 vm 当前作用域（type_lookup / 后续引用
+ *      经 sema_expr 的 scope_lookup 命中；运行时绑定由字节码 DEFINE
+ *      完成——编译期 vm 与运行时 vm 完全解耦）
+ *   3. 激活符号（TDZ：定义前引用不可见，与 var 一致）
+ * =========================================================================== */
+
+bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
+  if (!sema || !td) return false;
+  sema_symbol_t *sym = sema_scope_find_local(scope, td->name);
+  if (!sym) return false; /* 3a 重复定义已诊断，符号未注册 */
+
+  vm_t *vm = sema->vm;
+
+  /* 1. rhs 求值：type RHS 是类型表达式，须编译期真实求值得到 type value
+     （data=type_t*）。走 ctfe 整体求值而非 sema_expr shadow 求值：
+     - extends 二元表达式遇到即折叠为 bool（value_extends），三元用真实
+       bool 惰性选分支（ctfe 与运行期语义一致）
+     - 复合类型（AST_ARRAY）ctfe 也支持（intern 出数组类型）
+     - 别名/内建类型名走 scope_lookup 拿 type value
+     求值后统一由步骤 2 折叠为 AST_TYPE_REF（整个 rhs 收敛为类型引用，
+     运行时 LOAD_TYPE，无 extends/三元残留）。 */
+  bool saved = vm->comptime;
+  vm->comptime = true;
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.vm = vm;
+  ctx.sema = sema;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *sh = ctfe_eval(&ctx, td->expr);
+  vm->comptime = saved;
+  if (!sh || value_is_error(vm, sh)) {
+    const char *msg = NULL;
+    if (sh) {
+      error_data_t *ed = (error_data_t *)value_data(sh);
+      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+    }
+    diag_error(sema->diag, sema_loc(sema, td->expr),
+               "type definition '%.*s': expression is not a compile-time "
+               "type computation%s%s",
+               (int)td->name.len, td->name.ptr, msg ? ": " : "",
+               msg ? msg : "");
+    return false;
+  }
+  if (!value_is_type(sh, TYPE_KIND_TYPE)) {
+    char tn[64];
+    sema_type_name(value_type(sh), tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, td->expr),
+               "type definition '%.*s' must evaluate to a type value, got %s",
+               (int)td->name.len, td->name.ptr, tn);
+    return false;
+  }
+  const type_t *t = value_as(sh, const type_t *);
+
+  /* 2. rhs 折叠为 AST_TYPE_REF（登记 + 名字引用；内建类型不登记 → 名字 =
+     规范名，编译器经 type_lookup 兜底 → LOAD_TYPE <内建 id>）。复合类型
+     由 sema_ct_type_expr 递归登记，整个 rhs 收敛为单个类型引用。 */
+  if (td->expr->kind != AST_TYPE_REF) {
+    ast_node_t *folded = sema_ct_type_expr(sema, t, td->expr);
+    if (folded) {
+      folded->next = td->expr->next; /* 保留兄弟链 */
+      td->expr = folded;
+    }
+  }
+
+  /* 3. 绑定 type value 到编译期 vm 当前作用域（type_lookup / ctfe 引用
+     需要；运行时绑定由字节码 DEFINE 完成，与编译期 vm 解耦）。 */
+  value_t *tv = type_as_value(vm, t);
+  if (!tv) return false;
+  char nb[256];
+  if (td->name.len >= sizeof nb) return false;
+  memcpy(nb, td->name.ptr, td->name.len);
+  nb[td->name.len] = '\0';
+  scope_define(vm, vm->current_scope, nb, tv);
+
+  /* 4. 符号激活（TDZ：定义前不可见） */
+  sym->is_active = true;
+  sym->flow_init = true;
+  return true;
 }

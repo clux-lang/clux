@@ -66,11 +66,12 @@ static class_t lexer_class = {
 /* ---- Internal: keyword table (M1 language keywords) ---- */
 
 static const char *const g_keywords[] = {
-    "as",      "bool",   "break",     "comptime",  "const",   "continue",
-    "else",    "extends", "f32",      "f64",       "false",   "for",
-    "func",    "i16",    "i32",       "i64",       "i8",      "if",
-    "return",  "str",    "true",      "u16",       "u32",     "u64",
-    "u8",      "undefined", "var",    "void",      "volatile", "while",
+    "as",      "bool",    "break",     "comptime",  "const",   "continue",
+    "else",    "extends", "f32",       "f64",       "false",   "for",
+    "func",    "i16",     "i32",       "i64",       "i8",      "if",
+    "return",  "str",     "true",      "type",      "u16",     "u32",
+    "u64",     "u8",      "undefined", "var",       "void",    "volatile",
+    "while",
 };
 
 /* ---- Internal: character classes ---- */

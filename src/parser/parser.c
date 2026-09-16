@@ -2,6 +2,7 @@
 #include "parser/ast_program.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_error.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
@@ -104,6 +105,11 @@ ast_node_t *parse_program(parser_t *p) {
                 func = ast_error_new(p->diag, p->tokens, p->arena, ctb, p->pos,
                                      "expected 'func' or 'var' after 'comptime'");
             }
+        } else if (check_keyword(p, "type")) {
+            /* 全局类型定义 type name = <type-expr>; 挂 funcs 链：
+               sema pass1b 求值折叠（AST_TYPE_REF）后保留——进入字节码，
+               运行时 LOAD_TYPE/PUSH; PUSH_UNDEFINED; DEFINE 绑定 type value。 */
+            func = parse_type_def(p);
         } else {
             func = parse_func_def(p);
         }

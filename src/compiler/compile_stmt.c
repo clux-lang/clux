@@ -7,6 +7,7 @@
 #include "parser/ast_for.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
@@ -79,6 +80,24 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       st_push(c, 1);
     }
     compile_type_expr(c, n->type_expr); /* 栈: [value, type-spec]；空类型压 PUSH_UNDEFINED（从值推断） */
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, n->name);
+    /* DEFINE 永远双弹弹掉全部，栈深归零 */
+    st_push(c, -2);
+    break;
+  }
+  case AST_TYPE_DEF: {
+    /* type name = <type-expr>;：定义 type value 变量。
+       与 var def 同构（[value, type-spec] DEFINE 协议）：先压 rhs 求值出的
+       type value（sema 已折叠为 AST_TYPE_REF → LOAD_TYPE；内建别名保持
+       AST_IDENT → PUSH 从作用域查），再压 PUSH_UNDEFINED 作 spec 占位
+       （DEFINE 弹 spec=undefined → 从 init 推断 decl_type=type_type），
+       运行时 name 成为 type value 变量（类型 type_type，值=类型指针）。
+       即用户指定序列：LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"。 */
+    ast_type_def_t *n = (ast_type_def_t *)node;
+    compile_expr(c, n->expr);                  /* 栈: [type_value] */
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 栈: [type_value, spec占位] */
+    st_push(c, 1);
     bcode_write_op(c->bc, BCODE_DEFINE);
     bcode_write_str(c->bc, n->name);
     /* DEFINE 永远双弹弹掉全部，栈深归零 */

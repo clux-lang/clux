@@ -1,0 +1,37 @@
+// type 定义：创建新的 type value 绑定到当前作用域（不是新类型）。
+// 右值是类型表达式，编译期求值并折叠；运行时经字节码绑定 type value。
+
+// 内建类型别名：type MyInt = i64
+type MyInt = i64;
+
+// 复合类型别名：type Pair = [2]i32（sema 折叠为登记类型引用）
+type Pair = [2]i32;
+
+// 别名链：别名引用前一个 type def
+type PairAlias = Pair;
+
+// 函数签名可引用全局 type def
+func add_pair(a: Pair, b: Pair): Pair {
+    return .[2]i32{a[0] + b[0], a[1] + b[1]};
+}
+
+func main(): void {
+    // var 显式类型标注走 type value
+    var m: MyInt = 42;
+    printf("MyInt = %d\n", m as i32);
+
+    var p: Pair = .[2]i32{10, 20};
+    var q: PairAlias = .[2]i32{30, 40};
+    printf("Pair = %d %d\n", p[0], p[1]);
+
+    var s = add_pair(p, q);
+    printf("sum  = %d %d\n", s[0], s[1]);
+
+    // 局部 type def（块作用域遮蔽）
+    {
+        type Local = i32;
+        var x: Local = 7;
+        printf("Local = %d\n", x);
+    }
+}
+

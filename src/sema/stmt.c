@@ -8,6 +8,8 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_type_def.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
@@ -150,7 +152,36 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = !init_bad;
 
     if (vd->type_expr) {
-      /* 显式类型：value_assign 校验 init 可赋给声明类型（单一校验点） */
+      /* 显式类型：3a 槽位解析可能失败（引用同块后续局部 type/被 var 遮蔽，
+         当时未绑定 vm scope）→ 此处兜底重解析（局部 type 已在定义点求值
+         绑定）；仍失败补报诊断：激活的同名 var/参数遮蔽 → "is a variable,
+         not a type"（完全遮罩语义），其余（拼写错误/前向引用 type def）
+         保持 "unknown type"。 */
+      if (!sym->type) {
+        sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
+        if (!sym->type) {
+          /* 提取槽位名字（仅命名类型可判遮蔽来源；复合类型报 unknown） */
+          strslice_t tn = {0};
+          if (vd->type_expr->kind == AST_IDENT) {
+            tn = ((ast_ident_t *)vd->type_expr)->name;
+          } else if (vd->type_expr->kind == AST_TYPE_REF) {
+            tn = ((ast_type_ref_t *)vd->type_expr)->name;
+          }
+          sema_symbol_t *shadow =
+              tn.ptr ? sema_lookup(scope, tn) : NULL;
+          if (shadow && !shadow->ast) {
+            /* 激活的 var/参数遮蔽（ast==NULL 区分于 type def/函数符号）：
+               完全遮罩语义，类型槽位引用的是变量 → 报错 */
+            diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+                       "'%.*s' is a variable, not a type", (int)tn.len,
+                       tn.ptr);
+          } else {
+            diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+                       "unknown type");
+          }
+        }
+      }
+      /* value_assign 校验 init 可赋给声明类型（单一校验点） */
       if (!init_bad && sym->type) {
         value_t *dst = value_make_shadow(sema->vm, sym->type);
         if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
@@ -569,6 +600,12 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
   switch (stmt->kind) {
     case AST_VAR_DEF:
       shadow_var_def(sema, (ast_var_def_t *)stmt, scope);
+      break;
+    case AST_TYPE_DEF:
+      /* 局部 type 定义：rhs 求值 → 折叠 AST_TYPE_REF → 绑定编译期 vm
+         当前作用域 → 激活符号。定义点不摘除（进入字节码，运行时 DEFINE
+         绑定 type value）。 */
+      sema_eval_type_def(sema, (ast_type_def_t *)stmt, scope);
       break;
     case AST_ASSIGN:
       shadow_assign(sema, (ast_assign_t *)stmt, scope);

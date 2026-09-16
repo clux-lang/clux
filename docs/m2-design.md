@@ -107,6 +107,10 @@ type F = func(i32, i32)->i32;                     // 函数类型
 
 - clux 支持类型计算；无泛型时支持 `extends`（类型兼容判断）和 `==`（类型相等）
 - **类型/值三元完全统一**：类型右值当普通表达式执行，只判断结果是否是 type value
+- **type 定义不是创建新类型，而是创建新的 type value 绑定到当前作用域**（2026-09-15 定稿）：
+  - 右值 `<expr>` 是类型表达式，sema 阶段**真实求值**（type value 恒非 shadow，`data = type_t*`），校验为 type value 后绑定；复合类型（`[N]T` 等）求值中登记并折叠槽位为 `AST_TYPE_REF`
+  - 全局 type def 在 pass1b（函数签名解析前）求值，使函数签名/参数/返回类型可引用；局部 type def 在 3b 定义点求值（TDZ 与 var 一致）
+  - **进入字节码**：`LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"`（内建 rhs 折叠为 `AST_TYPE_REF`（名字 = 规范名），编译器经 `type_lookup` 兜底 → `LOAD_TYPE <内建 id>`，别名透明）——编译期 vm 与运行时 vm 完全解耦，运行时 DEFINE 绑定 type value 到当前作用域
 - **一切类型的右值槽位都视作表达式**：var 类型标注、函数参数/返回类型、cast 目标、`.<type>{}` 构造的类型位
 - 需要统一的类型表达式求值器（`resolve_type` 从 `strslice_t` 升级为 `ast_node_t*`）
 

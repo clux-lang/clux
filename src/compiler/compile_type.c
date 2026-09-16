@@ -26,9 +26,18 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
   }
 
   if (type_expr->kind == AST_IDENT) {
-    /* 类型名当作表达式：PUSH 从当前作用域链查 type value 压栈
-       （内建类型在 global scope，自定义类型在当前/root scope，天然遮罩） */
+    /* 类型名引用：编译期可解析（内建/全局 type def 在编译期 vm 作用域）
+       → LOAD_TYPE <id> 直接加载真实 type_t（别名透明）；否则 PUSH 从当前
+       作用域链查 type value 压栈（局部 type def 在函数体运行时绑定）。
+       遮蔽语义与变量同机制：type_lookup 命中非 type value → NULL。 */
     ast_ident_t *id = (ast_ident_t *)type_expr;
+    const type_t *t = type_lookup(c->vm, id->name);
+    if (t) {
+      bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+      bcode_write_u32(c->bc, t->id);
+      st_push(c, 1);
+      return;
+    }
     bcode_write_op(c->bc, BCODE_PUSH);
     bcode_write_str(c->bc, id->name);
     st_push(c, 1);
@@ -37,12 +46,21 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
 
   if (type_expr->kind == AST_TYPE_REF) {
     /* sema 登记的具名类型引用（__type_N）→ 查登记表拿 program id →
-       LOAD_TYPE <id> 查表压栈。类型构造收敛到 hoist 提升区。 */
+       LOAD_TYPE <id> 查表压栈。类型构造收敛到 hoist 提升区。
+       内建类型引用（名字 = 规范名 "i32"，不登记）→ type_lookup 兜底 →
+       LOAD_TYPE <内建 id>（别名透明，m2-design 关键决策 6）。 */
     ast_type_ref_t *ref = (ast_type_ref_t *)type_expr;
     const sema_type_t *st = c_sema_type_find_name(c->sema_types, ref->name);
     if (!st) {
-      c_error(c, type_expr, "unknown type reference '%.*s'",
-              (int)ref->name.len, ref->name.ptr);
+      const type_t *bt = type_lookup(c->vm, ref->name);
+      if (!bt) {
+        c_error(c, type_expr, "unknown type reference '%.*s'",
+                (int)ref->name.len, ref->name.ptr);
+        return;
+      }
+      bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+      bcode_write_u32(c->bc, bt->id);
+      st_push(c, 1);
       return;
     }
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);

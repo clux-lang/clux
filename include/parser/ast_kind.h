@@ -8,6 +8,7 @@ typedef enum {
 
     /* --- 语句 --- */
     AST_VAR_DEF,         /* var name[:type] [= init]; */
+    AST_TYPE_DEF,        /* type name = <type-expr>;（sema 求值折叠为类型引用） */
     AST_ASSIGN,          /* name = expr; / name += expr; */
     AST_IF,              /* if cond { then } [else { else_body }] */
     AST_WHILE,           /* while cond { body } */

@@ -1,0 +1,51 @@
+// typecalc.cx — 类型计算：extends + 三元在 type 定义与普通值中的折叠
+//
+//   extends  类型二元运算符，编译期求值折叠为 bool（真=两类型一致）
+//   三元     cond ? then : else，cond 为 bool 时按真实值惰性选分支
+//   遮罩     局部 var 与全局 type 同名时，局部定义遮蔽全局定义
+//   别名     内建类型别名在签名中透明（func(i32,i32):i32）
+
+// 基础别名：内建 rhs 折叠为类型引用
+type MyInt = i32;
+
+// extends + 三元选择类型：真分支取 i64、假分支取 i32
+type T = MyInt extends i32 ? i64 : i32;
+
+// 假分支示例：MyInt 不是 f64 → 选 else
+type U = MyInt extends f64 ? i64 : i32;
+
+// 别名链：三元两分支可引用其它 type def
+type Alt = f64;
+type Picked = Alt extends f64 ? T : U;
+
+func main(): i32 {
+    // 选择类型用于变量标注与签名
+    var t: T = 100;          // i64
+    var u: U = 5;            // i32
+    var p: Picked = 200;     // 别名链 → i64
+    printf("t = %d\n", t as i32);
+    printf("u = %d\n", u);
+    printf("p = %d\n", p as i32);
+
+    // 混合运算：extends 折叠为 bool 后三元直接选值
+    var val  = i32 extends i32 ? 1 : 0;   // 1
+    var val2 = i32 extends i64 ? 1 : 0;   // 0
+    var val3 = [2]i32 extends [2]i32 ? 1 : 0; // 1
+    printf("val = %d %d %d\n", val, val2, val3);
+
+    // extends 折叠结果用于 if 条件
+    var r: i32 = 0;
+    if (MyInt extends i32) { r = 42; }
+    printf("r = %d\n", r);
+
+    // 局部 var 遮罩全局 type：块内 MyInt 是变量，不是类型
+    {
+        var MyInt = 7;
+        printf("shadow = %d\n", MyInt);   // 7（变量）
+    }
+    // 块外恢复全局类型：类型槽位仍解析到 i32
+    var m: MyInt = 9;
+    printf("m = %d\n", m);
+
+    return 0;
+}

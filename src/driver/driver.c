@@ -225,9 +225,12 @@ int driver_run_file(const char *path) {
     return 1;
   }
 
-  /* Stage ④: 语义分析（sema，语法通过后才进入；语义错误快速失败） */
-  vm_t *vm = vm_new(alloc);
-  if (!vm) {
+  /* Stage ④: 语义分析（sema，语法通过后才进入；语义错误快速失败）。
+     编译期 vm（compile_vm）：sema shadow 执行 + 类型登记 + type value 绑定，
+     仅用于编译期，与运行时 vm 完全解耦（cxb 直接运行不经过 sema，未来
+     sema 可能对接 LLVM/C 后端——字节码必须自包含，运行时从零构建）。 */
+  vm_t *compile_vm = vm_new(alloc);
+  if (!compile_vm) {
     diag_buf_destroy(&diag);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
@@ -236,10 +239,10 @@ int driver_run_file(const char *path) {
     return 1;
   }
 
-  sema_t *sema = sema_create(vm, diag, pool, arena);
+  sema_t *sema = sema_create(compile_vm, diag, pool, arena);
   if (!sema) {
     diag_buf_destroy(&diag);
-    vm_destroy(&vm);
+    vm_destroy(&compile_vm);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -260,7 +263,7 @@ int driver_run_file(const char *path) {
     diag_print_all(diag);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
-    vm_destroy(&vm);
+    vm_destroy(&compile_vm);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -269,12 +272,13 @@ int driver_run_file(const char *path) {
   }
 
   /* Stage ⑤: 编译（AST + sema 作用域树 → 字节码模块） */
-  compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree, sema_types);
+  compiler_t *comp = compiler_new(alloc, compile_vm, diag, pool, scope_tree,
+                                  sema_types);
   if (!comp) {
     sema_destroy(&sema);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
-    vm_destroy(&vm);
+    vm_destroy(&compile_vm);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -290,7 +294,7 @@ int driver_run_file(const char *path) {
     diag_print_all(diag);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
-    vm_destroy(&vm);
+    vm_destroy(&compile_vm);
     lexer_close(&lexer);
     vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
@@ -298,7 +302,24 @@ int driver_run_file(const char *path) {
     return 1;
   }
 
-  /* Stage ⑥: 执行（注册函数 → 调用 main） */
+  /* 编译期 vm 使命完成：销毁（运行时从零构建，见 cxb 直接运行路径）。
+     字节码完全自包含（hoist SEAL 重建类型表 + 注册段 DEFINE 构建 scope）。 */
+  vm_destroy(&compile_vm);
+
+  /* Stage ⑥: 执行（独立运行时 vm：注册函数 → 调用 main） */
+  vm_t *vm = vm_new(alloc);
+  if (!vm) {
+    fprintf(stderr, "run: out of memory\n");
+    bcode_destroy(&bc);
+    if (scope_tree) sema_scope_destroy(&scope_tree);
+    diag_buf_destroy(&diag);
+    lexer_close(&lexer);
+    vec_free(alloc, &pool);
+    arena_destroy(alloc, &arena);
+    delete_allocator(&alloc);
+    return 1;
+  }
+
   value_t *er = exec_run(vm, bc);
   if (value_is_error(vm, er)) {
     error_data_t *ed = (error_data_t *)value_data(er);

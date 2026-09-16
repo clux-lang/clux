@@ -168,6 +168,15 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   size_t nfuncs = 0;
   size_t body_slots[128];
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind == AST_TYPE_DEF) {
+      /* 全局 type 定义进入注册段（HALT 前顺序执行）：rhs 折叠为
+         AST_TYPE_REF（LOAD_TYPE）或内建 AST_IDENT（PUSH）压 type value →
+         PUSH_UNDEFINED 作 spec 占位 → DEFINE 绑定 type value 到 scope。
+         compile_stmt 与局部同构（栈深归零，无 body 回填）。 */
+      compile_stmt(c, f);
+      if (c->failed) break;
+      continue;
+    }
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;

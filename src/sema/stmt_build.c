@@ -2,8 +2,11 @@
 #include "parser/ast_block.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_ident.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_type_def.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 
@@ -27,6 +30,37 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
                                   sema_scope_t *scope);
 static build_result_t build_func_if(sema_t *sema, ast_if_t *it,
                                     sema_scope_t *scope);
+
+/* 类型名是否被"待绑定的局部符号"遮蔽。
+ *
+ * 3a 阶段局部符号只注册 sema 符号表，尚未绑定 vm scope（type def 在 3b
+ * 定义点求值后才绑定；var/参数在 3b 定义点才入 vm scope）。此时若 var
+ * 类型槽位经 type_lookup（vm scope）解析，会错误落到外层同名全局 type
+ * （或内建）上。沿 sema scope 链查找：命中同名符号（type def 或
+ * var/参数）→ 遮蔽成立，槽位推迟到 3b 解析（定义点绑定后 shadow_var_def
+ * 兜底）。顺序敏感由 3b 兜底天然承担：遮蔽符号定义在槽位前 → vm scope
+ * 已遮蔽 → 解析失败报 "is a variable"；定义在槽位后 → vm scope 未遮蔽
+ * → 解析到外层全局 type（顺序敏感语义正确）。
+ * 仅命名类型槽位（AST_IDENT / AST_TYPE_REF）可判；复合类型（AST_ARRAY
+ * 等）不含裸名字，直接返回 false 走常规解析。 */
+static bool type_shadowed_by_local_def(sema_t *sema, sema_scope_t *scope,
+                                       ast_node_t *type_expr) {
+  strslice_t name;
+  if (type_expr->kind == AST_IDENT) {
+    name = ((ast_ident_t *)type_expr)->name;
+  } else if (type_expr->kind == AST_TYPE_REF) {
+    name = ((ast_type_ref_t *)type_expr)->name;
+  } else {
+    return false;
+  }
+  (void)sema;
+  for (sema_scope_t *s = scope; s; s = s->parent) {
+    sema_symbol_t *sym = sema_scope_find_local(s, name);
+    if (!sym) continue;
+    return true; /* 最近同名符号：type def / var / 参数均遮蔽 */
+  }
+  return false;
+}
 
 static void build_func(sema_t *sema, sema_func_t *sf) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
@@ -77,9 +111,12 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         ast_var_def_t *vd = (ast_var_def_t *)s;
         const type_t *vt = NULL;
         if (vd->type_expr) {
-          vt = sema_resolve_type_slot(sema, &vd->type_expr);
-          if (!vt) {
-            diag_error(sema->diag, sema_loc(sema, s), "unknown type");
+          /* 类型槽位解析：若名字被待绑定局部 type 遮蔽（type_shadowed_by_local_def），
+             跳过 vm scope 解析（会错误落到外层全局），sym->type 留 NULL 由 3b
+             shadow_var_def 定义点后兜底；否则按常规解析，失败也留 NULL
+             （3b 补报 "unknown type"）。 */
+          if (!type_shadowed_by_local_def(sema, scope, vd->type_expr)) {
+            vt = sema_resolve_type_slot(sema, &vd->type_expr);
           }
         }
         sema_symbol_t init = {.type = vt};
@@ -87,6 +124,19 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate variable '%.*s'", (int)vd->name.len,
                      vd->name.ptr);
+        }
+        break;
+      }
+      case AST_TYPE_DEF: {
+        /* 局部 type 定义：注册符号（暂不激活，Pass 3b 定义点求值后激活）。
+           类型名经 type_lookup（vm scope）解析，无需 type 字段；ast 指向
+           定义节点（3a 判别"待绑定局部 type"遮蔽场景用）。 */
+        ast_type_def_t *td = (ast_type_def_t *)s;
+        sema_symbol_t init = {.ast = (ast_node_t *)td};
+        if (!sema_scope_define(scope, td->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, s),
+                     "duplicate name '%.*s'", (int)td->name.len,
+                     td->name.ptr);
         }
         break;
       }
@@ -141,10 +191,10 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           ast_var_def_t *vd = (ast_var_def_t *)fr->init;
           const type_t *vt = NULL;
           if (vd->type_expr) {
-            vt = sema_resolve_type_slot(sema, &vd->type_expr);
-            if (!vt) {
-              diag_error(sema->diag, sema_loc(sema, fr->init),
-                         "unknown type");
+            /* 同 AST_VAR_DEF：局部 type 遮蔽则推迟，否则常规解析（失败留
+               NULL 由 3b 兜底） */
+            if (!type_shadowed_by_local_def(sema, scope, vd->type_expr)) {
+              vt = sema_resolve_type_slot(sema, &vd->type_expr);
             }
           }
           sema_symbol_t init_sym = {.type = vt};

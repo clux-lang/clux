@@ -94,13 +94,21 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_TYPE_REF: {
     /* sema 登记的具名类型引用：LOAD_TYPE <id> 查表压栈（与 compile_type_expr
-       一致；表达式位置出现时同样可用，类型即表达式）。 */
+       一致；表达式位置出现时同样可用，类型即表达式）。
+       内建类型引用（名字 = 规范名，不登记）→ type_lookup 兜底。 */
     ast_type_ref_t *n = (ast_type_ref_t *)node;
     const sema_type_t *st = c_sema_type_find_name(c->sema_types, n->name);
     if (!st) {
-      c_error(c, node, "unknown type reference '%.*s'",
-              (int)n->name.len, n->name.ptr);
-      return;
+      const type_t *bt = type_lookup(c->vm, n->name);
+      if (!bt) {
+        c_error(c, node, "unknown type reference '%.*s'",
+                (int)n->name.len, n->name.ptr);
+        return;
+      }
+      bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+      bcode_write_u32(c->bc, bt->id);
+      st_push(c, 1);
+      break;
     }
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, st->id);

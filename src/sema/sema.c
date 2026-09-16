@@ -10,6 +10,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_program.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
@@ -286,10 +287,13 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     }
     case AST_TYPE_REF: {
       /* 具名类型引用（sema 登记过的类型，如 "__type_0"）→ 查 types 队列。
-         折叠写回 / 重复解析（Pass 3 复查）时命中。 */
+         折叠写回 / 重复解析（Pass 3 复查）时命中。
+         内建类型引用（名字 = 规范名 "i32"）不在登记表 → type_lookup 兜底
+         （内建 type value 注册在编译期 vm global scope，别名透明解析）。 */
       ast_type_ref_t *ref = (ast_type_ref_t *)type_expr;
       const sema_type_t *st = sema_type_find_name(sema, ref->name);
-      return st ? st->type : NULL;
+      if (st) return st->type;
+      return type_lookup(sema->vm, ref->name);
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */
@@ -306,22 +310,24 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
   return t;
 }
 
-/* 槽位替换：resolve + 就地替换为 AST_TYPE_REF（携带登记名字）。
+/* 槽位替换：resolve + 就地替换为 AST_TYPE_REF（携带类型名）。
  * 已是 AST_TYPE_REF 时幂等（重新解析 + 同名字引用替换）。
- * 内建类型不登记（sema_type_register 跳过）→ 找不到登记项，不替换
- * 槽位：保持原 AST_IDENT 等，编译器走 PUSH <名字> 从作用域查内建
- * type value 的原有路径，避免冗余的 LOAD_TYPE 别名引用。 */
+ * 程序类型名字 = 登记名（"__type_N"）；内建类型不登记（sema_type_register
+ * 跳过）→ 名字 = 内建规范名（如 "i32"），编译器经 type_lookup 兜底 →
+ * LOAD_TYPE <内建 id>。统一折叠为 AST_TYPE_REF：类型槽位一律走
+ * LOAD_TYPE <id> 直接加载真实 type_t（别名透明，m2-design 关键决策——
+ * 复合类型组装用 value->data 而非名字），消除运行时作用域查找。 */
 const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!sema || !slot || !*slot) return NULL;
   ast_node_t *old = *slot;
   const type_t *t = resolve_type_expr(sema, old);
   if (!t) return NULL;
   const sema_type_t *st = sema_type_find(sema, t);
-  if (!st) return t; /* 内建类型：不替换，保持原槽位 */
+  if (!st && t->name.ptr == NULL) return t; /* 无名类型（异常防御）不替换 */
 
   ast_node_t *ref = ast_type_ref_new(sema->arena, old->tok_begin, old->tok_end);
   if (!ref) return NULL;
-  ((ast_type_ref_t *)ref)->name = st->name;
+  ((ast_type_ref_t *)ref)->name = st ? st->name : t->name;
   ref->next = old->next; /* 保留兄弟链 */
   *slot = ref;
   return t;
@@ -366,6 +372,20 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
       if (!sym) {
         diag_error(sema->diag, sema_loc(sema, f), "duplicate name '%.*s'",
                    (int)vd->name.len, vd->name.ptr);
+      }
+      continue;
+    }
+
+    /* 全局 type 定义：注册符号（暂不激活，pass1b 求值后激活）。
+       定义点不摘除（进入字节码，运行时 DEFINE 绑定 type value）。 */
+    if (f->kind == AST_TYPE_DEF) {
+      ast_type_def_t *td = (ast_type_def_t *)f;
+      sema_symbol_t init = {.ast = f};
+      sema_symbol_t *sym =
+          sema_scope_define(sema->global_scope, td->name, &init);
+      if (!sym) {
+        diag_error(sema->diag, sema_loc(sema, f), "duplicate name '%.*s'",
+                   (int)td->name.len, td->name.ptr);
       }
       continue;
     }
@@ -443,12 +463,31 @@ static void pass2_types(sema_t *sema) {
 }
 
 /* ===========================================================================
+ * pass1b_types：全局 type def 求值
+ *
+ * 在 pass2_types（函数签名解析）之前求值全局 type def（sema_eval_type_def：
+ * rhs 真实求值 → 折叠 AST_TYPE_REF → 绑定 type value 到编译期 vm 作用域），
+ * 使函数签名/参数/返回类型可引用全局 type 定义（type Foo = ... 先于 func
+ * 使用）。定义点不摘除——type def 进入字节码，运行时 DEFINE 绑定 type value
+ * 到运行时作用域（编译期 vm 与运行时 vm 解耦）。
+ * 注：局部 type def 由 3b 按语句顺序求值（定义点激活，TDZ 与 var 一致）。
+ * =========================================================================== */
+
+static void pass1b_types(sema_t *sema, ast_program_t *prog) {
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind != AST_TYPE_DEF) continue;
+    sema_eval_type_def(sema, (ast_type_def_t *)f, sema->global_scope);
+  }
+}
+
+/* ===========================================================================
  * pass_globals：全局 comptime var 求值
  *
- * 遍历 prog->funcs 链上的 AST_VAR_DEF（parser 仅把 comptime var 挂上链），
- * 逐一定义点求值（sema_eval_comptime_var：改写 init → ctfe 求值 → 符号表
- * 编码）。无论成功失败都从链摘除——comptime var 不进入运行时。
- * 在 pass2_types 之后执行：函数签名已解析，init 可调用函数（含 comptime func）。
+ * 遍历 prog->funcs 链上的 AST_VAR_DEF（comptime var），逐一定义点求值
+ * （sema_eval_comptime_var：改写 init → ctfe 求值 → 符号表编码）。
+ * 无论成功失败都从链摘除——comptime var 不进入运行时。
+ * 在 pass2_types 之后执行：函数签名已解析（pass1b 已绑定全局 type def），
+ * init 可调用函数（含 comptime func）与引用自定义类型。
  * =========================================================================== */
 
 static void pass_globals(sema_t *sema, ast_program_t *prog) {
@@ -489,6 +528,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   }
 
   pass1_names(sema, prog);
+  pass1b_types(sema, prog); /* 全局 type def 先于函数签名解析（签名可引用） */
   pass2_types(sema);
   pass_globals(sema, prog);
 

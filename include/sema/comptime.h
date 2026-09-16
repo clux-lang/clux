@@ -7,6 +7,7 @@ extern "C" {
 #include "parser/ast_call.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -58,6 +59,15 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
  */
 value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
                                  sema_scope_t *scope);
+
+/**
+ * 求值 type 定义（type name = <type-expr>;）：
+ *  rhs 经 sema_expr 求值（类型表达式恒返回真实 type value，data=type_t*）→
+ *  校验为类型值 → 折叠 rhs 为 AST_TYPE_REF（内建类型保持原 AST_IDENT）→
+ *  绑定 type value 到编译期 vm 当前作用域 → 激活符号。
+ *  失败返回 false（诊断已记录）。调用方不摘除定义节点（进入字节码）。
+ */
+bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope);
 
 #ifdef __cplusplus
 }
