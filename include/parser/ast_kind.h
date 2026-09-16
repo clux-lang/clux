@@ -47,6 +47,7 @@ typedef enum {
     AST_VOLATILE,        /* volatile <type-expr> */
     AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
+    AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */

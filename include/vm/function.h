@@ -39,8 +39,9 @@ typedef value_t *(*cfunc_t)(vm_t *vm, func_t *self, size_t argc, value_t **args)
  * - name: 函数名（调试/显示用）。内建函数为静态字面量（owns_name=false）；
  *   程序函数经 SET_FUNC_NAME 拷贝到 vm 堆（owns_name=true，func_destroy 释放）
  *
- * 签名不存于 func_t：签名类型（func_type_t）由 func_new 传入并成为
- * func value 的 type，调用点经 value_type() 取回（见 func_new）。
+ * 签名类型存于 func_t->type（func_new 传入，归 vm 类型池所有，不释放）；
+ * func value 的 type 亦为签名类型，调用点经 value_type() 取回
+ * （见 func_new）。LOAD_FUNCTION <id> 从 func_t 直接取签名包装 value。
  * sema 侧不构造 func value：符号表只记录函数定义 AST 节点（sym->ast），
  * 签名类型存于 sym->type。
  *
@@ -51,6 +52,7 @@ struct func_t {
     cfunc_t         cfunc;
     scope_t        *closure_scope;
     scope_t        *root_scope;
+    const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;
     strslice_t      name;
     bool            owns_closure_scope; /* true：closure_scope 由函数对象创建（bcode_function），
@@ -107,6 +109,23 @@ value_t *func_new(vm_t *vm,
  * （函数对象生命周期由 vm 统一管理）。
  */
 void func_destroy(allocator_t *alloc, func_t **fn);
+
+/**
+ * 创建程序函数"引用对象"（CTFE 函数引用专用）：轻量 func_t，仅携带
+ * 签名 + 名字（cfunc=NULL，无 body 入口，不可调用），注册进 vm->functions
+ * 统一释放，不分配 id、不登记 functions_by_id。
+ *
+ * 用途：comptime 函数体内引用普通函数名（如 `comptime func get() { return
+ * add; }`）时，CTFE 求值需要一个函数值载体——折叠终点是 AST_FUNC_REF
+ * （sema_ct_lit 按名字产出），此对象仅在 sema 阶段流转，运行期由
+ * LOAD_FUNCTION <fid> 加载真实函数，与本对象无关。
+ *
+ * - sig_type: 签名类型（func_type_t，归 vm 类型池）；name: 函数名（借用，
+ *   owns_name=false，sema arena / vm 静态字面量生命周期）。
+ * - 返回 func_t*（非 value）：调用方自行 value_alloc_data_copy 包装。
+ *   Panics on out-of-memory.
+ */
+func_t *func_new_program_ref(vm_t *vm, const type_t *sig_type, strslice_t name);
 
 #ifdef __cplusplus
 }

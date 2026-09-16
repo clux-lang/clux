@@ -27,6 +27,7 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
     memset(fn, 0, sizeof(bcode_function_t));
     fn->base.cfunc      = bcode_call_cfunc;
     fn->base.root_scope = root_scope;
+    fn->base.type       = sig_type; /* 签名类型：LOAD_FUNCTION 从 func_t 取签名包装 value */
     /* id 默认 0（未登记）：由 BIND_FUNC <id> 运行期填充并登记 */
     /* 孤立闭包作用域（parent=NULL）：不挂在任何 scope 树下，不随定义点
        作用域销毁。clux 显式闭包捕获——调用期间由 func_vcall 临时接线

@@ -1095,3 +1095,77 @@ TEST_F(ExecTest, SetFuncNameNonFuncValueReturnsError) {
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(value_is_error(vm, r));
 }
+
+/* ================================================================ */
+/* LOAD_FUNCTION <id>：函数值加载                                      */
+/* ================================================================ */
+
+/* LOAD_FUNCTION 加载内建函数（printf 预注册 id=0）：data 指向 func_t，
+   type 为签名类型（func value 可调用） */
+TEST_F(ExecTest, LoadFunctionBuiltin) {
+    bcode_write_op(bc, BCODE_LOAD_FUNCTION); bcode_write_u32(bc, 0);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *v = stack_top();
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(value_type(v)->kind, TYPE_KIND_FUNC);
+    func_t *fn = *(func_t **)value_data(v);
+    ASSERT_NE(fn, nullptr);
+    ASSERT_NE(fn->name.ptr, nullptr);
+    EXPECT_EQ(strncmp(fn->name.ptr, "printf", 6), 0);
+}
+
+/* LOAD_FUNCTION 加载程序函数（BIND_FUNC 登记 id=64）：函数值携带签名，
+   调用按签名校验，返回 i32 结果 */
+TEST_F(ExecTest, LoadFunctionProgramAndCall) {
+    size_t jmp_pc = bcode_tell(bc);
+    bcode_write_op(bc, BCODE_JMP);
+    bcode_write_u32(bc, 0);
+
+    /* 函数体：PUSH 7, PUSH 8, ADD, RET */
+    size_t body = bcode_tell(bc);
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 7);
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 8);
+    bcode_write_op(bc, BCODE_ADD);
+    bcode_write_op(bc, BCODE_RET);
+
+    size_t end = bcode_tell(bc);
+    /* 签名 func(): i32 —— 无参数，返回 i32 */
+    bcode_write_op(bc, BCODE_PUSH_FUNC_TYPE);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD); bcode_write_str(bc, STRSLICE_LIT("i32"));
+    bcode_write_op(bc, BCODE_FUNC_TYPE_RETURN);
+    bcode_write_op(bc, BCODE_SEAL);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_FUNCTION); bcode_write_u32(bc, (uint32_t)body);
+    bcode_write_op(bc, BCODE_BIND_FUNC); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
+    bcode_write_op(bc, BCODE_DEFINE); bcode_write_str(bc, STRSLICE_LIT("add"));
+    bcode_write_op(bc, BCODE_LOAD_FUNCTION); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_HALT);
+    bcode_patch_u32(bc, jmp_pc + 4, (uint32_t)end);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *v = stack_top();
+    ASSERT_NE(v, nullptr);
+    EXPECT_EQ(value_type(v)->kind, TYPE_KIND_FUNC);
+    /* 清空操作数栈：LOAD_FUNCTION 压入的 func value 仅是加载验证，调用时
+       栈应干净（真实场景 op_call 弹出 callee+args 后才 value_call） */
+    while (!vec_is_empty(vm->stack)) vec_pop(vm->stack);
+    value_t *r = value_call(vm, v, NULL, 0);
+    ASSERT_NE(r, nullptr);
+    EXPECT_FALSE(value_is_error(vm, r));
+    EXPECT_EQ(read_sint(r), 15);
+}
+
+/* LOAD_FUNCTION 未知 id（未登记）→ 硬错误 */
+TEST_F(ExecTest, LoadFunctionUnknownIdReturnsError) {
+    bcode_write_op(bc, BCODE_LOAD_FUNCTION); bcode_write_u32(bc, 128);
+    bcode_write_op(bc, BCODE_HALT);
+
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}

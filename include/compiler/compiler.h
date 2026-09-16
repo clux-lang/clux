@@ -6,6 +6,7 @@ extern "C" {
 
 #include "core/allocator.h"
 #include "core/strslice.h"
+#include "core/strmap.h"
 #include "core/vec.h"
 #include "diag/diagnostic.h"
 #include "parser/ast_func_def.h"
@@ -83,6 +84,13 @@ typedef struct compiler_t {
        vm->functions_by_id。函数 id 表（functions_by_id）与类型 id 表
        （types_by_id）独立，勿与 type_id_next 混淆。 */
     uint32_t        func_id_next;
+
+    /* 函数名 → 函数 id 映射（compiler_compile 开头构建，strmap 不拥有值）：
+       内建函数（printf，id < FUNC_ID_PROGRAM_BASE）+ 程序函数（按声明序
+       func_id_next 分配，与注册段 BIND_FUNC 顺序一致）。compile_expr
+       AST_FUNC_REF 查表发 LOAD_FUNCTION <fid>。值 = (void*)(uintptr_t)fid，
+       零分配（fid ≥ 64 或内建 0，恒非 NULL）。 */
+    strmap_t       *func_ids;
 
     /* 类型 id 分配计数器：sema_types 已占 [TYPE_ID_PROGRAM_BASE,
        TYPE_ID_PROGRAM_BASE + sema_types 数量)（sema_type_register 按登记

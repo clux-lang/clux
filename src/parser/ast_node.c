@@ -33,6 +33,7 @@ static const char *g_kind_names[] = {
     [AST_VOLATILE]   = "volatile",
     [AST_FUNC_TYPE]  = "func_type",
     [AST_TYPE_REF]   = "type_ref",
+    [AST_FUNC_REF]   = "func_ref",
     [AST_TERNARY]    = "ternary",
     [AST_ERROR]      = "error",
 };

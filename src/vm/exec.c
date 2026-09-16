@@ -148,6 +148,20 @@ static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return type_as_value(vm, t);
 }
 
+/* LOAD_FUNCTION <id>：从 functions_by_id 查表，压入该函数的 func value。
+   对标 LOAD_TYPE：函数值运行期加载（变量/参数/返回值传递）。签名类型取自
+   func_t->type（func_new 写入，归 vm 类型池所有），包装为 func value——
+   data 存 func_t*，type 即签名类型，与 PUSH_FUNCTION 构造的 func value
+   同构。 */
+static value_t *op_load_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    func_t *fn = vm_func_load(vm, id);
+    if (!fn || !fn->type)
+        return value_make_error(vm, "exec: unknown function id");
+    void *data = value_alloc_data_copy(vm->alloc, fn->type, &fn);
+    return value_make(vm, fn->type, data);
+}
+
 /* SET_TYPE_NAME <name>：弹栈顶 type value，设置其显示名（覆盖规范名） */
 static value_t *op_set_type_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
@@ -611,6 +625,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_VALUE]     = op_push_value,
     [BCODE_LOAD]           = op_load,
     [BCODE_LOAD_TYPE]      = op_load_type,
+    [BCODE_LOAD_FUNCTION]  = op_load_function,
     [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,
     [BCODE_DEFINE]         = op_define,

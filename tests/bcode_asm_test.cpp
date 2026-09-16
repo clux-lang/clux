@@ -209,3 +209,30 @@ TEST(BcodeAsm, UndefinedLabelIsError) {
     EXPECT_NE(bcode_asm_parse(a, src, std::strlen(src), &bc), 0);
     delete_allocator(&a);
 }
+
+/* LOAD_FUNCTION <id> 助记符往返：反汇编 → 汇编 → 反汇编字节稳定 */
+TEST(BcodeAsm, LoadFunctionRoundTrip) {
+    allocator_t *a = create_allocator(malloc, free);
+
+    bytecode_t *bc = bcode_new(a);
+    bcode_write_op(bc, BCODE_LOAD_FUNCTION); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_HALT);
+
+    char *t1 = bcode_disasm_mem(a, bc, NULL);
+    ASSERT_NE(t1, nullptr);
+    EXPECT_NE(std::strstr(t1, "LOAD_FUNCTION 64"), nullptr);
+
+    bytecode_t *bc2 = nullptr;
+    EXPECT_EQ(bcode_asm_parse(a, t1, std::strlen(t1), &bc2), 0);
+    ASSERT_NE(bc2, nullptr);
+
+    char *t2 = bcode_disasm_mem(a, bc2, NULL);
+    ASSERT_NE(t2, nullptr);
+    EXPECT_STREQ(t1, t2);
+
+    allocator_free(a, (void **)&t1);
+    allocator_free(a, (void **)&t2);
+    bcode_destroy(&bc);
+    bcode_destroy(&bc2);
+    delete_allocator(&a);
+}

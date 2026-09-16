@@ -31,6 +31,22 @@ static value_t *func_clone(vm_t *vm, value_t *v) {
     return value_make(vm, value_type(v), data);
 }
 
+/* ---- assign ---- */
+
+/* 函数赋值：源与目标签名一致（implicit_cast 仅同签名可过）→ clone/浅拷贝。
+   shadow 只校验类型兼容性，不拷贝 data（对齐 int_assign 模式）。 */
+static value_t *func_assign(vm_t *vm, value_t *dst, value_t *src) {
+    if (value_type(src) != value_type(dst)) {
+        value_t *casted = value_implicit_cast(vm, src, value_type(dst));
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
+    }
+    if (value_is_shadow(dst) || value_is_shadow(src))
+        return dst;
+    memcpy(value_data(dst), value_data(src), value_type(dst)->size);
+    return dst;
+}
+
 /* ---- call: 通过 vtable 分派的函数调用 ---- */
 
 /* 类型名 → 缓冲区（诊断用） */
@@ -222,6 +238,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
 const vtable_t VTABLE_FUNC = {
     .dispose   = func_dispose,
     .clone     = func_clone,
+    .assign    = func_assign,
     .call      = func_vcall,
     .type_seal = func_type_seal,
 };

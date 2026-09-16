@@ -29,6 +29,17 @@ typedef enum {
   SEMA_SCOPE_FOR,      /* for 作用域（init 变量） */
 } sema_scope_kind_t;
 
+/* ---- 符号种类 ---- */
+
+/* 符号的类别身份（sema/ctfe/compiler 判断符号语义的权威依据，替代
+   对定义 AST 节点的类型判别——func_t/sema_symbol 对外不透明，内建函数
+   无定义 AST 节点，变量符号 ast 恒为 NULL，不能靠 ast 区分）。 */
+typedef enum {
+  SEMA_SYM_VAR,  /* 变量（含参数、全局 comptime var） */
+  SEMA_SYM_FUNC, /* 函数（用户函数 + 内建函数，如 printf） */
+  SEMA_SYM_TYPE, /* 类型定义（type 名字） */
+} sema_symbol_kind_t;
+
 /* ---- 符号 ---- */
 
 typedef struct _sema_scope_t sema_scope_t;
@@ -36,11 +47,13 @@ typedef struct _sema_scope_t sema_scope_t;
 /*
  * 编译期常量编码（comptime var / comptime func 调用折叠产物）
  *
- * 支持标量 + 字符串 + 数组（M2 复合类型按需扩展）。
+ * 支持标量 + 字符串 + 数组 + 函数引用（M2 复合类型按需扩展）。
  * - 标量：type 决定读取 i/u/f/b/s 哪个字段（u64 → u，其余整数 → i，
  *   f32/f64 → f，bool → b，str → s）
  * - 数组：type->kind == TYPE_KIND_ARRAY → elems 是连续元素常量编码
  *   （arena 分配，count 个，递归），标量字段无效
+ * - 函数引用：type->kind == TYPE_KIND_FUNC → func_name 是函数名
+ *   （arena 复制），折叠为 AST_FUNC_REF（compile 发 LOAD_FUNCTION）
  * 字符串 strslice 指向 arena 复制的缓冲区（生命周期 = sema arena，
  * 跨 sema/compile 阶段安全）。type 是 vm 类型池指针（借用，生命周期 = vm）。
  */
@@ -51,6 +64,7 @@ typedef struct sema_ct_const {
   double        f;     /* f32/f64 */
   bool          b;     /* bool */
   strslice_t    s;     /* 字符串（arena 复制） */
+  strslice_t    func_name; /* 函数引用（TYPE_KIND_FUNC，arena 复制） */
   /* 数组（TYPE_KIND_ARRAY）：arena 分配的连续元素编码 */
   struct sema_ct_const *elems; /* count 个元素常量（arena 分配） */
   size_t                count; /* 元素个数 */
@@ -78,6 +92,7 @@ typedef struct sema_ct_const {
  * comptime func 调用点在 sema_expr 折叠，函数本身不注册到运行时。
  */
 struct _sema_symbol_t {
+  sema_symbol_kind_t kind; /* 符号种类（SYM_VAR/SYM_FUNC/SYM_TYPE） */
   const type_t *type; /* 已解析类型；NULL = 待推断（shadow VM 阶段填充）。
                          函数符号：签名类型（func_type_t，vm 池 intern）。 */
   ast_node_t   *ast;  /* 定义节点（借用，arena 管理，不拥有）：
