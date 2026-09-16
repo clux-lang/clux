@@ -1510,6 +1510,26 @@ TEST_F(SemaTest, TypeDefForwardRefFails) {
     expect_message(0, "unknown type");
 }
 
+TEST_F(SemaTest, UndefInitUnknownTypeFails) {
+    /* undefined 初始化 + 未知类型标注：3b 兜底重解析须报 unknown type
+       （此前静默当 void，无诊断）。 */
+    EXPECT_FALSE(analyze(
+        "func main() {"
+        "  var x:NoSuch = undefined;"
+        "}"));
+    expect_message(0, "unknown type");
+}
+
+TEST_F(SemaTest, UndefInitVarShadowTypeFails) {
+    /* undefined 初始化 + 类型名被 var 遮蔽：报 "is a variable, not a type" */
+    EXPECT_FALSE(analyze(
+        "func main() {"
+        "  var T:i32 = 1;"
+        "  var x:T = undefined;"
+        "}"));
+    expect_message(0, "'T' is a variable, not a type");
+}
+
 TEST_F(SemaTest, TypeDefUsedBeforeActivation) {
     /* 全局 type def TDZ：函数体内使用在 pass1b 已绑定 → OK */
     EXPECT_TRUE(analyze(
