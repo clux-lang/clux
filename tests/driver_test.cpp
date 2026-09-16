@@ -1153,3 +1153,131 @@ TEST(Driver, RunFileTypeDefFuncSignatureAsParamType) {
   std::remove(path.c_str());
 }
 
+/* ================================================================ */
+/* 函数值（function as value）端到端                                    */
+/* ================================================================ */
+
+TEST(Driver, RunFileFuncValueAssignAndCall) {
+  /* var f = add; f(3,4) 经变量调用函数值 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = add;\n"
+      "  var val = f(3, 4);\n"
+      "  printf(\"%d\\n\", val);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueAsArgument) {
+  /* 函数值传参：apply(add,10,20) */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func apply(f:func(i32,i32)->i32, x:i32, y:i32):i32 {\n"
+      "  return f(x, y);\n"
+      "}\n"
+      "func main():void {\n"
+      "  var r = apply(add, 10, 20);\n"
+      "  printf(\"%d\\n\", r);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueAsReturn) {
+  /* 函数值返回：get_add() 返回 add，再经变量调用 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func get_add():func(i32,i32)->i32 {\n"
+      "  return add;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = get_add();\n"
+      "  printf(\"%d\\n\", f(5, 6));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueExplicitTypeAndReassign) {
+  /* 显式 func 类型 + 函数值再赋值（f = g） */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func sub(a:i32, b:i32):i32 {\n"
+      "  return a - b;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f: func(i32,i32)->i32 = add;\n"
+      "  var g = sub;\n"
+      "  f = g;\n"
+      "  printf(\"%d\\n\", f(20, 8));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueComptimeFold) {
+  /* comptime func 返回函数值：编译期折叠，add_fn(1,2) 输出 3 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "comptime func get_add():func(i32,i32)->i32 {\n"
+      "  return add;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var add_fn = get_add();\n"
+      "  var val = add_fn(1,2);\n"
+      "  printf(\"%d\\n\", val);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueBuiltinPrintf) {
+  /* 内建 printf 与普通函数同等：函数值赋值 + 调用 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var p = printf;\n"
+      "  p(\"hello %s %d\\n\", \"world\", 42);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueVarShadowsNameRejected) {
+  /* 遮蔽平等：var add=2 遮蔽函数名，调用报错（不可调用而非函数不存在） */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var add = 2;\n"
+      "  var val = add(1,2);\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueTypeMismatchRejected) {
+  /* 签名不匹配：func(i32)->i32 槽位收 func(i32,i32)->i32 报错 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 {\n"
+      "  return a + b;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f: func(i32)->i32 = add;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+

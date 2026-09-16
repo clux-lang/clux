@@ -136,8 +136,8 @@ static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
     tn = ((ast_type_ref_t *)vd->type_expr)->name;
   }
   sema_symbol_t *shadow = tn.ptr ? sema_lookup(scope, tn) : NULL;
-  if (shadow && !shadow->ast) {
-    /* 激活的 var/参数遮蔽（ast==NULL 区分于 type def/函数符号）：
+  if (shadow && shadow->kind == SEMA_SYM_VAR) {
+    /* 激活的 var/参数遮蔽（kind==SYM_VAR 区分于 type/函数符号）：
        完全遮罩语义，类型槽位引用的是变量 → 报错 */
     diag_error(sema->diag, sema_loc(sema, vd->type_expr),
                "'%.*s' is a variable, not a type", (int)tn.len, tn.ptr);

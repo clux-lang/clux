@@ -74,6 +74,7 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     sema_symbol_t init = {
+        .kind = SEMA_SYM_VAR,
         .type = sema_resolve_type_slot(sema, &vd->type_expr)};
     if (!sema_scope_define(fscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p),
@@ -119,7 +120,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
             vt = sema_resolve_type_slot(sema, &vd->type_expr);
           }
         }
-        sema_symbol_t init = {.type = vt};
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = vt};
         if (!sema_scope_define(scope, vd->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate variable '%.*s'", (int)vd->name.len,
@@ -132,7 +133,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
            类型名经 type_lookup（vm scope）解析，无需 type 字段；ast 指向
            定义节点（3a 判别"待绑定局部 type"遮蔽场景用）。 */
         ast_type_def_t *td = (ast_type_def_t *)s;
-        sema_symbol_t init = {.ast = (ast_node_t *)td};
+        sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)td};
         if (!sema_scope_define(scope, td->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate name '%.*s'", (int)td->name.len,
@@ -197,7 +198,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
               vt = sema_resolve_type_slot(sema, &vd->type_expr);
             }
           }
-          sema_symbol_t init_sym = {.type = vt};
+          sema_symbol_t init_sym = {.kind = SEMA_SYM_VAR, .type = vt};
           if (!sema_scope_define(for_scope, vd->name, &init_sym)) {
             diag_error(sema->diag, sema_loc(sema, fr->init),
                        "duplicate variable '%.*s'", (int)vd->name.len,

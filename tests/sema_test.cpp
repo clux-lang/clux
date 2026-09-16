@@ -1696,4 +1696,132 @@ TEST_F(SemaTest, TypeDefExtendsTernaryArrayBranch) {
     EXPECT_EQ(array_type_elem(st->type), vm_->type_i32);
 }
 
+/* ================================================================ */
+/* 函数值（function as value）                                         */
+/* ================================================================ */
+
+TEST_F(SemaTest, FuncValueAssignInferFuncType) {
+    /* var f = add; 折叠为函数值，变量类型推断为签名 func(i32,i32)->i32 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var f = add; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *f = sema_scope_find_local(fscope, STRSLICE_LIT("f"));
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->kind, SEMA_SYM_VAR);
+    ASSERT_NE(f->type, nullptr);
+    EXPECT_EQ(f->type->kind, TYPE_KIND_FUNC);
+}
+
+TEST_F(SemaTest, FuncValueCallThroughVariable) {
+    /* 函数值经变量调用：f(1,2) 的 callee 是变量（kind=VAR）不折叠，
+       值类型是 func，按签名交验参数 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var f = add; var r = f(1, 2); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *r = sema_scope_find_local(fscope, STRSLICE_LIT("r"));
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(r->type, vm_->type_i32); /* 调用返回 return_type shadow */
+}
+
+TEST_F(SemaTest, FuncValueCallArgCountMismatch) {
+    EXPECT_FALSE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var f = add; var r = f(1); }"));
+    expect_message(0, "expects 2 arguments");
+}
+
+TEST_F(SemaTest, FuncValueCallArgTypeMismatch) {
+    EXPECT_FALSE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var f = add; var r = f(1, true); }"));
+    expect_message(0, "cannot convert bool to i32");
+}
+
+TEST_F(SemaTest, FuncValueExplicitTypeAssign) {
+    /* 显式 func 类型槽位 + 函数值初始化 + 再赋值 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func sub(a:i32, b:i32):i32 { return a - b; }"
+        "func main(): void {"
+        "  var f: func(i32,i32)->i32 = add;"
+        "  f = sub;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, FuncValueTypeMismatchRejected) {
+    /* 签名不匹配：func(i32)->i32 槽位不能收 func(i32,i32)->i32 */
+    EXPECT_FALSE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var f: func(i32)->i32 = add; }"));
+    expect_message(0, "cannot initialize");
+}
+
+TEST_F(SemaTest, FuncValueAsArgumentAndReturn) {
+    /* 函数值传参 + 返回 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func apply(f:func(i32,i32)->i32, x:i32, y:i32):i32 { return f(x, y); }"
+        "func get_add():func(i32,i32)->i32 { return add; }"
+        "func main(): void {"
+        "  var r = apply(add, 1, 2);"
+        "  var g = get_add();"
+        "  var q = g(3, 4);"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, FuncValueVarShadowsFunctionName) {
+    /* 遮蔽平等：局部变量遮蔽函数名后，调用走变量类型检查。
+       var add=2 是 i32 → 报不可调用（不是"函数不存在"） */
+    EXPECT_FALSE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func main(): void { var add = 2; var val = add(1,2); }"));
+    expect_message(0, "cannot call");
+}
+
+TEST_F(SemaTest, FuncValueParamShadowsFunctionName) {
+    /* 参数遮蔽函数名：apply(add, ...) 内 add 是参数（func 值）可调用 */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "func apply(add:func(i32,i32)->i32, x:i32, y:i32):i32 { return add(x, y); }"
+        "func main(): void { var r = apply(add, 1, 2); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, FuncValueBuiltinPrintf) {
+    /* 内建 printf 与普通函数同等看待：函数值赋值 + 调用 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var p = printf; p(\"%d\", 42); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, FuncValueComptimeFold) {
+    /* comptime func 返回函数值：编译期折叠为签名 shadow */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "comptime func get_add():func(i32,i32)->i32 { return add; }"
+        "func main(): void {"
+        "  var add_fn = get_add();"
+        "  var val = add_fn(1,2);"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* comptime func 不建作用域树（sema_build_scope_tree 跳过），
+       global 下只有 add(0) 和 main(1) 两个函数作用域 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *val = sema_scope_find_local(fscope, STRSLICE_LIT("val"));
+    ASSERT_NE(val, nullptr);
+    EXPECT_EQ(val->type, vm_->type_i32); /* 折叠后的函数调用返回 i32 */
+}
+
 } /* namespace */

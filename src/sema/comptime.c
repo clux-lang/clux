@@ -7,11 +7,13 @@
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
+#include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
+#include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
@@ -100,7 +102,21 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->elems = es;
     return true;
   }
-  return false; /* void/type/func/其他复合：不可折叠 */
+  if (t->kind == TYPE_KIND_FUNC) {
+    /* 函数引用（comptime 函数体内引用的普通/内建函数名）：data 存 func_t*
+       （CTFE 经 func_new_program_ref 构造的引用对象，或 scope 里真实函数
+       值）。编码函数名到 arena（跨 sema/compile 阶段安全），折叠为
+       AST_FUNC_REF（compile 查函数名→fid 映射发 LOAD_FUNCTION）。 */
+    func_t *fn = *(func_t **)value_data(v);
+    if (!fn || !fn->name.ptr) return false;
+    char *buf = (char *)arena_calloc(sema->arena, 1, fn->name.len + 1,
+                                     ALIGNOF(max_align_t));
+    if (!buf) return false;
+    memcpy(buf, fn->name.ptr, fn->name.len + 1);
+    out->func_name = strslice_from_bytes(buf, fn->name.len);
+    return true;
+  }
+  return false; /* void/type/其他复合：不可折叠 */
 }
 
 /* 从常量类型构造类型表达式 AST（折叠写回 AST_CONSTRUCT 的类型位用）：
@@ -210,6 +226,16 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     cn->fields = fhead;
     cn->fields_last = flast;
     return cnode;
+  }
+  if (t->kind == TYPE_KIND_FUNC) {
+    /* 函数引用常量：折叠为 AST_FUNC_REF（携带函数名，compile 查
+       func_ids 映射发 LOAD_FUNCTION <fid> 加载真实函数值）。 */
+    if (!ct->func_name.ptr) return NULL;
+    ast_node_t *ref =
+        ast_func_ref_new(arena, origin->tok_begin, origin->tok_end);
+    if (!ref) return NULL;
+    ((ast_func_ref_t *)ref)->name = ct->func_name; /* arena 复制，生命周期 = arena */
+    return ref;
   }
   return NULL;
 }

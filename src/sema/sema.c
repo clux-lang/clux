@@ -417,7 +417,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
        不创建 sema_func_t（不入 Pass 3 队列——不是函数，无函数体）。 */
     if (f->kind == AST_VAR_DEF) {
       ast_var_def_t *vd = (ast_var_def_t *)f;
-      sema_symbol_t init = {0};
+      sema_symbol_t init = {.kind = SEMA_SYM_VAR};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, vd->name, &init);
       if (!sym) {
@@ -431,7 +431,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
        定义点不摘除（进入字节码，运行时 DEFINE 绑定 type value）。 */
     if (f->kind == AST_TYPE_DEF) {
       ast_type_def_t *td = (ast_type_def_t *)f;
-      sema_symbol_t init = {.ast = f};
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, td->name, &init);
       if (!sym) {
@@ -442,7 +442,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
     }
 
     ast_func_def_t *fn = (ast_func_def_t *)f;
-    sema_symbol_t init = {0}; /* 函数定义顺序自由：Pass 1 全部注册，无遮罩问题 */
+    sema_symbol_t init = {.kind = SEMA_SYM_FUNC}; /* 函数定义顺序自由：Pass 1 全部注册，无遮罩问题 */
     sema_symbol_t *sym = sema_scope_define(sema->global_scope, fn->name, &init);
     if (!sym) {
       diag_error(sema->diag, sema_loc(sema, f), "duplicate function '%.*s'",
@@ -578,7 +578,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *pparams[1] = { sema->vm->type_str };
     const type_t *psig = type_func_sig(sema->vm, pparams, 1, NULL,
                                        /*is_variadic=*/true);
-    sema_symbol_t init = {.type = psig, .ast = NULL, .is_active = true};
+    sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = psig,
+                          .is_active = true};
     sema_scope_define(sema->global_scope, STRSLICE_LIT("printf"), &init);
   }
 

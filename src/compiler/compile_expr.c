@@ -5,6 +5,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_float_lit.h"
+#include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
@@ -112,6 +113,28 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, st->id);
+    st_push(c, 1);
+    break;
+  }
+  case AST_FUNC_REF: {
+    /* sema 确认的函数引用（函数值）：查函数名→fid 映射（compile_compile
+       开头构建：内建 + 程序函数按声明序）→ LOAD_FUNCTION <id> 运行期从
+       functions_by_id 查表压真实函数值。未命中（如 comptime func）是
+       sema 应已拦截的错误。 */
+    ast_func_ref_t *n = (ast_func_ref_t *)node;
+    char nb[256];
+    size_t nlen = n->name.len < sizeof(nb) - 1 ? n->name.len : sizeof(nb) - 1;
+    memcpy(nb, n->name.ptr, nlen);
+    nb[nlen] = '\0';
+    void *fidv = c->func_ids ? strmap_get(c->func_ids, nb) : NULL;
+    if (!fidv) {
+      c_error(c, node, "unknown function '%.*s'", (int)n->name.len, n->name.ptr);
+      return;
+    }
+    /* id+1 编码（见 compile.c func_ids 构建注释），还原真实 id */
+    uint32_t fid = (uint32_t)(uintptr_t)fidv - 1u;
+    bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+    bcode_write_u32(c->bc, fid);
     st_push(c, 1);
     break;
   }

@@ -144,6 +144,50 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   }
   c->bc = bc;
 
+  /* 0. 函数名 → 函数 id 映射（LOAD_FUNCTION 编译用）：
+     - 内建函数：遍历 vm->functions（func_new 已注册，id < FUNC_ID_PROGRAM_BASE，
+       如 printf=0），按 fn->name 登记。
+     - 程序函数：按声明顺序分配 fid（局部计数变量，与注册段 BIND_FUNC 的
+       c->func_id_next 分配完全对齐——两者都从 FUNC_ID_PROGRAM_BASE 起、
+       按声明序、跳过 comptime func。**不消耗 c->func_id_next**，注册段
+       compile_func_reg 是 fid 的唯一分配者）。
+     AST_FUNC_REF 编译时查表命中 → LOAD_FUNCTION <id>。 */
+  c->func_ids = strmap_new(c->alloc, /*owns_value=*/false);
+  if (!c->func_ids) {
+    diag_error(c->diag, c_loc(c, program), "compiler: out of memory creating func id map");
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+  if (c->vm && c->vm->functions) {
+    size_t nf = vec_len(c->vm->functions);
+    for (size_t i = 0; i < nf; i++) {
+      func_t *fn = (func_t *)vec_get(c->vm->functions, i);
+      if (!fn || !fn->name.ptr || fn->id >= FUNC_ID_PROGRAM_BASE) continue;
+      char nb[256];
+      size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
+      memcpy(nb, fn->name.ptr, n);
+      nb[n] = '\0';
+      /* id+1 编码：内建 id 从 0 起，strmap value 为 NULL 表示"未命中"，
+         直接存 id 会把 id=0 存成 NULL 导致 get 误判未命中 */
+      strmap_insert(c->func_ids, c->alloc, nb,
+                    (void *)(uintptr_t)(fn->id + 1u));
+    }
+  }
+
+  uint32_t pfid = FUNC_ID_PROGRAM_BASE;
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind != AST_FUNC_DEF) continue;
+    ast_func_def_t *fn = (ast_func_def_t *)f;
+    if (fn->is_comptime) continue;
+    char nb[256];
+    size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
+    memcpy(nb, fn->name.ptr, n);
+    nb[n] = '\0';
+    strmap_insert(c->func_ids, c->alloc, nb, (void *)(uintptr_t)(pfid + 1u));
+    pfid++;
+  }
+
   /* 产物布局（先定义类型，然后定义函数，最后放置函数体）：
        1. 类型提升区（hoist）— 运行时先构造并登记全部程序类型
        2. 函数注册段 — 签名构造 + PUSH_FUNCTION + DEFINE 名字（函数体入口
@@ -270,5 +314,6 @@ void compiler_destroy(compiler_t **pc) {
   compiler_t *c = *pc;
   /* 释放残留 patch 节点（编译中途失败时可能有未回填标签） */
   while (c->loop_stack) c->loop_stack = c->loop_stack->next; /* 仅断链 */
+  if (c->func_ids) strmap_free(c->alloc, &c->func_ids);
   allocator_free(c->alloc, (void **)pc);
 }

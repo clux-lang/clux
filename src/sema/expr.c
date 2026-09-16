@@ -9,6 +9,7 @@
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 #include "parser/ast_float_lit.h"
+#include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
@@ -140,6 +141,34 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          字面量 AST 节点（sema_ct_lit，arena 分配），下游（编译器）零感知。 */
       ast_ident_t *n = (ast_ident_t *)*node;
       sema_symbol_t *sym = sema_lookup(scope, n->name);
+
+      /* 函数引用（函数值，编译期/运行期二元）：符号种类 SYM_FUNC（用户函数
+         与内建函数 printf 统一——两者在 sema/ctfe/compiler/vm 视角无区别，
+         仅 func_t id 段不同，由 func_new 创建时分配）。
+         遮蔽平等：局部变量遮蔽函数名时 sym 解析到变量符号（SYM_VAR），
+         不走此分支——`var add = 2; var x = add;` 中 add 是变量引用。
+         改写为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION <id> 运行期加载
+         真实函数值），此处返回签名类型 shadow（编译期折叠，供赋值/实参/
+         返回值的签名匹配校验）。comptime func 不进入运行时，作为值引用
+         是非法用法（调用点在 AST_CALL 折叠）。 */
+      if (sym && sym->kind == SEMA_SYM_FUNC && sym->type &&
+          sym->type->kind == TYPE_KIND_FUNC) {
+        if (sym->is_comptime) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "comptime function '%.*s' cannot be used as a value",
+                     (int)n->name.len, n->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
+                                           (*node)->tok_end);
+        if (ref) {
+          ((ast_func_ref_t *)ref)->name = n->name;
+          ref->next = (*node)->next; /* 保留兄弟链 */
+          *node = ref;
+        }
+        return value_make_shadow(sema->vm, sym->type);
+      }
+
       if (sym && !sym->flow_init) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "variable '%.*s' used before initialization",
@@ -252,13 +281,26 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
       ast_ident_t *name = (ast_ident_t *)call->callee;
-      sema_symbol_t *sym = sema_lookup(sema->global_scope, name->name);
-      /* 函数符号：用户函数 sym->ast=AST_FUNC_DEF；内置函数（printf）ast=NULL
-         但 type 携带 variadic 签名。两者都经 func_shadow_call 校验。 */
+      /* 遮蔽平等：函数/类型/变量都是作用域符号，从调用点作用域链解析
+         （sema_lookup 沿 parent 链取第一个已激活命中）——局部变量遮蔽
+         函数名时 sym 解析到变量符号（type 非 func）→ 报"不可调用"。
+         函数符号：用户函数 sym->ast=AST_FUNC_DEF；内置函数（printf）
+         ast=NULL 但 type 携带 variadic 签名。两者都经 func_shadow_call
+         校验。 */
+      sema_symbol_t *sym = sema_lookup(scope, name->name);
       if (!sym || !sym->type) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
                    "undefined function '%.*s'", (int)name->name.len,
                    name->name.ptr);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      if (sym->type->kind != TYPE_KIND_FUNC) {
+        /* 遮蔽（变量/类型符号命中）：非函数符号不可调用 */
+        char tn[64];
+        sema_type_name(sym->type, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, &call->base),
+                   "cannot call '%.*s' of type %s", (int)name->name.len,
+                   name->name.ptr, tn);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
