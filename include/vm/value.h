@@ -201,6 +201,16 @@ void value_restore_type(value_t *v, const type_t *old_type);
 
 /* ---- 类型转换 ---- */
 
+/**
+ * 加限定符（qualify）身份转换：源无限定符、目标带 const/volatile 且限定符
+ * sub 链剥到源类型（如 i32 → volatile i32、i32 → const volatile i32）。
+ * 限定符只影响存取语义/赋值规则，不改变底层表示——身份拷贝（与
+ * type_const.c / type_volatile.c 中"脱限定符 const T → T / volatile T → T
+ * 身份拷贝"对称）。仅在标量/值类型 vtable 的 implicit_cast 中调用（指针的
+ * const 语义不同，指针 vtable 不调用此 helper）。返回新 value 或 error。
+ */
+value_t *value_implicit_qualify(vm_t *vm, value_t *v, const type_t *target);
+
 value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target);
 value_t *value_explicit_cast(vm_t *vm, value_t *v, const type_t *target);
 

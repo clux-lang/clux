@@ -165,15 +165,24 @@ size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn);    /* 返回 PUSH_FU
 /**
  * 编译类型提升区（产物最前、注册段之前）：
  * **两遍扫描**遍历 sema->types，把全部程序类型构造进 types_by_id 表。
- * pass 1（声明所有类型）：PUSH_XXXX 创建开放类型对象（数组 PUSH_ARRAY /
- * 签名 PUSH_FUNC_TYPE / 限定符 PUSH_CONST·PUSH_VOLATILE）→ DEFINE_TYPE
- * <id> 绑定 program id + 登记；内建别名 LOAD_TYPE <内建 id> → DEFINE_TYPE。
- * 所有类型 id 先登记，向前引用安全。
- * pass 2（定义所有类型）：LOAD_TYPE <id> 拉回 → 设字段（DEFINE_BOUND /
- * FUNC_TYPE_PARAM·RETURN / SET_TYPE）→ SEAL 封闭算布局，依赖后序（elem /
- * sub / 参数·返回先密封）。槽位 LOAD_TYPE <id> 运行时直接查表。净栈深 0。
+ * pass 1（compile_hoist_declare，声明所有类型）：PUSH_XXXX 创建开放类型
+ * 对象（数组 PUSH_ARRAY / 签名 PUSH_FUNC_TYPE / 限定符 PUSH_CONST·
+ * PUSH_VOLATILE）→ DEFINE_TYPE <id> 绑定 program id + 登记；内建别名
+ * LOAD_TYPE <内建 id> → DEFINE_TYPE。所有类型 id 先登记，向前引用安全。
+ *
+ * 两遍之间（由 compile.c 编排）插入**顶层 typedef 名字绑定**（LOAD_TYPE
+ * <id>; PUSH_UNDEFINED; DEFINE "name"）——类型定义自动提升：pass 1 后类型
+ * 对象已可 LOAD_TYPE 拉回，名字绑定先行，函数签名/变量类型槽位引用名字时
+ * 类型已可查；类型对象仍开放（未密封），但 DEFINE 只存引用，pass 2 密封后
+ * 名字解析到最终类型。
+ *
+ * pass 2（compile_hoist_define，定义所有类型）：LOAD_TYPE <id> 拉回 →
+ * 设字段（DEFINE_BOUND / FUNC_TYPE_PARAM·RETURN / SET_TYPE）→ SEAL 封闭
+ * 算布局，依赖后序（elem / sub / 参数·返回先密封）。槽位 LOAD_TYPE <id>
+ * 运行时直接查表。净栈深 0。
  */
-void compile_hoist(compiler_t *c);
+void compile_hoist_declare(compiler_t *c); /* pass 1：声明所有类型 */
+void compile_hoist_define(compiler_t *c);  /* pass 2：定义所有类型 */
 
 /** 类型登记表查找（AST_TYPE_REF 名字 / type_t 指针 → sema_type_t）。 */
 const sema_type_t *c_sema_type_find_name(vec_t *types, strslice_t name);

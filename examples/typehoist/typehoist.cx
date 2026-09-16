@@ -1,0 +1,60 @@
+// typehoist.cx — 样例：类型定义自动提升（hoist）
+//
+// 编译器把全部程序类型构造收进产物最前的**类型提升区**，顶层 type def 的
+// 名字绑定插在类型"声明(pass 1)"与"定义(pass 2)"之间——类型定义先于任何
+// 函数注册/调用构造完成：
+//
+//   - 类型先于函数存在：函数签名、变量类型标注经名字引用类型时，类型
+//     早已在提升区构造完成
+//   - 函数签名也是普通类型：签名类型纳入提升区两遍构造，签名引用签名
+//     （函数指针作参数）亦依赖后序构造
+//   - 别名链 / 数组 / 组合限定符共享同一依赖后序：pass 2 递归先定义依赖
+//     （数组 elem / 限定符 sub）再定义自身
+//
+// 注：类型"构造"（运行时字节码）自动提升；sema 阶段类型表达式仍按声明
+// 顺序编译期求值（CTFE 无前向引用），故别名链须按依赖序声明。
+
+// ---- 别名链（sema 按依赖序求值，运行时统一收进提升区两遍构造）----
+type Elem = i64;               // 基础元素类型
+type Pair = [2]Elem;           // 数组类型：依赖 Elem
+type PairAlias = Pair;         // 别名链：引用 Pair
+
+// ---- 函数签名引用全局 type def（签名类型纳入提升区构造）----
+func sum_pair(p: Pair): i64 {
+    return p[0] + p[1];
+}
+
+// ---- 组合限定符：const/volatile 嵌套依赖（pass 2 依赖后序）----
+type ConstElem = const i32;    // 依赖 i32（内建，直接 LOAD_TYPE）
+type ConstVolatileElem = const volatile i32; // 固定组合顺序 volatile(const(i32))
+
+// 限定符数组：数组类型表达式 [N]T 的 T 是任意类型表达式——元素类型
+// 带限定符（[2]volatile i32）天然支持，构造/读写经限定符身份转换
+type VolatilePair = [2]volatile i32;
+type ConstPair = [2]const i32;
+
+func main(): i32 {
+    // 别名链类型直接用于变量标注
+    var pa: PairAlias = .[2]i64{10, 20};
+    printf("sum = %d\n", sum_pair(pa) as i32);
+
+    // 限定符类型变量（typedef 类型引用 + 值初始化）
+    var ce: ConstElem = 7;
+    var cve: ConstVolatileElem = 5;
+    printf("ce = %d cve = %d\n", ce, cve);
+
+    // const 值可复制到非 const 变量
+    var plain: i32 = ce;
+    printf("plain = %d\n", plain);
+
+    // 限定符数组：元素类型带 volatile/const，构造时字面量身份转换
+    var vp: VolatilePair = .[2]volatile i32{1, 2};
+    vp[0] = vp[0] + 5;        // volatile 不影响赋值，读写合法
+    printf("vp = %d %d\n", vp[0], vp[1]);
+
+    var cp: ConstPair = .[2]const i32{7, 8};
+    // cp[0] = 9;             // const 元素不可赋值（反注释可验证编译错误）
+    printf("cp = %d %d\n", cp[0], cp[1]);
+
+    return 0;
+}

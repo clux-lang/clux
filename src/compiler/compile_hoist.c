@@ -51,6 +51,8 @@
  * 拿到开放对象（未密封），SEAL 后再重绑——见 compile.c 拓扑 TODO。
  *
  * 净栈深 0：每个类型构造序列弹压平衡，提升区整体对操作数栈无影响。
+ * 两遍之间由 compile.c 插入顶层 typedef 名字绑定（compile_stmt
+ * AST_TYPE_DEF 分支），见 compile.c 产物布局注释。
  * =========================================================================== */
 
 /* 登记表查找：AST_TYPE_REF 名字 / type_t 指针 → sema_type_t（线性扫描） */
@@ -256,7 +258,25 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
   done[idx] = true;
 }
 
-void compile_hoist(compiler_t *c) {
+/* pass 1：声明所有类型（开放对象登记进 types_by_id，顺序无关）。
+ * 与 pass 2 拆分为独立入口，compile.c 在两遍之间插入顶层 typedef
+ * 名字绑定（类型定义自动提升）。 */
+void compile_hoist_declare(compiler_t *c) {
+  if (!c || !c->sema_types) return;
+  size_t n = vec_len(c->sema_types);
+  if (n == 0) return;
+
+  for (size_t i = 0; i < n; i++) {
+    const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
+    declare_one(c, st);
+    if (c->failed) break;
+  }
+}
+
+/* pass 2：定义所有类型（依赖后序递归 + done 去重共享依赖）。
+ * 数组 SEAL 算布局需 elem 已密封，const/volatile 拷贝 size/align 需 sub
+ * 已密封，func 签名设参数/返回需依赖已构造——先定义依赖再定义自身。 */
+void compile_hoist_define(compiler_t *c) {
   if (!c || !c->sema_types) return;
   size_t n = vec_len(c->sema_types);
   if (n == 0) return;
@@ -267,20 +287,10 @@ void compile_hoist(compiler_t *c) {
   if (!done) panic("compiler: out of memory allocating hoist done set");
   memset(done, 0, n);
 
-  /* pass 1：声明所有类型（开放对象登记进 types_by_id，顺序无关） */
   for (size_t i = 0; i < n; i++) {
     const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
-    declare_one(c, st);
+    define_one(c, st, done, n);
     if (c->failed) break;
-  }
-
-  /* pass 2：定义所有类型（依赖后序递归 + done 去重共享依赖） */
-  if (!c->failed) {
-    for (size_t i = 0; i < n; i++) {
-      const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
-      define_one(c, st, done, n);
-      if (c->failed) break;
-    }
   }
   allocator_free(c->alloc, (void **)&done);
 }

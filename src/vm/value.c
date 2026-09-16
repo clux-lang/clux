@@ -417,6 +417,24 @@ value_t *value_assign(vm_t *vm, value_t *dst, value_t *src) {
 
 /* ---- 类型转换 ---- */
 
+value_t *value_implicit_qualify(vm_t *vm, value_t *v, const type_t *target) {
+    if (value_is_error(vm, v)) return v;
+    if (!v || !v->type || !target) {
+        return value_make_error(vm, "cannot implicitly qualify void");
+    }
+    /* 限定符 sub 链剥到源类型（如 i32 → volatile i32、
+       i32 → const volatile i32），且源无限定符（源本身带限定符时由
+       type_const.c/type_volatile.c 的 implicit_cast 处理脱限定符/再限定） */
+    const type_t *q = target;
+    while (q && (type_is_const(q) || type_is_volatile(q)))
+        q = type_qualifier_sub(q);
+    if (!q || q != v->type)
+        return value_make_error(vm, "implicit qualify: target is not a qualifier of source");
+    if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+    return value_make(vm, target, data);
+}
+
 value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_error(vm, v)) return v;
     if (!v || !v->type) {

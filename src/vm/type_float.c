@@ -167,6 +167,12 @@ static value_t *float_ge(vm_t *vm, value_t *a, value_t *b) {
 /* ---- 隐式转换：f32 → f64 ---- */
 
 static value_t *float_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* 加限定符身份转换（f32 → volatile f32 / const f32），同 int */
+    if (type_is_const(target) || type_is_volatile(target)) {
+        value_t *q = value_implicit_qualify(vm, v, target);
+        if (!value_is_error(vm, q)) return q;
+    }
+
     if (target != vm->type_f64)
         return value_make_error(vm, "implicit cast: float can only widen to f64");
 

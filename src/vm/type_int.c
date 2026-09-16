@@ -382,6 +382,14 @@ static value_t *uint_ge(vm_t *vm, value_t *a, value_t *b) {
 /* ================================================================ */
 
 static value_t *sint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* 加限定符身份转换（i32 → volatile i32 / const i32）：限定符不改变
+       底层表示，非拓宽非缩窄。仅在标量层处理（指针 const 语义不同，
+       指针 vtable 不调用）。 */
+    if (type_is_const(target) || type_is_volatile(target)) {
+        value_t *q = value_implicit_qualify(vm, v, target);
+        if (!value_is_error(vm, q)) return q;
+    }
+
     type_rank_t sr = type_rank(vm, value_type(v));
     type_rank_t tr = type_rank(vm, target);
 
@@ -402,6 +410,12 @@ static value_t *sint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
 }
 
 static value_t *uint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* 加限定符身份转换（u32 → volatile u32 / const u32），同 sint */
+    if (type_is_const(target) || type_is_volatile(target)) {
+        value_t *q = value_implicit_qualify(vm, v, target);
+        if (!value_is_error(vm, q)) return q;
+    }
+
     type_rank_t sr = type_rank(vm, value_type(v));
     type_rank_t tr = type_rank(vm, target);
 

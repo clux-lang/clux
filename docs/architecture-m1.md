@@ -742,6 +742,10 @@ func main():void { }
   DEFINE_TYPE 64                  ; 声明：弹栈顶签名类型 → 绑定 id 64 + 登记进 types_by_id（此后可 LOAD_TYPE 拉回）
   PUSH_FUNC_TYPE                  ; main 签名（开放对象）
   DEFINE_TYPE 65                  ; 声明登记 id 65
+; ---- 顶层 type def 名字绑定（类型声明与定义之间 → 类型定义自动提升）----
+  LOAD_TYPE 64                    ; pass 1 后类型已可 LOAD_TYPE 拉回（开放/密封皆可）
+  PUSH_UNDEFINED                  ; spec 占位（DEFINE 弹 spec=undefined → 从值推断 decl_type）
+  DEFINE "Pair"                   ; 绑定 type value 到 scope（DEFINE 只存引用，不依赖密封）
 ; pass 2 定义所有类型（依赖后序）：LOAD_TYPE 拉回 → 设字段 → SEAL 封闭
   LOAD_TYPE 64                    ; 拉回 add 签名开放对象（定义起点）
   LOAD "i32"                      ; 参数 a 类型
@@ -784,6 +788,8 @@ L_FUNC_START:                     ; = bcode_function_t.entry_pc（函数体区�
 
 **类型提升区（hoist）两遍扫描**：编译期遍历 sema->types（程序类型登记表，**函数签名类型亦登记于此**——签名本质是普通类型，且函数指针作参数时签名引用签名，须纳入提升区两遍构造），分两遍生成构造字节码——**pass 1 声明所有类型**：数组 `PUSH_ARRAY → DEFINE_TYPE <id>`、签名 `PUSH_FUNC_TYPE → DEFINE_TYPE <id>`、限定符 `PUSH_CONST / PUSH_VOLATILE → DEFINE_TYPE <id>` 创建开放对象并登记进 `types_by_id`（不设字段；内建别名 `LOAD_TYPE <内建 id> → DEFINE_TYPE <id>`），完成后所有程序类型 id 在表中都有登记（开放或密封），后续任何类型字段构造都可 `LOAD_TYPE <id>` 拿到对象（**向前引用安全**，为未来 struct 字段引用后声明类型 / 指针自引用铺路）；**pass 2 定义所有类型**：逐个 `LOAD_TYPE <id>` 拉回开放对象 → 设字段（`DEFINE_BOUND N` / `FUNC_TYPE_PARAM·RETURN` / `SET_TYPE`）→ `SEAL` 封闭算布局（统一置 `sealed`），**依赖后序**（递归 + done 去重共享依赖：数组 SEAL 需 elem 已密封、const/volatile 拷贝 size/align 需 sub 已密封、签名需参数/返回已构造，故先定义依赖再定义自身）。注册段不再内联构造签名类型，函数槽位 `LOAD_TYPE <sig_id>` 直接查表拉回。
 
+**顶层 type def 名字绑定插在两遍之间（类型定义自动提升）**：编译期把全局 `type name = <type-expr>;` 的名字绑定（`LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"`）安排在 pass 1（声明）与 pass 2（定义）之间——pass 1 后类型对象已可 `LOAD_TYPE` 拉回（开放/密封皆可），名字绑定先行：函数签名参数类型 / 变量显式类型标注经名字引用时类型已可查；`DEFINE` 只存引用（`spec=undefined` 时从值推断 decl_type），不依赖类型密封，pass 2 密封后名字解析到最终类型。此前名字绑定在注册段（hoist 区之后、函数注册之前），现在提前到类型定义完成前，类型定义整体自动提升。
+
 - **参数不按名绑定，由函数体内弹栈 DEFINE**：`bcode_call_cfunc` 把 local_args 按序压操作数栈（压栈顺序 `a, b` → 栈顶是 `b`），函数体头部编译期生成倒序 `DEFINE "b"; DEFINE "a"` 依次弹栈定义。参数名只在编译期用于生成 DEFINE 指令，运行时函数值不含参数名。
 - **func type 构造在 hoist 提升区（签名纳入两遍扫描）**：`PUSH_FUNC_TYPE` 分配空 `func_type_t`（开放类型，暂不入池）并压其 type value；pass 1 `DEFINE_TYPE <sig_id>` 弹栈声明——绑定程序 id + 登记进 `vm->types_by_id`（此后 `LOAD_TYPE <sig_id>` 可拉回开放对象）；pass 2 `LOAD_TYPE <sig_id>` 拉回开放对象作为定义起点；随后每参数 `LOAD "T"; FUNC_TYPE_PARAM` 按声明顺序追加为参数类型；`LOAD "T"; FUNC_TYPE_RETURN` 设为返回类型（依赖后序：参数/返回可为另一签名，递归先定义再引用）；`FUNC_TYPE_VARARG` 标记可变参数（M1 无用户变参函数省略该指令）；`SEAL`（无操作数）经统一 `value_seal` 代理到 `func_type_seal`，计算规范名 `func(...)`、按签名查重 intern（首次成功才入 `vm->sig_types` 池并置 `sealed=true` + 布局计算；去重复用则回收开放类型并重定向栈引用）→ 弹栈（消费类型位），密封前读开放对象自身 id（`DEFINE_TYPE` 已绑定），密封后按该 id 幂等更新登记（去重时重绑新 intern 实例，避免登记表悬垂）。**注册段**（hoist 区之后）`LOAD_TYPE <sig_id>` 主动拉回密封签名类型压栈，供 `PUSH_FUNCTION` 弹栈顶组装 func value（签名类型不再残留在栈上）。`type_func_sig` 仍保留为 C 侧一次性快捷构造（不向 VM 栈压 type value，供 builtin_printf/sema/测试使用）。
 - **void 函数返回 undefined**：为统一性，void 类型函数实际 `return undefined`——函数体末尾（或显式 `return;`）编译为 `PUSH_UNDEFINED; RET;`。`RET` 语义统一为"栈顶即返回值"：非 void 函数返回表达式求值结果，void 函数返回 void 类型的 undefined value。`return expr;` => `...expr...; RET`。
@@ -797,7 +803,7 @@ L_FUNC_START:                     ; = bcode_function_t.entry_pc（函数体区�
 
 **closure_scope = 孤立作用域（parent=NULL）**：clux 用**显式闭包捕获**——函数对象创建时 `scope_new(alloc, NULL)` 建孤立 scope，不挂任何作用域树（不随定义点作用域销毁）；`func_vcall` 调用期间临时让 `closure_scope->parent = root_scope` 使函数体可查看到模块变量，调用结束恢复原 parent。该作用域跟随函数对象销毁（`vm_destroy` 释放 functions 时处理）。
 
-**exec_run 只注册不执行（clux 无顶层语句）**：`exec_run` 只驱动类型提升区 + 函数注册段（提升区：`PUSH_ARRAY / PUSH_FUNC_TYPE / PUSH_CONST / PUSH_VOLATILE` → `DEFINE_TYPE <id>` 声明、`LOAD_TYPE <id>` → `DEFINE_BOUND N / FUNC_TYPE_PARAM* / FUNC_TYPE_RETURN / SET_TYPE` → `SEAL` 定义；注册段：`LOAD_TYPE <sig_id>` / `PUSH_FUNCTION` / `BIND_FUNC` / `SET_FUNC_NAME` / `DEFINE` 序列），入口函数由调用方在 `exec_run` 之后 `scope_lookup(vm->current_scope, "main")` + `value_call(vm, fn, NULL, 0)` 显式触发（driver 职责）。
+**exec_run 只注册不执行（clux 无顶层语句）**：`exec_run` 只驱动类型提升区 + 函数注册段（提升区：`PUSH_ARRAY / PUSH_FUNC_TYPE / PUSH_CONST / PUSH_VOLATILE` → `DEFINE_TYPE <id>` 声明、`LOAD_TYPE <id>` → `DEFINE_BOUND N / FUNC_TYPE_PARAM* / FUNC_TYPE_RETURN / SET_TYPE` → `SEAL` 定义，两遍之间插入顶层 type def 名字绑定 `LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"`；注册段：`LOAD_TYPE <sig_id>` / `PUSH_FUNCTION` / `BIND_FUNC` / `SET_FUNC_NAME` / `DEFINE` 序列），入口函数由调用方在 `exec_run` 之后 `scope_lookup(vm->current_scope, "main")` + `value_call(vm, fn, NULL, 0)` 显式触发（driver 职责）。
 
 #### 2.7.7 控制流编译模板
 

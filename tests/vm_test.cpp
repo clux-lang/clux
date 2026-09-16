@@ -388,6 +388,56 @@ TEST_F(VmQualifiedTypes, ValueHasConst) {
     allocator_free(vm->alloc, (void **)&vi);
 }
 
+TEST_F(VmQualifiedTypes, ImplicitCastQualifiesScalar) {
+    /* 加限定符身份转换：i32 → volatile i32 / const i32 /
+       const volatile i32（限定符不改变底层表示，身份拷贝非拓宽）。
+       入口经标量 vtable implicit_cast（sint/uint/float），
+       value_implicit_qualify 处理限定符 sub 链剥到源类型。
+       转换结果 auto-track 到当前 scope，fixture 清理，不手动释放。 */
+    value_t *v = make_i32_raw(vm, 42);
+
+    const type_t *vi32 = type_volatile_intern(vm, vm->type_i32);
+    value_t *qv = value_implicit_cast(vm, v, vi32);
+    ASSERT_FALSE(value_is_error(vm, qv));
+    EXPECT_EQ(value_type(qv), vi32);
+    EXPECT_EQ(*(int32_t *)value_data(qv), 42);
+
+    const type_t *ci32 = type_const_intern(vm, vm->type_i32);
+    value_t *qc = value_implicit_cast(vm, v, ci32);
+    ASSERT_FALSE(value_is_error(vm, qc));
+    EXPECT_EQ(value_type(qc), ci32);
+    EXPECT_EQ(*(int32_t *)value_data(qc), 42);
+
+    /* 组合：i32 → const volatile i32（固定顺序 volatile(const(i32))） */
+    const type_t *vci = type_volatile_intern(vm, ci32);
+    value_t *qvc = value_implicit_cast(vm, v, vci);
+    ASSERT_FALSE(value_is_error(vm, qvc));
+    EXPECT_EQ(value_type(qvc), vci);
+    EXPECT_EQ(*(int32_t *)value_data(qvc), 42);
+
+    raw_free(vm, v);
+}
+
+TEST_F(VmQualifiedTypes, ImplicitCastQualifyRejectsWrongTarget) {
+    /* 目标限定符 sub 链剥不到源类型 → 拒绝（如 i32 → volatile i64） */
+    value_t *v = make_i32_raw(vm, 42);
+    const type_t *vi64 = type_volatile_intern(vm, vm->type_i64);
+    value_t *r = value_implicit_cast(vm, v, vi64);
+    EXPECT_TRUE(value_is_error(vm, r));
+    raw_free(vm, v);
+}
+
+TEST_F(VmQualifiedTypes, ImplicitCastQualifyShadow) {
+    /* shadow 值加限定符：只检查类型兼容性返回 shadow（sema 类型检查）。
+       shadow 值 auto-track 到 scope，fixture 清理，不手动释放。 */
+    value_t *sv = value_make_shadow(vm, vm->type_i32);
+    const type_t *vi32 = type_volatile_intern(vm, vm->type_i32);
+    value_t *r = value_implicit_cast(vm, sv, vi32);
+    ASSERT_FALSE(value_is_error(vm, r));
+    EXPECT_TRUE(value_is_shadow(r));
+    EXPECT_EQ(value_type(r), vi32);
+}
+
 TEST_F(VmQualifiedTypes, TypeEqualDuckDispatch) {
     /* type value 的 == 经 type_equal 分派：
        const i32 == const i32 → true；const i32 == i32 → false（类型身份分离） */

@@ -110,7 +110,7 @@ type F = func(i32, i32)->i32;                     // 函数类型
 - **type 定义不是创建新类型，而是创建新的 type value 绑定到当前作用域**（2026-09-15 定稿）：
   - 右值 `<expr>` 是类型表达式，sema 阶段**真实求值**（type value 恒非 shadow，`data = type_t*`），校验为 type value 后绑定；复合类型（`[N]T` 等）求值中登记并折叠槽位为 `AST_TYPE_REF`
   - 全局 type def 在 pass1b（函数签名解析前）求值，使函数签名/参数/返回类型可引用；局部 type def 在 3b 定义点求值（TDZ 与 var 一致）
-  - **进入字节码**：`LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"`（内建 rhs 折叠为 `AST_TYPE_REF`（名字 = 规范名），编译器经 `type_lookup` 兜底 → `LOAD_TYPE <内建 id>`，别名透明）——编译期 vm 与运行时 vm 完全解耦，运行时 DEFINE 绑定 type value 到当前作用域
+  - **进入字节码**：`LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"`（内建 rhs 折叠为 `AST_TYPE_REF`（名字 = 规范名），编译器经 `type_lookup` 兜底 → `LOAD_TYPE <内建 id>`，别名透明）——编译期 vm 与运行时 vm 完全解耦，运行时 DEFINE 绑定 type value 到当前作用域；全局 type def 的名字绑定插在类型提升区 **pass 1（声明）与 pass 2（定义）之间**（类型定义自动提升：pass 1 后类型已可 LOAD_TYPE 拉回，DEFINE 只存引用不依赖密封）
 - **一切类型的右值槽位都视作表达式**：var 类型标注、函数参数/返回类型、cast 目标、`.<type>{}` 构造的类型位
 - 需要统一的类型表达式求值器（`resolve_type` 从 `strslice_t` 升级为 `ast_node_t*`）
 
@@ -174,6 +174,8 @@ clux 类型是**前导判定**（前缀式）的：`[N]i32` 数组、`[]i32` 切
 - 语义上 volatile 类型等价子类型，但**实现不直接剥离**：`volatile_type_t` 保留为独立类型，其 vtable 采用**代理方式**——所有槽位转发到子类型的 vtable（运算结果与子类型一致）
 - 好处：类型结构稳定（无需解包重建），未来 volatile 引入真实语义时只需替换 vtable 槽位，不影响其他类型
 - 组合场景 `const volatile i32` → volatile 代理到 const i32
+
+**加限定符 = 身份转换（非拓宽）**（2026-09-16 定稿）：`i32 → volatile i32 / const i32 / const volatile i32` 不改变底层表示，是身份拷贝（与"脱限定符 const T → T / volatile T → T 身份拷贝"对称）。实现在标量 vtable 的 `implicit_cast`（int/uint/float 经 `value_implicit_qualify` helper），**不放 value 层统一入口**——指针的 const 语义不同（`*const T` 指向 const 数据 vs `const *T` 指针自身 const），未来指针 vtable 自行处理。限定符数组组合（`[2]volatile i32` 构造时元素字面量身份转换）由此支持。
 
 **M2 范围内 const 实际修饰**：基础类型与复合类型（`const i32`、`const [N]i32`、`const <T1,T2>`、`const struct` 等）。const 类型参与类型计算（extends/== 基于 const 类型自身）；const 值的不可变检查（赋值/修改）为语义层职责。
 

@@ -159,7 +159,32 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      （数组 elem / 限定符 sub 无环）；若未来引入指针/自引用类型（成环），
      两遍模型天然支持向前引用（pass 1 开放对象已登记，字段构造 LOAD_TYPE
      拿到开放对象，SEAL 后再重绑）。 */
-  compile_hoist(c);
+  compile_hoist_declare(c);
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
+  /* 1.5 顶层 typedef 名字绑定（类型声明与定义之间 → 类型定义自动提升）：
+     全局 type 定义名字绑定先行。rhs 折叠为 AST_TYPE_REF（LOAD_TYPE）或
+     内建 AST_IDENT（PUSH）压 type value → PUSH_UNDEFINED 作 spec 占位 →
+     DEFINE 绑定 type value 到 scope（compile_stmt 与局部同构，栈深归零）。
+     pass 1 后类型对象已可 LOAD_TYPE 拉回（开放/密封皆可），名字绑定先行，
+     后续函数签名/变量类型槽位引用名字时类型已可查；pass 2 密封后名字解析
+     到最终类型（DEFINE 只存引用，不依赖密封）。 */
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind != AST_TYPE_DEF) continue;
+    compile_stmt(c, f);
+    if (c->failed) break;
+  }
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
+  compile_hoist_define(c);
   if (c->failed) {
     bcode_destroy(&bc);
     c->bc = NULL;
@@ -170,15 +195,6 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   size_t nfuncs = 0;
   size_t body_slots[128];
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    if (f->kind == AST_TYPE_DEF) {
-      /* 全局 type 定义进入注册段（HALT 前顺序执行）：rhs 折叠为
-         AST_TYPE_REF（LOAD_TYPE）或内建 AST_IDENT（PUSH）压 type value →
-         PUSH_UNDEFINED 作 spec 占位 → DEFINE 绑定 type value 到 scope。
-         compile_stmt 与局部同构（栈深归零，无 body 回填）。 */
-      compile_stmt(c, f);
-      if (c->failed) break;
-      continue;
-    }
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;
