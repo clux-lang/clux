@@ -883,10 +883,17 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
       continue;
     }
     if (s->kind == AST_FUNC_DEF) {
-      /* 入口提升已处理签名；消费 3a 建的 fscope 子作用域（被拒无子作用域）
-         ——comptime 局部函数同样建树，须一并消费，与 3a 建树严格对齐。 */
+      /* 入口提升已处理签名；捕获解析（定义点，外层 scope 在线——纯 id 捕获
+         类型/flow_init、括号捕获 init 求值与类型校验）在此完成，写回 fscope
+         捕获符号（sema_walk_function 读取定义 shadow value）。
+         消费 3a 建的 fscope 子作用域（被拒无子作用域）——comptime 局部函数
+         同样建树，须一并消费，与 3a 建树严格对齐。 */
       ast_func_def_t *fn = (ast_func_def_t *)s;
-      if (sema_scope_find_local(scope, fn->name)) (*idx)++;
+      if (sema_scope_find_local(scope, fn->name)) {
+        sema_func_t *sf = sema_func_find_by_def(sema, (ast_node_t *)fn);
+        resolve_func_captures(sema, fn, sf ? sf->scope : NULL, scope);
+        (*idx)++;
+      }
       prev = &s->next;
       s = s->next;
       continue;
@@ -944,6 +951,22 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     char nb[256];
     name_to_cstr(vd->name, nb, sizeof nb);
     scope_define(sema->vm, sema->vm->current_scope, nb, pv);
+  }
+
+  /* 捕获 shadow value 定义（参数之后）：捕获名在函数体内 lookup 命中。
+     类型已由定义点 resolve_func_captures 解析写回 fscope 符号（纯 id 从
+     外层变量取、括号从 init 推断/显式类型校验）。闭包是 clone 值语义——
+     函数体内对捕获名的引用命中本函数级 VM scope 的 shadow，不再穿透到
+     外层（与外层变量的真实值隔离，仅类型一致）。 */
+  for (ast_node_t *c = fn->captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(sf->scope, cv->name);
+    if (!cs) continue; /* 3a 拒绝已诊断，跳过防级联 */
+    value_t *cv_value = value_make_shadow(
+        sema->vm, cs->type ? cs->type : sema->vm->type_void);
+    char nb[256];
+    name_to_cstr(cv->name, nb, sizeof nb);
+    scope_define(sema->vm, sema->vm->current_scope, nb, cv_value);
   }
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成；

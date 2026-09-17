@@ -166,7 +166,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             sema_lookup(sema->global_scope, n->name) != sym) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "local function cannot reference sibling or self '%.*s' "
-                     "(closures not supported)",
+                     "(add it to the capture list)",
                      (int)n->name.len, n->name.ptr);
           return value_make_shadow(sema->vm, sema->vm->type_void);
         }
@@ -215,7 +215,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           sema_lookup(sema->global_scope, n->name) != sym) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "local function cannot access outer local '%.*s' "
-                   "(closures not supported)",
+                   "(add it to the capture list)",
                    (int)n->name.len, n->name.ptr);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }

@@ -122,6 +122,17 @@ typedef struct sema_t {
 /* ---- 公共 API ---- */
 
 /**
+ * 闭包捕获解析（函数"定义点"调用，外层 scope 在线）：
+ * - 纯 id 捕获：外层符号查找（变量须确定已初始化）+ 类型写回 fscope 捕获符号
+ * - 括号捕获：init 在外层作用域求值 + 显式 type_expr 校验 / init 类型推断
+ * 调用点：walk_block AST_FUNC_DEF 分支（局部函数）与 sema_check_func_literal
+ * （函数字面量）。捕获符号 type 就绪后，sema_walk_function /
+ * sema_check_func_literal 据此定义捕获 shadow value。
+ */
+void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
+                           sema_scope_t *fscope, sema_scope_t *outer);
+
+/**
  * 创建 sema 上下文。vm 提供类型注册表/vtable/shadow value；diag 收集诊断；
  * tokens 是 token pool（借用，不拥有），用于把 AST 节点的 tok_begin 下标
  * 解析为源码位置；arena 是 AST 折叠分配器（comptime 折叠用，借用）。

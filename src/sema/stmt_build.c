@@ -103,6 +103,33 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
     }
   }
 
+  /* 注册闭包捕获符号（3a 只注册名字，类型 3b 定义点解析——外层变量类型
+     此时可能未就绪）。纯 id 捕获 = 外层同名变量（type 留 NULL 由 3b 从
+     外层符号解析）；括号捕获 = 临时构造（显式 type_expr 解析，无则 3b
+     从 init 推断）。comptime func / 全局函数拒绝捕获（无运行时闭包场景）。 */
+  if (fn->captures) {
+    if (fn->is_comptime || !sf->is_local) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                 "%s function cannot have captures",
+                 fn->is_comptime ? "comptime" : "global");
+      fn->captures = NULL; /* 摘除：3b 不再处理（错误已诊断，防级联） */
+    } else {
+      for (ast_node_t *c = fn->captures; c; c = c->next) {
+        ast_var_def_t *cv = (ast_var_def_t *)c;
+        const type_t *ct = NULL;
+        if (cv->type_expr) {
+          ct = sema_resolve_type_slot(sema, &cv->type_expr);
+        }
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct};
+        if (!sema_scope_define(fscope, cv->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, c),
+                     "capture '%.*s' duplicates a parameter or capture",
+                     (int)cv->name.len, cv->name.ptr);
+        }
+      }
+    }
+  }
+
   /* 函数体 block 直接用 fscope（不再嵌套一层） */
   build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
 
@@ -342,6 +369,75 @@ void sema_build_scope_tree(sema_t *sema) {
   }
 }
 
+/* 捕获解析（函数"定义点"，外层 scope 在线）：
+   - 纯 id 捕获：外层符号查找（变量必须确定已初始化——捕获即读值）+ 类型
+     解析（从外层符号 type）写回 fscope 捕获符号
+   - 括号捕获：init 在外层作用域求值（定义点）+ 显式 type_expr 校验 /
+     无类型时从 init 推断，类型写回 fscope 捕获符号
+   调用点：walk_block AST_FUNC_DEF 分支（局部函数，定义点在父函数 walk 内，
+   先于 sema_walk_function）与 sema_check_func_literal（函数字面量，表达式
+   求值点同步）。fscope 捕获符号 type 就绪后，sema_walk_function /
+   sema_check_func_literal 据此定义捕获 shadow value（函数体内 lookup 命中）。 */
+void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
+                           sema_scope_t *fscope, sema_scope_t *outer) {
+  if (!fn->captures || !fscope) return;
+  for (ast_node_t *c = fn->captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+    if (!cs) continue; /* 3a 拒绝（comptime/全局/重名）已诊断，跳过防级联 */
+
+    if (cv->init) {
+      /* 括号捕获：init 定义点在外层作用域求值（c+d 引用外层变量） */
+      value_t *init = sema_expr(sema, &cv->init, outer);
+      bool init_bad = value_is_error(sema->vm, init) ||
+                      value_is_type(init, TYPE_KIND_VOID);
+      if (cv->type_expr) {
+        /* 显式类型：3a 已解析（或失败留 NULL）→ 兜底重解析 + 赋性校验 */
+        if (!cs->type) {
+          cs->type = sema_resolve_type_slot(sema, &cv->type_expr);
+        }
+        if (!init_bad && cs->type) {
+          value_t *dst = value_make_shadow(sema->vm, cs->type);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
+            char tn[64], itn[64];
+            sema_type_name(cs->type, tn, sizeof(tn));
+            sema_type_name(value_type(init), itn, sizeof(itn));
+            diag_error(sema->diag, sema_loc(sema, cv->init),
+                       "cannot initialize capture '%.*s' of type %s with %s",
+                       (int)cv->name.len, cv->name.ptr, tn, itn);
+          }
+        }
+      } else {
+        cs->type = init_bad ? sema->vm->type_void : value_type(init);
+      }
+    } else {
+      /* 纯 id 捕获：外层符号（定义点 block scope 沿链查找） */
+      sema_symbol_t *outer_sym = sema_lookup(outer, cv->name);
+      if (!outer_sym) {
+        diag_error(sema->diag, sema_loc(sema, c),
+                   "cannot capture undefined variable '%.*s'",
+                   (int)cv->name.len, cv->name.ptr);
+        continue;
+      }
+      if (outer_sym->kind != SEMA_SYM_VAR) {
+        diag_error(sema->diag, sema_loc(sema, c),
+                   "cannot capture '%.*s': not a variable",
+                   (int)cv->name.len, cv->name.ptr);
+        continue;
+      }
+      if (!outer_sym->flow_init) {
+        diag_error(sema->diag, sema_loc(sema, c),
+                   "cannot capture '%.*s' before initialization",
+                   (int)cv->name.len, cv->name.ptr);
+        continue;
+      }
+      cs->type = outer_sym->type; /* 捕获 clone 值，类型即外层变量类型 */
+    }
+    cs->flow_init = true; /* 捕获即初始化（闭包持有 clone 值） */
+    cs->is_active = true; /* 函数体 walk 时可见（sema_lookup 激活过滤） */
+  }
+}
+
 /* ===========================================================================
  * 函数字面量（表达式内 AST_FUNC_DEF，sema_expr 求值用）
  *
@@ -402,8 +498,37 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     }
   }
 
+  /* 捕获符号注册（与 build_func_tree 同构）：纯 id = 外层变量（type 3b 从
+     外层符号解析）；括号 = 临时构造（显式 type_expr 解析，无则 init 推断）。
+     comptime 字面量无运行时闭包，拒绝。 */
+  if (fn->captures) {
+    if (fn->is_comptime) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                 "comptime function literal cannot have captures");
+      fn->captures = NULL; /* 摘除：错误已诊断，防级联 */
+    } else {
+      for (ast_node_t *c = fn->captures; c; c = c->next) {
+        ast_var_def_t *cv = (ast_var_def_t *)c;
+        const type_t *ct = NULL;
+        if (cv->type_expr) {
+          ct = sema_resolve_type_slot(sema, &cv->type_expr);
+        }
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct};
+        if (!sema_scope_define(fscope, cv->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, c),
+                     "capture '%.*s' duplicates a parameter or capture",
+                     (int)cv->name.len, cv->name.ptr);
+        }
+      }
+    }
+  }
+
   /* 建树：body 内局部函数登记队列 + 嵌套块作用域（临时树，自持） */
   build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
+
+  /* 捕获解析（定义点即表达式求值点，外层 scope 在线）：纯 id 类型/flow_init、
+     括号 init 求值与类型校验，写回 fscope 捕获符号。 */
+  resolve_func_captures(sema, fn, fscope, outer);
 
   /* 返回路径完整性：非 void 字面量所有路径必须 return */
   const type_t *rt = NULL;
@@ -455,6 +580,18 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     char nb[256];
     name_to_cstr(vd->name, nb, sizeof nb);
     scope_define(sema->vm, sema->vm->current_scope, nb, pv);
+  }
+  /* 捕获 shadow value 定义（参数之后）：捕获名在字面量 body 内 lookup 命中。
+     类型已由 resolve_func_captures 解析写回 fscope 符号。 */
+  for (ast_node_t *c = fn->captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+    if (!cs) continue; /* 3a 拒绝已诊断，跳过防级联 */
+    value_t *cv_value = value_make_shadow(
+        sema->vm, cs->type ? cs->type : sema->vm->type_void);
+    char nb[256];
+    name_to_cstr(cv->name, nb, sizeof nb);
+    scope_define(sema->vm, sema->vm->current_scope, nb, cv_value);
   }
   sema_walk_block(sema, fn->body, fscope);
   vm_pop_scope(sema->vm);
