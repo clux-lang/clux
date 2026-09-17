@@ -290,7 +290,57 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
     bcode_write_str(c->bc, fn->name);
   }
 
+  /* 4. 捕获槽占位：每捕获 PUSH_UNDEFINED (+1) + SET_CLOSURE "name"（弹 cap
+     → scope_set 定义或替换，净 0）——函数对象 closure_scope 先以 undefined
+     绑定捕获名。定义点 SET_CLOSURE 用真实捕获值替换（scope_set）：
+     函数提升后、定义点前被调用 → 捕获槽是 undefined，函数体读到 → 引擎
+     级错误（TDZ 语义，见 compile_func_capture_bind）。函数值留在栈顶供
+     后续 BIND/名字绑定段使用。 */
+  for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)cap;
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_SET_CLOSURE);
+    bcode_write_str(c->bc, cv->name);
+    st_push(c, -1);
+  }
+
   return slot;
+}
+
+/**
+ * 捕获绑定序列（函数定义点）：
+ *   LOAD_FUNCTION <fid>            —— 压函数值（hoist 区已构造）
+ *   每捕获：<捕获值>                —— 纯 id → PUSH "name"（当前作用域链查外层
+ *                                    变量值，借用引用压栈）；括号 → compile_expr
+ *                                    (init)（定义点求值构造临时捕获值）
+ *            SET_CLOSURE "name"    —— 弹捕获值 → clone 进函数 closure_scope
+ *   keep=true：函数值留栈顶（函数字面量表达式，结果即函数值，净 +1）
+ *   keep=false：POP 丢弃函数值（语句定义点，作用域名字绑定已由提升完成，净 0）
+ * hoist 区已用 undefined 占位捕获槽（PUSH_UNDEFINED + SET_CLOSURE），此处
+ * scope_set 替换真实值——函数提升后、定义点前调用 → 读到占位 undefined。
+ */
+void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
+  bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+  bcode_write_u32(c->bc, fn->fid);
+  st_push(c, 1);
+  for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)cap;
+    if (cv->init) {
+      compile_expr(c, cv->init); /* 括号捕获：定义点求值构造临时值 */
+    } else {
+      bcode_write_op(c->bc, BCODE_PUSH);
+      bcode_write_str(c->bc, cv->name); /* 纯 id：作用域链查外层变量值 */
+    }
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_SET_CLOSURE);
+    bcode_write_str(c->bc, cv->name);
+    st_push(c, -1);
+  }
+  if (!keep) {
+    bcode_write_op(c->bc, BCODE_POP);
+    st_push(c, -1);
+  }
 }
 
 /**

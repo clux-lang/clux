@@ -89,8 +89,22 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
     compile_func_bind(c, fn);
     if (c->failed) return;
   }
-  for (ast_node_t *s = b->stmts; s; s = s->next)
-    if (s->kind != AST_TYPE_DEF && s->kind != AST_FUNC_DEF) compile_stmt(c, s);
+  /* 第三循环：按声明序编译语句；AST_FUNC_DEF 定义点发捕获绑定序列
+     （compile_func_capture_bind：LOAD_FUNCTION + 每捕获 SET_CLOSURE + POP，
+     净 0——名字绑定已在第二循环提升完成）。有捕获的局部函数在定义点把当前
+     外层变量值 clone 进函数 closure_scope（替换 hoist 区 undefined 占位）。 */
+  for (ast_node_t *s = b->stmts; s; s = s->next) {
+    if (s->kind == AST_TYPE_DEF) continue;
+    if (s->kind == AST_FUNC_DEF) {
+      ast_func_def_t *fn = (ast_func_def_t *)s;
+      if (!fn->is_comptime && fn->captures) {
+        compile_func_capture_bind(c, fn, false);
+        if (c->failed) return;
+      }
+      continue;
+    }
+    compile_stmt(c, s);
+  }
 }
 
 void compile_stmt(compiler_t *c, ast_node_t *node) {

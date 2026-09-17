@@ -164,6 +164,7 @@ void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
 size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn); /* compile_func.c：hoist 函数注册区构造（返回 PUSH_FUNCTION body 操作数字段位置） */
 void   compile_func_bind(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c：LOAD_FUNCTION <fid> + DEFINE 名字绑定（局部定义点/全局绑定用） */
+void   compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep); /* compile_func.c：定义点捕获绑定（LOAD_FUNCTION + 每捕获值 SET_CLOSURE；keep=false 尾 POP 净 0，keep=true 函数值留栈顶作字面量结果） */
 void   compile_prescan_funcs(compiler_t *c, ast_node_t *program); /* compile_func.c：递归收集全部函数定义（校验读取 sema 分配的 fid；comptime body 无条件递归） */
 
 /* ---- hoist 类型提升区（compile_hoist.c） ---- */

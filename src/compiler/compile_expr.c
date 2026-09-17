@@ -131,12 +131,18 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_FUNC_DEF: {
     /* 函数字面量（表达式内函数值）：函数对象已在程序头 hoist 函数注册区
-       统一构造（PUSH_FUNCTION + BIND_FUNC + [SET_FUNC_NAME]），此处只
-       LOAD_FUNCTION <fid> 从 functions_by_id 拉取压栈——引用点零构造。 */
+       统一构造（PUSH_FUNCTION + BIND_FUNC + [SET_FUNC_NAME]），此处
+       LOAD_FUNCTION <fid> 从 functions_by_id 拉取压栈——引用点零构造。
+       有捕获的字面量随后发捕获绑定序列（keep=true：函数值留栈顶作表达式
+       结果）——定义点把当前外层变量值 clone 进函数 closure_scope。 */
     ast_func_def_t *fn = (ast_func_def_t *)node;
-    bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
-    bcode_write_u32(c->bc, fn->fid);
-    st_push(c, 1);
+    if (fn->captures) {
+      compile_func_capture_bind(c, fn, true);
+    } else {
+      bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+      bcode_write_u32(c->bc, fn->fid);
+      st_push(c, 1);
+    }
     break;
   }
   case AST_UNDEF:
