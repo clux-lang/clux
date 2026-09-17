@@ -1699,12 +1699,119 @@ TEST(Driver, RunFileFuncLiteralLocalFuncInBody) {
 }
 
 TEST(Driver, RunFileFuncLiteralCaptureRejected) {
-  /* 捕获外层局部变量：需闭包，编译期拒绝 */
+  /* 未声明捕获即访问外层局部变量：仍编译期拒绝（需显式捕获列表） */
   std::string path = write_temp_file(
       "func main():void {\n"
       "  var base = 10;\n"
       "  var f = func(x: i32): i32 { return x + base; };\n"
       "  var val = f(1);\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ================================================================ */
+/* 闭包（closure）端到端：捕获列表 |a,(b:i32=expr)|                   */
+/* ================================================================ */
+
+TEST(Driver, RunFileClosureBasicLiteral) {
+  /* 字面量纯 id 捕获：func |base| add(x) 捕获外层 base（clone），
+     定义点绑定 → f(5) → 10 + 5 = 15 */
+  std::string path = write_temp_file(
+      "func make_adder():func(i32)->i32 {\n"
+      "  var base = 10;\n"
+      "  return func |base| add(x: i32): i32 { return base + x; };\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = make_adder();\n"
+      "  printf(\"%d\\n\", f(5));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureCloneSemantics) {
+  /* 捕获是 clone 值而非引用：闭包创建后修改外层变量不影响闭包内捕获值 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var base = 10;\n"
+      "  var f = func |base| add(x: i32): i32 { return base + x; };\n"
+      "  base = 1000;\n"
+      "  printf(\"%d\\n\", f(5));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureParenCapture) {
+  /* 括号捕获（VALUE DECL 临时构造）：(b: i32 = c + d) 定义点求值，
+     a 捕获外层 5，b 临时构造 107 → f(1) = 5 + 107 + 1 = 113 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var a = 5;\n"
+      "  var c = 100;\n"
+      "  var d = 7;\n"
+      "  var f = func |a, (b: i32 = c + d)| add(x: i32): i32 { return a + b + x; };\n"
+      "  printf(\"%d\\n\", f(1));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureLocalFunc) {
+  /* 语句级局部函数带捕获：提升 + 定义点绑定 → f(1) = 42 + 1 = 43 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var x = 42;\n"
+      "  func |x| f(v: i32): i32 { return x + v; }\n"
+      "  printf(\"%d\\n\", f(1));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureLoopRebind) {
+  /* 循环内重建闭包：每次迭代捕获当前 i 的 clone → 0*10 + 1*10 + 2*10 = 30 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var total = 0;\n"
+      "  for (var i = 0; i < 3; i = i + 1) {\n"
+      "    var f = func |i| mul(n: i32): i32 { return i * n; };\n"
+      "    total = total + f(10);\n"
+      "  }\n"
+      "  printf(\"%d\\n\", total);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureCaptureUndefinedRejected) {
+  /* 捕获列表中引用未定义变量 → 编译期诊断 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f = func |nope| add(x: i32): i32 { return nope + x; };\n"
+      "  var val = f(1);\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureFuncTypeCaptureRejected) {
+  /* 函数类型签名不能带捕获列表（闭包不参与类型） */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f: func |x| (i32)->i32 = func(x:i32):i32 { return x; };\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureGlobalFuncCaptureRejected) {
+  /* 全局函数不允许捕获列表 */
+  std::string path = write_temp_file(
+      "func |x| g(v: i32): i32 { return x + v; }\n"
+      "func main():void {\n"
+      "  var val = g(1);\n"
       "}\n");
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
