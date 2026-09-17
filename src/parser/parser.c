@@ -110,6 +110,11 @@ ast_node_t *parse_program(parser_t *p) {
                sema pass1b 求值折叠（AST_TYPE_REF）后保留——进入字节码，
                运行时 LOAD_TYPE/PUSH; PUSH_UNDEFINED; DEFINE 绑定 type value。 */
             func = parse_type_def(p);
+        } else if (check_symbol(p, ";")) {
+            /* 顶层空语句：单独分号（;）——无操作占位，跳过 */
+            advance(p);
+            skip_trivia(p);
+            continue;
         } else {
             func = parse_func_def(p);
         }

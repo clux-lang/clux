@@ -1141,6 +1141,20 @@ TEST_F(ParseStmtTest, Stmt_FallThroughExpr) {
     cleanup_parser(p);
 }
 
+/**
+ * Scenario: parse_stmt dispatches a standalone semicolon to AST_EMPTY_STMT
+ */
+TEST_F(ParseStmtTest, Stmt_DispatchEmpty) {
+    parser_t *p = make_parser(";");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_EMPTY_STMT);
+
+    cleanup_parser(p);
+}
+
 /* ================================================================ */
 /* parse_func_def 测试                                                */
 /* ================================================================ */

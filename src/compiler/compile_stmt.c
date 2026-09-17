@@ -199,6 +199,8 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     st_push(c, -1);
     break;
   }
+  case AST_EMPTY_STMT:
+    break; /* 空语句：无操作 */
   case AST_RETURN: {
     ast_return_t *n = (ast_return_t *)node;
     if (n->value) {

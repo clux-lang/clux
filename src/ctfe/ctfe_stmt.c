@@ -235,6 +235,8 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
         ast_expr_stmt_t *n = (ast_expr_stmt_t *)stmt;
         return ctfe_eval(ctx, n->expr);
     }
+    case AST_EMPTY_STMT:
+        return value_make_undefined(vm); /* ; 空语句：无操作 */
     case AST_FUNC_DEF: {
         /* comptime body 内函数定义语句（func inc(){}）：求值函数值
            （ctfe_eval_func_def 已绑定名字到当前 vm 作用域，供后续

@@ -30,6 +30,12 @@ ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "return")) return parse_return(p);
     if (check_keyword(p, "break"))  return parse_break(p);
     if (check_keyword(p, "continue")) return parse_continue(p);
+    /* 空语句：单独的分号（;）——无操作占位 */
+    if (check_symbol(p, ";")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        return ast_node_new(p->arena, AST_EMPTY_STMT, tb, p->pos);
+    }
     /* 裸块语句：{ stmt; ... }（独立作用域） */
     if (check_symbol(p, "{"))   return parse_block(p);
     /* 最后尝试表达式语句（赋值已是表达式的一种） */
