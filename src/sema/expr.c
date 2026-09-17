@@ -22,6 +22,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
 
@@ -301,79 +302,124 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return result;
     }
     case AST_CALL: {
-      /* 函数调用：符号查找 + 实参 shadow 求值（sema 职责）→ 构造带签名
-         type_t 的 shadow callee → value_call 分派到 func_vcall 的 shadow
-         分支（唯一校验点：参数数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
-         comptime func：调用点折叠为字面量（sema_eval_comptime_call）。 */
+      /* 函数调用：实参 shadow 求值（sema 职责）→ 带签名 type_t 的 callee
+         → value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
+         数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
+         callee 两种形态：
+         - AST_IDENT（函数名字调用）：符号查找（遮蔽平等）→ 闭包检查 →
+           comptime func 调用点折叠为字面量（sema_eval_comptime_call）→
+           shadow callee + value_call
+         - 一般表达式（函数值调用，如 get_fn()()、apply(f)(x)）：递归
+           shadow 求值 callee（可能触发内层 comptime 折叠）→ func 类型
+           校验 → value_call。 */
       ast_call_t *call = (ast_call_t *)*node;
-      if (!call->callee || call->callee->kind != AST_IDENT) {
+      if (!call->callee) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "M1: callee must be a function name");
+                   "M1: missing callee");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      ast_ident_t *name = (ast_ident_t *)call->callee;
-      /* 遮蔽平等：函数/类型/变量都是作用域符号，从调用点作用域链解析
-         （sema_lookup 沿 parent 链取第一个已激活命中）——局部变量遮蔽
-         函数名时 sym 解析到变量符号（type 非 func）→ 报"不可调用"。
-         函数符号：用户函数 sym->ast=AST_FUNC_DEF；内置函数（printf）
-         ast=NULL 但 type 携带 variadic 签名。两者都经 func_shadow_call
-         校验。 */
-      sema_symbol_t *sym = sema_lookup(scope, name->name);
-      if (!sym || !sym->type) {
-        diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "undefined function '%.*s'", (int)name->name.len,
-                   name->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      if (call->callee->kind == AST_IDENT) {
+        ast_ident_t *name = (ast_ident_t *)call->callee;
+        /* 遮蔽平等：函数/类型/变量都是作用域符号，从调用点作用域链解析
+           （sema_lookup 沿 parent 链取第一个已激活命中）——局部变量遮蔽
+           函数名时 sym 解析到变量符号（type 非 func）→ 报"不可调用"。
+           函数符号：用户函数 sym->ast=AST_FUNC_DEF；内置函数（printf）
+           ast=NULL 但 type 携带 variadic 签名。两者都经 func_shadow_call
+           校验。 */
+        sema_symbol_t *sym = sema_lookup(scope, name->name);
+        if (!sym || !sym->type) {
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "undefined function '%.*s'", (int)name->name.len,
+                     name->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        if (sym->type->kind != TYPE_KIND_FUNC) {
+          /* 遮蔽（变量/类型符号命中）：非函数符号不可调用 */
+          char tn[64];
+          sema_type_name(sym->type, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "cannot call '%.*s' of type %s", (int)name->name.len,
+                     name->name.ptr, tn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* 局部函数体内调用兄弟/自身/外层局部：callee 保持 AST_IDENT →
+           编译器发 PUSH name（运行时作用域查找），而函数体查找链只有参数 +
+           全局，兄弟/自身/外层局部符号不可见（需闭包）——编译期拦截。
+           参数（fscope 直系，含函数类型参数——可调用，运行时参数可见）与
+           全局函数放行（sema_scope_find_local 判参数、global lookup 判全局，
+           与 AST_IDENT 引用检查同构）。 */
+        if (sema->local_func_base &&
+            sema_scope_find_local(sema->local_func_base, name->name) != sym &&
+            sema_lookup(sema->global_scope, name->name) != sym) {
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "local function cannot call sibling or self '%.*s' "
+                     "(closures not supported)",
+                     (int)name->name.len, name->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
+           整个调用折叠为字面量。函数本身不注册到运行时。
+           walking_comptime（正在 walk 另一个 comptime func 的 body）：实参
+           是参数 shadow value，编译期无法求值——走下方普通 shadow 调用路径
+           只做类型检查（返回 return type 的 shadow），CTFE 折叠仅在真实调用点。 */
+        if (sym->is_comptime && !sema->walking_comptime) {
+          return sema_eval_comptime_call(sema, node, scope);
+        }
+
+        /* 逐个实参 shadow 求值（错误恢复产物保留为 void shadow，由
+           func_shadow_call 跳过，避免级联二次诊断）。经链上指针（&call->args
+           逐级推进）传递，使引用折叠就地写回实参链，编译器零感知。 */
+        size_t argc = sema_count_siblings(call->args);
+        value_t *arg_shadows[argc > 0 ? argc : 1];
+        ast_node_t **link = &call->args;
+        for (size_t i = 0; *link; link = &(*link)->next, i++) {
+          arg_shadows[i] = sema_expr(sema, link, scope);
+        }
+
+        /* shadow callee：data=NULL 只带签名类型（sym->type），受 vm scope
+           管理（auto-track） */
+        value_t *callee_shadow = value_make_shadow(sema->vm, sym->type);
+        value_t *result =
+            value_call(sema->vm, callee_shadow, arg_shadows, argc);
+
+        if (value_is_error(sema->vm, result)) {
+          error_data_t *ed = (error_data_t *)value_data(result);
+          const char *msg = ed && ed->message ? string_cstr(ed->message)
+                                              : "function call failed";
+          diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        return result; /* shadow in → shadow out（return_type shadow） */
       }
-      if (sym->type->kind != TYPE_KIND_FUNC) {
-        /* 遮蔽（变量/类型符号命中）：非函数符号不可调用 */
+
+      /* ---- 一般 callee 表达式（函数值调用）---- */
+      /* 递归 shadow 求值 callee：可能是内层 comptime 调用折叠产物
+         （get_fn()()：内层折叠为 AST_FUNC_REF）、函数字面量直接调用
+         （func(x:i32){...}(1)）、或函数类型变量（变量引用是 AST_IDENT，
+         已走上方分支）。经链上指针传 &call->callee，折叠就地写回。 */
+      value_t *callee = sema_expr(sema, &call->callee, scope);
+      if (value_is_error(sema->vm, callee) ||
+          value_is_type(callee, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *ctype = value_type(callee);
+      if (!ctype || ctype->kind != TYPE_KIND_FUNC) {
         char tn[64];
-        sema_type_name(sym->type, tn, sizeof(tn));
+        op_type_name(callee, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "cannot call '%.*s' of type %s", (int)name->name.len,
-                   name->name.ptr, tn);
+                   "cannot call value of type %s", tn);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 局部函数体内调用兄弟/自身/外层局部：callee 保持 AST_IDENT →
-         编译器发 PUSH name（运行时作用域查找），而函数体查找链只有参数 +
-         全局，兄弟/自身/外层局部符号不可见（需闭包）——编译期拦截。
-         参数（fscope 直系，含函数类型参数——可调用，运行时参数可见）与
-         全局函数放行（sema_scope_find_local 判参数、global lookup 判全局，
-         与 AST_IDENT 引用检查同构）。 */
-      if (sema->local_func_base &&
-          sema_scope_find_local(sema->local_func_base, name->name) != sym &&
-          sema_lookup(sema->global_scope, name->name) != sym) {
-        diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "local function cannot call sibling or self '%.*s' "
-                   "(closures not supported)",
-                   (int)name->name.len, name->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
-         整个调用折叠为字面量。函数本身不注册到运行时。
-         walking_comptime（正在 walk 另一个 comptime func 的 body）：实参
-         是参数 shadow value，编译期无法求值——走下方普通 shadow 调用路径
-         只做类型检查（返回 return type 的 shadow），CTFE 折叠仅在真实调用点。 */
-      if (sym->is_comptime && !sema->walking_comptime) {
-        return sema_eval_comptime_call(sema, node, scope);
-      }
-
-      /* 逐个实参 shadow 求值（错误恢复产物保留为 void shadow，由
-         func_shadow_call 跳过，避免级联二次诊断）。经链上指针（&call->args
-         逐级推进）传递，使引用折叠就地写回实参链，编译器零感知。 */
       size_t argc = sema_count_siblings(call->args);
       value_t *arg_shadows[argc > 0 ? argc : 1];
       ast_node_t **link = &call->args;
       for (size_t i = 0; *link; link = &(*link)->next, i++) {
         arg_shadows[i] = sema_expr(sema, link, scope);
       }
-
-      /* shadow callee：data=NULL 只带签名类型（sym->type），受 vm scope
-         管理（auto-track） */
-      value_t *callee_shadow = value_make_shadow(sema->vm, sym->type);
-      value_t *result = value_call(sema->vm, callee_shadow, arg_shadows, argc);
+      value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
 
       if (value_is_error(sema->vm, result)) {
         error_data_t *ed = (error_data_t *)value_data(result);
@@ -512,6 +558,44 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_func_def_t *fn = (ast_func_def_t *)*node;
       const type_t *sig = sema_check_func_literal(sema, fn, scope);
       if (!sig) return value_make_shadow(sema->vm, sema->vm->type_void);
+      return value_make_shadow(sema->vm, sig);
+    }
+    case AST_FUNC_REF: {
+      /* 函数引用折叠产物（sema AST_IDENT 确认函数符号改写 / comptime 折叠
+         AST_FUNC_REF）：纯 fid 标识，shadow walk 只关心签名类型——返回签名
+         类型的 shadow（函数值表达式的类型即签名；运行期 LOAD_FUNCTION 加载
+         真实函数值）。
+         签名查询双路径（与 CTFE 一致）：程序函数（全局/局部）按 fid 查
+         sema->funcs（def->sig_id → sema_type_by_id 反查）；内建函数与 CTFE
+         构造的函数字面量引用对象按 fid 查 vm->functions。 */
+      ast_func_ref_t *n = (ast_func_ref_t *)*node;
+      const type_t *sig = NULL;
+      sema_func_t *sf = sema_func_by_id(sema, n->fid);
+      if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+        ast_func_def_t *fd = (ast_func_def_t *)sf->def;
+        const sema_type_t *st = sema_type_by_id(sema, fd->sig_id);
+        if (st) sig = st->type;
+      }
+      /* 内建函数 / CTFE 构造的函数字面量引用对象：vm 侧按 fid 查签名。
+         内建函数登记 functions_by_id（id < PROGRAM_BASE）；字面量引用对象
+         （func_new_program_ref）只注册 vm->functions 不登记 functions_by_id
+         ——线性扫描兜底（函数数量少）。 */
+      if (!sig) {
+        func_t *fn = vm_func_load(sema->vm, n->fid);
+        if (!fn && sema->vm->functions) {
+          size_t nf = vec_len(sema->vm->functions);
+          for (size_t i = 0; i < nf; i++) {
+            func_t *f = (func_t *)vec_get(sema->vm->functions, i);
+            if (f && f->id == n->fid && f->type) { fn = f; break; }
+          }
+        }
+        if (fn) sig = fn->type;
+      }
+      if (!sig) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "unknown function reference (id %u)", n->fid);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
       return value_make_shadow(sema->vm, sig);
     }
     case AST_TERNARY: {

@@ -1505,6 +1505,41 @@ TEST(Driver, RunFileFuncValueComptimeReturnsLocalFunc) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileFuncValueCallExpressionCallee) {
+  /* 一般 callee 表达式（函数值调用）：comptime func 返回的函数值立即调用
+     get_fn()()、嵌套返回再调用、函数字面量直接调用 */
+  std::string path = write_temp_file(
+      "comptime func get_fn():func()->i32 {\n"
+      "  return func():i32 { return 123; };\n"
+      "}\n"
+      "comptime func get_add():func(i32,i32)->i32 {\n"
+      "  return func(a:i32, b:i32): i32 { return a + b; };\n"
+      "}\n"
+      "func make(): func(i32)->i32 {\n"
+      "  return func(x: i32): i32 { return x * 2; };\n"
+      "}\n"
+      "func main():void {\n"
+      "  var a = get_fn()();\n"
+      "  var b = get_add()(19, 23);\n"
+      "  var c = make()(21);\n"
+      "  var d = func(x:i32):i32 { return x + 1; }(41);\n"
+      "  printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueCallExpressionRejected) {
+  /* 非函数值表达式作 callee：编译期拒绝（cannot call value of type i32） */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var x: i32 = 5;\n"
+      "  var r = x(1);\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileFuncValueComptimeNestedCalls) {
   /* comptime func body 内调用另一个 comptime func（嵌套折叠）：walk 阶段
      只做 shadow 类型检查，真实调用点 CTFE 折叠 */
