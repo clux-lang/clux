@@ -950,3 +950,11 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   sema->func_return_type = NULL;
   sema->local_func_base = NULL;
 }
+
+/* 函数字面量 body walk 入口（stmt_build.c 的 sema_check_func_literal 用；
+   walk_block 是 static，此处暴露薄封装）。idx 内部自持——临时作用域树
+   由 sema_check_func_literal 独立构建，消费顺序与建树严格对齐。 */
+void sema_walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope) {
+  size_t child_idx = 0;
+  (void)walk_block(sema, block, scope, &child_idx);
+}

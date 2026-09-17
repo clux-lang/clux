@@ -144,13 +144,12 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   }
   c->bc = bc;
 
-  /* 0. 函数名 → 函数 id 映射（LOAD_FUNCTION 编译用）：
+  /* 0. 函数名 → 函数 id 映射 + 全部函数收集（LOAD_FUNCTION 编译用）：
      - 内建函数：遍历 vm->functions（func_new 已注册，id < FUNC_ID_PROGRAM_BASE，
        如 printf=0），按 fn->name 登记。
-     - 程序函数：按声明顺序分配 fid（局部计数变量，与注册段 BIND_FUNC 的
-       c->func_id_next 分配完全对齐——两者都从 FUNC_ID_PROGRAM_BASE 起、
-       按声明序、跳过 comptime func。**不消耗 c->func_id_next**，注册段
-       compile_func_reg 是 fid 的唯一分配者）。
+     - 程序函数：compile_prescan_funcs 递归收集全部函数定义（全局 + 局部 +
+       嵌套函数字面量），从 FUNC_ID_PROGRAM_BASE 起统一分配 fid（写回
+       fn->fid）并登记 func_ids（仅具名函数按名引用，匿名字面量跳过）。
      AST_FUNC_REF 编译时查表命中 → LOAD_FUNCTION <id>。 */
   c->func_ids = strmap_new(c->alloc, /*owns_value=*/false);
   if (!c->func_ids) {
@@ -174,24 +173,21 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
                     (void *)(uintptr_t)(fn->id + 1u));
     }
   }
-
-  uint32_t pfid = FUNC_ID_PROGRAM_BASE;
-  for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    if (f->kind != AST_FUNC_DEF) continue;
-    ast_func_def_t *fn = (ast_func_def_t *)f;
-    if (fn->is_comptime) continue;
-    char nb[256];
-    size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
-    memcpy(nb, fn->name.ptr, n);
-    nb[n] = '\0';
-    strmap_insert(c->func_ids, c->alloc, nb, (void *)(uintptr_t)(pfid + 1u));
-    pfid++;
+  compile_prescan_funcs(c, program);
+  if (c->failed) {
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
   }
 
-  /* 产物布局（先定义类型，然后定义函数，最后放置函数体）：
+  /* 产物布局（先定义类型，然后构造函数对象，最后放置函数体）：
        1. 类型提升区（hoist）— 运行时先构造并登记全部程序类型
-       2. 函数注册段 — 签名构造 + PUSH_FUNCTION + DEFINE 名字（函数体入口
-          pc 未知，PUSH_FUNCTION 先写占位，函数体区编译后回填）
+       2. 函数对象提升区 — 每函数 LOAD_TYPE <sig_id> + PUSH_FUNCTION +
+          BIND_FUNC <fid> + [SET_FUNC_NAME]（函数体入口 pc 未知，PUSH_FUNCTION
+          先写占位，函数体区编译后回填）。全部函数（全局/局部/字面量）统一
+          构造，引用点只 LOAD_FUNCTION <fid> 从 functions_by_id 拉取。
+       2.5 全局函数名绑定 — 每全局函数 LOAD_FUNCTION <fid> + DEFINE name
+          （与顶层 typedef 绑定同构；局部函数在定义点 DEFINE，字面量无绑定）
        3. HALT — 拦截顺序执行，函数体区不落入
        4. 函数体区 — 各函数体以 RET 结尾，仅经 PUSH_FUNCTION 记录的
           body 入口在被调用时进入
@@ -235,20 +231,39 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
-  /* 2. 函数注册段 */
-  size_t nfuncs = 0;
-  size_t body_slots[128];
+  /* 2. 函数对象提升区：构造全部程序函数对象（fid 序，与预扫描一致）。
+     签名类型已密封（hoist pass 2 完成），LOAD_TYPE <sig_id> 直接拉取。 */
+  size_t nfuncs = vec_len(c->funcs_all);
+  size_t *body_slots = NULL;
+  if (nfuncs > 0) {
+    body_slots = (size_t *)allocator_new_ex(
+        c->alloc, "size_t", sizeof(size_t), NULL, NULL, NULL, nfuncs);
+    if (!body_slots) panic("compiler: out of memory allocating body slots");
+  }
+  for (size_t i = 0; i < nfuncs; i++) {
+    ast_func_def_t *fn = (ast_func_def_t *)vec_get(c->funcs_all, i);
+    body_slots[i] = compile_func_reg_hoist(c, fn);
+    if (c->failed) break;
+  }
+  if (c->failed) {
+    if (body_slots) allocator_free(c->alloc, (void **)&body_slots);
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
+  /* 2.5 全局函数名绑定：LOAD_FUNCTION <fid> + DEFINE name（全局作用域）。
+     仅顶层函数（prog->funcs 中的 AST_FUNC_DEF）——局部函数在定义点
+     compile_block_body 绑定（提升语义），函数字面量无作用域绑定。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;
-    if (nfuncs < sizeof(body_slots) / sizeof(body_slots[0])) {
-      body_slots[nfuncs] = compile_func_reg(c, fn);
-      nfuncs++;
-    }
+    compile_func_bind(c, fn);
     if (c->failed) break;
   }
   if (c->failed) {
+    if (body_slots) allocator_free(c->alloc, (void **)&body_slots);
     bcode_destroy(&bc);
     c->bc = NULL;
     return NULL;
@@ -256,39 +271,16 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
 
   bcode_write_op(bc, BCODE_HALT);
 
-  /* 3. 函数体区（产物最后）：编译各函数体，回填注册段 PUSH_FUNCTION 的
-     body 入口 pc。 */
-  size_t fi = 0;
-  for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    if (f->kind != AST_FUNC_DEF) continue;
-    ast_func_def_t *fn = (ast_func_def_t *)f;
-    if (fn->is_comptime) continue;
+  /* 3. 函数体区（产物最后）：编译各函数体（fid 序，与提升区一致），回填
+     函数对象提升区 PUSH_FUNCTION 的 body 入口 pc。局部函数/函数字面量与
+     全局函数统一——预扫描已全部收集进 funcs_all。 */
+  for (size_t i = 0; i < nfuncs; i++) {
+    ast_func_def_t *fn = (ast_func_def_t *)vec_get(c->funcs_all, i);
     size_t body = compile_func_body(c, fn);
-    if (fi < sizeof(body_slots) / sizeof(body_slots[0])) {
-      bcode_patch_u32(bc, body_slots[fi], (uint32_t)body);
-      fi++;
-    }
+    bcode_patch_u32(bc, body_slots[i], (uint32_t)body);
     if (c->failed) break;
   }
-  if (c->failed) {
-    bcode_destroy(&bc);
-    c->bc = NULL;
-    return NULL;
-  }
-
-  /* 3.5 局部函数体区（全局函数体之后）：compile_block_body 提升时收集
-     （local_defs + local_slots），此时统一编译并回填 PUSH_FUNCTION body
-     占位。嵌套局部函数在外层局部函数体编译时追加到队列，while 重取
-     vec_len 自动覆盖。 */
-  size_t li = 0;
-  while (li < vec_len(c->local_defs)) {
-    ast_func_def_t *fn = (ast_func_def_t *)vec_get(c->local_defs, li);
-    size_t slot = (size_t)(uintptr_t)vec_get(c->local_slots, li);
-    size_t body = compile_func_body(c, fn);
-    bcode_patch_u32(bc, slot, (uint32_t)body);
-    li++;
-    if (c->failed) break;
-  }
+  if (body_slots) allocator_free(c->alloc, (void **)&body_slots);
   if (c->failed) {
     bcode_destroy(&bc);
     c->bc = NULL;
@@ -320,8 +312,7 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->loop_stack    = NULL;
   c->failed        = false;
   c->func_id_next  = FUNC_ID_PROGRAM_BASE;
-  c->local_defs    = vec_new(alloc, false);
-  c->local_slots   = vec_new(alloc, false);
+  c->funcs_all     = vec_new(alloc, false);
   /* 签名类型 id 由 sema 分配（sema_type_register 登记进 sema->types，
      id = PROGRAM_BASE + index，已写入 sig->id）；type_id_next 仅作防御
      分支（compile_type.c AST_ARRAY 未替换场景临时分配 id）。 */
@@ -336,7 +327,6 @@ void compiler_destroy(compiler_t **pc) {
   /* 释放残留 patch 节点（编译中途失败时可能有未回填标签） */
   while (c->loop_stack) c->loop_stack = c->loop_stack->next; /* 仅断链 */
   if (c->func_ids) strmap_free(c->alloc, &c->func_ids);
-  if (c->local_defs) vec_free(c->alloc, &c->local_defs);
-  if (c->local_slots) vec_free(c->alloc, &c->local_slots);
+  if (c->funcs_all) vec_free(c->alloc, &c->funcs_all);
   allocator_free(c->alloc, (void **)pc);
 }

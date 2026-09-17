@@ -6,6 +6,7 @@
 #include "core/vec.h"
 #include "diag/diagnostic.h"
 #include "parser/ast_node.h"
+#include "parser/ast_func_def.h"
 #include "parser/type_qual.h"
 #include "sema/symbol.h"
 #include "vm/vm.h"
@@ -46,6 +47,10 @@ typedef struct sema_func_t {
     strslice_t    name;   /* 函数名（诊断用） */
     bool          is_local; /* 局部函数（块内定义）：3b walk_block 提升签名
                                + 捕获检查（fscope parent = 定义点块作用域） */
+    bool          is_literal_owned; /* 函数字面量 body 内登记的局部函数：
+                                       sema_check_func_literal 已同步 walk 并
+                                       标记，Pass 3b 驱动循环跳过（防二次 walk
+                                       访问已销毁的临时 fscope） */
 } sema_func_t;
 
 /**
@@ -188,6 +193,21 @@ void sema_build_scope_tree(sema_t *sema);
  * 严格按预建作用域树（sf->scope）遍历函数体，做类型检查与推导。
  */
 void sema_walk_function(sema_t *sema, sema_func_t *sf);
+
+/**
+ * 函数字面量（表达式内 AST_FUNC_DEF，sema_expr 求值用）：签名解析 +
+ * body 类型检查（stmt_build.c 实现，同步建临时 fscope 并 walk，不注册
+ * 作用域名字、不提升）。body 内登记的局部函数在此同步 walk 并标记
+ * is_literal_owned。返回签名类型（失败 NULL），成功则写入 fn->sig_id。
+ */
+const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
+                                      sema_scope_t *outer);
+
+/**
+ * 函数字面量 body walk 入口（stmt.c 实现，sema_check_func_literal 用）：
+ * walk_block 是 static，此处暴露薄封装。idx 内部自持。
+ */
+void sema_walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope);
 
 /**
  * 表达式求值（shadow value）：只有类型，data=NULL。

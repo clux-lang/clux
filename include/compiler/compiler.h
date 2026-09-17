@@ -79,19 +79,27 @@ typedef struct compiler_t {
        槽位经 sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
     vec_t          *sema_types;
 
-    /* 函数 id 分配计数器：编译注册段时按声明顺序从 FUNC_ID_PROGRAM_BASE
-       起递增（仅 BIND_FUNC <id> 携带），与类型 id 机制对称——但分配在
-       compiler 侧（不写回 AST），运行时 BIND_FUNC 填充 fn->id 并登记进
-       vm->functions_by_id。函数 id 表（functions_by_id）与类型 id 表
-       （types_by_id）独立，勿与 type_id_next 混淆。 */
+    /* 函数 id 分配计数器：compiler_compile 预扫描（收集全部函数定义——
+       全局 + 局部 + 嵌套函数字面量）时从 FUNC_ID_PROGRAM_BASE 起统一分配
+       （写回 fn->fid）。与类型 id 机制对称——但分配在 compiler 侧（不写回
+       sema），运行时 BIND_FUNC 填充 fn->id 并登记进 vm->functions_by_id。
+       函数 id 表（functions_by_id）与类型 id 表（types_by_id）独立，勿与
+       type_id_next 混淆。 */
     uint32_t        func_id_next;
 
-    /* 函数名 → 函数 id 映射（compiler_compile 开头构建，strmap 不拥有值）：
-       内建函数（printf，id < FUNC_ID_PROGRAM_BASE）+ 程序函数（按声明序
-       func_id_next 分配，与注册段 BIND_FUNC 顺序一致）。compile_expr
-       AST_FUNC_REF 查表发 LOAD_FUNCTION <fid>。值 = (void*)(uintptr_t)fid，
-       零分配（fid ≥ 64 或内建 0，恒非 NULL）。 */
+    /* 函数名 → 函数 id 映射（compiler_compile 开头预扫描构建，strmap 不拥有值）：
+       内建函数（printf，id < FUNC_ID_PROGRAM_BASE）+ 程序函数（全局 + 局部，
+       预扫描按 DFS 序分配 fid）。compile_expr AST_FUNC_REF 查表发
+       LOAD_FUNCTION <fid>。值 = (void*)(uintptr_t)fid，零分配（fid ≥ 64
+       或内建 0，恒非 NULL）。 */
     strmap_t       *func_ids;
+
+    /* 全部程序函数收集（compiler_compile 开头预扫描填充，ast_func_def_t* 列表，
+       按 fid 分配序）：全局函数 + 局部函数 + 嵌套函数字面量（含表达式内）。
+       hoist 函数注册区（构造全部函数对象）与函数体区（编译各函数体、回填
+       PUSH_FUNCTION body 占位）按此列表统一驱动——fid 序即构造/回填序。
+       comptime func 不入列表（不进入运行时）。 */
+    vec_t          *funcs_all;
 
     /* 类型 id 分配计数器：sema_types 已占 [TYPE_ID_PROGRAM_BASE,
        TYPE_ID_PROGRAM_BASE + sema_types 数量)（sema_type_register 按登记
@@ -99,14 +107,6 @@ typedef struct compiler_t {
        AST_ARRAY 未替换场景临时分配 id（与 hoist 区同类型可成多 id 别名，
        types_by_id 幂等，语义无害）。签名类型 id 由 sema 分配（不在此列）。 */
     uint32_t        type_id_next;
-
-    /* 局部函数收集（compile_block_body 提升时登记，compiler_compile 函数体区
-       全局函数体编译后统一编译回填）：local_defs = ast_func_def_t*，
-       local_slots = 对应 PUSH_FUNCTION body 占位槽位（size_t，uintptr_t 编码）。
-       队列驱动——嵌套局部函数在编译外层局部函数体时追加，编译循环重取
-       len 自动覆盖。 */
-    vec_t          *local_defs;
-    vec_t          *local_slots;
 
     /* 静态平衡追踪 */
     size_t          scope_depth;    /* 当前已 PUSH_SCOPE 未 POP 的层数 */
@@ -174,9 +174,11 @@ void st_push(compiler_t *c, int delta);
 void   compile_type_expr(compiler_t *c, ast_node_t *type_expr); /* compile_type.c */
 void   compile_expr(compiler_t *c, ast_node_t *node);          /* compile_expr.c */
 void   compile_stmt(compiler_t *c, ast_node_t *node);          /* compile_stmt.c */
-void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c：块体编译 + 局部 type 入口提升 */
+void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c：块体编译 + 局部 type/函数入口提升 */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
-size_t compile_func_reg(compiler_t *c, ast_func_def_t *fn);    /* 返回 PUSH_FUNCTION body 操作数字段位置 */
+size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn); /* compile_func.c：hoist 函数注册区构造（返回 PUSH_FUNCTION body 操作数字段位置） */
+void   compile_func_bind(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c：LOAD_FUNCTION <fid> + DEFINE 名字绑定（局部定义点/全局绑定用） */
+void   compile_prescan_funcs(compiler_t *c, ast_node_t *program); /* compile_func.c：递归收集全部函数定义 + 分配 fid + func_ids 登记 */
 
 /* ---- hoist 类型提升区（compile_hoist.c） ---- */
 

@@ -1512,3 +1512,97 @@ TEST(Driver, RunFileFuncValueTypeMismatchRejected) {
   std::remove(path.c_str());
 }
 
+/* ================================================================ */
+/* 函数字面量（function literal）端到端                                */
+/* ================================================================ */
+
+TEST(Driver, RunFileFuncLiteralBasic) {
+  /* 匿名函数字面量：var f = func(...){...}; f(41) → 42 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f = func(x: i32): i32 { return x + 1; };\n"
+      "  var val = f(41);\n"
+      "  printf(\"%d\\n\", val);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralNamed) {
+  /* 具名字面量：函数有显示名，但不绑定作用域名字（外部不可按名调用） */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f = func inc(x: i32): i32 { return x * 2; };\n"
+      "  var val = f(21);\n"
+      "  printf(\"%d\\n\", val);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralMultiParam) {
+  /* 多参数 + 显式 func 类型槽位 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f: func(i32,i32)->i32 = func(a: i32, b: i32): i32 { return a * b; };\n"
+      "  var val = f(6, 7);\n"
+      "  printf(\"%d\\n\", val);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralAsArgument) {
+  /* 字面量直接传给函数参数（高阶调用）：apply(func(...), 10, 20) */
+  std::string path = write_temp_file(
+      "func apply(f:func(i32,i32)->i32, x:i32, y:i32):i32 {\n"
+      "  return f(x, y);\n"
+      "}\n"
+      "func main():void {\n"
+      "  var r = apply(func(a: i32, b: i32): i32 { return a + b; }, 10, 20);\n"
+      "  printf(\"%d\\n\", r);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralNested) {
+  /* 嵌套字面量：内层字面量作为外层字面量求值产物，outer(1) → 102 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var outer = func(n: i32): i32 {\n"
+      "    var inner = func(x: i32): i32 { return x + 100; };\n"
+      "    return inner(n + 1);\n"
+      "  };\n"
+      "  printf(\"%d\\n\", outer(1));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralLocalFuncInBody) {
+  /* 字面量 body 内可定义局部函数并调用：f(14) → 42 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var f = func(n: i32): i32 {\n"
+      "    func triple(x: i32): i32 { return x * 3; }\n"
+      "    return triple(n);\n"
+      "  };\n"
+      "  printf(\"%d\\n\", f(14));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncLiteralCaptureRejected) {
+  /* 捕获外层局部变量：需闭包，编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var base = 10;\n"
+      "  var f = func(x: i32): i32 { return x + base; };\n"
+      "  var val = f(1);\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+

@@ -175,11 +175,54 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         return node;
     }
 
-    /* 函数定义 / 匿名字面量：func [name](params):type { body } */
+    /* 函数定义 / 函数字面量：func [name](params):type { body } */
     if (expected_kind == AST_FUNC_TYPE) {
-        /* 表达式级：func(...) 后既无 '->'，即匿名字面量，M1 不支持 */
-        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "func literal not supported in M1");
+        /* 表达式级：func(...) 后既无 '->'，即函数字面量（函数值）。
+           与语句级函数定义共享 AST_FUNC_DEF 节点——语义差异（不注册
+           作用域名字、不提升）推迟到 sema/compiler 消费层：表达式内的
+           AST_FUNC_DEF 一律按字面量处理，name 可有可无（有则仅作函数
+           显示名，不绑定符号）。参数必须具名。 */
+        for (ast_node_t *pr = params; pr; pr = pr->next) {
+            if (pr->kind != AST_VAR_DEF) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "function literal parameters must have names");
+            }
+        }
+
+        /* 返回类型：: type 必选（与函数定义一致，不允许隐式 void） */
+        if (!expect_symbol(p, ":")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ':' and return type in function literal");
+        }
+        skip_trivia(p);
+
+        ast_node_t *return_expr = parse_expr_prec(p, 1);
+        if (!return_expr || return_expr->kind == AST_ERROR) {
+            if (!return_expr) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected return type after ':' in function literal");
+            }
+            return return_expr;
+        }
+
+        /* 函数体：{ ... } */
+        ast_node_t *body = parse_block(p);
+        if (!body || body->kind == AST_ERROR) {
+            if (!body) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected '{' for function literal body");
+            }
+            return body;
+        }
+
+        ast_node_t *node = ast_func_def_new(p->arena, tb, p->pos);
+        ast_func_def_t *fn = (ast_func_def_t *)node;
+        fn->name        = name; /* 可为空（匿名）或为显示名（不绑作用域） */
+        fn->params      = params;
+        fn->params_last = params_last;
+        fn->return_expr = return_expr;
+        fn->body        = body;
+        return node;
     }
 
     /* 语句级函数定义：必须有 name */

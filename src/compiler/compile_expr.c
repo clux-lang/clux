@@ -118,7 +118,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_FUNC_REF: {
     /* sema 确认的函数引用（函数值）：查函数名→fid 映射（compile_compile
-       开头构建：内建 + 程序函数按声明序）→ LOAD_FUNCTION <id> 运行期从
+       预扫描构建：内建 + 程序函数按 DFS 序）→ LOAD_FUNCTION <id> 运行期从
        functions_by_id 查表压真实函数值。未命中（如 comptime func）是
        sema 应已拦截的错误。 */
     ast_func_ref_t *n = (ast_func_ref_t *)node;
@@ -135,6 +135,16 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     uint32_t fid = (uint32_t)(uintptr_t)fidv - 1u;
     bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
     bcode_write_u32(c->bc, fid);
+    st_push(c, 1);
+    break;
+  }
+  case AST_FUNC_DEF: {
+    /* 函数字面量（表达式内函数值）：函数对象已在程序头 hoist 函数注册区
+       统一构造（PUSH_FUNCTION + BIND_FUNC + [SET_FUNC_NAME]），此处只
+       LOAD_FUNCTION <fid> 从 functions_by_id 拉取压栈——引用点零构造。 */
+    ast_func_def_t *fn = (ast_func_def_t *)node;
+    bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+    bcode_write_u32(c->bc, fn->fid);
     st_push(c, 1);
     break;
   }

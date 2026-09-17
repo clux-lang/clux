@@ -10,6 +10,10 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
+#include "vm/type_func.h"
+
+#include <stdio.h>
+#include <string.h>
 
 /* ===========================================================================
  * Pass 3a：作用域树构建 + 控制流分析
@@ -22,6 +26,13 @@
  * 与类型无关，因此不需要等 Pass 3b 的 shadow 运行。非 void 函数所有路径
  * 必须 return 在此阶段即可检查。
  * =========================================================================== */
+
+/* 标识符转 C 字符串（诊断/VM scope 注册用） */
+static void name_to_cstr(strslice_t s, char *buf, size_t cap) {
+  size_t n = s.len < cap - 1 ? s.len : cap - 1;
+  memcpy(buf, s.ptr, n);
+  buf[n] = '\0';
+}
 
 typedef struct build_result {
   bool definitely_returns; /* 该块保证返回（所有路径都 return） */
@@ -326,4 +337,133 @@ void sema_build_scope_tree(sema_t *sema) {
     if (fn->is_comptime) continue;
     build_func(sema, sf);
   }
+}
+
+/* ===========================================================================
+ * 函数字面量（表达式内 AST_FUNC_DEF，sema_expr 求值用）
+ *
+ * 与局部函数共享 AST_FUNC_DEF 节点，但语义差异：不注册作用域符号、不提升。
+ * 在表达式求值点同步完成全部检查：
+ *
+ *   1. 临时 fscope（parent = 定义点作用域）——不 add_child 挂树：不消费
+ *      外层 walk_block 的子作用域索引（idx 对齐不受影响），树由本函数
+ *      自持并销毁（含 body 内局部函数的 fscope）。
+ *   2. 建树（build_block）：注册参数 + body 内局部函数登记队列 +
+ *      嵌套块作用域（临时树）；返回路径完整性分析（非 void 必须全路径
+ *      return，与函数定义同语义）。
+ *   3. 签名解析（与 resolve_local_func_sig 同构）：type_func_sig 建签名 →
+ *      sema_type_register 登记 → fn->sig_id（compiler LOAD_TYPE 用）。
+ *   4. walk body（sema_walk_block，仿 sema_walk_function）：参数 shadow
+ *      定义到临时 VM scope；local_func_base = fscope → 字面量引用外层局部
+ *      （闭包）编译期拒绝。
+ *   5. 同步 walk body 内登记的局部函数（sema->funcs[n0..] 队列尾）并标记
+ *      is_literal_owned——Pass 3b 驱动循环据此跳过（防二次 walk 访问已
+ *      销毁的临时作用域树）。嵌套字面量已递归完成，跳过。
+ *   6. 销毁临时作用域树。
+ *
+ * 返回签名类型（func_type_t，vm 池 intern）；失败返回 NULL（已诊断）。
+ * =========================================================================== */
+const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
+                                      sema_scope_t *outer) {
+  /* 队列登记起点：body 内局部函数（含嵌套字面量内）追加到队尾 */
+  size_t n0 = vec_len(sema->funcs);
+
+  sema_scope_t *fscope =
+      sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, outer);
+  if (!fscope) panic("sema: out of memory allocating literal fscope");
+
+  /* 参数注册（与 build_func_tree 同构）+ 签名参数类型收集（一次解析） */
+  size_t nparams = sema_count_siblings(fn->params);
+  const type_t **ptypes = NULL;
+  if (nparams > 0) {
+    ptypes = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
+                              NULL, NULL, NULL, nparams);
+  }
+  size_t j = 0;
+  for (ast_node_t *p = fn->params; p; p = p->next, j++) {
+    ast_var_def_t *vd = (ast_var_def_t *)p;
+    const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
+    if (!t) {
+      diag_error(sema->diag, sema_loc(sema, p), "unknown type in parameter '%.*s'",
+                 (int)vd->name.len, vd->name.ptr);
+    }
+    if (ptypes) ptypes[j] = t; /* 失败置 NULL，位置对齐，签名校验时跳过 */
+    sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = t};
+    if (!sema_scope_define(fscope, vd->name, &init)) {
+      diag_error(sema->diag, sema_loc(sema, p), "duplicate parameter '%.*s'",
+                 (int)vd->name.len, vd->name.ptr);
+    }
+  }
+
+  /* 建树：body 内局部函数登记队列 + 嵌套块作用域（临时树，自持） */
+  build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
+
+  /* 返回路径完整性：非 void 字面量所有路径必须 return */
+  const type_t *rt = NULL;
+  if (fn->return_expr) {
+    rt = sema_resolve_type_slot(sema, &fn->return_expr);
+    if (!rt) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                 "unknown return type in function literal");
+    }
+  }
+  if (rt && rt->kind != TYPE_KIND_VOID && !r.definitely_returns) {
+    char nb[128];
+    if (fn->name.len)
+      name_to_cstr(fn->name, nb, sizeof nb);
+    else
+      snprintf(nb, sizeof nb, "<anonymous>");
+    diag_error(sema->diag, sema_loc(sema, &fn->base),
+               "function literal '%s' must return a value on all paths", nb);
+  }
+
+  /* 签名解析 + 登记（compiler hoist LOAD_TYPE <sig_id> 用） */
+  const type_t *sig = type_func_sig(sema->vm, ptypes, nparams, rt, false);
+  const sema_type_t *st = sema_type_register(sema, sig);
+  if (st) fn->sig_id = st->id;
+  if (ptypes) allocator_free(sema->vm->alloc, (void **)&ptypes);
+
+  /* walk body：参数 shadow 定义到临时 VM scope；捕获检查按字面量 fscope
+     生效（引用外层局部 = 闭包，拒绝）。保存/恢复外层状态——本函数嵌套在
+     外层 walk 中调用（外层可能正 walk 局部函数体，local_func_base 非空）。 */
+  sema_scope_t *saved_lfb = sema->local_func_base;
+  const type_t *saved_rt = sema->func_return_type;
+  bool saved_has_ret = sema->func_has_return;
+
+  sema->local_func_base = fscope;
+  sema->func_return_type = rt;
+  sema->func_has_return = false;
+
+  vm_push_scope(sema->vm);
+  for (ast_node_t *p = fn->params; p; p = p->next) {
+    ast_var_def_t *vd = (ast_var_def_t *)p;
+    sema_symbol_t *ps = sema_scope_find_local(fscope, vd->name);
+    if (ps) ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
+    value_t *pv = value_make_shadow(
+        sema->vm, ps && ps->type ? ps->type : sema->vm->type_void);
+    char nb[256];
+    name_to_cstr(vd->name, nb, sizeof nb);
+    scope_define(sema->vm, sema->vm->current_scope, nb, pv);
+  }
+  sema_walk_block(sema, fn->body, fscope);
+  vm_pop_scope(sema->vm);
+
+  /* 同步 walk body 内登记的局部函数（sema->funcs[n0..]）并标记 */
+  for (size_t i = n0; i < vec_len(sema->funcs); i++) {
+    sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
+    if (sf->is_literal_owned) continue; /* 嵌套字面量已同步 walk */
+    sf->is_literal_owned = true;
+    if (((ast_func_def_t *)sf->def)->is_comptime) continue;
+    sema_walk_function(sema, sf);
+  }
+
+  /* 恢复外层 walk 上下文 */
+  sema->local_func_base = saved_lfb;
+  sema->func_return_type = saved_rt;
+  sema->func_has_return = saved_has_ret;
+
+  /* 销毁临时作用域树（含 body 局部函数 fscope） */
+  sema_scope_destroy(&fscope);
+
+  return sig;
 }

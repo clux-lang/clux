@@ -333,11 +333,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 局部函数体内调用兄弟/自身：callee 保持 AST_IDENT → 编译器发
-         PUSH name（运行时作用域查找），而函数体查找链只有参数 + 全局，
-         兄弟/自身符号在定义点块作用域，不可见（需闭包）——编译期拦截。
-         全局函数（global_scope 符号）经作用域查找可见，放行。 */
+      /* 局部函数体内调用兄弟/自身/外层局部：callee 保持 AST_IDENT →
+         编译器发 PUSH name（运行时作用域查找），而函数体查找链只有参数 +
+         全局，兄弟/自身/外层局部符号不可见（需闭包）——编译期拦截。
+         参数（fscope 直系，含函数类型参数——可调用，运行时参数可见）与
+         全局函数放行（sema_scope_find_local 判参数、global lookup 判全局，
+         与 AST_IDENT 引用检查同构）。 */
       if (sema->local_func_base &&
+          sema_scope_find_local(sema->local_func_base, name->name) != sym &&
           sema_lookup(sema->global_scope, name->name) != sym) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
                    "local function cannot call sibling or self '%.*s' "
@@ -495,6 +498,16 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
       return value_make_shadow(sema->vm, t);
+    }
+    case AST_FUNC_DEF: {
+      /* 函数字面量（表达式内 func 定义，函数值）：签名解析 + body 类型
+         检查（sema_check_func_literal：临时 fscope 同步建树+walk，不注册
+         作用域符号、不提升）。返回签名类型的 shadow——函数值表达式的类型
+         即签名。失败（已诊断）返回 void shadow。 */
+      ast_func_def_t *fn = (ast_func_def_t *)*node;
+      const type_t *sig = sema_check_func_literal(sema, fn, scope);
+      if (!sig) return value_make_shadow(sema->vm, sema->vm->type_void);
+      return value_make_shadow(sema->vm, sig);
     }
     case AST_TERNARY: {
       /* 三元条件表达式：cond 必须 bool；两分支都 shadow 求值（两侧都要

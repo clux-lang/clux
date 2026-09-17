@@ -608,6 +608,10 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     /* comptime func：调用点折叠为字面量（sema_eval_comptime_call），
        不 shadow walk（参数为 shadow 无法编译期求值，body 求值在调用点）。 */
     if (fn->is_comptime) continue;
+    /* 函数字面量 body 内登记的局部函数：sema_check_func_literal 已同步
+       walk 并标记，其 fscope 挂在临时作用域树上已销毁——跳过防二次 walk
+       访问悬空作用域。 */
+    if (sf->is_literal_owned) continue;
     sema_walk_function(sema, sf);
   }
 
