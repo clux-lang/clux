@@ -191,6 +191,11 @@ static value_t *op_push_undefined(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make_undefined(vm);
 }
 
+static value_t *op_push_nil(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    return value_make_nil(vm);
+}
+
 static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
 
@@ -678,6 +683,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_LOAD_FUNCTION]  = op_load_function,
     [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,
+    [BCODE_PUSH_NIL]       = op_push_nil,
     [BCODE_DEFINE]         = op_define,
     [BCODE_ADD]            = op_add,
     [BCODE_SUB]            = op_sub,

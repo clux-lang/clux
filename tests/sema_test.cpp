@@ -466,6 +466,85 @@ TEST_F(SemaTest, SelfReferenceUndefined) {
     expect_message(0, "undefined variable 'x'");
 }
 
+/* ================================================================ */
+/* nil：内置类型唯一值（函数 0 初始化/未来空指针）                   */
+/* ================================================================ */
+
+TEST_F(SemaTest, NilTypeInference) {
+    /* var n = nil → 推断 nil 类型；nil == nil 恒真 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var n = nil;"
+        "  if (n == nil) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NilAsU64ExplicitCast) {
+    /* nil 显式转换 u64(0) */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var z:u64 = nil as u64;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NilAsFuncExplicitCast) {
+    /* nil 显式转换任意函数类型 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var f:func(i32)->i32 = nil as func(i32)->i32;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NilToFuncImplicitCast) {
+    /* 函数 0 初始化：var f:func(...) = nil（implicit_cast） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var f:func(i32)->i32 = nil;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, FuncCompareNil) {
+    /* func == nil / != nil：0 初始化检测 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var f:func(i32)->i32 = nil;"
+        "  if (f == nil) { }"
+        "  if (f != nil) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NilNotTypeName) {
+    /* nil 是内置类型但不可作变量类型注解（type_lookup("nil")=NULL） */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:nil = nil;"
+        "}"));
+    expect_message(0, "unsupported type expression");
+}
+
+TEST_F(SemaTest, NilCannotCompareWithInt) {
+    /* nil 只能与 nil / func 比较，与整数比较报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  if (nil == 0) { }"
+        "}"));
+    expect_message(0, "cannot apply '==' to nil and i32");
+}
+
+TEST_F(SemaTest, NilCannotImplicitCastToU64) {
+    /* nil → u64 仅显式（as），隐式（赋值）报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var z:u64 = nil;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'z'");
+}
+
 TEST_F(SemaTest, VarInitTypeMismatch) {
     EXPECT_FALSE(analyze("func main(): void { var x:i32 = \"s\"; }"));
     expect_message(0, "cannot initialize variable 'x' of type i32");

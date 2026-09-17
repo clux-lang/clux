@@ -18,6 +18,7 @@ break   continue true    false   void    bool    str     undefined
 const   volatile
 i8      i16     i32     i64     u8      u16     u32     u64
 f32     f64
+nil     comptime extends
 ```
 
 ### 2.2 运算符与标点
@@ -44,6 +45,7 @@ f32     f64
 - 字符：`'a'`, `'\n'`, `'\x41'`（值类型 u8，见 2.6）
 - 布尔：`true`, `false`
 - 字符串：`"hello"`（见 3.2）
+- nil：`nil`（内置类型唯一值，见 4.2.1）
 
 #### 数字字面量词法规则
 
@@ -358,6 +360,19 @@ var <name>:<type> = undefined;      // 延迟初始化（TDZ）
 - 可以赋值：`x = 10;` 赋值后退出 TDZ
 - 可计算 `typeof(x)`、`sizeof(x)`、`alignof(x)`（仅基于类型信息，不访问值）
 
+#### nil（内置类型唯一值）
+
+`nil` 是内置类型（与 `type` 类似）的唯一值，当前表示函数的 **0 初始化**（`*((func_t **)data) = NULL`），未来用于表示空指针。
+
+规则：
+- `nil` 是字面量值，**不是类型名**：不存在 `var a:nil = nil` 这类类型变量定义（`type_lookup("nil")` 返回 NULL）
+- 函数 0 初始化：`var f:func(...) = nil` / `f = nil`（nil → func 隐式转换）
+- 比较：`nil == nil` 恒真；`nil == f` / `f == nil` 判断函数指针是否为 NULL（func 对象与 nil 的比较）
+- 显式转换（`as`）：
+  - `nil as u64` → `0`
+  - `nil as func(...) -> ...` → NULL 函数指针
+- 隐式转换（赋值）：仅允许 → func 类型（0 初始化）；nil → u64 仅显式
+
 ### 4.3 赋值语句
 
 ```
@@ -467,6 +482,7 @@ M1 阶段硬编码绑定 C 的 printf，支持 %d, %f, %s, %c 等格式符。
   - 整数与浮点混合：禁止，必须用 `as` 显式转换
   - bool 参与算术：禁止
 - 比较运算：两边类型必须兼容，结果为 bool
+  - nil 可与 nil / func 比较：`nil == nil` 恒真，`nil == f` / `f == nil` 判断函数指针是否为 NULL（0 初始化检测）
 - 逻辑运算：操作数必须为 bool，结果为 bool
 - 位运算：操作数必须为整数类型，结果类型与操作数一致
 - 条件表达式（if/while）：必须为 bool，不接受整数

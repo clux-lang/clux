@@ -2297,3 +2297,121 @@ TEST_F(ValueCore, UndefinedScopeDefineAndPop) {
     EXPECT_TRUE(value_is_undefined(vm, stored));
     vm_pop_scope(vm);
 }
+
+/* ---- nil（内置类型唯一值，函数 0 初始化/未来空指针） ---- */
+
+TEST_F(ValueCore, MakeNilIsNilType) {
+    value_t *n = value_make_nil(vm);
+    EXPECT_EQ(value_type(n), vm->type_nil);
+    EXPECT_TRUE(value_is_nil(vm, n));
+    EXPECT_EQ(value_kind(n), TYPE_KIND_NIL);
+    /* data 为 func_t* 宽度零块 = NULL 指针（函数 0 初始化语义） */
+    const func_t *fn = *(const func_t **)value_data(n);
+    EXPECT_EQ(fn, nullptr);
+}
+
+TEST_F(ValueCore, NilNotRegisteredAsTypeName) {
+    /* nil 不注册进 global scope：type_lookup("nil") = NULL，
+       因此 var a:nil 无法解析（与 i32/bool 等类型名不同） */
+    EXPECT_EQ(type_lookup(vm, STRSLICE_LIT("nil")), nullptr);
+}
+
+TEST_F(ValueCore, NilCloneAndAssign) {
+    value_t *n = value_make_nil(vm);
+    value_t *c = value_clone(vm, n);
+    EXPECT_TRUE(value_is_nil(vm, c));
+    EXPECT_EQ(value_type(c), vm->type_nil);
+
+    value_t *dst = value_make_nil(vm);
+    value_t *r = value_assign(vm, dst, n);
+    ASSERT_EQ(r, dst);
+    EXPECT_TRUE(value_is_nil(vm, dst));
+}
+
+TEST_F(ValueCore, NilEqNilIsTrue) {
+    value_t *a = value_make_nil(vm);
+    value_t *b = value_make_nil(vm);
+    value_t *r = value_eq(vm, a, b);
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(value_type(r), vm->type_bool);
+    EXPECT_TRUE(*(bool *)value_data(r));
+}
+
+TEST_F(ValueCore, NilEqFuncIsNullCheck) {
+    /* nil == func：func 指针是否为 NULL。0 初始化的 func value 与 nil 相等 */
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
+    value_t *fn = func_new(vm, sum_variadic, vm->global_scope,
+                           vm->root_scope, sig, STRSLICE_LIT("f"));
+
+    /* 真实函数指针 → nil != fn */
+    value_t *r1 = value_eq(vm, value_make_nil(vm), fn);
+    EXPECT_FALSE(*(bool *)value_data(r1));
+
+    /* 0 初始化 func value（data 为 NULL 指针）→ nil == fn */
+    void *zd = value_alloc_data(vm->alloc, sig);
+    *(func_t **)zd = NULL;
+    value_t *zero_fn = value_make_untracked(vm->alloc, sig, zd);
+    value_t *r2 = value_eq(vm, value_make_nil(vm), zero_fn);
+    EXPECT_TRUE(*(bool *)value_data(r2));
+
+    raw_free(vm, fn);
+    raw_free(vm, zero_fn);
+}
+
+TEST_F(ValueCore, FuncEqNil) {
+    /* func == nil（func vtable 侧）：NULL 函数指针 == nil */
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
+    void *zd = value_alloc_data(vm->alloc, sig);
+    *(func_t **)zd = NULL;
+    value_t *zero_fn = value_make_untracked(vm->alloc, sig, zd);
+    value_t *r = value_eq(vm, zero_fn, value_make_nil(vm));
+    EXPECT_EQ(value_type(r), vm->type_bool);
+    EXPECT_TRUE(*(bool *)value_data(r));
+
+    raw_free(vm, zero_fn);
+}
+
+TEST_F(ValueCore, NilExplicitCastToU64IsZero) {
+    value_t *n = value_make_nil(vm);
+    value_t *r = value_explicit_cast(vm, n, vm->type_u64);
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(value_type(r), vm->type_u64);
+    EXPECT_EQ(read_sint(r), 0);
+}
+
+TEST_F(ValueCore, NilExplicitCastToFunc) {
+    value_t *n = value_make_nil(vm);
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
+    value_t *r = value_explicit_cast(vm, n, sig);
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(value_type(r), sig);
+    /* data 为 NULL 指针（0 初始化函数值） */
+    const func_t *fn = *(const func_t **)value_data(r);
+    EXPECT_EQ(fn, nullptr);
+}
+
+TEST_F(ValueCore, NilImplicitCastToFunc) {
+    value_t *n = value_make_nil(vm);
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
+    value_t *r = value_implicit_cast(vm, n, sig);
+    ASSERT_NE(r, nullptr);
+    EXPECT_EQ(value_type(r), sig);
+    const func_t *fn = *(const func_t **)value_data(r);
+    EXPECT_EQ(fn, nullptr);
+}
+
+TEST_F(ValueCore, NilImplicitCastToU64Fails) {
+    /* nil → u64 仅显式：隐式转换报错 */
+    value_t *n = value_make_nil(vm);
+    value_t *r = value_implicit_cast(vm, n, vm->type_u64);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+TEST_F(ValueCore, NilCompareWithIntFails) {
+    value_t *n = value_make_nil(vm);
+    value_t *i = make_i32_raw(vm, 0);
+    value_t *r = value_eq(vm, n, i);
+    EXPECT_TRUE(value_is_error(vm, r));
+    raw_free(vm, i);
+}
+

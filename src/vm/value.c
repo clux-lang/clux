@@ -165,6 +165,18 @@ bool value_is_undefined(vm_t *vm, const value_t *v) {
     return v && vm && v->type == vm->type_void;
 }
 
+/* ---- nil 工具 ---- */
+
+value_t *value_make_nil(vm_t *vm) {
+    if (!vm) return NULL;
+    void *data = value_alloc_data(vm->alloc, vm->type_nil); /* 零块 = NULL 指针 */
+    return value_make(vm, vm->type_nil, data);
+}
+
+bool value_is_nil(vm_t *vm, const value_t *v) {
+    return v && vm && v->type == vm->type_nil;
+}
+
 /* ---- interrupt 工具 ---- */
 
 bool value_is_interrupt(vm_t *vm, const value_t *v) {

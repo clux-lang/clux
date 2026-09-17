@@ -278,6 +278,30 @@ TEST(Driver, RunFileEmptyBareBlockReturnsZero) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileNilEndToEndPasses) {
+  /* nil 端到端：函数 0 初始化 + func==nil 比较 + nil as u64 显式转换 */
+  std::string path = write_temp_file(
+      "func f1(a:i32):i32 { return a + 1; }"
+      "func main():i32 {\n"
+      "  var z:u64 = nil as u64;\n"
+      "  var g:func(i32)->i32 = nil;\n"
+      "  if (g == nil) { g = f1; }\n"
+      "  if (g != nil) { var r = g(10); }\n"
+      "  if (nil == nil) { }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileNilAsTypeAnnotationRejected) {
+  /* var a:nil 应被拒绝：nil 是值字面量，不是类型名（type_lookup 返回 NULL） */
+  std::string path =
+      write_temp_file("func main():i32 { var a:nil = nil; return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileEmptyStatementsReturnsZero) {
   /* 单独分号空语句：顶层（函数定义后）、语句间、声明后均应通过流水线 */
   std::string path = write_temp_file(

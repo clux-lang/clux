@@ -99,6 +99,15 @@ value_t *value_make_undefined(vm_t *vm);
 /** 判断 value 是否为 undefined（void 类型 value） */
 bool value_is_undefined(vm_t *vm, const value_t *v);
 
+/* ---- nil 构造 ---- */
+
+/** 创建 nil value（type_nil 类型，data 为 func_t* 宽度的零块 = NULL 指针）。
+ *  nil 表示函数 0 初始化（未来空指针）；nil 是字面量值，不是类型名。 */
+value_t *value_make_nil(vm_t *vm);
+
+/** 判断 value 是否为 nil（type_nil 类型 value） */
+bool value_is_nil(vm_t *vm, const value_t *v);
+
 /* ---- interrupt 构造 ---- */
 
 /** 创建 interrupt value（引擎级控制流哨兵，data 内联 interrupt_data_t） */

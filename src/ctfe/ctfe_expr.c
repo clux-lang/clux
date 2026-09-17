@@ -426,6 +426,10 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
     case AST_UNDEF:
         return ctfe_err(ctx, "ctfe: 'undefined' is not an expression");
+    case AST_NIL:
+        /* nil：内置类型唯一值（函数 0 初始化/未来空指针），
+           CTFE 求值压入真实 nil value（data = NULL 指针）。 */
+        return value_make_nil(vm);
     case AST_INDEX: {
         /* 右值下标 a[i]：object → index → value_get_index（与运行期
            INDEX_GET 语义一致）。indices 由 sema 保证单索引。 */

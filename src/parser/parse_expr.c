@@ -9,6 +9,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_undef.h"
+#include "parser/ast_nil.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_assign.h"
@@ -135,6 +136,7 @@ ast_node_t *parse_primary(parser_t *p) {
     node = parse_char_lit(p);    if (node) return node;
     node = parse_ident(p);       if (node) return node;
     node = parse_undef(p);       if (node) return node;
+    node = parse_nil(p);         if (node) return node;
 
     /* 分组表达式：(expr) */
     if (check_symbol(p, "(")) {

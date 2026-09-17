@@ -54,6 +54,7 @@ typedef enum {
     BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名
                                （未来 struct 等具名类型用，当前无生成） */
     BCODE_PUSH_UNDEFINED,  /* 压入 void 类型 value（"类型待推导"） */
+    BCODE_PUSH_NIL,        /* 压入 nil 值（内置类型唯一值，函数 0 初始化/未来空指针） */
 
     BCODE_DEFINE,          /* strtable 索引：弹栈定义（永远双弹 [value, type-spec]） */
 

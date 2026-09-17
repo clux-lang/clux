@@ -152,6 +152,12 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
     st_push(c, 1);
     break;
+  case AST_NIL:
+    /* nil：内置类型唯一值（函数 0 初始化/未来空指针），
+       运行时压入 data=NULL 的 nil value。 */
+    bcode_write_op(c->bc, BCODE_PUSH_NIL);
+    st_push(c, 1);
+    break;
   case AST_BINARY: {
     ast_binary_t *n = (ast_binary_t *)node;
     if (token_is(n->op, "&&") || token_is(n->op, "||")) {

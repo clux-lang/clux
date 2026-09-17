@@ -516,16 +516,37 @@ TEST_F(ExecTest, ErrorPropagatesThroughBinary) {
     bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 2);
     bcode_write_op(bc, BCODE_ADD);
     bcode_write_op(bc, BCODE_HALT);
+    value_t *r = run();
+    ASSERT_NE(r, nullptr);
+    EXPECT_TRUE(value_is_error(vm, r));
+}
+
+/* nil 字面量压栈：PUSH_NIL → 栈顶为 nil 值（data = NULL 指针） */
+TEST_F(ExecTest, PushNilThenHalt) {
+    bcode_write_op(bc, BCODE_PUSH_NIL);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_nil);
+    EXPECT_TRUE(value_is_nil(vm, top));
+    const func_t *fn = *(const func_t **)value_data(top);
+    EXPECT_EQ(fn, nullptr);
+}
+
+/* nil 与整数比较 → error（nil 只与 nil/func 可比） */
+TEST_F(ExecTest, NilCompareWithIntErrors) {
+    bcode_write_op(bc, BCODE_PUSH_NIL);
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 0);
+    bcode_write_op(bc, BCODE_EQ);
+    bcode_write_op(bc, BCODE_HALT);
 
     value_t *r = run();
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
-/* ================================================================ */
-/* 5. 函数（PUSH_FUNC_TYPE / FUNC_TYPE_* / PUSH_FUNCTION / define 统一绑定 / */
-/*    CALL / RET）                                                  */
-/* ================================================================ */
 
 /* exec_run 注册函数后按名查模块作用域并调用（clux 无顶层语句，
    入口函数由调用方显式触发）；未找到返回 NULL 由断言捕获 */

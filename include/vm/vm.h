@@ -42,6 +42,7 @@ typedef struct vm_t {
     type_t *type_void;
     type_t *type_type;   /* 元类型：type 的 type */
     type_t *type_func;   /* 函数类型基类（无签名） */
+    type_t *type_nil;    /* nil：唯一值 nil（函数 0 初始化/未来空指针） */
     type_t *type_error;  /* 错误类型（引擎级硬错误） */
     type_t *type_interrupt; /* interrupt 类型（引擎级控制流哨兵） */
 

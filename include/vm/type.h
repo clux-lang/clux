@@ -24,6 +24,7 @@ typedef enum type_kind_t {
     TYPE_KIND_STR,
     TYPE_KIND_TYPE,      /* type value 的元类型 */
     TYPE_KIND_FUNC,
+    TYPE_KIND_NIL,       /* nil：唯一值 nil，函数 0 初始化/未来空指针（仅字面量，不可作变量类型） */
     TYPE_KIND_ERROR,
     TYPE_KIND_INTERRUPT, /* 引擎级控制流哨兵（interrupt 类型） */
     /* ---- M2 复合类型段（内建标量之后；sema 只登记此段类型） ---- */
@@ -182,7 +183,7 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
    内建类型固定 id 0..(TYPE_ID_BUILTIN_COUNT-1)（vm_register_builtin_types
    按序登记，error/interrupt 紧随其后）；程序类型 id 由 sema 分配，从
    TYPE_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
-#define TYPE_ID_BUILTIN_COUNT 17u
+#define TYPE_ID_BUILTIN_COUNT 18u
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**

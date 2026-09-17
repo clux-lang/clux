@@ -25,6 +25,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_LOAD_FUNCTION]  = { "LOAD_FUNCTION",  { BCODE_ASM_OP_U32 } },
     [BCODE_SET_TYPE_NAME]  = { "SET_TYPE_NAME",  { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_UNDEFINED] = { "PUSH_UNDEFINED", { BCODE_ASM_OP_NONE } },
+    [BCODE_PUSH_NIL]       = { "PUSH_NIL",       { BCODE_ASM_OP_NONE } },
 
     [BCODE_DEFINE]         = { "DEFINE",         { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_FUNC_TYPE] = { "PUSH_FUNC_TYPE", { BCODE_ASM_OP_NONE } },

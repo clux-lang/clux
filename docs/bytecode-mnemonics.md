@@ -59,6 +59,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `PUSH_VALUE` | `U32` | 压入 `stack[sp-1-offset]` 的借用引用（深层取址）。 |
 | `LOAD` | `STR` | 从 global scope 查 type value 压栈。 |
 | `PUSH_UNDEFINED` | — | 压入 void 类型 value（"类型待推导"占位）。 |
+| `PUSH_NIL` | — | 压入 nil 值（内置类型唯一值，data 为 func_t\* 宽度零块 = NULL 指针；函数 0 初始化 / 未来空指针）。 |
 
 ### 4.2 常量立即数
 

@@ -317,6 +317,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       diag_error(sema->diag, sema_loc(sema, *node),
                  "'undefined' can only be used as a variable initializer");
       return value_make_shadow(sema->vm, sema->vm->type_void);
+    case AST_NIL:
+      /* nil：内置类型（与 type 类似）的唯一值，函数 0 初始化/未来空指针。
+         仅字面量值，不可作变量类型——type_lookup("nil") 返回 NULL 自然拒绝
+         var a:nil。比较与显式转换由 nil/func vtable 槽位处理。 */
+      return value_make_shadow(sema->vm, sema->vm->type_nil);
     case AST_BINARY:
       return shadow_binary(sema, node, scope);
     case AST_UNARY: {

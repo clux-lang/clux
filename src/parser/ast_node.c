@@ -30,6 +30,7 @@ static const char *g_kind_names[] = {
     [AST_CHAR_LIT]   = "char_lit",
     [AST_IDENT]      = "ident",
     [AST_UNDEF]      = "undef",
+    [AST_NIL]        = "nil",
     [AST_CONST]      = "const",
     [AST_VOLATILE]   = "volatile",
     [AST_FUNC_TYPE]  = "func_type",
