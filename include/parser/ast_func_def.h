@@ -11,6 +11,10 @@ extern "C" {
 typedef struct {
     ast_node_t  base;
     strslice_t  name;        /* 函数名 */
+    ast_node_t *captures;    /* 闭包捕获列表（func |a,(b:i32=c+d)| ...）：AST_VAR_DEF
+                                兄弟链。纯 id 捕获 = type_expr/init 均为 NULL（类型取自
+                                外层符号）；括号 VALUE DECL = 完整 var def（显式类型 +
+                                init 初始化表达式）。NULL = 无捕获。 */
     ast_node_t *params;      /* AST_VAR_DEF 兄弟链 */
     ast_node_t *params_last; /* O(1) 追加 */
     ast_node_t *return_expr; /* 返回类型表达式（NULL = void） */

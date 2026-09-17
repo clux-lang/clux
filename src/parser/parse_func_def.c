@@ -78,12 +78,145 @@ static ast_node_t *parse_func_param_item(parser_t *p) {
     return parse_unary(p);
 }
 
+/** 解析捕获列表中的单个捕获项 → AST_VAR_DEF：
+ *   - 纯 id：name（type_expr/init 均为 NULL；类型取自外层符号）
+ *   - 括号 VALUE DECL：(name[:type] = init)（临时构造：type 可选、init 必选，
+ *     定义点在外层作用域求值后存入 closure_scope） */
+static ast_node_t *parse_capture_item(parser_t *p) {
+    uint32_t tb = p->pos;
+
+    /* 括号形态：(name[:type] = init) */
+    if (match_symbol(p, "(")) {
+        skip_trivia(p);
+
+        if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected capture name after '('");
+        }
+        strslice_t name = token_strslice(cur_token(p));
+        advance(p);
+        skip_trivia(p);
+
+        /* 可选类型标注：:type（min_prec=1 限定，不消费 '=' 与逗号/右括号） */
+        ast_node_t *type_expr = NULL;
+        if (check_symbol(p, ":")) {
+            advance(p);
+            skip_trivia(p);
+            type_expr = parse_expr_prec(p, 1);
+            if (!type_expr || type_expr->kind == AST_ERROR) {
+                if (!type_expr) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected type after ':' in capture");
+                }
+                return type_expr;
+            }
+        }
+
+        /* 初始化：= expr（必须） */
+        if (!expect_symbol(p, "=")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected '=' and initializer in capture");
+        }
+        skip_trivia(p);
+
+        ast_node_t *init = parse_expr_prec(p, 1);
+        if (!init || init->kind == AST_ERROR) {
+            if (!init) {
+                return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos,
+                                     "expected expression after '=' in capture");
+            }
+            return init;
+        }
+
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ')' to close capture");
+        }
+        skip_trivia(p);
+
+        ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
+        ((ast_var_def_t *)node)->name      = name;
+        ((ast_var_def_t *)node)->type_expr = type_expr;
+        ((ast_var_def_t *)node)->init      = init;
+        return node;
+    }
+
+    /* 纯 id 捕获：name（type_expr/init 均为 NULL） */
+    if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected capture name or '(name = init)' in capture list");
+    }
+    strslice_t name = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+
+    ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
+    ((ast_var_def_t *)node)->name = name;
+    return node;
+}
+
+/** 解析捕获列表：| item (, item)* |，空列表 || 合法（返回 NULL）。 */
+static ast_node_t *parse_capture_list(parser_t *p) {
+    uint32_t tb = p->pos;
+    advance(p);   /* 消费开 '|' */
+    skip_trivia(p);
+
+    ast_node_t *caps      = NULL;
+    ast_node_t *caps_last = NULL;
+
+    if (!check_symbol(p, "|")) {
+        ast_node_t *cap = parse_capture_item(p);
+        if (!cap || cap->kind == AST_ERROR) {
+            if (!cap) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected capture in capture list");
+            }
+            return cap;
+        }
+        ast_append(&caps, &caps_last, NULL, cap);
+        skip_trivia(p);
+
+        while (check_symbol(p, ",")) {
+            advance(p);
+            skip_trivia(p);
+            cap = parse_capture_item(p);
+            if (!cap || cap->kind == AST_ERROR) {
+                if (!cap) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected capture after ','");
+                }
+                return cap;
+            }
+            ast_append(&caps, &caps_last, NULL, cap);
+            skip_trivia(p);
+        }
+    }
+
+    if (!expect_symbol(p, "|")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected '|' to close capture list");
+    }
+    skip_trivia(p);
+    return caps;
+}
+
 ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     uint32_t tb = p->pos;
 
     if (!check_keyword(p, "func")) { p->pos = tb; return NULL; }
     advance(p);  /* commit: 消费 "func" */
     skip_trivia(p);
+
+    /* 捕获列表：func |a,(b:i32 = c+d)| name(...) —— 紧跟 func 之后。
+       仅函数定义/字面量（AST_FUNC_DEF）允许；函数类型（'->' 分支）拒绝，
+       在 '->' 分支处检查。空列表 || 合法（返回 NULL = 无捕获）。 */
+    ast_node_t *captures = NULL;
+    if (check_symbol(p, "|")) {
+        captures = parse_capture_list(p);
+        if (captures && captures->kind == AST_ERROR) {
+            return captures;
+        }
+    }
 
     /*
      * 分歧点：func 后跟标识符且不紧跟 ( → 语句级函数定义（有 name）
@@ -150,6 +283,11 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         if (expected_kind != AST_FUNC_TYPE) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "function type not allowed here (expected ':' and body)");
+        }
+        /* 捕获列表不属于函数类型（签名擦除闭包，类型无捕获概念） */
+        if (captures) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "function type cannot have a capture list");
         }
         /* 参数必须是纯类型表达式（无具名） */
         for (ast_node_t *pr = params; pr; pr = pr->next) {
@@ -218,6 +356,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         ast_node_t *node = ast_func_def_new(p->arena, tb, p->pos);
         ast_func_def_t *fn = (ast_func_def_t *)node;
         fn->name        = name; /* 可为空（匿名）或为显示名（不绑作用域） */
+        fn->captures    = captures;
         fn->params      = params;
         fn->params_last = params_last;
         fn->return_expr = return_expr;
@@ -267,6 +406,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     ast_node_t *node = ast_func_def_new(p->arena, tb, p->pos);
     ast_func_def_t *fn = (ast_func_def_t *)node;
     fn->name        = name;
+    fn->captures    = captures;
     fn->params      = params;
     fn->params_last = params_last;
     fn->return_expr = return_expr;
