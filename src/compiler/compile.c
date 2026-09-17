@@ -158,11 +158,14 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   /* 产物布局（先定义类型，然后构造函数对象，最后放置函数体）：
        1. 类型提升区（hoist）— 运行时先构造并登记全部程序类型
        2. 函数对象提升区 — 每函数 LOAD_TYPE <sig_id> + PUSH_FUNCTION +
-          BIND_FUNC <fid> + [SET_FUNC_NAME]（函数体入口 pc 未知，PUSH_FUNCTION
-          先写占位，函数体区编译后回填）。全部函数（全局/局部/字面量）统一
-          构造，引用点只 LOAD_FUNCTION <fid> 从 functions_by_id 拉取。
+          BIND_FUNC <fid> + [SET_FUNC_NAME] + 捕获槽占位（函数体入口 pc
+          未知，PUSH_FUNCTION 先写占位，函数体区编译后回填）。构造的是
+          "基底"对象——绑定地址（id + entry_pc + 名字）；全局函数无捕获
+          （sema 拒绝），基底即最终实例，局部函数/字面量定义点按基底
+          MAKE_FUNCTION 实例化新实例。
        2.5 全局函数名绑定 — 每全局函数 LOAD_FUNCTION <fid> + DEFINE name
-          （与顶层 typedef 绑定同构；局部函数在定义点 DEFINE，字面量无绑定）
+          （与顶层 typedef 绑定同构；局部函数在定义点 DEFINE 后 STORE
+          重定向到新实例，字面量无绑定）
        3. HALT — 拦截顺序执行，函数体区不落入
        4. 函数体区 — 各函数体以 RET 结尾，仅经 PUSH_FUNCTION 记录的
           body 入口在被调用时进入

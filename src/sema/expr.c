@@ -66,6 +66,20 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
   }
 }
 
+/* 函数自身符号归属检查（捕获检查用）：sym 是函数可见链上的符号（fscope
+   直系捕获 / param_scope 直系参数）→ true。false = 外层局部（需捕获）或
+   非函数自身符号。参数在参数层（fscope 子 scope），捕获在 fscope——参数
+   遮蔽捕获，两者同属函数自身符号，放行。 */
+static bool func_own_symbol(sema_t *sema, strslice_t name,
+                            sema_symbol_t *sym) {
+  if (!sema->local_func_base) return false;
+  if (sema_scope_find_local(sema->local_func_base, name) == sym) return true;
+  if (sema->local_func_param_scope &&
+      sema_scope_find_local(sema->local_func_param_scope, name) == sym)
+    return true;
+  return false;
+}
+
 /* 二元运算符 token → vtable 分派函数 */
 static value_t *(*binop_of(const token_t *op))(vm_t *, value_t *, value_t *) {
   if (token_is(op, "+")) return value_add;
@@ -158,11 +172,10 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            全局（closure_scope 为空、调用时临时接 root_scope），兄弟/自身
            符号在定义点块作用域，不可见（需闭包）。FUNC 分支改写 AST_FUNC_REF
            → LOAD_FUNCTION 查 functions_by_id 全局表，会绕过作用域可见性
-           ——在此显式拦截。参数（fscope 直系，含函数类型参数——可调用，
+           ——在此显式拦截。参数（param_scope 直系，含函数类型参数——可调用，
            运行时参数可见）与全局函数（global_scope 符号）放行，与变量
            分支捕获检查同构。 */
-        if (sema->local_func_base &&
-            sema_scope_find_local(sema->local_func_base, n->name) != sym &&
+        if (sema->local_func_base && !func_own_symbol(sema, n->name, sym) &&
             sema_lookup(sema->global_scope, n->name) != sym) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "local function cannot reference sibling or self '%.*s' "
@@ -179,9 +192,13 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
                                            (*node)->tok_end);
         if (ref) {
-          /* 纯 fid 标识：fid 由 sema 创建函数对象时分配（符号表字段；内建
-             函数 = 内建 id）。compiler 自然 LOAD_FUNCTION <fid>。 */
-          ((ast_func_ref_t *)ref)->fid = sym->fid;
+          /* fid 由 sema 创建函数对象时分配（符号表字段；内建函数 = 内建 id）。
+             name 指向源标识符 token（compiler 发 PUSH name 沿作用域链查找——
+             局部函数取定义点 STORE 重定向的新实例；全局/内建取全局绑定基底，
+             与定义点 MAKE_FUNCTION 新实例语义对齐）。 */
+          ast_func_ref_t *fr = (ast_func_ref_t *)ref;
+          fr->fid  = sym->fid;
+          fr->name = n->name;
           ref->next = (*node)->next; /* 保留兄弟链 */
           *node = ref;
         }
@@ -211,7 +228,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          global 命中）、函数名（FUNC 分支已先行返回）、comptime 符号（上方
          已折叠，不捕获）合法。 */
       if (sema->local_func_base && sym &&
-          sema_scope_find_local(sema->local_func_base, n->name) != sym &&
+          !func_own_symbol(sema, n->name, sym) &&
           sema_lookup(sema->global_scope, n->name) != sym) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "local function cannot access outer local '%.*s' "

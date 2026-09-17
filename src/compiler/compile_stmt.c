@@ -73,7 +73,8 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
    类型构造在全局 hoist 区，此处仅运行时名字绑定），再按声明序提升局部
    函数名字绑定（compile_func_bind：LOAD_FUNCTION <fid>; PUSH_UNDEFINED;
    DEFINE——函数对象已在程序头 hoist 函数注册区统一构造，此处只绑定名字
-   到块作用域，名字整个块内可见，前向引用安全，同块互相调用），定义点跳过。
+   到块作用域，名字整个块内可见，前向引用安全，同块互相调用），定义点
+   跳过（第三循环 MAKE_FUNCTION 新实例 + STORE name 重定向名字到新实例）。
    函数体统一由 compiler_compile 函数体区按 funcs_all 队列（预扫描收集）
    编译回填——compile_block_body 不再收集。comptime 局部函数不进入运行时
    （调用点 sema 折叠），跳过。与 sema walk_block 提升严格一致。
@@ -89,15 +90,16 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
     compile_func_bind(c, fn);
     if (c->failed) return;
   }
-  /* 第三循环：按声明序编译语句；AST_FUNC_DEF 定义点发捕获绑定序列
-     （compile_func_capture_bind：LOAD_FUNCTION + 每捕获 SET_CLOSURE + POP，
-     净 0——名字绑定已在第二循环提升完成）。有捕获的局部函数在定义点把当前
-     外层变量值 clone 进函数 closure_scope（替换 hoist 区 undefined 占位）。 */
+  /* 第三循环：按声明序编译语句；AST_FUNC_DEF 定义点发实例化序列
+     （compile_func_capture_bind：MAKE_FUNCTION + 每捕获 SET_CLOSURE + STORE
+     name，净 0——新实例重定向名字绑定，替换第二循环绑定的基底对象）。
+     局部函数在定义点生成独立实例并把当前外层变量值 clone 进其 closure_scope
+     （每次求值新对象，循环内多次定义各自独立，捕获互不干扰）。 */
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind == AST_TYPE_DEF) continue;
     if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
-      if (!fn->is_comptime && fn->captures) {
+      if (!fn->is_comptime) {
         compile_func_capture_bind(c, fn, false);
         if (c->failed) return;
       }

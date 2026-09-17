@@ -53,6 +53,23 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
 /** 字节码函数执行回调（cfunc_t）：驱动函数体字节码，捕获 RET interrupt 哨兵 */
 value_t *bcode_call_cfunc(vm_t *vm, func_t *self, size_t argc, value_t **args);
 
+/**
+ * 按基底函数实例化新函数实例（函数定义点每次求值调用）。
+ *
+ * 函数定义（字面量/局部函数）每次求值都应生成独立实例：共享基底的
+ * entry_pc/cfunc/type/id/name，但 closure_scope 独立（复制基底捕获槽名 +
+ * undefined 占位，定义点 SET_CLOSURE 绑定各自捕获值）——循环内
+ * `fns[i] = func|(val=items[i])|...` 三个槽位指向三个独立对象，
+ * 捕获互不干扰（对标 LOAD_FUNCTION 的"同一对象"引用语义）。
+ *
+ * - base: 基底函数（hoist 区 PUSH_FUNCTION 构造，functions_by_id 登记）
+ * - 返回 value_t*：data 存新 bcode_function_t*，type 即签名类型；
+ *   untracked（调用方管理）：value_dispose(vm, v) 释放 data 块与 value_t，
+ *   函数实例本体注册进 vm->functions，由 vm_destroy 统一释放。
+ *   名字借用基底（owns_name=false），不重复拥有。
+ */
+value_t *func_instantiate(vm_t *vm, func_t *base);
+
 #ifdef __cplusplus
 }
 #endif

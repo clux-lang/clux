@@ -117,32 +117,33 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_FUNC_REF: {
-    /* sema 确认的函数引用（函数值）：纯 fid 标识（sema 创建函数对象时
-       分配，写进符号表/折叠产物）→ LOAD_FUNCTION <fid> 运行期从
-       functions_by_id 查表压真实函数值——与函数是否有 name 无关（匿名
-       字面量无名字也可引用）。fid 段：内建函数 < FUNC_ID_PROGRAM_BASE
-       （printf=0 合法）；程序函数 >= FUNC_ID_PROGRAM_BASE（sema 分配，
-       预扫描已校验非 0）。运行期对未登记 id 报 "unknown function id"。 */
+    /* sema 确认的函数引用（函数值）：
+       - 有名字（源码引用）：PUSH name 沿作用域链查找——局部函数取定义点
+         STORE 重定向的新实例（捕获独立），全局/内建函数取全局绑定基底。
+         与 AST_FUNC_DEF 定义点 MAKE_FUNCTION 新实例语义对齐。
+       - 无名字（comptime 折叠产物：匿名字面量引用）：LOAD_FUNCTION <fid>
+         从 functions_by_id 加载基底。fid 段：内建函数 < FUNC_ID_PROGRAM_BASE
+         （printf=0 合法）；程序函数 >= FUNC_ID_PROGRAM_BASE。运行期对未登记
+         id 报 "unknown function id"。 */
     ast_func_ref_t *n = (ast_func_ref_t *)node;
-    bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
-    bcode_write_u32(c->bc, n->fid);
+    if (n->name.len > 0) {
+      bcode_write_op(c->bc, BCODE_PUSH);
+      bcode_write_str(c->bc, n->name);
+    } else {
+      bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+      bcode_write_u32(c->bc, n->fid);
+    }
     st_push(c, 1);
     break;
   }
   case AST_FUNC_DEF: {
-    /* 函数字面量（表达式内函数值）：函数对象已在程序头 hoist 函数注册区
-       统一构造（PUSH_FUNCTION + BIND_FUNC + [SET_FUNC_NAME]），此处
-       LOAD_FUNCTION <fid> 从 functions_by_id 拉取压栈——引用点零构造。
-       有捕获的字面量随后发捕获绑定序列（keep=true：函数值留栈顶作表达式
-       结果）——定义点把当前外层变量值 clone 进函数 closure_scope。 */
+    /* 函数字面量（表达式内函数值）：MAKE_FUNCTION <fid> 从基底（hoist 区
+       PUSH_FUNCTION + BIND_FUNC + [SET_FUNC_NAME] 构造）实例化独立新实例
+       ——函数定义每次求值生成新对象（循环内字面量各持独立实例，捕获互不
+       干扰）。有捕获的字面量随后发捕获绑定序列（keep=true：函数值留栈顶
+       作表达式结果）——定义点把当前外层变量值 clone 进新实例 closure_scope。 */
     ast_func_def_t *fn = (ast_func_def_t *)node;
-    if (fn->captures) {
-      compile_func_capture_bind(c, fn, true);
-    } else {
-      bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
-      bcode_write_u32(c->bc, fn->fid);
-      st_push(c, 1);
-    }
+    compile_func_capture_bind(c, fn, true);
     break;
   }
   case AST_UNDEF:

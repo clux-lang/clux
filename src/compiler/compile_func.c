@@ -255,8 +255,14 @@ void compile_prescan_funcs(compiler_t *c, ast_node_t *program) {
  *   [SET_FUNC_NAME name] —— 显示名（仅命名函数；匿名字面量跳过）
  * 返回 PUSH_FUNCTION body 操作数字段位置（opcode+4，emit_jump 同款取样时机）。
  *
+ * 此区构造的是"基底"对象——主要作用绑定地址（id + entry_pc + 名字）。
+ * 全局函数 captures 恒空（sema 拒绝捕获并摘除），捕获占位循环不执行，基底
+ * 即最终实例；局部函数/字面量的捕获占位（PUSH_UNDEFINED + SET_CLOSURE）
+ * 复制捕获槽名到基底 closure_scope，定义点 MAKE_FUNCTION 按基底实例化
+ * 新实例时以此为模板（strmap_keys 枚举槽名 + undefined 占位）。
+ *
  * 不 DEFINE：作用域名字绑定由消费点发出（全局 → compile.c 全局绑定段；
- * 局部 → compile_block_body 定义点；字面量无作用域绑定，只 LOAD_FUNCTION）。
+ * 局部 → compile_block_body 定义点；字面量无作用域绑定，只 MAKE_FUNCTION）。
  */
 size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
   uint32_t sig_id = fn->sig_id;
@@ -283,19 +289,20 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
   bcode_write_u32(c->bc, fn->fid);
 
   /* 3. SET_FUNC_NAME "name"：写入函数显示名（peek 不弹栈）。
-     仅命名函数写入；匿名字面量（name 空）跳过——运行期 LOAD_FUNCTION
-     压入的 func value 无显示名，语义无差异。 */
+     仅命名函数写入；匿名字面量（name 空）跳过——实例化的 func value
+     无显示名，语义无差异。 */
   if (fn->name.len > 0) {
     bcode_write_op(c->bc, BCODE_SET_FUNC_NAME);
     bcode_write_str(c->bc, fn->name);
   }
 
   /* 4. 捕获槽占位：每捕获 PUSH_UNDEFINED (+1) + SET_CLOSURE "name"（弹 cap
-     → scope_set 定义或替换，净 0）——函数对象 closure_scope 先以 undefined
-     绑定捕获名。定义点 SET_CLOSURE 用真实捕获值替换（scope_set）：
-     函数提升后、定义点前被调用 → 捕获槽是 undefined，函数体读到 → 引擎
-     级错误（TDZ 语义，见 compile_func_capture_bind）。函数值留在栈顶供
-     后续 BIND/名字绑定段使用。 */
+     → scope_set 定义或替换，净 0）——基底 closure_scope 先以 undefined
+     绑定捕获名。定义点 MAKE_FUNCTION 实例化新实例时复制这些槽名（strmap_keys
+     枚举 + undefined 占位），SET_CLOSURE 用真实捕获值替换——函数提升后、
+     定义点前被调用 → 捕获槽是 undefined，函数体读到 → 引擎级错误（TDZ
+     语义）。全局函数 captures 恒空（sema 拒绝捕获），此循环不执行。函数值
+     留在栈顶供后续 BIND/名字绑定段使用。 */
   for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
     ast_var_def_t *cv = (ast_var_def_t *)cap;
     bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
@@ -310,18 +317,21 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
 
 /**
  * 捕获绑定序列（函数定义点）：
- *   LOAD_FUNCTION <fid>            —— 压函数值（hoist 区已构造）
+ *   MAKE_FUNCTION <fid>            —— 从基底函数实例化新实例（新 closure_scope，
+ *                                    捕获槽 undefined 占位，共享 entry_pc）
  *   每捕获：<捕获值>                —— 纯 id → PUSH "name"（当前作用域链查外层
  *                                    变量值，借用引用压栈）；括号 → compile_expr
  *                                    (init)（定义点求值构造临时捕获值）
- *            SET_CLOSURE "name"    —— 弹捕获值 → clone 进函数 closure_scope
+ *            SET_CLOSURE "name"    —— 弹捕获值 → clone 进新实例 closure_scope
  *   keep=true：函数值留栈顶（函数字面量表达式，结果即函数值，净 +1）
- *   keep=false：POP 丢弃函数值（语句定义点，作用域名字绑定已由提升完成，净 0）
- * hoist 区已用 undefined 占位捕获槽（PUSH_UNDEFINED + SET_CLOSURE），此处
- * scope_set 替换真实值——函数提升后、定义点前调用 → 读到占位 undefined。
+ *   keep=false：STORE name 重定向——局部函数名字绑定（compile_func_bind 第二
+ *     循环绑定的是基底对象）改为指向新实例（value_assign 改写 data 指针，净 0）
+ * 函数定义每次求值生成独立实例：循环内多次求值各自新对象，捕获互不干扰
+ * （hoist 区基底仅作模板，不再被定义点改写）。提升后定义点前调用 → 读到
+ * 基底（捕获槽 undefined，TDZ 语义）。
  */
 void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
-  bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+  bcode_write_op(c->bc, BCODE_MAKE_FUNCTION);
   bcode_write_u32(c->bc, fn->fid);
   st_push(c, 1);
   for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
@@ -338,6 +348,13 @@ void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
     st_push(c, -1);
   }
   if (!keep) {
+    /* 局部函数语句定义点：名字已在块提升绑定基底对象，STORE 重定向到新实例。
+       func value 的 assign 是 data 指针改写（identity 拷贝），名字指向新实例
+       后递归/前向调用都解析到当前定义点的实例。STORE 压回结果引用（与
+       AST_ASSIGN 同款协议），语句无结果 → POP 丢弃。 */
+    bcode_write_op(c->bc, BCODE_STORE);
+    bcode_write_str(c->bc, fn->name);
+    st_push(c, -1);
     bcode_write_op(c->bc, BCODE_POP);
     st_push(c, -1);
   }
@@ -345,11 +362,13 @@ void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
 
 /**
  * 函数作用域名字绑定（LOAD_FUNCTION <fid> + DEFINE name）：
- *   LOAD_FUNCTION <fid> —— 从 functions_by_id 压入函数值（hoist 区已构造）
+ *   LOAD_FUNCTION <fid> —— 从 functions_by_id 压入基底函数值（hoist 区构造）
  *   PUSH_UNDEFINED       —— 类型说明符占位（DEFINE 从值推断 decl_type）
  *   DEFINE name          —— 绑定到当前作用域（全局 → 全局作用域；
  *                          局部 → 定义点块作用域，compile_block_body 提升时调用）
- * 函数值表达式（字面量）不调用本函数——只 LOAD_FUNCTION，无作用域绑定。
+ * 绑定的是基底对象：局部函数的定义点第三循环 MAKE_FUNCTION 生成新实例 +
+ * STORE name 重定向名字到新实例；全局函数只定义一次、无捕获，基底即实例。
+ * 函数值表达式（字面量）不调用本函数——MAKE_FUNCTION 实例化，无作用域绑定。
  */
 void compile_func_bind(compiler_t *c, ast_func_def_t *fn) {
   if (fn->name.len == 0) return; /* 匿名函数无作用域绑定 */

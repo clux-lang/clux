@@ -48,6 +48,43 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
     return value_make(vm, sig_type, data);
 }
 
+/* 按基底实例化新函数实例：共享 entry_pc/cfunc/type/id/name，closure_scope
+   独立（复制基底捕获槽名 + undefined 占位，定义点 SET_CLOSURE 逐个替换）。
+   名字借用基底（owns_name=false）——基底 owns_name=true（SET_FUNC_NAME 堆
+   拷贝）由 func_destroy 随基底释放，新实例共享 strslice 指针不释放。 */
+value_t *func_instantiate(vm_t *vm, func_t *base) {
+    if (!vm || !base || !base->type) return NULL;
+    bcode_function_t *fn = (bcode_function_t *)allocator_new(
+        vm->alloc, &g_bcode_function_class, 1);
+    if (!fn) panic("vm: out of memory instantiating bcode_function");
+    memset(fn, 0, sizeof(bcode_function_t));
+    fn->base.cfunc       = base->cfunc;
+    fn->base.root_scope  = base->root_scope;
+    fn->base.type        = base->type;
+    fn->base.id          = base->id;   /* 共享基底 id（不重复登记 functions_by_id） */
+    fn->base.name        = base->name; /* 借用基底名字 */
+    fn->base.closure_scope     = scope_new(vm->alloc, NULL);
+    fn->base.owns_closure_scope = true;
+    fn->entry_pc = (base->cfunc == bcode_call_cfunc)
+                       ? ((bcode_function_t *)base)->entry_pc : 0;
+
+    /* 复制基底捕获槽名 + undefined 占位（strmap_keys 只读 key 向量）。
+       定义点 SET_CLOSURE 用真实捕获值替换（scope_set）——提升后定义点前
+       调用 → 捕获槽 undefined（TDZ 语义，与 hoist 区占位一致）。 */
+    if (base->closure_scope && base->closure_scope->vars) {
+        const vec_t *keys = strmap_keys(base->closure_scope->vars);
+        for (size_t i = 0; i < vec_len(keys); i++) {
+            const char *key = (const char *)vec_get(keys, i);
+            value_t *u = value_make_undefined(vm);
+            scope_set(vm, fn->base.closure_scope, key, u);
+        }
+    }
+
+    if (vm->functions) vec_push(vm->functions, vm->alloc, fn);
+    void *data = value_alloc_data_copy(vm->alloc, base->type, &fn);
+    return value_make(vm, base->type, data);
+}
+
 value_t *bcode_call_cfunc(vm_t *vm, func_t *self, size_t argc, value_t **args) {
     bcode_function_t *bfn = (bcode_function_t *)self;
 

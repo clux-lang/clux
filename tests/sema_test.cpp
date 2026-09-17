@@ -74,6 +74,12 @@ static void lex_result_destroy(allocator_t *alloc, LexResult &lr) {
     lr.source_buf = nullptr;
 }
 
+/* 函数 fscope（捕获层）→ 参数层（fscope 的 child 0）：参数与函数体符号
+   挂参数层（镜像运行时 closure_scope → 参数匿名层结构）。 */
+static sema_scope_t *func_param_scope(sema_scope_t *fscope) {
+    return sema_scope_child(fscope, 0);
+}
+
 /* ---- Fixture ---- */
 
 class SemaTest : public ::testing::Test {
@@ -162,16 +168,18 @@ TEST_F(SemaTest, VarInferenceAndUse) {
     EXPECT_TRUE(analyze("func main(): void { var x = 1; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
-    /* 作用域树：global → main 函数作用域 */
+    /* 作用域树：global → main 函数 fscope（捕获层）→ 参数层（body 挂此层） */
     ASSERT_EQ(sema_scope_children_count(sema_->global_scope), 1u);
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
 
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(param, STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i32); /* 推断出 i32 */
 
-    sema_symbol_t *y = sema_scope_find_local(fscope, STRSLICE_LIT("y"));
+    sema_symbol_t *y = sema_scope_find_local(param, STRSLICE_LIT("y"));
     ASSERT_NE(y, nullptr);
     EXPECT_EQ(y->type, vm_->type_i32); /* 从 x 传播 */
 }
@@ -229,7 +237,8 @@ TEST_F(SemaTest, CallReturnTypeShadow) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *r = sema_scope_find_local(fscope, STRSLICE_LIT("r"));
+    sema_symbol_t *r =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("r"));
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->type, vm_->type_i32); /* shadow_call 返回 return_type shadow */
 }
@@ -686,15 +695,17 @@ TEST_F(SemaTest, ScopeTreeNestedBlocks) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
 
-    /* a 在函数作用域；b/c 各自在独立子作用域（if body / while body） */
-    EXPECT_NE(sema_scope_find_local(fscope, STRSLICE_LIT("a")), nullptr);
-    EXPECT_EQ(sema_scope_find_local(fscope, STRSLICE_LIT("b")), nullptr);
-    EXPECT_EQ(sema_scope_find_local(fscope, STRSLICE_LIT("c")), nullptr);
+    /* a 在参数层；b/c 各自在独立子作用域（if body / while body） */
+    EXPECT_NE(sema_scope_find_local(param, STRSLICE_LIT("a")), nullptr);
+    EXPECT_EQ(sema_scope_find_local(param, STRSLICE_LIT("b")), nullptr);
+    EXPECT_EQ(sema_scope_find_local(param, STRSLICE_LIT("c")), nullptr);
 
-    ASSERT_EQ(sema_scope_children_count(fscope), 2u);
-    sema_scope_t *b1 = sema_scope_child(fscope, 0);
-    sema_scope_t *b2 = sema_scope_child(fscope, 1);
+    ASSERT_EQ(sema_scope_children_count(param), 2u);
+    sema_scope_t *b1 = sema_scope_child(param, 0);
+    sema_scope_t *b2 = sema_scope_child(param, 1);
     ASSERT_NE(b1, nullptr);
     ASSERT_NE(b2, nullptr);
     EXPECT_EQ(b1->kind, SEMA_SCOPE_BLOCK);
@@ -711,9 +722,11 @@ TEST_F(SemaTest, ScopeTreeIfElse) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    ASSERT_EQ(sema_scope_children_count(fscope), 2u); /* then / else */
-    EXPECT_NE(sema_scope_child(fscope, 0), nullptr);
-    EXPECT_NE(sema_scope_child(fscope, 1), nullptr);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
+    ASSERT_EQ(sema_scope_children_count(param), 2u); /* then / else */
+    EXPECT_NE(sema_scope_child(param, 0), nullptr);
+    EXPECT_NE(sema_scope_child(param, 1), nullptr);
 }
 
 TEST_F(SemaTest, ScopeTreeElseIfChain) {
@@ -721,8 +734,10 @@ TEST_F(SemaTest, ScopeTreeElseIfChain) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
     /* then + else-if-then + else = 3 个同层子作用域 */
-    ASSERT_EQ(sema_scope_children_count(fscope), 3u);
+    ASSERT_EQ(sema_scope_children_count(param), 3u);
 }
 
 TEST_F(SemaTest, ScopeTreeFor) {
@@ -730,9 +745,11 @@ TEST_F(SemaTest, ScopeTreeFor) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    ASSERT_EQ(sema_scope_children_count(fscope), 1u);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
+    ASSERT_EQ(sema_scope_children_count(param), 1u);
 
-    sema_scope_t *for_scope = sema_scope_child(fscope, 0);
+    sema_scope_t *for_scope = sema_scope_child(param, 0);
     ASSERT_NE(for_scope, nullptr);
     EXPECT_EQ(for_scope->kind, SEMA_SCOPE_FOR);
 
@@ -751,9 +768,11 @@ TEST_F(SemaTest, ScopeTreeWhileBody) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    ASSERT_EQ(sema_scope_children_count(fscope), 1u);
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
+    ASSERT_EQ(sema_scope_children_count(param), 1u);
 
-    sema_scope_t *body = sema_scope_child(fscope, 0);
+    sema_scope_t *body = sema_scope_child(param, 0);
     ASSERT_NE(body, nullptr);
     EXPECT_NE(sema_scope_find_local(body, STRSLICE_LIT("t")), nullptr);
 }
@@ -770,10 +789,12 @@ TEST_F(SemaTest, ShadowingBlocksOuterNotVisible) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_scope_t *param = func_param_scope(fscope);
+    ASSERT_NE(param, nullptr);
+    sema_symbol_t *x = sema_scope_find_local(param, STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i32); /* 外层 x 保持 i32 */
-    sema_symbol_t *y = sema_scope_find_local(fscope, STRSLICE_LIT("y"));
+    sema_symbol_t *y = sema_scope_find_local(param, STRSLICE_LIT("y"));
     ASSERT_NE(y, nullptr);
     EXPECT_EQ(y->type, vm_->type_i32); /* var y = x 解析到外层 i32 x */
 }
@@ -886,7 +907,8 @@ TEST_F(SemaTest, ComptimeFuncCallFold) {
        global_scope 子节点 = [add, main]，main 在 child 1 */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *r = sema_scope_find_local(fscope, STRSLICE_LIT("r"));
+    sema_symbol_t *r =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("r"));
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->type, vm_->type_i32);
 }
@@ -983,7 +1005,8 @@ TEST_F(SemaTest, ComptimeLocalVar) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *l = sema_scope_find_local(fscope, STRSLICE_LIT("L"));
+    sema_symbol_t *l =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("L"));
     ASSERT_NE(l, nullptr);
     EXPECT_TRUE(l->is_comptime);
     EXPECT_TRUE(l->ct_valid);
@@ -1315,7 +1338,7 @@ TEST_F(SemaTest, TypeDefBuiltinRhs) {
        不经 sym->type。验证 var 显式类型解析到 i64。 */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
 
@@ -1362,7 +1385,7 @@ TEST_F(SemaTest, TypeDefAliasChain) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
 }
@@ -1388,7 +1411,7 @@ TEST_F(SemaTest, TypeDefLocal) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
 }
@@ -1413,7 +1436,7 @@ TEST_F(SemaTest, TypeDefTypeValueExpr) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *t = sema_scope_find_local(fscope, STRSLICE_LIT("t"));
+    sema_symbol_t *t = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("t"));
     ASSERT_NE(t, nullptr);
     EXPECT_EQ(t->type, vm_->type_type); /* 推断为 type 类型 */
 }
@@ -1453,7 +1476,7 @@ TEST_F(SemaTest, TypeDefFuncSignature) {
     /* var f:add_fn_t 类型解析到 func 签名 */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *f = sema_scope_find_local(fscope, STRSLICE_LIT("f"));
+    sema_symbol_t *f = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("f"));
     ASSERT_NE(f, nullptr);
     ASSERT_NE(f->type, nullptr);
     EXPECT_EQ(f->type->kind, TYPE_KIND_FUNC);
@@ -1520,7 +1543,7 @@ TEST_F(SemaTest, TypeDefForwardRefHoisted) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i32);
 }
@@ -1573,7 +1596,7 @@ TEST_F(SemaTest, TypeDefLocalShadowGlobal) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
 }
@@ -1592,10 +1615,10 @@ TEST_F(SemaTest, TypeDefLocalHoistedShadowGlobalForward) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
-    sema_symbol_t *y = sema_scope_find_local(fscope, STRSLICE_LIT("y"));
+    sema_symbol_t *y = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("y"));
     ASSERT_NE(y, nullptr);
     EXPECT_EQ(y->type, vm_->type_i64);
 }
@@ -1623,7 +1646,7 @@ TEST_F(SemaTest, TypeDefLocalHoistedDepOrder) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i32);
 }
@@ -1664,7 +1687,7 @@ TEST_F(SemaTest, VarShadowGlobalTypeOrderSensitive) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *t2 = sema_scope_find_local(fscope, STRSLICE_LIT("t2"));
+    sema_symbol_t *t2 = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("t2"));
     ASSERT_NE(t2, nullptr);
     EXPECT_EQ(t2->type, vm_->type_i32);
 }
@@ -1714,7 +1737,7 @@ TEST_F(SemaTest, TypeDefExtendsTernaryFoldTrueBranch) {
     /* var x:T 显式类型解析到 i64（选择分支生效） */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i64);
 }
@@ -1739,7 +1762,7 @@ TEST_F(SemaTest, TypeDefExtendsTernaryFoldFalseBranch) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *x = sema_scope_find_local(fscope, STRSLICE_LIT("x"));
+    sema_symbol_t *x = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("x"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->type, vm_->type_i32);
 }
@@ -1779,7 +1802,7 @@ TEST_F(SemaTest, FuncValueAssignInferFuncType) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *f = sema_scope_find_local(fscope, STRSLICE_LIT("f"));
+    sema_symbol_t *f = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("f"));
     ASSERT_NE(f, nullptr);
     EXPECT_EQ(f->kind, SEMA_SYM_VAR);
     ASSERT_NE(f->type, nullptr);
@@ -1796,7 +1819,7 @@ TEST_F(SemaTest, FuncValueCallThroughVariable) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *r = sema_scope_find_local(fscope, STRSLICE_LIT("r"));
+    sema_symbol_t *r = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("r"));
     ASSERT_NE(r, nullptr);
     EXPECT_EQ(r->type, vm_->type_i32); /* 调用返回 return_type shadow */
 }
@@ -1889,7 +1912,7 @@ TEST_F(SemaTest, FuncValueComptimeFold) {
        global 下 add(0)、get_add(1)、main(2) 三个函数作用域 */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 2);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *val = sema_scope_find_local(fscope, STRSLICE_LIT("val"));
+    sema_symbol_t *val = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("val"));
     ASSERT_NE(val, nullptr);
     EXPECT_EQ(val->type, vm_->type_i32); /* 折叠后的函数调用返回 i32 */
 }
@@ -1914,10 +1937,10 @@ TEST_F(SemaTest, LocalFuncBasic) {
     /* outer 的 fscope 下应有 inc / dbl 符号（局部函数提升注册） */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *inc = sema_scope_find_local(fscope, STRSLICE_LIT("inc"));
+    sema_symbol_t *inc = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("inc"));
     ASSERT_NE(inc, nullptr);
     EXPECT_EQ(inc->kind, SEMA_SYM_FUNC);
-    sema_symbol_t *dbl = sema_scope_find_local(fscope, STRSLICE_LIT("dbl"));
+    sema_symbol_t *dbl = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("dbl"));
     ASSERT_NE(dbl, nullptr);
     EXPECT_EQ(dbl->kind, SEMA_SYM_FUNC);
 }
@@ -2054,7 +2077,7 @@ TEST_F(SemaTest, LocalFuncComptimeSkipped) {
     /* comptime 局部函数不消费 3a 建的 fscope 子作用域（未建树） */
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *a = sema_scope_find_local(fscope, STRSLICE_LIT("a"));
+    sema_symbol_t *a = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("a"));
     ASSERT_NE(a, nullptr);
     EXPECT_EQ(a->type, vm_->type_i32);
 }
@@ -2072,7 +2095,7 @@ TEST_F(SemaTest, LocalFuncSignatureRegistered) {
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *inc = sema_scope_find_local(fscope, STRSLICE_LIT("inc"));
+    sema_symbol_t *inc = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("inc"));
     ASSERT_NE(inc, nullptr);
     EXPECT_EQ(inc->type->kind, TYPE_KIND_FUNC); /* 签名类型 */
 }

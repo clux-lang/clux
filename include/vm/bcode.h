@@ -81,6 +81,11 @@ typedef enum {
     BCODE_SET_CLOSURE,     /* strtable 索引：弹栈顶值 → clone 进栈下函数对象的
                               closure_scope 捕获槽（define-or-replace，占位
                               undefined 被真实捕获值替换） */
+    BCODE_MAKE_FUNCTION,   /* u32 fid：从 functions_by_id 拉基底函数对象 → 实例化
+                              新函数实例（共享 entry_pc/cfunc/type/name/id，新
+                              closure_scope 捕获槽 undefined 占位）→ 压栈。
+                              函数定义点每次求值生成独立实例——捕获绑定互不干扰
+                              （对标 LOAD_FUNCTION 的"同一对象"引用语义）。 */
 
     BCODE_ADD, BCODE_SUB, BCODE_MUL, BCODE_DIV, BCODE_MOD,
     BCODE_EQ,  BCODE_NE,  BCODE_LT,  BCODE_LE,  BCODE_GT,  BCODE_GE,

@@ -90,7 +90,8 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `PUSH_FUNCTION` | `U32`（entry pc，标签） | 弹栈顶签名类型（`LOAD_TYPE` 拉取的 `SEAL` 产物）→ 构造 `bcode_function_t{entry_pc}`（`fn->id` 默认 0）→ func value 压栈（函数对象，非签名类型）。函数 id 由编译器分配（程序段 ≥ 64），运行时由 `BIND_FUNC` 填充 `fn->id` 并登记进 `vm->functions_by_id`。 |
 | `BIND_FUNC` | `U32`（函数 id） | **peek** 栈顶 func value（不弹栈——注册段 `DEFINE` 需保留函数值）→ 填充 `fn->id = id` 并登记 `id → func` 进 `vm->functions_by_id`（幂等；程序函数 id ≥ `FUNC_ID_PROGRAM_BASE`）。id 单一来源——只在此出现一次。 |
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value（不弹栈）→ 拷贝函数显示名到 vm 堆（`fn->name`，`owns_name=true` 随对象释放）。仅命名函数定义写入；匿名函数表达式不写。 |
-| `SET_CLOSURE` | `STR` | 弹栈顶捕获值 → clone 进**栈下**函数对象（`peek` 栈下 1 位，调用约定：定义点先 `LOAD_FUNCTION` 压函数值）的 `closure_scope` 捕获槽（scope 层 define-or-replace，`scope_set`）。闭包为 **clone 值语义**（捕获独立副本，非引用）。hoist 提升区先以 `PUSH_UNDEFINED` 占位、定义点 `SET_CLOSURE` 替换——提升后、定义点前调用读到占位 undefined（TDZ 语义）。 |
+| `SET_CLOSURE` | `STR` | 弹栈顶捕获值 → clone 进**栈下**函数对象（`peek` 栈下 1 位，调用约定：定义点先 `MAKE_FUNCTION` 压函数值）的 `closure_scope` 捕获槽（scope 层 define-or-replace，`scope_set`）。闭包为 **clone 值语义**（捕获独立副本，非引用）。 |
+| `MAKE_FUNCTION` | `U32`（函数 id） | 从 `vm->functions_by_id` 拉取**基底**函数对象 → 实例化**独立新实例**（共享基底 entry_pc/cfunc/type/id/name；新 `closure_scope` 按基底捕获槽名以 `PUSH_UNDEFINED` 占位）→ func value 压栈。函数定义（字面量/局部函数）每次求值生成新对象——循环内多个闭包捕获互不干扰（对标 `LOAD_FUNCTION` 的"同一对象"引用语义）。hoist 提升区构造的基底仅绑定地址；全局函数无捕获，基底即最终实例。 |
 
 ### 4.3.1 值构造与下标访问
 

@@ -78,9 +78,12 @@ static bool type_shadowed_by_local_def(sema_t *sema, sema_scope_t *scope,
    - parent = 全局作用域（全局函数）/ 定义点块作用域（局部函数——同块
      局部函数互相可见 + 捕获检查拦截外层局部）
    - fscope 追加为 parent 的子作用域（3b walk_block 在定义点消费该子作用域
-     索引；sema_scope_destroy 递归回收）
-   - 参数注册（已解析类型；局部类型槽位在 3a 可能解析失败 → 3b 提升补全）
-   - 函数体 block 直接用 fscope（不嵌套） */
+     索引；sema_scope_destroy 递归回收）——捕获层，捕获符号注册在此
+   - param_scope 追加为 fscope 的子作用域——参数层，参数符号注册在此，
+     函数体 block 挂 param_scope（参数遮蔽捕获，镜像运行时 func_vcall 的
+     closure_scope → 参数匿名层结构）
+   - 捕获检查（expr.c local_func_base）：函数自身符号 = fscope 直系（捕获/
+     body 局部）+ param_scope 直系（参数） */
 static void build_func_tree(sema_t *sema, sema_func_t *sf,
                             sema_scope_t *parent) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
@@ -90,13 +93,18 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   sema_scope_add_child(parent, fscope);
   sf->scope = fscope;
 
+  sema_scope_t *pscope =
+      sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, fscope);
+  sema_scope_add_child(fscope, pscope);
+  sf->param_scope = pscope;
+
   /* 注册参数（已解析类型，运行时值在 Pass 3b 进入函数时定义到 VM scope） */
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     sema_symbol_t init = {
         .kind = SEMA_SYM_VAR,
         .type = sema_resolve_type_slot(sema, &vd->type_expr)};
-    if (!sema_scope_define(fscope, vd->name, &init)) {
+    if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p),
                  "duplicate parameter '%.*s'", (int)vd->name.len,
                  vd->name.ptr);
@@ -106,7 +114,9 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   /* 注册闭包捕获符号（3a 只注册名字，类型 3b 定义点解析——外层变量类型
      此时可能未就绪）。纯 id 捕获 = 外层同名变量（type 留 NULL 由 3b 从
      外层符号解析）；括号捕获 = 临时构造（显式 type_expr 解析，无则 3b
-     从 init 推断）。comptime func / 全局函数拒绝捕获（无运行时闭包场景）。 */
+     从 init 推断）。comptime func / 全局函数拒绝捕获（无运行时闭包场景）。
+     捕获注册在 fscope（父层）；参数在 param_scope（子层）——参数遮蔽
+     捕获（同名时参数优先，语言语义与运行时查找链一致）。 */
   if (fn->captures) {
     if (fn->is_comptime || !sf->is_local) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
@@ -123,15 +133,15 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
-                     "capture '%.*s' duplicates a parameter or capture",
+                     "capture '%.*s' duplicates another capture",
                      (int)cv->name.len, cv->name.ptr);
         }
       }
     }
   }
 
-  /* 函数体 block 直接用 fscope（不再嵌套一层） */
-  build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
+  /* 函数体 block 挂参数层（不再直接挂 fscope） */
+  build_result_t r = build_block(sema, (ast_block_t *)fn->body, pscope);
 
   /* 控制流分析：非 void 函数所有路径必须 return（纯结构，不依赖类型） */
   const type_t *rt = fn->return_expr
@@ -182,6 +192,7 @@ static void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   if (!sf) panic("sema: out of memory allocating sema_func");
   sf->def = s;
   sf->scope = NULL;
+  sf->param_scope = NULL;
   sf->name = fn->name;
   sf->is_local = true;
   sema_func_id_alloc(sema, fn); /* fid 单一来源：创建函数对象即分配 */
@@ -475,7 +486,11 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
       sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, outer);
   if (!fscope) panic("sema: out of memory allocating literal fscope");
 
-  /* 参数注册（与 build_func_tree 同构）+ 签名参数类型收集（一次解析） */
+  sema_scope_t *pscope =
+      sema_scope_new(sema->vm->alloc, SEMA_SCOPE_FUNCTION, fscope);
+  sema_scope_add_child(fscope, pscope); /* 参数层（fscope 子）——参数遮蔽捕获 */
+
+  /* 参数注册（与 build_func_tree 同构，注册到参数层）+ 签名参数类型收集 */
   size_t nparams = sema_count_siblings(fn->params);
   const type_t **ptypes = NULL;
   if (nparams > 0) {
@@ -492,15 +507,15 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     }
     if (ptypes) ptypes[j] = t; /* 失败置 NULL，位置对齐，签名校验时跳过 */
     sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = t};
-    if (!sema_scope_define(fscope, vd->name, &init)) {
+    if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p), "duplicate parameter '%.*s'",
                  (int)vd->name.len, vd->name.ptr);
     }
   }
 
-  /* 捕获符号注册（与 build_func_tree 同构）：纯 id = 外层变量（type 3b 从
-     外层符号解析）；括号 = 临时构造（显式 type_expr 解析，无则 init 推断）。
-     comptime 字面量无运行时闭包，拒绝。 */
+  /* 捕获符号注册（与 build_func_tree 同构，注册到 fscope 父层）：纯 id =
+     外层变量（type 3b 从外层符号解析）；括号 = 临时构造（显式 type_expr
+     解析，无则 init 推断）。comptime 字面量无运行时闭包，拒绝。 */
   if (fn->captures) {
     if (fn->is_comptime) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
@@ -516,7 +531,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
-                     "capture '%.*s' duplicates a parameter or capture",
+                     "capture '%.*s' duplicates another capture",
                      (int)cv->name.len, cv->name.ptr);
         }
       }
@@ -524,7 +539,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   }
 
   /* 建树：body 内局部函数登记队列 + 嵌套块作用域（临时树，自持） */
-  build_result_t r = build_block(sema, (ast_block_t *)fn->body, fscope);
+  build_result_t r = build_block(sema, (ast_block_t *)fn->body, pscope);
 
   /* 捕获解析（定义点即表达式求值点，外层 scope 在线）：纯 id 类型/flow_init、
      括号 init 求值与类型校验，写回 fscope 捕获符号。 */
@@ -555,34 +570,26 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   if (st) fn->sig_id = st->id;
   if (ptypes) allocator_free(sema->vm->alloc, (void **)&ptypes);
 
-  /* walk body：参数 shadow 定义到临时 VM scope；捕获检查按字面量 fscope
-     生效（引用外层局部 = 闭包，拒绝）。保存/恢复外层状态——本函数嵌套在
-     外层 walk 中调用（外层可能正 walk 局部函数体，local_func_base 非空）。 */
+  /* walk body：捕获 shadow 定义到捕获层 VM scope，参数 shadow 定义到参数层
+     VM scope（子层，遮蔽捕获——与运行时 func_vcall 结构一致）；捕获检查按
+     字面量 fscope + param_scope 生效（引用外层局部 = 闭包，拒绝）。保存/
+     恢复外层状态——本函数嵌套在外层 walk 中调用（外层可能正 walk 局部
+     函数体，local_func_base 非空）。 */
   sema_scope_t *saved_lfb = sema->local_func_base;
+  sema_scope_t *saved_lfps = sema->local_func_param_scope;
   const type_t *saved_rt = sema->func_return_type;
   bool saved_has_ret = sema->func_has_return;
   bool saved_comptime = sema->walking_comptime;
 
   sema->local_func_base = fscope;
+  sema->local_func_param_scope = pscope;
   sema->func_return_type = rt;
   sema->func_has_return = false;
   /* 字面量 body 是真实调用点（最终进入运行时字节码）：body 内 comptime
      调用照常折叠（即使本字面量定义在 comptime func body 内）。 */
   sema->walking_comptime = false;
 
-  vm_push_scope(sema->vm);
-  for (ast_node_t *p = fn->params; p; p = p->next) {
-    ast_var_def_t *vd = (ast_var_def_t *)p;
-    sema_symbol_t *ps = sema_scope_find_local(fscope, vd->name);
-    if (ps) ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
-    value_t *pv = value_make_shadow(
-        sema->vm, ps && ps->type ? ps->type : sema->vm->type_void);
-    char nb[256];
-    name_to_cstr(vd->name, nb, sizeof nb);
-    scope_define(sema->vm, sema->vm->current_scope, nb, pv);
-  }
-  /* 捕获 shadow value 定义（参数之后）：捕获名在字面量 body 内 lookup 命中。
-     类型已由 resolve_func_captures 解析写回 fscope 符号。 */
+  vm_push_scope(sema->vm); /* 捕获层（父） */
   for (ast_node_t *c = fn->captures; c; c = c->next) {
     ast_var_def_t *cv = (ast_var_def_t *)c;
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
@@ -593,7 +600,19 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     name_to_cstr(cv->name, nb, sizeof nb);
     scope_define(sema->vm, sema->vm->current_scope, nb, cv_value);
   }
-  sema_walk_block(sema, fn->body, fscope);
+  vm_push_scope(sema->vm); /* 参数层（子，遮蔽捕获） */
+  for (ast_node_t *p = fn->params; p; p = p->next) {
+    ast_var_def_t *vd = (ast_var_def_t *)p;
+    sema_symbol_t *ps = sema_scope_find_local(pscope, vd->name);
+    if (ps) ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
+    value_t *pv = value_make_shadow(
+        sema->vm, ps && ps->type ? ps->type : sema->vm->type_void);
+    char nb[256];
+    name_to_cstr(vd->name, nb, sizeof nb);
+    scope_define(sema->vm, sema->vm->current_scope, nb, pv);
+  }
+  sema_walk_block(sema, fn->body, pscope);
+  vm_pop_scope(sema->vm);
   vm_pop_scope(sema->vm);
 
   /* 同步 walk body 内登记的局部函数（sema->funcs[n0..]）并标记。
@@ -608,6 +627,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
 
   /* 恢复外层 walk 上下文 */
   sema->local_func_base = saved_lfb;
+  sema->local_func_param_scope = saved_lfps;
   sema->func_return_type = saved_rt;
   sema->func_has_return = saved_has_ret;
   sema->walking_comptime = saved_comptime;

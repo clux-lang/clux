@@ -278,6 +278,32 @@ TEST(Driver, RunFileEmptyBareBlockReturnsZero) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileEmptyStatementsReturnsZero) {
+  /* 单独分号空语句：顶层（函数定义后）、语句间、声明后均应通过流水线 */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 { return a + b; };\n"
+      "func main():i32 {\n"
+      "  ;\n"
+      "  var x:i32 = 1; ;\n"
+      "  return add(x, 2);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileParamShadowsCaptureReturnsZero) {
+  /* 参数位于 closure_scope 的子 scope：捕获 x 与参数 x 同名时参数遮蔽
+     捕获（函数体 return x 命中参数，返回 7 而非捕获的 100） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:i32 = 100;\n"
+      "  var f = func |x| (x:i32):i32 { return x; };\n"
+      "  return f(7);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 /* ---- const/volatile 限定类型 ---- */
 
 TEST(Driver, ConstTdzFirstAssignAllowed) {
@@ -1707,6 +1733,23 @@ TEST(Driver, RunFileFuncLiteralCaptureRejected) {
       "  var val = f(1);\n"
       "}\n");
   EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLoopClosuresIndependentInstances) {
+  /* 循环内函数定义每次求值生成独立实例：fns[i] 三个闭包各自捕获
+     items[0]=0 / items[1]=1 / items[2]=2，输出 "0 1 2"。
+     若共享同一函数对象则全部捕获最后一次迭代值 → "2 2 2"。 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var fns = .[3](func()->i32){ func():i32 { return -1; }, func():i32 { return -1; }, func():i32 { return -1; } };\n"
+      "  var items = .[3]i32 {0,1,2};\n"
+      "  for(var i = 0;i<3;i+=1) {\n"
+      "    fns[i] = func|(val = items[i])|():i32 { return val; };\n"
+      "  }\n"
+      "  printf(\"%d %d %d\\n\", fns[0](), fns[1](), fns[2]());\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 

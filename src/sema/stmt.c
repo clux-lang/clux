@@ -820,13 +820,14 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
 
-  /* 参数符号 type 补全（3a 建树时解析失败的局部类型槽位） */
+  /* 参数符号 type 补全（3a 建树时解析失败的局部类型槽位）；
+     参数符号在参数层（param_scope，fscope 子） */
   sema_func_t *sf = sema_func_find_by_def(sema, (ast_node_t *)fn);
-  if (sf && sf->scope) {
+  if (sf && sf->param_scope) {
     size_t j = 0;
     for (ast_node_t *p = fn->params; p; p = p->next, j++) {
       ast_var_def_t *vd = (ast_var_def_t *)p;
-      sema_symbol_t *ps = sema_scope_find_local(sf->scope, vd->name);
+      sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
       if (ps && !ps->type) ps->type = params ? params[j] : NULL;
     }
   }
@@ -924,6 +925,8 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      函数体查找链只有参数 + 全局）。全局函数不设（fscope parent = 全局，
      无外层局部可捕获）。 */
   sema->local_func_base = sf->is_local ? sf->scope : NULL;
+  sema->local_func_param_scope =
+      sf->is_local ? sf->param_scope : NULL;
 
   /* comptime 函数体 walk 标志：body 内对 comptime func 的调用走普通
      shadow 校验（参数是 shadow，不能 CTFE），标志在整个 body walk 期间
@@ -935,12 +938,25 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
   sema->func_has_return = false;
 
-  /* 函数级 VM scope（与 fscope 同构）：参数 shadow value 定义到此处，
-     进入函数体即可读（名字取自 ast） */
-  vm_push_scope(sema->vm);
+  /* 函数级 VM scope（与作用域树同构）：捕获层（父）定义捕获 shadow value，
+     参数层（子，遮蔽捕获）定义参数 shadow value——进入函数体即可读（名字
+     取自 ast）。与运行时 func_vcall 结构一致：closure_scope（捕获）→
+     参数匿名层（子）。 */
+  vm_push_scope(sema->vm); /* 捕获层 */
+  for (ast_node_t *c = fn->captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(sf->scope, cv->name);
+    if (!cs) continue; /* 3a 拒绝已诊断，跳过防级联 */
+    value_t *cv_value = value_make_shadow(
+        sema->vm, cs->type ? cs->type : sema->vm->type_void);
+    char nb[256];
+    name_to_cstr(cv->name, nb, sizeof nb);
+    scope_define(sema->vm, sema->vm->current_scope, nb, cv_value);
+  }
+  vm_push_scope(sema->vm); /* 参数层（子，遮蔽捕获） */
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
-    sema_symbol_t *ps = sema_scope_find_local(sf->scope, vd->name);
+    sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
     if (ps) {
       ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
       ps->is_active = true; /* 参数进入函数体立即可见 */
@@ -953,31 +969,17 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     scope_define(sema->vm, sema->vm->current_scope, nb, pv);
   }
 
-  /* 捕获 shadow value 定义（参数之后）：捕获名在函数体内 lookup 命中。
-     类型已由定义点 resolve_func_captures 解析写回 fscope 符号（纯 id 从
-     外层变量取、括号从 init 推断/显式类型校验）。闭包是 clone 值语义——
-     函数体内对捕获名的引用命中本函数级 VM scope 的 shadow，不再穿透到
-     外层（与外层变量的真实值隔离，仅类型一致）。 */
-  for (ast_node_t *c = fn->captures; c; c = c->next) {
-    ast_var_def_t *cv = (ast_var_def_t *)c;
-    sema_symbol_t *cs = sema_scope_find_local(sf->scope, cv->name);
-    if (!cs) continue; /* 3a 拒绝已诊断，跳过防级联 */
-    value_t *cv_value = value_make_shadow(
-        sema->vm, cs->type ? cs->type : sema->vm->type_void);
-    char nb[256];
-    name_to_cstr(cv->name, nb, sizeof nb);
-    scope_define(sema->vm, sema->vm->current_scope, nb, cv_value);
-  }
-
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成；
      walk_block 的 block_result_t 仅用于跳过不可达语句的类型检查 */
   size_t child_idx = 0;
-  (void)walk_block(sema, fn->body, sf->scope, &child_idx);
+  (void)walk_block(sema, fn->body, sf->param_scope, &child_idx);
+  vm_pop_scope(sema->vm);
   vm_pop_scope(sema->vm);
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成 */
   sema->func_return_type = NULL;
   sema->local_func_base = NULL;
+  sema->local_func_param_scope = NULL;
   sema->walking_comptime = saved_comptime;
 }
 

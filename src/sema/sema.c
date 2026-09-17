@@ -40,6 +40,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->func_return_type = NULL;
   sema->func_has_return = false;
   sema->local_func_base = NULL;
+  sema->local_func_param_scope = NULL;
   sema->loop_depth = 0;
   sema->func_id_next = FUNC_ID_PROGRAM_BASE;
   return sema;
@@ -498,6 +499,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
     if (!sf) panic("sema: out of memory allocating sema_func");
     sf->def = f;
     sf->scope = NULL;
+    sf->param_scope = NULL;
     sf->name = fn->name;
     /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
        流程；compiler 预扫描跳过 comptime 不读取，占位无冲突）。符号表 fid

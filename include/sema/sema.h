@@ -43,7 +43,11 @@ extern "C" {
  */
 typedef struct sema_func_t {
     ast_node_t   *def;    /* AST_FUNC_DEF（借用） */
-    sema_scope_t *scope;  /* 函数作用域树（Pass 3 填充） */
+    sema_scope_t *scope;  /* 函数作用域树（Pass 3 填充）：捕获层——闭包捕获
+                             符号注册在此（镜像运行时 closure_scope） */
+    sema_scope_t *param_scope; /* 参数层：scope 的子作用域，参数符号注册在此
+                                  （镜像运行时 func_vcall 的参数匿名层）。
+                                  函数体 block 挂此层下——参数遮蔽捕获。 */
     strslice_t    name;   /* 函数名（诊断用） */
     bool          is_local; /* 局部函数（块内定义）：3b walk_block 提升签名
                                + 捕获检查（fscope parent = 定义点块作用域） */
@@ -105,8 +109,11 @@ typedef struct sema_t {
        fscope parent = 定义点块作用域（同块局部函数互相可见）。sema_expr
        引用外层局部符号（非 fscope 直系、非 global）时据此报"无闭包"——
        运行时函数体查找链只有参数 + 全局（closure_scope 为空，调用时临时接
-       root_scope），外层局部不可见。 */
+       root_scope），外层局部不可见。
+       local_func_param_scope：函数参数层（fscope 子 scope）——参数符号
+       归属检查（参数遮蔽捕获，参数与捕获同属函数自身符号，放行）。 */
     sema_scope_t *local_func_base;
+    sema_scope_t *local_func_param_scope;
 
     /* 循环上下文 */
     int           loop_depth;       /* 0 = 不在循环中 */

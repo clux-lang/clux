@@ -162,6 +162,18 @@ static value_t *op_load_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make(vm, fn->type, data);
 }
 
+/* MAKE_FUNCTION <id>：从 functions_by_id 拉基底函数对象 → func_instantiate
+   实例化独立新实例（新 closure_scope，捕获槽 undefined 占位）→ 压栈。
+   函数定义点每次求值调用——循环内 `fns[i] = func|(val=items[i])|...` 三个
+   槽位各持独立对象，捕获绑定互不干扰（对标 LOAD_FUNCTION 同一对象语义）。 */
+static value_t *op_make_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    func_t *base = vm_func_load(vm, id);
+    if (!base || !base->type)
+        return value_make_error(vm, "exec: unknown function id");
+    return func_instantiate(vm, base);
+}
+
 /* SET_TYPE_NAME <name>：弹栈顶 type value，设置其显示名（覆盖规范名） */
 static value_t *op_set_type_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
@@ -702,6 +714,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_BIND_FUNC]      = op_bind_func,
     [BCODE_SET_FUNC_NAME]  = op_set_func_name,
     [BCODE_SET_CLOSURE]    = op_set_closure,
+    [BCODE_MAKE_FUNCTION]  = op_make_function,
     [BCODE_CALL]           = op_call,
     [BCODE_RET]            = op_ret,
     [BCODE_JMP]            = op_jmp,
