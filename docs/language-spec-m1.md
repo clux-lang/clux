@@ -328,7 +328,10 @@ var f = func |a, (b: i32 = c + d)| add(x: i32): i32 { return a + b + x; };  // �
 - **闭包不参与类型**：函数签名擦除捕获列表——`func |x| ...: func(i32)->i32` 与
   无捕获的 `func(i32)->i32` 是同一类型；函数类型表达式（`func(...)->T`）带捕获列表报错
 - 函数提升：捕获在**定义点**绑定（`MAKE_FUNCTION` + `SET_CLOSURE`）；
-  提升后、定义点前调用 → 捕获槽为占位 `undefined` → 运行期 TDZ 报错
+  提升后、定义点前引用/调用有捕获的局部函数 → **编译期 TDZ 报错**
+  （sema 检查捕获符号未激活即报 "used before its captures are bound"，
+  不静默到运行期——捕获槽运行期仍是 `undefined` 占位）；无捕获的局部
+  函数提升后即可安全引用（hoist 只绑定地址，无捕获槽）
 - 全局函数 / comptime 函数不允许捕获列表
 - 未在捕获列表声明的外层局部变量，body 内访问仍编译期拒绝
 - 函数体内读取捕获：查函数局部作用域链 → `closure_scope` → 全局

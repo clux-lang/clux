@@ -1813,6 +1813,44 @@ TEST(Driver, RunFileClosureLocalFunc) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileClosureTdzCompileTimeRejected) {
+  /* 闭包捕获 TDZ：定义点前引用有捕获局部函数 → 编译期报错（exit≠0），
+     不静默到运行期（捕获槽 undefined 占位参与运算报 "operator +"） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  printf(\"%d\\n\", f(1));\n"
+      "  var x = 42;\n"
+      "  func |x| f(v: i32): i32 { return x + v; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureTdzAfterDefinitionOk) {
+  /* 定义点之后引用有捕获局部函数：捕获已绑定 → 正常输出 43 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var x = 42;\n"
+      "  func |x| f(v: i32): i32 { return x + v; }\n"
+      "  printf(\"%d\\n\", f(1));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureNoCaptureForwardRefOk) {
+  /* 无捕获局部函数定义点前调用：hoist 只绑定地址，无捕获槽 → 合法 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  printf(\"%d\\n\", g(1));\n"
+      "  func g(v: i32): i32 { return v + 1; }\n"
+      "  printf(\"%d\\n\", g(1));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileClosureLoopRebind) {
   /* 循环内重建闭包：每次迭代捕获当前 i 的 clone → 0*10 + 1*10 + 2*10 = 30 */
   std::string path = write_temp_file(

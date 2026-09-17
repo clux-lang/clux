@@ -80,6 +80,21 @@ static bool func_own_symbol(sema_t *sema, strslice_t name,
   return false;
 }
 
+/* 闭包 TDZ 检查（编译期）：被引用/调用的局部函数若有捕获（fscope 捕获符号
+   存在），其捕获值在定义点 resolve_func_captures 才绑定（is_active 激活）。
+   walk 顺序保证：定义点前的引用点（函数提升后）捕获符号尚未激活 → TDZ，
+   编译期报错（捕获槽运行期仍为 undefined 占位，但不应静默到运行期才暴露）。
+   无捕获的局部函数提升后即可安全引用（hoist 只绑定地址，无捕获槽）。 */
+static bool func_capture_tdz(sema_scope_t *fscope, ast_node_t *captures) {
+  if (!fscope || !captures) return false;
+  for (ast_node_t *c = captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+    if (cs && !cs->is_active) return true;
+  }
+  return false;
+}
+
 /* 二元运算符 token → vtable 分派函数 */
 static value_t *(*binop_of(const token_t *op))(vm_t *, value_t *, value_t *) {
   if (token_is(op, "+")) return value_add;
@@ -188,6 +203,21 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      "comptime function '%.*s' cannot be used as a value",
                      (int)n->name.len, n->name.ptr);
           return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        /* 闭包捕获 TDZ（编译期）：局部函数的捕获值在定义点 resolve_func_captures
+           才绑定（is_active 激活）。walk 顺序保证定义点前的引用点捕获符号未激活
+           → 编译期报错，不静默到运行期（捕获槽运行期仍为 undefined 占位）。
+           全局函数 captures 恒空（hoist 基底即最终实例），天然放行。 */
+        sema_func_t *tdz_sf = sema_func_by_id(sema, sym->fid);
+        if (tdz_sf && tdz_sf->is_local && tdz_sf->def &&
+            tdz_sf->def->kind == AST_FUNC_DEF) {
+          ast_func_def_t *tdz_fn = (ast_func_def_t *)tdz_sf->def;
+          if (func_capture_tdz(tdz_sf->scope, tdz_fn->captures)) {
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "closure '%.*s' used before its captures are bound (TDZ)",
+                       (int)n->name.len, n->name.ptr);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
         }
         ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
                                            (*node)->tok_end);

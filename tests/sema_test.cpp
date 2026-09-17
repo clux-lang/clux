@@ -2100,4 +2100,46 @@ TEST_F(SemaTest, LocalFuncSignatureRegistered) {
     EXPECT_EQ(inc->type->kind, TYPE_KIND_FUNC); /* 签名类型 */
 }
 
+TEST_F(SemaTest, LocalFuncCaptureTdzCompileTimeRejected) {
+    /* 闭包捕获 TDZ（编译期）：有捕获的局部函数在定义点前被引用 → 捕获值
+       尚未绑定（resolve_func_captures 未执行，is_active=false）→ 编译期
+       报错，不静默到运行期（捕获槽 undefined 占位） */
+    EXPECT_FALSE(analyze(
+        "func outer(): i32 {"
+        "  var r = f(1);" /* 定义点前调用有捕获局部函数 → TDZ */
+        "  var x = 42;"
+        "  func |x| f(v: i32): i32 { return x + v; }"
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    expect_message(0, "used before its captures are bound (TDZ)");
+}
+
+TEST_F(SemaTest, LocalFuncCaptureTdzAfterDefinitionOk) {
+    /* 定义点之后引用有捕获局部函数：捕获已绑定（is_active=true）→ 合法 */
+    EXPECT_TRUE(analyze(
+        "func outer(): i32 {"
+        "  var x = 42;"
+        "  func |x| f(v: i32): i32 { return x + v; }"
+        "  var r = f(1);" /* 定义点后调用 → 合法 */
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncNoCaptureForwardRefOk) {
+    /* 无捕获局部函数前向引用（定义点前调用）：hoist 只绑定地址，无捕获槽
+       → 合法（与 LocalFuncHoistForwardReference 语义一致，此处为 TDZ 检查
+       不误伤无捕获函数的回归用例） */
+    EXPECT_TRUE(analyze(
+        "func outer(): i32 {"
+        "  var r = g(1);" /* 定义点前调用无捕获局部函数 → 合法 */
+        "  func g(v: i32): i32 { return v + 1; }"
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
 } /* namespace */
