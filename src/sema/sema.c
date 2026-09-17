@@ -41,6 +41,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->func_has_return = false;
   sema->local_func_base = NULL;
   sema->loop_depth = 0;
+  sema->func_id_next = FUNC_ID_PROGRAM_BASE;
   return sema;
 }
 
@@ -280,6 +281,16 @@ const sema_type_t *sema_type_find_name(sema_t *sema, strslice_t name) {
   return NULL;
 }
 
+const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id) {
+  if (!sema || !sema->types) return NULL;
+  size_t n = vec_len(sema->types);
+  for (size_t i = 0; i < n; i++) {
+    const sema_type_t *st = (const sema_type_t *)vec_get(sema->types, i);
+    if (st && st->id == id) return st;
+  }
+  return NULL;
+}
+
 /* ===========================================================================
  * 类型表达式求值
  * =========================================================================== */
@@ -408,6 +419,33 @@ size_t sema_count_siblings(const ast_node_t *node) {
   return n;
 }
 
+/* 函数 id 分配（幂等）：创建 sema 函数对象时调用——fid 单一来源在 sema，
+   compiler 预扫描只读取。fn->fid 已分配则复用（CTFE 求值字面量可能早于
+   sema_check_func_literal，两者幂等）。 */
+uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn) {
+  if (!sema || !fn) return 0;
+  if (fn->fid != 0) return fn->fid;
+  if (sema->func_id_next >= FUNC_ID_PROGRAM_BASE &&
+      (uint64_t)sema->func_id_next + 1u <= 0xFFFFFFFFull) {
+    fn->fid = sema->func_id_next++;
+    return fn->fid;
+  }
+  return 0; /* id 溢出 */
+}
+
+/* 按函数 id 查 sema 函数对象（线性扫描，函数数量少）。函数定义 AST 托管在
+   sema->funcs，sema/ctfe 经此按 id 查询（折叠产物按 fid 取签名构造引用）。 */
+sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
+  if (!sema || !sema->funcs) return NULL;
+  size_t n = vec_len(sema->funcs);
+  for (size_t i = 0; i < n; i++) {
+    sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
+    if (!sf || !sf->def || sf->def->kind != AST_FUNC_DEF) continue;
+    if (((ast_func_def_t *)sf->def)->fid == fid) return sf;
+  }
+  return NULL;
+}
+
 /* ===========================================================================
  * Pass 1/2：函数名收集 + 类型解析（func_t 签名）
  * =========================================================================== */
@@ -461,6 +499,11 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
     sf->def = f;
     sf->scope = NULL;
     sf->name = fn->name;
+    /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
+       流程；compiler 预扫描跳过 comptime 不读取，占位无冲突）。符号表 fid
+       字段同步（AST_FUNC_REF 替换 / 折叠按 id 查询用） */
+    sema_func_id_alloc(sema, fn);
+    sym->fid = fn->fid;
     vec_push(sema->funcs, sema->vm->alloc, sf);
   }
 }
@@ -577,13 +620,28 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   if (!sema->global_scope) return false;
 
   /* 预注册内置函数符号（printf：variadic 签名，ast=NULL 表示无 AST 定义）。
-     与 VM 侧 vm_register_printf 对应；签名类型经 type_func_sig intern。 */
+     与 VM 侧 vm_register_printf 对应；签名类型经 type_func_sig intern。
+     fid = 内建函数 id（vm->functions 按名字查询；内建段 < FUNC_ID_PROGRAM_BASE，
+     printf=0）。内建函数无 AST_FUNC_DEF 托管（sema->funcs 不含内建），
+     源码引用替换 AST_FUNC_REF 时从符号表 fid 字段取内建 id。 */
   {
     const type_t *pparams[1] = { sema->vm->type_str };
     const type_t *psig = type_func_sig(sema->vm, pparams, 1, NULL,
                                        /*is_variadic=*/true);
+    uint32_t pfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 6 &&
+            memcmp(bf->name.ptr, "printf", 6) == 0) {
+          pfid = bf->id;
+          break;
+        }
+      }
+    }
     sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = psig,
-                          .is_active = true};
+                          .is_active = true, .fid = pfid};
     sema_scope_define(sema->global_scope, STRSLICE_LIT("printf"), &init);
   }
 
@@ -604,10 +662,10 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      泛型单态化追加到队尾），len 每次重取自动覆盖新函数。 */
   for (size_t i = 0; i < vec_len(sema->funcs); i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
-    ast_func_def_t *fn = (ast_func_def_t *)sf->def;
-    /* comptime func：调用点折叠为字面量（sema_eval_comptime_call），
-       不 shadow walk（参数为 shadow 无法编译期求值，body 求值在调用点）。 */
-    if (fn->is_comptime) continue;
+    /* comptime func 同样 shadow walk：body 内语句做类型检查 + 折叠
+       （函数字面量分配 fid / 登记签名、comptime var 求值折叠）。不生成
+       运行时字节码（compiler 预扫描跳过 comptime）——walk 只为编译期
+       求值服务（调用点 CTFE 解释执行，sema_eval_comptime_call）。 */
     /* 函数字面量 body 内登记的局部函数：sema_check_func_literal 已同步
        walk 并标记，其 fscope 挂在临时作用域树上已销毁——跳过防二次 walk
        访问悬空作用域。 */

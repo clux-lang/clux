@@ -52,8 +52,9 @@ typedef struct _sema_scope_t sema_scope_t;
  *   f32/f64 → f，bool → b，str → s）
  * - 数组：type->kind == TYPE_KIND_ARRAY → elems 是连续元素常量编码
  *   （arena 分配，count 个，递归），标量字段无效
- * - 函数引用：type->kind == TYPE_KIND_FUNC → func_name 是函数名
- *   （arena 复制），折叠为 AST_FUNC_REF（compile 发 LOAD_FUNCTION）
+ * - 函数引用：type->kind == TYPE_KIND_FUNC → func_id 是函数 id
+ *   （sema 分配，内建 = 内建 id），折叠为 AST_FUNC_REF（compile 发
+ *   LOAD_FUNCTION <id>；匿名字面量无名字也可折叠——与 name 无关）
  * 字符串 strslice 指向 arena 复制的缓冲区（生命周期 = sema arena，
  * 跨 sema/compile 阶段安全）。type 是 vm 类型池指针（借用，生命周期 = vm）。
  */
@@ -64,7 +65,7 @@ typedef struct sema_ct_const {
   double        f;     /* f32/f64 */
   bool          b;     /* bool */
   strslice_t    s;     /* 字符串（arena 复制） */
-  strslice_t    func_name; /* 函数引用（TYPE_KIND_FUNC，arena 复制） */
+  uint32_t      func_id; /* 函数引用（TYPE_KIND_FUNC，sema 分配 fid） */
   /* 数组（TYPE_KIND_ARRAY）：arena 分配的连续元素编码 */
   struct sema_ct_const *elems; /* count 个元素常量（arena 分配） */
   size_t                count; /* 元素个数 */
@@ -108,6 +109,12 @@ struct _sema_symbol_t {
   bool           ct_valid;    /* 已编译期求值（常量有效；comptime var 求值成功
                                  或 comptime func 调用折叠后引用点改写） */
   sema_ct_const_t ct;         /* 编译期常量编码（ct_valid 时有效） */
+
+  /* 函数 id（SEMA_SYM_FUNC 符号）：创建函数对象时由 sema 分配
+     （全局 pass1 / 局部 build_local_func / 内建预注册 = 内建 id）。
+     源码 AST_IDENT 函数引用替换 AST_FUNC_REF 时取此字段；comptime
+     折叠产物经 func_t->id 携带同一 fid。fid 单一来源在 sema。 */
+  uint32_t       fid;
 };
 typedef struct _sema_symbol_t sema_symbol_t;
 

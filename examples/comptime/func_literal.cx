@@ -1,0 +1,40 @@
+// func_literal.cx — 样例：comptime func 返回函数值（字面量 / 局部函数）
+//
+// comptime func 的 body 同样走 sema shadow walk（类型检查 + 内部语句折叠），
+// 但自身不生成运行时字节码——调用点在编译期 CTFE 折叠为函数值：
+//
+//   - return func(x: i32): i32 { return x + 1; };
+//     comptime func 返回匿名函数字面量（表达式内函数定义）
+//   - func inc(x: i32): i32 { return x + 1; }  return inc;
+//     comptime func 内定义局部函数并返回（局部函数进入运行时字节码，
+//     折叠产物经 LOAD_FUNCTION <fid> 按 id 加载，与函数是否有名字无关）
+//   - 调用点折叠后运行时 LOAD_FUNCTION <fid> 加载真实函数对象，正常调用
+//   - comptime func body 内对另一个 comptime func 的调用：walk 阶段只做
+//     shadow 类型检查，真实调用点才 CTFE 折叠（嵌套折叠）
+//   - 字面量/局部函数 body 内不能访问外层局部变量（捕获需闭包，暂不支持），
+//     只能访问参数与全局函数
+
+comptime func make_inc(): func(i32) -> i32 {
+    return func(x: i32): i32 { return x + 1; };
+}
+
+comptime func make_twice(): func(i32) -> i32 {
+    func t(x: i32): i32 { return x * 2; }
+    return t;
+}
+
+comptime func double_(a: i32): i32 { return a * 2; }
+comptime func quad(a: i32): i32 { return double_(double_(a)); }
+
+func main(): i32 {
+    var inc = make_inc();
+    printf("inc(41) = %d\n", inc(41)); // 42
+
+    var t = make_twice();
+    printf("twice(21) = %d\n", t(21)); // 42
+
+    var q = quad(3);
+    printf("quad(3) = %d\n", q); // 12
+
+    return 0;
+}

@@ -8,14 +8,19 @@ extern "C" {
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 
-/* 函数引用节点：对全局函数名的引用（函数值）。
- * 由 sema 在 AST_IDENT 求值确认命中函数符号（sym->type 为签名类型）时
- * 替换构造——sema 是唯一能区分"函数引用 vs 变量引用（含遮蔽）"的位置，
- * 改写后 compiler 遇此节点发 LOAD_FUNCTION <id>（id 经名字在 compiler 的
- * 函数名→fid 映射查询）。AST 保持平凡可解耦：只携带名字标识。 */
+/* 函数引用节点：对函数的引用（函数值），只携带函数 id（fid）。
+ *
+ * 函数定义 AST 托管在 sema->funcs（sema_func_t::def），fid 由 sema 创建
+ * 函数对象时统一分配（写回 ast_func_def_t::fid）。本节点是纯 id 标识：
+ *   - 源码名字引用：sema 在 AST_IDENT 求值确认命中函数符号时替换构造
+ *     （从符号表 fid 字段取 id，含内建函数 printf=0）
+ *   - comptime 折叠产物：sema_ct_lit 折叠函数值常量时构造（从 func_t->id
+ *     取 fid）——匿名字面量无名字也可折叠
+ * compiler 遇此节点自然发 LOAD_FUNCTION <fid>（与函数是否有 name 无关）；
+ * sema/ctfe 需要函数 AST 时经 sema_func_by_id(fid) 从 sema->funcs 查询。 */
 typedef struct {
     ast_node_t  base;
-    strslice_t  name;        /* 函数名（sema arena 生命周期） */
+    uint32_t    fid;         /* 函数 id（sema 分配；内建函数 = 内建 id） */
 } ast_func_ref_t;
 
 static inline ast_node_t *ast_func_ref_new(arena_t *arena,

@@ -1474,6 +1474,75 @@ TEST(Driver, RunFileFuncValueComptimeFold) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileFuncValueComptimeReturnsLiteral) {
+  /* comptime func 返回匿名函数字面量：折叠产物 LOAD_FUNCTION <fid>，
+     运行期调用字面量函数体（+1 得 42） */
+  std::string path = write_temp_file(
+      "comptime func get_f():func(i32)->i32 {\n"
+      "  return func(x:i32):i32 { return x + 1; };\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = get_f();\n"
+      "  printf(\"%d\\n\", f(41));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueComptimeReturnsLocalFunc) {
+  /* comptime func 内定义局部函数并返回：局部函数进入运行时字节码
+     （prescan 无条件递归 comptime body），折叠产物按 fid 加载调用 */
+  std::string path = write_temp_file(
+      "comptime func get_f():func(i32)->i32 {\n"
+      "  func inc(x:i32):i32 { return x + 1; }\n"
+      "  return inc;\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = get_f();\n"
+      "  printf(\"%d\\n\", f(41));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueComptimeNestedCalls) {
+  /* comptime func body 内调用另一个 comptime func（嵌套折叠）：walk 阶段
+     只做 shadow 类型检查，真实调用点 CTFE 折叠 */
+  std::string path = write_temp_file(
+      "comptime func double_(a:i32):i32 {\n"
+      "  return a * 2;\n"
+      "}\n"
+      "comptime func quad(a:i32):i32 {\n"
+      "  return double_(double_(a));\n"
+      "}\n"
+      "comptime var Q = quad(3);\n"
+      "func main():void {\n"
+      "  var x = Q;\n"
+      "  printf(\"%d\\n\", x);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileFuncValueComptimeMultipleFactories) {
+  /* comptime func 多次调用各自返回字面量：fid 按定义点唯一分配，折叠产物
+     分别加载不同函数对象 */
+  std::string path = write_temp_file(
+      "comptime func make_plus():func(i32,i32)->i32 {\n"
+      "  return func(a:i32, b:i32):i32 { return a + b; };\n"
+      "}\n"
+      "comptime func make_mul():func(i32,i32)->i32 {\n"
+      "  return func(a:i32, b:i32):i32 { return a * b; };\n"
+      "}\n"
+      "func main():void {\n"
+      "  var f = make_plus();\n"
+      "  var g = make_mul();\n"
+      "  printf(\"%d %d\\n\", f(20, 22), g(6, 7));\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileFuncValueBuiltinPrintf) {
   /* 内建 printf 与普通函数同等：函数值赋值 + 调用 */
   std::string path = write_temp_file(

@@ -69,16 +69,18 @@ func_t *vm_func_load(vm_t *vm, uint32_t id) {
     return (func_t *)vec_get(vm->functions_by_id, id);
 }
 
-/* CTFE 函数引用对象：轻量 func_t（cfunc=NULL、无 id/closure_scope），
-   仅签名 + 名字，注册进 vm->functions 统一释放（func_destroy 见 owns_name
-   处理：借用名字不释放）。见 function.h 注释。 */
-func_t *func_new_program_ref(vm_t *vm, const type_t *sig_type, strslice_t name) {
+/* CTFE 函数引用对象：轻量 func_t（cfunc=NULL、不登记 functions_by_id），
+   仅签名 + 名字 + id，注册进 vm->functions 统一释放（func_destroy 见
+   owns_name 处理：借用名字不释放）。见 function.h 注释。 */
+func_t *func_new_program_ref(vm_t *vm, const type_t *sig_type,
+                             strslice_t name, uint32_t id) {
     if (!vm || !vm->alloc || !sig_type) return NULL;
     func_t *fn = (func_t *)allocator_new(vm->alloc, &g_func_class, 1);
     if (!fn) panic("vm: out of memory allocating func ref");
     memset(fn, 0, sizeof(func_t));
     fn->type = sig_type;
     fn->name = name; /* 借用，owns_name=false */
+    fn->id   = id;   /* sema 分配的 fid / 内建 id，编码折叠用 */
     if (vm->functions) vec_push(vm->functions, vm->alloc, fn);
     return fn;
 }

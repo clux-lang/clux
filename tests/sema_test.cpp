@@ -882,8 +882,9 @@ TEST_F(SemaTest, ComptimeFuncCallFold) {
         "func main(): void { var r = add(1, 2); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
-    /* comptime func 不建作用域树（调用点折叠），global_scope 唯一子节点是 main */
-    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    /* comptime func 同样建作用域树（Pass 3b 对其 shadow walk 做类型检查），
+       global_scope 子节点 = [add, main]，main 在 child 1 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
     ASSERT_NE(fscope, nullptr);
     sema_symbol_t *r = sema_scope_find_local(fscope, STRSLICE_LIT("r"));
     ASSERT_NE(r, nullptr);
@@ -1884,9 +1885,9 @@ TEST_F(SemaTest, FuncValueComptimeFold) {
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 
-    /* comptime func 不建作用域树（sema_build_scope_tree 跳过），
-       global 下只有 add(0) 和 main(1) 两个函数作用域 */
-    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 1);
+    /* comptime func 同样建作用域树（Pass 3b 对其 shadow walk），
+       global 下 add(0)、get_add(1)、main(2) 三个函数作用域 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 2);
     ASSERT_NE(fscope, nullptr);
     sema_symbol_t *val = sema_scope_find_local(fscope, STRSLICE_LIT("val"));
     ASSERT_NE(val, nullptr);

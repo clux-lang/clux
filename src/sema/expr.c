@@ -175,7 +175,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
                                            (*node)->tok_end);
         if (ref) {
-          ((ast_func_ref_t *)ref)->name = n->name;
+          /* 纯 fid 标识：fid 由 sema 创建函数对象时分配（符号表字段；内建
+             函数 = 内建 id）。compiler 自然 LOAD_FUNCTION <fid>。 */
+          ((ast_func_ref_t *)ref)->fid = sym->fid;
           ref->next = (*node)->next; /* 保留兄弟链 */
           *node = ref;
         }
@@ -350,8 +352,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       }
 
       /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
-         整个调用折叠为字面量。函数本身不注册到运行时。 */
-      if (sym->is_comptime) {
+         整个调用折叠为字面量。函数本身不注册到运行时。
+         walking_comptime（正在 walk 另一个 comptime func 的 body）：实参
+         是参数 shadow value，编译期无法求值——走下方普通 shadow 调用路径
+         只做类型检查（返回 return type 的 shadow），CTFE 折叠仅在真实调用点。 */
+      if (sym->is_comptime && !sema->walking_comptime) {
         return sema_eval_comptime_call(sema, node, scope);
       }
 

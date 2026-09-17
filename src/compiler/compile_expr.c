@@ -117,24 +117,15 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_FUNC_REF: {
-    /* sema 确认的函数引用（函数值）：查函数名→fid 映射（compile_compile
-       预扫描构建：内建 + 程序函数按 DFS 序）→ LOAD_FUNCTION <id> 运行期从
-       functions_by_id 查表压真实函数值。未命中（如 comptime func）是
-       sema 应已拦截的错误。 */
+    /* sema 确认的函数引用（函数值）：纯 fid 标识（sema 创建函数对象时
+       分配，写进符号表/折叠产物）→ LOAD_FUNCTION <fid> 运行期从
+       functions_by_id 查表压真实函数值——与函数是否有 name 无关（匿名
+       字面量无名字也可引用）。fid 段：内建函数 < FUNC_ID_PROGRAM_BASE
+       （printf=0 合法）；程序函数 >= FUNC_ID_PROGRAM_BASE（sema 分配，
+       预扫描已校验非 0）。运行期对未登记 id 报 "unknown function id"。 */
     ast_func_ref_t *n = (ast_func_ref_t *)node;
-    char nb[256];
-    size_t nlen = n->name.len < sizeof(nb) - 1 ? n->name.len : sizeof(nb) - 1;
-    memcpy(nb, n->name.ptr, nlen);
-    nb[nlen] = '\0';
-    void *fidv = c->func_ids ? strmap_get(c->func_ids, nb) : NULL;
-    if (!fidv) {
-      c_error(c, node, "unknown function '%.*s'", (int)n->name.len, n->name.ptr);
-      return;
-    }
-    /* id+1 编码（见 compile.c func_ids 构建注释），还原真实 id */
-    uint32_t fid = (uint32_t)(uintptr_t)fidv - 1u;
     bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
-    bcode_write_u32(c->bc, fid);
+    bcode_write_u32(c->bc, n->fid);
     st_push(c, 1);
     break;
   }

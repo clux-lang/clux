@@ -883,10 +883,10 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
       continue;
     }
     if (s->kind == AST_FUNC_DEF) {
-      /* 入口提升已处理签名；消费 3a 建的 fscope 子作用域（comptime / 被拒
-         无子作用域）——与 3a 建树严格对齐。 */
+      /* 入口提升已处理签名；消费 3a 建的 fscope 子作用域（被拒无子作用域）
+         ——comptime 局部函数同样建树，须一并消费，与 3a 建树严格对齐。 */
       ast_func_def_t *fn = (ast_func_def_t *)s;
-      if (!fn->is_comptime && sema_scope_find_local(scope, fn->name)) (*idx)++;
+      if (sema_scope_find_local(scope, fn->name)) (*idx)++;
       prev = &s->next;
       s = s->next;
       continue;
@@ -917,6 +917,12 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      函数体查找链只有参数 + 全局）。全局函数不设（fscope parent = 全局，
      无外层局部可捕获）。 */
   sema->local_func_base = sf->is_local ? sf->scope : NULL;
+
+  /* comptime 函数体 walk 标志：body 内对 comptime func 的调用走普通
+     shadow 校验（参数是 shadow，不能 CTFE），标志在整个 body walk 期间
+     保持。 */
+  bool saved_comptime = sema->walking_comptime;
+  sema->walking_comptime = fn->is_comptime;
 
   sema->func_return_type =
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
@@ -949,6 +955,7 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成 */
   sema->func_return_type = NULL;
   sema->local_func_base = NULL;
+  sema->walking_comptime = saved_comptime;
 }
 
 /* 函数字面量 body walk 入口（stmt_build.c 的 sema_check_func_literal 用；

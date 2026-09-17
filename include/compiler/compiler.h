@@ -6,7 +6,6 @@ extern "C" {
 
 #include "core/allocator.h"
 #include "core/strslice.h"
-#include "core/strmap.h"
 #include "core/vec.h"
 #include "diag/diagnostic.h"
 #include "parser/ast_block.h"
@@ -79,26 +78,13 @@ typedef struct compiler_t {
        槽位经 sema_type_find_name 查表拿 id 发 LOAD_TYPE。 */
     vec_t          *sema_types;
 
-    /* 函数 id 分配计数器：compiler_compile 预扫描（收集全部函数定义——
-       全局 + 局部 + 嵌套函数字面量）时从 FUNC_ID_PROGRAM_BASE 起统一分配
-       （写回 fn->fid）。与类型 id 机制对称——但分配在 compiler 侧（不写回
-       sema），运行时 BIND_FUNC 填充 fn->id 并登记进 vm->functions_by_id。
-       函数 id 表（functions_by_id）与类型 id 表（types_by_id）独立，勿与
-       type_id_next 混淆。 */
-    uint32_t        func_id_next;
-
-    /* 函数名 → 函数 id 映射（compiler_compile 开头预扫描构建，strmap 不拥有值）：
-       内建函数（printf，id < FUNC_ID_PROGRAM_BASE）+ 程序函数（全局 + 局部，
-       预扫描按 DFS 序分配 fid）。compile_expr AST_FUNC_REF 查表发
-       LOAD_FUNCTION <fid>。值 = (void*)(uintptr_t)fid，零分配（fid ≥ 64
-       或内建 0，恒非 NULL）。 */
-    strmap_t       *func_ids;
-
     /* 全部程序函数收集（compiler_compile 开头预扫描填充，ast_func_def_t* 列表，
-       按 fid 分配序）：全局函数 + 局部函数 + 嵌套函数字面量（含表达式内）。
-       hoist 函数注册区（构造全部函数对象）与函数体区（编译各函数体、回填
-       PUSH_FUNCTION body 占位）按此列表统一驱动——fid 序即构造/回填序。
-       comptime func 不入列表（不进入运行时）。 */
+       按 fid 序）：全局函数 + 局部函数 + 嵌套函数字面量（含表达式内与 comptime
+       body 内被折叠产物引用的函数）。hoist 函数注册区（构造全部函数对象）与
+       函数体区（编译各函数体、回填 PUSH_FUNCTION body 占位）按此列表统一驱动
+       ——fid 序即构造/回填序。fid 单一来源在 sema（创建函数对象即分配，
+       sema_func_id_alloc），预扫描只校验读取。comptime func 本身不入列表
+       （不进入运行时）。 */
     vec_t          *funcs_all;
 
     /* 类型 id 分配计数器：sema_types 已占 [TYPE_ID_PROGRAM_BASE,
@@ -178,7 +164,7 @@ void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
 size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn); /* compile_func.c：hoist 函数注册区构造（返回 PUSH_FUNCTION body 操作数字段位置） */
 void   compile_func_bind(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c：LOAD_FUNCTION <fid> + DEFINE 名字绑定（局部定义点/全局绑定用） */
-void   compile_prescan_funcs(compiler_t *c, ast_node_t *program); /* compile_func.c：递归收集全部函数定义 + 分配 fid + func_ids 登记 */
+void   compile_prescan_funcs(compiler_t *c, ast_node_t *program); /* compile_func.c：递归收集全部函数定义（校验读取 sema 分配的 fid；comptime body 无条件递归） */
 
 /* ---- hoist 类型提升区（compile_hoist.c） ---- */
 

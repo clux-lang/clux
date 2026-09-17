@@ -125,9 +125,10 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
    - 遮蔽全局函数名 → 显式拒绝（compiler func_ids 是全局平铺名字→fid 映射，
      局部插入会覆盖全局 fid，导致块外引用错绑；M1 明确不支持）
    - 注册符号（SEMA_SYM_FUNC，注册即激活——提升语义，与全局函数一致）
-   - 登记 sema_func_t 追加队列（is_local=true；comptime func 入队不建树，
-     与全局一致——调用点 ctfe 求值）
-   - 非 comptime：建 fscope 树（parent = 定义点块作用域） */
+   - 登记 sema_func_t 追加队列（is_local=true）并分配 fid（创建函数对象即分配）
+   - 建 fscope 树（parent = 定义点块作用域）；comptime 局部函数同样建树——
+     Pass 3b 对其 shadow walk（类型检查 + body 内语句折叠），不生成运行时
+     字节码（compiler 预扫描跳过 comptime） */
 static void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   ast_func_def_t *fn = (ast_func_def_t *)s;
 
@@ -156,10 +157,14 @@ static void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   sf->scope = NULL;
   sf->name = fn->name;
   sf->is_local = true;
+  sema_func_id_alloc(sema, fn); /* fid 单一来源：创建函数对象即分配 */
+  {
+    sema_symbol_t *lsym = sema_scope_find_local(scope, fn->name);
+    if (lsym) lsym->fid = fn->fid; /* 符号表同步（AST_FUNC_REF 替换用） */
+  }
   vec_push(sema->funcs, sema->vm->alloc, sf);
 
-  if (fn->is_comptime) return; /* comptime：不建树、不 shadow walk */
-  build_func_tree(sema, sf, scope);
+  build_func_tree(sema, sf, scope); /* comptime 亦建树（3b shadow walk 检查） */
 }
 
 static build_result_t build_block(sema_t *sema, ast_block_t *block,
@@ -330,11 +335,9 @@ void sema_build_scope_tree(sema_t *sema) {
   size_t n = vec_len(sema->funcs);
   for (size_t i = 0; i < n; i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
-    ast_func_def_t *fn = (ast_func_def_t *)sf->def;
-    /* comptime func：不建作用域树、不 shadow walk。函数体只在调用点
-       （sema_eval_comptime_call → ctfe）解释求值，参数是编译期实值，
-       静态 walk 参数为 shadow 无法求值；未调用则不检查（同 C++ template）。 */
-    if (fn->is_comptime) continue;
+    /* comptime func 同样建树：Pass 3b 对其 shadow walk（类型检查 + body 内
+       语句折叠）。不生成运行时字节码（compiler 预扫描跳过 comptime），
+       fscope 仅供 shadow walk 使用。 */
     build_func(sema, sf);
   }
 }
@@ -365,6 +368,10 @@ void sema_build_scope_tree(sema_t *sema) {
  * =========================================================================== */
 const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
                                       sema_scope_t *outer) {
+  /* fid 单一来源：创建函数对象（字面量）即分配。CTFE 求值（comptime body
+     内字面量）可能已分配——幂等复用；compiler LOAD_FUNCTION <fid> 用 */
+  sema_func_id_alloc(sema, fn);
+
   /* 队列登记起点：body 内局部函数（含嵌套字面量内）追加到队尾 */
   size_t n0 = vec_len(sema->funcs);
 
@@ -429,10 +436,14 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   sema_scope_t *saved_lfb = sema->local_func_base;
   const type_t *saved_rt = sema->func_return_type;
   bool saved_has_ret = sema->func_has_return;
+  bool saved_comptime = sema->walking_comptime;
 
   sema->local_func_base = fscope;
   sema->func_return_type = rt;
   sema->func_has_return = false;
+  /* 字面量 body 是真实调用点（最终进入运行时字节码）：body 内 comptime
+     调用照常折叠（即使本字面量定义在 comptime func body 内）。 */
+  sema->walking_comptime = false;
 
   vm_push_scope(sema->vm);
   for (ast_node_t *p = fn->params; p; p = p->next) {
@@ -448,12 +459,13 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   sema_walk_block(sema, fn->body, fscope);
   vm_pop_scope(sema->vm);
 
-  /* 同步 walk body 内登记的局部函数（sema->funcs[n0..]）并标记 */
+  /* 同步 walk body 内登记的局部函数（sema->funcs[n0..]）并标记。
+     comptime 局部函数同样 walk（类型检查 + body 内语句折叠），不生成
+     运行时字节码。 */
   for (size_t i = n0; i < vec_len(sema->funcs); i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
     if (sf->is_literal_owned) continue; /* 嵌套字面量已同步 walk */
     sf->is_literal_owned = true;
-    if (((ast_func_def_t *)sf->def)->is_comptime) continue;
     sema_walk_function(sema, sf);
   }
 
@@ -461,6 +473,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   sema->local_func_base = saved_lfb;
   sema->func_return_type = saved_rt;
   sema->func_has_return = saved_has_ret;
+  sema->walking_comptime = saved_comptime;
 
   /* 销毁临时作用域树（含 body 局部函数 fscope） */
   sema_scope_destroy(&fscope);

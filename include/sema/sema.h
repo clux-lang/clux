@@ -95,6 +95,12 @@ typedef struct sema_t {
     const type_t *func_return_type; /* NULL = void */
     bool          func_has_return;
 
+    /* comptime 函数体 walk 标志：sema_walk_function 对 comptime func 置
+       true（保存/恢复）。walk 期间 body 内对 comptime func 的调用只做
+       普通 shadow 类型检查（实参是参数 shadow value，无法编译期求值）——
+       CTFE 折叠仅发生在真实调用点（非 comptime body 内）。 */
+    bool          walking_comptime;
+
     /* 捕获检查上下文（Pass 3b walk 时设置）：非 NULL = 正在 walk 局部函数体，
        fscope parent = 定义点块作用域（同块局部函数互相可见）。sema_expr
        引用外层局部符号（非 fscope 直系、非 global）时据此报"无闭包"——
@@ -104,6 +110,13 @@ typedef struct sema_t {
 
     /* 循环上下文 */
     int           loop_depth;       /* 0 = 不在循环中 */
+
+    /* 函数 id 分配计数器：sema 登记每个函数定义（全局函数 pass1_names、
+       局部函数 build_local_func、函数字面量 sema_check_func_literal / CTFE
+       求值）时从 FUNC_ID_PROGRAM_BASE 起统一分配（写回 fn->fid）。compiler
+       预扫描只读取不再分配——fid 单一来源在 sema（用户函数对象创建即持 id，
+       comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
+    uint32_t      func_id_next;
 } sema_t;
 
 /* ---- 公共 API ---- */
@@ -175,6 +188,13 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t);
 const sema_type_t *sema_type_find(sema_t *sema, const type_t *t);
 const sema_type_t *sema_type_find_name(sema_t *sema, strslice_t name);
 
+/**
+ * 按登记 id 查 sema_type_t（线性扫描，类型数量少）。CTFE 求值函数引用
+ * （AST_FUNC_REF 折叠产物）从 fn->sig_id 反查签名类型用。
+ * 未登记返回 NULL（内建类型不登记，不在此队列）。
+ */
+const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id);
+
 /** 将 AST 节点解析为源码位置（经 token pool）。 */
 location_t sema_loc(sema_t *sema, ast_node_t *node);
 
@@ -222,6 +242,22 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
 
 /** 兄弟链节点计数（参数/实参列表长度）。 */
 size_t sema_count_siblings(const ast_node_t *node);
+
+/**
+ * 函数 id 分配（幂等）：fn->fid 未分配（0）时从 sema->funcs 队列尾部函数
+ * 的 fid 分配写回，已分配则返回现有值。创建 sema 函数对象（pass1 全局 /
+ * build 局部 / sema_check_func_literal 字面量 / CTFE 求值字面量）时调用——
+ * fid 单一来源在 sema。返回分配后的 fid（0 = 溢出/无效参数）。
+ */
+uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn);
+
+/**
+ * 按函数 id 查 sema 函数对象（sema->funcs 线性扫描，函数数量少）。
+ * 函数定义 AST 托管在 sema->funcs（sema_func_t::def），sema/ctfe 需要
+ * 函数 AST / 签名时经此查询（AST_FUNC_REF 折叠产物按 fid 取签名构造引用）。
+ * 未登记返回 NULL（内建函数无 AST 托管，不在此队列）。
+ */
+sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid);
 
 #ifdef __cplusplus
 }

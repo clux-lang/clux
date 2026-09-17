@@ -235,6 +235,14 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
         ast_expr_stmt_t *n = (ast_expr_stmt_t *)stmt;
         return ctfe_eval(ctx, n->expr);
     }
+    case AST_FUNC_DEF: {
+        /* comptime body 内函数定义语句（func inc(){}）：求值函数值
+           （ctfe_eval_func_def 已绑定名字到当前 vm 作用域，供后续
+           `return inc` 引用）并丢弃——语句无结果。 */
+        value_t *fv = ctfe_eval(ctx, stmt);
+        if (value_is_error(vm, fv)) return fv;
+        return value_make_undefined(vm);
+    }
     default:
         /* 表达式直接作为语句（for 的 update 等）→ 求值并丢弃 */
         return ctfe_eval(ctx, stmt);

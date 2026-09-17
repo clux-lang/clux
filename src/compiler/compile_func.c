@@ -72,23 +72,19 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   return body;
 }
 
-/* ---- 名字 → func_ids 登记（AST_FUNC_REF 编译用；id+1 编码，见 compile.c） ---- */
-
-static void func_ids_insert(compiler_t *c, ast_func_def_t *fn) {
-  if (fn->name.len == 0 || !c->func_ids) return; /* 匿名字面量不可按名引用 */
-  char nb[256];
-  size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
-  memcpy(nb, fn->name.ptr, n);
-  nb[n] = '\0';
-  strmap_insert(c->func_ids, c->alloc, nb, (void *)(uintptr_t)(fn->fid + 1u));
-}
-
-/* 预扫描收集：单个函数（全局/局部/字面量统一）——分配 fid、登记 func_ids、
-   追加 funcs_all 队列（fid 序）。comptime func 不入队列（不进入运行时）。 */
+/* 预扫描收集：单个函数（全局/局部/字面量统一）——校验读取 fid（sema 创建
+   函数对象时分配，单一来源）、追加 funcs_all 队列（fid 序）。comptime func
+   不入队列（不进入运行时）；其 body 由 prescan_func_body 无条件递归——body
+   内嵌套函数/字面量会被 comptime 调用点折叠产物（LOAD_FUNCTION <fid>）引用，
+   必须收集构造。 */
 static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
   if (fn->is_comptime) return;
-  fn->fid = c->func_id_next++;
-  func_ids_insert(c, fn);
+  if (fn->fid == 0) {
+    c_error(c, (const ast_node_t *)fn,
+            "internal: missing function id for '%.*s' (sema did not assign fid)",
+            (int)fn->name.len, fn->name.ptr);
+    return;
+  }
   vec_push(c->funcs_all, c->alloc, fn);
 }
 
@@ -229,12 +225,13 @@ static void prescan_expr(compiler_t *c, ast_node_t *n) {
 }
 
 /**
- * 预扫描收集全部程序函数定义（全局 + 局部 + 嵌套函数字面量），统一分配
- * fid（写回 fn->fid）并登记 func_ids 映射——hoist 函数注册区构造与函数体区
- * 回填按 funcs_all 队列（fid 序）驱动。
+ * 预扫描收集全部程序函数定义（全局 + 局部 + 嵌套函数字面量），校验读取
+ * sema 分配的 fid——hoist 函数注册区构造与函数体区回填按 funcs_all 队列
+ * （fid 序）驱动。fid 单一来源在 sema（创建函数对象即分配）。
  *
- * comptime func 不收集（不进入运行时）；其 body 也不递归（函数体只在调用点
- * CTFE 求值，body 内嵌套函数/字面量不编译——sema 亦不检查 comptime body）。
+ * comptime func 本身不收集（不进入运行时），但其 body **无条件递归**——body
+ * 内嵌套函数/函数字面量会被 comptime 调用点折叠产物（LOAD_FUNCTION <fid>）
+ * 在运行期引用，必须收集构造（hoist 注册区 + 函数体区）。
  */
 void compile_prescan_funcs(compiler_t *c, ast_node_t *program) {
   if (!c || !program || program->kind != AST_PROGRAM) return;

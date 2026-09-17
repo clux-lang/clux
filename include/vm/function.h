@@ -112,20 +112,25 @@ void func_destroy(allocator_t *alloc, func_t **fn);
 
 /**
  * 创建程序函数"引用对象"（CTFE 函数引用专用）：轻量 func_t，仅携带
- * 签名 + 名字（cfunc=NULL，无 body 入口，不可调用），注册进 vm->functions
- * 统一释放，不分配 id、不登记 functions_by_id。
+ * 签名 + 名字 + id（cfunc=NULL，无 body 入口，不可调用），注册进
+ * vm->functions 统一释放，不登记 functions_by_id。
  *
- * 用途：comptime 函数体内引用普通函数名（如 `comptime func get() { return
- * add; }`）时，CTFE 求值需要一个函数值载体——折叠终点是 AST_FUNC_REF
- * （sema_ct_lit 按名字产出），此对象仅在 sema 阶段流转，运行期由
- * LOAD_FUNCTION <fid> 加载真实函数，与本对象无关。
+ * 用途：comptime 函数体内引用/求值普通函数（`comptime func get() {
+ * return add; }` 或 `return func(x:i32):i32{...};`）时，CTFE 求值需要一个
+ * 函数值载体——折叠终点是 AST_FUNC_REF（sema_ct_lit 按 id 产出），
+ * 运行期由 LOAD_FUNCTION <fid> 加载真实函数，与本对象无关。
  *
  * - sig_type: 签名类型（func_type_t，归 vm 类型池）；name: 函数名（借用，
  *   owns_name=false，sema arena / vm 静态字面量生命周期）。
+ * - id: 函数 id（sema 分配的 fid：函数字面量/局部函数经 sema_func_id_alloc
+ *   幂等分配，源码引用取符号表 fid；内建函数 = 内建 id）。func_t->id 供
+ *   sema_ct_encode 编码折叠（LOAD_FUNCTION <id> 的依据），与是否登记
+ *   functions_by_id 无关。
  * - 返回 func_t*（非 value）：调用方自行 value_alloc_data_copy 包装。
  *   Panics on out-of-memory.
  */
-func_t *func_new_program_ref(vm_t *vm, const type_t *sig_type, strslice_t name);
+func_t *func_new_program_ref(vm_t *vm, const type_t *sig_type,
+                             strslice_t name, uint32_t id);
 
 #ifdef __cplusplus
 }

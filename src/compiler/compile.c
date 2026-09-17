@@ -144,35 +144,10 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   }
   c->bc = bc;
 
-  /* 0. 函数名 → 函数 id 映射 + 全部函数收集（LOAD_FUNCTION 编译用）：
-     - 内建函数：遍历 vm->functions（func_new 已注册，id < FUNC_ID_PROGRAM_BASE，
-       如 printf=0），按 fn->name 登记。
-     - 程序函数：compile_prescan_funcs 递归收集全部函数定义（全局 + 局部 +
-       嵌套函数字面量），从 FUNC_ID_PROGRAM_BASE 起统一分配 fid（写回
-       fn->fid）并登记 func_ids（仅具名函数按名引用，匿名字面量跳过）。
-     AST_FUNC_REF 编译时查表命中 → LOAD_FUNCTION <id>。 */
-  c->func_ids = strmap_new(c->alloc, /*owns_value=*/false);
-  if (!c->func_ids) {
-    diag_error(c->diag, c_loc(c, program), "compiler: out of memory creating func id map");
-    bcode_destroy(&bc);
-    c->bc = NULL;
-    return NULL;
-  }
-  if (c->vm && c->vm->functions) {
-    size_t nf = vec_len(c->vm->functions);
-    for (size_t i = 0; i < nf; i++) {
-      func_t *fn = (func_t *)vec_get(c->vm->functions, i);
-      if (!fn || !fn->name.ptr || fn->id >= FUNC_ID_PROGRAM_BASE) continue;
-      char nb[256];
-      size_t n = fn->name.len < sizeof(nb) - 1 ? fn->name.len : sizeof(nb) - 1;
-      memcpy(nb, fn->name.ptr, n);
-      nb[n] = '\0';
-      /* id+1 编码：内建 id 从 0 起，strmap value 为 NULL 表示"未命中"，
-         直接存 id 会把 id=0 存成 NULL 导致 get 误判未命中 */
-      strmap_insert(c->func_ids, c->alloc, nb,
-                    (void *)(uintptr_t)(fn->id + 1u));
-    }
-  }
+  /* 0. 全部函数收集（LOAD_FUNCTION 编译用）：compile_prescan_funcs 递归
+     收集全部进入运行时的函数定义（全局 + 局部 + 嵌套函数字面量，含 comptime
+     body 内被折叠产物引用的函数），校验读取 sema 分配的 fid（单一来源）。
+     AST_FUNC_REF 纯 fid 标识，编译时直接 LOAD_FUNCTION <fid>。 */
   compile_prescan_funcs(c, program);
   if (c->failed) {
     bcode_destroy(&bc);
@@ -311,7 +286,6 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->sema_types    = sema_types;
   c->loop_stack    = NULL;
   c->failed        = false;
-  c->func_id_next  = FUNC_ID_PROGRAM_BASE;
   c->funcs_all     = vec_new(alloc, false);
   /* 签名类型 id 由 sema 分配（sema_type_register 登记进 sema->types，
      id = PROGRAM_BASE + index，已写入 sig->id）；type_id_next 仅作防御
@@ -326,7 +300,6 @@ void compiler_destroy(compiler_t **pc) {
   compiler_t *c = *pc;
   /* 释放残留 patch 节点（编译中途失败时可能有未回填标签） */
   while (c->loop_stack) c->loop_stack = c->loop_stack->next; /* 仅断链 */
-  if (c->func_ids) strmap_free(c->alloc, &c->func_ids);
   if (c->funcs_all) vec_free(c->alloc, &c->funcs_all);
   allocator_free(c->alloc, (void **)pc);
 }

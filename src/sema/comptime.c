@@ -103,17 +103,14 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     return true;
   }
   if (t->kind == TYPE_KIND_FUNC) {
-    /* 函数引用（comptime 函数体内引用的普通/内建函数名）：data 存 func_t*
-       （CTFE 经 func_new_program_ref 构造的引用对象，或 scope 里真实函数
-       值）。编码函数名到 arena（跨 sema/compile 阶段安全），折叠为
-       AST_FUNC_REF（compile 查函数名→fid 映射发 LOAD_FUNCTION）。 */
+    /* 函数引用（comptime 函数体内引用的普通/内建函数值，或函数字面量值）：
+       data 存 func_t*（CTFE 经 func_new_program_ref 构造的引用对象，或 scope
+       里真实函数值）。编码函数 id（func_t->id：sema 分配的程序 fid 或内建
+       id），折叠为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION <id>）——与函数
+       是否有 name 无关（匿名字面量无名字也可折叠）。 */
     func_t *fn = *(func_t **)value_data(v);
-    if (!fn || !fn->name.ptr) return false;
-    char *buf = (char *)arena_calloc(sema->arena, 1, fn->name.len + 1,
-                                     ALIGNOF(max_align_t));
-    if (!buf) return false;
-    memcpy(buf, fn->name.ptr, fn->name.len + 1);
-    out->func_name = strslice_from_bytes(buf, fn->name.len);
+    if (!fn) return false;
+    out->func_id = fn->id;
     return true;
   }
   return false; /* void/type/其他复合：不可折叠 */
@@ -228,13 +225,13 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     return cnode;
   }
   if (t->kind == TYPE_KIND_FUNC) {
-    /* 函数引用常量：折叠为 AST_FUNC_REF（携带函数名，compile 查
-       func_ids 映射发 LOAD_FUNCTION <fid> 加载真实函数值）。 */
-    if (!ct->func_name.ptr) return NULL;
+    /* 函数引用常量：折叠为 AST_FUNC_REF（纯 id 标识——compiler 直接发
+       LOAD_FUNCTION <fid> 加载真实函数值，与函数是否有 name 无关：
+       匿名字面量无名字也可折叠）。 */
     ast_node_t *ref =
         ast_func_ref_new(arena, origin->tok_begin, origin->tok_end);
     if (!ref) return NULL;
-    ((ast_func_ref_t *)ref)->name = ct->func_name; /* arena 复制，生命周期 = arena */
+    ((ast_func_ref_t *)ref)->fid = ct->func_id;
     return ref;
   }
   return NULL;

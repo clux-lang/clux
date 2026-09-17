@@ -22,6 +22,7 @@
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
+#include "parser/ast_var_def.h"
 #include "parser/lexer.h"
 #include "sema/symbol.h"
 #include "vm/function.h"
@@ -37,6 +38,81 @@
  * 每个表达式产生真实 value（track 到 vm->current_scope）。失败返回 error
  * value。短路 &&/|| 惰性求值（不走 vtable 二元分派，与运行期解释器一致）。
  * =========================================================================== */
+
+/* 按 id 查 vm->functions 里的 func_t（线性扫描，函数数量少）。覆盖：
+   - 内建函数（printf，func_new 注册，id < FUNC_ID_PROGRAM_BASE）
+   - CTFE 求值函数字面量时 func_new_program_ref 构造的引用对象（同一 fid
+     可能被多次构造，全部注册进 vm->functions 统一释放）
+   程序函数（全局/局部）编译期不在 vm->functions——按 fid 查 sema->funcs。 */
+static func_t *ctfe_func_by_id(vm_t *vm, uint32_t fid) {
+    if (!vm || !vm->functions) return NULL;
+    size_t n = vec_len(vm->functions);
+    for (size_t i = 0; i < n; i++) {
+        func_t *fn = (func_t *)vec_get(vm->functions, i);
+        if (fn && fn->id == fid && fn->type) return fn;
+    }
+    return NULL;
+}
+
+/* 函数字面量求值（comptime body 内 AST_FUNC_DEF）：求值参数类型 + 返回
+   类型 → type_func_sig 构造签名 → 登记（写回 fn->sig_id，compiler hoist
+   LOAD_TYPE 用）→ 分配 fid（幂等：sema_check_func_literal 可能已分配）→
+   构造引用 func_t → 包装 func value。具名字面量绑定到当前 vm 作用域
+   （comptime body 内 `func inc(){}` 语句 + `return inc` 引用）。 */
+static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
+    vm_t *vm = ctx->vm;
+    size_t nparams = ctfe_count_siblings(n->params);
+    const type_t *params_arr[nparams > 0 ? nparams : 1];
+    size_t i = 0;
+    for (ast_node_t *p = n->params; p; p = p->next, i++) {
+        ast_var_def_t *vd = (ast_var_def_t *)p;
+        value_t *pt = ctfe_eval(ctx, vd->type_expr);
+        if (value_is_error(vm, pt)) return pt;
+        if (!value_is_type(pt, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: func literal parameter type must be a type");
+        params_arr[i] = value_as(pt, const type_t *);
+    }
+    const type_t *ret = NULL;
+    if (n->return_expr) {
+        value_t *rt = ctfe_eval(ctx, n->return_expr);
+        if (value_is_error(vm, rt)) return rt;
+        if (!value_is_type(rt, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: func literal return type must be a type");
+        ret = value_as(rt, const type_t *);
+    }
+    const type_t *sig = type_func_sig(vm, nparams > 0 ? params_arr : NULL,
+                                      nparams, ret, /*is_variadic=*/false);
+    if (!sig)
+        return ctfe_err(ctx, "ctfe: failed to construct function literal signature");
+
+    /* 登记签名类型（按指针去重幂等）并写回 fn->sig_id——compiler hoist
+       函数注册区发 LOAD_TYPE <sig_id> 需要。sema walk（sema_check_func_literal）
+       可能晚于此（pass_globals 早于 Pass 3b），两者写回同一 id。 */
+    if (ctx->sema) {
+        const sema_type_t *st = sema_type_register(ctx->sema, sig);
+        if (st) n->sig_id = st->id;
+    }
+
+    /* fid 单一来源在 sema：幂等分配（sema_check_func_literal 已分配则复用）。
+       eval 场景（ctx->sema == NULL）无 fid，引用对象 id=0（仅求值显示用）。 */
+    uint32_t fid = ctx->sema ? sema_func_id_alloc(ctx->sema, n) : 0;
+
+    func_t *fn = func_new_program_ref(vm, sig, n->name, fid);
+    if (!fn)
+        return ctfe_err(ctx, "ctfe: out of memory creating function literal");
+    void *data = value_alloc_data_copy(vm->alloc, sig, &fn);
+    value_t *fv = value_make(vm, sig, data);
+
+    /* 具名字面量绑定到当前 vm 作用域（comptime body 内函数定义语句 +
+       后续名字引用）。scope_define clone 到作用域 owned，引用值保留。 */
+    if (n->name.len > 0) {
+        char nb[128];
+        const char *name = ctfe_slice_to_cstr(n->name, nb, sizeof nb);
+        value_t *stored = scope_define(vm, vm->current_scope, name, fv);
+        if (value_is_error(vm, stored)) return stored;
+    }
+    return fv;
+}
 
 value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     vm_t *vm = ctx->vm;
@@ -94,7 +170,10 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                                 (int)n->name.len, n->name.ptr);
                 }
                 ast_func_def_t *fd = (ast_func_def_t *)sym->ast;
-                func_t *fn = func_new_program_ref(vm, sym->type, fd->name);
+                /* 引用对象携带 sema 分配的 fid（折叠编码 LOAD_FUNCTION
+                   <fid> 的依据，与函数是否有 name 无关） */
+                func_t *fn = func_new_program_ref(vm, sym->type, fd->name,
+                                                  fd->fid);
                 if (!fn)
                     return ctfe_err(ctx, "ctfe: out of memory creating function reference");
                 void *data = value_alloc_data_copy(vm->alloc, sym->type, &fn);
@@ -307,7 +386,13 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!ctx->sema)
             return ctfe_err(ctx, "ctfe: type reference requires sema context");
         const sema_type_t *st = sema_type_find_name(ctx->sema, n->name);
-        if (!st) return ctfe_err(ctx, "ctfe: unknown type reference");
+        /* 内建类型引用（名字 = 规范名 "i32"）不登记 sema->types → 按内建
+           id 直接加载（与 compiler AST_TYPE_REF 分支同构的 type_lookup 兜底） */
+        if (!st) {
+            const type_t *bt = type_lookup(vm, n->name);
+            if (!bt) return ctfe_err(ctx, "ctfe: unknown type reference");
+            return type_as_value(vm, bt);
+        }
         return type_as_value(vm, st->type);
     }
     case AST_CONSTRUCT: {
@@ -366,28 +451,49 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
     case AST_FUNC_REF: {
         /* 函数引用节点（sema 折叠产物：AST_IDENT 确认函数符号时改写，或
-           comptime 折叠 AST_FUNC_REF）：查 sema 符号表拿签名 → 构造引用
-           func_t → 包装 func value（与 AST_IDENT 函数引用回退同构；comptime
-           func 不可作为值引用）。 */
+           comptime 折叠 AST_FUNC_REF）：纯 fid 标识——compiler 运行期
+           LOAD_FUNCTION <fid> 加载真实函数值，CTFE 此处按 fid 构造引用
+           func_t 包装 func value（与函数是否有 name 无关：匿名字面量
+           无名字也可折叠）。
+           程序函数（全局/局部）AST 托管在 sema->funcs：按 fid 查 →
+           sig_id 反查签名类型 → 构造引用对象。内建函数 / CTFE 已构造的
+           字面量引用（注册进 vm->functions）按 fid 直接复用现有对象。 */
         ast_func_ref_t *n = (ast_func_ref_t *)node;
         if (!ctx->sema || !ctx->sema->global_scope)
             return ctfe_err(ctx, "ctfe: function reference requires sema context");
-        sema_symbol_t *sym = sema_lookup(ctx->sema->global_scope, n->name);
-        if (!sym || sym->kind != SEMA_SYM_FUNC || !sym->type ||
-            sym->type->kind != TYPE_KIND_FUNC) {
-            return ctfe_errf(ctx, "ctfe: unknown function '%.*s'",
-                             (int)n->name.len, n->name.ptr);
+        sema_func_t *sf = sema_func_by_id(ctx->sema, n->fid);
+        if (sf) {
+            ast_func_def_t *fd = (ast_func_def_t *)sf->def;
+            if (fd->is_comptime) {
+                return ctfe_errf(ctx,
+                            "ctfe: comptime function '%.*s' cannot be used as a value",
+                            (int)fd->name.len, fd->name.ptr);
+            }
+            const sema_type_t *st = sema_type_by_id(ctx->sema, fd->sig_id);
+            if (!st || !st->type || st->type->kind != TYPE_KIND_FUNC) {
+                return ctfe_errf(ctx, "ctfe: function id %u missing signature",
+                                 n->fid);
+            }
+            func_t *fn = func_new_program_ref(vm, st->type, fd->name, n->fid);
+            if (!fn)
+                return ctfe_err(ctx, "ctfe: out of memory creating function reference");
+            void *data = value_alloc_data_copy(vm->alloc, st->type, &fn);
+            return value_make(vm, st->type, data);
         }
-        if (sym->is_comptime) {
-            return ctfe_errf(ctx,
-                        "ctfe: comptime function '%.*s' cannot be used as a value",
-                        (int)n->name.len, n->name.ptr);
+        /* 内建函数 / CTFE 字面量引用：vm->functions 按 id 复用现有对象 */
+        func_t *fn = ctfe_func_by_id(vm, n->fid);
+        if (!fn || !fn->type || fn->type->kind != TYPE_KIND_FUNC) {
+            return ctfe_errf(ctx, "ctfe: unknown function id %u", n->fid);
         }
-        func_t *fn = func_new_program_ref(vm, sym->type, n->name);
-        if (!fn)
-            return ctfe_err(ctx, "ctfe: out of memory creating function reference");
-        void *data = value_alloc_data_copy(vm->alloc, sym->type, &fn);
-        return value_make(vm, sym->type, data);
+        void *data = value_alloc_data_copy(vm->alloc, fn->type, &fn);
+        return value_make(vm, fn->type, data);
+    }
+    case AST_FUNC_DEF: {
+        /* 函数字面量（comptime body 内表达式/语句级）：求值签名 + 构造
+           func value（ctfe_eval_func_def：登记签名 + 分配 fid + 绑定名字）。
+           函数体不在此解释——运行期由编译产物执行（折叠产物 LOAD_FUNCTION
+           <fid> 加载真实函数对象）。 */
+        return ctfe_eval_func_def(ctx, (ast_func_def_t *)node);
     }
     default:
         return ctfe_err(ctx, "ctfe: unsupported expression node");
