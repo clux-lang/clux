@@ -1,0 +1,41 @@
+// comparison.cx — 样例：比较运算、逻辑运算与严格 bool 条件
+//
+//   - 比较运算：< <= > >= == !=，结果为 bool 值
+//   - 逻辑运算：&& || 短路求值（左侧决定结果时右侧不求值），! 取反
+//   - 严格 bool：条件（if/while/三元/短路）要求显式 bool，不设隐式
+//     truthy——数值须显式 `as bool` 才能作条件
+//   - 链式组合：比较结果可再参与逻辑运算（括号组合）
+
+func main(): i32 {
+    var a: i32 = 10;
+    var b: i32 = 20;
+
+    // ---- 六种比较：结果为 bool ----
+    var lt = a < b;   // 10 < 20  → true
+    var le = a <= b;  // true
+    var gt = a > b;   // false
+    var ge = a >= b;  // false
+    var eq = a == b;  // false
+    var ne = a != b;  // true
+    printf("lt=%d le=%d gt=%d ge=%d eq=%d ne=%d\n", lt, le, gt, ge, eq, ne);
+
+    // ---- 逻辑运算：&& || 短路 + ! 取反 ----
+    var and = (a < b) && (a > 0);   // true && true  → true
+    var or = (a > b) || (a > 0);    // false || true → true
+    var not = !(a == b);            // !false → true
+    printf("and=%d or=%d not=%d\n", and, or, not);
+
+    // ---- 短路：右侧不求值（1/0 若执行会除零报错）----
+    var safe = (a > b) && (1 / 0 > 0);  // 左侧 false → 右侧不求值
+    printf("safe=%d\n", safe);
+
+    // ---- 严格 bool 条件 ----
+    if (a < b && a > 0) {
+        printf("branch taken\n");
+    }
+
+    // 数值不能直接作条件，须显式转换（反注释验证编译错误）
+    // if (a) { printf("never\n"); }
+
+    return 0;
+}
