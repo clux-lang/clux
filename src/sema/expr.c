@@ -158,8 +158,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            全局（closure_scope 为空、调用时临时接 root_scope），兄弟/自身
            符号在定义点块作用域，不可见（需闭包）。FUNC 分支改写 AST_FUNC_REF
            → LOAD_FUNCTION 查 functions_by_id 全局表，会绕过作用域可见性
-           ——在此显式拦截。全局函数（global_scope 符号）放行。 */
+           ——在此显式拦截。参数（fscope 直系，含函数类型参数——可调用，
+           运行时参数可见）与全局函数（global_scope 符号）放行，与变量
+           分支捕获检查同构。 */
         if (sema->local_func_base &&
+            sema_scope_find_local(sema->local_func_base, n->name) != sym &&
             sema_lookup(sema->global_scope, n->name) != sym) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "local function cannot reference sibling or self '%.*s' "
@@ -302,16 +305,18 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return result;
     }
     case AST_CALL: {
-      /* 函数调用：实参 shadow 求值（sema 职责）→ 带签名 type_t 的 callee
-         → value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
+      /* 函数调用：统一路径 = exec callee（shadow 求值）→ exec 各实参 →
+         value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
          数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
-         callee 两种形态：
-         - AST_IDENT（函数名字调用）：符号查找（遮蔽平等）→ 闭包检查 →
-           comptime func 调用点折叠为字面量（sema_eval_comptime_call）→
-           shadow callee + value_call
-         - 一般表达式（函数值调用，如 get_fn()()、apply(f)(x)）：递归
-           shadow 求值 callee（可能触发内层 comptime 折叠）→ func 类型
-           校验 → value_call。 */
+         遮蔽/可见性全部交给作用域机制：callee 是 AST_IDENT 时经
+         sema_expr → AST_IDENT 分支自然解析（局部变量遮蔽函数名 → 变量
+         符号 → 下方 func 类型检查报"不可调用"；兄弟/自身函数 → 该分支
+         闭包检查拦截；未定义 → "undefined variable"）。callee 是函数值
+         表达式（get_fn()()、函数字面量）时递归求值 shadow（可能触发内层
+         comptime 折叠）。
+         唯一保留的符号感知前置：comptime func 调用点折叠（真实调用点
+         CTFE 求值；walking_comptime 时实参是参数 shadow value 无法求值，
+         只构造 callee shadow 做类型检查，折叠留到真实调用点）。 */
       ast_call_t *call = (ast_call_t *)*node;
       if (!call->callee) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
@@ -319,98 +324,34 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
+      value_t *callee = NULL;
       if (call->callee->kind == AST_IDENT) {
-        ast_ident_t *name = (ast_ident_t *)call->callee;
-        /* 遮蔽平等：函数/类型/变量都是作用域符号，从调用点作用域链解析
-           （sema_lookup 沿 parent 链取第一个已激活命中）——局部变量遮蔽
-           函数名时 sym 解析到变量符号（type 非 func）→ 报"不可调用"。
-           函数符号：用户函数 sym->ast=AST_FUNC_DEF；内置函数（printf）
-           ast=NULL 但 type 携带 variadic 签名。两者都经 func_shadow_call
-           校验。 */
-        sema_symbol_t *sym = sema_lookup(scope, name->name);
-        if (!sym || !sym->type) {
-          diag_error(sema->diag, sema_loc(sema, &call->base),
-                     "undefined function '%.*s'", (int)name->name.len,
-                     name->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+        sema_symbol_t *sym =
+            sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
+        if (sym && sym->is_comptime) {
+          /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
+             整个调用折叠为字面量。函数本身不注册到运行时。 */
+          if (!sema->walking_comptime)
+            return sema_eval_comptime_call(sema, node, scope);
+          /* walking_comptime：只做 shadow 类型检查（callee shadow 走下方
+             统一 value_call 路径，返回 return type 的 shadow） */
+          callee = value_make_shadow(sema->vm, sym->type);
         }
-        if (sym->type->kind != TYPE_KIND_FUNC) {
-          /* 遮蔽（变量/类型符号命中）：非函数符号不可调用 */
-          char tn[64];
-          sema_type_name(sym->type, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, &call->base),
-                     "cannot call '%.*s' of type %s", (int)name->name.len,
-                     name->name.ptr, tn);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-
-        /* 局部函数体内调用兄弟/自身/外层局部：callee 保持 AST_IDENT →
-           编译器发 PUSH name（运行时作用域查找），而函数体查找链只有参数 +
-           全局，兄弟/自身/外层局部符号不可见（需闭包）——编译期拦截。
-           参数（fscope 直系，含函数类型参数——可调用，运行时参数可见）与
-           全局函数放行（sema_scope_find_local 判参数、global lookup 判全局，
-           与 AST_IDENT 引用检查同构）。 */
-        if (sema->local_func_base &&
-            sema_scope_find_local(sema->local_func_base, name->name) != sym &&
-            sema_lookup(sema->global_scope, name->name) != sym) {
-          diag_error(sema->diag, sema_loc(sema, &call->base),
-                     "local function cannot call sibling or self '%.*s' "
-                     "(closures not supported)",
-                     (int)name->name.len, name->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-
-        /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
-           整个调用折叠为字面量。函数本身不注册到运行时。
-           walking_comptime（正在 walk 另一个 comptime func 的 body）：实参
-           是参数 shadow value，编译期无法求值——走下方普通 shadow 调用路径
-           只做类型检查（返回 return type 的 shadow），CTFE 折叠仅在真实调用点。 */
-        if (sym->is_comptime && !sema->walking_comptime) {
-          return sema_eval_comptime_call(sema, node, scope);
-        }
-
-        /* 逐个实参 shadow 求值（错误恢复产物保留为 void shadow，由
-           func_shadow_call 跳过，避免级联二次诊断）。经链上指针（&call->args
-           逐级推进）传递，使引用折叠就地写回实参链，编译器零感知。 */
-        size_t argc = sema_count_siblings(call->args);
-        value_t *arg_shadows[argc > 0 ? argc : 1];
-        ast_node_t **link = &call->args;
-        for (size_t i = 0; *link; link = &(*link)->next, i++) {
-          arg_shadows[i] = sema_expr(sema, link, scope);
-        }
-
-        /* shadow callee：data=NULL 只带签名类型（sym->type），受 vm scope
-           管理（auto-track） */
-        value_t *callee_shadow = value_make_shadow(sema->vm, sym->type);
-        value_t *result =
-            value_call(sema->vm, callee_shadow, arg_shadows, argc);
-
-        if (value_is_error(sema->vm, result)) {
-          error_data_t *ed = (error_data_t *)value_data(result);
-          const char *msg = ed && ed->message ? string_cstr(ed->message)
-                                              : "function call failed";
-          diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        return result; /* shadow in → shadow out（return_type shadow） */
       }
-
-      /* ---- 一般 callee 表达式（函数值调用）---- */
-      /* 递归 shadow 求值 callee：可能是内层 comptime 调用折叠产物
-         （get_fn()()：内层折叠为 AST_FUNC_REF）、函数字面量直接调用
-         （func(x:i32){...}(1)）、或函数类型变量（变量引用是 AST_IDENT，
-         已走上方分支）。经链上指针传 &call->callee，折叠就地写回。 */
-      value_t *callee = sema_expr(sema, &call->callee, scope);
-      if (value_is_error(sema->vm, callee) ||
-          value_is_type(callee, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      const type_t *ctype = value_type(callee);
-      if (!ctype || ctype->kind != TYPE_KIND_FUNC) {
-        char tn[64];
-        op_type_name(callee, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "cannot call value of type %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (!callee) {
+        /* 一般 callee（函数名 / 函数值表达式）统一 shadow 求值 */
+        callee = sema_expr(sema, &call->callee, scope);
+        if (value_is_error(sema->vm, callee) ||
+            value_is_type(callee, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        const type_t *ctype = value_type(callee);
+        if (!ctype || ctype->kind != TYPE_KIND_FUNC) {
+          char tn[64];
+          op_type_name(callee, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "cannot call value of type %s", tn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
       }
 
       size_t argc = sema_count_siblings(call->args);

@@ -474,7 +474,7 @@ TEST_F(SemaTest, AssignTypeMismatch) {
 
 TEST_F(SemaTest, UndefinedFunctionCall) {
     EXPECT_FALSE(analyze("func main(): void { bar(); }"));
-    expect_message(0, "undefined function 'bar'");
+    expect_message(0, "undefined variable 'bar'");
 }
 
 TEST_F(SemaTest, CallArgCountMismatch) {
@@ -1288,8 +1288,8 @@ TEST_F(SemaTest, ComptimeFuncNotConstantPath) {
     EXPECT_FALSE(analyze(
         "comptime func f():i32 { return g(); }"
         "func main(): void { var r = f(); }"));
-    /* g 未定义 → undefined function 诊断（sema 阶段） */
-    expect_message(0, "undefined function 'g'");
+    /* g 未定义 → 调用点 lookup 失败诊断（sema 阶段） */
+    expect_message(0, "undefined variable 'g'");
 }
 
 /* ================================================================ */
@@ -1944,13 +1944,13 @@ TEST_F(SemaTest, LocalFuncNestedBlock) {
 }
 
 TEST_F(SemaTest, LocalFuncNestedBlockOutOfScopeRejected) {
-    /* 出块引用 → undefined function */
+    /* 出块引用 → 调用点 lookup 失败 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  { func inner(x:i32): i32 { return x; } }"
         "  var a = inner(1);"
         "}"));
-    expect_message(0, "undefined function");
+    expect_message(0, "undefined variable");
 }
 
 TEST_F(SemaTest, LocalFuncCallsGlobalFunction) {
@@ -1976,11 +1976,12 @@ TEST_F(SemaTest, LocalFuncRecursionRejected) {
         "  return dec(n);"
         "}"
         "func main(): void { var r = outer(5); }"));
-    expect_message(0, "local function cannot call sibling or self");
+    expect_message(0, "local function cannot reference sibling or self");
 }
 
 TEST_F(SemaTest, LocalFuncSiblingCallRejected) {
-    /* 局部函数调用兄弟函数：符号只在定义作用域可见，调用需闭包 → 报错 */
+    /* 局部函数调用兄弟函数：符号只在定义作用域可见，调用需闭包 → 报错
+       （统一 exec callee 后由 AST_IDENT 函数引用闭包检查拦截） */
     EXPECT_FALSE(analyze(
         "func outer(n:i32): i32 {"
         "  func caller(x:i32): i32 { return callee(x) + 1; }"
@@ -1988,7 +1989,7 @@ TEST_F(SemaTest, LocalFuncSiblingCallRejected) {
         "  return caller(n);"
         "}"
         "func main(): void { var r = outer(3); }"));
-    expect_message(0, "local function cannot call sibling or self");
+    expect_message(0, "local function cannot reference sibling or self");
 }
 
 TEST_F(SemaTest, LocalFuncSiblingValueRefRejected) {
