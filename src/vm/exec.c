@@ -539,6 +539,34 @@ static value_t *op_set_func_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* SET_CLOSURE <name>：弹栈顶捕获值 → clone 进栈下函数对象的 closure_scope
+   捕获槽。调用约定（compiler 保证）：定义点先 LOAD_FUNCTION <fid> 压函数
+   值，随后每个捕获 [值, SET_CLOSURE "name"]，栈下 1 位即目标函数。闭包为
+   clone 值语义（捕获独立副本，非引用）；提升区已用 undefined 占位（scope
+   层 define-or-replace：scope_set 替换，void 占位无 assign 槽不走 value_assign）。 */
+static value_t *op_set_closure(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *cap = exec_stack_pop(vm);
+    value_t *fv = exec_stack_peek(vm, 0);
+    const type_t *t = fv ? value_type(fv) : NULL;
+    if (!t || t->kind != TYPE_KIND_FUNC)
+        return value_make_error(vm, "exec: set closure expects a function value below");
+    func_t *fn = *(func_t **)value_data(fv);
+    if (!fn->closure_scope)
+        return value_make_error(vm, "exec: function has no closure scope");
+
+    /* clone 进 closure_scope（scope_set 临时切 current_scope，clone 自动 track
+       到 owned；占位 undefined 先被销毁替换） */
+    char buf[256];
+    if (name.len >= sizeof(buf))
+        return value_make_error(vm, "exec: closure capture name too long");
+    memcpy(buf, name.ptr, name.len);
+    buf[name.len] = '\0';
+    value_t *stored = scope_set(vm, fn->closure_scope, buf, cap);
+    if (!stored) return value_make_error(vm, "exec: failed to set closure capture");
+    return NULL;
+}
+
 static value_t *op_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* callee 在 stack[sp-1-argc]，args 为紧随其后的 argc 个引用。
        args 复制进 VLA（value_call 内部压栈可能 realloc 使栈缓冲悬垂）；
@@ -673,6 +701,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_FUNCTION]  = op_push_function,
     [BCODE_BIND_FUNC]      = op_bind_func,
     [BCODE_SET_FUNC_NAME]  = op_set_func_name,
+    [BCODE_SET_CLOSURE]    = op_set_closure,
     [BCODE_CALL]           = op_call,
     [BCODE_RET]            = op_ret,
     [BCODE_JMP]            = op_jmp,

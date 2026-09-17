@@ -78,6 +78,9 @@ typedef enum {
     BCODE_PUSH_FUNCTION,   /* entry pc：构造 bcode_function_t + 签名类型 → func value（id 默认 0，由 BIND_FUNC 填充） */
     BCODE_BIND_FUNC,       /* u32 id：peek 栈顶 func value → 填充 fn->id + 登记 id→func（幂等，不弹栈） */
     BCODE_SET_FUNC_NAME,   /* strtable 索引：peek 栈顶 func value → 设置函数名（不弹栈） */
+    BCODE_SET_CLOSURE,     /* strtable 索引：弹栈顶值 → clone 进栈下函数对象的
+                              closure_scope 捕获槽（define-or-replace，占位
+                              undefined 被真实捕获值替换） */
 
     BCODE_ADD, BCODE_SUB, BCODE_MUL, BCODE_DIV, BCODE_MOD,
     BCODE_EQ,  BCODE_NE,  BCODE_LT,  BCODE_LE,  BCODE_GT,  BCODE_GE,

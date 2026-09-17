@@ -53,8 +53,20 @@ void scope_track(vm_t *vm, scope_t *scope, value_t *v);
  * 定义变量: 将 name 和 v 绑定到当前作用域。
  * name 会被拷贝，value 会被 clone 进 scope。
  * 返回 scope 内存储的 value_t 指针（借用的）。
+ * 已有同名变量 → error（重复定义）。
  */
 value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v);
+
+/**
+ * 定义或替换变量（define-or-replace）：与 scope_define 不同，已有同名变量
+ * 时先销毁旧值（从 owned 移除 + dispose + free）再 clone 新值绑定。
+ * 用于闭包捕获槽位：函数提升区先以 undefined 占位（DEFINE 时无真实值），
+ * 定义点 SET_CLOSURE 用真实捕获值替换——void 占位无 assign 槽，须走
+ * scope 层替换。
+ * 返回 scope 内存储的 value_t 指针（借用的），失败返回 NULL（无诊断，
+ * 调用方负责 error）。
+ */
+value_t *scope_set(vm_t *vm, scope_t *scope, const char *name, value_t *v);
 
 /** 查找变量（沿 parent 链递归），未找到返回 NULL */
 value_t *scope_lookup(const scope_t *scope, strslice_t name);

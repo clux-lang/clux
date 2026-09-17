@@ -115,6 +115,31 @@ value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
     return cloned;
 }
 
+/* 从 owned 列表中移除并销毁 value（scope_set 替换旧值用） */
+static void scope_remove_owned(vm_t *vm, scope_t *scope, value_t *v) {
+    size_t n = vec_len(scope->owned);
+    for (size_t i = 0; i < n; i++) {
+        if (vec_get(scope->owned, i) == v) {
+            vec_swap_remove(scope->owned, i);
+            break;
+        }
+    }
+    value_dispose(vm, v);
+    allocator_free(scope->alloc, (void **)&v);
+}
+
+value_t *scope_set(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
+    if (!scope || !name) return NULL;
+
+    value_t *old = (value_t *)strmap_get(scope->vars, name);
+    if (old) {
+        /* 已有：移除 vars 映射 + 从 owned 移除旧值销毁，再走 define 绑定新值 */
+        strmap_remove(scope->vars, name);
+        scope_remove_owned(vm, scope, old);
+    }
+    return scope_define(vm, scope, name, v);
+}
+
 value_t *scope_lookup(const scope_t *scope, strslice_t name) {
     for (const scope_t *s = scope; s; s = s->parent) {
         char buf[256];

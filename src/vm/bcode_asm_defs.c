@@ -36,6 +36,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_FUNCTION]  = { "PUSH_FUNCTION",  { BCODE_ASM_OP_U32 } },
     [BCODE_BIND_FUNC]      = { "BIND_FUNC",      { BCODE_ASM_OP_U32 } },
     [BCODE_SET_FUNC_NAME]  = { "SET_FUNC_NAME",  { BCODE_ASM_OP_STR } },
+    [BCODE_SET_CLOSURE]    = { "SET_CLOSURE",    { BCODE_ASM_OP_STR } },
 
     [BCODE_ADD]            = { "ADD",            { BCODE_ASM_OP_NONE } },
     [BCODE_SUB]            = { "SUB",            { BCODE_ASM_OP_NONE } },
