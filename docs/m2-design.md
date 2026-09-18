@@ -25,6 +25,7 @@
 | 三元表达式 `? :` | 纳入 |
 | comptime 关键字（`comptime var` / `comptime func`） | **纳入**（2026-09-11，见 §9） |
 | const / volatile 前导修饰类型 | **纳入**（2026-09-11，见 §10；指针仍排除，示例仅作语义说明） |
+| optional 类型 `?T` + nil 语义重构 | **纳入**（2026-09-18，见 §12） |
 | 字节码产物 `.cxb` / `.cxs`（`bc emit` / `bc asm` / `bc disasm`；`run` 按内容判定） | **纳入**（2026-09-12，见 §11；工具链已完成，非主线） |
 | tagged union / cunion | **移出 M2**（鸭子类型协议复杂，后续里程碑） |
 | slice | **移出 M2**（前导判定语法示例，不实现） |
@@ -286,6 +287,107 @@ name:                     ; 标签定义（去空白后形如 "name:"，无内�
 
 ---
 
+### 12. optional 类型 `?T` + nil 语义重构（2026-09-18 定稿）
+
+**设计动机**：M1 用 `nil` 作为 str/func 的 0 值（NULL 指针），服务于数组延迟初始化（自动 0 填充）。但 str/func **概念上不应有 0 值**——NULL 混入类型值域破坏类型保证（`s.len`、`f()` 需处理"非字符串/非函数"的运行时 NULL）。重构决策：引入 **optional 类型 `?T`** 显式表达可空性，`nil` 降级为语法级 none（非值），str/func 恢复非空保证。
+
+**与 M1 的破坏性差异**（迁移范围见差异清单）：
+- `var s: str = nil` → 非法；改为 `var s: ?str = nil` 或 `var s: str = ""`
+- `str == nil` / `func == nil` 运行时指针检查 → 删除；仅 `?T` 可比较
+- `BCODE_PUSH_NIL`、`type_nil` value → 退役
+
+#### 12.1 `?T` 类型
+
+```
+var a: ?i32 = 123;    // some：T → ?T 隐式提升
+var a: ?i32 = nil;    // none
+var a: ?str = nil;
+```
+
+- **前导判定**，与 const/volatile 同族（前缀式），右结合递归：`?[3]?i32`、`?func(i32)->i32` 均合法
+- **`T → ?T` 隐式提升（some）**（D1）：`T` 的值天然是 `?T` 的 some 态，`var x:?i32 = 5` 直接合法；反向 `?T → T` 需窄化（§12.4）或显式转换，不对称性表达"T 是 ?T 的子集"
+- **`?T` 只能与 nil 比较**（D4）：四种判定形式（`x==nil`/`nil==x`/`x!=nil`/`nil!=x`）是唯一合法比较；`?T == ?T` 直接比较报错，须先窄化再比（§12.4）。`x == nil` 编译成**读 ok tag 的 bool 比较**（非 vtable eq 分派，因 nil 非 value）
+- **eq 语义**：none==none 恒真、some==some 按 T 比较、异态 false
+- **C 内存映射 = `struct Optional_T { bool ok; T value; }`**：
+  - size/align 按 C 对齐规则计算，value 字段偏移 `offsetof(value) = align_up(sizeof(bool), alignof(T))`
+  - 访问器：`option_ok(data)`（offset 0 读 tag）、`option_value(data) = data + offset`
+  - **SOME 态窄化退化的运行时真相** = 借用引用 data 指向 value 字段（与 is_own 借用字段同构，`x.member` 零拷贝）
+  - `T → ?T` 隐式提升 = 压 `ok=true` + T 值；none 构造 = 压 `ok=false` + value 全零
+
+#### 12.2 `?T` 构造器（二值单槽位）
+
+```
+.?i32{nil}     // none：ok=false
+.?i32{123}     // some：ok=true, value=123
+.?str{nil}     // ✓
+.?func(...){f} // ✓
+```
+
+- **字段数强制 == 1**（`.?i32{}` / `.?i32{1,2}` 报错），字段类型 ∈ {nil, T}
+- **编译 desugar**（不需新字节码，构造器解析层特化）：
+  - nil 形态 → `PUSH_OPT_NONE`（与 fill `<nil,N>` 同指令）
+  - T 形态 → `T→?T` 隐式提升（与 `var x:?i32 = 123` 同路径）
+- **嵌套**：T 为复合类型时值位可嵌套构造器，`.?[3]i32{ .[3]i32{1,2,3} }` 合法
+
+#### 12.3 fill 值包 `<v,N>`（数组批量初始化）
+
+```
+.[1000]i32{ <0, 1000> }      // 全 0
+.[1000]str{ <"", 1000> }     // 全空串（非 NULL）
+.[1000]func{ <f, 1000> }     // 同一函数指针复制 N 份（func 浅拷贝指针）
+.[1000]?i32{ <nil, 1000> }   // 全 none（D5）
+```
+
+- **字段链位置 `<...>` 一律解析为值包**，不做元组（与元组类型 `<T1,T2>` 的消歧规则）；元组元素用显式构造 `.{...}` 避开歧义
+- `v` 任意值表达式（含 `nil`、复合值）；`N` 编译期常量
+- 构造器总元素数 = ΣN + 显式字段数，**必须 == 数组长度**（不等 → 编译错误，无运行时裁剪）
+- 可拼接/混用：`.[10]i32{ <1,4>, 2, 3, <4,4> }`（4+1+1+4=10 ✓）
+- `N` 越界或类型不匹配 → 编译错误
+
+#### 12.4 construct 完全显式（不再 0 填充）
+
+- **删 sema 的 AST_UNDEF 自动补发**（M1 的"缺失字段补 0 值"协议，见"关键架构决策 3"旧文）
+- `.[1000]i32{}` / `.[3]i32{1,2}`（长度不匹配）→ **编译错误**
+- struct 部分字段 `.Point{ .x = 1 }`（缺 y）→ **编译错误**，须 `.Point{ .x = 1, .y = 0 }`
+- **undefined 声明全类型保留**（D2）：`var a:[1000]str = undefined` 合法，但 **a 本身 TDZ**——`a[0] = ""` 部分赋值非法（读 a 本身即 TDZ 违例），必须整体 `a = .[1000]str{<"",1000>}` 显式构造赋值；不违背"construct 完全显式"原则
+- **str/func 无空值**：删除全部 nil 隐式转换与 `== nil` 运行时分支；str 的值永远是有效 string_t，func 永远是有效 func_t
+
+#### 12.5 路径窄化（narrowing）
+
+**判定形式识别**（sema 的 if 条件分析，四种等价）：
+
+```
+if (x == nil) {...}   if (nil == x) {...}
+if (x != nil) {...}   if (nil != x) {...}
+```
+
+条件必须形如**符号 ==/!= nil**（x 是 `?T` 的变量/参数）；x 非 optional 与 nil 比较 → 编译错误。
+
+**分支内窄化状态**（符号级数据流，复用现有 flow_init 基础设施）：
+
+| 状态 | then 分支 | else 分支 |
+|------|-----------|-----------|
+| `x == nil` | NONE：访问报错 "x is known to be nil" | SOME：`?T` 退化 T，`x.member`/`x()` 合法 |
+| `x != nil` | SOME：退化 T | NONE：访问报错 |
+
+- **UNKNOWN 态**（未窄化）：`?T` shadow，`x.member` 报错，引导写 `if (x != nil)`
+- **窄化路径禁止可选赋值**（D3）：if 分支内 x 的类型已是 T（非 `?T`），用 `?T` 值赋给 T 非法，故分支内赋值 RHS 必为 T 类型，赋值后**保持 SOME 态**
+- **状态流转**：`a = nil`（UNKNOWN 态，合法）→ NONE；分支出口恢复外层状态；函数调用后清窄化（保守）；嵌套 if 沿外层状态继续窄化
+
+#### 12.6 nil 的语法角色与字节码协议
+
+- **nil 不是值**：AST_NIL 节点保留（parse_nil.c 已有），sema 在普通表达式位置报错；只允许出现在四种判定、`?T` 初始化、赋值 `a = nil`、构造器字段、fill `<nil,N>`
+- **运行时无 type_nil value**：none 是 option tag，`BCODE_PUSH_NIL` 指令退役
+
+| 场景 | 字节码 | 语义 |
+|------|--------|------|
+| `a = nil`（赋值/声明） | `STORE_NIL <name>` | scope_lookup → 置 ok=false，压回 dst；**只置 tag，不释放/清零 value 字段**（value->data 是平凡内存，string_t/function_t/type_t 由竞技场分配器统一管理，残留指针无泄漏） |
+| 构造器字段 `.{ nil }` / fill `<nil,N>` | `PUSH_OPT_NONE` | 压 ok=false + value 全零块（CONSTRUCT 需真实值块） |
+
+- 赋值改**已有变量的 tag**（STORE_NIL）与构造器生成**新 none 值块**（PUSH_OPT_NONE）两条路径语义不同，缺一不可
+
+---
+
 ## 关键架构决策
 
 ### 1. 类型表达式 = 普通表达式
@@ -436,10 +538,9 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 - **下标访问 `INDEX_GET` / `INDEX_SET`（对应 `a[i]` / `a[i] = v`）**：分派 `vtable->get_index` / `set_index`。**运行期越界检查**按数组值实际长度校验 `0 <= index < len`，越界（含负索引）返回硬错误并停机；索引须为整数类型。当前仅数组实现下标访问，struct/tuple 待后续 Phase
 - **值构造类型位统一**：类型位永远是栈顶一个类型值——命名类型 = `load "Test"`，匿名类型 = 先 `push_xxx...define_type <id>...seal` 在栈上构造类型值再由 `load_type <id>` 拉回（等价于具名 `load`，seal 本身消费栈不留类型位）；随后字段值按类型字段序压栈 → `construct N`。**类型生成发生在类型构造阶段（push_xxx...seal），construct 不负责生成类型**
 - **字段名纯编译期**：具名字段 `.field = v` 的字段名只在编译期用于重排值压栈顺序 + 字段存在性/缺失校验，**不产生运行时指令**（运行时按类型字段序写值，无 store_field）
-- **缺失字段补 0 值（sema 补发占位，运行期清零落地）**：用户只提供部分字段时（`.{ .x = 1 }` 缺 y），**sema 在类型解析后**按声明边界对缺失元素向字段链补发 `AST_UNDEF` 零值占位节点（compiler 逐字段编译 → `PUSH_UNDEFINED`，`construct N` 的 N = 补齐后的声明长度；ctfe 对占位节点压 undefined value）。运行期 `value_make_array` **跳过 undefined 元素**，剩余字节由分配块清零自动补**类型零值**（数值 0 / bool false / func nil / str NULL）。补齐逻辑收敛在 sema 的原因：sema 解析后复合类型折叠为类型引用（AST_TYPE_REF），compiler 层已拿不到边界，只能由 sema 在持有真实 len 时补发。示例 `var p = .Point{ .x = 1 }`：
-```asm
-load "Point"; push 1; push_undefined; construct 2   ; y 缺失 → sema 补 AST_UNDEF 占位 → 运行期跳过 → 0 值
-```
+- **缺失字段补 0 值（sema 补发占位，运行期清零落地）**：~~用户只提供部分字段时（`.{ .x = 1 }` 缺 y），sema 在类型解析后按声明边界对缺失元素向字段链补发 `AST_UNDEF` 零值占位节点（compiler 逐字段编译 → `PUSH_UNDEFINED`，`construct N` 的 N = 补齐后的声明长度；ctfe 对占位节点压 undefined value）。运行期 `value_make_array` **跳过 undefined 元素**，剩余字节由分配块清零自动补**类型零值**（数值 0 / bool false / func nil / str NULL）。补齐逻辑收敛在 sema 的原因：sema 解析后复合类型折叠为类型引用（AST_TYPE_REF），compiler 层已拿不到边界，只能由 sema 在持有真实 len 时补发。示例 `var p = .Point{ .x = 1 }`：~~
+  ~~`load "Point"; push 1; push_undefined; construct 2   ; y 缺失 → sema 补 AST_UNDEF 占位 → 运行期跳过 → 0 值`~~
+  **【已被 §12 推翻（2026-09-18）】construct 完全显式，不再 0 填充**：`.[3]i32{1,2}` / `.Point{ .x = 1 }` 长度/字段不足 → 编译错误；缺失补 0 由 fill 值包 `<v,N>` 显式表达（`.[3]i32{<0,3>}`）；str/func 无 0 值（NULL 消除），可空性走 `?T`
 - **类型引用**：命名类型统一 `load "Test"`；内联类型表达式（`[N]T`/`<T1,T2>`）在类型槽位直接构造类型值。与类型定义（push_xxx）解耦
 - **`define` 是唯一绑定指令**（`define_struct`/`DEFINE_FUNCTION` 已删除），**永远双弹 `[value, type-spec]`**（value 在底、类型说明符在顶，**无单弹分支**）：type-spec = type value（`load "T"`，显式类型）或 undefined（`push_undefined`，无标注 → define 从值推断类型）。`var a = 5` → `push_i32 5; push_undefined; define "a"`；`var a:i32 = 5` → `push_i32 5; load "i32"; define "a"`；**函数定义** → `push_func_type; [load "T"; func_type_param]*; load "R"; func_type_return; [func_type_vararg]; seal; push_function entry_pc; push_undefined; define "add"`（函数值自带签名类型）；**函数参数绑定**（函数体开头倒序）→ 每参数 `push_undefined; define name`（从值推断，与 var 定义完全一致）。**两个变体完全等价**：`struct Test {...}` 与 `type Test = struct {...}` 字节码相同（`push_struct...seal; push_undefined; define "Test"`）
 - 类型构造与值构造走同一套构造器求值协议
@@ -567,6 +668,24 @@ var arr:[N]i32 = .{};                // N 是 comptime var（全局/局部），
 
 **M2 消费点**：数组边界 N、type 别名计算、enum 值、`.[N]T{...}` 构造边界——经 ctfe 求值后读数值或 type value。sizeof/alignof/typeof **不经 ctfe**（SEMA→CTFE 桥梁，见 §8）：操作数 shadow 求值取类型，运算符自身产出真实常量直接消费。
 
+### 9. optional 类型架构（`?T`，2026-09-18 定稿，见语法设计决策 §12）
+
+**option_type_t**（继承 `type_t`，同 struct/array/const/volatile 平级）：
+- 持 `inner` 指针指向被 optional 包裹的类型（T）；各列 interning 池 + 独立 vtable
+- 布局：C 映射 `struct Optional_T { bool ok; T value; }`，size/align 按 C 对齐规则，value 偏移 `align_up(1, alignof(T))`
+- **vtable 比 const/volatile 更薄**：`?T` 只能与 nil 比较（tag 比较由编译器发专用指令，非 vtable eq 分派），故 eq/ne 无分派；clone/assign/dispose 转发 inner 且额外处理 ok（ok 平凡拷贝；value 按 T vtable 递归——OPT 分支进 `array_blit_raw`/`array_dispose_raw` switch，与嵌套数组处理同构）
+- 访问器：`option_ok(data)`（offset 0 读 tag）、`option_value(data) = data + offset`；SOME 态窄化 = 借用引用 data 指向 value 字段（与 is_own 借用字段同构）
+
+**路径窄化的数据流**（sema 层，复用 flow_init 基础设施）：
+- if 条件识别四种 nil 判定形式（符号 ==/!= nil），then/else 分支分别设置符号窄化状态（SOME/NONE）
+- 分支内符号 lookup 应用窄化状态：SOME → 返回 T 的 shadow value（?T 退化 T）；NONE → 返回 T shadow 但带 none 标志（一切 T 操作报错）；UNKNOWN → ?T shadow（访问报错引导判空）
+- 状态流转：`a = nil` → NONE；分支出口恢复；函数调用后清窄化；嵌套 if 传播
+- **窄化路径禁止可选赋值**（D3）：分支内 x 已是 T，`x = <?T值>` 类型不匹配非法
+
+**新字节码**：
+- `STORE_NIL <name>`：`a = nil` 赋值/声明置 ok=false，只置 tag 不清理 value 字段
+- `PUSH_OPT_NONE`：构造器字段 `.{nil}` / fill `<nil,N>` 压 ok=false + value 全零块
+
 ---
 
 ## 实现阶段
@@ -582,27 +701,30 @@ var arr:[N]i32 = .{};                // N 是 comptime var（全局/局部），
 - `AST_TYPE_NAME`, `AST_TERNARY`, `AST_STRUCT_DEF`, `AST_ENUM_DEF`, `AST_TYPE_DEF`, `AST_ARRAY_TYPE`, `AST_TUPLE_TYPE`, `AST_FUNC_TYPE`, `AST_CONSTRUCT`, `AST_SWITCH`, `AST_DO_WHILE`, `AST_SIZEOF`, `AST_ALIGNOF`, `AST_TYPEOF`, `AST_PATH`
 - `AST_CT_CONST`（编译期常量对象：携带类型 + 值数据，承载复合常量写回）
 - `AST_VAR_DEF` / `AST_FUNC_DEF` 新增 `is_comptime` 标志（comptime 语法糖，不建独立节点）
+- `AST_OPT_TYPE`（`?T` 类型）、`AST_FILL`（`<v,N>` 值包）——nil 语义重构（§12）
 
 **parse_type_expr**
-- `parse_type_expr(p)` → 解析类型表达式，产生 `AST_TYPE_NAME` / `AST_ARRAY_TYPE` / `AST_TUPLE_TYPE` / `AST_FUNC_TYPE`
+- `parse_type_expr(p)` → 解析类型表达式，产生 `AST_TYPE_NAME` / `AST_ARRAY_TYPE` / `AST_TUPLE_TYPE` / `AST_FUNC_TYPE` / `AST_OPT_TYPE`
 - 与 `parse_expr` 共享 Pratt 核心
 
 ### Phase 2: VM 类型系统扩展
 
 - `type_compatible(vm, from, to)` — 鸭子类型检查
 - `vm_register_type(vm, type, name)` — 用户类型注册
-- 新类型：`struct_type_t`, `array_type_t`, `tuple_type_t`, `enum_type_t`, `const_type_t`（持 base 指针）, `volatile_type_t`（持 base 指针 + 代理 vtable）
-- interning 池 + 独立 vtable（volatile vtable 代理到子类型，见 §10）
+- 新类型：`struct_type_t`, `array_type_t`, `tuple_type_t`, `enum_type_t`, `const_type_t`（持 base 指针）, `volatile_type_t`（持 base 指针 + 代理 vtable）, `option_type_t`（持 inner 指针，见架构决策 9）
+- interning 池 + 独立 vtable（volatile vtable 代理到子类型，见 §10；option vtable 薄——eq/ne 无分派，clone/assign/dispose 转发 + ok 处理）
 - value_t 新增 `is_own` 字段 + 借用数据 dispose/clone 语义
+- 新字节码 `STORE_NIL` / `PUSH_OPT_NONE`；退役 `BCODE_PUSH_NIL`（nil 语义重构 §12）
 
 ### Phase 3: Sema 扩展
 
 - `resolve_type(sema, ast_node)` → `ast_node_t*`（从 `strslice_t` 升级）
 - 类型计算：`extends`/`==` → bool shadow，`? :` 按条件选分支
 - Pass 1/2 扩展：收集类型定义名称、解析类型内部结构
-- sema_expr：`AST_CONSTRUCT`/`AST_MEMBER`/`AST_INDEX`/`AST_PATH`/`AST_SIZEOF`/`AST_ALIGNOF`/`AST_TYPEOF`/`AST_TERNARY`
+- sema_expr：`AST_CONSTRUCT`/`AST_MEMBER`/`AST_INDEX`/`AST_PATH`/`AST_SIZEOF`/`AST_ALIGNOF`/`AST_TYPEOF`/`AST_TERNARY`/`AST_FILL`
 - sema/stmt：`AST_DO_WHILE`/`AST_SWITCH` + 位运算复合赋值
 - **comptime 处理**：`comptime var` 右值在 `vm->comptime = true` 下求值 + 写回全局/局部编译期常量表；`comptime func` 符号表标记 + 调用点强制编译期；类型表达式槽位自动置 `vm->comptime = true`（见 §9）
+- **nil 语义重构（§12）**：删 AST_UNDEF 自动补发（construct 完全显式）；四种 nil 判定识别 + 路径窄化数据流（SOME/NONE 状态，复用 flow_init）；`a = nil` 编译为 `STORE_NIL`；`?T` 构造器二值单槽位 desugar
 
 ### Phase 4: 构造 + 访问
 
