@@ -436,9 +436,9 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 - **下标访问 `INDEX_GET` / `INDEX_SET`（对应 `a[i]` / `a[i] = v`）**：分派 `vtable->get_index` / `set_index`。**运行期越界检查**按数组值实际长度校验 `0 <= index < len`，越界（含负索引）返回硬错误并停机；索引须为整数类型。当前仅数组实现下标访问，struct/tuple 待后续 Phase
 - **值构造类型位统一**：类型位永远是栈顶一个类型值——命名类型 = `load "Test"`，匿名类型 = 先 `push_xxx...define_type <id>...seal` 在栈上构造类型值再由 `load_type <id>` 拉回（等价于具名 `load`，seal 本身消费栈不留类型位）；随后字段值按类型字段序压栈 → `construct N`。**类型生成发生在类型构造阶段（push_xxx...seal），construct 不负责生成类型**
 - **字段名纯编译期**：具名字段 `.field = v` 的字段名只在编译期用于重排值压栈顺序 + 字段存在性/缺失校验，**不产生运行时指令**（运行时按类型字段序写值，无 store_field）
-- **缺失字段递归补全 0 值**（compiler 职责）：用户只提供部分字段时（`.{ .x = 1 }` 缺 y），编译器按类型字段序对**缺失字段递归生成该字段类型的 0 值构造字节码**，保证 `construct N` 的 N 个字段值齐全——基本类型压 0 立即数；复合类型（struct/array/tuple）递归构造零值对象（复用类型位 + 各子字段 0 值 + construct）。示例 `var p = .Point{ .x = 1 }`：
+- **缺失字段补 0 值（sema 补发占位，运行期清零落地）**：用户只提供部分字段时（`.{ .x = 1 }` 缺 y），**sema 在类型解析后**按声明边界对缺失元素向字段链补发 `AST_UNDEF` 零值占位节点（compiler 逐字段编译 → `PUSH_UNDEFINED`，`construct N` 的 N = 补齐后的声明长度；ctfe 对占位节点压 undefined value）。运行期 `value_make_array` **跳过 undefined 元素**，剩余字节由分配块清零自动补**类型零值**（数值 0 / bool false / func nil / str NULL）。补齐逻辑收敛在 sema 的原因：sema 解析后复合类型折叠为类型引用（AST_TYPE_REF），compiler 层已拿不到边界，只能由 sema 在持有真实 len 时补发。示例 `var p = .Point{ .x = 1 }`：
 ```asm
-load "Point"; push 1; push 0; construct 2   ; y 缺失 → 补 i32 0 值
+load "Point"; push 1; push_undefined; construct 2   ; y 缺失 → sema 补 AST_UNDEF 占位 → 运行期跳过 → 0 值
 ```
 - **类型引用**：命名类型统一 `load "Test"`；内联类型表达式（`[N]T`/`<T1,T2>`）在类型槽位直接构造类型值。与类型定义（push_xxx）解耦
 - **`define` 是唯一绑定指令**（`define_struct`/`DEFINE_FUNCTION` 已删除），**永远双弹 `[value, type-spec]`**（value 在底、类型说明符在顶，**无单弹分支**）：type-spec = type value（`load "T"`，显式类型）或 undefined（`push_undefined`，无标注 → define 从值推断类型）。`var a = 5` → `push_i32 5; push_undefined; define "a"`；`var a:i32 = 5` → `push_i32 5; load "i32"; define "a"`；**函数定义** → `push_func_type; [load "T"; func_type_param]*; load "R"; func_type_return; [func_type_vararg]; seal; push_function entry_pc; push_undefined; define "add"`（函数值自带签名类型）；**函数参数绑定**（函数体开头倒序）→ 每参数 `push_undefined; define name`（从值推断，与 var 定义完全一致）。**两个变体完全等价**：`struct Test {...}` 与 `type Test = struct {...}` 字节码相同（`push_struct...seal; push_undefined; define "Test"`）

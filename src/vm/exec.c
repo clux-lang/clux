@@ -463,9 +463,10 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* 仅实现 array 分支 */
     if (t->kind == TYPE_KIND_ARRAY) {
         const type_t *et = array_type_elem(t);
-        /* 校验成员数（定长数组须与边界一致；动态数组 SIZE_MAX 不限） */
+        /* 校验成员数：定长数组允许部分填充（不足部分编译器补发
+           undefined 占位，块清零自动补零值）；动态数组 SIZE_MAX 不限 */
         size_t len = array_type_len(t);
-        if (len != SIZE_MAX && len != (size_t)n)
+        if (len != SIZE_MAX && (size_t)n > len)
             return value_make_error(vm,
                 "construct: array element count mismatch");
         return value_make_array(vm, et, n > 0 ? elems : NULL, n);

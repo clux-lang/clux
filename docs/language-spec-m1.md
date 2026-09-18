@@ -362,16 +362,20 @@ var <name>:<type> = undefined;      // 延迟初始化（TDZ）
 
 #### nil（内置类型唯一值）
 
-`nil` 是内置类型（与 `type` 类似）的唯一值，当前表示函数的 **0 初始化**（`*((func_t **)data) = NULL`），未来用于表示空指针。
+> **临时实现**：nil 是 M1 的临时空值表示，后续 M2+ 将由 **optional 类型**（`?T`）替代——当前 nil 同时充当 func/str 的"0 初始化"标记与比较探测，仅覆盖基本空指针语义，不携带类型信息（optional 将把"空"与类型绑定）。
+
+`nil` 是内置类型（与 `type` 类似）的唯一值，当前表示函数与字符串的 **0 初始化**（`*((func_t **)data) = NULL` / `*((string_t **)data) = NULL`），未来用于表示空指针。
 
 规则：
 - `nil` 是字面量值，**不是类型名**：不存在 `var a:nil = nil` 这类类型变量定义（`type_lookup("nil")` 返回 NULL）
 - 函数 0 初始化：`var f:func(...) = nil` / `f = nil`（nil → func 隐式转换）
-- 比较：`nil == nil` 恒真；`nil == f` / `f == nil` 判断函数指针是否为 NULL（func 对象与 nil 的比较）
+- 字符串 0 初始化：`var s:str = nil` / `s = nil`（nil → str 隐式转换，NULL 指针；数组自动 0 填充的 str 元素亦为 nil）
+- 比较：`nil == nil` 恒真；`nil == f` / `f == nil` 判断函数指针是否为 NULL；`nil == s` / `s == nil` 判断字符串指针是否为 NULL（0 初始化检测）
 - 显式转换（`as`）：
   - `nil as u64` → `0`
   - `nil as func(...) -> ...` → NULL 函数指针
-- 隐式转换（赋值）：仅允许 → func 类型（0 初始化）；nil → u64 仅显式
+  - `nil as str` → NULL 字符串指针
+- 隐式转换（赋值）：仅允许 → func / str 类型（0 初始化）；nil → u64 仅显式
 
 ### 4.3 赋值语句
 

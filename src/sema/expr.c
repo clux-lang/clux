@@ -508,11 +508,12 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 成员数校验：定长数组须与边界一致 */
+      /* 成员数校验：定长数组允许部分填充（不足部分自动 0 填充），
+         超出声明长度才报错 */
       const type_t *et = array_type_elem(t);
       size_t nfields = sema_count_siblings(n->fields);
       size_t len = array_type_len(t);
-      if (len != SIZE_MAX && nfields != len) {
+      if (len != SIZE_MAX && nfields > len) {
         char tn[64];
         sema_type_name(t, tn, sizeof tn);
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -521,14 +522,29 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
+      /* 自动 0 填充：定长数组字段数不足时，向字段链尾部补发 AST_UNDEF
+         零值占位节点（compiler 逐字段编译 → PUSH_UNDEFINED，CONSTRUCT
+         按声明长度 N 构造；运行期跳过 undefined，分配块清零 → 缺失元素
+         为类型零值，func 元素的零值即 nil）。 */
+      if (len != SIZE_MAX && nfields < len) {
+        for (size_t i = nfields; i < len; i++) {
+          ast_node_t *u = ast_undef_new(sema->arena, (*node)->tok_begin,
+                                        (*node)->tok_end);
+          if (!u) return value_make_shadow(sema->vm, sema->vm->type_void);
+          ast_append(&n->fields, &n->fields_last, NULL, u);
+        }
+      }
+
       /* 逐字段 shadow 求值 + 元素类型校验（经链上指针传递，使 comptime
          引用折叠就地写回字段链，编译器零感知） */
       ast_node_t **link = &n->fields;
       for (size_t i = 0; *link; link = &(*link)->next, i++) {
+        if ((*link)->kind == AST_UNDEF)
+          continue; /* 自动 0 填充占位节点：跳过求值（元素类型已由声明保证） */
         value_t *fv = sema_expr(sema, link, scope);
         if (value_is_error(sema->vm, fv) ||
             value_is_type(fv, TYPE_KIND_VOID))
-          continue; /* 错误恢复产物跳过，已有诊断 */
+          continue; /* 错误恢复产物/零值占位跳过，已有诊断 */
         if (!et) continue;
         value_t *dst = value_make_shadow(sema->vm, et);
         if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {

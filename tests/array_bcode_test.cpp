@@ -247,8 +247,57 @@ TEST_F(ArrayBcodeTest, LengthOnScalarReturnsError) {
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
-/* 定长数组成员数不匹配立即报错（construct 校验 len） */
-TEST_F(ArrayBcodeTest, ConstructCountMismatchReturnsError) {
+/* 定长数组部分填充合法（construct 校验 n <= len）：栈上补发 undefined
+   零值占位（与 compiler 产物一致，value_make_array 跳过）→ 按声明长度
+   构造，缺失元素自动补零值 */
+TEST_F(ArrayBcodeTest, ConstructPartialFillZeroPads) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    load_type 64\n"
+        "    push_i32 10\n"
+        "    push_undefined\n"
+        "    push_undefined\n"
+        "    construct 3\n"
+        "    length\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();   /* length: u64 */
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_u64);
+    EXPECT_EQ(read_sint(top), 3); /* 按声明长度构造，非 1 */
+}
+
+/* 部分填充后首元素保留（INDEX_GET 验证） */
+TEST_F(ArrayBcodeTest, ConstructPartialFillKeepsFirstElement) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_array\n"
+        "    define_type 64\n"
+        "    load_type 64\n"
+        "    load \"i32\"\n"
+        "    define_bound 3\n"
+        "    seal\n"
+        "    load_type 64\n"
+        "    push_i32 10\n"
+        "    push_undefined\n"
+        "    push_undefined\n"
+        "    construct 3\n"
+        "    push_i32 0\n"
+        "    index_get\n"
+        "    halt\n"));
+
+    value_t *top = stack_top();   /* a[0] 借用引用 */
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 10);
+}
+
+/* 定长数组超量成员数报错（construct 校验 n > len 仍拦） */
+TEST_F(ArrayBcodeTest, ConstructCountExceedsReturnsError) {
     const char *src =
         "    push_array\n"
         "    define_type 64\n"
@@ -259,9 +308,11 @@ TEST_F(ArrayBcodeTest, ConstructCountMismatchReturnsError) {
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
-        "    construct 2\n"
+        "    push_i32 30\n"
+        "    push_i32 40\n"
+        "    construct 4\n"
         "    halt\n";
-    /* 汇编成功（语法合法），运行时 construct 报错 */
+    /* 汇编成功（语法合法），运行时 construct 报错（4 > 3） */
     bcode_destroy(&bc);
     ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
     value_t *r = exec_run(vm, bc);

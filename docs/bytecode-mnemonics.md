@@ -59,7 +59,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `PUSH_VALUE` | `U32` | 压入 `stack[sp-1-offset]` 的借用引用（深层取址）。 |
 | `LOAD` | `STR` | 从 global scope 查 type value 压栈。 |
 | `PUSH_UNDEFINED` | — | 压入 void 类型 value（"类型待推导"占位）。 |
-| `PUSH_NIL` | — | 压入 nil 值（内置类型唯一值，data 为 func_t\* 宽度零块 = NULL 指针；函数 0 初始化 / 未来空指针）。 |
+| `PUSH_NIL` | — | 压入 nil 值（内置类型唯一值，data 为指针宽度零块 = NULL 指针；func/str 0 初始化 / 未来空指针）。 |
 
 ### 4.2 常量立即数
 
@@ -102,7 +102,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。当前仅实现 **array 分支**（`value_make_array`，定长数组成员数须与边界一致，否则报错；非 array 类型暂报错，struct/tuple 待后续 Phase）。 |
+| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。当前仅实现 **array 分支**（`value_make_array`）。定长数组（len ≠ SIZE_MAX）允许**部分填充**：编译器对缺失元素补发 `PUSH_UNDEFINED` 占位，`value_make_array` 跳过 undefined 元素，剩余字节由分配块清零自动补**类型零值**（数值 0 / bool false / func nil / str NULL）；元素数超出声明长度（`N > len`）报错。非 array 类型暂报错，struct/tuple 待后续 Phase。 |
 | `INDEX_GET` | — | `get_item`：`self[index]` → 元素副本。栈布局 `…, self, index`（index 在顶），弹 index、self 后分派 `vtable->get_index`。 |
 | `INDEX_SET` | — | `set_item`：`self[index] = val` → 返回 self。栈布局 `…, self, index, val`（val 在顶），弹 val、index、self 后分派 `vtable->set_index`。 |
 

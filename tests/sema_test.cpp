@@ -518,6 +518,37 @@ TEST_F(SemaTest, FuncCompareNil) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
+TEST_F(SemaTest, NilToStrImplicitCast) {
+    /* 字符串 0 初始化：var s:str = nil（implicit_cast） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var s:str = nil;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, StrCompareNil) {
+    /* str == nil / != nil（双向）：0 初始化检测 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var s:str = nil;"
+        "  if (s == nil) { }"
+        "  if (s != nil) { }"
+        "  if (nil == s) { }"
+        "  if (nil != s) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NilAsStrExplicitCast) {
+    /* nil 显式转换 str */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var s:str = nil as str;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
 TEST_F(SemaTest, NilNotTypeName) {
     /* nil 是内置类型但不可作变量类型注解（type_lookup("nil")=NULL） */
     EXPECT_FALSE(analyze(
@@ -1131,6 +1162,25 @@ TEST_F(SemaTest, ComptimeVarArrayEncode) {
     EXPECT_EQ(a->ct.elems[0].i, 1);
     EXPECT_EQ(a->ct.elems[1].i, 2);
     EXPECT_EQ(a->ct.elems[2].i, 3);
+}
+
+TEST_F(SemaTest, ComptimeVarArrayPartialFillZeroPads) {
+    /* comptime var 数组部分填充：sema 补发 AST_UNDEF 占位进字段链，
+       CTFE 求值补 undefined → value_make_array 跳过 → 缺失元素为零值 */
+    EXPECT_TRUE(analyze(
+        "comptime var A: [3]i32 = .[3]i32{ 1 };"
+        "func main(): void { var x = A; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *a = sema_lookup(sema_->global_scope, STRSLICE_LIT("A"));
+    ASSERT_NE(a, nullptr);
+    EXPECT_TRUE(a->ct_valid);
+    ASSERT_NE(a->ct.type, nullptr);
+    EXPECT_EQ(array_type_len(a->ct.type), 3u);
+    ASSERT_NE(a->ct.elems, nullptr);
+    EXPECT_EQ(a->ct.elems[0].i, 1);
+    EXPECT_EQ(a->ct.elems[1].i, 0); /* 自动 0 填充 */
+    EXPECT_EQ(a->ct.elems[2].i, 0);
 }
 
 TEST_F(SemaTest, ComptimeFuncReturnArrayFoldToConstruct) {

@@ -411,15 +411,23 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         size_t len = array_type_len(t);
 
         size_t nf = ctfe_count_siblings(n->fields);
-        if (len != SIZE_MAX && nf != len)
+        /* 定长数组允许部分填充（sema 已向字段链补发 AST_UNDEF 零值占位），
+           超出声明长度才报错 */
+        if (len != SIZE_MAX && nf > len)
             return ctfe_errf(ctx, "ctfe: construct: expected %zu elements for "
                                   "[..]T, got %zu", len, nf);
 
         value_t *elems[nf > 0 ? nf : 1];
         size_t i = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
-            elems[i] = ctfe_eval(ctx, f);
-            if (value_is_error(vm, elems[i])) return elems[i];
+            /* 零值占位：undefined 节点 → undefined value（value_make_array
+               跳过 blit，分配块清零自动补类型零值） */
+            if (f->kind == AST_UNDEF) {
+                elems[i] = value_make_undefined(vm);
+            } else {
+                elems[i] = ctfe_eval(ctx, f);
+                if (value_is_error(vm, elems[i])) return elems[i];
+            }
             i++;
         }
         return value_make_array(vm, et, elems, nf);

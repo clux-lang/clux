@@ -168,6 +168,55 @@ TEST(Driver, RunFileIndexSetPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFilePartialFillZeroPads) {
+  /* 定长数组部分填充自动 0 填充：缺失元素为类型零值 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a = .[3]i32 { 10 };\n"
+      "  return a[0] + a[1] + a[2];\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEmptyFuncArrayFillsNil) {
+  /* 空字段构造自动填充 nil（func 元素零值）：.[N](func()->T){} */
+  std::string path = write_temp_file(
+      "func main(): void {\n"
+      "  var fns = .[3](func()->i32){};\n"
+      "  if (fns[0] == nil && fns[1] == nil && fns[2] == nil) {\n"
+      "    printf(\"all nil\\n\");\n"
+      "  } else {\n"
+      "    printf(\"not nil\\n\");\n"
+      "  }\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFilePartialFillFuncArray) {
+  /* 函数数组部分填充：显式元素保留、缺失补 nil */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var fns = .[2](func()->i32){ f };\n"
+      "  if (fns[1] != nil) { return 1; }\n"
+      "  return fns[0]();\n"
+      "}\n"
+      "func f():i32 { return 7; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileConstructCountExceedsRejected) {
+  /* 超出声明长度的字段数 → 编译期诊断 */
+  std::string path = write_temp_file(
+      "func main(): void {\n"
+      "  var a = .[2]i32 { 1, 2, 3 };\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileMultiIndexSubscriptRejected) {
   /* a[i,j] 多索引（泛型实参语法预留）落到数组下标 → 诊断 */
   std::string path = write_temp_file(
@@ -299,6 +348,45 @@ TEST(Driver, RunFileNilAsTypeAnnotationRejected) {
   std::string path =
       write_temp_file("func main():i32 { var a:nil = nil; return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStrNilEndToEndPasses) {
+  /* 字符串 0 初始化：var s:str = nil（NULL 指针）+ s==nil 双向比较 +
+     赋值回普通字符串后 ==nil 恢复 false + 重新赋 nil + 显式 nil as str */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var s:str = nil;\n"
+      "  if (s != nil) { return 1; }\n"
+      "  if (nil != s) { return 2; }\n"
+      "  var t:str = \"hi\";\n"
+      "  if (t == nil) { return 3; }\n"
+      "  if (nil == t) { return 4; }\n"
+      "  s = \"world\";\n"
+      "  if (s == nil) { return 5; }\n"
+      "  if (s != \"world\") { return 6; }\n"
+      "  s = nil;\n"
+      "  if (s != nil) { return 7; }\n"
+      "  var a:str = nil as str;\n"
+      "  if (a != nil) { return 8; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStrArrayNilElementPasses) {
+  /* 数组自动 0 填充的 str 元素（NULL）即 nil：sarr[0]=="a" 保留、
+     sarr[1]/sarr[2] 为 nil，与 .[N]str{...} 部分填充联动 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var sarr: [3]str = .[3]str{ \"a\" };\n"
+      "  if (sarr[0] != \"a\") { return 1; }\n"
+      "  if (sarr[1] != nil) { return 2; }\n"
+      "  if (sarr[2] != nil) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 

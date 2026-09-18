@@ -445,6 +445,10 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
     for (size_t i = 0; i < count; i++) {
         value_t *e = elems[i];
         if (value_is_error(vm, e)) return e;
+        /* 自动 0 填充占位（undefined）：跳过 blit——分配块已由
+           value_alloc_data 清零，缺失元素保持类型零值（数值 0 /
+           bool false / func NULL=nil / str NULL）。 */
+        if (value_is_undefined(vm, e)) continue;
         /* 类型检查：非元素类型尝试隐式转换 */
         if (value_type(e) != elem_type) {
             value_t *casted = value_implicit_cast(vm, e, elem_type);

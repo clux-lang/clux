@@ -248,7 +248,9 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        1. 类型位：compile_type_expr（[N]T → 声明-定义两步构造，LOAD_TYPE 留类型值栈顶）
        2. 各字段值按序压栈（栈: [type_value, v1..vN]）
        3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 数组值（结果压栈）
-       栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。 */
+       栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。
+       注：定长数组部分填充的零值占位（AST_UNDEF 节点）由 sema 补发进
+       字段链，此处字段数即声明长度 N。 */
     ast_construct_t *n = (ast_construct_t *)node;
     compile_type_expr(c, n->type);              /* 栈: [type_value] */
     size_t fcount = 0;

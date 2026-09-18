@@ -631,7 +631,7 @@ void exec_run(exec_t *e) {
 | `PUSH_VALUE` | offset | 压入 `stack[sp-1-offset]` 的借用引用（offset=0 即 dup 栈顶一份） | — |
 | `LOAD` | strtable 索引 | 从 global scope 按名查 **type value** 压栈（类型注册见 2.7.5 下注） | `scope_lookup` |
 | `PUSH_UNDEFINED` | — | 压入 void 类型 value，标记"类型待推导" | `value_make_void` |
-| `PUSH_NIL` | — | 压入 nil 值（内置类型唯一值，data 为 func_t\* 宽度零块 = NULL 指针；函数 0 初始化 / 未来空指针） | `value_make_nil` |
+| `PUSH_NIL` | — | 压入 nil 值（内置类型唯一值，data 为指针宽度零块 = NULL 指针；func/str 0 初始化 / 未来空指针） | `value_make_nil` |
 | `DEFINE` | strtable 索引 | 弹栈定义变量：**栈顶为 type value（`LOAD` 压入）或 void/undefined（`PUSH_UNDEFINED` 压入）时作为类型说明符再弹一个值；否则栈顶即值本身（函数参数定义场景）**；无初始值（值为 void）以声明类型**零值占位**定义（TDZ 检查由 sema 编译期完成） | `scope_define` |
 | `PUSH_FUNC_TYPE` | — | 分配空 `func_type_t`（开放类型，暂不入池）并压其 type value 到操作数栈，作为签名构造起点（见 2.7.6）。`sealed` 标志已上移至基类 `type_t`，构造期（seal 前）可分步 set | `func_type_push` |
 | `FUNC_TYPE_PARAM` | — | 弹栈 type value → 追加为栈顶 func type 的下一参数类型（`func_type_add_param`） | `func_type_add_param` |
