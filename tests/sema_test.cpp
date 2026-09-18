@@ -467,90 +467,129 @@ TEST_F(SemaTest, SelfReferenceUndefined) {
 }
 
 /* ================================================================ */
-/* nil：内置类型唯一值（函数 0 初始化/未来空指针）                   */
+/* optional（?T，docs m2-design §12）                               */
 /* ================================================================ */
 
-TEST_F(SemaTest, NilTypeInference) {
-    /* var n = nil → 推断 nil 类型；nil == nil 恒真 */
+TEST_F(SemaTest, OptionalVarInitNil) {
+    /* var n:?i32 = nil → NONE 态；n == nil 恒真 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
-        "  var n = nil;"
+        "  var n:?i32 = nil;"
         "  if (n == nil) { }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NilAsU64ExplicitCast) {
-    /* nil 显式转换 u64(0) */
+TEST_F(SemaTest, OptionalVarInitValueLifts) {
+    /* var n:?i32 = 5 → D1 隐式提升 some；n != nil 判定合法 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
-        "  var z:u64 = nil as u64;"
+        "  var n:?i32 = 5;"
+        "  if (n != nil) { }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NilAsFuncExplicitCast) {
-    /* nil 显式转换任意函数类型 */
+TEST_F(SemaTest, OptionalConstructorNilAndValue) {
+    /* ?T 构造器二值单槽位：.{nil} none / .{v} some */
     EXPECT_TRUE(analyze(
         "func main(): void {"
-        "  var f:func(i32)->i32 = nil as func(i32)->i32;"
+        "  var a:?i32 = .?i32{nil};"
+        "  var b:?i32 = .?i32{42};"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NilToFuncImplicitCast) {
-    /* 函数 0 初始化：var f:func(...) = nil（implicit_cast） */
+TEST_F(SemaTest, OptionalConstructorFieldCountMustBeOne) {
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = .?i32{1, 2};"
+        "}"));
+    expect_message(0, "optional constructor expects exactly 1 field, got 2");
+}
+
+TEST_F(SemaTest, OptionalConstructorWrongFieldType) {
+    /* 字段类型与 inner 不匹配 → 赋值校验报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = .?i32{\"s\"};"
+        "}"));
+    expect_message(0, "cannot initialize optional");
+}
+
+TEST_F(SemaTest, NarrowingSomeRead) {
+    /* if (x != nil) SOME 分支内 x 退化为 T：可赋给 i32、可算术 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
-        "  var f:func(i32)->i32 = nil;"
+        "  var x:?i32 = 5;"
+        "  if (x != nil) {"
+        "    var y:i32 = x;"
+        "    var z:i32 = x + 1;"
+        "  }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, FuncCompareNil) {
-    /* func == nil / != nil：0 初始化检测 */
-    EXPECT_TRUE(analyze(
+TEST_F(SemaTest, NarrowingNoneReadErrors) {
+    /* if (x == nil) NONE 分支内读取 x → 报错（已知为 nil） */
+    EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var f:func(i32)->i32 = nil;"
-        "  if (f == nil) { }"
-        "  if (f != nil) { }"
+        "  var x:?i32 = nil;"
+        "  if (x == nil) {"
+        "    var y:i32 = x;"
+        "  }"
         "}"));
-    EXPECT_FALSE(diag_has_error(diag_));
+    expect_message(0, "is known to be nil");
 }
 
-TEST_F(SemaTest, NilToStrImplicitCast) {
-    /* 字符串 0 初始化：var s:str = nil（implicit_cast） */
-    EXPECT_TRUE(analyze(
+TEST_F(SemaTest, NarrowingElseBranch) {
+    /* else 分支窄化为补集：x != nil 的 else 内 x 已知为 nil */
+    EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var s:str = nil;"
+        "  var x:?i32 = nil;"
+        "  if (x != nil) { }"
+        "  else { var y:i32 = x; }"
         "}"));
-    EXPECT_FALSE(diag_has_error(diag_));
+    expect_message(0, "is known to be nil");
 }
 
-TEST_F(SemaTest, StrCompareNil) {
-    /* str == nil / != nil（双向）：0 初始化检测 */
-    EXPECT_TRUE(analyze(
+TEST_F(SemaTest, NilCompareNonOptionalErrors) {
+    /* str/func 无空值（§12.3）：非 ?T 变量与 nil 比较 → 编译错误 */
+    EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var s:str = nil;"
+        "  var s:str = \"a\";"
         "  if (s == nil) { }"
-        "  if (s != nil) { }"
-        "  if (nil == s) { }"
-        "  if (nil != s) { }"
         "}"));
-    EXPECT_FALSE(diag_has_error(diag_));
+    expect_message(0, "is not optional; cannot compare with nil");
 }
 
-TEST_F(SemaTest, NilAsStrExplicitCast) {
-    /* nil 显式转换 str */
-    EXPECT_TRUE(analyze(
+TEST_F(SemaTest, NilCanOnlyCompareWithOptionalVariable) {
+    EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var s:str = nil as str;"
+        "  if (nil == 0) { }"
         "}"));
-    EXPECT_FALSE(diag_has_error(diag_));
+    expect_message(0, "nil can only be compared with an optional variable");
+}
+
+TEST_F(SemaTest, NilAssignToNonOptionalErrors) {
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var z:u64 = nil;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'z' of type u64 with nil");
+}
+
+TEST_F(SemaTest, NilNoTypeInference) {
+    /* var n = nil → 无法推断类型（nil 非 value，须显式 ?T 注解） */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var n = nil;"
+        "}"));
+    expect_message(0, "cannot infer type of optional variable 'n' from nil");
 }
 
 TEST_F(SemaTest, NilNotTypeName) {
-    /* nil 是内置类型但不可作变量类型注解（type_lookup("nil")=NULL） */
+    /* nil 不是类型名（type_lookup("nil")=NULL） */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  var a:nil = nil;"
@@ -558,22 +597,28 @@ TEST_F(SemaTest, NilNotTypeName) {
     expect_message(0, "unsupported type expression");
 }
 
-TEST_F(SemaTest, NilCannotCompareWithInt) {
-    /* nil 只能与 nil / func 比较，与整数比较报错 */
+TEST_F(SemaTest, NilAssignInNarrowedBranchErrors) {
+    /* D3：SOME 分支内 x 已是 T，nil 赋值破坏窄化前提 → 编译错误 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  if (nil == 0) { }"
+        "  var x:?i32 = 5;"
+        "  if (x != nil) { x = nil; }"
         "}"));
-    expect_message(0, "cannot apply '==' to nil and i32");
+    expect_message(0, "cannot assign nil to 'x' inside a narrowed branch");
 }
 
-TEST_F(SemaTest, NilCannotImplicitCastToU64) {
-    /* nil → u64 仅显式（as），隐式（赋值）报错 */
+TEST_F(SemaTest, OptionalAssignAfterCallResetsNarrow) {
+    /* 函数调用后清窄化（保守）：调用后 x 恢复 UNKNOWN，算术报错 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var z:u64 = nil;"
-        "}"));
-    expect_message(0, "cannot initialize variable 'z'");
+        "  var x:?i32 = 5;"
+        "  if (x != nil) {"
+        "    foo();"
+        "    var y:i32 = x + 1;"
+        "  }"
+        "}"
+        "func foo() : void { }"));
+    expect_message(0, "cannot apply '+' to ?i32");
 }
 
 TEST_F(SemaTest, VarInitTypeMismatch) {
@@ -1165,10 +1210,10 @@ TEST_F(SemaTest, ComptimeVarArrayEncode) {
 }
 
 TEST_F(SemaTest, ComptimeVarArrayPartialFillZeroPads) {
-    /* comptime var 数组部分填充：sema 补发 AST_UNDEF 占位进字段链，
-       CTFE 求值补 undefined → value_make_array 跳过 → 缺失元素为零值 */
+    /* comptime var 数组 fill 值包（M2 construct 完全显式）：.<3>i32{ 1, <0,2> }
+       总元素数 = 1 + 2 = 3 == 长度，CTFE 求值 fill 展开为逐元素零值 */
     EXPECT_TRUE(analyze(
-        "comptime var A: [3]i32 = .[3]i32{ 1 };"
+        "comptime var A: [3]i32 = .[3]i32{ 1, <0,2> };"
         "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
@@ -1179,7 +1224,7 @@ TEST_F(SemaTest, ComptimeVarArrayPartialFillZeroPads) {
     EXPECT_EQ(array_type_len(a->ct.type), 3u);
     ASSERT_NE(a->ct.elems, nullptr);
     EXPECT_EQ(a->ct.elems[0].i, 1);
-    EXPECT_EQ(a->ct.elems[1].i, 0); /* 自动 0 填充 */
+    EXPECT_EQ(a->ct.elems[1].i, 0); /* fill <0,2> 展开 */
     EXPECT_EQ(a->ct.elems[2].i, 0);
 }
 

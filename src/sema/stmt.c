@@ -5,8 +5,10 @@
 #include "parser/ast_call.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_nil.h"
 #include "parser/ast_index.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
@@ -25,6 +27,7 @@
 #include "sema/comptime.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
+#include "vm/type_option.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -67,6 +70,8 @@ typedef struct flow_snap {
   sema_symbol_t  **syms;    /* 分支前可见的变量符号 */
   bool            *before;  /* 分支前 flow_init */
   bool            *after;   /* then 分支后 flow_init（meet 用） */
+  uint8_t         *nbefore; /* 分支前 narrow（?T 窄化状态） */
+  uint8_t         *nafter;  /* then 分支后 narrow（meet 用） */
   size_t           n;
 } flow_snap_t;
 
@@ -87,6 +92,10 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
                                  NULL, NULL, cap);
   snap.after = allocator_new_ex(alloc, "flow_snap_after", sizeof(bool), NULL,
                                 NULL, NULL, cap);
+  snap.nbefore = allocator_new_ex(alloc, "flow_snap_nbefore", sizeof(uint8_t),
+                                  NULL, NULL, NULL, cap);
+  snap.nafter = allocator_new_ex(alloc, "flow_snap_nafter", sizeof(uint8_t),
+                                 NULL, NULL, NULL, cap);
 
   size_t i = 0;
   for (const sema_scope_t *s = scope; s; s = s->parent) {
@@ -97,6 +106,7 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
       sema_symbol_t *sym = (sema_symbol_t *)strmap_get(s->symbols, key);
       snap.syms[i] = sym;
       snap.before[i] = sym->flow_init;
+      snap.nbefore[i] = sym->narrow;
       i++;
     }
   }
@@ -105,8 +115,10 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
 }
 
 static void flow_restore(const flow_snap_t *snap) {
-  for (size_t i = 0; i < snap->n; i++)
+  for (size_t i = 0; i < snap->n; i++) {
     snap->syms[i]->flow_init = snap->before[i];
+    snap->syms[i]->narrow = snap->nbefore[i];
+  }
 }
 
 static void flow_release(flow_snap_t *snap) {
@@ -114,6 +126,8 @@ static void flow_release(flow_snap_t *snap) {
   allocator_free(snap->alloc, (void **)&snap->syms);
   allocator_free(snap->alloc, (void **)&snap->before);
   allocator_free(snap->alloc, (void **)&snap->after);
+  allocator_free(snap->alloc, (void **)&snap->nbefore);
+  allocator_free(snap->alloc, (void **)&snap->nafter);
   snap->n = 0;
 }
 
@@ -184,6 +198,31 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       var_type_slot_reparse(sema, vd, scope); /* 3a 推迟的槽位定义点兜底 */
     }
     sym->flow_init = false;
+    var_value =
+        value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
+  } else if (vd->init && vd->init->kind == AST_NIL) {
+    /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
+       nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
+       optional。编译为 STORE_NIL（compiler 发码），运行期置 ok=false。
+       确定性 = 已初始化（nil 是确定的值）；窄化状态 → NONE（已知为 nil）。 */
+    if (!vd->type_expr) {
+      diag_error(sema->diag, sema_loc(sema, vd->init),
+                 "cannot infer type of optional variable '%.*s' from nil; "
+                 "add an explicit type annotation",
+                 (int)vd->name.len, vd->name.ptr);
+    } else {
+      var_type_slot_reparse(sema, vd, scope);
+      if (sym->type && sym->type->kind != TYPE_KIND_OPTION) {
+        char tn[64];
+        sema_type_name(sym->type, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, vd->init),
+                   "cannot initialize variable '%.*s' of type %s with nil "
+                   "(only optional types accept nil)",
+                   (int)vd->name.len, vd->name.ptr, tn);
+      }
+    }
+    sym->flow_init = true; /* nil 是确定值（已初始化） */
+    sym->narrow = NARROW_NONE;
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
   } else {
@@ -288,18 +327,20 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     return;
   }
 
-  value_t *rhs = sema_expr(sema, &as->value, scope);
+  /* nil 赋值（a = nil）：nil 非 value（AST_NIL 的 sema_expr 会报错），
+     先于 rhs 求值识别——合法消费点在 shadow_assign 内特判（STORE_NIL）。 */
+  bool rhs_nil = as->value->kind == AST_NIL;
+  value_t *rhs = rhs_nil ? NULL : sema_expr(sema, &as->value, scope);
   bool rhs_bad = value_is_error(sema->vm, rhs) ||
                  value_is_type(rhs, TYPE_KIND_VOID);
 
   if (token_is(as->op, "=")) {
-    if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
+    sema_symbol_t *sym = sema_lookup(scope, name);
 
     /* const 赋值检查（TDZ 豁免）：声明 const 且已初始化（flow_init=true）
        的变量不可再赋值；flow_init=false（未初始化声明 var a:const T =
        undefined）时的赋值是首次初始化，豁免（const 变量的 TDZ 赋值 =
        初始化，仅一次）。经 value 层接口查询 const（type is value）。 */
-    sema_symbol_t *sym = sema_lookup(scope, name);
     if (sym && value_has_const(lhs) && sym->flow_init) {
       diag_error(sema->diag, sema_loc(sema, &as->base),
                  "cannot assign to const variable '%.*s'",
@@ -307,8 +348,41 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
       return;
     }
 
+    if (rhs_nil) {
+      /* nil 赋值（docs m2-design §12.5/12.6）：a = nil → STORE_NIL <name>
+         （运行期只置 ok=false，不释放 value 字段）。左值必须 ?T 类型。
+         窄化状态 → NONE（已知为 nil）。
+         D3：SOME 分支内 x 已是 T，nil 赋值破坏窄化前提 → 编译错误。 */
+      const type_t *lt = value_type(lhs);
+      if (!lt || lt->kind != TYPE_KIND_OPTION) {
+        char tn[64];
+        sema_type_name(lt, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, as->value),
+                   "cannot assign nil to variable '%.*s' of type %s (only "
+                   "optional types accept nil)",
+                   (int)name.len, name.ptr, tn);
+        return;
+      }
+      if (sym) {
+        if (sym->narrow == NARROW_SOME) {
+          diag_error(sema->diag, sema_loc(sema, as->value),
+                     "cannot assign nil to '%.*s' inside a narrowed branch "
+                     "(it is known to be some)",
+                     (int)name.len, name.ptr);
+          return;
+        }
+        sym->flow_init = true;
+        sym->narrow = NARROW_NONE;
+      }
+      return;
+    }
+
+    if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
+
     /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true
-       （TDZ 退出由确定性赋值分析承担，VM 值层不感知） */
+       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。窄化路径
+       （D3）：SOME 分支内 RHS 必为 T 类型（x 已是 T 语义），赋值后
+       保持 SOME 态；其他分支赋值后恢复 UNKNOWN（窄化不可靠）。 */
     value_t *r = value_assign(sema->vm, lhs, rhs);
     if (value_is_error(sema->vm, r)) {
       char tn[64], rn[64];
@@ -318,7 +392,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                  "cannot assign %s to variable '%.*s' of type %s", rn,
                  (int)name.len, name.ptr, tn);
     } else {
-      if (sym) sym->flow_init = true;
+      if (sym) {
+        sym->flow_init = true;
+        if (sym->narrow != NARROW_SOME)
+          sym->narrow = NARROW_UNKNOWN; /* 赋新值后窄化不成立 */
+      }
     }
     return;
   }
@@ -333,6 +411,13 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                  (int)name.len, name.ptr);
       return;
     }
+  }
+
+  /* 复合赋值 x op= nil：nil 非 value，无二元运算语义 → 编译错误 */
+  if (rhs_nil) {
+    diag_error(sema->diag, sema_loc(sema, as->value),
+               "cannot use nil in compound assignment");
+    return;
   }
 
   /* 复合赋值 x op= rhs → x = x op rhs（shadow 走 vtable 类型协商） */
@@ -557,16 +642,41 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   return (block_result_t){0};
 }
 
+/* nil 判定识别（docs m2-design §12.5）：条件必须是 符号 ==/!= nil 二元
+   形式（x==nil / nil==x / x!=nil / nil!=x）。识别成功返回窄化目标符号 +
+   判定种类（EQ：x==nil；NE：x!=nil），失败返回 NULL（条件不是窄化判定）。 */
+static sema_symbol_t *narrow_condition(ast_node_t *cond,
+                                       sema_scope_t *scope, bool *is_eq) {
+  if (!cond || cond->kind != AST_BINARY) return NULL;
+  ast_binary_t *b = (ast_binary_t *)cond;
+  if (!token_is(b->op, "==") && !token_is(b->op, "!=")) return NULL;
+  if (b->lhs->kind != AST_NIL && b->rhs->kind != AST_NIL) return NULL;
+  ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
+  if (other->kind != AST_IDENT) return NULL;
+  sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)other)->name);
+  if (!sym || !sym->type || sym->type->kind != TYPE_KIND_OPTION) return NULL;
+  *is_eq = token_is(b->op, "==");
+  return sym;
+}
+
 static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
                               size_t *idx) {
   block_result_t r = {0};
   value_t *cond = sema_expr(sema, &it->cond, scope);
   sema_check_bool(sema, it->cond, cond, "if condition");
 
+  /* 窄化判定识别（在快照之前：分支内设置窄化状态，出口恢复外层状态）：
+     x==nil → then: NONE, else: SOME；x!=nil → then: SOME, else: NONE。 */
+  bool narrow_eq = false;
+  sema_symbol_t *nsym = narrow_condition(it->cond, scope, &narrow_eq);
+
   /* 确定性赋值合并点：快照分支前状态 → then → 记录 → 恢复 → else →
      meet（AND）：两分支都 flow_init 才 true。保守策略：非全部分支赋值
      （如 if(c){a=1;}else{}）→ 合并后仍 UNKNOWN，读取编译错误。 */
   flow_snap_t snap = flow_capture(sema, scope);
+
+  /* then 分支窄化设置：x==nil → NONE；x!=nil → SOME */
+  if (nsym) nsym->narrow = narrow_eq ? NARROW_NONE : NARROW_SOME;
 
   block_result_t tr = {0};
   sema_scope_t *then_scope = sema_scope_child(scope, (*idx)++);
@@ -575,12 +685,17 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   tr = walk_block(sema, it->then_body, then_scope ? then_scope : scope, &sub);
   vm_pop_scope(sema->vm);
 
-  /* 记录 then 后状态，恢复分支前 */
-  for (size_t i = 0; i < snap.n; i++) snap.after[i] = snap.syms[i]->flow_init;
+  /* 记录 then 后状态（flow + narrow），恢复分支前 */
+  for (size_t i = 0; i < snap.n; i++) {
+    snap.after[i] = snap.syms[i]->flow_init;
+    snap.nafter[i] = snap.syms[i]->narrow;
+  }
   flow_restore(&snap);
 
   block_result_t er = {0};
   if (it->else_body) {
+    /* else 分支窄化设置（补集）：x==nil → SOME；x!=nil → NONE */
+    if (nsym) nsym->narrow = narrow_eq ? NARROW_SOME : NARROW_NONE;
     if (it->else_body->kind == AST_IF) {
       /* else-if 链：同层递归（子作用域顺序与 3a 一致：else-if 不单独
          建 scope，其 then 是当前 scope 的下一个子节点） */
@@ -595,9 +710,12 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
     }
   }
 
-  /* meet：两分支都 INIT 才 INIT（else 缺失视为"未赋值分支"） */
-  for (size_t i = 0; i < snap.n; i++)
+  /* meet：两分支都 INIT 才 INIT（else 缺失视为"未赋值分支"）；
+     窄化恢复外层状态（出口恢复——窄化不跨 if 传播） */
+  for (size_t i = 0; i < snap.n; i++) {
     snap.syms[i]->flow_init = snap.after[i] && snap.syms[i]->flow_init;
+    snap.syms[i]->narrow = snap.nbefore[i];
+  }
   flow_release(&snap);
 
   r.definitely_returns = tr.definitely_returns && er.definitely_returns;

@@ -24,12 +24,12 @@ typedef enum type_kind_t {
     TYPE_KIND_STR,
     TYPE_KIND_TYPE,      /* type value 的元类型 */
     TYPE_KIND_FUNC,
-    TYPE_KIND_NIL,       /* nil：唯一值 nil，函数 0 初始化/未来空指针（仅字面量，不可作变量类型） */
     TYPE_KIND_ERROR,
     TYPE_KIND_INTERRUPT, /* 引擎级控制流哨兵（interrupt 类型） */
     /* ---- M2 复合类型段（内建标量之后；sema 只登记此段类型） ---- */
     TYPE_KIND_CONST,     /* const 修饰（持 sub） */
     TYPE_KIND_VOLATILE,  /* volatile 修饰（持 sub） */
+    TYPE_KIND_OPTION,    /* optional 修饰（持 inner，?T） */
     TYPE_KIND_STRUCT,
     TYPE_KIND_ARRAY,
     TYPE_KIND_TUPLE,
@@ -90,6 +90,31 @@ typedef struct volatile_type_t {
     type_t      base;
     const type_t *sub;
 } volatile_type_t;
+
+/**
+ * option_type_t: optional 类型（type_t 的扩展，?T，见 m2-design §9/§12.1）
+ *
+ * 持 inner 指针指向被 optional 包裹的类型 T。C 内存映射：
+ *   struct Optional_T { bool ok; T value; }（value 偏移 align_up(1, alignof(T))）。
+ * size/align 按 C 对齐规则密封时计算；value 偏移 = option_value_offset。
+ *
+ * ?T 只能与 nil 比较（四种判定形式，tag 比较由编译器发专用指令，非 vtable
+ * eq 分派）；T → ?T 隐式提升（some）在 value_implicit_cast 公共入口特判；
+ * clone/assign/dispose 转发 inner 且额外处理 ok（ok 平凡拷贝；value 字段
+ * 递归——复用 array_blit_raw / array_dispose_raw，OPTION 分支与嵌套数组同构）。
+ */
+typedef struct option_type_t {
+    type_t       base;
+    const type_t *inner;  /* 被 optional 包裹的类型 T（引用，不拥有） */
+} option_type_t;
+
+/** 判断类型是否为 optional 修饰类型（type_kind 分类） */
+static inline bool type_is_option(const type_t *t) {
+    return t && t->kind == TYPE_KIND_OPTION;
+}
+
+/* 取 option 类型的 inner（非 option 返回 NULL）：见 vm/type_option.h
+ * （static inline 定义，type.h 不重复声明避免冲突）。 */
 
 /* 数组类型 array_type_t 的定义、构造 API 与访问器见 vm/type_array.h
  * （array_type_t 继承 type_t：首成员 base 为 type_t，向上转型安全）。 */
@@ -174,6 +199,13 @@ const type_t *type_volatile_seal(vm_t *vm, const type_t *t);
  * array_type_is_sealed / array_type_layout_size / array_type_layout_align）见
  * vm/type_array.h。 */
 
+/* optional 类型构造 API（type_option_push / type_option_set_inner /
+ * type_option_seal / type_option_intern）与访问器（type_option_inner /
+ * option_value_offset / option_ok / option_value）见 vm/type_option.h。
+ * ?T 与 const/volatile 同族：开放构造（PUSH_OPT → DEFINE_TYPE → LOAD_TYPE
+ * → SET_TYPE 设 inner → SEAL）获得向前声明能力；sema 侧 type_option_intern
+ * 一次性快捷。 */
+
 /** 将 type 转为 value_t*（type 作为 first-class value） */
 value_t *type_as_value(vm_t *vm, const type_t *t);
 
@@ -183,7 +215,7 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
    内建类型固定 id 0..(TYPE_ID_BUILTIN_COUNT-1)（vm_register_builtin_types
    按序登记，error/interrupt 紧随其后）；程序类型 id 由 sema 分配，从
    TYPE_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
-#define TYPE_ID_BUILTIN_COUNT 18u
+#define TYPE_ID_BUILTIN_COUNT 17u
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**

@@ -2,6 +2,7 @@
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
+#include "vm/type_option.h"
 #include "vm/value.h"
 #include "vm/function.h"
 #include "core/panic.h"
@@ -95,6 +96,10 @@ vm_t *vm_new(allocator_t *alloc) {
        intern 用；元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->const_types = vec_new(alloc, /*owns_element=*/false);
     vm->volatile_types = vec_new(alloc, /*owns_element=*/false);
+
+    /* optional 修饰类型池（type_option_intern / type_option_seal intern 用；
+       元素由 vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->option_types = vec_new(alloc, /*owns_element=*/false);
 
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
@@ -209,6 +214,21 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&at);
         }
         vec_free(vm->alloc, &vm->array_types);
+    }
+
+    /* optional 修饰类型池：释放 name + 结构体（inner 归底层类型，不在此释放） */
+    if (vm->option_types) {
+        size_t n = vec_len(vm->option_types);
+        for (size_t i = 0; i < n; i++) {
+            option_type_t *ot = (option_type_t *)vec_get(vm->option_types, i);
+            if (!ot) continue;
+            if (ot->base.name.ptr) {
+                char *np = (char *)ot->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&ot);
+        }
+        vec_free(vm->alloc, &vm->option_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

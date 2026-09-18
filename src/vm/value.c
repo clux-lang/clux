@@ -2,6 +2,7 @@
 #include "vm/vm.h"
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
+#include "vm/type_option.h"
 #include "core/panic.h"
 #include "core/string.h"
 
@@ -163,18 +164,6 @@ value_t *value_make_undefined(vm_t *vm) {
 
 bool value_is_undefined(vm_t *vm, const value_t *v) {
     return v && vm && v->type == vm->type_void;
-}
-
-/* ---- nil 工具 ---- */
-
-value_t *value_make_nil(vm_t *vm) {
-    if (!vm) return NULL;
-    void *data = value_alloc_data(vm->alloc, vm->type_nil); /* 零块 = NULL 指针 */
-    return value_make(vm, vm->type_nil, data);
-}
-
-bool value_is_nil(vm_t *vm, const value_t *v) {
-    return v && vm && v->type == vm->type_nil;
 }
 
 /* ---- interrupt 工具 ---- */
@@ -455,6 +444,13 @@ value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (v->type == target) {
         /* 类型相同，clone 到当前 scope */
         return value_clone(vm, v);
+    }
+    /* T → ?T 隐式提升（some，D1）：目标为 option 且源 == inner 时提升。
+       在公共入口特判——所有标量 vtable 无需感知 ?T（value_lift_option 深拷贝
+       T 值到 value 字段 + 置 ok=true）。 */
+    if (target && target->kind == TYPE_KIND_OPTION &&
+        type_option_inner(target) == v->type) {
+        return value_lift_option(vm, v, target);
     }
     if (v->type->vtable && v->type->vtable->implicit_cast) {
         return v->type->vtable->implicit_cast(vm, v, target);

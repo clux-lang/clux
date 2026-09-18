@@ -8,11 +8,15 @@
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_nil.h"
+#include "parser/ast_opt_get.h"
+#include "parser/ast_option.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
@@ -25,6 +29,7 @@
 #include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
+#include "vm/type_option.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -277,6 +282,33 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          编译期实体，data 恒为 type_t*——无 shadow 形态，见 sema 注释）。 */
       if (value_type(v) == sema->vm->type_type)
         return v;
+
+      /* 路径窄化（docs m2-design §12.5）：?T 变量的符号级数据流状态。
+         SOME 态（if (x != nil) 真分支已判定非 none）：读取退化 T——重写为
+         AST_OPT_GET（compiler 发 PUSH + OPT_GET，运行时借用 value 字段
+         零拷贝），返回 inner 类型 shadow。
+         NONE 态（已知为 nil）：读取报错（nil 非 value，不可消费）。
+         UNKNOWN 态：普通 ?T shadow（T 操作报错引导判空）。 */
+      if (sym && sym->type && sym->type->kind == TYPE_KIND_OPTION) {
+        if (sym->narrow == NARROW_SOME) {
+          ast_node_t *og = ast_opt_get_new(sema->arena, (*node)->tok_begin,
+                                           (*node)->tok_end);
+          if (og) {
+            ((ast_opt_get_t *)og)->name = n->name;
+            og->next = (*node)->next; /* 保留兄弟链 */
+            *node = og;
+          }
+          return value_make_shadow(sema->vm, type_option_inner(sym->type));
+        }
+        if (sym->narrow == NARROW_NONE) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "variable '%.*s' is known to be nil (narrowed by a nil "
+                     "comparison); check it with '%.*s != nil' first",
+                     (int)n->name.len, n->name.ptr, (int)n->name.len,
+                     n->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
       return value_make_shadow(sema->vm, value_type(v));
     }
     case AST_CONST: {
@@ -318,10 +350,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                  "'undefined' can only be used as a variable initializer");
       return value_make_shadow(sema->vm, sema->vm->type_void);
     case AST_NIL:
-      /* nil：内置类型（与 type 类似）的唯一值，函数 0 初始化/未来空指针。
-         仅字面量值，不可作变量类型——type_lookup("nil") 返回 NULL 自然拒绝
-         var a:nil。比较与显式转换由 nil/func vtable 槽位处理。 */
-      return value_make_shadow(sema->vm, sema->vm->type_nil);
+      /* nil 不是 value：只允许四种 nil 判定（x==nil 等，窄化）、?T 初始化
+         赋值（a = nil）、构造器字段（.?T{nil}）与 fill 值包（<nil,N>）等
+         特殊位置消费（shadow_binary / 赋值 / 构造器 / fill 分别处理）。
+         普通表达式位置引用是非法用法。 */
+      diag_error(sema->diag, sema_loc(sema, *node),
+                 "'nil' can only be used in nil comparisons, ?T assignment, "
+                 "constructor fields or fills");
+      return value_make_shadow(sema->vm, sema->vm->type_void);
     case AST_BINARY:
       return shadow_binary(sema, node, scope);
     case AST_UNARY: {
@@ -421,6 +457,20 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
+
+      /* 函数调用后清窄化（docs m2-design §12.5 状态流转）：调用可能修改
+         任意 ?T 变量（副作用），窄化状态不可靠 → 保守清 UNKNOWN。 */
+      for (sema_scope_t *s = scope; s; s = s->parent) {
+        const vec_t *keys = strmap_keys(s->symbols);
+        size_t nk = vec_len(keys);
+        for (size_t k = 0; k < nk; k++) {
+          const char *key = (const char *)vec_get(keys, k);
+          sema_symbol_t *sym =
+              (sema_symbol_t *)strmap_get(s->symbols, key);
+          if (sym && sym->type && sym->type->kind == TYPE_KIND_OPTION)
+            sym->narrow = NARROW_UNKNOWN;
+        }
+      }
       return result; /* shadow in → shadow out（return_type shadow） */
     }
     case AST_MEMBER:
@@ -497,65 +547,124 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
          fields 数量与元素类型（value_assign 单一校验点），返回该类型
          的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
-         当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
+         当前实现 array + option 分支（struct/tuple 待后续 Phase）。 */
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t = sema_resolve_type_slot(sema, &n->type);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
 
+      /* ?T 构造器（二值单槽位，docs m2-design §12.2）：字段数强制 == 1，
+         字段类型 ∈ {nil, T}。nil 字段 → 运行期 PUSH_OPT_NONE；T 字段 →
+         隐式提升 D1。字段类型显式校验（不走 value_assign——option_assign
+         的 shadow 短路会绕过类型检查，须在此处直接比较 inner）。 */
+      if (t->kind == TYPE_KIND_OPTION) {
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "optional constructor expects exactly 1 field, got %zu",
+                     nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t *f = n->fields;
+        if (f && f->kind != AST_NIL) {
+          value_t *fv = sema_expr(sema, &f, scope);
+          if (!value_is_error(sema->vm, fv) &&
+              !value_is_type(fv, TYPE_KIND_VOID)) {
+            const type_t *inner = type_option_inner(t);
+            const type_t *ft = value_type(fv);
+            if (ft != t && ft != inner) {
+              char tn[64], fn[64];
+              sema_type_name(t, tn, sizeof tn);
+              sema_type_name(ft, fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "cannot initialize optional %s with %s", tn, fn);
+            }
+          }
+        }
+        return value_make_shadow(sema->vm, t);
+      }
+
       if (t->kind != TYPE_KIND_ARRAY) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "construct: unsupported type (only array implemented)");
+                   "construct: unsupported type (only array and optional "
+                   "implemented)");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 成员数校验：定长数组允许部分填充（不足部分自动 0 填充），
-         超出声明长度才报错 */
+      /* 数组构造（完全显式，docs m2-design §12.4）：总元素数 =
+         Σfill counts + 显式字段数，必须 == 数组长度（无自动 0 填充、
+         无运行时裁剪）。fill 的 N 编译期常量（sema_eval_array_bound
+         求值 + 折叠为 AST_INT_LIT，编译器读立即数）。 */
       const type_t *et = array_type_elem(t);
-      size_t nfields = sema_count_siblings(n->fields);
       size_t len = array_type_len(t);
-      if (len != SIZE_MAX && nfields > len) {
+
+      /* 第一遍：统计总元素数 + 求值 fill count（折叠写回） */
+      size_t total = 0;
+      for (ast_node_t *f = n->fields; f; f = f->next) {
+        if (f->kind == AST_FILL) {
+          size_t cnt;
+          if (!sema_eval_array_bound(sema, &((ast_fill_t *)f)->count, &cnt))
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          total += cnt;
+        } else {
+          total += 1;
+        }
+      }
+      if (len != SIZE_MAX && total != len) {
         char tn[64];
         sema_type_name(t, tn, sizeof tn);
         diag_error(sema->diag, sema_loc(sema, *node),
                    "construct: expected %zu elements for %s, got %zu", len, tn,
-                   nfields);
+                   total);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 自动 0 填充：定长数组字段数不足时，向字段链尾部补发 AST_UNDEF
-         零值占位节点（compiler 逐字段编译 → PUSH_UNDEFINED，CONSTRUCT
-         按声明长度 N 构造；运行期跳过 undefined，分配块清零 → 缺失元素
-         为类型零值，func 元素的零值即 nil）。 */
-      if (len != SIZE_MAX && nfields < len) {
-        for (size_t i = nfields; i < len; i++) {
-          ast_node_t *u = ast_undef_new(sema->arena, (*node)->tok_begin,
-                                        (*node)->tok_end);
-          if (!u) return value_make_shadow(sema->vm, sema->vm->type_void);
-          ast_append(&n->fields, &n->fields_last, NULL, u);
+      /* 第二遍：逐字段求值 + 元素类型校验（经链上指针传递，使 comptime
+         引用折叠就地写回字段链，编译器零感知）。fill 的 v 求值一次，
+         count 份同类型；nil 字段/fill 的 nil 值 → 元素须为 ?T（运行期
+         PUSH_OPT_NONE，跳过求值——nil 非 value）。 */
+      size_t idx = 0;
+      for (ast_node_t **link = &n->fields; *link; link = &(*link)->next) {
+        ast_node_t *f = *link;
+        value_t *fv = NULL;
+        bool is_nil_field = false;
+        if (f->kind == AST_FILL) {
+          ast_fill_t *fl = (ast_fill_t *)f;
+          is_nil_field = fl->value->kind == AST_NIL;
+          if (!is_nil_field)
+            fv = sema_expr(sema, &fl->value, scope);
+        } else if (f->kind == AST_NIL) {
+          is_nil_field = true;
+        } else {
+          fv = sema_expr(sema, link, scope);
         }
-      }
 
-      /* 逐字段 shadow 求值 + 元素类型校验（经链上指针传递，使 comptime
-         引用折叠就地写回字段链，编译器零感知） */
-      ast_node_t **link = &n->fields;
-      for (size_t i = 0; *link; link = &(*link)->next, i++) {
-        if ((*link)->kind == AST_UNDEF)
-          continue; /* 自动 0 填充占位节点：跳过求值（元素类型已由声明保证） */
-        value_t *fv = sema_expr(sema, link, scope);
-        if (value_is_error(sema->vm, fv) ||
-            value_is_type(fv, TYPE_KIND_VOID))
-          continue; /* 错误恢复产物/零值占位跳过，已有诊断 */
-        if (!et) continue;
-        value_t *dst = value_make_shadow(sema->vm, et);
-        if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
-          char tn[64], fn[64];
-          sema_type_name(et, tn, sizeof tn);
-          sema_type_name(value_type(fv), fn, sizeof fn);
-          diag_error(sema->diag, sema_loc(sema, *link),
-                     "cannot initialize array element %zu with %s (element "
-                     "type %s)",
-                     i, fn, tn);
+        if (is_nil_field) {
+          if (!et || et->kind != TYPE_KIND_OPTION) {
+            char tn[64];
+            sema_type_name(et, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "cannot initialize array element with nil (element "
+                       "type %s is not optional)",
+                       tn);
+          }
+          idx += 1;
+          continue;
         }
+
+        if (fv && !value_is_error(sema->vm, fv) &&
+            !value_is_type(fv, TYPE_KIND_VOID) && et) {
+          value_t *dst = value_make_shadow(sema->vm, et);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(et, tn, sizeof tn);
+            sema_type_name(value_type(fv), fn, sizeof fn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "cannot initialize array element %zu with %s (element "
+                       "type %s)",
+                       idx, fn, tn);
+          }
+        }
+        idx += 1;
       }
       return value_make_shadow(sema->vm, t);
     }
@@ -741,6 +850,30 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     sema_check_bool(sema, b->lhs, lhs, "logical operator");
     value_t *rhs = sema_expr(sema, &b->rhs, scope);
     sema_check_bool(sema, b->rhs, rhs, "logical operator");
+    return value_make_shadow(sema->vm, sema->vm->type_bool);
+  }
+
+  /* nil 比较（docs m2-design §12.5）：x==nil / nil==x / x!=nil / nil!=x
+     四种判定形式是 ?T 唯一合法比较（?T == ?T 直接比较报错，须先窄化）。
+     nil 不是 value：不进入 vtable eq 分派，sema 直接识别符号形态 →
+     返回 bool shadow。x 非 ?T 与 nil 比较 → 编译错误（str/func 无空值）。 */
+  if ((token_is(b->op, "==") || token_is(b->op, "!=")) &&
+      (b->lhs->kind == AST_NIL || b->rhs->kind == AST_NIL)) {
+    ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
+    if (other->kind != AST_IDENT) {
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "nil can only be compared with an optional variable");
+      return value_make_shadow(sema->vm, sema->vm->type_bool);
+    }
+    ast_ident_t *oid = (ast_ident_t *)other;
+    sema_symbol_t *sym = sema_lookup(scope, oid->name);
+    const type_t *ot = sym ? sym->type : NULL;
+    if (!ot || ot->kind != TYPE_KIND_OPTION) {
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "variable '%.*s' is not optional; cannot compare with nil",
+                 (int)oid->name.len, oid->name.ptr);
+      return value_make_shadow(sema->vm, sema->vm->type_bool);
+    }
     return value_make_shadow(sema->vm, sema->vm->type_bool);
   }
 

@@ -32,6 +32,7 @@ extern "C" {
 typedef enum {
     BCODE_PUSH,            /* strtable 索引：scope_lookup 借用引用压栈 */
     BCODE_STORE,           /* strtable 索引：value_assign(dst, pop) 压结果 */
+    BCODE_STORE_NIL,       /* strtable 索引：?T 变量置 none（只置 ok=false，压回 dst） */
     BCODE_PUSH_STR,        /* strtable 索引：字符串字面量压栈 */
 
     BCODE_PUSH_I8,         /* i8 立即数 */
@@ -54,7 +55,6 @@ typedef enum {
     BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名
                                （未来 struct 等具名类型用，当前无生成） */
     BCODE_PUSH_UNDEFINED,  /* 压入 void 类型 value（"类型待推导"） */
-    BCODE_PUSH_NIL,        /* 压入 nil 值（内置类型唯一值，函数 0 初始化/未来空指针） */
 
     BCODE_DEFINE,          /* strtable 索引：弹栈定义（永远双弹 [value, type-spec]） */
 
@@ -99,6 +99,7 @@ typedef enum {
     BCODE_CREATE_VOLATILE, /* 弹 type value → type_volatile_intern → type value 压回 */
     BCODE_PUSH_CONST,      /* 分配空 const type（开放，sub=NULL，不入池）+ 压其 type value */
     BCODE_PUSH_VOLATILE,   /* 分配空 volatile type（开放，sub=NULL，不入池）+ 压其 type value */
+    BCODE_PUSH_OPT,        /* 分配空 optional type（开放，inner=NULL，不入池）+ 压其 type value */
     BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */
@@ -125,6 +126,15 @@ typedef enum {
     BCODE_CONSTRUCT,        /* U32：成员数量；弹 N 个成员值 + 类型位 → 按类型构造 value */
     BCODE_INDEX_GET,        /* 弹 self + index，返回 self[index]（get_item） */
     BCODE_INDEX_SET,        /* 弹 self + index + val，返回 self（set_item） */
+    BCODE_PUSH_OPT_NONE,    /* u32 id：从 types_by_id 查 option 类型 → 压 ok=false +
+                               value 全零的 ?T 值块（构造器字段/fill 的 nil） */
+    BCODE_OPT_GET,          /* 无操作数：弹 ?T 值 → 借用返回 value 字段的借用引用
+                               （窄化 SOME 读取，sema 重写 AST_OPT_GET → PUSH + OPT_GET；
+                               零拷贝，data 指向 option 值块内偏移） */
+    BCODE_OPT_IS_NONE,      /* 无操作数：弹 ?T 值 → 压 bool（ok tag == false）
+                               （nil 判定 x==nil / nil==x → OPT_IS_NONE；
+                               x!=nil / nil!=x → OPT_IS_NONE + NOT。
+                               tag 比较专用指令，非 vtable eq 分派——nil 非 value） */
 
     /* ---- 长度查询：代理到 vtable->length（当前仅数组实现，返回 u64 元素个数） ---- */
     BCODE_LENGTH,           /* 弹 self，返回 value_length(self)（如数组 → u64 元素个数） */

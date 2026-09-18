@@ -13,7 +13,6 @@
 #include "vm/type_void.h"
 #include "vm/type_type.h"
 #include "vm/type_func.h"
-#include "vm/type_nil.h"
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
 
@@ -215,7 +214,6 @@ static type_t g_type_void = { NULL, {NULL,0}, 0, 0, 0, false };
 static type_t g_type_type = { NULL, {NULL,0}, 0, 0, 0, false };
 /* func 基类声明为 func_type_t 布局：无签名（sig 全零），向下转型安全 */
 static func_type_t g_type_func = { { NULL, {NULL,0}, 0, 0, 0, false }, { NULL, 0, NULL, false } };
-static type_t g_type_nil = { NULL, {NULL,0}, 0, 0, 0, false };
 static type_t g_type_error = { NULL, {NULL,0}, 0, 0, 0, false };
 static type_t g_type_interrupt = { NULL, {NULL,0}, 0, 0, 0, false };
 
@@ -227,7 +225,6 @@ void vm_init_builtins(vm_t *vm) {
     static const char S_VOID[] = "void", S_TYPE[] = "type", S_FUNC[] = "func";
     static const char S_ERROR[] = "error";
     static const char S_INTERRUPT[] = "interrupt";
-    static const char S_NIL[] = "nil";
 
     /* 函数签名类型池（type_func_sig intern 用）；元素由 vm_destroy 手动释放，
        vec 只持有指针数组（与 scope owned 同一模式） */
@@ -254,10 +251,6 @@ void vm_init_builtins(vm_t *vm) {
     g_type_type = (type_t){ &VTABLE_TYPE, STRSLICE_LIT(S_TYPE), sizeof(const type_t*), alignof(const type_t*), TYPE_KIND_TYPE, true, 13 };
     g_type_func.base = (type_t){ &VTABLE_FUNC, STRSLICE_LIT(S_FUNC), sizeof(func_t*), alignof(func_t*), TYPE_KIND_FUNC, true, 14 };
 
-    /* nil：data 为 func_t* 宽度的零块（NULL 指针），当前表示函数 0 初始化，
-       未来用于空指针。不注册进 global scope（不是类型名——仅字面量值）。 */
-    g_type_nil = (type_t){ &VTABLE_NIL, STRSLICE_LIT(S_NIL), sizeof(func_t*), alignof(func_t*), TYPE_KIND_NIL, true, 17 };
-
     /* error_data_t 内联在 value data 块中 */
     g_type_error = (type_t){ &VTABLE_ERROR, STRSLICE_LIT(S_ERROR),
                              sizeof(error_data_t), alignof(error_data_t),
@@ -283,7 +276,6 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_void = &g_type_void;
     vm->type_type = &g_type_type;
     vm->type_func = &g_type_func.base;
-    vm->type_nil = &g_type_nil;
     vm->type_error = &g_type_error;
     vm->type_interrupt = &g_type_interrupt;
 }

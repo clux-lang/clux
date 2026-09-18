@@ -2,6 +2,7 @@
 #include "core/panic.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
+#include "vm/type_option.h"
 
 #include <string.h>
 
@@ -140,6 +141,13 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_OPTION:
+      /* PUSH_OPT 压开放对象（inner=NULL，不入池）→ DEFINE_TYPE <id> 声明
+         登记（不设 inner；向前引用安全——inner 可后声明） */
+      bcode_write_op(c->bc, BCODE_PUSH_OPT);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
@@ -231,6 +239,21 @@ static void define_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
+/* optional 定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 inner 先定义（密封）→
+ * LOAD inner → SET_TYPE（设 inner）→ SEAL 封闭（按 inner 去重 intern，
+ * 计算 C 布局，置 sealed；去重时按自身 id 重绑登记） */
+static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                          size_t count) {
+  const type_t *t = st->type;
+  const type_t *inner = type_option_inner(t);
+
+  emit_load_type(c, st->id);             /* 栈: [open_option_type] */
+  emit_dep_type(c, inner, done, count);  /* 栈: [open, inner] */
+  bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 inner → 设进 open */
+  st_push(c, -1);
+  emit_seal(c);                          /* 封闭（去重时重绑登记） */
+}
+
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count) {
   if (!st) return;
@@ -250,6 +273,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE:
       define_qual(c, st, done, count);
+      break;
+    case TYPE_KIND_OPTION:
+      define_option(c, st, done, count);
       break;
     default:
       done[idx] = true; /* 内建别名：pass 1 已完成，无定义 */

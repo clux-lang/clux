@@ -4,16 +4,21 @@
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_nil.h"
+#include "parser/ast_opt_get.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
+#include "vm/type_array.h"
+#include "vm/type_option.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -21,6 +26,49 @@
  * 每个表达式压栈恰好一个值（或零值占位）；操作数栈净变化由 st_push 静态
  * 追踪。短路 &&/|| 走独立编译路径（JZ/JNZ + 常量兜底），结果恒在栈上。
  * =========================================================================== */
+
+/* 类型槽位解析为真实 type_t（CONSTRUCT 类型位 / PUSH_OPT_NONE 的 option
+ * 类型查询用）。AST_TYPE_REF → sema 登记表（__type_N）→ 内建 type_lookup
+ * 兜底；AST_IDENT → type_lookup（编译期可解析的类型名）。sema 已保证类型
+ * 槽位在常规路径为 AST_TYPE_REF（复合类型）或 AST_IDENT（内建别名）；
+ * 解析失败返回 NULL（调用方已 c_error，fail-fast）。 */
+const type_t *c_resolve_type(compiler_t *c, ast_node_t *type_expr) {
+  if (!type_expr) return NULL;
+  if (type_expr->kind == AST_TYPE_REF) {
+    ast_type_ref_t *ref = (ast_type_ref_t *)type_expr;
+    const sema_type_t *st = c_sema_type_find_name(c->sema_types, ref->name);
+    if (st) return st->type;
+    return type_lookup(c->vm, ref->name);
+  }
+  if (type_expr->kind == AST_IDENT) {
+    ast_ident_t *id = (ast_ident_t *)type_expr;
+    return type_lookup(c->vm, id->name);
+  }
+  return NULL;
+}
+
+/* 从类型槽位发 PUSH_OPT_NONE <id>：?T 构造器 nil 字段 / 数组 nil 元素 /
+ * var 声明 init nil。option 类型一定登记在 sema_types（sema_type_register
+ * 递归登记复合类型），取 st->id；未登记（内建兜底失败）报错。 */
+void emit_push_opt_none(compiler_t *c, ast_node_t *type_expr) {
+  const type_t *t = c_resolve_type(c, type_expr);
+  if (!t) {
+    c_error(c, type_expr, "unknown type in nil initializer");
+    return;
+  }
+  if (t->kind != TYPE_KIND_OPTION) {
+    c_error(c, type_expr, "compiler: nil initializer requires an optional type");
+    return;
+  }
+  const sema_type_t *st = c_sema_type_find_ptr(c->sema_types, t);
+  if (!st) {
+    c_error(c, type_expr, "compiler: optional type not registered");
+    return;
+  }
+  bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+  bcode_write_u32(c->bc, st->id);
+  st_push(c, 1);
+}
 
 void compile_expr(compiler_t *c, ast_node_t *node) {
   if (!node || c->failed) return;
@@ -93,6 +141,16 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, 1);
     break;
   }
+  case AST_OPT_GET: {
+    /* 窄化 SOME 读取（sema 重写产物）：PUSH <name> 压 ?T 变量值 →
+       OPT_GET 弹 ?T 值 → 借用返回 value 字段（?T 退化为 T）。
+       栈深：PUSH +1，OPT_GET 弹 1 压 1 净 0，表达式总净 +1。 */
+    ast_opt_get_t *n = (ast_opt_get_t *)node;
+    bcode_write_op(c->bc, BCODE_PUSH); bcode_write_str(c->bc, n->name);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_OPT_GET);
+    break;
+  }
   case AST_TYPE_REF: {
     /* sema 登记的具名类型引用：LOAD_TYPE <id> 查表压栈（与 compile_type_expr
        一致；表达式位置出现时同样可用，类型即表达式）。
@@ -153,11 +211,11 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, 1);
     break;
   case AST_NIL:
-    /* nil：内置类型唯一值（函数 0 初始化/未来空指针），
-       运行时压入 data=NULL 的 nil value。 */
-    bcode_write_op(c->bc, BCODE_PUSH_NIL);
-    st_push(c, 1);
-    break;
+    /* nil 不是 value：只允许四种 nil 判定、?T 初始化（STORE_NIL）、构造器
+       字段（PUSH_OPT_NONE）与 fill 值包等特殊位置消费（sema 已校验）。
+       普通表达式位置由 sema 拦截，此处不应到达。 */
+    c_error(c, node, "compiler: nil is not an expression");
+    return;
   case AST_BINARY: {
     ast_binary_t *n = (ast_binary_t *)node;
     if (token_is(n->op, "&&") || token_is(n->op, "||")) {
@@ -182,6 +240,26 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       st_push(c, 1);
       break;
     }
+    /* nil 判定（docs m2-design §12.5）：x==nil / nil==x → PUSH x +
+       OPT_IS_NONE（true=none）；x!=nil / nil!=x → PUSH x + OPT_IS_NONE
+       + NOT。tag 比较专用指令，不进入 vtable eq 分派。sema 已保证另一
+       侧是 ?T 变量（AST_IDENT）。 */
+    if ((token_is(n->op, "==") || token_is(n->op, "!=")) &&
+        (n->lhs->kind == AST_NIL || n->rhs->kind == AST_NIL)) {
+      ast_node_t *other = n->lhs->kind == AST_NIL ? n->rhs : n->lhs;
+      if (other->kind != AST_IDENT) {
+        c_error(c, node, "nil can only be compared with an optional variable");
+        return;
+      }
+      compile_expr(c, other);                 /* 栈: [x] */
+      bcode_write_op(c->bc, BCODE_OPT_IS_NONE); /* 弹 x → bool(none)，栈: [bool] */
+      if (token_is(n->op, "!=")) {
+        bcode_write_op(c->bc, BCODE_NOT);     /* 取反：!= nil → !is_none */
+      }
+      st_push(c, 0);
+      break;
+    }
+
     /* as：显式类型转换。lhs 普通表达式求值，rhs 是类型表达式
        （compile_type_expr：BCODE_PUSH 查当前作用域链 type value），
        BCODE_CAST 弹 type + value → 结果。 */
@@ -245,18 +323,87 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_CONSTRUCT: {
     /* 类型字面量构造 .<type>{ fields }：
-       1. 类型位：compile_type_expr（[N]T → 声明-定义两步构造，LOAD_TYPE 留类型值栈顶）
-       2. 各字段值按序压栈（栈: [type_value, v1..vN]）
-       3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 数组值（结果压栈）
+       1. 类型位：compile_type_expr（[N]T / ?T → 声明-定义两步构造，
+          LOAD_TYPE 留类型值栈顶；常规路径 sema 已替换为 AST_TYPE_REF）
+       2. 各字段值按序压栈（栈: [type_value, v1..vN]；fill 展开为 N 份
+          v；nil 字段 → PUSH_OPT_NONE <option id>）
+       3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 值（结果压栈）
        栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。
-       注：定长数组部分填充的零值占位（AST_UNDEF 节点）由 sema 补发进
-       字段链，此处字段数即声明长度 N。 */
+       构造完全显式（docs m2-design §12.4）：总元素数 = Σfill counts +
+       显式字段数，sema 已校验 == 数组长度（无 0 填充、无 AST_UNDEF
+       自动补发）；fill 的 count 已被 sema 折叠为 AST_INT_LIT 立即数。 */
     ast_construct_t *n = (ast_construct_t *)node;
     compile_type_expr(c, n->type);              /* 栈: [type_value] */
+
+    const type_t *t = c_resolve_type(c, n->type);
+    if (!t) { c_error(c, n->type, "unknown construct type"); return; }
+
+    if (t->kind == TYPE_KIND_OPTION) {
+      /* ?T 构造器（二值单槽位）：字段数强制 == 1（sema 已校验）。
+         nil → PUSH_OPT_NONE（none 态）；T 字段 → 压值，CONSTRUCT(1)
+         的 option 分支做隐式提升（some 态）。 */
+      size_t fcount = 0;
+      for (ast_node_t *f = n->fields; f; f = f->next) {
+        if (f->kind == AST_NIL) {
+          emit_push_opt_none(c, n->type);
+        } else {
+          compile_expr(c, f);
+        }
+        fcount++;
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, (uint32_t)fcount);
+      st_push(c, -((int)fcount));
+      break;
+    }
+
+    if (t->kind != TYPE_KIND_ARRAY) {
+      c_error(c, node, "construct: unsupported type (only array and optional implemented)");
+      return;
+    }
+
+    /* 数组构造：fill 展开 + nil 元素（元素须 ?T，sema 已校验）+ 普通字段 */
+    const type_t *et = array_type_elem(t);
     size_t fcount = 0;
     for (ast_node_t *f = n->fields; f; f = f->next) {
-      compile_expr(c, f);                       /* 栈: [type_value, v1..vN] */
-      fcount++;
+      if (f->kind == AST_FILL) {
+        /* <v,N>：count 已折叠为 AST_INT_LIT，N 份 v 依次压栈 */
+        ast_fill_t *fl = (ast_fill_t *)f;
+        uint64_t cnt = 0;
+        if (fl->count && fl->count->kind == AST_INT_LIT) {
+          cnt = ((ast_int_lit_t *)fl->count)->value;
+        } else {
+          c_error(c, fl->count ? fl->count : f,
+                  "fill count must be a compile-time constant");
+          return;
+        }
+        if (fl->value->kind == AST_NIL) {
+          /* nil 填充：元素须 ?T（sema 已校验），发 N 份 PUSH_OPT_NONE */
+          const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+          if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
+          for (uint64_t k = 0; k < cnt; k++) {
+            bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+            bcode_write_u32(c->bc, est->id);
+            st_push(c, 1);
+          }
+        } else {
+          for (uint64_t k = 0; k < cnt; k++) {
+            compile_expr(c, fl->value);         /* 栈: [type_value, v..] */
+          }
+        }
+        fcount += (size_t)cnt;
+      } else if (f->kind == AST_NIL) {
+        /* nil 字段：元素须 ?T（sema 已校验）→ PUSH_OPT_NONE */
+        const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+        if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, est->id);
+        st_push(c, 1);
+        fcount++;
+      } else {
+        compile_expr(c, f);                     /* 栈: [type_value, v1..vN] */
+        fcount++;
+      }
     }
     bcode_write_op(c->bc, BCODE_CONSTRUCT);
     bcode_write_u32(c->bc, (uint32_t)fcount);

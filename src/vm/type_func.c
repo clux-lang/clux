@@ -235,7 +235,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     return ret;
 }
 
-/* ---- eq/ne：func == nil（0 初始化检测）与 func == func（指针比较） ---- */
+/* ---- eq/ne：func == func（指针比较；func 无空值，nil 判定走 ?T 窄化） ---- */
 
 /* bool 值构造（与其他 vtable 同模式） */
 static value_t *func_bool_store(vm_t *vm, bool val) {
@@ -247,15 +247,6 @@ static value_t *func_bool_store(vm_t *vm, bool val) {
 static value_t *func_eq(vm_t *vm, value_t *a, value_t *b) {
     if (value_is_error(vm, a)) return a;
     if (value_is_error(vm, b)) return b;
-    bool a_nil = (value_type(a) == vm->type_nil);
-    bool b_nil = (value_type(b) == vm->type_nil);
-    if (a_nil || b_nil) {
-        /* func == nil：函数指针是否为 NULL（nil 的 0 初始化语义） */
-        if (value_is_shadow(a) || value_is_shadow(b))
-            return value_make_shadow(vm, vm->type_bool);
-        const func_t *fn = *(const func_t **)value_data(a_nil ? b : a);
-        return func_bool_store(vm, fn == NULL);
-    }
     /* func == func：签名类型必须一致，指针比较 */
     if (value_type(a) != value_type(b))
         return value_make_error(vm, "==: function type mismatch");
@@ -269,14 +260,6 @@ static value_t *func_eq(vm_t *vm, value_t *a, value_t *b) {
 static value_t *func_ne(vm_t *vm, value_t *a, value_t *b) {
     if (value_is_error(vm, a)) return a;
     if (value_is_error(vm, b)) return b;
-    bool a_nil = (value_type(a) == vm->type_nil);
-    bool b_nil = (value_type(b) == vm->type_nil);
-    if (a_nil || b_nil) {
-        if (value_is_shadow(a) || value_is_shadow(b))
-            return value_make_shadow(vm, vm->type_bool);
-        const func_t *fn = *(const func_t **)value_data(a_nil ? b : a);
-        return func_bool_store(vm, fn != NULL);
-    }
     if (value_type(a) != value_type(b))
         return value_make_error(vm, "!=: function type mismatch");
     if (value_is_shadow(a) || value_is_shadow(b))

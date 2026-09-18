@@ -5,6 +5,7 @@
 const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH]           = { "PUSH",           { BCODE_ASM_OP_STR } },
     [BCODE_STORE]          = { "STORE",          { BCODE_ASM_OP_STR } },
+    [BCODE_STORE_NIL]      = { "STORE_NIL",      { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_STR]       = { "PUSH_STRING",    { BCODE_ASM_OP_STR } },
 
     [BCODE_PUSH_I8]        = { "PUSH_I8",        { BCODE_ASM_OP_I8 } },
@@ -25,7 +26,6 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_LOAD_FUNCTION]  = { "LOAD_FUNCTION",  { BCODE_ASM_OP_U32 } },
     [BCODE_SET_TYPE_NAME]  = { "SET_TYPE_NAME",  { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_UNDEFINED] = { "PUSH_UNDEFINED", { BCODE_ASM_OP_NONE } },
-    [BCODE_PUSH_NIL]       = { "PUSH_NIL",       { BCODE_ASM_OP_NONE } },
 
     [BCODE_DEFINE]         = { "DEFINE",         { BCODE_ASM_OP_STR } },
     [BCODE_PUSH_FUNC_TYPE] = { "PUSH_FUNC_TYPE", { BCODE_ASM_OP_NONE } },
@@ -65,6 +65,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_CREATE_VOLATILE]= { "CREATE_VOLATILE",{ BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_CONST]     = { "PUSH_CONST",     { BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_VOLATILE]  = { "PUSH_VOLATILE",  { BCODE_ASM_OP_NONE } },
+    [BCODE_PUSH_OPT]       = { "PUSH_OPT",       { BCODE_ASM_OP_NONE } },
     [BCODE_SET_TYPE]       = { "SET_TYPE",       { BCODE_ASM_OP_NONE } },
     [BCODE_CALL]           = { "CALL",           { BCODE_ASM_OP_U32 } },
     [BCODE_RET]            = { "RET",            { BCODE_ASM_OP_NONE } },
@@ -84,6 +85,9 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_CONSTRUCT]      = { "CONSTRUCT",      { BCODE_ASM_OP_U32 } },
     [BCODE_INDEX_GET]      = { "INDEX_GET",     { BCODE_ASM_OP_NONE } },
     [BCODE_INDEX_SET]      = { "INDEX_SET",     { BCODE_ASM_OP_NONE } },
+    [BCODE_PUSH_OPT_NONE]  = { "PUSH_OPT_NONE",  { BCODE_ASM_OP_U32 } },
+    [BCODE_OPT_GET]        = { "OPT_GET",        { BCODE_ASM_OP_NONE } },
+    [BCODE_OPT_IS_NONE]    = { "OPT_IS_NONE",    { BCODE_ASM_OP_NONE } },
     [BCODE_LENGTH]         = { "LENGTH",        { BCODE_ASM_OP_NONE } },
 };
 

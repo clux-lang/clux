@@ -47,10 +47,14 @@ typedef enum {
      * 无顺序约束，const const i32 嵌套重复合法（语义上幂等，消费层收敛）。 */
     AST_CONST,           /* const <type-expr> */
     AST_VOLATILE,        /* volatile <type-expr> */
+    AST_OPTION,          /* ?T optional 类型修饰（类型即表达式，? 前导） */
+    AST_FILL,            /* <v,N> 值包（仅 CONSTRUCT 字段链中出现；v=值，N=重复次数） */
     AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
+    AST_OPT_GET,         /* 窄化 SOME 读取：sema 在 SOME 分支内将 ?T 变量的
+                            AST_IDENT 重写为该节点 → compiler 发 PUSH + OPT_GET */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

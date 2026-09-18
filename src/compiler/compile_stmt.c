@@ -6,6 +6,7 @@
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
 #include "parser/ast_if.h"
+#include "parser/ast_nil.h"
 #include "parser/ast_return.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
@@ -114,7 +115,11 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   switch (node->kind) {
   case AST_VAR_DEF: {
     ast_var_def_t *n = (ast_var_def_t *)node;
-    if (n->init) {
+    if (n->init && n->init->kind == AST_NIL) {
+      /* nil 初始化（var x:?T = nil；sema 已保证 type_expr 非空且为 ?T）：
+         PUSH_OPT_NONE <id> 压 none 值块，DEFINE 绑定。 */
+      emit_push_opt_none(c, n->type_expr);     /* 栈: [value] */
+    } else if (n->init) {
       compile_expr(c, n->init);              /* 栈: [value] */
     } else {
       bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 无初始值 → 零值占位（sema 已保证未初始化不可读） */
@@ -167,6 +172,15 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       break;
     }
     if (token_is(n->op, "=")) {
+      if (n->value->kind == AST_NIL) {
+        /* nil 赋值（a = nil；sema 已校验 a 为 ?T）：STORE_NIL <name> 只置
+           ok=false，压回 dst；POP 丢弃（赋值是语句）。STORE_NIL +1、
+           POP -1，净 0。 */
+        bcode_write_op(c->bc, BCODE_STORE_NIL);
+        bcode_write_str(c->bc, name);          /* 压回 dst，栈: [dst] */
+        bcode_write_op(c->bc, BCODE_POP);      /* 赋值是语句：丢弃结果 */
+        break;
+      }
       /* 直接赋值：value → STORE name */
       compile_expr(c, n->value);               /* 栈: [value] */
       bcode_write_op(c->bc, BCODE_STORE);

@@ -12,6 +12,7 @@ extern "C" {
 #include "vm/type_interrupt.h"
 #include "vm/function.h"
 #include "vm/type_func.h"
+#include "vm/type_option.h"
 #include "core/allocator.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -2298,120 +2299,101 @@ TEST_F(ValueCore, UndefinedScopeDefineAndPop) {
     vm_pop_scope(vm);
 }
 
-/* ---- nil（内置类型唯一值，函数 0 初始化/未来空指针） ---- */
+/* ---- optional（?T，docs m2-design §12）---- */
 
-TEST_F(ValueCore, MakeNilIsNilType) {
-    value_t *n = value_make_nil(vm);
-    EXPECT_EQ(value_type(n), vm->type_nil);
-    EXPECT_TRUE(value_is_nil(vm, n));
-    EXPECT_EQ(value_kind(n), TYPE_KIND_NIL);
-    /* data 为 func_t* 宽度零块 = NULL 指针（函数 0 初始化语义） */
-    const func_t *fn = *(const func_t **)value_data(n);
-    EXPECT_EQ(fn, nullptr);
+/* ?i32 构造：布局 struct Optional_T{bool ok;i32 value;}，
+   value 偏移 = align_up(1, alignof(i32)) = 4，size = 4 + 4 = 8 */
+TEST_F(ValueCore, OptionTypeLayout) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    EXPECT_EQ(opt->kind, TYPE_KIND_OPTION);
+    EXPECT_EQ(option_value_offset(opt), 4u);
+    EXPECT_EQ(opt->size, 8u);
+    EXPECT_EQ(opt->align, 4u);
+    /* inner 访问器 */
+    EXPECT_EQ(type_option_inner(opt), vm->type_i32);
+    /* 非 option 类型 inner = NULL */
+    EXPECT_EQ(type_option_inner(vm->type_i32), nullptr);
 }
 
-TEST_F(ValueCore, NilNotRegisteredAsTypeName) {
-    /* nil 不注册进 global scope：type_lookup("nil") = NULL，
-       因此 var a:nil 无法解析（与 i32/bool 等类型名不同） */
-    EXPECT_EQ(type_lookup(vm, STRSLICE_LIT("nil")), nullptr);
+/* ?T 按 inner 去重 intern：两次构造同 inner 返回同一实例 */
+TEST_F(ValueCore, OptionInternDedupsByInner) {
+    const type_t *a = type_option_intern(vm, vm->type_i32);
+    const type_t *b = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a, b);
+    /* 不同 inner 不同实例 */
+    const type_t *c = type_option_intern(vm, vm->type_i64);
+    EXPECT_NE(a, c);
 }
 
-TEST_F(ValueCore, NilCloneAndAssign) {
-    value_t *n = value_make_nil(vm);
-    value_t *c = value_clone(vm, n);
-    EXPECT_TRUE(value_is_nil(vm, c));
-    EXPECT_EQ(value_type(c), vm->type_nil);
-
-    value_t *dst = value_make_nil(vm);
-    value_t *r = value_assign(vm, dst, n);
-    ASSERT_EQ(r, dst);
-    EXPECT_TRUE(value_is_nil(vm, dst));
+/* T → ?T 隐式提升（some）：value_lift_option 压 ok=true + T 值深拷贝到
+   value 字段（D1：T 的值天然是 ?T 的 some 态） */
+TEST_F(ValueCore, LiftOptionSome) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    value_t *i = make_i32_raw(vm, 42);
+    value_t *o = value_lift_option(vm, i, opt);
+    ASSERT_NE(o, nullptr);
+    EXPECT_EQ(value_type(o), opt);
+    /* ok tag = true；value 字段 = 42 */
+    EXPECT_TRUE(*(const bool *)value_data(o));
+    EXPECT_EQ(*(const int32_t *)option_value(value_data(o), opt), 42);
+    raw_free(vm, i);
 }
 
-TEST_F(ValueCore, NilEqNilIsTrue) {
-    value_t *a = value_make_nil(vm);
-    value_t *b = value_make_nil(vm);
+/* 提升要求 inner 匹配：i64 提升到 ?i32 → error */
+TEST_F(ValueCore, LiftOptionInnerMismatchFails) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    value_t *i = make_i32_raw(vm, 7);
+    value_t *o = value_lift_option(vm, i, vm->type_i64); /* 目标非 option */
+    EXPECT_TRUE(value_is_error(vm, o));
+    value_t *i64 = value_make_untracked(vm->alloc, vm->type_i64, nullptr);
+    (void)i64;
+    raw_free(vm, i);
+    raw_free(vm, i64);
+}
+
+/* clone/assign 转发 inner：ok tag 平凡拷贝，value 字段深拷贝 */
+TEST_F(ValueCore, OptionCloneAndAssign) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    value_t *i = make_i32_raw(vm, 5);
+    value_t *o = value_lift_option(vm, i, opt);
+    ASSERT_NE(o, nullptr);
+
+    value_t *c = value_clone(vm, o);
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(value_type(c), opt);
+    EXPECT_TRUE(*(const bool *)value_data(c));
+    EXPECT_EQ(*(const int32_t *)option_value(value_data(c), opt), 5);
+
+    /* assign 到 none 目标 */
+    value_t *dst = value_make_untracked(vm->alloc, opt, value_alloc_data(vm->alloc, opt));
+    value_assign(vm, dst, o);
+    EXPECT_TRUE(*(const bool *)value_data(dst));
+    EXPECT_EQ(*(const int32_t *)option_value(value_data(dst), opt), 5);
+
+    raw_free(vm, i);
+    raw_free(vm, dst);
+}
+
+/* eq/ne 无分派：?T 只能与 nil 比较（tag 比较由编译器发专用指令
+   OPT_IS_NONE），vtable eq/ne 返回 error */
+TEST_F(ValueCore, OptionEqFails) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    value_t *i = make_i32_raw(vm, 1);
+    value_t *a = value_lift_option(vm, i, opt);
+    value_t *b = value_clone(vm, a);
     value_t *r = value_eq(vm, a, b);
-    ASSERT_NE(r, nullptr);
-    EXPECT_EQ(value_type(r), vm->type_bool);
-    EXPECT_TRUE(*(bool *)value_data(r));
-}
-
-TEST_F(ValueCore, NilEqFuncIsNullCheck) {
-    /* nil == func：func 指针是否为 NULL。0 初始化的 func value 与 nil 相等 */
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
-    value_t *fn = func_new(vm, sum_variadic, vm->global_scope,
-                           vm->root_scope, sig, STRSLICE_LIT("f"));
-
-    /* 真实函数指针 → nil != fn */
-    value_t *r1 = value_eq(vm, value_make_nil(vm), fn);
-    EXPECT_FALSE(*(bool *)value_data(r1));
-
-    /* 0 初始化 func value（data 为 NULL 指针）→ nil == fn */
-    void *zd = value_alloc_data(vm->alloc, sig);
-    *(func_t **)zd = NULL;
-    value_t *zero_fn = value_make_untracked(vm->alloc, sig, zd);
-    value_t *r2 = value_eq(vm, value_make_nil(vm), zero_fn);
-    EXPECT_TRUE(*(bool *)value_data(r2));
-
-    raw_free(vm, fn);
-    raw_free(vm, zero_fn);
-}
-
-TEST_F(ValueCore, FuncEqNil) {
-    /* func == nil（func vtable 侧）：NULL 函数指针 == nil */
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
-    void *zd = value_alloc_data(vm->alloc, sig);
-    *(func_t **)zd = NULL;
-    value_t *zero_fn = value_make_untracked(vm->alloc, sig, zd);
-    value_t *r = value_eq(vm, zero_fn, value_make_nil(vm));
-    EXPECT_EQ(value_type(r), vm->type_bool);
-    EXPECT_TRUE(*(bool *)value_data(r));
-
-    raw_free(vm, zero_fn);
-}
-
-TEST_F(ValueCore, NilExplicitCastToU64IsZero) {
-    value_t *n = value_make_nil(vm);
-    value_t *r = value_explicit_cast(vm, n, vm->type_u64);
-    ASSERT_NE(r, nullptr);
-    EXPECT_EQ(value_type(r), vm->type_u64);
-    EXPECT_EQ(read_sint(r), 0);
-}
-
-TEST_F(ValueCore, NilExplicitCastToFunc) {
-    value_t *n = value_make_nil(vm);
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
-    value_t *r = value_explicit_cast(vm, n, sig);
-    ASSERT_NE(r, nullptr);
-    EXPECT_EQ(value_type(r), sig);
-    /* data 为 NULL 指针（0 初始化函数值） */
-    const func_t *fn = *(const func_t **)value_data(r);
-    EXPECT_EQ(fn, nullptr);
-}
-
-TEST_F(ValueCore, NilImplicitCastToFunc) {
-    value_t *n = value_make_nil(vm);
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_void, false);
-    value_t *r = value_implicit_cast(vm, n, sig);
-    ASSERT_NE(r, nullptr);
-    EXPECT_EQ(value_type(r), sig);
-    const func_t *fn = *(const func_t **)value_data(r);
-    EXPECT_EQ(fn, nullptr);
-}
-
-TEST_F(ValueCore, NilImplicitCastToU64Fails) {
-    /* nil → u64 仅显式：隐式转换报错 */
-    value_t *n = value_make_nil(vm);
-    value_t *r = value_implicit_cast(vm, n, vm->type_u64);
-    EXPECT_TRUE(value_is_error(vm, r));
-}
-
-TEST_F(ValueCore, NilCompareWithIntFails) {
-    value_t *n = value_make_nil(vm);
-    value_t *i = make_i32_raw(vm, 0);
-    value_t *r = value_eq(vm, n, i);
     EXPECT_TRUE(value_is_error(vm, r));
     raw_free(vm, i);
+}
+
+/* ?T 类型不等同于 inner（鸭子判断）：?i32 == i32 → false */
+TEST_F(ValueCore, OptionTypeNotEqualInner) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    EXPECT_FALSE(type_equal(vm, opt, vm->type_i32));
+    EXPECT_TRUE(type_equal(vm, opt, type_option_intern(vm, vm->type_i32)));
 }
 

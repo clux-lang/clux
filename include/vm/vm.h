@@ -42,7 +42,6 @@ typedef struct vm_t {
     type_t *type_void;
     type_t *type_type;   /* 元类型：type 的 type */
     type_t *type_func;   /* 函数类型基类（无签名） */
-    type_t *type_nil;    /* nil：唯一值 nil（函数 0 初始化/未来空指针） */
     type_t *type_error;  /* 错误类型（引擎级硬错误） */
     type_t *type_interrupt; /* interrupt 类型（引擎级控制流哨兵） */
 
@@ -52,6 +51,9 @@ typedef struct vm_t {
     /* ---- const/volatile 修饰类型池（按 sub 去重 intern，vm 拥有生命周期） ---- */
     vec_t *const_types;    /* const_type_t*，元素为 const 修饰类型 */
     vec_t *volatile_types; /* volatile_type_t*，元素为 volatile 修饰类型 */
+
+    /* ---- optional 修饰类型池（按 inner 去重 intern，vm 拥有生命周期） ---- */
+    vec_t *option_types;   /* option_type_t*，元素为 optional 修饰类型 */
 
     /* ---- 数组类型池（按 elem_type + length 去重 intern，vm 拥有生命周期） ---- */
     vec_t *array_types;    /* array_type_t*，元素为数组类型 */

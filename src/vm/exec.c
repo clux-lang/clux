@@ -4,6 +4,7 @@
 #include "vm/type.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
+#include "vm/type_option.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
@@ -49,7 +50,31 @@ static value_t *op_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *src = exec_stack_pop(vm);
     value_t *dst = scope_lookup(vm->current_scope, name);
     if (!dst) return value_make_error(vm, "exec: undefined variable in assignment");
+    /* ?T 目标且 src 为 inner T：隐式提升（T → some，与 op_define 同语义）。
+       option_assign 本身要求严格同类型，提升在此前置完成（sema 已校验
+       src 为 inner，影子短路接受；运行期补齐）。 */
+    const type_t *dt = value_type(dst);
+    if (dt && dt->kind == TYPE_KIND_OPTION && value_type(src) != dt) {
+        value_t *casted = value_implicit_cast(vm, src, dt);
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
+    }
     return value_assign(vm, dst, src);
+}
+
+/* STORE_NIL <name>：?T 变量置 none（a = nil）。非真实 assign 操作——只置
+ * ok tag = false，value 字段不动（nil 无值可写；旧 value 资源归 scope 统一
+ * 释放）。压回 dst（赋值表达式值）。 */
+static value_t *op_store_nil(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *dst = scope_lookup(vm->current_scope, name);
+    if (!dst) return value_make_error(vm, "exec: undefined variable in assignment");
+    const type_t *t = value_type(dst);
+    if (!t || t->kind != TYPE_KIND_OPTION)
+        return value_make_error(vm, "exec: nil assignment requires an optional variable");
+    if (value_is_shadow(dst)) return dst;  /* shadow：只算类型 */
+    *(bool *)value_data(dst) = false;      /* 只置 ok=false */
+    return dst;
 }
 
 /* ---- 字面量 ---- */
@@ -191,11 +216,6 @@ static value_t *op_push_undefined(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make_undefined(vm);
 }
 
-static value_t *op_push_nil(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)bc; (void)pc;
-    return value_make_nil(vm);
-}
-
 static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
 
@@ -317,6 +337,14 @@ static value_t *op_push_volatile(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* PUSH_OPT：分配空 optional type（开放，inner=NULL，不入池）+ 压其 type value
+ * （type_option_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_opt(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_option_push(vm);
+    return NULL;
+}
+
 /* SET_TYPE：弹栈顶 sub type value → peek 栈顶开放对象 → 设为 sub。
  * 弹 sub 后，栈顶即当前构造的限定类型（由 PUSH_CONST/PUSH_VOLATILE 压入），
  * 与 DEFINE_BOUND 同款协议。 */
@@ -327,6 +355,10 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *open_v = exec_stack_peek(vm, 0);
     const type_t *open = (open_v && value_type(open_v) == vm->type_type)
                              ? value_as(open_v, const type_t *) : NULL;
+    if (open && open->kind == TYPE_KIND_OPTION) {
+        type_option_set_inner(vm, open, sub);  /* option：设 inner */
+        return NULL;
+    }
     type_qual_set_sub(vm, open, sub);
     return NULL;
 }
@@ -460,7 +492,7 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!t)
         return value_make_error(vm, "construct: missing type slot");
 
-    /* 仅实现 array 分支 */
+    /* 仅实现 array + option 分支 */
     if (t->kind == TYPE_KIND_ARRAY) {
         const type_t *et = array_type_elem(t);
         /* 校验成员数：定长数组允许部分填充（不足部分编译器补发
@@ -472,9 +504,29 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_array(vm, et, n > 0 ? elems : NULL, n);
     }
 
-    /* 非 array 类型暂未实现 */
+    /* ?T 构造器（二值单槽位，docs m2-design §12.2）：n 必须 == 1（sema
+       已校验）。字段 nil → PUSH_OPT_NONE 压的就是 ?T none 值块（member
+       type == t → 身份直接收下）；字段 T → 隐式提升 some（member type
+       == inner → value_lift_option 压 ok=true + T 值深拷贝到 value 字段）。
+       其余成员类型组合为 sema/编译期契约破坏，报错。 */
+    if (t->kind == TYPE_KIND_OPTION) {
+        const type_t *inner = type_option_inner(t);
+        if (n != 1)
+            return value_make_error(vm,
+                "construct: optional constructor expects exactly 1 field");
+        value_t *member = elems[0];
+        const type_t *mt = value_type(member);
+        if (mt == t)
+            return member;                     /* 已是 ?T（nil 字段 none 值块） */
+        if (inner && mt == inner)
+            return value_lift_option(vm, member, t);  /* T → some 提升 */
+        return value_make_error(vm,
+            "construct: optional field type mismatch");
+    }
+
+    /* 非 array/option 类型暂未实现 */
     return value_make_error(vm,
-        "construct: unsupported type (only array implemented)");
+        "construct: unsupported type (only array and optional implemented)");
 }
 
 /* ---- 下标读取（get_item）：self[index] -> 元素 ----
@@ -502,6 +554,58 @@ static value_t *op_length(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *self = exec_stack_pop(vm);
     return value_length(vm, self);
+}
+
+/* OPT_IS_NONE（无操作数）：nil 判定专用。弹 ?T 值 → 压 bool（ok tag ==
+ * false）。x==nil / nil==x → OPT_IS_NONE；x!=nil / nil!=x → OPT_IS_NONE
+ * + NOT。tag 比较不进入 vtable eq 分派（nil 非 value，option eq/ne 无
+ * 实现）。shadow → 压 bool shadow。 */
+static value_t *op_opt_is_none(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    const type_t *t = v ? value_type(v) : NULL;
+    if (!t || t->kind != TYPE_KIND_OPTION)
+        return value_make_error(vm, "exec: opt is none requires an optional value");
+    if (value_is_shadow(v))
+        return value_make_shadow(vm, vm->type_bool);
+    bool b = !*(const bool *)value_data(v);
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_bool, &b);
+    return value_make(vm, vm->type_bool, data);
+}
+
+/* PUSH_OPT_NONE <id>：从 types_by_id 查 option 类型（校验），压 ok=false +
+ * value 全零的 ?T 值块（构造器字段/fill 的 nil——value_alloc_data 清零，
+ * value 字段零值即"无残留"）。带类型 id 操作数而非弹栈顶类型值，省一条
+ * LOAD_TYPE。 */
+static value_t *op_push_opt_none(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    const type_t *t = vm_type_load(vm, id);
+    if (!t) return value_make_error(vm, "exec: unknown type id in push opt none");
+    if (t->kind != TYPE_KIND_OPTION)
+        return value_make_error(vm, "exec: push opt none requires an optional type");
+    void *data = value_alloc_data(vm->alloc, t);  /* 清零：ok=false + value 零值 */
+    return value_make(vm, t, data);
+}
+
+/* OPT_GET（无操作数）：窄化 SOME 读取。弹 ?T 值 → 借用返回 value 字段的
+ * 借用引用（零拷贝，data 指向 option 值块内偏移；与 is_own 借用字段同构，
+ * 生命周期 = 源 scope 值）。SOME 分支内 ok 恒为 true，读取安全；防御性
+ * 校验 ok，none 态读取 = 编译期/运行期契约破坏。 */
+static value_t *op_opt_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    const type_t *t = v ? value_type(v) : NULL;
+    if (!t || t->kind != TYPE_KIND_OPTION)
+        return value_make_error(vm, "exec: opt get requires an optional value");
+    const type_t *inner = type_option_inner(t);
+    if (value_is_shadow(v)) {
+        /* shadow：只算类型，退化 inner 的 shadow 引用 */
+        return value_make_shadow(vm, inner);
+    }
+    if (!*(const bool *)value_data(v))
+        return value_make_error(vm, "exec: opt get on none optional value");
+    return value_make_borrowed(vm, inner,
+        (uint8_t *)value_data(v) + option_value_offset(t));
 }
 
 static value_t *op_push_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -666,6 +770,7 @@ static value_t *op_halt(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH]           = op_push,
     [BCODE_STORE]          = op_store,
+    [BCODE_STORE_NIL]      = op_store_nil,
     [BCODE_PUSH_STR]       = op_push_str,
     [BCODE_PUSH_I8]        = op_push_i8,
     [BCODE_PUSH_I16]       = op_push_i16,
@@ -684,7 +789,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_LOAD_FUNCTION]  = op_load_function,
     [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,
-    [BCODE_PUSH_NIL]       = op_push_nil,
     [BCODE_DEFINE]         = op_define,
     [BCODE_ADD]            = op_add,
     [BCODE_SUB]            = op_sub,
@@ -710,6 +814,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_CREATE_VOLATILE]= op_create_volatile,
     [BCODE_PUSH_CONST]     = op_push_const,
     [BCODE_PUSH_VOLATILE]  = op_push_volatile,
+    [BCODE_PUSH_OPT]       = op_push_opt,
     [BCODE_SET_TYPE]       = op_set_type,
     [BCODE_PUSH_FUNC_TYPE]   = op_push_func_type,
     [BCODE_FUNC_TYPE_PARAM]  = op_func_type_param,
@@ -737,6 +842,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_INDEX_GET]       = op_index_get,
     [BCODE_INDEX_SET]       = op_index_set,
     [BCODE_LENGTH]          = op_length,
+    [BCODE_PUSH_OPT_NONE]   = op_push_opt_none,
+    [BCODE_OPT_GET]         = op_opt_get,
+    [BCODE_OPT_IS_NONE]     = op_opt_is_none,
 };
 
 /* ================================================================ */

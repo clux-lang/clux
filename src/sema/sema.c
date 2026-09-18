@@ -1,6 +1,7 @@
 #include "sema/sema.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
+#include "vm/type_option.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "ctfe/ctfe.h"
@@ -10,6 +11,7 @@
 #include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -82,7 +84,7 @@ void sema_destroy(sema_t **sema) {
  *
  * 失败返回 false（诊断已记录），len 不写入。
  */
-static bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
+bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
                                   size_t *len) {
   if (!sema || !bound || !*bound) return false;
   ast_node_t *b = *bound;
@@ -317,6 +319,12 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       const type_t *sub =
           resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
       return sub ? type_volatile_intern(sema->vm, sub) : NULL;
+    }
+    case AST_OPTION: {
+      /* ?T optional 类型修饰：递归解析内层 T → 按 (inner) 去重 intern。
+         与 const/volatile 同族（类型即表达式，嵌套递归）。 */
+      const type_t *sub = resolve_type_expr(sema, ((ast_option_t *)type_expr)->sub);
+      return sub ? type_option_intern(sema->vm, sub) : NULL;
     }
     case AST_ARRAY: {
       /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →

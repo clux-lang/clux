@@ -62,7 +62,8 @@ TEST(BcodeAsm, RoundTripOperands) {
     bcode_write_op(bc, BCODE_PUSH_F64);  bcode_write_f64(bc, 3.141592653589793);
     bcode_write_op(bc, BCODE_PUSH_BOOL); bcode_write_bool(bc, true);
     bcode_write_op(bc, BCODE_PUSH_UNDEFINED);
-    bcode_write_op(bc, BCODE_PUSH_NIL);
+    bcode_write_op(bc, BCODE_PUSH_OPT_NONE); bcode_write_u32(bc, 3);
+    bcode_write_op(bc, BCODE_OPT_IS_NONE);
     bcode_write_op(bc, BCODE_ADD);
     bcode_write_op(bc, BCODE_JMP);       bcode_write_u32(bc, 99);
     bcode_write_op(bc, BCODE_LOAD);      bcode_write_u32(bc, 0);

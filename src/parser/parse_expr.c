@@ -8,6 +8,8 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_const.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_option.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_unary.h"
@@ -114,6 +116,68 @@ static bool is_assign_op_token(const token_t *tok) {
         return c == '+' || c == '-' || c == '*' || c == '/' || c == '%';
     }
     return false;
+}
+
+/* ---- parse_construct_field: 构造器字段（含 <v,N> 值包） ---- */
+
+/**
+ * 解析构造器字段：.<type>{ f1, f2, ... } 中的单个字段 f。
+ *
+ * 特殊形态：<v,N> 值包（尖括号前导的"值 × 重复次数"批量初始化，如
+ * .[1000]i32{<0,1000>}）。值包只在 CONSTRUCT 的匿名构造字段链中存在，
+ * 与普通表达式位置的 <...>（元组类型，M2 预留）天然区别——本函数仅在
+ * 构造器字段上下文被调用，遇到 '<' 一律按值包解析；普通表达式位置的
+ * '<' 不会进入此路径。
+ *
+ * 值包语法：<expr, expr>（v=填充值，N=重复次数编译期常量）。
+ *   - v 用 parse_expr 解析（',' 天然停止，v 可为任意表达式含比较）
+ *   - N 用 parse_expr_prec(p, 15) 解析（绑定力高于 '>' 的 13/14，
+ *     保证 '>' 不被当比较运算符消费，N 解析在 '>' 前停止）
+ */
+static ast_node_t *parse_construct_field(parser_t *p) {
+    /* 值包：<v,N> */
+    if (check_symbol(p, "<")) {
+        uint32_t fb = p->pos;
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *value = parse_expr(p);
+        if (!value || value->kind == AST_ERROR) {
+            if (!value) {
+                return ast_error_new(p->diag, p->tokens, p->arena, fb, p->pos,
+                                     "expected value in fill '<v,N>'");
+            }
+            return value;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ",")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, fb, p->pos,
+                                 "expected ',' in fill '<v,N>'");
+        }
+        skip_trivia(p);
+
+        ast_node_t *count = parse_expr_prec(p, 15);
+        if (!count || count->kind == AST_ERROR) {
+            if (!count) {
+                return ast_error_new(p->diag, p->tokens, p->arena, fb, p->pos,
+                                     "expected count in fill '<v,N>'");
+            }
+            return count;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ">")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, fb, p->pos,
+                                 "expected '>' in fill '<v,N>'");
+        }
+
+        ast_node_t *node = ast_fill_new(p->arena, fb, p->pos);
+        ((ast_fill_t *)node)->value = value;
+        ((ast_fill_t *)node)->count = count;
+        return node;
+    }
+
+    /* 普通字段表达式 */
+    return parse_expr(p);
 }
 
 /* ---- parse_primary: 原子表达式入口 ---- */
@@ -227,6 +291,7 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_symbol(p, "~")) op_tok = cur_token(p);
     else if (check_symbol(p, "-")) op_tok = cur_token(p);
     else if (check_symbol(p, ".")) op_tok = cur_token(p);
+    else if (check_symbol(p, "?")) op_tok = cur_token(p);
     else if (check_keyword(p, "const"))     op_tok = cur_token(p);
     else if (check_keyword(p, "volatile"))  op_tok = cur_token(p);
 
@@ -261,7 +326,7 @@ ast_node_t *parse_unary(parser_t *p) {
 
         ast_node_t *fields = NULL, *fields_last = NULL;
         if (!check_symbol(p, "}")) {
-            ast_node_t *f = parse_expr(p);
+            ast_node_t *f = parse_construct_field(p);
             if (!f || f->kind == AST_ERROR) {
                 if (!f) {
                     return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
@@ -274,7 +339,7 @@ ast_node_t *parse_unary(parser_t *p) {
             while (check_symbol(p, ",")) {
                 advance(p);
                 skip_trivia(p);
-                f = parse_expr(p);
+                f = parse_construct_field(p);
                 if (!f || f->kind == AST_ERROR) {
                     if (!f) {
                         return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
@@ -320,6 +385,14 @@ ast_node_t *parse_unary(parser_t *p) {
     if (token_is(op_tok, "volatile")) {
         ast_node_t *node = ast_volatile_new(p->arena, tb, p->pos);
         ((ast_volatile_t *)node)->sub = operand;
+        return node;
+    }
+    /* ?T optional 类型修饰：与 const/volatile 同族，嵌套递归表达包裹顺序
+       （?[N]T / ?const i32 等）。注意 parse_expr_prec 2a 的 '?' 三元检查在
+       中缀位置，此处是前缀位置——'?' 出现在原子位置即类型前导，二者不冲突。 */
+    if (token_is(op_tok, "?")) {
+        ast_node_t *node = ast_option_new(p->arena, tb, p->pos);
+        ((ast_option_t *)node)->sub = operand;
         return node;
     }
 

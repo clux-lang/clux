@@ -182,6 +182,14 @@ void sema_destroy(sema_t **sema);
 const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr);
 
 /**
+ * 编译期求值数组边界（数组类型 [N]T 的 N / fill 的 <v,N> 重复次数）：
+ * 求值为 size_t + 折叠 *bound 就地替换为 AST_INT_LIT（编译器读立即数，
+ * 零感知）。字面量直接读；复杂表达式走 ctfe 编译期求值（失败报错返回
+ * false，诊断已记录）。fill count 与数组 length 复用同一机制。
+ */
+bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound, size_t *len);
+
+/**
  * 类型槽位替换：resolve_type_expr + 把 *slot 就地替换为 AST_TYPE_REF
  * （携带登记的 "__type_N" 名字），返回解析出的类型。
  *

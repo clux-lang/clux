@@ -195,6 +195,17 @@ void compile_hoist_define(compiler_t *c);  /* pass 2：定义所有类型 */
 const sema_type_t *c_sema_type_find_name(vec_t *types, strslice_t name);
 const sema_type_t *c_sema_type_find_ptr(vec_t *types, const type_t *t);
 
+/* ---- nil 初始化发码（compile_expr.c 实现，stmt 侧 var/assign 共用） ---- */
+
+/** 类型槽位解析为真实 type_t（CONSTRUCT 类型位 / PUSH_OPT_NONE 查询用）：
+ *  AST_TYPE_REF → sema 登记表 → 内建 type_lookup 兜底；AST_IDENT →
+ *  type_lookup。解析失败返回 NULL（调用方负责报错）。 */
+const type_t *c_resolve_type(compiler_t *c, ast_node_t *type_expr);
+
+/** 发 PUSH_OPT_NONE <id>：nil 初始化（?T 构造器 nil 字段 / 数组 nil 元素 /
+ *  var 声明 init nil）。option 类型须已登记 sema_types，否则报错。 */
+void emit_push_opt_none(compiler_t *c, ast_node_t *type_expr);
+
 #ifdef __cplusplus
 }
 #endif

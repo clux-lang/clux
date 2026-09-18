@@ -9,6 +9,7 @@ extern "C" {
 #include "vm/bcode.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
+#include "vm/type_option.h"
 #include "core/allocator.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -521,30 +522,65 @@ TEST_F(ExecTest, ErrorPropagatesThroughBinary) {
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
-/* nil 字面量压栈：PUSH_NIL → 栈顶为 nil 值（data = NULL 指针） */
-TEST_F(ExecTest, PushNilThenHalt) {
-    bcode_write_op(bc, BCODE_PUSH_NIL);
+/* PUSH_OPT_NONE <id>：压 ok=false + value 全零的 ?T 值块（构造器字段/fill
+   的 nil）。id 从 hoist 区类型登记取；测试用 type_option_intern 构造 ?i32
+   并登记进 sema_types 风格的表（此处直接用 vm_type_bind 绑定 program id）。 */
+TEST_F(ExecTest, PushOptNoneThenHalt) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    vm_type_bind(vm, TYPE_ID_PROGRAM_BASE, opt);
+
+    bcode_write_op(bc, BCODE_PUSH_OPT_NONE);
+    bcode_write_u32(bc, TYPE_ID_PROGRAM_BASE);
     bcode_write_op(bc, BCODE_HALT);
 
     EXPECT_EQ(run(), nullptr);
     value_t *top = stack_top();
     ASSERT_NE(top, nullptr);
-    EXPECT_EQ(value_type(top), vm->type_nil);
-    EXPECT_TRUE(value_is_nil(vm, top));
-    const func_t *fn = *(const func_t **)value_data(top);
-    EXPECT_EQ(fn, nullptr);
+    EXPECT_EQ(value_type(top), opt);
+    EXPECT_EQ(value_kind(top), TYPE_KIND_OPTION);
+    /* none 态：ok tag = false */
+    EXPECT_FALSE(*(const bool *)value_data(top));
 }
 
-/* nil 与整数比较 → error（nil 只与 nil/func 可比） */
-TEST_F(ExecTest, NilCompareWithIntErrors) {
-    bcode_write_op(bc, BCODE_PUSH_NIL);
-    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 0);
-    bcode_write_op(bc, BCODE_EQ);
+/* OPT_IS_NONE：?T 值 → bool（ok == false）。none → true */
+TEST_F(ExecTest, OptIsNoneOnNoneIsTrue) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    vm_type_bind(vm, TYPE_ID_PROGRAM_BASE, opt);
+
+    bcode_write_op(bc, BCODE_PUSH_OPT_NONE);
+    bcode_write_u32(bc, TYPE_ID_PROGRAM_BASE);
+    bcode_write_op(bc, BCODE_OPT_IS_NONE);
     bcode_write_op(bc, BCODE_HALT);
 
-    value_t *r = run();
-    ASSERT_NE(r, nullptr);
-    EXPECT_TRUE(value_is_error(vm, r));
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_bool);
+    EXPECT_TRUE(*(const bool *)value_data(top));
+}
+
+/* OPT_IS_NONE on some（?T 值 ok=true）→ false；随后 OPT_GET 借用返回
+   value 字段（零拷贝，data 指向 option 值块内偏移） */
+TEST_F(ExecTest, OptGetOnSomeBorrowsInner) {
+    const type_t *opt = type_option_intern(vm, vm->type_i32);
+    ASSERT_NE(opt, nullptr);
+    vm_type_bind(vm, TYPE_ID_PROGRAM_BASE, opt);
+
+    /* 构造 some 值：LOAD_TYPE → PUSH_I32 42 → CONSTRUCT 1（option 分支
+       隐式提升；栈序 [type, v1]，type 在底、v1 在顶） */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, TYPE_ID_PROGRAM_BASE);
+    bcode_write_op(bc, BCODE_PUSH_I32); bcode_write_i32(bc, 42);
+    bcode_write_op(bc, BCODE_CONSTRUCT); bcode_write_u32(bc, 1);
+    bcode_write_op(bc, BCODE_OPT_IS_NONE);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_bool);
+    EXPECT_FALSE(*(const bool *)value_data(top));
 }
 
 

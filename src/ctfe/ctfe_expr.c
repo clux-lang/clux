@@ -15,6 +15,7 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_func_type.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
@@ -397,8 +398,9 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
     case AST_CONSTRUCT: {
         /* 类型字面量构造 .<type>{ fields }：求值类型位为 type value，
-           逐个求值字段值，按数组语义构造连续块（value_make_array 内含
-           元素类型隐式转换与深拷贝）。当前仅支持数组类型。 */
+           逐个求值字段值（fill 值包 <v,N> 展开为 N 份 v），按数组语义构造
+           连续块（value_make_array 内含元素类型隐式转换与深拷贝）。
+           当前仅支持数组类型（optional 构造器走 op_construct，CTFE 不涉及）。 */
         ast_construct_t *n = (ast_construct_t *)node;
         value_t *ty = ctfe_eval(ctx, n->type);
         if (value_is_error(vm, ty)) return ty;
@@ -410,34 +412,48 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         const type_t *et = array_type_elem(t);
         size_t len = array_type_len(t);
 
-        size_t nf = ctfe_count_siblings(n->fields);
-        /* 定长数组允许部分填充（sema 已向字段链补发 AST_UNDEF 零值占位），
-           超出声明长度才报错 */
-        if (len != SIZE_MAX && nf > len)
+        /* 第一遍：统计展开后总元素数（fill count 已由 sema 折叠为
+           AST_INT_LIT 立即数），超出声明长度报错 */
+        size_t total = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+            if (f->kind == AST_FILL) {
+                ast_fill_t *fl = (ast_fill_t *)f;
+                total += (size_t)((ast_int_lit_t *)fl->count)->value;
+            } else {
+                total += 1;
+            }
+        }
+        if (len != SIZE_MAX && total > len)
             return ctfe_errf(ctx, "ctfe: construct: expected %zu elements for "
-                                  "[..]T, got %zu", len, nf);
+                                  "[..]T, got %zu", len, total);
 
-        value_t *elems[nf > 0 ? nf : 1];
+        value_t *elems[total > 0 ? total : 1];
         size_t i = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
-            /* 零值占位：undefined 节点 → undefined value（value_make_array
-               跳过 blit，分配块清零自动补类型零值） */
-            if (f->kind == AST_UNDEF) {
-                elems[i] = value_make_undefined(vm);
+            if (f->kind == AST_FILL) {
+                /* 值包展开：v 求值一次，count 份同类型值 */
+                ast_fill_t *fl = (ast_fill_t *)f;
+                value_t *fv = ctfe_eval(ctx, fl->value);
+                if (value_is_error(vm, fv)) return fv;
+                size_t cnt = (size_t)((ast_int_lit_t *)fl->count)->value;
+                for (size_t k = 0; k < cnt; k++) {
+                    value_t *copy = value_clone(vm, fv);
+                    if (value_is_error(vm, copy)) return copy;
+                    elems[i++] = copy;
+                }
             } else {
                 elems[i] = ctfe_eval(ctx, f);
                 if (value_is_error(vm, elems[i])) return elems[i];
+                i++;
             }
-            i++;
         }
-        return value_make_array(vm, et, elems, nf);
+        return value_make_array(vm, et, elems, total);
     }
     case AST_UNDEF:
         return ctfe_err(ctx, "ctfe: 'undefined' is not an expression");
     case AST_NIL:
-        /* nil：内置类型唯一值（函数 0 初始化/未来空指针），
-           CTFE 求值压入真实 nil value（data = NULL 指针）。 */
-        return value_make_nil(vm);
+        /* nil 不是 value：CTFE 表达式位置不合法（sema 已拦截，防御性报错） */
+        return ctfe_err(ctx, "ctfe: 'nil' is not an expression");
     case AST_INDEX: {
         /* 右值下标 a[i]：object → index → value_get_index（与运行期
            INDEX_GET 语义一致）。indices 由 sema 保证单索引。 */
