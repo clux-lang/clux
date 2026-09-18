@@ -642,21 +642,77 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   return (block_result_t){0};
 }
 
-/* nil 判定识别（docs m2-design §12.5）：条件必须是 符号 ==/!= nil 二元
-   形式（x==nil / nil==x / x!=nil / nil!=x）。识别成功返回窄化目标符号 +
-   判定种类（EQ：x==nil；NE：x!=nil），失败返回 NULL（条件不是窄化判定）。 */
-static sema_symbol_t *narrow_condition(ast_node_t *cond,
-                                       sema_scope_t *scope, bool *is_eq) {
-  if (!cond || cond->kind != AST_BINARY) return NULL;
-  ast_binary_t *b = (ast_binary_t *)cond;
-  if (!token_is(b->op, "==") && !token_is(b->op, "!=")) return NULL;
-  if (b->lhs->kind != AST_NIL && b->rhs->kind != AST_NIL) return NULL;
-  ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
-  if (other->kind != AST_IDENT) return NULL;
-  sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)other)->name);
-  if (!sym || !sym->type || sym->type->kind != TYPE_KIND_OPTION) return NULL;
-  *is_eq = token_is(b->op, "==");
-  return sym;
+/* ---- 复合条件窄化收集（docs m2-design §12.5）----
+ *
+ * 条件可以是递归嵌套的布尔表达式（分组括号已被 parser 剥离为内层节点，
+ * 一元 !、&&、||、比较任意组合）。对每个分支，收集"该分支必然成立"的
+ * 符号级窄化约束，按标准 De Morgan 语义递归：
+ *   - then 分支（want_true）：顶层 && → 两侧都真（都收集）；|| → 无法
+ *     确定哪侧真（保守不收集）。
+ *   - else 分支（want_false）：顶层 || → 两侧都假（都收集）；&& → 无法
+ *     确定哪侧假（保守不收集）。
+ *   - 一元 !（AST_UNARY）→ 翻转 want_true 后递归操作数。
+ *   - 叶子 x==nil / nil==x / x!=nil / nil!=x → {符号, 窄化状态}：
+ *       x==nil 为真 → NONE，为假 → SOME；x!=nil 为真 → SOME，为假 → NONE。
+ *   - 同符号收集到不同状态（矛盾条件）→ 保守置 NARROW_UNKNOWN。
+ * 约束数上限 NARROW_MAX_CONS：超出后停止收集（已收集约束仍成立，丢弃
+ * 多余只是少窄化，保守且无副作用）。 */
+#define NARROW_MAX_CONS 8
+
+typedef struct narrow_con {
+  sema_symbol_t *sym;    /* 窄化目标符号 */
+  uint8_t        narrow; /* 分支内窄化状态（NARROW_UNKNOWN = 冲突/保守） */
+} narrow_con_t;
+
+static void narrow_collect(ast_node_t *cond, sema_scope_t *scope,
+                           bool want_true, narrow_con_t *cons, size_t *n) {
+  if (!cond || *n >= NARROW_MAX_CONS) return;
+  switch (cond->kind) {
+    case AST_BINARY: {
+      ast_binary_t *b = (ast_binary_t *)cond;
+      if (token_is(b->op, "&&")) {
+        if (want_true) {
+          narrow_collect(b->lhs, scope, true, cons, n);
+          narrow_collect(b->rhs, scope, true, cons, n);
+        }
+      } else if (token_is(b->op, "||")) {
+        if (!want_true) {
+          narrow_collect(b->lhs, scope, false, cons, n);
+          narrow_collect(b->rhs, scope, false, cons, n);
+        }
+      } else if (token_is(b->op, "==") || token_is(b->op, "!=")) {
+        /* 叶子 nil 判定：x==nil / nil==x / x!=nil / nil!=x */
+        if (b->lhs->kind != AST_NIL && b->rhs->kind != AST_NIL) return;
+        ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
+        if (other->kind != AST_IDENT) return;
+        sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)other)->name);
+        if (!sym || !sym->type || sym->type->kind != TYPE_KIND_OPTION) return;
+        bool is_eq = token_is(b->op, "==");
+        uint8_t narrow = is_eq ? (want_true ? NARROW_NONE : NARROW_SOME)
+                               : (want_true ? NARROW_SOME : NARROW_NONE);
+        for (size_t i = 0; i < *n; i++) {
+          if (cons[i].sym == sym) {
+            if (cons[i].narrow != narrow) cons[i].narrow = NARROW_UNKNOWN;
+            return;
+          }
+        }
+        if (*n < NARROW_MAX_CONS) {
+          cons[*n].sym = sym;
+          cons[*n].narrow = narrow;
+          (*n)++;
+        }
+      }
+      break;
+    }
+    case AST_UNARY: {
+      ast_unary_t *u = (ast_unary_t *)cond;
+      if (token_is(u->op, "!"))
+        narrow_collect(u->operand, scope, !want_true, cons, n);
+      break;
+    }
+    default:
+      break; /* 其他表达式（调用、三元等）→ 保守不收集 */
+  }
 }
 
 static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
@@ -665,18 +721,21 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   value_t *cond = sema_expr(sema, &it->cond, scope);
   sema_check_bool(sema, it->cond, cond, "if condition");
 
-  /* 窄化判定识别（在快照之前：分支内设置窄化状态，出口恢复外层状态）：
-     x==nil → then: NONE, else: SOME；x!=nil → then: SOME, else: NONE。 */
-  bool narrow_eq = false;
-  sema_symbol_t *nsym = narrow_condition(it->cond, scope, &narrow_eq);
+  /* 窄化判定识别（在快照之前：分支内设置窄化状态，出口恢复外层状态）。
+     then 分支按"条件为真"收集约束（&& 组合两侧都成立，|| 保守不收集）；
+     else 分支按"条件为假"收集（|| 组合两侧都成立，&& 保守不收集）。 */
+  narrow_con_t cons[NARROW_MAX_CONS];
+  size_t ncons = 0;
+  narrow_collect(it->cond, scope, /*want_true=*/true, cons, &ncons);
 
   /* 确定性赋值合并点：快照分支前状态 → then → 记录 → 恢复 → else →
      meet（AND）：两分支都 flow_init 才 true。保守策略：非全部分支赋值
      （如 if(c){a=1;}else{}）→ 合并后仍 UNKNOWN，读取编译错误。 */
   flow_snap_t snap = flow_capture(sema, scope);
 
-  /* then 分支窄化设置：x==nil → NONE；x!=nil → SOME */
-  if (nsym) nsym->narrow = narrow_eq ? NARROW_NONE : NARROW_SOME;
+  /* then 分支窄化设置：收集到的约束全部成立 */
+  for (size_t i = 0; i < ncons; i++)
+    cons[i].sym->narrow = cons[i].narrow;
 
   block_result_t tr = {0};
   sema_scope_t *then_scope = sema_scope_child(scope, (*idx)++);
@@ -694,8 +753,12 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
 
   block_result_t er = {0};
   if (it->else_body) {
-    /* else 分支窄化设置（补集）：x==nil → SOME；x!=nil → NONE */
-    if (nsym) nsym->narrow = narrow_eq ? NARROW_SOME : NARROW_NONE;
+    /* else 分支窄化设置（补集）：重新按"条件为假"收集 */
+    narrow_con_t econs[NARROW_MAX_CONS];
+    size_t necons = 0;
+    narrow_collect(it->cond, scope, /*want_true=*/false, econs, &necons);
+    for (size_t i = 0; i < necons; i++)
+      econs[i].sym->narrow = econs[i].narrow;
     if (it->else_body->kind == AST_IF) {
       /* else-if 链：同层递归（子作用域顺序与 3a 一致：else-if 不单独
          建 scope，其 then 是当前 scope 的下一个子节点） */

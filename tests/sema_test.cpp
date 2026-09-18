@@ -553,6 +553,80 @@ TEST_F(SemaTest, NarrowingElseBranch) {
     expect_message(0, "is known to be nil");
 }
 
+TEST_F(SemaTest, NarrowingAndCombinationThen) {
+    /* 复合条件：&& then 分支两侧都窄化为 SOME（含分组括号，parser 剥离） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  var b:?i32 = 7;"
+        "  if ((a != nil) && (b != nil)) {"
+        "    var x:i32 = a + b;"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NarrowingOrCombinationElse) {
+    /* 复合条件：|| else 分支两侧都窄化为 SOME */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  var b:?i32 = 7;"
+        "  if (a == nil || b == nil) { }"
+        "  else { var x:i32 = a + b; }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NarrowingAndElseConservative) {
+    /* 复合条件：&& else 分支无法确定哪侧假 → 保守不窄化（算术报错） */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  var b:?i32 = 7;"
+        "  if (a != nil && b != nil) { }"
+        "  else { var x:i32 = a + 1; }"
+        "}"));
+    expect_message(0, "cannot apply '+' to ?i32");
+}
+
+TEST_F(SemaTest, NarrowingEqCombinationThen) {
+    /* 复合条件：== && then 分支两侧都窄化为 NONE */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = nil;"
+        "  var b:?i32 = nil;"
+        "  if (a == nil && b == nil) {"
+        "    var y:i32 = a;"
+        "  }"
+        "}"));
+    expect_message(0, "is known to be nil");
+}
+
+TEST_F(SemaTest, NarrowingNotFlip) {
+    /* 复合条件：一元 ! 翻转判定 —— !(a == nil) 等价 a != nil */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  if (!(a == nil)) {"
+        "    var z:i32 = a + 1;"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, NarrowingConflictConservative) {
+    /* 复合条件：矛盾约束（a != nil && a == nil）→ 保守 UNKNOWN */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  if (a != nil && a == nil) {"
+        "    var x:i32 = a + 1;"
+        "  }"
+        "}"));
+    expect_message(0, "cannot apply '+' to ?i32");
+}
+
 TEST_F(SemaTest, NilCompareNonOptionalErrors) {
     /* str/func 无空值（§12.3）：非 ?T 变量与 nil 比较 → 编译错误 */
     EXPECT_FALSE(analyze(
