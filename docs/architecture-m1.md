@@ -122,7 +122,7 @@ typedef enum {
     TOKEN_TYPE_KEYWORD,
     TOKEN_TYPE_SYMBOL,     // 运算符与标点（maximal munch，1-2 字符）
     TOKEN_TYPE_COMMENT,           // 行注释 // ...
-    TOKEN_TYPE_MULTILINE_COMMENT, // 块注释 /* */（可嵌套）
+    TOKEN_TYPE_MULTILINE_COMMENT, // 块注释 /* */（不嵌套，遇首个 */ 结束）
     TOKEN_TYPE_WHITESPACE,        // 合并的空白
     TOKEN_TYPE_EOF,
 } token_kind_t;

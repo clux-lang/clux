@@ -701,10 +701,18 @@ TEST(Lexer, BlockComment) {
   EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
 }
 
-TEST(Lexer, NestedBlockComment) {
+TEST(Lexer, BlockCommentNotNested) {
+  // 块注释不嵌套（2026-09-20 定稿，与 C 一致）：内层第一个 */ 即结束，
+  // 剩余部分按普通 token 继续词法分析。
   allocator_t *a = create_allocator(test_alloc, test_free);
-  lexer_t *lx = make_lexer(a, "/* a /* b */ c */x", "cmt.cx");
-  token_t *t = take(a, lx, TOKEN_TYPE_MULTILINE_COMMENT, "/* a /* b */ c */");
+  lexer_t *lx = make_lexer(a, "/* a /* b */c*/x", "cmt.cx");
+  token_t *t = take(a, lx, TOKEN_TYPE_MULTILINE_COMMENT, "/* a /* b */");
+  token_free(a, &t);
+  t = take(a, lx, TOKEN_TYPE_IDENTIFIER, "c");
+  token_free(a, &t);
+  t = take(a, lx, TOKEN_TYPE_SYMBOL, "*");
+  token_free(a, &t);
+  t = take(a, lx, TOKEN_TYPE_SYMBOL, "/");
   token_free(a, &t);
   t = take(a, lx, TOKEN_TYPE_IDENTIFIER, "x");
   token_free(a, &t);

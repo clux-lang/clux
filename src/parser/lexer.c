@@ -427,22 +427,16 @@ static token_t *lexer_read_slash(lexer_t *lexer, stream_pos_t begin) {
     return lexer_make_token(lexer, TOKEN_TYPE_COMMENT, begin, end);
   }
 
-  if (cp == '*') { /* block comment: slash-star ... star-slash, nestable */
+  if (cp == '*') { /* block comment: slash-star ... star-slash（不嵌套） */
     istream_read_cp(lexer->stream);
-    int depth = 1;
     for (;;) {
       cp = istream_read_cp(lexer->stream);
       if (cp == -1)
         return lexer_fail(lexer, begin, "unterminated block comment");
-      if (cp == '/') {
-        if (istream_peek_cp(lexer->stream) == '*') {
-          istream_read_cp(lexer->stream);
-          depth++;
-        }
-      } else if (cp == '*') {
+      if (cp == '*') {
         if (istream_peek_cp(lexer->stream) == '/') {
           istream_read_cp(lexer->stream);
-          if (--depth == 0) break;
+          break;
         }
       }
     }
