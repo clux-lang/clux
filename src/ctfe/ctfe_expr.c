@@ -10,6 +10,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_enum_ref.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_def.h"
@@ -29,6 +30,7 @@
 #include "vm/function.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_func.h"
 #include "vm/value.h"
@@ -309,6 +311,14 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                 if (!sym)
                     sym = sema_lookup(ctx->sema->global_scope, id->name);
                 if (sym && sym->kind == SEMA_SYM_FUNC) {
+                    /* 防御：pass1b_types（type/enum 定义求值）先于
+                       pass2_types（函数签名解析 + sym->ast 绑定）——此阶段
+                       函数 AST 未绑定，解释调用会解引用 NULL 崩溃。函数
+                       调用非编译期常量（本阶段不可求值）→ 干净报错。 */
+                    if (!sym->ast)
+                        return ctfe_errf(ctx,
+                            "ctfe: function '%.*s' is not a compile-time constant",
+                            (int)id->name.len, id->name.ptr);
                     return ctfe_call_ast_fn(ctx, (ast_func_def_t *)sym->ast,
                                             n->args);
                 }
@@ -522,6 +532,31 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
            函数体不在此解释——运行期由编译产物执行（折叠产物 LOAD_FUNCTION
            <fid> 加载真实函数对象）。 */
         return ctfe_eval_func_def(ctx, (ast_func_def_t *)node);
+    }
+    case AST_ENUM_REF: {
+        /* 枚举 variant 引用 Color::Red（sema 折叠产物）：type_expr 已折叠
+           为 AST_TYPE_REF，value 字段已填底层整数值——查 enum 类型 →
+           构造 enum 类型 value（data = 底层宽度的整数值块，MAKE_ENUM
+           运行期同构）。全局 enum 变量 init / comptime 折叠消费。 */
+        ast_enum_ref_t *n = (ast_enum_ref_t *)node;
+        value_t *ty = ctfe_eval(ctx, n->type_expr);
+        if (value_is_error(vm, ty)) return ty;
+        if (!value_is_type(ty, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: enum reference type must be a type");
+        const type_t *t = value_as(ty, const type_t *);
+        if (t->kind != TYPE_KIND_ENUM)
+            return ctfe_err(ctx, "ctfe: enum reference type is not an enum");
+        const type_t *u = enum_type_underlying(t);
+        if (!u) return ctfe_err(ctx, "ctfe: enum type missing underlying");
+        /* 按底层宽度截断存储（与 MAKE_ENUM / enum_store_value 同语义） */
+        void *data = value_alloc_data(vm->alloc, t);
+        switch (u->size) {
+        case 1: *(int8_t  *)data = (int8_t)n->value; break;
+        case 2: *(int16_t *)data = (int16_t)n->value; break;
+        case 4: *(int32_t *)data = (int32_t)n->value; break;
+        default: *(int64_t *)data = n->value; break;
+        }
+        return value_make(vm, t, data);
     }
     default:
         return ctfe_err(ctx, "ctfe: unsupported expression node");

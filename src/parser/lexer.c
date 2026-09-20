@@ -67,11 +67,11 @@ static class_t lexer_class = {
 
 static const char *const g_keywords[] = {
     "as",      "bool",    "break",     "comptime",  "const",   "continue",
-    "default", "else",    "extends",   "f32",       "f64",     "false",
-    "for",     "func",    "i16",       "i32",       "i64",     "i8",
-    "if",      "nil",     "return",    "str",       "switch",  "true",
-    "type",    "u16",     "u32",       "u64",       "u8",      "undefined",
-    "var",     "void",    "volatile",  "while",
+    "default", "else",    "enum",      "extends",   "f32",     "f64",
+    "false",   "for",     "func",      "i16",       "i32",     "i64",
+    "i8",      "if",      "nil",       "return",    "str",     "switch",
+    "true",    "type",    "u16",       "u32",       "u64",     "u8",
+    "undefined", "var",   "void",      "volatile",  "while",
 };
 
 /* ---- Internal: character classes ---- */
@@ -499,6 +499,7 @@ static token_t *lexer_read_symbol(lexer_t *lexer, stream_pos_t begin) {
       "&&",
       "||",
       "->",
+      "::",
       "+=",
       "-=",
       "*=",

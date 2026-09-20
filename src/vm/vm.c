@@ -101,6 +101,10 @@ vm_t *vm_new(allocator_t *alloc) {
        元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->option_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* 枚举类型池（type_enum_intern / type_enum_seal intern 用；元素由
+       vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->enum_types = vec_new(alloc, /*owns_element=*/false);
+
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
@@ -229,6 +233,31 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&ot);
         }
         vec_free(vm->alloc, &vm->option_types);
+    }
+
+    /* 枚举类型池：释放 variant 表（含名）+ 结构体（underlying 归底层类型，
+       不在此释放） */
+    if (vm->enum_types) {
+        size_t n = vec_len(vm->enum_types);
+        for (size_t i = 0; i < n; i++) {
+            enum_type_t *et = (enum_type_t *)vec_get(vm->enum_types, i);
+            if (!et) continue;
+            if (et->variants) {
+                for (size_t j = 0; j < et->variant_count; j++) {
+                    if (et->variants[j].name.ptr) {
+                        char *np = (char *)et->variants[j].name.ptr;
+                        allocator_free(vm->alloc, (void **)&np);
+                    }
+                }
+                allocator_free(vm->alloc, (void **)&et->variants);
+            }
+            if (et->base.name.ptr) {
+                char *np = (char *)et->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&et);
+        }
+        vec_free(vm->alloc, &vm->enum_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

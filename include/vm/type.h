@@ -108,6 +108,29 @@ typedef struct option_type_t {
     const type_t *inner;  /* 被 optional 包裹的类型 T（引用，不拥有） */
 } option_type_t;
 
+/**
+ * enum_type_t / enum_variant_t: 枚举类型（type_t 的扩展，见 m2-design §3）
+ *
+ * 枚举是"有特殊类型的全局变量"：每个 variant 是编译期常量，类型为枚举自身。
+ * 底层类型 underlying 必须为整型（TYPE_KIND_INT）；enum value 的 data 按
+ * underlying->size 宽度存储整数值（MAKE_ENUM 构造时截断）。
+ *
+ * variant 表由 vm 拥有（SEAL 时深拷贝；去重 intern 命中已有类型时手工回收）。
+ * 严格类型分离（m2-design §5）：enum 与底层互不隐式转换，显式 cast 仅允许
+ * enum → 声明底层类型（c as i8 报错，须 c as i32 as i8 两次 cast）。
+ */
+typedef struct enum_variant_t {
+    strslice_t name;   /* variant 名（seal 时从 strtable/源拷贝，vm 拥有） */
+    int64_t    value;  /* 底层整数值（按 underlying->size 截断存储） */
+} enum_variant_t;
+
+typedef struct enum_type_t {
+    type_t          base;
+    const type_t   *underlying;    /* 底层类型（引用，不拥有；须 TYPE_KIND_INT） */
+    enum_variant_t *variants;      /* variant 表（seal 时拷贝，vm 拥有） */
+    size_t          variant_count;
+} enum_type_t;
+
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
     return t && t->kind == TYPE_KIND_OPTION;

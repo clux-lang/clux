@@ -4,6 +4,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_enum_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_ref.h"
@@ -18,6 +19,7 @@
 #include "parser/ast_unary.h"
 #include "parser/lexer.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "vm/type_option.h"
 
 /* ===========================================================================
@@ -171,6 +173,65 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, st->id);
     st_push(c, 1);
+    break;
+  }
+  case AST_ENUM_REF: {
+    /* 枚举 variant 引用 Color::Red（sema 已折叠 value 入节点）：
+       PUSH_I* <value>（按底层宽度选立即数指令）→ LOAD_TYPE <enum_id> →
+       MAKE_ENUM（弹 type + 整数值 → 按底层宽度截断构造 enum 值）。
+       enum 类型 id：sema 登记（c_sema_type_find_name 查 type_expr 的
+       AST_TYPE_REF 名字）。 */
+    ast_enum_ref_t *n = (ast_enum_ref_t *)node;
+    const sema_type_t *st = NULL;
+    if (n->type_expr && n->type_expr->kind == AST_TYPE_REF) {
+      st = c_sema_type_find_name(c->sema_types,
+                                 ((ast_type_ref_t *)n->type_expr)->name);
+    }
+    if (!st || !st->type || st->type->kind != TYPE_KIND_ENUM) {
+      c_error(c, node, "unknown enum type in enum reference");
+      return;
+    }
+    const type_t *u = enum_type_underlying(st->type);
+    if (!u) {
+      c_error(c, node, "enum type missing underlying type");
+      return;
+    }
+    switch (u->size) {
+    case 1:
+      if (u == c->vm->type_u8) {
+        bcode_write_op(c->bc, BCODE_PUSH_U8);  bcode_write_u8(c->bc, (uint8_t)n->value);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I8);  bcode_write_i8(c->bc, (int8_t)n->value);
+      }
+      break;
+    case 2:
+      if (u == c->vm->type_u16) {
+        bcode_write_op(c->bc, BCODE_PUSH_U16); bcode_write_u16(c->bc, (uint16_t)n->value);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I16); bcode_write_i16(c->bc, (int16_t)n->value);
+      }
+      break;
+    case 4:
+      if (u == c->vm->type_u32) {
+        bcode_write_op(c->bc, BCODE_PUSH_U32); bcode_write_u32(c->bc, (uint32_t)n->value);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I32); bcode_write_i32(c->bc, (int32_t)n->value);
+      }
+      break;
+    default:
+      if (u == c->vm->type_u64) {
+        bcode_write_op(c->bc, BCODE_PUSH_U64); bcode_write_u64(c->bc, (uint64_t)n->value);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I64); bcode_write_i64(c->bc, (int64_t)n->value);
+      }
+      break;
+    }
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, st->id);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_MAKE_ENUM);
+    st_push(c, -1);
     break;
   }
   case AST_FUNC_REF: {

@@ -100,6 +100,10 @@ typedef enum {
     BCODE_PUSH_CONST,      /* 分配空 const type（开放，sub=NULL，不入池）+ 压其 type value */
     BCODE_PUSH_VOLATILE,   /* 分配空 volatile type（开放，sub=NULL，不入池）+ 压其 type value */
     BCODE_PUSH_OPT,        /* 分配空 optional type（开放，inner=NULL，不入池）+ 压其 type value */
+    BCODE_PUSH_ENUM,       /* 分配空 enum type（开放，underlying=NULL，不入池）+ 压其 type value */
+    BCODE_ENUM_VARIANT,    /* [strtable_idx:u32][value:i64]：peek 开放 enum → 追加 variant
+                              （名从 strtable 拷贝，值按 underlying->size 截断） */
+    BCODE_MAKE_ENUM,       /* 弹 type value + 弹底层整数值 → 按底层宽度截断构造 enum 值 */
     BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */

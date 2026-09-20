@@ -2339,3 +2339,117 @@ TEST(Driver, RunFileSwitchDuplicateDefaultRejected) {
 
 
 
+
+/* ---- enum（枚举）---- */
+
+TEST(Driver, RunFileEnumDeclAndComparePasses) {
+  /* enum 声明 + main 内 var 初始化 + 同 enum 判等（值断言写在程序内） */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1, Green = 2, Blue = 3 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  if (c == Color::Red) { printf(\"ok\\n\"); return 0; }\n"
+      "  return 1;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumTwoStepCastPasses) {
+  /* enum → 声明底层 i32 → i8 两步 cast 通过 */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  var v: i8 = c as i32 as i8;\n"
+      "  if (v == 1) { printf(\"ok\\n\"); return 0; }\n"
+      "  return 1;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumMultiVariantCompare) {
+  /* 多 variant 判等：Red==Green → false 分支 */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1, Green = 2 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Green;\n"
+      "  if (c == Color::Red) { return 1; }\n"
+      "  if (c != Color::Green) { return 2; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumGlobalVarInit) {
+  /* 全局 enum 变量 init 折叠（Color::Red 折叠为 AST_ENUM_REF 字面量） */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1, Green = 2 }\n"
+      "var g: Color = Color::Green;\n"
+      "func main():i32 {\n"
+      "  if (g == Color::Green) { printf(\"ok\\n\"); return 0; }\n"
+      "  return 1;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumU8UnderlyingPasses) {
+  /* u8 底层 + 值超出底层范围（300 超出 u8）→ 编译期拒绝 */
+  std::string path = write_temp_file(
+      "enum Color:u8 { Red = 300 }\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumStrictSeparationRejected) {
+  /* 严格分离：enum vs 底层 i32 判等 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  if (c == 1) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumVariantValueNarrowingRejected) {
+  /* variant 值与底层不兼容（i32 字面量赋给 i8 底层）→ 编译期拒绝 */
+  std::string path = write_temp_file(
+      "enum Color:i8 { Red = 300 }\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumSkipStepCastRejected) {
+  /* 跳步 cast（enum → i8 而非声明底层 i32）→ 编译期拒绝 */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  var v: i8 = c as i8;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumAssignIntRejected) {
+  /* enum 变量被整型赋值（i32 → enum 无隐式转换）→ 编译期拒绝 */
+  std::string path = write_temp_file(
+      "enum Color:i32 { Red = 1 }\n"
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  c = 5;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

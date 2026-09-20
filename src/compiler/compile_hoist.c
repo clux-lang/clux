@@ -1,6 +1,7 @@
 #include "compiler/compiler.h"
 #include "core/panic.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 
@@ -148,6 +149,14 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_ENUM:
+      /* PUSH_ENUM 压开放 enum 类型（underlying=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设底层；向前引用安全——底层是内建
+         整型，无自引用） */
+      bcode_write_op(c->bc, BCODE_PUSH_ENUM);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
@@ -239,6 +248,34 @@ static void define_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
+/* enum 定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 underlying（内建整型，
+ * 直接 LOAD_TYPE <内建 id>）→ SET_TYPE（设底层）→ ENUM_VARIANT×N →
+ * SEAL 封闭（拷贝 variant 表 + 布局 = 底层布局 + 去重 intern；去重时按
+ * 自身 id 重绑登记）。底层是内建类型（不登记 sema->types），无依赖递归。 */
+static void define_enum(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                        size_t count) {
+  const type_t *t = st->type;
+  const type_t *u = enum_type_underlying(t);
+
+  emit_load_type(c, st->id);             /* 栈: [open_enum_type] */
+  emit_load_type(c, u->id);              /* 栈: [open, underlying] */
+  bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 underlying → 设进 open */
+  st_push(c, -1);
+
+  size_t n = enum_type_variant_count(t);
+  for (size_t i = 0; i < n; i++) {
+    const enum_variant_t *v = enum_type_variant(t, i);
+    if (!v) continue;
+    bcode_write_op(c->bc, BCODE_ENUM_VARIANT);
+    bcode_write_str(c->bc, v->name);
+    bcode_write_i64(c->bc, v->value);
+    /* ENUM_VARIANT 无弹栈副作用（peek 开放对象追加） */
+  }
+
+  emit_seal(c);                          /* 封闭（去重时重绑登记） */
+  (void)done; (void)count;
+}
+
 /* optional 定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 inner 先定义（密封）→
  * LOAD inner → SET_TYPE（设 inner）→ SEAL 封闭（按 inner 去重 intern，
  * 计算 C 布局，置 sealed；去重时按自身 id 重绑登记） */
@@ -276,6 +313,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_OPTION:
       define_option(c, st, done, count);
+      break;
+    case TYPE_KIND_ENUM:
+      define_enum(c, st, done, count);
       break;
     default:
       done[idx] = true; /* 内建别名：pass 1 已完成，无定义 */

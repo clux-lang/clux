@@ -9,6 +9,8 @@ typedef enum {
     /* --- 语句 --- */
     AST_VAR_DEF,         /* var name[:type] [= init]; */
     AST_TYPE_DEF,        /* type name = <type-expr>;（sema 求值折叠为类型引用） */
+    AST_ENUM_DEF,        /* enum name:underlying { Var = val, ... }（顶层枚举定义） */
+    AST_ENUM_VARIANT,    /* 枚举 variant 声明（name = value，仅 enum 定义体内） */
     AST_ASSIGN,          /* name = expr; / name += expr; */
     AST_IF,              /* if cond { then } [else { else_body }] */
     AST_SWITCH,          /* switch(cond) { (pat,..)->{..} default->{..} } */
@@ -54,6 +56,7 @@ typedef enum {
     AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */
+    AST_ENUM_REF,        /* 枚举 variant 引用：Color::Red（sema 折叠 value 入节点） */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
     AST_UNWRAP,          /* optional 解包：a.!（assert，none 时 panic）/
                             a.?（try，仅词法预留，语义未实现） */

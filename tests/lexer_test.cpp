@@ -128,8 +128,8 @@ TEST(Lexer, EofIdempotent) {
 
 TEST(Lexer, AllKeywords) {
   const char *kws[] = {
-      "as",  "bool",  "break",    "const",   "continue", "else", "f32",
-      "f64", "false", "for",      "func",    "i16",      "i32",  "i64",
+      "as",  "bool",  "break",    "const",   "continue", "else", "enum",
+      "f32", "f64", "false", "for",      "func",    "i16",      "i32",  "i64",
       "i8",  "if",    "nil",     "return",  "str",     "true",  "u16",
       "u32", "u64",   "u8",      "undefined", "var",    "void",  "volatile",
       "while",

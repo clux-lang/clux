@@ -21,6 +21,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_enum_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_unwrap.h"
@@ -412,6 +413,32 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
     for (;;) {
         skip_trivia(p);
 
+        /* 枚举 variant 引用：Type::Variant（lhs 须为枚举类型名标识符）。
+         * '::' 是 lexer 产出的双字符 SYMBOL token。 */
+        if (check_symbol(p, "::")) {
+            if (lhs->kind != AST_IDENT) {
+                return ast_error_new(p->diag, p->tokens, p->arena, lhs->tok_begin,
+                                     p->pos, "expected enum type name before '::'");
+            }
+            uint32_t tb = p->pos;
+            advance(p);
+            skip_trivia(p);
+
+            if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected variant name after '::'");
+            }
+            strslice_t variant = token_strslice(cur_token(p));
+            advance(p);
+
+            ast_node_t *node = ast_enum_ref_new(p->arena, tb, p->pos);
+            if (!node) return NULL;
+            ((ast_enum_ref_t *)node)->type_expr = lhs;
+            ((ast_enum_ref_t *)node)->variant   = variant;
+            lhs = node;
+            continue;
+        }
+
         /* 函数调用：(args...) */
         if (check_symbol(p, "(")) {
             uint32_t tb = p->pos;
@@ -644,8 +671,9 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             continue;
         }
 
-        /* 2c. 后缀绑定力最高(25)，贪婪消费 */
-        if (check_symbol(p, "(") || check_symbol(p, ".") || check_symbol(p, "[")) {
+        /* 2c. 后缀绑定力最高(25)，贪婪消费（含枚举 variant 引用 ::） */
+        if (check_symbol(p, "(") || check_symbol(p, ".") || check_symbol(p, "[") ||
+            check_symbol(p, "::")) {
             if (POSTFIX_LEFT_PREC < min_prec) break;
             left = parse_postfix(p, left);
             if (left->kind == AST_ERROR) return left;

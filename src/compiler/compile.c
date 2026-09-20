@@ -192,7 +192,7 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      后续函数签名/变量类型槽位引用名字时类型已可查；pass 2 密封后名字解析
      到最终类型（DEFINE 只存引用，不依赖密封）。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    if (f->kind != AST_TYPE_DEF) continue;
+    if (f->kind != AST_TYPE_DEF && f->kind != AST_ENUM_DEF) continue;
     compile_stmt(c, f);
     if (c->failed) break;
   }

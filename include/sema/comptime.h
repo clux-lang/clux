@@ -5,13 +5,13 @@ extern "C" {
 #endif
 
 #include "parser/ast_call.h"
+#include "parser/ast_enum_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
-
 /**
  * comptime 与 sema → CTFE 集成（M2 第一阶段）
  *
@@ -79,6 +79,19 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
  *  失败返回 false（诊断已记录）。调用方不摘除定义节点（进入字节码）。
  */
 bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope);
+
+/**
+ * 求值枚举定义（enum Name:Underlying { Var = val, ... }）：
+ *  1. 底层类型解析（sema_resolve_type_slot）→ 必须 TYPE_KIND_INT，否则报错
+ *  2. 逐 variant 值 ctfe 求值 → 必须整型常量；按底层类型校验兼容
+ *     （value_assign 复用整型只拓宽语义：i32 赋给 i8 底层 → 报错）；
+ *     查重（重复名/重复值报错）
+ *  3. type_enum_intern 构造 enum 类型（立即密封 + 去重 intern）
+ *  4. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type value
+ *  5. 激活符号；定义点保留（进字节码，运行时 hoist 构造）
+ *  失败返回 false（诊断已记录）。
+ */
+bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope);
 
 #ifdef __cplusplus
 }

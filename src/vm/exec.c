@@ -5,6 +5,7 @@
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
+#include "vm/type_enum.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
@@ -345,6 +346,63 @@ static value_t *op_push_opt(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* PUSH_ENUM：分配空 enum type（开放，underlying=NULL，不入池）+ 压其 type
+ * value（type_enum_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_enum(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_enum_push(vm);
+    return NULL;
+}
+
+/* ENUM_VARIANT <name> <value>：peek 栈顶开放 enum type（不弹栈——后续
+ * ENUM_VARIANT / SEAL 继续消费），追加一个 variant（名从 strtable 拷贝，
+ * 值按底层宽度截断）。 */
+static value_t *op_enum_variant(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    int64_t value = bcode_read_i64(bc, pc);
+    value_t *ev = exec_stack_peek(vm, 0);
+    const type_t *open = (ev && value_type(ev) == vm->type_type)
+                             ? value_as(ev, const type_t *) : NULL;
+    if (!open || open->kind != TYPE_KIND_ENUM)
+        return value_make_error(vm, "exec: enum variant expects an open enum type on top");
+    type_enum_add_variant(vm, open, name, value);
+    return NULL;
+}
+
+/* MAKE_ENUM：弹 type value + 弹底层整数值 → 构造 enum 类型 value（data 为
+ * 底层宽度的整数值块，按 underlying->size 截断）。 */
+static value_t *op_make_enum(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    /* 协议与 op_cast 一致：整数值在栈底、类型 value 在栈顶（compiler 发
+       PUSH_I*; LOAD_TYPE），先弹类型再弹值。 */
+    value_t *vtype = exec_stack_pop(vm);
+    value_t *value = exec_stack_pop(vm);
+    const type_t *t = (vtype && value_type(vtype) == vm->type_type)
+                          ? value_as(vtype, const type_t *) : NULL;
+    if (!t || t->kind != TYPE_KIND_ENUM)
+        return value_make_error(vm, "exec: make enum expects an enum type");
+    if (value_is_shadow(value))
+        return value_make_shadow(vm, t);
+    /* 读底层整数值（源 value 类型可能为 i32 字面量等），按底层宽度截断 */
+    const type_t *u = enum_type_underlying(t);
+    if (!u) return value_make_error(vm, "exec: enum has no underlying type");
+    int64_t iv = 0;
+    switch (value_type(value)->size) {
+    case 1: iv = (int64_t)*(const int8_t  *)value_data(value); break;
+    case 2: iv = (int64_t)*(const int16_t *)value_data(value); break;
+    case 4: iv = (int64_t)*(const int32_t *)value_data(value); break;
+    default: iv = *(const int64_t *)value_data(value); break;
+    }
+    void *data = value_alloc_data(vm->alloc, t);
+    switch (u->size) {
+    case 1: *(int8_t  *)data = (int8_t)iv;  break;
+    case 2: *(int16_t *)data = (int16_t)iv; break;
+    case 4: *(int32_t *)data = (int32_t)iv; break;
+    default: *(int64_t *)data = iv;         break;
+    }
+    return value_make(vm, t, data);
+}
+
 /* SET_TYPE：弹栈顶 sub type value → peek 栈顶开放对象 → 设为 sub。
  * 弹 sub 后，栈顶即当前构造的限定类型（由 PUSH_CONST/PUSH_VOLATILE 压入），
  * 与 DEFINE_BOUND 同款协议。 */
@@ -357,6 +415,10 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
                              ? value_as(open_v, const type_t *) : NULL;
     if (open && open->kind == TYPE_KIND_OPTION) {
         type_option_set_inner(vm, open, sub);  /* option：设 inner */
+        return NULL;
+    }
+    if (open && open->kind == TYPE_KIND_ENUM) {
+        type_enum_set_underlying(vm, open, sub);  /* enum：设底层类型 */
         return NULL;
     }
     type_qual_set_sub(vm, open, sub);
@@ -817,6 +879,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_CONST]     = op_push_const,
     [BCODE_PUSH_VOLATILE]  = op_push_volatile,
     [BCODE_PUSH_OPT]       = op_push_opt,
+    [BCODE_PUSH_ENUM]      = op_push_enum,
+    [BCODE_ENUM_VARIANT]   = op_enum_variant,
+    [BCODE_MAKE_ENUM]      = op_make_enum,
     [BCODE_SET_TYPE]       = op_set_type,
     [BCODE_PUSH_FUNC_TYPE]   = op_push_func_type,
     [BCODE_FUNC_TYPE_PARAM]  = op_func_type_param,

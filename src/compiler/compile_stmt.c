@@ -1,5 +1,6 @@
 #include "compiler/compiler.h"
 #include "parser/ast_assign.h"
+#include "parser/ast_enum_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_block.h"
@@ -145,6 +146,24 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
        即用户指定序列：LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"。 */
     ast_type_def_t *n = (ast_type_def_t *)node;
     compile_expr(c, n->expr);                  /* 栈: [type_value] */
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 栈: [type_value, spec占位] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, n->name);
+    /* DEFINE 永远双弹弹掉全部，栈深归零 */
+    st_push(c, -2);
+    break;
+  }
+  case AST_ENUM_DEF: {
+    /* enum Name:Underlying { ... } 名字绑定（顶层 enum 定义）：
+       与 type def 同构——enum 类型在 hoist 区构造（pass 2 SEAL 完成），
+       此处 LOAD_TYPE <enum_id>（sema 登记的 type_id 写回节点）→
+       PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
+       （运行时 type_lookup 解析 `var c: Color`）。 */
+    ast_enum_def_t *n = (ast_enum_def_t *)node;
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
+    st_push(c, 1);
     bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 栈: [type_value, spec占位] */
     st_push(c, 1);
     bcode_write_op(c->bc, BCODE_DEFINE);

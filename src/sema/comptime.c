@@ -13,9 +13,12 @@
 #include "parser/ast_string_lit.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_enum_def.h"
+#include "parser/ast_enum_ref.h"
 #include "vm/function.h"
 #include "vm/scope.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
 #include "vm/value.h"
@@ -49,6 +52,18 @@ static bool encode_float(vm_t *vm, value_t *v, sema_ct_const_t *out) {
   (void)vm;
   out->f = *(const double *)value_data(v);
   return true;
+}
+
+/* 从真实枚举值读取底层整数值（int64，按底层宽度读——enum 的 data 是
+   底层宽度的整数值块）。encode_int 同模式。 */
+static int64_t enum_read_ct_int(const value_t *v) {
+  const type_t *t = value_type(v);
+  switch (t->size) {
+  case 1: return (int64_t)*(const int8_t  *)value_data(v);
+  case 2: return (int64_t)*(const int16_t *)value_data(v);
+  case 4: return (int64_t)*(const int32_t *)value_data(v);
+  default: return *(const int64_t *)value_data(v);
+  }
 }
 
 bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
@@ -101,6 +116,13 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
       if (!sema_ct_encode(sema, e, &es[i])) return false;
     }
     out->elems = es;
+    return true;
+  }
+  if (t->kind == TYPE_KIND_ENUM) {
+    /* 枚举常量：底层恒为整型，编码底层整数值（i 字段按底层宽度读）。
+       折叠为 AST_ENUM_REF（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM，
+       与源码引用 Color::Red 同构）。 */
+    out->i = enum_read_ct_int(v);
     return true;
   }
   if (t->kind == TYPE_KIND_FUNC) {
@@ -233,6 +255,20 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
         ast_func_ref_new(arena, origin->tok_begin, origin->tok_end);
     if (!ref) return NULL;
     ((ast_func_ref_t *)ref)->fid = ct->func_id;
+    return ref;
+  }
+  if (t->kind == TYPE_KIND_ENUM) {
+    /* 枚举常量：折叠为 AST_ENUM_REF（type_expr 登记为 AST_TYPE_REF +
+       底层整数值）。variant 名留空——compiler 分支只用 type_expr/value
+       （LOAD_TYPE + PUSH_I* + MAKE_ENUM），与源码引用同构。 */
+    ast_node_t *type_expr = sema_ct_type_expr(sema, t, origin);
+    if (!type_expr) return NULL;
+    ast_node_t *ref =
+        ast_enum_ref_new(arena, origin->tok_begin, origin->tok_end);
+    if (!ref) return NULL;
+    ast_enum_ref_t *er = (ast_enum_ref_t *)ref;
+    er->type_expr = type_expr;
+    er->value     = ct->i;
     return ref;
   }
   return NULL;
@@ -642,6 +678,190 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
   scope_define(vm, vm->current_scope, nb, tv);
 
   /* 4. 符号激活（TDZ：定义前不可见） */
+  sym->is_active = true;
+  sym->flow_init = true;
+  return true;
+}
+
+/* ===========================================================================
+ * enum 定义求值（enum Name:Underlying { Var = val, ... }）
+ *
+ * enum 是"有特殊类型的全局变量"：variant 是编译期常量（全局），类型为
+ * enum 类型（enum_type_t，TYPE_KIND_ENUM）。定义点在 pass1b 与全局 type
+ * def 一起求值（先于函数签名解析——签名/变量可引用 enum 类型）：
+ *   1. 底层类型解析（sema_resolve_type_slot）→ 必须 TYPE_KIND_INT（用户
+ *      契约：底层须整型；bool/str/复合报错）
+ *   2. 逐 variant 值 ctfe 求值（vm->comptime）→ 必须整型常量；值按底层
+ *      类型校验兼容（value_assign 复用整型"只拓宽"语义——i32 赋给 i8 底层
+ *      报错，符合"值与类型不兼容编译报错"契约）；重复名/重复值报错
+ *   3. type_enum_intern 构造 enum 类型（立即密封 + 去重 intern）
+ *   4. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type
+ *      value 到编译期 vm 作用域（var c: Color 经 type_lookup 解析）
+ *   5. 激活符号；定义点保留（进字节码，运行时 hoist 构造 + 名字绑定）
+ * =========================================================================== */
+
+bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
+  if (!sema || !ed) return false;
+  sema_symbol_t *sym = sema_scope_find_local(scope, ed->name);
+  if (!sym) return false; /* pass1 重复定义已诊断，符号未注册 */
+
+  vm_t *vm = sema->vm;
+
+  /* 1. 底层类型解析 + 校验（须整型） */
+  const type_t *underlying =
+      sema_resolve_type_slot(sema, &ed->underlying_type);
+  if (!underlying) {
+    diag_error(sema->diag, sema_loc(sema, ed->underlying_type),
+               "enum '%.*s': unknown underlying type",
+               (int)ed->name.len, ed->name.ptr);
+    return false;
+  }
+  bool is_int = (underlying == vm->type_i8 || underlying == vm->type_i16 ||
+                 underlying == vm->type_i32 || underlying == vm->type_i64 ||
+                 underlying == vm->type_u8 || underlying == vm->type_u16 ||
+                 underlying == vm->type_u32 || underlying == vm->type_u64);
+  if (!is_int) {
+    char tn[64];
+    sema_type_name(underlying, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, ed->underlying_type),
+               "enum '%.*s': underlying type must be an integer, got %s",
+               (int)ed->name.len, ed->name.ptr, tn);
+    return false;
+  }
+
+  /* 2. 逐 variant 值 ctfe 求值 + 收集 variant 表 */
+  size_t n = 0;
+  for (ast_node_t *vn = ed->variants; vn; vn = vn->next) n++;
+  enum_variant_t *variants = NULL;
+  if (n > 0) {
+    variants = (enum_variant_t *)allocator_new_ex(
+        vm->alloc, "enum_variant_t", sizeof(enum_variant_t), NULL, NULL, NULL,
+        n);
+    if (!variants) panic("sema: out of memory allocating enum variants");
+  }
+
+  size_t i = 0;
+  bool ok = true;
+  for (ast_node_t *vn = ed->variants; vn; vn = vn->next, i++) {
+    ast_enum_variant_t *ev = (ast_enum_variant_t *)vn;
+
+    /* ctfe 编译期求值 variant 值（与 comptime var / type def 同协议）。
+       值须为编译期整型常量：函数调用（pass1b 阶段函数 AST 未绑定）由
+       ctfe AST_CALL 防御分支干净报错，不落 sema_expr（会误报变量 TDZ）。 */
+    bool saved = vm->comptime;
+    vm->comptime = true;
+    ctfe_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.vm = vm;
+    ctx.sema = sema;
+    ctx.sema_scope = scope;
+    ctx.budget = 100000;
+    ctx.max_depth = 128;
+    value_t *val = ctfe_eval(&ctx, ev->value);
+    vm->comptime = saved;
+    if (!val || value_is_error(vm, val)) {
+      const char *msg = NULL;
+      if (val) {
+        error_data_t *ed_ = (error_data_t *)value_data(val);
+        msg = ed_ && ed_->message ? string_cstr(ed_->message) : NULL;
+      }
+      diag_error(sema->diag, sema_loc(sema, ev->value),
+                 "enum '%.*s': variant '%.*s' value must be a compile-time "
+                 "integer constant%s%s",
+                 (int)ed->name.len, ed->name.ptr, (int)ev->name.len,
+                 ev->name.ptr, msg ? ": " : "", msg ? msg : "");
+      ok = false;
+      continue;
+    }
+    const type_t *vt = value_type(val);
+    bool is_int_v = (vt == vm->type_i8 || vt == vm->type_i16 ||
+                     vt == vm->type_i32 || vt == vm->type_i64 ||
+                     vt == vm->type_u8 || vt == vm->type_u16 ||
+                     vt == vm->type_u32 || vt == vm->type_u64);
+    if (!is_int_v) {
+      char tn[64];
+      sema_type_name(vt, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, ev->value),
+                 "enum '%.*s': variant '%.*s' value must be an integer, got %s",
+                 (int)ed->name.len, ed->name.ptr, (int)ev->name.len,
+                 ev->name.ptr, tn);
+      ok = false;
+      continue;
+    }
+
+    /* 值与底层类型兼容性校验（用户契约：i32 赋给 i8 底层编译报错）：
+       value_assign 复用整型"只拓宽"语义——窄化/跨符号（u→s）报 error */
+    value_t *dst = value_make_shadow(vm, underlying);
+    value_t *res = value_assign(vm, dst, val);
+    if (value_is_error(vm, res)) {
+      char itn[64], btn[64];
+      sema_type_name(vt, itn, sizeof(itn));
+      sema_type_name(underlying, btn, sizeof(btn));
+      diag_error(sema->diag, sema_loc(sema, ev->value),
+                 "enum '%.*s': variant '%.*s' value of type %s is not "
+                 "compatible with underlying type %s",
+                 (int)ed->name.len, ed->name.ptr, (int)ev->name.len,
+                 ev->name.ptr, itn, btn);
+      ok = false;
+      continue;
+    }
+
+    /* 查重：重复名 / 重复值报错 */
+    bool dup_name = false, dup_val = false;
+    for (size_t j = 0; j < i; j++) {
+      if (variants[j].name.len == ev->name.len && variants[j].name.ptr &&
+          memcmp(variants[j].name.ptr, ev->name.ptr, ev->name.len) == 0)
+        dup_name = true;
+      if (variants[j].value == enum_read_ct_int(val)) dup_val = true;
+    }
+    if (dup_name) {
+      diag_error(sema->diag, sema_loc(sema, vn),
+                 "enum '%.*s': duplicate variant name '%.*s'",
+                 (int)ed->name.len, ed->name.ptr, (int)ev->name.len,
+                 ev->name.ptr);
+      ok = false;
+      continue;
+    }
+    if (dup_val) {
+      diag_error(sema->diag, sema_loc(sema, vn),
+                 "enum '%.*s': duplicate variant value %lld",
+                 (int)ed->name.len, ed->name.ptr,
+                 (long long)enum_read_ct_int(val));
+      ok = false;
+      continue;
+    }
+
+    variants[i].name  = ev->name;
+    variants[i].value = enum_read_ct_int(val);
+  }
+
+  if (!ok) {
+    if (variants) allocator_free(vm->alloc, (void **)&variants);
+    return false;
+  }
+
+  /* 3. type_enum_intern 构造 enum 类型（立即密封 + 去重 intern） */
+  const type_t *t = type_enum_intern(vm, underlying, variants, n);
+  if (variants) allocator_free(vm->alloc, (void **)&variants);
+  if (!t) return false;
+
+  /* 4. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
+  const sema_type_t *st = sema_type_register(sema, t);
+  if (!st) return false;
+  ed->type_id = st->id; /* compiler 顶层名字绑定 LOAD_TYPE 用 */
+  /* 显示名（诊断/值 dump 用）：须在 sema_type_register 分配 id 后调用——
+     type_set_name 要求 t->id >= TYPE_ID_PROGRAM_BASE 才可改名。 */
+  type_set_name(vm, t, ed->name);
+  value_t *tv = type_as_value(vm, t);
+  if (!tv) return false;
+  char nb[256];
+  if (ed->name.len >= sizeof nb) return false;
+  memcpy(nb, ed->name.ptr, ed->name.len);
+  nb[ed->name.len] = '\0';
+  scope_define(vm, vm->current_scope, nb, tv);
+
+  /* 5. 符号激活（TDZ：定义前不可见） */
+  sym->type = t;
   sym->is_active = true;
   sym->flow_init = true;
   return true;

@@ -3,6 +3,7 @@
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -60,6 +61,12 @@ static void type_dump_name(const type_t *t, string_t *out) {
         type_dump_name(elem, out);   /* 嵌套：[2][3]i32 */
         return;
     }
+    case TYPE_KIND_ENUM: {
+        /* 具名枚举：直接显示名字（Color） */
+        if (t->name.ptr) string_append_bytes(out, t->name.ptr, t->name.len);
+        else string_append_cstr(out, "enum");
+        return;
+    }
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE: {
         const char *kw = (t->kind == TYPE_KIND_CONST) ? "const " : "volatile ";
@@ -107,6 +114,19 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         break;
     case TYPE_KIND_INT: {
         bool unsign = (bt->name.ptr && bt->name.len > 0 && bt->name.ptr[0] == 'u');
+        char buf[32];
+        int n = unsign
+            ? snprintf(buf, sizeof buf, "%llu",
+                       (unsigned long long)dump_read_unsigned(v))
+            : snprintf(buf, sizeof buf, "%lld",
+                       (long long)dump_read_signed(v));
+        string_append_bytes(out, buf, (size_t)n);
+        break;
+    }
+    case TYPE_KIND_ENUM: {
+        /* 值块 = 底层宽度整数值（enum_read 同款读取），按底层有无符号决定渲染 */
+        const type_t *u = enum_type_underlying(t);
+        bool unsign = u && u->name.ptr && u->name.len > 0 && u->name.ptr[0] == 'u';
         char buf[32];
         int n = unsign
             ? snprintf(buf, sizeof buf, "%llu",

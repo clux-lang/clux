@@ -239,3 +239,38 @@ TEST(BcodeAsm, LoadFunctionRoundTrip) {
     bcode_destroy(&bc2);
     delete_allocator(&a);
 }
+
+/* PUSH_ENUM / ENUM_VARIANT "Red" 1 / MAKE_ENUM 助记符往返：
+ * 反汇编 → 汇编 → 反汇编字节稳定（enum 开放构造三指令协议） */
+TEST(BcodeAsm, EnumOpsRoundTrip) {
+    allocator_t *a = create_allocator(malloc, free);
+
+    bytecode_t *bc = bcode_new(a);
+    bcode_str_index(bc, strslice_from_cstr("Red"));  /* strtable 0 = "Red" */
+    bcode_write_op(bc, BCODE_PUSH_ENUM);
+    bcode_write_op(bc, BCODE_ENUM_VARIANT);
+    bcode_write_u32(bc, 0);   /* strtable_idx */
+    bcode_write_i64(bc, 1);   /* value */
+    bcode_write_op(bc, BCODE_MAKE_ENUM);
+    bcode_write_op(bc, BCODE_HALT);
+
+    char *t1 = bcode_disasm_mem(a, bc, NULL);
+    ASSERT_NE(t1, nullptr);
+    EXPECT_NE(std::strstr(t1, "PUSH_ENUM"), nullptr);
+    EXPECT_NE(std::strstr(t1, "ENUM_VARIANT \"Red\" 1"), nullptr);
+    EXPECT_NE(std::strstr(t1, "MAKE_ENUM"), nullptr);
+
+    bytecode_t *bc2 = nullptr;
+    EXPECT_EQ(bcode_asm_parse(a, t1, std::strlen(t1), &bc2), 0);
+    ASSERT_NE(bc2, nullptr);
+
+    char *t2 = bcode_disasm_mem(a, bc2, NULL);
+    ASSERT_NE(t2, nullptr);
+    EXPECT_STREQ(t1, t2);
+
+    allocator_free(a, (void **)&t1);
+    allocator_free(a, (void **)&t2);
+    bcode_destroy(&bc);
+    bcode_destroy(&bc2);
+    delete_allocator(&a);
+}

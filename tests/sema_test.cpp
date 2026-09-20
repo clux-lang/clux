@@ -35,6 +35,9 @@ extern "C" {
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
+#include "parser/ast_enum_def.h"
+#include "parser/ast_enum_ref.h"
 }
 
 #include "test_common.h"
@@ -2701,6 +2704,250 @@ TEST_F(SemaTest, SwitchCondExprUnusedNoError) {
         "    (6)->{ }"
         "    default->{ }"
         "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+/* ================================================================ */
+/* enum 类型（M2：enum Name:Underlying { Var = val, ... }）           */
+/* ================================================================ */
+
+TEST_F(SemaTest, EnumDefBasic) {
+    /* 合法 enum：variant 显式值 + 引用 Color::Red + 同 enum 赋值 */
+    EXPECT_TRUE(analyze(
+        "enum Color:i32 { Red = 1, Green = 2, Blue = 3 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var d: Color = c;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* 符号激活 + 类型登记 */
+    sema_symbol_t *sym =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("Color"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_TRUE(sym->is_active);
+    EXPECT_TRUE(sym->flow_init);
+    ASSERT_NE(sym->type, nullptr);
+    EXPECT_EQ(sym->type->kind, TYPE_KIND_ENUM);
+
+    /* enum 类型登记 + id 绑定（compiler LOAD_TYPE 用） */
+    const sema_type_t *st = sema_type_find(sema_, sym->type);
+    ASSERT_NE(st, nullptr);
+    EXPECT_GE(st->id, TYPE_ID_PROGRAM_BASE);
+
+    /* variant 表内容 */
+    EXPECT_EQ(enum_type_variant_count(sym->type), 3u);
+    ASSERT_NE(enum_type_variant(sym->type, 0), nullptr);
+    EXPECT_TRUE(strslice_eq(enum_type_variant(sym->type, 0)->name,
+                            STRSLICE_LIT("Red")));
+    EXPECT_EQ(enum_type_variant(sym->type, 0)->value, 1);
+    EXPECT_EQ(enum_type_underlying(sym->type), vm_->type_i32);
+
+    /* var c/d 类型解析为 enum 类型 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *c = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("c"));
+    ASSERT_NE(c, nullptr);
+    EXPECT_EQ(c->type, sym->type);
+}
+
+TEST_F(SemaTest, EnumDefU8Underlying) {
+    /* u8 底层 + 显式 as i8 的 variant 值（1 是 i32 字面量，须 as 到底层宽度） */
+    EXPECT_TRUE(analyze(
+        "enum Small:i8 { A = 1 as i8, B = 2 as i8 }"
+        "func main(): void {"
+        "  var s: Small = Small::B;"
+        "  if (s == Small::B) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *sym =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("Small"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_EQ(enum_type_underlying(sym->type), vm_->type_i8);
+}
+
+TEST_F(SemaTest, EnumRefInGlobalVarInit) {
+    /* 全局 enum 变量 init 经 ctfe 折叠：AST_ENUM_REF 须在 ctfe 求值成功 */
+    EXPECT_TRUE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "var g: Color = Color::Red;"
+        "func main(): void {"
+        "  var c: Color = g;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, EnumVariantValueNarrowingError) {
+    /* 用户契约：variant 值与底层不兼容（i32 → i8 底层）编译报错 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i8 { Red = 300 }"
+        "func main(): void { }"));
+    expect_message(0, "is not compatible with underlying type i8");
+}
+
+TEST_F(SemaTest, EnumVariantNonIntValueError) {
+    /* variant 值必须整型 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = true }"
+        "func main(): void { }"));
+    expect_message(0, "value must be an integer, got bool");
+}
+
+TEST_F(SemaTest, EnumVariantNonConstError) {
+    /* variant 值必须编译期常量 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = foo() }"
+        "func main(): void { }"
+        "func foo(): i32 { return 1; }"));
+    expect_message(0, "must be a compile-time integer constant");
+}
+
+TEST_F(SemaTest, EnumUnderlyingNotIntError) {
+    /* 底层类型必须整型（bool 报错） */
+    EXPECT_FALSE(analyze(
+        "enum C:bool { A = true }"
+        "func main(): void { }"));
+    expect_message(0, "underlying type must be an integer, got bool");
+}
+
+TEST_F(SemaTest, EnumUnknownUnderlyingError) {
+    EXPECT_FALSE(analyze(
+        "enum C:NoSuch { A = 1 }"
+        "func main(): void { }"));
+    expect_message(0, "unknown underlying type");
+}
+
+TEST_F(SemaTest, EnumDuplicateVariantNameError) {
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1, Red = 2 }"
+        "func main(): void { }"));
+    expect_message(0, "duplicate variant name 'Red'");
+}
+
+TEST_F(SemaTest, EnumDuplicateVariantValueError) {
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1, Green = 1 }"
+        "func main(): void { }"));
+    expect_message(0, "duplicate variant value 1");
+}
+
+TEST_F(SemaTest, EnumAssignIntToEnumError) {
+    /* i32 → enum：无隐式转换，编译报错 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var x: Color = 1;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'x' of type Color with i32");
+}
+
+TEST_F(SemaTest, EnumAssignEnumToIntError) {
+    /* enum → i32：无隐式转换（严格分离），编译报错 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var x: i32 = c;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'x' of type i32 with Color");
+}
+
+TEST_F(SemaTest, EnumAssignDifferentEnumError) {
+    /* 不同 enum 实例间赋值：严格分离 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "enum Mood:i32 { Happy = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var m: Mood = c;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'm' of type Mood with Color");
+}
+
+TEST_F(SemaTest, EnumCastSkipStepError) {
+    /* 跳步 cast（enum → i8 而非声明底层 i32）：严格分离 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var y: i8 = c as i8;"
+        "}"));
+    expect_message(0, "cannot cast Color to i8");
+}
+
+TEST_F(SemaTest, EnumCastTwoStepOk) {
+    /* 两步 cast：enum → i32 → i8 合法 */
+    EXPECT_TRUE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var v: i8 = c as i32 as i8;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, EnumEqSameEnumOk) {
+    EXPECT_TRUE(analyze(
+        "enum Color:i32 { Red = 1, Green = 2 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  if (c == Color::Green) { }"
+        "  if (c != Color::Red) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, EnumEqVsUnderlyingError) {
+    /* enum 与底层整型判等：严格分离 */
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  if (c == 1) { }"
+        "}"));
+    expect_message(0, "cannot apply '==' to Color and i32");
+}
+
+TEST_F(SemaTest, EnumEqDifferentEnumError) {
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "enum Mood:i32 { Happy = 1 }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var m: Mood = Mood::Happy;"
+        "  if (c == m) { }"
+        "}"));
+    expect_message(0, "cannot apply '==' to Color and Mood");
+}
+
+TEST_F(SemaTest, EnumRefUnknownVariantError) {
+    EXPECT_FALSE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func main(): void {"
+        "  var c = Color::Xyz;"
+        "}"));
+    expect_message(0, "enum 'Color' has no variant 'Xyz'");
+}
+
+TEST_F(SemaTest, EnumRefNonEnumTypeError) {
+    EXPECT_FALSE(analyze(
+        "type MyInt = i32;"
+        "func main(): void {"
+        "  var c = MyInt::Red;"
+        "}"));
+    expect_message(0, "'i32' is not an enum type");
+}
+
+TEST_F(SemaTest, EnumDefUsedInSignature) {
+    /* enum 类型可作函数签名/参数类型（pass1b 先于签名解析） */
+    EXPECT_TRUE(analyze(
+        "enum Color:i32 { Red = 1 }"
+        "func is_red(c: Color): bool { return c == Color::Red; }"
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  var b: bool = is_red(c);"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }

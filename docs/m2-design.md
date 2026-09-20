@@ -82,6 +82,15 @@ var val: i8 = c as i32 as i8;         // 必须两次 as，不允许 c as i8
 - enum 类型参与类型计算（extends/== 基于 enum 自身）
 - `Color::Red == c` — variant 之间判等
 
+**已实现**（2026-09-20）：
+- lexer 新增 `::` 双字符 token；parser 顶层 `enum` → `AST_ENUM_DEF`（name + underlying_type + variants 兄弟链，每 variant 独立 `AST_ENUM_VARIANT` 节点持 name + value 表达式）；`Color::Red` → `AST_ENUM_REF`（type_expr + variant 名，sema 折叠后持底层值）
+- sema `pass1b_types` 新增 `sema_eval_enum_def`：ctfe 逐 variant 求值（必须编译期整型常量，缺值/非整型/重复名/重复值均报错；variant 值与底层类型不兼容如 `Red = 300` 底层 `i8` → 编译期报错）+ `type_enum_intern` 构造密封 enum 类型 + 登记 type value 到编译期 vm 作用域（`var c: Color` 经 `type_lookup` 解析）
+- `AST_ENUM_REF` 折叠：`enum_type_find_variant` 查值，未定义 variant 报错；全局 var/type 定义内 enum 常量经 `sema_ct_encode`/`sema_ct_lit` 编码为 `AST_ENUM_REF`（compiler 同构发 `LOAD_TYPE + PUSH_I* + MAKE_ENUM`）
+- 严格分离由 VTABLE_ENUM 天然生效：`var x:i32 = Color::Red` / `Color::Red == 1` / `c as i8`（跳步）均在编译期报错
+- compiler hoist：`declare_one` 发 `PUSH_ENUM; DEFINE_TYPE <id>`；`define_enum` 发 `LOAD_TYPE <id>; LOAD_TYPE <underlying_id>; SET_TYPE; ENUM_VARIANT "Red" 1; ...; SEAL`
+- vm：`enum_type_t`（underlying 引用 + variant 表）+ `VTABLE_ENUM` 各槽位 + 三条开放构造指令 `PUSH_ENUM`（分配开放 enum_type 压 type value）/ `ENUM_VARIANT <strtable_idx> <value:i64>`（追加 variant，值按底层宽度截断）/ `MAKE_ENUM`（弹 type + 底层整数值 → 构造 enum 值）；`SEAL` 复用（经 vtable `type_seal` → `type_enum_seal` 拷贝表 + 布局 + 去重 intern）
+- 示例：`examples/enums/enums.cx`
+
 ### 4. switch = if 语法糖
 
 ```
@@ -557,7 +566,7 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 
 ### 5. enum 严格分离
 
-`Color extends i32 = false`，只能 `as` 底层类型，需两次 as（`c as i32 as i8`）。
+`Color extends i32 = false`，只能 `as` 底层类型，需两次 as（`c as i32 as i8`）。**已实现**（2026-09-20，见 §3）。
 
 ### 6. 类型名迁移
 

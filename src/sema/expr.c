@@ -7,6 +7,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_enum_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
@@ -28,6 +29,7 @@
 #include "sema/comptime.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
+#include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_option.h"
 
@@ -536,6 +538,32 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       const type_t *t = resolve_type_expr(sema, *node);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
       return type_as_value(sema->vm, t);
+    }
+    case AST_ENUM_REF: {
+      /* 枚举 variant 引用 Color::Red：type_expr 求值为 enum 类型（折叠为
+         AST_TYPE_REF）→ enum_type_find_variant 查 variant → 未找到报错；
+         找到则折叠底层值入节点（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM），
+         返回 enum 类型 shadow（赋值/判等类型检查用）。 */
+      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
+      const type_t *t = sema_resolve_type_slot(sema, &n->type_expr);
+      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (t->kind != TYPE_KIND_ENUM) {
+        char tn[64];
+        sema_type_name(t, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "'%s' is not an enum type", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      int idx = enum_type_find_variant(t, n->variant);
+      if (idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "enum '%.*s' has no variant '%.*s'",
+                   (int)t->name.len, t->name.ptr,
+                   (int)n->variant.len, n->variant.ptr);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      n->value = enum_type_variant(t, (size_t)idx)->value;
+      return value_make_shadow(sema->vm, t);
     }
     case AST_CONSTRUCT: {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验

@@ -1,0 +1,47 @@
+// enums.cx — enum（严格与底层类型分离）
+//
+//   声明     enum Name:底层类型 { Variant = 值, ... }，类型和值都不允许省略
+//   访问     Color::Red（:: 命名空间访问）
+//   严格分离  enum extends 底层 = false；不隐式转换；只能 as 到底层类型，
+//             跳步禁止（c as i8 报错，须 c as i32 as i8）
+//   判等     仅同 enum 实例间（Color::Red == Color::Green），vs 底层报错
+
+// 底层 i32 的枚举：variant 显式整数值
+enum Color:i32 { Red = 1, Green = 2, Blue = 3 }
+
+// 底层 u8 的枚举：字面量默认 i32，与 u8 严格分离须显式 as（值按底层宽度截断）
+enum Level:u8 { Low = 10 as u8, Mid = 20 as u8, High = 30 as u8 }
+
+func main(): i32 {
+    // variant 引用赋值给同 enum 类型变量（类型检查通过）
+    var c: Color = Color::Red;
+    printf("c = %d\n", c as i32);       // 1（须 as 底层才能打印）
+
+    // 同 enum 判等：variant 之间比较
+    if (c == Color::Red) {
+        printf("c is Red\n");
+    }
+    if (c == Color::Green) {
+        printf("should not print\n");
+    } else {
+        printf("c is not Green\n");
+    }
+
+    // 两次 as 到更窄宽度：c as i32 as i8（禁止 c as i8 跳步）
+    var v: i8 = c as i32 as i8;
+    printf("v = %d\n", v);              // 1
+
+    // 底层 u8：不同 enum 实例相互独立，判等仅在同类内
+    var l: Level = Level::High;
+    printf("l = %d\n", l as u8);        // 30
+
+    // 枚举变量赋值：同 enum 类型间
+    var d: Color = c;
+    printf("d = %d\n", d as i32);       // 1（Red）
+
+    // 三元 + 判等组合
+    var tag: i32 = (c == Color::Blue) ? 100 : 200;
+    printf("tag = %d\n", tag);          // 200
+
+    return 0;
+}

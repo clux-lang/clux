@@ -37,6 +37,8 @@ extern "C" {
 #include "parser/ast_ident.h"
 #include "parser/ast_program.h"
 #include "parser/ast_switch.h"
+#include "parser/ast_enum_def.h"
+#include "parser/ast_enum_ref.h"
 }
 
 #include "test_common.h"
@@ -1567,6 +1569,201 @@ TEST_F(ParseStmtTest, Switch_BadBodyEntry) {
     ASSERT_NE(p, nullptr);
 
     ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* enum 定义（M2：enum Name:Underlying { Var = val, ... }）           */
+/* ================================================================ */
+
+/**
+ * Scenario: 合法 enum 定义（多 variant、显式值）
+ * Expected: AST_ENUM_DEF，name/underlying/variants 兄弟链完整
+ */
+TEST_F(ParseStmtTest, EnumDef_Basic) {
+    parser_t *p = make_parser(
+        "enum Color:i32 { Red = 1, Green = 2, Blue = 3 }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ENUM_DEF);
+
+    auto *ed = (ast_enum_def_t *)node;
+    EXPECT_TRUE(strslice_eq(ed->name, strslice_from_cstr("Color")));
+
+    ASSERT_NE(ed->underlying_type, nullptr);
+    EXPECT_EQ(ed->underlying_type->kind, AST_IDENT);
+    EXPECT_TRUE(strslice_eq(((ast_ident_t *)ed->underlying_type)->name,
+                            strslice_from_cstr("i32")));
+
+    /* variant 兄弟链：Red → Green → Blue */
+    ASSERT_NE(ed->variants, nullptr);
+    auto *v1 = (ast_enum_variant_t *)ed->variants;
+    EXPECT_EQ(v1->base.kind, AST_ENUM_VARIANT);
+    EXPECT_TRUE(strslice_eq(v1->name, strslice_from_cstr("Red")));
+    ASSERT_NE(v1->value, nullptr);
+    EXPECT_EQ(v1->value->kind, AST_INT_LIT);
+
+    ASSERT_NE(v1->base.next, nullptr);
+    auto *v2 = (ast_enum_variant_t *)v1->base.next;
+    EXPECT_TRUE(strslice_eq(v2->name, strslice_from_cstr("Green")));
+
+    ASSERT_NE(v2->base.next, nullptr);
+    auto *v3 = (ast_enum_variant_t *)v2->base.next;
+    EXPECT_TRUE(strslice_eq(v3->name, strslice_from_cstr("Blue")));
+    EXPECT_EQ(v3->base.next, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: enum 定义挂 parse_program 顶层链
+ * Expected: AST_PROGRAM → funcs 链首节点为 AST_ENUM_DEF
+ */
+TEST_F(ParseStmtTest, EnumDef_AtTopLevel) {
+    parser_t *p = make_parser(
+        "enum Color:i32 { Red = 1 }\n"
+        "func main():void { }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_program(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_PROGRAM);
+
+    auto *prog = (ast_program_t *)node;
+    ASSERT_NE(prog->funcs, nullptr);
+    EXPECT_EQ(prog->funcs->kind, AST_ENUM_DEF);
+    ASSERT_NE(prog->funcs->next, nullptr);
+    EXPECT_EQ(prog->funcs->next->kind, AST_FUNC_DEF);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 表达式位置 Color::Red
+ * Expected: AST_ENUM_REF（type_expr=AST_IDENT Color，variant=Red）
+ */
+TEST_F(ParseStmtTest, EnumRef_Basic) {
+    parser_t *p = make_parser("Color::Red");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ENUM_REF);
+
+    auto *er = (ast_enum_ref_t *)node;
+    ASSERT_NE(er->type_expr, nullptr);
+    EXPECT_EQ(er->type_expr->kind, AST_IDENT);
+    EXPECT_TRUE(strslice_eq(((ast_ident_t *)er->type_expr)->name,
+                            strslice_from_cstr("Color")));
+    EXPECT_TRUE(strslice_eq(er->variant, strslice_from_cstr("Red")));
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 enum 名
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumDef_MissingName) {
+    parser_t *p = make_parser("enum :i32 { Red = 1 }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 ':' 与底层类型
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumDef_MissingColon) {
+    parser_t *p = make_parser("enum Color { Red = 1 }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: variant 缺 '= 值'（M2 契约：每个 variant 必须显式值）
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumDef_MissingVariantValue) {
+    parser_t *p = make_parser("enum Color:i32 { Red }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 空 variant 列表 {}
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumDef_EmptyVariantList) {
+    parser_t *p = make_parser("enum Color:i32 { }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 '}' 结尾
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumDef_MissingCloseBrace) {
+    parser_t *p = make_parser("enum Color:i32 { Red = 1 ");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: '::' 前不是标识符（非枚举类型名前缀）
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumRef_BeforeNotIdent) {
+    parser_t *p = make_parser("1::Red");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: '::' 后不是标识符
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, EnumRef_AfterNotIdent) {
+    parser_t *p = make_parser("Color::123");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_ERROR);
 
