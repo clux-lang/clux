@@ -2020,3 +2020,80 @@ TEST(Driver, RunFileClosureGlobalFuncCaptureRejected) {
   std::remove(path.c_str());
 }
 
+/* ================================================================ */
+/* 全局变量（运行时实体，init 编译期折叠）                             */
+/* ================================================================ */
+
+TEST(Driver, RunFileGlobalVarRead) {
+  /* 全局变量函数体内读取（经 func_vcall root_scope 接线） */
+  std::string path = write_temp_file(
+      "var g: i32 = 42;\n"
+      "func main():i32 {\n"
+      "  printf(\"%d\\n\", g);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileGlobalVarMutateAcrossFuncs) {
+  /* 全局变量跨函数修改：setg 写 root_scope，main 读到新值 */
+  std::string path = write_temp_file(
+      "var g: i32 = 42;\n"
+      "var s: str = \"hello\";\n"
+      "func setg(v: i32):i32 { g = v; return 0; }\n"
+      "func main():i32 {\n"
+      "  printf(\"%d %s\\n\", g, s);\n"
+      "  _ = setg(100);\n"
+      "  printf(\"%d\\n\", g);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileGlobalVarFuncRefInit) {
+  /* 全局变量 init 折叠为函数引用：var f = add; 调用 f */
+  std::string path = write_temp_file(
+      "func add(a:i32, b:i32):i32 { return a + b; }\n"
+      "var f = add;\n"
+      "func main():i32 {\n"
+      "  printf(\"%d\\n\", f(3, 4));\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileGlobalVarExprInit) {
+  /* 全局变量 init 为编译期可计算表达式：折叠为字面量发射 */
+  std::string path = write_temp_file(
+      "var x = (1 + 2) * 3 - 4;\n"
+      "func main():i32 {\n"
+      "  printf(\"%d\\n\", x);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileGlobalVarInitNotConstantRejected) {
+  /* 全局变量 init 引用其他全局变量（运行期实体）→ 编译期拒绝 */
+  std::string path = write_temp_file(
+      "var a: i32 = 1;\n"
+      "var b: i32 = a;\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileGlobalVarUnknownTypeRejected) {
+  /* 非法类型名（string 非内建，内建为 str）→ sema 拒绝，不落到运行时 */
+  std::string path = write_temp_file(
+      "var s: string = \"hi\";\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+

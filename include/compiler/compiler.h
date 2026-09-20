@@ -11,6 +11,7 @@ extern "C" {
 #include "parser/ast_block.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
+#include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
 #include "vm/bcode.h"

@@ -1,0 +1,20 @@
+// global_var.cx — 全局变量：运行时实体（可读可写），init 编译期折叠为字面量或函数
+var g: i32 = 42;              // 显式类型 + 字面量
+var s: str = "hello";         // 字符串全局变量
+var f = add;                  // init 折叠为函数引用
+
+func add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+func setg(v: i32): i32 {
+    g = v;                    // 跨函数修改全局变量（写 root_scope）
+    return 0;
+}
+
+func main(): i32 {
+    printf("before: g = %d, s = %s, add(3,4) = %d\n", g, s, f(3, 4));
+    _ = setg(100);
+    printf("after: g = %d\n", g);
+    return 0;
+}

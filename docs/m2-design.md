@@ -683,6 +683,32 @@ var arr:[N]i32 = .{};                // N 是 comptime var（全局/局部），
 
 **M2 消费点**：数组边界 N、type 别名计算、enum 值、`.[N]T{...}` 构造边界——经 ctfe 求值后读数值或 type value。sizeof/alignof/typeof **不经 ctfe**（SEMA→CTFE 桥梁，见 §8）：操作数 shadow 求值取类型，运算符自身产出真实常量直接消费。
 
+### 9.5 全局变量（2026-09-18 实现）
+
+普通全局变量是**运行时实体**（可读可写），与 comptime var（编译期常量，引用点折叠为字面量）关键差异：
+
+```
+var g: i32 = 42;                 // 全局变量：运行时 DEFINE 到模块 root_scope
+var s: str = "hello";            // 类型用内建名 str（无 string 别名）
+var f = add;                     // init 可折叠为函数引用（AST_FUNC_REF）
+var x = (1 + 2) * 3 - 4;         // init 编译期求值 → 折叠为字面量发射
+```
+
+**规则**：
+- **init 必须可编译期折叠为字面量或函数引用**（用户契约）：sema pass_globals 阶段 `sema_eval_global_var` 强制 ctfe 求值右值（`vm->comptime = true`），成功则 `sema_ct_lit` 折叠 `vd->init` 为 `AST_INT_LIT`/`AST_STRING_LIT`/`AST_FUNC_REF` 等，compiler 零感知直接发射字面量字节码
+- 引用运行期实体（其他全局变量/局部变量）→ ctfe 失败 → 编译错误（"initializer must be a compile-time constant"）
+- 无 init（`var a: i32;`）→ parser 层拒绝（全局变量必须带可折叠右值）
+- 显式类型与折叠右值不匹配 → 编译错误（"cannot initialize global variable"）；非法类型名（如 `string`，内建为 `str`）→ "unknown type"（对齐 shadow_var_def，不静默放行）
+
+**符号与作用域**：
+- 符号表：pass1 注册（SEMA_SYM_VAR），pass_globals 求值后激活（flow_init=true, is_active=true），**不设 is_comptime/ct_valid**（引用点不折叠，保持 AST_IDENT）
+- VM shadow scope：`sema_eval_global_var` 把 shadow value 定义到 `vm->root_scope`——3b walk 时函数体 VM scope 链（参数层→捕获层→root_scope→global_scope）经 scope_lookup 查到，与运行时 DEFINE 落 root_scope 对齐
+
+**字节码发射**（compiler_compile 2.6 段，函数名绑定之后、HALT 之前）：
+- 按声明序 `[value, type-spec] DEFINE name`（compile_stmt AST_VAR_DEF 分支，与全局函数绑定 compile_func_bind 协议同构）
+- 运行时 current_scope = root_scope（模块层），DEFINE 落到 root_scope；函数调用经 func_vcall 接线 `closure_scope->parent = fn->root_scope` 读取到全局变量
+- comptime var 由 pass_globals 摘除（不进运行时），2.6 段防御分支跳过
+
 ### 9. optional 类型架构（`?T`，2026-09-18 定稿，见语法设计决策 §12）
 
 **option_type_t**（继承 `type_t`，同 struct/array/const/volatile 平级）：

@@ -31,6 +31,8 @@ extern "C" {
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
+#include "vm/scope.h"
+#include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/type_array.h"
 }
@@ -1561,6 +1563,128 @@ TEST_F(SemaTest, ComptimeFuncNotConstantPath) {
         "func main(): void { var r = f(); }"));
     /* g 未定义 → 调用点 lookup 失败诊断（sema 阶段） */
     expect_message(0, "undefined variable 'g'");
+}
+
+/* ================================================================ */
+/* 全局变量（运行时实体，init 编译期折叠为字面量/函数引用）             */
+/* ================================================================ */
+
+TEST_F(SemaTest, GlobalVarBasic) {
+    /* 全局变量：符号注册 + 激活（is_comptime 不设——运行期实体）。
+       函数体引用不折叠（保持 AST_IDENT），shadow value 定义到
+       vm->root_scope（与运行时 DEFINE 落 root_scope 对齐）。 */
+    EXPECT_TRUE(analyze(
+        "var g: i32 = 42;"
+        "func main(): void { var x = g; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *g = sema_lookup(sema_->global_scope, STRSLICE_LIT("g"));
+    ASSERT_NE(g, nullptr);
+    EXPECT_FALSE(g->is_comptime);
+    EXPECT_FALSE(g->ct_valid);
+    EXPECT_TRUE(g->flow_init);
+    EXPECT_TRUE(g->is_active);
+    EXPECT_EQ(g->type, vm_->type_i32);
+
+    /* shadow value 在 vm root_scope（3b walk 时函数体可查到） */
+    value_t *sv = scope_lookup(vm_->root_scope, STRSLICE_LIT("g"));
+    ASSERT_NE(sv, nullptr);
+    EXPECT_EQ(value_type(sv), vm_->type_i32);
+    EXPECT_TRUE(value_is_shadow(sv));
+}
+
+TEST_F(SemaTest, GlobalVarInference) {
+    /* 无显式类型：从折叠右值推断类型（i32 字面量） */
+    EXPECT_TRUE(analyze(
+        "var n = 7;"
+        "func main(): void { var x = n; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *n = sema_lookup(sema_->global_scope, STRSLICE_LIT("n"));
+    ASSERT_NE(n, nullptr);
+    EXPECT_EQ(n->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, GlobalVarString) {
+    /* 字符串全局变量：str 类型 + init 折叠为 AST_STRING_LIT */
+    EXPECT_TRUE(analyze(
+        "var s: str = \"hi\";"
+        "func main(): void { var x = s; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *s = sema_lookup(sema_->global_scope, STRSLICE_LIT("s"));
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->type, vm_->type_str);
+
+    /* init 折叠为字面量节点（AST_STRING_LIT）写回 vd->init */
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ASSERT_NE(prog, nullptr);
+    ast_node_t *f = prog->funcs;
+    ASSERT_NE(f, nullptr);
+    ASSERT_EQ(f->kind, AST_VAR_DEF);
+    EXPECT_EQ(((ast_var_def_t *)f)->init->kind, AST_STRING_LIT);
+}
+
+TEST_F(SemaTest, GlobalVarExprFold) {
+    /* 右值编译期可计算表达式：折叠为字面量写回 init */
+    EXPECT_TRUE(analyze(
+        "var x = (1 + 2) * 3 - 4;"
+        "func main(): void { var y = x; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *x = sema_lookup(sema_->global_scope, STRSLICE_LIT("x"));
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->type, vm_->type_i32);
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *f = prog->funcs;
+    ASSERT_NE(f, nullptr);
+    ASSERT_EQ(f->kind, AST_VAR_DEF);
+    EXPECT_EQ(((ast_var_def_t *)f)->init->kind, AST_INT_LIT);
+}
+
+TEST_F(SemaTest, GlobalVarFuncRef) {
+    /* 右值 = 函数名引用：折叠为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION） */
+    EXPECT_TRUE(analyze(
+        "func add(a:i32, b:i32):i32 { return a + b; }"
+        "var f = add;"
+        "func main(): void { var x = f; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    ast_node_t *f = prog->funcs;
+    ASSERT_NE(f, nullptr);
+    /* prog->funcs = [add(func), f(var), main(func)] → f 在第二个 */
+    ast_node_t *second = f->next;
+    ASSERT_NE(second, nullptr);
+    ASSERT_EQ(second->kind, AST_VAR_DEF);
+    EXPECT_EQ(((ast_var_def_t *)second)->init->kind, AST_FUNC_REF);
+}
+
+TEST_F(SemaTest, GlobalVarTypeMismatch) {
+    /* 显式类型与折叠右值不匹配 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "var a: i32 = \"hello\";"
+        "func main(): void { }"));
+    expect_message(0, "cannot initialize global variable 'a' of type i32 with str");
+}
+
+TEST_F(SemaTest, GlobalVarNotConstant) {
+    /* 右值引用运行期实体（其他全局变量）→ 不可折叠诊断 */
+    EXPECT_FALSE(analyze(
+        "var a: i32 = 1;"
+        "var b: i32 = a;"
+        "func main(): void { }"));
+    expect_message(0, "initializer must be a compile-time constant");
+}
+
+TEST_F(SemaTest, GlobalVarUnknownType) {
+    /* 非法类型名（如 "string"，内建为 "str"）→ unknown type 诊断，
+       不静默放行到运行时（对齐 shadow_var_def 语义） */
+    EXPECT_FALSE(analyze(
+        "var s: string = \"hi\";"
+        "func main(): void { }"));
+    expect_message(0, "unknown type");
 }
 
 /* ================================================================ */

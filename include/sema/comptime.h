@@ -53,6 +53,17 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
                             sema_scope_t *scope);
 
 /**
+ * 求值全局变量定义（运行时实体，init 编译期折叠）：
+ * 改写 init 中的 comptime 引用 → ctfe 求值 → 折叠 init 为字面量/
+ * 函数引用（sema_ct_lit 写回 vd->init，compiler 发射字面量字节码）。
+ * 与 comptime var 的关键差异：不编码符号表（引用点不折叠——运行期
+ * 经 root_scope 读取变量），不设 is_comptime/ct_valid。
+ * 失败返回 false（诊断已记录）；调用方摘除失败节点防级联。
+ */
+bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
+                          sema_scope_t *scope);
+
+/**
  * 求值 comptime func 调用：改写实参引用 → ctfe 求值整个调用 →
  * 折叠 *node 为字面量。返回常量 shadow value；
  * 失败返回 void shadow（错误恢复产物，诊断已记录）。

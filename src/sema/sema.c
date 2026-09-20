@@ -607,9 +607,20 @@ static void pass_globals(sema_t *sema, ast_program_t *prog) {
   for (ast_node_t *f = prog->funcs; f;) {
     ast_node_t *next = f->next;
     if (f->kind == AST_VAR_DEF) {
-      /* 失败（诊断已记录）：仍摘除，避免下游误以为全局 var 存在 */
-      sema_eval_comptime_var(sema, (ast_var_def_t *)f, sema->global_scope);
-      *prev = next;
+      ast_var_def_t *vd = (ast_var_def_t *)f;
+      if (vd->is_comptime) {
+        /* comptime var：求值编码常量，定义点摘除（不进运行时） */
+        sema_eval_comptime_var(sema, vd, sema->global_scope);
+        *prev = next;
+      } else {
+        /* 普通全局变量：init 折叠为字面量/函数引用，保留进字节码（运行时
+           DEFINE 到 root_scope，函数体可见）。失败（诊断已记录）：仍摘除，
+           避免下游误以为全局 var 存在。 */
+        if (!sema_eval_global_var(sema, vd, sema->global_scope))
+          *prev = next;
+        else
+          prev = &f->next;
+      }
     } else {
       prev = &f->next;
     }

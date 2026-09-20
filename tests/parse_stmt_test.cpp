@@ -1377,12 +1377,13 @@ TEST_F(ParseStmtTest, ProgramMultipleFuncs) {
 }
 
 TEST_F(ParseStmtTest, ProgramNonFuncAtTopLevel) {
+    /* 顶层 var 已是合法语法（全局变量，parser.c parse_program 挂 funcs 链） */
     parser_t *p = make_parser("var x = 1;");
     ASSERT_NE(p, nullptr);
 
     ast_node_t *node = parse_program(p);
     ASSERT_NE(node, nullptr);
-    EXPECT_EQ(node->kind, AST_ERROR);
+    EXPECT_EQ(node->kind, AST_PROGRAM);
 
     cleanup_parser(p);
 }

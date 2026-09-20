@@ -247,6 +247,26 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
+  /* 2.6 全局变量定义：sema 已折叠 init 为字面量/AST_FUNC_REF（可编译期
+     折叠契约），按声明序发射 [value, type-spec] DEFINE name（compile_stmt
+     AST_VAR_DEF 分支，与全局函数绑定 compile_func_bind 协议同构）。
+     运行时此处 current_scope = root_scope（模块层），DEFINE 落到 root_scope
+     ——函数调用经 root_scope 查找（func_vcall 接线 closure_scope->parent =
+     root_scope）读取到全局变量。仅普通全局 var（comptime var 已由
+     pass_globals 摘除，防御分支跳过）。 */
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind != AST_VAR_DEF) continue;
+    if (((ast_var_def_t *)f)->is_comptime) continue; /* 防御：sema 已摘除 */
+    compile_stmt(c, f);
+    if (c->failed) break;
+  }
+  if (c->failed) {
+    if (body_slots) allocator_free(c->alloc, (void **)&body_slots);
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
   bcode_write_op(bc, BCODE_HALT);
 
   /* 3. 函数体区（产物最后）：编译各函数体（fid 序，与提升区一致），回填

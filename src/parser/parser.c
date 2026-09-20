@@ -110,6 +110,13 @@ ast_node_t *parse_program(parser_t *p) {
                sema pass1b 求值折叠（AST_TYPE_REF）后保留——进入字节码，
                运行时 LOAD_TYPE/PUSH; PUSH_UNDEFINED; DEFINE 绑定 type value。 */
             func = parse_type_def(p);
+        } else if (check_keyword(p, "var")) {
+            /* 全局变量定义 var name[:type] = init; 挂 funcs 链（非 comptime）。
+               sema pass_globals 折叠 init 为字面量/函数引用后保留——进入
+               字节码，运行时 DEFINE 到模块 root_scope（与全局函数绑定同层，
+               函数体经 root_scope 查找可见）。区别于 comptime var（编译期
+               常量，pass_globals 摘除不进运行时）。 */
+            func = parse_var_def(p);
         } else if (check_symbol(p, ";")) {
             /* 顶层空语句：单独分号（;）——无操作占位，跳过 */
             advance(p);

@@ -14,6 +14,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "vm/function.h"
+#include "vm/scope.h"
 #include "vm/type_array.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
@@ -328,6 +329,142 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
   sym->is_comptime = true;
   sym->ct_valid = true;
   sym->ct = ct;
+  sym->flow_init = true;
+  sym->is_active = true;
+  return true;
+}
+
+/* ===========================================================================
+ * 全局变量求值（运行时实体，init 编译期折叠）
+ * =========================================================================== */
+
+bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
+                          sema_scope_t *scope) {
+  sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
+  if (!sym) return false; /* 重复定义已诊断，符号未注册 */
+
+  /* 全局变量必须带编译期可折叠的右值（用户契约：init 可折叠为字面量或
+     函数引用）。无 init（未初始化声明）无法折叠 → 报错。 */
+  if (!vd->init || vd->init->kind == AST_UNDEF) {
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+               "global variable '%.*s' must have a compile-time initializer "
+               "foldable to a literal or function",
+               (int)vd->name.len, vd->name.ptr);
+    return false;
+  }
+
+  /* 1. 表达式求值（shadow 类型检查 + 改写 init 中的 comptime 引用）。
+     错误恢复产物（error/void shadow）跳过 ctfe（避免二次诊断） */
+  value_t *sh = sema_expr(sema, &vd->init, scope);
+  bool bad = value_is_error(sema->vm, sh) ||
+             value_is_type(sh, TYPE_KIND_VOID);
+  if (bad) return false;
+
+  /* 2. 类型校验（显式类型 / 推断，与 comptime var 一致） */
+  if (vd->type_expr) {
+    if (!sym->type) {
+      sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
+    }
+    if (!sym->type) {
+      /* 类型槽位解析失败（非法/未知类型名，如 "string"）：补报诊断防
+         静默放行到运行时（对齐 shadow_var_def 的 unknown type 语义）。
+         提取槽位名字区分 var 遮蔽来源（完全遮罩语义）。 */
+      strslice_t tn = {0};
+      if (vd->type_expr->kind == AST_IDENT) {
+        tn = ((ast_ident_t *)vd->type_expr)->name;
+      } else if (vd->type_expr->kind == AST_TYPE_REF) {
+        tn = ((ast_type_ref_t *)vd->type_expr)->name;
+      }
+      sema_symbol_t *shadow = tn.ptr ? sema_lookup(scope, tn) : NULL;
+      if (shadow && shadow->kind == SEMA_SYM_VAR) {
+        diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+                   "'%.*s' is a variable, not a type", (int)tn.len, tn.ptr);
+      } else {
+        diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+                   "unknown type");
+      }
+      return false;
+    }
+    if (sym->type) {
+      value_t *dst = value_make_shadow(sema->vm, sym->type);
+      if (value_is_error(sema->vm, value_assign(sema->vm, dst, sh))) {
+        char tn[64], itn[64];
+        sema_type_name(sym->type, tn, sizeof(tn));
+        sema_type_name(value_type(sh), itn, sizeof(itn));
+        diag_error(sema->diag, sema_loc(sema, vd->init),
+                   "cannot initialize global variable '%.*s' of type %s "
+                   "with %s",
+                   (int)vd->name.len, vd->name.ptr, tn, itn);
+        return false;
+      }
+    }
+  } else {
+    sym->type = value_type(sh);
+  }
+
+  /* 3. ctfe 强制编译期求值（vm->comptime 状态标记）：init 必须可折叠为
+     字面量/函数引用。引用运行期实体（局部/其他全局变量）或不可计算
+     表达式 → ctfe error → 报错（诊断信息含 ctfe 原因）。 */
+  vm_t *vm = sema->vm;
+  bool saved = vm->comptime;
+  vm->comptime = true;
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = vm;
+  ctx.sema = sema;
+  ctx.sema_scope = scope; /* 局部符号（函数/变量）按当前词法作用域解析 */
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *r = ctfe_eval(&ctx, vd->init);
+  vm->comptime = saved;
+
+  if (!r || value_is_error(vm, r)) {
+    const char *msg = NULL;
+    if (r) {
+      error_data_t *ed = (error_data_t *)value_data(r);
+      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+    }
+    diag_error(sema->diag, sema_loc(sema, vd->init),
+               "global variable '%.*s': initializer must be a compile-time "
+               "constant foldable to a literal or function%s%s",
+               (int)vd->name.len, vd->name.ptr, msg ? ": " : "",
+               msg ? msg : "");
+    return false;
+  }
+
+  /* 4. 编码常量 + 折叠 init AST 回字面量（写回 vd->init，compiler 直接
+     编译发射字面量字节码）。 */
+  sema_ct_const_t ct;
+  if (!sema_ct_encode(sema, r, &ct)) {
+    char tn[64];
+    sema_type_name(value_type(r), tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, vd->init),
+               "global variable '%.*s': value of type %s cannot be folded "
+               "to a constant",
+               (int)vd->name.len, vd->name.ptr, tn);
+    return false;
+  }
+  ast_node_t *folded = sema_ct_lit(sema, vd->init, &ct);
+  if (!folded) {
+    diag_error(sema->diag, sema_loc(sema, vd->init),
+               "global variable '%.*s': initializer cannot be folded to a "
+               "literal",
+               (int)vd->name.len, vd->name.ptr);
+    return false;
+  }
+  folded->next = vd->init->next; /* 保留兄弟链 */
+  vd->init = folded;
+
+  /* 5. 符号激活 + VM shadow scope 定义：全局变量函数体内可见（pass_globals
+     先于 Pass 3a/3b；sema_walk_function 的 VM scope 链参数层→捕获层→
+     root_scope→global_scope 经 scope_lookup 查到 shadow value——与运行时
+     DEFINE 落 root_scope 对齐）。不设 is_comptime/ct_valid——引用点不折叠
+     （保持 AST_IDENT，运行期 PUSH 读 root_scope）。 */
+  char nb[256];
+  ctfe_slice_to_cstr(vd->name, nb, sizeof nb);
+  value_t *sv =
+      value_make_shadow(vm, sym->type ? sym->type : vm->type_void);
+  scope_define(vm, vm->root_scope, nb, sv);
   sym->flow_init = true;
   sym->is_active = true;
   return true;
