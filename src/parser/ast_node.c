@@ -39,7 +39,7 @@ static const char *g_kind_names[] = {
     [AST_TYPE_REF]   = "type_ref",
     [AST_FUNC_REF]   = "func_ref",
     [AST_TERNARY]    = "ternary",
-    [AST_OPT_GET]    = "opt_get",
+    [AST_UNWRAP]     = "unwrap",
     [AST_ERROR]      = "error",
 };
 

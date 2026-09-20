@@ -511,6 +511,10 @@ static token_t *lexer_read_symbol(lexer_t *lexer, stream_pos_t begin) {
       "/=",
       "%=",
   };
+  /* 注：.! / .?（optional 解包 assert/try）不做双字符 token——与构造器
+     类型字面量前导 .?T{...}（'.' 前导 + '?' optional 类型修饰）冲突，
+     词法无法区分后缀解包与构造前导。由 parser 在 '.' 后紧跟 '!'/'?' 时
+     组合识别（parse_postfix）。 */
   UChar32 c1 = istream_read_cp(lexer->stream);
   UChar32 c2 = istream_peek_cp(lexer->stream);
 

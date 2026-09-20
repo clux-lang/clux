@@ -40,14 +40,6 @@ typedef enum {
   SEMA_SYM_TYPE, /* 类型定义（type 名字） */
 } sema_symbol_kind_t;
 
-/* ---- 窄化状态（docs m2-design §12.4）----
- * ?T 变量在 nil 判定分支内的数据流状态。符号级窄化，不进入运行时。 */
-typedef enum {
-  NARROW_UNKNOWN = 0, /* 普通 ?T：读写按 ?T 类型处理 */
-  NARROW_SOME,        /* 已知非 none（if (x != nil) 真分支）：读取退化 T */
-  NARROW_NONE,        /* 已知为 nil（a = nil 后）：读 nil 比较外的表达式报错 */
-} sema_narrow_t;
-
 /* ---- 符号 ---- */
 
 typedef struct _sema_scope_t sema_scope_t;
@@ -112,12 +104,9 @@ struct _sema_symbol_t {
                          "used before initialization"。仅变量符号有意义。 */
   bool is_active;     /* 符号是否已定义到 VM scope（运行时可见）。函数/内置
                          符号注册即激活；变量在 shadow_var_def 定义时激活。 */
-  /* ---- 路径窄化（docs m2-design §12.4）----
-     ?T 变量的数据流状态：UNKNOWN = 普通 ?T（读写无特殊语义）；
-     SOME = if (x != nil) 真分支内，已判定非 none，读取退化 T；
-     NONE = 已知为 nil（a = nil 后，读 nil 比较外的表达式报错）。
-     分支出口恢复外层状态；函数调用后清窄化（保守）。仅 ?T 变量符号有意义。 */
-  uint8_t narrow;     /* sema_narrow_t：NARROW_UNKNOWN / NARROW_SOME / NARROW_NONE */
+  /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
+     符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——
+     用户范式改为显式解包：if (a != nil) { var v = a.!; ... }。 ---- */
   /* ---- comptime（M2） ---- */
   bool           is_comptime; /* comptime var/func 标注 */
   bool           ct_valid;    /* 已编译期求值（常量有效；comptime var 求值成功

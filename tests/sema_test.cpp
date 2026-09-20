@@ -519,69 +519,87 @@ TEST_F(SemaTest, OptionalConstructorWrongFieldType) {
     expect_message(0, "cannot initialize optional");
 }
 
-TEST_F(SemaTest, NarrowingSomeRead) {
-    /* if (x != nil) SOME 分支内 x 退化为 T：可赋给 i32、可算术 */
+TEST_F(SemaTest, UnwrapAssertSomeRead) {
+    /* .! assert 解包：SOME 分支内 x 仍为 ?i32，解包后得 inner i32 可赋值/算术 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
         "  var x:?i32 = 5;"
         "  if (x != nil) {"
-        "    var y:i32 = x;"
-        "    var z:i32 = x + 1;"
+        "    var y:i32 = x.!;"
+        "    var z:i32 = x.! + 1;"
         "  }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NarrowingNoneReadErrors) {
-    /* if (x == nil) NONE 分支内读取 x → 报错（已知为 nil） */
+TEST_F(SemaTest, UnwrapAssertOnNonOptionalErrors) {
+    /* .! 只接受 optional 操作数；对非 optional 值报错 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var x:?i32 = nil;"
-        "  if (x == nil) {"
-        "    var y:i32 = x;"
-        "  }"
+        "  var x:i32 = 5;"
+        "  var y:i32 = x.!;"
         "}"));
-    expect_message(0, "is known to be nil");
+    expect_message(0, "operator '.!' requires an optional operand");
 }
 
-TEST_F(SemaTest, NarrowingElseBranch) {
-    /* else 分支窄化为补集：x != nil 的 else 内 x 已知为 nil */
+TEST_F(SemaTest, UnwrapTryNotImplementedErrors) {
+    /* .? try 仅词法预留，语义未实现 → 编译错误 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
-        "  var x:?i32 = nil;"
+        "  var x:?i32 = 5;"
+        "  var y = x.?;"
+        "}"));
+    expect_message(0, "operator '.?' (try) is not implemented yet");
+}
+
+TEST_F(SemaTest, UnwrapTryOnNonOptionalErrors) {
+    /* .? 同样要求 optional 操作数；先过操作数类型校验再报未实现 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var x:i32 = 5;"
+        "  var y = x.?;"
+        "}"));
+    expect_message(0, "operator '.?' requires an optional operand");
+}
+
+TEST_F(SemaTest, UnwrapAssertElseBranch) {
+    /* 无窄化记录：else 分支 x 仍为 ?i32，同样须 .! 解包 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x:?i32 = 5;"
         "  if (x != nil) { }"
-        "  else { var y:i32 = x; }"
+        "  else { var y:i32 = x.!; }"
         "}"));
-    expect_message(0, "is known to be nil");
+    EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NarrowingAndCombinationThen) {
-    /* 复合条件：&& then 分支两侧都窄化为 SOME（含分组括号，parser 剥离） */
+TEST_F(SemaTest, UnwrapAssertAndCombinationThen) {
+    /* 复合条件：&& then 分支两侧各自解包 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
         "  var a:?i32 = 5;"
         "  var b:?i32 = 7;"
         "  if ((a != nil) && (b != nil)) {"
-        "    var x:i32 = a + b;"
+        "    var x:i32 = a.! + b.!;"
         "  }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NarrowingOrCombinationElse) {
-    /* 复合条件：|| else 分支两侧都窄化为 SOME */
+TEST_F(SemaTest, UnwrapAssertOrCombinationElse) {
+    /* 复合条件：|| else 分支两侧各自解包 */
     EXPECT_TRUE(analyze(
         "func main(): void {"
         "  var a:?i32 = 5;"
         "  var b:?i32 = 7;"
         "  if (a == nil || b == nil) { }"
-        "  else { var x:i32 = a + b; }"
+        "  else { var x:i32 = a.! + b.!; }"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, NarrowingAndElseConservative) {
-    /* 复合条件：&& else 分支无法确定哪侧假 → 保守不窄化（算术报错） */
+TEST_F(SemaTest, UnwrapRequiredElseConservativeArithmeticErrors) {
+    /* 无窄化：&& else 分支 a 未解包直接算术 → 报错 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  var a:?i32 = 5;"
@@ -592,33 +610,8 @@ TEST_F(SemaTest, NarrowingAndElseConservative) {
     expect_message(0, "cannot apply '+' to ?i32");
 }
 
-TEST_F(SemaTest, NarrowingEqCombinationThen) {
-    /* 复合条件：== && then 分支两侧都窄化为 NONE */
-    EXPECT_FALSE(analyze(
-        "func main(): void {"
-        "  var a:?i32 = nil;"
-        "  var b:?i32 = nil;"
-        "  if (a == nil && b == nil) {"
-        "    var y:i32 = a;"
-        "  }"
-        "}"));
-    expect_message(0, "is known to be nil");
-}
-
-TEST_F(SemaTest, NarrowingNotFlip) {
-    /* 复合条件：一元 ! 翻转判定 —— !(a == nil) 等价 a != nil */
-    EXPECT_TRUE(analyze(
-        "func main(): void {"
-        "  var a:?i32 = 5;"
-        "  if (!(a == nil)) {"
-        "    var z:i32 = a + 1;"
-        "  }"
-        "}"));
-    EXPECT_FALSE(diag_has_error(diag_));
-}
-
-TEST_F(SemaTest, NarrowingConflictConservative) {
-    /* 复合条件：矛盾约束（a != nil && a == nil）→ 保守 UNKNOWN */
+TEST_F(SemaTest, UnwrapRequiredConflictConservativeArithmeticErrors) {
+    /* 无窄化：矛盾约束（a != nil && a == nil）不产生流记录 → 算术报错 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  var a:?i32 = 5;"
@@ -627,6 +620,18 @@ TEST_F(SemaTest, NarrowingConflictConservative) {
         "  }"
         "}"));
     expect_message(0, "cannot apply '+' to ?i32");
+}
+
+TEST_F(SemaTest, UnwrapAssertNotFlip) {
+    /* 一元 ! 翻转判定后解包 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a:?i32 = 5;"
+        "  if (!(a == nil)) {"
+        "    var z:i32 = a.! + 1;"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, NilCompareNonOptionalErrors) {
@@ -673,18 +678,18 @@ TEST_F(SemaTest, NilNotTypeName) {
     expect_message(0, "unsupported type expression");
 }
 
-TEST_F(SemaTest, NilAssignInNarrowedBranchErrors) {
-    /* D3：SOME 分支内 x 已是 T，nil 赋值破坏窄化前提 → 编译错误 */
-    EXPECT_FALSE(analyze(
+TEST_F(SemaTest, NilAssignToOptionalInBranchLegal) {
+    /* 无窄化：SOME 分支内 x 仍为 ?i32，nil 赋值合法（可再置回 none） */
+    EXPECT_TRUE(analyze(
         "func main(): void {"
         "  var x:?i32 = 5;"
         "  if (x != nil) { x = nil; }"
         "}"));
-    expect_message(0, "cannot assign nil to 'x' inside a narrowed branch");
+    EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, OptionalAssignAfterCallResetsNarrow) {
-    /* 函数调用后清窄化（保守）：调用后 x 恢复 UNKNOWN，算术报错 */
+TEST_F(SemaTest, OptionalNoNarrowingAfterCallArithmeticErrors) {
+    /* 无窄化：函数调用后 x 仍为 ?i32，未解包算术报错（不再依赖调用后清窄化） */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  var x:?i32 = 5;"

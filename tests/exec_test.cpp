@@ -561,8 +561,8 @@ TEST_F(ExecTest, OptIsNoneOnNoneIsTrue) {
     EXPECT_TRUE(*(const bool *)value_data(top));
 }
 
-/* OPT_IS_NONE on some（?T 值 ok=true）→ false；随后 OPT_GET 借用返回
-   value 字段（零拷贝，data 指向 option 值块内偏移） */
+/* OPT_IS_NONE on some（?T 值 ok=true）→ false（tag 比较；SOME 取值走
+   .! 解包 → UNWRAP 指令，借用返回 value 字段，零拷贝） */
 TEST_F(ExecTest, OptGetOnSomeBorrowsInner) {
     const type_t *opt = type_option_intern(vm, vm->type_i32);
     ASSERT_NE(opt, nullptr);

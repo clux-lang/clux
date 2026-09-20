@@ -53,8 +53,8 @@ typedef enum {
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
-    AST_OPT_GET,         /* 窄化 SOME 读取：sema 在 SOME 分支内将 ?T 变量的
-                            AST_IDENT 重写为该节点 → compiler 发 PUSH + OPT_GET */
+    AST_UNWRAP,          /* optional 解包：a.!（assert，none 时 panic）/
+                            a.?（try，仅词法预留，语义未实现） */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

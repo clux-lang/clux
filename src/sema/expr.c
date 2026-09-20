@@ -15,13 +15,13 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_nil.h"
-#include "parser/ast_opt_get.h"
 #include "parser/ast_option.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_undef.h"
+#include "parser/ast_unwrap.h"
 #include "parser/ast_volatile.h"
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
@@ -283,32 +283,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       if (value_type(v) == sema->vm->type_type)
         return v;
 
-      /* 路径窄化（docs m2-design §12.5）：?T 变量的符号级数据流状态。
-         SOME 态（if (x != nil) 真分支已判定非 none）：读取退化 T——重写为
-         AST_OPT_GET（compiler 发 PUSH + OPT_GET，运行时借用 value 字段
-         零拷贝），返回 inner 类型 shadow。
-         NONE 态（已知为 nil）：读取报错（nil 非 value，不可消费）。
-         UNKNOWN 态：普通 ?T shadow（T 操作报错引导判空）。 */
-      if (sym && sym->type && sym->type->kind == TYPE_KIND_OPTION) {
-        if (sym->narrow == NARROW_SOME) {
-          ast_node_t *og = ast_opt_get_new(sema->arena, (*node)->tok_begin,
-                                           (*node)->tok_end);
-          if (og) {
-            ((ast_opt_get_t *)og)->name = n->name;
-            og->next = (*node)->next; /* 保留兄弟链 */
-            *node = og;
-          }
-          return value_make_shadow(sema->vm, type_option_inner(sym->type));
-        }
-        if (sym->narrow == NARROW_NONE) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "variable '%.*s' is known to be nil (narrowed by a nil "
-                     "comparison); check it with '%.*s != nil' first",
-                     (int)n->name.len, n->name.ptr, (int)n->name.len,
-                     n->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
+      /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
+         解包由显式 .! assert 承担，见 docs m2-design §12.5） */
       return value_make_shadow(sema->vm, value_type(v));
     }
     case AST_CONST: {
@@ -458,20 +434,38 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 函数调用后清窄化（docs m2-design §12.5 状态流转）：调用可能修改
-         任意 ?T 变量（副作用），窄化状态不可靠 → 保守清 UNKNOWN。 */
-      for (sema_scope_t *s = scope; s; s = s->parent) {
-        const vec_t *keys = strmap_keys(s->symbols);
-        size_t nk = vec_len(keys);
-        for (size_t k = 0; k < nk; k++) {
-          const char *key = (const char *)vec_get(keys, k);
-          sema_symbol_t *sym =
-              (sema_symbol_t *)strmap_get(s->symbols, key);
-          if (sym && sym->type && sym->type->kind == TYPE_KIND_OPTION)
-            sym->narrow = NARROW_UNKNOWN;
-        }
-      }
       return result; /* shadow in → shadow out（return_type shadow） */
+    }
+    case AST_UNWRAP: {
+      /* optional 解包：.!（assert）/ .?（try）。
+         .! 要求操作数是 ?T：none 时运行期 panic（用户范式先判空再解包：
+         if (x != nil) { var v = x.!; ... }）。返回 inner 类型 shadow。
+         .? 仅词法预留（try），语义未实现 → 编译期报错。 */
+      ast_unwrap_t *uw = (ast_unwrap_t *)*node;
+      value_t *operand = sema_expr(sema, &uw->operand, scope);
+      if (value_is_error(sema->vm, operand) ||
+          value_is_type(operand, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      const type_t *ot = value_type(operand);
+      if (!ot || ot->kind != TYPE_KIND_OPTION) {
+        char tn[64], ob[16];
+        size_t len = 0;
+        const char *text =
+            uw->op ? token_get_text(uw->op, &len) : NULL;
+        snprintf(ob, sizeof(ob), ".%.*s", (int)len, text ? text : "?");
+        op_type_name(operand, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "operator '%s' requires an optional operand, got %s", ob,
+                   tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      if (uw->op && token_is(uw->op, "?")) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "operator '.?' (try) is not implemented yet");
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      return value_make_shadow(sema->vm, type_option_inner(ot));
     }
     case AST_MEMBER:
       diag_error(sema->diag, sema_loc(sema, *node),

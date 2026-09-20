@@ -23,6 +23,7 @@
 #include "parser/ast_construct.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
+#include "parser/ast_unwrap.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
 
@@ -460,12 +461,28 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             continue;
         }
 
-        /* 成员访问：.field */
+        /* 成员访问 / optional 解包：.field / .!（assert）/ .?（try）。
+         * .! / .? 不做双字符 token（与构造器 .?T{...} 前导冲突，见 lexer
+         * 注释）——此处识别 '.' 后紧跟 '!' 或 '?' 的组合。 */
         if (check_symbol(p, ".")) {
             uint32_t tb = p->pos;
             advance(p);
             skip_trivia(p);
 
+            /* 解包：. 后紧跟 !（assert）/ ?（try） */
+            if (check_symbol(p, "!") || check_symbol(p, "?")) {
+                const token_t *op_tok = cur_token(p);
+                advance(p);
+
+                ast_node_t *node = ast_unwrap_new(p->arena, tb, p->pos);
+                if (!node) return NULL;
+                ((ast_unwrap_t *)node)->operand = lhs;
+                ((ast_unwrap_t *)node)->op      = (token_t *)op_tok;
+                lhs = node;
+                continue;
+            }
+
+            /* 成员访问：.field */
             if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected field name after '.'");

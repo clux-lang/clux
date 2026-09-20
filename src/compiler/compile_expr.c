@@ -11,7 +11,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_nil.h"
-#include "parser/ast_opt_get.h"
+#include "parser/ast_unwrap.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
@@ -141,14 +141,13 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, 1);
     break;
   }
-  case AST_OPT_GET: {
-    /* 窄化 SOME 读取（sema 重写产物）：PUSH <name> 压 ?T 变量值 →
-       OPT_GET 弹 ?T 值 → 借用返回 value 字段（?T 退化为 T）。
-       栈深：PUSH +1，OPT_GET 弹 1 压 1 净 0，表达式总净 +1。 */
-    ast_opt_get_t *n = (ast_opt_get_t *)node;
-    bcode_write_op(c->bc, BCODE_PUSH); bcode_write_str(c->bc, n->name);
-    st_push(c, 1);
-    bcode_write_op(c->bc, BCODE_OPT_GET);
+  case AST_UNWRAP: {
+    /* optional 解包（a.! assert）：compile_expr(operand) 求值 ?T 值 →
+       UNWRAP 弹 ?T 值 → ok 借用返回 value 字段（?T 退化为 T）/ none panic。
+       栈深：operand 净 +1，UNWRAP 弹 1 压 1 净 0，表达式总净 +1。 */
+    ast_unwrap_t *n = (ast_unwrap_t *)node;
+    compile_expr(c, n->operand);
+    bcode_write_op(c->bc, BCODE_UNWRAP);
     break;
   }
   case AST_TYPE_REF: {

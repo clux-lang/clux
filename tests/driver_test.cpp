@@ -201,14 +201,14 @@ TEST(Driver, RunFileEmptyOptionalFuncArrayFillsNil) {
 
 TEST(Driver, RunFilePartialFillOptionalFuncArray) {
   /* optional 函数数组：显式 f + 显式 nil（M2 无自动 0 填充）。nil 元素判空 +
-     SOME 分支窄化后调用返回 7 */
+     SOME 分支 .! 解包后调用返回 7 */
   std::string path = write_temp_file(
       "func main():i32 {\n"
       "  var fns = .[2]?func()->i32{ f, nil };\n"
       "  var e1:?func()->i32 = fns[1];\n"
       "  if (e1 != nil) { return 1; }\n"
       "  var e0:?func()->i32 = fns[0];\n"
-      "  if (e0 != nil) { return e0(); }\n"
+      "  if (e0 != nil) { var f0 = e0.!; return f0(); }\n"
       "  return 2;\n"
       "}\n"
       "func f():i32 { return 7; }\n");
@@ -338,7 +338,7 @@ TEST(Driver, RunFileEmptyBareBlockReturnsZero) {
 
 TEST(Driver, RunFileOptionalNilEndToEndPasses) {
   /* nil 端到端（M2 optional）：?func 变量 nil 初始化 + ==nil 判定 + 赋值 f1
-     （T → ?T 隐式提升）+ 窄化 SOME 分支调用 + 再赋 nil */
+     （T → ?T 隐式提升）+ SOME 分支 .! 解包后调用 + 再赋 nil */
   std::string path = write_temp_file(
       "func f1(a:i32):i32 { return a + 1; }"
       "func main():i32 {\n"
@@ -346,7 +346,7 @@ TEST(Driver, RunFileOptionalNilEndToEndPasses) {
       "  if (g != nil) { return 1; }\n"
       "  g = f1;\n"
       "  if (g == nil) { return 2; }\n"
-      "  if (g != nil) { var r = g(10); if (r != 11) { return 3; } }\n"
+      "  if (g != nil) { var f = g.!; var r = f(10); if (r != 11) { return 3; } }\n"
       "  g = nil;\n"
       "  if (g != nil) { return 4; }\n"
       "  return 0;\n"
@@ -365,7 +365,7 @@ TEST(Driver, RunFileNilAsTypeAnnotationRejected) {
 
 TEST(Driver, RunFileOptionalStrEndToEndPasses) {
   /* ?str 端到端：nil 初始化 + 双向 ==nil 判定 + 赋值"world"（str → ?str 隐式
-     提升）+ SOME 窄化读取 + 再赋 nil */
+     提升）+ SOME 分支 .! 解包读取 + 再赋 nil */
   std::string path = write_temp_file(
       "func main():i32 {\n"
       "  var s:?str = nil;\n"
@@ -373,12 +373,66 @@ TEST(Driver, RunFileOptionalStrEndToEndPasses) {
       "  if (nil != s) { return 2; }\n"
       "  s = \"world\";\n"
       "  if (s == nil) { return 5; }\n"
-      "  if (s != nil) { var t:str = s; if (t != \"world\") { return 6; } }\n"
+      "  if (s != nil) { var t:str = s.!; if (t != \"world\") { return 6; } }\n"
       "  s = nil;\n"
       "  if (s != nil) { return 7; }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnwrapAssertEndToEndPasses) {
+  /* .! assert 解包端到端：SOME 分支解包读取 inner 值参与运算返回 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var s:?str = nil;\n"
+      "  s = \"world\";\n"
+      "  if (s != nil) {\n"
+      "    var t:str = s.!;\n"
+      "    if (t != \"world\") { return 1; }\n"
+      "  } else { return 2; }\n"
+      "  var n:?i32 = 40;\n"
+      "  if (n != nil) { var v:i32 = n.!; return v + 2; }\n"
+      "  return 3;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnwrapAssertOnNonePanics) {
+  /* .! 对 none 解包 → 运行期 panic（error 值，driver 返回非 0） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:?i32 = nil;\n"
+      "  var v:i32 = x.!;\n"
+      "  return v;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnwrapAssertOnNonOptionalRejected) {
+  /* .! 作用于非 optional 值 → 编译期诊断 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:i32 = 5;\n"
+      "  var v:i32 = x.!;\n"
+      "  return v;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnwrapTryRejected) {
+  /* .? try 语义未实现 → 编译期诊断 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x:?i32 = 5;\n"
+      "  var v = x.?;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 

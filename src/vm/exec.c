@@ -587,23 +587,25 @@ static value_t *op_push_opt_none(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make(vm, t, data);
 }
 
-/* OPT_GET（无操作数）：窄化 SOME 读取。弹 ?T 值 → 借用返回 value 字段的
- * 借用引用（零拷贝，data 指向 option 值块内偏移；与 is_own 借用字段同构，
- * 生命周期 = 源 scope 值）。SOME 分支内 ok 恒为 true，读取安全；防御性
- * 校验 ok，none 态读取 = 编译期/运行期契约破坏。 */
-static value_t *op_opt_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
+/* UNWRAP（无操作数）：optional 解包（a.! assert）。弹 ?T 值 → ok 则借用
+ * 返回 value 字段的借用引用（零拷贝，data 指向 option 值块内偏移；与
+ * is_own 借用字段同构，生命周期 = 源 scope 值）；ok=false（none）→ panic
+ * 错误值（用户范式先判空再解包：if (x != nil) { var v = x.!; ... }，
+ * 未判空直接解包是编程错误，panic 终止）。 */
+static value_t *op_unwrap(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
     const type_t *t = v ? value_type(v) : NULL;
     if (!t || t->kind != TYPE_KIND_OPTION)
-        return value_make_error(vm, "exec: opt get requires an optional value");
+        return value_make_error(vm, "exec: unwrap requires an optional value");
     const type_t *inner = type_option_inner(t);
     if (value_is_shadow(v)) {
         /* shadow：只算类型，退化 inner 的 shadow 引用 */
         return value_make_shadow(vm, inner);
     }
     if (!*(const bool *)value_data(v))
-        return value_make_error(vm, "exec: opt get on none optional value");
+        return value_make_error(vm,
+                                "panic: unwrap '.!' on none optional value");
     return value_make_borrowed(vm, inner,
         (uint8_t *)value_data(v) + option_value_offset(t));
 }
@@ -843,7 +845,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_INDEX_SET]       = op_index_set,
     [BCODE_LENGTH]          = op_length,
     [BCODE_PUSH_OPT_NONE]   = op_push_opt_none,
-    [BCODE_OPT_GET]         = op_opt_get,
+    [BCODE_UNWRAP]          = op_unwrap,
     [BCODE_OPT_IS_NONE]     = op_opt_is_none,
 };
 

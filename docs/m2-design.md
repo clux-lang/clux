@@ -305,13 +305,13 @@ var a: ?str = nil;
 ```
 
 - **前导判定**，与 const/volatile 同族（前缀式），右结合递归：`?[3]?i32`、`?func(i32)->i32` 均合法
-- **`T → ?T` 隐式提升（some）**（D1）：`T` 的值天然是 `?T` 的 some 态，`var x:?i32 = 5` 直接合法；反向 `?T → T` 需窄化（§12.4）或显式转换，不对称性表达"T 是 ?T 的子集"
-- **`?T` 只能与 nil 比较**（D4）：四种判定形式（`x==nil`/`nil==x`/`x!=nil`/`nil!=x`）是唯一合法比较；`?T == ?T` 直接比较报错，须先窄化再比（§12.4）。`x == nil` 编译成**读 ok tag 的 bool 比较**（非 vtable eq 分派，因 nil 非 value）
+- **`T → ?T` 隐式提升（some）**（D1）：`T` 的值天然是 `?T` 的 some 态，`var x:?i32 = 5` 直接合法；反向 `?T → T` 需显式 `.!` 解包（§12.5），不对称性表达"T 是 ?T 的子集"
+- **`?T` 只能与 nil 比较**（D4）：四种判定形式（`x==nil`/`nil==x`/`x!=nil`/`nil!=x`）是唯一合法比较；`?T == ?T` 直接比较报错。`x == nil` 编译成**读 ok tag 的 bool 比较**（非 vtable eq 分派，因 nil 非 value）
 - **eq 语义**：none==none 恒真、some==some 按 T 比较、异态 false
 - **C 内存映射 = `struct Optional_T { bool ok; T value; }`**：
   - size/align 按 C 对齐规则计算，value 字段偏移 `offsetof(value) = align_up(sizeof(bool), alignof(T))`
   - 访问器：`option_ok(data)`（offset 0 读 tag）、`option_value(data) = data + offset`
-  - **SOME 态窄化退化的运行时真相** = 借用引用 data 指向 value 字段（与 is_own 借用字段同构，`x.member` 零拷贝）
+  - **`.!` 解包的运行时真相** = 借用引用 data 指向 value 字段（与 is_own 借用字段同构，`x.member` 零拷贝）
   - `T → ?T` 隐式提升 = 压 `ok=true` + T 值；none 构造 = 压 `ok=false` + value 全零
 
 #### 12.2 `?T` 构造器（二值单槽位）
@@ -352,42 +352,27 @@ var a: ?str = nil;
 - **undefined 声明全类型保留**（D2）：`var a:[1000]str = undefined` 合法，但 **a 本身 TDZ**——`a[0] = ""` 部分赋值非法（读 a 本身即 TDZ 违例），必须整体 `a = .[1000]str{<"",1000>}` 显式构造赋值；不违背"construct 完全显式"原则
 - **str/func 无空值**：删除全部 nil 隐式转换与 `== nil` 运行时分支；str 的值永远是有效 string_t，func 永远是有效 func_t
 
-#### 12.5 路径窄化（narrowing）
+#### 12.5 显式解包：`.!`（assert）与 `.?`（try，预留）
 
-**判定形式识别**（sema 的 if 条件分析，四种等价）：
+**放弃路径窄化**（2026-09-20 定稿）：窄化依赖 flow 上的符号状态记录，`if`/`&&`/`||`/`!` 组合下无法精准检查（调用后清窄化、矛盾约束保守化等规则复杂且易漏），开发体验差。改为**显式解包运算符**，sema 不做任何 flow 记录：
 
 ```
-if (x == nil) {...}   if (nil == x) {...}
-if (x != nil) {...}   if (nil != x) {...}
+a.!    // assert：解包 ?T → T；none 时运行期 panic
+a.?    // try：仅词法预留，语义未实现（编译期报 "not implemented yet"）
 ```
 
-条件必须形如**符号 ==/!= nil**（x 是 `?T` 的变量/参数）；x 非 optional 与 nil 比较 → 编译错误。
+**用户范式**：先判空再解包，读/调用全部显式化。
 
-**复合条件**（条件可递归嵌套，括号分组由 parser 剥离不产生 AST 节点）：
+```
+if (a != nil) { var v = a.!; ... }        // 解包后使用 inner T
+if (f != nil) { var g = f.!; var r = g(x); }
+```
 
-对每个分支按"该分支必然成立"的约束集合窄化，标准 De Morgan 语义递归：
-
-| 条件形态 | then 分支（条件为真） | else 分支（条件为假） |
-|----------|----------------------|----------------------|
-| `A && B` | 收集 A、B 两侧约束 | 无法确定哪侧假 → 不收集 |
-| `A \|\| B` | 无法确定哪侧真 → 不收集 | 收集 A、B 两侧约束 |
-| `!A`（一元非） | 按"A 为假"收集 | 按"A 为真"收集 |
-
-- 叶子判定即上表四种形式（`x == nil` 为真 → NONE，为假 → SOME；`x != nil` 相反）
-- 例：`if (a != nil && b != nil)` then 内 a、b 都 SOME；`if (a == nil || b == nil)` else 内 a、b 都 SOME；`!(a == nil)` 等价 `a != nil`
-- 同一符号收集到矛盾状态（如 `a != nil && a == nil`）→ 保守置 UNKNOWN
-- 约束数上限 8：超出后停止收集（丢弃多余只是少窄化，已收集约束仍成立）
-
-**分支内窄化状态**（符号级数据流，复用现有 flow_init 基础设施）：
-
-| 状态 | then 分支 | else 分支 |
-|------|-----------|-----------|
-| `x == nil` | NONE：访问报错 "x is known to be nil" | SOME：`?T` 退化 T，`x.member`/`x()` 合法 |
-| `x != nil` | SOME：退化 T | NONE：访问报错 |
-
-- **UNKNOWN 态**（未窄化）：`?T` shadow，`x.member` 报错，引导写 `if (x != nil)`
-- **窄化路径禁止可选赋值**（D3）：if 分支内 x 的类型已是 T（非 `?T`），用 `?T` 值赋给 T 非法，故分支内赋值 RHS 必为 T 类型，赋值后**保持 SOME 态**
-- **状态流转**：`a = nil`（UNKNOWN 态，合法）→ NONE；分支出口恢复外层状态；函数调用后清窄化（保守）；嵌套 if 沿外层状态继续窄化
+- **`.!` 只接受 `?T` 操作数**：非 optional 值 `.！` → 编译错误（"operator '.!' requires an optional operand, got i32"）；返回 inner 类型 T 的 shadow value（借用引用 data 指向 value 字段，零拷贝，与 is_own 借用字段同构）
+- **none 时 panic**：`.!` 对 none 解包 → 运行期 error 值（消息 `panic: unwrap '.!' on none optional value`），driver 打印并返回非 0——语义即"断言此处必有值"
+- **`.?` 词法可识别，语义未实现**：sema 报 "operator '.?' (try) is not implemented yet"，不落运行时
+- **词法实现**：`.!` / `.?` 不做双字符 token——与构造器类型字面量前导 `.？T{...}`（`.` 前导 + `?` optional 修饰）冲突，词法无法区分后缀解包与构造前导。由 parser 在 parse_postfix 的 `.` 分支 advance 后检查后随 `!`/`?` 组合识别（单字符 symbol，天然可词法识别）
+- **`== nil` 判定保留**：四种形式（`x==nil`/`nil==x`/`x!=nil`/`nil!=x`）仍编译为读 ok tag 的 bool 比较（`OPT_IS_NONE`），sema 校验操作数是 `?T` 变量/参数；**不做分支内类型退化**——then/else 分支内 x 恒为 `?T`，读写都须显式 `.!`
 
 #### 12.6 nil 的语法角色与字节码协议
 
@@ -715,13 +700,12 @@ var x = (1 + 2) * 3 - 4;         // init 编译期求值 → 折叠为字面量�
 - 持 `inner` 指针指向被 optional 包裹的类型（T）；各列 interning 池 + 独立 vtable
 - 布局：C 映射 `struct Optional_T { bool ok; T value; }`，size/align 按 C 对齐规则，value 偏移 `align_up(1, alignof(T))`
 - **vtable 比 const/volatile 更薄**：`?T` 只能与 nil 比较（tag 比较由编译器发专用指令，非 vtable eq 分派），故 eq/ne 无分派；clone/assign/dispose 转发 inner 且额外处理 ok（ok 平凡拷贝；value 按 T vtable 递归——OPT 分支进 `array_blit_raw`/`array_dispose_raw` switch，与嵌套数组处理同构）
-- 访问器：`option_ok(data)`（offset 0 读 tag）、`option_value(data) = data + offset`；SOME 态窄化 = 借用引用 data 指向 value 字段（与 is_own 借用字段同构）
+- **访问器**：`option_ok(data)`（offset 0 读 tag）、`option_value(data) = data + offset`；`.!` 解包 = 借用引用 data 指向 value 字段（与 is_own 借用字段同构）
 
-**路径窄化的数据流**（sema 层，复用 flow_init 基础设施）：
-- if 条件识别四种 nil 判定形式（符号 ==/!= nil），then/else 分支分别设置符号窄化状态（SOME/NONE）
-- 分支内符号 lookup 应用窄化状态：SOME → 返回 T 的 shadow value（?T 退化 T）；NONE → 返回 T shadow 但带 none 标志（一切 T 操作报错）；UNKNOWN → ?T shadow（访问报错引导判空）
-- 状态流转：`a = nil` → NONE；分支出口恢复；函数调用后清窄化；嵌套 if 传播
-- **窄化路径禁止可选赋值**（D3）：分支内 x 已是 T，`x = <?T值>` 类型不匹配非法
+**显式解包 `.!`（sema 层，无 flow 记录，§12.5）**：
+- AST_UNWRAP：`.!` 校验操作数为 `?T`（否则编译错误），返回 inner T 的 shadow value；`.?` 词法预留报未实现
+- 运行期：UNWRAP 指令读 ok tag，false → panic error 值（`panic: unwrap '.!' on none optional value`），true → 借用返回 value 字段
+- 无窄化状态机：分支内 x 恒为 `?T`，读写都显式 `.!`
 
 **新字节码**：
 - `STORE_NIL <name>`：`a = nil` 赋值/声明置 ok=false，只置 tag 不清理 value 字段
@@ -765,7 +749,7 @@ var x = (1 + 2) * 3 - 4;         // init 编译期求值 → 折叠为字面量�
 - sema_expr：`AST_CONSTRUCT`/`AST_MEMBER`/`AST_INDEX`/`AST_PATH`/`AST_SIZEOF`/`AST_ALIGNOF`/`AST_TYPEOF`/`AST_TERNARY`/`AST_FILL`
 - sema/stmt：`AST_DO_WHILE`/`AST_SWITCH` + 位运算复合赋值
 - **comptime 处理**：`comptime var` 右值在 `vm->comptime = true` 下求值 + 写回全局/局部编译期常量表；`comptime func` 符号表标记 + 调用点强制编译期；类型表达式槽位自动置 `vm->comptime = true`（见 §9）
-- **nil 语义重构（§12）**：删 AST_UNDEF 自动补发（construct 完全显式）；四种 nil 判定识别 + 路径窄化数据流（SOME/NONE 状态，复用 flow_init）；`a = nil` 编译为 `STORE_NIL`；`?T` 构造器二值单槽位 desugar
+- **nil 语义重构（§12）**：删 AST_UNDEF 自动补发（construct 完全显式）；四种 nil 判定识别（编译为 tag 比较，无窄化数据流）；`a = nil` 编译为 `STORE_NIL`；`?T` 构造器二值单槽位 desugar；`.!` 解包（AST_UNWRAP → UNWRAP 指令，none panic）
 
 ### Phase 4: 构造 + 访问
 

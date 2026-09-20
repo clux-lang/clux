@@ -70,8 +70,6 @@ typedef struct flow_snap {
   sema_symbol_t  **syms;    /* 分支前可见的变量符号 */
   bool            *before;  /* 分支前 flow_init */
   bool            *after;   /* then 分支后 flow_init（meet 用） */
-  uint8_t         *nbefore; /* 分支前 narrow（?T 窄化状态） */
-  uint8_t         *nafter;  /* then 分支后 narrow（meet 用） */
   size_t           n;
 } flow_snap_t;
 
@@ -92,10 +90,6 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
                                  NULL, NULL, cap);
   snap.after = allocator_new_ex(alloc, "flow_snap_after", sizeof(bool), NULL,
                                 NULL, NULL, cap);
-  snap.nbefore = allocator_new_ex(alloc, "flow_snap_nbefore", sizeof(uint8_t),
-                                  NULL, NULL, NULL, cap);
-  snap.nafter = allocator_new_ex(alloc, "flow_snap_nafter", sizeof(uint8_t),
-                                 NULL, NULL, NULL, cap);
 
   size_t i = 0;
   for (const sema_scope_t *s = scope; s; s = s->parent) {
@@ -106,7 +100,6 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
       sema_symbol_t *sym = (sema_symbol_t *)strmap_get(s->symbols, key);
       snap.syms[i] = sym;
       snap.before[i] = sym->flow_init;
-      snap.nbefore[i] = sym->narrow;
       i++;
     }
   }
@@ -115,10 +108,8 @@ static flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope) {
 }
 
 static void flow_restore(const flow_snap_t *snap) {
-  for (size_t i = 0; i < snap->n; i++) {
+  for (size_t i = 0; i < snap->n; i++)
     snap->syms[i]->flow_init = snap->before[i];
-    snap->syms[i]->narrow = snap->nbefore[i];
-  }
 }
 
 static void flow_release(flow_snap_t *snap) {
@@ -126,8 +117,6 @@ static void flow_release(flow_snap_t *snap) {
   allocator_free(snap->alloc, (void **)&snap->syms);
   allocator_free(snap->alloc, (void **)&snap->before);
   allocator_free(snap->alloc, (void **)&snap->after);
-  allocator_free(snap->alloc, (void **)&snap->nbefore);
-  allocator_free(snap->alloc, (void **)&snap->nafter);
   snap->n = 0;
 }
 
@@ -204,7 +193,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
        nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
        optional。编译为 STORE_NIL（compiler 发码），运行期置 ok=false。
-       确定性 = 已初始化（nil 是确定的值）；窄化状态 → NONE（已知为 nil）。 */
+       确定性 = 已初始化（nil 是确定的值）。 */
     if (!vd->type_expr) {
       diag_error(sema->diag, sema_loc(sema, vd->init),
                  "cannot infer type of optional variable '%.*s' from nil; "
@@ -222,7 +211,6 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
     }
     sym->flow_init = true; /* nil 是确定值（已初始化） */
-    sym->narrow = NARROW_NONE;
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
   } else {
@@ -350,9 +338,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
 
     if (rhs_nil) {
       /* nil 赋值（docs m2-design §12.5/12.6）：a = nil → STORE_NIL <name>
-         （运行期只置 ok=false，不释放 value 字段）。左值必须 ?T 类型。
-         窄化状态 → NONE（已知为 nil）。
-         D3：SOME 分支内 x 已是 T，nil 赋值破坏窄化前提 → 编译错误。 */
+         （运行期只置 ok=false，不释放 value 字段）。左值必须 ?T 类型。 */
       const type_t *lt = value_type(lhs);
       if (!lt || lt->kind != TYPE_KIND_OPTION) {
         char tn[64];
@@ -363,26 +349,14 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                    (int)name.len, name.ptr, tn);
         return;
       }
-      if (sym) {
-        if (sym->narrow == NARROW_SOME) {
-          diag_error(sema->diag, sema_loc(sema, as->value),
-                     "cannot assign nil to '%.*s' inside a narrowed branch "
-                     "(it is known to be some)",
-                     (int)name.len, name.ptr);
-          return;
-        }
-        sym->flow_init = true;
-        sym->narrow = NARROW_NONE;
-      }
+      if (sym) sym->flow_init = true;
       return;
     }
 
     if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
 
     /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true
-       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。窄化路径
-       （D3）：SOME 分支内 RHS 必为 T 类型（x 已是 T 语义），赋值后
-       保持 SOME 态；其他分支赋值后恢复 UNKNOWN（窄化不可靠）。 */
+       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。 */
     value_t *r = value_assign(sema->vm, lhs, rhs);
     if (value_is_error(sema->vm, r)) {
       char tn[64], rn[64];
@@ -392,11 +366,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                  "cannot assign %s to variable '%.*s' of type %s", rn,
                  (int)name.len, name.ptr, tn);
     } else {
-      if (sym) {
-        sym->flow_init = true;
-        if (sym->narrow != NARROW_SOME)
-          sym->narrow = NARROW_UNKNOWN; /* 赋新值后窄化不成立 */
-      }
+      if (sym) sym->flow_init = true;
     }
     return;
   }
@@ -642,78 +612,7 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   return (block_result_t){0};
 }
 
-/* ---- 复合条件窄化收集（docs m2-design §12.5）----
- *
- * 条件可以是递归嵌套的布尔表达式（分组括号已被 parser 剥离为内层节点，
- * 一元 !、&&、||、比较任意组合）。对每个分支，收集"该分支必然成立"的
- * 符号级窄化约束，按标准 De Morgan 语义递归：
- *   - then 分支（want_true）：顶层 && → 两侧都真（都收集）；|| → 无法
- *     确定哪侧真（保守不收集）。
- *   - else 分支（want_false）：顶层 || → 两侧都假（都收集）；&& → 无法
- *     确定哪侧假（保守不收集）。
- *   - 一元 !（AST_UNARY）→ 翻转 want_true 后递归操作数。
- *   - 叶子 x==nil / nil==x / x!=nil / nil!=x → {符号, 窄化状态}：
- *       x==nil 为真 → NONE，为假 → SOME；x!=nil 为真 → SOME，为假 → NONE。
- *   - 同符号收集到不同状态（矛盾条件）→ 保守置 NARROW_UNKNOWN。
- * 约束数上限 NARROW_MAX_CONS：超出后停止收集（已收集约束仍成立，丢弃
- * 多余只是少窄化，保守且无副作用）。 */
-#define NARROW_MAX_CONS 8
-
-typedef struct narrow_con {
-  sema_symbol_t *sym;    /* 窄化目标符号 */
-  uint8_t        narrow; /* 分支内窄化状态（NARROW_UNKNOWN = 冲突/保守） */
-} narrow_con_t;
-
-static void narrow_collect(ast_node_t *cond, sema_scope_t *scope,
-                           bool want_true, narrow_con_t *cons, size_t *n) {
-  if (!cond || *n >= NARROW_MAX_CONS) return;
-  switch (cond->kind) {
-    case AST_BINARY: {
-      ast_binary_t *b = (ast_binary_t *)cond;
-      if (token_is(b->op, "&&")) {
-        if (want_true) {
-          narrow_collect(b->lhs, scope, true, cons, n);
-          narrow_collect(b->rhs, scope, true, cons, n);
-        }
-      } else if (token_is(b->op, "||")) {
-        if (!want_true) {
-          narrow_collect(b->lhs, scope, false, cons, n);
-          narrow_collect(b->rhs, scope, false, cons, n);
-        }
-      } else if (token_is(b->op, "==") || token_is(b->op, "!=")) {
-        /* 叶子 nil 判定：x==nil / nil==x / x!=nil / nil!=x */
-        if (b->lhs->kind != AST_NIL && b->rhs->kind != AST_NIL) return;
-        ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
-        if (other->kind != AST_IDENT) return;
-        sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)other)->name);
-        if (!sym || !sym->type || sym->type->kind != TYPE_KIND_OPTION) return;
-        bool is_eq = token_is(b->op, "==");
-        uint8_t narrow = is_eq ? (want_true ? NARROW_NONE : NARROW_SOME)
-                               : (want_true ? NARROW_SOME : NARROW_NONE);
-        for (size_t i = 0; i < *n; i++) {
-          if (cons[i].sym == sym) {
-            if (cons[i].narrow != narrow) cons[i].narrow = NARROW_UNKNOWN;
-            return;
-          }
-        }
-        if (*n < NARROW_MAX_CONS) {
-          cons[*n].sym = sym;
-          cons[*n].narrow = narrow;
-          (*n)++;
-        }
-      }
-      break;
-    }
-    case AST_UNARY: {
-      ast_unary_t *u = (ast_unary_t *)cond;
-      if (token_is(u->op, "!"))
-        narrow_collect(u->operand, scope, !want_true, cons, n);
-      break;
-    }
-    default:
-      break; /* 其他表达式（调用、三元等）→ 保守不收集 */
-  }
-}
+/* ---- if 语句 ---- */
 
 static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
                               size_t *idx) {
@@ -721,21 +620,12 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   value_t *cond = sema_expr(sema, &it->cond, scope);
   sema_check_bool(sema, it->cond, cond, "if condition");
 
-  /* 窄化判定识别（在快照之前：分支内设置窄化状态，出口恢复外层状态）。
-     then 分支按"条件为真"收集约束（&& 组合两侧都成立，|| 保守不收集）；
-     else 分支按"条件为假"收集（|| 组合两侧都成立，&& 保守不收集）。 */
-  narrow_con_t cons[NARROW_MAX_CONS];
-  size_t ncons = 0;
-  narrow_collect(it->cond, scope, /*want_true=*/true, cons, &ncons);
-
   /* 确定性赋值合并点：快照分支前状态 → then → 记录 → 恢复 → else →
      meet（AND）：两分支都 flow_init 才 true。保守策略：非全部分支赋值
-     （如 if(c){a=1;}else{}）→ 合并后仍 UNKNOWN，读取编译错误。 */
+     （如 if(c){a=1;}else{}）→ 合并后仍 UNKNOWN，读取编译错误。
+     optional 解包不在此做 flow 记录：if (x != nil) 分支内的 x 仍是 ?T，
+     解包由显式 x.!（assert）承担（docs m2-design §12.5）。 */
   flow_snap_t snap = flow_capture(sema, scope);
-
-  /* then 分支窄化设置：收集到的约束全部成立 */
-  for (size_t i = 0; i < ncons; i++)
-    cons[i].sym->narrow = cons[i].narrow;
 
   block_result_t tr = {0};
   sema_scope_t *then_scope = sema_scope_child(scope, (*idx)++);
@@ -744,21 +634,13 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   tr = walk_block(sema, it->then_body, then_scope ? then_scope : scope, &sub);
   vm_pop_scope(sema->vm);
 
-  /* 记录 then 后状态（flow + narrow），恢复分支前 */
-  for (size_t i = 0; i < snap.n; i++) {
+  /* 记录 then 后状态（flow），恢复分支前 */
+  for (size_t i = 0; i < snap.n; i++)
     snap.after[i] = snap.syms[i]->flow_init;
-    snap.nafter[i] = snap.syms[i]->narrow;
-  }
   flow_restore(&snap);
 
   block_result_t er = {0};
   if (it->else_body) {
-    /* else 分支窄化设置（补集）：重新按"条件为假"收集 */
-    narrow_con_t econs[NARROW_MAX_CONS];
-    size_t necons = 0;
-    narrow_collect(it->cond, scope, /*want_true=*/false, econs, &necons);
-    for (size_t i = 0; i < necons; i++)
-      econs[i].sym->narrow = econs[i].narrow;
     if (it->else_body->kind == AST_IF) {
       /* else-if 链：同层递归（子作用域顺序与 3a 一致：else-if 不单独
          建 scope，其 then 是当前 scope 的下一个子节点） */
@@ -773,12 +655,9 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
     }
   }
 
-  /* meet：两分支都 INIT 才 INIT（else 缺失视为"未赋值分支"）；
-     窄化恢复外层状态（出口恢复——窄化不跨 if 传播） */
-  for (size_t i = 0; i < snap.n; i++) {
+  /* meet：两分支都 INIT 才 INIT（else 缺失视为"未赋值分支"） */
+  for (size_t i = 0; i < snap.n; i++)
     snap.syms[i]->flow_init = snap.after[i] && snap.syms[i]->flow_init;
-    snap.syms[i]->narrow = snap.nbefore[i];
-  }
   flow_release(&snap);
 
   r.definitely_returns = tr.definitely_returns && er.definitely_returns;

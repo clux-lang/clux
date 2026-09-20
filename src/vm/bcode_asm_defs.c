@@ -86,7 +86,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_INDEX_GET]      = { "INDEX_GET",     { BCODE_ASM_OP_NONE } },
     [BCODE_INDEX_SET]      = { "INDEX_SET",     { BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_OPT_NONE]  = { "PUSH_OPT_NONE",  { BCODE_ASM_OP_U32 } },
-    [BCODE_OPT_GET]        = { "OPT_GET",        { BCODE_ASM_OP_NONE } },
+    [BCODE_UNWRAP]         = { "UNWRAP",         { BCODE_ASM_OP_NONE } },
     [BCODE_OPT_IS_NONE]    = { "OPT_IS_NONE",    { BCODE_ASM_OP_NONE } },
     [BCODE_LENGTH]         = { "LENGTH",        { BCODE_ASM_OP_NONE } },
 };

@@ -128,9 +128,10 @@ typedef enum {
     BCODE_INDEX_SET,        /* 弹 self + index + val，返回 self（set_item） */
     BCODE_PUSH_OPT_NONE,    /* u32 id：从 types_by_id 查 option 类型 → 压 ok=false +
                                value 全零的 ?T 值块（构造器字段/fill 的 nil） */
-    BCODE_OPT_GET,          /* 无操作数：弹 ?T 值 → 借用返回 value 字段的借用引用
-                               （窄化 SOME 读取，sema 重写 AST_OPT_GET → PUSH + OPT_GET；
-                               零拷贝，data 指向 option 值块内偏移） */
+    BCODE_UNWRAP,           /* 无操作数：弹 ?T 值 → ok 则借用返回 value 字段的
+                               （a.! assert 解包；零拷贝，data 指向 option 值块
+                               内偏移）；ok=false（none）→ panic 错误值
+                               （"unwrap '.!' on none optional value"）。 */
     BCODE_OPT_IS_NONE,      /* 无操作数：弹 ?T 值 → 压 bool（ok tag == false）
                                （nil 判定 x==nil / nil==x → OPT_IS_NONE；
                                x!=nil / nil!=x → OPT_IS_NONE + NOT。
