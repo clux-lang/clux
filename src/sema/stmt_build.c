@@ -6,6 +6,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
@@ -283,6 +284,35 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           }
         }
         if (tr.definitely_returns && er.definitely_returns)
+          r.definitely_returns = true;
+        break;
+      }
+      case AST_SWITCH: {
+        /* switch 分支体各建子作用域（声明序，与 3b walk 消费序一致）。
+           default 分支最后消费。无 fallthrough，break/continue 不涉及
+           switch（loop_depth 不变）——case 体自然结束。 */
+        ast_switch_t *sw = (ast_switch_t *)s;
+        bool all_return = true;
+        for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+          ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+          sema_scope_t *case_scope =
+              sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
+          sema_scope_add_child(scope, case_scope);
+          build_result_t br = build_block(sema, (ast_block_t *)sc->body,
+                                          case_scope);
+          if (!br.definitely_returns) all_return = false;
+        }
+        if (sw->default_body) {
+          sema_scope_t *def_scope =
+              sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
+          sema_scope_add_child(scope, def_scope);
+          build_result_t dr = build_block(sema, (ast_block_t *)sw->default_body,
+                                          def_scope);
+          if (!dr.definitely_returns) all_return = false;
+        }
+        /* 全部分支返回才贡献 definitely_returns（无 default 时可能不匹配
+           任何分支直接穿透，不贡献） */
+        if (sw->default_body && all_return)
           r.definitely_returns = true;
         break;
       }

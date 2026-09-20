@@ -95,6 +95,12 @@ typedef struct compiler_t {
        types_by_id 幂等，语义无害）。签名类型 id 由 sema 分配（不在此列）。 */
     uint32_t        type_id_next;
 
+    /* switch 临时变量序号（__switch_N 名字后缀）：每次编译 switch 递增，
+       compiler_new memset 0 初始化。临时名只在本 switch 编译期间有效
+       （bcode_write_str 即时拷入 strtable），嵌套 switch 经子作用域遮蔽，
+       序号保证与用户变量零碰撞。 */
+    uint32_t        switch_seq;
+
     /* 静态平衡追踪 */
     size_t          scope_depth;    /* 当前已 PUSH_SCOPE 未 POP 的层数 */
     int             stack_depth;    /* 静态操作数栈深度（压栈 +1 / 弹栈 -1） */

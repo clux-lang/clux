@@ -8,10 +8,13 @@
 #include "parser/ast_if.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_return.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
+
+#include <stdio.h>
 
 /* ===========================================================================
  * 语句节点
@@ -272,6 +275,75 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       }
       label_here(c, &end_l);
     }
+    break;
+  }
+  case AST_SWITCH: {
+    /* switch（docs m2-design §4：if 语法糖，语义内联）：
+       desugar 等价于 `var __switch_N = cond; if (...) {} else if ...`
+       1. cond 求值一次 → DEFINE 临时变量 __switch_N（[value, spec] 协议）
+       2. 每分支：PUSH __switch_N + 模式 + EQ + JNZ 分支体（模式间短接：
+          任一模式命中即入体，惰性）
+       3. 全模式未命中 → JMP 下一分支；default 兜底；无 fallthrough
+          （分支体后 JMP end_l） */
+    ast_switch_t *n = (ast_switch_t *)node;
+
+    compile_expr(c, n->cond);                        /* 栈: [cond] */
+    char tmp_name[32];
+    snprintf(tmp_name, sizeof(tmp_name), "__switch_%u", c->switch_seq++);
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);     /* 栈: [cond, spec] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, strslice_from_cstr(tmp_name)); /* 栈: [] */
+    st_push(c, -2);
+
+    compile_label_t end_l;
+    label_init(&end_l);
+    for (ast_node_t *cs = n->cases; cs; cs = cs->next) {
+      ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+      compile_label_t case_body_l, next_l;
+      label_init(&case_body_l);
+      label_init(&next_l);
+
+      /* 模式比较链：PUSH tmp + pat + EQ + JNZ case_body（任一命中即入体） */
+      for (ast_node_t *pt = sc->patterns; pt; pt = pt->next) {
+        bcode_write_op(c->bc, BCODE_PUSH);
+        bcode_write_str(c->bc, strslice_from_cstr(tmp_name));
+        st_push(c, 1);                               /* 栈: [tmp] */
+        compile_expr(c, pt);                         /* 栈: [tmp, pat] */
+        bcode_write_op(c->bc, BCODE_EQ);             /* 栈: [bool] */
+        st_push(c, -1);
+        bcode_write_op(c->bc, BCODE_JNZ);
+        emit_jump(c, &case_body_l);                  /* 弹 bool，命中跳 */
+      }
+      bcode_write_op(c->bc, BCODE_JMP);
+      emit_jump(c, &next_l);                         /* 全模式未命中 → 下一分支 */
+
+      label_here(c, &case_body_l);
+      if (sc->body->kind == AST_BLOCK) {
+        balance_push(c);
+        compile_block_body(c, (ast_block_t *)sc->body);
+        balance_pop(c);
+      } else {
+        compile_stmt(c, sc->body);
+      }
+      if (cs->next || n->default_body) {
+        bcode_write_op(c->bc, BCODE_JMP);            /* 无 fallthrough */
+        emit_jump(c, &end_l);
+      }
+      label_here(c, &next_l);
+    }
+
+    /* default 兜底 */
+    if (n->default_body) {
+      if (n->default_body->kind == AST_BLOCK) {
+        balance_push(c);
+        compile_block_body(c, (ast_block_t *)n->default_body);
+        balance_pop(c);
+      } else {
+        compile_stmt(c, n->default_body);
+      }
+    }
+    label_here(c, &end_l);
     break;
   }
   case AST_WHILE: {

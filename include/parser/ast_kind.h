@@ -11,6 +11,8 @@ typedef enum {
     AST_TYPE_DEF,        /* type name = <type-expr>;（sema 求值折叠为类型引用） */
     AST_ASSIGN,          /* name = expr; / name += expr; */
     AST_IF,              /* if cond { then } [else { else_body }] */
+    AST_SWITCH,          /* switch(cond) { (pat,..)->{..} default->{..} } */
+    AST_SWITCH_CASE,     /* switch 分支（模式列表 + 分支体，仅 switch 内出现） */
     AST_WHILE,           /* while cond { body } */
     AST_FOR,             /* for (init; cond; update) { body } */
     AST_RETURN,          /* return [expr]; */

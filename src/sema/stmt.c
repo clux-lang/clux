@@ -16,6 +16,7 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -49,6 +50,8 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
                                 sema_scope_t *scope, size_t *idx);
 static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
                               size_t *idx);
+static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
+                                  sema_scope_t *scope, size_t *idx);
 
 /* ---- 确定性赋值分析（definite assignment analysis） ---- */
 
@@ -664,6 +667,121 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   return r;
 }
 
+/* ---- switch 语句（docs m2-design §4：if 语法糖，语义内联） ----
+ *
+ * cond shadow 求值一次（C 局部持有，不注册临时符号——desugar 的
+ * `var __switch_N` 是编译期实现细节，用户代码不可见）。每分支每模式
+ * value_eq 校验（模式须与 cond 可比），全部分支 walk + flow meet：
+ * AND 累积——某变量在**全部分支**都赋值才确定性初始化。无 default 时
+ * "不匹配穿透"路径视为未赋值分支（与 else 缺失同语义）。
+ * definitely_returns：有 default 且全部分支返回才 true（无 default 时
+ * 可能穿透，不贡献）。 */
+static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
+                                  sema_scope_t *scope, size_t *idx) {
+  block_result_t r = {0};
+
+  value_t *cond = sema_expr(sema, &sw->cond, scope);
+  if (value_is_error(sema->vm, cond) ||
+      value_is_type(cond, TYPE_KIND_VOID)) {
+    /* cond 错误/void（错误恢复产物）：仍 walk 分支体消费子作用域
+       （索引对齐），跳过模式校验避免级联二次诊断 */
+    for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+      ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+      sema_scope_t *case_scope = sema_scope_child(scope, (*idx)++);
+      vm_push_scope(sema->vm);
+      size_t sub = 0;
+      walk_block(sema, sc->body, case_scope ? case_scope : scope, &sub);
+      vm_pop_scope(sema->vm);
+    }
+    if (sw->default_body) {
+      sema_scope_t *def_scope = sema_scope_child(scope, (*idx)++);
+      vm_push_scope(sema->vm);
+      size_t sub = 0;
+      walk_block(sema, sw->default_body, def_scope ? def_scope : scope, &sub);
+      vm_pop_scope(sema->vm);
+    }
+    return r;
+  }
+
+  /* 模式校验：每模式与 cond value_eq（值匹配，shadow 间比较）。
+     类型不可比（value_eq 返回 error）→ 报错，分支体仍 walk（消费子
+     作用域 + 内部检查），flow 不参与 meet（错误已 fail-fast）。 */
+  for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+    ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+    for (ast_node_t *pt = sc->patterns; pt; pt = pt->next) {
+      value_t *pv = sema_expr(sema, &pt, scope);
+      if (value_is_error(sema->vm, pv) ||
+          value_is_type(pv, TYPE_KIND_VOID))
+        continue; /* 错误恢复产物静默通过 */
+      value_t *eq = value_eq(sema->vm, cond, pv);
+      if (value_is_error(sema->vm, eq)) {
+        char cn[64], pn[64];
+        sema_type_name(value_type(cond), cn, sizeof(cn));
+        sema_type_name(value_type(pv), pn, sizeof(pn));
+        diag_error(sema->diag, sema_loc(sema, pt),
+                   "switch pattern type mismatch: cannot match %s against %s",
+                   cn, pn);
+      }
+    }
+  }
+
+  /* 确定性赋值合并点：快照分支前状态 → 逐分支 walk → 记录 → 恢复 →
+     AND 累积。 */
+  flow_snap_t snap = flow_capture(sema, scope);
+  bool first = true;
+  bool all_return = true;
+
+  for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+    ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+    sema_scope_t *case_scope = sema_scope_child(scope, (*idx)++);
+    vm_push_scope(sema->vm);
+    size_t sub = 0;
+    block_result_t br = walk_block(sema, sc->body, case_scope ? case_scope : scope,
+                                   &sub);
+    vm_pop_scope(sema->vm);
+    if (!br.definitely_returns) all_return = false;
+    for (size_t i = 0; i < snap.n; i++) {
+      snap.after[i] = first ? snap.syms[i]->flow_init
+                            : (snap.after[i] && snap.syms[i]->flow_init);
+    }
+    first = false;
+    flow_restore(&snap);
+  }
+
+  if (sw->default_body) {
+    sema_scope_t *def_scope = sema_scope_child(scope, (*idx)++);
+    vm_push_scope(sema->vm);
+    size_t sub = 0;
+    block_result_t dr = walk_block(sema, sw->default_body,
+                                   def_scope ? def_scope : scope, &sub);
+    vm_pop_scope(sema->vm);
+    if (!dr.definitely_returns) all_return = false;
+    for (size_t i = 0; i < snap.n; i++) {
+      snap.after[i] = first ? snap.syms[i]->flow_init
+                            : (snap.after[i] && snap.syms[i]->flow_init);
+    }
+    first = false;
+    flow_restore(&snap);
+  }
+
+  if (!first) {
+    /* 有分支被 walk：meet。有 default → 全路径覆盖，final = 全分支 AND
+       （当前 flow_init 是 restore 后的分支前状态，直接覆盖）；无 default
+       → 穿透路径保持分支前状态，final = after && before（AND 进 meet）。 */
+    for (size_t i = 0; i < snap.n; i++) {
+      if (sw->default_body)
+        snap.syms[i]->flow_init = snap.after[i];
+      else
+        snap.syms[i]->flow_init =
+            snap.after[i] && snap.syms[i]->flow_init;
+    }
+    if (sw->default_body && all_return)
+      r.definitely_returns = true;
+  }
+  flow_release(&snap);
+  return r;
+}
+
 /* ---- 语句分派 ---- */
 
 /* 索引语义：idx 是"当前 scope"的 children 迭代器。一个块内的语句按序
@@ -700,6 +818,9 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
     }
     case AST_IF:
       r = walk_if(sema, (ast_if_t *)stmt, scope, idx);
+      break;
+    case AST_SWITCH:
+      r = walk_switch(sema, (ast_switch_t *)stmt, scope, idx);
       break;
     case AST_WHILE:
       r = walk_while(sema, (ast_while_t *)stmt, scope, idx);

@@ -10,6 +10,7 @@
 #include "parser/ast_for.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
@@ -159,6 +160,33 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
             }
             if (ctx->ctrl == CTFE_CTRL_CONTINUE) ctx->ctrl = CTFE_CTRL_NONE;
             if (ctx->ctrl == CTFE_CTRL_RETURN) break;
+        }
+        return value_make_undefined(vm);
+    }
+    case AST_SWITCH: {
+        /* switch：cond 求值一次 → 逐模式 value_eq 短接（模式间 = ||
+           链，惰性）→ 命中分支体执行 → 未命中走 default。无 fallthrough。 */
+        ast_switch_t *n = (ast_switch_t *)stmt;
+        value_t *cv = ctfe_eval(ctx, n->cond);
+        if (value_is_error(vm, cv)) return cv;
+        bool matched = false;
+        for (ast_node_t *cs = n->cases; cs && !matched; cs = cs->next) {
+            ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+            for (ast_node_t *pt = sc->patterns; pt && !matched; pt = pt->next) {
+                value_t *pv = ctfe_eval(ctx, pt);
+                if (value_is_error(vm, pv)) return pv;
+                value_t *eq = value_eq(vm, cv, pv);
+                if (value_is_error(vm, eq)) return eq;
+                if (ctfe_read_bool(vm, eq)) {
+                    matched = true;
+                    value_t *r = ctfe_eval_stmt(ctx, sc->body);
+                    if (value_is_error(vm, r)) return r;
+                }
+            }
+        }
+        if (!matched && n->default_body) {
+            value_t *r = ctfe_eval_stmt(ctx, n->default_body);
+            if (value_is_error(vm, r)) return r;
         }
         return value_make_undefined(vm);
     }

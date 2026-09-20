@@ -36,6 +36,7 @@ extern "C" {
 #include "parser/ast_func_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_program.h"
+#include "parser/ast_switch.h"
 }
 
 #include "test_common.h"
@@ -1421,6 +1422,153 @@ TEST_F(ParseStmtTest, ParserParseEmpty) {
     ast_node_t *node = parser_parse(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_PROGRAM);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* switch 语句（docs m2-design §4：if 语法糖）                        */
+/* ================================================================ */
+
+/**
+ * Scenario: Basic switch with single-pattern cases + default
+ * Expected: AST_SWITCH with cond, 2 cases, default_body
+ */
+TEST_F(ParseStmtTest, Switch_Basic) {
+    parser_t *p = make_parser(
+        "switch (x) { (1)->{ var a = 10; } (2)->{ var a = 20; } default->{ var a = 30; } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_SWITCH);
+
+    auto *sw = (ast_switch_t *)node;
+    ASSERT_NE(sw->cond, nullptr);
+    EXPECT_EQ(sw->cond->kind, AST_IDENT);
+
+    ASSERT_NE(sw->cases, nullptr);
+    ast_node_t *c1 = sw->cases;
+    EXPECT_EQ(c1->kind, AST_SWITCH_CASE);
+    auto *sc1 = (ast_switch_case_t *)c1;
+    ASSERT_NE(sc1->patterns, nullptr);
+    EXPECT_EQ(sc1->patterns->kind, AST_INT_LIT);
+    ASSERT_NE(sc1->body, nullptr);
+    EXPECT_EQ(sc1->body->kind, AST_BLOCK);
+
+    ASSERT_NE(c1->next, nullptr);
+    EXPECT_EQ(c1->next->kind, AST_SWITCH_CASE);
+
+    ASSERT_NE(sw->default_body, nullptr);
+    EXPECT_EQ(sw->default_body->kind, AST_BLOCK);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: Multi-pattern case (a, b) — comma list = || chain
+ * Expected: case patterns is a sibling chain of 2 int literals
+ */
+TEST_F(ParseStmtTest, Switch_MultiPattern) {
+    parser_t *p = make_parser("switch (x) { (1, 2, 3)->{ } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_SWITCH);
+
+    auto *sw = (ast_switch_t *)node;
+    ASSERT_NE(sw->cases, nullptr);
+    auto *sc = (ast_switch_case_t *)sw->cases;
+
+    ast_node_t *pat = sc->patterns;
+    ASSERT_NE(pat, nullptr);
+    EXPECT_EQ(pat->kind, AST_INT_LIT);
+    ASSERT_NE(pat->next, nullptr);
+    EXPECT_EQ(pat->next->kind, AST_INT_LIT);
+    ASSERT_NE(pat->next->next, nullptr);
+    EXPECT_EQ(pat->next->next->kind, AST_INT_LIT);
+    EXPECT_EQ(pat->next->next->next, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: switch with no default
+ * Expected: default_body == NULL
+ */
+TEST_F(ParseStmtTest, Switch_NoDefault) {
+    parser_t *p = make_parser("switch (x) { (1)->{ } (2)->{ } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_SWITCH);
+
+    auto *sw = (ast_switch_t *)node;
+    EXPECT_EQ(sw->default_body, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: Duplicate default
+ * Expected: AST_ERROR with "duplicate 'default'"
+ */
+TEST_F(ParseStmtTest, Switch_DuplicateDefault) {
+    parser_t *p = make_parser(
+        "switch (x) { (1)->{ } default->{ } default->{ } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+    EXPECT_NE(std::strstr(((ast_error_t *)node)->message.ptr, "duplicate 'default'"), nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: Empty pattern list ()
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, Switch_EmptyPattern) {
+    parser_t *p = make_parser("switch (x) { ()->{ } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: Missing '->' after pattern list
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, Switch_MissingArrow) {
+    parser_t *p = make_parser("switch (x) { (1) { } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: Unexpected token in switch body
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, Switch_BadBodyEntry) {
+    parser_t *p = make_parser("switch (x) { 42->{ } }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_switch(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
 
     cleanup_parser(p);
 }

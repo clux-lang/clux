@@ -96,7 +96,7 @@ switch(cond) {
 - **无 fallthrough**；default 兜底
 - 条件可以是**运行时表达式**（不限制为常量）
 - 模式目前仅值匹配（`val == a || val == b`），待确认是否支持解构绑定
-- **编译期 desugar** 为嵌套 if 链（`var __switch_N = cond; if (...) {} else if ...`）
+- **编译期 desugar** 为嵌套 if 链（`var __switch_N = cond; if (...) {} else if ...`）——**已实现**（2026-09-20）：token_t 不透明无法在 parser 层合成 `==` token，采用独立 `AST_SWITCH` 节点，sema 每模式 `value_eq` 校验 + 全分支 flow meet（有 default 全路径覆盖 / 无 default 穿透路径并入 AND），compiler 发 cond 求值一次 + 每模式 `EQ/JNZ` 短路跳转 + `JMP` 尾部兜底（无 fallthrough），与文档 desugar 的字节码等价；`default`/`switch` 为关键字
 
 ### 5. type 别名 = 类型计算表达式
 
@@ -548,7 +548,12 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 
 ### 4. switch = 编译期 desugar
 
-解析为嵌套 if 链（`var __switch_N = cond; if (...) {} else if ...`），无独立 switch 语义。
+解析为嵌套 if 链（`var __switch_N = cond; if (...) {} else if ...`），无独立 switch 语义。**已实现**（2026-09-20）：token_t 不透明（struct 定义在 lexer.c）无法在 parser 层合成 `==` token 做字面 desugar，改由**独立 `AST_SWITCH` 节点 + sema/compiler 内联语义**（语义等价，见 §4 特性清单）：
+
+- parser：`AST_SWITCH`（cond + `AST_SWITCH_CASE` 兄弟链 + `default_body`），分支 `(模式列表)->{块}`，逗号分隔模式 = `||` 链；重复 default / 空模式列表 / 缺 `->` → 解析期诊断
+- sema（Pass 3b `walk_switch`）：cond shadow 求值一次（C 局部持有，不注册临时符号——`__switch_N` 是编译期实现细节）；每模式 `value_eq` 校验（不可比 → `switch pattern type mismatch`）；分支体各建子作用域（3a `build_block` 按声明序 add_child，3b 索引对齐消费）；flow meet 沿用快照机制——**有 default → 全路径覆盖（after 直接覆盖）**，**无 default → 穿透路径保持分支前状态并入 AND meet**（与 else 缺失同语义）；`definitely_returns` 仅当有 default 且全分支返回
+- compiler：`__switch_N` 临时变量（`compiler_t.switch_seq` 计数器命名，memset 0 初始化，嵌套 switch 经子作用域遮蔽天然安全）DEFINE 一次；每模式 `PUSH tmp + 模式求值 + EQ + JNZ 跳分支体`（短接），全模式未命中 `JMP next`；分支体尾部 `JMP end`（无 fallthrough）；default 兜底；`end` 收尾
+- CTFE（comptime 函数）同步支持：cond → 逐模式 `value_eq` 短接 → 命中执行 / 未命中走 default（不 push scope，与 CTFE if 一致）
 
 ### 5. enum 严格分离
 
@@ -776,7 +781,7 @@ var x = (1 + 2) * 3 - 4;         // init 编译期求值 → 折叠为字面量�
 
 ### Phase 5: 控制流 + 表达式补全（与 Phase 4 可并行）
 
-- `parse_ternary`（`? :`），`parse_switch`，`parse_do_while`
+- `parse_ternary`（`? :`），`parse_switch`（**已完成** 2026-09-20，见 §4），`parse_do_while`
 - 位运算复合赋值扩展
 - Sema + Compiler desugar/编译
 

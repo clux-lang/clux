@@ -2519,4 +2519,190 @@ TEST_F(SemaTest, LocalFuncNoCaptureForwardRefOk) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
+/* ---- switch 语句（docs m2-design §4：if 语法糖） ---- */
+
+TEST_F(SemaTest, SwitchBasicValid) {
+    /* 基本 switch：cond 为运行期 i32 变量，模式列表匹配 → 合法 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  switch (x) {"
+        "    (1)->{ var a = 10; }"
+        "    (2)->{ var a = 20; }"
+        "    default->{ var a = 30; }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchMultiPatternValid) {
+    /* 多模式（逗号 = || 链）：同一分支多个模式 → 合法 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  switch (x) {"
+        "    (1, 2)->{ var a = 10; }"
+        "    (3)->{ var a = 20; }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchRuntimeCondValid) {
+    /* 条件可为任意运行期表达式（文档：不限常量） */
+    EXPECT_TRUE(analyze(
+        "func f():i32 { return 1; }"
+        "func main(): void {"
+        "  var x = 5;"
+        "  switch (x + f()) {"
+        "    (6)->{ }"
+        "    default->{ }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchPatternTypeMismatchErrors) {
+    /* 模式与 cond 类型不可比（i32 vs str）→ 报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  switch (x) {"
+        "    (\"a\")->{ }"
+        "    default->{ }"
+        "  }"
+        "}"));
+    expect_message(0, "switch pattern type mismatch: cannot match i32 against str");
+}
+
+TEST_F(SemaTest, SwitchMissingDefaultDefiniteAssignmentErrors) {
+    /* 无 default：仅单分支赋值，其他分支/穿透路径未赋值 → 读取报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  var r:i32 = undefined;"
+        "  switch (x) {"
+        "    (1)->{ r = 10; }"
+        "    (2)->{ }"
+        "  }"
+        "  var y = r + 1;"
+        "}"));
+    expect_message(0, "variable 'r' used before initialization");
+}
+
+TEST_F(SemaTest, SwitchDefaultCoversDefiniteAssignment) {
+    /* 有 default：全部分支赋值 → 确定性初始化，读取合法 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  var r:i32 = undefined;"
+        "  switch (x) {"
+        "    (1)->{ r = 10; }"
+        "    (2)->{ r = 20; }"
+        "    default->{ r = 30; }"
+        "  }"
+        "  var y = r + 1;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchAllCasesAssignNoDefaultStillErrors) {
+    /* 无 default：即使所有 case 都赋值，穿透路径仍未赋值 → 保守报错 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var x = 2;"
+        "  var r:i32 = undefined;"
+        "  switch (x) {"
+        "    (1)->{ r = 10; }"
+        "    (2)->{ r = 20; }"
+        "  }"
+        "  var y = r + 1;"
+        "}"));
+    expect_message(0, "variable 'r' used before initialization");
+}
+
+TEST_F(SemaTest, SwitchNoDefaultMissingReturnErrors) {
+    /* 无 default：全分支 return 仍可能穿透 → 非 void 函数报错 */
+    EXPECT_FALSE(analyze(
+        "func f(x:i32):i32 {"
+        "  switch (x) {"
+        "    (1)->{ return 10; }"
+        "    (2)->{ return 20; }"
+        "  }"
+        "}"));
+    expect_message(0, "must return a value on all paths");
+}
+
+TEST_F(SemaTest, SwitchDefaultAllBranchesReturnOk) {
+    /* 有 default 且全分支 return → definitely_returns */
+    EXPECT_TRUE(analyze(
+        "func f(x:i32):i32 {"
+        "  switch (x) {"
+        "    (1)->{ return 10; }"
+        "    (2)->{ return 20; }"
+        "    default->{ return 30; }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchMissingDefaultReturnStillErrors) {
+    /* 有 default 但某分支缺 return → 不保证全路径返回 */
+    EXPECT_FALSE(analyze(
+        "func f(x:i32):i32 {"
+        "  switch (x) {"
+        "    (1)->{ return 10; }"
+        "    (2)->{ }"
+        "    default->{ return 30; }"
+        "  }"
+        "}"));
+    expect_message(0, "must return a value on all paths");
+}
+
+TEST_F(SemaTest, SwitchNestedValid) {
+    /* 嵌套 switch：内外层各自独立子作用域 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 1;"
+        "  var y = 2;"
+        "  switch (x) {"
+        "    (1)->{"
+        "      switch (y) {"
+        "        (2)->{ }"
+        "        default->{ }"
+        "      }"
+        "    }"
+        "    default->{ }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchBranchScopeIsolation) {
+    /* 分支体独立作用域：不同分支可定义同名变量，互不冲突 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 1;"
+        "  switch (x) {"
+        "    (1)->{ var tmp = 10; }"
+        "    (2)->{ var tmp = 20; }"
+        "    default->{ var tmp = 30; }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SwitchCondExprUnusedNoError) {
+    /* switch 条件不要求是语句：cond 求值结果本身不算"表达式结果未使用" */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var x = 3;"
+        "  switch (x * 2) {"
+        "    (6)->{ }"
+        "    default->{ }"
+        "  }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
 } /* namespace */

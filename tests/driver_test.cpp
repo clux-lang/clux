@@ -2150,4 +2150,192 @@ TEST(Driver, RunFileGlobalVarUnknownTypeRejected) {
   std::remove(path.c_str());
 }
 
+/* ---- switch 语句端到端（docs m2-design §4：if 语法糖） ---- */
+
+TEST(Driver, RunFileSwitchMatchReturnsCase) {
+  /* 基本匹配：命中 case 分支执行并返回 */
+  std::string path = write_temp_file(
+      "func pick(x:i32):i32 {\n"
+      "  switch (x) {\n"
+      "    (1)->{ return 10; }\n"
+      "    (2)->{ return 20; }\n"
+      "    default->{ return 30; }\n"
+      "  }\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  if (pick(1) != 10) { return 1; }\n"
+      "  if (pick(2) != 20) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchDefaultFallback) {
+  /* default 兜底：未命中任何 case 走 default */
+  std::string path = write_temp_file(
+      "func pick(x:i32):i32 {\n"
+      "  switch (x) {\n"
+      "    (1)->{ return 10; }\n"
+      "    (2)->{ return 20; }\n"
+      "    default->{ return 30; }\n"
+      "  }\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  if (pick(7) != 30) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchMultiPattern) {
+  /* 多模式（逗号 = || 链）：命中任一模式即执行该分支 */
+  std::string path = write_temp_file(
+      "func pick(x:i32):i32 {\n"
+      "  switch (x) {\n"
+      "    (1, 2)->{ return 10; }\n"
+      "    (3, 4, 5)->{ return 20; }\n"
+      "    default->{ return 30; }\n"
+      "  }\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  if (pick(1) != 10) { return 1; }\n"
+      "  if (pick(2) != 10) { return 2; }\n"
+      "  if (pick(4) != 20) { return 3; }\n"
+      "  if (pick(5) != 20) { return 4; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchNoFallthrough) {
+  /* 无 fallthrough：命中分支后不落入后续分支（default 不被执行） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var r = 0;\n"
+      "  switch (1) {\n"
+      "    (1)->{ r = 100; }\n"
+      "    (2)->{ r = 200; }\n"
+      "    default->{ r = 300; }\n"
+      "  }\n"
+      "  if (r != 100) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchRuntimeCond) {
+  /* 运行期条件（函数调用 + 算术）：文档定义 switch 条件为运行期表达式 */
+  std::string path = write_temp_file(
+      "func f():i32 { return 3; }\n"
+      "func main():i32 {\n"
+      "  var x = 2;\n"
+      "  var r = 0;\n"
+      "  switch (x + f()) {\n"
+      "    (5)->{ r = 50; }\n"
+      "    default->{ r = 99; }\n"
+      "  }\n"
+      "  if (r != 50) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchNested) {
+  /* 嵌套 switch：内外层独立判定 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x = 1;\n"
+      "  var y = 2;\n"
+      "  var r = 0;\n"
+      "  switch (x) {\n"
+      "    (1)->{\n"
+      "      switch (y) {\n"
+      "        (2)->{ r = 12; }\n"
+      "        default->{ r = 19; }\n"
+      "      }\n"
+      "    }\n"
+      "    default->{ r = 90; }\n"
+      "  }\n"
+      "  if (r != 12) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchStrCond) {
+  /* str 条件：模式可为字符串字面量 */
+  std::string path = write_temp_file(
+      "func pick(s:str):i32 {\n"
+      "  switch (s) {\n"
+      "    (\"one\")->{ return 1; }\n"
+      "    (\"two\", \"three\")->{ return 23; }\n"
+      "    default->{ return 0; }\n"
+      "  }\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  if (pick(\"one\") != 1) { return 1; }\n"
+      "  if (pick(\"three\") != 23) { return 2; }\n"
+      "  if (pick(\"zzz\") != 0) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchDefiniteAssignAllPaths) {
+  /* 有 default：全分支赋值 → 确定性初始化，switch 后读取合法 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x = 2;\n"
+      "  var r:i32 = undefined;\n"
+      "  switch (x) {\n"
+      "    (1)->{ r = 10; }\n"
+      "    (2)->{ r = 20; }\n"
+      "    default->{ r = 30; }\n"
+      "  }\n"
+      "  if (r != 20) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchTypeMismatchRejected) {
+  /* 模式与 cond 类型不可比 → 编译期拒绝，运行时不产出 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x = 2;\n"
+      "  switch (x) {\n"
+      "    (\"a\")->{ return 1; }\n"
+      "    default->{ return 2; }\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileSwitchDuplicateDefaultRejected) {
+  /* 重复 default → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var x = 2;\n"
+      "  switch (x) {\n"
+      "    (1)->{ return 1; }\n"
+      "    default->{ return 2; }\n"
+      "    default->{ return 3; }\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+
 

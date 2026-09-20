@@ -16,6 +16,7 @@
 #include "parser/ast_member.h"
 #include "parser/ast_program.h"
 #include "parser/ast_return.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_unary.h"
@@ -127,6 +128,19 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
       prescan_expr(c, ((ast_while_t *)n)->cond);
       prescan_stmt(c, ((ast_while_t *)n)->body);
       break;
+    case AST_SWITCH: {
+      /* switch 分支体与 default 体递归（嵌套函数定义收集） */
+      ast_switch_t *sw = (ast_switch_t *)n;
+      prescan_expr(c, sw->cond);
+      for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+        ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+        for (ast_node_t *pt = sc->patterns; pt; pt = pt->next)
+          prescan_expr(c, pt);
+        prescan_stmt(c, sc->body);
+      }
+      if (sw->default_body) prescan_stmt(c, sw->default_body);
+      break;
+    }
     case AST_FOR: {
       ast_for_t *fr = (ast_for_t *)n;
       if (fr->init) prescan_stmt(c, fr->init);
