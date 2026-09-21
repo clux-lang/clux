@@ -8,6 +8,8 @@
 //   - 可访问：自己的参数 + 全局函数 + 全局变量
 //   - 访问外层局部变量需捕获列表（闭包，见 examples/closure/closure.cx）：
 //     func |x| f(v: i32): i32 { return x + v; }  —— 捕获外层 x（clone）
+//   - 递归 / 兄弟调用：同样经捕获列表声明（自递归捕获自身、相互递归
+//     捕获对方），见 examples/local_function/recursion.cx
 //   - 不可访问：未在捕获列表中声明的外层局部变量（编译期拒绝）
 //   - comptime 局部函数：调用点编译期折叠，零运行时指令
 
@@ -38,10 +40,6 @@ func main(): i32 {
     // ---- 捕获外层局部变量：闭包语义（未声明捕获 → 编译期拒绝，反注释验证）----
     // func bad(x: i32): i32 { return x + base; }
     // var b = bad(1);
-
-    // ---- 递归 / 兄弟调用：同样需要闭包，当前拒绝（反注释验证）----
-    // func self_ref(n: i32): i32 { return self_ref(n - 1); }
-    // func sib(x: i32): i32 { return caller(x); }
 
     return 0;
 }

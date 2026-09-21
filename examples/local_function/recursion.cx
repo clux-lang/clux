@@ -1,0 +1,51 @@
+// recursion.cx — 样例：局部函数自递归与相互递归
+//
+// 局部函数体引用自身 / 兄弟局部函数，与访问外层局部变量同机制：
+// 必须在捕获列表中显式声明（编译期检查，未声明 → 拒绝）：
+//
+//   - 自递归：func |fact| fact(n) {...}——捕获自身
+//   - 相互递归：func |is_even, is_odd| is_even(n) {...} 与
+//     func |is_even, is_odd| is_odd(n) {...}——每方捕获对方（可捕获
+//     尚未定义的后向兄弟，块入口已注册全部局部函数名）
+//   - 捕获列表声明的是"函数引用"而非 clone：递归调用走块入口绑定的
+//     同一函数实例，每次迭代调用自身，栈帧正常增长/回收
+//   - 反注释验证：func fact(n) {...} 不带捕获 → 编译期报错
+//     "local function cannot reference sibling or self"
+
+func main(): i32 {
+    // ---- 自递归：阶乘（捕获自身）----
+    func |fact| fact(n: i32): i32 {
+        if (n <= 1) { return 1; }
+        return n * fact(n - 1);
+    }
+    var f5 = fact(5);   // 120
+
+    // ---- 相互递归：奇偶判定（每方捕获对方，含后向兄弟）----
+    func |is_even, is_odd| is_even(n: i32): i32 {
+        if (n == 0) { return 1; }
+        return is_odd(n - 1);
+    }
+    func |is_even, is_odd| is_odd(n: i32): i32 {
+        if (n == 0) { return 0; }
+        return is_even(n - 1);
+    }
+    var e10 = is_even(10);  // 1
+    var o7 = is_odd(7);     // 1
+    var e11 = is_even(11);  // 0
+
+    // ---- 相互递归 + 捕获外层变量混合（捕获列表可同时声明两者）----
+    var stop: i32 = 0;
+    func |is_done, is_go, stop| is_done(n: i32): i32 {
+        if (n <= stop) { return 1; }
+        return is_go(n - 1);
+    }
+    func |is_done, is_go, stop| is_go(n: i32): i32 {
+        return is_done(n);
+    }
+    var d5 = is_done(5);    // 5 > 0 → is_go(4) → is_done(4) → ... → 1
+
+    printf("fact(5)=%d even(10)=%d odd(7)=%d even(11)=%d done(5)=%d\n",
+           f5, e10, o7, e11, d5);
+
+    return 0;
+}
