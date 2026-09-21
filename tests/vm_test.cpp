@@ -1911,6 +1911,74 @@ TEST_F(ScopeMech, LookupTraversesParentChain) {
     vm_pop_scope(vm);
 }
 
+/* ---- value -> scope 还原（scope_frame / container_of） ---- */
+
+TEST_F(ScopeMech, ValueScopeCurrentScope) {
+    /* value_make 自动填充 frame：还原出的 scope == current_scope */
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    value_t *v = value_make(vm, vm->type_i32, data); /* auto-track 到 current_scope */
+    EXPECT_EQ(value_scope(v), vm->current_scope);
+    EXPECT_EQ(value_frame(v), &vm->current_scope->frame);
+}
+
+TEST_F(ScopeMech, ValueScopeNestedScope) {
+    vm_push_scope(vm);
+    scope_t *child = vm->current_scope;
+
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    value_t *v = value_make(vm, vm->type_i32, data);
+    EXPECT_EQ(value_scope(v), child);
+    EXPECT_EQ(value_frame(v), &child->frame);
+
+    vm_pop_scope(vm);
+}
+
+TEST_F(ScopeMech, ValueScopeFrameParentChain) {
+    /* frame.parent 与 scope->parent 同步：子 frame 的 parent 是父 scope 的 frame */
+    vm_push_scope(vm);
+    scope_t *child = vm->current_scope;
+    EXPECT_EQ(child->frame.parent, &vm->root_scope->frame);
+    EXPECT_EQ(scope_from_frame(&child->frame), child);
+    EXPECT_EQ(scope_from_frame(&vm->root_scope->frame), vm->root_scope);
+
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    value_t *v = value_make(vm, vm->type_i32, data);
+    const scope_frame_t *f = value_frame(v);
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->parent, &vm->root_scope->frame); /* 嵌套 scope 的 frame.parent = 根 frame */
+
+    vm_pop_scope(vm);
+}
+
+TEST_F(ScopeMech, ValueScopeCloneTracksNewScope) {
+    /* value_clone 走 vtable clone → value_make：副本 frame 指向 clone 时 current_scope */
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    value_t *v = value_make(vm, vm->type_i32, data);
+    ASSERT_EQ(value_scope(v), vm->current_scope);
+
+    vm_push_scope(vm);
+    scope_t *child = vm->current_scope;
+    value_t *copy = value_clone(vm, v); /* clone 到新 scope */
+    EXPECT_EQ(value_scope(copy), child);
+    EXPECT_NE(value_scope(copy), value_scope(v));
+
+    vm_pop_scope(vm);
+}
+
+TEST_F(ScopeMech, UntrackedValueHasNullFrame) {
+    /* untracked 构造（无 vm 上下文）frame 为 NULL，value_scope 返回 NULL */
+    value_t *v = make_i32_raw(vm, 42);
+    EXPECT_EQ(value_frame(v), nullptr);
+    EXPECT_EQ(value_scope(v), nullptr);
+    raw_free(vm, v);
+}
+
+TEST_F(ScopeMech, ShadowValueFrameFilled) {
+    /* shadow value 同样携带 frame（sema 阶段 shadow 生命周期容器 = VM scope） */
+    value_t *v = value_make_shadow(vm, vm->type_i32);
+    EXPECT_EQ(value_scope(v), vm->current_scope);
+}
+
 /* ---- scope_define 重复定义检查 ---- */
 
 TEST_F(ScopeMech, DuplicateDefineReturnsError) {

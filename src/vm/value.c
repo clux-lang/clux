@@ -11,10 +11,11 @@
 /* ---- value_t 结构体定义（仅此文件可见） ---- */
 
 struct value_t {
-    const type_t *type;
-    void        *data;
-    bool         is_shadow;
-    bool         is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */
+    const type_t     *type;
+    void             *data;
+    bool              is_shadow;
+    bool              is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */
+    const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
 };
 
 /* ---- 内部分配 class_t（value_t 堆分配用） ---- */
@@ -69,6 +70,14 @@ void *value_data(const value_t *v) {
     return v ? v->data : NULL;
 }
 
+const scope_frame_t *value_frame(const value_t *v) {
+    return v ? v->frame : NULL;
+}
+
+scope_t *value_scope(const value_t *v) {
+    return (v && v->frame) ? scope_from_frame(v->frame) : NULL;
+}
+
 bool value_is_void(const value_t *v) {
     return !v || v->type == NULL;
 }
@@ -101,6 +110,7 @@ value_t *value_make_untracked(allocator_t *alloc, const type_t *type, void *data
 
 value_t *value_make(vm_t *vm, const type_t *type, void *data) {
     value_t *v = value_make_untracked(vm->alloc, type, data);
+    v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
 }
@@ -109,12 +119,14 @@ value_t *value_make(vm_t *vm, const type_t *type, void *data) {
    is_own=false，dispose 跳过 data 释放。value 是引擎内部内存对象（含 type/
    is_own 等元数据），借用引用的 data 指向的是业务数据而非引擎对象。
    借用值只匿名存活于表达式链中，绑定（DEFINE/STORE/RET/clone）时经
-   value_clone materialize 成独立深拷贝。 */
+   value_clone materialize 成独立深拷贝。frame 指向当前求值作用域（借用
+   引用匿名存活于当前表达式链，不随 data 归属父值）。 */
 value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *data) {
     value_t *v = value_alloc(vm->alloc);
     v->type = type;
     v->data = data;     /* 业务内存：父值 data 块内偏移 */
     v->is_own = false;
+    v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
 }
@@ -130,6 +142,7 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type) {
     v->type = type;
     v->data = NULL;
     v->is_shadow = true;
+    v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
 }

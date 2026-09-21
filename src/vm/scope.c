@@ -19,6 +19,7 @@ scope_t *scope_new(allocator_t *alloc, scope_t *parent) {
     if (!s) panic("vm: out of memory allocating scope");
 
     s->parent   = parent;
+    s->frame.parent = parent ? &parent->frame : NULL; /* 与 parent 同步 */
     s->alloc    = alloc;
     s->vars     = strmap_new(alloc, /*owns_value=*/false);
     s->owned    = vec_new(alloc, /*owns_element=*/false);

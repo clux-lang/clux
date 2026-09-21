@@ -20,6 +20,7 @@ sema_scope_t *sema_scope_new(allocator_t *alloc, sema_scope_kind_t kind,
       allocator_new_ex(alloc, "sema_scope_t", sizeof(sema_scope_t), NULL, NULL,
                        NULL, 1);
   scope->parent = parent;
+  scope->frame.parent = parent ? &parent->frame : NULL; /* 与 parent 同步 */
   scope->alloc = alloc;
   scope->children = vec_new(alloc, false); /* 元素由递归销毁管理，非 vec_free */
   scope->symbols = strmap_new(alloc, true); /* owns sema_symbol_t* */

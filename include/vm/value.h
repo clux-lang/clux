@@ -6,6 +6,7 @@ extern "C" {
 
 #include "vm/type.h"
 #include "vm/type_interrupt.h"
+#include "vm/scope_frame.h"
 #include "core/allocator.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -16,6 +17,11 @@ extern "C" {
  * value_t 始终在堆上分配，由 scope 持有生命周期。
  * 所有 value_make / value_clone / value_implicit_cast / value_explicit_cast
  * 创建的 value 会自动 track 到 vm->current_scope。
+ *
+ * 每个 value 持有指向所属作用域 frame 的指针（借用 &scope->frame，见
+ * scope_frame.h）：value_scope() 可还原所属 scope，供所有权分析判定
+ * 作用域逃逸。untracked 构造（value_make_untracked）无 vm 上下文，
+ * frame 为 NULL（引擎内部对象不属用户作用域）。
  *
  * 外部代码通过 value_type() / value_data() 访问内部字段，
  * 不直接访问 struct value_t 成员。
@@ -29,6 +35,12 @@ const type_t *value_type(const value_t *v);
 
 /** 获取 value 的 data 指针 */
 void *value_data(const value_t *v);
+
+/** 返回 value 所属作用域的 frame（NULL = 无归属，如 untracked 引擎对象） */
+const scope_frame_t *value_frame(const value_t *v);
+
+/** 从 value 还原所属 vm scope（container_of 反推；frame 为 NULL 时返回 NULL） */
+scope_t *value_scope(const value_t *v);
 
 /** 便捷数据访问宏 */
 #define value_as(v, T) (*((T *)(value_data(v))))

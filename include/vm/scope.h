@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "vm/value.h"
+#include "vm/scope_frame.h"
 #include "core/strslice.h"
 #include "core/strmap.h"
 #include "core/vec.h"
@@ -18,11 +19,15 @@ extern "C" {
  * - 变量查找沿 parent 链向上递归（当前 -> parent -> ... -> global）
  * - 作用域退出时通过 owned 销毁所有 value
  * - children 向量记录所有子作用域，用于 error 传播时砍掉整个子树
+ * - frame 是与父子关系同步的轻量节点（frame.parent == parent->frame，
+ *   根作用域 frame.parent == NULL）：value 借用 &scope->frame 标记所属
+ *   作用域，所有权分析经 parent 链判定逃逸（见 scope_frame.h）
  *
  * 所有 value 必须由 scope 管理生命周期，严禁出现孤立 value。
  */
 typedef struct scope_t {
     struct scope_t *parent;
+    scope_frame_t   frame;      /* 父子关系节点（value 借用，与 parent 同步） */
     strmap_t       *vars;      /* name -> value_t* 借用映射（不拥有 value） */
     vec_t          *owned;     /* value_t* 所有 value（scope 拥有生命周期） */
     vec_t          *children;  /* scope_t* 子作用域（不拥有，子自行管理生命周期） */

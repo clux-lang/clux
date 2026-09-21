@@ -6,6 +6,7 @@
 #include "core/vec.h"
 #include "parser/ast_node.h"
 #include "vm/type.h"
+#include "vm/scope_frame.h"
 #include <stdbool.h>
 #include <stddef.h>
 #ifdef __cplusplus
@@ -125,6 +126,7 @@ typedef struct _sema_symbol_t sema_symbol_t;
 
 struct _sema_scope_t {
   struct _sema_scope_t *parent;
+  scope_frame_t  frame;      /* 父子关系节点（与 parent 同步，value 借用） */
   allocator_t    *alloc;    /* 借用调用方的 allocator（内部操作自取） */
   vec_t          *children; /* sema_scope_t* 子作用域（按出现顺序，不拥有） */
   strmap_t       *symbols;  /* name -> sema_symbol_t*（owns_value=true） */
