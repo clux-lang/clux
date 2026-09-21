@@ -1046,6 +1046,14 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
         continue; /* 遮蔽：跳过求值，符号保持未激活 */
       }
       sema_eval_type_def(sema, td, scope);
+    } else if (s->kind == AST_ENUM_DEF) {
+      /* 局部 enum 定义提升：与 type def 同构——底层类型是类型槽位（内建
+         整型名，非变量可遮蔽），variant 值是值表达式（ctfe 按 vm scope
+         查找，局部 var 未绑定报 undefined——天然正确），无需 prior_vars
+         遮蔽预检。sema_eval_enum_def 完成：底层校验 + variant 求值 +
+         type_enum_intern + 登记 sema->types（hoist 自动构造）+ 绑定 type
+         value + 激活符号。 */
+      sema_eval_enum_def(sema, (ast_enum_def_t *)s, scope);
     } else if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
       /* 统一解析签名（含 comptime：调用点折叠前符号 type 须就绪——
@@ -1059,7 +1067,8 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
      var def 不消费子作用域（3a 只注册符号），摘除不影响索引对齐。 */
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
-    if (s->kind == AST_TYPE_DEF) { /* 入口提升已处理 */
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) {
+      /* 入口提升已处理（type def / enum def 均无子作用域） */
       prev = &s->next;
       s = s->next;
       continue;

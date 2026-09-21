@@ -1,6 +1,7 @@
 #include "sema/sema.h"
 #include "core/panic.h"
 #include "parser/ast_block.h"
+#include "parser/ast_enum_def.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ident.h"
@@ -250,6 +251,20 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         }
         break;
       }
+      case AST_ENUM_DEF: {
+        /* 局部 enum 定义：注册符号（暂不激活，Pass 3b walk_block 入口提升
+           调 sema_eval_enum_def 求值后激活）。与局部 type 定义同构——ast
+           指向定义节点；sema_eval_enum_def 经 sema_scope_find_local 取符号
+           后写 type/激活。 */
+        ast_enum_def_t *ed = (ast_enum_def_t *)s;
+        sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)ed};
+        if (!sema_scope_define(scope, ed->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, s),
+                     "duplicate name '%.*s'", (int)ed->name.len,
+                     ed->name.ptr);
+        }
+        break;
+      }
       case AST_FUNC_DEF:
         /* 局部函数定义：注册符号 + 登记队列 + 建 fscope 树（提升语义，
            整个块内可见）。定义点不摘除（进入字节码，运行时 DEFINE 绑定）。
@@ -460,13 +475,17 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
                    (int)cv->name.len, cv->name.ptr);
         continue;
       }
-      if (outer_sym->kind != SEMA_SYM_VAR) {
+      if (outer_sym->kind != SEMA_SYM_VAR &&
+          outer_sym->kind != SEMA_SYM_FUNC) {
         diag_error(sema->diag, sema_loc(sema, c),
-                   "cannot capture '%.*s': not a variable",
+                   "cannot capture '%.*s': not a variable or function",
                    (int)cv->name.len, cv->name.ptr);
         continue;
       }
-      if (!outer_sym->flow_init) {
+      /* 函数符号（局部函数自身/兄弟）提升即存在（is_active=true），无
+         flow_init 概念——跳过初始化检查（运行时绑定在 STORE 后沿作用域链
+         取到定义点实例或提升基底）。变量捕获要求确定已初始化。 */
+      if (outer_sym->kind == SEMA_SYM_VAR && !outer_sym->flow_init) {
         diag_error(sema->diag, sema_loc(sema, c),
                    "cannot capture '%.*s' before initialization",
                    (int)cv->name.len, cv->name.ptr);
