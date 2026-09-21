@@ -1436,6 +1436,132 @@ TEST(Driver, RunFileLocalFuncRecursionRejected) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileLocalFuncSelfCaptureRecursion) {
+  /* 显式捕获自身递归：func |fib| fib(...) 定义点 STORE 后绑定新实例 →
+     fib(10) = 55 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  func |fib| fib(n: i32): i32 {\n"
+      "    if (n <= 1) { return n; }\n"
+      "    return fib(n - 1) + fib(n - 2);\n"
+      "  }\n"
+      "  var r: i32 = fib(10);\n"
+      "  if (r != 55) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncSelfCaptureWithOuterVar) {
+  /* 捕获外层变量 + 自身递归：[base, pow] 混合捕获 → pow(4) = 2^4 = 16 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var base: i32 = 2;\n"
+      "  func |base, pow| pow(n: i32): i32 {\n"
+      "    if (n == 0) { return 1; }\n"
+      "    return base * pow(n - 1);\n"
+      "  }\n"
+      "  var r: i32 = pow(4);\n"
+      "  if (r != 16) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncSiblingCapture) {
+  /* 兄弟函数捕获：a 显式捕获 b（定义在后）→ a(5) = b(5) = 50 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  func |b| a(n: i32): i32 {\n"
+      "    return b(n);\n"
+      "  }\n"
+      "  func b(n: i32): i32 {\n"
+      "    return n * 10;\n"
+      "  }\n"
+      "  var r: i32 = a(5);\n"
+      "  if (r != 50) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncValueRefBeforeDef) {
+  /* 定义点前值引用有捕获局部函数（var f = b，b 定义在后）：块入口实例化
+     绑定，f/b 浅拷贝共享 func_t，捕获在 b 定义点 SET_CLOSURE 填齐 →
+     f(2) = 3*2 = 6（值引用放行，不报 TDZ） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var base: i32 = 3;\n"
+      "  var f = b;\n"
+      "  func |base| b(n: i32): i32 {\n"
+      "    return base * n;\n"
+      "  }\n"
+      "  var r: i32 = f(2);\n"
+      "  if (r != 6) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncSiblingCaptureBackwardWithCaptures) {
+  /* 后向兄弟捕获 + 兄弟也有捕获：a 捕获 b（定义在后、b 捕获 base）→
+     a(2) = b(2) = 3*2 = 6（兄弟捕获链运行时正确解析） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var base: i32 = 3;\n"
+      "  func |b| a(n: i32): i32 {\n"
+      "    return b(n);\n"
+      "  }\n"
+      "  func |base| b(n: i32): i32 {\n"
+      "    return base * n;\n"
+      "  }\n"
+      "  var r: i32 = a(2);\n"
+      "  if (r != 6) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncCallBeforeDefRejected) {
+  /* 定义点前调用有捕获局部函数：值引用放行后调用点 TDZ 拦截保持不变 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var base: i32 = 3;\n"
+      "  var r: i32 = b(2);\n"
+      "  func |base| b(n: i32): i32 {\n"
+      "    return base * n;\n"
+      "  }\n"
+      "  return r;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileLocalFuncNoCaptureSelfRefRejected) {
+  /* 无捕获自身引用仍编译期拦截（提示加入捕获列表） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  func fib(n: i32): i32 {\n"
+      "    if (n <= 1) { return n; }\n"
+      "    return fib(n - 1) + fib(n - 2);\n"
+      "  }\n"
+      "  var r: i32 = fib(10);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileLocalFuncCaptureOuterRejected) {
   /* 局部函数捕获外层局部变量：需闭包，编译期拒绝 */
   std::string path = write_temp_file(
@@ -2448,6 +2574,99 @@ TEST(Driver, RunFileEnumAssignIntRejected) {
       "func main():i32 {\n"
       "  var c: Color = Color::Red;\n"
       "  c = 5;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalDefInFunc) {
+  /* 局部 enum（函数体内定义）：声明/使用/判等/两步 cast/三元组合 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  enum Color:i32 { Red = 1, Green = 2, Blue = 3 }\n"
+      "  var c: Color = Color::Red;\n"
+      "  if (c == Color::Red) {} else { return 1; }\n"
+      "  var v: i8 = c as i32 as i8;\n"
+      "  if (v != 1) { return 2; }\n"
+      "  var tag: i32 = (c == Color::Blue) ? 100 : 200;\n"
+      "  if (tag != 200) { return 3; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalNestedBlocksShadow) {
+  /* 局部 enum 在嵌套块中定义 + 同名遮蔽（外层全局 vs 内层块） */
+  std::string path = write_temp_file(
+      "enum A:i32 { X = 1, Y = 2 }\n"
+      "func main():i32 {\n"
+      "  var total: i32 = 0;\n"
+      "  {\n"
+      "    enum A:i32 { X = 10, Y = 20 }\n"
+      "    var a: A = A::Y;\n"
+      "    total += a as i32;\n"
+      "  }\n"
+      "  var g: A = A::X;\n"
+      "  total += g as i32;\n"
+      "  if (total != 21) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalForwardRef) {
+  /* 局部 enum 前向引用（提升语义：名字整个块内可见，与局部 type def 一致） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var c: Color = Color::Red;\n"
+      "  enum Color:i32 { Red = 1, Green = 2 }\n"
+      "  if (c != Color::Red) { return 1; }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalInLoopBody) {
+  /* 局部 enum 在 for 循环体内：每轮定义独立（运行时名字绑定在块作用域） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  for (var i: i32 = 0; i < 2; i = i + 1) {\n"
+      "    enum E:i32 { A = 1, B = 2 }\n"
+      "    var e: E = E::B;\n"
+      "    if (e != E::B) { return 1; }\n"
+      "  }\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalStrictSeparationRejected) {
+  /* 局部 enum 严格分离同样生效：variant 不能赋给整型变量 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  enum Color:i32 { Red = 1 }\n"
+      "  var x: i32 = Color::Red;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileEnumLocalVariantNotConstRejected) {
+  /* 局部 enum variant 值引用运行时变量 → 编译期拒绝（须编译期常量） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var n: i32 = 5;\n"
+      "  enum Color:i32 { Red = n }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_NE(driver_run_file(path.c_str()), 0);

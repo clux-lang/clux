@@ -76,10 +76,11 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
 /* 块体编译：入口提升局部 type 定义与局部函数定义——
    先按声明序发 type def 字节码（LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE，
    类型构造在全局 hoist 区，此处仅运行时名字绑定），再按声明序提升局部
-   函数名字绑定（compile_func_bind：LOAD_FUNCTION <fid>; PUSH_UNDEFINED;
-   DEFINE——函数对象已在程序头 hoist 函数注册区统一构造，此处只绑定名字
-   到块作用域，名字整个块内可见，前向引用安全，同块互相调用），定义点
-   跳过（第三循环 MAKE_FUNCTION 新实例 + STORE name 重定向名字到新实例）。
+   函数名字绑定（compile_func_bind_instance：MAKE_FUNCTION <fid>;
+   PUSH_UNDEFINED; DEFINE——运行时构造实例并绑定名字到块作用域，名字整个
+   块内可见，前向引用安全，同块互相调用；块入口即实例化，定义点之前引用
+   拿到的是同一实例的浅拷贝，无基底/实例双态）。定义点跳过（第三循环仅对
+   有捕获的局部函数发捕获绑定，见下）。
    函数体统一由 compiler_compile 函数体区按 funcs_all 队列（预扫描收集）
    编译回填——compile_block_body 不再收集。comptime 局部函数不进入运行时
    （调用点 sema 折叠），跳过。与 sema walk_block 提升严格一致。
@@ -87,24 +88,25 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
    函数体块（compile_func_body）与各控制流块（compile_stmt）共用。 */
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
-    if (s->kind == AST_TYPE_DEF) compile_stmt(c, s);
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) compile_stmt(c, s);
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)s;
     if (fn->is_comptime) continue;
-    compile_func_bind(c, fn);
+    compile_func_bind_instance(c, fn);
     if (c->failed) return;
   }
-  /* 第三循环：按声明序编译语句；AST_FUNC_DEF 定义点发实例化序列
-     （compile_func_capture_bind：MAKE_FUNCTION + 每捕获 SET_CLOSURE + STORE
-     name，净 0——新实例重定向名字绑定，替换第二循环绑定的基底对象）。
-     局部函数在定义点生成独立实例并把当前外层变量值 clone 进其 closure_scope
-     （每次求值新对象，循环内多次定义各自独立，捕获互不干扰）。 */
+  /* 第三循环：按声明序编译语句；AST_FUNC_DEF 定义点发捕获绑定
+     （compile_func_capture_bind，keep=false：PUSH name 取块入口实例 +
+     每捕获 SET_CLOSURE + POP，净 0）。捕获延迟到定义点：此时被捕获变量
+     已定义（sema 保证捕获符号已激活），SET_CLOSURE 把当前值 clone 进实例
+     的 closure_scope。无捕获函数跳过（块入口实例无需再绑定任何捕获）。
+     循环内每次迭代块入口都重新 MAKE_FUNCTION，每轮新实例，捕获互不干扰。 */
   for (ast_node_t *s = b->stmts; s; s = s->next) {
-    if (s->kind == AST_TYPE_DEF) continue;
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) continue;
     if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
-      if (!fn->is_comptime) {
+      if (!fn->is_comptime && fn->captures) {
         compile_func_capture_bind(c, fn, false);
         if (c->failed) return;
       }

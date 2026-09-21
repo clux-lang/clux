@@ -44,6 +44,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->func_has_return = false;
   sema->local_func_base = NULL;
   sema->local_func_param_scope = NULL;
+  sema->in_call_callee = false;
   sema->loop_depth = 0;
   sema->func_id_next = FUNC_ID_PROGRAM_BASE;
   return sema;

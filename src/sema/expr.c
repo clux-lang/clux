@@ -212,12 +212,16 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           return value_make_shadow(sema->vm, sema->vm->type_void);
         }
         /* 闭包捕获 TDZ（编译期）：局部函数的捕获值在定义点 resolve_func_captures
-           才绑定（is_active 激活）。walk 顺序保证定义点前的引用点捕获符号未激活
+           才绑定（is_active 激活）。walk 顺序保证定义点前的调用点捕获符号未激活
            → 编译期报错，不静默到运行期（捕获槽运行期仍为 undefined 占位）。
+           仅对调用点生效（in_call_callee）——值引用（var f = b）放行：f/b
+           浅拷贝共享同一 func_t 实例，运行时块入口已 MAKE_FUNCTION 实例化并
+           绑定名字，定义点前取值拿到的是同实例浅拷贝，捕获槽在定义点后由
+           SET_CLOSURE 填齐，调用时才读取，无 TDZ 悬垂。
            全局函数 captures 恒空（hoist 基底即最终实例），天然放行。 */
         sema_func_t *tdz_sf = sema_func_by_id(sema, sym->fid);
-        if (tdz_sf && tdz_sf->is_local && tdz_sf->def &&
-            tdz_sf->def->kind == AST_FUNC_DEF) {
+        if (sema->in_call_callee && tdz_sf && tdz_sf->is_local &&
+            tdz_sf->def && tdz_sf->def->kind == AST_FUNC_DEF) {
           ast_func_def_t *tdz_fn = (ast_func_def_t *)tdz_sf->def;
           if (func_capture_tdz(tdz_sf->scope, tdz_fn->captures)) {
             diag_error(sema->diag, sema_loc(sema, *node),
@@ -231,8 +235,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         if (ref) {
           /* fid 由 sema 创建函数对象时分配（符号表字段；内建函数 = 内建 id）。
              name 指向源标识符 token（compiler 发 PUSH name 沿作用域链查找——
-             局部函数取定义点 STORE 重定向的新实例；全局/内建取全局绑定基底，
-             与定义点 MAKE_FUNCTION 新实例语义对齐）。 */
+             局部函数取块入口 MAKE_FUNCTION 绑定的实例（全块同一实例，浅拷贝
+             共享 func_t）；全局/内建取全局绑定基底，与定义点实例化语义对齐）。 */
           ast_func_ref_t *fr = (ast_func_ref_t *)ref;
           fr->fid  = sym->fid;
           fr->name = n->name;
@@ -405,8 +409,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
       if (!callee) {
-        /* 一般 callee（函数名 / 函数值表达式）统一 shadow 求值 */
+        /* 一般 callee（函数名 / 函数值表达式）统一 shadow 求值。
+           置 in_call_callee：TDZ 检查仅对调用点生效（值引用放行）。 */
+        sema->in_call_callee = true;
         callee = sema_expr(sema, &call->callee, scope);
+        sema->in_call_callee = false;
         if (value_is_error(sema->vm, callee) ||
             value_is_type(callee, TYPE_KIND_VOID))
           return value_make_shadow(sema->vm, sema->vm->type_void);

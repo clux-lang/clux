@@ -337,24 +337,59 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
 }
 
 /**
- * 捕获绑定序列（函数定义点）：
- *   MAKE_FUNCTION <fid>            —— 从基底函数实例化新实例（新 closure_scope，
- *                                    捕获槽 undefined 占位，共享 entry_pc）
- *   每捕获：<捕获值>                —— 纯 id → PUSH "name"（当前作用域链查外层
- *                                    变量值，借用引用压栈）；括号 → compile_expr
- *                                    (init)（定义点求值构造临时捕获值）
- *            SET_CLOSURE "name"    —— 弹捕获值 → clone 进新实例 closure_scope
- *   keep=true：函数值留栈顶（函数字面量表达式，结果即函数值，净 +1）
- *   keep=false：STORE name 重定向——局部函数名字绑定（compile_func_bind 第二
- *     循环绑定的是基底对象）改为指向新实例（value_assign 改写 data 指针，净 0）
- * 函数定义每次求值生成独立实例：循环内多次求值各自新对象，捕获互不干扰
- * （hoist 区基底仅作模板，不再被定义点改写）。提升后定义点前调用 → 读到
- * 基底（捕获槽 undefined，TDZ 语义）。
+ * 局部函数块入口提升绑定（MAKE_FUNCTION + DEFINE name）：
+ *   MAKE_FUNCTION <fid> —— 从基底实例化新实例（新 closure_scope，捕获槽
+ *                           undefined 占位，共享 entry_pc）
+ *   PUSH_UNDEFINED       —— 类型说明符占位（DEFINE 从值推断 decl_type）
+ *   DEFINE name          —— 绑定到当前块作用域（运行时每次进入块执行——
+ *                           循环内每次迭代新实例 + 新块作用域，互不干扰）
+ * 与 compile_func_bind（LOAD_FUNCTION 基底）的区别：绑定的是**实例**而非
+ * 基底——全块任意位置引用（PUSH name 沿作用域链）都拿到同一实例对象，
+ * 消除"定义点前=基底 / 定义点后=实例"的双态。定义点只发捕获绑定
+ * （compile_func_capture_bind：PUSH name + SET_CLOSURE 填充捕获槽）。
+ * 捕获槽就绪前的值引用拿到实例（捕获槽 undefined 占位），就绪后填充对
+ * 所有共享引用（func_clone/assign 浅拷贝指针）同时可见。
  */
-void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
+void compile_func_bind_instance(compiler_t *c, ast_func_def_t *fn) {
+  if (fn->name.len == 0) return; /* 匿名函数无作用域绑定 */
   bcode_write_op(c->bc, BCODE_MAKE_FUNCTION);
   bcode_write_u32(c->bc, fn->fid);
   st_push(c, 1);
+  bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
+  st_push(c, 1);
+  bcode_write_op(c->bc, BCODE_DEFINE);
+  bcode_write_str(c->bc, fn->name);
+  st_push(c, -2);
+}
+
+/**
+ * 捕获绑定序列（函数定义点）：
+ *   keep=false（局部函数语句）：块入口已实例化并 DEFINE（compile_func_bind_
+ *     instance，全块同一实例）。此处只发捕获绑定——PUSH name 沿作用域链取
+ *     实例（当前块作用域），每捕获 PUSH cap（纯 id → PUSH "name" 查外层变量
+ *     值；括号 → compile_expr(init) 定义点求值）+ SET_CLOSURE "cap"（弹捕获
+ *     值 → clone 进实例 closure_scope）。尾 POP 清掉 PUSH name 的引用（净 0）。
+ *     无捕获函数（captures 空）不调用本函数（compile_block_body 跳过，定义
+ *     点无操作）。
+ *   keep=true（函数字面量）：MAKE_FUNCTION 实例化新实例（从基底，捕获槽占位
+ *     复制），捕获绑定原位，函数值留栈顶作字面量结果（净 +1，无 STORE）。
+ * 捕获值就绪语义：捕获变量须在定义点前已定义（sema resolve_func_captures
+ * flow_init 检查）；捕获绑定后填充对全块共享引用可见（func_clone/assign
+ * 浅拷贝指针——f = b 与 b 指向同一 func_t 实例）。
+ */
+void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
+  if (!keep) {
+    /* 局部函数语句：PUSH name 取块入口绑定的实例 */
+    bcode_write_op(c->bc, BCODE_PUSH);
+    bcode_write_str(c->bc, fn->name);
+    st_push(c, 1);
+  } else {
+    /* 函数字面量：MAKE_FUNCTION 实例化新实例 */
+    bcode_write_op(c->bc, BCODE_MAKE_FUNCTION);
+    bcode_write_u32(c->bc, fn->fid);
+    st_push(c, 1);
+  }
+  /* 捕获绑定：每捕获 <捕获值> + SET_CLOSURE "name" */
   for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
     ast_var_def_t *cv = (ast_var_def_t *)cap;
     if (cv->init) {
@@ -369,26 +404,18 @@ void compile_func_capture_bind(compiler_t *c, ast_func_def_t *fn, bool keep) {
     st_push(c, -1);
   }
   if (!keep) {
-    /* 局部函数语句定义点：名字已在块提升绑定基底对象，STORE 重定向到新实例。
-       func value 的 assign 是 data 指针改写（identity 拷贝），名字指向新实例
-       后递归/前向调用都解析到当前定义点的实例。STORE 压回结果引用（与
-       AST_ASSIGN 同款协议），语句无结果 → POP 丢弃。 */
-    bcode_write_op(c->bc, BCODE_STORE);
-    bcode_write_str(c->bc, fn->name);
-    st_push(c, -1);
     bcode_write_op(c->bc, BCODE_POP);
     st_push(c, -1);
   }
 }
 
 /**
- * 函数作用域名字绑定（LOAD_FUNCTION <fid> + DEFINE name）：
- *   LOAD_FUNCTION <fid> —— 从 functions_by_id 压入基底函数值（hoist 区构造）
+ * 函数作用域名字绑定（LOAD_FUNCTION <fid> + DEFINE name，**仅全局绑定用**）：
+ *   LOAD_FUNCTION <fid> —— 从 functions_by_id 压入函数值（hoist 注册区构造）
  *   PUSH_UNDEFINED       —— 类型说明符占位（DEFINE 从值推断 decl_type）
- *   DEFINE name          —— 绑定到当前作用域（全局 → 全局作用域；
- *                          局部 → 定义点块作用域，compile_block_body 提升时调用）
- * 绑定的是基底对象：局部函数的定义点第三循环 MAKE_FUNCTION 生成新实例 +
- * STORE name 重定向名字到新实例；全局函数只定义一次、无捕获，基底即实例。
+ *   DEFINE name          —— 绑定到全局作用域
+ * 全局函数只定义一次、无捕获，hoist 基底即最终实例（无局部函数那种"块入口
+ * 实例化"流程——那走 compile_func_bind_instance）。
  * 函数值表达式（字面量）不调用本函数——MAKE_FUNCTION 实例化，无作用域绑定。
  */
 void compile_func_bind(compiler_t *c, ast_func_def_t *fn) {

@@ -115,6 +115,12 @@ typedef struct sema_t {
     sema_scope_t *local_func_base;
     sema_scope_t *local_func_param_scope;
 
+    /* 调用点 callee 上下文（AST_CALL 分支设置）：true = 当前 AST_IDENT 求值
+       是函数调用点 callee（非值引用）。func_capture_tdz（闭包捕获 TDZ 检查）
+       仅对调用点生效——值引用（var f = b，f/b 浅拷贝共享 func_t）放行，定义
+       点前调用仍编译期拦截。sema_expr 递归进入 callee 前置位、返回后复位。 */
+    bool          in_call_callee;
+
     /* 循环上下文 */
     int           loop_depth;       /* 0 = 不在循环中 */
 

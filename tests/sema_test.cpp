@@ -2508,6 +2508,52 @@ TEST_F(SemaTest, LocalFuncCaptureTdzAfterDefinitionOk) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
+TEST_F(SemaTest, LocalFuncCaptureValueRefBeforeDefOk) {
+    /* 定义点前值引用有捕获局部函数（var f = b，b 定义在后）：块入口已实例化
+       绑定（MAKE_FUNCTION+DEFINE），f/b 浅拷贝共享同一 func_t → TDZ 仅对
+       调用点生效，值引用放行 */
+    EXPECT_TRUE(analyze(
+        "func outer(): i32 {"
+        "  var base = 3;"
+        "  var f = b;" /* 定义点前值引用有捕获局部函数 → 放行 */
+        "  func |base| b(n: i32): i32 { return base * n; }"
+        "  var r = f(2);"
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncSiblingCaptureBackwardWithCapturesOk) {
+    /* 后向兄弟捕获 + 兄弟自身也有捕获：a 捕获 b（定义在后、b 捕获 base）。
+       块入口 b 实例已绑定名字，a 的定义点捕获绑定拿到 b 实例浅拷贝，b 的
+       捕获在其定义点 SET_CLOSURE 填齐 → 合法 */
+    EXPECT_TRUE(analyze(
+        "func outer(): i32 {"
+        "  var base = 3;"
+        "  func |b| a(n: i32): i32 { return b(n); }"
+        "  func |base| b(n: i32): i32 { return base * n; }"
+        "  var r = a(2);"
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncCaptureCallBeforeDefStillRejected) {
+    /* 定义点前调用有捕获局部函数：值引用放行后调用点 TDZ 拦截保持不变
+       （in_call_callee 区分调用/值引用） */
+    EXPECT_FALSE(analyze(
+        "func outer(): i32 {"
+        "  var base = 3;"
+        "  var r = b(2);" /* 定义点前调用 → 仍 TDZ */
+        "  func |base| b(n: i32): i32 { return base * n; }"
+        "  return r;"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    expect_message(0, "used before its captures are bound (TDZ)");
+}
+
 TEST_F(SemaTest, LocalFuncNoCaptureForwardRefOk) {
     /* 无捕获局部函数前向引用（定义点前调用）：hoist 只绑定地址，无捕获槽
        → 合法（与 LocalFuncHoistForwardReference 语义一致，此处为 TDZ 检查
@@ -2520,6 +2566,65 @@ TEST_F(SemaTest, LocalFuncNoCaptureForwardRefOk) {
         "}"
         "func main(): void { var r = outer(); }"));
     EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncSelfCaptureRecursionOk) {
+    /* 显式捕获自身递归：func |fib| fib(...) 捕获列表含自身 → 定义点 STORE
+       后绑定新实例，函数体内自调用合法 */
+    EXPECT_TRUE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func |fib| fib(x:i32): i32 {"
+        "    if (x <= 1) { return x; }"
+        "    return fib(x - 1) + fib(x - 2);"
+        "  }"
+        "  return fib(n);"
+        "}"
+        "func main(): void { var r = outer(10); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncSelfCaptureWithOuterVarOk) {
+    /* 捕获外层变量 + 自身递归：捕获列表 [base, pow] 中 base 是外层 var，
+       pow 是自身——函数符号捕获跳过 flow_init 检查（提升即存在） */
+    EXPECT_TRUE(analyze(
+        "func outer(): i32 {"
+        "  var base: i32 = 2;"
+        "  func |base, pow| pow(x:i32): i32 {"
+        "    if (x == 0) { return 1; }"
+        "    return base * pow(x - 1);"
+        "  }"
+        "  return pow(4);"
+        "}"
+        "func main(): void { var r = outer(); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncSiblingCaptureOk) {
+    /* 兄弟函数捕获：a 捕获 b（定义在后，提升即存在），b 无捕获 → 合法。
+       兄弟互调须显式捕获列表声明 */
+    EXPECT_TRUE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func |b| a(x:i32): i32 { return b(x); }"
+        "  func b(x:i32): i32 { return x * 10; }"
+        "  return a(n);"
+        "}"
+        "func main(): void { var r = outer(5); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, LocalFuncNoCaptureSelfRefStillRejected) {
+    /* 无捕获自身引用仍拦截：不加捕获列表的自递归保持编译期报错
+       （与 LocalFuncRecursionRejected 一致，提示加入捕获列表） */
+    EXPECT_FALSE(analyze(
+        "func outer(n:i32): i32 {"
+        "  func dec(x:i32): i32 {"
+        "    if (x <= 0) { return 0; }"
+        "    return dec(x - 1);"
+        "  }"
+        "  return dec(n);"
+        "}"
+        "func main(): void { var r = outer(5); }"));
+    expect_message(0, "local function cannot reference sibling or self");
 }
 
 /* ---- switch 语句（docs m2-design §4：if 语法糖） ---- */
@@ -2920,6 +3025,88 @@ TEST_F(SemaTest, EnumEqDifferentEnumError) {
         "  if (c == m) { }"
         "}"));
     expect_message(0, "cannot apply '==' to Color and Mood");
+}
+
+TEST_F(SemaTest, EnumLocalDefInFunc) {
+    /* 局部 enum（函数体内定义）：声明/引用/同 enum 赋值/判等 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  enum Color:i32 { Red = 1, Green = 2 }"
+        "  var c: Color = Color::Red;"
+        "  var d: Color = c;"
+        "  if (c == Color::Green) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* 符号注册在函数体块作用域（fscope 的 param_scope 子） */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *sym =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("Color"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_TRUE(sym->is_active);
+    EXPECT_EQ(sym->type->kind, TYPE_KIND_ENUM);
+    EXPECT_EQ(enum_type_underlying(sym->type), vm_->type_i32);
+
+    /* enum 类型登记 + id 绑定（compiler LOAD_TYPE 用） */
+    const sema_type_t *st = sema_type_find(sema_, sym->type);
+    ASSERT_NE(st, nullptr);
+    EXPECT_GE(st->id, TYPE_ID_PROGRAM_BASE);
+}
+
+TEST_F(SemaTest, EnumLocalNestedBlockShadow) {
+    /* 局部 enum 在嵌套块定义 + 遮蔽外层同名 enum */
+    EXPECT_TRUE(analyze(
+        "enum A:i32 { X = 1 }"
+        "func main(): void {"
+        "  {"
+        "    enum A:i32 { X = 10 }"
+        "    var a: A = A::X;"
+        "  }"
+        "  var g: A = A::X;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, EnumLocalForwardRef) {
+    /* 局部 enum 前向引用（提升语义：与局部 type def 一致） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var c: Color = Color::Red;"
+        "  enum Color:i32 { Red = 1 }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, EnumLocalStrictSeparationError) {
+    /* 局部 enum 严格分离同样生效：variant 不能赋给整型 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  enum Color:i32 { Red = 1 }"
+        "  var x: i32 = Color::Red;"
+        "}"));
+    expect_message(0, "cannot initialize variable 'x' of type i32 with Color");
+}
+
+TEST_F(SemaTest, EnumLocalSkipStepCastError) {
+    /* 局部 enum 跳步 cast 拒绝 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  enum Color:i32 { Red = 1 }"
+        "  var c: Color = Color::Red;"
+        "  var y: i8 = c as i8;"
+        "}"));
+    expect_message(0, "cannot cast Color to i8");
+}
+
+TEST_F(SemaTest, EnumLocalDuplicateNameError) {
+    /* 局部 enum 与块内 var 重名 → 3a 建树报重复 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  enum Color:i32 { Red = 1 }"
+        "  var Color: i32 = 5;"
+        "}"));
+    EXPECT_TRUE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, EnumRefUnknownVariantError) {
