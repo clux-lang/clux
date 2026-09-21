@@ -1,6 +1,7 @@
 #include "vm/type_array.h"
 #include "vm/type.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/scope.h"
@@ -254,6 +255,16 @@ void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
                                (const uint8_t *)src + i * es, et);
             break;
         }
+        case TYPE_KIND_STRUCT: {
+            /* 按字段偏移递归（字段类型可能含资源：str/数组/嵌套 struct/option） */
+            size_t n = struct_type_field_count(t);
+            for (size_t i = 0; i < n; i++) {
+                const struct_field_t *f = struct_type_field(t, i);
+                value_blit_raw(vm, (uint8_t *)dst + f->offset,
+                               (const uint8_t *)src + f->offset, f->type);
+            }
+            break;
+        }
         case TYPE_KIND_STR: {
             const string_t *s = *(const string_t *const *)src;
             string_t *copy = s ? string_from_string(vm->alloc, s) : NULL;
@@ -286,6 +297,14 @@ void value_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
             size_t len = array_type_len(t);
             for (size_t i = 0; i < len; i++)
                 value_dispose_raw(vm, (uint8_t *)raw + i * es, et);
+            break;
+        }
+        case TYPE_KIND_STRUCT: {
+            size_t n = struct_type_field_count(t);
+            for (size_t i = 0; i < n; i++) {
+                const struct_field_t *f = struct_type_field(t, i);
+                value_dispose_raw(vm, (uint8_t *)raw + f->offset, f->type);
+            }
             break;
         }
         case TYPE_KIND_STR: {

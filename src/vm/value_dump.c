@@ -4,6 +4,7 @@
 #include "vm/vm.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
+#include "vm/type_struct.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -157,9 +158,19 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         }
         break;
     }
-    case TYPE_KIND_STRUCT:
-        /* VM 尚未实现 struct：best-effort 空体（待字段遍历后扩展本分支） */
+    case TYPE_KIND_STRUCT: {
+        /* 按字段偏移递归 dump（借用 value，data 指向块内偏移） */
+        size_t n = struct_type_field_count(t);
+        for (size_t i = 0; i < n; i++) {
+            const struct_field_t *f = struct_type_field(t, i);
+            if (i) string_append_cstr(out, ", ");
+            if (f->name.ptr) string_append_bytes(out, f->name.ptr, f->name.len);
+            string_append_cstr(out, ": ");
+            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, f->type,
+                              (uint8_t *)value_data(v) + f->offset), out);
+        }
         break;
+    }
     default:
         string_append_cstr(out, "<");
         if (t && t->name.ptr) string_append_bytes(out, t->name.ptr, t->name.len);

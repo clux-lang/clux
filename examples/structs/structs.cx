@@ -1,0 +1,30 @@
+// structs.cx — struct（结构体类型定义）
+//
+//   声明     struct Name { field: type; ... }，字段用分号分隔
+//   约束     字段必须显式写 ': 类型'；字段列表不能为空；尾随分号合法
+//   布局     C 对齐规则：offset_0=0；offset_i=align_up(prev_end, align_i)；
+//           size=align_up(last_end, max_align)；align=max(字段 align)
+//   当前阶段 仅类型定义：可解析、sema 注册、hoist 构造、var p: Point 声明；
+//           值构造（.Point{...}）、成员访问（.）、方法留待后续 Phase
+
+// 全局 struct：字段显式类型
+struct Point { x: i32; y: i32; }
+
+// 字段类型可为其他 struct 类型（布局依赖构造：Inner 先密封）
+struct Inner { a: i32; }
+struct Outer { i: Inner; b: i64; }
+
+func main(): void {
+    // 声明 struct 类型变量（当前阶段仅声明，无值构造）
+    var p: Point = undefined;
+    printf("Point declared\n");
+
+    // 局部 struct（函数体内定义）
+    struct Local { v: i32; }
+    var l: Local = undefined;
+    printf("Local declared\n");
+
+    // 嵌套字段类型布局：Inner{ a: i32 } size=4；Outer{ i@0, b@8 } size=16
+    var o: Outer = undefined;
+    printf("Outer declared\n");
+}

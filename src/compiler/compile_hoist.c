@@ -4,6 +4,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
 
 #include <string.h>
 
@@ -157,6 +158,14 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_STRUCT:
+      /* PUSH_STRUCT 压开放 struct 类型（fields=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设字段；字段类型是布局依赖，pass 2
+         依赖后序定义 + 环检测） */
+      bcode_write_op(c->bc, BCODE_PUSH_STRUCT);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
@@ -289,6 +298,30 @@ static void define_enum(compiler_t *c, const sema_type_t *st, uint8_t *done,
   (void)done; (void)count;
 }
 
+/* struct 定义：LOAD_TYPE <id> 拉回开放对象 → 逐字段：依赖字段类型先定义
+ * （密封；emit_dep_type 递归 + done 三态环检测）→ LOAD 字段类型 →
+ * DEFINE_FIELD <name> → SEAL 封闭（C 对齐布局 + 去重 intern；去重时按自身
+ * id 重绑登记）。字段类型是布局依赖（密封计算 offset/size 需要字段 size/
+ * align 已确定）→ 依赖后序 + 环检测。 */
+static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                          size_t count) {
+  const type_t *t = st->type;
+
+  emit_load_type(c, st->id);               /* 栈: [open_struct_type] */
+
+  size_t n = struct_type_field_count(t);
+  for (size_t i = 0; i < n; i++) {
+    const struct_field_t *f = struct_type_field(t, i);
+    if (!f || !f->type) continue;
+    emit_dep_type(c, f->type, done, count); /* 栈: [open, field_type] */
+    bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
+    bcode_write_str(c->bc, f->name);        /* 弹 field_type → 追加进 open */
+    st_push(c, -1);
+  }
+
+  emit_seal(c);                            /* 封闭（去重时重绑登记） */
+}
+
 /* optional 定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 inner 先定义（密封）→
  * LOAD inner → SET_TYPE（设 inner）→ SEAL 封闭（按 inner 去重 intern，
  * 计算 C 布局，置 sealed；去重时按自身 id 重绑登记） */
@@ -358,6 +391,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_ENUM:
       define_enum(c, st, done, count);
+      break;
+    case TYPE_KIND_STRUCT:
+      define_struct(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */

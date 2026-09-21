@@ -15,10 +15,12 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_enum_ref.h"
+#include "parser/ast_struct_def.h"
 #include "vm/function.h"
 #include "vm/scope.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
+#include "vm/type_struct.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
 #include "vm/value.h"
@@ -861,6 +863,112 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
   scope_define(vm, vm->current_scope, nb, tv);
 
   /* 5. 符号激活（TDZ：定义前不可见） */
+  sym->type = t;
+  sym->is_active = true;
+  sym->flow_init = true;
+  return true;
+}
+
+/* ===========================================================================
+ * struct 定义求值（struct Name { field: type; ... }）
+ *
+ * struct 是"具名字段表类型"：字段类型表（field_t { name, offset, type }）
+ * 密封时按 C 对齐规则布局。定义点在 pass1b 与全局 type/enum def 一起求值
+ * （先于函数签名解析——签名/变量可引用 struct 类型）：
+ *   1. 逐字段类型解析（sema_resolve_type_slot 折叠为 AST_TYPE_REF）→
+ *      未知/非类型槽位报错（字段类型是布局依赖，须已密封）；重复字段名报错
+ *   2. type_struct_intern 构造 struct 类型（拷贝字段表 + C 对齐布局 +
+ *      去重 intern，立即密封）
+ *   3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type
+ *      value 到编译期 vm 作用域（var p: Point 经 type_lookup 解析）
+ *   4. 激活符号；定义点保留（进字节码，运行时 hoist 构造 + 名字绑定）
+ * =========================================================================== */
+
+bool sema_eval_struct_def(sema_t *sema, ast_struct_def_t *sd, sema_scope_t *scope) {
+  if (!sema || !sd) return false;
+  sema_symbol_t *sym = sema_scope_find_local(scope, sd->name);
+  if (!sym) return false; /* pass1 重复定义已诊断，符号未注册 */
+
+  vm_t *vm = sema->vm;
+
+  /* 1. 逐字段类型解析 + 查重（重复字段名报错） */
+  size_t n = 0;
+  for (ast_node_t *fn = sd->fields; fn; fn = fn->next) n++;
+  struct_field_t *fields = NULL;
+  if (n > 0) {
+    fields = (struct_field_t *)allocator_new_ex(
+        vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL, NULL,
+        n);
+    if (!fields) panic("sema: out of memory allocating struct fields");
+  }
+
+  size_t i = 0;
+  bool ok = true;
+  for (ast_node_t *fn = sd->fields; fn; fn = fn->next, i++) {
+    ast_struct_field_t *sf = (ast_struct_field_t *)fn;
+
+    /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
+       ——内建类型名（i32 等）与已登记的具名类型均可用；未知类型报错。 */
+    const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
+    if (!ft) {
+      diag_error(sema->diag, sema_loc(sema, sf->type),
+                 "struct '%.*s': unknown field type for '%.*s'",
+                 (int)sd->name.len, sd->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
+      ok = false;
+      continue;
+    }
+
+    /* 查重：重复字段名报错 */
+    bool dup = false;
+    for (size_t j = 0; j < i; j++) {
+      if (fields[j].name.len == sf->name.len && fields[j].name.ptr &&
+          memcmp(fields[j].name.ptr, sf->name.ptr, sf->name.len) == 0) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) {
+      diag_error(sema->diag, sema_loc(sema, fn),
+                 "struct '%.*s': duplicate field name '%.*s'",
+                 (int)sd->name.len, sd->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
+      ok = false;
+      continue;
+    }
+
+    fields[i].name   = sf->name;
+    fields[i].offset = 0; /* seal 统一计算布局 */
+    fields[i].type   = ft;
+  }
+
+  if (!ok) {
+    if (fields) allocator_free(vm->alloc, (void **)&fields);
+    return false;
+  }
+
+  /* 2. type_struct_intern 构造 struct 类型（拷贝字段表 + C 对齐布局 +
+     去重 intern，立即密封） */
+  const type_t *t = type_struct_intern(vm, fields, n);
+  if (fields) allocator_free(vm->alloc, (void **)&fields);
+  if (!t) return false;
+
+  /* 3. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
+  const sema_type_t *st = sema_type_register(sema, t);
+  if (!st) return false;
+  sd->type_id = st->id; /* compiler 顶层名字绑定 LOAD_TYPE 用 */
+  /* 显示名（诊断/值 dump 用）：须在 sema_type_register 分配 id 后调用——
+     type_set_name 要求 t->id >= TYPE_ID_PROGRAM_BASE 才可改名。 */
+  type_set_name(vm, t, sd->name);
+  value_t *tv = type_as_value(vm, t);
+  if (!tv) return false;
+  char nb[256];
+  if (sd->name.len >= sizeof nb) return false;
+  memcpy(nb, sd->name.ptr, sd->name.len);
+  nb[sd->name.len] = '\0';
+  scope_define(vm, vm->current_scope, nb, tv);
+
+  /* 4. 符号激活（TDZ：定义前不可见） */
   sym->type = t;
   sym->is_active = true;
   sym->flow_init = true;

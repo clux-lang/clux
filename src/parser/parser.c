@@ -4,6 +4,7 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_error.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
@@ -116,6 +117,11 @@ ast_node_t *parse_program(parser_t *p) {
                funcs 链：sema pass1b 折叠 variant 值 + 登记类型，进入字节码，
                运行时 hoist 构造 enum 类型 + 绑定名字。 */
             func = parse_enum_def(p);
+        } else if (check_keyword(p, "struct")) {
+            /* 顶层结构体定义 struct Name { field: type; ... } 挂 funcs 链：
+               sema pass1b 折叠字段类型 + 登记类型，进入字节码，运行时 hoist
+               构造 struct 类型 + 绑定名字。 */
+            func = parse_struct_def(p);
         } else if (check_keyword(p, "var")) {
             /* 全局变量定义 var name[:type] = init; 挂 funcs 链（非 comptime）。
                sema pass_globals 折叠 init 为字面量/函数引用后保留——进入

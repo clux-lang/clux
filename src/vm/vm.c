@@ -105,6 +105,10 @@ vm_t *vm_new(allocator_t *alloc) {
        vm_destroy 手动释放，vec 只持有指针数组） */
     vm->enum_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* 结构体类型池（type_struct_intern / type_struct_seal intern 用；元素由
+       vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->struct_types = vec_new(alloc, /*owns_element=*/false);
+
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
@@ -258,6 +262,18 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&et);
         }
         vec_free(vm->alloc, &vm->enum_types);
+    }
+
+    /* 结构体类型池：dispose_fn 自动释放字段表（含字段名）+ 显示名，仅需裸释放
+       （字段类型归各自类型池，不在此释放） */
+    if (vm->struct_types) {
+        size_t n = vec_len(vm->struct_types);
+        for (size_t i = 0; i < n; i++) {
+            struct_type_t *st = (struct_type_t *)vec_get(vm->struct_types, i);
+            if (!st) continue;
+            allocator_free(vm->alloc, (void **)&st);
+        }
+        vec_free(vm->alloc, &vm->struct_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

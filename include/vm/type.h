@@ -131,6 +131,32 @@ typedef struct enum_type_t {
     size_t          variant_count;
 } enum_type_t;
 
+/**
+ * struct_field_t / struct_type_t: 结构体类型（type_t 的扩展，见 m2-design §2）
+ *
+ * 结构体是具名字段的复合类型：字段表 field_t { name, offset, type } 按声明序
+ * 存储，offset 在类型 intern 时按 C 对齐规则一次性布局：
+ *   offset_0 = 0；offset_i = align_up(prev_end, align_i)；
+ *   size = align_up(last_end, max_align)；align = max(字段 align)
+ * 字段访问 O(1)（偏移直接查表）。struct value 的 data 是连续内存块
+ * （size = type->size），字段按偏移读写。
+ *
+ * 字段表由 vm 拥有（SEAL 时深拷贝字段名 + 类型引用）；去重 intern 按
+ * (字段名 + 字段类型 + 顺序) 去重。字段类型是布局依赖（struct 的 size/align
+ * 依赖字段类型的 size/align），构造时须依赖后序（字段类型先密封）。
+ */
+typedef struct struct_field_t {
+    strslice_t     name;   /* 字段名（seal 时拷贝，vm 拥有） */
+    size_t         offset; /* 字段在 data 块中的字节偏移（seal 时布局计算） */
+    const type_t  *type;   /* 字段类型（引用，不拥有；须已密封） */
+} struct_field_t;
+
+typedef struct struct_type_t {
+    type_t          base;
+    struct_field_t *fields;  /* 字段表（seal 时拷贝，vm 拥有） */
+    size_t          field_count;
+} struct_type_t;
+
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
     return t && t->kind == TYPE_KIND_OPTION;

@@ -8,6 +8,7 @@ extern "C" {
 #include "parser/ast_enum_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
@@ -92,6 +93,17 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope);
  *  失败返回 false（诊断已记录）。
  */
 bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope);
+
+/**
+ * 求值结构体定义（struct Name { field: type; ... }）：
+ *  1. 逐字段类型解析（sema_resolve_type_slot 折叠为 AST_TYPE_REF）→
+ *     未知/非类型槽位报错；查重（重复字段名报错）
+ *  2. type_struct_intern 构造 struct 类型（C 对齐布局 + 去重 intern）
+ *  3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type value
+ *  4. 激活符号；定义点保留（进字节码，运行时 hoist 构造）
+ *  失败返回 false（诊断已记录）。
+ */
+bool sema_eval_struct_def(sema_t *sema, ast_struct_def_t *sd, sema_scope_t *scope);
 
 #ifdef __cplusplus
 }

@@ -20,6 +20,7 @@
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
@@ -1054,6 +1055,13 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
          type_enum_intern + 登记 sema->types（hoist 自动构造）+ 绑定 type
          value + 激活符号。 */
       sema_eval_enum_def(sema, (ast_enum_def_t *)s, scope);
+    } else if (s->kind == AST_STRUCT_DEF) {
+      /* 局部 struct 定义提升：与 type def 同构——字段类型是类型槽位
+         （sema_resolve_type_slot，内建/具名类型名，非变量可遮蔽），无需
+         prior_vars 遮蔽预检。sema_eval_struct_def 完成：字段类型解析 +
+         查重 + type_struct_intern + 登记 sema->types（hoist 自动构造）+
+         绑定 type value + 激活符号。 */
+      sema_eval_struct_def(sema, (ast_struct_def_t *)s, scope);
     } else if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
       /* 统一解析签名（含 comptime：调用点折叠前符号 type 须就绪——
@@ -1067,8 +1075,9 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
      var def 不消费子作用域（3a 只注册符号），摘除不影响索引对齐。 */
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
-    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) {
-      /* 入口提升已处理（type def / enum def 均无子作用域） */
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
+        s->kind == AST_STRUCT_DEF) {
+      /* 入口提升已处理（type def / enum def / struct def 均无子作用域） */
       prev = &s->next;
       s = s->next;
       continue;

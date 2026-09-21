@@ -2672,3 +2672,72 @@ TEST(Driver, RunFileEnumLocalVariantNotConstRejected) {
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- struct（结构体）---- */
+
+TEST(Driver, RunFileStructDeclAndVarPasses) {
+  /* struct 声明 + 声明 struct 类型变量（无值构造，仅类型定义） */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "func main():i32 {\n"
+      "  var p: Point = undefined;\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructLocalDefPasses) {
+  /* 局部 struct（函数体内定义） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  struct Point { x: i32; y: i32; }\n"
+      "  var p: Point = undefined;\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructNestedFieldTypePasses) {
+  /* 字段类型可为其他 struct 类型（布局依赖构造） */
+  std::string path = write_temp_file(
+      "struct Inner { a: i32; }\n"
+      "struct Outer { i: Inner; b: i64; }\n"
+      "func main():i32 {\n"
+      "  var o: Outer = undefined;\n"
+      "  printf(\"ok\\n\");\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructDuplicateFieldRejected) {
+  /* 重复字段名 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; x: i64; }\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructUnknownFieldTypeRejected) {
+  /* 未知字段类型 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { x: Nope; }\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEmptyFieldListRejected) {
+  /* 空字段列表 {} → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { }\n"
+      "func main():i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

@@ -104,6 +104,9 @@ typedef enum {
     BCODE_ENUM_VARIANT,    /* [strtable_idx:u32][value:i64]：peek 开放 enum → 追加 variant
                               （名从 strtable 拷贝，值按 underlying->size 截断） */
     BCODE_MAKE_ENUM,       /* 弹 type value + 弹底层整数值 → 按底层宽度截断构造 enum 值 */
+    BCODE_PUSH_STRUCT,     /* 分配空 struct type（开放，fields=NULL，不入池）+ 压其 type value */
+    BCODE_DEFINE_FIELD,    /* strtable 索引：弹栈顶 type value（字段类型）→ peek 开放
+                              struct → 追加字段（名从 strtable 拷贝） */
     BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */

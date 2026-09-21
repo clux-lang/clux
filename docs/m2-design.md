@@ -66,6 +66,13 @@ struct Point { x: i32; y: i32; };
 - **鸭子类型协议**：成员名、类型、顺序相同 = 兼容；类型兼容指事实相等（布局大小、字段完全相等、kind 一致）
 - 编译期检查布局兼容，运行时字段拷贝
 
+**已实现**（2026-09-21，仅类型定义阶段）：`struct Name { field: type; ... }` 可解析、sema 注册求值、hoist 构造、`var p: Point` 可声明；**值构造（`.Point{...}`）、成员访问（`.`）、方法留待后续 Phase**。
+- parser：顶层 `struct` → `AST_STRUCT_DEF`（name + fields 兄弟链，每字段独立 `AST_STRUCT_FIELD` 节点持 name + type 表达式）；字段以分号分隔（`x: i32;`），空字段列表 `{}`、缺字段名/缺 `: type`/缺 `}` 均报错；尾随分号 `x: i32; }` 合法
+- sema `pass1b_types` 新增 `sema_eval_struct_def`：逐字段 `sema_resolve_type_slot` 解析（未知类型/重复字段名报错）+ `type_struct_intern` 构造密封 struct 类型（C 对齐布局：offset_0=0、offset_i=align_up(prev_end, align_i)、size=align_up(last_end, max_align)、align=max(字段 align)）+ `sema_type_register` 登记 + `scope_define` 绑定 type value 到编译期 vm 作用域（`var p: Point` 经 `type_lookup` 解析）；字段类型是**布局依赖**（struct 的 size/align 依赖字段类型的 size/align），构造时依赖后序保证
+- compiler hoist：`declare_one` 发 `PUSH_STRUCT; DEFINE_TYPE <id>`；`define_struct` 发 `LOAD_TYPE <id>` + 逐字段 `LOAD_TYPE <field_type_id>; DEFINE_FIELD "x"` + `SEAL`
+- vm：`struct_type_t`（field 表 { name, offset, type }）+ `VTABLE_STRUCT` 各槽位（clone/assign/dispose 按字段递归，eq/ne 同实例按字段递归比较；implicit/explicit cast 仅同 struct 实例；type_equal/extends 按指针——鸭子类型检查留待后续）+ 两条开放构造指令 `PUSH_STRUCT`（分配开放 struct_type 压 type value）/ `DEFINE_FIELD <strtable_idx>`（追加字段，名从 strtable 拷贝）；`SEAL` 复用（经 vtable `type_seal` → `type_struct_seal` 拷贝字段表 + 布局计算 + 按 (字段名+类型+顺序) 去重 intern）；`struct_value` 的 data 是连续内存块（size = type->size），字段按偏移 O(1) 读写
+- 示例：`examples/structs/structs.cx`
+
 ### 3. enum（严格与底层类型分离）
 
 ```

@@ -61,6 +61,9 @@ typedef struct vm_t {
     /* ---- 枚举类型池（按 underlying + variant 表去重 intern，vm 拥有生命周期） ---- */
     vec_t *enum_types;     /* enum_type_t*，元素为枚举类型 */
 
+    /* ---- 结构体类型池（按字段名+类型+顺序去重 intern，vm 拥有生命周期） ---- */
+    vec_t *struct_types;   /* struct_type_t*，元素为结构体类型 */
+
     /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
     /* 内建类型固定 id 0..14（vm_init_builtins 登记）；程序类型 id 由编译器
        分配（>=16），运行期 DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等

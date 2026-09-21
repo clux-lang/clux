@@ -8,6 +8,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_enum_def.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
@@ -119,6 +120,12 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
          variant 值；enum 类型本身无函数字面量——variant 值须整型常量） */
       for (ast_node_t *vn = ((ast_enum_def_t *)n)->variants; vn; vn = vn->next)
         prescan_expr(c, ((ast_enum_variant_t *)vn)->value);
+      break;
+    case AST_STRUCT_DEF:
+      /* struct 字段类型表达式预扫描（字段类型已由 sema 折叠为 AST_TYPE_REF/
+         内建名，防御分支递归字段类型——字段类型是类型表达式，无函数字面量） */
+      for (ast_node_t *fn = ((ast_struct_def_t *)n)->fields; fn; fn = fn->next)
+        prescan_expr(c, ((ast_struct_field_t *)fn)->type);
       break;
     case AST_ASSIGN:
       prescan_expr(c, ((ast_assign_t *)n)->target);

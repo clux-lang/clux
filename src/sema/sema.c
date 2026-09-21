@@ -8,6 +8,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_const.h"
 #include "parser/ast_enum_def.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
@@ -505,6 +506,20 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
       continue;
     }
 
+    /* 全局 struct 定义：注册符号（暂不激活，pass1b 求值后激活）。
+       定义点不摘除（进入字节码，运行时 hoist 构造 + 名字绑定）。 */
+    if (f->kind == AST_STRUCT_DEF) {
+      ast_struct_def_t *sd = (ast_struct_def_t *)f;
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
+      sema_symbol_t *sym =
+          sema_scope_define(sema->global_scope, sd->name, &init);
+      if (!sym) {
+        diag_error(sema->diag, sema_loc(sema, f), "duplicate name '%.*s'",
+                   (int)sd->name.len, sd->name.ptr);
+      }
+      continue;
+    }
+
     ast_func_def_t *fn = (ast_func_def_t *)f;
     sema_symbol_t init = {.kind = SEMA_SYM_FUNC}; /* 函数定义顺序自由：Pass 1 全部注册，无遮罩问题 */
     sema_symbol_t *sym = sema_scope_define(sema->global_scope, fn->name, &init);
@@ -609,6 +624,10 @@ static void pass1b_types(sema_t *sema, ast_program_t *prog) {
       /* 与全局 type def 同 pass：enum 类型先于函数签名解析（签名/变量
          可引用 enum 类型）。定义点保留（进字节码，运行时 hoist 构造）。 */
       sema_eval_enum_def(sema, (ast_enum_def_t *)f, sema->global_scope);
+    } else if (f->kind == AST_STRUCT_DEF) {
+      /* 与全局 type def 同 pass：struct 类型先于函数签名解析（签名/变量
+         可引用 struct 类型）。定义点保留（进字节码，运行时 hoist 构造）。 */
+      sema_eval_struct_def(sema, (ast_struct_def_t *)f, sema->global_scope);
     }
   }
 }

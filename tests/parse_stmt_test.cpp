@@ -39,6 +39,7 @@ extern "C" {
 #include "parser/ast_switch.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_enum_ref.h"
+#include "parser/ast_struct_def.h"
 }
 
 #include "test_common.h"
@@ -1766,6 +1767,165 @@ TEST_F(ParseStmtTest, EnumRef_AfterNotIdent) {
     ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+
+/**
+ * Scenario: 合法 struct 定义（多字段、显式类型）
+ * Expected: AST_STRUCT_DEF，name/fields 兄弟链完整
+ */
+TEST_F(ParseStmtTest, StructDef_Basic) {
+    parser_t *p = make_parser(
+        "struct Point { x: i32; y: i32; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_STRUCT_DEF);
+
+    auto *sd = (ast_struct_def_t *)node;
+    EXPECT_TRUE(strslice_eq(sd->name, strslice_from_cstr("Point")));
+
+    /* 字段兄弟链：x → y */
+    ASSERT_NE(sd->fields, nullptr);
+    auto *f1 = (ast_struct_field_t *)sd->fields;
+    EXPECT_EQ(f1->base.kind, AST_STRUCT_FIELD);
+    EXPECT_TRUE(strslice_eq(f1->name, strslice_from_cstr("x")));
+    ASSERT_NE(f1->type, nullptr);
+    EXPECT_EQ(f1->type->kind, AST_IDENT);
+    EXPECT_TRUE(strslice_eq(((ast_ident_t *)f1->type)->name,
+                            strslice_from_cstr("i32")));
+
+    ASSERT_NE(f1->base.next, nullptr);
+    auto *f2 = (ast_struct_field_t *)f1->base.next;
+    EXPECT_TRUE(strslice_eq(f2->name, strslice_from_cstr("y")));
+    ASSERT_NE(f2->type, nullptr);
+    EXPECT_EQ(f2->type->kind, AST_IDENT);
+    EXPECT_TRUE(strslice_eq(((ast_ident_t *)f2->type)->name,
+                            strslice_from_cstr("i32")));
+    EXPECT_EQ(f2->base.next, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: struct 定义挂 parse_program 顶层链
+ * Expected: AST_PROGRAM → funcs 链首节点为 AST_STRUCT_DEF
+ */
+TEST_F(ParseStmtTest, StructDef_AtTopLevel) {
+    parser_t *p = make_parser(
+        "struct Point { x: i32; y: i32; }\n"
+        "func main():void { }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_program(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_PROGRAM);
+
+    auto *prog = (ast_program_t *)node;
+    ASSERT_NE(prog->funcs, nullptr);
+    EXPECT_EQ(prog->funcs->kind, AST_STRUCT_DEF);
+    ASSERT_NE(prog->funcs->next, nullptr);
+    EXPECT_EQ(prog->funcs->next->kind, AST_FUNC_DEF);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 struct 名
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, StructDef_MissingName) {
+    parser_t *p = make_parser("struct { x: i32; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 '{'
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, StructDef_MissingOpenBrace) {
+    parser_t *p = make_parser("struct Point x: i32; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 空字段列表 {}
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, StructDef_EmptyFieldList) {
+    parser_t *p = make_parser("struct Point { }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 字段缺 ': 类型'
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, StructDef_FieldMissingType) {
+    parser_t *p = make_parser("struct Point { x }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 缺 '}' 结尾
+ * Expected: AST_ERROR
+ */
+TEST_F(ParseStmtTest, StructDef_MissingCloseBrace) {
+    parser_t *p = make_parser("struct Point { x: i32; ");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 尾随分号后直接 '}'（x: i32; }）
+ * Expected: AST_STRUCT_DEF 解析成功
+ */
+TEST_F(ParseStmtTest, StructDef_TrailingSemicolon) {
+    parser_t *p = make_parser("struct Point { x: i32; }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_STRUCT_DEF);
+
+    auto *sd = (ast_struct_def_t *)node;
+    ASSERT_NE(sd->fields, nullptr);
+    auto *f1 = (ast_struct_field_t *)sd->fields;
+    EXPECT_TRUE(strslice_eq(f1->name, strslice_from_cstr("x")));
+    EXPECT_EQ(f1->base.next, nullptr);
 
     cleanup_parser(p);
 }

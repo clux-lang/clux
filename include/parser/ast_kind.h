@@ -11,6 +11,8 @@ typedef enum {
     AST_TYPE_DEF,        /* type name = <type-expr>;（sema 求值折叠为类型引用） */
     AST_ENUM_DEF,        /* enum name:underlying { Var = val, ... }（顶层枚举定义） */
     AST_ENUM_VARIANT,    /* 枚举 variant 声明（name = value，仅 enum 定义体内） */
+    AST_STRUCT_DEF,      /* struct name { field: type; ... }（顶层结构体定义） */
+    AST_STRUCT_FIELD,    /* 结构体字段声明（name: type，仅 struct 定义体内） */
     AST_ASSIGN,          /* name = expr; / name += expr; */
     AST_IF,              /* if cond { then } [else { else_body }] */
     AST_SWITCH,          /* switch(cond) { (pat,..)->{..} default->{..} } */

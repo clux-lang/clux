@@ -6,6 +6,7 @@
 #include "vm/type_array.h"
 #include "vm/type_option.h"
 #include "vm/type_enum.h"
+#include "vm/type_struct.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
@@ -532,6 +533,32 @@ static value_t *op_define_bound(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* ---- struct type 构造（与 array type 统一：PUSH → DEFINE_FIELD×N → SEAL） ---- */
+
+/* PUSH_STRUCT：分配空 struct type（开放，fields=NULL，不入池）+ 压其 type
+ * value（type_struct_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_struct(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_struct_push(vm);
+    return NULL;
+}
+
+/* DEFINE_FIELD <name>：弹栈顶 type value（字段类型）→ peek 开放 struct →
+ * 追加字段（名从 strtable 拷贝）。弹字段类型后，栈顶即当前构造的 struct
+ * type（由 PUSH_STRUCT 压入），与 DEFINE_BOUND 同款协议。 */
+static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *ft_v = exec_stack_pop(vm);
+    const type_t *ft = *(const type_t **)value_data(ft_v);
+    value_t *st_v = exec_stack_peek(vm, 0);
+    const type_t *st = (st_v && value_type(st_v) == vm->type_type)
+                           ? value_as(st_v, const type_t *) : NULL;
+    if (!st || st->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: define field expects an open struct type on top");
+    type_struct_add_field(vm, st, name, ft);
+    return NULL;
+}
+
 /* ---- 值构造（construct N）：弹 N 个成员值 + 类型位 → value ----
  * 栈布局（构造期）：[..., type_value, v1, v2, ..., vN]（type 在底、vN 在顶）。
  * 先弹 type_value（栈上类型构造产物，如 push_array...seal 留下的 array type
@@ -905,6 +932,8 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_HALT]           = op_halt,
     [BCODE_PUSH_ARRAY]      = op_push_array,
     [BCODE_DEFINE_BOUND]    = op_define_bound,
+    [BCODE_PUSH_STRUCT]     = op_push_struct,
+    [BCODE_DEFINE_FIELD]    = op_define_field,
     [BCODE_CONSTRUCT]       = op_construct,
     [BCODE_INDEX_GET]       = op_index_get,
     [BCODE_INDEX_SET]       = op_index_set,

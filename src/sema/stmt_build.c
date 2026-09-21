@@ -7,6 +7,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -262,6 +263,18 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate name '%.*s'", (int)ed->name.len,
                      ed->name.ptr);
+        }
+        break;
+      }
+      case AST_STRUCT_DEF: {
+        /* 局部 struct 定义：注册符号（暂不激活，Pass 3b walk_block 入口提升
+           调 sema_eval_struct_def 求值后激活）。与局部 enum/type 定义同构。 */
+        ast_struct_def_t *sd = (ast_struct_def_t *)s;
+        sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)sd};
+        if (!sema_scope_define(scope, sd->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, s),
+                     "duplicate name '%.*s'", (int)sd->name.len,
+                     sd->name.ptr);
         }
         break;
       }

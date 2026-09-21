@@ -38,6 +38,8 @@ extern "C" {
 #include "vm/type_enum.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_enum_ref.h"
+#include "parser/ast_struct_def.h"
+#include "vm/type_struct.h"
 }
 
 #include "test_common.h"
@@ -3137,6 +3139,115 @@ TEST_F(SemaTest, EnumDefUsedInSignature) {
         "  var b: bool = is_red(c);"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
+}
+
+/* ================================================================ */
+/* struct 类型定义                                                    */
+/* ================================================================ */
+
+TEST_F(SemaTest, StructDefBasic) {
+    /* 合法 struct：字段显式类型 + 声明 struct 类型变量 */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = undefined;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* 符号激活 + 类型登记 */
+    sema_symbol_t *sym =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("Point"));
+    ASSERT_NE(sym, nullptr);
+    EXPECT_TRUE(sym->is_active);
+    EXPECT_TRUE(sym->flow_init);
+    ASSERT_NE(sym->type, nullptr);
+    EXPECT_EQ(sym->type->kind, TYPE_KIND_STRUCT);
+
+    /* struct 类型登记 + id 绑定（compiler LOAD_TYPE 用） */
+    const sema_type_t *st = sema_type_find(sema_, sym->type);
+    ASSERT_NE(st, nullptr);
+    EXPECT_GE(st->id, TYPE_ID_PROGRAM_BASE);
+
+    /* 字段表内容 */
+    EXPECT_EQ(struct_type_field_count(sym->type), 2u);
+    ASSERT_NE(struct_type_field(sym->type, 0), nullptr);
+    EXPECT_TRUE(strslice_eq(struct_type_field(sym->type, 0)->name,
+                            STRSLICE_LIT("x")));
+    EXPECT_EQ(struct_type_field(sym->type, 0)->type, vm_->type_i32);
+    ASSERT_NE(struct_type_field(sym->type, 1), nullptr);
+    EXPECT_TRUE(strslice_eq(struct_type_field(sym->type, 1)->name,
+                            STRSLICE_LIT("y")));
+    EXPECT_EQ(struct_type_field(sym->type, 1)->type, vm_->type_i32);
+
+    /* C 对齐布局：x: i32(0), y: i32(4), size=8, align=4 */
+    EXPECT_EQ(struct_type_field(sym->type, 0)->offset, 0u);
+    EXPECT_EQ(struct_type_field(sym->type, 1)->offset, 4u);
+    EXPECT_EQ(sym->type->size, 8u);
+    EXPECT_EQ(sym->type->align, 4u);
+
+    /* var p 类型解析为 struct 类型 */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *p = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("p"));
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(p->type, sym->type);
+}
+
+TEST_F(SemaTest, StructDefUsedInSignature) {
+    /* struct 类型可作函数签名/参数类型（pass1b 先于签名解析） */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func x_of(p: Point): i32 { return 0; }"
+        "func main(): void {"
+        "  var p: Point = undefined;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, StructDefNestedFieldType) {
+    /* 字段类型可为其他 struct 类型（布局依赖：先构造字段类型） */
+    EXPECT_TRUE(analyze(
+        "struct Inner { a: i32; }"
+        "struct Outer { i: Inner; b: i64; }"
+        "func main(): void {"
+        "  var o: Outer = undefined;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_symbol_t *outer =
+        sema_lookup(sema_->global_scope, STRSLICE_LIT("Outer"));
+    ASSERT_NE(outer, nullptr);
+    ASSERT_EQ(outer->type->kind, TYPE_KIND_STRUCT);
+    /* Inner: size=4 align=4 → Outer: i@0, b@8(align_up(4,8)), size=16, align=8 */
+    ASSERT_NE(struct_type_field(outer->type, 0), nullptr);
+    EXPECT_EQ(struct_type_field(outer->type, 0)->offset, 0u);
+    ASSERT_NE(struct_type_field(outer->type, 1), nullptr);
+    EXPECT_EQ(struct_type_field(outer->type, 1)->offset, 8u);
+    EXPECT_EQ(outer->type->size, 16u);
+    EXPECT_EQ(outer->type->align, 8u);
+}
+
+TEST_F(SemaTest, StructDefDuplicateFieldNameError) {
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; x: i64; }"
+        "func main(): void { }"));
+    expect_message(0, "duplicate field name");
+}
+
+TEST_F(SemaTest, StructDefUnknownFieldTypeError) {
+    EXPECT_FALSE(analyze(
+        "struct Point { x: Nope; }"
+        "func main(): void { }"));
+    expect_message(0, "unknown field type");
+}
+
+TEST_F(SemaTest, StructDefNameCollisionError) {
+    /* struct 名与已有类型重名（pass1_names dup） */
+    EXPECT_FALSE(analyze(
+        "type MyInt = i32;"
+        "struct MyInt { x: i32; }"
+        "func main(): void { }"));
+    expect_message(0, "duplicate name 'MyInt'");
 }
 
 } /* namespace */
