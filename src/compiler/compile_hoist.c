@@ -174,8 +174,10 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count);
 
-/* 依赖类型压栈辅助：内建依赖直接 LOAD_TYPE <内建 id>；程序类型先递归
- * define_one（依赖后序密封）再 LOAD_TYPE <st->id>。返回后栈顶即依赖类型。 */
+/* 布局依赖类型压栈辅助：内建依赖直接 LOAD_TYPE <内建 id>；程序类型先递归
+ * define_one（依赖后序密封）再 LOAD_TYPE <st->id>。返回后栈顶即依赖类型。
+ * 布局依赖（array/option/const/volatile/enum/struct）的密封需要内部类型
+ * size/align 已确定 → 内部必须已密封，故递归定义 + done 三态环检测。 */
 static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
                           size_t count) {
   const sema_type_t *dst = c_sema_type_find_ptr(c->sema_types, dep);
@@ -186,6 +188,14 @@ static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
     define_one(c, dst, done, count);   /* 依赖后序：先定义依赖（密封） */
     emit_load_type(c, dst->id);
   }
+}
+
+/* 引用依赖类型压栈辅助：直接 LOAD_TYPE <id> 拉回（不递归、不检测环、不要求
+ * 内部已密封）。引用依赖（func 签名、未来指针 *T）size/align 恒定（如
+ * sizeof(func_t*)），密封不依赖内部类型的布局，实例存在即可——实例由 pass 1
+ * 声明登记保证。内部未密封时名字走 "?" 兜底（type_func.c func_sig_name）。 */
+static void emit_ref_type(compiler_t *c, const type_t *dep) {
+  emit_load_type(c, dep->id);
 }
 
 /* 数组定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 elem 先定义（密封）→
@@ -203,9 +213,11 @@ static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                            /* 封闭算布局（去重时重绑登记） */
 }
 
-/* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（依赖后序）→
- * FUNC_TYPE_PARAM 追加 → 返回类型 → FUNC_TYPE_RETURN → SEAL。
- * 签名引用签名（函数指针作参数）时依赖是另一个 func 类型，递归先定义。 */
+/* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（引用依赖，直接
+ * LOAD_TYPE 拉回，不要求已密封）→ FUNC_TYPE_PARAM 追加 → 返回类型 →
+ * FUNC_TYPE_RETURN → SEAL。签名归引用依赖：size/align 恒为 func_t*（指针），
+ * 密封不依赖参数/返回类型的布局，实例存在即可（pass 1 登记保证）；签名引用
+ * 签名（函数指针作参数）即使形成循环也放行，未密封参数名字 "?" 兜底。 */
 static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
                         size_t count) {
   const type_t *t = st->type;
@@ -216,14 +228,14 @@ static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
   for (size_t i = 0; i < nparams; i++) {
     const type_t *pt = func_type_param(t, i);
     if (!pt) continue; /* NULL = 无类型约束（防御） */
-    emit_dep_type(c, pt, done, count);     /* 栈: [open, param] */
+    emit_ref_type(c, pt);                  /* 栈: [open, param] */
     bcode_write_op(c->bc, BCODE_FUNC_TYPE_PARAM); /* 弹 param → 追加进 open */
     st_push(c, -1);
   }
 
   const type_t *rt = func_type_return(t);
   if (rt) {
-    emit_dep_type(c, rt, done, count);     /* 栈: [open, ret] */
+    emit_ref_type(c, rt);                  /* 栈: [open, ret] */
     bcode_write_op(c->bc, BCODE_FUNC_TYPE_RETURN); /* 弹 ret → 设为返回 */
     st_push(c, -1);
   }
@@ -231,6 +243,7 @@ static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
   /* M1 用户函数签名非 variadic（sema type_func_sig 固定 false），省略
      FUNC_TYPE_VARARG；未来用户变参函数在此发。 */
   emit_seal(c);                            /* 密封签名（去重时重绑登记） */
+  (void)done; (void)count; /* 签名归引用依赖：不递归，done 三态不参与 */
 }
 
 /* 限定符（const/volatile）定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 sub 先
@@ -291,14 +304,43 @@ static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
+/* 定义状态（done 数组三态）：
+ *   0 = 未处理
+ *   1 = 处理中（正在定义，布局依赖递归尚未完成）
+ *   2 = 已完成（已密封）
+ * 三态区分"处理中"与"已完成"：布局依赖（array/option/const/volatile/enum/
+ * struct）密封要求内部类型已 seal（依赖后序），循环引用（A → B → A）递归回到
+ * 处理中节点时内部类型永远无法密封 → 编译期报错（fail-fast），替代无限递归
+ * 崩溃。引用依赖（func 签名、未来指针 *T）不递归（emit_ref_type 直接拉取），
+ * 不参与环检测，天然放行循环签名。当前源语言类型 DAG（sema 按声明序求值拦截
+ * 前向引用）不会触发；未来指针/自引用类型（成环）时此检测是安全网。 */
+#define TYPE_DEF_UNTOUCHED 0
+#define TYPE_DEF_IN_PROGRESS 1
+#define TYPE_DEF_DONE 2
+
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count) {
   if (!st) return;
   size_t idx = (size_t)(st->id - TYPE_ID_PROGRAM_BASE);
   if (idx >= count) return;
-  if (done[idx]) return; /* 共享依赖只定义一次 */
+  if (done[idx] == TYPE_DEF_DONE) return; /* 共享依赖只定义一次 */
+  if (done[idx] == TYPE_DEF_IN_PROGRESS) {
+    /* 依赖链回到处理中节点 = 循环引用：内部类型无法先于自身密封。
+       sema 已拦截源语言循环（防御分支，正常情况下不触发）。 */
+    if (st->type && st->type->name.ptr) {
+      c_error(c, NULL, "circular type definition involving '%.*s'",
+              (int)st->type->name.len, st->type->name.ptr);
+    } else {
+      c_error(c, NULL, "circular type definition");
+    }
+    return;
+  }
+  done[idx] = TYPE_DEF_IN_PROGRESS; /* 进入时置位：递归返回检测环 */
   const type_t *t = st->type;
-  if (!t) return;
+  if (!t) {
+    done[idx] = TYPE_DEF_DONE;
+    return;
+  }
 
   switch (t->kind) {
     case TYPE_KIND_ARRAY:
@@ -318,10 +360,10 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       define_enum(c, st, done, count);
       break;
     default:
-      done[idx] = true; /* 内建别名：pass 1 已完成，无定义 */
+      done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */
       return;
   }
-  done[idx] = true;
+  done[idx] = TYPE_DEF_DONE;
 }
 
 /* pass 1：声明所有类型（开放对象登记进 types_by_id，顺序无关）。
@@ -339,9 +381,11 @@ void compile_hoist_declare(compiler_t *c) {
   }
 }
 
-/* pass 2：定义所有类型（依赖后序递归 + done 去重共享依赖）。
+/* pass 2：定义所有类型（依赖后序递归 + done 三态去重/环检测）。
  * 数组 SEAL 算布局需 elem 已密封，const/volatile 拷贝 size/align 需 sub
- * 已密封，func 签名设参数/返回需依赖已构造——先定义依赖再定义自身。 */
+ * 已密封，func 签名设参数/返回需依赖已构造——先定义依赖再定义自身。
+ * done 三态：0 未处理 / 1 处理中 / 2 已完成；递归回到处理中节点 =
+ * 循环引用 → 编译期报错（见 define_one）。 */
 void compile_hoist_define(compiler_t *c) {
   if (!c || !c->sema_types) return;
   size_t n = vec_len(c->sema_types);
