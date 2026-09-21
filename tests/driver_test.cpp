@@ -2741,3 +2741,83 @@ TEST(Driver, RunFileStructEmptyFieldListRejected) {
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+TEST(Driver, RunFileStructConstructFieldAccessPasses) {
+  /* struct 构造 + 字段读写 + 复合赋值端到端：
+     - 具名构造 .Point{ .x=1, .y=2 } 字段序可乱
+     - 字段读取 p.x / 写入 p.x=5 / 复合赋值 p.y+=3
+     - 匿名构造 .{...} 鸭子类型推断 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "func main(): i32 {\n"
+      "  var p: Point = .Point { .x = 1, .y = 2 };\n"
+      "  if (p.x != 1) { return 1; }\n"
+      "  if (p.y != 2) { return 1; }\n"
+      "  p.x = 5;\n"
+      "  if (p.x != 5) { return 1; }\n"
+      "  p.y += 3;\n"
+      "  if (p.y != 5) { return 1; }\n"
+      "  var q: Point = .{ .x = 7, .y = 8 };\n"
+      "  if (q.x != 7 || q.y != 8) { return 1; }\n"
+      "  var a: Point = .Point { .y = 2, .x = 1 };\n"
+      "  if (a.x != 1 || a.y != 2) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructNestedFieldAccessPasses) {
+  /* 嵌套 struct p.a.b 链式借用 + 写入 */
+  std::string path = write_temp_file(
+      "struct Inner { v: i32; }\n"
+      "struct Outer { a: Inner; b: i32; }\n"
+      "func main(): i32 {\n"
+      "  var o: Outer = .Outer { .a = .Inner { .v = 3 }, .b = 9 };\n"
+      "  if (o.a.v != 3) { return 1; }\n"
+      "  if (o.b != 9) { return 1; }\n"
+      "  o.a.v = 10;\n"
+      "  if (o.a.v != 10) { return 1; }\n"
+      "  if (o.b != 9) { return 1; }\n"
+      "  o.a.v += 5;\n"
+      "  if (o.a.v != 15) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructFieldAssignRejected) {
+  /* 不存在的字段 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; }\n"
+      "func main():i32 { var p: Point = .Point { .x = 1 }; p.z = 2; return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructNonStructFieldAccessRejected) {
+  /* 非 struct 值取字段 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main():i32 { var x = 1; return x.a; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructFieldTypeMismatchRejected) {
+  /* 字段赋值类型不匹配 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; }\n"
+      "func main():i32 { var p: Point = .Point { .x = 1 }; p.x = \"s\"; return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructConstructUnknownFieldRejected) {
+  /* 构造时给出不存在的字段 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; }\n"
+      "func main():i32 { var p: Point = .Point { .z = 1 }; return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

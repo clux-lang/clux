@@ -4,6 +4,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
+#include "parser/ast_member.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -71,6 +72,54 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
   bcode_write_op(c->bc, BCODE_INDEX_SET);   /* 弹 3 压 1 → [self] */
   st_push(c, -2);
   bcode_write_op(c->bc, BCODE_POP);         /* 语句丢弃 */
+  st_push(c, -1);
+}
+
+/* ---- 字段左值赋值编译：p.field = v / p.field op= v ----
+ * 简单赋值：object+value 压 2 → FIELD_SET 弹 2 压 1（self）→ POP。
+ * 复合赋值：object 压 1 → PUSH_VALUE dup self（保留引用，避免双求值）
+ *           → FIELD_GET 弹 1 压 1 → value 压 1 → op 弹 2 压 1
+ *           → FIELD_SET 弹 2 压 1 → POP。
+ * 嵌套 p.a.b：object 是 AST_MEMBER → compile_expr 递归 FIELD_GET，
+ * 借用引用偏移链正确；FIELD_SET 直接写回原 struct 值。
+ * nil 赋值（p.field = nil）：sema 已改写 value 为匿名构造 .{nil}
+ * （AST_CONSTRUCT，走 option 分支 → PUSH_OPT_NONE），此处零特判。 */
+static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
+  ast_member_t *m = (ast_member_t *)n->target;
+
+  if (token_is(n->op, "=")) {
+    compile_expr(c, m->object);              /* 栈: [self] */
+    compile_expr(c, n->value);               /* 栈: [self, val] */
+    bcode_write_op(c->bc, BCODE_FIELD_SET);  /* 弹 2 压 1（self） */
+    bcode_write_str(c->bc, m->field);
+    st_push(c, -1);
+    bcode_write_op(c->bc, BCODE_POP);        /* 赋值是语句：丢弃结果 */
+    st_push(c, -1);
+    return;
+  }
+
+  /* 复合赋值 p.field op= v：保留 self → GET → v → op → SET。
+     PUSH_VALUE 0 dup 栈顶（[self] 时 peek 0 即 self；index 场景
+     栈上有 [self,index] 才用 peek 1 取次顶）。 */
+  compile_expr(c, m->object);                /* 栈: [self] */
+  bcode_write_op(c->bc, BCODE_PUSH_VALUE);
+  bcode_write_u32(c->bc, 0);                 /* dup self（peek 0=栈顶） */
+  st_push(c, 1);                             /* 栈: [self, self] */
+  bcode_write_op(c->bc, BCODE_FIELD_GET);
+  bcode_write_str(c->bc, m->field);          /* 弹 1 压 1 → [self, old] */
+  st_push(c, 0);
+  compile_expr(c, n->value);                 /* 栈: [self, old, v] */
+  if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+  else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+  else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+  else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+  else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+  else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+  st_push(c, -1);                            /* 弹 2 压 1 → [self, new] */
+  bcode_write_op(c->bc, BCODE_FIELD_SET);    /* 弹 2 压 1 → [self] */
+  bcode_write_str(c->bc, m->field);
+  st_push(c, -1);
+  bcode_write_op(c->bc, BCODE_POP);          /* 语句丢弃 */
   st_push(c, -1);
 }
 
@@ -202,6 +251,10 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
        消除（见 m2-design 索引段）。 */
     if (n->target->kind == AST_INDEX) {
       compile_assign_index(c, n);
+      break;
+    }
+    if (n->target->kind == AST_MEMBER) {
+      compile_assign_member(c, n);
       break;
     }
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */

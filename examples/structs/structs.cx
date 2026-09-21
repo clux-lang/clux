@@ -1,11 +1,14 @@
-// structs.cx — struct（结构体类型定义）
+// structs.cx -- struct（结构体类型定义 + 值构造 + 字段访问）
 //
-//   声明     struct Name { field: type; ... }，字段用分号分隔
+//   声明     struct Name { field: type; }，字段用分号分隔
 //   约束     字段必须显式写 ': 类型'；字段列表不能为空；尾随分号合法
 //   布局     C 对齐规则：offset_0=0；offset_i=align_up(prev_end, align_i)；
 //           size=align_up(last_end, max_align)；align=max(字段 align)
-//   当前阶段 仅类型定义：可解析、sema 注册、hoist 构造、var p: Point 声明；
-//           值构造（.Point{...}）、成员访问（.）、方法留待后续 Phase
+//   构造     具名 .Point{ .x = 1, .y = 2 }（字段序可乱）；匿名 .{...}
+//           （鸭子类型，按字段名匹配目标 struct 类型）
+//   访问     p.x 读、p.x = 5 写、p.x += 1 复合赋值、p.a.b 嵌套链式
+//   实现     构造 → CONSTRUCT；读 → FIELD_GET（借用引用零拷贝）；
+//           写/复合 → FIELD_SET（隐式转换 + 深拷贝回写）
 
 // 全局 struct：字段显式类型
 struct Point { x: i32; y: i32; }
@@ -14,17 +17,29 @@ struct Point { x: i32; y: i32; }
 struct Inner { a: i32; }
 struct Outer { i: Inner; b: i64; }
 
-func main(): void {
-    // 声明 struct 类型变量（当前阶段仅声明，无值构造）
-    var p: Point = undefined;
-    printf("Point declared\n");
+func main(): i32 {
+    // 具名构造：字段序可乱（.y 先于 .x）
+    var p: Point = .Point { .y = 2, .x = 1 };
+    if (p.x != 1 || p.y != 2) { return 1; }
 
-    // 局部 struct（函数体内定义）
-    struct Local { v: i32; }
-    var l: Local = undefined;
-    printf("Local declared\n");
+    // 字段读取 + 写入 + 复合赋值
+    p.x = 5;
+    if (p.x != 5) { return 1; }
+    p.y += 3;
+    if (p.y != 5) { return 1; }
 
-    // 嵌套字段类型布局：Inner{ a: i32 } size=4；Outer{ i@0, b@8 } size=16
-    var o: Outer = undefined;
-    printf("Outer declared\n");
+    // 匿名构造：按字段名匹配目标类型
+    var q: Point = .{ .x = 7, .y = 8 };
+    if (q.x != 7 || q.y != 8) { return 1; }
+
+    // 嵌套 struct 构造 + 链式字段访问（p.a.b 借用零拷贝）
+    var o: Outer = .Outer { .i = .Inner { .a = 3 }, .b = 9 };
+    if (o.i.a != 3) { return 1; }
+    o.i.a = 10;
+    if (o.i.a != 10) { return 1; }
+    o.i.a += 5;
+    if (o.i.a != 15 || o.b != 9) { return 1; }
+
+    printf("struct ok\n");
+    return 0;
 }

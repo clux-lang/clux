@@ -7,6 +7,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_fill.h"
@@ -15,6 +16,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_member.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_option.h"
 #include "parser/ast_string_lit.h"
@@ -32,6 +34,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -476,10 +479,33 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       }
       return value_make_shadow(sema->vm, type_option_inner(ot));
     }
-    case AST_MEMBER:
-      diag_error(sema->diag, sema_loc(sema, *node),
-                 "member access is not supported in M1");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+    case AST_MEMBER: {
+      /* 字段读取 p.field：object 求值 → 校验 struct → 按名查字段（struct_type_find_field）
+         → 返回字段类型 shadow。嵌套 p.a.b 递归（object 是 AST_MEMBER 时
+         sema_expr 返回内层字段类型）。字段不存在 → 报错。 */
+      ast_member_t *n = (ast_member_t *)*node;
+      value_t *obj = sema_expr(sema, &n->object, scope);
+      if (value_is_error(sema->vm, obj) ||
+          value_is_type(obj, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *ot = value_type(obj);
+      if (!ot || ot->kind != TYPE_KIND_STRUCT) {
+        char tn[64];
+        sema_type_name(ot, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot access field of value of type %s", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      int idx = struct_type_find_field(ot, n->field);
+      if (idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)ot->name.len, ot->name.ptr,
+                   (int)n->field.len, n->field.ptr);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      return value_make_shadow(sema->vm, struct_type_field(ot, (size_t)idx)->type);
+    }
     case AST_INDEX: {
       /* 下标 / 泛型索引（GAP 延后落点）：parser 只收集 <expr>[<expr,...>
          的 object + indices 链，此处首次可区分——base 是数组 → 下标（GET）；
@@ -576,10 +602,31 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
          fields 数量与元素类型（value_assign 单一校验点），返回该类型
          的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
-         当前实现 array + option 分支（struct/tuple 待后续 Phase）。 */
+         当前实现 array + option + struct 分支（tuple 待后续 Phase）。 */
       ast_construct_t *n = (ast_construct_t *)*node;
-      const type_t *t = sema_resolve_type_slot(sema, &n->type);
-      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *t;
+      if (!n->type) {
+        /* 匿名构造 .{...}：目标类型取 anon_ct 栈顶（var 声明/赋值/嵌套
+           字段注入）。无上下文 → 报错。折叠 n->type 为 AST_TYPE_REF
+           （compiler 发 LOAD_TYPE <id>，零感知）。 */
+        if (sema->anon_ct_depth == 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "anonymous construct '.{...}' requires a type context "
+                     "(var declaration, assignment or struct field)");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        t = sema->anon_ct[sema->anon_ct_depth - 1];
+        ast_node_t *ref =
+            ast_type_ref_new(sema->arena, n->base.tok_begin, n->base.tok_end);
+        if (ref) {
+          const sema_type_t *st = sema_type_find(sema, t);
+          ((ast_type_ref_t *)ref)->name = st ? st->name : t->name;
+          n->type = ref;
+        }
+      } else {
+        t = sema_resolve_type_slot(sema, &n->type);
+        if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
 
       /* ?T 构造器（二值单槽位，docs m2-design §12.2）：字段数强制 == 1，
          字段类型 ∈ {nil, T}。nil 字段 → 运行期 PUSH_OPT_NONE；T 字段 →
@@ -612,10 +659,118 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, t);
       }
 
+      if (t->kind == TYPE_KIND_STRUCT) {
+        /* struct 构造（具名/匿名，docs m2-design §2）：字段数必须 == 类型
+           字段数（完全显式）。具名字段 .name = value（AST_CONSTRUCT_FIELD）
+           按名匹配；匿名字段（值表达式）按声明序匹配（鸭子构造，链序即
+           字段序）。每个字段 value_assign 校验可赋值给字段类型。嵌套匿名
+           构造注入：字段类型已知 → push anon_ct → 递归 sema_expr → pop。
+           校验后把 fields 链重排为类型表序（值节点直链）——运行期
+           op_construct 按表序布值（offset 查表），compiler 按链序压值，
+           链序必须 == 表序，否则具名乱序（.y=2,.x=1）会错位。 */
+        const struct_type_t *st = (const struct_type_t *)t;
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != st->field_count) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "construct: expected %zu fields for %s, got %zu",
+                     st->field_count, tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* 第一遍：按类型表序收集字段值节点（具名按名定位、匿名按序顺延） */
+        size_t cap = st->field_count;
+        ast_node_t **slot = cap ? (ast_node_t **)arena_calloc(
+            sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t)) : NULL;
+        if (cap && !slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        size_t anon = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_CONSTRUCT_FIELD) {
+            ast_construct_field_t *cf = (ast_construct_field_t *)f;
+            int fi = struct_type_find_field(t, cf->name);
+            if (fi < 0) {
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "struct '%.*s' has no field '%.*s'",
+                         (int)t->name.len, t->name.ptr,
+                         (int)cf->name.len, cf->name.ptr);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            slot[fi] = cf->value;
+          } else {
+            while (anon < cap && slot[anon]) anon++;
+            if (anon >= cap) {
+              char tn[64];
+              sema_type_name(t, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "construct: too many fields for %s", tn);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            slot[anon] = f;
+            anon++;
+          }
+        }
+        for (size_t i = 0; i < cap; i++) {
+          if (!slot[i]) {
+            char tn[64];
+            sema_type_name(t, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "construct: missing value for field '%.*s' of %s",
+                       (int)st->fields[i].name.len, st->fields[i].name.ptr, tn);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+        }
+
+        /* 第二遍：按表序求值每个字段值（注入 anon_ct）+ 可赋值性校验 */
+        for (size_t i = 0; i < cap; i++) {
+          ast_node_t *value = slot[i];
+          const type_t *ft = st->fields[i].type;
+          value_t *fv = NULL;
+          bool is_nil_field = value->kind == AST_NIL;
+          if (!is_nil_field) {
+            if (sema->anon_ct_depth < 16)
+              sema->anon_ct[sema->anon_ct_depth++] = ft;
+            fv = sema_expr(sema, &slot[i], scope);
+            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          }
+          if (is_nil_field) {
+            if (!ft || ft->kind != TYPE_KIND_OPTION) {
+              char tn[64];
+              sema_type_name(ft, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize struct field with nil (field "
+                         "type %s is not optional)",
+                         tn);
+            }
+          } else if (fv && !value_is_error(sema->vm, fv) &&
+                     !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+            value_t *dst = value_make_shadow(sema->vm, ft);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+              char tn[64], fn[64];
+              sema_type_name(ft, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize struct field '%.*s' with %s "
+                         "(field type %s)",
+                         (int)st->fields[i].name.len,
+                         st->fields[i].name.ptr, fn, tn);
+            }
+          }
+        }
+
+        /* 第三遍：重排 fields 链为类型表序（值节点直链，ast_append 清 next） */
+        ast_node_t *new_head = NULL, *new_last = NULL;
+        for (size_t i = 0; i < cap; i++)
+          ast_append(&new_head, &new_last, NULL, slot[i]);
+        n->fields      = new_head;
+        n->fields_last = new_last;
+        return value_make_shadow(sema->vm, t);
+      }
+
       if (t->kind != TYPE_KIND_ARRAY) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "construct: unsupported type (only array and optional "
-                   "implemented)");
+                   "construct: unsupported type (only array, optional and "
+                   "struct implemented)");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 

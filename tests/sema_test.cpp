@@ -3250,4 +3250,119 @@ TEST_F(SemaTest, StructDefNameCollisionError) {
     expect_message(0, "duplicate name 'MyInt'");
 }
 
+/* ---- struct 构造 + 字段访问（M2 构造/字段流程） ---- */
+
+TEST_F(SemaTest, StructConstructNamedAndAnonPasses) {
+    /* 具名构造 .Point{...} + 匿名构造 .{...}（鸭子类型按字段名匹配目标） */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1, .y = 2 };"
+        "  var q: Point = .{ .x = 7, .y = 8 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructConstructFieldOrderFreePasses) {
+    /* 具名字段构造字段序可乱（按名匹配，与声明序无关） */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var a: Point = .Point { .y = 2, .x = 1 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructFieldAccessReadWritePasses) {
+    /* 字段读取 + 写入 + 复合赋值 + 嵌套链式访问 */
+    EXPECT_TRUE(analyze(
+        "struct Inner { v: i32; }"
+        "struct Outer { a: Inner; b: i32; }"
+        "func main(): void {"
+        "  var o: Outer = .Outer { .a = .Inner { .v = 3 }, .b = 9 };"
+        "  var x = o.a.v;"
+        "  o.b = 5;"
+        "  o.b += 1;"
+        "  o.a.v *= 2;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructConstructUnknownFieldError) {
+    /* 构造时给出不存在的字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .z = 1 };"
+        "}"));
+    expect_message(0, "has no field 'z'");
+}
+
+TEST_F(SemaTest, StructConstructMissingFieldError) {
+    /* 构造漏字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructConstructFieldTypeMismatchError) {
+    /* 构造字段类型不匹配 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = \"s\" };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructFieldGetUnknownFieldError) {
+    /* 读取不存在的字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1 };"
+        "  var y = p.nope;"
+        "}"));
+    expect_message(0, "has no field 'nope'");
+}
+
+TEST_F(SemaTest, StructFieldGetNonStructError) {
+    /* 非 struct 值取字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var x = 1;"
+        "  var y = x.a;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructFieldAssignTypeMismatchError) {
+    /* 字段赋值类型不匹配 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1 };"
+        "  p.x = \"s\";"
+        "}"));
+}
+
+TEST_F(SemaTest, StructFieldAssignUnknownError) {
+    /* 写入不存在的字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1 };"
+        "  p.z = 2;"
+        "}"));
+    expect_message(0, "has no field 'z'");
+}
+
+TEST_F(SemaTest, StructAssignWholeValuePasses) {
+    /* struct 变量整体赋值（同类型深拷贝） */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 1 };"
+        "  var q: Point = .Point { .x = 2 };"
+        "  q = p;"
+        "}"));
+}
+
 } /* namespace */

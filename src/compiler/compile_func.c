@@ -340,6 +340,14 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
     st_push(c, -1);
   }
 
+  /* 5. POP：消费 BIND_FUNC/SET_FUNC_NAME 用毕的 func value（二者均 peek
+     不弹栈）。名字绑定由 compile_func_bind 另行 LOAD_FUNCTION 压新函数
+     值 + DEFINE——此处若不 POP，函数对象残留栈底，main 执行时栈深
+     基准偏移 1，依赖栈深/栈顶类型的指令（FIELD_GET/FIELD_SET 的
+     PUSH_VALUE dup 偏移、CONSTRUCT 弹栈）会读到残留函数值而错乱。 */
+  bcode_write_op(c->bc, BCODE_POP);
+  st_push(c, -1);
+
   return slot;
 }
 

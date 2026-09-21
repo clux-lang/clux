@@ -10,6 +10,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_index.h"
+#include "parser/ast_member.h"
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -30,6 +31,7 @@
 #include "vm/type_array.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -218,8 +220,24 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
   } else {
-    /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量） */
+    /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量）。
+       匿名构造注入：显式声明类型已知 → push anon_ct，使 init 的 .{...}
+       推断目标类型（var p: Point = .{ .x = 1 };）。 */
+    bool have_ct = false;
+    if (vd->type_expr && sema->anon_ct_depth < 16) {
+      const type_t *dt = NULL;
+      /* 类型槽位可能未解析（3a 推迟），先尝试解析出声明类型用于注入 */
+      ast_node_t *save = vd->type_expr;
+      const type_t *rt = resolve_type_expr(sema, vd->type_expr);
+      if (rt) dt = rt;
+      vd->type_expr = save; /* 不在此处折叠——3a/var_type_slot_reparse 负责 */
+      if (dt) {
+        sema->anon_ct[sema->anon_ct_depth++] = dt;
+        have_ct = true;
+      }
+    }
     value_t *init = sema_expr(sema, &vd->init, scope);
+    if (have_ct && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
     bool init_bad = value_is_error(sema->vm, init) ||
                     value_is_type(init, TYPE_KIND_VOID);
     /* 错误恢复产物（init 已诊断）不提升确定性 */
@@ -275,12 +293,19 @@ static value_t *(*compound_binop(const token_t *op))(vm_t *, value_t *,
 
 static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
                                 sema_scope_t *scope);
+static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
+                                 sema_scope_t *scope);
 
 static void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
   /* 左值：下标表达式 a[i] = v（sema 校验下标合法） */
   if (as->target->kind == AST_INDEX) {
     shadow_assign_index(sema, as, scope);
+    return;
+  }
+  /* 左值：字段赋值 p.field = v（读+写+复合赋值，嵌套 p.a.b 递归） */
+  if (as->target->kind == AST_MEMBER) {
+    shadow_assign_member(sema, as, scope);
     return;
   }
   /* 左值必须是标识符表达式（目前仅支持 ID_LIT） */
@@ -507,6 +532,148 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     sema_type_name(value_type(rhs), rn, sizeof(rn));
     diag_error(sema->diag, sema_loc(sema, as->value),
                "cannot assign %s to array element of type %s", rn, tn);
+  }
+}
+
+/* ---- 字段赋值（p.field = v）：读+写+复合赋值 ----
+ * 目标求值（sema_expr AST_MEMBER 返回字段类型 shadow，嵌套 p.a.b 递归）、
+ * const 检查（value_has_const(base)）、右值求值（匿名构造注入：字段类型
+ * 已知 → push anon_ct）、value_assign 校验可赋值给字段类型。复合赋值
+ * 走同一字段类型校验（op 结果可赋回字段）。
+ * 运行期由 FIELD_SET 指令写回（compiler 按 op 分派 FIELD_GET/op/FIELD_SET）。
+ */
+static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
+                                 sema_scope_t *scope) {
+  ast_member_t *m = (ast_member_t *)as->target;
+
+  /* base 求值 + 可访问校验（sema_expr AST_MEMBER 返回字段类型 shadow；
+     非 struct base 已在其中诊断） */
+  value_t *base = sema_expr(sema, &m->object, scope);
+  bool bad = value_is_error(sema->vm, base) ||
+             value_is_type(base, TYPE_KIND_VOID);
+  const type_t *bt = bad ? NULL : value_type(base);
+  if (!bad && (!bt || bt->kind != TYPE_KIND_STRUCT)) {
+    char tn[64];
+    sema_type_name(bt, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "invalid assignment target: cannot access field of value of "
+               "type %s",
+               tn);
+    bad = true;
+  }
+
+  /* 字段存在性 + 字段类型 */
+  int idx = -1;
+  const type_t *ft = NULL;
+  if (!bad) {
+    idx = struct_type_find_field(bt, m->field);
+    if (idx < 0) {
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
+                 bt->name.ptr, (int)m->field.len, m->field.ptr);
+      bad = true;
+    } else {
+      ft = struct_type_field(bt, (size_t)idx)->type;
+    }
+  }
+
+  /* const 字段不可写 */
+  if (!bad && value_has_const(base)) {
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign to field of const struct");
+    return;
+  }
+
+  /* 右值求值（匿名构造注入：字段类型已知） */
+  bool rhs_nil = as->value->kind == AST_NIL;
+  value_t *rhs = NULL;
+  if (!rhs_nil) {
+    if (ft && sema->anon_ct_depth < 16)
+      sema->anon_ct[sema->anon_ct_depth++] = ft;
+    rhs = sema_expr(sema, &as->value, scope);
+    if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+  }
+  if (bad) return; /* 已有诊断，右值已求值（错误恢复） */
+  if (value_is_error(sema->vm, rhs) ||
+      value_is_type(rhs, TYPE_KIND_VOID))
+    return;
+
+  if (rhs_nil) {
+    if (!ft || ft->kind != TYPE_KIND_OPTION) {
+      char tn[64];
+      sema_type_name(ft, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, as->value),
+                 "cannot assign nil to field '%.*s' (field type %s is not "
+                 "optional)",
+                 (int)m->field.len, m->field.ptr, tn);
+      return;
+    }
+    /* 改写为匿名构造 .{nil}（AST_CONSTRUCT type=NULL fields=[AST_NIL]）：
+       复用 struct 构造 nil 字段路径（compiler 发 PUSH_OPT_NONE <field id>
+       → FIELD_SET 隐式转换 ?T→?T 身份短路）。sema_expr 经 anon_ct 注入
+       字段类型完成校验。 */
+    ast_node_t *nil_node = ast_nil_new(sema->arena, as->value->tok_begin,
+                                       as->value->tok_end);
+    ast_node_t *ctor = ast_construct_new(sema->arena, as->value->tok_begin,
+                                         as->value->tok_end);
+    if (nil_node && ctor) {
+      ((ast_construct_t *)ctor)->type        = NULL;
+      ((ast_construct_t *)ctor)->fields      = nil_node;
+      ((ast_construct_t *)ctor)->fields_last = nil_node;
+      if (sema->anon_ct_depth < 16)
+        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      sema_expr(sema, &as->value, scope);
+      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    }
+    return;
+  }
+
+  if (token_is(as->op, "=")) {
+    /* 简单赋值：value_assign 校验字段类型可赋值性 */
+    value_t *dst = value_make_shadow(sema->vm, ft);
+    if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
+      char tn[64], rn[64];
+      sema_type_name(ft, tn, sizeof(tn));
+      sema_type_name(value_type(rhs), rn, sizeof(rn));
+      diag_error(sema->diag, sema_loc(sema, as->value),
+                 "cannot assign %s to field '%.*s' of type %s", rn,
+                 (int)m->field.len, m->field.ptr, tn);
+    }
+    return;
+  }
+
+  /* 复合赋值 p.field op= rhs → p.field = p.field op rhs（shadow 走 vtable
+     类型协商，结果须能赋回字段类型） */
+  value_t *(*op)(vm_t *, value_t *, value_t *) = compound_binop(as->op);
+  if (!op) {
+    char ob[16];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "unsupported compound assignment operator '%s'", ob);
+    return;
+  }
+  value_t *lhs_field = value_make_shadow(sema->vm, ft);
+  value_t *result = op(sema->vm, lhs_field, rhs);
+  if (value_is_error(sema->vm, result)) {
+    char ob[16], tn[64], rn[64];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(rhs), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "type mismatch: cannot apply '%s' to %s and %s", ob, tn, rn);
+    return;
+  }
+  if (value_is_error(sema->vm, value_assign(sema->vm, lhs_field, result))) {
+    char tn[64], rn[64];
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(result), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign %s to field '%.*s' of type %s", rn,
+               (int)m->field.len, m->field.ptr, tn);
   }
 }
 

@@ -684,10 +684,13 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             const token_t *op_tok = cur_token(p);
             uint32_t op_pos = p->pos;
 
-            /* 左值必须是标识符或下标表达式（a[i] = v）。下标/泛型索引
-             * （AST_INDEX）与泛型实例化语法重叠，parser 不区分——sema
-             * 层做最终校验（数组下标赋值 / 泛型占位诊断）。 */
-            if (left->kind != AST_IDENT && left->kind != AST_INDEX) {
+            /* 左值必须是标识符、下标（a[i] = v）或成员访问（p.x = v）。
+             * 下标/泛型索引（AST_INDEX）与泛型实例化语法重叠，parser 不区分——
+             * sema 层做最终校验（数组下标赋值 / 泛型占位诊断）。
+             * 成员访问目标（AST_MEMBER）支持 p.x = v、p.x += v 等复合赋值，
+             * 字段存在性/const 检查在 sema 层。 */
+            if (left->kind != AST_IDENT && left->kind != AST_INDEX &&
+                left->kind != AST_MEMBER) {
                 return ast_error_new(p->diag, p->tokens, p->arena, left->tok_begin, p->pos,
                                      "invalid assignment target");
             }

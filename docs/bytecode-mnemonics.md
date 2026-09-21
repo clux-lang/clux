@@ -102,7 +102,9 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。当前仅实现 **array 分支**（`value_make_array`）。定长数组（len ≠ SIZE_MAX）允许**部分填充**：编译器对缺失元素补发 `PUSH_UNDEFINED` 占位，`value_make_array` 跳过 undefined 元素，剩余字节由分配块清零自动补**类型零值**（数值 0 / bool false / func nil / str NULL）；元素数超出声明长度（`N > len`）报错。非 array 类型暂报错，struct/tuple 待后续 Phase。 |
+| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。**array 分支**（`value_make_array`）：定长数组（len ≠ SIZE_MAX）允许**部分填充**，编译器对缺失元素补发 `PUSH_UNDEFINED` 占位，跳过 undefined 元素，剩余字节由分配块清零自动补**类型零值**；元素数超出声明长度报错。**struct 分支**（2026-09-21）：字段数须与类型字段表一致，逐字段先 `value_implicit_cast` 到字段类型（字面量 i32 → i64 字段宽度提升）再 `value_blit_raw` 深拷贝，data 清零未指定字段自动零值。 |
+| `FIELD_GET` | `U32`（strtable 索引，字段名） | `field_get`：`self.field` → **借用引用**（is_own=false，data 指向 self data 块内字段偏移，零拷贝；绑定/返回经 `value_clone` materialize 深拷贝）。栈布局 `…, self`，弹 self → 按名查偏移（strtable 索引，编译期常量）→ 压借用引用。嵌套 `p.a.b` 借用链偏移正确。非 struct / 字段不存在返回硬错误。 |
+| `FIELD_SET` | `U32`（strtable 索引，字段名） | `field_set`：`self.field = val` → 返回 self（引用，链式复用）。栈布局 `…, self, val`（val 在顶），弹 val、self → 按名查偏移 → `value_implicit_cast` 到字段类型（同类型身份短路）→ dispose 旧字段值（回收资源）→ blit 深拷贝新值回偏移。复合赋值 `p.x op= v` 由编译器发 `PUSH_VALUE 0`（dup self）+ `FIELD_GET` + op + `FIELD_SET`。 |
 | `INDEX_GET` | — | `get_item`：`self[index]` → 元素副本。栈布局 `…, self, index`（index 在顶），弹 index、self 后分派 `vtable->get_index`。 |
 | `INDEX_SET` | — | `set_item`：`self[index] = val` → 返回 self。栈布局 `…, self, index, val`（val 在顶），弹 val、index、self 后分派 `vtable->set_index`。 |
 

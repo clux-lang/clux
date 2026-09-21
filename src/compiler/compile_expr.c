@@ -4,6 +4,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
@@ -11,6 +12,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_member.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_unwrap.h"
 #include "parser/ast_string_lit.h"
@@ -21,6 +23,7 @@
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -417,8 +420,45 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       break;
     }
 
+    if (t->kind == TYPE_KIND_STRUCT) {
+      /* struct 构造（具名/匿名，sema 已折叠匿名 type 为 AST_TYPE_REF）：
+         字段数已由 sema 校验 == 类型字段数。按字段序压值：
+         - 具名字段（AST_CONSTRUCT_FIELD）取 value 编译（sema 已按名匹配
+           到正确字段，运行期 CONSTRUCT 按声明序布值——具名字段编译序即
+           AST 链序，与类型字段表序一致）
+         - nil 字段 → 字段须 ?T（sema 已校验）→ PUSH_OPT_NONE <field id>
+         CONSTRUCT N 弹 N+1 压 1。 */
+      const struct_type_t *st = (const struct_type_t *)t;
+      size_t fcount = 0;
+      for (ast_node_t *f = n->fields; f; f = f->next) {
+        ast_node_t *value = f;
+        if (f->kind == AST_CONSTRUCT_FIELD)
+          value = ((ast_construct_field_t *)f)->value;
+        if (value->kind == AST_NIL) {
+          /* nil 字段：须 ?T（sema 已校验），发 PUSH_OPT_NONE <field type id>。
+             id 用字段类型（option 类型须已登记；sema 已 resolve 字段类型） */
+          const sema_type_t *fst =
+              c_sema_type_find_ptr(c->sema_types, st->fields[fcount].type);
+          if (!fst) {
+            c_error(c, value, "compiler: optional field type not registered");
+            return;
+          }
+          bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+          bcode_write_u32(c->bc, fst->id);
+          st_push(c, 1);
+        } else {
+          compile_expr(c, value);
+        }
+        fcount++;
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, (uint32_t)fcount);
+      st_push(c, -((int)fcount));
+      break;
+    }
+
     if (t->kind != TYPE_KIND_ARRAY) {
-      c_error(c, node, "construct: unsupported type (only array and optional implemented)");
+      c_error(c, node, "construct: unsupported type (only array, optional and struct implemented)");
       return;
     }
 
@@ -470,9 +510,17 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, -((int)fcount));                 /* CONSTRUCT 弹 N+1 压 1 */
     break;
   }
-  case AST_MEMBER:
-    c_error(c, node, "member access is not supported in M1");
-    return;
+  case AST_MEMBER: {
+    /* 字段读取 p.field：object → FIELD_GET <name>（弹 self → 借用引用）。
+       字段名进 strtable（编译期常量），运行期按名查偏移。嵌套 p.a.b：
+       object 是 AST_MEMBER → 递归 FIELD_GET，借用引用偏移链正确。 */
+    ast_member_t *n = (ast_member_t *)node;
+    compile_expr(c, n->object);       /* 栈: [self] */
+    bcode_write_op(c->bc, BCODE_FIELD_GET);
+    bcode_write_str(c->bc, n->field);
+    st_push(c, 0);                    /* 弹 1 压 1，净 0 */
+    break;
+  }
   case AST_INDEX: {
     /* 右值下标：object → index → INDEX_GET（弹 self+index → 元素副本）。
        a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），自然编译为两次

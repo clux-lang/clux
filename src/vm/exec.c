@@ -615,7 +615,9 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
 
     /* struct 构造：连续内存块（size = type->size），逐字段按偏移深拷贝
      * （value_blit_raw 递归处理资源字段）。字段数必须与类型字段表一致
-     * （sema 已校验"字段数完全显式"）。 */
+     * （sema 已校验"字段数完全显式"）。每字段先 value_implicit_cast 到
+     * 字段类型（字面量 i32 → i64 字段等宽度提升；同类型身份短路），
+     * 与 array 构造的 value_make_array 逐元素 cast 行为一致。 */
     if (t->kind == TYPE_KIND_STRUCT) {
         const struct_type_t *st = (const struct_type_t *)t;
         if ((size_t)n != st->field_count)
@@ -623,8 +625,12 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 "construct: struct field count mismatch");
         void *data = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
         for (uint32_t i = 0; i < n; i++) {
+            value_t *casted = value_implicit_cast(vm, elems[i],
+                                                  st->fields[i].type);
+            if (value_is_error(vm, casted))
+                return casted;
             value_blit_raw(vm, (uint8_t *)data + st->fields[i].offset,
-                           value_data(elems[i]), st->fields[i].type);
+                           value_data(casted), st->fields[i].type);
         }
         return value_make(vm, t, data);
     }

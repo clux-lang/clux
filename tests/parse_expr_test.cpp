@@ -30,6 +30,9 @@ extern "C" {
 #include "parser/ast_binary.h"
 #include "parser/ast_array.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
+#include "parser/ast_member.h"
+#include "parser/ast_assign.h"
 #include "parser/ast_error.h"
 #include "parser/ast_func_type.h"
 }
@@ -1769,6 +1772,121 @@ TEST_F(ParseExprTest, FuncType_FuncKeywordNotIdent) {
     ASSERT_NE(node, nullptr);
     ASSERT_EQ(node->kind, AST_FUNC_TYPE);
 
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 具名字段构造 .Point{ .x = 1, .y = 2 }
+ * Expected: AST_CONSTRUCT，type=AST_IDENT(Point)，fields 为
+ *           AST_CONSTRUCT_FIELD 兄弟链（.x=1 → .y=2）
+ */
+TEST_F(ParseExprTest, Construct_NamedFields) {
+    parser_t *p = make_parser(".Point{ .x = 1, .y = 2 }");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    ASSERT_NE(c->type, nullptr);
+    ASSERT_EQ(c->type->kind, AST_IDENT);
+    expect_ident_text(c->type, "Point");
+
+    ast_node_t *f = c->fields;
+    ASSERT_NE(f, nullptr);
+    ASSERT_EQ(f->kind, AST_CONSTRUCT_FIELD);
+    auto *cf = (ast_construct_field_t *)f;
+    EXPECT_EQ(cf->name.len, 1u);
+    EXPECT_EQ(memcmp(cf->name.ptr, "x", 1), 0);
+    ASSERT_NE(cf->value, nullptr);
+    EXPECT_EQ(cf->value->kind, AST_INT_LIT);
+
+    f = f->next;
+    ASSERT_NE(f, nullptr);
+    ASSERT_EQ(f->kind, AST_CONSTRUCT_FIELD);
+    cf = (ast_construct_field_t *)f;
+    EXPECT_EQ(cf->name.len, 1u);
+    EXPECT_EQ(memcmp(cf->name.ptr, "y", 1), 0);
+    EXPECT_EQ(f->next, nullptr);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 成员访问 p.x（读）
+ * Expected: AST_MEMBER，object=AST_IDENT(p)，field="x"
+ */
+TEST_F(ParseExprTest, Member_Read) {
+    parser_t *p = make_parser("p.x");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_MEMBER);
+
+    auto *m = (ast_member_t *)node;
+    ASSERT_NE(m->object, nullptr);
+    ASSERT_EQ(m->object->kind, AST_IDENT);
+    expect_ident_text(m->object, "p");
+    EXPECT_EQ(m->field.len, 1u);
+    EXPECT_EQ(memcmp(m->field.ptr, "x", 1), 0);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 嵌套成员访问 p.a.b（链式借用）
+ * Expected: AST_MEMBER 嵌套——外层 field="b"，object 为 AST_MEMBER(p.a)
+ */
+TEST_F(ParseExprTest, Member_NestedChain) {
+    parser_t *p = make_parser("p.a.b");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_MEMBER);
+
+    auto *m = (ast_member_t *)node;
+    EXPECT_EQ(m->field.len, 1u);
+    EXPECT_EQ(memcmp(m->field.ptr, "b", 1), 0);
+    ASSERT_NE(m->object, nullptr);
+    ASSERT_EQ(m->object->kind, AST_MEMBER);
+    auto *inner = (ast_member_t *)m->object;
+    EXPECT_EQ(inner->field.len, 1u);
+    EXPECT_EQ(memcmp(inner->field.ptr, "a", 1), 0);
+    ASSERT_NE(inner->object, nullptr);
+    ASSERT_EQ(inner->object->kind, AST_IDENT);
+    expect_ident_text(inner->object, "p");
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: 字段赋值 p.x = 5 与复合赋值 p.y += 3
+ * Expected: AST_ASSIGN，target=AST_MEMBER，op="="/"+="，value 就位
+ */
+TEST_F(ParseExprTest, Member_AssignAndCompound) {
+    parser_t *p = make_parser("p.x = 5");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ASSIGN);
+    auto *as = (ast_assign_t *)node;
+    ASSERT_NE(as->target, nullptr);
+    ASSERT_EQ(as->target->kind, AST_MEMBER);
+    ASSERT_NE(as->value, nullptr);
+    EXPECT_EQ(as->value->kind, AST_INT_LIT);
+    cleanup_parser(p);
+
+    p = make_parser("p.y += 3");
+    ASSERT_NE(p, nullptr);
+    node = parse_expr(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_ASSIGN);
+    as = (ast_assign_t *)node;
+    ASSERT_EQ(as->target->kind, AST_MEMBER);
     cleanup_parser(p);
 }
 

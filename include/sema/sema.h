@@ -130,6 +130,14 @@ typedef struct sema_t {
        预扫描只读取不再分配——fid 单一来源在 sema（用户函数对象创建即持 id，
        comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
     uint32_t      func_id_next;
+
+    /* 匿名构造目标类型栈（. { ... }，type=NULL 的 AST_CONSTRUCT）：sema_expr
+       遇匿名构造时取栈顶推断目标类型。入栈时机——var 声明已初始化分支、
+       简单/复合赋值右值、struct 具名构造字段递归（外层类型已知 → 字段类型
+       已知 → 嵌套匿名构造注入）、函数调用实参（参数类型已知）。无上下文时
+       栈空 → 匿名构造报错。 */
+    const type_t *anon_ct[16];
+    size_t        anon_ct_depth;
 } sema_t;
 
 /* ---- 公共 API ---- */
