@@ -55,6 +55,7 @@ typedef enum {
     AST_VOLATILE,        /* volatile <type-expr> */
     AST_OPTION,          /* ?T optional 类型修饰（类型即表达式，? 前导） */
     AST_FILL,            /* <v,N> 值包（仅 CONSTRUCT 字段链中出现；v=值，N=重复次数） */
+    AST_CONSTRUCT_FIELD, /* struct 构造具名字段：.name = expr（仅 CONSTRUCT 字段链） */
     AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */

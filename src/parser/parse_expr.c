@@ -21,6 +21,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
@@ -178,6 +179,41 @@ static ast_node_t *parse_construct_field(parser_t *p) {
         return node;
     }
 
+    /* 具名字段：.name = expr（struct 构造字段形态）。回溯探测 `.IDENT =`
+       ——命中则构造 AST_CONSTRUCT_FIELD；否则恢复游标回落普通表达式
+       （嵌套构造 .Point{...} / 成员访问 .x 等由 parse_expr 重新解析）。 */
+    if (check_symbol(p, ".")) {
+        uint32_t save = p->pos;
+        uint32_t fb2 = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+            strslice_t name = token_strslice(cur_token(p));
+            advance(p);
+            skip_trivia(p);
+            if (check_symbol(p, "=")) {
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *value = parse_expr(p);
+                if (!value || value->kind == AST_ERROR) {
+                    if (!value) {
+                        return ast_error_new(p->diag, p->tokens, p->arena, fb2,
+                                             p->pos,
+                                             "expected value after '.field =' "
+                                             "in construct");
+                    }
+                    return value;
+                }
+                ast_node_t *n = ast_construct_field_new(p->arena, fb2, p->pos);
+                if (!n) return NULL;
+                ((ast_construct_field_t *)n)->name  = name;
+                ((ast_construct_field_t *)n)->value = value;
+                return n;
+            }
+        }
+        p->pos = save; /* 非具名字段：恢复游标，回落普通表达式 */
+    }
+
     /* 普通字段表达式 */
     return parse_expr(p);
 }
@@ -308,20 +344,25 @@ ast_node_t *parse_unary(parser_t *p) {
         advance(p);                  /* 消费 '.' */
         skip_trivia(p);
 
-        ast_node_t *type = parse_unary(p);   /* 类型：i32 / [N]T / const i32 / 嵌套 */
-        if (!type || type->kind == AST_ERROR) {
-            if (!type) {
-                return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
-                                     "expected type after '.' in typed literal");
-            }
-            return type;
-        }
-        /* type 解析（如 [N] i32）返回后游标可能停在 trivia 上（关键字消费不跳空白），
-         * 检查 '{' 前必须跳过，否则 '}' 前的空格会导致误报。 */
-        skip_trivia(p);
+        ast_node_t *type = NULL;
+        /* 匿名构造：'.' 后直接 '{' → type=NULL，目标类型由 sema 依上下文
+         * 推断（var 声明/赋值/嵌套字段）。否则照旧解析具名类型。 */
         if (!check_symbol(p, "{")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
-                                 "expected '{' after type in typed literal");
+            type = parse_unary(p);   /* 类型：i32 / [N]T / const i32 / 嵌套 */
+            if (!type || type->kind == AST_ERROR) {
+                if (!type) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                         "expected type after '.' in typed literal");
+                }
+                return type;
+            }
+            /* type 解析（如 [N] i32）返回后游标可能停在 trivia 上（关键字消费不跳空白），
+             * 检查 '{' 前必须跳过，否则 '}' 前的空格会导致误报。 */
+            skip_trivia(p);
+            if (!check_symbol(p, "{")) {
+                return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
+                                     "expected '{' after type in typed literal");
+            }
         }
         advance(p);
         skip_trivia(p);

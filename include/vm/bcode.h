@@ -133,6 +133,11 @@ typedef enum {
     BCODE_CONSTRUCT,        /* U32：成员数量；弹 N 个成员值 + 类型位 → 按类型构造 value */
     BCODE_INDEX_GET,        /* 弹 self + index，返回 self[index]（get_item） */
     BCODE_INDEX_SET,        /* 弹 self + index + val，返回 self（set_item） */
+    BCODE_FIELD_GET,        /* STR：字段名；弹 self → 返回 self.field 借用引用
+                               （零拷贝，data 指向 self data 块内偏移；FIELD 名
+                               编译期常量，strtable 索引，不走 vtable 分派） */
+    BCODE_FIELD_SET,        /* STR：字段名；弹 self + val → 写回字段 → 返回 self
+                               （隐式转换 val → 字段类型；嵌套字段经借用链偏移正确） */
     BCODE_PUSH_OPT_NONE,    /* u32 id：从 types_by_id 查 option 类型 → 压 ok=false +
                                value 全零的 ?T 值块（构造器字段/fill 的 nil） */
     BCODE_UNWRAP,           /* 无操作数：弹 ?T 值 → ok 则借用返回 value 字段的

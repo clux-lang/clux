@@ -1617,7 +1617,7 @@ TEST_F(ParseExprTest, Construct_EmptyFields) {
 }
 
 /**
- * Scenario: 构造缺少类型 . {123} → AST_ERROR（'.' 后必须是类型）
+ * Scenario: 匿名构造 .{123} → AST_CONSTRUCT（type=NULL，sema 依上下文推断目标类型）
  */
 TEST_F(ParseExprTest, Construct_MissingTypeReturnsError) {
     parser_t *p = make_parser(".{123}");
@@ -1625,7 +1625,10 @@ TEST_F(ParseExprTest, Construct_MissingTypeReturnsError) {
 
     ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
-    EXPECT_EQ(node->kind, AST_ERROR);
+    ASSERT_EQ(node->kind, AST_CONSTRUCT);
+
+    auto *c = (ast_construct_t *)node;
+    EXPECT_EQ(c->type, nullptr);   /* 匿名：'.' 后直接 '{'，无类型表达式 */
 
     cleanup_parser(p);
 }

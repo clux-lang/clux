@@ -613,9 +613,25 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
             "construct: optional field type mismatch");
     }
 
-    /* 非 array/option 类型暂未实现 */
+    /* struct 构造：连续内存块（size = type->size），逐字段按偏移深拷贝
+     * （value_blit_raw 递归处理资源字段）。字段数必须与类型字段表一致
+     * （sema 已校验"字段数完全显式"）。 */
+    if (t->kind == TYPE_KIND_STRUCT) {
+        const struct_type_t *st = (const struct_type_t *)t;
+        if ((size_t)n != st->field_count)
+            return value_make_error(vm,
+                "construct: struct field count mismatch");
+        void *data = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
+        for (uint32_t i = 0; i < n; i++) {
+            value_blit_raw(vm, (uint8_t *)data + st->fields[i].offset,
+                           value_data(elems[i]), st->fields[i].type);
+        }
+        return value_make(vm, t, data);
+    }
+
+    /* 非 array/option/struct 类型暂未实现 */
     return value_make_error(vm,
-        "construct: unsupported type (only array and optional implemented)");
+        "construct: unsupported type (only array, optional and struct implemented)");
 }
 
 /* ---- 下标读取（get_item）：self[index] -> 元素 ----
@@ -635,6 +651,53 @@ static value_t *op_index_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *index = exec_stack_pop(vm);
     value_t *self  = exec_stack_pop(vm);
     return value_set_index(vm, self, index, val);
+}
+
+/* ---- 字段读取（field_get <name>）：self.field → 借用引用 ----
+ * 字段名是编译期常量（strtable 索引），运行时按名查偏移 → 返回借用引用
+ * （data 指向 self data 块内偏移，零拷贝；绑定/返回时经 value_clone
+ * materialize 深拷贝）。shadow → 返回字段类型 shadow（sema 走此路径）。
+ * 嵌套字段 p.a.b：FIELD_GET 返回的借用值再进 FIELD_GET，data 偏移链正确。 */
+static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *self = exec_stack_pop(vm);
+    const type_t *t = self ? value_type(self) : NULL;
+    if (!t || t->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: field get expects a struct value");
+    int idx = struct_type_find_field(t, name);
+    if (idx < 0)
+        return value_make_error(vm, "exec: no such struct field");
+    const struct_field_t *f = struct_type_field(t, (size_t)idx);
+    if (value_is_shadow(self))
+        return value_make_shadow(vm, f->type);
+    return value_make_borrowed(vm, f->type,
+                               (uint8_t *)value_data(self) + f->offset);
+}
+
+/* ---- 字段写入（field_set <name>）：self.field = val → self ----
+ * 栈布局：..., self, val（val 在顶）。弹 val、self，隐式转换 val → 字段类型
+ * （同类型身份短路），dispose 旧字段值（回收资源），blit 深拷贝新值到偏移，
+ * 返回 self（引用，供链式复用；绑定/返回经 value_clone materialize）。
+ * shadow → 直接返回 self shadow（sema 只做类型检查）。 */
+static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *val  = exec_stack_pop(vm);
+    value_t *self = exec_stack_pop(vm);
+    const type_t *t = self ? value_type(self) : NULL;
+    if (!t || t->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: field set expects a struct value");
+    int idx = struct_type_find_field(t, name);
+    if (idx < 0)
+        return value_make_error(vm, "exec: no such struct field");
+    const struct_field_t *f = struct_type_field(t, (size_t)idx);
+    if (value_is_shadow(self))
+        return self;
+    value_t *casted = value_implicit_cast(vm, val, f->type);
+    if (value_is_error(vm, casted)) return casted;
+    void *dst = (uint8_t *)value_data(self) + f->offset;
+    value_dispose_raw(vm, dst, f->type);
+    value_blit_raw(vm, dst, value_data(casted), f->type);
+    return self;
 }
 
 /* ---- 长度查询（length）：弹 self → value_length(self)（代理到 vtable->length）
@@ -937,6 +1000,8 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_CONSTRUCT]       = op_construct,
     [BCODE_INDEX_GET]       = op_index_get,
     [BCODE_INDEX_SET]       = op_index_set,
+    [BCODE_FIELD_GET]       = op_field_get,
+    [BCODE_FIELD_SET]       = op_field_set,
     [BCODE_LENGTH]          = op_length,
     [BCODE_PUSH_OPT_NONE]   = op_push_opt_none,
     [BCODE_UNWRAP]          = op_unwrap,
