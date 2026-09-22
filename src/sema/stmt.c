@@ -347,7 +347,21 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   /* nil 赋值（a = nil）：nil 非 value（AST_NIL 的 sema_expr 会报错），
      先于 rhs 求值识别——合法消费点在 shadow_assign 内特判（STORE_NIL）。 */
   bool rhs_nil = as->value->kind == AST_NIL;
-  value_t *rhs = rhs_nil ? NULL : sema_expr(sema, &as->value, scope);
+  /* 简单赋值 RHS 匿名构造注入：左值类型已知 → push anon_ct，使 RHS 的
+     .{...} 推断目标类型（q: Point = .{...} 赋值给已声明变量）。 */
+  const type_t *lt_ty = value_type(lhs);
+  value_t *rhs = NULL;
+  if (rhs_nil) {
+    rhs = NULL;
+  } else {
+    bool injected = false;
+    if (lt_ty && sema->anon_ct_depth < 16) {
+      sema->anon_ct[sema->anon_ct_depth++] = lt_ty;
+      injected = true;
+    }
+    rhs = sema_expr(sema, &as->value, scope);
+    if (injected && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+  }
   bool rhs_bad = value_is_error(sema->vm, rhs) ||
                  value_is_type(rhs, TYPE_KIND_VOID);
 
@@ -703,7 +717,8 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
       }
     }
   } else {
-    if (sema->func_return_type) {
+    if (sema->func_return_type &&
+        sema->func_return_type->kind != TYPE_KIND_VOID) {
       char tn[64];
       sema_type_name(sema->func_return_type, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &rt->base),

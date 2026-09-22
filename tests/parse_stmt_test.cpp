@@ -1865,8 +1865,8 @@ TEST_F(ParseStmtTest, StructDef_MissingOpenBrace) {
 }
 
 /**
- * Scenario: 空字段列表 {}
- * Expected: AST_ERROR
+ * Scenario: 空字段列表 {} 合法（C 语义 size=1）
+ * Expected: AST_STRUCT_DEF（非 AST_ERROR）
  */
 TEST_F(ParseStmtTest, StructDef_EmptyFieldList) {
     parser_t *p = make_parser("struct Point { }");
@@ -1874,7 +1874,7 @@ TEST_F(ParseStmtTest, StructDef_EmptyFieldList) {
 
     ast_node_t *node = parse_stmt(p);
     ASSERT_NE(node, nullptr);
-    EXPECT_EQ(node->kind, AST_ERROR);
+    EXPECT_EQ(node->kind, AST_STRUCT_DEF);
 
     cleanup_parser(p);
 }

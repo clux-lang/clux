@@ -64,6 +64,17 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t);
 const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
                                  size_t count);
 
+/**
+ * 结构兼容判断（鸭子类型，m2-design §2）：两 struct 类型字段名 + 字段类型
+ * （type_equal，支持嵌套复合）+ 字段顺序完全一致即兼容——布局（offset/size/
+ * align）由字段表唯一决定，字段兼容 ⟹ 布局相同。
+ *
+ * 用于跨具名类型的赋值/判等/隐式转换（struct A 与 struct B 字段一致时可
+ * 互赋值）与匿名构造校验（`.{...}` 推断的匿名类型 vs 目标类型）。非 struct
+ * 输入返回 false。
+ */
+bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b);
+
 #ifdef __cplusplus
 }
 #endif

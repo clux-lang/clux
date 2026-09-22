@@ -9,7 +9,7 @@
  * 语法：struct 名字 { 标识符 : 类型表达式 ; ... }
  * - 字段必须显式写 ': 类型'（缺 ':' 报错）
  * - 字段以分号分隔（与 enum variant 的逗号分隔不同）
- * - 字段列表不能为空（{} 报错）
+ * - 字段列表可为空（{} 合法，C 语义 size=1）
  */
 ast_node_t *parse_struct_def(parser_t *p) {
     uint32_t tb = p->pos;
@@ -20,8 +20,6 @@ ast_node_t *parse_struct_def(parser_t *p) {
 
     /* 结构体名：标识符 */
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
-        fprintf(stderr, "[DBG] name check failed at pos=%u kind=%d\n", p->pos,
-                (int)token_get_kind(cur_token(p)));
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected struct name after 'struct'");
     }
@@ -37,12 +35,6 @@ ast_node_t *parse_struct_def(parser_t *p) {
     skip_trivia(p);
 
     ast_node_t *fields = NULL, *fields_last = NULL;
-
-    /* 空字段列表非法：{} */
-    if (check_symbol(p, "}")) {
-        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "struct field list must not be empty");
-    }
 
     for (;;) {
         /* '}' 结束字段列表（含尾随分号后直接 '}' 的情况） */

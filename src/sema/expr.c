@@ -33,6 +33,7 @@
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
+#include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 
@@ -141,6 +142,157 @@ static void op_text(const token_t *op, char *buf, size_t cap) {
 
 static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope);
+
+/* 匿名构造 .{...} 字段求值 + 匿名 struct 类型推断（m2-design §2）：
+ * 1. 第一遍：按目标 struct 字段表收集字段值节点（具名字段按名匹配、匿名
+ *    字段按序顺延）——乱序具名字段（.y=2,.x=1）在此重排为表序。
+ * 2. 第二遍：逐字段求值（注入 anon_ct=目标字段类型，嵌套匿名构造/嵌套
+ *    struct 构造可正常推断）+ value_assign safe_cast 校验（i32 字面量 →
+ *    i64 字段提升，与具名构造一致）；nil 字段须目标字段为 ?T。
+ * 3. 第三遍：字段表 = (目标字段名, 目标字段类型, 目标序) → type_struct_intern
+ *    构造匿名类型（按字段名+类型+顺序去重 intern——与目标同构时合并为
+ *    同一实例，天然零转换）+ 登记 sema_type（进 hoist 提升区）。
+ * 4. 第四遍：把 fields 链重排为表序（值节点直链）——运行期 op_construct
+ *    按表序布值（offset 查表），compiler 按链序压值，链序必须 == 表序。
+ * 返回推断类型；失败（字段数/字段名/类型不兼容/OOM）返回 NULL。
+ * 注意：调用方（AST_CONSTRUCT 匿名分支）已保证 ct 为 struct 类型且
+ * anon_ct 非空。字段已在此求值+校验完毕，调用方须直接返回不落入
+ * struct 构造分支（否则二次求值会重复诊断）。 */
+static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
+                                       sema_scope_t *scope,
+                                       const type_t *ct) {
+  const struct_type_t *cst = (const struct_type_t *)ct;
+  size_t cap = cst->field_count;
+  size_t nfields = sema_count_siblings(n->fields);
+  if (nfields != cap) {
+    char tn[64];
+    sema_type_name(ct, tn, sizeof tn);
+    diag_error(sema->diag, sema_loc(sema, n->fields ? n->fields : &n->base),
+               "construct: expected %zu fields for %s, got %zu", cap, tn,
+               nfields);
+    return NULL;
+  }
+  struct_field_t *fields = NULL;
+  ast_node_t **slot = NULL;
+  if (cap > 0) {
+    fields = (struct_field_t *)arena_calloc(
+        sema->arena, cap, sizeof(struct_field_t), ALIGNOF(max_align_t));
+    slot = (ast_node_t **)arena_calloc(
+        sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t));
+    if (!fields || !slot) return NULL;
+  }
+
+  /* 第一遍：按目标表收集字段值节点（具名按名匹配，匿名按序顺延） */
+  size_t anon = 0;
+  for (ast_node_t *f = n->fields; f; f = f->next) {
+    if (f->kind == AST_CONSTRUCT_FIELD) {
+      ast_construct_field_t *cf = (ast_construct_field_t *)f;
+      int fi = struct_type_find_field(ct, cf->name);
+      if (fi < 0) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)ct->name.len, ct->name.ptr,
+                   (int)cf->name.len, cf->name.ptr);
+        return NULL;
+      }
+      if (slot[fi]) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "construct: duplicate field '%.*s'",
+                   (int)cf->name.len, cf->name.ptr);
+        return NULL;
+      }
+      slot[fi] = cf->value;
+    } else if (f->kind == AST_FILL) {
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "construct: fill is not supported for struct fields");
+      return NULL;
+    } else {
+      while (anon < cap && slot[anon]) anon++;
+      if (anon >= cap) {
+        char tn[64];
+        sema_type_name(ct, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "construct: too many fields for %s", tn);
+        return NULL;
+      }
+      slot[anon] = f;
+      anon++;
+    }
+  }
+  for (size_t i = 0; i < cap; i++) {
+    if (!slot[i]) {
+      char tn[64];
+      sema_type_name(ct, tn, sizeof tn);
+      diag_error(sema->diag, sema_loc(sema, &n->base),
+                 "construct: missing value for field '%.*s' of %s",
+                 (int)cst->fields[i].name.len, cst->fields[i].name.ptr, tn);
+      return NULL;
+    }
+    fields[i].name = cst->fields[i].name;
+  }
+
+  /* 第二遍：逐字段求值（注入 anon_ct=目标字段类型）+ safe_cast 校验；
+     字段类型取目标字段类型（值与目标同构校验，i32→i64 提升放行） */
+  for (size_t i = 0; i < cap; i++) {
+    ast_node_t *value = slot[i];
+    const type_t *ft = cst->fields[i].type;
+    value_t *fv = NULL;
+    bool is_nil_field = value->kind == AST_NIL;
+    if (!is_nil_field) {
+      if (sema->anon_ct_depth < 16)
+        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      fv = sema_expr(sema, &slot[i], scope);
+      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    }
+    if (is_nil_field) {
+      if (!ft || ft->kind != TYPE_KIND_OPTION) {
+        char tn[64];
+        sema_type_name(ft, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "cannot initialize struct field with nil (field type %s "
+                   "is not optional)", tn);
+      } else {
+        /* 目标字段为 ?T：裸 nil 无法从 nil 推断 ?T 类型，须显式构造
+           `.?T{nil}`（用户确认：optional 使用具名构造而非裸 nil） */
+        char fn[64] = "?";
+        if (cst->fields[i].name.ptr && cst->fields[i].name.len > 0)
+          snprintf(fn, sizeof fn, "%.*s", (int)cst->fields[i].name.len,
+                   cst->fields[i].name.ptr);
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "optional field '%.*s' requires an explicit constructor "
+                   "(use .?T{nil})", (int)cst->fields[i].name.len,
+                   cst->fields[i].name.ptr);
+      }
+    } else if (fv && !value_is_error(sema->vm, fv) &&
+               !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+      value_t *dst = value_make_shadow(sema->vm, ft);
+      if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+        char tn[64], fn[64];
+        sema_type_name(ft, tn, sizeof tn);
+        sema_type_name(value_type(fv), fn, sizeof fn);
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "cannot initialize struct field '%.*s' with %s "
+                   "(field type %s)",
+                   (int)cst->fields[i].name.len, cst->fields[i].name.ptr,
+                   fn, tn);
+      }
+    }
+    fields[i].type = ft;
+  }
+
+  /* 第三遍：构造匿名 struct 类型 + 登记 sema_type（hoist 提升区） */
+  const type_t *t = type_struct_intern(sema->vm, fields, cap);
+  if (!t) return NULL;
+  sema_type_register(sema, t);
+
+  /* 第四遍：把 fields 链重排为类型表序（值节点直链，ast_append 清 next） */
+  ast_node_t *new_head = NULL, *new_last = NULL;
+  for (size_t i = 0; i < cap; i++)
+    ast_append(&new_head, &new_last, NULL, slot[i]);
+  n->fields      = new_head;
+  n->fields_last = new_last;
+  return t;
+}
 
 value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
   if (!node || !*node) return value_make_shadow(sema->vm, sema->vm->type_void);
@@ -432,9 +584,21 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
 
       size_t argc = sema_count_siblings(call->args);
       value_t *arg_shadows[argc > 0 ? argc : 1];
+      /* 逐实参求值（匿名构造注入：参数类型已知 → push anon_ct，使实参的
+         .{...} 推断目标类型。签名参数类型从 callee 的 func 类型取——shadow
+         value（data=NULL）仍携带完整签名；可变参数后无类型 → 不注入。 */
+      const type_t *fnt = value_type(callee);
       ast_node_t **link = &call->args;
-      for (size_t i = 0; *link; link = &(*link)->next, i++) {
+      size_t i = 0;
+      for (; *link; link = &(*link)->next, i++) {
+        const type_t *pt = fnt ? func_type_param(fnt, i) : NULL;
+        bool injected = false;
+        if (pt && sema->anon_ct_depth < 16) {
+          sema->anon_ct[sema->anon_ct_depth++] = pt;
+          injected = true;
+        }
         arg_shadows[i] = sema_expr(sema, link, scope);
+        if (injected && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
 
@@ -606,16 +770,41 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t;
       if (!n->type) {
-        /* 匿名构造 .{...}：目标类型取 anon_ct 栈顶（var 声明/赋值/嵌套
-           字段注入）。无上下文 → 报错。折叠 n->type 为 AST_TYPE_REF
-           （compiler 发 LOAD_TYPE <id>，零感知）。 */
+        /* 匿名构造 .{...}（m2-design §2）：字段即全部类型信息。目标 struct
+           时按目标字段表驱动推断（infer_anon_struct：按名匹配 + 按目标字段
+           类型 safe_cast 校验 + 表序重排 + intern 匿名类型），与目标同构时
+           intern 去重为同一实例（天然零转换），否则结构兼容经
+           value_implicit_cast 转换。optional 字段显式 `.?T{nil}` 构造
+           （用户确认：nil 裸用不推断，须显式类型）。无上下文 → 报错。 */
         if (sema->anon_ct_depth == 0) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "anonymous construct '.{...}' requires a type context "
                      "(var declaration, assignment or struct field)");
           return value_make_shadow(sema->vm, sema->vm->type_void);
         }
-        t = sema->anon_ct[sema->anon_ct_depth - 1];
+        const type_t *ct = sema->anon_ct[sema->anon_ct_depth - 1];
+        if (ct->kind == TYPE_KIND_STRUCT) {
+          /* struct 目标：字段已在 infer_anon_struct 求值+校验+重排完毕，
+             直接返回（不落入下方 struct 构造分支，避免二次求值重复诊断）。 */
+          t = infer_anon_struct(sema, n, scope, ct);
+          if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+        } else if (ct->kind == TYPE_KIND_OPTION) {
+          /* ?T 目标：按具名构造路径（.?T{...}）校验，返回 void shadow
+             阻止落入下方 struct 分支（字段不是 struct 字段形态）。 */
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "anonymous construct '.{{...}}' with optional target type "
+                     "requires an explicit constructor (use .?T{...})");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        } else {
+          /* 其余目标类型暂不支持匿名构造 */
+          char cn[64];
+          sema_type_name(ct, cn, sizeof cn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "anonymous construct '.{{...}}' requires a struct or "
+                     "optional target type, got %s",
+                     cn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
         ast_node_t *ref =
             ast_type_ref_new(sema->arena, n->base.tok_begin, n->base.tok_end);
         if (ref) {
@@ -667,7 +856,12 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            构造注入：字段类型已知 → push anon_ct → 递归 sema_expr → pop。
            校验后把 fields 链重排为类型表序（值节点直链）——运行期
            op_construct 按表序布值（offset 查表），compiler 按链序压值，
-           链序必须 == 表序，否则具名乱序（.y=2,.x=1）会错位。 */
+           链序必须 == 表序，否则具名乱序（.y=2,.x=1）会错位。
+           **注意**：匿名构造 .{...} 已在 infer_anon_struct 求值过字段并
+           推断 t0（含重排），此处只处理具名构造（n->type 折叠为
+           AST_TYPE_REF 后的 t 即匿名类型时，字段链已是表序，重复求值
+           幂等）——区分标志：匿名构造字段求值时 anon_ct 栈顶是目标类型
+           （或 type_void 占位），此时 t==t0，字段校验结果与 infer 一致。 */
         const struct_type_t *st = (const struct_type_t *)t;
         size_t nfields = sema_count_siblings(n->fields);
         if (nfields != st->field_count) {

@@ -3365,4 +3365,189 @@ TEST_F(SemaTest, StructAssignWholeValuePasses) {
         "}"));
 }
 
+/* ---- 结构兼容赋值（鸭子类型，m2-design §2）：布局+字段完全相等可赋值 ---- */
+
+TEST_F(SemaTest, StructAssignLayoutCompatiblePasses) {
+    /* 两个具名 struct 字段名+类型+顺序一致 → 结构兼容，双向赋值合法 */
+    EXPECT_TRUE(analyze(
+        "struct A { x: i32; y: i32; }"
+        "struct B { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1, .y = 2 };"
+        "  var b: B = .B { .x = 3, .y = 4 };"
+        "  b = a;"
+        "  a = b;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAssignLayoutMismatchError) {
+    /* 字段类型不同（i32 vs i64）→ 不兼容，赋值报错 */
+    EXPECT_FALSE(analyze(
+        "struct A { x: i32; }"
+        "struct B { x: i64; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1 };"
+        "  var b: B = .B { .x = 2 };"
+        "  b = a;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAssignFieldOrderMismatchError) {
+    /* 字段顺序不同 → 布局不同，不兼容，赋值报错 */
+    EXPECT_FALSE(analyze(
+        "struct A { x: i32; y: i32; }"
+        "struct B { y: i32; x: i32; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1, .y = 2 };"
+        "  var b: B = .B { .y = 3, .x = 4 };"
+        "  b = a;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAssignFieldNameMismatchError) {
+    /* 字段名不同（x vs v）→ 不兼容，赋值报错 */
+    EXPECT_FALSE(analyze(
+        "struct A { x: i32; }"
+        "struct B { v: i32; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1 };"
+        "  var b: B = .B { .v = 2 };"
+        "  b = a;"
+        "}"));
+}
+
+TEST_F(SemaTest, StructEqLayoutCompatiblePasses) {
+    /* 跨具名类型结构兼容判等 ==/!= */
+    EXPECT_TRUE(analyze(
+        "struct A { x: i32; y: i32; }"
+        "struct B { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1, .y = 2 };"
+        "  var b: B = .B { .x = 1, .y = 2 };"
+        "  if (a == b) { }"
+        "  if (a != b) { }"
+        "}"));
+}
+
+TEST_F(SemaTest, StructEqLayoutMismatchError) {
+    /* 字段类型不同 → 判等报错 */
+    EXPECT_FALSE(analyze(
+        "struct A { x: i32; }"
+        "struct B { x: i64; }"
+        "func main(): void {"
+        "  var a: A = .A { .x = 1 };"
+        "  var b: B = .B { .x = 2 };"
+        "  if (a == b) { }"
+        "}"));
+}
+
+/* ---- 匿名构造 .{...} 创建匿名 struct 类型 ---- */
+
+TEST_F(SemaTest, StructAnonConstructCreatesAnonTypePasses) {
+    /* 匿名构造推断匿名类型，字段序乱（.y 在前）按名匹配重排到目标表序 */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = .{ .y = 2, .x = 1 };"
+        "  var q: Point = .{ .x = 3, .y = 4 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructMissingFieldError) {
+    /* 匿名构造漏字段（按目标表校验）→ 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = .{ .x = 1 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructUnknownFieldError) {
+    /* 匿名构造给出不存在字段 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .{ .z = 1 };"
+        "}"));
+    expect_message(0, "has no field 'z'");
+}
+
+TEST_F(SemaTest, StructAnonConstructFieldTypeMismatchError) {
+    /* 匿名构造字段类型不匹配（str → i32 字段）→ 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func main(): void {"
+        "  var p: Point = .{ .x = \"s\" };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructOptionalFieldRequiresExplicitCtorError) {
+    /* optional 字段裸 nil 无法推断类型 → 引导显式构造 .?T{nil} */
+    EXPECT_FALSE(analyze(
+        "struct Box { opt: ?i32; }"
+        "func main(): void {"
+        "  var b: Box = .{ .opt = nil };"
+        "}"));
+    expect_message(0, "use .?T{nil}");
+}
+
+TEST_F(SemaTest, StructAnonConstructOptionalFieldExplicitCtorPasses) {
+    /* optional 字段显式构造 .?i32{nil}/.?i32{42}（用户确认的语义） */
+    EXPECT_TRUE(analyze(
+        "struct Box { opt: ?i32; name: str; }"
+        "func main(): void {"
+        "  var b: Box = .{ .opt = .?i32{nil}, .name = \"b\" };"
+        "  var c: Box = .{ .opt = .?i32{42}, .name = \"c\" };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructNoContextError) {
+    /* 无类型上下文（表达式位置）→ 诊断 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var p = .{ .x = 1 };"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructOptionTargetError) {
+    /* 目标为 ?T 的匿名构造 → 引导显式构造 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var p: ?i32 = .{ 1 };"
+        "}"));
+    expect_message(0, "use .?T{...}");
+}
+
+TEST_F(SemaTest, StructAnonConstructInCallArgPasses) {
+    /* 函数实参位置匿名构造：参数类型已知 → 推断匿名类型（乱序字段按名匹配） */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func sum(p: Point):i32 { return p.x + p.y; }"
+        "func main(): void {"
+        "  var s = sum(.{ .x = 1, .y = 2 });"
+        "  var t = sum(.{ .y = 4, .x = 3 });"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructInCallArgTypeMismatchError) {
+    /* 实参匿名构造字段类型不匹配 → 诊断 */
+    EXPECT_FALSE(analyze(
+        "struct Point { x: i32; }"
+        "func f(p: Point):i32 { return p.x; }"
+        "func main(): void {"
+        "  var s = f(.{ .x = \"s\" });"
+        "}"));
+}
+
+TEST_F(SemaTest, StructAnonConstructInAssignRhsPasses) {
+    /* 赋值 RHS 匿名构造：左值类型已知 → 推断匿名类型 */
+    EXPECT_TRUE(analyze(
+        "struct Point { x: i32; y: i32; }"
+        "func main(): void {"
+        "  var p: Point = .Point { .x = 0, .y = 0 };"
+        "  p = .{ .x = 1, .y = 2 };"
+        "  p = .{ .y = 4, .x = 3 };"
+        "}"));
+}
+
 } /* namespace */

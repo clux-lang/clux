@@ -25,6 +25,11 @@
  * 严格类型：implicit_cast / explicit_cast 仅同 struct 实例（身份拷贝）；
  * eq/ne 同实例按字段递归比较；type_equal / type_extends 按指针（具名类型，
  * M2 鸭子类型检查留待后续 Phase）。
+ *
+ * M2 结构兼容（鸭子类型，2026-09-22）：跨具名类型的赋值/判等/隐式转换按
+ * 结构兼容判断（struct_type_compatible：字段名 + 字段类型 type_equal +
+ * 字段顺序完全一致 ⟹ 布局相同）——struct A 与 struct B 字段一致时可互
+ * 赋值；匿名构造 .{...} 推断的匿名类型也按此校验。
  * =========================================================================== */
 
 /* ---- 生命周期：clone / assign / dispose（字段递归） ---- */
@@ -39,9 +44,15 @@ static value_t *struct_clone(vm_t *vm, value_t *v) {
 }
 
 static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
+    /* safe_cast 语义（与 int_assign/float_assign 同款）：类型不同先向左值
+       类型 implicit_cast——结构兼容（鸭子类型，字段名+类型+顺序一致）的
+       A→B 跨具名类型赋值经 struct_implicit_cast 转换通过；不兼容 → cast
+       返回 error，此处直接传播。shadow 检查在 cast 之后（类型校验先于
+       shadow 短路，sema 编译期靠此拦截结构不兼容赋值）。 */
     if (value_type(src) != value_type(dst)) {
-        return value_make_error(vm,
-            "assign: struct type mismatch on assignment");
+        value_t *casted = value_implicit_cast(vm, src, value_type(dst));
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
     const type_t *t = value_type(dst);
@@ -91,10 +102,10 @@ static bool struct_field_equal(vm_t *vm, const void *a, const void *b,
 }
 
 static value_t *struct_eq(vm_t *vm, value_t *a, value_t *b) {
-    if (value_type(a) != value_type(b)) {
-        return value_make_error(vm,
-            "struct: compare only within same struct");
-    }
+    /* safe_cast 语义（与标量 VTABLE_BINARY 同款）：类型不同时尝试右值
+       implicit_cast 到左值类型——结构兼容（鸭子类型）的 A→B 比较经
+       struct_implicit_cast 转换通过；不兼容 → cast error 传播。 */
+    VTABLE_BINARY(vm, a, b, eq, "==");
     if (value_is_shadow(a) || value_is_shadow(b))
         return value_make_shadow(vm, vm->type_bool);
 
@@ -112,10 +123,7 @@ static value_t *struct_eq(vm_t *vm, value_t *a, value_t *b) {
 }
 
 static value_t *struct_ne(vm_t *vm, value_t *a, value_t *b) {
-    if (value_type(a) != value_type(b)) {
-        return value_make_error(vm,
-            "struct: compare only within same struct");
-    }
+    VTABLE_BINARY(vm, a, b, ne, "!=");
     if (value_is_shadow(a) || value_is_shadow(b))
         return value_make_shadow(vm, vm->type_bool);
     value_t *eq = struct_eq(vm, a, b);
@@ -125,10 +133,10 @@ static value_t *struct_ne(vm_t *vm, value_t *a, value_t *b) {
     return value_make(vm, vm->type_bool, data);
 }
 
-/* ---- 类型转换：仅同 struct 实例（严格，鸭子留待后续） ---- */
+/* ---- 类型转换：结构兼容（鸭子类型）即可转换 ---- */
 
 static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    if (!target || target != value_type(v))
+    if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: implicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
@@ -136,23 +144,21 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
 }
 
 static value_t *struct_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    if (!target || target != value_type(v))
+    if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: explicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
     return value_make(vm, target, data);
 }
 
-/* ---- 鸭子类型判断：struct 是独立具名类型（按指针） ---- */
+/* ---- 鸭子类型判断：struct 按结构兼容（字段名+类型+顺序） ---- */
 
 static bool struct_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
-    (void)vm;
-    return a == b;
+    return struct_type_compatible(vm, a, b);
 }
 
 static bool struct_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
-    (void)vm;
-    return sub == sup;
+    return struct_type_compatible(vm, sub, sup);
 }
 
 /* ===========================================================================
@@ -257,6 +263,30 @@ static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
     return true;
 }
 
+/* 结构兼容（鸭子类型，m2-design §2）：字段名 + 字段类型（type_equal，嵌套
+ * 复合类型递归）+ 字段顺序完全一致即兼容。布局（offset/size/align）由字段
+ * 表唯一决定（C 对齐规则），字段兼容 ⟹ size/align 相同——无需单独比较。
+ * 匿名构造 .{...} 推断的匿名类型与目标类型也走此判断。 */
+bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b) {
+    if (!a || !b || a->kind != TYPE_KIND_STRUCT ||
+        b->kind != TYPE_KIND_STRUCT)
+        return false;
+    if (a == b) return true;
+    const struct_type_t *sa = (const struct_type_t *)a;
+    const struct_type_t *sb = (const struct_type_t *)b;
+    if (sa->field_count != sb->field_count) return false;
+    for (size_t i = 0; i < sa->field_count; i++) {
+        const struct_field_t *fa = &sa->fields[i];
+        const struct_field_t *fb = &sb->fields[i];
+        if (fa->name.len != fb->name.len) return false;
+        if (fa->name.ptr && fb->name.ptr &&
+            memcmp(fa->name.ptr, fb->name.ptr, fa->name.len) != 0) return false;
+        if ((fa->name.ptr == NULL) != (fb->name.ptr == NULL)) return false;
+        if (!type_equal(vm, fa->type, fb->type)) return false;
+    }
+    return true;
+}
+
 /* C 对齐规则向上取整 */
 static size_t align_up(size_t v, size_t a) {
     if (a <= 1) return v;
@@ -270,6 +300,12 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
     if (type_is_sealed(t)) return t; /* 幂等 */
 
     struct_type_t *st = (struct_type_t *)t;
+
+    /* 防御：字段类型必须已解析（NULL 会产生 size=0 的 struct，后续
+       value_alloc_data 返回 NULL 崩溃）。非法输入拒绝密封。 */
+    for (size_t i = 0; i < st->field_count; i++) {
+        if (!st->fields[i].type) return NULL;
+    }
 
     if (!vm->struct_types) vm->struct_types = vec_new(vm->alloc, /*owns_element=*/false);
 
@@ -286,7 +322,9 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
     }
 
     /* 计算 C 对齐布局：offset_0 = 0；offset_i = align_up(prev_end, align_i)；
-       size = align_up(last_end, max_align)；align = max(字段 align) */
+       size = align_up(last_end, max_align)；align = max(字段 align)。
+       空 struct：C 语义 size=1（GCC/MSVC 空 struct 为 1 字节，保证
+       value_alloc_data 能分配 data 块——size==0 会返回 NULL）。 */
     size_t off = 0, max_align = 1;
     for (size_t i = 0; i < st->field_count; i++) {
         struct_field_t *f = &st->fields[i];
@@ -297,6 +335,7 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
         if (fa > max_align) max_align = fa;
     }
     st->base.size  = align_up(off, max_align);
+    if (st->field_count == 0) st->base.size = 1; /* 空 struct：C 语义 1 字节 */
     st->base.align = max_align;
     st->base.sealed = true;
 
@@ -335,7 +374,10 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
         st->fields = copy;
         st->field_count = count;
     }
-    return type_struct_seal(vm, &st->base);
+    const type_t *t = type_struct_seal(vm, &st->base);
+    if (!t) allocator_free(vm->alloc, (void **)&st); /* 密封失败（如字段类型
+                                                       未解析）：回收开放对象 */
+    return t;
 }
 
 /* ===========================================================================

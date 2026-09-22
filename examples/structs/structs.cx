@@ -1,11 +1,14 @@
 // structs.cx -- struct（结构体类型定义 + 值构造 + 字段访问）
 //
 //   声明     struct Name { field: type; }，字段用分号分隔
-//   约束     字段必须显式写 ': 类型'；字段列表不能为空；尾随分号合法
+//   约束     字段必须显式写 ': 类型'；空字段列表 `{}` 合法（C 语义 size=1）；
+//           尾随分号合法
 //   布局     C 对齐规则：offset_0=0；offset_i=align_up(prev_end, align_i)；
 //           size=align_up(last_end, max_align)；align=max(字段 align)
 //   构造     具名 .Point{ .x = 1, .y = 2 }（字段序可乱）；匿名 .{...}
-//           （鸭子类型，按字段名匹配目标 struct 类型）
+//           （推断匿名 struct 类型，与目标结构兼容——字段名+类型+顺序一致
+//           可赋值/传参/判等，字段完全一致时 intern 去重为同一类型）
+//   可选字段 匿名构造须显式 `.?T{nil}`（nil 裸用无法推断类型）
 //   访问     p.x 读、p.x = 5 写、p.x += 1 复合赋值、p.a.b 嵌套链式
 //   实现     构造 → CONSTRUCT；读 → FIELD_GET（借用引用零拷贝）；
 //           写/复合 → FIELD_SET（隐式转换 + 深拷贝回写）
@@ -16,6 +19,14 @@ struct Point { x: i32; y: i32; }
 // 字段类型可为其他 struct 类型（布局依赖构造：Inner 先密封）
 struct Inner { a: i32; }
 struct Outer { i: Inner; b: i64; }
+
+// 结构兼容（鸭子类型）：字段名+类型+顺序一致 ⟹ 布局相同，可互赋值/判等
+struct Alias { x: i32; y: i32; }
+
+// 实参位置匿名构造：参数类型已知 → 推断匿名类型
+func sum(p: Point): i32 {
+    return p.x + p.y;
+}
 
 func main(): i32 {
     // 具名构造：字段序可乱（.y 先于 .x）
@@ -28,9 +39,18 @@ func main(): i32 {
     p.y += 3;
     if (p.y != 5) { return 1; }
 
-    // 匿名构造：按字段名匹配目标类型
+    // 匿名构造：推断匿名 struct 类型（字段序可乱，按名匹配重排）
     var q: Point = .{ .x = 7, .y = 8 };
     if (q.x != 7 || q.y != 8) { return 1; }
+    q = .{ .y = 4, .x = 3 };           // 赋值 RHS 匿名构造（左值类型已知）
+    if (q.x != 3 || q.y != 4) { return 1; }
+
+    // 结构兼容赋值：字段一致的跨具名类型可互赋值
+    var a: Alias = q;
+    if (a.x != 3 || a.y != 4) { return 1; }
+
+    // 实参位置匿名构造：参数类型已知 → 推断 + 结构兼容转换
+    if (sum(.{ .x = 1, .y = 2 }) != 3) { return 1; }
 
     // 嵌套 struct 构造 + 链式字段访问（p.a.b 借用零拷贝）
     var o: Outer = .Outer { .i = .Inner { .a = 3 }, .b = 9 };
@@ -43,3 +63,4 @@ func main(): i32 {
     printf("struct ok\n");
     return 0;
 }
+

@@ -48,13 +48,14 @@
 
 - type 不带方括号，除非类型本身是数组/元组
 - 具名字段：`.x = 1`；匿名字段：直接给值
-- **无类型 + 具名字段**：临时生成匿名结构体对象，靠鸭子类型（字段布局兼容）赋给左值
+- **无类型 + 具名字段**：推断生成匿名 struct 类型（字段名+类型+顺序去重 intern），与目标类型结构兼容（鸭子类型）即可赋左值/传参
 - **无类型 + 匿名字段**：生成元组
 - `.<type>{...}` 是通用表达式，可嵌套任何表达式位置
 
 **命名构造 vs 匿名构造**：
 - `var p = .Point{...}` — 命名构造，`typeof(p) == Point`
-- `var p: Point = .{ .x = 1 }` — 匿名构造 + 左值标注，鸭子类型是**运行时拷贝**（编译期检查布局兼容，运行时逐字段拷贝）
+- `var p: Point = .{ .x = 1 }` — 匿名构造 + 类型上下文（var 声明/赋值 RHS/实参/struct 字段）——按目标字段表驱动：按名匹配 + 字段类型 safe_cast 校验 + 重排表序 + `type_struct_intern` 推断匿名类型。字段与目标完全一致时 intern 去重为同一实例（天然零转换）；仅结构兼容时运行期经 `value_implicit_cast` 逐字段拷贝
+- 匿名构造的 optional 字段须显式 `.?T{nil}`（nil 裸用无法推断类型，报错引导）
 
 ### 2. struct 定义
 
@@ -65,13 +66,15 @@ struct Point { x: i32; y: i32; };
 - 字段用分号 `;` 分隔
 - **鸭子类型协议**：成员名、类型、顺序相同 = 兼容；类型兼容指事实相等（布局大小、字段完全相等、kind 一致）
 - 编译期检查布局兼容，运行时字段拷贝
+- **结构兼容赋值/判等/转换**（2026-09-22）：`struct_type_compatible`（字段名 + 字段类型 `type_equal` 递归 + 字段顺序完全一致 ⟹ 布局相同）。跨具名类型赋值/判等/隐式转换按此判断（`struct_assign` safe_cast 语义：类型不同先 `value_implicit_cast` 到左值类型，失败才报错；`struct_eq/ne` 同款 VTABLE_BINARY 语义）；字段完全一致的两个具名类型 intern 去重可能合并为同一实例
 
 **已实现**（2026-09-21，类型定义 + 值构造 + 字段访问）：`struct Name { field: type; ... }` 可解析、sema 注册求值、hoist 构造、`var p: Point` 声明、值构造（`.Point{...}` 具名 / `.{...}` 匿名鸭子类型）、字段访问（`p.x` 读、`p.x = v` 写、`p.x op= v` 复合、`p.a.b` 嵌套链式）。方法留待后续 Phase。
-- parser：顶层 `struct` → `AST_STRUCT_DEF`（name + fields 兄弟链，每字段独立 `AST_STRUCT_FIELD` 节点持 name + type 表达式）；字段以分号分隔（`x: i32;`），空字段列表 `{}`、缺字段名/缺 `: type`/缺 `}` 均报错；尾随分号 `x: i32; }` 合法
+- parser：顶层 `struct` → `AST_STRUCT_DEF`（name + fields 兄弟链，每字段独立 `AST_STRUCT_FIELD` 节点持 name + type 表达式）；字段以分号分隔（`x: i32;`），空字段列表 `{}` 合法（C 语义 size=1），缺字段名/缺 `: type`/缺 `}` 报错；尾随分号 `x: i32; }` 合法
 - sema `pass1b_types` 新增 `sema_eval_struct_def`：逐字段 `sema_resolve_type_slot` 解析（未知类型/重复字段名报错）+ `type_struct_intern` 构造密封 struct 类型（C 对齐布局：offset_0=0、offset_i=align_up(prev_end, align_i)、size=align_up(last_end, max_align)、align=max(字段 align)）+ `sema_type_register` 登记 + `scope_define` 绑定 type value 到编译期 vm 作用域（`var p: Point` 经 `type_lookup` 解析）；字段类型是**布局依赖**（struct 的 size/align 依赖字段类型的 size/align），构造时依赖后序保证
 - compiler hoist：`declare_one` 发 `PUSH_STRUCT; DEFINE_TYPE <id>`；`define_struct` 发 `LOAD_TYPE <id>` + 逐字段 `LOAD_TYPE <field_type_id>; DEFINE_FIELD "x"` + `SEAL`
-- vm：`struct_type_t`（field 表 { name, offset, type }）+ `VTABLE_STRUCT` 各槽位（clone/assign/dispose 按字段递归，eq/ne 同实例按字段递归比较；implicit/explicit cast 仅同 struct 实例；type_equal/extends 按指针——鸭子类型检查留待后续）+ 两条开放构造指令 `PUSH_STRUCT`（分配开放 struct_type 压 type value）/ `DEFINE_FIELD <strtable_idx>`（追加字段，名从 strtable 拷贝）；`SEAL` 复用（经 vtable `type_seal` → `type_struct_seal` 拷贝字段表 + 布局计算 + 按 (字段名+类型+顺序) 去重 intern）；`struct_value` 的 data 是连续内存块（size = type->size），字段按偏移 O(1) 读写
+- vm：`struct_type_t`（field 表 { name, offset, type }）+ `VTABLE_STRUCT` 各槽位（clone/assign/dispose 按字段递归，eq/ne 按字段递归比较；implicit/explicit cast 结构兼容即转换（`struct_type_compatible`）；type_equal/extends 结构兼容；`type_seal` → `type_struct_seal` 拷贝字段表 + 布局计算 + 按 (字段名+类型+顺序) 去重 intern）+ 两条开放构造指令 `PUSH_STRUCT`（分配开放 struct_type 压 type value）/ `DEFINE_FIELD <strtable_idx>`（追加字段，名从 strtable 拷贝）；`struct_value` 的 data 是连续内存块（size = type->size），字段按偏移 O(1) 读写
 - 值构造（2026-09-21）：`CONSTRUCT <n>` struct 分支——逐字段 `value_implicit_cast` 到字段类型后 `value_blit_raw` 深拷贝（字面量 i32 → i64 字段宽度提升；与 array 构造逐元素 cast 一致），data 清零未指定字段自动零值；字段序可乱（sema 已按名匹配，编译器按声明序发值）
+- 匿名构造（2026-09-22）：sema `infer_anon_struct` 按**目标 struct 字段表**驱动——第一遍按名匹配收集字段值节点（乱序 `.y=2,.x=1` 重排为表序；重复/未知字段名、漏字段报错），第二遍逐字段求值 + `value_assign` safe_cast 校验（嵌套构造/匿名构造经 anon_ct 注入字段类型；nil 字段须目标字段为 `?T` 且显式 `.?T{nil}`），第三遍 `type_struct_intern` 推断匿名类型 + `sema_type_register` 登记（hoist 提升区构造），第四遍 fields 链重排表序。类型上下文注入：var 声明（显式类型）、赋值 RHS（左值类型）、函数实参（签名参数类型）、struct 字段（字段类型）、嵌套构造
 - 字段访问（2026-09-21）：`FIELD_GET <name>`（strtable 索引）弹 self → 按名查偏移返回**借用引用**（data 指向 self data 块内偏移，零拷贝；绑定/返回经 value_clone materialize 深拷贝；嵌套 `p.a.b` 借用链偏移正确）；`FIELD_SET <name>` 弹 self+val → `value_implicit_cast` 到字段类型 → dispose 旧值 → blit 新值回偏移 → 返回 self（链式复用）；复合赋值 `p.x op= v` 编译器发 `PUSH_VALUE 0`（dup self 保留引用，避免双求值）+ `FIELD_GET` + op + `FIELD_SET`
 - 示例：`examples/structs/structs.cx`
 

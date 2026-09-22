@@ -138,6 +138,8 @@ TEST_F(StructTypeTest, NestedStructLayout) {
 }
 
 TEST_F(StructTypeTest, AddFieldAfterSealIgnored) {
+    point_fields[0].type = vm->type_i32;
+    point_fields[1].type = vm->type_i32;
     const type_t *t = type_struct_intern(vm, point_fields, 2);
     /* 密封后追加字段被静默忽略 */
     type_struct_add_field(vm, t, STRSLICE_LIT("z"), vm->type_i32);
@@ -147,6 +149,8 @@ TEST_F(StructTypeTest, AddFieldAfterSealIgnored) {
 
 TEST_F(StructTypeTest, ValueRoundTrip) {
     /* struct value 是连续内存块：字段按偏移写 → 读回一致 */
+    point_fields[0].type = vm->type_i32;
+    point_fields[1].type = vm->type_i32;
     const type_t *t = type_struct_intern(vm, point_fields, 2);
     ASSERT_NE(t, nullptr);
 
@@ -168,6 +172,8 @@ TEST_F(StructTypeTest, ValueRoundTrip) {
 
 TEST_F(StructTypeTest, EqFieldWise) {
     /* 同 struct 实例按字段递归比较（值相等） */
+    point_fields[0].type = vm->type_i32;
+    point_fields[1].type = vm->type_i32;
     const type_t *t = type_struct_intern(vm, point_fields, 2);
     ASSERT_NE(t, nullptr);
 
