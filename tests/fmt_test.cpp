@@ -19,29 +19,11 @@ std::string fmt(const char *src) {
     allocator_t *a = create_allocator(malloc, free);
     EXPECT_NE(a, nullptr);
 
-    stream_source_t source =
-        stream_source_mem(a, src, std::strlen(src), /*owns_data=*/false);
-    istream_t *stream = istream_open(a, source);
-    EXPECT_NE(stream, nullptr);
-
-    lexer_t *lexer = lexer_create(a, stream, "<test>");
-    EXPECT_NE(lexer, nullptr);
-
-    vec_t *pool = vec_new(a, /*owns_element=*/true);
-    for (;;) {
-        token_t *t = lexer_next(lexer);
-        if (!t) break;
-        vec_push(pool, a, t);
-        if (token_get_kind(t) == TOKEN_TYPE_EOF) break;
-    }
-
-    char *out = fmt_format(a, pool, nullptr);
+    char *out = fmt_format_source(a, src, std::strlen(src), nullptr);
     std::string result = out ? out : "";
 
-    /* fmt_format 的缓冲由 alloc 分配，需显式释放（不随 delete_allocator 回收） */
+    /* fmt_format_source 的缓冲由 alloc 分配，需显式释放 */
     if (out) allocator_free(a, (void **)&out);
-    vec_free(a, &pool);
-    lexer_close(&lexer);
     EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
     return result;
 }
@@ -224,8 +206,9 @@ TEST(Fmt, NumericTypeSuffixStaysGlued) {
     EXPECT_EQ(out, twice);
 }
 
-/* 运算符后的括号须与运算符以空格分隔（`a + (b)` / `x = (y)`），
- * 不得紧贴成 `+(` / `=(`，否则破坏可读性。函数调用 `name(` 仍紧贴。 */
+/* 运算符后的括号：AST-based 格式化按语法优先级决定括号——`as`（21）比
+ * `+`（17）绑定更强，`a as f64 + b` 等价于 `(a as f64) + b`，语法决定
+ * 不加冗余括号。函数调用 `name(` 仍紧贴。 */
 TEST(Fmt, SpaceBeforeParenAfterOperator) {
     std::string out = fmt(
         "func main():void{\n"
@@ -234,8 +217,8 @@ TEST(Fmt, SpaceBeforeParenAfterOperator) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var r: f64 = (a as f64) + b;\n"
-              "    _ = dec + hex + oct + bin + (v8 as i32) + (vU8 as i32);\n"
+              "    var r: f64 = a as f64 + b;\n"
+              "    _ = dec + hex + oct + bin + v8 as i32 + vU8 as i32;\n"
               "}\n");
 
     /* 幂等性 */
@@ -384,12 +367,189 @@ TEST(Fmt, TernaryOperatorSpaced) {
               "func main(): i32 {\n"
               "    var a: i32 = 3;\n"
               "    var b: i32 = 7;\n"
-              "    var r: i32 = (a > b) ? a : b;\n"
-              "    var s: i32 = (a > b) ? a : (a == b) ? b : a;\n"
-              "    if ((a > b) ? true : false) {\n"
+              "    var r: i32 = a > b ? a : b;\n"
+              "    var s: i32 = a > b ? a : a == b ? b : a;\n"
+              "    if (a > b ? true : false) {\n"
               "        return r;\n"
               "    }\n"
               "    return s;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 闭包捕获 `func |x|` 与函数字面量：`|` 定界符紧贴 func、捕获间逗号+空格、
+ * `(x: i32)` 参数紧贴、返回类型 `-> type` 两侧空格。 */
+TEST(Fmt, ClosureCaptureAndFuncLiteral) {
+    std::string out = fmt(
+        "func make_adder():func(i32)->i32{\n"
+        "var base:i32=10;\n"
+        "var adder=func |base|(x:i32): i32 {return base+x;};\n"
+        "return adder;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func make_adder(): func(i32) -> i32 {\n"
+              "    var base: i32 = 10;\n"
+              "    var adder = func |base|(x: i32): i32 {\n"
+              "        return base + x;\n"
+              "    };\n"
+              "    return adder;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 多捕获 + 类型标注捕获：(a: i32 = v, b) */
+TEST(Fmt, ClosureMultipleCaptures) {
+    std::string out = fmt(
+        "func f():void{\n"
+        "var a:i32=1;var b:i32=2;\n"
+        "var g=func |(a: i32 = a), b|(x:i32):i32{return a+b+x;};\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func f(): void {\n"
+              "    var a: i32 = 1;\n"
+              "    var b: i32 = 2;\n"
+              "    var g = func |(a: i32 = a), b|(x: i32): i32 {\n"
+              "        return a + b + x;\n"
+              "    };\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 元组类型 `<T1, T2>` 与元组构造 `.<T1,T2>{...}`：尖括号元素间逗号+空格，
+ * 嵌套元组 `<i32, <i32, i32>>` 内层紧贴。 */
+TEST(Fmt, TupleTypeAndConstruct) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var tup:<i32,i32> = .<i32,i32>{1,2};\n"
+        "var nest:<i32,<i32,i32>> = .<i32,<i32,i32>>{1,<2,3>};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var tup: <i32, i32> = .<i32, i32>{1, 2};\n"
+              "    var nest: <i32, <i32, i32>> = .<i32, <i32, i32>>{1, <2, 3>};\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* struct 构造：`.Point{x = 1, y = 2}` 字段间逗号+空格、`.field = v` 规整。 */
+TEST(Fmt, StructConstructFields) {
+    std::string out = fmt(
+        "struct Point { x: i32; y: i32; }\n"
+        "func main():i32{\n"
+        "var pt = .Point{x = 1,y = 2};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "struct Point { x: i32; y: i32 }\n"
+              "func main(): i32 {\n"
+              "    var pt = .Point{x = 1, y = 2};\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 匿名构造：`.{1, 2}` 无类型前缀（目标类型由 sema 推断）。 */
+TEST(Fmt, AnonymousConstruct) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var arr=.[3]i32{1,2,3};\n"
+        "var anon=.{10,20};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var arr = .[3]i32{1, 2, 3};\n"
+              "    var anon = .{10, 20};\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 错误恢复：语法错误只格式化错误前的 AST，错误 token 之后内容丢弃。 */
+TEST(Fmt, RecoverPartialOnError) {
+    std::string out = fmt(
+        "func ok():i32{\n"
+        "return 1;\n"
+        "}\n"
+        "func broken(:i32{\n"
+        "var x:i32=1;\n");
+    EXPECT_EQ(out,
+              "func ok(): i32 {\n"
+              "    return 1;\n"
+              "}\n");
+}
+
+/* 顶层空行保留：文件头注释块后、函数之间、块内语句间的空行均保留。 */
+TEST(Fmt, TopLevelBlankLinesPreserved) {
+    std::string out = fmt(
+        "// head comment\n"
+        "// more head\n"
+        "\n"
+        "func f():void{\n"
+        "var a:i32=1;\n"
+        "\n"
+        "var b:i32=2;\n"
+        "}\n"
+        "\n"
+        "func g():void{\n"
+        "return;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "// head comment\n"
+              "// more head\n"
+              "\n"
+              "func f(): void {\n"
+              "    var a: i32 = 1;\n"
+              "\n"
+              "    var b: i32 = 2;\n"
+              "}\n"
+              "\n"
+              "func g(): void {\n"
+              "    return;\n"
+              "}\n");
+}
+
+/* 顶层注释块后空行：文件头多行注释块与首个函数之间保留空行。 */
+TEST(Fmt, TopLevelCommentBlockThenBlankLine) {
+    std::string out = fmt(
+        "// block line 1\n"
+        "// block line 2\n"
+        "\n"
+        "func f():void{}\n");
+    EXPECT_EQ(out,
+              "// block line 1\n"
+              "// block line 2\n"
+              "\n"
+              "func f(): void {}\n");
+}
+
+/* 函数字面量显示名保留：func |cap| name(params):ret 的 name 不得丢失。 */
+TEST(Fmt, FuncLiteralDisplayNamePreserved) {
+    std::string out = fmt(
+        "func make():func(i32)->i32{\n"
+        "var base:i32=10;\n"
+        "return func |base| add(x: i32):i32{return base+x;};\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func make(): func(i32) -> i32 {\n"
+              "    var base: i32 = 10;\n"
+              "    return func |base| add(x: i32): i32 {\n"
+              "        return base + x;\n"
+              "    };\n"
               "}\n");
 
     /* 幂等性 */

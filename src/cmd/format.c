@@ -76,43 +76,8 @@ static int write_all(const char *path, const char *data, size_t len) {
 /* 核心：源码文本 → 格式化文本（alloc 管理）。失败返回 NULL。 */
 static char *format_source(allocator_t *alloc, const char *src, size_t len,
                            size_t *out_len) {
-    /* 内存源 → lexer → token 池（保留 trivia） */
-    stream_source_t source = stream_source_mem(alloc, src, len, /*owns_data=*/false);
-    istream_t *stream = istream_open(alloc, source);
-    if (!stream) return NULL;
-
-    lexer_t *lexer = lexer_create(alloc, stream, "<format>");
-    if (!lexer) { istream_close(&stream); return NULL; }
-
-    vec_t *pool = vec_new(alloc, /*owns_element=*/true);
-    if (!pool) { lexer_close(&lexer); return NULL; }
-
-    bool lex_error = false;
-    for (;;) {
-        token_t *t = lexer_next(lexer);
-        if (!t) break;
-        vec_push(pool, alloc, t);
-        token_kind_t k = token_get_kind(t);
-        if (k == TOKEN_TYPE_ERROR) {
-            const location_t *loc = token_get_location(t);
-            const char *msg = token_get_error_message(t);
-            fprintf(stderr, "<format>:%zu:%zu: error: %s\n",
-                    loc ? loc->begin.line : 0, loc ? loc->begin.column : 0,
-                    msg ? msg : "unrecognized input");
-            lex_error = true;
-            break;
-        }
-        if (k == TOKEN_TYPE_EOF) break;
-    }
-
-    char *result = NULL;
-    if (!lex_error) {
-        result = fmt_format(alloc, pool, out_len);
-    }
-
-    vec_free(alloc, &pool);
-    lexer_close(&lexer);
-    return result;
+    /* AST-based 格式化：内部 lexer → parser（recover_partial）→ 渲染 */
+    return fmt_format_source(alloc, src, len, out_len);
 }
 
 int cmd_format(const cmd_args_t *args) {

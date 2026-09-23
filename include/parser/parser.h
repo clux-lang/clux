@@ -20,6 +20,9 @@ typedef struct {
     vec_t       *tokens;      /* token pool（由 driver 构建） */
     uint32_t     pos;         /* 当前游标（token pool 下标） */
     bool         has_error;   /* 已发生语法/词法错误（语法错误即终止，仅词法检查用） */
+    bool         recover_partial; /* 语法错误时保留错误前的 AST（formatter 用）：
+                                     parse_program 遇错 break 而非返回 AST_ERROR，
+                                     已解析的顶层节点仍挂到 PROGRAM，tok_end 停在错误处 */
     diag_buf_t  *diag;        /* 共享诊断缓冲区；NULL 时错误不记录（如单测） */
 } parser_t;
 

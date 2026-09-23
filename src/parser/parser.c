@@ -43,6 +43,7 @@ parser_t *parser_create(allocator_t *alloc, arena_t *arena, vec_t *tokens) {
     p->tokens    = tokens;
     p->pos       = 0;
     p->has_error = false;
+    p->recover_partial = false;   /* 默认关闭：不影响 driver/测试既有行为 */
     p->diag      = NULL;
     return p;
 }
@@ -138,10 +139,22 @@ ast_node_t *parse_program(parser_t *p) {
             func = parse_func_def(p);
         }
         if (!func) {
+            /* 语法错误。recover_partial（formatter 用）时保留错误前的 AST：
+               已解析的顶层节点仍挂到 PROGRAM，tok_end 停在错误 token 处。 */
+            if (p->recover_partial) {
+                p->has_error = true;
+                break;
+            }
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected function definition at top level");
         }
-        if (func->kind == AST_ERROR) return func;
+        if (func->kind == AST_ERROR) {
+            if (p->recover_partial) {
+                p->has_error = true;
+                break;
+            }
+            return func;
+        }
 
         ast_append(&funcs, &funcs_last, NULL, func);
         skip_trivia(p);

@@ -1,27 +1,73 @@
 #include "parser/fmt.h"
+#include "parser/parser.h"
 #include "parser/lexer.h"
+#include "parser/parse_utils.h"
+#include "parser/ast_node.h"
+#include "parser/ast_program.h"
+#include "parser/ast_func_def.h"
+#include "parser/ast_var_def.h"
+#include "parser/ast_type_def.h"
+#include "parser/ast_enum_def.h"
+#include "parser/ast_struct_def.h"
+#include "parser/ast_block.h"
+#include "parser/ast_if.h"
+#include "parser/ast_switch.h"
+#include "parser/ast_while.h"
+#include "parser/ast_for.h"
+#include "parser/ast_return.h"
+#include "parser/ast_expr_stmt.h"
+#include "parser/ast_assign.h"
+#include "parser/ast_binary.h"
+#include "parser/ast_unary.h"
+#include "parser/ast_call.h"
+#include "parser/ast_member.h"
+#include "parser/ast_index.h"
+#include "parser/ast_array.h"
+#include "parser/ast_tuple.h"
+#include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
+#include "parser/ast_fill.h"
+#include "parser/ast_int_lit.h"
+#include "parser/ast_float_lit.h"
+#include "parser/ast_bool_lit.h"
+#include "parser/ast_string_lit.h"
+#include "parser/ast_char_lit.h"
+#include "parser/ast_ident.h"
+#include "parser/ast_const.h"
+#include "parser/ast_volatile.h"
+#include "parser/ast_option.h"
+#include "parser/ast_func_type.h"
+#include "parser/ast_enum_ref.h"
+#include "parser/ast_ternary.h"
+#include "parser/ast_unwrap.h"
+#include "parser/ast_undef.h"
+#include "parser/ast_nil.h"
+#include "parser/ast_error.h"
 #include "core/allocator.h"
+#include "core/arena.h"
 #include "core/vec.h"
+#include "core/stream.h"
+#include "core/panic.h"
 
 #include <string.h>
 
 /* ================================================================ */
-/* clux 源码格式化（最小版）：基于 token 流规整 trivia                */
+/* clux 源码格式化（AST-based）：按语法树递归渲染                     */
 /* ================================================================ */
 /*
- * 策略：不重排代码结构，只规整 token 之间的空白与缩进。
+ * 策略：内部跑 lexer → parser（recover_partial）→ AST，按节点种类递归
+ * 渲染。输出只由语法决定，与源码书写风格无关（固定风格，无配置项）。
  *
- * 步骤：
- *   ① 过滤 trivia：把 WHITESPACE / COMMENT / MULTILINE_COMMENT 之外
- *      的实义 token 收集成数组，同时记录每个实义 token 之前遇到的
- *      trivia 信息（是否含换行、注释文本序列）。
- *   ② 按 token 序列 + 简单上下文规则输出：
- *        - '{' 跟随前行；非空块：'{' 后换行、缩进 +1；空块：紧凑 {}
- *        - '}' 单独一行；'}' 后 token 为 'else' 时同行（} else）
- *        - ';' 后换行（() 内除外）；',' 后一个空格
- *        - 运算符两侧空格；标识符/关键字/字面量之间空格
- *        - 注释原样保留在它出现的位置
- *   ③ 缩进一律 4 空格；输出以换行结束。
+ * 注释挂载：每个节点渲染前/后，把 token 池中落在 [tok_begin, tok_end) 内、
+ * 尚未消费的 COMMENT / MULTILINE_COMMENT 按源码位置输出：
+ *   - 与前一 token 同行的注释 → 行内（前一 token 后一个空格 + 注释文本）
+ *   - 其余注释 → 独立行（按当前缩进输出，保留源码空行分组）
+ *
+ * 表达式重新加括号：AST 丢失源码括号（分组直接返回内层节点），渲染时按
+ * 运算符优先级表决定是否加括号（AST_BINARY / AST_UNARY / AST_TERNARY /
+ * AST_ASSIGN）。括号是幂等的：加括号后再解析仍是同一棵树，再渲染不变。
+ *
+ * 幂等性由"AST 结构不变 → 输出不变"保证。
  */
 
 #define CLUX_INDENT "    "
@@ -63,461 +109,947 @@ static void sb_indent(sb_t *sb, int level) {
     for (int i = 0; i < level; i++) sb_str(sb, CLUX_INDENT);
 }
 
-/* ---- token 分类辅助 ---- */
+/* ---- formatter 上下文 ---- */
 
-static bool sym_is(const token_t *t, char c) {
-    if (token_get_kind(t) != TOKEN_TYPE_SYMBOL) return false;
-    size_t n = 0;
-    const char *s = token_get_text(t, &n);
-    return n == 1 && s && s[0] == c;
-}
-
-static bool kw_is(const token_t *t, const char *kw) {
-    if (token_get_kind(t) != TOKEN_TYPE_KEYWORD) return false;
-    return token_is(t, kw);
-}
-
-/* 词法上类似"值"的 token（标识符/关键字/字面量） */
-static bool is_word_like(token_kind_t k) {
-    return k == TOKEN_TYPE_IDENTIFIER || k == TOKEN_TYPE_KEYWORD ||
-           k == TOKEN_TYPE_NUMERIC    || k == TOKEN_TYPE_STRING  ||
-           k == TOKEN_TYPE_CHARACTER;
-}
-
-/* 运算符（两侧留空格）。含符号运算符与关键字运算符（extends / as，
- * 词法器以 KEYWORD 身份产出）。 */
-static bool is_operator(const token_t *t) {
-    if (!t) return false;
-    static const char *ops[] = {
-        "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=",
-        "+", "-", "*", "/", "%",
-        "==", "!=", "<", ">", "<=", ">=",
-        "&&", "||", "&", "|", "^", "<<", ">>",
-        "!", "~", "?", ":", "->", "=>",
-        "extends", "as",
-        NULL,
-    };
-    for (size_t i = 0; ops[i]; i++) {
-        if (token_is(t, ops[i])) return true;
-    }
-    return false;
-}
-
-/* 前一个 token 后是否禁用空格（`(`/`[` 后紧跟内容，`.` 后紧贴成员，
- * 类型构造块 `{` 后紧贴元素） */
-static bool no_space_after(const token_t *t) {
-    return sym_is(t, '(') || sym_is(t, '[') || sym_is(t, '{') || sym_is(t, '.');
-}
-
-/* 当前 token 是否为**一元前缀**运算符。
- *  - `!` / `~` 永远是一元；
- *  - `-` / `+` 仅当其前置 token 处于"期待一元操作数"上下文时视为一元，
- *    例如 `= -x`、`(-x)`、`, -x`、`; -x`、行首、另一运算符之后、`return -x`。
- * 一元前缀运算符紧贴其后操作数，不插入空格（`-x` / `~x` / `!x` / `+(...)` 等）。
- * 这与二元 `+`/`-`（两侧留空格，如 `a + b`）区分开来。 */
-static bool is_unary_prefix(const token_t *prev, const token_t *t) {
-    if (token_get_kind(t) != TOKEN_TYPE_SYMBOL) return false;
-    if (token_is(t, "!") || token_is(t, "~")) return true;
-    if (!token_is(t, "-") && !token_is(t, "+")) return false;
-    /* `-` / `+`：依靠上下文区分一元/二元 */
-    if (!prev) return true;                 /* 行首 / 表达式起始 */
-    if (sym_is(prev, '=') || sym_is(prev, ':') || sym_is(prev, ',') ||
-        sym_is(prev, ';') || sym_is(prev, '(') || sym_is(prev, '[') ||
-        is_operator(prev) || kw_is(prev, "return"))
-        return true;
-    return false;
-}
-
-/* 当前 token 前是否禁用空格（闭合符 / 分隔符 / 类型标注冒号） */
-static bool no_space_before(const token_t *t) {
-    return sym_is(t, ')') || sym_is(t, ']') || sym_is(t, ',') ||
-           sym_is(t, ';') || sym_is(t, '.') || sym_is(t, ':');
-}
-
-/* 控制流关键字：其后紧跟 `(` 的须以空格分隔，写作 `if (cond)` /
- * `while (cond)` / `for (...)` / `foreach (x of ...)` / `switch (...)`.
- * 注意 `func f(` 这类函数名调用不属此列。
- *
- * 注意：clux 的软关键字（foreach / switch / of 等）在词法器中并未登记进
- * g_keywords，而是以标识符（IDENTIFIER）身份产出，到 parser 阶段才按上下文
- * 识别为关键字。因此这里直接按文本内容判定，而非依赖 kind == KEYWORD，
- * 否则 foreach(x of b) 会被判为非控制流关键字而漏掉应有的空格。 */
-static bool is_control_keyword(const token_t *t) {
-    if (!t) return false;
-    return token_is(t, "if") || token_is(t, "while") ||
-           token_is(t, "for") || token_is(t, "foreach") ||
-           token_is(t, "switch");
-}
-
-/* `(` 之前是否需要空格：
- *  - 控制流关键字调用括号 `if (` / `while (` / `foreach (` / `switch (` 须空格；
- *  - 运算符后的括号 `a + (b)` / `x = (y)` 须空格（否则 `+(` / `=(` 紧贴破坏可读性）；
- *  - 函数调用 / 泛型实例化的 `name(` 紧贴（`main(`, `foo(`）。
- * 注意：clux 软关键字（foreach / switch 等）以标识符身份产出，故控制流判定
- * 按文本而非 kind。 */
-static bool need_space_before_paren(const token_t *prev,
-                                    const token_t *cur) {
-    if (!sym_is(cur, '(')) return false;
-    if (!prev) return false;
-    return is_control_keyword(prev) || is_operator(prev);
-}
-
-/* 两个 token 在源码中是否紧贴（无任何字符间隔）。
- *
- * 注意：lexer 不把数值的类型后缀并入 NUMERIC，而是切成两个 token
- * （`7i8` → NUMERIC("7") + IDENTIFIER("i8")，后缀由 parser 消费）。这类
- * 组合在语法上必须紧贴，格式化时若插入空格会直接改变语义（`7 i8`）。
- * 用字节偏移判断相邻性，从而只对"源码本就紧贴"的后缀生效。 */
-static bool tok_adjacent(const token_t *a, const token_t *b) {
-    if (!a || !b) return false;
-    const location_t *la = token_get_location(a);
-    const location_t *lb = token_get_location(b);
-    if (!la || !lb) return false;
-    return la->end.offset == lb->begin.offset;
-}
-
-/* 当前 token 是否为前一 NUMERIC 的**紧贴类型后缀**（`7i8` / `2.5f32`）。
- * 后缀是标识符且与数字在源码中相邻（区别于 `7 i8` 这种本就分开的写法）。 */
-/* 当前 token 是否为前一 NUMERIC 的**紧贴类型后缀**（`7i8` / `2.5f32`）。
- * 词法器把数值与类型后缀切成两个 token（`7` + `i8`，后缀由 parser 消费）。
- * 后缀是类型名，在词法器中以关键字形式出现（kind = KEYWORD），也可能落为
- * 普通标识符，二者都算"紧贴后缀"。若在此处插入空格会直接改变语义
- * （`7 i8` 不再是字面量）。用字节偏移判断相邻性，只对"源码本就紧贴"的
- * 后缀生效（区别于 `7 i8` 这种本就分开的写法）。 */
-static bool is_numeric_suffix(const token_t *prev, const token_t *cur) {
-    if (!prev || !cur) return false;
-    if (token_get_kind(prev) != TOKEN_TYPE_NUMERIC) return false;
-    token_kind_t ck = token_get_kind(cur);
-    if (ck != TOKEN_TYPE_IDENTIFIER && ck != TOKEN_TYPE_KEYWORD) return false;
-    return tok_adjacent(prev, cur);
-}
-
-/* 该实义 token 之前是否有换行（来自其前导空白） */
 typedef struct {
-    const token_t *tok;
-    bool           leading_newline;   /* 前面是否出现过换行 */
-    bool           leading_blank;     /* 前面是否出现过空行（>=2 换行） */
-} fmt_item_t;
+    allocator_t *alloc;
+    vec_t       *tokens;   /* token 池（含 trivia；注释挂载用） */
+    sb_t         sb;
+    int          indent;   /* 当前缩进层 */
+    bool         at_line_start;
+    /* 注释消费位图（bit per token 下标，1 = 已输出） */
+    uint8_t     *comment_seen;
+    size_t       comment_bytes;
+    size_t       src_line;     /* 当前输出位置对应的源码行号（行内/独立行判定） */
+} fmt_t;
+/* ---- 注释挂载 ---- */
 
-/* items[i]（应为 '{'）是否为**类型构造块** `.T{...}` / `.[N]T{...}`。
- *
- * 从 '{' 向前扫描 token：若在遇到表达式边界（= ; ( , { } 等非类型链
- * token）之前出现 '.'，则视为类型构造块。类型链 = 类型名（word-like）/
- * '[' / ']'（如 `.[2][3]i32{`）。构造块应紧凑单行（`.T{1, 2}`），
- * 区别于控制流/函数体块（展开多行、缩进 +1）。 */
-static bool is_construct_brace(const fmt_item_t *items, size_t i) {
-    size_t j = i;
-    while (j > 0) {
-        j--;
-        const token_t *t = items[j].tok;
-        token_kind_t k = token_get_kind(t);
-        if (sym_is(t, '.')) return true;
-        if (sym_is(t, ']') || sym_is(t, '[')) continue;
-        if (is_word_like(k)) continue;
-        return false;
+static bool tok_is_comment(const token_t *t) {
+    if (!t) return false;
+    token_kind_t k = token_get_kind(t);
+    return k == TOKEN_TYPE_COMMENT || k == TOKEN_TYPE_MULTILINE_COMMENT;
+}
+
+/* i 下标处注释是否已消费 */
+static bool comment_done(const fmt_t *f, size_t i) {
+    if (i >= f->comment_bytes * 8) return true;
+    return (f->comment_seen[i / 8] >> (i % 8)) & 1u;
+}
+
+static void comment_mark(fmt_t *f, size_t i) {
+    if (i >= f->comment_bytes * 8) return;
+    f->comment_seen[i / 8] |= (uint8_t)(1u << (i % 8));
+}
+
+/* token 在源码中的起始行号（无 location 时返回 0） */
+static size_t tok_line(const token_t *t) {
+    const location_t *loc = token_get_location(t);
+    return loc ? loc->begin.line : 0;
+}
+
+/* 输出注释 item：行内（inline=true，前面补一个空格）或独立行。
+ * 行注释（//）后强制换行（到行尾结束）；块注释后由调用方 gap 收尾决定。 */
+static void emit_comment(fmt_t *f, size_t i, const token_t *t, bool inline_,
+                         int indent) {
+    size_t tlen = 0;
+    const char *text = token_get_text(t, &tlen);
+    if (inline_) {
+        if (f->at_line_start) {
+            sb_indent(&f->sb, indent);
+        } else {
+            sb_ch(&f->sb, ' ');
+        }
+    } else {
+        if (!f->at_line_start) sb_ch(&f->sb, '\n');
+        sb_indent(&f->sb, indent);
+    }
+    sb_put(&f->sb, text, tlen);
+    comment_mark(f, i);
+    f->at_line_start = false;
+    if (token_get_kind(t) == TOKEN_TYPE_COMMENT) {
+        sb_ch(&f->sb, '\n');
+        f->at_line_start = true;
+    }
+}
+
+/* 挂载 [begin, end) 内的注释。
+ *   - 行内注释（源码行号 <= last_line：与上一输出同行）→ 前置空格追加
+ *   - 独立行注释（行号 > last_line）→ 换行 + 当前缩进输出
+ * inline_only=true 时只挂行内注释，独立行注释跳过（留给后续挂载）。
+ * 返回最后挂载注释的源码行号（无注释返回传入的 last_line）。
+ * 全量扫描 + 位图防重（comment_seen），无游标推进需求。 */
+static size_t mount_comments(fmt_t *f, uint32_t begin, uint32_t end,
+                             size_t last_line, bool inline_only) {
+    size_t n = vec_len(f->tokens);
+    for (size_t i = begin; i < end && i < n; i++) {
+        const token_t *t = (const token_t *)vec_get(f->tokens, i);
+        if (!tok_is_comment(t) || comment_done(f, i)) continue;
+        size_t line = tok_line(t);
+        if (line > last_line) {
+            if (inline_only) continue;
+            emit_comment(f, i, t, /*inline_=*/false, f->indent);
+        } else {
+            emit_comment(f, i, t, /*inline_=*/true, f->indent);
+        }
+        last_line = line;
+    }
+    return last_line;
+}
+
+/* ---- 渲染器前向声明 ---- */
+
+static void render_node(fmt_t *f, ast_node_t *node);
+static void render_expr(fmt_t *f, ast_node_t *node);
+static void render_stmt(fmt_t *f, ast_node_t *node);
+static void render_block(fmt_t *f, ast_node_t *node);
+static void render_func_def(fmt_t *f, ast_node_t *node);
+static void render_func_literal(fmt_t *f, ast_node_t *node);
+
+/* ---- 兄弟链渲染 ---- */
+
+/* 以 ", " 分隔渲染兄弟链（用于参数/实参/元素/字段/索引列表）。 */
+static void render_comma_list(fmt_t *f, ast_node_t *head) {
+    bool first = true;
+    for (ast_node_t *n = head; n; n = n->next) {
+        if (!first) sb_str(&f->sb, ", ");
+        render_expr(f, n);
+        first = false;
+    }
+}
+
+/* 以 "; " 分隔渲染兄弟链（struct 字段列表，保持单行紧凑）。 */
+static void render_semi_list(fmt_t *f, ast_node_t *head) {
+    bool first = true;
+    for (ast_node_t *n = head; n; n = n->next) {
+        if (!first) sb_str(&f->sb, "; ");
+        render_node(f, n);
+        first = false;
+    }
+}
+
+/* ---- 括号渲染与优先级 ---- */
+
+/* 运算符优先级表（数值 = 绑定力，越大越紧）。赋值/三元最低（0）。 */
+typedef struct { const char *op; int lp; int rp; } op_entry_t;
+
+/* 按 strslice（长度感知）查表；token 文本是源码切片，非 NUL 结尾。 */
+static bool op_binding_len(const char *ptr, size_t len, int *lp, int *rp) {
+    static const op_entry_t ops[] = {
+        { "as", 21, 22 }, { "extends", 11, 12 },
+        { "||", 1, 2 }, { "&&", 3, 4 }, { "|", 5, 6 }, { "^", 7, 8 },
+        { "&", 9, 10 }, { "==", 11, 12 }, { "!=", 11, 12 },
+        { "<", 13, 14 }, { ">", 13, 14 }, { "<=", 13, 14 }, { ">=", 13, 14 },
+        { "<<", 15, 16 }, { ">>", 15, 16 },
+        { "+", 17, 18 }, { "-", 17, 18 },
+        { "*", 19, 20 }, { "/", 19, 20 }, { "%", 19, 20 },
+        { NULL, 0, 0 },
+    };
+    for (size_t i = 0; ops[i].op; i++) {
+        size_t n = strlen(ops[i].op);
+        if (len == n && memcmp(ptr, ops[i].op, n) == 0) {
+            *lp = ops[i].lp;
+            *rp = ops[i].rp;
+            return true;
+        }
     }
     return false;
 }
 
-/* ---- 预看：tok[i+1] 是否为 '}'（用于空块判定） ---- */
+/* 表达式节点自身的左/右结合绑定力（用于决定是否加括号）。
+ * 赋值（= / += / ...）与三元：最低（0），右结合。 */
+static void node_prec(ast_node_t *n, int *lp, int *rp, bool *right_assoc) {
+    *right_assoc = false;
+    switch (n->kind) {
+        case AST_ASSIGN: {
+            *lp = 0;
+            *rp = 0;
+            *right_assoc = true;   /* a = b = c：右结合 */
+            break;
+        }
+        case AST_TERNARY: {
+            *lp = 0;
+            *rp = 0;
+            *right_assoc = true;   /* a ? b : c ? d : e */
+            break;
+        }
+        case AST_BINARY: {
+            strslice_t op = token_strslice(((ast_binary_t *)n)->op);
+            /* op 是 token pool 引用（源码切片，非 NUL 结尾），按长度比较 */
+            op_binding_len(op.ptr, op.len, lp, rp);
+            break;
+        }
+        case AST_UNARY: {
+            *lp = 23;
+            *rp = 23;
+            break;
+        }
+        default:
+            *lp = 26;   /* 原子/后缀：最高 */
+            *rp = 26;
+            break;
+    }
+}
 
-char *fmt_format(allocator_t *alloc, const vec_t *tokens, size_t *out_len) {
-    if (!alloc || !tokens) return NULL;
+/* 是否需要括号包裹 child（parent 的某侧子节点）。
+ *   child_prec < bound → 加括号（优先级不足）。
+ *   等优先级：同 op 左结合（child 在 lhs）不括号；右结合（child 在 rhs
+ *   或 child 是右结合运算符）时，若 op 相同则不括号（幂等），否则括号。
+ *   特殊：child 是三元时，作为父级 rhs 必须括号（歧义保护）。
+ */
+static bool need_paren(ast_node_t *child, ast_node_t *parent, bool child_on_rhs,
+                       int bound) {
+    if (!child) return false;
+    int lp, rp;
+    bool ra;
+    node_prec(child, &lp, &rp, &ra);
+
+    if (child->kind == AST_TERNARY) {
+        /* 三元嵌套在三元/赋值/二元 rhs 上：必须括号（a ? b : c ? d : e
+           例外见下——右结合同层不括号） */
+        if (parent->kind == AST_TERNARY && child_on_rhs) {
+            /* a ? b : (c ? d : e) 解析为 a ? b : (c?d:e)？否——
+               parser 右结合：else = c ? d : e 天然嵌套，不括号 */
+            return false;
+        }
+        return true;
+    }
+    if (child->kind == AST_ASSIGN) {
+        /* 赋值嵌套：a = b = c 合法（右结合，无括号）；作为 rhs 且同 op 不括号 */
+        if (child_on_rhs && parent->kind == AST_ASSIGN) return false;
+        return true;
+    }
+    if (lp < bound) return true;   /* 优先级不足 → 必须加括号 */
+
+    if (lp == bound && child_on_rhs && parent->kind == AST_BINARY) {
+        /* 等优先级：右结合链（a - (b - c) 中 child=rhs 且同 op）需括号，
+           除非 child 也是同 op 且右结合性允许。C 语义：左结合运算符
+           a - (b - c) 必须括号；a + (b + c) 语义等价但保留括号更清晰。
+           注意 token 文本是源码切片（非 NUL 结尾），不能 strcmp。 */
+        const token_t *p_tok = ((ast_binary_t *)parent)->op;
+        const token_t *c_tok = ((ast_binary_t *)child)->op;
+        size_t plen = 0, clen = 0;
+        const char *pt = token_get_text(p_tok, &plen);
+        const char *ct = token_get_text(c_tok, &clen);
+        if (plen == clen && plen > 0 && memcmp(pt, ct, plen) == 0) return false;
+        return true;
+    }
+    return false;
+}
+
+/* 渲染表达式并视需要加括号。 */
+static void render_expr_paren(fmt_t *f, ast_node_t *child, ast_node_t *parent,
+                              bool child_on_rhs, int bound) {
+    if (need_paren(child, parent, child_on_rhs, bound)) {
+        sb_ch(&f->sb, '(');
+        render_expr(f, child);
+        sb_ch(&f->sb, ')');
+    } else {
+        render_expr(f, child);
+    }
+}
+
+/* ---- 叶子渲染 ---- */
+
+static void render_ident(fmt_t *f, ast_node_t *n) {
+    strslice_t s = ((ast_ident_t *)n)->name;
+    sb_put(&f->sb, s.ptr, s.len);
+}
+
+static void render_int_lit(fmt_t *f, ast_node_t *n) {
+    ast_int_lit_t *lit = (ast_int_lit_t *)n;
+    size_t tlen = 0;
+    const char *text = token_get_text(
+        (const token_t *)vec_get(f->tokens, n->tok_begin), &tlen);
+    if (text) sb_put(&f->sb, text, tlen);   /* 原样保留进制/前缀 */
+    if (lit->type.ptr) sb_put(&f->sb, lit->type.ptr, lit->type.len);  /* 类型后缀 */
+}
+
+/* ---- 节点渲染（表达式） ---- */
+
+static void render_expr(fmt_t *f, ast_node_t *node) {
+    if (!node) return;
+    switch (node->kind) {
+        case AST_IDENT: {
+            render_ident(f, node);
+            break;
+        }
+        case AST_INT_LIT: {
+            render_int_lit(f, node);
+            break;
+        }
+        case AST_FLOAT_LIT: {
+            size_t tlen = 0;
+            const char *text = token_get_text(
+                (const token_t *)vec_get(f->tokens, node->tok_begin), &tlen);
+            if (text) sb_put(&f->sb, text, tlen);
+            ast_float_lit_t *fl = (ast_float_lit_t *)node;
+            if (fl->type.ptr) sb_put(&f->sb, fl->type.ptr, fl->type.len);
+            break;
+        }
+        case AST_BOOL_LIT: {
+            sb_str(&f->sb, ((ast_bool_lit_t *)node)->value ? "true" : "false");
+            break;
+        }
+        case AST_STRING_LIT: {
+            /* 输出源码原文（含引号与转义） */
+            size_t tlen = 0;
+            const char *text = token_get_text(
+                (const token_t *)vec_get(f->tokens, node->tok_begin), &tlen);
+            if (text) sb_put(&f->sb, text, tlen);
+            break;
+        }
+        case AST_CHAR_LIT: {
+            size_t tlen = 0;
+            const char *text = token_get_text(
+                (const token_t *)vec_get(f->tokens, node->tok_begin), &tlen);
+            if (text) sb_put(&f->sb, text, tlen);
+            break;
+        }
+        case AST_UNDEF: {
+            sb_str(&f->sb, "undefined");
+            break;
+        }
+        case AST_NIL: {
+            sb_str(&f->sb, "nil");
+            break;
+        }
+        case AST_ENUM_REF: {
+            ast_enum_ref_t *er = (ast_enum_ref_t *)node;
+            render_expr(f, er->type_expr);
+            sb_str(&f->sb, "::");
+            sb_put(&f->sb, er->variant.ptr, er->variant.len);
+            break;
+        }
+        case AST_ARRAY: {
+            ast_array_t *a = (ast_array_t *)node;
+            sb_ch(&f->sb, '[');
+            render_expr(f, a->length);
+            sb_ch(&f->sb, ']');
+            render_expr(f, a->base_type);
+            break;
+        }
+        case AST_TUPLE: {
+            ast_tuple_t *t = (ast_tuple_t *)node;
+            sb_ch(&f->sb, '<');
+            render_comma_list(f, t->elem_types);
+            sb_ch(&f->sb, '>');
+            break;
+        }
+        case AST_CONST: {
+            sb_str(&f->sb, "const ");
+            render_expr(f, ((ast_const_t *)node)->sub);
+            break;
+        }
+        case AST_VOLATILE: {
+            sb_str(&f->sb, "volatile ");
+            render_expr(f, ((ast_volatile_t *)node)->sub);
+            break;
+        }
+        case AST_OPTION: {
+            sb_ch(&f->sb, '?');
+            render_expr(f, ((ast_option_t *)node)->sub);
+            break;
+        }
+        case AST_FUNC_TYPE: {
+            ast_func_type_t *ft = (ast_func_type_t *)node;
+            sb_str(&f->sb, "func");
+            sb_ch(&f->sb, '(');
+            render_comma_list(f, ft->params);
+            sb_ch(&f->sb, ')');
+            if (ft->return_type) {
+                sb_str(&f->sb, " -> ");
+                render_expr(f, ft->return_type);
+            }
+            break;
+        }
+        case AST_UNARY: {
+            ast_unary_t *u = (ast_unary_t *)node;
+            size_t olen = 0;
+            const char *op = token_get_text(u->op, &olen);
+            sb_put(&f->sb, op, olen);
+            /* 一元前缀紧贴操作数；操作数优先级低于 23 时加括号（- (a + b)） */
+            render_expr_paren(f, u->operand, node, false, 23);
+            break;
+        }
+        case AST_BINARY: {
+            ast_binary_t *b = (ast_binary_t *)node;
+            int lp, rp;
+            size_t olen = 0;
+            const char *op = token_get_text(b->op, &olen);
+            op_binding_len(op, olen, &lp, &rp);
+            render_expr_paren(f, b->lhs, node, false, lp);
+            sb_ch(&f->sb, ' ');
+            sb_put(&f->sb, op, olen);
+            sb_ch(&f->sb, ' ');
+            render_expr_paren(f, b->rhs, node, true, rp);
+            break;
+        }
+        case AST_ASSIGN: {
+            ast_assign_t *a = (ast_assign_t *)node;
+            size_t olen = 0;
+            const char *op = token_get_text(a->op, &olen);
+            render_expr_paren(f, a->target, node, false, 0);
+            sb_ch(&f->sb, ' ');
+            sb_put(&f->sb, op, olen);
+            sb_ch(&f->sb, ' ');
+            render_expr_paren(f, a->value, node, true, 0);
+            break;
+        }
+        case AST_TERNARY: {
+            ast_ternary_t *t = (ast_ternary_t *)node;
+            render_expr(f, t->cond);
+            sb_str(&f->sb, " ? ");
+            render_expr_paren(f, t->then_branch, node, false, 0);
+            sb_str(&f->sb, " : ");
+            render_expr_paren(f, t->else_branch, node, true, 0);
+            break;
+        }
+        case AST_CALL: {
+            ast_call_t *c = (ast_call_t *)node;
+            render_expr(f, c->callee);
+            sb_ch(&f->sb, '(');
+            render_comma_list(f, c->args);
+            sb_ch(&f->sb, ')');
+            break;
+        }
+        case AST_MEMBER: {
+            ast_member_t *m = (ast_member_t *)node;
+            render_expr(f, m->object);
+            sb_ch(&f->sb, '.');
+            sb_put(&f->sb, m->field.ptr, m->field.len);
+            break;
+        }
+        case AST_INDEX: {
+            ast_index_t *ix = (ast_index_t *)node;
+            render_expr(f, ix->object);
+            sb_ch(&f->sb, '[');
+            render_comma_list(f, ix->indices);
+            sb_ch(&f->sb, ']');
+            break;
+        }
+        case AST_UNWRAP: {
+            ast_unwrap_t *u = (ast_unwrap_t *)node;
+            render_expr(f, u->operand);
+            size_t olen = 0;
+            const char *op = token_get_text(u->op, &olen);
+            sb_put(&f->sb, op, olen);
+            break;
+        }
+        case AST_CONSTRUCT: {
+            ast_construct_t *c = (ast_construct_t *)node;
+            sb_ch(&f->sb, '.');
+            if (c->type) render_expr(f, c->type);
+            sb_ch(&f->sb, '{');
+            render_comma_list(f, c->fields);
+            sb_ch(&f->sb, '}');
+            break;
+        }
+        case AST_CONSTRUCT_FIELD: {
+            ast_construct_field_t *cf = (ast_construct_field_t *)node;
+            sb_ch(&f->sb, '.');
+            sb_put(&f->sb, cf->name.ptr, cf->name.len);
+            sb_str(&f->sb, " = ");
+            render_expr(f, cf->value);
+            break;
+        }
+        case AST_FILL: {
+            ast_fill_t *fl = (ast_fill_t *)node;
+            sb_ch(&f->sb, '<');
+            render_expr(f, fl->value);
+            sb_str(&f->sb, ", ");
+            render_expr(f, fl->count);
+            sb_ch(&f->sb, '>');
+            break;
+        }
+        case AST_FUNC_DEF: {
+            /* 函数字面量（表达式位置） */
+            render_func_literal(f, node);
+            break;
+        }
+        case AST_ERROR: {
+            /* 错误恢复：不渲染 */
+            break;
+        }
+        default: {
+            break;
+        }
+    }
+}
+
+/* ---- 语句渲染 ---- */
+
+static void render_stmt(fmt_t *f, ast_node_t *node) {
+    if (!node) return;
+    switch (node->kind) {
+        case AST_VAR_DEF: {
+            ast_var_def_t *v = (ast_var_def_t *)node;
+            if (v->is_comptime) sb_str(&f->sb, "comptime ");
+            sb_str(&f->sb, "var ");
+            sb_put(&f->sb, v->name.ptr, v->name.len);
+            if (v->type_expr) {
+                sb_str(&f->sb, ": ");
+                render_expr(f, v->type_expr);
+            }
+            sb_str(&f->sb, " = ");
+            render_expr(f, v->init);
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_TYPE_DEF: {
+            ast_type_def_t *t = (ast_type_def_t *)node;
+            sb_str(&f->sb, "type ");
+            sb_put(&f->sb, t->name.ptr, t->name.len);
+            sb_str(&f->sb, " = ");
+            render_expr(f, t->expr);
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_ENUM_DEF: {
+            ast_enum_def_t *e = (ast_enum_def_t *)node;
+            sb_str(&f->sb, "enum ");
+            sb_put(&f->sb, e->name.ptr, e->name.len);
+            sb_str(&f->sb, ": ");
+            render_expr(f, e->underlying_type);
+            sb_str(&f->sb, " {");
+            bool first = true;
+            for (ast_node_t *v = e->variants; v; v = v->next) {
+                if (!first) sb_str(&f->sb, ", ");
+                ast_enum_variant_t *ev = (ast_enum_variant_t *)v;
+                sb_put(&f->sb, ev->name.ptr, ev->name.len);
+                sb_str(&f->sb, " = ");
+                render_expr(f, ev->value);
+                first = false;
+            }
+            sb_str(&f->sb, "}");
+            break;
+        }
+        case AST_STRUCT_DEF: {
+            ast_struct_def_t *s = (ast_struct_def_t *)node;
+            sb_str(&f->sb, "struct ");
+            sb_put(&f->sb, s->name.ptr, s->name.len);
+            sb_str(&f->sb, " {");
+            if (!s->fields) {
+                sb_str(&f->sb, "}");
+            } else {
+                sb_ch(&f->sb, ' ');
+                render_semi_list(f, s->fields);
+                sb_str(&f->sb, " }");
+            }
+            break;
+        }
+        case AST_STRUCT_FIELD: {
+            ast_struct_field_t *sf = (ast_struct_field_t *)node;
+            sb_put(&f->sb, sf->name.ptr, sf->name.len);
+            sb_str(&f->sb, ": ");
+            render_expr(f, sf->type);
+            break;
+        }
+        case AST_IF: {
+            ast_if_t *i = (ast_if_t *)node;
+            sb_str(&f->sb, "if (");
+            render_expr(f, i->cond);
+            sb_ch(&f->sb, ')');
+            render_block(f, i->then_body);
+            if (i->else_body) {
+                if (i->else_body->kind == AST_IF) {
+                    sb_str(&f->sb, " else ");
+                    render_stmt(f, i->else_body);
+                } else {
+                    /* else 后接块：空格由 render_block 的 " {" 提供 */
+                    sb_str(&f->sb, " else");
+                    render_block(f, i->else_body);
+                }
+            }
+            break;
+        }
+        case AST_SWITCH: {
+            ast_switch_t *sw = (ast_switch_t *)node;
+            sb_str(&f->sb, "switch (");
+            render_expr(f, sw->cond);
+            sb_ch(&f->sb, ')');
+            sb_str(&f->sb, " {");
+            bool any = false;
+            for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+                if (any) sb_ch(&f->sb, ' ');
+                ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+                sb_ch(&f->sb, '(');
+                render_comma_list(f, sc->patterns);
+                sb_ch(&f->sb, ')');
+                sb_str(&f->sb, " -> ");
+                render_block(f, sc->body);
+                any = true;
+            }
+            if (sw->default_body) {
+                if (any) sb_ch(&f->sb, ' ');
+                sb_str(&f->sb, "default -> ");
+                render_block(f, sw->default_body);
+            }
+            sb_str(&f->sb, "}");
+            break;
+        }
+        case AST_WHILE: {
+            ast_while_t *w = (ast_while_t *)node;
+            sb_str(&f->sb, "while (");
+            render_expr(f, w->cond);
+            sb_ch(&f->sb, ')');
+            render_block(f, w->body);
+            break;
+        }
+        case AST_FOR: {
+            ast_for_t *fo = (ast_for_t *)node;
+            sb_str(&f->sb, "for (");
+            if (fo->init) render_stmt(f, fo->init);
+            sb_ch(&f->sb, ' ');
+            if (fo->cond) render_expr(f, fo->cond);
+            sb_str(&f->sb, "; ");
+            if (fo->update) render_expr(f, fo->update);
+            sb_ch(&f->sb, ')');
+            render_block(f, fo->body);
+            break;
+        }
+        case AST_RETURN: {
+            ast_return_t *r = (ast_return_t *)node;
+            sb_str(&f->sb, "return");
+            if (r->value) {
+                sb_ch(&f->sb, ' ');
+                render_expr(f, r->value);
+            }
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_BREAK: {
+            sb_str(&f->sb, "break;");
+            break;
+        }
+        case AST_CONTINUE: {
+            sb_str(&f->sb, "continue;");
+            break;
+        }
+        case AST_EMPTY_STMT: {
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_BLOCK: {
+            render_block(f, node);
+            break;
+        }
+        case AST_EXPR_STMT: {
+            render_expr(f, ((ast_expr_stmt_t *)node)->expr);
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_ASSIGN: {
+            render_expr(f, node);
+            sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_FUNC_DEF: {
+            /* 语句级函数定义 */
+            render_func_def(f, node);
+            break;
+        }
+        default: {
+            render_expr(f, node);
+            sb_ch(&f->sb, ';');
+            break;
+        }
+    }
+}
+
+/* ---- 块渲染 ---- */
+
+/* 渲染块 `{ stmts }`：非空块展开多行 +1 缩进；空块紧凑 `{}`。
+ * 语句间 gap 注释（[上一语句末, 当前语句末)）在语句前挂载。 */
+static void render_block(fmt_t *f, ast_node_t *node) {
+    ast_block_t *b = (ast_block_t *)node;
+    sb_str(&f->sb, " {");
+    uint32_t prev_end = b->base.tok_begin + 1;  /* `{` 之后 */
+    size_t last_line =
+        tok_line((const token_t *)vec_get(f->tokens, b->base.tok_begin));
+
+    if (!b->stmts) {
+        /* 空块：块内注释挂载（如 `{ // hi }`），无注释则紧凑 `{}` */
+        mount_comments(f, prev_end, b->base.tok_end, last_line,
+                       /*inline_only=*/false);
+        sb_ch(&f->sb, '}');
+        f->at_line_start = false;
+        return;
+    }
+
+    f->indent++;
+    /* 首语句前的注释（`{` 后、首语句前） */
+    last_line = mount_comments(f, prev_end, b->stmts->tok_begin, last_line,
+                               /*inline_only=*/false);
+    for (ast_node_t *s = b->stmts; s; s = s->next) {
+        /* 语句分隔换行 */
+        if (!f->at_line_start) sb_ch(&f->sb, '\n');
+        f->at_line_start = true;
+        /* 语句前注释（独立行注释在此挂载，返回最后注释行号） */
+        last_line = mount_comments(f, prev_end, s->tok_begin, last_line,
+                                   /*inline_only=*/false);
+        /* 空行保留：本语句源码行号比上次输出的源码行号 ≥2 → 补空行 */
+        size_t cur_line = tok_line(
+            (const token_t *)vec_get(f->tokens, s->tok_begin));
+        if (cur_line >= last_line + 2) {
+            sb_ch(&f->sb, '\n');
+            f->at_line_start = true;
+        }
+        if (f->at_line_start) sb_indent(&f->sb, f->indent);
+        f->at_line_start = false;
+        render_stmt(f, s);
+        prev_end = s->tok_end;
+        /* 语句后行内注释：`stmt; // x` 同行注释立即挂载；独立行注释留给
+           下一语句前的挂载（保持空行判断准确性） */
+        uint32_t inline_end = s->next ? s->next->tok_begin : b->base.tok_end;
+        size_t stmt_end_line =
+            tok_line((const token_t *)vec_get(f->tokens, prev_end - 1));
+        last_line = mount_comments(f, prev_end, inline_end, stmt_end_line,
+                                   /*inline_only=*/true);
+        last_line = stmt_end_line;
+    }
+    /* 块尾注释：最后语句尾 → '}' 前（保持块内缩进，`}` 前独立行） */
+    if (!f->at_line_start) sb_ch(&f->sb, '\n');
+    f->at_line_start = true;
+    mount_comments(f, prev_end, b->base.tok_end, last_line,
+                   /*inline_only=*/false);
+    f->indent--;
+    if (f->at_line_start) sb_indent(&f->sb, f->indent);
+    f->at_line_start = false;
+    sb_ch(&f->sb, '}');
+    f->at_line_start = false;
+}
+
+/* ---- 函数渲染 ---- */
+
+static void render_param(fmt_t *f, ast_node_t *n) {
+    ast_var_def_t *v = (ast_var_def_t *)n;
+    sb_put(&f->sb, v->name.ptr, v->name.len);
+    sb_str(&f->sb, ": ");
+    render_expr(f, v->type_expr);
+}
+
+static void render_captures(fmt_t *f, ast_node_t *captures) {
+    sb_ch(&f->sb, '|');
+    bool first = true;
+    for (ast_node_t *c = captures; c; c = c->next) {
+        if (!first) sb_str(&f->sb, ", ");
+        ast_var_def_t *v = (ast_var_def_t *)c;
+        if (v->type_expr || v->init) {
+            /* 括号 VALUE DECL：(name[:type] = init) */
+            sb_ch(&f->sb, '(');
+            sb_put(&f->sb, v->name.ptr, v->name.len);
+            if (v->type_expr) {
+                sb_str(&f->sb, ": ");
+                render_expr(f, v->type_expr);
+            }
+            sb_str(&f->sb, " = ");
+            render_expr(f, v->init);
+            sb_ch(&f->sb, ')');
+        } else {
+            sb_put(&f->sb, v->name.ptr, v->name.len);
+        }
+        first = false;
+    }
+    sb_ch(&f->sb, '|');
+}
+
+static void render_func_def(fmt_t *f, ast_node_t *node) {
+    ast_func_def_t *fn = (ast_func_def_t *)node;
+    if (fn->is_comptime) sb_str(&f->sb, "comptime ");
+    sb_str(&f->sb, "func ");
+    if (fn->captures) {
+        render_captures(f, fn->captures);
+        sb_ch(&f->sb, ' ');
+    }
+    sb_put(&f->sb, fn->name.ptr, fn->name.len);
+    sb_ch(&f->sb, '(');
+    bool first = true;
+    for (ast_node_t *p = fn->params; p; p = p->next) {
+        if (!first) sb_str(&f->sb, ", ");
+        render_param(f, p);
+        first = false;
+    }
+    sb_ch(&f->sb, ')');
+    sb_str(&f->sb, ": ");
+    render_expr(f, fn->return_expr);
+    render_block(f, fn->body);
+}
+
+/* 函数字面量（表达式位置）：func [name](params): type { body }
+ * name 可选（无 name = 匿名）；有 name 时仅作显示名（不绑定符号），
+ * 格式化须保留以维持源码语义。 */
+static void render_func_literal(fmt_t *f, ast_node_t *node) {
+    ast_func_def_t *fn = (ast_func_def_t *)node;
+    sb_str(&f->sb, "func");
+    if (fn->captures) {
+        sb_ch(&f->sb, ' ');
+        render_captures(f, fn->captures);
+    }
+    if (fn->name.ptr) {
+        sb_ch(&f->sb, ' ');
+        sb_put(&f->sb, fn->name.ptr, fn->name.len);
+    }
+    sb_ch(&f->sb, '(');
+    bool first = true;
+    for (ast_node_t *p = fn->params; p; p = p->next) {
+        if (!first) sb_str(&f->sb, ", ");
+        render_param(f, p);
+        first = false;
+    }
+    sb_ch(&f->sb, ')');
+    sb_str(&f->sb, ": ");
+    render_expr(f, fn->return_expr);
+    render_block(f, fn->body);
+}
+
+/* ---- 顶层：PROGRAM ---- */
+
+static void render_program(fmt_t *f, ast_node_t *node) {
+    ast_program_t *prog = (ast_program_t *)node;
+    uint32_t prev_end = 0;
+    size_t last_line = 0;
+    bool first = true;
+    for (ast_node_t *fn = prog->funcs; fn; fn = fn->next) {
+        if (!first) sb_ch(&f->sb, '\n');
+        f->at_line_start = true;
+        /* 只挂载函数之前的注释（[prev_end, tok_begin)）；函数体内的
+           注释由 render_block 挂载（保持缩进/行内位置）。 */
+        size_t cmt_line = mount_comments(f, prev_end, fn->tok_begin, last_line,
+                                         /*inline_only=*/false);
+        /* 空行保留：函数/注释后与上一输出源码行号 ≥2 → 补空行。
+           顶层不缩进（indent=0），与块内规则一致。 */
+        size_t cur_line = tok_line(
+            (const token_t *)vec_get(f->tokens, fn->tok_begin));
+        if (cur_line >= cmt_line + 2) {
+            sb_ch(&f->sb, '\n');
+            f->at_line_start = true;
+        }
+        if (f->at_line_start) sb_indent(&f->sb, f->indent);
+        f->at_line_start = false;
+        render_node(f, fn);
+        prev_end = fn->tok_end;
+        last_line = tok_line((const token_t *)vec_get(f->tokens, prev_end - 1));
+        /* 函数尾注释：本函数尾 → 下一函数前 */
+        uint32_t end = fn->next ? fn->next->tok_begin : (uint32_t)vec_len(f->tokens);
+        cmt_line = mount_comments(f, prev_end, end, last_line,
+                                  /*inline_only=*/false);
+        last_line = cmt_line;
+        first = false;
+    }
+    /* 结尾补一个换行（空输入除外） */
+    if (!first) sb_ch(&f->sb, '\n');
+    f->at_line_start = true;
+}
+
+/* 通用节点入口（顶层 funcs / 兄弟链渲染用） */
+static void render_node(fmt_t *f, ast_node_t *node) {
+    if (!node) return;
+    if (node->kind == AST_FUNC_DEF) {
+        render_func_def(f, node);
+        return;
+    }
+    render_stmt(f, node);
+}
+
+/* ---- 公共入口 ---- */
+
+char *fmt_format_source(allocator_t *alloc, const char *src, size_t len,
+                        size_t *out_len) {
+    if (!alloc || !src) return NULL;
     if (out_len) *out_len = 0;
 
-    size_t n = vec_len(tokens);
+    /* ① lexer：内存源 → token 池（含 trivia，注释挂载用）。
+       lexer 持有 stream，lexer_close 的 dispose 一并关闭（勿重复关闭）。 */
+    stream_source_t source = stream_source_mem(alloc, src, len, /*owns_data=*/false);
+    istream_t *stream = istream_open(alloc, source);
+    if (!stream) return NULL;
 
-    /* ① 收集实义 token + 前导换行信息（用 alloc 临时数组） */
-    fmt_item_t *items = (fmt_item_t *)allocator_new_ex(
-        alloc, "clux.parser.fmt.items", (n ? n : 1) * sizeof(fmt_item_t),
+    lexer_t *lexer = lexer_create(alloc, stream, "<format>");
+    if (!lexer) { istream_close(&stream); return NULL; }
+
+    vec_t *pool = vec_new(alloc, /*owns_element=*/true);
+    if (!pool) { lexer_close(&lexer); istream_close(&stream); return NULL; }
+
+    bool lex_error = false;
+    for (;;) {
+        token_t *t = lexer_next(lexer);
+        if (!t) break;
+        vec_push(pool, alloc, t);
+        token_kind_t k = token_get_kind(t);
+        if (k == TOKEN_TYPE_ERROR) {
+            lex_error = true;
+            break;
+        }
+        if (k == TOKEN_TYPE_EOF) break;
+    }
+    /* lexer_close 的 dispose 会关闭 stream（含 source ctx），勿重复 istream_close */
+    lexer_close(&lexer);
+    if (lex_error) {
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    /* ② parser：recover_partial——语法错误时保留错误前的 AST */
+    arena_t *arena = arena_new_default(alloc);
+    if (!arena) { vec_free(alloc, &pool); return NULL; }
+
+    parser_t *parser = parser_create(alloc, arena, pool);
+    if (!parser) { arena_destroy(alloc, &arena); vec_free(alloc, &pool); return NULL; }
+    parser->recover_partial = true;
+    parser->diag = NULL;   /* 不打印诊断（仅格式化，错误由调用方感知） */
+
+    ast_node_t *root = parser_parse(parser);
+    if (!root) {
+        /* 词法错误（parser_parse 内部已打印） */
+        parser_destroy(&parser);
+        arena_destroy(alloc, &arena);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+    /* ③ 渲染 */
+    fmt_t f = { 0 };
+    f.alloc = alloc;
+    f.sb.alloc = alloc;   /* sb 增长缓冲独立持有 alloc */
+    f.tokens = pool;
+    f.indent = 0;
+    f.at_line_start = true;
+    size_t ntok = vec_len(pool);
+    f.comment_bytes = (ntok + 7) / 8;
+    f.comment_seen = (uint8_t *)allocator_new_ex(
+        alloc, "clux.parser.fmt.comment", f.comment_bytes ? f.comment_bytes : 1,
         NULL, NULL, NULL, 1);
-    size_t count = 0;
-
-    bool pending_newline = false;
-    size_t pending_nl_count = 0;
-
-    for (size_t i = 0; i < n; i++) {
-        const token_t *tok = (const token_t *)vec_get(tokens, i);
-        if (!tok) continue;
-        token_kind_t kind = token_get_kind(tok);
-        if (kind == TOKEN_TYPE_EOF) break;
-
-        if (kind == TOKEN_TYPE_WHITESPACE) {
-            size_t wl = 0;
-            const char *w = token_get_text(tok, &wl);
-            for (size_t k = 0; k < wl; k++) {
-                if (w[k] == '\n') {
-                    pending_newline = true;
-                    pending_nl_count++;
-                }
-            }
-            continue;
-        }
-        if (kind == TOKEN_TYPE_COMMENT || kind == TOKEN_TYPE_MULTILINE_COMMENT) {
-            /* 注释也作为 item 保留（需原样输出） */
-            items[count].tok = tok;
-            items[count].leading_newline = pending_newline;
-            items[count].leading_blank = pending_nl_count >= 2;
-            count++;
-            pending_newline = false;
-            pending_nl_count = 0;
-            continue;
-        }
-
-        items[count].tok = tok;
-        items[count].leading_newline = pending_newline;
-        items[count].leading_blank = pending_nl_count >= 2;
-        count++;
-        pending_newline = false;
-        pending_nl_count = 0;
+    if (!f.comment_seen) {
+        parser_destroy(&parser);
+        arena_destroy(alloc, &arena);
+        vec_free(alloc, &pool);
+        return NULL;
     }
+    memset(f.comment_seen, 0, f.comment_bytes);
 
-    /* ② 逐 item 输出 */
-    sb_t sb = { alloc, NULL, 0, 0 };
-    int  indent = 0;
-    int  paren_depth = 0;
-    int  ternary_pending = 0; /* 未配对的 '?' 数量（三元冒号两侧留空格判定） */
-    int  construct_depth = 0;     /* 嵌套类型构造块深度（>0 在构造块内） */
-    bool at_line_start = true;
-    const token_t *prev = NULL;   /* 上一个输出过的实义 token（注释不计） */
-    bool prev_unary_prefix = false; /* 上一 token 是否一元前缀（其操作数须紧贴） */
+    render_program(&f, root);
 
-    for (size_t i = 0; i < count; i++) {
-        const token_t *tok = items[i].tok;
-        token_kind_t kind = token_get_kind(tok);
-        size_t tlen = 0;
-        const char *text = token_get_text(tok, &tlen);
-
-        /* ---- 注释：原样保留 ---- */
-        if (kind == TOKEN_TYPE_COMMENT || kind == TOKEN_TYPE_MULTILINE_COMMENT) {
-            /* 关键：区分行内注释（源码中与前一 token 同行）与独立行注释。
-             *   - 行内：紧跟前一 token，中间一个空格，注释归属前一语句；
-             *   - 独立行：换行后按当前缩进输出（保留源码的空行分组）。 */
-            bool inline_comment = !at_line_start &&
-                                  !items[i].leading_newline;
-            if (inline_comment) {
-                sb_ch(&sb, ' ');
-            } else {
-                /* 独立行注释：若源码中其前有换行/空行，则换行输出 */
-                if (!at_line_start) sb_ch(&sb, '\n');
-                /* 源码中的空行 → 输出一个空行（保留用户分组意图） */
-                if (items[i].leading_blank) sb_ch(&sb, '\n');
-                sb_indent(&sb, indent);
-                at_line_start = false;
-            }
-            sb_put(&sb, text, tlen);
-
-            if (kind == TOKEN_TYPE_COMMENT) {
-                sb_ch(&sb, '\n');
-                at_line_start = true;
-            } else if (i + 1 < count && items[i + 1].leading_newline) {
-                /* 块注释后源码中有换行 → 换行 */
-                sb_ch(&sb, '\n');
-                at_line_start = true;
-            }
-            /* 行内块注释后无换行 → 保持同行，由后续 token 接续 */
-            continue;
+    /* ④ 收尾：NUL 结尾输出缓冲 */
+    char *out = NULL;
+    if (f.sb.buf) {
+        out = (char *)allocator_new_ex(alloc, "clux.parser.fmt.out",
+                                       f.sb.len + 1, NULL, NULL, NULL, 1);
+        if (out) {
+            memcpy(out, f.sb.buf, f.sb.len);
+            out[f.sb.len] = '\0';
+            if (out_len) *out_len = f.sb.len;
         }
-
-        bool is_open  = sym_is(tok, '{');
-        bool is_close = sym_is(tok, '}');
-        bool is_semi  = sym_is(tok, ';');
-        bool is_comma = sym_is(tok, ',');
-        bool is_else  = kw_is(tok, "else");
-
-        /* ---- '}' ---- */
-        if (is_close) {
-            bool empty = prev && sym_is(prev, '{');
-            if (empty) {
-                /* 空块：紧接 '{' 输出 '}'（'{' 处未换行、未增缩进） */
-                sb_ch(&sb, '}');
-                at_line_start = false;
-                prev = tok;
-                /* 空块后：若不是 ; , ) 则换行 */
-                bool next_glue = (i + 1 < count) &&
-                                 (sym_is(items[i + 1].tok, ';') ||
-                                  sym_is(items[i + 1].tok, ',') ||
-                                  sym_is(items[i + 1].tok, ')') ||
-                                  kw_is(items[i + 1].tok, "else"));
-                if (!next_glue) {
-                    sb_ch(&sb, '\n');
-                    at_line_start = true;
-                }
-                continue;
-            }
-            bool inner_construct = construct_depth > 0;  /* 当前 '}' 是否构造块收尾 */
-            if (construct_depth > 0) {
-                /* 类型构造块紧凑结束：紧贴最后元素输出 '}'（{ 处未换行、未增缩进） */
-                construct_depth--;
-                sb_ch(&sb, '}');
-                at_line_start = false;
-            } else {
-                if (indent > 0) indent--;
-                if (!at_line_start) sb_ch(&sb, '\n');
-                sb_indent(&sb, indent);
-                sb_ch(&sb, '}');
-                at_line_start = false;
-            }
-            prev = tok;
-            /* 构造块内层 '}' 后紧跟外层 '}'（多维嵌套 .T{.T{...}}）须同行；
-               普通块 '}}' 嵌套仍换行（inner_construct 为 false） */
-            bool next_brace_close = inner_construct && (i + 1 < count) &&
-                                    sym_is(items[i + 1].tok, '}');
-            /* '}' 后若为 else 则同行；否则换行（由下一个 token 决定） */
-            if (i + 1 < count && !kw_is(items[i + 1].tok, "else") &&
-                !sym_is(items[i + 1].tok, ';') && !sym_is(items[i + 1].tok, ',') &&
-                !sym_is(items[i + 1].tok, ')') && !sym_is(items[i + 1].tok, '.') &&
-                !next_brace_close) {
-                sb_ch(&sb, '\n');
-                at_line_start = true;
-            }
-            continue;
-        }
-
-        /* ---- '{' ---- */
-        if (is_open) {
-            /* 空块判定：下一个实义/注释 item 是否为 '}' */
-            bool empty_block = false;
-            for (size_t j = i + 1; j < count; j++) {
-                const token_t *nt = items[j].tok;
-                token_kind_t nk = token_get_kind(nt);
-                if (nk == TOKEN_TYPE_COMMENT || nk == TOKEN_TYPE_MULTILINE_COMMENT)
-                    break; /* 有注释 → 非空块 */
-                empty_block = sym_is(nt, '}');
-                break;
-            }
-
-            /* 类型构造块判定：.T{ / .[N]T{ / .[N][M]T{（紧凑单行） */
-            bool construct_brace = is_construct_brace(items, i);
-
-            if (at_line_start) {
-                sb_indent(&sb, indent);
-                at_line_start = false;
-            } else if (prev && !construct_brace) {
-                /* '{' 跟随前行：前面补一个空格（构造块紧贴类型名，如 `i32{`） */
-                sb_ch(&sb, ' ');
-            }
-            sb_ch(&sb, '{');
-            prev = tok;
-
-            if (empty_block) {
-                at_line_start = false;  /* '}' 将紧跟输出 */
-            } else if (construct_brace) {
-                /* 构造块紧凑：'{' 后不换行，元素跟随同行 */
-                construct_depth++;
-                at_line_start = false;
-            } else {
-                sb_ch(&sb, '\n');
-                at_line_start = true;
-                indent++;
-            }
-            continue;
-        }
-
-        /* ---- 其余实义 token ---- */
-
-        /* `else` 紧跟 `}` 同行：`} else`（一个空格分隔） */
-        bool glue_else = is_else && prev && sym_is(prev, '}');
-
-        if (at_line_start) {
-            /* 源码中此 token 前有空行 → 保留一个空行（用户分组意图） */
-            if (items[i].leading_blank && sb.len > 0 &&
-                sb.buf[sb.len - 1] == '\n') {
-                sb_ch(&sb, '\n');
-            }
-            sb_indent(&sb, indent);
-            at_line_start = false;
-            prev_unary_prefix = false;   /* 换行后一元前缀标志失效 */
-        } else if (glue_else) {
-            sb_ch(&sb, ' ');
-        } else {
-            bool need = false;
-            if (prev_unary_prefix) {
-                /* 上一 token 是一元前缀运算符：其操作数须紧贴，不插空格 */
-                need = false;
-                prev_unary_prefix = false;
-            } else if (prev) {
-                if (is_numeric_suffix(prev, tok)) {
-                    need = false;   /* 数字类型后缀紧贴：7i8 / 2.5f32 */
-                } else if (sym_is(tok, '(')) {
-                    /* `(` 前：控制流关键字要空格（`if (`），
-                     * 函数调用/泛型实例化紧贴（`main(`, `foo(`） */
-                    need = need_space_before_paren(prev, tok);
-                } else if (sym_is(tok, '[')) {
-                    /* `[` 前：下标访问/多维数组类型紧贴（`arr[i]` /
-                     * `m[1][0]` / `.[2][2]i32`）；类型标注/运算符后留空格
-                     * （`: [3]i32` / `= [3]i32` / `extends [2]i32`）。
-                     * 注意 `(`/`[`/`.` 后的 `[` 由 no_space_after 紧贴，
-                     * 运算符关键字（extends/as）须留空格 */
-                    need = !(no_space_after(prev) || sym_is(prev, ')') ||
-                             sym_is(prev, ']') ||
-                             (is_word_like(token_get_kind(prev)) &&
-                              !is_operator(prev)));
-                } else if (sym_is(tok, '.')) {
-                    /* `.` 前：成员访问紧贴（`a.b` / `f().b` /
-                     * `arr[0].length`）；类型构造表达式前留空格
-                     * （`= .T{...}` / `, .T{...}`），`.` 是构造起始 */
-                    need = sym_is(prev, ',') || sym_is(prev, ';') ||
-                           sym_is(prev, ':') || is_operator(prev);
-                } else if (prev && sym_is(prev, ']') &&
-                           is_word_like(token_get_kind(tok))) {
-                    /* 数组类型 [N]T 紧贴（`[1]i32` / `[2][3]i32`），
-                     * ']' 后紧跟类型名时不应插入空格 */
-                    need = false;
-                } else if (sym_is(tok, ':') && ternary_pending > 0) {
-                    /* 三元冒号（与 '?' 配对）：两侧留空格 `a ? b : c`；
-                       类型标注冒号（var x: i32）仍前不插空格（no_space_before） */
-                    ternary_pending--;
-                    need = true;
-                } else if (!no_space_before(tok) && !no_space_after(prev)) {
-                    need = true;   /* 运算符/字面量/标识符等均以单空格分隔 */
-                }
-            }
-            if (need) sb_ch(&sb, ' ');
-        }
-
-        sb_put(&sb, text, tlen);
-        at_line_start = false;
-
-        if (sym_is(tok, '(')) paren_depth++;
-        else if (sym_is(tok, ')') && paren_depth > 0) paren_depth--;
-        if (sym_is(tok, '?')) ternary_pending++;
-
-        prev_unary_prefix = is_unary_prefix(prev, tok);
-        prev = tok;
-
-        if (is_semi) {
-            /* 行内注释保护：若源码中紧跟一个"同行注释"（其前无换行），
-             * 则不在此处换行——注释归属本条语句，须与之同行。 */
-            bool trailing_comment = (i + 1 < count) &&
-                                    !items[i + 1].leading_newline &&
-                                    (token_get_kind(items[i + 1].tok) == TOKEN_TYPE_COMMENT ||
-                                     token_get_kind(items[i + 1].tok) == TOKEN_TYPE_MULTILINE_COMMENT);
-
-            if (paren_depth > 0) {
-                /* for (a; b; c)：不在此处补空格，交给下一个 token 的
-                 * 常规空格判定（避免与它重复插入两个空格） */
-                at_line_start = false;
-            } else if (trailing_comment) {
-                at_line_start = false;   /* 注释将紧随其后，保持同行 */
-            } else {
-                sb_ch(&sb, '\n');
-                at_line_start = true;
-                prev = NULL;           /* 换行后不参与跨行空格判定 */
-                prev_unary_prefix = false;
-            }
-        } else if (is_comma) {
-            /* 逗号后同样交给下一个 token 判定 */
-            at_line_start = false;
-        }
+    } else {
+        /* 空输入：输出空串 */
+        out = (char *)allocator_new_ex(alloc, "clux.parser.fmt.out", 1,
+                                       NULL, NULL, NULL, 1);
+        if (out) out[0] = '\0';
+        if (out_len) *out_len = 0;
     }
+    if (f.sb.buf) allocator_free(alloc, (void **)&f.sb.buf);
+    allocator_free(alloc, (void **)&f.comment_seen);
 
-    /* ③ 收尾：以换行结束 */
-    if (sb.len > 0 && sb.buf[sb.len - 1] != '\n') sb_ch(&sb, '\n');
-    sb_reserve(&sb, 0);
-    sb.buf[sb.len] = '\0';
-
-    allocator_free(alloc, (void **)&items);
-    if (out_len) *out_len = sb.len;
-    return sb.buf;
+    parser_destroy(&parser);
+    arena_destroy(alloc, &arena);
+    vec_free(alloc, &pool);
+    return out;
 }
