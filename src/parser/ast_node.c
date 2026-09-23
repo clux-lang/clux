@@ -29,6 +29,7 @@ static const char *g_kind_names[] = {
     [AST_MEMBER]     = "member",
     [AST_INDEX]      = "index",
     [AST_ARRAY]      = "array",
+    [AST_TUPLE]      = "tuple",
     [AST_CONSTRUCT]  = "construct",
     [AST_INT_LIT]    = "int_lit",
     [AST_FLOAT_LIT]  = "float_lit",

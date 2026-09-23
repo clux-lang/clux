@@ -1,5 +1,6 @@
 #include "parser/lexer.h"
 #include "core/allocator.h"
+#include "core/panic.h"
 #include "parser/location.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -490,8 +491,10 @@ static bool is_single_symbol(UChar32 c) {
 
 static token_t *lexer_read_symbol(lexer_t *lexer, stream_pos_t begin) {
   static const char *const kPairs[] = {
-      "<<",
-      ">>",
+      /* 注：<< / >> 不在此表——lexer 不产出双字符移位 token。嵌套元组
+         类型 <T1,T2> 的相邻尖括号（<<i32,i32>,i32>）与移位表达式
+         （a << b）词法不可区分，由 parser 在相邻字符时合成（见
+         parse_expr_prec 的 2d 合成检查）；原子位置 '<' 仍归元组类型。 */
       "<=",
       ">=",
       "==",
@@ -654,6 +657,24 @@ create_token(allocator_t *allocator, token_kind_t kind, location_t location) {
 void token_free(allocator_t *allocator, token_t **token) {
   if (!allocator || !token || !*token) return;
   allocator_free(allocator, (void **)token);
+}
+
+const token_t *arena_token_symbol(arena_t *arena, const char *text,
+                                  const location_t *loc) {
+  if (!arena || !text || !loc) return NULL;
+  size_t len = strlen(text);
+  token_t *token =
+      (token_t *)arena_calloc(arena, 1, sizeof(token_t), ALIGNOF(token_t));
+  if (!token) panic("parser: out of memory");
+  char *copy = (char *)arena_alloc(arena, len, 1);
+  if (!copy) panic("parser: out of memory");
+  memcpy(copy, text, len);
+  token->kind = TOKEN_TYPE_SYMBOL;
+  token->location = *loc;
+  token->text = copy;
+  token->length = len;
+  token->message = NULL;
+  return token;
 }
 
 /* ---- Callbacks for token_class ---- */

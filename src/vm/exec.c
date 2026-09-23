@@ -7,6 +7,7 @@
 #include "vm/type_option.h"
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
@@ -559,6 +560,33 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* ---- tuple type 构造（与 struct 统一：PUSH → APPEND_ELEM×N → SEAL） ---- */
+
+/* PUSH_TUPLE：分配空 tuple type（开放，elems=NULL，不入池）+ 压其 type
+ * value（type_tuple_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_tuple(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_tuple_push(vm);
+    return NULL;
+}
+
+/* APPEND_ELEM（无操作数）：弹栈顶 type value（元素类型）→ peek 开放 tuple →
+ * 追加元素（元素匿名，长度=追加次数）。弹元素类型后，栈顶即当前构造的
+ * tuple type（由 PUSH_TUPLE 压入），与 DEFINE_FIELD/DEFINE_BOUND 同款协议。 */
+static value_t *op_append_elem(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *et_v = exec_stack_pop(vm);
+    const type_t *et = (et_v && value_type(et_v) == vm->type_type)
+                           ? value_as(et_v, const type_t *) : NULL;
+    value_t *tt_v = exec_stack_peek(vm, 0);
+    const type_t *tt = (tt_v && value_type(tt_v) == vm->type_type)
+                           ? value_as(tt_v, const type_t *) : NULL;
+    if (!tt || tt->kind != TYPE_KIND_TUPLE)
+        return value_make_error(vm, "exec: append elem expects an open tuple type on top");
+    type_tuple_add_elem(vm, tt, et);
+    return NULL;
+}
+
 /* ---- 值构造（construct N）：弹 N 个成员值 + 类型位 → value ----
  * 栈布局（构造期）：[..., type_value, v1, v2, ..., vN]（type 在底、vN 在顶）。
  * 先弹 type_value（栈上类型构造产物，如 push_array...seal 留下的 array type
@@ -635,9 +663,31 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make(vm, t, data);
     }
 
-    /* 非 array/option/struct 类型暂未实现 */
+    /* tuple 构造：连续内存块（size = type->size），逐元素按偏移深拷贝
+     * （value_blit_raw 递归处理资源元素）。元素数必须与类型元素表一致
+     * （sema 已校验"元素数完全显式"）。每元素先 value_implicit_cast 到
+     * 元素类型（字面量 i32 → i64 元素等宽度提升；同类型身份短路），
+     * 与 struct 构造逐字段 cast 行为一致。 */
+    if (t->kind == TYPE_KIND_TUPLE) {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        if ((size_t)n != tt->elem_count)
+            return value_make_error(vm,
+                "construct: tuple element count mismatch");
+        void *data = value_alloc_data(vm->alloc, t);  /* 清零：未指定元素自动零值 */
+        for (uint32_t i = 0; i < n; i++) {
+            value_t *casted = value_implicit_cast(vm, elems[i],
+                                                  tt->elems[i].type);
+            if (value_is_error(vm, casted))
+                return casted;
+            value_blit_raw(vm, (uint8_t *)data + tt->elems[i].offset,
+                           value_data(casted), tt->elems[i].type);
+        }
+        return value_make(vm, t, data);
+    }
+
+    /* 非 array/option/struct/tuple 类型暂未实现 */
     return value_make_error(vm,
-        "construct: unsupported type (only array, optional and struct implemented)");
+        "construct: unsupported type (only array, optional, struct and tuple implemented)");
 }
 
 /* ---- 下标读取（get_item）：self[index] -> 元素 ----
@@ -1003,6 +1053,8 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_DEFINE_BOUND]    = op_define_bound,
     [BCODE_PUSH_STRUCT]     = op_push_struct,
     [BCODE_DEFINE_FIELD]    = op_define_field,
+    [BCODE_PUSH_TUPLE]      = op_push_tuple,
+    [BCODE_APPEND_ELEM]     = op_append_elem,
     [BCODE_CONSTRUCT]       = op_construct,
     [BCODE_INDEX_GET]       = op_index_get,
     [BCODE_INDEX_SET]       = op_index_set,

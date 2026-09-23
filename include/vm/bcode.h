@@ -107,6 +107,9 @@ typedef enum {
     BCODE_PUSH_STRUCT,     /* 分配空 struct type（开放，fields=NULL，不入池）+ 压其 type value */
     BCODE_DEFINE_FIELD,    /* strtable 索引：弹栈顶 type value（字段类型）→ peek 开放
                               struct → 追加字段（名从 strtable 拷贝） */
+    BCODE_PUSH_TUPLE,      /* 分配空 tuple type（开放，elems=NULL，不入池）+ 压其 type value */
+    BCODE_APPEND_ELEM,     /* 无操作数：弹栈顶 type value（元素类型）→ peek 开放
+                              tuple → 追加元素（元素匿名，长度=追加次数） */
     BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */

@@ -2,10 +2,13 @@
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "ctfe/ctfe.h"
 #include "parser/ast_array.h"
+#include "parser/ast_tuple.h"
 #include "parser/ast_const.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
@@ -178,6 +181,16 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       if (et) sema_type_register(sema, et);
       break;
     }
+    case TYPE_KIND_TUPLE: {
+      /* 元组类型：元素类型也是程序类型（嵌套元组/数组/struct 递归覆盖）。
+         依赖后序：先登记依赖，hoist pass 2 先定义依赖。 */
+      size_t n = tuple_type_elem_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e && e->type) sema_type_register(sema, e->type);
+      }
+      break;
+    }
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE: {
       const type_t *sub = type_qualifier_sub(t);
@@ -339,6 +352,21 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       size_t len;
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
       return type_array_intern(sema->vm, base, len);
+    }
+    case AST_TUPLE: {
+      /* <T1,T2,...> 元组类型：逐元素递归解析（可为任意类型表达式，
+         含嵌套元组/数组）→ 按（元素类型+顺序）去重 intern。 */
+      ast_tuple_t *tp = (ast_tuple_t *)type_expr;
+      size_t n = sema_count_siblings(tp->elem_types);
+      tuple_elem_t elems_arr[n > 0 ? n : 1];
+      size_t i = 0;
+      for (ast_node_t *et = tp->elem_types; et; et = et->next, i++) {
+        const type_t *pt = resolve_type_expr(sema, et);
+        if (!pt) return NULL;
+        elems_arr[i].type   = pt;
+        elems_arr[i].offset = 0; /* seal 统一布局 */
+      }
+      return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
     }
     case AST_FUNC_TYPE: {
       /* 函数签名类型：func(param_types...)->ret。逐参数/返回递归解析

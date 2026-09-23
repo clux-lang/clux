@@ -72,6 +72,31 @@ bool check_kind(const parser_t *p, token_kind_t kind) {
     return token_get_kind(cur_token(p)) == kind;
 }
 
+/* ---- 移位运算符合成 ---- */
+
+const token_t *synthesize_shift_token(parser_t *p) {
+    if (!p) return NULL;
+    const token_t *t0 = cur_token(p);
+    if (token_get_kind(t0) != TOKEN_TYPE_SYMBOL) return NULL;
+    strslice_t s0 = token_strslice(t0);
+    if (s0.len != 1 || (s0.ptr[0] != '<' && s0.ptr[0] != '>')) return NULL;
+
+    /* 下一个有效 token（跳过 trivia）必须同为该尖括号 */
+    uint32_t save = p->pos;
+    const token_t *t1 = advance(p);
+    skip_trivia(p);
+    const token_t *t2 = cur_token(p);
+    bool match = token_get_kind(t2) == TOKEN_TYPE_SYMBOL &&
+                 token_is(t2, s0.ptr[0] == '<' ? "<" : ">");
+    (void)t1;
+    p->pos = save; /* 不消费任何 token（含 trivia 游标恢复） */
+
+    if (!match) return NULL;
+
+    return arena_token_symbol(p->arena, s0.ptr[0] == '<' ? "<<" : ">>",
+                              token_get_location(t0));
+}
+
 /* ---- 匹配与消费 ---- */
 
 bool match_keyword(parser_t *p, const char *kw) {

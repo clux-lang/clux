@@ -2937,3 +2937,134 @@ TEST(Driver, RunFileStructAnonConstructInAssignRhsPasses) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- tuple（元组）---- */
+
+TEST(Driver, RunFileTupleConstructAndIndexPasses) {
+  /* tuple 构造 + 下标读写 + 复合赋值端到端：
+     - 具名构造 .<i32,i32>{ 1, 2 }
+     - 下标读取 t[0] / 写入 t[0]=5 / 复合赋值 t[1]+=3 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var t: <i32, i32> = .<i32, i32> { 1, 2 };\n"
+      "  if (t[0] != 1 || t[1] != 2) { return 1; }\n"
+      "  t[0] = 5;\n"
+      "  if (t[0] != 5) { return 1; }\n"
+      "  t[1] += 3;\n"
+      "  if (t[1] != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleAnonConstructPasses) {
+  /* 匿名构造 .{...}：按序推断匿名 tuple 类型（元素类型+顺序一致 → 同实例） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var q: <i32, i32> = .{ 7, 8 };\n"
+      "  if (q[0] != 7 || q[1] != 8) { return 1; }\n"
+      "  q = .{ 3, 4 };\n"
+      "  if (q[0] != 3 || q[1] != 4) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleMixedElemPasses) {
+  /* 异构元组：i32 + i64（C 对齐布局 + 隐式提升） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var h: <i32, i64> = .<i32, i64> { 1, 2000000000 };\n"
+      "  if (h[0] != 1 || h[1] != 2000000000) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleNestedPasses) {
+  /* 嵌套元组：元素类型可为元组（递归布局 + 链式下标） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var n: <<i32, i32>, i32> = .<<i32, i32>, i32> { .<i32, i32> { 3, 4 }, 9 };\n"
+      "  if (n[0][0] != 3 || n[0][1] != 4 || n[1] != 9) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleAnonConstructInCallArgPasses) {
+  /* 实参位置匿名构造端到端：参数类型已知 → 推断 */
+  std::string path = write_temp_file(
+      "func sum(p: <i32, i32>): i32 { return p[0] + p[1]; }\n"
+      "func main(): i32 {\n"
+      "  if (sum(.<i32, i32> { 1, 2 }) != 3) { return 1; }\n"
+      "  if (sum(.{ 4, 5 }) != 9) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleEqPasses) {
+  /* 判等：元素递归比较 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: <i32, i32> = .{ 5, 5 };\n"
+      "  var b: <i32, i32> = .{ 5, 5 };\n"
+      "  if (a != b) { return 1; }\n"
+      "  b[1] = 6;\n"
+      "  if (a == b) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleArrayCompatAssignPasses) {
+  /* Tuple↔Array 布局兼容互转端到端：<i32,i32> ↔ [2]i32 可互赋值 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var t: <i32, i32> = .{ 1, 2 };\n"
+      "  var a: [2]i32 = t;\n"
+      "  if (a[0] != 1 || a[1] != 2) { return 1; }\n"
+      "  var u: <i32, i32> = a;\n"
+      "  if (u[0] != 1 || u[1] != 2) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleCountMismatchRejected) {
+  /* 构造元素数 != 类型元素数 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var t: <i32, i32> = .<i32, i32> { 1 };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleNamedFieldRejected) {
+  /* 元组元素匿名：具名字段 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var t: <i32, i32> = .<i32, i32> { .x = 1, .y = 2 };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTupleIndexOnNonTupleRejected) {
+  /* 下标访问非数组/元组值 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main(): i32 { var x = 1; return x[0]; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

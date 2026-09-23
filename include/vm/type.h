@@ -157,6 +157,32 @@ typedef struct struct_type_t {
     size_t          field_count;
 } struct_type_t;
 
+/**
+ * tuple_elem_t / tuple_type_t: 元组类型（type_t 的扩展，见 m2-design §3）
+ *
+ * 元组是匿名字成员的复合类型：元素表 tuple_elem_t { offset, type } 按声明序
+ * 存储（无名字，按位置访问），offset 在类型 intern 时按 C 对齐规则一次性布局
+ * （与 struct 同款规则）：
+ *   offset_0 = 0；offset_i = align_up(prev_end, align_i)；
+ *   size = align_up(last_end, max_align)；align = max(元素 align)
+ * 元素访问 O(1)（偏移直接查表）。tuple value 的 data 是连续内存块
+ * （size = type->size），元素按偏移读写。
+ *
+ * 元素表由 vm 拥有（SEAL 时深拷贝类型引用）；去重 intern 按（元素类型 +
+ * 顺序）去重。元素类型是布局依赖（tuple 的 size/align 依赖元素类型的
+ * size/align），构造时须依赖后序（元素类型先密封）。
+ */
+typedef struct tuple_elem_t {
+    size_t        offset; /* 元素在 data 块中的字节偏移（seal 时布局计算） */
+    const type_t *type;   /* 元素类型（引用，不拥有；须已密封） */
+} tuple_elem_t;
+
+typedef struct tuple_type_t {
+    type_t        base;
+    tuple_elem_t *elems;  /* 元素表（seal 时拷贝，vm 拥有） */
+    size_t        elem_count;
+} tuple_type_t;
+
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
     return t && t->kind == TYPE_KIND_OPTION;
@@ -254,6 +280,12 @@ const type_t *type_volatile_seal(vm_t *vm, const type_t *t);
  * ?T 与 const/volatile 同族：开放构造（PUSH_OPT → DEFINE_TYPE → LOAD_TYPE
  * → SET_TYPE 设 inner → SEAL）获得向前声明能力；sema 侧 type_option_intern
  * 一次性快捷。 */
+
+/* tuple 类型构造 API（type_tuple_push / type_tuple_add_elem / type_tuple_seal /
+ * type_tuple_intern）与访问器（tuple_type_elem_count / tuple_type_elem）见
+ * vm/type_tuple.h。tuple 与 struct 同族：开放构造（PUSH_TUPLE → DEFINE_TYPE
+ * → LOAD_TYPE → APPEND_ELEM×N → SEAL）获得向前声明能力；sema 侧
+ * type_tuple_intern 一次性快捷。 */
 
 /** 将 type 转为 value_t*（type 作为 first-class value） */
 value_t *type_as_value(vm_t *vm, const type_t *t);

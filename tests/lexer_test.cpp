@@ -750,9 +750,9 @@ TEST(Lexer, SingleSymbols) {
 }
 
 TEST(Lexer, TwoCharSymbolsMaximalMunch) {
-  const char *syms[] = {"<<",
-                        ">>",
-                        "<=",
+  /* 注：<< 与 >> 已从 lexer 移除（与嵌套元组类型语法 <T1,T2> 冲突），
+     移位运算符由 parser 在中缀位置合成（synthesize_shift_token）。 */
+  const char *syms[] = {"<=",
                         ">=",
                         "==",
                         "!=",
@@ -774,10 +774,25 @@ TEST(Lexer, TwoCharSymbolsMaximalMunch) {
   EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
 }
 
+TEST(Lexer, ShiftIsTwoSingleTokens) {
+  /* << / >> 不再作为双字符 token：每个尖括号独立成 token，
+     由 parser 在中缀位置合成移位运算符（parse_expr_prec 2d）。 */
+  allocator_t *a = create_allocator(test_alloc, test_free);
+  lexer_t *lx = make_lexer(a, "<<", "sym.cx");
+  token_t *t = take(a, lx, TOKEN_TYPE_SYMBOL, "<");
+  token_free(a, &t);
+  t = take(a, lx, TOKEN_TYPE_SYMBOL, "<");
+  token_free(a, &t);
+  lexer_close(&lx);
+  EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
+}
+
 TEST(Lexer, MaximalMunchSplitsLongerRuns) {
   allocator_t *a = create_allocator(test_alloc, test_free);
   lexer_t *lx = make_lexer(a, "<<<", "sym.cx");
-  token_t *t = take(a, lx, TOKEN_TYPE_SYMBOL, "<<");
+  token_t *t = take(a, lx, TOKEN_TYPE_SYMBOL, "<");
+  token_free(a, &t);
+  t = take(a, lx, TOKEN_TYPE_SYMBOL, "<");
   token_free(a, &t);
   t = take(a, lx, TOKEN_TYPE_SYMBOL, "<");
   token_free(a, &t);

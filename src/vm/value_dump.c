@@ -5,6 +5,7 @@
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -68,6 +69,12 @@ static void type_dump_name(const type_t *t, string_t *out) {
         else string_append_cstr(out, "enum");
         return;
     }
+    case TYPE_KIND_TUPLE: {
+        /* 元组类型名 "<i32, i32>"（seal 时已构造，直接显示） */
+        if (t->name.ptr) string_append_bytes(out, t->name.ptr, t->name.len);
+        else string_append_cstr(out, "<...>");
+        return;
+    }
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE: {
         const char *kw = (t->kind == TYPE_KIND_CONST) ? "const " : "volatile ";
@@ -96,9 +103,10 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         const type_t *sub = type_qualifier_sub(t);
         if (sub) { bt = sub; k = sub->kind; }
     }
-    /* 聚合类型（数组/结构体）的 { } 前后加空格便于阅读；基础类型保持紧凑
+    /* 聚合类型（数组/结构体/元组）的 { } 前后加空格便于阅读；基础类型保持紧凑
        `.i32{42}`（与语言构造字面量 .i32{...} 一致），即 `. [3]i32 { .i32{1} }`。 */
-    bool agg = (k == TYPE_KIND_ARRAY || k == TYPE_KIND_STRUCT);
+    bool agg = (k == TYPE_KIND_ARRAY || k == TYPE_KIND_STRUCT ||
+                k == TYPE_KIND_TUPLE);
 
     if (!v) { string_append_cstr(out, "{<null>}"); return; }
     if (value_is_shadow(v)) {
@@ -168,6 +176,15 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
             string_append_cstr(out, ": ");
             value_dump_impl(vm, value_make_borrowed((vm_t *)vm, f->type,
                               (uint8_t *)value_data(v) + f->offset), out);
+        }
+        break;
+    }
+    case TYPE_KIND_TUPLE: {
+        /* 按元素偏移递归 dump（借用 value，data 指向块内偏移；元素匿名） */
+        size_t n = value_tuple_count(v);
+        for (size_t i = 0; i < n; i++) {
+            if (i) string_append_cstr(out, ", ");
+            value_dump_impl(vm, value_tuple_at(vm, v, i), out);
         }
         break;
     }

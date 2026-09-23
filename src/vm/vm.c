@@ -3,6 +3,8 @@
 #include "vm/type_array.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
+#include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "vm/value.h"
 #include "vm/function.h"
 #include "core/panic.h"
@@ -108,6 +110,10 @@ vm_t *vm_new(allocator_t *alloc) {
     /* 结构体类型池（type_struct_intern / type_struct_seal intern 用；元素由
        vm_destroy 手动释放，vec 只持有指针数组） */
     vm->struct_types = vec_new(alloc, /*owns_element=*/false);
+
+    /* 元组类型池（type_tuple_intern / type_tuple_seal intern 用；元素由
+       vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->tuple_types = vec_new(alloc, /*owns_element=*/false);
 
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
@@ -274,6 +280,18 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&st);
         }
         vec_free(vm->alloc, &vm->struct_types);
+    }
+
+    /* 元组类型池：dispose_fn 自动释放元素表 + 显示名，仅需裸释放（元素类型
+       归各自类型池，不在此释放） */
+    if (vm->tuple_types) {
+        size_t n = vec_len(vm->tuple_types);
+        for (size_t i = 0; i < n; i++) {
+            tuple_type_t *tt = (tuple_type_t *)vec_get(vm->tuple_types, i);
+            if (!tt) continue;
+            allocator_free(vm->alloc, (void **)&tt);
+        }
+        vec_free(vm->alloc, &vm->tuple_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

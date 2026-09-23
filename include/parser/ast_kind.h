@@ -34,6 +34,7 @@ typedef enum {
     AST_MEMBER,          /* expr.field */
     AST_INDEX,           /* expr[expr, ...]（下标 / 泛型实例化，语义阶段区分） */
     AST_ARRAY,           /* [N]T 数组类型表达式（N=长度，T=基础类型） */
+    AST_TUPLE,           /* <T1,T2,...> 元组类型表达式（元素类型兄弟链） */
     AST_CONSTRUCT,       /* .T { f1, f2, ... } 类型字面量构造（'.' 前导） */
     AST_INT_LIT,         /* 整数字面量 */
     AST_FLOAT_LIT,       /* 浮点字面量 */

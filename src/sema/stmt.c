@@ -32,6 +32,7 @@
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -490,7 +491,8 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
-  if (!bad && (!bt || bt->kind != TYPE_KIND_ARRAY)) {
+  if (!bad && (!bt || (bt->kind != TYPE_KIND_ARRAY &&
+                       bt->kind != TYPE_KIND_TUPLE))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
     diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -536,8 +538,14 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     return;
   }
 
-  /* 元素类型可赋值性（value_assign 单一校验点） */
-  const type_t *et = array_type_elem(bt);
+  /* 元素类型可赋值性（value_assign 单一校验点）：数组取元素类型；
+     tuple 按位置取元素类型（索引须编译期常量，sema_expr AST_INDEX 已
+     校验越界；此处直接按 0 号元素类型校验可赋值性——元素类型同构，
+     任意位置校验等价） */
+  const type_t *et = bt->kind == TYPE_KIND_TUPLE
+                         ? (tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type
+                                                   : NULL)
+                         : array_type_elem(bt);
   if (!et) return;
   value_t *dst = value_make_shadow(sema->vm, et);
   if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
@@ -545,7 +553,10 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     sema_type_name(et, tn, sizeof(tn));
     sema_type_name(value_type(rhs), rn, sizeof(rn));
     diag_error(sema->diag, sema_loc(sema, as->value),
-               "cannot assign %s to array element of type %s", rn, tn);
+               bt->kind == TYPE_KIND_TUPLE
+                   ? "cannot assign %s to tuple element of type %s"
+                   : "cannot assign %s to array element of type %s",
+               rn, tn);
   }
 }
 

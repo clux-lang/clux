@@ -2,6 +2,7 @@
 #include "vm/type.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/scope.h"
@@ -265,6 +266,16 @@ void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
             }
             break;
         }
+        case TYPE_KIND_TUPLE: {
+            /* 按元素偏移递归（元素类型可能含资源：str/数组/嵌套 tuple/option） */
+            size_t n = tuple_type_elem_count(t);
+            for (size_t i = 0; i < n; i++) {
+                const tuple_elem_t *e = tuple_type_elem(t, i);
+                value_blit_raw(vm, (uint8_t *)dst + e->offset,
+                               (const uint8_t *)src + e->offset, e->type);
+            }
+            break;
+        }
         case TYPE_KIND_STR: {
             const string_t *s = *(const string_t *const *)src;
             string_t *copy = s ? string_from_string(vm->alloc, s) : NULL;
@@ -304,6 +315,14 @@ void value_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
             for (size_t i = 0; i < n; i++) {
                 const struct_field_t *f = struct_type_field(t, i);
                 value_dispose_raw(vm, (uint8_t *)raw + f->offset, f->type);
+            }
+            break;
+        }
+        case TYPE_KIND_TUPLE: {
+            size_t n = tuple_type_elem_count(t);
+            for (size_t i = 0; i < n; i++) {
+                const tuple_elem_t *e = tuple_type_elem(t, i);
+                value_dispose_raw(vm, (uint8_t *)raw + e->offset, e->type);
             }
             break;
         }
@@ -441,16 +460,46 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
 /* ---- assign: 释放 dst 块内资源，深拷贝 src 块（src 可为借用） ---- */
 
 static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
+    /* safe_cast 语义（与 struct_assign / tuple_assign 同款）：类型不同先向
+       左值类型 implicit_cast——布局兼容的 array↔tuple 跨类型赋值经
+       array_implicit_cast 转换通过；不兼容 → cast 返回 error，直接传播。 */
+    if (value_type(src) != value_type(dst)) {
+        value_t *casted = value_implicit_cast(vm, src, value_type(dst));
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
+    }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
 
     const type_t *t = value_type(dst);
-    if (value_type(src) != t) {
-        return value_make_error(vm,
-            "assign: array type mismatch on assignment");
-    }
     value_dispose_raw(vm, value_data(dst), t);
     value_blit_raw(vm, value_data(dst), value_data(src), t);
     return dst;
+}
+
+/* ---- 类型转换：array↔tuple 布局兼容互转（m2-design §3）+ 同 array 身份 ---- */
+
+static value_t *array_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    if (!target) return value_make_error(vm, "array: missing cast target");
+    const type_t *src = value_type(v);
+    /* 同 array 实例（身份拷贝） */
+    if (target->kind == TYPE_KIND_ARRAY && target == src) {
+        if (value_is_shadow(v)) return value_make_shadow(vm, target);
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        return value_make(vm, target, data);
+    }
+    /* 布局兼容的 array↔tuple 互转（双向） */
+    if (tuple_array_layout_compatible(vm, target, src) ||
+        tuple_array_layout_compatible(vm, src, target)) {
+        if (value_is_shadow(v)) return value_make_shadow(vm, target);
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        return value_make(vm, target, data);
+    }
+    return value_make_error(vm, "array: implicit cast only within layout-compatible "
+                               "array/tuple");
+}
+
+static value_t *array_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    return array_implicit_cast(vm, v, target);
 }
 
 const vtable_t VTABLE_ARRAY = {
@@ -460,6 +509,8 @@ const vtable_t VTABLE_ARRAY = {
     .dispose   = array_dispose,
     .clone     = array_clone,
     .assign    = array_assign,
+    .implicit_cast = array_implicit_cast,
+    .explicit_cast = array_explicit_cast,
     .type_seal = array_type_seal,
 };
 

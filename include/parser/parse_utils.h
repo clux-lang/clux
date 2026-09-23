@@ -37,6 +37,14 @@ bool check_keyword(const parser_t *p, const char *kw);
 /** 当前 token 是指定符号？ */
 bool check_symbol(const parser_t *p, const char *sym);
 
+/**
+ * 合成二元移位运算符：当前与下一有效 token 均为 '<'（或 '>'）时返回
+ * "<"/">" 两字符 token。lexer 不产出 << / >>（与嵌套元组类型语法冲突），
+ * 中缀位置的连续尖括号由 parser 在此合成。
+ * 不消费 token；未命中返回 NULL。返回的 token 由 arena 分配。
+ */
+const token_t *synthesize_shift_token(parser_t *p);
+
 /** 当前 token 是指定 kind？ */
 bool check_kind(const parser_t *p, token_kind_t kind);
 

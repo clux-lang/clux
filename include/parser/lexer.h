@@ -1,6 +1,7 @@
 #ifndef _H_CLUX_PARSER_LEXER_
 #define _H_CLUX_PARSER_LEXER_
 #include "core/allocator.h"
+#include "core/arena.h"
 #include "core/stream.h"
 #include "location.h"
 #ifdef __cplusplus
@@ -141,6 +142,19 @@ const char *token_kind_name(token_kind_t kind);
  */
 token_t *
 create_token(allocator_t *allocator, token_kind_t kind, location_t location);
+
+/**
+ * Create a SYMBOL token whose text is `text` (e.g. a synthesized
+ * shift operator "<<"), allocated entirely from the arena: the token
+ * struct and its text copy live in `arena` and are released together
+ * with the arena (no per-token allocator tracking, no manual free).
+ *
+ * Used by the parser to synthesize operators the lexer no longer
+ * produces as two-char tokens (shift operators vs nested tuple
+ * syntax conflict). Returns NULL for invalid args; panics on OOM.
+ */
+const token_t *arena_token_symbol(arena_t *arena, const char *text,
+                                  const location_t *loc);
 
 /** Free a token and nullify the caller's pointer. No-op if NULL. */
 void token_free(allocator_t *allocator, token_t **token);

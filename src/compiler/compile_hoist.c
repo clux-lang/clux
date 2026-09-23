@@ -5,6 +5,7 @@
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 
 #include <string.h>
 
@@ -28,6 +29,8 @@
  *     - func 签名：PUSH_FUNC_TYPE（开放签名对象）→ DEFINE_TYPE <id>
  *     - const/volatile：PUSH_CONST / PUSH_VOLATILE（开放对象，sub=NULL）→
  *       DEFINE_TYPE <id>
+ *     - struct：PUSH_STRUCT（开放对象，fields=NULL）→ DEFINE_TYPE <id>
+ *     - tuple：PUSH_TUPLE（开放对象，elems=NULL）→ DEFINE_TYPE <id>
  *     - 内建别名（防御分支）：LOAD_TYPE <内建 id> → DEFINE_TYPE <id>
  *
  *   pass 2（定义所有类型）：遍历全部程序类型，逐个 LOAD_TYPE <id> 拉回
@@ -163,6 +166,14 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
          DEFINE_TYPE <id> 声明登记（不设字段；字段类型是布局依赖，pass 2
          依赖后序定义 + 环检测） */
       bcode_write_op(c->bc, BCODE_PUSH_STRUCT);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_TUPLE:
+      /* PUSH_TUPLE 压开放 tuple 类型（elems=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设元素；元素类型是布局依赖，pass 2
+         依赖后序定义 + 环检测） */
+      bcode_write_op(c->bc, BCODE_PUSH_TUPLE);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
@@ -337,6 +348,29 @@ static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
+/* tuple 定义：LOAD_TYPE <id> 拉回开放对象 → 逐元素：依赖元素类型先定义
+ * （密封；emit_dep_type 递归 + done 三态环检测）→ LOAD 元素类型 →
+ * APPEND_ELEM（元素匿名，追加次数=元素数）→ SEAL 封闭（C 对齐布局 + 去重
+ * intern；去重时按自身 id 重绑登记）。元素类型是布局依赖（密封计算 offset/
+ * size 需要元素 size/align 已确定）→ 依赖后序 + 环检测。 */
+static void define_tuple(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                         size_t count) {
+  const type_t *t = st->type;
+
+  emit_load_type(c, st->id);               /* 栈: [open_tuple_type] */
+
+  size_t n = tuple_type_elem_count(t);
+  for (size_t i = 0; i < n; i++) {
+    const tuple_elem_t *e = tuple_type_elem(t, i);
+    if (!e || !e->type) continue;
+    emit_dep_type(c, e->type, done, count); /* 栈: [open, elem_type] */
+    bcode_write_op(c->bc, BCODE_APPEND_ELEM); /* 弹 elem_type → 追加进 open */
+    st_push(c, -1);
+  }
+
+  emit_seal(c);                            /* 封闭（去重时重绑登记） */
+}
+
 /* 定义状态（done 数组三态）：
  *   0 = 未处理
  *   1 = 处理中（正在定义，布局依赖递归尚未完成）
@@ -394,6 +428,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_STRUCT:
       define_struct(c, st, done, count);
+      break;
+    case TYPE_KIND_TUPLE:
+      define_tuple(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */

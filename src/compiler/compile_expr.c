@@ -457,8 +457,38 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       break;
     }
 
+    if (t->kind == TYPE_KIND_TUPLE) {
+      /* tuple 构造（具名/匿名，sema 已折叠匿名 type 为 AST_TYPE_REF）：
+         元素数已由 sema 校验 == 类型元素数。元组元素匿名 → 字段链只能是
+         值表达式（sema 已校验无具名/值包字段），按元素序压值：
+         - nil 元素 → 元素须 ?T（sema 已校验）→ PUSH_OPT_NONE <elem id>
+         CONSTRUCT N 弹 N+1 压 1。 */
+      const tuple_type_t *tt = (const tuple_type_t *)t;
+      size_t fcount = 0;
+      for (ast_node_t *f = n->fields; f; f = f->next) {
+        if (f->kind == AST_NIL) {
+          const sema_type_t *est =
+              c_sema_type_find_ptr(c->sema_types, tt->elems[fcount].type);
+          if (!est) {
+            c_error(c, f, "compiler: optional element type not registered");
+            return;
+          }
+          bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+          bcode_write_u32(c->bc, est->id);
+          st_push(c, 1);
+        } else {
+          compile_expr(c, f);
+        }
+        fcount++;
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, (uint32_t)fcount);
+      st_push(c, -((int)fcount));
+      break;
+    }
+
     if (t->kind != TYPE_KIND_ARRAY) {
-      c_error(c, node, "construct: unsupported type (only array, optional and struct implemented)");
+      c_error(c, node, "construct: unsupported type (only array, optional, struct and tuple implemented)");
       return;
     }
 

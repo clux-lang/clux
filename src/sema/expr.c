@@ -36,6 +36,7 @@
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -288,6 +289,123 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
   /* 第四遍：把 fields 链重排为类型表序（值节点直链，ast_append 清 next） */
   ast_node_t *new_head = NULL, *new_last = NULL;
   for (size_t i = 0; i < cap; i++)
+    ast_append(&new_head, &new_last, NULL, slot[i]);
+  n->fields      = new_head;
+  n->fields_last = new_last;
+  return t;
+}
+
+/* 匿名构造 .{...} 的匿名 tuple 类型推断（m2-design §3，按序推断）：
+ * 元组元素匿名（无名字），字段链只能是值表达式（AST_CONSTRUCT_FIELD 具名
+ * 字段与 AST_FILL 值包在元组构造中非法）——字段数量必须 == 目标元素数量，
+ * 逐字段按位置匹配目标元素类型：
+ * 1. 第一遍：字段数校验 + 逐字段求值（注入 anon_ct=目标元素类型，嵌套
+ *    匿名构造/嵌套 tuple/struct 构造可正常推断）+ value_assign safe_cast
+ *    校验（i32 字面量 → i64 元素提升，与 struct/具名 tuple 构造一致）；
+ *    nil 字段须目标元素为 ?T。
+ * 2. 第二遍：tuple_elem_t 表 = (目标元素类型, 目标序, offset 待 seal) →
+ *    type_tuple_intern 构造匿名类型（按元素类型+顺序去重 intern——与目标
+ *    同构时合并为同一实例，天然零转换）。
+ * 3. 第三遍：把 fields 链重排为表序（值节点直链）——运行期 op_construct
+ *    按表序布值，compiler 按链序压值，链序必须 == 表序。
+ * 返回推断类型；失败返回 NULL（已诊断）。
+ * 注意：调用方（AST_CONSTRUCT 匿名分支）已保证 ct 为 tuple 类型且
+ * anon_ct 非空。字段已在此求值+校验完毕，调用方须直接返回不落入
+ * tuple 构造分支（否则二次求值会重复诊断）。 */
+static const type_t *infer_anon_tuple(sema_t *sema, ast_construct_t *n,
+                                      sema_scope_t *scope,
+                                      const type_t *ct) {
+  const tuple_type_t *ctt = (const tuple_type_t *)ct;
+  size_t cap = ctt->elem_count;
+  size_t nfields = sema_count_siblings(n->fields);
+  if (nfields != cap) {
+    char tn[64];
+    sema_type_name(ct, tn, sizeof tn);
+    diag_error(sema->diag, sema_loc(sema, n->fields ? n->fields : &n->base),
+               "construct: expected %zu elements for %s, got %zu", cap, tn,
+               nfields);
+    return NULL;
+  }
+  ast_node_t **slot = NULL;
+  if (cap > 0) {
+    slot = (ast_node_t **)arena_calloc(
+        sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t));
+    if (!slot) return NULL;
+  }
+
+  /* 第一遍：元组元素匿名——字段链按序直取（不允许具名/值包字段） */
+  size_t i = 0;
+  for (ast_node_t *f = n->fields; f; f = f->next, i++) {
+    if (f->kind == AST_CONSTRUCT_FIELD) {
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "construct: named field is not allowed for tuple elements "
+                 "(tuple elements are anonymous, use positional values)");
+      return NULL;
+    }
+    if (f->kind == AST_FILL) {
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "construct: fill is not supported for tuple elements");
+      return NULL;
+    }
+    slot[i] = f;
+  }
+
+  /* 第二遍：逐元素求值（注入 anon_ct=目标元素类型）+ safe_cast 校验；
+     元素类型取目标元素类型（值与目标同构校验，i32→i64 提升放行） */
+  tuple_elem_t *elems = NULL;
+  if (cap > 0) {
+    elems = (tuple_elem_t *)arena_calloc(
+        sema->arena, cap, sizeof(tuple_elem_t), ALIGNOF(max_align_t));
+    if (!elems) return NULL;
+  }
+  for (i = 0; i < cap; i++) {
+    ast_node_t *value = slot[i];
+    const type_t *et = ctt->elems[i].type;
+    value_t *fv = NULL;
+    bool is_nil_field = value->kind == AST_NIL;
+    if (!is_nil_field) {
+      if (sema->anon_ct_depth < 16)
+        sema->anon_ct[sema->anon_ct_depth++] = et;
+      fv = sema_expr(sema, &slot[i], scope);
+      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    }
+    if (is_nil_field) {
+      if (!et || et->kind != TYPE_KIND_OPTION) {
+        char tn[64];
+        sema_type_name(et, tn, sizeof tn);
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "cannot initialize tuple element with nil (element type %s "
+                   "is not optional)", tn);
+      } else {
+        /* 目标元素为 ?T：裸 nil 无法从 nil 推断 ?T 类型，须显式构造
+           `.?T{nil}`（与 struct 字段一致） */
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "optional tuple element requires an explicit constructor "
+                   "(use .?T{nil})");
+      }
+    } else if (fv && !value_is_error(sema->vm, fv) &&
+               !value_is_type(fv, TYPE_KIND_VOID) && et) {
+      value_t *dst = value_make_shadow(sema->vm, et);
+      if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+        char tn[64], fn[64];
+        sema_type_name(et, tn, sizeof tn);
+        sema_type_name(value_type(fv), fn, sizeof fn);
+        diag_error(sema->diag, sema_loc(sema, value),
+                   "cannot initialize tuple element %zu with %s (element "
+                   "type %s)", i, fn, tn);
+      }
+    }
+    elems[i].type = et;
+  }
+
+  /* 第三遍：构造匿名 tuple 类型 + 登记 sema_type（hoist 提升区） */
+  const type_t *t = type_tuple_intern(sema->vm, cap > 0 ? elems : NULL, cap);
+  if (!t) return NULL;
+  sema_type_register(sema, t);
+
+  /* 第四遍：把 fields 链重排为表序（值节点直链，ast_append 清 next） */
+  ast_node_t *new_head = NULL, *new_last = NULL;
+  for (i = 0; i < cap; i++)
     ast_append(&new_head, &new_last, NULL, slot[i]);
   n->fields      = new_head;
   n->fields_last = new_last;
@@ -688,7 +806,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "generic instantiation is not implemented (index on a type value)");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      if (!bt || bt->kind != TYPE_KIND_ARRAY) {
+      if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE)) {
         char tn[64];
         sema_type_name(bt, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -696,7 +814,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 
-      /* 数组下标只消费 1 个索引；a[i,j] 多索引 = 泛型实参语法预留。
+      /* 下标只消费 1 个索引；a[i,j] 多索引 = 泛型实参语法预留。
          a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），逐维下降天然处理。 */
       size_t nidx = sema_count_siblings(n->indices);
       if (nidx != 1) {
@@ -715,6 +833,55 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, n->indices),
                    "array index must be an integer, got %s", tn);
         return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      if (bt->kind == TYPE_KIND_TUPLE) {
+        /* tuple 下标 t[i]：元素匿名 → 按位置访问（运行期 INDEX_GET/INDEX_SET
+           带越界检查）。结果类型取决于 i——i 须编译期常量（字面量直接读，
+           复杂表达式走 ctfe 真实求值，与数组边界一致），越界编译期报错
+           （运行期指令仍兜底 panic）。 */
+        size_t cap = tuple_type_elem_count(bt);
+        uint64_t raw = 0;
+        if (n->indices && n->indices->kind == AST_INT_LIT) {
+          raw = ((ast_int_lit_t *)n->indices)->value;
+        } else {
+          vm_t *vm = sema->vm;
+          bool saved = vm->comptime;
+          vm->comptime = true;
+          ctfe_ctx_t ctx;
+          memset(&ctx, 0, sizeof ctx);
+          ctx.vm = vm;
+          ctx.sema = sema;
+          ctx.budget = 100000;
+          ctx.max_depth = 128;
+          value_t *r = ctfe_eval(&ctx, n->indices);
+          vm->comptime = saved;
+          if (!r || value_is_error(vm, r)) {
+            diag_error(sema->diag, sema_loc(sema, n->indices),
+                       "tuple index must be a compile-time constant");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          const type_t *rt = value_type(r);
+          if (!rt || rt->kind != TYPE_KIND_INT) {
+            diag_error(sema->diag, sema_loc(sema, n->indices),
+                       "tuple index must be an integer constant");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          switch (rt->size) {
+            case 1: raw = *(const uint8_t  *)value_data(r); break;
+            case 2: raw = *(const uint16_t *)value_data(r); break;
+            case 4: raw = *(const uint32_t *)value_data(r); break;
+            default: raw = *(const uint64_t *)value_data(r); break;
+          }
+        }
+        if (raw >= cap) {
+          diag_error(sema->diag, sema_loc(sema, n->indices),
+                     "tuple index %llu out of bounds (len=%zu)",
+                     (unsigned long long)raw, cap);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        const tuple_elem_t *e = tuple_type_elem(bt, (size_t)raw);
+        return value_make_shadow(sema->vm, e ? e->type : sema->vm->type_void);
       }
 
       const type_t *et = array_type_elem(bt);
@@ -766,7 +933,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
          fields 数量与元素类型（value_assign 单一校验点），返回该类型
          的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
-         当前实现 array + option + struct 分支（tuple 待后续 Phase）。 */
+         当前实现 array + option + struct + tuple 分支。 */
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t;
       if (!n->type) {
@@ -788,6 +955,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
              直接返回（不落入下方 struct 构造分支，避免二次求值重复诊断）。 */
           t = infer_anon_struct(sema, n, scope, ct);
           if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+        } else if (ct->kind == TYPE_KIND_TUPLE) {
+          /* tuple 目标：元素已在 infer_anon_tuple 求值+校验+重排完毕，
+             直接返回（不落入下方 tuple 构造分支，避免二次求值重复诊断）。 */
+          t = infer_anon_tuple(sema, n, scope, ct);
+          if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
         } else if (ct->kind == TYPE_KIND_OPTION) {
           /* ?T 目标：按具名构造路径（.?T{...}）校验，返回 void shadow
              阻止落入下方 struct 分支（字段不是 struct 字段形态）。 */
@@ -800,8 +972,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           char cn[64];
           sema_type_name(ct, cn, sizeof cn);
           diag_error(sema->diag, sema_loc(sema, *node),
-                     "anonymous construct '.{{...}}' requires a struct or "
-                     "optional target type, got %s",
+                     "anonymous construct '.{{...}}' requires a struct, tuple "
+                     "or optional target type, got %s",
                      cn);
           return value_make_shadow(sema->vm, sema->vm->type_void);
         }
@@ -961,10 +1133,100 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, t);
       }
 
+      if (t->kind == TYPE_KIND_TUPLE) {
+        /* tuple 构造（具名/匿名，docs m2-design §3）：元素数必须 == 类型
+           元素数（完全显式）。元组元素匿名 → 字段链只能是值表达式（具名
+           字段/值包非法），按声明序匹配元素类型（鸭子构造，链序即元素序）。
+           每个元素 value_assign 校验可赋值给元素类型。嵌套匿名构造注入：
+           元素类型已知 → push anon_ct → 递归 sema_expr → pop。
+           **注意**：匿名构造 .{...} 已在 infer_anon_tuple 求值过元素并
+           推断 t0（含重排），此处只处理具名构造（n->type 折叠为
+           AST_TYPE_REF 后的 t 即匿名类型时，字段链已是表序，重复求值
+           幂等）——区分标志：匿名构造元素求值时 anon_ct 栈顶是目标类型
+           （或 type_void 占位），此时 t==t0，元素校验结果与 infer 一致。 */
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != tt->elem_count) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "construct: expected %zu elements for %s, got %zu",
+                     tt->elem_count, tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* 第一遍：元组元素匿名——字段链按序直取（不允许具名/值包字段） */
+        ast_node_t **slot = NULL;
+        if (tt->elem_count > 0) {
+          slot = (ast_node_t **)arena_calloc(
+              sema->arena, tt->elem_count, sizeof(ast_node_t *),
+              ALIGNOF(max_align_t));
+          if (!slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        size_t anon = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_CONSTRUCT_FIELD) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "construct: named field is not allowed for tuple "
+                       "elements (tuple elements are anonymous, use "
+                       "positional values)");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          if (f->kind == AST_FILL) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "construct: fill is not supported for tuple elements");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          slot[anon++] = f;
+        }
+
+        /* 第二遍：按表序求值每个元素值（注入 anon_ct）+ 可赋值性校验 */
+        for (size_t i = 0; i < tt->elem_count; i++) {
+          ast_node_t *value = slot[i];
+          const type_t *et = tt->elems[i].type;
+          value_t *fv = NULL;
+          bool is_nil_field = value->kind == AST_NIL;
+          if (!is_nil_field) {
+            if (sema->anon_ct_depth < 16)
+              sema->anon_ct[sema->anon_ct_depth++] = et;
+            fv = sema_expr(sema, &slot[i], scope);
+            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          }
+          if (is_nil_field) {
+            if (!et || et->kind != TYPE_KIND_OPTION) {
+              char tn[64];
+              sema_type_name(et, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize tuple element with nil (element "
+                         "type %s is not optional)", tn);
+            }
+          } else if (fv && !value_is_error(sema->vm, fv) &&
+                     !value_is_type(fv, TYPE_KIND_VOID) && et) {
+            value_t *dst = value_make_shadow(sema->vm, et);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+              char tn[64], fn[64];
+              sema_type_name(et, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize tuple element %zu with %s "
+                         "(element type %s)", i, fn, tn);
+            }
+          }
+        }
+
+        /* 第三遍：重排 fields 链为表序（值节点直链，ast_append 清 next） */
+        ast_node_t *new_head = NULL, *new_last = NULL;
+        for (size_t i = 0; i < tt->elem_count; i++)
+          ast_append(&new_head, &new_last, NULL, slot[i]);
+        n->fields      = new_head;
+        n->fields_last = new_last;
+        return value_make_shadow(sema->vm, t);
+      }
+
       if (t->kind != TYPE_KIND_ARRAY) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "construct: unsupported type (only array, optional and "
-                   "struct implemented)");
+                   "construct: unsupported type (only array, optional, struct "
+                   "and tuple implemented)");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
 

@@ -5,6 +5,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_option.h"
+#include "parser/ast_tuple.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_volatile.h"
 
@@ -227,6 +228,48 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     }
 
     bcode_write_op(c->bc, BCODE_SEAL);         /* 密封（去重 intern） */
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+    return;
+  }
+
+  if (type_expr->kind == AST_TUPLE) {
+    /* <T1,T2,...> 元组类型（声明-定义两步模型，与数组同构）：
+       声明：PUSH_TUPLE 压开放 tuple type value → DEFINE_TYPE <tid> 绑定
+       program id + 登记进 types_by_id → LOAD_TYPE <tid> 拉回开放对象（定义
+       起点）。
+       定义：元素类型逐个（递归 compile_type_expr）→ APPEND_ELEM 追加 →
+       SEAL 封闭（C 对齐布局 + 去重 intern）→ LOAD_TYPE <tid> 拉回类型值
+       （保持"类型表达式压类型值"契约，调用方如 CONSTRUCT 类型位仍得 +1）。
+       注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
+       替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
+       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       （types_by_id 幂等），语义无害。 */
+    ast_tuple_t *tp = (ast_tuple_t *)type_expr;
+
+    bcode_write_op(c->bc, BCODE_PUSH_TUPLE);   /* 栈: [open_tuple_type] */
+    st_push(c, 1);
+
+    uint32_t tid = c->type_id_next++;
+    bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回开放对象（定义起点） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+
+    for (ast_node_t *et = tp->elem_types; et; et = et->next) {
+      compile_type_expr(c, et);                /* 栈: [open, elem_type] */
+      st_push(c, 1);
+      bcode_write_op(c->bc, BCODE_APPEND_ELEM); /* 弹 elem_type → 追加进 open */
+      st_push(c, -1);
+    }
+
+    bcode_write_op(c->bc, BCODE_SEAL);         /* 封闭：算布局（消费栈） */
     st_push(c, -1);
 
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */

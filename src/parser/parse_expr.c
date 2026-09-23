@@ -19,6 +19,7 @@
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
 #include "parser/ast_array.h"
+#include "parser/ast_tuple.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
@@ -295,6 +296,55 @@ ast_node_t *parse_primary(parser_t *p) {
         ast_node_t *node = ast_array_new(p->arena, tb, p->pos);
         ((ast_array_t *)node)->base_type = base_type;
         ((ast_array_t *)node)->length    = length;
+        return node;
+    }
+
+    /* 元组类型表达式：<T1,T2,...>（元素类型逗号分隔）。
+     * 仅当 '<' 出现在原子位置时（无 lhs）解析为类型；比较运算符 '<' 是
+     * 中缀（infix_binding 处理），构造字段链 <v,N> 是 fill 值包
+     * （parse_construct_field 处理）——三处互不重叠。 */
+    if (check_symbol(p, "<")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *elem_types = NULL, *elem_types_last = NULL;
+        if (!check_symbol(p, ">")) {
+            /* 元素类型用 parse_unary：支持 const/volatile 修饰、嵌套
+               [M]T 数组、嵌套 <T1,T2> 元组 */
+            ast_node_t *et = parse_unary(p);
+            if (!et || et->kind == AST_ERROR) {
+                if (!et) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected element type after '<' in tuple type");
+                }
+                return et;
+            }
+            ast_append(&elem_types, &elem_types_last, NULL, et);
+            skip_trivia(p);
+            while (check_symbol(p, ",")) {
+                advance(p);
+                skip_trivia(p);
+                et = parse_unary(p);
+                if (!et || et->kind == AST_ERROR) {
+                    if (!et) {
+                        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                             "expected element type after ',' in tuple type");
+                    }
+                    return et;
+                }
+                ast_append(&elem_types, &elem_types_last, NULL, et);
+                skip_trivia(p);
+            }
+        }
+        if (!expect_symbol(p, ">")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected '>' after tuple type elements");
+        }
+
+        ast_node_t *node = ast_tuple_new(p->arena, tb, p->pos);
+        ((ast_tuple_t *)node)->elem_types      = elem_types;
+        ((ast_tuple_t *)node)->elem_types_last = elem_types_last;
         return node;
     }
 
@@ -724,14 +774,34 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             continue;
         }
 
-        /* 2d. 中缀运算符查表 */
+        /* 2d. 中缀运算符查表。
+         *     移位运算符合成：lexer 不产出 << / >>（与嵌套元组类型语法
+         *     <T1,T2> 冲突，见 lexer kPairs 注释）。中缀位置的连续两个
+         *     相同尖括号由 synthesize_shift_token 合成为 "<<"/">>" token
+         *     （arena 分配，生命周期随 AST），并整体消费两个 token——
+         *     否则 advance 只吃掉第一个 '<'，剩余 '<' 会被 parse_primary
+         *     误判为元组类型（"expected '>'"）。原子位置（parse_primary）
+         *     的 '<' 仍解析为元组类型，与中缀合成互不重叠。 */
         const token_t *op_tok = cur_token(p);
+        const token_t *syn = NULL;
+        if (token_get_kind(op_tok) == TOKEN_TYPE_SYMBOL &&
+            (check_symbol(p, "<") || check_symbol(p, ">"))) {
+            syn = synthesize_shift_token(p); /* 探测，不消费 */
+            if (syn) op_tok = syn;
+        }
         int lp, rp;
         if (!infix_binding(op_tok, &lp, &rp)) break;
         if (lp < min_prec) break;
 
         uint32_t op_pos = p->pos;
-        advance(p);
+        if (syn) {
+            /* 合成移位：消费两个尖括号（其间可能隔 trivia） */
+            advance(p);
+            skip_trivia(p);
+            advance(p);
+        } else {
+            advance(p);
+        }
         skip_trivia(p);
 
         /* as 是普通中缀运算符（lp=21/rp=22，关键字运算符表）：
