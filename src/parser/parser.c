@@ -5,6 +5,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_error.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
@@ -123,6 +124,12 @@ ast_node_t *parse_program(parser_t *p) {
                sema pass1b 折叠字段类型 + 登记类型，进入字节码，运行时 hoist
                构造 struct 类型 + 绑定名字。 */
             func = parse_struct_def(p);
+        } else if (check_keyword(p, "union")) {
+            /* 顶层 tag union 定义 union Name { Tag: {fields}; ... } 挂
+               funcs 链：sema pass1b 折叠字段类型 + 登记类型（tag 整数前缀
+               + member 联合体布局），进入字节码，运行时 hoist 构造 union
+               类型 + 绑定名字。 */
+            func = parse_union_def(p);
         } else if (check_keyword(p, "var")) {
             /* 全局变量定义 var name[:type] = init; 挂 funcs 链（非 comptime）。
                sema pass_globals 折叠 init 为字面量/函数引用后保留——进入

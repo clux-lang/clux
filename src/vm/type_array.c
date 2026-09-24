@@ -3,6 +3,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "vm/scope.h"
@@ -276,6 +277,20 @@ void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
             }
             break;
         }
+        case TYPE_KIND_UNION: {
+            /* tag 平凡拷贝 + payload 按当前 tag 的 member 递归（读 src 的
+               tag——dst 与 src 同类型实例，tag 相同；payload_struct NULL =
+               纯 tag member 无 payload 区） */
+            size_t ts = union_type_tag_size(t);
+            memcpy(dst, src, ts);
+            size_t idx = (size_t)union_read_tag_raw(src, ts);
+            const union_member_t *m = union_type_member(t, idx);
+            const type_t *pt = m ? m->payload_struct : NULL;
+            if (pt)
+                value_blit_raw(vm, (uint8_t *)dst + union_type_payload_offset(t),
+                               (const uint8_t *)src + union_type_payload_offset(t), pt);
+            break;
+        }
         case TYPE_KIND_STR: {
             const string_t *s = *(const string_t *const *)src;
             string_t *copy = s ? string_from_string(vm->alloc, s) : NULL;
@@ -324,6 +339,16 @@ void value_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
                 const tuple_elem_t *e = tuple_type_elem(t, i);
                 value_dispose_raw(vm, (uint8_t *)raw + e->offset, e->type);
             }
+            break;
+        }
+        case TYPE_KIND_UNION: {
+            /* 先读 data 首部 tag 才知道按哪个 member 释放 payload */
+            size_t ts = union_type_tag_size(t);
+            size_t idx = (size_t)union_read_tag_raw(raw, ts);
+            const union_member_t *m = union_type_member(t, idx);
+            const type_t *pt = m ? m->payload_struct : NULL;
+            if (pt)
+                value_dispose_raw(vm, (uint8_t *)raw + union_type_payload_offset(t), pt);
             break;
         }
         case TYPE_KIND_STR: {

@@ -154,6 +154,16 @@ typedef enum {
 
     /* ---- 长度查询：代理到 vtable->length（当前仅数组实现，返回 u64 元素个数） ---- */
     BCODE_LENGTH,           /* 弹 self，返回 value_length(self)（如数组 → u64 元素个数） */
+
+    /* ---- tag union 构造 / 判 tag（与 struct 同族：开放构造协议
+       PUSH_UNION → DEFINE_TYPE → LOAD_TYPE → UNION_MEMBER×N → SEAL） ---- */
+    BCODE_PUSH_UNION,       /* 分配空 union type（开放，members=NULL，不入池）
+                               + 压其 type value */
+    BCODE_UNION_MEMBER,     /* STR：strtable 索引；peek 开放 union → 追加 member
+                               （名拷贝，tag = 追加序） */
+    BCODE_IS_TAG,           /* U32：tag 立即数；弹 union 值 → 读 data 首部 tag
+                               与立即数比较 → 压 bool（`x is Member` 编译期已
+                               解析 member → tag 值） */
 } bcode_op_t;
 
 /* ================================================================ */

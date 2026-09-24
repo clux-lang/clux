@@ -34,6 +34,7 @@ typedef enum type_kind_t {
     TYPE_KIND_ARRAY,
     TYPE_KIND_TUPLE,
     TYPE_KIND_ENUM,
+    TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
@@ -183,6 +184,43 @@ typedef struct tuple_type_t {
     size_t        elem_count;
 } tuple_type_t;
 
+/**
+ * union_member_t / union_type_t: tag union 类型（type_t 的扩展，见
+ * m2-design §tag union）
+ *
+ * tag union：member 名 = tag 名，每个 member 可携带匿名 struct payload
+ * （字段表，与 struct 字段同构）或无 payload（纯 tag member）。
+ * 存储布局（data 块，size = type->size）：
+ *   [0 .. tag_size)              tag 整数值（tag 编号 0..member_count-1，
+ *                                按 member_count 自适应宽度 u8/u16/u32/u64）
+ *   [payload_offset .. size)     各 member payload 联合体（max member size，
+ *                                按 C 对齐规则对齐；纯 tag member 无 payload）
+ * 字段绝对偏移 = payload_offset + member 内字段偏移。
+ *
+ * member 表由 vm 拥有（SEAL 时深拷贝）。每个 member 的 payload 结构
+ * （payload_struct）在 seal 时按字段表唯一构建——字段访问运行期按 tag
+ * 反查所属 member → 该 member 的 payload_struct → 字段偏移。tag 判定
+ * `x is Member` 运行期比较 data 首部 tag 整数与编译期 member 的 tag 值。
+ *
+ * 构造 `.Shape{.Circle{...}}`：外层 CONSTRUCT（union 类型）收 1 个
+ * member payload value + 隐式 tag；member payload 由内层 CONSTRUCT
+ * （member 的 payload_struct 类型）构造——两层嵌套。
+ */
+typedef struct union_member_t {
+    strslice_t      name;           /* member/tag 名（seal 时拷贝，vm 拥有） */
+    uint32_t        tag;            /* tag 编号（0..member_count-1） */
+    const type_t   *payload_struct; /* member payload 的匿名 struct 类型
+                                       （seal 时构建；NULL = 纯 tag member） */
+} union_member_t;
+
+typedef struct union_type_t {
+    type_t          base;
+    union_member_t *members;        /* member 表（seal 时拷贝，vm 拥有） */
+    size_t          member_count;
+    size_t          payload_offset; /* payload 联合体起始偏移（tag 对齐后） */
+    size_t          tag_size;       /* tag 整数值宽度（按 member_count 自适应） */
+} union_type_t;
+
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
     return t && t->kind == TYPE_KIND_OPTION;
@@ -286,6 +324,13 @@ const type_t *type_volatile_seal(vm_t *vm, const type_t *t);
  * vm/type_tuple.h。tuple 与 struct 同族：开放构造（PUSH_TUPLE → DEFINE_TYPE
  * → LOAD_TYPE → APPEND_ELEM×N → SEAL）获得向前声明能力；sema 侧
  * type_tuple_intern 一次性快捷。 */
+
+/* tag union 类型构造 API（type_union_push / type_union_add_member /
+ * type_union_seal / type_union_intern）与访问器（union_type_member_count /
+ * union_type_member / union_type_find_member / union_type_payload_offset /
+ * union_type_tag_size / union_read_tag）见 vm/type_union.h。union 与 struct
+ * 同族：开放构造（PUSH_UNION → DEFINE_TYPE → LOAD_TYPE → UNION_MEMBER×N
+ * → SEAL）获得向前声明能力；sema 侧 type_union_intern 一次性快捷。 */
 
 /** 将 type 转为 value_t*（type 作为 first-class value） */
 value_t *type_as_value(vm_t *vm, const type_t *t);

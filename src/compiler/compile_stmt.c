@@ -1,6 +1,7 @@
 #include "compiler/compiler.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_enum_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
@@ -138,7 +139,9 @@ static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
    函数体块（compile_func_body）与各控制流块（compile_stmt）共用。 */
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
-    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) compile_stmt(c, s);
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF)
+      compile_stmt(c, s);
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)s;
@@ -153,7 +156,9 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
      的 closure_scope。无捕获函数跳过（块入口实例无需再绑定任何捕获）。
      循环内每次迭代块入口都重新 MAKE_FUNCTION，每轮新实例，捕获互不干扰。 */
   for (ast_node_t *s = b->stmts; s; s = s->next) {
-    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF) continue;
+    if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF)
+      continue;
     if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
       if (!fn->is_comptime && fn->captures) {
@@ -231,6 +236,24 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
        PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
        （运行时 type_lookup 解析 `var p: Point`）。 */
     ast_struct_def_t *n = (ast_struct_def_t *)node;
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 栈: [type_value, spec占位] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, n->name);
+    /* DEFINE 永远双弹弹掉全部，栈深归零 */
+    st_push(c, -2);
+    break;
+  }
+  case AST_UNION_DEF: {
+    /* union Name { Tag: {fields}; Empty; ... } 名字绑定（顶层 union 定义）：
+       与 struct def 同构——union 类型在 hoist 区构造（pass 2 SEAL 完成），
+       此处 LOAD_TYPE <union_id>（sema 登记的 type_id 写回节点）→
+       PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
+       （运行时 type_lookup 解析 `var s: Shape`）。 */
+    ast_union_def_t *n = (ast_union_def_t *)node;
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
     st_push(c, 1);

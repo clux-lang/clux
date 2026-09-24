@@ -98,6 +98,7 @@ extern const vtable_t VTABLE_CONST;
 extern const vtable_t VTABLE_VOLATILE;
 extern const vtable_t VTABLE_OPTION;
 extern const vtable_t VTABLE_ENUM;
+extern const vtable_t VTABLE_UNION;
 
 #ifdef __cplusplus
 }

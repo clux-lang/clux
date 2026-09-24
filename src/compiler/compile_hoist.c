@@ -6,6 +6,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 
 #include <string.h>
 
@@ -174,6 +175,14 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
          DEFINE_TYPE <id> 声明登记（不设元素；元素类型是布局依赖，pass 2
          依赖后序定义 + 环检测） */
       bcode_write_op(c->bc, BCODE_PUSH_TUPLE);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_UNION:
+      /* PUSH_UNION 压开放 union 类型（members=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设 member；payload 字段类型是布局
+         依赖，pass 2 依赖后序定义 + 环检测） */
+      bcode_write_op(c->bc, BCODE_PUSH_UNION);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
@@ -371,6 +380,44 @@ static void define_tuple(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
 }
 
+/* union 定义：LOAD_TYPE <id> 拉回开放对象 → 逐 member：UNION_MEMBER <名>
+   （追加 member，tag = 追加序）→ 逐 payload 字段：依赖字段类型先定义
+   （密封；emit_dep_type 递归 + done 三态环检测）→ LOAD 字段类型 →
+   DEFINE_FIELD <name>（追加到当前 member 的开放 payload struct）→ SEAL
+   封闭（构建各 payload struct + tag 宽度自适应 + payload 联合体布局 + 去重
+   intern；去重时按自身 id 重绑登记）。纯 tag member（无 payload 字段）直接
+   UNION_MEMBER 追加，无字段发射。payload 字段类型是布局依赖（密封计算
+   payload size/align 需要字段 size/align 已确定）→ 依赖后序 + 环检测。 */
+static void define_union(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                         size_t count) {
+  const type_t *t = st->type;
+
+  emit_load_type(c, st->id);               /* 栈: [open_union_type] */
+
+  size_t n = union_type_member_count(t);
+  for (size_t i = 0; i < n; i++) {
+    const union_member_t *m = union_type_member(t, i);
+    if (!m) continue;
+    bcode_write_op(c->bc, BCODE_UNION_MEMBER);
+    bcode_write_str(c->bc, m->name);       /* peek 追加 member（不弹栈） */
+
+    const type_t *ps = m->payload_struct;
+    if (!ps) continue;                     /* 纯 tag member：无 payload 字段 */
+    const struct_type_t *pst = (const struct_type_t *)ps;
+    size_t fcount = struct_type_field_count(ps);
+    for (size_t fi = 0; fi < fcount; fi++) {
+      const struct_field_t *f = struct_type_field(ps, fi);
+      if (!f || !f->type) continue;
+      emit_dep_type(c, f->type, done, count); /* 栈: [open, field_type] */
+      bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
+      bcode_write_str(c->bc, f->name);       /* 弹 field_type → 追加进 open */
+      st_push(c, -1);
+    }
+  }
+
+  emit_seal(c);                            /* 封闭（去重时重绑登记） */
+}
+
 /* 定义状态（done 数组三态）：
  *   0 = 未处理
  *   1 = 处理中（正在定义，布局依赖递归尚未完成）
@@ -431,6 +478,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_TUPLE:
       define_tuple(c, st, done, count);
+      break;
+    case TYPE_KIND_UNION:
+      define_union(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */

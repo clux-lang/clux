@@ -8,6 +8,7 @@
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -275,6 +276,19 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate name '%.*s'", (int)sd->name.len,
                      sd->name.ptr);
+        }
+        break;
+      }
+      case AST_UNION_DEF: {
+        /* 局部 union 定义：注册符号（暂不激活，Pass 3b walk_block 入口提升
+           调 sema_eval_union_def 求值后激活）。与局部 struct/enum/type 定义
+           同构。 */
+        ast_union_def_t *ud = (ast_union_def_t *)s;
+        sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)ud};
+        if (!sema_scope_define(scope, ud->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, s),
+                     "duplicate name '%.*s'", (int)ud->name.len,
+                     ud->name.ptr);
         }
         break;
       }

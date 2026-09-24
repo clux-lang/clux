@@ -83,6 +83,17 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `DEFINE_BOUND` | `U32`（长度立即数 N） | 弹栈顶元素 type value → 设为 array type 的元素类型，并把立即数 N 设为长度，构造出 `[elem; N]`。 |
 | `PUSH_CONST` | — | 分配空 **const 限定类型**（`const_type_t`，开放态，sub=NULL，不入池），压其 type value（构造起点，供两遍扫描 pass 1 声明）。 |
 | `PUSH_VOLATILE` | — | 分配空 **volatile 限定类型**（`volatile_type_t`，开放态，sub=NULL，不入池），压其 type value（构造起点，供两遍扫描 pass 1 声明）。 |
+| `PUSH_OPT` | — | 分配空 **optional 类型**（`option_type_t`，开放态，inner=NULL，不入池），压其 type value（构造起点：`LOAD inner` → `SET_TYPE` 设 inner → `SEAL`）。 |
+| `PUSH_ENUM` | — | 分配空 **enum 类型**（`enum_type_t`，开放态，underlying=NULL，不入池），压其 type value（构造起点）。 |
+| `ENUM_VARIANT` | `[STR][I64]` | **peek** 开放 enum → 追加 variant（名从 strtable 拷贝，值按底层宽度截断）。 |
+| `MAKE_ENUM` | — | 弹栈顶 type value + 弹底层整数值 → 按底层宽度截断构造 enum 值。 |
+| `PUSH_STRUCT` | — | 分配空 **struct 类型**（`struct_type_t`，开放态，fields=NULL，不入池），压其 type value（构造起点）。 |
+| `DEFINE_FIELD` | `STR`（字段名） | 弹栈顶 type value（字段类型）→ **peek** 开放 struct（不弹栈——`LOAD_TYPE` 拉回的开放对象须留在栈顶供后续字段追加）→ 追加字段（名从 strtable 拷贝）。 |
+| `PUSH_TUPLE` | — | 分配空 **tuple 类型**（`tuple_type_t`，开放态，elems=NULL，不入池），压其 type value（构造起点）。 |
+| `APPEND_ELEM` | — | 弹栈顶 type value（元素类型）→ **peek** 开放 tuple → 追加元素（元素匿名，长度 = 追加次数）。 |
+| `PUSH_UNION` | — | 分配空 **tag union 类型**（`union_type_t`，开放态，members=NULL，不入池），压其 type value（构造起点）。 |
+| `UNION_MEMBER` | `STR`（member 名） | **peek** 开放 union（不弹栈——后续 payload 字段经 `DEFINE_FIELD` 追加、`SEAL` 收尾）→ 追加 member（名从 strtable 拷贝，tag = 追加序）。payload member 随后按 payload struct 字段表追加 `DEFINE_FIELD`；纯 tag member 直接结束。 |
+| `IS_TAG` | `U32`（tag 立即数） | 弹 union 值 → 读 data 首部 tag 与立即数比较 → 压 bool（`x is Member` 编译期已把 member 解析为 tag 值）。 |
 | `SET_TYPE` | — | 弹栈顶 type value（sub）→ 设为栈顶开放限定类型的 sub 字段（`type_qual_set_sub`，两遍扫描 pass 2 定义：`LOAD_TYPE <id>` 拉回开放对象 → `LOAD sub` → `SET_TYPE` 设 sub）。 |
 | `DEFINE_TYPE` | `U32`（类型 id） | 弹栈顶 type value（**类型声明**：消费栈）→ 绑定程序 id（≥64）写入 `t->id` 并登记进 `vm->types_by_id`（幂等，多 id 别名同一类型）。声明后 `LOAD_TYPE <id>` 可拉回开放对象继续定义。 |
 | `LOAD_TYPE` | `U32`（类型 id） | 从 `vm->types_by_id` 按 id 查类型并压其 type value。内建 id 0..16 预登记，程序类型 id ≥64 由 `DEFINE_TYPE <id>` 声明登记（开放构造阶段可拉回未密封对象，定义完成后 `SEAL` 密封重绑）。 |
@@ -102,9 +113,9 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。**array 分支**（`value_make_array`）：定长数组（len ≠ SIZE_MAX）允许**部分填充**，编译器对缺失元素补发 `PUSH_UNDEFINED` 占位，跳过 undefined 元素，剩余字节由分配块清零自动补**类型零值**；元素数超出声明长度报错。**struct 分支**（2026-09-21）：字段数须与类型字段表一致，逐字段先 `value_implicit_cast` 到字段类型（字面量 i32 → i64 字段宽度提升）再 `value_blit_raw` 深拷贝，data 清零未指定字段自动零值。 |
-| `FIELD_GET` | `U32`（strtable 索引，字段名） | `field_get`：`self.field` → **借用引用**（is_own=false，data 指向 self data 块内字段偏移，零拷贝；绑定/返回经 `value_clone` materialize 深拷贝）。栈布局 `…, self`，弹 self → 按名查偏移（strtable 索引，编译期常量）→ 压借用引用。嵌套 `p.a.b` 借用链偏移正确。非 struct / 字段不存在返回硬错误。 |
-| `FIELD_SET` | `U32`（strtable 索引，字段名） | `field_set`：`self.field = val` → 返回 self（引用，链式复用）。栈布局 `…, self, val`（val 在顶），弹 val、self → 按名查偏移 → `value_implicit_cast` 到字段类型（同类型身份短路）→ dispose 旧字段值（回收资源）→ blit 深拷贝新值回偏移。复合赋值 `p.x op= v` 由编译器发 `PUSH_VALUE 0`（dup self）+ `FIELD_GET` + op + `FIELD_SET`。 |
+| `CONSTRUCT` | `U32`（成员数量 N） | 收尾值构造：栈布局为 `…, type_value, v1 … vN`（类型在底、vN 在顶）。先逆序弹 N 个成员值，再弹类型位，按类型种类分派构造 value。**array 分支**（`value_make_array`）：定长数组（len ≠ SIZE_MAX）允许**部分填充**，编译器对缺失元素补发 `PUSH_UNDEFINED` 占位，跳过 undefined 元素，剩余字节由分配块清零自动补**类型零值**；元素数超出声明长度报错。**struct 分支**（2026-09-21）：字段数须与类型字段表一致，逐字段先 `value_implicit_cast` 到字段类型（字面量 i32 → i64 字段宽度提升）再 `value_blit_raw` 深拷贝，data 清零未指定字段自动零值。**union 分支**（2026-09-24）：成员数须 == 1（外层 union 构造收 1 个 member payload value）——payload member 值是内层 payload_struct 构造（先 `value_implicit_cast` 到 payload struct 类型），纯 tag member 值是 tag 整数常量（省略内层构造，直接写 tag）。 |
+| `FIELD_GET` | `U32`（strtable 索引，字段名） | `field_get`：`self.field` → **借用引用**（is_own=false，data 指向 self data 块内字段偏移，零拷贝；绑定/返回经 `value_clone` materialize 深拷贝）。栈布局 `…, self`，弹 self → 按名查偏移（strtable 索引，编译期常量）→ 压借用引用。嵌套 `p.a.b` 借用链偏移正确。非 struct 返回硬错误。**union 分支**（2026-09-24）：字段名全局唯一（sema 已校验），经 `union_type_find_field` 反查所属 member → 偏移 = payload_offset + member 内字段偏移 → 返回借用引用；当前 tag 的 member 无该字段 → 返回硬错误（运行期 tag 校验，对齐数组越界 panic）。 |
+| `FIELD_SET` | `U32`（strtable 索引，字段名） | `field_set`：`self.field = val` → 返回 self（引用，链式复用）。栈布局 `…, self, val`（val 在顶），弹 val、self → 按名查偏移 → `value_implicit_cast` 到字段类型（同类型身份短路）→ dispose 旧字段值（回收资源）→ blit 深拷贝新值回偏移。复合赋值 `p.x op= v` 由编译器发 `PUSH_VALUE 0`（dup self）+ `FIELD_GET` + op + `FIELD_SET`。union 分支同 `FIELD_GET`：反查 member + tag 校验 + payload_offset 偏移。 |
 | `INDEX_GET` | — | `get_item`：`self[index]` → 元素副本。栈布局 `…, self, index`（index 在顶），弹 index、self 后分派 `vtable->get_index`。 |
 | `INDEX_SET` | — | `set_item`：`self[index] = val` → 返回 self。栈布局 `…, self, index, val`（val 在顶），弹 val、index、self 后分派 `vtable->set_index`。 |
 

@@ -5,6 +5,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 #include "vm/value.h"
 #include "vm/function.h"
 #include "core/panic.h"
@@ -114,6 +115,10 @@ vm_t *vm_new(allocator_t *alloc) {
     /* 元组类型池（type_tuple_intern / type_tuple_seal intern 用；元素由
        vm_destroy 手动释放，vec 只持有指针数组） */
     vm->tuple_types = vec_new(alloc, /*owns_element=*/false);
+
+    /* tag union 类型池（type_union_intern / type_union_seal intern 用；元素由
+       vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->union_types = vec_new(alloc, /*owns_element=*/false);
 
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
@@ -292,6 +297,18 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&tt);
         }
         vec_free(vm->alloc, &vm->tuple_types);
+    }
+
+    /* tag union 类型池：dispose_fn 自动释放 member 表 + 显示名，仅需裸释放
+       （member payload_struct 归 struct_types 池，已在上方释放） */
+    if (vm->union_types) {
+        size_t n = vec_len(vm->union_types);
+        for (size_t i = 0; i < n; i++) {
+            union_type_t *ut = (union_type_t *)vec_get(vm->union_types, i);
+            if (!ut) continue;
+            allocator_free(vm->alloc, (void **)&ut);
+        }
+        vec_free(vm->alloc, &vm->union_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

@@ -6,6 +6,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -75,6 +76,12 @@ static void type_dump_name(const type_t *t, string_t *out) {
         else string_append_cstr(out, "<...>");
         return;
     }
+    case TYPE_KIND_UNION: {
+        /* 具名 union：直接显示名字（Shape）；匿名显示 "union" */
+        if (t->name.ptr) string_append_bytes(out, t->name.ptr, t->name.len);
+        else string_append_cstr(out, "union");
+        return;
+    }
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE: {
         const char *kw = (t->kind == TYPE_KIND_CONST) ? "const " : "volatile ";
@@ -103,10 +110,11 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         const type_t *sub = type_qualifier_sub(t);
         if (sub) { bt = sub; k = sub->kind; }
     }
-    /* 聚合类型（数组/结构体/元组）的 { } 前后加空格便于阅读；基础类型保持紧凑
-       `.i32{42}`（与语言构造字面量 .i32{...} 一致），即 `. [3]i32 { .i32{1} }`。 */
+    /* 聚合类型（数组/结构体/元组/tag union）的 { } 前后加空格便于阅读；基础
+       类型保持紧凑 `.i32{42}`（与语言构造字面量 .i32{...} 一致），即
+       `. [3]i32 { .i32{1} }`。 */
     bool agg = (k == TYPE_KIND_ARRAY || k == TYPE_KIND_STRUCT ||
-                k == TYPE_KIND_TUPLE);
+                k == TYPE_KIND_TUPLE || k == TYPE_KIND_UNION);
 
     if (!v) { string_append_cstr(out, "{<null>}"); return; }
     if (value_is_shadow(v)) {
@@ -185,6 +193,23 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         for (size_t i = 0; i < n; i++) {
             if (i) string_append_cstr(out, ", ");
             value_dump_impl(vm, value_tuple_at(vm, v, i), out);
+        }
+        break;
+    }
+    case TYPE_KIND_UNION: {
+        /* 按当前 tag 的 member 渲染：读 data 首部 tag → 定位 member →
+           payload 区按 payload_struct 递归（纯 tag member 无 payload 区） */
+        uint64_t tag = union_read_tag(v);
+        const union_member_t *m = union_type_member(t, (size_t)tag);
+        if (m && m->name.ptr)
+            string_append_bytes(out, m->name.ptr, m->name.len);
+        else
+            string_append_cstr(out, "<tag?>");
+        if (m && m->payload_struct) {
+            string_append_cstr(out, ": ");
+            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->payload_struct,
+                              (uint8_t *)value_data(v) + union_type_payload_offset(t)),
+                            out);
         }
         break;
     }

@@ -219,6 +219,15 @@ const type_t *type_struct_push(vm_t *vm) {
     return &st->base;
 }
 
+/* 分配开放 struct type（fields=NULL，不入池，不压栈）——union member payload
+ * 内部构造用（type_union_add_field 向开放 payload struct 追加字段）。
+ * 不向操作数栈压 type value；密封由 type_struct_seal 完成。 */
+const type_t *type_struct_alloc_open(vm_t *vm) {
+    if (!vm) return NULL;
+    struct_type_t *st = struct_type_create_open(vm);
+    return &st->base;
+}
+
 /* DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略）。
  * 开放阶段动态扩容（field_count 递增）。 */
 void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,

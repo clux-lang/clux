@@ -51,6 +51,13 @@ static bool infix_binding(const token_t *tok, int *lp, int *rp) {
         *lp = 21; *rp = 22;
         return true;
     }
+    /* is：tag union tag 判定（<expr> is <member>），与 as 同族——
+       lhs 是 union 对象，rhs 是编译期类型表达式（sema ctfe 求值为合法
+       member）。运行期比较 tag 整数，返回 bool。 */
+    if (s.len == 2 && s.ptr[0] == 'i' && s.ptr[1] == 's') {
+        *lp = 21; *rp = 22;
+        return true;
+    }
     /* extends：类型兼容判断（类型计算），与 ==/!= 同级比较运算符 */
     if (s.len == 7 && s.ptr[0] == 'e' && s.ptr[1] == 'x' && s.ptr[2] == 't' &&
         s.ptr[3] == 'e' && s.ptr[4] == 'n' && s.ptr[5] == 'd' &&

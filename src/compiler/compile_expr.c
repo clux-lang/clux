@@ -24,6 +24,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "vm/type_union.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -333,6 +334,27 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       st_push(c, -1);
       break;
     }
+    /* is：tag union tag 判定（<expr> is <member>，docs m2-design §tag
+       union）。lhs 普通表达式求值（union 对象）；rhs 已被 sema 折叠为
+       AST_INT_LIT（member 的 tag 整数值，member 名 → tag 在 sema 完成，
+       compiler 零感知 union 类型）→ IS_TAG <tag> 弹 union 值 → 压 bool。 */
+    if (token_is(n->op, "is")) {
+      compile_expr(c, n->lhs);              /* 栈: [value] */
+      if (!n->rhs || n->rhs->kind != AST_INT_LIT) {
+        c_error(c, node, "is: right operand must be a member tag value");
+        return;
+      }
+      uint64_t tag = ((ast_int_lit_t *)n->rhs)->value;
+      if (tag > 0xFFFFFFFFull) {
+        c_error(c, n->rhs, "is: member tag value %llu out of range",
+                (unsigned long long)tag);
+        return;
+      }
+      bcode_write_op(c->bc, BCODE_IS_TAG);
+      bcode_write_u32(c->bc, (uint32_t)tag); /* 弹 value → 压 bool */
+      st_push(c, 0);
+      break;
+    }
     /* 常规二元：lhs → rhs → op */
     compile_expr(c, n->lhs);
     compile_expr(c, n->rhs);
@@ -479,6 +501,26 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
         } else {
           compile_expr(c, f);
         }
+        fcount++;
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, (uint32_t)fcount);
+      st_push(c, -((int)fcount));
+      break;
+    }
+
+    if (t->kind == TYPE_KIND_UNION) {
+      /* union 构造（.Shape{.Circle{...}} 两层嵌套）：外层 union 构造收
+         1 个 member payload value（sema 已校验字段数 == 1）。
+         - payload member：值是内层 .Circle{...} CONSTRUCT（sema 已把 type
+           位改写为 payload_struct 的 AST_TYPE_REF → LOAD_TYPE 压类型值）
+           → 编译内层构造 → 栈: [type_value, payload_value]
+         - 纯 tag member：值是 tag 整数常量字面量（AST_INT_LIT，编译期
+           省略内层构造，直接发 tag 常量）→ 编译字面量 → 栈: [type_value, tag_value]
+         CONSTRUCT 1 弹 2 压 1（union 分支按 payload 类型匹配 member）。 */
+      size_t fcount = 0;
+      for (ast_node_t *f = n->fields; f; f = f->next) {
+        compile_expr(c, f);
         fcount++;
       }
       bcode_write_op(c->bc, BCODE_CONSTRUCT);

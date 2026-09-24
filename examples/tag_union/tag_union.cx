@@ -1,0 +1,49 @@
+// tag_union.cx -- tag union（标签联合：tag 前缀 + member payload 联合体）
+//
+//   声明     union Name { Tag: {field: type; ...}; Empty; ... }
+//           成员以分号分隔；member 名 = tag 名；payload 为匿名 struct 字段表；
+//           无 payload 的纯 tag member 直接 `Empty;`
+//   布局     data = [tag 整数（宽度按 member_count 自适应 1/2/4/8）] +
+//           [payload 联合体（自 payload_offset 起，C 对齐）]；纯 tag union 无 payload 区
+//   构造     .Shape{.Circle{ .radius = 1.0f32 }}（两层嵌套：外层 union 收 1 个
+//           member payload 值；payload member 值是内层 payload_struct 构造）；
+//           纯 tag member `.Shape{1}`（tag 整数值，编译期省略内层构造）
+//   判 tag   `s is Circle`（IS_TAG 指令比较 tag 整数，返回 bool）
+//   访问     s.radius 读 / s.radius = v 写：FIELD_GET/FIELD_SET 运行时按 tag
+//           反查所属 member；tag 不符 → error value（引擎级硬错误 = panic，
+//           对齐数组越界）
+//   实现     构造 → CONSTRUCT（union 分支）；判 tag → IS_TAG；访问 → FIELD_GET/SET
+
+// 全局 union：payload member（Circle/Rect）+ 纯 tag member（Empty）
+union Shape {
+  Circle: { radius: f32 };
+  Rect: { w: f32, h: f32 };
+  Empty;
+}
+
+func main(): i32 {
+    // payload member 构造：两层嵌套（外层 union + 内层 payload struct 构造）
+    var s = .Shape{.Circle{ .radius = 1.5f32 }};
+
+    // tag 判定：`s is Member` 返回 bool
+    if (s is Circle != true)  { return 1; }
+    if (s is Rect != false)   { return 2; }
+    if (s is Empty != false)  { return 3; }
+
+    // 字段访问：当前 tag 的 member 字段可直接读写
+    var r = s.radius;
+    if (r != 1.5f32) { return 4; }
+    s.radius = 2.5f32;
+    if (s.radius != 2.5f32) { return 5; }
+
+    // 纯 tag member 构造：直接写 tag 整数值
+    var e = .Shape{2};
+    if (e is Empty != true) { return 6; }
+    if (e is Circle != false) { return 7; }
+
+    // union 变量赋值：同 union 类型间
+    var s2: Shape = s;
+    if (s2.radius != 2.5f32) { return 8; }
+
+    return 0;
+}

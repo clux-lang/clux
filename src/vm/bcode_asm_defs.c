@@ -98,6 +98,10 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_UNWRAP]         = { "UNWRAP",         { BCODE_ASM_OP_NONE } },
     [BCODE_OPT_IS_NONE]    = { "OPT_IS_NONE",    { BCODE_ASM_OP_NONE } },
     [BCODE_LENGTH]         = { "LENGTH",        { BCODE_ASM_OP_NONE } },
+
+    [BCODE_PUSH_UNION]     = { "PUSH_UNION",    { BCODE_ASM_OP_NONE } },
+    [BCODE_UNION_MEMBER]   = { "UNION_MEMBER",  { BCODE_ASM_OP_STR } },
+    [BCODE_IS_TAG]         = { "IS_TAG",        { BCODE_ASM_OP_U32 } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

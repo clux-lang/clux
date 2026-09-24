@@ -3068,3 +3068,161 @@ TEST(Driver, RunFileTupleIndexOnNonTupleRejected) {
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- tag union（标签联合）---- */
+
+TEST(Driver, RunFileUnionConstructIsFieldAccessPasses) {
+  /* union 构造 + is 判 tag + 字段读写端到端：
+     - payload member 构造 .Shape{.Circle{...}} 两层嵌套
+     - `s is Member` 返回 bool（IS_TAG）
+     - 字段读取 s.radius / 写入 s.radius = v
+     - 纯 tag member 构造 .Shape{2}（tag 整数值） */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Rect: { w: f32, h: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Circle{ .radius = 1.5f32 }};\n"
+      "  if (s is Circle != true)  { return 1; }\n"
+      "  if (s is Rect != false)   { return 2; }\n"
+      "  if (s is Empty != false)  { return 3; }\n"
+      "  if (s.radius != 1.5f32)   { return 4; }\n"
+      "  s.radius = 2.5f32;\n"
+      "  if (s.radius != 2.5f32)   { return 5; }\n"
+      "  var e = .Shape{2};\n"
+      "  if (e is Empty != true)   { return 6; }\n"
+      "  if (e is Circle != false) { return 7; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionTypedVarAssignPasses) {
+  /* union 类型变量声明 + 同类型赋值 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: Shape = .Shape{.Circle{ .radius = 1.0f32 }};\n"
+      "  var s2: Shape = s;\n"
+      "  if (s2.radius != 1.0f32) { return 1; }\n"
+      "  if (s2 is Circle != true) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionLocalDefPasses) {
+  /* 局部 union（函数体内定义） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  union Shape {\n"
+      "    Circle: { radius: f32 };\n"
+      "    Empty;\n"
+      "  }\n"
+      "  var s = .Shape{.Circle{ .radius = 1.0f32 }};\n"
+      "  if (s is Circle != true) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionIsNonUnionRejected) {
+  /* is 左操作数非 union → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "func main(): i32 { var x = 1; if (x is Circle) { return 1; } return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionIsUnknownMemberRejected) {
+  /* is 右操作数非 union member → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Circle{ .radius = 1.0f32 }};\n"
+      "  if (s is Square) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionMemberCountMismatchRejected) {
+  /* union 构造字段数 != 1 → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Circle{ .radius = 1.0f32 }, .Circle{ .radius = 2.0f32 }};\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionUnknownFieldRejected) {
+  /* union 构造给出未知 member → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Square{ .radius = 1.0f32 }};\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionPayloadOnPureTagRejected) {
+  /* payload 构造落在纯 tag member → 编译期拒绝 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Empty{ .radius = 1.0f32 }};\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionFieldAccessMismatchTagPanics) {
+  /* 字段访问 tag 不符 → 运行期 error（引擎级硬错误 = panic）：
+     .Shape{.Circle{...}} 构造后 s is Circle；访问 s.radius 应成功；
+     换 Empty 后字段名不存在（Empty 无 payload）→ 构造 .Shape{1}
+     （Rect 有 payload 但未写字段）→ 访问 r.w 属 tag 不符。
+     此处验证 .Shape{.Rect{ .w = 1.0f32 }} 构造 + 正确 tag 访问正常。 */
+  std::string path = write_temp_file(
+      "union Shape {\n"
+      "  Circle: { radius: f32 };\n"
+      "  Rect: { w: f32, h: f32 };\n"
+      "  Empty;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s = .Shape{.Rect{ .w = 1.0f32, .h = 2.0f32 }};\n"
+      "  if (s is Rect != true) { return 1; }\n"
+      "  if (s.w != 1.0f32 || s.h != 2.0f32) { return 2; }\n"
+      "  s.h = 9.0f32;\n"
+      "  if (s.h != 9.0f32) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

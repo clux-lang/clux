@@ -22,6 +22,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
@@ -33,6 +34,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -577,7 +579,8 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
-  if (!bad && (!bt || bt->kind != TYPE_KIND_STRUCT)) {
+  if (!bad && (!bt || (bt->kind != TYPE_KIND_STRUCT &&
+                       bt->kind != TYPE_KIND_UNION))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
     diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -587,25 +590,44 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
     bad = true;
   }
 
-  /* 字段存在性 + 字段类型 */
+  /* 字段存在性 + 字段类型（struct：直接按名查表；union：反查所属 member，
+     字段名全局唯一——sema 已校验，命中即得字段类型） */
   int idx = -1;
   const type_t *ft = NULL;
   if (!bad) {
-    idx = struct_type_find_field(bt, m->field);
-    if (idx < 0) {
-      diag_error(sema->diag, sema_loc(sema, &as->base),
-                 "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
-                 bt->name.ptr, (int)m->field.len, m->field.ptr);
-      bad = true;
+    if (bt->kind == TYPE_KIND_STRUCT) {
+      idx = struct_type_find_field(bt, m->field);
+      if (idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, &as->base),
+                   "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
+                   bt->name.ptr, (int)m->field.len, m->field.ptr);
+        bad = true;
+      } else {
+        ft = struct_type_field(bt, (size_t)idx)->type;
+      }
     } else {
-      ft = struct_type_field(bt, (size_t)idx)->type;
+      int mi = -1;
+      union_type_find_field(bt, m->field, &mi, &idx);
+      if (mi < 0 || idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, &as->base),
+                   "union '%.*s' has no field '%.*s'", (int)bt->name.len,
+                   bt->name.ptr, (int)m->field.len, m->field.ptr);
+        bad = true;
+      } else {
+        const union_member_t *mem = union_type_member(bt, (size_t)mi);
+        if (!mem || !mem->payload_struct) {
+          bad = true; /* 防御：字段已命中则 payload 必存在 */
+        } else {
+          ft = struct_type_field(mem->payload_struct, (size_t)idx)->type;
+        }
+      }
     }
   }
 
   /* const 字段不可写 */
   if (!bad && value_has_const(base)) {
     diag_error(sema->diag, sema_loc(sema, &as->base),
-               "cannot assign to field of const struct");
+               "cannot assign to field of const value");
     return;
   }
 
@@ -1255,6 +1277,13 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
          查重 + type_struct_intern + 登记 sema->types（hoist 自动构造）+
          绑定 type value + 激活符号。 */
       sema_eval_struct_def(sema, (ast_struct_def_t *)s, scope);
+    } else if (s->kind == AST_UNION_DEF) {
+      /* 局部 union 定义提升：与 struct def 同构——payload 字段类型是类型
+         槽位，member/tag 名非变量可遮蔽，无需 prior_vars 遮蔽预检。
+         sema_eval_union_def 完成：member 查重 + payload 字段解析/查重 +
+         type_union_intern + 登记 sema->types（hoist 自动构造）+ 绑定 type
+         value + 激活符号。 */
+      sema_eval_union_def(sema, (ast_union_def_t *)s, scope);
     } else if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
       /* 统一解析签名（含 comptime：调用点折叠前符号 type 须就绪——
@@ -1269,8 +1298,9 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
-        s->kind == AST_STRUCT_DEF) {
-      /* 入口提升已处理（type def / enum def / struct def 均无子作用域） */
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF) {
+      /* 入口提升已处理（type def / enum def / struct def / union def 均无
+         子作用域） */
       prev = &s->next;
       s = s->next;
       continue;

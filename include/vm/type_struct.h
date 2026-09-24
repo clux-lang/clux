@@ -52,6 +52,11 @@ int struct_type_find_field(const type_t *t, strslice_t name);
 /** PUSH_STRUCT：分配空 struct_type（fields=NULL，不入池）+ 压其 type value */
 const type_t *type_struct_push(vm_t *vm);
 
+/** 分配开放 struct type（fields=NULL，不入池，**不压栈**）——union member
+ * payload 内部构造用（type_union_add_field 向开放 payload struct 追加字段）。
+ * 不向操作数栈压 type value；密封由 type_struct_seal 完成。 */
+const type_t *type_struct_alloc_open(vm_t *vm);
+
 /** DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略） */
 void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
                            const type_t *ftype);

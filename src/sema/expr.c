@@ -37,6 +37,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/type_union.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -762,16 +763,44 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return value_make_shadow(sema->vm, type_option_inner(ot));
     }
     case AST_MEMBER: {
-      /* 字段读取 p.field：object 求值 → 校验 struct → 按名查字段（struct_type_find_field）
-         → 返回字段类型 shadow。嵌套 p.a.b 递归（object 是 AST_MEMBER 时
-         sema_expr 返回内层字段类型）。字段不存在 → 报错。 */
+      /* 字段读取 p.field：object 求值 → 校验 struct/union → 按名查字段
+         （struct_type_find_field / union_type_find_field）→ 返回字段类型
+         shadow。嵌套 p.a.b 递归（object 是 AST_MEMBER 时 sema_expr 返回
+         内层字段类型）。字段不存在 → 报错。union 字段不做静态 tag 断言
+         （sema 不感知运行期 tag——运行期 FIELD_GET 反查 member + tag 校验，
+         不符返回 error value 即 panic）。 */
       ast_member_t *n = (ast_member_t *)*node;
       value_t *obj = sema_expr(sema, &n->object, scope);
       if (value_is_error(sema->vm, obj) ||
           value_is_type(obj, TYPE_KIND_VOID))
         return value_make_shadow(sema->vm, sema->vm->type_void);
       const type_t *ot = value_type(obj);
-      if (!ot || ot->kind != TYPE_KIND_STRUCT) {
+      if (!ot) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot access field of value of unknown type");
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      if (ot->kind == TYPE_KIND_UNION) {
+        /* union 字段：union_type_find_field 反查所属 member（字段名全局
+           唯一，sema 已校验）→ 返回该 member payload 字段类型 shadow */
+        int mi, fi;
+        union_type_find_field(ot, n->field, &mi, &fi);
+        if (mi < 0 || fi < 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "union '%.*s' has no field '%.*s'",
+                     (int)ot->name.len, ot->name.ptr,
+                     (int)n->field.len, n->field.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        const union_member_t *m = union_type_member(ot, (size_t)mi);
+        if (m && m->payload_struct) {
+          const struct_field_t *f =
+              struct_type_field(m->payload_struct, (size_t)fi);
+          if (f) return value_make_shadow(sema->vm, f->type);
+        }
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      if (ot->kind != TYPE_KIND_STRUCT) {
         char tn[64];
         sema_type_name(ot, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -1223,6 +1252,120 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, t);
       }
 
+      if (t->kind == TYPE_KIND_UNION) {
+        /* union 构造（.Shape{.Circle{...}} 两层嵌套，docs m2-design
+           §tag union）：外层 union 构造收 1 个 member payload value。
+           member 定位按值类型：payload member 值是内层 payload_struct 类型
+           （AST_CONSTRUCT 的 .Circle 构造），纯 tag member 值是 tag 整数
+           常量字面量（编译期省略内层构造，直接发 tag 常量）。 */
+        const union_type_t *ut = (const union_type_t *)t;
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "construct: union constructor expects exactly 1 member "
+                     "for %s, got %zu",
+                     tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        ast_node_t *f = n->fields;
+        if (f->kind == AST_CONSTRUCT_FIELD) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "construct: named field is not allowed for union member "
+                     "(use .Shape{.Circle{...}} form)");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        if (f->kind == AST_FILL) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "construct: fill is not supported for union member");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* member 定位：payload member（内层 .Circle{...} 构造，type 位 = member
+           名 AST_IDENT → 按名定位 payload_struct → 改写 type 位为类型引用，
+           使内层构造按 payload struct 类型正常推断/校验）；纯 tag member
+           （tag 整数常量字面量，编译期省略内层构造）。 */
+        int member_idx = -1;
+        if (f->kind == AST_CONSTRUCT) {
+          ast_construct_t *cf = (ast_construct_t *)f;
+          if (cf->type && cf->type->kind == AST_IDENT) {
+            const int mi = union_type_find_member(
+                t, ((ast_ident_t *)cf->type)->name);
+            if (mi < 0) {
+              char tn[64];
+              sema_type_name(t, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "union %s has no member '%.*s'",
+                         tn, (int)((ast_ident_t *)cf->type)->name.len,
+                         ((ast_ident_t *)cf->type)->name.ptr);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            const union_member_t *m = union_type_member(t, (size_t)mi);
+            if (!m || !m->payload_struct) {
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "union member '%.*s' has no payload (use tag value)",
+                         (int)m->name.len, m->name.ptr);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            /* 改写 type 位：member 名 → payload_struct 类型引用（登记 +
+               AST_TYPE_REF，compiler 发 LOAD_TYPE <id>） */
+            ast_node_t *ref =
+                sema_ct_type_ref(sema, m->payload_struct, cf->type);
+            if (!ref) return value_make_shadow(sema->vm, sema->vm->type_void);
+            ref->next = cf->type->next;
+            cf->type  = ref;
+            member_idx = mi;
+          }
+        }
+
+        /* 求值 member payload value（注入 anon_ct：内层 .Circle{...} 匿名
+           构造按 payload struct 类型推断） */
+        value_t *fv = sema_expr(sema, &f, scope);
+        if (value_is_error(sema->vm, fv) ||
+            value_is_type(fv, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        const type_t *vt = value_type(fv);
+
+        /* member 定位确认：payload member（struct 值 = payload_struct）或纯
+           tag member（整数值 = tag）。已按名定位时直接确认命中。 */
+        bool found = false;
+        if (member_idx >= 0) {
+          if (vt && vt->kind == TYPE_KIND_STRUCT &&
+              ut->members[(size_t)member_idx].payload_struct == vt)
+            found = true;
+        } else if (vt && vt->kind == TYPE_KIND_STRUCT) {
+          for (size_t i = 0; i < ut->member_count; i++) {
+            if (ut->members[i].payload_struct &&
+                ut->members[i].payload_struct == vt) {
+              found = true;
+              break;
+            }
+          }
+        } else if (vt && vt->kind == TYPE_KIND_INT) {
+          /* 纯 tag member：值是 tag 整数常量（AST_INT_LIT，运行期
+             op_construct 按整数值匹配纯 tag member）。校验整数值在 member
+             范围内且对应 member 无 payload。 */
+          if (f->kind == AST_INT_LIT) {
+            uint64_t tv = ((ast_int_lit_t *)f)->value;
+            if (tv < ut->member_count && !ut->members[tv].payload_struct)
+              found = true;
+          }
+        }
+        if (!found) {
+          char tn[64], fn[64];
+          sema_type_name(t, tn, sizeof tn);
+          sema_type_name(vt, fn, sizeof fn);
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "construct: member value of type %s does not match any "
+                     "member of union %s",
+                     fn, tn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        return value_make_shadow(sema->vm, t);
+      }
+
       if (t->kind != TYPE_KIND_ARRAY) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "construct: unsupported type (only array, optional, struct "
@@ -1430,6 +1573,54 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       return value_make_shadow(sema->vm, sema->vm->type_void);
     }
     return result;
+  }
+
+  /* is：tag union tag 判定（<expr> is <member>，docs m2-design §tag
+     union）。lhs shadow 求值（必须 union 类型）；rhs 是 member 名表达式
+     （AST_IDENT）→ 编译期查 member → 折叠 rhs 为 AST_INT_LIT（member 的
+     tag 整数值，compiler 发 IS_TAG 立即数，零感知 union 类型）。member
+     名不是类型名（payload struct 匿名、纯 tag member 无类型），直接按名
+     查 member（union_type_find_member）。合法 → 返回 bool shadow。 */
+  if (token_is(b->op, "is")) {
+    value_t *expr = sema_expr(sema, &b->lhs, scope);
+    if (value_is_error(sema->vm, expr) ||
+        value_is_type(expr, TYPE_KIND_VOID))
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    const type_t *ut = value_type(expr);
+    if (!ut || ut->kind != TYPE_KIND_UNION) {
+      char tn[64];
+      op_type_name(expr, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "is: left operand must be a union value, got %s", tn);
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    /* rhs：member 名（AST_IDENT）。编译期校验 member 存在 + 折叠为 tag
+       整数（compiler 发 IS_TAG 立即数）。非 member 名表达式（如函数调用/
+       复合）报错。 */
+    if (!b->rhs || b->rhs->kind != AST_IDENT) {
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "is: right operand must be a member name");
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    const strslice_t mname = ((ast_ident_t *)b->rhs)->name;
+    const int mi = union_type_find_member(ut, mname);
+    if (mi < 0) {
+      char tn[64];
+      sema_type_name(ut, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, &b->base),
+                 "is: union %s has no member '%.*s'", tn,
+                 (int)mname.len, mname.ptr);
+      return value_make_shadow(sema->vm, sema->vm->type_void);
+    }
+    /* 折叠 rhs → AST_INT_LIT（tag 值）：compiler 发 IS_TAG <tag> 立即数。
+       与 comptime 折叠同模式：sema 阶段确定 member 归属，下游零感知。 */
+    const union_member_t *m = union_type_member(ut, (size_t)mi);
+    ast_node_t *lit = ast_int_lit_new(sema->arena, b->rhs->tok_begin,
+                                      b->rhs->tok_end);
+    if (!lit) return value_make_shadow(sema->vm, sema->vm->type_void);
+    ((ast_int_lit_t *)lit)->value = m ? (uint64_t)m->tag : 0u;
+    b->rhs = lit;
+    return value_make_shadow(sema->vm, sema->vm->type_bool);
   }
 
   /* extends：类型兼容判断（编译期类型计算，ctfe 求值后折叠为常量）。

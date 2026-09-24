@@ -10,6 +10,7 @@ extern "C" {
 #include "parser/ast_node.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_type_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -29,6 +30,16 @@ extern "C" {
  */
 
 /* ---- 工具 ---- */
+
+/**
+ * 从类型构造类型表达式 AST（AST_TYPE_REF 携带登记的 "__type_N" 名字，
+ * 编译器经 hoist 提升区构造；内建类型名字 = 规范名，type_lookup 兜底）。
+ * 位置借用 origin。返回 NULL = OOM/登记失败。
+ * 用途：sema_ct_lit 折叠复杂类型常量 + union 构造改写内层 member 构造
+ * 的 type 位（member 名 → payload_struct 类型引用）。
+ */
+ast_node_t *sema_ct_type_ref(sema_t *sema, const type_t *t,
+                             const ast_node_t *origin);
 
 /**
  * 编码真实 value → 编译期常量（标量/字符串）。字符串复制到 sema arena。
@@ -104,6 +115,19 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope);
  *  失败返回 false（诊断已记录）。
  */
 bool sema_eval_struct_def(sema_t *sema, ast_struct_def_t *sd, sema_scope_t *scope);
+
+/**
+ * 求值 tag union 定义（union Name { Tag: {field: type; ...}; Empty; ... }）：
+ *  1. 逐 member：payload 字段类型解析（sema_resolve_type_slot 折叠为
+ *     AST_TYPE_REF）→ 未知/非类型槽位报错；member 名查重 + payload 字段名
+ *     全局唯一校验（不同 member 的同名字段无法静态区分归属，运行期反查歧义）
+ *  2. type_union_intern 构造 union 类型（拷贝 member 表 + 各 member payload
+ *     struct 密封 + tag 前缀/联合体布局 + 去重 intern）
+ *  3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type value
+ *  4. 激活符号；定义点保留（进字节码，运行时 hoist 构造）
+ *  失败返回 false（诊断已记录）。
+ */
+bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope);
 
 #ifdef __cplusplus
 }

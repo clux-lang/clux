@@ -67,6 +67,9 @@ typedef struct vm_t {
     /* ---- 元组类型池（按元素类型+顺序去重 intern，vm 拥有生命周期） ---- */
     vec_t *tuple_types;    /* tuple_type_t*，元素为元组类型 */
 
+    /* ---- tag union 类型池（按 member 表内容去重 intern，vm 拥有生命周期） ---- */
+    vec_t *union_types;    /* union_type_t*，元素为 tag union 类型 */
+
     /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
     /* 内建类型固定 id 0..14（vm_init_builtins 登记）；程序类型 id 由编译器
        分配（>=16），运行期 DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等
