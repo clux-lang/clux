@@ -19,6 +19,9 @@ typedef struct {
     ast_node_t *type;          /* 类型表达式（如 AST_IDENT / AST_ARRAY） */
     ast_node_t *fields;        /* 字段值表达式兄弟链（head） */
     ast_node_t *fields_last;   /* 字段值表达式兄弟链（tail） */
+    uint32_t    member_tag;    /* union 构造：sema 定位的 member 下标（tag 值），
+                                  compiler 发 tag 哨兵 + CONSTRUCT 2 用；其他
+                                  类型构造未用（0） */
 } ast_construct_t;
 
 static inline ast_node_t *ast_construct_new(arena_t *arena,

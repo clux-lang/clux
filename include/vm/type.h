@@ -188,29 +188,31 @@ typedef struct tuple_type_t {
  * union_member_t / union_type_t: tag union 类型（type_t 的扩展，见
  * m2-design §tag union）
  *
- * tag union：member 名 = tag 名，每个 member 可携带匿名 struct payload
- * （字段表，与 struct 字段同构）或无 payload（纯 tag member）。
+ * tag union 与 struct 同构语法：`union Name { field: type; ... }`——字段
+ * 直接平铺，每个字段即一个 member（member 名 = tag 名，member 类型 = payload
+ * 类型）。构造强制使用单个字段（.Name{ .field = value }），运行期 tag 记录
+ * 当前激活的 member，字段访问须 tag 匹配否则硬错误（panic）。
  * 存储布局（data 块，size = type->size）：
  *   [0 .. tag_size)              tag 整数值（tag 编号 0..member_count-1，
  *                                按 member_count 自适应宽度 u8/u16/u32/u64）
  *   [payload_offset .. size)     各 member payload 联合体（max member size，
- *                                按 C 对齐规则对齐；纯 tag member 无 payload）
- * 字段绝对偏移 = payload_offset + member 内字段偏移。
+ *                                按 C 对齐规则对齐）
+ * member payload 偏移 = payload_offset（单字段，无内部偏移）。
  *
- * member 表由 vm 拥有（SEAL 时深拷贝）。每个 member 的 payload 结构
- * （payload_struct）在 seal 时按字段表唯一构建——字段访问运行期按 tag
- * 反查所属 member → 该 member 的 payload_struct → 字段偏移。tag 判定
- * `x is Member` 运行期比较 data 首部 tag 整数与编译期 member 的 tag 值。
+ * member 表由 vm 拥有（SEAL 时深拷贝）。tag 判定 `x is Member` 运行期比较
+ * data 首部 tag 整数与编译期 member 的 tag 值；字段访问 `x.field`（field =
+ * member 名）运行期反查 member + 校验 tag，不符 → 硬错误（panic）。
  *
- * 构造 `.Shape{.Circle{...}}`：外层 CONSTRUCT（union 类型）收 1 个
- * member payload value + 隐式 tag；member payload 由内层 CONSTRUCT
- * （member 的 payload_struct 类型）构造——两层嵌套。
+ * 构造 `.Value{.i = 42}`：CONSTRUCT（union 类型）收 2 个成员——显式 tag
+ * 哨兵（member 下标整数）+ payload 值（struct 同构单字段构造，消除同类型
+ * member 歧义）。
  */
 typedef struct union_member_t {
-    strslice_t      name;           /* member/tag 名（seal 时拷贝，vm 拥有） */
-    uint32_t        tag;            /* tag 编号（0..member_count-1） */
-    const type_t   *payload_struct; /* member payload 的匿名 struct 类型
-                                       （seal 时构建；NULL = 纯 tag member） */
+    strslice_t      name;         /* member/tag 名（seal 时拷贝，vm 拥有） */
+    uint32_t        tag;          /* tag 编号（0..member_count-1） */
+    const type_t   *payload_type; /* member payload 类型（seal 时引用，归
+                                     type 池；不可为 NULL——所有 member
+                                     都有类型） */
 } union_member_t;
 
 typedef struct union_type_t {

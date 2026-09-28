@@ -409,46 +409,45 @@ if (f != nil) { var g = f.!; var r = g(x); }
 
 ---
 
-### 13. tag union（2026-09-24 定稿）
+### 13. tag union（2026-09-24 定稿，struct 同构平铺字段）
 
-**tag union（标签联合）**：`union` 关键字声明，member 名 = tag 名，payload 为匿名 struct 字段表；纯 tag member 无 payload。字段访问不做成 optional 解包，而是**运行时按 tag 校验**——tag 不符直接返回硬错误 value（panic，对齐数组越界）。
+**tag union（标签联合）**：`union` 关键字声明，与 struct 同构平铺字段语法，仅关键字不同——字段名 = tag 名 = member 名，字段类型 = payload 类型，每个字段即一个 member。字段访问不做成 optional 解包，而是**运行时按 tag 校验**——tag 不符直接返回硬错误 value（panic，对齐数组越界）。
 
 ```
 union Shape {
-  Circle: { radius: f32 };     // payload member：payload = 匿名 struct 字段表
-  Rect: { w: f32, h: f32 };    // payload member
-  Empty;                       // 纯 tag member：无 payload
+  radius: f32;     // member "radius"：tag=0，payload=f32
+  w: f32;          // member "w"：tag=1，payload=f32
+  h: f32;          // member "h"：tag=2，payload=f32
 }
 ```
 
 **存储布局**（`type_union_intern` 计算）：
 - `data = [tag 整数] + [payload 联合体]`
 - tag 宽度按 member_count 自适应：`<=255 → 1 字节`，`<=65535 → 2 字节`，`<=UINT32_MAX → 4 字节`，否则 8 字节
-- payload 区从 `payload_offset = align_up(tag_size, max payload align)` 起（C 对齐）
-- 字段绝对偏移 = `payload_offset + member 内字段偏移`（payload struct 的 offset 表由 `type_struct_intern` 计算）
-- 纯 tag union（无任何 payload member）无 payload 区，只有 tag 整数
+- payload 区从 `payload_offset = align_up(tag_size, max member align)` 起（C 对齐）
+- member payload 偏移 = `payload_offset`（单字段，无内部偏移）
+- 纯 tag union（单字段场景不适用——每个字段必有类型；无 payload 区的旧设计已移除）
 
 **语法**：
 
 | 操作 | 语法 | 说明 |
 |------|------|------|
-| 定义 | `union Name { Member: {f: T; ...}; Empty; }` | member 以分号分隔；payload 复用 struct 字段表语法 |
-| 构造（payload） | `.Shape{.Circle{ .radius = 1.0f32 }}` | 两层嵌套：外层 union 构造收 1 个 member payload value；内层是 payload_struct 构造 |
-| 构造（纯 tag） | `.Shape{1}` | 直接写 tag 整数值，编译期省略内层构造 |
-| 判 tag | `s is Circle` | 左值 union 对象、右值 member 名；编译期折叠为 tag 整数 → 运行期 `IS_TAG` 比较 |
-| 访问 | `s.radius` / `s.radius = v` | 按名反查所属 member → payload_offset + 字段偏移；**tag 不符 → panic** |
+| 定义 | `union Name { f: T; g: U; ... }` | 与 struct 同构平铺字段；字段名 = member 名（tag 名） |
+| 构造 | `.Shape{.radius = 1.5f32}` | 强制恰好 1 个具名字段；字段名 = member 名，tag 由编译器按名定位 |
+| 判 tag | `s is radius` | 左值 union 对象、右值 member 名；编译期折叠为 tag 整数 → 运行期 `IS_TAG` 比较 |
+| 访问 | `s.radius` / `s.radius = v` | 按名反查所属 member → payload_offset；**tag 不符 → panic** |
 
 **关键语义**：
-- member 名 = tag 名，**全局唯一**（sema 校验）；payload 字段名也须跨 member 唯一（运行期按名反查无歧义）
+- 字段名 = member 名 = tag 名，**全局唯一**（sema 校验），单字段构造无字段名歧义
 - `is` 运算符：`<expr> is <member>`，右操作数必须是 member 名（sema 折叠为 `AST_INT_LIT`（tag 值），compiler 只发 `IS_TAG <tag>` 立即数——与 comptime 折叠同模式，compiler 零感知 union 类型）
 - 字段访问不做静态 tag 断言（sema 不感知运行期 tag），运行期 `FIELD_GET`/`FIELD_SET` 反查 member + tag 校验，不符返回硬错误（panic）
 - 同 union 类型间赋值正常（`var s2: Shape = s`，blit 拷贝整个 data 块含 tag）
-- union 构造字段数强制 == 1（外层构造收 1 个 member payload value）
+- 构造协议：**显式 tag 哨兵**（`CONSTRUCT 2` 收 tag 值 + payload 值两个成员）——tag 值 = member 下标（整数，宽度按 tag 值 <128/<32768/其余 选 i8/i16/i32），消除同类型 member 歧义（`union Value { a: i32; b: i32; }` 按 tag 定位）
 
 **实现**：
-- VM：`union_type_t`（member 表 + tag 前缀/联合体布局），指令 `PUSH_UNION` / `UNION_MEMBER` / `IS_TAG`；`op_construct` union 分支；`op_field_get/set` union 分支
-- compiler：hoist 两遍构造（`PUSH_UNION` → `DEFINE_TYPE` → `LOAD_TYPE` → `UNION_MEMBER`×N + payload 字段 `DEFINE_FIELD`×M → `SEAL`）+ 顶层名字绑定 + 构造编译 + `IS_TAG` 编译
-- sema：`sema_eval_union_def`（member/payload 字段解析查重 + intern + 登记 + 激活）；局部 union 定义与 struct 同构（3a 符号注册 + walk_block 入口提升）
+- VM：`union_type_t`（member 表 + tag 前缀/联合体布局），指令 `PUSH_UNION` / `UNION_MEMBER` / `IS_TAG`；`op_construct` union 分支（tag 哨兵 + payload，n==2）；`op_field_get/set` union 分支
+- compiler：hoist 两遍构造（`PUSH_UNION` → `DEFINE_TYPE` → `LOAD_TYPE` → `UNION_MEMBER`×N + member payload 类型 `DEFINE_FIELD`×N → `SEAL`）+ 顶层名字绑定 + 构造编译（tag 哨兵 + payload + `CONSTRUCT 2`）+ `IS_TAG` 编译
+- sema：`sema_eval_union_def`（平铺字段解析查重 + intern + 登记 + 激活）；局部 union 定义与 struct 同构（3a 符号注册 + walk_block 入口提升）；构造分支按名定位 member 写回 `member_tag`
 
 ---
 

@@ -564,7 +564,7 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return NULL;
     }
     if (st->kind == TYPE_KIND_UNION) {
-        type_union_add_field(vm, st, name, ft);
+        type_union_set_member_type(vm, st, ft);
         return NULL;
     }
     return value_make_error(vm, "exec: define field expects an open struct or union type on top");
@@ -735,57 +735,47 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make(vm, t, data);
     }
 
-    /* tag union 构造：.Shape{.Circle{...}} 两层 CONSTRUCT 嵌套——
-       n == 1：外层收 1 个成员值。成员有两种形态：
-       - payload member：值是 member payload_struct 类型（内层 .Circle
-         CONSTRUCT 构造），按 payload_struct blit 到 payload 区
-       - 纯 tag member：值是 tag 整数值字面量（编译期省略内层构造，直接
-         发 tag 常量），只写 tag 不写 payload
-       data = [tag][payload]；tag 写 member 的 tag 值。 */
+    /* tag union 构造：.Value{.i = 42}（struct 同构单字段构造，docs m2-design
+       §tag union）——显式 tag 哨兵协议（消除同类型 member 歧义，指令单一路径）：
+       栈布局 [type_value, tag_value, payload_value]（tag 在底、payload 在顶），
+       n == 2（tag 值 + payload 值两个成员）。tag 值读自成员[0]（整数值 =
+       member 下标），payload 按该 member 的 payload_type implicit_cast 后
+       blit 到 payload 区（data 清零未覆盖位自动零值）。 */
     if (t->kind == TYPE_KIND_UNION) {
         const union_type_t *ut = (const union_type_t *)t;
-        if (n != 1)
+        if (n != 2)
             return value_make_error(vm,
-                "construct: union constructor expects exactly 1 member");
-        value_t *payload = elems[0];
-        if (value_is_shadow(payload))
+                "construct: union constructor expects tag + payload (n=2)");
+        value_t *tag_v = elems[0];
+        value_t *payload = elems[1];
+        if (value_is_shadow(payload) || value_is_shadow(tag_v))
             return value_make_shadow(vm, t);
-        const type_t *pt = payload ? value_type(payload) : NULL;
-        int mi = -1;   /* 定位 member 下标 */
-        bool pure = false;  /* 纯 tag member：值即 tag 整数 */
-        if (pt && pt->kind == TYPE_KIND_STRUCT) {
-            /* payload member：值类型须是某 member 的 payload_struct */
-            for (size_t i = 0; i < ut->member_count; i++) {
-                if (ut->members[i].payload_struct &&
-                    ut->members[i].payload_struct == pt) {
-                    mi = (int)i;
-                    break;
-                }
-            }
-        } else if (pt && pt->kind == TYPE_KIND_INT) {
-            /* 纯 tag member：值是 tag 整数值字面量（i32 等） */
-            int64_t tagv = 0;
-            switch (pt->size) {
-            case 1: tagv = (int64_t)*(const int8_t  *)value_data(payload); break;
-            case 2: tagv = (int64_t)*(const int16_t *)value_data(payload); break;
-            case 4: tagv = (int64_t)*(const int32_t *)value_data(payload); break;
-            default: tagv = *(const int64_t *)value_data(payload); break;
-            }
-            if (tagv >= 0 && (uint64_t)tagv < ut->member_count &&
-                !ut->members[tagv].payload_struct) {
-                mi = (int)tagv;
-                pure = true;
-            }
-        }
-        if (mi < 0)
+        /* tag 值：整数（member 下标） */
+        const type_t *tt = tag_v ? value_type(tag_v) : NULL;
+        if (!tt || tt->kind != TYPE_KIND_INT)
             return value_make_error(vm,
-                "construct: union member payload type mismatch");
-        const union_member_t *m = &ut->members[mi];
+                "construct: union member tag value must be an integer");
+        int64_t tagv = 0;
+        switch (tt->size) {
+        case 1: tagv = (int64_t)*(const int8_t  *)value_data(tag_v); break;
+        case 2: tagv = (int64_t)*(const int16_t *)value_data(tag_v); break;
+        case 4: tagv = (int64_t)*(const int32_t *)value_data(tag_v); break;
+        default: tagv = *(const int64_t *)value_data(tag_v); break;
+        }
+        if (tagv < 0 || (size_t)tagv >= ut->member_count)
+            return value_make_error(vm,
+                "construct: union member tag value out of range");
+        const union_member_t *m = &ut->members[(size_t)tagv];
+        if (!m->payload_type)
+            return value_make_error(vm, "construct: union member type missing");
+        /* 隐式转换 payload 值 → member 类型（同类型身份短路；字面量 i32 →
+           i64 成员宽度提升） */
+        value_t *casted = value_implicit_cast(vm, payload, m->payload_type);
+        if (value_is_error(vm, casted)) return casted;
         void *data = value_alloc_data(vm->alloc, t);  /* 清零 */
         union_store_tag_raw(data, ut->tag_size, m->tag);
-        if (!pure && m->payload_struct)
-            value_blit_raw(vm, (uint8_t *)data + ut->payload_offset,
-                           value_data(payload), m->payload_struct);
+        value_blit_raw(vm, (uint8_t *)data + ut->payload_offset,
+                       value_data(casted), m->payload_type);
         return value_make(vm, t, data);
     }
 
@@ -823,19 +813,18 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *self = exec_stack_pop(vm);
     const type_t *t = self ? value_type(self) : NULL;
     if (!t || t->kind != TYPE_KIND_STRUCT) {
-        /* union 分支：按字段名反查所属 member → 读 data 首部 tag →
+        /* union 分支：字段名 = member 名，按名反查 → 读 data 首部 tag →
            tag 不符 → error value（引擎级硬错误 = panic，对齐数组越界）；
-           相符 → 绝对偏移 = payload_offset + member 内字段偏移 */
+           相符 → 绝对偏移 = payload_offset（单字段，无内部偏移） */
         if (t && t->kind == TYPE_KIND_UNION) {
-            int mi, fi;
-            union_type_find_field(t, name, &mi, &fi);
-            if (mi < 0 || fi < 0)
-                return value_make_error(vm, "exec: no such union field");
+            int mi = union_type_find_member(t, name);
+            if (mi < 0)
+                return value_make_error(vm, "exec: no such union member field");
             const union_member_t *m = union_type_member(t, (size_t)mi);
-            const struct_type_t *ps = (const struct_type_t *)m->payload_struct;
-            const struct_field_t *f = struct_type_field(&ps->base, (size_t)fi);
+            if (!m->payload_type)
+                return value_make_error(vm, "exec: union member type missing");
             if (value_is_shadow(self))
-                return value_make_shadow(vm, f->type);
+                return value_make_shadow(vm, m->payload_type);
             uint64_t tag = union_read_tag(self);
             if (tag != (uint64_t)m->tag) {
                 char buf[128];
@@ -844,9 +833,8 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
                          (int)name.len, name.ptr, (unsigned)m->tag);
                 return value_make_error(vm, buf);
             }
-            return value_make_borrowed(vm, f->type,
-                (uint8_t *)value_data(self) + union_type_payload_offset(t) +
-                    f->offset);
+            return value_make_borrowed(vm, m->payload_type,
+                (uint8_t *)value_data(self) + union_type_payload_offset(t));
         }
         return value_make_error(vm, "exec: field get expects a struct value");
     }
@@ -874,13 +862,12 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
         /* union 分支：与 FIELD_GET 同款 tag 检查——字段存在但 tag 不符
            → error value（引擎级硬错误，对齐数组越界） */
         if (t && t->kind == TYPE_KIND_UNION) {
-            int mi, fi;
-            union_type_find_field(t, name, &mi, &fi);
-            if (mi < 0 || fi < 0)
-                return value_make_error(vm, "exec: no such union field");
+            int mi = union_type_find_member(t, name);
+            if (mi < 0)
+                return value_make_error(vm, "exec: no such union member field");
             const union_member_t *m = union_type_member(t, (size_t)mi);
-            const struct_type_t *ps = (const struct_type_t *)m->payload_struct;
-            const struct_field_t *f = struct_type_field(&ps->base, (size_t)fi);
+            if (!m->payload_type)
+                return value_make_error(vm, "exec: union member type missing");
             if (value_is_shadow(self))
                 return self;
             uint64_t tag = union_read_tag(self);
@@ -891,12 +878,12 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
                          (int)name.len, name.ptr, (unsigned)m->tag);
                 return value_make_error(vm, buf);
             }
-            value_t *casted = value_implicit_cast(vm, val, f->type);
+            value_t *casted = value_implicit_cast(vm, val, m->payload_type);
             if (value_is_error(vm, casted)) return casted;
             void *dst = (uint8_t *)value_data(self) +
-                        union_type_payload_offset(t) + f->offset;
-            value_dispose_raw(vm, dst, f->type);
-            value_blit_raw(vm, dst, value_data(casted), f->type);
+                        union_type_payload_offset(t);
+            value_dispose_raw(vm, dst, m->payload_type);
+            value_blit_raw(vm, dst, value_data(casted), m->payload_type);
             return self;
         }
         return value_make_error(vm, "exec: field set expects a struct value");

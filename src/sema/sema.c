@@ -212,14 +212,14 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       break;
     }
     case TYPE_KIND_UNION: {
-      /* union 类型：各 member 的 payload struct 也是程序类型（布局依赖）。
-         依赖后序：先登记依赖，hoist pass 2 先构造 payload struct 再密封
+      /* union 类型：各 member 的 payload 类型也是程序类型（布局依赖）。
+         依赖后序：先登记依赖，hoist pass 2 先构造 payload 类型再密封
          union（SEAL 算布局需要 payload size/align 已确定）。 */
       size_t n = union_type_member_count(t);
       for (size_t i = 0; i < n; i++) {
         const union_member_t *m = union_type_member(t, i);
-        if (m && m->payload_struct)
-          sema_type_register(sema, m->payload_struct);
+        if (m && m->payload_type)
+          sema_type_register(sema, m->payload_type);
       }
       break;
     }

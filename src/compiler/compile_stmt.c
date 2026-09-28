@@ -248,11 +248,12 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_UNION_DEF: {
-    /* union Name { Tag: {fields}; Empty; ... } 名字绑定（顶层 union 定义）：
-       与 struct def 同构——union 类型在 hoist 区构造（pass 2 SEAL 完成），
-       此处 LOAD_TYPE <union_id>（sema 登记的 type_id 写回节点）→
+    /* union Name { i: i32; f: f32; ... } 名字绑定（顶层 union 定义）：
+       与 struct def 同构——union 类型在 hoist 区构造（pass 2 SEAL 完成，
+       UNION_MEMBER×N + DEFINE_FIELD 设 member payload 类型），此处
+       LOAD_TYPE <union_id>（sema 登记的 type_id 写回节点）→
        PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
-       （运行时 type_lookup 解析 `var s: Shape`）。 */
+       （运行时 type_lookup 解析 `var s: Value`）。 */
     ast_union_def_t *n = (ast_union_def_t *)node;
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */

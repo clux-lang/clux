@@ -198,16 +198,16 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
     }
     case TYPE_KIND_UNION: {
         /* 按当前 tag 的 member 渲染：读 data 首部 tag → 定位 member →
-           payload 区按 payload_struct 递归（纯 tag member 无 payload 区） */
+           payload 区按 member payload 类型递归 */
         uint64_t tag = union_read_tag(v);
         const union_member_t *m = union_type_member(t, (size_t)tag);
         if (m && m->name.ptr)
             string_append_bytes(out, m->name.ptr, m->name.len);
         else
             string_append_cstr(out, "<tag?>");
-        if (m && m->payload_struct) {
+        if (m && m->payload_type) {
             string_append_cstr(out, ": ");
-            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->payload_struct,
+            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->payload_type,
                               (uint8_t *)value_data(v) + union_type_payload_offset(t)),
                             out);
         }

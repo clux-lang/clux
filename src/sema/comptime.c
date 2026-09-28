@@ -150,7 +150,7 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
    LOAD_TYPE <内建 id>（别名透明）。复合类型结构依赖由登记递归覆盖。
    位置借用 origin（折叠节点位置，诊断定位不变）。
    公共入口：union 构造分支改写内层 member 构造的 type 位（member 名 →
-   payload_struct 类型 → AST_TYPE_REF）也用此函数。 */
+   payload 类型 → AST_TYPE_REF）也用此函数。 */
 ast_node_t *sema_ct_type_ref(sema_t *sema, const type_t *t,
                              const ast_node_t *origin) {
   if (!sema || !t) return NULL;
@@ -980,22 +980,18 @@ bool sema_eval_struct_def(sema_t *sema, ast_struct_def_t *sd, sema_scope_t *scop
 }
 
 /* ===========================================================================
- * tag union 定义求值（union Name { Tag: {field: type; ...}; Empty; ... }）
+ * tag union 定义求值（union Name { field: type; ... }）
  *
- * union 是"tag 前缀 + 各 member payload 联合体"类型：member 名 = tag 名，
- * 每个 member 可携带匿名 struct payload（字段表）或无 payload（纯 tag）。
- * 定义点在 pass1b 与全局 type/enum/struct def 一起求值（先于函数签名解析）：
- *   1. 逐 member：payload 字段类型解析（sema_resolve_type_slot 折叠为
- *      AST_TYPE_REF）→ 未知/非类型槽位报错；member 名查重 + payload 字段名
- *      全局唯一校验（不同 member 的同名字段无法静态区分归属，运行期 FIELD_GET
- *      反查会歧义）
- *   2. 逐 payload 字段表构造匿名 struct 类型（type_struct_intern，立即密封）
- *      + sema_type_register 登记（hoist 依赖后序构造 union 前先构造 payload）
- *   3. type_union_intern 构造 union 类型（拷贝 member 表 + tag 前缀/联合体
+ * union 与 struct 同构语法：字段直接平铺，每个字段即一个 member（member 名
+ * = tag 名，member 类型 = payload 类型）。定义点在 pass1b 与全局
+ * type/enum/struct def 一起求值（先于函数签名解析）：
+ *   1. 逐字段类型解析（sema_resolve_type_slot 折叠为 AST_TYPE_REF）→
+ *      未知/非类型槽位报错；字段名查重（member 名 = tag 名，须全局唯一）
+ *   2. type_union_intern 构造 union 类型（拷贝 member 表 + tag 前缀/联合体
  *      布局 + 去重 intern，立即密封）
- *   4. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type
+ *   3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type
  *      value 到编译期 vm 作用域（var s: Shape 经 type_lookup 解析）
- *   5. 激活符号；定义点保留（进字节码，运行时 hoist 构造 + 名字绑定）
+ *   4. 激活符号；定义点保留（进字节码，运行时 hoist 构造 + 名字绑定）
  * =========================================================================== */
 
 bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope) {
@@ -1005,9 +1001,9 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
 
   vm_t *vm = sema->vm;
 
-  /* 1. 逐 member：payload 字段类型解析 + member 名查重 + 字段名全局唯一 */
+  /* 1. 逐字段（member）类型解析 + 查重（字段名 = tag 名，重复报错） */
   size_t n = 0;
-  for (ast_node_t *mn = ud->members; mn; mn = mn->next) n++;
+  for (ast_node_t *fn = ud->fields; fn; fn = fn->next) n++;
   union_member_t *members = NULL;
   if (n > 0) {
     members = (union_member_t *)allocator_new_ex(
@@ -1018,113 +1014,40 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
 
   size_t i = 0;
   bool ok = true;
-  for (ast_node_t *mn = ud->members; mn; mn = mn->next, i++) {
-    ast_union_member_t *um = (ast_union_member_t *)mn;
-    members[i].name           = um->name;
-    members[i].tag            = (uint32_t)i;
-    members[i].payload_struct = NULL;
+  for (ast_node_t *fn = ud->fields; fn; fn = fn->next, i++) {
+    ast_struct_field_t *sf = (ast_struct_field_t *)fn;
+    members[i].name         = sf->name;
+    members[i].tag          = (uint32_t)i;
+    members[i].payload_type = NULL;
 
-    /* member 名查重（member 名 = tag 名，须全局唯一） */
+    /* 字段名（member 名 = tag 名）查重 */
+    bool dup = false;
     for (size_t j = 0; j < i; j++) {
-      if (members[j].name.len == um->name.len && members[j].name.ptr &&
-          memcmp(members[j].name.ptr, um->name.ptr, um->name.len) == 0) {
-        diag_error(sema->diag, sema_loc(sema, mn),
+      if (members[j].name.len == sf->name.len && members[j].name.ptr &&
+          memcmp(members[j].name.ptr, sf->name.ptr, sf->name.len) == 0) {
+        diag_error(sema->diag, sema_loc(sema, fn),
                    "union '%.*s': duplicate member name '%.*s'",
-                   (int)ud->name.len, ud->name.ptr, (int)um->name.len,
-                   um->name.ptr);
-        ok = false;
-        break;
-      }
-    }
-
-    /* 纯 tag member：无 payload 字段表 */
-    if (!um->fields) continue;
-
-    /* payload 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，
-       别名透明）——内建类型名与已登记的具名类型均可用；未知类型报错。 */
-    size_t fc = 0;
-    for (ast_node_t *fn = um->fields; fn; fn = fn->next) fc++;
-    struct_field_t *fields = NULL;
-    if (fc > 0) {
-      fields = (struct_field_t *)allocator_new_ex(
-          vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL,
-          NULL, fc);
-      if (!fields) panic("sema: out of memory allocating union member fields");
-    }
-
-    size_t fi = 0;
-    for (ast_node_t *fn = um->fields; fn; fn = fn->next, fi++) {
-      ast_struct_field_t *sf = (ast_struct_field_t *)fn;
-      const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
-      if (!ft) {
-        diag_error(sema->diag, sema_loc(sema, sf->type),
-                   "union '%.*s': unknown field type for '%.*s'",
                    (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
                    sf->name.ptr);
         ok = false;
-        continue;
+        dup = true;
+        break;
       }
-      /* payload 字段名全局唯一校验（不同 member 的同名字段运行期反查歧义）：
-         本 member 内查重（fields[0..fi-1] 已收集）+ 跨 member 查重（先前
-         member 的 payload_struct 已密封，经 struct_type_field_count/field
-         读字段表） */
-      bool dup = false;
-      for (size_t j = 0; j < fi; j++) {
-        if (fields[j].name.len == sf->name.len && fields[j].name.ptr &&
-            memcmp(fields[j].name.ptr, sf->name.ptr, sf->name.len) == 0) {
-          diag_error(sema->diag, sema_loc(sema, fn),
-                     "union '%.*s': duplicate field name '%.*s' in member "
-                     "'%.*s'",
-                     (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
-                     sf->name.ptr, (int)um->name.len, um->name.ptr);
-          ok = false;
-          dup = true;
-          break;
-        }
-      }
-      for (size_t m2 = 0; m2 < i && !dup; m2++) {
-        const struct_type_t *ps =
-            (const struct_type_t *)members[m2].payload_struct;
-        if (!ps) continue;
-        for (size_t k = 0; k < ps->field_count; k++) {
-          const struct_field_t *pf = &ps->fields[k];
-          if (pf->name.len == sf->name.len && pf->name.ptr &&
-              memcmp(pf->name.ptr, sf->name.ptr, sf->name.len) == 0) {
-            diag_error(sema->diag, sema_loc(sema, fn),
-                       "union '%.*s': field name '%.*s' is not unique across "
-                       "members (duplicate in member '%.*s')",
-                       (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
-                       sf->name.ptr, (int)members[m2].name.len,
-                       members[m2].name.ptr);
-            ok = false;
-            dup = true;
-            break;
-          }
-        }
-      }
-      if (dup) continue;
-      fields[fi].name   = sf->name;
-      fields[fi].offset = 0; /* seal 统一计算布局 */
-      fields[fi].type   = ft;
     }
+    if (dup) continue;
 
-    /* payload 字段表 → 匿名 struct 类型（立即密封 + 登记进 hoist 依赖） */
-    if (!ok) {
-      if (fields) allocator_free(vm->alloc, (void **)&fields);
-      continue;
-    }
-    const type_t *ps = type_struct_intern(vm, fields, fc);
-    if (fields) allocator_free(vm->alloc, (void **)&fields);
-    if (!ps) {
+    /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
+       ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
+    const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
+    if (!ft) {
+      diag_error(sema->diag, sema_loc(sema, sf->type),
+                 "union '%.*s': unknown field type for '%.*s'",
+                 (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
       ok = false;
       continue;
     }
-    members[i].payload_struct = ps;
-    /* payload struct 登记（compiler hoist 依赖后序构造 union 前先构造） */
-    if (!sema_type_register(sema, ps)) {
-      ok = false;
-      continue;
-    }
+    members[i].payload_type = ft;
   }
 
   if (!ok) {
@@ -1132,13 +1055,13 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
     return false;
   }
 
-  /* 3. type_union_intern 构造 union 类型（拷贝 member 表 + tag 前缀/联合体
+  /* 2. type_union_intern 构造 union 类型（拷贝 member 表 + tag 前缀/联合体
      布局 + 去重 intern，立即密封） */
   const type_t *t = type_union_intern(vm, members, n);
   if (members) allocator_free(vm->alloc, (void **)&members);
   if (!t) return false;
 
-  /* 4. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
+  /* 3. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
   const sema_type_t *st = sema_type_register(sema, t);
   if (!st) return false;
   ud->type_id = st->id; /* compiler 顶层名字绑定 LOAD_TYPE 用 */
@@ -1153,7 +1076,7 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
   nb[ud->name.len] = '\0';
   scope_define(vm, vm->current_scope, nb, tv);
 
-  /* 5. 符号激活（TDZ：定义前不可见） */
+  /* 4. 符号激活（TDZ：定义前不可见） */
   sym->type = t;
   sym->is_active = true;
   sym->flow_init = true;

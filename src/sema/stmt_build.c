@@ -282,7 +282,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
       case AST_UNION_DEF: {
         /* 局部 union 定义：注册符号（暂不激活，Pass 3b walk_block 入口提升
            调 sema_eval_union_def 求值后激活）。与局部 struct/enum/type 定义
-           同构。 */
+           同构（struct 同构平铺字段语法）。 */
         ast_union_def_t *ud = (ast_union_def_t *)s;
         sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)ud};
         if (!sema_scope_define(scope, ud->name, &init)) {

@@ -279,13 +279,12 @@ void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
         }
         case TYPE_KIND_UNION: {
             /* tag 平凡拷贝 + payload 按当前 tag 的 member 递归（读 src 的
-               tag——dst 与 src 同类型实例，tag 相同；payload_struct NULL =
-               纯 tag member 无 payload 区） */
+               tag——dst 与 src 同类型实例，tag 相同） */
             size_t ts = union_type_tag_size(t);
             memcpy(dst, src, ts);
             size_t idx = (size_t)union_read_tag_raw(src, ts);
             const union_member_t *m = union_type_member(t, idx);
-            const type_t *pt = m ? m->payload_struct : NULL;
+            const type_t *pt = m ? m->payload_type : NULL;
             if (pt)
                 value_blit_raw(vm, (uint8_t *)dst + union_type_payload_offset(t),
                                (const uint8_t *)src + union_type_payload_offset(t), pt);
@@ -346,7 +345,7 @@ void value_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
             size_t ts = union_type_tag_size(t);
             size_t idx = (size_t)union_read_tag_raw(raw, ts);
             const union_member_t *m = union_type_member(t, idx);
-            const type_t *pt = m ? m->payload_struct : NULL;
+            const type_t *pt = m ? m->payload_type : NULL;
             if (pt)
                 value_dispose_raw(vm, (uint8_t *)raw + union_type_payload_offset(t), pt);
             break;

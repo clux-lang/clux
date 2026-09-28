@@ -510,22 +510,54 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
 
     if (t->kind == TYPE_KIND_UNION) {
-      /* union 构造（.Shape{.Circle{...}} 两层嵌套）：外层 union 构造收
-         1 个 member payload value（sema 已校验字段数 == 1）。
-         - payload member：值是内层 .Circle{...} CONSTRUCT（sema 已把 type
-           位改写为 payload_struct 的 AST_TYPE_REF → LOAD_TYPE 压类型值）
-           → 编译内层构造 → 栈: [type_value, payload_value]
-         - 纯 tag member：值是 tag 整数常量字面量（AST_INT_LIT，编译期
-           省略内层构造，直接发 tag 常量）→ 编译字面量 → 栈: [type_value, tag_value]
-         CONSTRUCT 1 弹 2 压 1（union 分支按 payload 类型匹配 member）。 */
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        compile_expr(c, f);
-        fcount++;
+      /* union 构造（.Value{.i = 42}，struct 同构单字段，显式 tag 哨兵协议）：
+         sema 已校验恰好 1 个具名字段 + 按名定位 member 并写回 member_tag
+         （member 下标）。编译序列：
+           1. type_value（compile_type_expr 已压）
+           2. tag 哨兵：member_tag 是 member 下标（0..member_count-1），
+              < 128 → PUSH_I8（op_construct union 分支按 size 1 读 int8）；
+              < 32768 → PUSH_I16（size 2 读 int16）；否则 PUSH_I32
+           3. payload 值：compile 具名字段的 value（nil 字段 → 须 ?T，
+              PUSH_OPT_NONE <member payload type id>）
+           4. CONSTRUCT 2：栈 [type_value, tag_value, payload_value]
+              弹 3 压 1（union 分支按 tag 值定位 member → implicit_cast →
+              blit 到 payload_offset）
+         栈深净变化 -1：压 3，CONSTRUCT 弹 3 压 1。 */
+      ast_node_t *f = n->fields; /* 恰好 1 个（sema 已校验） */
+      uint32_t tag = n->member_tag;
+      if (tag < 128) {
+        bcode_write_op(c->bc, BCODE_PUSH_I8);
+        bcode_write_i8(c->bc, (int8_t)tag);
+      } else if (tag < 32768) {
+        bcode_write_op(c->bc, BCODE_PUSH_I16);
+        bcode_write_i16(c->bc, (int16_t)tag);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I32);
+        bcode_write_i32(c->bc, (int32_t)tag);
+      }
+      st_push(c, 1);
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((ast_construct_field_t *)f)->value;
+      if (value->kind == AST_NIL) {
+        /* nil payload：member 须 ?T（sema 已校验），发 PUSH_OPT_NONE */
+        const union_type_t *ut = (const union_type_t *)t;
+        const union_member_t *m = &ut->members[tag];
+        const sema_type_t *mst =
+            c_sema_type_find_ptr(c->sema_types, m->payload_type);
+        if (!mst) {
+          c_error(c, value, "compiler: optional union member type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, mst->id);
+        st_push(c, 1);
+      } else {
+        compile_expr(c, value);
       }
       bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
+      bcode_write_u32(c->bc, 2);
+      st_push(c, -3);
       break;
     }
 

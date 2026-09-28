@@ -23,26 +23,23 @@ typedef struct value_t value_t;
  *   - type_union_push 分配空 union_type（members=NULL，不入池）+ 压其 type
  *     value，返回该 type（外部只持有 type_t*）。
  *   - type_union_add_member 追加 member（UNION_MEMBER 运行期用）：名从
- *     strtable 拷贝（vm 拥有），tag 编号 = 追加序；payload 字段表经
- *     type_union_add_field（DEFINE_FIELD 复用）追加到当前 member 的
- *     开放 payload struct。密封后静默忽略。
- *   - type_union_seal 拷贝 member 表 + 构建各 member payload struct +
- *     计算布局（tag 宽度自适应 + payload 联合体偏移） + 按 (member 表
- *     内容) 去重 intern + 置 sealed。
+ *     strtable 拷贝（vm 拥有），tag 编号 = 追加序；member 类型经
+ *     type_union_set_member_type（DEFINE_FIELD 复用，语义 = 设 member 类型）
+ *     写入最后追加的 member。密封后静默忽略。
+ *   - type_union_seal 拷贝 member 表 + 计算布局（tag 宽度自适应 + payload
+ *     联合体偏移） + 按 (member 表内容) 去重 intern + 置 sealed。
  *
  * 内存布局（密封时计算）：
  *   tag_size：member_count <= UINT8_MAX → 1；<= UINT16_MAX → 2；
  *             <= UINT32_MAX → 4；否则 8
- *   payload_offset = align_up(tag_size, max payload align)（纯 tag member
- *     union 无 payload：size = tag_size）
- *   size = payload_offset + max(member payload size)（C 对齐收尾）
+ *   payload_offset = align_up(tag_size, max member align)（C 对齐）
+ *   size = payload_offset + max(member type size)（C 对齐收尾）
  * union value 的 data 首部存 tag 整数值（union_read_tag / union_store_tag
  * 按 tag_size 读写），payload 联合体按当前 tag 的 member 解释。
  *
- * 字段访问（FIELD_GET/FIELD_SET）：按字段名反查所属 member（sema 已校验
- * 字段名全局唯一）→ 读取 data 首部 tag → tag 与 member 不符 → error
- * （对齐数组越界的运行期硬错误）；相符 → payload_struct 内偏移 + 绝对
- * 偏移 = payload_offset + member 内偏移。
+ * 字段访问（FIELD_GET/FIELD_SET）：按字段名 = member 名反查（member 名
+ * 天然全局唯一）→ 读取 data 首部 tag → tag 与 member 不符 → error（引擎级
+ * 硬错误 = panic，对齐数组越界）；相符 → 绝对偏移 = payload_offset。
  *
  * tag 判定（`x is Member`）：运行期比较 tag 整数与编译期 member 的 tag 值。
  */
@@ -77,15 +74,6 @@ static inline size_t union_type_tag_size(const type_t *t) {
  */
 int union_type_find_member(const type_t *t, strslice_t name);
 
-/**
- * 按名查 member payload 字段（FIELD_GET/SET 运行期反查所属 member）：
- * 命中返回 { member 下标, payload_struct 内字段下标 }；未找到两值均 -1。
- * 字段名须全局唯一（sema 已校验——member payload 字段表是联合体，不同
- * member 的同名字段无法静态区分归属）。
- */
-void union_type_find_field(const type_t *t, strslice_t name,
-                           int *member_idx, int *field_idx);
-
 /** 读 union value 的 tag 整数值（按 tag_size 宽度；非 union 返回 0） */
 uint64_t union_read_tag(const value_t *v);
 
@@ -114,15 +102,14 @@ static inline void union_store_tag_raw(void *data, size_t ts, uint64_t tag) {
 const type_t *type_union_push(vm_t *vm);
 
 /** UNION_MEMBER 运行期用：追加 member（名拷贝到 vm 堆，tag = 追加序；
- *  payload 字段表经 type_union_add_field 追加。密封后静默忽略） */
+ *  member 类型经 type_union_set_member_type 写入。密封后静默忽略） */
 void type_union_add_member(vm_t *vm, const type_t *t, strslice_t name);
 
-/** DEFINE_FIELD 运行期用（union 分支）：向当前（最后追加）member 的开放
- *  payload struct 追加字段（名拷贝到 vm 堆）。密封后静默忽略。 */
-void type_union_add_field(vm_t *vm, const type_t *t, strslice_t name,
-                          const type_t *ftype);
+/** DEFINE_FIELD 运行期用（union 分支）：设置最后追加的 member 的 payload
+ *  类型（名拷贝到 vm 堆）。密封后静默忽略。 */
+void type_union_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype);
 
-/** SEAL：拷贝 member 表 + 构建 payload struct + 布局 + 去重 intern + 置 sealed */
+/** SEAL：拷贝 member 表 + 布局 + 去重 intern + 置 sealed */
 const type_t *type_union_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（push + 全量 member + seal）：sema 构造 union 类型用。
