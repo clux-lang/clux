@@ -18,22 +18,22 @@
  * 运算行为（m2-design §9/§12.1）：
  *   - eq/ne 无分派：?T 只能与 nil 比较，tag 比较由编译器发专用指令
  *     （比较 ok tag 的 bool），vtable eq/ne 返回错误。
- *   - clone/assign/dispose 转发 inner（复用 value_blit_raw / value_dispose_raw，
- *     递归深拷贝/释放 value 字段），ok tag 平凡拷贝/无资源。
+ *   - clone/assign/dispose：data 全平凡（ok tag + value 字段为裸字节块，
+ *     memcpy 可拷贝），整块 memcpy / 无需释放。
  *   - implicit_cast：?T → ?T 同 inner 身份拷贝；?T → inner 窄化是运行期
  *     tag 检查 + 数据移动，由编译器发专用指令（sema 窄化），vtable 不处理。
  *   - T → ?T 隐式提升（some）在 value_implicit_cast 公共入口特判
  *     （value_lift_option，见 value.c），此处 vtable 只处理 ?T 自身。
  * =========================================================================== */
 
-/* ---- 生命周期：clone / assign / dispose（复用 value_blit_raw / value_dispose_raw） ---- */
+/* ---- 生命周期：clone / assign / dispose（data 全平凡，整块 memcpy） ---- */
 
 static value_t *option_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     void *data = value_alloc_data(vm->alloc, t);
-    value_blit_raw(vm, data, value_data(v), t);
+    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);
 }
 
@@ -44,15 +44,14 @@ static value_t *option_assign(vm_t *vm, value_t *dst, value_t *src) {
         return value_make_error(vm,
             "assign: optional type mismatch on assignment");
     }
-    value_dispose_raw(vm, value_data(dst), t);
-    value_blit_raw(vm, value_data(dst), value_data(src), t);
+    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
     return dst;
 }
 
 static void option_dispose(vm_t *vm, value_t *v) {
-    /* 借用引用不拥有 data（指向父值内部），跳过；由 value_dispose 统一拦截 */
-    if (value_is_borrowed(v)) return;
-    value_dispose_raw(vm, value_data(v), value_type(v));
+    /* data 全平凡（ok tag + value 字段为裸字节块，字符串归池），无需释放。
+       借用引用与 data 块本身由 value_dispose 统一处理。 */
+    (void)vm; (void)v;
 }
 
 /* ---- eq/ne：?T 只能与 nil 比较，tag 比较由编译器发专用指令 ---- */
@@ -248,7 +247,8 @@ value_t *value_lift_option(vm_t *vm, value_t *v, const type_t *target) {
 
     void *data = value_alloc_data(vm->alloc, target);
     *(bool *)data = true;   /* ok tag */
-    value_blit_raw(vm, (uint8_t *)data + option_value_offset(target),
-                   value_data(v), inner);
+    /* 平凡拷贝 value 字段（data 全平凡：整段 memcpy） */
+    memcpy((uint8_t *)data + option_value_offset(target), value_data(v),
+           inner->size);
     return value_make(vm, target, data);
 }

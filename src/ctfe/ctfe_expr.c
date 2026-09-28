@@ -149,8 +149,9 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
     case AST_STRING_LIT: {
         ast_string_lit_t *n = (ast_string_lit_t *)node;
-        string_t *str = string_from_bytes(vm->alloc, n->text.ptr, n->text.len);
-        void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &str);
+        /* 字符串走 vm 字符串池 intern（data 全平凡：直接存池内指针） */
+        const char *s = vm_str_intern_len(vm, n->text.ptr, n->text.len);
+        void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &s);
         return value_make(vm, vm->type_str, data);
     }
     case AST_IDENT: {

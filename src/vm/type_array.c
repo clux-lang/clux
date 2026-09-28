@@ -219,153 +219,6 @@ const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count)
 /* ================================================================ */
 
 /* ================================================================ */
-/* 连续块元素操作（业务内存深拷贝 / 资源释放）                        */
-/* ================================================================ */
-
-/*
- * 块内元素是裸数据（无 value_t 头）。按元素类型递归处理：
- *   - 标量（int/float/bool 等无指针）：整段 memcpy
- *   - 字符串：块内存 string_t* 指针，深拷贝复制 string_t 本体
- *   - 嵌套数组：递归子块（子块内可能含字符串，须递归）
- *   - optional：ok tag 平凡拷贝 + value 字段按 inner 递归（?str/?数组）
- * raw 版本操作裸数据块；value 版本先从 value 取 data 再委托 raw。
- * 两个 raw 函数同时服务 option 的 clone/assign/dispose（type_option.c）。
- */
-
-void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t);
-void value_dispose_raw(vm_t *vm, void *raw, const type_t *t);
-
-/* value → 块内偏移（dst 处写入 src value 的深拷贝） */
-static void array_blit_value(vm_t *vm, void *dst, value_t *src, const type_t *t) {
-    if (!dst || !src || !t) return;
-    if (value_is_shadow(src)) {   /* shadow 仅类型计算，块内无数据可拷贝 */
-        memset(dst, 0, t->size);
-        return;
-    }
-    value_blit_raw(vm, dst, value_data(src), t);
-}
-
-void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t) {
-    if (!dst || !src || !t) return;
-    switch (t->kind) {
-        case TYPE_KIND_ARRAY: {
-            const type_t *et = array_type_elem(t);
-            size_t es = et->size;
-            size_t len = array_type_len(t);
-            for (size_t i = 0; i < len; i++)
-                value_blit_raw(vm, (uint8_t *)dst + i * es,
-                               (const uint8_t *)src + i * es, et);
-            break;
-        }
-        case TYPE_KIND_STRUCT: {
-            /* 按字段偏移递归（字段类型可能含资源：str/数组/嵌套 struct/option） */
-            size_t n = struct_type_field_count(t);
-            for (size_t i = 0; i < n; i++) {
-                const struct_field_t *f = struct_type_field(t, i);
-                value_blit_raw(vm, (uint8_t *)dst + f->offset,
-                               (const uint8_t *)src + f->offset, f->type);
-            }
-            break;
-        }
-        case TYPE_KIND_TUPLE: {
-            /* 按元素偏移递归（元素类型可能含资源：str/数组/嵌套 tuple/option） */
-            size_t n = tuple_type_elem_count(t);
-            for (size_t i = 0; i < n; i++) {
-                const tuple_elem_t *e = tuple_type_elem(t, i);
-                value_blit_raw(vm, (uint8_t *)dst + e->offset,
-                               (const uint8_t *)src + e->offset, e->type);
-            }
-            break;
-        }
-        case TYPE_KIND_UNION: {
-            /* tag 平凡拷贝 + payload 按当前 tag 的 member 递归（读 src 的
-               tag——dst 与 src 同类型实例，tag 相同） */
-            size_t ts = union_type_tag_size(t);
-            memcpy(dst, src, ts);
-            size_t idx = (size_t)union_read_tag_raw(src, ts);
-            const union_member_t *m = union_type_member(t, idx);
-            const type_t *pt = m ? m->payload_type : NULL;
-            if (pt)
-                value_blit_raw(vm, (uint8_t *)dst + union_type_payload_offset(t),
-                               (const uint8_t *)src + union_type_payload_offset(t), pt);
-            break;
-        }
-        case TYPE_KIND_STR: {
-            const string_t *s = *(const string_t *const *)src;
-            string_t *copy = s ? string_from_string(vm->alloc, s) : NULL;
-            if (s && !copy) panic("vm: out of memory copying array element string");
-            *(string_t **)dst = copy;
-            break;
-        }
-        case TYPE_KIND_OPTION: {
-            /* ok tag 平凡拷贝 + value 字段按 inner 递归（?str/?数组深拷贝） */
-            const type_t *it = type_option_inner(t);
-            *(bool *)dst = *(const bool *)src;
-            value_blit_raw(vm, (uint8_t *)dst + option_value_offset(t),
-                           (const uint8_t *)src + option_value_offset(t), it);
-            break;
-        }
-        default:
-            memcpy(dst, src, t->size);
-            break;
-    }
-}
-
-/* 释放块内元素持有的资源（标量无资源；字符串释放 string_t；数组递归；
-   optional 递归 value 字段——ok tag 无资源） */
-void value_dispose_raw(vm_t *vm, void *raw, const type_t *t) {
-    if (!raw || !t) return;
-    switch (t->kind) {
-        case TYPE_KIND_ARRAY: {
-            const type_t *et = array_type_elem(t);
-            size_t es = et->size;
-            size_t len = array_type_len(t);
-            for (size_t i = 0; i < len; i++)
-                value_dispose_raw(vm, (uint8_t *)raw + i * es, et);
-            break;
-        }
-        case TYPE_KIND_STRUCT: {
-            size_t n = struct_type_field_count(t);
-            for (size_t i = 0; i < n; i++) {
-                const struct_field_t *f = struct_type_field(t, i);
-                value_dispose_raw(vm, (uint8_t *)raw + f->offset, f->type);
-            }
-            break;
-        }
-        case TYPE_KIND_TUPLE: {
-            size_t n = tuple_type_elem_count(t);
-            for (size_t i = 0; i < n; i++) {
-                const tuple_elem_t *e = tuple_type_elem(t, i);
-                value_dispose_raw(vm, (uint8_t *)raw + e->offset, e->type);
-            }
-            break;
-        }
-        case TYPE_KIND_UNION: {
-            /* 先读 data 首部 tag 才知道按哪个 member 释放 payload */
-            size_t ts = union_type_tag_size(t);
-            size_t idx = (size_t)union_read_tag_raw(raw, ts);
-            const union_member_t *m = union_type_member(t, idx);
-            const type_t *pt = m ? m->payload_type : NULL;
-            if (pt)
-                value_dispose_raw(vm, (uint8_t *)raw + union_type_payload_offset(t), pt);
-            break;
-        }
-        case TYPE_KIND_STR: {
-            string_t **sp = (string_t **)raw;
-            if (sp && *sp) string_free(sp);
-            break;
-        }
-        case TYPE_KIND_OPTION: {
-            const type_t *it = type_option_inner(t);
-            value_dispose_raw(vm, (uint8_t *)raw + option_value_offset(t), it);
-            break;
-        }
-        default:
-            break;   /* 标量无资源 */
-    }
-}
-
-/* ================================================================ */
 /* vtable 实现                                                      */
 /* ================================================================ */
 
@@ -451,20 +304,19 @@ static value_t *array_set_index(vm_t *vm, value_t *self, value_t *index,
         if (value_is_error(vm, v)) return v;
     }
 
-    /* 写块内偏移：先释放旧元素资源，再深拷贝新值到业务内存。
+    /* 写块内偏移：data 全平凡（元素为 memcpy 可拷贝字节块），直接覆盖。
        self 是借用（多维链）时 data 已指向块内偏移，写直达原数组。 */
     uint8_t *slot = (uint8_t *)value_data(self) + i * et->size;
-    value_dispose_raw(vm, slot, et);
-    array_blit_value(vm, slot, v, et);
+    memcpy(slot, value_data(v), et->size);
     return self;
 }
 
 /* ---- dispose: 释放块内元素资源（data 块本身由 value_dispose 释放） ---- */
 
 static void array_dispose(vm_t *vm, value_t *v) {
-    /* 借用引用不拥有 data（指向父数组内部），跳过；由 value_dispose 统一拦截 */
-    if (value_is_borrowed(v)) return;
-    value_dispose_raw(vm, value_data(v), value_type(v));
+    /* data 全平凡：元素为裸字节块（字符串归 vm 字符串池），无需释放。
+       借用引用与 data 块本身由 value_dispose 统一处理。 */
+    (void)vm; (void)v;
 }
 
 /* ---- clone: 分配新块深拷贝全部元素；借用 → materialize（同路径） ---- */
@@ -477,7 +329,7 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
        按其类型深拷贝该块即 materialize（独立 is_own=true 拷贝）。 */
     const type_t *t = value_type(v);
     void *block = value_alloc_data(vm->alloc, t);
-    value_blit_raw(vm, block, value_data(v), t);
+    memcpy(block, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, block);
 }
 
@@ -495,8 +347,7 @@ static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
 
     const type_t *t = value_type(dst);
-    value_dispose_raw(vm, value_data(dst), t);
-    value_blit_raw(vm, value_data(dst), value_data(src), t);
+    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
     return dst;
 }
 
@@ -566,8 +417,8 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
             if (value_is_error(vm, casted)) return casted;
             e = casted;
         }
-        /* 深拷贝元素数据到块内偏移（标量 memcpy；嵌套数组/字符串递归） */
-        array_blit_value(vm, (uint8_t *)block + i * es, e, elem_type);
+        /* 平凡拷贝元素数据到块内偏移（data 全平凡：整段 memcpy） */
+        memcpy((uint8_t *)block + i * es, value_data(e), es);
     }
     return value_make(vm, at, block);
 }

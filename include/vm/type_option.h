@@ -83,17 +83,6 @@ static inline void *option_value(const void *data, const type_t *t) {
  */
 value_t *value_lift_option(vm_t *vm, value_t *v, const type_t *target);
 
-/* ---- 裸数据块深拷贝/资源释放（type_array.c 导出，option clone/assign/
-   dispose 复用：ok tag 平凡拷贝 + value 字段按 inner 递归） ---- */
-
-/** 类型化内存块深拷贝：dst ← src 的深拷贝（STR 克隆 string_t、ARRAY/OPTION
- *  递归、标量 memcpy）。shadow 源由调用方先行处理。 */
-void value_blit_raw(vm_t *vm, void *dst, const void *src, const type_t *t);
-
-/** 释放类型化内存块持有的资源（STR 释放 string_t、ARRAY/OPTION 递归、标量
- *  无操作）。块内存本身由调用方释放。 */
-void value_dispose_raw(vm_t *vm, void *raw, const type_t *t);
-
 #ifdef __cplusplus
 }
 #endif

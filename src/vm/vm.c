@@ -6,6 +6,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/str_pool.h"
 #include "vm/value.h"
 #include "vm/function.h"
 #include "core/panic.h"
@@ -125,6 +126,9 @@ vm_t *vm_new(allocator_t *alloc) {
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
     vm->types_by_id = vec_new(alloc, /*owns_element=*/false);
 
+    /* 字符串池（str 生命周期托管：字面量/拼接/错误消息统一 intern） */
+    vm->strs = vec_new(alloc, /*owns_element=*/false);
+
     /* 基本类型注册进 global scope（LOAD 指令按名查 type value） */
     vm_register_builtin_types(vm);
 
@@ -152,6 +156,9 @@ void vm_destroy(vm_t **pvm) {
     scope_destroy(vm, &vm->global_scope);
 
     vm->current_scope = NULL;
+
+    /* 字符串池：释放全部 intern 的字符串块（value 侧只存池引用，不触碰） */
+    vm_str_pool_destroy(vm);
 
     /* 执行器操作数栈（借用引用，不拥有，仅释放向量结构） */
     vec_free(vm->alloc, &vm->stack);

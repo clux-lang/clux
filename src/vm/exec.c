@@ -9,6 +9,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/str_pool.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
@@ -141,8 +142,9 @@ static value_t *op_push_bool(vm_t *vm, bytecode_t *bc, size_t *pc) {
 }
 static value_t *op_push_str(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t s = bcode_read_str(bc, pc);
-    string_t *str = string_from_bytes(vm->alloc, s.ptr, s.len);
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &str);
+    /* 字符串走 vm 字符串池 intern（data 全平凡：直接存池内指针） */
+    const char *sv = vm_str_intern_len(vm, s.ptr, s.len);
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &sv);
     return value_make(vm, vm->type_str, data);
 }
 
@@ -691,11 +693,11 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
             "construct: optional field type mismatch");
     }
 
-    /* struct 构造：连续内存块（size = type->size），逐字段按偏移深拷贝
-     * （value_blit_raw 递归处理资源字段）。字段数必须与类型字段表一致
-     * （sema 已校验"字段数完全显式"）。每字段先 value_implicit_cast 到
-     * 字段类型（字面量 i32 → i64 字段等宽度提升；同类型身份短路），
-     * 与 array 构造的 value_make_array 逐元素 cast 行为一致。 */
+    /* struct 构造：连续内存块（size = type->size），逐字段按偏移平凡拷贝
+     * （data 全平凡：memcpy）。字段数必须与类型字段表一致（sema 已校验
+     * "字段数完全显式"）。每字段先 value_implicit_cast 到字段类型（字面量
+     * i32 → i64 字段等宽度提升；同类型身份短路），与 array 构造的
+     * value_make_array 逐元素 cast 行为一致。 */
     if (t->kind == TYPE_KIND_STRUCT) {
         const struct_type_t *st = (const struct_type_t *)t;
         if ((size_t)n != st->field_count)
@@ -707,17 +709,18 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                                                   st->fields[i].type);
             if (value_is_error(vm, casted))
                 return casted;
-            value_blit_raw(vm, (uint8_t *)data + st->fields[i].offset,
-                           value_data(casted), st->fields[i].type);
+            /* data 全平凡：字段为 memcpy 可拷贝字节块，直接拷贝到偏移 */
+            memcpy((uint8_t *)data + st->fields[i].offset, value_data(casted),
+                   st->fields[i].type->size);
         }
         return value_make(vm, t, data);
     }
 
-    /* tuple 构造：连续内存块（size = type->size），逐元素按偏移深拷贝
-     * （value_blit_raw 递归处理资源元素）。元素数必须与类型元素表一致
-     * （sema 已校验"元素数完全显式"）。每元素先 value_implicit_cast 到
-     * 元素类型（字面量 i32 → i64 元素等宽度提升；同类型身份短路），
-     * 与 struct 构造逐字段 cast 行为一致。 */
+    /* tuple 构造：连续内存块（size = type->size），逐元素按偏移平凡拷贝
+     * （data 全平凡：memcpy）。元素数必须与类型元素表一致（sema 已校验
+     * "元素数完全显式"）。每元素先 value_implicit_cast 到元素类型（字面量
+     * i32 → i64 元素等宽度提升；同类型身份短路），与 struct 构造逐字段
+     * cast 行为一致。 */
     if (t->kind == TYPE_KIND_TUPLE) {
         const tuple_type_t *tt = (const tuple_type_t *)t;
         if ((size_t)n != tt->elem_count)
@@ -729,8 +732,9 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                                                   tt->elems[i].type);
             if (value_is_error(vm, casted))
                 return casted;
-            value_blit_raw(vm, (uint8_t *)data + tt->elems[i].offset,
-                           value_data(casted), tt->elems[i].type);
+            /* data 全平凡：元素为 memcpy 可拷贝字节块，直接拷贝到偏移 */
+            memcpy((uint8_t *)data + tt->elems[i].offset, value_data(casted),
+                   tt->elems[i].type->size);
         }
         return value_make(vm, t, data);
     }
@@ -774,8 +778,9 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (value_is_error(vm, casted)) return casted;
         void *data = value_alloc_data(vm->alloc, t);  /* 清零 */
         union_store_tag_raw(data, ut->tag_size, m->tag);
-        value_blit_raw(vm, (uint8_t *)data + ut->payload_offset,
-                       value_data(casted), m->payload_type);
+        /* data 全平凡：payload 为 memcpy 可拷贝字节块，直接拷贝到偏移 */
+        memcpy((uint8_t *)data + ut->payload_offset, value_data(casted),
+               m->payload_type->size);
         return value_make(vm, t, data);
     }
 
@@ -882,8 +887,8 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
             if (value_is_error(vm, casted)) return casted;
             void *dst = (uint8_t *)value_data(self) +
                         union_type_payload_offset(t);
-            value_dispose_raw(vm, dst, m->payload_type);
-            value_blit_raw(vm, dst, value_data(casted), m->payload_type);
+            /* data 全平凡：直接覆盖 payload（memcpy 可拷贝） */
+            memcpy(dst, value_data(casted), m->payload_type->size);
             return self;
         }
         return value_make_error(vm, "exec: field set expects a struct value");
@@ -897,8 +902,8 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *casted = value_implicit_cast(vm, val, f->type);
     if (value_is_error(vm, casted)) return casted;
     void *dst = (uint8_t *)value_data(self) + f->offset;
-    value_dispose_raw(vm, dst, f->type);
-    value_blit_raw(vm, dst, value_data(casted), f->type);
+    /* data 全平凡：直接覆盖字段（memcpy 可拷贝） */
+    memcpy(dst, value_data(casted), f->type->size);
     return self;
 }
 

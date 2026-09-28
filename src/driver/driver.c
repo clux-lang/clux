@@ -324,7 +324,7 @@ int driver_run_file(const char *path) {
   if (value_is_error(vm, er)) {
     error_data_t *ed = (error_data_t *)value_data(er);
     fprintf(stderr, "run: %s\n",
-            ed && ed->message ? string_cstr(ed->message) : "execution error");
+            ed && ed->message ? ed->message : "execution error");
     bcode_destroy(&bc);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
@@ -354,7 +354,7 @@ int driver_run_file(const char *path) {
   if (value_is_error(vm, mr)) {
     error_data_t *ed = (error_data_t *)value_data(mr);
     fprintf(stderr, "run: %s\n",
-            ed && ed->message ? string_cstr(ed->message) : "runtime error");
+            ed && ed->message ? ed->message : "runtime error");
     bcode_destroy(&bc);
     if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
@@ -582,7 +582,7 @@ static int driver_execute_bytecode(allocator_t *alloc, bytecode_t *bc) {
     if (value_is_error(vm, er)) {
         error_data_t *ed = (error_data_t *)value_data(er);
         fprintf(stderr, "run: %s\n",
-                ed && ed->message ? string_cstr(ed->message) : "execution error");
+                ed && ed->message ? ed->message : "execution error");
         vm_destroy(&vm);
         return 1;
     }
@@ -598,7 +598,7 @@ static int driver_execute_bytecode(allocator_t *alloc, bytecode_t *bc) {
     if (value_is_error(vm, mr)) {
         error_data_t *ed = (error_data_t *)value_data(mr);
         fprintf(stderr, "run: %s\n",
-                ed && ed->message ? string_cstr(ed->message) : "runtime error");
+                ed && ed->message ? ed->message : "runtime error");
         vm_destroy(&vm);
         return 1;
     }

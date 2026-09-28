@@ -12,6 +12,7 @@
 #include "parser/lexer.h"
 #include "parser/parse_expr.h"
 #include "parser/parser.h"
+#include "vm/str_pool.h"
 #include "vm/type_error.h"
 #include "vm/value.h"
 #include "vm/vm.h"
@@ -33,7 +34,8 @@ static void eval_print_value(vm_t *vm, value_t *v) {
     return;
   }
   if (t == vm->type_str) {
-    printf("%s", string_cstr(*(string_t **)value_data(v)));
+    const char *sv = *(const char *const *)value_data(v);
+    if (sv) fwrite(sv, 1, strlen(sv), stdout);
     return;
   }
   if (t == vm->type_type) {
@@ -209,7 +211,7 @@ int cmd_eval(const cmd_args_t *args) {
   if (value_is_error(vm, r)) {
     error_data_t *ed = (error_data_t *)value_data(r);
     fprintf(stderr, "eval: %s\n",
-            ed && ed->message ? string_cstr(ed->message) : "evaluation error");
+            ed && ed->message ? ed->message : "evaluation error");
     rc = 1;
   } else {
     eval_print_value(vm, r);

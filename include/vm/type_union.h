@@ -77,8 +77,8 @@ int union_type_find_member(const type_t *t, strslice_t name);
 /** 读 union value 的 tag 整数值（按 tag_size 宽度；非 union 返回 0） */
 uint64_t union_read_tag(const value_t *v);
 
-/** 从裸 data 块读 tag 整数值（value_blit_raw/value_dispose_raw 内部用：
- * 按 tag 宽度读 data 首部；ts 为 union_type_tag_size(t)） */
+/** 从裸 data 块读 tag 整数值（按 tag 宽度读 data 首部；ts 为
+ * union_type_tag_size(t)；构造/判等/遍历用） */
 static inline uint64_t union_read_tag_raw(const void *data, size_t ts) {
     switch (ts) {
     case 1: return (uint64_t)*(const uint8_t  *)data;

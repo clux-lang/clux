@@ -3,8 +3,8 @@
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
 #include "vm/type_option.h"
+#include "vm/str_pool.h"
 #include "core/panic.h"
-#include "core/string.h"
 
 #include <string.h>
 
@@ -163,8 +163,9 @@ value_t *value_make_error(vm_t *vm, const char *message) {
 
 value_t *value_make_error_loc(vm_t *vm, const char *message, const char *location) {
     error_data_t ed;
-    ed.message  = message  ? string_from_cstr(vm->alloc, message)  : NULL;
-    ed.location = location ? string_from_cstr(vm->alloc, location) : NULL;
+    /* 字符串走 vm 字符串池 intern（data 全平凡：error_data_t 存池内指针） */
+    ed.message  = message  ? vm_str_intern_cstr(vm, message)  : NULL;
+    ed.location = location ? vm_str_intern_cstr(vm, location) : NULL;
     void *data = value_alloc_data_copy(vm->alloc, vm->type_error, &ed);
     return value_make(vm, vm->type_error, data);
 }

@@ -38,8 +38,8 @@ static value_t *make_f64(vm_t *vm, double v) {
     return value_make(vm, vm->type_f64, data);
 }
 static value_t *make_str(vm_t *vm, const char *s) {
-    string_t *str = string_from_cstr(vm->alloc, s);
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &str);
+    const char *sv = vm_str_intern_cstr(vm, s);
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &sv);
     return value_make(vm, vm->type_str, data);
 }
 static value_t *make_const_i32(vm_t *vm, int32_t v) {

@@ -723,8 +723,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
 
       if (value_is_error(sema->vm, result)) {
         error_data_t *ed = (error_data_t *)value_data(result);
-        const char *msg = ed && ed->message ? string_cstr(ed->message)
-                                            : "function call failed";
+        const char *msg = ed && ed->message ? ed->message
+                                               : "function call failed";
         diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
@@ -1619,7 +1619,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       const char *msg = NULL;
       if (r) {
         error_data_t *ed = (error_data_t *)value_data(r);
-        msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+        msg = ed && ed->message ? ed->message : NULL;
       }
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "extends: not a compile-time type computation%s%s",

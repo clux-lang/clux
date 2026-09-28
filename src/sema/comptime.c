@@ -91,10 +91,11 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     return true;
   }
   if (t == vm->type_str) {
-    /* 字符串：复制到 sema arena（跨 sema/compile 阶段安全） */
-    string_t *s = *(string_t **)value_data(v);
-    size_t len = string_len(s);
-    const char *c = string_cstr(s);
+    /* 字符串：复制到 sema arena（跨 sema/compile 阶段安全）。
+       data 是池内指针（全平凡） */
+    const char *sv = *(const char *const *)value_data(v);
+    size_t len = sv ? strlen(sv) : 0;
+    const char *c = sv ? sv : "";
     char *buf = (char *)arena_calloc(sema->arena, 1, len + 1,
                                      ALIGNOF(max_align_t));
     if (!buf) return false;
@@ -346,7 +347,7 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
     const char *msg = NULL;
     if (r) {
       error_data_t *ed = (error_data_t *)value_data(r);
-      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+      msg = ed && ed->message ? ed->message : NULL;
     }
     diag_error(sema->diag, sema_loc(sema, vd->init),
                "comptime variable '%.*s': expression is not a compile-time "
@@ -464,7 +465,7 @@ bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
     const char *msg = NULL;
     if (r) {
       error_data_t *ed = (error_data_t *)value_data(r);
-      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+      msg = ed && ed->message ? ed->message : NULL;
     }
     diag_error(sema->diag, sema_loc(sema, vd->init),
                "global variable '%.*s': initializer must be a compile-time "
@@ -548,7 +549,7 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
     if (value_is_error(vm, chk)) {
       error_data_t *ed = (error_data_t *)value_data(chk);
       const char *msg =
-          ed && ed->message ? string_cstr(ed->message) : "call failed";
+          ed && ed->message ? ed->message : "call failed";
       diag_error(sema->diag, sema_loc(sema, *node), "%s", msg);
       return value_make_shadow(vm, vm->type_void);
     }
@@ -571,7 +572,7 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
     const char *msg = NULL;
     if (r) {
       error_data_t *ed = (error_data_t *)value_data(r);
-      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+      msg = ed && ed->message ? ed->message : NULL;
     }
     diag_error(sema->diag, sema_loc(sema, *node),
                "call to comptime function is not a compile-time constant%s%s",
@@ -643,7 +644,7 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
     const char *msg = NULL;
     if (sh) {
       error_data_t *ed = (error_data_t *)value_data(sh);
-      msg = ed && ed->message ? string_cstr(ed->message) : NULL;
+      msg = ed && ed->message ? ed->message : NULL;
     }
     diag_error(sema->diag, sema_loc(sema, td->expr),
                "type definition '%.*s': expression is not a compile-time "
@@ -769,7 +770,7 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
       const char *msg = NULL;
       if (val) {
         error_data_t *ed_ = (error_data_t *)value_data(val);
-        msg = ed_ && ed_->message ? string_cstr(ed_->message) : NULL;
+        msg = ed_ && ed_->message ? ed_->message : NULL;
       }
       diag_error(sema->diag, sema_loc(sema, ev->value),
                  "enum '%.*s': variant '%.*s' value must be a compile-time "

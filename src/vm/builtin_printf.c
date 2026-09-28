@@ -4,6 +4,7 @@
 #include "vm/type.h"
 #include "vm/type_func.h"
 #include "vm/value_dump.h"
+#include "vm/str_pool.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -58,7 +59,8 @@ value_t *builtin_printf_cfunc(vm_t *vm, func_t *self, size_t argc,
     if (value_type(args[0]) != vm->type_str)
         return value_make_error(vm, "printf: format must be a string");
 
-    const char *fmt = string_cstr(*(string_t **)value_data(args[0]));
+    const char *fmt = *(const char *const *)value_data(args[0]);
+    if (!fmt) fmt = "";
     size_t ai = 1; /* 可变实参下标（0 = format） */
 
     for (const char *p = fmt; *p; ) {
@@ -98,7 +100,8 @@ value_t *builtin_printf_cfunc(vm_t *vm, func_t *self, size_t argc,
         case 's': {
             if (value_type(arg) != vm->type_str)
                 return value_make_error(vm, "printf: %%s requires a string");
-            printf(spec, string_cstr(*(string_t **)value_data(arg)));
+            const char *sv = *(const char *const *)value_data(arg);
+            printf(spec, sv ? sv : "");
             break;
         }
         case 'p':

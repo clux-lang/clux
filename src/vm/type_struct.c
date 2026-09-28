@@ -1,8 +1,8 @@
 #include "vm/type_struct.h"
 #include "vm/type.h"
+#include "vm/str_pool.h"
 #include "vm/value.h"
 #include "vm/vm.h"
-#include "vm/type_option.h" /* value_blit_raw / value_dispose_raw */
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -18,9 +18,8 @@
  *   offset_0 = 0；offset_i = align_up(prev_end, field_i.align)
  *   size = align_up(last_end, max_align)；align = max(字段 align)
  *
- * 生命周期（clone/assign/dispose）按字段递归（字段可能含资源：str/数组/
- * 嵌套 struct/option）——复用 value_blit_raw / value_dispose_raw（含
- * TYPE_KIND_STRUCT 分支，按字段偏移递归）。
+ * 生命周期（clone/assign/dispose）：data 全平凡（字段为 memcpy 可拷贝的
+ * 裸字节块，字符串归 vm 字符串池），整块 memcpy / 无需释放。
  *
  * 严格类型：implicit_cast / explicit_cast 仅同 struct 实例（身份拷贝）；
  * eq/ne 同实例按字段递归比较；type_equal / type_extends 按指针（具名类型，
@@ -39,7 +38,7 @@ static value_t *struct_clone(vm_t *vm, value_t *v) {
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     void *data = value_alloc_data(vm->alloc, t);
-    value_blit_raw(vm, data, value_data(v), t);
+    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);
 }
 
@@ -56,15 +55,14 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
     const type_t *t = value_type(dst);
-    value_dispose_raw(vm, value_data(dst), t);
-    value_blit_raw(vm, value_data(dst), value_data(src), t);
+    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
     return dst;
 }
 
 static void struct_dispose(vm_t *vm, value_t *v) {
-    /* 借用引用不拥有 data（指向父值内部），跳过；由 value_dispose 统一拦截 */
-    if (value_is_borrowed(v)) return;
-    value_dispose_raw(vm, value_data(v), value_type(v));
+    /* data 全平凡（字段为裸字节块，字符串归池），无需释放。
+       借用引用与 data 块本身由 value_dispose 统一处理。 */
+    (void)vm; (void)v;
 }
 
 /* ---- 判等：同实例按字段递归比较（值相等，非指针） ---- */
@@ -73,12 +71,12 @@ static void struct_dispose(vm_t *vm, value_t *v) {
 static bool struct_field_equal(vm_t *vm, const void *a, const void *b,
                                const type_t *ft) {
     if (!ft || ft->kind == TYPE_KIND_STR) {
-        /* str：指针相等（同一 string_t 实例）或内容相等 */
-        const string_t *sa = *(const string_t *const *)a;
-        const string_t *sb = *(const string_t *const *)b;
+        /* str：data 为池内指针（池去重：同指针即同内容；兜底 strcmp） */
+        const char *sa = *(const char *const *)a;
+        const char *sb = *(const char *const *)b;
         if (sa == sb) return true;
         if (!sa || !sb) return false;
-        return string_equals(sa, sb);
+        return strcmp(sa, sb) == 0;
     }
     switch (ft->kind) {
         case TYPE_KIND_INT:

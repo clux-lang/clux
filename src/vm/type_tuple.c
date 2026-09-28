@@ -1,9 +1,9 @@
 #include "vm/type_tuple.h"
 #include "vm/type.h"
+#include "vm/str_pool.h"
 #include "vm/type_array.h"
 #include "vm/value.h"
 #include "vm/vm.h"
-#include "vm/type_option.h" /* value_blit_raw / value_dispose_raw */
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -40,9 +40,8 @@ static bool tuple_read_index(vm_t *vm, value_t *index, size_t *out) {
  *   offset_0 = 0；offset_i = align_up(prev_end, elem_i.align)
  *   size = align_up(last_end, max_align)；align = max(元素 align)
  *
- * 生命周期（clone/assign/dispose）按元素递归（元素可能含资源：str/数组/
- * 嵌套 tuple/struct/option）——复用 value_blit_raw / value_dispose_raw（含
- * TYPE_KIND_TUPLE 分支，按元素偏移递归）。
+ * 生命周期（clone/assign/dispose）：data 全平凡（元素为 memcpy 可拷贝的
+ * 裸字节块，字符串归 vm 字符串池），整块 memcpy / 无需释放。
  *
  * 严格类型：implicit_cast / explicit_cast 支持 Tuple↔Array 布局兼容互转
  * （m2-design §3：元组 ↔ 数组匿名互转，布局兼容时）与同 tuple 实例（身份
@@ -50,14 +49,14 @@ static bool tuple_read_index(vm_t *vm, value_t *index, size_t *out) {
  * 逐位比较（tuple_type_compatible）。
  * =========================================================================== */
 
-/* ---- 生命周期：clone / assign / dispose（元素递归） ---- */
+/* ---- 生命周期：clone / assign / dispose（data 全平凡，整块 memcpy） ---- */
 
 static value_t *tuple_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     void *data = value_alloc_data(vm->alloc, t);
-    value_blit_raw(vm, data, value_data(v), t);
+    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);
 }
 
@@ -72,15 +71,14 @@ static value_t *tuple_assign(vm_t *vm, value_t *dst, value_t *src) {
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
     const type_t *t = value_type(dst);
-    value_dispose_raw(vm, value_data(dst), t);
-    value_blit_raw(vm, value_data(dst), value_data(src), t);
+    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
     return dst;
 }
 
 static void tuple_dispose(vm_t *vm, value_t *v) {
-    /* 借用引用不拥有 data（指向父值内部），跳过；由 value_dispose 统一拦截 */
-    if (value_is_borrowed(v)) return;
-    value_dispose_raw(vm, value_data(v), value_type(v));
+    /* data 全平凡（元素为裸字节块，字符串归池），无需释放。
+       借用引用与 data 块本身由 value_dispose 统一处理。 */
+    (void)vm; (void)v;
 }
 
 /* ---- 判等：同实例按元素递归比较（值相等，非指针） ---- */
@@ -90,12 +88,12 @@ static void tuple_dispose(vm_t *vm, value_t *v) {
 static bool tuple_elem_equal(vm_t *vm, const void *a, const void *b,
                              const type_t *et) {
     if (!et || et->kind == TYPE_KIND_STR) {
-        /* str：指针相等（同一 string_t 实例）或内容相等 */
-        const string_t *sa = *(const string_t *const *)a;
-        const string_t *sb = *(const string_t *const *)b;
+        /* str：data 为池内指针（池去重：同指针即同内容；兜底 strcmp） */
+        const char *sa = *(const char *const *)a;
+        const char *sb = *(const char *const *)b;
         if (sa == sb) return true;
         if (!sa || !sb) return false;
-        return string_equals(sa, sb);
+        return strcmp(sa, sb) == 0;
     }
     switch (et->kind) {
         case TYPE_KIND_INT:
@@ -280,11 +278,10 @@ static value_t *tuple_set_index(vm_t *vm, value_t *self, value_t *index,
         if (value_is_error(vm, v)) return v;
     }
 
-    /* 写块内偏移：先释放旧元素资源，再深拷贝新值到业务内存。
+    /* 写块内偏移：data 全平凡（元素为 memcpy 可拷贝字节块），直接覆盖。
        self 是借用（多维链）时 data 已指向块内偏移，写直达原 tuple。 */
     uint8_t *slot = (uint8_t *)value_data(self) + e->offset;
-    value_dispose_raw(vm, slot, e->type);
-    value_blit_raw(vm, slot, value_data(v), e->type);
+    memcpy(slot, value_data(v), e->type->size);
     return self;
 }
 

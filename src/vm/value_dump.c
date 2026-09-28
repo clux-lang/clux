@@ -2,6 +2,7 @@
 #include "vm/type.h"
 #include "vm/value.h"
 #include "vm/vm.h"
+#include "vm/str_pool.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
@@ -160,9 +161,10 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
         break;
     }
     case TYPE_KIND_STR: {
-        string_t *s = *(string_t **)value_data(v);
+        /* str data 是池内指针（全平凡） */
+        const char *sv = *(const char *const *)value_data(v);
         string_append_char(out, '"');
-        if (s) string_append_cstr(out, string_cstr(s));
+        if (sv) string_append_cstr(out, sv);
         string_append_char(out, '"');
         break;
     }

@@ -1,35 +1,30 @@
 #include "vm/type_error.h"
 #include "vm/value.h"
 #include "vm/vm.h"
+#include "vm/str_pool.h"
 #include "core/panic.h"
 
-#include <stdio.h>
+#include <string.h>
 
-/* error value 的 data 布局: error_data_t 内联（直接存结构体，非指针） */
-
-/* ---- dispose ---- */
+/* ===========================================================================
+ * error value 的 data 布局：error_data_t 内联（直接存结构体，非指针）
+ *
+ * 平凡化后 error_data_t 的 message/location 为 vm 字符串池内指针
+ * （const char *，本体归 vm 字符串池），data 块 memcpy 可拷贝：
+ *   - dispose：no-op（池内存归池，value_dispose 释放 data 块）
+ *   - clone：alloc + memcpy
+ * =========================================================================== */
 
 static void error_dispose(vm_t *vm, value_t *v) {
-    (void)vm;
-    error_data_t *ed = (error_data_t *)value_data(v);
-    if (ed) {
-        if (ed->message)  string_free(&ed->message);
-        if (ed->location) string_free(&ed->location);
-    }
+    /* data 全平凡：message/location 为池引用，无需释放 */
+    (void)vm; (void)v;
 }
 
-/* ---- clone ---- */
-
 static value_t *error_clone(vm_t *vm, value_t *v) {
-    error_data_t *src = (error_data_t *)value_data(v);
-
-    error_data_t ed;
-    ed.message  = src->message  ? string_from_string(vm->alloc, src->message)  : NULL;
-    ed.location = src->location ? string_from_string(vm->alloc, src->location) : NULL;
-    if (src->message && !ed.message)  panic("vm: out of memory cloning error message");
-    if (src->location && !ed.location) panic("vm: out of memory cloning error location");
-
-    void *data = value_alloc_data_copy(vm->alloc, value_type(v), &ed);
+    /* shadow：返回新 shadow（error 不参与运算，防御性支持） */
+    if (value_is_shadow(v))
+        return value_make_shadow(vm, value_type(v));
+    void *data = value_alloc_data_copy(vm->alloc, value_type(v), value_data(v));
     return value_make(vm, value_type(v), data);
 }
 

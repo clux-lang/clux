@@ -2,7 +2,6 @@
 #include "vm/type.h"
 #include "vm/value.h"
 #include "vm/vm.h"
-#include "vm/type_option.h" /* value_blit_raw / value_dispose_raw */
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -21,10 +20,8 @@
  *   [payload_offset .. size) 各 member payload 联合体（max member size）
  * member payload 偏移 = payload_offset（单字段，无内部偏移）。
  *
- * 生命周期（clone/assign/dispose）按当前 tag 的 member 递归：
- *   先读 tag（union_read_tag）→ 定位 member → 其 payload_type → 复用
- *   value_blit_raw / value_dispose_raw（含 TYPE_KIND_UNION 分支：tag 平凡
- *   拷贝 + payload 按当前 tag 递归）。
+ * 生命周期（clone/assign/dispose）：data 全平凡（tag + payload 为 memcpy
+ *   可拷贝的裸字节块，字符串归 vm 字符串池），整块 memcpy / 无需释放。
  *
  * 严格类型：implicit_cast / explicit_cast 仅同 union 实例（身份拷贝）；
  * eq/ne 按 tag + payload 递归比较（不同 tag → false，同 tag → payload
@@ -47,7 +44,7 @@ static value_t *union_clone(vm_t *vm, value_t *v) {
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     void *data = value_alloc_data(vm->alloc, t);
-    value_blit_raw(vm, data, value_data(v), t);
+    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);
 }
 
@@ -62,15 +59,14 @@ static value_t *union_assign(vm_t *vm, value_t *dst, value_t *src) {
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
     const type_t *t = value_type(dst);
-    value_dispose_raw(vm, value_data(dst), t);
-    value_blit_raw(vm, value_data(dst), value_data(src), t);
+    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
     return dst;
 }
 
 static void union_dispose(vm_t *vm, value_t *v) {
-    /* 借用引用不拥有 data（指向父值内部），跳过；由 value_dispose 统一拦截 */
-    if (value_is_borrowed(v)) return;
-    value_dispose_raw(vm, value_data(v), value_type(v));
+    /* data 全平凡（tag + payload 为裸字节块，字符串归池），无需释放。
+       借用引用与 data 块本身由 value_dispose 统一处理。 */
+    (void)vm; (void)v;
 }
 
 /* ---- 判等：同 tag 按 payload 递归比较；不同 tag → false ---- */

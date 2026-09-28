@@ -13,6 +13,7 @@ extern "C" {
 #include "vm/function.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
+#include "vm/str_pool.h"
 #include "core/allocator.h"
 #include "core/string.h"
 #include "core/strslice.h"
@@ -80,8 +81,8 @@ static value_t *make_f64_raw(vm_t *vm, double v) {
     return value_make_untracked(vm->alloc, vm->type_bool, data);
 }
 static value_t *make_str_raw(vm_t *vm, const char *s) {
-    string_t *str = string_from_cstr(vm->alloc, s);
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &str);
+    const char *sv = vm_str_intern_cstr(vm, s);
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &sv);
     return value_make_untracked(vm->alloc, vm->type_str, data);
 }
 [[maybe_unused]] static value_t *make_i16_raw(vm_t *vm, int16_t v) {
@@ -233,7 +234,7 @@ TEST_F(VmBuiltinTypes, TypeSizeAndAlign) {
     EXPECT_EQ(vm->type_f64->align, alignof(double));
     EXPECT_EQ(vm->type_bool->size, sizeof(bool));
     EXPECT_EQ(vm->type_void->size, 0u);
-    EXPECT_EQ(vm->type_str->size,  sizeof(string_t *));
+    EXPECT_EQ(vm->type_str->size,  sizeof(const char *));
     EXPECT_EQ(vm->type_func->size, sizeof(func_t *));
 }
 
@@ -247,6 +248,50 @@ TEST_F(VmBuiltinTypes, TypeAsValue) {
     EXPECT_EQ(value_type(tv), vm->type_type);
     EXPECT_EQ(*(const type_t **)value_data(tv), vm->type_i32);
     /* type_as_value auto-track 到 current_scope，vm_destroy 释放 */
+}
+
+/* ---- vm 字符串池（str 生命周期托管，vm_str_intern 去重 intern） ---- */
+
+TEST_F(VmBuiltinTypes, StrPoolInternDeduplicates) {
+    /* 相同内容 intern 返回同一池指针 */
+    const char *a = vm_str_intern_cstr(vm, "hello");
+    const char *b = vm_str_intern_cstr(vm, "hello");
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(strlen(a), 5u);
+    EXPECT_EQ(memcmp(a, "hello", 5), 0);
+
+    /* 不同内容返回不同池指针 */
+    const char *c = vm_str_intern_cstr(vm, "world");
+    EXPECT_NE(a, c);
+
+    /* 按长度+内容区分（"abc" vs "abcd" 不误判） */
+    const char *d = vm_str_intern_len(vm, "abc", 3);
+    const char *e = vm_str_intern_len(vm, "abc", 4);
+    EXPECT_NE(d, e);
+
+    /* nil 输入 → NULL */
+    const char *nil = vm_str_intern_len(vm, nullptr, 0);
+    EXPECT_EQ(nil, nullptr);
+
+    /* lookup 命中不 intern（同 ptr） */
+    const char *lk = vm_str_lookup(vm, "hello", 5);
+    EXPECT_EQ(lk, a);
+    const char *miss = vm_str_lookup(vm, "nope", 4);
+    EXPECT_EQ(miss, nullptr);
+}
+
+TEST_F(VmBuiltinTypes, StrValueDataIsPoolPointer) {
+    /* str value 的 data 是池内 const char* 指针（平凡布局，sizeof==指针） */
+    value_t *s = make_str_raw(vm, "hello");
+    ASSERT_EQ(value_type(s), vm->type_str);
+    EXPECT_EQ(vm->type_str->size, sizeof(const char *));
+    const char *sv = *(const char *const *)value_data(s);
+    ASSERT_NE(sv, nullptr);
+    EXPECT_EQ(strlen(sv), 5u);
+    EXPECT_EQ(memcmp(sv, "hello", 5), 0);
+    raw_free(vm, s);
+
+    /* 池在 vm_destroy 统一释放：此处仅验证 value 生命周期不触碰字符串 */
 }
 
 /* ================================================================ */
@@ -615,7 +660,7 @@ TEST_F(ValueCore, MakeErrorIsTracked) {
     EXPECT_TRUE(value_is_error(vm, err));
 
     error_data_t *ed = (error_data_t *)value_data(err);
-    EXPECT_STREQ(string_cstr(ed->message), "test error");
+    EXPECT_STREQ(ed->message, "test error");
     EXPECT_EQ(ed->location, nullptr);
 
     /* error auto-track 到 current_scope，vm_destroy 释放 */
@@ -626,8 +671,8 @@ TEST_F(ValueCore, MakeErrorWithLocation) {
     EXPECT_TRUE(value_is_error(vm, err));
 
     error_data_t *ed = (error_data_t *)value_data(err);
-    EXPECT_STREQ(string_cstr(ed->message), "boom");
-    EXPECT_STREQ(string_cstr(ed->location), "file.clux:10");
+    EXPECT_STREQ(ed->message, "boom");
+    EXPECT_STREQ(ed->location, "file.clux:10");
 }
 
 TEST_F(ValueCore, NonErrorIsNotError) {
@@ -950,19 +995,21 @@ TEST_F(ValueCore, AssignBoolTypeMismatchReturnsError) {
 }
 
 TEST_F(ValueCore, AssignStrDeepCopy) {
-    string_t *s1 = string_from_cstr(vm->alloc, "hello");
+    const char *s1 = vm_str_intern_cstr(vm, "hello");
     void *d1 = value_alloc_data_copy(vm->alloc, vm->type_str, &s1);
     value_t *dst = value_make_untracked(vm->alloc, vm->type_str, d1);
 
-    string_t *s2 = string_from_cstr(vm->alloc, "world");
+    const char *s2 = vm_str_intern_cstr(vm, "world");
     void *d2 = value_alloc_data_copy(vm->alloc, vm->type_str, &s2);
     value_t *src = value_make_untracked(vm->alloc, vm->type_str, d2);
 
     value_t *r = value_assign(vm, dst, src);
     ASSERT_EQ(r, dst);
-    EXPECT_STREQ(string_cstr(*(string_t **)value_data(dst)), "world");
+    const char *dv = *(const char *const *)value_data(dst);
+    EXPECT_STREQ(dv, "world");
     /* src 不变 */
-    EXPECT_STREQ(string_cstr(*(string_t **)value_data(src)), "world");
+    const char *sv = *(const char *const *)value_data(src);
+    EXPECT_STREQ(sv, "world");
 
     raw_free(vm, dst);
     raw_free(vm, src);
@@ -2064,11 +2111,11 @@ TEST_F(ScopeMech, StrValueDisposedOnPopScope) {
     vm_push_scope(vm);
 
     value_t *s = make_str_raw(vm, "hello world");
-    value_t *cloned = value_clone(vm, s); /* str_clone 深拷贝 string_t */
+    value_t *cloned = value_clone(vm, s); /* str_clone 平凡拷贝（池引用） */
     (void)cloned;
     raw_free(vm, s);
 
-    /* cloned track 到 current_scope，pop 时 str_dispose 释放 string_t */
+    /* cloned track 到 current_scope，pop 时释放 value（字符串本体归池） */
     vm_pop_scope(vm);
 }
 

@@ -1120,7 +1120,7 @@ case AST_CALL: {
     /* error → 翻译为诊断（消息由 func_shadow_call 生成） */
     if (value_is_error(sema->vm, result)) {
         error_data_t *ed = (error_data_t *)value_data(result);
-        const char *msg = ed && ed->message ? string_cstr(ed->message)
+        const char *msg = ed && ed->message ? ed->message
                                             : "function call failed";
         diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
         return value_make_shadow(sema->vm, sema->vm->type_void);

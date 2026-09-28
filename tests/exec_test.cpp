@@ -128,9 +128,10 @@ TEST_F(ExecTest, PushFloatAndBoolAndStr) {
     EXPECT_EQ(value_type(b), vm->type_bool);
     EXPECT_TRUE(*(const bool *)value_data(b));
     EXPECT_EQ(value_type(s), vm->type_str);
-    const string_t *str = *(const string_t *const *)value_data(s);
-    EXPECT_EQ(string_len(str), 2u);
-    EXPECT_EQ(strncmp(string_cstr(str), "hi", 2), 0);
+    const char *sv = *(const char *const *)value_data(s);
+    ASSERT_NE(sv, nullptr);
+    EXPECT_EQ(strlen(sv), 2u);
+    EXPECT_EQ(memcmp(sv, "hi", 2), 0);
 }
 
 /* ================================================================ */

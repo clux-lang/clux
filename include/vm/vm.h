@@ -9,6 +9,7 @@ extern "C" {
 #include "vm/scope.h"
 #include "vm/function.h"
 #include "vm/bcode.h"
+#include "vm/str_pool.h"
 #include "core/allocator.h"
 #include "core/vec.h"
 
@@ -93,6 +94,9 @@ typedef struct vm_t {
     bytecode_t  *bc;      /* 当前执行中的字节码模块（嵌套调用时切换） */
     size_t       pc;      /* 当前指令指针（code 流字节偏移） */
     bool         halted;  /* error 出现即停止 */
+
+    /* ---- 字符串池（str 生命周期托管，vm_str_intern 去重 intern） ---- */
+    vec_t       *strs;     /* 池内字符串块（char*，含 NUL 终止符；不 owns，vm_destroy 手动释放） */
 
     /* ---- 编译期状态 ---- */
     bool         comptime; /* true = 强制编译期求值（comptime var/func 上下文；
