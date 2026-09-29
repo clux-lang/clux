@@ -1328,6 +1328,110 @@ TEST(Driver, RunFileTypeDefLocalHoistedLoop) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileDoWhileBasic) {
+  /* do-while 基础：体先执行一次再判条件；0+1+2+3+4 = 10 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var sum:i32 = 0;\n"
+      "  var i:i32 = 0;\n"
+      "  do {\n"
+      "    sum = sum + i;\n"
+      "    i = i + 1;\n"
+      "  } while (i < 5);\n"
+      "  if (sum != 10) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileDoWhileFalseCondRunsOnce) {
+  /* 条件初始即 false：体仍执行一次（后置条件循环语义） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var n:i32 = 0;\n"
+      "  do { n = n + 1; } while (false);\n"
+      "  if (n != 1) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileDoWhileContinue) {
+  /* do-while continue：跳回条件判断（跳过本次迭代剩余语句） */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var sum:i32 = 0;\n"
+      "  var i:i32 = 0;\n"
+      "  do {\n"
+      "    i = i + 1;\n"
+      "    if (i == 3) { continue; }\n"
+      "    sum = sum + i;\n"
+      "  } while (i < 5);\n"
+      "  if (sum != 12) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileDoWhileBreak) {
+  /* do-while break：提前退出循环 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var acc:i32 = 0;\n"
+      "  var j:i32 = 0;\n"
+      "  do {\n"
+      "    j = j + 1;\n"
+      "    if (j == 4) { break; }\n"
+      "    acc = acc + j;\n"
+      "  } while (j < 10);\n"
+      "  if (acc != 6) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileDoWhileNested) {
+  /* 嵌套 do-while：内层 3 次 × 外层 2 次 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var inner:i32 = 0;\n"
+      "  var outer:i32 = 0;\n"
+      "  var k:i32 = 0;\n"
+      "  do {\n"
+      "    outer = outer + 1;\n"
+      "    var m:i32 = 0;\n"
+      "    do { inner = inner + 1; m = m + 1; } while (m < 3);\n"
+      "    k = k + 1;\n"
+      "  } while (k < 2);\n"
+      "  if (inner != 6) { return 1; }\n"
+      "  if (outer != 2) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileDoWhileInComptimeFunc) {
+  /* comptime func 内 do-while：CTFE 语句解释路径（do-while 折叠） */
+  std::string path = write_temp_file(
+      "comptime func count(n:i32):i32 {\n"
+      "  var c:i32 = 0;\n"
+      "  do { c = c + 1; } while (c < n);\n"
+      "  return c;\n"
+      "}\n"
+      "func main():i32 {\n"
+      "  var r:i32 = count(4);\n"
+      "  if (r != 4) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 /* ================================================================ */
 /* 局部函数（local function）端到端                                      */
 /* ================================================================ */

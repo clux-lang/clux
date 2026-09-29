@@ -18,6 +18,7 @@ static const char *g_kind_names[] = {
     [AST_SWITCH]     = "switch",
     [AST_SWITCH_CASE] = "switch_case",
     [AST_WHILE]      = "while",
+    [AST_DOWHILE]    = "dowhile",
     [AST_FOR]        = "for",
     [AST_RETURN]     = "return",
     [AST_BREAK]      = "break",

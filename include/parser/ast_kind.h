@@ -22,6 +22,7 @@ typedef enum {
     AST_SWITCH,          /* switch(cond) { (pat,..)->{..} default->{..} } */
     AST_SWITCH_CASE,     /* switch 分支（模式列表 + 分支体，仅 switch 内出现） */
     AST_WHILE,           /* while cond { body } */
+    AST_DOWHILE,         /* do { body } while (cond); 后置条件循环 */
     AST_FOR,             /* for (init; cond; update) { body } */
     AST_RETURN,          /* return [expr]; */
     AST_BREAK,           /* break; */

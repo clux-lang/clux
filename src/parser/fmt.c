@@ -14,6 +14,7 @@
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/ast_for.h"
 #include "parser/ast_return.h"
 #include "parser/ast_expr_stmt.h"
@@ -709,6 +710,16 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             render_expr(f, w->cond);
             sb_ch(&f->sb, ')');
             render_block(f, w->body);
+            break;
+        }
+        case AST_DOWHILE: {
+            ast_dowhile_t *d = (ast_dowhile_t *)node;
+            sb_str(&f->sb, "do");
+            render_block(f, d->body);
+            sb_str(&f->sb, " while (");
+            render_expr(f, d->cond);
+            sb_ch(&f->sb, ')');
+            sb_ch(&f->sb, ';');
             break;
         }
         case AST_FOR: {

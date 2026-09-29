@@ -27,6 +27,7 @@ extern "C" {
 #include "parser/ast_block.h"
 #include "parser/ast_if.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/ast_for.h"
 #include "parser/ast_return.h"
 #include "parser/ast_int_lit.h"
@@ -979,6 +980,82 @@ TEST_F(ParseStmtTest, While_MissingBlock) {
     ASSERT_NE(p, nullptr);
 
     ast_node_t *node = parse_while(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* DoWhile: do { body } while (cond);                               */
+/* ================================================================ */
+
+TEST_F(ParseStmtTest, DoWhile_Simple) {
+    parser_t *p = make_parser("do { var y = 1; } while (x);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_DOWHILE);
+
+    auto *dw = (ast_dowhile_t *)node;
+    ASSERT_NE(dw->cond, nullptr);
+    EXPECT_EQ(dw->cond->kind, AST_IDENT);
+    ASSERT_NE(dw->body, nullptr);
+    EXPECT_EQ(dw->body->kind, AST_BLOCK);
+
+    cleanup_parser(p);
+}
+
+TEST_F(ParseStmtTest, DoWhile_MissingBody) {
+    parser_t *p = make_parser("do var y = 1; while (x);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+TEST_F(ParseStmtTest, DoWhile_MissingWhile) {
+    parser_t *p = make_parser("do { var y = 1; } (x);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+TEST_F(ParseStmtTest, DoWhile_MissingCondParen) {
+    parser_t *p = make_parser("do { var y = 1; } while x;");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+TEST_F(ParseStmtTest, DoWhile_MissingCond) {
+    parser_t *p = make_parser("do { var y = 1; } while ();");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+TEST_F(ParseStmtTest, DoWhile_MissingSemicolon) {
+    parser_t *p = make_parser("do { var y = 1; } while (x)");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_stmt(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_ERROR);
 

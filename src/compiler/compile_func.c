@@ -25,6 +25,7 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 
 #include <string.h>
 
@@ -141,6 +142,10 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
     case AST_WHILE:
       prescan_expr(c, ((ast_while_t *)n)->cond);
       prescan_stmt(c, ((ast_while_t *)n)->body);
+      break;
+    case AST_DOWHILE:
+      prescan_stmt(c, ((ast_dowhile_t *)n)->body);
+      prescan_expr(c, ((ast_dowhile_t *)n)->cond);
       break;
     case AST_SWITCH: {
       /* switch 分支体与 default 体递归（嵌套函数定义收集） */

@@ -15,6 +15,7 @@
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/ast_for.h"
 #include "parser/ast_return.h"
 #include "parser/ast_error.h"
@@ -36,6 +37,7 @@ ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "if"))     return parse_if(p);
     if (check_keyword(p, "switch")) return parse_switch(p);
     if (check_keyword(p, "while"))  return parse_while(p);
+    if (check_keyword(p, "do"))     return parse_dowhile(p);
     if (check_keyword(p, "for"))    return parse_for(p);
     if (check_keyword(p, "return")) return parse_return(p);
     if (check_keyword(p, "break"))  return parse_break(p);

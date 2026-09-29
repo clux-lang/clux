@@ -17,6 +17,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/lexer.h"
 
 #include <stdio.h>
@@ -514,6 +515,41 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
 
     bcode_write_op(c->bc, BCODE_JMP);
     emit_jump(c, &loop_top);
+    label_here(c, &loop_end);
+
+    c->loop_stack = lc.next;
+    break;
+  }
+  case AST_DOWHILE: {
+    ast_dowhile_t *n = (ast_dowhile_t *)node;
+
+    compile_label_t loop_top, loop_cont, loop_end;
+    label_init(&loop_top);
+    label_init(&loop_cont);
+    label_init(&loop_end);
+
+    /* 循环上下文（break→end，continue→loop_cont）。continue 跳转到条件
+       判断前（loop_cont 定位在条件求值处）；loop_top 定位在循环体入口，
+       底部 JMP 跳回 loop_cont（判条件）而非 loop_top，保证每次迭代先判
+       条件后进体。 */
+    compile_loop_t lc;
+    lc.break_label = &loop_end;
+    lc.continue_label = &loop_cont;
+    lc.scope_depth = c->scope_depth;
+    lc.next = c->loop_stack;
+    c->loop_stack = &lc;
+
+    label_here(c, &loop_top);                /* 循环体入口（先执行体） */
+
+    balance_push(c);                         /* 循环体块作用域 */
+    ast_block_t *b = (ast_block_t *)n->body;
+    compile_block_body(c, b);
+    balance_pop(c);
+
+    label_here(c, &loop_cont);               /* continue 目标 + 循环底：判条件 */
+    compile_expr(c, n->cond);                /* 栈: [cond] */
+    bcode_write_op(c->bc, BCODE_JNZ);
+    emit_jump(c, &loop_top);                 /* 条件真 → 回循环体入口；假 → 落到 end */
     label_here(c, &loop_end);
 
     c->loop_stack = lc.next;

@@ -433,6 +433,34 @@ TEST_F(SemaTest, ForBodyAssignDoesNotInitOuter) {
     expect_message(0, "used before initialization");
 }
 
+TEST_F(SemaTest, DoWhileBodyAssignDoesNotInitOuter) {
+    /* do-while 体至少执行一次，但条件不满足时循环结束——体内赋值仍不提升
+       外层变量确定性（保守，与 while 一致） */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  var a:i32 = undefined;"
+        "  do { a = 1; } while (true);"
+        "  var b = a;"
+        "}"));
+    expect_message(0, "used before initialization");
+}
+
+TEST_F(SemaTest, DoWhileCondMustBeBool) {
+    EXPECT_FALSE(analyze(
+        "func main(): void { do { } while (1); }"));
+    expect_message(0, "do-while condition operand must be bool");
+}
+
+TEST_F(SemaTest, BreakContinueInDoWhile) {
+    /* do-while 是循环：break/continue 合法（Pass 3a loop_depth 包裹） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  do { break; } while (true);"
+        "  do { continue; } while (true);"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
 TEST_F(SemaTest, AssignBeforeIfThenReadInBranches) {
     /* if 前已初始化：分支内重新赋值不影响（读取在分支内） */
     EXPECT_TRUE(analyze(

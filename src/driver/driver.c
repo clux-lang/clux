@@ -799,7 +799,7 @@ static bool is_asm_label(const char *ls, const char *le) {
 /* 文本是否含 clux 源码关键字（作为词边界，避免误匹配标识符内的子串）。 */
 static bool has_source_keyword(const char *s, size_t len) {
     static const char *kws[] = {
-        "func", "var", "if", "else", "while", "for", "foreach", "return",
+        "func", "var", "if", "else", "while", "do", "for", "foreach", "return",
         "struct", "enum", "type", "comptime", "import", "interface", "using",
         NULL,
     };

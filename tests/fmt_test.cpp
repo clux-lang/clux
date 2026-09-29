@@ -183,6 +183,25 @@ TEST(Fmt, ControlKeywordSpaceBeforeParen) {
               "}\n");
 }
 
+TEST(Fmt, DoWhile) {
+    std::string out = fmt(
+        "func main():void{\n"
+        "var i:i32=0;\n"
+        "do{i=i+1;}while(i<3);\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): void {\n"
+              "    var i: i32 = 0;\n"
+              "    do {\n"
+              "        i = i + 1;\n"
+              "    } while (i < 3);\n"
+              "}\n");
+
+    /* 幂等性：再次格式化不变 */
+    std::string twice = fmt(out.c_str());
+    EXPECT_EQ(out, twice);
+}
+
 /* 数字类型后缀须与数值紧贴：`7i8` / `2.5f32` 不得被切成 `7 i8`，
  * 否则会改变语义（后缀本由词法器切为独立 token，但语法上必须紧邻）。 */
 TEST(Fmt, NumericTypeSuffixStaysGlued) {

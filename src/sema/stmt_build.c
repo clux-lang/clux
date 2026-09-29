@@ -15,6 +15,7 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "vm/type_func.h"
 
 #include <stdio.h>
@@ -381,6 +382,19 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         build_block(sema, (ast_block_t *)wl->body, body_scope);
         sema->loop_depth--;
         break; /* 循环体可能不执行，不贡献 definitely_returns */
+      }
+      case AST_DOWHILE: {
+        /* do-while 与 while 同构：body 建子作用域、loop_depth 包裹。
+           循环体至少执行一次，但条件不满足时仍可能不返回，保守不贡献
+           definitely_returns（与 while 一致）。 */
+        ast_dowhile_t *dw = (ast_dowhile_t *)s;
+        sema_scope_t *body_scope =
+            sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
+        sema_scope_add_child(scope, body_scope);
+        sema->loop_depth++;
+        build_block(sema, (ast_block_t *)dw->body, body_scope);
+        sema->loop_depth--;
+        break;
       }
       case AST_FOR: {
         ast_for_t *fr = (ast_for_t *)s;

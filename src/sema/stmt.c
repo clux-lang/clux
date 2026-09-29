@@ -28,6 +28,7 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
 #include "vm/type_array.h"
@@ -802,6 +803,26 @@ static block_result_t walk_while(sema_t *sema, ast_while_t *wl,
   return (block_result_t){0}; /* 循环体可能不执行，不贡献 definitely_returns */
 }
 
+static block_result_t walk_dowhile(sema_t *sema, ast_dowhile_t *dw,
+                                   sema_scope_t *scope, size_t *idx) {
+  /* do-while：条件在体后。体至少执行一次——但条件不满足时循环结束，
+     体内赋值对外层变量的确定性仍不提升（保守，与 while 一致） */
+  flow_snap_t snap = flow_capture(sema, scope);
+
+  sema_scope_t *body_scope = sema_scope_child(scope, (*idx)++);
+  vm_push_scope(sema->vm); /* 循环体块：VM scope 与 sema scope 树同构 */
+  size_t sub = 0;
+  walk_block(sema, dw->body, body_scope ? body_scope : scope, &sub);
+  vm_pop_scope(sema->vm);
+
+  value_t *cond = sema_expr(sema, &dw->cond, scope);
+  sema_check_bool(sema, dw->cond, cond, "do-while condition");
+
+  flow_restore(&snap);
+  flow_release(&snap);
+  return (block_result_t){0};
+}
+
 static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
                                sema_scope_t *scope, size_t *idx) {
   sema_scope_t *for_scope = sema_scope_child(scope, (*idx)++);
@@ -1061,6 +1082,9 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       break;
     case AST_WHILE:
       r = walk_while(sema, (ast_while_t *)stmt, scope, idx);
+      break;
+    case AST_DOWHILE:
+      r = walk_dowhile(sema, (ast_dowhile_t *)stmt, scope, idx);
       break;
     case AST_FOR:
       r = walk_for(sema, (ast_for_t *)stmt, scope, idx);

@@ -1,14 +1,18 @@
-// control_flow.cx — M1 样例：if/else、while、for、break、continue、return
+// control_flow.cx — M1 样例：if/else、while、do-while、for、break、continue、return
 func main(): i32 {
     var sum: i32 = 0;
     var i: i32 = 0;
-
     // while 循环
     while (i < 5) {
         sum = sum + i;
         i = i + 1;
     }
-
+    // do-while 循环（后置条件：体至少执行一次）
+    var n: i32 = 0;
+    do {
+        n = n + 1;
+    } while (n < 3);
+    sum = sum + n;
     // for 循环（C 风格三元头：init; cond; update）
     for (var j: i32 = 0; j < 5; j = j + 1) {
         if (j == 3) {
@@ -16,7 +20,6 @@ func main(): i32 {
         }
         sum = sum + j;
     }
-
     // break 提前退出循环
     for (var k: i32 = 0; k < 10; k = k + 1) {
         if (k == 7) {
@@ -24,7 +27,6 @@ func main(): i32 {
         }
         sum = sum + k;
     }
-
     // if / else 分支
     if (sum > 100) {
         printf("big\n");

@@ -13,6 +13,7 @@
 #include "parser/ast_switch.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
+#include "parser/ast_dowhile.h"
 #include "parser/lexer.h"
 #include "vm/type_error.h"
 #include "vm/value.h"
@@ -160,6 +161,28 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
             }
             if (ctx->ctrl == CTFE_CTRL_CONTINUE) ctx->ctrl = CTFE_CTRL_NONE;
             if (ctx->ctrl == CTFE_CTRL_RETURN) break;
+        }
+        return value_make_undefined(vm);
+    }
+    case AST_DOWHILE: {
+        /* do-while：先执行体，再判条件（体至少执行一次） */
+        ast_dowhile_t *n = (ast_dowhile_t *)stmt;
+        for (;;) {
+            if (ctx->budget == 0)
+                return ctfe_err(ctx, "ctfe: evaluation budget exceeded (loop)");
+            value_t *r = ctfe_eval_stmt(ctx, n->body);
+            if (value_is_error(vm, r)) return r;
+            if (ctx->ctrl == CTFE_CTRL_BREAK) {
+                ctx->ctrl = CTFE_CTRL_NONE;
+                break;
+            }
+            if (ctx->ctrl == CTFE_CTRL_CONTINUE) ctx->ctrl = CTFE_CTRL_NONE;
+            if (ctx->ctrl == CTFE_CTRL_RETURN) break;
+            value_t *cv = ctfe_eval(ctx, n->cond);
+            if (value_is_error(vm, cv)) return cv;
+            if (value_type(cv) != vm->type_bool)
+                return ctfe_err(ctx, "ctfe: do-while condition must be bool");
+            if (!ctfe_read_bool(vm, cv)) break;
         }
         return value_make_undefined(vm);
     }
