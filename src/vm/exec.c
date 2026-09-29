@@ -9,6 +9,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 #include "vm/str_pool.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
@@ -569,7 +570,12 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
         type_union_set_member_type(vm, st, ft);
         return NULL;
     }
-    return value_make_error(vm, "exec: define field expects an open struct or union type on top");
+    if (st->kind == TYPE_KIND_CUNION) {
+        type_cunion_add_member(vm, st, name);
+        type_cunion_set_member_type(vm, st, ft);
+        return NULL;
+    }
+    return value_make_error(vm, "exec: define field expects an open struct, union or cunion type on top");
 }
 
 /* ---- tuple type 构造（与 struct 统一：PUSH → APPEND_ELEM×N → SEAL） ---- */
@@ -606,6 +612,14 @@ static value_t *op_append_elem(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static value_t *op_push_union(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     type_union_push(vm);
+    return NULL;
+}
+
+/* PUSH_CUNION：分配空 cunion type（开放，members=NULL，不入池）+ 压其 type
+ * value（type_cunion_push 压栈；对应两遍构造声明阶段的起点） */
+static value_t *op_push_cunion(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    type_cunion_push(vm);
     return NULL;
 }
 
@@ -739,6 +753,52 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make(vm, t, data);
     }
 
+    /* cunion 构造：.C{.i = 42}（struct 同构单字段构造，docs m2-design
+       §cunion）——C union 无 tag（所有 member 共享 offset 0，无 tag 校验）。
+       与 tag union 同款显式 member 哨兵协议（消除同类型 member 歧义，指令
+       单一路径）：栈布局 [type_value, member_idx, payload_value]（idx 在底、
+       payload 在顶），n == 2（idx 值 + payload 值两个成员）。idx 值读自
+       成员[0]（整数值 = member 下标），payload 按该 member 的类型
+       implicit_cast 后 blit 到 data 首部（offset 0，所有 member 共享）。
+       data 清零未覆盖位自动零值。 */
+    if (t->kind == TYPE_KIND_CUNION) {
+        const cunion_type_t *ct = (const cunion_type_t *)t;
+        if (n != 2)
+            return value_make_error(vm,
+                "construct: cunion constructor expects member index + value (n=2)");
+        value_t *idx_v = elems[0];
+        value_t *payload = elems[1];
+        if (value_is_shadow(payload) || value_is_shadow(idx_v))
+            return value_make_shadow(vm, t);
+        /* member 下标值：整数（member 下标） */
+        const type_t *it = idx_v ? value_type(idx_v) : NULL;
+        if (!it || it->kind != TYPE_KIND_INT)
+            return value_make_error(vm,
+                "construct: cunion member index value must be an integer");
+        int64_t mi = 0;
+        switch (it->size) {
+        case 1: mi = (int64_t)*(const int8_t  *)value_data(idx_v); break;
+        case 2: mi = (int64_t)*(const int16_t *)value_data(idx_v); break;
+        case 4: mi = (int64_t)*(const int32_t *)value_data(idx_v); break;
+        default: mi = *(const int64_t *)value_data(idx_v); break;
+        }
+        if (mi < 0 || (size_t)mi >= ct->member_count)
+            return value_make_error(vm,
+                "construct: cunion member index value out of range");
+        const cunion_member_t *m = &ct->members[(size_t)mi];
+        if (!m->type)
+            return value_make_error(vm, "construct: cunion member type missing");
+        /* 隐式转换 payload 值 → 成员类型（同类型身份短路；字面量 i32 → i64
+           成员宽度提升） */
+        value_t *casted = value_implicit_cast(vm, payload, m->type);
+        if (value_is_error(vm, casted)) return casted;
+        void *data = value_alloc_data(vm->alloc, t);  /* 清零 */
+        /* data 全平凡：member 为 memcpy 可拷贝字节块，直接拷贝到 offset 0
+           （C union：所有 member 共享同一块内存，无 tag） */
+        memcpy((uint8_t *)data, value_data(casted), m->type->size);
+        return value_make(vm, t, data);
+    }
+
     /* tag union 构造：.Value{.i = 42}（struct 同构单字段构造，docs m2-design
        §tag union）——显式 tag 哨兵协议（消除同类型 member 歧义，指令单一路径）：
        栈布局 [type_value, tag_value, payload_value]（tag 在底、payload 在顶），
@@ -784,9 +844,9 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make(vm, t, data);
     }
 
-    /* 非 array/option/struct/tuple/union 类型暂未实现 */
+    /* 非 array/option/struct/tuple/union/cunion 类型暂未实现 */
     return value_make_error(vm,
-        "construct: unsupported type (only array, optional, struct, tuple and union implemented)");
+        "construct: unsupported type (only array, optional, struct, tuple, union and cunion implemented)");
 }
 
 /* ---- 下标读取（get_item）：self[index] -> 元素 ----
@@ -841,7 +901,21 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
             return value_make_borrowed(vm, m->payload_type,
                 (uint8_t *)value_data(self) + union_type_payload_offset(t));
         }
-        return value_make_error(vm, "exec: field get expects a struct value");
+        /* cunion 分支：字段名 = member 名，按名反查 → 无 tag 校验（C union
+           语义，开发者自负安全）→ 借用引用 data 指向 offset 0（所有 member
+           共享内存，data 即联合体本身）。shadow → member 类型 shadow。 */
+        if (t && t->kind == TYPE_KIND_CUNION) {
+            int mi = cunion_type_find_member(t, name);
+            if (mi < 0)
+                return value_make_error(vm, "exec: no such cunion member field");
+            const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
+            if (!m->type)
+                return value_make_error(vm, "exec: cunion member type missing");
+            if (value_is_shadow(self))
+                return value_make_shadow(vm, m->type);
+            return value_make_borrowed(vm, m->type, (uint8_t *)value_data(self));
+        }
+        return value_make_error(vm, "exec: field get expects a struct, union or cunion value");
     }
     int idx = struct_type_find_field(t, name);
     if (idx < 0)
@@ -891,7 +965,24 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
             memcpy(dst, value_data(casted), m->payload_type->size);
             return self;
         }
-        return value_make_error(vm, "exec: field set expects a struct value");
+        /* cunion 分支：与 FIELD_GET 同款 member 名反查 → 无 tag 校验（C union
+           语义）→ implicit_cast 后 memcpy 到 offset 0（共享内存直接覆盖） */
+        if (t && t->kind == TYPE_KIND_CUNION) {
+            int mi = cunion_type_find_member(t, name);
+            if (mi < 0)
+                return value_make_error(vm, "exec: no such cunion member field");
+            const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
+            if (!m->type)
+                return value_make_error(vm, "exec: cunion member type missing");
+            if (value_is_shadow(self))
+                return self;
+            value_t *casted = value_implicit_cast(vm, val, m->type);
+            if (value_is_error(vm, casted)) return casted;
+            /* data 全平凡：写入 offset 0（联合体本体，直接覆盖） */
+            memcpy((uint8_t *)value_data(self), value_data(casted), m->type->size);
+            return self;
+        }
+        return value_make_error(vm, "exec: field set expects a struct, union or cunion value");
     }
     int idx = struct_type_find_field(t, name);
     if (idx < 0)
@@ -1209,6 +1300,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_UNION]      = op_push_union,
     [BCODE_UNION_MEMBER]    = op_union_member,
     [BCODE_IS_TAG]          = op_is_tag,
+    [BCODE_PUSH_CUNION]     = op_push_cunion,
     [BCODE_CONSTRUCT]       = op_construct,
     [BCODE_INDEX_GET]       = op_index_get,
     [BCODE_INDEX_SET]       = op_index_set,

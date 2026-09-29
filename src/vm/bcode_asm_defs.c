@@ -102,6 +102,8 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_UNION]     = { "PUSH_UNION",    { BCODE_ASM_OP_NONE } },
     [BCODE_UNION_MEMBER]   = { "UNION_MEMBER",  { BCODE_ASM_OP_STR } },
     [BCODE_IS_TAG]         = { "IS_TAG",        { BCODE_ASM_OP_U32 } },
+
+    [BCODE_PUSH_CUNION]    = { "PUSH_CUNION",   { BCODE_ASM_OP_NONE } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

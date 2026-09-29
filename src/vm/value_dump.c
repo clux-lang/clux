@@ -8,6 +8,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 #include "core/string.h"
 #include "core/strslice.h"
 
@@ -83,6 +84,12 @@ static void type_dump_name(const type_t *t, string_t *out) {
         else string_append_cstr(out, "union");
         return;
     }
+    case TYPE_KIND_CUNION: {
+        /* 具名 cunion：直接显示名字；匿名显示 "cunion" */
+        if (t->name.ptr) string_append_bytes(out, t->name.ptr, t->name.len);
+        else string_append_cstr(out, "cunion");
+        return;
+    }
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE: {
         const char *kw = (t->kind == TYPE_KIND_CONST) ? "const " : "volatile ";
@@ -115,7 +122,8 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
        类型保持紧凑 `.i32{42}`（与语言构造字面量 .i32{...} 一致），即
        `. [3]i32 { .i32{1} }`。 */
     bool agg = (k == TYPE_KIND_ARRAY || k == TYPE_KIND_STRUCT ||
-                k == TYPE_KIND_TUPLE || k == TYPE_KIND_UNION);
+                k == TYPE_KIND_TUPLE || k == TYPE_KIND_UNION ||
+                k == TYPE_KIND_CUNION);
 
     if (!v) { string_append_cstr(out, "{<null>}"); return; }
     if (value_is_shadow(v)) {
@@ -212,6 +220,23 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
             value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->payload_type,
                               (uint8_t *)value_data(v) + union_type_payload_offset(t)),
                             out);
+        }
+        break;
+    }
+    case TYPE_KIND_CUNION: {
+        /* C union 无 tag：data 即联合体本身（offset 0）。按最后写入的 member
+           语义无法从数据反推当前活跃 member——渲染按声明序第一个 member 的
+           类型解释（与 C 语言读 union 相同：以读取方视角解释字节）。 */
+        size_t n = cunion_type_member_count(t);
+        const cunion_member_t *m = cunion_type_member(t, 0);
+        if (m && m->name.ptr)
+            string_append_bytes(out, m->name.ptr, m->name.len);
+        else
+            string_append_cstr(out, n ? "<member?>" : "<empty>");
+        if (m && m->type) {
+            string_append_cstr(out, ": ");
+            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->type,
+                              (uint8_t *)value_data(v)), out);
         }
         break;
     }

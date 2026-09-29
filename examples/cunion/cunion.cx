@@ -1,0 +1,52 @@
+// cunion.cx -- C 语义 union（兼容 C FFI：无 tag，所有 member 共享内存 offset 0，
+//             不做安全检查，开发者自负安全）
+//
+//   声明     cunion Name { field: type; ... }
+//           与 struct 同构平铺字段语法，仅关键字不同；字段名 = member 名，
+//           字段类型 = member 类型
+//   布局     data 即联合体本体（offset 0 起），size = max(member size)，
+//           align = max(member align)；空 member 列表 size = 1 占位
+//   构造     .U{.i = 42}（强制恰好 1 个具名字段；字段名 = member 名；
+//           member 下标哨兵消除同类型 member 歧义；下标不写入 data）
+//   访问     u.i 读 / u.i = v 写：FIELD_GET/FIELD_SET 按名反查 member，
+//           无 tag 校验，直接读写 offset 0（共享内存，写入一个 member 会
+//           覆盖其他 member 的字节——C union 语义）
+//   判等     memcmp 字节比较（str 成员按字节比较，不递归内容）
+//   实现     构造 → CONSTRUCT（cunion 分支）；访问 → FIELD_GET/SET
+
+// 全局 cunion：三个 member 共享同一块内存（i32 写进去，f32 读出来是字节重释）
+cunion U {
+  i: i32;
+  f: f32;
+  b: bool;
+}
+
+func main(): i32 {
+    // 单字段强制构造：字段名 = member 名
+    var u = .U{.i = 42};
+
+    // 字段访问：任意 member 都可读写（无 tag 校验）
+    if (u.i != 42) { return 1; }
+
+    // 共享内存：写入 f 覆盖 i 的字节（C union 语义——读取方视角解释字节）
+    u.f = 1.5f32;
+    var i = u.i; // i 与 f 共享字节，读取 reinterpret（平台相关，这里只验证可读）
+    if (u.f != 1.5f32) { return 2; }
+
+    // bool member 同址：写 b 后读 f（共享）
+    u.b = true;
+    if (u.b != true) { return 3; }
+
+    // 变量赋值：同 cunion 类型间（memcpy 整块）
+    var u2: U = u;
+    if (u2.b != true) { return 4; }
+
+    // 判等：memcmp 字节比较（同值同字节 → 相等）
+    var u3 = .U{.i = 42};
+    var u4 = .U{.i = 42};
+    if (u3 == u4 != true) { return 5; }
+    var u5 = .U{.i = 43};
+    if (u3 == u5 != false) { return 6; }
+
+    return 0;
+}

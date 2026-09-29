@@ -9,6 +9,7 @@
 #include "parser/ast_return.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -289,6 +290,19 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate name '%.*s'", (int)ud->name.len,
                      ud->name.ptr);
+        }
+        break;
+      }
+      case AST_CUNION_DEF: {
+        /* 局部 cunion 定义：注册符号（暂不激活，Pass 3b walk_block 入口提升
+           调 sema_eval_cunion_def 求值后激活）。与局部 union/struct/enum/type
+           定义同构（struct 同构平铺字段语法）。 */
+        ast_cunion_def_t *cd = (ast_cunion_def_t *)s;
+        sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = (ast_node_t *)cd};
+        if (!sema_scope_define(scope, cd->name, &init)) {
+          diag_error(sema->diag, sema_loc(sema, s),
+                     "duplicate name '%.*s'", (int)cd->name.len,
+                     cd->name.ptr);
         }
         break;
       }

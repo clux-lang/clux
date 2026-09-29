@@ -3218,3 +3218,114 @@ TEST(Driver, RunFileUnionFieldAccessMismatchTagPanics) {
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- cunion（C 语义裸 union，无 tag，开发者自负安全）---- */
+
+TEST(Driver, RunFileCUnionConstructSharedMemoryPasses) {
+  /* cunion 构造 + 共享内存重解释端到端：
+     - cunion U { i: i32; f: f32; b: bool } 平铺字段定义
+     - 单字段强制构造 .U{.i = 42}
+     - 字段读取 u.i / 写入 u.f = 1.5f32 后按 u.i 重解释（共享 offset 0）
+     - 同类型变量赋值 */
+  std::string path = write_temp_file(
+      "cunion U {\n"
+      "  i: i32;\n"
+      "  f: f32;\n"
+      "  b: bool;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var u = .U{.i = 42};\n"
+      "  if (u.i != 42)          { return 1; }\n"
+      "  if (u.f != 0.0f32)      { return 2; }\n"
+      "  u.f = 1.5f32;\n"
+      "  if (u.f != 1.5f32)      { return 3; }\n"
+      "  u.i = 7;\n"
+      "  if (u.i != 7)           { return 4; }\n"
+      "  u.b = true;\n"
+      "  if (u.b != true)        { return 5; }\n"
+      "  var u2: U = u;\n"
+      "  if (u2.i != 7)          { return 6; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileCUnionLocalDefPasses) {
+  /* 局部 cunion（函数体内定义） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  cunion U {\n"
+      "    i: i32;\n"
+      "  }\n"
+      "  var u = .U{.i = 5};\n"
+      "  if (u.i != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileCUnionEqMemcmpPasses) {
+  /* memcmp 字节判等：同字节模式 == true；改一字节 != */
+  std::string path = write_temp_file(
+      "cunion U {\n"
+      "  i: i32;\n"
+      "  f: f32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a = .U{.i = 100};\n"
+      "  var b = .U{.i = 100};\n"
+      "  var c = .U{.i = 101};\n"
+      "  if (a == b != true)  { return 1; }\n"
+      "  if (a != b != false) { return 2; }\n"
+      "  if (a == c != false) { return 3; }\n"
+      "  if (a != c != true)  { return 4; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileCUnionFieldCountMismatchRejected) {
+  /* cunion 构造字段数 != 1 -> 编译期拒绝（强制单字段构造） */
+  std::string path = write_temp_file(
+      "cunion U {\n"
+      "  i: i32;\n"
+      "  f: f32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var u = .U{.i = 1, .f = 2.0f32};\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileCUnionUnknownFieldRejected) {
+  /* cunion 构造给出未知 member -> 编译期拒绝 */
+  std::string path = write_temp_file(
+      "cunion U {\n"
+      "  i: i32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var u = .U{.z = 1};\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileCUnionEmptyMemberListRejected) {
+  /* 空 member 列表 cunion：定义合法（size=1 占位），但无 member 可构造 */
+  std::string path = write_temp_file(
+      "cunion Empty {\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var e = .Empty{.z = 1};\n"
+      "  return 0;\n"
+      "}\n");
+  /* 空 cunion 无 member -> 构造未知 member 编译期拒绝 */
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

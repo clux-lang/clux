@@ -2,6 +2,7 @@
 #include "parser/ast_assign.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
@@ -140,7 +141,8 @@ static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
-        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF)
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF ||
+        s->kind == AST_CUNION_DEF)
       compile_stmt(c, s);
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind != AST_FUNC_DEF) continue;
@@ -157,7 +159,8 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
      循环内每次迭代块入口都重新 MAKE_FUNCTION，每轮新实例，捕获互不干扰。 */
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
-        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF)
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF ||
+        s->kind == AST_CUNION_DEF)
       continue;
     if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
@@ -255,6 +258,25 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
        PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
        （运行时 type_lookup 解析 `var s: Value`）。 */
     ast_union_def_t *n = (ast_union_def_t *)node;
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+    bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* 栈: [type_value, spec占位] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, n->name);
+    /* DEFINE 永远双弹弹掉全部，栈深归零 */
+    st_push(c, -2);
+    break;
+  }
+  case AST_CUNION_DEF: {
+    /* cunion Name { i: i32; f: f32; ... } 名字绑定（顶层 cunion 定义）：
+       与 union def 同构——cunion 类型在 hoist 区构造（pass 2 SEAL 完成，
+       DEFINE_FIELD xN 追加 member 名 + 设 member 类型；无 UNION_MEMBER——
+       cunion 无 tag），此处 LOAD_TYPE <cunion_id>（sema 登记的 type_id
+       写回节点）-> PUSH_UNDEFINED -> DEFINE "Name" 绑定 type value 到作用域
+       （运行时 type_lookup 解析 var v: U）。 */
+    ast_cunion_def_t *n = (ast_cunion_def_t *)node;
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
     st_push(c, 1);

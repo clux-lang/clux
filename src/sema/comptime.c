@@ -17,12 +17,14 @@
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "vm/function.h"
 #include "vm/scope.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
 #include "vm/value.h"
@@ -1075,6 +1077,112 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
   if (ud->name.len >= sizeof nb) return false;
   memcpy(nb, ud->name.ptr, ud->name.len);
   nb[ud->name.len] = '\0';
+  scope_define(vm, vm->current_scope, nb, tv);
+
+  /* 4. 符号激活（TDZ：定义前不可见） */
+  sym->type = t;
+  sym->is_active = true;
+  sym->flow_init = true;
+  return true;
+}
+
+/* ===========================================================================
+ * C 语义 union 定义求值（cunion Name { field: type; ... }）
+ *
+ * cunion 与 struct 同构语法：字段直接平铺，每个字段即一个 member（member 名
+ * = 字段名，member 类型 = 字段类型）。定义点在 pass1b 与全局
+ * type/enum/struct/union def 一起求值（先于函数签名解析）：
+ *   1. 逐字段类型解析（sema_resolve_type_slot 折叠为 AST_TYPE_REF）→
+ *      未知/非类型槽位报错；字段名查重（member 名须全局唯一）
+ *   2. type_cunion_intern 构造 cunion 类型（拷贝 member 表 + 布局
+ *      size=max/align=max/offset 全 0 + 去重 intern，立即密封）
+ *   3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type
+ *      value 到编译期 vm 作用域（var s: C 经 type_lookup 解析）
+ *   4. 激活符号；定义点保留（进字节码，运行时 hoist 构造 + 名字绑定）
+ *
+ * 与 tag union 的区别：无 tag——member 不携带 tag 编号；布局共享 offset 0，
+ * 不做安全检查（开发者自负安全，对齐 C union FFI）。
+ * =========================================================================== */
+
+bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scope) {
+  if (!sema || !cd) return false;
+  sema_symbol_t *sym = sema_scope_find_local(scope, cd->name);
+  if (!sym) return false; /* pass1 重复定义已诊断，符号未注册 */
+
+  vm_t *vm = sema->vm;
+
+  /* 1. 逐字段（member）类型解析 + 查重（member 名重复报错） */
+  size_t n = 0;
+  for (ast_node_t *fn = cd->fields; fn; fn = fn->next) n++;
+  cunion_member_t *members = NULL;
+  if (n > 0) {
+    members = (cunion_member_t *)allocator_new_ex(
+        vm->alloc, "cunion_member_t", sizeof(cunion_member_t), NULL, NULL, NULL,
+        n);
+    if (!members) panic("sema: out of memory allocating cunion members");
+  }
+
+  size_t i = 0;
+  bool ok = true;
+  for (ast_node_t *fn = cd->fields; fn; fn = fn->next, i++) {
+    ast_struct_field_t *sf = (ast_struct_field_t *)fn;
+    members[i].name = sf->name;
+    members[i].type = NULL;
+
+    /* 字段名（member 名）查重 */
+    bool dup = false;
+    for (size_t j = 0; j < i; j++) {
+      if (members[j].name.len == sf->name.len && members[j].name.ptr &&
+          memcmp(members[j].name.ptr, sf->name.ptr, sf->name.len) == 0) {
+        diag_error(sema->diag, sema_loc(sema, fn),
+                   "cunion '%.*s': duplicate member name '%.*s'",
+                   (int)cd->name.len, cd->name.ptr, (int)sf->name.len,
+                   sf->name.ptr);
+        ok = false;
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+
+    /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
+       ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
+    const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
+    if (!ft) {
+      diag_error(sema->diag, sema_loc(sema, sf->type),
+                 "cunion '%.*s': unknown field type for '%.*s'",
+                 (int)cd->name.len, cd->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
+      ok = false;
+      continue;
+    }
+    members[i].type = ft;
+  }
+
+  if (!ok) {
+    if (members) allocator_free(vm->alloc, (void **)&members);
+    return false;
+  }
+
+  /* 2. type_cunion_intern 构造 cunion 类型（拷贝 member 表 + 布局
+     size=max/align=max/offset 全 0 + 去重 intern，立即密封） */
+  const type_t *t = type_cunion_intern(vm, members, n);
+  if (members) allocator_free(vm->alloc, (void **)&members);
+  if (!t) return false;
+
+  /* 3. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
+  const sema_type_t *st = sema_type_register(sema, t);
+  if (!st) return false;
+  cd->type_id = st->id; /* compiler 顶层名字绑定 LOAD_TYPE 用 */
+  /* 显示名（诊断/值 dump 用）：须在 sema_type_register 分配 id 后调用——
+     type_set_name 要求 t->id >= TYPE_ID_PROGRAM_BASE 才可改名。 */
+  type_set_name(vm, t, cd->name);
+  value_t *tv = type_as_value(vm, t);
+  if (!tv) return false;
+  char nb[256];
+  if (cd->name.len >= sizeof nb) return false;
+  memcpy(nb, cd->name.ptr, cd->name.len);
+  nb[cd->name.len] = '\0';
   scope_define(vm, vm->current_scope, nb, tv);
 
   /* 4. 符号激活（TDZ：定义前不可见） */

@@ -25,6 +25,7 @@
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -561,8 +562,60 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       break;
     }
 
+    if (t->kind == TYPE_KIND_CUNION) {
+      /* cunion 构造（.C{.i = 42}，struct 同构单字段，member 下标哨兵协议）：
+         sema 已校验恰好 1 个具名字段 + 按名定位 member 并写回 member_tag
+         （member 下标）。与 tag union 同款协议（区别：cunion 无 tag——运行期
+         op_construct 不把下标写进 data，blit 到 offset 0 即联合体本体）：
+           1. type_value（compile_type_expr 已压）
+           2. member 下标哨兵：member_tag < 128 → PUSH_I8；< 32768 →
+              PUSH_I16；否则 PUSH_I32（op_construct cunion 分支按宽度读整数）
+           3. payload 值：compile 具名字段的 value（nil 字段 → 须 ?T，
+              PUSH_OPT_NONE <member type id>）
+           4. CONSTRUCT 2：栈 [type_value, member_idx, payload_value]
+              弹 3 压 1（按 member 下标定位 member 类型 → implicit_cast →
+              memcpy 到 offset 0）
+         栈深净变化 -1：压 3，CONSTRUCT 弹 3 压 1。 */
+      ast_node_t *f = n->fields; /* 恰好 1 个（sema 已校验） */
+      uint32_t tag = n->member_tag;
+      if (tag < 128) {
+        bcode_write_op(c->bc, BCODE_PUSH_I8);
+        bcode_write_i8(c->bc, (int8_t)tag);
+      } else if (tag < 32768) {
+        bcode_write_op(c->bc, BCODE_PUSH_I16);
+        bcode_write_i16(c->bc, (int16_t)tag);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I32);
+        bcode_write_i32(c->bc, (int32_t)tag);
+      }
+      st_push(c, 1);
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((ast_construct_field_t *)f)->value;
+      if (value->kind == AST_NIL) {
+        /* nil payload：member 须 ?T（sema 已校验），发 PUSH_OPT_NONE */
+        const cunion_type_t *ct = (const cunion_type_t *)t;
+        const cunion_member_t *m = &ct->members[tag];
+        const sema_type_t *mst =
+            c_sema_type_find_ptr(c->sema_types, m->type);
+        if (!mst) {
+          c_error(c, value, "compiler: optional cunion member type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, mst->id);
+        st_push(c, 1);
+      } else {
+        compile_expr(c, value);
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, 2);
+      st_push(c, -3);
+      break;
+    }
+
     if (t->kind != TYPE_KIND_ARRAY) {
-      c_error(c, node, "construct: unsupported type (only array, optional, struct and tuple implemented)");
+      c_error(c, node, "construct: unsupported type (only array, optional, struct, tuple, union and cunion implemented)");
       return;
     }
 

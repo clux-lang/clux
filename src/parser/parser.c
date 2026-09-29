@@ -9,6 +9,7 @@
 #include "parser/ast_error.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/lexer.h"
 #include "parser/ast_node.h"
 #include "core/vec.h"
@@ -130,6 +131,12 @@ ast_node_t *parse_program(parser_t *p) {
                + member payload 联合体布局），进入字节码，运行时 hoist 构造
                union 类型 + 绑定名字。 */
             func = parse_union_def(p);
+        } else if (check_keyword(p, "cunion")) {
+            /* 顶层 C 语义 union 定义 cunion Name { field: type; ... } 挂
+               funcs 链：sema pass1b 折叠字段类型 + 登记类型（无 tag，所有
+               member 共享 offset 0，C FFI 布局），进入字节码，运行时 hoist
+               构造 cunion 类型 + 绑定名字。 */
+            func = parse_cunion_def(p);
         } else if (check_keyword(p, "var")) {
             /* 全局变量定义 var name[:type] = init; 挂 funcs 链（非 comptime）。
                sema pass_globals 折叠 init 为字面量/函数引用后保留——进入

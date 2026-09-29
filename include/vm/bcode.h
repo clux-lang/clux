@@ -164,6 +164,12 @@ typedef enum {
     BCODE_IS_TAG,           /* U32：tag 立即数；弹 union 值 → 读 data 首部 tag
                                与立即数比较 → 压 bool（`x is Member` 编译期已
                                解析 member → tag 值） */
+
+    /* ---- C 语义 union 构造（与 struct 同族：开放构造协议
+       PUSH_CUNION → DEFINE_TYPE → LOAD_TYPE → DEFINE_FIELD×N → SEAL；
+       无 tag——member 追加走 DEFINE_FIELD 协议，与 struct 同款） ---- */
+    BCODE_PUSH_CUNION,      /* 分配空 cunion type（开放，members=NULL，不入池）
+                               + 压其 type value */
 } bcode_op_t;
 
 /* ================================================================ */

@@ -38,6 +38,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -797,6 +798,23 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           return value_make_shadow(sema->vm, m->payload_type);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
+      if (ot->kind == TYPE_KIND_CUNION) {
+        /* cunion 字段：字段名 = member 名，按名反查 member → 返回该 member
+           的 type shadow。无 tag 校验（C union 语义，开发者自负安全）——
+           运行期 FIELD_GET 按名反查后直接借用 offset 0。 */
+        int mi = cunion_type_find_member(ot, n->field);
+        if (mi < 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "cunion '%.*s' has no field '%.*s'",
+                     (int)ot->name.len, ot->name.ptr,
+                     (int)n->field.len, n->field.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        const cunion_member_t *m = cunion_type_member(ot, (size_t)mi);
+        if (m && m->type)
+          return value_make_shadow(sema->vm, m->type);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
       if (ot->kind != TYPE_KIND_STRUCT) {
         char tn[64];
         sema_type_name(ot, tn, sizeof(tn));
@@ -1337,6 +1355,99 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
 
         /* member 下标写回节点（compiler 发 tag 哨兵用） */
+        n->member_tag = (uint32_t)mi;
+        return value_make_shadow(sema->vm, t);
+      }
+
+      if (t->kind == TYPE_KIND_CUNION) {
+        /* cunion 构造（.C{.i = 42}，struct 同构单字段，无 tag——C union
+           语义）：强制恰好 1 个具名字段（AST_CONSTRUCT_FIELD，字段名 =
+           member 名）。member 定位按名（cunion_type_find_member），值按
+           member 的 type value_assign 校验。sema 把 member 下标写回
+           AST_CONSTRUCT 节点（member_tag 字段复用），compiler 发 member 下标
+           哨兵 + payload 值 + CONSTRUCT 2（运行期定位 member 类型做
+           implicit_cast；与 tag union 同款协议，区别是不把下标写进 data）。 */
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "construct: cunion constructor expects exactly 1 field "
+                     "for %s, got %zu",
+                     tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        ast_node_t *f = n->fields;
+        if (f->kind == AST_FILL) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "construct: fill is not supported for cunion field");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        if (f->kind != AST_CONSTRUCT_FIELD) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "construct: cunion field must be named (use .C{.i = v} "
+                     "form)");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_construct_field_t *cf = (ast_construct_field_t *)f;
+
+        /* member 定位：字段名 = member 名 */
+        const int mi = cunion_type_find_member(t, cf->name);
+        if (mi < 0) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "cunion %s has no member '%.*s'",
+                     tn, (int)cf->name.len, cf->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
+        if (!m || !m->type) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "cunion member '%.*s' has no type",
+                     (int)cf->name.len, cf->name.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+
+        /* 求值 member 值（注入 anon_ct：匿名构造按 member 类型推断） */
+        ast_node_t *value = cf->value;
+        value_t *fv = NULL;
+        bool is_nil_field = value->kind == AST_NIL;
+        if (!is_nil_field) {
+          if (sema->anon_ct_depth < 16)
+            sema->anon_ct[sema->anon_ct_depth++] = m->type;
+          fv = sema_expr(sema, &value, scope);
+          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+        }
+        if (value_is_error(sema->vm, fv) ||
+            value_is_type(fv, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_nil_field) {
+          if (m->type->kind != TYPE_KIND_OPTION) {
+            char tn[64];
+            sema_type_name(m->type, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, value),
+                       "cannot initialize cunion field with nil (field type %s "
+                       "is not optional)",
+                       tn);
+          }
+        } else {
+          /* 可赋值性校验（safe_cast：同类型身份通过；结构兼容隐式转换；
+             不兼容报错） */
+          value_t *dst = value_make_shadow(sema->vm, m->type);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(m->type, tn, sizeof tn);
+            sema_type_name(value_type(fv), fn, sizeof fn);
+            diag_error(sema->diag, sema_loc(sema, value),
+                       "cannot initialize cunion field '%.*s' with %s (field "
+                       "type %s)",
+                       (int)cf->name.len, cf->name.ptr, fn, tn);
+          }
+        }
+
+        /* member 下标写回节点（compiler 发哨兵用；cunion 无 tag，不写 data） */
         n->member_tag = (uint32_t)mi;
         return value_make_shadow(sema->vm, t);
       }

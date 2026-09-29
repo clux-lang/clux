@@ -223,6 +223,36 @@ typedef struct union_type_t {
     size_t          tag_size;       /* tag 整数值宽度（按 member_count 自适应） */
 } union_type_t;
 
+/**
+ * cunion_member_t / cunion_type_t: C 语义 union 类型（type_t 的扩展）
+ *
+ * cunion 是兼容 C 语言 FFI 的裸 union：所有 member 共享同一块内存（offset
+ * 全为 0），无 tag、无安全检查，安全性由开发者自负（与 tag union 相对）。
+ * 语法与 struct/union 同构：`cunion Name { field: type; ... }`——字段直接
+ * 平铺，每个字段即一个 member。构造强制使用单个字段（.Name{ .field = value }）。
+ * 存储布局（data 块，size = type->size）：
+ *   [0 .. size)  所有 member 共享的联合体（size = max(member size)，
+ *                按 C 对齐规则对齐，align = max(member align)）
+ * 空 member 列表 → size = 1（对齐 struct 空类型 C 语义，保证 data 块可分配）。
+ *
+ * member 表由 vm 拥有（SEAL 时深拷贝）。生命周期全平凡（data 全平凡，
+ * str 成员归 vm 字符串池）：clone = 整块 memcpy、assign = implicit_cast 后
+ * memcpy 覆盖、dispose = no-op（不深拷贝 string_t，开发者自负安全）；
+ * eq/ne = memcmp 字节比较（str 成员按字节比较，不递归字符串内容）。
+ * 字段访问 `x.field` 按 member 名反查，无 tag 校验（C union 语义）。
+ * 类型转换仅同实例身份拷贝（命名类型非鸭子）。
+ */
+typedef struct cunion_member_t {
+    strslice_t    name;  /* member 名（seal 时拷贝，vm 拥有） */
+    const type_t *type;  /* member 类型（引用，须已密封；不可为 NULL） */
+} cunion_member_t;
+
+typedef struct cunion_type_t {
+    type_t           base;
+    cunion_member_t *members;  /* member 表（seal 时拷贝，vm 拥有） */
+    size_t           member_count;
+} cunion_type_t;
+
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
     return t && t->kind == TYPE_KIND_OPTION;

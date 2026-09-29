@@ -7,6 +7,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 
 #include <string.h>
 
@@ -183,6 +184,14 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
          DEFINE_TYPE <id> 声明登记（不设 member；payload 字段类型是布局
          依赖，pass 2 依赖后序定义 + 环检测） */
       bcode_write_op(c->bc, BCODE_PUSH_UNION);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_CUNION:
+      /* PUSH_CUNION 压开放 cunion 类型（members=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设 member；member 类型是布局依赖，
+         pass 2 依赖后序定义 + 环检测） */
+      bcode_write_op(c->bc, BCODE_PUSH_CUNION);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
@@ -411,6 +420,35 @@ static void define_union(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
 }
 
+/* cunion 定义：LOAD_TYPE <id> 拉回开放对象 → 逐 member：依赖 member 类型
+ * 先定义（密封；emit_dep_type 递归 + done 三态环检测）→ LOAD member 类型 →
+ * DEFINE_FIELD <name>（追加 member 名 + 设 member 类型；与 struct 同款
+ * DEFINE_FIELD 协议，无需 UNION_MEMBER——cunion 无 tag）→ SEAL 封闭
+ * （size=max(member size)/align=max(member align)/offset 全 0 + 去重 intern；
+ * 去重时按自身 id 重绑登记）。member 类型是布局依赖（密封计算 size/align
+ * 需要 member size/align 已确定）→ 依赖后序 + 环检测。 */
+static void define_cunion(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                          size_t count) {
+  const type_t *t = st->type;
+
+  emit_load_type(c, st->id);               /* 栈: [open_cunion_type] */
+
+  size_t n = cunion_type_member_count(t);
+  for (size_t i = 0; i < n; i++) {
+    const cunion_member_t *m = cunion_type_member(t, i);
+    if (!m) continue;
+
+    const type_t *mt = m->type;
+    if (!mt) continue;                     /* 防御：member 类型必存在 */
+    emit_dep_type(c, mt, done, count);     /* 栈: [open, member_type] */
+    bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
+    bcode_write_str(c->bc, m->name);       /* 弹 member_type → 追加 member + 设类型 */
+    st_push(c, -1);
+  }
+
+  emit_seal(c);                            /* 封闭（去重时重绑登记） */
+}
+
 /* 定义状态（done 数组三态）：
  *   0 = 未处理
  *   1 = 处理中（正在定义，布局依赖递归尚未完成）
@@ -474,6 +512,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_UNION:
       define_union(c, st, done, count);
+      break;
+    case TYPE_KIND_CUNION:
+      define_cunion(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */

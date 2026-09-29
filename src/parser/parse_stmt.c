@@ -8,6 +8,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
@@ -29,8 +30,9 @@ ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "func"))   return parse_func_def(p);
     if (check_keyword(p, "type"))   return parse_type_def(p);
     if (check_keyword(p, "enum"))   return parse_enum_def(p);
-    if (check_keyword(p, "struct")) return parse_struct_def(p);
-    if (check_keyword(p, "union"))  return parse_union_def(p);
+    if (check_keyword(p, "struct"))  return parse_struct_def(p);
+    if (check_keyword(p, "union"))   return parse_union_def(p);
+    if (check_keyword(p, "cunion")) return parse_cunion_def(p);
     if (check_keyword(p, "if"))     return parse_if(p);
     if (check_keyword(p, "switch")) return parse_switch(p);
     if (check_keyword(p, "while"))  return parse_while(p);

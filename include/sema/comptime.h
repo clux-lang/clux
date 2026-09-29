@@ -11,6 +11,7 @@ extern "C" {
 #include "parser/ast_struct_def.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -129,6 +130,21 @@ bool sema_eval_struct_def(sema_t *sema, ast_struct_def_t *sd, sema_scope_t *scop
  *  失败返回 false（诊断已记录）。
  */
 bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope);
+
+/**
+ * 求值 C 语义 union 定义（cunion Name { field: type; ... }，struct 同构平铺
+ * 字段，字段名 = member 名，字段类型 = member 类型）：
+ *  1. 逐字段：member 类型解析（sema_resolve_type_slot 折叠为 AST_TYPE_REF）
+ *     → 未知/非类型槽位报错；字段名（= member 名）查重
+ *  2. type_cunion_intern 构造 cunion 类型（拷贝 member 表 + 布局
+ *     size=max/align=max/offset 全 0 + 去重 intern，立即密封）
+ *  3. sema_type_register 登记（hoist 构造用）+ scope_define 绑定 type value
+ *  4. 激活符号；定义点保留（进字节码，运行时 hoist 构造）
+ *  失败返回 false（诊断已记录）。
+ *  与 tag union 的区别：无 tag——member 不携带 tag 编号，布局共享 offset 0，
+ *  不做安全检查（开发者自负安全，对齐 C union FFI）。
+ */
+bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scope);
 
 #ifdef __cplusplus
 }

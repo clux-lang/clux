@@ -23,6 +23,7 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
@@ -35,6 +36,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/type_cunion.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -580,7 +582,8 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
   if (!bad && (!bt || (bt->kind != TYPE_KIND_STRUCT &&
-                       bt->kind != TYPE_KIND_UNION))) {
+                       bt->kind != TYPE_KIND_UNION &&
+                       bt->kind != TYPE_KIND_CUNION))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
     diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -605,7 +608,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       } else {
         ft = struct_type_field(bt, (size_t)idx)->type;
       }
-    } else {
+    } else if (bt->kind == TYPE_KIND_UNION) {
       /* union 字段：字段名 = member 名（tag 名），按名反查 member →
          该 member 的 payload 类型即字段类型 */
       int mi = union_type_find_member(bt, m->field);
@@ -620,6 +623,23 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 payload 必存在 */
         } else {
           ft = mem->payload_type;
+        }
+      }
+    } else {
+      /* cunion 字段：字段名 = member 名，按名反查 member → 该 member 的
+         type 即字段类型（无 tag 校验，C union 语义） */
+      int mi = cunion_type_find_member(bt, m->field);
+      if (mi < 0) {
+        diag_error(sema->diag, sema_loc(sema, &as->base),
+                   "cunion '%.*s' has no field '%.*s'", (int)bt->name.len,
+                   bt->name.ptr, (int)m->field.len, m->field.ptr);
+        bad = true;
+      } else {
+        const cunion_member_t *mem = cunion_type_member(bt, (size_t)mi);
+        if (!mem || !mem->type) {
+          bad = true; /* 防御：字段已命中则 member 类型必存在 */
+        } else {
+          ft = mem->type;
         }
       }
     }
@@ -1284,6 +1304,12 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
          sema_eval_union_def 完成：字段类型解析 + 查重 + type_union_intern
          + 登记 sema->types（hoist 自动构造）+ 绑定 type value + 激活符号。 */
       sema_eval_union_def(sema, (ast_union_def_t *)s, scope);
+    } else if (s->kind == AST_CUNION_DEF) {
+      /* 局部 cunion 定义提升：与 union def 同构——字段类型是类型槽位，
+         字段（member）名非变量可遮蔽，无需 prior_vars 遮蔽预检。
+         sema_eval_cunion_def 完成：字段类型解析 + 查重 + type_cunion_intern
+         + 登记 sema->types（hoist 自动构造）+ 绑定 type value + 激活符号。 */
+      sema_eval_cunion_def(sema, (ast_cunion_def_t *)s, scope);
     } else if (s->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)s;
       /* 统一解析签名（含 comptime：调用点折叠前符号 type 须就绪——
@@ -1298,9 +1324,10 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
   ast_node_t **prev = &b->stmts;
   for (ast_node_t *s = b->stmts; s;) {
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
-        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF) {
-      /* 入口提升已处理（type def / enum def / struct def / union def 均无
-         子作用域） */
+        s->kind == AST_STRUCT_DEF || s->kind == AST_UNION_DEF ||
+        s->kind == AST_CUNION_DEF) {
+      /* 入口提升已处理（type def / enum def / struct def / union def /
+         cunion def 均无子作用域） */
       prev = &s->next;
       s = s->next;
       continue;

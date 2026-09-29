@@ -121,6 +121,10 @@ vm_t *vm_new(allocator_t *alloc) {
        vm_destroy 手动释放，vec 只持有指针数组） */
     vm->union_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* C 语义 union 类型池（type_cunion_intern / type_cunion_seal intern 用；
+       元素由 vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->cunion_types = vec_new(alloc, /*owns_element=*/false);
+
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
@@ -316,6 +320,18 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&ut);
         }
         vec_free(vm->alloc, &vm->union_types);
+    }
+
+    /* C 语义 union 类型池：dispose_fn 自动释放 member 表 + 显示名，仅需裸释放
+       （member 类型归各自类型池，不在此释放） */
+    if (vm->cunion_types) {
+        size_t n = vec_len(vm->cunion_types);
+        for (size_t i = 0; i < n; i++) {
+            cunion_type_t *ct = (cunion_type_t *)vec_get(vm->cunion_types, i);
+            if (!ct) continue;
+            allocator_free(vm->alloc, (void **)&ct);
+        }
+        vec_free(vm->alloc, &vm->cunion_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

@@ -193,7 +193,8 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      到最终类型（DEFINE 只存引用，不依赖密封）。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind != AST_TYPE_DEF && f->kind != AST_ENUM_DEF &&
-        f->kind != AST_STRUCT_DEF && f->kind != AST_UNION_DEF)
+        f->kind != AST_STRUCT_DEF && f->kind != AST_UNION_DEF &&
+        f->kind != AST_CUNION_DEF)
       continue;
     compile_stmt(c, f);
     if (c->failed) break;

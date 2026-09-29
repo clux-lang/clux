@@ -9,6 +9,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_block.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
@@ -633,6 +634,21 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             } else {
                 sb_ch(&f->sb, ' ');
                 render_semi_list(f, s->fields);
+                sb_str(&f->sb, " }");
+            }
+            break;
+        }
+        case AST_CUNION_DEF: {
+            /* C 语义 union：与 struct 同款平铺渲染（member 名: 类型; ...） */
+            ast_cunion_def_t *c = (ast_cunion_def_t *)node;
+            sb_str(&f->sb, "cunion ");
+            sb_put(&f->sb, c->name.ptr, c->name.len);
+            sb_str(&f->sb, " {");
+            if (!c->fields) {
+                sb_str(&f->sb, "}");
+            } else {
+                sb_ch(&f->sb, ' ');
+                render_semi_list(f, c->fields);
                 sb_str(&f->sb, " }");
             }
             break;
