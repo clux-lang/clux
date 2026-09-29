@@ -396,17 +396,19 @@ static value_t *sint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (tr <= sr)
         return value_make_error(vm, "implicit cast: not a widening conversion");
 
+    /* signed → unsigned 拒绝（设计：signed/unsigned 不隐式混合，须显式
+       cast）。先于 shadow 分支检查——shadow（sema 编译期检查）与真实值
+       （运行期）语义一致，编译期即可报错（快速失败）。 */
+    if (!is_signed_int(vm, target))
+        return value_make_error(vm, "implicit cast: incompatible target type");
+
     /* shadow：只检查类型兼容性，返回 shadow */
     if (value_is_shadow(v))
         return value_make_shadow(vm, target);
 
     int64_t sv = sint_read(v);
 
-    if (is_signed_int(vm, target)) {
-        return int_store(vm, target, (uint64_t)sv);
-    }
-
-    return value_make_error(vm, "implicit cast: incompatible target type");
+    return int_store(vm, target, (uint64_t)sv);
 }
 
 static value_t *uint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {

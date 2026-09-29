@@ -1,0 +1,61 @@
+// sizeof.cx — 编译期运算符：sizeof / alignof / typeof（SEMA→CTFE 桥梁）
+//
+// 三个运算符完全在编译期求值并折叠，运行期零指令残留：
+//
+//   sizeof(T)      类型 → u64 常量（元素字节数）
+//   sizeof(expr)   表达式 → 按操作数类型取 u64（只做 shadow 求值，不真实执行）
+//   alignof(T)     类型 → u64 常量（对齐字节数）
+//   typeof(expr)   表达式 → type value（可作变量类型标注）
+//
+// 折叠产物直接喂给类型槽位：数组边界 [sizeof(a)]i32 编译期展开为 [4]i32。
+
+func main(): i32 {
+    // ---- sizeof / alignof 内建标量 ----
+    printf("sizeof(u8)   = %llu\n", sizeof(u8) as u64);
+    printf("sizeof(u32)  = %llu\n", sizeof(u32) as u64);
+    printf("sizeof(i64)  = %llu\n", sizeof(i64) as u64);
+    printf("alignof(u64) = %llu\n", alignof(u64) as u64);
+    // ---- sizeof(expr)：操作数只做 shadow 求值 ----
+    var a: i32 = 1;
+    printf("sizeof(a)    = %llu\n", sizeof(a) as u64); // 4（a 的类型 i32）
+    // ---- 数组边界是变量类型大小（编译期折叠）----
+    var b: [sizeof(a)]i32 = .[4]i32{1, 2, 3, 4};
+    printf("sizeof(b)    = %llu\n", sizeof(b) as u64); // 16 = 4 * sizeof(i32)
+    // ---- 边界是类型表达式 / 对齐值 ----
+    var c: [sizeof(i32)]u32 = .[4]u32{1u32, 2u32, 3u32, 4u32};
+    var d: [alignof(u64)]i32 = .[8]i32{1, 2, 3, 4, 5, 6, 7, 8};
+    printf("sizeof(c)    = %llu\n", sizeof(c) as u64); // 16
+    printf("sizeof(d)    = %llu\n", sizeof(d) as u64); // 32 = 8 * sizeof(i32)
+    // ---- typeof：表达式类型 → 类型标注 ----
+    var t: typeof(a) = 42;
+    printf("typeof(a) t  = %d\n", t);
+    // ---- 自校验 ----
+    if (sizeof(u8) != 1u64) {
+        return 1;
+    }
+    if (sizeof(u32) != 4u64) {
+        return 2;
+    }
+    if (sizeof(i64) != 8u64) {
+        return 3;
+    }
+    if (alignof(u64) != 8u64) {
+        return 4;
+    }
+    if (sizeof(a) != 4u64) {
+        return 5;
+    }
+    if (sizeof(b) != 16u64) {
+        return 6;
+    }
+    if (sizeof(c) != 16u64) {
+        return 7;
+    }
+    if (sizeof(d) != 32u64) {
+        return 8;
+    }
+    if (t != 42) {
+        return 9;
+    }
+    return 0;
+}

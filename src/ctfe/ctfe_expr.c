@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "core/strslice.h"
 #include "parser/ast_array.h"
+#include "parser/ast_alignof.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
@@ -20,8 +21,10 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_sizeof.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
+#include "parser/ast_typeof.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
@@ -117,6 +120,43 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
     return fv;
 }
 
+/* 编译期运算符（sizeof/alignof/typeof，m2-design §8）的操作数类型提取：
+ * "操作数按类型（shadow 语义）求值，结果产生真实常量"——操作数只取类型，
+ * 不要求真实执行。三路解析：
+ *   1. 常规 ctfe 求值成功：
+ *      - type value → value_as 取类型
+ *      - 普通值 → value_type
+ *   2. ctfe 求值失败（操作数是运行期 shadow 值，如 `[sizeof(a)]i32` 的
+ *      `a`）：scope_lookup 在当前 VM scope 链查到 shadow value → 其类型即
+ *      操作数类型（shadow 语义：只取类型不执行）
+ *   3. AST_IDENT + sema 上下文兜底：sema 符号表查类型（type 别名/未进 VM
+ *      scope 的符号）。
+ * 返回 NULL = 无法确定类型（调用方报错）。 */
+static const type_t *ctfe_operand_type(ctfe_ctx_t *ctx, ast_node_t *opnd) {
+    vm_t *vm = ctx->vm;
+    value_t *v = ctfe_eval(ctx, opnd);
+    if (!value_is_error(vm, v)) {
+        if (value_is_type(v, TYPE_KIND_TYPE))
+            return value_as(v, const type_t *);
+        return value_type(v);
+    }
+    /* 操作数为运行期值（shadow）：scope_lookup 查到 shadow value 即类型 */
+    if (opnd && opnd->kind == AST_IDENT) {
+        ast_ident_t *id = (ast_ident_t *)opnd;
+        value_t *sv = scope_lookup(vm->current_scope, id->name);
+        if (sv) return value_type(sv);
+        if (ctx->sema && ctx->sema->global_scope) {
+            sema_symbol_t *sym = ctx->sema_scope
+                                     ? sema_lookup(ctx->sema_scope, id->name)
+                                     : NULL;
+            if (!sym)
+                sym = sema_lookup(ctx->sema->global_scope, id->name);
+            if (sym && sym->type) return sym->type;
+        }
+    }
+    return NULL;
+}
+
 value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     vm_t *vm = ctx->vm;
     if (!node) return ctfe_err(ctx, "ctfe: null expression node");
@@ -208,6 +248,25 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return ctfe_err(ctx, "ctfe: 'volatile' requires a type operand");
         const type_t *inner = value_as(sub, const type_t *);
         return type_as_value(vm, type_volatile_intern(vm, inner));
+    }
+    case AST_SIZEOF:
+    case AST_ALIGNOF:
+    case AST_TYPEOF: {
+        /* 编译期运算符（m2-design §8）：操作数按类型（shadow 语义）求值，
+           结果产生真实常量——sizeof/alignof → u64 立即值（ctfe_make_int），
+           typeof → type value。数组边界 [sizeof(a)]i32 经 ctfe_operand_type
+           从运行期 shadow 值取类型，产出真实常量喂给边界槽位。 */
+        ast_node_t *opnd = node->kind == AST_TYPEOF
+                               ? ((ast_typeof_t *)node)->operand
+                               : (node->kind == AST_SIZEOF
+                                      ? ((ast_sizeof_t *)node)->operand
+                                      : ((ast_alignof_t *)node)->operand);
+        const type_t *t = ctfe_operand_type(ctx, opnd);
+        if (!t) return ctfe_err(ctx, "ctfe: cannot determine operand type");
+        if (node->kind == AST_TYPEOF) return type_as_value(vm, t);
+        uint64_t n = node->kind == AST_SIZEOF ? (uint64_t)t->size
+                                              : (uint64_t)t->align;
+        return ctfe_make_int(ctx, vm->type_u64, n);
     }
     case AST_BINARY: {
         ast_binary_t *n = (ast_binary_t *)node;

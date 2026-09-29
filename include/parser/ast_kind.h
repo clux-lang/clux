@@ -70,6 +70,14 @@ typedef enum {
     AST_UNWRAP,          /* optional 解包：a.!（assert，none 时 panic）/
                             a.?（try，仅词法预留，语义未实现） */
 
+    /* --- 编译期运算符（SEMA→CTFE 桥梁，m2-design §8）---
+     * sizeof/alignof/typeof 是前缀运算符：操作数只做 shadow 求值（仅取
+     * 类型，不真实执行），运算符自身产出真实编译期常量（sizeof/alignof →
+     * u64，typeof → type value）。sema 求值后折叠为字面量节点写回。 */
+    AST_SIZEOF,          /* sizeof(T) / sizeof(expr) → u64 */
+    AST_ALIGNOF,         /* alignof(T) / alignof(expr) → u64 */
+    AST_TYPEOF,          /* typeof(expr) → type value */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

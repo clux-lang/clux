@@ -26,6 +26,9 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_sizeof.h"
+#include "parser/ast_typeof.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
 #include <string.h>
@@ -425,6 +428,30 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       const sema_type_t *st = sema_type_find_name(sema, ref->name);
       if (st) return st->type;
       return type_lookup(sema->vm, ref->name);
+    }
+    case AST_SIZEOF:
+    case AST_ALIGNOF:
+    case AST_TYPEOF: {
+      /* 编译期运算符（m2-design §8，SEMA→CTFE 桥梁）：类型槽位中的
+         sizeof/alignof/typeof 由 ctfe 求值（操作数按 shadow 语义只取类型）。
+         typeof → 类型本身；sizeof/alignof → 无法作为类型槽位（结果是 u64
+         值，非类型），报错。 */
+      ctfe_ctx_t ctx;
+      memset(&ctx, 0, sizeof ctx);
+      ctx.vm = sema->vm;
+      ctx.sema = sema;
+      ctx.budget = 100000;
+      ctx.max_depth = 128;
+      value_t *v = ctfe_eval(&ctx, type_expr);
+      if (value_is_error(sema->vm, v)) {
+        diag_error(sema->diag, sema_loc(sema, type_expr),
+                   "unsupported type expression");
+        return NULL;
+      }
+      if (value_is_type(v, TYPE_KIND_TYPE)) return value_as(v, const type_t *);
+      diag_error(sema->diag, sema_loc(sema, type_expr),
+                 "sizeof/alignof is a value, not a type");
+      return NULL;
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */

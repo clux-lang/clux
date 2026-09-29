@@ -574,3 +574,26 @@ TEST(Fmt, FuncLiteralDisplayNamePreserved) {
     /* 幂等性 */
     EXPECT_EQ(out, fmt(out.c_str()));
 }
+
+/* 编译期运算符 sizeof/alignof/typeof：括号内联、类型槽位与表达式位置均可。 */
+TEST(Fmt, SizeofAlignofTypeofCtOperators) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var s:u64 = sizeof(i32);\n"
+        "var a:u64 = alignof(u64);\n"
+        "var t:typeof(42) = 42;\n"
+        "var arr:[sizeof(i32)]u8 = .[4]u8{1u8,2u8,3u8,4u8};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var s: u64 = sizeof(i32);\n"
+              "    var a: u64 = alignof(u64);\n"
+              "    var t: typeof(42) = 42;\n"
+              "    var arr: [sizeof(i32)]u8 = .[4]u8{1u8, 2u8, 3u8, 4u8};\n"
+              "    return 0;\n"
+              "}\n");
+
+    /* 幂等性 */
+    EXPECT_EQ(out, fmt(out.c_str()));
+}

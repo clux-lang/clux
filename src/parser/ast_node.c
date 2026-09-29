@@ -53,6 +53,9 @@ static const char *g_kind_names[] = {
     [AST_ENUM_REF]   = "enum_ref",
     [AST_TERNARY]    = "ternary",
     [AST_UNWRAP]     = "unwrap",
+    [AST_SIZEOF]     = "sizeof",
+    [AST_ALIGNOF]    = "alignof",
+    [AST_TYPEOF]     = "typeof",
     [AST_ERROR]      = "error",
 };
 

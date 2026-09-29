@@ -41,6 +41,9 @@ extern "C" {
 #include "parser/ast_enum_def.h"
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_sizeof.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_typeof.h"
 }
 
 #include "test_common.h"
@@ -198,6 +201,98 @@ TEST_F(ParseStmtTest, ExprStmt_MissingSemicolon) {
     ast_node_t *node = parse_assign_or_expr_stmt(p);
     ASSERT_NE(node, nullptr);
     EXPECT_EQ(node->kind, AST_ERROR);
+
+    cleanup_parser(p);
+}
+
+/* ================================================================ */
+/* 编译期运算符：sizeof / alignof / typeof（m2-design §8）            */
+/* ================================================================ */
+
+/**
+ * Scenario: sizeof(type) 作为表达式语句
+ * Expected: AST_EXPR_STMT with expr being AST_SIZEOF（operand 为类型名）
+ */
+TEST_F(ParseStmtTest, ExprStmt_SizeofType) {
+    parser_t *p = make_parser("sizeof(i32);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_assign_or_expr_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_EXPR_STMT);
+
+    auto *stmt = (ast_expr_stmt_t *)node;
+    ASSERT_NE(stmt->expr, nullptr);
+    EXPECT_EQ(stmt->expr->kind, AST_SIZEOF);
+    auto *so = (ast_sizeof_t *)stmt->expr;
+    ASSERT_NE(so->operand, nullptr);
+    EXPECT_EQ(so->operand->kind, AST_IDENT);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: sizeof(expr) 操作数为表达式
+ * Expected: AST_SIZEOF with operand being AST_BINARY
+ */
+TEST_F(ParseStmtTest, ExprStmt_SizeofExpr) {
+    parser_t *p = make_parser("sizeof(a + b);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_assign_or_expr_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_EXPR_STMT);
+
+    auto *stmt = (ast_expr_stmt_t *)node;
+    ASSERT_NE(stmt->expr, nullptr);
+    EXPECT_EQ(stmt->expr->kind, AST_SIZEOF);
+    auto *so = (ast_sizeof_t *)stmt->expr;
+    ASSERT_NE(so->operand, nullptr);
+    EXPECT_EQ(so->operand->kind, AST_BINARY);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: alignof(type) 作为表达式语句
+ * Expected: AST_EXPR_STMT with expr being AST_ALIGNOF
+ */
+TEST_F(ParseStmtTest, ExprStmt_AlignofType) {
+    parser_t *p = make_parser("alignof(u64);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_assign_or_expr_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_EXPR_STMT);
+
+    auto *stmt = (ast_expr_stmt_t *)node;
+    ASSERT_NE(stmt->expr, nullptr);
+    EXPECT_EQ(stmt->expr->kind, AST_ALIGNOF);
+    auto *ao = (ast_alignof_t *)stmt->expr;
+    ASSERT_NE(ao->operand, nullptr);
+    EXPECT_EQ(ao->operand->kind, AST_IDENT);
+
+    cleanup_parser(p);
+}
+
+/**
+ * Scenario: typeof(expr) 作为表达式语句
+ * Expected: AST_EXPR_STMT with expr being AST_TYPEOF
+ */
+TEST_F(ParseStmtTest, ExprStmt_TypeofExpr) {
+    parser_t *p = make_parser("typeof(x);");
+    ASSERT_NE(p, nullptr);
+
+    ast_node_t *node = parse_assign_or_expr_stmt(p);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(node->kind, AST_EXPR_STMT);
+
+    auto *stmt = (ast_expr_stmt_t *)node;
+    ASSERT_NE(stmt->expr, nullptr);
+    EXPECT_EQ(stmt->expr->kind, AST_TYPEOF);
+    auto *to = (ast_typeof_t *)stmt->expr;
+    ASSERT_NE(to->operand, nullptr);
+    EXPECT_EQ(to->operand->kind, AST_IDENT);
 
     cleanup_parser(p);
 }

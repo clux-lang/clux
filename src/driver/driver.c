@@ -801,6 +801,7 @@ static bool has_source_keyword(const char *s, size_t len) {
     static const char *kws[] = {
         "func", "var", "if", "else", "while", "do", "for", "foreach", "return",
         "struct", "enum", "type", "comptime", "import", "interface", "using",
+        "sizeof", "alignof", "typeof",
         NULL,
     };
     for (size_t k = 0; kws[k]; k++) {

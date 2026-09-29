@@ -42,6 +42,9 @@
 #include "parser/ast_enum_ref.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_unwrap.h"
+#include "parser/ast_sizeof.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_typeof.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_error.h"
@@ -450,6 +453,24 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
         case AST_OPTION: {
             sb_ch(&f->sb, '?');
             render_expr(f, ((ast_option_t *)node)->sub);
+            break;
+        }
+        case AST_SIZEOF: {
+            sb_str(&f->sb, "sizeof(");
+            render_expr(f, ((ast_sizeof_t *)node)->operand);
+            sb_ch(&f->sb, ')');
+            break;
+        }
+        case AST_ALIGNOF: {
+            sb_str(&f->sb, "alignof(");
+            render_expr(f, ((ast_alignof_t *)node)->operand);
+            sb_ch(&f->sb, ')');
+            break;
+        }
+        case AST_TYPEOF: {
+            sb_str(&f->sb, "typeof(");
+            render_expr(f, ((ast_typeof_t *)node)->operand);
+            sb_ch(&f->sb, ')');
             break;
         }
         case AST_FUNC_TYPE: {

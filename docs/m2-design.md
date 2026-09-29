@@ -153,7 +153,7 @@ var mat: [2][3]i32 = ...;   // 多维 = [2]([3]i32)
 do { ... } while (cond);    // 后置条件循环
 ```
 
-### 8. sizeof / alignof / typeof（SEMA→CTFE 桥梁）
+### 8. sizeof / alignof / typeof（SEMA→CTFE 桥梁）✅ 已实现（2026-09-29）
 
 ```
 sizeof(T)        // 返回 u64
@@ -168,6 +168,12 @@ typeof(expr)     // 返回 type value
   - `var a:i32 = 1; var b:[sizeof(a)]i32 = .{};` 合法——`a` 是 shadow 值，但 `sizeof(a)` **不是** shadow：从 `a` 的类型 i32 产出真实常量 4，喂给数组边界槽位
   - 因此这三个运算符**不需要 ctfe 真实求值操作数**：在 sema shadow 路径内即可完成（shadow 操作数 → 真实常量），产物直接消费于类型槽位（数组边界 N、type 计算等），是 shadow 世界 → 真实值世界的天然桥梁
   - ctfe 遇到这些节点时遵循同一规则：操作数按类型（shadow 语义）求值，结果产生真实常量
+- **实现要点**（2026-09-29）：
+  - sema 表达式路径折叠：sizeof/alignof → `AST_INT_LIT(u64)`，typeof → `AST_TYPE_REF`（sema 登记类型名）——**完全编译期，运行期零指令残留**（disasm 验证）
+  - 类型槽位路径（`var t: typeof(a)` / `[sizeof(i32)]u32`）：sema 3a 检测 `type_has_ct_op` 推迟到 3b 定义点重解析，`sema_resolve_inner` 经 ctfe 求值类型槽位
+  - type value 操作数须解引用 `value_as(op, const type_t *)`（`value_type` 返回元类型 size=8，直接读取会得错值——sizeof(u8) 折叠成 8）
+  - **signed↔unsigned 不隐式互转**（2026-09-29 用户确认）：sema shadow 与运行时真实值语义一致（`sint_implicit_cast` shadow 分支移到方向检查后），混合错误在 sema 编译期报，显式后缀字面量（`1u64`）放行
+  - 示例：`examples/sizeof/sizeof.cx`
 
 ### 9. 位运算复合赋值
 

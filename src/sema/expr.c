@@ -22,6 +22,9 @@
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_typeof.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_sizeof.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_unwrap.h"
@@ -599,6 +602,56 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       const type_t *sub_t = value_as(sub, const type_t *);
       const type_t *vt = type_volatile_intern(sema->vm, sub_t);
       return type_as_value(sema->vm, vt);
+    }
+    case AST_SIZEOF:
+    case AST_ALIGNOF: {
+      /* 编译期运算符（m2-design §8）：操作数 shadow 求值只取类型（不真实
+         执行），结果恒 u64。sizeof = 类型宽度，alignof = 类型对齐。
+         折叠为 AST_INT_LIT(u64) 写回（保留兄弟链）——编译器零感知消费
+         立即数；返回 shadow u64。 */
+      ast_node_t *opnd = (*node)->kind == AST_SIZEOF
+                             ? ((ast_sizeof_t *)*node)->operand
+                             : ((ast_alignof_t *)*node)->operand;
+      value_t *op = sema_expr(sema, &opnd, scope);
+      if (value_is_error(sema->vm, op) || value_is_type(op, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      /* type value（data=type_t*）解引用 data；普通 shadow value 取
+         value_type。注意 value_type(type value) 返回元类型 vm->type_type
+         （size=8），直接读取会得错值——sizeof(u8) 折叠成 8。 */
+      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+                            ? value_as(op, const type_t *)
+                            : value_type(op);
+      uint64_t n = (*node)->kind == AST_SIZEOF ? (uint64_t)t->size
+                                               : (uint64_t)t->align;
+      ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
+                                        (*node)->tok_end);
+      if (lit) {
+        ((ast_int_lit_t *)lit)->type = sema->vm->type_u64->name;
+        ((ast_int_lit_t *)lit)->value = n;
+        lit->next = (*node)->next;
+        *node = lit;
+      }
+      return value_make_shadow(sema->vm, sema->vm->type_u64);
+    }
+    case AST_TYPEOF: {
+      /* typeof(expr) → type value（m2-design §8）：操作数 shadow 求值只取
+         类型，结果即该类型。折叠为 AST_TYPE_REF（sema_ct_type_ref 登记到
+         types 表，编译器 LOAD_TYPE <id> 零感知）；返回真实 type value
+         （编译期实体，data 恒为 type_t*）。 */
+      ast_typeof_t *n = (ast_typeof_t *)*node;
+      value_t *op = sema_expr(sema, &n->operand, scope);
+      if (value_is_error(sema->vm, op) || value_is_type(op, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      /* 同上：type value 解引用 data，普通值取 value_type */
+      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+                            ? value_as(op, const type_t *)
+                            : value_type(op);
+      ast_node_t *ref = sema_ct_type_ref(sema, t, *node);
+      if (ref) {
+        ref->next = (*node)->next;
+        *node = ref;
+      }
+      return type_as_value(sema->vm, t);
     }
     case AST_UNDEF:
       /* undefined 只允许作为 var 初始化的"未初始化声明"（shadow_var_def
@@ -1817,6 +1870,26 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     diag_error(sema->diag, sema_loc(sema, &b->base),
                "type mismatch: cannot apply '%s' to %s and %s", ob, ln, rn);
     return value_make_shadow(sema->vm, sema->vm->type_void);
+  }
+  /* 运行期协商预检（shadow 分派放行 → 运行期真实值才暴露的错误提前到
+     sema）：两操作数类型不同时，模拟 VTABLE_BINARY 的协商——type_promote
+     优先；协商失败则尝试隐式转 b 到 a（b 更窄）；两路都失败 → 运行期
+     implicit_cast 必然报错，此处编译期报错（快速失败）。 */
+  if (value_type(lhs) != value_type(rhs)) {
+    const type_t *ta = value_type(lhs), *tb = value_type(rhs);
+    const type_t *rt = type_promote(sema->vm, ta, tb);
+    if (!rt) {
+      value_t *castb = value_implicit_cast(sema->vm, rhs, ta);
+      if (value_is_error(sema->vm, castb)) {
+        char ob[16], ln[64], rn[64];
+        op_text(b->op, ob, sizeof(ob));
+        op_type_name(lhs, ln, sizeof(ln));
+        op_type_name(rhs, rn, sizeof(rn));
+        diag_error(sema->diag, sema_loc(sema, &b->base),
+                   "type mismatch: cannot apply '%s' to %s and %s", ob, ln, rn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+    }
   }
   return result; /* shadow in → shadow out */
 }

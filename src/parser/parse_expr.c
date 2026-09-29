@@ -27,6 +27,9 @@
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_unwrap.h"
+#include "parser/ast_sizeof.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_typeof.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
 
@@ -389,6 +392,93 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_symbol(p, "?")) op_tok = cur_token(p);
     else if (check_keyword(p, "const"))     op_tok = cur_token(p);
     else if (check_keyword(p, "volatile"))  op_tok = cur_token(p);
+
+    /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
+       sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
+       sizeof(...) / alignof(...) / typeof(...) 圆括号形态（与 C 同形）。
+       '（' 缺失/不匹配 → 语法错误（parse_primary 无法回落——关键字不是
+       标识符，'sizeof x' 无括号形态不合法）。 */
+    if (check_keyword(p, "sizeof")) {
+        uint32_t kb = tb;
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected '(' after 'sizeof'");
+        }
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand) {
+                return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                     "expected expression after 'sizeof('");
+            }
+            return operand;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected ')' after sizeof operand");
+        }
+        ast_node_t *node = ast_sizeof_new(p->arena, kb, p->pos);
+        if (!node) return NULL;
+        ((ast_sizeof_t *)node)->operand = operand;
+        return node;
+    }
+    if (check_keyword(p, "alignof")) {
+        uint32_t kb = tb;
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected '(' after 'alignof'");
+        }
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand) {
+                return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                     "expected expression after 'alignof('");
+            }
+            return operand;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected ')' after alignof operand");
+        }
+        ast_node_t *node = ast_alignof_new(p->arena, kb, p->pos);
+        if (!node) return NULL;
+        ((ast_alignof_t *)node)->operand = operand;
+        return node;
+    }
+    if (check_keyword(p, "typeof")) {
+        uint32_t kb = tb;
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected '(' after 'typeof'");
+        }
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand) {
+                return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                     "expected expression after 'typeof('");
+            }
+            return operand;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
+                                 "expected ')' after typeof operand");
+        }
+        ast_node_t *node = ast_typeof_new(p->arena, kb, p->pos);
+        if (!node) return NULL;
+        ((ast_typeof_t *)node)->operand = operand;
+        return node;
+    }
 
     if (!op_tok) return parse_primary(p);
 

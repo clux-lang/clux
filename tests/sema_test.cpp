@@ -1114,7 +1114,7 @@ TEST_F(SemaTest, ComptimeVarTypes) {
     /* 各类标量 + 字符串折叠编码 */
     EXPECT_TRUE(analyze(
         "comptime var I: i64 = 1;"
-        "comptime var U: u64 = 2;"
+        "comptime var U: u64 = 2u64;"
         "comptime var F: f64 = 3.5;"
         "comptime var B: bool = true;"
         "comptime var S: str = \"hi\";"
@@ -1149,6 +1149,120 @@ TEST_F(SemaTest, ComptimeVarExprFold) {
     sema_symbol_t *x = sema_lookup(sema_->global_scope, STRSLICE_LIT("X"));
     ASSERT_NE(x, nullptr);
     EXPECT_EQ(x->ct.i, 5);
+}
+
+/* ================================================================ */
+/* sizeof / alignof / typeof（m2-design §8，SEMA→CTFE 桥梁）         */
+/* ================================================================ */
+
+TEST_F(SemaTest, SizeofTypeFold) {
+    /* sizeof(类型)：折叠为 AST_INT_LIT(u64)——var 初始化右值节点被替换 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var s:u64 = sizeof(i32); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    /* main 函数体首语句 var s = <AST_INT_LIT>（sema 就地折叠） */
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *s =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("s"));
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->type, vm_->type_u64);
+}
+
+TEST_F(SemaTest, SizeofValueFold) {
+    /* sizeof(表达式)：按操作数 shadow 类型取 size，折叠为 u64 常量 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var a:i64 = 1; var s:u64 = sizeof(a); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *s =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("s"));
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->type, vm_->type_u64);
+}
+
+TEST_F(SemaTest, SizeofAsArrayBound) {
+    /* sizeof 作为数组边界：sema_eval_array_bound 走 ctfe 真实求值后折叠
+       为 AST_INT_LIT 写回——边界是变量类型大小（编译期折叠） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a: i32 = 1;"
+        "  var b: [sizeof(a)]i32 = .[4]i32{1,2,3,4};"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *b =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("b"));
+    ASSERT_NE(b, nullptr);
+    ASSERT_NE(b->type, nullptr);
+    EXPECT_EQ(b->type->kind, TYPE_KIND_ARRAY);
+    EXPECT_EQ(array_type_len(b->type), 4u);
+    EXPECT_EQ(array_type_elem(b->type), vm_->type_i32);
+}
+
+TEST_F(SemaTest, AlignofTypeFold) {
+    /* alignof(类型)：折叠为 AST_INT_LIT(u64) */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var a:u64 = alignof(u64); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *a =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("a"));
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->type, vm_->type_u64);
+}
+
+TEST_F(SemaTest, TypeofVarType) {
+    /* typeof(表达式)：操作数 shadow 求值 → 类型位折叠为 AST_TYPE_REF，
+       var 声明类型 = typeof 结果类型 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var t: typeof(42) = 42; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *t =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("t"));
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->type, vm_->type_i32);
+}
+
+TEST_F(SemaTest, SizeofNonTypeValueError) {
+    /* sizeof 操作数若是类型表达式（i32 名字），sema_resolve_inner 报
+       "sizeof/alignof is a value, not a type"（类型槽位场景） */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var a:i32 = 1; var s:u64 = sizeof(1); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SignedUnsignedNoImplicitConv) {
+    /* 设计（用户确认）：signed↔unsigned 不隐式互转，须显式字面量后缀。
+       i32 → u64 初始化在 sema 侧报错（编译期，非运行时）。 */
+    EXPECT_FALSE(analyze(
+        "func main(): void { var u:u64 = 1; }"));
+    EXPECT_TRUE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SignedUnsignedExplicitSuffixPasses) {
+    /* 显式后缀字面量放行：u64 = 1u64 类型一致，零转换 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var u:u64 = 1u64; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, SizeofMixedCompareTypeMismatch) {
+    /* u64 与 i32 比较：type_promote NULL + implicit_cast 拒绝 →
+       sema 编译期报 "type mismatch"（不落到运行时） */
+    EXPECT_FALSE(analyze(
+        "func main(): i32 { if (sizeof(i32) != 4) { return 1; } return 0; }"));
+    EXPECT_TRUE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, ComptimeFuncDefinition) {

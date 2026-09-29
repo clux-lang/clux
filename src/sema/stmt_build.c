@@ -1,19 +1,26 @@
 #include "sema/sema.h"
 #include "core/panic.h"
+#include "parser/ast_alignof.h"
+#include "parser/ast_array.h"
 #include "parser/ast_block.h"
+#include "parser/ast_const.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
+#include "parser/ast_option.h"
 #include "parser/ast_return.h"
+#include "parser/ast_sizeof.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_typeof.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_volatile.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
 #include "vm/type_func.h"
@@ -78,6 +85,32 @@ static bool type_shadowed_by_local_def(sema_t *sema, sema_scope_t *scope,
     return true; /* 最近同名符号：type def / var / 参数均遮蔽 */
   }
   return false;
+}
+
+/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符，m2-design §8）：
+ * 这些运算符是 SEMA→CTFE 桥梁——操作数按 shadow 语义取类型，依赖 Pass 3b
+ * 的 shadow 状态（局部变量定义点后才进 VM scope）。3a 求值会因变量未就绪
+ * 失败 → 与"待绑定局部 type 遮蔽"同机制推迟到 3b 定义点兜底
+ * （var_type_slot_reparse）。纯类型操作数（sizeof(i32)）本可在 3a 解析，
+ * 统一推迟简化（3b 重解析幂等）。 */
+static bool type_has_ct_op(const ast_node_t *type_expr) {
+  switch (type_expr->kind) {
+    case AST_SIZEOF:
+    case AST_ALIGNOF:
+    case AST_TYPEOF:
+      return true;
+    case AST_ARRAY:
+      return type_has_ct_op(((ast_array_t *)type_expr)->length) ||
+             type_has_ct_op(((ast_array_t *)type_expr)->base_type);
+    case AST_OPTION:
+      return type_has_ct_op(((ast_option_t *)type_expr)->sub);
+    case AST_CONST:
+      return type_has_ct_op(((ast_const_t *)type_expr)->sub);
+    case AST_VOLATILE:
+      return type_has_ct_op(((ast_volatile_t *)type_expr)->sub);
+    default:
+      return false;
+  }
 }
 
 /* 函数作用域树构建（全局 / 局部函数共用）：
@@ -230,7 +263,8 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
              跳过 vm scope 解析（会错误落到外层全局），sym->type 留 NULL 由 3b
              shadow_var_def 定义点后兜底；否则按常规解析，失败也留 NULL
              （3b 补报 "unknown type"）。 */
-          if (!type_shadowed_by_local_def(sema, scope, vd->type_expr)) {
+          if (!type_shadowed_by_local_def(sema, scope, vd->type_expr) &&
+              !type_has_ct_op(vd->type_expr)) {
             vt = sema_resolve_type_slot(sema, &vd->type_expr);
           }
         }
@@ -408,7 +442,8 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           if (vd->type_expr) {
             /* 同 AST_VAR_DEF：局部 type 遮蔽则推迟，否则常规解析（失败留
                NULL 由 3b 兜底） */
-            if (!type_shadowed_by_local_def(sema, scope, vd->type_expr)) {
+            if (!type_shadowed_by_local_def(sema, scope, vd->type_expr) &&
+                !type_has_ct_op(vd->type_expr)) {
               vt = sema_resolve_type_slot(sema, &vd->type_expr);
             }
           }

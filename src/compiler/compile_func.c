@@ -1,5 +1,6 @@
 #include "compiler/compiler.h"
 #include "core/panic.h"
+#include "parser/ast_alignof.h"
 #include "parser/ast_array.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_binary.h"
@@ -18,8 +19,10 @@
 #include "parser/ast_member.h"
 #include "parser/ast_program.h"
 #include "parser/ast_return.h"
+#include "parser/ast_sizeof.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_ternary.h"
+#include "parser/ast_typeof.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
@@ -232,6 +235,15 @@ static void prescan_expr(compiler_t *c, ast_node_t *n) {
       break;
     case AST_VOLATILE:
       prescan_expr(c, ((ast_volatile_t *)n)->sub);
+      break;
+    case AST_SIZEOF:
+      prescan_expr(c, ((ast_sizeof_t *)n)->operand);
+      break;
+    case AST_ALIGNOF:
+      prescan_expr(c, ((ast_alignof_t *)n)->operand);
+      break;
+    case AST_TYPEOF:
+      prescan_expr(c, ((ast_typeof_t *)n)->operand);
       break;
     case AST_FUNC_TYPE:
       for (ast_node_t *p = ((ast_func_type_t *)n)->params; p; p = p->next)
