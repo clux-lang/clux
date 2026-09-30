@@ -105,6 +105,18 @@ struct _sema_symbol_t {
                          "used before initialization"。仅变量符号有意义。 */
   bool is_active;     /* 符号是否已定义到 VM scope（运行时可见）。函数/内置
                          符号注册即激活；变量在 shadow_var_def 定义时激活。 */
+  bool moved;         /* 所有权转移状态（Step B，m3-design §7）：move(x) 后源
+                         变量失去所有权，进入 TDZ——读取报 "used after move"。
+                         重新赋值（=）恢复可用。仅变量符号有意义。 */
+  int  borrow_count;  /* 活跃借用计数（R3，m3-design §7）：指向本变量的 ref
+                         借用数。>0 时禁止 move（防借用悬空）。仅变量符号
+                         有意义。 */
+  /* R3 借用来源（m3-design §7）：本变量（ref *T / opaque）是借用的载体，
+     borrow_src 记录它借自哪个符号。定义时登记（借源符号 borrow_count++），
+     所在作用域退出时递减（scope_release_borrows 遍历符号清空）。opaque
+     变量（var q: opaque = p）同样登记——opaque 是借用（§8.4 堆块归源
+     释放），move 源须等 opaque 借用消亡。仅变量符号有意义。 */
+  struct _sema_symbol_t *borrow_src;
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——
      用户范式改为显式解包：if (a != nil) { var v = a.!; ... }。 ---- */

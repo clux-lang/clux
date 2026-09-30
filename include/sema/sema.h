@@ -98,6 +98,12 @@ typedef struct sema_t {
     /* 函数上下文（Pass 3 walk 时设置） */
     const type_t *func_return_type; /* NULL = void */
     bool          func_has_return;
+    /* 当前正在 walk 的函数定义（sema_walk_function 设置，walk_return 的
+       R3 返回 ref 来源检查用）：§6 判定返回 ref 是否来自参数——参数符号
+       在 param_scope 直系，但函数体顶层变量也注册在 param_scope（body
+       不建独立作用域），sema_scope_find_local 无法区分 → 遍历真实参数
+       列表（fn->params）判定。 */
+    ast_func_def_t *func_def;
 
     /* comptime 函数体 walk 标志：sema_walk_function 对 comptime func 置
        true（保存/恢复）。walk 期间 body 内对 comptime func 的调用只做
@@ -276,9 +282,24 @@ void sema_walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope);
  */
 value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 
+/**
+ * Step B 所有权检查（m3-design §3.1/§3.3）：判断表达式是否是 own *T 的
+ * 合法初始化源。own 只允许两种来源：new 表达式（新堆块，产 fatal）与
+ * fatal 接管源（move/clone 产物或 fatal 参数）。own → own 直接赋值
+ * = copy → 编译错误。stmt.c 实现，expr.c（AST_NEW 字段校验）共用。
+ */
+bool is_own_initializer(sema_t *sema, ast_node_t *expr, sema_scope_t *scope);
+
 /** 检查操作数必须为 bool；error/void shadow（错误恢复产物）静默通过。 */
 void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
                      const char *what);
+
+/**
+ * R3 借用释放（m3-design §7）：作用域退出时遍历本作用域符号，递减
+ * borrow_src 的 borrow_count 并清空 borrow_src。stmt.c 各 vm_pop_scope
+ * 前调用（借用载体随作用域消亡，源符号恢复可 move）。
+ */
+void sema_scope_release_borrows(sema_scope_t *scope);
 
 /** 兄弟链节点计数（参数/实参列表长度）。 */
 size_t sema_count_siblings(const ast_node_t *node);

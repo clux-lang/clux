@@ -86,15 +86,19 @@ static value_t *ptr_clone(vm_t *vm, value_t *v) {
 }
 
 static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
-    if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    const type_t *t = value_type(dst);
-    if (value_type(src) != t) {
-        return value_make_error(vm,
-            "ptr: assignment requires matching pointer type");
+    if (value_type(src) != value_type(dst)) {
+        /* 向左值类型 implicit_cast（与 int_assign 对齐：shadow 模式也要
+           校验类型兼容性——否则 sema 的 `var r: ref *i32 = 0` 静默通过）。
+           fatal → own 接管、own → ref 借用在此协商。 */
+        value_t *casted = value_implicit_cast(vm, src, value_type(dst));
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
     }
+    /* shadow：只检查类型兼容性，不拷贝 data */
+    if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
     /* 覆盖前释放旧堆块（own/fatal 且 owns=true）；借用无堆块跳过 */
     ptr_free_heap(vm, dst);
-    memcpy(value_data(dst), value_data(src), t->size);  /* 指针值覆盖 */
+    memcpy(value_data(dst), value_data(src), value_type(dst)->size);  /* 指针值覆盖 */
     return dst;
 }
 

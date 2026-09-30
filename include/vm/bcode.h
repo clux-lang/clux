@@ -185,7 +185,7 @@ typedef enum {
     BCODE_PTR_GET,          /* 弹指针值 → 压被指向 T 值副本（r.* 解引用 GET） */
     BCODE_PTR_SET,          /* 弹指针值 + val → 写回被指向 T（r.* = v 解引用
                                SET；val 隐式转换 → T）→ 压回指针 */
-    BCODE_ADDR,             /* 弹值 → 压 own *T 指针（x.& 后置取址） */
+    BCODE_ADDR,             /* 弹值 → 压 ref *T 指针（x.& 后置取址，借用） */
     BCODE_MOVE,             /* 弹值 → 压同类型值（move(x)，所有权转移，
                                Step A 静默：值平凡传递） */
     BCODE_CLONE,            /* 弹值 → 压深拷贝值（clone(x)，value_clone 分派） */

@@ -51,6 +51,35 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
+/* ---- Step B 所有权检查辅助（m3-design §3/§7） ---- */
+
+/* R1/R2 判定：赋值 rhs 是否是 own 指针的合法初始化源。
+   own *T 变量只允许两种初始化来源：
+   - new 表达式（AST_NEW）：新堆块直接产 own *T（§8.1）
+   - fatal 接管源（move/clone 产物或 fatal 参数，§3.3）
+   ref 派生（own → ref 隐式转换）是借用（owns=false），不能赋回 own。
+   own → own 直接赋值 = copy → 编译错误。
+   非 static：AST_NEW/AST_CONSTRUCT 字段校验（sema/expr.c）共用。 */
+bool is_own_initializer(sema_t *sema, ast_node_t *expr,
+                        sema_scope_t *scope) {
+  (void)sema; /* 仅借用 vm 类型判定，此处用 scope 查符号 */
+  if (!expr) return false;
+  switch (expr->kind) {
+    case AST_NEW:
+      return true; /* new 直接产 own *T（新堆块，非 copy） */
+    case AST_MOVE:
+      return true; /* move(x)/clone(x) 都产 fatal *T（接管源） */
+    case AST_IDENT: {
+      /* 标识符：其类型若已是 fatal *T（参数传入的 fatal 接收）→ 接管合法 */
+      sema_symbol_t *sym =
+          sema_lookup(scope, ((ast_ident_t *)expr)->name);
+      return sym && sym->type && sym->type->kind == TYPE_KIND_PTR_FATAL;
+    }
+    default:
+      return false;
+  }
+}
+
 typedef struct block_result {
   bool definitely_returns; /* 该块保证返回（所有路径都 return） */
 } block_result_t;
@@ -141,6 +170,63 @@ static void name_to_cstr(strslice_t s, char *buf, size_t cap) {
   size_t n = s.len < cap - 1 ? s.len : cap - 1;
   memcpy(buf, s.ptr, n);
   buf[n] = '\0';
+}
+
+/* ---- R3 借用登记/释放（m3-design §7） ---- */
+
+/* 借源登记（幂等切换）：var 绑定新借用源 src（或 NULL=解除）。
+   旧源递减、新源递增——重绑定（r = c;）切换借用目标。 */
+static void borrow_switch(sema_symbol_t *var, sema_symbol_t *src) {
+  if (var->borrow_src) var->borrow_src->borrow_count--;
+  var->borrow_src = src;
+  if (src) src->borrow_count++;
+}
+
+/* 从初始化表达式提取借用源符号（仅变量标识符直读：var q: ref *i32 = p /
+   var q: opaque = p）。new/move/clone 产物是自有堆块（非借用），opaque
+   从指针隐式转换、as 恢复（链式借 opaque 的源）不登记——链式借用由
+   opaque 变量自身的 borrow_src 传递。返回 NULL = 非借用绑定。 */
+static sema_symbol_t *init_borrow_src(sema_t *sema, ast_node_t *init,
+                                      sema_scope_t *scope) {
+  (void)sema; /* 仅查符号表，无 vm 交互 */
+  if (!init || init->kind != AST_IDENT) return NULL;
+  sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)init)->name);
+  if (!s || s->kind != SEMA_SYM_VAR) return NULL;
+  /* 源类型是 own/ref 指针，或 opaque（链式借用载体）——登记借用 */
+  if (s->type && (s->type->kind == TYPE_KIND_PTR_OWN ||
+                  s->type->kind == TYPE_KIND_PTR_REF ||
+                  s->type->kind == TYPE_KIND_OPAQUE))
+    return s;
+  return NULL;
+}
+
+/* 变量定义点借用登记：声明类型是 ref *T 或 opaque 且 init 直读变量 →
+   登记借源（源 borrow_count++）。显式类型已知才能判定借用载体。 */
+static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
+                                   ast_node_t *init, sema_scope_t *scope) {
+  if (!sym || !sym->type) return;
+  if (sym->type->kind != TYPE_KIND_PTR_REF &&
+      sym->type->kind != TYPE_KIND_OPAQUE)
+    return;
+  sema_symbol_t *src = init_borrow_src(sema, init, scope);
+  borrow_switch(sym, src);
+}
+
+/* 作用域退出：遍历本作用域直接符号，递减 borrow_src 的 borrow_count。
+   借用载体随作用域消亡，源符号恢复可 move（§7"有 ref 存活禁止 move"的
+   存活边界 = 借用变量所在作用域）。 */
+void sema_scope_release_borrows(sema_scope_t *scope) {
+  if (!scope || !scope->symbols) return;
+  const vec_t *keys = strmap_keys(scope->symbols);
+  size_t nk = vec_len(keys);
+  for (size_t k = 0; k < nk; k++) {
+    const char *key = (const char *)vec_get(keys, k);
+    sema_symbol_t *sym = (sema_symbol_t *)strmap_get(scope->symbols, key);
+    if (sym && sym->borrow_src) {
+      sym->borrow_src->borrow_count--;
+      sym->borrow_src = NULL;
+    }
+  }
 }
 
 /* 显式类型槽位兜底重解析：3a 槽位解析可能失败（引用同块后续局部 type /
@@ -256,27 +342,78 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
          当时未绑定 vm scope）→ 此处兜底重解析（局部 type 已在定义点求值
          绑定）；仍失败补报诊断（见 var_type_slot_reparse）。 */
       var_type_slot_reparse(sema, vd, scope);
+      /* R1（fatal 禁止命名，§3.3）：fatal *T 只能作为 move/clone 表达式的
+         临时值流，不能存进变量（fatal = 将亡值，必须直接接管）。函数参数
+         是唯一例外（§4，sema 参数路径不经过此分支）。 */
+      if (sym->type && sym->type->kind == TYPE_KIND_PTR_FATAL) {
+        diag_error(sema->diag, sema_loc(sema, vd->type_expr),
+                   "cannot declare variable '%.*s' of fatal pointer type "
+                   "(fatal is a temporary; receive it as own or pass to a "
+                   "function)",
+                   (int)vd->name.len, vd->name.ptr);
+        sym->flow_init = false;
+      }
       /* value_assign 校验 init 可赋给声明类型（单一校验点） */
       if (!init_bad && sym->type) {
-        value_t *dst = value_make_shadow(sema->vm, sym->type);
-        if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
-          char tn[64], itn[64];
-          sema_type_name(sym->type, tn, sizeof(tn));
+        /* R1（own 不可 copy，§3.1）：own *T 声明只能由 fatal 接管源
+           （move/clone 产物或 fatal 参数）初始化——直接赋 own/ref 变量
+           = copy → 编译错误。 */
+        if (sym->type->kind == TYPE_KIND_PTR_OWN &&
+            !is_own_initializer(sema, vd->init, scope)) {
+          char itn[64];
           sema_type_name(value_type(init), itn, sizeof(itn));
           diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize variable '%.*s' of type %s with %s",
-                     (int)vd->name.len, vd->name.ptr, tn, itn);
+                     "cannot initialize own pointer '%.*s' with %s "
+                     "(own is move-only; use move() or clone())",
+                     (int)vd->name.len, vd->name.ptr, itn);
+          sym->flow_init = false; /* copy 失败 = 未初始化 */
+        } else {
+          value_t *dst = value_make_shadow(sema->vm, sym->type);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
+            char tn[64], itn[64];
+            sema_type_name(sym->type, tn, sizeof(tn));
+            sema_type_name(value_type(init), itn, sizeof(itn));
+            diag_error(sema->diag, sema_loc(sema, vd->init),
+                       "cannot initialize variable '%.*s' of type %s with %s",
+                       (int)vd->name.len, vd->name.ptr, tn, itn);
+          }
         }
       }
       var_value =
           value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
     } else {
-      /* 推断类型：init 类型即变量类型 */
+      /* 推断类型：init 类型即变量类型。
+         R1（own 不可 copy，§3.1）：var p = q; 且 init 是 own *T 且非
+         fatal 接管 → copy → 编译错误（own 唯一所有权只能 move/clone）。 */
       const type_t *vt = init_bad ? sema->vm->type_void : value_type(init);
+      /* R1（fatal 禁止命名，§3.3）：var x = move(p) 推断出 fatal 类型——
+         fatal 是临时值，必须显式标注接收类型（own）。 */
+      if (vt && vt->kind == TYPE_KIND_PTR_FATAL) {
+        diag_error(sema->diag, sema_loc(sema, vd->init),
+                   "cannot infer fatal pointer type for variable '%.*s' "
+                   "(annotate the owning type, e.g. own *T)",
+                   (int)vd->name.len, vd->name.ptr);
+        sym->flow_init = false;
+        vt = sema->vm->type_void;
+      } else if (vt && vt->kind == TYPE_KIND_PTR_OWN &&
+                 !is_own_initializer(sema, vd->init, scope)) {
+        char itn[64];
+        sema_type_name(vt, itn, sizeof(itn));
+        diag_error(sema->diag, sema_loc(sema, vd->init),
+                   "cannot initialize variable '%.*s' with %s "
+                   "(own is move-only; use move() or clone())",
+                   (int)vd->name.len, vd->name.ptr, itn);
+        sym->flow_init = false; /* copy 失败 = 未初始化 */
+        vt = sema->vm->type_void;
+      }
       sym->type = vt;
       var_value = value_make_shadow(sema->vm, vt);
     }
   }
+
+  /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
+     分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
+  shadow_borrow_register(sema, sym, vd->init, scope);
 
   /* 定义 shadow value 到当前 VM scope（与 sema scope 树同构；名字取自 ast）。
      定义完成 → 符号激活（sema_lookup 跳过未激活符号，自引用解析到外层） */
@@ -414,7 +551,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
 
     /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true
-       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。 */
+       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。
+       R1（own 不可 copy，§3.1）：own *T 变量被赋值 = copy → 编译错误
+       （own 唯一所有权只能 move/clone 转移，不能按值复制）。
+       R2 恢复：赋值成功 → moved 标记清除（move 后重新赋值 = 重新获得
+       所有权，变量恢复可用）。 */
     value_t *r = value_assign(sema->vm, lhs, rhs);
     if (value_is_error(sema->vm, r)) {
       char tn[64], rn[64];
@@ -424,7 +565,29 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                  "cannot assign %s to variable '%.*s' of type %s", rn,
                  (int)name.len, name.ptr, tn);
     } else {
-      if (sym) sym->flow_init = true;
+      const type_t *lt = value_type(lhs);
+      if (lt && lt->kind == TYPE_KIND_PTR_OWN &&
+          !is_own_initializer(sema, as->value, scope)) {
+        char rn[64];
+        sema_type_name(value_type(rhs), rn, sizeof(rn));
+        diag_error(sema->diag, sema_loc(sema, as->value),
+                   "cannot copy %s into own pointer '%.*s' (own is "
+                   "move-only; use move() or clone())",
+                   rn, (int)name.len, name.ptr);
+        return;
+      }
+      if (sym) {
+        sym->flow_init = true;
+        sym->moved = false;
+        /* R3 重绑定切换借源：ref/opaque 变量 r = c; 换借目标（旧源递减
+           新源递增）。赋值右值直读变量才登记（与定义点同规则）。 */
+        if (sym->type &&
+            (sym->type->kind == TYPE_KIND_PTR_REF ||
+             sym->type->kind == TYPE_KIND_OPAQUE)) {
+          sema_symbol_t *src = init_borrow_src(sema, as->value, scope);
+          borrow_switch(sym, src);
+        }
+      }
     }
     return;
   }
@@ -899,6 +1062,48 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
           sema_type_name(value_type(v), rn, sizeof(rn));
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
+        } else if (sema->func_return_type->kind == TYPE_KIND_PTR_REF &&
+                   rt->value->kind == AST_IDENT) {
+          /* R3（返回 ref 来源，m3-design §6）：返回值 ref 的（标注）作用域
+             必然来自参数或全局——本地 own 变量/临时借用不能作为返回值 ref
+             来源（返回后栈上值销毁，借用悬垂）。检查：return 的值是
+             标识符时，须是 ref/fatal 参数（fatal 返回继续传递所有权）或
+             全局 ref。非标识符表达式（x.& 取栈值地址等）一律拒绝。 */
+          sema_symbol_t *rs =
+              sema_lookup(scope, ((ast_ident_t *)rt->value)->name);
+          if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
+              rs->type->kind == TYPE_KIND_PTR_REF) {
+            /* §6 返回 ref 来源：必须是参数或全局。参数层符号
+               （sema_lookup 沿 scope 链第一个命中）或全局符号放行；
+               本地 own 的 ref 变量/外层局部借用 → 悬垂 → 拒绝。 */
+            sema_symbol_t *g = sema_lookup(sema->global_scope,
+                                           ((ast_ident_t *)rt->value)->name);
+            /* 参数判定：遍历真实参数列表（body 顶层变量也注册在
+               param_scope，sema_scope_find_local 无法区分） */
+            bool is_param = false;
+            for (ast_node_t *p = sema->func_def ? sema->func_def->params : NULL;
+                 p && !is_param; p = p->next) {
+              ast_var_def_t *pvd = (ast_var_def_t *)p;
+              is_param = pvd->name.len == ((ast_ident_t *)rt->value)->name.len &&
+                         memcmp(pvd->name.ptr, ((ast_ident_t *)rt->value)->name.ptr,
+                                pvd->name.len) == 0;
+            }
+            bool is_global = g == rs;
+            if (!is_param && !is_global) {
+              diag_error(sema->diag, sema_loc(sema, rt->value),
+                         "cannot return ref borrowed from local "
+                         "'%.*s' (returned ref must come from a parameter "
+                         "or global)",
+                         (int)((ast_ident_t *)rt->value)->name.len,
+                         ((ast_ident_t *)rt->value)->name.ptr);
+            }
+          }
+          /* R1（fatal 参数消费，§4）：return fatal 参数 = 所有权继续传递，
+             标记已消费（函数结束未消费检查放行）。 */
+          if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
+              rs->type->kind == TYPE_KIND_PTR_FATAL) {
+            rs->moved = true;
+          }
         }
       }
     }
@@ -927,6 +1132,7 @@ static block_result_t walk_while(sema_t *sema, ast_while_t *wl,
   vm_push_scope(sema->vm); /* 循环体块：VM scope 与 sema scope 树同构 */
   size_t sub = 0;
   walk_block(sema, wl->body, body_scope ? body_scope : scope, &sub);
+  sema_scope_release_borrows(body_scope); /* R3：体内借用的 ref 载体随作用域消亡 */
   vm_pop_scope(sema->vm);
 
   flow_restore(&snap);
@@ -944,6 +1150,7 @@ static block_result_t walk_dowhile(sema_t *sema, ast_dowhile_t *dw,
   vm_push_scope(sema->vm); /* 循环体块：VM scope 与 sema scope 树同构 */
   size_t sub = 0;
   walk_block(sema, dw->body, body_scope ? body_scope : scope, &sub);
+  sema_scope_release_borrows(body_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   value_t *cond = sema_expr(sema, &dw->cond, scope);
@@ -993,6 +1200,7 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   vm_push_scope(sema->vm); /* 循环体块 */
   size_t sub = 0;
   walk_block(sema, fr->body, body_scope ? body_scope : fs, &sub);
+  sema_scope_release_borrows(body_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   if (fr->update) sema_expr(sema, &fr->update, fs);
@@ -1000,6 +1208,7 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   flow_restore(&snap); /* 丢弃体内确定性提升（保守） */
   flow_release(&snap);
 
+  sema_scope_release_borrows(for_scope); /* R3：for 作用域（init 变量）退出 */
   vm_pop_scope(sema->vm); /* 退出 for 作用域 */
   return (block_result_t){0};
 }
@@ -1024,6 +1233,7 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   vm_push_scope(sema->vm); /* then 块 */
   size_t sub = 0;
   tr = walk_block(sema, it->then_body, then_scope ? then_scope : scope, &sub);
+  sema_scope_release_borrows(then_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   /* 记录 then 后状态（flow），恢复分支前 */
@@ -1043,6 +1253,7 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
       size_t sub2 = 0;
       er = walk_block(sema, it->else_body, else_scope ? else_scope : scope,
                       &sub2);
+      sema_scope_release_borrows(else_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
   }
@@ -1080,6 +1291,7 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
       vm_push_scope(sema->vm);
       size_t sub = 0;
       walk_block(sema, sc->body, case_scope ? case_scope : scope, &sub);
+      sema_scope_release_borrows(case_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
     if (sw->default_body) {
@@ -1087,6 +1299,7 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
       vm_push_scope(sema->vm);
       size_t sub = 0;
       walk_block(sema, sw->default_body, def_scope ? def_scope : scope, &sub);
+      sema_scope_release_borrows(def_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
     return r;
@@ -1127,6 +1340,7 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
     size_t sub = 0;
     block_result_t br = walk_block(sema, sc->body, case_scope ? case_scope : scope,
                                    &sub);
+    sema_scope_release_borrows(case_scope); /* R3 */
     vm_pop_scope(sema->vm);
     if (!br.definitely_returns) all_return = false;
     for (size_t i = 0; i < snap.n; i++) {
@@ -1143,6 +1357,7 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
     size_t sub = 0;
     block_result_t dr = walk_block(sema, sw->default_body,
                                    def_scope ? def_scope : scope, &sub);
+    sema_scope_release_borrows(def_scope); /* R3 */
     vm_pop_scope(sema->vm);
     if (!dr.definitely_returns) all_return = false;
     for (size_t i = 0; i < snap.n; i++) {
@@ -1202,6 +1417,7 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       vm_push_scope(sema->vm); /* VM scope 与 sema scope 树同构 */
       size_t sub = 0;
       r = walk_block(sema, stmt, child ? child : scope, &sub);
+      sema_scope_release_borrows(child); /* R3：块内借用的 ref 载体随块消亡 */
       vm_pop_scope(sema->vm);
       break;
     }
@@ -1526,11 +1742,11 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   if (!sf->scope) return; /* 建树失败（结构错误已诊断），不进入 shadow run */
 
   /* 捕获检查上下文：局部函数体引用外层局部符号 → 报错（无闭包，运行时
-     函数体查找链只有参数 + 全局）。全局函数不设（fscope parent = 全局，
-     无外层局部可捕获）。 */
+     函数体查找链只有参数 + 全局）。全局函数不设 local_func_base（fscope
+     parent = 全局，无外层局部可捕获），但参数层照设——walk_return 的 §6
+     返回 ref 来源检查（参数放行）需要参数层判定。 */
   sema->local_func_base = sf->is_local ? sf->scope : NULL;
-  sema->local_func_param_scope =
-      sf->is_local ? sf->param_scope : NULL;
+  sema->local_func_param_scope = sf->param_scope;
 
   /* comptime 函数体 walk 标志：body 内对 comptime func 的调用走普通
      shadow 校验（参数是 shadow，不能 CTFE），标志在整个 body walk 期间
@@ -1541,6 +1757,19 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   sema->func_return_type =
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
   sema->func_has_return = false;
+  sema->func_def = fn;
+
+  /* R1（返回类型约束，m3-design §4）：参数/返回值只能 ref 或 fatal，不能
+     own——own 是单所有权，跨函数传 own 会破坏唯一所有权（调用方已销毁 /
+     返回值无法显式接管）。返回 own *T 应改写为返回 fatal *T（调用点
+     `var p: own *T = f()` 经 fatal→own 接管）。 */
+  if (sema->func_return_type &&
+      sema->func_return_type->kind == TYPE_KIND_PTR_OWN) {
+    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+               "function cannot return own pointer (return fatal *T instead; "
+               "the caller takes ownership via var p: own *T = f())");
+    sema->func_return_type = NULL; /* 防级联：后续 return 不再按 own 校验 */
+  }
 
   /* 函数级 VM scope（与作用域树同构）：捕获层（父）定义捕获 shadow value，
      参数层（子，遮蔽捕获）定义参数 shadow value——进入函数体即可读（名字
@@ -1564,6 +1793,17 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     if (ps) {
       ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
       ps->is_active = true; /* 参数进入函数体立即可见 */
+      /* R1（参数类型约束，m3-design §4）：参数只能 ref 或 fatal，不能 own
+         ——own 是单所有权，传 own 参数会分裂所有权（调用方销毁 + 参数接管
+         双释放）。own 场景：调用方 move(p) 传 fatal，函数体用 own 变量接收
+         （本地接管）或 return 出去。 */
+      if (ps->type && ps->type->kind == TYPE_KIND_PTR_OWN) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+                   "function parameter '%.*s' cannot be own pointer (use "
+                   "fatal and take ownership inside with var x: own *T = "
+                   "move(p), or use ref for borrowing)",
+                   (int)vd->name.len, vd->name.ptr);
+      }
     }
     value_t *pv = value_make_shadow(sema->vm,
                                     ps && ps->type ? ps->type
@@ -1577,11 +1817,30 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      walk_block 的 block_result_t 仅用于跳过不可达语句的类型检查 */
   size_t child_idx = 0;
   (void)walk_block(sema, fn->body, sf->param_scope, &child_idx);
+
+  /* R1（fatal 参数消费，m3-design §4）：fatal 参数必须被消费——move 接管
+     （AST_MOVE 标记 moved）或 return 出去（walk_return 标记 moved）。
+     未消费（函数结束时 fatal 仍"存活"）→ 所有权悬空 → 编译错误。 */
+  for (ast_node_t *p = fn->params; p; p = p->next) {
+    ast_var_def_t *vd = (ast_var_def_t *)p;
+    sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
+    if (ps && ps->type && ps->type->kind == TYPE_KIND_PTR_FATAL &&
+        !ps->moved) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+                 "fatal parameter '%.*s' is not consumed (take ownership "
+                 "with move() or return it)",
+                 (int)vd->name.len, vd->name.ptr);
+    }
+  }
+
+  sema_scope_release_borrows(sf->param_scope); /* R3：参数层借用载体消亡 */
   vm_pop_scope(sema->vm);
+  sema_scope_release_borrows(sf->scope);       /* R3：捕获层借用载体消亡 */
   vm_pop_scope(sema->vm);
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成 */
   sema->func_return_type = NULL;
+  sema->func_def = NULL;
   sema->local_func_base = NULL;
   sema->local_func_param_scope = NULL;
   sema->walking_comptime = saved_comptime;

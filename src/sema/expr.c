@@ -536,6 +536,13 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    (int)n->name.len, n->name.ptr);
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
+      if (sym && sym->moved) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "variable '%.*s' used after move (ownership was "
+                   "transferred)",
+                   (int)n->name.len, n->name.ptr);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
       if (sym && sym->is_comptime && sym->ct_valid) {
         /* 折叠引用点为字面量（保留兄弟链，供调用点/语句链继续遍历） */
         ast_node_t *lit = sema_ct_lit(sema, *node, &sym->ct);
@@ -1129,6 +1136,21 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+            /* R1（own 不可 copy，§3.1）：new 字段类型是 own *T 时，值必须
+               是显式接管源（move/clone/fatal 参数）。直接传 own/ref 变量
+               = 隐式 copy——运行期 NEW 会把 {ptr, owns=true} 原样复制进
+               新堆块 → 内外双 owns 指向同一堆块 → 作用域退出 double free。 */
+            if (ft->kind == TYPE_KIND_PTR_OWN &&
+                !is_own_initializer(sema, value, scope)) {
+              char fn[64];
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot copy %s into own pointer field '%.*s' "
+                         "(use move() or clone())",
+                         fn, (int)st->fields[i].name.len,
+                         st->fields[i].name.ptr);
+              continue;
+            }
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -1415,6 +1437,20 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "new: cannot initialize scalar with nil");
         } else if (fv && t) {
+          /* R1（own 不可 copy，§3.1）：new 被指向类型是 own 指针时，值
+             必须是显式接管源（move/clone/fatal）。直接传 own/ref 变量
+             = 隐式 copy → 新堆块与外变量双 owns 指向同一堆块 → double
+             free（new own *i32{p} 必须写 new own *i32{move(p)}）。 */
+          if (t->kind == TYPE_KIND_PTR_OWN &&
+              !is_own_initializer(sema, f, scope)) {
+            char fn[64];
+            sema_type_name(value_type(fv), fn, sizeof fn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "new: cannot copy %s into own pointer target (use "
+                       "move() or clone())",
+                       fn);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
           value_t *dst = value_make_shadow(sema->vm, t);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -1426,8 +1462,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
 
-      /* 返回 own *T 类型的 shadow（运行期 NEW 指令分配堆块） */
-      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, t);
+      /* 返回 fatal *T 类型的 shadow——new 产新堆块（owns=true），与
+         clone/move 统一：所有"产新堆块"路径都返回 fatal（§3.3 将亡值），
+         由 var 定义/参数/return 显式接管为 own（value_assign → implicit_cast
+         fatal→own 转移）。运行期 NEW 指令按 fatal 类型压栈。 */
+      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, t);
       if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);
@@ -1454,9 +1493,10 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return value_make_shadow(sema->vm, base);
     }
     case AST_ADDR: {
-      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 own *T 类型的
-         shadow（运行期 ADDR 指令取地址）。Step A 静默：借用检查（ref 派生）
-         推迟到 Step B。 */
+      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
+         shadow——x.& 指向栈上值（或他人堆块）是借用，运行期 ADDR 构造
+         owns=false 的借用值（type_ptr.c §3.2 注释），销毁 no-op。
+         返回 ref（而非 own）与值层语义一致（Step B 借用存活检查的基座）。 */
       ast_addr_t *n = (ast_addr_t *)*node;
       value_t *operand = sema_expr(sema, &n->operand, scope);
       if (value_is_error(sema->vm, operand) ||
@@ -1468,7 +1508,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "cannot take address of value of unknown type");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, t);
+      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, t);
       if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);
@@ -1491,6 +1531,38 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         const type_t *fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
         if (!fatal) return value_make_shadow(sema->vm, sema->vm->type_void);
         sema_type_register(sema, fatal);
+        /* R2（move 后源 TDZ，m3-design §7）：move(own *T) 转移所有权——
+           源变量标记 moved，后续读取报 "used after move"。clone 深拷贝，
+           源不受影响。ref 是值拷贝（§3.2 可 copy），move(ref) 平凡转移。
+           R3（§7 有 ref 存活禁止 move）：move 源有活跃借用（borrow_count>0）
+           → 借用会悬空（借用指针随源销毁失效）→ 编译错误。clone 深拷贝
+           （新堆块）不触发（§7"ref 不影响 clone"）。 */
+        if (!n->op || !token_is(n->op, "clone")) {
+          if (n->operand->kind == AST_IDENT) {
+            sema_symbol_t *src =
+                sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
+            if (src && src->kind == SEMA_SYM_VAR && src->type &&
+                src->type->kind == TYPE_KIND_PTR_OWN) {
+              if (src->borrow_count > 0) {
+                diag_error(sema->diag, sema_loc(sema, *node),
+                           "cannot move '%.*s': %d live borrow(s) still "
+                           "reference it (borrows must end before move)",
+                           (int)n->operand->kind == AST_IDENT
+                               ? ((ast_ident_t *)n->operand)->name.len
+                               : 0,
+                           ((ast_ident_t *)n->operand)->name.ptr,
+                           src->borrow_count);
+              } else {
+                src->moved = true;
+              }
+            } else if (src && src->kind == SEMA_SYM_VAR && src->type &&
+                       src->type->kind == TYPE_KIND_PTR_FATAL) {
+              /* R1（fatal 参数消费，§4）：move(fatal 参数) 接管所有权——
+                 标记已消费（函数结束未消费的 fatal 参数报编译错误）。 */
+              src->moved = true;
+            }
+          }
+        }
         return value_make_shadow(sema->vm, fatal);
       }
       return operand; /* shadow，类型 = 操作数类型（非指针） */

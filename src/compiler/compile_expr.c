@@ -684,11 +684,13 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_NEW: {
-    /* new T{...}（m3-design §8.1）：.T{...} 的堆分配形态 → own *T。
-       与 AST_CONSTRUCT 同构：先压类型位（compile_type_expr），再压 1 个
-       成员值（new 完全显式：sema 已校验字段数 == 1——标量 new i32{123}
-       是 1 字段；struct/tuple/array/option/union/cunion 是嵌套 CONSTRUCT
-       已构造好的 T 值，整块作为成员），NEW 指令弹 2 压 1。 */
+    /* new T{...}（m3-design §8.1）：.T{...} 的堆分配形态 → fatal *T
+       （§3.3 统一接管协议：new/clone/move 都产将亡值，由 DEFINE/赋值
+       implicit_cast 接管为 own）。与 AST_CONSTRUCT 同构：先压类型位
+       （compile_type_expr），再压 1 个成员值（new 完全显式：sema 已校验
+       字段数 == 1——标量 new i32{123} 是 1 字段；struct/tuple/array/
+       option/union/cunion 是嵌套 CONSTRUCT 已构造好的 T 值，整块作为
+       成员），NEW 指令弹 2 压 1。 */
     ast_new_t *n = (ast_new_t *)node;
     compile_type_expr(c, n->type);      /* 栈: [type_value] */
     ast_node_t *f = n->fields;          /* 仅 1 个字段（sema 已校验） */
@@ -709,7 +711,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       c_error(c, node, "compiler: new requires exactly 1 field");
       return;
     }
-    bcode_write_op(c->bc, BCODE_NEW);   /* 弹 2 压 1（own *T 指针） */
+    bcode_write_op(c->bc, BCODE_NEW);   /* 弹 2 压 1（fatal *T 指针） */
     st_push(c, -1);
     break;
   }
@@ -723,8 +725,8 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_ADDR: {
-    /* 后置取地址 x.&（m3-design §8.2）：operand → ADDR（弹值 → own *T
-       指针）。 */
+    /* 后置取地址 x.&（m3-design §8.2）：operand → ADDR（弹值 → ref *T
+       借用指针，运行期构造 owns=false）。 */
     ast_addr_t *n = (ast_addr_t *)node;
     compile_expr(c, n->operand);        /* 栈: [value] */
     bcode_write_op(c->bc, BCODE_ADDR);

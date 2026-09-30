@@ -3560,12 +3560,12 @@ TEST(Driver, PtrRefBorrowDoesNotOwn) {
 }
 
 TEST(Driver, PtrAddrBorrowsStackValue) {
-  /* 后置取址 x.&（§8.2）：own 指针借用栈上值，写回影响原值；
+  /* 后置取址 x.&（§8.2）：ref 指针借用栈上值，写回影响原值；
      指针退出作用域不释放栈值（owns=false） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var y: i32 = 42;\n"
-      "  var a: own *i32 = y.&;\n"
+      "  var a: ref *i32 = y.&;\n"
       "  a.* = 99;\n"
       "  if (y != 99) { return 1; }\n"
       "  if (a.* != 99) { return 2; }\n"
@@ -3582,7 +3582,7 @@ TEST(Driver, PtrOpaqueRoundtrip) {
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var q: opaque = p;\n"
-      "  var r: own *i32 = q as own *i32;\n"
+      "  var r: ref *i32 = q as ref *i32;\n"
       "  if (r.* != 7) { return 1; }\n"
       "  r.* = 88;\n"
       "  if (p.* != 88) { return 2; }\n"
@@ -3597,7 +3597,7 @@ TEST(Driver, PtrNestedDeref) {
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
-      "  var pp: own *own *i32 = new own *i32{p};\n"
+      "  var pp: own *own *i32 = new own *i32{move(p)};\n"
       "  var v: i32 = pp.*.*;\n"
       "  if (v != 7) { return 1; }\n"
       "  return 0;\n"
@@ -3622,5 +3622,230 @@ TEST(Driver, PtrScopeExitReleasesHeap) {
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ---- M3 Step B 逃逸分析（R1 禁止 copy / R2 move TDZ / R3 借用存活，§3-§7） ---- */
+
+TEST(Driver, StepBOwnCopyRejected) {
+  /* R1（§3.1）：own → own 直接赋值 = copy → 编译错误 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: own *i32 = p;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBOwnInitializedByMoveOrNew) {
+  /* R1 正向：own 只接受 new / move / clone 接管源 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: own *i32 = move(p);\n"
+      "  var r: own *i32 = clone(q);\n"
+      "  if (r.* != 1) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBOwnParamAndReturnRejected) {
+  /* R1（§4）：参数/返回值不能是 own *T——own 是单所有权，跨函数传会分裂 */
+  std::string path = write_temp_file(
+      "func bad(p: own *i32): void {\n"
+      "  var q: own *i32 = move(p);\n"
+      "}\n"
+      "func bad2(): own *i32 {\n"
+      "  return new i32{1};\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBFatalParamMustBeConsumed) {
+  /* R1（§4）：fatal 参数必须被 move 接管或 return 出去 */
+  std::string path = write_temp_file(
+      "func take(p: fatal *i32): void {\n"
+      "  var q: i32 = p.*;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  take(move(p));\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBFatalParamConsumedByMovePasses) {
+  /* R1 正向：fatal 参数 move 接管放行 */
+  std::string path = write_temp_file(
+      "func take(p: fatal *i32): i32 {\n"
+      "  var q: own *i32 = move(p);\n"
+      "  return q.*;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{7};\n"
+      "  var v: i32 = take(move(p));\n"
+      "  if (v != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBFatalChainThroughReturnPasses) {
+  /* §4：return new 产物（fatal）+ fatal 参数接收 + move 接管，完整传递链 */
+  std::string path = write_temp_file(
+      "func make(): fatal *i32 {\n"
+      "  return new i32{5};\n"
+      "}\n"
+      "func take(p: fatal *i32): i32 {\n"
+      "  var q: own *i32 = move(p);\n"
+      "  return q.*;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var v: i32 = take(make());\n"
+      "  if (v != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBMoveAfterMoveRejected) {
+  /* R2（§7）：move 后源进 TDZ，再次 move 报错 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: own *i32 = move(p);\n"
+      "  var r: own *i32 = move(p);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBReadAfterMoveRejected) {
+  /* R2：move 后读取源报 used after move */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: own *i32 = move(p);\n"
+      "  var y: i32 = p.*;\n"
+      "  return y;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBCloneKeepsSourceUsable) {
+  /* R2 正向：clone 深拷贝，源保持可用（不标记 moved） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{7};\n"
+      "  var c: own *i32 = clone(p);\n"
+      "  var v: i32 = p.* + c.*;\n"
+      "  if (v != 14) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBMoveWithLiveBorrowRejected) {
+  /* R3（§7）：借用存活期间 move 源 → 借用悬空 → 编译错误 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var r: ref *i32 = p;\n"
+      "  var q: own *i32 = move(p);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBMoveAfterBorrowScopeEndsPasses) {
+  /* R3 正向：借用作用域结束后 move 源放行（借用消亡恢复可 move） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  {\n"
+      "    var r: ref *i32 = p;\n"
+      "    if (r.* != 1) { return 1; }\n"
+      "  }\n"
+      "  var q: own *i32 = move(p);\n"
+      "  if (q.* != 1) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBOpaqueBorrowBlocksMove) {
+  /* R3（§8.4）：opaque 变量是借用载体，存活期间 move 源同样拦截 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: opaque = p;\n"
+      "  var r: ref *i32 = q as ref *i32;\n"
+      "  var c: own *i32 = move(p);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBReturnRefFromLocalRejected) {
+  /* R3（§6）：返回 ref 借用自本地变量 → 悬垂 → 编译错误 */
+  std::string path = write_temp_file(
+      "func bad(): ref *i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: ref *i32 = x.&;\n"
+      "  return r;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var r: ref *i32 = bad();\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBReturnRefFromParamPasses) {
+  /* R3（§6）正向：返回 ref 参数（借用自参数，放行） */
+  std::string path = write_temp_file(
+      "func get(p: ref *i32): ref *i32 {\n"
+      "  return p;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: ref *i32 = get(x.&);\n"
+      "  if (r.* != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBReturnI32FromPtrFunctionRejected) {
+  /* 指针返回类型校验：return 0 赋给 ref *i32 应报错（ptr_assign shadow
+     模式也做类型协商——回归：曾静默通过） */
+  std::string path = write_temp_file(
+      "func bad(): ref *i32 {\n"
+      "  return 0;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }

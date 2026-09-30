@@ -681,9 +681,11 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
                           ? value_as(type_v, const type_t *) : NULL;
     if (!t)
         return value_make_error(vm, "new: missing type slot");
-    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_OWN, t);
+    /* new 产 fatal *T（m3-design §3.3 统一接管协议）：新堆块是"将亡值"，
+       由 DEFINE/赋值经 implicit_cast fatal→own 显式接管为 own。 */
+    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_FATAL, t);
     if (!pt)
-        return value_make_error(vm, "new: cannot make owner pointer type");
+        return value_make_error(vm, "new: cannot make fatal pointer type");
     if (value_is_shadow(member))
         return value_make_shadow(vm, pt);
     /* 成员值 → T（同类型身份短路；字面量 i32 → i64 等宽度提升） */
@@ -691,7 +693,7 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_error(vm, casted)) return casted;
     void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
     memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
-    return ptr_make_value(vm, pt, heap, true);    /* own *T：拥有堆块 */
+    return ptr_make_value(vm, pt, heap, true);    /* fatal *T：拥有堆块 */
 }
 
 /* PTR_GET（无操作数）：**解引用取值**（r.*，m3-design §8.2）。
