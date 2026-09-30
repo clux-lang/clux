@@ -78,6 +78,16 @@ typedef enum {
     AST_ALIGNOF,         /* alignof(T) / alignof(expr) → u64 */
     AST_TYPEOF,          /* typeof(expr) → type value */
 
+    /* --- M3 指针与所有权（m3-design §3/§7/§8）---
+     * own/ref/fatal *T 指针类型修饰（无裸指针）、new 堆分配、后置取址
+     * x.& / 解引用 r.*、move/clone 所有权原语、作用域标注 '<a,b,c>。 */
+    AST_PTR,             /* own/ref/fatal *T 指针类型修饰（类型即表达式） */
+    AST_NEW,             /* new T{...} 堆分配构造 → own *T */
+    AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
+    AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */
+    AST_MOVE,            /* move(x) / clone(x) 所有权原语（op token 区分） */
+    AST_SCOPE_ANNOT,     /* '<a,b,c> type 作用域标注（' 前导，位置信息非类型） */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

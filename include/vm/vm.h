@@ -45,6 +45,7 @@ typedef struct vm_t {
     type_t *type_func;   /* 函数类型基类（无签名） */
     type_t *type_error;  /* 错误类型（引擎级硬错误） */
     type_t *type_interrupt; /* interrupt 类型（引擎级控制流哨兵） */
+    type_t *type_opaque; /* opaque 类型（≈ C void*，id 17，M3 §8.4） */
 
     /* ---- 函数签名类型池（按签名去重 intern，vm 拥有生命周期） ---- */
     vec_t *sig_types;    /* func_type_t*，元素为签名类型（sig 非空） */
@@ -55,6 +56,9 @@ typedef struct vm_t {
 
     /* ---- optional 修饰类型池（按 inner 去重 intern，vm 拥有生命周期） ---- */
     vec_t *option_types;   /* option_type_t*，元素为 optional 修饰类型 */
+
+    /* ---- 指针类型池（按 base_type + 所有权 kind 去重 intern，vm 拥有生命周期） ---- */
+    vec_t *ptr_types;      /* ptr_type_t*，元素为 own/ref/fatal 指针类型 */
 
     /* ---- 数组类型池（按 elem_type + length 去重 intern，vm 拥有生命周期） ---- */
     vec_t *array_types;    /* array_type_t*，元素为数组类型 */

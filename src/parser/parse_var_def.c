@@ -20,13 +20,15 @@ ast_node_t *parse_var_def(parser_t *p) {
     skip_trivia(p);
 
     /* 可选类型标注：:type（类型即表达式，普通表达式解析）。
-       用 min_prec=1 限定：不消费赋值（ASSIGN_LEFT_PREC=0）与逗号/右括号。 */
+       用 min_prec=1 限定：不消费赋值（ASSIGN_LEFT_PREC=0）与逗号/右括号。
+       parse_scope_annotated_type 额外处理前导作用域标注 '<a,b,c>
+       （m3-design §5：标注前导紧跟 ':' 之后，绑定在变量上）。 */
     ast_node_t *type_expr = NULL;
     if (check_symbol(p, ":")) {
         advance(p);
         skip_trivia(p);
 
-        type_expr = parse_expr_prec(p, 1);
+        type_expr = parse_scope_annotated_type(p);
         if (!type_expr || type_expr->kind == AST_ERROR) {
             if (!type_expr) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

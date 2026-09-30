@@ -30,6 +30,11 @@
 #include "parser/ast_sizeof.h"
 #include "parser/ast_alignof.h"
 #include "parser/ast_typeof.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_new.h"
+#include "parser/ast_addr.h"
+#include "parser/ast_deref.h"
+#include "parser/ast_move.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
 
@@ -358,6 +363,39 @@ ast_node_t *parse_primary(parser_t *p) {
         return node;
     }
 
+    /* move/clone 所有权原语：move(x) / clone(x)（m3-design §7）。
+       必须是括号形态（move x / clone x 无括号不合法），与 sizeof 同族。
+       返回 fatal：move 转移所有权（原对象 TDZ），clone 深拷贝。 */
+    if (check_keyword(p, "move") || check_keyword(p, "clone")) {
+        uint32_t mb = p->pos;
+        const token_t *op_tok = cur_token(p);
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                 "expected '(' after ownership primitive");
+        }
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand) {
+                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                     "expected expression after '(' in ownership primitive");
+            }
+            return operand;
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                 "expected ')' after ownership primitive operand");
+        }
+        ast_node_t *node = ast_move_new(p->arena, mb, p->pos);
+        if (!node) return NULL;
+        ((ast_move_t *)node)->op      = (token_t *)op_tok;
+        ((ast_move_t *)node)->operand = operand;
+        return node;
+    }
+
     /* 关键字 → 标识符引用（类型即表达式）：
      * 类型名（i32/bool/...）与关键字在表达式位置统一解析为 AST_IDENT，
      * 消费层感知 value 是否为类型。const/volatile 已在 parse_unary
@@ -392,6 +430,9 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_symbol(p, "?")) op_tok = cur_token(p);
     else if (check_keyword(p, "const"))     op_tok = cur_token(p);
     else if (check_keyword(p, "volatile"))  op_tok = cur_token(p);
+    else if (check_keyword(p, "own"))       op_tok = cur_token(p);
+    else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
+    else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
 
     /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
@@ -480,6 +521,73 @@ ast_node_t *parse_unary(parser_t *p) {
         return node;
     }
 
+    /* new 表达式：new T{...}（m3-design §8.1）—— .T{...} 的堆分配形态，
+       返回 own *T。字段解析与 AST_CONSTRUCT 同构（含 <v,N> 值包）。 */
+    if (check_keyword(p, "new")) {
+        uint32_t nb = tb;
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *type = NULL;
+        /* 匿名构造：'new' 后直接 '{' → type=NULL，目标类型由 sema 依上下文推断 */
+        if (!check_symbol(p, "{")) {
+            type = parse_unary(p);
+            if (!type || type->kind == AST_ERROR) {
+                if (!type) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                                         "expected type after 'new'");
+                }
+                return type;
+            }
+            skip_trivia(p);
+            if (!check_symbol(p, "{")) {
+                return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                                     "expected '{' after type in new expression");
+            }
+        }
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *fields = NULL, *fields_last = NULL;
+        if (!check_symbol(p, "}")) {
+            ast_node_t *f = parse_construct_field(p);
+            if (!f || f->kind == AST_ERROR) {
+                if (!f) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                                         "expected expression in new construct");
+                }
+                return f;
+            }
+            ast_append(&fields, &fields_last, NULL, f);
+            skip_trivia(p);
+            while (check_symbol(p, ",")) {
+                advance(p);
+                skip_trivia(p);
+                f = parse_construct_field(p);
+                if (!f || f->kind == AST_ERROR) {
+                    if (!f) {
+                        return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                                             "expected expression after ',' in new construct");
+                    }
+                    return f;
+                }
+                ast_append(&fields, &fields_last, NULL, f);
+                skip_trivia(p);
+            }
+        }
+        if (!expect_symbol(p, "}")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                                 "expected '}' after new fields");
+        }
+
+        ast_node_t *node = ast_new_new(p->arena, nb, p->pos);
+        if (!node) return NULL;
+        ((ast_new_t *)node)->type        = type;
+        ((ast_new_t *)node)->fields      = fields;
+        ((ast_new_t *)node)->fields_last = fields_last;
+        return node;
+    }
+
     if (!op_tok) return parse_primary(p);
 
     /* 类型字面量前缀：.<type> { fields } → AST_CONSTRUCT。
@@ -555,6 +663,33 @@ ast_node_t *parse_unary(parser_t *p) {
 
     advance(p);
     skip_trivia(p);
+
+    /* 指针类型 own/ref/fatal *T：'*' 是指针语法的一部分，必须紧跟
+       ownership 修饰（own i32 不合法，无裸指针）。消费 '*' 后再解析
+       被指向类型 T（parse_expr_prec 递归处理嵌套指针 own *own *i32、
+       数组 own *[N]T 等）。 */
+    if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
+        token_is(op_tok, "fatal")) {
+        if (!expect_symbol(p, "*")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected '*' after ownership qualifier (pointer "
+                                 "must be 'own *T' / 'ref *T' / 'fatal *T')");
+        }
+        skip_trivia(p);
+        ast_node_t *base_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
+        if (!base_type || base_type->kind == AST_ERROR) {
+            if (!base_type) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected type after '*' in pointer type");
+            }
+            return base_type;
+        }
+        ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
+        if (!node) return NULL;
+        ((ast_ptr_t *)node)->ownership = (token_t *)op_tok;
+        ((ast_ptr_t *)node)->base_type = base_type;
+        return node;
+    }
 
     ast_node_t *operand = parse_expr_prec(p, PREFIX_RIGHT_PREC);
     if (!operand || operand->kind == AST_ERROR) {
@@ -676,9 +811,12 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             continue;
         }
 
-        /* 成员访问 / optional 解包：.field / .!（assert）/ .?（try）。
+        /* 成员访问 / optional 解包 / 取址解引用：.field / .!（assert）/
+         * .?（try）/ .&（取址）/ .*（解引用）。
          * .! / .? 不做双字符 token（与构造器 .?T{...} 前导冲突，见 lexer
-         * 注释）——此处识别 '.' 后紧跟 '!' 或 '?' 的组合。 */
+         * 注释）——此处识别 '.' 后紧跟 '!' 或 '?' 的组合。
+         * .& / .* 同理：lexer 不产出双字符 token（与构造器 .?T{...}
+         * 前导冲突同族），parse_postfix 组合识别。 */
         if (check_symbol(p, ".")) {
             uint32_t tb = p->pos;
             advance(p);
@@ -693,6 +831,27 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 if (!node) return NULL;
                 ((ast_unwrap_t *)node)->operand = lhs;
                 ((ast_unwrap_t *)node)->op      = (token_t *)op_tok;
+                lhs = node;
+                continue;
+            }
+
+            /* 后置取地址：x.&（m3-design §8.2，由值得指针） */
+            if (check_symbol(p, "&")) {
+                advance(p);
+                ast_node_t *node = ast_addr_new(p->arena, tb, p->pos);
+                if (!node) return NULL;
+                ((ast_addr_t *)node)->operand = lhs;
+                lhs = node;
+                continue;
+            }
+
+            /* 后置解引用取值：r.*（m3-design §8.2，指针得值 GET）。
+               解引用写（SET）由 AST_ASSIGN 的 target 形态承载。 */
+            if (check_symbol(p, "*")) {
+                advance(p);
+                ast_node_t *node = ast_deref_new(p->arena, tb, p->pos);
+                if (!node) return NULL;
+                ((ast_deref_t *)node)->operand = lhs;
                 lhs = node;
                 continue;
             }
@@ -831,13 +990,14 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             const token_t *op_tok = cur_token(p);
             uint32_t op_pos = p->pos;
 
-            /* 左值必须是标识符、下标（a[i] = v）或成员访问（p.x = v）。
+            /* 左值必须是标识符、下标（a[i] = v）、成员访问（p.x = v）或
+             * 解引用（r.* = v，m3-design §8.2 解引用 SET）。
              * 下标/泛型索引（AST_INDEX）与泛型实例化语法重叠，parser 不区分——
              * sema 层做最终校验（数组下标赋值 / 泛型占位诊断）。
              * 成员访问目标（AST_MEMBER）支持 p.x = v、p.x += v 等复合赋值，
              * 字段存在性/const 检查在 sema 层。 */
             if (left->kind != AST_IDENT && left->kind != AST_INDEX &&
-                left->kind != AST_MEMBER) {
+                left->kind != AST_MEMBER && left->kind != AST_DEREF) {
                 return ast_error_new(p->diag, p->tokens, p->arena, left->tok_begin, p->pos,
                                      "invalid assignment target");
             }

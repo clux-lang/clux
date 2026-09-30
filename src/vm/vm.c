@@ -3,6 +3,7 @@
 #include "vm/type_array.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
+#include "vm/type_ptr.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
@@ -105,6 +106,10 @@ vm_t *vm_new(allocator_t *alloc) {
        元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->option_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* 指针类型池（type_ptr_intern / type_ptr_seal intern 用；元素由
+       vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->ptr_types = vec_new(alloc, /*owns_element=*/false);
+
     /* 枚举类型池（type_enum_intern / type_enum_seal intern 用；元素由
        vm_destroy 手动释放，vec 只持有指针数组） */
     vm->enum_types = vec_new(alloc, /*owns_element=*/false);
@@ -139,6 +144,21 @@ vm_t *vm_new(allocator_t *alloc) {
     /* error/interrupt 也登记进类型 id 表（id 15/16，内建段） */
     vm_type_bind(vm, 15, vm->type_error);
     vm_type_bind(vm, 16, vm->type_interrupt);
+
+    /* opaque 登记进类型 id 表（id 17，内建段）+ global scope（type_lookup
+       按名解析 "opaque"，sema AST_OPAQUE 分支用） */
+    vm_type_bind(vm, 17, vm->type_opaque);
+    {
+        const type_t *t = vm->type_opaque;
+        void *data = value_alloc_data_copy(vm->alloc, vm->type_type, &t);
+        value_t *tv = value_make_untracked(vm->alloc, vm->type_type, data);
+        value_t *stored = scope_define(vm, vm->global_scope, "opaque", tv);
+        if (!stored || value_is_error(vm, stored)) {
+            panic("vm: failed to register builtin type 'opaque'");
+        }
+        value_dispose(vm, tv);
+        allocator_free(vm->alloc, (void **)&tv);
+    }
 
     /* printf 内置函数（临时注册，M1 硬编码绑定 C printf） */
     vm_register_printf(vm);
@@ -259,6 +279,21 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&ot);
         }
         vec_free(vm->alloc, &vm->option_types);
+    }
+
+    /* 指针类型池：释放 name + 结构体（base_type 归底层类型，不在此释放） */
+    if (vm->ptr_types) {
+        size_t n = vec_len(vm->ptr_types);
+        for (size_t i = 0; i < n; i++) {
+            ptr_type_t *pt = (ptr_type_t *)vec_get(vm->ptr_types, i);
+            if (!pt) continue;
+            if (pt->base.name.ptr) {
+                char *np = (char *)pt->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&pt);
+        }
+        vec_free(vm->alloc, &vm->ptr_types);
     }
 
     /* 枚举类型池：释放 variant 表（含名）+ 结构体（underlying 归底层类型，

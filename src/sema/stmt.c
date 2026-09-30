@@ -38,6 +38,8 @@
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_ptr.h"
+#include "parser/ast_deref.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -301,6 +303,8 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
                                 sema_scope_t *scope);
 static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
                                  sema_scope_t *scope);
+static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
+                                sema_scope_t *scope);
 
 static void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
@@ -312,6 +316,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   /* 左值：字段赋值 p.field = v（读+写+复合赋值，嵌套 p.a.b 递归） */
   if (as->target->kind == AST_MEMBER) {
     shadow_assign_member(sema, as, scope);
+    return;
+  }
+  /* 左值：解引用赋值 r.* = v（m3-design §8.2 解引用 SET 严格分离） */
+  if (as->target->kind == AST_DEREF) {
+    shadow_assign_deref(sema, as, scope);
     return;
   }
   /* 左值必须是标识符表达式（目前仅支持 ID_LIT） */
@@ -743,6 +752,128 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
     diag_error(sema->diag, sema_loc(sema, &as->base),
                "cannot assign %s to field '%.*s' of type %s", rn,
                (int)m->field.len, m->field.ptr, tn);
+  }
+}
+
+/* ---- 解引用左值赋值（r.* = v，m3-design §8.2 解引用 SET 严格分离）----
+ * 目标求值（指针操作数须为 own/ref/fatal 指针 → 取被指向类型 T 为字段
+ * 类型；非指针已在诊断中报错）、const 检查（被指向类型含 const → 不可
+ * 写）、右值求值（匿名构造注入 T）、value_assign 校验可赋值给 T。运行期
+ * 由 PTR_SET 指令写回（compiler 按 op 分派 PTR_GET/op/PTR_SET）。 */
+static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
+                                sema_scope_t *scope) {
+  ast_deref_t *n = (ast_deref_t *)as->target;
+
+  /* 指针操作数求值（sema_expr AST_DEREF 分支：非指针已在其中诊断） */
+  value_t *base = sema_expr(sema, &n->operand, scope);
+  bool bad = value_is_error(sema->vm, base) ||
+             value_is_type(base, TYPE_KIND_VOID);
+  const type_t *bt = bad ? NULL : value_type(base);
+  const type_t *ft = bad ? NULL : ptr_type_base(bt);
+  if (!bad && !ft) {
+    char tn[64];
+    sema_type_name(bt, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "invalid assignment target: cannot dereference a value of "
+               "type %s (expected a pointer)",
+               tn);
+    bad = true;
+  }
+
+  /* 被指向类型含 const → 不可写（ref 可写性取决于被指向是否 const） */
+  if (!bad && type_has_const(ft)) {
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign through pointer to const value");
+    return;
+  }
+
+  /* 右值求值（匿名构造注入：被指向类型已知） */
+  bool rhs_nil = as->value->kind == AST_NIL;
+  value_t *rhs = NULL;
+  if (!rhs_nil) {
+    if (ft && sema->anon_ct_depth < 16)
+      sema->anon_ct[sema->anon_ct_depth++] = ft;
+    rhs = sema_expr(sema, &as->value, scope);
+    if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+  }
+  if (bad) return; /* 已有诊断，右值已求值（错误恢复） */
+  if (value_is_error(sema->vm, rhs) ||
+      value_is_type(rhs, TYPE_KIND_VOID))
+    return;
+
+  if (rhs_nil) {
+    if (!ft || ft->kind != TYPE_KIND_OPTION) {
+      char tn[64];
+      sema_type_name(ft, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, as->value),
+                 "cannot assign nil through pointer (pointee type %s is not "
+                 "optional)",
+                 tn);
+      return;
+    }
+    /* 改写为匿名构造 .{nil}（与 shadow_assign_member 同款：复用 struct
+       构造 nil 字段路径，compiler 发 PUSH_OPT_NONE → PTR_SET 隐式转换
+       ?T→?T 身份短路）。 */
+    ast_node_t *nil_node = ast_nil_new(sema->arena, as->value->tok_begin,
+                                       as->value->tok_end);
+    ast_node_t *ctor = ast_construct_new(sema->arena, as->value->tok_begin,
+                                         as->value->tok_end);
+    if (nil_node && ctor) {
+      ((ast_construct_t *)ctor)->type        = NULL;
+      ((ast_construct_t *)ctor)->fields      = nil_node;
+      ((ast_construct_t *)ctor)->fields_last = nil_node;
+      if (sema->anon_ct_depth < 16)
+        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      sema_expr(sema, &as->value, scope);
+      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    }
+    return;
+  }
+
+  if (token_is(as->op, "=")) {
+    /* 简单赋值：value_assign 校验被指向类型可赋值性 */
+    value_t *dst = value_make_shadow(sema->vm, ft);
+    if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
+      char tn[64], rn[64];
+      sema_type_name(ft, tn, sizeof(tn));
+      sema_type_name(value_type(rhs), rn, sizeof(rn));
+      diag_error(sema->diag, sema_loc(sema, as->value),
+                 "cannot assign %s through pointer to %s", rn, tn);
+    }
+    return;
+  }
+
+  /* 复合赋值 r.* op= v → r.* = r.* op v（shadow 走 vtable 类型协商，
+     结果须能赋回被指向类型） */
+  value_t *(*op)(vm_t *, value_t *, value_t *) = compound_binop(as->op);
+  if (!op) {
+    char ob[16];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "unsupported compound assignment operator '%s'", ob);
+    return;
+  }
+  value_t *lhs_field = value_make_shadow(sema->vm, ft);
+  value_t *result = op(sema->vm, lhs_field, rhs);
+  if (value_is_error(sema->vm, result)) {
+    char ob[16], tn[64], rn[64];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(rhs), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "type mismatch: cannot apply '%s' to %s and %s", ob, tn, rn);
+    return;
+  }
+  if (value_is_error(sema->vm, value_assign(sema->vm, lhs_field, result))) {
+    char tn[64], rn[64];
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(result), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign %s through pointer to %s", rn, tn);
   }
 }
 

@@ -74,6 +74,19 @@ void parse_error(parser_t *p, const char *fmt, ...);
 /** 取 token 的零拷贝文本切片。 */
 strslice_t token_strslice(const token_t *t);
 
+/* ---- 类型标注解析 ---- */
+
+/**
+ * 解析类型标注（类型即表达式），并处理前导作用域标注。
+ * 作用域标注：'<a,b,c> type（' 前导，lexer 仅在 ' 后紧跟 '<' 时产出
+ * ' SYMBOL token，故 check_symbol(p, "'") 即标注起点；否则字符字面量
+ * 是 CHARACTER token，天然区分）。
+ * 命中标注 → 解析 '<a,b,c>' 集合并包裹被标注类型（递归处理嵌套标注）；
+ * 未命中 → 直接 parse_expr_prec(p, 1)（不消费赋值/逗号/右括号）。
+ * 用于 var 定义/参数/返回类型的类型标注处（m3-design §5）。
+ */
+ast_node_t *parse_scope_annotated_type(parser_t *p);
+
 /* ---- 字面量解析工具 ---- */
 
 /**

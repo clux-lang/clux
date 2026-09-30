@@ -10,6 +10,7 @@
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_ptr.h"
 #include "vm/str_pool.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
@@ -428,6 +429,12 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
         type_enum_set_underlying(vm, open, sub);  /* enum：设底层类型 */
         return NULL;
     }
+    if (open && (open->kind == TYPE_KIND_PTR_OWN ||
+                 open->kind == TYPE_KIND_PTR_REF ||
+                 open->kind == TYPE_KIND_PTR_FATAL)) {
+        type_ptr_set_base(vm, open, sub);  /* 指针：设被指向类型 T */
+        return NULL;
+    }
     type_qual_set_sub(vm, open, sub);
     return NULL;
 }
@@ -635,6 +642,143 @@ static value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "exec: union member expects an open union type on top");
     type_union_add_member(vm, u, name);
     return NULL;
+}
+
+/* ---- 指针值级指令（M3，m3-design §3/§8.1/§8.2） ----
+   类型构造（PUSH_PTR → SET_TYPE → SEAL）见 op_set_type PTR 分支。
+   NEW：堆分配构造（new T{...}）；PTR_GET/PTR_SET：解引用 GET/SET 严格分离
+   （r.* / r.* = v）；ADDR：后置取址（x.&）；MOVE/CLONE：所有权原语。
+   Step A 静默：new 堆块暂不释放（dispose=no-op），值 = 裸指针。 */
+
+/* PUSH_PTR <kind>：分配空 ptr type（开放，base_type=NULL，不入池）+ 压其
+ * type value（type_ptr_push 压栈；对应两遍构造声明阶段的起点）。
+ * kind = 所有权修饰（TYPE_KIND_PTR_OWN/REF/FATAL，u8 立即数）。 */
+static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t kind = bcode_read_u8(bc, pc);
+    type_ptr_push(vm, (type_kind_t)kind);
+    return NULL;
+}
+
+/* NEW（无操作数）：**堆分配构造**（new T{...}，m3-design §8.1）。
+ * 栈布局 [type_value, member]（member 在顶）：先弹类型位，再弹 1 个成员值。
+ * 按 T 的类型构造堆块（分配 size = T->size 的裸数据块，blit 成员值）：
+ *   - 标量等无字段类型（new i32{123}）：member 值 implicit_cast → T 后拷贝
+ *   - 复合类型（struct/tuple/array/option/union/cunion）：member 值是嵌套
+ *     CONSTRUCT 已构造好的 T 值 → 整块 memcpy（data 全平凡；struct 字段/
+ *     tuple 元素已是构造产物）
+ * 成员值类型与 T 同构时身份直接收下（sema 已校验字段）；不同类型 implicit_cast。
+ * 返回 own *T 类型 value（data = 裸指针，Step A 不追踪——new 堆块暂不释放）。 */
+static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *member = exec_stack_pop(vm);   /* 栈顶：成员值 */
+    value_t *type_v = exec_stack_pop(vm);   /* 栈底：类型位 */
+    const type_t *t = (type_v && value_type(type_v) == vm->type_type)
+                          ? value_as(type_v, const type_t *) : NULL;
+    if (!t)
+        return value_make_error(vm, "new: missing type slot");
+    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_OWN, t);
+    if (!pt)
+        return value_make_error(vm, "new: cannot make owner pointer type");
+    if (value_is_shadow(member))
+        return value_make_shadow(vm, pt);
+    /* 成员值 → T（同类型身份短路；字面量 i32 → i64 等宽度提升） */
+    value_t *casted = value_implicit_cast(vm, member, t);
+    if (value_is_error(vm, casted)) return casted;
+    void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
+    memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
+    /* Step A 静默：new 堆块暂不释放（所有权销毁规则 Step B 叠加），从泄露
+       追踪链表摘除避免误报——进程退出时 OS 回收，未来 Step B 经
+       allocator_free 仍可安全释放（untrack 保留 header）。 */
+    allocator_untrack(vm->alloc, &heap);
+    void *data = value_alloc_data_copy(vm->alloc, pt, &heap);  /* 裸指针值 */
+    return value_make(vm, pt, data);
+}
+
+/* PTR_GET（无操作数）：**解引用取值**（r.*，m3-design §8.2）。
+ * 弹指针值 → 取被指向 T 值副本（data 指向堆块，借用到 T 值；零拷贝——
+ * 引用的是堆块业务内存，生命周期 = new 堆块，Step A 不追踪释放）。
+ * shadow → 退化 base 的 shadow 引用。 */
+static value_t *op_ptr_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *pv = exec_stack_pop(vm);
+    const type_t *pt = pv ? value_type(pv) : NULL;
+    const type_t *base = ptr_type_base(pt);
+    if (!base)
+        return value_make_error(vm,
+            "exec: ptr get expects a pointer value on stack");
+    if (value_is_shadow(pv))
+        return value_make_shadow(vm, base);
+    void **slot = (void **)value_data(pv);
+    if (!slot || !*slot)
+        return value_make_error(vm,
+            "exec: ptr get on null pointer (dereference of uninitialized pointer)");
+    return value_make_borrowed(vm, base, *slot);
+}
+
+/* PTR_SET（无操作数）：**解引用写入**（r.* = v，m3-design §8.2）。
+ * 栈布局 [ptr, val]（val 在顶）：弹 val、ptr → val implicit_cast → T →
+ * 拷贝到指针指向的 T 值（覆盖堆块）→ 压回指针（表达式值，供链式复用）。
+ * shadow → 返回指针 shadow（sema 只做类型检查）。 */
+static value_t *op_ptr_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *val = exec_stack_pop(vm);
+    value_t *pv  = exec_stack_pop(vm);
+    const type_t *pt = pv ? value_type(pv) : NULL;
+    const type_t *base = ptr_type_base(pt);
+    if (!base)
+        return value_make_error(vm,
+            "exec: ptr set expects a pointer value on stack");
+    if (value_is_shadow(pv))
+        return pv;
+    void **slot = (void **)value_data(pv);
+    if (!slot || !*slot)
+        return value_make_error(vm,
+            "exec: ptr set on null pointer (write through uninitialized pointer)");
+    value_t *casted = value_implicit_cast(vm, val, base);
+    if (value_is_error(vm, casted)) return casted;
+    memcpy(*slot, value_data(casted), base->size);  /* data 全平凡：覆盖 T */
+    return pv;
+}
+
+/* ADDR（无操作数）：**后置取地址**（x.&，m3-design §8.2）。
+ * 弹值 → 返回 own *T 指针（data = 指向值 data 块的裸指针）。
+ * shadow → 指针 shadow（sema 只做类型检查）。 */
+static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    const type_t *t = v ? value_type(v) : NULL;
+    if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR)
+        return value_make_error(vm, "addr: cannot take address of void/error value");
+    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_OWN, t);
+    if (!pt)
+        return value_make_error(vm, "addr: cannot make owner pointer type");
+    if (value_is_shadow(v))
+        return value_make_shadow(vm, pt);
+    void *ptr = value_data(v);                /* 指向值 data 块 */
+    void *data = value_alloc_data_copy(vm->alloc, pt, &ptr);
+    return value_make(vm, pt, data);
+}
+
+/* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
+ * 弹值 → 压同类型值（Step A 静默：值平凡传递，所有权检查 Step B 叠加）。
+ * shadow → 同类型 shadow。 */
+static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (value_is_shadow(v))
+        return value_make_shadow(vm, value_type(v));
+    return value_clone(vm, v);  /* Step A：clone 语义 = 平凡传递 */
+}
+
+/* CLONE（无操作数）：**深拷贝**（clone(x)，m3-design §7）。
+ * 弹值 → value_clone 分派深拷贝（vtable->clone）→ 压同类型新值。
+ * shadow → 同类型 shadow。 */
+static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (value_is_shadow(v))
+        return value_make_shadow(vm, value_type(v));
+    return value_clone(vm, v);
 }
 
 /* IS_TAG <tag>：判 tag 专用指令（`x is Member`，编译期已解析 member → tag
@@ -1310,6 +1454,13 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_OPT_NONE]   = op_push_opt_none,
     [BCODE_UNWRAP]          = op_unwrap,
     [BCODE_OPT_IS_NONE]     = op_opt_is_none,
+    [BCODE_PUSH_PTR]        = op_push_ptr,
+    [BCODE_NEW]             = op_new,
+    [BCODE_PTR_GET]         = op_ptr_get,
+    [BCODE_PTR_SET]         = op_ptr_set,
+    [BCODE_ADDR]            = op_addr,
+    [BCODE_MOVE]            = op_move,
+    [BCODE_CLONE]           = op_clone,
 };
 
 /* ================================================================ */

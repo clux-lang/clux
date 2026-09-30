@@ -21,6 +21,7 @@ typedef struct _alloc_header_t {
   class_t *clazz;
   size_t count;
   bool owns_clazz; /* true if clazz was heap-allocated by allocator_new_ex */
+  bool tracked;    /* false = untracked (leak list exempt, free skips bookkeeping) */
   struct _alloc_header_t *prev; /* doubly-linked list: previous allocation */
   struct _alloc_header_t *next; /* doubly-linked list: next allocation */
 } alloc_header_t;
@@ -112,6 +113,7 @@ void *allocator_new(allocator_t *allocator, class_t *clazz, size_t count) {
   header->clazz = clazz;
   header->count = count;
   header->owns_clazz = false;
+  header->tracked = true;
   list_insert(allocator, header);
   allocator->live_count++;
 
@@ -153,9 +155,13 @@ void allocator_free(allocator_t *allocator, void **data) {
   class_t *clazz = header->clazz;
   bool owns_clazz = header->owns_clazz;
 
-  /* Remove from live-allocation list before freeing */
-  list_remove(allocator, header);
-  allocator->live_count--;
+  /* Remove from live-allocation list before freeing. Untracked objects
+     were detached via allocator_untrack — skip the live-list bookkeeping
+     (their header still carries the class for dispose/free). */
+  if (header->tracked) {
+    list_remove(allocator, header);
+    allocator->live_count--;
+  }
 
   /* Call dispose before freeing memory */
   if (clazz->dispose_fn) {
@@ -171,6 +177,15 @@ void allocator_free(allocator_t *allocator, void **data) {
   }
 
   *data = NULL;
+}
+
+void allocator_untrack(allocator_t *allocator, void **data) {
+  if (!allocator || !data || !*data) return;
+  alloc_header_t *header = header_of(*data);
+  if (!header->tracked) return; /* already untracked */
+  list_remove(allocator, header);
+  allocator->live_count--;
+  header->tracked = false;
 }
 
 /* ---- Move / clone ---- */

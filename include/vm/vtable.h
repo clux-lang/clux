@@ -100,6 +100,13 @@ extern const vtable_t VTABLE_OPTION;
 extern const vtable_t VTABLE_ENUM;
 extern const vtable_t VTABLE_UNION;
 
+/* ---- M3 指针与 opaque 类型 vtable（type_ptr.c / type_opaque.c） ---- */
+
+extern const vtable_t VTABLE_PTR_OWN;
+extern const vtable_t VTABLE_PTR_REF;
+extern const vtable_t VTABLE_PTR_FATAL;
+extern const vtable_t VTABLE_OPAQUE;
+
 #ifdef __cplusplus
 }
 #endif

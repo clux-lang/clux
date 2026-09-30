@@ -67,14 +67,15 @@ static class_t lexer_class = {
 /* ---- Internal: keyword table (M1 language keywords) ---- */
 
 static const char *const g_keywords[] = {
-    "alignof", "as",     "bool",    "break",    "comptime", "const",
-    "continue", "cunion", "default", "do",      "else",     "enum",
-    "extends", "f32",    "f64",     "false",    "for",      "func",
-    "i16",     "i32",    "i64",     "i8",       "if",       "is",
-    "nil",     "return", "sizeof",  "str",      "struct",   "switch",
-    "true",    "type",   "typeof",  "u16",      "u32",      "u64",
-    "u8",      "undefined", "union", "var",     "void",     "volatile",
-    "while",
+    "alignof", "as",     "bool",    "break",    "clone",    "comptime",
+    "const",   "continue", "cunion", "default", "do",      "else",
+    "enum",    "extends", "f32",    "f64",     "false",    "fatal",
+    "for",     "func",   "i16",     "i32",     "i64",      "i8",
+    "if",      "is",     "move",    "new",     "nil",      "own",
+    "opaque",  "ref",    "return",  "sizeof",  "str",      "struct",
+    "switch",  "true",   "type",    "typeof",  "u16",      "u32",
+    "u64",     "u8",     "undefined", "union", "var",     "void",
+    "volatile", "while",
 };
 
 /* ---- Internal: character classes ---- */
@@ -577,6 +578,13 @@ static token_t *lexer_read_token(lexer_t *lexer) {
   case '"':
     return lexer_read_string(lexer, begin);
   case '\'':
+    /* scope annotation `'<a,b,c>`: a quote immediately followed by '<' is
+     * the scope-annotation prefix, not a character literal. */
+    if (istream_peek_cp(lexer->stream) == '<') {
+      istream_read_cp(lexer->stream); /* consume ' */
+      stream_pos_t end_pos = istream_tell(lexer->stream);
+      return lexer_make_token(lexer, TOKEN_TYPE_SYMBOL, begin, end_pos);
+    }
     return lexer_read_char(lexer, begin);
   case '/':
     return lexer_read_slash(lexer, begin);

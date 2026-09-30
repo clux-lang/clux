@@ -21,6 +21,8 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_new.h"
+#include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
@@ -29,6 +31,7 @@
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
 #include "parser/lexer.h"
+#include "parser/parse_utils.h"
 #include "sema/symbol.h"
 #include "vm/function.h"
 #include "vm/type.h"
@@ -36,6 +39,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_func.h"
+#include "vm/type_ptr.h"
 #include "vm/value.h"
 
 /* ===========================================================================
@@ -420,10 +424,32 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
     }
+    case AST_PTR: {
+        /* 指针类型表达式 own *T / ref *T / fatal *T（类型即表达式，m3-design
+           §3）：递归求值被指向类型 T → 按所有权修饰 type_ptr_intern（三种
+           所有权是独立 intern 实例）→ 返回 type value。与 AST_ARRAY 同构。 */
+        ast_ptr_t *n = (ast_ptr_t *)node;
+        value_t *bt = ctfe_eval(ctx, n->base_type);
+        if (value_is_error(vm, bt)) return bt;
+        if (!value_is_type(bt, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: pointer base must be a type");
+        const type_t *base = value_as(bt, const type_t *);
+        type_kind_t kind;
+        strslice_t own = token_strslice(n->ownership);
+        if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
+            kind = TYPE_KIND_PTR_OWN;
+        } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
+            kind = TYPE_KIND_PTR_REF;
+        } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
+            kind = TYPE_KIND_PTR_FATAL;
+        } else {
+            return ctfe_err(ctx, "ctfe: unsupported pointer ownership");
+        }
+        const type_t *pt = type_ptr_intern(vm, kind, base);
+        if (!pt) return ctfe_err(ctx, "ctfe: failed to construct pointer type");
+        return type_as_value(vm, pt);
+    }
     case AST_FUNC_TYPE: {
-        /* 函数签名类型表达式 func(ps...)->ret（类型即表达式）：递归求值
-           参数类型 + 返回类型，type_func_sig 一次性构造（内部去重 intern），
-           返回 type value。 */
         ast_func_type_t *n = (ast_func_type_t *)node;
         size_t np = ctfe_count_siblings(n->params);
         const type_t *params_arr[np > 0 ? np : 1];

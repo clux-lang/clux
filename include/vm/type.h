@@ -36,6 +36,11 @@ typedef enum type_kind_t {
     TYPE_KIND_ENUM,
     TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
+    /* ---- M3 指针与所有权段（m3-design §3）---- */
+    TYPE_KIND_PTR_OWN,   /* own *T：独占所有权指针（作用域退出自动销毁，Step B） */
+    TYPE_KIND_PTR_REF,   /* ref *T：借用指针（无所有权，借用检查 Step B） */
+    TYPE_KIND_PTR_FATAL, /* fatal *T：临时指针（表达式结束未被 own 接收 = 编译错，Step B） */
+    TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
 
@@ -124,6 +129,28 @@ typedef struct enum_variant_t {
     strslice_t name;   /* variant 名（seal 时从 strtable/源拷贝，vm 拥有） */
     int64_t    value;  /* 底层整数值（按 underlying->size 截断存储） */
 } enum_variant_t;
+
+/**
+ * ptr_type_t: 指针类型（type_t 的扩展，m3-design §3）
+ *
+ * 持 base_type 指针指向被指向类型 T。C 内存映射：指针值 = 裸指针
+ * （size = sizeof(void*)，align = 指针宽），无 RC 控制块——运行期零成本，
+ * 逃逸检查全编译期（Step A 静默，Step B 叠加）。
+ *
+ * 三种所有权修饰：own *T（独占，作用域退出自动销毁——Step B 递归
+ * dispose）、ref *T（借用，无所有权）、fatal *T（临时，表达式结束未被
+ * own 接收 = 编译错误——Step A 静默）。同一 base_type 的三种指针是
+ * 三个独立 intern 实例（kind 区分所有权），own→ref 隐式（身份拷贝）
+ * 由 vtable implicit_cast 提供。
+ *
+ * 指针类型的 size/align 恒定（指针宽），密封不依赖 base_type 布局——
+ * hoist 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 base，不递归），
+ * 与 func 签名同族。
+ */
+typedef struct ptr_type_t {
+    type_t       base;
+    const type_t *base_type;  /* 被指向类型 T（引用，不拥有） */
+} ptr_type_t;
 
 typedef struct enum_type_t {
     type_t          base;
@@ -373,7 +400,9 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
    内建类型固定 id 0..(TYPE_ID_BUILTIN_COUNT-1)（vm_register_builtin_types
    按序登记，error/interrupt 紧随其后）；程序类型 id 由 sema 分配，从
    TYPE_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
-#define TYPE_ID_BUILTIN_COUNT 17u
+/* opaque 内建 id 17（vm_init_builtins 创建，vm_register_builtin_types 登记
+   进 global scope，LOAD_TYPE <17> 直接可查；sema_type_register 跳过登记）。 */
+#define TYPE_ID_BUILTIN_COUNT 18u
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**
@@ -407,6 +436,14 @@ bool type_set_name(vm_t *vm, const type_t *t, strslice_t name);
  * - 非数值类型（str/void/type/func/error）或类型不兼容返回 NULL
  */
 const type_t *type_promote(const vm_t *vm, const type_t *a, const type_t *b);
+
+/* 指针类型构造 API（type_ptr_push / type_ptr_set_base / type_ptr_seal /
+ * type_ptr_intern）与访问器（ptr_type_base / ptr_type_is_sealed）见
+ * vm/type_ptr.h。指针与 func 签名同族：开放构造（PUSH_PTR → DEFINE_TYPE
+ * → LOAD_TYPE → SET_TYPE 设 base → SEAL）获得向前声明能力；base 是引用
+ * 依赖（LOAD_TYPE 拉回，不递归）；sema 侧 type_ptr_intern 一次性快捷。
+ * opaque 是内建单例类型（vm->type_opaque，无开放构造），转换规则见
+ * vm/type_opaque.h。 */
 
 /* 函数签名类型构造 API（func_type_push / func_type_add_param /
  * func_type_set_return / func_type_set_variadic / func_type_seal /

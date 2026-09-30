@@ -2,6 +2,8 @@
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
+#include "vm/type_ptr.h"
+#include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
@@ -22,6 +24,8 @@
 #include "parser/ast_int_lit.h"
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_scope_annot.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
@@ -29,6 +33,7 @@
 #include "parser/ast_alignof.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_typeof.h"
+#include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
 #include <string.h>
@@ -240,8 +245,18 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       }
       break;
     }
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_REF:
+    case TYPE_KIND_PTR_FATAL: {
+      /* 指针类型：被指向类型 T 也是程序类型（引用依赖——seal 不依赖
+         base 布局，但 hoist 中 LOAD_TYPE 拉回 base 需要其已登记。
+         PTR_* 段 < COUNT 自动登记；此处只递归登记 base 依赖。 */
+      const type_t *base = ptr_type_base(t);
+      if (base) sema_type_register(sema, base);
+      break;
+    }
     default:
-      break; /* 标量/str/bool/type/error：无结构依赖 */
+      break; /* 标量/str/bool/type/error/opaque：无结构依赖 */
   }
 }
 
@@ -264,11 +279,12 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
     case TYPE_KIND_TYPE:
     case TYPE_KIND_ERROR:
     case TYPE_KIND_INTERRUPT:
-      return NULL; /* 内建标量/哨兵 */
+    case TYPE_KIND_OPAQUE:
+      return NULL; /* 内建标量/哨兵（opaque 是内建单例，id 17 已固定绑定） */
     case TYPE_KIND_FUNC:
       break; /* 用户函数签名类型：登记（提升进 hoist 区） */
     default:
-      break; /* 复合段（CONST..CUNION）：登记 */
+      break; /* 复合段（CONST..CUNION）+ 指针段（PTR_*）：登记 */
   }
 
   /* 按 type_t 指针去重：同一 intern 实例只登记一次 */
@@ -452,6 +468,35 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       diag_error(sema->diag, sema_loc(sema, type_expr),
                  "sizeof/alignof is a value, not a type");
       return NULL;
+    }
+    case AST_PTR: {
+      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。按所有权
+         修饰 token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
+         递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
+      ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
+      type_kind_t kind;
+      strslice_t own = token_strslice(ptr->ownership);
+      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
+        kind = TYPE_KIND_PTR_OWN;
+      } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
+        kind = TYPE_KIND_PTR_REF;
+      } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
+        kind = TYPE_KIND_PTR_FATAL;
+      } else {
+        diag_error(sema->diag, sema_loc(sema, type_expr),
+                   "unsupported pointer ownership");
+        return NULL;
+      }
+      const type_t *base = resolve_type_expr(sema, ptr->base_type);
+      if (!base) return NULL;
+      return type_ptr_intern(sema->vm, kind, base);
+    }
+    case AST_SCOPE_ANNOT: {
+      /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
+         是绑定在 value 上的位置信息（Step A 静默：只解析存储，不检查）。
+         解析直接穿透到被标注类型。 */
+      ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
+      return resolve_type_expr(sema, sa->sub);
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */

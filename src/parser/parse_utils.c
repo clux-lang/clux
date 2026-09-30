@@ -1,5 +1,8 @@
 #include "parser/parse_utils.h"
 #include "core/panic.h"
+#include "parser/ast_error.h"
+#include "parser/ast_scope_annot.h"
+#include "parser/parse_expr.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -260,4 +263,107 @@ size_t utf8_encode(uint32_t cp, char *out) {
     out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
     out[3] = (char)(0x80 | (cp & 0x3F));
     return 4;
+}
+
+
+/* ---- 类型标注解析 ---- */
+
+/**
+ * 解析作用域标注集合 '<a,b,c>'：' 已由调用点确认（lexer 产出 ' SYMBOL
+ * token），消费 '<' 后循环解析标识符（'*' 记 global），直到 '>'。
+ * 返回 names 数组（arena 分配）与 count；失败返回 NULL（诊断已报）。
+ */
+static strslice_t *parse_scope_annot_names(parser_t *p, size_t *out_count) {
+    if (!expect_symbol(p, "<")) {
+        parse_error(p, "expected '<' after scope annotation prefix");
+        return NULL;
+    }
+    skip_trivia(p);
+
+    if (check_symbol(p, ">")) {
+        parse_error(p, "scope annotation cannot be empty");
+        return NULL;
+    }
+
+    /* 两遍扫描：先数元素，再 arena 分配一次性数组（走 arena 通道，随
+     * AST 生命周期释放，无 allocator 追踪负担）。 */
+    size_t count = 0;
+    uint32_t save = p->pos;
+    for (;;) {
+        if (!check_kind(p, TOKEN_TYPE_IDENTIFIER) &&
+            !(check_symbol(p, "*") && count == 0)) {
+            /* '*' 仅在首元素合法（'<*>' = global；'<*,a>' 可化简等价 '<a>'） */
+            parse_error(p, "expected scope name in annotation");
+            return NULL;
+        }
+        count++;
+        advance(p);
+        skip_trivia(p);
+        if (check_symbol(p, ",")) {
+            advance(p);
+            skip_trivia(p);
+            continue;
+        }
+        if (check_symbol(p, ">")) break;
+        parse_error(p, "expected ',' or '>' in scope annotation");
+        return NULL;
+    }
+    p->pos = save;
+
+    strslice_t *names = (strslice_t *)arena_calloc(
+        p->arena, count, sizeof(strslice_t), ALIGNOF(max_align_t));
+    if (!names) return NULL;
+
+    for (size_t i = 0; i < count; i++) {
+        names[i] = token_strslice(cur_token(p));
+        advance(p);
+        skip_trivia(p);
+        if (i + 1 < count) {
+            advance(p); /* ',' */
+            skip_trivia(p);
+        }
+    }
+
+    if (!expect_symbol(p, ">")) {
+        parse_error(p, "expected '>' after scope annotation");
+        return NULL;
+    }
+    skip_trivia(p);
+
+    *out_count = count;
+    return names;
+}
+
+ast_node_t *parse_scope_annotated_type(parser_t *p) {
+    if (!check_symbol(p, "'")) {
+        return parse_expr_prec(p, 1);
+    }
+
+    uint32_t tb = p->pos;
+    advance(p); /* 消费 ' */
+    skip_trivia(p);
+
+    size_t count = 0;
+    strslice_t *names = parse_scope_annot_names(p, &count);
+    if (!names) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "invalid scope annotation");
+    }
+
+    /* 递归：'<a> '<b> i32 —— 标注可嵌套（消费层按序收敛） */
+    ast_node_t *sub = parse_scope_annotated_type(p);
+    if (!sub || sub->kind == AST_ERROR) {
+        if (!sub) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected type after scope annotation");
+        }
+        return sub;
+    }
+
+    ast_node_t *node = ast_scope_annot_new(p->arena, tb, p->pos);
+    if (!node) return NULL;
+    ((ast_scope_annot_t *)node)->names = names;
+    ((ast_scope_annot_t *)node)->count = count;
+    ((ast_scope_annot_t *)node)->sub   = sub;
+    return node;
 }

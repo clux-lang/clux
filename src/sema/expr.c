@@ -17,6 +17,10 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
+#include "parser/ast_move.h"
+#include "parser/ast_new.h"
+#include "parser/ast_deref.h"
+#include "parser/ast_addr.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_option.h"
 #include "parser/ast_string_lit.h"
@@ -42,6 +46,8 @@
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_ptr.h"
+#include "vm/type_opaque.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1025,6 +1031,459 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       }
       n->value = enum_type_variant(t, (size_t)idx)->value;
       return value_make_shadow(sema->vm, t);
+    }
+    case AST_NEW: {
+      /* new 表达式（m3-design §8.1）：new T{...}—— .T{...} 的堆分配形态，
+         返回 own *T。字段校验与 AST_CONSTRUCT 同构（完全显式：数量 + 逐
+         字段可赋值性）。匿名构造 new {...}：目标类型依上下文推断（与
+         AST_CONSTRUCT 匿名构造同款 anon_ct 注入）。Step A 静默：仅类型
+         检查，堆分配运行期行为（NEW 指令）由 compiler/vm 承载。 */
+      ast_new_t *n = (ast_new_t *)*node;
+      const type_t *t;
+      if (!n->type) {
+        /* 匿名构造：依上下文推断目标类型（anon_ct 栈顶） */
+        if (sema->anon_ct_depth == 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "anonymous 'new {...}' requires a type context "
+                     "(var declaration, assignment or struct field)");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        t = sema->anon_ct[sema->anon_ct_depth - 1];
+      } else {
+        t = sema_resolve_type_slot(sema, &n->type);
+        if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 字段数量与逐字段可赋值性校验（struct/tuple/array/union/cunion 同
+         AST_CONSTRUCT 语义；scalar 等无字段类型 = 1 个空字段集合）。Step A
+         只校验类型层面，字段求值走 sema_expr 递归（含嵌套 new/匿名构造）。 */
+      if (t->kind == TYPE_KIND_STRUCT) {
+        const struct_type_t *st = (const struct_type_t *)t;
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != st->field_count) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: expected %zu fields for %s, got %zu",
+                     st->field_count, tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        size_t cap = st->field_count;
+        ast_node_t **slot = cap ? (ast_node_t **)arena_calloc(
+            sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t)) : NULL;
+        if (cap && !slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        size_t anon = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_CONSTRUCT_FIELD) {
+            ast_construct_field_t *cf = (ast_construct_field_t *)f;
+            int fi = struct_type_find_field(t, cf->name);
+            if (fi < 0) {
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "struct '%.*s' has no field '%.*s'",
+                         (int)t->name.len, t->name.ptr,
+                         (int)cf->name.len, cf->name.ptr);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            slot[fi] = cf->value;
+          } else {
+            while (anon < cap && slot[anon]) anon++;
+            if (anon >= cap) {
+              char tn[64];
+              sema_type_name(t, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "new: too many fields for %s", tn);
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            }
+            slot[anon] = f;
+            anon++;
+          }
+        }
+        for (size_t i = 0; i < cap; i++) {
+          if (!slot[i]) {
+            char tn[64];
+            sema_type_name(t, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "new: missing value for field '%.*s' of %s",
+                       (int)st->fields[i].name.len, st->fields[i].name.ptr, tn);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+        }
+        for (size_t i = 0; i < cap; i++) {
+          ast_node_t *value = slot[i];
+          const type_t *ft = st->fields[i].type;
+          value_t *fv = NULL;
+          bool is_nil_field = value->kind == AST_NIL;
+          if (!is_nil_field) {
+            if (sema->anon_ct_depth < 16)
+              sema->anon_ct[sema->anon_ct_depth++] = ft;
+            fv = sema_expr(sema, &slot[i], scope);
+            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          }
+          if (is_nil_field) {
+            if (!ft || ft->kind != TYPE_KIND_OPTION) {
+              char tn[64];
+              sema_type_name(ft, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize struct field with nil (field "
+                         "type %s is not optional)", tn);
+            }
+          } else if (fv && !value_is_error(sema->vm, fv) &&
+                     !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+            value_t *dst = value_make_shadow(sema->vm, ft);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+              char tn[64], fn[64];
+              sema_type_name(ft, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize struct field '%.*s' with %s "
+                         "(field type %s)",
+                         (int)st->fields[i].name.len,
+                         st->fields[i].name.ptr, fn, tn);
+            }
+          }
+        }
+        ast_node_t *new_head = NULL, *new_last = NULL;
+        for (size_t i = 0; i < cap; i++)
+          ast_append(&new_head, &new_last, NULL, slot[i]);
+        n->fields      = new_head;
+        n->fields_last = new_last;
+      } else if (t->kind == TYPE_KIND_TUPLE) {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != tt->elem_count) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: expected %zu elements for %s, got %zu",
+                     tt->elem_count, tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t **slot = NULL;
+        if (tt->elem_count > 0) {
+          slot = (ast_node_t **)arena_calloc(
+              sema->arena, tt->elem_count, sizeof(ast_node_t *),
+              ALIGNOF(max_align_t));
+          if (!slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        size_t anon = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_CONSTRUCT_FIELD) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "new: named field is not allowed for tuple elements "
+                       "(tuple elements are anonymous, use positional values)");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          if (f->kind == AST_FILL) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "new: fill is not supported for tuple elements");
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          slot[anon++] = f;
+        }
+        for (size_t i = 0; i < tt->elem_count; i++) {
+          ast_node_t *value = slot[i];
+          const type_t *et = tt->elems[i].type;
+          value_t *fv = NULL;
+          bool is_nil_field = value->kind == AST_NIL;
+          if (!is_nil_field) {
+            if (sema->anon_ct_depth < 16)
+              sema->anon_ct[sema->anon_ct_depth++] = et;
+            fv = sema_expr(sema, &slot[i], scope);
+            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          }
+          if (is_nil_field) {
+            if (!et || et->kind != TYPE_KIND_OPTION) {
+              char tn[64];
+              sema_type_name(et, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize tuple element with nil (element "
+                         "type %s is not optional)", tn);
+            }
+          } else if (fv && !value_is_error(sema->vm, fv) &&
+                     !value_is_type(fv, TYPE_KIND_VOID) && et) {
+            value_t *dst = value_make_shadow(sema->vm, et);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+              char tn[64], fn[64];
+              sema_type_name(et, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize tuple element %zu with %s "
+                         "(element type %s)", i, fn, tn);
+            }
+          }
+        }
+        ast_node_t *new_head = NULL, *new_last = NULL;
+        for (size_t i = 0; i < tt->elem_count; i++)
+          ast_append(&new_head, &new_last, NULL, slot[i]);
+        n->fields      = new_head;
+        n->fields_last = new_last;
+      } else if (t->kind == TYPE_KIND_ARRAY) {
+        const type_t *et = array_type_elem(t);
+        size_t len = array_type_len(t);
+        size_t total = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_FILL) {
+            size_t cnt;
+            if (!sema_eval_array_bound(sema, &((ast_fill_t *)f)->count, &cnt))
+              return value_make_shadow(sema->vm, sema->vm->type_void);
+            total += cnt;
+          } else {
+            total += 1;
+          }
+        }
+        if (len != SIZE_MAX && total != len) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: expected %zu elements for %s, got %zu", len, tn,
+                     total);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        size_t idx = 0;
+        for (ast_node_t **link = &n->fields; *link; link = &(*link)->next) {
+          ast_node_t *f = *link;
+          value_t *fv = NULL;
+          bool is_nil_field = false;
+          if (f->kind == AST_FILL) {
+            ast_fill_t *fl = (ast_fill_t *)f;
+            is_nil_field = fl->value->kind == AST_NIL;
+            if (!is_nil_field)
+              fv = sema_expr(sema, &fl->value, scope);
+          } else if (f->kind == AST_NIL) {
+            is_nil_field = true;
+          } else {
+            fv = sema_expr(sema, link, scope);
+          }
+          if (is_nil_field) {
+            if (!et || et->kind != TYPE_KIND_OPTION) {
+              char tn[64];
+              sema_type_name(et, tn, sizeof tn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "cannot initialize array element with nil (element "
+                         "type %s is not optional)", tn);
+            }
+            idx += 1;
+            continue;
+          }
+          if (fv && !value_is_error(sema->vm, fv) &&
+              !value_is_type(fv, TYPE_KIND_VOID) && et) {
+            value_t *dst = value_make_shadow(sema->vm, et);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+              char tn[64], fn[64];
+              sema_type_name(et, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "cannot initialize array element %zu with %s (element "
+                         "type %s)", idx, fn, tn);
+            }
+          }
+          idx += 1;
+        }
+      } else if (t->kind == TYPE_KIND_OPTION) {
+        /* new ?T{...}：字段语义与 AST_CONSTRUCT 一致——非 nil 字段值须
+           匹配 inner（D1 提升），nil 字段合法。Step A 静默。 */
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: optional constructor expects exactly 1 field, "
+                     "got %zu", nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t *f = n->fields;
+        if (f && f->kind != AST_NIL) {
+          value_t *fv = sema_expr(sema, &f, scope);
+          if (!value_is_error(sema->vm, fv) &&
+              !value_is_type(fv, TYPE_KIND_VOID)) {
+            const type_t *inner = type_option_inner(t);
+            const type_t *ft = value_type(fv);
+            if (ft != t && ft != inner) {
+              char tn[64], fn[64];
+              sema_type_name(t, tn, sizeof tn);
+              sema_type_name(ft, fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "cannot initialize optional %s with %s", tn, fn);
+            }
+          }
+        }
+      } else if (t->kind == TYPE_KIND_UNION || t->kind == TYPE_KIND_CUNION) {
+        /* new union/cunion {...}：struct 同构单字段（字段名 = member 名）。
+           成员定位按名 + payload 值可赋值性校验。Step A 静默。 */
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: %s constructor expects exactly 1 field, got %zu",
+                     tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t *f = n->fields;
+        if (f->kind != AST_CONSTRUCT_FIELD) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "new: %s field must be named (use .Value{.i = v} form)",
+                     t->kind == TYPE_KIND_UNION ? "union" : "cunion");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_construct_field_t *cf = (ast_construct_field_t *)f;
+        const type_t *mt = NULL;
+        if (t->kind == TYPE_KIND_UNION) {
+          const int mi = union_type_find_member(t, cf->name);
+          if (mi < 0) {
+            char tn[64];
+            sema_type_name(t, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "union %s has no member '%.*s'",
+                       tn, (int)cf->name.len, cf->name.ptr);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          const union_member_t *m = union_type_member(t, (size_t)mi);
+          if (m && m->payload_type)
+            mt = m->payload_type;
+        } else {
+          const int mi = cunion_type_find_member(t, cf->name);
+          if (mi < 0) {
+            char tn[64];
+            sema_type_name(t, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "cunion %s has no member '%.*s'",
+                       tn, (int)cf->name.len, cf->name.ptr);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+          const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
+          if (m && m->type)
+            mt = m->type;
+        }
+        if (!mt) return value_make_shadow(sema->vm, sema->vm->type_void);
+        ast_node_t *value = cf->value;
+        value_t *fv = NULL;
+        bool is_nil_field = value->kind == AST_NIL;
+        if (!is_nil_field) {
+          if (sema->anon_ct_depth < 16)
+            sema->anon_ct[sema->anon_ct_depth++] = mt;
+          fv = sema_expr(sema, &value, scope);
+          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+        }
+        if (value_is_error(sema->vm, fv) ||
+            value_is_type(fv, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_nil_field) {
+          if (mt->kind != TYPE_KIND_OPTION) {
+            char tn[64];
+            sema_type_name(mt, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, value),
+                       "cannot initialize %s field with nil (field type %s "
+                       "is not optional)",
+                       t->kind == TYPE_KIND_UNION ? "union" : "cunion", tn);
+          }
+        } else {
+          value_t *dst = value_make_shadow(sema->vm, mt);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(mt, tn, sizeof tn);
+            sema_type_name(value_type(fv), fn, sizeof fn);
+            diag_error(sema->diag, sema_loc(sema, value),
+                       "cannot initialize %s field '%.*s' with %s (field "
+                       "type %s)",
+                       t->kind == TYPE_KIND_UNION ? "union" : "cunion",
+                       (int)cf->name.len, cf->name.ptr, fn, tn);
+          }
+        }
+      } else {
+        /* 标量等无字段类型：new i32{123} 是 1 个字段（与 .i32{123} 同构） */
+        size_t nfields = sema_count_siblings(n->fields);
+        if (nfields != 1) {
+          char tn[64];
+          sema_type_name(t, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: scalar constructor expects exactly 1 field for %s, "
+                     "got %zu", tn, nfields);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+        ast_node_t *f = n->fields;
+        value_t *fv = NULL;
+        bool is_nil_field = f->kind == AST_NIL;
+        if (!is_nil_field) {
+          if (sema->anon_ct_depth < 16)
+            sema->anon_ct[sema->anon_ct_depth++] = t;
+          fv = sema_expr(sema, &f, scope);
+          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+        }
+        if (value_is_error(sema->vm, fv) ||
+            value_is_type(fv, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_nil_field) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "new: cannot initialize scalar with nil");
+        } else if (fv && t) {
+          value_t *dst = value_make_shadow(sema->vm, t);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(t, tn, sizeof tn);
+            sema_type_name(value_type(fv), fn, sizeof fn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "new: cannot initialize %s with %s", tn, fn);
+          }
+        }
+      }
+
+      /* 返回 own *T 类型的 shadow（运行期 NEW 指令分配堆块） */
+      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, t);
+      if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
+      sema_type_register(sema, pt);
+      return value_make_shadow(sema->vm, pt);
+    }
+    case AST_DEREF: {
+      /* 后置解引用取值 r.*（m3-design §8.2）：由指针得值。操作数必须是
+         指针类型（own/ref/fatal）→ 返回被指向类型 T 的 shadow（运行期
+         PTR_GET 指令取 T 值副本）。 */
+      ast_deref_t *n = (ast_deref_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (value_is_error(sema->vm, operand) ||
+          value_is_type(operand, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *ot = value_type(operand);
+      const type_t *base = ptr_type_base(ot);
+      if (!base) {
+        char tn[64];
+        op_type_name(operand, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot dereference a value of type %s (expected a pointer)",
+                   tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      return value_make_shadow(sema->vm, base);
+    }
+    case AST_ADDR: {
+      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 own *T 类型的
+         shadow（运行期 ADDR 指令取地址）。Step A 静默：借用检查（ref 派生）
+         推迟到 Step B。 */
+      ast_addr_t *n = (ast_addr_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (value_is_error(sema->vm, operand) ||
+          value_is_type(operand, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      const type_t *t = value_type(operand);
+      if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot take address of value of unknown type");
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, t);
+      if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
+      sema_type_register(sema, pt);
+      return value_make_shadow(sema->vm, pt);
+    }
+    case AST_MOVE: {
+      /* 所有权原语 move(x) / clone(x)（m3-design §7）：操作数求值 → 返回
+         被操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
+         clone 深拷贝。fatal 所有权修饰的返回类型在 Step A 静默阶段与操作数
+         同类型 shadow（fatal 的编译期接管检查推迟到 Step B）。 */
+      ast_move_t *n = (ast_move_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (value_is_error(sema->vm, operand) ||
+          value_is_type(operand, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      return operand; /* shadow，类型 = 操作数类型 */
     }
     case AST_CONSTRUCT: {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验

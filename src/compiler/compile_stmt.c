@@ -18,6 +18,7 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
+#include "parser/ast_deref.h"
 #include "parser/lexer.h"
 
 #include <stdio.h>
@@ -75,6 +76,47 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
   bcode_write_op(c->bc, BCODE_INDEX_SET);   /* 弹 3 压 1 → [self] */
   st_push(c, -2);
   bcode_write_op(c->bc, BCODE_POP);         /* 语句丢弃 */
+  st_push(c, -1);
+}
+
+/* ---- 解引用左值赋值编译：r.* = v / r.* op= v（m3-design §8.2）----
+   PTR_GET/PTR_SET 严格分离：解引用写（SET）由本分支承载。
+   简单赋值：指针+value 压 2 → PTR_SET 弹 2 压 1（指针）→ POP。
+   复合赋值：指针压 1 → PUSH_VALUE dup self（保留引用，避免双求值）
+             → PTR_GET 弹 1 压 1（被指向 T 值副本）→ value 压 1
+             → op 弹 2 压 1 → PTR_SET 弹 2 压 1 → POP。
+   与 compile_assign_member 的 FIELD_GET/op/FIELD_SET 模式同构。 */
+static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
+  ast_deref_t *d = (ast_deref_t *)n->target;
+
+  if (token_is(n->op, "=")) {
+    compile_expr(c, d->operand);             /* 栈: [ptr] */
+    compile_expr(c, n->value);               /* 栈: [ptr, val] */
+    bcode_write_op(c->bc, BCODE_PTR_SET);    /* 弹 2 压 1（ptr） */
+    st_push(c, -1);
+    bcode_write_op(c->bc, BCODE_POP);        /* 赋值是语句：丢弃结果 */
+    st_push(c, -1);
+    return;
+  }
+
+  /* 复合赋值 r.* op= v：保留 ptr → PTR_GET → v → op → PTR_SET */
+  compile_expr(c, d->operand);               /* 栈: [ptr] */
+  bcode_write_op(c->bc, BCODE_PUSH_VALUE);
+  bcode_write_u32(c->bc, 0);                 /* dup ptr（peek 0=栈顶） */
+  st_push(c, 1);                             /* 栈: [ptr, ptr] */
+  bcode_write_op(c->bc, BCODE_PTR_GET);      /* 弹 1 压 1 → [ptr, old] */
+  st_push(c, 0);
+  compile_expr(c, n->value);                 /* 栈: [ptr, old, v] */
+  if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+  else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+  else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+  else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+  else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+  else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+  st_push(c, -1);                            /* 弹 2 压 1 → [ptr, new] */
+  bcode_write_op(c->bc, BCODE_PTR_SET);      /* 弹 2 压 1 → [ptr] */
+  st_push(c, -1);
+  bcode_write_op(c->bc, BCODE_POP);          /* 语句丢弃 */
   st_push(c, -1);
 }
 
@@ -302,6 +344,12 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     }
     if (n->target->kind == AST_MEMBER) {
       compile_assign_member(c, n);
+      break;
+    }
+    if (n->target->kind == AST_DEREF) {
+      /* 解引用左值赋值 r.* = v / r.* op= v（m3-design §8.2）：
+         PTR_GET/PTR_SET 严格分离，SET 由本分支承载。 */
+      compile_assign_deref(c, n);
       break;
     }
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */

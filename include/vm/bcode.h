@@ -170,6 +170,25 @@ typedef enum {
        无 tag——member 追加走 DEFINE_FIELD 协议，与 struct 同款） ---- */
     BCODE_PUSH_CUNION,      /* 分配空 cunion type（开放，members=NULL，不入池）
                                + 压其 type value */
+
+    /* ---- M3 指针与所有权（m3-design §3/§7/§8）----
+       指针类型与 func 签名同族：开放构造协议
+       PUSH_PTR → DEFINE_TYPE → LOAD_TYPE → SET_TYPE 设 base → SEAL。
+       base 是引用依赖（LOAD_TYPE 拉回，不递归）。
+       值级指令：NEW（堆分配构造）、PTR_GET/PTR_SET（解引用 GET/SET 严格
+       分离）、ADDR（后置取址）、MOVE/CLONE（所有权原语）。 */
+    BCODE_PUSH_PTR,         /* u8 kind：分配空 ptr type（开放，base=NULL，不入池）
+                               + 压其 type value。kind = 所有权修饰
+                               （TYPE_KIND_PTR_OWN/REF/FATAL） */
+    BCODE_NEW,              /* 弹类型位 + 弹 1 个成员值 → 按类型构造 own *T
+                               堆块（new T{...}；Step A 不追踪，值=裸指针） */
+    BCODE_PTR_GET,          /* 弹指针值 → 压被指向 T 值副本（r.* 解引用 GET） */
+    BCODE_PTR_SET,          /* 弹指针值 + val → 写回被指向 T（r.* = v 解引用
+                               SET；val 隐式转换 → T）→ 压回指针 */
+    BCODE_ADDR,             /* 弹值 → 压 own *T 指针（x.& 后置取址） */
+    BCODE_MOVE,             /* 弹值 → 压同类型值（move(x)，所有权转移，
+                               Step A 静默：值平凡传递） */
+    BCODE_CLONE,            /* 弹值 → 压深拷贝值（clone(x)，value_clone 分派） */
 } bcode_op_t;
 
 /* ================================================================ */

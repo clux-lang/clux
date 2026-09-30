@@ -40,14 +40,15 @@ static ast_node_t *parse_param(parser_t *p) {
     skip_trivia(p);
 
     /* 类型标注：:type（必须，类型即表达式，普通表达式解析）。
-       min_prec=1 限定：不消费逗号/右括号（调用者处理）。 */
+       min_prec=1 限定：不消费逗号/右括号（调用者处理）。
+       parse_scope_annotated_type 额外处理前导作用域标注（m3-design §5）。 */
     if (!expect_symbol(p, ":")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ':' and type after parameter name");
     }
     skip_trivia(p);
 
-    ast_node_t *type_expr = parse_expr_prec(p, 1);
+    ast_node_t *type_expr = parse_scope_annotated_type(p);
     if (!type_expr || type_expr->kind == AST_ERROR) {
         if (!type_expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -298,7 +299,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         }
         advance(p);
         skip_trivia(p);
-        ast_node_t *return_type = parse_unary(p);
+        ast_node_t *return_type = parse_scope_annotated_type(p);
         if (!return_type || return_type->kind == AST_ERROR) {
             if (!return_type) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -334,7 +335,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         }
         skip_trivia(p);
 
-        ast_node_t *return_expr = parse_expr_prec(p, 1);
+        ast_node_t *return_expr = parse_scope_annotated_type(p);
         if (!return_expr || return_expr->kind == AST_ERROR) {
             if (!return_expr) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -384,7 +385,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     }
     skip_trivia(p);
 
-    ast_node_t *return_expr = parse_expr_prec(p, 1);
+    ast_node_t *return_expr = parse_scope_annotated_type(p);
     if (!return_expr || return_expr->kind == AST_ERROR) {
         if (!return_expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

@@ -26,6 +26,11 @@
 #include "vm/type_struct.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_ptr.h"
+#include "parser/ast_new.h"
+#include "parser/ast_deref.h"
+#include "parser/ast_addr.h"
+#include "parser/ast_move.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -676,6 +681,66 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     bcode_write_op(c->bc, BCODE_FIELD_GET);
     bcode_write_str(c->bc, n->field);
     st_push(c, 0);                    /* 弹 1 压 1，净 0 */
+    break;
+  }
+  case AST_NEW: {
+    /* new T{...}（m3-design §8.1）：.T{...} 的堆分配形态 → own *T。
+       与 AST_CONSTRUCT 同构：先压类型位（compile_type_expr），再压 1 个
+       成员值（new 完全显式：sema 已校验字段数 == 1——标量 new i32{123}
+       是 1 字段；struct/tuple/array/option/union/cunion 是嵌套 CONSTRUCT
+       已构造好的 T 值，整块作为成员），NEW 指令弹 2 压 1。 */
+    ast_new_t *n = (ast_new_t *)node;
+    compile_type_expr(c, n->type);      /* 栈: [type_value] */
+    ast_node_t *f = n->fields;          /* 仅 1 个字段（sema 已校验） */
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((ast_construct_field_t *)f)->value;
+    if (f && f->kind == AST_NIL) {
+      /* nil 字段：字段须 ?T（sema 已校验）→ PUSH_OPT_NONE <field id> */
+      const type_t *t = c_resolve_type(c, n->type);
+      if (!t) { c_error(c, n->type, "unknown construct type"); return; }
+      if (t->kind != TYPE_KIND_OPTION) {
+        c_error(c, f, "compiler: new nil field requires an optional type");
+        return;
+      }
+      emit_push_opt_none(c, n->type);   /* 栈: [type_value, member] */
+    } else if (f) {
+      compile_expr(c, f);               /* 栈: [type_value, member] */
+    } else {
+      c_error(c, node, "compiler: new requires exactly 1 field");
+      return;
+    }
+    bcode_write_op(c->bc, BCODE_NEW);   /* 弹 2 压 1（own *T 指针） */
+    st_push(c, -1);
+    break;
+  }
+  case AST_DEREF: {
+    /* 后置解引用取值 r.*（m3-design §8.2）：operand（指针）→ PTR_GET
+       （弹指针 → 被指向 T 值借用引用，零拷贝）。 */
+    ast_deref_t *n = (ast_deref_t *)node;
+    compile_expr(c, n->operand);        /* 栈: [ptr] */
+    bcode_write_op(c->bc, BCODE_PTR_GET);
+    st_push(c, 0);                      /* 弹 1 压 1，净 0 */
+    break;
+  }
+  case AST_ADDR: {
+    /* 后置取地址 x.&（m3-design §8.2）：operand → ADDR（弹值 → own *T
+       指针）。 */
+    ast_addr_t *n = (ast_addr_t *)node;
+    compile_expr(c, n->operand);        /* 栈: [value] */
+    bcode_write_op(c->bc, BCODE_ADDR);
+    st_push(c, 0);                      /* 弹 1 压 1，净 0 */
+    break;
+  }
+  case AST_MOVE: {
+    /* 所有权原语 move(x)/clone(x)（m3-design §7）：operand → MOVE/CLONE
+       （弹值 → 同类型新值，Step A 静默）。op 为原语关键字 token。 */
+    ast_move_t *n = (ast_move_t *)node;
+    compile_expr(c, n->operand);        /* 栈: [value] */
+    if (n->op && token_is(n->op, "clone"))
+      bcode_write_op(c->bc, BCODE_CLONE);
+    else
+      bcode_write_op(c->bc, BCODE_MOVE);
+    st_push(c, 0);                      /* 弹 1 压 1，净 0 */
     break;
   }
   case AST_INDEX: {

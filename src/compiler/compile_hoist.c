@@ -8,6 +8,7 @@
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_ptr.h"
 
 #include <string.h>
 
@@ -33,6 +34,10 @@
  *       DEFINE_TYPE <id>
  *     - struct：PUSH_STRUCT（开放对象，fields=NULL）→ DEFINE_TYPE <id>
  *     - tuple：PUSH_TUPLE（开放对象，elems=NULL）→ DEFINE_TYPE <id>
+ *     - union：PUSH_UNION（开放对象，members=NULL）→ DEFINE_TYPE <id>
+ *     - cunion：PUSH_CUNION（开放对象，members=NULL）→ DEFINE_TYPE <id>
+ *     - 指针（own/ref/fatal *T）：PUSH_PTR <kind>（开放对象，base=NULL）→
+ *       DEFINE_TYPE <id>（引用依赖，不设 base）
  *     - 内建别名（防御分支）：LOAD_TYPE <内建 id> → DEFINE_TYPE <id>
  *
  *   pass 2（定义所有类型）：遍历全部程序类型，逐个 LOAD_TYPE <id> 拉回
@@ -49,6 +54,8 @@
  *     - const/volatile：LOAD_TYPE <id> 拉回开放对象 →（递归定义 sub）→
  *       LOAD_TYPE <sub id> → SET_TYPE（设 sub）→ SEAL（intern 创建即密封，
  *       拷贝 size/align；去重时重绑登记）
+ *     - 指针：LOAD_TYPE <id> 拉回开放对象 → LOAD_TYPE <base id>（引用依赖，
+ *       不递归）→ SET_TYPE（设 base）→ SEAL（size/align 恒为指针宽）
  *     - 内建别名：pass 1 已完成，跳过
  *
  * 依赖后序：sema 登记时父先入队、依赖递归登记在后（sema_type_register →
@@ -195,6 +202,17 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_REF:
+    case TYPE_KIND_PTR_FATAL:
+      /* PUSH_PTR <kind> 压开放指针类型（base_type=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设 base；base 是引用依赖，pass 2
+         LOAD_TYPE 拉回即可，无环——指针密封不依赖 base 布局） */
+      bcode_write_op(c->bc, BCODE_PUSH_PTR);
+      bcode_write_u8(c->bc, (uint8_t)st->type->kind);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
@@ -325,6 +343,24 @@ static void define_enum(compiler_t *c, const sema_type_t *st, uint8_t *done,
 
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
   (void)done; (void)count;
+}
+
+/* 指针定义（own/ref/fatal *T）：LOAD_TYPE <id> 拉回开放对象 → base 是引用
+ * 依赖（直接 LOAD_TYPE 拉回，不递归、不要求已密封）→ SET_TYPE（设 base）→
+ * SEAL（指针 size/align 恒定 = 指针宽，密封不依赖 base 布局；去重时按自身
+ * id 重绑登记）。指针可引用指针（own *own *T 递归），实例存在即可（pass 1
+ * 登记保证），天然放行指针自引用。 */
+static void define_ptr(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                       size_t count) {
+  const type_t *t = st->type;
+  const type_t *base = ptr_type_base(t);
+
+  emit_load_type(c, st->id);             /* 栈: [open_ptr_type] */
+  emit_ref_type(c, base);                /* 栈: [open, base] */
+  bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 base → 设进 open */
+  st_push(c, -1);
+  emit_seal(c);                          /* 封闭（去重时重绑登记） */
+  (void)done; (void)count; /* 指针归引用依赖：不递归，done 三态不参与 */
 }
 
 /* struct 定义：LOAD_TYPE <id> 拉回开放对象 → 逐字段：依赖字段类型先定义
@@ -515,6 +551,11 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_CUNION:
       define_cunion(c, st, done, count);
+      break;
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_REF:
+    case TYPE_KIND_PTR_FATAL:
+      define_ptr(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */
