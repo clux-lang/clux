@@ -1475,15 +1475,25 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     }
     case AST_MOVE: {
       /* 所有权原语 move(x) / clone(x)（m3-design §7）：操作数求值 → 返回
-         被操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
-         clone 深拷贝。fatal 所有权修饰的返回类型在 Step A 静默阶段与操作数
-         同类型 shadow（fatal 的编译期接管检查推迟到 Step B）。 */
+         操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
+         clone 深拷贝。指针操作数（own/ref/fatal）返回 fatal 所有权修饰类型
+         （将亡值，§3.3——运行期 MOVE/CLONE 指令产物即 fatal 类型）；
+         非指针原样返回操作数类型。 */
       ast_move_t *n = (ast_move_t *)*node;
       value_t *operand = sema_expr(sema, &n->operand, scope);
       if (value_is_error(sema->vm, operand) ||
           value_is_type(operand, TYPE_KIND_VOID))
         return value_make_shadow(sema->vm, sema->vm->type_void);
-      return operand; /* shadow，类型 = 操作数类型 */
+      const type_t *ot = value_type(operand);
+      const type_t *base = ptr_type_base(ot);
+      if (base) {
+        /* 指针操作数：产物为 fatal *T（MOVE/CLONE 指令已按此类型压栈） */
+        const type_t *fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
+        if (!fatal) return value_make_shadow(sema->vm, sema->vm->type_void);
+        sema_type_register(sema, fatal);
+        return value_make_shadow(sema->vm, fatal);
+      }
+      return operand; /* shadow，类型 = 操作数类型（非指针） */
     }
     case AST_CONSTRUCT: {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
@@ -2141,26 +2151,19 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     if (value_is_error(sema->vm, expr) ||
         value_is_type(expr, TYPE_KIND_VOID))
       return value_make_shadow(sema->vm, sema->vm->type_void);
-    vm_t *vm = sema->vm;
-    bool saved = vm->comptime;
-    vm->comptime = true;
-    ctfe_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.vm = vm;
-    ctx.sema = sema;
-    ctx.budget = 100000;
-    ctx.max_depth = 128;
-    value_t *ty = ctfe_eval(&ctx, b->rhs);
-    vm->comptime = saved;
-    if (!ty || value_is_error(vm, ty) ||
-        !value_is_type(ty, TYPE_KIND_TYPE)) {
+    /* rhs 是类型表达式：sema_resolve_type_slot 解析为真实类型并就地替换
+       为 AST_TYPE_REF（与 AST_ARRAY/AST_ENUM_REF 同构——运行期 compiler
+       的 compile_type_expr 命中 AST_TYPE_REF 发 LOAD_TYPE，保证 as 右侧
+       压入真实 type value；否则复合类型表达式如 own *i32 落默认分支发
+       PUSH_UNDEFINED，CAST 弹 undefined 崩溃）。 */
+    const type_t *target = sema_resolve_type_slot(sema, &b->rhs);
+    if (!target) {
       char tn[64];
       op_type_name(expr, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "cast target is not a type (operand is %s)", tn);
       return value_make_shadow(sema->vm, sema->vm->type_void);
     }
-    const type_t *target = value_as(ty, const type_t *);
     value_t *result = value_explicit_cast(sema->vm, expr, target);
     if (value_is_error(sema->vm, result)) {
       char tn[64], tt[64];

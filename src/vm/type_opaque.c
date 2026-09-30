@@ -1,4 +1,5 @@
 #include "vm/type_opaque.h"
+#include "vm/type_ptr.h"
 #include "vm/value.h"
 #include "vm/vm.h"
 
@@ -87,9 +88,17 @@ static value_t *opaque_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
 }
 
 static value_t *opaque_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    /* opaque → 任意指针显式（as，§8.4）由指针 vtable 提供（ptr_explicit_cast
-       检测源为 opaque）。此处仅同类型身份拷贝。 */
+    /* opaque → 任意指针显式（as，§8.4）。源是 opaque（vtable 分派按源
+       类型）——对称于 ptr_implicit_cast 的指针→opaque 分支。opaque data
+       存裸指针值，拷贝进指针值 target 槽（owns=false：从 opaque 恢复的
+       指针是借用，无 owns 信息，堆块归原始持有者）。 */
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    if (target && (target->kind == TYPE_KIND_PTR_OWN ||
+                   target->kind == TYPE_KIND_PTR_REF ||
+                   target->kind == TYPE_KIND_PTR_FATAL)) {
+        void *opq = *(void **)value_data(v);
+        return ptr_make_value(vm, target, opq, false);
+    }
     if (value_type(v) == target) {
         void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);

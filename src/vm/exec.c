@@ -648,7 +648,11 @@ static value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
    类型构造（PUSH_PTR → SET_TYPE → SEAL）见 op_set_type PTR 分支。
    NEW：堆分配构造（new T{...}）；PTR_GET/PTR_SET：解引用 GET/SET 严格分离
    （r.* / r.* = v）；ADDR：后置取址（x.&）；MOVE/CLONE：所有权原语。
-   Step A 静默：new 堆块暂不释放（dispose=no-op），值 = 裸指针。 */
+   指针值 data 布局 = ptr_value_t { void *ptr; bool owns; }（type_ptr.h）：
+     - NEW 产物：ptr = 堆块，owns = true（作用域退出时释放）
+     - ADDR 产物：ptr = 栈上值 data，owns = false（借用，不释放）
+   MOVE = 转移（O(1)，源清零 TDZ，产物 fatal）；CLONE = 深拷贝（own 分配
+   新堆块，产物 fatal；ref/借用复制指针值）。 */
 
 /* PUSH_PTR <kind>：分配空 ptr type（开放，base_type=NULL，不入池）+ 压其
  * type value（type_ptr_push 压栈；对应两遍构造声明阶段的起点）。
@@ -667,7 +671,8 @@ static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
  *     CONSTRUCT 已构造好的 T 值 → 整块 memcpy（data 全平凡；struct 字段/
  *     tuple 元素已是构造产物）
  * 成员值类型与 T 同构时身份直接收下（sema 已校验字段）；不同类型 implicit_cast。
- * 返回 own *T 类型 value（data = 裸指针，Step A 不追踪——new 堆块暂不释放）。 */
+ * 返回 own *T 类型 value（ptr_value_t{堆块, owns=true}——作用域退出时
+ * ptr_dispose 释放堆块，m3-design §3.1）。 */
 static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *member = exec_stack_pop(vm);   /* 栈顶：成员值 */
@@ -686,18 +691,12 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_error(vm, casted)) return casted;
     void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
     memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
-    /* Step A 静默：new 堆块暂不释放（所有权销毁规则 Step B 叠加），从泄露
-       追踪链表摘除避免误报——进程退出时 OS 回收，未来 Step B 经
-       allocator_free 仍可安全释放（untrack 保留 header）。 */
-    allocator_untrack(vm->alloc, &heap);
-    void *data = value_alloc_data_copy(vm->alloc, pt, &heap);  /* 裸指针值 */
-    return value_make(vm, pt, data);
+    return ptr_make_value(vm, pt, heap, true);    /* own *T：拥有堆块 */
 }
 
 /* PTR_GET（无操作数）：**解引用取值**（r.*，m3-design §8.2）。
- * 弹指针值 → 取被指向 T 值副本（data 指向堆块，借用到 T 值；零拷贝——
- * 引用的是堆块业务内存，生命周期 = new 堆块，Step A 不追踪释放）。
- * shadow → 退化 base 的 shadow 引用。 */
+ * 弹指针值 → 取被指向 T 值副本（data 指向 ptr 目标，借用到 T 值；零拷贝——
+ * 引用的是堆块/栈值业务内存，生命周期 = 持有者）。shadow → base 的 shadow。 */
 static value_t *op_ptr_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *pv = exec_stack_pop(vm);
@@ -708,16 +707,16 @@ static value_t *op_ptr_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
             "exec: ptr get expects a pointer value on stack");
     if (value_is_shadow(pv))
         return value_make_shadow(vm, base);
-    void **slot = (void **)value_data(pv);
-    if (!slot || !*slot)
+    void *target = ptr_value_target(pv);
+    if (!target)
         return value_make_error(vm,
             "exec: ptr get on null pointer (dereference of uninitialized pointer)");
-    return value_make_borrowed(vm, base, *slot);
+    return value_make_borrowed(vm, base, target);
 }
 
 /* PTR_SET（无操作数）：**解引用写入**（r.* = v，m3-design §8.2）。
  * 栈布局 [ptr, val]（val 在顶）：弹 val、ptr → val implicit_cast → T →
- * 拷贝到指针指向的 T 值（覆盖堆块）→ 压回指针（表达式值，供链式复用）。
+ * 拷贝到指针指向的 T 值（覆盖目标）→ 压回指针（表达式值，供链式复用）。
  * shadow → 返回指针 shadow（sema 只做类型检查）。 */
 static value_t *op_ptr_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
@@ -730,19 +729,19 @@ static value_t *op_ptr_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
             "exec: ptr set expects a pointer value on stack");
     if (value_is_shadow(pv))
         return pv;
-    void **slot = (void **)value_data(pv);
-    if (!slot || !*slot)
+    void *target = ptr_value_target(pv);
+    if (!target)
         return value_make_error(vm,
             "exec: ptr set on null pointer (write through uninitialized pointer)");
     value_t *casted = value_implicit_cast(vm, val, base);
     if (value_is_error(vm, casted)) return casted;
-    memcpy(*slot, value_data(casted), base->size);  /* data 全平凡：覆盖 T */
+    memcpy(target, value_data(casted), base->size);  /* data 全平凡：覆盖 T */
     return pv;
 }
 
 /* ADDR（无操作数）：**后置取地址**（x.&，m3-design §8.2）。
- * 弹值 → 返回 own *T 指针（data = 指向值 data 块的裸指针）。
- * shadow → 指针 shadow（sema 只做类型检查）。 */
+ * 弹值 → 返回 own *T 指针（ptr_value_t{指向值 data 块, owns=false}——
+ * 借用指向栈上值，dispose 不释放，防释放栈值）。shadow → 指针 shadow。 */
 static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
@@ -754,31 +753,66 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "addr: cannot make owner pointer type");
     if (value_is_shadow(v))
         return value_make_shadow(vm, pt);
-    void *ptr = value_data(v);                /* 指向值 data 块 */
-    void *data = value_alloc_data_copy(vm->alloc, pt, &ptr);
-    return value_make(vm, pt, data);
+    return ptr_make_value(vm, pt, value_data(v), false); /* 借用：不拥有 */
 }
 
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
- * 弹值 → 压同类型值（Step A 静默：值平凡传递，所有权检查 Step B 叠加）。
+ * 弹值 → 压 fatal 同类型值（转移，O(1) 零拷贝）：
+ *   - own 指针：新值接管裸指针与 owns，源 data 清零（TDZ——运行期兜底
+ *     防双释放；sema TDZ 检查 Step B 叠加）
+ *   - 其他（ref/借用/标量）：平凡复制（ref 是 copy 语义）
  * shadow → 同类型 shadow。 */
 static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
-    return value_clone(vm, v);  /* Step A：clone 语义 = 平凡传递 */
+    const type_t *t = value_type(v);
+    if (t->kind == TYPE_KIND_PTR_OWN || t->kind == TYPE_KIND_PTR_FATAL) {
+        /* 转移：新值接管目标 + owns，源清零（TDZ，运行期兜底防双释放） */
+        const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+        const type_t *fatal = (t->kind == TYPE_KIND_PTR_FATAL)
+                                  ? t
+                                  : type_ptr_intern(vm, TYPE_KIND_PTR_FATAL,
+                                                    ptr_type_base(t));
+        if (!fatal) return value_make_error(vm, "move: cannot make fatal pointer type");
+        value_t *nv = ptr_make_value(vm, fatal, pv->ptr, pv->owns);
+        ((ptr_value_t *)value_data(v))->ptr = NULL;
+        ((ptr_value_t *)value_data(v))->owns = false;
+        return nv;
+    }
+    return value_clone(vm, v);  /* 非指针 / ref：平凡复制 */
 }
 
 /* CLONE（无操作数）：**深拷贝**（clone(x)，m3-design §7）。
- * 弹值 → value_clone 分派深拷贝（vtable->clone）→ 压同类型新值。
+ * 弹值 → 压 fatal 同类型值（vtable->clone 分派）：
+ *   - own：深拷贝——分配新堆块，新指针独立（fatal 接管）
+ *   - ref/借用：复制指针值（指向同一处）
  * shadow → 同类型 shadow。 */
 static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
-    return value_clone(vm, v);
+    const type_t *t = value_type(v);
+    value_t *copied = value_clone(vm, v);
+    if (value_is_error(vm, copied)) return copied;
+    /* clone 产物是 fatal（将亡值，m3-design §3.3）——仅指针类（own 深拷贝
+       产物 / ref 复制产物）包一层 fatal 类型；非指针原样返回。 */
+    if (t->kind == TYPE_KIND_PTR_OWN || t->kind == TYPE_KIND_PTR_REF) {
+        const type_t *fatal = type_ptr_intern(vm, TYPE_KIND_PTR_FATAL,
+                                              ptr_type_base(t));
+        if (!fatal) return value_make_error(vm, "clone: cannot make fatal pointer type");
+        const ptr_value_t *pv = (const ptr_value_t *)value_data(copied);
+        value_t *nv = ptr_make_value(vm, fatal, pv->ptr, pv->owns);
+        /* 清零 copied（own 深拷贝产物 owns=true，持有新堆块）：fatal 已接管，
+           copied 若留在 scope owned 列表，销毁时与接管方双释放。转移手法与
+           op_move 一致。 */
+        ((ptr_value_t *)value_data(copied))->ptr = NULL;
+        ((ptr_value_t *)value_data(copied))->owns = false;
+        return nv;
+    }
+    return copied;
 }
 
 /* IS_TAG <tag>：判 tag 专用指令（`x is Member`，编译期已解析 member → tag

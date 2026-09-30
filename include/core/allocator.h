@@ -101,20 +101,6 @@ void *allocator_new_ex(allocator_t *allocator,
  */
 void allocator_free(allocator_t *allocator, void **data);
 
-/**
- * Remove an allocation from leak tracking without freeing it.
- *
- * The allocation stays valid and can still be released later with
- * allocator_free (which skips the live-list bookkeeping for untracked
- * objects). Used when an object's lifetime is deliberately managed
- * outside the current leak-detection scope (e.g. M3 `new` heap blocks
- * that Step A keeps alive silently).
- *
- * Nullifies nothing; `*data` remains valid. No-op if `allocator`,
- * `data`, `*data` is NULL, or the object is already untracked.
- */
-void allocator_untrack(allocator_t *allocator, void **data);
-
 /* ---- Move / clone ---- */
 
 /**

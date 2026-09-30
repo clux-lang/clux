@@ -11,34 +11,78 @@
 /* ===========================================================================
  * 指针类型（own *T / ref *T / fatal *T，m3-design §3）
  *
- * ptr_type_t 继承 type_t 持 base_type 指针。C 内存映射：指针值 = 裸指针
- * （size = sizeof(void*)，align = 指针宽），无 RC 控制块——运行期零成本，
- * 逃逸检查全编译期（Step A 静默，Step B 叠加）。
+ * ptr_type_t 继承 type_t 持 base_type 指针。指针值 data 块布局 =
+ * ptr_value_t { void *ptr; bool owns; }（见 type_ptr.h）：
+ *   - new 产物：ptr = 堆块（value_alloc_data(base)），owns = true
+ *   - x.& 取址：ptr = 栈上值 data，owns = false（借用，不释放）
+ *   - ref 派生：ptr = 目标，owns = false（引用不拥有）
+ *   - fatal 流转：owns 随源（move 接管 / clone 深拷贝），转移时源清零
  *
  * 三种所有权修饰（own/ref/fatal）是同一结构、独立 intern 实例（kind 区分
  * 所有权，own *i32 != ref *i32）。同一 base_type 的三种指针各自去重。
  *
- * 运算行为（m3-design §3/§8.4）：
- *   - eq/ne：指针值字节比较（裸指针数据）。
- *   - clone：复制指针值（裸指针数据平凡拷贝）。
- *   - assign：指针值覆盖（类型须相同）。
- *   - dispose：no-op（Step A 静默——new 堆块暂不释放，所有权销毁规则
- *     Step B 叠加）。
- *   - implicit_cast：own → ref 身份拷贝（借用的表达，§3.2）；任意指针 →
+ * 生命周期（m3-design §7）：
+ *   - clone（own）：深拷贝整个对象图——分配新堆块 + memcpy 内容，新指针
+ *     指向新堆块（owns=true）。own 唯一所有权 + 递归销毁，浅拷贝必双释放。
+ *   - clone（ref / owns=false）：复制指针值（借用，不复制被指物）。
+ *   - clone（fatal）：转移——新值接管裸指针与 owns，源置 NULL（fatal 是
+ *     将亡值，DEFINE/参数接收处接管，不深拷贝，避免 move/clone 双分配）。
+ *   - assign：覆盖前释放旧堆块（own+owns）。
+ *   - dispose：own/fatal 且 owns → 释放堆块；借用（ref/取址/流转中）no-op。
+ *   - eq/ne：比较 ptr 字段（owns 非值语义）。
+ *   - implicit_cast：own → ref 身份拷贝（借用，只复制指针值）；任意指针 →
  *     opaque 隐式（§8.4）。
  *   - explicit_cast：opaque → 任意指针（as，§8.4）。
  *   - type_equal / type_extends：按 base 递归（三种所有权修饰是独立类型）。
  * =========================================================================== */
 
-/* ---- 生命周期：clone（复制指针值）/ assign / dispose（no-op，Step A） ---- */
+/* ---- 内部：释放指针拥有的堆块（own/fatal 且 owns=true） ---- */
+
+static void ptr_free_heap(vm_t *vm, const value_t *v) {
+    if (!v || value_is_shadow(v)) return;
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+    if (pv && pv->owns && pv->ptr) {
+        void *heap = pv->ptr;
+        allocator_free(vm->alloc, &heap);
+    }
+}
+
+/* ---- 生命周期：clone / assign / dispose ---- */
 
 static value_t *ptr_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-    void *data = value_alloc_data(vm->alloc, t);
-    memcpy(data, value_data(v), t->size);  /* 指针值 = 裸指针：平凡拷贝 */
-    return value_make(vm, t, data);
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+        if (pv->owns) {
+            /* own + 拥有堆块：深拷贝——分配新堆块 + memcpy 内容，新指针
+               指向新堆块（独立 owns=true）。两指针各自独占堆块，各自释放，
+               无双释放。 */
+            const type_t *base = ptr_type_base(t);
+            if (!base) return value_make_error(vm, "ptr: owner pointer missing base type");
+            void *heap = value_alloc_data(vm->alloc, base);
+            memcpy(heap, pv->ptr, base->size);
+            return ptr_make_value(vm, t, heap, true);
+        }
+        /* own 借用（x.& 指向栈值）：复制指针值，不复制被指物 */
+        return ptr_make_value(vm, t, pv->ptr, false);
+    case TYPE_KIND_PTR_FATAL:
+        /* fatal 流转：转移——新值接管裸指针与 owns，源置 NULL（fatal 是
+           将亡值，接管点在 DEFINE/参数接收处，不深拷贝——避免 move/clone
+           产物再深拷贝一次导致双分配）。 */
+        {
+            value_t *nv = ptr_make_value(vm, t, pv->ptr, pv->owns);
+            ((ptr_value_t *)value_data(v))->ptr = NULL;
+            ((ptr_value_t *)value_data(v))->owns = false;
+            return nv;
+        }
+    default:
+        /* ref 及一切借用：复制指针值（ref 是值拷贝语义，§3.2） */
+        return ptr_make_value(vm, t, pv->ptr, pv->owns);
+    }
 }
 
 static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
@@ -48,17 +92,19 @@ static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
         return value_make_error(vm,
             "ptr: assignment requires matching pointer type");
     }
+    /* 覆盖前释放旧堆块（own/fatal 且 owns=true）；借用无堆块跳过 */
+    ptr_free_heap(vm, dst);
     memcpy(value_data(dst), value_data(src), t->size);  /* 指针值覆盖 */
     return dst;
 }
 
 static void ptr_dispose(vm_t *vm, value_t *v) {
-    /* Step A 静默：new 堆块暂不释放（所有权销毁规则 Step B 叠加）。
-       指针值本身是裸指针数据，无额外资源。 */
-    (void)vm; (void)v;
+    /* own/fatal 拥有堆块 → 释放（作用域退出销毁，m3-design §3.1）；
+       借用（ref / x.& 取址 / fatal 已流转置 NULL）→ no-op，防双释放。 */
+    ptr_free_heap(vm, v);
 }
 
-/* ---- eq/ne：指针值字节比较 ---- */
+/* ---- eq/ne：指针目标地址比较（owns 非值语义） ---- */
 
 static value_t *ptr_eq(vm_t *vm, value_t *a, value_t *b) {
     if (value_is_shadow(a) || value_is_shadow(b))
@@ -69,9 +115,9 @@ static value_t *ptr_eq(vm_t *vm, value_t *a, value_t *b) {
         return value_make_error(vm,
             "ptr: == requires same pointer type");
     }
-    void *pa = value_data(a);
-    void *pb = value_data(b);
-    bool eq = memcmp(pa, pb, ta->size) == 0;
+    const ptr_value_t *pa = (const ptr_value_t *)value_data(a);
+    const ptr_value_t *pb = (const ptr_value_t *)value_data(b);
+    bool eq = pa->ptr == pb->ptr;
     void *data = value_alloc_data(vm->alloc, vm->type_bool);
     memcpy(data, &eq, sizeof(bool));
     return value_make(vm, vm->type_bool, data);
@@ -86,9 +132,9 @@ static value_t *ptr_ne(vm_t *vm, value_t *a, value_t *b) {
         return value_make_error(vm,
             "ptr: != requires same pointer type");
     }
-    void *pa = value_data(a);
-    void *pb = value_data(b);
-    bool ne = memcmp(pa, pb, ta->size) != 0;
+    const ptr_value_t *pa = (const ptr_value_t *)value_data(a);
+    const ptr_value_t *pb = (const ptr_value_t *)value_data(b);
+    bool ne = pa->ptr != pb->ptr;
     void *data = value_alloc_data(vm->alloc, vm->type_bool);
     memcpy(data, &ne, sizeof(bool));
     return value_make(vm, vm->type_bool, data);
@@ -104,25 +150,38 @@ static bool is_opaque_type(const type_t *t) {
 static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     const type_t *src = value_type(v);
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
 
-    /* 任意指针 → opaque 隐式（m3-design §8.4）：身份拷贝指针值 */
+    /* 任意指针 → opaque 隐式（m3-design §8.4）：身份拷贝指针目标地址。
+       owns 不随转换（opaque 是裸指针，不拥有堆块；堆块仍归源指针释放）。 */
     if (is_opaque_type(target)) {
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        void *data = value_alloc_data_copy(vm->alloc, target, &pv->ptr);
         return value_make(vm, target, data);
     }
 
-    /* own → ref 身份拷贝（借用的表达，§3.2）：同 base 的 own → ref */
+    /* own → ref 身份拷贝（借用的表达，§3.2）：同 base 的 own → ref。
+       ref 是借用，owns=false——不拥有堆块，堆块归原 own 释放。 */
     if (src->kind == TYPE_KIND_PTR_OWN && target &&
         target->kind == TYPE_KIND_PTR_REF &&
         ptr_type_base(src) == ptr_type_base(target)) {
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
-        return value_make(vm, target, data);
+        return ptr_make_value(vm, target, pv->ptr, false);
+    }
+
+    /* fatal → own 接管（§3.3）：var c: own *i32 = clone(p) / move(p) 的
+       DEFINE 路径。fatal 是将亡值——新值接管裸指针与 owns（转移语义，
+       与 ptr_clone fatal 分支一致），源置 NULL 防双释放。 */
+    if (src->kind == TYPE_KIND_PTR_FATAL && target &&
+        target->kind == TYPE_KIND_PTR_OWN &&
+        ptr_type_base(src) == ptr_type_base(target)) {
+        value_t *nv = ptr_make_value(vm, target, pv->ptr, pv->owns);
+        ((ptr_value_t *)value_data(v))->ptr = NULL;
+        ((ptr_value_t *)value_data(v))->owns = false;
+        return nv;
     }
 
     /* 同类型身份拷贝（ref → ref 等，clone 语义） */
     if (src == target) {
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
-        return value_make(vm, target, data);
+        return ptr_make_value(vm, target, pv->ptr, pv->owns);
     }
 
     return value_make_error(vm, "ptr: unsupported implicit cast for pointer");
@@ -131,19 +190,10 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
 static value_t *ptr_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
 
-    /* opaque → 任意指针显式（as，§8.4）：身份拷贝指针值 */
-    if (value_type(v)->vtable == &VTABLE_OPAQUE &&
-        target && (target->kind == TYPE_KIND_PTR_OWN ||
-                   target->kind == TYPE_KIND_PTR_REF ||
-                   target->kind == TYPE_KIND_PTR_FATAL)) {
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
-        return value_make(vm, target, data);
-    }
-
     /* 同类型身份拷贝 */
     if (value_type(v) == target) {
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
-        return value_make(vm, target, data);
+        const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+        return ptr_make_value(vm, target, pv->ptr, pv->owns);
     }
 
     return value_make_error(vm, "ptr: unsupported explicit cast for pointer");
@@ -319,9 +369,10 @@ const type_t *type_ptr_seal(vm_t *vm, const type_t *t) {
         }
     }
 
-    /* 指针类型 size/align 恒定（指针宽），不依赖 base_type 布局 */
-    pt->base.size   = sizeof(void *);
-    pt->base.align  = alignof(void *);
+    /* 指针值 size/align 恒定（ptr_value_t = 裸指针 + owns 标志，对齐指针宽），
+       不依赖 base_type 布局 */
+    pt->base.size   = sizeof(ptr_value_t);
+    pt->base.align  = alignof(ptr_value_t);
     pt->base.sealed = true;
 
     /* 重建类型名 "own *T" / "ref *T" / "fatal *T" */
@@ -349,4 +400,13 @@ const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base) {
     ptr_type_t *pt = ptr_type_create_open(vm, kind);
     pt->base_type = base;
     return type_ptr_seal(vm, &pt->base);
+}
+
+/* 构造指针值：目标地址 + 拥有标志（own *T / ref *T / fatal *T 统一）。
+ * data 块 = ptr_value_t（值布局，见 type_ptr.h）。 */
+value_t *ptr_make_value(vm_t *vm, const type_t *pt,
+                        void *target, bool owns) {
+    ptr_value_t pv = { target, owns };
+    void *data = value_alloc_data_copy(vm->alloc, pt, &pv);
+    return value_make(vm, pt, data);
 }
