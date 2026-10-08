@@ -286,6 +286,11 @@ add_library(ICU::i18n ALIAS icui18n)
 add_library(ICU::data ALIAS icudata)
 add_library(ICU::io   ALIAS icuio)
 
+# icuuc 的 udata.cpp 引用 icudt 数据符号（stubdata/icu_data_gen 提供）。
+# 显式链接 icudata：GNU ld 单遍扫描对静态库顺序敏感，icudata 必须在
+# icuuc 之后仍可解析（MSVC 多遍解析掩盖了此问题，此处统一声明）。
+target_link_libraries(icuuc PUBLIC icudata)
+
 # ---------------------------------------------------------------------------
 # Suppress ICU warnings (third-party code)
 # ---------------------------------------------------------------------------
