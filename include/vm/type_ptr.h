@@ -103,6 +103,59 @@ static inline bool ptr_value_owns(const value_t *v) {
 value_t *ptr_make_value(vm_t *vm, const type_t *pt,
                         void *target, bool owns);
 
+/* ================================================================ */
+/* 递归销毁（m3-design §3.1/§13：own 销毁沿字段递归）                */
+/* ================================================================ */
+
+/**
+ * 递归释放 data 块内所有 own 指针指向的堆内存（m3-design §3.1：
+ * `own *Struct` 且 Struct 含 own 字段时，销毁递归传导）。
+ *
+ * 纯静态分派（type + 裸 data 块，不依赖 value_t 包装）：
+ *   - own *T / fatal *T：owns=true 且 ptr≠NULL → 先递归销毁堆块内容
+ *     （T 为含 own 字段的复合类型时内嵌堆块一并释放），再释放本堆块
+ *   - ref *T：借用，跳过（指向栈值或他人堆块，不拥有）
+ *   - struct/tuple：按字段/元素偏移递归
+ *   - array：按 elem_type 逐元素递归（连续块，步长 elem_type->size）
+ *   - option：ok 时按 inner 递归 value 字段
+ *   - union：按当前 tag 的 member payload 类型递归
+ *   - cunion：跳过（无 tag，无法确定激活 member，与 clone/dispose 的
+ *     "开发者自负"语义一致）
+ *   - 标量/字符串/其他：无操作
+ *
+ * 只释放 own 指向的堆块，不释放 data 块本身（data 块归 value 生命周期
+ * 管理——scope_destroy 先调用本函数再 value_dispose）。
+ */
+void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
+
+/**
+ * 递归清空 data 块内所有 own/fatal 指针的 owns 标志（**不释放**，m3-design
+ * §3.3 接管辅助）。与 ptr_free_owned_recursive 同遍历（own/fatal 指针 +
+ * struct/tuple/array/option/union 按字段/元素/tag 递归），但只置 owns=false：
+ *
+ * 供 op_new/op_construct/value_make_array 在成员值 memcpy 进目标块后调用——
+ * 指针值已随 memcpy 复制进接管方，所有权随拷贝转移，清空源对象图防作用域
+ * 退出时与接管方双释放。遍历覆盖复合类型内嵌 own 指针（own *Struct 的
+ * Struct 字段里的 own *T），不止顶层直接指针。
+ */
+void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data);
+
+/**
+ * 深拷贝 type 类型的数据块（对象图克隆，m3-design §7"深拷贝整个对象图"）：
+ *   - own/fatal 指针且 owns=true：分配新堆块 + 递归克隆被指向类型（内嵌
+ *     own 字段一并深拷贝），新指针 owns=true——两个实例各自独占完整对象图，
+ *     递归销毁互不干扰（无共享指针 = 无双释放）
+ *   - 借用（ref / x.& / fatal 已转移）：复制指针值，不深拷贝被指物
+ *   - struct/tuple/array/option/union：按字段/元素/tag 递归克隆
+ *   - cunion：整块 memcpy（无 tag，无法确定激活 member，开发者自负）
+ *   - 标量/字符串：整块 memcpy
+ *
+ * 返回新分配的 dst 块（调用方 memcpy 进目标或直接持有）。struct/tuple/
+ * array 的 vtable clone 走此路径保证 own 字段深拷贝（浅拷贝 + 递归销毁
+ * 会双释放共享堆块）。
+ */
+void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src);
+
 #ifdef __cplusplus
 }
 #endif

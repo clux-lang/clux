@@ -37,6 +37,10 @@ static value_t *struct_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
+    /* 浅拷贝（整块 memcpy）：隐式拷贝路径（DEFINE/赋值/转换）只作用于
+       sema 已保证不含 own 字段的值（含 own 的 struct 由 sema 拦截，禁止
+       隐式拷贝——m3-design §7 唯一所有权）；own 字段的深拷贝发生在主动
+       clone()（op_clone → ptr_clone_block 递归对象图克隆）。 */
     void *data = value_alloc_data(vm->alloc, t);
     memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);

@@ -355,10 +355,11 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */
     strslice_t name = ((ast_ident_t *)n->target)->name;
     if (token_is(n->op, "=") && strslice_eq(name, STRSLICE_LIT("_"))) {
-      /* 显式丢弃：_ = expr → 只求值右值并 POP（不 STORE，_ 不是变量）。
-         sema 已校验 op 必须是 '='。 */
+      /* 显式丢弃：_ = expr → 求值右值 + DISPOSE（递归释放值内嵌 own 堆块
+         ——fatal/own 丢弃场景，m3-design §3.3；ref/借用 no-op）。不 STORE
+         （_ 不是变量），不 POP（DISPOSE 自身消费栈顶，不压回）。 */
       compile_expr(c, n->value);               /* 栈: [value] */
-      bcode_write_op(c->bc, BCODE_POP);        /* 丢弃结果 */
+      bcode_write_op(c->bc, BCODE_DISPOSE);    /* 递归释放 own 堆块 */
       st_push(c, -1);
       break;
     }

@@ -67,6 +67,22 @@ static value_t *op_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (value_is_error(vm, casted)) return casted;
         src = casted;
     }
+    /* R4 接管（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
+       src 若是 fresh 临时值（非变量借用，如 x = .[2]Cell{...} 匿名构造
+       赋值给变量），先递归释放 dst 旧值内嵌 own 堆块，再整块接管 src 的
+       data（memcpy 到 dst data + 从 owned 移除 src）——与 op_define 接管
+       同语义，防共享内嵌 own 堆块双释放。 */
+    if (value_type(src) == value_type(dst) && !value_is_shadow(src) &&
+        !value_is_borrowed(src)) {
+        const type_t *st = value_type(src);
+        if (st && (st->kind == TYPE_KIND_STRUCT || st->kind == TYPE_KIND_TUPLE ||
+                   st->kind == TYPE_KIND_ARRAY)) {
+            ptr_free_owned_recursive(vm, st, value_data(dst));
+            memcpy(value_data(dst), value_data(src), st->size);
+            scope_untrack(vm, vm->current_scope, src);
+            return dst;
+        }
+    }
     return value_assign(vm, dst, src);
 }
 
@@ -261,6 +277,23 @@ static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
         init = casted;
     }
 
+    /* R4 接管（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
+       init 若是 fresh 临时值（非变量借用），DEFINE 直接接管（从 owned 移除
+       并绑定），跳过 scope_define 的 value_clone 浅拷贝——浅拷贝会让变量与
+       temp 共享内嵌 own 堆块，作用域退出双释放（R4OwnArrayElemRecursiveFree
+       崩溃根因）。仅对含 own/fatal 指针的类型接管（纯值类型浅拷贝无共享
+       风险）；变量借用（var b = a）保持原 copy 语义。 */
+    const type_t *it = value_type(init);
+    if (it && (it->kind == TYPE_KIND_PTR_OWN || it->kind == TYPE_KIND_PTR_FATAL ||
+               it->kind == TYPE_KIND_STRUCT || it->kind == TYPE_KIND_TUPLE ||
+               it->kind == TYPE_KIND_ARRAY || it->kind == TYPE_KIND_OPTION ||
+               it->kind == TYPE_KIND_UNION) &&
+        !value_is_shadow(init) && !value_is_borrowed(init)) {
+        value_t *stored = scope_define_owned(vm, vm->current_scope, name.ptr,
+                                             init);
+        if (value_is_error(vm, stored)) return stored;
+        return NULL;
+    }
     value_t *stored = scope_define(vm, vm->current_scope, name.ptr, init);
     if (value_is_error(vm, stored)) return stored;
     return NULL;
@@ -664,7 +697,7 @@ static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
 }
 
 /* NEW（无操作数）：**堆分配构造**（new T{...}，m3-design §8.1）。
- * 栈布局 [type_value, member]（member 在顶）：先弹类型位，再弹 1 个成员值。
+ * 栈布局 [member, type_value]（type_value 在顶）：先弹类型位，再弹 1 个成员值。
  * 按 T 的类型构造堆块（分配 size = T->size 的裸数据块，blit 成员值）：
  *   - 标量等无字段类型（new i32{123}）：member 值 implicit_cast → T 后拷贝
  *   - 复合类型（struct/tuple/array/option/union/cunion）：member 值是嵌套
@@ -674,9 +707,13 @@ static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * 返回 own *T 类型 value（ptr_value_t{堆块, owns=true}——作用域退出时
  * ptr_dispose 释放堆块，m3-design §3.1）。 */
 static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    /* NEW（无操作数）：**堆分配构造**（new T{...}，m3-design §8.1）。
+     * 统一协议 [member, type_value]（type_value 在顶，与 CONSTRUCT 相反——
+     * compiler 对 struct/tuple/array 先 CONSTRUCT 得 T 值再补压类型位，
+     * 标量先压成员值再压类型位）：先弹类型位，再弹成员值。 */
     (void)bc; (void)pc;
-    value_t *member = exec_stack_pop(vm);   /* 栈顶：成员值 */
-    value_t *type_v = exec_stack_pop(vm);   /* 栈底：类型位 */
+    value_t *type_v = exec_stack_pop(vm);   /* 栈顶：类型位 */
+    value_t *member = exec_stack_pop(vm);   /* 栈底：成员值 */
     const type_t *t = (type_v && value_type(type_v) == vm->type_type)
                           ? value_as(type_v, const type_t *) : NULL;
     if (!t)
@@ -688,11 +725,23 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "new: cannot make fatal pointer type");
     if (value_is_shadow(member))
         return value_make_shadow(vm, pt);
-    /* 成员值 → T（同类型身份短路；字面量 i32 → i64 等宽度提升） */
-    value_t *casted = value_implicit_cast(vm, member, t);
-    if (value_is_error(vm, casted)) return casted;
+    /* 成员值 → T：同类型直接用（身份，不 clone——value_implicit_cast 同类型
+       短路 value_clone 浅拷贝，会与成员共享内嵌 own 堆块）；异类型才隐式转换
+       （字面量 i32 → i64 等宽度提升；fatal → own 接管产物在 cast 内转移）。 */
+    value_t *casted = member;
+    if (value_type(member) != t) {
+        casted = value_implicit_cast(vm, member, t);
+        if (value_is_error(vm, casted)) return casted;
+    }
     void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
     memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
+    /* 成员值已复制进堆块：所有权随 memcpy 转移给堆块——清空源对象图内所有
+       own/fatal 指针的 owns 标志（ptr_clear_owned_recursive 递归，覆盖复合
+       类型内嵌 own 字段：new Node{ .inner = new i32{...} } 的 Node 值内部
+       own *i32 字段、new own *i32{move(p)} 的 fatal→own 接管产物），防作用域
+       退出时源与堆块双释放。堆块归 new 产物递归销毁；借用（owns=false）
+       不受影响。 */
+    ptr_clear_owned_recursive(vm, t, value_data(casted));
     return ptr_make_value(vm, pt, heap, true);    /* fatal *T：拥有堆块 */
 }
 
@@ -817,6 +866,30 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return copied;
 }
 
+/* DISPOSE（无操作数）：**显式丢弃**（`_ = expr`，m3-design §3.3）。
+ * 弹值 → 递归释放值内部所有 own 指针指向的堆块（ptr_free_owned_recursive
+ * 同款静态分派：own/fatal + 含 own 的复合类型；ref/借用跳过），随后按
+ * 常规 POP 语义丢弃该值（不释放 data 块——值本体仍归 scope owned 列表，
+ * 作用域退出统一销毁，防双释放）。不压回（表达式语句消费）。
+ *
+ * 语义：`_ = move(x)` / `_ = new T{...}` 等将亡值（fatal）被显式丢弃——
+ * 无接管方时在此递归释放其堆块，避免 leak；源 data 内 owns 标志随释放
+ * 置 false，作用域退出扫描看到 owns=false 跳过（防双释放）。借用
+ * （ref / x.& 取址）无堆块可释，no-op。 */
+static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (!v || value_is_shadow(v)) return NULL;
+    const type_t *t = value_type(v);
+    if (!t) return NULL;
+    /* 借用引用 data 指向父值内部（如 arr[i]），递归释放会误伤父值——
+       跳过（ref/借用无 owns 堆块；own 借用 x.& 同理）。仅拥有 data 的值
+       （is_own=true）其内嵌 own 堆块才属本值所有。 */
+    if (!value_is_borrowed(v))
+        ptr_free_owned_recursive(vm, t, value_data(v));
+    return NULL;
+}
+
 /* IS_TAG <tag>：判 tag 专用指令（`x is Member`，编译期已解析 member → tag
  * 值）。弹 union 值 → 读 data 首部 tag 整数与立即数比较 → 压 bool。
  * shadow → 压 bool shadow（sema 只做类型检查）。 */
@@ -899,13 +972,25 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 "construct: struct field count mismatch");
         void *data = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
         for (uint32_t i = 0; i < n; i++) {
-            value_t *casted = value_implicit_cast(vm, elems[i],
-                                                  st->fields[i].type);
-            if (value_is_error(vm, casted))
-                return casted;
+            value_t *src = elems[i];
+            const type_t *ft = st->fields[i].type;
+            /* 同类型直接用（身份，不 clone——value_implicit_cast 同类型短路
+               value_clone 浅拷贝，会与成员共享内嵌 own 堆块）；异类型才隐式
+               转换（字面量 i32 → i64 字段等宽度提升；fatal → own 接管产物
+               在 cast 内转移、源清零）。 */
+            if (value_type(src) != ft) {
+                src = value_implicit_cast(vm, src, ft);
+                if (value_is_error(vm, src)) return src;
+            }
             /* data 全平凡：字段为 memcpy 可拷贝字节块，直接拷贝到偏移 */
-            memcpy((uint8_t *)data + st->fields[i].offset, value_data(casted),
-                   st->fields[i].type->size);
+            memcpy((uint8_t *)data + st->fields[i].offset, value_data(src),
+                   ft->size);
+            /* 成员值已复制进 data：所有权随 memcpy 转移——清空源对象图内
+               所有 own/fatal 指针的 owns 标志（递归，覆盖复合字段内嵌 own
+               指针：.inner = Inner{ .p = new i32{...} } 的 Inner 值内部
+               own *i32 字段，不止直接 own/fatal 指针成员）。防作用域退出时
+               源与 data 双释放；堆块归外层递归销毁；借用不受影响。 */
+            ptr_clear_owned_recursive(vm, ft, value_data(src));
         }
         return value_make(vm, t, data);
     }
@@ -922,13 +1007,21 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 "construct: tuple element count mismatch");
         void *data = value_alloc_data(vm->alloc, t);  /* 清零：未指定元素自动零值 */
         for (uint32_t i = 0; i < n; i++) {
-            value_t *casted = value_implicit_cast(vm, elems[i],
-                                                  tt->elems[i].type);
-            if (value_is_error(vm, casted))
-                return casted;
+            value_t *src = elems[i];
+            const type_t *et = tt->elems[i].type;
+            /* 同类型直接用（身份，不 clone——同类型短路 value_clone 浅拷贝会
+               与成员共享内嵌 own 堆块）；异类型才隐式转换（等宽度提升；
+               fatal → own 接管产物在 cast 内转移、源清零）。 */
+            if (value_type(src) != et) {
+                src = value_implicit_cast(vm, src, et);
+                if (value_is_error(vm, src)) return src;
+            }
             /* data 全平凡：元素为 memcpy 可拷贝字节块，直接拷贝到偏移 */
-            memcpy((uint8_t *)data + tt->elems[i].offset, value_data(casted),
-                   tt->elems[i].type->size);
+            memcpy((uint8_t *)data + tt->elems[i].offset, value_data(src),
+                   et->size);
+            /* 与 struct 分支同款：所有权随 memcpy 转移，清空源对象图内所有
+               own/fatal 指针的 owns 标志（递归，覆盖复合元素内嵌 own 指针）。 */
+            ptr_clear_owned_recursive(vm, et, value_data(src));
         }
         return value_make(vm, t, data);
     }
@@ -1497,6 +1590,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_ADDR]            = op_addr,
     [BCODE_MOVE]            = op_move,
     [BCODE_CLONE]           = op_clone,
+    [BCODE_DISPOSE]         = op_dispose,
 };
 
 /* ================================================================ */

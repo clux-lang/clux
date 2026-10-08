@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -3847,5 +3848,101 @@ TEST(Driver, StepBReturnI32FromPtrFunctionRejected) {
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+/* ---- R4 递归销毁（m3-design §3.1/§13：own 销毁沿字段递归） ---- */
+
+TEST(Driver, R4OwnStructFieldRecursiveFree) {
+  /* §3.1 递归销毁：own *Struct 且 Struct 含 own 字段——作用域退出时内嵌
+     堆块一并释放。循环验证无累积泄露（每次迭代 2 个嵌套堆块：root 堆块 +
+     inner 堆块）。 */
+  std::string path = write_temp_file(
+      "struct Node {\n"
+      "  val: i32;\n"
+      "  inner: own *i32;\n"
+      "}\n"
+      "func make(n: i32): fatal *Node {\n"
+      "  return new Node{ .val = n, .inner = new i32{n + 1} };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var i: i32 = 0;\n"
+      "  while (i < 200) {\n"
+      "    var root: own *Node = move(make(i));\n"
+      "    if (root.*.val != i) { return 1; }\n"
+      "    if (root.*.inner.* != i + 1) { return 2; }\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, R4OwnStructFieldCloneIsolation) {
+  /* §7 深拷贝整个对象图：clone(own *Struct) 递归克隆内嵌 own 字段——两个
+     实例各自独占完整对象图，修改互不影响（共享指针会双释放/改串）。 */
+  std::string path = write_temp_file(
+      "struct Pair {\n"
+      "  a: i32;\n"
+      "  b: own *i32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p: own *Pair = new Pair{ .a = 1, .b = new i32{100} };\n"
+      "  var q: own *Pair = clone(p);\n"
+      "  q.*.a = 2;\n"
+      "  q.*.b.* = 200;\n"
+      "  if (p.*.a != 1) { return 1; }\n"
+      "  if (p.*.b.* != 100) { return 2; }\n"
+      "  if (q.*.a != 2) { return 3; }\n"
+      "  if (q.*.b.* != 200) { return 4; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, R4OwnArrayElemRecursiveFree) {
+  /* §3.1 数组场景：[N]T 且 T 含 own 字段（own *[N]T 的堆块内数组元素的内嵌
+     own 指针）——作用域退出时数组元素级内嵌 own 指针一并释放。循环验证无
+     累积泄露（每次迭代 2 个内嵌堆块）。 */
+  std::string path = write_temp_file(
+      "struct Cell {\n"
+      "  v: i32;\n"
+      "  p: own *i32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var i: i32 = 0;\n"
+      "  while (i < 100) {\n"
+      "    var cells: [2]Cell = .[2]Cell{ .Cell{ .v = i, .p = new i32{i + 1} }, .Cell{ .v = i + 10, .p = new i32{i + 11} } };\n"
+      "    if (cells[0].p.* != i + 1) { return 1; }\n"
+      "    if (cells[1].p.* != i + 11) { return 2; }\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, R4MoveThenScopeExitNoDoubleFree) {
+  /* §7 move 后跳过 + §3.1：嵌套指针 move 后作用域退出——仅接管方销毁
+     一次，源清零防双释放（回归 PtrNestedDeref 曾双释放崩溃）。 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var i: i32 = 0;\n"
+      "  while (i < 200) {\n"
+      "    var p: own *i32 = new i32{7};\n"
+      "    var pp: own *own *i32 = new own *i32{move(p)};\n"
+      "    if (pp.*.* != 7) { return 1; }\n"
+      "    var c: own *own *i32 = clone(pp);\n"
+      "    c.*.* = 9;\n"
+      "    if (c.*.* != 9) { return 2; }\n"
+      "    if (pp.*.* != 7) { return 3; }\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }

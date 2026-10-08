@@ -1,6 +1,7 @@
 #include "vm/type_array.h"
 #include "vm/type.h"
 #include "vm/type_option.h"
+#include "vm/type_ptr.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
@@ -326,7 +327,9 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
         return value_make_shadow(vm, value_type(v));
 
     /* 借用/普通数组的 type 均为数组类型；借用 v 的 data 指向块内偏移，
-       按其类型深拷贝该块即 materialize（独立 is_own=true 拷贝）。 */
+       按其类型深拷贝该块即 materialize（独立 is_own=true 拷贝）。
+       浅拷贝（整块 memcpy）：隐式拷贝路径只作用于 sema 已保证不含 own
+       元素的值；own 元素的深拷贝发生在主动 clone()（op_clone）。 */
     const type_t *t = value_type(v);
     void *block = value_alloc_data(vm->alloc, t);
     memcpy(block, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
@@ -411,7 +414,9 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
            value_alloc_data 清零，缺失元素保持类型零值（数值 0 /
            bool false / func NULL=nil / str NULL）。 */
         if (value_is_undefined(vm, e)) continue;
-        /* 类型检查：非元素类型尝试隐式转换 */
+        /* 类型检查：非元素类型尝试隐式转换；同类型直接用（身份，不 clone——
+           value_implicit_cast 同类型短路 value_clone 浅拷贝，会与元素共享
+           内嵌 own 堆块）。 */
         if (value_type(e) != elem_type) {
             value_t *casted = value_implicit_cast(vm, e, elem_type);
             if (value_is_error(vm, casted)) return casted;
@@ -419,6 +424,12 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
         }
         /* 平凡拷贝元素数据到块内偏移（data 全平凡：整段 memcpy） */
         memcpy((uint8_t *)block + i * es, value_data(e), es);
+        /* 元素已复制进 block：所有权随 memcpy 转移——清空源对象图内所有
+           own/fatal 指针的 owns 标志（递归，覆盖复合元素内嵌 own 指针：
+           Cell 元素内部 own *i32 字段，不止直接 own/fatal 指针元素）。
+           防作用域退出时源与 block 双释放；堆块归外层递归销毁；借用
+           （owns=false）不受影响。 */
+        ptr_clear_owned_recursive(vm, elem_type, value_data(e));
     }
     return value_make(vm, at, block);
 }

@@ -32,6 +32,8 @@ static value_t *option_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
+    /* 浅拷贝（整块 memcpy）：隐式拷贝路径只作用于 sema 已保证不含 own
+       inner 的值；own inner 的深拷贝发生在主动 clone()（op_clone）。 */
     void *data = value_alloc_data(vm->alloc, t);
     memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
     return value_make(vm, t, data);

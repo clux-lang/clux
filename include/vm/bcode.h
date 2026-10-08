@@ -189,6 +189,11 @@ typedef enum {
     BCODE_MOVE,             /* 弹值 → 压同类型值（move(x)，所有权转移，
                                Step A 静默：值平凡传递） */
     BCODE_CLONE,            /* 弹值 → 压深拷贝值（clone(x)，value_clone 分派） */
+    BCODE_DISPOSE,          /* 无操作数：弹值 → 递归释放其内嵌 own 堆块
+                               （`_ = expr` 显式丢弃 fatal/own，m3-design
+                               §3.3：fatal 必被 own 接管，_ = 丢弃例外）→
+                               不压回（表达式语句消费）。借用（ref/x.&）
+                               跳过。 */
 } bcode_op_t;
 
 /* ================================================================ */

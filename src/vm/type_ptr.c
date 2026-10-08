@@ -1,6 +1,11 @@
 #include "vm/type_ptr.h"
 #include "vm/type.h"
 #include "vm/type_opaque.h"
+#include "vm/type_option.h"
+#include "vm/type_struct.h"
+#include "vm/type_tuple.h"
+#include "vm/type_array.h"
+#include "vm/type_union.h"
 #include "vm/value.h"
 #include "vm/vm.h"
 #include "core/panic.h"
@@ -47,7 +52,279 @@ static void ptr_free_heap(vm_t *vm, const value_t *v) {
     }
 }
 
+/* ===========================================================================
+ * 递归销毁（m3-design §3.1/§13）：own 销毁沿字段递归。
+ *
+ * 纯静态分派（type + 裸 data 块，不依赖 value_t 包装）——供 scope_destroy
+ * 在 value_dispose 前扫描 owned 值调用（销毁变量前先销毁变量内部所有 own
+ * 指向的堆内存，含结构体字段内嵌的 own 指针）。
+ *
+ * 双释放防线：owns=false（ref / x.& 借用 / fatal 已转移）一律跳过；递归
+ * 销毁后堆块随即释放，不重复扫描（每个 ptr_value_t 只被消费一次）。
+ * =========================================================================== */
+
+/* 目标是否含需递归销毁的 own 指针（own 指针 + 含 own 的复合类型）。
+   fatal 不在此列：fatal 是将亡值，sema 保证必被 own 接管（R1，§3.3），
+   接管后源清零 owns=false，无堆块可销毁；`_ =` 丢弃场景由 DISPOSE 指令
+   特殊处理（递归释放后源同样清零）。 */
+static bool ptr_type_needs_scan(const type_t *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_STRUCT:
+    case TYPE_KIND_TUPLE:
+    case TYPE_KIND_ARRAY:
+    case TYPE_KIND_OPTION:
+    case TYPE_KIND_UNION:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
+    if (!vm || !t || !data) return;
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN: {
+        /* own 指针：owns=true 拥有堆块 → 先递归销毁堆块内容（T 含 own 字段
+           时内嵌堆块一并释放），再释放本堆块。借用（ref/x.& 取址/已转移）
+           跳过。释放后清空指针值（ptr=NULL、owns=false）——后续
+           value_dispose → ptr_dispose → ptr_free_heap 看到 owns=false 跳过，
+           防双释放。fatal 不释放（sema 保证被 own 接管；接管路径源清零）。 */
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->owns || !pv->ptr) return;
+        const type_t *base = ptr_type_base(t);
+        if (base && ptr_type_needs_scan(base))
+            ptr_free_owned_recursive(vm, base, pv->ptr);
+        void *heap = pv->ptr;
+        pv->ptr = NULL;
+        pv->owns = false;
+        allocator_free(vm->alloc, &heap);
+        return;
+    }
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (ptr_type_needs_scan(f->type))
+                ptr_free_owned_recursive(vm, f->type,
+                                         (uint8_t *)data + f->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            if (ptr_type_needs_scan(e->type))
+                ptr_free_owned_recursive(vm, e->type,
+                                         (uint8_t *)data + e->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_ARRAY: {
+        const type_t *et = array_type_elem(t);
+        size_t len = array_type_len(t);
+        if (!et || len == SIZE_MAX || !ptr_type_needs_scan(et)) return;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < len; i++, p += et->size)
+            ptr_free_owned_recursive(vm, et, p);
+        return;
+    }
+    case TYPE_KIND_OPTION: {
+        const type_t *inner = type_option_inner(t);
+        if (!ptr_type_needs_scan(inner)) return;
+        if (!option_ok(data)) return;  /* none：无值可销毁 */
+        ptr_free_owned_recursive(vm, inner, option_value(data, t));
+        return;
+    }
+    case TYPE_KIND_UNION: {
+        /* 按当前激活 member 的 payload 类型递归（tag 决定解释方式） */
+        const union_type_t *ut = (const union_type_t *)t;
+        uint64_t tag = union_read_tag_raw(data, ut->tag_size);
+        if (tag >= ut->member_count) return;  /* 防御：非法 tag 跳过 */
+        const union_member_t *m = &ut->members[tag];
+        if (ptr_type_needs_scan(m->payload_type))
+            ptr_free_owned_recursive(vm, m->payload_type,
+                                     (uint8_t *)data + ut->payload_offset);
+        return;
+    }
+    default:
+        /* 标量/字符串/ref *T/cunion/opaque 等：无 own 堆块可销毁 */
+        return;
+    }
+}
+
+/* 所有权转移清空（接管辅助，m3-design §3.3）：递归把 data 块内所有
+   owns=true 的 own/fatal 指针置 owns=false（**不释放**——指针值已随 memcpy
+   复制进接管方堆块，所有权随拷贝转移）。
+   供 op_new/op_construct 在成员值 memcpy 进目标块后调用，清空源对象图内
+   所有内嵌 own 指针，防作用域退出时与接管方双释放（与
+   ptr_free_owned_recursive 同遍历，但不释放）。 */
+void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
+    if (!vm || !t || !data) return;
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_FATAL: {
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->owns) return;
+        const type_t *base = ptr_type_base(t);
+        if (base && ptr_type_needs_scan(base))
+            ptr_clear_owned_recursive(vm, base, pv->ptr);
+        pv->owns = false;  /* 只清标志：堆块已归接管方，不释放 */
+        return;
+    }
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (ptr_type_needs_scan(f->type))
+                ptr_clear_owned_recursive(vm, f->type,
+                                          (uint8_t *)data + f->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            if (ptr_type_needs_scan(e->type))
+                ptr_clear_owned_recursive(vm, e->type,
+                                          (uint8_t *)data + e->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_ARRAY: {
+        const type_t *et = array_type_elem(t);
+        size_t len = array_type_len(t);
+        if (!et || len == SIZE_MAX || !ptr_type_needs_scan(et)) return;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < len; i++, p += et->size)
+            ptr_clear_owned_recursive(vm, et, p);
+        return;
+    }
+    case TYPE_KIND_OPTION: {
+        const type_t *inner = type_option_inner(t);
+        if (!ptr_type_needs_scan(inner)) return;
+        if (!option_ok(data)) return;  /* none：无值可清 */
+        ptr_clear_owned_recursive(vm, inner, option_value(data, t));
+        return;
+    }
+    case TYPE_KIND_UNION: {
+        const union_type_t *ut = (const union_type_t *)t;
+        uint64_t tag = union_read_tag_raw(data, ut->tag_size);
+        if (tag >= ut->member_count) return;  /* 防御：非法 tag 跳过 */
+        const union_member_t *m = &ut->members[tag];
+        if (ptr_type_needs_scan(m->payload_type))
+            ptr_clear_owned_recursive(vm, m->payload_type,
+                                      (uint8_t *)data + ut->payload_offset);
+        return;
+    }
+    default:
+        /* 标量/字符串/ref *T/cunion/opaque 等：无 own 指针可清 */
+        return;
+    }
+}
+
 /* ---- 生命周期：clone / assign / dispose ---- */
+
+/* 深拷贝 type 类型的数据块（对象图克隆，m3-design §7"深拷贝整个对象图"）：
+   - own/fatal 指针且 owns=true：分配新堆块 + 递归克隆被指向类型（内嵌
+     own 字段一并深拷贝），新指针 owns=true——两个实例各自独占完整对象图，
+     递归销毁互不干扰（无共享指针 = 无双释放）
+   - 借用（ref / x.& / fatal 已转移）：复制指针值，不深拷贝被指物（§7"深
+     拷贝遇到 ref 字段直接 copy"）
+   - struct/tuple/array/option/union：按字段/元素/tag 递归克隆
+   - cunion：整块 memcpy（无 tag，无法确定激活 member，开发者自负）
+   - 标量/字符串：整块 memcpy */
+void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
+    void *dst = value_alloc_data(vm->alloc, type);
+    switch (type->kind) {
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_FATAL: {
+        const ptr_value_t *sp = (const ptr_value_t *)src;
+        if (sp->owns && sp->ptr) {
+            const type_t *base = ptr_type_base(type);
+            if (!base) {
+                memcpy(dst, src, type->size);
+                break;
+            }
+            void *heap = ptr_clone_block(vm, base, sp->ptr);
+            ptr_value_t np = { heap, true };
+            memcpy(dst, &np, sizeof np);
+        } else {
+            memcpy(dst, src, type->size);  /* 借用：复制指针值 */
+        }
+        break;
+    }
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)type;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            void *sf = ptr_clone_block(vm, f->type,
+                                       (const uint8_t *)src + f->offset);
+            memcpy((uint8_t *)dst + f->offset, sf, f->type->size);
+            allocator_free(vm->alloc, (void **)&sf);
+        }
+        break;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)type;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            void *se = ptr_clone_block(vm, e->type,
+                                       (const uint8_t *)src + e->offset);
+            memcpy((uint8_t *)dst + e->offset, se, e->type->size);
+            allocator_free(vm->alloc, (void **)&se);
+        }
+        break;
+    }
+    case TYPE_KIND_ARRAY: {
+        const type_t *et = array_type_elem(type);
+        size_t len = array_type_len(type);
+        if (!et || len == SIZE_MAX) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        const uint8_t *sp = (const uint8_t *)src;
+        uint8_t *dp = (uint8_t *)dst;
+        for (size_t i = 0; i < len; i++, sp += et->size, dp += et->size) {
+            void *se = ptr_clone_block(vm, et, sp);
+            memcpy(dp, se, et->size);
+            allocator_free(vm->alloc, (void **)&se);
+        }
+        break;
+    }
+    case TYPE_KIND_OPTION: {
+        memcpy(dst, src, type->size);  /* 先拷贝 ok tag + 原值 */
+        const type_t *inner = type_option_inner(type);
+        if (inner && option_ok(src)) {
+            void *sv = ptr_clone_block(vm, inner, option_value(src, type));
+            memcpy(option_value(dst, type), sv, inner->size);
+            allocator_free(vm->alloc, (void **)&sv);
+        }
+        break;
+    }
+    case TYPE_KIND_UNION: {
+        memcpy(dst, src, type->size);  /* 先拷贝 tag + 原 payload */
+        const union_type_t *ut = (const union_type_t *)type;
+        uint64_t tag = union_read_tag_raw(src, ut->tag_size);
+        if (tag < ut->member_count) {
+            const union_member_t *m = &ut->members[tag];
+            void *sv = ptr_clone_block(vm, m->payload_type,
+                                       (const uint8_t *)src + ut->payload_offset);
+            memcpy((uint8_t *)dst + ut->payload_offset, sv,
+                   m->payload_type->size);
+            allocator_free(vm->alloc, (void **)&sv);
+        }
+        break;
+    }
+    default:
+        memcpy(dst, src, type->size);  /* 标量/字符串/ref/cunion/opaque 平凡 */
+        break;
+    }
+    return dst;
+}
 
 static value_t *ptr_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
@@ -58,13 +335,12 @@ static value_t *ptr_clone(vm_t *vm, value_t *v) {
     switch (t->kind) {
     case TYPE_KIND_PTR_OWN:
         if (pv->owns) {
-            /* own + 拥有堆块：深拷贝——分配新堆块 + memcpy 内容，新指针
-               指向新堆块（独立 owns=true）。两指针各自独占堆块，各自释放，
-               无双释放。 */
+            /* own + 拥有堆块：深拷贝整个对象图——递归克隆被指向类型（含
+               内嵌 own 字段），新指针指向独立新堆块（owns=true）。两指针
+               各自独占完整对象图，各自释放，无双释放。 */
             const type_t *base = ptr_type_base(t);
             if (!base) return value_make_error(vm, "ptr: owner pointer missing base type");
-            void *heap = value_alloc_data(vm->alloc, base);
-            memcpy(heap, pv->ptr, base->size);
+            void *heap = ptr_clone_block(vm, base, pv->ptr);
             return ptr_make_value(vm, t, heap, true);
         }
         /* own 借用（x.& 指向栈值）：复制指针值，不复制被指物 */
