@@ -1331,6 +1331,37 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                          (int)((ast_ident_t *)rt->value)->name.len,
                          ((ast_ident_t *)rt->value)->name.ptr);
             }
+            /* §9 闭包返回捕获 ref 的标注关系检查：返回值标注的每个锚点
+               须嵌套于闭包标注的每个锚点（返回值存活 ≤ 闭包存活 ≤ 锚点）。
+               返回值来自捕获 → 返回值存活受闭包存活约束；返回值标注不得
+               比闭包标注更宽（否则调用方以为返回值活到 y，实际活不过 x）。 */
+            if (is_capture && sema->func_def &&
+                sema->func_def->scope_annot_count > 0) {
+              strslice_t *ret_names = NULL;
+              size_t ret_count = 0;
+              sema_annot_peek(sema->func_def->return_expr,
+                              &ret_names, &ret_count);
+              for (size_t i = 0; i < ret_count; i++) {
+                sema_scope_t *ret_anchor =
+                    annot_anchor_scope(sema, ret_names[i], scope);
+                if (!ret_anchor) continue; /* 未知锚点由他处报 */
+                for (size_t j = 0; j < sema->func_def->scope_annot_count;
+                     j++) {
+                  sema_scope_t *clo_anchor = annot_anchor_scope(
+                      sema, sema->func_def->scope_annot_names[j], scope);
+                  if (!clo_anchor) continue;
+                  if (!sema_scope_within(ret_anchor, clo_anchor)) {
+                    diag_error(sema->diag, sema_loc(sema, rt->value),
+                               "returned ref annotation '%.*s' escapes "
+                               "closure annotation '%.*s' (return scope must "
+                               "be nested within closure scope)",
+                               (int)ret_names[i].len, ret_names[i].ptr,
+                               (int)sema->func_def->scope_annot_names[j].len,
+                               sema->func_def->scope_annot_names[j].ptr);
+                  }
+                }
+              }
+            }
           }
           /* R1（fatal 参数消费，§4）：return fatal 参数 = 所有权继续传递，
              标记已消费（函数结束未消费检查放行）。 */

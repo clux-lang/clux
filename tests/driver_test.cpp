@@ -4111,6 +4111,23 @@ TEST(Driver, StepBClosureReturnCapturedRefPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, StepBClosureReturnRefAnnotEscapesRejected) {
+  /* §9 闭包返回捕获 ref 的标注关系：返回值标注 '<outer> 比闭包标注
+     '<inner> 宽 → 逃逸（调用方以为返回值活到 outer，实际活不过 inner） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var outer: i32 = 99;\n"
+      "  {\n"
+      "    var inner: i32 = 42;\n"
+      "    var r: '<inner> ref *i32 = inner.&;\n"
+      "    var f = func '<inner> |r| get(): '<outer> ref *i32 { return r; };\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBReturnRefFromParamPasses) {
   /* R3（§6）正向：返回 ref 参数（借用自参数，放行）。
      §5：返回 ref 必标注（'<p> = 借自参数 p）；调用点接收 ref 变量
