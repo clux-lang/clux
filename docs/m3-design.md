@@ -353,9 +353,9 @@ RC 系 share/weak 语义已全部定稿（2026-09-29）：创建源 fatal、weak
 
 ### 13.2 核心原则：作用域退出点显式销毁
 
-- **own 的销毁不在值上携带标志**——`owns` 标志是当前 VM 实现过渡形态（Step A），最终方案是**编译期在作用域退出点生成销毁代码**（如调用 `free(ptr)` / `free(own *T)` 的递归释放）
+- **own 的销毁不在值上携带标志**——**编译期在作用域退出点生成销毁代码**（如调用 `free(ptr)` / `free(own *T)` 的递归释放）；VM 运行时路径用 scope_destroy 遍历 owned + type kind 分派（已落地运行期零标志）
 - **谁拥有 = 编译期静态事实**：编译器跟踪每个 own 变量的所有权状态（move 后销毁跳过），作用域退出时生成 `free` 调用序列
-- **运行期零标志**：指针值就是裸指针（own/ref/fatal 退化为无标注裸指针，§11），无 tag、无 owns 位
+- **运行期零标志（已落地）**：指针值就是裸指针（`ptr_value_t { void *ptr; }`），所有权由 type kind 区分（own/ref/fatal），无 tag、无 owns 位
 
 ### 13.3 销毁点生成规则
 
@@ -376,14 +376,16 @@ RC 系 share/weak 语义已全部定稿（2026-09-29）：创建源 fatal、weak
 
 ### 13.5 与当前实现的关系
 
-- 当前 VM 用 `ptr_value_t {ptr, owns}` + vtable dispose 做运行期销毁（Step A 过渡）——语义等价，机制不同
-- 迁移路径：compiler 层先实现"作用域退出点生成销毁序列"，VM 解释器翻译为 free；然后去掉值上的 owns 标志，回归测试确认等价
+- VM 指针值已落地运行期零标志（§13.2）：`ptr_value_t { void *ptr; }`，所有权完全由 type kind 区分
+  （own 总拥有 / ref 总借用 / fatal ptr≠NULL 时拥有），`owns` 标志已移除
+- 当前销毁仍由 `scope_destroy` 遍历 owned 列表 → `ptr_free_owned_recursive` 递归释放 +
+  vtable dispose 释放 data 块（VM 运行时路径）；多后端统一待 compiler 层实现销毁点生成
 - `free` 以**内建函数**形式提供（FFI §8.4 的 `extern func free(ptr: fatal opaque): void` 形态），销毁序列 = 对指针值调用 free
 
 ### 13.6 设计决策记录
 
-- **own 标志 vs 销毁点生成**：销毁点生成是最终形态（多后端统一 + 运行期零标志）；owns 标志是当前 VM 过渡
-- **销毁点 = 编译期审计点**：生成处可静态检查"每个 own 恰被销毁一次"（move 转移不算销毁），泄露检查从运行时移到编译期
+- **运行期零标志已落地**：`ptr_value_t` 不再携带 `owns` 位，所有权由 type kind 编码（own/ref/fatal）
+- **销毁点 = 编译期审计点**：生成处可静态检查"每个 own 恰被销毁一次"（move 转移不算销毁），泄露检查从运行时移到编译期（多后端统一待后续）
 - **free 是内建**：不是用户可见的库函数，是编译器销毁序列的目标
 
 ---

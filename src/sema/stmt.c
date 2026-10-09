@@ -57,7 +57,7 @@
    own *T 变量只允许两种初始化来源：
    - new 表达式（AST_NEW）：新堆块直接产 own *T（§8.1）
    - fatal 接管源（move/clone 产物或 fatal 参数，§3.3）
-   ref 派生（own → ref 隐式转换）是借用（owns=false），不能赋回 own。
+   ref 派生（own → ref 隐式转换）是借用（ref 总借用），不能赋回 own。
    own → own 直接赋值 = copy → 编译错误。
    非 static：AST_NEW/AST_CONSTRUCT 字段校验（sema/expr.c）共用。 */
 bool is_own_initializer(sema_t *sema, ast_node_t *expr,

@@ -1138,8 +1138,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
             /* R1（own 不可 copy，§3.1）：new 字段类型是 own *T 时，值必须
                是显式接管源（move/clone/fatal 参数）。直接传 own/ref 变量
-               = 隐式 copy——运行期 NEW 会把 {ptr, owns=true} 原样复制进
-               新堆块 → 内外双 owns 指向同一堆块 → 作用域退出 double free。 */
+               = 隐式 copy——运行期 NEW 会把指针值原样复制进
+               新堆块 → 内外两个 own 指向同一堆块 → 作用域退出 double free。 */
             if (ft->kind == TYPE_KIND_PTR_OWN &&
                 !is_own_initializer(sema, value, scope)) {
               char fn[64];
@@ -1439,7 +1439,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         } else if (fv && t) {
           /* R1（own 不可 copy，§3.1）：new 被指向类型是 own 指针时，值
              必须是显式接管源（move/clone/fatal）。直接传 own/ref 变量
-             = 隐式 copy → 新堆块与外变量双 owns 指向同一堆块 → double
+             = 隐式 copy → 新堆块与外变量两个 own 指向同一堆块 → double
              free（new own *i32{p} 必须写 new own *i32{move(p)}）。 */
           if (t->kind == TYPE_KIND_PTR_OWN &&
               !is_own_initializer(sema, f, scope)) {
@@ -1462,7 +1462,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
 
-      /* 返回 fatal *T 类型的 shadow——new 产新堆块（owns=true），与
+      /* 返回 fatal *T 类型的 shadow——new 产新堆块，与
          clone/move 统一：所有"产新堆块"路径都返回 fatal（§3.3 将亡值），
          由 var 定义/参数/return 显式接管为 own（value_assign → implicit_cast
          fatal→own 转移）。运行期 NEW 指令按 fatal 类型压栈。 */
@@ -1494,8 +1494,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     }
     case AST_ADDR: {
       /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
-         shadow——x.& 指向栈上值（或他人堆块）是借用，运行期 ADDR 构造
-         owns=false 的借用值（type_ptr.c §3.2 注释），销毁 no-op。
+         shadow——x.& 指向栈上值（或他人堆块）是借用，ref 总借用（type kind
+         区分，运行期零标志 §13.2），销毁 no-op。
          返回 ref（而非 own）与值层语义一致（Step B 借用存活检查的基座）。 */
       ast_addr_t *n = (ast_addr_t *)*node;
       value_t *operand = sema_expr(sema, &n->operand, scope);

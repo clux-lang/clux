@@ -681,11 +681,12 @@ static value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
    类型构造（PUSH_PTR → SET_TYPE → SEAL）见 op_set_type PTR 分支。
    NEW：堆分配构造（new T{...}）；PTR_GET/PTR_SET：解引用 GET/SET 严格分离
    （r.* / r.* = v）；ADDR：后置取址（x.&）；MOVE/CLONE：所有权原语。
-   指针值 data 布局 = ptr_value_t { void *ptr; bool owns; }（type_ptr.h）：
-     - NEW 产物：ptr = 堆块，owns = true（作用域退出时释放）
-     - ADDR 产物：ptr = 栈上值 data，owns = false（借用，不释放）
-   MOVE = 转移（O(1)，源清零 TDZ，产物 fatal）；CLONE = 深拷贝（own 分配
-   新堆块，产物 fatal；ref/借用复制指针值）。 */
+   指针值 data 布局 = ptr_value_t { void *ptr; }（type_ptr.h），运行期零标志
+   （m3-design §13.2），所有权由 type kind 区分：
+     - NEW 产物：fatal *T，ptr = 堆块（接管为 own 后释放）
+     - ADDR 产物：ref *T，ptr = 栈上值 data（借用，不释放）
+   MOVE = 转移（O(1)，源 ptr=NULL TDZ，产物 fatal）；CLONE = 深拷贝（own 分配
+   新堆块，产物 fatal；ref 复制指针值）。 */
 
 /* PUSH_PTR <kind>：分配空 ptr type（开放，base_type=NULL，不入池）+ 压其
  * type value（type_ptr_push 压栈；对应两遍构造声明阶段的起点）。
@@ -704,8 +705,8 @@ static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
  *     CONSTRUCT 已构造好的 T 值 → 整块 memcpy（data 全平凡；struct 字段/
  *     tuple 元素已是构造产物）
  * 成员值类型与 T 同构时身份直接收下（sema 已校验字段）；不同类型 implicit_cast。
- * 返回 own *T 类型 value（ptr_value_t{堆块, owns=true}——作用域退出时
- * ptr_dispose 释放堆块，m3-design §3.1）。 */
+ * 返回 fatal *T 类型 value（ptr_value_t{堆块}——接管后变 own，作用域退出时
+ * ptr_dispose 释放堆块，m3-design §3.1/§3.3）。 */
 static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* NEW（无操作数）：**堆分配构造**（new T{...}，m3-design §8.1）。
      * 统一协议 [member, type_value]（type_value 在顶，与 CONSTRUCT 相反——
@@ -736,13 +737,12 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
     void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
     memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
     /* 成员值已复制进堆块：所有权随 memcpy 转移给堆块——清空源对象图内所有
-       own/fatal 指针的 owns 标志（ptr_clear_owned_recursive 递归，覆盖复合
+       own/fatal 指针（ptr_clear_owned_recursive 递归置 ptr=NULL，覆盖复合
        类型内嵌 own 字段：new Node{ .inner = new i32{...} } 的 Node 值内部
        own *i32 字段、new own *i32{move(p)} 的 fatal→own 接管产物），防作用域
-       退出时源与堆块双释放。堆块归 new 产物递归销毁；借用（owns=false）
-       不受影响。 */
+       退出时源与堆块双释放。堆块归 new 产物递归销毁；ref 借用不受影响。 */
     ptr_clear_owned_recursive(vm, t, value_data(casted));
-    return ptr_make_value(vm, pt, heap, true);    /* fatal *T：拥有堆块 */
+    return ptr_make_value(vm, pt, heap);    /* fatal *T：拥有堆块 */
 }
 
 /* PTR_GET（无操作数）：**解引用取值**（r.*，m3-design §8.2）。
@@ -791,25 +791,26 @@ static value_t *op_ptr_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
 }
 
 /* ADDR（无操作数）：**后置取地址**（x.&，m3-design §8.2）。
- * 弹值 → 返回 own *T 指针（ptr_value_t{指向值 data 块, owns=false}——
- * 借用指向栈上值，dispose 不释放，防释放栈值）。shadow → 指针 shadow。 */
+ * 弹值 → 返回 ref *T 指针（ptr_value_t{指向值 data 块}——
+ * 借用指向栈上值，ref 总借用不释放，防释放栈值。与 sema AST_ADDR 返回
+ * ref *T 一致，m3-design §13.2 运行期零标志）。shadow → 指针 shadow。 */
 static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
     const type_t *t = v ? value_type(v) : NULL;
     if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR)
         return value_make_error(vm, "addr: cannot take address of void/error value");
-    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_OWN, t);
+    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_REF, t);
     if (!pt)
-        return value_make_error(vm, "addr: cannot make owner pointer type");
+        return value_make_error(vm, "addr: cannot make ref pointer type");
     if (value_is_shadow(v))
         return value_make_shadow(vm, pt);
-    return ptr_make_value(vm, pt, value_data(v), false); /* 借用：不拥有 */
+    return ptr_make_value(vm, pt, value_data(v)); /* ref 借用：不拥有 */
 }
 
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
  * 弹值 → 压 fatal 同类型值（转移，O(1) 零拷贝）：
- *   - own 指针：新值接管裸指针与 owns，源 data 清零（TDZ——运行期兜底
+ *   - own 指针：新值接管裸指针，源 data 清零（TDZ——运行期兜底
  *     防双释放；sema TDZ 检查 Step B 叠加）
  *   - 其他（ref/借用/标量）：平凡复制（ref 是 copy 语义）
  * shadow → 同类型 shadow。 */
@@ -820,16 +821,15 @@ static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     if (t->kind == TYPE_KIND_PTR_OWN || t->kind == TYPE_KIND_PTR_FATAL) {
-        /* 转移：新值接管目标 + owns，源清零（TDZ，运行期兜底防双释放） */
+        /* 转移：新值接管目标指针，源置 NULL（TDZ，运行期兜底防双释放） */
         const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
         const type_t *fatal = (t->kind == TYPE_KIND_PTR_FATAL)
                                   ? t
                                   : type_ptr_intern(vm, TYPE_KIND_PTR_FATAL,
                                                     ptr_type_base(t));
         if (!fatal) return value_make_error(vm, "move: cannot make fatal pointer type");
-        value_t *nv = ptr_make_value(vm, fatal, pv->ptr, pv->owns);
+        value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
         ((ptr_value_t *)value_data(v))->ptr = NULL;
-        ((ptr_value_t *)value_data(v))->owns = false;
         return nv;
     }
     return value_clone(vm, v);  /* 非指针 / ref：平凡复制 */
@@ -855,12 +855,11 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
                                               ptr_type_base(t));
         if (!fatal) return value_make_error(vm, "clone: cannot make fatal pointer type");
         const ptr_value_t *pv = (const ptr_value_t *)value_data(copied);
-        value_t *nv = ptr_make_value(vm, fatal, pv->ptr, pv->owns);
-        /* 清零 copied（own 深拷贝产物 owns=true，持有新堆块）：fatal 已接管，
+        value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
+        /* 清零 copied（own 深拷贝产物持有新堆块）：fatal 已接管，
            copied 若留在 scope owned 列表，销毁时与接管方双释放。转移手法与
            op_move 一致。 */
         ((ptr_value_t *)value_data(copied))->ptr = NULL;
-        ((ptr_value_t *)value_data(copied))->owns = false;
         return nv;
     }
     return copied;
@@ -873,9 +872,9 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * 作用域退出统一销毁，防双释放）。不压回（表达式语句消费）。
  *
  * 语义：`_ = move(x)` / `_ = new T{...}` 等将亡值（fatal）被显式丢弃——
- * 无接管方时在此递归释放其堆块，避免 leak；源 data 内 owns 标志随释放
- * 置 false，作用域退出扫描看到 owns=false 跳过（防双释放）。借用
- * （ref / x.& 取址）无堆块可释，no-op。 */
+ * 无接管方时在此递归释放其堆块，避免 leak；源 data 内 ptr 随释放
+ * 置 NULL，作用域退出扫描看到 ptr=NULL 跳过（防双释放）。借用
+ * （ref）无堆块可释，no-op。 */
 static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
@@ -883,8 +882,8 @@ static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
     const type_t *t = value_type(v);
     if (!t) return NULL;
     /* 借用引用 data 指向父值内部（如 arr[i]），递归释放会误伤父值——
-       跳过（ref/借用无 owns 堆块；own 借用 x.& 同理）。仅拥有 data 的值
-       （is_own=true）其内嵌 own 堆块才属本值所有。 */
+       跳过（ref 借用无堆块）。仅拥有 data 的值（非借用）其内嵌 own
+       堆块才属本值所有。 */
     if (!value_is_borrowed(v))
         ptr_free_owned_recursive(vm, t, value_data(v));
     return NULL;
@@ -986,10 +985,10 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
             memcpy((uint8_t *)data + st->fields[i].offset, value_data(src),
                    ft->size);
             /* 成员值已复制进 data：所有权随 memcpy 转移——清空源对象图内
-               所有 own/fatal 指针的 owns 标志（递归，覆盖复合字段内嵌 own
+               所有 own/fatal 指针（递归置 ptr=NULL，覆盖复合字段内嵌 own
                指针：.inner = Inner{ .p = new i32{...} } 的 Inner 值内部
                own *i32 字段，不止直接 own/fatal 指针成员）。防作用域退出时
-               源与 data 双释放；堆块归外层递归销毁；借用不受影响。 */
+               源与 data 双释放；堆块归外层递归销毁；ref 借用不受影响。 */
             ptr_clear_owned_recursive(vm, ft, value_data(src));
         }
         return value_make(vm, t, data);
@@ -1020,7 +1019,7 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
             memcpy((uint8_t *)data + tt->elems[i].offset, value_data(src),
                    et->size);
             /* 与 struct 分支同款：所有权随 memcpy 转移，清空源对象图内所有
-               own/fatal 指针的 owns 标志（递归，覆盖复合元素内嵌 own 指针）。 */
+               own/fatal 指针（递归置 ptr=NULL，覆盖复合元素内嵌 own 指针）。 */
             ptr_clear_owned_recursive(vm, et, value_data(src));
         }
         return value_make(vm, t, data);

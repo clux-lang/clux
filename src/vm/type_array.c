@@ -425,10 +425,10 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
         /* 平凡拷贝元素数据到块内偏移（data 全平凡：整段 memcpy） */
         memcpy((uint8_t *)block + i * es, value_data(e), es);
         /* 元素已复制进 block：所有权随 memcpy 转移——清空源对象图内所有
-           own/fatal 指针的 owns 标志（递归，覆盖复合元素内嵌 own 指针：
+           own/fatal 指针（递归置 ptr=NULL，覆盖复合元素内嵌 own 指针：
            Cell 元素内部 own *i32 字段，不止直接 own/fatal 指针元素）。
-           防作用域退出时源与 block 双释放；堆块归外层递归销毁；借用
-           （owns=false）不受影响。 */
+           防作用域退出时源与 block 双释放；堆块归外层递归销毁；ref
+           借用不受影响。 */
         ptr_clear_owned_recursive(vm, elem_type, value_data(e));
     }
     return value_make(vm, at, block);

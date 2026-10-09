@@ -848,7 +848,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_ADDR: {
     /* 后置取地址 x.&（m3-design §8.2）：operand → ADDR（弹值 → ref *T
-       借用指针，运行期构造 owns=false）。 */
+       借用指针，ref 总借用，运行期零标志 §13.2）。 */
     ast_addr_t *n = (ast_addr_t *)node;
     compile_expr(c, n->operand);        /* 栈: [value] */
     bcode_write_op(c->bc, BCODE_ADDR);

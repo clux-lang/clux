@@ -17,37 +17,43 @@
  * 指针类型（own *T / ref *T / fatal *T，m3-design §3）
  *
  * ptr_type_t 继承 type_t 持 base_type 指针。指针值 data 块布局 =
- * ptr_value_t { void *ptr; bool owns; }（见 type_ptr.h）：
- *   - new 产物：ptr = 堆块（value_alloc_data(base)），owns = true
- *   - x.& 取址：ptr = 栈上值 data，owns = false（借用，不释放）
- *   - ref 派生：ptr = 目标，owns = false（引用不拥有）
- *   - fatal 流转：owns 随源（move 接管 / clone 深拷贝），转移时源清零
+ * ptr_value_t { void *ptr; }（见 type_ptr.h）——运行期零标志（m3-design
+ * §13.2），所有权完全由 type kind 区分：
+ *   - own *T：总拥有堆块，dispose 释放（new 产物接管后）
+ *   - ref *T：总借用，dispose 跳过（指向栈值 / 他人堆块 / ref 派生）
+ *   - fatal *T：ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
  *
  * 三种所有权修饰（own/ref/fatal）是同一结构、独立 intern 实例（kind 区分
  * 所有权，own *i32 != ref *i32）。同一 base_type 的三种指针各自去重。
  *
  * 生命周期（m3-design §7）：
  *   - clone（own）：深拷贝整个对象图——分配新堆块 + memcpy 内容，新指针
- *     指向新堆块（owns=true）。own 唯一所有权 + 递归销毁，浅拷贝必双释放。
- *   - clone（ref / owns=false）：复制指针值（借用，不复制被指物）。
- *   - clone（fatal）：转移——新值接管裸指针与 owns，源置 NULL（fatal 是
+ *     指向新堆块。own 唯一所有权 + 递归销毁，浅拷贝必双释放。
+ *   - clone（ref / ptr=NULL）：复制指针值（借用，不复制被指物）。
+ *   - clone（fatal）：转移——新值接管裸指针，源置 NULL（fatal 是
  *     将亡值，DEFINE/参数接收处接管，不深拷贝，避免 move/clone 双分配）。
- *   - assign：覆盖前释放旧堆块（own+owns）。
- *   - dispose：own/fatal 且 owns → 释放堆块；借用（ref/取址/流转中）no-op。
- *   - eq/ne：比较 ptr 字段（owns 非值语义）。
+ *   - assign：覆盖前释放旧堆块（own/fatal 且 ptr≠NULL）。
+ *   - dispose：own/fatal 且 ptr≠NULL → 释放堆块；借用（ref）no-op。
+ *   - eq/ne：比较 ptr 字段。
  *   - implicit_cast：own → ref 身份拷贝（借用，只复制指针值）；任意指针 →
  *     opaque 隐式（§8.4）。
  *   - explicit_cast：opaque → 任意指针（as，§8.4）。
  *   - type_equal / type_extends：按 base 递归（三种所有权修饰是独立类型）。
  * =========================================================================== */
 
-/* ---- 内部：释放指针拥有的堆块（own/fatal 且 owns=true） ---- */
+/* ---- 内部：释放指针拥有的堆块（own/fatal 且 ptr≠NULL） ---- */
 
 static void ptr_free_heap(vm_t *vm, const value_t *v) {
     if (!v || value_is_shadow(v)) return;
-    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
-    if (pv && pv->owns && pv->ptr) {
+    const type_t *t = value_type(v);
+    if (!t) return;
+    /* 仅 own/fatal 释放堆块；ref 总借用跳过 */
+    if (t->kind != TYPE_KIND_PTR_OWN && t->kind != TYPE_KIND_PTR_FATAL)
+        return;
+    ptr_value_t *pv = (ptr_value_t *)value_data(v);
+    if (pv && pv->ptr) {
         void *heap = pv->ptr;
+        pv->ptr = NULL;
         allocator_free(vm->alloc, &heap);
     }
 }
@@ -59,14 +65,15 @@ static void ptr_free_heap(vm_t *vm, const value_t *v) {
  * 在 value_dispose 前扫描 owned 值调用（销毁变量前先销毁变量内部所有 own
  * 指向的堆内存，含结构体字段内嵌的 own 指针）。
  *
- * 双释放防线：owns=false（ref / x.& 借用 / fatal 已转移）一律跳过；递归
- * 销毁后堆块随即释放，不重复扫描（每个 ptr_value_t 只被消费一次）。
+ * 双释放防线：ref 总借用跳过；own/fatal ptr=NULL（已转移）跳过；递归
+ * 销毁后堆块随即释放并置 ptr=NULL，不重复扫描（每个 ptr_value_t 只被
+ * 消费一次）。
  * =========================================================================== */
 
 /* 目标是否含需递归销毁的 own 指针（own 指针 + 含 own 的复合类型）。
    fatal 不在此列：fatal 是将亡值，sema 保证必被 own 接管（R1，§3.3），
-   接管后源清零 owns=false，无堆块可销毁；`_ =` 丢弃场景由 DISPOSE 指令
-   特殊处理（递归释放后源同样清零）。 */
+   接管后源 ptr=NULL，无堆块可销毁；`_ =` 丢弃场景由 DISPOSE 指令
+   特殊处理（递归释放后源同样置 NULL）。 */
 static bool ptr_type_needs_scan(const type_t *t) {
     if (!t) return false;
     switch (t->kind) {
@@ -86,19 +93,16 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR_OWN: {
-        /* own 指针：owns=true 拥有堆块 → 先递归销毁堆块内容（T 含 own 字段
-           时内嵌堆块一并释放），再释放本堆块。借用（ref/x.& 取址/已转移）
-           跳过。释放后清空指针值（ptr=NULL、owns=false）——后续
-           value_dispose → ptr_dispose → ptr_free_heap 看到 owns=false 跳过，
-           防双释放。fatal 不释放（sema 保证被 own 接管；接管路径源清零）。 */
+        /* own 指针：ptr≠NULL 拥有堆块 → 先递归销毁堆块内容（T 含 own 字段
+           时内嵌堆块一并释放），再释放本堆块，置 ptr=NULL 防双释放。
+           ref 总借用跳过（由 type kind 区分，不走此分支）。 */
         ptr_value_t *pv = (ptr_value_t *)data;
-        if (!pv->owns || !pv->ptr) return;
+        if (!pv->ptr) return;
         const type_t *base = ptr_type_base(t);
         if (base && ptr_type_needs_scan(base))
             ptr_free_owned_recursive(vm, base, pv->ptr);
         void *heap = pv->ptr;
         pv->ptr = NULL;
-        pv->owns = false;
         allocator_free(vm->alloc, &heap);
         return;
     }
@@ -156,8 +160,8 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
 }
 
 /* 所有权转移清空（接管辅助，m3-design §3.3）：递归把 data 块内所有
-   owns=true 的 own/fatal 指针置 owns=false（**不释放**——指针值已随 memcpy
-   复制进接管方堆块，所有权随拷贝转移）。
+   own/fatal 指针置 ptr=NULL（**不释放**——指针值已随 memcpy 复制进
+   接管方堆块，所有权随拷贝转移）。
    供 op_new/op_construct 在成员值 memcpy 进目标块后调用，清空源对象图内
    所有内嵌 own 指针，防作用域退出时与接管方双释放（与
    ptr_free_owned_recursive 同遍历，但不释放）。 */
@@ -167,11 +171,11 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     case TYPE_KIND_PTR_OWN:
     case TYPE_KIND_PTR_FATAL: {
         ptr_value_t *pv = (ptr_value_t *)data;
-        if (!pv->owns) return;
+        if (!pv->ptr) return;
         const type_t *base = ptr_type_base(t);
         if (base && ptr_type_needs_scan(base))
             ptr_clear_owned_recursive(vm, base, pv->ptr);
-        pv->owns = false;  /* 只清标志：堆块已归接管方，不释放 */
+        pv->ptr = NULL;  /* 只清指针：堆块已归接管方，不释放 */
         return;
     }
     case TYPE_KIND_STRUCT: {
@@ -229,10 +233,10 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
 /* ---- 生命周期：clone / assign / dispose ---- */
 
 /* 深拷贝 type 类型的数据块（对象图克隆，m3-design §7"深拷贝整个对象图"）：
-   - own/fatal 指针且 owns=true：分配新堆块 + 递归克隆被指向类型（内嵌
-     own 字段一并深拷贝），新指针 owns=true——两个实例各自独占完整对象图，
-     递归销毁互不干扰（无共享指针 = 无双释放）
-   - 借用（ref / x.& / fatal 已转移）：复制指针值，不深拷贝被指物（§7"深
+   - own/fatal 指针且 ptr≠NULL：分配新堆块 + 递归克隆被指向类型（内嵌
+     own 字段一并深拷贝），新指针指向独立新堆块——两个实例各自独占完整
+     对象图，递归销毁互不干扰（无共享指针 = 无双释放）
+   - 借用（ref / ptr=NULL）：复制指针值，不深拷贝被指物（§7"深
      拷贝遇到 ref 字段直接 copy"）
    - struct/tuple/array/option/union：按字段/元素/tag 递归克隆
    - cunion：整块 memcpy（无 tag，无法确定激活 member，开发者自负）
@@ -243,17 +247,16 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
     case TYPE_KIND_PTR_OWN:
     case TYPE_KIND_PTR_FATAL: {
         const ptr_value_t *sp = (const ptr_value_t *)src;
-        if (sp->owns && sp->ptr) {
+        if (sp->ptr) {
             const type_t *base = ptr_type_base(type);
             if (!base) {
                 memcpy(dst, src, type->size);
                 break;
             }
             void *heap = ptr_clone_block(vm, base, sp->ptr);
-            ptr_value_t np = { heap, true };
-            memcpy(dst, &np, sizeof np);
+            memcpy(dst, &heap, sizeof(heap));
         } else {
-            memcpy(dst, src, type->size);  /* 借用：复制指针值 */
+            memcpy(dst, src, type->size);  /* 借用 / 已转移：复制指针值 */
         }
         break;
     }
@@ -334,30 +337,29 @@ static value_t *ptr_clone(vm_t *vm, value_t *v) {
 
     switch (t->kind) {
     case TYPE_KIND_PTR_OWN:
-        if (pv->owns) {
+        if (pv->ptr) {
             /* own + 拥有堆块：深拷贝整个对象图——递归克隆被指向类型（含
-               内嵌 own 字段），新指针指向独立新堆块（owns=true）。两指针
-               各自独占完整对象图，各自释放，无双释放。 */
+               内嵌 own 字段），新指针指向独立新堆块。两指针各自独占完整
+               对象图，各自释放，无双释放。 */
             const type_t *base = ptr_type_base(t);
             if (!base) return value_make_error(vm, "ptr: owner pointer missing base type");
             void *heap = ptr_clone_block(vm, base, pv->ptr);
-            return ptr_make_value(vm, t, heap, true);
+            return ptr_make_value(vm, t, heap);
         }
-        /* own 借用（x.& 指向栈值）：复制指针值，不复制被指物 */
-        return ptr_make_value(vm, t, pv->ptr, false);
+        /* own ptr=NULL（已转移）：复制空指针值 */
+        return ptr_make_value(vm, t, NULL);
     case TYPE_KIND_PTR_FATAL:
-        /* fatal 流转：转移——新值接管裸指针与 owns，源置 NULL（fatal 是
+        /* fatal 流转：转移——新值接管裸指针，源置 NULL（fatal 是
            将亡值，接管点在 DEFINE/参数接收处，不深拷贝——避免 move/clone
            产物再深拷贝一次导致双分配）。 */
         {
-            value_t *nv = ptr_make_value(vm, t, pv->ptr, pv->owns);
+            value_t *nv = ptr_make_value(vm, t, pv->ptr);
             ((ptr_value_t *)value_data(v))->ptr = NULL;
-            ((ptr_value_t *)value_data(v))->owns = false;
             return nv;
         }
     default:
         /* ref 及一切借用：复制指针值（ref 是值拷贝语义，§3.2） */
-        return ptr_make_value(vm, t, pv->ptr, pv->owns);
+        return ptr_make_value(vm, t, pv->ptr);
     }
 }
 
@@ -372,19 +374,19 @@ static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
     }
     /* shadow：只检查类型兼容性，不拷贝 data */
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    /* 覆盖前释放旧堆块（own/fatal 且 owns=true）；借用无堆块跳过 */
+    /* 覆盖前释放旧堆块（own/fatal 且 ptr≠NULL）；借用（ref）无堆块跳过 */
     ptr_free_heap(vm, dst);
     memcpy(value_data(dst), value_data(src), value_type(dst)->size);  /* 指针值覆盖 */
     return dst;
 }
 
 static void ptr_dispose(vm_t *vm, value_t *v) {
-    /* own/fatal 拥有堆块 → 释放（作用域退出销毁，m3-design §3.1）；
-       借用（ref / x.& 取址 / fatal 已流转置 NULL）→ no-op，防双释放。 */
+    /* own/fatal 且 ptr≠NULL → 释放堆块（作用域退出销毁，m3-design §3.1）；
+       ref 总借用 / ptr=NULL（已转移）→ no-op，防双释放。 */
     ptr_free_heap(vm, v);
 }
 
-/* ---- eq/ne：指针目标地址比较（owns 非值语义） ---- */
+/* ---- eq/ne：指针目标地址比较 ---- */
 
 static value_t *ptr_eq(vm_t *vm, value_t *a, value_t *b) {
     if (value_is_shadow(a) || value_is_shadow(b))
@@ -433,35 +435,34 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
 
     /* 任意指针 → opaque 隐式（m3-design §8.4）：身份拷贝指针目标地址。
-       owns 不随转换（opaque 是裸指针，不拥有堆块；堆块仍归源指针释放）。 */
+       opaque 是裸指针，不拥有堆块；堆块仍归源指针释放。 */
     if (is_opaque_type(target)) {
         void *data = value_alloc_data_copy(vm->alloc, target, &pv->ptr);
         return value_make(vm, target, data);
     }
 
     /* own → ref 身份拷贝（借用的表达，§3.2）：同 base 的 own → ref。
-       ref 是借用，owns=false——不拥有堆块，堆块归原 own 释放。 */
+       ref 总借用——不拥有堆块，堆块归原 own 释放。 */
     if (src->kind == TYPE_KIND_PTR_OWN && target &&
         target->kind == TYPE_KIND_PTR_REF &&
         ptr_type_base(src) == ptr_type_base(target)) {
-        return ptr_make_value(vm, target, pv->ptr, false);
+        return ptr_make_value(vm, target, pv->ptr);
     }
 
     /* fatal → own 接管（§3.3）：var c: own *i32 = clone(p) / move(p) 的
-       DEFINE 路径。fatal 是将亡值——新值接管裸指针与 owns（转移语义，
+       DEFINE 路径。fatal 是将亡值——新值接管裸指针（转移语义，
        与 ptr_clone fatal 分支一致），源置 NULL 防双释放。 */
     if (src->kind == TYPE_KIND_PTR_FATAL && target &&
         target->kind == TYPE_KIND_PTR_OWN &&
         ptr_type_base(src) == ptr_type_base(target)) {
-        value_t *nv = ptr_make_value(vm, target, pv->ptr, pv->owns);
+        value_t *nv = ptr_make_value(vm, target, pv->ptr);
         ((ptr_value_t *)value_data(v))->ptr = NULL;
-        ((ptr_value_t *)value_data(v))->owns = false;
         return nv;
     }
 
     /* 同类型身份拷贝（ref → ref 等，clone 语义） */
     if (src == target) {
-        return ptr_make_value(vm, target, pv->ptr, pv->owns);
+        return ptr_make_value(vm, target, pv->ptr);
     }
 
     return value_make_error(vm, "ptr: unsupported implicit cast for pointer");
@@ -473,7 +474,7 @@ static value_t *ptr_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     /* 同类型身份拷贝 */
     if (value_type(v) == target) {
         const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
-        return ptr_make_value(vm, target, pv->ptr, pv->owns);
+        return ptr_make_value(vm, target, pv->ptr);
     }
 
     return value_make_error(vm, "ptr: unsupported explicit cast for pointer");
@@ -649,7 +650,7 @@ const type_t *type_ptr_seal(vm_t *vm, const type_t *t) {
         }
     }
 
-    /* 指针值 size/align 恒定（ptr_value_t = 裸指针 + owns 标志，对齐指针宽），
+    /* 指针值 size/align 恒定（ptr_value_t = 裸指针，对齐指针宽），
        不依赖 base_type 布局 */
     pt->base.size   = sizeof(ptr_value_t);
     pt->base.align  = alignof(ptr_value_t);
@@ -682,11 +683,11 @@ const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base) {
     return type_ptr_seal(vm, &pt->base);
 }
 
-/* 构造指针值：目标地址 + 拥有标志（own *T / ref *T / fatal *T 统一）。
+/* 构造指针值：目标地址（own *T / ref *T / fatal *T 统一，所有权由 type
+ * kind 区分，m3-design §13.2 运行期零标志）。
  * data 块 = ptr_value_t（值布局，见 type_ptr.h）。 */
-value_t *ptr_make_value(vm_t *vm, const type_t *pt,
-                        void *target, bool owns) {
-    ptr_value_t pv = { target, owns };
+value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target) {
+    ptr_value_t pv = { target };
     void *data = value_alloc_data_copy(vm->alloc, pt, &pv);
     return value_make(vm, pt, data);
 }

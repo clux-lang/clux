@@ -90,14 +90,14 @@ static value_t *opaque_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
 static value_t *opaque_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     /* opaque → 任意指针显式（as，§8.4）。源是 opaque（vtable 分派按源
        类型）——对称于 ptr_implicit_cast 的指针→opaque 分支。opaque data
-       存裸指针值，拷贝进指针值 target 槽（owns=false：从 opaque 恢复的
-       指针是借用，无 owns 信息，堆块归原始持有者）。 */
+       存裸指针值，拷贝进指针值 target 槽。从 opaque 恢复的指针不携带
+       所有权信息（堆块归原始持有者），目标类型决定所有权语义。 */
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     if (target && (target->kind == TYPE_KIND_PTR_OWN ||
                    target->kind == TYPE_KIND_PTR_REF ||
                    target->kind == TYPE_KIND_PTR_FATAL)) {
         void *opq = *(void **)value_data(v);
-        return ptr_make_value(vm, target, opq, false);
+        return ptr_make_value(vm, target, opq);
     }
     if (value_type(v) == target) {
         void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
