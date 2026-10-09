@@ -312,11 +312,24 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
   /* 2. 类型校验（显式类型 / 推断，与普通 var 一致）。显式类型在 Pass 3a
      未填充（sym->type 为 NULL），此处先 resolve（与 shadow_var_def 的
      "显式类型校验"语义对齐）。 */
+  bool is_global = (scope == sema->global_scope);
   if (vd->type_expr) {
     if (!sym->type) {
       sym->type = sema_resolve_type_slot(sema, &vd->type_expr);
     }
     if (sym->type) {
+      /* M5 约束：全局 comptime var 类型必须是 const T（值在 sema 求值后
+         编译为字节码常量，不可变更；防止 import 顺序导致值不一致）。
+         局部 comptime var 不受此约束。 */
+      if (is_global && !type_is_const(sym->type)) {
+        char tn[64];
+        sema_type_name(sym->type, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+                   "global comptime variable '%.*s' type must be const "
+                   "(got '%s'); use 'const %s' or omit the type to auto-infer",
+                   (int)vd->name.len, vd->name.ptr, tn, tn);
+        return false;
+      }
       value_t *dst = value_make_shadow(sema->vm, sym->type);
       if (value_is_error(sema->vm, value_assign(sema->vm, dst, sh))) {
         char tn[64], itn[64];
@@ -330,7 +343,14 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
       }
     }
   } else {
-    sym->type = value_type(sh);
+    /* 无显式类型 → 推断。全局 comptime var 自动加 const 修饰
+       （const T = init 表达式类型）。局部 comptime var 原样推断。 */
+    if (is_global) {
+      sym->type = type_const_intern(sema->vm, value_type(sh));
+      if (!sym->type) sym->type = value_type(sh); /* 兜底 */
+    } else {
+      sym->type = value_type(sh);
+    }
   }
 
   /* 3. ctfe 强制编译期求值（vm->comptime 状态标记） */

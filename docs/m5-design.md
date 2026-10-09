@@ -147,6 +147,24 @@ import std from "std";  // 非路径 → 包导入
 - export var 受全局 own 禁止规则约束（§9.4）：不能 export `own *T` / `own []T`
 - 可导出的 var 类型：标量 / str / ref / func / type value
 - export func：函数 value，通过 `::` 访问后可调用
+
+### 3.4 comptime var 类型约束（M5 新增）
+
+**全局 comptime var 的类型必须是 `const T`。**
+
+comptime var 是编译期常量——其值在 sema 阶段求值后编译为字节码常量，不可变更。
+为防止 import 顺序导致值不一致，comptime var 的类型必须带 const 修饰：
+
+```
+comptime var b: const i32 = 123;   // 合法
+comptime var b = 123;               // 合法（自动推断为 const i32）
+comptime var b: i32 = 123;          // 非法（类型不是 const T → 编译错误）
+```
+
+- 显式类型 `const T`：合法
+- 无类型标注（推断）：自动推断为 `const T`（对 init 表达式类型加 const 修饰）
+- 显式类型 `T`（非 const）：编译错误 "comptime variable type must be const (got '%s')"
+- 普通 `var`（非 comptime）：不受此约束（但全局普通 var 也有 own 禁止等约束）
 - export type/struct/enum/union/cunion：类型定义，通过 `::` 访问后可用于类型标注或构造
 
 ---

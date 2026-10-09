@@ -1082,9 +1082,10 @@ TEST_F(SemaTest, BlockVariableDoesNotLeakOut) {
 /* ================================================================ */
 
 TEST_F(SemaTest, ComptimeVarGlobal) {
-    /* 全局 comptime var：符号表编码常量，定义点从语句链摘除（不进运行时） */
+    /* 全局 comptime var：符号表编码常量，定义点从语句链摘除（不进运行时）。
+       M5 约束：全局 comptime var 类型必须是 const T。 */
     EXPECT_TRUE(analyze(
-        "comptime var A: i32 = 42;"
+        "comptime var A: const i32 = 42;"
         "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
@@ -1093,7 +1094,7 @@ TEST_F(SemaTest, ComptimeVarGlobal) {
     EXPECT_TRUE(a->is_comptime);
     EXPECT_TRUE(a->ct_valid);
     EXPECT_TRUE(a->flow_init);
-    EXPECT_EQ(a->type, vm_->type_i32);
+    EXPECT_TRUE(type_is_const(a->type));
     EXPECT_EQ(a->ct.i, 42);
 }
 
@@ -1106,18 +1107,18 @@ TEST_F(SemaTest, ComptimeVarInference) {
 
     sema_symbol_t *n = sema_lookup(sema_->global_scope, STRSLICE_LIT("N"));
     ASSERT_NE(n, nullptr);
-    EXPECT_EQ(n->type, vm_->type_i32);
+    EXPECT_TRUE(type_is_const(n->type));
     EXPECT_EQ(n->ct.i, 7);
 }
 
 TEST_F(SemaTest, ComptimeVarTypes) {
     /* 各类标量 + 字符串折叠编码 */
     EXPECT_TRUE(analyze(
-        "comptime var I: i64 = 1;"
-        "comptime var U: u64 = 2u64;"
-        "comptime var F: f64 = 3.5;"
-        "comptime var B: bool = true;"
-        "comptime var S: str = \"hi\";"
+        "comptime var I: const i64 = 1;"
+        "comptime var U: const u64 = 2u64;"
+        "comptime var F: const f64 = 3.5;"
+        "comptime var B: const bool = true;"
+        "comptime var S: const str = \"hi\";"
         "func main(): void {"
         "  var a:i64 = I;"
         "  var b:u64 = U;"
@@ -1419,7 +1420,7 @@ TEST_F(SemaTest, ComptimeFuncWithControlFlow) {
 TEST_F(SemaTest, ComptimeVarArrayEncode) {
     /* comptime var 数组常量：递归编码进符号表（elems 连续块 + count） */
     EXPECT_TRUE(analyze(
-        "comptime var A: [3]i32 = .[3]i32{ 1, 2, 3 };"
+        "comptime var A: const [3]i32 = .[3]i32{ 1, 2, 3 };"
         "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
@@ -1441,7 +1442,7 @@ TEST_F(SemaTest, ComptimeVarArrayPartialFillZeroPads) {
     /* comptime var 数组 fill 值包（M2 construct 完全显式）：.<3>i32{ 1, <0,2> }
        总元素数 = 1 + 2 = 3 == 长度，CTFE 求值 fill 展开为逐元素零值 */
     EXPECT_TRUE(analyze(
-        "comptime var A: [3]i32 = .[3]i32{ 1, <0,2> };"
+        "comptime var A: const [3]i32 = .[3]i32{ 1, <0,2> };"
         "func main(): void { var x = A; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
@@ -1682,7 +1683,7 @@ TEST_F(SemaTest, ComptimeVarNotConstant) {
 
 TEST_F(SemaTest, ComptimeVarTypeMismatch) {
     EXPECT_FALSE(analyze(
-        "comptime var A: i32 = 1.5;"
+        "comptime var A: const i32 = 1.5;"
         "func main(): void { }"));
     expect_message(0, "cannot initialize comptime variable 'A'");
 }
