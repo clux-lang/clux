@@ -194,6 +194,19 @@ typedef enum {
                                §3.3：fatal 必被 own 接管，_ = 丢弃例外）→
                                不压回（表达式语句消费）。借用（ref/x.&）
                                跳过。 */
+
+    /* ---- M4 切片段（m4-design §1/§2/§4）---- */
+    BCODE_PUSH_SLICE,       /* u8 kind：分配空 slice type（开放，elem=NULL，
+                               不入池）+ 压其 type value。kind = 所有权修饰
+                               （TYPE_KIND_SLICE_OWN/REF/FATAL） */
+    BCODE_SLICE,            /* u8 flags：bit0=low present, bit1=high present。
+                               弹 self + 按 flags 弹 high/low → 压 ref []T 胖指针
+                               （s[low:high] 切片表达式，恒产 ref []T，m4-design
+                               §4；省略 low=0, 省略 high=len(self)） */
+    BCODE_MAKE,             /* u32 init_count：弹 init_count 个初始值 + 弹 length
+                               + 弹 elem_type → 分配 len*elem_size 堆块 + 逐元素
+                               布值 → 压 fatal []T（make(T,N,init...) 宏函数，
+                               m4-design §2） */
 } bcode_op_t;
 
 /* ================================================================ */

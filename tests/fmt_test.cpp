@@ -559,12 +559,12 @@ TEST(Fmt, TopLevelCommentBlockThenBlankLine) {
 /* 函数字面量显示名保留：func |cap| name(params):ret 的 name 不得丢失。 */
 TEST(Fmt, FuncLiteralDisplayNamePreserved) {
     std::string out = fmt(
-        "func make():func(i32)->i32{\n"
+        "func mk_fn():func(i32)->i32{\n"
         "var base:i32=10;\n"
         "return func |base| add(x: i32):i32{return base+x;};\n"
         "}\n");
     EXPECT_EQ(out,
-              "func make(): func(i32) -> i32 {\n"
+              "func mk_fn(): func(i32) -> i32 {\n"
               "    var base: i32 = 10;\n"
               "    return func |base| add(x: i32): i32 {\n"
               "        return base + x;\n"

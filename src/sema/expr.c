@@ -21,6 +21,9 @@
 #include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
+#include "parser/ast_slice_type.h"
+#include "parser/ast_slice.h"
+#include "parser/ast_make.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_option.h"
 #include "parser/ast_string_lit.h"
@@ -47,6 +50,7 @@
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/type_opaque.h"
 
 #include <stdio.h>
@@ -812,6 +816,31 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
       }
 
+      /* len 内建函数特判（m4-design §5/§11.3）：len 注册为 variadic，
+         参数类型不经签名校验——此处校验实参是可长序列（array/slice/str）。
+         len 恒返回 u64（注册签名已正确，无需替换返回类型）。 */
+      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
+          argc == 1 && arg_shadows[0] &&
+          call->callee && call->callee->kind == AST_IDENT) {
+        /* 按 len 函数名匹配（fid 依赖注册顺序，按名更稳健） */
+        ast_ident_t *ci = (ast_ident_t *)call->callee;
+        if (ci && ci->name.len == 3 &&
+            memcmp(ci->name.ptr, "len", 3) == 0) {
+          const type_t *at = value_type(arg_shadows[0]);
+          if (at && at->kind != TYPE_KIND_ARRAY &&
+              at->kind != TYPE_KIND_SLICE_OWN &&
+              at->kind != TYPE_KIND_SLICE_REF &&
+              at->kind != TYPE_KIND_SLICE_FATAL &&
+              at->kind != TYPE_KIND_STR) {
+            char tn[64];
+            sema_type_name(at, tn, sizeof(tn));
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "len: argument must be array/slice/str, got %s", tn);
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          }
+        }
+      }
+
       if (value_is_error(sema->vm, result)) {
         error_data_t *ed = (error_data_t *)value_data(result);
         const char *msg = ed && ed->message ? ed->message
@@ -940,7 +969,10 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "generic instantiation is not implemented (index on a type value)");
         return value_make_shadow(sema->vm, sema->vm->type_void);
       }
-      if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE)) {
+      if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE &&
+                  bt->kind != TYPE_KIND_SLICE_OWN &&
+                  bt->kind != TYPE_KIND_SLICE_REF &&
+                  bt->kind != TYPE_KIND_SLICE_FATAL)) {
         char tn[64];
         sema_type_name(bt, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -1018,8 +1050,89 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, e ? e->type : sema->vm->type_void);
       }
 
-      const type_t *et = array_type_elem(bt);
+      const type_t *et;
+      if (bt->kind == TYPE_KIND_SLICE_OWN || bt->kind == TYPE_KIND_SLICE_REF ||
+          bt->kind == TYPE_KIND_SLICE_FATAL) {
+        et = slice_type_elem(bt);
+      } else {
+        et = array_type_elem(bt);
+      }
       return value_make_shadow(sema->vm, et ? et : sema->vm->type_void);
+    }
+    case AST_SLICE_TYPE: {
+      /* 切片类型表达式 own/ref/fatal []T（类型即表达式，m4-design §1）：
+         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
+         返回真实 type value。与 AST_ARRAY 同构。 */
+      const type_t *t = sema_resolve_type_slot(sema, node);
+      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      return type_as_value(sema->vm, t);
+    }
+    case AST_SLICE: {
+      /* 切片表达式 s[low:high]（m4-design §4）：适用于数组/切片/str，
+         恒产 ref []T（借用胖指针）。low/high 可省略（NULL = 0/len）。
+         arr[:] 是显式数组转切片的唯一路径（[N]T → ref []T 不自动）。 */
+      ast_slice_t *n = (ast_slice_t *)*node;
+      value_t *base = sema_expr(sema, &n->object, scope);
+      if (value_is_error(sema->vm, base) ||
+          value_is_type(base, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      const type_t *bt = value_type(base);
+      if (!bt) return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      /* 确定元素类型 + 基类合法性 */
+      const type_t *et = NULL;
+      if (bt->kind == TYPE_KIND_ARRAY) {
+        et = array_type_elem(bt);
+      } else if (bt->kind == TYPE_KIND_SLICE_OWN ||
+                 bt->kind == TYPE_KIND_SLICE_REF ||
+                 bt->kind == TYPE_KIND_SLICE_FATAL) {
+        et = slice_type_elem(bt);
+      } else if (bt->kind == TYPE_KIND_STR) {
+        /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
+        et = sema->vm->type_u8;  /* TODO: const u8 — const 修饰待 const 切片支持 */
+      } else {
+        char tn[64];
+        sema_type_name(bt, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot slice value of type %s", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 求值 low/high（均可是运行期值，运行期做越界检查） */
+      if (n->low) {
+        value_t *low = sema_expr(sema, &n->low, scope);
+        if (value_is_error(sema->vm, low) ||
+            value_is_type(low, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (!value_is_type(low, TYPE_KIND_INT)) {
+          char tn[64];
+          op_type_name(low, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, n->low),
+                     "slice lower bound must be an integer, got %s", tn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
+      if (n->high) {
+        value_t *high = sema_expr(sema, &n->high, scope);
+        if (value_is_error(sema->vm, high) ||
+            value_is_type(high, TYPE_KIND_VOID))
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (!value_is_type(high, TYPE_KIND_INT)) {
+          char tn[64];
+          op_type_name(high, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, n->high),
+                     "slice upper bound must be an integer, got %s", tn);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
+
+      /* 恒产 ref []T */
+      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_REF,
+                                                 et ? et : sema->vm->type_void);
+      if (!slice_t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      sema_type_register(sema, slice_t);
+      return value_make_shadow(sema->vm, slice_t);
     }
     case AST_ARRAY: {
       /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
@@ -1494,6 +1607,103 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);
+    }
+    case AST_MAKE: {
+      /* make 编译期宏函数 make(T, N, init...) → fatal []T（m4-design §2）。
+         T 是元素类型，N 是长度（可运行期值），init... 是初始值列表（支持
+         <v,M> fill 值包，同数组构造）。clux 无默认零值，init 必须覆盖
+         全部元素。返回 fatal []T（将亡值，须被 own 接管）。
+         sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
+      ast_make_t *n = (ast_make_t *)*node;
+
+      /* 解析元素类型 T */
+      const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
+      if (!et) return value_make_shadow(sema->vm, sema->vm->type_void);
+
+      /* 求值长度 N（shadow 求值，运行期可变） */
+      value_t *lenv = sema_expr(sema, &n->length, scope);
+      if (value_is_error(sema->vm, lenv) ||
+          value_is_type(lenv, TYPE_KIND_VOID))
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (!value_is_type(lenv, TYPE_KIND_INT)) {
+        char tn[64];
+        op_type_name(lenv, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, n->length),
+                   "make: length must be an integer, got %s", tn);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
+
+      /* 校验初始值列表：计算元素总数（含 fill 展开），逐元素类型检查 */
+      size_t total = 0;
+      for (ast_node_t *it = n->inits; it; it = it->next) {
+        if (it->kind == AST_FILL) {
+          size_t cnt;
+          if (!sema_eval_array_bound(sema, &((ast_fill_t *)it)->count, &cnt))
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          /* fill 的值部分也要类型检查 */
+          value_t *fv = sema_expr(sema, &((ast_fill_t *)it)->value, scope);
+          if (value_is_error(sema->vm, fv) ||
+              value_is_type(fv, TYPE_KIND_VOID))
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          value_t *dst = value_make_shadow(sema->vm, et);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(et, tn, sizeof(tn));
+            sema_type_name(value_type(fv), fn, sizeof(fn));
+            diag_error(sema->diag, sema_loc(sema, ((ast_fill_t *)it)->value),
+                       "make: cannot initialize %s element with %s", tn, fn);
+          }
+          total += cnt;
+        } else {
+          value_t *fv = sema_expr(sema, &it, scope);
+          if (value_is_error(sema->vm, fv) ||
+              value_is_type(fv, TYPE_KIND_VOID))
+            return value_make_shadow(sema->vm, sema->vm->type_void);
+          value_t *dst = value_make_shadow(sema->vm, et);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(et, tn, sizeof(tn));
+            sema_type_name(value_type(fv), fn, sizeof(fn));
+            diag_error(sema->diag, sema_loc(sema, it),
+                       "make: cannot initialize %s element with %s", tn, fn);
+          }
+          total += 1;
+        }
+      }
+
+      /* clux 无默认零值——init 必须覆盖全部元素（N 可运行期值，编译期
+         只校验 init 数量 > 0；N 运行期校验 total == N 由 MAKE 指令兜底）。
+         若 N 是编译期常量，编译期即校验 total == N。
+         例外：N == 0（零长度切片）允许无初始值。 */
+      if (n->inits == NULL) {
+        bool zero_len = false;
+        if (n->length && n->length->kind == AST_INT_LIT &&
+            ((ast_int_lit_t *)n->length)->value == 0)
+          zero_len = true;
+        if (!zero_len) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "make: initial values are required (clux has no default zero)");
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
+
+      /* 若 N 是编译期常量，校验 total == N */
+      if (n->length->kind == AST_INT_LIT) {
+        uint64_t nval = ((ast_int_lit_t *)n->length)->value;
+        if ((uint64_t)total != nval) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "make: expected %llu elements, got %zu",
+                     (unsigned long long)nval, total);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
+
+      /* 返回 fatal []T shadow——make 产新堆块，与 new 统一 */
+      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL,
+                                                 et);
+      if (!slice_t) return value_make_shadow(sema->vm, sema->vm->type_void);
+      sema_type_register(sema, slice_t);
+      return value_make_shadow(sema->vm, slice_t);
     }
     case AST_DEREF: {
       /* 后置解引用取值 r.*（m3-design §8.2）：由指针得值。操作数必须是

@@ -9,6 +9,10 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_slice_type.h"
+#include "parser/parse_utils.h"
+#include "vm/type_slice.h"
+#include "core/strslice.h"
 
 /* ===========================================================================
  * 类型表达式编译（类型即表达式，m2-design 关键架构决策 6）
@@ -280,6 +284,59 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     }
 
     bcode_write_op(c->bc, BCODE_SEAL);         /* 封闭：算布局（消费栈） */
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+    return;
+  }
+
+  if (type_expr->kind == AST_SLICE_TYPE) {
+    /* own/ref/fatal []T 切片类型（声明-定义两步模型，与指针同构）：
+       声明：PUSH_SLICE <kind> 压开放 slice type value（elem=NULL）→
+       DEFINE_TYPE <tid> 绑定 program id + 登记进 types_by_id → LOAD_TYPE
+       <tid> 拉回开放对象（定义起点）。
+       定义：元素类型（递归 compile_type_expr）→ SET_TYPE 设 elem → SEAL
+       封闭（切片 size/align 恒定 = 2 指针宽，密封不依赖 elem 布局）→
+       LOAD_TYPE <tid> 拉回类型值（保持"类型表达式压类型值"契约）。
+       注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
+       替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景。 */
+    ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
+
+    /* ownership token → type_kind_t（与 sema.c 映射一致） */
+    type_kind_t kind = TYPE_KIND_SLICE_REF; /* 默认防御 */
+    if (sl->ownership) {
+      strslice_t own = token_strslice(sl->ownership);
+      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
+        kind = TYPE_KIND_SLICE_OWN;
+      } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
+        kind = TYPE_KIND_SLICE_REF;
+      } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
+        kind = TYPE_KIND_SLICE_FATAL;
+      }
+    }
+
+    bcode_write_op(c->bc, BCODE_PUSH_SLICE);   /* 栈: [open_slice_type] */
+    bcode_write_u8(c->bc, (uint8_t)kind);
+    st_push(c, 1);
+
+    uint32_t tid = c->type_id_next++;
+    bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回开放对象（定义起点） */
+    bcode_write_u32(c->bc, tid);
+    st_push(c, 1);
+
+    compile_type_expr(c, sl->elem_type);       /* 栈: [open, elem_type] */
+    st_push(c, 1);
+
+    bcode_write_op(c->bc, BCODE_SET_TYPE);     /* 弹 elem_type → 设进 open */
+    st_push(c, -1);
+
+    bcode_write_op(c->bc, BCODE_SEAL);         /* 封闭（消费栈） */
     st_push(c, -1);
 
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);    /* 拉回类型值（契约：压 +1） */

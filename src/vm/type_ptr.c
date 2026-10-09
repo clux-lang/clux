@@ -5,6 +5,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_array.h"
+#include "vm/type_slice.h"
 #include "vm/type_union.h"
 #include "vm/value.h"
 #include "vm/vm.h"
@@ -12,6 +13,12 @@
 
 #include <string.h>
 #include <stdalign.h>
+
+/* ---- 前向声明：slice_free_elems / slice_clear_elems 在 type_slice.c 中
+   定义，切片元素级递归销毁/清空由下方 ptr_free_owned_recursive /
+   ptr_clear_owned_recursive 的 SLICE_OWN 分支调用。 ---- */
+void slice_free_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
+void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
 
 /* ===========================================================================
  * 指针类型（own *T / ref *T / fatal *T，m3-design §3）
@@ -91,7 +98,7 @@ static void ptr_free_heap(vm_t *vm, const value_t *v) {
    fatal 不在此列：fatal 是将亡值，sema 保证必被 own 接管（R1，§3.3），
    接管后源 ptr=NULL，无堆块可销毁；`_ =` 丢弃场景由 DISPOSE 指令
    特殊处理（递归释放后源同样置 NULL）。 */
-static bool ptr_type_needs_scan(const type_t *t) {
+bool ptr_type_needs_scan(const type_t *t) {
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_PTR_OWN:
@@ -102,6 +109,7 @@ static bool ptr_type_needs_scan(const type_t *t) {
     case TYPE_KIND_ARRAY:
     case TYPE_KIND_OPTION:
     case TYPE_KIND_UNION:
+    case TYPE_KIND_SLICE_OWN:
         return true;
     default:
         return false;
@@ -191,6 +199,20 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
                                      (uint8_t *)data + ut->payload_offset);
         return;
     }
+    case TYPE_KIND_SLICE_OWN: {
+        /* own []T：拥有堆块 → 先递归销毁元素内嵌 own 字段，再释放堆块，
+           置 ptr=NULL 防双释放。ref/fatal 切片不在此列（ref 借用；fatal
+           将亡值必被 own 接管，接管后 ptr=NULL）。 */
+        slice_value_t *sv = (slice_value_t *)data;
+        if (!sv->ptr) return;
+        const type_t *et = slice_type_elem(t);
+        if (et) slice_free_elems(vm, et, sv->ptr, sv->len);
+        void *heap = sv->ptr;
+        sv->ptr = NULL;
+        sv->len = 0;
+        allocator_free(vm->alloc, &heap);
+        return;
+    }
     default:
         /* 标量/字符串/ref *T/cunion/opaque 等：无 own 堆块可销毁 */
         return;
@@ -270,6 +292,18 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (ptr_type_needs_scan(m->payload_type))
             ptr_clear_owned_recursive(vm, m->payload_type,
                                       (uint8_t *)data + ut->payload_offset);
+        return;
+    }
+    case TYPE_KIND_SLICE_OWN: {
+        /* own []T：堆块已随 memcpy 复制进接管方，清源 ptr=NULL 防作用域
+           退出时与接管方双释放。递归清空元素内嵌 own 指针（堆块归接管方，
+           不释放——同 PTR_OWN 语义）。 */
+        slice_value_t *sv = (slice_value_t *)data;
+        if (!sv->ptr) return;
+        const type_t *et = slice_type_elem(t);
+        if (et) slice_clear_elems(vm, et, sv->ptr, sv->len);
+        sv->ptr = NULL;
+        sv->len = 0;
         return;
     }
     default:
@@ -384,8 +418,38 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         }
         break;
     }
+    case TYPE_KIND_SLICE_OWN:
+    case TYPE_KIND_SLICE_FATAL: {
+        /* own/fatal 切片深拷贝：分配新堆块 + 逐元素递归克隆，新胖指针指向
+           独立新堆块（同 PTR_OWN/PTR_FATAL 的深拷贝语义）。ptr=NULL 时
+           浅拷贝（已转移/空切片）。 */
+        const slice_value_t *ss = (const slice_value_t *)src;
+        if (!ss->ptr) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        const type_t *et = slice_type_elem(type);
+        if (!et) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        size_t total = (size_t)ss->len * et->size;
+        void *new_heap = allocator_new_ex(vm->alloc, "slice_heap", total,
+                                          NULL, NULL, NULL, 1);
+        if (!new_heap) panic("vm: out of memory cloning slice block");
+        const uint8_t *sp = (const uint8_t *)ss->ptr;
+        uint8_t *dp = (uint8_t *)new_heap;
+        for (uint64_t i = 0; i < ss->len; i++, sp += et->size, dp += et->size) {
+            void *se = ptr_clone_block(vm, et, sp);
+            memcpy(dp, se, et->size);
+            allocator_free(vm->alloc, (void **)&se);
+        }
+        slice_value_t new_sv = { new_heap, ss->len };
+        memcpy(dst, &new_sv, sizeof(slice_value_t));
+        break;
+    }
     default:
-        memcpy(dst, src, type->size);  /* 标量/字符串/ref/cunion/opaque 平凡 */
+        memcpy(dst, src, type->size);  /* 标量/字符串/ref 切片/cunion/opaque 平凡 */
         break;
     }
     return dst;

@@ -43,6 +43,10 @@ typedef enum type_kind_t {
     TYPE_KIND_PTR_SHARE, /* share *T：引用计数强指针（RC 系，§12） */
     TYPE_KIND_PTR_WEAK,  /* weak *T：引用计数弱指针（从 share 派生，§12） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
+    /* ---- M4 切片段（m4-design §1/§10，与指针对齐的三种所有权修饰） ---- */
+    TYPE_KIND_SLICE_OWN,   /* own []T：拥有堆分配的胖指针（作用域退出自动释放） */
+    TYPE_KIND_SLICE_REF,   /* ref []T：借用胖指针（不拥有，复制 ptr+len） */
+    TYPE_KIND_SLICE_FATAL, /* fatal []T：将亡值胖指针（move/clone 产物，禁止命名） */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
 
@@ -154,6 +158,22 @@ typedef struct ptr_type_t {
     type_t       base;
     const type_t *base_type;  /* 被指向类型 T（引用，不拥有） */
 } ptr_type_t;
+
+/**
+ * slice_type_t: 切片类型（type_t 的扩展，m4-design §1/§10）
+ *
+ * 与指针同构——胖指针 { ptr, len: u64 }。三种所有权修饰对应三个独立
+ * type kind（TYPE_KIND_SLICE_OWN/REF/FATAL），同一 elem_type 的三种切片
+ * 是三个独立 intern 实例。不存在 share/weak 切片。
+ *
+ * size = sizeof(slice_value_t) = 2 * sizeof(void*)（16 字节/64 位平台）
+ * align = sizeof(void*)。密封不依赖 elem_type 布局——hoist 中属引用依赖
+ * （emit_ref_type，LOAD_TYPE 拉回 elem，不递归），与指针/func 签名同族。
+ */
+typedef struct slice_type_t {
+    type_t       base;
+    const type_t *elem_type;  /* 元素类型 T（引用，不拥有） */
+} slice_type_t;
 
 typedef struct enum_type_t {
     type_t          base;

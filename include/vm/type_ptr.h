@@ -125,6 +125,14 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
  * 只释放 own 指向的堆块，不释放 data 块本身（data 块归 value 生命周期
  * 管理——scope_destroy 先调用本函数再 value_dispose）。
  */
+/** 目标类型是否含需递归扫描的 own 字段（own/share/weak 指针 + 含 own 的
+ *  复合类型 struct/tuple/array/option/union/slice_own）。fatal 不在此列
+ *  （将亡值必被 own 接管，接管后 ptr=NULL）。
+ *
+ *  供 ptr_free_owned_recursive / ptr_clear_owned_recursive 判定递归入口，
+ *  切片类型系统（type_slice.c）通过 slice_type_needs_scan 委托此函数。 */
+bool ptr_type_needs_scan(const type_t *t);
+
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
 
 /**

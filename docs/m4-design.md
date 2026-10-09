@@ -298,13 +298,19 @@ type View: struct {
 
 ### 10.1 新增 type kind
 
+与指针对齐——三种所有权修饰是三个独立 type kind：
+
 ```
-TYPE_KIND_SLICE   // []T：胖指针 { ptr, len }
+TYPE_KIND_SLICE_OWN    // own []T：拥有堆分配，作用域退出自动释放
+TYPE_KIND_SLICE_REF    // ref []T：借用，不拥有
+TYPE_KIND_SLICE_FATAL  // fatal []T：将亡值，move/clone 产物
 ```
 
-- `slice_type_t` 继承 `type_t`，持 `elem_type` 指针
-- 两遍构造协议：`type_slice_push` / `type_slice_set_elem` / `type_slice_seal`（同 array）
-- intern 池：`vm->slice_types`，按 elem_type 去重
+- 不存在 `TYPE_KIND_SLICE_SHARE` / `TYPE_KIND_SLICE_WEAK`——切片不参与 RC 系
+- `slice_type_t` 继承 `type_t`，持 `elem_type` 指针 + 所有权 kind
+- 两遍构造协议：`type_slice_push` / `type_slice_set_elem` / `type_slice_seal`（同 array/ptr）
+- intern 池：`vm->slice_types`，按 (elem_type, kind) 去重
+- 运行期零标志——所有权由 type kind 区分（同 M3 §13.2 指针设计）
 
 ### 10.2 与数组的关系
 

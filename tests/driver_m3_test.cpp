@@ -236,7 +236,7 @@ TEST(Driver, StepBFatalParamConsumedByMovePasses) {
 TEST(Driver, StepBFatalChainThroughReturnPasses) {
   /* §4：return new 产物（fatal）+ fatal 参数接收 + move 接管，完整传递链 */
   std::string path = write_temp_file(
-      "func make(): fatal *i32 {\n"
+      "func mk_fatal(): fatal *i32 {\n"
       "  return new i32{5};\n"
       "}\n"
       "func take(p: fatal *i32): i32 {\n"
@@ -244,7 +244,7 @@ TEST(Driver, StepBFatalChainThroughReturnPasses) {
       "  return q.*;\n"
       "}\n"
       "func main(): i32 {\n"
-      "  var v: i32 = take(make());\n"
+      "  var v: i32 = take(mk_fatal());\n"
       "  if (v != 5) { return 1; }\n"
       "  return 0;\n"
       "}\n");

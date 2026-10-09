@@ -4,6 +4,7 @@
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
@@ -16,6 +17,7 @@
 extern void vm_init_builtins(vm_t *vm);
 extern void vm_register_printf(vm_t *vm);
 extern void vm_register_upgrade(vm_t *vm);
+extern void vm_register_len(vm_t *vm);
 
 static class_t g_vm_class = {
     .name       = "clux.vm",
@@ -131,6 +133,10 @@ vm_t *vm_new(allocator_t *alloc) {
        元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->cunion_types = vec_new(alloc, /*owns_element=*/false);
 
+    /* 切片类型池（type_slice_intern / type_slice_seal intern 用；
+       元素由 vm_destroy 手动释放，vec 只持有指针数组） */
+    vm->slice_types = vec_new(alloc, /*owns_element=*/false);
+
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
        初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
@@ -166,6 +172,9 @@ vm_t *vm_new(allocator_t *alloc) {
 
     /* upgrade 内置函数（§12.4：weak *T -> ?share *T） */
     vm_register_upgrade(vm);
+
+    /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> u64） */
+    vm_register_len(vm);
 
     return vm;
 }
@@ -371,6 +380,21 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&ct);
         }
         vec_free(vm->alloc, &vm->cunion_types);
+    }
+
+    /* 切片类型池：释放 name + 结构体（elem_type 归底层类型，不在此释放） */
+    if (vm->slice_types) {
+        size_t n = vec_len(vm->slice_types);
+        for (size_t i = 0; i < n; i++) {
+            slice_type_t *st = (slice_type_t *)vec_get(vm->slice_types, i);
+            if (!st) continue;
+            if (st->base.name.ptr) {
+                char *np = (char *)st->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&st);
+        }
+        vec_free(vm->alloc, &vm->slice_types);
     }
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */

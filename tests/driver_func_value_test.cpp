@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -160,13 +160,13 @@ TEST(Driver, RunFileFuncValueCallExpressionCallee) {
       "comptime func get_add():func(i32,i32)->i32 {\n"
       "  return func(a:i32, b:i32): i32 { return a + b; };\n"
       "}\n"
-      "func make(): func(i32)->i32 {\n"
+      "func mk_fn(): func(i32)->i32 {\n"
       "  return func(x: i32): i32 { return x * 2; };\n"
       "}\n"
       "func main():void {\n"
       "  var a = get_fn()();\n"
       "  var b = get_add()(19, 23);\n"
-      "  var c = make()(21);\n"
+      "  var c = mk_fn()(21);\n"
       "  var d = func(x:i32):i32 { return x + 1; }(41);\n"
       "  printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
       "}\n");

@@ -31,6 +31,9 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_move.h"
+#include "parser/ast_slice.h"
+#include "parser/ast_make.h"
+#include "vm/type_slice.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -876,6 +879,88 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     compile_expr(c, n->indices);      /* 栈: [self, index] */
     bcode_write_op(c->bc, BCODE_INDEX_GET);
     st_push(c, -1);                   /* 弹 2 压 1 */
+    break;
+  }
+  case AST_SLICE: {
+    /* 切片表达式 s[low:high]（m4-design §4）：恒产 ref []T 胖指针。
+       栈协议：[self, high?, low?]——low 在栈顶（最后编译先弹）。
+       low/high 可省略（NULL）：省略 low = 0，省略 high = len(self)。
+       NULL 时不压栈——SLICE 指令 u8 flags 标识 low/high 存在性
+       （bit0=low, bit1=high），op_slice 按 flags 决定弹栈次数。 */
+    ast_slice_t *n = (ast_slice_t *)node;
+    compile_expr(c, n->object);       /* 栈: [self] */
+    int pushed = 1;                   /* 已压 self */
+    uint8_t flags = 0;
+    /* high 在下、low 在上（SLICE 弹栈顺序：low 先弹，high 后弹） */
+    if (n->high) {
+      compile_expr(c, n->high);       /* 栈: [self, high] */
+      pushed++;
+      flags |= 0x02;
+    }
+    if (n->low) {
+      compile_expr(c, n->low);        /* 栈: [self, high, low] */
+      pushed++;
+      flags |= 0x01;
+    }
+    bcode_write_op(c->bc, BCODE_SLICE);
+    bcode_write_u8(c->bc, flags);
+    st_push(c, -(pushed - 1));        /* 弹 pushed 压 1，净 -(pushed-1) */
+    break;
+  }
+  case AST_MAKE: {
+    /* make(T, N, init...) 宏函数（m4-design §2）：→ fatal []T。
+       栈协议：[elem_type, length, init1..initN]——elem_type 在栈底，
+       initN 在栈顶。MAKE <init_count> 弹 init_count+2 压 1。
+       inits 支持 <v,M> fill 展开（同数组构造），nil 元素须 ?T（sema 已
+       校验）。clux 无默认零值，init_count 须 == length（sema 已校验）。 */
+    ast_make_t *n = (ast_make_t *)node;
+    /* 元素类型位 */
+    compile_type_expr(c, n->elem_type);  /* 栈: [elem_type] */
+    /* 长度值（可运行期值） */
+    compile_expr(c, n->length);          /* 栈: [elem_type, length] */
+    /* 初始值逐个压栈（fill 展开 + nil → PUSH_OPT_NONE） */
+    const type_t *et = c_resolve_type(c, n->elem_type);
+    size_t icount = 0;
+    for (ast_node_t *f = n->inits; f; f = f->next) {
+      if (f->kind == AST_FILL) {
+        ast_fill_t *fl = (ast_fill_t *)f;
+        uint64_t cnt = 0;
+        if (fl->count && fl->count->kind == AST_INT_LIT) {
+          cnt = ((ast_int_lit_t *)fl->count)->value;
+        } else {
+          c_error(c, fl->count ? fl->count : f,
+                  "fill count must be a compile-time constant");
+          return;
+        }
+        if (fl->value->kind == AST_NIL) {
+          const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+          if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
+          for (uint64_t k = 0; k < cnt; k++) {
+            bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+            bcode_write_u32(c->bc, est->id);
+            st_push(c, 1);
+          }
+        } else {
+          for (uint64_t k = 0; k < cnt; k++) {
+            compile_expr(c, fl->value);
+          }
+        }
+        icount += (size_t)cnt;
+      } else if (f->kind == AST_NIL) {
+        const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+        if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, est->id);
+        st_push(c, 1);
+        icount++;
+      } else {
+        compile_expr(c, f);
+        icount++;
+      }
+    }
+    bcode_write_op(c->bc, BCODE_MAKE);
+    bcode_write_u32(c->bc, (uint32_t)icount);
+    st_push(c, -((int)icount) - 1);     /* MAKE 弹 icount+2 压 1，净 -(icount+1) */
     break;
   }
   case AST_TERNARY: {

@@ -9,6 +9,7 @@
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 
 #include <string.h>
 
@@ -215,6 +216,17 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_SLICE_OWN:
+    case TYPE_KIND_SLICE_REF:
+    case TYPE_KIND_SLICE_FATAL:
+      /* PUSH_SLICE <kind> 压开放切片类型（elem=NULL，不入池）→
+         DEFINE_TYPE <id> 声明登记（不设 elem；elem 是引用依赖，pass 2
+         LOAD_TYPE 拉回即可，无环——切片密封不依赖 elem 布局） */
+      bcode_write_op(c->bc, BCODE_PUSH_SLICE);
+      bcode_write_u8(c->bc, (uint8_t)st->type->kind);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
@@ -363,6 +375,24 @@ static void define_ptr(compiler_t *c, const sema_type_t *st, uint8_t *done,
   st_push(c, -1);
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
   (void)done; (void)count; /* 指针归引用依赖：不递归，done 三态不参与 */
+}
+
+/* 切片定义（own/ref/fatal []T）：LOAD_TYPE <id> 拉回开放对象 → elem 是引用
+ * 依赖（直接 LOAD_TYPE 拉回，不递归、不要求已密封）→ SET_TYPE（设 elem）→
+ * SEAL（切片 size/align 恒定 = 2 指针宽，密封不依赖 elem 布局；去重时按自身
+ * id 重绑登记）。与指针同属引用依赖：切片可引用切片，实例存在即可（pass 1
+ * 登记保证），天然放行切片自引用。 */
+static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                         size_t count) {
+  const type_t *t = st->type;
+  const type_t *elem = slice_type_elem(t);
+
+  emit_load_type(c, st->id);             /* 栈: [open_slice_type] */
+  emit_ref_type(c, elem);                /* 栈: [open, elem] */
+  bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 elem → 设进 open */
+  st_push(c, -1);
+  emit_seal(c);                          /* 封闭（去重时重绑登记） */
+  (void)done; (void)count; /* 切片归引用依赖：不递归，done 三态不参与 */
 }
 
 /* struct 定义：LOAD_TYPE <id> 拉回开放对象 → 逐字段：依赖字段类型先定义
@@ -560,6 +590,11 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
     case TYPE_KIND_PTR_SHARE:
     case TYPE_KIND_PTR_WEAK:
       define_ptr(c, st, done, count);
+      break;
+    case TYPE_KIND_SLICE_OWN:
+    case TYPE_KIND_SLICE_REF:
+    case TYPE_KIND_SLICE_FATAL:
+      define_slice(c, st, done, count);
       break;
     default:
       done[idx] = TYPE_DEF_DONE; /* 内建别名：pass 1 已完成，无定义 */

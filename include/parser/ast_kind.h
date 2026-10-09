@@ -88,6 +88,13 @@ typedef enum {
     AST_MOVE,            /* move(x) / clone(x) 所有权原语（op token 区分） */
     AST_SCOPE_ANNOT,     /* '<a,b,c> type 作用域标注（' 前导，位置信息非类型） */
 
+    /* --- M4 切片（m4-design §1/§2/§4）---
+     * 切片类型 own/ref/fatal []T（胖指针 {ptr,len}）、make 宏函数创建、
+     * s[a:b] 切片表达式（恒产 ref []T）。 */
+    AST_SLICE_TYPE,      /* own/ref/fatal []T 切片类型修饰（类型即表达式） */
+    AST_SLICE,           /* expr[low:high] 切片表达式 → ref []T */
+    AST_MAKE,            /* make(T, N, init...) 编译期宏函数 → fatal []T */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

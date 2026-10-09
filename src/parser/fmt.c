@@ -48,6 +48,9 @@
 #include "parser/ast_undef.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_error.h"
+#include "parser/ast_slice_type.h"
+#include "parser/ast_slice.h"
+#include "parser/ast_make.h"
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/vec.h"
@@ -591,6 +594,41 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
         }
         case AST_ERROR: {
             /* 错误恢复：不渲染 */
+            break;
+        }
+        case AST_SLICE_TYPE: {
+            ast_slice_type_t *st = (ast_slice_type_t *)node;
+            if (st->ownership) {
+                size_t olen = 0;
+                const char *ot = token_get_text(st->ownership, &olen);
+                sb_put(&f->sb, ot, olen);
+                sb_ch(&f->sb, ' ');
+            }
+            sb_str(&f->sb, "[]");
+            render_expr(f, st->elem_type);
+            break;
+        }
+        case AST_SLICE: {
+            ast_slice_t *sl = (ast_slice_t *)node;
+            render_expr(f, sl->object);
+            sb_ch(&f->sb, '[');
+            if (sl->low) render_expr(f, sl->low);
+            sb_ch(&f->sb, ':');
+            if (sl->high) render_expr(f, sl->high);
+            sb_ch(&f->sb, ']');
+            break;
+        }
+        case AST_MAKE: {
+            ast_make_t *m = (ast_make_t *)node;
+            sb_str(&f->sb, "make(");
+            render_expr(f, m->elem_type);
+            sb_str(&f->sb, ", ");
+            render_expr(f, m->length);
+            for (ast_node_t *it = m->inits; it; it = it->next) {
+                sb_str(&f->sb, ", ");
+                render_expr(f, it);
+            }
+            sb_ch(&f->sb, ')');
             break;
         }
         default: {

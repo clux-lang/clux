@@ -35,6 +35,9 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_move.h"
+#include "parser/ast_slice_type.h"
+#include "parser/ast_slice.h"
+#include "parser/ast_make.h"
 
 /* ---- Pratt parser 绑定力表 ---- */
 
@@ -275,13 +278,39 @@ ast_node_t *parse_primary(parser_t *p) {
         return inner;
     }
 
-    /* 数组类型表达式：[N]T（N=长度，T=基础类型）。
+    /* 数组类型 [N]T / 切片类型 []T（m4-design §1）。
      * 仅当 '[' 出现在原子位置时（无 lhs）解析为类型，后缀 '[' 仍归 AST_INDEX。
-     * ']' 与基础类型 T 之间的空格/注释由 skip_trivia 天然容错。 */
+     * ']' 后紧跟基础/元素类型 T（parse_unary 递归处理嵌套）。
+     * 空 '[]' → 切片类型（须带所有权修饰，裸 []T 不合法——sema 层校验）；
+     * '[N]' → 数组类型。 */
     if (check_symbol(p, "[")) {
         uint32_t tb = p->pos;
         advance(p);
         skip_trivia(p);
+
+        /* []T 切片类型：空括号后直接 ']' */
+        if (check_symbol(p, "]")) {
+            advance(p);
+            skip_trivia(p);
+
+            /* elem_type 用 parse_unary：支持 const/volatile 修饰、嵌套 [][][]T */
+            ast_node_t *elem_type = parse_unary(p);
+            if (!elem_type || elem_type->kind == AST_ERROR) {
+                if (!elem_type) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected element type after '[]' in slice type");
+                }
+                return elem_type;
+            }
+
+            /* 裸 []T 在 parse_primary 层暂存为 AST_SLICE_TYPE（ownership=NULL），
+               parse_unary 的 own/ref/fatal 分支会包装并设 ownership token。
+               sema 层校验 ownership≠NULL（裸 []T 不合法）。 */
+            ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
+            ((ast_slice_type_t *)node)->ownership = NULL;
+            ((ast_slice_type_t *)node)->elem_type = elem_type;
+            return node;
+        }
 
         ast_node_t *length = parse_expr(p);
         if (!length || length->kind == AST_ERROR) {
@@ -393,6 +422,82 @@ ast_node_t *parse_primary(parser_t *p) {
         if (!node) return NULL;
         ((ast_move_t *)node)->op      = (token_t *)op_tok;
         ((ast_move_t *)node)->operand = operand;
+        return node;
+    }
+
+    /* make 编译期宏函数：make(T, N, init...)（m4-design §2）。
+     * T 是元素类型表达式，N 是长度表达式，init... 是初始值列表（可含
+     * <v,M> fill 值包）。返回 fatal []T。clux 无默认零值，init 必须覆盖
+     * 全部元素（sema 层校验）。make 是宏函数——类型不可运行期作为参数，
+     * sema 层编译期替换为堆分配 + 逐元素布值。 */
+    if (check_keyword(p, "make")) {
+        uint32_t mb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                 "expected '(' after 'make'");
+        }
+        skip_trivia(p);
+
+        /* 第一个参数：元素类型 T */
+        ast_node_t *elem_type = parse_expr(p);
+        if (!elem_type || elem_type->kind == AST_ERROR) {
+            if (!elem_type) {
+                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                     "expected type expression after 'make('");
+            }
+            return elem_type;
+        }
+        skip_trivia(p);
+
+        if (!expect_symbol(p, ",")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                 "expected ',' after element type in 'make'");
+        }
+        skip_trivia(p);
+
+        /* 第二个参数：长度 N */
+        ast_node_t *length = parse_expr(p);
+        if (!length || length->kind == AST_ERROR) {
+            if (!length) {
+                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                     "expected length expression in 'make'");
+            }
+            return length;
+        }
+        skip_trivia(p);
+
+        /* 后续参数：初始值列表 init...（可空——sema 层校验是否覆盖全部元素）。
+           init 支持 <v,N> fill 值包语法（同数组构造），与普通表达式位置的
+           <...>（tuple）区分——make init 上下文遇 '<' 一律按 fill 解析。 */
+        ast_node_t *inits = NULL, *inits_last = NULL;
+        while (check_symbol(p, ",")) {
+            advance(p);
+            skip_trivia(p);
+            ast_node_t *init = parse_construct_field(p);
+            if (!init || init->kind == AST_ERROR) {
+                if (!init) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                         "expected expression after ',' in 'make'");
+                }
+                return init;
+            }
+            ast_append(&inits, &inits_last, NULL, init);
+            skip_trivia(p);
+        }
+
+        if (!expect_symbol(p, ")")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+                                 "expected ')' after 'make' arguments");
+        }
+
+        ast_node_t *node = ast_make_new(p->arena, mb, p->pos);
+        if (!node) return NULL;
+        ((ast_make_t *)node)->elem_type  = elem_type;
+        ((ast_make_t *)node)->length     = length;
+        ((ast_make_t *)node)->inits      = inits;
+        ((ast_make_t *)node)->inits_last = inits_last;
         return node;
     }
 
@@ -666,18 +771,51 @@ ast_node_t *parse_unary(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
-    /* 指针类型 own/ref/fatal/share/weak *T：'*' 是指针语法的一部分，必须紧跟
-       ownership 修饰（own i32 不合法，无裸指针）。消费 '*' 后再解析
-       被指向类型 T（parse_expr_prec 递归处理嵌套指针 own *own *i32、
-       数组 own *[N]T 等）。 */
+    /* 指针类型 own/ref/fatal/share/weak *T / 切片类型 own/ref/fatal []T
+       （m4-design §1）：'*' 是指针语法，'[]' 是切片语法，必须紧跟 ownership
+       修饰（own i32 不合法）。share/weak 无切片形态（RC 系不适用切片）。
+       消费 '*' 或 '[]' 后再解析被指向/元素类型 T。 */
     if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
         token_is(op_tok, "fatal") || token_is(op_tok, "share") ||
         token_is(op_tok, "weak")) {
+        /* 切片路径：own []T / ref []T / fatal []T（share/weak []T 不合法） */
+        if (check_symbol(p, "[")) {
+            /* 保存位置以便回退到 '[' 前做错误诊断 */
+            uint32_t bracket_pos = p->pos;
+            advance(p);
+            skip_trivia(p);
+            if (check_symbol(p, "]")) {
+                if (token_is(op_tok, "share") || token_is(op_tok, "weak")) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "slice does not support 'share'/'weak' "
+                                         "ownership (use 'own'/'ref'/'fatal')");
+                }
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *elem_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
+                if (!elem_type || elem_type->kind == AST_ERROR) {
+                    if (!elem_type) {
+                        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                             "expected type after '[]' in slice type");
+                    }
+                    return elem_type;
+                }
+                ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
+                if (!node) return NULL;
+                ((ast_slice_type_t *)node)->ownership = (token_t *)op_tok;
+                ((ast_slice_type_t *)node)->elem_type = elem_type;
+                return node;
+            }
+            /* '[' 后不是 ']'——不是切片语法，回退让其他分支处理 */
+            p->pos = bracket_pos;
+        }
+
         if (!expect_symbol(p, "*")) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "expected '*' after ownership qualifier (pointer "
-                                 "must be 'own *T' / 'ref *T' / 'fatal *T' / "
-                                 "'share *T' / 'weak *T')");
+                                 "expected '*' or '[]' after ownership qualifier "
+                                 "(pointer: 'own *T' / 'ref *T' / 'fatal *T' / "
+                                 "'share *T' / 'weak *T'; slice: 'own []T' / "
+                                 "'ref []T' / 'fatal []T')");
         }
         skip_trivia(p);
         ast_node_t *base_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
@@ -875,40 +1013,103 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             continue;
         }
 
-        /* 下标 / 泛型索引：[expr, ...] */
+        /* 下标 / 泛型索引：[expr, ...] / 切片：[low:high]（m4-design §4）。
+         * 切片用 ':' 区分：[a:b] / [:b] / [a:] / [:] 均为切片（AST_SLICE），
+         * 逗号分隔的多索引仍为 AST_INDEX。 */
         if (check_symbol(p, "[")) {
             uint32_t tb = p->pos;
             advance(p);
             skip_trivia(p);
 
-            ast_node_t *indices = NULL, *indices_last = NULL;
+            /* [: 切片：[:high] 或 [:]（下界省略） */
+            if (check_symbol(p, ":")) {
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *high = NULL;
+                if (!check_symbol(p, "]")) {
+                    high = parse_expr(p);
+                    if (!high || high->kind == AST_ERROR) {
+                        if (!high) {
+                            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                                 "expected expression after ':' in slice");
+                        }
+                        return high;
+                    }
+                }
+                skip_trivia(p);
+                if (!expect_symbol(p, "]")) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected ']' after slice expression");
+                }
+                ast_node_t *node = ast_slice_new(p->arena, tb, p->pos);
+                ((ast_slice_t *)node)->object = lhs;
+                ((ast_slice_t *)node)->low    = NULL;
+                ((ast_slice_t *)node)->high   = high;
+                lhs = node;
+                continue;
+            }
 
-            if (!check_symbol(p, "]")) {
+            /* [] 空括号在 postfix 位置不合法（不是类型——类型在 parse_primary） */
+            if (check_symbol(p, "]")) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected index expression or ':' after '['");
+            }
+
+            ast_node_t *first = parse_expr(p);
+            if (!first || first->kind == AST_ERROR) {
+                if (!first) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected expression in index");
+                }
+                return first;
+            }
+            skip_trivia(p);
+
+            /* [a:b] / [a:] 切片（上界可省略） */
+            if (check_symbol(p, ":")) {
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *high = NULL;
+                if (!check_symbol(p, "]")) {
+                    high = parse_expr(p);
+                    if (!high || high->kind == AST_ERROR) {
+                        if (!high) {
+                            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                                 "expected expression after ':' in slice");
+                        }
+                        return high;
+                    }
+                }
+                skip_trivia(p);
+                if (!expect_symbol(p, "]")) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected ']' after slice expression");
+                }
+                ast_node_t *node = ast_slice_new(p->arena, tb, p->pos);
+                ((ast_slice_t *)node)->object = lhs;
+                ((ast_slice_t *)node)->low    = first;
+                ((ast_slice_t *)node)->high   = high;
+                lhs = node;
+                continue;
+            }
+
+            /* 普通下标：[expr, expr, ...] */
+            ast_node_t *indices = NULL, *indices_last = NULL;
+            ast_append(&indices, &indices_last, NULL, first);
+
+            while (check_symbol(p, ",")) {
+                advance(p);
+                skip_trivia(p);
                 ast_node_t *idx = parse_expr(p);
                 if (!idx || idx->kind == AST_ERROR) {
                     if (!idx) {
                         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                             "expected expression in index");
+                                             "expected expression after ','");
                     }
                     return idx;
                 }
                 ast_append(&indices, &indices_last, NULL, idx);
-
                 skip_trivia(p);
-                while (check_symbol(p, ",")) {
-                    advance(p);
-                    skip_trivia(p);
-                    idx = parse_expr(p);
-                    if (!idx || idx->kind == AST_ERROR) {
-                        if (!idx) {
-                            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                                 "expected expression after ','");
-                        }
-                        return idx;
-                    }
-                    ast_append(&indices, &indices_last, NULL, idx);
-                    skip_trivia(p);
-                }
             }
 
             if (!expect_symbol(p, "]")) {

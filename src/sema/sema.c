@@ -3,6 +3,7 @@
 #include "vm/type_array.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -25,6 +26,7 @@
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
@@ -496,6 +498,37 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       if (!base) return NULL;
       return type_ptr_intern(sema->vm, kind, base);
     }
+    case AST_SLICE_TYPE: {
+      /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
+         按所有权修饰 token 文本分派 type_slice_intern（三种所有权是独立
+         intern 实例）。不存在 share/weak 切片（RC 系不适用切片）。
+         裸 []T（ownership=NULL）不合法——parser 在 parse_primary 层暂存
+         为 ownership=NULL 的 AST_SLICE_TYPE，此处校验拒绝。 */
+      ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
+      if (!sl->ownership) {
+        diag_error(sema->diag, sema_loc(sema, type_expr),
+                   "bare '[]T' is not allowed; use 'own []T' / 'ref []T' / "
+                   "'fatal []T'");
+        return NULL;
+      }
+      type_kind_t kind;
+      strslice_t own = token_strslice(sl->ownership);
+      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
+        kind = TYPE_KIND_SLICE_OWN;
+      } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
+        kind = TYPE_KIND_SLICE_REF;
+      } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
+        kind = TYPE_KIND_SLICE_FATAL;
+      } else {
+        diag_error(sema->diag, sema_loc(sema, type_expr),
+                   "unsupported slice ownership '%.*s' (use own/ref/fatal)",
+                   (int)own.len, own.ptr);
+        return NULL;
+      }
+      const type_t *elem = resolve_type_expr(sema, sl->elem_type);
+      if (!elem) return NULL;
+      return type_slice_intern(sema->vm, kind, elem);
+    }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
          是绑定在 value 上的位置信息（Step A 静默：只解析存储，不检查）。
@@ -954,6 +987,32 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       sema_symbol_t uinit = {.kind = SEMA_SYM_FUNC, .type = usig,
                              .is_active = true, .fid = ufid};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("upgrade"), &uinit);
+    }
+  }
+
+  /* 预注册 len 内置函数（m4-design §5/§11.3：len(s) -> u64）。
+     与 VM 侧 vm_register_len 对应。len 接受任意可长度的值（数组/切片/str），
+     注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
+     并产出 u64 返回类型。fid 从 vm->functions 按名查询。 */
+  {
+    const type_t *lsig = type_func_sig(sema->vm, NULL, 0, sema->vm->type_u64,
+                                       /*is_variadic=*/true);
+    uint32_t lfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 3 &&
+            memcmp(bf->name.ptr, "len", 3) == 0) {
+          lfid = bf->id;
+          break;
+        }
+      }
+    }
+    if (lsig) {
+      sema_symbol_t linit = {.kind = SEMA_SYM_FUNC, .type = lsig,
+                             .is_active = true, .fid = lfid};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("len"), &linit);
     }
   }
 

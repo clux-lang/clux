@@ -148,7 +148,7 @@ TEST(BcodeAsm, CaseInsensitiveMnemonics) {
         "Store \"x\"\n"
         "ADD\n"
         "Ret\n"
-        ".BYTE 99\n"
+        ".BYTE 200\n"
         "HALT\n";
     bytecode_t *bc = nullptr;
     EXPECT_EQ(bcode_asm_parse(a, src, std::strlen(src), &bc), 0);

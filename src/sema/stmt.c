@@ -39,6 +39,7 @@
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "parser/ast_deref.h"
 #include <stdio.h>
 #include <string.h>
@@ -889,7 +890,10 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
   if (!bad && (!bt || (bt->kind != TYPE_KIND_ARRAY &&
-                       bt->kind != TYPE_KIND_TUPLE))) {
+                       bt->kind != TYPE_KIND_TUPLE &&
+                       bt->kind != TYPE_KIND_SLICE_OWN &&
+                       bt->kind != TYPE_KIND_SLICE_REF &&
+                       bt->kind != TYPE_KIND_SLICE_FATAL))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
     diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -939,10 +943,16 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
      tuple 按位置取元素类型（索引须编译期常量，sema_expr AST_INDEX 已
      校验越界；此处直接按 0 号元素类型校验可赋值性——元素类型同构，
      任意位置校验等价） */
-  const type_t *et = bt->kind == TYPE_KIND_TUPLE
-                         ? (tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type
-                                                   : NULL)
-                         : array_type_elem(bt);
+  const type_t *et;
+  if (bt->kind == TYPE_KIND_TUPLE) {
+    et = tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type : NULL;
+  } else if (bt->kind == TYPE_KIND_SLICE_OWN ||
+             bt->kind == TYPE_KIND_SLICE_REF ||
+             bt->kind == TYPE_KIND_SLICE_FATAL) {
+    et = slice_type_elem(bt);
+  } else {
+    et = array_type_elem(bt);
+  }
   if (!et) return;
   value_t *dst = value_make_shadow(sema->vm, et);
   if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
@@ -952,7 +962,7 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     diag_error(sema->diag, sema_loc(sema, as->value),
                bt->kind == TYPE_KIND_TUPLE
                    ? "cannot assign %s to tuple element of type %s"
-                   : "cannot assign %s to array element of type %s",
+                   : "cannot assign %s to array/slice element of type %s",
                rn, tn);
   }
 }

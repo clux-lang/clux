@@ -78,6 +78,9 @@ typedef struct vm_t {
     /* ---- C 语义 union 类型池（按 member 表内容去重 intern，vm 拥有生命周期） ---- */
     vec_t *cunion_types;   /* cunion_type_t*，元素为 C 语义 union 类型 */
 
+    /* ---- 切片类型池（按 elem_type + 所有权 kind 去重 intern，vm 拥有生命周期） ---- */
+    vec_t *slice_types;    /* slice_type_t*，元素为 own/ref/fatal 切片类型 */
+
     /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
     /* 内建类型固定 id 0..14（vm_init_builtins 登记）；程序类型 id 由编译器
        分配（>=16），运行期 DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等

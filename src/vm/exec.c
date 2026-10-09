@@ -11,6 +11,7 @@
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/str_pool.h"
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
@@ -285,6 +286,7 @@ static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
        风险）；变量借用（var b = a）保持原 copy 语义。 */
     const type_t *it = value_type(init);
     if (it && (it->kind == TYPE_KIND_PTR_OWN || it->kind == TYPE_KIND_PTR_FATAL ||
+               it->kind == TYPE_KIND_SLICE_OWN || it->kind == TYPE_KIND_SLICE_FATAL ||
                it->kind == TYPE_KIND_STRUCT || it->kind == TYPE_KIND_TUPLE ||
                it->kind == TYPE_KIND_ARRAY || it->kind == TYPE_KIND_OPTION ||
                it->kind == TYPE_KIND_UNION) &&
@@ -468,6 +470,12 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
                  open->kind == TYPE_KIND_PTR_SHARE ||
                  open->kind == TYPE_KIND_PTR_WEAK)) {
         type_ptr_set_base(vm, open, sub);  /* 指针：设被指向类型 T */
+        return NULL;
+    }
+    if (open && (open->kind == TYPE_KIND_SLICE_OWN ||
+                 open->kind == TYPE_KIND_SLICE_REF ||
+                 open->kind == TYPE_KIND_SLICE_FATAL)) {
+        type_slice_set_elem(vm, open, sub);  /* 切片：设元素类型 T */
         return NULL;
     }
     type_qual_set_sub(vm, open, sub);
@@ -889,6 +897,193 @@ static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!value_is_borrowed(v))
         ptr_free_owned_recursive(vm, t, value_data(v));
     return NULL;
+}
+
+/* ---- M4 切片段（m4-design §1/§2/§4） ---- */
+
+/* PUSH_SLICE <kind>：分配空 slice type（开放，elem=NULL，不入池）+ 压其
+ * type value（type_slice_push 压栈；对应两遍构造声明阶段的起点）。
+ * kind = 所有权修饰（TYPE_KIND_SLICE_OWN/REF/FATAL，u8 立即数）。
+ * 与 op_push_ptr 同构。 */
+static value_t *op_push_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t kind = bcode_read_u8(bc, pc);
+    type_slice_push(vm, (type_kind_t)kind);
+    return NULL;
+}
+
+/* SLICE（无操作数）：**切片表达式** s[low:high]（m4-design §4）。
+ * 栈布局 [self, high, low]（low 在顶）：先弹 low、再弹 high、再弹 self →
+ * 压 ref []T 胖指针（借用，指向 self 内部元素序列首址 + (high-low) 长度）。
+ * self 可为数组 / 切片 / str：
+ *   - 数组 [N]T：data 内联元素序列，ptr = data + low*elem_size
+ *   - 切片 []T：data 是 slice_value_t{ptr, len}，ptr = sv.ptr + low*elem_size
+ *   - str：data 是 const char*，ptr = str + low（字节切片，elem=u8）
+ * 边界由 sema 静态校验（low <= high <= len），运行期直接计算偏移。
+ * shadow → ref []T shadow（sema 只做类型检查）。
+ * u8 flags 操作数：bit 0 = low present, bit 1 = high present。
+ * 省略的参数不压栈，op_slice 按 flags 决定弹栈次数。 */
+static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t flags = bcode_read_u8(bc, pc);
+    bool has_low  = (flags & 0x01) != 0;
+    bool has_high = (flags & 0x02) != 0;
+    value_t *low_v  = has_low  ? exec_stack_pop(vm) : NULL;
+    value_t *high_v = has_high ? exec_stack_pop(vm) : NULL;
+    value_t *self   = exec_stack_pop(vm);
+    const type_t *st = self ? value_type(self) : NULL;
+    if (!st)
+        return value_make_error(vm, "exec: slice expects a value on stack");
+
+    /* 解析元素类型 + 源指针 + 源长度 */
+    const type_t *elem = NULL;
+    const void *base_ptr = NULL;
+    uint64_t src_len = 0;
+    if (st->kind == TYPE_KIND_ARRAY) {
+        elem = array_type_elem(st);
+        if (!value_is_shadow(self)) base_ptr = value_data(self);
+        src_len = array_type_len(st);
+    } else if (st->kind == TYPE_KIND_SLICE_OWN ||
+               st->kind == TYPE_KIND_SLICE_REF ||
+               st->kind == TYPE_KIND_SLICE_FATAL) {
+        elem = slice_type_elem(st);
+        if (!value_is_shadow(self)) {
+            slice_value_t sv = slice_view(self);
+            base_ptr = sv.ptr;
+            src_len = sv.len;
+        }
+    } else if (st == vm->type_str) {
+        /* str 字节切片：elem = u8 */
+        elem = vm->type_u8;
+        if (!value_is_shadow(self)) {
+            base_ptr = *(const char *const *)value_data(self);
+            src_len = strlen((const char *)base_ptr);
+        }
+    } else {
+        return value_make_error(vm,
+            "exec: slice requires array, slice, or str value");
+    }
+    if (!elem)
+        return value_make_error(vm, "exec: slice cannot determine element type");
+
+    /* 构造 ref []T 切片类型 */
+    const type_t *ref_slice = type_slice_intern(vm, TYPE_KIND_SLICE_REF, elem);
+    if (!ref_slice)
+        return value_make_error(vm, "exec: slice cannot make ref slice type");
+
+    if (value_is_shadow(self))
+        return value_make_shadow(vm, ref_slice);
+
+    /* 读 low / high（按实际整数类型宽度读 → u64） */
+    uint64_t low = 0, high = src_len;
+    if (low_v) {
+        const type_t *lt = value_type(low_v);
+        void *ld = value_data(low_v);
+        int64_t lv = 0;
+        switch (lt->size) {
+        case 1: lv = *(const int8_t *)ld; break;
+        case 2: lv = *(const int16_t *)ld; break;
+        case 4: lv = *(const int32_t *)ld; break;
+        default: lv = *(const int64_t *)ld; break;
+        }
+        low = (uint64_t)(lv < 0 ? 0 : lv);
+    }
+    if (high_v) {
+        const type_t *lt = value_type(high_v);
+        void *ld = value_data(high_v);
+        int64_t hv = 0;
+        switch (lt->size) {
+        case 1: hv = *(const int8_t *)ld; break;
+        case 2: hv = *(const int16_t *)ld; break;
+        case 4: hv = *(const int32_t *)ld; break;
+        default: hv = *(const int64_t *)ld; break;
+        }
+        high = (uint64_t)(hv < 0 ? 0 : hv);
+    }
+    if (low > src_len) low = src_len;
+    if (high > src_len) high = src_len;
+    if (low > high) low = high;
+
+    /* 计算切片指针：base_ptr + low * elem_size */
+    const char *slice_ptr = (const char *)base_ptr + low * elem->size;
+    uint64_t slice_len = high - low;
+
+    return slice_make_value(vm, ref_slice, (void *)slice_ptr, slice_len);
+}
+
+/* MAKE <init_count>：**make 堆分配构造**（make(T, N, init...)，m4-design §2）。
+ * 栈布局 [elem_type, length, init1..initN]（elem_type 在底、initN 在顶）：
+ * 先弹 N 个初始值（逆序），再弹 length，再弹 elem_type → 分配 N*elem_size
+ * 堆块 + 逐元素布值（init implicit_cast → elem_type 后 memcpy）→ 压 fatal []T。
+ * clux 无默认零值，init_count 须 == length（sema 已校验）。
+ * 与 op_new 同构：堆块所有权随构造转移给 fatal []T 产物，源 init 值内嵌
+ * own 指针清空（ptr_clear_owned_recursive 防双释放）。 */
+static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t init_count = bcode_read_u32(bc, pc);
+
+    /* 逆序弹 N 个初始值 */
+    value_t *inits[init_count > 0 ? init_count : 1];
+    for (uint32_t i = 0; i < init_count; i++)
+        inits[init_count - 1 - i] = exec_stack_pop(vm);
+
+    value_t *len_v   = exec_stack_pop(vm);
+    value_t *type_v  = exec_stack_pop(vm);
+
+    const type_t *elem = (type_v && value_type(type_v) == vm->type_type)
+                             ? value_as(type_v, const type_t *) : NULL;
+    if (!elem)
+        return value_make_error(vm, "make: missing element type slot");
+
+    /* 构造 fatal []T 切片类型 */
+    const type_t *fatal_slice = type_slice_intern(vm, TYPE_KIND_SLICE_FATAL, elem);
+    if (!fatal_slice)
+        return value_make_error(vm, "make: cannot make fatal slice type");
+
+    /* shadow 模式：只返回类型 shadow（sema 只做类型检查） */
+    bool any_shadow = (len_v && value_is_shadow(len_v));
+    for (uint32_t i = 0; i < init_count && !any_shadow; i++)
+        if (value_is_shadow(inits[i])) any_shadow = true;
+    if (any_shadow)
+        return value_make_shadow(vm, fatal_slice);
+
+    /* 读 length（按实际整数类型宽度读 → u64） */
+    uint64_t length = 0;
+    if (len_v) {
+        const type_t *lt = value_type(len_v);
+        void *ld = value_data(len_v);
+        int64_t lv = 0;
+        switch (lt->size) {
+        case 1: lv = *(const int8_t *)ld; break;
+        case 2: lv = *(const int16_t *)ld; break;
+        case 4: lv = *(const int32_t *)ld; break;
+        default: lv = *(const int64_t *)ld; break;
+        }
+        length = (uint64_t)(lv < 0 ? 0 : lv);
+    }
+
+    /* 分配 len * elem_size 堆块（清零） */
+    size_t total = (size_t)length * elem->size;
+    void *heap = NULL;
+    if (total > 0) {
+        heap = allocator_new_ex(vm->alloc, "slice_make", total,
+                                NULL, NULL, NULL, 1);
+        if (!heap) panic("vm: out of memory in make");
+        memset(heap, 0, total);
+    }
+    if (length > 0 && elem->size > 0) {
+        /* 逐元素布值：init implicit_cast → elem_type 后 memcpy */
+        for (uint32_t i = 0; i < init_count && i < length; i++) {
+            value_t *casted = inits[i];
+            if (value_type(inits[i]) != elem) {
+                casted = value_implicit_cast(vm, inits[i], elem);
+                if (value_is_error(vm, casted)) return casted;
+            }
+            memcpy((char *)heap + i * elem->size,
+                   value_data(casted), elem->size);
+            /* 清空源 init 值内嵌 own 指针（防双释放） */
+            ptr_clear_owned_recursive(vm, elem, value_data(casted));
+        }
+    }
+
+    return slice_make_value(vm, fatal_slice, heap, length);
 }
 
 /* IS_TAG <tag>：判 tag 专用指令（`x is Member`，编译期已解析 member → tag
@@ -1592,6 +1787,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_MOVE]            = op_move,
     [BCODE_CLONE]           = op_clone,
     [BCODE_DISPOSE]         = op_dispose,
+    [BCODE_PUSH_SLICE]      = op_push_slice,
+    [BCODE_SLICE]           = op_slice,
+    [BCODE_MAKE]            = op_make,
 };
 
 /* ================================================================ */
