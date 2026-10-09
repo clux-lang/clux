@@ -1,5 +1,6 @@
 #include "sema/sema.h"
 #include "core/panic.h"
+#include "vm/type_ptr.h"
 #include "parser/ast_alignof.h"
 #include "parser/ast_array.h"
 #include "parser/ast_block.h"
@@ -554,7 +555,16 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           }
         }
       } else {
-        cs->type = init_bad ? sema->vm->type_void : value_type(init);
+        /* 推断类型：init 类型即捕获类型。
+           §9.2 fatal 接管为 own：move(p)/clone(p) 产 fatal *T，闭包内
+           无 fatal 变量——fatal 自动转 own *T（闭包成为所有权持有者）。 */
+        const type_t *it = init_bad ? sema->vm->type_void : value_type(init);
+        if (it && it->kind == TYPE_KIND_PTR_FATAL) {
+          const type_t *base = ptr_type_base(it);
+          it = base ? type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, base)
+                    : it;
+        }
+        cs->type = it;
       }
     } else {
       /* 纯 id 捕获：外层符号（定义点 block scope 沿链查找） */
@@ -582,9 +592,82 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         continue;
       }
       cs->type = outer_sym->type; /* 捕获 clone 值，类型即外层变量类型 */
+      /* §9.1 own 裸捕获禁止：纯 id 捕获 own *T = copy（own 禁止 copy，
+         §3.1）→ 必须显式 move()/clone()。fatal 同理（裸捕获 fatal 变量
+         = copy 将亡值，须 move/clone 接管）。 */
+      if (outer_sym->type &&
+          (outer_sym->type->kind == TYPE_KIND_PTR_OWN ||
+           outer_sym->type->kind == TYPE_KIND_PTR_FATAL)) {
+        diag_error(sema->diag, sema_loc(sema, c),
+                   "cannot capture own/fatal pointer '%.*s' by value "
+                   "(use move() or clone(), e.g. |(%.*s = move(%.*s))|)",
+                   (int)cv->name.len, cv->name.ptr,
+                   (int)cv->name.len, cv->name.ptr,
+                   (int)cv->name.len, cv->name.ptr);
+        continue;
+      }
     }
     cs->flow_init = true; /* 捕获即初始化（闭包持有 clone 值） */
     cs->is_active = true; /* 函数体 walk 时可见（sema_lookup 激活过滤） */
+  }
+
+  /* §9.3 ref/opaque 捕获强制标注（m3-design §9）：闭包是隐式 struct，
+     捕获 ref/opaque 视同 struct ref 字段——闭包整体必须带作用域标注
+     func '<x> |...|（同 §5 强制规则 B）。无标注 → 编译错误。
+     有标注 → 逃逸检查：闭包定义作用域须嵌套于标注锚点作用域。 */
+  bool has_ref_capture = false;
+  for (ast_node_t *c = fn->captures; c; c = c->next) {
+    ast_var_def_t *cv = (ast_var_def_t *)c;
+    sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+    if (!cs || !cs->type) continue;
+    if (cs->type->kind == TYPE_KIND_PTR_REF ||
+        cs->type->kind == TYPE_KIND_OPAQUE) {
+      has_ref_capture = true;
+      break;
+    }
+  }
+  if (has_ref_capture && fn->scope_annot_count == 0) {
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+               "closure capturing ref/opaque must declare a scope annotation "
+               "(e.g. func '<x> |...|)");
+  }
+  /* §9.3 逃逸检查：有标注时，闭包定义作用域（outer）须嵌套于每个锚点。
+     复用 stmt.c 的 annot_anchor_scope / scope_within——但它们是 static，
+     此处内联简化版本：标注名解析为符号 own_scope，比较 outer ⊆ anchor。 */
+  if (has_ref_capture && fn->scope_annot_count > 0) {
+    for (size_t i = 0; i < fn->scope_annot_count; i++) {
+      strslice_t nm = fn->scope_annot_names[i];
+      sema_scope_t *anchor = NULL;
+      if (nm.len == 1 && nm.ptr[0] == '*') {
+        anchor = sema->global_scope;
+      } else if (sema->func_def) {
+        for (ast_node_t *p = sema->func_def->params; p; p = p->next) {
+          ast_var_def_t *pvd = (ast_var_def_t *)p;
+          if (pvd->name.len == nm.len &&
+              memcmp(pvd->name.ptr, nm.ptr, nm.len) == 0) {
+            anchor = sema->local_func_param_scope;
+            break;
+          }
+        }
+      }
+      if (!anchor) {
+        sema_symbol_t *sym = sema_lookup(outer, nm);
+        if (sym && sym->kind == SEMA_SYM_VAR) anchor = sym->own_scope;
+      }
+      if (!anchor) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                   "scope annotation '%.*s' does not name a parameter, "
+                   "global or local variable",
+                   (int)nm.len, nm.ptr);
+        continue;
+      }
+      if (!sema_scope_within(outer, anchor)) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+                   "closure escapes scope annotation '%.*s' (its scope is "
+                   "not nested within the annotated scope)",
+                   (int)nm.len, nm.ptr);
+      }
+    }
   }
 }
 

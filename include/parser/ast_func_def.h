@@ -15,6 +15,11 @@ typedef struct {
                                 兄弟链。纯 id 捕获 = type_expr/init 均为 NULL（类型取自
                                 外层符号）；括号 VALUE DECL = 完整 var def（显式类型 +
                                 init 初始化表达式）。NULL = 无捕获。 */
+    strslice_t *scope_annot_names; /* 闭包作用域标注（m3-design §9）：func '<x> |...|
+                                      的标注集合（arena 数组，'*' = global）。
+                                      捕获 ref/opaque 时强制标注（视同 struct ref 字段）。
+                                      NULL/scope_annot_count=0 = 无标注。 */
+    size_t      scope_annot_count; /* 标注名字个数 */
     ast_node_t *params;      /* AST_VAR_DEF 兄弟链 */
     ast_node_t *params_last; /* O(1) 追加 */
     ast_node_t *return_expr; /* 返回类型表达式（NULL = void） */

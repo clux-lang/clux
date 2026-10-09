@@ -87,6 +87,15 @@ strslice_t token_strslice(const token_t *t);
  */
 ast_node_t *parse_scope_annotated_type(parser_t *p);
 
+/**
+ * 解析作用域标注集合 '<a,b,c>'（不包裹被标注类型）。
+ * '< 已由调用点确认（lexer 合成 "'<" 复合 SYMBOL token），消费该复合
+ * token 后循环解析标识符（'*' 记 global），直到 '>'。
+ * 返回 names 数组（arena 分配）与 count；失败返回 NULL（诊断已报）。
+ * 用于闭包捕获列表前的作用域标注（func '<x> |...|，m3-design §9）。
+ */
+strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count);
+
 /* ---- 字面量解析工具 ---- */
 
 /**

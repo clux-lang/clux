@@ -285,7 +285,7 @@ static bool type_contains_ref(const type_t *t) {
 
 /* 作用域嵌套比较：a 沿 parent 链可达 b（或 a == b）→ a 嵌套于 b。
    b 为 NULL（锚点解析失败）恒 true（保守放行，错误由解析方报）。 */
-static bool scope_within(const sema_scope_t *a, const sema_scope_t *b) {
+bool sema_scope_within(const sema_scope_t *a, const sema_scope_t *b) {
   for (const sema_scope_t *s = a; s; s = s->parent)
     if (s == b) return true;
   return false;
@@ -336,7 +336,7 @@ static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_s
                  (int)names[i].len, names[i].ptr);
       continue;
     }
-    if (!scope_within(own_scope, anchor)) {
+    if (!sema_scope_within(own_scope, anchor)) {
       diag_error(sema->diag, sema_loc(sema, at),
                  "variable escapes scope annotation '%.*s' (its scope is not "
                  "nested within the annotated scope)",
@@ -794,7 +794,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                            sym->annot_names[i].ptr);
                 continue;
               }
-              if (!scope_within(src->own_scope, anchor)) {
+              if (!sema_scope_within(src->own_scope, anchor)) {
                 diag_error(sema->diag, sema_loc(sema, as->value),
                            "rebinding ref variable '%.*s' escapes scope "
                            "annotation '%.*s' (new source's scope is not "

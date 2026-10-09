@@ -319,6 +319,12 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count);
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
                               const type_t *rt);
 
+/**
+ * 作用域嵌套比较（m3-design §5）：a 沿 parent 链可达 b（或 a == b）→
+ * a 嵌套于 b。b 为 NULL 恒 true（保守放行）。用于 §5/§9 逃逸检查。
+ */
+bool sema_scope_within(const sema_scope_t *a, const sema_scope_t *b);
+
 /** 兄弟链节点计数（参数/实参列表长度）。 */
 size_t sema_count_siblings(const ast_node_t *node);
 

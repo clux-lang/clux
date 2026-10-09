@@ -4028,6 +4028,73 @@ TEST(Driver, StepBGlobalScalarPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, StepBClosureOwnBareCaptureRejected) {
+  /* §9.1 own 裸捕获禁止：纯 id 捕获 own *T = copy → 编译错误
+     （必须 move()/clone()） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{42};\n"
+      "  var f = func |p| get(): i32 { return p.*; };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureMoveCapturePasses) {
+  /* §9.1 move 捕获：|(q = move(p))| 推断 own *T，转移所有权 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{42};\n"
+      "  var f = func |(q = move(p))| get(): i32 { return q.*; };\n"
+      "  if (f() != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureCloneCapturePasses) {
+  /* §9.1 clone 捕获：|(q = clone(p))| 深拷贝，原对象不变 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{42};\n"
+      "  var f = func |(q = clone(p))| get(): i32 { return q.*; };\n"
+      "  if (f() != 42) { return 1; }\n"
+      "  if (p.* != 42) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureRefCaptureUnannotatedRejected) {
+  /* §9.3 ref 捕获强制标注：捕获 ref 且闭包无作用域标注 → 编译错误 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: '<x> ref *i32 = x.&;\n"
+      "  var f = func |r| get(): i32 { return r.*; };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureRefCaptureAnnotatedPasses) {
+  /* §9.3 ref 捕获带标注放行：func '<x> |r| ——闭包存活不超过 x */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: '<x> ref *i32 = x.&;\n"
+      "  var f = func '<x> |r| get(): i32 { return r.*; };\n"
+      "  if (f() != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBReturnRefFromParamPasses) {
   /* R3（§6）正向：返回 ref 参数（借用自参数，放行）。
      §5：返回 ref 必标注（'<p> = 借自参数 p）；调用点接收 ref 变量

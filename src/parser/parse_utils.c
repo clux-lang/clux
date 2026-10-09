@@ -274,7 +274,7 @@ size_t utf8_encode(uint32_t cp, char *out) {
  * 记 global），直到 '>'。
  * 返回 names 数组（arena 分配）与 count；失败返回 NULL（诊断已报）。
  */
-static strslice_t *parse_scope_annot_names(parser_t *p, size_t *out_count) {
+strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
     skip_trivia(p);
 
     if (check_symbol(p, ">")) {
@@ -343,7 +343,7 @@ ast_node_t *parse_scope_annotated_type(parser_t *p) {
     skip_trivia(p);
 
     size_t count = 0;
-    strslice_t *names = parse_scope_annot_names(p, &count);
+    strslice_t *names = parse_scope_annotation(p, &count);
     if (!names) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "invalid scope annotation");
