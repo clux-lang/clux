@@ -334,7 +334,7 @@ move/clone 产物或 new 的分配均可流向 **share** 作为 RC 创建源。
 | 检查 | 编译期逃逸检查 | 运行期引用计数 |
 | 运行期成本 | 裸指针零成本 | RC 控制块 + atomic 计数 |
 | 赋值 | 须 move/clone | 正常 `=`（计数 +1） |
-| 闭包捕获 | 禁止 | share 允许 |
+| 闭包捕获 | own 须 move/clone，ref 须标注（§9） | share 允许 |
 | 复合类型 copy | 含 own 字段不可 copy | 含 share/weak 字段可 copy（字段 copy 即计数 +1） |
 | 循环依赖 | 无环（树状所有权） | 用户负责，用 weak 打破 |
 | 与对方互转 | — | share → own/ref 禁止（单向隔离，§12.1）；仅 fatal → share 创建通道 |
