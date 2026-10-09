@@ -1309,11 +1309,25 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                 pvd->name.len) == 0;
             }
             bool is_global = g == rs;
-            if (!is_param && !is_global) {
+            /* §9 闭包捕获视同特殊参数：返回 ref 可来自捕获变量
+               （调用闭包时闭包对象必然存活，捕获的 ref 有效） */
+            bool is_capture = false;
+            if (sema->func_def && sema->func_def->captures) {
+              strslice_t rname = ((ast_ident_t *)rt->value)->name;
+              for (ast_node_t *c = sema->func_def->captures; c; c = c->next) {
+                ast_var_def_t *cv = (ast_var_def_t *)c;
+                if (cv->name.len == rname.len &&
+                    memcmp(cv->name.ptr, rname.ptr, rname.len) == 0) {
+                  is_capture = true;
+                  break;
+                }
+              }
+            }
+            if (!is_param && !is_global && !is_capture) {
               diag_error(sema->diag, sema_loc(sema, rt->value),
                          "cannot return ref borrowed from local "
-                         "'%.*s' (returned ref must come from a parameter "
-                         "or global)",
+                         "'%.*s' (returned ref must come from a parameter, "
+                         "capture or global)",
                          (int)((ast_ident_t *)rt->value)->name.len,
                          ((ast_ident_t *)rt->value)->name.ptr);
             }

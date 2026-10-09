@@ -801,12 +801,14 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
      函数体，local_func_base 非空）。 */
   sema_scope_t *saved_lfb = sema->local_func_base;
   sema_scope_t *saved_lfps = sema->local_func_param_scope;
+  ast_func_def_t *saved_fn = sema->func_def;
   const type_t *saved_rt = sema->func_return_type;
   bool saved_has_ret = sema->func_has_return;
   bool saved_comptime = sema->walking_comptime;
 
   sema->local_func_base = fscope;
   sema->local_func_param_scope = pscope;
+  sema->func_def = fn; /* walk_return §6/§9 判定用（captures 查当前闭包） */
   sema->func_return_type = rt;
   sema->func_has_return = false;
   /* 字面量 body 是真实调用点（最终进入运行时字节码）：body 内 comptime
@@ -852,6 +854,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   /* 恢复外层 walk 上下文 */
   sema->local_func_base = saved_lfb;
   sema->local_func_param_scope = saved_lfps;
+  sema->func_def = saved_fn;
   sema->func_return_type = saved_rt;
   sema->func_has_return = saved_has_ret;
   sema->walking_comptime = saved_comptime;

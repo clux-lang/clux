@@ -4095,6 +4095,22 @@ TEST(Driver, StepBClosureRefCaptureAnnotatedPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, StepBClosureReturnCapturedRefPasses) {
+  /* §9 闭包返回捕获 ref：捕获视同特殊参数，返回 ref 可来自捕获变量
+     （调用闭包时闭包对象必然存活，捕获的 ref 有效） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: '<x> ref *i32 = x.&;\n"
+      "  var f = func '<x> |r| get(): '<x> ref *i32 { return r; };\n"
+      "  var result = f();\n"
+      "  if (result.* != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBReturnRefFromParamPasses) {
   /* R3（§6）正向：返回 ref 参数（借用自参数，放行）。
      §5：返回 ref 必标注（'<p> = 借自参数 p）；调用点接收 ref 变量
