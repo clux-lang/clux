@@ -94,14 +94,35 @@ func main(): void {
 - 路径不存在（文件找不到）→ 编译错误："module not found: './std'"
 - 路径规范化后去重：`./std` 和 `./../src/std` 如果指向同一文件，视为同一模块
 
-### 2.3 包导入（暂不实现）
+### 2.3 动态库导入（FFI 预备，sema 报错）
+
+```
+import libdemo from "libdemo.so";   // Linux/macOS
+import libdemo from "libdemo.dll";  // Windows
+```
+
+- 路径以 `.so` / `.dll` / `.dylib` 结尾的是**动态库导入**——为 M6 FFI 铺路
+- 语义：加载动态库，后续通过 `libdemo::function_name` 获取函数句柄（类似 `dlsym`）
+- M5 **parser 层支持此语法**（解析为 AST_IMPORT，路径标记为动态库）
+- M5 **sema 层报错**："dynamic library import not supported in M5 (requires FFI)"
+- M6 FFI 实现时：Linux/macOS 用 `dlopen`/`dlsym`，Windows 用 `LoadLibrary`/`GetProcAddress`
+
+### 2.4 包导入（暂不实现）
 
 ```
 import std from "std";  // 非路径 → 包导入
 ```
 
-- 非路径导入（不以 `./` 或 `../` 开头）是包导入
+- 非路径导入（不以 `./` 或 `../` 开头，且不以 `.so`/`.dll`/`.dylib` 结尾）是包导入
 - M5 **暂不实现**包导入，遇到时报错："package import not supported in M5"
+
+### 2.5 导入形式分类
+
+| 路径形式 | 类型 | M5 状态 |
+|----------|------|---------|
+| `./std` / `../lib/utils` | 模块导入（.cx 文件） | ✅ 实现 |
+| `libdemo.so` / `libdemo.dll` / `libdemo.dylib` | 动态库导入（FFI） | ⚠️ parser 支持，sema 报错 |
+| `std`（非路径、非动态库后缀） | 包导入 | ❌ 报错 |
 
 ---
 
@@ -386,6 +407,7 @@ typedef struct {
 - `export * from` 语法
 - AST_EXPORT / AST_IMPORT / AST_REEXPORT 节点
 - `::` 运算符已有（enum），扩展为模块成员访问
+- 动态库导入语法（`import x from "lib.so"`）——parser 支持，path 标记后缀类型
 
 ### Phase 2: 模块管理器 + 路径解析
 - module_manager_t 实现
@@ -398,6 +420,8 @@ typedef struct {
 - import 注册命名空间符号
 - `::` 成员访问分派（模块 vs 枚举）
 - 代理导出符号合并 + 冲突检测
+- **动态库导入 sema 报错**（"dynamic library import not supported in M5"）
+- 包导入 sema 报错（"package import not supported in M5"）
 
 ### Phase 4: Compiler + VM
 - IMPORT / GET_MEMBER 字节码指令
@@ -411,6 +435,7 @@ typedef struct {
 - 循环依赖检测（编译错误）
 - 路径解析（相对路径 + Windows/Linux 分隔符）
 - `::` 链式访问（模块 → 枚举 → variant）
+- 动态库导入 sema 报错（编译错误验证）
 
 ---
 
