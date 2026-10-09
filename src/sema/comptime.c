@@ -394,6 +394,7 @@ static bool type_contains_own(const type_t *t) {
   switch (t->kind) {
     case TYPE_KIND_PTR_OWN:
     case TYPE_KIND_PTR_SHARE:  /* §10 禁止全局 share（RC 需堆分配，全局静态期无法完成） */
+    case TYPE_KIND_SLICE_OWN:  /* §9.4 禁止全局 own []T（同 own *T） */
       return true;
     case TYPE_KIND_STRUCT: {
       size_t n = struct_type_field_count(t);

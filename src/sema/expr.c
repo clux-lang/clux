@@ -1090,7 +1090,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         et = slice_type_elem(bt);
       } else if (bt->kind == TYPE_KIND_STR) {
         /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
-        et = sema->vm->type_u8;  /* TODO: const u8 — const 修饰待 const 切片支持 */
+        et = type_const_intern(sema->vm, sema->vm->type_u8);
       } else {
         char tn[64];
         sema_type_name(bt, tn, sizeof(tn));
@@ -1760,9 +1760,19 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         return value_make_shadow(sema->vm, sema->vm->type_void);
       const type_t *ot = value_type(operand);
       const type_t *base = ptr_type_base(ot);
-      if (base) {
-        /* 指针操作数：产物为 fatal *T（MOVE/CLONE 指令已按此类型压栈） */
-        const type_t *fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
+      bool is_slice = (ot->kind == TYPE_KIND_SLICE_OWN ||
+                       ot->kind == TYPE_KIND_SLICE_REF ||
+                       ot->kind == TYPE_KIND_SLICE_FATAL);
+      if (base || is_slice) {
+        /* 指针/切片操作数：产物为 fatal *T / fatal []T
+           （MOVE/CLONE 指令已按此类型压栈） */
+        const type_t *fatal;
+        if (is_slice) {
+          const type_t *elem = slice_type_elem(ot);
+          fatal = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL, elem);
+        } else {
+          fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
+        }
         if (!fatal) return value_make_shadow(sema->vm, sema->vm->type_void);
         sema_type_register(sema, fatal);
         /* R2（move 后源 TDZ，m3-design §7）：move(own *T) 转移所有权——
@@ -1776,7 +1786,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             sema_symbol_t *src =
                 sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
             if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                src->type->kind == TYPE_KIND_PTR_OWN) {
+                (src->type->kind == TYPE_KIND_PTR_OWN ||
+                 src->type->kind == TYPE_KIND_SLICE_OWN)) {
               if (src->borrow_count > 0) {
                 diag_error(sema->diag, sema_loc(sema, *node),
                            "cannot move '%.*s': %d live borrow(s) still "
@@ -1790,7 +1801,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                 src->moved = true;
               }
             } else if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                       src->type->kind == TYPE_KIND_PTR_FATAL) {
+                       (src->type->kind == TYPE_KIND_PTR_FATAL ||
+                        src->type->kind == TYPE_KIND_SLICE_FATAL)) {
               /* R1（fatal 参数消费，§4）：move(fatal 参数) 接管所有权——
                  标记已消费（函数结束未消费的 fatal 参数报编译错误）。 */
               src->moved = true;
@@ -1799,7 +1811,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
         return value_make_shadow(sema->vm, fatal);
       }
-      return operand; /* shadow，类型 = 操作数类型（非指针） */
+      return operand; /* shadow，类型 = 操作数类型（非指针/切片） */
     }
     case AST_CONSTRUCT: {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验

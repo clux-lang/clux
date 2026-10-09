@@ -621,6 +621,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs || !cs->type) continue;
     if (cs->type->kind == TYPE_KIND_PTR_REF ||
+        cs->type->kind == TYPE_KIND_SLICE_REF ||
         cs->type->kind == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;
       break;

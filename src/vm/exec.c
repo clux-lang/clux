@@ -951,8 +951,8 @@ static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
             src_len = sv.len;
         }
     } else if (st == vm->type_str) {
-        /* str 字节切片：elem = u8 */
-        elem = vm->type_u8;
+        /* str 字节切片：elem = const u8（元素不可写，m4-design §8.3） */
+        elem = type_const_intern(vm, vm->type_u8);
         if (!value_is_shadow(self)) {
             base_ptr = *(const char *const *)value_data(self);
             src_len = strlen((const char *)base_ptr);
@@ -998,9 +998,15 @@ static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
         }
         high = (uint64_t)(hv < 0 ? 0 : hv);
     }
-    if (low > src_len) low = src_len;
-    if (high > src_len) high = src_len;
-    if (low > high) low = high;
+    /* §4.1 运行期边界检查：0 <= low <= high <= len，越界 → 运行期错误 */
+    if (low > src_len || high > src_len || low > high) {
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "slice index out of bounds: [%llu:%llu] (len=%llu)",
+                 (unsigned long long)low, (unsigned long long)high,
+                 (unsigned long long)src_len);
+        return value_make_error(vm, buf);
+    }
 
     /* 计算切片指针：base_ptr + low * elem_size */
     const char *slice_ptr = (const char *)base_ptr + low * elem->size;

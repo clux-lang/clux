@@ -932,11 +932,22 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
       value_is_type(rhs, TYPE_KIND_VOID))
     return;
 
-  /* const 数组元素不可写 */
+  /* const 数组/切片元素不可写 */
   if (value_has_const(base)) {
     diag_error(sema->diag, sema_loc(sema, &as->base),
                "cannot assign to element of const array");
     return;
+  }
+  /* §10.3 [] const T：元素类型是 const → 不可写 */
+  if (bt->kind == TYPE_KIND_SLICE_OWN ||
+      bt->kind == TYPE_KIND_SLICE_REF ||
+      bt->kind == TYPE_KIND_SLICE_FATAL) {
+    const type_t *elem = slice_type_elem(bt);
+    if (elem && type_is_const(elem)) {
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "cannot assign to element of const slice (element type is const)");
+      return;
+    }
   }
 
   /* 元素类型可赋值性（value_assign 单一校验点）：数组取元素类型；
@@ -2074,9 +2085,10 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
          ——own 是单所有权，传 own 参数会分裂所有权（调用方销毁 + 参数接管
          双释放）。own 场景：调用方 move(p) 传 fatal，函数体用 own 变量接收
          （本地接管）或 return 出去。 */
-      if (ps->type && ps->type->kind == TYPE_KIND_PTR_OWN) {
+      if (ps->type && (ps->type->kind == TYPE_KIND_PTR_OWN ||
+                       ps->type->kind == TYPE_KIND_SLICE_OWN)) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                   "function parameter '%.*s' cannot be own pointer (use "
+                   "function parameter '%.*s' cannot be own pointer/slice (use "
                    "fatal and take ownership inside with var x: own *T = "
                    "move(p), or use ref for borrowing)",
                    (int)vd->name.len, vd->name.ptr);
@@ -2101,7 +2113,8 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
-    if (ps && ps->type && ps->type->kind == TYPE_KIND_PTR_FATAL &&
+    if (ps && ps->type && (ps->type->kind == TYPE_KIND_PTR_FATAL ||
+                           ps->type->kind == TYPE_KIND_SLICE_FATAL) &&
         !ps->moved) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
                  "fatal parameter '%.*s' is not consumed (take ownership "
