@@ -3546,11 +3546,13 @@ TEST(Driver, PtrMoveTransfersOwnership) {
 }
 
 TEST(Driver, PtrRefBorrowDoesNotOwn) {
-  /* ref 借用（§3.2）：q 借 p 目标，写入经 q 可见于 p；q 退出不释放 */
+  /* ref 借用（§3.2）：q 借 p 目标，写入经 q 可见于 p；q 退出不释放。
+     §5：ref 变量可显式标注（'<p> = 借自 p，逃逸检查：q 定义作用域
+     须嵌套于 p 的作用域；此处放行） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{456};\n"
-      "  var q: ref *i32 = p;\n"
+      "  var q: '<p> ref *i32 = p;\n"
       "  q.* = 789;\n"
       "  if (p.* != 789) { return 1; }\n"
       "  if (q.* != 789) { return 2; }\n"
@@ -3562,11 +3564,12 @@ TEST(Driver, PtrRefBorrowDoesNotOwn) {
 
 TEST(Driver, PtrAddrBorrowsStackValue) {
   /* 后置取址 x.&（§8.2）：ref 指针借用栈上值，写回影响原值；
-     指针退出作用域不释放栈值（owns=false） */
+     指针退出作用域不释放栈值（owns=false）。
+     §5：ref 变量可显式标注（'<y> = 借自栈上变量 y） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var y: i32 = 42;\n"
-      "  var a: ref *i32 = y.&;\n"
+      "  var a: '<y> ref *i32 = y.&;\n"
       "  a.* = 99;\n"
       "  if (y != 99) { return 1; }\n"
       "  if (a.* != 99) { return 2; }\n"
@@ -3578,12 +3581,13 @@ TEST(Driver, PtrAddrBorrowsStackValue) {
 
 TEST(Driver, PtrOpaqueRoundtrip) {
   /* opaque 往返（§8.4）：own → opaque（隐式）→ as 恢复（显式），
-     恢复指针是借用（owns=false），读写仍命中原堆块 */
+     恢复指针是借用（owns=false），读写仍命中原堆块。
+     §5：ref 变量可显式标注（'<p> = 借自 p 的堆块，p 存活） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var q: opaque = p;\n"
-      "  var r: ref *i32 = q as ref *i32;\n"
+      "  var r: '<p> ref *i32 = q as ref *i32;\n"
       "  if (r.* != 7) { return 1; }\n"
       "  r.* = 88;\n"
       "  if (p.* != 88) { return 2; }\n"
@@ -3775,12 +3779,13 @@ TEST(Driver, StepBMoveWithLiveBorrowRejected) {
 }
 
 TEST(Driver, StepBMoveAfterBorrowScopeEndsPasses) {
-  /* R3 正向：借用作用域结束后 move 源放行（借用消亡恢复可 move） */
+  /* R3 正向：借用作用域结束后 move 源放行（借用消亡恢复可 move）。
+     §5：ref 变量可显式标注（'<p> = 借自 p；借用块退出后 p 可 move） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{1};\n"
       "  {\n"
-      "    var r: ref *i32 = p;\n"
+      "    var r: '<p> ref *i32 = p;\n"
       "    if (r.* != 1) { return 1; }\n"
       "  }\n"
       "  var q: own *i32 = move(p);\n"
@@ -3821,8 +3826,9 @@ TEST(Driver, StepBReturnRefFromLocalRejected) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, StepBReturnRefFromParamPasses) {
-  /* R3（§6）正向：返回 ref 参数（借用自参数，放行） */
+TEST(Driver, StepBReturnRefUnannotatedRejected) {
+  /* §5 强制规则：函数返回 ref 必须声明作用域标注（'<p> ref *T），
+     未标注 → 编译错误（用户澄清：仅函数返回值 ref 强制标注） */
   std::string path = write_temp_file(
       "func get(p: ref *i32): ref *i32 {\n"
       "  return p;\n"
@@ -3830,6 +3836,96 @@ TEST(Driver, StepBReturnRefFromParamPasses) {
       "func main(): i32 {\n"
       "  var x: i32 = 42;\n"
       "  var r: ref *i32 = get(x.&);\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBLocalRefUnannotatedInferredPasses) {
+  /* §5 推断语义（用户澄清）：局部 ref 变量未标注不强制——按定义作用域
+     推断（ref 存活 = 当前定义作用域）。借 p 且在 p 存活作用域内 → 放行 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{7};\n"
+      "  var q: ref *i32 = p;\n"
+      "  if (q.* != 7) { return 1; }\n"
+      "  q.* = 8;\n"
+      "  if (p.* != 8) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAnnotEscapePasses) {
+  /* §5 检查算法：显式标注的 ref 变量定义作用域必须嵌套于锚点作用域。
+     r 定义在块内，锚点 '<q>（q 在块外定义）→ r 作用域嵌套于 q 作用域
+     → 放行 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: '<p> ref *i32 = p;\n"
+      "  {\n"
+      "    var r: '<q> ref *i32 = q;\n"
+      "    if (r.* != 1) { return 1; }\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAnnotUnknownNameRejected) {
+  /* §5 锚点解析：标注名必须命名参数、全局或局部变量（或 '*' = global）。
+     '<nope> 未定义 → 编译错误 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: '<nope> ref *i32 = p;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAnnotGlobalStarPasses) {
+  /* §5 '<*>' = global：全局作用域恒放行（全局值存活到程序结束） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{5};\n"
+      "  var q: '<*> ref *i32 = p;\n"
+      "  if (q.* != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAnnotOnI32TypeIgnored) {
+  /* §5 标注仅对含 ref 指针的类型有效：'<x> i32（标量）不触发逃逸检查
+     （type_contains_ref=false），放行 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var x: i32 = 1;\n"
+      "  var y: '<x> i32 = 2;\n"
+      "  return x + y;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBReturnRefFromParamPasses) {
+  /* R3（§6）正向：返回 ref 参数（借用自参数，放行）。
+     §5：返回 ref 必标注（'<p> = 借自参数 p）；调用点接收 ref 变量
+     可显式标注（'<x> = 借自 x） */
+  std::string path = write_temp_file(
+      "func get(p: ref *i32): '<p> ref *i32 {\n"
+      "  return p;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var r: '<x> ref *i32 = get(x.&);\n"
       "  if (r.* != 42) { return 1; }\n"
       "  return 0;\n"
       "}\n");

@@ -519,7 +519,41 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
  * 跳过）→ 名字 = 内建规范名（如 "i32"），编译器经 type_lookup 兜底 →
  * LOAD_TYPE <内建 id>。统一折叠为 AST_TYPE_REF：类型槽位一律走
  * LOAD_TYPE <id> 直接加载真实 type_t（别名透明，m2-design 关键决策——
- * 复合类型组装用 value->data 而非名字），消除运行时作用域查找。 */
+ * 复合类型组装用 value->data 而非名字），消除运行时作用域查找。
+ *
+ * M3 作用域标注（m3-design §5）：标注不是类型的一部分，是绑定在 value 上
+ * 的位置信息——AST_SCOPE_ANNOT 节点**保留在槽位**（只折叠 sub 为
+ * AST_TYPE_REF），标注集合（names/count）在折叠后仍可从节点读取。sema 的
+ * §5/§6 检查与 compiler 的 compile_type_expr（AST_SCOPE_ANNOT 穿透分支）
+ * 均从保留节点消费标注。 */
+void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
+  if (names) *names = NULL;
+  if (count) *count = 0;
+  if (type_expr && type_expr->kind == AST_SCOPE_ANNOT) {
+    ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
+    if (names) *names = sa->names;
+    if (count) *count = sa->count;
+  }
+}
+
+/* §5 强制规则：返回 ref 必标注。rt 是折叠出的返回类型；fn->return_expr
+   已折叠（标注节点保留，sema_annot_peek 可读）。未标注 → 编译错误。 */
+bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
+                              const type_t *rt) {
+  if (!rt || rt->kind != TYPE_KIND_PTR_REF || !fn->return_expr) return true;
+  strslice_t *names = NULL;
+  size_t count = 0;
+  sema_annot_peek(fn->return_expr, &names, &count);
+  if (count == 0) {
+    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+               "function '%.*s' returns a ref but does not declare its "
+               "scope (annotate the return type, e.g. '<p> ref *T)",
+               (int)fn->name.len, fn->name.ptr);
+    return false;
+  }
+  return true;
+}
+
 const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!sema || !slot || !*slot) return NULL;
   ast_node_t *old = *slot;
@@ -527,6 +561,20 @@ const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!t) return NULL;
   const sema_type_t *st = sema_type_find(sema, t);
   if (!st && t->name.ptr == NULL) return t; /* 无名类型（异常防御）不替换 */
+
+  /* 标注节点保留：只折叠 sub 为 AST_TYPE_REF，外层 AST_SCOPE_ANNOT 原位
+     保留（标注是位置信息，随槽位节点存活到编译期，供检查消费）。 */
+  if (old->kind == AST_SCOPE_ANNOT) {
+    ast_scope_annot_t *sa = (ast_scope_annot_t *)old;
+    ast_node_t *sub = sa->sub;
+    ast_node_t *sub_ref =
+        ast_type_ref_new(sema->arena, sub->tok_begin, sub->tok_end);
+    if (!sub_ref) return NULL;
+    ((ast_type_ref_t *)sub_ref)->name = st ? st->name : t->name;
+    sub_ref->next = sub->next; /* 保留兄弟链 */
+    sa->sub = sub_ref;         /* 标注节点保留，sub 折叠为 AST_TYPE_REF */
+    return t;
+  }
 
   ast_node_t *ref = ast_type_ref_new(sema->arena, old->tok_begin, old->tok_end);
   if (!ref) return NULL;
@@ -741,6 +789,9 @@ static void pass2_types(sema_t *sema) {
                    "unknown return type");
       }
     }
+    /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。
+       未标注 → 编译错误（调用点无法确定返回值存活上限）。 */
+    sema_check_ret_ref_annot(sema, fn, rt);
 
     /* 注册签名类型（按签名去重 intern 到 vm 类型池，type_func_sig 复制 params）；
        符号统一记录定义 AST 节点（函数 = AST_FUNC_DEF）；签名类型存于

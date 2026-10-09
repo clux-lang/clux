@@ -7,6 +7,7 @@
 #include "parser/ast_option.h"
 #include "parser/ast_tuple.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_scope_annot.h"
 #include "parser/ast_volatile.h"
 
 /* ===========================================================================
@@ -25,6 +26,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        限定符无意义（无基础类型可修饰），sema 已保证限定符不带空类型。 */
     bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
     st_push(c, 1);
+    return;
+  }
+
+  if (type_expr->kind == AST_SCOPE_ANNOT) {
+    /* 作用域标注（m3-design §5）：'<a,b,c> T。标注不是类型的一部分，是
+       绑定在 value 上的位置信息（编译期检查用，sema §5/§6 消费）——
+       运行时类型构造无感知，直接穿透编译被标注类型 T。sema 检查在
+       sema_resolve_type_slot 折叠 sub 后读取保留的标注节点。 */
+    compile_type_expr(c, ((ast_scope_annot_t *)type_expr)->sub);
     return;
   }
 

@@ -269,15 +269,12 @@ size_t utf8_encode(uint32_t cp, char *out) {
 /* ---- 类型标注解析 ---- */
 
 /**
- * 解析作用域标注集合 '<a,b,c>'：' 已由调用点确认（lexer 产出 ' SYMBOL
- * token），消费 '<' 后循环解析标识符（'*' 记 global），直到 '>'。
+ * 解析作用域标注集合 '<a,b,c>'：'< 已由调用点确认（lexer 合成 "'<" 复合
+ * SYMBOL token，lexer.c:580），消费该复合 token 后循环解析标识符（'*'
+ * 记 global），直到 '>'。
  * 返回 names 数组（arena 分配）与 count；失败返回 NULL（诊断已报）。
  */
 static strslice_t *parse_scope_annot_names(parser_t *p, size_t *out_count) {
-    if (!expect_symbol(p, "<")) {
-        parse_error(p, "expected '<' after scope annotation prefix");
-        return NULL;
-    }
     skip_trivia(p);
 
     if (check_symbol(p, ">")) {
@@ -335,12 +332,14 @@ static strslice_t *parse_scope_annot_names(parser_t *p, size_t *out_count) {
 }
 
 ast_node_t *parse_scope_annotated_type(parser_t *p) {
-    if (!check_symbol(p, "'")) {
+    /* lexer 把前导 `'<` 合成单符号 token（lexer.c:581，'< 紧跟 = 作用域
+       标注前缀，非字符字面量）；此处匹配复合 token "'<"，非单 "'"。 */
+    if (!check_symbol(p, "'<")) {
         return parse_expr_prec(p, 1);
     }
 
     uint32_t tb = p->pos;
-    advance(p); /* 消费 ' */
+    advance(p); /* 消费 '<（标注前缀） */
     skip_trivia(p);
 
     size_t count = 0;

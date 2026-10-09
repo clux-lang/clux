@@ -579,12 +579,20 @@ static token_t *lexer_read_token(lexer_t *lexer) {
     return lexer_read_string(lexer, begin);
   case '\'':
     /* scope annotation `'<a,b,c>`: a quote immediately followed by '<' is
-     * the scope-annotation prefix, not a character literal. */
+     * the scope-annotation prefix, not a character literal. The token is
+     * synthesized as the two-byte symbol "'<" (both characters consumed;
+     * parse_utils.c parse_scope_annotated_type matches the composite).
+     * Note: the leading quote must be consumed first — the lexer loop
+     * peeks (does not consume) the current char, so peeking again here
+     * would return the quote itself, never '<'. */
+    istream_read_cp(lexer->stream); /* consume ' */
     if (istream_peek_cp(lexer->stream) == '<') {
-      istream_read_cp(lexer->stream); /* consume ' */
+      istream_read_cp(lexer->stream); /* consume '<' */
       stream_pos_t end_pos = istream_tell(lexer->stream);
       return lexer_make_token(lexer, TOKEN_TYPE_SYMBOL, begin, end_pos);
     }
+    /* not an annotation: rewind so lexer_read_char re-consumes the quote */
+    istream_seek(lexer->stream, begin.byte_offset);
     return lexer_read_char(lexer, begin);
   case '/':
     return lexer_read_slash(lexer, begin);

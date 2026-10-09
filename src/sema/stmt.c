@@ -229,6 +229,147 @@ void sema_scope_release_borrows(sema_scope_t *scope) {
   }
 }
 
+/* ---- §5 作用域标注逃逸检查（m3-design §5） ---- */
+
+/* 类型是否含 ref 指针（顶层或嵌套——struct/tuple/union/cunion 字段、
+   option/const/volatile 内层、数组元素）。§5 强制规则 B 的判定基础：
+   "结构体/共用体含 ref 字段时，该类型变量定义时必须标注"。 */
+static bool type_contains_ref(const type_t *t) {
+  if (!t) return false;
+  switch (t->kind) {
+    case TYPE_KIND_PTR_REF:
+      return true;
+    case TYPE_KIND_STRUCT: {
+      size_t n = struct_type_field_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const struct_field_t *f = struct_type_field(t, i);
+        if (f && type_contains_ref(f->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e && type_contains_ref(e->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        if (m && type_contains_ref(m->payload_type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_CUNION: {
+      size_t n = cunion_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const cunion_member_t *m = cunion_type_member(t, i);
+        if (m && type_contains_ref(m->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_OPTION:
+      return type_contains_ref(type_option_inner(t));
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE:
+      return type_contains_ref(type_qualifier_sub(t));
+    case TYPE_KIND_ARRAY:
+      return type_contains_ref(array_type_elem(t));
+    default:
+      return false; /* 标量/str/bool/own/fatal 指针/type/error/opaque */
+  }
+}
+
+/* 作用域嵌套比较：a 沿 parent 链可达 b（或 a == b）→ a 嵌套于 b。
+   b 为 NULL（锚点解析失败）恒 true（保守放行，错误由解析方报）。 */
+static bool scope_within(const sema_scope_t *a, const sema_scope_t *b) {
+  for (const sema_scope_t *s = a; s; s = s->parent)
+    if (s == b) return true;
+  return false;
+}
+
+/* 标注锚点解析（m3-design §5 检查算法）：标注名字 → 锚点作用域。
+   - "*"   → global（global 作用域，恒放行：全局值存活到程序结束）
+   - 参数名 → 参数层作用域（参数整个函数体期间存活，恒放行）
+   - 局部变量名 → 该符号定义所在作用域（own_scope，3b 定义点记录）
+   未解析（非参数/全局/局部变量名）返回 NULL（错误由调用方报）。 */
+static sema_scope_t *annot_anchor_scope(sema_t *sema, strslice_t name,
+                                        sema_scope_t *scope) {
+  if (name.len == 1 && name.ptr[0] == '*') return sema->global_scope;
+
+  /* 参数判定：遍历当前函数真实参数列表（参数符号在 param_scope 直系，但
+     函数体顶层变量也注册在 param_scope，sema_scope_find_local 无法区分）。 */
+  if (sema->func_def) {
+    for (ast_node_t *p = sema->func_def->params; p; p = p->next) {
+      ast_var_def_t *pvd = (ast_var_def_t *)p;
+      if (pvd->name.len == name.len &&
+          memcmp(pvd->name.ptr, name.ptr, name.len) == 0)
+        return sema->local_func_param_scope;
+    }
+  }
+
+  /* 局部变量：沿 scope 链解析符号，取其定义作用域（own_scope 3b 记录；
+     未走到定义点的符号 own_scope 为 NULL → 锚点解析失败，调用方报错）。 */
+  sema_symbol_t *sym = sema_lookup(scope, name);
+  if (sym && sym->kind == SEMA_SYM_VAR) return sym->own_scope;
+  return NULL;
+}
+
+/* §5 逃逸比较（m3-design §5 检查算法：ref 的作用域 ≤ own 的作用域）：
+   持有 ref 的变量（own_scope = 变量定义作用域，即 ref 的推断存活）须被
+   标注集合的 min 锚点涵盖。**AND 语义**：'<a,b,c> = 存活不超过 min(a,b,c)，
+   每个锚点都必须涵盖 ref 定义作用域（任一不涵盖 → 逃逸 → 悬垂）。参数/
+   全局锚点恒成立（scope_within 天然处理：函数体内所有块 ⊆ 参数层，所有
+   作用域 ⊆ global 根）。 */
+static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_scope,
+                               strslice_t *names, size_t count) {
+  if (count == 0) return;
+  for (size_t i = 0; i < count; i++) {
+    sema_scope_t *anchor = annot_anchor_scope(sema, names[i], own_scope);
+    if (!anchor) {
+      diag_error(sema->diag, sema_loc(sema, at),
+                 "scope annotation '%.*s' does not name a parameter, global "
+                 "or local variable",
+                 (int)names[i].len, names[i].ptr);
+      continue;
+    }
+    if (!scope_within(own_scope, anchor)) {
+      diag_error(sema->diag, sema_loc(sema, at),
+                 "variable escapes scope annotation '%.*s' (its scope is not "
+                 "nested within the annotated scope)",
+                 (int)names[i].len, names[i].ptr);
+    }
+  }
+}
+
+/* §5 逃逸检查统一入口（shadow_var_def 调用）：声明类型含 ref 指针（顶层
+   ref *T 或含 ref 字段的 struct/tuple/union）时做逃逸比较。
+   - 显式标注（顶层 AST_SCOPE_ANNOT）→ 锚点集合 = 标注名字（'<p> ref *T
+     借自 p；'<*> = global）
+   - 未标注 → 按定义作用域推断（§5"推断：ref 变量未显式标注时推断为
+     当前定义作用域"）→ 锚点 = 借源对象：init 直读变量（var r: ref *i32
+     = p）取该符号定义作用域；init 非直读（x.&、函数调用返回、new 产物）
+     无静态可判借源 → 跳过（ref 存活 = 当前作用域，逃逸点由 §6/调用点
+     检查兜底）。 */
+static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
+                            sema_scope_t *scope, const type_t *vt) {
+  if (!vt || !type_contains_ref(vt)) return;
+
+  strslice_t *names = NULL;
+  size_t count = 0;
+  sema_annot_peek(vd->type_expr, &names, &count);
+  if (count == 0) {
+    if (!vd->init || vd->init->kind != AST_IDENT) return;
+    names = &((ast_ident_t *)vd->init)->name;
+    count = 1;
+  }
+  check_annot_escape(sema, vd->type_expr ? vd->type_expr : vd->init,
+                     scope, names, count);
+}
+
 /* 显式类型槽位兜底重解析：3a 槽位解析可能失败（引用同块后续局部 type /
    被 type_shadowed_by_local_def 判"待绑定局部遮蔽"推迟）→ 此处定义点兜底。
    仍失败补报诊断：激活的同名 var/参数遮蔽 → "is a variable, not a type"
@@ -267,11 +408,16 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
 
   /* comptime var：编译期求值 + 符号表编码（sema_eval_comptime_var）。
      定义点不进入 VM scope——调用方（walk_block）负责从语句链摘除；
-     引用点在 sema_expr 折叠为字面量。 */
+     引用点在 sema_expr 折叠为字面量。comptime 值是编译期常量（无运行时
+     生命周期），不参与 §5 逃逸检查。 */
   if (vd->is_comptime) {
     sema_eval_comptime_var(sema, vd, scope);
     return;
   }
+
+  /* §5 锚点解析基础：记录定义所在作用域（own_scope）。作用域标注
+     '<p> ref *T 中的 p 解析为符号后取其 own_scope 作锚点作用域。 */
+  sym->own_scope = scope;
 
   value_t *var_value;
   if (vd->init && vd->init->kind == AST_UNDEF) {
@@ -410,6 +556,12 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       var_value = value_make_shadow(sema->vm, vt);
     }
   }
+
+  /* §5 逃逸检查（m3-design §5）：声明类型含 ref 指针（顶层 ref *T 或含
+     ref 字段的 struct/tuple/union）时定义必须带作用域标注；带标注则做
+     逃逸比较（ref 存活 ≤ 锚点存活）。类型未就绪（解析失败已诊断）跳过
+     ——防级联。 */
+  if (sym->type) check_var_annot(sema, vd, scope, sym->type);
 
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
@@ -1597,6 +1749,8 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
                  "unknown return type");
     }
   }
+  /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
+  sema_check_ret_ref_annot(sema, fn, rt);
 
   const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
   /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */

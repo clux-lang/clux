@@ -117,6 +117,11 @@ struct _sema_symbol_t {
      变量（var q: opaque = p）同样登记——opaque 是借用（§8.4 堆块归源
      释放），move 源须等 opaque 借用消亡。仅变量符号有意义。 */
   struct _sema_symbol_t *borrow_src;
+  /* 定义所在作用域（§5 逃逸检查锚点解析用）：变量定义时记录所在 sema
+     作用域。作用域标注 '<p> ref *T 中的 p 解析为符号后，其 own_scope 即
+     锚点作用域——与持有 ref 的变量的定义作用域做嵌套比较（ref 存活 ≤
+     锚点存活，防悬垂）。仅变量符号有意义。 */
+  sema_scope_t *own_scope;
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——
      用户范式改为显式解包：if (a != nil) { var v = a.!; ... }。 ---- */

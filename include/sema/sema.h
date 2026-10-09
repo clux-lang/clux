@@ -301,6 +301,24 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
  */
 void sema_scope_release_borrows(sema_scope_t *scope);
 
+/**
+ * 作用域标注读取（m3-design §5）：type_expr 最外层是 AST_SCOPE_ANNOT 时
+ * 返回其标注集合（names 指向 arena 数组，count = 个数；'<*>' = 单元素
+ * "*"，global）；否则 *names=NULL, *count=0。标注节点保留在 AST（sema_
+ * resolve_type_slot 折叠 sub 但保留外层标注节点），任何消费点可随时读取。
+ * 嵌套标注 '<a> '<b> T：只读最外层（消费层按序收敛——内层标注属内层类型）。
+ */
+void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count);
+
+/**
+ * §5 强制规则（m3-design §5）：函数返回 ref *T 时返回类型必须标注作用域
+ * （'<p> ref *T，集合 = 参数名 ∪ {*}）——未标注无法确定返回值存活上限，
+ * 调用点无法检查逃逸。fn->return_expr 已折叠（标注节点保留），rt 是折叠
+ * 出的返回类型。返回 true = 通过（非 ref 返回 / 无返回类型 / 已标注）。
+ */
+bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
+                              const type_t *rt);
+
 /** 兄弟链节点计数（参数/实参列表长度）。 */
 size_t sema_count_siblings(const ast_node_t *node);
 

@@ -693,6 +693,8 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
                  "unknown return type in function literal");
     }
   }
+  /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
+  sema_check_ret_ref_annot(sema, fn, rt);
   if (rt && rt->kind != TYPE_KIND_VOID && !r.definitely_returns) {
     char nb[128];
     if (fn->name.len)
