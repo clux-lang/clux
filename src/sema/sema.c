@@ -470,8 +470,9 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return NULL;
     }
     case AST_PTR: {
-      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。按所有权
-         修饰 token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
+      /* 指针类型（m3-design §3/§12）：own *T / ref *T / fatal *T /
+         share *T / weak *T。按所有权修饰 token 文本分派 type_ptr_intern
+        （五种所有权是独立 intern 实例）。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
       type_kind_t kind;
@@ -482,6 +483,10 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         kind = TYPE_KIND_PTR_REF;
       } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
         kind = TYPE_KIND_PTR_FATAL;
+      } else if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0) {
+        kind = TYPE_KIND_PTR_SHARE;
+      } else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0) {
+        kind = TYPE_KIND_PTR_WEAK;
       } else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
@@ -919,6 +924,37 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = psig,
                           .is_active = true, .fid = pfid};
     sema_scope_define(sema->global_scope, STRSLICE_LIT("printf"), &init);
+  }
+
+  /* 预注册 upgrade 内置函数（§12.4：upgrade(weak *T) -> ?share *T）。
+     与 VM 侧 vm_register_upgrade 对应。泛型 T：注册为 variadic（0 固定参数），
+     返回 ?share *opaque 占位——sema 调用点特判从实参 weak *T 推断 ?share *T。
+     fid 从 vm->functions 按名查询（内建 id=1，printf=0）。 */
+  {
+    const type_t *share_opaque = type_ptr_intern(sema->vm, TYPE_KIND_PTR_SHARE,
+                                                 sema->vm->type_opaque);
+    const type_t *opt_share = share_opaque
+        ? type_option_intern(sema->vm, share_opaque) : NULL;
+    const type_t *usig = opt_share
+        ? type_func_sig(sema->vm, NULL, 0, opt_share, /*is_variadic=*/true)
+        : NULL;
+    uint32_t ufid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 7 &&
+            memcmp(bf->name.ptr, "upgrade", 7) == 0) {
+          ufid = bf->id;
+          break;
+        }
+      }
+    }
+    if (usig) {
+      sema_symbol_t uinit = {.kind = SEMA_SYM_FUNC, .type = usig,
+                             .is_active = true, .fid = ufid};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("upgrade"), &uinit);
+    }
   }
 
   pass1_names(sema, prog);

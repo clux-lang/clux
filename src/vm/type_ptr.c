@@ -47,14 +47,31 @@ static void ptr_free_heap(vm_t *vm, const value_t *v) {
     if (!v || value_is_shadow(v)) return;
     const type_t *t = value_type(v);
     if (!t) return;
-    /* 仅 own/fatal 释放堆块；ref 总借用跳过 */
-    if (t->kind != TYPE_KIND_PTR_OWN && t->kind != TYPE_KIND_PTR_FATAL)
-        return;
     ptr_value_t *pv = (ptr_value_t *)value_data(v);
-    if (pv && pv->ptr) {
+    if (!pv || !pv->ptr) return;
+    /* own/fatal：释放堆块；share：递减 strong；weak：递减 weak；ref 跳过 */
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_FATAL: {
         void *heap = pv->ptr;
         pv->ptr = NULL;
         allocator_free(vm->alloc, &heap);
+        break;
+    }
+    case TYPE_KIND_PTR_SHARE: {
+        rc_block_t *rc = (rc_block_t *)pv->ptr;
+        pv->ptr = NULL;
+        rc_block_strong_dec(vm, rc);
+        break;
+    }
+    case TYPE_KIND_PTR_WEAK: {
+        rc_block_t *rc = (rc_block_t *)pv->ptr;
+        pv->ptr = NULL;
+        rc_block_weak_dec(vm, rc);
+        break;
+    }
+    default:
+        break;  /* ref/opaque：无堆块 */
     }
 }
 
@@ -78,6 +95,8 @@ static bool ptr_type_needs_scan(const type_t *t) {
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR_WEAK:
     case TYPE_KIND_STRUCT:
     case TYPE_KIND_TUPLE:
     case TYPE_KIND_ARRAY:
@@ -104,6 +123,25 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         void *heap = pv->ptr;
         pv->ptr = NULL;
         allocator_free(vm->alloc, &heap);
+        return;
+    }
+    case TYPE_KIND_PTR_SHARE: {
+        /* share 字段析构：递减 strong 计数（strong→0 时 rc_block_strong_dec
+           递归析构 payload 内嵌 own/share 字段）。 */
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->ptr) return;
+        rc_block_t *rc = (rc_block_t *)pv->ptr;
+        rc_block_strong_dec(vm, rc);
+        pv->ptr = NULL;
+        return;
+    }
+    case TYPE_KIND_PTR_WEAK: {
+        /* weak 字段析构：递减 weak 计数。 */
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->ptr) return;
+        rc_block_t *rc = (rc_block_t *)pv->ptr;
+        rc_block_weak_dec(vm, rc);
+        pv->ptr = NULL;
         return;
     }
     case TYPE_KIND_STRUCT: {
@@ -176,6 +214,16 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (base && ptr_type_needs_scan(base))
             ptr_clear_owned_recursive(vm, base, pv->ptr);
         pv->ptr = NULL;  /* 只清指针：堆块已归接管方，不释放 */
+        return;
+    }
+    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR_WEAK: {
+        /* share/weak 随 memcpy 复制后，计数已在 clone/assign 时递增，
+           清源 ptr=NULL 防作用域退出递减两次。不递减计数——接管方
+           持有的 share/weak 已有独立计数。 */
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->ptr) return;
+        pv->ptr = NULL;
         return;
     }
     case TYPE_KIND_STRUCT: {
@@ -258,6 +306,20 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         } else {
             memcpy(dst, src, type->size);  /* 借用 / 已转移：复制指针值 */
         }
+        break;
+    }
+    case TYPE_KIND_PTR_SHARE: {
+        /* share clone：递增 strong 计数，复制指针值（共享同一 RC 块）。 */
+        const ptr_value_t *sp = (const ptr_value_t *)src;
+        if (sp->ptr) rc_block_strong_inc((rc_block_t *)sp->ptr);
+        memcpy(dst, src, type->size);
+        break;
+    }
+    case TYPE_KIND_PTR_WEAK: {
+        /* weak clone：递增 weak 计数，复制指针值。 */
+        const ptr_value_t *sp = (const ptr_value_t *)src;
+        if (sp->ptr) rc_block_weak_inc((rc_block_t *)sp->ptr);
+        memcpy(dst, src, type->size);
         break;
     }
     case TYPE_KIND_STRUCT: {
@@ -357,6 +419,14 @@ static value_t *ptr_clone(vm_t *vm, value_t *v) {
             ((ptr_value_t *)value_data(v))->ptr = NULL;
             return nv;
         }
+    case TYPE_KIND_PTR_SHARE:
+        /* share clone：递增 strong 计数，共享同一 RC 块（§12.2）。 */
+        if (pv->ptr) rc_block_strong_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, t, pv->ptr);
+    case TYPE_KIND_PTR_WEAK:
+        /* weak clone：递增 weak 计数，共享同一 RC 块（§12.2）。 */
+        if (pv->ptr) rc_block_weak_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, t, pv->ptr);
     default:
         /* ref 及一切借用：复制指针值（ref 是值拷贝语义，§3.2） */
         return ptr_make_value(vm, t, pv->ptr);
@@ -374,15 +444,28 @@ static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
     }
     /* shadow：只检查类型兼容性，不拷贝 data */
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    /* 覆盖前释放旧堆块（own/fatal 且 ptr≠NULL）；借用（ref）无堆块跳过 */
+    /* 覆盖前释放旧值（own/fatal 释放堆块；share/weak 递减计数；ref 跳过） */
     ptr_free_heap(vm, dst);
-    memcpy(value_data(dst), value_data(src), value_type(dst)->size);  /* 指针值覆盖 */
+    /* share/weak 赋值：src 计数递增（memcpy 复制指针值前递增，避免
+       src==dst 自赋值时先递减后递增导致中间态归零） */
+    const type_t *dt = value_type(dst);
+    if (dt->kind == TYPE_KIND_PTR_SHARE || dt->kind == TYPE_KIND_PTR_WEAK) {
+        ptr_value_t *sp = (ptr_value_t *)value_data(src);
+        if (sp->ptr) {
+            if (dt->kind == TYPE_KIND_PTR_SHARE)
+                rc_block_strong_inc((rc_block_t *)sp->ptr);
+            else
+                rc_block_weak_inc((rc_block_t *)sp->ptr);
+        }
+    }
+    memcpy(value_data(dst), value_data(src), dt->size);  /* 指针值覆盖 */
     return dst;
 }
 
 static void ptr_dispose(vm_t *vm, value_t *v) {
     /* own/fatal 且 ptr≠NULL → 释放堆块（作用域退出销毁，m3-design §3.1）；
-       ref 总借用 / ptr=NULL（已转移）→ no-op，防双释放。 */
+       share → 递减 strong（→0 析构 payload）；weak → 递减 weak（→0 释放块）；
+       ref 总借用 / ptr=NULL → no-op，防双释放。 */
     ptr_free_heap(vm, v);
 }
 
@@ -460,6 +543,40 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         return nv;
     }
 
+    /* fatal → share 创建（§12.1）：var s: share *T = <fatal 值>。
+       fatal 接管三路之一：从 fatal 堆块创建 RC 块（payload = 堆块内容拷贝），
+       源置 NULL 防双释放。单向隔离：share 不能转回 own/ref。 */
+    if (src->kind == TYPE_KIND_PTR_FATAL && target &&
+        target->kind == TYPE_KIND_PTR_SHARE &&
+        ptr_type_base(src) == ptr_type_base(target)) {
+        value_t *sv = ptr_make_share_from_fatal(vm, v);
+        return sv;
+    }
+
+    /* share → weak 派生（§12.1）：weak 只从 share 派生。递增 weak 计数，
+       复制 RC 块指针。share 保持不变（不递减 strong——weak 是额外观察者）。 */
+    if (src->kind == TYPE_KIND_PTR_SHARE && target &&
+        target->kind == TYPE_KIND_PTR_WEAK &&
+        ptr_type_base(src) == ptr_type_base(target)) {
+        return ptr_make_weak_from_share(vm, v);
+    }
+
+    /* share → share（copy = 计数+1，§12.2） */
+    if (src->kind == TYPE_KIND_PTR_SHARE && target &&
+        target->kind == TYPE_KIND_PTR_SHARE &&
+        ptr_type_base(src) == ptr_type_base(target)) {
+        if (pv->ptr) rc_block_strong_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, target, pv->ptr);
+    }
+
+    /* weak → weak（copy = 计数+1，§12.2） */
+    if (src->kind == TYPE_KIND_PTR_WEAK && target &&
+        target->kind == TYPE_KIND_PTR_WEAK &&
+        ptr_type_base(src) == ptr_type_base(target)) {
+        if (pv->ptr) rc_block_weak_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, target, pv->ptr);
+    }
+
     /* 同类型身份拷贝（ref → ref 等，clone 语义） */
     if (src == target) {
         return ptr_make_value(vm, target, pv->ptr);
@@ -480,14 +597,15 @@ static value_t *ptr_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     return value_make_error(vm, "ptr: unsupported explicit cast for pointer");
 }
 
-/* ---- 鸭子类型判断：按 base 递归（三种所有权修饰是独立类型） ---- */
+/* ---- 鸭子类型判断：按 base 递归（五种所有权修饰是独立类型） ---- */
 
 static bool ptr_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (a == b) return true;
     if (!b) return false;
     if (a->kind != b->kind) return false;
     if (a->kind != TYPE_KIND_PTR_OWN && a->kind != TYPE_KIND_PTR_REF &&
-        a->kind != TYPE_KIND_PTR_FATAL) {
+        a->kind != TYPE_KIND_PTR_FATAL &&
+        a->kind != TYPE_KIND_PTR_SHARE && a->kind != TYPE_KIND_PTR_WEAK) {
         return false;
     }
     return type_equal(vm, ptr_type_base(a), ptr_type_base(b));
@@ -497,7 +615,8 @@ static bool ptr_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
     if (sub == sup) return true;
     if (!sup) return false;
     if (sub->kind != TYPE_KIND_PTR_OWN && sub->kind != TYPE_KIND_PTR_REF &&
-        sub->kind != TYPE_KIND_PTR_FATAL) {
+        sub->kind != TYPE_KIND_PTR_FATAL &&
+        sub->kind != TYPE_KIND_PTR_SHARE && sub->kind != TYPE_KIND_PTR_WEAK) {
         return false;
     }
     /* 指针按 base 递归：同所有权修饰下 base 兼容即指针兼容。
@@ -547,17 +666,43 @@ const vtable_t VTABLE_PTR_FATAL = {
     .type_seal = type_ptr_seal,
 };
 
+const vtable_t VTABLE_PTR_SHARE = {
+    .eq = ptr_eq, .ne = ptr_ne,
+    .dispose = ptr_dispose,
+    .clone = ptr_clone,
+    .assign = ptr_assign,
+    .implicit_cast = ptr_implicit_cast,
+    .explicit_cast = ptr_explicit_cast,
+    .type_equal = ptr_type_equal,
+    .type_extends = ptr_type_extends,
+    .type_seal = type_ptr_seal,
+};
+
+const vtable_t VTABLE_PTR_WEAK = {
+    .eq = ptr_eq, .ne = ptr_ne,
+    .dispose = ptr_dispose,
+    .clone = ptr_clone,
+    .assign = ptr_assign,
+    .implicit_cast = ptr_implicit_cast,
+    .explicit_cast = ptr_explicit_cast,
+    .type_equal = ptr_type_equal,
+    .type_extends = ptr_type_extends,
+    .type_seal = type_ptr_seal,
+};
+
 /* ===========================================================================
  * 开放构造（PUSH_PTR / SET_TYPE / SEAL，与 const/volatile 统一的两遍构造）
  * =========================================================================== */
 
-/* 构造名 "own *T" / "ref *T" / "fatal *T"（堆分配，vm 拥有） */
+/* 构造名 "own *T" / "ref *T" / "fatal *T" / "share *T" / "weak *T" */
 static char *ptr_name(allocator_t *alloc, type_kind_t kind, const type_t *base) {
     const char *owner;
     switch (kind) {
     case TYPE_KIND_PTR_OWN:   owner = "own ";   break;
     case TYPE_KIND_PTR_REF:   owner = "ref ";   break;
     case TYPE_KIND_PTR_FATAL: owner = "fatal "; break;
+    case TYPE_KIND_PTR_SHARE: owner = "share "; break;
+    case TYPE_KIND_PTR_WEAK:  owner = "weak ";  break;
     default:                  owner = "ptr ";   break;
     }
     size_t ol = strlen(owner);
@@ -582,6 +727,8 @@ static ptr_type_t *ptr_type_create_open(vm_t *vm, type_kind_t kind) {
     case TYPE_KIND_PTR_OWN:   pt->base.vtable = &VTABLE_PTR_OWN;   break;
     case TYPE_KIND_PTR_REF:   pt->base.vtable = &VTABLE_PTR_REF;   break;
     case TYPE_KIND_PTR_FATAL: pt->base.vtable = &VTABLE_PTR_FATAL; break;
+    case TYPE_KIND_PTR_SHARE: pt->base.vtable = &VTABLE_PTR_SHARE; break;
+    case TYPE_KIND_PTR_WEAK:  pt->base.vtable = &VTABLE_PTR_WEAK;  break;
     default:
         panic("vm: invalid pointer ownership kind");
         break;
@@ -606,19 +753,21 @@ void type_ptr_set_base(vm_t *vm, const type_t *t, const type_t *base) {
     (void)vm;
     if (!t || type_is_sealed(t)) return;
     if (t->kind != TYPE_KIND_PTR_OWN && t->kind != TYPE_KIND_PTR_REF &&
-        t->kind != TYPE_KIND_PTR_FATAL) {
+        t->kind != TYPE_KIND_PTR_FATAL &&
+        t->kind != TYPE_KIND_PTR_SHARE && t->kind != TYPE_KIND_PTR_WEAK) {
         return;
     }
     ((ptr_type_t *)t)->base_type = base;
 }
 
-/* SEAL：按 base_type 去重 intern（同一 base 的三种所有权是三个独立实例），
+/* SEAL：按 base_type 去重 intern（同一 base 的五种所有权是五个独立实例），
  * 标记 sealed，返回该 const type（允许链式）。t 须为已设 base_type 的开放
  * ptr 类型（type_ptr_push 产物）。 */
 const type_t *type_ptr_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t) return NULL;
     if (t->kind != TYPE_KIND_PTR_OWN && t->kind != TYPE_KIND_PTR_REF &&
-        t->kind != TYPE_KIND_PTR_FATAL) {
+        t->kind != TYPE_KIND_PTR_FATAL &&
+        t->kind != TYPE_KIND_PTR_SHARE && t->kind != TYPE_KIND_PTR_WEAK) {
         return NULL;
     }
     if (type_is_sealed(t)) return t;  /* 已密封直接返回（幂等） */
@@ -675,7 +824,8 @@ const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base) {
      * 场景避免栈布局污染）。去重 intern 由 type_ptr_seal 完成。 */
     if (!vm || !base) return NULL;
     if (kind != TYPE_KIND_PTR_OWN && kind != TYPE_KIND_PTR_REF &&
-        kind != TYPE_KIND_PTR_FATAL) {
+        kind != TYPE_KIND_PTR_FATAL &&
+        kind != TYPE_KIND_PTR_SHARE && kind != TYPE_KIND_PTR_WEAK) {
         return NULL;
     }
     ptr_type_t *pt = ptr_type_create_open(vm, kind);
@@ -683,11 +833,134 @@ const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base) {
     return type_ptr_seal(vm, &pt->base);
 }
 
-/* 构造指针值：目标地址（own *T / ref *T / fatal *T 统一，所有权由 type
- * kind 区分，m3-design §13.2 运行期零标志）。
+/* 构造指针值：目标地址（五种指针统一，所有权由 type kind 区分，
+ * m3-design §13.2 运行期零标志）。
  * data 块 = ptr_value_t（值布局，见 type_ptr.h）。 */
 value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target) {
     ptr_value_t pv = { target };
     void *data = value_alloc_data_copy(vm->alloc, pt, &pv);
     return value_make(vm, pt, data);
+}
+
+/* ===========================================================================
+ * RC 控制块（share/weak，m3-design §12）
+ *
+ * 布局：rc_block_t 头部 + payload（T 的实际数据，按 type->align 对齐）。
+ * share/weak 的 ptr_value_t.ptr 指向 rc_block_t。strong 计数归零时析构
+ * payload（递归释放内嵌 own/share 字段），但保留控制块（weak 仍观察）。
+ * weak 计数归零时释放控制块 + payload 内存。
+ *
+ * 线程安全（§12.5）：strong/weak 皆为 atomic，upgrade 用 CAS。
+ * =========================================================================== */
+
+rc_block_t *rc_block_new(allocator_t *alloc, const type_t *payload_type) {
+    if (!alloc || !payload_type) return NULL;
+    /* 分配：头部 + 对齐填充 + payload */
+    size_t hdr = sizeof(rc_block_t);
+    size_t align = payload_type->align;
+    size_t aligned_hdr = (hdr + align - 1) & ~(align - 1);
+    size_t total = aligned_hdr + payload_type->size;
+    rc_block_t *rc = (rc_block_t *)allocator_new_ex(
+        alloc, "rc_block_t", total, NULL, NULL, NULL, align);
+    if (!rc) panic("vm: out of memory allocating rc block");
+    memset(rc, 0, total);
+    atomic_init(&rc->strong, 1);
+    atomic_init(&rc->weak, 1);  /* strong 自身占一个 weak 引用 */
+    rc->alloc = alloc;
+    rc->type = payload_type;
+    rc->destroyed = false;
+    return rc;
+}
+
+void rc_block_strong_inc(rc_block_t *rc) {
+    if (!rc) return;
+    atomic_fetch_add(&rc->strong, 1);
+}
+
+void rc_block_strong_dec(vm_t *vm, rc_block_t *rc) {
+    if (!rc || !vm) return;
+    /* strong-- ：归零时析构 payload（递归释放内嵌 own/share 字段，
+       类似 C++ 析构），然后 weak--（strong 释放其占有的 weak 引用）。 */
+    if (atomic_fetch_sub(&rc->strong, 1) == 1) {
+        /* 析构 payload：递归释放内嵌 own/share 堆块 */
+        if (!rc->destroyed) {
+            rc->destroyed = true;
+            void *payload = rc_block_payload(rc);
+            ptr_free_owned_recursive(vm, rc->type, payload);
+        }
+        /* strong 释放其占有的 weak 引用 */
+        rc_block_weak_dec(vm, rc);
+    }
+}
+
+void rc_block_weak_inc(rc_block_t *rc) {
+    if (!rc) return;
+    atomic_fetch_add(&rc->weak, 1);
+}
+
+void rc_block_weak_dec(vm_t *vm, rc_block_t *rc) {
+    if (!rc || !vm) return;
+    /* weak-- ：归零时释放控制块 + payload 内存（此时 strong 已为 0，
+       payload 已析构，但内存仍保留供 weak 观察）。 */
+    if (atomic_fetch_sub(&rc->weak, 1) == 1) {
+        allocator_t *alloc = rc->alloc;
+        allocator_free(alloc, (void **)&rc);
+    }
+}
+
+void *rc_block_upgrade(rc_block_t *rc) {
+    if (!rc) return NULL;
+    /* CAS 原子检查 strong>0 并递增——防止销毁竞态 */
+    unsigned int expected;
+    do {
+        expected = atomic_load(&rc->strong);
+        if (expected == 0) return NULL;  /* 对象已析构 */
+    } while (!atomic_compare_exchange_weak(&rc->strong, &expected, expected + 1));
+    return rc_block_payload(rc);
+}
+
+/* weak 从 share 派生（§12.1）：递增 weak 计数，返回 weak value。 */
+value_t *ptr_make_weak_from_share(vm_t *vm, value_t *share_val) {
+    if (!vm || !share_val) return value_make_error(vm, "weak: null share value");
+    const type_t *st = value_type(share_val);
+    if (!st || st->kind != TYPE_KIND_PTR_SHARE)
+        return value_make_error(vm, "weak: can only derive from share");
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(share_val);
+    const type_t *wt = type_ptr_intern(vm, TYPE_KIND_PTR_WEAK, ptr_type_base(st));
+    if (!wt) return value_make_error(vm, "weak: cannot make weak pointer type");
+    if (pv->ptr) rc_block_weak_inc((rc_block_t *)pv->ptr);
+    return ptr_make_value(vm, wt, pv->ptr);
+}
+
+/* share 创建：从 fatal 值接管堆块 → 分配 RC 块（payload = 堆块内容拷贝），
+ * 返回 share *T value（§12.1：fatal → share 创建通道）。 */
+value_t *ptr_make_share_from_fatal(vm_t *vm, value_t *fatal_val) {
+    if (!vm || !fatal_val) return value_make_error(vm, "share: null fatal value");
+    const type_t *ft = value_type(fatal_val);
+    if (!ft || ft->kind != TYPE_KIND_PTR_FATAL)
+        return value_make_error(vm, "share: can only create from fatal");
+    const type_t *base = ptr_type_base(ft);
+    if (!base) return value_make_error(vm, "share: fatal missing base type");
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(fatal_val);
+    if (!pv->ptr) return value_make_error(vm, "share: fatal has null pointer");
+
+    /* 分配 RC 块，payload 拷贝 fatal 指向的堆块内容 */
+    rc_block_t *rc = rc_block_new(vm->alloc, base);
+    void *payload = rc_block_payload(rc);
+    memcpy(payload, pv->ptr, base->size);
+
+    /* 清空源对象图内嵌 own/share 指针（所有权随拷贝转移到 RC 块 payload） */
+    ptr_clear_owned_recursive(vm, base, pv->ptr);
+
+    /* 释放 fatal 的原始堆块（内容已拷贝进 RC 块） */
+    void *heap = pv->ptr;
+    ((ptr_value_t *)value_data(fatal_val))->ptr = NULL;
+    allocator_free(vm->alloc, &heap);
+
+    const type_t *share_t = type_ptr_intern(vm, TYPE_KIND_PTR_SHARE, base);
+    if (!share_t) {
+        rc_block_strong_dec(vm, rc);
+        return value_make_error(vm, "share: cannot make share pointer type");
+    }
+    return ptr_make_value(vm, share_t, rc);
 }

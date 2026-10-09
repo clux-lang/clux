@@ -685,3 +685,89 @@ TEST(Driver, StepBClosureReturnRefAnnotEscapesRejected) {
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
 }
+
+/* ---- M3 §12 RC 引用计数系（share/weak/upgrade） ---- */
+
+TEST(Driver, ShareCreateAndDeref) {
+  /* share 创建（fatal→share 隐式）+ 解引用读写（§12.1/§12.2） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s: share *i32 = new i32{42};\n"
+      "  if (s.* != 42) { return 1; }\n"
+      "  s.* = 99;\n"
+      "  if (s.* != 99) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, ShareCopySharedMutation) {
+  /* share copy = strong+1，两个 share 指向同一对象（§12.2） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s: share *i32 = new i32{42};\n"
+      "  var s2: share *i32 = s;\n"
+      "  if (s2.* != 42) { return 1; }\n"
+      "  s2.* = 99;\n"
+      "  if (s.* != 99) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, WeakFromShareUpgradeSuccess) {
+  /* weak 从 share 派生 + upgrade 成功返回 some share（§12.1/§12.4） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s: share *i32 = new i32{42};\n"
+      "  var w: weak *i32 = s;\n"
+      "  var r: ?share *i32 = upgrade(w);\n"
+      "  if (r == nil) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, UpgradeFailureAfterDestroy) {
+  /* strong 归零后 upgrade 返回 none（§12.4：对象已析构）。
+     weak 保命不保访问——控制块存活但 payload 已析构 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s0: share *i32 = new i32{0};\n"
+      "  var w: weak *i32 = s0;\n"
+      "  {\n"
+      "    var s: share *i32 = new i32{42};\n"
+      "    w = s;\n"
+      "  }\n"
+      "  var r: ?share *i32 = upgrade(w);\n"
+      "  if (r != nil) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, ShareWeakStressLoop) {
+  /* 循环 1 万次 share 创建/copy/weak/upgrade，验证引用计数无泄露无 double free */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var i: i32 = 0;\n"
+      "  while (i < 10000) {\n"
+      "    var s: share *i64 = new i64{1234567890123};\n"
+      "    if (s.* != 1234567890123) { return 1; }\n"
+      "    var s2: share *i64 = s;\n"
+      "    s2.* = i;\n"
+      "    if (s.* != i) { return 2; }\n"
+      "    var w: weak *i64 = s;\n"
+      "    var r: ?share *i64 = upgrade(w);\n"
+      "    if (r == nil) { return 3; }\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

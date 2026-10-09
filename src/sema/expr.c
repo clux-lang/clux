@@ -736,9 +736,11 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       }
 
       value_t *callee = NULL;
+      sema_symbol_t *callee_sym = NULL;
       if (call->callee->kind == AST_IDENT) {
-        sema_symbol_t *sym =
+        callee_sym =
             sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
+        sema_symbol_t *sym = callee_sym;
         if (sym && sym->is_comptime) {
           /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
              整个调用折叠为字面量。函数本身不注册到运行时。 */
@@ -787,6 +789,28 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         if (injected && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
+
+      /* upgrade 内建函数特判（§12.4）：泛型 T 从实参 weak *T 推断，
+         返回类型由占位 ?share *opaque 替换为 ?share *T。
+         callee_sym->fid == 1（upgrade，printf=0）。 */
+      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
+          callee_sym->fid == 1 && argc == 1 && arg_shadows[0]) {
+        const type_t *at = value_type(arg_shadows[0]);
+        if (at && at->kind == TYPE_KIND_PTR_WEAK) {
+          const type_t *base = ptr_type_base(at);
+          if (base) {
+            const type_t *share_t = type_ptr_intern(sema->vm,
+                TYPE_KIND_PTR_SHARE, base);
+            if (share_t) {
+              const type_t *opt_t = type_option_intern(sema->vm, share_t);
+              if (opt_t) {
+                value_dispose(sema->vm, result);
+                result = value_make_shadow(sema->vm, opt_t);
+              }
+            }
+          }
+        }
+      }
 
       if (value_is_error(sema->vm, result)) {
         error_data_t *ed = (error_data_t *)value_data(result);

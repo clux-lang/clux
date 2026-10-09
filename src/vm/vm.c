@@ -15,6 +15,7 @@
 
 extern void vm_init_builtins(vm_t *vm);
 extern void vm_register_printf(vm_t *vm);
+extern void vm_register_upgrade(vm_t *vm);
 
 static class_t g_vm_class = {
     .name       = "clux.vm",
@@ -162,6 +163,9 @@ vm_t *vm_new(allocator_t *alloc) {
 
     /* printf 内置函数（临时注册，M1 硬编码绑定 C printf） */
     vm_register_printf(vm);
+
+    /* upgrade 内置函数（§12.4：weak *T -> ?share *T） */
+    vm_register_upgrade(vm);
 
     return vm;
 }

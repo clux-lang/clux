@@ -464,7 +464,9 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     }
     if (open && (open->kind == TYPE_KIND_PTR_OWN ||
                  open->kind == TYPE_KIND_PTR_REF ||
-                 open->kind == TYPE_KIND_PTR_FATAL)) {
+                 open->kind == TYPE_KIND_PTR_FATAL ||
+                 open->kind == TYPE_KIND_PTR_SHARE ||
+                 open->kind == TYPE_KIND_PTR_WEAK)) {
         type_ptr_set_base(vm, open, sub);  /* 指针：设被指向类型 T */
         return NULL;
     }

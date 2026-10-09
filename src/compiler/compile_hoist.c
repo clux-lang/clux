@@ -205,6 +205,8 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
     case TYPE_KIND_PTR_OWN:
     case TYPE_KIND_PTR_REF:
     case TYPE_KIND_PTR_FATAL:
+    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR_WEAK:
       /* PUSH_PTR <kind> 压开放指针类型（base_type=NULL，不入池）→
          DEFINE_TYPE <id> 声明登记（不设 base；base 是引用依赖，pass 2
          LOAD_TYPE 拉回即可，无环——指针密封不依赖 base 布局） */
@@ -555,6 +557,8 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
     case TYPE_KIND_PTR_OWN:
     case TYPE_KIND_PTR_REF:
     case TYPE_KIND_PTR_FATAL:
+    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR_WEAK:
       define_ptr(c, st, done, count);
       break;
     default:

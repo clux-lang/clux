@@ -11,13 +11,15 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-/** 指针类型 vtable（own/ref/fatal 三种所有权修饰共享同一结构，kind 区分） */
+/** 指针类型 vtable（own/ref/fatal/share/weak 五种所有权修饰，kind 区分） */
 extern const vtable_t VTABLE_PTR_OWN;
 extern const vtable_t VTABLE_PTR_REF;
 extern const vtable_t VTABLE_PTR_FATAL;
+extern const vtable_t VTABLE_PTR_SHARE;
+extern const vtable_t VTABLE_PTR_WEAK;
 
 /* ================================================================ */
-/* 指针类型（ptr_type_t，继承 type_t，m3-design §3）                  */
+/* 指针类型（ptr_type_t，继承 type_t，m3-design §3/§12）             */
 /* ================================================================ */
 
 /**
@@ -26,8 +28,8 @@ extern const vtable_t VTABLE_PTR_FATAL;
  *   - type_ptr_push 分配空 ptr_type（base_type=NULL，不入池）+ 压其 type
  *     value，返回该 type（外部只持有 type_t*）。
  *   - type_ptr_set_base 设被指向类型 T（SET_TYPE 运行期用）；密封后静默忽略。
- *   - type_ptr_seal 按 base_type 指针去重 intern（同一 base 的三种所有权是
- *     三个独立实例），标记 sealed。
+ *   - type_ptr_seal 按 base_type 指针去重 intern（同一 base 的五种所有权是
+ *     五个独立实例），标记 sealed。
  *
  * 指针类型的 size/align 恒定（指针宽），密封不依赖 base_type 布局——hoist
  * 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 base，不递归），与 func
@@ -36,7 +38,8 @@ extern const vtable_t VTABLE_PTR_FATAL;
 typedef struct ptr_type_t ptr_type_t;  /* 定义见 vm/type.h */
 
 /** PUSH_PTR：分配开放 ptr_type（base_type=NULL，不入池）+ 压其 type value。
- *  kind = 所有权修饰（TYPE_KIND_PTR_OWN/REF/FATAL，PUSH_PTR 指令 u8 操作数）。 */
+ *  kind = 所有权修饰（TYPE_KIND_PTR_OWN/REF/FATAL/SHARE/WEAK，PUSH_PTR 指令
+ *  u8 操作数）。 */
 const type_t *type_ptr_push(vm_t *vm, type_kind_t kind);
 
 /** SET_TYPE 运行期用：设被指向类型 T（密封后静默忽略） */
@@ -45,15 +48,17 @@ void type_ptr_set_base(vm_t *vm, const type_t *t, const type_t *base);
 /** SEAL：按 base_type 去重 intern + 置 sealed。返回该 const type */
 const type_t *type_ptr_seal(vm_t *vm, const type_t *t);
 
-/** 一次性快捷（type_ptr_push + set_base + seal）：sema 解析 own/ref/fatal *T
- *  用。不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。 */
+/** 一次性快捷（type_ptr_push + set_base + seal）：sema 解析 own/ref/fatal/
+ *  share/weak *T 用。不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。 */
 const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base);
 
 /** 取指针类型的被指向类型 T（非指针返回 NULL） */
 static inline const type_t *ptr_type_base(const type_t *t) {
     return (t && (t->kind == TYPE_KIND_PTR_OWN ||
                   t->kind == TYPE_KIND_PTR_REF ||
-                  t->kind == TYPE_KIND_PTR_FATAL))
+                  t->kind == TYPE_KIND_PTR_FATAL ||
+                  t->kind == TYPE_KIND_PTR_SHARE ||
+                  t->kind == TYPE_KIND_PTR_WEAK))
                ? ((const ptr_type_t *)t)->base_type
                : NULL;
 }
@@ -63,13 +68,14 @@ static inline const type_t *ptr_type_base(const type_t *t) {
 /* ================================================================ */
 
 /**
- * 指针值（data 块布局）。own/ref/fatal 三种指针的 value data 统一为
- * { 裸指针 }：
- *   - ptr：指向目标内存（new 堆块 / 栈上值 / 借用目标）
+ * 指针值（data 块布局）。五种指针的 value data 统一为 { 裸指针 }：
+ *   - ptr：指向目标内存（new 堆块 / 栈上值 / 借用目标 / RC 控制块）
  *   - 所有权由 type kind 区分（m3-design §13.2：运行期零标志）：
- *     own *T   → 总拥有堆块，dispose 释放（new 产物接管后）
- *     ref *T   → 总借用，dispose 跳过（指向栈值 / 他人堆块）
- *     fatal *T → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
+ *     own *T    → 总拥有堆块，dispose 释放（new 产物接管后）
+ *     ref *T    → 总借用，dispose 跳过（指向栈值 / 他人堆块）
+ *     fatal *T  → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
+ *     share *T  → ptr 指向 rc_block_t，dispose 递减 strong 计数
+ *     weak *T   → ptr 指向 rc_block_t，dispose 递减 weak 计数
  *
  * size = sizeof(ptr_value_t)（对齐到指针宽），type_ptr_seal 设定。
  */
@@ -77,19 +83,22 @@ typedef struct ptr_value_t {
     void *ptr;
 } ptr_value_t;
 
-/** 读指针值目标地址（非指针 value 返回 NULL） */
+/** 读指针值目标地址（非指针 value 返回 NULL）。
+ *  share/weak 返回 RC 块内 payload 地址（rc_block_payload）。 */
 static inline void *ptr_value_target(const value_t *v) {
     if (!v) return NULL;
     const type_t *t = value_type(v);
     if (!t || (t->kind != TYPE_KIND_PTR_OWN &&
                t->kind != TYPE_KIND_PTR_REF &&
-               t->kind != TYPE_KIND_PTR_FATAL))
+               t->kind != TYPE_KIND_PTR_FATAL &&
+               t->kind != TYPE_KIND_PTR_SHARE &&
+               t->kind != TYPE_KIND_PTR_WEAK))
         return NULL;
     return ((const ptr_value_t *)value_data(v))->ptr;
 }
 
-/** 构造指针值：目标地址（own *T / ref *T / fatal *T 统一，所有权由 type
- *  kind 区分，m3-design §13.2 运行期零标志） */
+/** 构造指针值：目标地址（五种指针统一，所有权由 type kind 区分，
+ *  m3-design §13.2 运行期零标志） */
 value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 
 /* ================================================================ */
@@ -145,6 +154,72 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data);
  * 会双释放共享堆块）。
  */
 void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src);
+
+/* ================================================================ */
+/* RC 控制块（share/weak，m3-design §12）                            */
+/* ================================================================ */
+
+/**
+ * rc_block_t：RC 控制块（share/weak 的 ptr 指向此结构）。
+ *
+ * 布局：头部（计数 + 元信息）紧跟 payload（T 的实际数据）。
+ *   - strong：share 引用计数（atomic）。strong→0 时析构 payload（递归
+ *     释放内嵌 own/share 字段），但保留控制块（weak 仍观察）。
+ *   - weak：weak 引用计数 + 1（strong 自身占一个 weak 引用，strong→0
+ *     时递减）。weak→0 时释放控制块 + payload 内存。
+ *   - alloc：分配器引用（释放控制块用，内嵌 data 便于 C 后端生成）。
+ *   - type：payload 类型引用（析构递归用）。
+ *   - destroyed：strong→0 析构后置 true（防御重复析构）。
+ *
+ * 线程安全（m3-design §12.5）：strong/weak 皆为 atomic 变量，
+ * upgrade 用 CAS 原子检查 strong>0 并递增。
+ */
+#include <stdatomic.h>
+
+typedef struct rc_block_t {
+    atomic_uint  strong;       /* share 引用计数 */
+    atomic_uint  weak;         /* weak 引用计数 + 1（strong 占一个 weak） */
+    allocator_t *alloc;        /* 分配器（释放控制块用） */
+    const type_t *type;        /* payload 类型（析构递归用） */
+    bool         destroyed;    /* strong→0 析构后置 true */
+    /* payload 紧跟其后（rc_block_payload 获取地址） */
+} rc_block_t;
+
+/** RC 块 payload 地址（紧跟头部之后，按 type->align 对齐） */
+static inline void *rc_block_payload(rc_block_t *rc) {
+    size_t hdr = sizeof(rc_block_t);
+    size_t align = rc->type ? rc->type->align : 1;
+    size_t aligned = (hdr + align - 1) & ~(align - 1);
+    return (uint8_t *)rc + aligned;
+}
+
+/** 分配 RC 块 + payload（按 type->size 布局），初始化 strong=1, weak=1。
+ *  payload 由调用方填充（memcpy 成员值）。 */
+rc_block_t *rc_block_new(allocator_t *alloc, const type_t *payload_type);
+
+/** share 引用计数 +1（atomic fetch_add）。 */
+void rc_block_strong_inc(rc_block_t *rc);
+
+/** share 引用计数 -1。strong→0 时析构 payload（递归释放内嵌 own/share
+ *  字段）+ weak--（strong 释放其占有的 weak 引用）。weak→0 时释放控制块。 */
+void rc_block_strong_dec(vm_t *vm, rc_block_t *rc);
+
+/** weak 引用计数 +1（atomic fetch_add）。 */
+void rc_block_weak_inc(rc_block_t *rc);
+
+/** weak 引用计数 -1。weak→0 时释放控制块 + payload 内存。 */
+void rc_block_weak_dec(vm_t *vm, rc_block_t *rc);
+
+/** upgrade：原子检查 strong>0 并递增。成功返回 payload 地址（调用方包装
+ *  为 share value），失败返回 NULL（strong 已归零，对象已析构）。 */
+void *rc_block_upgrade(rc_block_t *rc);
+
+/** weak 从 share 派生：递增 weak 计数，返回 share 同指向的 weak value。 */
+value_t *ptr_make_weak_from_share(vm_t *vm, value_t *share_val);
+
+/** share 创建：从 fatal 值接管堆块 → 分配 RC 块（payload = 堆块内容拷贝），
+ *  返回 share *T value（m3-design §12.1：fatal → share 创建通道）。 */
+value_t *ptr_make_share_from_fatal(vm_t *vm, value_t *fatal_val);
 
 #ifdef __cplusplus
 }

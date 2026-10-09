@@ -36,10 +36,12 @@ typedef enum type_kind_t {
     TYPE_KIND_ENUM,
     TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
-    /* ---- M3 指针与所有权段（m3-design §3）---- */
+    /* ---- M3 指针与所有权段（m3-design §3/§12）---- */
     TYPE_KIND_PTR_OWN,   /* own *T：独占所有权指针（作用域退出自动销毁，Step B） */
     TYPE_KIND_PTR_REF,   /* ref *T：借用指针（无所有权，借用检查 Step B） */
     TYPE_KIND_PTR_FATAL, /* fatal *T：临时指针（表达式结束未被 own 接收 = 编译错，Step B） */
+    TYPE_KIND_PTR_SHARE, /* share *T：引用计数强指针（RC 系，§12） */
+    TYPE_KIND_PTR_WEAK,  /* weak *T：引用计数弱指针（从 share 派生，§12） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
@@ -131,17 +133,18 @@ typedef struct enum_variant_t {
 } enum_variant_t;
 
 /**
- * ptr_type_t: 指针类型（type_t 的扩展，m3-design §3）
+ * ptr_type_t: 指针类型（type_t 的扩展，m3-design §3/§12）
  *
  * 持 base_type 指针指向被指向类型 T。C 内存映射：指针值 = 裸指针
- * （size = sizeof(void*)，align = 指针宽），无 RC 控制块——运行期零成本，
- * 逃逸检查全编译期（Step A 静默，Step B 叠加）。
+ * （size = sizeof(void*)，align = 指针宽）。单所有权系（own/ref/fatal）
+ * 无 RC 控制块——运行期零成本，逃逸检查全编译期。RC 系（share/weak）
+ * 的 ptr 指向 RC 控制块（内嵌 atomic 计数 + payload，§12）。
  *
- * 三种所有权修饰：own *T（独占，作用域退出自动销毁——Step B 递归
- * dispose）、ref *T（借用，无所有权）、fatal *T（临时，表达式结束未被
- * own 接收 = 编译错误——Step A 静默）。同一 base_type 的三种指针是
- * 三个独立 intern 实例（kind 区分所有权），own→ref 隐式（身份拷贝）
- * 由 vtable implicit_cast 提供。
+ * 五种所有权修饰：own *T（独占，作用域退出自动销毁）、ref *T（借用，
+ * 无所有权）、fatal *T（临时，表达式结束未被 own 接收 = 编译错误）、
+ * share *T（RC 强引用，copy = 计数+1）、weak *T（RC 弱引用，从 share
+ * 派生，经 upgrade 升级为 share）。同一 base_type 的五种指针是
+ * 五个独立 intern 实例（kind 区分所有权）。
  *
  * 指针类型的 size/align 恒定（指针宽），密封不依赖 base_type 布局——
  * hoist 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 base，不递归），

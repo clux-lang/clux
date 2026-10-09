@@ -433,6 +433,8 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_keyword(p, "own"))       op_tok = cur_token(p);
     else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
     else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
+    else if (check_keyword(p, "share"))     op_tok = cur_token(p);
+    else if (check_keyword(p, "weak"))      op_tok = cur_token(p);
 
     /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
@@ -664,16 +666,18 @@ ast_node_t *parse_unary(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
-    /* 指针类型 own/ref/fatal *T：'*' 是指针语法的一部分，必须紧跟
+    /* 指针类型 own/ref/fatal/share/weak *T：'*' 是指针语法的一部分，必须紧跟
        ownership 修饰（own i32 不合法，无裸指针）。消费 '*' 后再解析
        被指向类型 T（parse_expr_prec 递归处理嵌套指针 own *own *i32、
        数组 own *[N]T 等）。 */
     if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
-        token_is(op_tok, "fatal")) {
+        token_is(op_tok, "fatal") || token_is(op_tok, "share") ||
+        token_is(op_tok, "weak")) {
         if (!expect_symbol(p, "*")) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected '*' after ownership qualifier (pointer "
-                                 "must be 'own *T' / 'ref *T' / 'fatal *T')");
+                                 "must be 'own *T' / 'ref *T' / 'fatal *T' / "
+                                 "'share *T' / 'weak *T')");
         }
         skip_trivia(p);
         ast_node_t *base_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);

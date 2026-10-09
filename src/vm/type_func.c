@@ -184,9 +184,11 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
             if (value_is_error(vm, result)) {
                 is_error = true;
                 ret = result;  /* error 借用 callee scope */
-            } else if (sig && sig->return_type &&
+            } else if (sig && sig->return_type && !sig->is_variadic &&
                        value_type(result) != sig->return_type) {
-                /* safe_cast 返回值到声明的返回类型（auto-tracked 到 callee scope） */
+                /* safe_cast 返回值到声明的返回类型（auto-tracked 到 callee scope）。
+                   variadic 内建函数（如 upgrade）使用类型擦除签名，返回类型
+                   由 cfunc 按实参动态构造——跳过 cast，直接借用 cfunc 结果。 */
                 ret = value_implicit_cast(vm, result, sig->return_type);
                 if (value_is_error(vm, ret)) {
                     is_error = true;

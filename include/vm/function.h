@@ -64,7 +64,7 @@ struct func_t {
 /* 内建函数固定 id 0..(FUNC_ID_BUILTIN_COUNT-1)（vm 自动分配：func_new 内
    部从 0 起递增，printf=0）；程序函数 id 由编译器分配，从 FUNC_ID_PROGRAM_BASE
    起（预留扩展空隙，见 vm.h 注释）。 */
-#define FUNC_ID_BUILTIN_COUNT 1u
+#define FUNC_ID_BUILTIN_COUNT 2u
 #define FUNC_ID_PROGRAM_BASE  64u
 
 /* ---- 函数 id 表（id → func_t*，索引即 id） ---- */
