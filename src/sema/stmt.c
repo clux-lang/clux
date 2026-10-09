@@ -353,18 +353,59 @@ static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_s
      当前定义作用域"）→ 锚点 = 借源对象：init 直读变量（var r: ref *i32
      = p）取该符号定义作用域；init 非直读（x.&、函数调用返回、new 产物）
      无静态可判借源 → 跳过（ref 存活 = 当前作用域，逃逸点由 §6/调用点
-     检查兜底）。 */
+     检查兜底）。
+   - §5 强制规则 B：含 ref 字段的聚合类型（struct/tuple/union/cunion 等
+     非顶层 ref）变量定义**必须标注**——聚合内 ref 字段借源无法从 init
+     静态推断（构造器可能多源），强制用户显式声明。顶层 ref *T 仍走推断
+     语义（单源可判）。 */
 static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
-                            sema_scope_t *scope, const type_t *vt) {
+                            sema_scope_t *scope, const type_t *vt,
+                            sema_symbol_t *sym) {
   if (!vt || !type_contains_ref(vt)) return;
 
   strslice_t *names = NULL;
   size_t count = 0;
   sema_annot_peek(vd->type_expr, &names, &count);
   if (count == 0) {
-    if (!vd->init || vd->init->kind != AST_IDENT) return;
-    names = &((ast_ident_t *)vd->init)->name;
-    count = 1;
+    /* §5 强制规则 B：含 ref 字段的聚合类型（非顶层 ref）必须标注。
+       顶层 ref *T 走推断语义（不强制）。 */
+    if (vt->kind != TYPE_KIND_PTR_REF) {
+      char tn[64];
+      sema_type_name(vt, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, vd->type_expr ? vd->type_expr
+                                                           : (ast_node_t *)vd),
+                 "variable of type '%s' contains ref fields and must declare a "
+                 "scope annotation (e.g. '<a> %s)",
+                 tn, tn);
+      return;
+    }
+    if (!vd->init) return;
+    if (vd->init->kind == AST_IDENT) {
+      /* 推断：init 直读变量（var r: ref *i32 = p）→ 锚点 = 借源变量 */
+      names = &((ast_ident_t *)vd->init)->name;
+      count = 1;
+    } else if (vd->init->kind == AST_MEMBER) {
+      /* §5 字段访问继承（m3-design §5"var p = s.aaa; 中 p 继承 s 的
+         作用域绑定"）：init 是 s.a（object 直读变量 s）→ 继承 s 的
+         标注集合（p 借自 s 的字段，p 存活 ≤ s 存活）。s 无标注（推断
+         或未含 ref）→ 跳过（s 自身无约束可继承）。 */
+      ast_member_t *m = (ast_member_t *)vd->init;
+      if (!m->object || m->object->kind != AST_IDENT) return;
+      sema_symbol_t *obj_sym =
+          sema_lookup(scope, ((ast_ident_t *)m->object)->name);
+      if (!obj_sym || obj_sym->annot_count == 0) return;
+      names = obj_sym->annot_names;
+      count = obj_sym->annot_count;
+    } else {
+      return;
+    }
+  }
+  /* 记录标注集合到符号（重绑定逃逸校验用）。显式标注 names 指向
+     ast_scope_annot_t->names（arena 管理）；推断分支 names 指向
+     ast_ident_t->name（arena 管理）——均随 AST 存活，重绑定时可安全读取。 */
+  if (sym) {
+    sym->annot_names = names;
+    sym->annot_count = count;
   }
   check_annot_escape(sema, vd->type_expr ? vd->type_expr : vd->init,
                      scope, names, count);
@@ -561,7 +602,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      ref 字段的 struct/tuple/union）时定义必须带作用域标注；带标注则做
      逃逸比较（ref 存活 ≤ 锚点存活）。类型未就绪（解析失败已诊断）跳过
      ——防级联。 */
-  if (sym->type) check_var_annot(sema, vd, scope, sym->type);
+  if (sym->type) check_var_annot(sema, vd, scope, sym->type, sym);
 
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
@@ -737,6 +778,33 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
             (sym->type->kind == TYPE_KIND_PTR_REF ||
              sym->type->kind == TYPE_KIND_OPAQUE)) {
           sema_symbol_t *src = init_borrow_src(sema, as->value, scope);
+          /* §5 重绑定逃逸校验（m3-design §5"重绑定时校验是否逃逸"）：
+             r 的标注集合（定义时记录）须涵盖新借源的定义作用域——
+             新借源存活不得超过标注声明的存活上限，否则重绑定引入悬垂。
+             annot_count=0 = 定义时跳过（无可判借源），重绑定同样跳过。 */
+          if (src && src->own_scope && sym->annot_count > 0) {
+            for (size_t i = 0; i < sym->annot_count; i++) {
+              sema_scope_t *anchor =
+                  annot_anchor_scope(sema, sym->annot_names[i], scope);
+              if (!anchor) {
+                diag_error(sema->diag, sema_loc(sema, as->value),
+                           "scope annotation '%.*s' does not name a parameter, "
+                           "global or local variable",
+                           (int)sym->annot_names[i].len,
+                           sym->annot_names[i].ptr);
+                continue;
+              }
+              if (!scope_within(src->own_scope, anchor)) {
+                diag_error(sema->diag, sema_loc(sema, as->value),
+                           "rebinding ref variable '%.*s' escapes scope "
+                           "annotation '%.*s' (new source's scope is not "
+                           "nested within the annotated scope)",
+                           (int)name.len, name.ptr,
+                           (int)sym->annot_names[i].len,
+                           sym->annot_names[i].ptr);
+              }
+            }
+          }
           borrow_switch(sym, src);
         }
       }

@@ -25,6 +25,8 @@
 #include "vm/type_struct.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_tuple.h"
+#include "vm/type_option.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"
 #include "vm/value.h"
@@ -383,6 +385,59 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
  * 全局变量求值（运行时实体，init 编译期折叠）
  * =========================================================================== */
 
+/* §10 全局规则（m3-design §10）：禁止全局 own（含任何嵌套位置）。
+   递归判定类型是否含 own 指针（顶层 own *T 或 struct/tuple/union/cunion
+   字段、option/const/volatile 内层、数组元素）。全局变量类型含 own →
+   不合法（检查器失去确定性：undefined 延迟初始化无法保守感知何时赋值）。 */
+static bool type_contains_own(const type_t *t) {
+  if (!t) return false;
+  switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+      return true;
+    case TYPE_KIND_STRUCT: {
+      size_t n = struct_type_field_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const struct_field_t *f = struct_type_field(t, i);
+        if (f && type_contains_own(f->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e && type_contains_own(e->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        if (m && type_contains_own(m->payload_type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_CUNION: {
+      size_t n = cunion_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const cunion_member_t *m = cunion_type_member(t, i);
+        if (m && type_contains_own(m->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_OPTION:
+      return type_contains_own(type_option_inner(t));
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE:
+      return type_contains_own(type_qualifier_sub(t));
+    case TYPE_KIND_ARRAY:
+      return type_contains_own(array_type_elem(t));
+    default:
+      return false;
+  }
+}
+
 bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
                           sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
@@ -445,6 +500,20 @@ bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
     }
   } else {
     sym->type = value_type(sh);
+  }
+
+  /* §10 全局规则（m3-design §10）：禁止全局 own（含任何嵌套位置）。
+     全局变量类型含 own 指针 → 不合法（undefined 延迟初始化使检查器
+     失去确定性）。share 系未实现（§12 后续），暂不检查。 */
+  if (sym->type && type_contains_own(sym->type)) {
+    char tn[64];
+    sema_type_name(sym->type, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+               "global variable '%.*s' of type '%s' contains own pointer and "
+               "cannot be global (own requires deterministic scope-bound "
+               "lifecycle; use a local variable)",
+               (int)vd->name.len, vd->name.ptr, tn);
+    return false;
   }
 
   /* 3. ctfe 强制编译期求值（vm->comptime 状态标记）：init 必须可折叠为

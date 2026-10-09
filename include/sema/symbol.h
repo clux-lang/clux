@@ -122,6 +122,13 @@ struct _sema_symbol_t {
      锚点作用域——与持有 ref 的变量的定义作用域做嵌套比较（ref 存活 ≤
      锚点存活，防悬垂）。仅变量符号有意义。 */
   sema_scope_t *own_scope;
+  /* §5 作用域标注集合（重绑定逃逸校验用）：显式标注（'<p> ref *T）时
+     记录 names/count；未标注的顶层 ref 推断为定义作用域（annot_count=0，
+     重绑定时按 own_scope 作锚点）。含 ref 字段的聚合类型强制标注（规则 B）
+     也记录于此。重绑定 r = q 时用新借源 q 的 own_scope 对此集合做逃逸
+     比较。仅变量符号有意义。 */
+  strslice_t *annot_names;
+  size_t      annot_count;
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——
      用户范式改为显式解包：if (a != nil) { var v = a.!; ... }。 ---- */

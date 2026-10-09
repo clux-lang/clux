@@ -3915,6 +3915,119 @@ TEST(Driver, StepBAnnotOnI32TypeIgnored) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, StepBStructWithRefUnannotatedRejected) {
+  /* §5 强制规则 B：含 ref 字段的聚合类型（struct）变量定义必须标注。
+     未标注 → 编译错误（聚合内 ref 字段借源无法从 init 静态推断） */
+  std::string path = write_temp_file(
+      "struct Pair { a: ref *i32; b: i32; }\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var s: Pair = .Pair{ .a = x.&, .b = 1 };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBStructWithRefAnnotatedPasses) {
+  /* §5 强制规则 B 正向：含 ref 字段的 struct 标注后放行
+     （'<x> = a 字段借自 x） */
+  std::string path = write_temp_file(
+      "struct Pair { a: ref *i32; b: i32; }\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  var s: '<x> Pair = .Pair{ .a = x.&, .b = 1 };\n"
+      "  if (s.a.* != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBRebindRefEscapeRejected) {
+  /* §5 重绑定逃逸校验：r 标注 '<p>（存活不超过 p），重绑定到 outer
+     （定义在外层，比 p 长命）→ r 通过 outer 获得超过 p 的存活期 → 逃逸 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var outer: own *i32 = new i32{1};\n"
+      "  {\n"
+      "    var p: own *i32 = new i32{2};\n"
+      "    var r: '<p> ref *i32 = p;\n"
+      "    r = outer;\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBRebindRefSameScopePasses) {
+  /* §5 重绑定正向：r 标注 '<p>，重绑定到同作用域的 q（同级，存活期相同
+     → 不逃逸 → 放行） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{1};\n"
+      "  var q: own *i32 = new i32{2};\n"
+      "  var r: '<p> ref *i32 = p;\n"
+      "  r = q;\n"
+      "  if (r.* != 2) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBFieldAccessInheritsAnnotPasses) {
+  /* §5 字段访问继承（m3-design §5"var p = s.aaa; 中 p 继承 s 的作用域
+     绑定"）：s 标注 '<x>，未标注的 var p = s.a 继承 s 的标注集合
+     （p 借自 s 的 ref 字段，p 存活 ≤ s 存活 ≤ x 存活）→ 放行 */
+  std::string path = write_temp_file(
+      "struct Pair { a: ref *i32; b: i32; }\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 42;\n"
+      "  {\n"
+      "    var s: '<x> Pair = .Pair{ .a = x.&, .b = 1 };\n"
+      "    var p = s.a;\n"
+      "    if (p.* != 42) { return 1; }\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBGlobalOwnRejected) {
+  /* §10 全局规则（m3-design §10）：禁止全局 own（含任何嵌套位置）。
+     全局变量类型 own *T → 编译错误（检查器失去确定性） */
+  std::string path = write_temp_file(
+      "var g: own *i32 = new i32{42};\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBGlobalStructWithOwnRejected) {
+  /* §10 全局规则：含 own 字段的聚合结构作全局变量 → 编译错误 */
+  std::string path = write_temp_file(
+      "struct Pair { a: own *i32; b: i32; }\n"
+      "var g: Pair = .Pair{ .a = new i32{1}, .b = 2 };\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBGlobalScalarPasses) {
+  /* §10 全局规则正向：标量全局变量放行（全局值域 = 复制语义） */
+  std::string path = write_temp_file(
+      "var g: i32 = 42;\n"
+      "func main(): i32 {\n"
+      "  if (g != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBReturnRefFromParamPasses) {
   /* R3（§6）正向：返回 ref 参数（借用自参数，放行）。
      §5：返回 ref 必标注（'<p> = 借自参数 p）；调用点接收 ref 变量
