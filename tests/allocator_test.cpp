@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "core/allocator.h"
+#include "core/panic.h"
 }
 
 /* ---- Test helpers ---- */
@@ -703,4 +704,65 @@ TEST(LeakDetection, MultipleLeaksReported) {
   enum { HDR = sizeof(void *) * 5 };
   free((char *)p1 - HDR);
   free((char *)p2 - HDR);
+}
+
+/* ==== Memory Budget Guard ==== */
+
+static void alloc_panic_throw(const char *msg) {
+  (void)msg;
+  abort();
+}
+
+TEST(MemoryBudget, TotalBytesTracked) {
+  allocator_t *a = create_allocator(test_alloc, test_free);
+  void *p1 = allocator_new(a, &int_class, 1);
+  ASSERT_NE(p1, nullptr);
+  size_t after_one = allocator_total_bytes(a);
+  EXPECT_GT(after_one, 0u);
+
+  void *p2 = allocator_new(a, &byte_class, 100);
+  ASSERT_NE(p2, nullptr);
+  size_t after_two = allocator_total_bytes(a);
+  EXPECT_GT(after_two, after_one);
+
+  allocator_free(a, &p1);
+  EXPECT_LT(allocator_total_bytes(a), after_two);
+
+  allocator_free(a, &p2);
+  EXPECT_EQ(allocator_total_bytes(a), 0u);
+  EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
+}
+
+TEST(MemoryBudget, SetMaxBytesEnforced) {
+  panic_handler_t saved = get_panic_handler();
+  set_panic_handler(alloc_panic_throw);
+
+  allocator_t *a = create_allocator(test_alloc, test_free);
+  /* Set a tiny limit — one allocation fits, the second must panic.
+   * Internal header is ~40 bytes on 64-bit; one int alloc ≈ 44 bytes,
+   * two would be ≈ 88 bytes. 64 bytes allows one but not two. */
+  allocator_set_max_bytes(a, 64);
+
+  void *p = allocator_new(a, &int_class, 1);
+  ASSERT_NE(p, nullptr);
+
+  /* Second allocation should exceed the budget and panic. */
+  EXPECT_DEATH(allocator_new(a, &int_class, 1), ".*");
+
+  allocator_free(a, &p);
+  EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
+  set_panic_handler(saved);
+}
+
+TEST(MemoryBudget, ZeroMaxBytesDisablesGuard) {
+  allocator_t *a = create_allocator(test_alloc, test_free);
+  allocator_set_max_bytes(a, 0); /* unlimited */
+
+  /* Should not panic even though many allocations happen. */
+  for (int i = 0; i < 1000; i++) {
+    void *p = allocator_new(a, &int_class, 1);
+    ASSERT_NE(p, nullptr);
+    allocator_free(a, &p);
+  }
+  EXPECT_ALLOCATOR_EMPTY_DELETE(&a);
 }

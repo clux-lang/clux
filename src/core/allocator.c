@@ -4,7 +4,20 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* ---- Memory budget guard ----
+ * Prevents runaway allocations (use-after-free reading garbage len, infinite
+ * loop push, etc.) from silently exhausting system resources.  On Windows
+ * malloc rarely returns NULL before the OS starts thrashing to death, so the
+ * per-allocation OOM panic in allocator_new never fires.  Tracking total bytes
+ * and panicking at a hard ceiling turns these bugs into an immediate, clear
+ * crash instead of a system freeze.
+ *
+ * The ceiling can be overridden at runtime via the CLUX_MEM_LIMIT environment
+ * variable (in MiB).  0 means unlimited (disables the guard). */
+#define ALLOC_DEFAULT_MAX_MB 512
 
 /* ---- Internal: allocator_t definition ---- */
 
@@ -13,6 +26,8 @@ struct _allocator_t {
   free_fn_t *free_fn;
   struct _alloc_header_t *head; /* linked list of live allocations */
   size_t live_count;            /* number of live allocations (for leak checks) */
+  size_t total_bytes;           /* sum of raw allocation sizes (header+user) */
+  size_t max_bytes;             /* hard ceiling; 0 = unlimited */
 };
 
 /* ---- Internal header prepended to every allocation ---- */
@@ -60,6 +75,17 @@ allocator_t *create_allocator(alloc_fn_t alloc_fn, free_fn_t free_fn) {
   a->free_fn = free_fn;
   a->head = NULL;
   a->live_count = 0;
+  a->total_bytes = 0;
+  a->max_bytes = (size_t)ALLOC_DEFAULT_MAX_MB * 1024 * 1024;
+  /* CLUX_MEM_LIMIT=<MiB> overrides the ceiling; 0 disables the guard. */
+  const char *env = getenv("CLUX_MEM_LIMIT");
+  if (env) {
+    char *end = NULL;
+    unsigned long mb = strtoul(env, &end, 10);
+    if (end && *end == '\0') {
+      a->max_bytes = (size_t)mb * 1024 * 1024;
+    }
+  }
   return a;
 }
 
@@ -102,6 +128,15 @@ void *allocator_new(allocator_t *allocator, class_t *clazz, size_t count) {
   if (user_size > SIZE_MAX - sizeof(alloc_header_t)) return NULL;
   size_t total = sizeof(alloc_header_t) + user_size;
 
+  /* Memory budget guard: panic before the OS starts thrashing. */
+  if (allocator->max_bytes > 0 &&
+      total > allocator->max_bytes - allocator->total_bytes) {
+    panic("memory budget exceeded: %zu bytes requested, %zu/%zu in use "
+          "(type='%s', count=%zu)",
+          total, allocator->total_bytes, allocator->max_bytes,
+          clazz->name, count);
+  }
+
   void *raw = allocator->alloc_fn(total);
   if (!raw)
     panic("out of memory: failed to allocate %zu bytes for '%s'",
@@ -114,6 +149,7 @@ void *allocator_new(allocator_t *allocator, class_t *clazz, size_t count) {
   header->owns_clazz = false;
   list_insert(allocator, header);
   allocator->live_count++;
+  allocator->total_bytes += total;
 
   void *user = (char *)raw + sizeof(alloc_header_t);
   memset(user, 0, user_size);
@@ -156,6 +192,8 @@ void allocator_free(allocator_t *allocator, void **data) {
   /* Remove from live-allocation list before freeing */
   list_remove(allocator, header);
   allocator->live_count--;
+  allocator->total_bytes -= sizeof(alloc_header_t) +
+                            header->count * header->clazz->size;
 
   /* Call dispose before freeing memory */
   if (clazz->dispose_fn) {
@@ -240,4 +278,19 @@ size_t allocator_get_count(void *data) {
 size_t allocator_live_count(allocator_t *allocator) {
   if (!allocator) return 0;
   return allocator->live_count;
+}
+
+size_t allocator_total_bytes(allocator_t *allocator) {
+  if (!allocator) return 0;
+  return allocator->total_bytes;
+}
+
+size_t allocator_max_bytes(allocator_t *allocator) {
+  if (!allocator) return 0;
+  return allocator->max_bytes;
+}
+
+void allocator_set_max_bytes(allocator_t *allocator, size_t max_bytes) {
+  if (!allocator) return;
+  allocator->max_bytes = max_bytes;
 }

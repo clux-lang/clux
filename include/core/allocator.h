@@ -150,6 +150,24 @@ size_t allocator_get_count(void *data);
  */
 size_t allocator_live_count(allocator_t *allocator);
 
+/**
+ * Return the total bytes currently allocated through this allocator
+ * (sum of raw allocation sizes including headers), or 0 if `allocator`
+ * is NULL.
+ */
+size_t allocator_total_bytes(allocator_t *allocator);
+
+/**
+ * Return the memory budget ceiling in bytes, or 0 if unlimited.
+ */
+size_t allocator_max_bytes(allocator_t *allocator);
+
+/**
+ * Override the memory budget ceiling.  0 disables the guard.
+ * Affects subsequent allocations only.
+ */
+void allocator_set_max_bytes(allocator_t *allocator, size_t max_bytes);
+
 #ifdef __cplusplus
 }
 #endif
