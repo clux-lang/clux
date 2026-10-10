@@ -10,8 +10,10 @@ extern "C" {
 #include "vm/function.h"
 #include "vm/bcode.h"
 #include "vm/str_pool.h"
+#include "vm/module.h"
 #include "core/allocator.h"
 #include "core/vec.h"
+#include "core/strmap.h"
 
 /**
  * vm_t: 虚拟机上下文
@@ -46,6 +48,7 @@ typedef struct vm_t {
     type_t *type_error;  /* 错误类型（引擎级硬错误） */
     type_t *type_interrupt; /* interrupt 类型（引擎级控制流哨兵） */
     type_t *type_opaque; /* opaque 类型（≈ C void*，id 17，M3 §8.4） */
+    type_t *type_module; /* 模块类型（M5，命名空间值，不可实例化/赋值/传递） */
 
     /* ---- 函数签名类型池（按签名去重 intern，vm 拥有生命周期） ---- */
     vec_t *sig_types;    /* func_type_t*，元素为签名类型（sig 非空） */
@@ -108,6 +111,12 @@ typedef struct vm_t {
     /* ---- 字符串池（str 生命周期托管，vm_str_intern 去重 intern） ---- */
     vec_t       *strs;     /* 池内字符串块（char*，含 NUL 终止符；不 owns，vm_destroy 手动释放） */
 
+    /* ---- 模块表（M5：规范路径 → module_t*，IMPORT <path> 运行期查表）----
+     * 每个模块独立走完整流水线（lex→parse→sema→compile），产出 module_t
+     * （bc + global_scope + exports）。vm 拥有 module 生命周期。
+     * IMPORT <path> 查此表获取 module_t*，构造模块值压栈。 */
+    strmap_t    *modules;  /* 规范路径(C字符串) → module_t*（vm 拥有生命周期） */
+
     /* ---- 编译期状态 ---- */
     bool         comptime; /* true = 强制编译期求值（comptime var/func 上下文；
                               类型表达式槽位自动置位）。false = 只检查类型。 */
@@ -124,6 +133,26 @@ void vm_push_scope(vm_t *vm);
 
 /** 退出当前作用域（销毁该作用域所有 value，current_scope 回退到 parent） */
 void vm_pop_scope(vm_t *vm);
+
+/* ---- 模块表（M5：规范路径 → module_t*） ---- */
+
+/**
+ * 登记模块到 vm->modules 表。IMPORT <path> 运行期用。
+ * 幂等——同一路径重复登记无害（后者替换前者，前者需调用方释放）。
+ * vm 拥有 module_t 生命周期（vm_destroy 释放）。
+ */
+void vm_module_bind(vm_t *vm, const char *path, module_t *mod);
+
+/**
+ * 按规范路径查找模块。返回 module_t*，未找到返回 NULL。
+ */
+module_t *vm_module_lookup(vm_t *vm, const char *path);
+
+/**
+ * 按路径加载模块：查 vm->modules 表，命中构造模块值（type=type_module，
+ * data=module_t*）压栈返回。未找到返回 NULL。
+ */
+value_t *vm_import(vm_t *vm, const char *path);
 
 #ifdef __cplusplus
 }

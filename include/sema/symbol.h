@@ -8,6 +8,9 @@
 #include "vm/type.h"
 #include "vm/scope_frame.h"
 #include <stdbool.h>
+
+/* M5: 前向声明，SEMA_SYM_MODULE 符号引用 module_t* */
+struct module_t;
 #include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
@@ -36,9 +39,10 @@ typedef enum {
    对定义 AST 节点的类型判别——func_t/sema_symbol 对外不透明，内建函数
    无定义 AST 节点，变量符号 ast 恒为 NULL，不能靠 ast 区分）。 */
 typedef enum {
-  SEMA_SYM_VAR,  /* 变量（含参数、全局 comptime var） */
-  SEMA_SYM_FUNC, /* 函数（用户函数 + 内建函数，如 printf） */
-  SEMA_SYM_TYPE, /* 类型定义（type 名字） */
+  SEMA_SYM_VAR,    /* 变量（含参数、全局 comptime var） */
+  SEMA_SYM_FUNC,   /* 函数（用户函数 + 内建函数，如 printf） */
+  SEMA_SYM_TYPE,   /* 类型定义（type 名字） */
+  SEMA_SYM_MODULE, /* 模块（M5：import 别名，关联 module_t*，:: 成员访问用） */
 } sema_symbol_kind_t;
 
 /* ---- 符号 ---- */
@@ -143,6 +147,11 @@ struct _sema_symbol_t {
      源码 AST_IDENT 函数引用替换 AST_FUNC_REF 时取此字段；comptime
      折叠产物经 func_t->id 携带同一 fid。fid 单一来源在 sema。 */
   uint32_t       fid;
+
+  /* 模块引用（SEMA_SYM_MODULE 符号，M5）：import 别名关联的被导入模块。
+     sema 解析 alias::name 时从此字段取 module_t*，查 module->exports
+     获取成员类型信息。借用 vm->modules 生命周期。 */
+  struct module_t *module;
 };
 typedef struct _sema_symbol_t sema_symbol_t;
 

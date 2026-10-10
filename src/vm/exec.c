@@ -16,6 +16,7 @@
 #include "vm/type_type.h"
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
+#include "vm/module.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/vec.h"
@@ -1541,7 +1542,7 @@ static value_t *op_push_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t entry_pc = bcode_read_u32(bc, pc);
     value_t *sig_v = exec_stack_pop(vm);
     const type_t *sig = *(const type_t **)value_data(sig_v);
-    return bcode_function_new(vm, sig, entry_pc, vm->root_scope);
+    return bcode_function_new(vm, sig, entry_pc, vm->root_scope, vm->bc);
 }
 
 /* BIND_FUNC <id>：peek 栈顶 func value（不弹栈——注册段 DEFINE 需保留
@@ -1682,6 +1683,57 @@ static value_t *op_pop_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* ---- M5 模块系统 ---- */
+
+/* IMPORT <str>：模块规范路径。查 vm->modules 表，构造模块值压栈。
+ * 幂等：同一路径返回同一模块值。模块在 sema 阶段递归 compile_module
+ * 时已注册到 vm->modules，运行期只查表不触发编译。 */
+static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t path = bcode_read_str(bc, pc);
+    char buf[1024];
+    if (path.len >= sizeof(buf)) {
+        return value_make_error(vm, "exec: module path too long");
+    }
+    memcpy(buf, path.ptr, path.len);
+    buf[path.len] = '\0';
+
+    value_t *mod_val = vm_import(vm, buf);
+    if (!mod_val) {
+        char msg[1152];
+        snprintf(msg, sizeof(msg), "exec: module not found '%s'", buf);
+        return value_make_error(vm, msg);
+    }
+    return mod_val;
+}
+
+/* GET_MEMBER <str>：成员名。弹模块值 → 从 module->global_scope 按名取
+ * 成员值压栈。模块命名空间隔离：GET_MEMBER 从模块自身的 global_scope
+ * 查找（而非 current_scope），仅 global_scope 中存在的符号可见
+ * （非导出符号也在 global_scope 中，但 sema 层已保证只有 is_exported
+ * 的符号会被 :: 访问——编译期拦截未导出成员）。 */
+static value_t *op_get_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *mod_val = exec_stack_pop(vm);
+    if (!mod_val || value_type(mod_val) != vm->type_module) {
+        return value_make_error(vm, "exec: GET_MEMBER expects a module value");
+    }
+    module_t *mod = value_as(mod_val, module_t *);
+    if (!mod || !mod->global_scope) {
+        return value_make_error(vm, "exec: invalid module in GET_MEMBER");
+    }
+    value_t *member = scope_lookup(mod->global_scope, name);
+    if (!member) {
+        char buf[256];
+        size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
+        memcpy(buf, name.ptr, n);
+        buf[n] = '\0';
+        char msg[320];
+        snprintf(msg, sizeof(msg), "exec: module has no member '%s'", buf);
+        return value_make_error(vm, msg);
+    }
+    return member; /* 借用引用，归 module->global_scope 拥有 */
+}
+
 /* ---- 终止 ---- */
 
 static value_t *op_halt(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -1796,6 +1848,8 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_SLICE]      = op_push_slice,
     [BCODE_SLICE]           = op_slice,
     [BCODE_MAKE]            = op_make,
+    [BCODE_IMPORT]          = op_import,
+    [BCODE_GET_MEMBER]      = op_get_member,
 };
 
 /* ================================================================ */

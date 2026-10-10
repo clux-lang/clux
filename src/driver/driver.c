@@ -1,4 +1,5 @@
 #include "driver/driver.h"
+#include "driver/compile_module.h"
 #include "core/allocator.h"
 #include "core/stream.h"
 #include "core/vec.h"
@@ -11,6 +12,13 @@
 #include "parser/ast_kind.h"
 #include "parser/ast_program.h"
 #include "parser/ast_error.h"
+#include "parser/ast_func_def.h"
+#include "parser/ast_var_def.h"
+#include "parser/ast_type_def.h"
+#include "parser/ast_enum_def.h"
+#include "parser/ast_struct_def.h"
+#include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "diag/diagnostic.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -25,6 +33,7 @@
 #include "vm/bcode_asm_defs.h"
 #include "vm/bcode_serial.h"
 #include "vm/type_error.h"
+#include "vm/module.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,211 +177,96 @@ int driver_run_file(const char *path) {
     return 1;
   }
 
-  /* Stage ① + ②: 加载 → 词法分析（词法错误快速失败） */
-  vec_t *pool = NULL;
-  lexer_t *lexer = NULL;
-  int lex_result = driver_lex_into(alloc, path, &pool, &lexer);
-  if (lex_result == -2) {
-    /* 词法错误已输出到 stderr */
-    if (lexer) lexer_close(&lexer);
-    if (pool) vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-  if (lex_result != 0) {
-    fprintf(stderr, "run: cannot open file '%s'\n", path);
-    if (lexer) lexer_close(&lexer);
-    if (pool) vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  /* Stage ③: 语法分析 */
-  /* 诊断缓冲区在解析前创建：语法错误由 parser 记入，统一在出口打印 */
   diag_buf_t *diag = diag_buf_new(alloc);
   if (!diag) {
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
     return 1;
   }
 
-  parser_t *parser = parser_create(alloc, arena, pool);
-  if (!parser) {
-    diag_buf_destroy(&diag);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-  parser->diag = diag;
-
-  ast_node_t *ast = parser_parse(parser);
-  parser_destroy(&parser);
-
-  if (!ast || ast->kind == AST_ERROR) {
-    /* 语法错误：诊断已由 parser 记入 diag，统一打印到 stderr */
-    diag_print_all(diag);
-    diag_buf_destroy(&diag);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  /* Stage ④: 语义分析（sema，语法通过后才进入；语义错误快速失败）。
-     编译期 vm（compile_vm）：sema shadow 执行 + 类型登记 + type value 绑定，
-     仅用于编译期，与运行时 vm 完全解耦（cxb 直接运行不经过 sema，未来
-     sema 可能对接 LLVM/C 后端——字节码必须自包含，运行时从零构建）。 */
-  vm_t *compile_vm = vm_new(alloc);
-  if (!compile_vm) {
-    diag_buf_destroy(&diag);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  sema_t *sema = sema_create(compile_vm, diag, pool, arena);
-  if (!sema) {
-    diag_buf_destroy(&diag);
-    vm_destroy(&compile_vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  bool sema_ok = sema_analyze(sema, ast);
-  /* 作用域树与类型登记表是持久化数据，编译器（AST → bcode）按名查找符号
-     元数据 / 类型 id，必须存活到编译完成；顺序参照生命周期约定：先取树与
-     types 表、再在编译结束后销毁 sema、随后销毁树与 types */
-  sema_scope_t *scope_tree = sema->global_scope;
-  vec_t *sema_types = sema->types;
-
-  if (!sema_ok) {
-    /* 语义诊断已由 sema 记入 diag，统一在出口打印（diag 销毁前） */
-    sema_destroy(&sema);
-    diag_print_all(diag);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
-    diag_buf_destroy(&diag);
-    vm_destroy(&compile_vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  /* Stage ⑤: 编译（AST + sema 作用域树 → 字节码模块） */
-  compiler_t *comp = compiler_new(alloc, compile_vm, diag, pool, scope_tree,
-                                  sema_types);
-  if (!comp) {
-    sema_destroy(&sema);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
-    diag_buf_destroy(&diag);
-    vm_destroy(&compile_vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-  bytecode_t *bc = compiler_compile(comp, ast);
-  compiler_destroy(&comp);
-  sema_destroy(&sema); /* types 表已随编译器使用完毕，统一在此销毁 */
-
-  if (!bc) {
-    /* 编译诊断已记入 diag，统一在出口打印 */
-    diag_print_all(diag);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
-    diag_buf_destroy(&diag);
-    vm_destroy(&compile_vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
-    arena_destroy(alloc, &arena);
-    delete_allocator(&alloc);
-    return 1;
-  }
-
-  /* 编译期 vm 使命完成：销毁（运行时从零构建，见 cxb 直接运行路径）。
-     字节码完全自包含（hoist SEAL 重建类型表 + 注册段 DEFINE 构建 scope）。 */
-  vm_destroy(&compile_vm);
-
-  /* Stage ⑥: 执行（独立运行时 vm：注册函数 → 调用 main） */
+  /* M5：统一走 compile_module 入口——lex→parse→sema→compile→run 全流水线。
+     单 vm 同时用于编译期（sema shadow 执行 + 类型登记）和运行期（注册段执行 +
+     main 调用）。模块的 global_scope 由 compile_module 内 exec_run 产出，
+     main 在 module->global_scope 中查找。 */
   vm_t *vm = vm_new(alloc);
   if (!vm) {
-    fprintf(stderr, "run: out of memory\n");
-    bcode_destroy(&bc);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
     diag_buf_destroy(&diag);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
     return 1;
   }
 
-  value_t *er = exec_run(vm, bc);
-  if (value_is_error(vm, er)) {
-    error_data_t *ed = (error_data_t *)value_data(er);
-    fprintf(stderr, "run: %s\n",
-            ed && ed->message ? ed->message : "execution error");
-    bcode_destroy(&bc);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
-    diag_buf_destroy(&diag);
+  /* 保存 vm 原始 root_scope/current_scope（vm_destroy 会销毁它们）。
+     compile_module 内部会保存/恢复 root_scope/current_scope，但 run_file
+     为了执行 main 需要临时切换到模块 scope。模块 scope 归 module_t 拥有
+     （vm_destroy 通过 module_destroy 释放），不能让 vm_destroy 的
+     scope_destroy 再释放一次。 */
+  scope_t *vm_orig_root    = vm->root_scope;
+  scope_t *vm_orig_current = vm->current_scope;
+
+  vec_t *path_stack = vec_new(alloc, /*owns_element=*/false);
+  if (!path_stack) {
     vm_destroy(&vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
+    diag_buf_destroy(&diag);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
     return 1;
   }
 
-  value_t *main_fn = scope_lookup(vm->current_scope, STRSLICE_LIT("main"));
+  module_t *mod = compile_module(vm, alloc, diag, arena, path, path_stack);
+  vec_free(alloc, &path_stack);
+
+  if (!mod) {
+    diag_print_all(diag);
+    vm_destroy(&vm);
+    diag_buf_destroy(&diag);
+    arena_destroy(alloc, &arena);
+    delete_allocator(&alloc);
+    return 1;
+  }
+
+  /* 查找 main 函数（在模块的 global_scope 中） */
+  value_t *main_fn = scope_lookup(mod->global_scope, STRSLICE_LIT("main"));
   if (!main_fn) {
     fprintf(stderr, "run: no entry function 'main'\n");
-    bcode_destroy(&bc);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
+    /* 恢复 vm scope 到原始值（避免 vm_destroy 释放 module 的 scope） */
+    vm->root_scope    = vm_orig_root;
+    vm->current_scope = vm_orig_current;
+    vm_destroy(&vm); /* 释放 module（含 bc + global_scope + exports） */
     diag_buf_destroy(&diag);
-    vm_destroy(&vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
     return 1;
   }
+
+  /* 设置 vm 状态到入口模块（main 函数的 root_scope 已在 func_t 中记录，
+     value_call→func_vcall 会自动切换 root_scope + bc） */
+  vm->root_scope    = mod->global_scope;
+  vm->current_scope = mod->global_scope;
+  vm->bc            = mod->bc;
 
   value_t *mr = value_call(vm, main_fn, NULL, 0);
   if (value_is_error(vm, mr)) {
     error_data_t *ed = (error_data_t *)value_data(mr);
     fprintf(stderr, "run: %s\n",
             ed && ed->message ? ed->message : "runtime error");
-    bcode_destroy(&bc);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
-    diag_buf_destroy(&diag);
+    /* 恢复 vm scope 到原始值（避免 vm_destroy 释放 module 的 scope） */
+    vm->root_scope    = vm_orig_root;
+    vm->current_scope = vm_orig_current;
     vm_destroy(&vm);
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
+    diag_buf_destroy(&diag);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
     return 1;
   }
 
-  bcode_destroy(&bc);
-  if (scope_tree) sema_scope_destroy(&scope_tree);
-  diag_buf_destroy(&diag);
-  vm_destroy(&vm);
+  /* 恢复 vm scope 到原始值（module scope 归 module_destroy 释放） */
+  vm->root_scope    = vm_orig_root;
+  vm->current_scope = vm_orig_current;
 
-  lexer_close(&lexer);
-  vec_free(alloc, &pool);
+  /* module 归 vm->modules 拥有，vm_destroy 统一释放 */
+  vm_destroy(&vm);
+  diag_buf_destroy(&diag);
   arena_destroy(alloc, &arena);
   delete_allocator(&alloc);
 
@@ -491,7 +385,7 @@ static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) 
     }
     out->vm = vm;
 
-    sema_t *sema = sema_create(vm, diag, pool, arena);
+    sema_t *sema = sema_create(vm, diag, pool, arena, NULL);
     if (!sema) {
         driver_compiled_dispose(out);
         return 1;
@@ -527,6 +421,227 @@ static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) 
     out->scope_tree = scope_tree;
     out->bc = bc;
     return 0;
+}
+
+/* ================================================================
+ * M5 模块系统：compile_module 统一入口
+ * ================================================================ */
+
+/* 从 AST 顶层节点链提取导出符号名（is_exported=true 的声明）。
+ * 遍历 program->funcs 兄弟链，收集每个 is_exported 节点的名字。
+ * 返回一个 vec_t<char*>（NUL 终止的符号名拷贝，alloc 分配）。 */
+static vec_t *collect_export_names(allocator_t *alloc, ast_node_t *program) {
+    vec_t *names = vec_new(alloc, /*owns_element=*/false);
+    if (!names) return NULL;
+
+    ast_program_t *prog = (ast_program_t *)program;
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (!n->is_exported) continue;
+        strslice_t name = {0};
+        switch (n->kind) {
+            case AST_FUNC_DEF:   name = ((ast_func_def_t *)n)->name;  break;
+            case AST_VAR_DEF:    name = ((ast_var_def_t *)n)->name;   break;
+            case AST_TYPE_DEF:   name = ((ast_type_def_t *)n)->name;  break;
+            case AST_ENUM_DEF:   name = ((ast_enum_def_t *)n)->name;  break;
+            case AST_STRUCT_DEF: name = ((ast_struct_def_t *)n)->name; break;
+            case AST_UNION_DEF:  name = ((ast_union_def_t *)n)->name;  break;
+            case AST_CUNION_DEF: name = ((ast_cunion_def_t *)n)->name; break;
+            default: continue; /* export 只修饰声明节点 */
+        }
+        if (!name.ptr || name.len == 0) continue;
+        /* 分配 NUL 终止拷贝（strslice.ptr 不保证 NUL 终止） */
+        char *copy = (char *)allocator_new_ex(alloc, "export.name",
+                                               name.len + 1, NULL, NULL, NULL, 1);
+        if (!copy) continue;
+        memcpy(copy, name.ptr, name.len);
+        copy[name.len] = '\0';
+        vec_push(names, alloc, copy);
+    }
+    return names;
+}
+
+module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
+                         arena_t *arena, const char *canonical,
+                         vec_t *path_stack) {
+    if (!vm || !alloc || !diag || !canonical) return NULL;
+
+    /* 1. cache 查找：已编译直接返回 */
+    module_t *cached = vm_module_lookup(vm, canonical);
+    if (cached) return cached;
+
+    /* 2. 循环依赖检测：检查 canonical 是否在 path_stack 中 */
+    if (path_stack) {
+        size_t n = vec_len(path_stack);
+        for (size_t i = 0; i < n; i++) {
+            const char *p = (const char *)vec_get(path_stack, i);
+            if (p && strcmp(p, canonical) == 0) {
+                /* 打印循环依赖链 */
+                fprintf(stderr, "error: circular dependency detected:\n");
+                for (size_t j = i; j < n; j++) {
+                    const char *cp = (const char *)vec_get(path_stack, j);
+                    fprintf(stderr, "  %s\n", cp ? cp : "?");
+                }
+                fprintf(stderr, "  %s\n", canonical);
+                diag_error(diag, (location_t){0}, "circular dependency: %s", canonical);
+                return NULL;
+            }
+        }
+    }
+
+    /* 3. push 到路径栈 */
+    if (path_stack) {
+        vec_push(path_stack, alloc, (void *)canonical);
+    }
+
+    /* 4. lex → parse */
+    vec_t *pool = NULL;
+    lexer_t *lexer = NULL;
+    int lex_result = driver_lex_into(alloc, canonical, &pool, &lexer);
+    if (lex_result == -2) {
+        /* 词法错误已输出到 stderr */
+        if (lexer) lexer_close(&lexer);
+        if (pool) vec_free(alloc, &pool);
+        return NULL;
+    }
+    if (lex_result != 0) {
+        fprintf(stderr, "compile: cannot open file '%s'\n", canonical);
+        if (lexer) lexer_close(&lexer);
+        if (pool) vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    parser_t *parser = parser_create(alloc, arena, pool);
+    if (!parser) {
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+    parser->diag = diag;
+    ast_node_t *ast = parser_parse(parser);
+    parser_destroy(&parser);
+
+    if (!ast || ast->kind == AST_ERROR) {
+        diag_print_all(diag);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    /* 5. sema（独立创建，用完即销毁；借用 vm 的全局表） */
+    sema_t *sema = sema_create(vm, diag, pool, arena, path_stack);
+    if (!sema) {
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    bool sema_ok = sema_analyze(sema, ast);
+    sema_scope_t *scope_tree = sema->global_scope;
+    vec_t *sema_types = sema->types;
+
+    if (!sema_ok) {
+        sema_destroy(&sema);
+        diag_print_all(diag);
+        if (scope_tree) sema_scope_destroy(&scope_tree);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    /* 6. compile（AST + sema 作用域树 → 字节码） */
+    compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree,
+                                    sema_types);
+    if (!comp) {
+        sema_destroy(&sema);
+        if (scope_tree) sema_scope_destroy(&scope_tree);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+    bytecode_t *bc = compiler_compile(comp, ast);
+    compiler_destroy(&comp);
+    sema_destroy(&sema);
+    if (scope_tree) sema_scope_destroy(&scope_tree);
+
+    if (!bc) {
+        diag_print_all(diag);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    /* 字节码已自包含，但 AST 节点 name（strslice_t.ptr）仍借用 token pool
+     * 中的 source buffer 文本——collect_export_names 需要读取 name。
+     * lexer/pool 推迟到 collect_export_names 之后释放。 */
+
+    /* 7. run 注册段：创建模块独立 scope，执行注册段产出 global_scope。
+     *    保存/恢复 vm 的 root_scope/current_scope/bc——多模块共享同一 vm。 */
+    scope_t *saved_root    = vm->root_scope;
+    scope_t *saved_current = vm->current_scope;
+    bytecode_t *saved_bc   = vm->bc;
+
+    /* 模块 global_scope：以 vm->global_scope 为 parent（内建类型可见） */
+    scope_t *module_scope = scope_new(alloc, vm->global_scope);
+    vm->root_scope    = module_scope;
+    vm->current_scope = module_scope;
+
+    value_t *er = exec_run(vm, bc);
+
+    /* 恢复 vm 状态 */
+    vm->root_scope    = saved_root;
+    vm->current_scope = saved_current;
+    vm->bc            = saved_bc;
+
+    if (value_is_error(vm, er)) {
+        error_data_t *ed = (error_data_t *)value_data(er);
+        fprintf(stderr, "compile: module '%s' registration failed: %s\n",
+                canonical, ed && ed->message ? ed->message : "execution error");
+        scope_destroy(vm, &module_scope);
+        bcode_destroy(&bc);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+
+    /* 8. 构建 exports：从 global_scope 中提取 is_exported 符号的 value 借用。
+     *    AST name（strslice_t.ptr）借用 source buffer，须在 lexer_close 前读取。 */
+    vec_t *export_names = collect_export_names(alloc, ast);
+    strmap_t *exports = strmap_new(alloc, /*owns_value=*/false);
+    if (export_names && exports) {
+        size_t n = vec_len(export_names);
+        for (size_t i = 0; i < n; i++) {
+            char *name = (char *)vec_get(export_names, i);
+            if (!name) continue;
+            value_t *v = scope_lookup(module_scope, strslice_from_cstr(name));
+            if (v) {
+                strmap_insert(exports, alloc, name, v);
+            }
+            allocator_free(alloc, (void **)&name);
+        }
+    }
+    if (export_names) vec_free(alloc, &export_names);
+
+    /* AST name 已拷贝完毕，lexer/pool 安全释放 */
+    lexer_close(&lexer);
+    vec_free(alloc, &pool);
+
+    /* 9. 构建 module_t 并注册到 vm->modules */
+    module_t *mod = module_new(alloc, bc, module_scope, exports, canonical);
+    if (!mod) {
+        fprintf(stderr, "compile: out of memory creating module '%s'\n", canonical);
+        if (exports) strmap_free(alloc, &exports);
+        scope_destroy(vm, &module_scope);
+        bcode_destroy(&bc);
+        return NULL;
+    }
+    vm_module_bind(vm, canonical, mod);
+
+    /* 10. pop 路径栈 */
+    if (path_stack && vec_len(path_stack) > 0) {
+        vec_pop(path_stack);
+    }
+
+    return mod;
 }
 
 int driver_build_asm(const char *src_path, const char *out_path) {

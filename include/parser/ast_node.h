@@ -6,6 +6,7 @@ extern "C" {
 
 #include "core/arena.h"
 #include "parser/ast_kind.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* ================================================================ */
@@ -25,6 +26,7 @@ typedef struct ast_node {
     uint32_t         tok_end;     /* token pool 结束下标（exclusive） */
     struct ast_node *parent;      /* 父节点（构建时填充） */
     struct ast_node *next;        /* 兄弟链（语句列表/参数/实参） */
+    bool             is_exported;/* M5：export 前缀标记（全局声明进入模块导出表） */
 } ast_node_t;
 
 /* ================================================================ */

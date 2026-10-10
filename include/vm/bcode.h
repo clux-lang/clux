@@ -207,6 +207,14 @@ typedef enum {
                                + 弹 elem_type → 分配 len*elem_size 堆块 + 逐元素
                                布值 → 压 fatal []T（make(T,N,init...) 宏函数，
                                m4-design §2） */
+
+    /* ---- M5 模块系统 ---- */
+    BCODE_IMPORT,           /* STR：strtable 索引（模块规范路径）。vm_import 查
+                               vm->modules 表 → 构造模块值（type=type_module，
+                               data=module_t*）压栈。幂等：同一路径返回同一模块。 */
+    BCODE_GET_MEMBER,       /* STR：strtable 索引（成员名）。弹模块值 → 从
+                               module_t->exports 按名取成员值压栈。模块命名空间
+                               隔离：仅导出成员可访问。 */
 } bcode_op_t;
 
 /* ================================================================ */

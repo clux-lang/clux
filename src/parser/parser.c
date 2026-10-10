@@ -7,6 +7,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_error.h"
+#include "parser/ast_import.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_cunion_def.h"
@@ -110,6 +111,40 @@ ast_node_t *parse_program(parser_t *p) {
                 func = ast_error_new(p->diag, p->tokens, p->arena, ctb, p->pos,
                                      "expected 'func' or 'var' after 'comptime'");
             }
+        } else if (check_keyword(p, "import")) {
+            /* M5: import <alias> from "<path>"; — 导入模块为命名空间。
+               sema 遇到此节点递归编译被导入模块，在当前模块全局作用域注册
+               <alias> 为 MODULE 符号。compiler 不生成字节码（模块加载在 sema
+               阶段完成）。 */
+            func = parse_import(p);
+        } else if (check_keyword(p, "export")) {
+            /* M5: export <decl> — 前缀修饰，标记全局定义进入模块导出表。
+               消费 export 关键字后递归调用现有声明解析器，设置 is_exported=true。
+               允许 export func / export var / export type / export enum /
+               export struct / export union / export cunion。 */
+            uint32_t etb = p->pos;
+            advance(p);
+            skip_trivia(p);
+            if (check_keyword(p, "func")) {
+                func = parse_func_def(p);
+            } else if (check_keyword(p, "var")) {
+                func = parse_var_def(p);
+            } else if (check_keyword(p, "type")) {
+                func = parse_type_def(p);
+            } else if (check_keyword(p, "enum")) {
+                func = parse_enum_def(p);
+            } else if (check_keyword(p, "struct")) {
+                func = parse_struct_def(p);
+            } else if (check_keyword(p, "union")) {
+                func = parse_union_def(p);
+            } else if (check_keyword(p, "cunion")) {
+                func = parse_cunion_def(p);
+            } else {
+                func = ast_error_new(p->diag, p->tokens, p->arena, etb, p->pos,
+                                     "expected declaration after 'export'");
+            }
+            if (func && func->kind != AST_ERROR)
+                func->is_exported = true;
         } else if (check_keyword(p, "type")) {
             /* 全局类型定义 type name = <type-expr>; 挂 funcs 链：
                sema pass1b 求值折叠（AST_TYPE_REF）后保留——进入字节码，

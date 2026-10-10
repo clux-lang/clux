@@ -52,6 +52,8 @@
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "vm/type_opaque.h"
+#include "vm/module.h"
+#include "core/strmap.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1151,11 +1153,41 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return type_as_value(sema->vm, t);
     }
     case AST_ENUM_REF: {
+      /* M5：:: 成员访问有两种语义——枚举 variant（Color::Red）与
+         模块成员（std::add）。先检查 type_expr 是否是模块别名
+         （AST_IDENT 解析到 SEMA_SYM_MODULE 符号），若是则走模块成员
+         路径；否则走枚举 variant 路径。链式访问 a::b::c 由 parser 产出
+         嵌套 AST_ENUM_REF（lhs 也可以是 AST_ENUM_REF），递归处理。 */
+      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
+
+      /* 模块成员访问检查：type_expr 是 AST_IDENT 且解析到 MODULE 符号 */
+      if (n->type_expr && n->type_expr->kind == AST_IDENT) {
+        ast_ident_t *id = (ast_ident_t *)n->type_expr;
+        sema_symbol_t *sym = sema_lookup(scope, id->name);
+        if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
+          /* 模块成员访问：从 module->exports 查 variant 名 */
+          module_t *mod = sym->module;
+          char buf[256];
+          if (n->variant.len < sizeof(buf)) {
+            memcpy(buf, n->variant.ptr, n->variant.len);
+            buf[n->variant.len] = '\0';
+            value_t *member = (value_t *)strmap_get(mod->exports, buf);
+            if (member) {
+              const type_t *mt = value_type(member);
+              return value_make_shadow(sema->vm, mt);
+            }
+          }
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "module has no exported member '%.*s'",
+                     (int)n->variant.len, n->variant.ptr);
+          return value_make_shadow(sema->vm, sema->vm->type_void);
+        }
+      }
+
       /* 枚举 variant 引用 Color::Red：type_expr 求值为 enum 类型（折叠为
          AST_TYPE_REF）→ enum_type_find_variant 查 variant → 未找到报错；
          找到则折叠底层值入节点（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM），
          返回 enum 类型 shadow（赋值/判等类型检查用）。 */
-      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
       const type_t *t = sema_resolve_type_slot(sema, &n->type_expr);
       if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
       if (t->kind != TYPE_KIND_ENUM) {

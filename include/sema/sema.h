@@ -144,6 +144,12 @@ typedef struct sema_t {
        栈空 → 匿名构造报错。 */
     const type_t *anon_ct[16];
     size_t        anon_ct_depth;
+
+    /* M5 模块系统：编译路径栈（vec_t<const char*>，循环依赖检测）。
+       sema 遇 AST_IMPORT 时递归调用 compile_module，传入此栈。
+       由 compile_module 在 sema_create 前创建并传入。NULL = 不做循环检测
+       （单模块场景）。借用，sema 不拥有。 */
+    vec_t        *path_stack;
 } sema_t;
 
 /* ---- 公共 API ---- */
@@ -163,9 +169,11 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
  * 创建 sema 上下文。vm 提供类型注册表/vtable/shadow value；diag 收集诊断；
  * tokens 是 token pool（借用，不拥有），用于把 AST 节点的 tok_begin 下标
  * 解析为源码位置；arena 是 AST 折叠分配器（comptime 折叠用，借用）。
+ * path_stack 是 M5 模块编译路径栈（借用，循环依赖检测），单模块可传 NULL。
  * Panics on out-of-memory. Returns NULL for invalid arguments.
  */
-sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens, arena_t *arena);
+sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens, arena_t *arena,
+                    vec_t *path_stack);
 
 /**
  * 三遍扫描：Pass 1 函数名收集 → Pass 2 类型解析（func_t 签名）→

@@ -120,7 +120,7 @@ protected:
         parser_destroy(&parser);
         if (!ast_ || ast_->kind != AST_PROGRAM) return false;
 
-        sema_ = sema_create(vm_, diag_, lex_.tokens, arena_);
+        sema_ = sema_create(vm_, diag_, lex_.tokens, arena_, NULL);
         return sema_analyze(sema_, ast_);
     }
 
@@ -147,15 +147,15 @@ protected:
 /* ================================================================ */
 
 TEST_F(SemaTest, CreateWithNullArgsReturnsNull) {
-    EXPECT_EQ(sema_create(nullptr, diag_, nullptr, arena_), nullptr);
-    EXPECT_EQ(sema_create(vm_, nullptr, nullptr, arena_), nullptr);
-    EXPECT_EQ(sema_create(vm_, diag_, nullptr, arena_), nullptr);
-    EXPECT_EQ(sema_create(vm_, diag_, lex_.tokens, nullptr), nullptr);
+    EXPECT_EQ(sema_create(nullptr, diag_, nullptr, arena_, NULL), nullptr);
+    EXPECT_EQ(sema_create(vm_, nullptr, nullptr, arena_, NULL), nullptr);
+    EXPECT_EQ(sema_create(vm_, diag_, nullptr, arena_, NULL), nullptr);
+    EXPECT_EQ(sema_create(vm_, diag_, lex_.tokens, nullptr, NULL), nullptr);
 }
 
 TEST_F(SemaTest, AnalyzeNullProgram) {
     lex_ = lex_source(alloc_, "");
-    sema_t *s = sema_create(vm_, diag_, lex_.tokens, arena_);
+    sema_t *s = sema_create(vm_, diag_, lex_.tokens, arena_, NULL);
     ASSERT_NE(s, nullptr);
     EXPECT_FALSE(sema_analyze(s, nullptr));
     sema_destroy(&s);

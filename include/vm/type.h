@@ -47,6 +47,7 @@ typedef enum type_kind_t {
     TYPE_KIND_SLICE_OWN,   /* own []T：拥有堆分配的胖指针（作用域退出自动释放） */
     TYPE_KIND_SLICE_REF,   /* ref []T：借用胖指针（不拥有，复制 ptr+len） */
     TYPE_KIND_SLICE_FATAL, /* fatal []T：将亡值胖指针（move/clone 产物，禁止命名） */
+    TYPE_KIND_MODULE,    /* 模块命名空间值（M5，data=module_t*，不可实例化/赋值/传递） */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
 

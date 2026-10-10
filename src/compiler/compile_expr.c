@@ -34,6 +34,9 @@
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "vm/type_slice.h"
+#include "vm/module.h"
+#include "sema/symbol.h"
+#include "core/strslice.h"
 
 /* ===========================================================================
  * 表达式节点
@@ -189,12 +192,38 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_ENUM_REF: {
+    ast_enum_ref_t *n = (ast_enum_ref_t *)node;
+
+    /* M5 模块成员访问：type_expr 是 AST_IDENT（未被 sema 折叠为 AST_TYPE_REF）
+       → 模块命名空间访问。sema 已校验成员存在。compiler 发：
+       IMPORT <path> → GET_MEMBER <name>。
+       模块路径：sema 在 pass0_imports 解析时已知，但 AST_IMPORT 节点的
+       path 保留在 AST 中。这里通过 sema 作用域查找模块符号获取 module_t*，
+       从中取 canonical 路径。 */
+    if (n->type_expr && n->type_expr->kind == AST_IDENT) {
+      /* 检查是否是模块符号（而非枚举类型——枚举类型 sema 已折叠为
+         AST_TYPE_REF，AST_IDENT 只可能是模块别名） */
+      sema_symbol_t *sym = sema_lookup(c->global_scope,
+                                       ((ast_ident_t *)n->type_expr)->name);
+      if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
+        module_t *mod = sym->module;
+        /* IMPORT <canonical path> */
+        bcode_write_op(c->bc, BCODE_IMPORT);
+        bcode_write_str(c->bc, strslice_from_cstr(mod->canonical));
+        st_push(c, 1);
+        /* GET_MEMBER <variant name> */
+        bcode_write_op(c->bc, BCODE_GET_MEMBER);
+        bcode_write_str(c->bc, n->variant);
+        st_push(c, 0); /* 弹模块值，压成员值：净 0 */
+        break;
+      }
+    }
+
     /* 枚举 variant 引用 Color::Red（sema 已折叠 value 入节点）：
        PUSH_I* <value>（按底层宽度选立即数指令）→ LOAD_TYPE <enum_id> →
        MAKE_ENUM（弹 type + 整数值 → 按底层宽度截断构造 enum 值）。
        enum 类型 id：sema 登记（c_sema_type_find_name 查 type_expr 的
        AST_TYPE_REF 名字）。 */
-    ast_enum_ref_t *n = (ast_enum_ref_t *)node;
     const sema_type_t *st = NULL;
     if (n->type_expr && n->type_expr->kind == AST_TYPE_REF) {
       st = c_sema_type_find_name(c->sema_types,

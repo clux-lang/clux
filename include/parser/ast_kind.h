@@ -95,6 +95,10 @@ typedef enum {
     AST_SLICE,           /* expr[low:high] 切片表达式 → ref []T */
     AST_MAKE,            /* make(T, N, init...) 编译期宏函数 → fatal []T */
 
+    /* --- M5 模块系统 --- */
+    AST_IMPORT,          /* import <alias> from "<path>"; — 导入模块为命名空间 */
+    AST_EXPORT,          /* export <decl> — 标记全局定义进入模块导出表（前缀修饰） */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

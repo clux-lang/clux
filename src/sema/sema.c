@@ -38,6 +38,9 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "driver/compile_module.h"
+#include "parser/ast_import.h"
+#include "vm/module.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -46,7 +49,7 @@
  * =========================================================================== */
 
 sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
-                    arena_t *arena) {
+                    arena_t *arena, vec_t *path_stack) {
   if (!vm || !diag || !tokens || !arena) return NULL;
   sema_t *sema =
       allocator_new_ex(vm->alloc, "sema_t", sizeof(sema_t), NULL, NULL, NULL,
@@ -65,6 +68,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->in_call_callee = false;
   sema->loop_depth = 0;
   sema->func_id_next = FUNC_ID_PROGRAM_BASE;
+  sema->path_stack = path_stack;
   return sema;
 }
 
@@ -673,11 +677,77 @@ sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
 }
 
 /* ===========================================================================
+ * Pass 0：import 语句处理（递归编译被导入模块）
+ * =========================================================================== */
+
+/* 规范化模块路径：base_dir + relative_path → 规范绝对路径。
+ * 目前简化处理：直接返回 relative_path（caller 保证传入已规范化的路径）。
+ * TODO: 实现真正的路径规范化（./ → 当前目录，../ → 上级目录）。 */
+static char *resolve_module_path(allocator_t *alloc, strslice_t rel_path,
+                                 const char *importer_path) {
+    (void)importer_path; /* TODO: 基于 importer 所在目录解析相对路径 */
+    /* 简化：直接拷贝路径（测试阶段用绝对路径） */
+    size_t len = rel_path.len;
+    char *buf = (char *)allocator_new_ex(alloc, "sema.path", len + 1,
+                                         NULL, NULL, NULL, 1);
+    if (!buf) return NULL;
+    memcpy(buf, rel_path.ptr, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+static void pass0_imports(sema_t *sema, ast_program_t *prog) {
+    for (ast_node_t *f = prog->funcs; f; f = f->next) {
+        if (f->kind != AST_IMPORT) continue;
+        ast_import_t *imp = (ast_import_t *)f;
+
+        /* 规范化路径 */
+        char *canonical = resolve_module_path(sema->vm->alloc, imp->path,
+                                              NULL /* TODO: importer path */);
+        if (!canonical) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "out of memory resolving module path");
+            continue;
+        }
+
+        /* 递归编译被导入模块（同步完成完整流水线 lex→parse→sema→compile→run）。
+           compile_module 内部有 cache 查找 + 循环依赖检测。 */
+        module_t *mod = compile_module(sema->vm, sema->vm->alloc, sema->diag,
+                                       sema->arena, canonical,
+                                       sema->path_stack);
+        if (!mod) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "failed to import module '%s'", canonical);
+            allocator_free(sema->vm->alloc, (void **)&canonical);
+            continue;
+        }
+
+        /* 在当前模块全局作用域注册 <alias> 为 MODULE 符号 */
+        sema_symbol_t init = {0};
+        init.kind = SEMA_SYM_MODULE;
+        init.module = mod;
+        init.is_active = true;
+        sema_symbol_t *sym = sema_scope_define(sema->global_scope, imp->alias,
+                                               &init);
+        if (!sym) {
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "duplicate name '%.*s' for import alias",
+                       (int)imp->alias.len, imp->alias.ptr);
+        }
+
+        allocator_free(sema->vm->alloc, (void **)&canonical);
+    }
+}
+
+/* ===========================================================================
  * Pass 1/2：函数名收集 + 类型解析（func_t 签名）
  * =========================================================================== */
 
 static void pass1_names(sema_t *sema, ast_program_t *prog) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    /* AST_IMPORT 已在 pass0_imports 处理（注册 MODULE 符号），跳过 */
+    if (f->kind == AST_IMPORT) continue;
+
     /* 全局 comptime var：注册变量符号（暂不激活，pass_globals 求值后激活）。
        不创建 sema_func_t（不入 Pass 3 队列——不是函数，无函数体）。 */
     if (f->kind == AST_VAR_DEF) {
@@ -1016,6 +1086,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  pass0_imports(sema, prog);
   pass1_names(sema, prog);
   pass1b_types(sema, prog); /* 全局 type def 先于函数签名解析（签名可引用） */
   pass2_types(sema);

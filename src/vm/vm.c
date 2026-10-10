@@ -1,5 +1,6 @@
 #include "vm/vm.h"
 #include "vm/type.h"
+#include "vm/type_module.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
@@ -11,6 +12,8 @@
 #include "vm/str_pool.h"
 #include "vm/value.h"
 #include "vm/function.h"
+#include "vm/bcode.h"
+#include "vm/scope.h"
 #include "core/panic.h"
 #include "core/vec.h"
 
@@ -145,6 +148,9 @@ vm_t *vm_new(allocator_t *alloc) {
     /* 字符串池（str 生命周期托管：字面量/拼接/错误消息统一 intern） */
     vm->strs = vec_new(alloc, /*owns_element=*/false);
 
+    /* 模块表（M5：规范路径 → module_t*，vm 拥有 module 生命周期） */
+    vm->modules = strmap_new(alloc, /*owns_value=*/false);
+
     /* 基本类型注册进 global scope（LOAD 指令按名查 type value） */
     vm_register_builtin_types(vm);
 
@@ -182,6 +188,25 @@ vm_t *vm_new(allocator_t *alloc) {
 void vm_destroy(vm_t **pvm) {
     if (!pvm || !*pvm) return;
     vm_t *vm = *pvm;
+
+    /* 模块表（M5）：必须在作用域链之前销毁。
+       module 的 global_scope 以 vm->global_scope 为 parent（内建类型可见），
+       scope_destroy → scope_remove_from_parent 会访问 parent->children 向量。
+       若先销毁 vm->global_scope，module scope 的 remove_from_parent 将访问
+       已释放的 global_scope 内存（use-after-free）。
+       scope_destroy 释放 value 壳 + data 指针拷贝，不释放 func_t 本体
+       （func_t 归 functions 池统一释放，无 double-free）。
+       closure_scope->parent 在非调用期为 NULL，销毁顺序无关。 */
+    if (vm->modules) {
+        const vec_t *keys = strmap_keys(vm->modules);
+        size_t n = vec_len(keys);
+        for (size_t i = 0; i < n; i++) {
+            const char *key = (const char *)vec_get(keys, i);
+            module_t *mod = (module_t *)strmap_get(vm->modules, key);
+            if (mod) module_destroy(vm, &mod);
+        }
+        strmap_free(vm->alloc, &vm->modules);
+    }
 
     /* 销毁作用域链：root_scope 是 global 的子作用域 */
     /* 先销毁 root_scope 以下的所有作用域（current_scope 可能在 root 之下） */
@@ -417,4 +442,27 @@ void vm_pop_scope(vm_t *vm) {
     scope_t *parent = scope_parent(vm->current_scope);
     scope_destroy(vm, &vm->current_scope);
     vm->current_scope = parent;
+}
+
+/* ---- 模块表（M5：规范路径 → module_t*） ---- */
+
+void vm_module_bind(vm_t *vm, const char *path, module_t *mod) {
+    if (!vm || !path || !mod) return;
+    /* 幂等：同一路径重复登记，旧 module 由调用方释放（strmap_insert 返回旧值） */
+    void *old = strmap_insert(vm->modules, vm->alloc, path, mod);
+    (void)old; /* 调用方应避免重复注册；旧值不释放（可能导致泄漏，但不应发生） */
+}
+
+module_t *vm_module_lookup(vm_t *vm, const char *path) {
+    if (!vm || !path || !vm->modules) return NULL;
+    return (module_t *)strmap_get(vm->modules, path);
+}
+
+value_t *vm_import(vm_t *vm, const char *path) {
+    if (!vm || !path) return NULL;
+    module_t *mod = vm_module_lookup(vm, path);
+    if (!mod) return NULL;
+    /* 构造模块值：data = module_t*（借用，不拥有） */
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_module, &mod);
+    return value_make(vm, vm->type_module, data);
 }

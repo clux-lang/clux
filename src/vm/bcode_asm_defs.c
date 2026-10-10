@@ -117,6 +117,9 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_U8 } },
     [BCODE_SLICE]          = { "SLICE",         { BCODE_ASM_OP_U8 } },
     [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32 } },
+
+    [BCODE_IMPORT]         = { "IMPORT",        { BCODE_ASM_OP_STR } },
+    [BCODE_GET_MEMBER]     = { "GET_MEMBER",    { BCODE_ASM_OP_STR } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

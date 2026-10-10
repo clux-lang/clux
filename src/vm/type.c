@@ -16,6 +16,7 @@
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
 #include "vm/type_opaque.h"
+#include "vm/type_module.h"
 
 #include <string.h>
 #include <stdalign.h>
@@ -218,6 +219,7 @@ static func_type_t g_type_func = { { NULL, {NULL,0}, 0, 0, 0, false }, { NULL, 0
 static type_t g_type_error = { NULL, {NULL,0}, 0, 0, 0, false };
 static type_t g_type_interrupt = { NULL, {NULL,0}, 0, 0, 0, false };
 static type_t g_type_opaque = { NULL, {NULL,0}, 0, 0, 0, false };
+static type_t g_type_module = { NULL, {NULL,0}, 0, 0, 0, false };
 
 void vm_init_builtins(vm_t *vm) {
     static const char S_I8[]  = "i8",   S_I16[] = "i16", S_I32[] = "i32", S_I64[] = "i64";
@@ -228,6 +230,7 @@ void vm_init_builtins(vm_t *vm) {
     static const char S_ERROR[] = "error";
     static const char S_INTERRUPT[] = "interrupt";
     static const char S_OPAQUE[] = "opaque";
+    static const char S_MODULE[] = "module";
 
     /* 函数签名类型池（type_func_sig intern 用）；元素由 vm_destroy 手动释放，
        vec 只持有指针数组（与 scope owned 同一模式） */
@@ -270,6 +273,13 @@ void vm_init_builtins(vm_t *vm) {
                               sizeof(void *), alignof(void *),
                               TYPE_KIND_OPAQUE, true, 17 };
 
+    /* module（M5）：模块命名空间值。data = module_t*（借用，不拥有）。
+     * 不可实例化/赋值/传递——仅由 IMPORT 指令内部构造。内建单例，
+     * 无开放构造阶段。不登记进 global scope（模块类型不是用户可引用的类型名）。 */
+    g_type_module = (type_t){ &VTABLE_MODULE, STRSLICE_LIT(S_MODULE),
+                              sizeof(void *), alignof(void *),
+                              TYPE_KIND_MODULE, true, 18 };
+
     vm->type_i8   = &g_type_i8;
     vm->type_i16  = &g_type_i16;
     vm->type_i32  = &g_type_i32;
@@ -288,4 +298,5 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_error = &g_type_error;
     vm->type_interrupt = &g_type_interrupt;
     vm->type_opaque = &g_type_opaque;
+    vm->type_module = &g_type_module;
 }

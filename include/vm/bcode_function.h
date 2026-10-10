@@ -10,8 +10,9 @@ extern "C" {
 #include "core/allocator.h"
 #include <stdint.h>
 
-typedef struct vm_t    vm_t;
-typedef struct scope_t scope_t;
+typedef struct vm_t        vm_t;
+typedef struct scope_t     scope_t;
+typedef struct bytecode_t  bytecode_t;
 
 /**
  * bcode_function_t: 字节码函数对象（func_t 的子类）
@@ -25,13 +26,16 @@ typedef struct scope_t scope_t;
  * - base.id：默认 0；BIND_FUNC <id> 运行期填充（编译器分配的全局唯一 id，
  *   程序段 >= FUNC_ID_PROGRAM_BASE）并登记进 vm->functions_by_id
  * - entry_pc：函数体字节码入口（绝对偏移，函数体内倒序 DEFINE 绑参）
+ * - bc：函数所属模块的字节码。跨模块调用时 bcode_call_cfunc 用此 bc
+ *   而非 vm->bc 执行函数体（M5：每个模块有独立 bcode）。
  *
  * 名字由 SET_FUNC_NAME 写入（调试/显示用）：scope 注册用 DEFINE 的
  * strtable 名。函数对象本体注册进 vm->functions（vm 统一释放生命周期）。
  */
 typedef struct bcode_function_t {
-    func_t   base;
-    uint32_t entry_pc;
+    func_t      base;
+    uint32_t    entry_pc;
+    bytecode_t *bc;  /* 函数所属模块的字节码（借用，module 拥有生命周期） */
 } bcode_function_t;
 
 /**
@@ -42,13 +46,15 @@ typedef struct bcode_function_t {
  * - root_scope: 定义时的模块作用域；closure_scope 由内部创建
  *   （scope_new(alloc, root_scope)，孤立于定义点 current_scope）
  *   id 默认 0，由后续 BIND_FUNC <id> 填充
+ * - bc: 函数所属模块的字节码（借用，module 拥有生命周期）
  * - 返回 value_t*：data 存 bcode_function_t*，type 即 sig_type；
  *   untracked（调用方管理）：value_dispose(vm, v) 释放 data 块与 value_t，
  *   函数对象本体归 vm->functions，由 vm_destroy 统一释放。
  */
 value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
                             uint32_t entry_pc,
-                            scope_t *root_scope);
+                            scope_t *root_scope,
+                            bytecode_t *bc);
 
 /** 字节码函数执行回调（cfunc_t）：驱动函数体字节码，捕获 RET interrupt 哨兵 */
 value_t *bcode_call_cfunc(vm_t *vm, func_t *self, size_t argc, value_t **args);

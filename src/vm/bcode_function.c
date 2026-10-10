@@ -19,7 +19,8 @@ static class_t g_bcode_function_class = {
 
 value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
                             uint32_t entry_pc,
-                            scope_t *root_scope) {
+                            scope_t *root_scope,
+                            bytecode_t *bc) {
     if (!vm || !vm->alloc || !sig_type) return NULL;
     bcode_function_t *fn = (bcode_function_t *)allocator_new(
         vm->alloc, &g_bcode_function_class, 1);
@@ -36,6 +37,7 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
     fn->base.closure_scope     = scope_new(vm->alloc, NULL);
     fn->base.owns_closure_scope = true;
     fn->entry_pc = entry_pc;
+    fn->bc       = bc;
 
     /* 函数对象注册进 vm->functions（vm 统一释放，value 共享指针不 double free） */
     if (vm->functions) vec_push(vm->functions, vm->alloc, fn);
@@ -67,6 +69,8 @@ value_t *func_instantiate(vm_t *vm, func_t *base) {
     fn->base.owns_closure_scope = true;
     fn->entry_pc = (base->cfunc == bcode_call_cfunc)
                        ? ((bcode_function_t *)base)->entry_pc : 0;
+    fn->bc       = (base->cfunc == bcode_call_cfunc)
+                       ? ((bcode_function_t *)base)->bc : NULL;
 
     /* 复制基底捕获槽名 + undefined 占位（strmap_keys 只读 key 向量）。
        定义点 SET_CLOSURE 用真实捕获值替换（scope_set）——提升后定义点前
@@ -91,13 +95,18 @@ value_t *bcode_call_cfunc(vm_t *vm, func_t *self, size_t argc, value_t **args) {
     /* 1. 实参按序压操作数栈（a, b → 栈顶 b，函数体倒序 DEFINE 绑定） */
     for (size_t i = 0; i < argc; i++) exec_stack_push(vm, args[i]);
 
-    /* 2. 保存现场，切到函数体入口驱动（bc 同一模块不变） */
-    size_t saved_pc     = vm->pc;
-    bool   saved_halted = vm->halted;
+    /* 2. 保存现场，切到函数体入口驱动。
+       M5：用函数所属模块的 bc（bfn->bc），而非 vm->bc——跨模块调用时
+       函数体在被导入模块的字节码中，必须切换到正确的 bcode。 */
+    size_t      saved_pc     = vm->pc;
+    bool        saved_halted = vm->halted;
+    bytecode_t *saved_bc     = vm->bc;
     vm->halted = false;
-    value_t *r = exec_drive(vm, vm->bc, bfn->entry_pc);
+    vm->bc     = bfn->bc;
+    value_t *r = exec_drive(vm, bfn->bc, bfn->entry_pc);
     vm->pc     = saved_pc;
     vm->halted = saved_halted;
+    vm->bc     = saved_bc;
 
     /* 3. RET interrupt 哨兵：弹哨兵，栈顶即返回值（借用引用，func_vcall clone 回 caller） */
     if (value_is_interrupt(vm, r)) {

@@ -878,12 +878,15 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
     for (;;) {
         skip_trivia(p);
 
-        /* 枚举 variant 引用：Type::Variant（lhs 须为枚举类型名标识符）。
-         * '::' 是 lexer 产出的双字符 SYMBOL token。 */
+        /* 命名空间成员引用：Type::Variant（枚举 variant）或
+         * Module::name（模块成员访问）。
+         * lhs 须为标识符或已解析的 :: 链（AST_ENUM_REF），支持链式访问
+         * a::b::c。'::' 是 lexer 产出的双字符 SYMBOL token。
+         * sema 层区分 enum variant vs 模块成员。 */
         if (check_symbol(p, "::")) {
-            if (lhs->kind != AST_IDENT) {
+            if (lhs->kind != AST_IDENT && lhs->kind != AST_ENUM_REF) {
                 return ast_error_new(p->diag, p->tokens, p->arena, lhs->tok_begin,
-                                     p->pos, "expected enum type name before '::'");
+                                     p->pos, "expected type name or module name before '::'");
             }
             uint32_t tb = p->pos;
             advance(p);
