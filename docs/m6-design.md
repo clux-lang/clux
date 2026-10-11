@@ -1460,15 +1460,21 @@ sema 之前调用）把 struct 体内的 var/func 成员**改名**为 `Test::dat
 3. 运行期字段操作接受 const/volatile 视图（PTR_GET 后是 `const T`，原判非 struct）；
 4. `clux format` 原先**静默删掉**结构体成员（数据损坏），现已渲染并保证幂等。
 
-#### 14.22.2 已知缺口（本轮发现，未修）
+#### 14.22.2 T → const T（加限定）的隐式转换 ✅ 已修复
 
 `var c: const Test = .Test{...};` 这类**非指针**的 `T → const T` 隐式转换在运行期报
 `struct: implicit cast only within same struct`。在通用入口 value_implicit_cast 加
 「只加限定」分支可以修，但初版实现波及 slice / qualify shadow 路径（DriverM4.StrSlice*、
 VmQualifiedTypes.ImplicitCastQualifyShadow、examples/const_volatile.cx、typehoist.cx
-共 5 处回归），因此**已回退**，留作独立议题：需按类型族细分（shadow / 指针 / 切片 /
-结构体各自语义）后再落地。当前只读方法可用 `ref *const T` 形参接收可变值的 `c.&`
-（指针路径已支持加 const）。
+共 5 处回归），**因此没有走通用入口**。
+
+**修复方式（按类型族落地）**：① `struct`/`cunion` vtable 的 implicit_cast 识别
+「目标只是给源加了限定」→ 身份拷贝；② 指针走 ptr_implicit_cast（含 share/weak 计数）；
+③ sema 的 `ex_member` 与运行期 FIELD_GET/SET 先剥限定再查字段（**读** const 值合法，
+**写**由赋值路径按 const 规则拒绝）；④ const 检查仍用未剥限定的值。TDZ 进入
+（`var x: const T = undefined; x = v;`）本就由 sema 按 `flow_init` 放行（首次初始化），
+运行期只是把赋值落地。测试见 `tests/const_convert_test.cpp`（构造 / 按值传参 /
+指针传参 / TDZ 进入 / 标量 + 3 个负例：去限定、重赋值、写 const 字段）。
 
 #### 14.22.3 测试与验证
 

@@ -2073,6 +2073,9 @@ static value_t *ex_member(sema_t *sema, ast_node_t **node,
                    "cannot access field of value of unknown type");
         return val_void(sema);
       }
+      /* const/volatile 只是同一份数据的视图：**读**字段始终合法（写由赋值路径按
+         const 规则拒绝），故先剥掉限定再按底层类型查字段。 */
+      ot = type_strip_quals(ot);
       /* 指针上的成员访问**自动解引用**：`p.field` ≡ `p.*.field`（任意指针修饰，
          指向 struct/cunion；pointee 可带 const/volatile）。做法是就地改写 AST——
          把当前 object 节点包进一个 AST_DEREF（compiler 据此发 PTR_GET，与手写

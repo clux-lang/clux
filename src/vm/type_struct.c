@@ -138,6 +138,16 @@ static value_t *struct_ne(vm_t *vm, value_t *a, value_t *b) {
 /* ---- 类型转换：结构兼容（鸭子类型）即可转换 ---- */
 
 static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* T → const T / volatile T（可嵌套）：**只加限定**的隐式转换（C 语义：
+       限定符只能加不能去）——同一份数据的视图，身份拷贝即可。sema 允许该转换
+       （构造、参数传递、TDZ 初始化三处都合法），运行期必须落地；不加这一支就会
+       报 "struct: implicit cast only within same struct"。 */
+    if (target && type_has_quals(target) && !type_has_quals(value_type(v)) &&
+        struct_type_compatible(vm, type_strip_quals(target), value_type(v))) {
+        if (value_is_shadow(v)) return value_make_shadow(vm, target);
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        return value_make(vm, target, data);
+    }
     if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: implicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
@@ -146,6 +156,13 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
 }
 
 static value_t *struct_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* `as` 同样允许加限定（与隐式一致；去限定仍要求类型完全相同） */
+    if (target && type_has_quals(target) && !type_has_quals(value_type(v)) &&
+        struct_type_compatible(vm, type_strip_quals(target), value_type(v))) {
+        if (value_is_shadow(v)) return value_make_shadow(vm, target);
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        return value_make(vm, target, data);
+    }
     if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: explicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);

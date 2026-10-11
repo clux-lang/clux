@@ -970,6 +970,8 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
+  /* 限定视图不影响字段定位（写 const 由下方 value_has_const(base) 拒绝） */
+  if (!bad) bt = type_strip_quals(bt);
   if (!bad && (!bt || (bt->kind != TYPE_KIND_ARRAY &&
                        bt->kind != TYPE_KIND_TUPLE &&
                        bt->kind != TYPE_KIND_SLICE_OWN &&
@@ -1076,6 +1078,8 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
+  /* 限定视图不影响字段定位（写 const 由下方 value_has_const(base) 拒绝） */
+  if (!bad) bt = type_strip_quals(bt);
   /* 指针上的成员写入同样**自动解引用**：`p.field = v` ≡ `p.*.field = v`
      （与读取路径 ex_member 同一改写：包一层 AST_DEREF，compiler 发 PTR_GET）。
      pointee 带 const/volatile 时**拒绝写入**（C 语义：const 只能加不能去）。 */
@@ -1410,6 +1414,8 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
+  /* 限定视图不影响字段定位（写 const 由下方 value_has_const(base) 拒绝） */
+  if (!bad) bt = type_strip_quals(bt);
   const type_t *ft = bad ? NULL : ptr_type_base(bt);
   if (!bad && !ft) {
     char tn[64];

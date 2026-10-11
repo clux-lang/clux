@@ -1353,4 +1353,4 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 验证：`build exit=0`、**0 告警**、**1674/1674**、示例 **41/41**（0 泄漏）且
       format 幂等 **43/43**。
     - 测试与示例：`tests/struct_members_test.cpp` 6 例；`examples/struct_members/`（静态属性跨实例共享 + 值/指针接收者方法 + 只读方法 + 显式限定调用）。
-    - 已知缺口（本轮发现，未修；尝试已回退）：非指针的 `T → const T` 隐式转换运行期报 `struct: implicit cast only within same struct`；通用入口加「只加限定」分支会波及 slice/qualify shadow 路径（5 处回归），留作独立议题 —— 详见 m6-design §14.22.2。
+    - （已修复，见 m6-design §14.22.2）：非指针的 `T → const T` 隐式转换运行期报 `struct: implicit cast only within same struct`；通用入口加「只加限定」分支会波及 slice/qualify shadow 路径（5 处回归），已按类型族落地（struct vtable + sema 剥限定 + 运行期字段操作），并新增 tests/const_convert_test.cpp 覆盖构造/值传参/指针传参/TDZ 与 3 个负例。
