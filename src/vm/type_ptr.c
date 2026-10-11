@@ -576,6 +576,23 @@ static bool is_opaque_type(const type_t *t) {
     return t && t->vtable == &VTABLE_OPAQUE;
 }
 
+/* target_base 是否等于 src_base、或只是它外层加了 const/volatile（可嵌套）。
+ * C 语义：**限定符只能加不能去**——`ref *T → ref *const T` 永远安全，
+ * 反向（去 const）必须显式 `as`。 */
+static bool ptr_base_adds_quals(const type_t *src_base, const type_t *target_base) {
+    if (src_base == target_base) return true;
+    const type_t *t = target_base;
+    while (t && (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE)) {
+        const type_t *sub = (t->kind == TYPE_KIND_CONST)
+                                ? ((const const_type_t *)t)->sub
+                                : ((const volatile_type_t *)t)->sub;
+        if (!sub) break;
+        if (sub == src_base) return true;
+        t = sub;
+    }
+    return false;
+}
+
 static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     const type_t *src = value_type(v);
@@ -588,11 +605,25 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         return value_make(vm, target, data);
     }
 
-    /* own → ref 身份拷贝（借用的表达，§3.2）：同 base 的 own → ref。
+    /* 同种所有权修饰、目标只是给 pointee **加了 const/volatile**：身份拷贝。
+       不加这一支的话 sema 放行、运行期报 "ptr: unsupported implicit cast for
+       pointer"——`ref *T` 传给 `ref *const T` 形参（例如方法的第一参数写成
+       `ref *const Test`）就会踩到。share/weak 需要维护引用计数。 */
+    if (target && src->kind == target->kind &&
+        ptr_base_adds_quals(ptr_type_base(src), ptr_type_base(target))) {
+        if (src->kind == TYPE_KIND_PTR_SHARE && pv->ptr)
+            rc_block_strong_inc((rc_block_t *)pv->ptr);
+        if (src->kind == TYPE_KIND_PTR_WEAK && pv->ptr)
+            rc_block_weak_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, target, pv->ptr);
+    }
+
+    /* own → ref 身份拷贝（借用的表达，§3.2）：同 base 的 own → ref
+       （含给 pointee 加 const/volatile 的情形：own *T → ref *const T）。
        ref 总借用——不拥有堆块，堆块归原 own 释放。 */
     if (src->kind == TYPE_KIND_PTR_OWN && target &&
         target->kind == TYPE_KIND_PTR_REF &&
-        ptr_type_base(src) == ptr_type_base(target)) {
+        ptr_base_adds_quals(ptr_type_base(src), ptr_type_base(target))) {
         return ptr_make_value(vm, target, pv->ptr);
     }
 

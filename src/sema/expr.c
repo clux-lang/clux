@@ -2018,6 +2018,23 @@ static value_t *ex_member(sema_t *sema, ast_node_t **node,
                    "cannot access field of value of unknown type");
         return val_void(sema);
       }
+      /* 指针上的成员访问**自动解引用**：`p.field` ≡ `p.*.field`（任意指针修饰，
+         指向 struct/cunion；pointee 可带 const/volatile）。做法是就地改写 AST——
+         把当前 object 节点包进一个 AST_DEREF（compiler 据此发 PTR_GET，与手写
+         `p.*.field` 完全同路），然后按**剥掉限定符**的 base 类型继续查字段。
+         object 已经求值过，**不重新求值**（避免调用/函数字面量被二次处理）。 */
+      {
+        const type_t *base = type_strip_quals(ptr_type_base(ot));
+        if (base && (base->kind == TYPE_KIND_STRUCT ||
+                     base->kind == TYPE_KIND_CUNION)) {
+          ast_node_t *deref = ast_deref_new(sema->arena, (*node)->tok_begin,
+                                            (*node)->tok_end);
+          if (!deref) return val_void(sema);
+          ((ast_deref_t *)deref)->operand = n->object;
+          n->object = deref;
+          ot = base;
+        }
+      }
       if (ot->kind == TYPE_KIND_UNION) {
         /* union 字段：字段名 = member 名（tag 名），按名反查 member →
            返回该 member 的 payload 类型 shadow。运行期 FIELD_GET 按 tag

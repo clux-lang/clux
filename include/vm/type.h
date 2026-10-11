@@ -362,6 +362,25 @@ static inline bool type_is_volatile(const type_t *t) {
 /** 取修饰类型的 sub（非 const/volatile 时返回 NULL） */
 const type_t *type_qualifier_sub(const type_t *t);
 
+/** 剥掉（可嵌套的）const/volatile 限定，返回最内层基础类型；
+ *  无修饰时原样返回。用于"指针自动解引用后按 base 查字段/构造描述符"
+ *  这类只关心底层布局的判定。 */
+static inline const type_t *type_strip_quals(const type_t *t) {
+    while (t && (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE)) {
+        const type_t *sub = (t->kind == TYPE_KIND_CONST)
+                                ? ((const const_type_t *)t)->sub
+                                : ((const volatile_type_t *)t)->sub;
+        if (!sub) break;
+        t = sub;
+    }
+    return t;
+}
+
+/** 是否带（可嵌套的）const/volatile 限定 */
+static inline bool type_has_quals(const type_t *t) {
+    return t && (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE);
+}
+
 /**
  * 类型是否含 const 修饰（递归 sub 链）：const i32 → true；
  * volatile(const(i32)) → true；volatile(i32) → false。

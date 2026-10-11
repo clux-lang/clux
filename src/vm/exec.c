@@ -1338,6 +1338,9 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
     value_t *self = exec_stack_pop(vm);
     const type_t *t = self ? value_type(self) : NULL;
+    /* const/volatile 限定只是同一份数据的视图：剥掉再按底层布局查字段
+       （`ref *const T` 自动解引用后得到的就是 `const T` 值）。 */
+    t = type_strip_quals(t);
     if (!t || t->kind != TYPE_KIND_STRUCT) {
         /* union 分支：字段名 = member 名，按名反查 → 读 data 首部 tag →
            tag 不符 → error value（引擎级硬错误 = panic，对齐数组越界）；
@@ -1398,6 +1401,9 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *val  = exec_stack_pop(vm);
     value_t *self = exec_stack_pop(vm);
     const type_t *t = self ? value_type(self) : NULL;
+    /* const/volatile 视图：剥掉再按底层布局定位字段（写入本身由 sema
+       按 const 规则拦截——这里只负责布局）。 */
+    t = type_strip_quals(t);
     if (!t || t->kind != TYPE_KIND_STRUCT) {
         /* union 分支：与 FIELD_GET 同款 tag 检查——字段存在但 tag 不符
            → error value（引擎级硬错误，对齐数组越界） */

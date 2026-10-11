@@ -1044,6 +1044,30 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   bool bad = value_is_error(sema->vm, base) ||
              value_is_type(base, TYPE_KIND_VOID);
   const type_t *bt = bad ? NULL : value_type(base);
+  /* 指针上的成员写入同样**自动解引用**：`p.field = v` ≡ `p.*.field = v`
+     （与读取路径 ex_member 同一改写：包一层 AST_DEREF，compiler 发 PTR_GET）。
+     pointee 带 const/volatile 时**拒绝写入**（C 语义：const 只能加不能去）。 */
+  if (!bad && bt && ptr_type_base(bt)) {
+    const type_t *pbase = ptr_type_base(bt);
+    const type_t *ub = type_strip_quals(pbase);
+    if (ub && (ub->kind == TYPE_KIND_STRUCT || ub->kind == TYPE_KIND_CUNION)) {
+      if (type_has_quals(pbase)) {
+        diag_error(sema->diag, sema_loc(sema, &as->base),
+                   "cannot assign to field through a pointer to const value");
+        sema_expr(sema, &as->value, scope);
+        return;
+      }
+      ast_node_t *deref =
+          ast_deref_new(sema->arena, as->target->tok_begin, as->target->tok_end);
+      if (!deref) {
+        sema_expr(sema, &as->value, scope);
+        return;
+      }
+      ((ast_deref_t *)deref)->operand = m->object;
+      m->object = deref;
+      bt = ub;
+    }
+  }
   if (!bad && (!bt || (bt->kind != TYPE_KIND_STRUCT &&
                        bt->kind != TYPE_KIND_UNION &&
                        bt->kind != TYPE_KIND_CUNION))) {
