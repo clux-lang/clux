@@ -1,0 +1,83 @@
+// struct_members.cx — 结构体命名空间成员：静态属性（var）与方法（func）
+//
+// 结构体体内除了字段，还可以声明：
+//
+//     var  total = 0;                              // 静态属性
+//     func bump(self: ref *Counter): i32 { ... }   // 方法
+//
+// 二者**本质都是模块级全局声明**（变量 / 函数），只是以 `<结构体名>::<成员名>`
+// 的命名空间方式访问——编译流水线在 parse 之后把它们改名成 `Counter::total` /
+// `Counter::bump` 并追加进程序声明表，此后 sema / compiler / 运行期完全走既有的
+// 全局变量与全局函数路径（没有任何新的运行时机制）。
+//
+// 访问方式：
+//     Counter::total           静态属性（读 / 写 / 复合赋值；所有实例共享同一份）
+//     Counter::bump(other.&)   显式限定调用（与手写全局函数同形）
+//     c.bump()                 ≡ typeof(c)::bump(c.&)   —— c 是值：自动取地址
+//     p.bump()                 ≡ typeof(p.*)::bump(p)   —— p 是指针：自动解引用
+//
+// 两点说明：
+//   - `self` **不是关键字**，只是第一个参数的名字。接收者按**位置**传递：
+//     第一个参数就是接收者（类型通常写 `ref *T` 或 `ref *const T`）。
+//   - 只读方法把接收者写成 `ref *const T`；`ref *T` 会**自动**加 const 传进去，
+//     但反向（去 const）不允许，所以只读方法里写 `self.field = v` 会被拒绝。
+
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;   // M6 起 printf 由 libc 提供
+
+struct Counter {
+    value: i32;
+    var total: i32 = 0;      // 静态属性：跨实例共享
+    var limit: i32 = 3;
+
+    // 方法：读 + 写（接收者是非 const 的 ref）
+    func bump(self: ref *Counter): i32 {
+        self.value += 1;
+        Counter::total += 1;
+        return self.value;
+    }
+
+    // 方法：只读（接收者可加 const）
+    func get(self: ref *const Counter): i32 {
+        return self.value;
+    }
+
+    // 方法：读静态属性
+    func isFull(self: ref *const Counter): bool {
+        _ = self;
+        return Counter::total >= Counter::limit;
+    }
+}
+
+func main(): i32 {
+    // 静态属性：命名空间访问，读 / 写 / 复合赋值
+    if (Counter::total != 0) { return 1; }
+    Counter::limit = 3;
+    if (Counter::limit != 3) { return 2; }
+    Counter::total += 0;
+    if (Counter::total != 0) { return 3; }
+
+    // 值接收者：c.bump() ≡ typeof(c)::bump(c.&)
+    var a: Counter = .Counter{ .value = 10 };
+    var b: Counter = .Counter{ .value = 20 };
+    if (a.bump() != 11) { return 4; }
+    if (b.bump() != 21) { return 5; }
+    if (Counter::total != 2) { return 6; }   // 静态属性被两个实例共同改写
+    if (a.get() != 11 || b.get() != 21) { return 7; }
+
+    // 指针接收者：p.bump() ≡ typeof(p.*)::bump(p)
+    var p: ref *Counter = a.&;
+    if (p.bump() != 12) { return 8; }
+    if (a.get() != 12) { return 9; }
+
+    // 显式限定调用（与上面完全等价）
+    if (Counter::bump(b.&) != 22) { return 10; }
+    if (Counter::total != 4) { return 11; }
+
+    // 方法读静态属性
+    if (!a.isFull()) { return 12; }          // total(4) >= limit(3)
+
+    libc::printf("Counter::total = %d, a = %d, b = %d, full = %d\n",
+           Counter::total, a.get(), b.get(), a.isFull() as i32);
+    return 0;
+}

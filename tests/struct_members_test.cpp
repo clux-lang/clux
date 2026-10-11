@@ -187,6 +187,37 @@ TEST_F(StructMembersTest, MethodBodyAutoDeref) {
       "}\n");
 }
 
+/* 只读方法：`ref *const T` 形参可由可变值的 `c.&` 满足（ref *T 自动加 const） */
+TEST_F(StructMembersTest, MethodOnConstValue) {
+  expect_verdict(
+      "struct Test {\n"
+      "  id: i32;\n"
+      "  func get(self: ref *const Test): i32 { return self.id; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c: Test = .Test{ .id = 5 };\n"
+      "  if (c.get() != 5) { return report(1); }  // 可变值 → ref *const 形参（自动加 const）\n"
+      "  var t: Test = .Test{ .id = 6 };\n"
+      "  if (t.get() != 6) { return report(2); }\n"
+      "  return report(0);\n"
+      "}\n");
+}
+
+/* 限定名可以当**函数值**用（与普通函数名同机制） */
+TEST_F(StructMembersTest, QualifiedMethodAsFunctionValue) {
+  expect_verdict(
+      "struct Test {\n"
+      "  id: i32;\n"
+      "  func get(self: ref *const Test): i32 { return self.id; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var t: Test = .Test{ .id = 9 };\n"
+      "  var f = Test::get;\n"
+      "  if (f(t.&) != 9) { return report(1); }\n"
+      "  return report(0);\n"
+      "}\n");
+}
+
 /* 诊断：写 const 接收者 / 不存在的成员 */
 TEST_F(StructMembersTest, Diagnostics) {
   const char *cases[] = {

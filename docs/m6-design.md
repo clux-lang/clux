@@ -1424,3 +1424,60 @@ _ = libc::memcmp(data(a), data(a), sizeof(i32) * 4usize);   // (ptr, len) 与 C 
 - `examples/ffi_data/ffi_data.cx`：`data`+`len` 与 `memcmp`/`strlen` 对接，
   并演示 `p.*` 与"clux 侧遍历用序列"的边界。
 - 全量：`build exit=0`、**0 告警**、**1668/1668**、示例 **40/40**、format **42/42**。
+### 14.22 ✅ 结构体命名空间成员 + 方法调用糖
+
+```c
+struct Test {
+  id: i32;
+  var  data = 123;                                          // 静态属性
+  func getId(self: ref *const Test): i32 { return self.id; } // 方法
+}
+Test::data;  Test::data += 1;   Test::getId(t.&);   // 命名空间访问
+var t: Test = .Test{ .id = 234 };
+t.getId();      // ≡ typeof(t)::getId(t.&)      —— 值：取地址
+p.getId();      // ≡ typeof(p.*)::getId(p)      —— 指针：自动解引用
+```
+
+**成员本质就是模块级全局声明**：`ast_expand_struct_members`（编译流水线在 parse 之后、
+sema 之前调用）把 struct 体内的 var/func 成员**改名**为 `Test::data` / `Test::getId`
+并追加进 `prog->funcs`——此后 sema / compiler / 运行期完全走既有的全局变量与全局函数
+路径，**零新运行时机制**（不改字节码、不改容器）。fmt 路径不调用展开（成员随结构体
+渲染，避免重复打印）。
+
+- **限定访问**：sema 的 `::` 分支在「左侧是类型符号 + `T::x` 在全局表里存在（VAR/FUNC）」
+  时把节点改写成同名 AST_IDENT → 读取 / 赋值 / 取函数值 / 调用全部复用既有路径。
+  赋值目标同理（shadow_assign 先改写，再走普通变量赋值，含复合赋值与 const 检查）。
+- **方法糖**：`ex_call` 开头识别 callee 是 AST_MEMBER → 取对象静态类型（指针 → base，
+  值 → 自身）→ 查 `T::f` → 命中即把 callee 换成限定名 AST_IDENT，并把**接收者插为
+  第一个实参**（值 → `t.&`；指针 → `t`）。随后完全走既有调用路径。
+- **`self` 不是关键字**：只是普通参数名。接收者按**位置**取（第一个参数）。
+
+#### 14.22.1 前置修复（同批，各自独立有价值）
+
+1. 指针成员访问**自动解引用** `p.x ≡ p.*.x`（读/写/复合赋值、链式成立；写穿
+   `ref *const T` 拒绝）；
+2. `ref *T → ref *const T` 的运行期转换（ptr_implicit_cast 缺「只加限定」分支）；
+3. 运行期字段操作接受 const/volatile 视图（PTR_GET 后是 `const T`，原判非 struct）；
+4. `clux format` 原先**静默删掉**结构体成员（数据损坏），现已渲染并保证幂等。
+
+#### 14.22.2 已知缺口（本轮发现，未修）
+
+`var c: const Test = .Test{...};` 这类**非指针**的 `T → const T` 隐式转换在运行期报
+`struct: implicit cast only within same struct`。在通用入口 value_implicit_cast 加
+「只加限定」分支可以修，但初版实现波及 slice / qualify shadow 路径（DriverM4.StrSlice*、
+VmQualifiedTypes.ImplicitCastQualifyShadow、examples/const_volatile.cx、typehoist.cx
+共 5 处回归），因此**已回退**，留作独立议题：需按类型族细分（shadow / 指针 / 切片 /
+结构体各自语义）后再落地。当前只读方法可用 `ref *const T` 形参接收可变值的 `c.&`
+（指针路径已支持加 const）。
+
+#### 14.22.3 测试与验证
+
+- `tests/struct_members_test.cpp` **6 例**：静态属性读/写/复合赋值 + 函数内共享同一份
+  存储；方法糖三种接收者（值 / ref / own）与显式限定调用等价；方法体内 `self.id`
+  读写；只读方法（`ref *const T`）；限定名当**函数值**用；诊断（写 const 接收者 /
+  不存在的方法）。
+- `examples/struct_members/struct_members.cx`：Counter 演示静态属性跨实例共享、
+  值/指针接收者方法、只读方法与显式限定调用；实测输出
+  `Counter::total = 4, a = 12, b = 22, full = 1`。
+- 全量：build exit=0、**0 告警**、**1674/1674**、示例 **41/41**（0 泄漏）且
+  41/41 emit → run .cxb 全通过、format 幂等 **43/43**。

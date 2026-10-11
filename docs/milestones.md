@@ -1350,5 +1350,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **顺带修掉一个数据损坏 bug**：`clux format` 原先**静默删掉**结构体成员
       （`struct T { var x = 1; }` → `struct T {}`）——fmt 的 struct 分支没渲染 members。
       现已渲染并保证幂等 + 格式化后语义不变。
-    - 验证：`build exit=0`、**0 告警**、**1672/1672**、示例 **40/40**（0 泄漏）、
-      format 幂等 **42/42**。
+    - 验证：`build exit=0`、**0 告警**、**1674/1674**、示例 **41/41**（0 泄漏）且
+      format 幂等 **43/43**。
+    - 测试与示例：`tests/struct_members_test.cpp` 6 例；`examples/struct_members/`（静态属性跨实例共享 + 值/指针接收者方法 + 只读方法 + 显式限定调用）。
+    - 已知缺口（本轮发现，未修；尝试已回退）：非指针的 `T → const T` 隐式转换运行期报 `struct: implicit cast only within same struct`；通用入口加「只加限定」分支会波及 slice/qualify shadow 路径（5 处回归），留作独立议题 —— 详见 m6-design §14.22.2。
