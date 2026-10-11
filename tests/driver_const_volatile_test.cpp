@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -22,7 +22,8 @@ std::string write_temp_file(const std::string &content) {
   static int counter = 0;
   path_str += std::to_string(counter++);
   FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
+  const std::string src_ = clux_with_printf_prelude(content);
+  fwrite(src_.data(), 1, src_.size(), fp);
   fclose(fp);
   return path_str;
 }
@@ -122,7 +123,7 @@ TEST(Driver, RunFileAnnotatedWideVarKeepsDeclaredType) {
       "  var x:i64 = 7;\n"
       "  x = 9 as i64;\n"
       "  x = x + 5;\n"
-      "  printf(\"%d\\n\", x as i32);\n"
+      "  libc::printf(\"%d\\n\", x as i32);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -137,7 +138,7 @@ TEST(Driver, RunFileAnnotatedWideVarInferenceMatchesDeclared) {
       "  var x:i64 = 7;\n"
       "  var t = x;\n"
       "  t = 9 as i64;\n"
-      "  printf(\"%d\\n\", t as i32);\n"
+      "  libc::printf(\"%d\\n\", t as i32);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -165,8 +166,8 @@ TEST(Driver, AsmBinRoundTripStable) {
 
   {
     FILE *fp = fopen(src.c_str(), "wb");
-    const char *code = "func main():void { printf(\"ok\\n\"); }\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    const char *code = "func main():void { libc::printf(\"ok\\n\"); }\n";
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
 
@@ -200,7 +201,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(src.c_str(), "wb");
     const char *code = "func main():void { var x:i32 = 1; }\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(src.c_str()), DRIVER_INPUT_SOURCE);
@@ -210,7 +211,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(cxs.c_str(), "wb");
     const char *code = "; comment\nstart:\n    push_i32 1\n    halt\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(cxs.c_str()), DRIVER_INPUT_CXS);
@@ -220,7 +221,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(cxs2.c_str(), "wb");
     const char *code = "push_i32 1\nhalt\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(cxs2.c_str()), DRIVER_INPUT_CXS);
@@ -230,7 +231,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(src2.c_str(), "wb");
     const char *code = "// clux source\nfunc main():void {}\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(src2.c_str()), DRIVER_INPUT_SOURCE);
@@ -241,7 +242,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(cxsrc.c_str(), "wb");
     const char *code = "func main():void {}\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   ASSERT_EQ(driver_build_bin(cxsrc.c_str(), cxb.c_str()), 0);
@@ -252,7 +253,7 @@ TEST(Driver, DetectInputByContent) {
   {
     FILE *fp = fopen(empty.c_str(), "wb");
     const char *code = "   \n\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(empty.c_str()), DRIVER_INPUT_UNKNOWN);
@@ -298,7 +299,7 @@ TEST(Driver, ConvByContentSniffing) {
         "    push_scope\n"
         "    push_undefined\n"
         "    ret\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_EQ(driver_detect_input(weird.c_str()), DRIVER_INPUT_CXS);
@@ -332,7 +333,7 @@ TEST(Driver, ConvErrorPaths) {
   {
     FILE *fp = fopen(bad_cxs.c_str(), "wb");
     const char *code = "FOOBAR 1\n";
-    fwrite(code, 1, std::strlen(code), fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_NE(driver_asm_to_bin(bad_cxs.c_str(),
@@ -343,7 +344,7 @@ TEST(Driver, ConvErrorPaths) {
   {
     FILE *fp = fopen(bad_cxb.c_str(), "wb");
     const char code[] = "NOTABINARYFILE";
-    fwrite(code, 1, sizeof code - 1, fp);
+    { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }
   EXPECT_NE(driver_bin_to_asm(bad_cxb.c_str(),

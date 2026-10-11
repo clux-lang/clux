@@ -41,4 +41,20 @@ inline std::string slurp(const std::string &path) {
   return out;
 }
 
+/**
+ * M6 FFI：`printf` **不再是内建**——它是 libc 的函数，由源码用 FFI 声明后调用
+ * （`extern lib "*" as libc;` + `extern func libc::printf(format: str, ...): void;`；
+ * 别名用 `libc` 而不是 `c`：**局部变量会遮蔽库别名**）。
+ *
+ * 测试里要**运行**的 clux 片段凡是用到 `libc::printf(`，统一在写文件前补上这两行
+ * 声明，免得每个片段都手写样板。只关心格式化的测试（fmt_test）不需要它——
+ * 格式化不解析名字。
+ */
+inline std::string clux_with_printf_prelude(const std::string &body) {
+  if (body.find("libc::printf(") == std::string::npos) return body;
+  return std::string("extern lib \"*\" as libc;\n"
+                     "extern func libc::printf(format: str, ...): void;\n") +
+         body;
+}
+
 #endif /* CLUX_TEST_COMMON_H */

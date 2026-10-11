@@ -351,11 +351,13 @@ var c: std::Color = std::Color::Red;
 - 模块可以 export ref []T（借用切片，指向模块全局数据）
 - 模块不能 export own []T（全局 own 禁止）
 
-### 9.3 与 printf 内建
+### 9.3 与 printf 的关系（M6 后已变更）
 
-- 当前 printf 是硬编码内建函数（id=0），不在任何模块中
-- M5 不改变 printf 的地位——它仍然全局可用，不需要 import
-- 未来标准库可能提供 `std::printf`，但 M5 暂不涉及
+- M5 当时 printf 是硬编码内建函数（id=0），不在任何模块中、全局可用。
+- **M6 起它不再是内建**：printf 由 libc 经 FFI 提供，源码里自己声明
+  （`extern lib "*" as libc;` + `extern func libc::printf(format: str, ...): void;`），
+  见 docs/m6-design.md §14.19 与 docs/language-spec-m1.md §5。
+- 本节其余关于"模块命名空间 / 代理导出"的讨论不受影响。
 
 ---
 

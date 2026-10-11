@@ -1,3 +1,5 @@
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 comptime func add(a: i32, b: i32): i32 {
     return a + b;
 }
@@ -5,5 +7,5 @@ comptime func add(a: i32, b: i32): i32 {
 comptime var SUM = add(1, 2);
 
 func main(): void {
-    printf("%d\n", SUM);
+    libc::printf("%d\n", SUM);
 }

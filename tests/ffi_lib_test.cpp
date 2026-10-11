@@ -146,9 +146,10 @@ TEST_F(FfiLibTest, CallRejectsNullSymbolAndTooManyArgs) {
   EXPECT_FALSE(ffi_call_int(nullptr, 0, nullptr, &out, err, sizeof(err)));
   EXPECT_NE(err[0], '\0');
 
-  int64_t many[9] = {0};
+  /* FFI_MAX_ARGS 现在是 16（变参 printf 等需要更多实参）：用上限 +1 触发拒绝 */
+  int64_t many[17] = {0};
   void *sym = reinterpret_cast<void *>(static_cast<intptr_t>(1)); /* 不会被调用 */
-  EXPECT_FALSE(ffi_call_int(sym, 9, many, &out, err, sizeof(err)));
+  EXPECT_FALSE(ffi_call_int(sym, 17, many, &out, err, sizeof(err)));
   EXPECT_NE(std::strstr(err, "exceed"), nullptr);
 }
 

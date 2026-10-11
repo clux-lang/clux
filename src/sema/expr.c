@@ -1639,26 +1639,42 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
       return value_make_shadow(sema->vm, value_type(v));
 }
 
-/* M6 FFI：实参类型能否按调用层的两种槽（int64 / double）传给该形参。
- * 判据与**运行期实际做的事**对齐，而不是 clux 的类型系统规则：
- *   - 整数族（int/bool/enum）形参收整数族实参——都按 int64 槽传，语义同 C 的
- *     隐式转换（所以 `malloc(16)` 的 i32 字面量喂 u64 形参是合法的）；
- *   - opaque/指针形参收指针/opaque 实参（指针宽度）；
- *   - str 形参收 str 实参（C 视角的 char *）；
- *   - 浮点形参只在**浮点签名**（返回 f32/f64）里出现，实参也必须是浮点
- *     （f32 由调用层升为 double）；非浮点签名里出现浮点实参会被塞进整数
- *     寄存器 ⇒ 必须拒绝而不是猜着传。 */
-static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt, const type_t *at,
-                               bool float_sig) {
+/* M6 FFI：剥掉 const/volatile 限定符（它们是同一份数据的限定视图，C ABI 描述符
+   与底层类型一致）。`const i32` 的实参就应该按 int32 传。 */
+static const type_t *ffi_strip_quals(const type_t *t) {
+  while (t && (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE)) {
+    const type_t *sub = (t->kind == TYPE_KIND_CONST)
+                            ? ((const const_type_t *)t)->sub
+                            : ((const volatile_type_t *)t)->sub;
+    if (!sub) break;
+    t = sub;
+  }
+  return t;
+}
+
+/* M6 FFI：实参类型能否传给该形参。
+ *
+ * clux 的标量与 C 是 **1:1** 的，调用层用 libffi 的精确 `ffi_type` 描述符，
+ * 因此判据是"能否共用同一个描述符"：
+ *   - 整数族（int/bool/enum）⇄ 整数族：宽度/符号可以不同（与 C 的隐式转换同义，
+ *     都由整数寄存器承载）——所以 `malloc(16)` 的 i32 字面量喂 u64 形参合法；
+ *   - 浮点 ⇄ 浮点：**要求同型**（f32⇄f32、f64⇄f64）。宽度不同不能共用一个
+ *     描述符；要换精度请显式 `as`；
+ *   - `opaque` 收 opaque 与各种指针/切片/str（C 里都是裸指针）；
+ *   - `str` 收 `str`；指针形参收 opaque 与指针/切片；
+ *   - 其它（结构体/cunion）：按值传参需要构造 struct 描述符，暂不支持 → 拒绝。
+ * const/volatile 限定符先剥掉再判（视图不影响 ABI）。 */
+static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
+                               const type_t *at_raw) {
+  const type_t *pt = ffi_strip_quals(pt_raw);
+  const type_t *at = ffi_strip_quals(at_raw);
   if (!pt || !at) return false;
   bool p_int = pt->kind == TYPE_KIND_INT || pt->kind == TYPE_KIND_BOOL ||
                pt->kind == TYPE_KIND_ENUM;
   bool a_int = at->kind == TYPE_KIND_INT || at->kind == TYPE_KIND_BOOL ||
                at->kind == TYPE_KIND_ENUM;
-  if (float_sig)
-    return pt->kind == TYPE_KIND_FLOAT && at->kind == TYPE_KIND_FLOAT;
-  if (pt->kind == TYPE_KIND_FLOAT) return false; /* 非浮点签名里不许有浮点实参 */
   if (p_int) return a_int;
+  if (pt->kind == TYPE_KIND_FLOAT) return at == pt; /* 同型（f32/f64 不可混） */
   if (pt == sema->vm->type_opaque)
     return at == sema->vm->type_opaque || at->kind == TYPE_KIND_PTR_OWN ||
            at->kind == TYPE_KIND_PTR_REF || at->kind == TYPE_KIND_PTR_FATAL ||
@@ -1666,7 +1682,36 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt, const type_t *at,
            at->kind == TYPE_KIND_SLICE_REF || at->kind == TYPE_KIND_SLICE_FATAL ||
            at->kind == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
-  return pt == at; /* 其它（含 struct/cunion）：要求完全一致 */
+  /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
+     指针/切片等也要求完全一致。 */
+  return pt == at;
+}
+
+/* M6 FFI：变参（`...`）位置的额外实参是否可搬运。整数族/浮点/指针/str 都可以
+ * （浮点按 C 规则提升：f32→double）；结构体/cunion（按值）尚不支持。 */
+static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
+  const type_t *at = ffi_strip_quals(at_raw);
+  if (!at) return false;
+  (void)sema;
+  switch (at->kind) {
+  case TYPE_KIND_INT:
+  case TYPE_KIND_BOOL:
+  case TYPE_KIND_ENUM:
+  case TYPE_KIND_FLOAT:
+  case TYPE_KIND_STR:
+  case TYPE_KIND_OPAQUE:
+  case TYPE_KIND_PTR_OWN:
+  case TYPE_KIND_PTR_REF:
+  case TYPE_KIND_PTR_FATAL:
+  case TYPE_KIND_PTR_SHARE:
+  case TYPE_KIND_PTR_WEAK:
+  /* 变参也能按值传结构体/cunion（libffi 支持；C 对聚合类型不做默认提升） */
+  case TYPE_KIND_STRUCT:
+  case TYPE_KIND_CUNION:
+    return true;
+  default:
+    return false; /* 切片/option/tag union/元组/闭包：变参位置不可搬运 */
+  }
 }
 
 /* AST_CALL 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -1718,8 +1763,9 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             }
             const type_t *rt = func_type_return(fs->type);
             /* 返回类型码：**精确到类型**（vm/bcode.h 的 BCODE_FFI_RET_*）。
-               只用 0..4 的旧编码会把 u64 返回造 i64 值，使用点（比较/赋值）
-               随后撞上隐式转换（`strlen(s) != 5u64` 的经典症状）。 */
+               clux 标量与 C 是 1:1 的，调用层用 libffi 的精确描述符，因此返回值
+               的类型必须与源码声明完全一致（旧编码把 u64 返回造成 i64，使用点会
+               在比较/赋值时撞上隐式转换）。 */
             uint32_t rk = BCODE_FFI_RET_VOID;
             if (!rt || rt == sema->vm->type_void) rk = BCODE_FFI_RET_VOID;
             else if (rt == sema->vm->type_i8) rk = BCODE_FFI_RET_I8;
@@ -1731,62 +1777,71 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             else if (rt == sema->vm->type_u32) rk = BCODE_FFI_RET_U32;
             else if (rt == sema->vm->type_u64) rk = BCODE_FFI_RET_U64;
             else if (rt == sema->vm->type_bool) rk = BCODE_FFI_RET_BOOL;
+            else if (rt == sema->vm->type_f32) rk = BCODE_FFI_RET_F32;
             else if (rt == sema->vm->type_f64) rk = BCODE_FFI_RET_F64;
             else if (rt == sema->vm->type_opaque) rk = BCODE_FFI_RET_PTR;
-            else if (rt == sema->vm->type_f32) {
-              /* 浮点通路是"全 double 签名"（§14.5）：f32 返回会按 double 读错
-                 XMM0 宽度。明确拒绝，而不是造个 f64 值冒充 f32。 */
-              diag_error(sema->diag, sema_loc(sema, &call->base),
-                         "extern call %s: f32 return is not supported yet "
-                         "(declare the function as returning f64)", qual);
-              return val_void(sema);
+            else if (rt == sema->vm->type_str) rk = BCODE_FFI_RET_STR;
+            else if (rt && (rt->kind == TYPE_KIND_STRUCT ||
+                            rt->kind == TYPE_KIND_CUNION ||
+                            rt->kind == TYPE_KIND_ENUM ||
+                            rt->kind == TYPE_KIND_PTR_OWN ||
+                            rt->kind == TYPE_KIND_PTR_REF ||
+                            rt->kind == TYPE_KIND_PTR_FATAL ||
+                            rt->kind == TYPE_KIND_PTR_SHARE ||
+                            rt->kind == TYPE_KIND_PTR_WEAK)) {
+              /* 程序自定义类型 / 带类型的指针：宽度与布局必须查类型表 →
+                "按类型值返回"。compiler 会在 EXTERN_CALL 之前压一个类型值
+                （类型表达式取自 extern cfunc 的声明，sema 已挂在符号的 ast 上）。 */
+              rk = BCODE_FFI_RET_TYPED;
+              ast_func_def_t *efd =
+                  (fs->ast && fs->ast->kind == AST_FUNC_DEF)
+                      ? (ast_func_def_t *)fs->ast
+                      : NULL;
+              call->ffi_ret_type_expr = efd ? efd->return_expr : NULL;
             } else {
               diag_error(sema->diag, sema_loc(sema, &call->base),
                          "extern call %s: return type is not marshalable",
                          qual);
               return val_void(sema);
             }
-            call->is_ffi_call = true;
-            call->ffi_ret_kind = (uint8_t)rk;
-
-            /* 实参校验（此前**完全没做**——类型不符会静默按 int64 传参：x64 下把
-               double 塞进整数寄存器之类的错误不会有任何提示）。
-               判据与**调用层实际能做的事**对齐（§14.5：只有"int64 槽"与"全
-               double 槽"两条通路）：
-                ① 数量：固定参数之外只允许 variadic（`...`）的多余实参；
-                ② 类型：整数族（含 bool/enum）形参 ⇄ 整数族实参（都走 int64 槽，
-                   与 C 的隐式转换同义）；opaque/指针形参 ⇄ 指针/opaque 实参；
-                   str 形参 ⇄ str 实参；浮点形参只在**浮点签名**里出现（f32 实参
-                   由调用层升为 double ✓）；
-                ③ 非浮点签名里出现浮点实参 → 明确报错（会被塞进整数寄存器）；
-                   variadic 的浮点额外实参同理（C 要求走 XMM，未支持）。 */
             const func_sig_t *sig = &((const func_type_t *)fs->type)->sig;
-            const bool float_sig =
-                (rt && rt->kind == TYPE_KIND_FLOAT) ? true : false;
+            call->is_ffi_call = true;
+            /* 返回类型码 + 变参信息打包（编解码见 vm/bcode.h）。
+               变参调用必须知道"前几个是固定参数"，运行期才能按 C 的约定铺寄存器/
+               栈并对变参部分施加默认实参提升。 */
+            call->ffi_ret_kind =
+                BCODE_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
+
+            /* 实参校验（此前**完全没做**）：数量 + 每个实参能否共用形参的 C 类型
+               描述符（判据见 ffi_arg_acceptable）。变参的额外实参按 C 的默认实参
+               提升处理（f32→double、窄整型→int），因此浮点/整型/指针都可以。 */
             size_t nargs = 0;
             for (ast_node_t *a = call->args; a; a = a->next) nargs++;
             if (!sig->is_variadic && nargs > sig->param_count)
               diag_error(sema->diag, sema_loc(sema, &call->base),
                          "extern call %s: expected %zu argument(s), got %zu",
                          qual, sig->param_count, nargs);
+            /* 逐个求值实参：**必须经真正的 AST 槽**（`&call->args` / `&node->next`）——
+               comptime 折叠会把节点就地替换成字面量（如 `add(1,2)` → `3`），写在
+               局部指针副本上会丢，编译器随后仍去编译未折叠的调用）。 */
             size_t ai = 0;
-            for (ast_node_t *a = call->args; a; a = a->next, ai++) {
-              value_t *av = sema_expr(sema, &a, scope);
+            for (ast_node_t **slot = &call->args; *slot; slot = &(*slot)->next, ai++) {
+              value_t *av = sema_expr(sema, slot, scope);
               if (!av || value_is_error(sema->vm, av) ||
                   value_is_type(av, TYPE_KIND_VOID))
                 continue;
+              ast_node_t *a = *slot;
               const type_t *at = value_type(av);
               const type_t *pt =
                   (ai < sig->param_count && sig->params) ? sig->params[ai] : NULL;
               if (!pt) {
-                /* variadic 额外实参：只支持按 int64 槽传的值 */
-                if (at && at->kind == TYPE_KIND_FLOAT)
+                if (!ffi_vararg_acceptable(sema, at))
                   diag_error(sema->diag, sema_loc(sema, a),
-                             "extern call %s: variadic floating-point arguments "
-                             "are not supported yet", qual);
+                             "extern call %s: variadic argument %zu: this type "
+                             "cannot cross the C ABI", qual, ai + 1);
                 continue;
               }
-              if (!ffi_arg_acceptable(sema, pt, at, float_sig))
+              if (!ffi_arg_acceptable(sema, pt, at))
                 diag_error(sema->diag, sema_loc(sema, a),
                            "extern call %s: argument %zu: cannot pass this value "
                            "as the declared parameter type", qual, ai + 1);
@@ -2182,8 +2237,19 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
               : NULL;
           if (ds && ds->kind == SEMA_SYM_EXTERN_VAR && ds->type) {
             uint32_t kind = 0;
-            if (!ffi_data_kind_of(ds->type, sema->vm, &kind)) {
-              /* pass1_names 已就类型报过错；这里只做错误恢复 */
+            if (ffi_data_kind_of(ds->type, sema->vm, &kind)) {
+              /* 标量/指针/str：宽度直接由类型码表达 */
+            } else if (ffi_data_kind_needs_type(ds->type)) {
+              /* struct/cunion/enum：宽度/布局要查类型表 → compiler 在读之前压
+                 一个类型值（类型表达式取自 extern var 的声明，符号的 ast 有）。 */
+              kind = BCODE_FFI_DATA_TYPED;
+              ast_var_def_t *evd =
+                  (ds->ast && ds->ast->kind == AST_VAR_DEF)
+                      ? (ast_var_def_t *)ds->ast
+                      : NULL;
+              n->ffi_var_type_expr = evd ? evd->type_expr : NULL;
+            } else {
+              /* pass1c 已就类型报过错；这里只做错误恢复 */
               return val_void(sema);
             }
             n->is_ffi_var = true;

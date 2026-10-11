@@ -237,10 +237,13 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
                           (int)lib_id->name.len, lib_id->name.ptr,
                           (int)n->variant.len, n->variant.ptr);
         if (qn > 0 && (size_t)qn < sizeof(qual)) {
+          bool typed = (n->ffi_var_kind == BCODE_FFI_DATA_TYPED);
+          if (typed) compile_type_expr(c, n->ffi_var_type_expr);
           bcode_write_op(c->bc, BCODE_EXTERN_LOAD);
           bcode_write_str(c->bc, strslice_from_bytes(qual, (size_t)qn));
           bcode_write_u32(c->bc, n->ffi_var_kind);
-          st_push(c, 1);
+          /* TYPED：类型值被指令消费（压 1 → 指令弹 1 压 1 = 净 0） */
+          st_push(c, typed ? 0 : 1);
           break;
         }
       }
@@ -482,15 +485,21 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
           return;
         }
         size_t ffi_argc = 0;
+        /* 返回类型是程序自定义类型（struct/cunion/enum/带类型的指针）：先压**类型值**
+           （与 CONSTRUCT 同一机制），运行期按它读返回内存并造值。 */
+        bool typed_ret = (BCODE_FFI_RET_UNPACK_KIND(n->ffi_ret_kind) ==
+                          BCODE_FFI_RET_TYPED);
+        if (typed_ret) compile_type_expr(c, n->ffi_ret_type_expr);
         for (ast_node_t *a = n->args; a; a = a->next) {
-          compile_expr(c, a); /* 栈: [arg1..argN]（无 callee） */
+          compile_expr(c, a); /* 栈: [type?][arg1..argN]（无 callee） */
           ffi_argc++;
         }
         bcode_write_op(c->bc, BCODE_EXTERN_CALL);
         bcode_write_str(c->bc, strslice_from_bytes(qual, (size_t)qn));
         bcode_write_u32(c->bc, (uint32_t)ffi_argc);
         bcode_write_u32(c->bc, (uint32_t)n->ffi_ret_kind);
-        st_push(c, -((int)ffi_argc)); /* 实参弹出，结果压入 */
+        /* 实参弹出，结果压入；TYPED 时类型值也被指令消费掉（净变化相同） */
+        st_push(c, -((int)ffi_argc));
         break;
       }
       c_error(c, node, "extern call: callee must be `<lib>::<name>`");

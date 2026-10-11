@@ -698,7 +698,7 @@ ast_node_t *parse_unary(parser_t *p) {
     if (!op_tok) return parse_primary(p);
 
     /* 类型字面量前缀：.<type> { fields } → AST_CONSTRUCT。
-     * 构造语法必须 '.' 前导（与 %v 调试输出 '.type{value}' 一致）。
+     * 构造语法必须 '.' 前导（与 value_dump 的调试输出 '.type{value}' 一致）。
      * 注意 '.' 在此处仅作为表达式起始前缀；成员访问 '.' 由 parse_postfix 处理，
      * 不会与前置 '.' 冲突。 */
     if (token_is(op_tok, ".")) {

@@ -10,7 +10,10 @@ extern "C" {
 #include "driver/driver.h"
 #include "vm/bcode_asm.h"
 #include "vm/bcode_serial.h"
+
 }
+
+#include "test_common.h"
 
 namespace {
 
@@ -21,7 +24,8 @@ std::string write_temp_file(const std::string &content,
   static int counter = 0;
   path_str += std::to_string(counter++);
   FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
+  const std::string src_ = clux_with_printf_prelude(content);
+  fwrite(src_.data(), 1, src_.size(), fp);
   fclose(fp);
   return path_str;
 }

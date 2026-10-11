@@ -11,7 +11,7 @@ extern "C" {
 
 /**
  * value_dump_string: 将 value 以 `.type { value }` 形式（复杂类型递归包裹）
- * 追加到 out 字符串，用于调试输出（如 printf %v）。
+ * 追加到 out 字符串，用于调试输出（M6 前是 printf 的 %v，现为独立工具）。
  *
  * - 基础类型输出值；bool → true/false；str → 带双引号字符串（`"hello"`）。
  * - 数组递归每个元素（`. [3]i32 { .i32{1}, .i32{2}, .i32{3} }`）。

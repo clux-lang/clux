@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -22,7 +22,8 @@ std::string write_temp_file(const std::string &content) {
   static int counter = 0;
   path_str += std::to_string(counter++);
   FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
+  const std::string src_ = clux_with_printf_prelude(content);
+  fwrite(src_.data(), 1, src_.size(), fp);
   fclose(fp);
   return path_str;
 }
@@ -148,7 +149,7 @@ TEST(Driver, RunFileLocalFuncSelfCaptureRecursion) {
       "  }\n"
       "  var r: i32 = fib(10);\n"
       "  if (r != 55) { return 1; }\n"
-      "  printf(\"ok\\n\");\n"
+      "  libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -166,7 +167,7 @@ TEST(Driver, RunFileLocalFuncSelfCaptureWithOuterVar) {
       "  }\n"
       "  var r: i32 = pow(4);\n"
       "  if (r != 16) { return 1; }\n"
-      "  printf(\"ok\\n\");\n"
+      "  libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -185,7 +186,7 @@ TEST(Driver, RunFileLocalFuncSiblingCapture) {
       "  }\n"
       "  var r: i32 = a(5);\n"
       "  if (r != 50) { return 1; }\n"
-      "  printf(\"ok\\n\");\n"
+      "  libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -205,7 +206,7 @@ TEST(Driver, RunFileLocalFuncValueRefBeforeDef) {
       "  }\n"
       "  var r: i32 = f(2);\n"
       "  if (r != 6) { return 1; }\n"
-      "  printf(\"ok\\n\");\n"
+      "  libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -226,7 +227,7 @@ TEST(Driver, RunFileLocalFuncSiblingCaptureBackwardWithCaptures) {
       "  }\n"
       "  var r: i32 = a(2);\n"
       "  if (r != 6) { return 1; }\n"
-      "  printf(\"ok\\n\");\n"
+      "  libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

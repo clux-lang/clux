@@ -39,54 +39,58 @@
 #include <string.h>
 
 /* 与 FFI 调用层同一上限（src/vm/ffi_lib.c 的 FFI_MAX_ARGS） */
-#define CFUNC_CLOSURE_MAX_ARGS 8u
+#define CFUNC_CLOSURE_MAX_ARGS 16u
 
 #ifdef CLUX_HAVE_LIBFFI
 
 /* 闭包 handler 的上下文：被包装的函数 + 签名。归调用它的 func_t 所有
-   （func_destroy 释放），因此 handler 生命周期内始终有效。 */
+   （func_destroy 释放），因此 handler 生命周期内始终有效。
+   `owned` 保存本层新建的 libffi 描述符（struct/cunion 的树）——libffi 的 cif
+   会持有描述符指针直到闭包销毁，所以必须活到那时，由 dispose 统一释放。 */
 typedef struct {
     vm_t          *vm;
     func_t        *fn;    /* 被包装的 clux 函数（归 vm->functions） */
     const type_t  *sig;   /* 签名类型（参数/返回类型来源） */
     size_t         argc;
+    void          *owned[CFUNC_CLOSURE_MAX_ARGS + 1];
+    size_t         owned_count;
 } cfunc_ctx_t;
+
+static void cfunc_ctx_dispose(void *self, allocator_t *allocator) {
+    (void)allocator;
+    cfunc_ctx_t *ctx = (cfunc_ctx_t *)self;
+    for (size_t i = 0; i < ctx->owned_count; i++)
+        ffi_type_release(ctx->owned[i]);
+    ctx->owned_count = 0;
+}
 
 static class_t g_cfunc_ctx_class = {
     .name       = "clux.ffi.cfunc_ctx",
     .size       = sizeof(cfunc_ctx_t),
     .clone_fn   = NULL,
     .move_fn    = NULL,
-    .dispose_fn = NULL,
+    .dispose_fn = cfunc_ctx_dispose,
 };
 
-/* ---- clux 类型 → libffi 类型描述符（Phase 5 可编组子集）----
+/* ---- clux 类型 → libffi 类型描述符 ----
  *
- * 先过 §2 谓词（C ABI 约束），再限定到**本层能编组**的类型：整数/bool/浮点/
- * opaque。§2 允许但本层尚未编组的（str、enum、struct、cunion、own/ref/fatal/
- * share 指针）给出明确原因，而不是猜着传参。返回 NULL 时 *why 填原因。 */
-static const ffi_type *cfunc_ffi_type(vm_t *vm, const type_t *t,
-                                      const char **why) {
+ * 直接复用调用层同一张映射（`ffi_type_for`）：标量/str/enum/指针 → 静态描述符；
+ * struct/cunion → 新建描述符树（`*owned` 置 true，由 ctx 接管并在销毁时释放）。
+ * §2 之外的类型仍给明确原因（option/切片/元组/闭包…）。
+ *
+ * **C → clux 的编组无需分类**：clux 的 value->data 与 C 同构，handler 直接按
+ * 参数类型的 size 拷贝 libffi 给的实参指针即可（结构体就是那块 C 布局字节）。 */
+static const void *cfunc_ffi_type(vm_t *vm, const type_t *t, bool *owned,
+                                  const char **why) {
     const char *rej = ffi_c_abi_reject_reason(t);
     if (rej) {
         *why = rej;
         return NULL;
     }
-    if (t == vm->type_i8)     return &ffi_type_sint8;
-    if (t == vm->type_i16)    return &ffi_type_sint16;
-    if (t == vm->type_i32)    return &ffi_type_sint32;
-    if (t == vm->type_i64)    return &ffi_type_sint64;
-    if (t == vm->type_u8)     return &ffi_type_uint8;
-    if (t == vm->type_u16)    return &ffi_type_uint16;
-    if (t == vm->type_u32)    return &ffi_type_uint32;
-    if (t == vm->type_u64)    return &ffi_type_uint64;
-    if (t == vm->type_bool)   return &ffi_type_uint8;
-    if (t == vm->type_f32)    return &ffi_type_float;
-    if (t == vm->type_f64)    return &ffi_type_double;
-    if (t == vm->type_opaque) return &ffi_type_pointer;
-    *why = "C-ABI compatible but not marshalable across a closure yet "
-           "(supported: integers/bool/f32/f64/opaque)";
-    return NULL;
+    char err[256] = {0};
+    const void *ft = ffi_type_for(t, vm, owned, err, sizeof(err));
+    if (!ft) *why = err[0] ? "type cannot be marshalled across a closure" : "";
+    return ft;
 }
 
 /* ---- C → clux：把 C 实参编组成 clux 值 ----
@@ -175,31 +179,8 @@ static value_t *builtin_cfunc_ptr_cfunc(vm_t *vm, func_t *self, size_t argc,
     char msg[512];
     const char *why = NULL;
     void *argtypes[CFUNC_CLOSURE_MAX_ARGS];
-    for (size_t i = 0; i < n; i++) {
-        const type_t *pt = func_type_param(sig, i);
-        if (pt == vm->type_void) {
-            snprintf(msg, sizeof(msg),
-                     "cfunc_ptr: parameter %zu is void", i + 1);
-            return value_make_error(vm, msg);
-        }
-        const ffi_type *ft = cfunc_ffi_type(vm, pt, &why);
-        if (!ft) {
-            snprintf(msg, sizeof(msg), "cfunc_ptr: parameter %zu: %s", i + 1, why);
-            return value_make_error(vm, msg);
-        }
-        argtypes[i] = (void *)ft;
-    }
-    const type_t *rt = func_type_return(sig);
-    void *rtype = (void *)&ffi_type_void;
-    if (rt && rt != vm->type_void) {
-        const ffi_type *ft = cfunc_ffi_type(vm, rt, &why);
-        if (!ft) {
-            snprintf(msg, sizeof(msg), "cfunc_ptr: return type: %s", why);
-            return value_make_error(vm, msg);
-        }
-        rtype = (void *)ft;
-    }
-
+    /* 先攒 ctx（新建描述符的所有权立刻转进去：中途失败也能靠 allocator_free
+       触发 dispose 释放，不会泄漏） */
     cfunc_ctx_t *ctx = (cfunc_ctx_t *)allocator_new(
         vm->alloc, &g_cfunc_ctx_class, 1);
     if (!ctx) return value_make_error(vm, "cfunc_ptr: out of memory");
@@ -207,6 +188,43 @@ static value_t *builtin_cfunc_ptr_cfunc(vm_t *vm, func_t *self, size_t argc,
     ctx->fn = fn;
     ctx->sig = sig;
     ctx->argc = n;
+    ctx->owned_count = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        const type_t *pt = func_type_param(sig, i);
+        if (pt == vm->type_void) {
+            allocator_free(vm->alloc, (void **)&ctx);
+            snprintf(msg, sizeof(msg),
+                     "cfunc_ptr: parameter %zu is void", i + 1);
+            return value_make_error(vm, msg);
+        }
+        bool owned = false;
+        const void *ft = cfunc_ffi_type(vm, pt, &owned, &why);
+        if (!ft) {
+            allocator_free(vm->alloc, (void **)&ctx);
+            snprintf(msg, sizeof(msg), "cfunc_ptr: parameter %zu: %s", i + 1,
+                     why && *why ? why : "type cannot cross the C ABI");
+            return value_make_error(vm, msg);
+        }
+        if (owned && ctx->owned_count <= CFUNC_CLOSURE_MAX_ARGS)
+            ctx->owned[ctx->owned_count++] = (void *)ft;
+        argtypes[i] = (void *)ft;
+    }
+    const type_t *rt = func_type_return(sig);
+    void *rtype = (void *)&ffi_type_void;
+    if (rt && rt != vm->type_void) {
+        bool owned = false;
+        const void *ft = cfunc_ffi_type(vm, rt, &owned, &why);
+        if (!ft) {
+            allocator_free(vm->alloc, (void **)&ctx);
+            snprintf(msg, sizeof(msg), "cfunc_ptr: return type: %s",
+                     why && *why ? why : "type cannot cross the C ABI");
+            return value_make_error(vm, msg);
+        }
+        if (owned && ctx->owned_count <= CFUNC_CLOSURE_MAX_ARGS)
+            ctx->owned[ctx->owned_count++] = (void *)ft;
+        rtype = (void *)ft;
+    }
 
     char err[512] = {0};
     void *handle = NULL, *code = NULL;

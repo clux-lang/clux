@@ -13,6 +13,7 @@
  *
  * 编译为 SHARED（Windows: .dll / POSIX: .so），不需要额外依赖。
  */
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -39,3 +40,94 @@ CLUX_TESTDATA_EXPORT bool     td_bool = true;
 
 /* 指针：指向本库里的另一个导出变量（非空、稳定），用于 opaque 的指针宽度读写 */
 CLUX_TESTDATA_EXPORT void    *td_ptr = (void *)&td_i32;
+
+/* ============================================================================
+ * struct / cunion / enum / char* —— M6 §14.20 的被测目标
+ *
+ * clux 的 struct 布局就是 C 布局（编译器保证平凡同构），因此两侧同名结构体
+ * 可以逐字节对应。这里覆盖 x64 的三种传参/返回类别：
+ *   - 8 字节（整数寄存器）
+ *   - 16 字节全 double（XMM）
+ *   - 24 字节（内存传递 / 隐藏指针返回）
+ * ==========================================================================*/
+
+typedef struct { int32_t x; int32_t y; } CluxPoint;        /* 8B, INTEGER */
+typedef struct { double x; double y; }   CluxDPoint;       /* 16B, SSE */
+typedef struct { int32_t a; int64_t b; double c; } CluxBig; /* 24B, MEMORY */
+
+typedef enum { CLUX_COLOR_RED = 1, CLUX_COLOR_GREEN = 2 } CluxColor;
+
+/* 按值收 struct，返回标量 */
+CLUX_TESTDATA_EXPORT int32_t clux_point_sum(CluxPoint p) { return p.x + p.y; }
+CLUX_TESTDATA_EXPORT double  clux_dpoint_sum(CluxDPoint p) { return p.x + p.y; }
+CLUX_TESTDATA_EXPORT int64_t clux_big_sum(CluxBig v) {
+    return (int64_t)v.a + v.b + (int64_t)v.c;
+}
+
+/* 按值返回 struct（8B 走 RAX、16B SSE 走 XMM0/1、24B 走隐藏指针） */
+CLUX_TESTDATA_EXPORT CluxPoint clux_point_make(int32_t x, int32_t y) {
+    CluxPoint p = { x, y };
+    return p;
+}
+CLUX_TESTDATA_EXPORT CluxDPoint clux_dpoint_make(double x, double y) {
+    CluxDPoint p = { x, y };
+    return p;
+}
+CLUX_TESTDATA_EXPORT CluxBig clux_big_make(int32_t a, int64_t b, double c) {
+    CluxBig v = { a, b, c };
+    return v;
+}
+
+/* struct 数据符号（extern var 读/写整块） */
+CLUX_TESTDATA_EXPORT CluxPoint td_point = { 3, 4 };
+
+/* enum（C 里就是整数）：参数/返回/数据符号 */
+CLUX_TESTDATA_EXPORT CluxColor clux_color_next(CluxColor c) {
+    return c == CLUX_COLOR_RED ? CLUX_COLOR_GREEN : CLUX_COLOR_RED;
+}
+CLUX_TESTDATA_EXPORT CluxColor td_color = CLUX_COLOR_GREEN;
+
+/* char* 返回（clux 侧声明为 str） */
+CLUX_TESTDATA_EXPORT const char *clux_greeting(void) { return "hello from testdata"; }
+
+/* 回调：把 struct 按值传给 clux 函数，并把它的 struct 返回值按值返回 */
+typedef CluxPoint (*clux_point_cb)(CluxPoint);
+CLUX_TESTDATA_EXPORT int32_t clux_call_point_cb(clux_point_cb cb, int32_t x,
+                                                int32_t y) {
+    CluxPoint in = { x, y };
+    CluxPoint out = cb(in);
+    return out.x * 100 + out.y;
+}
+
+/* 嵌套结构体（描述符递归构造的被测目标） */
+typedef struct { CluxPoint p; int32_t z; } CluxNested;
+CLUX_TESTDATA_EXPORT int32_t clux_nested_sum(CluxNested v) {
+    return v.p.x + v.p.y + v.z;
+}
+CLUX_TESTDATA_EXPORT CluxNested clux_nested_make(int32_t x, int32_t y,
+                                                 int32_t z) {
+    CluxNested v;
+    v.p.x = x;
+    v.p.y = y;
+    v.z = z;
+    return v;
+}
+
+/* 指向结构体的指针（"传指针"路线：sema 侧要能解析 ref *P） */
+CLUX_TESTDATA_EXPORT int32_t clux_point_ptr_sum(const CluxPoint *p) {
+    return p ? p->x + p->y : -1;
+}
+
+/* 变参里的结构体（C 对聚合类型不做默认提升） */
+#include <stdarg.h>
+CLUX_TESTDATA_EXPORT int32_t clux_point_va_sum(int32_t n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int32_t sum = 0;
+    for (int32_t i = 0; i < n; i++) {
+        CluxPoint p = va_arg(ap, CluxPoint);
+        sum += p.x + p.y;
+    }
+    va_end(ap);
+    return sum;
+}

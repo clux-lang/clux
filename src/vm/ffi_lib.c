@@ -2,9 +2,13 @@
 #include "vm/module.h"
 #include "vm/vm.h"     /* vm_t 内建类型单例（数据符号的类型码编解码） */
 #include "vm/bcode.h"  /* BCODE_FFI_DATA_*（EXTERN_LOAD/STORE 的类型码） */
+#include "vm/type_struct.h"  /* 结构体字段表（构造 libffi struct 描述符） */
+#include "vm/type_cunion.h"  /* cunion 成员/布局（同上） */
+#include "vm/type_enum.h"    /* enum 底层类型（描述符 = 底层整数） */
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>   /* malloc/free：libffi 描述符树（同闭包 box 的约定） */
 #include <string.h>
 
 #ifdef _WIN32
@@ -256,7 +260,7 @@ const char *ffi_lib_path(const ffi_lib_t *lib) {
  * 都由 libffi 决定传递方式；回调（Phase 5）将用 `ffi_closure`。
  * 未接 libffi 的构建回退到"最小 ABI 层"（整数/指针，按参数个数分派强转）。
  */
-#define FFI_MAX_ARGS 8
+#define FFI_MAX_ARGS 16
 typedef int64_t (*ffi_fn0)(void);
 typedef int64_t (*ffi_fn1)(int64_t);
 typedef int64_t (*ffi_fn2)(int64_t, int64_t);
@@ -327,6 +331,54 @@ bool ffi_call_typed(void *sym, size_t argc, const struct _ffi_type **arg_types,
     ffi_set_err(err, ecap,
                 "ffi: typed calls (float/struct) require the libffi call path; "
                 "this build has no libffi (CLUX_HAVE_LIBFFI)");
+    return false;
+#endif
+}
+
+/* 定参 / 变参统一入口：`nfixed == argc` 走 ffi_prep_cif，`nfixed < argc` 走
+ * ffi_prep_cif_var（C 的 `...`）。变参部分的**提升**由调用方完成——只有它知道
+ * 哪些位置是变参（见 ffi_lib.h）。 */
+bool ffi_call_typed_items(void *sym, size_t nfixed, size_t argc,
+                          const void *const *arg_types, const void *ret_type,
+                          void **arg_values, void *ret_value, char *err,
+                          size_t ecap) {
+    if (!sym) {
+        ffi_set_err(err, ecap, "ffi: cannot call a null symbol");
+        return false;
+    }
+    if (nfixed > argc) {
+        ffi_set_err(err, ecap, "ffi: fixed argument count exceeds total");
+        return false;
+    }
+#if defined(CLUX_HAVE_LIBFFI)
+    /* ret_type == NULL 表示 void：libffi **要求**非空返回描述符（会直接解引用，
+       传 NULL 会崩），所以这里补上 ffi_type_void。 */
+    if (!ret_type) ret_type = &ffi_type_void;
+    ffi_cif cif;
+    ffi_status st;
+    if (nfixed == argc) {
+        st = ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argc,
+                          (ffi_type *)ret_type, (ffi_type **)arg_types);
+    } else {
+        /* 变参：libffi 需要"固定参数个数 + 总个数"以决定寄存器/栈的铺法
+           （x64 变参还要按需把寄存器参数复制进 shadow store）。 */
+        st = ffi_prep_cif_var(&cif, FFI_DEFAULT_ABI, (unsigned int)nfixed,
+                              (unsigned int)argc, (ffi_type *)ret_type,
+                              (ffi_type **)arg_types);
+    }
+    if (st != FFI_OK) {
+        ffi_set_err(err, ecap, "ffi: ffi_prep_cif%s failed (status=%d)",
+                    nfixed == argc ? "" : "_var", (int)st);
+        return false;
+    }
+    ffi_call(&cif, FFI_FN(sym), ret_value, arg_values);
+    return true;
+#else
+    (void)nfixed; (void)argc; (void)arg_types; (void)ret_type; (void)arg_values;
+    (void)ret_value;
+    ffi_set_err(err, ecap,
+                "ffi: typed calls require the libffi call path; this build has "
+                "no libffi (CLUX_HAVE_LIBFFI)");
     return false;
 #endif
 }
@@ -432,6 +484,9 @@ bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind
     if (t == v->type_f64) { *out_kind = BCODE_FFI_DATA_F64; return true; }
     if (t == v->type_bool) { *out_kind = BCODE_FFI_DATA_BOOL; return true; }
     if (t == v->type_opaque) { *out_kind = BCODE_FFI_DATA_PTR; return true; }
+    /* `str` 在 C 里就是 `char *`：库里的 char* 全局可以按 str 读/写
+       （value->data 存的就是那个指针，与 C 同构） */
+    if (t == v->type_str) { *out_kind = BCODE_FFI_DATA_STR; return true; }
     return false;
 }
 
@@ -456,8 +511,173 @@ const type_t *ffi_data_type_of(const struct vm_t *vm, uint32_t kind,
     case BCODE_FFI_DATA_PTR:
         if (out_size) *out_size = sizeof(void *);
         return v->type_opaque;
+    case BCODE_FFI_DATA_STR:
+        if (out_size) *out_size = sizeof(char *);
+        return v->type_str;
     default: return NULL;
     }
+}
+
+/* 码 → libffi 描述符：clux 标量与 C 的 1:1 映射（`bool` 就是 1 字节 _Bool）。
+ * 与上面的编/解码表同源，新增类型时三处一起看。 */
+const void *ffi_data_ffi_type(uint32_t kind) {
+#if defined(CLUX_HAVE_LIBFFI)
+    switch (kind) {
+    case BCODE_FFI_DATA_I8:  return &ffi_type_sint8;
+    case BCODE_FFI_DATA_I16: return &ffi_type_sint16;
+    case BCODE_FFI_DATA_I32: return &ffi_type_sint32;
+    case BCODE_FFI_DATA_I64: return &ffi_type_sint64;
+    case BCODE_FFI_DATA_U8:  return &ffi_type_uint8;
+    case BCODE_FFI_DATA_U16: return &ffi_type_uint16;
+    case BCODE_FFI_DATA_U32: return &ffi_type_uint32;
+    case BCODE_FFI_DATA_U64: return &ffi_type_uint64;
+    case BCODE_FFI_DATA_F32: return &ffi_type_float;
+    case BCODE_FFI_DATA_F64: return &ffi_type_double;
+    case BCODE_FFI_DATA_BOOL: return &ffi_type_uint8;
+    case BCODE_FFI_DATA_PTR: return &ffi_type_pointer;
+    case BCODE_FFI_DATA_STR: return &ffi_type_pointer;
+    default: return NULL;
+    }
+#else
+    (void)kind;
+    return NULL;
+#endif
+}
+
+/* 该类型作数据符号时是否**必须**把类型随指令落盘（宽度/布局要查类型表）。 */
+bool ffi_data_kind_needs_type(const type_t *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+    case TYPE_KIND_CUNION:
+    case TYPE_KIND_ENUM:
+        return true;
+    default:
+        return false;
+    }
+}
+
+#if defined(CLUX_HAVE_LIBFFI)
+/* 新造一个 ffi_type（elements 以 NULL 结尾）。 */
+static ffi_type *ffi_type_new_struct(ffi_type **elems) {
+    ffi_type *st = (ffi_type *)malloc(sizeof(ffi_type));
+    if (!st) {
+        free(elems);
+        return NULL;
+    }
+    st->size = 0;          /* libffi 在 ffi_prep_cif 里算 */
+    st->alignment = 0;
+    st->type = FFI_TYPE_STRUCT;
+    st->elements = elems;
+    return st;
+}
+#endif
+
+const void *ffi_type_for(const type_t *t, const struct vm_t *vm, bool *out_owned,
+                         char *err, size_t ecap) {
+    if (out_owned) *out_owned = false;
+    if (!t) {
+        ffi_set_err(err, ecap, "ffi: missing type");
+        return NULL;
+    }
+    /* 标量（含 str → 指针）：libffi 静态描述符，无需释放 */
+    uint32_t dk = 0;
+    if (vm && ffi_data_kind_of(t, vm, &dk)) return ffi_data_ffi_type(dk);
+    switch (t->kind) {
+    case TYPE_KIND_PTR_OWN:
+    case TYPE_KIND_PTR_REF:
+    case TYPE_KIND_PTR_FATAL:
+    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR_WEAK:
+        return ffi_data_ffi_type(BCODE_FFI_DATA_PTR);
+    case TYPE_KIND_ENUM: {
+        const type_t *u = enum_type_underlying(t);
+        /* 底层类型一定是内建整数 → 递归一次即可 */
+        return ffi_type_for(u, vm, out_owned, err, ecap);
+    }
+#if defined(CLUX_HAVE_LIBFFI)
+    case TYPE_KIND_STRUCT: {
+        size_t n = struct_type_field_count(t);
+        ffi_type **elems = (ffi_type **)malloc((n + 1) * sizeof(ffi_type *));
+        if (!elems) {
+            ffi_set_err(err, ecap, "ffi: out of memory (struct descriptor)");
+            return NULL;
+        }
+        for (size_t i = 0; i < n; i++) {
+            const struct_field_t *f = struct_type_field(t, i);
+            bool child_owned = false;
+            const void *child =
+                f ? ffi_type_for(f->type, vm, &child_owned, err, ecap) : NULL;
+            if (!child) {
+                /* 递归失败：清掉已建的子描述符 */
+                for (size_t k = 0; k < i; k++)
+                    ffi_type_release(elems[k]);
+                free(elems);
+                return NULL;
+            }
+            elems[i] = (ffi_type *)child;
+        }
+        elems[n] = NULL;
+        ffi_type *st = ffi_type_new_struct(elems);
+        if (!st) {
+            for (size_t k = 0; k < n; k++) ffi_type_release(elems[k]);
+            free(elems);
+            ffi_set_err(err, ecap, "ffi: out of memory (struct descriptor)");
+            return NULL;
+        }
+        if (out_owned) *out_owned = true;
+        return st;
+    }
+    case TYPE_KIND_CUNION: {
+        /* libffi 没有 union：建模成 k = size/align 个 align 宽度的整数成员。
+           union 的 size 必是 align 的整数倍（size = align_up(max member, align)），
+           因此这样建出来的 struct size/align 与真 union 完全一致，ABI 分类相同。 */
+        size_t align = t->align ? t->align : 1;
+        size_t k = (t->size + align - 1) / align;
+        if (k == 0) k = 1;
+        const void *member = NULL;
+        switch (align) {
+        case 1: member = &ffi_type_sint8; break;
+        case 2: member = &ffi_type_sint16; break;
+        case 4: member = &ffi_type_sint32; break;
+        default: member = &ffi_type_sint64; break;
+        }
+        ffi_type **elems = (ffi_type **)malloc((k + 1) * sizeof(ffi_type *));
+        if (!elems) {
+            ffi_set_err(err, ecap, "ffi: out of memory (cunion descriptor)");
+            return NULL;
+        }
+        for (size_t i = 0; i < k; i++) elems[i] = (ffi_type *)member;
+        elems[k] = NULL;
+        ffi_type *st = ffi_type_new_struct(elems);
+        if (!st) {
+            free(elems);
+            ffi_set_err(err, ecap, "ffi: out of memory (cunion descriptor)");
+            return NULL;
+        }
+        if (out_owned) *out_owned = true;
+        return st;
+    }
+#endif
+    default:
+        ffi_set_err(err, ecap, "ffi: type cannot cross the C ABI (%s)",
+                    t->name.ptr ? t->name.ptr : "?");
+        return NULL;
+    }
+}
+
+void ffi_type_release(const void *desc) {
+#if defined(CLUX_HAVE_LIBFFI)
+    if (!desc) return;
+    const ffi_type *st = (const ffi_type *)desc;
+    /* 只释放"新建"的 STRUCT 描述符（静态标量描述符的元素表为 NULL/非本函数分配） */
+    if (st->type != FFI_TYPE_STRUCT || !st->elements) return;
+    for (size_t i = 0; st->elements[i]; i++) ffi_type_release(st->elements[i]);
+    free((void *)st->elements);
+    free((void *)st);
+#else
+    (void)desc;
+#endif
 }
 
 /* ---- 闭包（Phase 5 回调基础设施）----

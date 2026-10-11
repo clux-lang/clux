@@ -11,6 +11,8 @@
 //            （规范路径作为 key）。
 //   循环依赖  编译期检测并报错（依赖链打印）。
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 import math from "./lib/math";
 import api from "./lib/api";
 
@@ -29,6 +31,6 @@ func main(): i32 {
     // ---- 同一模块被两处导入（直接 + 经代理）→ 同一实例 ----
     if (api::add(0, 0) != math::add(0, 0)) { return 6; }
 
-    printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
+    libc::printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
     return 0;
 }

@@ -480,13 +480,29 @@ return;
 
 ## 5. 内建函数
 
-### printf
+### printf（M6 起不再是内建）
 
-```
-printf(format, ...);
+M1 曾把 C 的 printf 硬编码成内建函数（还额外提供 `%v`"打印任意值"的扩展）。
+**M6 起整体删除**：printf 就是 libc 里的普通函数，由源码用 FFI 声明后调用
+（走 `BCODE_EXTERN_CALL` → libffi 精确类型调用；定参与 C 变参都支持）：
+
+```c
+extern lib "*" as libc;                    // "*" = 当前进程自身（已链接进来的库）
+extern func libc::printf(format: str, ...): void;
+
+func main(): i32 {
+    libc::printf("x = %d, s = %s, f = %.2f\n", 42, "hi", 1.5);
+    return 0;
+}
 ```
 
-M1 阶段硬编码绑定 C 的 printf，支持 %d, %f, %s, %c 等格式符。
+- **返回值**：C 的 `printf` 返回写入字符数；只用它做输出时声明成 `void` 即可
+  （clux 的表达式语句不允许丢弃非 void 结果，声明成 `i32` 就得写 `_ = libc::printf(...)`）。
+- **格式符**：C 的**原生**语义（`%d %u %x %o %c %s %f %e %g %p %%`，含宽度/精度）。
+  原先内建版的 `%v` 扩展**不存在了**——聚合值请逐个成员打印。
+- 别名别用 `c`：`::` 左侧先按作用域解析，**局部变量会遮蔽库别名**
+  （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
+- 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
 ## 6. 语义规则
 

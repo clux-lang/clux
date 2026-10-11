@@ -24,7 +24,8 @@
 #include "core/vec.h"
 
 #include <string.h>
-#include <stdio.h> /* snprintf */
+#include <stdio.h>  /* snprintf */
+#include <stdlib.h> /* malloc/free：FFI 返回槽（struct 返回可能大于 16 字节） */
 
 /* ================================================================ */
 /* 操作数栈（借用引用，归 scope 管理生命周期）                         */
@@ -1691,7 +1692,7 @@ static value_t *op_pop_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * 浮点走 BCODE_FFI_RET_F64 + 全 double 实参（见 docs/m6-design.md §14.5 的
  * ffi_call_f64；本仓库 Windows x64 的 libffi 汇编路径不可用，故按类型分派）。
  */
-#define FFI_MAX_ARGS 8
+#define FFI_MAX_ARGS 16
 
 /* M6 FFI 共用：拆 "lib::name" → 当前模块库表查句柄 → ffi_lib_sym 解析符号。
  * 成功返回 NULL 并写 *out_sym；失败返回 error value（文案含别名/符号名与 OS 文本）。
@@ -1746,36 +1747,56 @@ static const type_t *ffi_data_type(vm_t *vm, uint32_t kind, size_t *size) {
 
 /* EXTERN_LOAD <STR "lib::name"> <U32 kind>：读**数据符号**（extern var 的读取）。
  * 地址来自 dlsym（数据符号的"符号地址"就是变量地址），按 kind 读 size 字节 →
- * 压对应内建类型的值。值是新分配的副本，与库内存储解耦（写回需 EXTERN_STORE）。 */
+ * 压对应类型的值。值是新分配的副本，与库内存储解耦（写回需 EXTERN_STORE）。
+ *
+ * kind = BCODE_FFI_DATA_TYPED 时，指令前有一个**类型值**（compiler 压入）：
+ * 宽度/布局查该类型（struct/cunion/enum），size = 类型的 size。 */
 static value_t *op_extern_load(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t qual = bcode_read_str(bc, pc);
     uint32_t kind = bcode_read_u32(bc, pc);
 
     size_t size = 0;
-    const type_t *t = ffi_data_type(vm, kind, &size);
-    if (!t || size == 0 || size > 8)
-        return value_make_error(vm, "exec: extern load: bad data type code");
+    const type_t *t = NULL;
+    if (kind == BCODE_FFI_DATA_TYPED) {
+        value_t *tv = exec_stack_pop(vm);
+        if (tv && value_type(tv) == vm->type_type)
+            t = value_as(tv, const type_t *);
+        if (!t) return value_make_error(vm, "exec: extern load: missing type slot");
+        size = t->size;
+    } else {
+        t = ffi_data_type(vm, kind, &size);
+        if (!t || size == 0 || size > 8)
+            return value_make_error(vm, "exec: extern load: bad data type code");
+    }
 
     void *sym = NULL;
     value_t *err = ffi_resolve_symbol(vm, bc, qual, "extern load", &sym);
     if (err) return err;
 
-    uint8_t buf[8] = {0};
-    memcpy(buf, sym, size);
-    return value_make(vm, t, value_alloc_data_copy(vm->alloc, t, buf));
+    if (size <= 8) {
+        uint8_t buf[8] = {0};
+        memcpy(buf, sym, size);
+        return value_make(vm, t, value_alloc_data_copy(vm->alloc, t, buf));
+    }
+    /* 大对象（struct）：直接按类型的 size 复制（值块与 C 布局同构） */
+    return value_make(vm, t, value_alloc_data_copy(vm->alloc, t, sym));
 }
 
 /* EXTERN_STORE <STR "lib::name"> <U32 kind>：写**数据符号**（extern var 的写入）。
  * 弹栈顶值 → 按 kind 把 size 字节写进符号地址（不压回结果：赋值是语句）。
- * 先解析符号再弹值，符号找不到时操作数栈保持原样。 */
+ * 先解析符号再弹值，符号找不到时操作数栈保持原样。
+ * TYPED 时栈布局是 [type, value]（类型在值之下）。 */
 static value_t *op_extern_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t qual = bcode_read_str(bc, pc);
     uint32_t kind = bcode_read_u32(bc, pc);
 
     size_t size = 0;
-    const type_t *t = ffi_data_type(vm, kind, &size);
-    if (!t || size == 0 || size > 8)
-        return value_make_error(vm, "exec: extern store: bad data type code");
+    const type_t *t = NULL;
+    if (kind != BCODE_FFI_DATA_TYPED) {
+        t = ffi_data_type(vm, kind, &size);
+        if (!t || size == 0 || size > 8)
+            return value_make_error(vm, "exec: extern store: bad data type code");
+    }
 
     void *sym = NULL;
     value_t *err = ffi_resolve_symbol(vm, bc, qual, "extern store", &sym);
@@ -1783,6 +1804,13 @@ static value_t *op_extern_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
 
     value_t *v = exec_stack_pop(vm);
     if (value_is_error(vm, v)) return v;
+    if (kind == BCODE_FFI_DATA_TYPED) {
+        value_t *tv = exec_stack_pop(vm);
+        if (tv && value_type(tv) == vm->type_type)
+            t = value_as(tv, const type_t *);
+        if (!t) return value_make_error(vm, "exec: extern store: missing type slot");
+        size = t->size;
+    }
     if (!v || !value_data(v))
         return value_make_error(vm, "exec: extern store: bad value");
     /* 类型安全网：sema 已保证类型可赋；字节码层被改坏时按隐式转换兜底 */
@@ -1791,19 +1819,138 @@ static value_t *op_extern_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (value_is_error(vm, casted)) return casted;
         v = casted;
     }
-    uint8_t buf[8] = {0};
-    memcpy(buf, value_data(v), size);
-    memcpy(sym, buf, size);
+    if (size <= 8) {
+        uint8_t buf[8] = {0};
+        memcpy(buf, value_data(v), size);
+        memcpy(sym, buf, size);
+        return NULL;
+    }
+    memcpy(sym, value_data(v), size);
     return NULL;
+}
+
+/* BCODE_FFI_RET_*（返回类型码）→ BCODE_FFI_DATA_*（类型/描述符码）。
+   两套码描述的是同一批 clux 标量，只是用途不同。 */
+static uint32_t ffi_ret_to_data_kind(uint32_t rk) {
+    switch (rk) {
+    case BCODE_FFI_RET_I8:  return BCODE_FFI_DATA_I8;
+    case BCODE_FFI_RET_I16: return BCODE_FFI_DATA_I16;
+    case BCODE_FFI_RET_I32: return BCODE_FFI_DATA_I32;
+    case BCODE_FFI_RET_I64: return BCODE_FFI_DATA_I64;
+    case BCODE_FFI_RET_U8:  return BCODE_FFI_DATA_U8;
+    case BCODE_FFI_RET_U16: return BCODE_FFI_DATA_U16;
+    case BCODE_FFI_RET_U32: return BCODE_FFI_DATA_U32;
+    case BCODE_FFI_RET_U64: return BCODE_FFI_DATA_U64;
+    case BCODE_FFI_RET_F32: return BCODE_FFI_DATA_F32;
+    case BCODE_FFI_RET_F64: return BCODE_FFI_DATA_F64;
+    case BCODE_FFI_RET_BOOL: return BCODE_FFI_DATA_BOOL;
+    case BCODE_FFI_RET_PTR: return BCODE_FFI_DATA_PTR;
+    default: return (uint32_t)-1;
+    }
+}
+
+/* 实参 → (libffi 描述符, C 表示地址)。
+ *
+ * **clux 的 value->data 与 C 同构**（编译器保证平凡布局）：i32 的 data 就是一个
+ * `int32_t`、f64 就是一个 `double`、指针就是一个指针、struct 就是那块 C 布局的
+ * 字节……因此实参可以直接把 `value_data(v)` 交给 libffi（它按描述符读 size 字节）。
+ *   - `str` 与各种指针（own/ref/fatal/share/weak）、opaque 在 C ABI 里都是裸指针；
+ *   - `enum` 按其底层整数类型（data 就是那个整数）；
+ *   - **struct/cunion** 按值传：描述符按字段递归新建（`owned` 置 true，调用方
+ *     用完 `ffi_type_release`）；
+ *   - 切片是胖指针（ptr+len），**不是** C 可表达的单个值 → 拒绝。
+ * 返回 false = 该类型不可作 FFI 实参。 */
+static bool ffi_arg_desc(vm_t *vm, const value_t *v, const void **out_type,
+                         void **out_ptr, bool *out_owned, char *err,
+                         size_t ecap) {
+    const type_t *t = value_type(v);
+    if (out_owned) *out_owned = false;
+    if (!t || !value_data(v)) return false;
+    /* const/volatile 是同一份数据的限定视图：剥掉再判（描述符与底层类型一致） */
+    while (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE) {
+        const type_t *sub = (t->kind == TYPE_KIND_CONST)
+                                ? ((const const_type_t *)t)->sub
+                                : ((const volatile_type_t *)t)->sub;
+        if (!sub) break;
+        t = sub;
+    }
+    bool owned = false;
+    const void *desc = ffi_type_for(t, vm, &owned, err, ecap);
+    if (!desc) return false;
+    if (out_owned) *out_owned = owned;
+    *out_type = desc;
+    *out_ptr = value_data(v);
+    return true;
+}
+
+/* 变参位置的 **C 默认实参提升**：float → double、窄整型/bool → int。
+ * 提升后的值要放进调用方提供的 8 字节槽（libffi 按提升后的类型读取）。
+ * 返回 true 表示"已提升"（描述符与槽都写好）；false = 无需提升（原样传）。 */
+static bool ffi_promote_vararg(vm_t *vm, const value_t *v, const void **out_type,
+                               void **out_ptr, void *slot8) {
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return false;
+    while (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE) {
+        const type_t *sub = (t->kind == TYPE_KIND_CONST)
+                                ? ((const const_type_t *)t)->sub
+                                : ((const volatile_type_t *)t)->sub;
+        if (!sub) break;
+        t = sub;
+    }
+    if (t == vm->type_f32) {
+        double d = (double)*(const float *)value_data(v);
+        memcpy(slot8, &d, sizeof d);
+        *out_type = ffi_data_ffi_type(BCODE_FFI_DATA_F64);
+        *out_ptr = slot8;
+        return true;
+    }
+    const type_t *vt = t;
+    if (vt->kind == TYPE_KIND_ENUM) {
+        const type_t *u = enum_type_underlying(vt);
+        if (u) vt = u;
+    }
+    int promoted = 0;
+    if (vt == vm->type_i8)        promoted = (int)*(const int8_t *)value_data(v);
+    else if (vt == vm->type_i16)  promoted = (int)*(const int16_t *)value_data(v);
+    else if (vt == vm->type_bool) promoted = *(const bool *)value_data(v) ? 1 : 0;
+    else if (vt == vm->type_u8)   promoted = (int)*(const uint8_t *)value_data(v);
+    else if (vt == vm->type_u16)  promoted = (int)*(const uint16_t *)value_data(v);
+    else return false; /* 32/64 位整数与指针已是寄存器槽宽度，无需提升 */
+    memcpy(slot8, &promoted, sizeof promoted);
+    *out_type = ffi_data_ffi_type(BCODE_FFI_DATA_I32);
+    *out_ptr = slot8;
+    return true;
 }
 
 static value_t *op_extern_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t qual = bcode_read_str(bc, pc);
     uint32_t argc = bcode_read_u32(bc, pc);
-    uint32_t ret_kind = bcode_read_u32(bc, pc);
+    uint32_t packed = bcode_read_u32(bc, pc);
+    uint32_t ret_kind = BCODE_FFI_RET_UNPACK_KIND(packed);
+    bool variadic = BCODE_FFI_RET_UNPACK_VARIADIC(packed);
+    size_t nfixed = BCODE_FFI_RET_UNPACK_NFIXED(packed);
 
     if (argc > FFI_MAX_ARGS)
         return value_make_error(vm, "exec: extern call: too many arguments");
+    if (variadic && nfixed > argc) nfixed = argc; /* 旧产物/异常编码兜底 */
+
+    /* 返回类型：码 → clux 类型 + libffi 描述符（void 用 NULL 表示"无返回值"）。
+       STR → clux str（读回 char*）；TYPED → 类型值在栈上（见下）。 */
+    const type_t *rt = vm->type_void;
+    const void *rffi = NULL;
+    bool ret_owned = false;
+    if (ret_kind == BCODE_FFI_RET_STR) {
+        rt = vm->type_str;
+        rffi = ffi_data_ffi_type(BCODE_FFI_DATA_PTR);
+    } else if (ret_kind != BCODE_FFI_RET_VOID &&
+               ret_kind != BCODE_FFI_RET_TYPED) {
+        uint32_t rdk = ffi_ret_to_data_kind(ret_kind);
+        size_t rsize = 0;
+        rt = (rdk == (uint32_t)-1) ? NULL : ffi_data_type_of(vm, rdk, &rsize);
+        rffi = (rdk == (uint32_t)-1) ? NULL : ffi_data_ffi_type(rdk);
+        if (!rt || !rffi)
+            return value_make_error(vm, "exec: extern call: bad return type code");
+    }
 
     /* 拆 "lib::name" → 库表 → 符号地址（与 extern load/store 共用同一实现） */
     void *sym = NULL;
@@ -1811,121 +1958,104 @@ static value_t *op_extern_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (rerr) return rerr;
     char err[512] = {0};
 
-    /* F64 返回：v0 规则 = "F64 返回 ⇒ 全 double 签名"，走类型化调用层
-       ffi_call_f64（x64 下 double 走 XMM0-3、返回走 XMM0；本仓库 Windows x64 的
-       libffi 汇编路径不可用，见 docs/m6-design.md §14.4/§14.5）。
-       实参须已是浮点值（f32/f64），整数实参在此明确报错而不是猜着转换。 */
-    if (ret_kind == BCODE_FFI_RET_F64) {
-        if (argc > 4)
-            return value_make_error(
-                vm, "exec: extern call: f64 calls support at most 4 arguments");
-        double dargs[4];
-        for (size_t i = argc; i > 0; i--) {
-            value_t *a = exec_stack_pop(vm);
-            if (value_is_error(vm, a)) return a;
-            const type_t *at = value_type(a);
-            if (!at || !value_data(a))
-                return value_make_error(vm, "exec: extern call: bad f64 argument");
-            if (at == vm->type_f64) {
-                memcpy(&dargs[i - 1], value_data(a), sizeof(double));
-            } else if (at == vm->type_f32) {
-                float f = 0.0f;
-                memcpy(&f, value_data(a), sizeof(float));
-                dargs[i - 1] = (double)f;
-            } else {
-                return value_make_error(
-                    vm, "exec: extern call: f64 signature requires floating-point "
-                        "arguments (see docs/m6-design.md 14.5)");
-            }
-        }
-        double fout = 0.0;
-        if (!ffi_call_f64(sym, argc, dargs, &fout, err, sizeof(err)))
-            return value_make_error(vm, err);
-        return value_make(vm, vm->type_f64,
-                          value_alloc_data_copy(vm->alloc, vm->type_f64, &fout));
-    }
-
-    /* 弹实参（栈顶为最后一个实参）→ 按顺序装进 int64 数组 */
-    int64_t args[FFI_MAX_ARGS];
+    /* 弹实参（栈顶是最后一个实参）→ 逐个取 C 表示 + libffi 描述符。
+       定参直接借用 value->data（与 C 同构）；**变参位置**做 C 默认实参提升
+       （f32→double、窄整型→int），提升结果放在下面的槽里。 */
+    value_t *argv[FFI_MAX_ARGS];
+    const void *argtypes[FFI_MAX_ARGS];
+    void *argvals[FFI_MAX_ARGS];
+    bool argowned[FFI_MAX_ARGS];
+    uint8_t vararg_slots[FFI_MAX_ARGS][8];
     for (size_t i = argc; i > 0; i--) {
         value_t *a = exec_stack_pop(vm);
         if (value_is_error(vm, a)) return a;
-        int64_t raw = 0;
-        const type_t *at = value_type(a);
-        if (at && value_data(a) && at->size > 0 && at->size <= 8) {
-            memcpy(&raw, value_data(a), at->size);
+        argv[i - 1] = a;
+    }
+    memset(argowned, 0, sizeof(argowned));
+    for (size_t i = 0; i < argc; i++) {
+        const void *at_type = NULL;
+        void *at_ptr = NULL;
+        bool is_vararg = variadic && i >= nfixed;
+        if (is_vararg &&
+            ffi_promote_vararg(vm, argv[i], &at_type, &at_ptr, vararg_slots[i])) {
+            argtypes[i] = at_type;
+            argvals[i] = at_ptr;
+            continue;
         }
-        args[i - 1] = raw;
+        if (!ffi_arg_desc(vm, argv[i], &at_type, &at_ptr, &argowned[i], err,
+                          sizeof(err))) {
+            for (size_t k = 0; k < i; k++)
+                if (argowned[k]) ffi_type_release(argtypes[k]);
+            return value_make_error(
+                vm, "exec: extern call: argument type cannot cross the C ABI");
+        }
+        argtypes[i] = at_type;
+        argvals[i] = at_ptr;
     }
 
-    int64_t iout = 0;
-    double fout = 0.0;
-    if (!ffi_call_int(sym, argc, args, &iout, err, sizeof(err)))
+    /* TYPED 返回：类型值在实参**之下**（compiler 先压类型再压实参）→ 现在弹它，
+       并据此构造返回描述符（struct/cunion/enum/带类型的指针）。 */
+    uint8_t *retbuf = NULL;
+    if (ret_kind == BCODE_FFI_RET_TYPED) {
+        value_t *tv = exec_stack_pop(vm);
+        /* 类型值的数据就是 type_t 本身（与 op_construct 同一约定） */
+        if (tv && value_type(tv) == vm->type_type)
+            rt = value_as(tv, const type_t *);
+        if (!rt || rt == vm->type_void || rt == vm->type_type) {
+            for (size_t k = 0; k < argc; k++)
+                if (argowned[k]) ffi_type_release(argtypes[k]);
+            return value_make_error(
+                vm, "exec: extern call: missing type slot for typed return");
+        }
+        rffi = ffi_type_for(rt, vm, &ret_owned, err, sizeof(err));
+        if (!rffi) {
+            for (size_t k = 0; k < argc; k++)
+                if (argowned[k]) ffi_type_release(argtypes[k]);
+            return value_make_error(vm, err);
+        }
+    }
+
+    /* libffi 精确类型调用（定参走 ffi_prep_cif，变参走 ffi_prep_cif_var）。
+       返回槽：标量 16 字节足够；struct/cunion 按类型的 size 现分配。 */
+    uint8_t small_ret[16] = {0};
+    size_t ret_size = sizeof(small_ret);
+    if (ret_kind == BCODE_FFI_RET_TYPED && rt && rt->size > sizeof(small_ret)) {
+        retbuf = (uint8_t *)malloc(rt->size);
+        if (!retbuf) {
+            for (size_t k = 0; k < argc; k++)
+                if (argowned[k]) ffi_type_release(argtypes[k]);
+            if (ret_owned) ffi_type_release(rffi);
+            return value_make_error(vm, "exec: extern call: out of memory");
+        }
+        ret_size = rt->size;
+    } else {
+        retbuf = small_ret;
+    }
+    if (ret_size > sizeof(small_ret)) memset(retbuf, 0, ret_size);
+
+    bool ok = ffi_call_typed_items(sym, variadic ? nfixed : argc, argc, argtypes,
+                                   rffi, argvals,
+                                   ret_kind == BCODE_FFI_RET_VOID ? NULL : retbuf,
+                                   err, sizeof(err));
+    for (size_t k = 0; k < argc; k++)
+        if (argowned[k]) ffi_type_release(argtypes[k]);
+    if (ret_owned) ffi_type_release(rffi);
+    if (!ok) {
+        if (ret_size > sizeof(small_ret)) free(retbuf);
         return value_make_error(vm, err);
+    }
 
-    switch (ret_kind) {
-    case BCODE_FFI_RET_VOID:
-        return value_make_undefined(vm);
-    case BCODE_FFI_RET_I32: {
-        int32_t v = (int32_t)iout;
-        return value_make(vm, vm->type_i32,
-                          value_alloc_data_copy(vm->alloc, vm->type_i32, &v));
+    /* 返回值：retbuf 里是**该 C 类型的原生表示**，与 clux 类型的 data 同构
+       （str 是指针、struct 是那块 C 布局字节），因此直接按键值复制即可
+       （类型必须与源码声明一致，见 vm/bcode.h）。 */
+    value_t *out;
+    if (ret_kind == BCODE_FFI_RET_VOID) {
+        out = value_make_undefined(vm);
+    } else {
+        out = value_make(vm, rt, value_alloc_data_copy(vm->alloc, rt, retbuf));
     }
-    case BCODE_FFI_RET_F64:
-        /* 浮点返回值在 XMM0：需要类型化调用层（ffi_call_f64），见头文件 */
-        (void)fout;
-        return value_make_error(
-            vm, "exec: extern call: f64 return requires the typed call layer");
-    case BCODE_FFI_RET_PTR:
-        /* 指针/opaque 返回：压 **opaque 类型**的值（不是 i64）。否则
-           `var p: opaque = crt::malloc(n);` 会在运行期报
-           "implicit cast: not a widening conversion"（M6 §14.10 的例子）。 */
-        return value_make(vm, vm->type_opaque,
-                          value_alloc_data_copy(vm->alloc, vm->type_opaque,
-                                                  &iout));
-    /* 精确宽度/符号的整数返回（M6 §14.18）：整型/指针返回值都在 RAX，读法相同，
-       差别只在**造哪个 clux 类型的值**——必须与源码声明的返回类型一致，否则
-       使用点（比较/赋值）会撞上隐式转换。 */
-    case BCODE_FFI_RET_U32: {
-        uint32_t v = (uint32_t)iout;
-        return value_make(vm, vm->type_u32,
-                          value_alloc_data_copy(vm->alloc, vm->type_u32, &v));
-    }
-    case BCODE_FFI_RET_U64: {
-        uint64_t v = (uint64_t)iout;
-        return value_make(vm, vm->type_u64,
-                          value_alloc_data_copy(vm->alloc, vm->type_u64, &v));
-    }
-    case BCODE_FFI_RET_I8: {
-        int8_t v = (int8_t)iout;
-        return value_make(vm, vm->type_i8,
-                          value_alloc_data_copy(vm->alloc, vm->type_i8, &v));
-    }
-    case BCODE_FFI_RET_I16: {
-        int16_t v = (int16_t)iout;
-        return value_make(vm, vm->type_i16,
-                          value_alloc_data_copy(vm->alloc, vm->type_i16, &v));
-    }
-    case BCODE_FFI_RET_U8: {
-        uint8_t v = (uint8_t)iout;
-        return value_make(vm, vm->type_u8,
-                          value_alloc_data_copy(vm->alloc, vm->type_u8, &v));
-    }
-    case BCODE_FFI_RET_U16: {
-        uint16_t v = (uint16_t)iout;
-        return value_make(vm, vm->type_u16,
-                          value_alloc_data_copy(vm->alloc, vm->type_u16, &v));
-    }
-    case BCODE_FFI_RET_BOOL: {
-        bool v = (iout & 0xFF) != 0;
-        return value_make(vm, vm->type_bool,
-                          value_alloc_data_copy(vm->alloc, vm->type_bool, &v));
-    }
-    case BCODE_FFI_RET_I64:
-    default:
-        return value_make(vm, vm->type_i64,
-                          value_alloc_data_copy(vm->alloc, vm->type_i64, &iout));
-    }
+    if (ret_size > sizeof(small_ret)) free(retbuf);
+    return out;
 }
 
 static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {

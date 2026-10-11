@@ -221,10 +221,15 @@ fatal 在非空时拥有）。
 - `ret_kind`（返回类型码，`vm/bcode.h` 的 `BCODE_FFI_RET_*`）：`0` = void、
   `1` = i32、`2` = i64、`3` = 指针（opaque）、`4` = f64
   —— 以上 5 个是 v0 的原始编码（旧 `.cxb` 语义不变）；M6 补齐到**逐类型**：
-  `5` = u32、`6` = u64、`7` = i8、`8` = i16、`9` = u8、`10` = u16、`11` = bool。
+  `5` = u32、`6` = u64、`7` = i8、`8` = i16、`9` = u8、`10` = u16、`11` = bool、
+  `12` = f32、**`13` = str（char\*）**、**`14` = TYPED（按类型值返回）**。
   运行期按码造出**与源码声明一致的类型**（旧编码把 u64 返回造成 i64，使用点会在
-  比较/赋值时撞上隐式转换）。`f32` 返回未支持（浮点通路是全 double 签名），
-  sema 在声明处明确拒绝。
+  比较/赋值时撞上隐式转换）。
+  **高位打包变参信息**（不新增操作数，旧产物高位恒 0）：
+  `bit8` = 变参、`bits9..15` = 固定参数个数。
+  `BCODE_FFI_RET_TYPED` 用于 struct/cunion/enum 与带类型的指针：指令前由
+  compiler 用 `compile_type_expr` 压一个**类型值**（与 `CONSTRUCT` 同一机制），
+  运行期按该类型读返回内存并造值（程序自定义类型的宽度/布局查不了小整数码）。
 - **实参约定**：`ret_kind != 4` 时实参按 **int64 宽度**取出（整数符号/零扩展、指针原样）；
   `ret_kind == 4`（v0 规则：F64 返回 ⇒ 全 double 签名）时实参须为 f32/f64，整数实参明确报错而不猜着转换。
   sema 在**调用点**按同样口径校验数量与类型（整数族 ⇄ 整数族、指针 ⇄ 指针/切片/str、
@@ -239,13 +244,15 @@ fatal 在非空时拥有）。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `EXTERN_LOAD` | `STR`（`"lib::name"`）+ `U32`（kind） | 同一条库表/`ffi_lib_sym` 通路取**变量地址**（数据符号的符号地址就是变量地址）→ 按 `kind` 读 size 字节 → 压对应内建类型的值（+1）。 |
-| `EXTERN_STORE` | `STR`（`"lib::name"`）+ `U32`（kind） | 同路径取变量地址 → 弹栈顶值 → 按 `kind` 把 size 字节写进那块内存（**不压回**，−1）。符号解析失败时先于弹栈发生（操作数栈保持原样）。 |
+| `EXTERN_LOAD` | `STR`（`"lib::name"`）+ `U32`（kind） | 同一条库表/`ffi_lib_sym` 通路取**变量地址**（数据符号的符号地址就是变量地址）→ 按 `kind` 读 size 字节 → 压对应类型的值（+1）。`kind = 13`（TYPED）时**指令前有一个类型值**（compiler 压入），宽度按该类型的 size。 |
+| `EXTERN_STORE` | `STR`（`"lib::name"`）+ `U32`（kind） | 同路径取变量地址 → 弹栈顶值 → 按 `kind` 把 size 字节写进那块内存（**不压回**，−1）。`kind = 13`（TYPED）时栈布局是 `[type, value]`。符号解析失败时先于弹栈发生（操作数栈保持原样）。 |
 
 - `kind` 是"宽度 + 类别"码：`0`=i8 `1`=i16 `2`=i32 `3`=i64 `4`=u8 `5`=u16 `6`=u32
-  `7`=u64 `8`=f32 `9`=f64 `10`=opaque（指针宽度）`11`=bool。
+  `7`=u64 `8`=f32 `9`=f64 `10`=opaque（指针宽度）`11`=bool `12`=str（char\*）
+  `13`=TYPED（struct/cunion/enum：按类型值读写）。
   **必须与库里符号的真实类型一致**——读多/写多会踩到相邻符号，因此 sema 只放行
-  这张表里的类型（`ffi_data_kind_of` / `ffi_data_type_of` 成对实现，见 `vm/ffi_lib.c`）。
+  这张表里的类型 + TYPED 覆盖的聚合类型（`ffi_data_kind_of` / `ffi_data_type_of` /
+  `ffi_data_kind_needs_type` 同处实现，见 `vm/ffi_lib.c`）。
   `bool` 单独一码（宽度 1，但类型要还原成 `bool`，否则 `flag != true` 报类型不匹配）。
 - **来源**：`extern var <库>::<名>: T;` 的读取点与赋值点（`lib::name = v` / `op=`）。
   复合赋值展开为 `EXTERN_LOAD → 运算 → EXTERN_STORE`。
@@ -458,45 +465,58 @@ clux bc disasm <file.cxb>   [-o PATH]   # .cxb → .cxs 汇编文本
 
 ## 8. 示例
 
-`clux bc disasm` 的真实产物（源码 `var a = .[3]i32{1,2,3}; printf("%d\n", len(a));`）：
+`clux bc disasm` 的真实产物（源码：声明 libc 的 printf 后调用它，见 §14.19）：
+
+```c
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+func main(): void {
+    var a = .[3]i32{1,2,3};
+    libc::printf("%d\n", len(a));
+}
+```
 
 ```
-PUSH_FUNC_TYPE            ; ---- hoist pass 1：声明签名类型 ----
+externlib "*" as libc    ; ---- 容器指令行：本模块的 extern lib（M6，见 §5.3）----
+PUSH_FUNC_TYPE           ; ---- hoist pass 1：声明签名类型 ----
 DEFINE_TYPE 64
-PUSH_ARRAY                ; 声明数组类型
+PUSH_ARRAY               ; 声明数组类型
 DEFINE_TYPE 65
-LOAD_TYPE 64              ; ---- hoist pass 2：定义签名（返回 void = id 12）----
+LOAD_TYPE 64             ; ---- hoist pass 2：定义签名（返回 void = id 12）----
 LOAD_TYPE 12
 FUNC_TYPE_RETURN
 SEAL
-LOAD_TYPE 65              ; 定义数组类型（元素 i32 = id 2，长度 3）
+LOAD_TYPE 65             ; 定义数组类型（元素 i32 = id 2，长度 3）
 LOAD_TYPE 2
 DEFINE_BOUND 3
 SEAL
-LOAD_TYPE 64              ; ---- 函数注册段 ----
+LOAD_TYPE 64             ; ---- 函数注册段 ----
 PUSH_FUNCTION [L0]
 BIND_FUNC 64
 SET_FUNC_NAME "main"
 POP
-LOAD_FUNCTION 64
+LOAD_FUNCTION 0          ; 签名类型值（printf 声明：func(str, ...) -> void）
+PUSH_UNDEFINED
+DEFINE "printf"          ; 声明绑定进模块作用域（调用点由 sema 解析）
+LOAD_FUNCTION 65
 PUSH_UNDEFINED
 DEFINE "main"
-HALT                      ; 拦截，函数体在下方
-L0:                       ; ---- 函数体区 ----
+HALT                     ; 拦截，函数体在下方
+L0:                      ; ---- 函数体区 ----
 PUSH_SCOPE
-LOAD_TYPE 65              ; 压类型位，随后压 3 个成员值
+LOAD_TYPE 65             ; 压类型位，随后压 3 个成员值
 PUSH_I32 1
 PUSH_I32 2
 PUSH_I32 3
-CONSTRUCT 3               ; 值构造收尾 → [3]i32 数组
+CONSTRUCT 3              ; 值构造收尾 → [3]i32 数组
 PUSH_UNDEFINED
 DEFINE "a"
-PUSH "printf"             ; printf("%d\n", len(a))
-PUSH_STRING "%d\n"
-PUSH "len"                ; len 是内建函数（非 LENGTH 指令）
+PUSH_STRING "%d\n"       ; 实参 1：格式串
+PUSH "len"               ; 实参 2：len(a)（len 是内建，走 CALL）
 PUSH "a"
 CALL 1
-CALL 2
+EXTERN_CALL "libc::printf" 2 65792
+                         ; ↑ STR 限定名 + U32 argc=2 + U32 打包(返回 void | 变参 | nfixed=1)
 POP
 POP_SCOPE
 PUSH_UNDEFINED

@@ -767,6 +767,130 @@ static void pass0_imports(sema_t *sema, ast_program_t *prog) {
  * Pass 1/2：函数名收集 + 类型解析（func_t 签名）
  * =========================================================================== */
 
+/* 解析 + 校验 + 注册一个 extern cfunc 声明。
+ * 返回 false = 有类型还没激活（程序类型未就绪）——`report=false` 时静默返回、
+ * 交给 `pass1c_extern_abi` 处理。`report=true` 时才产出诊断（避免同一错误两次）。 */
+static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
+  const type_t *ptypes[64];
+  size_t pn = 0;
+  bool resolved = true;
+  for (ast_node_t *p = efd->params; p && pn < 64; p = p->next) {
+    ast_var_def_t *pvd = (ast_var_def_t *)p;
+    const type_t *pt = sema_resolve_type_slot(sema, &pvd->type_expr);
+    if (!pt) {
+      resolved = false;
+      ptypes[pn++] = NULL;
+      continue;
+    }
+    const char *why = ffi_c_abi_reject_reason(pt);
+    if (!why && pt->kind == TYPE_KIND_VOID)
+      why = "void is not a valid parameter type";
+    if (why && report) {
+      diag_error(sema->diag, sema_loc(sema, p),
+                 "extern cfunc %.*s::%.*s: parameter '%.*s': %s",
+                 (int)efd->lib_name.len, efd->lib_name.ptr,
+                 (int)efd->name.len, efd->name.ptr,
+                 (int)pvd->name.len, pvd->name.ptr, why);
+    }
+    ptypes[pn++] = pt;
+  }
+  const type_t *rt = sema->vm->type_void;
+  if (efd->return_expr) {
+    rt = sema_resolve_type_slot(sema, &efd->return_expr);
+    if (!rt) {
+      resolved = false;
+    } else if (report) {
+      const char *rwhy = ffi_c_abi_reject_reason(rt);
+      if (rwhy) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
+                   "extern cfunc %.*s::%.*s: return type: %s",
+                   (int)efd->lib_name.len, efd->lib_name.ptr,
+                   (int)efd->name.len, efd->name.ptr, rwhy);
+      }
+    }
+  }
+  if (!resolved) return false;
+
+  /* 注册限定名函数符号 "<lib>::<name>"（`::` 分支据此解析）。
+     **不分配 fid**：无函数体、不进运行时函数队列。 */
+  char qual[512];
+  int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                    (int)efd->lib_name.len, efd->lib_name.ptr,
+                    (int)efd->name.len, efd->name.ptr);
+  if (qn <= 0 || (size_t)qn >= sizeof(qual)) return resolved;
+  const type_t *sig =
+      type_func_sig(sema->vm, ptypes, pn, rt ? rt : sema->vm->type_void,
+                    efd->is_variadic);
+  if (sig) {
+    /* `.ast` 指向声明节点：调用点需要它取返回类型表达式（程序自定义类型的
+       "按类型值返回"要用，见 sema/expr.c 的 FFI 返回类型码映射）。 */
+    sema_symbol_t einit = {.kind = SEMA_SYM_FUNC, .type = sig,
+                           .ast = (ast_node_t *)efd, .is_active = true,
+                           .fid = 0};
+    sema_scope_define(sema->global_scope,
+                      strslice_from_bytes(qual, (size_t)qn), &einit);
+  }
+  return resolved;
+}
+
+/* 解析 + 校验 + 注册一个 extern var（动态库导出的数据符号）。
+ * 与 extern cfunc 对称：限定名变量符号、无本地存储、运行期 EXTERN_LOAD/STORE。 */
+static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
+  char qual[512];
+  int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                    (int)evd->lib_name.len, evd->lib_name.ptr,
+                    (int)evd->name.len, evd->name.ptr);
+  if (qn <= 0 || (size_t)qn >= sizeof(qual)) {
+    if (report) diag_error(sema->diag, sema_loc(sema, (ast_node_t *)evd),
+                           "extern var name too long");
+    return false;
+  }
+  if (report) {
+    sema_symbol_t *libsym = sema_lookup(sema->global_scope, evd->lib_name);
+    if (!libsym || libsym->kind != SEMA_SYM_EXTERN_LIB) {
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)evd),
+                 "extern var %s uses undeclared library '%.*s' "
+                 "(add `extern lib \"...\" as %.*s;`)",
+                 qual, (int)evd->lib_name.len, evd->lib_name.ptr,
+                 (int)evd->lib_name.len, evd->lib_name.ptr);
+    }
+  }
+  const type_t *vt = sema_resolve_type_slot(sema, &evd->type_expr);
+  if (!vt) {
+    if (report)
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)evd),
+                 "extern var %s: type could not be resolved", qual);
+    return false;
+  }
+  if (report) {
+    const char *why = ffi_c_abi_reject_reason(vt);
+    uint32_t kind = 0;
+    if (!why && vt->kind == TYPE_KIND_VOID) why = "void is not a value type";
+    if (!why && !ffi_data_kind_of(vt, sema->vm, &kind) &&
+        !ffi_data_kind_needs_type(vt))
+      why = "type cannot be read/written as an external data symbol";
+    if (why)
+      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)evd),
+                 "extern var %s: %s", qual, why);
+  }
+  sema_symbol_t einit = {.kind = SEMA_SYM_EXTERN_VAR, .type = vt,
+                         .ast = (ast_node_t *)evd, .is_active = true};
+  sema_scope_define(sema->global_scope,
+                    strslice_from_bytes(qual, (size_t)qn), &einit);
+  return true;
+}
+
+/* pass1c：程序类型激活之后统一校验 extern 签名（并把 pass1_names 未能登记的
+   ——签名里含程序自定义类型的——补登记）。 */
+static void pass1c_extern_abi(sema_t *sema, ast_program_t *prog) {
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind == AST_FUNC_DEF && ((ast_func_def_t *)f)->is_extern_cfunc)
+      (void)check_extern_cfunc(sema, (ast_func_def_t *)f, /*report=*/true);
+    else if (f->kind == AST_VAR_DEF && ((ast_var_def_t *)f)->is_extern_var)
+      (void)check_extern_var(sema, (ast_var_def_t *)f, /*report=*/true);
+  }
+}
+
 static void pass1_names(sema_t *sema, ast_program_t *prog) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     /* AST_IMPORT / AST_REEXPORT 已在 pass0_imports 处理（注册 MODULE 符号 /
@@ -776,104 +900,18 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
       continue;
     if (f->kind == AST_FUNC_DEF && ((ast_func_def_t *)f)->is_extern_cfunc) {
       /* M6 FFI：extern cfunc 声明（无体，符号由 driver 用 dlsym 解析）。
-         这里注册**限定名函数符号** "<lib>::<name>"（`::` 分支据此解析），并做
-         §2 C ABI 类型校验：每个参数与返回类型都必须 C 可表达（option/tag union/
-         切片/元组/闭包/类型值一律拒绝，见 docs/m6-design.md §2 与 §14.8）。
-         **不分配 fid**：无函数体、不进运行时函数队列，编译器也不为它生成函数体。 */
-      ast_func_def_t *efd = (ast_func_def_t *)f;
-      const type_t *ptypes[64];
-      size_t pn = 0;
-      for (ast_node_t *p = efd->params; p; p = p->next) {
-        ast_var_def_t *pvd = (ast_var_def_t *)p;
-        const type_t *pt = sema_resolve_type_slot(sema, &pvd->type_expr);
-        const char *why = ffi_c_abi_reject_reason(pt);
-        if (!why && pt && pt->kind == TYPE_KIND_VOID)
-          why = "void is not a valid parameter type";
-        if (why) {
-          diag_error(sema->diag, sema_loc(sema, (ast_node_t *)p),
-                     "extern cfunc %.*s::%.*s: parameter '%.*s': %s",
-                     (int)efd->lib_name.len, efd->lib_name.ptr,
-                     (int)efd->name.len, efd->name.ptr,
-                     (int)pvd->name.len, pvd->name.ptr, why);
-        }
-        if (pt && pn < sizeof(ptypes) / sizeof(ptypes[0])) ptypes[pn++] = pt;
-      }
-      const type_t *rt = sema->vm->type_void;
-      if (efd->return_expr) rt = sema_resolve_type_slot(sema, &efd->return_expr);
-      const char *rwhy = ffi_c_abi_reject_reason(rt);
-      /* f32 返回在**声明处**就拒绝：调用层的浮点通路是"全 double 签名"
-         （m6-design §14.5），f32 返回会按 double 读 XMM0 却只取低 4 字节。
-         与其造一个 f64 值冒充 f32（使用点再报类型错），不如声明处就说清楚。 */
-      if (!rwhy && rt == sema->vm->type_f32)
-        rwhy = "f32 return is not supported yet (declare it as returning f64)";
-      if (rwhy) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)f),
-                   "extern cfunc %.*s::%.*s: return type: %s",
-                   (int)efd->lib_name.len, efd->lib_name.ptr,
-                   (int)efd->name.len, efd->name.ptr, rwhy);
-      }
-      /* 注册限定名符号（签名有问题时也注册，避免后续级联报"未定义符号"） */
-      char qual[512];
-      int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
-                        (int)efd->lib_name.len, efd->lib_name.ptr,
-                        (int)efd->name.len, efd->name.ptr);
-      const type_t *sig = (rt && qn > 0)
-                              ? type_func_sig(sema->vm, ptypes, pn, rt,
-                                              efd->is_variadic)
-                              : NULL;
-      if (sig) {
-        sema_symbol_t einit = {.kind = SEMA_SYM_FUNC, .type = sig,
-                               .is_active = true, .fid = 0};
-        sema_scope_define(sema->global_scope,
-                          strslice_from_bytes(qual, (size_t)qn), &einit);
-      }
+         这里登记**限定名函数符号**，签名校验交给 pass1c（程序自定义类型要等
+         pass1b_types 激活后才能 resolve，见 check_extern_cfunc 的说明）。 */
+      (void)check_extern_cfunc(sema, (ast_func_def_t *)f, /*report=*/false);
       continue;
     }
 
     /* M6 FFI：extern var 声明（动态库导出的**数据符号**）。
-       与 extern cfunc 对称：注册**限定名变量符号** "<lib>::<name>"（`::` 分支据此
-       解析读取，赋值目标也据此识别），且**不进运行时函数/变量队列**——它没有本地
-       存储，运行期由 dlsym 得到库里的变量地址（EXTERN_LOAD/STORE）。
-       类型必须给出（宽度/类别决定读写字节数），并做两道校验：
-         ① `extern lib` 别名必须已声明（否则给出可执行的指引）；
-         ② 类型必须属于**可搬运标量子集**（ffi_data_kind_of）——§2 允许的
-            struct/enum/切片等在这里会明确报"不可作为 extern var"，因为按固定
-            宽度读写一块外部内存必须知道精确布局。 */
+       与 extern cfunc 对称：注册**限定名变量符号** "<lib>::<name>"，且不进运行时
+       变量队列——它没有本地存储，运行期由 dlsym 得到库里的变量地址。
+       校验（别名已声明 / 类型可搬运）同样交给 pass1c。 */
     if (f->kind == AST_VAR_DEF && ((ast_var_def_t *)f)->is_extern_var) {
-      ast_var_def_t *evd = (ast_var_def_t *)f;
-      char qual[512];
-      int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
-                        (int)evd->lib_name.len, evd->lib_name.ptr,
-                        (int)evd->name.len, evd->name.ptr);
-      if (qn <= 0 || (size_t)qn >= sizeof(qual)) {
-        diag_error(sema->diag, sema_loc(sema, f),
-                   "extern var name too long");
-        continue;
-      }
-      sema_symbol_t *libsym = sema_lookup(sema->global_scope, evd->lib_name);
-      if (!libsym || libsym->kind != SEMA_SYM_EXTERN_LIB) {
-        diag_error(sema->diag, sema_loc(sema, f),
-                   "extern var %s uses undeclared library '%.*s' "
-                   "(add `extern lib \"...\" as %.*s;`)",
-                   qual, (int)evd->lib_name.len, evd->lib_name.ptr,
-                   (int)evd->lib_name.len, evd->lib_name.ptr);
-      }
-      const type_t *vt = sema_resolve_type_slot(sema, &evd->type_expr);
-      const char *why = ffi_c_abi_reject_reason(vt);
-      uint32_t kind = 0;
-      if (!why && vt && vt->kind == TYPE_KIND_VOID)
-        why = "void is not a value type";
-      if (!why && !ffi_data_kind_of(vt, sema->vm, &kind))
-        why = "only scalar/pointer types can be extern var "
-              "(i8..i64 / u8..u64 / bool / f32 / f64 / opaque)";
-      if (why) {
-        diag_error(sema->diag, sema_loc(sema, f), "extern var %s: %s", qual, why);
-      }
-      /* 以限定名注册（类型有问题时也注册，避免级联报"未定义符号"） */
-      sema_symbol_t einit = {.kind = SEMA_SYM_EXTERN_VAR, .type = vt,
-                             .ast = f, .is_active = true};
-      sema_scope_define(sema->global_scope,
-                        strslice_from_bytes(qual, (size_t)qn), &einit);
+      (void)check_extern_var(sema, (ast_var_def_t *)f, /*report=*/false);
       continue;
     }
 
@@ -1261,36 +1299,10 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       sema_scope_new(sema->vm->alloc, SEMA_SCOPE_GLOBAL, NULL);
   if (!sema->global_scope) return false;
 
-  /* 预注册内置函数符号（printf：variadic 签名，ast=NULL 表示无 AST 定义）。
-     与 VM 侧 vm_register_printf 对应；签名类型经 type_func_sig intern。
-     fid = 内建函数 id（vm->functions 按名字查询；内建段 < FUNC_ID_PROGRAM_BASE，
-     printf=0）。内建函数无 AST_FUNC_DEF 托管（sema->funcs 不含内建），
-     源码引用替换 AST_FUNC_REF 时从符号表 fid 字段取内建 id。 */
-  {
-    const type_t *pparams[1] = { sema->vm->type_str };
-    const type_t *psig = type_func_sig(sema->vm, pparams, 1, NULL,
-                                       /*is_variadic=*/true);
-    uint32_t pfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 6 &&
-            memcmp(bf->name.ptr, "printf", 6) == 0) {
-          pfid = bf->id;
-          break;
-        }
-      }
-    }
-    sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = psig,
-                          .is_active = true, .fid = pfid};
-    sema_scope_define(sema->global_scope, STRSLICE_LIT("printf"), &init);
-  }
-
   /* 预注册 upgrade 内置函数（§12.4：upgrade(weak *T) -> ?share *T）。
      与 VM 侧 vm_register_upgrade 对应。泛型 T：注册为 variadic（0 固定参数），
      返回 ?share *opaque 占位——sema 调用点特判从实参 weak *T 推断 ?share *T。
-     fid 从 vm->functions 按名查询（内建 id=1，printf=0）。 */
+     fid 从 vm->functions 按名查询（内建 id 按注册顺序，见 vm_new）。 */
   {
     const type_t *share_opaque = type_ptr_intern(sema->vm, TYPE_KIND_PTR_SHARE,
                                                  sema->vm->type_opaque);
@@ -1383,6 +1395,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     if (sema_speculative_round(sema, prog) == 0) break;
   }
   pass1b_types(sema, prog, /*speculative=*/false); /* 全局 type def */
+  pass1c_extern_abi(sema, prog); /* extern cfunc/var 签名校验（程序类型已激活） */
   pass2_types(sema, /*speculative=*/false);         /* 函数签名 */
   pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
 

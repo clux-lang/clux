@@ -104,6 +104,46 @@ bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind
 /** 码 → clux 类型 + 字节宽度；未知码返回 NULL（容器被改坏时的兜底）。 */
 const type_t *ffi_data_type_of(const struct vm_t *vm, uint32_t kind,
                                size_t *out_size);
+/** 码 → libffi 类型描述符（**不透明指针**，免得本头文件依赖 ffi.h）；
+ *  未知码返回 NULL。clux 标量与 C 是 1:1 的，这张表就是那个映射。 */
+const void *ffi_data_ffi_type(uint32_t kind);
+
+/** 该类型能否作为 extern var（数据符号）——需要"类型随指令落盘"的那些：
+ *  struct/cunion（布局要查类型表）、enum（值要按 enum 类型造）。 */
+bool ffi_data_kind_needs_type(const type_t *t);
+
+/* ---- clux 类型 → libffi 描述符（可递归：struct/cunion/enum/指针/str）----
+ *
+ * 标量直接返回 libffi 的**静态**描述符（out_owned=false，不需要释放）；
+ * struct/cunion 会**新建**描述符树（malloc 分配，out_owned 置 true，用完调
+ * `ffi_type_release`——与闭包 box 同一约定：libffi 相关内存不走项目 allocator）。
+ * 返回 NULL = 该类型无法跨 C ABI。
+ *
+ * - struct：按字段顺序递归构造成 `ffi_type{FFI_TYPE_STRUCT}`（clux 的布局就是
+ *   C 布局，编译器保证平凡同构——所以直接传 value->data 即可）；
+ * - cunion：libffi **没有** union 类型 → 等价建模成"size/align 个 align 宽度的
+ *   整数"（`struct { intN a; intN b; ... }`：size 与 align 完全一致，ABI 分类与
+ *   寄存器/栈占用因此与真 union 相同）；
+ * - enum：其底层整数类型。 */
+const void *ffi_type_for(const type_t *t, const struct vm_t *vm, bool *out_owned,
+                         char *err, size_t ecap);
+/** 释放 `ffi_type_for` 新建的描述符树（静态描述符可安全传入）。 */
+void ffi_type_release(const void *desc);
+
+/* ---- 精确类型调用（libffi；定参与变参统一入口）----
+ *
+ * 与 ffi_call_typed 的区别只在**变参**：`nfixed < argc` 时用
+ * `ffi_prep_cif_var`（C 的 `...`），此时**变参部分的类型必须是 C 默认实参提升后
+ * 的类型**（f32→double、窄整型→int）——提升由调用方负责（它才知道哪些位置是变参）。
+ *
+ * 约定：`arg_types[i]` 与 `arg_values[i]` 一一对应，`arg_values[i]` 指向该实参的
+ * **C 表示**（clux 的 value->data 与 C 同构：直接就是 int32_t/float/double/指针…）。
+ * `nfixed == argc` 表示非变参；`ret_type == NULL` 表示 void 返回值。
+ * 失败返回 false 并写 err。 */
+bool ffi_call_typed_items(void *sym, size_t nfixed, size_t argc,
+                          const void *const *arg_types, const void *ret_type,
+                          void **arg_values, void *ret_value, char *err,
+                          size_t ecap);
 
 /** 闭包处理器：ret 指向返回值槽，args 为参数指针数组，user 为上下文。 */
 typedef void (*ffi_closure_handler_t)(void *ret, void **args, void *user);

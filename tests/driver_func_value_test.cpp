@@ -22,7 +22,8 @@ std::string write_temp_file(const std::string &content) {
   static int counter = 0;
   path_str += std::to_string(counter++);
   FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
+  const std::string src_ = clux_with_printf_prelude(content);
+  fwrite(src_.data(), 1, src_.size(), fp);
   fclose(fp);
   return path_str;
 }
@@ -42,7 +43,7 @@ TEST(Driver, RunFileFuncValueAssignAndCall) {
       "func main():void {\n"
       "  var f = add;\n"
       "  var val = f(3, 4);\n"
-      "  printf(\"%d\\n\", val);\n"
+      "  libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -59,7 +60,7 @@ TEST(Driver, RunFileFuncValueAsArgument) {
       "}\n"
       "func main():void {\n"
       "  var r = apply(add, 10, 20);\n"
-      "  printf(\"%d\\n\", r);\n"
+      "  libc::printf(\"%d\\n\", r);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -76,7 +77,7 @@ TEST(Driver, RunFileFuncValueAsReturn) {
       "}\n"
       "func main():void {\n"
       "  var f = get_add();\n"
-      "  printf(\"%d\\n\", f(5, 6));\n"
+      "  libc::printf(\"%d\\n\", f(5, 6));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -95,7 +96,7 @@ TEST(Driver, RunFileFuncValueExplicitTypeAndReassign) {
       "  var f: func(i32,i32)->i32 = add;\n"
       "  var g = sub;\n"
       "  f = g;\n"
-      "  printf(\"%d\\n\", f(20, 8));\n"
+      "  libc::printf(\"%d\\n\", f(20, 8));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -113,7 +114,7 @@ TEST(Driver, RunFileFuncValueComptimeFold) {
       "func main():void {\n"
       "  var add_fn = get_add();\n"
       "  var val = add_fn(1,2);\n"
-      "  printf(\"%d\\n\", val);\n"
+      "  libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -128,7 +129,7 @@ TEST(Driver, RunFileFuncValueComptimeReturnsLiteral) {
       "}\n"
       "func main():void {\n"
       "  var f = get_f();\n"
-      "  printf(\"%d\\n\", f(41));\n"
+      "  libc::printf(\"%d\\n\", f(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -144,7 +145,7 @@ TEST(Driver, RunFileFuncValueComptimeReturnsLocalFunc) {
       "}\n"
       "func main():void {\n"
       "  var f = get_f();\n"
-      "  printf(\"%d\\n\", f(41));\n"
+      "  libc::printf(\"%d\\n\", f(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -168,7 +169,7 @@ TEST(Driver, RunFileFuncValueCallExpressionCallee) {
       "  var b = get_add()(19, 23);\n"
       "  var c = mk_fn()(21);\n"
       "  var d = func(x:i32):i32 { return x + 1; }(41);\n"
-      "  printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
+      "  libc::printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -198,7 +199,7 @@ TEST(Driver, RunFileFuncValueComptimeNestedCalls) {
       "comptime var Q = quad(3);\n"
       "func main():void {\n"
       "  var x = Q;\n"
-      "  printf(\"%d\\n\", x);\n"
+      "  libc::printf(\"%d\\n\", x);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -217,18 +218,21 @@ TEST(Driver, RunFileFuncValueComptimeMultipleFactories) {
       "func main():void {\n"
       "  var f = make_plus();\n"
       "  var g = make_mul();\n"
-      "  printf(\"%d %d\\n\", f(20, 22), g(6, 7));\n"
+      "  libc::printf(\"%d %d\\n\", f(20, 22), g(6, 7));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueBuiltinPrintf) {
-  /* 内建 printf 与普通函数同等：函数值赋值 + 调用 */
+TEST(Driver, RunFileFuncValueBuiltinLen) {
+  /* 内建函数与普通函数同等：函数值赋值 + 调用。
+     这里用 `len`——printf 已从内建删除，改由 libc 经 FFI 提供（`extern cfunc`
+     只有**调用点**语义，没有运行期函数值，见 docs/m6-design.md §14.19）。 */
   std::string path = write_temp_file(
       "func main():void {\n"
-      "  var p = printf;\n"
-      "  p(\"hello %s %d\\n\", \"world\", 42);\n"
+      "  var p = len;\n"
+      "  var n = p(\"hello\");\n"
+      "  if (n != 5u64) { return; }\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -271,7 +275,7 @@ TEST(Driver, RunFileFuncLiteralBasic) {
       "func main():void {\n"
       "  var f = func(x: i32): i32 { return x + 1; };\n"
       "  var val = f(41);\n"
-      "  printf(\"%d\\n\", val);\n"
+      "  libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -283,7 +287,7 @@ TEST(Driver, RunFileFuncLiteralNamed) {
       "func main():void {\n"
       "  var f = func inc(x: i32): i32 { return x * 2; };\n"
       "  var val = f(21);\n"
-      "  printf(\"%d\\n\", val);\n"
+      "  libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -295,7 +299,7 @@ TEST(Driver, RunFileFuncLiteralMultiParam) {
       "func main():void {\n"
       "  var f: func(i32,i32)->i32 = func(a: i32, b: i32): i32 { return a * b; };\n"
       "  var val = f(6, 7);\n"
-      "  printf(\"%d\\n\", val);\n"
+      "  libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -309,7 +313,7 @@ TEST(Driver, RunFileFuncLiteralAsArgument) {
       "}\n"
       "func main():void {\n"
       "  var r = apply(func(a: i32, b: i32): i32 { return a + b; }, 10, 20);\n"
-      "  printf(\"%d\\n\", r);\n"
+      "  libc::printf(\"%d\\n\", r);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -323,7 +327,7 @@ TEST(Driver, RunFileFuncLiteralNested) {
       "    var inner = func(x: i32): i32 { return x + 100; };\n"
       "    return inner(n + 1);\n"
       "  };\n"
-      "  printf(\"%d\\n\", outer(1));\n"
+      "  libc::printf(\"%d\\n\", outer(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -337,7 +341,7 @@ TEST(Driver, RunFileFuncLiteralLocalFuncInBody) {
       "    func triple(x: i32): i32 { return x * 3; }\n"
       "    return triple(n);\n"
       "  };\n"
-      "  printf(\"%d\\n\", f(14));\n"
+      "  libc::printf(\"%d\\n\", f(14));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -366,7 +370,7 @@ TEST(Driver, RunFileLoopClosuresIndependentInstances) {
       "  for(var i = 0;i<3;i+=1) {\n"
       "    fns[i] = func|(val = items[i])|():i32 { return val; };\n"
       "  }\n"
-      "  printf(\"%d %d %d\\n\", fns[0](), fns[1](), fns[2]());\n"
+      "  libc::printf(\"%d %d %d\\n\", fns[0](), fns[1](), fns[2]());\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

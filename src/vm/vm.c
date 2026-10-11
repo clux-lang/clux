@@ -18,7 +18,6 @@
 #include "core/vec.h"
 
 extern void vm_init_builtins(vm_t *vm);
-extern void vm_register_printf(vm_t *vm);
 extern void vm_register_upgrade(vm_t *vm);
 extern void vm_register_len(vm_t *vm);
 extern void vm_register_cfunc_ptr(vm_t *vm);
@@ -172,8 +171,10 @@ vm_t *vm_new(allocator_t *alloc) {
         }
     }
 
-    /* printf 内置函数（临时注册，M1 硬编码绑定 C printf） */
-    vm_register_printf(vm);
+    /* M6：printf **不再是内建**——它是 libc 的函数，由 clux 源码经 FFI 声明后
+       调用（`extern lib "*" as c;` + `extern func c::printf(format: str, ...): i32;`），
+       走 BCODE_EXTERN_CALL → libffi（定参/变参都精确）。此前那个"魔改版"自带
+       格式解析与 `%v` 扩展，已整体删除（见 docs/m6-design.md §14.19）。 */
 
     /* upgrade 内置函数（§12.4：weak *T -> ?share *T） */
     vm_register_upgrade(vm);

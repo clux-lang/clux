@@ -10,6 +10,8 @@
 //   - 越界检查：INDEX_GET/SET 运行时越界返回 error
 
 // 数组作为函数参数（按值拷贝，函数内修改不影响实参）
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 func sum_arr(a: [3]i32): i32 {
     return a[0] + a[1] + a[2];
 }
@@ -25,13 +27,13 @@ func main(): i32 {
     var x = a[0] + a[2];   // 下标右值读取：10 + 30
     a[1] = 99;             // 下标左值写入
     a[2] += 1;             // 下标复合赋值：30 → 31
-    printf("x = %d, a = %d %d %d\n", x, a[0], a[1], a[2]);
+    libc::printf("x = %d, a = %d %d %d\n", x, a[0], a[1], a[2]);
 
     // 变量下标：i 可为任意表达式
     var i = 1;
     var z = a[i] * 2;
     a[i] = z;
-    printf("z = %d, a[1] = %d\n", z, a[1]);
+    libc::printf("z = %d, a[1] = %d\n", z, a[1]);
 
     // ---- 多维数组：嵌套数组逐维下标 ----
     var m = .[2][2]i32 { .[2]i32 { 1, 2 }, .[2]i32 { 3, 4 } };
@@ -39,18 +41,18 @@ func main(): i32 {
     m[1][0] = 7;           // 深层写入直达原数组
     var j = 1;
     m[0][j] += 10;         // 变量下标 + 复合赋值
-    printf("y = %d, m = %d %d / %d %d\n",
+    libc::printf("y = %d, m = %d %d / %d %d\n",
            y, m[0][0], m[0][1], m[1][0], m[1][1]);
 
     // ---- 函数传参（按值拷贝）与返回值 ----
     var s = sum_arr(a);
     var d = double_arr(a);
-    printf("sum = %d, doubled = %d %d %d\n", s, d[0], d[1], d[2]);
+    libc::printf("sum = %d, doubled = %d %d %d\n", s, d[0], d[1], d[2]);
 
     // ---- 借用引用绑定变量：深拷贝为独立副本 ----
     var row = m[1];        // 绑定 m[1] 的借用引用 → 变量深拷贝
     row[0] = 100;          // 修改 row 不影响 m
-    printf("row = %d %d, m[1] = %d %d\n", row[0], row[1], m[1][0], m[1][1]);
+    libc::printf("row = %d %d, m[1] = %d %d\n", row[0], row[1], m[1][0], m[1][1]);
 
     // 越界下标：运行时报错（反注释验证）
     // var bad = a[5];

@@ -19,6 +19,8 @@
 //   函数名是预登记的名字引用（作用域绑定 + 提升）；函数字面量是表达式
 //   求值点即时构造的匿名函数对象（无作用域绑定），引用点零构造。
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 func apply(f: func(i32, i32) -> i32, x: i32, y: i32): i32 {
     return f(x, y);
 }
@@ -26,26 +28,26 @@ func apply(f: func(i32, i32) -> i32, x: i32, y: i32): i32 {
 func main(): i32 {
     // 匿名函数字面量：赋给变量，类型推断为签名
     var inc = func(x: i32): i32 { return x + 1; };
-    printf("inc(41) = %d\n", inc(41)); // 42
+    libc::printf("inc(41) = %d\n", inc(41)); // 42
 
     // 具名字面量：名字仅作显示名，不绑定作用域
     var dbl = func twice(x: i32): i32 { return x * 2; };
-    printf("dbl(21) = %d\n", dbl(21)); // 42
+    libc::printf("dbl(21) = %d\n", dbl(21)); // 42
 
     // 显式 func 类型槽位 + 多参数
     var mul: func(i32, i32) -> i32 = func(a: i32, b: i32): i32 { return a * b; };
-    printf("mul(6,7) = %d\n", mul(6, 7)); // 42
+    libc::printf("mul(6,7) = %d\n", mul(6, 7)); // 42
 
     // 字面量直接作实参（高阶调用）
     var s = apply(func(a: i32, b: i32): i32 { return a + b; }, 10, 20);
-    printf("apply(literal,10,20) = %d\n", s); // 30
+    libc::printf("apply(literal,10,20) = %d\n", s); // 30
 
     // 字面量 body 内定义局部函数并调用
     var triple = func(n: i32): i32 {
         func t(x: i32): i32 { return x * 3; }
         return t(n);
     };
-    printf("triple(14) = %d\n", triple(14)); // 42
+    libc::printf("triple(14) = %d\n", triple(14)); // 42
 
     // 未声明捕获即访问外层局部变量：编译期拒绝（捕获需显式闭包列表，
     // 见 examples/closure/closure.cx；取消注释体验诊断）

@@ -242,15 +242,19 @@ typedef enum {
 #define BCODE_FFI_DATA_F64  9u
 #define BCODE_FFI_DATA_PTR  10u
 #define BCODE_FFI_DATA_BOOL 11u
+/* 数据符号：库里的 `char *` 全局（clux 侧声明为 str）。 */
+#define BCODE_FFI_DATA_STR  12u
+/* 数据符号：**按类型值读写**（指令前由 `compile_type_expr` 压入类型值）。
+ * struct/cunion/enum 走这里——读写字节数 = 该类型的 size。 */
+#define BCODE_FFI_DATA_TYPED 13u
 
 /* ---- BCODE_EXTERN_CALL 的 ret_kind（返回类型码）----
  * 前 5 个是 v0 的原始编码（`.cxb` 兼容：旧容器里只有这些值，语义保持不变）：
  *   0 = void、1 = i32、2 = i64（旧产物里 u64 也走这里）、3 = 指针/opaque、
  *   4 = f64（旧产物里 f32 也走这里）。
- * 之后**逐个类型补齐**——返回值的**类型必须等于源码里声明的类型**：旧编码把
- * u64 返回造成 i64 值，于是 `if (lib::strlen(s) != 5u64)` 这类比较会在运行期撞上
- * "i64 vs u64" 的隐式转换，报 `implicit cast: not a widening conversion`
- * （症状出现在比较点，根因在调用层的返回类型）。 */
+ * 之后**逐个类型补齐**——clux 的标量与 C 是 1:1 的，调用层用 libffi 的精确
+ * `ffi_type` 描述符，因此返回值的类型必须与源码声明**完全一致**（旧编码把 u64
+ * 返回造成 i64，使用点会在比较/赋值时撞上隐式转换）。 */
 #define BCODE_FFI_RET_VOID  0u
 #define BCODE_FFI_RET_I32   1u
 #define BCODE_FFI_RET_I64   2u
@@ -263,8 +267,38 @@ typedef enum {
 #define BCODE_FFI_RET_U8    9u
 #define BCODE_FFI_RET_U16   10u
 #define BCODE_FFI_RET_BOOL  11u
-/* f32 返回**未支持**：调用层的浮点通路是"全 double 签名"（§14.5），f32 返回会
-   按 double 读错 XMM0 宽度。sema 明确拒绝（而不是造一个 f64 值冒充 f32）。 */
+#define BCODE_FFI_RET_F32   12u
+/* 返回 C 的 char*：读回一个指针并按 clux `str` 造值（如 getenv/strchr）。 */
+#define BCODE_FFI_RET_STR   13u
+/* **按类型值返回**：指令前有一个由 `compile_type_expr` 压入的**类型值**
+ * （与 `CONSTRUCT` 同一套机制），运行期按该类型读返回内存并造值。
+ * struct/cunion/enum 等程序自定义类型走这里——宽度/布局必须查类型，
+ * 用一个小整数码表达不了。 */
+#define BCODE_FFI_RET_TYPED 14u
+
+/* ---- ret_kind 操作数的高位：变参信息（M6 FFI；与低 8 位的类型码共用一个 u32）----
+ * 不新增第四个操作数的理由：`EXTERN_CALL` 的 `.cxs` 文本与旧 `.cxb` 都按
+ * "STR + U32 + U32" 解析，加操作数会让**旧产物读错**。旧产物写 ret_kind 时高位
+ * 恒为 0（值是 0..4），因此下面的解包对旧产物天然等价于"非变参" ✓。
+ *
+ *   bits 0..7   : 返回类型码（BCODE_FFI_RET_*）
+ *   bit  8      : 变参（1 = 被调函数是 C 的 `...`，走 libffi ffi_prep_cif_var）
+ *   bits 9..15  : **固定参数个数**（变参时有意义；非变参恒 0）
+ *
+ * 变参调用必须知道"前几个是固定参数"才能按 C 的约定铺寄存器/栈（且变参部分要
+ * 施加 C 的默认实参提升：f32→double、窄整型→int），所以固定参数个数随指令落盘。 */
+#define BCODE_FFI_RET_KIND_MASK 0xFFu
+#define BCODE_FFI_VARIADIC_BIT  (1u << 8)
+#define BCODE_FFI_NFIXED_SHIFT  9u
+#define BCODE_FFI_RET_PACK(kind, variadic, nfixed)                     \
+    (((uint32_t)(kind) & BCODE_FFI_RET_KIND_MASK) |                    \
+     ((variadic) ? BCODE_FFI_VARIADIC_BIT : 0u) |                      \
+     ((((uint32_t)(nfixed)) << BCODE_FFI_NFIXED_SHIFT) & 0x0000FE00u))
+#define BCODE_FFI_RET_UNPACK_KIND(v) ((uint32_t)(v) & BCODE_FFI_RET_KIND_MASK)
+#define BCODE_FFI_RET_UNPACK_VARIADIC(v) \
+    (((uint32_t)(v) & BCODE_FFI_VARIADIC_BIT) != 0u)
+#define BCODE_FFI_RET_UNPACK_NFIXED(v) \
+    (((uint32_t)(v) >> BCODE_FFI_NFIXED_SHIFT) & 0x7Fu)
 
 /* ================================================================ */
 /* 聚合结构：bytecode 模块                                            */

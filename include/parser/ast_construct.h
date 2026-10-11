@@ -11,7 +11,7 @@ extern "C" {
  * 类型字面量构造节点：.<type> { f1, f2, ... }
  *   - type：类型表达式（AST_IDENT / AST_ARRAY / AST_CONST ...）
  *   - fields：逗号分隔的字段值表达式兄弟链（head/tail）
- * 构造语法必须 '.' 前导（与 %v 调试输出 '.type{value}' 一致）。
+ * 构造语法必须 '.' 前导（与 value_dump 的调试输出 '.type{value}' 一致）。
  * 由 parse_unary 的 '.' 前缀分支构造；下游 sema/compiler 暂以 default 分支容错。
  */
 typedef struct {

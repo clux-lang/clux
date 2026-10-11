@@ -1048,8 +1048,9 @@ TEST_F(ExecTest, SetTypeNameNonTypeValueReturnsError) {
 /* ================================================================ */
 
 /* 函数 id 表：程序函数 id 从 FUNC_ID_PROGRAM_BASE(=64) 起（compiler 分配），
-   内建函数（printf）固定 id 0（func_new 自动分配）。以下测试直接写字节码
-   驱动三条函数指令（与 compiler 注册段的运行时语义一致）。 */
+   内建函数 id 由 func_new 按注册顺序自动分配（upgrade=0、len=1、cfunc_ptr=2；
+   printf 已不是内建）。以下测试直接写字节码驱动三条函数指令（与 compiler
+   注册段的运行时语义一致）。 */
 
 /* PUSH_FUNCTION <body> 构造（id 默认 0）→ BIND_FUNC <id> 填充 fn->id 并
    登记 → 查表取回同一实例。id 单一来源：只在 BIND_FUNC 出现。 */
@@ -1158,8 +1159,10 @@ TEST_F(ExecTest, SetFuncNameNonFuncValueReturnsError) {
 /* LOAD_FUNCTION <id>：函数值加载                                      */
 /* ================================================================ */
 
-/* LOAD_FUNCTION 加载内建函数（printf 预注册 id=0）：data 指向 func_t，
-   type 为签名类型（func value 可调用） */
+/* LOAD_FUNCTION 加载内建函数（id 0 = `upgrade`——printf 已从内建删除，
+   改由 libc 经 FFI 提供，见 docs/m6-design.md §14.19）：data 指向 func_t，
+   type 为签名类型（func value 可调用）。这里按 id 0 + 名字非空断言，
+   不写死具体内建名（内建清单会变）。 */
 TEST_F(ExecTest, LoadFunctionBuiltin) {
     bcode_write_op(bc, BCODE_LOAD_FUNCTION); bcode_write_u32(bc, 0);
     bcode_write_op(bc, BCODE_HALT);
@@ -1171,7 +1174,7 @@ TEST_F(ExecTest, LoadFunctionBuiltin) {
     func_t *fn = *(func_t **)value_data(v);
     ASSERT_NE(fn, nullptr);
     ASSERT_NE(fn->name.ptr, nullptr);
-    EXPECT_EQ(strncmp(fn->name.ptr, "printf", 6), 0);
+    EXPECT_EQ(fn->id, 0u); /* 内建按注册顺序分配 id：upgrade、len、cfunc_ptr */
 }
 
 /* LOAD_FUNCTION 加载程序函数（BIND_FUNC 登记 id=64）：函数值携带签名，

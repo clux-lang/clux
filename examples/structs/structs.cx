@@ -14,6 +14,8 @@
 //           写/复合 → FIELD_SET（隐式转换 + 深拷贝回写）
 
 // 全局 struct：字段显式类型
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 struct Point { x: i32; y: i32; }
 
 // 字段类型可为其他 struct 类型（布局依赖构造：Inner 先密封）
@@ -60,7 +62,7 @@ func main(): i32 {
     o.i.a += 5;
     if (o.i.a != 15 || o.b != 9) { return 1; }
 
-    printf("struct ok\n");
+    libc::printf("struct ok\n");
     return 0;
 }
 

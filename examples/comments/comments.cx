@@ -1,6 +1,8 @@
 // comments.cx — M1 样例：行注释与块注释
 // 这是行注释：从 // 到行尾被忽略
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 /* 这是块注释：
    可以跨越多行 */
 
@@ -11,6 +13,6 @@
 func main(): i32 {
     /* 函数体中的块注释 */
     var x: i32 = 1; // 行尾注释
-    printf("%d\n", x);
+    libc::printf("%d\n", x);
     return 0;
 }

@@ -77,7 +77,7 @@ bool tuple_type_compatible(vm_t *vm, const type_t *a, const type_t *b);
  */
 bool tuple_array_layout_compatible(vm_t *vm, const type_t *a, const type_t *b);
 
-/* ---- 运行期 tuple value 只读访问（供调试/格式化遍历，如 printf %v） ---- */
+/* ---- 运行期 tuple value 只读访问（供 value_dump 等调试遍历） ---- */
 
 /** 前置声明：避免为仅消费指针的访问器引入整个 value.h */
 typedef struct value_t value_t;
@@ -87,7 +87,7 @@ size_t value_tuple_count(const value_t *v);
 
 /**
  * 返回第 i 个元素的借用引用（data 指向块内偏移业务内存，type = 元素类型），
- * 越界返回 NULL。供调试/格式化遍历（如 printf %v）递归使用；借用值 auto-track
+ * 越界返回 NULL。供 value_dump 等调试遍历递归使用；借用值 auto-track
  * 到 vm->current_scope。
  */
 value_t *value_tuple_at(vm_t *vm, const value_t *v, size_t i);

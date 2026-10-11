@@ -6,20 +6,26 @@ clux 采用标准 C ABI，通过 `cfunc` / `extern cfunc` / `extern var` 实现�
 （`extern lib "<路径>" as <别名>;` 声明动态库）。
 运行期动态调用使用 libffi（git submodule 引入），无需手写 trampoline。
 
-> **实现状态：✅ Phase 1–5 全部落地（M6 完成）** —— 前端（`extern lib` / `cfunc` /
+> **实现状态：✅ Phase 1–5 全部落地 + 聚合类型完备（M6 完成）** —— 前端（`extern lib` /
 > `extern cfunc` / `extern func`（等价写法）/ `extern var` 语法 + fmt + 明确诊断）；
 > 运行期 `dlopen/dlsym` 加载与符号解析（库表在 `module_t.ffi_libs`，**判据是关键字
 > 而非后缀**；路径 `"*"` = **当前进程自身**，见 §14.18）；调用路径
-> （`BCODE_EXTERN_CALL` + libffi `ffi_call_typed`，整数/指针/浮点，返回类型逐类型精确，
-> 参数在调用点按 ABI 能力校验，经 MASM `ml64` 端口，见 §14.12/§14.18.2）；
+> （`BCODE_EXTERN_CALL` + libffi 精确类型描述符，定参与 C 变参统一入口，
+> 经 MASM `ml64` 端口，见 §14.12/§14.19.2）；
 > **数据符号**（库导出的全局变量）读写（`BCODE_EXTERN_LOAD`/`EXTERN_STORE`，见 §14.17）；
 > §2 C ABI 类型约束（`ffi_c_abi_reject_reason`，接入 sema 与 `cfunc_ptr`）；
 > **回调（Phase 5）**：宿主侧 `clux_ffi_closure_create`（§14.13–§14.15）与
 > **语言侧 `cfunc_ptr(f)`**（§14.16）均已打通，clux 函数可被 C（含 libc `qsort`）
 > 当回调调用。
-> 未做（有意留有边界）：FFI 实参位置的**隐式**转换（指针/整数族以外一律要求
-> 类型可接受，见 §14.18.2）、闭包对 str/enum/struct/指针类的编组、结构体/变参的
-> `ffi_call`、f32 返回值、FFI 数据符号只支持标量/指针（布局不定的类型明确拒绝）。
+>
+> **C 类型覆盖（§14.20）**：标量 `i8..u64`/`f32`/`f64`/`bool`、指针族、`opaque`、
+> **`str`（char\*）**、**`enum`**、**`struct`/`cunion` 按值**（传参、返回、变参位置、
+> 回调双向）全部支持；**程序自定义类型可出现在 FFI 签名里**（含 `type` 别名与
+> 指向它们的指针，修掉了 pass 顺序缺陷）。`struct` 的描述符按字段递归构造，
+> `cunion` 等价建模为"size/align 个整数成员"（libffi 无 union 类型）。
+> 未做（有意留有边界）：FFI 实参位置的**隐式**转换（整数族/指针族以外要求类型可接受，
+> 见 §14.18.2）；`option`/tag union/切片（胖指针）/元组/闭包/`[N]T` 裸数组无 C 对应，
+> 一律在编译期拒绝。
 >
 > **前置依赖（M5 已就绪）**：M5 已实现模块的相对路径解析与代理导出，并**明确拒绝**
 > 非相对路径（`import path must be relative (...) package and dynamic-library
@@ -1187,3 +1193,159 @@ func main(): i32 {
 - 新增 `examples/ffi_process/ffi_process.cx`：只用 `extern lib "*"` 调 `abs`/`strlen`
   并读 `_osplatform`；源码运行与 `emit → run .cxb` 均 exit 0。
 - 全量：`build exit=0`、**0 告警**、**1645/1645**、示例 38/38、format 40/40。
+
+### 14.19 ✅ 删除内建 printf，改用 libc 的原生 printf（并因此补齐精确类型调用）
+
+**动机**：M1 把 C 的 printf **硬编码**成内建函数（`builtin_printf.c`），自己解析格式
+串转发给 `printf(spec, ...)`，还加了一个 `%v`"打印任意值"的扩展（`.type { value }`
+形态，靠 `value_dump` 实现）。这是把 C 库函数改装成语言内建：格式语义要自己跟 C 保持
+一致、`%v` 成了只有 clux 才有的方言、诊断/边界（%s 必须是 str 等）也都得自己维护。
+M6 有了 FFI（调用 + 数据符号 + 回调 + 当前进程库 `"*"`）之后，正确的做法是**让它回到
+它本来的身份**：libc 里的一个普通函数。
+
+#### 14.19.1 语言层：显式声明，零预置
+
+不做任何"编译器预置 printf"的魔法。源码自己声明（别名用 `libc` 而非 `c`——
+`::` 左侧先按作用域解析，**局部变量会遮蔽库别名**）：
+
+```c
+extern lib "*" as libc;                              // 当前进程自身
+extern func libc::printf(format: str, ...): void;    // 返回值用不到就声明 void
+```
+
+- **为什么声明成 `void`**：clux 的表达式语句不允许丢弃非 void 结果
+  （`expression result of type i32 is unused; use '_ = expr'`）。C 的 printf 返回
+  写入字符数；只做输出时声明 `void` 最自然（ABI 上返回槽被忽略，无副作用），
+  需要计数就声明 `i32` 并写 `var n = libc::printf(...)`。
+- **`%v` 随之消失**：格式符就是 C 的原生集合。聚合值要打印就逐个成员打印
+  （示例里改成了 `%d %d %d %d %d` 逐个打印数组元素）。`value_dump`（`%v` 的实现）
+  保留为独立工具（当前只有单测使用，将来 REPL/调试器会用到）。
+- 内建函数只剩 `upgrade` / `len` / `cfunc_ptr`（id 按注册顺序分配，**不要写死数字**）。
+
+#### 14.19.2 引擎层：为"真 printf"补齐两件事
+
+删除内建后，printf 走通用的 `EXTERN_CALL`，因此必须支持它的两个特征：
+
+1. **C 变参（`...`）** —— 新增 `ffi_call_typed_items`（`vm/ffi_lib.c`）：
+   `nfixed == argc` 走 `ffi_prep_cif`，`nfixed < argc` 走 **`ffi_prep_cif_var`**
+   （x64 变参要按需把寄存器实参复制进 shadow store）。
+   固定参数个数与"是否变参"打包进 `EXTERN_CALL` 的 **ret_kind 操作数高位**
+   （`BCODE_FFI_RET_PACK`：bits0..7 返回类型码、bit8 变参、bits16..31 nfixed）——
+   不新增操作数，旧 `.cxb`/`.cxs`（高位恒 0）因此天然读作"非变参" ✓。
+2. **C 默认实参提升** —— 变参位置由调用方（VM）施加：`f32 → double`、
+   窄整型/`bool` → `int`（提升结果写进 8 字节临时槽）；32/64 位整数与指针已是寄存器
+   槽宽度，原样传。定参**不需要**提升：clux 的 `value->data` 与 C **同构**
+   （编译器保证平凡布局），直接把 `value_data(v)` 交给 libffi，它按描述符读
+   `sizeof` 字节即可。
+
+顺带把**类型映射补成完整的 1:1**（用户要求："基础数据类型可以完整的和 C 1:1 转换"）：
+
+- 调用统一走 libffi 的**精确描述符**（`ffi_data_ffi_type`：i8..i64、u8..u64、
+  f32、f64、bool、pointer…），不再有"全 double 签名"这类人为限制：
+  **f32 参数与返回值都支持**，混合整数/浮点签名也支持。
+- 返回类型码 `BCODE_FFI_RET_*` 补到逐类型（新增 f32；`f32` 返回不再是错误）。
+- 实参描述符按**值的类型**取（整数族宽度/符号、浮点同型、`str`/指针/`opaque` → pointer、
+  `enum` → 底层整数、const/volatile 先剥限定符）；sema 侧的校验就是"能否共用同一个
+  描述符"：整数族 ⇄ 整数族（同 C 隐式转换）、浮点**必须同型**、指针族 ⇄ 指针族、
+  `str` ⇄ `str`（结构体/cunion 见 §14.20：按字段构造描述符后同样支持）。
+- libffi 的 `ret_type` **不能为 NULL**（会直接崩），调用层用 `NULL = void` 约定并补
+  `ffi_type_void`——这是本轮的崩溃根因，值得记一笔。
+
+#### 14.19.3 一个真踩到的坑：FFI 实参求值必须经**真正的 AST 槽**
+
+给 FFI 调用点加实参校验时，最初写成 `for (a = call->args; ...) sema_expr(sema, &a, ...)`——
+`&a` 是**局部副本**，而 comptime 折叠是"就地替换节点"（`add(1,2)` → 字面量 `3`），
+写在副本上就丢了：编译器随后仍去编译未折叠的调用，运行期报 `exec: undefined variable`
+（`PUSH "add"` 找不到函数——comptime 函数不进运行时）。改为沿真实槽遍历
+（`for (slot = &call->args; *slot; slot = &(*slot)->next) sema_expr(sema, slot, ...)`)
+即可。**规则：任何可能改写 AST 的求值都必须拿到真正的节点槽。**
+
+#### 14.19.4 影响面与验证
+
+- 删除：`src/vm/builtin_printf.c`（整文件）、`vm_register_printf`、sema 的 printf
+  预注册；内建 id 顺移（upgrade=0/len=1/cfunc_ptr=2）。
+- 示例 36 个文件、测试 10 个文件改用 `libc::printf`；示例用别名 `libc`（避开变量名
+  遮蔽），测试统一经 `tests/test_common.h` 的 `clux_with_printf_prelude()` 在写文件时
+  补声明（只对含 `libc::printf(` 的片段生效，格式化类测试不需要）。
+- 两个"内建函数值"用例改用 `len`（printf 不再是内建，`extern cfunc` 也没有运行期
+  函数值，只有调用点语义）。
+- 验证（强制全量重编）：`build exit=0`、**0 告警**、**1645/1645**、
+  示例 **38/38**（0 泄漏）且 38/38 `emit → run .cxb` 全通过、format 幂等 40/40。
+  实测原生 printf：`%d %s %.2f %c %x %f %llu`、0/1/2/5 个变参、`u64` 变参
+  （`18000000000000000000`）、`i8` 提升（`-7`）、`f32` 返回（`sqrtf`）全部正确。
+
+### 14.20 ✅ 聚合类型完备：struct / cunion / enum / char*（含 FFI 签名里的程序自定义类型）
+
+**动机（用户提问："M6 彻底完备了吗，兼容数据类型包括结构体都支持了吗"）**：用探针逐个
+类型试出来的边界是——标量/指针/opaque 早已支持，但 `str` 只能传参不能返回、
+**enum 与 struct 连声明都用不了**（报 `missing type`）、`extern var` 只认标量/指针、
+回调只编组标量。其中 `missing type` 不是"没实现"而是**一个真缺陷**：FFI 签名校验跑在
+`pass1_names`，那时程序自定义类型只是"登记"未"激活"，`resolve` 得到 NULL。连
+"传结构体指针"（`ref *P`）这条标准做法都被它挡住。
+
+#### 14.20.1 修缺陷：FFI 签名校验挪到程序类型激活之后（pass1c）
+
+- `pass1_names`：只登记**类型已就绪**（纯内建标量签名）的 extern 符号，不报诊断；
+  未就绪的（含程序自定义类型）留白。
+- **新增 `pass1c_extern_abi`**（在 `pass1b_types` 之后、`pass2_types` 之前）：
+  统一 resolve + §2 校验 + 补登记。`check_extern_cfunc` / `check_extern_var` 两个
+  助手 `report=false/true` 复用同一份逻辑，避免同一错误报两次。
+- 未知类型的诊断从 `missing type` 改成 `type could not be resolved`。
+- 效果：`struct`/`cunion`/`enum`/`type` 别名/`ref *P` 都能写进 FFI 签名 ✓
+
+#### 14.20.2 类型怎么跨层传：**类型值随指令走**（不引入类型 id 操作数）
+
+`EXTERN_CALL` / `EXTERN_LOAD` / `EXTERN_STORE` 的操作数个数是**冻结**的
+（旧 `.cxb`/`.cxs` 按固定个数解析）。程序自定义类型的宽度/布局又必须运行期查表。
+解法是复用 `CONSTRUCT` 已有的机制：**compiler 在指令之前 `compile_type_expr` 压一个
+"类型值"**，运行期 pop 出来当类型用。
+
+- 返回：新码 `BCODE_FFI_RET_TYPED`（struct/cunion/enum/带类型的指针）；
+- 数据符号：新码 `BCODE_FFI_DATA_TYPED`（struct/cunion/enum）；
+- `str` 各自有码（`BCODE_FFI_RET_STR` / `BCODE_FFI_DATA_STR`），无需类型值；
+- 变参信息（是否变参 + 固定参数个数）仍在 ret_kind 高位，本轮把 nfixed 从
+  bits16..31 挪到 **bits9..15**（旧产物这些位恒 0，语义不变 ✓）。
+
+#### 14.20.3 描述符构造：`ffi_type_for`（递归）
+
+`vm/ffi_lib.c` 新增 `ffi_type_for(t, vm, &owned, err, ecap)`：
+
+- 标量/`str`/指针/`opaque` → libffi 的**静态**描述符（`out_owned=false`）；
+- `enum` → 递归到**底层整数**；
+- `struct` → 按字段顺序递归新建 `ffi_type{FFI_TYPE_STRUCT}`（elements 以 NULL 结尾）；
+- `cunion` → libffi **没有** union 类型：等价建模成 **size/align 个 align 宽度的
+  整数成员**（`struct { intN a; intN b; … }`）。union 的 size 必是 align 的整数倍
+  （`size = align_up(max member, align)`），所以这样建出来的 size/align 与真 union
+  完全一致，x64 的 ABI 分类（INTEGER/SSE/MEMORY）与寄存器/栈占用因此相同 ✓
+- 新建的描述符用 `malloc` 分配、`ffi_type_release` 释放（与闭包 box 同一约定：
+  libffi 相关内存不走项目 allocator）。调用点用完即释放；闭包把它们挂到
+  `cfunc_ctx_t`（新增 `dispose_fn`）活到闭包销毁——libffi 的 `cif` 持有这些指针。
+
+**实参编组零特判**：clux 的 `value->data` 与 C 同构（编译器保证平凡布局），
+所以 `ffi_arg_desc` 直接把 `value_data(v)` 交给 libffi，结构体就是那块 C 布局字节。
+回调方向同理（handler 按参数类型的 size 拷贝 libffi 给的指针）。
+
+#### 14.20.4 sema：类型可接受性
+
+- 参数：整数族⇄整数族、浮点**同型**、`str`⇄`str`、指针族⇄指针族、
+  **struct/cunion 同型**（描述符按字段构造，布局必须完全一致）；
+- 变参：整数族/浮点/指针/`str`/**struct/cunion** 都可以（C 对聚合类型不做默认提升）；
+- 返回：标量/`opaque`/`str`/struct/cunion/enum/指针族（其余仍报
+  `return type is not marshalable`）；
+- `extern var`：标量/指针/`str`/struct/cunion/enum（`option` 等明确拒绝）。
+- 顺带把 `FFI_MAX_ARGS` 从 8 提到 **16**（真 printf 很容易超 8 个实参）。
+
+#### 14.20.5 测试与验证
+
+- `tests/ffi_testdata.c` 增补：`CluxPoint`(8B INTEGER)、`CluxDPoint`(16B SSE)、
+  `CluxBig`(24B MEMORY)、`CluxNested`(嵌套)、`CluxColor`(enum)、
+  `td_point`/`td_color` 数据符号、`clux_greeting`(char*)、
+  `clux_call_point_cb`(struct 回调)、`clux_point_va_sum`(变参 struct) 等导出。
+- 新增 `tests/ffi_struct_test.cpp` 11 例（判定方式：clux 程序把检查结果写进库里的
+  `td_i32`，宿主侧读回——`driver_run_file` 的返回值只表示"编译并运行成功"，
+  **不代表 main 的返回值**）：三种 ABI 类别的按值传参/返回、嵌套结构体、
+  指向结构体的指针、变参里的结构体、struct 数据符号读写（宿主侧复核）、
+  enum 传参/返回/数据符号、char* 返回（用 libc `strcmp` 比对内容）、
+  struct 回调（C 按值传给 clux 函数并接收其按值返回的 struct）、
+  容器往返（`emit → run .cxb`）、程序自定义类型签名（别名 + 指针通过 / 未知类型报错）。
+- 全量：`build exit=0`、**0 告警**、**1656/1656**、示例 39/39、format 41/41。

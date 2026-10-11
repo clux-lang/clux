@@ -1264,7 +1264,17 @@ static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
     return;
   }
   uint32_t kind = 0;
-  if (!ffi_data_kind_of(ft, sema->vm, &kind)) {
+  if (ffi_data_kind_of(ft, sema->vm, &kind)) {
+    /* 标量/指针/str：宽度由类型码表达 */
+  } else if (ffi_data_kind_needs_type(ft) && token_is(as->op, "=")) {
+    /* struct/cunion/enum：compiler 在写之前压一个类型值（类型表达式取自
+       extern var 的声明）。复合赋值（+= 等）对聚合类型无意义 → 拒绝。 */
+    kind = BCODE_FFI_DATA_TYPED;
+    ast_var_def_t *evd = (ds->ast && ds->ast->kind == AST_VAR_DEF)
+                             ? (ast_var_def_t *)ds->ast
+                             : NULL;
+    n->ffi_var_type_expr = evd ? evd->type_expr : NULL;
+  } else {
     diag_error(sema->diag, sema_loc(sema, &as->base),
                "cannot assign to '%.*s::%.*s': type is not supported for "
                "extern var", (int)liblen, libname, (int)n->variant.len,

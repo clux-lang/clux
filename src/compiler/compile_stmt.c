@@ -111,11 +111,15 @@ static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
   strslice_t q = strslice_from_bytes(qual, (size_t)qn);
 
   if (token_is(n->op, "=")) {
-    compile_expr(c, n->value);                /* 栈: [val] */
+    /* TYPED（struct/cunion/enum）：先压类型值，再压值 → 指令弹 2 写 size 字节；
+       非 TYPED：只压值 → 指令弹 1。两者最终都净 -1（赋值是语句）。 */
+    if (t->ffi_var_kind == BCODE_FFI_DATA_TYPED)
+      compile_type_expr(c, t->ffi_var_type_expr);
+    compile_expr(c, n->value);
     bcode_write_op(c->bc, BCODE_EXTERN_STORE);
     bcode_write_str(c->bc, q);
     bcode_write_u32(c->bc, t->ffi_var_kind);
-    st_push(c, -1);                           /* 弹 1 压 0 */
+    st_push(c, -1);                           /* 弹 1 压 0（TYPED 同样净 -1） */
     return;
   }
 

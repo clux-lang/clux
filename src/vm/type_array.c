@@ -435,7 +435,7 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
 }
 
 /* ================================================================ */
-/* 运行期数组 value 只读访问（供调试/格式化遍历，如 printf %v）        */
+/* 运行期数组 value 只读访问（供 value_dump 等调试遍历使用）            */
 /* ================================================================ */
 
 size_t value_array_count(const value_t *v) {

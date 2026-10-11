@@ -14,6 +14,8 @@
 //   - 字面量/局部函数 body 内不能访问外层局部变量（捕获需闭包，暂不支持），
 //     只能访问参数与全局函数
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 comptime func make_inc(): func(i32) -> i32 {
     return func(x: i32): i32 { return x + 1; };
 }
@@ -28,13 +30,13 @@ comptime func quad(a: i32): i32 { return double_(double_(a)); }
 
 func main(): i32 {
     var inc = make_inc();
-    printf("inc(41) = %d\n", inc(41)); // 42
+    libc::printf("inc(41) = %d\n", inc(41)); // 42
 
     var t = make_twice();
-    printf("twice(21) = %d\n", t(21)); // 42
+    libc::printf("twice(21) = %d\n", t(21)); // 42
 
     var q = quad(3);
-    printf("quad(3) = %d\n", q); // 12
+    libc::printf("quad(3) = %d\n", q); // 12
 
     return 0;
 }

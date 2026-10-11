@@ -1,0 +1,43 @@
+// ffi_struct.cx — M6 FFI：**结构体按值**跨 C ABI（以及 char* 作为返回类型）
+//
+// clux 的 struct 布局就是 C 布局（编译器保证平凡同构），因此只要字段与顺序一致就能
+// 直接按值传给 C——libffi 的 struct 描述符按字段递归构造，x64 的三种 ABI 类别
+// （8 字节走 RAX、16 字节全 double 走 XMM、更大走内存/隐藏指针）自动正确。
+//
+// 这里用 libc 里**真实存在**的结构体返回函数 `div`：
+//     div_t div(int, int)  →  { int quot; int rem; }     （8 字节，走 RAX）
+// 声明成同名布局的 clux struct，返回值就是那个结构体（不需要出参指针）。
+//
+// 关于结构体**按值传参**：C 标准库没有可移植的"收结构体"的函数，因此那条路径由
+// tests/ffi_struct_test.cpp 用自建测试动态库覆盖（8B INTEGER / 16B SSE / 24B MEMORY
+// 三种类别 + 嵌套结构体 + 变参里的结构体 + 回调双向）。这里演示真实库里能拿到的部分。
+
+struct DivT { quot: i32; rem: i32; }     // 对应 C 的 div_t（字段名/顺序/宽度都一致）
+
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+extern cfunc libc::div(num: i32, den: i32): DivT;   // 按值返回结构体
+extern cfunc libc::getenv(name: str): str;         // 按值返回 char*（clux 侧就是 str）
+
+func main(): i32 {
+    // 结构体返回值：字段直接可用（值块就是 C 的那 8 字节）
+    var d: DivT = libc::div(17, 5);
+    if (d.quot != 3 || d.rem != 2) { return 1; }
+
+    // 字段可以再喂回 C（结构体值 = C 布局，取其成员传标量形参）
+    var again: DivT = libc::div(d.rem * 10, 4);
+    if (again.quot != 5 || again.rem != 0) { return 2; }
+
+    // 负数除法：C 的截断语义（-17/5 = -3 余 -2）
+    var neg: DivT = libc::div(-17, 5);
+    if (neg.quot != -3 || neg.rem != -2) { return 3; }
+
+    // char* 返回值声明成 str，直接用（len / 传给 C 的 char* 形参）
+    var path: str = libc::getenv("PATH");
+    if (len(path) == 0u64) { return 4; }
+
+    libc::printf("div(17,5) = { %d, %d }, div(-17,5) = { %d, %d }, PATH len = %u\n",
+                 d.quot, d.rem, neg.quot, neg.rem, len(path));
+    return 0;
+}

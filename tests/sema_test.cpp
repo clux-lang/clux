@@ -2415,10 +2415,11 @@ TEST_F(SemaTest, FuncValueParamShadowsFunctionName) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, FuncValueBuiltinPrintf) {
-    /* 内建 printf 与普通函数同等看待：函数值赋值 + 调用 */
+TEST_F(SemaTest, FuncValueBuiltinLen) {
+    /* 内建函数与普通函数同等看待：函数值赋值 + 调用。
+       用 `len`——printf 已从内建删除（改由 libc 经 FFI 提供，见 §14.19）。 */
     EXPECT_TRUE(analyze(
-        "func main(): void { var p = printf; p(\"%d\", 42); }"));
+        "func main(): void { var p = len; var n = p(\"abc\"); }"));
     EXPECT_FALSE(diag_has_error(diag_));
 }
 

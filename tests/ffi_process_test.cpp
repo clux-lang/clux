@@ -320,8 +320,9 @@ TEST(FfiReturnAndArgs, UnsignedReturnTypeMatchesDeclaration) {
   std::remove(path.c_str());
 }
 
-/* 实参校验：数量不符 / 浮点实参喂整数签名 / 浮点变参 / f32 返回 —— 都要在
-   编译期给出明确诊断（此前是完全不校验，静默按 int64 传参）。 */
+/* 实参校验：数量不符 / 浮点喂整数形参 / f32 与 f64 混宽度 / 结构体按值 /
+   进程里没有的符号 —— 都要在编译期给出明确诊断（类型不符此前完全不校验，
+   会静默按 int64 传参）。 */
 TEST(FfiReturnAndArgs, ArgumentAndReturnDiagnostics) {
   const std::string lib = std::string("extern lib \"") + kHostLib + "\" as c;\n";
   std::vector<std::pair<std::string, std::string>> cases = {
@@ -329,19 +330,19 @@ TEST(FfiReturnAndArgs, ArgumentAndReturnDiagnostics) {
       {lib + "extern cfunc c::abs(x: i32): i32;\n"
              "func main(): i32 { return c::abs(1, 2); }\n",
        "argc"},
-      /* 浮点实参喂整数形参（会被塞进整数寄存器） */
+      /* 浮点实参喂整数形参（描述符不同：double 不能当 int 传） */
       {lib + "extern cfunc c::abs(x: i32): i32;\n"
              "func main(): i32 { return c::abs(1.5); }\n",
        "float_arg"},
-      /* 非浮点签名里的浮点形参：整条签名只有"全 double"通路支持浮点 */
-      {lib + "extern cfunc c::foo(x: f64): i32;\n"
-             "func main(): i32 { return c::foo(1.5); }\n",
-       "mixed_sig"},
-      /* f32 返回未支持（调用层按全 double 读 XMM0）——用真实存在的符号，
-         确保命中的是"返回类型"诊断而不是"符号不存在" */
-      {lib + "extern cfunc c::strlen(s: str): f32;\n"
-             "func main(): i32 { return 0; }\n",
-       "f32_ret"},
+      /* 浮点**混宽度**：f32 实参喂 f64 形参（描述符不同，要显式 as 转换） */
+      {lib + "extern cfunc c::sqrt(x: f64): f64;\n"
+             "func main(): i32 { return c::sqrt(1.5f32) as i32; }\n",
+       "f32_to_f64"},
+      /* 结构体按值传参尚未支持（§2 允许，但搬运层要构造 struct 描述符） */
+      {"struct P { x: i32; }\n" + lib +
+           "extern cfunc c::foo(p: P): i32;\n"
+           "func main(): i32 { return 0; }\n",
+       "struct_arg"},
       /* 进程里没有这个符号（编译期按进程解析校验） */
       {lib + "extern cfunc c::clux_no_such_symbol_xyz(): i32;\n"
              "func main(): i32 { return 0; }\n",

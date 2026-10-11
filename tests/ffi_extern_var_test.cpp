@@ -473,8 +473,8 @@ TEST(FfiExternVarSource, Diagnostics) {
   std::vector<std::pair<std::string, std::string>> cases = {
       /* 未声明的库别名 */
       {"extern var nolib::x: i32;\nfunc main(): i32 { return 0; }\n", "nolib"},
-      /* 类型不在可编组子集（str 是 C ABI 允许的，但没有固定外部宽度） */
-      {decl_lib + "extern var td::td_i32: str;\n"
+      /* 类型不在可编组子集（option 没有 C 表示；str/struct/enum 现在都支持了） */
+      {decl_lib + "extern var td::td_i32: ?i32;\n"
                   "func main(): i32 { return 0; }\n",
        "badtype"},
       /* 库里没有这个数据符号（编译期 dlsym 校验） */

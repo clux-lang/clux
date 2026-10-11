@@ -31,6 +31,10 @@ typedef struct {
      * 置位时 type_expr 保持 AST_IDENT（sema 不把它折叠成类型）。 */
     bool        is_ffi_var;
     uint32_t    ffi_var_kind;
+    /* 数据符号的类型是程序自定义类型（struct/cunion/enum）时，sema 在这里挂上
+     * 声明的**类型表达式**；compiler 在读/写之前先 `compile_type_expr` 压一个
+     * 类型值（ffi_var_kind = BCODE_FFI_DATA_TYPED），运行期按该类型的 size 读写。 */
+    ast_node_t *ffi_var_type_expr;
 } ast_enum_ref_t;
 
 static inline ast_node_t *ast_enum_ref_new(arena_t *arena,

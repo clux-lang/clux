@@ -528,7 +528,7 @@ static char *tuple_type_name(allocator_t *alloc, const tuple_type_t *tt) {
 }
 
 /* ===========================================================================
- * 运行期 tuple value 只读访问（供调试/格式化遍历，如 printf %v）
+ * 运行期 tuple value 只读访问（供 value_dump 等调试遍历使用）
  * =========================================================================== */
 
 size_t value_tuple_count(const value_t *v) {

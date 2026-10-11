@@ -18,6 +18,8 @@
 // ⚠️ 这里改的是 **CRT 自己的全局变量**：示例跑完会把值还原。真实程序里要谨慎
 // （例如 `_fmode` 影响文件打开模式），优先用 CRT 提供的 setter（`_set_fmode`）。
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 extern lib "msvcrt.dll" as crt;
 
 extern var crt::_fmode: i32;      // 文件打开模式（int 全局变量）
@@ -27,7 +29,7 @@ extern var crt::_pgmptr: opaque;  // 程序路径指针（指针宽度 → opaqu
 func main(): i32 {
     // 读：EXTERN_LOAD 按类型宽度从符号地址取字节
     var old: i32 = crt::_fmode;
-    printf("before: _fmode = %d, _osplatform = %u\n", old, crt::_osplatform);
+    libc::printf("before: _fmode = %d, _osplatform = %u\n", old, crt::_osplatform);
 
     // 写：EXTERN_STORE 直接把值写进库里的内存（宿主侧可见）
     crt::_fmode = 32768; // _O_BINARY
@@ -48,6 +50,6 @@ func main(): i32 {
     // 平台标识读一下即可（现代 Windows 上是 2 = VER_PLATFORM_WIN32_NT）
     if (crt::_osplatform == 0u32) { return 4; }
 
-    printf("after:  _fmode = %d (restored)\n", crt::_fmode);
+    libc::printf("after:  _fmode = %d (restored)\n", crt::_fmode);
     return 0;
 }

@@ -18,6 +18,8 @@
 // 平台说明：C 运行库的名字随平台而变（Windows `msvcrt.dll`、Linux `libc.so.6`、
 // macOS `libSystem.B.dylib`）；libffi 端口目前只提供 Windows x64 构建。
 
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
 extern lib "msvcrt.dll" as crt;
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
@@ -41,13 +43,15 @@ cfunc cmp(a: opaque, b: opaque): i32 {
 
 func main(): i32 {
     var arr = .[5]i32{4, 2, 5, 1, 3};
-    printf("before: %v\n", arr);
+    // 注意：%v（旧内建 printf 的"打印任意值"扩展）已随内建一起删除——
+    // 原生 printf 只认 C 的转换符，聚合值请逐个成员打印（或自己写格式化函数）。
+    libc::printf("before: %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
 
     // 数组地址（ref 指针 → opaque 隐式转换）+ C 函数指针 → libc qsort
     crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp));
 
-    printf("after:  %v\n", arr);
-    printf("qsort called the clux comparator %d times\n", CALLS);
+    libc::printf("after:  %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
+    libc::printf("qsort called the clux comparator %d times\n", CALLS);
 
     // 自检：已升序、首尾正确、回调确实被调用过
     if (arr[0] > arr[1]) { return 1; }

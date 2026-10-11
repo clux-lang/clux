@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -22,7 +22,8 @@ std::string write_temp_file(const std::string &content) {
   static int counter = 0;
   path_str += std::to_string(counter++);
   FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
+  const std::string src_ = clux_with_printf_prelude(content);
+  fwrite(src_.data(), 1, src_.size(), fp);
   fclose(fp);
   return path_str;
 }
@@ -136,9 +137,9 @@ TEST(Driver, RunFileEmptyOptionalFuncArrayFillsNil) {
       "  var e1:?func()->i32 = fns[1];\n"
       "  var e2:?func()->i32 = fns[2];\n"
       "  if (e0 == nil && e1 == nil && e2 == nil) {\n"
-      "    printf(\"all nil\\n\");\n"
+      "    libc::printf(\"all nil\\n\");\n"
       "  } else {\n"
-      "    printf(\"not nil\\n\");\n"
+      "    libc::printf(\"not nil\\n\");\n"
       "  }\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
