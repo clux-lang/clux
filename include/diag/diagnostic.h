@@ -27,7 +27,12 @@ typedef enum {
 typedef struct _diagnostic_t {
   diag_level_t level;
   location_t   loc;
-  char        *message; /* NUL-terminated, owned by the buffer */
+  char        *message;  /* NUL-terminated, owned by the buffer */
+  /* loc.filename 的**自有副本**（NUL 终止，owned by the buffer）。
+     location_t 里的 filename 是借用指针（词法器的 filename "must outlive the
+     lexer"、驱动侧规范化路径等），调用方可能在诊断打印前释放它；诊断在注册时
+     拷贝一份，打印/读源码行只用这份副本。loc 本身保留原值不动。 */
+  char        *filename;
 } diagnostic_t;
 
 /* ---- Buffer (opaque to callers) ---- */

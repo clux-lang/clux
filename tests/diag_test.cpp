@@ -115,6 +115,34 @@ TEST_F(DiagTest, MessageCopiedNotAliased) {
     EXPECT_STREQ(diag_items(db_)[0].message, "hello");
 }
 
+TEST_F(DiagTest, FilenameCopiedNotAliased) {
+    /* location_t.filename 是借用指针（词法器的 filename 只保证活过 lexer、
+       驱动侧规范化路径在诊断打印前就被释放）——诊断必须在注册时拷贝一份，
+       调用方释放后仍能打印出正确路径。 */
+    char *path = static_cast<char *>(malloc(64));
+    ASSERT_NE(path, nullptr);
+    strcpy(path, "freed_after_record.clx");
+
+    location_t loc;
+    loc.filename     = path;
+    loc.begin.line   = 3;
+    loc.begin.column = 5;
+    loc.end.line     = 3;
+    loc.end.column   = 6;
+    diag_error(db_, loc, "boom");
+    free(path); /* 模拟驱动侧释放规范化路径 */
+
+    ASSERT_EQ(diag_count(db_), 1u);
+    ASSERT_NE(diag_items(db_)[0].filename, nullptr);
+    EXPECT_STREQ(diag_items(db_)[0].filename, "freed_after_record.clx");
+
+    testing::internal::CaptureStderr();
+    diag_print_all(db_);
+    std::string out = testing::internal::GetCapturedStderr();
+    EXPECT_NE(out.find("freed_after_record.clx:3:5: error: boom"),
+              std::string::npos);
+}
+
 TEST_F(DiagTest, MultipleRecordsOrdered) {
     diag_error(db_, make_loc(1, 1), "first");
     diag_error(db_, make_loc(2, 2), "second");

@@ -58,6 +58,7 @@ void diag_buf_destroy(diag_buf_t **db) {
   diag_buf_t *self = *db;
   for (size_t i = 0; i < self->count; i++) {
     allocator_free(self->alloc, (void **)&self->items[i].message);
+    allocator_free(self->alloc, (void **)&self->items[i].filename);
   }
   allocator_free(self->alloc, (void **)&self->items);
   allocator_free(self->alloc, (void **)db);
@@ -73,6 +74,15 @@ static void diag_add(diag_buf_t *db, diag_level_t level, location_t loc,
   d->level = level;
   d->loc = loc;
   d->message = NULL;
+  d->filename = NULL;
+  if (loc.filename) {
+    /* 位置里的 filename 是借用指针，注册时拷贝一份自有副本，
+       使诊断在调用方释放路径缓冲后仍可打印（含源码片段）。 */
+    size_t n = strlen(loc.filename) + 1;
+    d->filename = allocator_new_ex(db->alloc, "char", sizeof(char),
+                                   default_move, default_clone, NULL, n);
+    memcpy(d->filename, loc.filename, n);
+  }
   if (fmt) {
     va_list ap2;
     va_copy(ap2, ap);
@@ -173,7 +183,7 @@ static size_t line_no_width(size_t line_no) {
  * fallback 到单行格式。
  */
 static bool print_snippet_block(FILE *out, const diagnostic_t *d) {
-  const char *filename = d->loc.filename;
+  const char *filename = d->filename;
   size_t line_no = d->loc.begin.line;
   size_t col = d->loc.begin.column;
   if (!filename || line_no == 0 || col == 0) return false;
@@ -210,7 +220,7 @@ void diag_print_all(const diag_buf_t *db) {
   if (!db) return;
   for (size_t i = 0; i < db->count; i++) {
     const diagnostic_t *d = &db->items[i];
-    const char *file = d->loc.filename ? d->loc.filename : "<unknown>";
+    const char *file = d->filename ? d->filename : "<unknown>";
 
     /* 能读到源码行 → Rust 风格块；否则 fallback 单行 */
     if (print_snippet_block(stderr, d)) continue;
