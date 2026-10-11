@@ -1,0 +1,141 @@
+// manual_vtable.cx — 样例：用户侧手写"虚表"（clux 不做隐式虚表）
+//
+// 设计原则：clux **没有**隐式/隐藏虚表，**不做**自动动态分派。
+//   - 方法调用 `t.f()` ≡ `typeof(t)::f(t.&)` 是**编译期静态绑定**：调用点
+//     直接绑定到具体实现，运行期不查表、对象里没有隐藏的 vptr；
+//   - 需要"虚方法/接口"语义时，由**用户显式**把函数值放进字段、自己查表调用。
+//
+// 本文件就是那个"用户侧模式"的最小可运行版本：
+//
+//   ShapeOps             —— 一张"虚表行"：一组函数类型字段（手动填的槽）
+//   Shape                —— 公共前缀（"基"）：只放一个指向表行的指针
+//   Circle / Rect / Square —— 具体"类型"，用 `...Shape;` 组合得到公共前缀
+//   circle_ops / ...     —— 每"类型"一份全局表（表里放各自的实现）
+//   name_of / area_of    —— 统一入口：读对象里的表指针，再调用表里的槽
+//   total_area           —— 异构集合遍历：`ref []ref *const Shape` + 前缀向上转换
+//
+// 两个语言事实让这个模式成立（探针结论见 docs/m6-design.md §14.24）：
+//   1. 结构体字段可以是**函数类型**（`func(opaque) -> i32`）：函数名 / 结构体成员
+//      方法 / 函数字面量 / 闭包都能填进去，字段可读可写，可经 `obj.slot(args)` 调用；
+//   2. 结构体字段类型**不能引用自身、也不能引用尚未声明的结构体**（clux 无前置
+//      声明），所以表行的函数签名一律写 `opaque`（≈ C 的 `void*`）——指针 → opaque
+//      是隐式转换，opaque → 指针用 `as` 显式还原，正是 C 里 `void *user` 的用法。
+//
+// 表是**普通数据**：统一入口每次调用都重新读对象的 `ops` 指针，因此同一个结构体
+// 的两个实例可以装不同的表（本文件末尾的 square/square_doubled 就是），
+// 换表即换行为——但这是**用户自己**安排在字段里的，不是编译器偷偷塞的。
+//
+// 与 VM 内部的 `vtable_t`（include/vm/vtable.h，**类型自身的运算行为表**：
+// clone/dispose/eq/add/index…）无关：那是类型系统的内部机制，不是对象多态。
+
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+// ---- 表行：一组函数指针槽（手动虚表）----
+struct ShapeOps {
+    name: func(opaque) -> str;
+    area: func(opaque) -> i32;
+}
+
+// ---- 公共前缀（"基"）：只持有指向表行的指针 ----
+struct Shape {
+    ops: ref *const ShapeOps;
+}
+
+// ---- 具体"类型"：`...Shape` 在最前 → 前缀兼容 + 指针向上转换成立 ----
+struct Circle { ...Shape; r: i32; }
+struct Rect   { ...Shape; w: i32; h: i32; }
+struct Square { ...Shape; side: i32; }
+
+// ---- 各"类型"的实现：接收者经 opaque 传入，实现里 as 还原具体类型 ----
+func circle_name(p: opaque): str {
+    _ = p;
+    return "circle";
+}
+func circle_area(p: opaque): i32 {
+    var c = p as ref *const Circle;
+    return c.r * c.r * 3;
+}
+func rect_name(p: opaque): str {
+    _ = p;
+    return "rect";
+}
+func rect_area(p: opaque): i32 {
+    var r = p as ref *const Rect;
+    return r.w * r.h;
+}
+func square_name(p: opaque): str {
+    _ = p;
+    return "square";
+}
+func square_area(p: opaque): i32 {
+    var s = p as ref *const Square;
+    return s.side * s.side;
+}
+// 同一布局的第二个实现：用来演示"表可换 ⇒ 行为随表变"
+func square_area_doubled(p: opaque): i32 {
+    var s = p as ref *const Square;
+    return s.side * s.side * 2;
+}
+
+// ---- 每"类型"一份表（全局变量，地址稳定；对象只借它的地址）----
+var circle_ops: ShapeOps = .ShapeOps{ .name = circle_name, .area = circle_area };
+var rect_ops:   ShapeOps = .ShapeOps{ .name = rect_name,   .area = rect_area };
+var square_ops: ShapeOps = .ShapeOps{ .name = square_name, .area = square_area };
+var square_ops_doubled: ShapeOps =
+    .ShapeOps{ .name = square_name, .area = square_area_doubled };
+
+// ---- 统一入口：调用点静态绑定到"查表这一步"，表里放什么由运行期决定 ----
+func name_of(s: ref *const Shape): str {
+    return s.ops.name(s);
+}
+func area_of(s: ref *const Shape): i32 {
+    return s.ops.area(s);
+}
+
+// ---- 异构集合遍历：数组 / 切片元素统一为 ref *const Shape ----
+func total_area(xs: ref []ref *const Shape): i32 {
+    var acc: i32 = 0;
+    var i: usize = 0usize;
+    while (i < len(xs)) {
+        acc += area_of(xs[i]);
+        i = i + 1usize;
+    }
+    return acc;
+}
+
+func main(): i32 {
+    // 构造：把各自的表填进对象（`'<*>` = 表与对象都不超过全局作用域）
+    var c: '<*> Circle = .Circle{ .ops = circle_ops.&, .r = 3 };
+    var r: '<*> Rect   = .Rect{ .ops = rect_ops.&, .w = 4, .h = 5 };
+    var q: '<*> Square = .Square{ .ops = square_ops.&, .side = 6 };
+
+    // 前缀向上转换：ref *Circle / ref *Rect / ref *Square → ref *const Shape
+    var s1: ref *const Shape = c.&;
+    var s2: ref *const Shape = r.&;
+    var s3: ref *const Shape = q.&;
+    if (name_of(s1) != "circle") { return 1; }
+    if (area_of(s1) != 27) { return 2; }
+    if (name_of(s2) != "rect") { return 3; }
+    if (area_of(s2) != 20) { return 4; }
+    if (name_of(s3) != "square") { return 5; }
+    if (area_of(s3) != 36) { return 6; }
+
+    // 数组字面量：元素各自向上转换（异构集合）
+    var arr: '<*> [3]ref *const Shape = .[3]ref *const Shape { c.&, r.&, q.& };
+    if (total_area(arr[0:3]) != 83) { return 7; }
+
+    // 切片：make 出来的异构集合，同一入口同样的结果
+    var sl: own []ref *const Shape = make(ref *const Shape, 3, c.&, r.&, q.&);
+    if (total_area(sl) != 83) { return 8; }
+
+    // 表是数据：同一个结构体的另一个实例装另一张表 → 同一入口得到另一种实现
+    var q2: '<*> Square = .Square{ .ops = square_ops_doubled.&, .side = 6 };
+    if (area_of(q2.&) != 72) { return 9; }
+    if (area_of(q.&) != 36) { return 10; }   // q 自己那张表没被影响
+
+    libc::printf("manual_vtable: circle=%d(%s) rect=%d(%s) square=%d(%s) total=%d doubled=%d\n",
+           area_of(c.&), name_of(c.&), area_of(r.&), name_of(r.&),
+           area_of(q.&), name_of(q.&), total_area(arr[0:3]), area_of(q2.&));
+    return 0;
+}

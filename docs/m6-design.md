@@ -1684,3 +1684,197 @@ union payload、字节码运行期 `DEFINE_TYPE`/`SEAL`）不置位，保持既�
 - `examples/struct_compose/struct_compose.cx`：组合 + 向上转换 + 成员共享 + 布局对照。
 - 全量：build exit=0、**0 告警**、**1711/1711**、示例 **42/42**（0 泄漏）且 42/42
   emit → run .cxb 全通过、format 幂等 **44/44**。
+
+### 14.24 ✅ 不做隐式虚表：静态分派 + 用户侧手写虚表
+
+**决策（用户口径，唯一权威）**：
+
+> "已经差不多了，clux 不要看不见的虚表，如果需要类似虚表的功能，用户应该自己实现"
+
+#### 14.24.1 原则（写死，不是"待实现"）
+
+1. **永久不做**隐式/隐藏虚表，**不做**自动动态分派：对象布局里没有 vptr，调用点不查表；
+2. **方法调用保持编译期静态绑定**：`t.f()` ≡ `typeof(t)::f(t.&)` 在编译期解析到**确定的
+   那一个**实现；
+3. **需要虚表语义时，用户自己显式实现**：把函数值放进结构体字段 / 表结构，自己填表、
+   自己查表调用；
+4. 与 VM 内部的 `vtable_t` **无关**（见 §14.24.5）。
+
+语言规格侧的同一条非目标写在 `docs/language-spec-m1.md`（结构体嵌入那一段之后）。
+
+#### 14.24.2 为什么这样定
+
+- **可预测的对象布局**：struct 的字段表就是布局，`...Base` 组合与指针向上转换
+  （§14.23）都按字段表在**编译期**判定；没有隐藏槽位 → `sizeof` / FFI struct 互操作 /
+  内存对照保持"所见即所得"。
+- **零隐藏成本**：不查表、对象里没有额外的表指针、单态调用点不会退化成间接跳转。
+- **与静态子类型关系自洽**：`...Base` 的前缀字段兼容 + 指针向上转换是**编译期**关系；
+  若再叠一层运行期类型信息，两套"算不算同一个类型"的判据会互相打架（鸭子类型 /
+  布局兼容同理）。clux 只保留编译期那一套。
+- **可见性**：动态分派的那一跳写在用户源码里（"读哪个字段、调哪个槽"），调试与审计
+  不需要知道编译器的隐藏约定。
+- **代价可控**：用户侧模式已验证成立（§14.24.3），且**不需要动编译器**——本次 C/C++
+  源码改动 **0 行**（只有文档 + 一个示例）。
+
+#### 14.24.3 探针结论：用户侧能自己实现虚表吗 —— 能（`build/tmp` 13 个探针）
+
+结论先给：**函数类型字段 + 显式查表**这条路完全可用（声明、字面量初始化、后置赋值、
+经字段调用、用结构体成员方法 / 函数字面量 / 闭包填槽、异构集合遍历都通过）。唯一要绕的是
+**字段类型的依赖不能成环**：clux 没有"不完全类型"，字段类型的依赖图必须无环——自引用
+（`next: ref *const Node`）与互相引用（两个 struct 各自点名对方）都在字段处报
+`unknown field type`；而**前向引用是支持的**（字段类型可以点名**后面**才声明的 struct，
+写在函数签名里也行；compose pass 会延后一轮重试到不动点）。于是"对象持表指针 + 表行的
+函数签名点名对象类型"这一自然写法恰好成环 → 表行签名写 `opaque`（≈ C 的 `void*`），
+实现里 `as` 还原具体类型，正是 C 里 `void *user` 的惯用法。
+
+| 探针 | 验证点 | 结果 |
+| --- | --- | --- |
+| `probe1_field_fn.cx` | 函数类型字段的声明 / `.T{ .f = impl }` 字面量填充 / 后置赋值 / 值接收者与指针接收者调用（`a.draw()`、`p.draw()`） | ✅ exit 0 |
+| `probe2_fn_with_args.cx` | 带参签名 `func(i32) -> i32`；结构体成员方法 `Circle::area` 作为函数值取出并调用 | ✅ exit 0 |
+| `probe3_selfref.cx` | 字段的函数**签名**引用**自身** struct | ❌ 环（见下） |
+| `probe4_collection.cx` | 同上的集合版（含 `ref []ref *const Shape`） | ❌ 同一诊断 |
+| `probe5_opaque.cx` | 签名写 `opaque` + 实现内 `as` 还原：`a.draw(a.&)`、统一入口 `render(self, slot)` | ✅ exit 0 |
+| `probe6_vtbl.cx` | 独立"表行"结构 `ShapeOps` + 全局表变量 + 对象侧 `ref *const ShapeOps` 字段 + `c.ops.area(c.&)` | ✅ exit 0（变量需 `'<*>` 标注） |
+| `probe7_poly.cx` | 完整模式：`...Shape` 公共前缀 + 每类型一张全局表 + 统一入口 + `[2]ref *const Shape` 与 `own []` 遍历 | ✅ exit 0 |
+| `probe8_fwd.cx` | 两个 struct **互相**在字段类型里引用（表在前、数据在后） | ❌ 两个都报环 |
+| `probe9_literal.cx` | 函数**字面量**与**闭包**填槽、运行期替换字段 | ✅ exit 0 |
+| `probe10_later_ptr.cx` | 普通指针字段引用**后面**才声明的 struct（**前向引用**） | ✅ exit 0 |
+| `probe11_later_func.cx` | **函数类型字段的签名**里引用后面才声明的 struct | ✅ exit 0 |
+| `probe12_selfptr.cx` | 自引用普通指针字段（链表 `next: ref *const Node`） | ❌ 环 |
+| `probe13_mutual_ptr.cx` | 两个 struct 互相点名对方的指针字段（`P ↔ Q`） | ❌ 两个都报 |
+
+真实输出（原文）：
+
+```
+# probe1_field_fn.cx
+a.draw()=11 b.draw()=22
+a.draw() after assign=22
+p.draw()=22
+exit=0
+
+# probe2_fn_with_args.cx
+o.f(21)=42
+g(c.&)=27
+h(r.&)=20
+exit=0
+
+# probe5_opaque.cx
+a.draw(a.&)=11
+render(a.&,a.draw)=11 render(b.&,b.draw)=22
+exit=0
+
+# probe6_vtbl.cx
+c=circle area=27
+r=rect area=20
+exit=0
+
+# probe7_poly.cx
+s1: circle 27
+s2: rect 20
+  item 0: circle area=27
+  item 1: rect area=20
+total_area(arr)=47
+  item 0: circle area=27
+  item 1: rect area=20
+exit=0
+
+# probe9_literal.cx
+o.f(41)=42 o.g()=7
+o.f(14) after replace=42
+closure f(2)=42
+exit=0
+
+# probe10_later_ptr.cx
+a.b.x=5
+exit=0
+
+# probe11_later_func.cx
+c.f(d.&)=7
+exit=0
+```
+
+不支持的环节是**同一处**既有边界（不是本次新缺陷）：**字段类型的依赖成环**——自引用
+（probe3/4 的函数签名自引用、probe12 的链表 `next`）与互相引用（probe8、probe13）。
+诊断原文：
+
+```
+error: struct 'Node': unknown field type for 'next'
+ --> build/tmp/probe12_selfptr.cx:7:11
+  |
+7 |     next: ref *const Node;
+  |           ^^^^
+```
+
+```
+error: struct 'Shape': unknown field type for 'draw'
+ --> build/tmp/probe3_selfref.cx:7:11
+  |
+7 |     draw: func(ref *const Shape) -> i32;
+  |           ^^^^
+（级联：error: unknown type in parameter 'self' …）
+```
+
+```
+error: struct 'Vt': unknown field type for 'area'
+error: struct 'Data': unknown field type for 'vt'
+（probe8；probe13 的 P ↔ Q 同理）
+```
+
+**最小绕法（不改编译器，已验证可运行）**：表行签名一律写 `opaque`，实现里 `as` 还原。
+`opaque` ≈ C 的 `void*`：指针 → `opaque` **隐式**转换，`opaque` → 指针用 `as`
+（m3-design §8.4）。这属于"用户可自行实现"的范畴——**不需要**改调用约定、**不需要**
+改对象布局、**不需要**加指令。
+
+补充：**前向引用本身是支持的**（probe10/11）——只要依赖图无环，字段类型与函数签名都可以
+点名后面声明的 struct。所以"精确签名 + 表"并非完全不可写，不可写的只是**对象 ↔ 表互相
+指认**那一种（例如对象持 `ref *const Ops`、`Ops` 的槽又签名到对象类型）；绕开它的另一条
+路是让对象**不**反向引用表（表指针当参数传、或表只被单向引用）。示例选了 `opaque` 这条，
+因为它对"一张表服务多种类型"最直接。
+
+四条使用注意（示例与探针里都实测到）：
+
+- 含 `ref` 字段的结构体变量必须带作用域标注（`var c: '<*> Circle = …`），否则
+  `error: variable of type 'Circle' contains ref fields and must declare a scope annotation (e.g. '<a> Circle)`。
+- `len(x)` 是 `usize` → 遍历下标写 `var i: usize = 0usize;`，否则
+  `error: type mismatch: cannot apply '<' to i32 and u64`。
+- `own []T` 直接传给 `ref []T` 形参（不要再取地址，`own []T → ref []T` 已可隐式）；
+  数组字面量元素含 `ref` 时，数组变量同样要 `'<*>`。
+- 指针 → `opaque` **不能**写 `as`（运行期会报 `ptr: unsupported explicit cast for
+  pointer`）——它本来就是隐式转换，直接传。
+
+#### 14.24.4 用户侧模式（四件套 + 示例）
+
+```cx
+struct ShapeOps {                             // ① 表行：手动填的槽
+    name: func(opaque) -> str;
+    area: func(opaque) -> i32;
+}
+struct Shape { ops: ref *const ShapeOps; }    // ② 公共前缀（"基"）
+struct Circle { ...Shape; r: i32; }           // ③ 具体"类型"（前缀兼容 → 向上转换）
+var circle_ops: ShapeOps = .ShapeOps{ .name = circle_name, .area = circle_area };  // 每类型一张表
+func area_of(s: ref *const Shape): i32 { return s.ops.area(s); }   // ④ 统一入口：查表在源码里
+```
+
+- 示例：[examples/manual_vtable/manual_vtable.cx](../examples/manual_vtable/manual_vtable.cx)
+  —— Circle / Rect / Square 三张表 + `area_of` / `name_of` 统一入口 +
+  `[3]ref *const Shape` 数组与 `own []ref *const Shape` 切片两种异构集合遍历 +
+  同型不同表的两个实例（表是数据 ⇒ 运行期换表换行为）。
+- 运行输出：`manual_vtable: circle=27(circle) rect=20(rect) square=36(square) total=83 doubled=72`。
+
+#### 14.24.5 与 VM 内部 `vtable_t` 的区别（别混）
+
+| | `vtable_t`（`include/vm/vtable.h`） | 对象多态"虚表" |
+| --- | --- | --- |
+| 归属 | **类型自身的运算行为表**（类型系统内部） | 用户数据里的函数指针槽 |
+| 内容 | `clone` / `move` / `dispose` / `assign` / `eq` / `ne` / `add` / `get_index` / … | 用户自己定义的"方法" |
+| 分派时机 | 值运算时由 VM 按**值的类型**取槽（类型早已确定） | 由**用户源码**显式读字段再调用 |
+| 结论 | clux 保留（实现细节，与多态无关） | clux **不做**（用户自己写） |
+
+#### 14.24.6 测试与验证
+
+- `examples/manual_vtable/manual_vtable.cx`：`run` exit 0、无 memory leak；
+  `bc emit` → `run .cxb` 同结果；`format` 幂等。
+- 全量：build exit=0（强制全量重编 188 步）、**0 告警 / 0 错误**、
+  **1712/1712 PASSED / 0 FAILED**（无泄漏报告）、示例 **43/43 main 全 exit 0 且 0 泄漏**、
+  43/43 `emit → run .cxb` 通过、format 幂等 **45/45**。
+- 本次改动不含任何 C/C++ 源码改动（`git status` 只有 3 个文档 + 1 个新示例）。

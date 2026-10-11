@@ -293,6 +293,27 @@ struct Test { ...Base; extra: i64; }   // Test 的字段 = id, extra
 - **限制**：`...Name` 目前只支持**同一编译单元内**声明的结构体（跨 `import` 的结构体
   报"no struct type with that name in this compilation unit"）。
 
+**不做隐式虚表：静态分派 + 用户侧手写虚表（2026-10 定稿，非目标）**：clux **不提供**
+隐式（编译器隐藏的）虚表，**不做**自动动态分派。这是**设计原则**，不是"尚未实现"：
+
+- **方法调用是编译期静态绑定**：`t.f()` ≡ `typeof(t)::f(t.&)` 在编译期解析到**确定的
+  那一个**实现；对象布局里**没有**隐藏的 vptr/vtable 槽，调用点**不查表**，运行期无
+  隐藏成本。这与结构体嵌入给出的静态子类型关系自洽：`...Base` 只是重排字段表，
+  不引入任何运行期类型信息。
+- **需要虚表语义时，用户自己显式实现**：把**函数类型字段**当槽位，自己填表、自己
+  查表调用（形如 `var slot: func(opaque) -> i32 = impl;` … `obj.slot(obj.&)`）。
+  可运行示例：[examples/manual_vtable/manual_vtable.cx](../examples/manual_vtable/manual_vtable.cx)
+  （`...Shape` 公共前缀 + 每"类型"一张全局函数表 + 统一入口遍历异构集合）；
+  设计说明见 [m6-design.md §14.24](m6-design.md)。
+- **别与 `vtable_t` 混淆**：`include/vm/vtable.h` 的 `vtable_t` 是**类型自身的运算行为
+  表**（clone / dispose / assign / eq / get_index / … 的 VM 内部函数指针表），属于类型
+  系统的实现细节，与"对象多态 / 虚方法"无关。
+- **用户侧模式的边界**（探针结论见 §14.24）：**字段类型的依赖不能成环**——自引用
+  （`next: ref *const Node`）与两个 struct 互相点名都在字段处报 `unknown field type`；
+  前向引用（点名**后面**才声明的 struct，写在函数签名里也行）反而支持。因此"对象持表
+  指针 + 表行签名点名对象类型"这一写法要改成表行签名写 `opaque`（≈ C 的 `void*`）——
+  指针 → `opaque` 是隐式转换，`opaque` → 指针用 `as` 显式还原。
+
 **`volatile` 在脚本态被完全忽略（2026-10 起）**：`volatile T` 一律折叠为 `T` ——
 类型解析（sema）、类型构造（compiler）、CTFE 类型值求值三处都直接取 sub，因此
 volatile 不参与任何类型检查：读写、运算、复合赋值、与 `T` 双向赋值、传参、比较、
