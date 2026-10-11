@@ -107,8 +107,11 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
   }
 
   if (type_expr->kind == AST_VOLATILE) {
+    /* `volatile T` **在脚本态无意义**：sema 与 compiler 一律折叠为 T（完全放行）。
+       这里只编译 sub、不发 BCODE_CREATE_VOLATILE——保证 sema 眼中的类型与运行期
+       构造出来的类型一致（否则声明处得到 volatile i32、而类型检查按 i32 走）。
+       fmt 仍原样打印 `volatile`（不动 AST），因此格式化不会静默丢关键字。 */
     compile_type_expr(c, ((ast_volatile_t *)type_expr)->sub);
-    bcode_write_op(c->bc, BCODE_CREATE_VOLATILE);
     return;
   }
 

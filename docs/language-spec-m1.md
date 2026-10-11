@@ -215,6 +215,14 @@ const *i32 p;       // const 修饰指针 → 指针不可变，指向的 i32 �
 const *const i32 p; // 第一个 const 修饰指针，第二个 const 修饰 i32 → 两者都不可变
 ```
 
+**`volatile` 在脚本态被完全忽略（2026-10 起）**：`volatile T` 一律折叠为 `T` ——
+类型解析（sema）、类型构造（compiler）、CTFE 类型值求值三处都直接取 sub，因此
+volatile 不参与任何类型检查：读写、运算、复合赋值、与 `T` 双向赋值、传参、比较、
+取字段、作指针 base 全部放行；`const volatile T` / `volatile const T` 只保留
+`const` 语义。理由：脚本/VM 全程由运行时持有数据、没有编译器的重排序优化，
+`volatile` 的语义没有承载对象。AST 与 fmt 保持不变（源码里的 `volatile` 仍原样
+打印，不会静默丢关键字）；VM 类型系统内部的 volatile 类型（`type_volatile_intern`）
+仍保留为 API，只是源码不再产生它。
 **语义（已实现）**：const/volatile 是真实类型（intern 池管理，`const i32 != i32`），可任意顺序重复修饰并位或合并（`const volatile i32`、`volatile const i32` 等价，固定组合顺序 `volatile(const(T))`）：
 
 - **const**：声明后不可再作为赋值左值。`var x:const T = undefined` 声明后**首次赋值豁免**（TDZ 赋值 = 初始化，仅一次），此后赋值/复合赋值编译报错。读取与参与运算不受限。

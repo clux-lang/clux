@@ -2684,9 +2684,8 @@ static value_t *ex_volatile(sema_t *sema, ast_node_t **node,
                    "'volatile' requires a type operand");
         return val_void(sema);
       }
-      const type_t *sub_t = value_as(sub, const type_t *);
-      const type_t *vt = type_volatile_intern(sema->vm, sub_t);
-      return type_as_value(sema->vm, vt);
+      /* `volatile T` 在脚本态无意义：表达式形式同样折叠为 T（与类型解析一致） */
+      return sub;
 }
 
 /* AST_SIZEOF / AST_ALIGNOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */

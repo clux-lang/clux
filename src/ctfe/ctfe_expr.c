@@ -282,8 +282,10 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (value_is_error(vm, sub)) return sub;
         if (!value_is_type(sub, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: 'volatile' requires a type operand");
-        const type_t *inner = value_as(sub, const type_t *);
-        return type_as_value(vm, type_volatile_intern(vm, inner));
+        /* `volatile T` 在脚本态无意义 → 折叠为 T（与 sema 的类型解析、compiler 的
+           类型构造一致）。类型别名 `type X = [2]volatile i32;` 走的就是这条 CTFE
+           路径，漏掉它会让声明侧留下 volatile 类型而初始化值没有。 */
+        return sub;
     }
     case AST_SIZEOF:
     case AST_ALIGNOF:

@@ -402,9 +402,10 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return sub ? type_const_intern(sema->vm, sub) : NULL;
     }
     case AST_VOLATILE: {
-      const type_t *sub =
-          resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
-      return sub ? type_volatile_intern(sema->vm, sub) : NULL;
+      /* `volatile T` **在脚本态无意义** → 折叠为 T（完全放行）：所有类型检查按 T
+         走；compiler 侧同样不发 CREATE_VOLATILE（两处必须一致，否则声明处会构造出
+         volatile i32 而类型检查按 i32 走）。AST/fmt 不动，格式化不会丢关键字。 */
+      return resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
     }
     case AST_OPTION: {
       /* ?T optional 类型修饰：递归解析内层 T → 按 (inner) 去重 intern。

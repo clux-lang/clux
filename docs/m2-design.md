@@ -210,7 +210,11 @@ clux 类型是**前导判定**（前缀式）的：`[N]i32` 数组、`[]i32` 切
 - `*const i32` → const 修饰 i32（i32 是指针的子语句）= pointer to const i32
 - 指针 `*T` **移出 M2**，上述仅为 const 语义说明（未来里程碑实现指针时语法已定）
 
-**volatile：自动解包，vtable 代理**（2026-09-11 确认）：
+> **2026-10 更新**：olatile 在脚本态**被完全忽略**——sema 类型解析、compiler 类型构造、
+> CTFE 类型值求值三处一律折叠为 sub，volatile 不参与任何类型检查（详见 
+> language-spec §3.3）。VM 侧的 volatile 类型（	ype_volatile_intern）保留为 API。
+
+**volatile：自动解包，vtable 代理**（2026-09-11 确认，已被上条取代）：
 - 当前 clux 是脚本执行场景（解释器），volatile 无硬件/多线程语义
 - 语义上 volatile 类型等价子类型，但**实现不直接剥离**：`volatile_type_t` 保留为独立类型，其 vtable 采用**代理方式**——所有槽位转发到子类型的 vtable（运算结果与子类型一致）
 - 好处：类型结构稳定（无需解包重建），未来 volatile 引入真实语义时只需替换 vtable 槽位，不影响其他类型

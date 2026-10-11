@@ -172,6 +172,39 @@ const char *kProgram =
 
 TEST_F(ConstConvertTest, ConstructionParamsAndTdzInit) { expect_verdict(kProgram); }
 
+/* `volatile` **在脚本态完全无视**：sema 与 compiler 一致地折叠为 sub（类型解析与
+ * 类型构造两处），因此 volatile 不参与任何类型检查——读写/运算/复合赋值/双向赋值/
+ * 传参/比较/取字段/指针 base 全部放行；`const volatile` 只保留 const 语义。
+ * AST/fmt 不动（格式化仍原样输出 volatile，不丢关键字）。 */
+TEST_F(ConstConvertTest, VolatileFullyIgnored) {
+  expect_verdict(
+      "struct Test { id: i32; }\n"
+      "func byVal(x: i32): i32 { return x; }\n"
+      "func byConstTest(x: const Test): i32 { return x.id; }\n"
+      "func main(): i32 {\n"
+      "  var verdict: i32 = 0;\n"
+      "  var a: volatile i32 = 1;\n"
+      "  a = a + 1;\n"
+      "  a += 2;\n"
+      "  if (a != 4) { return report(1); }\n"
+      "  var b: i32 = a;\n"
+      "  var c: volatile i32 = b;\n"
+      "  if (byVal(a) != 4 || byVal(c) != 4) { return report(2); }\n"
+      "  var d: const volatile i32 = 7;\n"
+      "  var e: volatile const i32 = 8;\n"
+      "  if (d != 7 || e != 8) { return report(3); }\n"
+      "  if (sizeof(volatile i32) != sizeof(i32)) { return report(4); }\n"
+      "  var t: Test = .Test{ .id = 9 };\n"
+      "  var p: ref *volatile Test = t.&;\n"
+      "  if (p.id != 9) { return report(5); }\n"
+      "  p.id = 10;\n"
+      "  if (t.id != 10) { return report(6); }\n"
+      "  var v: volatile Test = .Test{ .id = 11 };\n"
+      "  if (byConstTest(v) != 11) { return report(7); }\n"
+      "  return report(0);\n"
+      "}\n");
+}
+
 /* 负例：**去**限定不允许；const 变量重赋值不允许；写 const 值的字段不允许 */
 TEST_F(ConstConvertTest, NegativeCases) {
   /* 去限定：const Test → ref *Test（反过来加限定才合法） */

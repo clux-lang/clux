@@ -1354,3 +1354,25 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       format 幂等 **43/43**。
     - 测试与示例：`tests/struct_members_test.cpp` 6 例；`examples/struct_members/`（静态属性跨实例共享 + 值/指针接收者方法 + 只读方法 + 显式限定调用）。
     - （已修复，见 m6-design §14.22.2）：非指针的 `T → const T` 隐式转换运行期报 `struct: implicit cast only within same struct`；通用入口加「只加限定」分支会波及 slice/qualify shadow 路径（5 处回归），已按类型族落地（struct vtable + sema 剥限定 + 运行期字段操作），并新增 tests/const_convert_test.cpp 覆盖构造/值传参/指针传参/TDZ 与 3 个负例。
+68. **`volatile` 在脚本态完全忽略（sema 全面放行）**
+    - **需求（用户指出）**："volatile T 完全无视，volatile 在脚本态无意义，sema 完全放行"。
+    - **实现：三处构造点一律折叠为 sub**（缺一处就会出现"声明侧是 volatile 类型、值侧不是"）：
+      ① sema 类型解析 `resolve_type_expr` 的 `AST_VOLATILE` → 直接返回 sub；
+      ② compiler `compile_type_expr` 的 `AST_VOLATILE` → 只编译 sub、**不发**
+         `BCODE_CREATE_VOLATILE`（否则运行期类型与 sema 视角不一致）；
+      ③ CTFE `ctfe_expr` 的 `AST_VOLATILE`（类型别名 `type X = [2]volatile i32;` 走这条）
+         → 返回内层类型值。第三处是实测漏掉后暴露的（`Driver.RunFileTypeDefAutoHoist`
+         报 "cannot initialize variable 'vp' of type [volatile i32; 2] with [i32; 2]"）。
+    - **AST 与 fmt 不动**：源码里的 `volatile` 仍原样打印（格式化不静默丢关键字）；
+      VM 的 `TYPE_KIND_VOLATILE` / `type_volatile_intern` 保留为 API（源码不再产生它）。
+    - **效果**：volatile 不参与任何类型检查——读写/运算/复合赋值/与 `T` 双向赋值/传参/
+      比较/取字段/作指针 base 全放行；`const volatile T`、`volatile const T` 只保留
+      const 语义（既有的 const volatile 重赋值拒绝用例仍通过）。
+    - **测试**：`tests/const_convert_test.cpp` 新增 `VolatileFullyIgnored`（用测试库
+      `td_i32` 收判定）：volatile 变量读写/复合赋值、volatile↔i32 双向赋值、按值传参、
+      `sizeof(volatile i32) == sizeof(i32)`、`ref *volatile T`（→ `ref *T`）读写、
+      `volatile Test` 传给 `const Test` 形参、`const volatile`/`volatile const` 组合。
+    - **文档**：language-spec §3.3 新增折叠说明；m2-design §10 标注"2026-10 更新，
+      原 volatile 自动解包/vtable 代理设计已被取代"。
+    - 验证：`build exit=0`、**0 告警**、**1677/1677**、示例 **41/41**（0 泄漏）且
+      41/41 `emit → run .cxb` 全通过、format 幂等 **43/43**。
