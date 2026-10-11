@@ -137,6 +137,55 @@ TEST_F(StructTypeTest, NestedStructLayout) {
     EXPECT_EQ(outer->align, 8u);
 }
 
+/* ================================================================
+ * seal 窗口不变量：类型的字段表/嵌入表**只能在 seal 之前**编辑；
+ * seal 之后写入 API 一律拒绝（结构体组合必须走 seal 前窗口）。
+ * ================================================================ */
+
+TEST_F(StructTypeTest, EmbedFieldsOnlyEditableBeforeSeal) {
+    /* Base { id: i32 }（已 seal，作为嵌入来源） */
+    struct_field_t base_f[1] = { { STRSLICE_LIT("id"), 0, vm->type_i32 } };
+    const type_t *base = type_struct_intern(vm, base_f, 1);
+    ASSERT_NE(base, nullptr);
+    ASSERT_TRUE(type_is_sealed(base));
+
+    /* 开放窗口：自有字段 extra 之后再插入 Base 的字段表（layer=1 → 排在 extra 后） */
+    const type_t *open = type_struct_alloc_open(vm);
+    ASSERT_NE(open, nullptr);
+    ASSERT_FALSE(type_is_sealed(open));
+    type_struct_add_field(vm, open, STRSLICE_LIT("extra"), vm->type_i64);
+    ASSERT_EQ(struct_type_field_count(open), 1u);
+
+    const type_t *emb[1] = { base };
+    struct_embed_fields_t span = {
+        struct_type_field(base, 0), 1, 1 /* layer 1 = 末尾（自有字段之后） */
+    };
+    EXPECT_TRUE(type_struct_insert_embed_fields(vm, open, &span, 1));
+    EXPECT_TRUE(type_struct_set_embeds(vm, open, emb, 1));
+    EXPECT_EQ(struct_type_field_count(open), 2u);
+
+    const type_t *sealed = type_struct_seal(vm, open);
+    ASSERT_NE(sealed, nullptr);
+    EXPECT_TRUE(type_is_sealed(sealed));
+    /* 字段序 extra, id（layer=1）；布局 8 + 4 → 16 */
+    EXPECT_EQ(struct_type_field_count(sealed), 2u);
+    EXPECT_EQ(struct_type_field(sealed, 1)->offset, 8u);
+    EXPECT_EQ(sealed->size, 16u);
+    size_t ec = 0;
+    const type_t *const *et = type_struct_embeds(sealed, &ec);
+    ASSERT_EQ(ec, 1u);
+    EXPECT_EQ(et[0], base);
+
+    /* seal 之后：同样的两个写入 API 必须**拒绝**且不改动类型 */
+    size_t before = struct_type_field_count(sealed);
+    EXPECT_FALSE(type_struct_insert_embed_fields(vm, sealed, &span, 1));
+    EXPECT_FALSE(type_struct_set_embeds(vm, sealed, NULL, 0));
+    EXPECT_EQ(struct_type_field_count(sealed), before);
+    size_t ec2 = 0;
+    type_struct_embeds(sealed, &ec2);
+    EXPECT_EQ(ec2, 1u);
+}
+
 TEST_F(StructTypeTest, AddFieldAfterSealIgnored) {
     point_fields[0].type = vm->type_i32;
     point_fields[1].type = vm->type_i32;

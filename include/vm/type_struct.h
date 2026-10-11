@@ -61,8 +61,79 @@ const type_t *type_struct_alloc_open(vm_t *vm);
 void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
                            const type_t *ftype);
 
-/** SEAL：拷贝字段表 + C 对齐布局 + 按 (字段名+类型+顺序) 去重 intern + 置 sealed */
+/** SEAL：拷贝字段表 + C 对齐布局 + 按 (字段名+类型+顺序) 去重 intern + 置 sealed。
+ *
+ *  **seal 是类型生命周期的分界线**（不变量，见下方 type_struct_* 写入 API）：
+ *   - seal **之前**（开放类型）：字段表、嵌入表与**身份标记**（unique）**可编辑**
+ *     ——结构体组合（`...Base;`，sema）与未来的装饰器（在 sema 建出 type 后改类型
+ *     属性）都在这个窗口里完成；
+ *   - seal **之后**：类型不可变——本文件的写入 API 一律拒绝 sealed 类型
+ *     （返回 false，类型一字不改），类型/布局/元数据都只能被读取。
+ *  去重规则：**标记为 unique 的类型（具名 struct 定义）跳过 intern 去重**，独立
+ *  占一个 type_t 对象（见 type_struct_mark_unique）；其余按字段表去重。
+ *  `type_struct_seal` 本身幂等（已 sealed 直接返回自己）。 */
 const type_t *type_struct_seal(vm_t *vm, const type_t *t);
+
+/* ===========================================================================
+ * 结构体组合（`...Base;`）——seal **之前**（开放窗口）的字段/嵌入表编辑
+ *
+ * 用户规格（隐含规则）："在 seal 之前可以复写编辑类型的 attribute"——即类型
+ * 在 seal 前是可编辑的（attribute/元数据可改写），seal 后不可变。因此结构体
+ * 组合（以及未来装饰器对类型的修改）都必须在**目标类型 seal 之前**完成：
+ *   1. sema 走既有开放构造路径建出 Test 的**开放** struct_type（type_struct_alloc_open）；
+ *   2. 逐自有字段 type_struct_add_field；
+ *   3. 把每个 `...Base`（**已 sealed**）的字段表按位置
+ *      type_struct_insert_embed_fields 插进来（虚拟字段：只贡献字段表与 find_field，
+ *      成员方法/静态属性不复制）；
+ *   4. type_struct_set_embeds 登记嵌入表（成员继承查找用）；
+ *   5. type_struct_mark_unique 标记"具名类型、身份独立"（跳过去重 intern）；
+ *   6. 只 seal **一次**（type_struct_seal）——seal 时的深拷贝让两表定型。
+ *
+ * 由此保证：不变量"seal 后类型不可变"在整个仓库成立，组合不需要（也不允许）
+ * 事后改写已 sealed 的类型；`type_t*` 身份由"同一个开放对象就地 seal"保持。
+ * =========================================================================== */
+
+/** 一个 `...Base` 嵌入的字段表插入描述（seal 前插入用）：
+ *  `fields[0..field_count)` 是 Base **已 sealed** 类型此刻的字段表（名字被深
+ *  拷贝、字段类型引用记录）；`layer` = 该 `...Base` 出现在 Test **自有**字段
+ *  的第几个之前（0 = 所有自有字段之前，== 自有字段数 = 最后）——与
+ *  ast_struct_embed_t::field_index 同义，插入位置按 layer 计算。 */
+typedef struct struct_embed_fields_t {
+    const struct_field_t *fields;
+    size_t                field_count;
+    size_t                layer;
+} struct_embed_fields_t;
+
+/** 把嵌入的字段表按 layer 插入开放 struct 类型的字段表（seal 前）。
+ *  `embeds` 按 `...` 声明序传入（同一 layer 的多个嵌入保持声明序）。
+ *  **sealed 类型拒绝**（返回 false，不改动任何东西）——组合必须走 seal 前窗口。
+ *  字段名深拷贝（vm 拥有，与 add_field 一致），字段类型是引用（不拥有）。
+ *  失败（sealed / 参数非法）返回 false。 */
+bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
+                                     const struct_embed_fields_t *embeds,
+                                     size_t embed_count);
+
+/** 登记结构体组合的嵌入表（`...Base` 的类型指针，按声明序；**seal 前**设置）。
+ *  成员名字查找完全依赖它（字段表是虚拟的：只贡献字段，不贡献成员）。
+ *  **sealed 类型拒绝**（返回 false）。表由 vm 拥有（深拷贝指针数组）。 */
+bool type_struct_set_embeds(vm_t *vm, const type_t *t,
+                            const type_t *const *embeds, size_t embed_count);
+
+/** 结构体组合的嵌入表（`...Base` 登记的被嵌入类型，按 `...` 出现顺序）。
+ *  无嵌入（或非 struct）→ *count = 0。指针生命周期同类型对象（vm 拥有）。 */
+const type_t *const *type_struct_embeds(const type_t *t, size_t *count);
+
+/** 把开放 struct 类型标记为**独立身份**（命名 struct 定义用，**seal 之前**调用）。
+ *
+ *  置位后 seal **跳过去重 intern**：该类型不与类型池里字段表相同的既有 struct
+ *  合并，独占一个 type_t 对象。理由是命名的 `struct A` / `struct B` 即使字段表
+ *  逐位相同也是两个不同具名类型（独立成员命名空间 `A::f` / `B::f`、独立嵌入表）；
+ *  合并会让显示名互相覆盖、并让结构体组合的嵌入表退化成 [X, X]（歧义判定失效）。
+ *  返回 false = 参数非法 / 类型已 seal（不变量：类型属性只能在 seal 前编辑）。 */
+bool type_struct_mark_unique(vm_t *vm, const type_t *t);
+
+/** 该 struct 类型是否被标记为独立身份（非 struct / 未标记 → false）。 */
+bool type_struct_is_unique(const type_t *t);
 
 /** 一次性快捷（push + 全量字段 + seal）：sema 构造 struct 类型用。
  * 不向操作数栈压 type value。 */

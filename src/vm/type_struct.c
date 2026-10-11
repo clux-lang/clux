@@ -7,6 +7,7 @@
 #include "core/string.h"
 #include "core/strslice.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ===========================================================================
@@ -29,6 +30,10 @@
  * 结构兼容判断（struct_type_compatible：字段名 + 字段类型 type_equal +
  * 字段顺序完全一致 ⟹ 布局相同）——struct A 与 struct B 字段一致时可互
  * 赋值；匿名构造 .{...} 推断的匿名类型也按此校验。
+ *
+ * 结构体组合（`...Base;`，2026-xx）：类型的字段表与嵌入表（embeds）在
+ * **seal 之前**可编辑（type_struct_insert_embed_fields / type_struct_set_embeds），
+ * seal 之后不可变——两个写入 API 对 sealed 类型拒绝，把不变量固化在代码里。
  * =========================================================================== */
 
 /* ---- 生命周期：clone / assign / dispose（字段递归） ---- */
@@ -200,7 +205,7 @@ const vtable_t VTABLE_STRUCT = {
  * 开放构造（PUSH_STRUCT / DEFINE_FIELD / SEAL）
  * =========================================================================== */
 
-/* dispose_fn：allocator_free 时自动释放字段名 + 字段表 + 显示名
+/* dispose_fn：allocator_free 时自动释放字段名 + 字段表 + 嵌入表 + 显示名
    （open 对象分配时注册，seal 去重回收与 vm_destroy 都只需裸 allocator_free） */
 static void struct_type_dispose(void *self, allocator_t *allocator) {
     struct_type_t *st = (struct_type_t *)self;
@@ -217,6 +222,7 @@ static void struct_type_dispose(void *self, allocator_t *allocator) {
         char *np = (char *)st->base.name.ptr;
         allocator_free(allocator, (void **)&np);
     }
+    if (st->embeds) allocator_free(allocator, (void **)&st->embeds);
 }
 
 static struct_type_t *struct_type_create_open(vm_t *vm) {
@@ -228,6 +234,34 @@ static struct_type_t *struct_type_create_open(vm_t *vm) {
     st->base.vtable = &VTABLE_STRUCT;
     st->base.kind   = TYPE_KIND_STRUCT;
     return st;
+}
+
+/* 字段名深拷贝到 vm 堆（本类型拥有；dispose / seal 去重回收都只释放名字）。
+ * 字段表的**唯一**名字所有权入口：add_field（开放追加）、
+ * insert_embed_fields（seal 前插嵌入字段）、intern（一次性构造）共用，
+ * 因此"字段名归类型所有"这条不变量只有一份实现。 */
+static strslice_t struct_field_name_dup(vm_t *vm, strslice_t name) {
+    char *nbuf = (char *)allocator_new_ex(vm->alloc, "char", sizeof(char), NULL,
+                                          NULL, NULL, name.len + 1);
+    if (!nbuf) panic("vm: out of memory copying struct field name");
+    if (name.len && name.ptr) memcpy(nbuf, name.ptr, name.len);
+    nbuf[name.len] = '\0';
+    return (strslice_t){ nbuf, name.len };
+}
+
+/* 释放字段表里的名字 + 数组本身（**只有本类型拥有的字段表**可以走这里：
+ * seal 去重回收开放对象 / 换表前回收旧表）。名字归类型所有，两者必须成对释放，
+ * 否则换表/回收会漏掉名字那块内存。 */
+static void struct_fields_dispose(vm_t *vm, struct_field_t *fields,
+                                  size_t count) {
+    if (!fields) return;
+    for (size_t i = 0; i < count; i++) {
+        if (fields[i].name.ptr) {
+            char *np = (char *)fields[i].name.ptr;
+            allocator_free(vm->alloc, (void **)&np);
+        }
+    }
+    allocator_free(vm->alloc, (void **)&fields);
 }
 
 /* PUSH_STRUCT：分配空 struct_type（fields=NULL，不入池）+ 压其 type value */
@@ -255,11 +289,7 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     struct_type_t *st = (struct_type_t *)t;
 
     /* 名拷贝（vm 拥有；seal 时整表再拷贝一次，开放期追加名在 seal 后释放） */
-    char *nbuf = (char *)allocator_new_ex(vm->alloc, "char", sizeof(char),
-                                          NULL, NULL, NULL, name.len + 1);
-    if (!nbuf) panic("vm: out of memory adding struct field");
-    memcpy(nbuf, name.ptr, name.len);
-    nbuf[name.len] = '\0';
+    strslice_t nbuf = struct_field_name_dup(vm, name);
 
     size_t n = st->field_count;
     struct_field_t *nf = (struct_field_t *)allocator_new_ex(
@@ -269,7 +299,7 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     if (n > 0) memcpy(nf, st->fields, n * sizeof(struct_field_t));
     if (st->fields) allocator_free(vm->alloc, (void **)&st->fields);
 
-    nf[n].name   = (strslice_t){ nbuf, name.len };
+    nf[n].name   = nbuf;
     nf[n].offset = 0;  /* 布局在 seal 时统一计算 */
     nf[n].type   = ftype;
     st->fields = nf;
@@ -354,8 +384,36 @@ static size_t align_up(size_t v, size_t a) {
     return (v + a - 1) / a * a;
 }
 
+/* 按 C 对齐规则就地计算字段表布局 + 结构体 size/align（offset_0 = 0；
+ * offset_i = align_up(prev_end, align_i)；size = align_up(last_end, max_align)；
+ * align = max(字段 align)；空 struct：C 语义 size=1）。
+ * SEAL 与"seal 前组合好的字段表"共用，布局规则**只此一份**（组合不再有
+ * "seal 之后重算布局"这条路径）。 */
+static void struct_layout_apply(struct_type_t *st) {
+    size_t off = 0, max_align = 1;
+    for (size_t i = 0; i < st->field_count; i++) {
+        struct_field_t *f = &st->fields[i];
+        size_t fa = f->type && f->type->align > 0 ? f->type->align : 1;
+        off = align_up(off, fa);
+        f->offset = off;
+        off += f->type ? f->type->size : 0;
+        if (fa > max_align) max_align = fa;
+    }
+    st->base.size  = align_up(off, max_align);
+    if (st->field_count == 0) st->base.size = 1; /* 空 struct：C 语义 1 字节 */
+    st->base.align = max_align;
+}
+
 /* SEAL：拷贝字段表 + C 对齐布局 + 按 (字段名+类型+顺序) 去重 intern + 置
- * sealed。返回密封后的 const type（可能 != self）。 */
+ * sealed。返回密封后的 const type（可能 != self）。
+ *
+ * 嵌入表（st->embeds）**原样保留**：它是 seal 前（组合窗口）设好的，与字段表
+ * 一起构成 sealed 类型的一次性快照；seal 之后两者都不可变（写入 API 拒绝
+ * sealed 类型）。**具名类型（unique 标记）不参与字段表去重**（见下文
+ * struct_type_t::unique）：字段表相同但成员命名空间/嵌入表不同的两个具名
+ * struct 是**不同类型**。
+ *
+ * **seal 是分界线**：调用本函数之后该类型对象的字段表/嵌入表/布局全部冻结。 */
 const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t || t->kind != TYPE_KIND_STRUCT) return NULL;
     if (type_is_sealed(t)) return t; /* 幂等 */
@@ -371,37 +429,146 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
     if (!vm->struct_types) vm->struct_types = vec_new(vm->alloc, /*owns_element=*/false);
 
     /* 去重 intern：命中已有 sealed 类型则复用并手工回收本开放类型
-       （allocator_free 自动调 dispose_fn 释放字段表） */
+       （allocator_free 自动调 dispose_fn 释放字段表）。
+       **具名类型（unique）不参与去重**：命名的 `struct A` / `struct B` 即使
+       字段表逐位相同，也是两个不同的具名类型（独立成员命名空间与嵌入表）；
+       合并会让显示名互相覆盖、并让结构体组合的嵌入表退化成 [X, X]（成员继承
+       查找按类型去重后歧义/覆盖判定失效）。普通匿名/内部构造的类型保持既有
+       dedup 语义（见 include/vm/type.h 的 struct_type_t::unique 说明）。 */
+    bool skip_dedup = st->unique;
     size_t n = vec_len(vm->struct_types);
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; !skip_dedup && i < n; i++) {
         const struct_type_t *other = (const struct_type_t *)vec_get(vm->struct_types, i);
         if (other && other != st && type_is_sealed(&other->base) &&
-            struct_same(other, st)) {
+            !other->unique && struct_same(other, st)) {
             allocator_free(vm->alloc, (void **)&st);
             return &other->base;
         }
     }
 
-    /* 计算 C 对齐布局：offset_0 = 0；offset_i = align_up(prev_end, align_i)；
-       size = align_up(last_end, max_align)；align = max(字段 align)。
-       空 struct：C 语义 size=1（GCC/MSVC 空 struct 为 1 字节，保证
-       value_alloc_data 能分配 data 块——size==0 会返回 NULL）。 */
-    size_t off = 0, max_align = 1;
-    for (size_t i = 0; i < st->field_count; i++) {
-        struct_field_t *f = &st->fields[i];
-        size_t fa = f->type && f->type->align > 0 ? f->type->align : 1;
-        off = align_up(off, fa);
-        f->offset = off;
-        off += f->type ? f->type->size : 0;
-        if (fa > max_align) max_align = fa;
-    }
-    st->base.size  = align_up(off, max_align);
-    if (st->field_count == 0) st->base.size = 1; /* 空 struct：C 语义 1 字节 */
-    st->base.align = max_align;
+    /* 计算 C 对齐布局（seal 前已组合好的字段表在这里一次性定型） */
+    struct_layout_apply(st);
     st->base.sealed = true;
 
     vec_push(vm->struct_types, vm->alloc, st); /* 密封后入池（去重 intern） */
     return &st->base;
+}
+
+/* ===========================================================================
+ * 结构体组合（`...Base;`）——seal **之前**（开放窗口）的字段/嵌入表编辑
+ *
+ * 不变量（见 type_struct.h 的 SEAL 注释）：类型在 seal 前可编辑，seal 后不可变。
+ * 组合因此**不再**事后改写已 sealed 的类型，而是在 sema 的开放构造窗口里完成：
+ *   开放对象 → 追加自有字段 → 按位置插入各 `...Base` 的字段表 → 设嵌入表 →
+ *   seal（一次）。
+ * 这样：
+ *   - 布局只在 seal 里算一次（struct_layout_apply），不存在"seal 后再改布局"；
+ *   - `type_t*` 身份不变：同一个开放对象就地 seal（seal 去重命中时返回既有
+ *     类型对象，与仓库其它开放构造路径完全一致——sema 用返回值做符号/登记）；
+ *   - 两个写入 API 在 sealed 类型上**拒绝**（返回 false，类型一字不改），把
+ *     不变量固化在代码里：任何"seal 后改类型"的路径都会立刻失败，而不是悄悄
+ *     生效。
+ * =========================================================================== */
+
+bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
+                                     const struct_embed_fields_t *embeds,
+                                     size_t embed_count) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT) return false;
+    if (embed_count > 0 && !embeds) return false;
+    /* 不变量：只有 seal 前的开放类型可以编辑字段表。sealed 类型**拒绝**（返回
+       false，类型一字不改）——组合必须走 seal 前窗口，没有"事后改写"这条路径。
+       与 type_struct_add_field 的 sealed 处理一致：拒绝时静默返回，由调用方
+       （sema 组合入口）报明确诊断。 */
+    if (type_is_sealed(t)) return false;
+
+    struct_type_t *st = (struct_type_t *)t;
+    size_t own = st->field_count;
+    size_t total = own;
+    for (size_t e = 0; e < embed_count; e++) total += embeds[e].field_count;
+
+    if (total > 0) {
+        struct_field_t *nf = (struct_field_t *)allocator_new_ex(
+            vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL,
+            NULL, total);
+
+        /* 合并（单趟两指针，**不做原地 memmove**）：按"自有字段之间插入嵌入
+           字段块"的顺序直接铺出最终表——
+             对每个自有字段 fi（fi = 0..own）：
+               先按 `...` 声明序放入所有 layer == fi 的嵌入字段块，
+               再放入第 fi 个自有字段（fi == own 时无）。
+           字段名**深拷贝**（名归本类型所有，与 add_field / intern 同一所有权
+           语义），字段类型引用记录；offset 留给 seal 统一布局。 */
+        size_t out = 0;
+        for (size_t fi = 0; fi <= own; fi++) {
+            for (size_t e = 0; e < embed_count; e++) {
+                const struct_embed_fields_t *sp = &embeds[e];
+                if (sp->layer != fi) continue;
+                for (size_t k = 0; k < sp->field_count; k++) {
+                    nf[out].name   = struct_field_name_dup(vm, sp->fields[k].name);
+                    nf[out].offset = 0;
+                    nf[out].type   = sp->fields[k].type;
+                    out++;
+                }
+            }
+            if (fi < own) {
+                nf[out].name   = struct_field_name_dup(vm, st->fields[fi].name);
+                nf[out].offset = 0;
+                nf[out].type   = st->fields[fi].type;
+                out++;
+            }
+        }
+
+        /* 旧字段表整体回收（**名字归本类型所有**，必须连名字一起释放）：新表
+           里的名字都是上面深拷贝出来的，旧表的名字没有别处持有——只回收数组
+           会漏掉名字那块内存。 */
+        struct_fields_dispose(vm, st->fields, st->field_count);
+        st->fields      = nf;
+        st->field_count = total;
+    }
+    return true;
+}
+
+bool type_struct_set_embeds(vm_t *vm, const type_t *t,
+                            const type_t *const *embeds, size_t embed_count) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT) return false;
+    if (embed_count > 0 && !embeds) return false;
+    /* 不变量：嵌入表同样只能在 seal 前设置（sealed → 拒绝，不改动类型） */
+    if (type_is_sealed(t)) return false;
+
+    struct_type_t *st = (struct_type_t *)t;
+    if (st->embeds) allocator_free(vm->alloc, (void **)&st->embeds);
+    st->embeds = NULL;
+    st->embed_count = 0;
+    if (embed_count == 0) return true;
+
+    const type_t **copy = (const type_t **)allocator_new_ex(
+        vm->alloc, "type_t*", sizeof(type_t *), NULL, NULL, NULL, embed_count);
+    if (!copy) panic("vm: out of memory recording struct embeds");
+    for (size_t i = 0; i < embed_count; i++) copy[i] = embeds[i];
+    st->embeds = copy;
+    st->embed_count = embed_count;
+    return true;
+}
+
+const type_t *const *type_struct_embeds(const type_t *t, size_t *count) {
+    if (count) *count = 0;
+    if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+    const struct_type_t *st = (const struct_type_t *)t;
+    if (count) *count = st->embed_count;
+    return st->embeds;
+}
+
+bool type_struct_mark_unique(vm_t *vm, const type_t *t) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT) return false;
+    /* 与其它类型属性写入 API 同一不变量：seal 之后类型不可变 → 拒绝 */
+    if (type_is_sealed(t)) return false;
+    ((struct_type_t *)t)->unique = true;
+    return true;
+}
+
+bool type_struct_is_unique(const type_t *t) {
+    if (!t || t->kind != TYPE_KIND_STRUCT) return false;
+    return ((const struct_type_t *)t)->unique;
 }
 
 /* ===========================================================================
@@ -422,13 +589,7 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
             NULL, count);
         if (!copy) panic("vm: out of memory interning struct type");
         for (size_t i = 0; i < count; i++) {
-            char *nbuf = (char *)allocator_new_ex(vm->alloc, "char",
-                                                  sizeof(char), NULL, NULL,
-                                                  NULL, fields[i].name.len + 1);
-            if (!nbuf) panic("vm: out of memory interning struct field name");
-            memcpy(nbuf, fields[i].name.ptr, fields[i].name.len);
-            nbuf[fields[i].name.len] = '\0';
-            copy[i].name   = (strslice_t){ nbuf, fields[i].name.len };
+            copy[i].name   = struct_field_name_dup(vm, fields[i].name);
             copy[i].offset = 0; /* seal 统一计算 */
             copy[i].type   = fields[i].type;
         }

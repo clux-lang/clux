@@ -603,9 +603,76 @@ static bool ptr_base_adds_quals(const type_t *src_base, const type_t *target_bas
     return false;
 }
 
+/* 隐式转换的**类型层判据**（不接触 data）：判断 `src → target` 是否允许。
+ * 与下方 ptr_implicit_cast 的转换分支**逐一对应**——之所以抽出来，是因为
+ * shadow 值（sema 的纯类型检查，data=NULL）也必须走同一套判据：
+ * 早前 shadow 直接 "return value_make_shadow(vm, target)" 无条件放行，
+ * 于是**非法**的指针隐式转换（例如 `ref *Test → ref *const Base`，Test 的字段
+ * 前缀不是 Base 的字段）在 sema 阶段被静默放行，直到运行期才报
+ * "ptr: unsupported implicit cast for pointer"（编译期该报的错漏到运行期）。 */
+static bool ptr_implicit_cast_ok(vm_t *vm, const type_t *src,
+                                 const type_t *target) {
+    if (!src || !target) return false;
+    if (src == target) return true; /* 同类型身份拷贝 */
+    if (is_opaque_type(target)) return true; /* 任意指针 → opaque */
+
+    /* 同种所有权修饰 + 只给 pointee 加限定：身份拷贝 */
+    if (src->kind == target->kind &&
+        ptr_base_adds_quals(ptr_type_base(src), ptr_type_base(target)))
+        return true;
+
+    /* 结构体指针向上转换（大 → 小，前缀字段兼容；只允许借用目标） */
+    if (target->kind == TYPE_KIND_PTR_REF &&
+        (src->kind == TYPE_KIND_PTR_REF || src->kind == TYPE_KIND_PTR_OWN) &&
+        ptr_upcast_keeps_quals(ptr_type_base(src), ptr_type_base(target)) &&
+        struct_type_prefix_compatible(vm,
+            type_strip_quals(ptr_type_base(target)),
+            type_strip_quals(ptr_type_base(src))))
+        return true;
+
+    /* own → ref（借用的表达） */
+    if (src->kind == TYPE_KIND_PTR_OWN && target->kind == TYPE_KIND_PTR_REF &&
+        ptr_base_adds_quals(ptr_type_base(src), ptr_type_base(target)))
+        return true;
+
+    /* fatal → own 接管 */
+    if (src->kind == TYPE_KIND_PTR_FATAL && target->kind == TYPE_KIND_PTR_OWN &&
+        ptr_type_base(src) == ptr_type_base(target))
+        return true;
+
+    /* fatal → share 创建 */
+    if (src->kind == TYPE_KIND_PTR_FATAL && target->kind == TYPE_KIND_PTR_SHARE &&
+        ptr_type_base(src) == ptr_type_base(target))
+        return true;
+
+    /* share → weak 派生 */
+    if (src->kind == TYPE_KIND_PTR_SHARE && target->kind == TYPE_KIND_PTR_WEAK &&
+        ptr_type_base(src) == ptr_type_base(target))
+        return true;
+
+    /* share → share / weak → weak（引用计数拷贝） */
+    if (src->kind == TYPE_KIND_PTR_SHARE && target->kind == TYPE_KIND_PTR_SHARE &&
+        ptr_type_base(src) == ptr_type_base(target))
+        return true;
+    if (src->kind == TYPE_KIND_PTR_WEAK && target->kind == TYPE_KIND_PTR_WEAK &&
+        ptr_type_base(src) == ptr_type_base(target))
+        return true;
+
+    return false;
+}
+
 static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    if (value_is_shadow(v)) return value_make_shadow(vm, target);
     const type_t *src = value_type(v);
+
+    /* shadow（sema 纯类型检查，data=NULL）：只做**类型层**判据，通过则返回
+       target 的 shadow。判据与下面真实转换完全一致，因此 sema 报的错与运行期
+       一致（非法转换在编译期就被拒绝，不再漏到运行期）。 */
+    if (value_is_shadow(v)) {
+        if (!ptr_implicit_cast_ok(vm, src, target))
+            return value_make_error(vm, "ptr: unsupported implicit cast for pointer");
+        return value_make_shadow(vm, target);
+    }
+
     const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
 
     /* 任意指针 → opaque 隐式（m3-design §8.4）：身份拷贝指针目标地址。

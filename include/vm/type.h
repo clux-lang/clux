@@ -207,6 +207,30 @@ typedef struct struct_type_t {
     type_t          base;
     struct_field_t *fields;  /* 字段表（seal 时拷贝，vm 拥有） */
     size_t          field_count;
+    /* ---- 结构体组合（`...Base;`）的**嵌入表**（vm 拥有）----
+     * 结构体组合（sema）在类型** seal 之前**（开放窗口）把每个 `...Base` 的
+     * 字段表插入 fields，同时把 Base 类型指针登记到此表——于是 sealed 类型的
+     * "字段表 + 嵌入表"是一次性定型的快照，seal 之后两表都不再变。
+     * 成员（`var`/`func`）**不复制**（Base 的成员只有一份 `Base::name`），所以
+     * 成员名字查找需要沿此表递归（见 struct_compose 的成员继承查找）：
+     * `Test::f` 未命中自己时在嵌入表里找 `Base::f`。
+     * embed_count == 0 表示无嵌入（普通结构体，绝大多数情况）。 */
+    const type_t  **embeds;
+    size_t          embed_count;
+    /* ---- 具名结构体的"独立身份"标记（命名 struct 定义用）----
+     * type_struct_mark_unique 置位后，seal 时**跳过去重 intern**：本类型不会
+     * 与类型池里字段表相同的既有 struct 合并，自己独占一个 type_t 对象。
+     *
+     * 为什么需要：命名的 `struct A` 与 `struct B` 即使字段表逐位相同，也是两个
+     * **不同的具名类型**——各自有独立的成员命名空间（`A::f` / `B::f`）与嵌入表。
+     * 合并成同一个对象会造成两类错误：
+     *   (1) 类型显示名互相覆盖（后定义的把先定义的 name 改掉）；
+     *   (2) 结构体组合的嵌入表被抹掉——`struct R { ...P; ...Q; }` 里 P、Q 若
+     *       合并成一个对象，嵌入表就成了 [X, X]，成员继承查找按类型去重后只
+     *       剩一个命中：**歧义不再报出**、覆盖判定也失去依据。
+     * 去重仍服务于匿名/内部构造的类型（sema 的匿名 struct 推断、union payload、
+     * 字节码运行期的 DEFINE_TYPE/SEAL）：它们不置位，行为与既有实现一致。 */
+    bool            unique;
 } struct_type_t;
 
 /**

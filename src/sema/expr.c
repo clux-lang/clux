@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
 #include "parser/ast_binary.h"
@@ -1739,16 +1740,46 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         const bool by_ptr = ot && ptr_type_base(ot) != NULL;
         const type_t *st = type_strip_quals(by_ptr ? ptr_type_base(ot) : ot);
         if (st && st->kind == TYPE_KIND_STRUCT && st->name.len) {
+          /* 名字解析：先 `T::f`，未命中再沿**嵌入链**继承查找
+             （`struct Test { ...Base; }` 的 `t.getId()` 解析到 `Base::getId`）。
+             歧义（多个嵌入都提供该成员）由查找函数报诊断并返回 NULL。
+             接收者仍按 `t.&` / `t` 传入，需要时由既有的结构体指针向上转换
+             （字段前缀兼容）隐式转成方法第一参数的类型——`...Base` 不在开头时
+             前缀不成立，于是这里**自然**编译失败（无需位置特判）。 */
+          strslice_t q = {0};
           size_t total = st->name.len + 2 + mem->field.len;
           char *mangled = (char *)arena_alloc(sema->arena, total, 1);
-          if (!mangled) return val_void(sema);
-          memcpy(mangled, st->name.ptr, st->name.len);
-          mangled[st->name.len] = ':';
-          mangled[st->name.len + 1] = ':';
-          if (mem->field.len)
-            memcpy(mangled + st->name.len + 2, mem->field.ptr, mem->field.len);
-          strslice_t q = strslice_from_bytes(mangled, total);
-          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          if (mangled) {
+            memcpy(mangled, st->name.ptr, st->name.len);
+            mangled[st->name.len] = ':';
+            mangled[st->name.len + 1] = ':';
+            if (mem->field.len)
+              memcpy(mangled + st->name.len + 2, mem->field.ptr, mem->field.len);
+            q = strslice_from_bytes(mangled, total);
+          }
+          sema_symbol_t *ms = q.ptr ? sema_lookup(sema->global_scope, q) : NULL;
+          /* 名字优先、**自己的胜出**：`T::f` 命中就只用它，不再回退嵌入链——
+             因此 `Test` 自己声明 `func f` 时静默覆盖 `Base::f`（不报歧义）。
+             只在自己没有（或不是函数）时才继承查找。跨 kind 覆盖（Test 的 `f`
+             是 var 而 Base 的 `f` 是 func）同样以自己为准：不回退，落到下面的
+             "不可调用"诊断（kind 由使用点裁决，不会静默用回 Base 的那份）。 */
+          if (!ms || ms->kind != SEMA_SYM_FUNC) {
+            strslice_t *inherited =
+                sema_struct_member_lookup(sema, st, mem->field, call->callee);
+            if (inherited) {
+              q = *inherited;
+              ms = sema_lookup(sema->global_scope, q);
+            }
+          }
+          /* 以名字命中、但不是函数（自己的 var 成员 / 继承来的静态属性）：
+             明确说清"它是变量，不是方法"，而不是落到下面的字段诊断。 */
+          if (ms && ms->kind != SEMA_SYM_FUNC) {
+            diag_error(sema->diag, sema_loc(sema, call->callee),
+                       "cannot call '%.*s': it is a struct member variable, "
+                       "not a method",
+                       (int)mem->field.len, mem->field.ptr);
+            return val_void(sema);
+          }
           if (ms && ms->kind == SEMA_SYM_FUNC) {
             /* 接收者：值 → t.&（ADDR）；指针 → t 本身（与手写等价） */
             ast_node_t *recv = NULL;
@@ -2136,6 +2167,26 @@ static value_t *ex_member(sema_t *sema, ast_node_t **node,
       }
       int idx = struct_type_find_field(ot, n->field);
       if (idx < 0) {
+        /* 不是字段，但可能是**成员**（`var` 静态属性 / `func` 方法，含沿嵌入链
+           继承来的）：`t.f` / `t.n` 这种不带 `()` 的写法要说清"它是 struct 的
+           成员，不是字段"，而不是含混地报"没有这个字段"。按成员 kind 给出
+           对应写法建议（方法可 `t.f(...)` 调用，静态属性只能 `T::n` 限定访问）。 */
+        strslice_t *mem = sema_struct_member_lookup(sema, ot, n->field, *node);
+        if (mem) {
+          sema_symbol_t *msym = sema_lookup(sema->global_scope, *mem);
+          bool is_func = msym && msym->kind == SEMA_SYM_FUNC;
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     is_func
+                         ? "'%.*s' is a member of struct '%.*s', not a field "
+                           "(methods are accessed as `T::%.*s` or called as "
+                           "`t.%.*s(...)`)"
+                         : "'%.*s' is a member of struct '%.*s', not a field "
+                           "(static properties are accessed as `T::%.*s`)",
+                     (int)n->field.len, n->field.ptr, (int)ot->name.len,
+                     ot->name.ptr, (int)n->field.len, n->field.ptr,
+                     (int)n->field.len, n->field.ptr);
+          return val_void(sema);
+        }
         diag_error(sema->diag, sema_loc(sema, *node),
                    "struct '%.*s' has no field '%.*s'",
                    (int)ot->name.len, ot->name.ptr,
@@ -2355,6 +2406,19 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
             memcpy(mangled + id->name.len + 2, n->variant.ptr, n->variant.len);
           strslice_t q = strslice_from_bytes(mangled, total);
           sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          /* 嵌入继承：`struct Test { ...Base; }` 的 `Test::getId` / `Test::count`
+             未命中自己时沿嵌入链解析到**实际定义**的限定名（`Base::getId` /
+             `Base::count`，静态属性因此是**同一份全局变量**）。歧义 → 查找函数
+             已报诊断，这里按"未命中"继续走后面的分支（错误恢复）。 */
+          if ((!ms || (ms->kind != SEMA_SYM_VAR && ms->kind != SEMA_SYM_FUNC)) &&
+              sym->type && sym->type->kind == TYPE_KIND_STRUCT) {
+            strslice_t *inh = sema_struct_member_lookup(sema, sym->type,
+                                                        n->variant, *node);
+            if (inh) {
+              q = *inh;
+              ms = sema_lookup(sema->global_scope, q);
+            }
+          }
           if (ms && (ms->kind == SEMA_SYM_VAR || ms->kind == SEMA_SYM_FUNC)) {
             ast_node_t *ident = ast_ident_new(sema->arena, (*node)->tok_begin,
                                               (*node)->tok_end);

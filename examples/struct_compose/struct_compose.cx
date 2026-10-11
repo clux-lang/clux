@@ -1,0 +1,125 @@
+// struct_compose.cx — 结构体组合：`...Base;` 嵌入（语法树/类型层的"继承"）
+//
+// 结构体体内可以写 `...Base;`，表示把 Base 的字段**嵌进**本结构体：
+//
+//     struct Base { id: i32; func getId(self: ref *const Base): i32 {...} }
+//     struct Test { ...Base; extra: i64; }
+//
+// 语义要点：
+//   - `...Base;` 只是**语法**：parser 记录"名字 + 出现在自己第几个字段之前"，
+//     不在 AST 里拼接字段；
+//   - 组合发生在 **sema、目标类型 seal 之前**的开放窗口：遍历 Base 的 **type**
+//     （含未来装饰器对它的修改），把字段插进 Test 的开放类型字段表，位置 =
+//     `...Base` 在源码中的位置，登记嵌入表，然后**只 seal 一次**并按 C 对齐规则
+//     定型布局。seal 之后类型不可变（VM 写入 API 拒绝 sealed 类型）——这就是
+//     "seal 前可编辑 attribute、seal 后不可变"那条隐含规则；字段不允许覆盖，
+//     嵌入导致字段重名是编译错误；
+//   - 于是 `...Base` 在最前面 ⟺ Test 的字段前缀 == Base 的字段 ⟹ 既有的
+//     **结构体指针向上转换**自然生效，`t.getId()` 可用；前面还有字段 ⟹ 前缀
+//     不成立 ⟹ `t.getId()` 自然编译失败（本示例只演示成立的那一半）；
+//   - 成员（`var` 静态属性 / `func` 方法）**不复制**：Test 自己没声明时通过嵌入链
+//     **继承名字查找**（`t.getId()` / `Test::count` 都解析到 `Base::...` 的同一份
+//     存储）；Test 自己声明了同名 attribute 时**静默覆盖**继承来的那一份
+//     （attribute = 字段 + `var` 属性 + `func` 方法；**字段是唯一例外**，字段同名
+//     一律报错——见测试套件里的覆盖用例）。
+
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Base {
+    id: i32;
+    var count: i32 = 0;
+
+    func getId(self: ref *const Base): i32 {
+        return self.id;
+    }
+
+    func bump(self: ref *Base): i32 {
+        self.id += 1;
+        return self.id;
+    }
+}
+
+// 嵌入在**开头**：Test 的字段前缀 == Base 的字段 → 向上转换成立
+struct Test {
+    ...Base;
+    extra: i64;
+}
+
+// 传递嵌入：C 的字段前缀是 A 的字段
+struct A { a: i32; }
+struct B { ...A; b: i32; }
+struct C { ...B; c: i32; }
+
+// 嵌入在中途：合法（字段序 x, id），只是"指向 M 的指针不能转成指向 Base 的"
+struct Middle {
+    x: i32;
+    ...Base;
+}
+
+// 布局对照：手写同样字段
+struct Plain { id: i32; extra: i64; }
+
+// attribute 覆盖：Override 自己声明 `count` 与 `getId`，**静默覆盖**继承来的同名成员
+// （attribute = 字段 + var 属性 + func 方法；字段是唯一例外，同名一律报错）
+struct Override {
+    ...Base;
+    var count: i32 = 7;
+    func getId(self: ref *const Override): i32 { return 100 + self.id; }
+}
+
+func takeA(v: ref *const A): i32 { return v.a; }
+
+func main(): i32 {
+    // 组合后的字段表 = id, extra：构造按组合后的顺序
+    var t: Test = .Test{ .id = 7, .extra = 21 };
+
+    // 继承的方法 / 继承的字段 / 自有字段
+    if (t.getId() != 7) { return 1; }
+    if (Test::getId(t.&) != 7) { return 2; }     // 显式限定写法等价
+    if (t.id != 7) { return 3; }
+    if (t.extra != 21) { return 4; }
+
+    // 向上转换：ref *Test → ref *const Base（前缀兼容）
+    var b: ref *const Base = t.&;
+    if (b.getId() != 7) { return 5; }
+
+    // 同一块存储：通过基指针写，派生对象看到
+    var m: ref *Base = t.&;
+    if (m.bump() != 8) { return 6; }
+    if (t.id != 8) { return 7; }
+
+    // 静态属性共享同一份（不复制）
+    Base::count = 5;
+    if (Test::count != 5) { return 8; }
+    Test::count = 6;
+    if (Base::count != 6) { return 9; }
+
+    // 布局与"手写同样字段"一致
+    if (sizeof(Test) as i32 != sizeof(Plain) as i32) { return 10; }
+    if (sizeof(Test) as i32 != 16) { return 11; }
+
+    // 传递嵌入（C 的字段序 a, b, c）与 A 的向上转换
+    var c: C = .C{ .a = 1, .b = 2, .c = 3 };
+    if (c.a != 1 || c.b != 2 || c.c != 3) { return 12; }
+    if (takeA(c.&) != 1) { return 13; }
+
+    // 中途嵌入：字段序 x, id 按源码位置
+    var mid: Middle = .Middle{ .x = 3, .id = 9 };
+    if (mid.x != 3 || mid.id != 9) { return 14; }
+
+    // attribute 覆盖：Override 自己的 count / getId 静默胜出，且与 Base 的**各一份**
+    var o: Override = .Override{ .id = 1 };
+    if (Override::count != 7) { return 15; }        // 自己的那一份
+    if (Base::count != 6) { return 16; }            // Base 不受影响（上一步写过 6）
+    Override::count = 70;
+    if (Base::count != 6) { return 17; }            // 两份互相独立
+    if (o.getId() != 101) { return 18; }            // t.getId() → Override::getId
+    if (Base::getId(o.&) != 1) { return 19; }       // 显式 Base:: 仍取 Base 的实现
+
+    libc::printf("struct_compose ok: t.id=%d t.extra=%d Test::count=%d sizeof(Test)=%d c=%d,%d,%d mid=%d,%d Override::count=%d Base::count=%d o.getId=%d\n",
+                 t.id, t.extra as i32, Test::count, sizeof(Test) as i32,
+                 c.a, c.b, c.c, mid.x, mid.id, Override::count, Base::count,
+                 o.getId());
+    return 0;
+}

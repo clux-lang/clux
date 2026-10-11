@@ -1,4 +1,5 @@
 #include "parser/ast_struct_def.h"
+#include "parser/ast_struct_embed.h" /* 结构体嵌入：`...Name;` */
 #include "parser/ast_var_def.h"   /* 命名空间成员：var */
 #include "parser/ast_func_def.h"  /* 命名空间成员：func */
 #include "parser/ast_program.h"   /* 展开时追加到 prog->funcs */
@@ -7,12 +8,21 @@
 #include "parser/ast_error.h"
 #include <stdio.h>
 
+/* 兄弟链节点计数（结构体嵌入节点的 field_index 用：`...Base;` 出现在自己第
+ * 几个字段之前 = 此刻已解析的字段数）。 */
+static size_t count_siblings(const ast_node_t *head) {
+    size_t n = 0;
+    for (const ast_node_t *n2 = head; n2; n2 = n2->next) n++;
+    return n;
+}
+
 /* 解析结构体定义 struct Name { field: type; ... }
  *
  * 语法：struct 名字 { 标识符 : 类型表达式 ; ... }
  * - 字段必须显式写 ': 类型'（缺 ':' 报错）
  * - 字段以分号分隔（与 enum variant 的逗号分隔不同）
  * - 字段列表可为空（{} 合法，C 语义 size=1）
+ * - 体内可声明命名空间成员（var/func）与**嵌入**（`...Base;`，结构体组合）
  */
 ast_node_t *parse_struct_def(parser_t *p) {
     uint32_t tb = p->pos;
@@ -39,11 +49,46 @@ ast_node_t *parse_struct_def(parser_t *p) {
 
     ast_node_t *fields = NULL, *fields_last = NULL;
     ast_node_t *members = NULL, *members_last = NULL;
+    ast_node_t *embeds = NULL, *embeds_last = NULL;
 
     for (;;) {
         skip_trivia(p);
         /* '}' 结束字段列表（含尾随分号后直接 '}' 的情况） */
         if (check_symbol(p, "}")) break;
+
+        /* ---- 结构体嵌入（结构体组合）：`...Base;` ----
+         * 纯语法：只记录名字与"出现在自己第几个字段之前"（此时 fields 链的
+         * 长度就是 field_index）。字段的实际组合（遍历 Base 的 **type** 复制
+         * 字段）由 sema 在**目标类型 seal 之前**按此下标完成——见
+         * ast_struct_embed.h。
+         * `...` 是 lexer 的**三字符** SYMBOL token（M6 可变参数复用同款 token，
+         * 二者语境不重叠）。 */
+        if (check_symbol(p, "...")) {
+            uint32_t eb = p->pos;
+            advance(p);
+            skip_trivia(p);
+            if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+                return ast_error_new(p->diag, p->tokens, p->arena, eb, p->pos,
+                                     "expected struct name after '...'");
+            }
+            strslice_t ename = token_strslice(cur_token(p));
+            advance(p);
+            skip_trivia(p);
+
+            ast_node_t *en = ast_struct_embed_new(p->arena, eb, p->pos);
+            if (!en) return NULL;
+            ast_struct_embed_t *emb = (ast_struct_embed_t *)en;
+            emb->name        = ename;
+            emb->field_index = (size_t)count_siblings(fields);
+            ast_append(&embeds, &embeds_last, NULL, en);
+
+            if (check_symbol(p, ";")) {
+                advance(p);
+                skip_trivia(p);
+                continue;
+            }
+            break;
+        }
 
         /* ---- 命名空间成员（语法糖）----
          *   var  data = 123;                         // 静态属性（本质：全局变量）
@@ -118,6 +163,8 @@ ast_node_t *parse_struct_def(parser_t *p) {
     ((ast_struct_def_t *)node)->fields_last  = fields_last;
     ((ast_struct_def_t *)node)->members      = members;
     ((ast_struct_def_t *)node)->members_last = members_last;
+    ((ast_struct_def_t *)node)->embeds       = embeds;
+    ((ast_struct_def_t *)node)->embeds_last  = embeds_last;
     return node;
 }
 

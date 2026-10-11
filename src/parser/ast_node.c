@@ -11,6 +11,7 @@ static const char *g_kind_names[] = {
     [AST_ENUM_VARIANT] = "enum_variant",
     [AST_STRUCT_DEF] = "struct_def",
     [AST_STRUCT_FIELD] = "struct_field",
+    [AST_STRUCT_EMBED] = "struct_embed",
     [AST_UNION_DEF]  = "union_def",
     [AST_CUNION_DEF] = "cunion_def",
     [AST_ASSIGN]     = "assign",

@@ -225,6 +225,74 @@ const *const i32 p; // 第一个 const 修饰指针，第二个 const 修饰 i32
 own/share **目标**的向上转换也不隐式允许：按小结构体释放会漏掉尾部字段的 own 资源。
 用途：把"派生"结构体的指针直接喂给按"基"结构体声明的接收者/参数，例如
 `Base::getId(d.&)`（`d: Derived`，`Base` 是 `Derived` 的前缀）。
+
+**结构体嵌入 / 组合（`...Base;`，2026-10 起）**：结构体体内可以写一条 `...Base;`，
+把另一个结构体的字段**嵌进**本结构体：
+
+```
+struct Base {
+    id: i32;
+    var count: i32 = 0;
+    func getId(self: ref *const Base): i32 { return self.id; }
+}
+
+struct Test { ...Base; extra: i64; }   // Test 的字段 = id, extra
+```
+
+- **语法与位置**：`...Name;` 可出现在字段之间的任意位置；它出现在**自己第几个字段
+  之前**决定组合后的字段序（`struct M { x: i32; ...Base; y: i32; }` 的字段是
+  `x, id, y`）。同一个结构体体内可以写多条 `...Name;`（按书写顺序依次插入）。
+- **位置决定前缀兼容（不需要任何特判）**：组合后的字段表就是"手写同样字段"的字段表，
+  于是既有的**结构体指针向上自动转换**规则自然生效——`...Base` 在**最前面** ⟹ Test
+  的字段前缀 == Base 的字段 ⟹ `var b: ref *const Base = t.&;` 与 `t.getId()` 都成立；
+  前面还有字段 ⟹ 前缀不成立 ⟹ 同一写法**自然编译失败**
+  （`cannot convert ref Test to ref const Base`）。
+- **attribute 覆盖（新 struct 可以重写继承来的 attribute）**：**attribute** 指结构体命名
+  空间的成员 —— **字段** + `var` 静态属性 + `func` 方法。组合后的新 struct（`Test`）
+  **自己声明**的同名 attribute **静默覆盖**从 `Base` 继承来的那一份：合法、不报歧义、
+  不报重复。细口径：
+  - **成员（`var` / `func`）**：`Test` 声明了 `var count`（或 `func f`）时，
+    `Test::count` / `t.f()` 一律解析到 **Test 自己的那一份**；覆盖后二者**互相独立**
+    （`Test::count` 与 `Base::count` 是两个独立的全局变量，写 `Test::count = 9` **不**
+    影响 `Base::count`）；`Test` 自己**没有**声明时才继承——此时静态属性是**同一份**
+    全局变量（`Test::count` 与 `Base::count` 读写互通、互为别名）。
+  - **kind 组合按"名字优先、自己的胜出"裁决**：`Test` 用 `func count` 覆盖 `Base` 的
+    `var count`（或反向）时以**自己**为准，**不会**静默回退到 `Base` 的那一份。若使用点
+    的写法与自己的 kind 不符，就在使用点报错：自己的是 `var` 却写 `t.f()` →
+    `cannot call 'f': it is a struct member variable, not a method`；自己的是 `func`
+    却写 `Test::f = v` → `cannot assign to 'Test::f': it is a func member (a method,
+    not a variable)`。这样"覆盖"永远是确定的（不会出现"看情况用谁的"）。
+  - **字段是唯一例外**：字段**不允许覆盖**——自有字段与继承字段同名、两个嵌入字段同名
+    一律**报错**（见下一条）。
+- **成员继承（方法 / 静态属性不复制）**：`Test` **自己没声明**该名字时，才通过嵌入链
+  **继承名字查找**：`t.getId()`、`Test::getId(t.&)`、`Test::count`（读写）都解析到
+  `Base::...` 的同一份存储。查找顺序是确定性的：先 `Test::name` 自己（命中即**自己的
+  胜出**，不再往下找），再按 `...` 的书写顺序**深度优先**（因此传递嵌入天然覆盖）、
+  按类型去重（同一个 `Base` 经两条路径只算一次命中）；**恰好命中一个**才可用，命中
+  多个 → 报歧义（`member 'x' of struct 'R' is ambiguous: found in P, Q`，**只在**
+  "自己没有、而多个嵌入都提供同名 attribute"时出现），零命中 → 沿用普通"没有这个
+  成员"的诊断。
+- **字段不允许覆盖**：嵌入字段与自有字段重名、两条嵌入路径带来同名字段（含菱形里共享
+  的 Base 实例字段），都**报错**（`field 'id' conflicts with embedded field from 'Base'
+  (fields cannot be overridden by struct embedding)`
+  / `duplicate field name 'v' after struct embedding: inherited from both 'P' and 'Q'`）。
+  字段不参与"覆盖"语义——它是 attribute 里唯一不可被重写的成员。
+- **seal 前可编辑 attribute 的不变量**：类型在 **seal 之前是可编辑的**（attribute 可以
+  被改写、覆盖），**seal 之后不可变**——结构体组合与未来的装饰器都必须在这个窗口里完成。
+  这条规则在实现上是硬的：VM 层的类型写入 API（`type_struct_insert_embed_fields` /
+  `type_struct_set_embeds` / `type_struct_mark_unique`）对已 seal 的类型**拒绝**（返回
+  失败、类型一字不改），与 `type_struct_add_field` 的"密封后静默忽略"同一口径。组合
+  本身因此也发生在 seal 之前（开放类型上装好字段表 + 嵌入表，然后只 seal 一次）。
+  注：clux 目前**没有** attribute / 装饰器语法，规则以不变量 + 文档 + 测试固化。
+- **具名 struct 的身份不合并**：命名的 `struct A` 与 `struct B` 即使字段表逐位相同也是
+  两个**不同**类型（各自有独立的成员命名空间 `A::f` / `B::f` 与嵌入表），类型构造时
+  **不**去做重合并。结构兼容（鸭子类型）与指针前缀向上转换仍按字段表判定，不受影响。
+- **定义顺序与环**：`...Base` 的 `Base` 声明在本文件 `Test` **之后**也可以（sema 按
+  嵌入依赖顺序反复尝试到不动点）；循环嵌入（`struct X { ...X; }`、`X→Y→X`、更长的环）
+  一律报 `circular struct embedding ('...' cycle involving this struct)`。
+- **限制**：`...Name` 目前只支持**同一编译单元内**声明的结构体（跨 `import` 的结构体
+  报"no struct type with that name in this compilation unit"）。
+
 **`volatile` 在脚本态被完全忽略（2026-10 起）**：`volatile T` 一律折叠为 `T` ——
 类型解析（sema）、类型构造（compiler）、CTFE 类型值求值三处都直接取 sub，因此
 volatile 不参与任何类型检查：读写、运算、复合赋值、与 `T` 双向赋值、传参、比较、

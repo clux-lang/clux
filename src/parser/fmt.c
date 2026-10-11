@@ -9,6 +9,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_struct_embed.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_import.h"
@@ -788,23 +789,113 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "struct ");
             sb_put(&f->sb, s->name.ptr, s->name.len);
             sb_str(&f->sb, " {");
-            /* 字段 + **命名空间成员**（var 静态属性 / func 方法）都要渲染：
-               漏掉 members 会让 `struct T { var x = 1; func f(){} }` 被静默改写成
-               `struct T {}`——声明与其中的成员一起消失（数据损坏）。 */
-            bool any = s->fields || s->members;
+            /* 字段 + **嵌入**（`...Base;`）+ **命名空间成员**（var 静态属性 /
+               func 方法）都要渲染：
+               - 漏掉 members 会让 `struct T { var x = 1; func f(){} }` 被静默
+                 改写成 `struct T {}`——声明与其中的成员一起消失（数据损坏）。
+               - 漏掉 embeds 同理是数据损坏，而且**位置**也有语义：`...Base;` 与
+                 自己字段的相对次序决定组合后字段表（进而是向上转换是否成立），
+                 因此按 embed->field_index 插回原位，不能统一挪到末尾。
+               分隔符：项与项之间 "; "（与 render_semi_list 同款，保证 fmt 幂等）。*/
+            bool any = s->fields || s->embeds || s->members;
             if (!any) {
                 sb_str(&f->sb, "}");
             } else {
                 sb_ch(&f->sb, ' ');
-                if (s->fields) {
-                    render_semi_list(f, s->fields);
-                    /* 字段列表分隔符只在项之间；后面还有成员时须补一个 ';'
-                       收尾（否则 `id: i32 var x = 1;` 无法解析） */
-                    if (s->members) sb_ch(&f->sb, ';');
+                /* 字段 + 嵌入按**合并序列**渲染（嵌入的插入位次来自它之前
+                   已解析的自有字段数，见 ast_struct_embed.h）。分隔符规则与
+                   render_semi_list 完全一致：项与项之间 "; "，只有一项时无分隔符。 */
+                size_t nfs = 0;
+                for (ast_node_t *fn = s->fields; fn; fn = fn->next) nfs++;
+                size_t nembs = 0;
+                for (ast_node_t *e = s->embeds; e; e = e->next) nembs++;
+
+                ast_node_t *items[256];
+                size_t nitems = 0;
+                bool overflow = false;
+                if (nfs + nembs <= sizeof(items) / sizeof(items[0])) {
+                    /* 合并序列 = 对每个 fi = 0..nfs：先按声明序放入所有
+                       field_index == fi 的嵌入，再放入第 fi 个自有字段
+                       （fi == nfs 时无字段）。这正是 sema 组合 pass 的插入
+                       语义（"在自有字段之间插入 Base 字段表"）——位置一致，
+                       格式化后的字段表与原 AST 完全相同。 */
+                    for (size_t fi = 0; fi <= nfs; fi++) {
+                        for (ast_node_t *e = s->embeds; e; e = e->next) {
+                            ast_struct_embed_t *emb = (ast_struct_embed_t *)e;
+                            if (emb->field_index != fi) continue;
+                            items[nitems++] = e;
+                        }
+                        if (fi < nfs) {
+                            ast_node_t *fn = s->fields;
+                            for (size_t skip = 0; skip < fi && fn; skip++)
+                                fn = fn->next;
+                            if (fn) items[nitems++] = fn;
+                        }
+                    }
+                } else {
+                    overflow = true; /* 病态输入（>256 项）：按原序渲染 */
                 }
+
+                if (!overflow) {
+                    /* 项与项之间的分隔符：字段与嵌入**都由自己收尾**
+                       （字段 = "name: type"，嵌入 = "...Name;"），所以项间统一
+                       写 "; "；只有"后一项是 var 成员"时例外——var 自带分号，
+                       这里只补一个空格（见下方成员循环）。 */
+                    for (size_t k = 0; k < nitems; k++) {
+                        ast_node_t *it = items[k];
+                        if (k) sb_str(&f->sb, "; ");
+                        if (it->kind == AST_STRUCT_FIELD) {
+                            /* 单字段渲染（**不能**用 render_semi_list：它会沿
+                               node->next 把整条字段链一次性渲染完，导致重复输出） */
+                            ast_struct_field_t *sf = (ast_struct_field_t *)it;
+                            sb_put(&f->sb, sf->name.ptr, sf->name.len);
+                            sb_str(&f->sb, ": ");
+                            render_expr(f, sf->type);
+                        } else {
+                            /* 嵌入渲染但不写自带分号（分号由上面的 "; " 提供）——
+                               与 render_node 的 AST_STRUCT_EMBED 分支保持一致。 */
+                            ast_struct_embed_t *emb = (ast_struct_embed_t *)it;
+                            sb_str(&f->sb, "...");
+                            sb_put(&f->sb, emb->name.ptr, emb->name.len);
+                        }
+                    }
+                } else {
+                    bool first = true;
+                    for (ast_node_t *fn = s->fields; fn; fn = fn->next) {
+                        if (!first) sb_str(&f->sb, "; ");
+                        render_node(f, fn);
+                        first = false;
+                    }
+                    for (ast_node_t *e = s->embeds; e; e = e->next) {
+                        if (!first) sb_str(&f->sb, "; ");
+                        render_node(f, e);
+                        first = false;
+                    }
+                }
+                /* 合并序列末项是**嵌入**：补上它的分号（嵌入在序列里不写自带
+                   分号），并把"前一项已自带分号"记为真，避免成员循环重复补。 */
+                bool prev_terminated = false;
+                if (!overflow && nitems > 0) {
+                    if (items[nitems - 1]->kind == AST_STRUCT_EMBED) {
+                        sb_ch(&f->sb, ';');
+                        prev_terminated = true;
+                    }
+                }
+                /* 字段/嵌入 → 成员：var 与 func **都自带收尾**（var 自带分号、
+                   func 自带函数体块），但**都不收尾前一项**——前一项是字段时它
+                   的类型表达式后面没有分号（`x: i32 func f(){…}` 无法解析），
+                   所以这里必须补 "; "；前一项是嵌入时它的分号已在上面补过
+                   （prev_terminated），只需空格。成员之间只隔一个空格。 */
+                ast_node_t *prev_m = NULL;
                 for (ast_node_t *m = s->members; m; m = m->next) {
-                    if (s->fields || m != s->members) sb_ch(&f->sb, ' ');
+                    if (prev_m) {
+                        sb_ch(&f->sb, ' ');
+                    } else if (nitems > 0) {
+                        if (prev_terminated) sb_ch(&f->sb, ' ');
+                        else sb_str(&f->sb, "; ");
+                    }
                     render_node(f, m); /* var 自带 ';'；func 自带函数体块 */
+                    prev_m = m;
                 }
                 sb_str(&f->sb, " }");
             }
@@ -877,6 +968,15 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_put(&f->sb, sf->name.ptr, sf->name.len);
             sb_str(&f->sb, ": ");
             render_expr(f, sf->type);
+            break;
+        }
+        case AST_STRUCT_EMBED: {
+            /* 结构体嵌入 `...Name;`（结构体组合的语法面）。位置由
+               AST_STRUCT_DEF 分支按 field_index 恢复，这里只渲染自身。 */
+            ast_struct_embed_t *emb = (ast_struct_embed_t *)node;
+            sb_str(&f->sb, "...");
+            sb_put(&f->sb, emb->name.ptr, emb->name.len);
+            sb_ch(&f->sb, ';');
             break;
         }
         case AST_IF: {

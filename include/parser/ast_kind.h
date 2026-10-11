@@ -13,6 +13,8 @@ typedef enum {
     AST_ENUM_VARIANT,    /* 枚举 variant 声明（name = value，仅 enum 定义体内） */
     AST_STRUCT_DEF,      /* struct name { field: type; ... }（顶层结构体定义） */
     AST_STRUCT_FIELD,    /* 结构体字段声明（name: type，仅 struct 定义体内） */
+    AST_STRUCT_EMBED,    /* 结构体嵌入声明 `...Name;`（仅 struct 定义体内；纯语法节点，
+                            type 层的字段组合由 sema 在类型 seal 之前完成） */
     AST_UNION_DEF,       /* union name { field: type; ... }（顶层 union 定义，struct 同构平铺字段） */
     AST_UNION_MEMBER,    /* union member 声明（field: type，仅 union 定义体内） */
     AST_CUNION_DEF,      /* cunion name { field: type; ... }（顶层 C 语义 union 定义，

@@ -62,6 +62,7 @@
 #include "parser/lexer.h"
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
+#include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "vm/type_array.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
@@ -711,6 +712,33 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
             memcpy(mangled + lid->name.len + 2, er->variant.ptr, er->variant.len);
           strslice_t q = strslice_from_bytes(mangled, total);
           sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          /* 嵌入继承：`struct Test { ...Base; }` 的 `Test::count = v` 未命中自己
+             的静态属性时沿嵌入链解析到 `Base::count` —— 写的是**同一个**全局
+             变量（不生成新的一份）。歧义由查找函数报诊断（返回 NULL）。
+             名字优先、**自己的胜出**：`Test` 自己声明了 `var count` 就用自己
+             那一份（即使 Base 也有同名属性），不报歧义。 */
+          if ((!ms || ms->kind != SEMA_SYM_VAR) && ls->type &&
+              ls->type->kind == TYPE_KIND_STRUCT) {
+            strslice_t *inh = sema_struct_member_lookup(sema, ls->type,
+                                                        er->variant,
+                                                        as->target);
+            if (inh) {
+              q = *inh;
+              ms = sema_lookup(sema->global_scope, q);
+            }
+          }
+          /* 名字命中的是**函数成员**（`func`，含沿嵌入链继承来的方法）：
+             `Test::f = v` 非法（成员是函数不是变量）。这里给准确诊断，
+             而不是落到下面枚举 variant 的错误恢复分支。 */
+          if (ms && ms->kind == SEMA_SYM_FUNC) {
+            diag_error(sema->diag, sema_loc(sema, as->target),
+                       "cannot assign to '%.*s::%.*s': it is a `func` member "
+                       "(a method, not a variable)",
+                       (int)lid->name.len, lid->name.ptr,
+                       (int)er->variant.len, er->variant.ptr);
+            sema_expr(sema, &as->value, scope);
+            return;
+          }
           if (ms && ms->kind == SEMA_SYM_VAR) {
             ast_node_t *ident = ast_ident_new(sema->arena, as->target->tok_begin,
                                               as->target->tok_end);

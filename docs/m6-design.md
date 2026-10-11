@@ -1487,3 +1487,200 @@ VmQualifiedTypes.ImplicitCastQualifyShadow、examples/const_volatile.cx、typeho
   `Counter::total = 4, a = 12, b = 22, full = 1`。
 - 全量：build exit=0、**0 告警**、**1674/1674**、示例 **41/41**（0 泄漏）且
   41/41 emit → run .cxb 全通过、format 幂等 **43/43**。
+
+### 14.23 ✅ 结构体组合：`...Base;`（type 层，**seal 前窗口**）
+
+#### 14.23.1 需求与纠正
+
+用户需求：
+
+```
+struct Base { id: i32; func getId(self: ref *const Base): i32 { return self.id; } };
+struct Test { ...Base; }
+```
+
+"直接将 Base 的语法树原样嫁接到 Test 中，如果 Base 在开头自然的 Test 的实例 t 上面
+t.getId() 兼容，但是如果 ...Base 前面还有字段，自然的拒绝"。
+
+随后纠正实现路径："这个结构体组合构建类型应该在 sema 后阶段，不是语法树嫁接，而是
+遍历旧的 type（Base）复制到新的 type（Test）中，因为需要考虑未来的装饰器会在 sema
+创建 type 后修改 type，而聚合其它结构体应该在 type seal 后"；再补出隐含规则："新
+struct 在聚合后的 attribute 可以覆盖原来的（重写，但是字段不允许覆盖，冲突报错），
+也就是一条隐含的规则，在 seal 之前可以复写编辑类型的 attribute"。
+
+**attribute 的口径**（用户最终澄清："我说的 attribute 指的是结构体的字段和 var 定义的
+属性"）＝ 结构体的**字段** + `var` 定义的**静态属性**（+ 同属命名空间成员的 `func`
+方法，按同一覆盖规则处理）。据此，本轮在"seal 前窗口 + 字段不可覆盖"之上补齐
+**成员覆盖语义**（14.23.4）：新 struct 自己声明的同名 attribute **静默覆盖**继承来的，
+字段是唯一例外。
+
+要点：**组合的输入是 Base 的 type（不是 AST）**；而"seal 前可编辑、seal 后不可变"
+这条隐含规则决定了组合必须发生在**目标类型 seal 之前**，不能事后改写已 seal 的类型。
+
+#### 14.23.2 机制：type 层组合挂在 seal 前的开放窗口
+
+数据流（`src/sema/struct_compose.c` 的 `sema_struct_compose_def`，由
+`sema_eval_struct_def` 转发调用；全局 pass1b 与局部块提升都走它）：
+
+```
+自有字段槽位解析（unknown → 报错；同名 → 报错；未就绪 → DEFERRED）
+  → 逐 `...Base` 解析成已 sealed 的 struct 类型（未 seal → DEFERRED）
+  → 字段冲突检查（自有 vs 嵌入 / 嵌入 vs 嵌入：字段不允许覆盖）
+  → type_struct_alloc_open()                       // 开放对象（可编辑）
+  → type_struct_add_field() × 自有字段             // 追加
+  → type_struct_insert_embed_fields()              // 按 layer 插入各 Base 字段表
+  → type_struct_set_embeds()                       // 登记嵌入表（成员继承用）
+  → type_struct_seal()                             // **只 seal 一次**（布局定型）
+  → sema_type_register + type_set_name + scope_define + 激活符号
+```
+
+- **`type_t*` 身份**：由"同一个开放对象就地 seal"保持。具名 struct 定义**不参与**
+  seal 去重（`type_struct_mark_unique`，见 14.23.8）——命名的 `struct A` / `struct B`
+  即使字段表逐位相同也是两个不同类型；匿名/内部构造的类型仍按字段表去重（与
+  array/tuple/enum 等开放构造路径一致）。sema 用 seal 的**返回值**做登记与符号绑定，
+  后续 `c_sema_type_find_ptr` / `vm->types_by_id` / CTFE 拿到的都是它——不存在"替换
+  指针后留下悬垂引用"的问题。
+- **布局**：只在 seal 里算一次（`struct_layout_apply`，SEAL 与组合共用同一份 C 对齐
+  规则），不再有"seal 后重算布局"。
+- **嵌入表**（`struct_type_t::embeds`）：seal 前设置、seal 时原样保留。成员
+  （`var` 静态属性 / `func` 方法）**不复制**，成员名字查找沿它递归（见 14.23.4）。
+
+#### 14.23.3 不变量：seal 前可编辑 attribute，seal 后拒绝
+
+用户给的隐含规则在代码里硬化成两条：
+
+1. `include/vm/type_struct.h` 紧邻 `type_struct_seal` 的注释写明：**seal 是类型生命
+   周期的分界线**——seal 前字段表/嵌入表（以及未来的 attribute/元数据）可编辑；
+   seal 后类型不可变。
+2. 两个写入 API（`type_struct_insert_embed_fields` / `type_struct_set_embeds`）对
+   `type_is_sealed(t)` 为真的类型**拒绝**（返回 false，类型一字不改），与既有
+   `type_struct_add_field`（密封后静默忽略）同一口径。任何"seal 后改类型"的路径都会
+   立刻失败，而不是悄悄生效。
+
+clux 源码自身**没有** attribute / 装饰器机制（`attr`/`attribute` 只命中 third_party
+的 C 宏），因此这条规则没有新语法载体，按"不变量 + 文档 + 测试"落地：
+
+- `tests/struct_test.cpp::StructTypeTest.EmbedFieldsOnlyEditableBeforeSeal`：开放类型上
+  两个 API 成功（字段序/偏移/嵌入表全部正确），seal 之后同样的调用**失败且不改动**。
+
+字段那一半（**字段不允许覆盖**）有独立诊断：自有字段撞嵌入字段、两个嵌入字段重名、
+菱形里共享的 Base 实例字段走两条路径，分别报
+
+```
+struct 'Test': field 'id' conflicts with embedded field from 'Base'
+             (fields cannot be overridden by struct embedding)
+struct 'R': duplicate field name 'v' after struct embedding:
+            inherited from both 'P' and 'Q'
+```
+
+#### 14.23.4 attribute 覆盖：新 struct 可以重写继承来的 attribute
+
+**attribute 的口径**（用户最终澄清："新 struct 在聚合后的 attribute 可以覆盖原来的
+（重写，但是字段不允许覆盖，冲突报错），也就是一条隐含的规则，在 seal 之前可以复写
+编辑类型的 attribute"）＝ **结构体的字段** + **`var` 定义的静态属性** + 同属命名空间
+成员的 **`func` 方法**。
+
+裁决点只有一处：`sema_struct_member_lookup` 的第 1 步（"先 `Test::name` 自己"）——
+`T::name` 在全局成员表里命中就**直接返回自己**，不再走嵌入链。于是：
+
+| `Test` 是否自己声明 `name` | 解析结果 | 存储关系 |
+| --- | --- | --- |
+| 是（`var` 或 `func`） | `Test::name`（自己胜出，**不报歧义/重复**） | 与 `Base::name` **互相独立**（各自一个全局变量 / 各自一个函数） |
+| 否 | 沿嵌入链的唯一命中 `Base::name` | `Test::name` 与 `Base::name` 是**同一份**（写一个即写另一个） |
+| 否，且多个嵌入都提供 | 歧义报错（`member 'x' of struct 'R' is ambiguous: found in P, Q`） | —— |
+
+- **kind 组合（`Test` 用 `func count` 覆盖 `Base` 的 `var count`，或反向）**：按
+  **名字优先、自己的胜出**落在使用点裁决——不回退到 `Base` 的那一份（否则"用谁的"
+  会随写法漂移，产生隐式行为）。三处使用点各给准确诊断：
+  - `ex_call`（`t.f()` 方法糖）：自己的 `f` 是 `var` →
+    `cannot call 'f': it is a struct member variable, not a method`；
+  - `shadow_assign`（`Test::f = v`）：自己的 `f` 是 `func` →
+    `cannot assign to 'Test::f': it is a func member (a method, not a variable)`；
+  - `ex_member`（`t.n` 不带 `()`）：命中成员而非字段 → `'n' is a member of struct
+    'Test', not a field (static properties are accessed as `T::n`)`。
+- **字段是唯一例外**：字段不参与覆盖（14.23.3 的冲突诊断保留）。
+- **不变量**：覆盖发生在 **seal 之前**的开放窗口（同 14.23.3）；seal 之后类型（含
+  attribute 的归属）不可变。
+
+#### 14.23.5 成员继承的确定性规则
+
+`Base` 的成员只有一份（`Base::getId` 是同一个函数、`Base::count` 是同一个全局变量）。
+`sema_struct_member_lookup`（`t.f()` 方法糖、`Test::f` 限定访问、`Test::count = v`
+静态属性写三处共用）的规则：
+
+1. 先 `Test::name` 自己 —— **命中即返回**（新 struct 的同名 attribute 覆盖继承来的，
+   见 14.23.4）；
+2. 再按 `...` **书写顺序深度优先**递归（因此传递嵌入天然覆盖），**按类型指针去重**
+   （同一个 Base 经两条路径只算一次命中——菱形不会误报歧义）；
+3. 恰好一个命中 → 改写为成员**实际定义**所在的限定名（`Base::name`），于是读/写/取
+   函数值/调用全部走既有全局路径；命中多个 → 歧义诊断；零命中 → 不报错（沿用调用点
+   既有诊断）。
+
+#### 14.23.6 定义顺序与环
+
+- **定义顺序无关**：`sema_struct_compose_pass` 做"依赖序遍历 + 反复尝试"——每轮扫过
+  顶层结构体定义，把 `...Base` 已 seal 的当场做掉，直到一轮没有任何新进展。因此
+  `...Base` 的 Base 写在 Test **之后**（甚至整条链倒序）都可用。
+- **环检测必须在求值之前**：环里的定义永远等不到依赖就绪（X 等 Y、Y 等 X），先求值
+  只会把它们静默延后。因此 pass 先跑 `report_embed_cycles`：DFS + 在途标记
+  （`ast_struct_def_t::composing`），命中在途节点即报
+  `circular struct embedding ('...' cycle involving this struct)`；路径式遍历保证
+  菱形（A→B、A→C、B→D、C→D）**不会**被误判成环。环检测覆盖全局与块内结构体定义。
+
+#### 14.23.7 位置决定前缀兼容
+
+组合后的字段表就是"手写同样字段"的字段表，因此既有的**结构体指针向上自动转换**
+（14.x/`struct_type_prefix_compatible`）**自然**给出位置语义：
+
+- `...Base` 在开头 ⟹ Test 的字段前缀 == Base 的字段 ⟹ `t.getId()` 成立
+  （方法糖需要 `ref *Test → ref *const Base`）；
+- `...Base` 前面还有字段 ⟹ 前缀不成立 ⟹ 同一写法报
+  `argument 1: cannot convert ref Test to ref const Base`。
+
+位置限制**没有**任何特判代码——它是"字段表 + 既有向上转换规则"的自然结果。
+
+#### 14.23.8 具名 struct 的身份不合并（本轮修掉的第三个既有缺陷）
+
+`type_struct_seal` 的去重 intern 原来只按**字段表**（`struct_same`：名字 + 类型 +
+顺序）比较，不看成员命名空间与嵌入表。于是命名的 `struct P { var n }` 与
+`struct Q { var n }`（字段表都是「1 个 i32 字段 n」）在 seal 时被合并成**同一个
+`type_t` 对象**：
+
+- 后 seal 的那个把 `type->name` 覆盖掉（P 的类型显示名变成 "Q"）；
+- `struct R { ...P; ...Q; }` 的嵌入表退化为 `[X, X]`（两个槽位指向同一对象），
+  `collect_member_sources` 按类型指针去重后只剩**一个**命中 → `R::n` **不再报歧义**、
+  静默解析到那个被合并的对象（实测：`R::n` 编译通过并读到 Q 的值）。
+
+修法：给 `struct_type_t` 加 `unique` 标记（`type_struct_mark_unique`，seal 前设置，
+seal 后拒绝——与其它类型属性同一不变量）。**具名 struct 定义**（`sema_struct_compose_def`
+的统一入口，含无嵌入的普通 struct）标记为 unique，`type_struct_seal` 对它**跳过去重**：
+命名的 `struct A` / `struct B` 即使字段表逐位相同也是两个不同类型（各自有独立的
+`A::f` / `B::f` 成员命名空间与嵌入表）。匿名/内部构造的类型（sema 的匿名 struct 推断、
+union payload、字节码运行期 `DEFINE_TYPE`/`SEAL`）不置位，保持既有 dedup 语义。
+结构兼容（鸭子类型 `struct_type_compatible`）与指针前缀向上转换
+（`struct_type_prefix_compatible`）都按字段表判定，不受影响。
+
+#### 14.23.9 顺带修掉的两个既有缺陷
+
+- `src/vm/type_ptr.c`：`ptr_implicit_cast` 对 shadow 值（data=NULL）**无条件放行**
+  （`value_make_shadow(vm, target)`），于是非法指针隐式转换在 sema 静默通过、漏到
+  运行期才报 "ptr: unsupported implicit cast for pointer"。抽出类型层判据
+  `ptr_implicit_cast_ok`（与真实转换分支逐一对应），shadow 走同一套判据 → 编译期拒绝。
+- `src/vm/type.c`：`type_set_name` 只对已分配 program id 的类型生效。在**开放对象**
+  （id=0）上设显示名会把名字堆内存挂在开放对象上，seal 去重命中回收开放对象时泄漏
+  （实测 6 字节 "Test"）。组合路径改为 seal + 登记**之后**设置显示名。
+
+#### 14.23.10 测试与验证
+
+- `tests/struct_compose_test.cpp` **31 例**：正向（开头嵌入的字段访问/方法糖/限定调用/
+  向上转换/同一块存储、静态属性同一份、传递嵌入、中部嵌入、多个嵌入、布局与数组步长、
+  与手写类型结构兼容、Base 声明在后、整条链倒序、菱形成员去重；**attribute 覆盖**
+  （`var` 覆盖后两份独立、`func` 覆盖后 `t.f()` 取自己的而 `Base::f(...)` 仍取 Base 的、
+  不声明时仍共享同一份、自己的声明让歧义消失、跨 kind 覆盖以自己为准）；负例（前缀不
+  成立时方法糖/显式转换被拒、未知与非结构体目标、字段冲突三类、重复嵌入同一 Base、
+  成员歧义只在"自己没有而多个嵌入都有"时出现、跨 kind 覆盖的使用点错误、字段不可覆盖、
+  具名 struct 不被合并）。
+- `tests/struct_test.cpp` 新增 seal 窗口不变量用例（14.23.3）。
+- `examples/struct_compose/struct_compose.cx`：组合 + 向上转换 + 成员共享 + 布局对照。
+- 全量：build exit=0、**0 告警**、**1711/1711**、示例 **42/42**（0 泄漏）且 42/42
+  emit → run .cxb 全通过、format 幂等 **44/44**。

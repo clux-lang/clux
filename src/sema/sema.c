@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/struct_compose.h" /* 结构体组合（`...Base;`）pass */
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
@@ -1151,8 +1152,13 @@ static void pass1b_types(sema_t *sema, ast_program_t *prog, bool speculative) {
       sema_eval_enum_def(sema, (ast_enum_def_t *)f, sema->global_scope);
     } else if (f->kind == AST_STRUCT_DEF) {
       /* 与全局 type def 同 pass：struct 类型先于函数签名解析（签名/变量
-         可引用 struct 类型）。定义点保留（进字节码，运行时 hoist 构造）。 */
-      sema_eval_struct_def(sema, (ast_struct_def_t *)f, sema->global_scope);
+         可引用 struct 类型）。定义点保留（进字节码，运行时 hoist 构造）。
+         实现已收敛到 struct_compose.c 的 sema_struct_compose_pass——它按
+         "嵌入依赖优先"反复遍历未求值的定义，因此 `...Base` 的 Base 写在
+         Test 之后也能解析。**结构体组合发生在类型 seal 之前**：组合入口在
+         开放对象窗口里插字段 + 登记嵌入表，然后只 seal 一次。整条链一次
+         处理完，循环继续处理后面的定义（type/union/cunion）。 */
+      sema_struct_compose_pass(sema, prog, sema->global_scope);
     } else if (f->kind == AST_UNION_DEF) {
       /* 与全局 type def 同 pass：union 类型先于函数签名解析（签名/变量
          可引用 union 类型）。定义点保留（进字节码，运行时 hoist 构造）。 */
@@ -1429,6 +1435,9 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   for (int round = 0; round < 8; round++) {
     if (sema_speculative_round(sema, prog) == 0) break;
   }
+  /* 试跑轮的诊断进临时缓冲被丢弃，但"环已诊断"标记会留下来；复位它，正式轮
+     才会重新检测并报出循环嵌入（否则环错误只存在于被丢弃的缓冲区里）。 */
+  sema_struct_compose_reset_reports(prog);
   pass1b_types(sema, prog, /*speculative=*/false); /* 全局 type def */
   pass1c_extern_abi(sema, prog); /* extern cfunc/var 签名校验（程序类型已激活） */
   pass2_types(sema, /*speculative=*/false);         /* 函数签名 */

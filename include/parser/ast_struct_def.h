@@ -33,6 +33,19 @@ typedef struct {
      * 全局路径，无需任何新机制。fmt 直接渲染 members（**不**走展开，避免重复）。 */
     ast_node_t *members;
     ast_node_t *members_last;
+    /* ---- 结构体嵌入（`...Base;`，纯语法）----
+     * AST_STRUCT_EMBED 兄弟链，声明序。**只记录位置与名字**——字段组合由 sema
+     * 在**目标类型 seal 之前**按 `field_index` 完成（遍历 Base 已 sealed 的
+     * type 复制字段），本列表**不**参与字段拼接（见 ast_struct_embed.h）。 */
+    ast_node_t *embeds;
+    ast_node_t *embeds_last;
+    /* 组合状态（sema 用，transient）：
+     * composing：嵌入环检测 DFS 的**在途标记**——A→B→A 在第二次进入 A 时命中它。
+     *   作用域限定在一次 DFS 路径内，进入/退出成对置位/清零。
+     * cycle_reported：本结构体所在嵌入环已经报过"循环嵌入"。sema 的试跑轮会反复
+     *   调用同一个 pass，没有它会重复打印同一组诊断；只增不清（一次诊断足够）。 */
+    bool        composing;
+    bool        cycle_reported;
     uint32_t    type_id;         /* sema 登记的类型 id（TYPE_ID_PROGRAM_BASE+idx；
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
 } ast_struct_def_t;
