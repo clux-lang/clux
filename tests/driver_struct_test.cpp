@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -288,6 +288,50 @@ TEST(Driver, RunFileStructAnonConstructInAssignRhsPasses) {
       "  if (p.x != 1 || p.y != 2) { return 1; }\n"
       "  p = .{ .y = 4, .x = 3 };\n"
       "  if (p.x != 3 || p.y != 4) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* 聚合类型的拷贝语义（用户可见契约）：`var b = a` 是**拷贝**而非别名。
+   回归背景：DEFINE/STORE 的"接管"守卫误把"变量的值"（is_own=true）当成
+   fresh 临时值，导致 b 与 a 绑定同一 value 本体——改 b 会连带改 a。 */
+TEST(Driver, RunFileStructCopyInitIsNotAlias) {
+  std::string path = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "func main():i32 {\n"
+      "  var a: Point = .Point { .x = 1, .y = 2 };\n"
+      "  var b: Point = a;\n"          /* 必须是拷贝 */
+      "  b.x = 9;\n"
+      "  if (a.x != 1) { return 1; }\n" /* 别名实现下会读到 9 */
+      "  if (b.x != 9) { return 2; }\n"
+      /* 赋值语句同样不得别名 */
+      "  var c: Point = .Point { .x = 3, .y = 4 };\n"
+      "  var d: Point = .Point { .x = 5, .y = 6 };\n"
+      "  c = d;\n"
+      "  c.y = 8;\n"
+      "  if (d.y != 6) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* 聚合类型的赋值在驱动层也不得泄漏：driver_run_file 内部的 allocator
+   销毁时会向 stderr 报 leak（此处以退出码 + 无崩溃为主，泄漏由
+   exec_test.cpp 的 ExecTest.Aggregate* 用例以分配器存活计数精确断言）。 */
+TEST(Driver, RunFileAggregateAssignChain) {
+  std::string path = write_temp_file(
+      "struct Cell { v: i32; }\n"
+      "func main():i32 {\n"
+      "  var cells: [2]Cell = .[2]Cell{ .Cell{ .v = 1 }, .Cell{ .v = 2 } };\n"
+      "  cells[0] = .Cell{ .v = 7 };\n"
+      "  if (cells[0].v != 7) { return 1; }\n"
+      "  var one: Cell = .Cell{ .v = 9 };\n"
+      "  var two: Cell = one;\n"
+      "  two.v = 11;\n"
+      "  if (one.v != 9) { return 2; }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

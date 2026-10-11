@@ -1,0 +1,7 @@
+struct Cell { v: i32; }
+func main(): i32 {
+  var p: own *i32 = new i32{7};
+  var c: Cell = .Cell{ .v = (move(p)).* };
+  printf("%d\n", c.v);
+  return 0;
+}

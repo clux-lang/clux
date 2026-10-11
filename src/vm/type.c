@@ -43,8 +43,17 @@ value_t *type_as_value(vm_t *vm, const type_t *t) {
 /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
 
 /* 内建类型 id 段 0..16（vm_register_builtin_types + error/interrupt）。
-   程序类型 id 由 sema 分配，从 64 起（预留扩展空隙，见 vm.h 注释）。
+   程序类型 id 由 type_id_alloc 全 VM 全局分配，从 64 起（预留扩展空隙）。
    TYPE_ID_BUILTIN_COUNT / TYPE_ID_PROGRAM_BASE 定义于 vm/type.h（sema/编译器共用）。 */
+
+/* 分配全 VM 唯一的程序类型 id。id 溢出（>u32 上限）时返回 0 —— 调用方
+   （sema_type_register / 编译器）按"分配失败"处理并报错，不静默复用。 */
+uint32_t type_id_alloc(vm_t *vm) {
+    if (!vm) return 0;
+    if (vm->type_id_next == 0) vm->type_id_next = TYPE_ID_PROGRAM_BASE;
+    if (vm->type_id_next == 0xFFFFFFFFu) return 0;
+    return vm->type_id_next++;
+}
 
 /* DEFINE_TYPE <id> 声明登记（SEAL 密封后按自身 id 幂等重绑）：扩容至
    id+1 后写入。重复登记幂等（同一实例多 id 别名）。
@@ -200,26 +209,30 @@ const type_t *type_promote(const vm_t *vm, const type_t *a, const type_t *b) {
 /* 内置类型实例（全局静态，由 vm_init_builtins 初始化）                   */
 /* ================================================================ */
 
-static type_t g_type_i8   = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_i16  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_i32  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_i64  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_u8   = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_u16  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_u32  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_u64  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_f32  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_f64  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_bool = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_str  = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_void = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_type = { NULL, {NULL,0}, 0, 0, 0, false };
+/* 内置类型单例：零初始化（静态存储期），全部字段（vtable/name/size/align/
+   kind/sealed/id）由 vm_init_builtins 逐一填充。
+   此前用位置式初始化逐个列字段，新增字段（如 `id`）后必然漏初始化并触发
+   -Wmissing-field-initializers——这里改为依赖零初始化，避免同类漂移。 */
+static type_t g_type_i8;
+static type_t g_type_i16;
+static type_t g_type_i32;
+static type_t g_type_i64;
+static type_t g_type_u8;
+static type_t g_type_u16;
+static type_t g_type_u32;
+static type_t g_type_u64;
+static type_t g_type_f32;
+static type_t g_type_f64;
+static type_t g_type_bool;
+static type_t g_type_str;
+static type_t g_type_void;
+static type_t g_type_type;
 /* func 基类声明为 func_type_t 布局：无签名（sig 全零），向下转型安全 */
-static func_type_t g_type_func = { { NULL, {NULL,0}, 0, 0, 0, false }, { NULL, 0, NULL, false } };
-static type_t g_type_error = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_interrupt = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_opaque = { NULL, {NULL,0}, 0, 0, 0, false };
-static type_t g_type_module = { NULL, {NULL,0}, 0, 0, 0, false };
+static func_type_t g_type_func;
+static type_t g_type_error;
+static type_t g_type_interrupt;
+static type_t g_type_opaque;
+static type_t g_type_module;
 
 void vm_init_builtins(vm_t *vm) {
     static const char S_I8[]  = "i8",   S_I16[] = "i16", S_I32[] = "i32", S_I64[] = "i64";

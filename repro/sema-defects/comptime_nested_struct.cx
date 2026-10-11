@@ -1,0 +1,8 @@
+comptime var N: const i32 = 5;
+struct I { a: i32; }
+struct O { i: I; }
+func main(): i32 {
+  var o: O = .O{ .i = .I{ .a = N } };
+  printf("%d", o.i.a);
+  return 0;
+}

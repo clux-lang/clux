@@ -132,7 +132,6 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
   ast_program_t *prog = (ast_program_t *)program;
-  c->current_scope = c->global_scope;
   c->failed = false;
   c->scope_depth = 0;
   c->stack_depth = 0;
@@ -260,6 +259,10 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind != AST_VAR_DEF) continue;
     if (((ast_var_def_t *)f)->is_comptime) continue; /* 防御：sema 已摘除 */
+    /* M6 FFI：extern var 是**外部数据符号的声明**——没有本地存储、没有 init，
+       运行期由 EXTERN_LOAD/STORE 直接读写库里的变量地址，因此不进字节码的
+       全局定义序列（引用点各自发指令）。 */
+    if (((ast_var_def_t *)f)->is_extern_var) continue;
     compile_stmt(c, f);
     if (c->failed) break;
   }
@@ -308,16 +311,13 @@ compiler_t *compiler_new(allocator_t *alloc, vm_t *vm, diag_buf_t *diag,
   c->diag          = diag;
   c->tokens        = tokens;
   c->global_scope  = global_scope;
-  c->current_scope = global_scope;
   c->sema_types    = sema_types;
   c->loop_stack    = NULL;
   c->failed        = false;
   c->funcs_all     = vec_new(alloc, false);
-  /* 签名类型 id 由 sema 分配（sema_type_register 登记进 sema->types，
-     id = PROGRAM_BASE + index，已写入 sig->id）；type_id_next 仅作防御
-     分支（compile_type.c AST_ARRAY 未替换场景临时分配 id）。 */
-  c->type_id_next  = TYPE_ID_PROGRAM_BASE +
-                     (uint32_t)(sema_types ? vec_len(sema_types) : 0);
+  /* 类型 id 不在编译器侧分配：program 类型 id 由 vm 的 type_id_alloc 全 VM
+     全局分配（sema_type_register 与 compile_type.c 的防御分支共用），避免多模块
+     各自从 TYPE_ID_PROGRAM_BASE 起算导致 types_by_id 槽位互相覆盖。 */
   return c;
 }
 

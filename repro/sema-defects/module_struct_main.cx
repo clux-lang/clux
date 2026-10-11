@@ -1,0 +1,2 @@
+import a from "./module_struct_lib";
+func main(): i32 { printf("%d\n", a::fa()); return 0; }

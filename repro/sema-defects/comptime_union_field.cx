@@ -1,0 +1,7 @@
+comptime var N: const i32 = 5;
+union U { a: i32; b: i32; }
+func main(): i32 {
+  var u: U = .U{ .a = N };
+  printf("%d", u.a);
+  return 0;
+}

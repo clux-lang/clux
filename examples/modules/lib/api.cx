@@ -1,0 +1,11 @@
+// api.cx -- 代理导出（M5）：export * from "./math";
+//
+//   把依赖模块的**全部导出符号**原样转发到本模块导出表（全量转发，
+//   不支持选择性代理）。使用方 import 本模块即可访问被代理模块的符号：
+//
+//       import api from "./lib/api";
+//       api::add(1, 2)      // add 来自 lib/math.cx
+//
+//   若转发符号与本模块已有导出同名 → 编译错误（符号冲突）。
+
+export * from "./math";

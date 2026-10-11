@@ -20,7 +20,7 @@ extern "C" {
  *
  * 每个 value 持有指向所属作用域 frame 的指针（借用 &scope->frame，见
  * scope_frame.h）：value_scope() 可还原所属 scope，供所有权分析判定
- * 作用域逃逸。untracked 构造（value_make_untracked）无 vm 上下文，
+ * 作用域逃逸。untracked 构造（value_alloc_shell）无 vm 上下文，
  * frame 为 NULL（引擎内部对象不属用户作用域）。
  *
  * 外部代码通过 value_type() / value_data() 访问内部字段，
@@ -77,7 +77,7 @@ value_t *value_make(vm_t *vm, const type_t *type, void *data);
 
 /** 从已有 data 指针构造 value（堆分配，不 auto-track）。
  * 仅供需要手动管理生命周期时使用。 */
-value_t *value_make_untracked(allocator_t *alloc, const type_t *type, void *data);
+value_t *value_alloc_shell(allocator_t *alloc, const type_t *type, void *data);
 
 /** 构造 shadow value：只携带类型信息，data=NULL，用于语义分析阶段类型计算。
  * is_shadow=true 的 value 参与运算时只做类型计算不操作实际数据。
@@ -92,7 +92,12 @@ bool value_is_shadow(const value_t *v);
  * materialize 成独立深拷贝（is_own=true）。自动 track 到 vm->current_scope。 */
 value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *slot);
 
-/** 判断 value 是否为借用引用（非 shadow 且不拥有 data） */
+/** 判断 value 是否为借用引用（非 shadow 且不拥有 data）。
+ *
+ * 这也是**唯一的"采用 vs 拷贝"判据**：变量读取（op_push）压入借用视图，
+ * 因此 `scope_define` 见到非借用值就只可能是表达式刚创建的临时值 → 零拷贝
+ * 采用；见到借用视图（或属于其他作用域的值）→ materialize 成独立深拷贝。
+ * 不再需要"该值是否已绑定到名字"的附加标记（2026-10 所有权重构删除）。 */
 bool value_is_borrowed(const value_t *v);
 
 /* ---- error 构造 ---- */

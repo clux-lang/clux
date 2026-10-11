@@ -30,6 +30,11 @@ endfunction()
 
 add_subdirectory(third_party/icu)
 
+# M6 FFI：libffi（Windows x64 + clang 的 CMake 端口；见 third_party/libffi-port）
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+  add_subdirectory(third_party/libffi-port)
+endif()
+
 add_executable(clux src/main.c)
 clux_target_warnings(clux)
 
@@ -61,7 +66,15 @@ file(GLOB CLUX_VM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/vm/*.c")
 add_library(clux_vm STATIC ${CLUX_VM_SOURCES})
 target_include_directories(clux_vm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_vm PUBLIC clux_core clux_parser ICU::uc ICU::i18n)
+target_link_libraries(clux_vm PUBLIC clux_core clux_parser clux_module ICU::uc ICU::i18n)
+# M6 FFI：libffi（third_party/libffi-port；win64.S 经预处理剥 cfi_*）
+if(TARGET FFI::ffi)
+  target_link_libraries(clux_vm PUBLIC FFI::ffi)
+endif()
+# M6 FFI：POSIX 下 dlopen/dlsym/dlclose 在 libdl（Windows 无需）
+if(UNIX)
+  target_link_libraries(clux_vm PUBLIC ${CMAKE_DL_LIBS})
+endif()
 clux_target_warnings(clux_vm)
 
 # ---------------------------------------------------------------------------
@@ -110,6 +123,22 @@ if(CLUX_COMPILER_SOURCES)
 endif()
 
 # ---------------------------------------------------------------------------
+# Module library (neutral module-path utilities)
+#
+# Path classification/normalization/resolution used by BOTH driver (entry path,
+# dependency re-resolution) and sema (import statements). Lives below both so
+# neither has to depend on the other — it must not include driver or sema headers.
+# ---------------------------------------------------------------------------
+file(GLOB CLUX_MODULE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/module/*.c")
+if(CLUX_MODULE_SOURCES)
+  add_library(clux_module STATIC ${CLUX_MODULE_SOURCES})
+  target_include_directories(clux_module PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(clux_module PUBLIC clux_core ICU::uc ICU::i18n)
+  clux_target_warnings(clux_module)
+endif()
+
+# ---------------------------------------------------------------------------
 # CTFE library (compile-time evaluation: interpret AST into real values)
 #
 # Materializes as soon as the first *.c file lands in src/ctfe/.
@@ -134,7 +163,7 @@ file(GLOB CLUX_DRIVER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/driver/*.c")
 add_library(clux_driver STATIC ${CLUX_DRIVER_SOURCES})
 target_include_directories(clux_driver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_diag clux_compiler ICU::uc ICU::i18n)
+target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_diag clux_compiler clux_module ICU::uc ICU::i18n)
 clux_target_warnings(clux_driver)
 
 # ---------------------------------------------------------------------------
@@ -189,6 +218,24 @@ if(BUILD_TESTS)
   target_link_libraries(clux_test PRIVATE clux_core clux_cmd clux_parser clux_driver clux_vm ${CLUX_STAGE_LIBS} icu_data_init ICU::data GTest::gtest)
   clux_target_warnings(clux_test)
 
+  # M6 FFI：extern var（动态库导出的**数据符号**）的测试素材。
+  # 系统库里没有"各种宽度的可写全局数据符号"可用（msvcrt 只有 int/指针那几类），
+  # 因此自建一个极小的测试动态库：i8/i16/i32/i64、u8/u16/u32/u64、f32/f64、
+  # bool、指针各一个导出变量，读写都作用于库里那块内存（真 dlsym + 真内存）。
+  # 产物落在与 clux_test 同一目录（Windows 的加载器会先搜可执行文件所在目录，
+  # 因此测试里用裸文件名即可打开）。
+  add_library(clux_ffi_testdata SHARED tests/ffi_testdata.c)
+  clux_target_warnings(clux_ffi_testdata)
+  add_dependencies(clux_test clux_ffi_testdata)
+
   include(GoogleTest)
   gtest_discover_tests(clux_test)
+endif()
+
+# M6：libffi 原生类型化调用层已可用（端口用 ml64 汇编 MASM/Intel 变体，见
+# third_party/libffi-port/CMakeLists.txt），打开 gated 测试以验证 ffi_call 路径。
+# TODO(M6)：ffi_call_typed 的 libffi 分支启用后，取消下面一行注释即可打开 gated 测试；
+# 目前 LibffiCallsFloatFunctionSqrt/Pow 仍失败（该分支当时因汇编不可用而被禁用）。
+if(TARGET FFI::ffi)
+  add_compile_definitions(CLUX_FFI_TYPED_CALLS=1)
 endif()

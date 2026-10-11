@@ -22,7 +22,6 @@ static void *test_alloc(size_t size) { return malloc(size); }
 static void test_free(void *ptr)     { free(ptr); }
 
 static int32_t read_i32(const value_t *v) { return *(const int32_t *)value_data(v); }
-static int64_t read_i64(const value_t *v) { return *(const int64_t *)value_data(v); }
 static uint64_t read_u64(const value_t *v) { return *(const uint64_t *)value_data(v); }
 
 static value_t *make_i32(vm_t *vm, int32_t v) {

@@ -5,6 +5,7 @@
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_enum_ref.h" /* M6 FFI：extern var 赋值目标（is_ffi_var 契约） */
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
 #include "parser/ast_block.h"
@@ -86,6 +87,57 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
              → PTR_GET 弹 1 压 1（被指向 T 值副本）→ value 压 1
              → op 弹 2 压 1 → PTR_SET 弹 2 压 1 → POP。
    与 compile_assign_member 的 FIELD_GET/op/FIELD_SET 模式同构。 */
+/* ---- M6 FFI：`<库>::<数据符号>` = v（extern var 的写入）----
+ *
+ * EXTERN_STORE 弹 1 压 0（写进库里的变量地址，无结果值），因此：
+ *   简单赋值：value → EXTERN_STORE                     栈净 -1（赋值是语句）
+ *   复合赋值：EXTERN_LOAD → value → op → EXTERN_STORE  同样是净 -1
+ * 与 compile_assign_deref 的 PTR_GET/op/PTR_SET 模式同构（差别只在目标不是
+ * 求值出来的指针，而是指令里的限定名——地址由运行期 dlsym 得到）。 */
+static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
+  ast_enum_ref_t *t = (ast_enum_ref_t *)n->target;
+  if (!t->is_ffi_var || !t->type_expr || t->type_expr->kind != AST_IDENT) {
+    c_error(c, &n->base, "malformed extern var assignment target");
+    return;
+  }
+  ast_ident_t *lib_id = (ast_ident_t *)t->type_expr;
+  char qual[512];
+  int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s", (int)lib_id->name.len,
+                    lib_id->name.ptr, (int)t->variant.len, t->variant.ptr);
+  if (qn <= 0 || (size_t)qn >= sizeof(qual)) {
+    c_error(c, &n->base, "malformed extern var assignment target");
+    return;
+  }
+  strslice_t q = strslice_from_bytes(qual, (size_t)qn);
+
+  if (token_is(n->op, "=")) {
+    compile_expr(c, n->value);                /* 栈: [val] */
+    bcode_write_op(c->bc, BCODE_EXTERN_STORE);
+    bcode_write_str(c->bc, q);
+    bcode_write_u32(c->bc, t->ffi_var_kind);
+    st_push(c, -1);                           /* 弹 1 压 0 */
+    return;
+  }
+
+  /* 复合赋值：先读旧值（EXTERN_LOAD +1），再算，再写回 */
+  bcode_write_op(c->bc, BCODE_EXTERN_LOAD);
+  bcode_write_str(c->bc, q);
+  bcode_write_u32(c->bc, t->ffi_var_kind);
+  st_push(c, 1);                              /* 栈: [old] */
+  compile_expr(c, n->value);                  /* 栈: [old, v] */
+  if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+  else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+  else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+  else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+  else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+  else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+  st_push(c, -1);                             /* 弹 2 压 1 → [new] */
+  bcode_write_op(c->bc, BCODE_EXTERN_STORE);
+  bcode_write_str(c->bc, q);
+  bcode_write_u32(c->bc, t->ffi_var_kind);
+  st_push(c, -1);                             /* 弹 1 压 0 */
+}
+
 static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
   ast_deref_t *d = (ast_deref_t *)n->target;
 
@@ -350,6 +402,12 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       /* 解引用左值赋值 r.* = v / r.* op= v（m3-design §8.2）：
          PTR_GET/PTR_SET 严格分离，SET 由本分支承载。 */
       compile_assign_deref(c, n);
+      break;
+    }
+    if (n->target->kind == AST_ENUM_REF) {
+      /* M6 FFI：`<库>::<数据符号>` = v / op= v（extern var 的写入）。
+         sema 已在目标节点上置 is_ffi_var + ffi_var_kind。 */
+      compile_assign_extern_var(c, n);
       break;
     }
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */

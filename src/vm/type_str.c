@@ -68,6 +68,7 @@ static value_t *str_clone(vm_t *vm, value_t *v) {
 }
 
 static value_t *str_assign(vm_t *vm, value_t *dst, value_t *src) {
+    (void)vm;   /* 池内指针平凡覆盖：无需分配，也无错误路径 */
     /* shadow：只检查类型兼容性，不拷贝 data */
     if (value_is_shadow(dst) || value_is_shadow(src))
         return dst;

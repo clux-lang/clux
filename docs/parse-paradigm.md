@@ -1,5 +1,14 @@
 # Parser 解析范式设计
 
+> **阅读提示**：本文档描述 M1 阶段确立的解析范式（mismatch / error 两种失败模式、
+> 三段式骨架、trivia 不变式、Pratt 绑定力、无 panic mode 的 fail-fast 策略）——
+> 该范式至今未变，M2–M5 只是在其上增加构造（type 表达式、构造器、optional、
+> 指针/切片、模块 import/export）。文中代码为**范式示意**；实际实现按节点拆分为
+> `src/parser/parse_*.c`，以代码为准。
+>
+> 标注 "M1" 的能力边界（如函数字面量/函数类型未支持）已在 M2 落地，相关段落留作
+> 范式举例并附注现状。
+
 ## 1. parser_t 上下文
 
 ```c
@@ -141,7 +150,7 @@ parse_for 在分号后跳过 trivia
 - `advance` 不自动跳 trivia（某些场景需要精确停在原始 token）
 - `skip_trivia` 由需要的地方显式调用（主要是 `parse_block`、`parse_program` 的循环体）
 
-### 2.3 解析函数清单
+### 2.4 解析函数清单
 
 | 函数 | 对应 AST 节点 | 说明 |
 |------|--------------|------|
@@ -342,16 +351,8 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
 
 ## 5. AST_ERROR 节点构造
 
-当 parse 函数 commit 后遇到错误，构造 `AST_ERROR` 节点返回并终止解析：
-
-```c
-ast_node_t *make_error_node(parser_t *p, uint32_t tb, const char *msg) {
-    ast_node_t *node = ast_error_new(p->arena, tb, p->pos);
-    ast_error_t *e = (ast_error_t *)node;
-    e->message = strslice_from_cstr(msg);  // 注意：msg 须是静态/arena 生命周期
-    return node;
-}
-```
+见 §2.5（本节内容与 §2.5 重复，已合并；`make_error_node` 的构造约定与
+"`msg` 须为静态 / arena 生命周期"的注意事项均在 §2.5）。
 
 ## 6. 文件布局
 
@@ -361,12 +362,20 @@ include/parser/
   parse_stmt.h       — parse_stmt / parse_block / parse_var_def / parse_if / ...
   parse_expr.h       — parse_expr / parse_expr_prec / parse_unary / parse_primary
   parse_utils.h      — cur_token / advance / match_*/expect_*/check_*/skip_trivia
+  ast_kind.h         — ast_kind_t 枚举 + 各节点子类头（ast_*.h 每节点一个）
+  fmt.h              — 源码格式化（clux format）入口
+  lexer.h            — lexer_t / token_t（token_t 为不透明类型）
 
 src/parser/
   parser.c           — parser_create / parser_destroy / parser_parse / parse_program
-  parse_stmt.c       — 所有语句解析实现
-  parse_expr.c       — Pratt parser 实现
+  ast_node.c         — ast_new / ast_append / ast_kind_name / ast_kind_size
+  lexer.c            — 词法分析（含 Unicode 标识符判定、BOM/注释/字面量形状校验）
+  parse_stmt.c       — 语句分派 + 块语句
+  parse_expr.c       — Pratt parser（绑定力表驱动）
   parse_utils.c      — 辅助函数实现
+  parse_<node>.c     — 每类节点一个文件（parse_if.c / parse_for.c / parse_import.c /
+                       parse_struct_def.c / parse_type_def.c / parse_switch.c ...）
+  fmt.c              — 格式化实现（token 流规整，规则见 format-rules.md）
 ```
 
 ## 7. 设计约束
@@ -462,6 +471,12 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     return make_error_node(p, tb, "func literal not supported in M1");
 }
 ```
+
+> **现状**：上面函数末尾的 `"func literal not supported in M1"` 是 M1 阶段的占位分支。
+> M2 起，`func` 的两个非定义角色均已实现：`parse_expr` 上下文产出函数字面量
+> （`AST_FUNC_LIT` / 具名字面量的名字仅作显示名），`parse_type` 上下文产出函数类型
+> （`AST_FUNC_TYPE`，`func(i32,i32)->i32`）。实现见 `src/parser/parse_func_def.c`。
+> 捕获列表 `func |a, (b: i32 = c + d)| name(...)` 也在同一入口解析。
 
 ### 8.3 案例二：赋值 vs 表达式语句
 

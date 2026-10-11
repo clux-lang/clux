@@ -62,19 +62,12 @@ void scope_track(vm_t *vm, scope_t *scope, value_t *v);
  */
 value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v);
 
-/**
- * 所有权接管定义（R4，m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
- * 与 scope_define 不同——不 clone，直接接管 v 本体（从 current_scope 的
- * owned 列表移除并绑定到 name）。供 op_define 在 init 是 fresh 临时值
- * （new/construct/move/clone 产物）时调用：浅拷贝会让变量与 temp 共享内嵌
- * own 堆块，作用域退出双释放。调用方须保证 v 非借用引用（is_own=true）。
- * 返回 v 本身（借用的）。
- */
-value_t *scope_define_owned(vm_t *vm, scope_t *scope, const char *name,
-                            value_t *v);
 
 /**
- * 从 scope 的 owned 列表移除 v（不释放，所有权移交调用方接管）。
+ * **仅测试用**（src 已无调用者）：从 scope 的 owned 列表移除 v（不释放）。
+ * 正常代码中 value 的生命周期完全由 scope 管理——不存在"脱离作用域"的
+ * value（VM 所有权模型，2026-10 重构）。
+ * 原用途：
  * 供 op_define/op_store 接管 fresh 临时值（new/construct/move/clone 产物）
  * 后调用——temp 已随 memcpy/绑定转移给目标，从 owned 移除防作用域退出
  * 双释放。v 不在 owned 列表时静默 no-op。

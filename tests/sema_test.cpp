@@ -120,7 +120,7 @@ protected:
         parser_destroy(&parser);
         if (!ast_ || ast_->kind != AST_PROGRAM) return false;
 
-        sema_ = sema_create(vm_, diag_, lex_.tokens, arena_, NULL);
+        sema_ = sema_create(vm_, diag_, lex_.tokens, arena_);
         return sema_analyze(sema_, ast_);
     }
 
@@ -147,15 +147,15 @@ protected:
 /* ================================================================ */
 
 TEST_F(SemaTest, CreateWithNullArgsReturnsNull) {
-    EXPECT_EQ(sema_create(nullptr, diag_, nullptr, arena_, NULL), nullptr);
-    EXPECT_EQ(sema_create(vm_, nullptr, nullptr, arena_, NULL), nullptr);
-    EXPECT_EQ(sema_create(vm_, diag_, nullptr, arena_, NULL), nullptr);
-    EXPECT_EQ(sema_create(vm_, diag_, lex_.tokens, nullptr, NULL), nullptr);
+    EXPECT_EQ(sema_create(nullptr, diag_, nullptr, arena_), nullptr);
+    EXPECT_EQ(sema_create(vm_, nullptr, nullptr, arena_), nullptr);
+    EXPECT_EQ(sema_create(vm_, diag_, nullptr, arena_), nullptr);
+    EXPECT_EQ(sema_create(vm_, diag_, lex_.tokens, nullptr), nullptr);
 }
 
 TEST_F(SemaTest, AnalyzeNullProgram) {
     lex_ = lex_source(alloc_, "");
-    sema_t *s = sema_create(vm_, diag_, lex_.tokens, arena_, NULL);
+    sema_t *s = sema_create(vm_, diag_, lex_.tokens, arena_);
     ASSERT_NE(s, nullptr);
     EXPECT_FALSE(sema_analyze(s, nullptr));
     sema_destroy(&s);
@@ -3046,12 +3046,26 @@ TEST_F(SemaTest, EnumVariantNonIntValueError) {
 }
 
 TEST_F(SemaTest, EnumVariantNonConstError) {
-    /* variant 值必须编译期常量 */
+    /* variant 值必须编译期整型常量。**可解释的普通函数调用是允许的**
+       （m2-design §9 决策点 2：非 comptime 函数在常量槽位被尝试编译期求值，
+       失败才报错）——真正非法的是求值依赖运行期实体：这里 `id(g)` 的实参 g
+       是运行期全局变量（CTFE 里只有 shadow value，取不到真实数据）。 */
     EXPECT_FALSE(analyze(
+        "var g: i32 = 1;"
+        "enum Color:i32 { Red = id(g) }"
+        "func main(): void { }"
+        "func id(v: i32): i32 { return v; }"));
+    expect_message(0, "must be a compile-time integer constant");
+}
+
+TEST_F(SemaTest, EnumVariantComputableFunctionCallAllowed) {
+    /* 与上面对照：纯可解释的普通函数调用可作 variant 值（常量槽位尝试 CTFE）。
+       注意顺序无关：foo 定义在 enum 之后也必须能求值（不动点轮次）。 */
+    EXPECT_TRUE(analyze(
         "enum Color:i32 { Red = foo() }"
         "func main(): void { }"
         "func foo(): i32 { return 1; }"));
-    expect_message(0, "must be a compile-time integer constant");
+    EXPECT_FALSE(diag_has_error(diag_));
 }
 
 TEST_F(SemaTest, EnumUnderlyingNotIntError) {
@@ -3691,6 +3705,89 @@ TEST_F(SemaTest, StructAnonConstructInAssignRhsPasses) {
         "  p = .{ .x = 1, .y = 2 };"
         "  p = .{ .y = 4, .x = 3 };"
         "}"));
+}
+
+/* ================================================================ */
+/* 回归：sema_expr 的"未处理节点"不再静默吞掉                          */
+/* ================================================================ */
+
+TEST_F(SemaTest, FillInStructConstructorRejected) {
+    /* 回归：`<值, 次数>` 填充元素只适用于数组/make 元素位。此前 struct 构造
+       路径不检查 fill：fill 被当成"一个匿名字段"计数 → 报误导性的字段数不符
+       （或单字段 struct 时通过计数检查，再把 fill 交给编译器报
+       "unsupported expression node 'fill'"）。现在必须给出明确诊断。 */
+    EXPECT_FALSE(analyze(
+        "struct S { a: i32; b: i32; }"
+        "func main(): void { var s: S = .S{ <1, 2> }; }"));
+    EXPECT_TRUE(diag_has_error(diag_));
+    expect_message(0, "fill element");
+}
+
+TEST_F(SemaTest, ForUpdateAssignmentTypeMismatchRejected) {
+    /* 回归：for 的步进槽（update）可放赋值语句，而 sema_expr 只处理表达式。
+       此前 update 无条件交给 sema_expr → AST_ASSIGN 落入 switch 的 default
+       被静默返回 void shadow ⇒ **步进赋值从未做类型检查**（"j = 字符串" 也能
+       通过编译）。现在与 for-init 同路走 shadow_assign。 */
+    EXPECT_FALSE(analyze(
+        "func main(): void {"
+        "  for (var j: i32 = 0; j < 3; j = \"x\") { }"
+        "}"));
+    EXPECT_TRUE(diag_has_error(diag_));
+    expect_message(0, "cannot assign");
+}
+
+TEST_F(SemaTest, ForUpdateValidAssignmentPasses) {
+    /* 对照：合法的步进赋值照常通过（步进改走 shadow_assign 后行为不变） */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var i: i32 = 0;"
+        "  while (i < 10) { i += 1; }"
+        "  for (var j: i32 = 0; j < 3; j = j + 1) { }"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeExpressionsAreValuesInExpressionPosition) {
+    /* 回归：元组/签名/可选/指针这 4 种**类型表达式**在表达式位置求值为类型值
+       （类型即表达式）。此前它们没有 case，落入 default 静默返回 void shadow：
+       `var x = <i32,i32>;` 会以 "cannot initialize ... with void" 之类误导性
+       形式失败。 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var t = <i32, i32>;"
+        "  var f = func(i32)->i32;"
+        "  var o = ?i32;"
+        "  var p = own *i32;"
+        "}"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, AnonCtPushPopTokenIsSymmetric) {
+    /* 回归：匿名构造目标类型栈的入栈/出栈必须成对。此前 12 处写成
+       "有条件压栈 + 无条件弹栈"：类型为 NULL 或栈满（16 层）时压栈被跳过而
+       弹栈照做，深度计数与栈内容失配 → 后续 `.{}` 推断到**外层**的目标类型。
+       这里直接验证配对令牌的语义。 */
+    lex_ = lex_source(alloc_, "func main(): void {}");
+    sema_ = sema_create(vm_, diag_, lex_.tokens, arena_);
+    ASSERT_NE(sema_, nullptr);
+
+    EXPECT_FALSE(sema_anon_push(sema_, nullptr)); /* 类型 NULL：不入栈 */
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 0u);
+    sema_anon_pop(sema_, false); /* 未入栈 → 不影响深度 */
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 0u);
+
+    for (int i = 0; i < 16; i++)
+        EXPECT_TRUE(sema_anon_push(sema_, vm_->type_i32));
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 16u);
+    EXPECT_FALSE(sema_anon_push(sema_, vm_->type_i32)); /* 栈满：拒绝 */
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 16u);
+    sema_anon_pop(sema_, false); /* 拒绝过的入栈不产生弹栈 */
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 16u);
+
+    for (int i = 0; i < 16; i++) sema_anon_pop(sema_, true);
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 0u);
+    sema_anon_pop(sema_, true); /* 空栈多弹：不越界 */
+    EXPECT_EQ(sema_->ex.anon_ct_depth, 0u);
 }
 
 } /* namespace */

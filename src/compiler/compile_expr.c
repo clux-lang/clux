@@ -1,3 +1,4 @@
+#include <stdio.h>   /* snprintf：M6 FFI 限定名拼接 */
 #include "compiler/compiler.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
@@ -207,9 +208,14 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
                                        ((ast_ident_t *)n->type_expr)->name);
       if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
         module_t *mod = sym->module;
-        /* IMPORT <canonical path> */
+        /* IMPORT <源码路径>：发射**源码里写的路径**（`"./math"`），而非编译期
+           规范化后的宿主路径——产物因此与宿主目录布局解耦；运行期由 op_import
+           以"当前模块的规范路径"为基准重新规范化（见 module/module_path.h）。
+           import_path 为 NULL 只会出现在入口模块，而入口不会被 import。 */
         bcode_write_op(c->bc, BCODE_IMPORT);
-        bcode_write_str(c->bc, strslice_from_cstr(mod->canonical));
+        bcode_write_str(c->bc, strslice_from_cstr(
+                                   mod->import_path ? mod->import_path
+                                                    : mod->canonical));
         st_push(c, 1);
         /* GET_MEMBER <variant name> */
         bcode_write_op(c->bc, BCODE_GET_MEMBER);
@@ -217,6 +223,29 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
         st_push(c, 0); /* 弹模块值，压成员值：净 0 */
         break;
       }
+    }
+
+    /* M6 FFI：`<库>::<数据符号>`（extern var 的读取）。sema 已置 is_ffi_var +
+       ffi_var_kind（契约见 ast_enum_ref.h），这里发 EXTERN_LOAD：运行期 dlsym
+       得变量地址，按类型码读 size 字节并压对应内建类型的值。**不**编译成
+       枚举 variant 路径（那样会去查类型表并报 unknown enum type）。 */
+    if (n->is_ffi_var) {
+      if (n->type_expr && n->type_expr->kind == AST_IDENT) {
+        ast_ident_t *lib_id = (ast_ident_t *)n->type_expr;
+        char qual[512];
+        int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                          (int)lib_id->name.len, lib_id->name.ptr,
+                          (int)n->variant.len, n->variant.ptr);
+        if (qn > 0 && (size_t)qn < sizeof(qual)) {
+          bcode_write_op(c->bc, BCODE_EXTERN_LOAD);
+          bcode_write_str(c->bc, strslice_from_bytes(qual, (size_t)qn));
+          bcode_write_u32(c->bc, n->ffi_var_kind);
+          st_push(c, 1);
+          break;
+        }
+      }
+      c_error(c, node, "malformed extern var reference");
+      return;
     }
 
     /* 枚举 variant 引用 Color::Red（sema 已折叠 value 入节点）：
@@ -433,6 +462,41 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   }
   case AST_CALL: {
     ast_call_t *n = (ast_call_t *)node;
+
+    /* M6 FFI：extern cfunc 调用（sema 在 AST_CALL 上置 is_ffi_call + ffi_ret_kind，
+       契约见 include/parser/ast_call.h 与 docs/m6-design.md §14.7）。
+       走这条路径时：**不编译 callee**（它没有 fid、没有运行时函数对象），只按序编译
+       实参，然后发 `EXTERN_CALL <STR "lib::name"> <U32 argc> <U32 ret_kind>`，
+       运行期由 op_extern_call 从当前模块的库表取句柄并调用。
+       注意：标志在 sema 接线（步骤 ②）之前恒为 false，故本分支是惰性的。 */
+    if (n->is_ffi_call && n->callee && n->callee->kind == AST_ENUM_REF) {
+      ast_enum_ref_t *er = (ast_enum_ref_t *)n->callee;
+      if (er->type_expr && er->type_expr->kind == AST_IDENT) {
+        ast_ident_t *lib_id = (ast_ident_t *)er->type_expr;
+        char qual[512];
+        int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                          (int)lib_id->name.len, lib_id->name.ptr,
+                          (int)er->variant.len, er->variant.ptr);
+        if (qn <= 0 || (size_t)qn >= sizeof(qual)) {
+          c_error(c, node, "extern call: qualified name too long");
+          return;
+        }
+        size_t ffi_argc = 0;
+        for (ast_node_t *a = n->args; a; a = a->next) {
+          compile_expr(c, a); /* 栈: [arg1..argN]（无 callee） */
+          ffi_argc++;
+        }
+        bcode_write_op(c->bc, BCODE_EXTERN_CALL);
+        bcode_write_str(c->bc, strslice_from_bytes(qual, (size_t)qn));
+        bcode_write_u32(c->bc, (uint32_t)ffi_argc);
+        bcode_write_u32(c->bc, (uint32_t)n->ffi_ret_kind);
+        st_push(c, -((int)ffi_argc)); /* 实参弹出，结果压入 */
+        break;
+      }
+      c_error(c, node, "extern call: callee must be `<lib>::<name>`");
+      return;
+    }
+
     compile_expr(c, n->callee);     /* 栈: [callee] */
     size_t argc = 0;
     for (ast_node_t *a = n->args; a; a = a->next) {

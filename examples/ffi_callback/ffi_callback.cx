@@ -1,0 +1,60 @@
+// ffi_callback.cx — M6 FFI Phase 5：**clux 函数作为 C 回调**（C → clux 方向）
+//
+// 本示例全程只用 clux 源码，不写任何宿主 C 代码，却让 **libc 的 qsort**
+// 用 clux 定义的比较函数把数组排好序：
+//
+//   1. `extern lib "msvcrt.dll" as crt;`   —— 加载 C 运行库（判据是关键字，
+//      路径只是加载参数；**不按 .dll/.so 后缀判类**）
+//   2. `extern cfunc crt::qsort(...): void;` —— 声明要调用的 C 函数
+//   3. `cfunc cmp(a, b): i32 { ... }`      —— 定义 C ABI 函数（cfunc = 可被 C 调用）
+//   4. `cfunc_ptr(cmp)`                    —— 取出该函数的 **C 函数指针**
+//      （libffi 生成的 trampoline；同一函数重复取用会复用同一指针）
+//   5. `crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp))` —— 数组地址与函数指针一起交给 C 库
+//      C 侧每次比较都回调进 clux 函数体：libffi trampoline → 解释器 → 返回值回写 C
+//
+// 比较函数拿到的是元素**地址**（C 的 `const void *`），因此参数声明为 `opaque`
+// 再显式 `as ref *i32` 解引用取值 —— 与 C 里写 `*(const int*)a` 等价。
+//
+// 平台说明：C 运行库的名字随平台而变（Windows `msvcrt.dll`、Linux `libc.so.6`、
+// macOS `libSystem.B.dylib`）；libffi 端口目前只提供 Windows x64 构建。
+
+extern lib "msvcrt.dll" as crt;
+
+// C 标准库排序：void qsort(void *base, size_t n, size_t size,
+//                          int (*cmp)(const void *, const void *));
+extern cfunc crt::qsort(base: opaque, n: u64, size: u64, cmp: opaque): void;
+
+// 回调次数：由 C 侧触发的 clux 函数体修改**模块全局变量**（可写），
+// 用来证明"确实是 C 库在调用我们"。
+var CALLS: i32 = 0;
+
+// C ABI 函数（可被 C 调用）：三值比较，等价于 C 的
+//   int cmp(const void *a, const void *b) { int x = *(int*)a, y = *(int*)b; ... }
+cfunc cmp(a: opaque, b: opaque): i32 {
+    CALLS = CALLS + 1;
+    var x: i32 = (a as ref *i32).*;
+    var y: i32 = (b as ref *i32).*;
+    if (x < y) { return -1; }
+    if (x > y) { return 1; }
+    return 0;
+}
+
+func main(): i32 {
+    var arr = .[5]i32{4, 2, 5, 1, 3};
+    printf("before: %v\n", arr);
+
+    // 数组地址（ref 指针 → opaque 隐式转换）+ C 函数指针 → libc qsort
+    crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp));
+
+    printf("after:  %v\n", arr);
+    printf("qsort called the clux comparator %d times\n", CALLS);
+
+    // 自检：已升序、首尾正确、回调确实被调用过
+    if (arr[0] > arr[1]) { return 1; }
+    if (arr[1] > arr[2]) { return 1; }
+    if (arr[2] > arr[3]) { return 1; }
+    if (arr[3] > arr[4]) { return 1; }
+    if (arr[0] != 1 || arr[4] != 5) { return 2; }
+    if (CALLS < 4) { return 3; }
+    return 0;
+}

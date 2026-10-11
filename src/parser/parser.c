@@ -8,6 +8,8 @@
 #include "parser/ast_union_def.h"
 #include "parser/ast_error.h"
 #include "parser/ast_import.h"
+#include "parser/ast_extern_lib.h"
+#include "parser/ast_reexport.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_cunion_def.h"
@@ -111,21 +113,56 @@ ast_node_t *parse_program(parser_t *p) {
                 func = ast_error_new(p->diag, p->tokens, p->arena, ctb, p->pos,
                                      "expected 'func' or 'var' after 'comptime'");
             }
+        } else if (check_keyword(p, "cfunc")) {
+            /* M6 FFI：cfunc 定义（有体，C ABI）——与 func 同构，仅标志与关键字不同。 */
+            func = parse_cfunc_def(p);
         } else if (check_keyword(p, "import")) {
             /* M5: import <alias> from "<path>"; — 导入模块为命名空间。
                sema 遇到此节点递归编译被导入模块，在当前模块全局作用域注册
                <alias> 为 MODULE 符号。compiler 不生成字节码（模块加载在 sema
                阶段完成）。 */
             func = parse_import(p);
-        } else if (check_keyword(p, "export")) {
+        } else if (check_keyword(p, "extern")) {
+            /* M6 FFI：extern lib "<path>" as <alias>;（动态库声明）
+               判据是关键字，不做后缀判类。extern cfunc 在后续阶段接入同一前缀。 */
+            uint32_t xtb = p->pos;
+            advance(p);
+            skip_trivia(p);
+            if (check_keyword(p, "lib")) {
+                func = parse_extern_lib(p, xtb);
+            } else if (check_keyword(p, "cfunc")) {
+                func = parse_extern_cfunc(p, xtb);
+            } else if (check_keyword(p, "func")) {
+                /* M6 FFI：`extern func <库>::<名>(...): T;` —— 与 `extern cfunc`
+                   完全等价（限定名已表明它来自外部库）。规范写法是 `extern cfunc`
+                   （显式标注 C ABI），fmt 统一渲染成它。 */
+                func = parse_extern_cfunc_kw(p, xtb, "func");
+            } else if (check_keyword(p, "var")) {
+                /* M6 FFI：extern var <库>::<名>: T;（动态库导出的数据符号） */
+                func = parse_extern_var(p, xtb);
+            } else {
+                func = ast_error_new(p->diag, p->tokens, p->arena, xtb, p->pos,
+                                     "expected 'lib' after 'extern' "
+                                     "(M6: extern lib / extern cfunc / extern func / "
+                                     "extern var)");
+            }        } else if (check_keyword(p, "export")) {
             /* M5: export <decl> — 前缀修饰，标记全局定义进入模块导出表。
                消费 export 关键字后递归调用现有声明解析器，设置 is_exported=true。
                允许 export func / export var / export type / export enum /
-               export struct / export union / export cunion。 */
+               export struct / export union / export cunion；
+               另有 export * from "path"（代理导出 → AST_REEXPORT）。 */
             uint32_t etb = p->pos;
             advance(p);
             skip_trivia(p);
-            if (check_keyword(p, "func")) {
+            bool is_reexport = false;
+            if (check_symbol(p, "*")) {
+                func = parse_reexport(p);
+                is_reexport = true;
+                if (func && func->kind != AST_ERROR) {
+                    /* 诊断跨度从 `export` 起（parse_reexport 从 '*' 起算） */
+                    func->tok_begin = etb;
+                }
+            } else if (check_keyword(p, "func")) {
                 func = parse_func_def(p);
             } else if (check_keyword(p, "var")) {
                 func = parse_var_def(p);
@@ -143,7 +180,9 @@ ast_node_t *parse_program(parser_t *p) {
                 func = ast_error_new(p->diag, p->tokens, p->arena, etb, p->pos,
                                      "expected declaration after 'export'");
             }
-            if (func && func->kind != AST_ERROR)
+            /* export 前缀只标记"声明"进入导出表；代理导出由 AST_REEXPORT
+               自身承载语义，不设 is_exported。 */
+            if (func && func->kind != AST_ERROR && !is_reexport)
                 func->is_exported = true;
         } else if (check_keyword(p, "type")) {
             /* 全局类型定义 type name = <type-expr>; 挂 funcs 链：

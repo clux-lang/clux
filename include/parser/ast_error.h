@@ -82,9 +82,19 @@ static inline ast_node_t *ast_error_newv(diag_buf_t *diag, vec_t *tokens,
     if (diag && n->message.ptr && tokens && tok_begin < vec_len(tokens)) {
         const token_t *tok = (const token_t *)vec_get(tokens, tok_begin);
         const location_t *loc = token_get_location(tok);
-        location_t l = {0};
-        if (loc) l = *loc;
-        diag_error(diag, l, "%s", n->message.ptr);
+        if (loc) {
+            diag_error(diag, *loc, "%s", n->message.ptr);
+        } else {
+            /* 无可用位置：显式逐字段零初始化。
+               不用 `location_t l = {0}`——该聚合初始化在 C++ 下会触发
+               -Wmissing-field-initializers / -Wmissing-braces（本头被测试的
+               C++ TU 包含），而空初始化 `= {}` 不是 C11 语法。 */
+            location_t none;
+            none.begin.offset = 0; none.begin.column = 0; none.begin.line = 0;
+            none.end.offset   = 0; none.end.column   = 0; none.end.line   = 0;
+            none.filename     = NULL;
+            diag_error(diag, none, "%s", n->message.ptr);
+        }
     }
 
     return &n->base;

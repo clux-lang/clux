@@ -209,13 +209,62 @@ typedef enum {
                                m4-design §2） */
 
     /* ---- M5 模块系统 ---- */
-    BCODE_IMPORT,           /* STR：strtable 索引（模块规范路径）。vm_import 查
-                               vm->modules 表 → 构造模块值（type=type_module，
+    BCODE_IMPORT,           /* STR：strtable 索引（模块规范路径）。vm_import 查                               vm->modules 表 → 构造模块值（type=type_module，
                                data=module_t*）压栈。幂等：同一路径返回同一模块。 */
     BCODE_GET_MEMBER,       /* STR：strtable 索引（成员名）。弹模块值 → 从
                                module_t->exports 按名取成员值压栈。模块命名空间
                                隔离：仅导出成员可访问。 */
+    /* ---- M6 FFI（追加在末尾：不得改变既有操作码编号，否则旧容器会被静默误读）---- */
+    BCODE_EXTERN_CALL,      /* STR "lib::name" + U32 argc + U32 ret_kind：从当前模块库表取句柄 →
+                             * ffi_lib_sym → 按 argc 弹实参调类型化调用层（整数/指针/浮点）。 */
+    BCODE_EXTERN_LOAD,      /* STR "lib::name" + U32 kind：动态库导出的**数据符号** →
+                             * ffi_lib_sym 得**变量地址** → 按 kind 读 size 字节 →
+                             * 压对应内建类型的值（extern var 的读取）。 */
+    BCODE_EXTERN_STORE,     /* STR "lib::name" + U32 kind：弹栈顶值 → 按 kind 把 size 字节
+                             * 写进符号地址（extern var 的写入；不压回结果）。 */
 } bcode_op_t;
+
+/* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----
+ * 宽度 + 类别：决定从符号地址读/写多少字节、按哪个内建类型建模。与 clux 内建
+ * 标量一一对应；`bool` 单独一码（宽度同 u8，但**类型必须还原成 bool**——否则
+ * `crt::flag != true` 会因为拿到的值是 u8 而报类型不匹配）。`opaque` 用 PTR，
+ * 即指针宽度。**宽度必须与库里符号的真实类型一致**：读多/写多会越界踩到相邻
+ * 符号，因此 sema 只放行这张表里的类型，别的类型明确报错。 */
+#define BCODE_FFI_DATA_I8   0u
+#define BCODE_FFI_DATA_I16  1u
+#define BCODE_FFI_DATA_I32  2u
+#define BCODE_FFI_DATA_I64  3u
+#define BCODE_FFI_DATA_U8   4u
+#define BCODE_FFI_DATA_U16  5u
+#define BCODE_FFI_DATA_U32  6u
+#define BCODE_FFI_DATA_U64  7u
+#define BCODE_FFI_DATA_F32  8u
+#define BCODE_FFI_DATA_F64  9u
+#define BCODE_FFI_DATA_PTR  10u
+#define BCODE_FFI_DATA_BOOL 11u
+
+/* ---- BCODE_EXTERN_CALL 的 ret_kind（返回类型码）----
+ * 前 5 个是 v0 的原始编码（`.cxb` 兼容：旧容器里只有这些值，语义保持不变）：
+ *   0 = void、1 = i32、2 = i64（旧产物里 u64 也走这里）、3 = 指针/opaque、
+ *   4 = f64（旧产物里 f32 也走这里）。
+ * 之后**逐个类型补齐**——返回值的**类型必须等于源码里声明的类型**：旧编码把
+ * u64 返回造成 i64 值，于是 `if (lib::strlen(s) != 5u64)` 这类比较会在运行期撞上
+ * "i64 vs u64" 的隐式转换，报 `implicit cast: not a widening conversion`
+ * （症状出现在比较点，根因在调用层的返回类型）。 */
+#define BCODE_FFI_RET_VOID  0u
+#define BCODE_FFI_RET_I32   1u
+#define BCODE_FFI_RET_I64   2u
+#define BCODE_FFI_RET_PTR   3u
+#define BCODE_FFI_RET_F64   4u
+#define BCODE_FFI_RET_U32   5u
+#define BCODE_FFI_RET_U64   6u
+#define BCODE_FFI_RET_I8    7u
+#define BCODE_FFI_RET_I16   8u
+#define BCODE_FFI_RET_U8    9u
+#define BCODE_FFI_RET_U16   10u
+#define BCODE_FFI_RET_BOOL  11u
+/* f32 返回**未支持**：调用层的浮点通路是"全 double 签名"（§14.5），f32 返回会
+   按 double 读错 XMM0 宽度。sema 明确拒绝（而不是造一个 f64 值冒充 f32）。 */
 
 /* ================================================================ */
 /* 聚合结构：bytecode 模块                                            */
@@ -229,6 +278,10 @@ typedef struct bytecode_t {
         size_t   len;
         size_t   cap;
     } code;
+    /* 本模块的**规范路径**（借用 module_t::canonical，不拥有；NULL = 独立
+       字节码，无模块上下文）。运行期 `IMPORT <源码路径>` 必须以"当前正在执行
+       的模块"为基准重新规范化路径，此字段就是那个基准（见 exec.c op_import）。 */
+    const char *module_path;
 } bytecode_t;
 
 /* ---- 生命周期 ---- */

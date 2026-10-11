@@ -1,0 +1,1 @@
+func main(): i32 { comptime var C = 3; type Arr = [C]i32; var n: Arr = .[3]i32{1,2,3}; return 0; }

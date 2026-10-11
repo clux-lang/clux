@@ -771,3 +771,57 @@ TEST(Driver, ShareWeakStressLoop) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+TEST(Driver, AnonConstructFieldEvaluatedOnce) {
+  /* 回归：匿名构造 `.{...}` 的推断分支曾漏 `return`，控制流继续落入具名构造
+     分支，对同一批字段表达式**二次求值**——第二次求值看到第一次留下的
+     `moved` 标记，于是含 move() 的字段被误报
+     "variable 'p' used after move"。同样代码写具名构造 `.Cell{...}` 本来就正常，
+     此测试锁定匿名形式必须与具名形式行为一致。 */
+  std::string path = write_temp_file(
+      "struct Cell { v: i32; }\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{7};\n"
+      "  var c: Cell = .{ .v = (move(p)).* };\n"
+      "  if (c.v != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ---- R1 fatal 参数消费：return 出去 = 所有权继续传递（指针与切片两种）----
+ *
+ * 回归背景：`walk_return` 的"return fatal 参数 → 标记已消费"原先写在
+ * `: ref *T` 的分支内部，因此只有 ref 返回才生效；fatal 指针/切片返回走不到
+ * 那段，`func id(p: fatal []i32): fatal []i32 { return p; }` 被误报
+ * "fatal parameter 'p' is not consumed"（诊断文本自己写的是
+ * "take ownership with move() or return it"）。判据现与函数结束的
+ * 未消费检查（PTR_FATAL || SLICE_FATAL）一致。 */
+TEST(Driver, FatalSliceParamReturnedIsConsumed) {
+  std::string path = write_temp_file(
+      "func id(p: fatal []i32): fatal []i32 {\n"
+      "  return p;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: fatal []i32 = make(i32, 2, 9, 9);\n"
+      "  var t: fatal []i32 = id(s);\n"
+      "  if (t[1] != 9) { return 1; }\n"
+      "  if (t[0] != 9) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+
+TEST(Driver, FatalSliceParamNotConsumedStillRejected) {
+  /* 只读取元素不算消费：p 仍存活 → 必须报错（修复不得放宽规则） */
+  std::string path = write_temp_file(
+      "func peek(p: fatal []i32): i32 {\n"
+      "  return p[0];\n"
+      "}\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

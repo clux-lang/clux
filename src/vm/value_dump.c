@@ -106,7 +106,7 @@ static void type_dump_name(const type_t *t, string_t *out) {
 
 /* ---- 递归 dumper ---- */
 
-static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
+static void value_dump_impl(vm_t *vm, const value_t *v, string_t *out) {
     const type_t *t = v ? value_type(v) : NULL;
     string_append_char(out, '.');
     type_dump_name(t, out);
@@ -192,7 +192,7 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
             if (i) string_append_cstr(out, ", ");
             if (f->name.ptr) string_append_bytes(out, f->name.ptr, f->name.len);
             string_append_cstr(out, ": ");
-            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, f->type,
+            value_dump_impl(vm, value_make_borrowed(vm, f->type,
                               (uint8_t *)value_data(v) + f->offset), out);
         }
         break;
@@ -217,7 +217,7 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
             string_append_cstr(out, "<tag?>");
         if (m && m->payload_type) {
             string_append_cstr(out, ": ");
-            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->payload_type,
+            value_dump_impl(vm, value_make_borrowed(vm, m->payload_type,
                               (uint8_t *)value_data(v) + union_type_payload_offset(t)),
                             out);
         }
@@ -235,7 +235,7 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
             string_append_cstr(out, n ? "<member?>" : "<empty>");
         if (m && m->type) {
             string_append_cstr(out, ": ");
-            value_dump_impl(vm, value_make_borrowed((vm_t *)vm, m->type,
+            value_dump_impl(vm, value_make_borrowed(vm, m->type,
                               (uint8_t *)value_data(v)), out);
         }
         break;
@@ -251,7 +251,7 @@ static void value_dump_impl(const vm_t *vm, const value_t *v, string_t *out) {
     string_append_cstr(out, agg ? " }" : "}");
 }
 
-void value_dump_string(const vm_t *vm, const value_t *v, string_t *out) {
+void value_dump_string(vm_t *vm, const value_t *v, string_t *out) {
     (void)vm;
     if (!out) return;
     value_dump_impl(vm, v, out);

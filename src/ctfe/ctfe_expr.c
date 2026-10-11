@@ -1,4 +1,5 @@
 #include "ctfe/ctfe.h"
+#include "sema/sema.h"
 
 #include "core/panic.h"
 #include "core/string.h"
@@ -40,6 +41,8 @@
 #include "vm/type_error.h"
 #include "vm/type_func.h"
 #include "vm/type_ptr.h"
+#include "vm/type_struct.h"
+#include "vm/type_tuple.h"
 #include "vm/value.h"
 
 /* ===========================================================================
@@ -136,6 +139,35 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
  *   3. AST_IDENT + sema 上下文兜底：sema 符号表查类型（type 别名/未进 VM
  *      scope 的符号）。
  * 返回 NULL = 无法确定类型（调用方报错）。 */
+/* 编译期构造 struct/tuple 值：按类型表布局把字段值数据 blit 到目标块
+   （与运行期 op_construct 的 struct/tuple 分支同语义——字段序 = 类型表序，
+   未提供/零字段留零）。用于 `comptime var S = .P{...}` 这类聚合常量：
+   CTFE 必须能构造真实聚合值，编码（sema_ct_encode）才能按字段递归折叠。
+   局限：字段为内嵌聚合时按字节 blit（浅拷贝）；含 own/RC 指针字段的编译期
+   聚合常量会共享内部块（编译期常量本就不应携带堆所有权，m3 全局 own 亦禁止）。 */
+static value_t *ctfe_make_aggregate(vm_t *vm, const type_t *t,
+                                    value_t **fields, size_t n) {
+    void *data = value_alloc_data(vm->alloc, t);
+    if (!data) return NULL;
+    memset(data, 0, t->size);
+    for (size_t i = 0; i < n; i++) {
+        if (!fields[i]) continue;
+        const type_t *ft = NULL;
+        size_t off = 0;
+        if (t->kind == TYPE_KIND_STRUCT) {
+            const struct_field_t *f = struct_type_field(t, i);
+            if (f) { ft = f->type; off = f->offset; }
+        } else {
+            const tuple_elem_t *e = tuple_type_elem(t, i);
+            if (e) { ft = e->type; off = e->offset; }
+        }
+        if (!ft) continue;
+        const void *src = value_data(fields[i]);
+        if (src && ft->size) memcpy((char *)data + off, src, ft->size);
+    }
+    return value_make(vm, t, data);
+}
+
 static const type_t *ctfe_operand_type(ctfe_ctx_t *ctx, ast_node_t *opnd) {
     vm_t *vm = ctx->vm;
     value_t *v = ctfe_eval(ctx, opnd);
@@ -357,11 +389,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         ast_call_t *n = (ast_call_t *)node;
         if (n->callee && n->callee->kind == AST_IDENT) {
             ast_ident_t *id = (ast_ident_t *)n->callee;
-            /* 1. vm scope 已有函数值（内置 printf / 注册函数）→ value_call */
+            /* 1. vm scope 已有函数值（内置 printf / 已注册函数）→ value_call。
+               但**只有带 cfunc 的内建函数**能直接调用：程序函数的引用对象
+               （func_new_program_ref，cfunc=NULL）走 value_call 会在
+               func_vcall 里报 "func call: invalid function"——它必须回落到
+               下方 sema 符号表按 AST 解释执行（这正是"常量槽位里的普通函数
+               调用"路径）。 */
             value_t *fnv = scope_lookup(vm->current_scope, id->name);
-            if (fnv && value_type(fnv) && value_type(fnv)->vtable &&
-                value_type(fnv)->vtable->call) {
-                return ctfe_call_value(ctx, fnv, n->args);
+            if (fnv && !value_is_shadow(fnv) && value_type(fnv) &&
+                value_type(fnv)->vtable && value_type(fnv)->vtable->call) {
+                func_t *bf = *(func_t **)value_data(fnv);
+                if (bf && bf->cfunc) return ctfe_call_value(ctx, fnv, n->args);
             }
             /* 2. sema 符号表：SYM_FUNC（clux 函数）→ 解释调用。
                先查当前词法作用域（局部 comptime 函数/变量的符号所在块，
@@ -503,8 +541,29 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(ty, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: construct type must be a type");
         const type_t *t = value_as(ty, const type_t *);
+        if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+            /* struct / tuple 构造（comptime var 支持所有类型）：字段按类型表序
+               求值 → 编译期构造聚合值。具名字段链已由 sema 重排为表序
+               （sema_expr 的 struct 分支"值节点直链"），此处按链序位置化即可。 */
+            size_t nf = ctfe_count_siblings(n->fields);
+            size_t expect = (t->kind == TYPE_KIND_STRUCT)
+                                ? struct_type_field_count(t)
+                                : tuple_type_elem_count(t);
+            if (nf != expect)
+                return ctfe_errf(ctx, "ctfe: construct: expected %zu fields, got %zu",
+                                 expect, nf);
+            value_t *fields[nf > 0 ? nf : 1];
+            size_t i = 0;
+            for (ast_node_t *f = n->fields; f; f = f->next, i++) {
+                fields[i] = ctfe_eval(ctx, f);
+                if (value_is_error(vm, fields[i])) return fields[i];
+            }
+            value_t *agg = ctfe_make_aggregate(vm, t, fields, nf);
+            if (!agg) return ctfe_err(ctx, "ctfe: out of memory constructing aggregate");
+            return agg;
+        }
         if (t->kind != TYPE_KIND_ARRAY)
-            return ctfe_err(ctx, "ctfe: construct only supports array types");
+            return ctfe_err(ctx, "ctfe: construct only supports array/struct/tuple types");
         const type_t *et = array_type_elem(t);
         size_t len = array_type_len(t);
 

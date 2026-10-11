@@ -21,6 +21,7 @@ extern void vm_init_builtins(vm_t *vm);
 extern void vm_register_printf(vm_t *vm);
 extern void vm_register_upgrade(vm_t *vm);
 extern void vm_register_len(vm_t *vm);
+extern void vm_register_cfunc_ptr(vm_t *vm);
 
 static class_t g_vm_class = {
     .name       = "clux.vm",
@@ -65,13 +66,11 @@ static void vm_register_builtin_types(vm_t *vm) {
         vm_type_bind(vm, entries[i].id, t);
 
         void *data = value_alloc_data_copy(vm->alloc, vm->type_type, &t);
-        value_t *tv = value_make_untracked(vm->alloc, vm->type_type, data);
+        value_t *tv = value_make(vm, vm->type_type, data);
         value_t *stored = scope_define(vm, vm->global_scope, entries[i].name, tv);
         if (!stored || value_is_error(vm, stored)) {
             panic("vm: failed to register builtin type '%s'", entries[i].name);
         }
-        value_dispose(vm, tv);
-        allocator_free(vm->alloc, (void **)&tv);
     }
 }
 
@@ -141,9 +140,11 @@ vm_t *vm_new(allocator_t *alloc) {
     vm->slice_types = vec_new(alloc, /*owns_element=*/false);
 
     /* 类型 id 表（id → type_t*，索引即 id；元素不 owns，归各类型池释放）。
-       初始容量预留内建段（0..16），程序类型 id 从 64 起由编译器分配，
+       初始容量预留内建段（0..16）；**程序类型 id 由 type_id_alloc 全 VM 全局
+       分配**（见 vm.h 字段注释：多模块共享本表，id 不能按模块重复起算），
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
     vm->types_by_id = vec_new(alloc, /*owns_element=*/false);
+    vm->type_id_next = TYPE_ID_PROGRAM_BASE;
 
     /* 字符串池（str 生命周期托管：字面量/拼接/错误消息统一 intern） */
     vm->strs = vec_new(alloc, /*owns_element=*/false);
@@ -164,13 +165,11 @@ vm_t *vm_new(allocator_t *alloc) {
     {
         const type_t *t = vm->type_opaque;
         void *data = value_alloc_data_copy(vm->alloc, vm->type_type, &t);
-        value_t *tv = value_make_untracked(vm->alloc, vm->type_type, data);
+        value_t *tv = value_make(vm, vm->type_type, data);
         value_t *stored = scope_define(vm, vm->global_scope, "opaque", tv);
         if (!stored || value_is_error(vm, stored)) {
             panic("vm: failed to register builtin type 'opaque'");
         }
-        value_dispose(vm, tv);
-        allocator_free(vm->alloc, (void **)&tv);
     }
 
     /* printf 内置函数（临时注册，M1 硬编码绑定 C printf） */
@@ -181,6 +180,9 @@ vm_t *vm_new(allocator_t *alloc) {
 
     /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> u64） */
     vm_register_len(vm);
+
+    /* cfunc_ptr 内置函数（M6 Phase 5：clux 函数 → C 函数指针 / 回调） */
+    vm_register_cfunc_ptr(vm);
 
     return vm;
 }

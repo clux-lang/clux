@@ -25,6 +25,11 @@ typedef struct {
     ast_node_t *return_expr; /* 返回类型表达式（NULL = void） */
     ast_node_t *body;        /* AST_BLOCK */
     bool        is_comptime; /* comptime func：调用点编译期求值折叠为常量，不注册到运行时 */
+    /* ---- M6 FFI ---- */
+    bool        is_cfunc;        /* cfunc 定义（有体，C ABI，可被 C 侧 dlsym 调用） */
+    bool        is_extern_cfunc; /* extern cfunc 声明（无体，运行期 dlsym 查找） */
+    bool        is_variadic;     /* 参数表以 ... 结尾（仅 extern cfunc 允许） */
+    strslice_t  lib_name;        /* extern cfunc 的库别名（<lib>::<name> 的 lib 部分） */
     uint32_t    sig_id;      /* 签名类型 id（sema 3b 填充，compiler LOAD_TYPE <sig_id> 用；
                                 全局函数经 sema_type_register 分配，局部函数提升时解析分配） */
     uint32_t    fid;         /* 函数 id（compiler 预扫描分配，LOAD_FUNCTION <fid> 用；
@@ -45,12 +50,28 @@ static inline ast_node_t *ast_func_def_new(arena_t *arena,
 /** 解析函数定义：func name(params):type { body } */
 ast_node_t *parse_func_def(parser_t *p);
 
+/** M6 FFI：解析 cfunc 定义（有体，C ABI）。 */
+ast_node_t *parse_cfunc_def(parser_t *p);
+
 /**
  * func 统一入口（语句级 / 表达式级）。
  * expected_kind = AST_FUNC_DEF → 语句级函数定义（有 name）
  * M2+: expected_kind = AST_FUNC_LIT → 表达式级匿名函数
  */
-ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind);
+ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
+                                  const char *kw);
+
+/** M6 FFI：extern cfunc 声明（无体，dlsym 解析）。 */
+ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb);
+
+/** M6 FFI：同上，但消费的关键字由 `kw` 给出（`"cfunc"` 规范写法 /
+ *  `"func"` 等价习惯写法）。两者产生完全相同的 AST。 */
+ast_node_t *parse_extern_cfunc_kw(parser_t *p, uint32_t tb, const char *kw);
+
+/** 内部：带预解析名/库的扩展入口（extern cfunc 复用 func 的签名解析）。 */
+ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
+                           const char *kw, strslice_t pre_name,
+                           strslice_t pre_lib);
 
 #ifdef __cplusplus
 }

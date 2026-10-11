@@ -25,7 +25,7 @@ static int32_t read_i32(const value_t *v) { return *(const int32_t *)value_data(
 
 static value_t *make_i64_raw(vm_t *vm, int64_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_i64, &v);
-    return value_make_untracked(vm->alloc, vm->type_i64, data);
+    return value_alloc_shell(vm->alloc, vm->type_i64, data);
 }
 
 /* 构造 <i32, i32> 的元素表（type 借用 vm 内建类型） */

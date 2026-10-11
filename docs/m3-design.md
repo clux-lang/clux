@@ -11,6 +11,15 @@
 
 所有语法决策由用户 2026-09-29 逐项确认。
 
+> **实现状态：✅ 已完成（§3–§12 + §13.2）**。单所有权系（`own`/`ref`/`fatal`）与
+> RC 系（`share`/`weak`）均已落地，测试见 `tests/driver_m3_test.cpp`；实现位置：
+> `src/vm/type_ptr.c`（含 `rc_block_t`：atomic 强/弱计数 + CAS `upgrade`）、
+> `src/vm/builtin_upgrade.c`（`upgrade` 内建）。
+>
+> **§13.3–§13.4（销毁点的编译期生成）仍未实现**：当前销毁走 VM 运行时路径
+> （`scope_destroy` 遍历 owned → `ptr_free_owned_recursive` 递归释放），
+> compiler 层生成销毁点、多后端统一留给 M7 C 后端 / M12 原生后端。
+
 ---
 
 ## 1. 核心检查问题
@@ -341,7 +350,13 @@ move/clone 产物或 new 的分配均可流向 **share** 作为 RC 创建源。
 
 ### 12.8 开放点（无，骨架定稿）
 
-RC 系 share/weak 语义已全部定稿（2026-09-29）：创建源 fatal、weak 只从 share 派生、copy 计数、延迟销毁、`upgrade` 内置函数、atomic 计数、share 普通值、单向隔离、禁止全局 share。实现待后续里程碑。
+RC 系 share/weak 语义已全部定稿（2026-09-29）：创建源 fatal、weak 只从 share 派生、copy 计数、延迟销毁、`upgrade` 内置函数、atomic 计数、share 普通值、单向隔离、禁止全局 share。
+
+**实现状态：✅ 已实现**（本节此前写作"实现待后续里程碑"，为过期表述）。落地形态：
+`src/vm/type_ptr.c` 的 `rc_block_t { atomic_uint strong; atomic_uint weak; /* payload 紧随 */ }`
+与 `rc_block_new` / `rc_block_strong_inc|dec` / `rc_block_weak_inc|dec` / `rc_block_upgrade`
+（CAS 递增强计数），`upgrade` 以**内建函数**提供（`src/vm/builtin_upgrade.c`，
+返回 `?share *T`），类型 kind 为 `TYPE_KIND_PTR_SHARE` / `TYPE_KIND_PTR_WEAK`。
 
 ---
 

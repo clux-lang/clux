@@ -70,7 +70,6 @@ typedef struct compiler_t {
 
     /* sema 作用域树（借用，不拥有；编译完成后由 driver 释放） */
     sema_scope_t   *global_scope;
-    sema_scope_t   *current_scope; /* 编译期当前词法作用域（符号元数据查找） */
 
     /* sema 类型登记表（借用，不拥有）：sema->types（sema_type_t* 数组）。
        hoist 类型提升区**两遍扫描**遍历它：pass 1 声明所有类型（PUSH_XXXX
@@ -88,12 +87,9 @@ typedef struct compiler_t {
        （不进入运行时）。 */
     vec_t          *funcs_all;
 
-    /* 类型 id 分配计数器：sema_types 已占 [TYPE_ID_PROGRAM_BASE,
-       TYPE_ID_PROGRAM_BASE + sema_types 数量)（sema_type_register 按登记
-       序分配，签名类型亦登记于此）。本计数器仅作防御分支备用——compile_type.c
-       AST_ARRAY 未替换场景临时分配 id（与 hoist 区同类型可成多 id 别名，
-       types_by_id 幂等，语义无害）。签名类型 id 由 sema 分配（不在此列）。 */
-    uint32_t        type_id_next;
+    /* 类型 id 不再由编译器持计数器：program 类型 id 必须**全 VM 唯一**，
+       统一由 vm 的 type_id_alloc 分配（sema_type_register 登记 sema 类型时
+       分配、compile_type.c 的防御分支临时分配时也走它）。详见 vm/type.h。 */
 
     /* switch 临时变量序号（__switch_N 名字后缀）：每次编译 switch 递增，
        compiler_new memset 0 初始化。临时名只在本 switch 编译期间有效

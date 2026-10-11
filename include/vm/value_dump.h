@@ -18,8 +18,12 @@ extern "C" {
  * - const / volatile 类型名保留完整限定名，值体按底层类型读取。
  * - 结构体当前 VM 未实现，best-effort 仅输出类型名 + 空 `{}`（前向兼容）。
  * - shadow value 与 NULL 安全（打印 `<shadow>` / `<null>`，不读 data）。
+ *
+ * 注意：vm 为**非 const**——递归 dump 复合类型时会经 value_make_borrowed /
+ * value_array_at 等访问器创建借用值，这些值要 track 进当前 scope（会改 vm）。
+ * 此前声明为 const 并在实现里强转，掩盖了真实的 const 违约。
  */
-void value_dump_string(const vm_t *vm, const value_t *v, string_t *out);
+void value_dump_string(vm_t *vm, const value_t *v, string_t *out);
 
 #ifdef __cplusplus
 }

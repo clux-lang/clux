@@ -38,9 +38,11 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
-#include "driver/compile_module.h"
 #include "parser/ast_import.h"
+#include "parser/ast_reexport.h"
+#include "parser/ast_extern_lib.h"
 #include "vm/module.h"
+#include "vm/ffi_lib.h"   /* M6 FFI：§2 C ABI 类型校验 */
 #include <string.h>
 #include <stdio.h>
 
@@ -49,7 +51,7 @@
  * =========================================================================== */
 
 sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
-                    arena_t *arena, vec_t *path_stack) {
+                    arena_t *arena) {
   if (!vm || !diag || !tokens || !arena) return NULL;
   sema_t *sema =
       allocator_new_ex(vm->alloc, "sema_t", sizeof(sema_t), NULL, NULL, NULL,
@@ -61,15 +63,26 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->global_scope = NULL;
   sema->funcs = vec_new(vm->alloc, false); /* 元素手动释放（sema_func_t 无 dispose） */
   sema->types = vec_new(vm->alloc, false); /* 元素手动释放（sema_type_t 无 dispose） */
-  sema->func_return_type = NULL;
-  sema->func_has_return = false;
-  sema->local_func_base = NULL;
-  sema->local_func_param_scope = NULL;
-  sema->in_call_callee = false;
-  sema->loop_depth = 0;
+  sema->fn.return_type = NULL;
+  sema->fn.local_func_base = NULL;
+  sema->fn.local_func_param_scope = NULL;
+  sema->fn.in_call_callee = false;
+  sema->fn.loop_depth = 0;
   sema->func_id_next = FUNC_ID_PROGRAM_BASE;
-  sema->path_stack = path_stack;
+  /* import 回调默认未注入：单文件/测试场景下 import 语句报「当前编译模式不支持」 */
+  sema->imports.resolve = NULL;
+  sema->imports.user = NULL;
   return sema;
+}
+
+/* 注入 import 解析回调（driver 在 sema_create 后、sema_analyze 前调用）。
+   见 sema.h 的 sema_import_resolver_t：sema 借此把"路径解析 + 递归编译"交给
+   驱动层，自身保持不依赖 driver（消除 sema → driver 反向依赖）。 */
+void sema_set_import_resolver(sema_t *sema, sema_import_resolver_t resolve,
+                              void *user) {
+  if (!sema) return;
+  sema->imports.resolve = resolve;
+  sema->imports.user = user;
 }
 
 void sema_destroy(sema_t **sema) {
@@ -102,7 +115,7 @@ void sema_destroy(sema_t **sema) {
  *
  * N 是编译期常量表达式（m2-design §6）：字面量直接读值；复杂表达式
  * （[2+3]i32 / [sizeof(a)]i32 / comptime var 引用）走 ctfe 真实求值
- * （vm->comptime 模式）。成功后把非字面量边界折叠为 AST_INT_LIT 写回
+ * 成功后把非字面量边界折叠为 AST_INT_LIT 写回
  * （m2-design §comptime"常量折叠写回 AST"）——编译器消费类型槽位时
  * 直接读立即数，无需再次编译期求值。
  *
@@ -127,8 +140,6 @@ bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
 
   /* 复杂表达式：ctfe 编译期求值（shadow 值不可用，须真实常量） */
   vm_t *vm = sema->vm;
-  bool saved = vm->comptime;
-  vm->comptime = true;
   ctfe_ctx_t ctx;
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
@@ -136,7 +147,6 @@ bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, b);
-  vm->comptime = saved;
 
   if (!r || value_is_error(vm, r)) {
     diag_error(sema->diag, sema_loc(sema, b),
@@ -298,14 +308,21 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   if (found) return found;
 
   size_t n = vec_len(sema->types);
-  if (n > 0xFFFFFFFFull - TYPE_ID_PROGRAM_BASE) return NULL; /* id 溢出 */
+
+  /* id 全 VM 唯一（type_id_alloc）：vm->types_by_id 是 VM 单表、被所有模块
+     共享，若按"模块内下标 + TYPE_ID_PROGRAM_BASE"分配，两个模块的 id 会重叠，
+     后编译模块的 DEFINE_TYPE 覆盖先者槽位 → 先者 LOAD_TYPE 取到别的模块类型
+     （被导入模块内的 struct 构造会运行期报 "construct: unsupported type"）。 */
+  uint32_t id = type_id_alloc(sema->vm);
+  if (id == 0) return NULL; /* id 耗尽 */
 
   sema_type_t *st = (sema_type_t *)allocator_new_ex(
       sema->vm->alloc, "sema_type_t", sizeof(sema_type_t), NULL, NULL, NULL, 1);
   if (!st) return NULL;
   memset(st, 0, sizeof(*st));
-  st->type = t;
-  st->id   = (uint32_t)(TYPE_ID_PROGRAM_BASE + n);
+  st->type  = t;
+  st->id    = id;
+  st->index = (uint32_t)n;
 
   /* 名字 "__type_N"（arena 分配，跨 sema/compile 阶段安全） */
   char name[32];
@@ -680,63 +697,70 @@ sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
  * Pass 0：import 语句处理（递归编译被导入模块）
  * =========================================================================== */
 
-/* 规范化模块路径：base_dir + relative_path → 规范绝对路径。
- * 目前简化处理：直接返回 relative_path（caller 保证传入已规范化的路径）。
- * TODO: 实现真正的路径规范化（./ → 当前目录，../ → 上级目录）。 */
-static char *resolve_module_path(allocator_t *alloc, strslice_t rel_path,
-                                 const char *importer_path) {
-    (void)importer_path; /* TODO: 基于 importer 所在目录解析相对路径 */
-    /* 简化：直接拷贝路径（测试阶段用绝对路径） */
-    size_t len = rel_path.len;
-    char *buf = (char *)allocator_new_ex(alloc, "sema.path", len + 1,
-                                         NULL, NULL, NULL, 1);
-    if (!buf) return NULL;
-    memcpy(buf, rel_path.ptr, len);
-    buf[len] = '\0';
-    return buf;
+/* 取 import / 代理导出声明的路径文本。 */
+static strslice_t import_decl_path(ast_node_t *f) {
+    if (f->kind == AST_IMPORT) return ((ast_import_t *)f)->path;
+    return ((ast_reexport_t *)f)->path;
 }
 
 static void pass0_imports(sema_t *sema, ast_program_t *prog) {
-    for (ast_node_t *f = prog->funcs; f; f = f->next) {
-        if (f->kind != AST_IMPORT) continue;
-        ast_import_t *imp = (ast_import_t *)f;
-
-        /* 规范化路径 */
-        char *canonical = resolve_module_path(sema->vm->alloc, imp->path,
-                                              NULL /* TODO: importer path */);
-        if (!canonical) {
-            diag_error(sema->diag, sema_loc(sema, f),
-                       "out of memory resolving module path");
-            continue;
-        }
-
-        /* 递归编译被导入模块（同步完成完整流水线 lex→parse→sema→compile→run）。
-           compile_module 内部有 cache 查找 + 循环依赖检测。 */
-        module_t *mod = compile_module(sema->vm, sema->vm->alloc, sema->diag,
-                                       sema->arena, canonical,
-                                       sema->path_stack);
-        if (!mod) {
-            diag_error(sema->diag, sema_loc(sema, f),
-                       "failed to import module '%s'", canonical);
-            allocator_free(sema->vm->alloc, (void **)&canonical);
-            continue;
-        }
-
-        /* 在当前模块全局作用域注册 <alias> 为 MODULE 符号 */
-        sema_symbol_t init = {0};
-        init.kind = SEMA_SYM_MODULE;
-        init.module = mod;
-        init.is_active = true;
-        sema_symbol_t *sym = sema_scope_define(sema->global_scope, imp->alias,
-                                               &init);
-        if (!sym) {
-            diag_error(sema->diag, sema_loc(sema, f),
-                       "duplicate name '%.*s' for import alias",
-                       (int)imp->alias.len, imp->alias.ptr);
-        }
-
-        allocator_free(sema->vm->alloc, (void **)&canonical);
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    /* M6 FFI：extern lib 由 **driver** 处理（在 lexer pool 释放前扫描 AST 并
+       dlopen/LoadLibrary，句柄挂 module_t.ffi，失败即诊断）——sema 不再重复
+       诊断，但仍要跳过它（它不是可编译的声明）。`extern cfunc` 的符号解析与
+       调用属后续阶段。 */
+    if (f->kind == AST_EXTERN_LIB) {
+      /* M6 FFI：注册库别名符号（kind = SEMA_SYM_EXTERN_LIB），使 `crt::malloc` 能
+         解析到别名并在 :: 分支给出"调用未实现"的明确诊断，而不是含混的
+         "unknown enum type in enum reference"。加载与符号解析由 driver 负责。 */
+      ast_extern_lib_t *el = (ast_extern_lib_t *)f;
+      sema_symbol_t init = {0};
+      init.kind = SEMA_SYM_EXTERN_LIB;
+      init.is_active = true;
+      sema_symbol_t *fsym = sema_scope_define(sema->global_scope, el->alias,
+                                             &init);
+      if (!fsym) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "duplicate name '%.*s' for extern lib alias",
+                   (int)el->alias.len, el->alias.ptr);
+      }
+      continue;
     }
+    if (f->kind != AST_IMPORT && f->kind != AST_REEXPORT) continue;
+    strslice_t raw = import_decl_path(f);
+
+    /* import 的解析与编译由**驱动层注入的回调**完成：路径分类/规范化、
+       存在性检查、递归编译（cache + 循环依赖检测）与诊断都在 driver 侧。
+       sema 因此不 include 任何 driver 头、不认识 module_t 的内容、不做路径
+       处理——依赖方向保持单向（driver → sema）。 */
+    if (!sema->imports.resolve) {
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "imports are not supported in this compilation mode");
+      continue;
+    }
+    struct module_t *mod =
+        sema->imports.resolve(sema->imports.user, sema, f, raw);
+    if (!mod) continue; /* 回调已诊断（非相对路径 / 未找到 / 递归编译失败） */
+
+    if (f->kind == AST_IMPORT) {
+      /* 在当前模块全局作用域注册 <alias> 为 MODULE 符号。
+         （AST_REEXPORT（`export * from "./x"`）无需在此记账：依赖模块已在回调里
+         编译并注册进 vm->modules，driver 构建本模块导出表时会重解析该路径并
+         并入其导出符号，同名冲突在彼处诊断。） */
+      ast_import_t *imp = (ast_import_t *)f;
+      sema_symbol_t init = {0};
+      init.kind = SEMA_SYM_MODULE;
+      init.module = mod;
+      init.is_active = true;
+      sema_symbol_t *sym = sema_scope_define(sema->global_scope, imp->alias,
+                                             &init);
+      if (!sym) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "duplicate name '%.*s' for import alias",
+                   (int)imp->alias.len, imp->alias.ptr);
+      }
+    }
+  }
 }
 
 /* ===========================================================================
@@ -745,14 +769,123 @@ static void pass0_imports(sema_t *sema, ast_program_t *prog) {
 
 static void pass1_names(sema_t *sema, ast_program_t *prog) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
-    /* AST_IMPORT 已在 pass0_imports 处理（注册 MODULE 符号），跳过 */
-    if (f->kind == AST_IMPORT) continue;
+    /* AST_IMPORT / AST_REEXPORT 已在 pass0_imports 处理（注册 MODULE 符号 /
+       收集代理导出），跳过 */
+    if (f->kind == AST_IMPORT || f->kind == AST_REEXPORT ||
+        f->kind == AST_EXTERN_LIB)
+      continue;
+    if (f->kind == AST_FUNC_DEF && ((ast_func_def_t *)f)->is_extern_cfunc) {
+      /* M6 FFI：extern cfunc 声明（无体，符号由 driver 用 dlsym 解析）。
+         这里注册**限定名函数符号** "<lib>::<name>"（`::` 分支据此解析），并做
+         §2 C ABI 类型校验：每个参数与返回类型都必须 C 可表达（option/tag union/
+         切片/元组/闭包/类型值一律拒绝，见 docs/m6-design.md §2 与 §14.8）。
+         **不分配 fid**：无函数体、不进运行时函数队列，编译器也不为它生成函数体。 */
+      ast_func_def_t *efd = (ast_func_def_t *)f;
+      const type_t *ptypes[64];
+      size_t pn = 0;
+      for (ast_node_t *p = efd->params; p; p = p->next) {
+        ast_var_def_t *pvd = (ast_var_def_t *)p;
+        const type_t *pt = sema_resolve_type_slot(sema, &pvd->type_expr);
+        const char *why = ffi_c_abi_reject_reason(pt);
+        if (!why && pt && pt->kind == TYPE_KIND_VOID)
+          why = "void is not a valid parameter type";
+        if (why) {
+          diag_error(sema->diag, sema_loc(sema, (ast_node_t *)p),
+                     "extern cfunc %.*s::%.*s: parameter '%.*s': %s",
+                     (int)efd->lib_name.len, efd->lib_name.ptr,
+                     (int)efd->name.len, efd->name.ptr,
+                     (int)pvd->name.len, pvd->name.ptr, why);
+        }
+        if (pt && pn < sizeof(ptypes) / sizeof(ptypes[0])) ptypes[pn++] = pt;
+      }
+      const type_t *rt = sema->vm->type_void;
+      if (efd->return_expr) rt = sema_resolve_type_slot(sema, &efd->return_expr);
+      const char *rwhy = ffi_c_abi_reject_reason(rt);
+      /* f32 返回在**声明处**就拒绝：调用层的浮点通路是"全 double 签名"
+         （m6-design §14.5），f32 返回会按 double 读 XMM0 却只取低 4 字节。
+         与其造一个 f64 值冒充 f32（使用点再报类型错），不如声明处就说清楚。 */
+      if (!rwhy && rt == sema->vm->type_f32)
+        rwhy = "f32 return is not supported yet (declare it as returning f64)";
+      if (rwhy) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)f),
+                   "extern cfunc %.*s::%.*s: return type: %s",
+                   (int)efd->lib_name.len, efd->lib_name.ptr,
+                   (int)efd->name.len, efd->name.ptr, rwhy);
+      }
+      /* 注册限定名符号（签名有问题时也注册，避免后续级联报"未定义符号"） */
+      char qual[512];
+      int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                        (int)efd->lib_name.len, efd->lib_name.ptr,
+                        (int)efd->name.len, efd->name.ptr);
+      const type_t *sig = (rt && qn > 0)
+                              ? type_func_sig(sema->vm, ptypes, pn, rt,
+                                              efd->is_variadic)
+                              : NULL;
+      if (sig) {
+        sema_symbol_t einit = {.kind = SEMA_SYM_FUNC, .type = sig,
+                               .is_active = true, .fid = 0};
+        sema_scope_define(sema->global_scope,
+                          strslice_from_bytes(qual, (size_t)qn), &einit);
+      }
+      continue;
+    }
+
+    /* M6 FFI：extern var 声明（动态库导出的**数据符号**）。
+       与 extern cfunc 对称：注册**限定名变量符号** "<lib>::<name>"（`::` 分支据此
+       解析读取，赋值目标也据此识别），且**不进运行时函数/变量队列**——它没有本地
+       存储，运行期由 dlsym 得到库里的变量地址（EXTERN_LOAD/STORE）。
+       类型必须给出（宽度/类别决定读写字节数），并做两道校验：
+         ① `extern lib` 别名必须已声明（否则给出可执行的指引）；
+         ② 类型必须属于**可搬运标量子集**（ffi_data_kind_of）——§2 允许的
+            struct/enum/切片等在这里会明确报"不可作为 extern var"，因为按固定
+            宽度读写一块外部内存必须知道精确布局。 */
+    if (f->kind == AST_VAR_DEF && ((ast_var_def_t *)f)->is_extern_var) {
+      ast_var_def_t *evd = (ast_var_def_t *)f;
+      char qual[512];
+      int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                        (int)evd->lib_name.len, evd->lib_name.ptr,
+                        (int)evd->name.len, evd->name.ptr);
+      if (qn <= 0 || (size_t)qn >= sizeof(qual)) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "extern var name too long");
+        continue;
+      }
+      sema_symbol_t *libsym = sema_lookup(sema->global_scope, evd->lib_name);
+      if (!libsym || libsym->kind != SEMA_SYM_EXTERN_LIB) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "extern var %s uses undeclared library '%.*s' "
+                   "(add `extern lib \"...\" as %.*s;`)",
+                   qual, (int)evd->lib_name.len, evd->lib_name.ptr,
+                   (int)evd->lib_name.len, evd->lib_name.ptr);
+      }
+      const type_t *vt = sema_resolve_type_slot(sema, &evd->type_expr);
+      const char *why = ffi_c_abi_reject_reason(vt);
+      uint32_t kind = 0;
+      if (!why && vt && vt->kind == TYPE_KIND_VOID)
+        why = "void is not a value type";
+      if (!why && !ffi_data_kind_of(vt, sema->vm, &kind))
+        why = "only scalar/pointer types can be extern var "
+              "(i8..i64 / u8..u64 / bool / f32 / f64 / opaque)";
+      if (why) {
+        diag_error(sema->diag, sema_loc(sema, f), "extern var %s: %s", qual, why);
+      }
+      /* 以限定名注册（类型有问题时也注册，避免级联报"未定义符号"） */
+      sema_symbol_t einit = {.kind = SEMA_SYM_EXTERN_VAR, .type = vt,
+                             .ast = f, .is_active = true};
+      sema_scope_define(sema->global_scope,
+                        strslice_from_bytes(qual, (size_t)qn), &einit);
+      continue;
+    }
 
     /* 全局 comptime var：注册变量符号（暂不激活，pass_globals 求值后激活）。
-       不创建 sema_func_t（不入 Pass 3 队列——不是函数，无函数体）。 */
+       不创建 sema_func_t（不入 Pass 3 队列——不是函数，无函数体）。
+       `is_comptime` 必须在**注册时**就置位：类型槽位的延迟判定
+       （type_refs_unevaluated_comptime）与按需求值都靠它区分
+       "尚未求值的 comptime var" 与普通变量。 */
     if (f->kind == AST_VAR_DEF) {
       ast_var_def_t *vd = (ast_var_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_VAR};
+      sema_symbol_t init = {.kind = SEMA_SYM_VAR,
+                            .is_comptime = vd->is_comptime};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, vd->name, &init);
       if (!sym) {
@@ -851,8 +984,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
     sf->def = f;
     sf->scope = NULL;
     sf->param_scope = NULL;
-    sf->name = fn->name;
-    /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
+      /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
        流程；compiler 预扫描跳过 comptime 不读取，占位无冲突）。符号表 fid
        字段同步（AST_FUNC_REF 替换 / 折叠按 id 查询用） */
     sema_func_id_alloc(sema, fn);
@@ -861,7 +993,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
   }
 }
 
-static void pass2_types(sema_t *sema) {
+static void pass2_types(sema_t *sema, bool speculative) {
   size_t n = vec_len(sema->funcs);
   for (size_t i = 0; i < n; i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
@@ -869,8 +1001,16 @@ static void pass2_types(sema_t *sema) {
     ast_func_def_t *fn = (ast_func_def_t *)f;
     sema_symbol_t *sym = sema_lookup(sema->global_scope, fn->name);
     if (!sym) continue;
-    if (sym->ast) continue; /* 理论上不可达：队列只含有效函数 */
+    if (sym->ast && sym->ast != f) continue; /* 理论上不可达：队列只含有效函数 */
 
+    /* 注意：**不能**在函数入口用 "签名已解析" 短路——§5 返回 ref 标注校验
+       （sema_check_ret_ref_annot）每次都要跑：试跑轮里它写进临时缓冲被丢弃，
+       正式轮必须补报。槽位解析本身幂等（首次解析后槽位已折叠为 AST_TYPE_REF）。 */
+
+    /* 参数/返回类型槽位解析。**未解析成功则不建签名**（留待下一轮试跑或
+       最终正式报错）——否则会用 NULL 参数构造出半有效的签名并把它标记为
+       已完成，后续轮次不再重试。 */
+    bool unresolved = false;
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;
     if (nparams > 0) {
@@ -881,9 +1021,11 @@ static void pass2_types(sema_t *sema) {
         ast_var_def_t *vd = (ast_var_def_t *)p;
         const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t) {
-          diag_error(sema->diag, sema_loc(sema, p),
-                     "unknown type in parameter '%.*s'",
-                     (int)vd->name.len, vd->name.ptr);
+          if (!speculative)
+            diag_error(sema->diag, sema_loc(sema, p),
+                       "unknown type in parameter '%.*s'",
+                       (int)vd->name.len, vd->name.ptr);
+          unresolved = true;
         }
         params[j] = t; /* 失败置 NULL，位置对齐，func_shadow_call 校验时跳过 */
       }
@@ -893,13 +1035,25 @@ static void pass2_types(sema_t *sema) {
     if (fn->return_expr) {
       rt = sema_resolve_type_slot(sema, &fn->return_expr);
       if (!rt) {
-        diag_error(sema->diag, sema_loc(sema, f),
-                   "unknown return type");
+        if (!speculative)
+          diag_error(sema->diag, sema_loc(sema, f), "unknown return type");
+        unresolved = true;
       }
     }
+    if (unresolved) {
+      if (params) allocator_free(sema->vm->alloc, (void **)&params);
+      continue; /* 保持未就绪，等下一轮（符号 type 仍为 NULL） */
+    }
     /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。
-       未标注 → 编译错误（调用点无法确定返回值存活上限）。 */
+       未标注 → 编译错误（调用点无法确定返回值存活上限）。
+       **每次都要跑**：签名可能已在试跑轮解析完毕（下面会跳过重建），但试跑轮
+       的诊断进了临时缓冲被丢弃——正式轮必须补报；试跑轮里也只是做检查、
+       不产生状态。 */
     sema_check_ret_ref_annot(sema, fn, rt);
+    if (sym->type) { /* 签名已就绪（试跑轮已解析）：无需重建 */
+      if (params) allocator_free(sema->vm->alloc, (void **)&params);
+      continue;
+    }
 
     /* 注册签名类型（按签名去重 intern 到 vm 类型池，type_func_sig 复制 params）；
        符号统一记录定义 AST 节点（函数 = AST_FUNC_DEF）；签名类型存于
@@ -929,10 +1083,27 @@ static void pass2_types(sema_t *sema) {
  * 使用）。定义点不摘除——type def 进入字节码，运行时 DEFINE 绑定 type value
  * 到运行时作用域（编译期 vm 与运行时 vm 解耦）。
  * 注：局部 type def 由 3b 按语句顺序求值（定义点激活，TDZ 与 var 一致）。
+ *
+ * `speculative`：试跑轮（诊断进临时缓冲、不报真错）。两种模式都**跳过已激活
+ * 的符号**，因此可反复调用（求值顺序无关的不动点轮次）。
  * =========================================================================== */
 
-static void pass1b_types(sema_t *sema, ast_program_t *prog) {
+static void pass1b_types(sema_t *sema, ast_program_t *prog, bool speculative) {
+  (void)speculative;
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    strslice_t name = {0};
+    switch (f->kind) {
+      case AST_TYPE_DEF:   name = ((ast_type_def_t *)f)->name; break;
+      case AST_ENUM_DEF:   name = ((ast_enum_def_t *)f)->name; break;
+      case AST_STRUCT_DEF: name = ((ast_struct_def_t *)f)->name; break;
+      case AST_UNION_DEF:  name = ((ast_union_def_t *)f)->name; break;
+      case AST_CUNION_DEF: name = ((ast_cunion_def_t *)f)->name; break;
+      default: continue;
+    }
+    /* 已求值（激活）→ 跳过：使本函数可反复调用（不动点轮次） */
+    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, name);
+    if (sym && sym->is_active) continue;
+
     if (f->kind == AST_TYPE_DEF) {
       sema_eval_type_def(sema, (ast_type_def_t *)f, sema->global_scope);
     } else if (f->kind == AST_ENUM_DEF) {
@@ -965,24 +1136,111 @@ static void pass1b_types(sema_t *sema, ast_program_t *prog) {
  * init 可调用函数（含 comptime func）与引用自定义类型。
  * =========================================================================== */
 
-static void pass_globals(sema_t *sema, ast_program_t *prog) {
+/* ===========================================================================
+ * 求值顺序无关：试跑轮 + 不动点
+ *
+ * 全局编译期实体之间有真实依赖环，单趟顺序无解：
+ *     comptime var N = add(1, 2);   // N 需要 add 的签名（pass2 才解析）
+ *     type T = [N]i32;              // T 需要 N（而 type def 在 pass1b 解析）
+ *     func f(a: T): void { }        // f 的签名需要 T
+ * 因此 pass1b / pass2 / pass_globals 都做成**可反复调用**（各自跳过已就绪的
+ * 符号），外面套一轮循环反复"试跑"直到不再有新的实体就绪：
+ *   - 每轮诊断进临时缓冲并丢弃（半成品不报错）
+ *   - 轮次之间的进展由"就绪实体计数"衡量
+ *   - 循环结束后再用**真实诊断**跑一遍，把真正无解的错误报出来
+ * 这样 `[N]i32` 之类常量位置不再因为书写顺序而挑食。
+ * =========================================================================== */
+
+static void pass_globals(sema_t *sema, ast_program_t *prog, bool speculative);
+
+/* 已就绪的全局编译期实体计数（进展度量）：
+   类型/枚举/结构/联合定义与普通全局变量 → 符号已激活；comptime var →
+   ct_valid；函数签名 → sym->type 已解析。 */
+static size_t sema_ready_count(sema_t *sema, ast_program_t *prog) {
+  size_t n = 0;
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    strslice_t name = {0};
+    switch (f->kind) {
+      case AST_TYPE_DEF:   name = ((ast_type_def_t *)f)->name; break;
+      case AST_ENUM_DEF:   name = ((ast_enum_def_t *)f)->name; break;
+      case AST_STRUCT_DEF: name = ((ast_struct_def_t *)f)->name; break;
+      case AST_UNION_DEF:  name = ((ast_union_def_t *)f)->name; break;
+      case AST_CUNION_DEF: name = ((ast_cunion_def_t *)f)->name; break;
+      case AST_VAR_DEF: {
+        ast_var_def_t *vd = (ast_var_def_t *)f;
+        sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, vd->name);
+        if (sym && (vd->is_comptime ? sym->ct_valid : sym->is_active)) n++;
+        continue;
+      }
+      default: continue;
+    }
+    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, name);
+    if (sym && sym->is_active) n++;
+  }
+  size_t nf = vec_len(sema->funcs);
+  for (size_t i = 0; i < nf; i++) {
+    sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
+    ast_func_def_t *fn = (ast_func_def_t *)sf->def;
+    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, fn->name);
+    if (sym && sym->type) n++;
+  }
+  return n;
+}
+
+/* 跑一轮试跑（诊断丢弃），返回本轮新就绪的实体数 */
+static size_t sema_speculative_round(sema_t *sema, ast_program_t *prog) {
+  size_t before = sema_ready_count(sema, prog);
+  diag_buf_t *real = sema->diag;
+  diag_buf_t *scratch = diag_buf_new(sema->vm->alloc);
+  if (!scratch) return 0; /* 内存不足：交给正式轮报错 */
+  sema->diag = scratch;
+  pass1b_types(sema, prog, /*speculative=*/true);
+  pass2_types(sema, /*speculative=*/true);
+  pass_globals(sema, prog, /*speculative=*/true);
+  sema->diag = real;
+  diag_buf_destroy(&scratch); /* 半成品诊断丢弃，正式轮再报 */
+  size_t after = sema_ready_count(sema, prog);
+  return after > before ? after - before : 0;
+}
+
+static void pass_globals(sema_t *sema, ast_program_t *prog, bool speculative) {
   ast_node_t **prev = &prog->funcs;
   for (ast_node_t *f = prog->funcs; f;) {
     ast_node_t *next = f->next;
     if (f->kind == AST_VAR_DEF) {
       ast_var_def_t *vd = (ast_var_def_t *)f;
+      /* M6 FFI：extern var 没有本地存储（运行期直接读写库里的变量地址），
+         既不是 comptime 常量也不需要 init 求值——原样保留进字节码序列，
+         但**不**在这里求值/激活任何东西（引用点由 :: 分支直接处理）。 */
+      if (vd->is_extern_var) {
+        prev = &f->next;
+        f = next;
+        continue;
+      }
       if (vd->is_comptime) {
-        /* comptime var：求值编码常量，定义点摘除（不进运行时） */
-        sema_eval_comptime_var(sema, vd, sema->global_scope);
-        *prev = next;
+        /* comptime var：求值编码常量。已求值（ct_valid）跳过——否则会二次
+           绑定同名常量到 root_scope（重复定义）。
+           节点摘除（"comptime var 不进运行时"）只在**正式轮**做：试跑轮里
+           本轮失败、下轮可能成功，摘掉就再也看不到它了。 */
+        sema_symbol_t *csym =
+            sema_scope_find_local(sema->global_scope, vd->name);
+        if (!csym || !csym->ct_valid)
+          sema_eval_comptime_var(sema, vd, sema->global_scope);
+        if (speculative) prev = &f->next;
+        else             *prev = next;
       } else {
         /* 普通全局变量：init 折叠为字面量/函数引用，保留进字节码（运行时
-           DEFINE 到 root_scope，函数体可见）。失败（诊断已记录）：仍摘除，
-           避免下游误以为全局 var 存在。 */
-        if (!sema_eval_global_var(sema, vd, sema->global_scope))
-          *prev = next;
-        else
-          prev = &f->next;
+           DEFINE 到 root_scope，函数体可见）。已求值（is_active）跳过。
+           失败：正式轮摘除（避免下游误以为全局 var 存在）；试跑轮保留
+           （下轮可能就绪）。 */
+        sema_symbol_t *gsym =
+            sema_scope_find_local(sema->global_scope, vd->name);
+        if (!gsym || !gsym->is_active)
+          sema_eval_global_var(sema, vd, sema->global_scope);
+        gsym = sema_scope_find_local(sema->global_scope, vd->name);
+        if (gsym && gsym->is_active) prev = &f->next;
+        else if (speculative)        prev = &f->next;
+        else                         *prev = next;
       }
     } else {
       prev = &f->next;
@@ -1086,11 +1344,47 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  /* 预注册 cfunc_ptr 内置函数（M6 Phase 5：cfunc_ptr(f) -> opaque，C 函数指针）。
+     与 VM 侧 vm_register_cfunc_ptr 对应。参数是任意函数值（cfunc 定义），
+     注册为 variadic（0 固定参数）——具体 §2 校验在运行期由 cfunc 内部完成
+     （与 len/upgrade 同一套路），返回类型 opaque。fid 从 vm->functions 按名查询。 */
+  {
+    const type_t *csig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_opaque,
+                                       /*is_variadic=*/true);
+    uint32_t cfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 10 &&
+            memcmp(bf->name.ptr, "cfunc_ptr", 10) == 0) {
+          cfid = bf->id;
+          break;
+        }
+      }
+    }
+    if (csig) {
+      sema_symbol_t cinit = {.kind = SEMA_SYM_FUNC, .type = csig,
+                             .is_active = true, .fid = cfid};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("cfunc_ptr"), &cinit);
+    }
+  }
+
   pass0_imports(sema, prog);
   pass1_names(sema, prog);
-  pass1b_types(sema, prog); /* 全局 type def 先于函数签名解析（签名可引用） */
-  pass2_types(sema);
-  pass_globals(sema, prog);
+
+  /* 全局编译期实体按**不动点轮次**求值（求值顺序无关）：
+     type def / 函数签名 / comptime var / 全局变量之间的依赖没有固定拓扑序
+     ——`comptime var N = add(1,2); type T = [N]i32;` 里 N 需要 add 的签名
+     （pass2）、T 需要 N（pass1b 阶段）、可能还有 `func f(a: T)` 需要 T。
+     先反复试跑（诊断丢弃）到不再有新实体就绪，再用真实诊断跑一遍报错。 */
+  for (int round = 0; round < 8; round++) {
+    if (sema_speculative_round(sema, prog) == 0) break;
+  }
+  pass1b_types(sema, prog, /*speculative=*/false); /* 全局 type def */
+  pass2_types(sema, /*speculative=*/false);         /* 函数签名 */
+  pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
 
   /* Pass 3a：作用域树构建 + 控制流分析（符号注册、break/continue 位置检查、
      不可达语句、非 void 函数返回路径完整性）。快速失败：3a 有错误则

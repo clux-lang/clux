@@ -86,6 +86,9 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
    必须收集构造。 */
 static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
   if (fn->is_comptime) return;
+  /* M6 FFI：extern cfunc 声明**无体**（符号由 driver 用 dlsym 解析）——不进运行时
+     函数队列，也不参与 fid 校验；动态调用属 Phase 4/5。 */
+  if (fn->is_extern_cfunc) return;
   if (fn->fid == 0) {
     c_error(c, (const ast_node_t *)fn,
             "internal: missing function id for '%.*s' (sema did not assign fid)",

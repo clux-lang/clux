@@ -1,4 +1,5 @@
 #include "ctfe/ctfe.h"
+#include "sema/sema.h"
 
 #include "core/string.h"
 #include "core/strslice.h"

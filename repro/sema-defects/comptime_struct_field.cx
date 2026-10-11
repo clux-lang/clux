@@ -1,0 +1,7 @@
+comptime var N: const i32 = 5;
+struct S { a: i32; b: i32; }
+func main(): i32 {
+  var s: S = .S{ .a = N, .b = N + 1 };
+  printf("%d %d", s.a, s.b);
+  return 0;
+}

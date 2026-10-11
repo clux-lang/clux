@@ -1,0 +1,2 @@
+comptime var C = 3;
+func main(): i32 { var n: [C]i32 = .[C]i32{ 1, 2, 3 }; return 0; }

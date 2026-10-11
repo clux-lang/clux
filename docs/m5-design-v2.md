@@ -13,6 +13,37 @@
 
 ---
 
+> ### ✅ 实现状态：本设计已落地（v1 已被取代，M5 收尾项已完成）
+>
+> 落地位置：`src/driver/driver.c` 的 `compile_module`（含缓存查找与路径栈循环依赖检测）、
+> `src/driver/module_path.c`（导入路径分类 / 词法归一化 / 相对 importer 解析 /
+> 存在性检查）、`src/vm/module.c`（`module_t` + `vm->modules`）、
+> `include/vm/bcode_function.h`（`bcode_function_t.bc`）、`src/sema/sema.c` 的
+> `pass0_imports`（递归编译 + 注册 MODULE 符号 + 代理导出收集）、
+> `src/vm/exec.c` 的 `op_import` / `op_get_member`。
+> `IMPORT` 的操作数是**规范路径字符串**（strtable 索引），非 v1 的 `u32 module_id`。
+> 端到端测试：`tests/driver_import_test.cpp`（14 个用例）、示例
+> `examples/modules/`（入口 + `lib/` 下的模块与代理导出模块）。
+>
+> **收尾项状态**：
+> 1. **相对路径解析** ✅ 已实现（原为占位实现）：`./x`、`../y` 相对**被导入文件
+>    所在目录**解析；`\`→`/` 归一、折叠 `.`/`..`、省略扩展名自动补 `.cx`、
+>    规范路径作为 `vm->modules` key 去重；文件不存在报 `module not found: './x'`。
+> 2. **代理导出** `export * from "./x"` ✅ 已实现（`AST_REEXPORT`）：全量转发依赖模块
+>    导出符号并做同名冲突检测；支持链式转发（a → b → c）。
+> 3. **非相对路径的诊断** ✅ 已实现，但**不按扩展名分类**——`.so`/`.dll`/`.dylib`
+>    后缀不表示文件类型，因此 M5 只看路径形式：非 `./`/`../` 开头一律报
+>    `import path must be relative (...) package and dynamic-library imports are
+>    not supported in M5`。动态库绑定留给 M6 且必须由显式语法表达。
+> 4. **模块示例** ✅ `examples/modules/`（约定：example 目录顶层 `.cx` 为入口，
+>    子目录中的 `.cx` 为其导入的模块库）。
+>
+> **实现步骤 7 的修正**：`op_get_member` 现按本节设计查 **`module->exports`**
+> （此前查 `global_scope`，与 sema 的 `::` 解析不一致，导致代理导出的符号
+> sema 通过、运行期却 `module has no member`）。
+
+---
+
 ## 1. module 对象
 
 ```c

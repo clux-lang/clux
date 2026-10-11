@@ -119,6 +119,9 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32 } },
 
     [BCODE_IMPORT]         = { "IMPORT",        { BCODE_ASM_OP_STR } },
+    [BCODE_EXTERN_CALL]  = { "EXTERN_CALL",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32, BCODE_ASM_OP_U32 } },
+    [BCODE_EXTERN_LOAD]  = { "EXTERN_LOAD",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
+    [BCODE_EXTERN_STORE] = { "EXTERN_STORE",  { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
     [BCODE_GET_MEMBER]     = { "GET_MEMBER",    { BCODE_ASM_OP_STR } },
 };
 

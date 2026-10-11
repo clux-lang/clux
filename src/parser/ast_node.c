@@ -66,6 +66,8 @@ static const char *g_kind_names[] = {
     [AST_SLICE]       = "slice",
     [AST_MAKE]        = "make",
     [AST_IMPORT]      = "import",
+    [AST_REEXPORT]    = "reexport",
+    [AST_EXTERN_LIB]  = "extern lib",
     [AST_EXPORT]      = "export",
     [AST_ERROR]      = "error",
 };

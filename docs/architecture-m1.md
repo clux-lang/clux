@@ -1,5 +1,18 @@
 # clux 编译器架构 — M1
 
+> **阅读提示**：本文档记录 **M1 阶段**确立的架构——流水线分层、VM 作为值计算引擎、
+> shadow value 语义分析、字节码 IR、诊断收集器，这些设计至今仍然有效，M2–M5 都是在其
+> 框架内扩展（新增类型 kind / 指令 / sema pass），而非推翻。
+>
+> 文中标注"已实现"的小节描述的是**当时**的落地状态；涉及"当前阶段/当前测试数"等
+> 时效性表述已按最新状态更新（见 §4、§5）。各里程碑的完成情况以
+> [milestones.md](milestones.md) 为准。
+>
+> 后续里程碑新增的部分（不在本文档范围）：复合类型与 optional、指针与所有权、
+> 切片、模块系统——分别见 [m2-design.md](m2-design.md)、[m3-design.md](m3-design.md)、
+> [m4-design.md](m4-design.md)、[m5-design-v2.md](m5-design-v2.md)；
+> 指令集完整清单见 [bytecode-mnemonics.md](bytecode-mnemonics.md)。
+
 ## 1. Pipeline
 
 ```
@@ -1203,7 +1216,7 @@ if (!sema_analyze(sema, ast)) {
 
 ### 2.10 Driver（include/driver/driver.h, src/driver/driver.c）—— 已实现（完整流水线 lex → parse → sema → bytecode compile → execute）
 
-流水线编排者，见本文档第 1 节。当前落地阶段 ①（加载源码）与 ②（词法分析），并直接完成 ③（输出单词表）：
+流水线编排者，见本文档第 1 节。**当前已接入完整流水线**（加载 → 词法 → 语法 → 语义 → 字节码编译 → 执行），并额外提供字节码工具链与内容嗅探：
 
 ```c
 // 加载源码到内存缓冲（allocator 管理，data 在 allocator 存活期间有效）。
@@ -1216,12 +1229,34 @@ int driver_load_source(allocator_t *alloc,
 // 返回 0 成功 / -1 文件无法打开；词法错误以 TOKEN_TYPE_ERROR 留在池中。
 int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool);
 
-// 顶层入口：加载 -> 词法 -> 输出单词表。
-// 返回退出码：0 成功，1 编译错误（文件打不开 / 词法错误）。
+// 顶层入口：完整流水线（经 compile_module 编译入口模块；模块在 sema 阶段
+// 递归编译并注册），随后执行注册段并调用 main。
+// 返回退出码：0 成功，1 编译错误，2 运行时错误。
 int driver_run_file(const char *path);
+
+// 字节码产物（不执行）：源码 -> .cxs 文本 / .cxb 二进制；
+// 以及 .cxs ⇄ .cxb 互转、按内容直接执行 .cxb / .cxs。
+int driver_build_asm(const char *src_path, const char *out_path);
+int driver_build_bin(const char *src_path, const char *out_path);
+int driver_run_asm(const char *asm_path);
+int driver_run_bin(const char *bin_path);
+int driver_asm_to_bin(const char *asm_path, const char *bin_path);
+int driver_bin_to_asm(const char *bin_path, const char *asm_path);
+
+// 按内容嗅探输入类型（不依赖扩展名）：source / cxs / cxb / unknown。
+driver_input_kind_t driver_detect_input(const char *path);
+const char *driver_input_kind_name(driver_input_kind_t kind);
+
+// M5 模块系统统一入口：lex → parse → sema → compile → 执行注册段 → module_t。
+module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
+                         arena_t *arena, const char *canonical, vec_t *path_stack);
 ```
 
 `cmd_run`（src/cmd/run.c）只做参数解析（取首个位置参数作为文件路径），其余编排下沉到 `driver_run_file`。
+
+> **历史沿革**：M1 阶段 `driver_run_file` 的产物是"输出单词表到 stdout"（阶段 ③），
+> 该行为已不存在——现在是最外层编译执行入口。下方两段（单词表格式、内存源约束）
+> 保留为 M1 阶段的实现记录，仍准确描述了 lexer 对内存源的约束。
 
 **单词表输出格式（阶段 ③）**：每个 token 独占一行（EOF 作为终止符跳过不打印），打印其源码位置范围与转义后的文本：
 
@@ -1238,10 +1273,20 @@ int driver_run_file(const char *path);
 ## 3. 命令行接口
 
 ```
-clux run <file.cx>    解释执行 .cx 文件
+clux run <file>                              # 执行 .cx 源码（或按内容识别的 .cxb 字节码）
+clux format <file.cx> [-o PATH]              # 格式化（原地 / 指定输出 / stdout）
+clux bc <emit|asm|disasm> <file> [-o PATH]   # 字节码工具：源码→.cxb / .cxs→.cxb / .cxb→.cxs
+clux eval <expr>                             # 编译期（CTFE）求值单个表达式
+clux version                                 # 版本信息
+clux test                                    # 预留（当前输出 not implemented）
+clux build <file.cx>                         # 机器码后端（未实现）
 ```
 
 退出码：0 成功，1 编译错误（含文件打不开、词法/语法/语义错误），2 运行时错误。
+`run` 按**内容**而非扩展名判定输入（`CXBC` 魔数 → 字节码，否则按源码编译）。
+
+（M1 阶段此处仅有 `clux run <file.cx>`；上表为当前实际子命令，详见
+[cmd.md](../specs/cmd.md) 与 [bytecode-mnemonics.md](bytecode-mnemonics.md)。）
 
 ## 4. 构建系统
 
@@ -1249,15 +1294,17 @@ CMake（C11；测试为 C++20 + GoogleTest）。库划分：
 
 | 目标 | 源文件 | 说明 |
 |------|--------|------|
-| `clux_core` | `src/core/*.c` | allocator / stream / vec / rbtree / omap / strmap / string |
-| `clux_parser` | `src/parser/*.c` | lexer（T4 之后加入 parser.c），依赖 `clux_core` |
-| `clux_vm` | `src/vm/*.c` | 值计算引擎：type/vtable/value/scope/function（已实现），依赖 `clux_core` + `clux_parser` + ICU |
-| `clux_driver` | `src/driver/*.c` | 流水线编排（加载 + 词法，后续加 parse/sema/bytecode），依赖 `clux_core` + `clux_parser` + `clux_vm` |
-| `clux_sema` | `src/sema/*.c` | 语义分析（shadow value 驱动）；**目录为空时不创建目标**（GLOB + `if`） |
-| `clux_diag` | `src/diag/*.c` | 诊断收集器；同上 |
-| `clux_cmd` | `src/cmd/*.c` | 子命令分发，依赖 `clux_driver` |
+| `clux_core` | `src/core/*.c` | allocator / arena / panic / stream / vec / rbtree / omap / strmap / string |
+| `clux_parser` | `src/parser/*.c` | lexer + parser + AST + formatter，依赖 `clux_core` |
+| `clux_vm` | `src/vm/*.c` | 值计算引擎：type/vtable/value/scope/function/bytecode/module，依赖 `clux_core` + `clux_parser` + ICU |
+| `clux_sema` | `src/sema/*.c` | 语义分析（shadow value 驱动）+ comptime |
+| `clux_diag` | `src/diag/*.c` | 诊断收集器 |
+| `clux_compiler` | `src/compiler/*.c` | AST → 字节码（含类型提升区两遍构造） |
+| `clux_ctfe` | `src/ctfe/*.c` | 编译期求值（解释 AST 产出真实 value） |
+| `clux_driver` | `src/driver/*.c` | 流水线编排（含 `compile_module` 模块编译入口、`module_path` 导入路径解析、字节码产物与内容嗅探） |
+| `clux_cmd` | `src/cmd/*.c` | 子命令分发，依赖 `clux_driver` + `clux_ctfe` |
 
-`sema` / `diag` 两个目录目前还没有源文件（对应流水线阶段 T5/T6），一旦放入第一个 `*.c`，CMake 会自动创建对应目标并链入 `clux` 与 `clux_test`，无需再改构建脚本。测试目标通过 `file(GLOB CONFIGURE_DEPENDS)` 自动收集 `tests/*.cpp`。
+以上目标均已有源文件；`sema` / `diag` / `compiler` / `ctfe` 曾按"目录为空时不创建目标"（GLOB + `if`）预留，放入第一个 `*.c` 后自动生效——该机制仍在，新增阶段目录无需改构建脚本。测试目标通过 `file(GLOB CONFIGURE_DEPENDS)` 自动收集 `tests/*.cpp`。
 
 **编译警告**：项目目标统一启用严格警告（MSVC 风格驱动用 `/W4`，GNU 风格驱动用 `-Wall -Wextra -Wpedantic`），第三方（ICU / GoogleTest）保持各自配置——通过 `clux_target_warnings(<target>)` 施加，不用全局 `add_compile_options`。
 
@@ -1267,7 +1314,19 @@ CMake（C11；测试为 C++20 + GoogleTest）。库划分：
 |------|------|------|
 | MSVC CRT 安全弃用（`fopen` / `tmpnam` / `freopen`） | Windows 下定义 `_CRT_SECURE_NO_WARNINGS` | clux 使用可移植 C API，而非 MSVC 专有的 `_s` 变体 |
 
-其余警告视为真实缺陷并直接修掉（如未使用变量/参数、C99 compound literal、结构体部分初始化），**当前构建零警告**。
+其余警告视为真实缺陷并直接修掉（如未使用变量/参数、C99 compound literal、结构体部分初始化）。
+
+> **当前状态**：`-Wall -Wextra -Wpedantic` 下**零告警**（Windows / clang 22.1.8 / Debug
+> 全量重编实测）。此前存在 37 条，已全部清理：
+>
+> | 类别 | 数量 | 处理 |
+> |------|------|------|
+> | `-Wmissing-field-initializers`（内建类型单例位置式初始化漏 `id`） | 19 | `src/vm/type.c` 单例改为零初始化（字段由 `vm_init_builtins` 填充），杜绝新增字段再漂移 |
+> | `-Wmissing-field-initializers` / `-Wmissing-braces`（`location_t l = {0}`） | 6 | `include/parser/ast_error.h` 改为显式逐字段零初始化（该头被 C++ TU 包含，`= {0}` 与 `= {}` 都不合适） |
+> | `-Wc99-extensions`（测试里的复合字面量） | 4 | `tests/vm_test.cpp` 改用具名局部变量 |
+> | `-Wunused-variable` / `-Wunused-function` / `-Wunused-parameter` | 5 | 删除死代码或补 `(void)param`（`src/vm/module.c` 无用 class、`src/vm/type_tuple.c` 未用 `n`、`src/vm/type_str.c` 未用 `vm`、`tests/array_test.cpp` 未用 `read_i64`、`tests/vm_test.cpp` 未用 `opt`） |
+> | `-Wincompatible-pointer-types-discards-qualifiers` | 2 | **真实 const 违约**：`value_dump_impl` / `value_dump_string` 内部会创建借用值并 track 进 scope（改 vm），却声明 `const vm_t *` 并在实现里强转——签名改为 `vm_t *`，去掉强转 |
+> | `-Wcomment`（注释内含 `/*`） | 1 | 改写注释文本 |
 
 ### 4.1 构建注意事项
 
@@ -1285,6 +1344,19 @@ clang: error: no such file or directory: '<build>/third_party/icu/icu_data_gen.c
 
 ## 5. 测试策略
 
-- **单元测试**：Lexer、Parser、VM（type/vtable/value/scope/function）各模块独立测试，当前 597 测试通过
-- **集成测试**：.cx 程序端到端执行，对比输出
-- **测试用例**：hello.cx、arithmetic.cx、functions.cx、control_flow.cx、fibonacci.cx
+- **单元测试**：Lexer、Parser、Sema、VM（type/vtable/value/scope/function）、字节码（容器 / 汇编 / 反汇编 / 序列化）、核心容器（allocator / vec / string / 映射 / stream）各模块独立测试
+- **集成测试**：`.cx` 程序端到端执行（经 `driver_run_file`）并比对输出；`examples/` 全量扫描；`.cxs → .cxb → .cxs → .cxb` 往返字节级稳定
+
+**当前规模**（2026-10 实测，Windows / clang 22.1.8 / Debug）：
+
+| 项目 | 结果 |
+|------|------|
+| 注册测试数 | 1570 |
+| `clux_test` 通过 | 1570 / 1570 |
+| `examples/*/*.cx` 入口示例 | 35 / 35 通过 |
+| `examples/asm/*.cxs` | 5 / 5 通过 |
+
+> **运行前提**：部分测试经 `temp_directory_path()` / `tmpnam` 写临时文件；若宿主拒绝
+> 子进程写 `%TEMP%` 根（`fopen` 报 `errno 13`），这些测试会失败并可能触发 UCRT 断言
+> 中止，**使测试套件提前退出而不报错**——需先把 `TMP`/`TEMP` 指向可写目录。详见
+> [milestones.md](milestones.md) 的"当前验证状态"。

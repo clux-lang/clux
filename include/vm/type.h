@@ -422,12 +422,27 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
 
 /* 类型 id 分段（type.c / sema.c / compile_hoist.c 共用）：
    内建类型固定 id 0..(TYPE_ID_BUILTIN_COUNT-1)（vm_register_builtin_types
-   按序登记，error/interrupt 紧随其后）；程序类型 id 由 sema 分配，从
-   TYPE_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
+   按序登记，error/interrupt 紧随其后）；程序类型 id 由 type_id_alloc 从
+   TYPE_ID_PROGRAM_BASE 起**全 VM 全局分配**（见下方说明）。 */
 /* opaque 内建 id 17（vm_init_builtins 创建，vm_register_builtin_types 登记
    进 global scope，LOAD_TYPE <17> 直接可查；sema_type_register 跳过登记）。 */
 #define TYPE_ID_BUILTIN_COUNT 18u
 #define TYPE_ID_PROGRAM_BASE   64u
+
+/**
+ * 分配一个**全 VM 唯一**的程序类型 id（从 TYPE_ID_PROGRAM_BASE 递增）。
+ *
+ * 谁需要它：sema 登记模块内每个类型（sema_type_register）与编译器为内联构造
+ * 的类型临时分配 id 时。**不得用"模块内下标 + 基数"自行推算**——vm->types_by_id
+ * 是 VM 单表、被所有模块共享，而每个模块的字节码都用 LOAD_TYPE <id> 直接索引
+ * 它；若两模块各自从 TYPE_ID_PROGRAM_BASE 起算，后编译模块的 DEFINE_TYPE 会
+ * 覆盖先者的槽位，先者函数体随即取到别的模块的类型（曾实测：被导入模块内的
+ * struct 构造运行期报 "construct: unsupported type"）。
+ *
+ * 注意：id 全 VM 唯一 ⇒ 同一模块内不再连续，任何"按 id - BASE 当下标"的用法
+ * 都必须改为按登记下标（见 sema_type_t::index）。
+ */
+uint32_t type_id_alloc(vm_t *vm);
 
 /**
  * 登记类型到 id 表（vm->types_by_id，索引即 id）。DEFINE_TYPE <id> 运行期

@@ -104,10 +104,6 @@ void vm_register_upgrade(vm_t *vm) {
 
     value_t *stored = scope_define(vm, vm->global_scope, "upgrade", fnv);
     if (!stored || value_is_error(vm, stored)) {
-        value_dispose(vm, fnv);
-        allocator_free(vm->alloc, (void **)&fnv);
         return;
     }
-    value_dispose(vm, fnv);
-    allocator_free(vm->alloc, (void **)&fnv);
 }

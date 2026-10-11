@@ -12,7 +12,18 @@
 #include "parser/ast_slice_type.h"
 #include "parser/parse_utils.h"
 #include "vm/type_slice.h"
+#include "vm/type.h"
 #include "core/strslice.h"
+
+/* 为"槽位未被 sema 替换"的防御分支临时分配一个**全 VM 唯一** program id
+   （type_id_alloc，见 vm/type.h）。id 耗尽（返回 0）时报编译器错误（c_error
+   置 c->failed）并返回 0，调用方必须立即 return——绝不能继续用 id 0 发
+   DEFINE_TYPE，那会覆盖内建类型槽位。 */
+static uint32_t temp_type_id(compiler_t *c, const ast_node_t *at) {
+    uint32_t id = type_id_alloc(c->vm);
+    if (id == 0) c_error(c, at, "type id exhausted (too many program types)");
+    return id;
+}
 
 /* ===========================================================================
  * 类型表达式编译（类型即表达式，m2-design 关键架构决策 6）
@@ -112,14 +123,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        +1）。
        注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
-       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       compiler 临时分配（temp_type_id → type_id_alloc，全 VM 唯一），与 hoist 区同类型可成多 id 别名
        （types_by_id 幂等），语义无害。 */
     ast_option_t *opt = (ast_option_t *)type_expr;
 
     bcode_write_op(c->bc, BCODE_PUSH_OPT);   /* 栈: [open_option_type] */
     st_push(c, 1);
 
-    uint32_t tid = c->type_id_next++;
+    uint32_t tid = temp_type_id(c, type_expr);
+    if (tid == 0) return;
     bcode_write_op(c->bc, BCODE_DEFINE_TYPE); /* 声明：绑 id + 登记开放对象 */
     bcode_write_u32(c->bc, tid);
     st_push(c, -1);
@@ -155,14 +167,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        边界 N 已被 sema 折叠为 AST_INT_LIT（编译期常量）。
        注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
-       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       compiler 临时分配（temp_type_id → type_id_alloc，全 VM 唯一），与 hoist 区同类型可成多 id 别名
        （types_by_id 幂等），语义无害。 */
     ast_array_t *arr = (ast_array_t *)type_expr;
 
     bcode_write_op(c->bc, BCODE_PUSH_ARRAY);   /* 栈: [open_array_type] */
     st_push(c, 1);
 
-    uint32_t tid = c->type_id_next++;
+    uint32_t tid = temp_type_id(c, type_expr);
+    if (tid == 0) return;
     bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
     bcode_write_u32(c->bc, tid);
     st_push(c, -1);
@@ -211,14 +224,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        <tid> 拉回类型值（保持"类型表达式压类型值"契约）。
        注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
-       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       compiler 临时分配（temp_type_id → type_id_alloc，全 VM 唯一），与 hoist 区同类型可成多 id 别名
        （types_by_id 幂等），语义无害。 */
     ast_func_type_t *ft = (ast_func_type_t *)type_expr;
 
     bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE); /* 栈: [open_func_type] */
     st_push(c, 1);
 
-    uint32_t tid = c->type_id_next++;
+    uint32_t tid = temp_type_id(c, type_expr);
+    if (tid == 0) return;
     bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
     bcode_write_u32(c->bc, tid);
     st_push(c, -1);
@@ -260,14 +274,15 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        （保持"类型表达式压类型值"契约，调用方如 CONSTRUCT 类型位仍得 +1）。
        注：常规路径该分支不可达（sema_resolve_type_slot 已把复合类型槽位
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景；id 由
-       compiler 临时分配（type_id_next），与 hoist 区同类型可成多 id 别名
+       compiler 临时分配（temp_type_id → type_id_alloc，全 VM 唯一），与 hoist 区同类型可成多 id 别名
        （types_by_id 幂等），语义无害。 */
     ast_tuple_t *tp = (ast_tuple_t *)type_expr;
 
     bcode_write_op(c->bc, BCODE_PUSH_TUPLE);   /* 栈: [open_tuple_type] */
     st_push(c, 1);
 
-    uint32_t tid = c->type_id_next++;
+    uint32_t tid = temp_type_id(c, type_expr);
+    if (tid == 0) return;
     bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
     bcode_write_u32(c->bc, tid);
     st_push(c, -1);
@@ -321,7 +336,8 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
     bcode_write_u8(c->bc, (uint8_t)kind);
     st_push(c, 1);
 
-    uint32_t tid = c->type_id_next++;
+    uint32_t tid = temp_type_id(c, type_expr);
+    if (tid == 0) return;
     bcode_write_op(c->bc, BCODE_DEFINE_TYPE);  /* 声明：绑 id + 登记开放对象 */
     bcode_write_u32(c->bc, tid);
     st_push(c, -1);

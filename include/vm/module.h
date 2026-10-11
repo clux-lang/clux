@@ -31,6 +31,25 @@ typedef struct module_t {
     scope_t    *global_scope;   /* 模块全局作用域（owned） */
     strmap_t   *exports;        /* name → value_t* 借用映射（owned map，借用 value） */
     char       *canonical;      /* 规范路径（owned，NUL 终止） */
+
+    /* ---- M5 字节码容器所需：**源码路径**与导入者（owned 副本，可 NULL） ----
+     * 容器与 `.cxs` 文本里存的是**源码中写的路径**（"./math"、"./lib/api"），
+     * 不是规范化后的宿主路径——产物因此与宿主目录布局解耦（换个目录照样解析）。
+     * 加载时由加载方以"导入者的规范路径"为基准重新规范化，得到 vm->modules 的
+     * key（与运行期 op_import 对 IMPORT 操作数做的规范化完全一致）。
+     *
+     * - import_path: 导入它的那条 `import` 语句里写的路径（NULL = 入口模块）
+     * - importer:    导入者的规范路径（NULL = 入口模块）
+     *
+     * 菱形依赖（两个模块以不同写法导入同一模块）只需记录任意一条边：两条边
+     * 规范化后必然得到同一个 key（否则编译期就不会解析到同一模块）。 */
+    char       *import_path;
+    char       *importer;
+
+    /* ---- M6 FFI：extern lib 库表（别名 → 动态库句柄；owned，destroy 关闭全部）----
+     * 别名即源码里 `extern lib "..." as <名>;` 的 <名>，`extern cfunc <名>::<fn>`
+     * 依此查表取句柄再 dlsym。NULL = 本模块没有 extern lib（懒创建）。 */
+    strmap_t   *ffi_libs;
 } module_t;
 
 /**

@@ -203,6 +203,10 @@ clux 的选项语法统一为 GNU 风格 `--key` / `--key=value` / `--key value`
 - **必须幂等**：格式化结果再格式化不变（由 `tests/fmt_test.cpp` 保证）
 - **必须语义等价**：格式化后代码运行结果不变（测试覆盖 + 示例回归验证）
 
+> 该契约在 2026-10 曾被违反（顶层 `union`/`import`/`export` 被静默删除、单遍不幂等），
+> 现已修复并补齐回归测试（`FmtRegression.*`）；历史缺陷与根因见
+> [../docs/format-rules.md](../docs/format-rules.md) §9。
+
 ### 6.3 `run` 的输入判定：按内容，不按扩展名
 
 `run` **不感知汇编文本（`.cxs`）这一中间态**，只认两种输入：

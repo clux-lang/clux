@@ -142,11 +142,7 @@ void vm_register_printf(vm_t *vm) {
 
     value_t *stored = scope_define(vm, vm->global_scope, "printf", fnv);
     if (!stored || value_is_error(vm, stored)) {
-        value_dispose(vm, fnv);
-        allocator_free(vm->alloc, (void **)&fnv);
         return;
     }
     /* scope_define clone 进 scope，原值壳归调用方管理（与 vm_register_builtin_types 同模式） */
-    value_dispose(vm, fnv);
-    allocator_free(vm->alloc, (void **)&fnv);
 }

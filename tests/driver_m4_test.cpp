@@ -644,3 +644,20 @@ TEST(DriverM4, LenFatalSlice) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+TEST(DriverM4, MakeElementsFoldComptimeVar) {
+  /* 回归：make 的元素槽必须把 comptime 变量引用折叠为字面量并**写回 AST**。
+     `sema_expr` 通过可写节点槽（`ast_node_t **`）做折叠写回，而这里曾传
+     局部变量副本且不回写 ⇒ 折叠结果丢失 ⇒ comptime 变量引用漏到运行期
+     （该名字在运行期不存在）→ `run: exec: undefined variable`。 */
+  std::string path = write_temp_file(
+      "comptime var N = 5;\n"
+      "func main(): i32 {\n"
+      "  var s: own []i32 = make(i32, 2, N, N + 1);\n"
+      "  if (s[0] != 5) { return 1; }\n"
+      "  if (s[1] != 6) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

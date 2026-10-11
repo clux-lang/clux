@@ -85,10 +85,18 @@ typedef struct vm_t {
     vec_t *slice_types;    /* slice_type_t*，元素为 own/ref/fatal 切片类型 */
 
     /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
-    /* 内建类型固定 id 0..14（vm_init_builtins 登记）；程序类型 id 由编译器
-       分配（>=16），运行期 DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等
-       更新/去重重绑）。同一 intern 实例重复登记幂等（多 id 别名同一 type_t）。 */
+    /* 内建类型固定 id 0..14（vm_init_builtins 登记）；**程序类型 id 由本 VM
+       全局分配**（type_id_alloc，从 TYPE_ID_PROGRAM_BASE 起递增），运行期
+       DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等更新/去重重绑）。
+       同一 intern 实例重复登记幂等（多 id 别名同一 type_t）。
+
+       ⚠️ id 必须**全 VM 唯一**，不能按模块各从 64 起：本表是 VM 单表（多模块
+       共享同一 vm），且模块字节码里的 LOAD_TYPE <id> 直接索引本表。若两个模块
+       各自从 64 开始分配，后编译模块的 DEFINE_TYPE 会覆盖先者的槽位，导致先者
+       函数体里的 LOAD_TYPE 取到**别的模块的类型**（曾实测：被导入模块内的
+       struct 构造运行期报 "construct: unsupported type"）。 */
     vec_t *types_by_id;    /* type_t*，索引即类型 id */
+    uint32_t type_id_next; /* 程序类型 id 分配计数器（type_id_alloc 维护） */
 
     /* ---- 函数对象池（func_t / bcode_function_t*，vm 统一持有生命周期） ---- */
     /* 所有函数值共享同一 func_t*（clone 浅拷贝指针），因此 func_t 不能由
@@ -116,10 +124,6 @@ typedef struct vm_t {
      * （bc + global_scope + exports）。vm 拥有 module 生命周期。
      * IMPORT <path> 查此表获取 module_t*，构造模块值压栈。 */
     strmap_t    *modules;  /* 规范路径(C字符串) → module_t*（vm 拥有生命周期） */
-
-    /* ---- 编译期状态 ---- */
-    bool         comptime; /* true = 强制编译期求值（comptime var/func 上下文；
-                              类型表达式槽位自动置位）。false = 只检查类型。 */
 } vm_t;
 
 /** 创建 VM（初始化内置类型、全局作用域、调用栈） */

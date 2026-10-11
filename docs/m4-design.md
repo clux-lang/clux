@@ -10,6 +10,18 @@
 
 所有语法决策由用户 2026-10-09 逐项确认。
 
+> **实现状态：✅ 已完成（2026-10-09）**。本设计已落地并有测试覆盖
+> （`tests/driver_m4_test.cpp`、`src/vm/type_slice.c`、`src/vm/builtin_len.c`）。
+> 实现与本文档的两处偏差（**以代码为准**）：
+> 1. §13 Phase 4 列出的计划指令名与实际不符——实际指令为 `PUSH_SLICE <kind>` /
+>    `SLICE <flags>`（`[a:b]`）/ `MAKE <init_count>`（`make`），下标访问**复用**
+>    `INDEX_GET` / `INDEX_SET`，`len` **不是指令**而是内建函数（编译为 `CALL`）。
+>    详见 [bytecode-mnemonics.md](bytecode-mnemonics.md)。
+> 2. §10.1 的三个 type kind 是最终形态（§13 Phase 1 里"单一 `TYPE_KIND_SLICE`"
+>    的旧写法已废弃）。
+>
+> 本文档后续只作设计记录；改动请同步 [milestones.md](milestones.md)。
+
 ---
 
 ## 1. 切片类型
@@ -100,7 +112,7 @@ var d: own []i32 = make(i32, n, <0, n>);          // 运行期长度，全 0
 
 ### 3.2 ref []T（借用引用）
 
-- **从 own 隐式产生**：`var s: own []i32 = make(i32, 4); var r: ref []i32 = s;`
+- **从 own 隐式产生**：`var s: own []i32 = make(i32, 4, <0, 4>); var r: ref []i32 = s;`（`make` 必须给全元素初值，故用 fill 值包；`make(i32, 4)` 非法）
 - **从切片语法产生**：`s[a:b]` 恒产 `ref []T`（见 §4）
 - **运行期零成本**：ref 切片就是胖指针值，逃逸检查全编译期
 - **copy 允许**：`var r2: ref []i32 = r;` 拷贝 ptr+len
@@ -277,16 +289,18 @@ var cell: i32 = grid[1][2];     // 6
 切片可作为 struct/tuple/union/cunion 的字段类型，所有权传导与指针字段一致：
 
 ```
-type Buffer: struct {
-    data: own []u8,
-    cap:  u64,
+type Buffer = struct {
+    data: own []u8;
+    cap:  u64;
 };
 
-type View: struct {
-    data: ref []u8,
-    pos:  u64,
+type View = struct {
+    data: ref []u8;
+    pos:  u64;
 };
 ```
+
+（`type X = <类型表达式>` 为现行 type 别名语法；字段以 `;` 分隔。）
 
 - `own []T` 字段：struct 销毁时递归释放切片堆块
 - `ref []T` 字段：借用，不释放（§5 作用域标注约束适用）
@@ -398,33 +412,40 @@ make ( type_expr , expr , init... ) -> fatal []T
 
 ## 13. 实现路线
 
-### Phase 1: 类型系统
-- `TYPE_KIND_SLICE` 枚举 + `slice_type_t` 结构
+### Phase 1: 类型系统 ✅
+- `TYPE_KIND_SLICE_OWN` / `_REF` / `_FATAL` 三个枚举 + `slice_type_t` 结构（§10.1，最终形态）
 - vtable（clone/dispose/assign/eq/ne/get_index/set_index）
-- intern 池 + 两遍构造协议
+- intern 池 + 两遍构造协议（`type_slice_push` / `type_slice_set_elem` / `type_slice_seal`）
 - const 修饰支持
 
-### Phase 2: parser
+### Phase 2: parser ✅
 - `[]` 前导类型构造符解析
 - `[a:b]` postfix 切片运算符解析
 - `make` 宏函数解析
 - 所有权修饰 + `[]` 组合解析
 
-### Phase 3: sema
+### Phase 3: sema ✅
 - 切片类型解析 + 所有权规则
 - `make` 宏函数编译期替换
 - 切片语法 `[a:b]` 类型检查
 - `len` 内建函数注册 + 类型检查
 - 作用域标注 / 函数边界 / 闭包捕获 / 全局规则扩展
 
-### Phase 4: compiler + VM
-- 字节码指令：SLICE_GET / SLICE_SET（下标）/ SLICE_RANGE（`[a:b]`）
-- MAKE_SLICE 指令（make 宏编译产物）
-- LEN 指令
-- 胖指针 value 布局 + clone/dispose/assign 语义
-- 运行期越界检查
+### Phase 4: compiler + VM ✅（指令名以实际实现为准）
+- 类型构造：`PUSH_SLICE <kind:u8>`（声明）+ `LOAD_TYPE` → `SET_TYPE`（设 elem）→ `SEAL`
+- 切片表达式 `[a:b]`：`SLICE <flags:u8>`（bit0=low 存在，bit1=high 存在），恒产 `ref []T`
+- `make` 宏：`MAKE <init_count:u32>`（弹初值 + length + elem type）
+- 下标访问：**复用** `INDEX_GET` / `INDEX_SET`（未新增 `SLICE_GET` / `SLICE_SET`）
+- `len`：**内建函数**（`PUSH "len"; …; CALL 1`），未使用 `LENGTH` / `LEN` 指令
+- 胖指针 value 布局（`{void *ptr; uint64 len;}`）+ clone/dispose/assign 语义
+- 运行期越界检查（下标与切片区间）
 
-### Phase 5: 测试 + examples
+> 实现与原计划的命名差异（`SLICE_GET` / `SLICE_SET` / `SLICE_RANGE` / `MAKE_SLICE` /
+> `LEN` → 实际的 `SLICE` / `MAKE` / `PUSH_SLICE` / `INDEX_*` + `len` 内建）已记入
+> [bytecode-mnemonics.md](bytecode-mnemonics.md)；`LENGTH` 指令虽在指令表中，但当前
+> 编译器不生成。
+
+### Phase 5: 测试 + examples ✅
 - 切片创建/读写下标/子切片/数组转切片
 - 所有权 move/clone/borrow
 - str 切片 → ref [] const u8

@@ -6,8 +6,16 @@ extern "C" {
 
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
-#include "sema/sema.h"
 #include "vm/vm.h"
+
+/* sema 类型只以**指针**形式出现（sema 符号表查函数 AST + 当前词法作用域），
+   因此这里用前向声明而非 #include "sema/sema.h"——否则 sema 与 ctfe 互相
+   include（sema 的 comptime.c/expr.c 需要 ctfe_eval，ctfe.h 需要 sema_t），
+   形成头文件循环依赖。前向声明使依赖方向单向：ctfe → sema。 */
+struct sema_t;         /* sema 上下文（sema/sema.h 定义） */
+struct _sema_scope_t;  /* sema 词法作用域（sema/symbol.h 定义） */
+typedef struct sema_t sema_t;
+typedef struct _sema_scope_t sema_scope_t;
 #include <stdbool.h>
 #include <stddef.h>
 

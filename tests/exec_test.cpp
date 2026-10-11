@@ -1227,3 +1227,128 @@ TEST_F(ExecTest, LoadFunctionUnknownIdReturnsError) {
     ASSERT_NE(r, nullptr);
     EXPECT_TRUE(value_is_error(vm, r));
 }
+
+/* ================================================================ */
+/* 10. 聚合值的拷贝语义与"接管"路径（fresh 临时值）                  */
+/*                                                                  */
+/* 回归背景（两处缺陷，均由绑定语义（is_bound）判定修复）：                  */
+/*   ① DEFINE/STORE 的接管守卫原先只看 !value_is_borrowed，而"变量    */
+/*      自身的值"同样 is_own=true、并非借用 → "var b = a"（聚合类型） */
+/*      被误判为 fresh 临时值而**直接绑定同一 value 本体**，结果 b 与 */
+/*      a 互为别名（改 b 连带改 a）；                             */
+/*   ② op_store 接管后只把源值从 owned 摘除、未回收 value 壳 →        */
+/*      每次聚合赋值泄漏 1 个 value_t + 1 个 data 块。             */
+/* 本 fixture 的 TearDown 断言分配器无存活分配，泄漏即测试失败。     */
+/* ================================================================ */
+
+namespace {
+
+/* 发射 `[2]i32` 类型定义（PUSH_ARRAY → DEFINE_TYPE 64 → DEFINE_BOUND 2 → SEAL），
+   类型留在 types_by_id[64]，由 LOAD_TYPE 64 拉回。 */
+void emit_i32x2_type(bytecode_t *bc) {
+    bcode_write_op(bc, BCODE_PUSH_ARRAY);
+    bcode_write_op(bc, BCODE_DEFINE_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD_TYPE);   bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_LOAD);        bcode_write_str(bc, STRSLICE_LIT("i32"));
+    bcode_write_op(bc, BCODE_DEFINE_BOUND); bcode_write_u32(bc, 2);
+    bcode_write_op(bc, BCODE_SEAL);
+}
+
+/* 发射 `<e0, e1>` 数组字面量的构造序列（LOAD_TYPE 64 + 两个元素 + CONSTRUCT 2）。 */
+void emit_i32x2_lit(bytecode_t *bc, int32_t e0, int32_t e1) {
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, e0);
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, e1);
+    bcode_write_op(bc, BCODE_CONSTRUCT); bcode_write_u32(bc, 2);
+}
+
+} // namespace
+
+/* var b = a（聚合类型）必须是**拷贝**：改 b 不得影响 a。
+   修复前：b 与 a 绑定同一 value 本体，a[0] 会读到被 b 改写后的值。 */
+TEST_F(ExecTest, AggregateCopyInitIsNotAlias) {
+    emit_i32x2_type(bc);
+
+    /* var a: [2]i32 = .[2]i32{1, 2}（fresh 临时值 → DEFINE 接管） */
+    emit_i32x2_lit(bc, 1, 2);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_DEFINE);    bcode_write_str(bc, STRSLICE_LIT("a"));
+
+    /* var b: [2]i32 = a（变量源 → 必须 clone，不得别名） */
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("a"));
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_DEFINE);    bcode_write_str(bc, STRSLICE_LIT("b"));
+
+    /* b[0] = 9（INDEX_SET 消费 self 并返回 self） */
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("b"));
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, 0);
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, 9);
+    bcode_write_op(bc, BCODE_INDEX_SET);
+    bcode_write_op(bc, BCODE_POP);
+
+    /* 读 a[0] → 必须是 1（拷贝语义）；别名实现会得到 9 */
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("a"));
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, 0);
+    bcode_write_op(bc, BCODE_INDEX_GET);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(read_sint(top), 1);
+}
+
+/* a = <fresh 临时值>（聚合赋值）：内容正确，且临时值壳必须被回收（不泄漏）。 */
+TEST_F(ExecTest, AggregateStoreFreshTempNoLeak) {
+    emit_i32x2_type(bc);
+
+    /* var a: [2]i32 = .[2]i32{1, 2} */
+    emit_i32x2_lit(bc, 1, 2);
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_DEFINE);    bcode_write_str(bc, STRSLICE_LIT("a"));
+
+    /* a = .[2]i32{7, 8}（fresh 临时值 → STORE 接管路径） */
+    emit_i32x2_lit(bc, 7, 8);
+    bcode_write_op(bc, BCODE_STORE);     bcode_write_str(bc, STRSLICE_LIT("a"));
+    bcode_write_op(bc, BCODE_POP);
+
+    /* 读 a[0] → 7 */
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("a"));
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, 0);
+    bcode_write_op(bc, BCODE_INDEX_GET);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(read_sint(top), 7);
+    /* TearDown 的 EXPECT_ALLOCATOR_EMPTY_DELETE 覆盖"接管后泄漏临时值壳"的回归 */
+}
+
+/* s = t（变量→变量，聚合类型）同样不得泄漏，且 t 必须保持可读。 */
+TEST_F(ExecTest, AggregateStoreFromVariableNoLeak) {
+    emit_i32x2_type(bc);
+
+    emit_i32x2_lit(bc, 1, 2);                 /* var s = {1,2} */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_DEFINE);    bcode_write_str(bc, STRSLICE_LIT("s"));
+
+    emit_i32x2_lit(bc, 3, 4);                 /* var t = {3,4} */
+    bcode_write_op(bc, BCODE_LOAD_TYPE); bcode_write_u32(bc, 64);
+    bcode_write_op(bc, BCODE_DEFINE);    bcode_write_str(bc, STRSLICE_LIT("t"));
+
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("t"));
+    bcode_write_op(bc, BCODE_STORE);     bcode_write_str(bc, STRSLICE_LIT("s"));
+    bcode_write_op(bc, BCODE_POP);
+
+    /* 读 t[0] → 必须仍是 3（t 未被接管摘除/破坏） */
+    bcode_write_op(bc, BCODE_PUSH);      bcode_write_str(bc, STRSLICE_LIT("t"));
+    bcode_write_op(bc, BCODE_PUSH_I32);  bcode_write_i32(bc, 0);
+    bcode_write_op(bc, BCODE_INDEX_GET);
+    bcode_write_op(bc, BCODE_HALT);
+
+    EXPECT_EQ(run(), nullptr);
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(read_sint(top), 3);
+}

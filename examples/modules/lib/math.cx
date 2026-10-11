@@ -1,0 +1,19 @@
+// math.cx -- 被导入模块（M5）：export 决定对外可见的符号
+//
+//   export func / export var 进入本模块导出表，其它模块经 `alias::name` 访问；
+//   未 export 的全局符号是本模块私有（sema 编译期拒绝跨模块访问）。
+
+export var PI: i32 = 42;
+
+export func add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+// 私有函数：外部不可见（`math::secret` 编译错误）
+func secret(): i32 {
+    return 7;
+}
+
+export func internal_call(): i32 {
+    return secret();   // 模块内部仍可自由调用私有符号
+}

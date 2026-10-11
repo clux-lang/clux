@@ -1,0 +1,6 @@
+struct S { a: i32; b: i32; }
+func main(): i32 {
+  var s: S = .S{ <1, 2> };
+  printf("%d\n", s.a);
+  return 0;
+}

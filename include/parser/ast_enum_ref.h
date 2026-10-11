@@ -22,6 +22,15 @@ typedef struct {
     ast_node_t *type_expr;   /* 枚举类型名（AST_IDENT → sema 折叠为 AST_TYPE_REF） */
     strslice_t  variant;     /* variant 名 */
     int64_t     value;       /* sema 折叠后的底层整数值 */
+
+    /* ---- M6 FFI：`<库别名>::<数据符号>`（extern var 的引用）----
+     * 与 ast_call_t.is_ffi_call/ffi_ret_kind 同一契约：sema 在 :: 分支识别出
+     * "别名是 extern lib 且限定名符号是 extern var"时置这两个字段，compiler
+     * 据此发 `EXTERN_LOAD`（读取）/ `EXTERN_STORE`（赋值目标），**不再**走枚举
+     * variant 路径。ffi_var_kind 是 BCODE_FFI_DATA_* 宽度/类别码（见 vm/bcode.h）。
+     * 置位时 type_expr 保持 AST_IDENT（sema 不把它折叠成类型）。 */
+    bool        is_ffi_var;
+    uint32_t    ffi_var_kind;
 } ast_enum_ref_t;
 
 static inline ast_node_t *ast_enum_ref_new(arena_t *arena,

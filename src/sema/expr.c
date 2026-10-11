@@ -53,6 +53,8 @@
 #include "vm/type_slice.h"
 #include "vm/type_opaque.h"
 #include "vm/module.h"
+#include "vm/ffi_lib.h" /* M6 FFI：ffi_data_kind_of（extern var 的类型码） */
+#include "vm/bcode.h"   /* M6 FFI：BCODE_FFI_RET_*（extern cfunc 的返回类型码） */
 #include "core/strmap.h"
 
 #include <stdio.h>
@@ -101,10 +103,10 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
    遮蔽捕获，两者同属函数自身符号，放行。 */
 static bool func_own_symbol(sema_t *sema, strslice_t name,
                             sema_symbol_t *sym) {
-  if (!sema->local_func_base) return false;
-  if (sema_scope_find_local(sema->local_func_base, name) == sym) return true;
-  if (sema->local_func_param_scope &&
-      sema_scope_find_local(sema->local_func_param_scope, name) == sym)
+  if (!sema->fn.local_func_base) return false;
+  if (sema_scope_find_local(sema->fn.local_func_base, name) == sym) return true;
+  if (sema->fn.local_func_param_scope &&
+      sema_scope_find_local(sema->fn.local_func_param_scope, name) == sym)
     return true;
   return false;
 }
@@ -182,6 +184,16 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
   const struct_type_t *cst = (const struct_type_t *)ct;
   size_t cap = cst->field_count;
   size_t nfields = sema_count_siblings(n->fields);
+  /* 先查 fill：`<值, 次数>` 只适用于数组/make 元素位，在 struct 构造里它会
+     被当成"一个匿名字段"计数 → 报出与真实原因无关的字段数不符。 */
+  for (ast_node_t *ff = n->fields; ff; ff = ff->next) {
+    if (ff->kind == AST_FILL) {
+      diag_error(sema->diag, sema_loc(sema, ff),
+                 "construct: fill element '<value, count>' is not allowed "
+                 "in struct constructors (list every field explicitly)");
+      return NULL;
+    }
+  }
   if (nfields != cap) {
     char tn[64];
     sema_type_name(ct, tn, sizeof tn);
@@ -257,10 +269,9 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
     value_t *fv = NULL;
     bool is_nil_field = value->kind == AST_NIL;
     if (!is_nil_field) {
-      if (sema->anon_ct_depth < 16)
-        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      bool ct_pushed = sema_anon_push(sema, ft);
       fv = sema_expr(sema, &slot[i], scope);
-      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+      sema_anon_pop(sema, ct_pushed);
     }
     if (is_nil_field) {
       if (!ft || ft->kind != TYPE_KIND_OPTION) {
@@ -381,10 +392,9 @@ static const type_t *infer_anon_tuple(sema_t *sema, ast_construct_t *n,
     value_t *fv = NULL;
     bool is_nil_field = value->kind == AST_NIL;
     if (!is_nil_field) {
-      if (sema->anon_ct_depth < 16)
-        sema->anon_ct[sema->anon_ct_depth++] = et;
+      bool ct_pushed = sema_anon_push(sema, et);
       fv = sema_expr(sema, &slot[i], scope);
-      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+      sema_anon_pop(sema, ct_pushed);
     }
     if (is_nil_field) {
       if (!et || et->kind != TYPE_KIND_OPTION) {
@@ -429,786 +439,35 @@ static const type_t *infer_anon_tuple(sema_t *sema, ast_construct_t *n,
   return t;
 }
 
-value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
-  if (!node || !*node) return value_make_shadow(sema->vm, sema->vm->type_void);
-  switch ((*node)->kind) {
-    case AST_INT_LIT: {
-      ast_int_lit_t *n = (ast_int_lit_t *)*node;
-      const type_t *t = n->type.len ? type_lookup(sema->vm, n->type)
-                                    : sema->vm->type_i32;
-      if (!t) {
-        diag_error(sema->diag, sema_loc(sema, *node), "unknown type '%.*s'",
-                   (int)n->type.len, n->type.ptr);
-        t = sema->vm->type_i32;
-      }
-      return value_make_shadow(sema->vm, t);
-    }
-    case AST_FLOAT_LIT: {
-      ast_float_lit_t *n = (ast_float_lit_t *)*node;
-      const type_t *t = n->type.len ? type_lookup(sema->vm, n->type)
-                                    : sema->vm->type_f64;
-      if (!t) {
-        diag_error(sema->diag, sema_loc(sema, *node), "unknown type '%.*s'",
-                   (int)n->type.len, n->type.ptr);
-        t = sema->vm->type_f64;
-      }
-      return value_make_shadow(sema->vm, t);
-    }
-    case AST_BOOL_LIT:
-      return value_make_shadow(sema->vm, sema->vm->type_bool);
-    case AST_CHAR_LIT:
-      return value_make_shadow(sema->vm, sema->vm->type_u8);
-    case AST_STRING_LIT:
-      return value_make_shadow(sema->vm, sema->vm->type_str);
-    case AST_IDENT: {
-      /* 变量读取：从 VM scope 链 lookup shadow value（与 sema 作用域树同构，
-         天然遮罩）。未初始化检查走符号表 flow_init（确定性赋值分析，
-         VM 值层不感知 TDZ）。
-         comptime var：定义点已从语句链摘除（不在 VM scope），引用点折叠为
-         字面量 AST 节点（sema_ct_lit，arena 分配），下游（编译器）零感知。 */
-      ast_ident_t *n = (ast_ident_t *)*node;
-      sema_symbol_t *sym = sema_lookup(scope, n->name);
+/* ===========================================================================
+ * 表达式求值的公共基础设施
+ *
+ * 这两个模式在 sema_expr 及其各 case 里重复上百次，抽成助手后逐 kind 处理器
+ * 才可能保持可读（拆分 sema_expr 的前置工作）。
+ * =========================================================================== */
 
-      /* 函数引用（函数值，编译期/运行期二元）：符号种类 SYM_FUNC（用户函数
-         与内建函数 printf 统一——两者在 sema/ctfe/compiler/vm 视角无区别，
-         仅 func_t id 段不同，由 func_new 创建时分配）。
-         遮蔽平等：局部变量遮蔽函数名时 sym 解析到变量符号（SYM_VAR），
-         不走此分支——`var add = 2; var x = add;` 中 add 是变量引用。
-         改写为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION <id> 运行期加载
-         真实函数值），此处返回签名类型 shadow（编译期折叠，供赋值/实参/
-         返回值的签名匹配校验）。comptime func 不进入运行时，作为值引用
-         是非法用法（调用点在 AST_CALL 折叠）。 */
-      if (sym && sym->kind == SEMA_SYM_FUNC && sym->type &&
-          sym->type->kind == TYPE_KIND_FUNC) {
-        /* 局部函数体内引用兄弟/自身函数值：运行时函数体查找链只有参数 +
-           全局（closure_scope 为空、调用时临时接 root_scope），兄弟/自身
-           符号在定义点块作用域，不可见（需闭包）。FUNC 分支改写 AST_FUNC_REF
-           → LOAD_FUNCTION 查 functions_by_id 全局表，会绕过作用域可见性
-           ——在此显式拦截。参数（param_scope 直系，含函数类型参数——可调用，
-           运行时参数可见）与全局函数（global_scope 符号）放行，与变量
-           分支捕获检查同构。 */
-        if (sema->local_func_base && !func_own_symbol(sema, n->name, sym) &&
-            sema_lookup(sema->global_scope, n->name) != sym) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "local function cannot reference sibling or self '%.*s' "
-                     "(add it to the capture list)",
-                     (int)n->name.len, n->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        if (sym->is_comptime) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "comptime function '%.*s' cannot be used as a value",
-                     (int)n->name.len, n->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        /* 闭包捕获 TDZ（编译期）：局部函数的捕获值在定义点 resolve_func_captures
-           才绑定（is_active 激活）。walk 顺序保证定义点前的调用点捕获符号未激活
-           → 编译期报错，不静默到运行期（捕获槽运行期仍为 undefined 占位）。
-           仅对调用点生效（in_call_callee）——值引用（var f = b）放行：f/b
-           浅拷贝共享同一 func_t 实例，运行时块入口已 MAKE_FUNCTION 实例化并
-           绑定名字，定义点前取值拿到的是同实例浅拷贝，捕获槽在定义点后由
-           SET_CLOSURE 填齐，调用时才读取，无 TDZ 悬垂。
-           全局函数 captures 恒空（hoist 基底即最终实例），天然放行。 */
-        sema_func_t *tdz_sf = sema_func_by_id(sema, sym->fid);
-        if (sema->in_call_callee && tdz_sf && tdz_sf->is_local &&
-            tdz_sf->def && tdz_sf->def->kind == AST_FUNC_DEF) {
-          ast_func_def_t *tdz_fn = (ast_func_def_t *)tdz_sf->def;
-          if (func_capture_tdz(tdz_sf->scope, tdz_fn->captures)) {
-            diag_error(sema->diag, sema_loc(sema, *node),
-                       "closure '%.*s' used before its captures are bound (TDZ)",
-                       (int)n->name.len, n->name.ptr);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          }
-        }
-        ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
-                                           (*node)->tok_end);
-        if (ref) {
-          /* fid 由 sema 创建函数对象时分配（符号表字段；内建函数 = 内建 id）。
-             name 指向源标识符 token（compiler 发 PUSH name 沿作用域链查找——
-             局部函数取块入口 MAKE_FUNCTION 绑定的实例（全块同一实例，浅拷贝
-             共享 func_t）；全局/内建取全局绑定基底，与定义点实例化语义对齐）。 */
-          ast_func_ref_t *fr = (ast_func_ref_t *)ref;
-          fr->fid  = sym->fid;
-          fr->name = n->name;
-          ref->next = (*node)->next; /* 保留兄弟链 */
-          *node = ref;
-        }
-        return value_make_shadow(sema->vm, sym->type);
-      }
+/** "错误/未定" 占位值：void shadow（data=NULL，类型 void）。
+ *  表达式求值失败的统一返回值——调用方经 is_poison 识别后短路。 */
+static value_t *val_void(sema_t *sema) {
+  return value_make_shadow(sema->vm, sema->vm->type_void);
+}
 
-      if (sym && !sym->flow_init) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "variable '%.*s' used before initialization",
-                   (int)n->name.len, n->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (sym && sym->moved) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "variable '%.*s' used after move (ownership was "
-                   "transferred)",
-                   (int)n->name.len, n->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (sym && sym->is_comptime && sym->ct_valid) {
-        /* 折叠引用点为字面量（保留兄弟链，供调用点/语句链继续遍历） */
-        ast_node_t *lit = sema_ct_lit(sema, *node, &sym->ct);
-        if (lit) {
-          lit->next = (*node)->next;
-          *node = lit;
-          return value_make_shadow(sema->vm, sym->ct.type);
-        }
-      }
-      /* 捕获检查（无闭包）：局部函数体内引用外层局部符号（外层块/外层函数
-         的变量、参数、类型名）→ 运行时函数体查找链只有参数 + 全局
-         （closure_scope 为空、调用时临时接 root_scope），外层局部不可见。
-         fscope parent = 定义点块作用域（同块局部函数互相可见）——沿链命中的
-         "非 fscope 直系、非 global"符号即外层局部。全局符号（sema_lookup
-         global 命中）、函数名（FUNC 分支已先行返回）、comptime 符号（上方
-         已折叠，不捕获）合法。 */
-      if (sema->local_func_base && sym &&
-          !func_own_symbol(sema, n->name, sym) &&
-          sema_lookup(sema->global_scope, n->name) != sym) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "local function cannot access outer local '%.*s' "
-                   "(add it to the capture list)",
-                   (int)n->name.len, n->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      value_t *v = scope_lookup(sema->vm->current_scope, n->name);
-      if (!v) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "undefined variable '%.*s'", (int)n->name.len, n->name.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      /* 类型即表达式：内建/自定义类型值注册在作用域链（global/root/current），
-         与变量同机制查找。命中 type value 直接返回该真实值（type value 是
-         编译期实体，data 恒为 type_t*——无 shadow 形态，见 sema 注释）。 */
-      if (value_type(v) == sema->vm->type_type)
-        return v;
+/** 求值结果是否不可用（错误 value / void shadow / NULL）。
+ *  三者都表示"这一步没有可用类型信息"，调用方应立刻传播而非继续推断。 */
+static bool is_poison(sema_t *sema, const value_t *v) {
+  if (!v) return true;
+  return value_is_error(sema->vm, v) || value_is_type(v, TYPE_KIND_VOID);
+}
 
-      /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
-         解包由显式 .! assert 承担，见 docs m2-design §12.5） */
-      return value_make_shadow(sema->vm, value_type(v));
-    }
-    case AST_CONST: {
-      /* const 类型修饰（类型即表达式）：操作数必须是类型值，结果仍是
-         类型值。遮蔽/类型检查在此感知（as 右值、M2 类型字面量）。 */
-      ast_const_t *n = (ast_const_t *)*node;
-      value_t *sub = sema_expr(sema, &n->sub, scope);
-      if (value_is_error(sema->vm, sub) || value_is_type(sub, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "'const' requires a type operand");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      /* type value 恒真实（编译期实体）：取 data 里的类型指针 intern 后
-         返回新的 type value（auto-track 当前 scope） */
-      const type_t *sub_t = value_as(sub, const type_t *);
-      const type_t *ct = type_const_intern(sema->vm, sub_t);
-      return type_as_value(sema->vm, ct);
-    }
-    case AST_VOLATILE: {
-      ast_volatile_t *n = (ast_volatile_t *)*node;
-      value_t *sub = sema_expr(sema, &n->sub, scope);
-      if (value_is_error(sema->vm, sub) || value_is_type(sub, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "'volatile' requires a type operand");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      const type_t *sub_t = value_as(sub, const type_t *);
-      const type_t *vt = type_volatile_intern(sema->vm, sub_t);
-      return type_as_value(sema->vm, vt);
-    }
-    case AST_SIZEOF:
-    case AST_ALIGNOF: {
-      /* 编译期运算符（m2-design §8）：操作数 shadow 求值只取类型（不真实
-         执行），结果恒 u64。sizeof = 类型宽度，alignof = 类型对齐。
-         折叠为 AST_INT_LIT(u64) 写回（保留兄弟链）——编译器零感知消费
-         立即数；返回 shadow u64。 */
-      ast_node_t *opnd = (*node)->kind == AST_SIZEOF
-                             ? ((ast_sizeof_t *)*node)->operand
-                             : ((ast_alignof_t *)*node)->operand;
-      value_t *op = sema_expr(sema, &opnd, scope);
-      if (value_is_error(sema->vm, op) || value_is_type(op, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      /* type value（data=type_t*）解引用 data；普通 shadow value 取
-         value_type。注意 value_type(type value) 返回元类型 vm->type_type
-         （size=8），直接读取会得错值——sizeof(u8) 折叠成 8。 */
-      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
-                            ? value_as(op, const type_t *)
-                            : value_type(op);
-      uint64_t n = (*node)->kind == AST_SIZEOF ? (uint64_t)t->size
-                                               : (uint64_t)t->align;
-      ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
-                                        (*node)->tok_end);
-      if (lit) {
-        ((ast_int_lit_t *)lit)->type = sema->vm->type_u64->name;
-        ((ast_int_lit_t *)lit)->value = n;
-        lit->next = (*node)->next;
-        *node = lit;
-      }
-      return value_make_shadow(sema->vm, sema->vm->type_u64);
-    }
-    case AST_TYPEOF: {
-      /* typeof(expr) → type value（m2-design §8）：操作数 shadow 求值只取
-         类型，结果即该类型。折叠为 AST_TYPE_REF（sema_ct_type_ref 登记到
-         types 表，编译器 LOAD_TYPE <id> 零感知）；返回真实 type value
-         （编译期实体，data 恒为 type_t*）。 */
-      ast_typeof_t *n = (ast_typeof_t *)*node;
-      value_t *op = sema_expr(sema, &n->operand, scope);
-      if (value_is_error(sema->vm, op) || value_is_type(op, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      /* 同上：type value 解引用 data，普通值取 value_type */
-      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
-                            ? value_as(op, const type_t *)
-                            : value_type(op);
-      ast_node_t *ref = sema_ct_type_ref(sema, t, *node);
-      if (ref) {
-        ref->next = (*node)->next;
-        *node = ref;
-      }
-      return type_as_value(sema->vm, t);
-    }
-    case AST_UNDEF:
-      /* undefined 只允许作为 var 初始化的"未初始化声明"（shadow_var_def
-         消费）；普通表达式位置引用是非法用法。 */
-      diag_error(sema->diag, sema_loc(sema, *node),
-                 "'undefined' can only be used as a variable initializer");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
-    case AST_NIL:
-      /* nil 不是 value：只允许四种 nil 判定（x==nil 等，窄化）、?T 初始化
-         赋值（a = nil）、构造器字段（.?T{nil}）与 fill 值包（<nil,N>）等
-         特殊位置消费（shadow_binary / 赋值 / 构造器 / fill 分别处理）。
-         普通表达式位置引用是非法用法。 */
-      diag_error(sema->diag, sema_loc(sema, *node),
-                 "'nil' can only be used in nil comparisons, ?T assignment, "
-                 "constructor fields or fills");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
-    case AST_BINARY:
-      return shadow_binary(sema, node, scope);
-    case AST_UNARY: {
-      ast_unary_t *n = (ast_unary_t *)*node;
-      value_t *operand = sema_expr(sema, &n->operand, scope);
-      /* 错误恢复产物静默通过，避免级联二次诊断 */
-      if (value_is_error(sema->vm, operand) ||
-          value_is_type(operand, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      value_t *result = NULL;
-      if (token_is(n->op, "-")) {
-        result = value_neg(sema->vm, operand);
-      } else if (token_is(n->op, "!")) {
-        sema_check_bool(sema, n->operand, operand, "logical not");
-        result = value_lnot(sema->vm, operand);
-      } else if (token_is(n->op, "~")) {
-        result = value_bnot(sema->vm, operand);
-      } else {
-        char ob[16];
-        op_text(n->op, ob, sizeof(ob));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "unsupported unary operator '%s'", ob);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (value_is_error(sema->vm, result)) {
-        char ob[16], tn[64];
-        op_text(n->op, ob, sizeof(ob));
-        op_type_name(operand, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "operator '%s' cannot be applied to %s", ob, tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      return result;
-    }
-    case AST_CALL: {
-      /* 函数调用：统一路径 = exec callee（shadow 求值）→ exec 各实参 →
-         value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
-         数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
-         遮蔽/可见性全部交给作用域机制：callee 是 AST_IDENT 时经
-         sema_expr → AST_IDENT 分支自然解析（局部变量遮蔽函数名 → 变量
-         符号 → 下方 func 类型检查报"不可调用"；兄弟/自身函数 → 该分支
-         闭包检查拦截；未定义 → "undefined variable"）。callee 是函数值
-         表达式（get_fn()()、函数字面量）时递归求值 shadow（可能触发内层
-         comptime 折叠）。
-         唯一保留的符号感知前置：comptime func 调用点折叠（真实调用点
-         CTFE 求值；walking_comptime 时实参是参数 shadow value 无法求值，
-         只构造 callee shadow 做类型检查，折叠留到真实调用点）。 */
-      ast_call_t *call = (ast_call_t *)*node;
-      if (!call->callee) {
-        diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "M1: missing callee");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
+/** 守护：求值结果不可用则返回 void shadow（错误恢复产物静默通过）。 */
+#define EX_GUARD(sema, v)                                                     \
+  do {                                                                        \
+    if (is_poison((sema), (v))) return val_void((sema));                       \
+  } while (0)
 
-      value_t *callee = NULL;
-      sema_symbol_t *callee_sym = NULL;
-      if (call->callee->kind == AST_IDENT) {
-        callee_sym =
-            sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
-        sema_symbol_t *sym = callee_sym;
-        if (sym && sym->is_comptime) {
-          /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
-             整个调用折叠为字面量。函数本身不注册到运行时。 */
-          if (!sema->walking_comptime)
-            return sema_eval_comptime_call(sema, node, scope);
-          /* walking_comptime：只做 shadow 类型检查（callee shadow 走下方
-             统一 value_call 路径，返回 return type 的 shadow） */
-          callee = value_make_shadow(sema->vm, sym->type);
-        }
-      }
-      if (!callee) {
-        /* 一般 callee（函数名 / 函数值表达式）统一 shadow 求值。
-           置 in_call_callee：TDZ 检查仅对调用点生效（值引用放行）。 */
-        sema->in_call_callee = true;
-        callee = sema_expr(sema, &call->callee, scope);
-        sema->in_call_callee = false;
-        if (value_is_error(sema->vm, callee) ||
-            value_is_type(callee, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        const type_t *ctype = value_type(callee);
-        if (!ctype || ctype->kind != TYPE_KIND_FUNC) {
-          char tn[64];
-          op_type_name(callee, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, &call->base),
-                     "cannot call value of type %s", tn);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-
-      size_t argc = sema_count_siblings(call->args);
-      value_t *arg_shadows[argc > 0 ? argc : 1];
-      /* 逐实参求值（匿名构造注入：参数类型已知 → push anon_ct，使实参的
-         .{...} 推断目标类型。签名参数类型从 callee 的 func 类型取——shadow
-         value（data=NULL）仍携带完整签名；可变参数后无类型 → 不注入。 */
-      const type_t *fnt = value_type(callee);
-      ast_node_t **link = &call->args;
-      size_t i = 0;
-      for (; *link; link = &(*link)->next, i++) {
-        const type_t *pt = fnt ? func_type_param(fnt, i) : NULL;
-        bool injected = false;
-        if (pt && sema->anon_ct_depth < 16) {
-          sema->anon_ct[sema->anon_ct_depth++] = pt;
-          injected = true;
-        }
-        arg_shadows[i] = sema_expr(sema, link, scope);
-        if (injected && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
-      }
-      value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
-
-      /* upgrade 内建函数特判（§12.4）：泛型 T 从实参 weak *T 推断，
-         返回类型由占位 ?share *opaque 替换为 ?share *T。
-         callee_sym->fid == 1（upgrade，printf=0）。 */
-      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
-          callee_sym->fid == 1 && argc == 1 && arg_shadows[0]) {
-        const type_t *at = value_type(arg_shadows[0]);
-        if (at && at->kind == TYPE_KIND_PTR_WEAK) {
-          const type_t *base = ptr_type_base(at);
-          if (base) {
-            const type_t *share_t = type_ptr_intern(sema->vm,
-                TYPE_KIND_PTR_SHARE, base);
-            if (share_t) {
-              const type_t *opt_t = type_option_intern(sema->vm, share_t);
-              if (opt_t) {
-                value_dispose(sema->vm, result);
-                result = value_make_shadow(sema->vm, opt_t);
-              }
-            }
-          }
-        }
-      }
-
-      /* len 内建函数特判（m4-design §5/§11.3）：len 注册为 variadic，
-         参数类型不经签名校验——此处校验实参是可长序列（array/slice/str）。
-         len 恒返回 u64（注册签名已正确，无需替换返回类型）。 */
-      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
-          argc == 1 && arg_shadows[0] &&
-          call->callee && call->callee->kind == AST_IDENT) {
-        /* 按 len 函数名匹配（fid 依赖注册顺序，按名更稳健） */
-        ast_ident_t *ci = (ast_ident_t *)call->callee;
-        if (ci && ci->name.len == 3 &&
-            memcmp(ci->name.ptr, "len", 3) == 0) {
-          const type_t *at = value_type(arg_shadows[0]);
-          if (at && at->kind != TYPE_KIND_ARRAY &&
-              at->kind != TYPE_KIND_SLICE_OWN &&
-              at->kind != TYPE_KIND_SLICE_REF &&
-              at->kind != TYPE_KIND_SLICE_FATAL &&
-              at->kind != TYPE_KIND_STR) {
-            char tn[64];
-            sema_type_name(at, tn, sizeof(tn));
-            diag_error(sema->diag, sema_loc(sema, *node),
-                       "len: argument must be array/slice/str, got %s", tn);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          }
-        }
-      }
-
-      if (value_is_error(sema->vm, result)) {
-        error_data_t *ed = (error_data_t *)value_data(result);
-        const char *msg = ed && ed->message ? ed->message
-                                               : "function call failed";
-        diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      return result; /* shadow in → shadow out（return_type shadow） */
-    }
-    case AST_UNWRAP: {
-      /* optional 解包：.!（assert）/ .?（try）。
-         .! 要求操作数是 ?T：none 时运行期 panic（用户范式先判空再解包：
-         if (x != nil) { var v = x.!; ... }）。返回 inner 类型 shadow。
-         .? 仅词法预留（try），语义未实现 → 编译期报错。 */
-      ast_unwrap_t *uw = (ast_unwrap_t *)*node;
-      value_t *operand = sema_expr(sema, &uw->operand, scope);
-      if (value_is_error(sema->vm, operand) ||
-          value_is_type(operand, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-
-      const type_t *ot = value_type(operand);
-      if (!ot || ot->kind != TYPE_KIND_OPTION) {
-        char tn[64], ob[16];
-        size_t len = 0;
-        const char *text =
-            uw->op ? token_get_text(uw->op, &len) : NULL;
-        snprintf(ob, sizeof(ob), ".%.*s", (int)len, text ? text : "?");
-        op_type_name(operand, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "operator '%s' requires an optional operand, got %s", ob,
-                   tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (uw->op && token_is(uw->op, "?")) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "operator '.?' (try) is not implemented yet");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      return value_make_shadow(sema->vm, type_option_inner(ot));
-    }
-    case AST_MEMBER: {
-      /* 字段读取 p.field：object 求值 → 校验 struct/union → 按名查字段
-         （struct_type_find_field / union_type_find_field）→ 返回字段类型
-         shadow。嵌套 p.a.b 递归（object 是 AST_MEMBER 时 sema_expr 返回
-         内层字段类型）。字段不存在 → 报错。union 字段不做静态 tag 断言
-         （sema 不感知运行期 tag——运行期 FIELD_GET 反查 member + tag 校验，
-         不符返回 error value 即 panic）。 */
-      ast_member_t *n = (ast_member_t *)*node;
-      value_t *obj = sema_expr(sema, &n->object, scope);
-      if (value_is_error(sema->vm, obj) ||
-          value_is_type(obj, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      const type_t *ot = value_type(obj);
-      if (!ot) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot access field of value of unknown type");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (ot->kind == TYPE_KIND_UNION) {
-        /* union 字段：字段名 = member 名（tag 名），按名反查 member →
-           返回该 member 的 payload 类型 shadow。运行期 FIELD_GET 按 tag
-           校验，不符返回 error value 即 panic。 */
-        int mi = union_type_find_member(ot, n->field);
-        if (mi < 0) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "union '%.*s' has no field '%.*s'",
-                     (int)ot->name.len, ot->name.ptr,
-                     (int)n->field.len, n->field.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        const union_member_t *m = union_type_member(ot, (size_t)mi);
-        if (m && m->payload_type)
-          return value_make_shadow(sema->vm, m->payload_type);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (ot->kind == TYPE_KIND_CUNION) {
-        /* cunion 字段：字段名 = member 名，按名反查 member → 返回该 member
-           的 type shadow。无 tag 校验（C union 语义，开发者自负安全）——
-           运行期 FIELD_GET 按名反查后直接借用 offset 0。 */
-        int mi = cunion_type_find_member(ot, n->field);
-        if (mi < 0) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "cunion '%.*s' has no field '%.*s'",
-                     (int)ot->name.len, ot->name.ptr,
-                     (int)n->field.len, n->field.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        const cunion_member_t *m = cunion_type_member(ot, (size_t)mi);
-        if (m && m->type)
-          return value_make_shadow(sema->vm, m->type);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (ot->kind != TYPE_KIND_STRUCT) {
-        char tn[64];
-        sema_type_name(ot, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot access field of value of type %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      int idx = struct_type_find_field(ot, n->field);
-      if (idx < 0) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "struct '%.*s' has no field '%.*s'",
-                   (int)ot->name.len, ot->name.ptr,
-                   (int)n->field.len, n->field.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      return value_make_shadow(sema->vm, struct_type_field(ot, (size_t)idx)->type);
-    }
-    case AST_INDEX: {
-      /* 下标 / 泛型索引（GAP 延后落点）：parser 只收集 <expr>[<expr,...>
-         的 object + indices 链，此处首次可区分——base 是数组 → 下标（GET）；
-         base 是类型值 → 泛型实例化语法（M2 未实现，占位诊断）。 */
-      ast_index_t *n = (ast_index_t *)*node;
-      value_t *base = sema_expr(sema, &n->object, scope);
-      if (value_is_error(sema->vm, base) ||
-          value_is_type(base, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-
-      const type_t *bt = value_type(base);
-      if (bt && bt->kind == TYPE_KIND_TYPE) {
-        /* 泛型实例化占位：<type>[<expr,...> 与下标语法重叠，延后到 sema
-           才可区分，M2 泛型未实现前明确占位。 */
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "generic instantiation is not implemented (index on a type value)");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE &&
-                  bt->kind != TYPE_KIND_SLICE_OWN &&
-                  bt->kind != TYPE_KIND_SLICE_REF &&
-                  bt->kind != TYPE_KIND_SLICE_FATAL)) {
-        char tn[64];
-        sema_type_name(bt, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot index value of type %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      /* 下标只消费 1 个索引；a[i,j] 多索引 = 泛型实参语法预留。
-         a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），逐维下降天然处理。 */
-      size_t nidx = sema_count_siblings(n->indices);
-      if (nidx != 1) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "array subscript expects exactly 1 index, got %zu", nidx);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      value_t *idx = sema_expr(sema, &n->indices, scope);
-      if (value_is_error(sema->vm, idx) ||
-          value_is_type(idx, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      if (!value_is_type(idx, TYPE_KIND_INT)) {
-        char tn[64];
-        op_type_name(idx, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, n->indices),
-                   "array index must be an integer, got %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      if (bt->kind == TYPE_KIND_TUPLE) {
-        /* tuple 下标 t[i]：元素匿名 → 按位置访问（运行期 INDEX_GET/INDEX_SET
-           带越界检查）。结果类型取决于 i——i 须编译期常量（字面量直接读，
-           复杂表达式走 ctfe 真实求值，与数组边界一致），越界编译期报错
-           （运行期指令仍兜底 panic）。 */
-        size_t cap = tuple_type_elem_count(bt);
-        uint64_t raw = 0;
-        if (n->indices && n->indices->kind == AST_INT_LIT) {
-          raw = ((ast_int_lit_t *)n->indices)->value;
-        } else {
-          vm_t *vm = sema->vm;
-          bool saved = vm->comptime;
-          vm->comptime = true;
-          ctfe_ctx_t ctx;
-          memset(&ctx, 0, sizeof ctx);
-          ctx.vm = vm;
-          ctx.sema = sema;
-          ctx.budget = 100000;
-          ctx.max_depth = 128;
-          value_t *r = ctfe_eval(&ctx, n->indices);
-          vm->comptime = saved;
-          if (!r || value_is_error(vm, r)) {
-            diag_error(sema->diag, sema_loc(sema, n->indices),
-                       "tuple index must be a compile-time constant");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          }
-          const type_t *rt = value_type(r);
-          if (!rt || rt->kind != TYPE_KIND_INT) {
-            diag_error(sema->diag, sema_loc(sema, n->indices),
-                       "tuple index must be an integer constant");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          }
-          switch (rt->size) {
-            case 1: raw = *(const uint8_t  *)value_data(r); break;
-            case 2: raw = *(const uint16_t *)value_data(r); break;
-            case 4: raw = *(const uint32_t *)value_data(r); break;
-            default: raw = *(const uint64_t *)value_data(r); break;
-          }
-        }
-        if (raw >= cap) {
-          diag_error(sema->diag, sema_loc(sema, n->indices),
-                     "tuple index %llu out of bounds (len=%zu)",
-                     (unsigned long long)raw, cap);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-        const tuple_elem_t *e = tuple_type_elem(bt, (size_t)raw);
-        return value_make_shadow(sema->vm, e ? e->type : sema->vm->type_void);
-      }
-
-      const type_t *et;
-      if (bt->kind == TYPE_KIND_SLICE_OWN || bt->kind == TYPE_KIND_SLICE_REF ||
-          bt->kind == TYPE_KIND_SLICE_FATAL) {
-        et = slice_type_elem(bt);
-      } else {
-        et = array_type_elem(bt);
-      }
-      return value_make_shadow(sema->vm, et ? et : sema->vm->type_void);
-    }
-    case AST_SLICE_TYPE: {
-      /* 切片类型表达式 own/ref/fatal []T（类型即表达式，m4-design §1）：
-         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
-         返回真实 type value。与 AST_ARRAY 同构。 */
-      const type_t *t = sema_resolve_type_slot(sema, node);
-      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      return type_as_value(sema->vm, t);
-    }
-    case AST_SLICE: {
-      /* 切片表达式 s[low:high]（m4-design §4）：适用于数组/切片/str，
-         恒产 ref []T（借用胖指针）。low/high 可省略（NULL = 0/len）。
-         arr[:] 是显式数组转切片的唯一路径（[N]T → ref []T 不自动）。 */
-      ast_slice_t *n = (ast_slice_t *)*node;
-      value_t *base = sema_expr(sema, &n->object, scope);
-      if (value_is_error(sema->vm, base) ||
-          value_is_type(base, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-
-      const type_t *bt = value_type(base);
-      if (!bt) return value_make_shadow(sema->vm, sema->vm->type_void);
-
-      /* 确定元素类型 + 基类合法性 */
-      const type_t *et = NULL;
-      if (bt->kind == TYPE_KIND_ARRAY) {
-        et = array_type_elem(bt);
-      } else if (bt->kind == TYPE_KIND_SLICE_OWN ||
-                 bt->kind == TYPE_KIND_SLICE_REF ||
-                 bt->kind == TYPE_KIND_SLICE_FATAL) {
-        et = slice_type_elem(bt);
-      } else if (bt->kind == TYPE_KIND_STR) {
-        /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
-        et = type_const_intern(sema->vm, sema->vm->type_u8);
-      } else {
-        char tn[64];
-        sema_type_name(bt, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot slice value of type %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      /* 求值 low/high（均可是运行期值，运行期做越界检查） */
-      if (n->low) {
-        value_t *low = sema_expr(sema, &n->low, scope);
-        if (value_is_error(sema->vm, low) ||
-            value_is_type(low, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        if (!value_is_type(low, TYPE_KIND_INT)) {
-          char tn[64];
-          op_type_name(low, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, n->low),
-                     "slice lower bound must be an integer, got %s", tn);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-      if (n->high) {
-        value_t *high = sema_expr(sema, &n->high, scope);
-        if (value_is_error(sema->vm, high) ||
-            value_is_type(high, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        if (!value_is_type(high, TYPE_KIND_INT)) {
-          char tn[64];
-          op_type_name(high, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, n->high),
-                     "slice upper bound must be an integer, got %s", tn);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-
-      /* 恒产 ref []T */
-      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_REF,
-                                                 et ? et : sema->vm->type_void);
-      if (!slice_t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      sema_type_register(sema, slice_t);
-      return value_make_shadow(sema->vm, slice_t);
-    }
-    case AST_ARRAY: {
-      /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
-         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
-         返回真实 type value（data=type_t*，auto-track 当前 scope），供
-         type 定义 / as 右值 / sizeof / 嵌套类型构造消费。 */
-      const type_t *t = sema_resolve_type_slot(sema, node);
-      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      return type_as_value(sema->vm, t);
-    }
-    case AST_TYPE_REF: {
-      /* 具名类型引用（sema 登记的 "__type_N"）：重复求值（折叠重访）时
-         命中——解析回类型，返回真实 type value。 */
-      const type_t *t = resolve_type_expr(sema, *node);
-      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      return type_as_value(sema->vm, t);
-    }
-    case AST_ENUM_REF: {
-      /* M5：:: 成员访问有两种语义——枚举 variant（Color::Red）与
-         模块成员（std::add）。先检查 type_expr 是否是模块别名
-         （AST_IDENT 解析到 SEMA_SYM_MODULE 符号），若是则走模块成员
-         路径；否则走枚举 variant 路径。链式访问 a::b::c 由 parser 产出
-         嵌套 AST_ENUM_REF（lhs 也可以是 AST_ENUM_REF），递归处理。 */
-      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
-
-      /* 模块成员访问检查：type_expr 是 AST_IDENT 且解析到 MODULE 符号 */
-      if (n->type_expr && n->type_expr->kind == AST_IDENT) {
-        ast_ident_t *id = (ast_ident_t *)n->type_expr;
-        sema_symbol_t *sym = sema_lookup(scope, id->name);
-        if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
-          /* 模块成员访问：从 module->exports 查 variant 名 */
-          module_t *mod = sym->module;
-          char buf[256];
-          if (n->variant.len < sizeof(buf)) {
-            memcpy(buf, n->variant.ptr, n->variant.len);
-            buf[n->variant.len] = '\0';
-            value_t *member = (value_t *)strmap_get(mod->exports, buf);
-            if (member) {
-              const type_t *mt = value_type(member);
-              return value_make_shadow(sema->vm, mt);
-            }
-          }
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "module has no exported member '%.*s'",
-                     (int)n->variant.len, n->variant.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-
-      /* 枚举 variant 引用 Color::Red：type_expr 求值为 enum 类型（折叠为
-         AST_TYPE_REF）→ enum_type_find_variant 查 variant → 未找到报错；
-         找到则折叠底层值入节点（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM），
-         返回 enum 类型 shadow（赋值/判等类型检查用）。 */
-      const type_t *t = sema_resolve_type_slot(sema, &n->type_expr);
-      if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      if (t->kind != TYPE_KIND_ENUM) {
-        char tn[64];
-        sema_type_name(t, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "'%s' is not an enum type", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      int idx = enum_type_find_variant(t, n->variant);
-      if (idx < 0) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "enum '%.*s' has no variant '%.*s'",
-                   (int)t->name.len, t->name.ptr,
-                   (int)n->variant.len, n->variant.ptr);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      n->value = enum_type_variant(t, (size_t)idx)->value;
-      return value_make_shadow(sema->vm, t);
-    }
-    case AST_NEW: {
+/* AST_NEW 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
+static value_t *ex_new(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
       /* new 表达式（m3-design §8.1）：new T{...}—— .T{...} 的堆分配形态，
          返回 own *T。字段校验与 AST_CONSTRUCT 同构（完全显式：数量 + 逐
          字段可赋值性）。匿名构造 new {...}：目标类型依上下文推断（与
@@ -1218,16 +477,16 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       const type_t *t;
       if (!n->type) {
         /* 匿名构造：依上下文推断目标类型（anon_ct 栈顶） */
-        if (sema->anon_ct_depth == 0) {
+        if (sema->ex.anon_ct_depth == 0) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "anonymous 'new {...}' requires a type context "
                      "(var declaration, assignment or struct field)");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
-        t = sema->anon_ct[sema->anon_ct_depth - 1];
+        t = sema->ex.anon_ct[sema->ex.anon_ct_depth - 1];
       } else {
         t = sema_resolve_type_slot(sema, &n->type);
-        if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (!t) return val_void(sema);
       }
 
       /* 字段数量与逐字段可赋值性校验（struct/tuple/array/union/cunion 同
@@ -1236,18 +495,30 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       if (t->kind == TYPE_KIND_STRUCT) {
         const struct_type_t *st = (const struct_type_t *)t;
         size_t nfields = sema_count_siblings(n->fields);
+        /* `<值, 次数>` 填充元素只适用于数组/make 元素位：struct 字段无法用
+           "重复次数"表达，必须显式报错。若放过它，fill 会按"一个匿名字段"
+           进入 slot，最终以误导性的字段数不符（如 expected 2 fields, got 1）
+           或编译器的 "unsupported expression node 'fill'" 暴露。 */
+        for (ast_node_t *ff = n->fields; ff; ff = ff->next) {
+          if (ff->kind == AST_FILL) {
+            diag_error(sema->diag, sema_loc(sema, ff),
+                       "construct: fill element '<value, count>' is not allowed "
+                       "in struct constructors (list every field explicitly)");
+            return val_void(sema);
+          }
+        }
         if (nfields != st->field_count) {
           char tn[64];
           sema_type_name(t, tn, sizeof tn);
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: expected %zu fields for %s, got %zu",
                      st->field_count, tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         size_t cap = st->field_count;
         ast_node_t **slot = cap ? (ast_node_t **)arena_calloc(
             sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t)) : NULL;
-        if (cap && !slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (cap && !slot) return val_void(sema);
         size_t anon = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
           if (f->kind == AST_CONSTRUCT_FIELD) {
@@ -1258,7 +529,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                          "struct '%.*s' has no field '%.*s'",
                          (int)t->name.len, t->name.ptr,
                          (int)cf->name.len, cf->name.ptr);
-              return value_make_shadow(sema->vm, sema->vm->type_void);
+              return val_void(sema);
             }
             slot[fi] = cf->value;
           } else {
@@ -1268,7 +539,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
               sema_type_name(t, tn, sizeof tn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "new: too many fields for %s", tn);
-              return value_make_shadow(sema->vm, sema->vm->type_void);
+              return val_void(sema);
             }
             slot[anon] = f;
             anon++;
@@ -1281,7 +552,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, *node),
                        "new: missing value for field '%.*s' of %s",
                        (int)st->fields[i].name.len, st->fields[i].name.ptr, tn);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
         }
         for (size_t i = 0; i < cap; i++) {
@@ -1290,10 +561,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
-            if (sema->anon_ct_depth < 16)
-              sema->anon_ct[sema->anon_ct_depth++] = ft;
+            bool ct_pushed = sema_anon_push(sema, ft);
             fv = sema_expr(sema, &slot[i], scope);
-            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+            sema_anon_pop(sema, ct_pushed);
           }
           if (is_nil_field) {
             if (!ft || ft->kind != TYPE_KIND_OPTION) {
@@ -1347,14 +617,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: expected %zu elements for %s, got %zu",
                      tt->elem_count, tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t **slot = NULL;
         if (tt->elem_count > 0) {
           slot = (ast_node_t **)arena_calloc(
               sema->arena, tt->elem_count, sizeof(ast_node_t *),
               ALIGNOF(max_align_t));
-          if (!slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+          if (!slot) return val_void(sema);
         }
         size_t anon = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
@@ -1362,12 +632,12 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, f),
                        "new: named field is not allowed for tuple elements "
                        "(tuple elements are anonymous, use positional values)");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           if (f->kind == AST_FILL) {
             diag_error(sema->diag, sema_loc(sema, f),
                        "new: fill is not supported for tuple elements");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           slot[anon++] = f;
         }
@@ -1377,10 +647,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
-            if (sema->anon_ct_depth < 16)
-              sema->anon_ct[sema->anon_ct_depth++] = et;
+            bool ct_pushed = sema_anon_push(sema, et);
             fv = sema_expr(sema, &slot[i], scope);
-            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+            sema_anon_pop(sema, ct_pushed);
           }
           if (is_nil_field) {
             if (!et || et->kind != TYPE_KIND_OPTION) {
@@ -1416,7 +685,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           if (f->kind == AST_FILL) {
             size_t cnt;
             if (!sema_eval_array_bound(sema, &((ast_fill_t *)f)->count, &cnt))
-              return value_make_shadow(sema->vm, sema->vm->type_void);
+              return val_void(sema);
             total += cnt;
           } else {
             total += 1;
@@ -1428,7 +697,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: expected %zu elements for %s, got %zu", len, tn,
                      total);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         size_t idx = 0;
         for (ast_node_t **link = &n->fields; *link; link = &(*link)->next) {
@@ -1478,11 +747,17 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: optional constructor expects exactly 1 field, "
                      "got %zu", nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t *f = n->fields;
         if (f && f->kind != AST_NIL) {
+          bool was_last = (n->fields_last == f);
           value_t *fv = sema_expr(sema, &f, scope);
+          /* 折叠写回（见 AST_SIZEOF 同款说明）：传的是局部变量，须回写；
+             若被改写的是链尾，同时修正 fields_last（否则后续追加会挂到
+             已脱链的旧节点上）。 */
+          n->fields = f;
+          if (was_last) n->fields_last = f;
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
@@ -1506,14 +781,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: %s constructor expects exactly 1 field, got %zu",
                      tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t *f = n->fields;
         if (f->kind != AST_CONSTRUCT_FIELD) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "new: %s field must be named (use .Value{.i = v} form)",
                      t->kind == TYPE_KIND_UNION ? "union" : "cunion");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_construct_field_t *cf = (ast_construct_field_t *)f;
         const type_t *mt = NULL;
@@ -1525,7 +800,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, f),
                        "union %s has no member '%.*s'",
                        tn, (int)cf->name.len, cf->name.ptr);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           const union_member_t *m = union_type_member(t, (size_t)mi);
           if (m && m->payload_type)
@@ -1538,25 +813,24 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, f),
                        "cunion %s has no member '%.*s'",
                        tn, (int)cf->name.len, cf->name.ptr);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
           if (m && m->type)
             mt = m->type;
         }
-        if (!mt) return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (!mt) return val_void(sema);
         ast_node_t *value = cf->value;
         value_t *fv = NULL;
         bool is_nil_field = value->kind == AST_NIL;
         if (!is_nil_field) {
-          if (sema->anon_ct_depth < 16)
-            sema->anon_ct[sema->anon_ct_depth++] = mt;
+          bool ct_pushed = sema_anon_push(sema, mt);
           fv = sema_expr(sema, &value, scope);
-          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          cf->value = value; /* 折叠写回（见 AST_SIZEOF 同款说明） */
+          sema_anon_pop(sema, ct_pushed);
         }
-        if (value_is_error(sema->vm, fv) ||
-            value_is_type(fv, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_poison(sema, fv))
+          return val_void(sema);
         if (is_nil_field) {
           if (mt->kind != TYPE_KIND_OPTION) {
             char tn[64];
@@ -1588,20 +862,22 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "new: scalar constructor expects exactly 1 field for %s, "
                      "got %zu", tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t *f = n->fields;
         value_t *fv = NULL;
         bool is_nil_field = f->kind == AST_NIL;
         if (!is_nil_field) {
-          if (sema->anon_ct_depth < 16)
-            sema->anon_ct[sema->anon_ct_depth++] = t;
+          bool was_last = (n->fields_last == f);
+          bool ct_pushed = sema_anon_push(sema, t);
           fv = sema_expr(sema, &f, scope);
-          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          /* 折叠写回 + fields_last 修正（见 AST_SIZEOF 同款说明） */
+          n->fields = f;
+          if (was_last) n->fields_last = f;
+          sema_anon_pop(sema, ct_pushed);
         }
-        if (value_is_error(sema->vm, fv) ||
-            value_is_type(fv, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_poison(sema, fv))
+          return val_void(sema);
         if (is_nil_field) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "new: cannot initialize scalar with nil");
@@ -1618,7 +894,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                        "new: cannot copy %s into own pointer target (use "
                        "move() or clone())",
                        fn);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           value_t *dst = value_make_shadow(sema->vm, t);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
@@ -1636,216 +912,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          由 var 定义/参数/return 显式接管为 own（value_assign → implicit_cast
          fatal→own 转移）。运行期 NEW 指令按 fatal 类型压栈。 */
       const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, t);
-      if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);
-    }
-    case AST_MAKE: {
-      /* make 编译期宏函数 make(T, N, init...) → fatal []T（m4-design §2）。
-         T 是元素类型，N 是长度（可运行期值），init... 是初始值列表（支持
-         <v,M> fill 值包，同数组构造）。clux 无默认零值，init 必须覆盖
-         全部元素。返回 fatal []T（将亡值，须被 own 接管）。
-         sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
-      ast_make_t *n = (ast_make_t *)*node;
+}
 
-      /* 解析元素类型 T */
-      const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
-      if (!et) return value_make_shadow(sema->vm, sema->vm->type_void);
-
-      /* 求值长度 N（shadow 求值，运行期可变） */
-      value_t *lenv = sema_expr(sema, &n->length, scope);
-      if (value_is_error(sema->vm, lenv) ||
-          value_is_type(lenv, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      if (!value_is_type(lenv, TYPE_KIND_INT)) {
-        char tn[64];
-        op_type_name(lenv, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, n->length),
-                   "make: length must be an integer, got %s", tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-
-      /* 校验初始值列表：计算元素总数（含 fill 展开），逐元素类型检查 */
-      size_t total = 0;
-      for (ast_node_t *it = n->inits; it; it = it->next) {
-        if (it->kind == AST_FILL) {
-          size_t cnt;
-          if (!sema_eval_array_bound(sema, &((ast_fill_t *)it)->count, &cnt))
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          /* fill 的值部分也要类型检查 */
-          value_t *fv = sema_expr(sema, &((ast_fill_t *)it)->value, scope);
-          if (value_is_error(sema->vm, fv) ||
-              value_is_type(fv, TYPE_KIND_VOID))
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          value_t *dst = value_make_shadow(sema->vm, et);
-          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
-            char tn[64], fn[64];
-            sema_type_name(et, tn, sizeof(tn));
-            sema_type_name(value_type(fv), fn, sizeof(fn));
-            diag_error(sema->diag, sema_loc(sema, ((ast_fill_t *)it)->value),
-                       "make: cannot initialize %s element with %s", tn, fn);
-          }
-          total += cnt;
-        } else {
-          value_t *fv = sema_expr(sema, &it, scope);
-          if (value_is_error(sema->vm, fv) ||
-              value_is_type(fv, TYPE_KIND_VOID))
-            return value_make_shadow(sema->vm, sema->vm->type_void);
-          value_t *dst = value_make_shadow(sema->vm, et);
-          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
-            char tn[64], fn[64];
-            sema_type_name(et, tn, sizeof(tn));
-            sema_type_name(value_type(fv), fn, sizeof(fn));
-            diag_error(sema->diag, sema_loc(sema, it),
-                       "make: cannot initialize %s element with %s", tn, fn);
-          }
-          total += 1;
-        }
-      }
-
-      /* clux 无默认零值——init 必须覆盖全部元素（N 可运行期值，编译期
-         只校验 init 数量 > 0；N 运行期校验 total == N 由 MAKE 指令兜底）。
-         若 N 是编译期常量，编译期即校验 total == N。
-         例外：N == 0（零长度切片）允许无初始值。 */
-      if (n->inits == NULL) {
-        bool zero_len = false;
-        if (n->length && n->length->kind == AST_INT_LIT &&
-            ((ast_int_lit_t *)n->length)->value == 0)
-          zero_len = true;
-        if (!zero_len) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "make: initial values are required (clux has no default zero)");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-
-      /* 若 N 是编译期常量，校验 total == N */
-      if (n->length->kind == AST_INT_LIT) {
-        uint64_t nval = ((ast_int_lit_t *)n->length)->value;
-        if ((uint64_t)total != nval) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "make: expected %llu elements, got %zu",
-                     (unsigned long long)nval, total);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
-        }
-      }
-
-      /* 返回 fatal []T shadow——make 产新堆块，与 new 统一 */
-      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL,
-                                                 et);
-      if (!slice_t) return value_make_shadow(sema->vm, sema->vm->type_void);
-      sema_type_register(sema, slice_t);
-      return value_make_shadow(sema->vm, slice_t);
-    }
-    case AST_DEREF: {
-      /* 后置解引用取值 r.*（m3-design §8.2）：由指针得值。操作数必须是
-         指针类型（own/ref/fatal）→ 返回被指向类型 T 的 shadow（运行期
-         PTR_GET 指令取 T 值副本）。 */
-      ast_deref_t *n = (ast_deref_t *)*node;
-      value_t *operand = sema_expr(sema, &n->operand, scope);
-      if (value_is_error(sema->vm, operand) ||
-          value_is_type(operand, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      const type_t *ot = value_type(operand);
-      const type_t *base = ptr_type_base(ot);
-      if (!base) {
-        char tn[64];
-        op_type_name(operand, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot dereference a value of type %s (expected a pointer)",
-                   tn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      return value_make_shadow(sema->vm, base);
-    }
-    case AST_ADDR: {
-      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
-         shadow——x.& 指向栈上值（或他人堆块）是借用，ref 总借用（type kind
-         区分，运行期零标志 §13.2），销毁 no-op。
-         返回 ref（而非 own）与值层语义一致（Step B 借用存活检查的基座）。 */
-      ast_addr_t *n = (ast_addr_t *)*node;
-      value_t *operand = sema_expr(sema, &n->operand, scope);
-      if (value_is_error(sema->vm, operand) ||
-          value_is_type(operand, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      const type_t *t = value_type(operand);
-      if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot take address of value of unknown type");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      }
-      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, t);
-      if (!pt) return value_make_shadow(sema->vm, sema->vm->type_void);
-      sema_type_register(sema, pt);
-      return value_make_shadow(sema->vm, pt);
-    }
-    case AST_MOVE: {
-      /* 所有权原语 move(x) / clone(x)（m3-design §7）：操作数求值 → 返回
-         操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
-         clone 深拷贝。指针操作数（own/ref/fatal）返回 fatal 所有权修饰类型
-         （将亡值，§3.3——运行期 MOVE/CLONE 指令产物即 fatal 类型）；
-         非指针原样返回操作数类型。 */
-      ast_move_t *n = (ast_move_t *)*node;
-      value_t *operand = sema_expr(sema, &n->operand, scope);
-      if (value_is_error(sema->vm, operand) ||
-          value_is_type(operand, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
-      const type_t *ot = value_type(operand);
-      const type_t *base = ptr_type_base(ot);
-      bool is_slice = (ot->kind == TYPE_KIND_SLICE_OWN ||
-                       ot->kind == TYPE_KIND_SLICE_REF ||
-                       ot->kind == TYPE_KIND_SLICE_FATAL);
-      if (base || is_slice) {
-        /* 指针/切片操作数：产物为 fatal *T / fatal []T
-           （MOVE/CLONE 指令已按此类型压栈） */
-        const type_t *fatal;
-        if (is_slice) {
-          const type_t *elem = slice_type_elem(ot);
-          fatal = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL, elem);
-        } else {
-          fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
-        }
-        if (!fatal) return value_make_shadow(sema->vm, sema->vm->type_void);
-        sema_type_register(sema, fatal);
-        /* R2（move 后源 TDZ，m3-design §7）：move(own *T) 转移所有权——
-           源变量标记 moved，后续读取报 "used after move"。clone 深拷贝，
-           源不受影响。ref 是值拷贝（§3.2 可 copy），move(ref) 平凡转移。
-           R3（§7 有 ref 存活禁止 move）：move 源有活跃借用（borrow_count>0）
-           → 借用会悬空（借用指针随源销毁失效）→ 编译错误。clone 深拷贝
-           （新堆块）不触发（§7"ref 不影响 clone"）。 */
-        if (!n->op || !token_is(n->op, "clone")) {
-          if (n->operand->kind == AST_IDENT) {
-            sema_symbol_t *src =
-                sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
-            if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                (src->type->kind == TYPE_KIND_PTR_OWN ||
-                 src->type->kind == TYPE_KIND_SLICE_OWN)) {
-              if (src->borrow_count > 0) {
-                diag_error(sema->diag, sema_loc(sema, *node),
-                           "cannot move '%.*s': %d live borrow(s) still "
-                           "reference it (borrows must end before move)",
-                           (int)n->operand->kind == AST_IDENT
-                               ? ((ast_ident_t *)n->operand)->name.len
-                               : 0,
-                           ((ast_ident_t *)n->operand)->name.ptr,
-                           src->borrow_count);
-              } else {
-                src->moved = true;
-              }
-            } else if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                       (src->type->kind == TYPE_KIND_PTR_FATAL ||
-                        src->type->kind == TYPE_KIND_SLICE_FATAL)) {
-              /* R1（fatal 参数消费，§4）：move(fatal 参数) 接管所有权——
-                 标记已消费（函数结束未消费的 fatal 参数报编译错误）。 */
-              src->moved = true;
-            }
-          }
-        }
-        return value_make_shadow(sema->vm, fatal);
-      }
-      return operand; /* shadow，类型 = 操作数类型（非指针/切片） */
-    }
-    case AST_CONSTRUCT: {
+/* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
+static value_t *ex_construct(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
          fields 数量与元素类型（value_assign 单一校验点），返回该类型
          的 shadow value（运行期由 CONSTRUCT 字节码完成值构造）。
@@ -1859,30 +933,30 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            intern 去重为同一实例（天然零转换），否则结构兼容经
            value_implicit_cast 转换。optional 字段显式 `.?T{nil}` 构造
            （用户确认：nil 裸用不推断，须显式类型）。无上下文 → 报错。 */
-        if (sema->anon_ct_depth == 0) {
+        if (sema->ex.anon_ct_depth == 0) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "anonymous construct '.{...}' requires a type context "
                      "(var declaration, assignment or struct field)");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
-        const type_t *ct = sema->anon_ct[sema->anon_ct_depth - 1];
+        const type_t *ct = sema->ex.anon_ct[sema->ex.anon_ct_depth - 1];
         if (ct->kind == TYPE_KIND_STRUCT) {
           /* struct 目标：字段已在 infer_anon_struct 求值+校验+重排完毕，
              直接返回（不落入下方 struct 构造分支，避免二次求值重复诊断）。 */
           t = infer_anon_struct(sema, n, scope, ct);
-          if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+          if (!t) return val_void(sema);
         } else if (ct->kind == TYPE_KIND_TUPLE) {
           /* tuple 目标：元素已在 infer_anon_tuple 求值+校验+重排完毕，
              直接返回（不落入下方 tuple 构造分支，避免二次求值重复诊断）。 */
           t = infer_anon_tuple(sema, n, scope, ct);
-          if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+          if (!t) return val_void(sema);
         } else if (ct->kind == TYPE_KIND_OPTION) {
           /* ?T 目标：按具名构造路径（.?T{...}）校验，返回 void shadow
              阻止落入下方 struct 分支（字段不是 struct 字段形态）。 */
           diag_error(sema->diag, sema_loc(sema, *node),
                      "anonymous construct '.{{...}}' with optional target type "
                      "requires an explicit constructor (use .?T{...})");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         } else {
           /* 其余目标类型暂不支持匿名构造 */
           char cn[64];
@@ -1891,7 +965,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      "anonymous construct '.{{...}}' requires a struct, tuple "
                      "or optional target type, got %s",
                      cn);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t *ref =
             ast_type_ref_new(sema->arena, n->base.tok_begin, n->base.tok_end);
@@ -1900,9 +974,17 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           ((ast_type_ref_t *)ref)->name = st ? st->name : t->name;
           n->type = ref;
         }
+
+        /* 匿名构造到此已完整处理：infer_anon_struct / infer_anon_tuple 内部
+           已逐字段求值 + 可赋值性校验 + 链重排 + sema_type_register。必须
+           **就此返回**——落下去会进入下方具名构造分支，对同一批字段表达式
+           **再求值一遍**，对含 move() 的字段会留下假的 "used after move"
+           （实测：`var c: Cell = .{ .v = (move(p)).* };` 被误拒，
+           而同样代码写具名构造 `.Cell{...}` 正常）。 */
+        return value_make_shadow(sema->vm, t);
       } else {
         t = sema_resolve_type_slot(sema, &n->type);
-        if (!t) return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (!t) return val_void(sema);
       }
 
       /* ?T 构造器（二值单槽位，docs m2-design §12.2）：字段数强制 == 1，
@@ -1915,11 +997,17 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "optional constructor expects exactly 1 field, got %zu",
                      nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_node_t *f = n->fields;
         if (f && f->kind != AST_NIL) {
+          bool was_last = (n->fields_last == f);
           value_t *fv = sema_expr(sema, &f, scope);
+          /* 折叠写回（见 AST_SIZEOF 同款说明）：传的是局部变量，须回写；
+             若被改写的是链尾，同时修正 fields_last（否则后续追加会挂到
+             已脱链的旧节点上）。 */
+          n->fields = f;
+          if (was_last) n->fields_last = f;
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
@@ -1952,20 +1040,32 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            （或 type_void 占位），此时 t==t0，字段校验结果与 infer 一致。 */
         const struct_type_t *st = (const struct_type_t *)t;
         size_t nfields = sema_count_siblings(n->fields);
+        /* `<值, 次数>` 填充元素只适用于数组/make 元素位：struct 字段无法用
+           "重复次数"表达，必须显式报错。若放过它，fill 会按"一个匿名字段"
+           进入 slot，最终以误导性的字段数不符（如 expected 2 fields, got 1）
+           或编译器的 "unsupported expression node 'fill'" 暴露。 */
+        for (ast_node_t *ff = n->fields; ff; ff = ff->next) {
+          if (ff->kind == AST_FILL) {
+            diag_error(sema->diag, sema_loc(sema, ff),
+                       "construct: fill element '<value, count>' is not allowed "
+                       "in struct constructors (list every field explicitly)");
+            return val_void(sema);
+          }
+        }
         if (nfields != st->field_count) {
           char tn[64];
           sema_type_name(t, tn, sizeof tn);
           diag_error(sema->diag, sema_loc(sema, *node),
                      "construct: expected %zu fields for %s, got %zu",
                      st->field_count, tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         /* 第一遍：按类型表序收集字段值节点（具名按名定位、匿名按序顺延） */
         size_t cap = st->field_count;
         ast_node_t **slot = cap ? (ast_node_t **)arena_calloc(
             sema->arena, cap, sizeof(ast_node_t *), ALIGNOF(max_align_t)) : NULL;
-        if (cap && !slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (cap && !slot) return val_void(sema);
         size_t anon = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
           if (f->kind == AST_CONSTRUCT_FIELD) {
@@ -1976,7 +1076,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                          "struct '%.*s' has no field '%.*s'",
                          (int)t->name.len, t->name.ptr,
                          (int)cf->name.len, cf->name.ptr);
-              return value_make_shadow(sema->vm, sema->vm->type_void);
+              return val_void(sema);
             }
             slot[fi] = cf->value;
           } else {
@@ -1986,7 +1086,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
               sema_type_name(t, tn, sizeof tn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "construct: too many fields for %s", tn);
-              return value_make_shadow(sema->vm, sema->vm->type_void);
+              return val_void(sema);
             }
             slot[anon] = f;
             anon++;
@@ -1999,7 +1099,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, *node),
                        "construct: missing value for field '%.*s' of %s",
                        (int)st->fields[i].name.len, st->fields[i].name.ptr, tn);
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
         }
 
@@ -2010,10 +1110,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
-            if (sema->anon_ct_depth < 16)
-              sema->anon_ct[sema->anon_ct_depth++] = ft;
+            bool ct_pushed = sema_anon_push(sema, ft);
             fv = sema_expr(sema, &slot[i], scope);
-            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+            sema_anon_pop(sema, ct_pushed);
           }
           if (is_nil_field) {
             if (!ft || ft->kind != TYPE_KIND_OPTION) {
@@ -2068,7 +1167,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "construct: expected %zu elements for %s, got %zu",
                      tt->elem_count, tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         /* 第一遍：元组元素匿名——字段链按序直取（不允许具名/值包字段） */
@@ -2077,7 +1176,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           slot = (ast_node_t **)arena_calloc(
               sema->arena, tt->elem_count, sizeof(ast_node_t *),
               ALIGNOF(max_align_t));
-          if (!slot) return value_make_shadow(sema->vm, sema->vm->type_void);
+          if (!slot) return val_void(sema);
         }
         size_t anon = 0;
         for (ast_node_t *f = n->fields; f; f = f->next) {
@@ -2086,12 +1185,12 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                        "construct: named field is not allowed for tuple "
                        "elements (tuple elements are anonymous, use "
                        "positional values)");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           if (f->kind == AST_FILL) {
             diag_error(sema->diag, sema_loc(sema, f),
                        "construct: fill is not supported for tuple elements");
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           }
           slot[anon++] = f;
         }
@@ -2103,10 +1202,9 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
-            if (sema->anon_ct_depth < 16)
-              sema->anon_ct[sema->anon_ct_depth++] = et;
+            bool ct_pushed = sema_anon_push(sema, et);
             fv = sema_expr(sema, &slot[i], scope);
-            if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+            sema_anon_pop(sema, ct_pushed);
           }
           if (is_nil_field) {
             if (!et || et->kind != TYPE_KIND_OPTION) {
@@ -2154,20 +1252,20 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      "construct: union constructor expects exactly 1 field "
                      "for %s, got %zu",
                      tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         ast_node_t *f = n->fields;
         if (f->kind == AST_FILL) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "construct: fill is not supported for union field");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         if (f->kind != AST_CONSTRUCT_FIELD) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "construct: union field must be named (use .Value{.i = v} "
                      "form)");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_construct_field_t *cf = (ast_construct_field_t *)f;
 
@@ -2179,14 +1277,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "union %s has no member '%.*s'",
                      tn, (int)cf->name.len, cf->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         const union_member_t *m = union_type_member(t, (size_t)mi);
         if (!m || !m->payload_type) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "union member '%.*s' has no payload type",
                      (int)cf->name.len, cf->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         /* 求值 member payload 值（注入 anon_ct：匿名构造按 member 类型推断） */
@@ -2194,14 +1292,13 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         value_t *fv = NULL;
         bool is_nil_field = value->kind == AST_NIL;
         if (!is_nil_field) {
-          if (sema->anon_ct_depth < 16)
-            sema->anon_ct[sema->anon_ct_depth++] = m->payload_type;
+          bool ct_pushed = sema_anon_push(sema, m->payload_type);
           fv = sema_expr(sema, &value, scope);
-          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          cf->value = value; /* 折叠写回（见 AST_SIZEOF 同款说明） */
+          sema_anon_pop(sema, ct_pushed);
         }
-        if (value_is_error(sema->vm, fv) ||
-            value_is_type(fv, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_poison(sema, fv))
+          return val_void(sema);
         if (is_nil_field) {
           if (m->payload_type->kind != TYPE_KIND_OPTION) {
             char tn[64];
@@ -2247,20 +1344,20 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      "construct: cunion constructor expects exactly 1 field "
                      "for %s, got %zu",
                      tn, nfields);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         ast_node_t *f = n->fields;
         if (f->kind == AST_FILL) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "construct: fill is not supported for cunion field");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         if (f->kind != AST_CONSTRUCT_FIELD) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "construct: cunion field must be named (use .C{.i = v} "
                      "form)");
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         ast_construct_field_t *cf = (ast_construct_field_t *)f;
 
@@ -2272,14 +1369,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "cunion %s has no member '%.*s'",
                      tn, (int)cf->name.len, cf->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
         const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
         if (!m || !m->type) {
           diag_error(sema->diag, sema_loc(sema, f),
                      "cunion member '%.*s' has no type",
                      (int)cf->name.len, cf->name.ptr);
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+          return val_void(sema);
         }
 
         /* 求值 member 值（注入 anon_ct：匿名构造按 member 类型推断） */
@@ -2287,14 +1384,13 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         value_t *fv = NULL;
         bool is_nil_field = value->kind == AST_NIL;
         if (!is_nil_field) {
-          if (sema->anon_ct_depth < 16)
-            sema->anon_ct[sema->anon_ct_depth++] = m->type;
+          bool ct_pushed = sema_anon_push(sema, m->type);
           fv = sema_expr(sema, &value, scope);
-          if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+          cf->value = value; /* 折叠写回（见 AST_SIZEOF 同款说明） */
+          sema_anon_pop(sema, ct_pushed);
         }
-        if (value_is_error(sema->vm, fv) ||
-            value_is_type(fv, TYPE_KIND_VOID))
-          return value_make_shadow(sema->vm, sema->vm->type_void);
+        if (is_poison(sema, fv))
+          return val_void(sema);
         if (is_nil_field) {
           if (m->type->kind != TYPE_KIND_OPTION) {
             char tn[64];
@@ -2328,7 +1424,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "construct: unsupported type (only array, optional, struct "
                    "and tuple implemented)");
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       }
 
       /* 数组构造（完全显式，docs m2-design §12.4）：总元素数 =
@@ -2344,7 +1440,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         if (f->kind == AST_FILL) {
           size_t cnt;
           if (!sema_eval_array_bound(sema, &((ast_fill_t *)f)->count, &cnt))
-            return value_make_shadow(sema->vm, sema->vm->type_void);
+            return val_void(sema);
           total += cnt;
         } else {
           total += 1;
@@ -2356,7 +1452,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "construct: expected %zu elements for %s, got %zu", len, tn,
                    total);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       }
 
       /* 第二遍：逐字段求值 + 元素类型校验（经链上指针传递，使 comptime
@@ -2408,18 +1504,1232 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         idx += 1;
       }
       return value_make_shadow(sema->vm, t);
-    }
-    case AST_FUNC_DEF: {
+}
+
+/* AST_IDENT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_ident(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 变量读取：从 VM scope 链 lookup shadow value（与 sema 作用域树同构，
+         天然遮罩）。未初始化检查走符号表 flow_init（确定性赋值分析，
+         VM 值层不感知 TDZ）。
+         comptime var：定义点已从语句链摘除（不在 VM scope），引用点折叠为
+         字面量 AST 节点（sema_ct_lit，arena 分配），下游（编译器）零感知。 */
+      ast_ident_t *n = (ast_ident_t *)*node;
+      sema_symbol_t *sym = sema_lookup(scope, n->name);
+
+      /* 函数引用（函数值，编译期/运行期二元）：符号种类 SYM_FUNC（用户函数
+         与内建函数 printf 统一——两者在 sema/ctfe/compiler/vm 视角无区别，
+         仅 func_t id 段不同，由 func_new 创建时分配）。
+         遮蔽平等：局部变量遮蔽函数名时 sym 解析到变量符号（SYM_VAR），
+         不走此分支——`var add = 2; var x = add;` 中 add 是变量引用。
+         改写为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION <id> 运行期加载
+         真实函数值），此处返回签名类型 shadow（编译期折叠，供赋值/实参/
+         返回值的签名匹配校验）。comptime func 不进入运行时，作为值引用
+         是非法用法（调用点在 AST_CALL 折叠）。 */
+      if (sym && sym->kind == SEMA_SYM_FUNC && sym->type &&
+          sym->type->kind == TYPE_KIND_FUNC) {
+        /* 局部函数体内引用兄弟/自身函数值：运行时函数体查找链只有参数 +
+           全局（closure_scope 为空、调用时临时接 root_scope），兄弟/自身
+           符号在定义点块作用域，不可见（需闭包）。FUNC 分支改写 AST_FUNC_REF
+           → LOAD_FUNCTION 查 functions_by_id 全局表，会绕过作用域可见性
+           ——在此显式拦截。参数（param_scope 直系，含函数类型参数——可调用，
+           运行时参数可见）与全局函数（global_scope 符号）放行，与变量
+           分支捕获检查同构。 */
+        if (sema->fn.local_func_base && !func_own_symbol(sema, n->name, sym) &&
+            sema_lookup(sema->global_scope, n->name) != sym) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "local function cannot reference sibling or self '%.*s' "
+                     "(add it to the capture list)",
+                     (int)n->name.len, n->name.ptr);
+          return val_void(sema);
+        }
+        if (sym->is_comptime) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "comptime function '%.*s' cannot be used as a value",
+                     (int)n->name.len, n->name.ptr);
+          return val_void(sema);
+        }
+        /* 闭包捕获 TDZ（编译期）：局部函数的捕获值在定义点 resolve_func_captures
+           才绑定（is_active 激活）。walk 顺序保证定义点前的调用点捕获符号未激活
+           → 编译期报错，不静默到运行期（捕获槽运行期仍为 undefined 占位）。
+           仅对调用点生效（in_call_callee）——值引用（var f = b）放行：f/b
+           浅拷贝共享同一 func_t 实例，运行时块入口已 MAKE_FUNCTION 实例化并
+           绑定名字，定义点前取值拿到的是同实例浅拷贝，捕获槽在定义点后由
+           SET_CLOSURE 填齐，调用时才读取，无 TDZ 悬垂。
+           全局函数 captures 恒空（hoist 基底即最终实例），天然放行。 */
+        sema_func_t *tdz_sf = sema_func_by_id(sema, sym->fid);
+        if (sema->fn.in_call_callee && tdz_sf && tdz_sf->is_local &&
+            tdz_sf->def && tdz_sf->def->kind == AST_FUNC_DEF) {
+          ast_func_def_t *tdz_fn = (ast_func_def_t *)tdz_sf->def;
+          if (func_capture_tdz(tdz_sf->scope, tdz_fn->captures)) {
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "closure '%.*s' used before its captures are bound (TDZ)",
+                       (int)n->name.len, n->name.ptr);
+            return val_void(sema);
+          }
+        }
+        ast_node_t *ref = ast_func_ref_new(sema->arena, (*node)->tok_begin,
+                                           (*node)->tok_end);
+        if (ref) {
+          /* fid 由 sema 创建函数对象时分配（符号表字段；内建函数 = 内建 id）。
+             name 指向源标识符 token（compiler 发 PUSH name 沿作用域链查找——
+             局部函数取块入口 MAKE_FUNCTION 绑定的实例（全块同一实例，浅拷贝
+             共享 func_t）；全局/内建取全局绑定基底，与定义点实例化语义对齐）。 */
+          ast_func_ref_t *fr = (ast_func_ref_t *)ref;
+          fr->fid  = sym->fid;
+          fr->name = n->name;
+          ref->next = (*node)->next; /* 保留兄弟链 */
+          *node = ref;
+        }
+        return value_make_shadow(sema->vm, sym->type);
+      }
+
+      if (sym && !sym->flow_init) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "variable '%.*s' used before initialization",
+                   (int)n->name.len, n->name.ptr);
+        return val_void(sema);
+      }
+      if (sym && sym->moved) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "variable '%.*s' used after move (ownership was "
+                   "transferred)",
+                   (int)n->name.len, n->name.ptr);
+        return val_void(sema);
+      }
+      if (sym && sym->is_comptime && sym->ct_valid) {
+        /* 折叠引用点为字面量（保留兄弟链，供调用点/语句链继续遍历） */
+        ast_node_t *lit = sema_ct_lit(sema, *node, &sym->ct);
+        if (lit) {
+          lit->next = (*node)->next;
+          *node = lit;
+          return value_make_shadow(sema->vm, sym->ct.type);
+        }
+      }
+      /* 捕获检查（无闭包）：局部函数体内引用外层局部符号（外层块/外层函数
+         的变量、参数、类型名）→ 运行时函数体查找链只有参数 + 全局
+         （closure_scope 为空、调用时临时接 root_scope），外层局部不可见。
+         fscope parent = 定义点块作用域（同块局部函数互相可见）——沿链命中的
+         "非 fscope 直系、非 global"符号即外层局部。全局符号（sema_lookup
+         global 命中）、函数名（FUNC 分支已先行返回）、comptime 符号（上方
+         已折叠，不捕获）合法。 */
+      if (sema->fn.local_func_base && sym &&
+          !func_own_symbol(sema, n->name, sym) &&
+          sema_lookup(sema->global_scope, n->name) != sym) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "local function cannot access outer local '%.*s' "
+                   "(add it to the capture list)",
+                   (int)n->name.len, n->name.ptr);
+        return val_void(sema);
+      }
+      value_t *v = scope_lookup(sema->vm->current_scope, n->name);
+      if (!v) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "undefined variable '%.*s'", (int)n->name.len, n->name.ptr);
+        return val_void(sema);
+      }
+      /* 类型即表达式：内建/自定义类型值注册在作用域链（global/root/current），
+         与变量同机制查找。命中 type value 直接返回该真实值（type value 是
+         编译期实体，data 恒为 type_t*——无 shadow 形态，见 sema 注释）。 */
+      if (value_type(v) == sema->vm->type_type)
+        return v;
+
+      /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
+         解包由显式 .! assert 承担，见 docs m2-design §12.5） */
+      return value_make_shadow(sema->vm, value_type(v));
+}
+
+/* M6 FFI：实参类型能否按调用层的两种槽（int64 / double）传给该形参。
+ * 判据与**运行期实际做的事**对齐，而不是 clux 的类型系统规则：
+ *   - 整数族（int/bool/enum）形参收整数族实参——都按 int64 槽传，语义同 C 的
+ *     隐式转换（所以 `malloc(16)` 的 i32 字面量喂 u64 形参是合法的）；
+ *   - opaque/指针形参收指针/opaque 实参（指针宽度）；
+ *   - str 形参收 str 实参（C 视角的 char *）；
+ *   - 浮点形参只在**浮点签名**（返回 f32/f64）里出现，实参也必须是浮点
+ *     （f32 由调用层升为 double）；非浮点签名里出现浮点实参会被塞进整数
+ *     寄存器 ⇒ 必须拒绝而不是猜着传。 */
+static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt, const type_t *at,
+                               bool float_sig) {
+  if (!pt || !at) return false;
+  bool p_int = pt->kind == TYPE_KIND_INT || pt->kind == TYPE_KIND_BOOL ||
+               pt->kind == TYPE_KIND_ENUM;
+  bool a_int = at->kind == TYPE_KIND_INT || at->kind == TYPE_KIND_BOOL ||
+               at->kind == TYPE_KIND_ENUM;
+  if (float_sig)
+    return pt->kind == TYPE_KIND_FLOAT && at->kind == TYPE_KIND_FLOAT;
+  if (pt->kind == TYPE_KIND_FLOAT) return false; /* 非浮点签名里不许有浮点实参 */
+  if (p_int) return a_int;
+  if (pt == sema->vm->type_opaque)
+    return at == sema->vm->type_opaque || at->kind == TYPE_KIND_PTR_OWN ||
+           at->kind == TYPE_KIND_PTR_REF || at->kind == TYPE_KIND_PTR_FATAL ||
+           at->kind == TYPE_KIND_PTR_SHARE || at->kind == TYPE_KIND_PTR_WEAK ||
+           at->kind == TYPE_KIND_SLICE_REF || at->kind == TYPE_KIND_SLICE_FATAL ||
+           at->kind == TYPE_KIND_STR;
+  if (pt == sema->vm->type_str) return at == sema->vm->type_str;
+  return pt == at; /* 其它（含 struct/cunion）：要求完全一致 */
+}
+
+/* AST_CALL 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_call(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 函数调用：统一路径 = exec callee（shadow 求值）→ exec 各实参 →
+         value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
+         数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
+         遮蔽/可见性全部交给作用域机制：callee 是 AST_IDENT 时经
+         sema_expr → AST_IDENT 分支自然解析（局部变量遮蔽函数名 → 变量
+         符号 → 下方 func 类型检查报"不可调用"；兄弟/自身函数 → 该分支
+         闭包检查拦截；未定义 → "undefined variable"）。callee 是函数值
+         表达式（get_fn()()、函数字面量）时递归求值 shadow（可能触发内层
+         comptime 折叠）。
+         唯一保留的符号感知前置：comptime func 调用点折叠（真实调用点
+         CTFE 求值；walking_comptime 时实参是参数 shadow value 无法求值，
+         只构造 callee shadow 做类型检查，折叠留到真实调用点）。 */
+      ast_call_t *call = (ast_call_t *)*node;
+      if (!call->callee) {
+        diag_error(sema->diag, sema_loc(sema, &call->base),
+                   "M1: missing callee");
+        return val_void(sema);
+      }
+
+      /* M6 FFI：extern cfunc 调用（`<库>::<名>(...)`）——callee 是 AST_ENUM_REF 且库
+         别名解析为 SEMA_SYM_EXTERN_LIB 时：**不做** value_call（那里没有运行时函数
+         对象），置 AST 标志供 compiler 发 EXTERN_CALL（契约见 ast_call.h），并返回
+         返回类型的 shadow 作为本表达式的类型。限定名符号由 pass1_names 注册
+         （步骤 ①，含 §2 C ABI 校验）。 */
+      if (call->callee->kind == AST_ENUM_REF) {
+        ast_enum_ref_t *er = (ast_enum_ref_t *)call->callee;
+        if (er->type_expr && er->type_expr->kind == AST_IDENT) {
+          ast_ident_t *lib_id = (ast_ident_t *)er->type_expr;
+          sema_symbol_t *lsym = sema_lookup(scope, lib_id->name);
+          if (lsym && lsym->kind == SEMA_SYM_EXTERN_LIB) {
+            char qual[512];
+            int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                              (int)lib_id->name.len, lib_id->name.ptr,
+                              (int)er->variant.len, er->variant.ptr);
+            sema_symbol_t *fs = (qn > 0 && (size_t)qn < sizeof(qual))
+                ? sema_lookup(sema->global_scope,
+                              strslice_from_bytes(qual, (size_t)qn))
+                : NULL;
+            if (!fs || fs->kind != SEMA_SYM_FUNC || !fs->type) {
+              diag_error(sema->diag, sema_loc(sema, &call->base),
+                         "extern call %.*s: no matching `extern cfunc` declaration",
+                         qn > 0 ? qn : 0, qual);
+              return val_void(sema);
+            }
+            const type_t *rt = func_type_return(fs->type);
+            /* 返回类型码：**精确到类型**（vm/bcode.h 的 BCODE_FFI_RET_*）。
+               只用 0..4 的旧编码会把 u64 返回造 i64 值，使用点（比较/赋值）
+               随后撞上隐式转换（`strlen(s) != 5u64` 的经典症状）。 */
+            uint32_t rk = BCODE_FFI_RET_VOID;
+            if (!rt || rt == sema->vm->type_void) rk = BCODE_FFI_RET_VOID;
+            else if (rt == sema->vm->type_i8) rk = BCODE_FFI_RET_I8;
+            else if (rt == sema->vm->type_i16) rk = BCODE_FFI_RET_I16;
+            else if (rt == sema->vm->type_i32) rk = BCODE_FFI_RET_I32;
+            else if (rt == sema->vm->type_i64) rk = BCODE_FFI_RET_I64;
+            else if (rt == sema->vm->type_u8) rk = BCODE_FFI_RET_U8;
+            else if (rt == sema->vm->type_u16) rk = BCODE_FFI_RET_U16;
+            else if (rt == sema->vm->type_u32) rk = BCODE_FFI_RET_U32;
+            else if (rt == sema->vm->type_u64) rk = BCODE_FFI_RET_U64;
+            else if (rt == sema->vm->type_bool) rk = BCODE_FFI_RET_BOOL;
+            else if (rt == sema->vm->type_f64) rk = BCODE_FFI_RET_F64;
+            else if (rt == sema->vm->type_opaque) rk = BCODE_FFI_RET_PTR;
+            else if (rt == sema->vm->type_f32) {
+              /* 浮点通路是"全 double 签名"（§14.5）：f32 返回会按 double 读错
+                 XMM0 宽度。明确拒绝，而不是造个 f64 值冒充 f32。 */
+              diag_error(sema->diag, sema_loc(sema, &call->base),
+                         "extern call %s: f32 return is not supported yet "
+                         "(declare the function as returning f64)", qual);
+              return val_void(sema);
+            } else {
+              diag_error(sema->diag, sema_loc(sema, &call->base),
+                         "extern call %s: return type is not marshalable",
+                         qual);
+              return val_void(sema);
+            }
+            call->is_ffi_call = true;
+            call->ffi_ret_kind = (uint8_t)rk;
+
+            /* 实参校验（此前**完全没做**——类型不符会静默按 int64 传参：x64 下把
+               double 塞进整数寄存器之类的错误不会有任何提示）。
+               判据与**调用层实际能做的事**对齐（§14.5：只有"int64 槽"与"全
+               double 槽"两条通路）：
+                ① 数量：固定参数之外只允许 variadic（`...`）的多余实参；
+                ② 类型：整数族（含 bool/enum）形参 ⇄ 整数族实参（都走 int64 槽，
+                   与 C 的隐式转换同义）；opaque/指针形参 ⇄ 指针/opaque 实参；
+                   str 形参 ⇄ str 实参；浮点形参只在**浮点签名**里出现（f32 实参
+                   由调用层升为 double ✓）；
+                ③ 非浮点签名里出现浮点实参 → 明确报错（会被塞进整数寄存器）；
+                   variadic 的浮点额外实参同理（C 要求走 XMM，未支持）。 */
+            const func_sig_t *sig = &((const func_type_t *)fs->type)->sig;
+            const bool float_sig =
+                (rt && rt->kind == TYPE_KIND_FLOAT) ? true : false;
+            size_t nargs = 0;
+            for (ast_node_t *a = call->args; a; a = a->next) nargs++;
+            if (!sig->is_variadic && nargs > sig->param_count)
+              diag_error(sema->diag, sema_loc(sema, &call->base),
+                         "extern call %s: expected %zu argument(s), got %zu",
+                         qual, sig->param_count, nargs);
+            size_t ai = 0;
+            for (ast_node_t *a = call->args; a; a = a->next, ai++) {
+              value_t *av = sema_expr(sema, &a, scope);
+              if (!av || value_is_error(sema->vm, av) ||
+                  value_is_type(av, TYPE_KIND_VOID))
+                continue;
+              const type_t *at = value_type(av);
+              const type_t *pt =
+                  (ai < sig->param_count && sig->params) ? sig->params[ai] : NULL;
+              if (!pt) {
+                /* variadic 额外实参：只支持按 int64 槽传的值 */
+                if (at && at->kind == TYPE_KIND_FLOAT)
+                  diag_error(sema->diag, sema_loc(sema, a),
+                             "extern call %s: variadic floating-point arguments "
+                             "are not supported yet", qual);
+                continue;
+              }
+              if (!ffi_arg_acceptable(sema, pt, at, float_sig))
+                diag_error(sema->diag, sema_loc(sema, a),
+                           "extern call %s: argument %zu: cannot pass this value "
+                           "as the declared parameter type", qual, ai + 1);
+            }
+            return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+          }
+        }
+      }
+
+      value_t *callee = NULL;
+      sema_symbol_t *callee_sym = NULL;
+      if (call->callee->kind == AST_IDENT) {
+        callee_sym =
+            sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
+        sema_symbol_t *sym = callee_sym;
+        if (sym && sym->is_comptime) {
+          /* comptime func 调用：实参改写（折叠引用为字面量）+ ctfe 求值 →
+             整个调用折叠为字面量。函数本身不注册到运行时。 */
+          if (!sema->fn.walking_comptime)
+            return sema_eval_comptime_call(sema, node, scope);
+          /* walking_comptime：只做 shadow 类型检查（callee shadow 走下方
+             统一 value_call 路径，返回 return type 的 shadow） */
+          callee = value_make_shadow(sema->vm, sym->type);
+        }
+      }
+      if (!callee) {
+        /* 一般 callee（函数名 / 函数值表达式）统一 shadow 求值。
+           置 in_call_callee：TDZ 检查仅对调用点生效（值引用放行）。 */
+        sema->fn.in_call_callee = true;
+        callee = sema_expr(sema, &call->callee, scope);
+        sema->fn.in_call_callee = false;
+        if (is_poison(sema, callee))
+          return val_void(sema);
+        const type_t *ctype = value_type(callee);
+        if (!ctype || ctype->kind != TYPE_KIND_FUNC) {
+          char tn[64];
+          op_type_name(callee, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "cannot call value of type %s", tn);
+          return val_void(sema);
+        }
+      }
+
+      size_t argc = sema_count_siblings(call->args);
+      value_t *arg_shadows[argc > 0 ? argc : 1];
+      /* 逐实参求值（匿名构造注入：参数类型已知 → push anon_ct，使实参的
+         .{...} 推断目标类型。签名参数类型从 callee 的 func 类型取——shadow
+         value（data=NULL）仍携带完整签名；可变参数后无类型 → 不注入。 */
+      const type_t *fnt = value_type(callee);
+      ast_node_t **link = &call->args;
+      size_t i = 0;
+      for (; *link; link = &(*link)->next, i++) {
+        const type_t *pt = fnt ? func_type_param(fnt, i) : NULL;
+        bool ct_pushed = sema_anon_push(sema, pt);
+        arg_shadows[i] = sema_expr(sema, link, scope);
+        sema_anon_pop(sema, ct_pushed);
+      }
+      value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
+
+      /* upgrade 内建函数特判（§12.4）：泛型 T 从实参 weak *T 推断，
+         返回类型由占位 ?share *opaque 替换为 ?share *T。
+         callee_sym->fid == 1（upgrade，printf=0）。 */
+      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
+          callee_sym->fid == 1 && argc == 1 && arg_shadows[0]) {
+        const type_t *at = value_type(arg_shadows[0]);
+        if (at && at->kind == TYPE_KIND_PTR_WEAK) {
+          const type_t *base = ptr_type_base(at);
+          if (base) {
+            const type_t *share_t = type_ptr_intern(sema->vm,
+                TYPE_KIND_PTR_SHARE, base);
+            if (share_t) {
+              const type_t *opt_t = type_option_intern(sema->vm, share_t);
+              if (opt_t) {
+                /* upgrade 特判：直接换用更精确的返回类型 shadow。原 result 是
+                   scope 拥有的值——不得手工 dispose（那会留下 owned 里的悬垂
+                   条目），交由作用域退出统一释放。 */
+                result = value_make_shadow(sema->vm, opt_t);
+              }
+            }
+          }
+        }
+      }
+
+      /* len 内建函数特判（m4-design §5/§11.3）：len 注册为 variadic，
+         参数类型不经签名校验——此处校验实参是可长序列（array/slice/str）。
+         len 恒返回 u64（注册签名已正确，无需替换返回类型）。 */
+      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
+          argc == 1 && arg_shadows[0] &&
+          call->callee && call->callee->kind == AST_IDENT) {
+        /* 按 len 函数名匹配（fid 依赖注册顺序，按名更稳健） */
+        ast_ident_t *ci = (ast_ident_t *)call->callee;
+        if (ci && ci->name.len == 3 &&
+            memcmp(ci->name.ptr, "len", 3) == 0) {
+          const type_t *at = value_type(arg_shadows[0]);
+          if (at && at->kind != TYPE_KIND_ARRAY &&
+              at->kind != TYPE_KIND_SLICE_OWN &&
+              at->kind != TYPE_KIND_SLICE_REF &&
+              at->kind != TYPE_KIND_SLICE_FATAL &&
+              at->kind != TYPE_KIND_STR) {
+            char tn[64];
+            sema_type_name(at, tn, sizeof(tn));
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "len: argument must be array/slice/str, got %s", tn);
+            return val_void(sema);
+          }
+        }
+      }
+
+      if (value_is_error(sema->vm, result)) {
+        error_data_t *ed = (error_data_t *)value_data(result);
+        const char *msg = ed && ed->message ? ed->message
+                                               : "function call failed";
+        diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
+        return val_void(sema);
+      }
+
+      return result; /* shadow in → shadow out（return_type shadow） */
+}
+
+/* AST_MEMBER 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_member(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 字段读取 p.field：object 求值 → 校验 struct/union → 按名查字段
+         （struct_type_find_field / union_type_find_field）→ 返回字段类型
+         shadow。嵌套 p.a.b 递归（object 是 AST_MEMBER 时 sema_expr 返回
+         内层字段类型）。字段不存在 → 报错。union 字段不做静态 tag 断言
+         （sema 不感知运行期 tag——运行期 FIELD_GET 反查 member + tag 校验，
+         不符返回 error value 即 panic）。 */
+      ast_member_t *n = (ast_member_t *)*node;
+      value_t *obj = sema_expr(sema, &n->object, scope);
+      if (is_poison(sema, obj))
+        return val_void(sema);
+      const type_t *ot = value_type(obj);
+      if (!ot) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot access field of value of unknown type");
+        return val_void(sema);
+      }
+      if (ot->kind == TYPE_KIND_UNION) {
+        /* union 字段：字段名 = member 名（tag 名），按名反查 member →
+           返回该 member 的 payload 类型 shadow。运行期 FIELD_GET 按 tag
+           校验，不符返回 error value 即 panic。 */
+        int mi = union_type_find_member(ot, n->field);
+        if (mi < 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "union '%.*s' has no field '%.*s'",
+                     (int)ot->name.len, ot->name.ptr,
+                     (int)n->field.len, n->field.ptr);
+          return val_void(sema);
+        }
+        const union_member_t *m = union_type_member(ot, (size_t)mi);
+        if (m && m->payload_type)
+          return value_make_shadow(sema->vm, m->payload_type);
+        return val_void(sema);
+      }
+      if (ot->kind == TYPE_KIND_CUNION) {
+        /* cunion 字段：字段名 = member 名，按名反查 member → 返回该 member
+           的 type shadow。无 tag 校验（C union 语义，开发者自负安全）——
+           运行期 FIELD_GET 按名反查后直接借用 offset 0。 */
+        int mi = cunion_type_find_member(ot, n->field);
+        if (mi < 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "cunion '%.*s' has no field '%.*s'",
+                     (int)ot->name.len, ot->name.ptr,
+                     (int)n->field.len, n->field.ptr);
+          return val_void(sema);
+        }
+        const cunion_member_t *m = cunion_type_member(ot, (size_t)mi);
+        if (m && m->type)
+          return value_make_shadow(sema->vm, m->type);
+        return val_void(sema);
+      }
+      if (ot->kind != TYPE_KIND_STRUCT) {
+        char tn[64];
+        sema_type_name(ot, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot access field of value of type %s", tn);
+        return val_void(sema);
+      }
+      int idx = struct_type_find_field(ot, n->field);
+      if (idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "struct '%.*s' has no field '%.*s'",
+                   (int)ot->name.len, ot->name.ptr,
+                   (int)n->field.len, n->field.ptr);
+        return val_void(sema);
+      }
+      return value_make_shadow(sema->vm, struct_type_field(ot, (size_t)idx)->type);
+}
+
+/* AST_INDEX 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_index(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 下标 / 泛型索引（GAP 延后落点）：parser 只收集 <expr>[<expr,...>
+         的 object + indices 链，此处首次可区分——base 是数组 → 下标（GET）；
+         base 是类型值 → 泛型实例化语法（M2 未实现，占位诊断）。 */
+      ast_index_t *n = (ast_index_t *)*node;
+      value_t *base = sema_expr(sema, &n->object, scope);
+      if (is_poison(sema, base))
+        return val_void(sema);
+
+      const type_t *bt = value_type(base);
+      if (bt && bt->kind == TYPE_KIND_TYPE) {
+        /* 泛型实例化占位：<type>[<expr,...> 与下标语法重叠，延后到 sema
+           才可区分，M2 泛型未实现前明确占位。 */
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "generic instantiation is not implemented (index on a type value)");
+        return val_void(sema);
+      }
+      if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE &&
+                  bt->kind != TYPE_KIND_SLICE_OWN &&
+                  bt->kind != TYPE_KIND_SLICE_REF &&
+                  bt->kind != TYPE_KIND_SLICE_FATAL)) {
+        char tn[64];
+        sema_type_name(bt, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot index value of type %s", tn);
+        return val_void(sema);
+      }
+
+      /* 下标只消费 1 个索引；a[i,j] 多索引 = 泛型实参语法预留。
+         a[i][j] 多维是 parse 链式嵌套（((a[i])[j])），逐维下降天然处理。 */
+      size_t nidx = sema_count_siblings(n->indices);
+      if (nidx != 1) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "array subscript expects exactly 1 index, got %zu", nidx);
+        return val_void(sema);
+      }
+
+      value_t *idx = sema_expr(sema, &n->indices, scope);
+      if (is_poison(sema, idx))
+        return val_void(sema);
+      if (!value_is_type(idx, TYPE_KIND_INT)) {
+        char tn[64];
+        op_type_name(idx, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, n->indices),
+                   "array index must be an integer, got %s", tn);
+        return val_void(sema);
+      }
+
+      if (bt->kind == TYPE_KIND_TUPLE) {
+        /* tuple 下标 t[i]：元素匿名 → 按位置访问（运行期 INDEX_GET/INDEX_SET
+           带越界检查）。结果类型取决于 i——i 须编译期常量（字面量直接读，
+           复杂表达式走 ctfe 真实求值，与数组边界一致），越界编译期报错
+           （运行期指令仍兜底 panic）。 */
+        size_t cap = tuple_type_elem_count(bt);
+        uint64_t raw = 0;
+        if (n->indices && n->indices->kind == AST_INT_LIT) {
+          raw = ((ast_int_lit_t *)n->indices)->value;
+        } else {
+          vm_t *vm = sema->vm;
+          ctfe_ctx_t ctx;
+          memset(&ctx, 0, sizeof ctx);
+          ctx.vm = vm;
+          ctx.sema = sema;
+          ctx.budget = 100000;
+          ctx.max_depth = 128;
+          value_t *r = ctfe_eval(&ctx, n->indices);
+          if (!r || value_is_error(vm, r)) {
+            diag_error(sema->diag, sema_loc(sema, n->indices),
+                       "tuple index must be a compile-time constant");
+            return val_void(sema);
+          }
+          const type_t *rt = value_type(r);
+          if (!rt || rt->kind != TYPE_KIND_INT) {
+            diag_error(sema->diag, sema_loc(sema, n->indices),
+                       "tuple index must be an integer constant");
+            return val_void(sema);
+          }
+          switch (rt->size) {
+            case 1: raw = *(const uint8_t  *)value_data(r); break;
+            case 2: raw = *(const uint16_t *)value_data(r); break;
+            case 4: raw = *(const uint32_t *)value_data(r); break;
+            default: raw = *(const uint64_t *)value_data(r); break;
+          }
+        }
+        if (raw >= cap) {
+          diag_error(sema->diag, sema_loc(sema, n->indices),
+                     "tuple index %llu out of bounds (len=%zu)",
+                     (unsigned long long)raw, cap);
+          return val_void(sema);
+        }
+        const tuple_elem_t *e = tuple_type_elem(bt, (size_t)raw);
+        return value_make_shadow(sema->vm, e ? e->type : sema->vm->type_void);
+      }
+
+      const type_t *et;
+      if (bt->kind == TYPE_KIND_SLICE_OWN || bt->kind == TYPE_KIND_SLICE_REF ||
+          bt->kind == TYPE_KIND_SLICE_FATAL) {
+        et = slice_type_elem(bt);
+      } else {
+        et = array_type_elem(bt);
+      }
+      return value_make_shadow(sema->vm, et ? et : sema->vm->type_void);
+}
+
+/* AST_SLICE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_slice(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 切片表达式 s[low:high]（m4-design §4）：适用于数组/切片/str，
+         恒产 ref []T（借用胖指针）。low/high 可省略（NULL = 0/len）。
+         arr[:] 是显式数组转切片的唯一路径（[N]T → ref []T 不自动）。 */
+      ast_slice_t *n = (ast_slice_t *)*node;
+      value_t *base = sema_expr(sema, &n->object, scope);
+      if (is_poison(sema, base))
+        return val_void(sema);
+
+      const type_t *bt = value_type(base);
+      if (!bt) return val_void(sema);
+
+      /* 确定元素类型 + 基类合法性 */
+      const type_t *et = NULL;
+      if (bt->kind == TYPE_KIND_ARRAY) {
+        et = array_type_elem(bt);
+      } else if (bt->kind == TYPE_KIND_SLICE_OWN ||
+                 bt->kind == TYPE_KIND_SLICE_REF ||
+                 bt->kind == TYPE_KIND_SLICE_FATAL) {
+        et = slice_type_elem(bt);
+      } else if (bt->kind == TYPE_KIND_STR) {
+        /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
+        et = type_const_intern(sema->vm, sema->vm->type_u8);
+      } else {
+        char tn[64];
+        sema_type_name(bt, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot slice value of type %s", tn);
+        return val_void(sema);
+      }
+
+      /* 求值 low/high（均可是运行期值，运行期做越界检查） */
+      if (n->low) {
+        value_t *low = sema_expr(sema, &n->low, scope);
+        if (is_poison(sema, low))
+          return val_void(sema);
+        if (!value_is_type(low, TYPE_KIND_INT)) {
+          char tn[64];
+          op_type_name(low, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, n->low),
+                     "slice lower bound must be an integer, got %s", tn);
+          return val_void(sema);
+        }
+      }
+      if (n->high) {
+        value_t *high = sema_expr(sema, &n->high, scope);
+        if (is_poison(sema, high))
+          return val_void(sema);
+        if (!value_is_type(high, TYPE_KIND_INT)) {
+          char tn[64];
+          op_type_name(high, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, n->high),
+                     "slice upper bound must be an integer, got %s", tn);
+          return val_void(sema);
+        }
+      }
+
+      /* 恒产 ref []T */
+      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_REF,
+                                                 et ? et : sema->vm->type_void);
+      if (!slice_t) return val_void(sema);
+      sema_type_register(sema, slice_t);
+      return value_make_shadow(sema->vm, slice_t);
+}
+
+/* AST_ENUM_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* M5：:: 成员访问有两种语义——枚举 variant（Color::Red）与
+         模块成员（std::add）。先检查 type_expr 是否是模块别名
+         （AST_IDENT 解析到 SEMA_SYM_MODULE 符号），若是则走模块成员
+         路径；否则走枚举 variant 路径。链式访问 a::b::c 由 parser 产出
+         嵌套 AST_ENUM_REF（lhs 也可以是 AST_ENUM_REF），递归处理。 */
+      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
+
+      /* 模块成员访问检查：type_expr 是 AST_IDENT 且解析到 MODULE 符号 */
+      if (n->type_expr && n->type_expr->kind == AST_IDENT) {
+        ast_ident_t *id = (ast_ident_t *)n->type_expr;
+        sema_symbol_t *sym = sema_lookup(scope, id->name);
+        /* M6 FFI：`<库别名>::<名>` —— 限定名符号由 pass1_names 注册：
+             - `extern cfunc`  → SEMA_SYM_FUNC：**调用**（callee 位置的拦截在
+                                  ex_call，本分支落到这里说明是"当值用"）；
+             - `extern var`    → SEMA_SYM_EXTERN_VAR：**数据符号引用**（读值；
+                                 作为赋值目标由 shadow_assign 的另一入口处理）。
+             这里按类型码置 AST 标志（契约见 ast_enum_ref.h），compiler 据
+             此发 EXTERN_LOAD；返回声明类型的 shadow 供类型检查。 */
+        if (sym && sym->kind == SEMA_SYM_EXTERN_LIB) {
+          char qual[512];
+          int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                            (int)id->name.len, id->name.ptr,
+                            (int)n->variant.len, n->variant.ptr);
+          sema_symbol_t *ds = (qn > 0 && (size_t)qn < sizeof(qual))
+              ? sema_lookup(sema->global_scope,
+                            strslice_from_bytes(qual, (size_t)qn))
+              : NULL;
+          if (ds && ds->kind == SEMA_SYM_EXTERN_VAR && ds->type) {
+            uint32_t kind = 0;
+            if (!ffi_data_kind_of(ds->type, sema->vm, &kind)) {
+              /* pass1_names 已就类型报过错；这里只做错误恢复 */
+              return val_void(sema);
+            }
+            n->is_ffi_var = true;
+            n->ffi_var_kind = kind;
+            return value_make_shadow(sema->vm, ds->type);
+          }
+          if (ds && ds->kind == SEMA_SYM_FUNC) {
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "'%s' is an `extern cfunc` (a function); call it with "
+                       "arguments", qual);
+            return val_void(sema);
+          }
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "extern symbol %s: no matching `extern cfunc` or "
+                     "`extern var` declaration", qual);
+          return val_void(sema);
+        }
+        if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
+          /* 模块成员访问：从 module->exports 查 variant 名 */
+          module_t *mod = sym->module;
+          char buf[256];
+          if (n->variant.len < sizeof(buf)) {
+            memcpy(buf, n->variant.ptr, n->variant.len);
+            buf[n->variant.len] = '\0';
+            value_t *member = (value_t *)strmap_get(mod->exports, buf);
+            if (member) {
+              const type_t *mt = value_type(member);
+              return value_make_shadow(sema->vm, mt);
+            }
+          }
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "module has no exported member '%.*s'",
+                     (int)n->variant.len, n->variant.ptr);
+          return val_void(sema);
+        }
+      }
+
+      /* 枚举 variant 引用 Color::Red：type_expr 求值为 enum 类型（折叠为
+         AST_TYPE_REF）→ enum_type_find_variant 查 variant → 未找到报错；
+         找到则折叠底层值入节点（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM），
+         返回 enum 类型 shadow（赋值/判等类型检查用）。 */
+      const type_t *t = sema_resolve_type_slot(sema, &n->type_expr);
+      if (!t) return val_void(sema);
+      if (t->kind != TYPE_KIND_ENUM) {
+        char tn[64];
+        sema_type_name(t, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "'%s' is not an enum type", tn);
+        return val_void(sema);
+      }
+      int idx = enum_type_find_variant(t, n->variant);
+      if (idx < 0) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "enum '%.*s' has no variant '%.*s'",
+                   (int)t->name.len, t->name.ptr,
+                   (int)n->variant.len, n->variant.ptr);
+        return val_void(sema);
+      }
+      n->value = enum_type_variant(t, (size_t)idx)->value;
+      return value_make_shadow(sema->vm, t);
+}
+
+/* AST_MAKE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_make(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* make 编译期宏函数 make(T, N, init...) → fatal []T（m4-design §2）。
+         T 是元素类型，N 是长度（可运行期值），init... 是初始值列表（支持
+         <v,M> fill 值包，同数组构造）。clux 无默认零值，init 必须覆盖
+         全部元素。返回 fatal []T（将亡值，须被 own 接管）。
+         sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
+      ast_make_t *n = (ast_make_t *)*node;
+
+      /* 解析元素类型 T */
+      const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
+      if (!et) return val_void(sema);
+
+      /* 求值长度 N（shadow 求值，运行期可变） */
+      value_t *lenv = sema_expr(sema, &n->length, scope);
+      if (is_poison(sema, lenv))
+        return val_void(sema);
+      if (!value_is_type(lenv, TYPE_KIND_INT)) {
+        char tn[64];
+        op_type_name(lenv, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, n->length),
+                   "make: length must be an integer, got %s", tn);
+        return val_void(sema);
+      }
+
+      /* 校验初始值列表：计算元素总数（含 fill 展开），逐元素类型检查 */
+      size_t total = 0;
+      /* 链上指针迭代：把**真实的链槽**交给 sema_expr，折叠（comptime 变量引用
+         → 字面量）就地写回链表；若传局部变量副本，折叠结果只在栈上有效，
+        编译期符号引用会漏到运行期（"undefined variable"）。 */
+      ast_node_t **link = &n->inits;
+      for (ast_node_t *it = n->inits; it; it = it->next) {
+        if (it->kind == AST_FILL) {
+          size_t cnt;
+          if (!sema_eval_array_bound(sema, &((ast_fill_t *)it)->count, &cnt))
+            return val_void(sema);
+          /* fill 的值部分也要类型检查 */
+          value_t *fv = sema_expr(sema, &((ast_fill_t *)it)->value, scope);
+          if (is_poison(sema, fv))
+            return val_void(sema);
+          value_t *dst = value_make_shadow(sema->vm, et);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(et, tn, sizeof(tn));
+            sema_type_name(value_type(fv), fn, sizeof(fn));
+            diag_error(sema->diag, sema_loc(sema, ((ast_fill_t *)it)->value),
+                       "make: cannot initialize %s element with %s", tn, fn);
+          }
+          total += cnt;
+        } else {
+          value_t *fv = sema_expr(sema, link, scope);
+          it = *link; /* 折叠可能替换节点：刷新游标，后续 it->next 才有效 */
+          if (is_poison(sema, fv))
+            return val_void(sema);
+          value_t *dst = value_make_shadow(sema->vm, et);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            char tn[64], fn[64];
+            sema_type_name(et, tn, sizeof(tn));
+            sema_type_name(value_type(fv), fn, sizeof(fn));
+            diag_error(sema->diag, sema_loc(sema, it),
+                       "make: cannot initialize %s element with %s", tn, fn);
+          }
+          total += 1;
+        }
+        link = &it->next;
+      }
+
+      /* clux 无默认零值——init 必须覆盖全部元素（N 可运行期值，编译期
+         只校验 init 数量 > 0；N 运行期校验 total == N 由 MAKE 指令兜底）。
+         若 N 是编译期常量，编译期即校验 total == N。
+         例外：N == 0（零长度切片）允许无初始值。 */
+      if (n->inits == NULL) {
+        bool zero_len = false;
+        if (n->length && n->length->kind == AST_INT_LIT &&
+            ((ast_int_lit_t *)n->length)->value == 0)
+          zero_len = true;
+        if (!zero_len) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "make: initial values are required (clux has no default zero)");
+          return val_void(sema);
+        }
+      }
+
+      /* 若 N 是编译期常量，校验 total == N */
+      if (n->length->kind == AST_INT_LIT) {
+        uint64_t nval = ((ast_int_lit_t *)n->length)->value;
+        if ((uint64_t)total != nval) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "make: expected %llu elements, got %zu",
+                     (unsigned long long)nval, total);
+          return val_void(sema);
+        }
+      }
+
+      /* 返回 fatal []T shadow——make 产新堆块，与 new 统一 */
+      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL,
+                                                 et);
+      if (!slice_t) return val_void(sema);
+      sema_type_register(sema, slice_t);
+      return value_make_shadow(sema->vm, slice_t);
+}
+
+/* AST_MOVE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_move(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 所有权原语 move(x) / clone(x)（m3-design §7）：操作数求值 → 返回
+         操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
+         clone 深拷贝。指针操作数（own/ref/fatal）返回 fatal 所有权修饰类型
+         （将亡值，§3.3——运行期 MOVE/CLONE 指令产物即 fatal 类型）；
+         非指针原样返回操作数类型。 */
+      ast_move_t *n = (ast_move_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (is_poison(sema, operand))
+        return val_void(sema);
+      const type_t *ot = value_type(operand);
+      const type_t *base = ptr_type_base(ot);
+      bool is_slice = (ot->kind == TYPE_KIND_SLICE_OWN ||
+                       ot->kind == TYPE_KIND_SLICE_REF ||
+                       ot->kind == TYPE_KIND_SLICE_FATAL);
+      if (base || is_slice) {
+        /* 指针/切片操作数：产物为 fatal *T / fatal []T
+           （MOVE/CLONE 指令已按此类型压栈） */
+        const type_t *fatal;
+        if (is_slice) {
+          const type_t *elem = slice_type_elem(ot);
+          fatal = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL, elem);
+        } else {
+          fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
+        }
+        if (!fatal) return val_void(sema);
+        sema_type_register(sema, fatal);
+        /* R2（move 后源 TDZ，m3-design §7）：move(own *T) 转移所有权——
+           源变量标记 moved，后续读取报 "used after move"。clone 深拷贝，
+           源不受影响。ref 是值拷贝（§3.2 可 copy），move(ref) 平凡转移。
+           R3（§7 有 ref 存活禁止 move）：move 源有活跃借用（borrow_count>0）
+           → 借用会悬空（借用指针随源销毁失效）→ 编译错误。clone 深拷贝
+           （新堆块）不触发（§7"ref 不影响 clone"）。 */
+        if (!n->op || !token_is(n->op, "clone")) {
+          if (n->operand->kind == AST_IDENT) {
+            sema_symbol_t *src =
+                sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
+            if (src && src->kind == SEMA_SYM_VAR && src->type &&
+                (src->type->kind == TYPE_KIND_PTR_OWN ||
+                 src->type->kind == TYPE_KIND_SLICE_OWN)) {
+              if (src->borrow_count > 0) {
+                diag_error(sema->diag, sema_loc(sema, *node),
+                           "cannot move '%.*s': %d live borrow(s) still "
+                           "reference it (borrows must end before move)",
+                           (int)n->operand->kind == AST_IDENT
+                               ? ((ast_ident_t *)n->operand)->name.len
+                               : 0,
+                           ((ast_ident_t *)n->operand)->name.ptr,
+                           src->borrow_count);
+              } else {
+                src->moved = true;
+              }
+            } else if (src && src->kind == SEMA_SYM_VAR &&
+                       sema_type_is_fatal(src->type)) {
+              /* R1（fatal 消费，§4）：move(fatal) 是**合法消费点之一**——
+                 所有权被接管，标记已消费（判据见 sema_type_is_fatal）。 */
+              sema_mark_fatal_consumed(src);
+            }
+          }
+        }
+        return value_make_shadow(sema->vm, fatal);
+      }
+      return operand; /* shadow，类型 = 操作数类型（非指针/切片） */
+}
+
+/* AST_INT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_int_lit(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      ast_int_lit_t *n = (ast_int_lit_t *)*node;
+      const type_t *t = n->type.len ? type_lookup(sema->vm, n->type)
+                                    : sema->vm->type_i32;
+      if (!t) {
+        diag_error(sema->diag, sema_loc(sema, *node), "unknown type '%.*s'",
+                   (int)n->type.len, n->type.ptr);
+        t = sema->vm->type_i32;
+      }
+      return value_make_shadow(sema->vm, t);
+}
+
+/* AST_FLOAT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_float_lit(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      ast_float_lit_t *n = (ast_float_lit_t *)*node;
+      const type_t *t = n->type.len ? type_lookup(sema->vm, n->type)
+                                    : sema->vm->type_f64;
+      if (!t) {
+        diag_error(sema->diag, sema_loc(sema, *node), "unknown type '%.*s'",
+                   (int)n->type.len, n->type.ptr);
+        t = sema->vm->type_f64;
+      }
+      return value_make_shadow(sema->vm, t);
+}
+
+/* AST_CONST 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_const(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* const 类型修饰（类型即表达式）：操作数必须是类型值，结果仍是
+         类型值。遮蔽/类型检查在此感知（as 右值、M2 类型字面量）。 */
+      ast_const_t *n = (ast_const_t *)*node;
+      value_t *sub = sema_expr(sema, &n->sub, scope);
+      if (is_poison(sema, sub))
+        return val_void(sema);
+      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "'const' requires a type operand");
+        return val_void(sema);
+      }
+      /* type value 恒真实（编译期实体）：取 data 里的类型指针 intern 后
+         返回新的 type value（auto-track 当前 scope） */
+      const type_t *sub_t = value_as(sub, const type_t *);
+      const type_t *ct = type_const_intern(sema->vm, sub_t);
+      return type_as_value(sema->vm, ct);
+}
+
+/* AST_VOLATILE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_volatile(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      ast_volatile_t *n = (ast_volatile_t *)*node;
+      value_t *sub = sema_expr(sema, &n->sub, scope);
+      if (is_poison(sema, sub))
+        return val_void(sema);
+      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "'volatile' requires a type operand");
+        return val_void(sema);
+      }
+      const type_t *sub_t = value_as(sub, const type_t *);
+      const type_t *vt = type_volatile_intern(sema->vm, sub_t);
+      return type_as_value(sema->vm, vt);
+}
+
+/* AST_SIZEOF / AST_ALIGNOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 编译期运算符（m2-design §8）：操作数 shadow 求值只取类型（不真实
+         执行），结果恒 u64。sizeof = 类型宽度，alignof = 类型对齐。
+         折叠为 AST_INT_LIT(u64) 写回（保留兄弟链）——编译器零感知消费
+         立即数；返回 shadow u64。 */
+      ast_node_t *opnd = (*node)->kind == AST_SIZEOF
+                             ? ((ast_sizeof_t *)*node)->operand
+                             : ((ast_alignof_t *)*node)->operand;
+      value_t *op = sema_expr(sema, &opnd, scope);
+      /* 折叠写回：sema_expr 通过可写节点槽就地改写（comptime 变量引用 → 字面量），
+         本处因两个结构体二选一而只能传局部变量，必须显式回写——否则 comptime
+         符号引用会漏到运行期（该名字在运行期不存在 → "undefined variable"）。 */
+      if ((*node)->kind == AST_SIZEOF)
+        ((ast_sizeof_t *)*node)->operand = opnd;
+      else
+        ((ast_alignof_t *)*node)->operand = opnd;
+      if (is_poison(sema, op))
+        return val_void(sema);
+      /* type value（data=type_t*）解引用 data；普通 shadow value 取
+         value_type。注意 value_type(type value) 返回元类型 vm->type_type
+         （size=8），直接读取会得错值——sizeof(u8) 折叠成 8。 */
+      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+                            ? value_as(op, const type_t *)
+                            : value_type(op);
+      uint64_t n = (*node)->kind == AST_SIZEOF ? (uint64_t)t->size
+                                               : (uint64_t)t->align;
+      ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
+                                        (*node)->tok_end);
+      if (lit) {
+        ((ast_int_lit_t *)lit)->type = sema->vm->type_u64->name;
+        ((ast_int_lit_t *)lit)->value = n;
+        lit->next = (*node)->next;
+        *node = lit;
+      }
+      return value_make_shadow(sema->vm, sema->vm->type_u64);
+}
+
+/* AST_TYPEOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_typeof(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* typeof(expr) → type value（m2-design §8）：操作数 shadow 求值只取
+         类型，结果即该类型。折叠为 AST_TYPE_REF（sema_ct_type_ref 登记到
+         types 表，编译器 LOAD_TYPE <id> 零感知）；返回真实 type value
+         （编译期实体，data 恒为 type_t*）。 */
+      ast_typeof_t *n = (ast_typeof_t *)*node;
+      value_t *op = sema_expr(sema, &n->operand, scope);
+      if (is_poison(sema, op))
+        return val_void(sema);
+      /* 同上：type value 解引用 data，普通值取 value_type */
+      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+                            ? value_as(op, const type_t *)
+                            : value_type(op);
+      ast_node_t *ref = sema_ct_type_ref(sema, t, *node);
+      if (ref) {
+        ref->next = (*node)->next;
+        *node = ref;
+      }
+      return type_as_value(sema->vm, t);
+}
+
+/* AST_UNARY 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_unary(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      ast_unary_t *n = (ast_unary_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      /* 错误恢复产物静默通过，避免级联二次诊断 */
+      if (is_poison(sema, operand))
+        return val_void(sema);
+      value_t *result = NULL;
+      if (token_is(n->op, "-")) {
+        result = value_neg(sema->vm, operand);
+      } else if (token_is(n->op, "!")) {
+        sema_check_bool(sema, n->operand, operand, "logical not");
+        result = value_lnot(sema->vm, operand);
+      } else if (token_is(n->op, "~")) {
+        result = value_bnot(sema->vm, operand);
+      } else {
+        char ob[16];
+        op_text(n->op, ob, sizeof(ob));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "unsupported unary operator '%s'", ob);
+        return val_void(sema);
+      }
+      if (value_is_error(sema->vm, result)) {
+        char ob[16], tn[64];
+        op_text(n->op, ob, sizeof(ob));
+        op_type_name(operand, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "operator '%s' cannot be applied to %s", ob, tn);
+        return val_void(sema);
+      }
+      return result;
+}
+
+/* AST_UNWRAP 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* optional 解包：.!（assert）/ .?（try）。
+         .! 要求操作数是 ?T：none 时运行期 panic（用户范式先判空再解包：
+         if (x != nil) { var v = x.!; ... }）。返回 inner 类型 shadow。
+         .? 仅词法预留（try），语义未实现 → 编译期报错。 */
+      ast_unwrap_t *uw = (ast_unwrap_t *)*node;
+      value_t *operand = sema_expr(sema, &uw->operand, scope);
+      if (is_poison(sema, operand))
+        return val_void(sema);
+
+      const type_t *ot = value_type(operand);
+      if (!ot || ot->kind != TYPE_KIND_OPTION) {
+        char tn[64], ob[16];
+        size_t len = 0;
+        const char *text =
+            uw->op ? token_get_text(uw->op, &len) : NULL;
+        snprintf(ob, sizeof(ob), ".%.*s", (int)len, text ? text : "?");
+        op_type_name(operand, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "operator '%s' requires an optional operand, got %s", ob,
+                   tn);
+        return val_void(sema);
+      }
+      if (uw->op && token_is(uw->op, "?")) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "operator '.?' (try) is not implemented yet");
+        return val_void(sema);
+      }
+      return value_make_shadow(sema->vm, type_option_inner(ot));
+}
+
+/* AST_SLICE_TYPE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_slice_type(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      /* 切片类型表达式 own/ref/fatal []T（类型即表达式，m4-design §1）：
+         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
+         返回真实 type value。与 AST_ARRAY 同构。 */
+      const type_t *t = sema_resolve_type_slot(sema, node);
+      if (!t) return val_void(sema);
+      return type_as_value(sema->vm, t);
+}
+
+/* AST_ARRAY 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_array(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      /* 数组类型表达式 [N]T（类型即表达式）：表达式位置求值 = 类型值。
+         解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
+         返回真实 type value（data=type_t*，auto-track 当前 scope），供
+         type 定义 / as 右值 / sizeof / 嵌套类型构造消费。 */
+      const type_t *t = sema_resolve_type_slot(sema, node);
+      if (!t) return val_void(sema);
+      return type_as_value(sema->vm, t);
+}
+
+/* AST_TUPLE / AST_FUNC_TYPE / AST_OPTION / AST_PTR 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_type_expr(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      /* 其余**类型表达式**出现在表达式位置（类型即表达式，m2-design 关键
+         架构决策 6）：元组 `<T1,T2>` / 签名 `func(T)->R` / 可选 `?T` /
+         指针 `own *T` 都应求值为类型值，与上方 AST_ARRAY 完全同构——解析为
+         真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），返回
+         type value 供 type 定义 / as 右值 / sizeof / 嵌套类型构造消费。
+
+         此前这 4 种 kind 没有 case，落到 switch 的 default 静默返回 void
+         shadow：`var x = <i32,i32>;` 之类合法写法被误报成
+         "cannot initialize ... with void"，在字段位则静默跳过校验。 */
+      const type_t *t = sema_resolve_type_slot(sema, node);
+      if (!t) return val_void(sema);
+      return type_as_value(sema->vm, t);
+}
+
+/* AST_TYPE_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_type_ref(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
+      /* 具名类型引用（sema 登记的 "__type_N"）：重复求值（折叠重访）时
+         命中——解析回类型，返回真实 type value。 */
+      const type_t *t = resolve_type_expr(sema, *node);
+      if (!t) return val_void(sema);
+      return type_as_value(sema->vm, t);
+}
+
+/* AST_DEREF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_deref(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 后置解引用取值 r.*（m3-design §8.2）：由指针得值。操作数必须是
+         指针类型（own/ref/fatal）→ 返回被指向类型 T 的 shadow（运行期
+         PTR_GET 指令取 T 值副本）。 */
+      ast_deref_t *n = (ast_deref_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (is_poison(sema, operand))
+        return val_void(sema);
+      const type_t *ot = value_type(operand);
+      const type_t *base = ptr_type_base(ot);
+      if (!base) {
+        char tn[64];
+        op_type_name(operand, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot dereference a value of type %s (expected a pointer)",
+                   tn);
+        return val_void(sema);
+      }
+      return value_make_shadow(sema->vm, base);
+}
+
+/* AST_ADDR 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_addr(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
+         shadow——x.& 指向栈上值（或他人堆块）是借用，ref 总借用（type kind
+         区分，运行期零标志 §13.2），销毁 no-op。
+         返回 ref（而非 own）与值层语义一致（Step B 借用存活检查的基座）。 */
+      ast_addr_t *n = (ast_addr_t *)*node;
+      value_t *operand = sema_expr(sema, &n->operand, scope);
+      if (is_poison(sema, operand))
+        return val_void(sema);
+      const type_t *t = value_type(operand);
+      if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot take address of value of unknown type");
+        return val_void(sema);
+      }
+      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, t);
+      if (!pt) return val_void(sema);
+      sema_type_register(sema, pt);
+      return value_make_shadow(sema->vm, pt);
+}
+
+/* AST_FUNC_DEF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_func_def(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
       /* 函数字面量（表达式内 func 定义，函数值）：签名解析 + body 类型
          检查（sema_check_func_literal：临时 fscope 同步建树+walk，不注册
          作用域符号、不提升）。返回签名类型的 shadow——函数值表达式的类型
          即签名。失败（已诊断）返回 void shadow。 */
       ast_func_def_t *fn = (ast_func_def_t *)*node;
       const type_t *sig = sema_check_func_literal(sema, fn, scope);
-      if (!sig) return value_make_shadow(sema->vm, sema->vm->type_void);
+      if (!sig) return val_void(sema);
       return value_make_shadow(sema->vm, sig);
-    }
-    case AST_FUNC_REF: {
+}
+
+/* AST_FUNC_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_func_ref(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
+  (void)scope; /* 本处理器不使用词法作用域 */
       /* 函数引用折叠产物（sema AST_IDENT 确认函数符号改写 / comptime 折叠
          AST_FUNC_REF）：纯 fid 标识，shadow walk 只关心签名类型——返回签名
          类型的 shadow（函数值表达式的类型即签名；运行期 LOAD_FUNCTION 加载
@@ -2453,11 +2763,14 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       if (!sig) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "unknown function reference (id %u)", n->fid);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       }
       return value_make_shadow(sema->vm, sig);
-    }
-    case AST_TERNARY: {
+}
+
+/* AST_TERNARY 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_ternary(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
       /* 三元条件表达式：cond 必须 bool；两分支都 shadow 求值（两侧都要
          类型检查，运行时惰性只执行选中分支）；结果类型要求两分支一致。
          类型即表达式天然支持：`cond ? i32 : i64` 两侧都是 type_type。 */
@@ -2470,7 +2783,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           value_is_error(sema->vm, eval) ||
           value_is_type(tval, TYPE_KIND_VOID) ||
           value_is_type(eval, TYPE_KIND_VOID))
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       const type_t *tt = value_type(tval);
       const type_t *et = value_type(eval);
       if (tt != et) {
@@ -2480,13 +2793,123 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "ternary branches must have the same type, got %s and %s",
                    tn, en);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       }
       return tval; /* shadow，类型 = 两分支共同类型 */
-    }
+}
+
+value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
+  if (!node || !*node) return val_void(sema);
+  switch ((*node)->kind) {
+    case AST_INT_LIT:
+      return ex_int_lit(sema, node, scope);
+    case AST_FLOAT_LIT:
+      return ex_float_lit(sema, node, scope);
+    case AST_BOOL_LIT:
+      return value_make_shadow(sema->vm, sema->vm->type_bool);
+    case AST_CHAR_LIT:
+      return value_make_shadow(sema->vm, sema->vm->type_u8);
+    case AST_STRING_LIT:
+      return value_make_shadow(sema->vm, sema->vm->type_str);
+    case AST_IDENT:
+      return ex_ident(sema, node, scope);
+    case AST_CONST:
+      return ex_const(sema, node, scope);
+    case AST_VOLATILE:
+      return ex_volatile(sema, node, scope);
+    case AST_SIZEOF:
+      return ex_sizeof_alignof(sema, node, scope);
+    case AST_ALIGNOF:
+      return ex_sizeof_alignof(sema, node, scope);
+    case AST_TYPEOF:
+      return ex_typeof(sema, node, scope);
+    case AST_UNDEF:
+      /* undefined 只允许作为 var 初始化的"未初始化声明"（shadow_var_def
+         消费）；普通表达式位置引用是非法用法。 */
+      diag_error(sema->diag, sema_loc(sema, *node),
+                 "'undefined' can only be used as a variable initializer");
+      return val_void(sema);
+    case AST_NIL:
+      /* nil 不是 value：只允许四种 nil 判定（x==nil 等，窄化）、?T 初始化
+         赋值（a = nil）、构造器字段（.?T{nil}）与 fill 值包（<nil,N>）等
+         特殊位置消费（shadow_binary / 赋值 / 构造器 / fill 分别处理）。
+         普通表达式位置引用是非法用法。 */
+      diag_error(sema->diag, sema_loc(sema, *node),
+                 "'nil' can only be used in nil comparisons, ?T assignment, "
+                 "constructor fields or fills");
+      return val_void(sema);
+    case AST_BINARY:
+      return shadow_binary(sema, node, scope);
+    case AST_UNARY:
+      return ex_unary(sema, node, scope);
+    case AST_CALL:
+      return ex_call(sema, node, scope);
+    case AST_UNWRAP:
+      return ex_unwrap(sema, node, scope);
+    case AST_MEMBER:
+      return ex_member(sema, node, scope);
+    case AST_INDEX:
+      return ex_index(sema, node, scope);
+    case AST_SLICE_TYPE:
+      return ex_slice_type(sema, node, scope);
+    case AST_SLICE:
+      return ex_slice(sema, node, scope);
+    case AST_ARRAY:
+      return ex_array(sema, node, scope);
+    case AST_TUPLE:
+      return ex_type_expr(sema, node, scope);
+    case AST_FUNC_TYPE:
+      return ex_type_expr(sema, node, scope);
+    case AST_OPTION:
+      return ex_type_expr(sema, node, scope);
+    case AST_PTR:
+      return ex_type_expr(sema, node, scope);
+    case AST_TYPE_REF:
+      return ex_type_ref(sema, node, scope);
+    case AST_ENUM_REF:
+      return ex_enum_ref(sema, node, scope);
+    case AST_NEW:
+      return ex_new(sema, node, scope);
+    case AST_MAKE:
+      return ex_make(sema, node, scope);
+    case AST_DEREF:
+      return ex_deref(sema, node, scope);
+    case AST_ADDR:
+      return ex_addr(sema, node, scope);
+    case AST_MOVE:
+      return ex_move(sema, node, scope);
+    case AST_CONSTRUCT:
+      return ex_construct(sema, node, scope);
+    case AST_FUNC_DEF:
+      return ex_func_def(sema, node, scope);
+    case AST_FUNC_REF:
+      return ex_func_ref(sema, node, scope);
+    case AST_TERNARY:
+      return ex_ternary(sema, node, scope);
     case AST_ERROR:
+      /* 错误恢复产物：静默返回 void shadow（调用方按"错误/未定"处理，
+         避免级联二次诊断）。 */
+      return val_void(sema);
+    case AST_FILL: {
+      /* `<值, 次数>` 填充元素：只允许出现在**数组构造**与 make(...) 的
+         元素位——那两处由 AST_CONSTRUCT 数组分支 / AST_MAKE 自行识别处理，
+         不会把 fill 交给 sema_expr。走到这里说明它落在 struct/union 字段位
+         或别的表达式位置：明确报错。此前无 case，落 default 静默返回 void
+         shadow ⇒ 字段可赋值性校验被跳过、fill 节点被交给编译器，最终以
+         "unsupported expression node 'fill'" 这种内部文案暴露给用户。 */
+      diag_error(sema->diag, sema_loc(sema, *node),
+                 "fill element '<value, count>' is only allowed in array "
+                 "constructs and in make(...) element lists");
+      return val_void(sema);
+    }
     default:
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      /* 未处理的表达式节点 = 编译器自身缺陷（新增 AST kind 漏了分支）。
+         显式报内部诊断而不是静默返回 void shadow——后者会让漏分支表现为
+         "校验被跳过"，错误在更晚处以误导性形式出现。 */
+      diag_error(sema->diag, sema_loc(sema, *node),
+                 "internal: unhandled expression node '%s'",
+                 ast_kind_name((*node)->kind));
+      return val_void(sema);
   }
 }
 
@@ -2494,13 +2917,12 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
   ast_binary_t *b = (ast_binary_t *)*node;
   /* as：显式类型转换（普通中缀运算符）。lhs shadow 求值；rhs 是类型表达式，
-     走 ctfe 编译期真实求值（vm->comptime 模式，调用 ctfe_eval），拿真实
+     走 ctfe 编译期真实求值（调用 ctfe_eval），拿真实
      type value 的 data（type_t*）作为转换目标——遮蔽语义在此感知。 */
   if (token_is(b->op, "as")) {
     value_t *expr = sema_expr(sema, &b->lhs, scope);
-    if (value_is_error(sema->vm, expr) ||
-        value_is_type(expr, TYPE_KIND_VOID))
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+    if (is_poison(sema, expr))
+      return val_void(sema);
     /* rhs 是类型表达式：sema_resolve_type_slot 解析为真实类型并就地替换
        为 AST_TYPE_REF（与 AST_ARRAY/AST_ENUM_REF 同构——运行期 compiler
        的 compile_type_expr 命中 AST_TYPE_REF 发 LOAD_TYPE，保证 as 右侧
@@ -2512,7 +2934,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       op_type_name(expr, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "cast target is not a type (operand is %s)", tn);
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     value_t *result = value_explicit_cast(sema->vm, expr, target);
     if (value_is_error(sema->vm, result)) {
@@ -2521,7 +2943,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       sema_type_name(target, tt, sizeof(tt));
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "cannot cast %s to %s", tn, tt);
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     return result;
   }
@@ -2534,16 +2956,15 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
      （union_type_find_member）。合法 → 返回 bool shadow。 */
   if (token_is(b->op, "is")) {
     value_t *expr = sema_expr(sema, &b->lhs, scope);
-    if (value_is_error(sema->vm, expr) ||
-        value_is_type(expr, TYPE_KIND_VOID))
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+    if (is_poison(sema, expr))
+      return val_void(sema);
     const type_t *ut = value_type(expr);
     if (!ut || ut->kind != TYPE_KIND_UNION) {
       char tn[64];
       op_type_name(expr, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "is: left operand must be a union value, got %s", tn);
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     /* rhs：member 名（AST_IDENT）。编译期校验 member 存在 + 折叠为 tag
        整数（compiler 发 IS_TAG 立即数）。非 member 名表达式（如函数调用/
@@ -2551,7 +2972,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     if (!b->rhs || b->rhs->kind != AST_IDENT) {
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "is: right operand must be a member name");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     const strslice_t mname = ((ast_ident_t *)b->rhs)->name;
     const int mi = union_type_find_member(ut, mname);
@@ -2561,28 +2982,26 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "is: union %s has no member '%.*s'", tn,
                  (int)mname.len, mname.ptr);
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     /* 折叠 rhs → AST_INT_LIT（tag 值）：compiler 发 IS_TAG <tag> 立即数。
        与 comptime 折叠同模式：sema 阶段确定 member 归属，下游零感知。 */
     const union_member_t *m = union_type_member(ut, (size_t)mi);
     ast_node_t *lit = ast_int_lit_new(sema->arena, b->rhs->tok_begin,
                                       b->rhs->tok_end);
-    if (!lit) return value_make_shadow(sema->vm, sema->vm->type_void);
+    if (!lit) return val_void(sema);
     ((ast_int_lit_t *)lit)->value = m ? (uint64_t)m->tag : 0u;
     b->rhs = lit;
     return value_make_shadow(sema->vm, sema->vm->type_bool);
   }
 
   /* extends：类型兼容判断（编译期类型计算，ctfe 求值后折叠为常量）。
-     两侧都是类型表达式（类型即表达式），ctfe 在 vm->comptime 模式下真实
+     两侧都是类型表达式（类型即表达式），ctfe 真实
      求值（scope 中的类型值为真实 type value，非 shadow），value_extends
      分派 vtable->extends → bool。成功后把二元节点折叠为 AST_BOOL_LIT
      写回（保留兄弟链），下游编译器零感知——纯编译期，无运行时指令。 */
   if (token_is(b->op, "extends")) {
     vm_t *vm = sema->vm;
-    bool saved = vm->comptime;
-    vm->comptime = true;
     ctfe_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.vm = vm;
@@ -2590,7 +3009,6 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     ctx.budget = 100000;
     ctx.max_depth = 128;
     value_t *r = ctfe_eval(&ctx, *node);
-    vm->comptime = saved;
     if (!r || value_is_error(vm, r)) {
       const char *msg = NULL;
       if (r) {
@@ -2600,26 +3018,26 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "extends: not a compile-time type computation%s%s",
                  msg ? ": " : "", msg ? msg : "");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     if (value_type(r) != vm->type_bool) {
       char tn[64];
       sema_type_name(value_type(r), tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "extends must yield bool (got %s)", tn);
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     sema_ct_const_t ct;
     if (!sema_ct_encode(sema, r, &ct)) {
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "extends result cannot be folded");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     ast_node_t *lit = sema_ct_lit(sema, *node, &ct);
     if (!lit) {
       diag_error(sema->diag, sema_loc(sema, &b->base),
                  "extends result cannot be folded");
-      return value_make_shadow(sema->vm, sema->vm->type_void);
+      return val_void(sema);
     }
     lit->next = (*node)->next; /* 保留兄弟链 */
     *node = lit;
@@ -2664,14 +3082,14 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
   /* 错误恢复产物（error/void shadow）静默通过，避免级联二次诊断 */
   if (value_is_error(sema->vm, lhs) || value_is_error(sema->vm, rhs) ||
       value_is_type(lhs, TYPE_KIND_VOID) || value_is_type(rhs, TYPE_KIND_VOID))
-    return value_make_shadow(sema->vm, sema->vm->type_void);
+    return val_void(sema);
   value_t *(*op)(vm_t *, value_t *, value_t *) = binop_of(b->op);
   if (!op) {
     char ob[16];
     op_text(b->op, ob, sizeof(ob));
     diag_error(sema->diag, sema_loc(sema, &b->base),
                "unsupported binary operator '%s'", ob);
-    return value_make_shadow(sema->vm, sema->vm->type_void);
+    return val_void(sema);
   }
   value_t *result = op(sema->vm, lhs, rhs);
   if (value_is_error(sema->vm, result)) {
@@ -2681,7 +3099,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     op_type_name(rhs, rn, sizeof(rn));
     diag_error(sema->diag, sema_loc(sema, &b->base),
                "type mismatch: cannot apply '%s' to %s and %s", ob, ln, rn);
-    return value_make_shadow(sema->vm, sema->vm->type_void);
+    return val_void(sema);
   }
   /* 运行期协商预检（shadow 分派放行 → 运行期真实值才暴露的错误提前到
      sema）：两操作数类型不同时，模拟 VTABLE_BINARY 的协商——type_promote
@@ -2699,7 +3117,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
         op_type_name(rhs, rn, sizeof(rn));
         diag_error(sema->diag, sema_loc(sema, &b->base),
                    "type mismatch: cannot apply '%s' to %s and %s", ob, ln, rn);
-        return value_make_shadow(sema->vm, sema->vm->type_void);
+        return val_void(sema);
       }
     }
   }

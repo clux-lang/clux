@@ -1,0 +1,1 @@
+func main(): i32 { var n: [2 + 3]i32 = undefined; return 0; }

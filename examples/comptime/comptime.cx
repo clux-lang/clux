@@ -2,7 +2,7 @@ comptime func add(a: i32, b: i32): i32 {
     return a + b;
 }
 
-comptime var BASE: i32 = 100;
+comptime var BASE: const i32 = 100;
 comptime var SUM = add(BASE, 23);
 
 func main(): void {

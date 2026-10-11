@@ -246,7 +246,7 @@ ast_node_t *parse_primary(parser_t *p) {
        统一生成式入口 parse_func_like，')' 后按 ':'/'->' 分叉。必须先于
        末尾 TOKEN_TYPE_KEYWORD 的 AST_IDENT 兜底）。 */
     if (check_keyword(p, "func")) {
-        node = parse_func_like(p, AST_FUNC_TYPE);
+        node = parse_func_like(p, AST_FUNC_TYPE, "func");
         if (node) return node;
     }
 
@@ -1198,14 +1198,19 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             const token_t *op_tok = cur_token(p);
             uint32_t op_pos = p->pos;
 
-            /* 左值必须是标识符、下标（a[i] = v）、成员访问（p.x = v）或
-             * 解引用（r.* = v，m3-design §8.2 解引用 SET）。
+            /* 左值必须是标识符、下标（a[i] = v）、成员访问（p.x = v）、
+             * 解引用（r.* = v，m3-design §8.2 解引用 SET）或限定名
+             * （`<库>::<数据符号>` = v，M6 FFI 的 extern var）。
              * 下标/泛型索引（AST_INDEX）与泛型实例化语法重叠，parser 不区分——
              * sema 层做最终校验（数组下标赋值 / 泛型占位诊断）。
              * 成员访问目标（AST_MEMBER）支持 p.x = v、p.x += v 等复合赋值，
-             * 字段存在性/const 检查在 sema 层。 */
+             * 字段存在性/const 检查在 sema 层。
+             * AST_ENUM_REF 同理：parser 无法区分"枚举 variant / 模块成员 /
+             * 外部数据符号"，能不能赋值由 sema 判定（只有 extern var 可以，
+             * 其余给出精确诊断）——parser 在这里只放行语法形态。 */
             if (left->kind != AST_IDENT && left->kind != AST_INDEX &&
-                left->kind != AST_MEMBER && left->kind != AST_DEREF) {
+                left->kind != AST_MEMBER && left->kind != AST_DEREF &&
+                left->kind != AST_ENUM_REF) {
                 return ast_error_new(p->diag, p->tokens, p->arena, left->tok_begin, p->pos,
                                      "invalid assignment target");
             }

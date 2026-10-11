@@ -1,4 +1,4 @@
-comptime var A: i32 = 42;
+comptime var A: const i32 = 42;
 
 func main(): void {
     printf("%d\n", A);

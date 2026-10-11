@@ -22,6 +22,7 @@
 #include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
 #include "vm/type_func.h"
@@ -94,24 +95,77 @@ static bool type_shadowed_by_local_def(sema_t *sema, sema_scope_t *scope,
  * 失败 → 与"待绑定局部 type 遮蔽"同机制推迟到 3b 定义点兜底
  * （var_type_slot_reparse）。纯类型操作数（sizeof(i32)）本可在 3a 解析，
  * 统一推迟简化（3b 重解析幂等）。 */
-static bool type_has_ct_op(const ast_node_t *type_expr) {
-  switch (type_expr->kind) {
-    case AST_SIZEOF:
-    case AST_ALIGNOF:
-    case AST_TYPEOF:
-      return true;
-    case AST_ARRAY:
-      return type_has_ct_op(((ast_array_t *)type_expr)->length) ||
-             type_has_ct_op(((ast_array_t *)type_expr)->base_type);
-    case AST_OPTION:
-      return type_has_ct_op(((ast_option_t *)type_expr)->sub);
-    case AST_CONST:
-      return type_has_ct_op(((ast_const_t *)type_expr)->sub);
-    case AST_VOLATILE:
-      return type_has_ct_op(((ast_volatile_t *)type_expr)->sub);
-    default:
-      return false;
+/* ---- 类型槽位查询（基于共享 AST 遍历，见 parser/ast_walk.h）----
+ *
+ * 这两个查询过去各自手写递归遍历，覆盖面互不一致（见 ast_walk.h 说明）。
+ * 现在共享同一份"子节点事实"，只写谓词：同一类型槽位不会因查询不同而得到
+ * 不同结论。 */
+
+typedef struct {
+  unsigned want;  /* 需要探测的性质（PROBE_* 位或） */
+  unsigned found; /* 已命中的性质 */
+} type_slot_probe_t;
+
+#define PROBE_CT_OP 1u          /* sizeof / alignof / typeof 出现 */
+#define PROBE_NONLIT_BOUND 2u   /* 非字面量数组边界出现 */
+
+/* 探针：只在**所求性质**命中时终止遍历。
+   注意不能把两个性质合并进一次固定终止条件的遍历——例如 `[sizeof(a)]i32`
+   会先命中"非字面量边界"而终止，从而永远看不到 `sizeof`，使
+   type_has_ct_op 误报 false（槽位被 3a 提前解析 → 失败 → 快速失败闸门挡掉
+   3b）。请求驱动的 `want/found` 位掩码保证每个谓词都得到完整遍历。 */
+static ast_walk_action_t probe_type_slot(ast_node_t *n, void *user) {
+  type_slot_probe_t *p = (type_slot_probe_t *)user;
+  if ((p->want & PROBE_CT_OP) && !(p->found & PROBE_CT_OP) &&
+      (n->kind == AST_SIZEOF || n->kind == AST_ALIGNOF ||
+       n->kind == AST_TYPEOF)) {
+    p->found |= PROBE_CT_OP;
   }
+  if ((p->want & PROBE_NONLIT_BOUND) && !(p->found & PROBE_NONLIT_BOUND) &&
+      n->kind == AST_ARRAY) {
+    ast_node_t *len = ((ast_array_t *)n)->length;
+    if (!len || len->kind != AST_INT_LIT) p->found |= PROBE_NONLIT_BOUND;
+  }
+  return (p->found & p->want) == p->want ? AST_WALK_STOP : AST_WALK_CONTINUE;
+}
+
+/* 类型槽位是否具备 want 中的任一性质（各自完整遍历，见探针说明） */
+static bool type_slot_has(const ast_node_t *type_expr, unsigned want) {
+  if (!type_expr) return false;
+  type_slot_probe_t p = {.want = want, .found = 0};
+  ast_walk_preorder((ast_node_t *)type_expr, probe_type_slot, &p);
+  return (p.found & want) != 0;
+}
+
+/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符，m2-design §8）：
+ * 这些运算符是 SEMA→CTFE 桥梁——操作数按 shadow 语义取类型，依赖 Pass 3b
+ * 的 shadow 状态（局部变量定义点后才进 VM scope）。3a 求值会因变量未就绪
+ * 失败 → 与"待绑定局部 type 遮蔽"同机制推迟到 3b 定义点兜底
+ * （var_type_slot_reparse）。纯类型操作数（sizeof(i32)）本可在 3a 解析，
+ * 统一推迟简化（3b 重解析幂等）。 */
+static bool type_has_ct_op(const ast_node_t *type_expr) {
+  return type_slot_has(type_expr, PROBE_CT_OP);
+}
+
+/* 作用域链上是否存在**尚未求值的 comptime var**（同块靠前的 `comptime var C`） */
+static bool scope_has_unevaluated_comptime(sema_scope_t *scope) {
+  for (sema_scope_t *s = scope; s; s = s->parent) {
+    const vec_t *keys = s->symbols ? strmap_keys(s->symbols) : NULL;
+    size_t n = keys ? vec_len((vec_t *)keys) : 0;
+    for (size_t i = 0; i < n; i++) {
+      const char *k = (const char *)vec_get((vec_t *)keys, i);
+      sema_symbol_t *sym = k ? (sema_symbol_t *)strmap_get(s->symbols, k) : NULL;
+      if (sym && sym->is_comptime && !sym->ct_valid) return true;
+    }
+  }
+  return false;
+}
+
+/* 类型槽位里是否含**非字面量数组边界**（`[N]T` / `[N+1]T`：长度在 3b 定义点
+   才求值——comptime var 的常量此时才绑定进 VM 作用域。与"作用域内有未求值
+   comptime var"联合判定是否推迟槽位解析） */
+static bool type_has_nonliteral_array_bound(const ast_node_t *type_expr) {
+  return type_slot_has(type_expr, PROBE_NONLIT_BOUND);
 }
 
 /* 函数作用域树构建（全局 / 局部函数共用）：
@@ -233,7 +287,6 @@ static void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   sf->def = s;
   sf->scope = NULL;
   sf->param_scope = NULL;
-  sf->name = fn->name;
   sf->is_local = true;
   sema_func_id_alloc(sema, fn); /* fid 单一来源：创建函数对象即分配 */
   {
@@ -263,13 +316,23 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           /* 类型槽位解析：若名字被待绑定局部 type 遮蔽（type_shadowed_by_local_def），
              跳过 vm scope 解析（会错误落到外层全局），sym->type 留 NULL 由 3b
              shadow_var_def 定义点后兜底；否则按常规解析，失败也留 NULL
-             （3b 补报 "unknown type"）。 */
+             （3b 补报 "unknown type"）。
+
+             另两类同样推迟到 3b：
+             - 槽位含 sizeof/alignof/typeof（type_has_ct_op，依赖 3b shadow 状态）；
+             - 槽位含**非字面量数组边界**且作用域里有尚未求值的 comptime var
+               （`comptime var C = 3; var a: [C]i32` —— C 的常量在 3b 定义点求值，
+               3a 解析会因值未就绪失败并记录硬诊断，被 sema 的快速失败闸门挡掉
+               3b，使本地 comptime var 完全不可用）。 */
           if (!type_shadowed_by_local_def(sema, scope, vd->type_expr) &&
-              !type_has_ct_op(vd->type_expr)) {
+              !type_has_ct_op(vd->type_expr) &&
+              !(type_has_nonliteral_array_bound(vd->type_expr) &&
+                scope_has_unevaluated_comptime(scope))) {
             vt = sema_resolve_type_slot(sema, &vd->type_expr);
           }
         }
-        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = vt};
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = vt,
+                              .is_comptime = vd->is_comptime};
         if (!sema_scope_define(scope, vd->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate variable '%.*s'", (int)vd->name.len,
@@ -413,9 +476,9 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         sema_scope_t *body_scope =
             sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
         sema_scope_add_child(scope, body_scope);
-        sema->loop_depth++;
+        sema->fn.loop_depth++;
         build_block(sema, (ast_block_t *)wl->body, body_scope);
-        sema->loop_depth--;
+        sema->fn.loop_depth--;
         break; /* 循环体可能不执行，不贡献 definitely_returns */
       }
       case AST_DOWHILE: {
@@ -426,9 +489,9 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         sema_scope_t *body_scope =
             sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
         sema_scope_add_child(scope, body_scope);
-        sema->loop_depth++;
+        sema->fn.loop_depth++;
         build_block(sema, (ast_block_t *)dw->body, body_scope);
-        sema->loop_depth--;
+        sema->fn.loop_depth--;
         break;
       }
       case AST_FOR: {
@@ -459,9 +522,9 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         sema_scope_t *body_scope =
             sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, for_scope);
         sema_scope_add_child(for_scope, body_scope);
-        sema->loop_depth++;
+        sema->fn.loop_depth++;
         build_block(sema, (ast_block_t *)fr->body, body_scope);
-        sema->loop_depth--;
+        sema->fn.loop_depth--;
         break; /* 循环体可能不执行，不贡献 definitely_returns */
       }
       case AST_RETURN:
@@ -469,7 +532,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         break; /* 后续语句在循环顶部报 unreachable */
       case AST_BREAK:
       case AST_CONTINUE:
-        if (sema->loop_depth == 0) {
+        if (sema->fn.loop_depth == 0) {
           diag_error(sema->diag, sema_loc(sema, s), "'%.*s' outside loop",
                      (int)(s->kind == AST_BREAK ? 5 : 8),
                      s->kind == AST_BREAK ? "break" : "continue");
@@ -641,12 +704,12 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
       sema_scope_t *anchor = NULL;
       if (nm.len == 1 && nm.ptr[0] == '*') {
         anchor = sema->global_scope;
-      } else if (sema->func_def) {
-        for (ast_node_t *p = sema->func_def->params; p; p = p->next) {
+      } else if (sema->fn.def) {
+        for (ast_node_t *p = sema->fn.def->params; p; p = p->next) {
           ast_var_def_t *pvd = (ast_var_def_t *)p;
           if (pvd->name.len == nm.len &&
               memcmp(pvd->name.ptr, nm.ptr, nm.len) == 0) {
-            anchor = sema->local_func_param_scope;
+            anchor = sema->fn.local_func_param_scope;
             break;
           }
         }
@@ -799,22 +862,17 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
      VM scope（子层，遮蔽捕获——与运行时 func_vcall 结构一致）；捕获检查按
      字面量 fscope + param_scope 生效（引用外层局部 = 闭包，拒绝）。保存/
      恢复外层状态——本函数嵌套在外层 walk 中调用（外层可能正 walk 局部
-     函数体，local_func_base 非空）。 */
-  sema_scope_t *saved_lfb = sema->local_func_base;
-  sema_scope_t *saved_lfps = sema->local_func_param_scope;
-  ast_func_def_t *saved_fn = sema->func_def;
-  const type_t *saved_rt = sema->func_return_type;
-  bool saved_has_ret = sema->func_has_return;
-  bool saved_comptime = sema->walking_comptime;
+     函数体，local_func_base 非空）。**整体保存/恢复 sema->fn**：逐字段
+     备份极易漏字段（上下文新增字段时静默失配）。 */
+  sema_fn_ctx_t saved = sema_fn_ctx_enter(sema);
 
-  sema->local_func_base = fscope;
-  sema->local_func_param_scope = pscope;
-  sema->func_def = fn; /* walk_return §6/§9 判定用（captures 查当前闭包） */
-  sema->func_return_type = rt;
-  sema->func_has_return = false;
+  sema->fn.local_func_base = fscope;
+  sema->fn.local_func_param_scope = pscope;
+  sema->fn.def = fn; /* walk_return §6/§9 判定用（captures 查当前闭包） */
+  sema->fn.return_type = rt;
   /* 字面量 body 是真实调用点（最终进入运行时字节码）：body 内 comptime
      调用照常折叠（即使本字面量定义在 comptime func body 内）。 */
-  sema->walking_comptime = false;
+  sema->fn.walking_comptime = false;
 
   vm_push_scope(sema->vm); /* 捕获层（父） */
   for (ast_node_t *c = fn->captures; c; c = c->next) {
@@ -852,13 +910,8 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     sema_walk_function(sema, sf);
   }
 
-  /* 恢复外层 walk 上下文 */
-  sema->local_func_base = saved_lfb;
-  sema->local_func_param_scope = saved_lfps;
-  sema->func_def = saved_fn;
-  sema->func_return_type = saved_rt;
-  sema->func_has_return = saved_has_ret;
-  sema->walking_comptime = saved_comptime;
+  /* 恢复外层 walk 上下文（整体恢复，见入口保存） */
+  sema_fn_ctx_leave(sema, saved);
 
   /* 销毁临时作用域树（含 body 局部函数 fscope） */
   sema_scope_destroy(&fscope);

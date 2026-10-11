@@ -1,0 +1,34 @@
+// modules.cx -- 模块系统（M5）：import / export / :: 成员访问 / 代理导出
+//
+//   导入     import <alias> from "./path";     路径必须是相对路径（./ 或 ../），
+//            相对于**被导入文件所在目录**解析；可省略 `.cx` 扩展名；
+//            `\` 与 `/` 分隔符都可，路径会做词法归一化（折叠 `.` / `..`）。
+//   导出     export func / export var / export type / ... 进入模块导出表，
+//            未 export 的全局符号是本模块私有。
+//   访问     <alias>::<member>（`::` 是编译期命名空间解析，不经值）。
+//   代理导出  export * from "./path";  转发依赖模块的全部导出符号。
+//   单例     模块是运行期全局单例；同一文件被多处导入只编译/初始化一次
+//            （规范路径作为 key）。
+//   循环依赖  编译期检测并报错（依赖链打印）。
+
+import math from "./lib/math";
+import api from "./lib/api";
+
+func main(): i32 {
+    // ---- 直接导入：函数与导出变量 ----
+    if (math::add(20, 22) != 42) { return 1; }
+    if (math::PI != 42) { return 2; }
+
+    // ---- 模块内部调用私有符号：经导出函数间接可见 ----
+    if (math::internal_call() != 7) { return 3; }
+
+    // ---- 代理导出：api 自身不定义符号，转发 math 的导出 ----
+    if (api::add(1, 2) != 3) { return 4; }
+    if (api::PI != 42) { return 5; }
+
+    // ---- 同一模块被两处导入（直接 + 经代理）→ 同一实例 ----
+    if (api::add(0, 0) != math::add(0, 0)) { return 6; }
+
+    printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
+    return 0;
+}

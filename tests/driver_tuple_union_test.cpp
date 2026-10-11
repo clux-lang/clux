@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -418,5 +418,22 @@ TEST(Driver, RunFileCUnionEmptyMemberListRejected) {
       "}\n");
   /* 空 cunion 无 member -> 构造未知 member 编译期拒绝 */
   EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionFieldComptimeVarFolds) {
+  /* 回归：union/cunion 字段构造器里的 comptime 变量引用必须被折叠**并写回
+     AST**（`cf->value = value;`）。此前该槽传局部变量副本且不回写 ⇒ 折叠丢失
+     ⇒ comptime 符号引用漏到运行期（运行期不存在）→
+     `run: exec: undefined variable`。 */
+  std::string path = write_temp_file(
+      "comptime var N = 5;\n"
+      "union U { a: i32; b: i32; }\n"
+      "func main(): i32 {\n"
+      "  var u: U = .U{ .a = N };\n"
+      "  if (u.a != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }

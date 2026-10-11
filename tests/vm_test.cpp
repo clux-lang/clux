@@ -54,52 +54,52 @@ static uint64_t read_uint(const value_t *v) {
 /* 构造一个未 track 的 value_t*（堆分配，需手动释放） */
 static value_t *make_i32_raw(vm_t *vm, int32_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, &v);
-    return value_make_untracked(vm->alloc, vm->type_i32, data);
+    return value_alloc_shell(vm->alloc, vm->type_i32, data);
 }
 static value_t *make_i8_raw(vm_t *vm, int8_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_i8, &v);
-    return value_make_untracked(vm->alloc, vm->type_i8, data);
+    return value_alloc_shell(vm->alloc, vm->type_i8, data);
 }
 static value_t *make_u32_raw(vm_t *vm, uint32_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_u32, &v);
-    return value_make_untracked(vm->alloc, vm->type_u32, data);
+    return value_alloc_shell(vm->alloc, vm->type_u32, data);
 }
 static value_t *make_u64_raw(vm_t *vm, uint64_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_u64, &v);
-    return value_make_untracked(vm->alloc, vm->type_u64, data);
+    return value_alloc_shell(vm->alloc, vm->type_u64, data);
 }
 static value_t *make_f32_raw(vm_t *vm, float v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_f32, &v);
-    return value_make_untracked(vm->alloc, vm->type_f32, data);
+    return value_alloc_shell(vm->alloc, vm->type_f32, data);
 }
 static value_t *make_f64_raw(vm_t *vm, double v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_f64, &v);
-    return value_make_untracked(vm->alloc, vm->type_f64, data);
+    return value_alloc_shell(vm->alloc, vm->type_f64, data);
 }
 [[maybe_unused]] static value_t *make_bool_raw(vm_t *vm, bool v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_bool, &v);
-    return value_make_untracked(vm->alloc, vm->type_bool, data);
+    return value_alloc_shell(vm->alloc, vm->type_bool, data);
 }
 static value_t *make_str_raw(vm_t *vm, const char *s) {
     const char *sv = vm_str_intern_cstr(vm, s);
     void *data = value_alloc_data_copy(vm->alloc, vm->type_str, &sv);
-    return value_make_untracked(vm->alloc, vm->type_str, data);
+    return value_alloc_shell(vm->alloc, vm->type_str, data);
 }
 [[maybe_unused]] static value_t *make_i16_raw(vm_t *vm, int16_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_i16, &v);
-    return value_make_untracked(vm->alloc, vm->type_i16, data);
+    return value_alloc_shell(vm->alloc, vm->type_i16, data);
 }
 [[maybe_unused]] static value_t *make_i64_raw(vm_t *vm, int64_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_i64, &v);
-    return value_make_untracked(vm->alloc, vm->type_i64, data);
+    return value_alloc_shell(vm->alloc, vm->type_i64, data);
 }
 [[maybe_unused]] static value_t *make_u8_raw(vm_t *vm, uint8_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_u8, &v);
-    return value_make_untracked(vm->alloc, vm->type_u8, data);
+    return value_alloc_shell(vm->alloc, vm->type_u8, data);
 }
 [[maybe_unused]] static value_t *make_u16_raw(vm_t *vm, uint16_t v) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_u16, &v);
-    return value_make_untracked(vm->alloc, vm->type_u16, data);
+    return value_alloc_shell(vm->alloc, vm->type_u16, data);
 }
 
 /* 释放未 track 的 raw value（dispose data + free struct） */
@@ -403,7 +403,7 @@ TEST_F(VmQualifiedTypes, ValueKindAndIsType) {
     EXPECT_TRUE(value_is_type(bv, TYPE_KIND_BOOL));
 
     /* NULL type value → VOID kind（value_is_void 语义：无类型） */
-    value_t *voidv = value_make_untracked(vm->alloc, NULL, NULL);
+    value_t *voidv = value_alloc_shell(vm->alloc, NULL, NULL);
     EXPECT_EQ(value_kind(voidv), TYPE_KIND_VOID);
     EXPECT_TRUE(value_is_type(voidv, TYPE_KIND_VOID));
 
@@ -417,10 +417,10 @@ TEST_F(VmQualifiedTypes, ValueHasConst) {
     const type_t *ci32 = type_const_intern(vm, vm->type_i32);
     const type_t *vci = type_volatile_intern(vm, ci32);
 
-    value_t *plain = value_make_untracked(vm->alloc, vm->type_i32, NULL);
-    value_t *ci = value_make_untracked(vm->alloc, ci32, NULL);
-    value_t *vci_v = value_make_untracked(vm->alloc, vci, NULL);
-    value_t *vi = value_make_untracked(
+    value_t *plain = value_alloc_shell(vm->alloc, vm->type_i32, NULL);
+    value_t *ci = value_alloc_shell(vm->alloc, ci32, NULL);
+    value_t *vci_v = value_alloc_shell(vm->alloc, vci, NULL);
+    value_t *vi = value_alloc_shell(
         vm->alloc, type_volatile_intern(vm, vm->type_i32), NULL);
 
     EXPECT_FALSE(value_has_const(plain));
@@ -523,9 +523,9 @@ TEST_F(VmQualifiedTypes, ConstValueArithmeticProxies) {
     const type_t *ci32 = type_const_intern(vm, vm->type_i32);
     int32_t lhs = 3, rhs = 4;
     void *ld = value_alloc_data_copy(vm->alloc, ci32, &lhs);
-    value_t *lv = value_make_untracked(vm->alloc, ci32, ld);
+    value_t *lv = value_alloc_shell(vm->alloc, ci32, ld);
     void *rd = value_alloc_data_copy(vm->alloc, vm->type_i32, &rhs);
-    value_t *rv = value_make_untracked(vm->alloc, vm->type_i32, rd);
+    value_t *rv = value_alloc_shell(vm->alloc, vm->type_i32, rd);
 
     value_t *sum = value_add(vm, lv, rv);
     ASSERT_NE(sum, nullptr);
@@ -543,9 +543,9 @@ TEST_F(VmQualifiedTypes, VolatileValueAssignProxies) {
     const type_t *vi32 = type_volatile_intern(vm, vm->type_i32);
     int32_t src = 42;
     void *sd = value_alloc_data_copy(vm->alloc, vm->type_i32, &src);
-    value_t *sv = value_make_untracked(vm->alloc, vm->type_i32, sd);
+    value_t *sv = value_alloc_shell(vm->alloc, vm->type_i32, sd);
     void *dd = value_alloc_data_copy(vm->alloc, vi32, &src);
-    value_t *dv = value_make_untracked(vm->alloc, vi32, dd);
+    value_t *dv = value_alloc_shell(vm->alloc, vi32, dd);
 
     value_t *res = value_assign(vm, dv, sv);
     ASSERT_NE(res, nullptr);
@@ -639,7 +639,7 @@ TEST_F(ValueCore, CloneVoidReturnsNull) {
 TEST_F(ValueCore, DisposeNullIsSafe) {
     value_dispose(vm, nullptr); /* 不应崩溃 */
 
-    value_t *v = value_make_untracked(vm->alloc, nullptr, nullptr);
+    value_t *v = value_alloc_shell(vm->alloc, nullptr, nullptr);
     value_dispose(vm, v); /* type==NULL，no-op on data */
     allocator_free(vm->alloc, (void **)&v);
 }
@@ -903,7 +903,7 @@ static value_t *sum_variadic(vm_t *vm, func_t *self, size_t argc, value_t **args
 
 TEST_F(ValueCore, VariadicFuncAcceptsExtraArgs) {
     const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_i64, true);
-    /* func value：data 存 func_t*，type 即签名类型；untracked，手动释放 */
+    /* func value：data 存 func_t*，type 即签名类型；由 vm->global_scope 拥有（统一释放） */
     value_t *fv = func_new(vm, sum_variadic, vm->global_scope,
                            vm->root_scope, sig, STRSLICE_LIT("sum_variadic"));
     ASSERT_NE(fv, nullptr);
@@ -922,14 +922,13 @@ TEST_F(ValueCore, VariadicFuncAcceptsExtraArgs) {
     raw_free(vm, a);
     raw_free(vm, b);
     raw_free(vm, c);
-    raw_free(vm, fv);
 }
 
 TEST_F(ValueCore, NonVariadicFuncRejectsExtraArgs) {
     /* 固定参数函数：1 个 i32 参数 */
     const type_t *params[1] = { NULL };  /* 无类型约束，但 param_count=1 */
     const type_t *sig = type_func_sig(vm, params, 1, vm->type_void, false);
-    /* func value：data 存 func_t*，type 即签名类型；untracked，手动释放 */
+    /* func value：data 存 func_t*，type 即签名类型；由 vm->global_scope 拥有（统一释放） */
     value_t *fv = func_new(vm, sum_variadic, vm->global_scope,
                            vm->root_scope, sig, STRSLICE_LIT("fixed"));
     ASSERT_NE(fv, nullptr);
@@ -945,7 +944,6 @@ TEST_F(ValueCore, NonVariadicFuncRejectsExtraArgs) {
 
     raw_free(vm, a);
     raw_free(vm, b);
-    raw_free(vm, fv);
 }
 
 /* ---- value_assign 分派 ---- */
@@ -997,11 +995,11 @@ TEST_F(ValueCore, AssignBoolTypeMismatchReturnsError) {
 TEST_F(ValueCore, AssignStrDeepCopy) {
     const char *s1 = vm_str_intern_cstr(vm, "hello");
     void *d1 = value_alloc_data_copy(vm->alloc, vm->type_str, &s1);
-    value_t *dst = value_make_untracked(vm->alloc, vm->type_str, d1);
+    value_t *dst = value_alloc_shell(vm->alloc, vm->type_str, d1);
 
     const char *s2 = vm_str_intern_cstr(vm, "world");
     void *d2 = value_alloc_data_copy(vm->alloc, vm->type_str, &s2);
-    value_t *src = value_make_untracked(vm->alloc, vm->type_str, d2);
+    value_t *src = value_alloc_shell(vm->alloc, vm->type_str, d2);
 
     value_t *r = value_assign(vm, dst, src);
     ASSERT_EQ(r, dst);
@@ -1962,7 +1960,8 @@ TEST_F(ScopeMech, LookupTraversesParentChain) {
 
 TEST_F(ScopeMech, ValueScopeCurrentScope) {
     /* value_make 自动填充 frame：还原出的 scope == current_scope */
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    int32_t seven = 7;
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, &seven);
     value_t *v = value_make(vm, vm->type_i32, data); /* auto-track 到 current_scope */
     EXPECT_EQ(value_scope(v), vm->current_scope);
     EXPECT_EQ(value_frame(v), &vm->current_scope->frame);
@@ -1972,7 +1971,8 @@ TEST_F(ScopeMech, ValueScopeNestedScope) {
     vm_push_scope(vm);
     scope_t *child = vm->current_scope;
 
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    int32_t seven = 7;
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, &seven);
     value_t *v = value_make(vm, vm->type_i32, data);
     EXPECT_EQ(value_scope(v), child);
     EXPECT_EQ(value_frame(v), &child->frame);
@@ -1988,7 +1988,8 @@ TEST_F(ScopeMech, ValueScopeFrameParentChain) {
     EXPECT_EQ(scope_from_frame(&child->frame), child);
     EXPECT_EQ(scope_from_frame(&vm->root_scope->frame), vm->root_scope);
 
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    int32_t seven = 7;
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, &seven);
     value_t *v = value_make(vm, vm->type_i32, data);
     const scope_frame_t *f = value_frame(v);
     ASSERT_NE(f, nullptr);
@@ -1999,7 +2000,8 @@ TEST_F(ScopeMech, ValueScopeFrameParentChain) {
 
 TEST_F(ScopeMech, ValueScopeCloneTracksNewScope) {
     /* value_clone 走 vtable clone → value_make：副本 frame 指向 clone 时 current_scope */
-    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, (int32_t[]){7});
+    int32_t seven = 7;
+    void *data = value_alloc_data_copy(vm->alloc, vm->type_i32, &seven);
     value_t *v = value_make(vm, vm->type_i32, data);
     ASSERT_EQ(value_scope(v), vm->current_scope);
 
@@ -2459,11 +2461,10 @@ TEST_F(ValueCore, LiftOptionSome) {
 
 /* 提升要求 inner 匹配：i64 提升到 ?i32 → error */
 TEST_F(ValueCore, LiftOptionInnerMismatchFails) {
-    const type_t *opt = type_option_intern(vm, vm->type_i32);
     value_t *i = make_i32_raw(vm, 7);
     value_t *o = value_lift_option(vm, i, vm->type_i64); /* 目标非 option */
     EXPECT_TRUE(value_is_error(vm, o));
-    value_t *i64 = value_make_untracked(vm->alloc, vm->type_i64, nullptr);
+    value_t *i64 = value_alloc_shell(vm->alloc, vm->type_i64, nullptr);
     (void)i64;
     raw_free(vm, i);
     raw_free(vm, i64);
@@ -2483,7 +2484,7 @@ TEST_F(ValueCore, OptionCloneAndAssign) {
     EXPECT_EQ(*(const int32_t *)option_value(value_data(c), opt), 5);
 
     /* assign 到 none 目标 */
-    value_t *dst = value_make_untracked(vm->alloc, opt, value_alloc_data(vm->alloc, opt));
+    value_t *dst = value_alloc_shell(vm->alloc, opt, value_alloc_data(vm->alloc, opt));
     value_assign(vm, dst, o);
     EXPECT_TRUE(*(const bool *)value_data(dst));
     EXPECT_EQ(*(const int32_t *)option_value(value_data(dst), opt), 5);

@@ -1,0 +1,2 @@
+comptime var N = 5;
+func main(): i32 { var n: [N]i32 = undefined; return 0; }

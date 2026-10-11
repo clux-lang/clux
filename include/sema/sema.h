@@ -48,7 +48,6 @@ typedef struct sema_func_t {
     sema_scope_t *param_scope; /* 参数层：scope 的子作用域，参数符号注册在此
                                   （镜像运行时 func_vcall 的参数匿名层）。
                                   函数体 block 挂此层下——参数遮蔽捕获。 */
-    strslice_t    name;   /* 函数名（诊断用） */
     bool          is_local; /* 局部函数（块内定义）：3b walk_block 提升签名
                                + 捕获检查（fscope parent = 定义点块作用域） */
     bool          is_literal_owned; /* 函数字面量 body 内登记的局部函数：
@@ -63,7 +62,10 @@ typedef struct sema_func_t {
  * - type: 类型单例（vm 池 intern，按指针去重：同一类型只登记一次）
  * - name: 具名类型标识 "__type_N"（arena 分配，AST_TYPE_REF 引用标识；
  *   不是显示名——显示名保留在 type->name）
- * - id:   DEFINE_TYPE 的 u32 id 操作数（TYPE_ID_PROGRAM_BASE + index）
+ * - id:   DEFINE_TYPE 的 u32 id 操作数（**全 VM 唯一**，type_id_alloc 分配）
+ * - index: 本类型在 sema->types 中的登记下标。id 已不再与下标一一对应（见
+ *   vm/type.h 的 type_id_alloc 说明），任何需要"数组下标"的地方（如 hoist 区
+ *   的 done 三态表）都必须用 index，不能用 id - TYPE_ID_PROGRAM_BASE 推算。
  *
  * 与 funcs 同构（m2-design §comptime"类型提升"）：sema 把解析过的每个
  * 类型登记到此队列，compiler 据此生成 hoist 类型提升区（**两遍扫描**：
@@ -75,8 +77,92 @@ typedef struct sema_func_t {
 typedef struct sema_type_t {
     const type_t *type;    /* vm 池 intern 单例 */
     strslice_t    name;    /* "__type_N"（sema arena 生命周期） */
-    uint32_t      id;      /* TYPE_ID_PROGRAM_BASE + index */
+    uint32_t      id;      /* 全 VM 唯一 program id（type_id_alloc） */
+    uint32_t      index;   /* sema->types 中的登记下标（0 起） */
 } sema_type_t;
+
+/**
+ * sema_fn_ctx_t: **当前正在 walk 的函数**的上下文（Pass 3 期间设置）
+ *
+ * 收敛原先散落在 sema_t 上的多个"函数 walk 状态"字段：它们总是一起被设置、
+ * 一起被保存/恢复，混在 sema_t 里既看不出边界，也容易漏掉恢复（曾出现
+ * `walking_comptime` 忘记复位导致后续函数被误判为 comptime body）。
+ *
+ * - return_type: 函数返回类型（NULL = void）；walk_return R2 校验用
+ * - def: 当前函数定义 AST；walk_return R3 判定"返回 ref 是否来自参数"
+ *   ——参数符号与函数体顶层变量都注册在 param_scope，sema_scope_find_local
+ *   无法区分，须遍历真实参数列表（fn->params）
+ * - walking_comptime: 正在 walk comptime func 体（body 内调用 comptime func
+ *   只做 shadow 类型检查，CTFE 折叠仅发生在真实调用点）
+ * - local_func_base / local_func_param_scope: 捕获检查上下文（非 NULL = 正在
+ *   walk 局部函数体）：fscope parent = 定义点块作用域；引用外层局部符号报
+ *   "无闭包"；参数层用于放行"参数遮蔽捕获"
+ * - in_call_callee: 当前 AST_IDENT 求值是调用点 callee（非值引用）——
+ *   func_capture_tdz 仅对调用点生效
+ * - loop_depth: 循环嵌套深度（0 = 不在循环中），break/continue 位置检查用
+ */
+typedef struct sema_fn_ctx_t {
+    const type_t   *return_type;
+    ast_func_def_t *def;
+    bool            walking_comptime;
+    sema_scope_t   *local_func_base;
+    sema_scope_t   *local_func_param_scope;
+    bool            in_call_callee;
+    int             loop_depth;
+} sema_fn_ctx_t;
+
+/**
+ * sema_expr_ctx_t: **表达式求值**期间共享的上下文
+ *
+ * - anon_ct/anon_ct_depth: 匿名构造目标类型栈（`.{ ... }`，type=NULL 的
+ *   AST_CONSTRUCT）：入栈时机——var 声明已初始化分支、简单/复合赋值右值、
+ *   struct 具名构造字段递归、函数调用实参；栈空时匿名构造报错。
+ */
+typedef struct sema_expr_ctx_t {
+    const type_t *anon_ct[16];
+    size_t        anon_ct_depth;
+} sema_expr_ctx_t;
+
+/* ---- §4/R1 fatal 消费点：**唯一判据入口** ----
+ *
+ * fatal 值（`fatal *T` / `fatal []T`）是"必须被消费"的所有权载体，合法消费点
+ * 只有两个：**move(x)**（AST_MOVE）与 **return x**（walk_return）。三处判定
+ * （move 标记、return 标记、函数结束的未消费检查）统一走本组接口，判据只此
+ * 一处定义——此前分散在三段代码里各写一遍 `PTR_FATAL || SLICE_FATAL`，其中
+ * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。 */
+static inline bool sema_type_is_fatal(const type_t *t) {
+  return t && (t->kind == TYPE_KIND_PTR_FATAL ||
+               t->kind == TYPE_KIND_SLICE_FATAL);
+}
+static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
+  if (sym) sym->moved = true;
+}
+static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
+  return sym && sym->moved;
+}
+struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
+
+
+
+/**
+ * sema_import_resolver_t: **import 解析/编译回调**（驱动层注入）
+ *
+ * sema 遇 `AST_IMPORT` / `AST_REEXPORT` 时调用注入的回调，由驱动层负责：
+ * 路径分类与规范化（module 层的 module_path_*）、存在性检查、递归编译
+ * （模块缓存 + 循环依赖检测）以及全部诊断。
+ *
+ * 目的：**消除 sema → driver 反向依赖**。sema 不再 include 任何 driver 头、
+ * 不认识 module_t 的内容（只把返回的不透明句柄存进 SEMA_SYM_MODULE 符号）、
+ * 也不做路径处理——依赖方向保持单向（driver → sema）。
+ *
+ * 返回：被导入模块的句柄（`module_t *`，驱动层已注册进 vm->modules）；
+ *       NULL = 失败，诊断已由回调记录（sema 静默跳过）。
+ *       未注入回调时 sema 对 import 报"当前编译模式不支持 import"。
+ */
+typedef struct module_t *(*sema_import_resolver_t)(void *user,
+                                                   struct sema_t *sema,
+                                                   ast_node_t *import_node,
+                                                   strslice_t raw);
 
 typedef struct sema_t {
     vm_t         *vm;           /* 复用 VM 类型注册表 + vtable + shadow value */
@@ -95,40 +181,10 @@ typedef struct sema_t {
        sema 拥有元素生命周期。 */
     vec_t        *types;        /* sema_type_t* */
 
-    /* 函数上下文（Pass 3 walk 时设置） */
-    const type_t *func_return_type; /* NULL = void */
-    bool          func_has_return;
-    /* 当前正在 walk 的函数定义（sema_walk_function 设置，walk_return 的
-       R3 返回 ref 来源检查用）：§6 判定返回 ref 是否来自参数——参数符号
-       在 param_scope 直系，但函数体顶层变量也注册在 param_scope（body
-       不建独立作用域），sema_scope_find_local 无法区分 → 遍历真实参数
-       列表（fn->params）判定。 */
-    ast_func_def_t *func_def;
-
-    /* comptime 函数体 walk 标志：sema_walk_function 对 comptime func 置
-       true（保存/恢复）。walk 期间 body 内对 comptime func 的调用只做
-       普通 shadow 类型检查（实参是参数 shadow value，无法编译期求值）——
-       CTFE 折叠仅发生在真实调用点（非 comptime body 内）。 */
-    bool          walking_comptime;
-
-    /* 捕获检查上下文（Pass 3b walk 时设置）：非 NULL = 正在 walk 局部函数体，
-       fscope parent = 定义点块作用域（同块局部函数互相可见）。sema_expr
-       引用外层局部符号（非 fscope 直系、非 global）时据此报"无闭包"——
-       运行时函数体查找链只有参数 + 全局（closure_scope 为空，调用时临时接
-       root_scope），外层局部不可见。
-       local_func_param_scope：函数参数层（fscope 子 scope）——参数符号
-       归属检查（参数遮蔽捕获，参数与捕获同属函数自身符号，放行）。 */
-    sema_scope_t *local_func_base;
-    sema_scope_t *local_func_param_scope;
-
-    /* 调用点 callee 上下文（AST_CALL 分支设置）：true = 当前 AST_IDENT 求值
-       是函数调用点 callee（非值引用）。func_capture_tdz（闭包捕获 TDZ 检查）
-       仅对调用点生效——值引用（var f = b，f/b 浅拷贝共享 func_t）放行，定义
-       点前调用仍编译期拦截。sema_expr 递归进入 callee 前置位、返回后复位。 */
-    bool          in_call_callee;
-
-    /* 循环上下文 */
-    int           loop_depth;       /* 0 = 不在循环中 */
+    /* **当前函数 walk 上下文**：Pass 3 期间设置/保存恢复的全部"当前函数"
+       状态（返回类型、函数定义、comptime body 标志、捕获检查上下文、
+       调用点 callee 标志、循环深度）。字段语义见 sema_fn_ctx_t 文档。 */
+    sema_fn_ctx_t fn;
 
     /* 函数 id 分配计数器：sema 登记每个函数定义（全局函数 pass1_names、
        局部函数 build_local_func、函数字面量 sema_check_func_literal / CTFE
@@ -137,20 +193,47 @@ typedef struct sema_t {
        comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
     uint32_t      func_id_next;
 
-    /* 匿名构造目标类型栈（. { ... }，type=NULL 的 AST_CONSTRUCT）：sema_expr
-       遇匿名构造时取栈顶推断目标类型。入栈时机——var 声明已初始化分支、
-       简单/复合赋值右值、struct 具名构造字段递归（外层类型已知 → 字段类型
-       已知 → 嵌套匿名构造注入）、函数调用实参（参数类型已知）。无上下文时
-       栈空 → 匿名构造报错。 */
-    const type_t *anon_ct[16];
-    size_t        anon_ct_depth;
+    /* **表达式求值上下文**：匿名构造目标类型栈（见 sema_expr_ctx_t）。 */
+    sema_expr_ctx_t ex;
 
-    /* M5 模块系统：编译路径栈（vec_t<const char*>，循环依赖检测）。
-       sema 遇 AST_IMPORT 时递归调用 compile_module，传入此栈。
-       由 compile_module 在 sema_create 前创建并传入。NULL = 不做循环检测
-       （单模块场景）。借用，sema 不拥有。 */
-    vec_t        *path_stack;
+    /* import 解析/编译回调（驱动层注入，见 sema_import_resolver_t）。
+       未注入（NULL）时 import 语句报"当前编译模式不支持 import"——
+       sema 因此完全不认识 driver 层与 module_t 内容。借用，sema 不拥有。 */
+    struct {
+        sema_import_resolver_t resolve;
+        void                  *user;
+    } imports;
 } sema_t;
+
+/* ---- 函数 walk 上下文的配对进入/离开 ----
+ *
+ * `sema_walk_function` 可被嵌套调用（`sema_check_func_literal` 在外层 walk 中
+ * 调用它走函数字面量 body），因此必须"进入时整体保存、离开时整体恢复"。
+ * 逐字段备份/恢复曾经漏过字段（上下文新增字段即静默失配）；用这组接口把
+ * "整体快照 + 整体恢复"写成显式配对，且**进入点必须在写入任何字段之前**。 */
+static inline sema_fn_ctx_t sema_fn_ctx_enter(const sema_t *sema) {
+  return sema->fn;
+}
+static inline void sema_fn_ctx_leave(sema_t *sema, sema_fn_ctx_t saved) {
+  sema->fn = saved;
+}
+
+/* ---- 匿名构造目标类型栈（anon_ct / anon_ct_depth）的配对接口 ----
+ *
+ * 必须成对使用：`sema_anon_push` 可能因类型为 NULL 或栈满（上限 16 层）
+ * **不入栈**，返回的令牌要原样交给 `sema_anon_pop`。此前各调用点手写
+ * "有条件压栈 + 无条件弹栈"（12 处如此），`ft == NULL` 或栈满时弹栈会
+ * 误减外层上下文，使后续 `.{}` 推断到错误的目标类型（静默错误类型）。
+ */
+static inline bool sema_anon_push(sema_t *sema, const type_t *t) {
+    if (!sema || !t || sema->ex.anon_ct_depth >= 16) return false;
+    sema->ex.anon_ct[sema->ex.anon_ct_depth++] = t;
+    return true;
+}
+
+static inline void sema_anon_pop(sema_t *sema, bool pushed) {
+    if (sema && pushed && sema->ex.anon_ct_depth > 0) sema->ex.anon_ct_depth--;
+}
 
 /* ---- 公共 API ---- */
 
@@ -169,11 +252,16 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
  * 创建 sema 上下文。vm 提供类型注册表/vtable/shadow value；diag 收集诊断；
  * tokens 是 token pool（借用，不拥有），用于把 AST 节点的 tok_begin 下标
  * 解析为源码位置；arena 是 AST 折叠分配器（comptime 折叠用，借用）。
- * path_stack 是 M5 模块编译路径栈（借用，循环依赖检测），单模块可传 NULL。
  * Panics on out-of-memory. Returns NULL for invalid arguments.
  */
-sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens, arena_t *arena,
-                    vec_t *path_stack);
+sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens, arena_t *arena);
+
+/**
+ * 注入 import 解析回调（见 sema_import_resolver_t）。driver 在 sema_create 后、
+ * sema_analyze 前调用。user 是回调上下文（借用，sema 不拥有）。
+ */
+void sema_set_import_resolver(sema_t *sema, sema_import_resolver_t resolve,
+                              void *user);
 
 /**
  * 三遍扫描：Pass 1 函数名收集 → Pass 2 类型解析（func_t 签名）→

@@ -534,7 +534,9 @@ static void define_cunion(compiler_t *c, const sema_type_t *st, uint8_t *done,
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count) {
   if (!st) return;
-  size_t idx = (size_t)(st->id - TYPE_ID_PROGRAM_BASE);
+  /* done 下标用**登记下标**（sema_type_t::index），不能用 id - BASE 推算：
+     id 已是全 VM 全局分配（跨模块不连续），见 vm/type.h 的 type_id_alloc。 */
+  size_t idx = (size_t)st->index;
   if (idx >= count) return;
   if (done[idx] == TYPE_DEF_DONE) return; /* 共享依赖只定义一次 */
   if (done[idx] == TYPE_DEF_IN_PROGRESS) {
@@ -628,7 +630,8 @@ void compile_hoist_define(compiler_t *c) {
   size_t n = vec_len(c->sema_types);
   if (n == 0) return;
 
-  /* done 数组：sema 分配的 program id 连续（TYPE_ID_PROGRAM_BASE + 下标） */
+  /* done 数组：按 sema->types 的**登记下标**索引（sema_type_t::index）；
+     id 是全 VM 全局分配的，模块内不再连续（见 vm/type.h 的 type_id_alloc）。 */
   uint8_t *done = (uint8_t *)allocator_new_ex(
       c->alloc, "uint8_t", sizeof(uint8_t), NULL, NULL, NULL, n);
   if (!done) panic("compiler: out of memory allocating hoist done set");

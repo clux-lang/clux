@@ -1,0 +1,6 @@
+struct T { a: i32; }
+func main(): i32 {
+  var t: T = .T{ <5, 3> };
+  printf("%d\n", t.a);
+  return 0;
+}

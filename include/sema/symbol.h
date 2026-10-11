@@ -6,7 +6,6 @@
 #include "core/vec.h"
 #include "parser/ast_node.h"
 #include "vm/type.h"
-#include "vm/scope_frame.h"
 #include <stdbool.h>
 
 /* M5: 前向声明，SEMA_SYM_MODULE 符号引用 module_t* */
@@ -43,6 +42,9 @@ typedef enum {
   SEMA_SYM_FUNC,   /* 函数（用户函数 + 内建函数，如 printf） */
   SEMA_SYM_TYPE,   /* 类型定义（type 名字） */
   SEMA_SYM_MODULE, /* 模块（M5：import 别名，关联 module_t*，:: 成员访问用） */
+SEMA_SYM_EXTERN_LIB, /* M6 FFI：`extern lib "..." as <名>` 的库别名（:: 成员访问用） */
+SEMA_SYM_EXTERN_VAR, /* M6 FFI：`extern var <库>::<名>: T;` 的**数据符号**
+                        （限定名 "<库>::<名>" 注册；可读可写，运行期 dlsym 解析） */
 } sema_symbol_kind_t;
 
 /* ---- 符号 ---- */
@@ -159,7 +161,6 @@ typedef struct _sema_symbol_t sema_symbol_t;
 
 struct _sema_scope_t {
   struct _sema_scope_t *parent;
-  scope_frame_t  frame;      /* 父子关系节点（与 parent 同步，value 借用） */
   allocator_t    *alloc;    /* 借用调用方的 allocator（内部操作自取） */
   vec_t          *children; /* sema_scope_t* 子作用域（按出现顺序，不拥有） */
   strmap_t       *symbols;  /* name -> sema_symbol_t*（owns_value=true） */

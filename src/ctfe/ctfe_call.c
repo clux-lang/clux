@@ -1,4 +1,5 @@
 #include "ctfe/ctfe.h"
+#include "sema/sema.h"
 
 #include "core/string.h"
 #include "core/strslice.h"
@@ -93,10 +94,31 @@ value_t *ctfe_call_ast_fn(ctfe_ctx_t *ctx, ast_func_def_t *fn,
     return ret;
 }
 
-/* 调用已求值的 func value（内置 C 函数 / 运行时注册函数）：求值实参 → value_call */
+/* 调用已求值的 func value：
+   - 内建 C 函数（printf/upgrade 等，cfunc != NULL）→ 求值实参 → value_call
+   - **程序函数引用**（sema 把函数名折叠成 AST_FUNC_REF 后的产物，cfunc == NULL）
+     → value_call 会在 func_vcall 里报 "func call: invalid function"，必须按
+     AST 解释执行（m2-design §9 决策点 2：非 comptime 函数在常量槽位被尝试
+     编译期求值）。 */
 value_t *ctfe_call_value(ctfe_ctx_t *ctx, value_t *callee,
                          ast_node_t *args) {
     vm_t *vm = ctx->vm;
+
+    if (!value_is_shadow(callee) && ctx->sema && value_type(callee)) {
+        const type_t *ct = value_type(callee);
+        if (ct->vtable && ct->vtable->call) {
+            func_t *fn = *(func_t **)value_data(callee);
+            if (fn && !fn->cfunc) {
+                sema_func_t *sf = sema_func_by_id(ctx->sema, fn->id);
+                if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+                    return ctfe_call_ast_fn(ctx, (ast_func_def_t *)sf->def, args);
+                return ctfe_errf(ctx,
+                    "ctfe: function id %u is not a clux function definition",
+                    (unsigned)fn->id);
+            }
+        }
+    }
+
     size_t argc = ctfe_count_siblings(args);
     value_t *av[argc > 0 ? argc : 1];
     size_t i = 0;

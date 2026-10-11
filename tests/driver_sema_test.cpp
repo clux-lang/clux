@@ -1,4 +1,4 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -203,6 +203,68 @@ TEST(Driver, RunFileParamShadowsCaptureReturnsZero) {
       "  var x:i32 = 100;\n"
       "  var f = func |x| (x:i32):i32 { return x; };\n"
       "  return f(7);\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ================================================================
+ * 回归：编译失败路径不得泄漏 sema 作用域树
+ *
+ * `driver_compile_to_bytecode`（clux bc emit / build -asm / build -bin 走的路径）
+ * 在 sema 失败 / compiler_new 失败 / compile 失败三条路径上都必须释放作用域树：
+ * `sema_destroy` 明确不释放它，而 `out->scope_tree` 只在成功路径末尾赋值。
+ * 修复前实测 stderr 会打印 40+ 条 "memory leak detected ...（type='sema_scope_t'
+ * / 'sema_symbol_t' / 'strmap_t' / 'rbtree_t' / 'vec_t'）"。
+ * 分配器在 delete_allocator 时自检，这里捕获 stderr 断言没有泄漏报告。
+ * ================================================================ */
+
+TEST(Driver, CompileErrorPathDoesNotLeakSemaScopeTree) {
+  /* sema 错误（str → i32 类型不匹配）→ driver_build_bin 走失败路径 */
+  std::string src =
+      write_temp_file("func main(): i32 { var x: i32 = \"s\"; return 0; }\n");
+  std::string out = src + ".cxb";
+
+  char tmp_path[L_tmpnam];
+  std::tmpnam(tmp_path);
+  FILE *redirected = freopen(tmp_path, "w", stderr);
+  ASSERT_NE(redirected, nullptr);
+
+  int rc = driver_build_bin(src.c_str(), out.c_str());
+
+  fflush(stderr);
+  freopen("CON", "w", stderr); /* Windows：恢复 stderr（同 allocator_test 做法） */
+
+  EXPECT_NE(rc, 0); /* 编译必须失败 */
+
+  FILE *rf = fopen(tmp_path, "r");
+  ASSERT_NE(rf, nullptr);
+  std::string captured;
+  char buf[1024];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof buf, rf)) > 0) captured.append(buf, n);
+  fclose(rf);
+
+  std::remove(tmp_path);
+  std::remove(src.c_str());
+  std::remove(out.c_str());
+
+  EXPECT_EQ(captured.find("memory leak detected"), std::string::npos)
+      << "编译失败路径泄漏了分配：\n"
+      << captured;
+}
+
+TEST(Driver, RunFileTypeExpressionsAsValuesPass) {
+  /* 回归：元组/签名/可选/指针这 4 种**类型表达式**在表达式位置求值为类型值
+     （类型即表达式）。此前它们没有 case，落入 sema_expr 的 default 静默返回
+     void shadow，`var x = <i32,i32>;` 之类合法写法会以误导性诊断失败。 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var t = <i32, i32>;\n"
+      "  var f = func(i32)->i32;\n"
+      "  var o = ?i32;\n"
+      "  var p = own *i32;\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

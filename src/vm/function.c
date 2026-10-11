@@ -1,6 +1,7 @@
 #include "vm/function.h"
 #include "vm/vm.h"
 #include "vm/value.h"
+#include "vm/ffi_lib.h"   /* M6 Phase 5：函数对象持有的 C 回调闭包 */
 #include "core/panic.h"
 #include "core/vec.h"
 
@@ -45,9 +46,17 @@ value_t *func_new(vm_t *vm,
     /* 登记进 id 表（内建段 0..N-1 立即可查） */
     vm_func_bind(vm, fn->id, fn);
 
-    /* 包装为 func value：data 存 func_t*，type 即签名类型 */
+    /* 包装为 func value：data 存 func_t*，type 即签名类型。
+       **登记进 global scope**（内建函数值随 VM 存活，不属于任何调用帧）——
+       引擎对象同样不得孤立于 scope：作用域退出/VM 销毁统一释放。
+       （此前 value_alloc_shell + 调用方手工 dispose/free 是唯一例外，
+       本次所有权重构已消除。） */
     void *data = value_alloc_data_copy(vm->alloc, sig_type, &fn);
-    return value_make_untracked(vm->alloc, sig_type, data);
+    scope_t *saved_scope = vm->current_scope;
+    if (vm->global_scope) vm->current_scope = vm->global_scope;
+    value_t *fv = value_make(vm, sig_type, data);
+    vm->current_scope = saved_scope;
+    return fv;
 }
 
 /* ---- 函数 id 表（id → func_t*，索引即 id） ---- */
@@ -94,6 +103,18 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
         allocator_free(alloc, (void **)&np);
         fn->name = (strslice_t){ NULL, 0 };
     }
+    /* M6 FFI Phase 5：`cfunc_ptr(f)` 惰性创建的 C 回调闭包随函数对象释放。
+       libffi 的 trampoline 不在本 allocator 记账内，**必须**显式销毁，否则
+       静默泄漏可执行内存（见 docs/m6-design.md §14.14）。ctx 由本 allocator
+       分配，同样在此释放。 */
+    if (fn->ffi_closure) {
+        clux_ffi_closure_destroy(alloc, fn->ffi_closure);
+        fn->ffi_closure = NULL;
+    }
+    if (fn->ffi_closure_ctx) {
+        allocator_free(alloc, &fn->ffi_closure_ctx);
+    }
+    fn->ffi_closure_code = NULL;
     /* 签名信息归 vm 类型池所有，func_t 不释放 sig_type */
     allocator_free(alloc, (void **)pfn);
 }

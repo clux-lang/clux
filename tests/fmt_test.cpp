@@ -597,3 +597,205 @@ TEST(Fmt, SizeofAlignofTypeofCtOperators) {
     /* 幂等性 */
     EXPECT_EQ(out, fmt(out.c_str()));
 }
+
+/* ===========================================================================
+ * 回归：格式化不得丢失顶层声明 / 语句
+ *
+ * 背景：render_stmt 曾漏掉 AST_UNION_DEF 与 AST_IMPORT（落到 default 分支
+ * 输出空 + 一个 ';'），且无人读取 is_exported —— 三者都会**静默删除源码**，
+ * 使格式化后的程序编译失败或丢失模块导出（数据损坏级缺陷）。
+ * =========================================================================== */
+
+/* 顶层 union（tag union）声明必须保留：union Name { member: type; ... }。 */
+TEST(FmtRegression, UnionDeclPreserved) {
+    std::string out = fmt("union U { a: f32; b: f32; }\nfunc main(): void {}\n");
+    EXPECT_EQ(out,
+              "union U { a: f32; b: f32 }\n"
+              "func main(): void {}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 顶层 cunion 声明必须保留（与 union/struct 同款平铺渲染）。 */
+TEST(FmtRegression, CunionDeclPreserved) {
+    std::string out = fmt("cunion C { x: i32; y: i64; }\nfunc main(): void {}\n");
+    EXPECT_EQ(out,
+              "cunion C { x: i32; y: i64 }\n"
+              "func main(): void {}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* import 语句必须保留（引号内是模块路径，AST 中已去引号，渲染时补回）。 */
+TEST(FmtRegression, ImportStmtPreserved) {
+    std::string out = fmt("import math from \"./math\";\nfunc main(): void {}\n");
+    EXPECT_EQ(out,
+              "import math from \"./math\";\n"
+              "func main(): void {}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* export 前缀必须保留（parser 记为 is_exported 标志；丢失即模块导出表消失）。
+   覆盖 func / var / union / struct 四种被 export 修饰的声明。 */
+TEST(FmtRegression, ExportPrefixPreserved) {
+    std::string out = fmt(
+        "export var PI: i32 = 42;\n"
+        "export func add(a: i32, b: i32): i32 { return a + b; }\n"
+        "export union U { a: f32; b: f32; }\n"
+        "export struct S { x: i32; }\n"
+        "func main(): void {}\n");
+    EXPECT_EQ(out,
+              "export var PI: i32 = 42;\n"
+              "export func add(a: i32, b: i32): i32 {\n"
+              "    return a + b;\n"
+              "}\n"
+              "export union U { a: f32; b: f32 }\n"
+              "export struct S { x: i32 }\n"
+              "func main(): void {}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* ===========================================================================
+ * 回归：幂等性
+ *
+ * 背景 1：render_program 的分隔换行未检查 at_line_start —— 上一顶层项以
+ * 独立行注释结尾时（注释自带换行）会凭空多出一个空行，第二遍的空白保留
+ * 规则又合法地补一个空行，于是输出收敛到"两个空行"，单遍不幂等。
+ * 背景 2：括号决策查绑定力表，而表里漏了 `is`，且查表失败时 lp/rp 未初始化
+ * —— need_paren 读出垃圾值（UB），同一文件两遍格式化括号结果不同。
+ * =========================================================================== */
+
+/* 独立行注释后的顶层声明：格式化两遍结果必须一致（不得多出空行）。 */
+TEST(FmtRegression, IdempotentAfterStandaloneComment) {
+    std::string out = fmt(
+        "// lead comment\n"
+        "\n"
+        "func f(): void {}\n"
+        "\n"
+        "// second\n"
+        "\n"
+        "func g(): void {}\n");
+    EXPECT_EQ(out,
+              "// lead comment\n"
+              "\n"
+              "func f(): void {}\n"
+              "// second\n"
+              "\n"
+              "func g(): void {}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* `is` 运算符：括号渲染必须稳定（曾经因绑定力表缺项而每遍不同）。 */
+TEST(FmtRegression, IsOperatorParensStable) {
+    std::string out = fmt(
+        "func main(): void {\n"
+        "    var e: Shape = .Shape{ .w = 3.0f32 };\n"
+        "    if (e is w != true) { }\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): void {\n"
+              "    var e: Shape = .Shape{.w = 3.0f32};\n"
+              "    if (e is w != true) {}\n"
+              "}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 综合幂等：一次覆盖 union / cunion / import / export / 注释空行 /
+   is 判定，三次格式化结果必须完全一致。 */
+TEST(FmtRegression, IdempotentAcrossDeclKinds) {
+    const char *src =
+        "// header\n"
+        "\n"
+        "import math from \"./math\";\n"
+        "\n"
+        "export var PI: i32 = 42;\n"
+        "export union U { a: f32; b: f32; }\n"
+        "export cunion C { x: i32; y: i64; }\n"
+        "export struct S { x: i32; }\n"
+        "comptime var K: const i32 = 1;\n"
+        "\n"
+        "func main(): void {\n"
+        "    var u: U = .U{ .a = 1.5f32 };\n"
+        "    if (u is a != true) { }\n"
+        "    printf(\"%d\\n\", PI + K);\n"
+        "}\n";
+    std::string once = fmt(src);
+    std::string twice = fmt(once.c_str());
+    std::string thrice = fmt(twice.c_str());
+    EXPECT_EQ(once, twice);
+    EXPECT_EQ(twice, thrice);
+
+    /* 同时确认没有任何声明被删除 */
+    EXPECT_NE(once.find("import math from \"./math\";"), std::string::npos);
+    EXPECT_NE(once.find("export var PI"), std::string::npos);
+    EXPECT_NE(once.find("export union U"), std::string::npos);
+    EXPECT_NE(once.find("export cunion C"), std::string::npos);
+    EXPECT_NE(once.find("export struct S"), std::string::npos);
+    EXPECT_NE(once.find("comptime var K"), std::string::npos);
+    EXPECT_NE(once.find("u is a"), std::string::npos);
+}
+
+/* ================================================================
+ * M3 语法渲染（此前**静默丢弃**：这些 AST kind 在 render_expr 里没有
+ * case，落到 `default: break` → `clux format` 直接把表达式/类型吃掉，
+ * 属数据损坏）。覆盖：后缀取址 `.&`、后缀解引用 `.*`、所有权指针类型
+ * `own|ref|fatal *T`、`new T{...}`、`move/clone(...)`、作用域标注 `'<a,b> T`。
+ * 关键点：后缀操作数里优先级更低者必须保住括号——`(a as ref *i32).*`
+ * 若渲染成 `a as ref *i32.*` 会被重解析成 `a as ref *(i32.*)`。
+ * ================================================================ */
+
+TEST(FmtRegression, PostfixAddrAndDerefAreRendered) {
+    std::string out = fmt(
+        "func main():void{\n"
+        "var r:ref *i32=p.&;\n"
+        "var x:i32=r.*;\n"
+        "var y:i32=(a as ref *i32).*;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): void {\n"
+              "    var r: ref *i32 = p.&;\n"
+              "    var x: i32 = r.*;\n"
+              "    var y: i32 = (a as ref *i32).*;\n"
+              "}\n");
+}
+
+TEST(FmtRegression, PtrTypeNewMoveAndScopeAnnotAreRendered) {
+    std::string out = fmt(
+        "func main():void{\n"
+        "var p:own *i32=new i32{7};\n"
+        "var q:Cell=new Cell{.v=1};\n"
+        "var m:i32=move(p).*;\n"
+        "var t:'<a,b> i32=1;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): void {\n"
+              "    var p: own *i32 = new i32{7};\n"
+              "    var q: Cell = new Cell{.v = 1};\n"
+              "    var m: i32 = move(p).*;\n"
+              "    var t: '<a,b> i32 = 1;\n"
+              "}\n");
+}
+
+/* 幂等 + 不丢代码：同一段 M3 语法三遍格式化必须一致，且关键片段仍在。 */
+TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
+    const char *src =
+        "struct Cell { v: i32; }\n"
+        "func main(): i32 {\n"
+        "    var p: own *i32 = new i32{7};\n"
+        "    var r: ref *i32 = p.&;\n"
+        "    var x: i32 = (r as ref *i32).*;\n"
+        "    var c: Cell = .{ .v = (move(p)).* };\n"
+        "    var g: '<*> i32 = 1;\n"
+        "    return c.v + x + g;\n"
+        "}\n";
+    std::string once = fmt(src);
+    std::string twice = fmt(once.c_str());
+    std::string thrice = fmt(twice.c_str());
+    EXPECT_EQ(once, twice);
+    EXPECT_EQ(twice, thrice);
+    EXPECT_NE(once.find("own *i32"), std::string::npos);
+    EXPECT_NE(once.find("ref *i32"), std::string::npos);
+    EXPECT_NE(once.find("new i32{7}"), std::string::npos);
+    EXPECT_NE(once.find("p.&"), std::string::npos);
+    EXPECT_NE(once.find(".*"), std::string::npos);
+    EXPECT_NE(once.find("move(p)"), std::string::npos);
+    EXPECT_NE(once.find("'<*> i32"), std::string::npos);
+}

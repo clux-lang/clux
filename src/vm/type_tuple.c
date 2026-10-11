@@ -219,7 +219,6 @@ static value_t *tuple_get_index(vm_t *vm, value_t *self, value_t *index) {
     /* shadow：只返回元素类型 shadow（不操作实际数据） */
     if (value_is_shadow(self) || value_is_shadow(index)) {
         const type_t *t = value_type(self);
-        size_t n = tuple_type_elem_count(t);
         /* shadow index 无值可取——取首个元素类型（sema 编译期只做类型协商，
            运行时索引值不可知；首个元素类型与整体类型形状一致） */
         const tuple_elem_t *e = tuple_type_elem(t, 0);

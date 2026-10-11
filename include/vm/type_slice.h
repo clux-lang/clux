@@ -83,7 +83,13 @@ value_t *slice_make_value(vm_t *vm, const type_t *slice_type,
 
 /** 读切片 value 的胖指针（非切片 value 返回全零） */
 static inline slice_value_t slice_view(const value_t *v) {
-    if (!v) return (slice_value_t){ NULL, 0 };
+    if (!v) {
+        /* 不用复合字面量：本头文件会被 C++ 测试包含，C99 扩展会报 -Wc99-extensions */
+        slice_value_t empty;
+        empty.ptr  = NULL;
+        empty.len  = 0;
+        return empty;
+    }
     return *(const slice_value_t *)value_data(v);
 }
 

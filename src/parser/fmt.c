@@ -9,7 +9,11 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
+#include "parser/ast_import.h"
+#include "parser/ast_extern_lib.h"
+#include "parser/ast_reexport.h"
 #include "parser/ast_block.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
@@ -51,6 +55,12 @@
 #include "parser/ast_slice_type.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_new.h"
+#include "parser/ast_addr.h"
+#include "parser/ast_deref.h"
+#include "parser/ast_move.h"
+#include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/vec.h"
@@ -243,7 +253,7 @@ typedef struct { const char *op; int lp; int rp; } op_entry_t;
 /* 按 strslice（长度感知）查表；token 文本是源码切片，非 NUL 结尾。 */
 static bool op_binding_len(const char *ptr, size_t len, int *lp, int *rp) {
     static const op_entry_t ops[] = {
-        { "as", 21, 22 }, { "extends", 11, 12 },
+        { "as", 21, 22 }, { "is", 21, 22 }, { "extends", 11, 12 },
         { "||", 1, 2 }, { "&&", 3, 4 }, { "|", 5, 6 }, { "^", 7, 8 },
         { "&", 9, 10 }, { "==", 11, 12 }, { "!=", 11, 12 },
         { "<", 13, 14 }, { ">", 13, 14 }, { "<=", 13, 14 }, { ">=", 13, 14 },
@@ -282,8 +292,14 @@ static void node_prec(ast_node_t *n, int *lp, int *rp, bool *right_assoc) {
         }
         case AST_BINARY: {
             strslice_t op = token_strslice(((ast_binary_t *)n)->op);
-            /* op 是 token pool 引用（源码切片，非 NUL 结尾），按长度比较 */
-            op_binding_len(op.ptr, op.len, lp, rp);
+            /* op 是 token pool 引用（源码切片，非 NUL 结尾），按长度比较。
+               未登记的运算符（表缺项）必须回落到原子优先级——否则 lp/rp
+               保持未初始化，need_paren 会读出垃圾值，导致括号加得随机
+               （表现为同一文件两遍格式化结果不同 = 非幂等，且属 UB）。 */
+            if (!op_binding_len(op.ptr, op.len, lp, rp)) {
+                *lp = 26;
+                *rp = 26;
+            }
             break;
         }
         case AST_UNARY: {
@@ -561,6 +577,34 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             sb_put(&f->sb, op, olen);
             break;
         }
+        /* M3 后缀族：x.& 取地址 / r.* 解引用。三者（与成员/下标/解包）都是
+           **后缀**，绑定力最高（26），因此操作数里优先级更低者必须保住括号：
+           `(a as ref *i32).*` 若渲染成 `a as ref *i32.*` 会被重解析成
+           `a as ref *(i32.*)`，语义改变（此前这两个 kind 无渲染分支，会被
+           静默丢弃 —— `clux format` 直接吃掉表达式，属数据损坏）。 */
+        case AST_ADDR: {
+            ast_addr_t *ad = (ast_addr_t *)node;
+            render_expr_paren(f, ad->operand, node, false, 26);
+            sb_str(&f->sb, ".&");
+            break;
+        }
+        case AST_DEREF: {
+            ast_deref_t *dr = (ast_deref_t *)node;
+            render_expr_paren(f, dr->operand, node, false, 26);
+            sb_str(&f->sb, ".*");
+            break;
+        }
+        case AST_MOVE: {
+            /* move(x) / clone(x)：op token 决定是哪一个 */
+            ast_move_t *mv = (ast_move_t *)node;
+            size_t olen = 0;
+            const char *op = token_get_text(mv->op, &olen);
+            sb_put(&f->sb, op, olen);
+            sb_ch(&f->sb, '(');
+            render_expr(f, mv->operand);
+            sb_ch(&f->sb, ')');
+            break;
+        }
         case AST_CONSTRUCT: {
             ast_construct_t *c = (ast_construct_t *)node;
             sb_ch(&f->sb, '.');
@@ -631,6 +675,43 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             sb_ch(&f->sb, ')');
             break;
         }
+        /* M3 类型/分配族：own|ref|fatal *T、new T{...}、'<a,b> T。
+           同样此前**无渲染分支 → 静默丢弃**（`var p: ref *i32 = ...` 的类型
+           会被整个吃掉）。 */
+        case AST_PTR: {
+            ast_ptr_t *pt = (ast_ptr_t *)node;
+            if (pt->ownership) {
+                size_t olen = 0;
+                const char *ot = token_get_text(pt->ownership, &olen);
+                sb_put(&f->sb, ot, olen);
+                sb_ch(&f->sb, ' ');
+            }
+            sb_ch(&f->sb, '*');
+            render_expr(f, pt->base_type);
+            break;
+        }
+        case AST_NEW: {
+            /* new T{...}：type 为 NULL 即匿名构造（new { .x = 1 }） */
+            ast_new_t *nw = (ast_new_t *)node;
+            sb_str(&f->sb, "new ");
+            if (nw->type) render_expr(f, nw->type);
+            sb_ch(&f->sb, '{');
+            render_comma_list(f, nw->fields);
+            sb_ch(&f->sb, '}');
+            break;
+        }
+        case AST_SCOPE_ANNOT: {
+            /* '<a,b> T（'*' 记 global，仅首元素合法） */
+            ast_scope_annot_t *sa = (ast_scope_annot_t *)node;
+            sb_str(&f->sb, "'<");
+            for (size_t i = 0; i < sa->count; i++) {
+                if (i > 0) sb_ch(&f->sb, ',');
+                sb_put(&f->sb, sa->names[i].ptr, sa->names[i].len);
+            }
+            sb_str(&f->sb, "> ");
+            render_expr(f, sa->sub);
+            break;
+        }
         default: {
             break;
         }
@@ -644,6 +725,24 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
     switch (node->kind) {
         case AST_VAR_DEF: {
             ast_var_def_t *v = (ast_var_def_t *)node;
+            /* M6 FFI：`extern var <库>::<名>: T;` —— 必须原样渲染（含 `extern var`
+               与 `lib::` 前缀、无初始化器）。漏掉这一步的话 format 会把它改写成
+               普通 `var name: T = ...`（丢库名 + 丢 `extern`），与 import/reexport/
+               extern cfunc 漏分支同类的**静默数据损坏**。 */
+            if (v->is_extern_var) {
+                sb_str(&f->sb, "extern var ");
+                if (v->lib_name.len > 0) {
+                    sb_put(&f->sb, v->lib_name.ptr, v->lib_name.len);
+                    sb_str(&f->sb, "::");
+                }
+                sb_put(&f->sb, v->name.ptr, v->name.len);
+                if (v->type_expr) {
+                    sb_str(&f->sb, ": ");
+                    render_expr(f, v->type_expr);
+                }
+                sb_ch(&f->sb, ';');
+                break;
+            }
             if (v->is_comptime) sb_str(&f->sb, "comptime ");
             sb_str(&f->sb, "var ");
             sb_put(&f->sb, v->name.ptr, v->name.len);
@@ -711,6 +810,53 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
                 render_semi_list(f, c->fields);
                 sb_str(&f->sb, " }");
             }
+            break;
+        }
+        case AST_UNION_DEF: {
+            /* tag union：与 struct/cunion 同款平铺渲染（member 名: 类型; ...）。
+               漏掉本分支会让 union 声明被渲染成空 + 一个 ';'（数据损坏）。 */
+            ast_union_def_t *u = (ast_union_def_t *)node;
+            sb_str(&f->sb, "union ");
+            sb_put(&f->sb, u->name.ptr, u->name.len);
+            sb_str(&f->sb, " {");
+            if (!u->fields) {
+                sb_str(&f->sb, "}");
+            } else {
+                sb_ch(&f->sb, ' ');
+                render_semi_list(f, u->fields);
+                sb_str(&f->sb, " }");
+            }
+            break;
+        }
+        case AST_EXTERN_LIB: {
+            /* extern lib "<path>" as <alias>;——AST 中 path 已去引号，渲染补回。
+               漏掉本分支会让声明被渲染成空（数据损坏），与 AST_IMPORT 同理。 */
+            ast_extern_lib_t *el = (ast_extern_lib_t *)node;
+            sb_str(&f->sb, "extern lib \"");
+            sb_put(&f->sb, el->path.ptr, el->path.len);
+            sb_str(&f->sb, "\" as ");
+            sb_put(&f->sb, el->alias.ptr, el->alias.len);
+            sb_str(&f->sb, ";");
+            break;
+        }        case AST_IMPORT: {
+            /* import <alias> from "<path>";——AST 中的 path 已去掉引号
+               （parse_import 不做转义展开），故渲染时补回引号。
+               漏掉本分支会让 import 语句被渲染成空 + 一个 ';'（数据损坏）。 */
+            ast_import_t *im = (ast_import_t *)node;
+            sb_str(&f->sb, "import ");
+            sb_put(&f->sb, im->alias.ptr, im->alias.len);
+            sb_str(&f->sb, " from \"");
+            sb_put(&f->sb, im->path.ptr, im->path.len);
+            sb_str(&f->sb, "\";");
+            break;
+        }
+        case AST_REEXPORT: {
+            /* export * from "<path>";——代理导出（AST 中 path 已去引号，
+               渲染时补回；与 AST_IMPORT 同款：漏分支会静默删除该声明）。 */
+            ast_reexport_t *re = (ast_reexport_t *)node;
+            sb_str(&f->sb, "export * from \"");
+            sb_put(&f->sb, re->path.ptr, re->path.len);
+            sb_str(&f->sb, "\";");
             break;
         }
         case AST_STRUCT_FIELD: {
@@ -942,7 +1088,14 @@ static void render_captures(fmt_t *f, ast_node_t *captures) {
 static void render_func_def(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
     if (fn->is_comptime) sb_str(&f->sb, "comptime ");
-    sb_str(&f->sb, "func ");
+    /* M6 FFI：cfunc 定义必须原样渲染为 `cfunc`——渲染成 `func` 会静默改变语义
+       （C ABI 导出 vs 普通函数），与 import/reexport 漏分支同类问题。 */
+    sb_str(&f->sb, fn->is_extern_cfunc ? "extern cfunc "
+                            : (fn->is_cfunc ? "cfunc " : "func "));
+    if (fn->is_extern_cfunc && fn->lib_name.len > 0) {
+        sb_put(&f->sb, fn->lib_name.ptr, fn->lib_name.len);
+        sb_str(&f->sb, "::");
+    }
     if (fn->captures) {
         render_captures(f, fn->captures);
         sb_ch(&f->sb, ' ');
@@ -955,10 +1108,18 @@ static void render_func_def(fmt_t *f, ast_node_t *node) {
         render_param(f, p);
         first = false;
     }
+    if (fn->is_variadic) {
+        if (!first) sb_str(&f->sb, ", ");
+        sb_str(&f->sb, "...");
+    }
     sb_ch(&f->sb, ')');
     sb_str(&f->sb, ": ");
     render_expr(f, fn->return_expr);
-    render_block(f, fn->body);
+    if (fn->is_extern_cfunc) {
+        sb_ch(&f->sb, ';');  /* extern cfunc 声明无体 */
+    } else {
+        render_block(f, fn->body);
+    }
 }
 
 /* 函数字面量（表达式位置）：func [name](params): type { body }
@@ -982,10 +1143,18 @@ static void render_func_literal(fmt_t *f, ast_node_t *node) {
         render_param(f, p);
         first = false;
     }
+    if (fn->is_variadic) {
+        if (!first) sb_str(&f->sb, ", ");
+        sb_str(&f->sb, "...");
+    }
     sb_ch(&f->sb, ')');
     sb_str(&f->sb, ": ");
     render_expr(f, fn->return_expr);
-    render_block(f, fn->body);
+    if (fn->is_extern_cfunc) {
+        sb_ch(&f->sb, ';');  /* extern cfunc 声明无体 */
+    } else {
+        render_block(f, fn->body);
+    }
 }
 
 /* ---- 顶层：PROGRAM ---- */
@@ -996,7 +1165,11 @@ static void render_program(fmt_t *f, ast_node_t *node) {
     size_t last_line = 0;
     bool first = true;
     for (ast_node_t *fn = prog->funcs; fn; fn = fn->next) {
-        if (!first) sb_ch(&f->sb, '\n');
+        /* 顶层项之间的分隔换行：仅当上一项没有停在行首时才补。
+           上一项若以独立行注释结尾，其文本已自带换行（at_line_start=true），
+           此处再补一个 '\n' 会凭空多出一个空行——那正是"单遍不幂等"的根因
+           （第二遍的空白保留规则又会合法地补一个空行，于是收敛到两个空行）。 */
+        if (!first && !f->at_line_start) sb_ch(&f->sb, '\n');
         f->at_line_start = true;
         /* 只挂载函数之前的注释（[prev_end, tok_begin)）；函数体内的
            注释由 render_block 挂载（保持缩进/行内位置）。 */
@@ -1012,6 +1185,9 @@ static void render_program(fmt_t *f, ast_node_t *node) {
         }
         if (f->at_line_start) sb_indent(&f->sb, f->indent);
         f->at_line_start = false;
+        /* export 前缀：parser 把 `export` 记为声明节点上的 is_exported 标志
+           （不是独立节点），渲染时必须还原，否则模块导出表静默丢失。 */
+        if (fn->is_exported) sb_str(&f->sb, "export ");
         render_node(f, fn);
         prev_end = fn->tok_end;
         last_line = tok_line((const token_t *)vec_get(f->tokens, prev_end - 1));

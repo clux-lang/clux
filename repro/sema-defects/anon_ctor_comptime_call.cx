@@ -1,0 +1,7 @@
+comptime func f(x: i32): i32 { return x + 1; }
+struct T { a: i32; }
+func main(): i32 {
+  var t: T = .{ .a = f(41) };
+  printf("%d\n", t.a);
+  return 0;
+}

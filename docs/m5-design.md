@@ -12,6 +12,38 @@
 
 ---
 
+> ### ⚠️ 实现状态与取代关系
+>
+> 本文件是 M5 的**原始（v1）设计**。实际落地时发现 v1 的"子 sema + module_manager +
+> 拓扑排序 + module_id 表"结构有问题，已按 **[m5-design-v2.md](m5-design-v2.md)** 重新设计
+> 并落地（**v2 才是已实现的设计**，与本文冲突处以 v2 与代码为准）。主要差异：
+>
+> | 方面 | v1（本文档） | 实际（v2 + 代码） |
+> |------|--------------|-------------------|
+> | 模块键 | `module_id`（u32，拓扑分配） | **规范路径字符串**（`vm->modules` 为 path → `module_t*`） |
+> | 编译组织 | module_manager + 拓扑排序 + 子 sema | 每模块独立走完整流水线，`compile_module` 同步递归 + 路径栈循环检测 |
+> | `IMPORT` 操作数 | `u32 module_id` | **`STR`（规范路径，strtable 索引）** |
+> | 跨模块调用 | `bcode_call_cfunc` 用 `vm->bc` | `bcode_function_t` 自带所属模块 `bc` |
+> | 初始化 | 运行期首次 `IMPORT` 惰性初始化 | `compile_module` 内执行模块注册段；`IMPORT` 只查表 |
+>
+> **已实现**（与 v1 一致的部分）：`export` 前缀修饰、`import <alias> from "<path>"`、
+> `::` 成员访问（复用 enum variant 的 `::` 分派）、`TYPE_KIND_MODULE`、全局 comptime
+> var 必须是 `const T`（§3.4）、循环依赖检测（§7）、入口约定（§8）、printf 地位不变（§9.3）、
+> **相对路径解析与校验（§2.1/§2.2）**、**代理导出 `export * from`（§1.3）**、
+> **非相对路径的统一诊断（§2.3/§2.4）**。
+>
+> **与 v1 的两处语义修正**（实现时按用户要求收紧，以本节为准）：
+> 1. **不按扩展名判断导入类型**：v1 §2.3 曾规定"路径以 `.so`/`.dll`/`.dylib` 结尾即动态库导入"。
+>    后缀不表示文件类型（`libc.so.6` 可能只是普通文件，某个 `.dll` 也可能并非动态库），
+>    按后缀推断会给出误导性诊断并把错误假设固化进语言。因此 M5 **只看路径形式**：
+>    `./`/`../` 开头 → 源码模块；其余一律视为"非相对路径"，报同一条诊断。
+>    动态库绑定留给 **M6**，且必须由**显式语法**表达（见 [m6-design.md](m6-design.md)）。
+> 2. **`GET_MEMBER` 查 `module->exports`**（v2 实现步骤 7）：运行期成员可见性以导出表
+>    为唯一来源，与 sema 的 `::` 解析一致；此前查 `global_scope`，导致代理导出的符号
+>    在 sema 通过却在运行期找不到。
+
+---
+
 ## 1. 语法
 
 ### 1.1 export
@@ -94,35 +126,39 @@ func main(): void {
 - 路径不存在（文件找不到）→ 编译错误："module not found: './std'"
 - 路径规范化后去重：`./std` 和 `./../src/std` 如果指向同一文件，视为同一模块
 
-### 2.3 动态库导入（FFI 预备，sema 报错）
+### 2.3 动态库导入（M6 FFI；M5 不做任何后缀特判）
 
 ```
-import libdemo from "libdemo.so";   // Linux/macOS
-import libdemo from "libdemo.dll";  // Windows
+import libdemo from "libdemo.so";   // ✗ M5：报"非相对路径"诊断
 ```
 
-- 路径以 `.so` / `.dll` / `.dylib` 结尾的是**动态库导入**——为 M6 FFI 铺路
-- 语义：加载动态库，后续通过 `libdemo::function_name` 获取函数句柄（类似 `dlsym`）
-- M5 **parser 层支持此语法**（解析为 AST_IMPORT，路径标记为动态库）
-- M5 **sema 层报错**："dynamic library import not supported in M5 (requires FFI)"
-- M6 FFI 实现时：Linux/macOS 用 `dlopen`/`dlsym`，Windows 用 `LoadLibrary`/`GetProcAddress`
+- **M5 不按扩展名判断导入类型**：`.so` / `.dll` / `.dylib` 只是文件名后缀，
+  不表示文件类型。靠后缀推断会给出误导性诊断，并把"后缀即类型"的错误假设
+  固化进语言。
+- 因此 M5 不做"动态库"特判：这类路径一律落入 §2.4 的"非相对路径"诊断。
+- 动态库绑定由 **M6** 实现（Linux/macOS `dlopen`/`dlsym`、Windows
+  `LoadLibrary`/`GetProcAddress`），并且**必须用显式语法**表达绑定意图
+  （见 [m6-design.md](m6-design.md)），不能靠文件名后缀。
 
-### 2.4 包导入（暂不实现）
+### 2.4 非相对路径（M5 不支持）
 
 ```
-import std from "std";  // 非路径 → 包导入
+import std from "std";       // ✗ 非相对路径
+import libc from "libc.so.6"; // ✗ 同上（M5 不因后缀而特殊对待）
 ```
 
-- 非路径导入（不以 `./` 或 `../` 开头，且不以 `.so`/`.dll`/`.dylib` 结尾）是包导入
-- M5 **暂不实现**包导入，遇到时报错："package import not supported in M5"
+- 不以 `./` 或 `../` 开头的路径（含包导入、动态库路径、绝对路径）在 M5 一律拒绝：
+  `import path must be relative (start with './' or '../'); package and
+  dynamic-library imports are not supported in M5`
+- 包导入（`std`）需要包管理器与标准库目录约定，属后续里程碑。
 
 ### 2.5 导入形式分类
 
 | 路径形式 | 类型 | M5 状态 |
 |----------|------|---------|
-| `./std` / `../lib/utils` | 模块导入（.cx 文件） | ✅ 实现 |
-| `libdemo.so` / `libdemo.dll` / `libdemo.dylib` | 动态库导入（FFI） | ⚠️ parser 支持，sema 报错 |
-| `std`（非路径、非动态库后缀） | 包导入 | ❌ 报错 |
+| `./std` / `../lib/utils` | 源码模块（相对路径） | ✅ 实现（相对 importer 目录解析） |
+| 其它一切（`std`、`libc.so.6`、绝对路径…） | 非相对路径 | ❌ 统一诊断（**不看后缀**） |
+| 动态库绑定 | FFI（M6） | ⏳ M6 以显式语法提供 |
 
 ---
 

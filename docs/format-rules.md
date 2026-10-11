@@ -1,8 +1,19 @@
 # clux 格式化规则（clux format）
 
 clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `src/parser/fmt.c`）。
-它**不重排代码结构、不改写 AST**，只在 token 流层面规整空白、缩进与注释位置，
-因此输出在语义上与输入等价，并且是**幂等**的：连续两次格式化结果相同。
+它**不重排代码结构、不改写语义**，只规整空白、缩进与注释位置，并保证：
+
+- **声明完整**：`union` / `cunion` / `struct` / `enum` / `type` / `import` / `export`
+  等顶层构造一律原样保留（不丢声明、不丢 `export` 前缀）；
+- **语义等价**：格式化后程序运行结果不变；
+- **幂等**：对格式化结果再跑一次 `clux format`，输出逐字节不变。
+
+> 实现说明：格式化器是**基于 AST 渲染 + token pool 提供注释/空行信息**的混合实现
+> （`render_stmt` / `render_expr` 遍历 AST，`mount_comments` 从 token 池挂载注释），
+> 因此"注释天然保留"来自 token 池，而结构来自 AST。
+>
+> 上述三条性质在 2026-10 曾全部被破坏（union/import/export 被静默删除、单遍不幂等），
+> 现已修复并有回归测试覆盖 —— 见 §9。
 
 ---
 
@@ -93,6 +104,58 @@ var r: f64 = (a as f64) + b;   /* 二元：两侧空格 */
 
 ## 8. 幂等性
 
-格式化器是幂等的：对格式化后的结果再跑一次 `clux format`，输出不变。相关测试见
-`tests/fmt_test.cpp`（含 `SpaceBeforeParenAfterOperator`、
-`UnaryPrefixOperatorNoTrailingSpace` 等用例）。
+格式化器幂等：对格式化后的结果再跑一次 `clux format`，输出逐字节不变。
+相关测试：`tests/fmt_test.cpp` 的 `Fmt.Idempotent`、`FmtRegression.*`
+（`IdempotentAfterStandaloneComment` / `IsOperatorParensStable` /
+`IdempotentAcrossDeclKinds`），以及 examples 全量三遍格式化结果一致。
+
+---
+
+## 9. 历史缺陷与回归覆盖（2026-10）
+
+格式化器曾存在三类**静默破坏源码**的缺陷，均已修复。记录在此便于追溯，并说明
+为什么 §1–§8 的每条规则都值得一条回归测试。
+
+### 9.1 顶层 union 声明被删除
+
+`render_stmt` 缺 `AST_UNION_DEF` 分支，`union Name { ... }` 落到 `default:`
+分支后只渲染出一个 `;`（类型声明整段消失，程序随即无法编译）。
+
+修复：补 `AST_UNION_DEF` 渲染分支（与 `cunion` / `struct` 同款平铺渲染）。
+回归：`FmtRegression.UnionDeclPreserved`、`CunionDeclPreserved`。
+
+### 9.2 import 语句与 export 前缀被删除
+
+同一处 `switch` 缺 `AST_IMPORT` 分支（`import x from "..."` 变成 `;`），
+且**没有任何代码读取 `is_exported`**（parser 把 `export` 记为声明节点上的标志位，
+不是独立节点）——`export func/var/union/struct` 的 `export` 前缀被整体丢弃，
+模块导出表静默消失。
+
+修复：补 `AST_IMPORT` 渲染分支（AST 中 path 已去引号，渲染时补回）；
+`render_program` 在渲染每个顶层声明前输出 `is_exported` 对应的 `export ` 前缀。
+回归：`FmtRegression.ImportStmtPreserved`、`ExportPrefixPreserved`。
+
+### 9.3 单遍不幂等（两处独立根因）
+
+**(a) 顶层分隔换行未检查行首状态**：`render_program` 每项前无条件补 `'\n'`，
+而上一顶层项若以独立行注释结尾（注释自带换行），该分隔符就凭空多出一个空行；
+第二遍的"保留空行"规则又会合法地补一个空行 → 输出收敛到两个空行，单遍不幂等。
+影响 34 个 examples 中的 10 个（当时规模）。修复：改为 `if (!first && !f->at_line_start)`。
+
+**(b) `is` 运算符未登记绑定力，且查表失败时未初始化**：括号决策表
+（`op_binding_len`）漏了 `is`，而 `node_prec` 忽略返回值 —— `*lp/*rp` 保持
+未初始化，`need_paren` 读出垃圾值（UB），导致同一文件两遍格式化括号结果不同
+（`((e) is (radius))` vs `((e) is radius)`）。修复：表补 `{ "is", 21, 22 }`
+（与 parser 的 `infix_binding` 一致），并让未登记运算符回落到原子优先级。
+
+回归：`FmtRegression.IdempotentAfterStandaloneComment` /
+`IsOperatorParensStable` / `IdempotentAcrossDeclKinds`。
+
+### 9.4 当前已核对成立
+
+- **声明完整**：`union` / `cunion` / `struct` / `import` / `export` 全量 examples 扫描后均保留。
+- **语义等价**：examples 全量 `.cx`（当前 37 个：35 个入口 + 2 个模块库）格式化后运行输出与退出码不变
+  （比较时排除运行期泄漏转储——其含地址，逐次不同）。
+- **幂等**：examples 全量 `.cx` 连续三遍格式化结果逐字节一致（37/37）。
+- **`.cxs` 汇编往返**：`examples/asm/*.cxs` 经 `bc asm → bc disasm → bc asm`
+  两次 `.cxb` 逐字节一致（5/5）。

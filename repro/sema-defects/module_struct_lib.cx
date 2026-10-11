@@ -1,0 +1,2 @@
+struct S { x: i32; }
+export func fa(): i32 { var s: S = .S{ .x = 9 }; return s.x; }

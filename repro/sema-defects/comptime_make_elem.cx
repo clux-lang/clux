@@ -1,0 +1,6 @@
+comptime var N: const i32 = 5;
+func main(): i32 {
+  var s: own []i32 = make(i32, 2, N, N + 1);
+  printf("%d %d", s[0], s[1]);
+  return 0;
+}

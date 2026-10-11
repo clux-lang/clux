@@ -201,11 +201,14 @@ static ast_node_t *parse_capture_list(parser_t *p) {
     return caps;
 }
 
-ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
+ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
+                                     const char *kw, strslice_t pre_name,
+                                     strslice_t pre_lib) {
     uint32_t tb = p->pos;
 
-    if (!check_keyword(p, "func")) { p->pos = tb; return NULL; }
-    advance(p);  /* commit: 消费 "func" */
+    if (kw) { if (!check_keyword(p, kw)) { p->pos = tb; return NULL; }
+        advance(p);  /* commit；kw == NULL = 调用方已消费关键字 */
+    }
     skip_trivia(p);
 
     /* 闭包作用域标注（m3-design §9）：func '<x> |...| —— 标注在 func 后、
@@ -227,6 +230,10 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
        仅函数定义/字面量（AST_FUNC_DEF）允许；函数类型（'->' 分支）拒绝，
        在 '->' 分支处检查。空列表 || 合法（返回 NULL = 无捕获）。 */
     ast_node_t *captures = NULL;
+    if (pre_lib.len > 0 && check_symbol(p, "|")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "cfunc cannot capture (C ABI has no closures)");
+    }
     if (check_symbol(p, "|")) {
         captures = parse_capture_list(p);
         if (captures && captures->kind == AST_ERROR) {
@@ -240,8 +247,9 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
      *
      * 判断方式：func 后当前 token 是 IDENTIFIER 且下一个不是 (
      */
-    strslice_t name = STRSLICE_EMPTY;
-    if (check_kind(p, TOKEN_TYPE_IDENTIFIER) && !check_symbol(p, "(")) {
+    strslice_t name = pre_name.len > 0 ? pre_name : STRSLICE_EMPTY;
+    if (pre_name.len == 0 &&
+        check_kind(p, TOKEN_TYPE_IDENTIFIER) && !check_symbol(p, "(")) {
         name = token_strslice(cur_token(p));
         advance(p);
         skip_trivia(p);
@@ -254,6 +262,18 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     }
     skip_trivia(p);
 
+    bool variadic = false;
+    if (check_symbol(p, "...")) {
+        if (pre_lib.len == 0) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "variadic ... is only allowed in extern cfunc");
+        }
+        variadic = true;
+        advance(p);
+        skip_trivia(p);
+    }
+
+    /* M6 FFI：...（C 可变参数）只在 extern cfunc 中允许 */
     ast_node_t *params      = NULL;
     ast_node_t *params_last = NULL;
 
@@ -272,6 +292,17 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         while (check_symbol(p, ",")) {
             advance(p);   /* 消费 , */
             skip_trivia(p);
+            /* M6 FFI：`, ...` —— 可变参数只允许出现在参数表末尾 */
+            if (check_symbol(p, "...")) {
+                if (pre_lib.len == 0) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "variadic ... is only allowed in extern cfunc");
+                }
+                variadic = true;
+                advance(p);
+                skip_trivia(p);
+                break;
+            }
 
             param = parse_func_param_item(p);
             if (!param || param->kind == AST_ERROR) {
@@ -364,9 +395,16 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
             return return_expr;
         }
 
-        /* 函数体：{ ... } */
-        ast_node_t *body = parse_block(p);
-        if (!body || body->kind == AST_ERROR) {
+        ast_node_t *body = NULL;
+    if (pre_lib.len > 0) {
+        if (!expect_symbol(p, ";")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ';' after extern cfunc declaration");
+        }
+    } else {
+        body = parse_block(p);
+    }
+        if (pre_lib.len == 0 && (!body || body->kind == AST_ERROR)) {
             if (!body) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected '{' for function literal body");
@@ -384,6 +422,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         fn->params_last = params_last;
         fn->return_expr = return_expr;
         fn->body        = body;
+    fn->is_variadic = variadic;
         return node;
     }
 
@@ -416,9 +455,16 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
         return return_expr;
     }
 
-    /* 函数体：{ ... } */
-    ast_node_t *body = parse_block(p);
-    if (!body || body->kind == AST_ERROR) {
+    ast_node_t *body = NULL;
+    if (pre_lib.len > 0) {
+        if (!expect_symbol(p, ";")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ';' after extern cfunc declaration");
+        }
+    } else {
+        body = parse_block(p);
+    }
+    if (pre_lib.len == 0 && (!body || body->kind == AST_ERROR)) {
         if (!body) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected '{' for function body");
@@ -436,9 +482,154 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind) {
     fn->params_last = params_last;
     fn->return_expr = return_expr;
     fn->body        = body;
+    fn->is_variadic = variadic;
     return node;
 }
 
 ast_node_t *parse_func_def(parser_t *p) {
-    return parse_func_like(p, AST_FUNC_DEF);
+    return parse_func_like(p, AST_FUNC_DEF, "func");
+}
+
+/* ---- M6 FFI：cfunc 定义（C ABI，有函数体）---- */
+
+/** 解析 `cfunc <name>(<params>): <ret> { <body> }`
+ *
+ * 与 `func` 同构（复用 parse_func_like，只把关键字换成 "cfunc"），额外置
+ * `is_cfunc`：语义走 VM 执行，但符号与调用约定是 C ABI，可被动态库回调
+ * （Phase 5）。捕获列表 `|...|` 对 cfunc 非法——调用方不会解析它，出现即语法错误。
+ */
+ast_node_t *parse_cfunc_def(parser_t *p) {
+    ast_node_t *fn = parse_func_like(p, AST_FUNC_DEF, "cfunc");
+    if (fn && fn->kind == AST_FUNC_DEF)
+        ((ast_func_def_t *)fn)->is_cfunc = true;
+    return fn;
+}
+
+/* ---- 兼容包装：3 参数版（关键字必给，无预解析）---- */
+
+ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
+                            const char *kw) {
+    return parse_func_like_ex(p, expected_kind, kw, STRSLICE_EMPTY,
+                              STRSLICE_EMPTY);
+}
+
+/* ---- M6 FFI：extern cfunc <库>::<名>(<参数>): <返回>; ---- */
+
+/** 解析 `extern cfunc <lib>::<name>(params): ret;`（调用方已消费 `extern`）。
+ * 无函数体：符号在运行期由 dlsym/GetProcAddress 从库句柄解析（Phase 3/4）。
+ * `...` 允许（C 可变参数）；捕获列表非法（C 无闭包）。
+ * `<lib>` 是 `extern lib "..." as <lib>;` 声明的别名；路径 `"*"` 表示
+ * **当前进程自身**（已链接进来的符号，见 ffi_lib.c）。 */
+ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb) {
+    return parse_extern_cfunc_kw(p, tb, "cfunc");
+}
+
+/** 与 parse_extern_cfunc 同构，只是消费的关键字不同（`extern cfunc` / `extern func`）。
+ * 两种拼写产生**完全相同**的 AST（`is_extern_cfunc = true`）——`cfunc` 是规范写法
+ * （显式标注 C ABI），`extern func <库>::<名>` 是等价的习惯写法（限定名已表明它来自
+ * 外部库）；`fmt` 统一渲染为 `extern cfunc`。 */
+ast_node_t *parse_extern_cfunc_kw(parser_t *p, uint32_t tb, const char *kw) {
+    if (!expect_keyword(p, kw)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected 'cfunc' after 'extern'");
+    }
+    skip_trivia(p);
+    if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected library alias in extern cfunc <lib>::<name> "
+                             "(alias comes from `extern lib \"...\" as <alias>;`)");
+    }
+    strslice_t lib = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+    if (!expect_symbol(p, "::")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected :: in extern cfunc <lib>::<name>");
+    }
+    skip_trivia(p);
+    if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected function name after ::");
+    }
+    strslice_t fname = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+
+    ast_node_t *fn = parse_func_like_ex(p, AST_FUNC_DEF, NULL, fname, lib);
+    if (fn && fn->kind == AST_FUNC_DEF) {
+        ast_func_def_t *fd = (ast_func_def_t *)fn;
+        fd->is_extern_cfunc = true;
+        fd->lib_name        = lib;
+    }
+    return fn;
+}
+
+/* ---- M6 FFI：extern var <库>::<名>: <类型>; ---- */
+
+/** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。
+ *
+ * 动态库导出的**全局数据符号**：运行期 dlsym/GetProcAddress 得到变量地址，
+ * 读写都直接作用于库里的那块内存（没有本地副本），因此：
+ *   - 无初始化器（`init = NULL`）——语法上是声明，`= ...` 一律语法错；
+ *   - 类型标注**必须**给出（宽度/类别决定载入与写回的字节数，无法推断）；
+ *   - 引用是**左值**：`crt::name = v;` 合法（对比 `extern cfunc` 只能调用）。 */
+ast_node_t *parse_extern_var(parser_t *p, uint32_t tb) {
+    if (!expect_keyword(p, "var")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected 'var' after 'extern'");
+    }
+    skip_trivia(p);
+    if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected library alias in extern var <lib>::<name> "
+                             "(alias comes from `extern lib \"...\" as <alias>;`)");
+    }
+    strslice_t lib = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+    if (!expect_symbol(p, "::")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected :: in extern var <lib>::<name>");
+    }
+    skip_trivia(p);
+    if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected symbol name after ::");
+    }
+    strslice_t vname = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+
+    if (!expect_symbol(p, ":")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ':' and type in extern var declaration");
+    }
+    skip_trivia(p);
+    ast_node_t *type_expr = parse_scope_annotated_type(p);
+    if (!type_expr || type_expr->kind == AST_ERROR) {
+        if (!type_expr) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected type after ':' in extern var");
+        }
+        return type_expr;
+    }
+    skip_trivia(p);
+    if (!check_symbol(p, ";")) {
+        /* 用 check_symbol 自行判定：expect_symbol 会先报一条通用 "expected ';'"
+           再返回 false，那样同一处会出两条诊断。 */
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ';' after extern var declaration "
+                             "(extern var has no initializer)");
+    }
+    advance(p);
+
+    ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
+    if (!node) return NULL;
+    ast_var_def_t *vd = (ast_var_def_t *)node;
+    vd->name          = vname;
+    vd->type_expr     = type_expr;
+    vd->init          = NULL; /* 声明而非定义：库里已有那块内存 */
+    vd->is_extern_var = true;
+    vd->lib_name      = lib;
+    return node;
 }

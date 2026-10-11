@@ -14,8 +14,7 @@ struct value_t {
     const type_t     *type;
     void             *data;
     bool              is_shadow;
-    bool              is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */
-    const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
+    bool              is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */    const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
 };
 
 /* ---- 内部分配 class_t（value_t 堆分配用） ---- */
@@ -100,7 +99,7 @@ bool value_has_const(const value_t *v) {
 
 /* ---- 构造器 ---- */
 
-value_t *value_make_untracked(allocator_t *alloc, const type_t *type, void *data) {
+value_t *value_alloc_shell(allocator_t *alloc, const type_t *type, void *data) {
     value_t *v = value_alloc(alloc);
     v->type = type;
     v->data = data;
@@ -109,9 +108,8 @@ value_t *value_make_untracked(allocator_t *alloc, const type_t *type, void *data
 }
 
 value_t *value_make(vm_t *vm, const type_t *type, void *data) {
-    value_t *v = value_make_untracked(vm->alloc, type, data);
-    v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
-    scope_track(vm, vm->current_scope, v);
+    value_t *v = value_alloc_shell(vm->alloc, type, data);
+    v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;    scope_track(vm, vm->current_scope, v);
     return v;
 }
 
@@ -134,6 +132,8 @@ value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *data) {
 bool value_is_borrowed(const value_t *v) {
     return v && !v->is_shadow && !v->is_own;
 }
+
+
 
 /* ---- shadow value ---- */
 

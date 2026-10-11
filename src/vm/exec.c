@@ -17,6 +17,8 @@
 #include "vm/type_interrupt.h"
 #include "vm/bcode_function.h"
 #include "vm/module.h"
+#include "vm/ffi_lib.h"   /* M6 FFI：EXTERN_CALL */
+#include "module/module_path.h" /* 运行期 IMPORT 路径重新规范化（VM 层） */
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/vec.h"
@@ -52,7 +54,14 @@ static value_t *op_push(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
     value_t *v = scope_lookup(vm->current_scope, name);
     if (!v) return value_make_error(vm, "exec: undefined variable");
-    return v; /* 借用引用 */
+    /* **变量读取 = 借用视图**（data 指向变量值的业务内存，is_own=false）：
+       所有权始终留在变量所属作用域，读取只是"看"它一眼；消费点各自负责
+       materialize——DEFINE 经 scope_define 深拷贝、赋值经 value_assign
+       就地深拷、RET/传参经 clone。于是"采用 vs 拷贝"只需看 is_borrowed，
+       不再需要"该值是否已绑定到名字"的附加标记。
+       shadow（sema 侧）与无 data 的值直接返回自身（无业务内存可视图）。 */
+    if (value_is_shadow(v) || !value_data(v)) return v;
+    return value_make_borrowed(vm, value_type(v), value_data(v));
 }
 
 static value_t *op_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -69,22 +78,10 @@ static value_t *op_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (value_is_error(vm, casted)) return casted;
         src = casted;
     }
-    /* R4 接管（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
-       src 若是 fresh 临时值（非变量借用，如 x = .[2]Cell{...} 匿名构造
-       赋值给变量），先递归释放 dst 旧值内嵌 own 堆块，再整块接管 src 的
-       data（memcpy 到 dst data + 从 owned 移除 src）——与 op_define 接管
-       同语义，防共享内嵌 own 堆块双释放。 */
-    if (value_type(src) == value_type(dst) && !value_is_shadow(src) &&
-        !value_is_borrowed(src)) {
-        const type_t *st = value_type(src);
-        if (st && (st->kind == TYPE_KIND_STRUCT || st->kind == TYPE_KIND_TUPLE ||
-                   st->kind == TYPE_KIND_ARRAY)) {
-            ptr_free_owned_recursive(vm, st, value_data(dst));
-            memcpy(value_data(dst), value_data(src), st->size);
-            scope_untrack(vm, vm->current_scope, src);
-            return dst;
-        }
-    }
+    /* 赋值统一走 value_assign（深语义：先释放 dst 旧值内嵌 own 块再拷贝）。
+       此前的"fresh 临时值整块接管 + scope_untrack"分支会让 value 的归属游离于
+       作用域之外（本次所有权重构已删除该轨道）：作用域唯一所有权下，赋值是
+       就地更新目标值；临时值仍由本作用域 owned 列表统一释放。 */
     return value_assign(vm, dst, src);
 }
 
@@ -279,24 +276,11 @@ static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
         init = casted;
     }
 
-    /* R4 接管（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
-       init 若是 fresh 临时值（非变量借用），DEFINE 直接接管（从 owned 移除
-       并绑定），跳过 scope_define 的 value_clone 浅拷贝——浅拷贝会让变量与
-       temp 共享内嵌 own 堆块，作用域退出双释放（R4OwnArrayElemRecursiveFree
-       崩溃根因）。仅对含 own/fatal 指针的类型接管（纯值类型浅拷贝无共享
-       风险）；变量借用（var b = a）保持原 copy 语义。 */
-    const type_t *it = value_type(init);
-    if (it && (it->kind == TYPE_KIND_PTR_OWN || it->kind == TYPE_KIND_PTR_FATAL ||
-               it->kind == TYPE_KIND_SLICE_OWN || it->kind == TYPE_KIND_SLICE_FATAL ||
-               it->kind == TYPE_KIND_STRUCT || it->kind == TYPE_KIND_TUPLE ||
-               it->kind == TYPE_KIND_ARRAY || it->kind == TYPE_KIND_OPTION ||
-               it->kind == TYPE_KIND_UNION) &&
-        !value_is_shadow(init) && !value_is_borrowed(init)) {
-        value_t *stored = scope_define_owned(vm, vm->current_scope, name.ptr,
-                                             init);
-        if (value_is_error(vm, stored)) return stored;
-        return NULL;
-    }
+    /* 绑定统一走 scope_define：作用域唯一所有权下，init 若已由本作用域拥有
+       （即新建的临时值）就被**直接采用**（零拷贝，own 复合类型因此不会与临时
+       共享内嵌堆块）；借用视图（`var b = a` 压入的是 a 的借用视图）才在
+       scope_define 内 materialize 成独立深拷贝。原先"fresh 才接管、否则 clone"
+       的双轨（scope_define_owned + is_fresh 标记）已随本次重构删除。 */
     value_t *stored = scope_define(vm, vm->current_scope, name.ptr, init);
     if (value_is_error(vm, stored)) return stored;
     return NULL;
@@ -1688,29 +1672,293 @@ static value_t *op_pop_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
 /* IMPORT <str>：模块规范路径。查 vm->modules 表，构造模块值压栈。
  * 幂等：同一路径返回同一模块值。模块在 sema 阶段递归 compile_module
  * 时已注册到 vm->modules，运行期只查表不触发编译。 */
-static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    strslice_t path = bcode_read_str(bc, pc);
-    char buf[1024];
-    if (path.len >= sizeof(buf)) {
-        return value_make_error(vm, "exec: module path too long");
-    }
-    memcpy(buf, path.ptr, path.len);
-    buf[path.len] = '\0';
+/* IMPORT <源码路径>：操作数是**源码里写的路径**（`"./math"`），不是规范路径。
+ * 这里以"当前正在执行的模块"（bc->module_path）为基准**重新规范化**，得到
+ * vm->modules 的 key —— 与加载 `.cxb`/`.cxs` 时重建模块图用的是同一套规则
+ * （module/module_path.h），因此产物与宿主目录布局解耦：容器搬到任何目录，
+ * 两侧的规范化同步平移，key 依旧吻合。
+ * bc->module_path 为 NULL（独立 .cxs 片段、无模块上下文）时以进程工作目录为
+ * 基准——与旧行为一致。 */
+/* M6 FFI：EXTERN_CALL <str "lib::name"> <u32 argc> <u32 ret_kind>
+ *
+ * 从**当前执行模块**取动态库句柄并调用外部 C 函数：
+ *   bc->module_path → vm->modules（vm_module_lookup）→ module_t.ffi_libs（别名 → 句柄）
+ *   → ffi_lib_sym（dlsym/GetProcAddress）→ 按 argc 弹实参 → 类型化调用层。
+ *
+ * 实参一律按 int64 宽度传递（整数/指针）；ret_kind 决定返回值如何归一化——
+ * **必须造出与源码声明一致的类型**（见 vm/bcode.h 的 BCODE_FFI_RET_* 表：
+ * void / i8..i64 / u8..u64 / bool / ptr / f64）。
+ * 浮点走 BCODE_FFI_RET_F64 + 全 double 实参（见 docs/m6-design.md §14.5 的
+ * ffi_call_f64；本仓库 Windows x64 的 libffi 汇编路径不可用，故按类型分派）。
+ */
+#define FFI_MAX_ARGS 8
 
-    value_t *mod_val = vm_import(vm, buf);
-    if (!mod_val) {
-        char msg[1152];
-        snprintf(msg, sizeof(msg), "exec: module not found '%s'", buf);
+/* M6 FFI 共用：拆 "lib::name" → 当前模块库表查句柄 → ffi_lib_sym 解析符号。
+ * 成功返回 NULL 并写 *out_sym；失败返回 error value（文案含别名/符号名与 OS 文本）。
+ * `what` 只用于诊断前缀（"extern call" / "extern load" / "extern store"）。
+ * 函数与数据符号走同一条路：GetProcAddress/dlsym 对数据符号返回的**就是变量
+ * 地址**，因此 extern var 的读写直接作用于库里那块内存。 */
+static value_t *ffi_resolve_symbol(vm_t *vm, bytecode_t *bc, strslice_t qual,
+                                  const char *what, void **out_sym) {
+    *out_sym = NULL;
+    size_t sep = (size_t)-1;
+    for (size_t i = 0; i + 1 < qual.len; i++) {
+        if (qual.ptr[i] == ':' && qual.ptr[i + 1] == ':') { sep = i; break; }
+    }
+    if (sep == (size_t)-1) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "exec: %s: malformed 'lib::name'", what);
         return value_make_error(vm, msg);
     }
+    char alias[256], name[256];
+    size_t alen = sep < sizeof(alias) - 1 ? sep : sizeof(alias) - 1;
+    size_t nlen = qual.len - sep - 2;
+    if (nlen > sizeof(name) - 1) nlen = sizeof(name) - 1;
+    memcpy(alias, qual.ptr, alen);
+    alias[alen] = '\0';
+    memcpy(name, qual.ptr + sep + 2, nlen);
+    name[nlen] = '\0';
+
+    module_t *mod = bc->module_path ? vm_module_lookup(vm, bc->module_path) : NULL;
+    ffi_lib_t *lib = (mod && mod->ffi_libs)
+                         ? (ffi_lib_t *)strmap_get(mod->ffi_libs, alias)
+                         : NULL;
+    if (!lib) {
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: %s: no loaded library '%s' in this module "
+                 "(declare `extern lib \"...\" as %s;`)", what, alias, alias);
+        return value_make_error(vm, msg);
+    }
+    char err[512] = {0};
+    void *sym = ffi_lib_sym(lib, name, err, sizeof(err));
+    if (!sym)
+        return value_make_error(vm, err[0] ? err : "exec: cannot resolve symbol");
+    *out_sym = sym;
+    return NULL;
+}
+
+/* BCODE_FFI_DATA_* → clux 内建类型 + 字节宽度（实现在 vm/ffi_lib.c，与 sema 侧的
+ * 编码函数成对，避免两处清单漂移）。 */
+static const type_t *ffi_data_type(vm_t *vm, uint32_t kind, size_t *size) {
+    return ffi_data_type_of(vm, kind, size);
+}
+
+/* EXTERN_LOAD <STR "lib::name"> <U32 kind>：读**数据符号**（extern var 的读取）。
+ * 地址来自 dlsym（数据符号的"符号地址"就是变量地址），按 kind 读 size 字节 →
+ * 压对应内建类型的值。值是新分配的副本，与库内存储解耦（写回需 EXTERN_STORE）。 */
+static value_t *op_extern_load(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t qual = bcode_read_str(bc, pc);
+    uint32_t kind = bcode_read_u32(bc, pc);
+
+    size_t size = 0;
+    const type_t *t = ffi_data_type(vm, kind, &size);
+    if (!t || size == 0 || size > 8)
+        return value_make_error(vm, "exec: extern load: bad data type code");
+
+    void *sym = NULL;
+    value_t *err = ffi_resolve_symbol(vm, bc, qual, "extern load", &sym);
+    if (err) return err;
+
+    uint8_t buf[8] = {0};
+    memcpy(buf, sym, size);
+    return value_make(vm, t, value_alloc_data_copy(vm->alloc, t, buf));
+}
+
+/* EXTERN_STORE <STR "lib::name"> <U32 kind>：写**数据符号**（extern var 的写入）。
+ * 弹栈顶值 → 按 kind 把 size 字节写进符号地址（不压回结果：赋值是语句）。
+ * 先解析符号再弹值，符号找不到时操作数栈保持原样。 */
+static value_t *op_extern_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t qual = bcode_read_str(bc, pc);
+    uint32_t kind = bcode_read_u32(bc, pc);
+
+    size_t size = 0;
+    const type_t *t = ffi_data_type(vm, kind, &size);
+    if (!t || size == 0 || size > 8)
+        return value_make_error(vm, "exec: extern store: bad data type code");
+
+    void *sym = NULL;
+    value_t *err = ffi_resolve_symbol(vm, bc, qual, "extern store", &sym);
+    if (err) return err;
+
+    value_t *v = exec_stack_pop(vm);
+    if (value_is_error(vm, v)) return v;
+    if (!v || !value_data(v))
+        return value_make_error(vm, "exec: extern store: bad value");
+    /* 类型安全网：sema 已保证类型可赋；字节码层被改坏时按隐式转换兜底 */
+    if (value_type(v) != t) {
+        value_t *casted = value_implicit_cast(vm, v, t);
+        if (value_is_error(vm, casted)) return casted;
+        v = casted;
+    }
+    uint8_t buf[8] = {0};
+    memcpy(buf, value_data(v), size);
+    memcpy(sym, buf, size);
+    return NULL;
+}
+
+static value_t *op_extern_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t qual = bcode_read_str(bc, pc);
+    uint32_t argc = bcode_read_u32(bc, pc);
+    uint32_t ret_kind = bcode_read_u32(bc, pc);
+
+    if (argc > FFI_MAX_ARGS)
+        return value_make_error(vm, "exec: extern call: too many arguments");
+
+    /* 拆 "lib::name" → 库表 → 符号地址（与 extern load/store 共用同一实现） */
+    void *sym = NULL;
+    value_t *rerr = ffi_resolve_symbol(vm, bc, qual, "extern call", &sym);
+    if (rerr) return rerr;
+    char err[512] = {0};
+
+    /* F64 返回：v0 规则 = "F64 返回 ⇒ 全 double 签名"，走类型化调用层
+       ffi_call_f64（x64 下 double 走 XMM0-3、返回走 XMM0；本仓库 Windows x64 的
+       libffi 汇编路径不可用，见 docs/m6-design.md §14.4/§14.5）。
+       实参须已是浮点值（f32/f64），整数实参在此明确报错而不是猜着转换。 */
+    if (ret_kind == BCODE_FFI_RET_F64) {
+        if (argc > 4)
+            return value_make_error(
+                vm, "exec: extern call: f64 calls support at most 4 arguments");
+        double dargs[4];
+        for (size_t i = argc; i > 0; i--) {
+            value_t *a = exec_stack_pop(vm);
+            if (value_is_error(vm, a)) return a;
+            const type_t *at = value_type(a);
+            if (!at || !value_data(a))
+                return value_make_error(vm, "exec: extern call: bad f64 argument");
+            if (at == vm->type_f64) {
+                memcpy(&dargs[i - 1], value_data(a), sizeof(double));
+            } else if (at == vm->type_f32) {
+                float f = 0.0f;
+                memcpy(&f, value_data(a), sizeof(float));
+                dargs[i - 1] = (double)f;
+            } else {
+                return value_make_error(
+                    vm, "exec: extern call: f64 signature requires floating-point "
+                        "arguments (see docs/m6-design.md 14.5)");
+            }
+        }
+        double fout = 0.0;
+        if (!ffi_call_f64(sym, argc, dargs, &fout, err, sizeof(err)))
+            return value_make_error(vm, err);
+        return value_make(vm, vm->type_f64,
+                          value_alloc_data_copy(vm->alloc, vm->type_f64, &fout));
+    }
+
+    /* 弹实参（栈顶为最后一个实参）→ 按顺序装进 int64 数组 */
+    int64_t args[FFI_MAX_ARGS];
+    for (size_t i = argc; i > 0; i--) {
+        value_t *a = exec_stack_pop(vm);
+        if (value_is_error(vm, a)) return a;
+        int64_t raw = 0;
+        const type_t *at = value_type(a);
+        if (at && value_data(a) && at->size > 0 && at->size <= 8) {
+            memcpy(&raw, value_data(a), at->size);
+        }
+        args[i - 1] = raw;
+    }
+
+    int64_t iout = 0;
+    double fout = 0.0;
+    if (!ffi_call_int(sym, argc, args, &iout, err, sizeof(err)))
+        return value_make_error(vm, err);
+
+    switch (ret_kind) {
+    case BCODE_FFI_RET_VOID:
+        return value_make_undefined(vm);
+    case BCODE_FFI_RET_I32: {
+        int32_t v = (int32_t)iout;
+        return value_make(vm, vm->type_i32,
+                          value_alloc_data_copy(vm->alloc, vm->type_i32, &v));
+    }
+    case BCODE_FFI_RET_F64:
+        /* 浮点返回值在 XMM0：需要类型化调用层（ffi_call_f64），见头文件 */
+        (void)fout;
+        return value_make_error(
+            vm, "exec: extern call: f64 return requires the typed call layer");
+    case BCODE_FFI_RET_PTR:
+        /* 指针/opaque 返回：压 **opaque 类型**的值（不是 i64）。否则
+           `var p: opaque = crt::malloc(n);` 会在运行期报
+           "implicit cast: not a widening conversion"（M6 §14.10 的例子）。 */
+        return value_make(vm, vm->type_opaque,
+                          value_alloc_data_copy(vm->alloc, vm->type_opaque,
+                                                  &iout));
+    /* 精确宽度/符号的整数返回（M6 §14.18）：整型/指针返回值都在 RAX，读法相同，
+       差别只在**造哪个 clux 类型的值**——必须与源码声明的返回类型一致，否则
+       使用点（比较/赋值）会撞上隐式转换。 */
+    case BCODE_FFI_RET_U32: {
+        uint32_t v = (uint32_t)iout;
+        return value_make(vm, vm->type_u32,
+                          value_alloc_data_copy(vm->alloc, vm->type_u32, &v));
+    }
+    case BCODE_FFI_RET_U64: {
+        uint64_t v = (uint64_t)iout;
+        return value_make(vm, vm->type_u64,
+                          value_alloc_data_copy(vm->alloc, vm->type_u64, &v));
+    }
+    case BCODE_FFI_RET_I8: {
+        int8_t v = (int8_t)iout;
+        return value_make(vm, vm->type_i8,
+                          value_alloc_data_copy(vm->alloc, vm->type_i8, &v));
+    }
+    case BCODE_FFI_RET_I16: {
+        int16_t v = (int16_t)iout;
+        return value_make(vm, vm->type_i16,
+                          value_alloc_data_copy(vm->alloc, vm->type_i16, &v));
+    }
+    case BCODE_FFI_RET_U8: {
+        uint8_t v = (uint8_t)iout;
+        return value_make(vm, vm->type_u8,
+                          value_alloc_data_copy(vm->alloc, vm->type_u8, &v));
+    }
+    case BCODE_FFI_RET_U16: {
+        uint16_t v = (uint16_t)iout;
+        return value_make(vm, vm->type_u16,
+                          value_alloc_data_copy(vm->alloc, vm->type_u16, &v));
+    }
+    case BCODE_FFI_RET_BOOL: {
+        bool v = (iout & 0xFF) != 0;
+        return value_make(vm, vm->type_bool,
+                          value_alloc_data_copy(vm->alloc, vm->type_bool, &v));
+    }
+    case BCODE_FFI_RET_I64:
+    default:
+        return value_make(vm, vm->type_i64,
+                          value_alloc_data_copy(vm->alloc, vm->type_i64, &iout));
+    }
+}
+
+static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t raw = bcode_read_str(bc, pc);
+
+    module_import_kind_t kind = MODULE_IMPORT_MODULE;
+    char *canonical =
+        module_path_resolve(vm->alloc, raw, bc->module_path, &kind);
+    if (!canonical) {
+        char msg[1152];
+        snprintf(msg, sizeof(msg), "exec: cannot resolve module path '%.*s'",
+                 (int)raw.len, raw.ptr);
+        return value_make_error(vm, msg);
+    }
+
+    value_t *mod_val = vm_import(vm, canonical);
+    if (!mod_val) {
+        char msg[1152];
+        snprintf(msg, sizeof(msg), "exec: module not found '%s'", canonical);
+        allocator_free(vm->alloc, (void **)&canonical);
+        return value_make_error(vm, msg);
+    }
+    allocator_free(vm->alloc, (void **)&canonical);
     return mod_val;
 }
 
-/* GET_MEMBER <str>：成员名。弹模块值 → 从 module->global_scope 按名取
- * 成员值压栈。模块命名空间隔离：GET_MEMBER 从模块自身的 global_scope
- * 查找（而非 current_scope），仅 global_scope 中存在的符号可见
- * （非导出符号也在 global_scope 中，但 sema 层已保证只有 is_exported
- * 的符号会被 :: 访问——编译期拦截未导出成员）。 */
+/* GET_MEMBER <str>：成员名。弹模块值 → 从 **module->exports** 按名取成员值压栈。
+ *
+ * 导出表是唯一的成员可见性来源，与 sema 的 `::` 解析（sema/expr.c 查
+ * module->exports）以及 m5-design-v2 实现步骤 7 一致。此前查 global_scope：
+ * 虽然 sema 已在编译期拦截未导出成员，但**代理导出**（`export * from`）只并入
+ * exports 而不进 global_scope——若运行期查 global_scope，`app::add` 这类经代理
+ * 导出可见的成员会在运行期找不到（sema 通过、运行期失败）。 */
 static value_t *op_get_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
     value_t *mod_val = exec_stack_pop(vm);
@@ -1718,20 +1966,22 @@ static value_t *op_get_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "exec: GET_MEMBER expects a module value");
     }
     module_t *mod = value_as(mod_val, module_t *);
-    if (!mod || !mod->global_scope) {
+    if (!mod || !mod->exports) {
         return value_make_error(vm, "exec: invalid module in GET_MEMBER");
     }
-    value_t *member = scope_lookup(mod->global_scope, name);
+
+    char buf[256];
+    size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
+    memcpy(buf, name.ptr, n);
+    buf[n] = '\0';
+
+    value_t *member = (value_t *)strmap_get(mod->exports, buf);
     if (!member) {
-        char buf[256];
-        size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
-        memcpy(buf, name.ptr, n);
-        buf[n] = '\0';
         char msg[320];
         snprintf(msg, sizeof(msg), "exec: module has no member '%s'", buf);
         return value_make_error(vm, msg);
     }
-    return member; /* 借用引用，归 module->global_scope 拥有 */
+    return member; /* 借用引用，归被导出符号所在模块的 global_scope 拥有 */
 }
 
 /* ---- 终止 ---- */
@@ -1850,6 +2100,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_MAKE]            = op_make,
     [BCODE_IMPORT]          = op_import,
     [BCODE_GET_MEMBER]      = op_get_member,
+    [BCODE_EXTERN_CALL]     = op_extern_call,
+    [BCODE_EXTERN_LOAD]     = op_extern_load,
+    [BCODE_EXTERN_STORE]    = op_extern_store,
 };
 
 /* ================================================================ */

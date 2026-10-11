@@ -1,0 +1,53 @@
+// ffi_extern_var.cx — M6 FFI：`extern var` 访问动态库导出的**全局数据符号**
+//
+// `extern cfunc` 声明的是库里的**函数**，`extern var` 声明的是库里的**全局变量**：
+// 运行期由 dlsym/GetProcAddress 解析出**变量地址**（数据符号的"符号地址"就是
+// 变量地址），因此读写都直接作用于库里的那块内存——**没有本地副本**。
+// 这也是它与普通 `var` 的两点不同：
+//   - 没有初始化器（`extern var lib::name: T;`，库那边已经有内存了）；
+//   - 是**左值**，可以赋值：`crt::_fmode = 32768;` 走 EXTERN_STORE。
+//
+// 类型给出的是"读/写多少字节、按什么类型解释"：必须与库里符号的真实类型一致
+// （读多/写多会踩到相邻符号），可用的类型是
+//   i8/i16/i32/i64、u8/u16/u32/u64、bool、f32/f64、opaque（指针宽度）。
+//
+// 平台说明：C 运行库的名字随平台而变（Windows `msvcrt.dll`、Linux `libc.so.6`、
+// macOS `libSystem.B.dylib`），导出变量名也不同；libffi 端口目前只提供
+// Windows x64 构建。
+//
+// ⚠️ 这里改的是 **CRT 自己的全局变量**：示例跑完会把值还原。真实程序里要谨慎
+// （例如 `_fmode` 影响文件打开模式），优先用 CRT 提供的 setter（`_set_fmode`）。
+
+extern lib "msvcrt.dll" as crt;
+
+extern var crt::_fmode: i32;      // 文件打开模式（int 全局变量）
+extern var crt::_osplatform: u32; // 平台标识（Win32 NT = 2）
+extern var crt::_pgmptr: opaque;  // 程序路径指针（指针宽度 → opaque）
+
+func main(): i32 {
+    // 读：EXTERN_LOAD 按类型宽度从符号地址取字节
+    var old: i32 = crt::_fmode;
+    printf("before: _fmode = %d, _osplatform = %u\n", old, crt::_osplatform);
+
+    // 写：EXTERN_STORE 直接把值写进库里的内存（宿主侧可见）
+    crt::_fmode = 32768; // _O_BINARY
+    if (crt::_fmode != 32768) { return 1; }
+
+    // 复合赋值：LOAD → 运算 → STORE（与普通变量同构）
+    crt::_fmode += 1;
+    if (crt::_fmode != 32769) { return 2; }
+
+    // 还原（不要留下被改过的 CRT 全局）
+    crt::_fmode = old;
+    if (crt::_fmode != old) { return 3; }
+
+    // 指针宽度的数据符号：读出来是 opaque（clux 不解引用 opaque，只能原样传递）
+    var prog: opaque = crt::_pgmptr;
+    crt::_pgmptr = prog;
+
+    // 平台标识读一下即可（现代 Windows 上是 2 = VER_PLATFORM_WIN32_NT）
+    if (crt::_osplatform == 0u32) { return 4; }
+
+    printf("after:  _fmode = %d (restored)\n", crt::_fmode);
+    return 0;
+}

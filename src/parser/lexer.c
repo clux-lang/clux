@@ -67,11 +67,12 @@ static class_t lexer_class = {
 /* ---- Internal: keyword table (M1 language keywords) ---- */
 
 static const char *const g_keywords[] = {
-    "alignof", "as",     "bool",    "break",    "clone",    "comptime",
+    "alignof", "as",     "bool",    "break",    "clone",    "cfunc",    "comptime",
     "const",   "continue", "cunion", "default", "do",      "else",
-    "enum",    "export", "extends", "f32",    "f64",     "false",    "fatal",
+    "enum",    "export", "extends", "extern", "f32",     "f64",      "false",
+    "fatal",
     "for",     "from",   "func",   "i16",     "i32",     "i64",      "i8",
-    "if",      "import", "is",     "len",     "make",    "move",    "new",
+    "if",      "import", "is",     "len",     "lib",     "make",    "move",    "new",
     "nil",     "own",    "opaque",  "ref",    "return",  "share",
     "sizeof",  "str",    "struct",  "switch", "true",    "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",
@@ -518,6 +519,17 @@ static token_t *lexer_read_symbol(lexer_t *lexer, stream_pos_t begin) {
      组合识别（parse_postfix）。 */
   UChar32 c1 = istream_read_cp(lexer->stream);
   UChar32 c2 = istream_peek_cp(lexer->stream);
+
+  /* M6 FFI：`...`（C 可变参数）——**三字符** token，必须先于双字符表识别
+     （否则会被读成三个独立的 '.'）。两点的退化输入产出 `..` token 交 parser 报错。 */
+  if (c1 == '.' && c2 == '.') {
+    istream_read_cp(lexer->stream); /* 第二个 '.' */
+    if (istream_peek_cp(lexer->stream) == '.') {
+      istream_read_cp(lexer->stream); /* 第三个 '.' */
+    }
+    stream_pos_t dend = istream_tell(lexer->stream);
+    return lexer_make_token(lexer, TOKEN_TYPE_SYMBOL, begin, dend);
+  }
 
   if (c2 != -1) {
     for (size_t i = 0; i < sizeof(kPairs) / sizeof(kPairs[0]); i++) {

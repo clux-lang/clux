@@ -127,6 +127,39 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->elems = es;
     return true;
   }
+  if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+    /* struct/tuple 常量（comptime var 支持所有类型）：按类型表序逐字段递归编码，
+       `elems` 复用为字段值数组（与数组元素同一表示）。字段值以**借用 value**
+       （value_make_borrowed 指向目标块内的字段偏移）递归编码，布局语义与运行期
+       op_construct 的 struct/tuple 分支一致。 */
+    size_t count = (t->kind == TYPE_KIND_STRUCT) ? struct_type_field_count(t)
+                                                 : tuple_type_elem_count(t);
+    out->count = count;
+    if (count == 0) {
+      out->elems = NULL;
+      return true;
+    }
+    sema_ct_const_t *es = (sema_ct_const_t *)arena_calloc(
+        sema->arena, count, sizeof(sema_ct_const_t), ALIGNOF(max_align_t));
+    if (!es) return false;
+    const char *base = (const char *)value_data(v);
+    for (size_t i = 0; i < count; i++) {
+      const type_t *ft = NULL;
+      size_t off = 0;
+      if (t->kind == TYPE_KIND_STRUCT) {
+        const struct_field_t *f = struct_type_field(t, i);
+        if (f) { ft = f->type; off = f->offset; }
+      } else {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e) { ft = e->type; off = e->offset; }
+      }
+      if (!ft) return false;
+      value_t *fv = value_make_borrowed(vm, ft, (void *)(base + off));
+      if (!fv || !sema_ct_encode(sema, fv, &es[i])) return false;
+    }
+    out->elems = es;
+    return true;
+  }
   if (t->kind == TYPE_KIND_ENUM) {
     /* 枚举常量：底层恒为整型，编码底层整数值（i 字段按底层宽度读）。
        折叠为 AST_ENUM_REF（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM，
@@ -258,6 +291,27 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     cn->fields_last = flast;
     return cnode;
   }
+  if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+    /* struct/tuple 常量：与数组同机制折叠为 AST_CONSTRUCT——type 位递归构造
+       类型表达式，fields 为按**类型表序**位置化的字面量兄弟链（struct 用具名
+       构造亦可，位置化更简单且运行期 op_construct 按表序布值，语义等价）。 */
+    ast_node_t *type_expr = sema_ct_type_ref(sema, t, origin);
+    if (!type_expr) return NULL;
+    ast_node_t *cnode = ast_construct_new(arena, tb, te);
+    if (!cnode) return NULL;
+    ast_construct_t *cn = (ast_construct_t *)cnode;
+    cn->type = type_expr;
+
+    ast_node_t *fhead = NULL, *flast = NULL;
+    for (size_t i = 0; i < ct->count; i++) {
+      ast_node_t *el = sema_ct_lit(sema, origin, &ct->elems[i]);
+      if (!el) return NULL;
+      sema_ct_link(&fhead, &flast, el);
+    }
+    cn->fields = fhead;
+    cn->fields_last = flast;
+    return cnode;
+  }
   if (t->kind == TYPE_KIND_FUNC) {
     /* 函数引用常量：折叠为 AST_FUNC_REF（纯 id 标识——compiler 直接发
        LOAD_FUNCTION <fid> 加载真实函数值，与函数是否有 name 无关：
@@ -353,10 +407,9 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
     }
   }
 
-  /* 3. ctfe 强制编译期求值（vm->comptime 状态标记） */
+  /* 3. ctfe 编译期真实求值（comptime 与 shadow 的区别在值的形态：shadow 的
+     data==NULL，ctfe 产出带真实 data 的 value，无需模式标志） */
   vm_t *vm = sema->vm;
-  bool saved = vm->comptime;
-  vm->comptime = true;
   ctfe_ctx_t ctx;
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
@@ -365,7 +418,6 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, vd->init);
-  vm->comptime = saved;
 
   if (!r || value_is_error(vm, r)) {
     const char *msg = NULL;
@@ -398,6 +450,21 @@ bool sema_eval_comptime_var(sema_t *sema, ast_var_def_t *vd,
   sym->ct = ct;
   sym->flow_init = true;
   sym->is_active = true;
+
+  /* 5. 常量值绑定进 VM 作用域（**常量槽位解析的前提**）。
+     常量槽位（数组边界 `[N]T`、type 别名计算、enum 值、make 长度……）由
+     CTFE 求值，而 CTFE 的标识符解析只查 `vm->current_scope` 这条链；
+     comptime var 不生成运行期字节码，运行期 scope 里没有它——必须把**真实
+     值**（非 shadow）落在链上，`[N]i32` 之类写法才能被解析到。
+     落点与普通变量的 shadow value 保持一致：
+       - 全局：`vm->root_scope`（3b 的函数体 VM scope 链
+         参数层→捕获层→root_scope 经 scope_lookup 可查到）；
+       - 局部：当前块作用域（定义点同级；嵌套块经 parent 链可见）。
+     `scope_define` 会把值 clone 到目标作用域（生命周期归该作用域 owned），
+     因此这里可以直接交 CTFE 产出的 `r`。 */
+  char nb[256];
+  ctfe_slice_to_cstr(vd->name, nb, sizeof nb);
+  scope_define(vm, is_global ? vm->root_scope : vm->current_scope, nb, r);
   return true;
 }
 
@@ -538,12 +605,10 @@ bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
     return false;
   }
 
-  /* 3. ctfe 强制编译期求值（vm->comptime 状态标记）：init 必须可折叠为
+  /* 3. ctfe 编译期真实求值：init 必须可折叠为
      字面量/函数引用。引用运行期实体（局部/其他全局变量）或不可计算
      表达式 → ctfe error → 报错（诊断信息含 ctfe 原因）。 */
   vm_t *vm = sema->vm;
-  bool saved = vm->comptime;
-  vm->comptime = true;
   ctfe_ctx_t ctx;
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
@@ -552,7 +617,6 @@ bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, vd->init);
-  vm->comptime = saved;
 
   if (!r || value_is_error(vm, r)) {
     const char *msg = NULL;
@@ -648,9 +712,7 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
     }
   }
 
-  /* 2. ctfe 强制编译期求值整个调用 */
-  bool saved = vm->comptime;
-  vm->comptime = true;
+  /* 2. ctfe 编译期真实求值整个调用 */
   ctfe_ctx_t ctx;
   memset(&ctx, 0, sizeof ctx);
   ctx.vm = vm;
@@ -659,7 +721,6 @@ value_t *sema_eval_comptime_call(sema_t *sema, ast_node_t **node,
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *r = ctfe_eval(&ctx, *node);
-  vm->comptime = saved;
 
   if (!r || value_is_error(vm, r)) {
     const char *msg = NULL;
@@ -723,8 +784,6 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
      - 别名/内建类型名走 scope_lookup 拿 type value
      求值后统一由步骤 2 折叠为 AST_TYPE_REF（整个 rhs 收敛为类型引用，
      运行时 LOAD_TYPE，无 extends/三元残留）。 */
-  bool saved = vm->comptime;
-  vm->comptime = true;
   ctfe_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
   ctx.vm = vm;
@@ -732,7 +791,6 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *sh = ctfe_eval(&ctx, td->expr);
-  vm->comptime = saved;
   if (!sh || value_is_error(vm, sh)) {
     const char *msg = NULL;
     if (sh) {
@@ -791,7 +849,7 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
  * def 一起求值（先于函数签名解析——签名/变量可引用 enum 类型）：
  *   1. 底层类型解析（sema_resolve_type_slot）→ 必须 TYPE_KIND_INT（用户
  *      契约：底层须整型；bool/str/复合报错）
- *   2. 逐 variant 值 ctfe 求值（vm->comptime）→ 必须整型常量；值按底层
+ *   2. 逐 variant 值 ctfe 求值 → 必须整型常量；值按底层
  *      类型校验兼容（value_assign 复用整型"只拓宽"语义——i32 赋给 i8 底层
  *      报错，符合"值与类型不兼容编译报错"契约）；重复名/重复值报错
  *   3. type_enum_intern 构造 enum 类型（立即密封 + 去重 intern）
@@ -848,8 +906,6 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
     /* ctfe 编译期求值 variant 值（与 comptime var / type def 同协议）。
        值须为编译期整型常量：函数调用（pass1b 阶段函数 AST 未绑定）由
        ctfe AST_CALL 防御分支干净报错，不落 sema_expr（会误报变量 TDZ）。 */
-    bool saved = vm->comptime;
-    vm->comptime = true;
     ctfe_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.vm = vm;
@@ -858,7 +914,6 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
     ctx.budget = 100000;
     ctx.max_depth = 128;
     value_t *val = ctfe_eval(&ctx, ev->value);
-    vm->comptime = saved;
     if (!val || value_is_error(vm, val)) {
       const char *msg = NULL;
       if (val) {

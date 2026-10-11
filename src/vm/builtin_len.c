@@ -89,10 +89,6 @@ void vm_register_len(vm_t *vm) {
 
     value_t *stored = scope_define(vm, vm->global_scope, "len", fnv);
     if (!stored || value_is_error(vm, stored)) {
-        value_dispose(vm, fnv);
-        allocator_free(vm->alloc, (void **)&fnv);
         return;
     }
-    value_dispose(vm, fnv);
-    allocator_free(vm->alloc, (void **)&fnv);
 }

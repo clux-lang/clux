@@ -1,35 +1,66 @@
 #include "sema/sema.h"
 #include "parser/ast_array.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_assign.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_binary.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_call.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_const.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_fill.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_func_type.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_nil.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_index.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_member.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_block.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_expr_stmt.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_for.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_if.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_return.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_switch.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_ternary.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_type_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_union_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_cunion_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_unary.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_while.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_dowhile.h"
+#include "parser/ast_walk.h"
 #include "parser/lexer.h"
+#include "parser/ast_walk.h"
 #include "sema/comptime.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
@@ -41,6 +72,9 @@
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "parser/ast_deref.h"
+#include "parser/ast_enum_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
+#include "parser/ast_walk.h"
+#include "vm/ffi_lib.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
 #include <stdio.h>
 #include <string.h>
 
@@ -303,12 +337,12 @@ static sema_scope_t *annot_anchor_scope(sema_t *sema, strslice_t name,
 
   /* 参数判定：遍历当前函数真实参数列表（参数符号在 param_scope 直系，但
      函数体顶层变量也注册在 param_scope，sema_scope_find_local 无法区分）。 */
-  if (sema->func_def) {
-    for (ast_node_t *p = sema->func_def->params; p; p = p->next) {
+  if (sema->fn.def) {
+    for (ast_node_t *p = sema->fn.def->params; p; p = p->next) {
       ast_var_def_t *pvd = (ast_var_def_t *)p;
       if (pvd->name.len == name.len &&
           memcmp(pvd->name.ptr, name.ptr, name.len) == 0)
-        return sema->local_func_param_scope;
+        return sema->fn.local_func_param_scope;
     }
   }
 
@@ -451,9 +485,12 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
   /* comptime var：编译期求值 + 符号表编码（sema_eval_comptime_var）。
      定义点不进入 VM scope——调用方（walk_block）负责从语句链摘除；
      引用点在 sema_expr 折叠为字面量。comptime 值是编译期常量（无运行时
-     生命周期），不参与 §5 逃逸检查。 */
+     生命周期），不参与 §5 逃逸检查。
+     已求值的跳过：walk_block 的提升预扫会先按源序求值同块 comptime var
+     （该块后面的 type def 如 `type T = [C]i32` 在提升阶段就要用到常量值），
+     此处不能重复求值（会二次绑定同名常量）。 */
   if (vd->is_comptime) {
-    sema_eval_comptime_var(sema, vd, scope);
+    if (!sym->ct_valid) sema_eval_comptime_var(sema, vd, scope);
     return;
   }
 
@@ -505,21 +542,17 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量）。
        匿名构造注入：显式声明类型已知 → push anon_ct，使 init 的 .{...}
        推断目标类型（var p: Point = .{ .x = 1 };）。 */
-    bool have_ct = false;
-    if (vd->type_expr && sema->anon_ct_depth < 16) {
-      const type_t *dt = NULL;
+    const type_t *dt = NULL;
+    if (vd->type_expr && sema->ex.anon_ct_depth < 16) {
       /* 类型槽位可能未解析（3a 推迟），先尝试解析出声明类型用于注入 */
       ast_node_t *save = vd->type_expr;
       const type_t *rt = resolve_type_expr(sema, vd->type_expr);
       if (rt) dt = rt;
       vd->type_expr = save; /* 不在此处折叠——3a/var_type_slot_reparse 负责 */
-      if (dt) {
-        sema->anon_ct[sema->anon_ct_depth++] = dt;
-        have_ct = true;
-      }
     }
+    bool ct_pushed = sema_anon_push(sema, dt);
     value_t *init = sema_expr(sema, &vd->init, scope);
-    if (have_ct && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    sema_anon_pop(sema, ct_pushed);
     bool init_bad = value_is_error(sema->vm, init) ||
                     value_is_type(init, TYPE_KIND_VOID);
     /* 错误恢复产物（init 已诊断）不提升确定性 */
@@ -636,6 +669,8 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
                                  sema_scope_t *scope);
 static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
                                 sema_scope_t *scope);
+static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
+                                     sema_scope_t *scope);
 
 static void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
@@ -652,6 +687,13 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   /* 左值：解引用赋值 r.* = v（m3-design §8.2 解引用 SET 严格分离） */
   if (as->target->kind == AST_DEREF) {
     shadow_assign_deref(sema, as, scope);
+    return;
+  }
+  /* 左值：`<库>::<数据符号>` = v（M6 FFI，extern var 的写入）。
+     与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。
+     复合赋值（`crt::x += 1`）走 LOAD → op → STORE，与普通变量同构。 */
+  if (as->target->kind == AST_ENUM_REF) {
+    shadow_assign_extern_var(sema, as, scope);
     return;
   }
   /* 左值必须是标识符表达式（目前仅支持 ID_LIT） */
@@ -673,7 +715,18 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     return;
   }
 
-  /* 左值从 VM scope 链 lookup（与 sema 作用域树同构） */
+  /* 左值从 VM scope 链 lookup（与 sema 作用域树同构）。
+     先判 comptime var：它的**常量真实值**现在也会绑定进 VM 作用域
+     （常量槽位解析需要，见 sema_eval_comptime_var 步骤 5），因此不能再靠
+     "VM scope 查不到" 来识别编译期常量——必须在命中之前查符号表。 */
+  sema_symbol_t *csym = sema_lookup(scope, name);
+  if (csym && csym->is_comptime && csym->ct_valid) {
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign to compile-time constant '%.*s'",
+               (int)name.len, name.ptr);
+    return;
+  }
+
   value_t *lhs = scope_lookup(sema->vm->current_scope, name);
   if (!lhs) {
     /* comptime var 不在 VM scope：赋值给编译期常量 → 编译错误 */
@@ -700,13 +753,9 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   if (rhs_nil) {
     rhs = NULL;
   } else {
-    bool injected = false;
-    if (lt_ty && sema->anon_ct_depth < 16) {
-      sema->anon_ct[sema->anon_ct_depth++] = lt_ty;
-      injected = true;
-    }
+    bool ct_pushed = sema_anon_push(sema, lt_ty);
     rhs = sema_expr(sema, &as->value, scope);
-    if (injected && sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    sema_anon_pop(sema, ct_pushed);
   }
   bool rhs_bad = value_is_error(sema->vm, rhs) ||
                  value_is_type(rhs, TYPE_KIND_VOID);
@@ -1070,10 +1119,9 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   bool rhs_nil = as->value->kind == AST_NIL;
   value_t *rhs = NULL;
   if (!rhs_nil) {
-    if (ft && sema->anon_ct_depth < 16)
-      sema->anon_ct[sema->anon_ct_depth++] = ft;
+    bool ct_pushed = sema_anon_push(sema, ft);
     rhs = sema_expr(sema, &as->value, scope);
-    if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    sema_anon_pop(sema, ct_pushed);
   }
   if (bad) return; /* 已有诊断，右值已求值（错误恢复） */
   if (value_is_error(sema->vm, rhs) ||
@@ -1102,10 +1150,9 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       ((ast_construct_t *)ctor)->type        = NULL;
       ((ast_construct_t *)ctor)->fields      = nil_node;
       ((ast_construct_t *)ctor)->fields_last = nil_node;
-      if (sema->anon_ct_depth < 16)
-        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      bool ct_pushed = sema_anon_push(sema, ft);
       sema_expr(sema, &as->value, scope);
-      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+      sema_anon_pop(sema, ct_pushed);
     }
     return;
   }
@@ -1159,6 +1206,131 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   }
 }
 
+/* ---- M6 FFI：`<库>::<数据符号>` = v（extern var 的写入）----
+ *
+ * 与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。这里做三件事：
+ *   ① 解析限定名符号（必须是 SEMA_SYM_EXTERN_VAR——函数符号要报"这是函数"）；
+ *   ② 在目标节点上置 is_ffi_var/ffi_var_kind（compiler 据此发 EXTERN_STORE，
+ *      契约见 ast_enum_ref.h；读取态的 EXTERN_LOAD 也读同样两个字段）；
+ *   ③ 右值类型校验：简单赋值 value_assign(T, rhs)；复合赋值先 shadow 算
+ *      `T op rhs` 再校验结果可赋回 T（与普通变量的复合赋值同一套判据）。
+ *
+ * `nil` 不是合法右值（数据符号没有 optional 形态）。 */
+static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
+                                     sema_scope_t *scope) {
+  ast_enum_ref_t *n = (ast_enum_ref_t *)as->target;
+
+  /* ② 先取符号（type_expr 是库别名 AST_IDENT）。
+     `::` 左侧可能是：extern lib 别名（我们的目标）、模块命名空间、枚举类型。
+     parser 只放行语法形态，语义在这里分流——每种情况给出各自的精确诊断。 */
+  sema_symbol_t *ds = NULL;
+  sema_symbol_t *left = NULL;
+  const char *libname = NULL;
+  size_t liblen = 0;
+  if (n->type_expr && n->type_expr->kind == AST_IDENT) {
+    ast_ident_t *id = (ast_ident_t *)n->type_expr;
+    libname = id->name.ptr;
+    liblen = id->name.len;
+    left = sema_lookup(scope, id->name);
+    char qual[512];
+    int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s", (int)id->name.len,
+                      id->name.ptr, (int)n->variant.len, n->variant.ptr);
+    if (qn > 0 && (size_t)qn < sizeof(qual))
+      ds = sema_lookup(sema->global_scope,
+                       strslice_from_bytes(qual, (size_t)qn));
+  }
+  const type_t *ft = (ds && ds->kind == SEMA_SYM_EXTERN_VAR) ? ds->type : NULL;
+  if (!ft) {
+    if (left && left->kind == SEMA_SYM_MODULE)
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "cannot assign to module member '%.*s::%.*s' (module exports "
+                 "are read-only through the namespace)",
+                 (int)liblen, libname, (int)n->variant.len, n->variant.ptr);
+    else if (left && left->kind == SEMA_SYM_TYPE)
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "cannot assign to '%.*s::%.*s' (enum variant is not a variable)",
+                 (int)liblen, libname, (int)n->variant.len, n->variant.ptr);
+    else if (ds && ds->kind == SEMA_SYM_FUNC)
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "cannot assign to '%.*s::%.*s': it is an `extern cfunc` "
+                 "(a function, not a variable)",
+                 (int)liblen, libname, (int)n->variant.len, n->variant.ptr);
+    else
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "invalid assignment target: '%.*s::%.*s' is not an "
+                 "`extern var` declaration",
+                 (int)liblen, libname, (int)n->variant.len, n->variant.ptr);
+    sema_expr(sema, &as->value, scope);
+    return;
+  }
+  uint32_t kind = 0;
+  if (!ffi_data_kind_of(ft, sema->vm, &kind)) {
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "cannot assign to '%.*s::%.*s': type is not supported for "
+               "extern var", (int)liblen, libname, (int)n->variant.len,
+               n->variant.ptr);
+    sema_expr(sema, &as->value, scope);
+    return;
+  }
+  n->is_ffi_var = true;
+  n->ffi_var_kind = kind;
+
+  if (as->value->kind == AST_NIL) {
+    diag_error(sema->diag, sema_loc(sema, as->value),
+               "cannot assign nil to `extern var` (no optional form for a "
+               "library data symbol)");
+    return;
+  }
+
+  /* ③ 右值求值 + 类型校验（简单 / 复合两条路径） */
+  value_t *rhs = sema_expr(sema, &as->value, scope);
+  if (value_is_error(sema->vm, rhs) || value_is_type(rhs, TYPE_KIND_VOID))
+    return;
+
+  value_t *dst = value_make_shadow(sema->vm, ft);
+  if (token_is(as->op, "=")) {
+    if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
+      char tn[64], rn[64];
+      sema_type_name(ft, tn, sizeof(tn));
+      sema_type_name(value_type(rhs), rn, sizeof(rn));
+      diag_error(sema->diag, sema_loc(sema, as->value),
+                 "cannot assign %s to `%.*s::%.*s` of type %s", rn,
+                 (int)liblen, libname, (int)n->variant.len, n->variant.ptr, tn);
+    }
+    return;
+  }
+  value_t *(*op)(vm_t *, value_t *, value_t *) = compound_binop(as->op);
+  if (!op) {
+    char ob[16];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "unsupported compound assignment operator '%s'", ob);
+    return;
+  }
+  value_t *result = op(sema->vm, dst, rhs);
+  if (value_is_error(sema->vm, result)) {
+    char ob[16], tn[64], rn[64];
+    size_t len = 0;
+    const char *text = as->op ? token_get_text(as->op, &len) : NULL;
+    snprintf(ob, sizeof(ob), "%.*s", (int)len, text ? text : "?");
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(rhs), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, &as->base),
+               "type mismatch: cannot apply '%s' to %s and %s", ob, tn, rn);
+    return;
+  }
+  if (value_is_error(sema->vm, value_assign(sema->vm, dst, result))) {
+    char tn[64], rn[64];
+    sema_type_name(ft, tn, sizeof(tn));
+    sema_type_name(value_type(result), rn, sizeof(rn));
+    diag_error(sema->diag, sema_loc(sema, as->value),
+               "cannot assign %s to `%.*s::%.*s` of type %s", rn,
+               (int)liblen, libname, (int)n->variant.len, n->variant.ptr, tn);
+  }
+}
+
 /* ---- 解引用左值赋值（r.* = v，m3-design §8.2 解引用 SET 严格分离）----
  * 目标求值（指针操作数须为 own/ref/fatal 指针 → 取被指向类型 T 为字段
  * 类型；非指针已在诊断中报错）、const 检查（被指向类型含 const → 不可
@@ -1167,7 +1339,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
 static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
                                 sema_scope_t *scope) {
   ast_deref_t *n = (ast_deref_t *)as->target;
-
   /* 指针操作数求值（sema_expr AST_DEREF 分支：非指针已在其中诊断） */
   value_t *base = sema_expr(sema, &n->operand, scope);
   bool bad = value_is_error(sema->vm, base) ||
@@ -1195,10 +1366,9 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   bool rhs_nil = as->value->kind == AST_NIL;
   value_t *rhs = NULL;
   if (!rhs_nil) {
-    if (ft && sema->anon_ct_depth < 16)
-      sema->anon_ct[sema->anon_ct_depth++] = ft;
+    bool ct_pushed = sema_anon_push(sema, ft);
     rhs = sema_expr(sema, &as->value, scope);
-    if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+    sema_anon_pop(sema, ct_pushed);
   }
   if (bad) return; /* 已有诊断，右值已求值（错误恢复） */
   if (value_is_error(sema->vm, rhs) ||
@@ -1226,10 +1396,9 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
       ((ast_construct_t *)ctor)->type        = NULL;
       ((ast_construct_t *)ctor)->fields      = nil_node;
       ((ast_construct_t *)ctor)->fields_last = nil_node;
-      if (sema->anon_ct_depth < 16)
-        sema->anon_ct[sema->anon_ct_depth++] = ft;
+      bool ct_pushed = sema_anon_push(sema, ft);
       sema_expr(sema, &as->value, scope);
-      if (sema->anon_ct_depth > 0) sema->anon_ct_depth--;
+      sema_anon_pop(sema, ct_pushed);
     }
     return;
   }
@@ -1291,19 +1460,19 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     bool v_bad = value_is_error(sema->vm, v) ||
                  value_is_type(v, TYPE_KIND_VOID);
     if (!v_bad) {
-      if (!sema->func_return_type) {
+      if (!sema->fn.return_type) {
         diag_error(sema->diag, sema_loc(sema, rt->value),
                    "void function cannot return a value");
       } else {
         /* value_assign 校验返回类型可赋给签名返回类型 */
-        value_t *dst = value_make_shadow(sema->vm, sema->func_return_type);
+        value_t *dst = value_make_shadow(sema->vm, sema->fn.return_type);
         if (value_is_error(sema->vm, value_assign(sema->vm, dst, v))) {
           char tn[64], rn[64];
-          sema_type_name(sema->func_return_type, tn, sizeof(tn));
+          sema_type_name(sema->fn.return_type, tn, sizeof(tn));
           sema_type_name(value_type(v), rn, sizeof(rn));
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
-        } else if (sema->func_return_type->kind == TYPE_KIND_PTR_REF &&
+        } else if (sema->fn.return_type->kind == TYPE_KIND_PTR_REF &&
                    rt->value->kind == AST_IDENT) {
           /* R3（返回 ref 来源，m3-design §6）：返回值 ref 的（标注）作用域
              必然来自参数或全局——本地 own 变量/临时借用不能作为返回值 ref
@@ -1322,7 +1491,7 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
             /* 参数判定：遍历真实参数列表（body 顶层变量也注册在
                param_scope，sema_scope_find_local 无法区分） */
             bool is_param = false;
-            for (ast_node_t *p = sema->func_def ? sema->func_def->params : NULL;
+            for (ast_node_t *p = sema->fn.def ? sema->fn.def->params : NULL;
                  p && !is_param; p = p->next) {
               ast_var_def_t *pvd = (ast_var_def_t *)p;
               is_param = pvd->name.len == ((ast_ident_t *)rt->value)->name.len &&
@@ -1333,9 +1502,9 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
             /* §9 闭包捕获视同特殊参数：返回 ref 可来自捕获变量
                （调用闭包时闭包对象必然存活，捕获的 ref 有效） */
             bool is_capture = false;
-            if (sema->func_def && sema->func_def->captures) {
+            if (sema->fn.def && sema->fn.def->captures) {
               strslice_t rname = ((ast_ident_t *)rt->value)->name;
-              for (ast_node_t *c = sema->func_def->captures; c; c = c->next) {
+              for (ast_node_t *c = sema->fn.def->captures; c; c = c->next) {
                 ast_var_def_t *cv = (ast_var_def_t *)c;
                 if (cv->name.len == rname.len &&
                     memcmp(cv->name.ptr, rname.ptr, rname.len) == 0) {
@@ -1356,20 +1525,20 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                须嵌套于闭包标注的每个锚点（返回值存活 ≤ 闭包存活 ≤ 锚点）。
                返回值来自捕获 → 返回值存活受闭包存活约束；返回值标注不得
                比闭包标注更宽（否则调用方以为返回值活到 y，实际活不过 x）。 */
-            if (is_capture && sema->func_def &&
-                sema->func_def->scope_annot_count > 0) {
+            if (is_capture && sema->fn.def &&
+                sema->fn.def->scope_annot_count > 0) {
               strslice_t *ret_names = NULL;
               size_t ret_count = 0;
-              sema_annot_peek(sema->func_def->return_expr,
+              sema_annot_peek(sema->fn.def->return_expr,
                               &ret_names, &ret_count);
               for (size_t i = 0; i < ret_count; i++) {
                 sema_scope_t *ret_anchor =
                     annot_anchor_scope(sema, ret_names[i], scope);
                 if (!ret_anchor) continue; /* 未知锚点由他处报 */
-                for (size_t j = 0; j < sema->func_def->scope_annot_count;
+                for (size_t j = 0; j < sema->fn.def->scope_annot_count;
                      j++) {
                   sema_scope_t *clo_anchor = annot_anchor_scope(
-                      sema, sema->func_def->scope_annot_names[j], scope);
+                      sema, sema->fn.def->scope_annot_names[j], scope);
                   if (!clo_anchor) continue;
                   if (!sema_scope_within(ret_anchor, clo_anchor)) {
                     diag_error(sema->diag, sema_loc(sema, rt->value),
@@ -1377,32 +1546,38 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                "closure annotation '%.*s' (return scope must "
                                "be nested within closure scope)",
                                (int)ret_names[i].len, ret_names[i].ptr,
-                               (int)sema->func_def->scope_annot_names[j].len,
-                               sema->func_def->scope_annot_names[j].ptr);
+                               (int)sema->fn.def->scope_annot_names[j].len,
+                               sema->fn.def->scope_annot_names[j].ptr);
                   }
                 }
               }
             }
           }
-          /* R1（fatal 参数消费，§4）：return fatal 参数 = 所有权继续传递，
-             标记已消费（函数结束未消费检查放行）。 */
-          if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
-              rs->type->kind == TYPE_KIND_PTR_FATAL) {
-            rs->moved = true;
-          }
         }
       }
     }
+
+    /* R1（fatal 参数消费，§4）：`return p;`（p 为 fatal 指针**或切片**参数）
+       = 所有权继续传递给调用方 → 标记已消费，函数结束的"未消费"检查放行。
+       **与返回类型无关**：这段标记原先写在 `: ref *T` 的分支内部，fatal 指针/
+       切片返回根本走不到，于是 `func id(p: fatal []i32): fatal []i32 { return p; }`
+       被误报"未消费"（诊断文本自己写的是 "move() or return it"）。
+       判据与 sema_walk_function 末尾的检查（PTR_FATAL || SLICE_FATAL）一致。 */
+    if (rt->value && rt->value->kind == AST_IDENT) {
+      sema_symbol_t *rs = sema_lookup(scope, ((ast_ident_t *)rt->value)->name);
+      if (rs && rs->kind == SEMA_SYM_VAR && sema_type_is_fatal(rs->type)) {
+        sema_mark_fatal_consumed(rs);
+      }
+    }
   } else {
-    if (sema->func_return_type &&
-        sema->func_return_type->kind != TYPE_KIND_VOID) {
+    if (sema->fn.return_type &&
+        sema->fn.return_type->kind != TYPE_KIND_VOID) {
       char tn[64];
-      sema_type_name(sema->func_return_type, tn, sizeof(tn));
+      sema_type_name(sema->fn.return_type, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &rt->base),
                  "function returning %s must return a value", tn);
     }
   }
-  sema->func_has_return = true;
   return r;
 }
 
@@ -1489,7 +1664,17 @@ static block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   sema_scope_release_borrows(body_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
-  if (fr->update) sema_expr(sema, &fr->update, fs);
+  /* update 与 init 同形：可放赋值语句（j = j + 1）或表达式。
+     AST_ASSIGN 必须走 shadow_assign（赋值是语句级检查，sema_expr 只处理
+     表达式）。此前无条件走 sema_expr：AST_ASSIGN 落入 switch 的 default
+     被静默返回 void shadow ⇒ **for 的步进语句从未被类型检查**。 */
+  if (fr->update) {
+    if (fr->update->kind == AST_ASSIGN) {
+      shadow_assign(sema, (ast_assign_t *)fr->update, fs);
+    } else {
+      sema_expr(sema, &fr->update, fs);
+    }
+  }
 
   flow_restore(&snap); /* 丢弃体内确定性提升（保守） */
   flow_release(&snap);
@@ -1596,8 +1781,11 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
      作用域 + 内部检查），flow 不参与 meet（错误已 fail-fast）。 */
   for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
     ast_switch_case_t *sc = (ast_switch_case_t *)cs;
-    for (ast_node_t *pt = sc->patterns; pt; pt = pt->next) {
-      value_t *pv = sema_expr(sema, &pt, scope);
+    /* 链上指针迭代：把真实链槽交给 sema_expr，折叠（comptime 变量引用 →
+       字面量）就地写回；传局部变量副本会丢折叠，编译期符号引用漏到运行期。 */
+    for (ast_node_t **link = &sc->patterns; *link; link = &(*link)->next) {
+      value_t *pv = sema_expr(sema, link, scope);
+      ast_node_t *pt = *link; /* 折叠可能替换节点：后续用刷新后的节点 */
       if (value_is_error(sema->vm, pv) ||
           value_is_type(pv, TYPE_KIND_VOID))
         continue; /* 错误恢复产物静默通过 */
@@ -1760,81 +1948,37 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
  * 引用（未折叠的名字，折叠产物 AST_TYPE_REF 不在此列）是否命中——
  * 命中即 var 完全遮罩（遮蔽平等），报错并跳过求值。 */
 
+/* 类型 rhs 是否引用了 prior_vars 中的运行期变量名（返回命中的那个名字）。
+   基于共享 AST 遍历（parser/ast_walk.h）：谓词只关心标识符名，遍历覆盖
+   类型表达式与值表达式的全部子节点（此前手写版漏掉 ?T / *T / []T / 元组
+   等子树，导致 `type T = ?[x]i32` 这类遮蔽要到 CTFE 才以另一种消息报出）。 */
+typedef struct {
+  const strslice_t *prior_vars;
+  size_t            prior_n;
+  const strslice_t *hit;
+} uses_var_probe_t;
+
+static ast_walk_action_t probe_uses_var(ast_node_t *n, void *user) {
+  uses_var_probe_t *p = (uses_var_probe_t *)user;
+  if (n->kind != AST_IDENT) return AST_WALK_CONTINUE;
+  strslice_t name = ((ast_ident_t *)n)->name;
+  for (size_t i = 0; i < p->prior_n; i++) {
+    if (p->prior_vars[i].len == name.len &&
+        memcmp(p->prior_vars[i].ptr, name.ptr, name.len) == 0) {
+      p->hit = &p->prior_vars[i];
+      return AST_WALK_STOP;
+    }
+  }
+  return AST_WALK_CONTINUE;
+}
+
 static const strslice_t *type_rhs_uses_var(const ast_node_t *e,
                                            const strslice_t *prior_vars,
                                            size_t prior_n) {
   if (!e) return NULL;
-  if (e->kind == AST_IDENT) {
-    for (size_t i = 0; i < prior_n; i++) {
-      if (prior_vars[i].len == ((ast_ident_t *)e)->name.len &&
-          memcmp(prior_vars[i].ptr, ((ast_ident_t *)e)->name.ptr,
-                 prior_vars[i].len) == 0)
-        return &prior_vars[i];
-    }
-    return NULL;
-  }
-  const strslice_t *hit = NULL;
-  switch (e->kind) {
-    case AST_ARRAY:
-      hit = type_rhs_uses_var(((ast_array_t *)e)->base_type, prior_vars,
-                              prior_n);
-      if (hit) return hit;
-      return type_rhs_uses_var(((ast_array_t *)e)->length, prior_vars,
-                               prior_n);
-    case AST_CONST:
-      return type_rhs_uses_var(((ast_const_t *)e)->sub, prior_vars, prior_n);
-    case AST_VOLATILE:
-      return type_rhs_uses_var(((ast_volatile_t *)e)->sub, prior_vars,
-                               prior_n);
-    case AST_BINARY:
-      hit = type_rhs_uses_var(((ast_binary_t *)e)->lhs, prior_vars, prior_n);
-      if (hit) return hit;
-      return type_rhs_uses_var(((ast_binary_t *)e)->rhs, prior_vars, prior_n);
-    case AST_UNARY:
-      return type_rhs_uses_var(((ast_unary_t *)e)->operand, prior_vars,
-                               prior_n);
-    case AST_TERNARY: {
-      hit = type_rhs_uses_var(((ast_ternary_t *)e)->cond, prior_vars,
-                              prior_n);
-      if (hit) return hit;
-      hit = type_rhs_uses_var(((ast_ternary_t *)e)->then_branch, prior_vars,
-                              prior_n);
-      if (hit) return hit;
-      return type_rhs_uses_var(((ast_ternary_t *)e)->else_branch, prior_vars,
-                               prior_n);
-    }
-    case AST_CALL: {
-      hit = type_rhs_uses_var(((ast_call_t *)e)->callee, prior_vars,
-                              prior_n);
-      if (hit) return hit;
-      for (ast_node_t *a = ((ast_call_t *)e)->args; a; a = a->next) {
-        hit = type_rhs_uses_var(a, prior_vars, prior_n);
-        if (hit) return hit;
-      }
-      return NULL;
-    }
-    case AST_FUNC_TYPE: {
-      for (ast_node_t *p = ((ast_func_type_t *)e)->params; p; p = p->next) {
-        hit = type_rhs_uses_var(p, prior_vars, prior_n);
-        if (hit) return hit;
-      }
-      return type_rhs_uses_var(((ast_func_type_t *)e)->return_type,
-                               prior_vars, prior_n);
-    }
-    case AST_CONSTRUCT: {
-      hit = type_rhs_uses_var(((ast_construct_t *)e)->type, prior_vars,
-                              prior_n);
-      if (hit) return hit;
-      for (ast_node_t *f = ((ast_construct_t *)e)->fields; f; f = f->next) {
-        hit = type_rhs_uses_var(f, prior_vars, prior_n);
-        if (hit) return hit;
-      }
-      return NULL;
-    }
-    case AST_TYPE_REF:
-    default:
-      return NULL; /* 折叠产物 / 无子节点字面量 */
-  }
+  uses_var_probe_t p = {prior_vars, prior_n, NULL};
+  ast_walk_preorder((ast_node_t *)e, probe_uses_var, &p);
+  return p.hit;
 }
 
 /* ---- 局部函数签名解析（3b 提升时） ---- */
@@ -1912,6 +2056,32 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
   if (params) allocator_free(sema->vm->alloc, (void **)&params);
 }
 
+/* ===========================================================================
+ * 3a 建树 / 3b 消费的**对位自检**（作用域树索引协议）
+ *
+ * 协议：3a（stmt_build）用 sema_scope_add_child 按源码序为每个建作用域的语句
+ * （block / if 的 then·else / switch 的 case·default / while / do-while /
+ * for + body / 函数定义）挂一个子作用域；3b（本文件 walker）用
+ * sema_scope_child(scope, (*idx)++) 按同一顺序消费。
+ *
+ * 两侧一旦失配，此前只会**静默降级**（调用点统一写 `child ? child : scope`）
+ * ——表现为符号永不激活、遮罩语义反转、借用计数泄漏等极难定位的错误。
+ * 这里在每个块消费结束时校验"消费数 == 子作用域数"，使失配立刻变响。
+ *
+ * 唯一允许的差异：块内出现"确定返回"之后的不可达尾部——3a 仍按结构建树，
+ * 而 3b 提前 break（不可达语句本就不做类型检查），故跳过校验。
+ * =========================================================================== */
+
+static void check_scope_consumed(sema_t *sema, sema_scope_t *scope,
+                                 ast_node_t *where_node, size_t consumed) {
+  size_t have = sema_scope_children_count(scope);
+  if (consumed == have) return;
+  diag_error(sema->diag, sema_loc(sema, where_node),
+             "internal: scope tree desync (consumed %zu of %zu child scopes) "
+             "— sema 3a/3b 建树与消费不一致，请报告此缺陷",
+             consumed, have);
+}
+
 static block_result_t walk_block(sema_t *sema, ast_node_t *block,
                                  sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
@@ -1928,8 +2098,26 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
   size_t prior_n = 0;
   for (ast_node_t *s = b->stmts; s; s = s->next) {
     if (s->kind == AST_VAR_DEF) {
-      if (prior_n < 64) {
-        prior_vars[prior_n++] = ((ast_var_def_t *)s)->name;
+      ast_var_def_t *pv = (ast_var_def_t *)s;
+      if (pv->is_comptime) {
+        /* 局部 comptime var 在提升预扫里按源序求值：同块后面的 type def
+           （`type T = [C]i32`）在提升阶段就要用到它的常量值（值同时绑定进
+           本块 VM 作用域，常量槽位解析才查得到）。
+           comptime var 是**编译期常量**，不是运行期变量——不纳入
+           prior_vars 遮蔽预检（否则 `type T = [C]i32` 会被误判为
+           "引用变量遮蔽类型名"）。
+           守卫：init 引用了靠前的**运行期变量**时**不**提前求值——此刻那些
+           变量尚未在定义点激活，提前求值会把诊断退化成 "undefined variable"；
+           留给 3b 定义点求值才能给出准确的 "not a compile-time constant"。 */
+        bool uses_runtime_var =
+            pv->init && type_rhs_uses_var(pv->init, prior_vars, prior_n) != NULL;
+        if (!uses_runtime_var) {
+          sema_symbol_t *csym = sema_scope_find_local(scope, pv->name);
+          if (!csym || !csym->ct_valid)
+            sema_eval_comptime_var(sema, pv, scope);
+        }
+      } else if (prior_n < 64) {
+        prior_vars[prior_n++] = pv->name;
       }
     } else if (s->kind == AST_TYPE_DEF) {
       ast_type_def_t *td = (ast_type_def_t *)s;
@@ -2020,6 +2208,10 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
     prev = &s->next;
     s = s->next;
   }
+  /* 3a/3b 对位自检（见 check_scope_consumed 说明）。不可达尾部不校验：
+     3a 按结构建树，3b 已提前 break——属预期差异。 */
+  if (!r.definitely_returns)
+    check_scope_consumed(sema, scope, block, *idx);
   return r;
 }
 
@@ -2029,34 +2221,39 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
   if (!sf->scope) return; /* 建树失败（结构错误已诊断），不进入 shadow run */
 
+  /* 进入函数 walk：**整体保存**当前函数上下文并整体恢复（含 return_type /
+     def / 捕获检查上下文 / comptime 标志 / callee·循环标志）。
+     本函数可被嵌套调用（sema_check_func_literal 在外层 walk 中调用它走字面量
+     body），逐字段清空 + 部分恢复的写法极易漏字段——整体结构赋值则天然完备。
+     上下文类型见 sema_fn_ctx_t。 */
+  sema_fn_ctx_t saved = sema_fn_ctx_enter(sema);
+
   /* 捕获检查上下文：局部函数体引用外层局部符号 → 报错（无闭包，运行时
      函数体查找链只有参数 + 全局）。全局函数不设 local_func_base（fscope
      parent = 全局，无外层局部可捕获），但参数层照设——walk_return 的 §6
      返回 ref 来源检查（参数放行）需要参数层判定。 */
-  sema->local_func_base = sf->is_local ? sf->scope : NULL;
-  sema->local_func_param_scope = sf->param_scope;
+  sema->fn.local_func_base = sf->is_local ? sf->scope : NULL;
+  sema->fn.local_func_param_scope = sf->param_scope;
 
   /* comptime 函数体 walk 标志：body 内对 comptime func 的调用走普通
      shadow 校验（参数是 shadow，不能 CTFE），标志在整个 body walk 期间
      保持。 */
-  bool saved_comptime = sema->walking_comptime;
-  sema->walking_comptime = fn->is_comptime;
+  sema->fn.walking_comptime = fn->is_comptime;
 
-  sema->func_return_type =
+  sema->fn.return_type =
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
-  sema->func_has_return = false;
-  sema->func_def = fn;
+  sema->fn.def = fn;
 
   /* R1（返回类型约束，m3-design §4）：参数/返回值只能 ref 或 fatal，不能
      own——own 是单所有权，跨函数传 own 会破坏唯一所有权（调用方已销毁 /
      返回值无法显式接管）。返回 own *T 应改写为返回 fatal *T（调用点
      `var p: own *T = f()` 经 fatal→own 接管）。 */
-  if (sema->func_return_type &&
-      sema->func_return_type->kind == TYPE_KIND_PTR_OWN) {
+  if (sema->fn.return_type &&
+      sema->fn.return_type->kind == TYPE_KIND_PTR_OWN) {
     diag_error(sema->diag, sema_loc(sema, fn->return_expr),
                "function cannot return own pointer (return fatal *T instead; "
                "the caller takes ownership via var p: own *T = f())");
-    sema->func_return_type = NULL; /* 防级联：后续 return 不再按 own 校验 */
+    sema->fn.return_type = NULL; /* 防级联：后续 return 不再按 own 校验 */
   }
 
   /* 函数级 VM scope（与作用域树同构）：捕获层（父）定义捕获 shadow value，
@@ -2113,9 +2310,7 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
-    if (ps && ps->type && (ps->type->kind == TYPE_KIND_PTR_FATAL ||
-                           ps->type->kind == TYPE_KIND_SLICE_FATAL) &&
-        !ps->moved) {
+    if (ps && sema_type_is_fatal(ps->type) && !sema_fatal_consumed(ps)) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
                  "fatal parameter '%.*s' is not consumed (take ownership "
                  "with move() or return it)",
@@ -2128,12 +2323,9 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   sema_scope_release_borrows(sf->scope);       /* R3：捕获层借用载体消亡 */
   vm_pop_scope(sema->vm);
 
-  /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成 */
-  sema->func_return_type = NULL;
-  sema->func_def = NULL;
-  sema->local_func_base = NULL;
-  sema->local_func_param_scope = NULL;
-  sema->walking_comptime = saved_comptime;
+  /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成。整体恢复进入函数 walk
+     前的上下文（见函数入口的 saved_fn_ctx）——不再逐字段清空/部分恢复。 */
+  sema_fn_ctx_leave(sema, saved);
 }
 
 /* 函数字面量 body walk 入口（stmt_build.c 的 sema_check_func_literal 用；

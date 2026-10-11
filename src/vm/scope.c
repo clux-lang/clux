@@ -106,6 +106,18 @@ void scope_track(vm_t *vm, scope_t *scope, value_t *v) {
     vec_push(scope->owned, scope->alloc, v);
 }
 
+/* 定义变量：把 name 绑定到 v。
+ *
+ * **作用域唯一所有权**（VM 所有权模型，2026-10 重构）：
+ *   - v 已由本作用域拥有（`v->frame == &scope->frame`）且不是借用视图
+ *     → **直接绑定（采用/adopt）**，零拷贝。变量表只是 name→value 的指针别名；
+ *     值本体仍在本作用域 owned 列表里，scope 退出统一释放。
+ *   - 否则（借用视图：data 指向别的值内部；或值属于其他作用域）
+ *     → 先 materialize 成独立深拷贝（拷贝产物登记进本作用域 owned）。
+ *
+ * 此前一律 clone，于是必须另开 `scope_define_owned` + `is_fresh` 标记 +
+ * 调用方 `scope_untrack` 的"接管"双轨来避免重复深拷贝——那条轨道会让 value
+ * 的归属在作用域之间游离（本次重构要消除的正是它）。 */
 value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
     if (!scope || !name) return NULL;
 
@@ -114,15 +126,24 @@ value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
         return value_make_error(vm, "scope: duplicate variable definition");
     }
 
-    /* 临时切换 current_scope 到目标 scope，clone 后 value 自动注册到 owned */
-    scope_t *saved = vm->current_scope;
-    vm->current_scope = scope;
-    value_t *cloned = value_clone(vm, v);
-    vm->current_scope = saved;
+    value_t *stored;
+    if (v && !value_is_borrowed(v) &&
+        value_frame(v) == &scope->frame) {
+        /* 本作用域所有的**非借用**值（只可能是表达式刚创建、尚未与任何变量
+           绑定的临时值）：**直接采用**（零拷贝）。变量读取已改为压入借用视图，
+           因此不会走到这里——无需"是否已绑定"的附加标记。 */
+        stored = v;
+    } else {
+        /* 借用视图（`var b = a` 压入的是 a 的视图）或其他作用域的值：
+           materialize 到本作用域（深拷贝）——否则 b 与 a 会别名。 */
+        scope_t *saved = vm->current_scope;
+        vm->current_scope = scope;
+        stored = value_clone(vm, v);
+        vm->current_scope = saved;
+    }
 
-    strmap_insert(scope->vars, vm->alloc, name, cloned);
-
-    return cloned;
+    strmap_insert(scope->vars, vm->alloc, name, stored);
+    return stored;
 }
 
 /* 所有权接管定义（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
@@ -134,26 +155,6 @@ value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
    与 scope_define 的 clone 产物同生命周期路径。曾误从 owned 移除导致接管值
    的 value/data/堆块全部泄漏。R4 专用：调用方（op_define）已保证 v 非借用
    引用。 */
-value_t *scope_define_owned(vm_t *vm, scope_t *scope, const char *name,
-                            value_t *v) {
-    if (!scope || !name) return NULL;
-
-    /* 重复定义检查：当前作用域已有同名变量时报错 */
-    if (strmap_get(scope->vars, name)) {
-        return value_make_error(vm, "scope: duplicate variable definition");
-    }
-
-    /* 防御（调用方 op_define 已保证）：v 非借用引用（借用 data 指向父值
-       内部，接管会误伤父值）。 */
-    if (value_is_borrowed(v)) return value_make_error(vm,
-        "scope: cannot take ownership of a borrowed reference");
-
-    /* v 的 frame 指向其原所属作用域——随 scope 销毁统一处理
-       （scope_destroy 遍历 owned 递归销毁），无需改 frame。 */
-
-    strmap_insert(scope->vars, vm->alloc, name, v);
-    return v;
-}
 
 void scope_untrack(vm_t *vm, scope_t *scope, value_t *v) {
     (void)vm;
