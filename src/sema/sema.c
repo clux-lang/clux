@@ -1325,7 +1325,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
     if (usig) {
       sema_symbol_t uinit = {.kind = SEMA_SYM_FUNC, .type = usig,
-                             .is_active = true, .fid = ufid};
+                             .is_active = true, .fid = ufid,
+                             .builtin_op = SEMA_BUILTIN_UPGRADE};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("upgrade"), &uinit);
     }
   }
@@ -1351,8 +1352,40 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
     if (lsig) {
       sema_symbol_t linit = {.kind = SEMA_SYM_FUNC, .type = lsig,
-                             .is_active = true, .fid = lfid};
+                             .is_active = true, .fid = lfid,
+                             .builtin_op = SEMA_BUILTIN_LEN};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("len"), &linit);
+    }
+  }
+
+  /* 预注册 data 内置函数（C ABI 适配：data(array/slice/str) -> ref *T，取首元素
+     指针）。与 VM 侧 vm_register_data 对应。注册为 variadic（0 固定参数）——
+     sema 调用点特判按实参类型精化返回类型为 `ref *<元素类型>`（str → ref *u8），
+     运行期也按实参类型重新推导。fid 从 vm->functions 按名查询。 */
+  {
+    const type_t *ref_opaque = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF,
+                                               sema->vm->type_opaque);
+    const type_t *dsig = ref_opaque
+                             ? type_func_sig(sema->vm, NULL, 0, ref_opaque,
+                                             /*is_variadic=*/true)
+                             : NULL;
+    uint32_t dfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 4 &&
+            memcmp(bf->name.ptr, "data", 4) == 0) {
+          dfid = bf->id;
+          break;
+        }
+      }
+    }
+    if (dsig) {
+      sema_symbol_t dinit = {.kind = SEMA_SYM_FUNC, .type = dsig,
+                             .is_active = true, .fid = dfid,
+                             .builtin_op = SEMA_BUILTIN_DATA};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("data"), &dinit);
     }
   }
 
@@ -1378,7 +1411,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
     if (csig) {
       sema_symbol_t cinit = {.kind = SEMA_SYM_FUNC, .type = csig,
-                             .is_active = true, .fid = cfid};
+                             .is_active = true, .fid = cfid,
+                             .builtin_op = SEMA_BUILTIN_CFUNC_PTR};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("cfunc_ptr"), &cinit);
     }
   }

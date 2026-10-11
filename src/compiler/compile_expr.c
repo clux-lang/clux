@@ -466,6 +466,22 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   case AST_CALL: {
     ast_call_t *n = (ast_call_t *)node;
 
+    /* `data(s)`（C ABI 适配，sema 置 is_data_call）：从序列取首元素指针。
+       编译成 `compile_expr(arg)` + `DATA` 指令——**不是函数调用**：内置 cfunc
+       的实参会被 clone 进被调作用域（保证内置改不到调用方的值），函数形态只能
+       拿到副本的地址（slice 缓冲区副本 / 数组副本块），调用一结束就悬垂。
+       指令形态就地读序列的存储身份（与 `x.&` 同一道理）。 */
+    if (n->is_data_call) {
+      if (!n->args || n->args->next) {
+        c_error(c, node, "data: expects exactly 1 argument");
+        return;
+      }
+      compile_expr(c, n->args);           /* 栈: [seq] */
+      bcode_write_op(c->bc, BCODE_DATA);  /* 弹序列 → 压 ref *T */
+      st_push(c, 0);                      /* 弹 1 压 1 */
+      break;
+    }
+
     /* M6 FFI：extern cfunc 调用（sema 在 AST_CALL 上置 is_ffi_call + ffi_ret_kind，
        契约见 include/parser/ast_call.h 与 docs/m6-design.md §14.7）。
        走这条路径时：**不编译 callee**（它没有 fid、没有运行时函数对象），只按序编译

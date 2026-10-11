@@ -47,6 +47,17 @@ SEMA_SYM_EXTERN_VAR, /* M6 FFI：`extern var <库>::<名>: T;` 的**数据符号
                         （限定名 "<库>::<名>" 注册；可读可写，运行期 dlsym 解析） */
 } sema_symbol_kind_t;
 
+/* ---- 语言级内建操作（sema_symbol_t.builtin_op）----
+ * 0 = 普通符号。非 0 的符号是"语言内建"：sema 调用点按它做类型特判，
+ * compiler 按它改发专用指令（`data` → BCODE_DATA）。**按标记判，不按名字/fid 判**。 */
+typedef enum {
+  SEMA_BUILTIN_NONE = 0,
+  SEMA_BUILTIN_LEN,       /* len(s) -> usize（序列元信息） */
+  SEMA_BUILTIN_UPGRADE,   /* upgrade(w) -> ?share *T（weak 升级，返回类型随实参精化） */
+  SEMA_BUILTIN_DATA,      /* data(s) -> ref *T（取首元素指针，C ABI 适配；专用指令） */
+  SEMA_BUILTIN_CFUNC_PTR, /* cfunc_ptr(f) -> opaque（clux 函数 → C 函数指针） */
+} sema_builtin_op_t;
+
 /* ---- 符号 ---- */
 
 typedef struct _sema_scope_t sema_scope_t;
@@ -154,6 +165,16 @@ struct _sema_symbol_t {
      sema 解析 alias::name 时从此字段取 module_t*，查 module->exports
      获取成员类型信息。借用 vm->modules 生命周期。 */
   struct module_t *module;
+
+  /* ---- 语言级内建操作标记（M6 之后）----
+   * 非 0 表示该符号是"语言内建"，semas 调用点据此做类型特判（返回类型精化 /
+   * 实参校验），compiler 也可能据此改发专用指令（`data` → BCODE_DATA）。
+   *
+   * **不要用 fid 判内建**：内建 id 随注册顺序变化（printf 从内建删除后就踩过
+   * 一次），而且 `ex_call` 求值 callee 时 AST_IDENT 会被折叠成 FUNC_REF——
+   * 曾经"按 callee 名字 + AST_IDENT 匹配"的 upgrade/len 特判因此**从未生效**。
+   * 标记跟着**符号**走，与节点形态和 id 顺序都无关。 */
+  uint8_t        builtin_op;
 };
 typedef struct _sema_symbol_t sema_symbol_t;
 

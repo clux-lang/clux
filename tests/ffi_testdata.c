@@ -131,3 +131,29 @@ CLUX_TESTDATA_EXPORT int32_t clux_point_va_sum(int32_t n, ...) {
     va_end(ap);
     return sum;
 }
+
+/* ---- C ABI 的 (T*, size_t) 形态：`data(s)` + `len(s)` 的被测目标 ----
+ * clux 侧 `td::clux_sum_i32(data(s), len(s))` 与 C 的 `sum_i32(ptr, n)` 同形。 */
+CLUX_TESTDATA_EXPORT int32_t clux_sum_i32(const int32_t *p, int32_t n) {
+    int32_t sum = 0;
+    for (int32_t i = 0; i < n; i++) {
+        if (p) sum += p[i];
+    }
+    return sum;
+}
+
+/* 只读首元素（验证 data() 给的确实是首元素地址） */
+CLUX_TESTDATA_EXPORT int32_t clux_first_i32(const int32_t *p) {
+    return p ? p[0] : -1;
+}
+
+/* 写回：C 通过指针改调用方的缓冲区（clux 侧看到变化 → 证明是同一块内存） */
+CLUX_TESTDATA_EXPORT void clux_fill_i32(int32_t *p, int32_t n, int32_t v) {
+    if (!p) return;
+    for (int32_t i = 0; i < n; i++) p[i] = v + i;
+}
+
+/* char* 形态：data(str) → const char* */
+CLUX_TESTDATA_EXPORT int32_t clux_str_first_byte(const char *s) {
+    return s ? (int32_t)(unsigned char)s[0] : -1;
+}

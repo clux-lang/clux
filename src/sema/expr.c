@@ -1901,11 +1901,14 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
 
-      /* upgrade 内建函数特判（§12.4）：泛型 T 从实参 weak *T 推断，
-         返回类型由占位 ?share *opaque 替换为 ?share *T。
-         callee_sym->fid == 1（upgrade，printf=0）。 */
-      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
-          callee_sym->fid == 1 && argc == 1 && arg_shadows[0]) {
+      /* 语言级内建的类型特判（**按符号上的 builtin_op 标记**，不按 callee
+         名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
+         "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
+
+      /* upgrade（§12.4）：泛型 T 从实参 weak *T 推断，返回类型由占位
+         ?share *opaque 精化为 ?share *T。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_UPGRADE &&
+          argc == 1 && arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);
         if (at && at->kind == TYPE_KIND_PTR_WEAK) {
           const type_t *base = ptr_type_base(at);
@@ -1925,28 +1928,22 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         }
       }
 
-      /* len 内建函数特判（m4-design §5/§11.3）：len 注册为 variadic，
-         参数类型不经签名校验——此处校验实参是可长序列（array/slice/str）。
-         len 恒返回 u64（注册签名已正确，无需替换返回类型）。 */
-      if (callee_sym && callee_sym->kind == SEMA_SYM_FUNC &&
-          argc == 1 && arg_shadows[0] &&
-          call->callee && call->callee->kind == AST_IDENT) {
-        /* 按 len 函数名匹配（fid 依赖注册顺序，按名更稳健） */
-        ast_ident_t *ci = (ast_ident_t *)call->callee;
-        if (ci && ci->name.len == 3 &&
-            memcmp(ci->name.ptr, "len", 3) == 0) {
-          const type_t *at = value_type(arg_shadows[0]);
-          if (at && at->kind != TYPE_KIND_ARRAY &&
-              at->kind != TYPE_KIND_SLICE_OWN &&
-              at->kind != TYPE_KIND_SLICE_REF &&
-              at->kind != TYPE_KIND_SLICE_FATAL &&
-              at->kind != TYPE_KIND_STR) {
-            char tn[64];
-            sema_type_name(at, tn, sizeof(tn));
-            diag_error(sema->diag, sema_loc(sema, *node),
-                       "len: argument must be array/slice/str, got %s", tn);
-            return val_void(sema);
-          }
+      /* len（m4-design §5/§11.3）：注册为 variadic，参数类型不经签名校验——
+         此处校验实参是可长序列（array/slice/str）。返回类型由注册签名给出
+         （usize），无需替换。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_LEN && argc == 1 &&
+          arg_shadows[0]) {
+        const type_t *at = value_type(arg_shadows[0]);
+        if (at && at->kind != TYPE_KIND_ARRAY &&
+            at->kind != TYPE_KIND_SLICE_OWN &&
+            at->kind != TYPE_KIND_SLICE_REF &&
+            at->kind != TYPE_KIND_SLICE_FATAL &&
+            at->kind != TYPE_KIND_STR) {
+          char tn[64];
+          sema_type_name(at, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "len: argument must be array/slice/str, got %s", tn);
+          return val_void(sema);
         }
       }
 
@@ -1956,6 +1953,47 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                                                : "function call failed";
         diag_error(sema->diag, sema_loc(sema, &call->base), "%s", msg);
         return val_void(sema);
+      }
+
+      /* data（C ABI 适配）：从**序列**取首元素指针。实参必须是 array/slice/str；
+         返回类型精化为 `ref *<元素类型>`（str → ref *u8，即 C 的 const char*）。
+         置 is_data_call：compiler 改发 BCODE_DATA 指令（不是 CALL——内置 cfunc
+         的实参是副本，取不到调用方的存储身份，见 ast_call.h / vm/bcode.h）。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_DATA) {
+        if (argc != 1) {
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "data: expects exactly 1 argument, got %zu", argc);
+          return val_void(sema);
+        }
+        const type_t *at = value_type(arg_shadows[0]);
+        const type_t *elem = NULL;
+        switch (at ? at->kind : TYPE_KIND_VOID) {
+        case TYPE_KIND_SLICE_OWN:
+        case TYPE_KIND_SLICE_REF:
+        case TYPE_KIND_SLICE_FATAL:
+          elem = slice_type_elem(at);
+          break;
+        case TYPE_KIND_ARRAY:
+          elem = array_type_elem(at);
+          break;
+        case TYPE_KIND_STR:
+          elem = sema->vm->type_u8;
+          break;
+        default:
+          break;
+        }
+        if (!elem) {
+          char tn[64];
+          sema_type_name(at, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "data: argument must be array/slice/str, got %s", tn);
+          return val_void(sema);
+        }
+        const type_t *rp = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, elem);
+        if (!rp) return val_void(sema);
+        sema_type_register(sema, rp);
+        call->is_data_call = true;
+        return value_make_shadow(sema->vm, rp);
       }
 
       return result; /* shadow in → shadow out（return_type shadow） */

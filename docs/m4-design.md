@@ -373,6 +373,7 @@ len(s) -> usize
 | upgrade | 0 | M3 §12.4 |
 | len | 1 | M4 |
 | cfunc_ptr | 2 | M6 §14.16（clux 函数 → C 函数指针） |
+| data | —（语言级指令，无运行时函数） | M6 §14.21：data(array/slice/str) -> ref *T，取首元素指针（C ABI 的 (T*, size_t) 适配；VM 侧是 BCODE_DATA） |
 
 内建函数的 id 由 `func_new` 按 `vm_new` 里的注册顺序自动分配，**不要写死具体数字**。
 （`printf` 在 M6 已从内建删除，改为 libc 经 FFI 提供，见 docs/m6-design.md §14.19。）

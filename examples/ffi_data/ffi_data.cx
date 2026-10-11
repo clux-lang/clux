@@ -1,0 +1,77 @@
+// ffi_data.cx — `data(s)`：从序列取首元素指针（C ABI 适配）
+//
+// C 的接口几乎都是 `(T *ptr, size_t n)` 形态，而 clux 的序列是**胖指针**
+// （slice 带 len、数组自带长度、str 自带 NUL）。对接时需要把"首元素地址"取出来：
+//
+//     data(s) -> ref *T      // T = 元素类型；str → ref *u8（C 的 const char*）
+//     len(s)  -> usize       // C 的 size_t
+//
+// 两者配对就是 C 的 `(T*, size_t)`：`f(data(s), len(s))`。
+//
+// 覆盖三类序列：
+//   - own/ref/fatal []T → 指向切片首元素（切片自带缓冲区）
+//   - [N]T              → 指向数组值自身的数据块
+//   - str               → 指向字符串首字节
+// 结果恒 `ref`（借用、永不拥有）：指针只在序列还活着时有效。
+//
+// 边界（两条都是**有意**的）：
+//   - `data` 是**指令**而不是普通函数（VM 里是 BCODE_DATA）：内置函数的实参会被
+//     复制进被调作用域，函数形态只能取到"副本"的地址，调用一结束就悬垂。取存储
+//     身份必须在调用点就地完成——与 `x.&` 同理。
+//   - clux **没有指针算术**（`p[i]` 报 "cannot index value of type ref i32"）：
+//     指针只为"喂 C"而生；clux 侧遍历用序列本身（`s[i]`），或者只解引用首元素
+//     （`p.*`）。
+
+extern lib "*" as libc;
+
+extern func libc::printf(format: str, ...): void;
+extern cfunc libc::memcmp(a: opaque, b: opaque, n: usize): i32;
+extern cfunc libc::strlen(s: opaque): usize;
+
+// clux 侧遍历：拿序列（不是指针）
+func sum(a: ref []i32): i32 {
+    var total: i32 = 0;
+    var i: usize = 0usize;
+    while (i < len(a)) {
+        total = total + a[i];
+        i = i + 1usize;
+    }
+    return total;
+}
+
+// 指针的合法用法：解引用首元素（C 的 `*p`）
+func first(p: ref *i32): i32 {
+    return p.*;
+}
+
+func main(): i32 {
+    // ① slice：own []i32 → ref *i32
+    var s: own []i32 = make(i32, 4, 10, 20, 30, 40);
+    if (first(data(s)) != 10) { return 1; }
+    if (sum(s) != 100) { return 2; }
+
+    // ② ref []i32（数组的一段）——data() 仍指向原数组内存
+    var arr = .[5]i32{1, 2, 3, 4, 5};
+    var part: ref []i32 = arr[1:4];
+    if (first(data(part)) != 2) { return 3; }
+    if (sum(part) != 9) { return 4; }
+
+    // ③ 数组：data(a) 指向数组值自己的元素块
+    if (first(data(arr)) != 1) { return 5; }
+
+    // ④ str：data(g) 就是 C 的 const char*
+    var g: str = "hello";
+    if (libc::strlen(data(g)) != 5usize) { return 6; }
+
+    // ⑤ 与 libc 的 memcmp 直接对接：(ptr, len) 形态交给 C
+    var a = .[4]i32{7, 7, 7, 7};
+    var b = .[4]i32{7, 7, 7, 7};
+    var n: usize = sizeof(i32) * 4usize;
+    if (libc::memcmp(data(a), data(b), n) != 0) { return 7; }
+    b[3] = 8;
+    if (libc::memcmp(data(a), data(b), n) == 0) { return 8; }
+
+    libc::printf("data/len: slice=%d part=%d first=%d strlen=%llu\n",
+                 sum(s), sum(part), first(data(arr)), libc::strlen(data(g)));
+    return 0;
+}

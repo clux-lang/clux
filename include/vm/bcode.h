@@ -222,6 +222,17 @@ typedef enum {
                              * 压对应内建类型的值（extern var 的读取）。 */
     BCODE_EXTERN_STORE,     /* STR "lib::name" + U32 kind：弹栈顶值 → 按 kind 把 size 字节
                              * 写进符号地址（extern var 的写入；不压回结果）。 */
+    BCODE_DATA,             /* 无操作数（**追加在末尾**，不动既有编号）：弹一个**序列值**
+                             * （array/slice/str）→ 压 `ref *T`（T = 元素类型，str → u8），
+                             * 指向首元素。C ABI 适配：`f(data(s), len(s))` 与 C 的
+                             * `(T*, size_t)` 同形。
+                             *
+                             * **为什么必须是指令而不是内置函数**：内置 cfunc 的实参会被
+                             * clone 进被调作用域（value_call 的既有语义，保证内置不会改到
+                             * 调用方的值），因此函数形态只能拿到"副本"的地址——slice 的
+                             * 缓冲区副本、数组的副本块，调用一结束就悬垂。取**存储身份**
+                             * 必须像 `x.&`（ADDR）那样在调用点就地完成：编译器压序列的
+                             * 借用视图，本指令从中读出真实的 ptr 字段。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

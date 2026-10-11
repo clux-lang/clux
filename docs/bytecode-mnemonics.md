@@ -209,6 +209,7 @@ fatal 在非空时拥有）。
 |--------|--------|------|
 | `IMPORT` | `STR`（模块规范路径） | 查 `vm->modules` → 构造模块值（type = 模块类型，data = `module_t*`）压栈。**幂等**：同一路径返回同一模块。 |
 | `GET_MEMBER` | `STR`（成员名） | 弹模块值 → 从 `module_t->exports` 按名取成员值压栈（命名空间隔离：仅导出成员可见）。 |
+| `DATA` | —（无操作数） | 弹一个**序列值**（array/slice/str）→ 压 `ref *T`（T = 元素类型；str → u8），指向首元素。**C ABI 适配**：与 `len` 组成 C 的 `(T*, size_t)`。恒借用（dispose 跳过）；空序列可能为 NULL。见 §14.21。 |
 
 ### 4.9b 外部符号访问（M6 FFI）
 

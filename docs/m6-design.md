@@ -1350,4 +1350,77 @@ extern func libc::printf(format: str, ...): void;    // 返回值用不到就声
   enum 传参/返回/数据符号、char* 返回（用 libc `strcmp` 比对内容）、
   struct 回调（C 按值传给 clux 函数并接收其按值返回的 struct）、
   容器往返（`emit → run .cxb`）、程序自定义类型签名（别名 + 指针通过 / 未知类型报错）。
-- 全量：`build exit=0`、**0 告警**、**1656/1656**、示例 39/39、format 41/41。
+- 全量：`build exit=0`、**0 告警**、**1668/1668**、示例 40/40、format 42/42。
+
+### 14.21 ✅ `data(s)`：从序列取首元素指针（C ABI 的 `(T*, size_t)` 适配）
+
+**动机**：C 的接口几乎都是 `(T *ptr, size_t n)`，而 clux 的序列是**胖指针**（slice
+带 len、数组自带长度、str 自带 NUL）。两边对接需要"把首元素地址取出来"：
+
+```c
+extern cfunc libc::memcmp(a: opaque, b: opaque, n: usize): i32;
+var a = .[4]i32{7, 7, 7, 7};
+_ = libc::memcmp(data(a), data(a), sizeof(i32) * 4usize);   // (ptr, len) 与 C 同形
+```
+
+#### 14.21.1 语义
+
+`data(s) -> ref *T`（T = 元素类型；str → `u8`，即 C 的 `const char *`）：
+
+| 序列 | 结果 |
+|---|---|
+| `own/ref/fatal []T` | 指向切片首元素（切片自带缓冲区） |
+| `[N]T` | 指向数组值自身的数据块（借用，随该值生命周期） |
+| `str` | 指向首字节；空串给的是**有效的**空串指针（不是 NULL） |
+
+恒 `ref`（借用、永不拥有，dispose 跳过）；空切片可能得到 NULL（C 侧不得解引用，
+用 `len(s) == 0` 判空）。与 `len(s)`（= usize = C 的 `size_t`）配对。
+
+#### 14.21.2 关键决策：它是**指令**（`BCODE_DATA`）而不是内置函数
+
+第一版实现成内置 cfunc，实测**悬垂**：内置函数的实参会被 `value_call` **clone 进被调
+作用域**（这是既有语义，保证内置改不到调用方的值），所以函数形态拿到的是**副本**的
+地址——slice 缓冲区副本、数组副本块，调用一结束就失效（读回 `0xDDDDDDDD` 的填充值）。
+"取存储身份"必须像 `x.&`（ADDR）那样**在调用点就地完成**：编译器压序列（`op_push`
+给的是借用视图，`value_data` 就是调用方的存储），新指令从中读出真实的 ptr 字段。
+
+- 新操作码 `BCODE_DATA` 追加在末尾（不动既有编号）＋ `.cxs` 助记符 `DATA`；
+- sema 侧仍按内建名解析（符号标记见下），把返回类型精化为 `ref *<元素类型>` 并置
+  `ast_call_t.is_data_call`；compiler 据此改发指令（**不是** CALL）；
+- 运行期 `op_data`：按值的类型取 `slice_view().ptr` / 数组的元素块 / str 的 char*，
+  再 `type_ptr_intern(PtrRef, elem)` + `ptr_make_value` ✓。
+
+#### 14.21.3 顺带修掉的两个真缺陷
+
+1. **内建特判从未生效**（老缺陷）：`ex_call` 求值 callee 时 AST_IDENT 会被折叠成
+   `FUNC_REF`，而 `upgrade` 的返回类型精化与 `len` 的实参校验都是"按 callee 名字 +
+   `AST_IDENT`"匹配的 → **一直是死代码**（`upgrade` 因此只能靠 `?share *opaque` 的
+   隐式转换侥幸通过；`len(5)` 也不会被拦）。修法：在 `sema_symbol_t` 上加
+   **`builtin_op` 标记**（`SEMA_BUILTIN_{LEN,UPGRADE,DATA,CFUNC_PTR}`），注册时打标、
+   调用点按标记匹配——与节点形态、名字、内建 id 顺序都无关。这正是"不该用 fid 判内建"
+   的第二次教训（第一次是 printf 从内建删除后 `fid==1` 失效）。
+2. **空字符串字面量 panic**：`""` 触发 `arena: zero-size allocation`
+   （`parse_string_lit` 对 `out_len == 0` 直接 `arena_alloc(0)`）。修法：空字面量分配
+   1 字节写 `'\0'`（长度仍 0）——顺带让 `data("")` 给出**有效**的空串指针而不是 NULL，
+   对 C 侧更正确。
+
+#### 14.21.4 边界（有意保留）
+
+- clux **没有指针算术**：`p[i]`（p 为 `ref *i32`）是编译错误
+  （`cannot index value of type ref i32`）。指针只用于喂 C；clux 侧遍历用序列下标，
+  或只解引用首元素 `p.*`。
+- 借用有效期 = 序列值的生命周期；把 `data()` 的结果存起来后让序列先死，就是悬垂
+  （与 `x.&` 同一约定，C 里也一样）。
+
+#### 14.21.5 测试与验证
+
+- `tests/ffi_testdata.c` 增补 C ABI 形态的导出：`clux_sum_i32(const int32_t*, int32_t)`、
+  `clux_first_i32`、`clux_fill_i32`（C 通过指针**写回**调用方缓冲区）、
+  `clux_str_first_byte(const char*)`。
+- 新增 `tests/data_builtin_test.cpp` 7 例：**悬垂回归**（C 写回后 clux 侧看得见 →
+  证明是同一块内存而不是副本）、slice/ref-slice/array 的 `(ptr,len)` 求和、
+  `data(str)` 的 char*、结果类型精确为 `ref *T`（含元素类型随序列变化）、
+  诊断（非序列实参 / 参数个数）、空切片（len 0 + C 侧安全返回 0）。
+- `examples/ffi_data/ffi_data.cx`：`data`+`len` 与 `memcmp`/`strlen` 对接，
+  并演示 `p.*` 与"clux 侧遍历用序列"的边界。
+- 全量：`build exit=0`、**0 告警**、**1668/1668**、示例 **40/40**、format **42/42**。

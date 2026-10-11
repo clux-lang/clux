@@ -1280,3 +1280,34 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       m3-design 的 malloc 声明、bytecode-mnemonics（LENGTH）。
     - 验证：`build exit=0`、**0 告警**、**1661/1661**、示例 **39/39**（0 泄漏）
       且 39/39 `emit → run .cxb` 全通过、format 幂等 **41/41**。
+66. **`data(s)`：从序列取首元素指针（C ABI 的 `(T*, size_t)` 适配）**
+    - **需求（用户提出）**：新增一个内建函数从 slice 取 `ref ptr`，适配 C ABI。
+      与 `len(s)`（= usize = `size_t`）配对，写成 `f(data(s), len(s))` 就与 C 的
+      `(T*, size_t)` 同形。
+    - **语义**：`data(s) -> ref *T`（T = 元素类型；str → u8 即 `const char*`）。
+      `own/ref/fatal []T` → 切片首元素；`[N]T` → 数组值自身的数据块；`str` → 首字节
+      （空串给**有效**空串指针而非 NULL）。恒借用、永不拥有；空切片可能 NULL。
+    - **关键决策：它是指令（`BCODE_DATA`）而不是内置函数**。第一版做成内置 cfunc
+      实测**悬垂**：内置函数的实参被 `value_call` clone 进被调作用域（保证内置改不到
+      调用方的值），函数形态只能拿到**副本**的地址（slice 缓冲区副本 / 数组副本块），
+      调用一结束即失效（读回 `0xDDDDDDDD`）。取存储身份必须像 `x.&`（ADDR）那样在
+      调用点就地完成：编译器压借用视图，新指令读其中的真实 ptr 字段。
+      新操作码追加在末尾 + `.cxs` 助记符 `DATA`。
+    - **顺带修掉两个真缺陷**：
+      ① **内建特判从未生效**：`ex_call` 求值 callee 时 AST_IDENT 被折叠成 FUNC_REF，
+         而 `upgrade` 的返回类型精化与 `len` 的实参校验是"按 callee 名字 + AST_IDENT"
+         匹配 → 一直是死代码（`len(5)` 不会被拦；upgrade 靠 opaque 隐式转换侥幸通过）。
+         修法：`sema_symbol_t` 加 **`builtin_op` 标记**，注册时打标、调用点按标记匹配
+         （与节点形态/名字/fid 顺序无关）——这是"不该用 fid 判内建"的第二次教训。
+      ② **空字符串字面量 panic**：`""` → `arena: zero-size allocation`
+         （`parse_string_lit` 对 `out_len == 0` 直接 `arena_alloc(0)`）。修法：分配
+         1 字节写 `'\0'`，长度仍为 0——顺带让 `data("")` 给出有效空串指针。
+    - **边界（有意）**：clux 没有指针算术（`p[i]` 编译错误）——指针只喂 C，
+      clux 侧遍历用序列下标或 `p.*`。
+    - **测试**：`tests/ffi_testdata.c` 增补 `clux_sum_i32`/`clux_first_i32`/
+      `clux_fill_i32`（C 写回调用方缓冲区）/`clux_str_first_byte`；新增
+      `tests/data_builtin_test.cpp` **7 例**（含悬垂回归、`(ptr,len)` 求和、
+      str→char*、结果类型精确、诊断、空切片）；新增
+      `examples/ffi_data/ffi_data.cx`（与 `memcmp`/`strlen` 对接）。
+    - 验证：`build exit=0`、**0 告警**、**1668/1668**、示例 **40/40**（0 泄漏）
+      且 40/40 `emit → run .cxb` 全通过、format 幂等 **42/42**。

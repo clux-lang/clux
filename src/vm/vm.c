@@ -193,7 +193,7 @@ vm_t *vm_new(allocator_t *alloc) {
     /* upgrade 内置函数（§12.4：weak *T -> ?share *T） */
     vm_register_upgrade(vm);
 
-    /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> u64） */
+    /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> usize） */
     vm_register_len(vm);
 
     /* cfunc_ptr 内置函数（M6 Phase 5：clux 函数 → C 函数指针 / 回调） */

@@ -30,6 +30,16 @@ static strslice_t parse_string_value(arena_t *arena, strslice_t text) {
         }
     }
 
+    /* 空字面量 `""`：out_len == 0。arena **不接受 0 字节分配**（会 panic
+       "arena: zero-size allocation"），而且 C 侧 `data(s)`（char*）应当是
+       **有效**的空串指针而非 NULL。故分配 1 字节写 '\0'（长度仍为 0）。 */
+    if (out_len == 0) {
+        char *z = (char *)arena_alloc(arena, 1, _Alignof(char));
+        if (!z) return STRSLICE_EMPTY;
+        z[0] = '\0';
+        return strslice_from_bytes(z, 0);
+    }
+
     /* 分配并写入 */
     char *buf = (char *)arena_alloc(arena, out_len, _Alignof(char));
     if (!buf) return STRSLICE_EMPTY;

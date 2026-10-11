@@ -31,6 +31,11 @@ typedef struct {
      * `compile_type_expr(ffi_ret_type_expr)` 压一个**类型值**（与 CONSTRUCT 同一
      * 机制），运行期据此读返回内存并造值（ret_kind = BCODE_FFI_RET_TYPED）。 */
     ast_node_t *ffi_ret_type_expr;
+    /* `data(s)` —— 从序列取首元素指针（C ABI 适配）。它不是运行时函数调用：
+     * 内置 cfunc 的实参会被 clone 进被调作用域，函数形态只能拿到副本地址
+     * （slice 缓冲区副本 / 数组副本块，调用一结束即悬垂）。因此 sema 置本标志，
+     * compiler 改发 `BCODE_DATA` 指令（就地读序列的存储身份，与 `x.&` 同理）。 */
+    bool        is_data_call;
 } ast_call_t;
 
 static inline ast_node_t *ast_call_new(arena_t *arena,

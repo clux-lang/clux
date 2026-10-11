@@ -2058,6 +2058,55 @@ static value_t *op_extern_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return out;
 }
 
+/* DATA（无操作数）：从**序列值**取首元素指针（C ABI 适配）。
+ *
+ * 弹一个 array/slice/str 值（借用视图即可，本指令只读它的存储身份）→ 压
+ * `ref *T`（T = 元素类型；str → u8，即 C 的 `const char *`），指向首元素。
+ * 与 C 的 `(T*, size_t)` 对接：`f(data(s), len(s))`。
+ *
+ * 恒 `ref`（借用、永不拥有），dispose 跳过；空序列可能得到 NULL（C 侧不得解引用）。
+ * 借用有效期 = 序列值的生命周期（与 `x.&` 同一约定）。 */
+static value_t *op_data(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *sv = exec_stack_pop(vm);
+    if (value_is_error(vm, sv)) return sv;
+    const type_t *st = value_type(sv);
+    if (!st) return value_make_error(vm, "data: argument has no type");
+
+    const type_t *elem = NULL;
+    void *first = NULL;
+    switch (st->kind) {
+    case TYPE_KIND_SLICE_OWN:
+    case TYPE_KIND_SLICE_REF:
+    case TYPE_KIND_SLICE_FATAL: {
+        slice_value_t sval = slice_view(sv);
+        elem = slice_type_elem(st);
+        first = sval.ptr;
+        break;
+    }
+    case TYPE_KIND_ARRAY:
+        /* 数组元素连续存放在值的数据块里 → value_data 即元素 0 的地址 */
+        elem = array_type_elem(st);
+        first = value_data(sv);
+        break;
+    case TYPE_KIND_STR:
+        /* str 的 data 槽里存的是 `const char *`（与 C 同构），解一层引用 */
+        elem = vm->type_u8;
+        first = value_data(sv) ? *(void **)value_data(sv) : NULL;
+        break;
+    default:
+        return value_make_error(
+            vm, "data: argument must be array/slice/str");
+    }
+    if (!elem)
+        return value_make_error(vm, "data: sequence has no element type");
+
+    const type_t *pt = type_ptr_intern(vm, TYPE_KIND_PTR_REF, elem);
+    if (!pt) return value_make_error(vm, "data: cannot make ref pointer type");
+    if (value_is_shadow(sv)) return value_make_shadow(vm, pt);
+    return ptr_make_value(vm, pt, first); /* ref 借用：不拥有 */
+}
+
 static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t raw = bcode_read_str(bc, pc);
 
@@ -2233,6 +2282,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_EXTERN_CALL]     = op_extern_call,
     [BCODE_EXTERN_LOAD]     = op_extern_load,
     [BCODE_EXTERN_STORE]    = op_extern_store,
+    [BCODE_DATA]            = op_data,
 };
 
 /* ================================================================ */

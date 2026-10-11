@@ -123,6 +123,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_EXTERN_LOAD]  = { "EXTERN_LOAD",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
     [BCODE_EXTERN_STORE] = { "EXTERN_STORE",  { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
     [BCODE_GET_MEMBER]     = { "GET_MEMBER",    { BCODE_ASM_OP_STR } },
+    [BCODE_DATA]           = { "DATA",          { BCODE_ASM_OP_NONE } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =
