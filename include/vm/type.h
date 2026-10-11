@@ -386,6 +386,22 @@ static inline bool type_is_volatile(const type_t *t) {
 /** 取修饰类型的 sub（非 const/volatile 时返回 NULL） */
 const type_t *type_qualifier_sub(const type_t *t);
 
+/** 派生类型布局**延迟定型**：在 `sub` 密封之后，把"以 sub 为直接布局来源"的
+ *  已密封派生类型（const/volatile：size/align = sub；数组：size = N * elem.size、
+ *  align = elem.align）就地同步到最终布局，并链式处理由它们再派生的包装
+ *  （`const [2]T`、`volatile (const T)` 等），直到不动点。
+ *
+ *  为什么需要：递归结构体（`struct Node { next: ref *const Node; }`）的字段类型
+ *  必须在 Node **还是开放对象**时就能构造出对象（身份可用、指针宽/切片头恒定），
+ *  而 const/数组这类包装在**构造时**就拷贝了 sub 的布局——此时 sub 还没 seal
+ *  （size=0）。等 sub seal 后布局才真正定型，这里把它落到位。
+ *
+ *  不变量说明：这不是"seal 后改写类型属性"（那被 VM 写入 API 一律拒绝），而是
+ *  这些派生包装的布局本来就是**延迟定型**的——它在构造时无法得知，只能在 sub
+ *  seal 之后确定；对象身份（type_t*）与 intern 键（sub/elem 指针）全程不变，
+ *  因此已经指向它们的指针/签名/嵌入类型不受影响。 */
+void type_sync_derived_layout(vm_t *vm, const type_t *sub);
+
 /** 剥掉（可嵌套的）const/volatile 限定，返回最内层基础类型；
  *  无修饰时原样返回。用于"指针自动解引用后按 base 查字段/构造描述符"
  *  这类只关心底层布局的判定。 */

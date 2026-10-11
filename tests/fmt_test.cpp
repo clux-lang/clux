@@ -799,3 +799,21 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
     EXPECT_NE(once.find("move(p)"), std::string::npos);
     EXPECT_NE(once.find("'<*> i32"), std::string::npos);
 }
+
+/* 后缀解包 `a.!`：parser 按"`.` 后看单字符 symbol"识别，AST 里的 op token 只是
+   `!`——fmt 必须把前导点补回。曾直接输出 op 文本，把 `x.!` 渲染成 `x!`，
+   格式化产物无法重新解析（`expected ';'`），且幂等在第二遍失败。 */
+TEST(Fmt, UnwrapKeepsLeadingDot) {
+    std::string out = fmt("func f(x:?ref *const i32):i32{return x.!.*;}\n");
+    EXPECT_NE(out.find("x.!"), std::string::npos) << out;
+    EXPECT_EQ(out.find("x!."), std::string::npos) << out;
+
+    /* 幂等 + 成员/解包混合形态 */
+    std::string src =
+        "struct Node { v: i32; next: ?ref *const Node; }\n"
+        "func f(n: ref *const Node): i32 { return n.next.!.v; }\n";
+    std::string once = fmt(src.c_str());
+    std::string twice = fmt(once.c_str());
+    EXPECT_EQ(once, twice);
+    EXPECT_NE(once.find("n.next.!.v"), std::string::npos) << once;
+}

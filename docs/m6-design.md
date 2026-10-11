@@ -1719,8 +1719,16 @@ union payload、字节码运行期 `DEFINE_TYPE`/`SEAL`）不置位，保持既�
 #### 14.24.3 探针结论：用户侧能自己实现虚表吗 —— 能（`build/tmp` 13 个探针）
 
 结论先给：**函数类型字段 + 显式查表**这条路完全可用（声明、字面量初始化、后置赋值、
-经字段调用、用结构体成员方法 / 函数字面量 / 闭包填槽、异构集合遍历都通过）。唯一要绕的是
-**字段类型的依赖不能成环**：clux 没有"不完全类型"，字段类型的依赖图必须无环——自引用
+经字段调用、用结构体成员方法 / 函数字面量 / 闭包填槽、异构集合遍历都通过）。
+
+> **⚠️ 本节下述"字段类型依赖不能成环"的边界已于第 73 项解除（2026-10）**：递归结构体
+> （自引用 `next: ?ref *const Node`、互相引用、`func(ref *const Self) -> R` 自引用签名）
+> 现已支持，只有**按值递归**（`struct A { a: A; }` / `[N]A` / `?A`）被拒。因此
+> `probe3/4/8/12/13` 的 ❌ 是**当时的**结论，今天都会通过。实现见 **§14.25**；
+> 本节的"最小绕法 `opaque`"仍然有效（它的真正价值是**接收者下转型**：指针→指针的显式
+> 窄化不支持，`opaque → 指针` 才支持），示例沿用该写法。
+
+当时的边界（历史记录）：clux 没有"不完全类型"，字段类型的依赖图必须无环——自引用
 （`next: ref *const Node`）与互相引用（两个 struct 各自点名对方）都在字段处报
 `unknown field type`；而**前向引用是支持的**（字段类型可以点名**后面**才声明的 struct，
 写在函数签名里也行；compose pass 会延后一轮重试到不动点）。于是"对象持表指针 + 表行的
@@ -1878,3 +1886,86 @@ func area_of(s: ref *const Shape): i32 { return s.ops.area(s); }   // ④ 统一
   **1712/1712 PASSED / 0 FAILED**（无泄漏报告）、示例 **43/43 main 全 exit 0 且 0 泄漏**、
   43/43 `emit → run .cxb` 通过、format 幂等 **45/45**。
 - 本次改动不含任何 C/C++ 源码改动（`git status` 只有 3 个文档 + 1 个新示例）。
+
+---
+
+### 14.25 递归结构体：自引用 / 互相引用（第 73 项，2026-10）
+
+**目标**：解除 §14.24.3 记录的唯一边界——结构体字段的类型依赖图**允许成环**，只要环
+经过"布局不依赖被引用类型完整布局"的包装；同时**拒绝**按值递归（无限大小）。用户要求
+把这条作为"明确缺口"补齐。
+
+**语义**
+
+```c
+struct Node  { v: i32; next: ?ref *const Node; }        // 自引用（链表/树）
+struct A { b: ?ref *const B; }
+struct B { a: ?ref *const A; }                          // 互相引用
+struct Shape { area: func(ref *const Shape) -> i32; r: i32; }  // 签名点名自身
+struct List  { v: i32; rest: own []ref *const List; }   // 切片包装
+struct Node2 { v: i32; kids: ?ref *[2]Node2; }          // 数组包装（布局延迟定型）
+```
+
+- **允许**：指针族（`own/ref/fatal/share/weak *T`）、切片、函数签名、`const`/`volatile`、
+  数组 `[N]T`；
+- **拒绝**：按值内联自身的形态（`struct A { a: A; }`、`[N]A` 直接内联、`?A`）→
+  `struct 'A': field 'a' has incomplete type 'A': recursive struct by value
+  (break the cycle with a pointer, e.g. 'ref *A')`；
+- 定义顺序无关（前向引用照旧）；仅限同一编译单元。
+
+**机制（六处改动，全部为"机制"而非点修）**
+
+1. **sema 物化**（`src/sema/struct_compose.c:materialize_struct_type`）：求值结构体定义
+   前先建它的**开放**类型对象（`type_struct_alloc_open` + `type_struct_mark_unique` +
+   `sema_type_register` 分配 id + `type_set_name` + `scope_define` 绑定编译期类型名），
+   字段类型表达式才可能解析到"正在定义中的自己"或环上的另一个定义。`ast_struct_compose_pass`
+   的第 1b 步为**全部**顶层 struct 先物化一遍（块内定义按需物化）。
+   物化即把对象**入 `vm->struct_types` 池**：若定义最终失败（字段冲突/未知类型/递归无解），
+   pool 是它唯一的拥有者（`vm_destroy` 释放）；`type_struct_seal` 按指针检测避免重复入池。
+2. **AST 结构预判**（`slot_blocked_by_unsealed`）：判定"该字段类型表达式是否按值内联了一个
+   尚未 seal 的结构体"。**不创建任何类型对象**——否则"解析到一半又延后"会把未定型的派生
+   类型（如 `?T`）intern 进池并折叠进槽位，下一轮拿到同一个未定型对象。递归规则：
+   指针/切片/func 之下 → `behind_ind = true`（只要身份）；`option/tuple/union` 包装按值
+   内联元素布局 → 重置 `behind_ind`（`?ref *Node` 里的指针仍不阻塞）；命中即本轮 DEFERRED。
+3. **按值递归环诊断**（`report_incomplete_field_cycles`）：不动点结束后，顺"按值阻塞"链走，
+   链回到起点才报（别的定义卡住时由那个定义自己的诊断负责，不重复报）；区分"按值"与
+   "option/tuple/union 包装"两种文案。一次性门闩与嵌入环检测同款（试跑轮不重复打印）。
+4. **布局延迟定型**（`type_sync_derived_layout`，`include/vm/type.h` + `src/vm/type.c`）：
+   `const`/`volatile`（size/align = sub）与数组（`N * elem.size`）这类包装在**构造时**就把
+   sub 的布局拷走了，而 sub（正在定义中的 struct）那一刻 size 还是 0 → 在 **sub seal 之后**
+   就地同步这些派生包装（链式到不动点）。调用点放在 `type_struct_seal` 内部：编译期
+   （sema 物化路径）与运行期（hoist 构造 → `op_seal`）**共用同一处**，两侧一起修好。
+   不变量说明：这不是"seal 后改写属性"（写入 API 一律拒绝 sealed），而是这些包装的布局
+   本就**只能延迟定型**；对象身份与 intern 键（sub/elem 指针）全程不变。
+5. **hoist 依赖定义**（`src/compiler/compile_hoist.c`）：早期"引用依赖"（指针 base、切片
+   elem、func 参数/返回）直接 `LOAD_TYPE` 而不定义依赖，理由是"这些类型 layout 恒定"。
+   但**身份**会被影响：pass 1 为每个 id 建的是开放对象，若指针在依赖尚未定义时就把它捕获
+   进 base，依赖随后 seal 时可能**去重命中既有等价类型而被回收**（实测：开放 `const i32`
+   命中 sema 早已 intern 的 `const i32` 后被 `allocator_free`），指针 base 变成悬垂 →
+   运行期 `ptr: unsupported implicit cast for pointer`。新增 `emit_ref_dep_type`：依赖未处理
+   → 先定义；依赖**正在定义中**（环）→ 直接 LOAD 其开放对象（此时它一定是本程序新建、
+   不会与 sema 既有类型去重的类型，身份稳定）；`option/tuple/union/struct 字段`这类真正
+   需要"内部先密封"的关系仍走 `emit_dep_type`（环上报 `circular type definition`，sema
+   已拦截源语言的按值递归，这里是安全网）。
+6. **VM 值层两处修复**（递归字段常用 `?ref *const T`，暴露了既有缺口）：
+   - `value_implicit_cast`（`src/vm/value.c`）：`T → ?T` 提升的门槛从"源类型 == inner"
+     放宽到"源不是 option"；
+   - `value_lift_option`（`src/vm/type_option.c`）：内层类型不完全相同时先做一次**内层
+     隐式转换**（`ref *T → ref *const T` 这类加限定符的提升），拷贝后立即
+     `value_dispose` 释放临时值（否则每次提升泄漏一个 `value_data`）。
+
+**与既有特性的交互**：`...Base;` 组合（§14.23）与指针向上转换（第 67 项）都不受影响——
+组合读的是 Base 已 sealed 的字段表快照；自引用结构体同样可以参与嵌入（字段前缀规则不变）。
+
+**测试与验证**：`tests/struct_recursive_test.cpp` 12 例（链表/方法遍历/互相引用/二叉树/
+自引用函数签名字段/数组与切片包装的布局定型/`?ref *const T` 提升/前向引用 + 3 个按值
+递归负例 + option 包装负例）；`examples/recursive_struct/recursive_struct.cx`（链表 +
+方法、二叉树 + 递归、互相引用、自引用签名字段四合一，自检式）。
+
+**顺带修掉的既有缺陷**：`clux format` 渲染后缀解包 `a.!` 时**丢掉了前导点**（parser 按
+"`.` 后看单字符 symbol"识别，AST 里的 token 只是 `!`），产出 `a!` → 格式化结果无法重新
+解析（`expected ';'`），幂等也在第二遍失败。修法与 `.*` / `.&` 同款：补点 + 按后缀优先级
+给操作数保括号；新增 `Fmt.UnwrapKeepsLeadingDot` 锁定。
+
+全量 **1725/1725 PASSED / 0 FAILED**、0 泄漏；示例 **44/44** `run` 与 44/44
+`emit → run .cxb`、format 幂等 **46/46**；强制全量重编 0 warning / 0 error。

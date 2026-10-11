@@ -1509,6 +1509,8 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       点名自身）与互相引用（两个 struct 各点名对方）都在字段处报
       `unknown field type for '<field>'`；**前向引用反而支持**（字段类型点名**后面**声明
       的 struct，含写在函数签名里，exit 0 —— 依赖图无环即可）。
+      **（第 73 项已解除此边界：递归结构体现已支持，"依赖成环"不再是限制；`opaque`
+      绕法仍然有效，但它今天的主要价值是接收者下转型。）**
       **最小绕法**：表行签名写 `opaque`（≈ `void*`）+ 实现里 `as` 还原——指针 → opaque
       隐式、opaque → 指针显式，属于"用户可自行实现"，不需要改调用约定/对象布局/加指令。
       另记三条用法：含 `ref` 字段的变量要 `'<*>` 标注；`len` 是 `usize`（下标用 usize）；
@@ -1526,3 +1528,42 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 验证：强制全量重编 **188 步 exit 0、0 告警/0 错误**；全量 **1712/1712 PASSED、
       0 FAILED**、无泄漏报告；示例 **43/43**（带 `func main`）`run` exit 0 且 0 泄漏、
       43/43 `emit → run .cxb` 通过、format 幂等 **45/45**（`fmt(fmt(x)) == fmt(x)`）。
+
+73. **递归结构体（自引用 / 互相引用）——解除第 72 项记录的唯一语言边界**（2026-10）
+    - **语义**：字段类型依赖图**允许成环**，只要环经过"布局不依赖被引用类型完整布局"的
+      包装：指针族（`own/ref/fatal/share/weak *T`）、切片、函数签名、`const`/`volatile`、
+      数组 `[N]T`。**按值递归**（`struct A { a: A; }`、`[N]A` 直接内联、`?A`）仍拒绝：
+      `struct 'A': field 'a' has incomplete type 'A': recursive struct by value
+      (break the cycle with a pointer, e.g. 'ref *A')`。定义顺序无关（前向引用照旧）。
+    - **sema 物化**（`struct_compose.c:materialize_struct_type`）：求值前先给目标定义建
+      **开放**类型对象（分配 id + 显示名 + 编译期类型名绑定）并**入池**（失败路径由
+      `vm_destroy` 回收；`type_struct_seal` 按指针避免重复入池），字段类型表达式于是能解析
+      到"正在定义中的自己"与环上其它定义。
+    - **AST 结构预判**（`slot_blocked_by_unsealed`）：判定字段类型是否**按值内联**了尚未
+      seal 的结构体，**不创建任何类型对象**（避免把未定型的派生类型 intern 进池并折叠进
+      槽位）；`option/tuple/union` 包装按值内联元素布局 → 重置"在指针之下"标记。
+    - **按值递归环诊断**（`report_incomplete_field_cycles`）：顺"按值阻塞"链找环，链回到
+      起点才报；区分"按值"与"包装类型"两种文案；一次性门闩（试跑轮不重复打印）。
+    - **布局延迟定型**（`type_sync_derived_layout`）：`const`/`volatile`/数组这些"布局派生
+      自 sub/elem"的包装在构造时拷到的是**未 seal 的 sub**（size=0）→ 在 sub seal 之后就地
+      同步（链式到不动点）。调用点放进 `type_struct_seal` 内部，**编译期与运行期共用一处**。
+    - **hoist 依赖定义修正**（`compile_hoist.c:emit_ref_dep_type`）：早期"引用依赖"（指针
+      base / 切片 elem / func 参数返回）直接 `LOAD_TYPE` 不定义依赖，会让指针 base 捕获
+      "稍后被 seal 去重回收"的开放对象（实测：开放 `const i32` 命中 sema 既有 `const i32`
+      后被 `allocator_free`）→ 悬垂 → 运行期 `ptr: unsupported implicit cast for pointer`。
+      新规则：依赖未处理 → 先定义；**正在定义中（环）** → 直接 LOAD 其开放对象（环上被
+      捕获者一定是本程序新建、不会与 sema 既有类型去重的类型，身份稳定）。
+    - **VM 值层修复**（递归字段常用 `?ref *const T` 暴露的既有缺口）：`value_implicit_cast`
+      放宽 `T → ?T` 提升门槛；`value_lift_option` 内层类型不同时先做一次内层隐式转换
+      （`ref *T → ref *const T`）并在拷贝后释放临时值（原先每次提升泄漏一个 `value_data`）。
+    - **测试**：`tests/struct_recursive_test.cpp` 12 例（链表 / 方法遍历 / 互相引用 / 二叉树 /
+      自引用函数签名字段 / 数组与切片包装布局 / `?ref *const T` 提升 / 前向引用 + 3 个按值
+      递归负例 + option 包装负例）；新增 `examples/recursive_struct/recursive_struct.cx`
+      （链表 + 方法、二叉树 + 递归、互相引用、自引用签名字段，自检式）。
+    - **顺带修掉既有缺陷**：`clux format` 渲染后缀解包 `a.!` 丢前导点（输出 `a!`）→
+      格式化产物无法重新解析、幂等在第二遍失败；修法与 `.*`/`.&` 同款（补点 + 后缀优先级
+      保括号），新增 `Fmt.UnwrapKeepsLeadingDot`。
+    - **文档**：`language-spec-m1.md` §3.3 新增"递归结构体"小节 + 修正旧"依赖不能成环"
+      条款；`m6-design.md` 新增 **§14.25**（机制六点）并在 §14.24.3 标注旧结论已解除。
+    - 验证：强制全量重编 **0 告警 / 0 错误**；全量 **1725/1725 PASSED / 0 FAILED**、0 泄漏；
+      示例 **44/44** `run` 与 44/44 `emit → run .cxb`、format 幂等 **46/46**。

@@ -17,6 +17,7 @@
 #include "vm/type_interrupt.h"
 #include "vm/type_opaque.h"
 #include "vm/type_module.h"
+#include "vm/type_array.h"
 
 #include <string.h>
 #include <stdalign.h>
@@ -130,6 +131,56 @@ const type_t *type_qualifier_sub(const type_t *t) {
     if (t->kind == TYPE_KIND_VOLATILE)
         return ((const volatile_type_t *)t)->sub;
     return NULL;
+}
+
+/* 派生类型布局延迟定型（见 include/vm/type.h 的说明）。
+ * 遍历 const/volatile/数组池，把"直接以 root 为布局来源"的派生类型同步到
+ * root 的最终布局，并以修好的类型为新 root 继续（链式派生）。 */
+void type_sync_derived_layout(vm_t *vm, const type_t *sub) {
+    if (!vm || !sub || !type_is_sealed(sub)) return;
+    const type_t *roots[64];
+    size_t nroots = 0;
+    roots[nroots++] = sub;
+    for (size_t pass = 0; pass < 8; pass++) {
+        size_t fixed = 0;
+        for (size_t r = 0; r < nroots; r++) {
+            const type_t *root = roots[r];
+            /* const / volatile：布局 = sub 的布局 */
+            vec_t *pools[2] = {vm->const_types, vm->volatile_types};
+            for (size_t p = 0; p < 2; p++) {
+                vec_t *pool = pools[p];
+                if (!pool) continue;
+                size_t n = vec_len(pool);
+                for (size_t i = 0; i < n; i++) {
+                    const type_t *t = (const type_t *)vec_get(pool, i);
+                    if (!t || t == root || !type_is_sealed(t)) continue;
+                    if (type_qualifier_sub(t) != root) continue;
+                    if (t->size == root->size && t->align == root->align) continue;
+                    ((type_t *)t)->size  = root->size;
+                    ((type_t *)t)->align = root->align;
+                    if (nroots < 64) roots[nroots++] = t;
+                    fixed++;
+                }
+            }
+            /* 数组：[N]T 布局 = N * sizeof(T)（对齐 = T 的对齐） */
+            if (vm->array_types) {
+                size_t n = vec_len(vm->array_types);
+                for (size_t i = 0; i < n; i++) {
+                    const type_t *t = (const type_t *)vec_get(vm->array_types, i);
+                    if (!t || t == root || !type_is_sealed(t)) continue;
+                    if (array_type_elem(t) != root) continue;
+                    size_t eal = root->align ? root->align : 1;
+                    size_t nsz = array_type_len(t) * root->size;
+                    if (t->size == nsz && t->align == eal) continue;
+                    ((type_t *)t)->size  = nsz;
+                    ((type_t *)t)->align = eal;
+                    if (nroots < 64) roots[nroots++] = t;
+                    fixed++;
+                }
+            }
+        }
+        if (fixed == 0) break;
+    }
 }
 
 bool type_has_const(const type_t *t) {

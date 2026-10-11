@@ -571,10 +571,16 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             break;
         }
         case AST_UNWRAP: {
+            /* 后缀解包 `a.!`（assert）。**点必须由 fmt 补上**：parser 按
+               "`.` 分支 advance 后看后随单字符 symbol"识别，`u->op` 只是那
+               个单字符 token（`!`），直接 sb_put 会输出 `a!` → 重新解析报
+               `expected ';'`（格式化把源码改坏）。操作数是后缀族，绑定力最高
+               （26），优先级更低者保括号，与 `.*` / `.&` 同款。 */
             ast_unwrap_t *u = (ast_unwrap_t *)node;
-            render_expr(f, u->operand);
+            render_expr_paren(f, u->operand, node, false, 26);
             size_t olen = 0;
             const char *op = token_get_text(u->op, &olen);
+            sb_ch(&f->sb, '.');
             sb_put(&f->sb, op, olen);
             break;
         }

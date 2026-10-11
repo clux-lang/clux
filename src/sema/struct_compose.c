@@ -1,19 +1,35 @@
 #include "sema/struct_compose.h"
 
 #include "core/strslice.h"
+#include "parser/ast_array.h"
 #include "parser/ast_block.h"
+#include "parser/ast_const.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_option.h"
 #include "parser/ast_program.h"
+#include "parser/ast_ptr.h"
 #include "parser/ast_scope_annot.h"
+#include "parser/ast_slice_type.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_struct_embed.h"
+#include "parser/ast_tuple.h"
 #include "parser/ast_type_ref.h"
+#include "parser/ast_volatile.h"
 #include "sema/comptime.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
 #include "vm/type.h"
+#include "vm/type_array.h"
+#include "vm/type_cunion.h"
+#include "vm/type_func.h"
+#include "vm/type_option.h"
+#include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/type_struct.h"
+#include "vm/type_tuple.h"
+#include "vm/type_union.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -83,6 +99,147 @@ static sema_symbol_t *find_global(sema_t *sema, strslice_t name) {
                             : NULL;
 }
 
+/* ===========================================================================
+ * 递归类型（自引用 / 互相引用）
+ *
+ * 物化（materialize_struct_type）：为目标类型先建**开放**对象 + 分配类型 id +
+ * 设显示名 + 绑定编译期类型名——字段类型表达式（`next: ref *const Node` 写在
+ * Node 自己体内、或 A/B 互指）此刻就能解析到对象。
+ *
+ * 构造侧本就支持成环：hoist 的 pass 1 先把**所有**类型 id 声明登记（LOAD_TYPE
+ * 可拉回开放对象），pass 2 里指针/切片/func 的密封**不依赖 base 布局**（指针宽、
+ * 切片头恒定），结构体 define 对字段类型走 emit_dep_type（指针定义不递归进
+ * base）→ 自引用天然成立。sema 侧此前缺的只是"先给环上每个类型一个可命名的
+ * 开放对象"，于是自引用一律报 unknown field type。
+ *
+ * 但"按值内联"的字段仍需要被引用类型**已 seal** 才能定型（struct 自身布局、
+ * array/option/tuple/union 的布局都在构造时结算）。因此：
+ *   - 允许（布局恒定或可延迟定型）：指针、切片、func 签名；以及 const/volatile/
+ *     数组这些"布局由 sub/elem 派生"的包装——后者在 sub seal 后由 VM 侧的
+ *     type_sync_derived_layout 就地**延迟定型**；
+ *   - 需要 seal：按值内联了尚未 seal 的 struct（含 option/tuple/union/cunion
+ *     包装，它们没有延迟定型路径）→ 本轮 DEFERRED；若最终成环，由
+ *     report_incomplete_field_cycles 报"类型不完整（递归）"。
+ *
+ * 判定走 **AST 结构预判**（slot_blocked_by_unsealed），不做任何类型构造——
+ * 否则"解析到一半又延后"会把未定型的派生类型（如 ?T）intern 进类型池并折叠进
+ * 槽位，下一轮拿到的是同一个未定型对象。
+ * =========================================================================== */
+
+/* 命中"按值内联了尚未 seal 的结构体"时的阻塞信息（诊断用） */
+typedef struct {
+  ast_node_t       *slot;       /* 命中的类型表达式节点（诊断位置） */
+  sema_symbol_t    *sym;        /* 尚未 seal 的结构体类型符号 */
+  strslice_t        target;     /* 被点名的类型名（诊断用） */
+  strslice_t        field;      /* 触发阻塞的字段名（诊断用） */
+  bool              behind_ind; /* 命中点是否位于指针/切片/func 之下 */
+  bool              wrapped;    /* 命中点外层是否套了 option/tuple/union 包装 */
+} compose_block_t;
+
+/* AST 结构预判：类型表达式是否按值内联了一个尚未 seal 的结构体？
+ * behind_ind：当前位置在指针/切片/func 之下（布局恒定，struct 只需身份）。
+ * wrapped：已经穿过 option/tuple/union/cunion 包装（用于给出准确诊断）。
+ * **不创建任何类型对象**（见上面的说明）。 */
+static bool slot_blocked_by_unsealed(sema_t *sema, ast_node_t *slot,
+                                     bool behind_ind, bool wrapped,
+                                     compose_block_t *out) {
+  if (!sema || !slot) return false;
+  switch (slot->kind) {
+    case AST_IDENT:
+    case AST_TYPE_REF: {
+      strslice_t nm = (slot->kind == AST_IDENT)
+                          ? ((ast_ident_t *)slot)->name
+                          : ((ast_type_ref_t *)slot)->name;
+      if (!nm.ptr) return false;
+      sema_symbol_t *sym = find_global(sema, nm);
+      if (!sym || sym->kind != SEMA_SYM_TYPE || !sym->type) return false;
+      if (sym->type->kind != TYPE_KIND_STRUCT || type_is_sealed(sym->type))
+        return false;
+      if (behind_ind) return false; /* 指针/切片/func 之下：只需身份（布局恒定） */
+      if (out) {
+        out->slot       = slot;
+        out->sym        = sym;
+        out->target     = nm;
+        out->behind_ind = behind_ind;
+        out->wrapped    = wrapped;
+      }
+      return true;
+    }
+    case AST_CONST:
+      return slot_blocked_by_unsealed(sema, ((const ast_const_t *)slot)->sub,
+                                      behind_ind, wrapped, out);
+    case AST_VOLATILE:
+      return slot_blocked_by_unsealed(sema, ((const ast_volatile_t *)slot)->sub,
+                                      behind_ind, wrapped, out);
+    case AST_ARRAY:
+      return slot_blocked_by_unsealed(sema, ((const ast_array_t *)slot)->base_type,
+                                      behind_ind, wrapped, out);
+    case AST_PTR:
+      return slot_blocked_by_unsealed(sema, ((const ast_ptr_t *)slot)->base_type,
+                                      true, wrapped, out);
+    case AST_SLICE_TYPE:
+      return slot_blocked_by_unsealed(
+          sema, ((const ast_slice_type_t *)slot)->elem_type, true, wrapped, out);
+    case AST_FUNC_TYPE: {
+      ast_func_type_t *ft = (ast_func_type_t *)slot;
+      for (ast_node_t *pr = ft->params; pr; pr = pr->next)
+        if (slot_blocked_by_unsealed(sema, pr, true, wrapped, out)) return true;
+      return slot_blocked_by_unsealed(sema, ft->return_type, true, wrapped, out);
+    }
+    case AST_OPTION:
+      /* ?T 布局 = struct{bool;T}：**按值**内联 T 的布局，且没有延迟定型路径
+         → 只看 T 自身是否需要 seal（重置 behind_ind：包装内部的"按值"语义与
+         外层是否在指针之下无关——`?ref *Node` 的 T 是指针 → 不阻塞） */
+      return slot_blocked_by_unsealed(sema, ((ast_option_t *)slot)->sub, false,
+                                      true, out);
+    case AST_TUPLE: {
+      ast_tuple_t *tp = (ast_tuple_t *)slot;
+      for (ast_node_t *et = tp->elem_types; et; et = et->next)
+        if (slot_blocked_by_unsealed(sema, et, false, true, out)) return true;
+      return false;
+    }
+    case AST_SCOPE_ANNOT:
+      return slot_blocked_by_unsealed(sema, ((const ast_scope_annot_t *)slot)->sub,
+                                      behind_ind, wrapped, out);
+    default:
+      return false; /* sizeof/typeof/内建标量：交给正常解析路径 */
+  }
+}
+
+/* 物化：为目标结构体先建开放类型对象（分配 id + 显示名 + 编译期类型名绑定），
+ * 使字段类型表达式（自引用/互相引用）能解析到它。幂等：已物化直接返回。
+ * **不 seal**——字段表由 sema_struct_compose_def 在同一个开放对象上填充。 */
+static const type_t *materialize_struct_type(sema_t *sema, ast_struct_def_t *sd,
+                                             sema_symbol_t *sym) {
+  if (!sema || !sd || !sym) return NULL;
+  if (sym->type) return sym->type; /* 已物化（幂等） */
+  vm_t *vm = sema->vm;
+  const type_t *t = type_struct_alloc_open(vm);
+  if (!t) return NULL;
+  /* 具名 struct：独立身份（seal 跳过去重 intern，见 type_struct_mark_unique） */
+  type_struct_mark_unique(vm, t);
+  /* **物化即入池**：开放对象若一直等不到 seal（错误路径：字段冲突/未知类型/
+     递归无解），pool 是它唯一的拥有者——vm_destroy 会释放它（含显示名/字段表）。
+     正常路径 seal 时按指针检测跳过重复入池（见 type_struct_seal）。 */
+  if (!vm->struct_types) vm->struct_types = vec_new(vm->alloc, false);
+  vec_push(vm->struct_types, vm->alloc, (void *)t);
+  /* 登记：分配全 VM 唯一类型 id（type_set_name 要求 id >= PROGRAM_BASE） */
+  const sema_type_t *st = sema_type_register(sema, t);
+  if (!st) return NULL; /* 对象已入池：归 vm 所有，不在此释放 */
+  sd->type_id = st->id;
+  if (!type_set_name(vm, t, sd->name)) return NULL;
+  /* 编译期 vm 作用域绑定：类型表达式按名字解析走 type_lookup（AST_IDENT 分支） */
+  value_t *tv = type_as_value(vm, t);
+  if (!tv) return NULL;
+  char nb[256];
+  if (sd->name.len >= sizeof nb) return NULL;
+  memcpy(nb, sd->name.ptr, sd->name.len);
+  nb[sd->name.len] = '\0';
+  scope_define(vm, vm->current_scope, nb, tv);
+  sym->type = t; /* 开放对象（未 seal）；is_active 保持 false（TDZ 不变） */
+  return t;
+}
+
 /* 槽位是否"点名了一个已知类型符号"（用于区分"未知类型"与"依赖尚未就绪"：
  * 前者报诊断，后者静默延后到下一轮，见下方 pending 分支）。 */
 static bool slot_names_type_symbol(sema_t *sema, const ast_node_t *slot) {
@@ -104,7 +261,8 @@ static bool slot_names_type_symbol(sema_t *sema, const ast_node_t *slot) {
 
 /* 嵌入目标 `...Name` 的三种"还没就绪"形态：
  *   - 名字不是类型符号 → **不是** pending（下面按"无此结构体"报错）；
- *   - 名字是 struct 定义、类型尚未 seal（前向引用）→ pending（静默延后）；
+ *   - 名字是 struct 定义、类型尚未 **seal** → pending（静默延后；注意类型可能
+ *     已被"物化"成开放对象，`es->type` 非空但未 seal）；
  *   - 名字是 **type 别名**（`type A = ...`）：类型值尚未建出时算 pending
  *     （同一轮里别名可能随后就绪）；已建出但不是 struct 时**不是** pending
  *     （它就是错的，下面报"not a struct type"）。 */
@@ -112,8 +270,9 @@ static bool embed_targets_pending(sema_t *sema, const ast_struct_def_t *sd) {
   for (ast_node_t *e = sd->embeds; e; e = e->next) {
     sema_symbol_t *es = find_global(sema, ((ast_struct_embed_t *)e)->name);
     if (!es || es->kind != SEMA_SYM_TYPE) continue;
-    if (es->type) continue; /* 类型已建出：交给下方结构体类型检查 */
-    if (es->ast && es->ast->kind != AST_STRUCT_DEF) continue; /* 别名等 */
+    if (es->type && type_is_sealed(es->type)) continue; /* 已 seal：交给下方检查 */
+    if (es->ast && es->ast->kind != AST_STRUCT_DEF && es->type)
+      continue; /* 别名等已建出的非 struct：交给下方报"not a struct" */
     return true;
   }
   return false;
@@ -176,7 +335,13 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
      类型（`...Base;` 的字段已定型在 sealed 类型里）overwrite 掉。 */
   if (sym->is_active) return SEMA_COMPOSE_OK;
 
-  /* 0. 依赖未就绪（前向引用）→ 静默延后，不建任何类型、不报错。
+  /* 0. 物化（幂等）：先给本定义一个**可命名的开放类型对象**（+ 类型 id + 显示名
+        + 编译期类型名绑定），字段类型表达式才可能解析到"正在定义中的自己"
+       （自引用）或另一个同样在环上的定义（互相引用）。 */
+  const type_t *open = materialize_struct_type(sema, sd, sym);
+  if (!open) return SEMA_COMPOSE_FAILED;
+
+  /* 0b. 嵌入目标尚未 seal（前向引用 / 环）→ 静默延后，不建任何类型、不报错。
         点名的 Base 若根本不存在 / 不是结构体，则不在此列（下面报错）。 */
   if (embed_targets_pending(sema, sd)) return SEMA_COMPOSE_DEFERRED;
 
@@ -200,6 +365,15 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
     size_t i = 0;
     for (ast_node_t *f = sd->fields; f; f = f->next, i++) {
       ast_struct_field_t *sf = (ast_struct_field_t *)f;
+      /* 按值内联了尚未 seal 的结构体 → 本轮延后（**不解析、不折叠槽位**：
+         解析会把未定型的派生类型 intern 进池并写回槽位，下一轮拿到同一个
+         未定型对象）。指针/切片/func/const/volatile/数组不受此限。 */
+      compose_block_t blk;
+      memset(&blk, 0, sizeof blk);
+      if (slot_blocked_by_unsealed(sema, sf->type, false, false, &blk)) {
+        pending = true;
+        continue;
+      }
       const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
       if (!ft) {
         if (slot_names_type_symbol(sema, sf->type)) {
@@ -260,11 +434,12 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
         resolve_embed_struct(sema, sd, emb); /* 报"未知结构体" */
         return SEMA_COMPOSE_FAILED;
       }
-      /* 嵌入目标尚未 seal（前向引用：Base 声明在 Test 之后）→ **静默延后**。
+      /* 嵌入目标尚未 **seal**（前向引用：Base 声明在 Test 之后；或 Base 已被
+         物化成开放对象但还没填充字段）→ **静默延后**。
          不在这里递归求值 Base："定义顺序无关"由 sema_struct_compose_pass 的
          依赖序遍历 + 反复尝试保证（它会把能做的先做掉，下一轮再回来）；环由
          该 pass 的 report_embed_cycles 先一步报出，所以不会无限延后。 */
-      if (!bs->type) return SEMA_COMPOSE_DEFERRED;
+      if (!bs->type || !type_is_sealed(bs->type)) return SEMA_COMPOSE_DEFERRED;
       const type_t *bt = bs->type;
       if (bt->kind != TYPE_KIND_STRUCT) {
         resolve_embed_struct(sema, sd, emb); /* 报"不是结构体类型" */
@@ -361,17 +536,14 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
     if (dup) return SEMA_COMPOSE_FAILED;
   }
 
-  /* 4. 开放类型（**尚未 seal**：字段表 + 嵌入表都在这个窗口里编辑）：
-        自有字段按声明序 add_field → 按位置插入各 `...Base` 的字段表 →
-        登记嵌入表 → seal 一次（布局在 seal 里统一计算）。
-        type_t* 身份：seal 返回的对象就是本开放对象（去重命中时是既有同构
-        类型，与仓库其它开放构造路径一致）——后续 c_sema_type_find_ptr /
-        types_by_id / CTFE 用的都是这个返回值。
-        注意**不要**在这里给开放类型设显示名：type_set_name 只对已分配
-        program id 的类型生效（开放对象 id=0），改名分配的堆内存会挂在开放
-        对象上，seal 去重命中回收开放对象时一起泄漏；显示名在 seal + 登记
-        之后设置（第 5 步，与仓库其它类型构造路径一致）。 */
-  const type_t *t = type_struct_alloc_open(vm);
+  /* 4. 就地填充**物化过**的开放类型（**尚未 seal**：字段表 + 嵌入表都在这个
+        窗口里编辑）：自有字段按声明序 add_field → 按位置插入各 `...Base` 的
+        字段表 → 登记嵌入表 → seal 一次（布局在 seal 里统一计算）。
+        type_t* 身份：物化时登记的对象就是最终对象（具名 struct 走 unique，
+        seal 不做去重 intern、不换对象）——后续 c_sema_type_find_ptr /
+        types_by_id / CTFE 用的都是它；显示名/id 也已在物化时设置（type_set_name
+        只对已分配 program id 的类型生效，物化已登记 id）。 */
+  const type_t *t = open;
   if (!t) return SEMA_COMPOSE_FAILED;
 
   /* 具名 struct 定义 → **独立身份**：不参与 seal 去重 intern（`struct A` 与
@@ -397,7 +569,8 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
                  "struct '%.*s': failed to compose embedded fields before type "
                  "seal",
                  (int)sd->name.len, sd->name.ptr);
-      allocator_free(vm->alloc, (void **)&t);
+      /* 不释放 t：它已在物化时登记进 sema->types / 名字绑定 / 符号表——释放会
+         留下悬垂引用。诊断已记录，编译会中止。 */
       sd->composing = false;
       return SEMA_COMPOSE_FAILED;
     }
@@ -410,24 +583,34 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
     return SEMA_COMPOSE_FAILED;
   }
 
+  /* 4b. 递归类型的"布局延迟定型"已收敛到 type_struct_seal 内部（编译期与
+         运行期共用同一处）：目标 seal 之后，以它为布局来源的 const/volatile/
+         数组包装会被同步到最终布局。 */
+
   /* 5. 登记（hoist 构造用）+ 绑定 type value 到编译期 vm 作用域 */
   const sema_type_t *st = sema_type_register(sema, sealed);
   if (!st) { sd->composing = false; return SEMA_COMPOSE_FAILED; }
   sd->type_id = st->id; /* compiler 顶层名字绑定 LOAD_TYPE 用 */
-  /* 显示名（诊断/值 dump 用）：须在 sema_type_register 分配 id 之后调用——
-     type_set_name 要求 t->id >= TYPE_ID_PROGRAM_BASE 才可改名。去重命中时
-     返回的既有类型带旧显示名，此处覆盖为本次定义名（与既有路径一致）。 */
-  type_set_name(vm, sealed, sd->name);
-  value_t *tv = type_as_value(vm, sealed);
-  if (!tv) { sd->composing = false; return SEMA_COMPOSE_FAILED; }
-  char nb[256];
-  if (sd->name.len >= sizeof nb) {
-    sd->composing = false;
-    return SEMA_COMPOSE_FAILED;
+  /* 显示名（诊断/值 dump 用）：物化时已设过（此时 id 已分配）；这里只做
+     "seal 换了对象"的防御性同步——具名 struct 走 unique 不去重，正常不会发生。 */
+  if (sealed != t) {
+    ((sema_type_t *)st)->type = sealed;
+    type_set_name(vm, sealed, sd->name);
   }
-  memcpy(nb, sd->name.ptr, sd->name.len);
-  nb[sd->name.len] = '\0';
-  scope_define(vm, vm->current_scope, nb, tv);
+  /* 名字绑定已在**物化**时完成（同一个对象；具名 struct 不走 seal 去重，
+     sealed == t）。只有"seal 换了对象"的防御分支才需要重新绑定。 */
+  if (sealed != t) {
+    value_t *tv = type_as_value(vm, sealed);
+    if (!tv) { sd->composing = false; return SEMA_COMPOSE_FAILED; }
+    char nb[256];
+    if (sd->name.len >= sizeof nb) {
+      sd->composing = false;
+      return SEMA_COMPOSE_FAILED;
+    }
+    memcpy(nb, sd->name.ptr, sd->name.len);
+    nb[sd->name.len] = '\0';
+    scope_define(vm, vm->current_scope, nb, tv);
+  }
 
   /* 6. 符号激活（TDZ：定义前不可见）——类型已 seal 且登记完毕，"构造中"结束 */
   sd->composing  = false;
@@ -495,23 +678,21 @@ static void collect_block_structs(ast_node_t *stmts, ast_struct_def_t **out,
   }
 }
 
-/* 环检测入口：收集全局 + 各函数体内（含嵌套块）的结构体定义，逐个 DFS。 */
-/* 每次组合遍历只做一次环检测：pass1b_types 是"逐个顶层定义"的循环，每个
- * struct 定义都会调一次 sema_struct_compose_pass（幂等），没有这个门闩会把
- * 同一组环诊断打印多次。sema_struct_compose_reset_reports 打开门闩（正式轮
- * 之前调用），因此每个"轮次"最多检测一次。 */
-static bool g_cycles_checked = false;
-
-static void report_embed_cycles(sema_t *sema, ast_program_t *prog) {
+/* 收集程序里全部结构体定义（顶层 + 各函数体内含嵌套块的局部定义）。
+ * 返回个数；defs 由 arena 分配（*out = NULL 表示无定义 / OOM）。 */
+static size_t collect_program_structs(sema_t *sema, ast_program_t *prog,
+                                      ast_struct_def_t ***out) {
+  if (out) *out = NULL;
+  if (!sema || !prog) return 0;
   size_t cap = 0;
   for (ast_node_t *d = prog->funcs; d; d = d->next) {
     if (d->kind == AST_STRUCT_DEF) cap++;
     else if (d->kind == AST_FUNC_DEF) cap += 64; /* 局部结构体上限的粗估 */
   }
-  if (cap == 0) return;
+  if (cap == 0) return 0;
   ast_struct_def_t **defs = (ast_struct_def_t **)arena_alloc(
       sema->arena, cap * sizeof(*defs), ALIGNOF(max_align_t));
-  if (!defs) return;
+  if (!defs) return 0;
   size_t n = 0;
   for (ast_node_t *d = prog->funcs; d; d = d->next) {
     if (d->kind == AST_STRUCT_DEF) {
@@ -520,6 +701,21 @@ static void report_embed_cycles(sema_t *sema, ast_program_t *prog) {
       collect_block_structs(((ast_func_def_t *)d)->body, defs, &n, cap);
     }
   }
+  if (out) *out = defs;
+  return n;
+}
+
+/* 环检测入口：收集全局 + 各函数体内（含嵌套块）的结构体定义，逐个 DFS。 */
+/* 每次组合遍历只做一次环检测：pass1b_types 是"逐个顶层定义"的循环，每个
+ * struct 定义都会调一次 sema_struct_compose_pass（幂等），没有这个门闩会把
+ * 同一组环诊断打印多次。sema_struct_compose_reset_reports 打开门闩（正式轮
+ * 之前调用），因此每个"轮次"最多检测一次。 */
+static bool g_cycles_checked = false;
+
+static void report_embed_cycles(sema_t *sema, ast_program_t *prog) {
+  ast_struct_def_t **defs = NULL;
+  size_t n = collect_program_structs(sema, prog, &defs);
+  if (n == 0 || !defs) return;
   /* 本轮起点：复位上一轮留下的标记（试跑轮会反复调用本函数），再逐个 DFS。 */
   ast_struct_def_t *path[COMPOSE_MAX_DEPTH];
   for (size_t i = 0; i < n; i++) {
@@ -541,10 +737,88 @@ static void report_embed_cycles(sema_t *sema, ast_program_t *prog) {
   }
 }
 
+/* ===========================================================================
+ * 按值递归环诊断（一次性门闩，与 g_cycles_checked 同款）
+ *
+ * `struct A { b: B; } struct B { a: A; }`（或自含）永远等不到依赖就绪——按值内联
+ * 的类型布局必须先于自身确定，不是"延后"能解决的。判定：顺"按值阻塞"链走，
+ * 链回到起点才算环（别的定义卡住时由那个定义自己的诊断负责，不重复报）。
+ * 指针/切片/func/const/volatile/数组是允许的递归形态，不在此列。
+ * =========================================================================== */
+
+static bool g_incomplete_reported = false;
+
+/* 从 sd 的字段里找"按值内联了尚未 seal 的结构体"的第一个阻塞字段。 */
+static bool find_blocking_field(sema_t *sema, ast_struct_def_t *sd,
+                                compose_block_t *out) {
+  for (ast_node_t *f = sd->fields; f; f = f->next) {
+    ast_struct_field_t *sf = (ast_struct_field_t *)f;
+    compose_block_t blk;
+    memset(&blk, 0, sizeof blk);
+    if (slot_blocked_by_unsealed(sema, sf->type, false, false, &blk)) {
+      blk.field = sf->name;
+      if (out) *out = blk;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void report_incomplete_field_cycles(sema_t *sema, ast_program_t *prog) {
+  ast_struct_def_t **defs = NULL;
+  size_t n = collect_program_structs(sema, prog, &defs);
+  if (n == 0 || !defs) return;
+  for (size_t i = 0; i < n; i++) {
+    ast_struct_def_t *sd = defs[i];
+    if (!sd->name.ptr) continue;
+    sema_symbol_t *sym = find_global(sema, sd->name);
+    if (sym && sym->is_active) continue; /* 已建好 */
+    compose_block_t blk;
+    if (!find_blocking_field(sema, sd, &blk)) continue; /* 卡在别处（如嵌入环） */
+    /* 顺链找环：链回到自己才是递归环 */
+    ast_struct_def_t *cur = sd;
+    bool cycle = false;
+    for (size_t hop = 0; hop <= n; hop++) {
+      compose_block_t step;
+      if (!find_blocking_field(sema, cur, &step)) break;
+      ast_struct_def_t *next =
+          (step.sym && step.sym->ast && step.sym->ast->kind == AST_STRUCT_DEF)
+              ? (ast_struct_def_t *)step.sym->ast
+              : NULL;
+      if (next == sd) { cycle = true; blk = step; break; }
+      if (!next) break;
+      cur = next;
+    }
+    if (!cycle) continue;
+    strslice_t target = blk.target.ptr ? blk.target : sd->name;
+    location_t loc = blk.slot ? sema_loc(sema, blk.slot) : sema_loc(sema, &sd->base);
+    if (blk.wrapped) {
+      /* 命中点套了 option/tuple/union 包装：这些类型按值内联元素布局且没有
+         "延迟定型"路径（见 type_sync_derived_layout 的说明）。 */
+      diag_error(sema->diag, loc,
+                 "struct '%.*s': field '%.*s' has incomplete type '%.*s': "
+                 "option/tuple/union wrappers cannot be completed while the "
+                 "struct is being defined (use a pointer, slice, qualified type "
+                 "or array to make the reference recursive)",
+                 (int)sd->name.len, sd->name.ptr, (int)blk.field.len,
+                 blk.field.ptr, (int)target.len, target.ptr);
+    } else {
+      diag_error(sema->diag, loc,
+                 "struct '%.*s': field '%.*s' has incomplete type '%.*s': "
+                 "recursive struct by value (break the cycle with a pointer, "
+                 "e.g. 'ref *%.*s')",
+                 (int)sd->name.len, sd->name.ptr, (int)blk.field.len,
+                 blk.field.ptr, (int)target.len, target.ptr, (int)sd->name.len,
+                 sd->name.ptr);
+    }
+  }
+}
+
 void sema_struct_compose_reset_reports(ast_program_t *prog) {
   /* 打开"本轮环检测"门闩：正式轮会重新检测并报出循环嵌入（试跑轮的诊断进了
-     临时缓冲被丢弃，但"已检测"标记会留下来）。 */
-  g_cycles_checked = false;
+     临时缓冲被丢弃，但"已检测"标记会留下来）。同理复位按值递归环的门闩。 */
+  g_cycles_checked    = false;
+  g_incomplete_reported = false;
   if (!prog) return;
   for (ast_node_t *d = prog->funcs; d; d = d->next) {
     if (d->kind == AST_STRUCT_DEF) {
@@ -578,10 +852,23 @@ size_t sema_struct_compose_pass(sema_t *sema, ast_program_t *prog,
     report_embed_cycles(sema, prog);
   }
 
+  /* 1b. 物化：为**全部**顶层结构体定义先建开放类型对象（+ 类型 id + 显示名 +
+         编译期类型名绑定）。自引用/互相引用的字段类型表达式要求名字此刻就能解析
+         到对象；hoist 的两遍构造（pass 1 声明全部 id、pass 2 指针/切片/func 密封
+         不依赖 base 布局）本就支持成环，sema 侧只差这一步。
+         局部（块内）结构体不在全局作用域：由 sema_struct_compose_def 按需物化。 */
+  for (ast_node_t *d = prog->funcs; d; d = d->next) {
+    if (d->kind != AST_STRUCT_DEF) continue;
+    ast_struct_def_t *sd = (ast_struct_def_t *)d;
+    sema_symbol_t *sym = sema_scope_find_local(scope, sd->name);
+    if (!sym || sym->type) continue; /* 已物化 / 重复定义已诊断 */
+    materialize_struct_type(sema, sd, sym);
+  }
+
   /* 2. 依赖序遍历 + 反复尝试：每轮扫过全部顶层结构体定义，能做的当场做掉
-        （"能做的"= 所有 `...Base` 已 seal），直到某一轮没有任何新进展。
-        由此 `...Base` 的 Base 写在 Test 之后也可用（Base 会在同一轮更早的
-        尝试里就绪，或下一轮就绪）。环已在第 1 步被拒，不会无限延后。 */
+        （"能做的"= 所有 `...Base` 已 seal、字段类型没有按值内联未 seal 的类型），
+        直到某一轮没有任何新进展。由此 `...Base` 的 Base 写在 Test 之后也可用，
+        自引用/互相引用在同轮内即可定型。环已在第 1 步被拒，不会无限延后。 */
   size_t done = 0;
   for (;;) {
     size_t progressed = 0;
@@ -595,6 +882,13 @@ size_t sema_struct_compose_pass(sema_t *sema, ast_program_t *prog,
     }
     if (progressed == 0) break;
     done += progressed;
+  }
+
+  /* 3. 按值递归环诊断（一次性）：不动点结束后仍有定义没建出来、且其字段按值
+        内联了未 seal 的类型 → 这是无解的递归（不是延后能解决的），必须报错。 */
+  if (!g_incomplete_reported) {
+    g_incomplete_reported = true;
+    report_incomplete_field_cycles(sema, prog);
   }
   return done;
 }

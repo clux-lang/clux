@@ -450,7 +450,23 @@ const type_t *type_struct_seal(vm_t *vm, const type_t *t) {
     struct_layout_apply(st);
     st->base.sealed = true;
 
-    vec_push(vm->struct_types, vm->alloc, st); /* 密封后入池（去重 intern） */
+    /* 递归类型的"布局延迟定型"：本类型 seal 之前，以它为布局来源的派生包装
+       （const/volatile：size/align = sub；数组：N * elem.size）已经按"当时还
+       没定型的 sub"拷贝过了 size/align（例：`struct Node { next: ref *const
+       Node; }` 里的 `const Node`）。这里在 sub 定稿后把这些派生包装就地同步到
+       最终布局（链式到不动点）。编译期（sema 物化路径）与运行期（hoist 构造
+       → op_seal）都经过本函数，因此两侧一起修好。 */
+    type_sync_derived_layout(vm, &st->base);
+
+    /* 入池（去重 intern 用）。**物化的开放对象**（sema 递归类型：先建对象、
+       字段后填）在分配时就已入池——那里是为了让"永不 seal"的错误路径也能被
+       vm_destroy 回收（开放对象不入池就是无人拥有的裸分配）。此处避免重复入池
+       （vm_destroy 逐个裸释放，重复项会双重释放）。 */
+    bool in_pool = false;
+    for (size_t i = 0; i < vec_len(vm->struct_types); i++) {
+        if (vec_get(vm->struct_types, i) == st) { in_pool = true; break; }
+    }
+    if (!in_pool) vec_push(vm->struct_types, vm->alloc, st);
     return &st->base;
 }
 

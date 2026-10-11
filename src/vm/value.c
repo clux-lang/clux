@@ -459,11 +459,13 @@ value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         /* 类型相同，clone 到当前 scope */
         return value_clone(vm, v);
     }
-    /* T → ?T 隐式提升（some，D1）：目标为 option 且源 == inner 时提升。
+    /* T → ?T 隐式提升（some，D1）：目标为 option 且源不是 option 时提升。
+       内层类型完全相同是最常见形态；不同时由 value_lift_option 先按内层做一次
+       隐式转换（例：`ref *Node → ?ref *const Node`：提升的同时加限定符）。
        在公共入口特判——所有标量 vtable 无需感知 ?T（value_lift_option 深拷贝
        T 值到 value 字段 + 置 ok=true）。 */
     if (target && target->kind == TYPE_KIND_OPTION &&
-        type_option_inner(target) == v->type) {
+        v->type->kind != TYPE_KIND_OPTION) {
         return value_lift_option(vm, v, target);
     }
     if (v->type->vtable && v->type->vtable->implicit_cast) {

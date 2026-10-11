@@ -244,13 +244,25 @@ value_t *value_lift_option(vm_t *vm, value_t *v, const type_t *target) {
         return value_make_shadow(vm, target);
 
     const type_t *inner = type_option_inner(target);
-    if (inner != value_type(v))
-        return value_make_error(vm, "?: option lift requires matching inner type");
+    if (!inner) return value_make_error(vm, "?: invalid option lift target");
+
+    /* 内层类型不完全相同：先做一次隐式转换（例：`ref *Node → ref *const Node`
+       在提升的同时加限定符；sema 已校验转换合法）。转换出的临时值在拷贝之后
+       立即释放，否则会留下一次 value_data 泄漏。 */
+    value_t *tmp = NULL;
+    if (inner != value_type(v)) {
+        tmp = value_implicit_cast(vm, v, inner);
+        if (value_is_error(vm, tmp)) return tmp;
+        if (inner != value_type(tmp))
+            return value_make_error(vm, "?: option lift requires matching inner type");
+    }
+    const value_t *src = tmp ? tmp : v;
 
     void *data = value_alloc_data(vm->alloc, target);
     *(bool *)data = true;   /* ok tag */
     /* 平凡拷贝 value 字段（data 全平凡：整段 memcpy） */
-    memcpy((uint8_t *)data + option_value_offset(target), value_data(v),
+    memcpy((uint8_t *)data + option_value_offset(target), value_data(src),
            inner->size);
+    if (tmp && tmp != v) value_dispose(vm, tmp);
     return value_make(vm, target, data);
 }

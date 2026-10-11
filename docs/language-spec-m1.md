@@ -293,6 +293,27 @@ struct Test { ...Base; extra: i64; }   // Test 的字段 = id, extra
 - **限制**：`...Name` 目前只支持**同一编译单元内**声明的结构体（跨 `import` 的结构体
   报"no struct type with that name in this compilation unit"）。
 
+**递归结构体（自引用 / 互相引用，2026-10 起支持）**：字段的类型依赖图**可以成环**，只要
+环**经过指针 / 切片 / 函数签名 / 限定符 / 数组**——这些包装的布局不依赖被引用类型的完整
+布局（指针宽与切片头恒定；`const`/`volatile`/数组在 sub 定型后由 VM 侧同步布局）：
+
+```
+struct Node { v: i32; next: ?ref *const Node; }               // 自引用（链表/树）
+struct A { b: ?ref *const B; }
+struct B { a: ?ref *const A; }                                // 互相引用
+struct Shape { area: func(ref *const Shape) -> i32; r: i32; } // 签名点名自身
+```
+
+- **允许**：`own */ref */fatal */share */weak *T`、切片（`own []T` / `ref []T` / `fatal []T`，
+  切片头布局恒定）、函数签名里的 `T`（`func(ref *const T) -> R` 这种自引用签名也行）、
+  `const T` / `volatile T`、数组 `[N]T`；
+- **拒绝（按值递归 = 无限大小）**：`struct A { a: A; }`、`struct A { xs: [2]A; }`、
+  `?A`（option 按值内联元素布局，没有延迟定型路径）→
+  `error: struct 'A': field 'a' has incomplete type 'A': recursive struct by value
+  (break the cycle with a pointer, e.g. 'ref *A')`；
+- **仍然不需要前置声明**：定义顺序无关（字段可以点名**后面**才声明的结构体）；
+- 只支持**同一编译单元**内声明的结构体（跨 `import` 与 `...Name` 同一限制）。
+
 **不做隐式虚表：静态分派 + 用户侧手写虚表（2026-10 定稿，非目标）**：clux **不提供**
 隐式（编译器隐藏的）虚表，**不做**自动动态分派。这是**设计原则**，不是"尚未实现"：
 
@@ -308,11 +329,14 @@ struct Test { ...Base; extra: i64; }   // Test 的字段 = id, extra
 - **别与 `vtable_t` 混淆**：`include/vm/vtable.h` 的 `vtable_t` 是**类型自身的运算行为
   表**（clone / dispose / assign / eq / get_index / … 的 VM 内部函数指针表），属于类型
   系统的实现细节，与"对象多态 / 虚方法"无关。
-- **用户侧模式的边界**（探针结论见 §14.24）：**字段类型的依赖不能成环**——自引用
-  （`next: ref *const Node`）与两个 struct 互相点名都在字段处报 `unknown field type`；
-  前向引用（点名**后面**才声明的 struct，写在函数签名里也行）反而支持。因此"对象持表
-  指针 + 表行签名点名对象类型"这一写法要改成表行签名写 `opaque`（≈ C 的 `void*`）——
-  指针 → `opaque` 是隐式转换，`opaque` → 指针用 `as` 显式还原。
+- **用户侧模式**：表行的槽位用**函数类型字段**表达，接收者经 `opaque`（≈ C 的 `void*`）
+  传入、实现里 `as` 还原具体类型——`opaque` 在这里的作用是**接收者下转型**（指针 → 指针
+  的显式窄化不支持，`opaque → 指针` 才支持），**不是**为了绕开类型递归（见下条）。
+- **递归结构体已支持**（2026-10，见 §3.3「递归结构体」）：自引用（`next: ref *const Node`）
+  与互相引用都合法；唯一被拒的是**按值递归**（`struct A { a: A; }`、`[N]A`、`?A` 等按值
+  内联自身的形态，必然无限大小），报 `has incomplete type ... recursive struct by value`。
+  因此"对象持表指针 + 表行签名点名对象类型"（`area: func(ref *const Shape) -> i32`）
+  也能直接写（示例为了下转型仍用 `opaque`）。
 
 **`volatile` 在脚本态被完全忽略（2026-10 起）**：`volatile T` 一律折叠为 `T` ——
 类型解析（sema）、类型构造（compiler）、CTFE 类型值求值三处都直接取 sub，因此

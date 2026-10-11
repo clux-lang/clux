@@ -55,8 +55,8 @@
  *     - const/volatile：LOAD_TYPE <id> 拉回开放对象 →（递归定义 sub）→
  *       LOAD_TYPE <sub id> → SET_TYPE（设 sub）→ SEAL（intern 创建即密封，
  *       拷贝 size/align；去重时重绑登记）
- *     - 指针：LOAD_TYPE <id> 拉回开放对象 → LOAD_TYPE <base id>（引用依赖，
- *       不递归）→ SET_TYPE（设 base）→ SEAL（size/align 恒为指针宽）
+ *     - 指针：LOAD_TYPE <id> 拉回开放对象 → 依赖 base 先定义（emit_dep_type；
+ *       指针 size/align 恒为指针宽，base 只作身份）→ SET_TYPE（设 base）→ SEAL
  *     - 内建别名：pass 1 已完成，跳过
  *
  * 依赖后序：sema 登记时父先入队、依赖递归登记在后（sema_type_register →
@@ -243,11 +243,26 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
 
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count);
+static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
+                              size_t count);
 
-/* 布局依赖类型压栈辅助：内建依赖直接 LOAD_TYPE <内建 id>；程序类型先递归
- * define_one（依赖后序密封）再 LOAD_TYPE <st->id>。返回后栈顶即依赖类型。
- * 布局依赖（array/option/const/volatile/enum/struct）的密封需要内部类型
- * size/align 已确定 → 内部必须已密封，故递归定义 + done 三态环检测。 */
+/* 引用依赖类型压栈辅助：先把依赖**定义出来**（密封）再 LOAD_TYPE <id> 拉回。
+ *
+ * 早期版本对"引用依赖"（func 签名/指针/切片）直接 LOAD_TYPE 而不定义依赖，
+ * 理由是"这些类型 size/align 恒定，密封不依赖内部布局"。但**身份**仍会被
+ * 影响：pass 1 为每个 id 建的是开放对象，若某类型在依赖尚未定义时就把它捕获
+ * 进自己的字段/基底，依赖随后 seal 时可能**去重命中既有等价类型而被回收**
+ * （例：pass 1 的开放 `const i32` 在 seal 时命中 sema 早已 intern 好的
+ * `const i32`，开放对象被 allocator_free）——捕获者就指向了已释放对象，
+ * 运行期表现为 "ptr: unsupported implicit cast for pointer"。
+ *
+ * 因此这里一律走 emit_dep_type：依赖先定义（done 三态处理成环——环上再次
+ * 进入的类型直接跳过并 LOAD 其（可能是开放的）对象；成环时被捕获的开放对象
+ * 都是**本程序新建、不会与 sema 既有类型去重**的类型（结构体 unique /
+ * 结构体上派生的包装），身份稳定，不会悬垂）。
+ * 结构体自身的布局依赖（字段类型）本来就走 emit_dep_type；本函数用于
+ * array elem / 限定符 sub / struct 字段 / tuple 元素 / union member /
+ * 指针 base / 切片 elem / func 参数与返回。 */
 static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
                           size_t count) {
   const sema_type_t *dst = c_sema_type_find_ptr(c->sema_types, dep);
@@ -260,14 +275,6 @@ static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
   }
 }
 
-/* 引用依赖类型压栈辅助：直接 LOAD_TYPE <id> 拉回（不递归、不检测环、不要求
- * 内部已密封）。引用依赖（func 签名、未来指针 *T）size/align 恒定（如
- * sizeof(func_t*)），密封不依赖内部类型的布局，实例存在即可——实例由 pass 1
- * 声明登记保证。内部未密封时名字走 "?" 兜底（type_func.c func_sig_name）。 */
-static void emit_ref_type(compiler_t *c, const type_t *dep) {
-  emit_load_type(c, dep->id);
-}
-
 /* 数组定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 elem 先定义（密封）→
  * LOAD_TYPE <elem id> → DEFINE_BOUND N → SEAL（按自身 id 幂等更新登记） */
 static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
@@ -276,18 +283,62 @@ static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *elem = array_type_elem(t);
 
   emit_load_type(c, st->id);               /* 栈: [open_array_type] */
-  emit_dep_type(c, elem, done, count);     /* 栈: [open, elem] */
+  emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
   emit_seal(c);                            /* 封闭算布局（去重时重绑登记） */
 }
 
-/* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（引用依赖，直接
- * LOAD_TYPE 拉回，不要求已密封）→ FUNC_TYPE_PARAM 追加 → 返回类型 →
- * FUNC_TYPE_RETURN → SEAL。签名归引用依赖：size/align 恒为 func_t*（指针），
- * 密封不依赖参数/返回类型的布局，实例存在即可（pass 1 登记保证）；签名引用
- * 签名（函数指针作参数）即使形成循环也放行，未密封参数名字 "?" 兜底。 */
+/* 定义状态（done 数组三态）：
+ *   0 = 未处理    1 = 处理中（正在定义，依赖递归尚未完成）    2 = 已完成（已密封）
+ * 三态区分"处理中"与"已完成"：需要内部先密封的依赖（option/tuple/union/struct
+ * 字段）回到处理中节点时报 "circular type definition"（fail-fast，替代无限递归）；
+ * 而**可延迟定型**的依赖（指针 base、切片 elem、func 参数/返回、const/volatile
+ * 的 sub、数组 elem——见 emit_ref_dep_type）回到处理中节点时直接 LOAD 其开放
+ * 对象（自引用/互相引用类型正是靠这条路径成立）。 */
+#define TYPE_DEF_UNTOUCHED 0
+#define TYPE_DEF_IN_PROGRESS 1
+#define TYPE_DEF_DONE 2
+
+/* 引用/延迟定型依赖压栈辅助：依赖未处理 → 先定义（身份+布局定型）；依赖**正在
+ * 定义中**（环）→ 不递归、不报错，直接 LOAD_TYPE 它的（仍开放的）对象。
+ *
+ * 用于布局**可以延迟定型**的关系：指针 base、切片 elem、func 参数/返回、
+ * const/volatile 的 sub、数组的 elem（它们在 sub seal 后由 VM 侧的
+ * type_sync_derived_layout 同步布局，见 vm/type.h）。
+ *
+ * 环上被捕获的开放对象必须"身份稳定"：它是本程序 pass 1 新建、且不会与 sema
+ * 既有等价类型去重回收的类型（具名 struct 走 unique 不去重；结构体上派生的
+ * 包装其 base/elem 是本程序的结构体对象，池里没有等价项）——因此捕获后
+ * 其后的 seal 不会把对象换掉，指针/包装指向它始终有效。
+ *
+ * 真正需要"内部先密封"的关系（option/tuple/union 按值内联元素布局、struct 字段
+ * 布局）仍走 emit_dep_type：环上直接报 "circular type definition"（sema 已拦截
+ * 源语言里的按值递归，这里是安全网）。 */
+static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
+                              size_t count) {
+  const sema_type_t *dst = c_sema_type_find_ptr(c->sema_types, dep);
+  if (!dst) {
+    emit_load_type(c, dep->id); /* 内建依赖：已密封 */
+    return;
+  }
+  size_t idx = (size_t)dst->index;
+  if (idx < count && done[idx] == TYPE_DEF_IN_PROGRESS) {
+    emit_load_type(c, dst->id); /* 环：用其开放对象（身份稳定，布局随后同步） */
+    return;
+  }
+  define_one(c, dst, done, count);
+  emit_load_type(c, dst->id);
+}
+
+/* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（emit_ref_dep_type：
+ * 先把依赖定义出来，见其说明）→ FUNC_TYPE_PARAM 追加 → 返回类型 →
+ * FUNC_TYPE_RETURN → SEAL。签名自身 size/align 恒为 func_t*（指针），密封不
+ * 依赖参数/返回类型的布局；但依赖的**身份**必须先定型（否则去重回收留下悬垂）。
+ * 签名引用签名（函数指针作参数）形成环时由 define_one 的 done 三态跳过重复
+ * 定义、LOAD 其（可能仍开放的）对象——环上被捕获的开放对象都是本程序新建、
+ * 不会与 sema 既有类型去重的类型，身份稳定。 */
 static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
                         size_t count) {
   const type_t *t = st->type;
@@ -298,14 +349,14 @@ static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
   for (size_t i = 0; i < nparams; i++) {
     const type_t *pt = func_type_param(t, i);
     if (!pt) continue; /* NULL = 无类型约束（防御） */
-    emit_ref_type(c, pt);                  /* 栈: [open, param] */
+    emit_ref_dep_type(c, pt, done, count); /* 栈: [open, param] */
     bcode_write_op(c->bc, BCODE_FUNC_TYPE_PARAM); /* 弹 param → 追加进 open */
     st_push(c, -1);
   }
 
   const type_t *rt = func_type_return(t);
   if (rt) {
-    emit_ref_type(c, rt);                  /* 栈: [open, ret] */
+    emit_ref_dep_type(c, rt, done, count); /* 栈: [open, ret] */
     bcode_write_op(c->bc, BCODE_FUNC_TYPE_RETURN); /* 弹 ret → 设为返回 */
     st_push(c, -1);
   }
@@ -313,7 +364,8 @@ static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
   /* M1 用户函数签名非 variadic（sema type_func_sig 固定 false），省略
      FUNC_TYPE_VARARG；未来用户变参函数在此发。 */
   emit_seal(c);                            /* 密封签名（去重时重绑登记） */
-  (void)done; (void)count; /* 签名归引用依赖：不递归，done 三态不参与 */
+  /* 参数/返回也先定义依赖（见 emit_dep_type 的说明）：签名自身 layout 恒定，
+     但内部类型的**身份**必须先定型，否则 seal 去重回收会留下悬垂基底。 */
 }
 
 /* 限定符（const/volatile）定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 sub 先
@@ -325,7 +377,7 @@ static void define_qual(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *sub = type_qualifier_sub(t);
 
   emit_load_type(c, st->id);             /* 栈: [open_qual_type] */
-  emit_dep_type(c, sub, done, count);    /* 栈: [open, sub] */
+  emit_ref_dep_type(c, sub, done, count);  /* 栈: [open, sub] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 sub → 设进 open */
   st_push(c, -1);
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
@@ -359,9 +411,10 @@ static void define_enum(compiler_t *c, const sema_type_t *st, uint8_t *done,
   (void)done; (void)count;
 }
 
-/* 指针定义（own/ref/fatal *T）：LOAD_TYPE <id> 拉回开放对象 → base 是引用
- * 依赖（直接 LOAD_TYPE 拉回，不递归、不要求已密封）→ SET_TYPE（设 base）→
- * SEAL（指针 size/align 恒定 = 指针宽，密封不依赖 base 布局；去重时按自身
+/* 指针定义（own/ref/fatal *T）：LOAD_TYPE <id> 拉回开放对象 → base 先定义
+ * （emit_dep_type：指针自身 layout 恒定 = 指针宽，但 base 的**身份**必须先
+ * 定型，否则 seal 去重回收会留下悬垂基底）→ SET_TYPE（设 base）→
+ * SEAL（去重时按自身
  * id 重绑登记）。指针可引用指针（own *own *T 递归），实例存在即可（pass 1
  * 登记保证），天然放行指针自引用。 */
 static void define_ptr(compiler_t *c, const sema_type_t *st, uint8_t *done,
@@ -370,16 +423,17 @@ static void define_ptr(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *base = ptr_type_base(t);
 
   emit_load_type(c, st->id);             /* 栈: [open_ptr_type] */
-  emit_ref_type(c, base);                /* 栈: [open, base] */
+  emit_ref_dep_type(c, base, done, count); /* 栈: [open, base] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 base → 设进 open */
   st_push(c, -1);
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
-  (void)done; (void)count; /* 指针归引用依赖：不递归，done 三态不参与 */
+  /* base 先定义（emit_dep_type）：指针自身 layout 恒定，但 base 的身份必须已定型 */
 }
 
-/* 切片定义（own/ref/fatal []T）：LOAD_TYPE <id> 拉回开放对象 → elem 是引用
- * 依赖（直接 LOAD_TYPE 拉回，不递归、不要求已密封）→ SET_TYPE（设 elem）→
- * SEAL（切片 size/align 恒定 = 2 指针宽，密封不依赖 elem 布局；去重时按自身
+/* 切片定义（own/ref/fatal []T）：LOAD_TYPE <id> 拉回开放对象 → elem 先定义
+ * （emit_dep_type：切片自身 layout 恒定 = 2 指针宽，但 elem 的身份必须先定型）→
+ * SET_TYPE（设 elem）→
+ * SEAL（去重时按自身
  * id 重绑登记）。与指针同属引用依赖：切片可引用切片，实例存在即可（pass 1
  * 登记保证），天然放行切片自引用。 */
 static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
@@ -388,11 +442,11 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *elem = slice_type_elem(t);
 
   emit_load_type(c, st->id);             /* 栈: [open_slice_type] */
-  emit_ref_type(c, elem);                /* 栈: [open, elem] */
+  emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 elem → 设进 open */
   st_push(c, -1);
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
-  (void)done; (void)count; /* 切片归引用依赖：不递归，done 三态不参与 */
+  /* elem 先定义（emit_dep_type）：切片自身 layout 恒定，但 elem 的身份必须已定型 */
 }
 
 /* struct 定义：LOAD_TYPE <id> 拉回开放对象 → 逐字段：依赖字段类型先定义
@@ -516,20 +570,6 @@ static void define_cunion(compiler_t *c, const sema_type_t *st, uint8_t *done,
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
 }
-
-/* 定义状态（done 数组三态）：
- *   0 = 未处理
- *   1 = 处理中（正在定义，布局依赖递归尚未完成）
- *   2 = 已完成（已密封）
- * 三态区分"处理中"与"已完成"：布局依赖（array/option/const/volatile/enum/
- * struct）密封要求内部类型已 seal（依赖后序），循环引用（A → B → A）递归回到
- * 处理中节点时内部类型永远无法密封 → 编译期报错（fail-fast），替代无限递归
- * 崩溃。引用依赖（func 签名、未来指针 *T）不递归（emit_ref_type 直接拉取），
- * 不参与环检测，天然放行循环签名。当前源语言类型 DAG（sema 按声明序求值拦截
- * 前向引用）不会触发；未来指针/自引用类型（成环）时此检测是安全网。 */
-#define TYPE_DEF_UNTOUCHED 0
-#define TYPE_DEF_IN_PROGRESS 1
-#define TYPE_DEF_DONE 2
 
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count) {
