@@ -1253,3 +1253,30 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       新增 `examples/ffi_struct/ffi_struct.cx`：用 libc 真实的 `div` 演示按值返回
       结构体、`getenv` 演示 char\* 返回（结构体按值**传参**的可移植库函数不存在，
       那条路径由测试库覆盖）。
+65. **`usize`：C 的 `size_t`（随架构变化）**
+    - **动机（用户指出）**："之前把 size 大小统一成 u64 了"——`len`/`sizeof`/`alignof`
+      一律返回 u64，在 32 位平台上宽度是错的；FFI 里声明 C 的 `size_t` 形参也只能
+      写死 u64。
+    - **设计：不是新类型，而是别名**（与 C 的 `typedef` 同义）。`vm_type_usize(vm)`
+      按指针宽度返回平台类型：8 → `u64`，4 → `u32`。这样：
+      * `usize` 与底层类型**完全同一**（同一个 `type_t`）→ 可互相赋值/比较，
+        与 `u64` 之间没有隐式转换障碍（`len(s) != 5u64` 这类既有代码不受影响）；
+      * FFI 描述符复用同一张表 → `extern cfunc libc::malloc(n: usize)` 就是
+        C 的 `size_t`；
+      * 名字注册成**第二个绑定**（`scope_define(..., "usize", <平台类型>)`），
+        不占新 type id、不动类型系统。
+    - **覆盖面**：`len(...)`（shadow + 运行时值 + sema 注册的签名）、`sizeof`/`alignof`
+      （sema 折叠 + CTFE 折叠出的常量类型）、字面量后缀 `5usize`（值域 `SIZE_MAX`，
+      解析时**归一化**成平台宽度名 u64/u32，编译器据此选 `PUSH_U*` 指令）、
+      变量/结构体字段/参数/返回、FFI 形参与返回。
+    - **测试**：新增 `tests/usize_test.cpp` 5 例——VM 层断言 `type_lookup(vm,"usize")`
+      与 `vm_type_usize(vm)`/`vm->type_u64` 同一且 `len` 返回它；源码层用测试库的
+      `td_i32` 收判定值，覆盖 len/sizeof/alignof、`usize`⇄`u64` 互换、
+      字段/参数/返回、`sizeof(Buf) == sizeof(usize) * 2usize`、
+      FFI（`malloc`/`memset`/`free`/`strlen` 的 size_t 形参与返回）。
+      `array_test`/`array_bcode_test` 的 len 类型断言改用 `vm_type_usize`。
+    - **文档**：language-spec §2.1/§2.3/§3.1（关键字 + 后缀 + 类型表）、
+      m2-design §8（sizeof/alignof → usize）、m4-design §5/§11.3（len → usize）、
+      m3-design 的 malloc 声明、bytecode-mnemonics（LENGTH）。
+    - 验证：`build exit=0`、**0 告警**、**1661/1661**、示例 **39/39**（0 泄漏）
+      且 39/39 `emit → run .cxb` 全通过、format 幂等 **41/41**。

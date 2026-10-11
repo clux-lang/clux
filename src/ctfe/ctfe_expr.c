@@ -302,7 +302,8 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (node->kind == AST_TYPEOF) return type_as_value(vm, t);
         uint64_t n = node->kind == AST_SIZEOF ? (uint64_t)t->size
                                               : (uint64_t)t->align;
-        return ctfe_make_int(ctx, vm->type_u64, n);
+        /* 宽度/对齐结果 = usize（C 的 size_t） */
+        return ctfe_make_int(ctx, vm_type_usize(vm), n);
     }
     case AST_BINARY: {
         ast_binary_t *n = (ast_binary_t *)node;

@@ -1330,12 +1330,12 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
-  /* 预注册 len 内置函数（m4-design §5/§11.3：len(s) -> u64）。
+  /* 预注册 len 内置函数（m4-design §5/§11.3：len(s) -> usize，即 C 的 size_t）。
      与 VM 侧 vm_register_len 对应。len 接受任意可长度的值（数组/切片/str），
      注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
-     并产出 u64 返回类型。fid 从 vm->functions 按名查询。 */
+     并产出 usize 返回类型（C 的 size_t：随架构变化）。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *lsig = type_func_sig(sema->vm, NULL, 0, sema->vm->type_u64,
+    const type_t *lsig = type_func_sig(sema->vm, NULL, 0, vm_type_usize(sema->vm),
                                        /*is_variadic=*/true);
     uint32_t lfid = 0;
     if (sema->vm->functions) {

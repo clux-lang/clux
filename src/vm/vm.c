@@ -71,6 +71,20 @@ static void vm_register_builtin_types(vm_t *vm) {
             panic("vm: failed to register builtin type '%s'", entries[i].name);
         }
     }
+
+    /* `usize` = C 的 size_t：**别名**（与 typedef 同义），指向平台上的无符号
+       整数类型本身（64 位 → u64，32 位 → u32，见 vm_type_usize）。注册成第二个
+       名字而不是新 type_t：这样 `usize` 与底层类型完全同一，可互相赋值/比较，
+       FFI 描述符也复用同一张表。 */
+    {
+        const type_t *t = vm_type_usize(vm);
+        vm_type_bind(vm, (uint32_t)t->id, t);
+        void *data = value_alloc_data_copy(vm->alloc, vm->type_type, &t);
+        value_t *tv = value_make(vm, vm->type_type, data);
+        value_t *stored = scope_define(vm, vm->global_scope, "usize", tv);
+        if (!stored || value_is_error(vm, stored))
+            panic("vm: failed to register builtin type 'usize'");
+    }
 }
 
 vm_t *vm_new(allocator_t *alloc) {

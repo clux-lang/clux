@@ -2581,12 +2581,13 @@ static value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node,
       ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
                                         (*node)->tok_end);
       if (lit) {
-        ((ast_int_lit_t *)lit)->type = sema->vm->type_u64->name;
+        /* 折叠成 `usize` 字面量：宽度/长度类结果的正确类型（C 的 size_t） */
+        ((ast_int_lit_t *)lit)->type = vm_type_usize(sema->vm)->name;
         ((ast_int_lit_t *)lit)->value = n;
         lit->next = (*node)->next;
         *node = lit;
       }
-      return value_make_shadow(sema->vm, sema->vm->type_u64);
+      return value_make_shadow(sema->vm, vm_type_usize(sema->vm));
 }
 
 /* AST_TYPEOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */

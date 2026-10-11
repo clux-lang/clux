@@ -20,9 +20,11 @@ clux 采用标准 C ABI，通过 `cfunc` / `extern cfunc` / `extern var` 实现�
 >
 > **C 类型覆盖（§14.20）**：标量 `i8..u64`/`f32`/`f64`/`bool`、指针族、`opaque`、
 > **`str`（char\*）**、**`enum`**、**`struct`/`cunion` 按值**（传参、返回、变参位置、
-> 回调双向）全部支持；**程序自定义类型可出现在 FFI 签名里**（含 `type` 别名与
-> 指向它们的指针，修掉了 pass 顺序缺陷）。`struct` 的描述符按字段递归构造，
-> `cunion` 等价建模为"size/align 个整数成员"（libffi 无 union 类型）。
+> 回调双向）全部支持；**`usize` = C 的 `size_t`**（别名：64 位平台即 `u64`，
+> 32 位平台即 `u32`），FFI 里声明 C 的 `size_t` 形参就用它；**程序自定义类型可出现
+> 在 FFI 签名里**（含 `type` 别名与指向它们的指针，修掉了 pass 顺序缺陷）。
+> `struct` 的描述符按字段递归构造，`cunion` 等价建模为"size/align 个整数成员"
+> （libffi 无 union 类型）。
 > 未做（有意留有边界）：FFI 实参位置的**隐式**转换（整数族/指针族以外要求类型可接受，
 > 见 §14.18.2）；`option`/tag union/切片（胖指针）/元组/闭包/`[N]T` 裸数组无 C 对应，
 > 一律在编译期拒绝。

@@ -177,7 +177,7 @@ var whole: ref [] const u8 = s[:];      // "hello world"
 ## 5. 长度：len 内建函数
 
 ```
-len(s) -> u64
+len(s) -> usize
 ```
 
 - **内建函数**，读胖指针的 len 字段
@@ -359,7 +359,7 @@ make(T, N, init...) -> fatal []T
 ### 11.2 len（内建函数）
 
 ```
-len(s) -> u64
+len(s) -> usize
 ```
 
 - 适用 `[]T`（所有所有权修饰）和 `[N]T`

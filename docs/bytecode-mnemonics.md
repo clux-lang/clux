@@ -157,7 +157,7 @@ value** 返回，由 `exec_drive` 捕获停机。
 | `FIELD_SET` | `STR`（字段名） | 弹 self + val → `value_implicit_cast` 到字段类型 → dispose 旧值 → blit 新值 → **压回 self**（链式复用）。复合赋值 `p.x op= v` 编译为 `PUSH_VALUE 0` + `FIELD_GET` + op + `FIELD_SET`。 |
 | `INDEX_GET` | — | `get_item`：栈 `…, self, index` → 弹 index、self → `vtable->get_index` → 压元素副本（**消费 self**）。 |
 | `INDEX_SET` | — | `set_item`：栈 `…, self, index, val` → 弹三者 → `vtable->set_index` → 压回 self。 |
-| `LENGTH` | — | 弹 self → 压 `value_length(self)`（`vtable->length` 代理，u64）。**当前编译器不生成此指令**：语言层 `len(x)` 编译为对内建函数 `len` 的调用（`PUSH "len"; …; CALL 1`），内建实现覆盖数组 / 切片 / str；本指令与 VM handler 保留待用。 |
+| `LENGTH` | — | 弹 self → 压 `value_length(self)`（`vtable->length` 代理，usize）。**当前编译器不生成此指令**：语言层 `len(x)` 编译为对内建函数 `len` 的调用（`PUSH "len"; …; CALL 1`），内建实现覆盖数组 / 切片 / str；本指令与 VM handler 保留待用。 |
 
 > **运行期越界检查**：数组 / 切片下标按运行时长度校验 `0 <= index < len`，越界
 > （含负索引按无符号读入后 `>= len`）返回硬错误 `array index N out of bounds (len=M)`

@@ -45,6 +45,8 @@ static const int_type_info_t kIntTypes[] = {
     {"u16", 65535ULL,            false},
     {"u32", 4294967295ULL,       false},
     {"u64", UINT64_MAX, false},
+    /* size_t：值域随架构（64 位 = u64，32 位 = u32）→ `5usize` 才是可移植写法 */
+    {"usize", (uint64_t)SIZE_MAX, false},
 };
 
 static const int_type_info_t *find_int_type(strslice_t s) {
@@ -115,6 +117,12 @@ ast_node_t *parse_int_lit(parser_t *p) {
                                      (unsigned long long)value, (int)next.len, next.ptr);
             }
             type = next;
+            /* `usize` 是**别名**（C 的 size_t，随架构）→ 字面量归一化成平台上的
+               具体宽度名（64 位 u64 / 32 位 u32），这样字面量的类型与 `usize`
+               指向的 type_t 完全一致（编译器按宽度选 PUSH_U* 指令）。 */
+            if (strslice_eq(next, STRSLICE_LIT("usize")))
+                type = (sizeof(void *) == 8) ? STRSLICE_LIT("u64")
+                                             : STRSLICE_LIT("u32");
             advance(p);
         }
     }

@@ -230,7 +230,7 @@ TEST_F(ArrayBcodeTest, LengthReturnsElementCount) {
 
     value_t *top = stack_top();
     ASSERT_NE(top, nullptr);
-    EXPECT_EQ(value_type(top), vm->type_u64);
+    EXPECT_EQ(value_type(top), vm_type_usize(vm)); /* len 返回 usize */
     EXPECT_EQ(read_sint(top), 3);
 }
 
@@ -268,7 +268,7 @@ TEST_F(ArrayBcodeTest, ConstructPartialFillZeroPads) {
 
     value_t *top = stack_top();   /* length: u64 */
     ASSERT_NE(top, nullptr);
-    EXPECT_EQ(value_type(top), vm->type_u64);
+    EXPECT_EQ(value_type(top), vm_type_usize(vm)); /* len 返回 usize */
     EXPECT_EQ(read_sint(top), 3); /* 按声明长度构造，非 1 */
 }
 

@@ -178,7 +178,7 @@ r.* = 123;      // 解引用赋值（SET）
 - fatal 值可 `as` 转换（仅禁止命名，不禁止表达式内流转）
 - FFI 示例（FFI 暂不支持，语法先行）：
   ```
-  extern func malloc(size: u64): fatal opaque;
+  extern func malloc(size: usize): fatal opaque;   // size_t
   extern func free(ptr: fatal opaque): void;
   ```
 

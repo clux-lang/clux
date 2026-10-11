@@ -118,7 +118,7 @@ TEST_F(ArrayTypeTest, MakeAndLength) {
     value_t *len = value_length(vm, arr);
     ASSERT_NE(len, nullptr);
     EXPECT_FALSE(value_is_error(vm, len));
-    EXPECT_EQ(value_type(len), vm->type_u64);
+    EXPECT_EQ(value_type(len), vm_type_usize(vm)); /* len 返回 usize（C 的 size_t） */
     EXPECT_EQ(read_u64(len), 3u);
 }
 

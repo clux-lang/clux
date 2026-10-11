@@ -32,9 +32,9 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
     value_t *sv = args[0];
     const type_t *st = value_type(sv);
 
-    /* shadow：只算类型——len 恒返回 u64 */
+    /* shadow：只算类型——len 恒返回 usize（C 的 size_t，随架构变化） */
     if (value_is_shadow(sv))
-        return value_make_shadow(vm, vm->type_u64);
+        return value_make_shadow(vm, vm_type_usize(vm));
 
     uint64_t len = 0;
     if (!st) return value_make_error(vm, "len: argument has no type");
@@ -67,9 +67,9 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
                                      "(array/slice/str)");
     }
 
-    void *data = value_alloc_data(vm->alloc, vm->type_u64);
+    void *data = value_alloc_data(vm->alloc, vm_type_usize(vm));
     *(uint64_t *)data = len;
-    return value_make(vm, vm->type_u64, data);
+    return value_make(vm, vm_type_usize(vm), data);
 }
 
 /* 注册 len 到 vm->global_scope（调用方在 vm_new 内调用）。

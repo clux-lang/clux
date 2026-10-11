@@ -126,6 +126,19 @@ typedef struct vm_t {
     strmap_t    *modules;  /* 规范路径(C字符串) → module_t*（vm 拥有生命周期） */
 } vm_t;
 
+/* ---- `usize`：C 的 size_t 在 clux 里的名字（**随架构变化**）----
+ *
+ * 与 C 的 `typedef` 同义：`usize` **就是**平台上的无符号整数类型本身
+ * （指针宽度 = 8 → `u64`；= 4 → `u32`），不是新类型。因此：
+ *   - `usize` 与底层类型可以互相赋值/比较（无隐式转换障碍）；
+ *   - FFI 里声明 `usize` 即 C 的 `size_t`，描述符走同一张表（§14.20）；
+ *   - 大小/长度类内建（`len`/`sizeof`/`alignof`）返回它，代码才真正可移植
+ *     （此前一律返回 u64，在 32 位平台上宽度是错的）。
+ * 名字注册见 `vm_register_builtin_types`（vm.c）。 */
+static inline const type_t *vm_type_usize(const vm_t *vm) {
+    return (sizeof(void *) == 8) ? vm->type_u64 : vm->type_u32;
+}
+
 /** 创建 VM（初始化内置类型、全局作用域、调用栈） */
 vm_t *vm_new(allocator_t *alloc);
 
