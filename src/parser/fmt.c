@@ -788,11 +788,24 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "struct ");
             sb_put(&f->sb, s->name.ptr, s->name.len);
             sb_str(&f->sb, " {");
-            if (!s->fields) {
+            /* 字段 + **命名空间成员**（var 静态属性 / func 方法）都要渲染：
+               漏掉 members 会让 `struct T { var x = 1; func f(){} }` 被静默改写成
+               `struct T {}`——声明与其中的成员一起消失（数据损坏）。 */
+            bool any = s->fields || s->members;
+            if (!any) {
                 sb_str(&f->sb, "}");
             } else {
                 sb_ch(&f->sb, ' ');
-                render_semi_list(f, s->fields);
+                if (s->fields) {
+                    render_semi_list(f, s->fields);
+                    /* 字段列表分隔符只在项之间；后面还有成员时须补一个 ';'
+                       收尾（否则 `id: i32 var x = 1;` 无法解析） */
+                    if (s->members) sb_ch(&f->sb, ';');
+                }
+                for (ast_node_t *m = s->members; m; m = m->next) {
+                    if (s->fields || m != s->members) sb_ch(&f->sb, ' ');
+                    render_node(f, m); /* var 自带 ';'；func 自带函数体块 */
+                }
                 sb_str(&f->sb, " }");
             }
             break;

@@ -579,6 +579,12 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
     ast_node_t *ast = parser_parse(parser);
     parser_destroy(&parser);
 
+    /* 结构体命名空间成员展开（`struct T { var x; func f(){} }` 的成员 →
+       `T::x` / `T::f` 模块级全局声明）：必须在 sema 之前完成——展开之后它们
+       就是普通全局变量/函数，sema 与 compiler 无需任何特殊处理。
+       fmt 路径不调用（成员已随结构体一起渲染，避免重复打印）。 */
+    if (ast && ast->kind != AST_ERROR) ast_expand_struct_members(arena, ast);
+
     if (!ast || ast->kind == AST_ERROR) {
         /* 诊断不在此打印：compile_module 会被外层模块经 sema 递归调用
            （import 链），统一由最外层入口在拿到 NULL 后打印一次——

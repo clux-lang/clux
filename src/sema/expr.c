@@ -1717,6 +1717,62 @@ static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
 /* AST_CALL 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 static value_t *ex_call(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
+      ast_call_t *call = (ast_call_t *)*node;
+      /* ---- 方法调用糖（结构体命名空间成员）----
+       *   t.f(args)  ≡  typeof(t)::f(<接收者>, args)
+       *   接收者：t 是指针（任意指针修饰）→ t 本身；t 是值 → t.&。
+       * `self` **不是关键字**——它只是普通参数名，第一个参数按位置就是接收者。
+       * 做法：把 callee 换成限定名 AST_IDENT（`T::f`，展开阶段已注册为模块级
+       * 全局函数），并把接收者作为**第一个实参**插到参数链首；随后完全走既有
+       * 调用路径（callee 求值 / 实参求值 / 类型检查都不需要新代码）。 */
+      if (call->callee && call->callee->kind == AST_MEMBER) {
+        ast_member_t *mem = (ast_member_t *)call->callee;
+        const type_t *ot = NULL;
+        if (mem->object && mem->object->kind == AST_IDENT) {
+          sema_symbol_t *os =
+              sema_lookup(scope, ((ast_ident_t *)mem->object)->name);
+          if (os && os->type) ot = os->type;
+        } else {
+          value_t *ov = sema_expr(sema, &mem->object, scope);
+          if (ov && !value_is_error(sema->vm, ov)) ot = value_type(ov);
+        }
+        const bool by_ptr = ot && ptr_type_base(ot) != NULL;
+        const type_t *st = type_strip_quals(by_ptr ? ptr_type_base(ot) : ot);
+        if (st && st->kind == TYPE_KIND_STRUCT && st->name.len) {
+          size_t total = st->name.len + 2 + mem->field.len;
+          char *mangled = (char *)arena_alloc(sema->arena, total, 1);
+          if (!mangled) return val_void(sema);
+          memcpy(mangled, st->name.ptr, st->name.len);
+          mangled[st->name.len] = ':';
+          mangled[st->name.len + 1] = ':';
+          if (mem->field.len)
+            memcpy(mangled + st->name.len + 2, mem->field.ptr, mem->field.len);
+          strslice_t q = strslice_from_bytes(mangled, total);
+          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          if (ms && ms->kind == SEMA_SYM_FUNC) {
+            /* 接收者：值 → t.&（ADDR）；指针 → t 本身（与手写等价） */
+            ast_node_t *recv = NULL;
+            if (by_ptr) {
+              recv = mem->object;
+            } else {
+              recv = ast_addr_new(sema->arena, mem->object->tok_begin,
+                                  mem->object->tok_end);
+              if (!recv) return val_void(sema);
+              ((ast_addr_t *)recv)->operand = mem->object;
+            }
+            bool had_args = call->args != NULL;
+            recv->next = call->args;
+            call->args = recv;
+            if (!had_args) call->args_last = recv;
+            ast_node_t *callee_id = ast_ident_new(sema->arena,
+                                                 call->callee->tok_begin,
+                                                 call->callee->tok_end);
+            if (!callee_id) return val_void(sema);
+            ((ast_ident_t *)callee_id)->name = q;
+            call->callee = callee_id;
+          }
+        }
+      }
       /* 函数调用：统一路径 = exec callee（shadow 求值）→ exec 各实参 →
          value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
          数量/隐式转换，不执行 cfunc）→ 错误翻译为诊断。
@@ -1729,7 +1785,6 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
          唯一保留的符号感知前置：comptime func 调用点折叠（真实调用点
          CTFE 求值；walking_comptime 时实参是参数 shadow value 无法求值，
          只构造 callee shadow 做类型检查，折叠留到真实调用点）。 */
-      ast_call_t *call = (ast_call_t *)*node;
       if (!call->callee) {
         diag_error(sema->diag, sema_loc(sema, &call->base),
                    "M1: missing callee");
@@ -2281,6 +2336,32 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
                                  作为赋值目标由 shadow_assign 的另一入口处理）。
              这里按类型码置 AST 标志（契约见 ast_enum_ref.h），compiler 据
              此发 EXTERN_LOAD；返回声明类型的 shadow 供类型检查。 */
+        /* ---- 结构体命名空间成员：`T::x`（静态属性）/ `T::f`（方法 / 限定调用）----
+         * 展开阶段已把 struct 体内的 var/func 成员注册成**模块级全局声明**，
+         * 声明名就是 `T::x` / `T::f`。这里把节点改写成同名 AST_IDENT，于是
+         * 读取 / 赋值 / 取函数值 / 调用全部走既有全局路径，无需新机制。
+         * （枚举 variant 不走这里：它们不注册成全局名，仍由下面的 variant 分支处理。）*/
+        if (sym && sym->kind == SEMA_SYM_TYPE) {
+          size_t total = id->name.len + 2 + n->variant.len;
+          char *mangled = (char *)arena_alloc(sema->arena, total, 1);
+          if (!mangled) return val_void(sema);
+          memcpy(mangled, id->name.ptr, id->name.len);
+          mangled[id->name.len] = ':';
+          mangled[id->name.len + 1] = ':';
+          if (n->variant.len)
+            memcpy(mangled + id->name.len + 2, n->variant.ptr, n->variant.len);
+          strslice_t q = strslice_from_bytes(mangled, total);
+          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          if (ms && (ms->kind == SEMA_SYM_VAR || ms->kind == SEMA_SYM_FUNC)) {
+            ast_node_t *ident = ast_ident_new(sema->arena, (*node)->tok_begin,
+                                              (*node)->tok_end);
+            if (!ident) return val_void(sema);
+            ((ast_ident_t *)ident)->name = q;
+            ident->next = (*node)->next;
+            *node = ident;
+            return sema_expr(sema, node, scope);
+          }
+        }
         if (sym && sym->kind == SEMA_SYM_EXTERN_LIB) {
           char qual[512];
           int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",

@@ -693,6 +693,38 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
      与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。
      复合赋值（`crt::x += 1`）走 LOAD → op → STORE，与普通变量同构。 */
   if (as->target->kind == AST_ENUM_REF) {
+    /* 结构体静态属性：`T::x = v`。展开阶段已把它注册为**模块级全局变量**
+       （名字就是 `T::x`）→ 把目标改写成同名 AST_IDENT，随后完全走普通变量
+       赋值路径（含复合赋值、const 检查、所有权检查）。 */
+    ast_enum_ref_t *er = (ast_enum_ref_t *)as->target;
+    if (er->type_expr && er->type_expr->kind == AST_IDENT) {
+      ast_ident_t *lid = (ast_ident_t *)er->type_expr;
+      sema_symbol_t *ls = sema_lookup(scope, lid->name);
+      if (ls && ls->kind == SEMA_SYM_TYPE) {
+        size_t total = lid->name.len + 2 + er->variant.len;
+        char *mangled = (char *)arena_alloc(sema->arena, total, 1);
+        if (mangled) {
+          memcpy(mangled, lid->name.ptr, lid->name.len);
+          mangled[lid->name.len] = ':';
+          mangled[lid->name.len + 1] = ':';
+          if (er->variant.len)
+            memcpy(mangled + lid->name.len + 2, er->variant.ptr, er->variant.len);
+          strslice_t q = strslice_from_bytes(mangled, total);
+          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
+          if (ms && ms->kind == SEMA_SYM_VAR) {
+            ast_node_t *ident = ast_ident_new(sema->arena, as->target->tok_begin,
+                                              as->target->tok_end);
+            if (ident) {
+              ((ast_ident_t *)ident)->name = q;
+              ident->next = as->target->next;
+              as->target = ident;
+            }
+          }
+        }
+      }
+    }
+  }
+  if (as->target->kind == AST_ENUM_REF) {
     shadow_assign_extern_var(sema, as, scope);
     return;
   }

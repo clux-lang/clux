@@ -1311,3 +1311,44 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `examples/ffi_data/ffi_data.cx`（与 `memcmp`/`strlen` 对接）。
     - 验证：`build exit=0`、**0 告警**、**1668/1668**、示例 **40/40**（0 泄漏）
       且 40/40 `emit → run .cxb` 全通过、format 幂等 **42/42**。
+67. **结构体命名空间成员 + 方法调用糖（`Test::data` / `Test::getId` / `t.getId()`）**
+    - **需求（用户提出）**：
+      ```c
+      struct Test {
+        id: i32;
+        var  data = 123;                          // 静态属性
+        func getId(self: ref *const Test): i32 { return self.id; }  // 方法
+      }
+      Test::data;        Test::getId(t.&);        // 命名空间访问
+      var t: Test = .Test{ .id = 234 };
+      t.getId();         // ≡ typeof(t)::getId(t.&)
+      p.getId();         // p 是指针 → ≡ typeof(p.*)::getId(p)
+      ```
+      **`self` 不是关键字**，只是普通参数名——方法糖按**位置**取第一个参数当接收者，
+      不做任何名字特判（用户明确要求）。
+    - **关键设计：成员本质就是模块级全局声明**。编译流水线在 `parse` 之后调用
+      `ast_expand_struct_members`，把 `struct` 体内的 `var`/`func` 成员**改名**为
+      `Test::data` / `Test::getId` 并**追加进 `prog->funcs`**——此后 sema / compiler /
+      运行期完全走既有全局变量与全局函数路径（零新运行时机制）；`fmt` 路径**不**调用
+      展开（成员随结构体渲染，避免重复打印）。
+    - **限定访问**：sema 的 `::` 分支在左侧是**类型符号**且 `T::x` 在全局表里存在
+      （VAR/FUNC）时，把节点改写成同名 `AST_IDENT` → 读取/赋值/取函数值/调用全部复用
+      既有路径（赋值目标同理，在 `shadow_assign` 里改写后再走普通变量赋值，含复合赋值
+      与 const 检查）。
+    - **方法糖**：`ex_call` 开头识别 `callee` 是 `AST_MEMBER` → 取对象静态类型
+      （指针 → base，值 → 自身）→ 在全局表里找 `T::f` → 命中即把 callee 换成限定名
+      `AST_IDENT`，并**把接收者插为第一个实参**（值 → `t.&`（ADDR）；指针 → `t`）。
+      随后完全走既有调用路径（callee 求值 / 实参求值 / 类型检查无新代码）。
+    - **前置修复（本特性的地基，第 66 项之后单独提交）**：①指针成员访问自动解引用
+      `p.x ≡ p.*.x`（读/写/复合赋值，链式成立；写穿 const 拒绝）；②`ref *T → ref *const T`
+      的运行期转换缺陷（`ptr: unsupported implicit cast for pointer`）——不加这条，
+      `t.getId()` 传 `t.&` 给 `ref *const Test` 形参必然失败；③运行期字段操作接受
+      const/volatile 视图（PTR_GET 后拿到的是 `const T`）。
+    - **测试**：新增 `tests/struct_members_test.cpp` 4 例（静态属性读/写/复合赋值 + 函数内
+      共享同一份存储；方法糖三种接收者形态与显式限定调用等价；方法体内 `self.id` 读写；
+      诊断：写 const 接收者 / 不存在的方法）。
+    - **顺带修掉一个数据损坏 bug**：`clux format` 原先**静默删掉**结构体成员
+      （`struct T { var x = 1; }` → `struct T {}`）——fmt 的 struct 分支没渲染 members。
+      现已渲染并保证幂等 + 格式化后语义不变。
+    - 验证：`build exit=0`、**0 告警**、**1672/1672**、示例 **40/40**（0 泄漏）、
+      format 幂等 **42/42**。
