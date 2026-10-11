@@ -80,6 +80,13 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
  */
 bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b);
 
+/** 结构体**指针向上转换**的字段兼容判定：target（小/基）的字段是 source（大/派生）
+ *  字段表的**前缀**（名字 + 类型逐一相等）→ 同一地址按 target 解释安全（C 布局自左
+ *  向右，前缀字段的 offset 与类型一致）。仅用于指针转换；值转换仍要求类型完全相同
+ *  （struct_type_compatible），否则会静默丢掉尾部字段。 */
+bool struct_type_prefix_compatible(vm_t *vm, const type_t *target,
+                                   const type_t *source);
+
 #ifdef __cplusplus
 }
 #endif

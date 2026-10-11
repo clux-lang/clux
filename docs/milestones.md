@@ -1376,3 +1376,28 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       原 volatile 自动解包/vtable 代理设计已被取代"。
     - 验证：`build exit=0`、**0 告警**、**1677/1677**、示例 **41/41**（0 泄漏）且
       41/41 `emit → run .cxb` 全通过、format 幂等 **43/43**。
+69. **结构体指针向上自动转换（大 → 小，前缀字段兼容）**
+    - **需求（用户提出）**："结构体指针支持向上自动转换，只要字段兼容，就可以大结构体
+      转小结构体"——配合第 67 项语法糖：把"派生"结构体指针直接喂给按"基"结构体声明的
+      接收者/参数（`Base::getId(d.&)`）。
+    - **判定**：新增 `struct_type_prefix_compatible(vm, target, source)`（type_struct.c）：
+      target（小/基）的字段是 source（大/派生）字段表的**前缀**（名字 + 类型逐一相等，
+      目标字段数 ≤ 源）。C 布局自左向右 → 前缀字段的 offset 与类型一致 → 同一地址按
+      小结构体解释安全（C 的"公共起始序列"规则）。
+    - **两处成对落地**（缺一即"sema 放行但运行期报错"或反之）：
+      ① `ptr_type_extends`（type_ptr.c）：`ref *Big` 用在 `ref *Small` 处合法；
+      ② `ptr_implicit_cast`（type_ptr.c）：身份拷贝指针目标地址（不涉及所有权）。
+    - **边界（都是刻意收紧的）**：
+      * 只允许**借用目标**（ref）：own/share **目标**的向上转换会按小结构体释放/析构，
+        漏掉尾部字段的 own 资源（泄漏）→ 不隐式允许；
+      * 反向（小 → 大）永不允许——多出的字段没有存储；
+      * **值**转换仍要求类型完全相同（`struct_type_compatible`），否则静默切片；
+      * **丢限定不允许**：加 `ptr_upcast_keeps_quals` 守卫——初版漏了它，前缀判定把
+        `ref *const T → ref *T` 也"兼容"掉了，被既有负例 `ConstConvertTest.NegativeCases`
+        抓出（这正是"先跑全量"的价值）。
+    - **测试**：新增 `tests/struct_upcast_test.cpp` 2 例——正向（ref/own 向上转换、
+      写穿回原存储、显式基指针、3→2 前缀、按基声明的函数参数）与 5 个负例（向下转换、
+      前缀名字不符、前缀类型不符、值转换、丢限定）。
+    - **文档**：language-spec §3.3 增补"结构体指针向上自动转换"小节。
+    - 验证：`build exit=0`、**0 告警**、**1679/1679**、示例 **41/41**（0 泄漏）且
+      41/41 `emit → run .cxb` 全通过、format 幂等 **43/43**。

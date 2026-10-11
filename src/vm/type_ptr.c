@@ -579,6 +579,16 @@ static bool is_opaque_type(const type_t *t) {
 /* target_base 是否等于 src_base、或只是它外层加了 const/volatile（可嵌套）。
  * C 语义：**限定符只能加不能去**——`ref *T → ref *const T` 永远安全，
  * 反向（去 const）必须显式 `as`。 */
+/* 向上转换**不得丢限定**：源 pointee 带 const 时目标也必须带 const。
+ * （加 const/volatile 由 ptr_base_adds_quals 分支处理；volatile 已被 sema 折叠，
+ * 源码类型里不会出现。缺这一条时 `ref *const T → ref *T` 会因为"剥掉限定后前缀
+ * 兼容"被误判成向上转换，从而绕过 const 保护。） */
+static bool ptr_upcast_keeps_quals(const type_t *src_base,
+                                   const type_t *target_base) {
+    if (type_has_const(src_base) && !type_has_const(target_base)) return false;
+    return true;
+}
+
 static bool ptr_base_adds_quals(const type_t *src_base, const type_t *target_base) {
     if (src_base == target_base) return true;
     const type_t *t = target_base;
@@ -615,6 +625,22 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
             rc_block_strong_inc((rc_block_t *)pv->ptr);
         if (src->kind == TYPE_KIND_PTR_WEAK && pv->ptr)
             rc_block_weak_inc((rc_block_t *)pv->ptr);
+        return ptr_make_value(vm, target, pv->ptr);
+    }
+
+    /* ---- 结构体指针**向上自动转换**（大 → 小，前缀字段兼容）----
+     * `ref *Big → ref *Small`、`own *Big → ref *Small`：Small 的字段恰是 Big 的
+     * 前缀 → C 布局下前缀字段偏移与类型完全一致，指针身份拷贝即可（不涉及所有权）。
+     * 这是配合结构体语法糖的能力：把"派生"结构体的指针直接喂给按"基"结构体声明的
+     * 接收者/参数（`Base::getId(d.&)`）。
+     * 只允许**借用目标**（ref）：own/share 目标会按小结构体释放/析构，尾部字段
+     * 的 own 资源会被漏掉（泄漏），故不隐式允许；反向（小 → 大）没有存储，永不允许。 */
+    if (target && target->kind == TYPE_KIND_PTR_REF &&
+        (src->kind == TYPE_KIND_PTR_REF || src->kind == TYPE_KIND_PTR_OWN) &&
+        ptr_upcast_keeps_quals(ptr_type_base(src), ptr_type_base(target)) &&
+        struct_type_prefix_compatible(vm,
+            type_strip_quals(ptr_type_base(target)),
+            type_strip_quals(ptr_type_base(src)))) {
         return ptr_make_value(vm, target, pv->ptr);
     }
 
@@ -718,6 +744,15 @@ static bool ptr_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
        （跨所有权修饰的兼容由 sema 层控制——own → ref 的借用在转换层
        处理，类型值层面的鸭子判断不混用所有权。） */
     if (sub->kind != sup->kind) return false;
+    /* 结构体指针**向上转换**：`ref *Big`（sub，实参）用在 `ref *Small`（sup，形参）
+       处合法——Small 的字段是 Big 的前缀（C 公共起始序列）。反向不成立。
+       与 ptr_implicit_cast 的对应分支必须成对存在（sema 放行 + 运行期落地）。 */
+    if (sup->kind == TYPE_KIND_PTR_REF &&
+        ptr_upcast_keeps_quals(ptr_type_base(sub), ptr_type_base(sup)) &&
+        struct_type_prefix_compatible(vm,
+            type_strip_quals(ptr_type_base(sup)),
+            type_strip_quals(ptr_type_base(sub))))
+        return true;
     return type_extends(vm, ptr_type_base(sub), ptr_type_base(sup));
 }
 

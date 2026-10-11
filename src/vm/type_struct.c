@@ -315,6 +315,39 @@ bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b) {
     return true;
 }
 
+/* 结构体指针**向上转换**的字段兼容判定：target（小/基）的字段是否构成
+ * source（大/派生）字段表的**前缀**（名字 + 类型逐一相等）。
+ *
+ * 语义：`大结构体* → 小结构体*` 只有在"小结构体的全部字段恰好是大结构体的前
+ * 几个字段"时才安全——C 布局自左向右分配，前缀字段的偏移与类型完全一致，因此
+ * 同一个地址按小结构体解释是对的（即 C 的"公共起始序列"规则）。
+ * 反向（小 → 大，向下转换）不成立：大结构体多出来的字段没有存储。
+ *
+ * 只用于**指针**转换；值转换仍要求类型完全相同（struct_type_compatible），
+ * 否则会静默丢掉尾部字段（切片）。 */
+bool struct_type_prefix_compatible(vm_t *vm, const type_t *target,
+                                   const type_t *source) {
+    if (!target || !source || target->kind != TYPE_KIND_STRUCT ||
+        source->kind != TYPE_KIND_STRUCT)
+        return false;
+    if (target == source) return true;
+    const struct_type_t *st = (const struct_type_t *)target;
+    const struct_type_t *ss = (const struct_type_t *)source;
+    /* 目标（小）字段数必须 ≤ 源（大）字段数 */
+    if (st->field_count > ss->field_count) return false;
+    for (size_t i = 0; i < st->field_count; i++) {
+        const struct_field_t *ft = &st->fields[i];
+        const struct_field_t *fs = &ss->fields[i];
+        if (ft->name.len != fs->name.len) return false;
+        if (ft->name.ptr && fs->name.ptr &&
+            memcmp(ft->name.ptr, fs->name.ptr, ft->name.len) != 0)
+            return false;
+        if ((ft->name.ptr == NULL) != (fs->name.ptr == NULL)) return false;
+        if (!type_equal(vm, ft->type, fs->type)) return false;
+    }
+    return true;
+}
+
 /* C 对齐规则向上取整 */
 static size_t align_up(size_t v, size_t a) {
     if (a <= 1) return v;
