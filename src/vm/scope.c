@@ -2,9 +2,11 @@
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/type_ptr.h"
+#include "vm/type_error.h"
 #include "core/strmap.h"
 #include "core/panic.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static class_t g_scope_class = {
@@ -25,9 +27,11 @@ scope_t *scope_new(allocator_t *alloc, scope_t *parent) {
     s->vars     = strmap_new(alloc, /*owns_value=*/false);
     s->owned    = vec_new(alloc, /*owns_element=*/false);
     s->children = vec_new(alloc, /*owns_element=*/false);
+    s->defers   = vec_new(alloc, /*owns_element=*/false);
     if (!s->vars)     panic("vm: out of memory allocating scope vars");
     if (!s->owned)    panic("vm: out of memory allocating scope owned");
     if (!s->children) panic("vm: out of memory allocating scope children");
+    if (!s->defers)   panic("vm: out of memory allocating scope defers");
 
     /* 注册到父作用域的 children */
     if (parent && parent->children) {
@@ -81,6 +85,13 @@ void scope_destroy(vm_t *vm, scope_t **pscope) {
 
     /* 3. 释放 children 向量（不拥有元素，仅释放向量结构） */
     vec_free(scope->alloc, &scope->children);
+
+    /* 3b. 释放 defers 向量（**借用**指针，不拥有值——值随 owned 释放，
+        与 owned 中同一批函数值的 dispose 互不干涉，无 double free）。
+        注意：defer 的**执行**不在这里，而在 vm_pop_scope（正常作用域退出
+        路径）→ scope_run_defers，先跑完 defer 再调用本函数销毁；error
+        展开走 scope_destroy_subtree（不触发 defer，见 include/vm/scope.h）。 */
+    vec_free(scope->alloc, &scope->defers);
 
     /* 4. 释放 scope 结构体 */
     allocator_free(scope->alloc, (void **)pscope);
@@ -204,4 +215,70 @@ value_t *scope_lookup(const scope_t *scope, strslice_t name) {
         }
     }
     return NULL;
+}
+
+/* ================================================================ */
+/* defer 栈（延迟执行块）                                             */
+/* ================================================================ */
+
+/* BCODE_DEFER：登记（借用）一个 defer 闭包值到 scope 的 defer 栈。
+ *
+ * 所有权：**不接管**——值由 value_make 在 MAKE_FUNCTION 时已 auto-track 进
+ * 同一个 scope 的 owned 列表；这里只把指针按登记序追加。scope 退出时
+ * scope_run_defers 逆序执行，随后 scope_destroy 照常 dispose owned 里的
+ * 那批函数值（func value 的 dispose 是 no-op，func_t 归 vm->functions），
+ * 因此既不泄漏也不会 double free。 */
+void scope_add_defer(vm_t *vm, scope_t *scope, value_t *v) {
+    (void)vm;
+    if (!scope || !v || !scope->defers) return;
+    vec_push(scope->defers, scope->alloc, v);
+}
+
+/* 逆序执行 defer 栈：LIFO（后登记的先执行）。
+ *
+ * 每次调用的语义与"调用一个无参 void 闭包"完全一致——走唯一入口
+ * value_call → func_vcall：闭包自己的 closure_scope（捕获值）+ 匿名参数层，
+ * 函数体在独立的 scope 链上执行。因此 defer 体内：
+ *   - 读捕获变量（clone 值，与闭包同语义）；
+ *   - 读**本作用域**尚未释放的一切（own/fatal 变量及其堆块：本函数在
+ *     scope_destroy 的 dispose 之前被调用）；
+ *   - 调用任意函数 / 读写字段。
+ *
+ * 返回值一律丢弃（与 `_ = expr` 一致）：defer 的 error 值不改变作用域退出
+ * 流程，也不向调用方传播（作用域正在销毁，无处可传）。闭包体内部的
+ * `return` 只从该闭包返回（它就是函数体），不影响外层函数。
+ *
+ * 执行期间把 vm->current_scope 临时切到本 scope：闭包体沿作用域链查找时
+ * 能看到本作用域的名字（func_vcall 会再把 current_scope 换成闭包自己的
+ * closure_scope，闭包体查找链 = closure_scope → 本 scope(临时 parent 接线
+ * 到函数的 root_scope)…，这里切换的是"调用方现场"，语义与在作用域内直接
+ * 调用该闭包一致）。 */
+void scope_run_defers(vm_t *vm, scope_t *scope) {
+    if (!vm || !scope || !scope->defers) return;
+    if (vec_is_empty(scope->defers)) return; /* 绝大多数作用域：零开销 */
+
+    scope_t *saved_current = vm->current_scope;
+    vm->current_scope = scope;
+
+    /* 边执行边弹栈（不预先快照长度）：执行期间 current_scope 已是闭包自己的
+       作用域，defer 体内再登记 defer 只会登记到它自己的作用域——本 scope 的
+       栈不会被展开中追加。即便真被追加（防御），此处也照样按 LIFO 执行。 */
+    while (!vec_is_empty(scope->defers)) {
+        value_t *d = (value_t *)vec_pop(scope->defers);
+        if (!d) continue;
+        value_t *r = value_call(vm, d, NULL, 0);
+        /* defer 的返回值（含 error/panic 值）**不传给任何消费点**：作用域正在
+           销毁，没有接收方（与 `_ = expr` 丢弃语义一致）。唯一的例外是"打出来
+           让人看见"——error 值在这个 VM 里代表引擎级失败（越界/未定义变量/
+           unwrap none/FFI 失败…），静默丢弃会让 defer 体悄悄半途而废，因此把
+           error 文本打到 stderr（**不改控制流、不改退出码**，与析构函数
+           "记日志继续" 同一姿态）。 */
+        if (value_is_error(vm, r)) {
+            error_data_t *ed = (error_data_t *)value_data(r);
+            fprintf(stderr, "defer: %s\n",
+                    ed && ed->message ? ed->message : "runtime error");
+        }
+    }
+
+    vm->current_scope = saved_current;
 }

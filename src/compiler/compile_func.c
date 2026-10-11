@@ -29,6 +29,7 @@
 #include "parser/ast_volatile.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
+#include "parser/ast_defer.h"
 
 #include <string.h>
 
@@ -188,6 +189,18 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
       ast_func_def_t *fn = (ast_func_def_t *)n;
       prescan_func(c, fn);
       prescan_func_body(c, fn);
+      break;
+    }
+    case AST_DEFER: {
+      /* defer：其 closure 是**函数字面量**（无参 void），同样必须进
+         funcs_all 队列——否则 hoist 注册区不构造基底对象、函数体区不编译
+         它，运行期 MAKE_FUNCTION <fid> 会拉到不存在的 id（"unknown function
+         id"）或入口 pc=0 的错误地址。 */
+      ast_func_def_t *fn = ((ast_defer_t *)n)->closure;
+      if (fn) {
+        prescan_func(c, fn);
+        prescan_func_body(c, fn);
+      }
       break;
     }
     default:

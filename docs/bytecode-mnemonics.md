@@ -142,6 +142,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value → 拷贝显示名到 vm 堆（随对象释放）。仅具名函数定义写入，匿名函数字面量不写。 |
 | `SET_CLOSURE` | `STR`（捕获名） | 弹栈顶捕获值 → **clone** 进**栈下**函数对象（`peek` 栈下 1 位）的 `closure_scope` 捕获槽（define-or-replace，替换占位 undefined）。闭包为 clone 值语义。 |
 | `MAKE_FUNCTION` | `U32`（函数 id） | 从 `functions_by_id` 拉**基底**函数对象 → 实例化**独立新实例**（共享 entry_pc/cfunc/type/name/id，新 `closure_scope` 按基底捕获槽名以 undefined 占位）→ 压栈。函数定义每次求值生成新对象（循环内多个闭包互不干扰），对标 `LOAD_FUNCTION` 的"同一对象"引用语义。 |
+| `DEFER` | — | 弹栈顶函数值 → 借用登记进当前作用域的 **defer 栈**（延迟执行块 `defer ... { }`，见 §4.14 与 `docs/m6-design.md` §14.26）。 |
 
 ### 4.5 值构造 / 字段与下标访问
 
@@ -312,7 +313,8 @@ fatal 在非空时拥有）。
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
 | `PUSH_SCOPE` | — | `scope_new(alloc, current)` 进入新作用域。 |
-| `POP_SCOPE` | — | 弹出并销毁当前作用域（回收本块全部临时值）。 |
+| `POP_SCOPE` | — | 弹出并销毁当前作用域：**先逆序执行本作用域的 defer 栈**（见 `DEFER`），再回收本块全部临时值（`dispose owned` + 释放 vars/scope）。 |
+| `DEFER` | — | 弹栈顶**函数值**（defer 的无参 void 闭包）→ **借用**登记进**当前作用域**的 defer 栈（`scope_t::defers`，登记序）。作用域退出时在 dispose/销毁**之前**逆序（LIFO）弹出逐个 `value_call`；返回值不传给消费点（error 值打 stderr）。值本体归 `owned`（`MAKE_FUNCTION` 自动 track），栈只存指针 → 无泄漏/无 double free。见 §14.26。 |
 | `POP` | — | 丢弃栈顶引用（不释放，归 scope 管理）。 |
 | `HALT` | — | 停止执行（注册段之后拦截落入函数体区）。 |
 

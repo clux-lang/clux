@@ -289,6 +289,13 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     }
     case AST_EMPTY_STMT:
         return value_make_undefined(vm); /* ; 空语句：无操作 */
+    case AST_DEFER:
+        /* defer 是**运行期**作用域退出钩子：CTFE 没有"作用域栈退出时回调"
+        这一层（解释器逐语句求值，块 pop 直接 vm_pop_scope），因此 comptime
+        求值里明确拒绝而不是静默丢弃（静默丢弃会让 comptime 与运行期语义
+        分叉：同一个函数在 comptime 调用点少跑一次延迟块）。 */
+        return ctfe_err(ctx, "ctfe: 'defer' is not supported in comptime "
+                             "evaluation (it is a runtime scope-exit hook)");
     case AST_FUNC_DEF: {
         /* comptime body 内函数定义语句（func inc(){}）：求值函数值
            （ctfe_eval_func_def 已绑定名字到当前 vm 作用域，供后续

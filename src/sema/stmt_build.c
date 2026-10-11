@@ -411,6 +411,14 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
            3b walk_block 入口提升签名、主循环跳过（消费 fscope 子作用域）。 */
         build_local_func(sema, s, scope);
         break;
+      case AST_DEFER:
+        /* defer：**不建子作用域、不注册符号**。
+           块体按函数字面量在 Pass 3b（walk_stmt 的 AST_DEFER 分支 →
+           sema_check_func_literal）走完整链路——那里自建**临时** fscope 树
+           （不 add_child 挂树，用后销毁），因此不参与本块 children 索引，
+           3a/3b 的子作用域计数天然对齐。defer 语句本身不贡献
+           definitely_returns（不是返回路径），后续语句仍可达。 */
+        break;
       case AST_BLOCK: {
         sema_scope_t *child =
             sema_scope_new(sema->vm->alloc, SEMA_SCOPE_BLOCK, scope);
@@ -693,7 +701,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
   if (has_ref_capture && fn->scope_annot_count == 0) {
     diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
                "closure capturing ref/opaque must declare a scope annotation "
-               "(e.g. func '<x> |...|)");
+               "(e.g. func '<x> |...| or defer '<x> |...|)");
   }
   /* §9.3 逃逸检查：有标注时，闭包定义作用域（outer）须嵌套于每个锚点。
      复用 stmt.c 的 annot_anchor_scope / scope_within——但它们是 static，

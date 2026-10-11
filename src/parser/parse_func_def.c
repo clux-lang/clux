@@ -156,8 +156,10 @@ static ast_node_t *parse_capture_item(parser_t *p) {
     return node;
 }
 
-/** 解析捕获列表：| item (, item)* |，空列表 || 合法（返回 NULL）。 */
-static ast_node_t *parse_capture_list(parser_t *p) {
+/** 解析捕获列表：| item (, item)* |，空列表 || 合法（返回 NULL）。
+ *  非 static：defer 语句（parse_defer.c）复用同一份捕获列表解析——
+ *  捕获项的两种形态与闭包完全一致，不另造一套。 */
+ast_node_t *parse_capture_list(parser_t *p) {
     uint32_t tb = p->pos;
     advance(p);   /* 消费开 '|' */
     skip_trivia(p);

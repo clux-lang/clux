@@ -12,6 +12,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
+#include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
@@ -42,6 +43,7 @@ ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "return")) return parse_return(p);
     if (check_keyword(p, "break"))  return parse_break(p);
     if (check_keyword(p, "continue")) return parse_continue(p);
+    if (check_keyword(p, "defer"))  return parse_defer(p);
     /* 空语句：单独的分号（;）——无操作占位 */
     if (check_symbol(p, ";")) {
         uint32_t tb = p->pos;

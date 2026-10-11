@@ -497,6 +497,74 @@ var f = func |a, (b: i32 = c + d)| add(x: i32): i32 { return a + b + x; };  // �
 - 未在捕获列表声明的外层局部变量，body 内访问仍编译期拒绝
 - 函数体内读取捕获：查函数局部作用域链 → `closure_scope` → 全局
 
+#### 4.1.3 defer（延迟执行块）
+
+`defer` 是"在作用域退出时延迟执行的块"，语义上等价于在当前作用域里创建一个
+**带闭包的无参 void 函数值**并把它压进该作用域的 **defer 栈**：
+
+```
+defer ['<a, b>] [|cap, (name: T = init)|] { <body> }
+```
+
+| 形态 | 含义 |
+|------|------|
+| `defer { ... }` | 无捕获（等价 `defer \|\|`） |
+| `defer \|\| { ... }` / `defer \| \| { ... }` | 显式空捕获列表（与省略写法 AST 相同，`fmt` 统一渲染为省略形态） |
+| `defer \|a, (b: i32 = c + d)\| { ... }` | 捕获列表：与闭包 `func \|...\|` **同一套**解析与语义（见 4.1.2） |
+| `defer '<x> \|r\| { ... }` | 作用域标注：捕获 `ref`/`opaque` 时**必须**给出（与闭包同规则） |
+
+规则：
+
+- **捕获是 clone 值而非引用**（与闭包逐字一致）：`defer |a| { ... }` 捕获的是
+  **登记时**外层变量 `a` 的值；登记之后再修改 `a` 不影响 defer 体内读到的副本。
+  因此 defer 体内**不能**直接改写外层局部变量（要共享状态请用全局变量，或捕获
+  `ref` 通过指针改内存）。
+- 纯 id 捕获要求外层变量已定义且**已初始化**；`own`/`fatal` 裸捕获被拒（须
+  `move()`/`clone()` 显式接管，如 `defer |(q: own *i32 = move(p))| { ... }`）；
+  捕获 `ref`/`opaque` 必须带作用域标注（诊断与闭包同一条）。
+- **执行时机**：作用域退出（`pop_scope`）时，在**内存释放之前**（`own`/`fatal` 的
+  dispose、scope 销毁之前）把 defer 栈**逆序（LIFO）**弹出来逐个调用。因此
+  defer 体内可以正常读到本作用域的一切，包括即将释放的 `own`/`fatal` 变量与其
+  指向的堆块。
+- **所有正常离开作用域的路径都执行 defer**：落到块尾、`return`（当前作用域 +
+  所有被弹出作用域，内层先于外层）、`break`/`continue` 跳出该作用域、`switch`
+  分支体结束、以及循环体每次迭代结束（循环内每次迭代各执行一次，迭代内 LIFO）。
+  唯一不执行的是**错误/panic 值向上传播**的展开路径（引擎在错误展开时走
+  `scope_destroy_subtree` 砍掉整棵子树，刻意不触发 defer；见
+  `docs/m6-design.md` §14.26 与 `include/vm/scope.h` 的说明）。
+- **块体就是函数体**（无参、返回 `void`）：
+  - 可以引用捕获的变量、调用函数、读写字段/下标，与普通函数体同一套语义；
+  - 非 void 的表达式语句须显式丢弃：`defer { _ = f(); }`（与函数体内
+    "结果未使用"同一条规则）；
+  - `return;` 只从该 defer 块体返回（`return expr;` 报
+    `void function cannot return a value`）；
+  - `break`/`continue` **不能**跨出 defer（它是另一个函数体，报
+    `'break' outside loop`）；
+  - 未捕获的外层局部变量在块体内不可见（与闭包同一条诊断
+    "local function cannot access outer local ... (add it to the capture list)"）。
+- defer 自身的返回值（含 error/panic 值）**不传给任何消费点**：作用域正在销毁，
+  没有接收方。error 值（引擎级失败）会以 `defer: <消息>` 打到 stderr，便于定位
+  defer 体半途失败，但不改变控制流与退出码。
+- `defer` 只能出现在**函数体内**（语句位置）；顶层 `defer` 报
+  `expected function definition at top level`。
+- `comptime` 求值（CTFE）内的 `defer` 明确拒绝：
+  `ctfe: 'defer' is not supported in comptime evaluation`（CTFE 没有"作用域退出
+  钩子"这一层，静默丢弃会让 comptime 与运行期语义分叉）。
+
+示例：
+
+```c
+func main(): i32 {
+    var a: i32 = 7;
+    {
+        defer |a| { libc::printf("a=%d\n", a); }   // 读到登记时的 7
+        defer { libc::printf("first\n"); }         // 后登记 → 先执行
+        a = 1000;                                  // 不影响已捕获的副本
+    }
+    return 0;                                      // 输出顺序：first → a=7
+}
+```
+
 ### 4.2 变量声明
 
 ```

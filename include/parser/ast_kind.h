@@ -32,6 +32,10 @@ typedef enum {
     AST_BLOCK,           /* { stmts... } */
     AST_EXPR_STMT,       /* expr;（表达式作为语句） */
     AST_EMPTY_STMT,      /* ;（空语句，无操作） */
+    AST_DEFER,           /* defer ['<a,b>] [|caps|] { body }（延迟执行块：无参
+                            void 闭包 + 登记到当前作用域的 defer 栈；作用域退出
+                            （pop_scope）时在内存释放之前逆序调用。复用闭包捕获
+                            语义——captures 是 AST_VAR_DEF 兄弟链，见 ast_defer.h） */
     /* AST_DISCARD removed: _ = expr is AST_ASSIGN, discard semantics in Sema */
 
     /* --- 表达式 --- */

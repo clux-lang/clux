@@ -817,3 +817,99 @@ TEST(Fmt, UnwrapKeepsLeadingDot) {
     EXPECT_EQ(once, twice);
     EXPECT_NE(once.find("n.next.!.v"), std::string::npos) << once;
 }
+
+/* defer 语句：`defer ['<a>] [|caps|] { body }`。
+ * fmt 曾经对未识别的语句 kind 落到 `default: render_expr(...); ';'`——defer 若
+ * 缺分支会被**静默吃掉**（AST_DEFER 不是表达式，render_expr 无渲染 → 整条语句
+ * 消失 + 凭空多一个分号），属数据损坏。本测试锁定：捕获列表与作用域标注完整
+ * 回显、`defer {}` 紧凑、`defer ||` 归一为省略形态、幂等。 */
+TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var a:i32=1;var b:i32=2;\n"
+        "defer '<*> |(r: ref *i32 = a.&), b| {\n"
+        "var c:i32=a+b;\n"
+        "}\n"
+        "defer || {}\n"
+        "defer { b = b + 1; }\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var a: i32 = 1;\n"
+              "    var b: i32 = 2;\n"
+              "    defer '<*> |(r: ref *i32 = a.&), b| {\n"
+              "        var c: i32 = a + b;\n"
+              "    }\n"
+              "    defer {}\n"
+              "    defer {\n"
+              "        b = b + 1;\n"
+              "    }\n"
+              "    return 0;\n"
+              "}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+
+    /* 三遍幂等 + 语句没有被吃掉（defer 关键字与块体都在） */
+    std::string twice = fmt(out.c_str());
+    std::string thrice = fmt(twice.c_str());
+    EXPECT_EQ(twice, thrice);
+    EXPECT_NE(out.find("defer '<*>"), std::string::npos) << out;
+    EXPECT_EQ(out.find("defer||"), std::string::npos) << out;
+}
+
+/* defer 无捕获的多种写法：`defer {` / `defer || {` / `defer | | {` 归一为
+ * `defer {`（AST 相同），嵌套 defer 与 defer 内联体照常渲染。 */
+TEST(Fmt, DeferEmptyCapturesNormalized) {
+    std::string out = fmt(
+        "func f():void{\n"
+        "defer { }\n"
+        "defer || { }\n"
+        "defer |  | { defer { } }\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func f(): void {\n"
+              "    defer {}\n"
+              "    defer {}\n"
+              "    defer {\n"
+              "        defer {}\n"
+              "    }\n"
+              "}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+}
+
+/* 闭包作用域标注 `func '<a,b> |...|`：曾**完全没有渲染分支**（fn->
+ * scope_annot_names 是 AST 之外的独立字段），格式化后标注消失 → 捕获 ref 的
+ * 闭包产物不再能编译（静默数据损坏）。命名函数与函数字面量都要回显。 */
+TEST(Fmt, ClosureScopeAnnotationPreserved) {
+    std::string out = fmt(
+        "func main():i32{\n"
+        "var a:i32=1;\n"
+        "var f=func '<*> |(r: ref *i32 = a.&)| ():i32{return r.*;};\n"
+        "var g=func '<*> |a| add(x:i32):i32{return a+x;};\n"
+        "return 0;\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func main(): i32 {\n"
+              "    var a: i32 = 1;\n"
+              "    var f = func '<*> |(r: ref *i32 = a.&)|(): i32 {\n"
+              "        return r.*;\n"
+              "    };\n"
+              "    var g = func '<*> |a| add(x: i32): i32 {\n"
+              "        return a + x;\n"
+              "    };\n"
+              "    return 0;\n"
+              "}\n");
+    EXPECT_EQ(out, fmt(out.c_str()));
+    EXPECT_NE(out.find("'<*>"), std::string::npos) << out;
+
+    /* 局部函数语句（func '<x> |c| name(...): T { ... }）同样保留标注 */
+    std::string out2 = fmt(
+        "func main():i32{\n"
+        "var a:i32=1;\n"
+        "func '<*> |a| local(v: i32): i32 { return a + v; }\n"
+        "return local(1);\n"
+        "}\n");
+    EXPECT_NE(out2.find("func '<*> |a| local(v: i32): i32"), std::string::npos)
+        << out2;
+    EXPECT_EQ(out2, fmt(out2.c_str()));
+}

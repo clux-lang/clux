@@ -19,6 +19,7 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
+#include "parser/ast_defer.h"
 #include "parser/ast_deref.h"
 #include "parser/lexer.h"
 
@@ -736,6 +737,27 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     /* 局部函数定义：compile_block_body 入口提升已处理（注册段字节码），
        定义点跳过。 */
     break;
+  case AST_DEFER: {
+    /* defer ['<a,b>] [|caps|] { body }：
+         1. compile_expr(closure) —— 与源码里手写的函数字面量**同一套**发射：
+            MAKE_FUNCTION <fid>（从基底实例化独立新实例，closure_scope 捕获槽
+            undefined 占位）+ 每捕获 [捕获值, SET_CLOSURE "name"]（纯 id 捕获
+            PUSH 外层变量值、括号捕获定义点求值）→ 函数值留栈顶。
+         2. BCODE_DEFER —— 弹该函数值 → 登记进**当前作用域**的 defer 栈
+            （scope_t::defers，借用指针；值本体仍归 scope->owned 所有，统一
+            释放）。作用域退出（vm_pop_scope）时在 dispose/销毁**之前**逆序
+            弹出逐个 value_call。
+       栈净 0（+1 函数值，DEFER -1）——defer 是语句，无值产生。 */
+    ast_defer_t *d = (ast_defer_t *)node;
+    if (!d->closure) {
+      c_error(c, node, "compiler: defer without closure body");
+      return;
+    }
+    compile_expr(c, (ast_node_t *)d->closure); /* 栈: [func value] */
+    bcode_write_op(c->bc, BCODE_DEFER);        /* 弹 1 → 登记进当前 scope */
+    st_push(c, -1);
+    break;
+  }
   case AST_ERROR:
     c_error(c, node, "compile aborted on parse error node");
     return;

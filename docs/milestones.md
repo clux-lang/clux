@@ -1567,3 +1567,59 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       条款；`m6-design.md` 新增 **§14.25**（机制六点）并在 §14.24.3 标注旧结论已解除。
     - 验证：强制全量重编 **0 告警 / 0 错误**；全量 **1725/1725 PASSED / 0 FAILED**、0 泄漏；
       示例 **44/44** `run` 与 44/44 `emit → run .cxb`、format 幂等 **46/46**。
+74. **defer（延迟执行块）：闭包值 + 作用域 defer 栈，pop_scope 时内存释放前逆序调用**（2026-10）
+    - **语法/口径**：`defer ['<a,b>] [|cap, (name: T = init)|] { body }`。捕获列表
+      **复用闭包那一套**（`parse_capture_list` 改为导出后直接调用；作用域标注同样复用
+      `parse_scope_annotation`），空捕获三种写法等价——省略、`defer || {`、`defer | | {`
+      （`||` 是 lexer 的单个 SYMBOL token，defer 之后只能是捕获列表/块体，与逻辑或无歧义；
+      三者 AST 相同，fmt 统一渲染为省略形态）。只接受 `defer` 后跟块体——没有参数表，
+      也没有返回类型。
+    - **AST**：新增语句节点 `AST_DEFER`（壳）+ **复用闭包节点** `ast_func_def_t`
+      （`ast_defer_t.closure`：`params/return_expr = NULL` = 无参 void、`captures` /
+      `scope_annot_names` / `body` 与闭包同字段）。于是 sema 侧直接走
+      `sema_check_func_literal`（捕获可见性 / §9.1 own 拒绝 / §9.3 ref 强制标注 /
+      body 类型检查 / 签名登记），compiler 侧直接走 `MAKE_FUNCTION` + `SET_CLOSURE`
+      发射——**捕获语义就是闭包语义（clone 值，非引用）**，零复制。
+    - **执行时机**：`vm_pop_scope` 里**先** `scope_run_defers`（`scope_t::defers` 逆序
+      `value_call`，逐个从栈尾弹出），**再** `scope_destroy`（own/fatal dispose + 释放
+      vars/scope）。因此 defer 体内读得到本作用域的一切，含**即将释放的 own/fatal 变量
+      与其堆块**（测试用 `defer '<*> |(r: ref *T = p.*.&)|` 读 own 堆块内容锁定这条顺序）。
+      覆盖全部**正常**离开作用域的路径：块尾 `POP_SCOPE`、`break`/`continue`
+      （`balance_scopes_out` 补发 POP_SCOPE）、`return`（`func_vcall` 收尾逐层 pop）、
+      switch 分支体、循环体每轮迭代；顺序 = 内层先于外层、同层 LIFO。
+      **错误/panic 值向上传播**的展开刻意**不**触发 defer（`scope_destroy_subtree`
+      分支的注释在 defer 之前就写着"避免触发 defer"）——边界在 `include/vm/scope.h`
+      与语言规格里写明。
+    - **所有权（无泄漏/无 double free）**：`defers` 是 **`value_t*` 借用向量**；值本体由
+      `MAKE_FUNCTION` 经 `value_make` auto-track 进同一个 scope 的 `owned`，故栈只记指针，
+      执行完由 `scope_destroy` 照常回收（func value 的 dispose 是 no-op，`func_t` 归
+      `vm->functions`）；`defers` 向量自身只释放结构。空向量直接返回 → 普通作用域零开销。
+    - **新指令 `BCODE_DEFER`**（无操作数，**追加在指令集末尾**不动既有编号）：弹函数值 →
+      借用登记进当前作用域 defer 栈。三处同步：`include/vm/bcode.h` + `src/vm/exec.c`
+      （`op_defer` + handler 表）+ `src/vm/bcode_asm_defs.c`（`"DEFER"`），
+      `docs/bytecode-mnemonics.md` §4.4/§4.14 补表；`.cxs` 往返逐字节一致、
+      `emit → run .cxb` 通过。
+    - **返回值口径**：defer 的返回值不传给任何消费点（作用域正在销毁）。但 **error 值**
+      会以 `defer: <消息>` 打到 **stderr**（不改变控制流/退出码）——否则 defer 体内的
+      失败会被静默吞掉。块体按**函数体**处理：非 void 表达式语句须 `_ = expr`，
+      `return` 只从该块体返回（void，不能带值），`break`/`continue` 跨不出去。
+    - **其余落点**：lexer 关键字表加 `"defer"`（**未动 `self`**）；`fmt` 补 `AST_DEFER`
+      渲染分支（否则会静默吃掉整条语句）；`sema/stmt_build.c` 显式跳过（不建子作用域，
+      3a/3b 子作用域索引对齐）；CTFE 对 `defer` 明确报错（不静默丢弃）；
+      `compile_func.c:prescan_stmt` 收集 defer 的闭包（否则基底/函数体不构造）。
+    - **顺带修掉既有缺陷**：`clux format` 对闭包**完全没有作用域标注渲染分支**
+      （`func '<x> |r| ...` 的标注被静默吃掉 → 格式化产物再编译直接报错，与第 73 项记的
+      `a.!` 丢点同类）。新增 `render_scope_annot_names` 并在命名函数/函数字面量两处接上，
+      新增 `Fmt.ClosureScopeAnnotationPreserved` 锁定。
+    - **测试**：`tests/defer_test.cpp` **21 例**（LIFO / 空捕获三写法 / clone 捕获 /
+      多捕获两形态 / 嵌套含 return / 循环 LIFO / break·continue / 多层 return 弹出 /
+      **defer 先于 own 释放** / defer 体内调用函数 / defer 体内再登记 defer / switch 分支 /
+      函数体顶层 + 9 组负例 + `move()` 捕获正例）；`tests/fmt_test.cpp` 新增 3 例；
+      新增 `examples/defer/defer.cx`（自检式，输出
+      `defer ok: lifo=321 capture=7 nested=321 loop=102132 own=43 slice=60`）。
+    - **文档**：`language-spec-m1.md` 新增 §4.1.3（语法/捕获/LIFO/执行时机/控制流交互）；
+      `m6-design.md` 新增 **§14.26**（口径九条 + 实现落点表 + 已知边界）；
+      `bytecode-mnemonics.md` 补 `DEFER`。
+    - 验证：强制全量重编（touch 全部 src/include/tests）**190 步 / 0 告警 / 0 错误**；
+      全量 **1749/1749 PASSED / 0 FAILED**、无 `memory leak` 报告；示例 **45/45** `run`
+      与 45/45 `emit → run .cxb`、format 幂等 **47/47**（`fmt(fmt(x)) == fmt(x)`）。

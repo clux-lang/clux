@@ -16,6 +16,7 @@
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_block.h"
+#include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
@@ -223,6 +224,9 @@ static void render_stmt(fmt_t *f, ast_node_t *node);
 static void render_block(fmt_t *f, ast_node_t *node);
 static void render_func_def(fmt_t *f, ast_node_t *node);
 static void render_func_literal(fmt_t *f, ast_node_t *node);
+static void render_captures(fmt_t *f, ast_node_t *captures);
+static void render_scope_annot_names(fmt_t *f, const strslice_t *names,
+                                     size_t count);
 
 /* ---- 兄弟链渲染 ---- */
 
@@ -1084,6 +1088,28 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             render_block(f, node);
             break;
         }
+        case AST_DEFER: {
+            /* defer [annot] [captures] { body }：
+               渲染必须完整回显捕获列表与作用域标注——漏渲染会让格式化产物
+               丢掉引用语义（捕获的变量在块体里变成未声明）或丢掉标注（ref
+               捕获的强制标注消失 → 产物不再能编译），属静默数据损坏。
+               空捕获列表（`||` / 省略）统一渲染为省略形态（两者 AST 相同）。 */
+            ast_defer_t *d = (ast_defer_t *)node;
+            sb_str(&f->sb, "defer");
+            if (d->closure) {
+                if (d->closure->scope_annot_count > 0) {
+                    sb_ch(&f->sb, ' ');
+                    render_scope_annot_names(f, d->closure->scope_annot_names,
+                                             d->closure->scope_annot_count);
+                }
+                if (d->closure->captures) {
+                    sb_ch(&f->sb, ' ');
+                    render_captures(f, d->closure->captures);
+                }
+                render_block(f, (ast_node_t *)d->closure->body);
+            }
+            break;
+        }
         case AST_EXPR_STMT: {
             render_expr(f, ((ast_expr_stmt_t *)node)->expr);
             sb_ch(&f->sb, ';');
@@ -1204,6 +1230,23 @@ static void render_captures(fmt_t *f, ast_node_t *captures) {
     sb_ch(&f->sb, '|');
 }
 
+/* 闭包 / defer 的作用域标注 `'<a,b>`（m3-design §9）：' 与 < 紧贴（lexer 只在
+ * 相邻时才合成 "'<" 复合 token），名字间 ", "，无标注时不输出任何字符。
+ * 此前 render_func_def / render_func_literal **完全没有**这个渲染分支——
+ * `func '<x> |r| ...` 的标注会被静默吃掉，产物里捕获 ref 的强制标注消失
+ * （格式化后再编译直接报错），与 import/reexport/unwrap 漏分支同类的静默
+ * 数据损坏，这里一并补上。 */
+static void render_scope_annot_names(fmt_t *f, const strslice_t *names,
+                                     size_t count) {
+    if (!names || count == 0) return;
+    sb_str(&f->sb, "'<");
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) sb_str(&f->sb, ", ");
+        sb_put(&f->sb, names[i].ptr, names[i].len);
+    }
+    sb_ch(&f->sb, '>');
+}
+
 static void render_func_def(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
     if (fn->is_comptime) sb_str(&f->sb, "comptime ");
@@ -1214,6 +1257,11 @@ static void render_func_def(fmt_t *f, ast_node_t *node) {
     if (fn->is_extern_cfunc && fn->lib_name.len > 0) {
         sb_put(&f->sb, fn->lib_name.ptr, fn->lib_name.len);
         sb_str(&f->sb, "::");
+    }
+    if (fn->scope_annot_count > 0) {
+        render_scope_annot_names(f, fn->scope_annot_names,
+                                 fn->scope_annot_count);
+        sb_ch(&f->sb, ' ');
     }
     if (fn->captures) {
         render_captures(f, fn->captures);
@@ -1241,12 +1289,18 @@ static void render_func_def(fmt_t *f, ast_node_t *node) {
     }
 }
 
-/* 函数字面量（表达式位置）：func [name](params): type { body }
+/* 函数字面量（表达式位置）：func ['<a>] [|caps|] [name](params): type { body }
  * name 可选（无 name = 匿名）；有 name 时仅作显示名（不绑定符号），
- * 格式化须保留以维持源码语义。 */
+ * 格式化须保留以维持源码语义；作用域标注同样必须保留（见
+ * render_scope_annot_names 的说明）。 */
 static void render_func_literal(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
     sb_str(&f->sb, "func");
+    if (fn->scope_annot_count > 0) {
+        sb_ch(&f->sb, ' ');
+        render_scope_annot_names(f, fn->scope_annot_names,
+                                 fn->scope_annot_count);
+    }
     if (fn->captures) {
         sb_ch(&f->sb, ' ');
         render_captures(f, fn->captures);

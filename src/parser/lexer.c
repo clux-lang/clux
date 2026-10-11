@@ -68,7 +68,7 @@ static class_t lexer_class = {
 
 static const char *const g_keywords[] = {
     "alignof", "as",     "bool",    "break",    "clone",    "cfunc",    "comptime",
-    "const",   "continue", "cunion", "default", "do",      "else",
+    "const",   "continue", "cunion", "default", "defer",    "do",       "else",
     "enum",    "export", "extends", "extern", "f32",     "f64",      "false",
     "fatal",
     "for",     "from",   "func",   "i16",     "i32",     "i64",      "i8",

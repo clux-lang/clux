@@ -457,6 +457,15 @@ void vm_pop_scope(vm_t *vm) {
         panic("vm: cannot pop the global scope");
     }
     scope_t *parent = scope_parent(vm->current_scope);
+    /* defer（延迟执行块）：**先**逆序执行本作用域登记的 defer，**再**
+       走 scope_destroy 的 dispose/销毁（own/fatal 释放、vars 释放）。
+       因此 defer 体内能正常读到本作用域的一切（含即将释放的 own/fatal
+       变量与其堆块）——顺序即"作用域退出时、内存释放之前"。
+       无 defer 的普通作用域零开销（空向量直接返回）。
+       注意：这里是**正常退出路径**（落到块尾 / return 时 func_vcall 逐层
+       pop / break·continue 的 balance_scopes_out）；error 值向上传播走
+       scope_destroy_subtree（见 include/vm/scope.h），刻意不触发 defer。 */
+    scope_run_defers(vm, vm->current_scope);
     scope_destroy(vm, &vm->current_scope);
     vm->current_scope = parent;
 }

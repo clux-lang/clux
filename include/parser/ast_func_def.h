@@ -61,6 +61,12 @@ ast_node_t *parse_cfunc_def(parser_t *p);
 ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
                                   const char *kw);
 
+/** 解析捕获列表：`| item (, item)* |`（空列表 `||` 返回 NULL）。
+ *  闭包（func |...|）与 defer（defer |...|）共用同一份解析——捕获项形态
+ *  （纯 id / 括号 VALUE DECL）逐字一致，不另造一套。调用方已确认当前
+ *  token 是开界符号 `|`。成功后游标停在闭界 `|` 之后。 */
+ast_node_t *parse_capture_list(parser_t *p);
+
 /** M6 FFI：extern cfunc 声明（无体，dlsym 解析）。 */
 ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb);
 

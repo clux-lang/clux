@@ -31,6 +31,7 @@
 #include "parser/ast_walk.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_walk.h"
+#include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_return.h"
@@ -2020,6 +2021,19 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       /* 局部函数定义：入口提升已处理签名，主循环（walk_block）已跳过并
          消费 fscope 子作用域。防御分支（非块上下文直接调用时零操作）。 */
       break;
+    case AST_DEFER: {
+      /* defer 语句：块体按**函数字面量**走完整链路
+         （sema_check_func_literal：临时 fscope 建树 + 捕获解析 +
+         body 类型检查 + 签名登记 + 捕获/标注规则），与源码里手写的
+         `func |a| (): void { ... }` 逐字同一套检查。defer 本身不产生值、
+         不注册作用域符号、不做块入口提升（closure 匿名）。
+         作用域对齐：Pass 3a 对 AST_DEFER 不建子作用域（见 stmt_build.c
+         build_block 的说明），此处也不消费所在 scope 的 children 索引，
+         两侧严格对齐；字面量的 body 树由 sema_check_func_literal 自持并销毁。 */
+      ast_defer_t *d = (ast_defer_t *)stmt;
+      if (d->closure) (void)sema_check_func_literal(sema, d->closure, scope);
+      break;
+    }
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
       value_t *v = sema_expr(sema, &es->expr, scope);
