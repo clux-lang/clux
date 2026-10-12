@@ -577,11 +577,11 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
             /* R1（own 不可 copy，§3.1）：new 字段类型是 own *T 时，值必须
-               是显式接管源（move/clone/fatal 参数）。直接传 own/ref 变量
-               = 隐式 copy——运行期 NEW 会把指针值原样复制进
-               新堆块 → 内外两个 own 指向同一堆块 → 作用域退出 double free。 */
-            if (ft->kind == TYPE_KIND_PTR_OWN &&
-                !is_own_initializer(sema, value, scope)) {
+               是 fatal 将亡值（move/clone/new/make 产物或函数返回值）。
+               直接传 own/ref 变量 = 隐式 copy——运行期 NEW 会把指针值原样
+               复制进新堆块 → 内外两个 own 指向同一堆块 → 作用域退出 double
+               free。 */
+            if (type_is_own(ft) && !type_is_fatal(value_type(fv))) {
               char fn[64];
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, value),
@@ -884,11 +884,11 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
                      "new: cannot initialize scalar with nil");
         } else if (fv && t) {
           /* R1（own 不可 copy，§3.1）：new 被指向类型是 own 指针时，值
-             必须是显式接管源（move/clone/fatal）。直接传 own/ref 变量
-             = 隐式 copy → 新堆块与外变量两个 own 指向同一堆块 → double
-             free（new own *i32{p} 必须写 new own *i32{move(p)}）。 */
-          if (t->kind == TYPE_KIND_PTR_OWN &&
-              !is_own_initializer(sema, f, scope)) {
+             必须是 fatal 将亡值（move/clone 产物或函数返回值）。直接传
+             own/ref 变量 = 隐式 copy → 新堆块与外变量两个 own 指向同一
+             堆块 → double free（new own *i32{p} 必须写
+             new own *i32{move(p)}）。 */
+          if (type_is_own(t) && !type_is_fatal(value_type(fv))) {
             char fn[64];
             sema_type_name(value_type(fv), fn, sizeof fn);
             diag_error(sema->diag, sema_loc(sema, f),
@@ -912,7 +912,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
          clone/move 统一：所有"产新堆块"路径都返回 fatal（§3.3 将亡值），
          由 var 定义/参数/return 显式接管为 own（value_assign → implicit_cast
          fatal→own 转移）。运行期 NEW 指令按 fatal 类型压栈。 */
-      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, t);
+      const type_t *pt = type_ptr_intern(sema->vm, OWN_FATAL, t);
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);
@@ -1677,10 +1677,9 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
   if (p_int) return a_int;
   if (pt->kind == TYPE_KIND_FLOAT) return at == pt; /* 同型（f32/f64 不可混） */
   if (pt == sema->vm->type_opaque)
-    return at == sema->vm->type_opaque || at->kind == TYPE_KIND_PTR_OWN ||
-           at->kind == TYPE_KIND_PTR_REF || at->kind == TYPE_KIND_PTR_FATAL ||
-           at->kind == TYPE_KIND_PTR_SHARE || at->kind == TYPE_KIND_PTR_WEAK ||
-           at->kind == TYPE_KIND_SLICE_REF || at->kind == TYPE_KIND_SLICE_FATAL ||
+    return at == sema->vm->type_opaque || type_is_ptr(at) ||
+           (type_is_slice(at) && (at->ownership == OWN_REF ||
+                                  at->ownership == OWN_FATAL)) ||
            at->kind == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
   /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
@@ -1701,11 +1700,7 @@ static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
   case TYPE_KIND_FLOAT:
   case TYPE_KIND_STR:
   case TYPE_KIND_OPAQUE:
-  case TYPE_KIND_PTR_OWN:
-  case TYPE_KIND_PTR_REF:
-  case TYPE_KIND_PTR_FATAL:
-  case TYPE_KIND_PTR_SHARE:
-  case TYPE_KIND_PTR_WEAK:
+  case TYPE_KIND_PTR:
   /* 变参也能按值传结构体/cunion（libffi 支持；C 对聚合类型不做默认提升） */
   case TYPE_KIND_STRUCT:
   case TYPE_KIND_CUNION:
@@ -1870,11 +1865,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             else if (rt && (rt->kind == TYPE_KIND_STRUCT ||
                             rt->kind == TYPE_KIND_CUNION ||
                             rt->kind == TYPE_KIND_ENUM ||
-                            rt->kind == TYPE_KIND_PTR_OWN ||
-                            rt->kind == TYPE_KIND_PTR_REF ||
-                            rt->kind == TYPE_KIND_PTR_FATAL ||
-                            rt->kind == TYPE_KIND_PTR_SHARE ||
-                            rt->kind == TYPE_KIND_PTR_WEAK)) {
+                            type_is_ptr(rt))) {
               /* 程序自定义类型 / 带类型的指针：宽度与布局必须查类型表 →
                 "按类型值返回"。compiler 会在 EXTERN_CALL 之前压一个类型值
                 （类型表达式取自 extern cfunc 的声明，sema 已挂在符号的 ast 上）。 */
@@ -1996,11 +1987,11 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_UPGRADE &&
           argc == 1 && arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);
-        if (at && at->kind == TYPE_KIND_PTR_WEAK) {
+        if (at && type_is_weak(at)) {
           const type_t *base = ptr_type_base(at);
           if (base) {
             const type_t *share_t = type_ptr_intern(sema->vm,
-                TYPE_KIND_PTR_SHARE, base);
+                OWN_SHARE, base);
             if (share_t) {
               const type_t *opt_t = type_option_intern(sema->vm, share_t);
               if (opt_t) {
@@ -2021,9 +2012,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
           arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);
         if (at && at->kind != TYPE_KIND_ARRAY &&
-            at->kind != TYPE_KIND_SLICE_OWN &&
-            at->kind != TYPE_KIND_SLICE_REF &&
-            at->kind != TYPE_KIND_SLICE_FATAL &&
+            !type_is_slice(at) &&
             at->kind != TYPE_KIND_STR) {
           char tn[64];
           sema_type_name(at, tn, sizeof(tn));
@@ -2054,9 +2043,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         const type_t *at = value_type(arg_shadows[0]);
         const type_t *elem = NULL;
         switch (at ? at->kind : TYPE_KIND_VOID) {
-        case TYPE_KIND_SLICE_OWN:
-        case TYPE_KIND_SLICE_REF:
-        case TYPE_KIND_SLICE_FATAL:
+        case TYPE_KIND_SLICE:
           elem = slice_type_elem(at);
           break;
         case TYPE_KIND_ARRAY:
@@ -2075,7 +2062,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                      "data: argument must be array/slice/str, got %s", tn);
           return val_void(sema);
         }
-        const type_t *rp = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, elem);
+        const type_t *rp = type_ptr_intern(sema->vm, OWN_REF, elem);
         if (!rp) return val_void(sema);
         sema_type_register(sema, rp);
         call->is_data_call = true;
@@ -2216,9 +2203,7 @@ static value_t *ex_index(sema_t *sema, ast_node_t **node,
         return val_void(sema);
       }
       if (!bt || (bt->kind != TYPE_KIND_ARRAY && bt->kind != TYPE_KIND_TUPLE &&
-                  bt->kind != TYPE_KIND_SLICE_OWN &&
-                  bt->kind != TYPE_KIND_SLICE_REF &&
-                  bt->kind != TYPE_KIND_SLICE_FATAL)) {
+                  !type_is_slice(bt))) {
         char tn[64];
         sema_type_name(bt, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -2293,8 +2278,7 @@ static value_t *ex_index(sema_t *sema, ast_node_t **node,
       }
 
       const type_t *et;
-      if (bt->kind == TYPE_KIND_SLICE_OWN || bt->kind == TYPE_KIND_SLICE_REF ||
-          bt->kind == TYPE_KIND_SLICE_FATAL) {
+      if (type_is_slice(bt)) {
         et = slice_type_elem(bt);
       } else {
         et = array_type_elem(bt);
@@ -2320,9 +2304,7 @@ static value_t *ex_slice(sema_t *sema, ast_node_t **node,
       const type_t *et = NULL;
       if (bt->kind == TYPE_KIND_ARRAY) {
         et = array_type_elem(bt);
-      } else if (bt->kind == TYPE_KIND_SLICE_OWN ||
-                 bt->kind == TYPE_KIND_SLICE_REF ||
-                 bt->kind == TYPE_KIND_SLICE_FATAL) {
+      } else if (type_is_slice(bt)) {
         et = slice_type_elem(bt);
       } else if (bt->kind == TYPE_KIND_STR) {
         /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
@@ -2362,7 +2344,7 @@ static value_t *ex_slice(sema_t *sema, ast_node_t **node,
       }
 
       /* 恒产 ref []T */
-      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_REF,
+      const type_t *slice_t = type_slice_intern(sema->vm, OWN_REF,
                                                  et ? et : sema->vm->type_void);
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
@@ -2611,7 +2593,7 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
       }
 
       /* 返回 fatal []T shadow——make 产新堆块，与 new 统一 */
-      const type_t *slice_t = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL,
+      const type_t *slice_t = type_slice_intern(sema->vm, OWN_FATAL,
                                                  et);
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
@@ -2632,18 +2614,16 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         return val_void(sema);
       const type_t *ot = value_type(operand);
       const type_t *base = ptr_type_base(ot);
-      bool is_slice = (ot->kind == TYPE_KIND_SLICE_OWN ||
-                       ot->kind == TYPE_KIND_SLICE_REF ||
-                       ot->kind == TYPE_KIND_SLICE_FATAL);
+      bool is_slice = type_is_slice(ot);
       if (base || is_slice) {
         /* 指针/切片操作数：产物为 fatal *T / fatal []T
            （MOVE/CLONE 指令已按此类型压栈） */
         const type_t *fatal;
         if (is_slice) {
           const type_t *elem = slice_type_elem(ot);
-          fatal = type_slice_intern(sema->vm, TYPE_KIND_SLICE_FATAL, elem);
+          fatal = type_slice_intern(sema->vm, OWN_FATAL, elem);
         } else {
-          fatal = type_ptr_intern(sema->vm, TYPE_KIND_PTR_FATAL, base);
+          fatal = type_ptr_intern(sema->vm, OWN_FATAL, base);
         }
         if (!fatal) return val_void(sema);
         sema_type_register(sema, fatal);
@@ -2658,8 +2638,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
             sema_symbol_t *src =
                 sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
             if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                (src->type->kind == TYPE_KIND_PTR_OWN ||
-                 src->type->kind == TYPE_KIND_SLICE_OWN)) {
+                type_is_own(src->type)) {
               if (src->borrow_count > 0) {
                 diag_error(sema->diag, sema_loc(sema, *node),
                            "cannot move '%.*s': %d live borrow(s) still "
@@ -2976,7 +2955,7 @@ static value_t *ex_addr(sema_t *sema, ast_node_t **node,
                    "cannot take address of value of unknown type");
         return val_void(sema);
       }
-      const type_t *pt = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF, t);
+      const type_t *pt = type_ptr_intern(sema->vm, OWN_REF, t);
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);

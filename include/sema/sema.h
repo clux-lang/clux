@@ -131,8 +131,7 @@ typedef struct sema_expr_ctx_t {
  * 一处定义——此前分散在三段代码里各写一遍 `PTR_FATAL || SLICE_FATAL`，其中
  * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。 */
 static inline bool sema_type_is_fatal(const type_t *t) {
-  return t && (t->kind == TYPE_KIND_PTR_FATAL ||
-               t->kind == TYPE_KIND_SLICE_FATAL);
+  return type_is_fatal(t);
 }
 static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
   if (sym) sym->moved = true;
@@ -377,14 +376,6 @@ void sema_walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope);
  * 就地改写 *node 为字面量 AST 节点（arena 分配），下游（编译器）零感知。
  */
 value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
-
-/**
- * Step B 所有权检查（m3-design §3.1/§3.3）：判断表达式是否是 own *T 的
- * 合法初始化源。own 只允许两种来源：new 表达式（新堆块，产 fatal）与
- * fatal 接管源（move/clone 产物或 fatal 参数）。own → own 直接赋值
- * = copy → 编译错误。stmt.c 实现，expr.c（AST_NEW 字段校验）共用。
- */
-bool is_own_initializer(sema_t *sema, ast_node_t *expr, sema_scope_t *scope);
 
 /** 检查操作数必须为 bool；error/void shadow（错误恢复产物）静默通过。 */
 void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,

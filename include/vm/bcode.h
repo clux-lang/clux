@@ -177,9 +177,9 @@ typedef enum {
        base 是引用依赖（LOAD_TYPE 拉回，不递归）。
        值级指令：NEW（堆分配构造）、PTR_GET/PTR_SET（解引用 GET/SET 严格
        分离）、ADDR（后置取址）、MOVE/CLONE（所有权原语）。 */
-    BCODE_PUSH_PTR,         /* u8 kind：分配空 ptr type（开放，base=NULL，不入池）
-                               + 压其 type value。kind = 所有权修饰
-                               （TYPE_KIND_PTR_OWN/REF/FATAL） */
+    BCODE_PUSH_PTR,         /* u8 ownership：分配空 ptr type（开放，base=NULL，不入池）
+                               + 压其 type value。ownership = 所有权修饰
+                               （OWN_OWN/REF/FATAL） */
     BCODE_NEW,              /* 弹类型位 + 弹 1 个成员值 → 按类型构造 own *T
                                堆块（new T{...}；Step A 不追踪，值=裸指针） */
     BCODE_PTR_GET,          /* 弹指针值 → 压被指向 T 值副本（r.* 解引用 GET） */
@@ -196,9 +196,9 @@ typedef enum {
                                跳过。 */
 
     /* ---- M4 切片段（m4-design §1/§2/§4）---- */
-    BCODE_PUSH_SLICE,       /* u8 kind：分配空 slice type（开放，elem=NULL，
-                               不入池）+ 压其 type value。kind = 所有权修饰
-                               （TYPE_KIND_SLICE_OWN/REF/FATAL） */
+    BCODE_PUSH_SLICE,       /* u8 ownership：分配空 slice type（开放，elem=NULL，
+                               不入池）+ 压其 type value。ownership = 所有权修饰
+                               （OWN_OWN/REF/FATAL） */
     BCODE_SLICE,            /* u8 flags：bit0=low present, bit1=high present。
                                弹 self + 按 flags 弹 high/low → 压 ref []T 胖指针
                                （s[low:high] 切片表达式，恒产 ref []T，m4-design

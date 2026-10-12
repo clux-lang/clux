@@ -630,9 +630,9 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
            §9.2 fatal 接管为 own：move(p)/clone(p) 产 fatal *T，闭包内
            无 fatal 变量——fatal 自动转 own *T（闭包成为所有权持有者）。 */
         const type_t *it = init_bad ? sema->vm->type_void : value_type(init);
-        if (it && it->kind == TYPE_KIND_PTR_FATAL) {
+        if (it && type_is_fatal(it)) {
           const type_t *base = ptr_type_base(it);
-          it = base ? type_ptr_intern(sema->vm, TYPE_KIND_PTR_OWN, base)
+          it = base ? type_ptr_intern(sema->vm, OWN_OWN, base)
                     : it;
         }
         cs->type = it;
@@ -667,8 +667,8 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
          §3.1）→ 必须显式 move()/clone()。fatal 同理（裸捕获 fatal 变量
          = copy 将亡值，须 move/clone 接管）。 */
       if (outer_sym->type &&
-          (outer_sym->type->kind == TYPE_KIND_PTR_OWN ||
-           outer_sym->type->kind == TYPE_KIND_PTR_FATAL)) {
+          (type_is_own(outer_sym->type) ||
+           type_is_fatal(outer_sym->type))) {
         diag_error(sema->diag, sema_loc(sema, c),
                    "cannot capture own/fatal pointer '%.*s' by value "
                    "(use move() or clone(), e.g. |(%.*s = move(%.*s))|)",
@@ -691,8 +691,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     ast_var_def_t *cv = (ast_var_def_t *)c;
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs || !cs->type) continue;
-    if (cs->type->kind == TYPE_KIND_PTR_REF ||
-        cs->type->kind == TYPE_KIND_SLICE_REF ||
+    if (type_is_ref(cs->type) ||
         cs->type->kind == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;
       break;

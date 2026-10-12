@@ -31,12 +31,12 @@ value_t *builtin_upgrade_cfunc(vm_t *vm, func_t *self, size_t argc,
 
     value_t *wv = args[0];
     const type_t *wt = value_type(wv);
-    if (!wt || wt->kind != TYPE_KIND_PTR_WEAK)
+    if (!wt || !type_is_weak(wt))
         return value_make_error(vm, "upgrade: argument must be weak pointer");
 
     /* shadow：只算类型——返回 ?share *T 的 shadow */
     if (value_is_shadow(wv)) {
-        const type_t *share_t = type_ptr_intern(vm, TYPE_KIND_PTR_SHARE,
+        const type_t *share_t = type_ptr_intern(vm, OWN_SHARE,
                                                 ptr_type_base(wt));
         if (!share_t) return value_make_error(vm, "upgrade: cannot make share type");
         const type_t *opt_t = type_option_intern(vm, share_t);
@@ -45,7 +45,7 @@ value_t *builtin_upgrade_cfunc(vm_t *vm, func_t *self, size_t argc,
     }
 
     /* 构造返回类型 ?share *T */
-    const type_t *share_t = type_ptr_intern(vm, TYPE_KIND_PTR_SHARE,
+    const type_t *share_t = type_ptr_intern(vm, OWN_SHARE,
                                             ptr_type_base(wt));
     if (!share_t) return value_make_error(vm, "upgrade: cannot make share type");
     const type_t *opt_t = type_option_intern(vm, share_t);
@@ -87,7 +87,7 @@ void vm_register_upgrade(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
 
     /* ?share *opaque 作为占位返回类型（sema 调用点特判替换为 ?share *T） */
-    const type_t *share_opaque = type_ptr_intern(vm, TYPE_KIND_PTR_SHARE,
+    const type_t *share_opaque = type_ptr_intern(vm, OWN_SHARE,
                                                  vm->type_opaque);
     if (!share_opaque) return;
     const type_t *opt_share = type_option_intern(vm, share_opaque);

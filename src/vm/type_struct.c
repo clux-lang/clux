@@ -1,5 +1,6 @@
 #include "vm/type_struct.h"
 #include "vm/type.h"
+#include "vm/type_ptr.h"
 #include "vm/str_pool.h"
 #include "vm/value.h"
 #include "vm/vm.h"
@@ -42,6 +43,24 @@ static value_t *struct_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
+    if (t->ownership == OWN_FATAL) {
+        /* fatal 复合类型 clone（将亡值深拷贝）：memcpy 整块 + 递归 clone
+           own/fatal 指针字段（ptr_clone_block 逐字段深拷贝对象图）。
+           与 ptr_clone_block 的 STRUCT 分支同款逻辑，但产出 fatal 类型值。 */
+        const struct_type_t *st = (const struct_type_t *)t;
+        void *data = value_alloc_data(vm->alloc, t);
+        memcpy(data, value_data(v), t->size); /* 平凡复制字段值 */
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (ptr_type_needs_scan(f->type)) {
+                void *fc = ptr_clone_block(vm, f->type,
+                                           (const uint8_t *)value_data(v) + f->offset);
+                memcpy((uint8_t *)data + f->offset, fc, f->type->size);
+                allocator_free(vm->alloc, (void **)&fc);
+            }
+        }
+        return value_make(vm, t, data);
+    }
     /* 浅拷贝（整块 memcpy）：隐式拷贝路径（DEFINE/赋值/转换）只作用于
        sema 已保证不含 own 字段的值（含 own 的 struct 由 sema 拦截，禁止
        隐式拷贝——m3-design §7 唯一所有权）；own 字段的深拷贝发生在主动
@@ -69,7 +88,23 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
 }
 
 static void struct_dispose(vm_t *vm, value_t *v) {
-    /* data 全平凡（字段为裸字节块，字符串归池），无需释放。
+    const type_t *t = value_type(v);
+    if (t && t->ownership == OWN_FATAL) {
+        /* fatal 复合类型 dispose：递归释放 own 指针字段指向的堆块
+           （ptr_free_owned_recursive 逐字段递归销毁对象图）。data 块本身
+           由 value_dispose 统一处理。 */
+        const struct_type_t *st = (const struct_type_t *)t;
+        void *data = value_data(v);
+        if (!data) return;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (ptr_type_needs_scan(f->type))
+                ptr_free_owned_recursive(vm, f->type,
+                                         (uint8_t *)data + f->offset);
+        }
+        return;
+    }
+    /* 普通结构体 data 全平凡（字段为裸字节块，字符串归池），无需释放。
        借用引用与 data 块本身由 value_dispose 统一处理。 */
     (void)vm; (void)v;
 }
@@ -306,8 +341,11 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     st->field_count = n + 1;
 }
 
-/* 按 (字段名 + 类型 + 顺序) 判断两结构体是否等价（去重 intern 用） */
+/* 按 (字段名 + 类型 + 顺序 + ownership) 判断两结构体是否等价（去重 intern 用）。
+ * ownership 参与比较：fatal Node 与 Node 字段表相同但 ownership 不同，是
+ * 不同类型（fatal 是将亡值，普通 struct 不是）。 */
 static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
+    if (a->base.ownership != b->base.ownership) return false;
     if (a->field_count != b->field_count) return false;
     for (size_t i = 0; i < a->field_count; i++) {
         const struct_field_t *fa = &a->fields[i];
@@ -615,6 +653,47 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
     const type_t *t = type_struct_seal(vm, &st->base);
     if (!t) allocator_free(vm->alloc, (void **)&st); /* 密封失败（如字段类型
                                                        未解析）：回收开放对象 */
+    return t;
+}
+
+/* 带指定 ownership 的 struct intern：复制 base 的字段表，设 ownership，
+ * 密封为新的 struct_type_t（与 base 同布局不同 ownership——去重时
+ * struct_same 按 ownership 区分）。用于 fatal Node（ownership=OWN_FATAL）。 */
+const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
+                                                ownership_t ownership) {
+    if (!vm || !base || base->kind != TYPE_KIND_STRUCT) return NULL;
+    const struct_type_t *src = (const struct_type_t *)base;
+    struct_type_t *st = struct_type_create_open(vm);
+    st->base.ownership = ownership;
+    /* 拷贝字段表（vm 拥有；名深拷贝；offset 拷贝——布局与 base 相同） */
+    if (src->field_count > 0) {
+        struct_field_t *copy = (struct_field_t *)allocator_new_ex(
+            vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL,
+            NULL, src->field_count);
+        if (!copy) panic("vm: out of memory interning struct type (ownership)");
+        for (size_t i = 0; i < src->field_count; i++) {
+            copy[i].name   = struct_field_name_dup(vm, src->fields[i].name);
+            copy[i].offset = src->fields[i].offset;
+            copy[i].type   = src->fields[i].type;
+        }
+        st->fields = copy;
+        st->field_count = src->field_count;
+    }
+    /* 拷贝嵌入表（组合 struct 的 embeds——与字段表同构快照） */
+    if (src->embed_count > 0) {
+        const type_t **ecopy = (const type_t **)allocator_new_ex(
+            vm->alloc, "type_t*", sizeof(const type_t *), NULL, NULL, NULL,
+            src->embed_count);
+        if (!ecopy) panic("vm: out of memory interning struct embeds (ownership)");
+        for (size_t i = 0; i < src->embed_count; i++)
+            ecopy[i] = src->embeds[i];
+        st->embeds = ecopy;
+        st->embed_count = src->embed_count;
+    }
+    /* unique 跟随 base：具名 struct 的 fatal 副本仍保持独立身份 */
+    st->unique = src->unique;
+    const type_t *t = type_struct_seal(vm, &st->base);
+    if (!t) allocator_free(vm->alloc, (void **)&st);
     return t;
 }
 

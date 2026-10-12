@@ -475,18 +475,18 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(bt, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: pointer base must be a type");
         const type_t *base = value_as(bt, const type_t *);
-        type_kind_t kind;
+        ownership_t own_tag;
         strslice_t own = token_strslice(n->ownership);
         if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-            kind = TYPE_KIND_PTR_OWN;
+            own_tag = OWN_OWN;
         } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-            kind = TYPE_KIND_PTR_REF;
+            own_tag = OWN_REF;
         } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-            kind = TYPE_KIND_PTR_FATAL;
+            own_tag = OWN_FATAL;
         } else {
             return ctfe_err(ctx, "ctfe: unsupported pointer ownership");
         }
-        const type_t *pt = type_ptr_intern(vm, kind, base);
+        const type_t *pt = type_ptr_intern(vm, own_tag, base);
         if (!pt) return ctfe_err(ctx, "ctfe: failed to construct pointer type");
         return type_as_value(vm, pt);
     }

@@ -180,12 +180,13 @@ value** 返回，由 `exec_drive` 捕获停机。
 ### 4.7 指针与所有权（M3）
 
 指针类型与签名同族：`PUSH_PTR <kind> → DEFINE_TYPE → LOAD_TYPE → SET_TYPE 设 base → SEAL`。
-**运行期零所有权标志**——所有权完全由 type kind 编码（own 总拥有 / ref 总借用 /
-fatal 在非空时拥有）。
+**运行期零所有权标志**——所有权由 `type_t.ownership` 正交字段编码（own 总拥有 /
+ref 总借用 / fatal 在非空时拥有 / share RC 强引用 / weak RC 弱引用），type kind
+统一为 `TYPE_KIND_PTR`。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `PUSH_PTR` | `U8`（kind） | 分配空指针类型（开放态，base=NULL）→ 压其 type value。kind ∈ `TYPE_KIND_PTR_OWN / _REF / _FATAL / _SHARE / _WEAK`。 |
+| `PUSH_PTR` | `U8`（ownership） | 分配空指针类型（开放态，base=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL / _SHARE / _WEAK`。 |
 | `NEW` | — | 弹类型位 + 1 个成员值 → 按类型构造 `own *T` 堆块（`new T{...}`）。 |
 | `PTR_GET` | — | 弹指针值 → 压被指向 `T` 的**值副本**（`r.*` 解引用 GET）。 |
 | `PTR_SET` | — | 弹指针值 + val → 隐式转换后写回被指向 `T` → 压回指针（`r.* = v`）。 |
@@ -196,11 +197,12 @@ fatal 在非空时拥有）。
 
 ### 4.8 切片（M4）
 
-切片是胖指针 `{ void *ptr; uint64 len; }`，三种所有权 kind 与指针对齐。
+切片是胖指针 `{ void *ptr; uint64 len; }`，三种所有权修饰（own/ref/fatal）由
+`type_t.ownership` 编码，与指针对齐。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `PUSH_SLICE` | `U8`（kind） | 分配空切片类型（开放态，elem=NULL）→ 压其 type value。kind ∈ `TYPE_KIND_SLICE_OWN / _REF / _FATAL`。 |
+| `PUSH_SLICE` | `U8`（ownership） | 分配空切片类型（开放态，elem=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL`。 |
 | `SLICE` | `U8`（flags） | bit0 = low 存在，bit1 = high 存在；弹 self + 按 flags 弹 high/low → 压 `ref []T` 胖指针（`s[low:high]`，**恒产 ref []T**；省略 low=0、high=len）。含运行期边界检查 `0 <= low <= high <= len`。 |
 | `MAKE` | `U32`（init_count） | 弹 init_count 个初始值 + 弹 length + 弹 elem type → 分配 `len * elem_size` 堆块并逐元素布值 → 压 `fatal []T`（`make(T, N, init...)` 宏函数）。 |
 

@@ -11,7 +11,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-/** 指针类型 vtable（own/ref/fatal/share/weak 五种所有权修饰，kind 区分） */
+/** 指针类型 vtable（own/ref/fatal/share/weak 五种所有权修饰，ownership 区分） */
 extern const vtable_t VTABLE_PTR_OWN;
 extern const vtable_t VTABLE_PTR_REF;
 extern const vtable_t VTABLE_PTR_FATAL;
@@ -38,9 +38,9 @@ extern const vtable_t VTABLE_PTR_WEAK;
 typedef struct ptr_type_t ptr_type_t;  /* 定义见 vm/type.h */
 
 /** PUSH_PTR：分配开放 ptr_type（base_type=NULL，不入池）+ 压其 type value。
- *  kind = 所有权修饰（TYPE_KIND_PTR_OWN/REF/FATAL/SHARE/WEAK，PUSH_PTR 指令
+ *  ownership = 所有权修饰（OWN_OWN/REF/FATAL/SHARE/WEAK，PUSH_PTR 指令
  *  u8 操作数）。 */
-const type_t *type_ptr_push(vm_t *vm, type_kind_t kind);
+const type_t *type_ptr_push(vm_t *vm, ownership_t ownership);
 
 /** SET_TYPE 运行期用：设被指向类型 T（密封后静默忽略） */
 void type_ptr_set_base(vm_t *vm, const type_t *t, const type_t *base);
@@ -50,17 +50,11 @@ const type_t *type_ptr_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_ptr_push + set_base + seal）：sema 解析 own/ref/fatal/
  *  share/weak *T 用。不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。 */
-const type_t *type_ptr_intern(vm_t *vm, type_kind_t kind, const type_t *base);
+const type_t *type_ptr_intern(vm_t *vm, ownership_t ownership, const type_t *base);
 
 /** 取指针类型的被指向类型 T（非指针返回 NULL） */
 static inline const type_t *ptr_type_base(const type_t *t) {
-    return (t && (t->kind == TYPE_KIND_PTR_OWN ||
-                  t->kind == TYPE_KIND_PTR_REF ||
-                  t->kind == TYPE_KIND_PTR_FATAL ||
-                  t->kind == TYPE_KIND_PTR_SHARE ||
-                  t->kind == TYPE_KIND_PTR_WEAK))
-               ? ((const ptr_type_t *)t)->base_type
-               : NULL;
+    return type_is_ptr(t) ? ((const ptr_type_t *)t)->base_type : NULL;
 }
 
 /* ================================================================ */
@@ -70,7 +64,7 @@ static inline const type_t *ptr_type_base(const type_t *t) {
 /**
  * 指针值（data 块布局）。五种指针的 value data 统一为 { 裸指针 }：
  *   - ptr：指向目标内存（new 堆块 / 栈上值 / 借用目标 / RC 控制块）
- *   - 所有权由 type kind 区分（m3-design §13.2：运行期零标志）：
+ *   - 所有权由 type_t.ownership 区分（m3-design §13.2：运行期零标志）：
  *     own *T    → 总拥有堆块，dispose 释放（new 产物接管后）
  *     ref *T    → 总借用，dispose 跳过（指向栈值 / 他人堆块）
  *     fatal *T  → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
@@ -88,16 +82,12 @@ typedef struct ptr_value_t {
 static inline void *ptr_value_target(const value_t *v) {
     if (!v) return NULL;
     const type_t *t = value_type(v);
-    if (!t || (t->kind != TYPE_KIND_PTR_OWN &&
-               t->kind != TYPE_KIND_PTR_REF &&
-               t->kind != TYPE_KIND_PTR_FATAL &&
-               t->kind != TYPE_KIND_PTR_SHARE &&
-               t->kind != TYPE_KIND_PTR_WEAK))
+    if (!type_is_ptr(t))
         return NULL;
     return ((const ptr_value_t *)value_data(v))->ptr;
 }
 
-/** 构造指针值：目标地址（五种指针统一，所有权由 type kind 区分，
+/** 构造指针值：目标地址（五种指针统一，所有权由 type_t.ownership 区分，
  *  m3-design §13.2 运行期零标志） */
 value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 

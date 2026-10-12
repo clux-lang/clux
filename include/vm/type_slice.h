@@ -11,7 +11,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-/** 切片类型 vtable（own/ref/fatal 三种所有权修饰，kind 区分） */
+/** 切片类型 vtable（own/ref/fatal 三种所有权修饰，ownership 区分） */
 extern const vtable_t VTABLE_SLICE_OWN;
 extern const vtable_t VTABLE_SLICE_REF;
 extern const vtable_t VTABLE_SLICE_FATAL;
@@ -33,26 +33,22 @@ extern const vtable_t VTABLE_SLICE_FATAL;
  */
 
 /** PUSH_SLICE：分配开放 slice_type（elem_type=NULL，不入池）+ 压其 type value。
- *  kind = 所有权修饰（TYPE_KIND_SLICE_OWN/REF/FATAL）。 */
-const type_t *type_slice_push(vm_t *vm, type_kind_t kind);
+ *  ownership = 所有权修饰（OWN_OWN/REF/FATAL）。 */
+const type_t *type_slice_push(vm_t *vm, ownership_t ownership);
 
 /** SET_TYPE 运行期用：设元素类型 T（密封后静默忽略） */
 void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem);
 
-/** SEAL：按 (elem_type, kind) 去重 intern + 置 sealed。返回该 const type */
+/** SEAL：按 (elem_type, ownership) 去重 intern + 置 sealed。返回该 const type */
 const type_t *type_slice_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_slice_push + set_elem + seal）：sema 解析 own/ref/fatal
  *  []T 用。不向操作数栈压 type value。 */
-const type_t *type_slice_intern(vm_t *vm, type_kind_t kind, const type_t *elem);
+const type_t *type_slice_intern(vm_t *vm, ownership_t ownership, const type_t *elem);
 
 /** 取切片类型的元素类型 T（非切片返回 NULL） */
 static inline const type_t *slice_type_elem(const type_t *t) {
-    return (t && (t->kind == TYPE_KIND_SLICE_OWN ||
-                  t->kind == TYPE_KIND_SLICE_REF ||
-                  t->kind == TYPE_KIND_SLICE_FATAL))
-               ? ((const slice_type_t *)t)->elem_type
-               : NULL;
+    return type_is_slice(t) ? ((const slice_type_t *)t)->elem_type : NULL;
 }
 
 /* ================================================================ */
@@ -64,7 +60,7 @@ static inline const type_t *slice_type_elem(const type_t *t) {
  *   - ptr：指向元素序列首地址（own 堆分配 / ref 借用 / fatal 将亡值）
  *   - len：元素数量（u64）
  *
- * 所有权由 type kind 区分（运行期零标志，同 M3 §13.2）：
+ * 所有权由 type_t.ownership 区分（运行期零标志，同 M3 §13.2）：
  *   own []T   → 总拥有堆块，dispose 释放（make 产物接管后）
  *   ref []T   → 总借用，dispose 跳过（指向他人堆块 / 数组内联内存）
  *   fatal []T → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）

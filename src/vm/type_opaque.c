@@ -93,9 +93,8 @@ static value_t *opaque_explicit_cast(vm_t *vm, value_t *v, const type_t *target)
        存裸指针值，拷贝进指针值 target 槽。从 opaque 恢复的指针不携带
        所有权信息（堆块归原始持有者），目标类型决定所有权语义。 */
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
-    if (target && (target->kind == TYPE_KIND_PTR_OWN ||
-                   target->kind == TYPE_KIND_PTR_REF ||
-                   target->kind == TYPE_KIND_PTR_FATAL)) {
+    if (target && type_is_ptr(target) &&
+        (type_is_own(target) || type_is_ref(target) || type_is_fatal(target))) {
         void *opq = *(void **)value_data(v);
         return ptr_make_value(vm, target, opq);
     }

@@ -262,12 +262,10 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       }
       break;
     }
-    case TYPE_KIND_PTR_OWN:
-    case TYPE_KIND_PTR_REF:
-    case TYPE_KIND_PTR_FATAL: {
+    case TYPE_KIND_PTR: {
       /* 指针类型：被指向类型 T 也是程序类型（引用依赖——seal 不依赖
          base 布局，但 hoist 中 LOAD_TYPE 拉回 base 需要其已登记。
-         PTR_* 段 < COUNT 自动登记；此处只递归登记 base 依赖。 */
+         PTR 段 < COUNT 自动登记；此处只递归登记 base 依赖。 */
       const type_t *base = ptr_type_base(t);
       if (base) sema_type_register(sema, base);
       break;
@@ -500,18 +498,18 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         （五种所有权是独立 intern 实例）。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      type_kind_t kind;
+      ownership_t ownership;
       strslice_t own = token_strslice(ptr->ownership);
       if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-        kind = TYPE_KIND_PTR_OWN;
+        ownership = OWN_OWN;
       } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-        kind = TYPE_KIND_PTR_REF;
+        ownership = OWN_REF;
       } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-        kind = TYPE_KIND_PTR_FATAL;
+        ownership = OWN_FATAL;
       } else if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0) {
-        kind = TYPE_KIND_PTR_SHARE;
+        ownership = OWN_SHARE;
       } else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0) {
-        kind = TYPE_KIND_PTR_WEAK;
+        ownership = OWN_WEAK;
       } else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
@@ -519,7 +517,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       }
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       if (!base) return NULL;
-      return type_ptr_intern(sema->vm, kind, base);
+      return type_ptr_intern(sema->vm, ownership, base);
     }
     case AST_SLICE_TYPE: {
       /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
@@ -534,14 +532,14 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "'fatal []T'");
         return NULL;
       }
-      type_kind_t kind;
+      ownership_t ownership;
       strslice_t own = token_strslice(sl->ownership);
       if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-        kind = TYPE_KIND_SLICE_OWN;
+        ownership = OWN_OWN;
       } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-        kind = TYPE_KIND_SLICE_REF;
+        ownership = OWN_REF;
       } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-        kind = TYPE_KIND_SLICE_FATAL;
+        ownership = OWN_FATAL;
       } else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported slice ownership '%.*s' (use own/ref/fatal)",
@@ -550,7 +548,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       }
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
-      return type_slice_intern(sema->vm, kind, elem);
+      return type_slice_intern(sema->vm, ownership, elem);
     }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
@@ -601,7 +599,7 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
    已折叠（标注节点保留，sema_annot_peek 可读）。未标注 → 编译错误。 */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
                               const type_t *rt) {
-  if (!rt || rt->kind != TYPE_KIND_PTR_REF || !fn->return_expr) return true;
+  if (!rt || !type_is_ref(rt) || !fn->return_expr) return true;
   strslice_t *names = NULL;
   size_t count = 0;
   sema_annot_peek(fn->return_expr, &names, &count);
@@ -1311,7 +1309,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      返回 ?share *opaque 占位——sema 调用点特判从实参 weak *T 推断 ?share *T。
      fid 从 vm->functions 按名查询（内建 id 按注册顺序，见 vm_new）。 */
   {
-    const type_t *share_opaque = type_ptr_intern(sema->vm, TYPE_KIND_PTR_SHARE,
+    const type_t *share_opaque = type_ptr_intern(sema->vm, OWN_SHARE,
                                                  sema->vm->type_opaque);
     const type_t *opt_share = share_opaque
         ? type_option_intern(sema->vm, share_opaque) : NULL;
@@ -1370,7 +1368,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      sema 调用点特判按实参类型精化返回类型为 `ref *<元素类型>`（str → ref *u8），
      运行期也按实参类型重新推导。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *ref_opaque = type_ptr_intern(sema->vm, TYPE_KIND_PTR_REF,
+    const type_t *ref_opaque = type_ptr_intern(sema->vm, OWN_REF,
                                                sema->vm->type_opaque);
     const type_t *dsig = ref_opaque
                              ? type_func_sig(sema->vm, NULL, 0, ref_opaque,

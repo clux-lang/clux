@@ -304,45 +304,46 @@ void vm_init_builtins(vm_t *vm) {
     vm->array_types = vec_new(vm->alloc, /*owns_element=*/false);
 
     /* 内置基础类型创建即 sealed（无开放构造阶段，永不重新 intern）。
-       id 按 0..14 固定（vm_register_builtin_types 与 LOAD_TYPE 内建段一致）。 */
-    g_type_i8   = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I8),  sizeof(int8_t),   alignof(int8_t),   TYPE_KIND_INT,  true,  0 };
-    g_type_i16  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I16), sizeof(int16_t),  alignof(int16_t),  TYPE_KIND_INT,  true,  1 };
-    g_type_i32  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I32), sizeof(int32_t),  alignof(int32_t),  TYPE_KIND_INT,  true,  2 };
-    g_type_i64  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I64), sizeof(int64_t),  alignof(int64_t),  TYPE_KIND_INT,  true,  3 };
-    g_type_u8   = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U8),  sizeof(uint8_t),   alignof(uint8_t),  TYPE_KIND_INT,  true,  4 };
-    g_type_u16  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U16), sizeof(uint16_t),  alignof(uint16_t), TYPE_KIND_INT,  true,  5 };
-    g_type_u32  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U32), sizeof(uint32_t),  alignof(uint32_t), TYPE_KIND_INT,  true,  6 };
-    g_type_u64  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U64), sizeof(uint64_t),  alignof(uint64_t), TYPE_KIND_INT,  true,  7 };
-    g_type_f32  = (type_t){ &VTABLE_FLOAT, STRSLICE_LIT(S_F32), sizeof(float),    alignof(float),    TYPE_KIND_FLOAT, true,  8 };
-    g_type_f64  = (type_t){ &VTABLE_FLOAT, STRSLICE_LIT(S_F64), sizeof(double),   alignof(double),   TYPE_KIND_FLOAT, true,  9 };
-    g_type_bool = (type_t){ &VTABLE_BOOL, STRSLICE_LIT(S_BOOL), sizeof(bool),     alignof(bool),     TYPE_KIND_BOOL, true, 10 };
-    g_type_str  = (type_t){ &VTABLE_STR,  STRSLICE_LIT(S_STR),  sizeof(const char *), alignof(const char *), TYPE_KIND_STR,  true, 11 };
-    g_type_void = (type_t){ &VTABLE_VOID, STRSLICE_LIT(S_VOID), 0, 1, TYPE_KIND_VOID, true, 12 };
-    g_type_type = (type_t){ &VTABLE_TYPE, STRSLICE_LIT(S_TYPE), sizeof(const type_t*), alignof(const type_t*), TYPE_KIND_TYPE, true, 13 };
-    g_type_func.base = (type_t){ &VTABLE_FUNC, STRSLICE_LIT(S_FUNC), sizeof(func_t*), alignof(func_t*), TYPE_KIND_FUNC, true, 14 };
+       id 按 0..14 固定（vm_register_builtin_types 与 LOAD_TYPE 内建段一致）。
+       ownership = OWN_NONE（内建标量无所有权修饰）。 */
+    g_type_i8   = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I8),  sizeof(int8_t),   alignof(int8_t),   TYPE_KIND_INT,  OWN_NONE, true,  0 };
+    g_type_i16  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I16), sizeof(int16_t),  alignof(int16_t),  TYPE_KIND_INT,  OWN_NONE, true,  1 };
+    g_type_i32  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I32), sizeof(int32_t),  alignof(int32_t),  TYPE_KIND_INT,  OWN_NONE, true,  2 };
+    g_type_i64  = (type_t){ &VTABLE_INT_SIGNED,  STRSLICE_LIT(S_I64), sizeof(int64_t),  alignof(int64_t),  TYPE_KIND_INT,  OWN_NONE, true,  3 };
+    g_type_u8   = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U8),  sizeof(uint8_t),   alignof(uint8_t),  TYPE_KIND_INT,  OWN_NONE, true,  4 };
+    g_type_u16  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U16), sizeof(uint16_t),  alignof(uint16_t), TYPE_KIND_INT,  OWN_NONE, true,  5 };
+    g_type_u32  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U32), sizeof(uint32_t),  alignof(uint32_t), TYPE_KIND_INT,  OWN_NONE, true,  6 };
+    g_type_u64  = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_U64), sizeof(uint64_t),  alignof(uint64_t), TYPE_KIND_INT,  OWN_NONE, true,  7 };
+    g_type_f32  = (type_t){ &VTABLE_FLOAT, STRSLICE_LIT(S_F32), sizeof(float),    alignof(float),    TYPE_KIND_FLOAT, OWN_NONE, true,  8 };
+    g_type_f64  = (type_t){ &VTABLE_FLOAT, STRSLICE_LIT(S_F64), sizeof(double),   alignof(double),   TYPE_KIND_FLOAT, OWN_NONE, true,  9 };
+    g_type_bool = (type_t){ &VTABLE_BOOL, STRSLICE_LIT(S_BOOL), sizeof(bool),     alignof(bool),     TYPE_KIND_BOOL, OWN_NONE, true, 10 };
+    g_type_str  = (type_t){ &VTABLE_STR,  STRSLICE_LIT(S_STR),  sizeof(const char *), alignof(const char *), TYPE_KIND_STR,  OWN_NONE, true, 11 };
+    g_type_void = (type_t){ &VTABLE_VOID, STRSLICE_LIT(S_VOID), 0, 1, TYPE_KIND_VOID, OWN_NONE, true, 12 };
+    g_type_type = (type_t){ &VTABLE_TYPE, STRSLICE_LIT(S_TYPE), sizeof(const type_t*), alignof(const type_t*), TYPE_KIND_TYPE, OWN_NONE, true, 13 };
+    g_type_func.base = (type_t){ &VTABLE_FUNC, STRSLICE_LIT(S_FUNC), sizeof(func_t*), alignof(func_t*), TYPE_KIND_FUNC, OWN_NONE, true, 14 };
 
     /* error_data_t 内联在 value data 块中 */
     g_type_error = (type_t){ &VTABLE_ERROR, STRSLICE_LIT(S_ERROR),
                              sizeof(error_data_t), alignof(error_data_t),
-                             TYPE_KIND_ERROR, true, 15 };
+                             TYPE_KIND_ERROR, OWN_NONE, true, 15 };
 
     /* interrupt_data_t 内联在 value data 块中（引擎级控制流哨兵） */
     g_type_interrupt = (type_t){ &VTABLE_INTERRUPT, STRSLICE_LIT(S_INTERRUPT),
                                  sizeof(interrupt_data_t), alignof(interrupt_data_t),
-                                 TYPE_KIND_INTERRUPT, true, 16 };
+                                 TYPE_KIND_INTERRUPT, OWN_NONE, true, 16 };
 
     /* opaque（≈ C void*，m3-design §8.4）：指针值 = 裸指针。内建单例，
        无开放构造阶段（与 error/interrupt 同族，type_seal 槽位 NULL）。 */
     g_type_opaque = (type_t){ &VTABLE_OPAQUE, STRSLICE_LIT(S_OPAQUE),
                               sizeof(void *), alignof(void *),
-                              TYPE_KIND_OPAQUE, true, 17 };
+                              TYPE_KIND_OPAQUE, OWN_NONE, true, 17 };
 
     /* module（M5）：模块命名空间值。data = module_t*（借用，不拥有）。
      * 不可实例化/赋值/传递——仅由 IMPORT 指令内部构造。内建单例，
      * 无开放构造阶段。不登记进 global scope（模块类型不是用户可引用的类型名）。 */
     g_type_module = (type_t){ &VTABLE_MODULE, STRSLICE_LIT(S_MODULE),
                               sizeof(void *), alignof(void *),
-                              TYPE_KIND_MODULE, true, 18 };
+                              TYPE_KIND_MODULE, OWN_NONE, true, 18 };
 
     vm->type_i8   = &g_type_i8;
     vm->type_i16  = &g_type_i16;

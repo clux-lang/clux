@@ -16,8 +16,8 @@
  * 切片类型（m4-design §1/§10）
  *
  * 切片 = 胖指针 { void *ptr; uint64_t len; }，与指针对齐但多一个 len 字段。
- * 三种所有权修饰对应三个独立 type kind（own/ref/fatal），运行期零标志
- * （同 M3 §13.2）。不存在 share/weak 切片。
+ * 三种所有权修饰对应三个独立 type 实例（own/ref/fatal，由 type_t.ownership 区分），
+ * 运行期零标志（同 M3 §13.2）。不存在 share/weak 切片。
  *
  * own []T   → 总拥有堆块，dispose 释放（make 产物接管后）
  * ref []T   → 总借用，dispose 跳过
@@ -62,9 +62,8 @@ static void slice_free_heap(vm_t *vm, const value_t *v) {
     if (!t) return;
     slice_value_t *sv = (slice_value_t *)value_data(v);
     if (!sv || !sv->ptr) return;
-    switch (t->kind) {
-    case TYPE_KIND_SLICE_OWN:
-    case TYPE_KIND_SLICE_FATAL: {
+    if (!type_is_slice(t)) return;
+    if (t->ownership == OWN_OWN || t->ownership == OWN_FATAL) {
         /* 递归释放元素内嵌 own 字段，再释放堆块 */
         const type_t *et = slice_type_elem(t);
         if (et) slice_free_elems(vm, et, sv->ptr, sv->len);
@@ -72,11 +71,8 @@ static void slice_free_heap(vm_t *vm, const value_t *v) {
         sv->ptr = NULL;
         sv->len = 0;
         allocator_free(vm->alloc, &heap);
-        break;
     }
-    default:
-        break;  /* ref：无堆块 */
-    }
+    /* ref：无堆块 */
 }
 
 /* ---- 索引读取辅助 ---- */
@@ -105,8 +101,7 @@ static value_t *slice_clone(vm_t *vm, value_t *v) {
     const type_t *t = value_type(v);
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
 
-    switch (t->kind) {
-    case TYPE_KIND_SLICE_OWN: {
+    if (t->ownership == OWN_OWN) {
         /* 深拷贝：分配新堆块 + 逐元素克隆 */
         const type_t *et = slice_type_elem(t);
         if (!et) return value_make_error(vm, "slice: missing elem type");
@@ -126,17 +121,15 @@ static value_t *slice_clone(vm_t *vm, value_t *v) {
         }
         return slice_make_value(vm, t, new_heap, sv->len);
     }
-    case TYPE_KIND_SLICE_FATAL: {
+    if (t->ownership == OWN_FATAL) {
         /* 转移语义：新值接管 (ptr, len)，源置空 */
         value_t *nv = slice_make_value(vm, t, sv->ptr, sv->len);
         ((slice_value_t *)value_data(v))->ptr = NULL;
         ((slice_value_t *)value_data(v))->len = 0;
         return nv;
     }
-    default:
-        /* ref：浅拷贝 ptr+len（借用） */
-        return slice_make_value(vm, t, sv->ptr, sv->len);
-    }
+    /* ref：浅拷贝 ptr+len（借用） */
+    return slice_make_value(vm, t, sv->ptr, sv->len);
 }
 
 static value_t *slice_assign(vm_t *vm, value_t *dst, value_t *src) {
@@ -270,15 +263,15 @@ static value_t *slice_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
 
     /* own → ref 借用（同 elem 的 own → ref，§3.2）：复制 ptr+len，不释放 */
-    if (src->kind == TYPE_KIND_SLICE_OWN && target &&
-        target->kind == TYPE_KIND_SLICE_REF &&
+    if (src->ownership == OWN_OWN && target &&
+        target->ownership == OWN_REF &&
         slice_type_elem(src) == slice_type_elem(target)) {
         return slice_make_value(vm, target, sv->ptr, sv->len);
     }
 
     /* fatal → own 接管（§3.3）：新值接管 (ptr,len)，源置空防双释放 */
-    if (src->kind == TYPE_KIND_SLICE_FATAL && target &&
-        target->kind == TYPE_KIND_SLICE_OWN &&
+    if (src->ownership == OWN_FATAL && target &&
+        target->ownership == OWN_OWN &&
         slice_type_elem(src) == slice_type_elem(target)) {
         value_t *nv = slice_make_value(vm, target, sv->ptr, sv->len);
         ((slice_value_t *)value_data(v))->ptr = NULL;
@@ -287,8 +280,8 @@ static value_t *slice_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     }
 
     /* ref → ref（copy = 浅拷贝 ptr+len） */
-    if (src->kind == TYPE_KIND_SLICE_REF && target &&
-        target->kind == TYPE_KIND_SLICE_REF &&
+    if (src->ownership == OWN_REF && target &&
+        target->ownership == OWN_REF &&
         slice_type_elem(src) == slice_type_elem(target)) {
         return slice_make_value(vm, target, sv->ptr, sv->len);
     }
@@ -318,35 +311,29 @@ static value_t *slice_explicit_cast(vm_t *vm, value_t *v, const type_t *target) 
 static bool slice_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (a == b) return true;
     if (!b) return false;
-    if (a->kind != b->kind) return false;
-    if (a->kind != TYPE_KIND_SLICE_OWN && a->kind != TYPE_KIND_SLICE_REF &&
-        a->kind != TYPE_KIND_SLICE_FATAL) {
-        return false;
-    }
+    if (!type_is_slice(a) || !type_is_slice(b)) return false;
+    if (a->ownership != b->ownership) return false;
     return type_equal(vm, slice_type_elem(a), slice_type_elem(b));
 }
 
 static bool slice_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
     if (sub == sup) return true;
     if (!sup) return false;
-    if (sub->kind != TYPE_KIND_SLICE_OWN && sub->kind != TYPE_KIND_SLICE_REF &&
-        sub->kind != TYPE_KIND_SLICE_FATAL) {
-        return false;
-    }
-    if (sub->kind != sup->kind) return false;
+    if (!type_is_slice(sub)) return false;
+    if (sub->ownership != sup->ownership) return false;
     return type_extends(vm, slice_type_elem(sub), slice_type_elem(sup));
 }
 
 /* ---- 类型名： "own []T" / "ref []T" / "fatal []T" ---- */
 
-static char *slice_name(allocator_t *alloc, type_kind_t kind,
+static char *slice_name(allocator_t *alloc, ownership_t ownership,
                         const type_t *elem) {
     const char *owner;
-    switch (kind) {
-    case TYPE_KIND_SLICE_OWN:   owner = "own ";   break;
-    case TYPE_KIND_SLICE_REF:   owner = "ref ";   break;
-    case TYPE_KIND_SLICE_FATAL: owner = "fatal "; break;
-    default:                    owner = "";        break;
+    switch (ownership) {
+    case OWN_OWN:   owner = "own ";   break;
+    case OWN_REF:   owner = "ref ";   break;
+    case OWN_FATAL: owner = "fatal "; break;
+    default:        owner = "";        break;
     }
     size_t ol = strlen(owner);
     size_t bl = elem && elem->name.ptr ? elem->name.len : 0;
@@ -415,27 +402,28 @@ const vtable_t VTABLE_SLICE_FATAL = {
  * 两遍构造协议
  * =========================================================================== */
 
-static slice_type_t *slice_type_create_open(vm_t *vm, type_kind_t kind) {
+static slice_type_t *slice_type_create_open(vm_t *vm, ownership_t ownership) {
     slice_type_t *st = (slice_type_t *)allocator_new_ex(
         vm->alloc, "slice_type_t", sizeof(slice_type_t), NULL, NULL, NULL, 1);
     if (!st) panic("vm: out of memory allocating slice type");
     memset(st, 0, sizeof(slice_type_t));
-    switch (kind) {
-    case TYPE_KIND_SLICE_OWN:   st->base.vtable = &VTABLE_SLICE_OWN;   break;
-    case TYPE_KIND_SLICE_REF:   st->base.vtable = &VTABLE_SLICE_REF;   break;
-    case TYPE_KIND_SLICE_FATAL: st->base.vtable = &VTABLE_SLICE_FATAL; break;
+    switch (ownership) {
+    case OWN_OWN:   st->base.vtable = &VTABLE_SLICE_OWN;   break;
+    case OWN_REF:   st->base.vtable = &VTABLE_SLICE_REF;   break;
+    case OWN_FATAL: st->base.vtable = &VTABLE_SLICE_FATAL; break;
     default:
-        panic("vm: invalid slice ownership kind");
+        panic("vm: invalid slice ownership");
         break;
     }
-    st->base.kind = kind;
+    st->base.kind = TYPE_KIND_SLICE;
+    st->base.ownership = ownership;
     /* name/size/align 由 seal 按 elem 填充；elem_type 由 SET_TYPE 设定 */
     return st;
 }
 
-const type_t *type_slice_push(vm_t *vm, type_kind_t kind) {
+const type_t *type_slice_push(vm_t *vm, ownership_t ownership) {
     if (!vm) return NULL;
-    slice_type_t *st = slice_type_create_open(vm, kind);
+    slice_type_t *st = slice_type_create_open(vm, ownership);
     vec_push(vm->stack, vm->alloc, type_as_value(vm, &st->base));
     return &st->base;
 }
@@ -443,19 +431,13 @@ const type_t *type_slice_push(vm_t *vm, type_kind_t kind) {
 void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem) {
     (void)vm;
     if (!t || type_is_sealed(t)) return;
-    if (t->kind != TYPE_KIND_SLICE_OWN && t->kind != TYPE_KIND_SLICE_REF &&
-        t->kind != TYPE_KIND_SLICE_FATAL) {
-        return;
-    }
+    if (!type_is_slice(t)) return;
     ((slice_type_t *)t)->elem_type = elem;
 }
 
 const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t) return NULL;
-    if (t->kind != TYPE_KIND_SLICE_OWN && t->kind != TYPE_KIND_SLICE_REF &&
-        t->kind != TYPE_KIND_SLICE_FATAL) {
-        return NULL;
-    }
+    if (!type_is_slice(t)) return NULL;
     if (type_is_sealed(t)) return t;
 
     slice_type_t *st = (slice_type_t *)t;
@@ -463,12 +445,12 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->slice_types) vm->slice_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* dedup intern by (kind, elem_type) */
+    /* dedup intern by (ownership, elem_type) */
     size_t n = vec_len(vm->slice_types);
     for (size_t i = 0; i < n; i++) {
         const slice_type_t *other = (const slice_type_t *)vec_get(vm->slice_types, i);
         if (other && other != st && type_is_sealed(&other->base) &&
-            other->base.kind == st->base.kind &&
+            other->base.ownership == st->base.ownership &&
             other->elem_type == st->elem_type) {
             if (st->base.name.ptr) {
                 char *np = (char *)st->base.name.ptr;
@@ -483,7 +465,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     st->base.align  = _Alignof(slice_value_t);
     st->base.sealed = true;
 
-    char *name = slice_name(vm->alloc, st->base.kind, st->elem_type);
+    char *name = slice_name(vm->alloc, st->base.ownership, st->elem_type);
     if (!name) panic("vm: out of memory allocating slice type name");
     st->base.name = (strslice_t){ name, strlen(name) };
 
@@ -491,14 +473,14 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     return &st->base;
 }
 
-const type_t *type_slice_intern(vm_t *vm, type_kind_t kind,
+const type_t *type_slice_intern(vm_t *vm, ownership_t ownership,
                                 const type_t *elem) {
     if (!vm || !elem) return NULL;
-    if (kind != TYPE_KIND_SLICE_OWN && kind != TYPE_KIND_SLICE_REF &&
-        kind != TYPE_KIND_SLICE_FATAL) {
+    if (ownership != OWN_OWN && ownership != OWN_REF &&
+        ownership != OWN_FATAL) {
         return NULL;
     }
-    slice_type_t *st = slice_type_create_open(vm, kind);
+    slice_type_t *st = slice_type_create_open(vm, ownership);
     st->elem_type = elem;
     return type_slice_seal(vm, &st->base);
 }

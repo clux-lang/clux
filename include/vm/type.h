@@ -10,11 +10,37 @@ extern "C" {
 #include <stddef.h>
 
 /**
+ * ownership_t: 所有权修饰（type_t.ownership）
+ *
+ * 正交于 type_kind_t 的所有权属性。指针（PTR）和切片（SLICE）支持全部
+ * 五种修饰；其他类型（struct/tuple/array/...）恒为 OWN_NONE，唯一例外
+ * 是 OWN_FATAL——move/clone 产物的将亡值（fatal T），仅允许出现在函数
+ * 返回类型标注，其他位置（sizeof/typeof/变量声明/参数...）均为编译错误。
+ *
+ *   OWN_NONE  — 无所有权修饰（标量/struct/tuple/... 的默认值）
+ *   OWN_OWN   — 独占所有权（own *T / own []T，作用域退出自动销毁）
+ *   OWN_REF   — 借用引用（ref *T / ref []T，无所有权，可 copy）
+ *   OWN_FATAL — 将亡值（fatal *T / fatal []T / fatal T，move/clone 产物，
+ *               禁止命名；非指针/切片的 fatal T 只允许在返回类型）
+ *   OWN_SHARE — RC 强引用（share *T，§12）
+ *   OWN_WEAK  — RC 弱引用（weak *T，§12）
+ */
+typedef enum ownership_t {
+    OWN_NONE  = 0,
+    OWN_OWN,
+    OWN_REF,
+    OWN_FATAL,
+    OWN_SHARE,
+    OWN_WEAK,
+} ownership_t;
+
+/**
  * type_kind_t: 类型粗粒度分类（type_t.kind）
  *
  * 鸭子类型判断的基础：复合/修饰类型按 kind 而非实例指针分类。
  * 粗粒度（INT/FLOAT 覆盖全部宽度变体），细粒度差异由 name/size 承载。
- * M2 预留 STRUCT/ARRAY/TUPLE/ENUM/CUNION。
+ * 所有权修饰（own/ref/fatal/share/weak）不再编码在 kind 中——改为
+ * type_t.ownership 正交字段（见 ownership_t）。
  */
 typedef enum type_kind_t {
     TYPE_KIND_VOID     = 0,
@@ -36,17 +62,10 @@ typedef enum type_kind_t {
     TYPE_KIND_ENUM,
     TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
-    /* ---- M3 指针与所有权段（m3-design §3/§12）---- */
-    TYPE_KIND_PTR_OWN,   /* own *T：独占所有权指针（作用域退出自动销毁，Step B） */
-    TYPE_KIND_PTR_REF,   /* ref *T：借用指针（无所有权，借用检查 Step B） */
-    TYPE_KIND_PTR_FATAL, /* fatal *T：临时指针（表达式结束未被 own 接收 = 编译错，Step B） */
-    TYPE_KIND_PTR_SHARE, /* share *T：引用计数强指针（RC 系，§12） */
-    TYPE_KIND_PTR_WEAK,  /* weak *T：引用计数弱指针（从 share 派生，§12） */
+    /* ---- 指针与切片（所有权由 type_t.ownership 正交修饰） ---- */
+    TYPE_KIND_PTR,       /* *T：指针（own/ref/fatal/share/weak 由 ownership 区分） */
+    TYPE_KIND_SLICE,     /* []T：切片胖指针（own/ref/fatal 由 ownership 区分） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
-    /* ---- M4 切片段（m4-design §1/§10，与指针对齐的三种所有权修饰） ---- */
-    TYPE_KIND_SLICE_OWN,   /* own []T：拥有堆分配的胖指针（作用域退出自动释放） */
-    TYPE_KIND_SLICE_REF,   /* ref []T：借用胖指针（不拥有，复制 ptr+len） */
-    TYPE_KIND_SLICE_FATAL, /* fatal []T：将亡值胖指针（move/clone 产物，禁止命名） */
     TYPE_KIND_MODULE,    /* 模块命名空间值（M5，data=module_t*，不可实例化/赋值/传递） */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
@@ -80,6 +99,7 @@ typedef struct type_t {
     size_t          size;       /* 该类型数据的字节大小 */
     size_t          align;      /* 该类型数据的对齐要求 */
     type_kind_t     kind;       /* 粗粒度分类（鸭子类型判断用） */
+    ownership_t     ownership;  /* 所有权修饰（own/ref/fatal/share/weak，正交于 kind） */
     bool            sealed;     /* 是否已密封（构造完成后置位；内置基础类型创建即 true） */
     uint32_t        id;         /* 类型全局唯一 id：内建类型固定（vm_init_builtins 按序），
                                    程序类型由编译器按 sema 解析的实例指针去重分配。
@@ -148,8 +168,9 @@ typedef struct enum_variant_t {
  * 五种所有权修饰：own *T（独占，作用域退出自动销毁）、ref *T（借用，
  * 无所有权）、fatal *T（临时，表达式结束未被 own 接收 = 编译错误）、
  * share *T（RC 强引用，copy = 计数+1）、weak *T（RC 弱引用，从 share
- * 派生，经 upgrade 升级为 share）。同一 base_type 的五种指针是
- * 五个独立 intern 实例（kind 区分所有权）。
+ * 派生，经 upgrade 升级为 share）。所有权由 type_t.ownership 字段编码
+ * （ownership_t），同一 base_type 的五种指针是五个独立 intern 实例
+ * （ownership 区分所有权）。
  *
  * 指针类型的 size/align 恒定（指针宽），密封不依赖 base_type 布局——
  * hoist 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 base，不递归），
@@ -163,8 +184,8 @@ typedef struct ptr_type_t {
 /**
  * slice_type_t: 切片类型（type_t 的扩展，m4-design §1/§10）
  *
- * 与指针同构——胖指针 { ptr, len: u64 }。三种所有权修饰对应三个独立
- * type kind（TYPE_KIND_SLICE_OWN/REF/FATAL），同一 elem_type 的三种切片
+ * 与指针同构——胖指针 { ptr, len: u64 }。三种所有权修饰（own/ref/fatal）
+ * 由 type_t.ownership 字段编码（ownership_t），同一 elem_type 的三种切片
  * 是三个独立 intern 实例。不存在 share/weak 切片。
  *
  * size = sizeof(slice_value_t) = 2 * sizeof(void*)（16 字节/64 位平台）
@@ -327,6 +348,50 @@ typedef struct cunion_type_t {
     cunion_member_t *members;  /* member 表（seal 时拷贝，vm 拥有） */
     size_t           member_count;
 } cunion_type_t;
+
+/* ---- 所有权辅助查询（type_t.ownership 的语义判断） ---- */
+
+/** 类型是否为 own 修饰（own *T / own []T）。 */
+static inline bool type_is_own(const type_t *t) {
+    return t && t->ownership == OWN_OWN;
+}
+
+/** 类型是否为 ref 修饰（ref *T / ref []T）。 */
+static inline bool type_is_ref(const type_t *t) {
+    return t && t->ownership == OWN_REF;
+}
+
+/** 类型是否为 fatal 修饰（fatal *T / fatal []T / fatal T）。 */
+static inline bool type_is_fatal(const type_t *t) {
+    return t && t->ownership == OWN_FATAL;
+}
+
+/** 类型是否为 share 修饰（share *T，RC 系，§12）。 */
+static inline bool type_is_share(const type_t *t) {
+    return t && t->ownership == OWN_SHARE;
+}
+
+/** 类型是否为 weak 修饰（weak *T，RC 系，§12）。 */
+static inline bool type_is_weak(const type_t *t) {
+    return t && t->ownership == OWN_WEAK;
+}
+
+/** 类型是否为指针（TYPE_KIND_PTR，任意所有权修饰）。 */
+static inline bool type_is_ptr(const type_t *t) {
+    return t && t->kind == TYPE_KIND_PTR;
+}
+
+/** 类型是否为切片（TYPE_KIND_SLICE，任意所有权修饰）。 */
+static inline bool type_is_slice(const type_t *t) {
+    return t && t->kind == TYPE_KIND_SLICE;
+}
+
+/** 类型是否拥有堆资源（own/share/weak 修饰的指针或切片，需递归释放/增减计数）。 */
+static inline bool type_owns_resource(const type_t *t) {
+    return t && (t->ownership == OWN_OWN ||
+                 t->ownership == OWN_SHARE ||
+                 t->ownership == OWN_WEAK);
+}
 
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {

@@ -436,18 +436,14 @@ const char *ffi_c_abi_reject_reason(const type_t *t) {
     case TYPE_KIND_STRUCT:
     case TYPE_KIND_CUNION:
     case TYPE_KIND_VOID: /* 仅作返回类型；参数位置的检查由调用方负责 */
-    case TYPE_KIND_PTR_WEAK:
-    case TYPE_KIND_PTR_FATAL:
-    case TYPE_KIND_PTR_REF:
-    case TYPE_KIND_PTR_SHARE:
+    case TYPE_KIND_PTR:
+        /* weak/fatal/ref/share 指针都是 C ABI 兼容的指针宽度 */
         return NULL;
     case TYPE_KIND_OPTION:
         return "option has no C representation";
     case TYPE_KIND_UNION:
         return "tag union has no C representation (use cunion for C unions)";
-    case TYPE_KIND_SLICE_OWN:
-    case TYPE_KIND_SLICE_FATAL:
-    case TYPE_KIND_SLICE_REF:
+    case TYPE_KIND_SLICE:
         return "slice is a fat pointer (not C ABI)";
     case TYPE_KIND_TUPLE:
         return "tuple has no C representation";
@@ -584,11 +580,7 @@ const void *ffi_type_for(const type_t *t, const struct vm_t *vm, bool *out_owned
     uint32_t dk = 0;
     if (vm && ffi_data_kind_of(t, vm, &dk)) return ffi_data_ffi_type(dk);
     switch (t->kind) {
-    case TYPE_KIND_PTR_OWN:
-    case TYPE_KIND_PTR_REF:
-    case TYPE_KIND_PTR_FATAL:
-    case TYPE_KIND_PTR_SHARE:
-    case TYPE_KIND_PTR_WEAK:
+    case TYPE_KIND_PTR:
         return ffi_data_ffi_type(BCODE_FFI_DATA_PTR);
     case TYPE_KIND_ENUM: {
         const type_t *u = enum_type_underlying(t);

@@ -48,9 +48,7 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
         len = (uint64_t)alen;
         break;
     }
-    case TYPE_KIND_SLICE_OWN:
-    case TYPE_KIND_SLICE_REF:
-    case TYPE_KIND_SLICE_FATAL: {
+    case TYPE_KIND_SLICE: {
         /* 切片：运行期读胖指针 len 字段 */
         const slice_value_t *sval = (const slice_value_t *)value_data(sv);
         len = sval->len;

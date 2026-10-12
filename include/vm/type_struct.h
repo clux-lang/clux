@@ -140,6 +140,13 @@ bool type_struct_is_unique(const type_t *t);
 const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
                                  size_t count);
 
+/** 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，设
+ *  ownership，密封为新的 struct_type_t。与 base 同布局不同 ownership
+ *  （去重时 struct_same 按 ownership 区分）。用于 fatal Node
+ *  （ownership=OWN_FATAL）。 */
+const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
+                                                ownership_t ownership);
+
 /**
  * 结构兼容判断（鸭子类型，m2-design §2）：两 struct 类型字段名 + 字段类型
  * （type_equal，支持嵌套复合）+ 字段顺序完全一致即兼容——布局（offset/size/

@@ -322,21 +322,21 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        替换为 AST_TYPE_REF → LOAD_TYPE），此分支仅防御未替换场景。 */
     ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
 
-    /* ownership token → type_kind_t（与 sema.c 映射一致） */
-    type_kind_t kind = TYPE_KIND_SLICE_REF; /* 默认防御 */
+    /* ownership token → ownership_t（与 sema.c 映射一致；所有权正交于 kind） */
+    ownership_t own_tag = OWN_REF; /* 默认防御 */
     if (sl->ownership) {
       strslice_t own = token_strslice(sl->ownership);
       if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-        kind = TYPE_KIND_SLICE_OWN;
+        own_tag = OWN_OWN;
       } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-        kind = TYPE_KIND_SLICE_REF;
+        own_tag = OWN_REF;
       } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-        kind = TYPE_KIND_SLICE_FATAL;
+        own_tag = OWN_FATAL;
       }
     }
 
     bcode_write_op(c->bc, BCODE_PUSH_SLICE);   /* 栈: [open_slice_type] */
-    bcode_write_u8(c->bc, (uint8_t)kind);
+    bcode_write_u8(c->bc, (uint8_t)own_tag);
     st_push(c, 1);
 
     uint32_t tid = temp_type_id(c, type_expr);
