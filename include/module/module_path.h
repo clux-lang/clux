@@ -58,6 +58,21 @@ char *module_path_resolve(allocator_t *alloc, strslice_t raw,
 /** 模块文件是否存在且可读（用于 "module not found" 精确诊断）。 */
 bool module_path_exists(const char *path);
 
+/**
+ * 统一 import 路径解析：相对路径 + 非路径（deps 包导入）。
+ *
+ *   - 相对路径（./ ../）：同 module_path_resolve，相对 importer 拼接 + 补 .cx。
+ *   - 非路径（如 "std"、"std/array"）：从 importer 向上查找 clux.mod 得到包根，
+ *     再在 deps/<第一段>/ 下解析依赖包的 clux.mod 得到入口文件规范路径。
+ *
+ * 返回 alloc 分配、NUL 结尾的规范路径；失败返回 NULL（*out_kind 仍有效）。
+ * 对于非路径 import，*out_kind 设为 MODULE_IMPORT_NON_PATH（即使成功），
+ * 以便调用方区分诊断措辞。
+ */
+char *module_resolve_import(allocator_t *alloc, strslice_t raw,
+                            const char *importer_path,
+                            module_import_kind_t *out_kind);
+
 #ifdef __cplusplus
 }
 #endif

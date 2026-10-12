@@ -1,4 +1,5 @@
 #include "cmd/format.h"
+#include "cmd/package.h"
 #include "cmd/path.h"
 #include "core/allocator.h"
 #include "core/stream.h"
@@ -95,10 +96,59 @@ int cmd_format(const cmd_args_t *args) {
     }
 
     const char *path = (np > 0) ? pos[0] : NULL;
+
+    /* 无文件参数：从 clux.mod 查找包，格式化所有 .cx 源文件 */
     if (!path) {
-        fprintf(stderr, "format: missing input file\n");
-        fputs(USAGE, stderr);
-        return 1;
+        char *root = NULL;
+        char *entry = NULL;
+        int rc = cmd_resolve_entry(NULL, &entry, &root);
+        if (rc != 0) return rc;
+        free(entry);
+
+        /* 收集包内所有 .cx 文件 */
+        char **sources = NULL;
+        size_t nsrc = 0;
+        if (cmd_collect_sources(root, &sources, &nsrc) != 0) {
+            fprintf(stderr, "format: failed to collect source files\n");
+            free(root);
+            return 1;
+        }
+
+        /* 逐个格式化 */
+        int rc_total = 0;
+        for (size_t i = 0; i < nsrc; i++) {
+            allocator_t *a = create_allocator(malloc, free);
+            if (!a) { rc_total = 1; break; }
+
+            size_t flen = 0;
+            char *src = read_all(a, sources[i], &flen);
+            if (!src) {
+                fprintf(stderr, "format: cannot read '%s'\n", sources[i]);
+                delete_allocator(&a);
+                rc_total = 1;
+                continue;
+            }
+
+            size_t out_len = 0;
+            char *formatted = format_source(a, src, flen, &out_len);
+            if (!formatted) {
+                rc_total = 1;
+            } else if (write_all(sources[i], formatted, out_len) != 0) {
+                fprintf(stderr, "format: cannot write '%s'\n", sources[i]);
+                rc_total = 1;
+            } else {
+                fprintf(stdout, "formatted %s\n", sources[i]);
+            }
+
+            allocator_free(a, (void **)&formatted);
+            allocator_free(a, (void **)&src);
+            delete_allocator(&a);
+        }
+
+        for (size_t i = 0; i < nsrc; i++) free(sources[i]);
+        free(sources);
+        free(root);
+        return rc_total;
     }
 
     allocator_t *alloc = create_allocator(malloc, free);

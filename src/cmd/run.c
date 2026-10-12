@@ -1,44 +1,96 @@
 #include "cmd/run.h"
+#include "cmd/package.h"
 #include "driver/driver.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* clux run：运行 clux 程序。
  *
- *   clux run <file.cx>    编译并执行源码
- *   clux run <file.cxb>   加载并执行二进制字节码
+ *   clux run                  从 clux.mod 的 entry 查找入口文件
+ *   clux run <subpkg>         多 entry 项目指定子包名
+ *   clux run <file.cx>        编译并执行指定源码文件
+ *   clux run <file.cxb>       加载并执行二进制字节码
  *
- * 二者由**内容**区分：以 "CXBC" 二进制头开头者当字节码执行，否则当源码
- * 编译执行。因此无需任何模式选项——文件叫什么名字、什么扩展名都不影响。
+ * 无文件名参数时自动查找 clux.mod：
+ *   - 单 entry → 直接用 entry 路径
+ *   - 多 entry → 第一个位置参数当子包名（如 std/array）
  *
- * `.cxs` 汇编文本既没有二进制头、也不是合法源码，会按其真实内容走源码
- * 编译路径并报编译错误（run 不感知汇编文本这一中间态，见 clux asm）。 */
+ * 文件参数以 .cx 或 .cxb 结尾时直接当文件处理，不查 clux.mod。
+ * 二进制/源码由**内容**区分：以 "CXBC" 二进制头开头者当字节码执行。 */
 
 static const char *USAGE =
-    "usage: clux run <file>\n";
+    "usage: clux run [subpkg|<file>]\n";
+
+/* 判断字符串是否像文件路径：
+ *   - 以 "./" 或 "../" 开头（相对路径）
+ *   - 以 "/" 开头（POSIX 绝对路径）
+ *   - 以盘符开头如 "C:/"（Windows 绝对路径）
+ * 子包名如 "std/array" 不匹配上述任何条件 → 不是文件 */
+static int looks_like_file(const char *s) {
+    if (!s || !s[0]) return 0;
+    /* 相对路径：./ 或 ../ */
+    if (s[0] == '.') {
+        if (s[1] == '/') return 1;
+        if (s[1] == '.' && s[2] == '/') return 1;
+    }
+    /* POSIX 绝对路径 */
+    if (s[0] == '/') return 1;
+    /* Windows 绝对路径：盘符:/ 或盘符:\ */
+    if (((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) &&
+        s[1] == ':' && (s[2] == '/' || s[2] == '\\'))
+        return 1;
+    return 0;
+}
 
 int cmd_run(const cmd_args_t *args) {
     if (!args) return 1;
 
-    const char *path = cmd_args_pos(args, 0);
-    if (!path) {
-        fprintf(stderr, "run: missing input file\n");
-        fputs(USAGE, stderr);
-        return 1;
+    const char *arg0 = cmd_args_pos(args, 0);
+
+    /* 无参数：从 clux.mod 查找入口 */
+    if (!arg0) {
+        char *entry = NULL;
+        int rc = cmd_resolve_entry(NULL, &entry, NULL);
+        if (rc != 0) return rc;
+
+        /* 内容判定 */
+        if (driver_detect_input(entry) == DRIVER_INPUT_CXB) {
+            rc = driver_run_bin(entry);
+        } else {
+            rc = driver_run_file(entry);
+        }
+        free(entry);
+        return rc;
     }
 
-    /* 单横线选项（如 -asm）不是 clux 的选项语法：cmd.c 只识别 `--`，
-     * 它们会落到位置参数。给出明确提示，避免被误当作文件名。 */
-    if (path[0] == '-' && path[1] != '\0') {
+    /* 单横线选项 → 报错 */
+    if (arg0[0] == '-' && arg0[1] != '\0') {
         fprintf(stderr,
-                "run: unknown option '%s' (clux options use '--')\n", path);
+                "run: unknown option '%s' (clux options use '--')\n", arg0);
         fputs(USAGE, stderr);
         return 1;
     }
 
-    /* 内容判定：带 CXBC 二进制头 → 字节码执行；否则源码编译执行 */
-    if (driver_detect_input(path) == DRIVER_INPUT_CXB) {
-        return driver_run_bin(path);
+    /* 看起来像文件路径 → 直接当文件处理 */
+    if (looks_like_file(arg0)) {
+        if (driver_detect_input(arg0) == DRIVER_INPUT_CXB) {
+            return driver_run_bin(arg0);
+        }
+        return driver_run_file(arg0);
     }
-    return driver_run_file(path);
+
+    /* 非文件路径 → 当子包名从 clux.mod 查找 */
+    char *entry = NULL;
+    int rc = cmd_resolve_entry(arg0, &entry, NULL);
+    if (rc != 0) return rc;
+
+    if (driver_detect_input(entry) == DRIVER_INPUT_CXB) {
+        rc = driver_run_bin(entry);
+    } else {
+        rc = driver_run_file(entry);
+    }
+    free(entry);
+    return rc;
 }

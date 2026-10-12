@@ -2138,7 +2138,7 @@ static value_t *op_import(vm_t *vm, bytecode_t *bc, size_t *pc) {
 
     module_import_kind_t kind = MODULE_IMPORT_MODULE;
     char *canonical =
-        module_path_resolve(vm->alloc, raw, bc->module_path, &kind);
+        module_resolve_import(vm->alloc, raw, bc->module_path, &kind);
     if (!canonical) {
         char msg[1152];
         snprintf(msg, sizeof(msg), "exec: cannot resolve module path '%.*s'",

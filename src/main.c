@@ -18,13 +18,17 @@
 static const cmd_t g_cmds[] = {
     {
         .name = "format",
-        .usage = "clux format <file.cx> [-o PATH]",
+        .usage = "clux format [<file.cx> | -o PATH]",
         .help =
             "Format clux source code.\n"
             "\n"
+            "  clux format                    format all .cx files in package\n"
             "  clux format <file.cx>          format in place\n"
             "  clux format <file.cx> -o PATH  write result to PATH\n"
             "  clux format -                  read stdin, write stdout\n"
+            "\n"
+            "Without a file argument, finds clux.mod and formats every .cx\n"
+            "source file in the package (recursively, excluding deps/).\n"
             "\n"
             "Style: 4-space indent, K&R braces ('{' on the same line,\n"
             "'}' on its own line, empty block stays '{}'), newline after ';'.",
@@ -42,9 +46,17 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "run",
-        .usage = "clux run <file>",
+        .usage = "clux run [subpkg|<file>]",
         .help =
             "Run a clux program.\n"
+            "\n"
+            "  clux run                  find entry from clux.mod\n"
+            "  clux run <subpkg>         run a sub-package (multi-entry package)\n"
+            "  clux run <file>           run a specific file directly\n"
+            "\n"
+            "Without a file argument, finds clux.mod and resolves the entry.\n"
+            "A relative/absolute path is treated as a file; anything else is\n"
+            "a sub-package name.\n"
             "\n"
             "The input kind is decided by CONTENT, not by extension:\n"
             "  - starts with the CXBC binary header -> run as bytecode\n"

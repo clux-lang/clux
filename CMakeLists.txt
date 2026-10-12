@@ -41,7 +41,7 @@ clux_target_warnings(clux)
 # ---------------------------------------------------------------------------
 # Core library (allocator + runtime support)
 # ---------------------------------------------------------------------------
-add_library(clux_core STATIC src/core/allocator.c src/core/arena.c src/core/panic.c src/core/vec.c src/core/rbtree.c src/core/omap.c src/core/strmap.c src/core/stream.c src/core/string.c)
+add_library(clux_core STATIC src/core/allocator.c src/core/arena.c src/core/panic.c src/core/vec.c src/core/rbtree.c src/core/omap.c src/core/strmap.c src/core/stream.c src/core/string.c src/core/json.c)
 target_include_directories(clux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(clux_core PUBLIC ICU::uc ICU::i18n)
 clux_target_warnings(clux_core)
@@ -173,6 +173,7 @@ add_library(clux_cmd STATIC
     src/cmd/cmd.c
     src/cmd/format.c
     src/cmd/path.c
+    src/cmd/package.c
     src/cmd/build.c
     src/cmd/run.c
     src/cmd/bc.c
@@ -181,7 +182,7 @@ add_library(clux_cmd STATIC
     src/cmd/eval.c
 )
 target_include_directories(clux_cmd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_cmd PUBLIC clux_core clux_driver clux_ctfe ICU::uc icu_data_init)
+target_link_libraries(clux_cmd PUBLIC clux_core clux_driver clux_ctfe clux_module ICU::uc icu_data_init)
 clux_target_warnings(clux_cmd)
 
 target_link_libraries(clux PRIVATE

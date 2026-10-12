@@ -1,6 +1,7 @@
 #include "driver/driver.h"
 #include "driver/compile_module.h"
 #include "module/module_path.h"
+#include "module/package.h"
 #include "vm/bcode_graph.h"
 #include "core/allocator.h"
 #include "core/stream.h"
@@ -478,19 +479,21 @@ static struct module_t *driver_resolve_import(void *user, sema_t *sema,
     driver_import_ctx_t *c = (driver_import_ctx_t *)user;
     if (!c || !sema) return NULL;
 
-    /* 路径分类：只看路径形式，不嗅探扩展名。M5 只支持相对路径源码模块；
-       包导入与动态库绑定不在 M5 范围内（后者留给 M6，且应由显式语法表达）。 */
+    /* 路径分类：只看路径形式，不嗅探扩展名。
+       相对路径（./ ../）→ 源码模块，相对 importer 解析；
+       非路径（如 "std"、"std/array"）→ 包导入，从 deps/ 查找。 */
     module_import_kind_t kind = MODULE_IMPORT_MODULE;
-    char *canonical = module_path_resolve(c->alloc, raw, c->importer, &kind);
-    if (kind == MODULE_IMPORT_NON_PATH) {
-        diag_error(c->diag, sema_loc(sema, import_node),
-                   "import path must be relative (start with './' or '../'); "
-                   "package and dynamic-library imports are not supported in M5");
-        return NULL;
-    }
+    char *canonical = module_resolve_import(c->alloc, raw, c->importer, &kind);
+
     if (!canonical) {
-        diag_error(c->diag, sema_loc(sema, import_node),
-                   "out of memory resolving module path");
+        if (kind == MODULE_IMPORT_NON_PATH) {
+            diag_error(c->diag, sema_loc(sema, import_node),
+                       "dependency '%.*s' not found in deps/",
+                       (int)raw.len, raw.ptr);
+        } else {
+            diag_error(c->diag, sema_loc(sema, import_node),
+                       "out of memory resolving module path");
+        }
         return NULL;
     }
     if (!module_path_exists(canonical)) {

@@ -1,4 +1,6 @@
 #include "module/module_path.h"
+#include "module/package.h"
+#include "core/arena.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -212,4 +214,152 @@ bool module_path_exists(const char *path) {
     if (!fp) return false;
     fclose(fp);
     return true;
+}
+
+/* ---- 统一 import 解析（相对路径 + deps 包导入） ---- */
+
+/* 从 importer 路径向上查找含 clux.mod 的目录（alloc 分配返回）。 */
+static char *find_pkg_root(allocator_t *alloc, const char *importer) {
+    if (!importer) return NULL;
+    char cur[4096];
+    strncpy(cur, importer, sizeof(cur) - 1);
+    cur[sizeof(cur) - 1] = '\0';
+
+    for (int hop = 0; hop < 64; hop++) {
+        size_t clen = strlen(cur);
+        while (clen > 0 && (cur[clen - 1] == '/' || cur[clen - 1] == '\\'))
+            clen--;
+        cur[clen] = '\0';
+        if (clen == 0) break;
+
+        char test[4096];
+        if (clen + sizeof("/clux.mod") >= sizeof(test)) break;
+        memcpy(test, cur, clen);
+        test[clen] = '/';
+        memcpy(test + clen + 1, "clux.mod", sizeof("clux.mod"));
+
+        FILE *fp = fopen(test, "rb");
+        if (fp) {
+            fclose(fp);
+            char *dir = (char *)allocator_new_ex(
+                alloc, "pkg.root", clen + 1, NULL, NULL, NULL, 1);
+            if (!dir) return NULL;
+            memcpy(dir, cur, clen);
+            dir[clen] = '\0';
+            return dir;
+        }
+
+        /* 向上一级 */
+        size_t last_sep = (size_t)-1;
+        for (size_t i = 0; i < clen; i++) {
+            if (cur[i] == '/' || cur[i] == '\\') last_sep = i;
+        }
+        if (last_sep == (size_t)-1) break;
+        if (last_sep == 1 && cur[1] == ':') {
+            cur[2] = '\0';
+        } else if (last_sep == 0 && cur[0] == '/') {
+            cur[1] = '\0';
+        } else {
+            cur[last_sep] = '\0';
+        }
+        if (cur[0] == '\0') { cur[0] = '.'; cur[1] = '\0'; }
+    }
+    return NULL;
+}
+
+char *module_resolve_import(allocator_t *alloc, strslice_t raw,
+                            const char *importer_path,
+                            module_import_kind_t *out_kind) {
+    module_import_kind_t kind = module_import_classify(raw);
+    if (out_kind) *out_kind = kind;
+
+    if (kind == MODULE_IMPORT_MODULE) {
+        /* 相对路径：直接用 module_path_resolve */
+        return module_path_resolve(alloc, raw, importer_path, NULL);
+    }
+
+    /* 非路径 import：从 deps/ 查找依赖包 */
+    if (!alloc || !importer_path) return NULL;
+
+    /* 拆分第一段（依赖包名）和剩余（子包名） */
+    size_t first_slash = 0;
+    bool has_subpkg = false;
+    for (size_t i = 0; i < raw.len; i++) {
+        if (raw.ptr[i] == '/' || raw.ptr[i] == '\\') {
+            first_slash = i;
+            has_subpkg = true;
+            break;
+        }
+    }
+    strslice_t dep_name = has_subpkg
+        ? strslice_make(raw.ptr, first_slash)
+        : raw;
+
+    /* 查找包根目录 */
+    char *pkg_root = find_pkg_root(alloc, importer_path);
+    if (!pkg_root) return NULL;
+
+    /* 依赖包目录：pkg_root/deps/dep_name */
+    size_t rlen = strlen(pkg_root);
+    size_t dnlen = dep_name.len;
+    char dep_dir[4096];
+    if (rlen + 6 + dnlen + 1 >= sizeof(dep_dir)) {
+        allocator_free(alloc, (void **)&pkg_root);
+        return NULL;
+    }
+    memcpy(dep_dir, pkg_root, rlen);
+    dep_dir[rlen] = '/';
+    memcpy(dep_dir + rlen + 1, "deps/", 5);
+    memcpy(dep_dir + rlen + 6, dep_name.ptr, dnlen);
+    dep_dir[rlen + 6 + dnlen] = '\0';
+    allocator_free(alloc, (void **)&pkg_root);
+
+    /* 解析依赖包的 clux.mod */
+    arena_t *dep_arena = arena_new_default(alloc);
+    if (!dep_arena) return NULL;
+
+    package_desc_t desc;
+    pkg_result_t pr = package_load(alloc, dep_arena, dep_dir, &desc);
+    if (pr != PKG_OK) {
+        arena_destroy(alloc, &dep_arena);
+        return NULL;
+    }
+
+    /* 根据 entry 类型解析入口 */
+    strslice_t entry_path = STRSLICE_EMPTY;
+    if (desc.entry_kind == PKG_ENTRY_SINGLE) {
+        entry_path = desc.entry.single;
+    } else {
+        /* 多子包：用 raw 全名匹配子包名 */
+        for (size_t i = 0; i < desc.entry.multi.count; i++) {
+            if (strslice_eq(desc.entry.multi.entries[i].name, raw)) {
+                entry_path = desc.entry.multi.entries[i].path;
+                break;
+            }
+        }
+    }
+
+    if (entry_path.len == 0) {
+        arena_destroy(alloc, &dep_arena);
+        return NULL;
+    }
+
+    /* 拼接 dep_dir/entry_path → 规范路径 */
+    size_t dlen = strlen(dep_dir);
+    size_t eplen = entry_path.len;
+    char *full = (char *)allocator_new_ex(
+        alloc, "deps.entry", dlen + 1 + eplen + 1, NULL, NULL, NULL, 1);
+    if (!full) {
+        arena_destroy(alloc, &dep_arena);
+        return NULL;
+    }
+    memcpy(full, dep_dir, dlen);
+    full[dlen] = '/';
+    memcpy(full + dlen + 1, entry_path.ptr, eplen);
+    full[dlen + 1 + eplen] = '\0';
+
+    char *canonical = module_path_normalize(alloc, full);
+    allocator_free(alloc, (void **)&full);
+    arena_destroy(alloc, &dep_arena);
+    return canonical;
 }
