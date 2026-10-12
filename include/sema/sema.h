@@ -139,8 +139,26 @@ static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
 static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
   return sym && sym->moved;
 }
-struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
 
+/* ---- 复合类型的 own 资源判定（move/clone 拦截与 fatal 变体的判定基础） ----
+ *
+ * `type_directly_owns`（vm/type.h）：顶层直接是 own/share/weak 指针或 own 切片。
+ * `sema_type_contains_owned_resource`（sema.c 定义）：**递归**——顶层直接持有，
+ * 或 struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素
+ * 持有。
+ *
+ * 为什么需要"递归"版本：含 own 字段的结构体**本身**的 ownership 是 OWN_NONE，
+ * 用 `type_is_own`/`type_directly_owns` 都判不出来——而它恰恰是 M3 R1
+ * "unique 所有权不可隐式拷贝"要拦的对象（浅拷贝会与源共享内嵌堆块 → 双释放）。
+ *
+ * 为什么 fatal 不算"持有资源"：fatal 是"必被接管的将亡值"标记，其顶层值在
+ * sema 里必然被 move/return 消费（消费后 ptr=NULL）；字段位置的 fatal 由运行期
+ * 释放路径处理（见 type_ptr.c 的 ptr_free_owned_recursive）。
+ *
+ * 与 comptime.c 的全局变量 own 检查（静态函数，语义更窄：不含 weak）**有意
+ * 不同**，故各留一份、不复用。 */
+bool sema_type_contains_owned_resource(const type_t *t);
+struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
 
 
 /**
@@ -203,6 +221,13 @@ typedef struct sema_t {
         void                  *user;
     } imports;
 } sema_t;
+
+/** move(x) / clone(x) 的产物类型（将亡值变体，AST_MOVE 处理器用）：
+ *  - 指针 own/ref → fatal *T；切片 own/ref → fatal []T；
+ *  - 含 own 资源的复合类型（struct/tuple/array/option/union）→ 其 fatal 变体；
+ *  - 其余（标量 / 平凡 struct / ref 切片）→ 原样返回 t（无资源可转移）。
+ *  已是 fatal 的 t 原样返回（幂等）。返回 NULL = 内部构造失败。 */
+const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *t);
 
 /* ---- 函数 walk 上下文的配对进入/离开 ----
  *

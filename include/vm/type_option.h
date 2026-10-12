@@ -50,6 +50,12 @@ const type_t *type_option_seal(vm_t *vm, const type_t *t);
  *  不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。 */
 const type_t *type_option_intern(vm_t *vm, const type_t *inner);
 
+/** 带 ownership 的一次性快捷：ownership 在 seal **之前**设。用于
+ *  `fatal ?T`——内层含 own 资源的 optional 跨函数边界的将亡值变体
+ *  （去重按 inner + ownership 区分）。 */
+const type_t *type_option_intern_with_ownership(vm_t *vm, const type_t *inner,
+                                                ownership_t ownership);
+
 /** 取 option 类型的 inner（非 option 返回 NULL） */
 static inline const type_t *type_option_inner(const type_t *t) {
     return (t && t->kind == TYPE_KIND_OPTION) ? ((const option_type_t *)t)->inner

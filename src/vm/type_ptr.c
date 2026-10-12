@@ -96,9 +96,13 @@ static void ptr_free_heap(vm_t *vm, const value_t *v) {
  * =========================================================================== */
 
 /* 目标是否含需递归销毁的 own 指针（own 指针 + 含 own 的复合类型）。
-   fatal 不在此列：fatal 是将亡值，sema 保证必被 own 接管（R1，§3.3），
-   接管后源 ptr=NULL，无堆块可销毁；`_ =` 丢弃场景由 DISPOSE 指令
-   特殊处理（递归释放后源同样置 NULL）。 */
+   fatal **不在此列**：fatal 是"将亡值"标记，其语义是"顶层必被 own 接管"
+   （sema R1，§3.3），接管后源 ptr=NULL，扫描本身就是空操作；而**字段位置**的
+   fatal（`struct S { p: fatal *i32; }`）不被移动，必须由释放路径处理——那条
+   路径走 ptr_free_owned_recursive 的 PTR 分支（已含 OWN_FATAL），不依赖本
+   谓词。因此这里不把 fatal 列为"需扫描"是刻意的：本谓词只回答"该字段是否
+   可能是**可在别处析构的共享资源**（own/share/weak）或**含此类字段的聚合**"。
+   `_ = move(x)` 丢弃场景由 DISPOSE 指令特殊处理。 */
 bool ptr_type_needs_scan(const type_t *t) {
     if (!t) return false;
     switch (t->kind) {
@@ -124,9 +128,15 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR: {
-        if (t->ownership == OWN_OWN) {
-            /* own 指针：ptr≠NULL 拥有堆块 → 先递归销毁堆块内容（T 含 own 字段
-               时内嵌堆块一并释放），再释放本堆块，置 ptr=NULL 防双释放。
+        if (t->ownership == OWN_OWN || t->ownership == OWN_FATAL) {
+            /* own/fatal 指针：ptr≠NULL 拥有堆块 → 先递归销毁堆块内容（T 含 own
+               字段时内嵌堆块一并释放），再释放本堆块，置 ptr=NULL 防双释放。
+
+               fatal 为何也在这里释放：顶层 fatal 值（move/clone/new 产物）由
+               sema 保证必被消费（ptr=NULL），但 fatal 也可能出现在**结构体字段
+               位置**（`struct S { p: fatal *i32; }`）——字段不被移动，作用域退出
+               时它就是唯一释放点，跳过即泄漏。释放后置 NULL 使重复扫描幂等。
+
                ref 总借用跳过（由 ownership 区分，不走此分支）。 */
             ptr_value_t *pv = (ptr_value_t *)data;
             if (!pv->ptr) return;

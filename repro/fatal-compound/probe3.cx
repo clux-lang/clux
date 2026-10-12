@@ -1,0 +1,17 @@
+// probe3: 结构体含 own 指针，跨函数边界传参（不 move，隐式拷贝）——当前是否被拦？
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box {
+    p: own *i32;
+    n: i32;
+}
+
+func read(b: Box): i32 {
+    return b.n;
+}
+
+func main(): i32 {
+    var a: Box = .Box{ .p = new i32{7}, .n = 7 };
+    return read(a);
+}

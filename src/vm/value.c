@@ -3,10 +3,12 @@
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
 #include "vm/type_option.h"
+#include "vm/type_ptr.h"   /* ptr_clear_owned_recursive（fatal 接管转换用） */
 #include "vm/str_pool.h"
 #include "core/panic.h"
 
 #include <string.h>
+#include <stdio.h>
 
 /* ---- value_t 结构体定义（仅此文件可见） ---- */
 
@@ -403,6 +405,24 @@ void value_dispose(vm_t *vm, value_t *v) {
         }
         v->type = NULL;
     }
+}
+
+/* fatal 变体 → 同布局非 fatal 类型的接管转换（见 value.h） */
+value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
+                               bool (*cfg)(vm_t *, const type_t *,
+                                           const type_t *)) {
+    if (!vm || !v || !target || !cfg) return NULL;
+    const type_t *src = v->type;
+    if (!src || !type_is_fatal(src) || type_is_fatal(target)) return NULL;
+    if (src->kind != target->kind) return NULL;   /* 只认同 kind 的 fatal 变体 */
+    if (src->size != target->size) return NULL;   /* 布局必须一致才能重贴标签 */
+    if (!cfg(vm, target, src)) return NULL;       /* 各类型的布局兼容判定 */
+    if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    void *data = value_alloc_data_copy(vm->alloc, target, v->data);
+    /* 源清空其 own/fatal 指针：所有权随构造转移给新值（防双释放）。
+       源的 data 块仍由作用域在退出时释放（裸字节块，无副作用）。 */
+    ptr_clear_owned_recursive(vm, (type_t *)src, v->data);
+    return value_make(vm, target, data);
 }
 
 value_t *value_clone(vm_t *vm, value_t *v) {

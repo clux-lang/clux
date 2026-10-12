@@ -1,0 +1,17 @@
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box {
+    p: own *i32;
+    n: i32;
+}
+
+func main(): i32 {
+    var p: own *i32 = new i32{7};
+    var c: own *i32 = move(p);
+    if (c.* != 7) { return 1; }
+    var b: Box = .Box{ .p = new i32{5}, .n = 2 };
+    if (b.p.* != 5) { return 2; }
+    libc::printf("ptr move: ok\n");
+    return 0;
+}

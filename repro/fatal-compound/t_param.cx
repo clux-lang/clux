@@ -1,0 +1,20 @@
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box {
+    p: own *i32;
+    n: i32;
+}
+
+func take(b: fatal Box): i32 {
+    var owned: Box = move(b);
+    return owned.n;
+}
+
+func main(): i32 {
+    var b: Box = .Box{ .p = new i32{7}, .n = 7 };
+    var r: i32 = take(move(b));
+    if (r != 7) { return 1; }
+    libc::printf("fatal param: ok\n");
+    return 0;
+}

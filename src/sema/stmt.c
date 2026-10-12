@@ -1585,6 +1585,18 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
 
 /* ---- 语句：控制流 ---- */
 
+/* return 的值是否是"fatal 标识符"（fatal 参数/变量的直接转发）。
+   语义：`return b;`（b 为 fatal 形态）把所有权继续传给调用方 —— 合法消费点，
+   无需 move()（与 walk_return 末尾的"标记已消费"同一判据）。
+   指针/切片/复合类型一视同仁（sema_type_is_fatal 覆盖全部 fatal 形态）。 */
+static bool sema_expr_is_fatal_ident(sema_t *sema, ast_node_t *expr,
+                                     sema_scope_t *scope) {
+  (void)sema;
+  if (!expr || expr->kind != AST_IDENT) return false;
+  sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)expr)->name);
+  return sym && sym->kind == SEMA_SYM_VAR && sema_type_is_fatal(sym->type);
+}
+
 static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                   sema_scope_t *scope) {
   block_result_t r = {.definitely_returns = true};
@@ -1606,6 +1618,13 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
         } else if (rt->value->kind != AST_MOVE &&
+                   /* fatal 标识符直接返回 = 所有权继续传递（合法消费点，§4）：
+                      `func id(b: fatal Box): fatal Box { return b; }`。判据必须
+                      在复合类型拦截**之前**——sema_type_is_fatal 之后没有再判
+                      值本身，于是这条合法写法会被下面的"含 own 字段不可隐式
+                      拷贝"误拦（诊断文本自己写的是 "use move() ... to transfer
+                      ownership"，而 fatal 参数转发正是转移）。 */
+                   !sema_expr_is_fatal_ident(sema, rt->value, scope) &&
                    !((type_is_ptr(sema->fn.return_type) ||
                       type_is_slice(sema->fn.return_type)) &&
                      (sema->fn.return_type->ownership == OWN_OWN ||

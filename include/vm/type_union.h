@@ -117,6 +117,13 @@ const type_t *type_union_seal(vm_t *vm, const type_t *t);
 const type_t *type_union_intern(vm_t *vm, const union_member_t *members,
                                 size_t count);
 
+/** 带 ownership 的一次性快捷：ownership 在 seal **之前**设。用于 `fatal U`
+ *  ——含 own payload 的 tag union 跨函数边界的将亡值变体。 */
+const type_t *type_union_intern_with_ownership(vm_t *vm,
+                                               const union_member_t *members,
+                                               size_t count,
+                                               ownership_t ownership);
+
 #ifdef __cplusplus
 }
 #endif

@@ -141,6 +141,50 @@ var b = move(a);    // 转移所有权，返回 fatal，原对象进 TDZ
   - **ref 不影响 clone**：有 ref 存活时仍可 clone（仅 move 受限制）
 - **含 own 字段的复合类型**：struct/cunion 内有 own 字段时不可 copy，须 move/clone（own 语义沿字段嵌套传导）
 
+### 7.1 复合类型的将亡值变体 `fatal T`（2026-10 补：跨越函数边界）
+
+§7 的 move/clone 只规定了语义，没规定**含 own 字段的复合值如何跨函数边界**：
+`func read(b: Box)`（Box 含 `own *i32`）用 `read(a)` 调用时，契约是"按值传参 =
+拷贝"，而 Box 的整块 memcpy 会连裸指针一起复制 —— 源与目标各自递归销毁同一
+堆块 = double free。返回值同理。§4 的"参数/返回值只能 ref 或 fatal"此前只对
+指针/切片生效（`type_is_own(Box)` 为假）。
+
+**`fatal T`**（T 为含 own 资源的 struct/tuple/array/option/union）补齐这一环：
+
+```
+struct Box { p: own *i32; n: i32; }
+
+func take(b: fatal Box): i32 {      // 形参：将亡值，函数内必须接管
+  var owned: Box = move(b);         //   move 接管 → 普通 Box
+  return owned.n;
+}
+func mk(n: i32): fatal Box {        // 返回：把所有权交出去
+  var b: Box = .Box{ .p = new i32{n}, .n = n };
+  return move(b);
+}
+
+var a: Box = .Box{ .p = new i32{7}, .n = 7 };
+take(move(a));                      // 调用点：move 产生将亡值
+var c: Box = mk(9);                 // fatal → Box 的接管 = 转移
+```
+
+- **类型**：与 T **逐字节同布局**（ownership 不参与布局），仅
+  `ownership = OWN_FATAL` 不同的独立 intern 实例（去重按「字段表 + ownership」）。
+- **产出**：`move(x)` / `clone(x)`（x 为含 own 资源的复合值）；`new` / `make`
+  产 fatal 指针/切片（既有）。
+- **move**：整块 memcpy + 递归清空**源**顶层 own/fatal 指针（源不再持有，
+  作用域退出是 no-op）。
+- **clone**：递归深拷贝对象图（own 字段分配独立新堆块，ref 字段复制指针）；
+  **源保持有效** —— clone 是复制语义，转移走 move / fatal 参数与返回值。
+- **接管**：`fatal T → T` 的隐式转换是**转移**（memcpy + 清空源）。
+- **拒绝**：目标持有 own 资源而来源不是将亡值 → 编译错误（要求 move()/clone()；
+  只想借用就写 `ref *T` 形参）。
+- **无资源折叠**：T 不含 own 资源时 `fatal T` 折叠为 T 本身（不引入互不兼容的
+  新类型）。`own T` / `ref T`（T 非指针/切片）非法。
+- **销毁**：与 T 完全相同的递归路径（按字段偏移分派，与 ownership 无关）。
+- **运行期物化**：hoist 声明阶段 `LOAD_TYPE <id>` → `SET_OWNERSHIP FATAL` →
+  `SEAL` 按 ownership 去重（见 `docs/bytecode-mnemonics.md` §4.7）。
+
 ---
 
 ## 8. 运算符与语法

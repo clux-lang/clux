@@ -111,6 +111,9 @@ typedef enum {
     BCODE_APPEND_ELEM,     /* 无操作数：弹栈顶 type value（元素类型）→ peek 开放
                               tuple → 追加元素（元素匿名，长度=追加次数） */
     BCODE_SET_TYPE,        /* 弹栈顶 type value（sub）→ peek 栈顶开放对象 → 设为 sub */
+    BCODE_SET_OWNERSHIP,   /* u8 ownership：peek 栈顶开放复合类型 → 设其所有权修饰
+                              （只允许 OWN_NONE → OWN_FATAL，产出 fatal T 将亡值
+                              变体；密封后拒绝——见 type_set_ownership）。无栈深变化。 */
     BCODE_CALL,            /* argc：value_call（callee 在 stack[sp-1-argc]） */
     BCODE_RET,             /* 返回 interrupt 哨兵，栈顶即返回值 */
 

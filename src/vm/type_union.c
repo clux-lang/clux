@@ -121,8 +121,18 @@ static value_t *union_ne(vm_t *vm, value_t *a, value_t *b) {
 
 /* ---- 类型转换：仅同 union 实例（身份拷贝） ---- */
 
+/* fatal 变体的布局兼容判定（供 value_take_fatal_into 回调）：成员表逐位一致
+   （名 + tag + payload 类型）⟹ 布局一致。与 union_same 同判据。 */
+static bool union_members_same(vm_t *vm, const type_t *a, const type_t *b);
+
 static value_t *union_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    if (!target || target != value_type(v))
+    if (!target) return value_make_error(vm, "union: implicit cast only within same union");
+    /* fatal 变体 → 同布局的非 fatal union：接管转换（见 value_take_fatal_into）。
+       union 的兼容判定就是成员表一致（与 union_same 同义，但只取"类型层"——
+       本处两个类型必然同 kind、同 size，成员表一致 ⟹ 布局一致）。 */
+    value_t *taken = value_take_fatal_into(vm, v, target, union_members_same);
+    if (taken) return taken;
+    if (target != value_type(v))
         return value_make_error(vm, "union: implicit cast only within same union");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
@@ -158,6 +168,7 @@ const vtable_t VTABLE_UNION = {
     .explicit_cast = union_explicit_cast,
     .type_equal = union_type_equal,
     .type_extends = union_type_extends,
+    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_union_seal, /* 开放构造路径（PUSH_UNION → SEAL）密封入口 */
 };
 
@@ -269,10 +280,28 @@ static bool union_member_same(const union_member_t *a, const union_member_t *b) 
     return a->payload_type == b->payload_type;
 }
 
+/* 按（member 名 + tag + payload 类型 + ownership）判断两 union 是否等价
+   （去重 intern 用）。ownership 参与比较——fatal 变体与普通值不同型。 */
 static bool union_same(const union_type_t *a, const union_type_t *b) {
+    if (a->base.ownership != b->base.ownership) return false;
     if (a->member_count != b->member_count) return false;
     for (size_t i = 0; i < a->member_count; i++) {
         if (!union_member_same(&a->members[i], &b->members[i])) return false;
+    }
+    return true;
+}
+
+/* 回调包装（value_take_fatal_into 的签名）：只看成员表，不看 ownership——
+   fatal 变体与 base 的 ownership 必然不同，正是"接管转换"要跨过的那一步。 */
+static bool union_members_same(vm_t *vm, const type_t *a, const type_t *b) {
+    (void)vm;
+    if (!a || !b || a->kind != TYPE_KIND_UNION || b->kind != TYPE_KIND_UNION)
+        return false;
+    const union_type_t *ua = (const union_type_t *)a;
+    const union_type_t *ub = (const union_type_t *)b;
+    if (ua->member_count != ub->member_count) return false;
+    for (size_t i = 0; i < ua->member_count; i++) {
+        if (!union_member_same(&ua->members[i], &ub->members[i])) return false;
     }
     return true;
 }
@@ -360,10 +389,19 @@ const type_t *type_union_seal(vm_t *vm, const type_t *t) {
 
 const type_t *type_union_intern(vm_t *vm, const union_member_t *members,
                                 size_t count) {
+    return type_union_intern_with_ownership(vm, members, count, OWN_NONE);
+}
+
+/* 带 ownership 的一次性快捷（见 type_union.h）：ownership 在 seal 之前设。 */
+const type_t *type_union_intern_with_ownership(vm_t *vm,
+                                               const union_member_t *members,
+                                               size_t count,
+                                               ownership_t ownership) {
     /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。不向操作数栈
      * 压入 type value。去重 intern 由 type_union_seal 完成。 */
     if (!vm || !members || count == 0) return NULL;
     union_type_t *ut = union_type_create_open(vm);
+    ut->base.ownership = ownership;
 
     /* 拷贝 member 表（vm 拥有；名深拷贝；payload 类型按成员逐个复制） */
     union_member_t *copy = (union_member_t *)allocator_new_ex(

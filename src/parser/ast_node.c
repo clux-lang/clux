@@ -59,6 +59,7 @@ static const char *g_kind_names[] = {
     [AST_ALIGNOF]    = "alignof",
     [AST_TYPEOF]     = "typeof",
     [AST_PTR]        = "ptr",
+    [AST_OWNED_TYPE] = "owned_type",
     [AST_NEW]        = "new",
     [AST_ADDR]       = "addr",
     [AST_DEREF]      = "deref",

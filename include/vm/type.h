@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "vm/vtable.h"
+#include "core/allocator.h"  /* allocator_t：type_name_with_ownership 的参数 */
 #include "core/strslice.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -492,6 +493,78 @@ static inline bool type_has_quals(const type_t *t) {
  * sema 赋值左值检查用。
  */
 bool type_has_const(const type_t *t);
+
+/**
+ * 设置**未密封**复合类型的所有权修饰（SET_OWNERSHIP 命令的唯一入口）。
+ *
+ * 语义：把 t 的 ownership 由 OWN_NONE 置为 OWN_FATAL（fatal T 将亡值变体，
+ * m3-design §3.3）。复合类型（struct/tuple/array/option/union）的 ownership
+ * 恒为 OWN_NONE，fatal 是其唯一合法取值，故只允许 NONE → FATAL 一条转换。
+ *
+ * 拒绝（返回 false，类型一字不改）：
+ *   - t 为 NULL / 已密封（与其它类型写入 API 同一不变量：seal 后不可变）；
+ *   - t 的 ownership 已非 OWN_NONE（幂等重放不视为错误由调用方处理）；
+ *   - ownership 参数不是 OWN_FATAL；
+ *   - t 的 vtable 无 type_set_ownership 槽位（标量/指针/切片/func/...——
+ *     标量与所有权无关，指针/切片的所有权在构造期由 PUSH_PTR/PUSH_SLICE
+ *     的操作数给定）。
+ */
+bool type_set_ownership(vm_t *vm, const type_t *t, ownership_t ownership);
+
+/** vtable 槽位 type_set_ownership 的**共享实现**：开放复合类型（struct /
+ *  tuple / array / option / union）的所有权语义完全相同（ownership 字段是
+ *  type_t 上的正交属性，与各类型的字段表/元素表无关），因此五个 vtable 共用
+ *  这一个回调，避免把同一行赋值抄五遍。仅由 type_set_ownership 代理调用
+ *  （它已做完 seal / ownership / 合法性判定），此处只落字段。 */
+bool type_set_ownership_default(vm_t *vm, const type_t *self,
+                                ownership_t ownership);
+
+/** 构造"<ownership 前缀> + base 名"的类型显示名（堆分配，vm 拥有）。
+ *  ownership == OWN_FATAL 时前缀为 "fatal "，否则原样拷贝 base 名。
+ *  base 名为空（ptr==NULL）时用 fallback（可为 NULL → 空名）。用于 fatal
+ *  复合类型变体的规范显示名（`fatal Box` / `fatal <i32, i32>` …）。失败返回 NULL。 */
+char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
+                               ownership_t ownership, const char *fallback);
+
+/** 复合类型是否**直接**拥有堆资源：own/share/weak 指针或 own 切片。
+ *  只判顶层，不递归字段——递归判定见 type_owns_resources。 */
+static inline bool type_directly_owns(const type_t *t) {
+  return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) &&
+         type_owns_resource(t);
+}
+
+/**
+ * 类型是否（**递归**）拥有堆资源——即"持有 own/share/weak 指针或 own 切片"，
+ * 或 struct/tuple/union 的任一字段/元素/member、option 内层、数组元素持有。
+ *
+ * 判定的用途：M3 §7 唯一所有权——含 own 资源的**值**不可隐式拷贝（浅拷贝会与
+ * 源共享内嵌堆块 → 作用域退出双释放）。因此"参数/返回值/赋值目标持有资源而
+ * 来源不是将亡值（fatal）"就必须拒绝，要求显式 move()/clone()。
+ *
+ * 为什么需要**递归**版本：含 own 字段的结构体**本身**的 ownership 是 OWN_NONE，
+ * 用 type_is_own / type_directly_owns 都判不出来——而它恰恰是要拦的对象。
+ *
+ * 为什么 fatal 不算"持有资源"：fatal 是"必被接管的将亡值"标记，其顶层值必然被
+ * move/return 消费（消费后 ptr=NULL）；字段位置的 fatal 由运行期释放路径处理
+ * （type_ptr.c 的 ptr_free_owned_recursive）。所以 fatal 来源**是**合法初始化源
+ * （它把所有权交出来）。
+ *
+ * cunion 不参与判定：其析构本就是 no-op（无 tag，开发者自负），与 clone/dispose
+ * 的既有语义一致。
+ */
+bool type_owns_resources(const type_t *t);
+
+/**
+ * fatal **将亡值**是否携带可转移的堆资源——即"跨函数边界转移所有权"是否有
+ * 实际内容可转：
+ *   - `fatal *T` / `fatal []T`：是（裸指针 / 切片堆块要交给对方）；
+ *   - `fatal T`（T 为含 own 字段的复合类型）：是（内嵌堆块要交出去）；
+ *   - 其它 fatal 形态（无资源可转移）：否。
+ *
+ * 用于 func_vcall 的参数接收与返回值交回：只有带资源时才走 value_move
+ * （转移——源被掏空是**必须**的，否则双方共享堆块）；否则走 clone（拷贝）。
+ */
+bool type_fatal_carries_resource(const type_t *t);
 
 /** const 类型 intern（按 sub 指针去重，vm 拥有生命周期） */
 const type_t *type_const_intern(vm_t *vm, const type_t *sub);

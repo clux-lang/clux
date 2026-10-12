@@ -30,8 +30,12 @@ extern "C" {
  * code_len 严格校验越界与截断，任何不一致视为损坏并失败（不 panic）。
  */
 
-/* 当前二进制格式版本号。 */
-#define BCODE_SERIAL_VERSION 1u
+/* 当前二进制格式版本号。
+ *
+ * v2：新增 BCODE_SET_OWNERSHIP（fatal 复合类型将亡值变体），它插在指令枚举
+ * 中段，使该指令之后的全部 opcode 编号整体后移——v1 的 .cxb 落盘字节用新
+ * 表解释会张冠李戴（静默错误执行）。因此必须在读版本号时直接拒绝旧文件。 */
+#define BCODE_SERIAL_VERSION 2u
 
 /* 魔数："CXBC"（clux bytecode），小端写入。 */
 #define BCODE_SERIAL_MAGIC 0x43425843u /* 'C''X''B''C' little-endian */

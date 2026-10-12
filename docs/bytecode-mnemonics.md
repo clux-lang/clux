@@ -126,6 +126,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `UNION_MEMBER` | `STR`（member 名） | **peek** 开放 union → 追加 member（tag = 追加序，payload_type 暂 NULL，随后配一个 `DEFINE_FIELD`）。 |
 | `PUSH_CUNION` | — | 分配空 C 语义 union 类型（开放态，member 追加走 `DEFINE_FIELD`，**无 tag**）→ 压其 type value。 |
 | `SET_TYPE` | — | 弹栈顶 type value（sub）→ 设为栈顶开放对象的 sub / base / inner（`LOAD_TYPE` → `SET_TYPE` → `SEAL`）。 |
+| `SET_OWNERSHIP` | `U8`（ownership） | **peek** 栈顶开放复合类型（struct/tuple/array/option/union）→ 设其 `ownership`。只允许 `OWN_NONE → OWN_FATAL`（产出 `fatal T` 将亡值变体，见 §4.7）；已密封 / 无该槽位的类型 → 运行期 error。无栈深变化（peek）。 |
 | `DEFINE_TYPE` | `U32`（类型 id） | 弹 type value（**声明**：消费栈）→ 绑定程序 id（≥64）写入 `t->id` 并登记 `vm->types_by_id`（幂等，多 id 可别名同一类型）。 |
 | `SEAL` | — | 弹 type value（**定义收尾**：消费栈）→ 经 `value_seal` 分派 `vtable->type_seal`：按类型各自池查重 intern、计算布局、置 `sealed`；去重命中则回收开放对象并重定向栈引用；随后按开放对象自身 id 幂等重绑登记（避免登记表悬垂）。 |
 | `CREATE_CONST` | — | 一次性快捷：弹 type value → `type_const_intern` → 压回（不走向上两遍构造；编译器 hoist 区用 `PUSH_CONST`+`SET_TYPE`+`SEAL`）。 |
@@ -191,9 +192,22 @@ ref 总借用 / fatal 在非空时拥有 / share RC 强引用 / weak RC 弱引�
 | `PTR_GET` | — | 弹指针值 → 压被指向 `T` 的**值副本**（`r.*` 解引用 GET）。 |
 | `PTR_SET` | — | 弹指针值 + val → 隐式转换后写回被指向 `T` → 压回指针（`r.* = v`）。 |
 | `ADDR` | — | 弹值 → 压 `ref *T` 指针（`x.&` 后置取址，借用）。 |
-| `MOVE` | — | 弹值 → 压同类型值（`move(x)`，所有权转移；语义检查在编译期，指令本身平凡传递）。 |
-| `CLONE` | — | 弹值 → 压深拷贝值（`clone(x)`，`value_clone` 分派）。 |
+| `MOVE` | — | 弹值 → 压**将亡值（fatal 变体）**：own 指针/切片转移裸指针（源置空）；含 own 字段的复合类型**整块 memcpy + 递归清空源顶层 own/fatal 指针**（`move(x)` 的所有权转移）。 |
+| `CLONE` | — | 弹值 → 压**将亡值（fatal 变体）**：指针/切片/复合类型均为**深拷贝**（`ptr_clone_block` 递归对象图：own 字段分配独立新堆块，ref 字段复制指针），**源保持有效**。 |
 | `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。用于 `_ = expr` 显式丢弃 fatal / own；借用（ref、`x.&`）跳过。 |
+
+**复合类型的将亡值变体 `fatal T`**（`fatal T` 类型表达式，T 为含 own 资源的
+struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携带所有权，
+含 own 字段的复合类型因此无法通过参数/返回值转移——浅拷贝会与源共享内嵌堆块
+（双释放）。`fatal T` 是其载体：
+
+- **类型**：与 T **逐字节同布局**、仅 `ownership = OWN_FATAL` 不同的独立 intern
+  实例（去重按「字段表 + ownership」区分）。运行期物化：`PUSH_XXXX` →
+  `DEFINE_TYPE <id>` → `SET_OWNERSHIP FATAL` → （定义阶段）设字段 → `SEAL`。
+- **产出**：`MOVE` / `CLONE` 指令（见上表）；`new` / `make` 亦产 fatal（指针/切片形态）。
+- **接管**：`fatal T → T` 的隐式转换（`DEFINE` 路径）**转移**所有权——memcpy
+  顶层后清空源的 own/fatal 指针；指针/切片的 `fatal → own` 同理。
+- **消费**：fatal 参数必须被 `move()` 接管或 `return` 出去（sema R1 检查）。
 
 ### 4.8 切片（M4）
 

@@ -74,6 +74,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_TUPLE]     = { "PUSH_TUPLE",     { BCODE_ASM_OP_NONE } },
     [BCODE_APPEND_ELEM]    = { "APPEND_ELEM",    { BCODE_ASM_OP_NONE } },
     [BCODE_SET_TYPE]       = { "SET_TYPE",       { BCODE_ASM_OP_NONE } },
+    [BCODE_SET_OWNERSHIP]  = { "SET_OWNERSHIP",  { BCODE_ASM_OP_U8 } },
     [BCODE_CALL]           = { "CALL",           { BCODE_ASM_OP_U32 } },
     [BCODE_RET]            = { "RET",            { BCODE_ASM_OP_NONE } },
 

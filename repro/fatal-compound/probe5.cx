@@ -1,0 +1,47 @@
+// probe5: 复合类型 move/clone 的语义检查
+//   1) clone 深拷贝：源仍有效且与产物各自独立
+//   2) move 后源置空：源不能再释放同一堆块（无双释放）
+//   3) 嵌套复合：struct 含 struct 含 own 字段
+//   4) 元组含 own 字段跨函数边界
+//   5) 数组含 own 字段元素
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Inner { p: own *i32; }
+struct Outer { inner: Inner; n: i32; }
+
+func main(): i32 {
+    // 1) clone 深拷贝：a 与 b 独立
+    var a: Inner = .Inner{ .p = new i32{11} };
+    var b: Inner = clone(a);
+    b.p.* = 22;
+    if (a.p.* != 11) { return 1; }
+    if (b.p.* != 22) { return 2; }
+
+    // 2) move：a 的堆块转移给 c
+    var c: Inner = move(a);
+    if (c.p.* != 11) { return 3; }
+
+    // 3) 嵌套复合 move
+    var o: Outer = .Outer{ .inner = .Inner{ .p = new i32{33} }, .n = 5 };
+    var o2: Outer = move(o);
+    if (o2.inner.p.* != 33 || o2.n != 5) { return 4; }
+    var o3: Outer = clone(o2);
+    if (o3.inner.p.* != 33) { return 5; }
+
+    // 4) 元组含 own 字段：move 元组
+    var t: <own *i32, i32> = .<own *i32, i32>{ new i32{44}, 6 };
+    var t2: <own *i32, i32> = move(t);
+    if (t2[0].* != 44 || t2[1] != 6) { return 6; }
+
+    // 5) 数组含 own 字段：clone 数组（逐元素深拷贝）
+    var arr: [2]Inner = .[2]Inner{ .Inner{ .p = new i32{55} },
+                                   .Inner{ .p = new i32{66} } };
+    var arr2: [2]Inner = clone(arr);
+    if (arr2[0].p.* != 55 || arr2[1].p.* != 66) { return 7; }
+    arr2[0].p.* = 77;
+    if (arr[0].p.* != 55) { return 8; }
+
+    libc::printf("compound move/clone: ok\n");
+    return 0;
+}

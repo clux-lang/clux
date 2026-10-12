@@ -462,6 +462,31 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* SET_OWNERSHIP <ownership>：peek 栈顶开放复合类型 → 设其所有权修饰。
+ *
+ * 用途：fatal T（将亡值变体）的运行期物化——hoist 声明阶段
+ *   PUSH_STRUCT / PUSH_TUPLE / ... → DEFINE_TYPE <id> → **SET_OWNERSHIP FATAL**
+ * → （定义阶段）LOAD_TYPE <id> → 设字段/元素 → SEAL 去重到该 fatal 变体。
+ * 与 PUSH_PTR/PUSH_SLICE 的 ownership 操作数对称：那两类在**构造时**给定
+ * 所有权，复合类型在本指令里补一刀。
+ *
+ * 无栈深变化（peek，不弹）：类型构造序列压栈平衡不变。
+ * 语义/合法性判定全部在 type_set_ownership（seal 后拒绝、只允许
+ * NONE → FATAL、无该槽位的类型拒绝）。 */
+static value_t *op_set_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t ownership = bcode_read_u8(bc, pc);
+    value_t *open_v = exec_stack_peek(vm, 0);
+    const type_t *open = (open_v && value_type(open_v) == vm->type_type)
+                             ? value_as(open_v, const type_t *) : NULL;
+    if (!open)
+        return value_make_error(vm, "exec: set ownership expects a type value");
+    if (!type_set_ownership(vm, open, (ownership_t)ownership))
+        return value_make_error(
+            vm, "exec: cannot set ownership on this type "
+                "(only open compound types accept NONE -> FATAL)");
+    return NULL;
+}
+
 /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL） ---- */
 
 /* PUSH_FUNC_TYPE：分配空 func type 入池并压其 type value */
@@ -798,10 +823,64 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return ptr_make_value(vm, pt, value_data(v)); /* ref 借用：不拥有 */
 }
 
+/* 复合类型（struct/tuple/array/option/union）的 fatal 变体：与 base 同布局、
+ * 仅 ownership 标记不同（fatal T 将亡值，m3-design §3.3）。每个类型走各自的
+ * `type_*_intern_with_ownership`（按 [字段表/元素 + ownership] 去重）——与 sema
+ * 编译期造出的变体**同一 intern 池、同一去重键**，因此拿到的是同一身份。
+ *
+ * 为什么不能按 type_equal 在池里找：type_equal 是**布局**判等（array 甚至是默认
+ * 指针比较），而 fatal 变体与 base 的布局本来就相同——按布局找只会找到 base
+ * 自己，fatal 标记随之丢失（移动语义退化成浅拷贝）。 */
+static const type_t *compound_fatal_variant(vm_t *vm, const type_t *t) {
+    if (!vm || !t) return NULL;
+    if (t->ownership == OWN_FATAL) return t;           /* 已是 fatal 变体 */
+    if (t->ownership != OWN_NONE) return t;            /* 其它所有权：原样 */
+    switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+        return type_struct_intern_with_ownership(vm, t, OWN_FATAL);
+    case TYPE_KIND_TUPLE: {
+        size_t n = tuple_type_elem_count(t);
+        tuple_elem_t elems[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const tuple_elem_t *e = tuple_type_elem(t, i);
+            elems[i].type = e ? e->type : NULL;
+            elems[i].offset = 0; /* seal 重算 */
+        }
+        return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                                OWN_FATAL);
+    }
+    case TYPE_KIND_ARRAY:
+        return type_array_intern_with_ownership(vm, array_type_elem(t),
+                                                array_type_len(t), OWN_FATAL);
+    case TYPE_KIND_OPTION:
+        return type_option_intern_with_ownership(vm, type_option_inner(t),
+                                                 OWN_FATAL);
+    case TYPE_KIND_UNION: {
+        size_t n = union_type_member_count(t);
+        union_member_t members[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const union_member_t *m = union_type_member(t, i);
+            members[i].name = m ? m->name : STRSLICE_EMPTY;
+            members[i].tag = m ? m->tag : (uint32_t)i;
+            members[i].payload_type = m ? m->payload_type : NULL;
+        }
+        return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                                OWN_FATAL);
+    }
+    default:
+        return t; /* 无该变体（不含 own 资源的类型）：fatal 标记无意义 */
+    }
+}
+
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
- * 弹值 → 压 fatal 同类型值（转移，O(1) 零拷贝）：
+ * 弹值 → 压 fatal 同类型值：
  *   - own 指针：新值接管裸指针，源 data 清零（TDZ——运行期兜底
  *     防双释放；sema TDZ 检查 Step B 叠加）
+ *   - own/fatal 切片：同指针（接管 (ptr,len)，源置空）
+ *   - **含 own 字段的复合类型（struct/tuple/array/option/union）**：整块 memcpy
+ *     到新值（裸字节复制，O(size)），再把**源**顶层的 own/fatal 指针字段递归
+ *     置 NULL——堆块所有权随 memcpy 转移到新值，源不再持有，作用域退出时不会
+ *     与接管方双释放（承接"复合类型 move 只需 memcpy + 清源顶层 own 指针"）。
  *   - 其他（ref/借用/标量）：平凡复制（ref 是 copy 语义）
  * shadow → 同类型 shadow。 */
 static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -837,13 +916,29 @@ static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
             return nv;
         }
     }
-    return value_clone(vm, v);  /* 非指针 / ref：平凡复制 */
+    /* 复合类型（含 own 字段）：memcpy + 递归清空源的 own/fatal 指针字段。
+       ptr_clone_block 不适用（那是深拷贝）；这里要的是**位复制 + 源清空**。 */
+    if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
+        t->kind != TYPE_KIND_VOID && value_data(v)) {
+        const type_t *fatal = compound_fatal_variant(vm, t);
+        void *data = value_alloc_data(vm->alloc, t);
+        memcpy(data, value_data(v), t->size);
+        /* 源对象图的 own/fatal 指针全部置 NULL（不释放）：堆块已归新值。
+           ref 借用与标量不受影响（ptr_clear_owned_recursive 按字段类型分派）。 */
+        ptr_clear_owned_recursive(vm, t, value_data(v));
+        return value_make(vm, fatal, data);
+    }
+    return value_clone(vm, v);  /* 标量 / ref：平凡复制 */
 }
 
 /* CLONE（无操作数）：**深拷贝**（clone(x)，m3-design §7）。
  * 弹值 → 压 fatal 同类型值（vtable->clone 分派）：
- *   - own：深拷贝——分配新堆块，新指针独立（fatal 接管）
+ *   - own 指针：深拷贝——分配新堆块，新指针独立（fatal 接管）
  *   - ref/借用：复制指针值（指向同一处）
+ *   - **含 own 字段的复合类型**：ptr_clone_block 逐字段深拷贝对象图（own 字段
+ *     分配独立新堆块；ref 字段按"借用"复制指针），产物为 fatal 变体。
+ *     **源值保持有效**——clone 是"复制"语义（与 clone(own *T) 一致），跨函数
+ *     边界的所有权转移走 MOVE / fatal 参数路径，不走 clone。
  * shadow → 同类型 shadow。 */
 static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
@@ -851,6 +946,16 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
+
+    /* 复合类型：整块深拷贝（对象图克隆）后包一层 fatal 变体类型 */
+    if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
+        t->kind != TYPE_KIND_VOID && value_data(v) &&
+        !(type_is_ptr(t) || type_is_slice(t))) {
+        const type_t *fatal = compound_fatal_variant(vm, t);
+        void *data = ptr_clone_block(vm, t, value_data(v));
+        return value_make(vm, fatal, data);
+    }
+
     value_t *copied = value_clone(vm, v);
     if (value_is_error(vm, copied)) return copied;
     /* clone 产物是 fatal（将亡值，m3-design §3.3）——指针与切片包一层
@@ -875,6 +980,50 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return nv;
     }
     return copied;
+}
+
+/* value_move（供 MOVE 指令与函数调用/返回的**所有权转移**共用，m3-design §7）：
+ * 把 v 的所有权无损交给调用方，返回接管方持有的新值（fatal 变体类型），
+ * 并清空 v 内部的 own/fatal 指针使 v 不再持有任何资源（作用域退出时安全）。
+ *
+ * 为什么需要它：函数参数/返回值在类型相同时走的是 vtable->clone 路径，而
+ * "把含 own 字段的复合值传出去"必须是**转移**而不是深拷贝——深拷贝会白分配
+ * 一整套对象图，而且调用方仍持有原件（语义上就不是 move 了）。ptr/slice 的
+ * 转移规则与 op_move 完全一致，故同一份实现。 */
+value_t *value_move(vm_t *vm, value_t *v) {
+    if (!v) return v;
+    if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return v;
+
+    if (type_is_ptr(t)) {
+        const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+        const type_t *fatal = type_is_fatal(t)
+                                  ? t
+                                  : type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
+        if (!fatal) return value_make_error(vm, "move: cannot make fatal pointer type");
+        value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
+        ((ptr_value_t *)value_data(v))->ptr = NULL; /* 源不再持有 */
+        return nv;
+    }
+    if (type_is_slice(t)) {
+        const slice_value_t *sv = (const slice_value_t *)value_data(v);
+        const type_t *fatal = type_is_fatal(t)
+                                  ? t
+                                  : type_slice_intern(vm, OWN_FATAL, slice_type_elem(t));
+        if (!fatal) return value_make_error(vm, "move: cannot make fatal slice type");
+        value_t *nv = slice_make_value(vm, fatal, sv->ptr, sv->len);
+        ((slice_value_t *)value_data(v))->ptr = NULL;
+        ((slice_value_t *)value_data(v))->len = 0;
+        return nv;
+    }
+
+    /* 复合类型：memcpy 位复制 + 清空源（见 op_move 同款说明） */
+    const type_t *fatal = compound_fatal_variant(vm, t);
+    void *data = value_alloc_data(vm->alloc, t);
+    memcpy(data, value_data(v), t->size);
+    ptr_clear_owned_recursive(vm, t, value_data(v));
+    return value_make(vm, fatal, data);
 }
 
 /* DISPOSE（无操作数）：**显式丢弃**（`_ = expr`，m3-design §3.3）。
@@ -2265,6 +2414,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_ENUM_VARIANT]   = op_enum_variant,
     [BCODE_MAKE_ENUM]      = op_make_enum,
     [BCODE_SET_TYPE]       = op_set_type,
+    [BCODE_SET_OWNERSHIP]  = op_set_ownership,
     [BCODE_PUSH_FUNC_TYPE]   = op_push_func_type,
     [BCODE_FUNC_TYPE_PARAM]  = op_func_type_param,
     [BCODE_FUNC_TYPE_RETURN] = op_func_type_return,

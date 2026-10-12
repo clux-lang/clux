@@ -89,6 +89,27 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
         if (value_is_error(vm, args[i]) ||
             value_type(args[i]) == vm->type_void)
             continue;
+        /* R1（§7 唯一所有权不可隐式拷贝）：形参类型持有 own 资源时，实参必须是
+           **将亡值（fatal 变体）**——否则实参是普通左值/值，传进被调用方会后与
+           调用方**共享**内嵌 own 堆块，被调用方作用域退出时释放 → 调用方拿到
+           悬垂指针（实测 access violation）。调用点必须显式 move()/clone() 让
+           实参成为 fatal 将亡值；只想借用就写成 `ref *T` 形参。
+           **必须在 type_eq 之前判**：`func read(b: Box)` 用 `read(a)`（a 也是 Box）
+           时两侧类型完全相同，早前"仅类型不等时才检查"的写法会静默放行 ——
+           这正是本缺陷（复合类型跨函数边界）的入口之一。
+           本函数是"实参 → 形参"转换的**唯一**判定点：运行期 func_vcall 与 sema
+           的 shadow 调用都经过这里，因此规则只此一处。 */
+        if (i < sig->param_count && sig->params[i] &&
+            type_owns_resources(sig->params[i]) &&
+            !type_is_fatal(value_type(args[i]))) {
+            char pn[64];
+            sig_type_name(sig->params[i], pn, sizeof pn);
+            snprintf(msg, sizeof msg,
+                     "argument %zu: cannot copy a value holding owned resources "
+                     "into parameter of type %s (use move() or clone(), or declare "
+                     "the parameter as 'ref *T' to borrow)", i + 1, pn);
+            return value_make_error(vm, msg);
+        }
         if (i < sig->param_count && sig->params[i] &&
             !type_eq(value_type(args[i]), sig->params[i])) {
             value_t *casted = value_implicit_cast(vm, args[i], sig->params[i]);
@@ -161,6 +182,24 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     bool is_error = false;
 
     for (size_t i = 0; i < argc; i++) {
+        /* fatal 形参（`fatal T` / `fatal *T` / `fatal []T`）：所有权**转移**进
+           被调用方，不是拷贝。类型相同（fatal T → fatal T）时下方 else 分支会走
+           value_clone —— 对含 own 字段的复合类型那是一次**多余的深拷贝**
+           （白分配一整套对象图），而且调用方实参仍持有原件，"转移"就名不副实。
+           这里显式走 value_move：接管资源 + 清空源，等价于 O(size) 的 memcpy。 */
+        if (sig && sig->params && i < sig->param_count && sig->params[i] &&
+            type_is_fatal(sig->params[i]) &&
+            type_fatal_carries_resource(value_type(args[i])) &&
+            type_fatal_carries_resource(sig->params[i])) {
+            value_t *moved = value_move(vm, args[i]);
+            if (value_is_error(vm, moved)) {
+                is_error = true;
+                ret = moved;
+                break;
+            }
+            local_args[i] = moved;
+            continue;
+        }
         if (sig && sig->params && i < sig->param_count && sig->params[i]
             && value_type(args[i]) != sig->params[i]) {
             /* safe_cast: implicit_cast（auto-tracked），失败返回 error */
@@ -200,12 +239,23 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
         }
     }
 
-    /* 7. clone 返回值/error 到调用方作用域 */
-    /* 临时切换 current_scope 到 caller，clone 后自动 track 到 caller 的 owned */
+    /* 7. 返回值/error 交回调用方作用域 */
+    /* 临时切换 current_scope 到 caller，新值自动 track 到 caller 的 owned。
+       fatal 返回类型（返回值携带所有权出函数）：**转移**而不是拷贝——被调用方
+       局部（`return move(b)` 的 b）在下方第 8 步随作用域销毁，拷贝会白复制一整套
+       对象图；转移把资源直接交给调用方，被调用方局部已 ptr=NULL，安全。
+       其余类型照旧 clone（借用视图 materialize 成独立副本）。 */
     scope_t *callee_current = vm->current_scope;
     vm->current_scope = caller_scope;
     if (ret && value_type(ret)) {
-        ret = value_clone(vm, ret);
+        if (sig && sig->return_type &&
+            type_is_fatal(sig->return_type) &&
+            type_is_fatal(value_type(ret)) &&
+            type_fatal_carries_resource(value_type(ret))) {
+            ret = value_move(vm, ret);
+        } else {
+            ret = value_clone(vm, ret);
+        }
     }
 
     /* 8. 平衡作用域栈：销毁 callee 作用域子树 */

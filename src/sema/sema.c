@@ -27,6 +27,7 @@
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_type_def.h"
@@ -273,6 +274,157 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
     default:
       break; /* 标量/str/bool/type/error/opaque：无结构依赖 */
   }
+}
+
+/* ===========================================================================
+ * 复合类型的 own 资源判定 + fatal 变体构造（m3-design §3.3/§7）
+ * =========================================================================== */
+
+bool sema_type_contains_owned_resource(const type_t *t) {
+  if (!t) return false;
+  /* 顶层直接持有：own/share/weak 指针、own 切片 */
+  if (type_directly_owns(t)) return true;
+  switch (t->kind) {
+    case TYPE_KIND_STRUCT: {
+      size_t n = struct_type_field_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const struct_field_t *f = struct_type_field(t, i);
+        if (f && sema_type_contains_owned_resource(f->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e && sema_type_contains_owned_resource(e->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        if (m && sema_type_contains_owned_resource(m->payload_type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_OPTION:
+      return sema_type_contains_owned_resource(type_option_inner(t));
+    case TYPE_KIND_ARRAY:
+      return sema_type_contains_owned_resource(array_type_elem(t));
+    default:
+      /* 标量/str/ptr(已判)/slice(已判)/cunion/enum/func/opaque：无 own 资源。
+         cunion 的析构本就是 no-op（无 tag，开发者自负），不参与判定。 */
+      return false;
+  }
+}
+
+/* `fatal T` 的类型解析（AST_OWNED_TYPE）。语义：
+ *   - T 不含任何 own 资源 → **原样返回 T**。没有资源可转移，"将亡值"标记毫无
+ *     意义，而凭空造一个 T 的副本只会让 `fatal Point` 与 `Point` 变成两个互不
+ *     兼容的类型（赋值/传参全部报类型错）。
+ *   - T 含 own 资源 → 产出它的 fatal 变体：与 T **同布局**、ownership=OWN_FATAL
+ *     的独立类型（跨函数边界的 move/clone 载体）。
+ *
+ * 变体在本函数内立即登记进 sema->types（编译期 vm 侧已密封对象 → 分配到
+ * program id → 设显示名），因此 hoist 会为它生成运行期构造序列
+ * （type_*_intern_with_ownership），运行期 op_move/op_clone 才能拿到真正的
+ * fatal 类型。 */
+static const type_t *make_fatal_variant(sema_t *sema, const type_t *base) {
+  if (!sema || !base) return NULL;
+  if (base->ownership == OWN_FATAL) return base;  /* 幂等 */
+  if (base->ownership != OWN_NONE) return base;   /* 指针/切片走自己的路径 */
+  if (!sema_type_contains_owned_resource(base)) return base; /* 无资源：无意义 */
+
+  vm_t *vm = sema->vm;
+  const type_t *v = NULL;
+  switch (base->kind) {
+    case TYPE_KIND_STRUCT:
+      v = type_struct_intern_with_ownership(vm, base, OWN_FATAL);
+      break;
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(base);
+      tuple_elem_t elems[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(base, i);
+        elems[i].type = e ? e->type : NULL;
+        elems[i].offset = 0; /* seal 重算 */
+      }
+      v = type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                           OWN_FATAL);
+      break;
+    }
+    case TYPE_KIND_ARRAY: {
+      const type_t *elem = array_type_elem(base);
+      size_t len = array_type_len(base);
+      v = type_array_intern_with_ownership(vm, elem, len, OWN_FATAL);
+      break;
+    }
+    case TYPE_KIND_OPTION: {
+      const type_t *inner = type_option_inner(base);
+      v = type_option_intern_with_ownership(vm, inner, OWN_FATAL);
+      break;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(base);
+      union_member_t members[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(base, i);
+        members[i].name = m ? m->name : STRSLICE_EMPTY;
+        members[i].tag = m ? m->tag : (uint32_t)i;
+        members[i].payload_type = m ? m->payload_type : NULL;
+      }
+      v = type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                           OWN_FATAL);
+      break;
+    }
+    default:
+      return base; /* cunion / enum / func / ...：不持有 own 资源，无需变体 */
+  }
+  if (!v || v == base) return base;
+
+  /* 登记（hoist 构造完备性）+ 显示名 "fatal T"（type_set_name 拷贝一份，vm
+     拥有；临时缓冲随后释放）。 */
+  const sema_type_t *st = sema_type_register(sema, v);
+  if (st) {
+    char *nm = type_name_with_ownership(vm->alloc, base, OWN_FATAL, "T");
+    if (nm) {
+      size_t l = 0;
+      while (nm[l]) l++;
+      type_set_name(vm, v, (strslice_t){ nm, l });
+      allocator_free(vm->alloc, (void **)&nm);
+    }
+  }
+  return v;
+}
+
+/* move(x) / clone(x) 的**产物类型**（将亡值变体，m3-design §3.3/§7）。
+ *
+ * 规则（与运行期 MOVE/CLONE 指令压栈的类型必须一致）：
+ *   - ot 已是 fatal → ot（幂等：move(fatal 参数) 继续传下去）
+ *   - 指针 own/ref  → fatal *T（fatal 指针已是 fatal，走上一分支）
+ *   - 切片 own/ref  → fatal []T
+ *   - 含 own 资源的复合类型（struct/tuple/array/option/union）→ fatal T
+ *   - 其余（标量 / 平凡 struct / ref 切片）→ ot 原样（无资源可转移）
+ *
+ * 返回 NULL = 无法构造（类型槽位内部错误），调用方转 val_void。 */
+const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *ot) {
+  if (!sema || !ot) return NULL;
+  if (type_is_fatal(ot)) return ot;
+  if (type_is_own(ot) || type_is_ref(ot)) {
+    const type_t *fatal = NULL;
+    if (type_is_slice(ot)) {
+      fatal = type_slice_intern(sema->vm, OWN_FATAL, slice_type_elem(ot));
+    } else if (type_is_ptr(ot)) {
+      fatal = type_ptr_intern(sema->vm, OWN_FATAL, ptr_type_base(ot));
+    }
+    if (!fatal) return NULL;
+    sema_type_register(sema, fatal);
+    return fatal;
+  }
+  /* 复合类型：只有**含 own 资源**的才有将亡值变体（无资源者原样） */
+  return make_fatal_variant(sema, ot);
 }
 
 const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
@@ -556,6 +708,28 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          解析直接穿透到被标注类型。 */
       ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
       return resolve_type_expr(sema, sa->sub);
+    }
+    case AST_OWNED_TYPE: {
+      /* `fatal T`（m3-design §3.3）：所有权限定的**非指针**类型（T 为
+         struct/tuple/array/option/union）。语义见 make_fatal_variant：
+         T 不含 own 资源时原样返回 T，否则产出同布局、ownership=OWN_FATAL
+         的将亡值变体。
+         parser 已保证只有 "fatal" 能构造本节点；此处再校验一次 token 文本，
+         防御 AST 被其它路径构造成 own/ref 限定的复合类型。 */
+      ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
+      if (ot->ownership) {
+        strslice_t own = token_strslice(ot->ownership);
+        if (!(own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "unsupported type ownership '%.*s' (only 'fatal' can "
+                     "qualify a non-pointer type)",
+                     (int)own.len, own.ptr);
+          return NULL;
+        }
+      }
+      const type_t *base = resolve_type_expr(sema, ot->base_type);
+      if (!base) return NULL;
+      return make_fatal_variant(sema, base);
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */

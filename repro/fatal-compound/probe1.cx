@@ -1,0 +1,30 @@
+// probe1: fatal 复合类型（struct 含 own 字段）跨函数边界 —— 参数 + 返回值
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box {
+    p: own *i32;
+    n: i32;
+}
+
+// 参数 fatal Box：函数内用 own 变量接管
+func take(b: fatal Box): i32 {
+    var owned: Box = move(b);
+    return owned.n;
+}
+
+// 返回 fatal Box：函数内 move 出去，调用方接管
+func mkbox(n: i32): fatal Box {
+    var b: Box = .Box{ .p = new i32{n}, .n = n };
+    return move(b);
+}
+
+func main(): i32 {
+    var b: Box = .Box{ .p = new i32{7}, .n = 7 };
+    if (take(move(b)) != 7) { return 1; }
+    var c: Box = mkbox(9);
+    if (c.n != 9) { return 2; }
+    if (c.p.* != 9) { return 3; }
+    libc::printf("fatal compound: ok\n");
+    return 0;
+}

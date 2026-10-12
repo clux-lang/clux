@@ -39,34 +39,39 @@
 
 /* ---- 生命周期：clone / assign / dispose（字段递归） ---- */
 
+/* 结构体是否**含**需递归处理的 own 资源（顶层字段直接是 own/share/weak
+   指针或 own 切片，或字段本身是含 own 的聚合）。与 sema 侧
+   type_contains_own_or_fatal 同义，但只看 own 系（fatal 是"必被接管"的
+   将亡值，不算资源持有者）。 */
+static bool struct_owns_resources(const struct_type_t *st) {
+    for (size_t i = 0; i < st->field_count; i++) {
+        if (ptr_type_needs_scan(st->fields[i].type)) return true;
+    }
+    return false;
+}
+
 static value_t *struct_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-    if (t->ownership == OWN_FATAL) {
-        /* fatal 复合类型 clone（将亡值深拷贝）：memcpy 整块 + 递归 clone
-           own/fatal 指针字段（ptr_clone_block 逐字段深拷贝对象图）。
-           与 ptr_clone_block 的 STRUCT 分支同款逻辑，但产出 fatal 类型值。 */
-        const struct_type_t *st = (const struct_type_t *)t;
-        void *data = value_alloc_data(vm->alloc, t);
-        memcpy(data, value_data(v), t->size); /* 平凡复制字段值 */
-        for (size_t i = 0; i < st->field_count; i++) {
-            const struct_field_t *f = &st->fields[i];
-            if (ptr_type_needs_scan(f->type)) {
-                void *fc = ptr_clone_block(vm, f->type,
-                                           (const uint8_t *)value_data(v) + f->offset);
-                memcpy((uint8_t *)data + f->offset, fc, f->type->size);
-                allocator_free(vm->alloc, (void **)&fc);
-            }
-        }
+
+    /* 含 own 资源的结构体：字段级深拷贝（ptr_clone_block 递归克隆对象图）——
+       own/fatal 指针字段分配**独立新堆块**，ref 字段复制指针值（借用共享）。
+       两个实例各自独占完整对象图，各自递归销毁，无共享堆块 = 无双释放。
+       源值**保持有效**（clone 是"复制"语义，不是转移——转移走 value_move /
+       op_move / fatal 参数与返回值路径），因此本函数不得清空源的 own 指针：
+       它同时服务 `var b = clone(a)`（a 必须仍可用）、scope_define 的借用
+       materialize 与 FIELD_GET 的字段取值（源是父值内部）。 */
+    if (t->kind == TYPE_KIND_STRUCT && struct_owns_resources((const struct_type_t *)t)) {
+        void *data = ptr_clone_block(vm, t, value_data(v));
         return value_make(vm, t, data);
     }
-    /* 浅拷贝（整块 memcpy）：隐式拷贝路径（DEFINE/赋值/转换）只作用于
-       sema 已保证不含 own 字段的值（含 own 的 struct 由 sema 拦截，禁止
-       隐式拷贝——m3-design §7 唯一所有权）；own 字段的深拷贝发生在主动
-       clone()（op_clone → ptr_clone_block 递归对象图克隆）。 */
+
+    /* 平凡结构体（data 全平凡：字段是裸字节块，字符串归 vm 字符串池）：
+       整块 memcpy 即可——sema 已保证不隐式拷贝含 own 字段的值，而真正需要
+       逐字段的路径（含 own / fatal 变体）走上一条分支。 */
     void *data = value_alloc_data(vm->alloc, t);
-    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
+    memcpy(data, value_data(v), t->size);
     return value_make(vm, t, data);
 }
 
@@ -89,23 +94,17 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
 
 static void struct_dispose(vm_t *vm, value_t *v) {
     const type_t *t = value_type(v);
-    if (t && t->ownership == OWN_FATAL) {
-        /* fatal 复合类型 dispose：递归释放 own 指针字段指向的堆块
-           （ptr_free_owned_recursive 逐字段递归销毁对象图）。data 块本身
-           由 value_dispose 统一处理。 */
-        const struct_type_t *st = (const struct_type_t *)t;
+    /* 含 own 资源的结构体（含 fatal 变体）：递归释放 own 指针字段指向的堆块。
+       **委托 ptr_free_owned_recursive**（不在此复写字段遍历）——它与
+       scope_destroy 走的是同一个实现，两条析构路径（scope 统一销毁 / vtable
+       dispose）语义必须逐字一致，否则会出现"作用域退出漏掉某类字段"这类只在
+       一条路径上出现的泄漏。data 块本身由 value_dispose 统一释放。
+       平凡结构体（无 own 字段）无需释放。 */
+    if (t && t->kind == TYPE_KIND_STRUCT &&
+        struct_owns_resources((const struct_type_t *)t)) {
         void *data = value_data(v);
-        if (!data) return;
-        for (size_t i = 0; i < st->field_count; i++) {
-            const struct_field_t *f = &st->fields[i];
-            if (ptr_type_needs_scan(f->type))
-                ptr_free_owned_recursive(vm, f->type,
-                                         (uint8_t *)data + f->offset);
-        }
-        return;
+        if (data) ptr_free_owned_recursive(vm, t, data);
     }
-    /* 普通结构体 data 全平凡（字段为裸字节块，字符串归池），无需释放。
-       借用引用与 data 块本身由 value_dispose 统一处理。 */
     (void)vm; (void)v;
 }
 
@@ -178,6 +177,12 @@ static value_t *struct_ne(vm_t *vm, value_t *a, value_t *b) {
 /* ---- 类型转换：结构兼容（鸭子类型）即可转换 ---- */
 
 static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
+    /* fatal 变体 → 同布局的非 fatal 类型（`T` / `const T`）：**接管转换**（memcpy
+       顶层 + 清空源的 own/fatal 指针），不是普通整块拷贝。理由见
+       value_take_fatal_into（共享内嵌 own 堆块 → 双释放，实测 access violation）。 */
+    value_t *taken = value_take_fatal_into(vm, v, target,
+                                           struct_type_compatible);
+    if (taken) return taken;
     /* T → const T / volatile T（可嵌套）：**只加限定**的隐式转换（C 语义：
        限定符只能加不能去）——同一份数据的视图，身份拷贝即可。sema 允许该转换
        （构造、参数传递、TDZ 初始化三处都合法），运行期必须落地；不加这一支就会
@@ -233,6 +238,7 @@ const vtable_t VTABLE_STRUCT = {
     .explicit_cast = struct_explicit_cast,
     .type_equal = struct_type_equal,
     .type_extends = struct_type_extends,
+    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_struct_seal, /* 开放构造路径（PUSH_STRUCT → SEAL）密封入口 */
 };
 
@@ -656,9 +662,20 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
     return t;
 }
 
-/* 带指定 ownership 的 struct intern：复制 base 的字段表，设 ownership，
- * 密封为新的 struct_type_t（与 base 同布局不同 ownership——去重时
- * struct_same 按 ownership 区分）。用于 fatal Node（ownership=OWN_FATAL）。 */
+/* 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，设
+ * ownership，密封为新的 struct_type_t（与 base 同布局不同 ownership——去重时
+ * struct_same 按 ownership 区分）。用于 `fatal Box`（ownership=OWN_FATAL）：
+ * "将亡值"变体，跨函数边界传递含 own 字段的结构体时由 move()/clone() 产出、
+ * 由参数/返回值接收方接管。
+ *
+ * **布局与 base 完全相同**（size/align/字段偏移逐字相同）——ownership 是
+ * type_t 上的正交标记，不参与布局。因此 fatal 变体与 base 的值可以按同一份
+ * 内存布局整块 memcpy 互换（move 的实现正是如此）。
+ *
+ * 显示名**不在此设定**：本对象由 struct_type_create_open 创建，其 dispose 会
+ * 释放 base.name，而 base 的名字可能借用外部存储（编译期 arena）。调用方
+ * （sema）在密封后用 type_set_name 设一个 vm 自有的名（如 "fatal Box"）——
+ * 与具名 struct 的既有做法一致（见 struct_compose.c）。 */
 const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
                                                 ownership_t ownership) {
     if (!vm || !base || base->kind != TYPE_KIND_STRUCT) return NULL;

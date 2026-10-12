@@ -207,6 +207,93 @@ void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub) {
     }
 }
 
+/* ---- 所有权设置（fatal T 的将亡值变体） ---- */
+
+bool type_set_ownership(vm_t *vm, const type_t *t, ownership_t ownership) {
+    if (!vm || !t) return false;
+    /* 不变量：类型属性只能在 seal 前编辑（与 add_field / set_embeds /
+       mark_unique 同一道闸门）。 */
+    if (type_is_sealed(t)) return false;
+    /* 复合类型的 ownership 恒为 OWN_NONE，fatal 是唯一例外——只此一条转换 */
+    if (ownership != OWN_FATAL) return false;
+    if (t->ownership != OWN_NONE) return false;
+    if (!t->vtable || !t->vtable->type_set_ownership) return false; /* 标量/指针/切片… */
+    return t->vtable->type_set_ownership(vm, t, ownership);
+}
+
+/* 五个复合类型 vtable 共用的槽位实现（见 type.h 说明） */
+bool type_set_ownership_default(vm_t *vm, const type_t *self,
+                                ownership_t ownership) {
+    (void)vm;
+    if (!self) return false;
+    ((type_t *)self)->ownership = ownership;
+    return true;
+}
+
+/* "fatal " + base 名（见 type.h）。前缀只此一份实现，五种复合类型共用。
+ * 长度取自 strslice_t（不用 strlen：名可能含内嵌字节）。 */
+char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
+                               ownership_t ownership, const char *fallback) {
+    if (!alloc) return NULL;
+    const char *prefix = (ownership == OWN_FATAL) ? "fatal " : "";
+    size_t plen = (ownership == OWN_FATAL) ? 6u : 0u;
+    const char *bn = (base && base->name.ptr) ? base->name.ptr : fallback;
+    size_t blen = 0;
+    if (base && base->name.ptr) {
+        blen = base->name.len;
+    } else if (bn) {
+        while (bn[blen]) blen++;
+    }
+    char *buf = (char *)allocator_new_ex(alloc, "char", sizeof(char), NULL, NULL,
+                                        NULL, plen + blen + 1);
+    if (!buf) return NULL;
+    if (plen) memcpy(buf, prefix, plen);
+    if (blen) memcpy(buf + plen, bn, blen);
+    buf[plen + blen] = '\0';
+    return buf;
+}
+
+/* ---- 递归 own 资源判定（见 type.h） ---- */
+
+bool type_owns_resources(const type_t *t) {
+    if (!t) return false;
+    if (type_directly_owns(t)) return true; /* own/share/weak 指针、own 切片 */
+    switch (t->kind) {
+        case TYPE_KIND_STRUCT: {
+            const struct_type_t *st = (const struct_type_t *)t;
+            for (size_t i = 0; i < st->field_count; i++)
+                if (type_owns_resources(st->fields[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_TUPLE: {
+            const tuple_type_t *tt = (const tuple_type_t *)t;
+            for (size_t i = 0; i < tt->elem_count; i++)
+                if (type_owns_resources(tt->elems[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_UNION: {
+            const union_type_t *ut = (const union_type_t *)t;
+            for (size_t i = 0; i < ut->member_count; i++)
+                if (type_owns_resources(ut->members[i].payload_type)) return true;
+            return false;
+        }
+        case TYPE_KIND_OPTION:
+            return type_owns_resources(((const option_type_t *)t)->inner);
+        case TYPE_KIND_ARRAY:
+            return type_owns_resources(((const array_type_t *)t)->elem_type);
+        default:
+            return false; /* 标量/str/ptr(已判)/slice(已判)/cunion/enum/func/opaque */
+    }
+}
+
+/* ---- fatal 将亡值是否携带可转移的堆资源（见 type.h） ---- */
+
+bool type_fatal_carries_resource(const type_t *t) {
+    if (!t || !type_is_fatal(t)) return false;
+    if (type_is_ptr(t) || type_is_slice(t)) return true; /* 裸指针 / 切片堆块 */
+    return type_owns_resources(t);                       /* 复合：内嵌 own 堆块 */
+}
+
 /* ---- type_promote ---- */
 
 typedef enum {

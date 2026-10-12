@@ -88,6 +88,8 @@ typedef enum {
      * own/ref/fatal *T 指针类型修饰（无裸指针）、new 堆分配、后置取址
      * x.& / 解引用 r.*、move/clone 所有权原语、作用域标注 '<a,b,c>。 */
     AST_PTR,             /* own/ref/fatal *T 指针类型修饰（类型即表达式） */
+    AST_OWNED_TYPE,      /* fatal T 所有权限定的**非指针**类型（复合类型的
+                            将亡值变体，跨函数边界的 move/clone 载体） */
     AST_NEW,             /* new T{...} 堆分配构造 → own *T */
     AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
     AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */

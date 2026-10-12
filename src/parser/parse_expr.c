@@ -31,6 +31,7 @@
 #include "parser/ast_alignof.h"
 #include "parser/ast_typeof.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
@@ -768,6 +769,8 @@ ast_node_t *parse_unary(parser_t *p) {
         return node;
     }
 
+    /* 修饰词已被 advance 消费（本分支只处理 own/ref/fatal/share/weak 五种），
+       游标现停在修饰词之后。 */
     advance(p);
     skip_trivia(p);
 
@@ -810,13 +813,37 @@ ast_node_t *parse_unary(parser_t *p) {
             p->pos = bracket_pos;
         }
 
-        if (!expect_symbol(p, "*")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "expected '*' or '[]' after ownership qualifier "
-                                 "(pointer: 'own *T' / 'ref *T' / 'fatal *T' / "
-                                 "'share *T' / 'weak *T'; slice: 'own []T' / "
-                                 "'ref []T' / 'fatal []T')");
+        if (!check_symbol(p, "*")) {
+            /* `*` / `[]` 都没有 → 不是指针/切片，而是**所有权限定的复合类型**
+               `fatal T`（m3-design §3.3：将亡值变体的载体，T 为 struct/tuple/
+               array/option/union 这类可能内嵌 own 字段的复合类型）。此时游标
+               仍停在修饰词之后（check_symbol 不消费），直接解析基础类型 T 即可
+               （右绑定力同指针/切片）。
+               合法组合只有 `fatal T`（own/ref 限定复合类型无意义——复合值本身
+               没有"借用/独占"这回事，借用走 ref *T / ref []T），其余在此处直接
+               报错，不留到 sema 产出难懂的诊断。 */
+            if (!token_is(op_tok, "fatal")) {
+                return ast_error_new(
+                    p->diag, p->tokens, p->arena, tb, p->pos,
+                    "only 'fatal' can qualify a non-pointer type "
+                    "(write 'own *T' / 'ref *T' / 'own []T' for pointers and "
+                    "slices, or 'fatal T' for a compound value's dying value)");
+            }
+            ast_node_t *ot_base = parse_expr_prec(p, PREFIX_RIGHT_PREC);
+            if (!ot_base || ot_base->kind == AST_ERROR) {
+                if (!ot_base) {
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                         "expected type after 'fatal'");
+                }
+                return ot_base;
+            }
+            ast_node_t *onode = ast_owned_type_new(p->arena, tb, p->pos);
+            if (!onode) return NULL;
+            ((ast_owned_type_t *)onode)->ownership = (token_t *)op_tok;
+            ((ast_owned_type_t *)onode)->base_type = ot_base;
+            return onode;
         }
+        advance(p);   /* 消费 '*'（check_symbol 不消费，见上方分支） */
         skip_trivia(p);
         ast_node_t *base_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
         if (!base_type || base_type->kind == AST_ERROR) {

@@ -58,6 +58,7 @@
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
@@ -699,6 +700,18 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             }
             sb_ch(&f->sb, '*');
             render_expr(f, pt->base_type);
+            break;
+        }
+        case AST_OWNED_TYPE: {
+            /* fatal T（复合类型的将亡值变体）：修饰词 + 空格 + 基础类型 */
+            ast_owned_type_t *ot = (ast_owned_type_t *)node;
+            if (ot->ownership) {
+                size_t olen = 0;
+                const char *otext = token_get_text(ot->ownership, &olen);
+                sb_put(&f->sb, otext, olen);
+                sb_ch(&f->sb, ' ');
+            }
+            render_expr(f, ot->base_type);
             break;
         }
         case AST_NEW: {

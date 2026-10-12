@@ -2613,55 +2613,32 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       if (is_poison(sema, operand))
         return val_void(sema);
       const type_t *ot = value_type(operand);
-      const type_t *base = ptr_type_base(ot);
-      bool is_slice = type_is_slice(ot);
-      if (base || is_slice) {
-        /* 指针/切片操作数：产物为 fatal *T / fatal []T
-           （MOVE/CLONE 指令已按此类型压栈） */
-        const type_t *fatal;
-        if (is_slice) {
-          const type_t *elem = slice_type_elem(ot);
-          fatal = type_slice_intern(sema->vm, OWN_FATAL, elem);
-        } else {
-          fatal = type_ptr_intern(sema->vm, OWN_FATAL, base);
-        }
-        if (!fatal) return val_void(sema);
-        sema_type_register(sema, fatal);
-        /* R2（move 后源 TDZ，m3-design §7）：move(own *T) 转移所有权——
-           源变量标记 moved，后续读取报 "used after move"。clone 深拷贝，
-           源不受影响。ref 是值拷贝（§3.2 可 copy），move(ref) 平凡转移。
-           R3（§7 有 ref 存活禁止 move）：move 源有活跃借用（borrow_count>0）
-           → 借用会悬空（借用指针随源销毁失效）→ 编译错误。clone 深拷贝
-           （新堆块）不触发（§7"ref 不影响 clone"）。 */
-        if (!n->op || !token_is(n->op, "clone")) {
-          if (n->operand->kind == AST_IDENT) {
-            sema_symbol_t *src =
-                sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
-            if (src && src->kind == SEMA_SYM_VAR && src->type &&
-                type_is_own(src->type)) {
-              if (src->borrow_count > 0) {
-                diag_error(sema->diag, sema_loc(sema, *node),
-                           "cannot move '%.*s': %d live borrow(s) still "
-                           "reference it (borrows must end before move)",
-                           (int)n->operand->kind == AST_IDENT
-                               ? ((ast_ident_t *)n->operand)->name.len
-                               : 0,
-                           ((ast_ident_t *)n->operand)->name.ptr,
-                           src->borrow_count);
-              } else {
-                src->moved = true;
-              }
-            } else if (src && src->kind == SEMA_SYM_VAR &&
-                       sema_type_is_fatal(src->type)) {
-              /* R1（fatal 消费，§4）：move(fatal) 是**合法消费点之一**——
-                 所有权被接管，标记已消费（判据见 sema_type_is_fatal）。 */
-              sema_mark_fatal_consumed(src);
-            }
+      const type_t *fatal = sema_fatal_variant_of(sema, ot);
+      if (!fatal) return val_void(sema);
+      bool is_clone = n->op && token_is(n->op, "clone");
+      bool produces_fatal = (fatal != ot);
+      if (!is_clone && (produces_fatal || type_is_fatal(ot)) &&
+          n->operand->kind == AST_IDENT) {
+        sema_symbol_t *src =
+            sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
+        if (src && src->kind == SEMA_SYM_VAR && src->type &&
+            type_is_own(src->type)) {
+          if (src->borrow_count > 0) {
+            diag_error(
+                sema->diag, sema_loc(sema, *node),
+                "cannot move '%.*s': %d live borrow(s) still "
+                "reference it (borrows must end before move)",
+                (int)((ast_ident_t *)n->operand)->name.len,
+                ((ast_ident_t *)n->operand)->name.ptr, src->borrow_count);
+          } else {
+            src->moved = true;
           }
+        } else if (src && src->kind == SEMA_SYM_VAR &&
+                   sema_type_is_fatal(src->type)) {
+          sema_mark_fatal_consumed(src);
         }
-        return value_make_shadow(sema->vm, fatal);
       }
-      return operand; /* shadow，类型 = 操作数类型（非指针/切片） */
+      return value_make_shadow(sema->vm, fatal);
 }
 
 /* AST_INT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */

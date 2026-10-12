@@ -166,11 +166,15 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->array_types) vm->array_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* 去重 intern（按 elem_type + length）：命中已有 sealed 类型则复用并手工回收本开放类型 */
+    /* 去重 intern（按 elem_type + length **+ ownership**）：命中已有 sealed
+       类型则复用并手工回收本开放类型。ownership 必须参与比较——fatal [N]T
+       与 [N]T 元素/长度相同但是**不同所有权**的类型（fatal 是将亡值变体，
+       漏比会把 fatal 变体去重成普通数组，跨函数边界的将被消费标记随之丢失）。 */
     size_t n = vec_len(vm->array_types);
     for (size_t i = 0; i < n; i++) {
         const array_type_t *other = (const array_type_t *)vec_get(vm->array_types, i);
         if (other && other != at && type_is_sealed(&other->base) &&
+            other->base.ownership == at->base.ownership &&
             other->elem_type == at->elem_type && other->length == at->length) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 at 的 type value 由 value_seal 负责
@@ -194,22 +198,40 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
     at->base.align   = at->layout_align;
     at->base.sealed  = true;
 
-    /* 重建类型名（含 length：固定长度 [elem; N]，未定长 [elem]） */
-    char *name = array_type_name(vm->alloc, at->elem_type, at->length);
-    if (!name) panic("vm: out of memory allocating array type name");
-    at->base.name = (strslice_t){ name, strlen(name) };
+    /* 重建类型名（含 length：固定长度 [elem; N]，未定长 [elem]）；
+       ownership == OWN_FATAL（fatal 变体）时加 "fatal " 前缀。 */
+    char *base_name = array_type_name(vm->alloc, at->elem_type, at->length);
+    if (!base_name) panic("vm: out of memory allocating array type name");
+    if (at->base.ownership == OWN_FATAL) {
+        char *prefixed = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL,
+                                                  base_name);
+        allocator_free(vm->alloc, (void **)&base_name);
+        if (!prefixed) panic("vm: out of memory allocating array type name");
+        base_name = prefixed;
+    }
+    at->base.name = (strslice_t){ base_name, strlen(base_name) };
 
     vec_push(vm->array_types, vm->alloc, at);  /* 密封后入池（去重 intern） */
     return &at->base;
 }
 
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count) {
+    return type_array_intern_with_ownership(vm, elem_type, count, OWN_NONE);
+}
+
+/* 带 ownership 的一次性快捷（见 type_array.h）。array_type_set_elem 拒绝已密封
+ * 类型，故 ownership 必须在 seal 之前设——这正是本函数与 type_array_intern 的
+ * 唯一差别。 */
+const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
+                                               size_t count,
+                                               ownership_t ownership) {
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
      * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
      * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
      * 压栈只会污染操作数栈（嵌套构造场景曾因此栈布局错位）。 */
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
+    ((type_t *)t)->ownership = ownership;
     array_type_set_elem(vm, t, elem_type);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);
@@ -356,8 +378,21 @@ static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
 
 /* ---- 类型转换：array↔tuple 布局兼容互转（m2-design §3）+ 同 array 身份 ---- */
 
+/* fatal 变体的布局兼容判定（供 value_take_fatal_into 回调）：
+   同 kind（都是数组）且元素类型相同 ⟹ 长度与 size 相同（fatal 变体按同一
+   elem+len 构造），故只需比元素类型。 */
+static bool array_fatal_layout_ok(vm_t *vm, const type_t *target,
+                                  const type_t *src) {
+    (void)vm;
+    return array_type_elem(target) == array_type_elem(src);
+}
+
 static value_t *array_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (!target) return value_make_error(vm, "array: missing cast target");
+    /* fatal 变体 → 同布局的非 fatal 数组：接管转换（见 value_take_fatal_into） */
+    value_t *taken = value_take_fatal_into(vm, v, target,
+                                           array_fatal_layout_ok);
+    if (taken) return taken;
     const type_t *src = value_type(v);
     /* 同 array 实例（身份拷贝） */
     if (target->kind == TYPE_KIND_ARRAY && target == src) {
@@ -389,6 +424,7 @@ const vtable_t VTABLE_ARRAY = {
     .assign    = array_assign,
     .implicit_cast = array_implicit_cast,
     .explicit_cast = array_explicit_cast,
+    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = array_type_seal,
 };
 
