@@ -124,26 +124,6 @@ static void emit_set_ownership(compiler_t *c, ownership_t ownership) {
   /* peek，无栈深变化 */
 }
 
-/* 声明阶段收尾：若该类型是 fatal 变体（ownership == OWN_FATAL），把所有权设到
- * 刚声明登记的开放对象上。**必须在 DEFINE_TYPE 之后**（peek 的是栈顶那个开放
- * 对象）、**SEAL 之前**（见 emit_set_ownership 说明）。
- * 指针/切片不在此列——它们的所有权在 PUSH_PTR/PUSH_SLICE 的构造操作数里给定。 */
-static void emit_declared_ownership(compiler_t *c, const sema_type_t *st) {
-  if (!st || !st->type) return;
-  if (st->type->ownership != OWN_FATAL) return;
-  switch (st->type->kind) {
-    case TYPE_KIND_STRUCT:
-    case TYPE_KIND_TUPLE:
-    case TYPE_KIND_ARRAY:
-    case TYPE_KIND_OPTION:
-    case TYPE_KIND_UNION:
-      emit_set_ownership(c, OWN_FATAL);
-      break;
-    default:
-      break; /* 指针/切片：构造操作数已给定；其余类型无该槽位 */
-  }
-}
-
 /* ===========================================================================
  * pass 1：声明所有类型
  *

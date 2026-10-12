@@ -769,19 +769,42 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
   }
 }
 
-/* §5 强制规则：返回 ref 必标注。rt 是折叠出的返回类型；fn->return_expr
-   已折叠（标注节点保留，sema_annot_peek 可读）。未标注 → 编译错误。 */
+/* §5 强制规则：**返回值含 ref 必标注**。rt 是折叠出的返回类型；fn->return_expr
+   已折叠（标注节点保留，sema_annot_peek 可读）。未标注 → 编译错误。
+
+   与变量声明的 check_var_annot（stmt.c）同一条规则、同一递归判定
+   （type_contains_ref）：
+     - 顶层 `ref *T` / `ref []T`：未标注 → 报错（调用点无法确定返回值存活上限）；
+     - **含 ref 字段的复合类型**（struct/tuple/union/array/option 内嵌 ref）：
+       与变量声明侧一致地强制标注——聚合内 ref 字段的借源无法静态推断
+       （构造式可能多源），不标注就是**指针逃逸**：调用方拿到的是借用了被调用方
+       局部（或参数）的值，却没有可判的存活上限。
+       实测此前只查顶层 ref，`func f(p: ref *i32): Holder`（Holder 含 ref 字段）
+       静默放行。 */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
                               const type_t *rt) {
-  if (!rt || !type_is_ref(rt) || !fn->return_expr) return true;
+  if (!rt || !fn->return_expr) return true;
+  bool top_ref = type_is_ref(rt);
+  bool compound_ref = !top_ref && type_contains_ref(rt);
+  if (!top_ref && !compound_ref) return true;
   strslice_t *names = NULL;
   size_t count = 0;
   sema_annot_peek(fn->return_expr, &names, &count);
   if (count == 0) {
-    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
-               "function '%.*s' returns a ref but does not declare its "
-               "scope (annotate the return type, e.g. '<p> ref *T)",
-               (int)fn->name.len, fn->name.ptr);
+    if (top_ref) {
+      diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+                 "function '%.*s' returns a ref but does not declare its "
+                 "scope (annotate the return type, e.g. '<p> ref *T)",
+                 (int)fn->name.len, fn->name.ptr);
+    } else {
+      char tn[64];
+      sema_type_name(rt, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+                 "function '%.*s' returns a value of type '%s' which contains "
+                 "ref pointers and must declare their scope (annotate the "
+                 "return type, e.g. '<p> %s)",
+                 (int)fn->name.len, fn->name.ptr, tn, tn);
+    }
     return false;
   }
   return true;

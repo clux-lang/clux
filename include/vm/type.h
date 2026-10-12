@@ -5,35 +5,11 @@ extern "C" {
 #endif
 
 #include "vm/vtable.h"
+#include "vm/ownership.h"    /* ownership_t（vtable_t 的 type_set_ownership 槽位也要） */
 #include "core/allocator.h"  /* allocator_t：type_name_with_ownership 的参数 */
 #include "core/strslice.h"
 #include <stdbool.h>
 #include <stddef.h>
-
-/**
- * ownership_t: 所有权修饰（type_t.ownership）
- *
- * 正交于 type_kind_t 的所有权属性。指针（PTR）和切片（SLICE）支持全部
- * 五种修饰；其他类型（struct/tuple/array/...）恒为 OWN_NONE，唯一例外
- * 是 OWN_FATAL——move/clone 产物的将亡值（fatal T），仅允许出现在函数
- * 返回类型标注，其他位置（sizeof/typeof/变量声明/参数...）均为编译错误。
- *
- *   OWN_NONE  — 无所有权修饰（标量/struct/tuple/... 的默认值）
- *   OWN_OWN   — 独占所有权（own *T / own []T，作用域退出自动销毁）
- *   OWN_REF   — 借用引用（ref *T / ref []T，无所有权，可 copy）
- *   OWN_FATAL — 将亡值（fatal *T / fatal []T / fatal T，move/clone 产物，
- *               禁止命名；非指针/切片的 fatal T 只允许在返回类型）
- *   OWN_SHARE — RC 强引用（share *T，§12）
- *   OWN_WEAK  — RC 弱引用（weak *T，§12）
- */
-typedef enum ownership_t {
-    OWN_NONE  = 0,
-    OWN_OWN,
-    OWN_REF,
-    OWN_FATAL,
-    OWN_SHARE,
-    OWN_WEAK,
-} ownership_t;
 
 /**
  * type_kind_t: 类型粗粒度分类（type_t.kind）
@@ -565,6 +541,18 @@ bool type_owns_resources(const type_t *t);
  * （转移——源被掏空是**必须**的，否则双方共享堆块）；否则走 clone（拷贝）。
  */
 bool type_fatal_carries_resource(const type_t *t);
+
+/**
+ * 类型是否（**递归**）含 ref 指针——顶层 `ref *T` / `ref []T`，或
+ * struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素含
+ * ref。
+ *
+ * 判定的用途（M3 §5 强制规则）：ref 的作用域**必须标注**——含 ref 的类型出现
+ * 在变量声明或返回值位置时，没有 `'<a,b> T` 标注就无法确定借用的存活上限，
+ * 指针会逃逸到标注之外（悬垂）。变量声明侧（stmt.c 的 check_var_annot）与
+ * 返回值侧（sema.c 的 sema_check_ret_ref_annot）共用本判定，两处规则一致。
+ */
+bool type_contains_ref(const type_t *t);
 
 /** const 类型 intern（按 sub 指针去重，vm 拥有生命周期） */
 const type_t *type_const_intern(vm_t *vm, const type_t *sub);

@@ -249,57 +249,10 @@ void sema_scope_release_borrows(sema_scope_t *scope) {
 
 /* ---- §5 作用域标注逃逸检查（m3-design §5） ---- */
 
-/* 类型是否含 ref 指针（顶层或嵌套——struct/tuple/union/cunion 字段、
-   option/const/volatile 内层、数组元素）。§5 强制规则 B 的判定基础：
-   "结构体/共用体含 ref 字段时，该类型变量定义时必须标注"。 */
-static bool type_contains_ref(const type_t *t) {
-  if (!t) return false;
-  switch (t->kind) {
-    case TYPE_KIND_PTR:
-      return type_is_ref(t);
-    case TYPE_KIND_STRUCT: {
-      size_t n = struct_type_field_count(t);
-      for (size_t i = 0; i < n; i++) {
-        const struct_field_t *f = struct_type_field(t, i);
-        if (f && type_contains_ref(f->type)) return true;
-      }
-      return false;
-    }
-    case TYPE_KIND_TUPLE: {
-      size_t n = tuple_type_elem_count(t);
-      for (size_t i = 0; i < n; i++) {
-        const tuple_elem_t *e = tuple_type_elem(t, i);
-        if (e && type_contains_ref(e->type)) return true;
-      }
-      return false;
-    }
-    case TYPE_KIND_UNION: {
-      size_t n = union_type_member_count(t);
-      for (size_t i = 0; i < n; i++) {
-        const union_member_t *m = union_type_member(t, i);
-        if (m && type_contains_ref(m->payload_type)) return true;
-      }
-      return false;
-    }
-    case TYPE_KIND_CUNION: {
-      size_t n = cunion_type_member_count(t);
-      for (size_t i = 0; i < n; i++) {
-        const cunion_member_t *m = cunion_type_member(t, i);
-        if (m && type_contains_ref(m->type)) return true;
-      }
-      return false;
-    }
-    case TYPE_KIND_OPTION:
-      return type_contains_ref(type_option_inner(t));
-    case TYPE_KIND_CONST:
-    case TYPE_KIND_VOLATILE:
-      return type_contains_ref(type_qualifier_sub(t));
-    case TYPE_KIND_ARRAY:
-      return type_contains_ref(array_type_elem(t));
-    default:
-      return false; /* 标量/str/bool/own/fatal 指针/type/error/opaque */
-  }
-}
+/* 类型是否含 ref 指针（顶层或嵌套）：用 vm 层的 `type_contains_ref`
+   （type.c / type.h）——§5 强制规则 B（含 ref 字段的聚合变量必须标注）与返回值
+   侧的 sema_check_ret_ref_annot 共用同一递归判定，两处规则必须逐字一致
+   （此前只有变量声明侧有这份递归，返回值侧漏查含 ref 的复合类型）。 */
 
 /* 复合类型是否**嵌套**含 own/fatal 指针或切片（struct/tuple/union/cunion
    字段、option/const/volatile 内层、数组元素）。R1 隐式拷贝拦截的判定基础：

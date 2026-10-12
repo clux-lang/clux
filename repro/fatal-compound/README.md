@@ -46,13 +46,19 @@
 | `t_move_local.cx` | 局部 `move(struct)`：源置空、无双释放 | exit 0 |
 | `t_param.cx` | `fatal Box` 形参 + 函数内 `move` 接管 | exit 0 |
 | `probe2.cx` | 局部 `clone` + `move` 连续切换 | exit 0 |
-| `probe3.cx` | **反例**：`func read(b: Box)` + `read(a)`（隐式拷贝） | exit 1（明确诊断） |
+| `probe3.cx` | 只读字段：`func read(b: ref *Box)` + `read(a.&)`（借用，不动所有权） | exit 0 |
+| `probe3b_plain_arg.rejected.cx` | **反例**：`func read(b: Box)` + `read(a)`（隐式浅拷贝） | exit 1（明确诊断） |
 | `probe1.cx` | `fatal Box` 形参 + `fatal Box` 返回值（完整跨边界链） | exit 0 |
 | `probe4.cx` | 同上（`make` 是语言关键字，已改名 `mkbox`） | exit 0 |
 | `probe5.cx` | move/clone 语义：深拷贝隔离、嵌套 struct、元组含 own、数组元素深拷贝 | exit 0 |
+| `probe6_refret.cx` | 含 ref 字段的结构体/数组返回 + 已标注作用域 | exit 0 |
+| `probe6b_refret.rejected.cx` | **反例**：含 ref 字段的返回未标注 → 指针逃逸 | exit 1（明确诊断） |
 | `t_fatal_array.cx` | `fatal [2]Inner` 形参（数组 fatal 变体 + 跨边界转移） | exit 0 |
 | `t_forward.cx` | `fatal Box` 参数原样 `return` 转发 + 局部 `move` 数组 | exit 0 |
 | `t_ptr.cx` | 对照：指针 move 未被本次改动破坏 | exit 0 |
+
+`.rejected.cx` 后缀标记"**必须编译失败**"的反例（与 `repro/sema-defects` 里
+"已修复档案"的约定一致：这些文件不该被当成可运行的正例）。
 
 ## 已知边界
 
@@ -64,3 +70,24 @@
 - 运行期 `func_vcall` 的 fatal 参数接收 / 返回值交回走**转移**（`value_move`）
   而非深拷贝；判定用 `type_fatal_carries_resource`（只有真带堆资源的 fatal 才转
   移）。
+
+## 相邻缺陷（同批修复）：含 ref 字段的返回值必须标注作用域
+
+`probe6b_refret.rejected.cx`。返回类型**含 ref 指针**（顶层 `ref *T` **或**含
+ref 字段的复合类型）时，没有 `'<a,b> T` 标注就无法确定借用的存活上限——调用方
+拿到的是借用了被调用方局部/参数的悬垂指针（**指针逃逸**）。
+
+修复前只查顶层 `ref *T`（`sema_check_ret_ref_annot` 的判据是 `type_is_ref(rt)`），
+`func f(p: ref *i32): Holder`（Holder 含 ref 字段）**静默放行**。现在返回值侧与
+变量声明侧（`check_var_annot`）共用同一递归判定 `type_contains_ref`（vm 层），
+含 ref 的复合返回类型同样强制标注。
+
+注意**两侧都要标注**：被调用方标返回值的借用来源（`'<p> Holder`），调用方标
+自己那个含 ref 字段的变量（`var h: '<x> Holder = f(x.&)`）——§5 对声明与返回
+一视同仁。
+
+| 文件 | 覆盖 | 期望 |
+|---|---|---|
+| `probe6_refret.cx` | 已标注 `'<p>`：结构体 + 嵌套数组返回，调用方按标注绑定 | exit 0 |
+| `probe6b_refret.rejected.cx` | **反例**：未标注 → "contains ref pointers and must declare their scope" | exit 1 |
+

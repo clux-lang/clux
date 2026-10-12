@@ -1,0 +1,20 @@
+// probe3b: **反例** —— 结构体含 own 指针字段，按值传参（隐式浅拷贝）→ 必须报错
+// 修复前：静默编译通过，运行期 access violation（源与被调用方共享同一堆块）。
+// 诊断：argument 1: cannot copy a value holding owned resources into parameter
+//       of type Box (use move() or clone(), or declare the parameter as 'ref *T')
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box {
+    p: own *i32;
+    n: i32;
+}
+
+func read(b: Box): i32 {
+    return b.n;
+}
+
+func main(): i32 {
+    var a: Box = .Box{ .p = new i32{7}, .n = 7 };
+    return read(a);
+}

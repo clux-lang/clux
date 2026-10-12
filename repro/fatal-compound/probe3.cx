@@ -1,4 +1,6 @@
-// probe3: 结构体含 own 指针，跨函数边界传参（不 move，隐式拷贝）——当前是否被拦？
+// probe3: 只想读字段 → 用 `ref *Box` 借用（不涉及所有权转移）
+// 反例（必须报错）见 probe3b_plain_arg.rejected.cx：`func read(b: Box)` + `read(a)`
+// 会因 Box 含 own 字段而隐式浅拷贝 → 与被调用方共享堆块 → 双释放。
 extern lib "*" as libc;
 extern func libc::printf(format: str, ...): void;
 
@@ -7,11 +9,13 @@ struct Box {
     n: i32;
 }
 
-func read(b: Box): i32 {
-    return b.n;
+func read(b: ref *Box): i32 {
+    return b.n + b.p.*;
 }
 
 func main(): i32 {
-    var a: Box = .Box{ .p = new i32{7}, .n = 7 };
-    return read(a);
+    var a: Box = .Box{ .p = new i32{4}, .n = 3 };
+    if (read(a.&) != 7) { return 1; }
+    libc::printf("borrowing read: ok\n");
+    return 0;
 }

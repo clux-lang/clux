@@ -311,7 +311,66 @@ TEST(DriverFatalCompound, NonFatalOwnerCannotQualifyCompound) {
   std::remove(path.c_str());
 }
 
-/* ---- 6. 借用路径不被误伤 ---- */
+/* ---- 7. 含 ref 字段的返回值必须标注作用域（§5 强制规则） ----
+ *
+ * 与变量声明侧同一条规则：含 ref 指针的类型（顶层或嵌套）出现在返回值位置时，
+ * 没有 `'<a,b> T` 标注就无法确定借用的存活上限 —— 调用方会拿到借用了被调用方
+ * 局部/参数的悬垂指针（指针逃逸）。修复前只查顶层 `ref *T`，含 ref 字段的复合
+ * 返回类型静默放行。
+ */
+
+TEST(DriverFatalCompound, StructWithRefFieldReturnRequiresAnnotation) {
+  std::string path = write_temp_file(
+      "struct Holder { r: ref *i32; n: i32; }\n"
+      "func f(p: ref *i32): Holder {\n"
+      "  return .Holder{ .r = p, .n = 1 };\n"
+      "}\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFatalCompound, ArrayWithRefElemReturnRequiresAnnotation) {
+  /* 嵌套（数组元素含 ref 的复合类型）同样必须标注 */
+  std::string path = write_temp_file(
+      "struct Holder { r: ref *i32; n: i32; }\n"
+      "func f(p: ref *i32): [1]Holder {\n"
+      "  return .[1]Holder{ .Holder{ .r = p, .n = 1 } };\n"
+      "}\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFatalCompound, AnnotatedStructWithRefFieldReturnPasses) {
+  /* 已标注 '<p> → 放行；调用方侧含 ref 字段的变量同样标注（§5 对声明与返回
+     一视同仁），借自本作用域的 x 故用 '<x>。 */
+  std::string path = write_temp_file(
+      "struct Holder { r: ref *i32; n: i32; }\n"
+      "func annot(p: ref *i32): '<p> Holder {\n"
+      "  return .Holder{ .r = p, .n = 2 };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var x: i32 = 41;\n"
+      "  var h: '<x> Holder = annot(x.&);\n"
+      "  if (h.n != 2) { return 1; }\n"
+      "  if (h.r.* != 41) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFatalCompound, PlainRefReturnStillRequiresAnnotation) {
+  /* 顶层 ref 返回的既有规则不回归 */
+  std::string path = write_temp_file(
+      "func f(p: ref *i32): ref *i32 { return p; }\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+/* ---- 8. 借用路径不被误伤 ---- */
 
 TEST(DriverFatalCompound, RefPointerBorrowingStillWorks) {
   /* 只想借用时用 `ref *Box`：不涉及所有权转移，读字段照常。 */

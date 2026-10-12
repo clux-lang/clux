@@ -70,7 +70,10 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
         return value_make_error(vm, "func call: function has no signature");
     }
     const func_sig_t *sig = &((const func_type_t *)ct)->sig;
-    char msg[96];
+    /* 192：最长的诊断（"argument N: cannot copy a value holding owned resources
+       into parameter of type <类型名> (use move() or clone(), or declare the
+       parameter as 'ref *T' to borrow)"）在类型名较长时约 150 字符。 */
+    char msg[192];
 
     /* 参数数量校验（非 variadic 必须精确匹配；variadic 至少 param_count） */
     if (!sig->is_variadic && argc != sig->param_count) {

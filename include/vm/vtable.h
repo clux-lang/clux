@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "vm/ownership.h"  /* ownership_t：type_set_ownership 槽位用 */
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -13,10 +14,6 @@ extern "C" {
 typedef struct vm_t    vm_t;
 typedef struct type_t  type_t;
 typedef struct value_t value_t;
-/* ownership_t 的真定义在 vm/type.h（type_t.ownership）。本头文件被 type.h 先
- * 包含，故此处用**带固定底层类型的前置声明**（C11 6.7.2.3 允许，且与 type.h
- * 里的定义一致）——只需一个不完全枚举类型即可声明指针/参数。 */
-typedef enum ownership_t ownership_t;
 
 /**
  * vtable_t: 类型行为虚表

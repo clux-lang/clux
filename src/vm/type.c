@@ -294,6 +294,48 @@ bool type_fatal_carries_resource(const type_t *t) {
     return type_owns_resources(t);                       /* 复合：内嵌 own 堆块 */
 }
 
+/* ---- 递归 ref 判定（见 type.h） ---- */
+
+bool type_contains_ref(const type_t *t) {
+    if (!t) return false;
+    if (type_is_ref(t)) return true; /* 顶层 ref *T / ref []T */
+    switch (t->kind) {
+        case TYPE_KIND_STRUCT: {
+            const struct_type_t *st = (const struct_type_t *)t;
+            for (size_t i = 0; i < st->field_count; i++)
+                if (type_contains_ref(st->fields[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_TUPLE: {
+            const tuple_type_t *tt = (const tuple_type_t *)t;
+            for (size_t i = 0; i < tt->elem_count; i++)
+                if (type_contains_ref(tt->elems[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_UNION: {
+            const union_type_t *ut = (const union_type_t *)t;
+            for (size_t i = 0; i < ut->member_count; i++)
+                if (type_contains_ref(ut->members[i].payload_type)) return true;
+            return false;
+        }
+        case TYPE_KIND_CUNION: {
+            const cunion_type_t *ct = (const cunion_type_t *)t;
+            for (size_t i = 0; i < ct->member_count; i++)
+                if (type_contains_ref(ct->members[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_OPTION:
+            return type_contains_ref(((const option_type_t *)t)->inner);
+        case TYPE_KIND_CONST:
+        case TYPE_KIND_VOLATILE:
+            return type_contains_ref(type_qualifier_sub(t));
+        case TYPE_KIND_ARRAY:
+            return type_contains_ref(((const array_type_t *)t)->elem_type);
+        default:
+            return false; /* 标量/str/own/fatal 指针/type/error/opaque/enum/func */
+    }
+}
+
 /* ---- type_promote ---- */
 
 typedef enum {
