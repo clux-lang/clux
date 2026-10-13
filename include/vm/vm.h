@@ -98,6 +98,16 @@ typedef struct vm_t {
     vec_t *types_by_id;    /* type_t*，索引即类型 id */
     uint32_t type_id_next; /* 程序类型 id 分配计数器（type_id_alloc 维护） */
 
+    /* ---- fatal 变体 → base 的派生关系（成对存储：变体、base） ----
+       `type_fatal_variant_of` 创建变体时登记，`type_fatal_base_of` 查询。
+       **为什么必须显式登记**：具名 struct 标记 unique、不参与 intern 去重
+       （见 struct_type_t::unique），所以"从 fatal 变体重拼一个 OWN_NONE 变体"
+       会每次新建实例，指针永不等于原 base —— 任何身份判定都会失败
+       （实测：`.?I{ .I{...} }` 的 option 内层比对误报）。
+       元素为 type_t*，两两一组：[variant, base, variant, base, …]，
+       不 owns（两者都归各自类型池）。 */
+    vec_t *fatal_bases;
+
     /* ---- 函数对象池（func_t / bcode_function_t*，vm 统一持有生命周期） ---- */
     /* 所有函数值共享同一 func_t*（clone 浅拷贝指针），因此 func_t 不能由
      * 某个 value dispose 释放（double free）；归本池统一释放。 */

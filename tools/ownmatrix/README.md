@@ -72,8 +72,7 @@ python tools/ownmatrix/run_matrix.py
 | `C6` | `defer` 捕获（复用同一套捕获解析） |
 | `C7` | 块内捕获（闭包更早释放） |
 
-当前结果：struct / nested / deep / tuple / array / union 六族 **42/42 干净**；
-`optinner` 7 格被下面第 1 条缺口挡住（与闭包无关）。
+当前结果：**七族 49/49 干净**（`optinner` 随下面两条缺口修复后也全通）。
 
 > 附注：`closure_scope` 的生命周期**并非无人管理**——`vm_destroy` 会对每个函数
 > 调 `scope_destroy(vm, &fn->closure_scope)`。此前的捕获泄漏根因是
@@ -82,15 +81,28 @@ python tools/ownmatrix/run_matrix.py
 
 ## 当前已知缺口
 
-1. **`optinner` 全列**：`var a: ?I = .?I{ .I{ .p = new i32{7} } }` 报
-   `cannot initialize optional ?I with fatal I`。sema 的匿名构造槽位把 option 的
-   内层推断成了 `fatal I`，而 `?I` 要的是内层 `I`。
-2. **`13_fatal_return` 的 `array` / `union` 两格**：运行期报
-   `array: implicit cast only within layout-compatible array/tuple`。根因是
-   fatal 变体的**元素类型不统一**——`fatal [2]I` 与 `fatal [2]fatal I` 互不相等
-   （指针/切片由 `type_fatal_variant_of` 升为 fatal，而数组/union 的
-   `*_intern_with_ownership` 保留了原元素类型）。
-   `struct` / `tuple` 的对应格已通过（`value_relabel_into` 就地重贴标签）。
+**（无）** —— 截至本次，矩阵的 119 + 49 格全部 `ok`。
 
-> 早先记录的 `13_fatal_return` 8 字节泄漏已随提交 `0732858` 修复（同第 1 条根因的
-> 副作用）。
+### 已修复（留档，避免回退）
+
+1. **`optinner` 全列**（原：`cannot initialize optional ?I with fatal I`）
+   两层根因：sema 的 option 字段类型比对没把 fatal 折回 base；而折回时"按同布局
+   重新 intern"对**具名 struct 不可靠**（标了 `unique`、不参与去重，每次新建实例）。
+   修法：`type_fatal_variant_of` 创建变体时登记 `fatal → base`（`vm->fatal_bases`），
+   折回查登记表拿规范身份。见 `docs/m3-design.md` §7.4。
+2. **`13_fatal_return` 的 `array` / `union` 两格**（原：运行期
+   `array: implicit cast only within layout-compatible array/tuple`）
+   真正的原因**不是**元素类型不统一，而是返回值路径上**第 6 步**（safe_cast 到声明
+   返回类型）抢先做了一次 `base → fatal` 的 cast —— 那是**非法方向**（各族
+   `implicit_cast` 只认 `fatal → base` 的接管）。修法：声明返回类型 fatal 且带资源时
+   第 6 步让开，交给第 7 步 `value_move` + `value_relabel_into`。
+   struct / 指针族此前靠布局兜底偶然通过。见 `docs/m3-design.md` §7.5。
+3. **`13_fatal_return` 的 8 字节泄漏**：随提交 `0732858` 修复
+   （`value_own_copy_into` 未回收 `ptr_clone_block` 的中间块）。
+
+### 尚未拦截（sema 侧，非缺陷但规则不齐）
+
+捕获 **`own *T` 裸变量**已被拦（`cannot capture own/fatal pointer … use move()`），
+但**含 own 字段的复合类型按值捕获（纯 id）未被拦**——目前走深拷贝语义（安全、无
+泄漏），与 §7.2"复合类型赋值禁止 copy"不一致。是否要求显式 `clone()`/`move()` 待定。
+

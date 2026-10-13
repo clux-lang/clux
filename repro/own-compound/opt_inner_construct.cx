@@ -1,0 +1,30 @@
+// opt_inner_construct.cx: **正例** —— option 内层含 own，字段是内联构造表达式
+//
+// `?I` 的字段语义是"内层提升为 some"，内层类型是**非 fatal** 的 `I`；但字段表达式
+// 本身往往是构造表达式（`.I{...}`），sema 的 `ex_construct_fatal` 会把它标成
+// `fatal I`。归一之前这里误报：
+//   error: cannot initialize optional ?I with fatal I
+//
+// 两层根因（见 docs/m3-design.md §7.4）：
+//   1. option 字段类型比对没把 fatal 折回 base；
+//   2. 折回时"按同布局重新 intern 一个 OWN_NONE 变体"对**具名 struct 不可靠**——
+//      具名 struct 标了 unique、不参与 intern 去重，每次新建实例，指针永不相等。
+// 修法：`type_fatal_variant_of` 创建变体时登记 `fatal → base`，折回查登记表。
+struct I { p: own *i32; n: i32; }
+struct M { i: I; n: i32; }
+
+func main(): i32 {
+    // 内联构造作 option 字段值（原本误报的那一处）
+    var a: ?I = .?I{ .I{ .p = new i32{7}, .n = 3 } };
+    if (a == nil) { return 1; }
+
+    // 内层再嵌一层（字段表更大）
+    var b: ?M = .?M{ .M{ .i = .I{ .p = new i32{8}, .n = 5 }, .n = 4 } };
+    if (b == nil) { return 2; }
+
+    // nil 字段仍然合法
+    var c: ?I = .?I{ nil };
+    if (c != nil) { return 3; }
+
+    return 0;
+}

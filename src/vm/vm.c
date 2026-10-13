@@ -158,6 +158,9 @@ vm_t *vm_new(allocator_t *alloc) {
        DEFINE_TYPE <id> 声明登记（SEAL 密封后幂等重绑）动态扩容。 */
     vm->types_by_id = vec_new(alloc, /*owns_element=*/false);
     vm->type_id_next = TYPE_ID_PROGRAM_BASE;
+    /* fatal 变体 → base 的派生关系表（惰性创建亦可，这里显式建好省一次判空；
+       元素不 owns——两者都归各自类型池） */
+    vm->fatal_bases = vec_new(alloc, /*owns_element=*/false);
 
     /* 字符串池（str 生命周期托管：字面量/拼接/错误消息统一 intern） */
     vm->strs = vec_new(alloc, /*owns_element=*/false);
@@ -441,6 +444,8 @@ void vm_destroy(vm_t **pvm) {
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */
     vec_free(vm->alloc, &vm->types_by_id);
+    /* fatal 变体 → base 关系表：只释放向量结构（元素归类型池） */
+    if (vm->fatal_bases) vec_free(vm->alloc, &vm->fatal_bases);
 
     allocator_free(vm->alloc, (void **)pvm);
 }

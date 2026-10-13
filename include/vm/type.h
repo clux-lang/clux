@@ -594,6 +594,32 @@ bool type_fatal_carries_resource(const type_t *t);
 const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
 
 /**
+ * 取 fatal 变体的 **base 类型**（fatal T → T；fatal *T → own *T；
+ * fatal []T → own []T）。非 fatal 输入原样返回。
+ *
+ * 实现要点：优先返回创建时缓存的 `t->fatal_base`（**规范身份**）；
+ * 未缓存时才退回"按同布局重新 intern"。前者是唯一可靠路径——具名 struct 标了
+ * `unique`、不参与 intern 去重，重新 intern 会每次新建实例，指针永不等于原 base。
+ *
+ * 用途：sema/运行期需要"把 fatal 字段折回它声明的类型"时比较身份
+ * （例：`.?I{ .I{...} }` 的 option 内层比对）。
+ *
+ * **注意返回的指针可能是新建的 intern 实例**，因此只应用于**比较/判定**，
+ * 不要拿去当类型注册名（它没有登记名）。
+ */
+const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
+
+/**
+ * 记录"`fatal` 变体 `variant` 由 `base` 派生"（写 `variant->fatal_base = base`）。
+ * 由各 `type_*_intern_with_ownership(…, OWN_FATAL)` **在 seal 之后**调用：
+ *   - seal 可能把新分配的对象 dedup 掉并返回池中已有实例（struct 非 unique 时），
+ *     因此必须在拿到最终实例之后再写，否则写进的是被回收的临时对象；
+ *   - `base == variant`（未真正派生新变体）时不写，避免自指。
+ * 幂等：已记录则保持首次记录（同一逻辑类型的 base 是唯一的）。
+ */
+void type_fatal_bind_base(vm_t *vm, const type_t *variant, const type_t *base);
+
+/**
  * 类型是否（**递归**）含 ref 指针——顶层 `ref *T` / `ref []T`，或
  * struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素含
  * ref。

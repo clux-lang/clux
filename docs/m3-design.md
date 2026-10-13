@@ -279,6 +279,44 @@ DEFINE "a"                 ← op_define 走 value_implicit_cast：
 只有"构造产 fatal"没有推断写回 → 运行期值带 fatal 类型而变量声明为 T，转移判定
 落空 → 变量析构不释放堆块（泄漏）或与临时值双释放。
 
+### 7.4 fatal 变体的**身份**与 `fatal → base` 的可靠折回
+
+`fatal T` 与 `T` 逐字节同布局，但是**不同的 `type_t` 实例**。凡需要"把 fatal 折回它
+声明的类型"再比身份的地方，都必须拿到 **base 的规范身份**，否则判定必然失败。
+
+**为什么不能"按同布局重新 intern 一个 base"**：具名 `struct` 会被标记
+`unique`（`MARK_UNIQUE`，见 `struct_type_t::unique`），而 `type_struct_seal` 的
+去重**跳过 unique 类型**（具名类型各有独立成员命名空间，合并会串味）。于是
+`type_struct_intern_with_ownership(fatal_I, OWN_NONE)` **每次新建一个实例**，
+指针永不等于原 base —— 实测 `.?I{ .I{...} }` 的 option 内层比对因此误报
+`cannot initialize optional ?I with fatal I`。
+
+**正解**：在**唯一同时握有 base 与变体**的地方登记派生关系 ——
+`type_fatal_variant_of`（`src/vm/type.c`）创建变体后写 `vm->fatal_bases`
+（`[variant, base, …]` 成对）；查询走 `type_fatal_base_of`，命中登记表即返回
+**规范 base**，未命中才退回"按布局重新 intern"的兜底（该兜底对 unique 类型不可靠，
+仅供比较参考）。
+
+> 为什么不在 `type_t` 里加 `fatal_base` 字段：`type.c` 的内建类型用定位初始化器
+> （`(type_t){…}`）逐个列出字段，加字段会给每一处带来 `-Wmissing-field-initializers`
+> 噪声；放 vm 侧映射表既不动布局，也不影响类型池的生命周期（元素两两都由各自类型池
+> 拥有，映射表只存借用指针）。
+
+### 7.5 fatal 聚合类型的**返回值**路径
+
+`func mk(): fatal [2]I` 的返回值交回调用方时会经过两处对"声明返回类型"的处理：
+
+| 步骤 | 行为 | 对 `fatal` 声明是否正确 |
+|---|---|---|
+| 第 6 步：返回值 safe_cast 到声明返回类型 | `value_implicit_cast(result, sig->return_type)` | **否**——`base → fatal` 不是合法的隐式转换方向（各族的 `implicit_cast` 只认 `fatal → base` 的接管）。array/union 直接失败：`array: implicit cast only within layout-compatible array/tuple` |
+| 第 7 步：fatal 返回值的**转移** | `value_move` + `value_relabel_into`（按声明类型就地重贴标签） | **是** |
+
+所以第 6 步必须**让开**：声明返回类型 `fatal` 且携带资源时跳过它，交给第 7 步。
+struct / 指针族此前靠 base→fatal 的布局兜底偶然通过，array / union 暴露了这个漏洞。
+
+同理，**形参接收**侧（`func_vcall` 的参数循环）也在 `value_move` 之后做一次
+`value_relabel_into`，保证形参运行期类型与声明的 `fatal` 类型严格一致。
+
 ---
 
 ## 8. 运算符与语法

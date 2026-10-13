@@ -241,7 +241,18 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                 is_error = true;
                 ret = result;  /* error 借用 callee scope */
             } else if (sig && sig->return_type && !sig->is_variadic &&
-                       value_type(result) != sig->return_type) {
+                       value_type(result) != sig->return_type &&
+                       /* 声明返回类型是 **fatal 且带资源** 时，这里**不** cast——
+                          交给下方第 7 步做"转移 + 重贴标签"。原因：base→fatal 不是
+                          一个合法的隐式转换方向（各族的 implicit_cast 只认
+                          fatal→base 的接管），在此 cast 会直接失败：
+                          `fatal [2]I` 返回 `[2]I` 时实测报
+                          "array: implicit cast only within layout-compatible
+                          array/tuple"。第 7 步的 value_move + value_relabel_into
+                          才是这条路径的正解（struct/指针族此前偶然靠 base→fatal
+                          的布局兜底通过，array/union 则暴露了问题）。 */
+                       !(type_is_fatal(sig->return_type) &&
+                         type_fatal_carries_resource(sig->return_type))) {
                 /* safe_cast 返回值到声明的返回类型（auto-tracked 到 callee scope）。
                    variadic 内建函数（如 upgrade）使用类型擦除签名，返回类型
                    由 cfunc 按实参动态构造——跳过 cast，直接借用 cfunc 结果。 */

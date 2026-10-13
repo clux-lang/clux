@@ -501,47 +501,62 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_module = &g_type_module;
 }
 
-/* 取 fatal 变体：**唯一权威定义**（sema 与运行期共用，见 type.h 的说明）。
-   各形态的变体必须由**同一套**参数拼出，否则会 intern 出同布局不同身份的实例。 */
-const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
-    if (!vm || !t) return NULL;
-    if (t->ownership == OWN_FATAL) return t;        /* 幂等 */
-
-    /* 指针 / 切片：顶层所有权升级。**必须在下面那句"其它所有权原样"之前**判——
-       `own *T` / `own []T` 本身就是 OWN_OWN，先被那句挡掉就永远升不上 fatal，
-       于是 FFI 的 `fatal *T` 形参收 `own *T` 实参会被误拒。
-       `ref` 指针/切片**不持有资源**，按借用语义不参与升级（原样返回）。 */
-    if (type_is_slice(t) || type_is_ptr(t)) {
-        if (t->ownership == OWN_OWN) {
-            return type_is_slice(t)
-                       ? type_slice_intern(vm, OWN_FATAL, slice_type_elem(t))
-                       : type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
-        }
-        return t;
+/* 记录 fatal 变体与其 base 的派生关系（见 type.h/vm.h 的 fatal_bases） */
+void type_fatal_bind_base(vm_t *vm, const type_t *variant, const type_t *base) {
+    if (!vm || !variant || !base || variant == base) return;
+    if (!vm->fatal_bases) {
+        vm->fatal_bases = vec_new(vm->alloc, /*owns_element=*/false);
+        if (!vm->fatal_bases) return;
     }
-    if (t->ownership != OWN_NONE) return t;         /* 其它所有权：原样 */
-    if (!type_owns_resources(t)) return t;          /* 无资源：fatal 无意义 */
+    /* 幂等：已登记则保留首次（同一逻辑类型的 base 唯一）。元素少（个位数），
+       线性扫描足够；热路径上只在创建变体时走一次。 */
+    size_t n = vec_len(vm->fatal_bases);
+    for (size_t i = 0; i + 1 < n; i += 2) {
+        if (vec_get(vm->fatal_bases, i) == variant) return;
+    }
+    vec_push(vm->fatal_bases, vm->alloc, (void *)variant);
+    vec_push(vm->fatal_bases, vm->alloc, (void *)base);
+}
 
+/* 取 fatal 变体的 base（见 type.h：优先用登记表，未登记才按布局重新 intern） */
+const type_t *type_fatal_base_of(vm_t *vm, const type_t *t) {
+    if (!t) return NULL;
+    if (!type_is_fatal(t)) return t;
+    if (vm && vm->fatal_bases) {
+        size_t n = vec_len(vm->fatal_bases);
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            if (vec_get(vm->fatal_bases, i) == t)
+                return (const type_t *)vec_get(vm->fatal_bases, i + 1);
+        }
+    }
+
+    /* 未登记（fatal 变体由较早的代码路径创建）：退回"按同布局 intern"。
+       **仅供参考/比较**——具名 struct unique 不去重，这里会新建实例，
+       身份不一定等于原 base。 */
     switch (t->kind) {
+    case TYPE_KIND_PTR:
+        return type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
+    case TYPE_KIND_SLICE:
+        return type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
     case TYPE_KIND_STRUCT:
-        return type_struct_intern_with_ownership(vm, t, OWN_FATAL);
+        return type_struct_intern_with_ownership(vm, t, OWN_NONE);
     case TYPE_KIND_TUPLE: {
         size_t n = tuple_type_elem_count(t);
         tuple_elem_t elems[n > 0 ? n : 1];
         for (size_t i = 0; i < n; i++) {
             const tuple_elem_t *e = tuple_type_elem(t, i);
             elems[i].type = e ? e->type : NULL;
-            elems[i].offset = 0; /* seal 重算 */
+            elems[i].offset = 0;
         }
         return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
-                                                OWN_FATAL);
+                                                OWN_NONE);
     }
     case TYPE_KIND_ARRAY:
         return type_array_intern_with_ownership(vm, array_type_elem(t),
-                                                array_type_len(t), OWN_FATAL);
+                                                array_type_len(t), OWN_NONE);
     case TYPE_KIND_OPTION:
         return type_option_intern_with_ownership(vm, type_option_inner(t),
-                                                 OWN_FATAL);
+                                                 OWN_NONE);
     case TYPE_KIND_UNION: {
         size_t n = union_type_member_count(t);
         union_member_t members[n > 0 ? n : 1];
@@ -552,9 +567,81 @@ const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
             members[i].payload_type = m ? m->payload_type : NULL;
         }
         return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
-                                                OWN_FATAL);
+                                                OWN_NONE);
+    }
+    default:
+        return t;
+    }
+}
+
+/* 取 fatal 变体：**唯一权威定义**（sema 与运行期共用，见 type.h 的说明）。
+   各形态的变体必须由**同一套**参数拼出，否则会 intern 出同布局不同身份的实例。
+
+   **顺带登记 base**（`type_fatal_bind_base`）：这里恰好同时握有 base 与变体，
+   是唯一能可靠建立 `fatal_base` 的地方。具名 struct 标记 unique、不参与 intern
+   去重，"从变体反推 base"是不可靠的（每次新建实例），所以必须在创建点记录。 */
+const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
+    if (!vm || !t) return NULL;
+    if (t->ownership == OWN_FATAL) return t;        /* 幂等 */
+
+    /* 指针 / 切片：顶层所有权升级。**必须在下面那句"其它所有权原样"之前**判——
+       `own *T` / `own []T` 本身就是 OWN_OWN，先被那句挡掉就永远升不上 fatal，
+       于是 FFI 的 `fatal *T` 形参收 `own *T` 实参会被误拒。
+       `ref` 指针/切片**不持有资源**，按借用语义不参与升级（原样返回）。 */
+    if (type_is_slice(t) || type_is_ptr(t)) {
+        if (t->ownership == OWN_OWN) {
+            const type_t *f = type_is_slice(t)
+                                  ? type_slice_intern(vm, OWN_FATAL, slice_type_elem(t))
+                                  : type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
+            type_fatal_bind_base(vm, f, t);
+            return f;
+        }
+        return t;
+    }
+    if (t->ownership != OWN_NONE) return t;         /* 其它所有权：原样 */
+    if (!type_owns_resources(t)) return t;          /* 无资源：fatal 无意义 */
+
+    const type_t *f = NULL;
+    switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+        f = type_struct_intern_with_ownership(vm, t, OWN_FATAL);
+        break;
+    case TYPE_KIND_TUPLE: {
+        size_t n = tuple_type_elem_count(t);
+        tuple_elem_t elems[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const tuple_elem_t *e = tuple_type_elem(t, i);
+            elems[i].type = e ? e->type : NULL;
+            elems[i].offset = 0; /* seal 重算 */
+        }
+        f = type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                             OWN_FATAL);
+        break;
+    }
+    case TYPE_KIND_ARRAY:
+        f = type_array_intern_with_ownership(vm, array_type_elem(t),
+                                             array_type_len(t), OWN_FATAL);
+        break;
+    case TYPE_KIND_OPTION:
+        f = type_option_intern_with_ownership(vm, type_option_inner(t),
+                                              OWN_FATAL);
+        break;
+    case TYPE_KIND_UNION: {
+        size_t n = union_type_member_count(t);
+        union_member_t members[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const union_member_t *m = union_type_member(t, i);
+            members[i].name = m ? m->name : STRSLICE_EMPTY;
+            members[i].tag = m ? m->tag : (uint32_t)i;
+            members[i].payload_type = m ? m->payload_type : NULL;
+        }
+        f = type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                             OWN_FATAL);
+        break;
     }
     default:
         return t; /* 无该变体的形态 */
     }
+    type_fatal_bind_base(vm, f, t);
+    return f;
 }

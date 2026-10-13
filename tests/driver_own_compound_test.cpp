@@ -398,3 +398,137 @@ TEST(DriverOwnCompound, ResourceFreeCompoundIsStillFreelyCopyable) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- 8. option 内层含 own：构造表达式作字段值（回归） ----
+ *
+ * `?I` 的字段语义是"内层提升为 some"，内层类型是**非 fatal** 的 `I`；但字段
+ * 表达式本身往往是构造表达式（`.I{...}`），`ex_construct_fatal` 会把它标成
+ * `fatal I` —— 归一**之前**这里误报 "cannot initialize optional ?I with fatal I"。
+ *
+ * 根因（两层）：
+ *   1. sema 的 option 字段类型比对没有把 fatal 折回 base；
+ *   2. 折回时"按同布局重新 intern 一个 OWN_NONE 变体"**不可靠**——**具名 struct
+ *      标记 unique、不参与 intern 去重**，每次新建实例，指针永不等于原 base。
+ *      正解是 `type_fatal_variant_of` 创建变体时登记 `fatal→base`（vm->fatal_bases），
+ *      折回时查登记表拿**规范身份**。
+ */
+TEST(DriverOwnCompound, OptionWithOwnInnerInlinedConstruct) {
+  std::string path = write_temp_file(
+      "struct I { p: own *i32; }\n"
+      "func main(): i32 {\n"
+      "  var a: ?I = .?I{ .I{ .p = new i32{7} } };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, OptionWithOwnInnerInlinedConstructPlusScalar) {
+  /* 内层同时带标量字段（字段表更大的情况） */
+  std::string path = write_temp_file(
+      "struct I { p: own *i32; n: i32; }\n"
+      "struct M { i: I; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var a: ?I = .?I{ .I{ .p = new i32{7}, .n = 3 } };\n"
+      "  var b: ?M = .?M{ .M{ .i = .I{ .p = new i32{8}, .n = 5 }, .n = 4 } };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, OptionWithFatalInnerVariableIsRejected) {
+  /* 反例：字段值类型与内层**真的**不兼容（int 不是 I）仍须拒绝。
+     归一化不能让"什么都能塞进 option"。 */
+  std::string path = write_temp_file(
+      "struct I { p: own *i32; }\n"
+      "func main(): i32 {\n"
+      "  var a: ?I = .?I{ 42 };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+/* ---- 9. fatal 聚合类型的返回值（array / union，回归） ----
+ *
+ * `func mk(): fatal [2]I` 的返回值路径上有**两处**会尝试把运行期 base 值 cast 到
+ * 声明的 fatal 类型：
+ *   - 第 6 步（返回值 safe_cast 到声明返回类型）——**方向非法**
+ *     （各族的 implicit_cast 只认 fatal→base 的接管），对 array/union 直接失败：
+ *     "array: implicit cast only within layout-compatible array/tuple"；
+ *   - 第 7 步（fatal 返回值的**转移 + 重贴标签**）——正解。
+ * 修法是让第 6 步把"fatal 且带资源"的声明返回类型**让给**第 7 步。
+ * struct / 指针族此前靠 base→fatal 的布局兜底偶然通过，array/union 暴露了它。
+ */
+const char *kFatalArrayRet =
+    "struct I { p: own *i32; }\n"
+    "func mk(): fatal [2]I {\n"
+    "  return move(.[2]I{ .I{ .p = new i32{7} }, .I{ .p = new i32{8} } });\n"
+    "}\n";
+
+TEST(DriverOwnCompound, FatalArrayReturnExplicitType) {
+  std::string path = write_temp_file(
+      std::string(kFatalArrayRet) +
+      "func main(): i32 {\n"
+      "  var o: [2]I = mk();\n"
+      "  if (o[0].p.* != 7 || o[1].p.* != 8) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, FatalArrayReturnInferredType) {
+  std::string path = write_temp_file(
+      std::string(kFatalArrayRet) +
+      "func main(): i32 {\n"
+      "  var o = mk();\n"
+      "  if (o[0].p.* != 7 || o[1].p.* != 8) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, FatalUnionReturn) {
+  std::string path = write_temp_file(
+      "union U { p: own *i32; n: i32 }\n"
+      "func mk(): fatal U { return move(.U{ .p = new i32{7} }); }\n"
+      "func main(): i32 {\n"
+      "  var o: U = mk();\n"
+      "  if (o.p.* != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, FatalTupleReturn) {
+  std::string path = write_temp_file(
+      "func mk(): fatal <own *i32, i32> {\n"
+      "  return move(.<own *i32, i32>{ new i32{7}, 3 });\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var o: <own *i32, i32> = mk();\n"
+      "  if (o[0].* != 7 || o[1] != 3) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, FatalArrayReturnForwarded) {
+  /* fatal 形参原样返回（转发）：同样走第 6/7 步组合 */
+  std::string path = write_temp_file(
+      "struct I { p: own *i32; }\n"
+      "func fwd(x: fatal [2]I): fatal [2]I { return x; }\n"
+      "func main(): i32 {\n"
+      "  var o: [2]I = fwd(.[2]I{ .I{ .p = new i32{7} }, .I{ .p = new i32{8} } });\n"
+      "  if (o[0].p.* != 7 || o[1].p.* != 8) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+

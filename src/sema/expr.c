@@ -466,6 +466,79 @@ static bool is_poison(sema_t *sema, const value_t *v) {
     if (is_poison((sema), (v))) return val_void((sema));                       \
   } while (0)
 
+/**
+ * 取 fatal 变体的 **base 类型**（fatal T → T，fatal *T → own *T，
+ * fatal []T → own []T，…）。非 fatal 输入原样返回。
+ *
+ * 优先走 VM 的登记表 `type_fatal_base_of`（**规范身份**）；未登记时退回按布局
+ * 重新 intern 的兜底逻辑（与 `stmt.c` 的 static `strip_fatal` 同源）。
+ */
+static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
+  if (!t || !type_is_fatal(t)) return t;
+  /* 登记表给出规范 base —— 具名 struct 标了 unique、不参与 intern 去重，
+     只靠下面"按布局重新 intern"会每次新建实例，身份永不相等。 */
+  const type_t *base = type_fatal_base_of(sema->vm, t);
+  if (base && base != t && !type_is_fatal(base)) return base;
+
+  vm_t *vm = sema->vm;
+  switch (t->kind) {
+    case TYPE_KIND_PTR:
+      return type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
+    case TYPE_KIND_SLICE:
+      return type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
+    case TYPE_KIND_STRUCT:
+      return type_struct_intern_with_ownership(vm, t, OWN_NONE);
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      tuple_elem_t elems[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        elems[i].type = e ? e->type : NULL;
+        elems[i].offset = 0;
+      }
+      return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                              OWN_NONE);
+    }
+    case TYPE_KIND_ARRAY:
+      return type_array_intern_with_ownership(vm, array_type_elem(t),
+                                              array_type_len(t), OWN_NONE);
+    case TYPE_KIND_OPTION:
+      return type_option_intern_with_ownership(vm, type_option_inner(t),
+                                               OWN_NONE);
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      union_member_t members[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        members[i].name = m ? m->name : STRSLICE_EMPTY;
+        members[i].tag = m ? m->tag : (uint32_t)i;
+        members[i].payload_type = m ? m->payload_type : NULL;
+      }
+      return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                              OWN_NONE);
+    }
+    default:
+      return t; /* 无该变体的形态 */
+  }
+}
+
+/**
+ * option 构造字段的类型归一：把 **fatal 变体折回 base**（fatal T → T）。
+ *
+ * `?T` 构造器（`.?T{...}` / `new ?T{...}`）的字段语义是"内层提升为 some"，
+ * 而内层类型是**非 fatal** 的 `T`：`fatal` 只标记"将亡值"，option 的 value 槽位
+ * 不是将亡值位。但字段表达式往往本身就是**构造表达式**（`.?I{ .I{...} }` 的内层
+ * `.I{...}`），`ex_construct_fatal` 会把它标成 `fatal I` —— 于是 `ft != inner`
+ * 误报 "cannot initialize optional ?I with fatal I"。
+ *
+ * 归一后比较：`fatal I` 与 `I` 逐字节同布局，接受它既正确也不会破坏所有权
+ * （运行期 `value_lift_option` 按 inner 转移/深拷贝）。
+ * 非 fatal 输入原样返回（绝大多数情况是空转）。
+ */
+static const type_t *option_field_type_normalized(sema_t *sema, const type_t *ft) {
+  return expr_strip_fatal(sema, ft);
+}
+
 /* AST_NEW 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
 static value_t *ex_new(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -762,11 +835,11 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
-            const type_t *ft = value_type(fv);
+            const type_t *ft = option_field_type_normalized(sema, value_type(fv));
             if (ft != t && ft != inner) {
               char tn[64], fn[64];
               sema_type_name(t, tn, sizeof tn);
-              sema_type_name(ft, fn, sizeof fn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
             }
@@ -1012,11 +1085,13 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
-            const type_t *ft = value_type(fv);
+            const type_t *ft = option_field_type_normalized(sema, value_type(fv));
             if (ft != t && ft != inner) {
               char tn[64], fn[64];
               sema_type_name(t, tn, sizeof tn);
-              sema_type_name(ft, fn, sizeof fn);
+              /* 提示用**原始**类型名：归一后的 stripped base 可能是 intern 出来的
+                 未登记实例（无名字），打印出来会是空的。 */
+              sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
             }
@@ -1538,8 +1613,7 @@ static value_t *ex_construct_fatal(sema_t *sema, ast_node_t **node,
   if (is_poison(sema, r)) return r;
   const type_t *t = value_type(r);
   if (!t || !sema_type_contains_owned_resource(t)) return r;
-  const type_t *fatal = sema_fatal_variant_of(sema, t);
-  if (!fatal || fatal == t) return r;
+  const type_t *fatal = sema_fatal_variant_of(sema, t);  if (!fatal || fatal == t) return r;
   return value_make_shadow(sema->vm, fatal);
 }
 
