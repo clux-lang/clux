@@ -42,6 +42,11 @@ ast_node_t *parse_if(parser_t *p) {
         }
         return then_body;
     }
+    /* 记录 then_body 后、skip_trivia 前的位置：无 else 时用它作 tok_end，
+       使 fmt 的注释挂载能覆盖 then_body 后的行尾/独立行注释（skip_trivia 会
+       越过注释，导致 tok_end 指向注释之后，[prev_end, next.tok_begin) 区间
+       漏掉注释 → 行尾注释被静默丢弃）。 */
+    uint32_t after_then = p->pos;
     skip_trivia(p);
 
     ast_node_t *else_body = NULL;
@@ -64,7 +69,8 @@ ast_node_t *parse_if(parser_t *p) {
         }
     }
 
-    ast_node_t *node = ast_if_new(p->arena, tb, p->pos);
+    uint32_t te = else_body ? p->pos : after_then;
+    ast_node_t *node = ast_if_new(p->arena, tb, te);
     ((ast_if_t *)node)->cond      = cond;
     ((ast_if_t *)node)->then_body = then_body;
     ((ast_if_t *)node)->else_body = else_body;

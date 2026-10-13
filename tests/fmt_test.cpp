@@ -324,9 +324,9 @@ TEST(Fmt, ArrayConstructCompact) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
-              "    var arr = .[2]i32{10, 20};\n"
-              "    var a = .[2][2]i32{.[2]i32{1, 2}, .[2]i32{3, 4}};\n"
-              "    var u = .[2]str{\"a\", \"b\"};\n"
+              "    var arr = .[2]i32{ 10, 20 };\n"
+              "    var a = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };\n"
+              "    var u = .[2]str{ \"a\", \"b\" };\n"
               "    var e = .[0]i32{};\n"
               "    return 0;\n"
               "}\n");
@@ -354,15 +354,15 @@ TEST(Fmt, IndexSubscriptGlued) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
-              "    var a = .[3]i32{10, 20, 30};\n"
+              "    var a = .[3]i32{ 10, 20, 30 };\n"
               "    var x = a[0] + a[2];\n"
               "    a[1] = 99;\n"
               "    a[2] += 1;\n"
-              "    var m = .[2][2]i32{.[2]i32{1, 2}, .[2]i32{3, 4}};\n"
+              "    var m = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };\n"
               "    var y = m[1][0];\n"
               "    var i = 1;\n"
               "    var z = a[i];\n"
-              "    var t: [2]i32 = .[2]i32{0, 0};\n"
+              "    var t: [2]i32 = .[2]i32{ 0, 0 };\n"
               "    var ok: bool = [2]i32 extends [2]i32;\n"
               "    return x + y + z;\n"
               "}\n");
@@ -451,8 +451,8 @@ TEST(Fmt, TupleTypeAndConstruct) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
-              "    var tup: <i32, i32> = .<i32, i32>{1, 2};\n"
-              "    var nest: <i32, <i32, i32>> = .<i32, <i32, i32>>{1, <2, 3>};\n"
+              "    var tup: <i32, i32> = .<i32, i32>{ 1, 2 };\n"
+              "    var nest: <i32, <i32, i32>> = .<i32, <i32, i32>>{ 1, <2, 3> };\n"
               "    return 0;\n"
               "}\n");
 
@@ -469,9 +469,12 @@ TEST(Fmt, StructConstructFields) {
         "return 0;\n"
         "}\n");
     EXPECT_EQ(out,
-              "struct Point { x: i32; y: i32 }\n"
+              "struct Point {\n"
+              "    x: i32;\n"
+              "    y: i32;\n"
+              "}\n"
               "func main(): i32 {\n"
-              "    var pt = .Point{x = 1, y = 2};\n"
+              "    var pt = .Point{ x = 1, y = 2 };\n"
               "    return 0;\n"
               "}\n");
 
@@ -489,8 +492,8 @@ TEST(Fmt, AnonymousConstruct) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
-              "    var arr = .[3]i32{1, 2, 3};\n"
-              "    var anon = .{10, 20};\n"
+              "    var arr = .[3]i32{ 1, 2, 3 };\n"
+              "    var anon = .{ 10, 20 };\n"
               "    return 0;\n"
               "}\n");
 
@@ -590,7 +593,7 @@ TEST(Fmt, SizeofAlignofTypeofCtOperators) {
               "    var s: u64 = sizeof(i32);\n"
               "    var a: u64 = alignof(u64);\n"
               "    var t: typeof(42) = 42;\n"
-              "    var arr: [sizeof(i32)]u8 = .[4]u8{1u8, 2u8, 3u8, 4u8};\n"
+              "    var arr: [sizeof(i32)]u8 = .[4]u8{ 1u8, 2u8, 3u8, 4u8 };\n"
               "    return 0;\n"
               "}\n");
 
@@ -648,7 +651,9 @@ TEST(FmtRegression, ExportPrefixPreserved) {
               "    return a + b;\n"
               "}\n"
               "export union U { a: f32; b: f32 }\n"
-              "export struct S { x: i32 }\n"
+              "export struct S {\n"
+              "    x: i32;\n"
+              "}\n"
               "func main(): void {}\n");
     EXPECT_EQ(out, fmt(out.c_str()));
 }
@@ -677,6 +682,7 @@ TEST(FmtRegression, IdempotentAfterStandaloneComment) {
               "// lead comment\n"
               "\n"
               "func f(): void {}\n"
+              "\n"
               "// second\n"
               "\n"
               "func g(): void {}\n");
@@ -692,7 +698,7 @@ TEST(FmtRegression, IsOperatorParensStable) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var e: Shape = .Shape{.w = 3.0f32};\n"
+              "    var e: Shape = .Shape{ .w = 3.0f32 };\n"
               "    if (e is w != true) {}\n"
               "}\n");
     EXPECT_EQ(out, fmt(out.c_str()));
@@ -767,8 +773,8 @@ TEST(FmtRegression, PtrTypeNewMoveAndScopeAnnotAreRendered) {
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var p: own *i32 = new i32{7};\n"
-              "    var q: Cell = new Cell{.v = 1};\n"
+              "    var p: own *i32 = new i32{ 7 };\n"
+              "    var q: Cell = new Cell{ .v = 1 };\n"
               "    var m: i32 = move(p).*;\n"
               "    var t: '<a,b> i32 = 1;\n"
               "}\n");
@@ -793,7 +799,7 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
     EXPECT_EQ(twice, thrice);
     EXPECT_NE(once.find("own *i32"), std::string::npos);
     EXPECT_NE(once.find("ref *i32"), std::string::npos);
-    EXPECT_NE(once.find("new i32{7}"), std::string::npos);
+    EXPECT_NE(once.find("new i32{ 7 }"), std::string::npos);
     EXPECT_NE(once.find("p.&"), std::string::npos);
     EXPECT_NE(once.find(".*"), std::string::npos);
     EXPECT_NE(once.find("move(p)"), std::string::npos);
