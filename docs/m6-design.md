@@ -125,12 +125,38 @@ cfunc callback(data: ref *u8, len: u64): i32 {
 | slice | 胖指针，非 C ABI |
 | 闭包类型 | C 无闭包概念 |
 
-### 2.3 指针约束
+### 2.3 指针与所有权约束
 
 - 只允许 `ref *T` 和 `fatal *T`
 - **禁止 `own *T`**——C 侧无所有权概念
 - `ref *T`：借用指针，C 侧不释放，clux 侧保留所有权
 - `fatal *T`：raw 指针，不追踪所有权，C 侧自由操作
+
+**推广：含 own 资源的类型不能出现在 C ABI 签名里（2026-10-13 落地）**
+
+上面"禁止 `own *T`"不只适用于顶层指针——**递归含 own 字段的复合类型同样非法**：
+
+```rust
+struct Box { p: own *i32; n: i32 }
+
+extern cfunc libc::f(p: own *i32): i32;   // ❌ 顶层 own 指针
+extern cfunc libc::g(b: Box): i32;        // ❌ 含 own 字段的 struct 参数
+extern cfunc libc::h(): Box;              // ❌ 含 own 字段的 struct 返回
+extern var   libc::v: own *i32;           // ❌ 数据符号同理
+```
+
+理由：C 只看到裸指针字段，会拿到一个**仍由 clux 拥有的堆块**——谁来 free？语义
+无法表达。因此这是"**签名即约束**"：在**声明处**拒绝，而不是等调用点。
+
+判据与语言侧共用同一套 `type_owns_resources`（递归：own/share/weak 指针或 own
+切片，或含此类字段的聚合），**FFI 边界不比语言内部更宽松**。share/weak 同为 RC
+资源，一并拒绝；`ref`/`fatal` 指针不持有资源，仍按指针宽度放行。
+
+> 实现注记：该检查此前只做了 per-kind 分派，`TYPE_KIND_PTR` 无脑放行 →
+> 顶层 `own *T` 与含 own 字段的 struct 都漏放（`docs/m6-design.md` §9.3 早已写明
+> 要拒）。现在在 per-kind 分派**之前**做递归判定。
+> 回归：`tests/driver_ffi_own_test.cpp`（7 例：4 类拒绝 + ref/fatal 指针与平凡
+> struct 走真实 C 符号跑通）。
 
 ### 2.4 其他约束
 

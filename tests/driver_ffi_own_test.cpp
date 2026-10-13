@@ -1,0 +1,132 @@
+// driver_ffi_own_test.cpp —— extern cfunc/var 签名不得含 own 资源
+//
+// 规则（m6-design §2.3/§9.3"禁止 `own *T`"的推广）：**C 侧没有所有权概念**，
+// 所以含 own 资源的类型不能出现在 C ABI 签名里——包括
+//   - 顶层 `own *T`（既有规则，实现曾漏：`TYPE_KIND_PTR` 在 per-kind 分派里
+//     无脑放行，m6-design 明写要拒）；
+//   - **递归含 own 字段的复合类型**（struct/tuple/…）：C 只看到裸指针字段，会拿到
+//     一个仍由 clux 拥有的堆块（谁来 free？），语义无法表达。
+//
+// 这是"**签名即约束**"：非法在**声明处**被拒，而不是等调用点。
+// 判定与语言侧同一套（type_owns_resources），FFI 边界不比语言内部更宽松。
+// ref *T / fatal *T 不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal 指针）。
+
+#include <gtest/gtest.h>
+#include <cstdio>
+#include <string>
+
+extern "C" {
+#include "driver/driver.h"
+}
+
+#include "test_common.h"
+
+namespace {
+
+std::string write_temp_file(const std::string &content) {
+  static int counter = 0;
+  std::string path = "clux_ffi_own_" + std::to_string(counter++) + ".cx";
+  FILE *fp = fopen(path.c_str(), "wb");
+  if (!fp) {
+    ADD_FAILURE() << "cannot open temp source file: " << path;
+    return path;
+  }
+  fwrite(content.data(), 1, content.size(), fp);
+  fclose(fp);
+  return path;
+}
+
+/* 只关心**声明期**的拒绝：诊断出现在编译阶段（driver_run_file 返回 1）。
+   这些声明引用的 C 符号不存在，但类型约束先于 dlsym 解析失败。 */
+const char *kPrelude = "extern lib \"*\" as libc;\n";
+
+} // namespace
+
+TEST(DriverFfiOwn, OwnPointerParamIsRejected) {
+  std::string path = write_temp_file(
+      std::string(kPrelude) +
+      "extern cfunc libc::f(p: own *i32): i32;\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, OwnSliceParamIsRejected) {
+  std::string path = write_temp_file(
+      std::string(kPrelude) +
+      "extern cfunc libc::f(p: own []i32): i32;\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, StructWithOwnFieldParamIsRejected) {
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32 }\n" +
+      std::string(kPrelude) +
+      "extern cfunc libc::f(b: Box): i32;\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, StructWithOwnFieldReturnIsRejected) {
+  /* 返回值同理：C 侧无法构造含 own 字段的值，也无法表达"谁拥有"。 */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32 }\n" +
+      std::string(kPrelude) +
+      "extern cfunc libc::f(): Box;\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, OwnPointerExternVarIsRejected) {
+  std::string path = write_temp_file(
+      std::string(kPrelude) +
+      "extern var libc::v: own *i32;\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, RefAndFatalPointersAreStillAccepted) {
+  /* §2.3：只允许 ref/fatal 指针——它们不持有资源，仍按指针宽度放行。
+     **真的调用真实 C 符号**（msvcrt 的 strlen + 测试库的 clux_first_i32），
+     确保 exit 0 来自"跑通"而不是"被拒后没崩"。
+     注：`extern lib "*"` 这类**通配库**在加载期就解析全部声明符号，所以正例必须
+     挂真实库（惰性解析只对具体库路径生效）。 */
+  std::string path = write_temp_file(
+      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern cfunc crt::strlen(p: ref *u8): u64;\n"
+      "extern lib \"clux_ffi_testdata.dll\" as td;\n"
+      "extern cfunc td::clux_first_i32(p: fatal *i32): i32;\n"
+      "func main(): i32 {\n"
+      "  var s: str = \"hello\";\n"
+      "  if (crt::strlen(data(s) as ref *u8) != 5u64) { return 1; }\n"
+      "  var x: i32 = 42;\n"
+      "  if (td::clux_first_i32(move(x.&)) != 42) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverFfiOwn, PlainStructIsStillAccepted) {
+  /* 不含 own 的平凡 struct 按值跨 C ABI 依旧合法（布局 1:1）——真调用测试库的
+     `clux_point_sum(CluxPoint)` 验证。 */
+  std::string path = write_temp_file(
+      "struct Point { x: i32; y: i32 }\n"
+      "extern lib \"clux_ffi_testdata.dll\" as td;\n"
+      "extern cfunc td::clux_point_sum(p: Point): i32;\n"
+      "extern cfunc td::clux_point_make(x: i32, y: i32): Point;\n"
+      "func main(): i32 {\n"
+      "  var p: Point = .Point{ .x = 3, .y = 4 };\n"
+      "  if (td::clux_point_sum(p) != 7) { return 1; }\n"
+      "  var q: Point = td::clux_point_make(5, 6);\n"
+      "  if (q.x != 5 || q.y != 6) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}

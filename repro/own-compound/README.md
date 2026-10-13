@@ -99,6 +99,28 @@ ownership 无关 → 两者走同一条路径，无需特判。
 | `probe4_param_ref.rejected.cx` | **反例**：参数含 ref 字段但未标注作用域 | exit 1 |
 | `probe5_bare_discard.rejected.cx` | **反例**：fatal 裸表达式语句（应写 `_ = `） | exit 1 |
 | `probe6_explicit_discard.cx` | `_ = ` 显式丢弃 fatal 复合值 → 递归释放内嵌 own | exit 0 |
+| `ffi_own_ok.cx` | 合法 FFI：`ref *T` / `fatal *T` / 平凡 struct 真调用 C 符号 | exit 0 |
+| `ffi_own_signature.rejected.cx` | **反例**：`extern cfunc/var` 签名含 own（顶层指针 / struct 参数 / struct 返回 / extern var） | exit 1 |
+
+## FFI 签名约束：含 own 资源即非法（"签名即约束"）
+
+C 侧没有所有权概念，所以含 own 资源的类型不能出现在 C ABI 签名里——不只是顶层
+`own *T`（m6-design §2.3 早已明写要拒，实现漏了），**递归含 own 字段的复合类型
+同样非法**：
+
+```rust
+extern cfunc libc::f(p: own *i32): i32;   // ❌
+extern cfunc libc::g(b: Box): i32;        // ❌ Box 含 own *i32
+extern cfunc libc::h(): Box;              // ❌
+extern var   libc::v: own *i32;           // ❌
+```
+
+理由：C 只看到裸指针字段，会拿到一个仍由 clux 拥有的堆块（谁来 free？）。检查放在
+**声明处**（`ffi_c_abi_reject_reason`，per-kind 分派之前），判据与语言侧共用
+`type_owns_resources` —— FFI 边界不比语言内部更宽松。share/weak 同为 RC 资源一并
+拒绝；`ref *T` / `fatal *T` 不持有资源，仍按指针宽度放行。
+
+回归：`tests/driver_ffi_own_test.cpp`（7 例）。
 
 ### union 的 double-free（本目录发现并修复）
 

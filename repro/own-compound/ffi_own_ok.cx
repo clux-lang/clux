@@ -1,0 +1,32 @@
+// ffi_own_ok.cx: **正例** —— 不含 own 资源的类型照旧跨 C ABI
+//
+// 与 ffi_own_signature.rejected.cx 成对：拒绝的是"含 own 资源"，不是"结构体"
+// 或"指针"。ref/fatal 指针（不持有资源）与平凡 struct（布局 1:1）都合法，
+// 而且这里**真的调用**真实 C 符号，确保 exit 0 来自跑通而非"被拒后没崩"。
+extern lib "msvcrt.dll" as crt;
+extern lib "clux_ffi_testdata.dll" as td;
+
+// ref 指针：借用，C 侧不释放
+extern cfunc crt::strlen(p: ref *u8): u64;
+// fatal 指针：raw，C 侧自由操作
+extern cfunc td::clux_first_i32(p: fatal *i32): i32;
+// 平凡 struct：无 own 字段，按值布局 1:1
+struct Point { x: i32; y: i32 }
+extern cfunc td::clux_point_sum(p: Point): i32;
+extern cfunc td::clux_point_make(x: i32, y: i32): Point;
+
+func main(): i32 {
+    var s: str = "hello";
+    if (crt::strlen(data(s) as ref *u8) != 5u64) { return 1; }
+
+    var x: i32 = 42;
+    if (td::clux_first_i32(move(x.&)) != 42) { return 2; }
+
+    var p: Point = .Point{ .x = 3, .y = 4 };
+    if (td::clux_point_sum(p) != 7) { return 3; }
+
+    var q: Point = td::clux_point_make(5, 6);
+    if (q.x != 5 || q.y != 6) { return 4; }
+
+    return 0;
+}

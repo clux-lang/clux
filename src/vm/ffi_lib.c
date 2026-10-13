@@ -426,6 +426,22 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
  */
 const char *ffi_c_abi_reject_reason(const type_t *t) {
     if (!t) return "missing type";
+    /* C 侧没有所有权概念（m6-design §2.3/§9.3"禁止 own *T"）：**含 own 资源的
+       类型不能出现在 C ABI 签名里**——包括
+         - `own *T` / `own []T`（顶层 own 指针本身）；
+         - **递归含 own 字段的复合类型**（struct / tuple / …）：C 只看到裸指针
+           字段，会拿到一个仍由 clux 拥有的堆块（谁来 free？），语义无法表达。
+       这是"签名即约束"：非法在**声明处**被拒，而不是等到调用点。
+       判据与语言侧同一套（type_owns_resources）——FFI 边界不该比语言内部更宽松。
+       注意 share/weak 也返回 true（同为 RC 资源），一并拒绝；ref/fatal 指针
+       不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal 指针）。
+       在 per-kind 分派**之前**判，是为了覆盖 TYPE_KIND_PTR（下方分支无脑放行，
+       原先漏掉了顶层 `own *T`）。 */
+    if (type_owns_resources(t))
+        return "the type contains owned pointers (own *T / own []T / own fields) "
+               "and cannot cross the C ABI (C has no ownership; declare the "
+               "parameter or return type without own, or use 'ref *T' / "
+               "'fatal *T' for pointers)";
     switch (t->kind) {
     case TYPE_KIND_INT:
     case TYPE_KIND_FLOAT:
