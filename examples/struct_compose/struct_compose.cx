@@ -24,7 +24,7 @@
 //     一律报错——见测试套件里的覆盖用例）。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 
 struct Base {
     id: i32;
@@ -47,9 +47,17 @@ struct Test {
 }
 
 // 传递嵌入：C 的字段前缀是 A 的字段
-struct A { a: i32; }
-struct B { ...A; b: i32; }
-struct C { ...B; c: i32; }
+struct A {
+    a: i32;
+}
+struct B {
+    ...A;
+    b: i32;
+}
+struct C {
+    ...B;
+    c: i32;
+}
 
 // 嵌入在中途：合法（字段序 x, id），只是"指向 M 的指针不能转成指向 Base 的"
 struct Middle {
@@ -58,68 +66,110 @@ struct Middle {
 }
 
 // 布局对照：手写同样字段
-struct Plain { id: i32; extra: i64; }
+struct Plain {
+    id: i32;
+    extra: i64;
+}
 
 // attribute 覆盖：Override 自己声明 `count` 与 `getId`，**静默覆盖**继承来的同名成员
 // （attribute = 字段 + var 属性 + func 方法；字段是唯一例外，同名一律报错）
 struct Override {
     ...Base;
     var count: i32 = 7;
-    func getId(self: ref *const Override): i32 { return 100 + self.id; }
+    func getId(self: ref *const Override): i32 {
+        return 100 + self.id;
+    }
 }
 
-func takeA(v: ref *const A): i32 { return v.a; }
+func takeA(v: ref *const A): i32 {
+    return v.a;
+}
 
 func main(): i32 {
     // 组合后的字段表 = id, extra：构造按组合后的顺序
     var t: Test = .Test{ .id = 7, .extra = 21 };
 
     // 继承的方法 / 继承的字段 / 自有字段
-    if (t.getId() != 7) { return 1; }
-    if (Test::getId(t.&) != 7) { return 2; }     // 显式限定写法等价
-    if (t.id != 7) { return 3; }
-    if (t.extra != 21) { return 4; }
+    if (t.getId() != 7) {
+        return 1;
+    }
+    if (Test::getId(t.&) != 7) {
+        return 2;
+    } // 显式限定写法等价
+    if (t.id != 7) {
+        return 3;
+    }
+    if (t.extra != 21) {
+        return 4;
+    }
 
     // 向上转换：ref *Test → ref *const Base（前缀兼容）
     var b: ref *const Base = t.&;
-    if (b.getId() != 7) { return 5; }
+    if (b.getId() != 7) {
+        return 5;
+    }
 
     // 同一块存储：通过基指针写，派生对象看到
     var m: ref *Base = t.&;
-    if (m.bump() != 8) { return 6; }
-    if (t.id != 8) { return 7; }
+    if (m.bump() != 8) {
+        return 6;
+    }
+    if (t.id != 8) {
+        return 7;
+    }
 
     // 静态属性共享同一份（不复制）
     Base::count = 5;
-    if (Test::count != 5) { return 8; }
+    if (Test::count != 5) {
+        return 8;
+    }
     Test::count = 6;
-    if (Base::count != 6) { return 9; }
+    if (Base::count != 6) {
+        return 9;
+    }
 
     // 布局与"手写同样字段"一致
-    if (sizeof(Test) as i32 != sizeof(Plain) as i32) { return 10; }
-    if (sizeof(Test) as i32 != 16) { return 11; }
+    if (sizeof(Test) as i32 != sizeof(Plain) as i32) {
+        return 10;
+    }
+    if (sizeof(Test) as i32 != 16) {
+        return 11;
+    }
 
     // 传递嵌入（C 的字段序 a, b, c）与 A 的向上转换
     var c: C = .C{ .a = 1, .b = 2, .c = 3 };
-    if (c.a != 1 || c.b != 2 || c.c != 3) { return 12; }
-    if (takeA(c.&) != 1) { return 13; }
+    if (c.a != 1 || c.b != 2 || c.c != 3) {
+        return 12;
+    }
+    if (takeA(c.&) != 1) {
+        return 13;
+    }
 
     // 中途嵌入：字段序 x, id 按源码位置
     var mid: Middle = .Middle{ .x = 3, .id = 9 };
-    if (mid.x != 3 || mid.id != 9) { return 14; }
+    if (mid.x != 3 || mid.id != 9) {
+        return 14;
+    }
 
     // attribute 覆盖：Override 自己的 count / getId 静默胜出，且与 Base 的**各一份**
     var o: Override = .Override{ .id = 1 };
-    if (Override::count != 7) { return 15; }        // 自己的那一份
-    if (Base::count != 6) { return 16; }            // Base 不受影响（上一步写过 6）
+    if (Override::count != 7) {
+        return 15;
+    } // 自己的那一份
+    if (Base::count != 6) {
+        return 16;
+    } // Base 不受影响（上一步写过 6）
     Override::count = 70;
-    if (Base::count != 6) { return 17; }            // 两份互相独立
-    if (o.getId() != 101) { return 18; }            // t.getId() → Override::getId
-    if (Base::getId(o.&) != 1) { return 19; }       // 显式 Base:: 仍取 Base 的实现
+    if (Base::count != 6) {
+        return 17;
+    } // 两份互相独立
+    if (o.getId() != 101) {
+        return 18;
+    } // t.getId() → Override::getId
+    if (Base::getId(o.&) != 1) {
+        return 19;
+    } // 显式 Base:: 仍取 Base 的实现
 
-    libc::printf("struct_compose ok: t.id=%d t.extra=%d Test::count=%d sizeof(Test)=%d c=%d,%d,%d mid=%d,%d Override::count=%d Base::count=%d o.getId=%d\n",
-                 t.id, t.extra as i32, Test::count, sizeof(Test) as i32,
-                 c.a, c.b, c.c, mid.x, mid.id, Override::count, Base::count,
-                 o.getId());
+    libc::printf("struct_compose ok: t.id=%d t.extra=%d Test::count=%d sizeof(Test)=%d c=%d,%d,%d mid=%d,%d Override::count=%d Base::count=%d o.getId=%d\n", t.id, t.extra as i32, Test::count, sizeof(Test) as i32, c.a, c.b, c.c, mid.x, mid.id, Override::count, Base::count, o.getId());
     return 0;
 }

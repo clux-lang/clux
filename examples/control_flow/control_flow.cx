@@ -1,6 +1,6 @@
 // control_flow.cx — M1 样例：if/else、while、do-while、for、break、continue、return
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var sum: i32 = 0;
     var i: i32 = 0;

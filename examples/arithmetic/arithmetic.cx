@@ -1,6 +1,6 @@
 // arithmetic.cx — M1 样例：算术/位运算、一元运算、复合赋值、类型转换 as
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var a: i32 = 40;
     var b: f64 = 2.0;
@@ -28,7 +28,7 @@ func main(): i32 {
     a %= 3;
 
     // 类型转换：<expr> as <type>
-    var r: f64 = (a as f64) + b;
+    var r: f64 = a as f64 + b;
     var s: i32 = (sum + 1) as i32;
 
     libc::printf("sum = %d, prod = %d, bnot = %d, r = %f\n", sum, prod, bnot, r);

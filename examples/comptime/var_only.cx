@@ -1,5 +1,5 @@
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 comptime var A: const i32 = 42;
 
 func main(): void {

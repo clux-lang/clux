@@ -12,32 +12,42 @@
 // tests/ffi_struct_test.cpp 用自建测试动态库覆盖（8B INTEGER / 16B SSE / 24B MEMORY
 // 三种类别 + 嵌套结构体 + 变参里的结构体 + 回调双向）。这里演示真实库里能拿到的部分。
 
-struct DivT { quot: i32; rem: i32; }     // 对应 C 的 div_t（字段名/顺序/宽度都一致）
+struct DivT {
+    quot: i32;
+    rem: i32;
+} // 对应 C 的 div_t（字段名/顺序/宽度都一致）
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 
-extern cfunc libc::div(num: i32, den: i32): DivT;   // 按值返回结构体
-extern cfunc libc::getenv(name: str): str;         // 按值返回 char*（clux 侧就是 str）
+extern cfunc libc::div(num: i32, den: i32): DivT; // 按值返回结构体
+extern cfunc libc::getenv(name: str): str; // 按值返回 char*（clux 侧就是 str）
 
 func main(): i32 {
     // 结构体返回值：字段直接可用（值块就是 C 的那 8 字节）
     var d: DivT = libc::div(17, 5);
-    if (d.quot != 3 || d.rem != 2) { return 1; }
+    if (d.quot != 3 || d.rem != 2) {
+        return 1;
+    }
 
     // 字段可以再喂回 C（结构体值 = C 布局，取其成员传标量形参）
     var again: DivT = libc::div(d.rem * 10, 4);
-    if (again.quot != 5 || again.rem != 0) { return 2; }
+    if (again.quot != 5 || again.rem != 0) {
+        return 2;
+    }
 
     // 负数除法：C 的截断语义（-17/5 = -3 余 -2）
     var neg: DivT = libc::div(-17, 5);
-    if (neg.quot != -3 || neg.rem != -2) { return 3; }
+    if (neg.quot != -3 || neg.rem != -2) {
+        return 3;
+    }
 
     // char* 返回值声明成 str，直接用（len / 传给 C 的 char* 形参）
     var path: str = libc::getenv("PATH");
-    if (len(path) == 0u64) { return 4; }
+    if (len(path) == 0u64) {
+        return 4;
+    }
 
-    libc::printf("div(17,5) = { %d, %d }, div(-17,5) = { %d, %d }, PATH len = %u\n",
-                 d.quot, d.rem, neg.quot, neg.rem, len(path));
+    libc::printf("div(17,5) = { %d, %d }, div(-17,5) = { %d, %d }, PATH len = %u\n", d.quot, d.rem, neg.quot, neg.rem, len(path));
     return 0;
 }

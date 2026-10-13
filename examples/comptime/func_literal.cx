@@ -15,18 +15,26 @@
 //     只能访问参数与全局函数
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 comptime func make_inc(): func(i32) -> i32 {
-    return func(x: i32): i32 { return x + 1; };
+    return func(x: i32): i32 {
+        return x + 1;
+    };
 }
 
 comptime func make_twice(): func(i32) -> i32 {
-    func t(x: i32): i32 { return x * 2; }
+    func t(x: i32): i32 {
+        return x * 2;
+    }
     return t;
 }
 
-comptime func double_(a: i32): i32 { return a * 2; }
-comptime func quad(a: i32): i32 { return double_(double_(a)); }
+comptime func double_(a: i32): i32 {
+    return a * 2;
+}
+comptime func quad(a: i32): i32 {
+    return double_(double_(a));
+}
 
 func main(): i32 {
     var inc = make_inc();

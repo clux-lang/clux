@@ -7,13 +7,13 @@
 //   - 局部 type 前向引用：定义在后、使用在前合法（提升机制）
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 type T = i32; // 全局 type
 
 func main(): i32 {
     var g: i32 = 1;
 
-    {
+     {
         // ---- 局部变量遮蔽外层 ----
         var g: i32 = 2;
         libc::printf("inner g = %d\n", g);
@@ -30,7 +30,7 @@ func main(): i32 {
     libc::printf("x = %d\n", x);
 
     // ---- 前向引用 + 嵌套块 ----
-    {
+     {
         var y: Inner = 9; // 使用在前
         type Inner = i32; // 定义在后（提升）
         libc::printf("y = %d\n", y);

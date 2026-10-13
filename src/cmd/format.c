@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 /* clux format：格式化 clux 源码。
  *
  *   clux format <file.cx>            原地格式化（写回源文件）
@@ -158,6 +163,16 @@ int cmd_format(const cmd_args_t *args) {
     }
 
     bool from_stdin = (strcmp(path, "-") == 0);
+
+#ifdef _WIN32
+    /* Windows CRT 文本模式会把 \n ↔ \r\n 双向转换，导致 stdin→stdout 路径
+       产生 CRLF（与文件路径 "wb" 写入的纯 LF 不一致）。设为二进制模式
+       保留 fmt 输出的原始 LF。 */
+    if (from_stdin) {
+        _setmode(_fileno(stdin), _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+    }
+#endif
 
     size_t len = 0;
     char *src = from_stdin ? read_stdin(alloc, &len)

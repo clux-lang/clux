@@ -19,21 +19,30 @@
 //     全局变量，或捕获 ref 通过指针改内存（本示例两种都用到）。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 
-var seq: i32 = 0;        // 拼接用的全局序列（defer 体内可写全局）
-var own_field: i32 = 0;  // defer 里读 own 堆块的结果
-var slice_sum: i32 = 0;  // defer 里读 own 切片的结果
+var seq: i32 = 0; // 拼接用的全局序列（defer 体内可写全局）
+var own_field: i32 = 0; // defer 里读 own 堆块的结果
+var slice_sum: i32 = 0; // defer 里读 own 切片的结果
 
-struct Box { v: i32; w: i32; }
+struct Box {
+    v: i32;
+    w: i32;
+}
 
 // return 路径：当前作用域 + 所有被弹出作用域的 defer 都执行（内层先于外层）
 func with_return(): i32 {
-    defer { seq = seq * 10 + 1; }        // 函数体作用域：最后跑
-    {
-        defer { seq = seq * 10 + 2; }
-        {
-            defer { seq = seq * 10 + 3; }  // 最内层：最先跑
+    defer {
+        seq = seq * 10 + 1;
+    } // 函数体作用域：最后跑
+     {
+        defer {
+            seq = seq * 10 + 2;
+        }
+         {
+            defer {
+                seq = seq * 10 + 3;
+            } // 最内层：最先跑
             return 7;
         }
     }
@@ -42,54 +51,77 @@ func with_return(): i32 {
 func main(): i32 {
     // ---- 1. LIFO：同作用域三个 defer 逆序执行（登记 1,2,3 → 执行 3,2,1）----
     seq = 0;
-    {
-        defer { seq = seq * 10 + 1; }
-        defer || { seq = seq * 10 + 2; }   // 显式空捕获列表
-        defer | | { seq = seq * 10 + 3; }  // 空列表（有空白）等价
+     {
+        defer {
+            seq = seq * 10 + 1;
+        }
+        defer {
+            seq = seq * 10 + 2;
+        } // 显式空捕获列表
+        defer {
+            seq = seq * 10 + 3;
+        } // 空列表（有空白）等价
     }
-    var lifo: i32 = seq;                    // 321
+    var lifo: i32 = seq; // 321
 
     // ---- 2. 捕获是 clone 值：登记后改外层变量，defer 读到登记时的值 ----
     var a: i32 = 7;
     seq = 0;
-    {
-        defer |a| { seq = seq * 10 + a; }
-        a = 1000;                           // 不影响已捕获的副本 7
+     {
+        defer |a| {
+            seq = seq * 10 + a;
+        }
+        a = 1000; // 不影响已捕获的副本 7
     }
-    var capture: i32 = seq;                 // 7
+    var capture: i32 = seq; // 7
 
     // ---- 3. 嵌套作用域 + return：内层先于外层 ----
     seq = 0;
     var r: i32 = with_return();
-    if (r != 7) { return 1; }
-    var nested: i32 = seq;                  // 321（3 → 32 → 321）
+    if (r != 7) {
+        return 1;
+    }
+    var nested: i32 = seq; // 321（3 → 32 → 321）
 
     // ---- 4. 循环体：每次迭代各执行一次（迭代内 LIFO）----
     seq = 0;
     for (var i = 0; i < 3; i = i + 1) {
-        defer |i| { seq = seq * 10 + i; }
-        defer |i| { seq = seq * 10 + i + 1; }  // 后登记 → 先执行
+        defer |i| {
+            seq = seq * 10 + i;
+        }
+        defer |i| {
+            seq = seq * 10 + i + 1;
+        } // 后登记 → 先执行
     }
-    var loop: i32 = seq;                    // 10, 21, 32 → 102132
+    var loop: i32 = seq; // 10, 21, 32 → 102132
 
     // ---- 5. 与资源（own）释放的顺序：defer 在 dispose **之前**跑，
     //         因此 defer 体内通过 ref 捕获读得到 own 堆块 / own 切片的内容 ----
-    {
+     {
         var p: own *Box = new Box{ .v = 41, .w = 42 };
         // 捕获 ref 须带作用域标注（'<*> = 不逃出全局作用域），与闭包同规则
-        defer '<*> |(q: ref *Box = p.*.&)| { own_field = q.w + 1; }
+        defer '<*> |(q: ref *Box = p.*.&)| {
+            own_field = q.w + 1;
+        }
 
         var buf: own []i32 = make(i32, 3, 10, 20, 30);
-        defer '<*> |(s: ref []i32 = buf[:])| { slice_sum = s[0] + s[1] + s[2]; }
+        defer '<*> |(s: ref []i32 = buf[:])| {
+            slice_sum = s[0] + s[1] + s[2];
+        }
 
-        if (p.v != 41 || buf[0] != 10) { return 2; }
+        if (p.v != 41 || buf[0] != 10) {
+            return 2;
+        }
     }
     // 同一 pop_scope 内逆序执行（切片 defer 先跑、Box defer 后跑），
     // 两者都在 own 堆块/own 切片的 dispose 之前。
-    if (own_field != 43) { return 3; }
-    if (slice_sum != 60) { return 4; }
+    if (own_field != 43) {
+        return 3;
+    }
+    if (slice_sum != 60) {
+        return 4;
+    }
 
-    libc::printf("defer ok: lifo=%d capture=%d nested=%d loop=%d own=%d slice=%d\n",
-                 lifo, capture, nested, loop, own_field, slice_sum);
+    libc::printf("defer ok: lifo=%d capture=%d nested=%d loop=%d own=%d slice=%d\n", lifo, capture, nested, loop, own_field, slice_sum);
     return 0;
 }

@@ -4,7 +4,7 @@
 //   volatile  — 存取语义提示（禁止优化器重排/合并读写），读写全合法
 //   const volatile T — 组合限定（固定顺序 volatile(const(T))）
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // const：TDZ 首次赋值豁免（var x:const T = undefined 后的首次赋值即初始化）
     var a: const i32 = undefined;

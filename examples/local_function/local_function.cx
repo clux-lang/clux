@@ -14,7 +14,7 @@
 //   - comptime 局部函数：调用点编译期折叠，零运行时指令
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func global_add(a: i32, b: i32): i32 {
     return a + b;
 }
@@ -22,19 +22,27 @@ func global_add(a: i32, b: i32): i32 {
 func main(): i32 {
     // ---- 前向调用：定义在后、调用在前（提升注册）----
     var r = caller(5);
-    func caller(x: i32): i32 { return x + 1; }   // caller(5) → 6
+    func caller(x: i32): i32 {
+        return x + 1;
+    } // caller(5) → 6
 
     // ---- 访问参数 + 全局变量 ----
     var base: i32 = 100;
-    func scale(v: i32, f: i32): i32 { return v * f; }  // 只用参数
+    func scale(v: i32, f: i32): i32 {
+        return v * f;
+    } // 只用参数
     var s = scale(3, 4);
 
     // ---- 调用全局函数 ----
-    func wrapped(a: i32, b: i32): i32 { return global_add(a, b) + 1; }
+    func wrapped(a: i32, b: i32): i32 {
+        return global_add(a, b) + 1;
+    }
     var w = wrapped(10, 20);
 
     // ---- comptime 局部函数：编译期折叠 ----
-    comptime func twice(x: i32): i32 { return x * 2; }
+    comptime func twice(x: i32): i32 {
+        return x * 2;
+    }
     var t = twice(5);
 
     libc::printf("caller=%d scale=%d wrapped=%d twice=%d\n", r, s, w, t);

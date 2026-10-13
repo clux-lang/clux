@@ -13,7 +13,7 @@
 // 别名链须按依赖序声明；提升只作用于"类型构造"这一运行期阶段。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 type Local = i32; // 全局同名 type：用于演示局部遮蔽
 
 func main(): i32 {
@@ -21,11 +21,11 @@ func main(): i32 {
     var x: Local = 7; // 块内 Local 一律是局部 i64（提升遮蔽，非全局 i32）
     type Local = i64; // 局部 type def：遮蔽全局同名 type，块内全范围生效
 
-    {
+     {
         // ---- 嵌套块：内层只提升本块的 type def ----
         var y: Inner = 9;
         type Inner = i32;
-        x = x + (y as i64);
+        x = x + y as i64;
     }
     // var z: Inner = 1; // 出块不可见（反注释可验证编译错误）
 

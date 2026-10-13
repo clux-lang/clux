@@ -1,6 +1,6 @@
 // literals.cx — M1 样例：整数字面量（多进制+后缀）、浮点、布尔、字符、字符串
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // 整数：十进制 / 十六进制 / 八进制 / 二进制
     var dec: i32 = 42;
@@ -34,13 +34,13 @@ func main(): i32 {
     var text: str = "clux language\n";
 
     // 逻辑运算符与显式丢弃（M1 无隐式提升：混合运算须手工 as 到公共类型）
-    _ = dec + hex + oct + bin + (v8 as i32) + (vU8 as i32);
-    _ = (pi as f64) + (exp as f64) + (frac as f64);
+    _ = dec + hex + oct + bin + v8 as i32 + vU8 as i32;
+    _ = pi as f64 + exp as f64 + frac as f64;
     _ = yes && no || yes;
 
     libc::printf(text);
 
-    var arr = .[1]i32{123};
+    var arr = .[1]i32{ 123 };
     // `%v`（旧内建 printf 的"打印任意值"扩展）已删除：原生 printf 只认 C 的
     // 转换符，聚合值逐个成员打印。
     libc::printf("arr[0] = %d\n", arr[0]);

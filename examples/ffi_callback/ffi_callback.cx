@@ -19,7 +19,7 @@
 // macOS `libSystem.B.dylib`）；libffi 端口目前只提供 Windows x64 构建。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 extern lib "msvcrt.dll" as crt;
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
@@ -36,13 +36,17 @@ cfunc cmp(a: opaque, b: opaque): i32 {
     CALLS = CALLS + 1;
     var x: i32 = (a as ref *i32).*;
     var y: i32 = (b as ref *i32).*;
-    if (x < y) { return -1; }
-    if (x > y) { return 1; }
+    if (x < y) {
+        return -1;
+    }
+    if (x > y) {
+        return 1;
+    }
     return 0;
 }
 
 func main(): i32 {
-    var arr = .[5]i32{4, 2, 5, 1, 3};
+    var arr = .[5]i32{ 4, 2, 5, 1, 3 };
     // 注意：%v（旧内建 printf 的"打印任意值"扩展）已随内建一起删除——
     // 原生 printf 只认 C 的转换符，聚合值请逐个成员打印（或自己写格式化函数）。
     libc::printf("before: %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
@@ -54,11 +58,23 @@ func main(): i32 {
     libc::printf("qsort called the clux comparator %d times\n", CALLS);
 
     // 自检：已升序、首尾正确、回调确实被调用过
-    if (arr[0] > arr[1]) { return 1; }
-    if (arr[1] > arr[2]) { return 1; }
-    if (arr[2] > arr[3]) { return 1; }
-    if (arr[3] > arr[4]) { return 1; }
-    if (arr[0] != 1 || arr[4] != 5) { return 2; }
-    if (CALLS < 4) { return 3; }
+    if (arr[0] > arr[1]) {
+        return 1;
+    }
+    if (arr[1] > arr[2]) {
+        return 1;
+    }
+    if (arr[2] > arr[3]) {
+        return 1;
+    }
+    if (arr[3] > arr[4]) {
+        return 1;
+    }
+    if (arr[0] != 1 || arr[4] != 5) {
+        return 2;
+    }
+    if (CALLS < 4) {
+        return 3;
+    }
     return 0;
 }

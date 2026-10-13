@@ -7,7 +7,7 @@
 
 // 基础别名：内建 rhs 折叠为类型引用
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 type MyInt = i32;
 
 // extends + 三元选择类型：真分支取 i64、假分支取 i32
@@ -22,28 +22,30 @@ type Picked = Alt extends f64 ? T : U;
 
 func main(): i32 {
     // 选择类型用于变量标注与签名
-    var t: T = 100;          // i64
-    var u: U = 5;            // i32
-    var p: Picked = 200;     // 别名链 → i64
+    var t: T = 100; // i64
+    var u: U = 5; // i32
+    var p: Picked = 200; // 别名链 → i64
     libc::printf("t = %d\n", t as i32);
     libc::printf("u = %d\n", u);
     libc::printf("p = %d\n", p as i32);
 
     // 混合运算：extends 折叠为 bool 后三元直接选值
-    var val  = i32 extends i32 ? 1 : 0;   // 1
-    var val2 = i32 extends i64 ? 1 : 0;   // 0
+    var val = i32 extends i32 ? 1 : 0; // 1
+    var val2 = i32 extends i64 ? 1 : 0; // 0
     var val3 = [2]i32 extends [2]i32 ? 1 : 0; // 1
     libc::printf("val = %d %d %d\n", val, val2, val3);
 
     // extends 折叠结果用于 if 条件
     var r: i32 = 0;
-    if (MyInt extends i32) { r = 42; }
+    if (MyInt extends i32) {
+        r = 42;
+    }
     libc::printf("r = %d\n", r);
 
     // 局部 var 遮罩全局 type：块内 MyInt 是变量，不是类型
-    {
+     {
         var MyInt = 7;
-        libc::printf("shadow = %d\n", MyInt);   // 7（变量）
+        libc::printf("shadow = %d\n", MyInt); // 7（变量）
     }
     // 块外恢复全局类型：类型槽位仍解析到 i32
     var m: MyInt = 9;

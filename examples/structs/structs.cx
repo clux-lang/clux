@@ -15,15 +15,26 @@
 
 // 全局 struct：字段显式类型
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
-struct Point { x: i32; y: i32; }
+extern cfunc libc::printf(format: str, ...): void;
+struct Point {
+    x: i32;
+    y: i32;
+}
 
 // 字段类型可为其他 struct 类型（布局依赖构造：Inner 先密封）
-struct Inner { a: i32; }
-struct Outer { i: Inner; b: i64; }
+struct Inner {
+    a: i32;
+}
+struct Outer {
+    i: Inner;
+    b: i64;
+}
 
 // 结构兼容（鸭子类型）：字段名+类型+顺序一致 ⟹ 布局相同，可互赋值/判等
-struct Alias { x: i32; y: i32; }
+struct Alias {
+    x: i32;
+    y: i32;
+}
 
 // 实参位置匿名构造：参数类型已知 → 推断匿名类型
 func sum(p: Point): i32 {
@@ -32,37 +43,56 @@ func sum(p: Point): i32 {
 
 func main(): i32 {
     // 具名构造：字段序可乱（.y 先于 .x）
-    var p: Point = .Point { .y = 2, .x = 1 };
-    if (p.x != 1 || p.y != 2) { return 1; }
+    var p: Point = .Point{ .y = 2, .x = 1 };
+    if (p.x != 1 || p.y != 2) {
+        return 1;
+    }
 
     // 字段读取 + 写入 + 复合赋值
     p.x = 5;
-    if (p.x != 5) { return 1; }
+    if (p.x != 5) {
+        return 1;
+    }
     p.y += 3;
-    if (p.y != 5) { return 1; }
+    if (p.y != 5) {
+        return 1;
+    }
 
     // 匿名构造：推断匿名 struct 类型（字段序可乱，按名匹配重排）
     var q: Point = .{ .x = 7, .y = 8 };
-    if (q.x != 7 || q.y != 8) { return 1; }
-    q = .{ .y = 4, .x = 3 };           // 赋值 RHS 匿名构造（左值类型已知）
-    if (q.x != 3 || q.y != 4) { return 1; }
+    if (q.x != 7 || q.y != 8) {
+        return 1;
+    }
+    q = .{ .y = 4, .x = 3 }; // 赋值 RHS 匿名构造（左值类型已知）
+    if (q.x != 3 || q.y != 4) {
+        return 1;
+    }
 
     // 结构兼容赋值：字段一致的跨具名类型可互赋值
     var a: Alias = q;
-    if (a.x != 3 || a.y != 4) { return 1; }
+    if (a.x != 3 || a.y != 4) {
+        return 1;
+    }
 
     // 实参位置匿名构造：参数类型已知 → 推断 + 结构兼容转换
-    if (sum(.{ .x = 1, .y = 2 }) != 3) { return 1; }
+    if (sum(.{ .x = 1, .y = 2 }) != 3) {
+        return 1;
+    }
 
     // 嵌套 struct 构造 + 链式字段访问（p.a.b 借用零拷贝）
-    var o: Outer = .Outer { .i = .Inner { .a = 3 }, .b = 9 };
-    if (o.i.a != 3) { return 1; }
+    var o: Outer = .Outer{ .i = .Inner{ .a = 3 }, .b = 9 };
+    if (o.i.a != 3) {
+        return 1;
+    }
     o.i.a = 10;
-    if (o.i.a != 10) { return 1; }
+    if (o.i.a != 10) {
+        return 1;
+    }
     o.i.a += 5;
-    if (o.i.a != 15 || o.b != 9) { return 1; }
+    if (o.i.a != 15 || o.b != 9) {
+        return 1;
+    }
 
     libc::printf("struct ok\n");
     return 0;
 }
-

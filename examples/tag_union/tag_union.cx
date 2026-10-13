@@ -14,35 +14,47 @@
 //   实现     构造 → CONSTRUCT（union 分支）；判 tag → IS_TAG；访问 → FIELD_GET/SET
 
 // 全局 union：平铺字段 = 三个 member（radius/w/h，各持独立 payload 类型）
-union Shape {
-  radius: f32;
-  w: f32;
-  h: f32;
-}
+union Shape { radius: f32; w: f32; h: f32 }
 
 func main(): i32 {
     // 单字段强制构造：字段名 = member 名，tag 由编译器按名定位
-    var s = .Shape{.radius = 1.5f32};
+    var s = .Shape{ .radius = 1.5f32 };
 
     // tag 判定：`s is Member` 返回 bool
-    if (s is radius != true)  { return 1; }
-    if (s is w != false)      { return 2; }
-    if (s is h != false)      { return 3; }
+    if (s is radius != true) {
+        return 1;
+    }
+    if (s is w != false) {
+        return 2;
+    }
+    if (s is h != false) {
+        return 3;
+    }
 
     // 字段访问：当前 tag 的 member 字段可直接读写
     var r = s.radius;
-    if (r != 1.5f32) { return 4; }
+    if (r != 1.5f32) {
+        return 4;
+    }
     s.radius = 2.5f32;
-    if (s.radius != 2.5f32) { return 5; }
+    if (s.radius != 2.5f32) {
+        return 5;
+    }
 
     // 另一 member 构造：tag 切换，字段按当前 tag 访问
-    var e = .Shape{.w = 3.0f32};
-    if (e is w != true)        { return 6; }
-    if (e is radius != false)  { return 7; }
+    var e = .Shape{ .w = 3.0f32 };
+    if (e is w != true) {
+        return 6;
+    }
+    if (e is radius != false) {
+        return 7;
+    }
 
     // union 变量赋值：同 union 类型间
     var s2: Shape = s;
-    if (s2.radius != 2.5f32) { return 8; }
+    if (s2.radius != 2.5f32) {
+        return 8;
+    }
 
     return 0;
 }

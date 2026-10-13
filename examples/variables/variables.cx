@@ -1,6 +1,6 @@
 // variables.cx — M1 样例：变量声明（显式标注/推断）、赋值、显式丢弃
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var x: i32 = 10; // 显式类型标注
     var y = 20; // 类型推断

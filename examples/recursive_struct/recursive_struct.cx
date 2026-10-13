@@ -20,7 +20,7 @@
 //   3. 互相引用（Parent ↔ Child）。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 
 // ---- 1. 单链表：自引用指针字段 + 方法 ----
 struct Node {
@@ -34,7 +34,9 @@ struct Node {
         while (true) {
             acc += cur.v;
             var nx: '<*> ?ref *const Node = cur.next;
-            if (nx == nil) { break; }
+            if (nx == nil) {
+                break;
+            }
             cur = nx.!;
         }
         return acc;
@@ -52,10 +54,16 @@ func depth(t: ref *const Tree): i32 {
     var l: i32 = 0;
     var r: i32 = 0;
     var ln: '<*> ?ref *const Tree = t.left;
-    if (ln != nil) { l = depth(ln.!); }
+    if (ln != nil) {
+        l = depth(ln.!);
+    }
     var rn: '<*> ?ref *const Tree = t.right;
-    if (rn != nil) { r = depth(rn.!); }
-    if (l > r) { return l + 1; }
+    if (rn != nil) {
+        r = depth(rn.!);
+    }
+    if (l > r) {
+        return l + 1;
+    }
     return r + 1;
 }
 
@@ -77,43 +85,61 @@ struct Shape {
     r: i32;
 }
 
-func square_area(s: ref *const Shape): i32 { return s.r * s.r; }
+func square_area(s: ref *const Shape): i32 {
+    return s.r * s.r;
+}
 
 func main(): i32 {
     // 1) 链表：a <- b <- c（c 在头）
-    var a: '<*> Node = .Node{ .v = 1, .next = .?ref *const Node{nil} };
+    var a: '<*> Node = .Node{ .v = 1, .next = .?ref *const Node{ nil } };
     var b: '<*> Node = .Node{ .v = 2, .next = a.& };
     var c: '<*> Node = .Node{ .v = 3, .next = b.& };
-    if (c.sum() != 6) { return 1; }                 // 方法糖：接收者 ref *Node → ref *const Node
-    if (Node::sum(c.&) != 6) { return 2; }          // 显式限定调用
-    if (c.next.!.next.!.v != 1) { return 3; }       // 逐级解包 + 字段访问
+    if (c.sum() != 6) {
+        return 1;
+    } // 方法糖：接收者 ref *Node → ref *const Node
+    if (Node::sum(c.&) != 6) {
+        return 2;
+    } // 显式限定调用
+    if (c.next.!.next.!.v != 1) {
+        return 3;
+    } // 逐级解包 + 字段访问
 
     // 2) 二叉树：root -> (mid -> leaf, leaf)
-    var leaf: '<*> Tree = .Tree{ .v = 1, .left = .?ref *const Tree{nil},
-                                 .right = .?ref *const Tree{nil} };
-    var mid: '<*> Tree = .Tree{ .v = 2, .left = leaf.&,
-                                .right = .?ref *const Tree{nil} };
+    var leaf: '<*> Tree = .Tree{ .v = 1, .left = .?ref *const Tree{ nil }, .right = .?ref *const Tree{ nil } };
+    var mid: '<*> Tree = .Tree{ .v = 2, .left = leaf.&, .right = .?ref *const Tree{ nil } };
     var root: '<*> Tree = .Tree{ .v = 3, .left = mid.&, .right = leaf.& };
-    if (depth(root.&) != 3) { return 4; }
-    if (depth(leaf.&) != 1) { return 5; }
+    if (depth(root.&) != 3) {
+        return 4;
+    }
+    if (depth(leaf.&) != 1) {
+        return 5;
+    }
 
     // 3) 互相引用：走一圈 Parent → Child → Parent
-    var p: '<*> Parent = .Parent{ .name = 7, .first = .?ref *const Child{nil} };
+    var p: '<*> Parent = .Parent{ .name = 7, .first = .?ref *const Child{ nil } };
     var ch: '<*> Child = .Child{ .label = 9, .owner = p.& };
     p.first = ch.&;
-    if (ch.owner.!.name != 7) { return 6; }
-    if (p.first.!.label != 9) { return 7; }
+    if (ch.owner.!.name != 7) {
+        return 6;
+    }
+    if (p.first.!.label != 9) {
+        return 7;
+    }
 
     // 4) 自引用签名的函数字段：槽里放实现，经字段调用
     var sq: '<*> Shape = .Shape{ .area = square_area, .r = 5 };
-    if (sq.area(sq.&) != 25) { return 8; }
+    if (sq.area(sq.&) != 25) {
+        return 8;
+    }
 
     // 布局：含 ?ref *const Node 的 Node = i32 + 对齐 + option{bool;ptr} = 24 字节
-    if (sizeof(Node) != 24u64) { return 9; }
-    if (sizeof([2]Node) != 2u64 * sizeof(Node)) { return 10; }
+    if (sizeof(Node) != 24u64) {
+        return 9;
+    }
+    if (sizeof([2]Node) != 2u64 * sizeof(Node)) {
+        return 10;
+    }
 
-    libc::printf("recursive_struct: list_sum=%d depth=%d parent=%d child=%d shape_area=%d sizeof(Node)=%llu\n",
-                 c.sum(), depth(root.&), ch.owner.!.name, p.first.!.label,
-                 sq.area(sq.&), sizeof(Node));
+    libc::printf("recursive_struct: list_sum=%d depth=%d parent=%d child=%d shape_area=%d sizeof(Node)=%llu\n", c.sum(), depth(root.&), ch.owner.!.name, p.first.!.label, sq.area(sq.&), sizeof(Node));
     return 0;
 }

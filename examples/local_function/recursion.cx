@@ -13,41 +13,48 @@
 //     "local function cannot reference sibling or self"
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // ---- 自递归：阶乘（捕获自身）----
     func |fact| fact(n: i32): i32 {
-        if (n <= 1) { return 1; }
+        if (n <= 1) {
+            return 1;
+        }
         return n * fact(n - 1);
     }
-    var f5 = fact(5);   // 120
+    var f5 = fact(5); // 120
 
     // ---- 相互递归：奇偶判定（每方捕获对方，含后向兄弟）----
     func |is_even, is_odd| is_even(n: i32): i32 {
-        if (n == 0) { return 1; }
+        if (n == 0) {
+            return 1;
+        }
         return is_odd(n - 1);
     }
     func |is_even, is_odd| is_odd(n: i32): i32 {
-        if (n == 0) { return 0; }
+        if (n == 0) {
+            return 0;
+        }
         return is_even(n - 1);
     }
-    var e10 = is_even(10);  // 1
-    var o7 = is_odd(7);     // 1
-    var e11 = is_even(11);  // 0
+    var e10 = is_even(10); // 1
+    var o7 = is_odd(7); // 1
+    var e11 = is_even(11); // 0
 
     // ---- 相互递归 + 捕获外层变量混合（捕获列表可同时声明两者）----
     var stop: i32 = 0;
     func |is_done, is_go, stop| is_done(n: i32): i32 {
-        if (n <= stop) { return 1; }
+        if (n <= stop) {
+            return 1;
+        }
         return is_go(n - 1);
     }
     func |is_done, is_go, stop| is_go(n: i32): i32 {
         return is_done(n);
     }
-    var d5 = is_done(5);    // 5 > 0 → is_go(4) → is_done(4) → ... → 1
+    var d5 = is_done(5); // 5 > 0 → is_go(4) → is_done(4) → ... → 1
 
-    libc::printf("fact(5)=%d even(10)=%d odd(7)=%d even(11)=%d done(5)=%d\n",
-           f5, e10, o7, e11, d5);
+    libc::printf("fact(5)=%d even(10)=%d odd(7)=%d even(11)=%d done(5)=%d\n", f5, e10, o7, e11, d5);
 
     return 0;
 }

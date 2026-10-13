@@ -12,24 +12,36 @@
 //   循环依赖  编译期检测并报错（依赖链打印）。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 import math from "./lib/math";
 import api from "./lib/api";
 
 func main(): i32 {
     // ---- 直接导入：函数与导出变量 ----
-    if (math::add(20, 22) != 42) { return 1; }
-    if (math::PI != 42) { return 2; }
+    if (math::add(20, 22) != 42) {
+        return 1;
+    }
+    if (math::PI != 42) {
+        return 2;
+    }
 
     // ---- 模块内部调用私有符号：经导出函数间接可见 ----
-    if (math::internal_call() != 7) { return 3; }
+    if (math::internal_call() != 7) {
+        return 3;
+    }
 
     // ---- 代理导出：api 自身不定义符号，转发 math 的导出 ----
-    if (api::add(1, 2) != 3) { return 4; }
-    if (api::PI != 42) { return 5; }
+    if (api::add(1, 2) != 3) {
+        return 4;
+    }
+    if (api::PI != 42) {
+        return 5;
+    }
 
     // ---- 同一模块被两处导入（直接 + 经代理）→ 同一实例 ----
-    if (api::add(0, 0) != math::add(0, 0)) { return 6; }
+    if (api::add(0, 0) != math::add(0, 0)) {
+        return 6;
+    }
 
     libc::printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
     return 0;

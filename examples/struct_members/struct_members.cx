@@ -23,11 +23,11 @@
 //     但反向（去 const）不允许，所以只读方法里写 `self.field = v` 会被拒绝。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;   // M6 起 printf 由 libc 提供
+extern cfunc libc::printf(format: str, ...): void; // M6 起 printf 由 libc 提供
 
 struct Counter {
     value: i32;
-    var total: i32 = 0;      // 静态属性：跨实例共享
+    var total: i32 = 0; // 静态属性：跨实例共享
     var limit: i32 = 3;
 
     // 方法：读 + 写（接收者是非 const 的 ref）
@@ -51,33 +51,56 @@ struct Counter {
 
 func main(): i32 {
     // 静态属性：命名空间访问，读 / 写 / 复合赋值
-    if (Counter::total != 0) { return 1; }
+    if (Counter::total != 0) {
+        return 1;
+    }
     Counter::limit = 3;
-    if (Counter::limit != 3) { return 2; }
+    if (Counter::limit != 3) {
+        return 2;
+    }
     Counter::total += 0;
-    if (Counter::total != 0) { return 3; }
+    if (Counter::total != 0) {
+        return 3;
+    }
 
     // 值接收者：c.bump() ≡ typeof(c)::bump(c.&)
     var a: Counter = .Counter{ .value = 10 };
     var b: Counter = .Counter{ .value = 20 };
-    if (a.bump() != 11) { return 4; }
-    if (b.bump() != 21) { return 5; }
-    if (Counter::total != 2) { return 6; }   // 静态属性被两个实例共同改写
-    if (a.get() != 11 || b.get() != 21) { return 7; }
+    if (a.bump() != 11) {
+        return 4;
+    }
+    if (b.bump() != 21) {
+        return 5;
+    }
+    if (Counter::total != 2) {
+        return 6;
+    } // 静态属性被两个实例共同改写
+    if (a.get() != 11 || b.get() != 21) {
+        return 7;
+    }
 
     // 指针接收者：p.bump() ≡ typeof(p.*)::bump(p)
     var p: ref *Counter = a.&;
-    if (p.bump() != 12) { return 8; }
-    if (a.get() != 12) { return 9; }
+    if (p.bump() != 12) {
+        return 8;
+    }
+    if (a.get() != 12) {
+        return 9;
+    }
 
     // 显式限定调用（与上面完全等价）
-    if (Counter::bump(b.&) != 22) { return 10; }
-    if (Counter::total != 4) { return 11; }
+    if (Counter::bump(b.&) != 22) {
+        return 10;
+    }
+    if (Counter::total != 4) {
+        return 11;
+    }
 
     // 方法读静态属性
-    if (!a.isFull()) { return 12; }          // total(4) >= limit(3)
+    if (!a.isFull()) {
+        return 12;
+    } // total(4) >= limit(3)
 
-    libc::printf("Counter::total = %d, a = %d, b = %d, full = %d\n",
-           Counter::total, a.get(), b.get(), a.isFull() as i32);
+    libc::printf("Counter::total = %d, a = %d, b = %d, full = %d\n", Counter::total, a.get(), b.get(), a.isFull() as i32);
     return 0;
 }

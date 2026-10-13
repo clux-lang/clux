@@ -32,7 +32,7 @@
 // clone/dispose/eq/add/index…）无关：那是类型系统的内部机制，不是对象多态。
 
 extern lib "*" as libc;
-extern func libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): void;
 
 // ---- 表行：一组函数指针槽（手动虚表）----
 struct ShapeOps {
@@ -46,9 +46,19 @@ struct Shape {
 }
 
 // ---- 具体"类型"：`...Shape` 在最前 → 前缀兼容 + 指针向上转换成立 ----
-struct Circle { ...Shape; r: i32; }
-struct Rect   { ...Shape; w: i32; h: i32; }
-struct Square { ...Shape; side: i32; }
+struct Circle {
+    ...Shape;
+    r: i32;
+}
+struct Rect {
+    ...Shape;
+    w: i32;
+    h: i32;
+}
+struct Square {
+    ...Shape;
+    side: i32;
+}
 
 // ---- 各"类型"的实现：接收者经 opaque 传入，实现里 as 还原具体类型 ----
 func circle_name(p: opaque): str {
@@ -83,10 +93,9 @@ func square_area_doubled(p: opaque): i32 {
 
 // ---- 每"类型"一份表（全局变量，地址稳定；对象只借它的地址）----
 var circle_ops: ShapeOps = .ShapeOps{ .name = circle_name, .area = circle_area };
-var rect_ops:   ShapeOps = .ShapeOps{ .name = rect_name,   .area = rect_area };
+var rect_ops: ShapeOps = .ShapeOps{ .name = rect_name, .area = rect_area };
 var square_ops: ShapeOps = .ShapeOps{ .name = square_name, .area = square_area };
-var square_ops_doubled: ShapeOps =
-    .ShapeOps{ .name = square_name, .area = square_area_doubled };
+var square_ops_doubled: ShapeOps = .ShapeOps{ .name = square_name, .area = square_area_doubled };
 
 // ---- 统一入口：调用点静态绑定到"查表这一步"，表里放什么由运行期决定 ----
 func name_of(s: ref *const Shape): str {
@@ -99,10 +108,10 @@ func area_of(s: ref *const Shape): i32 {
 // ---- 异构集合遍历：数组 / 切片元素统一为 ref *const Shape ----
 func total_area(xs: ref []ref *const Shape): i32 {
     var acc: i32 = 0;
-    var i: usize = 0usize;
+    var i: usize = 0u64;
     while (i < len(xs)) {
         acc += area_of(xs[i]);
-        i = i + 1usize;
+        i = i + 1u64;
     }
     return acc;
 }
@@ -110,35 +119,53 @@ func total_area(xs: ref []ref *const Shape): i32 {
 func main(): i32 {
     // 构造：把各自的表填进对象（`'<*>` = 表与对象都不超过全局作用域）
     var c: '<*> Circle = .Circle{ .ops = circle_ops.&, .r = 3 };
-    var r: '<*> Rect   = .Rect{ .ops = rect_ops.&, .w = 4, .h = 5 };
+    var r: '<*> Rect = .Rect{ .ops = rect_ops.&, .w = 4, .h = 5 };
     var q: '<*> Square = .Square{ .ops = square_ops.&, .side = 6 };
 
     // 前缀向上转换：ref *Circle / ref *Rect / ref *Square → ref *const Shape
     var s1: ref *const Shape = c.&;
     var s2: ref *const Shape = r.&;
     var s3: ref *const Shape = q.&;
-    if (name_of(s1) != "circle") { return 1; }
-    if (area_of(s1) != 27) { return 2; }
-    if (name_of(s2) != "rect") { return 3; }
-    if (area_of(s2) != 20) { return 4; }
-    if (name_of(s3) != "square") { return 5; }
-    if (area_of(s3) != 36) { return 6; }
+    if (name_of(s1) != "circle") {
+        return 1;
+    }
+    if (area_of(s1) != 27) {
+        return 2;
+    }
+    if (name_of(s2) != "rect") {
+        return 3;
+    }
+    if (area_of(s2) != 20) {
+        return 4;
+    }
+    if (name_of(s3) != "square") {
+        return 5;
+    }
+    if (area_of(s3) != 36) {
+        return 6;
+    }
 
     // 数组字面量：元素各自向上转换（异构集合）
-    var arr: '<*> [3]ref *const Shape = .[3]ref *const Shape { c.&, r.&, q.& };
-    if (total_area(arr[0:3]) != 83) { return 7; }
+    var arr: '<*> [3]ref *const Shape = .[3]ref *const Shape{ c.&, r.&, q.& };
+    if (total_area(arr[0:3]) != 83) {
+        return 7;
+    }
 
     // 切片：make 出来的异构集合，同一入口同样的结果
     var sl: own []ref *const Shape = make(ref *const Shape, 3, c.&, r.&, q.&);
-    if (total_area(sl) != 83) { return 8; }
+    if (total_area(sl) != 83) {
+        return 8;
+    }
 
     // 表是数据：同一个结构体的另一个实例装另一张表 → 同一入口得到另一种实现
     var q2: '<*> Square = .Square{ .ops = square_ops_doubled.&, .side = 6 };
-    if (area_of(q2.&) != 72) { return 9; }
-    if (area_of(q.&) != 36) { return 10; }   // q 自己那张表没被影响
+    if (area_of(q2.&) != 72) {
+        return 9;
+    }
+    if (area_of(q.&) != 36) {
+        return 10;
+    } // q 自己那张表没被影响
 
-    libc::printf("manual_vtable: circle=%d(%s) rect=%d(%s) square=%d(%s) total=%d doubled=%d\n",
-           area_of(c.&), name_of(c.&), area_of(r.&), name_of(r.&),
-           area_of(q.&), name_of(q.&), total_area(arr[0:3]), area_of(q2.&));
+    libc::printf("manual_vtable: circle=%d(%s) rect=%d(%s) square=%d(%s) total=%d doubled=%d\n", area_of(c.&), name_of(c.&), area_of(r.&), name_of(r.&), area_of(q.&), name_of(q.&), total_area(arr[0:3]), area_of(q2.&));
     return 0;
 }
