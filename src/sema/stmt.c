@@ -471,17 +471,23 @@ static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
   return false;
 }
 
-/* 从 fatal 复合类型（fatal T）剥离 OWN_FATAL → OWN_NONE 基础类型。
- * 用于 `var t = expr` 推断：fatal 复合类型是将亡值，变量接管所有权后
- * 类型为 T（OWN_NONE）。指针/切片的 fatal 变体不在此处理——它们需要
- * 显式 own *T 标注（fatal *T → own *T 是所有权升级，不是简单剥离）。
- * 返回 NULL = 无法剥离（指针/切片/标量等非复合 fatal）。 */
-static const type_t *strip_fatal_composite(sema_t *sema, const type_t *t) {
+/* 从 fatal 类型剥离 OWN_FATAL：
+ * - 复合类型（struct/tuple/array/option/union）→ OWN_NONE（fatal T → T）
+ * - 指针/切片 → OWN_OWN（fatal *T → own *T，fatal []T → own []T）
+ *   fatal 是将亡值，只能赋值给 own（move/clone/new 产物），所以自动推断
+ *   为 own 而非要求显式标注。
+ * 返回 NULL = 非 fatal 类型或无法处理。 */
+static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
   if (!t || !type_is_fatal(t)) return NULL;
-  if (type_is_ptr(t) || type_is_slice(t)) return NULL;
   vm_t *vm = sema->vm;
   const type_t *r = NULL;
   switch (t->kind) {
+    case TYPE_KIND_PTR:
+      r = type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
+      break;
+    case TYPE_KIND_SLICE:
+      r = type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
+      break;
     case TYPE_KIND_STRUCT:
       r = type_struct_intern_with_ownership(vm, t, OWN_NONE);
       break;
@@ -661,16 +667,33 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
          - fatal 复合类型（fatal Test）：自动剥离为 T（OWN_NONE）——复合类型
            的 own 字段所有权由字段自身的 ownership 编码，fatal 仅标记将亡值，
            变量接管后类型为 T。
-         - fatal 指针/切片（fatal *T / fatal []T）：需要显式 own *T 标注——
-           指针所有权升级（fatal → own）不能自动推断。 */
+         - fatal 指针/切片（fatal *T / fatal []T）：自动升级为 own *T / own []T
+           ——fatal 是将亡值，只能赋值给 own（move/clone/new 产物），自动推断
+           为 own 而非要求显式标注。 */
       if (vt && type_is_fatal(vt)) {
-        const type_t *stripped = strip_fatal_composite(sema, vt);
+        const type_t *stripped = strip_fatal(sema, vt);
         if (stripped) {
           vt = stripped;
+          /* 将推断出的类型写回 type_expr（AST_TYPE_REF），让 compiler 发
+             LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
+             类型路径：value_implicit_cast(fatal init → own/none 接管），
+             避免变量持有 fatal 类型在 scope 退出时不释放 → 内存泄漏。
+             函数参数不走此路径（参数有显式 fatal 类型标注，合法保留）。 */
+          const sema_type_t *st = sema_type_find(sema, vt);
+          if (st && st->name.ptr) {
+            ast_node_t *ref = ast_type_ref_new(sema->arena,
+                                               vd->init->tok_begin,
+                                               vd->init->tok_end);
+            if (ref) {
+              ((ast_type_ref_t *)ref)->name = st->name;
+              vd->type_expr = ref;
+            }
+          }
         } else {
+          /* strip_fatal 返回 NULL 意味着遇到不支持的 fatal 类型（理论上
+             不会发生——所有 fatal 变体都覆盖了），保守报错。 */
           diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot infer fatal pointer type for variable '%.*s' "
-                     "(annotate the owning type, e.g. own *T)",
+                     "cannot infer fatal type for variable '%.*s'",
                      (int)vd->name.len, vd->name.ptr);
           sym->flow_init = false;
           vt = sema->vm->type_void;

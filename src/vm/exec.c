@@ -255,8 +255,13 @@ static value_t *op_define(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_type(spec) == vm->type_type) {
         decl_type = value_as(spec, const type_t *);
     }
-    /* spec 是 undefined：无显式类型，从值推断 */
-    if (!decl_type) decl_type = value_type(init);
+    /* spec 是 undefined：无显式类型，从值推断。
+       fatal 是将亡值——推断时 fatal 复合类型剥离为 OWN_NONE（fatal T → T），
+       fatal 指针/切片升级为 OWN_OWN（fatal *T → own *T）。否则变量持有
+       fatal 类型，scope 退出时不释放（fatal 释放权在 own 侧）→ 内存泄漏。 */
+    if (!decl_type) {
+        decl_type = value_type(init);
+    }
 
     /* 无初始值（init 为 void/undefined，来自 var x:T = undefined）：
        以声明类型分配零值占位（sema 确定性赋值分析已保证编译期拦截读取，
