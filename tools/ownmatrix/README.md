@@ -57,12 +57,40 @@ python tools/ownmatrix/run_matrix.py
 `run_matrix.py` 会把非 `ok` / 非 `REJECT` 的格子单独列出来（那才是必须修的），
 并把所有 `REJECT` 的首条诊断附上供判定。
 
-## 当前已知缺口（矩阵里表现为 REJECT，已确认是缺口而非合理拒绝）
+## 闭包 / defer 捕获维度
+
+`closure_matrix.py` 追加一个维度：**族 × 捕获写法**（7 族 × 7 种写法 = 49 格），
+每格除断言字段值外还检查泄漏报告。
+
+| 写法 | 内容 |
+|---|---|
+| `C1` | 纯 id 捕获 |
+| `C2` | 括号捕获 + `move` |
+| `C3` | 捕获后把源 `move` 走 |
+| `C4` | 捕获后再 `clone` 源 |
+| `C5` | 同时捕获两个含 own 的值 |
+| `C6` | `defer` 捕获（复用同一套捕获解析） |
+| `C7` | 块内捕获（闭包更早释放） |
+
+当前结果：struct / nested / deep / tuple / array / union 六族 **42/42 干净**；
+`optinner` 7 格被下面第 1 条缺口挡住（与闭包无关）。
+
+> 附注：`closure_scope` 的生命周期**并非无人管理**——`vm_destroy` 会对每个函数
+> 调 `scope_destroy(vm, &fn->closure_scope)`。此前的捕获泄漏根因是
+> `value_own_copy_into` 没有回收 `ptr_clone_block` 的中间块（每构造一个含 own 的
+> 字段泄漏 8 字节），**不含闭包的程序同样泄漏**；见 `minimal_probe.py` 的对照。
+
+## 当前已知缺口
 
 1. **`optinner` 全列**：`var a: ?I = .?I{ .I{ .p = new i32{7} } }` 报
    `cannot initialize optional ?I with fatal I`。sema 的匿名构造槽位把 option 的
    内层推断成了 `fatal I`，而 `?I` 要的是内层 `I`。
-2. **`13_fatal_return` 的 8 字节泄漏**：`var o: T = mkone();`（`mkone` 返回
-   `fatal T`）程序 exit 0，但收尾报一个 `clux.vm.value_data` 泄漏。
+2. **`13_fatal_return` 的 `array` / `union` 两格**：运行期报
+   `array: implicit cast only within layout-compatible array/tuple`。根因是
+   fatal 变体的**元素类型不统一**——`fatal [2]I` 与 `fatal [2]fatal I` 互不相等
+   （指针/切片由 `type_fatal_variant_of` 升为 fatal，而数组/union 的
+   `*_intern_with_ownership` 保留了原元素类型）。
+   `struct` / `tuple` 的对应格已通过（`value_relabel_into` 就地重贴标签）。
 
-两项都记在提交 `6b72e74` 的说明里，尚未修复。
+> 早先记录的 `13_fatal_return` 8 字节泄漏已随提交 `0732858` 修复（同第 1 条根因的
+> 副作用）。
