@@ -471,7 +471,17 @@ void *value_own_copy_into(vm_t *vm, void *dst, const value_t *src,
        后者对 `own *T` 是**浅拷贝指针**，克隆体与源共享同一个堆块 → 双释放
        （实测 access violation）。 */
     void *cloned = ptr_clone_block(vm, ft, value_data(src));
-    memcpy(p, cloned ? cloned : value_data(src), ft->size);
+    if (!cloned) {
+        memcpy(p, value_data(src), ft->size);
+        return p;
+    }
+    memcpy(p, cloned, ft->size);
+    /* ptr_clone_block 返回的是**它自己分配的一块临时 data**：字节已拷进 dst，
+       这块临时块必须回收——否则每构造一个含 own 的字段就泄漏一个 data 块
+       （实测 8 字节/次，正是本函数此前的泄漏根因）。
+       回收它**不能**用 value_dispose：那会连带 dispose 内部的 own 子块，而 dst
+       已经持有那些子块的引用。这里只把临时块本身还给分配器。 */
+    allocator_free(vm->alloc, &cloned);
     return p;
 }
 

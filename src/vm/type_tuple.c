@@ -57,10 +57,11 @@ static value_t *tuple_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-    /* 浅拷贝（整块 memcpy）：隐式拷贝路径只作用于 sema 已保证不含 own
-       元素的值；own 元素的深拷贝发生在主动 clone()（op_clone）。 */
-    void *data = value_alloc_data(vm->alloc, t);
-    memcpy(data, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
+    /* **持有资源则对象图克隆**（value_alloc_data_own）。不能一律浅 memcpy：
+       隐式拷贝路径并不只作用于"不含 own"的值——闭包捕获、scope_define 的借用
+       materialize 都走这里，而它们完全可以承载含 own 的元组。浅拷贝会让副本与源
+       共享内嵌堆块 → 双释放（实测 access violation）。 */
+    void *data = value_alloc_data_own(vm, t, value_data(v));
     return value_make(vm, t, data);
 }
 

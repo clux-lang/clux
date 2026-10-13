@@ -352,11 +352,11 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
 
     /* 借用/普通数组的 type 均为数组类型；借用 v 的 data 指向块内偏移，
        按其类型深拷贝该块即 materialize（独立 is_own=true 拷贝）。
-       浅拷贝（整块 memcpy）：隐式拷贝路径只作用于 sema 已保证不含 own
-       元素的值；own 元素的深拷贝发生在主动 clone()（op_clone）。 */
+       **持有资源则对象图克隆**（value_alloc_data_own）：隐式拷贝路径同样承载
+       含 own 元素的数组（闭包捕获、scope_define 的借用 materialize），浅拷贝
+       会让副本与源共享内嵌堆块 → 双释放。 */
     const type_t *t = value_type(v);
-    void *block = value_alloc_data(vm->alloc, t);
-    memcpy(block, value_data(v), t->size);  /* data 全平凡：整块 memcpy */
+    void *block = value_alloc_data_own(vm, t, value_data(v));
     return value_make(vm, t, block);
 }
 
