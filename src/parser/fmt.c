@@ -257,6 +257,98 @@ static void render_semi_list(fmt_t *f, ast_node_t *head) {
     }
 }
 
+/* ---- 构造表达式字段渲染 ---- */
+
+/* 在 token 池 [begin, end) 范围内查找指定单字符标点符号的下标。
+ * 用于定位构造表达式的 '{' / '}'（节点 tok_begin/tok_end 覆盖整个表达式，
+ * 但字段渲染需要花括号位置做注释挂载边界）。未找到返回 end。 */
+static uint32_t find_punct_token(fmt_t *f, uint32_t begin, uint32_t end,
+                                 const char *sym) {
+    size_t n = vec_len(f->tokens);
+    for (uint32_t i = begin; i < end && i < n; i++) {
+        const token_t *t = (const token_t *)vec_get(f->tokens, i);
+        if (token_is(t, sym)) return i;
+    }
+    return end;
+}
+
+/* 统计兄弟链节点数。 */
+static size_t sibling_count(ast_node_t *head) {
+    size_t n = 0;
+    for (ast_node_t *p = head; p; p = p->next) n++;
+    return n;
+}
+
+/* 构造表达式字段渲染：struct 具名字段构造（AST_CONSTRUCT_FIELD）≥2 字段时
+ * 多行展开（每字段独占一行，4 空格缩进，注释按源码位置挂载）；单字段或
+ * 数组/元组值构造（普通值表达式）保持单行紧凑 `{ v1, v2 }`。
+ *
+ * 区分依据：struct 构造字段是 AST_CONSTRUCT_FIELD（.name = value），数组/
+ * 元组构造字段是普通值表达式。只有具名字段构造才多行展开。
+ *
+ * open_tok / close_tok 是 '{' / '}' 在 token 池中的下标，用于注释挂载范围。 */
+static void render_construct_fields(fmt_t *f, ast_node_t *head,
+                                    uint32_t open_tok, uint32_t close_tok) {
+    if (!head) {
+        /* 空构造：紧凑 {} */
+        return;
+    }
+    /* 非具名字段构造（数组/元组值）：保持单行紧凑 */
+    if (head->kind != AST_CONSTRUCT_FIELD) {
+        sb_ch(&f->sb, ' ');
+        render_comma_list(f, head);
+        sb_ch(&f->sb, ' ');
+        return;
+    }
+    size_t nf = sibling_count(head);
+    if (nf < 2) {
+        /* 单字段：单行紧凑 { .f = v } */
+        sb_ch(&f->sb, ' ');
+        render_comma_list(f, head);
+        sb_ch(&f->sb, ' ');
+        return;
+    }
+    /* 多字段：多行展开 */
+    f->indent++;
+    uint32_t prev_end = open_tok + 1;  /* '{' 之后 */
+    size_t last_line = tok_line(
+        (const token_t *)vec_get(f->tokens, open_tok));
+    for (ast_node_t *fld = head; fld; fld = fld->next) {
+        /* 字段前换行 + 注释挂载 */
+        if (!f->at_line_start) sb_ch(&f->sb, '\n');
+        f->at_line_start = true;
+        last_line = mount_comments(f, prev_end, fld->tok_begin, last_line,
+                                   /*inline_only=*/false);
+        /* 空行保留 */
+        size_t cur_line = tok_line(
+            (const token_t *)vec_get(f->tokens, fld->tok_begin));
+        if (cur_line >= last_line + 2) {
+            sb_ch(&f->sb, '\n');
+            f->at_line_start = true;
+        }
+        if (f->at_line_start) sb_indent(&f->sb, f->indent);
+        f->at_line_start = false;
+        render_expr(f, fld);
+        /* 非末尾字段补 ',' */
+        if (fld->next) sb_ch(&f->sb, ',');
+        prev_end = fld->tok_end;
+        /* 字段后行内注释 */
+        uint32_t inline_end = fld->next ? fld->next->tok_begin : close_tok;
+        size_t fld_end_line = tok_line(
+            (const token_t *)vec_get(f->tokens, prev_end - 1));
+        last_line = mount_comments(f, prev_end, inline_end, fld_end_line,
+                                   /*inline_only=*/true);
+        last_line = fld_end_line;
+    }
+    /* 块尾注释 + '}' */
+    if (!f->at_line_start) sb_ch(&f->sb, '\n');
+    f->at_line_start = true;
+    mount_comments(f, prev_end, close_tok, last_line, /*inline_only=*/false);
+    f->indent--;
+    if (f->at_line_start) sb_indent(&f->sb, f->indent);
+    f->at_line_start = false;
+}
+
 /* ---- 括号渲染与优先级 ---- */
 
 /* 运算符优先级表（数值 = 绑定力，越大越紧）。赋值/三元最低（0）。 */
@@ -627,10 +719,13 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             ast_construct_t *c = (ast_construct_t *)node;
             sb_ch(&f->sb, '.');
             if (c->type) render_expr(f, c->type);
+            /* 定位 '{' / '}' token 下标做注释挂载边界 */
+            uint32_t open_tok = find_punct_token(f, node->tok_begin,
+                                                 node->tok_end, "{");
+            uint32_t close_tok = find_punct_token(f, open_tok + 1,
+                                                  node->tok_end, "}");
             sb_ch(&f->sb, '{');
-            if (c->fields) sb_ch(&f->sb, ' ');
-            render_comma_list(f, c->fields);
-            if (c->fields) sb_ch(&f->sb, ' ');
+            render_construct_fields(f, c->fields, open_tok, close_tok);
             sb_ch(&f->sb, '}');
             break;
         }
@@ -727,10 +822,12 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             ast_new_t *nw = (ast_new_t *)node;
             sb_str(&f->sb, "new ");
             if (nw->type) render_expr(f, nw->type);
+            uint32_t open_tok = find_punct_token(f, node->tok_begin,
+                                                 node->tok_end, "{");
+            uint32_t close_tok = find_punct_token(f, open_tok + 1,
+                                                  node->tok_end, "}");
             sb_ch(&f->sb, '{');
-            if (nw->fields) sb_ch(&f->sb, ' ');
-            render_comma_list(f, nw->fields);
-            if (nw->fields) sb_ch(&f->sb, ' ');
+            render_construct_fields(f, nw->fields, open_tok, close_tok);
             sb_ch(&f->sb, '}');
             break;
         }
