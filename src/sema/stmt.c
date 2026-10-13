@@ -471,6 +471,63 @@ static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
   return false;
 }
 
+/* 从 fatal 复合类型（fatal T）剥离 OWN_FATAL → OWN_NONE 基础类型。
+ * 用于 `var t = expr` 推断：fatal 复合类型是将亡值，变量接管所有权后
+ * 类型为 T（OWN_NONE）。指针/切片的 fatal 变体不在此处理——它们需要
+ * 显式 own *T 标注（fatal *T → own *T 是所有权升级，不是简单剥离）。
+ * 返回 NULL = 无法剥离（指针/切片/标量等非复合 fatal）。 */
+static const type_t *strip_fatal_composite(sema_t *sema, const type_t *t) {
+  if (!t || !type_is_fatal(t)) return NULL;
+  if (type_is_ptr(t) || type_is_slice(t)) return NULL;
+  vm_t *vm = sema->vm;
+  const type_t *r = NULL;
+  switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+      r = type_struct_intern_with_ownership(vm, t, OWN_NONE);
+      break;
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      tuple_elem_t elems[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        elems[i].type = e ? e->type : NULL;
+        elems[i].offset = 0;
+      }
+      r = type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                            OWN_NONE);
+      break;
+    }
+    case TYPE_KIND_ARRAY: {
+      const type_t *elem = array_type_elem(t);
+      size_t len = array_type_len(t);
+      r = type_array_intern_with_ownership(vm, elem, len, OWN_NONE);
+      break;
+    }
+    case TYPE_KIND_OPTION: {
+      const type_t *inner = type_option_inner(t);
+      r = type_option_intern_with_ownership(vm, inner, OWN_NONE);
+      break;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      union_member_t members[n > 0 ? n : 1];
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        members[i].name = m ? m->name : STRSLICE_EMPTY;
+        members[i].tag = m ? m->tag : (uint32_t)i;
+        members[i].payload_type = m ? m->payload_type : NULL;
+      }
+      r = type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                            OWN_NONE);
+      break;
+    }
+    default:
+      return NULL;
+  }
+  if (r) sema_type_register(sema, r);
+  return r;
+}
+
 static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
@@ -600,15 +657,24 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
          R1（own 不可 copy，§3.1）：var p = q; 且 init 是 own *T 且非
          fatal 接管 → copy → 编译错误（own 唯一所有权只能 move/clone）。 */
       const type_t *vt = init_bad ? sema->vm->type_void : value_type(init);
-      /* R1（fatal 禁止命名，§3.3）：var x = move(p) 推断出 fatal 类型——
-         fatal 是临时值，必须显式标注接收类型（own）。 */
+      /* R1（fatal 禁止命名，§3.3）：fatal 是临时值，不能直接命名。
+         - fatal 复合类型（fatal Test）：自动剥离为 T（OWN_NONE）——复合类型
+           的 own 字段所有权由字段自身的 ownership 编码，fatal 仅标记将亡值，
+           变量接管后类型为 T。
+         - fatal 指针/切片（fatal *T / fatal []T）：需要显式 own *T 标注——
+           指针所有权升级（fatal → own）不能自动推断。 */
       if (vt && type_is_fatal(vt)) {
-        diag_error(sema->diag, sema_loc(sema, vd->init),
-                   "cannot infer fatal pointer type for variable '%.*s' "
-                   "(annotate the owning type, e.g. own *T)",
-                   (int)vd->name.len, vd->name.ptr);
-        sym->flow_init = false;
-        vt = sema->vm->type_void;
+        const type_t *stripped = strip_fatal_composite(sema, vt);
+        if (stripped) {
+          vt = stripped;
+        } else {
+          diag_error(sema->diag, sema_loc(sema, vd->init),
+                     "cannot infer fatal pointer type for variable '%.*s' "
+                     "(annotate the owning type, e.g. own *T)",
+                     (int)vd->name.len, vd->name.ptr);
+          sym->flow_init = false;
+          vt = sema->vm->type_void;
+        }
       } else if (vt && type_is_own(vt) &&
                  !type_is_fatal(value_type(init))) {
         char itn[64];
