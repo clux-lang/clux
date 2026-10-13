@@ -1219,6 +1219,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
     sf->def = f;
     sf->scope = NULL;
     sf->param_scope = NULL;
+    sf->def_scope = sema->global_scope;
       /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
        流程；compiler 预扫描跳过 comptime 不读取，占位无冲突）。符号表 fid
        字段同步（AST_FUNC_REF 替换 / 折叠按 id 查询用） */
@@ -1228,13 +1229,94 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
   }
 }
 
+/* pass1d：结构体成员注册（struct 体内的 var/func → 成员作用域符号）
+ *
+ * 成员不再展开为全局 `T::name` 声明。本 pass 为每个有成员的 sealed struct
+ * 类型创建一个 sema 子作用域（global_scope 的 child），注册成员符号：
+ *   - func 成员 → SEMA_SYM_FUNC + sema_func_t（入 Pass 2/3 队列，与全局函数
+ *     同构），fid 由 sema 统一分配
+ *   - var 成员 → SEMA_SYM_VAR（comptime var 标记 is_comptime；pass_globals
+ *     求值后激活）
+ * member_scope 挂在 sema_symbol_t::member_scope 上，供 ex_call 方法调用
+ * 与 ex_enum_ref `T::x` 静态访问解析。
+ *
+ * 调用时机：pass1b_types 之后（所有 struct 已 seal）、pass2_types 之前
+ * （方法函数需要先注册符号 + 入队，pass2 才能解析签名）。 */
+static void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
+  for (ast_node_t *d = prog->funcs; d; d = d->next) {
+    if (d->kind != AST_STRUCT_DEF) continue;
+    ast_struct_def_t *sd = (ast_struct_def_t *)d;
+    if (!sd->members) continue;
+
+    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, sd->name);
+    if (!sym || !sym->is_active || !sym->type) continue; /* 类型未就绪 */
+
+    /* 幂等：试跑轮已创建 member_scope 时跳过（不重复创建/注册） */
+    if (sym->member_scope) continue;
+
+    /* 创建成员子作用域（global_scope 的 child） */
+    sema_scope_t *mscope = sema_scope_new(sema->vm->alloc, SEMA_SCOPE_GLOBAL,
+                                           sema->global_scope);
+    if (!mscope) panic("sema: out of memory creating struct member scope");
+    sema_scope_add_child(sema->global_scope, mscope);
+    sym->member_scope = mscope;
+
+    for (ast_node_t *m = sd->members; m; m = m->next) {
+      if (m->kind == AST_FUNC_DEF) {
+        ast_func_def_t *fn = (ast_func_def_t *)m;
+        sema_symbol_t init = {.kind = SEMA_SYM_FUNC};
+        sema_symbol_t *msym = sema_scope_define(mscope, fn->name, &init);
+        if (!msym) {
+          diag_error(sema->diag, sema_loc(sema, m),
+                     "struct '%.*s': duplicate method '%.*s'",
+                     (int)sd->name.len, sd->name.ptr,
+                     (int)fn->name.len, fn->name.ptr);
+          continue;
+        }
+        msym->is_active = true;
+        msym->is_comptime = fn->is_comptime;
+        /* 登记 sema 层函数对象（与全局函数同构） */
+        sema_func_t *sf = allocator_new_ex(sema->vm->alloc, "sema_func_t",
+                                           sizeof(sema_func_t), NULL, NULL, NULL,
+                                           1);
+        if (!sf) panic("sema: out of memory allocating struct method sema_func");
+        sf->def = m;
+        sf->scope = NULL;
+        sf->param_scope = NULL;
+        sf->def_scope = mscope; /* struct 方法符号在 member_scope 中 */
+        sema_func_id_alloc(sema, fn);
+        msym->fid = fn->fid;
+        vec_push(sema->funcs, sema->vm->alloc, sf);
+      } else if (m->kind == AST_VAR_DEF) {
+        ast_var_def_t *vd = (ast_var_def_t *)m;
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR,
+                              .is_comptime = vd->is_comptime};
+        sema_symbol_t *msym = sema_scope_define(mscope, vd->name, &init);
+        if (!msym) {
+          diag_error(sema->diag, sema_loc(sema, m),
+                     "struct '%.*s': duplicate attribute '%.*s'",
+                     (int)sd->name.len, sd->name.ptr,
+                     (int)vd->name.len, vd->name.ptr);
+          continue;
+        }
+        /* comptime var 成员必须 const：标记后赋值时拦截（TODO: 赋值拦截） */
+      }
+    }
+  }
+}
+
 static void pass2_types(sema_t *sema, bool speculative) {
   size_t n = vec_len(sema->funcs);
   for (size_t i = 0; i < n; i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
     ast_node_t *f = sf->def;
     ast_func_def_t *fn = (ast_func_def_t *)f;
-    sema_symbol_t *sym = sema_lookup(sema->global_scope, fn->name);
+    /* 符号定义所在作用域：全局函数在 global_scope（sema_lookup 沿 parent 链），
+       struct 方法在类型的 member_scope（sema_scope_find_local 只查本层）。 */
+    sema_scope_t *def_scope = sf->def_scope ? sf->def_scope : sema->global_scope;
+    sema_symbol_t *sym = (def_scope == sema->global_scope)
+                             ? sema_lookup(sema->global_scope, fn->name)
+                             : sema_scope_find_local(def_scope, fn->name);
     if (!sym) continue;
     if (sym->ast && sym->ast != f) continue; /* 理论上不可达：队列只含有效函数 */
 
@@ -1421,7 +1503,10 @@ static size_t sema_ready_count(sema_t *sema, ast_program_t *prog) {
   for (size_t i = 0; i < nf; i++) {
     sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
     ast_func_def_t *fn = (ast_func_def_t *)sf->def;
-    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, fn->name);
+    sema_scope_t *def_scope = sf->def_scope ? sf->def_scope : sema->global_scope;
+    sema_symbol_t *sym = (def_scope == sema->global_scope)
+                             ? sema_lookup(sema->global_scope, fn->name)
+                             : sema_scope_find_local(def_scope, fn->name);
     if (sym && sym->type) n++;
   }
   return n;
@@ -1435,6 +1520,7 @@ static size_t sema_speculative_round(sema_t *sema, ast_program_t *prog) {
   if (!scratch) return 0; /* 内存不足：交给正式轮报错 */
   sema->diag = scratch;
   pass1b_types(sema, prog, /*speculative=*/true);
+  pass1d_struct_members(sema, prog);
   pass2_types(sema, /*speculative=*/true);
   pass_globals(sema, prog, /*speculative=*/true);
   sema->diag = real;
@@ -1486,6 +1572,36 @@ static void pass_globals(sema_t *sema, ast_program_t *prog, bool speculative) {
       prev = &f->next;
     }
     f = next;
+  }
+
+  /* struct 成员 var：与全局 var 同构，但在成员作用域（sym->member_scope）中
+     求值/激活。成员 var 的 init 求值上下文是成员作用域（静态属性可引用同
+     struct 的其他成员/全局符号）。不摘除节点（成员节点挂在 sd->members 上，
+     不在 prog->funcs 链中，无需 prev 摘链）。 */
+  for (ast_node_t *d = prog->funcs; d; d = d->next) {
+    if (d->kind != AST_STRUCT_DEF) continue;
+    ast_struct_def_t *sd = (ast_struct_def_t *)d;
+    if (!sd->members) continue;
+    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, sd->name);
+    if (!sym || !sym->member_scope) continue;
+    sema_scope_t *mscope = sym->member_scope;
+
+    for (ast_node_t *m = sd->members; m; m = m->next) {
+      if (m->kind != AST_VAR_DEF) continue;
+      ast_var_def_t *vd = (ast_var_def_t *)m;
+      if (vd->is_comptime) {
+        /* comptime var 成员：求值编码常量（与全局 comptime var 同构） */
+        sema_symbol_t *csym = sema_scope_find_local(mscope, vd->name);
+        if (!csym || !csym->ct_valid)
+          sema_eval_comptime_var(sema, vd, mscope);
+      } else {
+        /* 普通静态属性：init 折叠为字面量/函数引用，保留进字节码。
+           已求值（is_active）跳过。 */
+        sema_symbol_t *gsym = sema_scope_find_local(mscope, vd->name);
+        if (!gsym || !gsym->is_active)
+          sema_eval_global_var(sema, vd, mscope);
+      }
+    }
   }
 }
 
@@ -1635,6 +1751,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   sema_struct_compose_reset_reports(prog);
   pass1b_types(sema, prog, /*speculative=*/false); /* 全局 type def */
   pass1c_extern_abi(sema, prog); /* extern cfunc/var 签名校验（程序类型已激活） */
+  pass1d_struct_members(sema, prog); /* struct 成员注册（方法入队 + 属性符号） */
   pass2_types(sema, /*speculative=*/false);         /* 函数签名 */
   pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
 

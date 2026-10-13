@@ -83,12 +83,10 @@ void sema_struct_compose_reset_reports(ast_program_t *prog);
  *
  * 查找顺序：先 `T::name` 本身；命中即返回——即"新 struct 自己声明的 attribute
  * （`var` 静态属性 / `func` 方法 / 字段之外的命名空间成员）**覆盖**继承来的同名
- * attribute"，覆盖后二者互相独立（各一份全局变量 / 各一个函数）。否则按 `...`
- * 出现顺序在嵌入链（传递、按序、按类型指针去重）里找：
- *   - 恰好命中一个 → 返回该成员**实际定义**所在的限定名（`Base::name`，
- *     sema arena 分配）——调用方把 AST 改写成这个具名全局符号，
- *     于是读取/赋值/取函数值/调用全部走既有全局路径，**未覆盖时 Base 的成员
- *     只有一份**（静态属性是同一个全局变量）；
+ * attribute"，覆盖后自己优先。否则按 `...` 出现顺序在嵌入链（传递、按序、
+ * 按类型指针去重）里找：
+ *   - 恰好命中一个 → 返回成员名（sema arena 分配）——调用方在命中的类型
+ *     的 member_scope 中查找符号，**未覆盖时 Base 的成员只有一份**；
  *   - 命中多个 → 报歧义诊断（说明名字与涉及的 Base）并返回 NULL——**只**发生在
  *     "自己没有、而多个嵌入都提供同名 attribute"的情形；
  *   - 零命中 → 返回 NULL（**不报错**，沿用调用点既有的诊断）。
@@ -99,6 +97,24 @@ void sema_struct_compose_reset_reports(ast_program_t *prog);
 strslice_t *sema_struct_member_lookup(sema_t *sema, const type_t *t,
                                       strslice_t name,
                                       ast_node_t *tnode);
+
+/**
+ * 在 struct 类型的 member_scope 中查找成员符号（含**嵌入继承**递归）。
+ *
+ * 查找顺序：先自己 member_scope（`find_own_member`）；命中即返回——
+ * 自声明的 attribute 覆盖继承来的同名成员。否则沿嵌入链递归查找
+ * （`collect_member_sources`，传递、按序、按类型指针去重）：
+ *   - 恰好命中一个 → 返回成员符号借用指针，`out_owner` 写命中的 struct 类型；
+ *   - 命中多个 → 报歧义诊断并返回 NULL；
+ *   - 零命中 → 返回 NULL（不报错）。
+ *
+ * 与 `sema_struct_member_lookup` 的区别：后者只返回成员名（strslice），
+ * 本函数返回成员符号本身 + 所属类型，供调用方直接取签名/类型。
+ * `t` 允许带 const/volatile 限定。`tnode` 只用于诊断位置（可为 NULL）。
+ */
+sema_symbol_t *sema_struct_find_member(sema_t *sema, const type_t *t,
+                                       strslice_t name, ast_node_t *tnode,
+                                       const struct_type_t **out_owner);
 
 #ifdef __cplusplus
 }

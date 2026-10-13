@@ -128,16 +128,14 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR: {
-        if (t->ownership == OWN_OWN || t->ownership == OWN_FATAL) {
-            /* own/fatal 指针：ptr≠NULL 拥有堆块 → 先递归销毁堆块内容（T 含 own
+        if (t->ownership == OWN_OWN) {
+            /* own 指针：ptr≠NULL 拥有堆块 → 先递归销毁堆块内容（T 含 own
                字段时内嵌堆块一并释放），再释放本堆块，置 ptr=NULL 防双释放。
-
-               fatal 为何也在这里释放：顶层 fatal 值（move/clone/new 产物）由
-               sema 保证必被消费（ptr=NULL），但 fatal 也可能出现在**结构体字段
-               位置**（`struct S { p: fatal *i32; }`）——字段不被移动，作用域退出
-               时它就是唯一释放点，跳过即泄漏。释放后置 NULL 使重复扫描幂等。
-
-               ref 总借用跳过（由 ownership 区分，不走此分支）。 */
+               ref 借用跳过；fatal 将亡值不在此释放——它必须被 own 接管后由
+               own 的释放路径统一回收，fatal 自身在 pop_scope 时只清壳（data
+               块由 value_dispose 释放），堆块归接管方所有。pop_scope 遇到
+               ptr≠NULL 的 fatal 说明 sema 没能保证消费——这是编程错误，
+               堆块泄漏比 double-free 安全（接管方已 move 走资源）。 */
             ptr_value_t *pv = (ptr_value_t *)data;
             if (!pv->ptr) return;
             const type_t *base = ptr_type_base(t);
@@ -146,6 +144,14 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
             void *heap = pv->ptr;
             pv->ptr = NULL;
             allocator_free(vm->alloc, &heap);
+        } else if (t->ownership == OWN_FATAL) {
+            /* fatal 将亡值：不释放堆块。fatal 必须被 own 接管（move/clone/
+               return/参数传递），接管方持有 own 侧的释放权。pop_scope 遇到
+               fatal 说明该值未被消费——堆块泄漏（leak）而非 double-free。
+               ptr_type_needs_scan 对 fatal 返回 false，从 struct/tuple 等复合
+               类型递归进来不会命中此分支；只有顶层 fatal 指针值直接被
+               scope_destroy 调用时才到达。 */
+            return;
         } else if (t->ownership == OWN_SHARE) {
             /* share 字段析构：递减 strong 计数（strong→0 时 rc_block_strong_dec
                递归析构 payload 内嵌 own/share 字段）。 */
@@ -162,7 +168,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
             rc_block_weak_dec(vm, rc);
             pv->ptr = NULL;
         }
-        /* ref/fatal：ref 借用跳过；fatal 将亡值必被 own 接管（ptr=NULL） */
+        /* ref：借用跳过（无 own 堆块） */
         return;
     }
     case TYPE_KIND_STRUCT: {

@@ -11,6 +11,7 @@ extern "C" {
 #include "parser/ast_block.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_var_def.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
@@ -164,6 +165,7 @@ void   compile_type_expr(compiler_t *c, ast_node_t *type_expr); /* compile_type.
 void   compile_expr(compiler_t *c, ast_node_t *node);          /* compile_expr.c */
 void   compile_stmt(compiler_t *c, ast_node_t *node);          /* compile_stmt.c */
 void   compile_block_body(compiler_t *c, ast_block_t *b);      /* compile_stmt.c：块体编译 + 局部 type/函数入口提升 */
+void   compile_struct_member_init(compiler_t *c, ast_struct_def_t *n); /* compile_stmt.c：struct 成员初始化（函数对象提升区之后调用） */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c */
 size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn); /* compile_func.c：hoist 函数注册区构造（返回 PUSH_FUNCTION body 操作数字段位置） */
 void   compile_func_bind(compiler_t *c, ast_func_def_t *fn);   /* compile_func.c：LOAD_FUNCTION <fid> + DEFINE 名字绑定（全局绑定用，基底即实例） */

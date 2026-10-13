@@ -16,6 +16,7 @@
 #include "parser/ast_return.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
+#include "parser/ast_type_ref.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
@@ -143,6 +144,43 @@ static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
   st_push(c, -1);                             /* 弹 1 压 0 */
 }
 
+/* ---- struct 静态属性赋值：`T::x = v` / `T::x op= v` ----
+ * sema 已校验成员存在性（含嵌入链继承）+ comptime var const 拦截 +
+ * 置 is_struct_attr + struct_attr_type_id。
+ *
+ * 简单赋值：value → STORE_ATTR <type_id> <name>（净 -1，赋值是语句）
+ * 复合赋值：LOAD_ATTR <type_id> <name> → value → op → STORE_ATTR（净 -1） */
+static void compile_assign_struct_attr(compiler_t *c, ast_assign_t *n) {
+  ast_enum_ref_t *t = (ast_enum_ref_t *)n->target;
+
+  if (token_is(n->op, "=")) {
+    compile_expr(c, n->value);               /* 栈: [value] */
+    bcode_write_op(c->bc, BCODE_STORE_ATTR);
+    bcode_write_u32(c->bc, t->struct_attr_type_id);
+    bcode_write_str(c->bc, t->variant);
+    st_push(c, -1);                           /* 弹 1 压 0 */
+    return;
+  }
+
+  /* 复合赋值：先读旧值（LOAD_ATTR +1），再算，再写回 */
+  bcode_write_op(c->bc, BCODE_LOAD_ATTR);
+  bcode_write_u32(c->bc, t->struct_attr_type_id);
+  bcode_write_str(c->bc, t->variant);
+  st_push(c, 1);                              /* 栈: [old] */
+  compile_expr(c, n->value);                  /* 栈: [old, v] */
+  if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+  else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+  else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+  else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+  else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+  else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+  st_push(c, -1);                             /* 弹 2 压 1 → [new] */
+  bcode_write_op(c->bc, BCODE_STORE_ATTR);
+  bcode_write_u32(c->bc, t->struct_attr_type_id);
+  bcode_write_str(c->bc, t->variant);
+  st_push(c, -1);                             /* 弹 1 压 0 */
+}
+
 static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
   ast_deref_t *d = (ast_deref_t *)n->target;
 
@@ -238,6 +276,44 @@ static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
    （调用点 sema 折叠），跳过。与 sema walk_block 提升严格一致。
    balance（PUSH_SCOPE）由调用方在调用前发出，DEFINE 落到块作用域。
    函数体块（compile_func_body）与各控制流块（compile_stmt）共用。 */
+/* struct 成员初始化（var 静态属性 + func 方法值注册到 attributes）。
+ * 必须在函数对象提升区（BIND_FUNC）之后执行——func 成员发 LOAD_FUNCTION
+ * <fid> 取回 func value 需先经 BIND_FUNC 登记到 functions_by_id。
+ * 遍历 members：func → LOAD_FUNCTION + STORE_ATTR；var → init + STORE_ATTR。
+ * comptime 成员不进运行时（sema 已在 pass_globals 摘除或折叠）。 */
+void compile_struct_member_init(compiler_t *c, ast_struct_def_t *n) {
+  for (ast_node_t *m = n->members; m; m = m->next) {
+    if (m->kind == AST_FUNC_DEF) {
+      ast_func_def_t *fn = (ast_func_def_t *)m;
+      if (fn->is_comptime) continue;        /* comptime func 不进运行时 */
+      if (fn->is_extern_cfunc) continue;    /* extern cfunc 无体，不注册 */
+      bcode_write_op(c->bc, BCODE_LOAD_FUNCTION);
+      bcode_write_u32(c->bc, fn->fid);
+      st_push(c, 1);
+      bcode_write_op(c->bc, BCODE_STORE_ATTR);
+      bcode_write_u32(c->bc, n->type_id);
+      bcode_write_str(c->bc, fn->name);
+      st_push(c, -1);
+    } else if (m->kind == AST_VAR_DEF) {
+      ast_var_def_t *vd = (ast_var_def_t *)m;
+      if (vd->is_comptime) continue;        /* comptime var 不进运行时 */
+      if (vd->init && vd->init->kind == AST_NIL) {
+        /* nil 初始化（var x: ?T = nil）：PUSH_OPT_NONE <id> 压 none 值 */
+        emit_push_opt_none(c, vd->type_expr);
+      } else if (vd->init) {
+        compile_expr(c, vd->init);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
+        st_push(c, 1);
+      }
+      bcode_write_op(c->bc, BCODE_STORE_ATTR);
+      bcode_write_u32(c->bc, n->type_id);
+      bcode_write_str(c->bc, vd->name);
+      st_push(c, -1);
+    }
+  }
+}
+
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
@@ -337,7 +413,10 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
        与 enum def 同构——struct 类型在 hoist 区构造（pass 2 SEAL 完成），
        此处 LOAD_TYPE <struct_id>（sema 登记的 type_id 写回节点）→
        PUSH_UNDEFINED → DEFINE "Name" 绑定 type value 到作用域
-       （运行时 type_lookup 解析 `var p: Point`）。 */
+       （运行时 type_lookup 解析 `var p: Point`）。
+       成员初始化（var 静态属性 + func 方法值注册到 attributes）推迟到
+       函数对象提升区之后——func 成员发 LOAD_FUNCTION <fid> 取回 func value
+       需先经 BIND_FUNC 登记，而 BIND_FUNC 在函数对象提升区执行。 */
     ast_struct_def_t *n = (ast_struct_def_t *)node;
     bcode_write_op(c->bc, BCODE_LOAD_TYPE);
     bcode_write_u32(c->bc, n->type_id);        /* 栈: [type_value] */
@@ -410,6 +489,13 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       break;
     }
     if (n->target->kind == AST_ENUM_REF) {
+      ast_enum_ref_t *er = (ast_enum_ref_t *)n->target;
+      if (er->is_struct_attr) {
+        /* struct 静态属性赋值 `T::x = v`：sema 已校验成员存在性 +
+           置 is_struct_attr + struct_attr_type_id。发 STORE_ATTR。 */
+        compile_assign_struct_attr(c, n);
+        break;
+      }
       /* M6 FFI：`<库>::<数据符号>` = v / op= v（extern var 的写入）。
          sema 已在目标节点上置 is_ffi_var + ffi_var_kind。 */
       compile_assign_extern_var(c, n);

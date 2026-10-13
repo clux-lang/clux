@@ -35,6 +35,15 @@ typedef struct {
      * 声明的**类型表达式**；compiler 在读/写之前先 `compile_type_expr` 压一个
      * 类型值（ffi_var_kind = BCODE_FFI_DATA_TYPED），运行期按该类型的 size 读写。 */
     ast_node_t *ffi_var_type_expr;
+
+    /* ---- struct 静态属性（attribute）引用 ----
+     * `T::x`（读取）/ `T::x = v`（写入）：sema 在 :: 分支识别出 "T 是 struct
+     * 类型且 x 是其静态属性"时置 is_struct_attr + struct_attr_type_id，compiler
+     * 据此发 `LOAD_ATTR <type_id> <name>`（读取）/ `STORE_ATTR <type_id> <name>`
+     * （赋值目标），**不再**走枚举 variant / FFI 路径。
+     * type_expr 被 sema 折叠为 AST_TYPE_REF（类型引用）。 */
+    bool        is_struct_attr;
+    uint32_t    struct_attr_type_id; /* 属性所在的 struct 类型的 type_id */
 } ast_enum_ref_t;
 
 static inline ast_node_t *ast_enum_ref_new(arena_t *arena,

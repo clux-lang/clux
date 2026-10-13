@@ -36,6 +36,18 @@ typedef struct {
      * （slice 缓冲区副本 / 数组副本块，调用一结束即悬垂）。因此 sema 置本标志，
      * compiler 改发 `BCODE_DATA` 指令（就地读序列的存储身份，与 `x.&` 同理）。 */
     bool        is_data_call;
+    /* ---- struct 方法调用（MEMBER_CALL）----
+     * `a.b(args)`（实例方法）/ `T::f(args)`（静态方法）：sema 解析出方法名 +
+     * 方法所在的 struct 类型后，置 is_member_call + member_type_id，compiler
+     * 据此发 `MEMBER_CALL <STR method_name> <U32 argc>`（不复用 CALL）。
+     * receiver（a 的值/指针 或 T 的 type value）由 compiler 正常编译 callee
+     * 表达式压栈，VM 从 receiver 的类型解析方法。
+     *
+     * `is_member_call` 为 true 时，compiler **不**编译 callee 为 callee 值，
+     * 而是把 callee 的 object（AST_MEMBER）或 type_expr（AST_ENUM_REF）当
+     * receiver 编译压栈，然后发 MEMBER_CALL。 */
+    bool        is_member_call;
+    uint32_t    member_type_id; /* 方法所在的 struct 类型的 type_id（sema 登记） */
 } ast_call_t;
 
 static inline ast_node_t *ast_call_new(arena_t *arena,

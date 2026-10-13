@@ -251,6 +251,16 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       return;
     }
 
+    /* struct 静态属性 `T::x`（sema 置 is_struct_attr + struct_attr_type_id）：
+       发 LOAD_ATTR <type_id> <name> 从 struct_type_t::attributes 取值。
+       sema 已校验成员存在性（含嵌入链继承）。 */
+    if (n->is_struct_attr) {
+      bcode_write_op(c->bc, BCODE_LOAD_ATTR);
+      bcode_write_u32(c->bc, n->struct_attr_type_id);
+      bcode_write_str(c->bc, n->variant);
+      st_push(c, 1);
+      break;
+    }
     /* 枚举 variant 引用 Color::Red（sema 已折叠 value 入节点）：
        PUSH_I* <value>（按底层宽度选立即数指令）→ LOAD_TYPE <enum_id> →
        MAKE_ENUM（弹 type + 整数值 → 按底层宽度截断构造 enum 值）。
@@ -520,6 +530,41 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       }
       c_error(c, node, "extern call: callee must be `<lib>::<name>`");
       return;
+    }
+
+    /* struct 方法调用（sema 置 is_member_call + member_type_id）：
+       不编译 callee 为函数值——编译 receiver 压栈 + 实参压栈 → MEMBER_CALL。
+       实例方法 `a.b(args)`：receiver = a（AST_MEMBER 的 object）。
+       静态方法 `T::f(args)`：receiver = T 的 type value（AST_ENUM_REF 的
+       type_expr，编译为 LOAD_TYPE <id> 压 type value）。 */
+    if (n->is_member_call) {
+      strslice_t method_name = {0};
+      if (n->callee->kind == AST_MEMBER) {
+        ast_member_t *mem = (ast_member_t *)n->callee;
+        method_name = mem->field;
+        /* 实例方法：编译 object 作为 receiver 压栈 */
+        compile_expr(c, mem->object);  /* 栈: [receiver] */
+      } else if (n->callee->kind == AST_ENUM_REF) {
+        ast_enum_ref_t *er = (ast_enum_ref_t *)n->callee;
+        method_name = er->variant;
+        /* 静态方法：编译 type_expr 作为 receiver（type value）压栈 */
+        compile_type_expr(c, er->type_expr);  /* 栈: [type_value] */
+      } else {
+        c_error(c, node, "member call: invalid callee kind");
+        return;
+      }
+      st_push(c, 1);  /* receiver */
+      size_t argc = 0;
+      for (ast_node_t *a = n->args; a; a = a->next) {
+        compile_expr(c, a);           /* 栈: [receiver, arg1..argN] */
+        argc++;
+      }
+      bcode_write_op(c->bc, BCODE_MEMBER_CALL);
+      bcode_write_str(c->bc, method_name);
+      bcode_write_u32(c->bc, (uint32_t)argc);
+      /* 弹 receiver + argc 个实参，压 1 个结果 = 净 -argc */
+      st_push(c, -((int)argc));
+      break;
     }
 
     compile_expr(c, n->callee);     /* 栈: [callee] */

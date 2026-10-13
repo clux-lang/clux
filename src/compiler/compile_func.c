@@ -129,12 +129,26 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
       for (ast_node_t *vn = ((ast_enum_def_t *)n)->variants; vn; vn = vn->next)
         prescan_expr(c, ((ast_enum_variant_t *)vn)->value);
       break;
-    case AST_STRUCT_DEF:
+    case AST_STRUCT_DEF: {
       /* struct 字段类型表达式预扫描（字段类型已由 sema 折叠为 AST_TYPE_REF/
          内建名，防御分支递归字段类型——字段类型是类型表达式，无函数字面量） */
-      for (ast_node_t *fn = ((ast_struct_def_t *)n)->fields; fn; fn = fn->next)
+      ast_struct_def_t *sd = (ast_struct_def_t *)n;
+      for (ast_node_t *fn = sd->fields; fn; fn = fn->next)
         prescan_expr(c, ((ast_struct_field_t *)fn)->type);
+      /* struct 成员预扫描：func 方法收集进 funcs_all（fid 序，与全局函数同构），
+         var 属性递归 init（含嵌套函数字面量）。sema 在 pass1d_struct_members
+         已为方法分配 fid + 入 sema->funcs 队列，compiler 这里收集对应的
+         AST_FUNC_DEF 进 funcs_all 才能在 hoist 区构造 + 函数体区编译。 */
+      for (ast_node_t *m = sd->members; m; m = m->next) {
+        if (m->kind == AST_FUNC_DEF) {
+          prescan_func(c, (ast_func_def_t *)m);
+          prescan_func_body(c, (ast_func_def_t *)m);
+        } else {
+          prescan_stmt(c, m);
+        }
+      }
       break;
+    }
     case AST_ASSIGN:
       prescan_expr(c, ((ast_assign_t *)n)->target);
       prescan_expr(c, ((ast_assign_t *)n)->value);

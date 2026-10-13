@@ -915,26 +915,11 @@ size_t sema_struct_compose_pass(sema_t *sema, ast_program_t *prog,
  * 第 3 步的字段冲突检查）。
  * =========================================================================== */
 
-/* 拼 `A::b` 限定名（arena）。owner 为空 / OOM → false。 */
-static bool make_qualified(sema_t *sema, strslice_t owner, strslice_t member,
-                           strslice_t *out) {
-  if (!owner.ptr || !member.ptr) return false;
-  size_t total = owner.len + 2 + member.len;
-  char *buf = (char *)arena_alloc(sema->arena, total, 1);
-  if (!buf) return false;
-  memcpy(buf, owner.ptr, owner.len);
-  buf[owner.len] = ':';
-  buf[owner.len + 1] = ':';
-  if (member.len) memcpy(buf + owner.len + 2, member.ptr, member.len);
-  *out = strslice_from_bytes(buf, total);
-  return true;
-}
-
 /* 收集"嵌入链上**确实**定义了成员 `name` 的嵌入结构体"：沿类型上的嵌入表
  * （`...Base` 各自贡献字段时登记，见 type_struct_set_embeds）**深度优先、
- * 按 `...` 出现顺序**递归展开（传递继承天然覆盖），命中判定 = 全局符号表里
- * 存在 `Base::name`。按类型指针去重：同一个 Base 经两条 `...` 路径只算一次命中
- * （于是"重复嵌入同一个 Base"不会被误报成歧义）。 */
+ * 按 `...` 出现顺序**递归展开（传递继承天然覆盖），命中判定 = 该类型的
+ * member_scope 中存在名为 `name` 的符号。按类型指针去重：同一个 Base 经
+ * 两条 `...` 路径只算一次命中（于是"重复嵌入同一个 Base"不会被误报成歧义）。 */
 static void collect_member_sources(sema_t *sema, const struct_type_t *st,
                                    strslice_t name, const struct_type_t **out,
                                    size_t *n, const struct_type_t **visited,
@@ -950,46 +935,49 @@ static void collect_member_sources(sema_t *sema, const struct_type_t *st,
     const type_t *bt = emb[i];
     if (!bt || bt->kind != TYPE_KIND_STRUCT) continue;
     const struct_type_t *bs = (const struct_type_t *)bt;
-    strslice_t q;
-    if (make_qualified(sema, bs->base.name, name, &q) && find_global(sema, q)) {
-      bool dup = false;
-      for (size_t k = 0; k < *n; k++)
-        if (out[k] == bs) { dup = true; break; }
-      if (!dup && *n < COMPOSE_MAX_SRC) out[(*n)++] = bs;
+    /* 命中判定：查 Base 类型的 member_scope 中是否有名为 `name` 的符号 */
+    sema_symbol_t *bs_sym = find_global(sema, bs->base.name);
+    if (bs_sym && bs_sym->member_scope) {
+      sema_symbol_t *ms = sema_scope_find_local(bs_sym->member_scope, name);
+      if (ms) {
+        bool dup = false;
+        for (size_t k = 0; k < *n; k++)
+          if (out[k] == bs) { dup = true; break; }
+        if (!dup && *n < COMPOSE_MAX_SRC) out[(*n)++] = bs;
+      }
     }
     /* 继续向下（Base 自己的嵌入链）——传递继承 */
     collect_member_sources(sema, bs, name, out, n, visited, nvis);
   }
 }
 
-strslice_t *sema_struct_member_lookup(sema_t *sema, const type_t *t,
-                                      strslice_t name,
-                                      ast_node_t *tnode) {
-  if (!sema || !t || !name.ptr || name.len == 0) return NULL;
+/* 在 struct 类型的 member_scope 中查找成员符号（不沿嵌入链）。
+ * 返回借用指针，未找到返回 NULL。 */
+static sema_symbol_t *find_own_member(sema_t *sema, const type_t *t,
+                                      strslice_t name) {
+  if (!t || !t->name.ptr) return NULL;
+  sema_symbol_t *sym = find_global(sema, t->name);
+  if (!sym || !sym->member_scope) return NULL;
+  return sema_scope_find_local(sym->member_scope, name);
+}
+
+/* 沿嵌入链递归查找成员符号（用于方法调用与静态访问的继承解析）。
+ * 返回命中的成员符号 + 所属类型（out_owner）。歧义报诊断并返回 NULL。 */
+static sema_symbol_t *find_inherited_member(sema_t *sema, const type_t *t,
+                                            strslice_t name,
+                                            ast_node_t *tnode,
+                                            const struct_type_t **out_owner) {
   const type_t *base = type_strip_quals(t);
-  if (!base || base->kind != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
+  if (!base || base->kind != TYPE_KIND_STRUCT) return NULL;
   const struct_type_t *st = (const struct_type_t *)base;
 
-  /* 1. 自己（`T::name`）优先 */
-  strslice_t self;
-  if (make_qualified(sema, base->name, name, &self) &&
-      find_global(sema, self)) {
-    strslice_t *res = (strslice_t *)arena_alloc(sema->arena, sizeof(strslice_t),
-                                                ALIGNOF(max_align_t));
-    if (!res) return NULL;
-    *res = self;
-    return res;
-  }
-
-  /* 2. 嵌入链（传递、按 `...` 出现顺序、按类型去重） */
   const struct_type_t *src[COMPOSE_MAX_SRC];
   const struct_type_t *visited[COMPOSE_MAX_SRC];
   size_t nsrc = 0, nvis = 0;
   collect_member_sources(sema, st, name, src, &nsrc, visited, &nvis);
-  if (nsrc == 0) return NULL; /* 零命中：不报错，沿用调用点既有诊断 */
+  if (nsrc == 0) return NULL;
 
   if (nsrc > 1) {
-    /* 歧义：命中多个嵌入（同名字段）——**恰好命中一个**才可用 */
     char msg[512];
     int off = snprintf(msg, sizeof msg,
                        "member '%.*s' of struct '%.*s' is ambiguous: found in ",
@@ -1008,17 +996,57 @@ strslice_t *sema_struct_member_lookup(sema_t *sema, const type_t *t,
     return NULL;
   }
 
-  /* 3. 唯一命中：改写为成员**实际定义**所在的限定名 `Base::name` */
   const struct_type_t *owner = src[0];
-  strslice_t q;
-  if (!owner->base.name.ptr || !make_qualified(sema, owner->base.name, name, &q))
-    return NULL;
-  if (!find_global(sema, q)) return NULL; /* 名字冲突的防御：落回零命中 */
-  {
+  sema_symbol_t *ms = find_own_member(sema, &owner->base, name);
+  if (!ms) return NULL;
+  if (out_owner) *out_owner = owner;
+  return ms;
+}
+
+sema_symbol_t *sema_struct_find_member(sema_t *sema, const type_t *t,
+                                       strslice_t name, ast_node_t *tnode,
+                                       const struct_type_t **out_owner) {
+  if (out_owner) *out_owner = NULL;
+  if (!sema || !t || !name.ptr || name.len == 0) return NULL;
+  const type_t *base = type_strip_quals(t);
+  if (!base || base->kind != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
+
+  /* 1. 自己优先：查 member_scope */
+  sema_symbol_t *ms = find_own_member(sema, base, name);
+  if (ms) {
+    if (out_owner) *out_owner = (const struct_type_t *)base;
+    return ms;
+  }
+
+  /* 2. 嵌入链继承查找（collect_member_sources 递归传递嵌入） */
+  return find_inherited_member(sema, base, name, tnode, out_owner);
+}
+
+strslice_t *sema_struct_member_lookup(sema_t *sema, const type_t *t,
+                                      strslice_t name,
+                                      ast_node_t *tnode) {
+  if (!sema || !t || !name.ptr || name.len == 0) return NULL;
+  const type_t *base = type_strip_quals(t);
+  if (!base || base->kind != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
+
+  /* 1. 自己优先：查 member_scope */
+  sema_symbol_t *ms = find_own_member(sema, base, name);
+  if (ms) {
     strslice_t *res = (strslice_t *)arena_alloc(sema->arena, sizeof(strslice_t),
                                                 ALIGNOF(max_align_t));
     if (!res) return NULL;
-    *res = q;
+    *res = name;
     return res;
   }
+
+  /* 2. 嵌入链继承查找 */
+  const struct_type_t *owner = NULL;
+  ms = find_inherited_member(sema, base, name, tnode, &owner);
+  if (!ms) return NULL;
+
+  strslice_t *res = (strslice_t *)arena_alloc(sema->arena, sizeof(strslice_t),
+                                              ALIGNOF(max_align_t));
+  if (!res) return NULL;
+  *res = name;
+  return res;
 }

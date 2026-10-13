@@ -48,6 +48,10 @@ typedef struct sema_func_t {
     sema_scope_t *param_scope; /* 参数层：scope 的子作用域，参数符号注册在此
                                   （镜像运行时 func_vcall 的参数匿名层）。
                                   函数体 block 挂此层下——参数遮蔽捕获。 */
+    sema_scope_t *def_scope; /* 符号定义所在作用域（Pass 2 符号查找用）：
+                                全局函数 = global_scope；struct 方法 =
+                                struct 类型的 member_scope。NULL = 全局
+                                （向后兼容旧代码按 global_scope 查找）。 */
     bool          is_local; /* 局部函数（块内定义）：3b walk_block 提升签名
                                + 捕获检查（fscope parent = 定义点块作用域） */
     bool          is_literal_owned; /* 函数字面量 body 内登记的局部函数：

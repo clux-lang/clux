@@ -2,7 +2,6 @@
 #include "parser/ast_struct_embed.h" /* 结构体嵌入：`...Name;` */
 #include "parser/ast_var_def.h"   /* 命名空间成员：var */
 #include "parser/ast_func_def.h"  /* 命名空间成员：func */
-#include "parser/ast_program.h"   /* 展开时追加到 prog->funcs */
 #include "parser/parse_expr.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_error.h"
@@ -166,55 +165,4 @@ ast_node_t *parse_struct_def(parser_t *p) {
     ((ast_struct_def_t *)node)->embeds       = embeds;
     ((ast_struct_def_t *)node)->embeds_last  = embeds_last;
     return node;
-}
-
-/* ---- 命名空间成员展开：struct 体内的 var/func → 模块级全局声明 ----
- *
- * 把 `<结构体名>::<成员名>` 作为**声明名**（与 sema 的限定名解析、运行期的
- * 全局名字绑定一致），节点本身复用（改名 + 摘掉 next），追加到 prog->funcs
- * 尾部——此后它们就是普通的全局变量 / 函数，sema 与 compiler 无需特殊处理。
- *
- * 调用时机：compile_module 在 parser_parse 之后、sema 之前（fmt 路径不调用，
- * 成员已随结构体一起渲染，避免重复打印）。 */
-void ast_expand_struct_members(arena_t *arena, ast_node_t *prog) {
-    if (!arena || !prog || prog->kind != AST_PROGRAM) return;
-    ast_program_t *p = (ast_program_t *)prog;
-
-    /* 先收集结构体（遍历中会往 funcs 追加，故用快照式两阶段：先记录结构体）。 */
-    for (ast_node_t *d = p->funcs; d; d = d->next) {
-        if (d->kind != AST_STRUCT_DEF) continue;
-        ast_struct_def_t *sd = (ast_struct_def_t *)d;
-        if (!sd->members) continue;
-
-        for (ast_node_t *m = sd->members; m;) {
-            ast_node_t *next = m->next; /* 追加过程中会改 next，先存 */
-            strslice_t mname;
-            if (m->kind == AST_VAR_DEF) {
-                mname = ((ast_var_def_t *)m)->name;
-            } else if (m->kind == AST_FUNC_DEF) {
-                mname = ((ast_func_def_t *)m)->name;
-            } else {
-                m = next;
-                continue;
-            }
-            size_t total = sd->name.len + 2 + mname.len;
-            char *mangled = (char *)arena_alloc(arena, total, 1);
-            if (!mangled) return;
-            memcpy(mangled, sd->name.ptr, sd->name.len);
-            mangled[sd->name.len] = ':';
-            mangled[sd->name.len + 1] = ':';
-            if (mname.len) memcpy(mangled + sd->name.len + 2, mname.ptr, mname.len);
-            strslice_t q = strslice_from_bytes(mangled, total);
-            if (m->kind == AST_VAR_DEF) {
-                ((ast_var_def_t *)m)->name = q;
-            } else {
-                ((ast_func_def_t *)m)->name = q;
-            }
-            m->next = NULL;
-            ast_append(&p->funcs, &p->funcs_last, NULL, m);
-            m = next;
-        }
-        sd->members = NULL;
-        sd->members_last = NULL;
-    }
 }

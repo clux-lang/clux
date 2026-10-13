@@ -224,10 +224,12 @@ static value_t *op_make_function(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return func_instantiate(vm, base);
 }
 
-/* SET_TYPE_NAME <name>：弹栈顶 type value，设置其显示名（覆盖规范名） */
+/* SET_TYPE_NAME <name>：peek 栈顶 type value（不弹栈），设置其显示名
+ * （覆盖规范名）。与 SET_FUNC_NAME 同款 peek 语义——允许后续 DEFINE_TYPE
+ * 消费同一 type value。 */
 static value_t *op_set_type_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
-    value_t *tv = exec_stack_pop(vm);
+    value_t *tv = exec_stack_peek(vm, 0);
     if (!tv || value_type(tv) != vm->type_type)
         return value_make_error(vm, "exec: set type name expects a type value");
     const type_t *t = *(const type_t **)value_data(tv);
@@ -631,6 +633,39 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return NULL;
     }
     return value_make_error(vm, "exec: define field expects an open struct, union or cunion type on top");
+}
+
+/* ADD_EMBED <embed_type_id>：peek 栈顶开放 struct → vm_type_load 拉回 embed
+ * 类型 → type_struct_add_embed 追加到 embeds 表（seal 前可编辑）。
+ * 无栈深变化（peek 不弹）。逐个追加，与 DEFINE_FIELD 同构。 */
+static value_t *op_add_embed(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t eid = bcode_read_u32(bc, pc);
+    value_t *st_v = exec_stack_peek(vm, 0);
+    const type_t *st = (st_v && value_type(st_v) == vm->type_type)
+                           ? value_as(st_v, const type_t *) : NULL;
+    if (!st || st->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: add embed expects an open struct on top");
+    const type_t *embed = vm_type_load(vm, eid);
+    if (!embed || embed->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: add embed: invalid embed type id");
+    if (!type_struct_add_embed(vm, st, embed))
+        return value_make_error(vm, "exec: add embed failed (sealed?)");
+    return NULL;
+}
+
+/* MARK_UNIQUE（无操作数）：peek 栈顶开放 struct → type_struct_mark_unique
+ *（seal 前调用，seal 跳过去重 intern——命名 struct 不与字段表相同的既有
+ * struct 合并）。无栈深变化。 */
+static value_t *op_mark_unique(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *st_v = exec_stack_peek(vm, 0);
+    const type_t *st = (st_v && value_type(st_v) == vm->type_type)
+                           ? value_as(st_v, const type_t *) : NULL;
+    if (!st || st->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: mark unique expects an open struct on top");
+    if (!type_struct_mark_unique(vm, st))
+        return value_make_error(vm, "exec: mark unique failed (sealed?)");
+    return NULL;
 }
 
 /* ---- tuple type 构造（与 struct 统一：PUSH → APPEND_ELEM×N → SEAL） ---- */
@@ -2350,6 +2385,221 @@ static value_t *op_get_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return member; /* 借用引用，归被导出符号所在模块的 global_scope 拥有 */
 }
 
+/* ---- struct 静态成员（attribute）读写 ----
+ * struct_type_t 运行时持有 attributes（name→value_t* 借用映射）。value 生命
+ * 周期归 member_scope（挂在 module global_scope 下的子作用域）。
+ *
+ * LOAD_ATTR <type_id> <name>：按 type_id 查 struct 类型 → 从 attributes 按
+ *   名取值压栈。沿嵌入链继承查找（自己未命中时递归查各嵌入类型）。
+ * STORE_ATTR <type_id> <name>：弹栈顶值 → 写入 attributes[name]。首次写入
+ *   时初始化 member_scope + attributes + 注册 value 到 member_scope（生命
+ *   周期管理）。后续写入用 scope_set 替换值（旧值由 scope 释放）。
+ */
+
+/* 沿嵌入链递归查找拥有指定属性名的 struct 类型（自己优先，再沿 embeds 深度
+ * 优先）。返回命中的 struct_type_t，未找到返回 NULL。 */
+static const struct_type_t *find_attr_owner(const type_t *t, const char *name) {
+    if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+    const struct_type_t *st = (const struct_type_t *)t;
+    if (st->attributes && strmap_contains(st->attributes, name))
+        return st;
+    size_t ne = 0;
+    const type_t *const *emb = type_struct_embeds(t, &ne);
+    for (size_t i = 0; i < ne; i++) {
+        const struct_type_t *owner = find_attr_owner(emb[i], name);
+        if (owner) return owner;
+    }
+    return NULL;
+}
+
+static value_t *op_load_attr(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t type_id = bcode_read_u32(bc, pc);
+    strslice_t name = bcode_read_str(bc, pc);
+
+    char buf[256];
+    size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
+    memcpy(buf, name.ptr, n);
+    buf[n] = '\0';
+
+    const type_t *t = vm_type_load(vm, type_id);
+    if (!t || t->kind != TYPE_KIND_STRUCT) {
+        return value_make_error(vm, "exec: LOAD_ATTR: invalid struct type");
+    }
+    /* 沿嵌入链查找拥有该属性的 struct 类型 */
+    const struct_type_t *owner = find_attr_owner(t, buf);
+    if (!owner || !owner->attributes) {
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: struct '%.*s' has no attribute '%s'",
+                 (int)t->name.len, t->name.ptr, buf);
+        return value_make_error(vm, msg);
+    }
+    value_t *val = (value_t *)strmap_get(owner->attributes, buf);
+    if (!val) {
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: struct '%.*s' attribute '%s' not initialized",
+                 (int)t->name.len, t->name.ptr, buf);
+        return value_make_error(vm, msg);
+    }
+    return val; /* 借用引用，归 member_scope 拥有 */
+}
+
+static value_t *op_store_attr(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t type_id = bcode_read_u32(bc, pc);
+    strslice_t name = bcode_read_str(bc, pc);
+
+    char buf[256];
+    size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
+    memcpy(buf, name.ptr, n);
+    buf[n] = '\0';
+
+    const type_t *t = vm_type_load(vm, type_id);
+    if (!t || t->kind != TYPE_KIND_STRUCT) {
+        return value_make_error(vm, "exec: STORE_ATTR: invalid struct type");
+    }
+    /* type_id 已由 sema 解析为实际拥有属性的 struct 类型（覆盖语义→自身，
+       共享语义→继承源），直接在其 attributes 上写入。 */
+    struct_type_t *st = (struct_type_t *)t;
+
+    value_t *val = exec_stack_pop(vm);
+    if (!val) return value_make_error(vm, "exec: STORE_ATTR: stack underflow");
+
+    /* 确保成员容器已初始化 */
+    if (!type_struct_members_init(vm, t)) {
+        return value_make_error(vm, "exec: STORE_ATTR: failed to init members");
+    }
+    /* 首次写入：创建 member_scope（挂在 vm->current_scope 下）+ 注册 value */
+    if (!st->member_scope) {
+        scope_t *mscope = scope_new(vm->alloc, vm->current_scope);
+        if (!mscope) return value_make_error(vm, "exec: STORE_ATTR: OOM creating member scope");
+        type_struct_set_member_scope(vm, &st->base, mscope);
+    }
+    /* value 注册到 member_scope（生命周期管理）。
+       首次写入用 scope_define，后续写入用 scope_set（覆盖旧值防重复定义报错）。 */
+    value_t *stored;
+    if (strmap_contains(st->attributes, buf)) {
+        stored = scope_set(vm, st->member_scope, buf, val);
+    } else {
+        stored = scope_define(vm, st->member_scope, buf, val);
+    }
+    if (value_is_error(vm, stored)) return stored;
+    /* attributes 存借用引用（scope_define/scope_set 返回的就是 scope 拥有的 value） */
+    strmap_insert(st->attributes, vm->alloc, buf, (void *)stored);
+    return NULL; /* 赋值是语句，不压回结果 */
+}
+
+/* ---- struct 方法调用（MEMBER_CALL）----
+ * 不复用 CALL：方法 func value 存在 struct_type 的 attributes 表中（非全局
+ * 作用域），运行期从 receiver 的 struct 类型中解析。sema 标记 AST_CALL，
+ * compiler 据此发 MEMBER_CALL（不改写为 AST_FUNC_REF + 接收者插首参）。
+ *
+ * 栈: [receiver, arg1..argN] → [result]。净变化 = -argc。
+ * - 实例方法：receiver 是值或指针。值 → 取地址（ref *T）作为 self 参数；
+ *   指针 → 原样作为 self 参数。总参数 = argc + 1。
+ * - 静态方法：receiver 是 type value → 只用于确定在哪个 struct 类型的
+ *   attributes 中查找方法，不作为参数传递。总参数 = argc。 */
+static value_t *op_member_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    uint32_t argc = bcode_read_u32(bc, pc);
+
+    char buf[256];
+    size_t n = name.len < sizeof(buf) - 1 ? name.len : sizeof(buf) - 1;
+    memcpy(buf, name.ptr, n);
+    buf[n] = '\0';
+
+    size_t sp = vec_len(vm->stack);
+    /* receiver 在 stack[sp-1-argc]（与 CALL 的 callee 同位） */
+    value_t *receiver = exec_stack_peek(vm, argc);
+
+    /* 确定 struct 类型 + 是否静态调用（receiver 是 type value） */
+    const type_t *struct_type = NULL;
+    bool is_static = false;
+    if (value_type(receiver) == vm->type_type) {
+        /* 静态方法 T::f(args)：receiver 是 type value */
+        is_static = true;
+        struct_type = value_as(receiver, const type_t *);
+    } else {
+        /* 实例方法 a.b(args)：receiver 是值或指针 */
+        const type_t *rt = value_type(receiver);
+        if (!rt) {
+            for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
+            return value_make_error(vm, "exec: MEMBER_CALL: receiver has no type");
+        }
+        /* 指针 → 取 base 类型 */
+        const type_t *base = ptr_type_base(rt);
+        if (base) rt = base;
+        struct_type = type_strip_quals(rt);
+    }
+    if (!struct_type || struct_type->kind != TYPE_KIND_STRUCT) {
+        for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: MEMBER_CALL: receiver is not a struct (method '%s')", buf);
+        return value_make_error(vm, msg);
+    }
+
+    /* 沿嵌入链查找拥有该方法的 struct 类型（方法 func value 在 attributes 中） */
+    const struct_type_t *owner = find_attr_owner(struct_type, buf);
+    if (!owner || !owner->attributes) {
+        for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: struct '%.*s' has no method '%s'",
+                 (int)struct_type->name.len, struct_type->name.ptr, buf);
+        return value_make_error(vm, msg);
+    }
+    value_t *method = (value_t *)strmap_get(owner->attributes, buf);
+    if (!method) {
+        for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "exec: struct '%.*s' method '%s' not initialized",
+                 (int)struct_type->name.len, struct_type->name.ptr, buf);
+        return value_make_error(vm, msg);
+    }
+
+    /* 收集实参到 VLA（value_call 内部压栈可能 realloc 使栈缓冲悬垂） */
+    if (is_static) {
+        /* 静态方法：argc 个参数，无 self */
+        value_t *args[argc > 0 ? argc : 1];
+        for (uint32_t i = 0; i < argc; i++)
+            args[i] = (value_t *)vec_get(vm->stack, sp - argc + i);
+        for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm); /* pop args + receiver */
+        return value_call(vm, method, args, argc);
+    } else {
+        /* 实例方法：self + argc 个参数 */
+        const type_t *rt = value_type(receiver);
+        const type_t *base = ptr_type_base(rt);
+        bool by_ptr = (base != NULL);
+
+        /* 构造 self 参数：指针 → 原样；值 → 取地址（ref *T） */
+        value_t *self_arg;
+        if (by_ptr) {
+            self_arg = receiver;
+        } else {
+            /* 值 receiver → ref *T 借用指针（与 op_addr 同款） */
+            const type_t *pt = type_ptr_intern(vm, OWN_REF, rt);
+            if (!pt) {
+                for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
+                return value_make_error(vm, "exec: MEMBER_CALL: cannot make ref pointer");
+            }
+            if (value_is_shadow(receiver))
+                self_arg = value_make_shadow(vm, pt);
+            else
+                self_arg = ptr_make_value(vm, pt, value_data(receiver));
+        }
+
+        uint32_t total = argc + 1;
+        value_t *args[total];
+        args[0] = self_arg;
+        for (uint32_t i = 0; i < argc; i++)
+            args[1 + i] = (value_t *)vec_get(vm->stack, sp - argc + i);
+        for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm); /* pop args + receiver */
+        return value_call(vm, method, args, total);
+    }
+}
+
 /* ---- 终止 ---- */
 
 static value_t *op_halt(vm_t *vm, bytecode_t *bc, size_t *pc) {
@@ -2439,6 +2689,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_DEFINE_BOUND]    = op_define_bound,
     [BCODE_PUSH_STRUCT]     = op_push_struct,
     [BCODE_DEFINE_FIELD]    = op_define_field,
+    [BCODE_ADD_EMBED]       = op_add_embed,
     [BCODE_PUSH_TUPLE]      = op_push_tuple,
     [BCODE_APPEND_ELEM]     = op_append_elem,
     [BCODE_PUSH_UNION]      = op_push_union,
@@ -2472,6 +2723,10 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_EXTERN_STORE]    = op_extern_store,
     [BCODE_DATA]            = op_data,
     [BCODE_DEFER]           = op_defer,
+    [BCODE_LOAD_ATTR]       = op_load_attr,
+    [BCODE_STORE_ATTR]      = op_store_attr,
+    [BCODE_MARK_UNIQUE]     = op_mark_unique,
+    [BCODE_MEMBER_CALL]     = op_member_call,
 };
 
 /* ================================================================ */

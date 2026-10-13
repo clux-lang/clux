@@ -183,11 +183,24 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       break;
     case TYPE_KIND_STRUCT:
       /* PUSH_STRUCT 压开放 struct 类型（fields=NULL，不入池）→
-         DEFINE_TYPE <id> 声明登记（不设字段；字段类型是布局依赖，pass 2
-         依赖后序定义 + 环检测） */
+         DEFINE_TYPE <id> 声明登记（设 id + 注册到 types_by_id）→
+         LOAD_TYPE <id> 拉回 + SET_TYPE_NAME 设显示名（peek 不弹栈）→
+         POP 消费拉回的 type value。
+         name 来自 sema 注册时 type_set_name 设的 type_t->name
+        （struct_compose.c 物化阶段）。SET_TYPE_NAME 要求 id >=
+         TYPE_ID_PROGRAM_BASE，须在 DEFINE_TYPE 设 id 之后执行。 */
       bcode_write_op(c->bc, BCODE_PUSH_STRUCT);
       st_push(c, 1);
       emit_define_type(c, st->id);
+      if (st->type && st->type->name.ptr) {
+        bcode_write_op(c->bc, BCODE_LOAD_TYPE);
+        bcode_write_u32(c->bc, st->id);
+        st_push(c, 1);
+        bcode_write_op(c->bc, BCODE_SET_TYPE_NAME);
+        bcode_write_str(c->bc, st->type->name);
+        bcode_write_op(c->bc, BCODE_POP);
+        st_push(c, -1);
+      }
       break;
     case TYPE_KIND_TUPLE:
       /* PUSH_TUPLE 压开放 tuple 类型（elems=NULL，不入池）→
@@ -484,8 +497,10 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
 
 /* struct 定义：LOAD_TYPE <id> 拉回开放对象 → 逐字段：依赖字段类型先定义
  * （密封；emit_dep_type 递归 + done 三态环检测）→ LOAD 字段类型 →
- * DEFINE_FIELD <name> → SEAL 封闭（C 对齐布局 + 去重 intern；去重时按自身
- * id 重绑登记）。字段类型是布局依赖（密封计算 offset/size 需要字段 size/
+ * DEFINE_FIELD <name> → ADD_EMBED <embed_id>×N（设置嵌入表，seal 前）→
+ * SET_TYPE_NAME（设显示名，seal 后 LOAD_TYPE 拉回再设）→
+ * SEAL 封闭（C 对齐布局 + 去重 intern；去重时按自身 id 重绑登记）。
+ * 字段类型是布局依赖（密封计算 offset/size 需要字段 size/
  * align 已确定）→ 依赖后序 + 环检测。 */
 static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
                           size_t count) {
@@ -503,7 +518,41 @@ static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
     st_push(c, -1);
   }
 
+  /* 嵌入表（`...Base`）：sema 组合阶段已设置 embeds，此处逐个 ADD_EMBED
+     在 seal 前复制到运行时构造的类型对象上（find_attr_owner 沿 embeds 链
+     查找 attributes）。embed 类型必须先定义（递归 define_one 密封）。 */
+  size_t ne = 0;
+  const type_t *const *emb = type_struct_embeds(t, &ne);
+  for (size_t i = 0; i < ne; i++) {
+    if (!emb[i]) continue;
+    const sema_type_t *es = c_sema_type_find_ptr(c->sema_types, emb[i]);
+    if (!es) continue;
+    define_one(c, es, done, count);  /* 确保 embed 类型已密封 */
+    bcode_write_op(c->bc, BCODE_ADD_EMBED);
+    bcode_write_u32(c->bc, es->id);
+  }
+
+  /* 具名 struct 标记独立身份（seal 跳过去重 intern）——sema 已在
+     struct_compose.c 物化阶段调 type_struct_mark_unique，此处对 compiler
+     重建的开放类型复制标记。须在 SEAL 之前。 */
+  if (type_struct_is_unique(t)) {
+    bcode_write_op(c->bc, BCODE_MARK_UNIQUE);
+  }
+
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
+
+  /* 设置类型显示名（seal 后 LOAD_TYPE 拉回密封类型 → SET_TYPE_NAME 设名）。
+     struct 的 name 用于 find_attr_owner 沿嵌入链查找时通过 sema global_scope
+     查符号（VM 层 find_attr_owner 直接用 embeds 递归查 attributes，但 sema
+     层 find_own_member/find_inherited_member 用 name 查 global_scope）。 */
+  if (t->name.ptr && t->name.len > 0) {
+    emit_load_type(c, st->id);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_SET_TYPE_NAME);
+    bcode_write_str(c->bc, t->name);
+    bcode_write_op(c->bc, BCODE_POP);
+    st_push(c, -1);
+  }
 }
 
 /* optional 定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 inner 先定义（密封）→

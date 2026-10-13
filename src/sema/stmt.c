@@ -686,60 +686,71 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
      与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。
      复合赋值（`crt::x += 1`）走 LOAD → op → STORE，与普通变量同构。 */
   if (as->target->kind == AST_ENUM_REF) {
-    /* 结构体静态属性：`T::x = v`。展开阶段已把它注册为**模块级全局变量**
-       （名字就是 `T::x`）→ 把目标改写成同名 AST_IDENT，随后完全走普通变量
-       赋值路径（含复合赋值、const 检查、所有权检查）。 */
+    /* 结构体静态属性：`T::x = v`。在类型的 member_scope 中查成员。
+       comptime var 成员是 const（不可赋值）；func 成员不可赋值。
+       type_expr 可能是 AST_IDENT（首次访问）或 AST_TYPE_REF（被 ex_enum_ref
+       折叠过）——两种情况都取类型名查全局符号。 */
     ast_enum_ref_t *er = (ast_enum_ref_t *)as->target;
-    if (er->type_expr && er->type_expr->kind == AST_IDENT) {
-      ast_ident_t *lid = (ast_ident_t *)er->type_expr;
-      sema_symbol_t *ls = sema_lookup(scope, lid->name);
+    strslice_t type_name = STRSLICE_EMPTY;
+    if (er->type_expr && er->type_expr->kind == AST_IDENT)
+      type_name = ((ast_ident_t *)er->type_expr)->name;
+    else if (er->type_expr && er->type_expr->kind == AST_TYPE_REF)
+      type_name = ((ast_type_ref_t *)er->type_expr)->name;
+    if (type_name.ptr) {
+      sema_symbol_t *ls = sema_lookup(scope, type_name);
       if (ls && ls->kind == SEMA_SYM_TYPE) {
-        size_t total = lid->name.len + 2 + er->variant.len;
-        char *mangled = (char *)arena_alloc(sema->arena, total, 1);
-        if (mangled) {
-          memcpy(mangled, lid->name.ptr, lid->name.len);
-          mangled[lid->name.len] = ':';
-          mangled[lid->name.len + 1] = ':';
-          if (er->variant.len)
-            memcpy(mangled + lid->name.len + 2, er->variant.ptr, er->variant.len);
-          strslice_t q = strslice_from_bytes(mangled, total);
-          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
-          /* 嵌入继承：`struct Test { ...Base; }` 的 `Test::count = v` 未命中自己
-             的静态属性时沿嵌入链解析到 `Base::count` —— 写的是**同一个**全局
-             变量（不生成新的一份）。歧义由查找函数报诊断（返回 NULL）。
-             名字优先、**自己的胜出**：`Test` 自己声明了 `var count` 就用自己
-             那一份（即使 Base 也有同名属性），不报歧义。 */
-          if ((!ms || ms->kind != SEMA_SYM_VAR) && ls->type &&
-              ls->type->kind == TYPE_KIND_STRUCT) {
-            strslice_t *inh = sema_struct_member_lookup(sema, ls->type,
-                                                        er->variant,
-                                                        as->target);
-            if (inh) {
-              q = *inh;
-              ms = sema_lookup(sema->global_scope, q);
+        /* 在 member_scope 中查成员名（自己优先 + 嵌入链递归） */
+        const struct_type_t *owner = NULL;
+        sema_symbol_t *ms = sema_struct_find_member(sema, ls->type,
+                                                    er->variant, as->target,
+                                                    &owner);
+        /* 名字命中的是**函数成员**：`T::f = v` 非法 */
+        if (ms && ms->kind == SEMA_SYM_FUNC) {
+          diag_error(sema->diag, sema_loc(sema, as->target),
+                     "cannot assign to '%.*s::%.*s': it is a `func` member "
+                     "(a method, not a variable)",
+                     (int)type_name.len, type_name.ptr,
+                     (int)er->variant.len, er->variant.ptr);
+          sema_expr(sema, &as->value, scope);
+          return;
+        }
+        /* comptime var 成员是 const：不可赋值 */
+        if (ms && ms->kind == SEMA_SYM_VAR && ms->is_comptime) {
+          diag_error(sema->diag, sema_loc(sema, as->target),
+                     "cannot assign to '%.*s::%.*s': it is a `comptime var` "
+                     "(const, cannot be reassigned)",
+                     (int)type_name.len, type_name.ptr,
+                     (int)er->variant.len, er->variant.ptr);
+          sema_expr(sema, &as->value, scope);
+          return;
+        }
+        /* 普通静态属性：类型检查右值后放行（compiler 发 STORE_ATTR）。
+           置 is_struct_attr + struct_attr_type_id 供 compiler 识别。 */
+        if (ms && ms->kind == SEMA_SYM_VAR) {
+          /* struct_attr_type_id 用**实际拥有属性的 struct 类型**（owner），
+             覆盖语义下写自身、共享语义下写继承源。 */
+          if (owner) {
+            const sema_type_t *reg = sema_type_find(sema, &owner->base);
+            if (reg) {
+              er->is_struct_attr = true;
+              er->struct_attr_type_id = reg->id;
             }
           }
-          /* 名字命中的是**函数成员**（`func`，含沿嵌入链继承来的方法）：
-             `Test::f = v` 非法（成员是函数不是变量）。这里给准确诊断，
-             而不是落到下面枚举 variant 的错误恢复分支。 */
-          if (ms && ms->kind == SEMA_SYM_FUNC) {
-            diag_error(sema->diag, sema_loc(sema, as->target),
-                       "cannot assign to '%.*s::%.*s': it is a `func` member "
-                       "(a method, not a variable)",
-                       (int)lid->name.len, lid->name.ptr,
-                       (int)er->variant.len, er->variant.ptr);
-            sema_expr(sema, &as->value, scope);
-            return;
-          }
-          if (ms && ms->kind == SEMA_SYM_VAR) {
-            ast_node_t *ident = ast_ident_new(sema->arena, as->target->tok_begin,
-                                              as->target->tok_end);
-            if (ident) {
-              ((ast_ident_t *)ident)->name = q;
-              ident->next = as->target->next;
-              as->target = ident;
+          /* 求值右值做类型检查 */
+          value_t *rv = sema_expr(sema, &as->value, scope);
+          if (rv && !value_is_error(sema->vm, rv) && ms->type) {
+            /* 隐式转换检查 */
+            value_t *casted = value_implicit_cast(sema->vm, rv, ms->type);
+            if (value_is_error(sema->vm, casted)) {
+              char exp[256], got[256];
+              sema_type_name(ms->type, exp, sizeof exp);
+              sema_type_name(value_type(rv), got, sizeof got);
+              diag_error(sema->diag, sema_loc(sema, as->value),
+                         "type mismatch in assignment: expected '%s', got '%s'",
+                         exp, got);
             }
           }
+          return;
         }
       }
     }

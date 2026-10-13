@@ -8,8 +8,15 @@ extern "C" {
 #include "vm/ownership.h"    /* ownership_t（vtable_t 的 type_set_ownership 槽位也要） */
 #include "core/allocator.h"  /* allocator_t：type_name_with_ownership 的参数 */
 #include "core/strslice.h"
+#include "core/strmap.h"     /* strmap_t：struct_type_t 的 attributes */
+#include "core/vec.h"        /* vec_t：struct_type_t 的 methods */
 #include <stdbool.h>
 #include <stddef.h>
+
+/* 前向声明：scope_t 在 scope.h 中定义，而 scope.h → value.h → type.h，
+ * 此处只能前向声明避免循环依赖。struct_type_t 的 member_scope 是借用指针，
+ * 只需前向声明即可。 */
+typedef struct scope_t scope_t;
 
 /**
  * type_kind_t: 类型粗粒度分类（type_t.kind）
@@ -229,6 +236,32 @@ typedef struct struct_type_t {
      * 去重仍服务于匿名/内部构造的类型（sema 的匿名 struct 推断、union payload、
      * 字节码运行期的 DEFINE_TYPE/SEAL）：它们不置位，行为与既有实现一致。 */
     bool            unique;
+
+    /* ---- 运行时成员（静态变量 + 方法）----
+     *
+     * struct_type 在运行时拥有自己的静态属性（`var`）和方法（`func`）生命周期，
+     * 不再是语法糖展开为全局 `T::name` 符号。三字段协作：
+     *
+     * - member_scope: 借用作用域，挂在所属 module 的 global_scope 下（child）。
+     *   所有成员的 value_t 本体由此 scope 的 owned 向量管理生命周期——module
+     *   销毁时 scope_destroy_subtree 自动销毁，无需手工释放。NULL = 无成员。
+     *
+     * - attributes: name → value_t* 借用映射（strmap，不拥有 value）。静态变量
+     *   和方法值都登记在此表中：`T::x` 读写、`T::f()` 调用都从此表取值。
+     *   comptime var 成员标记为 const（初始化后不可写）。NULL = 无成员。
+     *
+     * - methods: 方法名白名单（vec_t*，元素为 char* owned NUL 终止字符串）。
+     *   只记录哪些名字是方法——`a.b()` 调用时先在 methods 白名单确认 b 是
+     *   方法（而非属性），再从 attributes 取 func value 调用。值本体在
+     *   attributes 中，methods 只提供 `a.b()` 调用的白名单判定。NULL = 无方法。
+     *
+     * 嵌入继承（`...Base;`）：成员不复制，Base 的成员只有一份。`a.b()` 与
+     * `T::x` 未命中自己时沿 embeds 链递归查各嵌入类型的 attributes/methods。
+     * 自己声明同名成员 → 命中自己即返回（覆盖继承来的那一份）。
+     * 命中多个嵌入且自己没有 → 歧义报错（与既有语义一致）。 */
+    scope_t    *member_scope;
+    strmap_t   *attributes;
+    vec_t      *methods;
 } struct_type_t;
 
 /**

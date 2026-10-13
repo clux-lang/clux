@@ -107,6 +107,9 @@ typedef enum {
     BCODE_PUSH_STRUCT,     /* 分配空 struct type（开放，fields=NULL，不入池）+ 压其 type value */
     BCODE_DEFINE_FIELD,    /* strtable 索引：弹栈顶 type value（字段类型）→ peek 开放
                               struct → 追加字段（名从 strtable 拷贝） */
+    BCODE_ADD_EMBED,       /* U32 embed_type_id：peek 栈顶开放 struct → vm_type_load
+                              拉 embed 类型 → 追加到 embeds 表（seal 前可编辑）。
+                              无栈深变化（与 SET_EMBEDS 不同，逐个追加）。 */
     BCODE_PUSH_TUPLE,      /* 分配空 tuple type（开放，elems=NULL，不入池）+ 压其 type value */
     BCODE_APPEND_ELEM,     /* 无操作数：弹栈顶 type value（元素类型）→ peek 开放
                               tuple → 追加元素（元素匿名，长度=追加次数） */
@@ -247,6 +250,37 @@ typedef enum {
                              * 值本体不进 defer 栈的所有权：它由 value_make 自动
                              * track 进同一个 scope 的 owned 列表，栈里只存借用
                              * 指针——既不泄漏也不 double-free。 */
+
+    /* ---- struct 方法调用（**追加在末尾**，不动既有编号）----
+     *
+     * 不复用 CALL：方法 func value 存在 struct_type 的 attributes 表中，而非
+     * 全局作用域——CALL 需要栈上是 callee 值，而 MEMBER_CALL 在运行期从
+     * receiver 的 struct 类型中解析方法。sema 不再把 `a.b(args)` 改写为
+     * `AST_FUNC_REF + 接收者插首参`，而是标记 AST_CALL，compiler 据此发
+     * MEMBER_CALL。
+     *
+     * 栈: [receiver, arg1..argN] → [result]。净变化 = -argc。
+     * 实例方法：receiver 是值或指针，作为第一个参数（self）传递。
+     *   值 receiver → 运行期取地址（ref *T）；指针 receiver → 原样传递。
+     * 静态方法：receiver 是 type value → 不作为参数传递（type value 只用于
+     *   确定在哪个 struct 类型的 attributes 中查找方法）。 */
+    BCODE_MEMBER_CALL,      /* STR method_name + U32 argc：弹 argc 个实参 +
+                             * 弹 receiver → 从 receiver 对应 struct 类型的
+                             * attributes 中查方法 func value → value_call。
+                             * receiver 为 type value 时是静态方法调用（无 self）。 */
+
+    /* ---- struct 静态成员（attribute）读写（**追加在末尾**，不动既有编号）----
+     * struct_type_t 运行时持有 attributes（name→value_t* 借用映射）+ methods
+     * （方法名白名单）。这两个指令按 type_id 查到 struct 类型后，从 attributes
+     * 按名取/存值。value 归 member_scope 管（挂在 module global_scope 下）。 */
+    BCODE_LOAD_ATTR,        /* U32 type_id + STR name：从 struct_type_t::attributes
+                             * 按名取值压栈（借用引用）。沿嵌入链继承查找（sema 已
+                             * 校验存在性）。type_id 索引 vm->types_by_id。 */
+    BCODE_STORE_ATTR,       /* U32 type_id + STR name：弹栈顶值 → 写入
+                             * struct_type_t::attributes[name]（赋值语句，不压回
+                             * 结果）。沿嵌入链继承查找目标类型。 */
+    BCODE_MARK_UNIQUE,      /* 无操作数：peek 栈顶开放 struct → type_struct_mark_unique
+                             *（seal 前调用，seal 跳过去重 intern）。无栈深变化。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

@@ -65,8 +65,10 @@ void module_destroy(vm_t *vm, module_t **pmod) {
     /* 释放字节码 */
     if (mod->bc) bcode_destroy(&mod->bc);
 
-    /* 释放全局作用域（模块所有函数/var 绑定在此） */
-    if (mod->global_scope) scope_destroy(vm, &mod->global_scope);
+    /* 释放全局作用域（模块所有函数/var 绑定在此）+ 其子作用域。
+       struct member_scope 挂在 global_scope 下（STORE_ATTR 首次写入时创建），
+       需 scope_destroy_subtree 递归销毁，否则 member_scope 及其 owned 值泄漏。 */
+    if (mod->global_scope) scope_destroy_subtree(vm, &mod->global_scope);
 
     /* 释放导出表 map（value 借用 global_scope，不释放 value） */
     if (mod->exports) strmap_free(alloc, &mod->exports);

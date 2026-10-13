@@ -21,16 +21,14 @@ typedef struct {
     strslice_t  name;            /* 结构体名 */
     ast_node_t *fields;          /* AST_STRUCT_FIELD 兄弟链 */
     ast_node_t *fields_last;
-    /* ---- 命名空间成员（语法糖）----
+    /* ---- 命名空间成员（运行时成员模型）----
      * 结构体体内还可声明：
      *     var  data = 123;                         // 静态属性
      *     func getId(self: ref *const T): i32 {…}   // 方法（第一个参数即接收者）
-     * 二者**本质都是模块级全局声明**（变量 / 函数），只是以
-     * `<结构体名>::<成员名>` 的命名空间方式访问。`members` 挂 AST_VAR_DEF /
-     * AST_FUNC_DEF（名字是**未限定**的成员名）；
-     * `ast_expand_struct_members`（编译流水线在 parse 之后调用）把它们改名为
-     * `T::name` 并追加进程序声明表 → 此后 sema / compiler / 运行期完全走既有
-     * 全局路径，无需任何新机制。fmt 直接渲染 members（**不**走展开，避免重复）。 */
+     * 成员的生命周期由 struct_type_t 运行时拥有（member_scope + attributes +
+     * methods），不再展开为模块级全局声明。`members` 挂 AST_VAR_DEF /
+     * AST_FUNC_DEF（名字是**未限定**的成员名）；sema 在类型 seal 之后注册到
+     * struct_type 的成员容器中。fmt 直接渲染 members。 */
     ast_node_t *members;
     ast_node_t *members_last;
     /* ---- 结构体嵌入（`...Base;`，纯语法）----
@@ -83,12 +81,6 @@ static inline ast_node_t *ast_struct_field_new(arena_t *arena,
 
 /** 解析结构体定义 struct Name { field: type; ... } */
 ast_node_t *parse_struct_def(parser_t *p);
-
-/** 把结构体的命名空间成员（var/func）展开成模块级全局声明：
- *  名字改写为 `<结构体名>::<成员名>` 并**追加到 `prog->funcs` 尾部**。
- *  编译流水线在 parse 之后、sema 之前调用（见 driver.c 的 compile_module）；
- *  fmt 路径不调用（成员已随结构体渲染）。*/
-void ast_expand_struct_members(arena_t *arena, ast_node_t *prog);
 
 #ifdef __cplusplus
 }

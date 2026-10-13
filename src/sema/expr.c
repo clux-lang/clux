@@ -1715,12 +1715,18 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
       /* ---- 方法调用糖（结构体命名空间成员）----
-       *   t.f(args)  ≡  typeof(t)::f(<接收者>, args)
-       *   接收者：t 是指针（任意指针修饰）→ t 本身；t 是值 → t.&。
+       *   a.b(args)   —— 实例方法：receiver = a（值或指针），self 隐式首参
+       *   T::f(args)  —— 静态方法：receiver = T 的 type value，无 self
+       *
+       * sema 解析出方法名 + 方法所在的 struct 类型后，置 is_member_call +
+       * member_type_id，compiler 据此发 `MEMBER_CALL <STR name> <U32 argc>`
+       * （不复用 CALL）。receiver 由 compiler 编译 callee 的 object（实例方法）
+       * 或 type_expr（静态方法）压栈，VM 从 receiver 的 struct 类型 attributes
+       * 中查方法 func value 并调用。
+       *
        * `self` **不是关键字**——它只是普通参数名，第一个参数按位置就是接收者。
-       * 做法：把 callee 换成限定名 AST_IDENT（`T::f`，展开阶段已注册为模块级
-       * 全局函数），并把接收者作为**第一个实参**插到参数链首；随后完全走既有
-       * 调用路径（callee 求值 / 实参求值 / 类型检查都不需要新代码）。 */
+       * 实例方法的接收者传递由 VM 的 op_member_call 完成（值 → 取地址 ref *T，
+       * 指针 → 原样），sema 不再改写 AST。 */
       if (call->callee && call->callee->kind == AST_MEMBER) {
         ast_member_t *mem = (ast_member_t *)call->callee;
         const type_t *ot = NULL;
@@ -1735,37 +1741,10 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         const bool by_ptr = ot && ptr_type_base(ot) != NULL;
         const type_t *st = type_strip_quals(by_ptr ? ptr_type_base(ot) : ot);
         if (st && st->kind == TYPE_KIND_STRUCT && st->name.len) {
-          /* 名字解析：先 `T::f`，未命中再沿**嵌入链**继承查找
-             （`struct Test { ...Base; }` 的 `t.getId()` 解析到 `Base::getId`）。
-             歧义（多个嵌入都提供该成员）由查找函数报诊断并返回 NULL。
-             接收者仍按 `t.&` / `t` 传入，需要时由既有的结构体指针向上转换
-             （字段前缀兼容）隐式转成方法第一参数的类型——`...Base` 不在开头时
-             前缀不成立，于是这里**自然**编译失败（无需位置特判）。 */
-          strslice_t q = {0};
-          size_t total = st->name.len + 2 + mem->field.len;
-          char *mangled = (char *)arena_alloc(sema->arena, total, 1);
-          if (mangled) {
-            memcpy(mangled, st->name.ptr, st->name.len);
-            mangled[st->name.len] = ':';
-            mangled[st->name.len + 1] = ':';
-            if (mem->field.len)
-              memcpy(mangled + st->name.len + 2, mem->field.ptr, mem->field.len);
-            q = strslice_from_bytes(mangled, total);
-          }
-          sema_symbol_t *ms = q.ptr ? sema_lookup(sema->global_scope, q) : NULL;
-          /* 名字优先、**自己的胜出**：`T::f` 命中就只用它，不再回退嵌入链——
-             因此 `Test` 自己声明 `func f` 时静默覆盖 `Base::f`（不报歧义）。
-             只在自己没有（或不是函数）时才继承查找。跨 kind 覆盖（Test 的 `f`
-             是 var 而 Base 的 `f` 是 func）同样以自己为准：不回退，落到下面的
-             "不可调用"诊断（kind 由使用点裁决，不会静默用回 Base 的那份）。 */
-          if (!ms || ms->kind != SEMA_SYM_FUNC) {
-            strslice_t *inherited =
-                sema_struct_member_lookup(sema, st, mem->field, call->callee);
-            if (inherited) {
-              q = *inherited;
-              ms = sema_lookup(sema->global_scope, q);
-            }
-          }
+          /* 在 struct 类型的 member_scope 中查方法名（自己优先 + 嵌入链递归） */
+          const struct_type_t *owner = NULL;
+          sema_symbol_t *ms = sema_struct_find_member(sema, st, mem->field,
+                                                      call->callee, &owner);
           /* 以名字命中、但不是函数（自己的 var 成员 / 继承来的静态属性）：
              明确说清"它是变量，不是方法"，而不是落到下面的字段诊断。 */
           if (ms && ms->kind != SEMA_SYM_FUNC) {
@@ -1776,26 +1755,44 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             return val_void(sema);
           }
           if (ms && ms->kind == SEMA_SYM_FUNC) {
-            /* 接收者：值 → t.&（ADDR）；指针 → t 本身（与手写等价） */
-            ast_node_t *recv = NULL;
-            if (by_ptr) {
-              recv = mem->object;
-            } else {
-              recv = ast_addr_new(sema->arena, mem->object->tok_begin,
-                                  mem->object->tok_end);
-              if (!recv) return val_void(sema);
-              ((ast_addr_t *)recv)->operand = mem->object;
+            /* 标记为 member_call：compiler 发 MEMBER_CALL，不改写 AST */
+            const sema_type_t *reg = sema_type_find(sema, st);
+            if (reg) {
+              call->is_member_call = true;
+              call->member_type_id = reg->id;
             }
-            bool had_args = call->args != NULL;
-            recv->next = call->args;
-            call->args = recv;
-            if (!had_args) call->args_last = recv;
-            ast_node_t *callee_id = ast_ident_new(sema->arena,
-                                                 call->callee->tok_begin,
-                                                 call->callee->tok_end);
-            if (!callee_id) return val_void(sema);
-            ((ast_ident_t *)callee_id)->name = q;
-            call->callee = callee_id;
+          }
+        }
+      }
+      /* ---- 静态方法调用 `T::f(args)` ----
+       * callee 是 AST_ENUM_REF，type_expr 解析到 SEMA_SYM_TYPE（struct），
+       * variant 是方法名。sema 查 member_scope 命中函数 → 置 is_member_call。
+       * compiler 编译 type_expr 压 type value（receiver），发 MEMBER_CALL。 */
+      if (!call->is_member_call && call->callee &&
+          call->callee->kind == AST_ENUM_REF) {
+        ast_enum_ref_t *er = (ast_enum_ref_t *)call->callee;
+        /* type_expr 可能是 AST_IDENT（首次）或 AST_TYPE_REF（被 ex_enum_ref
+           折叠过）——两种情况都取类型名查全局符号。 */
+        strslice_t tn = STRSLICE_EMPTY;
+        if (er->type_expr && er->type_expr->kind == AST_IDENT)
+          tn = ((ast_ident_t *)er->type_expr)->name;
+        else if (er->type_expr && er->type_expr->kind == AST_TYPE_REF)
+          tn = ((ast_type_ref_t *)er->type_expr)->name;
+        if (tn.ptr) {
+          sema_symbol_t *sym = sema_lookup(scope, tn);
+          if (sym && sym->kind == SEMA_SYM_TYPE && sym->type &&
+              sym->type->kind == TYPE_KIND_STRUCT) {
+            const struct_type_t *owner = NULL;
+            sema_symbol_t *ms = sema_struct_find_member(sema, sym->type,
+                                                        er->variant,
+                                                        call->callee, &owner);
+            if (ms && ms->kind == SEMA_SYM_FUNC) {
+              const sema_type_t *reg = sema_type_find(sema, sym->type);
+              if (reg) {
+                call->is_member_call = true;
+                call->member_type_id = reg->id;
+              }
+            }
           }
         }
       }
@@ -1815,6 +1812,53 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         diag_error(sema->diag, sema_loc(sema, &call->base),
                    "M1: missing callee");
         return val_void(sema);
+      }
+
+      /* ---- member_call 提前返回 ----
+       * is_member_call 为 true 时，callee 不走 shadow 求值（它是 AST_MEMBER/
+       * AST_ENUM_REF，不是函数值表达式）。方法签名已在 member_scope 注册时由
+       * pass2 解析；此处从符号取签名，做实参校验（含接收者），返回 return_type
+       * shadow。compiler 据此发 MEMBER_CALL。 */
+      if (call->is_member_call) {
+        /* 从 member_type_id 对应的 struct 类型 + 方法名查方法符号 */
+        const type_t *st = vm_type_load(sema->vm, call->member_type_id);
+        if (!st) return val_void(sema);
+        strslice_t mname = {0};
+        if (call->callee->kind == AST_MEMBER)
+          mname = ((ast_member_t *)call->callee)->field;
+        else if (call->callee->kind == AST_ENUM_REF)
+          mname = ((ast_enum_ref_t *)call->callee)->variant;
+        const struct_type_t *owner = NULL;
+        sema_symbol_t *msym = sema_struct_find_member(sema, st, mname,
+                                                      call->callee, &owner);
+        if (!msym || msym->kind != SEMA_SYM_FUNC || !msym->type)
+          return val_void(sema);
+        const func_sig_t *sig = &((const func_type_t *)msym->type)->sig;
+        /* 实参校验（参数数量 + 隐式转换），与 value_call 的 shadow 校验同构。
+           实例方法：第一个参数是 self（接收者），实参从 args 开始对齐 self
+           之后的形参。静态方法：无 self，实参从 args 开始对齐全部形参。 */
+        bool is_instance = (call->callee->kind == AST_MEMBER);
+        size_t nargs = sema_count_siblings(call->args);
+        size_t expected = sig->param_count - (is_instance ? 1 : 0);
+        if (!sig->is_variadic && nargs != expected) {
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "method '%.*s': expected %zu argument(s), got %zu",
+                     (int)mname.len, mname.ptr, expected, nargs);
+          return val_void(sema);
+        }
+        /* 逐实参求值（shadow）——匿名构造注入形参类型 */
+        size_t ai = 0;
+        for (ast_node_t **slot = &call->args; *slot;
+             slot = &(*slot)->next, ai++) {
+          const type_t *pt = (is_instance)
+              ? func_type_param(msym->type, ai + 1)  /* skip self */
+              : func_type_param(msym->type, ai);
+          bool ct_pushed = sema_anon_push(sema, pt);
+          sema_expr(sema, slot, scope);
+          sema_anon_pop(sema, ct_pushed);
+        }
+        const type_t *rt = func_type_return(msym->type);
+        return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
       }
 
       /* M6 FFI：extern cfunc 调用（`<库>::<名>(...)`）——callee 是 AST_ENUM_REF 且库
@@ -2373,42 +2417,52 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
              这里按类型码置 AST 标志（契约见 ast_enum_ref.h），compiler 据
              此发 EXTERN_LOAD；返回声明类型的 shadow 供类型检查。 */
         /* ---- 结构体命名空间成员：`T::x`（静态属性）/ `T::f`（方法 / 限定调用）----
-         * 展开阶段已把 struct 体内的 var/func 成员注册成**模块级全局声明**，
-         * 声明名就是 `T::x` / `T::f`。这里把节点改写成同名 AST_IDENT，于是
-         * 读取 / 赋值 / 取函数值 / 调用全部走既有全局路径，无需新机制。
+         * struct 成员注册在类型的 member_scope 中（不再展开为全局 `T::name`）。
+         * 在 member_scope 中查成员名；未命中时沿嵌入链继承查找。
+         * 命中函数 → 改写为 AST_FUNC_REF（fid 引用，compiler 发 LOAD_FUNCTION）。
+         * 命中变量 → 返回类型的 shadow（compiler 在 Phase 4 发 LOAD_ATTR）。
          * （枚举 variant 不走这里：它们不注册成全局名，仍由下面的 variant 分支处理。）*/
         if (sym && sym->kind == SEMA_SYM_TYPE) {
-          size_t total = id->name.len + 2 + n->variant.len;
-          char *mangled = (char *)arena_alloc(sema->arena, total, 1);
-          if (!mangled) return val_void(sema);
-          memcpy(mangled, id->name.ptr, id->name.len);
-          mangled[id->name.len] = ':';
-          mangled[id->name.len + 1] = ':';
-          if (n->variant.len)
-            memcpy(mangled + id->name.len + 2, n->variant.ptr, n->variant.len);
-          strslice_t q = strslice_from_bytes(mangled, total);
-          sema_symbol_t *ms = sema_lookup(sema->global_scope, q);
-          /* 嵌入继承：`struct Test { ...Base; }` 的 `Test::getId` / `Test::count`
-             未命中自己时沿嵌入链解析到**实际定义**的限定名（`Base::getId` /
-             `Base::count`，静态属性因此是**同一份全局变量**）。歧义 → 查找函数
-             已报诊断，这里按"未命中"继续走后面的分支（错误恢复）。 */
-          if ((!ms || (ms->kind != SEMA_SYM_VAR && ms->kind != SEMA_SYM_FUNC)) &&
-              sym->type && sym->type->kind == TYPE_KIND_STRUCT) {
-            strslice_t *inh = sema_struct_member_lookup(sema, sym->type,
-                                                        n->variant, *node);
-            if (inh) {
-              q = *inh;
-              ms = sema_lookup(sema->global_scope, q);
+          /* 在 member_scope 中查成员名（自己优先 + 嵌入链递归） */
+          const struct_type_t *owner = NULL;
+          sema_symbol_t *ms = sema_struct_find_member(sema, sym->type,
+                                                      n->variant, *node,
+                                                      &owner);
+          if (ms && ms->kind == SEMA_SYM_FUNC) {
+            /* 方法引用 `T::f`（当值用，非调用）：返回函数签名的 shadow。
+               compiler 发 LOAD_ATTR 取方法 func value（存在 attributes 中）。
+               struct_attr_type_id 用**实际拥有方法的 struct 类型**（owner），
+               而非访问者类型——嵌入继承时方法 func value 存在 owner 的
+               attributes 中。 */
+            if (owner) {
+              const sema_type_t *reg = sema_type_find(sema, &owner->base);
+              if (reg) {
+                n->is_struct_attr = true;
+                n->struct_attr_type_id = reg->id;
+              }
             }
+            sema_resolve_type_slot(sema, &n->type_expr);
+            if (ms->type)
+              return value_make_shadow(sema->vm, ms->type);
+            return val_void(sema);
           }
-          if (ms && (ms->kind == SEMA_SYM_VAR || ms->kind == SEMA_SYM_FUNC)) {
-            ast_node_t *ident = ast_ident_new(sema->arena, (*node)->tok_begin,
-                                              (*node)->tok_end);
-            if (!ident) return val_void(sema);
-            ((ast_ident_t *)ident)->name = q;
-            ident->next = (*node)->next;
-            *node = ident;
-            return sema_expr(sema, node, scope);
+          if (ms && ms->kind == SEMA_SYM_VAR) {
+            /* 静态属性 `T::x`：标记 is_struct_attr + struct_attr_type_id，
+               compiler 据此发 LOAD_ATTR <type_id> <name>。返回变量类型的 shadow。
+               struct_attr_type_id 用**实际拥有属性的 struct 类型**（owner），
+               而非访问者类型——覆盖语义下 Test::count 写 Test 自己的 attributes，
+               共享语义下 Test::count（继承自 Base）写 Base 的 attributes。 */
+            if (owner) {
+              const sema_type_t *reg = sema_type_find(sema, &owner->base);
+              if (reg) {
+                n->is_struct_attr = true;
+                n->struct_attr_type_id = reg->id;
+              }
+            }
+            sema_resolve_type_slot(sema, &n->type_expr);
+            if (ms->type)
+              return value_make_shadow(sema->vm, ms->type);
+            return val_void(sema);
           }
         }
         if (sym && sym->kind == SEMA_SYM_EXTERN_LIB) {

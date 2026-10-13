@@ -166,6 +166,13 @@ struct _sema_symbol_t {
      获取成员类型信息。借用 vm->modules 生命周期。 */
   struct module_t *module;
 
+  /* ---- 结构体成员作用域（SEMA_SYM_TYPE 符号，struct 成员运行时模型）----
+   * struct_type 的静态变量和方法注册在此子作用域（global_scope 的 child）。
+   * `t.f()` 方法调用与 `T::x` 静态访问通过此作用域解析成员名字，不再拼
+   * `T::name` 限定名查全局。NULL = 非 struct 类型 / struct 无成员。
+   * 生命周期归 sema 作用域树（sema_scope_destroy 统一销毁）。 */
+  sema_scope_t *member_scope;
+
   /* ---- 语言级内建操作标记（M6 之后）----
    * 非 0 表示该符号是"语言内建"，semas 调用点据此做类型特判（返回类型精化 /
    * 实参校验），compiler 也可能据此改发专用指令（`data` → BCODE_DATA）。

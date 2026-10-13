@@ -71,6 +71,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_MAKE_ENUM]      = { "MAKE_ENUM",      { BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_STRUCT]    = { "PUSH_STRUCT",    { BCODE_ASM_OP_NONE } },
     [BCODE_DEFINE_FIELD]   = { "DEFINE_FIELD",   { BCODE_ASM_OP_STR } },
+    [BCODE_ADD_EMBED]      = { "ADD_EMBED",      { BCODE_ASM_OP_U32 } },
     [BCODE_PUSH_TUPLE]     = { "PUSH_TUPLE",     { BCODE_ASM_OP_NONE } },
     [BCODE_APPEND_ELEM]    = { "APPEND_ELEM",    { BCODE_ASM_OP_NONE } },
     [BCODE_SET_TYPE]       = { "SET_TYPE",       { BCODE_ASM_OP_NONE } },
@@ -126,6 +127,10 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_GET_MEMBER]     = { "GET_MEMBER",    { BCODE_ASM_OP_STR } },
     [BCODE_DATA]           = { "DATA",          { BCODE_ASM_OP_NONE } },
     [BCODE_DEFER]          = { "DEFER",         { BCODE_ASM_OP_NONE } },
+    [BCODE_MEMBER_CALL]    = { "MEMBER_CALL",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
+    [BCODE_LOAD_ATTR]      = { "LOAD_ATTR",     { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },
+    [BCODE_STORE_ATTR]     = { "STORE_ATTR",    { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },
+    [BCODE_MARK_UNIQUE]    = { "MARK_UNIQUE",   { BCODE_ASM_OP_NONE } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

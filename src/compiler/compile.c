@@ -232,6 +232,23 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
     return NULL;
   }
 
+  /* 2.4 struct 成员初始化：var 静态属性 + func 方法值注册到 attributes。
+     必须在函数对象提升区（BIND_FUNC）之后——func 成员 LOAD_FUNCTION <fid>
+     取回 func value 需先经 BIND_FUNC 登记到 functions_by_id。 */
+  for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (f->kind != AST_STRUCT_DEF) continue;
+    ast_struct_def_t *sd = (ast_struct_def_t *)f;
+    if (!sd->members) continue;
+    compile_struct_member_init(c, sd);
+    if (c->failed) break;
+  }
+  if (c->failed) {
+    if (body_slots) allocator_free(c->alloc, (void **)&body_slots);
+    bcode_destroy(&bc);
+    c->bc = NULL;
+    return NULL;
+  }
+
   /* 2.5 全局函数名绑定：LOAD_FUNCTION <fid> + DEFINE name（全局作用域）。
      仅顶层函数（prog->funcs 中的 AST_FUNC_DEF）——局部函数在定义点
      compile_block_body 绑定（提升语义），函数字面量无作用域绑定。 */

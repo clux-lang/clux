@@ -6,6 +6,9 @@ extern "C" {
 #endif
 
 #include "vm/type.h"
+#include "vm/scope.h"
+#include "core/strmap.h"
+#include "core/vec.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -119,6 +122,10 @@ bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
 bool type_struct_set_embeds(vm_t *vm, const type_t *t,
                             const type_t *const *embeds, size_t embed_count);
 
+/** 追加单个嵌入类型到开放 struct 的 embeds 表（seal 前可编辑，逐个追加）。
+ *  **sealed 类型拒绝**（返回 false）。 */
+bool type_struct_add_embed(vm_t *vm, const type_t *t, const type_t *embed);
+
 /** 结构体组合的嵌入表（`...Base` 登记的被嵌入类型，按 `...` 出现顺序）。
  *  无嵌入（或非 struct）→ *count = 0。指针生命周期同类型对象（vm 拥有）。 */
 const type_t *const *type_struct_embeds(const type_t *t, size_t *count);
@@ -164,6 +171,69 @@ bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b);
  *  （struct_type_compatible），否则会静默丢掉尾部字段。 */
 bool struct_type_prefix_compatible(vm_t *vm, const type_t *target,
                                    const type_t *source);
+
+/* ================================================================
+ * 运行时成员管理（静态变量 + 方法）
+ *
+ * struct_type 在运行时持有自己的成员生命周期（非语法糖）。三字段协作
+ * （见 type.h 的 struct_type_t 注释）：
+ *   - member_scope: 借用作用域（挂在 module global_scope 下），管 value 生命周期
+ *   - attributes: name → value_t* 借用映射（静态变量 + 方法值）
+ *   - methods: 方法名白名单（char*，供 a.b() 解析区分方法与属性）
+ *
+ * 成员注册发生在 sema 类型 seal 之后、函数体遍历之前。member_scope 由调用方
+ * 创建（挂在 module global_scope 下），注册到 struct_type 上（借用）。attributes
+ * 和 methods 由 struct_type 拥有（struct_type_dispose 释放）。
+ * ================================================================ */
+
+/**
+ * 初始化 struct_type 的运行时成员容器。创建 attributes（name→value_t* 借用映射）
+ * 和 methods（char* owned 名字白名单）。member_scope 由调用方单独设置
+ * （type_struct_set_member_scope）。
+ * 幂等：已初始化的直接返回 true。非 struct 返回 false。 */
+bool type_struct_members_init(vm_t *vm, const type_t *t);
+
+/**
+ * 设置 struct_type 的成员作用域（借用，生命周期由 module global_scope 子树管理）。
+ * 调用方负责创建 scope 并挂到 module global_scope 下。NULL 清除借用。
+ * 非 struct 拒绝（返回 false）。允许在 seal 后调用——运行时成员注册发生在
+ * 类型 seal 之后。 */
+bool type_struct_set_member_scope(vm_t *vm, const type_t *t, scope_t *scope);
+
+/** 取 struct_type 的成员作用域（非 struct / 无成员 → NULL）。 */
+scope_t *type_struct_member_scope(const type_t *t);
+
+/**
+ * 注册一个静态属性到 struct_type 的 attributes 表。
+ * name 被 NUL 终止拷贝（attributes map 拥有 key），value 是借用（生命周期归
+ * member_scope）。已有同名属性 → 返回 false（不覆盖，调用方负责报诊断）。
+ * comptime var 成员的 const 约束由 sema 层在赋值时拦截，此处不区分。
+ * 非 struct / 未初始化成员容器 → 返回 false。 */
+bool type_struct_add_attribute(vm_t *vm, const type_t *t,
+                               const char *name, value_t *value);
+
+/**
+ * 从 attributes 表按名查值（借用指针）。未找到 / 非 struct → NULL。
+ * 不沿嵌入链查找——嵌入继承由上层（sema/VM）逐层调用本函数完成。 */
+value_t *type_struct_get_attribute(const type_t *t, const char *name);
+
+/**
+ * 注册一个方法名到 methods 白名单。name 被 NUL 终止拷贝（methods vec 拥有）。
+ * 方法的 func value 仍存于 attributes（通过 type_struct_add_attribute 注册），
+ * methods 只记录"这个名字是方法"。已有同名 → 返回 false。
+ * 非 struct / 未初始化成员容器 → 返回 false。 */
+bool type_struct_add_method(vm_t *vm, const type_t *t, const char *name);
+
+/**
+ * 查询名字是否为方法（在 methods 白名单中）。非 struct / 无方法 → false。
+ * 不沿嵌入链查找——嵌入继承由上层逐层调用本函数完成。 */
+bool type_struct_is_method(const type_t *t, const char *name);
+
+/** 取方法名白名单（char* 元素的 vec）。非 struct / 无方法 → NULL。 */
+vec_t *type_struct_methods(const type_t *t);
+
+/** 取 attributes 表（name→value_t* 借用映射）。非 struct / 无属性 → NULL。 */
+strmap_t *type_struct_attributes(const type_t *t);
 
 #ifdef __cplusplus
 }

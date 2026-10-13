@@ -196,6 +196,18 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
     if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: implicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    /* fatal → fatal 同布局不同 type_t*（compound_fatal_variant 创建的变体与
+       hoist 构造的变体可能是不同 type_t* 但字段表完全一致）：源是**将亡值**，
+       走转移（memcpy + 清空源 own 指针），不是深拷贝。深拷贝白分配一整套对象图
+       且源仍持有原件，语义上也不是 fatal 应有的行为；浅 memcpy 不清源则双释放。
+       与 value_move 复合类型路径同款。 */
+    if (type_is_fatal(value_type(v)) && type_is_fatal(target) &&
+        struct_owns_resources((const struct_type_t *)target)) {
+        void *data = value_alloc_data(vm->alloc, target);
+        memcpy(data, value_data(v), target->size);
+        ptr_clear_owned_recursive(vm, value_type(v), value_data(v));
+        return value_make(vm, target, data);
+    }
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
     return value_make(vm, target, data);
 }
@@ -247,7 +259,11 @@ const vtable_t VTABLE_STRUCT = {
  * =========================================================================== */
 
 /* dispose_fn：allocator_free 时自动释放字段名 + 字段表 + 嵌入表 + 显示名
-   （open 对象分配时注册，seal 去重回收与 vm_destroy 都只需裸 allocator_free） */
+   + 运行时成员容器（attributes map + methods vec）
+   （open 对象分配时注册，seal 去重回收与 vm_destroy 都只需裸 allocator_free）
+
+   member_scope 是**借用**——生命周期由 module global_scope 子树管理
+   （scope_destroy_subtree 自动销毁），此处不释放。 */
 static void struct_type_dispose(void *self, allocator_t *allocator) {
     struct_type_t *st = (struct_type_t *)self;
     if (st->fields) {
@@ -264,6 +280,18 @@ static void struct_type_dispose(void *self, allocator_t *allocator) {
         allocator_free(allocator, (void **)&np);
     }
     if (st->embeds) allocator_free(allocator, (void **)&st->embeds);
+    /* 运行时成员容器：attributes 是借用映射（不拥有 value），只释放 map 本身；
+       methods vec 拥有 char* 名字字符串，逐个释放再释放 vec。 */
+    if (st->attributes) strmap_free(allocator, &st->attributes);
+    if (st->methods) {
+        size_t n = vec_len(st->methods);
+        for (size_t i = 0; i < n; i++) {
+            char *name = (char *)vec_get(st->methods, i);
+            if (name) allocator_free(allocator, (void **)&name);
+        }
+        vec_free(allocator, &st->methods);
+    }
+    /* member_scope 是借用，不在此释放 */
 }
 
 static struct_type_t *struct_type_create_open(vm_t *vm) {
@@ -610,6 +638,22 @@ bool type_struct_set_embeds(vm_t *vm, const type_t *t,
     return true;
 }
 
+bool type_struct_add_embed(vm_t *vm, const type_t *t, const type_t *embed) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT || !embed) return false;
+    if (type_is_sealed(t)) return false;
+    struct_type_t *st = (struct_type_t *)t;
+    const type_t **copy = (const type_t **)allocator_new_ex(
+        vm->alloc, "type_t*", sizeof(type_t *), NULL, NULL, NULL,
+        st->embed_count + 1);
+    if (!copy) panic("vm: out of memory adding struct embed");
+    for (size_t i = 0; i < st->embed_count; i++) copy[i] = st->embeds[i];
+    copy[st->embed_count] = embed;
+    if (st->embeds) allocator_free(vm->alloc, (void **)&st->embeds);
+    st->embeds = copy;
+    st->embed_count++;
+    return true;
+}
+
 const type_t *const *type_struct_embeds(const type_t *t, size_t *count) {
     if (count) *count = 0;
     if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
@@ -709,6 +753,16 @@ const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
     }
     /* unique 跟随 base：具名 struct 的 fatal 副本仍保持独立身份 */
     st->unique = src->unique;
+    /* 运行时成员共享 base 的容器（借用——不拷贝、不拥有）：
+       fatal 变体与 base 是同一类型的不同所有权视图，成员（方法/静态属性）
+       是同一份。dispose 只在 base 对象上释放（fatal 副本的 dispose 时这些
+       字段是借用，不会重复释放——strmap_free/vec_free 对 NULL 安全，
+       但这里它们非 NULL 且是借用的，所以 dispose 中需要跳过）。
+       为避免 fatal 副本 dispose 时误释放 base 的容器，fatal 副本不拷贝
+       这三个指针——成员访问走 base 类型（type_strip_quals 去掉 fatal 后
+       得到 base，sema/VM 成员查找都先 strip 限定符）。 */
+    /* st->member_scope = NULL; st->attributes = NULL; st->methods = NULL;
+       — memset 已清零，保持 NULL：成员访问经 type_strip_quals 走 base 类型 */
     const type_t *t = type_struct_seal(vm, &st->base);
     if (!t) allocator_free(vm->alloc, (void **)&st);
     return t;
@@ -728,4 +782,102 @@ int struct_type_find_field(const type_t *t, strslice_t name) {
             return (int)i;
     }
     return -1;
+}
+
+/* ===========================================================================
+ * 运行时成员管理（静态变量 + 方法）
+ *
+ * struct_type 持有自己的成员生命周期（非语法糖）。attributes 是 name→value_t*
+ * 借用映射（不拥有 value——value 归 member_scope 的 owned 向量），methods 是
+ * 方法名白名单（char* owned——只记录"这个名字是方法"，func value 仍在 attributes）。
+ * member_scope 是借用（生命周期由 module global_scope 子树管理）。
+ * =========================================================================== */
+
+bool type_struct_members_init(vm_t *vm, const type_t *t) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT) return false;
+    struct_type_t *st = (struct_type_t *)t;
+    if (st->attributes) return true; /* 幂等 */
+    /* attributes: 借用映射（owns_value=false——value 归 member_scope） */
+    st->attributes = strmap_new(vm->alloc, /*owns_value=*/false);
+    if (!st->attributes) panic("vm: out of memory allocating struct attributes");
+    /* methods: 不 owns_element（名字字符串由我们手工 allocator_new + 手工释放，
+       vec_free 不会调 dispose_fn——但我们用 owns_element=false 自己逐个释放） */
+    st->methods = vec_new(vm->alloc, /*owns_element=*/false);
+    if (!st->methods) panic("vm: out of memory allocating struct methods vec");
+    return true;
+}
+
+bool type_struct_set_member_scope(vm_t *vm, const type_t *t, scope_t *scope) {
+    (void)vm;
+    if (!t || t->kind != TYPE_KIND_STRUCT) return false;
+    struct_type_t *st = (struct_type_t *)t;
+    st->member_scope = scope; /* 借用，不拥有 */
+    return true;
+}
+
+scope_t *type_struct_member_scope(const type_t *t) {
+    if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+    return ((const struct_type_t *)t)->member_scope;
+}
+
+bool type_struct_add_attribute(vm_t *vm, const type_t *t,
+                               const char *name, value_t *value) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT || !name || !value) return false;
+    struct_type_t *st = (struct_type_t *)t;
+    if (!st->attributes) return false; /* 未初始化成员容器 */
+    /* 已有同名 → 不覆盖（调用方负责报诊断） */
+    if (strmap_contains(st->attributes, name)) return false;
+    /* strmap_insert 会拷贝 key（name → NUL 终止副本，map 拥有）；value 借用 */
+    strmap_insert(st->attributes, vm->alloc, name, (void *)value);
+    return true;
+}
+
+value_t *type_struct_get_attribute(const type_t *t, const char *name) {
+    if (!t || t->kind != TYPE_KIND_STRUCT || !name) return NULL;
+    const struct_type_t *st = (const struct_type_t *)t;
+    if (!st->attributes) return NULL;
+    return (value_t *)strmap_get(st->attributes, name);
+}
+
+bool type_struct_add_method(vm_t *vm, const type_t *t, const char *name) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT || !name) return false;
+    struct_type_t *st = (struct_type_t *)t;
+    if (!st->methods) return false; /* 未初始化成员容器 */
+    /* 去重：已有同名方法名 → 不覆盖 */
+    size_t n = vec_len(st->methods);
+    for (size_t i = 0; i < n; i++) {
+        const char *existing = (const char *)vec_get(st->methods, i);
+        if (existing && strcmp(existing, name) == 0) return false;
+    }
+    /* NUL 终止拷贝（methods vec 拥有名字字符串，dispose 时逐个释放） */
+    size_t len = strlen(name);
+    char *copy = (char *)allocator_new_ex(vm->alloc, "char", sizeof(char), NULL,
+                                          NULL, NULL, len + 1);
+    if (!copy) panic("vm: out of memory copying method name");
+    memcpy(copy, name, len);
+    copy[len] = '\0';
+    vec_push(st->methods, vm->alloc, (void *)copy);
+    return true;
+}
+
+bool type_struct_is_method(const type_t *t, const char *name) {
+    if (!t || t->kind != TYPE_KIND_STRUCT || !name) return false;
+    const struct_type_t *st = (const struct_type_t *)t;
+    if (!st->methods) return false;
+    size_t n = vec_len(st->methods);
+    for (size_t i = 0; i < n; i++) {
+        const char *m = (const char *)vec_get(st->methods, i);
+        if (m && strcmp(m, name) == 0) return true;
+    }
+    return false;
+}
+
+vec_t *type_struct_methods(const type_t *t) {
+    if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+    return ((const struct_type_t *)t)->methods;
+}
+
+strmap_t *type_struct_attributes(const type_t *t) {
+    if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+    return ((const struct_type_t *)t)->attributes;
 }
