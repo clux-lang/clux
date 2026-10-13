@@ -1,0 +1,25 @@
+// cross_struct.cx -- 跨模块 struct 方法调用测试
+//
+//   模块 export struct Test {}，另一个模块 import 之后
+//   xxx::Test::method() 静态方法调用 + 实例方法调用
+
+import shapes from "./lib/shapes";
+extern lib "*" as libc;
+extern cfunc libc::printf(format: str, ...): void;
+
+func main(): i32 {
+    // 静态方法调用：xxx::Test::create(42)
+    var t = shapes::Test::create(42);
+    if (t.get() != 42) {
+        return 1;
+    }
+
+    // 实例方法调用
+    t.set(100);
+    if (t.get() != 100) {
+        return 2;
+    }
+
+    libc::printf("cross_struct ok: %d\n", t.get());
+    return 0;
+}

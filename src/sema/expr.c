@@ -1710,6 +1710,49 @@ static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
   }
 }
 
+/* 从 `mod::Type` 形式的 AST_ENUM_REF 解析被导入模块导出的 struct 类型。
+ * type_expr 是 AST_IDENT（模块别名），variant 是类型名。
+ * 直接从 module->exports 查 type value，取其指向的 type_t*。
+ * 非 struct / 未找到返回 NULL。 */
+static const type_t *resolve_cross_module_struct(sema_t *sema,
+                                                  ast_enum_ref_t *er,
+                                                  sema_scope_t *scope) {
+  if (!er || !er->type_expr || er->type_expr->kind != AST_IDENT) return NULL;
+  ast_ident_t *id = (ast_ident_t *)er->type_expr;
+  sema_symbol_t *sym = sema_lookup(scope, id->name);
+  if (!sym || sym->kind != SEMA_SYM_MODULE || !sym->module) return NULL;
+  module_t *mod = sym->module;
+  if (!mod || !mod->exports) return NULL;
+  char buf[256];
+  if (er->variant.len >= sizeof(buf)) return NULL;
+  memcpy(buf, er->variant.ptr, er->variant.len);
+  buf[er->variant.len] = '\0';
+  value_t *member = (value_t *)strmap_get(mod->exports, buf);
+  if (!member || value_type(member) != sema->vm->type_type) return NULL;
+  const type_t *t = value_as(member, const type_t *);
+  if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+  return t;
+}
+
+/* 沿 struct 嵌入链查找拥有指定属性名的 struct_type_t（自己优先，再沿 embeds
+ * 深度优先）。运行时 attributes 查找用——跨模块时 sema member_scope 已销毁，
+ * 只能依赖运行时 struct_type_t.attributes。 */
+static const struct_type_t *find_runtime_attr_owner(const type_t *t,
+                                                    const char *name) {
+  if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
+  const struct_type_t *st = (const struct_type_t *)t;
+  if (st->attributes && strmap_contains(st->attributes, name))
+    return st;
+  size_t ne = 0;
+  const type_t *const *emb = type_struct_embeds(t, &ne);
+  for (size_t i = 0; i < ne; i++) {
+    const type_t *eb = type_strip_quals(emb[i]);
+    const struct_type_t *owner = find_runtime_attr_owner(eb, name);
+    if (owner) return owner;
+  }
+  return NULL;
+}
+
 /* AST_CALL 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 static value_t *ex_call(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -1761,16 +1804,79 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
               call->is_member_call = true;
               call->member_type_id = reg->id;
             }
+          } else if (!ms) {
+            /* 跨模块回退：sema_struct_find_member 找不到 member_scope（源模块
+               sema 已销毁），从运行时 struct_type_t.attributes 查方法。 */
+            char fbuf[256];
+            size_t fl = mem->field.len < sizeof(fbuf) - 1
+                            ? mem->field.len : sizeof(fbuf) - 1;
+            memcpy(fbuf, mem->field.ptr, fl);
+            fbuf[fl] = '\0';
+            const struct_type_t *rt_owner = find_runtime_attr_owner(st, fbuf);
+            if (rt_owner && rt_owner->attributes) {
+              value_t *mval = (value_t *)strmap_get(rt_owner->attributes,
+                                                    fbuf);
+              if (mval && value_type(mval) &&
+                  value_type(mval)->kind == TYPE_KIND_FUNC) {
+                /* 跨模块类型已由被导入模块注册并 vm_type_bind，直接用 t->id */
+                if (rt_owner->base.id != 0) {
+                  call->is_member_call = true;
+                  call->member_type_id = rt_owner->base.id;
+                }
+              }
+            }
           }
         }
       }
       /* ---- 静态方法调用 `T::f(args)` ----
        * callee 是 AST_ENUM_REF，type_expr 解析到 SEMA_SYM_TYPE（struct），
        * variant 是方法名。sema 查 member_scope 命中函数 → 置 is_member_call。
-       * compiler 编译 type_expr 压 type value（receiver），发 MEMBER_CALL。 */
+       * compiler 编译 type_expr 压 type value（receiver），发 MEMBER_CALL。
+       *
+       * 跨模块 `mod::Type::f(args)`：type_expr 是嵌套 AST_ENUM_REF（mod::Type）。
+       * 被导入模块已 exec_run，运行时 struct_type_t.attributes / methods 已填充。
+       * 从运行时 attributes 查方法 func value，取其签名类型做参数校验。 */
       if (!call->is_member_call && call->callee &&
           call->callee->kind == AST_ENUM_REF) {
         ast_enum_ref_t *er = (ast_enum_ref_t *)call->callee;
+        if (er->type_expr && er->type_expr->kind == AST_ENUM_REF) {
+          /* ---- 跨模块静态方法 `mod::Type::f(args)` ---- */
+          ast_enum_ref_t *inner_er = (ast_enum_ref_t *)er->type_expr;
+          const type_t *st = resolve_cross_module_struct(sema, inner_er,
+                                                         scope);
+          if (!st) {
+            diag_error(sema->diag, sema_loc(sema, call->callee),
+                       "cross-module static method call: '%.*s::%.*s' is not "
+                       "a struct type",
+                       (int)inner_er->variant.len, inner_er->variant.ptr,
+                       (int)er->variant.len, er->variant.ptr);
+            return val_void(sema);
+          }
+          char mbuf[256];
+          size_t mn = er->variant.len < sizeof(mbuf) - 1
+                          ? er->variant.len : sizeof(mbuf) - 1;
+          memcpy(mbuf, er->variant.ptr, mn);
+          mbuf[mn] = '\0';
+          const struct_type_t *owner = find_runtime_attr_owner(st, mbuf);
+          if (!owner) {
+            diag_error(sema->diag, sema_loc(sema, call->callee),
+                       "struct '%.*s' has no method '%.*s'",
+                       (int)st->name.len, st->name.ptr,
+                       (int)er->variant.len, er->variant.ptr);
+            return val_void(sema);
+          }
+          value_t *mval = owner->attributes
+              ? (value_t *)strmap_get(owner->attributes, mbuf) : NULL;
+          if (mval && value_type(mval) &&
+              value_type(mval)->kind == TYPE_KIND_FUNC) {
+            /* 跨模块类型已由被导入模块注册并 vm_type_bind，直接用 t->id。
+               不调 sema_type_register——会覆盖 t->id 破坏原有绑定。 */
+            if (owner->base.id != 0) {
+              call->is_member_call = true;
+              call->member_type_id = owner->base.id;
+            }
+          }
+        } else {
         /* type_expr 可能是 AST_IDENT（首次）或 AST_TYPE_REF（被 ex_enum_ref
            折叠过）——两种情况都取类型名查全局符号。 */
         strslice_t tn = STRSLICE_EMPTY;
@@ -1795,6 +1901,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             }
           }
         }
+        }
       }
       /* 函数调用：统一路径 = exec callee（shadow 求值）→ exec 各实参 →
          value_call 分派到 func_vcall 的 shadow 分支（唯一校验点：参数
@@ -1818,7 +1925,10 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
        * is_member_call 为 true 时，callee 不走 shadow 求值（它是 AST_MEMBER/
        * AST_ENUM_REF，不是函数值表达式）。方法签名已在 member_scope 注册时由
        * pass2 解析；此处从符号取签名，做实参校验（含接收者），返回 return_type
-       * shadow。compiler 据此发 MEMBER_CALL。 */
+       * shadow。compiler 据此发 MEMBER_CALL。
+       *
+       * 跨模块方法：源模块 sema 已销毁，sema_struct_find_member 找不到 member_scope，
+       * 从运行时 struct_type_t.attributes 取方法 func value 的签名类型做校验。 */
       if (call->is_member_call) {
         /* 从 member_type_id 对应的 struct 类型 + 方法名查方法符号 */
         const type_t *st = vm_type_load(sema->vm, call->member_type_id);
@@ -1831,9 +1941,25 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         const struct_type_t *owner = NULL;
         sema_symbol_t *msym = sema_struct_find_member(sema, st, mname,
                                                       call->callee, &owner);
-        if (!msym || msym->kind != SEMA_SYM_FUNC || !msym->type)
-          return val_void(sema);
-        const func_sig_t *sig = &((const func_type_t *)msym->type)->sig;
+        const type_t *sig_type = NULL;  /* 方法签名类型（func_type_t） */
+        if (msym && msym->kind == SEMA_SYM_FUNC && msym->type) {
+          sig_type = msym->type;
+        } else {
+          /* 跨模块回退：从运行时 attributes 取方法 func value 的签名 */
+          char mbuf[256];
+          size_t ml = mname.len < sizeof(mbuf) - 1 ? mname.len : sizeof(mbuf) - 1;
+          memcpy(mbuf, mname.ptr, ml);
+          mbuf[ml] = '\0';
+          const struct_type_t *rt_owner = find_runtime_attr_owner(st, mbuf);
+          if (rt_owner && rt_owner->attributes) {
+            value_t *mval = (value_t *)strmap_get(rt_owner->attributes, mbuf);
+            if (mval && value_type(mval) &&
+                value_type(mval)->kind == TYPE_KIND_FUNC)
+              sig_type = value_type(mval);
+          }
+        }
+        if (!sig_type) return val_void(sema);
+        const func_sig_t *sig = &((const func_type_t *)sig_type)->sig;
         /* 实参校验（参数数量 + 隐式转换），与 value_call 的 shadow 校验同构。
            实例方法：第一个参数是 self（接收者），实参从 args 开始对齐 self
            之后的形参。静态方法：无 self，实参从 args 开始对齐全部形参。 */
@@ -1851,13 +1977,13 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         for (ast_node_t **slot = &call->args; *slot;
              slot = &(*slot)->next, ai++) {
           const type_t *pt = (is_instance)
-              ? func_type_param(msym->type, ai + 1)  /* skip self */
-              : func_type_param(msym->type, ai);
+              ? func_type_param(sig_type, ai + 1)  /* skip self */
+              : func_type_param(sig_type, ai);
           bool ct_pushed = sema_anon_push(sema, pt);
           sema_expr(sema, slot, scope);
           sema_anon_pop(sema, ct_pushed);
         }
-        const type_t *rt = func_type_return(msym->type);
+        const type_t *rt = func_type_return(sig_type);
         return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
       }
 
@@ -2404,6 +2530,52 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
          路径；否则走枚举 variant 路径。链式访问 a::b::c 由 parser 产出
          嵌套 AST_ENUM_REF（lhs 也可以是 AST_ENUM_REF），递归处理。 */
       ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
+
+      /* ---- 跨模块 struct 成员访问：`mod::Type::member` ----
+       * type_expr 是嵌套 AST_ENUM_REF（mod::Type），从模块导出直接解析 struct
+       * 类型。被导入模块已完整走完流水线（含 exec_run），运行时
+       * struct_type_t.attributes / methods 已填充，从此查成员。
+       * 命中方法 → 返回函数签名 shadow（compiler 发 IMPORT→GET_MEMBER 压 type
+       * value receiver + MEMBER_CALL，或 LOAD_ATTR 取方法值）。
+       * 命中静态属性 → 标记 is_struct_attr + struct_attr_type_id（LOAD_ATTR）。
+       * （源模块 sema 已销毁，sema_struct_find_member 的 member_scope 不存在，
+       *  只能依赖运行时 attributes。） */
+      if (n->type_expr && n->type_expr->kind == AST_ENUM_REF) {
+        ast_enum_ref_t *inner_er = (ast_enum_ref_t *)n->type_expr;
+        const type_t *st = resolve_cross_module_struct(sema, inner_er, scope);
+        if (!st) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "'%.*s::%.*s' is not a struct type",
+                     (int)inner_er->variant.len, inner_er->variant.ptr,
+                     (int)n->variant.len, n->variant.ptr);
+          return val_void(sema);
+        }
+        char mbuf[256];
+        size_t mn = n->variant.len < sizeof(mbuf) - 1
+                        ? n->variant.len : sizeof(mbuf) - 1;
+        memcpy(mbuf, n->variant.ptr, mn);
+        mbuf[mn] = '\0';
+        const struct_type_t *owner = find_runtime_attr_owner(st, mbuf);
+        if (!owner) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "struct '%.*s' has no member '%.*s'",
+                     (int)st->name.len, st->name.ptr,
+                     (int)n->variant.len, n->variant.ptr);
+          return val_void(sema);
+        }
+        value_t *mval = owner->attributes
+            ? (value_t *)strmap_get(owner->attributes, mbuf) : NULL;
+        if (!mval) return val_void(sema);
+        /* 跨模块类型已由被导入模块注册并 vm_type_bind，直接用 t->id */
+        if (owner->base.id != 0) {
+          n->is_struct_attr = true;
+          n->struct_attr_type_id = owner->base.id;
+        }
+        const type_t *mt = value_type(mval);
+        if (mt)
+          return value_make_shadow(sema->vm, mt);
+        return val_void(sema);
+      }
 
       /* 模块成员访问检查：type_expr 是 AST_IDENT 且解析到 MODULE 符号 */
       if (n->type_expr && n->type_expr->kind == AST_IDENT) {

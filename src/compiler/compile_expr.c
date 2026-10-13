@@ -547,8 +547,15 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       } else if (n->callee->kind == AST_ENUM_REF) {
         ast_enum_ref_t *er = (ast_enum_ref_t *)n->callee;
         method_name = er->variant;
-        /* 静态方法：编译 type_expr 作为 receiver（type value）压栈 */
-        compile_type_expr(c, er->type_expr);  /* 栈: [type_value] */
+        /* 静态方法：编译 type_expr 作为 receiver（type value）压栈。
+           跨模块 `mod::Type::f()`：type_expr 是嵌套 AST_ENUM_REF，走 compile_expr
+           的 IMPORT→GET_MEMBER 路径获取模块导出的 type value。
+           本模块 `Type::f()`：type_expr 是 AST_IDENT/AST_TYPE_REF，走 compile_type_expr
+           的 LOAD_TYPE 路径。 */
+        if (er->type_expr && er->type_expr->kind == AST_ENUM_REF)
+          compile_expr(c, er->type_expr);     /* 栈: [type_value] */
+        else
+          compile_type_expr(c, er->type_expr);  /* 栈: [type_value] */
       } else {
         c_error(c, node, "member call: invalid callee kind");
         return;

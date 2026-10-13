@@ -1,0 +1,17 @@
+// shapes.cx -- 导出 struct（跨模块 struct 方法调用测试）
+
+export struct Test {
+    x: i32;
+
+    func get(self: ref *const Test): i32 {
+        return self.x;
+    }
+
+    func set(self: ref *Test, v: i32): void {
+        self.x = v;
+    }
+
+    func create(v: i32): Test {
+        return .Test{ .x = v };
+    }
+}
