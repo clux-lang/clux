@@ -20,7 +20,7 @@ extern "C" {
  *
  * 文件格式（全部小端）：
  *   [magic "CXBC" : 4 字节]
- *   [format_version : u32]                    当前 1
+ *   [format_version : u32]                    当前 1（= bcode_graph v1 单模块）
  *   [str_count : u32]                          字符串表条目数
  *   重复 str_count 次：[str_len : u32][bytes : str_len 字节]
  *   [code_len : u64]                           字节码流长度（字节）
@@ -32,10 +32,11 @@ extern "C" {
 
 /* 当前二进制格式版本号。
  *
- * v2：新增 BCODE_SET_OWNERSHIP（fatal 复合类型将亡值变体），它插在指令枚举
- * 中段，使该指令之后的全部 opcode 编号整体后移——v1 的 .cxb 落盘字节用新
- * 表解释会张冠李戴（静默错误执行）。因此必须在读版本号时直接拒绝旧文件。 */
-#define BCODE_SERIAL_VERSION 2u
+ * bcode_serial 产物的布局（strtable + code）与 bcode_graph 的 v1 单模块格式
+ * 完全一致，因此写 version=1：加载方（bcode_graph_deserial）按 v1 分支读取，
+ * 单模块、空路径、无导出表。bcode_graph 的 v2/v3 版本号供模块表容器专用，
+ * 两者版本号空间不重叠。 */
+#define BCODE_SERIAL_VERSION 1u
 
 /* 魔数："CXBC"（clux bytecode），小端写入。 */
 #define BCODE_SERIAL_MAGIC 0x43425843u /* 'C''X''B''C' little-endian */
