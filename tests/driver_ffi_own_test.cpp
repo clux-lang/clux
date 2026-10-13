@@ -104,8 +104,8 @@ TEST(DriverFfiOwn, RefAndFatalPointersAreStillAccepted) {
       "func main(): i32 {\n"
       "  var s: str = \"hello\";\n"
       "  if (crt::strlen(data(s) as ref *u8) != 5u64) { return 1; }\n"
-      "  var x: i32 = 42;\n"
-      "  if (td::clux_first_i32(move(x.&)) != 42) { return 2; }\n"
+      "  var x: own *i32 = new i32{42};\n"
+      "  if (td::clux_first_i32(move(x)) != 42) { return 2; }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

@@ -19,14 +19,14 @@ func main(): i32 {
     var s: str = "hello";
     if (crt::strlen(data(s) as ref *u8) != 5u64) { return 1; }
 
-    var x: i32 = 42;
-    if (td::clux_first_i32(move(x.&)) != 42) { return 2; }
+    var p: own *i32 = new i32{42};
+    if (td::clux_first_i32(move(p)) != 42) { return 2; }
 
-    var p: Point = .Point{ .x = 3, .y = 4 };
-    if (td::clux_point_sum(p) != 7) { return 3; }
+    var q: Point = .Point{ .x = 3, .y = 4 };
+    if (td::clux_point_sum(q) != 7) { return 3; }
 
-    var q: Point = td::clux_point_make(5, 6);
-    if (q.x != 5 || q.y != 6) { return 4; }
+    var r: Point = td::clux_point_make(5, 6);
+    if (r.x != 5 || r.y != 6) { return 4; }
 
     return 0;
 }

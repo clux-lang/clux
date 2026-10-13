@@ -1719,7 +1719,14 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
            at->kind == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
   /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
-     指针/切片等也要求完全一致。 */
+     指针/切片等也要求完全一致。**两侧都归一化到 fatal 变体**再比身份：
+     只升一侧会永不相等，从而误拒 `fatal *T` 形参接收 `own *T` 变量（两者是
+     同布局的不同 intern 实例）。归一后 own / fatal / 构造产物统一落在同一个
+     intern 实例；`ref *T` 不持有资源、不参与升级，仍然只与 `ref *T` 匹配
+     （借用语义不同，不予放行——`move(x.&)` 不会把借用变成所有权）。 */
+  const type_t *pfn = type_fatal_variant_of(sema->vm, pt);
+  const type_t *afn = type_fatal_variant_of(sema->vm, at);
+  if (pfn && afn) return pfn == afn;
   return pt == at;
 }
 

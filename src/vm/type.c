@@ -506,17 +506,20 @@ void vm_init_builtins(vm_t *vm) {
 const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
     if (!vm || !t) return NULL;
     if (t->ownership == OWN_FATAL) return t;        /* 幂等 */
-    if (t->ownership != OWN_NONE) return t;         /* 其它所有权：原样 */
 
-    /* 指针 / 切片：顶层所有权升级（无资源可转的形态无从升级） */
-    if (type_is_slice(t)) {
-        if (!type_owns_resources(t)) return t;
-        return type_slice_intern(vm, OWN_FATAL, slice_type_elem(t));
+    /* 指针 / 切片：顶层所有权升级。**必须在下面那句"其它所有权原样"之前**判——
+       `own *T` / `own []T` 本身就是 OWN_OWN，先被那句挡掉就永远升不上 fatal，
+       于是 FFI 的 `fatal *T` 形参收 `own *T` 实参会被误拒。
+       `ref` 指针/切片**不持有资源**，按借用语义不参与升级（原样返回）。 */
+    if (type_is_slice(t) || type_is_ptr(t)) {
+        if (t->ownership == OWN_OWN) {
+            return type_is_slice(t)
+                       ? type_slice_intern(vm, OWN_FATAL, slice_type_elem(t))
+                       : type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
+        }
+        return t;
     }
-    if (type_is_ptr(t)) {
-        if (!type_owns_resources(t)) return t;
-        return type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
-    }
+    if (t->ownership != OWN_NONE) return t;         /* 其它所有权：原样 */
     if (!type_owns_resources(t)) return t;          /* 无资源：fatal 无意义 */
 
     switch (t->kind) {
