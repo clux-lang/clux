@@ -476,6 +476,8 @@ ast_node_t *parse_primary(parser_t *p) {
         while (check_symbol(p, ",")) {
             advance(p);
             skip_trivia(p);
+            /* 尾随逗号：',' 后直接 ')' → 允许结束 */
+            if (check_symbol(p, ")")) break;
             ast_node_t *init = parse_construct_field(p);
             if (!init || init->kind == AST_ERROR) {
                 if (!init) {
@@ -671,6 +673,8 @@ ast_node_t *parse_unary(parser_t *p) {
             while (check_symbol(p, ",")) {
                 advance(p);
                 skip_trivia(p);
+                /* 尾随逗号：',' 后直接 '}' → 允许结束 */
+                if (check_symbol(p, "}")) break;
                 f = parse_construct_field(p);
                 if (!f || f->kind == AST_ERROR) {
                     if (!f) {
@@ -745,6 +749,8 @@ ast_node_t *parse_unary(parser_t *p) {
             while (check_symbol(p, ",")) {
                 advance(p);
                 skip_trivia(p);
+                /* 尾随逗号：',' 后直接 '}' → 允许结束 */
+                if (check_symbol(p, "}")) break;
                 f = parse_construct_field(p);
                 if (!f || f->kind == AST_ERROR) {
                     if (!f) {
