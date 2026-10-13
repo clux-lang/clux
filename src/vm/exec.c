@@ -1,6 +1,7 @@
 #include "vm/exec.h"
 #include "vm/vm.h"
 #include "vm/value.h"
+#include "vm/value_owncopy.h"  /* value_own_copy_into（构造字段写入） */
 #include "vm/type.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
@@ -863,54 +864,11 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return ptr_make_value(vm, pt, value_data(v)); /* ref 借用：不拥有 */
 }
 
-/* 复合类型（struct/tuple/array/option/union）的 fatal 变体：与 base 同布局、
- * 仅 ownership 标记不同（fatal T 将亡值，m3-design §3.3）。每个类型走各自的
- * `type_*_intern_with_ownership`（按 [字段表/元素 + ownership] 去重）——与 sema
- * 编译期造出的变体**同一 intern 池、同一去重键**，因此拿到的是同一身份。
- *
- * 为什么不能按 type_equal 在池里找：type_equal 是**布局**判等（array 甚至是默认
- * 指针比较），而 fatal 变体与 base 的布局本来就相同——按布局找只会找到 base
- * 自己，fatal 标记随之丢失（移动语义退化成浅拷贝）。 */
-static const type_t *compound_fatal_variant(vm_t *vm, const type_t *t) {
-    if (!vm || !t) return NULL;
-    if (t->ownership == OWN_FATAL) return t;           /* 已是 fatal 变体 */
-    if (t->ownership != OWN_NONE) return t;            /* 其它所有权：原样 */
-    switch (t->kind) {
-    case TYPE_KIND_STRUCT:
-        return type_struct_intern_with_ownership(vm, t, OWN_FATAL);
-    case TYPE_KIND_TUPLE: {
-        size_t n = tuple_type_elem_count(t);
-        tuple_elem_t elems[n > 0 ? n : 1];
-        for (size_t i = 0; i < n; i++) {
-            const tuple_elem_t *e = tuple_type_elem(t, i);
-            elems[i].type = e ? e->type : NULL;
-            elems[i].offset = 0; /* seal 重算 */
-        }
-        return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
-                                                OWN_FATAL);
-    }
-    case TYPE_KIND_ARRAY:
-        return type_array_intern_with_ownership(vm, array_type_elem(t),
-                                                array_type_len(t), OWN_FATAL);
-    case TYPE_KIND_OPTION:
-        return type_option_intern_with_ownership(vm, type_option_inner(t),
-                                                 OWN_FATAL);
-    case TYPE_KIND_UNION: {
-        size_t n = union_type_member_count(t);
-        union_member_t members[n > 0 ? n : 1];
-        for (size_t i = 0; i < n; i++) {
-            const union_member_t *m = union_type_member(t, i);
-            members[i].name = m ? m->name : STRSLICE_EMPTY;
-            members[i].tag = m ? m->tag : (uint32_t)i;
-            members[i].payload_type = m ? m->payload_type : NULL;
-        }
-        return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
-                                                OWN_FATAL);
-    }
-    default:
-        return t; /* 无该变体（不含 own 资源的类型）：fatal 标记无意义 */
-    }
-}
+/* 注：曾经有过 compound_fatal_variant（把复合值包成运行期 fatal 变体类型）。
+   已删除——运行期不为同一逻辑类型维护两个实例：fatal 是**编译期**的所有权
+   标记（sema 的类型解析据此产将亡值），运行期的转移在"转移点"按语义完成
+   （见 value_move / func_vcall 的 fatal 形参分支）。保留 `SET_OWNERSHIP`
+   指令与 `type_*_intern_with_ownership` 供 hoist 物化声明里的 fatal 类型。 */
 
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
  * 弹值 → 压 fatal 同类型值：
@@ -957,16 +915,18 @@ static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
         }
     }
     /* 复合类型（含 own 字段）：memcpy + 递归清空源的 own/fatal 指针字段。
-       ptr_clone_block 不适用（那是深拷贝）；这里要的是**位复制 + 源清空**。 */
+       ptr_clone_block 不适用（那是深拷贝）；这里要的是**位复制 + 源清空**。
+       产物保持 base 类型：fatal 是**编译期**的所有权标记，运行期不为同一逻辑
+       类型维护两个实例（曾因构造点物化 fatal 变体导致形参/实参类型不一致 →
+       数组族在函数边界上被误判为普通值）。转移点按语义完成转移。 */
     if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
         t->kind != TYPE_KIND_VOID && value_data(v)) {
-        const type_t *fatal = compound_fatal_variant(vm, t);
         void *data = value_alloc_data(vm->alloc, t);
         memcpy(data, value_data(v), t->size);
         /* 源对象图的 own/fatal 指针全部置 NULL（不释放）：堆块已归新值。
            ref 借用与标量不受影响（ptr_clear_owned_recursive 按字段类型分派）。 */
         ptr_clear_owned_recursive(vm, t, value_data(v));
-        return value_make(vm, fatal, data);
+        return value_make(vm, t, data);
     }
     return value_clone(vm, v);  /* 标量 / ref：平凡复制 */
 }
@@ -987,13 +947,12 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
 
-    /* 复合类型：整块深拷贝（对象图克隆）后包一层 fatal 变体类型 */
+    /* 复合类型：整块深拷贝（对象图克隆）后保持 base 类型——与 op_move 同理 */
     if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
         t->kind != TYPE_KIND_VOID && value_data(v) &&
         !(type_is_ptr(t) || type_is_slice(t))) {
-        const type_t *fatal = compound_fatal_variant(vm, t);
         void *data = ptr_clone_block(vm, t, value_data(v));
-        return value_make(vm, fatal, data);
+        return value_make(vm, t, data);
     }
 
     value_t *copied = value_clone(vm, v);
@@ -1058,12 +1017,12 @@ value_t *value_move(vm_t *vm, value_t *v) {
         return nv;
     }
 
-    /* 复合类型：memcpy 位复制 + 清空源（见 op_move 同款说明） */
-    const type_t *fatal = compound_fatal_variant(vm, t);
+    /* 复合类型：memcpy 位复制 + 清空源（见 op_move 同款说明）——产物保持
+       base 类型（fatal 是编译期标记）。 */
     void *data = value_alloc_data(vm->alloc, t);
     memcpy(data, value_data(v), t->size);
     ptr_clear_owned_recursive(vm, t, value_data(v));
-    return value_make(vm, fatal, data);
+    return value_make(vm, t, data);
 }
 
 /* DISPOSE（无操作数）：**显式丢弃**（`_ = expr`，m3-design §3.3）。
@@ -1264,17 +1223,16 @@ static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
         memset(heap, 0, total);
     }
     if (length > 0 && elem->size > 0) {
-        /* 逐元素布值：init implicit_cast → elem_type 后 memcpy */
+        /* 逐元素布值：init implicit_cast → elem_type 后写入；持有资源的元素
+           深拷贝（见 value_own_copy_into —— 平凡 memcpy 会让新块与源临时值
+           共享内嵌堆块，源头仍归作用域所有 → 双释放）。 */
         for (uint32_t i = 0; i < init_count && i < length; i++) {
             value_t *casted = inits[i];
             if (value_type(inits[i]) != elem) {
                 casted = value_implicit_cast(vm, inits[i], elem);
                 if (value_is_error(vm, casted)) return casted;
             }
-            memcpy((char *)heap + i * elem->size,
-                   value_data(casted), elem->size);
-            /* 清空源 init 值内嵌 own 指针（防双释放） */
-            ptr_clear_owned_recursive(vm, elem, value_data(casted));
+            value_own_copy_into(vm, (char *)heap + i * elem->size, casted, elem);
         }
     }
 
@@ -1297,13 +1255,19 @@ static value_t *op_is_tag(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make(vm, vm->type_bool, data);
 }
 
+/* 构造期字段写入：持有资源则深拷贝（见 vm/value_owncopy.h）。
+   前向声明：slice 字面量构造（make）在 op_construct 之前也要用。 */
+static void *construct_field_copy(vm_t *vm, void *dst, const value_t *src,
+                                  const type_t *ft) {
+    return value_own_copy_into(vm, dst, src, ft);
+}
+
 /* ---- 值构造（construct N）：弹 N 个成员值 + 类型位 → value ----
  * 栈布局（构造期）：[..., type_value, v1, v2, ..., vN]（type 在底、vN 在顶）。
  * 先弹 type_value（栈上类型构造产物，如 push_array...seal 留下的 array type
  * value），再逐个弹 N 个成员值（栈顶为 vN，逆序收集为 elems[0..n-1] = v1..vN）。
  * 按类型种类分派：当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
-static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint32_t n = bcode_read_u32(bc, pc);
+static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {    uint32_t n = bcode_read_u32(bc, pc);
 
     /* 栈上收集 N 个成员值（仅指针，不拥有 value）。VLA 与 op_call 的 args 同款。
        栈布局：..., type_value, v1, ..., vN（type 在底、vN 在顶），故先弹 vN..v1，
@@ -1373,15 +1337,10 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 src = value_implicit_cast(vm, src, ft);
                 if (value_is_error(vm, src)) return src;
             }
-            /* data 全平凡：字段为 memcpy 可拷贝字节块，直接拷贝到偏移 */
-            memcpy((uint8_t *)data + st->fields[i].offset, value_data(src),
-                   ft->size);
-            /* 成员值已复制进 data：所有权随 memcpy 转移——清空源对象图内
-               所有 own/fatal 指针（递归置 ptr=NULL，覆盖复合字段内嵌 own
-               指针：.inner = Inner{ .p = new i32{...} } 的 Inner 值内部
-               own *i32 字段，不止直接 own/fatal 指针成员）。防作用域退出时
-               源与 data 双释放；堆块归外层递归销毁；ref 借用不受影响。 */
-            ptr_clear_owned_recursive(vm, ft, value_data(src));
+            /* data 全平凡：字段按偏移写入；持有资源的字段深拷贝（见
+               construct_field_copy），源临时值继续归作用域，各自释放各自的。 */
+            construct_field_copy(vm, (uint8_t *)data + st->fields[i].offset,
+                                 src, ft);
         }
         return value_make(vm, t, data);
     }
@@ -1407,12 +1366,10 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 src = value_implicit_cast(vm, src, et);
                 if (value_is_error(vm, src)) return src;
             }
-            /* data 全平凡：元素为 memcpy 可拷贝字节块，直接拷贝到偏移 */
-            memcpy((uint8_t *)data + tt->elems[i].offset, value_data(src),
-                   et->size);
-            /* 与 struct 分支同款：所有权随 memcpy 转移，清空源对象图内所有
-               own/fatal 指针（递归置 ptr=NULL，覆盖复合元素内嵌 own 指针）。 */
-            ptr_clear_owned_recursive(vm, et, value_data(src));
+            /* data 全平凡：元素按偏移写入；持有资源的元素深拷贝（见
+               construct_field_copy）。 */
+            construct_field_copy(vm, (uint8_t *)data + tt->elems[i].offset,
+                                 src, et);
         }
         return value_make(vm, t, data);
     }
@@ -1502,20 +1459,10 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (value_is_error(vm, casted)) return casted;
         void *data = value_alloc_data(vm->alloc, t);  /* 清零 */
         union_store_tag_raw(data, ut->tag_size, m->tag);
-        /* data 全平凡：payload 为 memcpy 可拷贝字节块，直接拷贝到偏移 */
-        memcpy((uint8_t *)data + ut->payload_offset, value_data(casted),
-               m->payload_type->size);
-        /* **成员值已复制进 data：所有权随 memcpy 转移——清空源的 own/fatal
-           指针**（与 struct 构造分支同款，原先漏了这一步）。漏掉会让 payload
-           临时值在作用域退出时**先**释放内嵌堆块，随后 union 成员再释放同一个块
-           → double-free（实测 access violation）。
-           清两处（casted 与 payload）覆盖两种路径，两者都是**本次构造的临时值**
-           （表达式求值产物，不是具名变量的视图）：异类型时 casted 是新值、payload
-           是原值，指针可能落在任一手上；同类型短路时两者同一个对象，第二次调用是
-           幂等空转（指针已 NULL）。 */
-        ptr_clear_owned_recursive(vm, m->payload_type, value_data(casted));
-        if (casted != payload)
-            ptr_clear_owned_recursive(vm, m->payload_type, value_data(payload));
+        /* 成员值写入 data：持有资源的 payload 深拷贝（见
+           construct_field_copy）。 */
+        construct_field_copy(vm, (uint8_t *)data + ut->payload_offset,
+                             casted, m->payload_type);
         return value_make(vm, t, data);
     }
 

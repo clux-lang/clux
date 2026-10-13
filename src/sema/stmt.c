@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_assign.h"
@@ -985,6 +986,27 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                    "cannot copy %s into own pointer '%.*s' (own is "
                    "move-only; use move() or clone())",
                    rn, (int)name.len, name.ptr);
+        return;
+      }
+      /* R1 的**所有权扩散**（与 shadow_var_def 的声明路径同规则）：左值类型
+         **含** own 资源（struct/tuple/union/array/option 内嵌 own 字段）时，
+         赋值同样是"释放旧值 + 接管新值"，不能按值拷贝——`b = a` 会让 b 与 a
+         共享内嵌堆块 → 双释放。必须 `b = move(a)` / `b = clone(a)`。
+         判据用递归 sema_type_contains_owned_resource（own 指针本身由上方
+         type_is_own 分支覆盖；含 own 字段的复合类型 ownership 是 OWN_NONE，
+         必须递归才判得出来）。
+         注：`b = .T{...}`（构造表达式产 fatal）合法——它是将亡值，赋值即转移。 */
+      if (lt && !type_is_fatal(lt) &&
+          sema_type_contains_owned_resource(lt) &&
+          !type_is_fatal(value_type(rhs))) {
+        char tn[64], rn[64];
+        sema_type_name(lt, tn, sizeof(tn));
+        sema_type_name(value_type(rhs), rn, sizeof(rn));
+        diag_error(sema->diag, sema_loc(sema, as->value),
+                   "cannot copy %s into variable '%.*s' of type %s: the type "
+                   "contains owned pointers and is move-only "
+                   "(use move() or clone())",
+                   rn, (int)name.len, name.ptr, tn);
         return;
       }
       if (sym) {

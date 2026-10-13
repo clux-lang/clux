@@ -1,6 +1,7 @@
 #include "vm/type_struct.h"
 #include "vm/type.h"
 #include "vm/type_ptr.h"
+#include "vm/value_compound_assign.h" /* compound_assign_transfer（赋值共享实现） */
 #include "vm/str_pool.h"
 #include "vm/value.h"
 #include "vm/vm.h"
@@ -87,9 +88,10 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    const type_t *t = value_type(dst);
-    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
-    return dst;
+    /* 共享实现：释放左值旧值 → memcpy → 清空源（详见 value_compound_assign.h）。
+       整块 memcpy 覆盖是**错的**：旧字段的裸指针被覆盖 → 泄漏；源与 dst 共享
+       内嵌堆块 → 双释放。 */
+    return compound_assign_transfer(vm, dst, src);
 }
 
 static void struct_dispose(vm_t *vm, value_t *v) {
@@ -206,6 +208,15 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
         void *data = value_alloc_data(vm->alloc, target);
         memcpy(data, value_data(v), target->size);
         ptr_clear_owned_recursive(vm, value_type(v), value_data(v));
+        return value_make(vm, target, data);
+    }
+    /* 同布局、不同 type_t 实例、**含 own 资源**：必须**对象图克隆**，不能整块
+       浅拷贝——浅拷贝会让新值与源共享内嵌 own 堆块，两侧析构各释放一次 →
+       双释放（实测 access violation）。推断路径常见：构造产出的 base 实例与
+       hoist 物化 / sema 剥离出的 base 实例不是同一个 type_t*。 */
+    if (struct_owns_resources((const struct_type_t *)target)) {
+        void *data = ptr_clone_block(vm, target, value_data(v));
+        if (!data) data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);
     }
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));

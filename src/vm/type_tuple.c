@@ -3,6 +3,8 @@
 #include "vm/str_pool.h"
 #include "vm/type_array.h"
 #include "vm/value.h"
+#include "vm/value_compound_assign.h" /* compound_assign_transfer（赋值共享实现） */
+#include "vm/value_deepcopy.h"        /* value_alloc_data_own（转换期深拷贝） */
 #include "vm/vm.h"
 #include "core/panic.h"
 #include "core/string.h"
@@ -72,9 +74,8 @@ static value_t *tuple_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    const type_t *t = value_type(dst);
-    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
-    return dst;
+    /* 共享实现：释放左值旧值 → memcpy → 清空源（详见 value_compound_assign.h） */
+    return compound_assign_transfer(vm, dst, src);
 }
 
 static void tuple_dispose(vm_t *vm, value_t *v) {
@@ -186,24 +187,24 @@ static value_t *tuple_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
                                            tuple_type_compatible);
     if (taken) return taken;
     const type_t *src = value_type(v);
-    /* 同 tuple 实例（身份拷贝） */
+    /* 同 tuple 实例（身份拷贝；持有资源时对象图克隆，防与源共享内嵌 own） */
     if (target->kind == TYPE_KIND_TUPLE && target == src) {
         if (value_is_shadow(v)) return value_make_shadow(vm, target);
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        void *data = value_alloc_data_own(vm, target, value_data(v));
         return value_make(vm, target, data);
     }
     /* 布局兼容的 tuple→tuple（不同 intern 实例，元素一致） */
     if (target->kind == TYPE_KIND_TUPLE && src->kind == TYPE_KIND_TUPLE &&
         tuple_type_compatible(vm, target, src)) {
         if (value_is_shadow(v)) return value_make_shadow(vm, target);
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        void *data = value_alloc_data_own(vm, target, value_data(v));
         return value_make(vm, target, data);
     }
     /* 布局兼容的 tuple↔array 互转 */
     if (tuple_array_layout_compatible(vm, target, src) ||
         tuple_array_layout_compatible(vm, src, target)) {
         if (value_is_shadow(v)) return value_make_shadow(vm, target);
-        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        void *data = value_alloc_data_own(vm, target, value_data(v));
         return value_make(vm, target, data);
     }
     return value_make_error(vm, "tuple: implicit cast only within layout-compatible "

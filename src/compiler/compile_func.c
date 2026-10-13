@@ -49,18 +49,40 @@
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   size_t body = bcode_tell(c->bc);
 
-  /* 倒序绑定参数：每参数 push_undefined; define name（从值推断，与 var 定义一致） */
-  /* 收集参数名（倒序） */
+  /* 倒序绑定参数：每参数（调用方压入的实参留在栈上）+ 类型说明符 → DEFINE name。
+   *
+   * **类型说明符必须用形参声明的类型**（`compile_type_expr(vd->type_expr)`；无
+   * 标注时才压 PUSH_UNDEFINED 从值推断）。原先**一律**压 PUSH_UNDEFINED，等于把
+   * 形参声明的类型丢掉、让 op_define 拿实参的运行期类型当形参类型 —— 对
+   * `fatal T` / `own *T` 这类**只有编译期意义**的注解是致命的：
+   *   func take(x: fatal [2]I) { var o: [2]I = move(x); }   // x 实为普通 [2]I
+   * 实参虽是 fatal [2]I，但形参被推断成普通 [2]I，函数体里的 `move(x)` 于是把
+   * 普通值当将亡值转出，落到非法转换（"array: implicit cast only within
+   * layout-compatible array/tuple"）。结构体/元组只是**恰好**没暴露（值的运行期
+   * 类型与声明一致），指针/切片一直靠实参本来就是 fatal 才对上。
+   * 用声明类型后，op_define 走显式类型路径 value_implicit_cast（fatal → 声明类型
+   * 的接管转移），形参的类型与声明严格一致 —— 与语义层同一套。
+   *
+   * 与 var 定义完全同构（compile_stmt.c 的 AST_VAR_DEF）：栈 [value, type-spec]
+   * → DEFINE 双弹。参数无初始值，值即调用方压入的实参。 */
   strslice_t names[64];
+  ast_node_t *pdefs[64];
   size_t ni = 0;
   for (ast_node_t *p = fn->params; p; p = p->next) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
-    if (ni < sizeof(names) / sizeof(names[0])) names[ni++] = vd->name;
+    if (ni < sizeof(names) / sizeof(names[0])) {
+      names[ni] = vd->name;
+      pdefs[ni] = p;
+      ni++;
+    }
   }
   for (size_t i = ni; i-- > 0; ) {
-    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
+    compile_type_expr(c, ((ast_var_def_t *)pdefs[i])->type_expr);
     bcode_write_op(c->bc, BCODE_DEFINE);
     bcode_write_str(c->bc, names[i]);
+    /* DEFINE 双弹（value + type-spec），但 value 是调用方压入的、不经 st_push
+       记账 —— 这里只记账 type-spec 的 +1 与其被弹的 -1，净 0。 */
+    st_push(c, 0);
   }
 
   /* 参数绑定完成 → push 函数体作用域（临时变量与参数隔离，遮蔽语义正确） */

@@ -4,6 +4,9 @@
 #include "vm/type_interrupt.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"   /* ptr_clear_owned_recursive（fatal 接管转换用） */
+#include "vm/value_compound_assign.h" /* compound_assign_transfer */
+#include "vm/value_owncopy.h"         /* value_own_copy_into */
+#include "vm/value_deepcopy.h"        /* value_alloc_data_own */
 #include "vm/str_pool.h"
 #include "core/panic.h"
 
@@ -425,6 +428,70 @@ value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
     return value_make(vm, target, data);
 }
 
+/* 隐式转换/身份拷贝的 data 分配：持有资源才对象图克隆（见 vm/value_deepcopy.h） */
+void *value_alloc_data_own(vm_t *vm, const type_t *t, const void *src_data) {
+    if (!vm || !t || !src_data) return NULL;
+    if (type_owns_resources(t)) {
+        void *cloned = ptr_clone_block(vm, t, src_data);
+        if (cloned) return cloned;
+    }
+    return value_alloc_data_copy(vm->alloc, t, src_data);
+}
+
+/* 同布局重贴标签：把 v 的字节按 target 解释（**转移**语义）。见
+   vm/value_deepcopy.h 的 value_relabel_into。 */
+value_t *value_relabel_into(vm_t *vm, value_t *v, const type_t *target) {
+    if (!vm || !v || !target || !value_type(v)) return NULL;
+    const type_t *src_t = value_type(v);
+    if (src_t == target) return v;
+    /* 只对"逐字节同布局"成立（同 kind 且同大小），否则拒绝——把字节按错误布局
+       解释会读出垃圾。 */
+    if (src_t->kind != target->kind || src_t->size != target->size) return NULL;
+    if (value_is_shadow(v)) {
+        v->type = target;
+        return v;
+    }
+    /* **就地**换 type_t：源已经是转移产物（value_move 刚分配好的独立块），
+       直接改类型标记即可。此处**不能**再分配一份 data 再 memcpy——那会留下
+       一块没人释放的旧块（实测 leak 报告），而且多一次无谓的 O(size) 拷贝。 */
+    v->type = target;
+    return v;
+}
+
+/* 聚合块写入：持有资源的字段深拷贝（见 vm/value_owncopy.h） */
+void *value_own_copy_into(vm_t *vm, void *dst, const value_t *src,
+                          const type_t *ft) {
+    uint8_t *p = (uint8_t *)dst;
+    if (!dst || !src || !ft || !value_data(src)) return p;
+    if (!type_owns_resources(ft)) {
+        memcpy(p, value_data(src), ft->size);
+        return p;
+    }
+    /* 持有资源：**对象图克隆**（ptr_clone_block）。不能用 value_clone——
+       后者对 `own *T` 是**浅拷贝指针**，克隆体与源共享同一个堆块 → 双释放
+       （实测 access violation）。 */
+    void *cloned = ptr_clone_block(vm, ft, value_data(src));
+    memcpy(p, cloned ? cloned : value_data(src), ft->size);
+    return p;
+}
+
+/* 复合类型就地赋值的共享实现（见 vm/value_compound_assign.h） */
+value_t *compound_assign_transfer(vm_t *vm, value_t *dst, value_t *src) {
+    if (!vm || !dst || !src) return dst;
+    if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
+    const type_t *t = value_type(dst);
+    if (!t || !value_data(dst) || !value_data(src)) return dst;
+    /* 1. 释放左值旧值拥有的堆块：整块 memcpy 会丢掉旧字段的裸指针，不先释放
+          就再也找不到那些块 → 泄漏。 */
+    ptr_free_owned_recursive(vm, t, value_data(dst));
+    /* 2. 整块 memcpy（data 全平凡：字段即裸字节） */
+    memcpy(value_data(dst), value_data(src), t->size);
+    /* 3. 清空源的 own/fatal 指针：所有权随 memcpy 转移进 dst；不清空则源与
+          dst 共享同一堆块 → 两侧析构各释放一次 = double-free。 */
+    ptr_clear_owned_recursive(vm, (type_t *)value_type(src), value_data(src));
+    return dst;
+}
+
 value_t *value_clone(vm_t *vm, value_t *v) {
     if (!v || !v->type) return v;
 
@@ -476,8 +543,17 @@ value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         return value_make_error(vm, "cannot implicitly cast void");
     }
     if (v->type == target) {
-        /* 类型相同，clone 到当前 scope */
-        return value_clone(vm, v);
+        /* 类型相同：把值 materialize 到当前作用域。**必须用
+           value_alloc_data_own**（持有资源则对象图克隆）——此前的 value_clone
+           对 array/tuple/union/option 是**浅拷贝**，会让副本与源共享内嵌 own
+           堆块 → 两侧析构各释放一次 = double-free（实测 access violation）。
+           注意不能只依赖各类型的 vtable implicit_cast：本分支在派发**之前**
+           短路返回，各族自己那条"身份拷贝"分支根本不会被执行到。 */
+        if (value_is_shadow(v)) return value_make_shadow(vm, target);
+        if (!value_data(v)) return v;
+        void *data = value_alloc_data_own(vm, target, value_data(v));
+        if (!data) return value_make_error(vm, "cast: out of memory");
+        return value_make(vm, target, data);
     }
     /* T → ?T 隐式提升（some，D1）：目标为 option 且源不是 option 时提升。
        内层类型完全相同是最常见形态；不同时由 value_lift_option 先按内层做一次

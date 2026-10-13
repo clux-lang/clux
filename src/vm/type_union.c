@@ -1,6 +1,8 @@
 #include "vm/type_union.h"
 #include "vm/type.h"
 #include "vm/value.h"
+#include "vm/value_compound_assign.h" /* compound_assign_transfer（赋值共享实现） */
+#include "vm/value_deepcopy.h"        /* value_alloc_data_own（转换期深拷贝） */
 #include "vm/vm.h"
 #include "core/panic.h"
 #include "core/string.h"
@@ -60,9 +62,8 @@ static value_t *union_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    const type_t *t = value_type(dst);
-    memcpy(value_data(dst), value_data(src), t->size);  /* 平凡覆盖 */
-    return dst;
+    /* 共享实现：释放左值旧值 → memcpy → 清空源（详见 value_compound_assign.h） */
+    return compound_assign_transfer(vm, dst, src);
 }
 
 static void union_dispose(vm_t *vm, value_t *v) {
@@ -135,7 +136,7 @@ static value_t *union_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     if (target != value_type(v))
         return value_make_error(vm, "union: implicit cast only within same union");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
-    void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+    void *data = value_alloc_data_own(vm, target, value_data(v));
     return value_make(vm, target, data);
 }
 

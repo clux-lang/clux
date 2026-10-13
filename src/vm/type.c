@@ -18,6 +18,12 @@
 #include "vm/type_opaque.h"
 #include "vm/type_module.h"
 #include "vm/type_array.h"
+#include "vm/type_struct.h"
+#include "vm/type_tuple.h"
+#include "vm/type_option.h"
+#include "vm/type_union.h"
+#include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 
 #include <string.h>
 #include <stdalign.h>
@@ -493,4 +499,59 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_interrupt = &g_type_interrupt;
     vm->type_opaque = &g_type_opaque;
     vm->type_module = &g_type_module;
+}
+
+/* 取 fatal 变体：**唯一权威定义**（sema 与运行期共用，见 type.h 的说明）。
+   各形态的变体必须由**同一套**参数拼出，否则会 intern 出同布局不同身份的实例。 */
+const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
+    if (!vm || !t) return NULL;
+    if (t->ownership == OWN_FATAL) return t;        /* 幂等 */
+    if (t->ownership != OWN_NONE) return t;         /* 其它所有权：原样 */
+
+    /* 指针 / 切片：顶层所有权升级（无资源可转的形态无从升级） */
+    if (type_is_slice(t)) {
+        if (!type_owns_resources(t)) return t;
+        return type_slice_intern(vm, OWN_FATAL, slice_type_elem(t));
+    }
+    if (type_is_ptr(t)) {
+        if (!type_owns_resources(t)) return t;
+        return type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
+    }
+    if (!type_owns_resources(t)) return t;          /* 无资源：fatal 无意义 */
+
+    switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+        return type_struct_intern_with_ownership(vm, t, OWN_FATAL);
+    case TYPE_KIND_TUPLE: {
+        size_t n = tuple_type_elem_count(t);
+        tuple_elem_t elems[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const tuple_elem_t *e = tuple_type_elem(t, i);
+            elems[i].type = e ? e->type : NULL;
+            elems[i].offset = 0; /* seal 重算 */
+        }
+        return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
+                                                OWN_FATAL);
+    }
+    case TYPE_KIND_ARRAY:
+        return type_array_intern_with_ownership(vm, array_type_elem(t),
+                                                array_type_len(t), OWN_FATAL);
+    case TYPE_KIND_OPTION:
+        return type_option_intern_with_ownership(vm, type_option_inner(t),
+                                                 OWN_FATAL);
+    case TYPE_KIND_UNION: {
+        size_t n = union_type_member_count(t);
+        union_member_t members[n > 0 ? n : 1];
+        for (size_t i = 0; i < n; i++) {
+            const union_member_t *m = union_type_member(t, i);
+            members[i].name = m ? m->name : STRSLICE_EMPTY;
+            members[i].tag = m ? m->tag : (uint32_t)i;
+            members[i].payload_type = m ? m->payload_type : NULL;
+        }
+        return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
+                                                OWN_FATAL);
+    }
+    default:
+        return t; /* 无该变体的形态 */
+    }
 }

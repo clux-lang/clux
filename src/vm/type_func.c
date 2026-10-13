@@ -1,5 +1,6 @@
 #include "vm/type_func.h"
 #include "vm/value.h"
+#include "vm/value_deepcopy.h" /* value_relabel_into（fatal 形参重贴标签） */
 #include "vm/function.h"
 #include "vm/vm.h"
 #include "vm/scope.h"
@@ -185,20 +186,33 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     bool is_error = false;
 
     for (size_t i = 0; i < argc; i++) {
-        /* fatal 形参（`fatal T` / `fatal *T` / `fatal []T`）：所有权**转移**进
-           被调用方，不是拷贝。类型相同（fatal T → fatal T）时下方 else 分支会走
-           value_clone —— 对含 own 字段的复合类型那是一次**多余的深拷贝**
-           （白分配一整套对象图），而且调用方实参仍持有原件，"转移"就名不副实。
-           这里显式走 value_move：接管资源 + 清空源，等价于 O(size) 的 memcpy。 */
+        /* fatal 形参（`fatal T` / `fatal *T` / `fatal []T` / `fatal struct`）：
+           所有权**转移**进被调用方，不是拷贝。判定用"**实参持有资源** 且 形参
+           声明为 fatal 且形参类型持有资源"——不要求实参的运行期类型本身是 fatal
+           变体：构造表达式/`move()` 的产物在**语义**上是将亡值，但运行期保持
+           base 类型（运行期不为同一逻辑类型维护两个实例，见 exec.c 的 value_move）。
+           下方 else 分支对同类型走 value_clone —— 对含 own 字段的复合类型那是一次
+           **多余的深拷贝**（白分配一整套对象图），而且调用方实参仍持有原件，
+           "转移"就名不副实。这里显式走 value_move：接管资源 + 清空源。 */
         if (sig && sig->params && i < sig->param_count && sig->params[i] &&
             type_is_fatal(sig->params[i]) &&
-            type_fatal_carries_resource(value_type(args[i])) &&
-            type_fatal_carries_resource(sig->params[i])) {
+            type_fatal_carries_resource(sig->params[i]) &&
+            type_owns_resources(value_type(args[i]))) {
             value_t *moved = value_move(vm, args[i]);
             if (value_is_error(vm, moved)) {
                 is_error = true;
                 ret = moved;
                 break;
+            }
+            /* 形参声明为 fatal：转移产物必须**是**该 fatal 类型（否则下方
+               "同类型"分支会把它当普通值，而 DEFINE 绑参时按声明的 fatal 类型做
+               普通→fatal 的转换，那不是合法转换）。base 与 fatal 变体逐字节同
+               布局，按形参类型**重贴标签**即可（资源已在 move 内完成转移）。
+               不用 value_implicit_cast：那条路径按各族 vtable 分派，对
+               array/union 等"同布局不同身份"的形态会落到拒绝分支。 */
+            if (value_type(moved) != sig->params[i]) {
+                value_t *relabeled = value_relabel_into(vm, moved, sig->params[i]);
+                if (relabeled) moved = relabeled;
             }
             local_args[i] = moved;
             continue;
@@ -253,9 +267,15 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     if (ret && value_type(ret)) {
         if (sig && sig->return_type &&
             type_is_fatal(sig->return_type) &&
-            type_is_fatal(value_type(ret)) &&
-            type_fatal_carries_resource(value_type(ret))) {
+            type_fatal_carries_resource(sig->return_type) &&
+            type_owns_resources(value_type(ret))) {
+            /* 声明返回值带资源：**转移**（与形参接收同款）。产物是 base 类型，
+               按声明的 fatal 返回类型重贴标签后再交回调用方。 */
             ret = value_move(vm, ret);
+            if (!value_is_error(vm, ret) && value_type(ret) != sig->return_type) {
+                value_t *relabeled = value_relabel_into(vm, ret, sig->return_type);
+                if (relabeled) ret = relabeled;
+            }
         } else {
             ret = value_clone(vm, ret);
         }

@@ -576,6 +576,24 @@ bool type_owns_resources(const type_t *t);
 bool type_fatal_carries_resource(const type_t *t);
 
 /**
+ * 取 `t` 的 **fatal 变体**（fatal T 将亡值，m3-design §3.3）——**唯一的权威
+ * 定义**，sema 与运行期共用：
+ *   - `t` 已是 fatal → 返回 `t`（幂等）；
+ *   - 指针/切片（own/share/weak/ref）→ `*_intern` 成 OWN_FATAL 变体（顶层所有权
+ *     升级；无资源可转的形态返回 NULL）；
+ *   - 复合类型（struct/tuple/array/option/union）**且递归含 own 资源** →
+ *     走各自的 `*_intern_with_ownership(…, OWN_FATAL)`；
+ *   - 其余（无资源可转、或本来就不是所有权形态）→ 返回 `t` 自身（fatal 标记无意义）。
+ *
+ * **为什么必须在 VM 层统一**：fatal 变体是 intern 出来的独立 `type_t`，各
+ * 复合类型各有自己的去重键。若 sema 与运行期各自"拼"变体（一个传字段表指针、
+ * 一个传字段表副本，或元素类型用了 fatal 变体而非 base），会造出**同布局但不同
+ * 身份**的多个 fatal 实例——形参与实参比对失败，转移判定落空，最终表现为
+ * "普通值 → fatal 类型"的非法转换或双释放。集中的一处定义消除了这类分叉。
+ */
+const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
+
+/**
  * 类型是否（**递归**）含 ref 指针——顶层 `ref *T` / `ref []T`，或
  * struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素含
  * ref。

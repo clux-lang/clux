@@ -411,20 +411,13 @@ static const type_t *make_fatal_variant(sema_t *sema, const type_t *base) {
  * 返回 NULL = 无法构造（类型槽位内部错误），调用方转 val_void。 */
 const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *ot) {
   if (!sema || !ot) return NULL;
-  if (type_is_fatal(ot)) return ot;
-  if (type_is_own(ot) || type_is_ref(ot)) {
-    const type_t *fatal = NULL;
-    if (type_is_slice(ot)) {
-      fatal = type_slice_intern(sema->vm, OWN_FATAL, slice_type_elem(ot));
-    } else if (type_is_ptr(ot)) {
-      fatal = type_ptr_intern(sema->vm, OWN_FATAL, ptr_type_base(ot));
-    }
-    if (!fatal) return NULL;
-    sema_type_register(sema, fatal);
-    return fatal;
-  }
-  /* 复合类型：只有**含 own 资源**的才有将亡值变体（无资源者原样） */
-  return make_fatal_variant(sema, ot);
+  /* 变体构造是**唯一权威**，在 VM 层（vm/type.h 的 type_fatal_variant_of）——
+     sema 与运行期必须拿到同一个实例，否则会 intern 出同布局不同身份的 fatal
+     副本，转移判定在函数边界上落空。sema 这层只多做一件事：把变体登记进
+     sema 类型表（hoist 需要它按名 LOAD_TYPE 物化）。 */
+  const type_t *fatal = type_fatal_variant_of(sema->vm, ot);
+  if (fatal) sema_type_register(sema, fatal);
+  return fatal;
 }
 
 const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {

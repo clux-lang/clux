@@ -1540,30 +1540,6 @@ static value_t *ex_construct_fatal(sema_t *sema, ast_node_t **node,
   if (!t || !sema_type_contains_owned_resource(t)) return r;
   const type_t *fatal = sema_fatal_variant_of(sema, t);
   if (!fatal || fatal == t) return r;
-
-  /* 类型槽位改写成 fatal 变体：编译器据此发 LOAD_TYPE <变体 id>，运行期
-     CONSTRUCT 产出 fatal 值（布局与 base 相同，构造/字段访问全部无感）。
-     槽位此刻已是 sema 折叠出的 AST_TYPE_REF（ex_construct 内部调过
-     sema_resolve_type_slot / infer_anon_* 已建 ref），只需把名字换成变体的
-     登记名。匿名构造无槽位（n->type == NULL）时跳过——那种写法本身要求目标
-     类型上下文，运行期类型由外层的类型槽位给出。 */
-  ast_construct_t *cn = (ast_construct_t *)*node;
-  if (cn && cn->type) {
-    const sema_type_t *vst = sema_type_register(sema, fatal);
-    if (vst && vst->name.ptr) {
-      if (cn->type->kind == AST_TYPE_REF) {
-        ((ast_type_ref_t *)cn->type)->name = vst->name;
-      } else {
-        ast_node_t *ref = ast_type_ref_new(sema->arena, cn->type->tok_begin,
-                                           cn->type->tok_end);
-        if (ref) {
-          ((ast_type_ref_t *)ref)->name = vst->name;
-          ref->next = cn->type->next;
-          cn->type = ref;
-        }
-      }
-    }
-  }
   return value_make_shadow(sema->vm, fatal);
 }
 
