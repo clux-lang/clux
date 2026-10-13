@@ -243,6 +243,42 @@ take(.Box{ .p = new i32{3}, .n = 4 });          // ✅ 构造直接喂 fatal 形
   第二次调用幂等空转）。此处曾漏清，导致 union 含 own payload 时必然 double-free
   （access violation），2026-10-13 修复。
 
+### 7.3 推断与扩散的合流：`var a = .T{...}` 不必标注
+
+`var` 推断时把 fatal 剥离成可用类型（**这是 17839d9 / ca00b91 的意图**，与 §7.2 的
+"构造产 fatal T"是两条独立提交，必须同时成立）：
+
+| 推断源 | 推断结果 |
+|---|---|
+| `fatal *T` | `own *T`（指针的所有权升级靠推断，不必写 `own *T`） |
+| `fatal []T` | `own []T` |
+| `fatal T`（复合） | 基础类型 `T`（OWN_NONE）——变量接管后类型就是 T |
+
+所以下面这种写法**不需要**显式标注 `a` 是 `own Test` 还是 `Test`：
+
+```rust
+struct Test { data: own *i32; }
+var a = .Test{ .data = new i32{123} };   // 推断为 Test
+func mk(n: i32): fatal Test { ... }
+var b = mk(7);                            // 推断为 Test（fatal 被剥离）
+var p = new i32{9};                       // 推断为 own *i32
+```
+
+**两者合流的正确形态**（逐字节看过 bytecode，`repro/own-infer` 与
+`tests/driver_own_infer_test.cpp` 锁定）：
+
+```
+LOAD_TYPE <fatal 变体>     ← 构造点（§7.2：产物是 fatal T）
+... CONSTRUCT N            ← 运行期产出 fatal 值
+LOAD_TYPE <基础类型 T>     ← DEFINE 类型槽位（推断写回的显式类型）
+DEFINE "a"                 ← op_define 走 value_implicit_cast：
+                              fatal T → T 的**接管转移**（堆块归变量）
+```
+
+缺任何一侧都会退化：只有推断没有"构造产 fatal"→ 接管无从发生（语义上不算转移）；
+只有"构造产 fatal"没有推断写回 → 运行期值带 fatal 类型而变量声明为 T，转移判定
+落空 → 变量析构不释放堆块（泄漏）或与临时值双释放。
+
 ---
 
 ## 8. 运算符与语法

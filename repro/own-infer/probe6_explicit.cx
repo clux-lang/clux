@@ -1,0 +1,9 @@
+// 显式标注与推断两条路都要通
+struct Test { data: own *i32; n: i32 }
+func main(): i32 {
+    var a: Test = .Test{ .data = new i32{123}, .n = 1 };
+    if (a.data.* != 123) { return 1; }
+    var b: own *i32 = new i32{7};
+    if (b.* != 7) { return 2; }
+    return 0;
+}

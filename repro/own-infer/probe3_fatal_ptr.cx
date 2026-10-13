@@ -1,0 +1,8 @@
+// new 产 fatal 指针 → 推断为 own *i32
+func main(): i32 {
+    var p = new i32{9};
+    if (p.* != 9) { return 1; }
+    p.* = 10;
+    if (p.* != 10) { return 2; }
+    return 0;
+}

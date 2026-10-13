@@ -1,0 +1,7 @@
+// 用户给的确切形态：构造推断，不写任何标注
+struct Test { data: own *i32; }
+func main(): i32 {
+    var a = .Test{ .data = new i32{123} };
+    if (a.data.* != 123) { return 1; }
+    return 0;
+}
