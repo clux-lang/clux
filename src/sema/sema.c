@@ -1238,7 +1238,7 @@ static void pass1_names(sema_t *sema, ast_program_t *prog) {
  *   - var 成员 → SEMA_SYM_VAR（comptime var 标记 is_comptime；pass_globals
  *     求值后激活）
  * member_scope 挂在 sema_symbol_t::member_scope 上，供 ex_call 方法调用
- * 与 ex_enum_ref `T::x` 静态访问解析。
+ * 与 ex_scope_ref `T::x` 静态访问解析。
  *
  * 调用时机：pass1b_types 之后（所有 struct 已 seal）、pass2_types 之前
  * （方法函数需要先注册符号 + 入队，pass2 才能解析签名）。 */

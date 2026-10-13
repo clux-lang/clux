@@ -45,7 +45,7 @@
 #include "parser/ast_volatile.h"
 #include "parser/ast_option.h"
 #include "parser/ast_func_type.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_unwrap.h"
 #include "parser/ast_sizeof.h"
@@ -449,8 +449,8 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "nil");
             break;
         }
-        case AST_ENUM_REF: {
-            ast_enum_ref_t *er = (ast_enum_ref_t *)node;
+        case AST_SCOPE_REF: {
+            ast_scope_ref_t *er = (ast_scope_ref_t *)node;
             render_expr(f, er->type_expr);
             sb_str(&f->sb, "::");
             sb_put(&f->sb, er->variant.ptr, er->variant.len);

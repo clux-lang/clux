@@ -71,7 +71,8 @@ typedef enum {
     AST_FUNC_TYPE,       /* func(param_types...)->ret 函数签名类型（类型构造） */
     AST_TYPE_REF,        /* 类型引用：sema 登记的具名类型（__type_N）→ LOAD_TYPE <id> */
     AST_FUNC_REF,        /* 函数引用：sema 确认的函数名（函数值）→ LOAD_FUNCTION <id> */
-    AST_ENUM_REF,        /* 枚举 variant 引用：Color::Red（sema 折叠 value 入节点） */
+    AST_SCOPE_REF,        /* 作用域限定引用：lhs::name（枚举 variant / 模块成员 /
+                              FFI 符号 / struct 静态成员 / 跨模块 struct 成员） */
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
     AST_UNWRAP,          /* optional 解包：a.!（assert，none 时 panic）/
                             a.?（try，仅词法预留，语义未实现） */

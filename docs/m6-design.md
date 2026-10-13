@@ -688,7 +688,7 @@ type-check 通过但在运行期报错。锚点表与 `ret_kind` 映射见 §14.
 读 `src/compiler/compile_expr.c` 后确认两件事，直接决定步骤 ③ 怎么写：
 
 1. **如何判定"这是 FFI 调用"**：`AST_CALL`（`:439-451`）里 callee 若是
-   **`AST_ENUM_REF`**（即 `<库>::<名>` 的 `::` 形式），就一定是 FFI 调用——
+   **`AST_SCOPE_REF`**（即 `<库>::<名>` 的 `::` 形式），就一定是 FFI 调用——
    枚举 variant（`Color::Red`）**不可能被调用**（写了就是语法/语义错），因此这个
    判据是**充分且廉价**的，不需要在 compiler 里另建 extern cfunc 表。
    命中后：**不**编译 callee（不发 `LOAD_FUNCTION`/`PUSH`），只按序编译实参，然后发
@@ -713,7 +713,7 @@ type-check 通过但在运行期报错。锚点表与 `ret_kind` 映射见 §14.
 - **步骤 ③（compiler）**：`compile_expr.c` 的 `AST_CALL`（`:439-451`）在
   `n->is_ffi_call` 为真时：**不**编译 callee，只编译实参，发
   `EXTERN_CALL <STR 限定名> <U32 argc> <U32 ffi_ret_kind>`，`st_push(c, -(int)argc)`
-  （限定名由 callee 的 `AST_ENUM_REF` 的 `type_expr` 名 + `variant` 拼出）。
+  （限定名由 callee 的 `AST_SCOPE_REF` 的 `type_expr` 名 + `variant` 拼出）。
 - **两处必须同批**：只做 ② 会让调用点通过类型检查却在运行期报 "invalid function"。
 ### 14.10 ✅ M6 语言层打通（2026-10，端到端实测）
 
@@ -723,7 +723,7 @@ sema `ex_call` 拦截并置 `ast_call_t.is_ffi_call`/`ffi_ret_kind` → compiler
 `BCODE_EXTERN_CALL` → VM `op_extern_call` 从模块库表取句柄 → 类型化调用层
 （整数/指针 `ffi_call_int`、浮点 `ffi_call_f64`）。
 
-- **实现要点**：sema 侧只需在 `ex_call` 开头拦截（callee 为 `AST_ENUM_REF` + 库别名为
+- **实现要点**：sema 侧只需在 `ex_call` 开头拦截（callee 为 `AST_SCOPE_REF` + 库别名为
   `SEMA_SYM_EXTERN_LIB`），`::` 分支无需改动；`ret_kind` 由 `func_type_return(sym->type)`
   指针比较得出。
 - **§2 校验已接入**：`extern cfunc` 建符号时逐参数/返回类型校验（option/切片/元组/
@@ -1088,11 +1088,11 @@ func main(): i32 {
 
 | 层 | 改动 |
 |---|---|
-| AST | `ast_var_def_t` 增 `is_extern_var` + `lib_name`；`ast_enum_ref_t` 增 `is_ffi_var` + `ffi_var_kind`（与 `ast_call_t.is_ffi_call`/`ffi_ret_kind` 同一契约：sema 填、compiler 读） |
-| parser | `parse_extern_var`：`extern var <库>::<名>: <T>;`（无体、无初始化器）；赋值左值放行 `AST_ENUM_REF`（**语义判定交给 sema**：只有 extern var 可赋值，enum variant / 模块成员 / 函数各给精确诊断） |
+| AST | `ast_var_def_t` 增 `is_extern_var` + `lib_name`；`ast_scope_ref_t` 增 `is_ffi_var` + `ffi_var_kind`（与 `ast_call_t.is_ffi_call`/`ffi_ret_kind` 同一契约：sema 填、compiler 读） |
+| parser | `parse_extern_var`：`extern var <库>::<名>: <T>;`（无体、无初始化器）；赋值左值放行 `AST_SCOPE_REF`（**语义判定交给 sema**：只有 extern var 可赋值，enum variant / 模块成员 / 函数各给精确诊断） |
 | fmt | `extern var lib::name: T;` 原样渲染（**漏了就是静默改写**：会被格式化成普通 `var … = …`） |
-| sema | ① `pass1_names` 注册限定名符号 `"<库>::<名>"`（新符号种类 `SEMA_SYM_EXTERN_VAR`）+ 别名存在性与类型子集校验；② `ex_enum_ref` 的 `::` 分支：命中 extern var → 置 AST 标志 + 返回声明类型 shadow（读取）；③ `shadow_assign` 新分支 `shadow_assign_extern_var`：类型校验 + 置标志（写入/复合赋值） |
-| compiler | `AST_ENUM_REF`（is_ffi_var）→ `EXTERN_LOAD <"lib::name"> <kind>`；`AST_ASSIGN` 目标同标志 → `EXTERN_STORE`（复合赋值展开 LOAD→op→STORE） |
+| sema | ① `pass1_names` 注册限定名符号 `"<库>::<名>"`（新符号种类 `SEMA_SYM_EXTERN_VAR`）+ 别名存在性与类型子集校验；② `ex_scope_ref` 的 `::` 分支：命中 extern var → 置 AST 标志 + 返回声明类型 shadow（读取）；③ `shadow_assign` 新分支 `shadow_assign_extern_var`：类型校验 + 置标志（写入/复合赋值） |
+| compiler | `AST_SCOPE_REF`（is_ffi_var）→ `EXTERN_LOAD <"lib::name"> <kind>`；`AST_ASSIGN` 目标同标志 → `EXTERN_STORE`（复合赋值展开 LOAD→op→STORE） |
 | VM | `op_extern_load` / `op_extern_store`；与 `op_extern_call` 共用 `ffi_resolve_symbol`（拆 `lib::name` → 库表 → dlsym，诊断带库名/符号名与 OS 文本） |
 | driver | 编译期对每个 `extern var` 做 dlsym 校验（与 `extern cfunc` 同一循环）。**顺带修掉一个真实缺陷**：符号解析失败时同一条诊断被打印两次（重复的 `diag_error`），已合并 |
 | 编码 | `ffi_data_kind_of`（类型→码）与 `ffi_data_type_of`（码→类型+宽度）**成对实现在 `vm/ffi_lib.c`**，避免两处清单漂移 |

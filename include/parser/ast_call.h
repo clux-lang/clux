@@ -14,7 +14,7 @@ typedef struct {
     ast_node_t *args;        /* 实参兄弟链 */
     ast_node_t *args_last;   /* O(1) 追加 */
     /* ---- M6 FFI：extern cfunc 调用的返回类型码 + 变参信息（sema 填、compiler 读）----
-     * callee 是 `<库>::<名>`（AST_ENUM_REF）时，sema 的 `::` 分支解析出该
+     * callee 是 `<库>::<名>`（AST_SCOPE_REF）时，sema 的 `::` 分支解析出该
      * extern cfunc 的签名，把**返回类型码与变参信息**打包进这里（避免 type_t*
      * 跨层传递）：
      *   bits 0..7   = BCODE_FFI_RET_*（返回类型码）
@@ -44,7 +44,7 @@ typedef struct {
      * 表达式压栈，VM 从 receiver 的类型解析方法。
      *
      * `is_member_call` 为 true 时，compiler **不**编译 callee 为 callee 值，
-     * 而是把 callee 的 object（AST_MEMBER）或 type_expr（AST_ENUM_REF）当
+     * 而是把 callee 的 object（AST_MEMBER）或 type_expr（AST_SCOPE_REF）当
      * receiver 编译压栈，然后发 MEMBER_CALL。 */
     bool        is_member_call;
     uint32_t    member_type_id; /* 方法所在的 struct 类型的 type_id（sema 登记） */

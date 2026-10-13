@@ -6,7 +6,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_ref.h"
@@ -192,8 +192,8 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, 1);
     break;
   }
-  case AST_ENUM_REF: {
-    ast_enum_ref_t *n = (ast_enum_ref_t *)node;
+  case AST_SCOPE_REF: {
+    ast_scope_ref_t *n = (ast_scope_ref_t *)node;
 
     /* M5 模块成员访问：type_expr 是 AST_IDENT（未被 sema 折叠为 AST_TYPE_REF）
        → 模块命名空间访问。sema 已校验成员存在。compiler 发：
@@ -226,7 +226,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
 
     /* M6 FFI：`<库>::<数据符号>`（extern var 的读取）。sema 已置 is_ffi_var +
-       ffi_var_kind（契约见 ast_enum_ref.h），这里发 EXTERN_LOAD：运行期 dlsym
+       ffi_var_kind（契约见 ast_scope_ref.h），这里发 EXTERN_LOAD：运行期 dlsym
        得变量地址，按类型码读 size 字节并压对应内建类型的值。**不**编译成
        枚举 variant 路径（那样会去查类型表并报 unknown enum type）。 */
     if (n->is_ffi_var) {
@@ -498,8 +498,8 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        实参，然后发 `EXTERN_CALL <STR "lib::name"> <U32 argc> <U32 ret_kind>`，
        运行期由 op_extern_call 从当前模块的库表取句柄并调用。
        注意：标志在 sema 接线（步骤 ②）之前恒为 false，故本分支是惰性的。 */
-    if (n->is_ffi_call && n->callee && n->callee->kind == AST_ENUM_REF) {
-      ast_enum_ref_t *er = (ast_enum_ref_t *)n->callee;
+    if (n->is_ffi_call && n->callee && n->callee->kind == AST_SCOPE_REF) {
+      ast_scope_ref_t *er = (ast_scope_ref_t *)n->callee;
       if (er->type_expr && er->type_expr->kind == AST_IDENT) {
         ast_ident_t *lib_id = (ast_ident_t *)er->type_expr;
         char qual[512];
@@ -535,7 +535,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     /* struct 方法调用（sema 置 is_member_call + member_type_id）：
        不编译 callee 为函数值——编译 receiver 压栈 + 实参压栈 → MEMBER_CALL。
        实例方法 `a.b(args)`：receiver = a（AST_MEMBER 的 object）。
-       静态方法 `T::f(args)`：receiver = T 的 type value（AST_ENUM_REF 的
+       静态方法 `T::f(args)`：receiver = T 的 type value（AST_SCOPE_REF 的
        type_expr，编译为 LOAD_TYPE <id> 压 type value）。 */
     if (n->is_member_call) {
       strslice_t method_name = {0};
@@ -544,15 +544,15 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
         method_name = mem->field;
         /* 实例方法：编译 object 作为 receiver 压栈 */
         compile_expr(c, mem->object);  /* 栈: [receiver] */
-      } else if (n->callee->kind == AST_ENUM_REF) {
-        ast_enum_ref_t *er = (ast_enum_ref_t *)n->callee;
+      } else if (n->callee->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *er = (ast_scope_ref_t *)n->callee;
         method_name = er->variant;
         /* 静态方法：编译 type_expr 作为 receiver（type value）压栈。
-           跨模块 `mod::Type::f()`：type_expr 是嵌套 AST_ENUM_REF，走 compile_expr
+           跨模块 `mod::Type::f()`：type_expr 是嵌套 AST_SCOPE_REF，走 compile_expr
            的 IMPORT→GET_MEMBER 路径获取模块导出的 type value。
            本模块 `Type::f()`：type_expr 是 AST_IDENT/AST_TYPE_REF，走 compile_type_expr
            的 LOAD_TYPE 路径。 */
-        if (er->type_expr && er->type_expr->kind == AST_ENUM_REF)
+        if (er->type_expr && er->type_expr->kind == AST_SCOPE_REF)
           compile_expr(c, er->type_expr);     /* 栈: [type_value] */
         else
           compile_type_expr(c, er->type_expr);  /* 栈: [type_value] */

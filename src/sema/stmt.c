@@ -74,7 +74,7 @@
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_enum_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
+#include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
 #include "vm/ffi_lib.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
 #include <stdio.h>
@@ -685,12 +685,12 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   /* 左值：`<库>::<数据符号>` = v（M6 FFI，extern var 的写入）。
      与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。
      复合赋值（`crt::x += 1`）走 LOAD → op → STORE，与普通变量同构。 */
-  if (as->target->kind == AST_ENUM_REF) {
+  if (as->target->kind == AST_SCOPE_REF) {
     /* 结构体静态属性：`T::x = v`。在类型的 member_scope 中查成员。
        comptime var 成员是 const（不可赋值）；func 成员不可赋值。
-       type_expr 可能是 AST_IDENT（首次访问）或 AST_TYPE_REF（被 ex_enum_ref
+       type_expr 可能是 AST_IDENT（首次访问）或 AST_TYPE_REF（被 ex_scope_ref
        折叠过）——两种情况都取类型名查全局符号。 */
-    ast_enum_ref_t *er = (ast_enum_ref_t *)as->target;
+    ast_scope_ref_t *er = (ast_scope_ref_t *)as->target;
     strslice_t type_name = STRSLICE_EMPTY;
     if (er->type_expr && er->type_expr->kind == AST_IDENT)
       type_name = ((ast_ident_t *)er->type_expr)->name;
@@ -755,7 +755,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
       }
     }
   }
-  if (as->target->kind == AST_ENUM_REF) {
+  if (as->target->kind == AST_SCOPE_REF) {
     shadow_assign_extern_var(sema, as, scope);
     return;
   }
@@ -1296,14 +1296,14 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
  * 与读取同源：C ABI 层面就是"往 dlsym 得到的变量地址写 size 字节"。这里做三件事：
  *   ① 解析限定名符号（必须是 SEMA_SYM_EXTERN_VAR——函数符号要报"这是函数"）；
  *   ② 在目标节点上置 is_ffi_var/ffi_var_kind（compiler 据此发 EXTERN_STORE，
- *      契约见 ast_enum_ref.h；读取态的 EXTERN_LOAD 也读同样两个字段）；
+ *      契约见 ast_scope_ref.h；读取态的 EXTERN_LOAD 也读同样两个字段）；
  *   ③ 右值类型校验：简单赋值 value_assign(T, rhs)；复合赋值先 shadow 算
  *      `T op rhs` 再校验结果可赋回 T（与普通变量的复合赋值同一套判据）。
  *
  * `nil` 不是合法右值（数据符号没有 optional 形态）。 */
 static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
                                      sema_scope_t *scope) {
-  ast_enum_ref_t *n = (ast_enum_ref_t *)as->target;
+  ast_scope_ref_t *n = (ast_scope_ref_t *)as->target;
 
   /* ② 先取符号（type_expr 是库别名 AST_IDENT）。
      `::` 左侧可能是：extern lib 别名（我们的目标）、模块命名空间、枚举类型。

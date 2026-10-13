@@ -5,7 +5,7 @@
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_ident.h"
-#include "parser/ast_enum_ref.h" /* M6 FFI：extern var 赋值目标（is_ffi_var 契约） */
+#include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标（is_ffi_var 契约） */
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
 #include "parser/ast_block.h"
@@ -97,7 +97,7 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
  * 与 compile_assign_deref 的 PTR_GET/op/PTR_SET 模式同构（差别只在目标不是
  * 求值出来的指针，而是指令里的限定名——地址由运行期 dlsym 得到）。 */
 static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
-  ast_enum_ref_t *t = (ast_enum_ref_t *)n->target;
+  ast_scope_ref_t *t = (ast_scope_ref_t *)n->target;
   if (!t->is_ffi_var || !t->type_expr || t->type_expr->kind != AST_IDENT) {
     c_error(c, &n->base, "malformed extern var assignment target");
     return;
@@ -151,7 +151,7 @@ static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
  * 简单赋值：value → STORE_ATTR <type_id> <name>（净 -1，赋值是语句）
  * 复合赋值：LOAD_ATTR <type_id> <name> → value → op → STORE_ATTR（净 -1） */
 static void compile_assign_struct_attr(compiler_t *c, ast_assign_t *n) {
-  ast_enum_ref_t *t = (ast_enum_ref_t *)n->target;
+  ast_scope_ref_t *t = (ast_scope_ref_t *)n->target;
 
   if (token_is(n->op, "=")) {
     compile_expr(c, n->value);               /* 栈: [value] */
@@ -488,8 +488,8 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       compile_assign_deref(c, n);
       break;
     }
-    if (n->target->kind == AST_ENUM_REF) {
-      ast_enum_ref_t *er = (ast_enum_ref_t *)n->target;
+    if (n->target->kind == AST_SCOPE_REF) {
+      ast_scope_ref_t *er = (ast_scope_ref_t *)n->target;
       if (er->is_struct_attr) {
         /* struct 静态属性赋值 `T::x = v`：sema 已校验成员存在性 +
            置 is_struct_attr + struct_attr_type_id。发 STORE_ATTR。 */

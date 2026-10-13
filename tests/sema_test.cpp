@@ -37,7 +37,7 @@ extern "C" {
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "parser/ast_enum_def.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_struct_def.h"
 #include "vm/type_struct.h"
 }
@@ -3020,7 +3020,7 @@ TEST_F(SemaTest, EnumDefU8Underlying) {
 }
 
 TEST_F(SemaTest, EnumRefInGlobalVarInit) {
-    /* 全局 enum 变量 init 经 ctfe 折叠：AST_ENUM_REF 须在 ctfe 求值成功 */
+    /* 全局 enum 变量 init 经 ctfe 折叠：AST_SCOPE_REF 须在 ctfe 求值成功 */
     EXPECT_TRUE(analyze(
         "enum Color:i32 { Red = 1 }"
         "var g: Color = Color::Red;"

@@ -54,7 +54,7 @@ static inline const enum_variant_t *enum_type_variant(const type_t *t, size_t i)
 }
 
 /**
- * 按名查 variant（sema AST_ENUM_REF 折叠用）：命中返回下标，未找到返回 -1。
+ * 按名查 variant（sema AST_SCOPE_REF 折叠用）：命中返回下标，未找到返回 -1。
  */
 int enum_type_find_variant(const type_t *t, strslice_t name);
 

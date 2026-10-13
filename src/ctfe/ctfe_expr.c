@@ -12,7 +12,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_func_def.h"
@@ -681,12 +681,12 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
            <fid> 加载真实函数对象）。 */
         return ctfe_eval_func_def(ctx, (ast_func_def_t *)node);
     }
-    case AST_ENUM_REF: {
+    case AST_SCOPE_REF: {
         /* 枚举 variant 引用 Color::Red（sema 折叠产物）：type_expr 已折叠
            为 AST_TYPE_REF，value 字段已填底层整数值——查 enum 类型 →
            构造 enum 类型 value（data = 底层宽度的整数值块，MAKE_ENUM
            运行期同构）。全局 enum 变量 init / comptime 折叠消费。 */
-        ast_enum_ref_t *n = (ast_enum_ref_t *)node;
+        ast_scope_ref_t *n = (ast_scope_ref_t *)node;
         value_t *ty = ctfe_eval(ctx, n->type_expr);
         if (value_is_error(vm, ty)) return ty;
         if (!value_is_type(ty, TYPE_KIND_TYPE))

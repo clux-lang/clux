@@ -265,7 +265,7 @@ TEST(Driver, RunFileEnumMultiVariantCompare) {
 }
 
 TEST(Driver, RunFileEnumGlobalVarInit) {
-  /* 全局 enum 变量 init 折叠（Color::Red 折叠为 AST_ENUM_REF 字面量） */
+  /* 全局 enum 变量 init 折叠（Color::Red 折叠为 AST_SCOPE_REF 字面量） */
   std::string path = write_temp_file(
       "enum Color:i32 { Red = 1, Green = 2 }\n"
       "var g: Color = Color::Green;\n"

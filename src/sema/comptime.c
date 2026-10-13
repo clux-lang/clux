@@ -14,7 +14,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_enum_def.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
@@ -164,7 +164,7 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
   }
   if (t->kind == TYPE_KIND_ENUM) {
     /* 枚举常量：底层恒为整型，编码底层整数值（i 字段按底层宽度读）。
-       折叠为 AST_ENUM_REF（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM，
+       折叠为 AST_SCOPE_REF（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM，
        与源码引用 Color::Red 同构）。 */
     out->i = enum_read_ct_int(v);
     return true;
@@ -325,15 +325,15 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     return ref;
   }
   if (t->kind == TYPE_KIND_ENUM) {
-    /* 枚举常量：折叠为 AST_ENUM_REF（type_expr 登记为 AST_TYPE_REF +
+    /* 枚举常量：折叠为 AST_SCOPE_REF（type_expr 登记为 AST_TYPE_REF +
        底层整数值）。variant 名留空——compiler 分支只用 type_expr/value
        （LOAD_TYPE + PUSH_I* + MAKE_ENUM），与源码引用同构。 */
     ast_node_t *type_expr = sema_ct_type_ref(sema, t, origin);
     if (!type_expr) return NULL;
     ast_node_t *ref =
-        ast_enum_ref_new(arena, origin->tok_begin, origin->tok_end);
+        ast_scope_ref_new(arena, origin->tok_begin, origin->tok_end);
     if (!ref) return NULL;
-    ast_enum_ref_t *er = (ast_enum_ref_t *)ref;
+    ast_scope_ref_t *er = (ast_scope_ref_t *)ref;
     er->type_expr = type_expr;
     er->value     = ct->i;
     return ref;

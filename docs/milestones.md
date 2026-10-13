@@ -288,7 +288,7 @@
    - `src/sema/expr.c` 的 `sema_expr` 原是 **2114 行**单函数（34 个 case，最大
      case 588 行）。按 AST kind 抽出 **27 个静态处理器**
      （`ex_new` / `ex_construct` / `ex_ident` / `ex_call` / `ex_index` /
-     `ex_member` / `ex_slice` / `ex_make` / `ex_move` / `ex_enum_ref` /
+     `ex_member` / `ex_slice` / `ex_make` / `ex_move` / `ex_scope_ref` /
      `ex_unary` / `ex_unwrap` / `ex_ternary` / `ex_func_ref` / `ex_sizeof_alignof` /
      `ex_type_expr` / …），`sema_expr` 只剩 **114 行分派表**。
      纯搬移（每个 case 体逐字未改），1563 测试全绿。
@@ -878,7 +878,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
      `EXTERN_CALL`）——两者需同批完成，之后 `crt::strlen(s)` 即可源码直调。
 47. **M6：compiler 侧接线判定已核实（§14.7 补遗三）**
    - 读 `src/compiler/compile_expr.c` 确认：`AST_CALL`（`:439-451`）的 callee 若是
-     `AST_ENUM_REF`（`<库>::<名>`）**就一定是 FFI 调用**——枚举 variant 不可能被调用，
+     `AST_SCOPE_REF`（`<库>::<名>`）**就一定是 FFI 调用**——枚举 variant 不可能被调用，
      故该判据充分且廉价，**不需要在 compiler 里另建 extern cfunc 表**；命中后不编译
      callee，只编译实参并发 `EXTERN_CALL`。
    - `ret_kind` 用 `c_resolve_type(c, <return_expr>)`（同文件 `:466` 有用法）解析返回类型，
@@ -889,7 +889,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
 48. **M6：为步骤 ③ 预置 AST 槽位（`ast_call_t.is_ffi_call` / `ffi_ret_kind`）**
    - `include/parser/ast_call.h` 新增两个字段（纯数据、零行为变更）：`bool is_ffi_call`
      与 `uint8_t ffi_ret_kind`（0 = void、1 = i32、2 = i64/u64、3 = 指针/opaque、4 = f32/f64）。
-   - **契约**（写在字段注释里）：callee 为 `<库>::<名>`（`AST_ENUM_REF`）时，sema 的
+   - **契约**（写在字段注释里）：callee 为 `<库>::<名>`（`AST_SCOPE_REF`）时，sema 的
      `::` 分支解析出 extern cfunc 签名，**由 sema 的 AST_CALL 处理点**用该签名填充这两个
      字段；compiler 据此改发 `BCODE_EXTERN_CALL`，**不再**走 callee + `CALL`。用**数值
      类别**而非 `type_t*`，避免类型句柄跨层传递。
@@ -897,7 +897,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
    - 验证（强制全量重编）：`build exit=0`、**0 告警**、**1603/1603**。
 49. **🎉 M6 打通：`crt::abs(-7)` / `crt::sqrt(9.0)` 在 clux 源码里直接可调**
    - **步骤 ②（sema）完成**：`src/sema/expr.c` 的 `ex_call` 开头拦截 FFI 调用——callee 是
-     `AST_ENUM_REF` 且库别名解析为 `SEMA_SYM_EXTERN_LIB` 时：查限定名函数符号（步骤 ①
+     `AST_SCOPE_REF` 且库别名解析为 `SEMA_SYM_EXTERN_LIB` 时：查限定名函数符号（步骤 ①
      注册 ✓）→ 置 `call->is_ffi_call = true` + 按 `func_type_return(fs->type)` 写
      `ffi_ret_kind`（void→0/i32→1/i64·u64→2/指针·opaque→3/f32·f64→4）→ 返回返回类型的
      shadow 作为表达式类型；未找到声明则报
@@ -1106,9 +1106,9 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       类型一致**（读多/写多会踩到相邻符号）。§2 允许但布局不定的类型
       （`str`/`struct`/`enum`/切片/指针所有权）在这里**明确报错**。
     - **实现链路**（与 `extern cfunc` 对称）：AST（`ast_var_def_t.is_extern_var` +
-      `lib_name`；`ast_enum_ref_t.is_ffi_var` + `ffi_var_kind`，与
+      `lib_name`；`ast_scope_ref_t.is_ffi_var` + `ffi_var_kind`，与
       `ast_call_t.is_ffi_call` 同一契约）→ parser（`parse_extern_var`；赋值左值放行
-      `AST_ENUM_REF`，**语义判定交给 sema**）→ fmt（原样渲染，否则会被静默改写成普通
+      `AST_SCOPE_REF`，**语义判定交给 sema**）→ fmt（原样渲染，否则会被静默改写成普通
       `var … = …`）→ sema（限定名符号 `SEMA_SYM_EXTERN_VAR` + `::` 读取分支 +
       `shadow_assign_extern_var` 写入分支）→ compiler（`EXTERN_LOAD`/`EXTERN_STORE`）
       → VM（`op_extern_load`/`op_extern_store`，与 `op_extern_call` 共用

@@ -9,7 +9,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
@@ -1710,12 +1710,12 @@ static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
   }
 }
 
-/* 从 `mod::Type` 形式的 AST_ENUM_REF 解析被导入模块导出的 struct 类型。
+/* 从 `mod::Type` 形式的 AST_SCOPE_REF 解析被导入模块导出的 struct 类型。
  * type_expr 是 AST_IDENT（模块别名），variant 是类型名。
  * 直接从 module->exports 查 type value，取其指向的 type_t*。
  * 非 struct / 未找到返回 NULL。 */
 static const type_t *resolve_cross_module_struct(sema_t *sema,
-                                                  ast_enum_ref_t *er,
+                                                  ast_scope_ref_t *er,
                                                   sema_scope_t *scope) {
   if (!er || !er->type_expr || er->type_expr->kind != AST_IDENT) return NULL;
   ast_ident_t *id = (ast_ident_t *)er->type_expr;
@@ -1829,19 +1829,19 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         }
       }
       /* ---- 静态方法调用 `T::f(args)` ----
-       * callee 是 AST_ENUM_REF，type_expr 解析到 SEMA_SYM_TYPE（struct），
+       * callee 是 AST_SCOPE_REF，type_expr 解析到 SEMA_SYM_TYPE（struct），
        * variant 是方法名。sema 查 member_scope 命中函数 → 置 is_member_call。
        * compiler 编译 type_expr 压 type value（receiver），发 MEMBER_CALL。
        *
-       * 跨模块 `mod::Type::f(args)`：type_expr 是嵌套 AST_ENUM_REF（mod::Type）。
+       * 跨模块 `mod::Type::f(args)`：type_expr 是嵌套 AST_SCOPE_REF（mod::Type）。
        * 被导入模块已 exec_run，运行时 struct_type_t.attributes / methods 已填充。
        * 从运行时 attributes 查方法 func value，取其签名类型做参数校验。 */
       if (!call->is_member_call && call->callee &&
-          call->callee->kind == AST_ENUM_REF) {
-        ast_enum_ref_t *er = (ast_enum_ref_t *)call->callee;
-        if (er->type_expr && er->type_expr->kind == AST_ENUM_REF) {
+          call->callee->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *er = (ast_scope_ref_t *)call->callee;
+        if (er->type_expr && er->type_expr->kind == AST_SCOPE_REF) {
           /* ---- 跨模块静态方法 `mod::Type::f(args)` ---- */
-          ast_enum_ref_t *inner_er = (ast_enum_ref_t *)er->type_expr;
+          ast_scope_ref_t *inner_er = (ast_scope_ref_t *)er->type_expr;
           const type_t *st = resolve_cross_module_struct(sema, inner_er,
                                                          scope);
           if (!st) {
@@ -1877,7 +1877,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             }
           }
         } else {
-        /* type_expr 可能是 AST_IDENT（首次）或 AST_TYPE_REF（被 ex_enum_ref
+        /* type_expr 可能是 AST_IDENT（首次）或 AST_TYPE_REF（被 ex_scope_ref
            折叠过）——两种情况都取类型名查全局符号。 */
         strslice_t tn = STRSLICE_EMPTY;
         if (er->type_expr && er->type_expr->kind == AST_IDENT)
@@ -1923,7 +1923,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
 
       /* ---- member_call 提前返回 ----
        * is_member_call 为 true 时，callee 不走 shadow 求值（它是 AST_MEMBER/
-       * AST_ENUM_REF，不是函数值表达式）。方法签名已在 member_scope 注册时由
+       * AST_SCOPE_REF，不是函数值表达式）。方法签名已在 member_scope 注册时由
        * pass2 解析；此处从符号取签名，做实参校验（含接收者），返回 return_type
        * shadow。compiler 据此发 MEMBER_CALL。
        *
@@ -1936,8 +1936,8 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         strslice_t mname = {0};
         if (call->callee->kind == AST_MEMBER)
           mname = ((ast_member_t *)call->callee)->field;
-        else if (call->callee->kind == AST_ENUM_REF)
-          mname = ((ast_enum_ref_t *)call->callee)->variant;
+        else if (call->callee->kind == AST_SCOPE_REF)
+          mname = ((ast_scope_ref_t *)call->callee)->variant;
         const struct_type_t *owner = NULL;
         sema_symbol_t *msym = sema_struct_find_member(sema, st, mname,
                                                       call->callee, &owner);
@@ -1987,13 +1987,13 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
       }
 
-      /* M6 FFI：extern cfunc 调用（`<库>::<名>(...)`）——callee 是 AST_ENUM_REF 且库
+      /* M6 FFI：extern cfunc 调用（`<库>::<名>(...)`）——callee 是 AST_SCOPE_REF 且库
          别名解析为 SEMA_SYM_EXTERN_LIB 时：**不做** value_call（那里没有运行时函数
          对象），置 AST 标志供 compiler 发 EXTERN_CALL（契约见 ast_call.h），并返回
          返回类型的 shadow 作为本表达式的类型。限定名符号由 pass1_names 注册
          （步骤 ①，含 §2 C ABI 校验）。 */
-      if (call->callee->kind == AST_ENUM_REF) {
-        ast_enum_ref_t *er = (ast_enum_ref_t *)call->callee;
+      if (call->callee->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *er = (ast_scope_ref_t *)call->callee;
         if (er->type_expr && er->type_expr->kind == AST_IDENT) {
           ast_ident_t *lib_id = (ast_ident_t *)er->type_expr;
           sema_symbol_t *lsym = sema_lookup(scope, lib_id->name);
@@ -2521,18 +2521,18 @@ static value_t *ex_slice(sema_t *sema, ast_node_t **node,
       return value_make_shadow(sema->vm, slice_t);
 }
 
-/* AST_ENUM_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
-static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
+/* AST_SCOPE_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+static value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* M5：:: 成员访问有两种语义——枚举 variant（Color::Red）与
          模块成员（std::add）。先检查 type_expr 是否是模块别名
          （AST_IDENT 解析到 SEMA_SYM_MODULE 符号），若是则走模块成员
          路径；否则走枚举 variant 路径。链式访问 a::b::c 由 parser 产出
-         嵌套 AST_ENUM_REF（lhs 也可以是 AST_ENUM_REF），递归处理。 */
-      ast_enum_ref_t *n = (ast_enum_ref_t *)*node;
+         嵌套 AST_SCOPE_REF（lhs 也可以是 AST_SCOPE_REF），递归处理。 */
+      ast_scope_ref_t *n = (ast_scope_ref_t *)*node;
 
       /* ---- 跨模块 struct 成员访问：`mod::Type::member` ----
-       * type_expr 是嵌套 AST_ENUM_REF（mod::Type），从模块导出直接解析 struct
+       * type_expr 是嵌套 AST_SCOPE_REF（mod::Type），从模块导出直接解析 struct
        * 类型。被导入模块已完整走完流水线（含 exec_run），运行时
        * struct_type_t.attributes / methods 已填充，从此查成员。
        * 命中方法 → 返回函数签名 shadow（compiler 发 IMPORT→GET_MEMBER 压 type
@@ -2540,8 +2540,8 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
        * 命中静态属性 → 标记 is_struct_attr + struct_attr_type_id（LOAD_ATTR）。
        * （源模块 sema 已销毁，sema_struct_find_member 的 member_scope 不存在，
        *  只能依赖运行时 attributes。） */
-      if (n->type_expr && n->type_expr->kind == AST_ENUM_REF) {
-        ast_enum_ref_t *inner_er = (ast_enum_ref_t *)n->type_expr;
+      if (n->type_expr && n->type_expr->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *inner_er = (ast_scope_ref_t *)n->type_expr;
         const type_t *st = resolve_cross_module_struct(sema, inner_er, scope);
         if (!st) {
           diag_error(sema->diag, sema_loc(sema, *node),
@@ -2586,7 +2586,7 @@ static value_t *ex_enum_ref(sema_t *sema, ast_node_t **node,
                                   ex_call，本分支落到这里说明是"当值用"）；
              - `extern var`    → SEMA_SYM_EXTERN_VAR：**数据符号引用**（读值；
                                  作为赋值目标由 shadow_assign 的另一入口处理）。
-             这里按类型码置 AST 标志（契约见 ast_enum_ref.h），compiler 据
+             这里按类型码置 AST 标志（契约见 ast_scope_ref.h），compiler 据
              此发 EXTERN_LOAD；返回声明类型的 shadow 供类型检查。 */
         /* ---- 结构体命名空间成员：`T::x`（静态属性）/ `T::f`（方法 / 限定调用）----
          * struct 成员注册在类型的 member_scope 中（不再展开为全局 `T::name`）。
@@ -3317,8 +3317,8 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return ex_type_expr(sema, node, scope);
     case AST_TYPE_REF:
       return ex_type_ref(sema, node, scope);
-    case AST_ENUM_REF:
-      return ex_enum_ref(sema, node, scope);
+    case AST_SCOPE_REF:
+      return ex_scope_ref(sema, node, scope);
     case AST_NEW:
       return ex_new(sema, node, scope);
     case AST_MAKE:
@@ -3375,7 +3375,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     if (is_poison(sema, expr))
       return val_void(sema);
     /* rhs 是类型表达式：sema_resolve_type_slot 解析为真实类型并就地替换
-       为 AST_TYPE_REF（与 AST_ARRAY/AST_ENUM_REF 同构——运行期 compiler
+       为 AST_TYPE_REF（与 AST_ARRAY/AST_SCOPE_REF 同构——运行期 compiler
        的 compile_type_expr 命中 AST_TYPE_REF 发 LOAD_TYPE，保证 as 右侧
        压入真实 type value；否则复合类型表达式如 own *i32 落默认分支发
        PUSH_UNDEFINED，CAST 弹 undefined 崩溃）。 */

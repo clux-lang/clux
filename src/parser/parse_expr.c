@@ -23,7 +23,7 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_unwrap.h"
@@ -907,11 +907,11 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
 
         /* 命名空间成员引用：Type::Variant（枚举 variant）或
          * Module::name（模块成员访问）。
-         * lhs 须为标识符或已解析的 :: 链（AST_ENUM_REF），支持链式访问
+         * lhs 须为标识符或已解析的 :: 链（AST_SCOPE_REF），支持链式访问
          * a::b::c。'::' 是 lexer 产出的双字符 SYMBOL token。
          * sema 层区分 enum variant vs 模块成员。 */
         if (check_symbol(p, "::")) {
-            if (lhs->kind != AST_IDENT && lhs->kind != AST_ENUM_REF) {
+            if (lhs->kind != AST_IDENT && lhs->kind != AST_SCOPE_REF) {
                 return ast_error_new(p->diag, p->tokens, p->arena, lhs->tok_begin,
                                      p->pos, "expected type name or module name before '::'");
             }
@@ -926,10 +926,10 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             strslice_t variant = token_strslice(cur_token(p));
             advance(p);
 
-            ast_node_t *node = ast_enum_ref_new(p->arena, tb, p->pos);
+            ast_node_t *node = ast_scope_ref_new(p->arena, tb, p->pos);
             if (!node) return NULL;
-            ((ast_enum_ref_t *)node)->type_expr = lhs;
-            ((ast_enum_ref_t *)node)->variant   = variant;
+            ((ast_scope_ref_t *)node)->type_expr = lhs;
+            ((ast_scope_ref_t *)node)->variant   = variant;
             lhs = node;
             continue;
         }
@@ -1232,12 +1232,12 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
              * sema 层做最终校验（数组下标赋值 / 泛型占位诊断）。
              * 成员访问目标（AST_MEMBER）支持 p.x = v、p.x += v 等复合赋值，
              * 字段存在性/const 检查在 sema 层。
-             * AST_ENUM_REF 同理：parser 无法区分"枚举 variant / 模块成员 /
+             * AST_SCOPE_REF 同理：parser 无法区分"枚举 variant / 模块成员 /
              * 外部数据符号"，能不能赋值由 sema 判定（只有 extern var 可以，
              * 其余给出精确诊断）——parser 在这里只放行语法形态。 */
             if (left->kind != AST_IDENT && left->kind != AST_INDEX &&
                 left->kind != AST_MEMBER && left->kind != AST_DEREF &&
-                left->kind != AST_ENUM_REF) {
+                left->kind != AST_SCOPE_REF) {
                 return ast_error_new(p->diag, p->tokens, p->arena, left->tok_begin, p->pos,
                                      "invalid assignment target");
             }

@@ -1,5 +1,5 @@
-#ifndef _H_CLUX_PARSER_AST_ENUM_REF_
-#define _H_CLUX_PARSER_AST_ENUM_REF_
+#ifndef _H_CLUX_PARSER_AST_SCOPE_REF_
+#define _H_CLUX_PARSER_AST_SCOPE_REF_
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -10,17 +10,22 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
-/* 枚举 variant 引用节点：Color::Red
+/* 作用域限定引用节点：lhs::name
  *
- * type_expr 为枚举类型名（AST_IDENT；sema 折叠为 AST_TYPE_REF，compiler 发
- * LOAD_TYPE <id>）。variant 为 variant 名。sema 折叠时把 enum_type_find_variant
- * 查到的底层整数值写入 value 字段（compiler 发 PUSH_I* <value> + MAKE_ENUM）。
- * 未找到 variant 时 sema 报错并置 value=0（错误恢复产物）。
+ * 通用 `::` 限定访问节点，承载五种语义（sema 按上下文分派）：
+ *   - 枚举 variant：Color::Red（type_expr 折叠为 AST_TYPE_REF，value 存底层整数）
+ *   - 模块成员：mod::func（type_expr 是 AST_IDENT 解析到 SEMA_SYM_MODULE）
+ *   - FFI 符号：libc::printf / libc::var（is_ffi_var / is_ffi_call 标记）
+ *   - struct 静态成员：T::x / T::f（is_struct_attr 标记）
+ *   - 跨模块 struct 成员：mod::Type::method（type_expr 是嵌套 AST_SCOPE_REF）
+ *
+ * 链式访问 a::b::c 由 parser 产出嵌套 AST_SCOPE_REF（lhs 也可以是
+ * AST_SCOPE_REF），sema 递归处理。
  */
 typedef struct {
-    ast_node_t  base;        /* kind = AST_ENUM_REF */
-    ast_node_t *type_expr;   /* 枚举类型名（AST_IDENT → sema 折叠为 AST_TYPE_REF） */
-    strslice_t  variant;     /* variant 名 */
+    ast_node_t  base;        /* kind = AST_SCOPE_REF */
+    ast_node_t *type_expr;   /* 左侧表达式（AST_IDENT / AST_TYPE_REF / 嵌套 AST_SCOPE_REF） */
+    strslice_t  variant;     /* `::` 右侧的名字 */
     int64_t     value;       /* sema 折叠后的底层整数值 */
 
     /* ---- M6 FFI：`<库别名>::<数据符号>`（extern var 的引用）----
@@ -44,14 +49,14 @@ typedef struct {
      * type_expr 被 sema 折叠为 AST_TYPE_REF（类型引用）。 */
     bool        is_struct_attr;
     uint32_t    struct_attr_type_id; /* 属性所在的 struct 类型的 type_id */
-} ast_enum_ref_t;
+} ast_scope_ref_t;
 
-static inline ast_node_t *ast_enum_ref_new(arena_t *arena,
+static inline ast_node_t *ast_scope_ref_new(arena_t *arena,
                                            uint32_t tok_begin, uint32_t tok_end) {
-    ast_enum_ref_t *n = (ast_enum_ref_t *)arena_calloc(
-        arena, 1, sizeof(ast_enum_ref_t), ALIGNOF(max_align_t));
+    ast_scope_ref_t *n = (ast_scope_ref_t *)arena_calloc(
+        arena, 1, sizeof(ast_scope_ref_t), ALIGNOF(max_align_t));
     if (!n) return NULL;
-    n->base.kind      = AST_ENUM_REF;
+    n->base.kind      = AST_SCOPE_REF;
     n->base.tok_begin = tok_begin;
     n->base.tok_end   = tok_end;
     return &n->base;
@@ -60,4 +65,4 @@ static inline ast_node_t *ast_enum_ref_new(arena_t *arena,
 #ifdef __cplusplus
 }
 #endif
-#endif /* _H_CLUX_PARSER_AST_ENUM_REF_ */
+#endif /* _H_CLUX_PARSER_AST_SCOPE_REF_ */

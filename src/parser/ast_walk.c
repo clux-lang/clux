@@ -9,7 +9,7 @@
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_func_type.h"
 #include "parser/ast_index.h"
@@ -123,8 +123,8 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_deref_t *)node)->operand, visit, user);
     case AST_MOVE:
       return ast_walk_preorder(((ast_move_t *)node)->operand, visit, user);
-    case AST_ENUM_REF:
-      return ast_walk_preorder(((ast_enum_ref_t *)node)->type_expr, visit,
+    case AST_SCOPE_REF:
+      return ast_walk_preorder(((ast_scope_ref_t *)node)->type_expr, visit,
                                user);
 
     default:

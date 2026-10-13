@@ -39,7 +39,7 @@ extern "C" {
 #include "parser/ast_program.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_enum_def.h"
-#include "parser/ast_enum_ref.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_alignof.h"
@@ -1818,7 +1818,7 @@ TEST_F(ParseStmtTest, EnumDef_AtTopLevel) {
 
 /**
  * Scenario: 表达式位置 Color::Red
- * Expected: AST_ENUM_REF（type_expr=AST_IDENT Color，variant=Red）
+ * Expected: AST_SCOPE_REF（type_expr=AST_IDENT Color，variant=Red）
  */
 TEST_F(ParseStmtTest, EnumRef_Basic) {
     parser_t *p = make_parser("Color::Red");
@@ -1826,9 +1826,9 @@ TEST_F(ParseStmtTest, EnumRef_Basic) {
 
     ast_node_t *node = parse_expr(p);
     ASSERT_NE(node, nullptr);
-    ASSERT_EQ(node->kind, AST_ENUM_REF);
+    ASSERT_EQ(node->kind, AST_SCOPE_REF);
 
-    auto *er = (ast_enum_ref_t *)node;
+    auto *er = (ast_scope_ref_t *)node;
     ASSERT_NE(er->type_expr, nullptr);
     EXPECT_EQ(er->type_expr->kind, AST_IDENT);
     EXPECT_TRUE(strslice_eq(((ast_ident_t *)er->type_expr)->name,
