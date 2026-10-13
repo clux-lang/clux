@@ -1497,7 +1497,7 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         if (!m->payload_type)
             return value_make_error(vm, "construct: union member type missing");
         /* 隐式转换 payload 值 → member 类型（同类型身份短路；字面量 i32 →
-           i64 成员宽度提升） */
+           i64 成员宽度提升；fatal 指针 → own 接管产物在 cast 内转移、源清零） */
         value_t *casted = value_implicit_cast(vm, payload, m->payload_type);
         if (value_is_error(vm, casted)) return casted;
         void *data = value_alloc_data(vm->alloc, t);  /* 清零 */
@@ -1505,6 +1505,17 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
         /* data 全平凡：payload 为 memcpy 可拷贝字节块，直接拷贝到偏移 */
         memcpy((uint8_t *)data + ut->payload_offset, value_data(casted),
                m->payload_type->size);
+        /* **成员值已复制进 data：所有权随 memcpy 转移——清空源的 own/fatal
+           指针**（与 struct 构造分支同款，原先漏了这一步）。漏掉会让 payload
+           临时值在作用域退出时**先**释放内嵌堆块，随后 union 成员再释放同一个块
+           → double-free（实测 access violation）。
+           清两处（casted 与 payload）覆盖两种路径，两者都是**本次构造的临时值**
+           （表达式求值产物，不是具名变量的视图）：异类型时 casted 是新值、payload
+           是原值，指针可能落在任一手上；同类型短路时两者同一个对象，第二次调用是
+           幂等空转（指针已 NULL）。 */
+        ptr_clear_owned_recursive(vm, m->payload_type, value_data(casted));
+        if (casted != payload)
+            ptr_clear_owned_recursive(vm, m->payload_type, value_data(payload));
         return value_make(vm, t, data);
     }
 

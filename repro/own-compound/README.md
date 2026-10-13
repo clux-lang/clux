@@ -90,6 +90,8 @@ ownership 无关 → 两者走同一条路径，无需特判。
 
 | 文件 | 覆盖 | 期望 |
 |---|---|---|
+| `probe0_union.cx` | union 含 own payload：构造/接管/move/clone/fatal 传参/显式丢弃 | exit 0 |
+| `probe0b_union_param.rejected.cx` | **反例**：union 含 own payload 时按值传参 | exit 1 |
 | `probe1_nested_field.cx` | 内层构造（fatal Inner）作外层字段值 → 转移 | exit 0 |
 | `probe2_ownptr_copy.rejected.cx` | **反例**：`own *i32` 直接 copy（既有规则对照） | exit 1 |
 | `probe2b_struct_copy.rejected.cx` | **反例**：含 own 字段的结构体 copy | exit 1 |
@@ -97,6 +99,20 @@ ownership 无关 → 两者走同一条路径，无需特判。
 | `probe4_param_ref.rejected.cx` | **反例**：参数含 ref 字段但未标注作用域 | exit 1 |
 | `probe5_bare_discard.rejected.cx` | **反例**：fatal 裸表达式语句（应写 `_ = `） | exit 1 |
 | `probe6_explicit_discard.cx` | `_ = ` 显式丢弃 fatal 复合值 → 递归释放内嵌 own | exit 0 |
+
+### union 的 double-free（本目录发现并修复）
+
+`op_construct` 的 **union 分支**原先 memcpy payload 后**没有清空源**（struct 分支
+有 `ptr_clear_owned_recursive`）。于是 payload 临时值仍持有内嵌堆块：
+
+1. 作用域退出时 payload 临时值先释放该堆块（`own *i32` 的销毁路径）；
+2. union 成员随后再释放**同一个**堆块 → double-free（access violation）。
+
+修法与 struct 分支对齐：memcpy 后对 `casted`（异类型转换产物）与 `payload`
+（原值）都做递归清空——两者都是本次构造的**临时值**（表达式求值产物），清空它们
+不伤任何具名变量；同类型短路时两者是同一对象，第二次调用幂等空转。
+
+回归用例见 `tests/driver_own_compound_test.cpp` 的 `UnionWithOwnPayload*` 四例。
 
 ## 与其他目录的关系
 

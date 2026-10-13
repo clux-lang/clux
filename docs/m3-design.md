@@ -233,6 +233,16 @@ take(.Box{ .p = new i32{3}, .n = 4 });          // ✅ 构造直接喂 fatal 形
 接管方或由 DISPOSE 释放，所以销毁路径碰它就是 double-free。fatal 复合类型与 base
 逐字节同布局，递归销毁按字段偏移分派，与 ownership 无关 → 两者天然同路径。
 
+**构造必须"物化即转移"**：每个构造分支把成员/字段值 memcpy 进新块后，都要对**源
+临时值**做 `ptr_clear_owned_recursive`（把内嵌 own/fatal 指针置 NULL），否则源临时
+值在作用域退出时先释放内嵌堆块、新块再释放同一个 → double-free。
+
+- struct 分支：逐字段按 `field->type` 清空（既有）。
+- **union 分支**：按激活 member 的 `payload_type` 清空**两处**——`casted`（异类型
+  转换的产物）与原 `payload`（两者都是本次构造的临时值；同类型短路时是同一对象，
+  第二次调用幂等空转）。此处曾漏清，导致 union 含 own payload 时必然 double-free
+  （access violation），2026-10-13 修复。
+
 ---
 
 ## 8. 运算符与语法

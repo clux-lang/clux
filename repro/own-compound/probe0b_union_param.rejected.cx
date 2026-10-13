@@ -1,0 +1,13 @@
+// probe0b_union_param.rejected.cx: **反例** —— union 含 own payload 时按值传参
+// 与 struct 同规则：只能 `fatal U`（借用写 `ref *U`）。
+// 诊断：function parameter 'u' of type 'U' contains owned pointers and cannot be
+//       passed by value (use 'fatal U' and take ownership inside with move(),
+//       or 'ref *U' to borrow)
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+union U { p: own *i32; n: i32 }
+
+func bad(u: U): i32 { return u.n; }
+
+func main(): i32 { return 0; }

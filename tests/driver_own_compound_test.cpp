@@ -279,7 +279,65 @@ TEST(DriverOwnCompound, BareFatalExpressionStatementIsRejected) {
   std::remove(path.c_str());
 }
 
-/* ---- 6. 其他复合形态：tuple / option / array ---- */
+/* ---- 6. 其他复合形态：tuple / option / array / union ---- */
+
+TEST(DriverOwnCompound, UnionWithOwnPayloadConstructAndRead) {
+  /* union 含 own payload：构造产 fatal U → own 变量接管，字段访问正常。
+     回归：op_construct 的 union 分支原先 memcpy payload 后**没有清空源**，payload
+     临时值在作用域退出时先释放内嵌堆块、union 成员随后再释放同一个块 →
+     double-free（实测 access violation）。 */
+  std::string path = write_temp_file(
+      "union U { p: own *i32; n: i32 }\n"
+      "func main(): i32 {\n"
+      "  var a: U = .U{ .p = new i32{5} };\n"
+      "  if (a.p.* != 5) { return 1; }\n"
+      "  var b: U = move(a);\n"
+      "  if (b.p.* != 5) { return 2; }\n"
+      "  var c: U = .U{ .p = new i32{6} };\n"
+      "  var d: U = clone(c);\n"
+      "  if (d.p.* != 6 || c.p.* != 6) { return 3; }\n"
+      "  _ = .U{ .p = new i32{7} };\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, UnionWithOwnPayloadParamNeedsFatal) {
+  std::string path = write_temp_file(
+      "union U { p: own *i32; n: i32 }\n"
+      "func bad(u: U): i32 { return u.n; }\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, UnionWithOwnPayloadViaFatalPasses) {
+  std::string path = write_temp_file(
+      "union U { p: own *i32; n: i32 }\n"
+      "func take(u: fatal U): i32 {\n"
+      "  var owned: U = move(u);\n"
+      "  return owned.p.*;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (take(.U{ .p = new i32{7} }) != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(DriverOwnCompound, UnionWithOwnPayloadCopyIsRejected) {
+  std::string path = write_temp_file(
+      "union U { p: own *i32; n: i32 }\n"
+      "func main(): i32 {\n"
+      "  var a: U = .U{ .p = new i32{1} };\n"
+      "  var b: U = a;\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
 
 TEST(DriverOwnCompound, TupleWithOwnElemParamNeedsFatal) {
   std::string path = write_temp_file(
