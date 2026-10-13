@@ -1930,8 +1930,14 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
        * 跨模块方法：源模块 sema 已销毁，sema_struct_find_member 找不到 member_scope，
        * 从运行时 struct_type_t.attributes 取方法 func value 的签名类型做校验。 */
       if (call->is_member_call) {
-        /* 从 member_type_id 对应的 struct 类型 + 方法名查方法符号 */
-        const type_t *st = vm_type_load(sema->vm, call->member_type_id);
+        /* 从 member_type_id 对应的 struct 类型 + 方法名查方法符号。
+           编译期 struct 类型可能尚未 vm_type_bind（SEAL 在运行时执行），
+           先用 sema_type_by_id 查 sema 登记的类型指针；失败再 fallback
+           到 vm_type_load（跨模块已 bind 的类型）。 */
+        const type_t *st = NULL;
+        const sema_type_t *sreg = sema_type_by_id(sema, call->member_type_id);
+        if (sreg) st = sreg->type;
+        if (!st) st = vm_type_load(sema->vm, call->member_type_id);
         if (!st) return val_void(sema);
         strslice_t mname = {0};
         if (call->callee->kind == AST_MEMBER)
