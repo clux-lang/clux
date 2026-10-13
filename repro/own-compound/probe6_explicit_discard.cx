@@ -1,0 +1,13 @@
+// gap7: `_ = ` 显式丢弃 fatal 复合值——应递归释放内嵌 own 堆块（不泄漏）
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box { p: own *i32; n: i32; }
+
+func main(): i32 {
+    _ = .Box{ .p = new i32{1}, .n = 1 };
+    var a: Box = .Box{ .p = new i32{2}, .n = 2 };
+    _ = move(a);
+    libc::printf("discard: ok\n");
+    return 0;
+}

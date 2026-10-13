@@ -96,15 +96,17 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 /* ================================================================ */
 
 /**
- * 递归释放 data 块内所有 own 指针指向的堆内存（m3-design §3.1：
+ * 递归释放 data 块内所有 **own** 指针指向的堆内存（m3-design §3.1：
  * `own *Struct` 且 Struct 含 own 字段时，销毁递归传导）。
  *
  * 纯静态分派（type + 裸 data 块，不依赖 value_t 包装）：
  *   - own *T：ptr≠NULL → 先递归销毁堆块内容（T 为含 own 字段的复合类型时
  *     内嵌堆块一并释放），再释放本堆块，置 ptr=NULL（防双释放）
- *   - fatal *T：ptr≠NULL → 同 own（将亡值未接管时释放；接管路径已 ptr=NULL）
+ *   - **fatal *T：不释放**（所有权体系不变量——fatal 必被接受方接管或被
+ *     `_ = ` 丢弃，堆块归接管方/dispose 路径；销毁路径碰它就是 double-free）
  *   - ref *T：借用，跳过（指向栈值或他人堆块，不拥有）
- *   - struct/tuple：按字段/元素偏移递归
+ *   - struct/tuple：按字段/元素偏移递归（**与 ownership 无关**，故 fatal 复合
+ *     类型与其 base 走同一条路径）
  *   - array：按 elem_type 逐元素递归（连续块，步长 elem_type->size）
  *   - option：ok 时按 inner 递归 value 字段
  *   - union：按当前 tag 的 member payload 类型递归
@@ -116,8 +118,8 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
  * 管理——scope_destroy 先调用本函数再 value_dispose）。
  */
 /** 目标类型是否含需递归扫描的 own 字段（own/share/weak 指针 + 含 own 的
- *  复合类型 struct/tuple/array/option/union/slice_own）。fatal 不在此列
- *  （将亡值必被 own 接管，接管后 ptr=NULL）。
+ *  复合类型 struct/tuple/array/option/union/slice_own）。**fatal 不在此列**：
+ *  将亡值必被接受方接管（或 `_ = ` 丢弃），销毁路径永不碰它指向的堆块。
  *
  *  供 ptr_free_owned_recursive / ptr_clear_owned_recursive 判定递归入口，
  *  切片类型系统（type_slice.c）通过 slice_type_needs_scan 委托此函数。 */

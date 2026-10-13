@@ -1,0 +1,8 @@
+// gap2b: 赋值 copy：含 own 字段的结构体（目标要求报错）
+struct Box { p: own *i32; n: i32; }
+
+func main(): i32 {
+    var a: Box = .Box{ .p = new i32{2}, .n = 2 };
+    var b: Box = a;
+    return b.n;
+}

@@ -1,0 +1,9 @@
+// gap2: 隔离测三个点（单文件单点，避免诊断互相干扰）
+// A) 赋值 copy：own 指针（既有规则，应报错）
+func case_a(): i32 {
+    var x: own *i32 = new i32{1};
+    var y: own *i32 = x;
+    return y.*;
+}
+
+func main(): i32 { return 0; }

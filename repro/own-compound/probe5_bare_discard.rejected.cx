@@ -1,0 +1,11 @@
+// gap6: 构造产出的 fatal 值被"裸丢弃"（表达式语句）——应显式丢弃（_ =）
+extern lib "*" as libc;
+extern func libc::printf(format: str, ...): void;
+
+struct Box { p: own *i32; n: i32; }
+
+func main(): i32 {
+    .Box{ .p = new i32{1}, .n = 1 };   // 表达式语句：fatal 值被丢弃 → 泄漏？
+    var a: Box = .Box{ .p = new i32{2}, .n = 2 };
+    return a.n;
+}

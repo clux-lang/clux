@@ -1507,6 +1507,66 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
       return value_make_shadow(sema->vm, t);
 }
 
+/* 构造表达式 `.T{...}` 的**所有权扩散**包装（单所有权体系，m3-design §7/§3.3）：
+ * 构造产物是**新堆块**（内嵌 own 字段），语义上就是"将亡值"——因此当 T 含 own
+ * 资源时，产物类型是 **fatal T**，而不是 T 本身。后果（都是想要的）：
+ *   - `.Box{ .p = new i32{1} }` 不能隐式拷贝，必须由 own 变量接管（赋值的
+ *     fatal → own 转移）或 move()/clone() 显式转移；
+ *   - 直接传给 `fatal Box` 形参合法（不必再写 move(...)）；
+ *   - 作为字段值赋给 `own` 字段 / 含 own 字段的字段，走 fatal → 目标 的转移。
+ *
+ * 覆盖 struct / union / tuple / option / array（只要类型含 own 资源）；不含 own
+ * 的平凡类型原样返回（fatal 对无资源类型无意义——sema_fatal_variant_of 直接返回
+ * t）。**cunion 是刻意的例外**：它的 dispose 是 no-op（无 tag、开发者自负），把
+ * 产物标成 fatal 只会让所有权规则与销毁语义脱节。
+ *
+ * **sema 与运行期类型必须一致**——这是本规则的实现要点，也是踩过的坑：
+ * 只把 sema 的 shadow 类型改成 fatal、编译器照旧发普通类型的 LOAD_TYPE，会让
+ * 运行期值带着**非 fatal** 的类型却走到 `fatal T` 形参/返回位：那里靠
+ * `type_fatal_carries_resource` 判定"要不要转移"，看到非 fatal 就退化成 clone，
+ * 于是构造产生的临时值仍持有内嵌堆块 → 作用域退出双释放（实测 access violation）。
+ * 因此这里同时把构造节点的**类型槽位**改写为 fatal 变体，让编译器发
+ * `LOAD_TYPE <fatal 变体 id>`：运行期 CONSTRUCT 产出 fatal 类型的值（与 base
+ * 逐字节同布局，构造逻辑完全无感），转移判定与 sema 严格对齐。
+ * 覆盖 struct / union / tuple / option / array（只要类型含 own 资源）；不含 own
+ * 的平凡类型原样返回（fatal 对无资源类型无意义——sema_fatal_variant_of 直接返回
+ * t）。**cunion 是刻意的例外**：它的 dispose 是 no-op（无 tag、开发者自负），把
+ * 产物标成 fatal 只会让所有权规则与销毁语义脱节。 */
+static value_t *ex_construct_fatal(sema_t *sema, ast_node_t **node,
+                                   sema_scope_t *scope) {
+  value_t *r = ex_construct(sema, node, scope);
+  if (is_poison(sema, r)) return r;
+  const type_t *t = value_type(r);
+  if (!t || !sema_type_contains_owned_resource(t)) return r;
+  const type_t *fatal = sema_fatal_variant_of(sema, t);
+  if (!fatal || fatal == t) return r;
+
+  /* 类型槽位改写成 fatal 变体：编译器据此发 LOAD_TYPE <变体 id>，运行期
+     CONSTRUCT 产出 fatal 值（布局与 base 相同，构造/字段访问全部无感）。
+     槽位此刻已是 sema 折叠出的 AST_TYPE_REF（ex_construct 内部调过
+     sema_resolve_type_slot / infer_anon_* 已建 ref），只需把名字换成变体的
+     登记名。匿名构造无槽位（n->type == NULL）时跳过——那种写法本身要求目标
+     类型上下文，运行期类型由外层的类型槽位给出。 */
+  ast_construct_t *cn = (ast_construct_t *)*node;
+  if (cn && cn->type) {
+    const sema_type_t *vst = sema_type_register(sema, fatal);
+    if (vst && vst->name.ptr) {
+      if (cn->type->kind == AST_TYPE_REF) {
+        ((ast_type_ref_t *)cn->type)->name = vst->name;
+      } else {
+        ast_node_t *ref = ast_type_ref_new(sema->arena, cn->type->tok_begin,
+                                           cn->type->tok_end);
+        if (ref) {
+          ((ast_type_ref_t *)ref)->name = vst->name;
+          ref->next = cn->type->next;
+          cn->type = ref;
+        }
+      }
+    }
+  }
+  return value_make_shadow(sema->vm, fatal);
+}
+
 /* AST_IDENT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 static value_t *ex_ident(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -2854,7 +2914,10 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
         if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            type_is_own(src->type)) {
+            (type_is_own(src->type) ||
+             sema_type_contains_owned_resource(src->type))) {
+          /* `own *T` 与**含 own 资源的复合类型**同规则（所有权扩散）：move 后
+             源不再持有资源 → 标记 moved，后续读取报 "used after move"。 */
           if (src->borrow_count > 0) {
             diag_error(
                 sema->diag, sema_loc(sema, *node),
@@ -3336,7 +3399,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     case AST_MOVE:
       return ex_move(sema, node, scope);
     case AST_CONSTRUCT:
-      return ex_construct(sema, node, scope);
+      return ex_construct_fatal(sema, node, scope);
     case AST_FUNC_DEF:
       return ex_func_def(sema, node, scope);
     case AST_FUNC_REF:

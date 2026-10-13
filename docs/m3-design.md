@@ -191,6 +191,48 @@ var c: Box = mk(9);                 // fatal → Box 的接管 = 转移
 - **运行期物化**：hoist 声明阶段 `LOAD_TYPE <id>` → `SET_OWNERSHIP FATAL` →
   `SEAL` 按 ownership 去重（见 `docs/bytecode-mnemonics.md` §4.7）。
 
+### 7.2 所有权**扩散**：含 own 字段的复合类型整体进入单所有权体系
+
+§7 的规则此前只落在 `own *T` 这一形态上，复合类型（struct/tuple/union/option/
+array）**递归含** own 指针时没有被覆盖——四个漏水点：
+
+| 位置 | 修复前 | 现在 |
+|---|---|---|
+| 构造表达式 `.T{...}` | 产出普通 T（新堆块却可被当普通值拷来拷去） | 产出 **`fatal T`**（新堆块 = 将亡值） |
+| 函数参数 | `func f(b: Box)` 合法 → 按值传 = 与调用方共享内嵌堆块 → 双释放 | **只能 `fatal T`**（借用写 `ref *T`） |
+| 变量声明/赋值 | `var b: Box = a` 静默放行（浅拷贝） | **禁止 copy**：只能由 fatal 将亡值初始化 |
+| 参数位的 ref 字段 | 不查标注 | 与变量声明/返回值同一条：**必须标注作用域** |
+
+规则本身一句话：**复合类型只要（递归地）含 own 指针，就整体按 `own *T` 的双规则
+办事**——不能 copy（须 move/clone/接管），跨函数边界只能以 `fatal T` 出现。
+
+```rust
+struct Box { p: own *i32; n: i32; }
+
+var a: Box = .Box{ .p = new i32{5}, .n = 6 };  // 构造产 fatal Box → own 变量接管
+func mk(): fatal Box { return move(.Box{ .p = new i32{1}, .n = 1 }); }
+func take(b: fatal Box): i32 { var x: Box = move(b); return x.n; }
+func read(b: ref *Box): i32 { return b.n; }    // 只想借用
+
+var b: Box = a;                                 // ❌ copy
+var b: Box = move(a);                           // ✅ 转移
+var b: Box = clone(a);                          // ✅ 深拷贝
+take(.Box{ .p = new i32{3}, .n = 4 });          // ✅ 构造直接喂 fatal 形参
+```
+
+**sema 与运行期类型必须一致**（实现要点）：构造产 fatal 时，构造节点的**类型
+槽位**也要改成 fatal 变体，让编译器发 `LOAD_TYPE <变体 id>`。只改 sema 的 shadow
+类型会让运行期值带非 fatal 类型，走到 fatal 形参/返回位时"要不要转移"的判定失败、
+退化成 clone → 构造临时值仍持有内嵌堆块 → 双释放（实测 access violation）。
+
+**cunion 例外**：它的 dispose 是 no-op（无 tag、开发者自负），标成 fatal 只会让
+所有权规则与销毁语义脱节。
+
+**销毁边界（细节）**：`pop_scope` 的递归释放**只认 `OWN_OWN`**。fatal 的归宿只有
+两个——被 own 变量/参数/返回值接管，或被 `_ = ` 显式丢弃；两种情况下堆块都已归
+接管方或由 DISPOSE 释放，所以销毁路径碰它就是 double-free。fatal 复合类型与 base
+逐字节同布局，递归销毁按字段偏移分派，与 ownership 无关 → 两者天然同路径。
+
 ---
 
 ## 8. 运算符与语法
