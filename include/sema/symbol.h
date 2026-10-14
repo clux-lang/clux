@@ -125,6 +125,11 @@ struct _sema_symbol_t {
   bool moved;         /* 所有权转移状态（Step B，m3-design §7）：move(x) 后源
                          变量失去所有权，进入 TDZ——读取报 "used after move"。
                          重新赋值（=）恢复可用。仅变量符号有意义。 */
+  bool is_capture;    /* 本符号是**闭包捕获**（`func |caps|` 的捕获槽，含括号捕获
+                         的参数槽）。捕获值**不可 move**：捕获作用域由闭包的所有
+                         调用共享，move 进去的 TDZ 无法恢复，第二次调用读到已转移
+                         的槽位。由 resolve_func_captures 在解析捕获时置位
+                         （那里的符号可能没有 own_scope，所以不能靠作用域反查）。 */
   int  borrow_count;  /* 活跃借用计数（R3，m3-design §7）：指向本变量的 ref
                          借用数。>0 时禁止 move（防借用悬空）。仅变量符号
                          有意义。 */

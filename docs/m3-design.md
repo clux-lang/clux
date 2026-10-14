@@ -368,6 +368,46 @@ struct / 指针族此前靠 base→fatal 的布局兜底偶然通过，array / u
 同理，**形参接收**侧（`func_vcall` 的参数循环）也在 `value_move` 之后做一次
 `value_relabel_into`，保证形参运行期类型与声明的 `fatal` 类型严格一致。
 
+### 7.6 own 指针的 move 边界：只能整体 move，闭包捕获不可 move
+
+TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名）。这条事实推出两条 move 约束：
+
+**约束 1 —— 聚合的 own 字段不能单独 move**
+
+字段没有"局部 TDZ"：`move(s.p)` 把资源掏走却没有任何地方记录 `s.p` 已失效，
+于是同一个字段可以重复 move、被读成空值/悬垂。
+
+```rust
+struct Box { p: own *i32; n: i32; }
+var b: Box = .Box{ .p = new i32{7}, .n = 1 };
+var q: own *i32 = move(b.p);   // ❌ cannot move a struct/aggregate field that owns resources
+var c: Box = move(b);          // ✅ 整体 move：TDZ 标在符号 b 上，语义完整
+var r: own *i32 = clone(b.p);  // ✅ clone 不改变源的绑定状态
+```
+
+判据：操作数是 `AST_MEMBER` / `AST_INDEX`（字段或元素访问）且其类型 own / fatal /
+含 own 资源。递归生效（`move(o.i.p)` 同样拒绝）。
+
+**约束 2 —— 闭包捕获（含捕获里的结构体）不可 move**
+
+捕获作用域由闭包的**所有调用共享**：move 把捕获槽标进 TDZ 后**无法恢复**，
+第二次调用就读到已转移的槽位。
+
+```rust
+var p: own *i32 = new i32{7};
+var f = func |(q: own *i32 = move(p))| get(): i32 {
+  var r: own *i32 = move(q);   // ❌ cannot move closure capture 'q'
+  return q.*;                  // ✅ 借用读取
+};
+```
+
+判据：符号带 `is_capture` 标记（由 `resolve_func_captures` 在解析捕获时置位——
+捕获符号**可能没有 `own_scope`**，括号捕获 `(q: T = move(p))` 的 `q` 就是
+`own_scope == NULL`，所以不能靠作用域反查，必须用符号标记）。
+
+**边界**：闭包体内**自己定义**的局部变量（非捕获）照常可 move —— 它的 TDZ 随该次
+调用消亡，不存在跨调用残留。
+
 ---
 
 ## 8. 运算符与语法

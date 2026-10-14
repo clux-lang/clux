@@ -603,6 +603,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     ast_var_def_t *cv = (ast_var_def_t *)c;
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs) continue; /* 3a 拒绝（comptime/全局/重名）已诊断，跳过防级联 */
+    cs->is_capture = true;  /* 捕获槽：闭包内不可 move（见 symbol.h 说明） */
 
     if (cv->init) {
       /* 括号捕获：init 定义点在外层作用域求值（c+d 引用外层变量） */

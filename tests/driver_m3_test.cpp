@@ -305,6 +305,136 @@ TEST(Driver, StepBMoveWithLiveBorrowRejected) {
   std::remove(path.c_str());
 }
 
+/* ---- own 指针的两处 move 约束 ----
+ *
+ * 约束 1：**聚合的 own 字段不能单独 move**。TDZ 是**符号级**的（只跟踪变量名），
+ *   字段没有"局部 TDZ"——`move(s.p)` 把资源掏走却不留任何标记，可以重复执行。
+ *   所以含 own 资源的字段/元素只能连**整个**聚合一起 move。
+ *
+ * 约束 2：**闭包捕获不能 move**（含捕获里的结构体）。捕获作用域由闭包的**所有
+ *   调用共享**：move 把捕获槽标进 TDZ 后无法恢复，第二次调用读到已转移的槽位。
+ *   闭包内只能用 clone / 借用。
+ */
+
+TEST(Driver, StepBStructFieldMoveRejected) {
+  /* 约束 1：own 字段单独 move → 拒绝（字段无局部 TDZ） */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
+      "  var q: own *i32 = move(b.p);\n"
+      "  return q.*;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBNestedStructFieldMoveRejected) {
+  /* 约束 1 递归：嵌套聚合的 own 字段单独 move → 同样拒绝 */
+  std::string path = write_temp_file(
+      "struct I { p: own *i32; }\n"
+      "struct O { i: I; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var o: O = .O{ .i = .I{ .p = new i32{7} }, .n = 1 };\n"
+      "  var q: own *i32 = move(o.i.p);\n"
+      "  return q.*;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBWholeStructMovePasses) {
+  /* 约束 1 的正向：整体 move 聚合 → 放行（这是转移的唯一正道） */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
+      "  var c: Box = move(b);\n"
+      "  if (c.p.* != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBFieldMoveOfCloneStillAllowed) {
+  /* 约束 1 只管 move：字段 **clone** 不改变源的绑定状态 → 放行 */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
+      "  var q: own *i32 = clone(b.p);\n"
+      "  if (q.* != 7) { return 1; }\n"
+      "  if (b.p.* != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureCaptureMoveRejected) {
+  /* 约束 2：闭包内 move 捕获的 own 指针 → 拒绝（捕获槽由所有调用共享） */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{7};\n"
+      "  var f = func |(q: own *i32 = move(p))| get(): i32 {\n"
+      "    var r: own *i32 = move(q);\n"
+      "    return r.*;\n"
+      "  };\n"
+      "  return f();\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureCapturedStructMoveRejected) {
+  /* 约束 2 含"闭包中的结构体"：捕获的聚合整体 move 也拒绝 */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
+      "  var f = func |(c: Box = move(b))| get(): i32 {\n"
+      "    var d: Box = move(c);\n"
+      "    return d.p.*;\n"
+      "  };\n"
+      "  return f();\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureCaptureCloneAndBorrowPass) {
+  /* 约束 2 的正向：捕获后 clone / 借用读取都合法 */
+  std::string path = write_temp_file(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box = .Box{ .p = new i32{8}, .n = 2 };\n"
+      "  var f = func |(c: Box = move(b))| get(): i32 {\n"
+      "    var d: Box = clone(c);\n"       /* clone 捕获槽：合法 */
+      "    return d.p.* + c.n;\n"          /* 借用读取捕获槽：合法 */
+      "  };\n"
+      "  if (f() != 10) { return 1; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBClosureLocalMoveStillAllowed) {
+  /* 约束 2 的边界：闭包体内**自己定义**的局部变量（非捕获）仍可正常 move */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var f = func || get(): i32 {\n"
+      "    var a: own *i32 = new i32{5};\n"
+      "    var b: own *i32 = move(a);\n"   /* 局部变量：可 move */
+      "    return b.*;\n"
+      "  };\n"
+      "  return f() - 5;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBMoveAfterBorrowScopeEndsPasses) {
   /* R3 正向：借用作用域结束后 move 源放行（借用消亡恢复可 move） */
   std::string path = write_temp_file(

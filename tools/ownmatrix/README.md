@@ -99,6 +99,13 @@ python tools/ownmatrix/run_matrix.py
    struct / 指针族此前靠布局兜底偶然通过。见 `docs/m3-design.md` §7.5。
 3. **`13_fatal_return` 的 8 字节泄漏**：随提交 `0732858` 修复
    （`value_own_copy_into` 未回收 `ptr_clone_block` 的中间块）。
+4. **字段级 move 漏放**：`move(s.p)` / `move(o.i.p)` 此前全部放行 —— TDZ 是符号级的
+   （`sema_symbol_t.moved`），字段没有"局部 TDZ"，同一字段可重复 move、被读成空值。
+   修法：`ex_move` 在操作数是字段/元素访问且类型 own/fatal/含 own 资源时拒绝。
+5. **闭包捕获 move 漏放**：`move(q)`（q 为 `func |(q = move(p))|` 的捕获槽）此前放行 ——
+   捕获作用域由闭包所有调用共享，move 进去的 TDZ 无法恢复。修法：捕获解析时给符号打
+   `is_capture` 标记（不能用 `own_scope` 反查：括号捕获的参数槽 `own_scope == NULL`）。
+   见 `docs/m3-design.md` §7.6。
 
 ### 尚未拦截（sema 侧，非缺陷但规则不齐）
 
@@ -133,4 +140,22 @@ python tools/ownmatrix/run_matrix.py
 
 > 矩阵本身不覆盖 ref（矩阵面向 own 所有权扩散）；ref 的覆盖在
 > `driver_m3_test.cpp` 与 `defer_test.cpp`。
+
+### own 的 move 边界（再一个维度，见 `docs/m3-design.md` §7.6）
+
+TDZ 是**符号级**的，由此推出两条约束（此前都漏放，已修）：
+
+| 情形 | 判定 |
+|---|---|
+| `move(s.p)`（聚合的 own 字段单独 move） | ❌ 字段无局部 TDZ，可重复 move |
+| `move(o.i.p)`（嵌套字段） | ❌ 递归生效 |
+| `move(s)`（整体 move 聚合） | ✅ 转移的唯一正道 |
+| `clone(s.p)`（字段 clone） | ✅ 不改变源的绑定状态 |
+| `move(q)`，q 是闭包捕获槽（`func \|(q = move(p))\|`） | ❌ 捕获作用域由所有调用共享，TDZ 不可恢复 |
+| 闭包内 `move(c)`，c 是捕获的结构体 | ❌ 同上 |
+| 闭包体内**自定义**的局部变量 move | ✅ TDZ 随该次调用消亡 |
+
+复现：`repro/own-compound/move_whole_only.cx`（正例）与
+`move_field_and_closure.rejected.cx`（反例）；测试 `Driver.StepBStruct*Move*` /
+`Driver.StepB*ClosureCapture*` / `StepBWholeStructMovePasses` 等 8 例。
 

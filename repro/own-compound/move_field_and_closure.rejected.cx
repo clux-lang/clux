@@ -1,0 +1,32 @@
+// move_field_and_closure.rejected.cx: **反例** —— own 指针的两处 move 约束
+//
+// 约束 1：**结构体/聚合的 own 字段不能单独 move**——字段没有"局部 TDZ"（TDZ 是
+//         符号级的，只跟踪变量名），`move(s.p)` 掏走资源却不留任何标记，可重复执行。
+//         只能连整个聚合一起 move。
+//
+// 约束 2：**闭包捕获不能 move**（含捕获里的结构体）——捕获作用域由闭包的所有调用
+//         共享，move 进去的 TDZ 无法恢复，第二次调用读到已转移的槽位。
+//
+// 期望诊断（两条）：
+//   cannot move a struct/aggregate field that owns resources
+//   cannot move closure capture 'q'
+struct Box { p: own *i32; n: i32; }
+
+// 约束 1
+func v1_field_move(): i32 {
+    var b: Box = .Box{ .p = new i32{7}, .n = 1 };
+    var q: own *i32 = move(b.p);
+    return q.*;
+}
+
+// 约束 2
+func v2_capture_move(): i32 {
+    var p: own *i32 = new i32{7};
+    var f = func |(q: own *i32 = move(p))| get(): i32 {
+        var r: own *i32 = move(q);     // ❌ 捕获槽不可 move
+        return r.*;
+    };
+    return f();
+}
+
+func main(): i32 { return v1_field_move() + v2_capture_move(); }
