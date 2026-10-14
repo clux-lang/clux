@@ -421,13 +421,17 @@ TEST(Driver, StepBClosureCaptureCloneAndBorrowPass) {
 }
 
 TEST(Driver, StepBClosureLocalMoveStillAllowed) {
-  /* 约束 2 的边界：闭包体内**自己定义**的局部变量（非捕获）仍可正常 move */
+  /* 约束 3 的边界：闭包体内**自己定义**的局部变量（非捕获）仍可正常 move ——
+     它的 TDZ 随该次调用消亡，不存在跨调用残留。
+     注：本语言的闭包捕获列表**不能为空**（`func ||` 解析失败，实测
+     `error: expected '('`），所以用一个带默认值的捕获槽建立合法闭包；
+     被测的局部变量与该捕获无关。 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var f = func || get(): i32 {\n"
+      "  var f = func |(seed: i32 = 0)| get(): i32 {\n"
       "    var a: own *i32 = new i32{5};\n"
-      "    var b: own *i32 = move(a);\n"   /* 局部变量：可 move */
-      "    return b.*;\n"
+      "    var b: own *i32 = move(a);\n"   /* 局部变量（非捕获）：可 move */
+      "    return b.* + seed;\n"
       "  };\n"
       "  return f() - 5;\n"
       "}\n");

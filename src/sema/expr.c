@@ -2967,35 +2967,56 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       bool is_clone = n->op && token_is(n->op, "clone");
       bool produces_fatal = (fatal != ot);
 
-      /* ---- 约束 1：**字段/元素级 move 禁止**（只能整体 move）----
-         结构体的 own 字段没有"局部 TDZ"：`move(s.p)` 把 s.p 的资源掏走，却没有
-         任何机制把 s.p 标进 TDZ（TDZ 是**符号级**的，只跟踪变量名）。于是
-         `move(s.p)` 可以重复执行、字段被读成空值/悬垂 —— 实测同一字段连续两次
-         move 都被放行。规则：含 own 资源的字段/元素只能连**整个**聚合一起 move。
-         （clone 不受限：拷贝不改变源的绑定状态。） */
+      /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
+         TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有
+         "局部 TDZ"：`move(s.p)` 把值/资源从字段里掏走，却没有任何地方记录
+         `s.p` 已失效 —— 于是同一字段可以重复 move、被读成陈旧值或悬垂指针。
+
+         判据**不能**依赖"是否产生 fatal 变体"：标量（i32 等）没有资源，其 fatal
+         变体折叠为自身，`produces_fatal` 为假 —— 用 fatal 当门槛会把
+         `move(p.x)`（标量字段）整条漏掉（实测放行）。所以这里独立判断
+         "操作数是不是字段/元素访问"。
+
+         `clone` 不受限：拷贝不改变源的绑定状态。 */
       if (!is_clone &&
-          (n->operand->kind == AST_MEMBER || n->operand->kind == AST_INDEX) &&
-          (type_is_own(ot) || type_is_fatal(ot) ||
-           sema_type_contains_owned_resource(ot))) {
+          (n->operand->kind == AST_MEMBER || n->operand->kind == AST_INDEX)) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot move a struct/aggregate field that owns resources "
-                   "(fields have no per-field TDZ; move the whole value instead, "
-                   "e.g. `move(s)` + re-insert the field, or use clone())");
+                   "cannot move a struct/aggregate field or element "
+                   "(fields have no per-field TDZ, so a moved-out field cannot be "
+                   "tracked or refilled; move the whole value instead — "
+                   "`move(s)` — or use clone() to copy the field)");
         return value_make_shadow(sema->vm, fatal);
       }
 
-      if (!is_clone && (produces_fatal || type_is_fatal(ot)) &&
-          n->operand->kind == AST_IDENT) {
+      if (!is_clone && n->operand->kind == AST_IDENT) {
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
-        /* ---- 约束 2：**闭包捕获不可 move**（含捕获里的结构体）----
+
+        /* ---- 约束 2：**闭包（`TYPE_KIND_FUNC` 值）不可 move** ----
+           闭包本质是携带捕获状态的**结构体**（语法糖），且语言里不存在"闭包"
+           这个整体变量可供整体 move；它的捕获槽又不能单独 move（见约束 3）。
+           所以闭包值整体也不允许 move。 */
+        if (src && src->kind == SEMA_SYM_VAR && src->type &&
+            src->type->kind == TYPE_KIND_FUNC) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "cannot move closure '%.*s': a closure is a struct carrying "
+                     "its capture state (syntactic sugar), and there is no "
+                     "'closure' whole value to move (call it, or pass it by "
+                     "reference)",
+                     (int)((ast_ident_t *)n->operand)->name.len,
+                     ((ast_ident_t *)n->operand)->name.ptr);
+          return value_make_shadow(sema->vm, fatal);
+        }
+
+        /* ---- 约束 3：**闭包捕获不可 move**（含捕获里的结构体）----
            捕获符号定义在闭包的捕获作用域上，而闭包每次调用共享同一份捕获
            作用域：move 把捕获槽标进 TDZ 后无法恢复，第二次调用就读到已转移的
            槽位。所以闭包内的捕获值（`own *T` 或含 own 的聚合）只能 clone/借用，
            不能 move。 */
         if (src && src->kind == SEMA_SYM_VAR && src->is_capture &&
             (type_is_own(src->type) ||
-             sema_type_contains_owned_resource(src->type))) {
+             sema_type_contains_owned_resource(src->type) ||
+             src->type->kind == TYPE_KIND_FUNC)) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "cannot move closure capture '%.*s': the capture slot is "
                      "shared by every call of the closure and cannot be left in "
@@ -3005,6 +3026,12 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
                      ((ast_ident_t *)n->operand)->name.ptr);
           return value_make_shadow(sema->vm, fatal);
         }
+      }
+
+      if (!is_clone && (produces_fatal || type_is_fatal(ot)) &&
+          n->operand->kind == AST_IDENT) {
+        sema_symbol_t *src =
+            sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
         if (src && src->kind == SEMA_SYM_VAR && src->type &&
             (type_is_own(src->type) ||
              sema_type_contains_owned_resource(src->type))) {
