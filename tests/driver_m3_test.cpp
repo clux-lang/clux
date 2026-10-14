@@ -502,8 +502,123 @@ TEST(Driver, StepBStructWithRefAnnotatedPasses) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, StepBRebindRefEscapeRejected) {
-  /* §5 重绑定逃逸校验：r 标注 '<p>（存活不超过 p），重绑定到 outer
+/* ---- §5 含 ref 聚合类型的**赋值**作用域检查 ----
+ *
+ * 声明侧（"必须标注"）早有 check_var_annot；赋值侧此前完全没查。
+ *
+ * **语义（方向极易写反，务必按这条读）**：标注 `'<A>` 不是"变量活到 A"，而是
+ * "本变量持有的借用**至少活到 A**"——即对**被借对象**存活期的承诺。所以把值赋给
+ * `g: '<A>` 时要求
+ *        借源作用域 ⊇ A        （等价于 `within(A, 借源)`）
+ *   - 承诺活到全局（`'<*>`）却只借到参数 p（比全局短）→ 承诺不成立 → **拒绝**
+ *   - 承诺只活到参数 p，实际借自**全局**（比 p 久）→ 承诺成立 → **放行**
+ *   - 承诺活到参数 p，实际借自**更内层的块局部** → 承诺不成立 → **拒绝**
+ *
+ * 实现要点（都踩过）：借源要**递归**收集（构造式的借源在字段值里）；`x.&` 的借源
+ * 是 x **本身且与类型无关**（`gx: i32` 也要收，否则检查空转）；源符号**不能**用
+ * `init_borrow_src` 过滤（它只认 own/ref/opaque，含 ref 的聚合会被滤掉，导致
+ * "经变量继承"这条路径失效）；借源锚点要复用 `'<p>` 那套解析（参数 → 参数作用域；
+ * 模块级变量 own_scope 为 NULL → 视作全局），否则同锚点的合法赋值被误拒。
+ */
+
+TEST(Driver, StepBAggregateAssignPromiseTooStrongRejected) {
+  /* 目标承诺活到全局（'<*>），实际只借到参数 p（p 比全局短）→ 拒绝 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "var gx: i32 = 9;\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g: '<*> H = .H{ .r = gx.&, .n = 1 };\n"
+      "  g = .H{ .r = p, .n = 2 };\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAggregateAssignShorterBorrowRejected) {
+  /* 目标承诺活到参数 p，实际借自**更内层**的块局部 → 拒绝 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
+      "  {\n"
+      "    var inner: i32 = 5;\n"
+      "    g = .H{ .r = inner.&, .n = 2 };\n"
+      "  }\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAggregateAssignInheritsBorrowSetRejected) {
+  /* 源是**变量**：继承它的借源集合。h 只借到块局部 inner，而 g 承诺活到 p
+     → 拒绝。这条专门覆盖"经变量继承"路径（不用 move 也一样，见 v_move/v_clone）。 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
+      "  {\n"
+      "    var inner: i32 = 5;\n"
+      "    var h: '<inner> H = .H{ .r = inner.&, .n = 2 };\n"
+      "    g = move(h);\n"
+      "  }\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAggregateAssignSameAnchorPasses) {
+  /* 承诺与借源同锚点（都活到 p）→ 放行 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
+      "  g = .H{ .r = p, .n = 2 };\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&) - 2; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAggregateAssignLongerBorrowPasses) {
+  /* 承诺比借源**短**（承诺活到参数 p，实际借自更久的全局）→ 放行。
+     这是方向上最容易写反的一侧：'<*> 才是**最强**承诺，不是最弱。 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "var gx: i32 = 9;\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
+      "  g = .H{ .r = gx.&, .n = 2 };\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&) - 2; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBAggregateAssignToUnannotatedRejected) {
+  /* 目标无标注（`var g = ...` 推断）→ 声明侧就拦下了（规则 B）。
+     即便绕过声明，赋值侧也会因"无可判上限"拒绝。 */
+  std::string path = write_temp_file(
+      "struct H { r: ref *i32; n: i32; }\n"
+      "var gx: i32 = 9;\n"
+      "func f(p: ref *i32): i32 {\n"
+      "  var g = .H{ .r = p, .n = 1 };\n"
+      "  g = .H{ .r = gx.&, .n = 2 };\n"
+      "  return g.n;\n"
+      "}\n"
+      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, StepBRebindRefEscapeRejected) {  /* §5 重绑定逃逸校验：r 标注 '<p>（存活不超过 p），重绑定到 outer
      （定义在外层，比 p 长命）→ r 通过 outer 获得超过 p 的存活期 → 逃逸 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"

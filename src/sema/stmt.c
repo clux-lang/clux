@@ -11,6 +11,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"  /* ast_construct_field_t::value */
 #include "parser/ast_walk.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_walk.h"
@@ -62,6 +63,8 @@
 #include "parser/ast_dowhile.h"
 #include "parser/ast_walk.h"
 #include "parser/lexer.h"
+#include "parser/ast_move.h"   /* ast_move_t（借源收集剥 move/clone） */
+#include "parser/ast_addr.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -231,6 +234,92 @@ static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
   borrow_switch(sym, src);
 }
 
+/* ===========================================================================
+ * §5 聚合类型的**借源集合**（provenance）
+ *
+ * 顶层 ref 用单个 `borrow_src` 表达"借自谁"；含 ref 字段的聚合值可能**多源**
+ * （`.H{ .a = p, .b = q }`），需要一套集合。它的用途是让**赋值**能校验
+ * "目标不会活过源所借的东西"：
+ *
+ *   g: '<p> H = .H{ .r = p };      // g 只保证活到 p
+ *   g = .H{ .r = gx.& };           // 源借自全局 gx（更久）→ 目标会活过它 → 拒绝
+ *
+ * 只靠标注（annot_names）做不到这件事：标注是用户对"这个值活多久"的**承诺**，
+ * 而借源是**事实**。声明点强制标注保证了每个聚合变量都有承诺；赋值点的这套
+ * 检查保证新值的事实不超出承诺。
+ *
+ * 收集是**递归**的：`.H{ .r = p }` 的借源藏在字段值里；`move(h)` 包一层原语
+ * 节点；变量引用直接继承该变量的借源集合（声明点已记好）。
+ * =========================================================================== */
+
+static void borrow_set_add(sema_symbol_t *sym, sema_symbol_t *src) {
+  if (!sym || !src) return;
+  for (size_t i = 0; i < sym->borrow_set_count; i++)
+    if (sym->borrow_set[i] == src) return;               /* 去重 */
+  if (sym->borrow_set_count < SEMA_BORROW_SET_MAX)
+    sym->borrow_set[sym->borrow_set_count++] = src;
+}
+
+/* 递归收集表达式里所有"带 ref 的借源符号"，并入 out 的借源集合。 */
+static void borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
+                           sema_symbol_t *out) {
+  if (!e || out->borrow_set_count >= SEMA_BORROW_SET_MAX) return;
+  switch (e->kind) {
+    case AST_MOVE:
+      borrow_collect(sema, ((ast_move_t *)e)->operand, scope, out);
+      return;
+    case AST_ADDR: {
+      /* `x.&` 的借源是 x **本身**——与 x 的类型无关：任何变量的地址都依赖该
+         变量的存活（`.H{ .r = gx.& }` 里的 gx 可能是个平凡 i32）。
+         **不能**走下面的 AST_IDENT 分支：那里用 init_borrow_src 过滤
+         own/ref/opaque 类型，`gx: i32` 会被滤掉 → 收不到任何借源 → 赋值检查
+         整条空转（实测正是如此）。 */
+      ast_node_t *op = ((ast_addr_t *)e)->operand;
+      if (op && op->kind == AST_IDENT) {
+        sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)op)->name);
+        if (s && s->kind == SEMA_SYM_VAR) borrow_set_add(out, s);
+      } else {
+        borrow_collect(sema, op, scope, out);   /* x.a.& / a[i].& 等：往内收 */
+      }
+      return;
+    }
+    case AST_IDENT: {
+      /* **不能**用 init_borrow_src 取源符号：它只认 own/ref/opaque 类型，
+         含 ref 的**聚合**（struct/tuple/array/union）会被它滤掉 —— 实测
+         `g = h`（h 是含 ref 的 struct）因此取不到源、"继承源变量借源"这条
+         路径整条失效。这里只要求"是变量且类型含 ref"（与声明侧记录的条件一致）。 */
+      sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)e)->name);
+      if (!s || s->kind != SEMA_SYM_VAR || !s->type) return;
+      if (!type_contains_ref(s->type) && !type_is_own(s->type) &&
+          s->type->kind != TYPE_KIND_OPAQUE)
+        return;
+      /* 源自身是聚合 → 继承它的借源集合（声明/赋值点已记）；
+         源是顶层 ref/own → 它自己就是借源。 */
+      if (s->borrow_set_count > 0) {
+        for (size_t i = 0; i < s->borrow_set_count; i++)
+          borrow_set_add(out, s->borrow_set[i]);
+      } else {
+        borrow_set_add(out, s);
+      }
+      return;
+    }
+    case AST_CONSTRUCT: {
+      /* 赋值点的字段链**尚未**被 sema 重排（重排发生在 ex_construct 内部），
+         具名字段仍是 AST_CONSTRUCT_FIELD（名 + 值），取它的 value。 */
+      ast_construct_t *cn = (ast_construct_t *)e;
+      for (ast_node_t *f = cn->fields; f; f = f->next) {
+        ast_node_t *v = (f->kind == AST_CONSTRUCT_FIELD)
+                            ? ((ast_construct_field_t *)f)->value
+                            : f;
+        borrow_collect(sema, v, scope, out);
+      }
+      return;
+    }
+    default:
+      return;   /* 字面量 / 调用结果 / 取址（x.&）等：无可判静态借源 */
+  }
+}
+
 /* 作用域退出：遍历本作用域直接符号，递减 borrow_src 的 borrow_count。
    借用载体随作用域消亡，源符号恢复可 move（§7"有 ref 存活禁止 move"的
    存活边界 = 借用变量所在作用域）。 */
@@ -249,6 +338,34 @@ void sema_scope_release_borrows(sema_scope_t *scope) {
 }
 
 /* ---- §5 作用域标注逃逸检查（m3-design §5） ---- */
+
+/* 借源符号的**锚点作用域**：这个借源最多能保证借用的存活期。
+   - 参数：参数名在 `'<p>` 标注里解析到的是**参数作用域**
+     （annot_anchor_scope 的语义）。源侧必须用同一套解析——拿符号的 own_scope
+     直接比会把 `g: '<p> H = .H{ .r = p }` 这种**同锚点**的合法赋值误拒
+     （实测：参数符号的 own_scope 与 param_scope 不是同一个对象）。
+     参数判定用**符号身份**（sema_symbol_t 没有 name 字段，名字是符号表的 key），
+     所以按名字查 param_scope 再比指针。
+   - 其它符号：定义作用域即可。
+   返回 NULL = 无可判存活期（调用方跳过该源）。 */
+static sema_scope_t *borrow_src_anchor_scope(sema_t *sema, sema_symbol_t *s) {
+  if (!s) return NULL;
+  if (sema->fn.def && sema->fn.local_func_param_scope) {
+    for (ast_node_t *p = sema->fn.def->params; p; p = p->next) {
+      ast_var_def_t *pvd = (ast_var_def_t *)p;
+      if (sema_scope_find_local(sema->fn.local_func_param_scope, pvd->name) == s)
+        return sema->fn.local_func_param_scope;
+    }
+  }
+  /* **模块级变量**：`own_scope` 为 NULL（全局变量不经过变量定义的 own_scope
+     登记），它实际活到程序结束 —— 锚点取 `global_scope`。
+     不这么判会把"承诺活到 p、实际借自全局"这种**成立**的赋值误拒：实测
+     gx 的 own_scope 是 NULL → 被当成"不可判存活" → 保守拒绝。 */
+  if (!s->own_scope) return sema->global_scope;
+  if (sema->global_scope && s->own_scope->parent == sema->global_scope)
+    return sema->global_scope;
+  return s->own_scope;
+}
 
 /* 类型是否含 ref 指针（顶层或嵌套）：用 vm 层的 `type_contains_ref`
    （type.c / type.h）——§5 强制规则 B（含 ref 字段的聚合变量必须标注）与返回值
@@ -737,6 +854,14 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      ——防级联。 */
   if (sym->type) check_var_annot(sema, vd, scope, sym->type, sym);
 
+  /* §5 聚合借源记录：含 ref 字段的聚合变量把 init 的借源集合记在符号上，
+     供后续**赋值**校验"新值的存活不超出本变量承诺的上限"。
+     只记不报——声明侧的"必须标注"由 check_var_annot 负责。 */
+  if (sym->type && vd->init && vd->init->kind != AST_NIL &&
+      type_contains_ref(sym->type) && !type_is_ref(sym->type)) {
+    borrow_collect(sema, vd->init, scope, sym);
+  }
+
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
   shadow_borrow_register(sema, sym, vd->init, scope);
@@ -1012,6 +1137,62 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
       if (sym) {
         sym->flow_init = true;
         sym->moved = false;
+        /* §5 赋值**作用域检查**（含 ref 字段的聚合类型）：
+           目标 `g` 的标注集合是它对"本值活多久"的**承诺**；新值的实际存活上限
+           是 rhs 的**借源集合**（各 ref 字段借自谁 → 活不过谁）。要求
+           `目标的每个锚点 ⊆ 某个借源的定义作用域`（目标存活 ≤ 源存活），
+           否则目标会活过它借的东西 → 悬垂：
+             var g: '<p> H = .H{ .r = p };   // 承诺活到 p
+             g = .H{ .r = gx.& };            // 源借自全局 gx（更久）→ 目标会活过它
+           此前只查顶层 ref 重绑定（下面的 R3 分支），含 ref 字段的聚合完全没查。 */
+        if (sym->type && type_contains_ref(sym->type) && !type_is_ref(sym->type)) {
+          sema_symbol_t srcs = {0};
+          borrow_collect(sema, as->value, scope, &srcs);
+          if (srcs.borrow_set_count > 0) {
+            if (sym->annot_count == 0) {
+              /* 目标没有任何可判上限（顶层 ref 的推断锚点写在 annot_*；
+                 聚合声明强制标注，走到这里说明标注解析失败/缺失）。 */
+              diag_error(sema->diag, sema_loc(sema, as->value),
+                         "cannot assign into variable '%.*s': it has no scope "
+                         "annotation, so the assigned value's references could "
+                         "outlive what they borrow (declare it with a scope "
+                         "annotation, e.g. '<a> or '<*>)",
+                         (int)name.len, name.ptr);
+              return;
+            }
+            for (size_t j = 0; j < sym->annot_count; j++) {
+              /* 目标锚点：优先按标注名解析；解析不出来时**不能跳过**——跳过
+                 等于放弃这条约束（实测：`'<p>` 的参数锚点解析失败时整条检查
+                 被 continue 掉，逃逸赋值照样放行）。此时用目标符号自身的定义
+                 作用域兜底：变量至少活不过它自己的作用域，是保守且可靠的界。 */
+              sema_scope_t *tanchor =
+                  annot_anchor_scope(sema, sym->annot_names[j], scope);
+              if (!tanchor) tanchor = sym->own_scope;
+              if (!tanchor) continue;   /* 连自身作用域都没有：无可用界 */
+              bool covered = false;
+              for (size_t k = 0; k < srcs.borrow_set_count && !covered; k++) {
+                sema_scope_t *sanchor =
+                    borrow_src_anchor_scope(sema, srcs.borrow_set[k]);
+                if (sanchor && sema_scope_within(tanchor, sanchor)) covered = true;
+              }
+              if (!covered) {
+                diag_error(sema->diag, sema_loc(sema, as->value),
+                           "cannot assign into variable '%.*s': its scope "
+                           "annotation '<%.*s>' is not within the assigned "
+                           "value's borrow scope (the target could outlive what "
+                           "the value borrows)",
+                           (int)name.len, name.ptr,
+                           (int)sym->annot_names[j].len,
+                           sym->annot_names[j].ptr);
+                return;
+              }
+            }
+          }
+          /* 覆盖目标的借源集合（赋值后目标持有的是新值的借源）。 */
+          sym->borrow_set_count = 0;
+          for (size_t k = 0; k < srcs.borrow_set_count; k++)
+            borrow_set_add(sym, srcs.borrow_set[k]);
+        }
         /* R3 重绑定切换借源：ref/opaque 变量 r = c; 换借目标（旧源递减
            新源递增）。赋值右值直读变量才登记（与定义点同规则）。 */
         if (sym->type &&

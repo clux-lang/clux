@@ -106,3 +106,31 @@ python tools/ownmatrix/run_matrix.py
 但**含 own 字段的复合类型按值捕获（纯 id）未被拦**——目前走深拷贝语义（安全、无
 泄漏），与 §7.2"复合类型赋值禁止 copy"不一致。是否要求显式 `clone()`/`move()` 待定。
 
+### ref 聚合的作用域检查（另一个维度，见 `docs/m3-design.md` §5/§5.1）
+
+含 ref 字段的聚合类型（struct/tuple/array/union）在三处强制/校验作用域标注：
+
+| 位置 | 规则 | 状态 |
+|---|---|---|
+| 变量声明 | 含 ref 字段**必须标注**（`'<a>` / `'<*>`） | ✅ `check_var_annot` |
+| 参数位 | 同上（顶层 `ref *T` 除外） | ✅ 参数检查 |
+| 返回位 | 同上 | ✅ `sema_check_ret_ref_annot` |
+| **赋值** | 标注 `'<A>` = "借的东西至少活到 A" → 要求 `借源作用域 ⊇ A` | ✅ `borrow_set` provenance（§5.1） |
+
+**方向极易写反**：`'<*>` 是**最强**承诺。赋值的五条方向性用例
+（`tests/driver_m3_test.cpp` 的 `Driver.StepBAggregate*`）：
+
+| 用例 | 期望 |
+|---|---|
+| `g: '<*> H = .H{.r = p}`（承诺活到全局，实际只借到 p） | 拒绝 |
+| `g: '<p> H = .H{.r = inner.&}`（只借到更内层块局部） | 拒绝 |
+| `g: '<p> H = move(h)`，h 只借到块局部（继承借源） | 拒绝 |
+| `g: '<p> H = .H{.r = p}`（同锚点） | 通过 |
+| `g: '<p> H = .H{.r = gx.&}`（承诺比借源短） | 通过 |
+
+复现用例：`repro/own-compound/ref_agg_assign_scope.cx`（通过侧）与
+`ref_agg_assign_escape.rejected.cx`（拒绝侧）。
+
+> 矩阵本身不覆盖 ref（矩阵面向 own 所有权扩散）；ref 的覆盖在
+> `driver_m3_test.cpp` 与 `defer_test.cpp`。
+
