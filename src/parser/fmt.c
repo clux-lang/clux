@@ -1516,6 +1516,19 @@ static void render_node(fmt_t *f, ast_node_t *node) {
 
 /* ---- 公共入口 ---- */
 
+/** 语法错误时的安全回退：返回原始源码的副本（不输出可能丢失数据的部分 AST）。 */
+static char *fmt_return_orig(allocator_t *alloc, const char *src, size_t len,
+                              size_t *out_len) {
+    char *out = (char *)allocator_new_ex(
+        alloc, "clux.parser.fmt.out", len + 1, NULL, NULL, NULL, 1);
+    if (out) {
+        memcpy(out, src, len);
+        out[len] = '\0';
+        if (out_len) *out_len = len;
+    }
+    return out;
+}
+
 char *fmt_format_source(allocator_t *alloc, const char *src, size_t len,
                         size_t *out_len) {
     if (!alloc || !src) return NULL;
@@ -1568,6 +1581,14 @@ char *fmt_format_source(allocator_t *alloc, const char *src, size_t len,
         arena_destroy(alloc, &arena);
         vec_free(alloc, &pool);
         return NULL;
+    }
+    /* 语法错误时，不输出部分 AST（会静默丢弃错误后的代码段），
+       改为返回原始源码不变。错误已由 parse_error 打印到 stderr。 */
+    if (parser->has_error) {
+        parser_destroy(&parser);
+        arena_destroy(alloc, &arena);
+        vec_free(alloc, &pool);
+        return fmt_return_orig(alloc, src, len, out_len);
     }
     /* ③ 渲染 */
     fmt_t f = { 0 };

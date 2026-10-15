@@ -503,6 +503,8 @@ TEST(Fmt, AnonymousConstruct) {
 
 /* 错误恢复：语法错误只格式化错误前的 AST，错误 token 之后内容丢弃。 */
 TEST(Fmt, RecoverPartialOnError) {
+    /* 语法错误时格式化为不输出部分 AST（防止静默丢掉错误后代码段），
+       改为返回原始源码不变。测试的"broken"函数不合法，整个文件原样返回。 */
     std::string out = fmt(
         "func ok():i32{\n"
         "return 1;\n"
@@ -510,9 +512,11 @@ TEST(Fmt, RecoverPartialOnError) {
         "func broken(:i32{\n"
         "var x:i32=1;\n");
     EXPECT_EQ(out,
-              "func ok(): i32 {\n"
-              "    return 1;\n"
-              "}\n");
+              "func ok():i32{\n"
+              "return 1;\n"
+              "}\n"
+              "func broken(:i32{\n"
+              "var x:i32=1;\n");
 }
 
 /* 顶层空行保留：文件头注释块后、函数之间、块内语句间的空行均保留。 */
