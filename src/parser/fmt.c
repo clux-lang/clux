@@ -1267,6 +1267,25 @@ static void render_block(fmt_t *f, ast_node_t *node) {
     last_line = mount_comments(f, prev_end, b->stmts->tok_begin, last_line,
                                /*inline_only=*/false);
     for (ast_node_t *s = b->stmts; s; s = s->next) {
+        /* 紧跟 `}` 后的空语句 `;`（如嵌套函数定义 `func ... { ... };` 末尾
+           的分号）与 `}` 处于同一行时，合并输出 `};` 而非把 `;` 排到下一行。
+           prev_end 指向前语句末，prev_end-1 即前语句最后一个 token（`}`）。 */
+        if (s->kind == AST_EMPTY_STMT && prev_end > 0) {
+            const token_t *prev_last = (const token_t *)vec_get(
+                f->tokens, prev_end - 1);
+            size_t prev_line = tok_line(prev_last);
+            size_t semi_line = tok_line(
+                (const token_t *)vec_get(f->tokens, s->tok_begin));
+            if (token_is(prev_last, "}") && prev_line == semi_line) {
+                sb_ch(&f->sb, ';');
+                f->at_line_start = false;
+                prev_end = s->tok_end;
+                /* last_line 保持为 prev_line（`}` 的行号），供下一语句的
+                   空行判断与注释挂载使用。 */
+                continue;
+            }
+        }
+
         /* 语句分隔换行 */
         if (!f->at_line_start) sb_ch(&f->sb, '\n');
         f->at_line_start = true;
