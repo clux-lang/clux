@@ -762,7 +762,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "(own is move-only; use move() or clone())",
                      (int)vd->name.len, vd->name.ptr, itn);
           sym->flow_init = false; /* copy 失败 = 未初始化 */
-        } else if (sema_type_contains_owned_resource(sym->type) &&
+        } else if (sema_type_contains_own_resource(sym->type) &&
                    !sema_type_is_fatal(value_type(init))) {
           /* R1 的**所有权扩散**（m3-design §7）：声明类型**含** own 资源
              （struct/tuple/union/array/option 内嵌 own 字段）时与 own 指针同规则
@@ -1117,12 +1117,13 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
          **含** own 资源（struct/tuple/union/array/option 内嵌 own 字段）时，
          赋值同样是"释放旧值 + 接管新值"，不能按值拷贝——`b = a` 会让 b 与 a
          共享内嵌堆块 → 双释放。必须 `b = move(a)` / `b = clone(a)`。
-         判据用递归 sema_type_contains_owned_resource（own 指针本身由上方
+         判据用递归 sema_type_contains_own_resource（own 指针本身由上方
          type_is_own 分支覆盖；含 own 字段的复合类型 ownership 是 OWN_NONE，
          必须递归才判得出来）。
-         注：`b = .T{...}`（构造表达式产 fatal）合法——它是将亡值，赋值即转移。 */
+         注：`b = .T{...}`（构造表达式产 fatal）合法——它是将亡值，赋值即转移。
+         注 2：share/weak 引用计数共享、拷贝安全，不在此列。 */
       if (lt && !type_is_fatal(lt) &&
-          sema_type_contains_owned_resource(lt) &&
+          sema_type_contains_own_resource(lt) &&
           !type_is_fatal(value_type(rhs))) {
         char tn[64], rn[64];
         sema_type_name(lt, tn, sizeof(tn));
@@ -2752,11 +2753,11 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
          会让调用方与被调用方共享内嵌堆块 → 被调用方作用域退出即双释放。
          因此与 own 指针同规则：**只能写成 `fatal T`**（调用点 move/clone 传入，
          函数内 move 接管），只想借用就写 `ref *T`。
-         判据用递归 sema_type_contains_owned_resource（own 指针本身由上方
+         判据用递归 sema_type_contains_own_resource（own 指针本身由上方
          type_is_own 分支覆盖；含 own 字段的复合类型其 ownership 是 OWN_NONE，
          必须递归才判得出来）。 */
       if (ps->type && !sema_type_is_fatal(ps->type) &&
-          sema_type_contains_owned_resource(ps->type)) {
+          sema_type_contains_own_resource(ps->type)) {
         char tn[64];
         sema_type_name(ps->type, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),

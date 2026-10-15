@@ -162,6 +162,12 @@ static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
  * 与 comptime.c 的全局变量 own 检查（静态函数，语义更窄：不含 weak）**有意
  * 不同**，故各留一份、不复用。 */
 bool sema_type_contains_owned_resource(const type_t *t);
+
+/** `sema_type_contains_own_resource`：仅检查 **own** 资源（不含 share/weak）。
+ *  与 `sema_type_contains_owned_resource` 的区别在于顶层不匹配 share/weak
+ *  指针/切片，递归落入字段后也只认 OWN_OWN——用于 R1 copy 禁止判定（share/weak
+ *  引用计数共享，拷贝合法；own 唯一所有权拷贝 = 双释放）。 */
+bool sema_type_contains_own_resource(const type_t *t);
 struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
 
 

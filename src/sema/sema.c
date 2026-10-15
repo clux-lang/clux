@@ -320,6 +320,49 @@ bool sema_type_contains_owned_resource(const type_t *t) {
   }
 }
 
+/** 仅检查 OWN_OWN（不含 share/weak），递归逻辑同 sema_type_contains_owned_resource。
+ *  share/weak 引用计数共享、拷贝安全，不触发 R1 move-only 禁止。 */
+bool sema_type_contains_own_resource(const type_t *t) {
+  if (!t) return false;
+  /* 顶层直接持有 own 指针/切片 */
+  if (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) {
+    if (t->ownership == OWN_OWN) return true;
+    return false; /* share/weak → 不视为 own 资源 */
+  }
+  switch (t->kind) {
+    case TYPE_KIND_STRUCT: {
+      size_t n = struct_type_field_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const struct_field_t *f = struct_type_field(t, i);
+        if (f && sema_type_contains_own_resource(f->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_TUPLE: {
+      size_t n = tuple_type_elem_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const tuple_elem_t *e = tuple_type_elem(t, i);
+        if (e && sema_type_contains_own_resource(e->type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_UNION: {
+      size_t n = union_type_member_count(t);
+      for (size_t i = 0; i < n; i++) {
+        const union_member_t *m = union_type_member(t, i);
+        if (m && sema_type_contains_own_resource(m->payload_type)) return true;
+      }
+      return false;
+    }
+    case TYPE_KIND_OPTION:
+      return sema_type_contains_own_resource(type_option_inner(t));
+    case TYPE_KIND_ARRAY:
+      return sema_type_contains_own_resource(array_type_elem(t));
+    default:
+      return false;
+  }
+}
+
 /* `fatal T` 的类型解析（AST_OWNED_TYPE）。语义：
  *   - T 不含任何 own 资源 → **原样返回 T**。没有资源可转移，"将亡值"标记毫无
  *     意义，而凭空造一个 T 的副本只会让 `fatal Point` 与 `Point` 变成两个互不
