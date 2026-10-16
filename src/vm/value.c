@@ -19,7 +19,17 @@ struct value_t {
     const type_t     *type;
     void             *data;
     bool              is_shadow;
-    bool              is_own;   /* true=拥有 data（dispose 释放）；false=借用引用（data 指向父值内部，跳过释放） */    const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
+    /* 所有权状态（值层编码，2026-10 重构）：
+     *   OWN_NONE — 无所有权（shadow 值、引擎内部对象）
+     *   OWN_OWN  — 拥有 data（dispose 释放 data 块 + 递归释放内嵌 own 资源）
+     *   OWN_REF  — 借用引用（data 指向父值内部，dispose 跳过释放）
+     *   OWN_FATAL— 将亡值（sema 编译期状态，运行期不使用）
+     *
+     * **运行期约束**：exec/scope/value 等运行期代码只通过 value_is_borrowed
+     * 间接区分 OWN_REF（借用）vs 非借用，不直接读写 ownership 字段。
+     * OWN_FATAL 仅供 sema 编译期使用，运行期永远不产生也不读取该状态。 */
+    ownership_t       ownership;
+    const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
 };
 
 /* ---- 内部分配 class_t（value_t 堆分配用） ---- */
@@ -82,6 +92,14 @@ scope_t *value_scope(const value_t *v) {
     return (v && v->frame) ? scope_from_frame(v->frame) : NULL;
 }
 
+ownership_t value_ownership(const value_t *v) {
+    return v ? v->ownership : OWN_NONE;
+}
+
+void value_set_ownership(value_t *v, ownership_t own) {
+    if (v) v->ownership = own;
+}
+
 bool value_is_void(const value_t *v) {
     return !v || v->type == NULL;
 }
@@ -108,7 +126,7 @@ value_t *value_alloc_shell(allocator_t *alloc, const type_t *type, void *data) {
     value_t *v = value_alloc(alloc);
     v->type = type;
     v->data = data;
-    v->is_own = true;   /* 默认拥有 data */
+    v->ownership = OWN_OWN;   /* 默认拥有 data */
     return v;
 }
 
@@ -119,8 +137,8 @@ value_t *value_make(vm_t *vm, const type_t *type, void *data) {
 }
 
 /* 借用引用：data 指向父值 data 块内的业务内存偏移（C 语义 &arr[i]），
-   is_own=false，dispose 跳过 data 释放。value 是引擎内部内存对象（含 type/
-   is_own 等元数据），借用引用的 data 指向的是业务数据而非引擎对象。
+   ownership=OWN_REF，dispose 跳过 data 释放。value 是引擎内部内存对象（含
+   type/ownership 等元数据），借用引用的 data 指向的是业务数据而非引擎对象。
    借用值只匿名存活于表达式链中，绑定（DEFINE/STORE/RET/clone）时经
    value_clone materialize 成独立深拷贝。frame 指向当前求值作用域（借用
    引用匿名存活于当前表达式链，不随 data 归属父值）。 */
@@ -128,14 +146,14 @@ value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *data) {
     value_t *v = value_alloc(vm->alloc);
     v->type = type;
     v->data = data;     /* 业务内存：父值 data 块内偏移 */
-    v->is_own = false;
+    v->ownership = OWN_REF;
     v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
 }
 
 bool value_is_borrowed(const value_t *v) {
-    return v && !v->is_shadow && !v->is_own;
+    return v && !v->is_shadow && v->ownership == OWN_REF;
 }
 
 
@@ -147,6 +165,7 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type) {
     v->type = type;
     v->data = NULL;
     v->is_shadow = true;
+    v->ownership = OWN_NONE;   /* shadow 无数据所有权概念 */
     v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
@@ -395,8 +414,8 @@ void value_dispose(vm_t *vm, value_t *v) {
     if (v->type) {
         /* shadow 值无 data，跳过 dispose 和 data 释放 */
         if (!v->is_shadow) {
-            /* 借用引用：data 指向父值内部，不拥有，跳过 dispose 与释放 */
-            if (v->is_own) {
+            /* 借用引用（OWN_REF）：data 指向父值内部，不拥有，跳过 dispose 与释放 */
+            if (v->ownership != OWN_REF) {
                 if (v->type->vtable && v->type->vtable->dispose) {
                     v->type->vtable->dispose(vm, v);
                 }

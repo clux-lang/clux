@@ -546,7 +546,7 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
     EXPECT_EQ(read_sint(top), 7);
 }
 
-/* 借用引用（is_own=false）：INDEX_GET 复合元素返回借用 value，data 指向父数组
+/* 借用引用（ownership=OWN_REF）：INDEX_GET 复合元素返回借用 value，data 指向父数组
  * 槽位。验证 value_is_borrowed + data 指向槽位 + 借用值可继续链式索引。
  * 绑定 materialize（clone 独立性）由 driver 测试 RunFileMultidimBorrowIsIndependentOnBind
  * 覆盖（DEFINE → scope_define → value_clone）。 */

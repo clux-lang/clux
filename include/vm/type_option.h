@@ -32,7 +32,7 @@ extern const vtable_t VTABLE_OPTION;
  * 内存布局（密封时计算）：
  *   value 字段偏移 voff = align_up(sizeof(bool), inner->align)
  *   size = voff + inner->size；align = max(1, inner->align)
- * SOME 态窄化退化的运行时真相 = 借用引用 data 指向 value 字段（与 is_own
+ * SOME 态窄化退化的运行时真相 = 借用引用 data 指向 value 字段（与 OWN_REF
  * 借用字段同构，零拷贝）。
  */
 typedef struct option_type_t option_type_t;  /* 定义见 vm/type.h */

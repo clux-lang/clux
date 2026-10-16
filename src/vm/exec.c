@@ -56,7 +56,7 @@ static value_t *op_push(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
     value_t *v = scope_lookup(vm->current_scope, name);
     if (!v) return value_make_error(vm, "exec: undefined variable");
-    /* **变量读取 = 借用视图**（data 指向变量值的业务内存，is_own=false）：
+    /* **变量读取 = 借用视图**（data 指向变量值的业务内存，ownership=OWN_REF）：
        所有权始终留在变量所属作用域，读取只是"看"它一眼；消费点各自负责
        materialize——DEFINE 经 scope_define 深拷贝、赋值经 value_assign
        就地深拷、RET/传参经 clone。于是"采用 vs 拷贝"只需看 is_borrowed，
@@ -1642,7 +1642,7 @@ static value_t *op_push_opt_none(vm_t *vm, bytecode_t *bc, size_t *pc) {
 
 /* UNWRAP（无操作数）：optional 解包（a.! assert）。弹 ?T 值 → ok 则借用
  * 返回 value 字段的借用引用（零拷贝，data 指向 option 值块内偏移；与
- * is_own 借用字段同构，生命周期 = 源 scope 值）；ok=false（none）→ panic
+ * ownership=OWN_REF 借用字段同构，生命周期 = 源 scope 值）；ok=false（none）→ panic
  * 错误值（用户范式先判空再解包：if (x != nil) { var v = x.!; ... }，
  * 未判空直接解包是编程错误，panic 终止）。 */
 static value_t *op_unwrap(vm_t *vm, bytecode_t *bc, size_t *pc) {

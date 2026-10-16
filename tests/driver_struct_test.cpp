@@ -296,7 +296,7 @@ TEST(Driver, RunFileStructAnonConstructInAssignRhsPasses) {
 }
 
 /* 聚合类型的拷贝语义（用户可见契约）：`var b = a` 是**拷贝**而非别名。
-   回归背景：DEFINE/STORE 的"接管"守卫误把"变量的值"（is_own=true）当成
+   回归背景：DEFINE/STORE 的"接管"守卫误把"变量的值"（ownership=OWN_OWN）当成
    fresh 临时值，导致 b 与 a 绑定同一 value 本体——改 b 会连带改 a。 */
 TEST(Driver, RunFileStructCopyInitIsNotAlias) {
   std::string path = write_temp_file(

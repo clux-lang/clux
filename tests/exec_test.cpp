@@ -1236,7 +1236,7 @@ TEST_F(ExecTest, LoadFunctionUnknownIdReturnsError) {
 /*                                                                  */
 /* 回归背景（两处缺陷，均由绑定语义（is_bound）判定修复）：                  */
 /*   ① DEFINE/STORE 的接管守卫原先只看 !value_is_borrowed，而"变量    */
-/*      自身的值"同样 is_own=true、并非借用 → "var b = a"（聚合类型） */
+/*      自身的值"同样 ownership=OWN_OWN、并非借用 → "var b = a"（聚合类型） */
 /*      被误判为 fresh 临时值而**直接绑定同一 value 本体**，结果 b 与 */
 /*      a 互为别名（改 b 连带改 a）；                             */
 /*   ② op_store 接管后只把源值从 owned 摘除、未回收 value 壳 →        */

@@ -42,6 +42,23 @@ const scope_frame_t *value_frame(const value_t *v);
 /** 从 value 还原所属 vm scope（container_of 反推；frame 为 NULL 时返回 NULL） */
 scope_t *value_scope(const value_t *v);
 
+/**
+ * 获取 value 的所有权状态（值层编码）。
+ *
+ * **仅 sema 编译期使用**——运行期代码不应读取此字段。运行期的"采用 vs 拷贝"
+ * 判据统一走 value_is_borrowed()（OWN_REF = 借用），不直接判 ownership。
+ * OWN_FATAL 是 sema 的将亡值标记，运行期永远不产生也不读取。
+ */
+ownership_t value_ownership(const value_t *v);
+
+/**
+ * 设置 value 的所有权状态（**仅 sema 编译期使用**）。
+ *
+ * 运行期代码不应调用此函数。sema 在 shadow value 上设置所有权状态以驱动
+ * 编译期的所有权检查（move/clone/return 拦截、fatal 消费点判定等）。
+ */
+void value_set_ownership(value_t *v, ownership_t own);
+
 /** 便捷数据访问宏 */
 #define value_as(v, T) (*((T *)(value_data(v))))
 
@@ -88,8 +105,8 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type);
 bool value_is_shadow(const value_t *v);
 
 /** 构造借用引用：data 指向父值（数组/struct）内部元素槽位（value_t**），
- * is_own=false。借用值只匿名存活于表达式链；绑定/返回时经 value_clone
- * materialize 成独立深拷贝（is_own=true）。自动 track 到 vm->current_scope。 */
+ * ownership=OWN_REF。借用值只匿名存活于表达式链；绑定/返回时经 value_clone
+ * materialize 成独立深拷贝（ownership=OWN_OWN）。自动 track 到 vm->current_scope。 */
 value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *slot);
 
 /** 判断 value 是否为借用引用（非 shadow 且不拥有 data）。
