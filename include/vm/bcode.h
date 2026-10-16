@@ -270,6 +270,19 @@ typedef enum {
                              * 结果）。沿嵌入链继承查找目标类型。 */
     BCODE_MARK_UNIQUE,      /* 无操作数：peek 栈顶开放 struct → type_struct_mark_unique
                              *（seal 前调用，seal 跳过去重 intern）。无栈深变化。 */
+
+    /* ---- 所有权显式释放（**追加在末尾**，不动既有编号）----
+     *
+     * sema 在作用域退出点（块尾 / return / break / continue）为每个 own 变量
+     * 生成 FREE <name>，类似 DEFER 的语法糖。运行期按名查变量 → 递归释放其
+     * own 堆块（ptr_free_owned_recursive），但不释放 value_t 壳与 data 块
+     * （那些由 POP_SCOPE 的 scope 结构释放统一处理）。
+     *
+     * **为什么需要显式 FREE**：所有权从 scope 统一销毁改为编译期显式生成。
+     * 所有 own 资源必然被一个有名字的变量追踪（无名字的 own = 内存泄露），
+     * sema 保证这一点。未来聚合类型含 own 字段时 FREE 递归释放。 */
+    BCODE_FREE,             /* STR name：按名查当前作用域变量 → 递归释放其 own
+                             * 堆块。无栈深变化（不弹不压）。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

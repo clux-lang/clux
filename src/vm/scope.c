@@ -1,7 +1,6 @@
 #include "vm/scope.h"
 #include "vm/vm.h"
 #include "vm/value.h"
-#include "vm/type_ptr.h"
 #include "vm/type_error.h"
 #include "core/strmap.h"
 #include "core/panic.h"
@@ -59,20 +58,15 @@ void scope_destroy(vm_t *vm, scope_t **pscope) {
     /* 0. 从父作用域的 children 中移除自身 */
     scope_remove_from_parent(scope);
 
-    /* 1. dispose + free 所有 owned value（scope 唯一的生命周期管理入口）。
-       销毁前先递归释放值内部所有 own 指针指向的堆内存（m3-design §3.1：
-       own 销毁沿字段递归——own *Struct 且 Struct 含 own 字段时递归传导；
-       含结构体字段内嵌 own 指针的场景由 ptr_free_owned_recursive 统一
-       扫描，value_dispose 只负责释放值自身的 data 块）。
-       仅拥有 data 的值（非借用）递归销毁——借用引用的 data 指向父值内部，
-       由父值销毁统一处理，跳过防 use-after-free（父值先于借用创建，先销毁）。 */
+    /* 1. 释放所有 owned value 的 value_t 结构体与 data 块。
+       **own 堆资源已由 sema 生成的 FREE <name> 指令在作用域退出点显式释放**，
+       scope_destroy 不再递归释放堆资源——只释放 value_t 壳与 data 块本身。
+       借用引用（OWN_REF）的 data 指向父值内部，跳过 data 释放。 */
     size_t owned_n = vec_len(scope->owned);
     for (size_t i = 0; i < owned_n; i++) {
         value_t *v = (value_t *)vec_get(scope->owned, i);
         if (v) {
-            if (!value_is_borrowed(v))
-                ptr_free_owned_recursive(vm, value_type(v), value_data(v));
-            value_dispose(vm, v);  /* 释放 data */
+            value_dispose(vm, v);  /* 释放 data 块（非借用） + 置 type=NULL */
             allocator_free(scope->alloc, (void **)&v);  /* 释放 value_t 结构体 */
         }
     }

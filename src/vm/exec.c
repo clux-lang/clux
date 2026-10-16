@@ -1024,6 +1024,22 @@ static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* FREE <name>：按名查当前作用域变量 → 递归释放其 own 堆块。
+ * sema 在作用域退出点为每个 own 变量生成此指令（类似 DEFER 语法糖）。
+ * 只释放堆资源（ptr_free_owned_recursive），不释放 value_t 壳与 data 块——
+ * 那些由 POP_SCOPE 的 scope 结构释放统一处理。无栈深变化。 */
+static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *v = scope_lookup(vm->current_scope, name);
+    if (!v || value_is_shadow(v)) return NULL;
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return NULL;
+    /* 借用引用无 own 堆块可释放（sema 不应为 ref 变量生成 FREE，运行期兜底） */
+    if (value_is_borrowed(v)) return NULL;
+    ptr_free_owned_recursive(vm, t, value_data(v));
+    return NULL;
+}
+
 /* ---- M4 切片段（m4-design §1/§2/§4） ---- */
 
 /* PUSH_SLICE <ownership>：分配空 slice type（开放，elem=NULL，不入池）+ 压其
@@ -2643,6 +2659,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_STORE_ATTR]      = op_store_attr,
     [BCODE_MARK_UNIQUE]     = op_mark_unique,
     [BCODE_MEMBER_CALL]     = op_member_call,
+    [BCODE_FREE]            = op_free,
 };
 
 /* ================================================================ */

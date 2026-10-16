@@ -80,6 +80,7 @@
 #include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
 #include "vm/ffi_lib.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
+#include "parser/ast_free.h"     /* AST_FREE：sema 生成的 own 变量释放语句 */
 #include <stdio.h>
 #include <string.h>
 
@@ -113,6 +114,91 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
                               size_t *idx);
 static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
                                   sema_scope_t *scope, size_t *idx);
+
+/* ---- 所有权显式释放：为 scope 中 own 变量生成 FREE <name> 语句 ----
+ *
+ * 所有权机制保证一切 own 资源必然被一个有名字的变量追踪（无名字的 own =
+ * 内存泄露）。sema 在作用域退出点遍历自己的变量符号，对所有权为 own 的
+ * 变量生成 AST_FREE 语句，compiler 发 BCODE_FREE <name> 递归释放堆块。
+ * 类似 DEFER 的语法糖，但由 sema 在 Pass 3b（类型已确定）自动生成。
+ *
+ * 返回 AST_FREE 语句链首（按变量声明序），NULL = 无 own 变量。
+ * **仅遍历本 scope 自身符号**（不沿 parent 链）——每个 scope 各自在自己的
+ * 退出点生成自己的 FREE。 */
+static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
+  if (!scope || !scope->symbols) return NULL;
+  const vec_t *keys = strmap_keys(scope->symbols);
+  if (!keys) return NULL;
+  size_t n = vec_len(keys);
+  ast_node_t *head = NULL;
+  ast_node_t *tail = NULL;
+  for (size_t i = 0; i < n; i++) {
+    const char *name = (const char *)vec_get(keys, i);
+    if (!name) continue;
+    sema_symbol_t *sym = (sema_symbol_t *)strmap_get(scope->symbols, name);
+    if (!sym || sym->kind != SEMA_SYM_VAR) continue;
+    if (!sym->type) continue;
+    /* 仅 own 变量需要显式 FREE（own 指针 / own 切片）。
+       moved 变量已被转移（TDZ），不需要 FREE。
+       comptime 变量不进入运行时，不需要 FREE。 */
+    if (sym->moved || sym->is_comptime) continue;
+    if (!sema_type_contains_own_resource(sym->type)) continue;
+    /* arena 持久化变量名（strslice → NUL 终止字符串） */
+    size_t nlen = strlen(name);
+    char *name_buf = (char *)arena_calloc(
+        sema->arena, nlen + 1, 1, ALIGNOF(max_align_t));
+    memcpy(name_buf, name, nlen);
+    strslice_t name_slice = strslice_from_bytes(name_buf, nlen);
+    ast_node_t *free_stmt = ast_free_new(sema->arena, name_slice);
+    if (!free_stmt) continue;
+    if (!head) {
+      head = free_stmt;
+      tail = free_stmt;
+    } else {
+      tail->next = free_stmt;
+      tail = free_stmt;
+    }
+  }
+  return head;
+}
+
+/* 沿 scope parent 链到 stop_scope（不含）收集各层 own 变量的 FREE 语句链。
+   与 collect_defer_calls 同构——FREE 在 defer calls 之后执行（追加到 defers
+   链末尾）。返回 FREE 语句链首（按执行顺序：内层 scope 先），NULL = 无。 */
+static ast_node_t *collect_free_stmts(sema_t *sema, sema_scope_t *from_scope,
+                                      const sema_scope_t *stop_scope) {
+  ast_node_t *head = NULL;
+  ast_node_t *tail = NULL;
+  for (sema_scope_t *s = from_scope; s && s != stop_scope; s = s->parent) {
+    ast_node_t *free_stmts = make_free_stmts(sema, s);
+    if (!free_stmts) continue;
+    if (!head) {
+      head = free_stmts;
+    } else {
+      tail->next = free_stmts;
+    }
+    ast_node_t *ft = free_stmts;
+    while (ft->next) ft = ft->next;
+    tail = ft;
+  }
+  return head;
+}
+
+/* 找到函数 scope 的 parent（return 的 FREE 收集范围 stop）。 */
+static const sema_scope_t *find_func_stop_sema(sema_scope_t *scope) {
+  for (sema_scope_t *s = scope; s; s = s->parent) {
+    if (s->kind == SEMA_SCOPE_FUNCTION) return s->parent;
+  }
+  return NULL;
+}
+
+/* 找到最近循环 scope 的 parent（break/continue 的 FREE 收集范围 stop）。 */
+static const sema_scope_t *find_loop_stop_sema(sema_scope_t *scope) {
+  for (sema_scope_t *s = scope; s; s = s->parent) {
+    if (s->kind == SEMA_SCOPE_FOR) return s->parent;
+  }
+  return NULL;
+}
 
 /* ---- 确定性赋值分析（definite assignment analysis） ---- */
 
@@ -1984,6 +2070,25 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                  "function returning %s must return a value", tn);
     }
   }
+  /* 为 return 路径沿 scope 链收集 own 变量的 FREE 语句，追加到 defers 链末尾。
+     FREE 在 defer calls 之后执行（defer 可能引用 own 变量，须先执行）。
+     defers 链由 Pass 3a desugar_defers 设置（可能为 NULL）；FREE 追加到末尾。 */
+  {
+    const sema_scope_t *stop = find_func_stop_sema(scope);
+    ast_node_t *free_stmts = collect_free_stmts(sema, scope, stop);
+    if (free_stmts) {
+      if (rt->base.defers) {
+        ast_node_t *tail = rt->base.defers;
+        while (tail->next) tail = tail->next;
+        tail->next = free_stmts;
+      } else {
+        rt->base.defers = free_stmts;
+      }
+      /* walk 生成的 FREE 语句 */
+      for (ast_node_t *f = free_stmts; f; f = f->next)
+        walk_stmt(sema, f, scope, &((size_t){0}));
+    }
+  }
   return r;
 }
 
@@ -2320,8 +2425,22 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       r = walk_return(sema, (ast_return_t *)stmt, scope);
       break;
     case AST_BREAK:
-    case AST_CONTINUE:
-      break; /* 位置检查已在 Pass 3a 完成 */
+    case AST_CONTINUE: {
+      /* 为 break/continue 路径沿 scope 链收集 own 变量的 FREE 语句，
+         追加到 defers 链末尾（与 return 同机制）。 */
+      const sema_scope_t *stop = find_loop_stop_sema(scope);
+      ast_node_t *free_stmts = collect_free_stmts(sema, scope, stop);
+      if (free_stmts) {
+        if (stmt->defers) {
+          ast_node_t *tail = stmt->defers;
+          while (tail->next) tail = tail->next;
+          tail->next = free_stmts;
+        } else {
+          stmt->defers = free_stmts;
+        }
+      }
+      break;
+    }
     case AST_FUNC_DEF:
       /* 局部函数定义：入口提升已处理签名，主循环（walk_block）已跳过并
          消费 fscope 子作用域。防御分支（非块上下文直接调用时零操作）。
@@ -2329,6 +2448,9 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
       break;
     /* AST_DEFER 已在 Pass 3a desugar_defers 中改写为 AST_FUNC_DEF +
        退出点 call（AST_EXPR_STMT），到达此处时已不存在 AST_DEFER。 */
+    case AST_FREE:
+      /* sema 生成的 own 变量释放语句：纯运行期指令，sema 无需类型检查。 */
+      break;
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
       value_t *v = sema_expr(sema, &es->expr, scope);
@@ -2620,6 +2742,25 @@ static block_result_t walk_block(sema_t *sema, ast_node_t *block,
     }
     prev = &s->next;
     s = s->next;
+  }
+  /* 为本 scope 的 own 变量生成 FREE <name> 语句，追加到块尾语句链末尾。
+     仅在块正常退出（非 definitely_returns）时追加——return/break/continue
+     路径的 FREE 由 walk_return/walk_break/walk_continue 沿 scope 链收集
+     并挂载到退出点节点的 defers 字段。 */
+  if (!r.definitely_returns) {
+    ast_node_t *free_stmts = make_free_stmts(sema, scope);
+    if (free_stmts) {
+      if (!b->stmts) {
+        b->stmts = free_stmts;
+      } else {
+        ast_node_t *tail = b->stmts;
+        while (tail->next) tail = tail->next;
+        tail->next = free_stmts;
+      }
+      /* walk 生成的 FREE 语句（类型检查：AST_FREE 在 walk_stmt 中无操作） */
+      for (ast_node_t *f = free_stmts; f; f = f->next)
+        walk_stmt(sema, f, scope, idx);
+    }
   }
   /* 3a/3b 对位自检（见 check_scope_consumed 说明）。不可达尾部不校验：
      3a 按结构建树，3b 已提前 break——属预期差异。 */

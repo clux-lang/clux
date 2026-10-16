@@ -13,6 +13,7 @@
 #include "parser/ast_for.h"
 #include "parser/ast_if.h"
 #include "parser/ast_nil.h"
+#include "parser/ast_free.h"
 #include "parser/ast_return.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_type_def.h"
@@ -885,6 +886,14 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   case AST_ERROR:
     c_error(c, node, "compile aborted on parse error node");
     return;
+  case AST_FREE: {
+    /* sema 为 own 变量在作用域退出点生成的显式释放语句。
+       发 BCODE_FREE <name>：运行期按名查变量递归释放 own 堆块。无栈深变化。 */
+    ast_free_t *n = (ast_free_t *)node;
+    bcode_write_op(c->bc, BCODE_FREE);
+    bcode_write_str(c->bc, n->name);
+    break;
+  }
   default:
     c_error(c, node, "unsupported statement node '%s'", ast_kind_name(node->kind));
     return;
