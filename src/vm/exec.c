@@ -916,18 +916,26 @@ static value_t *op_dispose(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
-/* FREE <name>：按名查当前作用域变量 → 递归释放其 own 堆块。
- * sema 在作用域退出点为每个 own 变量生成此指令（类似 DEFER 语法糖）。
+/* FREE：释放**栈顶的值**（无操作数）。
+ *
+ * sema 在作用域退出点为每个 own 变量生成 `PUSH <name>` + `FREE` 两条指令
+ * ——变量解析由 PUSH 完成，本指令只管"释放栈顶这个块"。
+ *
+ * **不做所有权判定**：只有 own 变量才会被生成这对指令，这是编译期事实；
+ * 对借用值释放是无意义的（其 data 指向父值内部），而 sema 不会那样生成。
+ *
  * 只释放堆资源（ptr_free_owned_recursive），不释放 value_t 壳与 data 块——
- * 那些由 POP_SCOPE 的 scope 结构释放统一处理。无栈深变化。 */
+ * 那些由 POP_SCOPE 的 scope 结构释放统一处理。栈深 -1。
+ *
+ * 注：PUSH 给出的是**借用视图**（data 指向变量本体的同一内存），而
+ * ptr_free_owned_recursive 就地把 ptr 置 NULL，所以释放会作用到变量本体，
+ * 作用域退出时不会二次释放。 */
 static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    strslice_t name = bcode_read_str(bc, pc);
-    value_t *v = scope_lookup(vm->current_scope, name);
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
     if (!v || value_is_shadow(v)) return NULL;
     const type_t *t = value_type(v);
     if (!t || !value_data(v)) return NULL;
-    /* 借用引用无 own 堆块可释放（sema 不应为 ref 变量生成 FREE，运行期兜底） */
-    if (value_is_borrowed(v)) return NULL;
     ptr_free_owned_recursive(vm, t, value_data(v));
     return NULL;
 }

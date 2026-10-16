@@ -887,11 +887,18 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     c_error(c, node, "compile aborted on parse error node");
     return;
   case AST_FREE: {
-    /* sema 为 own 变量在作用域退出点生成的显式释放语句。
-       发 BCODE_FREE <name>：运行期按名查变量递归释放 own 堆块。无栈深变化。 */
+    /* `FREE <expr>`：编译操作数表达式压栈，再发 FREE（只消费栈顶）。
+       **compiler 不知道任何类型结构**——"释放什么"完全由 sema 生成的
+       expr 决定。目前简单指针下 expr 就是变量引用（→ PUSH <name>），
+       于是字节码是 `PUSH <name>` + `FREE`；将来复杂类型的展开（循环 /
+       判断 / get_field / get_index）同样只是别的 expr，编译器无需改动。
+       `operand` 是操作数兄弟链链首（组合式释放时多于一条）。 */
     ast_free_t *n = (ast_free_t *)node;
-    bcode_write_op(c->bc, BCODE_FREE);
-    bcode_write_str(c->bc, n->name);
+    for (ast_node_t *op = n->operand; op; op = op->next) {
+      compile_expr(c, op);                   /* 栈: [handle] */
+      bcode_write_op(c->bc, BCODE_FREE);     /* 释放栈顶 */
+      st_push(c, -1);
+    }
     break;
   }
   default:

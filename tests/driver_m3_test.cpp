@@ -20,6 +20,34 @@ namespace {
 
 /* ---- M3 指针与所有权（own/ref/fatal，m3-design §3/§7/§8） ---- */
 
+TEST(Driver, OwnReleasedAtScopeExit) {
+  /* own 变量在作用域退出点被显式释放（m3-design：销毁序列编译期生成）。
+     覆盖三条退出路径——块尾 / return / break——以及"释放发生在块内变量上"。
+     本用例同时锁定 FREE 的新形态：`FREE <expr>` 由 sema 生成 expr
+     （简单指针 = 变量引用 → PUSH <name>），compiler 编译 expr 后发 FREE。
+     若 FREE 退化成按名查表或 expr 未压栈，运行期会读到错误值或崩溃。 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var acc: i32 = 0;\n"
+      "  {\n"                                  /* 块尾退出 */
+      "    var a: own *i32 = new i32{1};\n"
+      "    acc = acc + a.*;\n"
+      "  }\n"
+      "  for (var i: i32 = 0; i < 3; i = i + 1) {\n"
+      "    var b: own *i32 = new i32{10};\n"
+      "    acc = acc + b.*;\n"
+      "    if (i == 1) { break; }\n"           /* break 退出（仍有块要释放） */
+      "  }\n"
+      "  {\n"
+      "    var c: own *i32 = new i32{100};\n"
+      "    acc = acc + c.*;\n"
+      "    return acc - 131;\n"                /* return 退出（块内 own 未到块尾） */
+      "  }\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, PtrNewDerefWrite) {
   /* new 堆分配 + 解引用读 + 解引用写（m3-design §8.1/§8.2） */
   std::string path = write_temp_file(

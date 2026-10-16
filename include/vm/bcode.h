@@ -274,15 +274,19 @@ typedef enum {
     /* ---- 所有权显式释放（**追加在末尾**，不动既有编号）----
      *
      * sema 在作用域退出点（块尾 / return / break / continue）为每个 own 变量
-     * 生成 FREE <name>，类似 DEFER 的语法糖。运行期按名查变量 → 递归释放其
-     * own 堆块（ptr_free_owned_recursive），但不释放 value_t 壳与 data 块
-     * （那些由 POP_SCOPE 的 scope 结构释放统一处理）。
+     * 生成 `PUSH <name>` + `FREE` 一对指令。
      *
      * **为什么需要显式 FREE**：所有权从 scope 统一销毁改为编译期显式生成。
-     * 所有 own 资源必然被一个有名字的变量追踪（无名字的 own = 内存泄露），
-     * sema 保证这一点。未来聚合类型含 own 字段时 FREE 递归释放。 */
-    BCODE_FREE,             /* STR name：按名查当前作用域变量 → 递归释放其 own
-                             * 堆块。无栈深变化（不弹不压）。 */
+     * 全部所有权判定在编译期完成（哪些变量是 own 由 sema 知道），运行期不做
+     * 任何所有权判定。
+     *
+     * **为什么 FREE 消费栈顶而不是按名**：按名会把"变量解析"揉进释放指令，
+     * 使其无法作用于无名临时值（`_ = new T{...}`），且需要运行期读所有权兜底。
+     * 改为消费栈顶后，FREE 是**类型无关**的"释放这个块"，变量解析交给配对的
+     * PUSH。类型相关的展开（optional→判断 / 数组·切片→循环 / tuple→get_index
+     * / struct→get_field）由后续 sema 按类型生成，见 docs/m3-design.md。 */
+    BCODE_FREE,             /* 无操作数：弹栈顶值 → 递归释放其 own 堆块。
+                             * 栈深 -1。不按名解析、不做所有权判定。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

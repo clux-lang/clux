@@ -115,16 +115,21 @@ static block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
 static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
                                   sema_scope_t *scope, size_t *idx);
 
-/* ---- 所有权显式释放：为 scope 中 own 变量生成 FREE <name> 语句 ----
+/* ---- 所有权显式释放：为 scope 中 own 变量生成 `PUSH <name>` + `FREE` ----
  *
- * 所有权机制保证一切 own 资源必然被一个有名字的变量追踪（无名字的 own =
- * 内存泄露）。sema 在作用域退出点遍历自己的变量符号，对所有权为 own 的
- * 变量生成 AST_FREE 语句，compiler 发 BCODE_FREE <name> 递归释放堆块。
+ * 只在**编译期**决定释放什么：sema 在作用域退出点遍历自己的变量符号，对
+ * 所有权为 own 的变量生成两条语句——`PUSH <name>`（AST_IDENT，编译为
+ * BCODE_PUSH）把变量压栈，`FREE` 消费栈顶释放它。
+ *
+ * **FREE 不按名解析**（不携带名字）：它只是"释放栈顶那个块"，因此类型无关，
+ * 且同样能作用于无名临时值（`_ = new T{...}`）。运行期不做任何所有权判定
+ * ——只为 own 变量生成，这是编译期事实。类型相关的展开（optional→判断 /
+ * 数组·切片→循环 / tuple→get_index / struct→get_field）待后续按类型生成。
+ *
  * 类似 DEFER 的语法糖，但由 sema 在 Pass 3b（类型已确定）自动生成。
- *
- * 返回 AST_FREE 语句链首（按变量声明序），NULL = 无 own 变量。
+ * 返回语句链首（按变量声明序），NULL = 无 own 变量。
  * **仅遍历本 scope 自身符号**（不沿 parent 链）——每个 scope 各自在自己的
- * 退出点生成自己的 FREE。 */
+ * 退出点生成自己的释放。 */
 static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
   if (!scope || !scope->symbols) return NULL;
   const vec_t *keys = strmap_keys(scope->symbols);
@@ -138,19 +143,30 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     sema_symbol_t *sym = (sema_symbol_t *)strmap_get(scope->symbols, name);
     if (!sym || sym->kind != SEMA_SYM_VAR) continue;
     if (!sym->type) continue;
-    /* 仅 own 变量需要显式 FREE（own 指针 / own 切片）。
-       moved 变量已被转移（TDZ），不需要 FREE。
-       comptime 变量不进入运行时，不需要 FREE。 */
+    /* 仅 **own** 变量需要显式释放。判据用符号层的 `sym->ownership`
+       （所有权已从类型层迁移到值/符号层——类型不携带 ownership，
+       所以**不能**用类型层的谓词判断）。
+       moved 变量已被转移（TDZ），不需要释放。
+       comptime 变量不进入运行时，不需要释放。 */
     if (sym->moved || sym->is_comptime) continue;
-    if (!sema_type_contains_own_resource(sym->type)) continue;
-    /* arena 持久化变量名（strslice → NUL 终止字符串） */
+    if (sym->ownership != OWN_OWN) continue;
+    /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
+       目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
+       将来复杂类型在此按类型展开（optional→判断 / 数组→循环 / tuple→
+       get_index / struct→get_field），生成的仍是 AST_FREE + 对应 expr，
+       compiler 不需要知道类型结构。 */
+    /* arena 持久化变量名（strslice → NUL 终止字符串；AST_IDENT 引用它） */
     size_t nlen = strlen(name);
     char *name_buf = (char *)arena_calloc(
         sema->arena, nlen + 1, 1, ALIGNOF(max_align_t));
     memcpy(name_buf, name, nlen);
     strslice_t name_slice = strslice_from_bytes(name_buf, nlen);
-    ast_node_t *free_stmt = ast_free_new(sema->arena, name_slice);
-    if (!free_stmt) continue;
+
+    ast_node_t *ident = ast_ident_new(sema->arena, 0, 0);
+    ast_node_t *free_stmt = ast_free_new(sema->arena, ident);
+    if (!ident || !free_stmt) continue;
+    ((ast_ident_t *)ident)->name = name_slice;
+
     if (!head) {
       head = free_stmt;
       tail = free_stmt;

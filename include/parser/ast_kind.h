@@ -111,9 +111,10 @@ typedef enum {
     AST_EXPORT,          /* export <decl> — 标记全局定义进入模块导出表（前缀修饰） */
 
     /* --- sema 生成的内部节点（不出现在用户源码中）--- */
-    AST_FREE,            /* FREE <name>：sema 为 own 变量在作用域退出点生成的
-                            显式释放语句（类似 DEFER 语法糖）。compiler 发
-                            BCODE_FREE <name>，运行期递归释放变量的 own 堆块。 */
+    AST_FREE,            /* `FREE <expr>`：释放 expr 所指的堆块。sema 在作用域
+                            退出点按类型生成 expr（简单指针 = 变量引用 → PUSH
+                            <name>），compiler 编译 expr 后发 BCODE_FREE
+                            （只消费栈顶）。compiler 不知道类型结构。 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

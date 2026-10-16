@@ -9,27 +9,42 @@ extern "C" {
 #include "core/arena.h"
 
 /**
- * AST_FREE：sema 为 own 变量在作用域退出点生成的显式释放语句。
+ * AST_FREE：**释放表达式所指的堆块**——语义上是 `FREE <expr>`。
  *
- * 不出现在用户源码中——由 sema desugar_defers 阶段自动生成，插入到
- * 块尾 / return / break / continue 退出点（与 defer calls 同机制）。
- * compiler 识别 AST_FREE 发出 BCODE_FREE <name> 指令。
+ * 分两层，注意区分：
+ * - **语义层**：`FREE <expr>`，`expr` 求值得到要释放的指针/值。
+ * - **字节码层**：`FREE` 指令无操作数，只消费**栈顶**。
+ *   所以 compiler 先编译 `expr` 压栈，再发 `BCODE_FREE`。
  *
- * name 是 arena 持久化的 NUL 终止字符串（变量名）。
+ * 目前只有简单指针，sema 生成的 `expr` 就是变量引用（`AST_IDENT` →
+ * `BCODE_PUSH <name>`），于是字节码是 `PUSH <name>` + `FREE`。
+ * **将来复杂类型**由 sema 按类型展开（optional→判断 / 数组·切片→循环 /
+ * tuple→get_index / struct→get_field），生成的仍是本节点 + 对应 expr
+ * ——**compiler 不需要知道任何类型结构**。
+ *
+ * 为什么不在 compiler 里按名字拼 PUSH：那会把"释放什么"的构造逻辑锁在
+ * compiler 层，未来按类型展开时无法复用，且与其它类型的释放形式冲突。
+ *
+ * `operand` 是操作数表达式**兄弟链**的链首（与 `ast_node_t::defers` 同款
+ * 约定），用于组合式释放（如"释放这个结构体里的一批 own 槽位"）。
+ * 单个释放时它就是一条链。
+ *
+ * 不出现在用户源码中——由 sema 在作用域退出点（块尾 / return /
+ * break / continue）自动生成。调用方保证只对 **own** 目标生成。
  */
 typedef struct {
-    ast_node_t base;
-    strslice_t name;  /* 要释放的变量名（arena 持久化） */
+    ast_node_t  base;
+    ast_node_t *operand;  /* 操作数表达式兄弟链链首（释放它所指的块） */
 } ast_free_t;
 
-static inline ast_node_t *ast_free_new(arena_t *arena, strslice_t name) {
+static inline ast_node_t *ast_free_new(arena_t *arena, ast_node_t *operand) {
     ast_free_t *n = (ast_free_t *)arena_calloc(
         arena, 1, sizeof(ast_free_t), ALIGNOF(max_align_t));
     if (!n) return NULL;
     n->base.kind      = AST_FREE;
     n->base.tok_begin = 0;  /* 编译器生成节点：tok_begin=0 标记 */
     n->base.tok_end   = 0;
-    n->name           = name;
+    n->operand        = operand;
     return &n->base;
 }
 
