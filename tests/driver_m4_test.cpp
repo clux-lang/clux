@@ -14,16 +14,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_m4_test_XXXXXX";
-  auto path_str = path.string();
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 

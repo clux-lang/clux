@@ -101,7 +101,7 @@ class ConstConvertTest : public ::testing::Test {
         body +
         "func report(v: i32): i32 { td::td_i32 = v; return v; }\n";
     std::string path =
-        (std::filesystem::temp_directory_path() /
+        (clux_test_path() /
          ("clux_const_convert_" + std::to_string(counter++) + ".cx"))
             .string();
     FILE *fp = fopen(path.c_str(), "wb");
@@ -119,7 +119,7 @@ class ConstConvertTest : public ::testing::Test {
   void expect_compile_error(const char *src) {
     static int counter = 0;
     std::string path =
-        (std::filesystem::temp_directory_path() /
+        (clux_test_path() /
          ("clux_const_convert_bad_" + std::to_string(counter++) + ".cx"))
             .string();
     FILE *fp = fopen(path.c_str(), "wb");

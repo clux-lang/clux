@@ -19,7 +19,7 @@ class ImportCase {
 public:
   explicit ImportCase(const std::string &name) {
     static int counter = 0;
-    dir_ = std::filesystem::temp_directory_path() /
+    dir_ = clux_test_path() /
            ("clux_import_" + name + "_" + std::to_string(counter++));
     std::filesystem::create_directories(dir_);
   }

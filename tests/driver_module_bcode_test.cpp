@@ -17,18 +17,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content,
-                            const std::string &tag = "clux_mbc") {
-  auto path = std::filesystem::temp_directory_path() / (tag + "_XXXXXX");
-  auto path_str = path.string();
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  const std::string src_ = clux_with_printf_prelude(content);
-  fwrite(src_.data(), 1, src_.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 std::string read_file(const std::string &path) {
   std::ifstream in(path, std::ios::binary);
@@ -79,7 +67,7 @@ MultiModuleProgram make_program(const std::string &dir_hint) {
  * ================================================================ */
 
 TEST(DriverModuleBcode, EmittedCxbEmbedsDependenciesAndRuns) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_mbc_prog";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_mbc_prog";
   std::filesystem::create_directories(dir);
   std::string hint = (dir / "").string();
   MultiModuleProgram p = make_program(hint);
@@ -98,7 +86,7 @@ TEST(DriverModuleBcode, EmittedCxbEmbedsDependenciesAndRuns) {
 }
 
 TEST(DriverModuleBcode, DisasmAsmRoundTripIsByteIdentical) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_mbc_rt";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_mbc_rt";
   std::filesystem::create_directories(dir);
   std::string hint = (dir / "").string();
   MultiModuleProgram p = make_program(hint);
@@ -130,7 +118,7 @@ TEST(DriverModuleBcode, SingleModuleTextStaysDirectiveFree) {
      examples/asm 的 5 个手写 .cxs 样本因此继续可用。 */
   std::string src = write_temp_file(
       "func main(): i32 { return 7 - 7; }\n", "clux_mbc_one");
-  auto dir = std::filesystem::temp_directory_path();
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir());
   std::string bin = (dir / "clux_mbc_one.cxb").string();
   std::string cxs = (dir / "clux_mbc_one.cxs").string();
 
@@ -152,7 +140,7 @@ TEST(DriverModuleBcode, LegacyV1ContainerStillRuns) {
      源码 → v2 容器 → 反汇编成文本 → **旧汇编器 + 旧序列化器** → v1 容器。 */
   std::string src = write_temp_file(
       "func main(): i32 { return 3 - 3; }\n", "clux_mbc_v1");
-  auto dir = std::filesystem::temp_directory_path();
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir());
   std::string v2 = (dir / "clux_mbc_v1.v2.cxb").string();
   std::string cxs = (dir / "clux_mbc_v1.cxs").string();
   std::string v1 = (dir / "clux_mbc_v1.v1.cxb").string();
@@ -178,7 +166,7 @@ TEST(DriverModuleBcode, LegacyV1ContainerStillRuns) {
 
 TEST(DriverModuleBcode, CyclicImportRejectedBeforeEmit) {
   /* 循环依赖在编译期拒绝（不会产出可执行容器） */
-  auto dir = std::filesystem::temp_directory_path() / "clux_mbc_cycle";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_mbc_cycle";
   std::filesystem::create_directories(dir);
   std::string hint = (dir / "").string();
   std::string a = hint + "a.cx", b = hint + "b.cx";
@@ -521,7 +509,7 @@ TEST(DriverM6, FfiProgramCxbCxsRoundTripIsByteIdentical) {
 
 /* FFI 声明属于**依赖模块**时同样落盘（每模块一段，section 归属必须正确） */
 TEST(DriverM6, FfiInDependencyModuleRunsFromCxb) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_mbc_ffi_dep";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_mbc_ffi_dep";
   std::filesystem::create_directories(dir);
   std::string hint = (dir / "").string();
 

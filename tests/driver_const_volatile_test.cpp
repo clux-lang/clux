@@ -15,18 +15,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_test_XXXXXX";
-  auto path_str = path.string();
-  /* mkstemps is not available on Windows; use a simple unique name. */
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  const std::string src_ = clux_with_printf_prelude(content);
-  fwrite(src_.data(), 1, src_.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 
@@ -157,7 +145,7 @@ TEST(Driver, RunFileAnnotatedWideVarNarrowLiteralRejected) {
 /* 源码 → .cxb → .cxs → .cxb：两次 .cxb 应字节级一致（往返稳定），
  * 且中间 .cxs 可被执行。 */
 TEST(Driver, AsmBinRoundTripStable) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_conv_test";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_conv_test";
   std::filesystem::create_directories(dir);
   std::string src  = (dir / "prog.cx").string();
   std::string cxb1 = (dir / "prog.cxb").string();
@@ -193,7 +181,7 @@ TEST(Driver, AsmBinRoundTripStable) {
 
 /* 内容嗅探：按内容（而非扩展名）判定输入类型。 */
 TEST(Driver, DetectInputByContent) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_detect_test";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_detect_test";
   std::filesystem::create_directories(dir);
 
   /* 源码（关键字特征）——扩展名故意用 .txt，验证不依赖扩展名 */
@@ -273,7 +261,7 @@ TEST(Driver, DetectInputByContent) {
 
 /* 内容嗅探驱动的互转：即使扩展名不标准也能正确转换。 */
 TEST(Driver, ConvByContentSniffing) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_conv_sniff";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_conv_sniff";
   std::filesystem::create_directories(dir);
 
   /* 用 .txt 扩展名承载汇编文本 → 应能汇编为 .cxb 并执行 */
@@ -319,7 +307,7 @@ TEST(Driver, ConvByContentSniffing) {
 
 /* 互转的失败路径：文件不存在 / 输入内容损坏。 */
 TEST(Driver, ConvErrorPaths) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_conv_err";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_conv_err";
   std::filesystem::create_directories(dir);
 
   /* 源文件不存在 */

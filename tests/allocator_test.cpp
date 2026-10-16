@@ -639,8 +639,9 @@ TEST(LeakDetection, LeakReportedOnDelete) {
   void *leaked = allocator_new(a, &int_class, 3);
 
   /* Redirect stderr to a temp file to capture leak output */
-  char tmp_path[L_tmpnam];
-  tmpnam(tmp_path);
+  std::string tmp_path_s = clux_test_temp_dir() + "/clux_leak.txt";
+  const char *tmp_path = tmp_path_s.c_str();
+  std::filesystem::create_directories(clux_test_temp_dir());
   FILE *tmp = freopen(tmp_path, "w", stderr);
   ASSERT_NE(tmp, nullptr);
 
@@ -676,8 +677,9 @@ TEST(LeakDetection, MultipleLeaksReported) {
   ASSERT_NE(p1, nullptr);
   ASSERT_NE(p2, nullptr);
 
-  char tmp_path[L_tmpnam];
-  tmpnam(tmp_path);
+  std::string tmp_path_s = clux_test_temp_dir() + "/clux_leak.txt";
+  const char *tmp_path = tmp_path_s.c_str();
+  std::filesystem::create_directories(clux_test_temp_dir());
   FILE *tmp = freopen(tmp_path, "w", stderr);
   ASSERT_NE(tmp, nullptr);
 

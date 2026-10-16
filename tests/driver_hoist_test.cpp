@@ -15,17 +15,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_test_XXXXXX";
-  auto path_str = path.string();
-  /* mkstemps is not available on Windows; use a simple unique name. */
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 
@@ -36,7 +25,7 @@ std::string write_temp_file(const std::string &content) {
    driver_build_asm 产出的 .cxs 文本应可见
    DEFINE_TYPE / SEAL / PUSH_ARRAY / DEFINE_BOUND / LOAD_TYPE 指令。 */
 TEST(Driver, BuildAsmHoistSectionPresent) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_hoist";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_hoist";
   std::filesystem::create_directories(dir);
   std::string src = (dir / "prog.cx").string();
   std::string cxs = (dir / "prog.cxs").string();
@@ -75,7 +64,7 @@ TEST(Driver, BuildAsmHoistSectionPresent) {
    （LOAD_TYPE <id>→DEFINE_BOUND→SEAL）。断言 .cxs 文本中 DEFINE "Pair"
    出现在 SEAL（pass 2 收尾）之前。 */
 TEST(Driver, BuildAsmTypeDefBindingBetweenHoistPasses) {
-  auto dir = std::filesystem::temp_directory_path() / "clux_typedef_hoist";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_typedef_hoist";
   std::filesystem::create_directories(dir);
   std::string src = (dir / "prog.cx").string();
   std::string cxs = (dir / "prog.cxs").string();

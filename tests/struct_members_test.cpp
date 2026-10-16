@@ -107,7 +107,7 @@ class StructMembersTest : public ::testing::Test {
         body +
         "func report(v: i32): i32 { td::td_i32 = v; return v; }\n";
     std::string path =
-        (std::filesystem::temp_directory_path() /
+        (clux_test_path() /
          ("clux_struct_members_" + std::to_string(counter++) + ".cx"))
             .string();
     FILE *fp = fopen(path.c_str(), "wb");
@@ -234,7 +234,7 @@ TEST_F(StructMembersTest, Diagnostics) {
   for (const char *src : cases) {
     static int counter = 0;
     std::string path =
-        (std::filesystem::temp_directory_path() /
+        (clux_test_path() /
          ("clux_struct_members_bad_" + std::to_string(counter++) + ".cx"))
             .string();
     FILE *fp = fopen(path.c_str(), "wb");

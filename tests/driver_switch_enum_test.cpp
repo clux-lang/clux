@@ -15,18 +15,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_test_XXXXXX";
-  auto path_str = path.string();
-  /* mkstemps is not available on Windows; use a simple unique name. */
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  const std::string src_ = clux_with_printf_prelude(content);
-  fwrite(src_.data(), 1, src_.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 

@@ -37,6 +37,7 @@ extern "C" {
 #include "vm/scope.h"
 #include "vm/value.h"
 #include "vm/vm.h"
+#include "test_common.h"
 }
 
 namespace {
@@ -48,18 +49,6 @@ const char *kHostLib = "*";
 void *pl_alloc(size_t size) { return std::malloc(size); }
 void pl_free(void *p) { std::free(p); }
 
-std::string write_temp_file(const std::string &content,
-                            const std::string &tag = "clux_ffi_proc") {
-  static int counter = 0;
-  std::string path =
-      (std::filesystem::temp_directory_path() /
-       ("clux_ffi_proc_" + tag + "_" + std::to_string(counter++) + ".cx"))
-          .string();
-  FILE *fp = fopen(path.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path;
-}
 
 std::string read_file(const std::string &path) {
   std::string out;

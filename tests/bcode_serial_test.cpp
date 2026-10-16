@@ -123,7 +123,7 @@ TEST(BcodeSerial, FileRoundTrip) {
     allocator_t *a = create_allocator(malloc, free);
 
     std::string path =
-        (std::filesystem::temp_directory_path() / "clux_serial_test.cxb").string();
+        (clux_test_temp_dir() + "/" + ("clux_serial_test.cxb"));
 
     bytecode_t *bc = make_sample(a);
     ASSERT_EQ(bcode_serial(bc, path.c_str()), 0);

@@ -47,6 +47,7 @@ extern "C" {
 #include "vm/scope.h"
 #include "vm/value.h"
 #include "vm/vm.h"
+#include "test_common.h"
 }
 
 namespace {
@@ -69,7 +70,7 @@ struct CompiledClux {
   bool compile(const std::string &src, const char *tag) {
     static int counter = 0;
     std::filesystem::path p =
-        std::filesystem::temp_directory_path() /
+        clux_test_path() /
         ("clux_ffi_cb_" + std::string(tag) + "_" + std::to_string(counter++) +
          ".cx");
     path = p.string();

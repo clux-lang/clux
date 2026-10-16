@@ -15,17 +15,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_test_XXXXXX";
-  auto path_str = path.string();
-  /* mkstemps is not available on Windows; use a simple unique name. */
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 
@@ -225,8 +214,9 @@ TEST(Driver, CompileErrorPathDoesNotLeakSemaScopeTree) {
       write_temp_file("func main(): i32 { var x: i32 = \"s\"; return 0; }\n");
   std::string out = src + ".cxb";
 
-  char tmp_path[L_tmpnam];
-  std::tmpnam(tmp_path);
+  std::string tmp_path_s = clux_test_temp_dir() + "/clux_sema.txt";
+  const char *tmp_path = tmp_path_s.c_str();
+  std::filesystem::create_directories(clux_test_temp_dir());
   FILE *redirected = freopen(tmp_path, "w", stderr);
   ASSERT_NE(redirected, nullptr);
 

@@ -51,7 +51,7 @@ const bool kIs64 = sizeof(void *) == 8;
 
 std::string temp_path(const std::string &tag) {
   static int counter = 0;
-  return (std::filesystem::temp_directory_path() /
+  return (clux_test_path() /
           (tag + "_" + std::to_string(counter++) + ".cx"))
       .string();
 }

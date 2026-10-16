@@ -39,6 +39,7 @@ extern "C" {
 #include "vm/scope.h"
 #include "vm/value.h"
 #include "vm/vm.h"
+#include "test_common.h"
 }
 
 namespace {
@@ -54,18 +55,6 @@ const char *kTestDataLib = "libclux_ffi_testdata.so";
 void *td_alloc(size_t size) { return std::malloc(size); }
 void td_free(void *p) { std::free(p); }
 
-std::string write_temp_file(const std::string &content,
-                            const std::string &tag = "clux_ffi_var") {
-  static int counter = 0;
-  std::string path =
-      (std::filesystem::temp_directory_path() /
-       (tag + "_" + std::to_string(counter++) + ".cx"))
-          .string();
-  FILE *fp = fopen(path.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path;
-}
 
 /* 保持测试库**常驻**：`ffi_lib_close` 是 FreeLibrary/dlclose，引用计数归零会
    **卸载模块**——下次 LoadLibrary 拿到的是全新副本，导出变量复位。若每次读取都

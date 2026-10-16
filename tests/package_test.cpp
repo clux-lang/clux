@@ -37,7 +37,7 @@ protected:
 
     /* 创建临时目录并写入 clux.mod，返回目录路径 */
     std::string make_pkg_dir(const std::string &content) {
-        auto dir = std::filesystem::temp_directory_path() /
+        auto dir = clux_test_path() /
                    ("clux_pkg_test_XXXXXX");
         static int counter = 0;
         dir += std::to_string(counter++);
@@ -222,8 +222,7 @@ TEST_F(PackageTest, FindFromSubdirectory) {
          src/
            main.clux
     */
-    auto base = std::filesystem::temp_directory_path() /
-                "clux_pkg_find_XXXXXX";
+    std::filesystem::path base = std::filesystem::path(clux_test_temp_dir()) / "clux_pkg_find_XXXXXX";
     static int counter = 0;
     base += std::to_string(counter++);
     std::filesystem::create_directories(base / "src");
@@ -252,8 +251,7 @@ TEST_F(PackageTest, FindFromSubdirectory) {
 
 TEST_F(PackageTest, FindNoMod) {
     /* 在临时目录的深处查找（应该找不到） */
-    auto deep = std::filesystem::temp_directory_path() /
-                "clux_nopkg_test_XXXXXX";
+    std::filesystem::path deep = std::filesystem::path(clux_test_temp_dir()) / "clux_nopkg_test_XXXXXX";
     static int counter = 0;
     deep += std::to_string(counter++);
     std::filesystem::create_directories(deep);

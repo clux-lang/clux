@@ -15,17 +15,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_test_XXXXXX";
-  auto path_str = path.string();
-  /* mkstemps is not available on Windows; use a simple unique name. */
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 } // namespace
 
@@ -51,7 +40,7 @@ TEST(Driver, RunFileExtendsCompileTimeFold) {
 TEST(Driver, RunFileExtendsFoldToBoolConst) {
   /* 折叠验证：反汇编 .cxs 中 extends 表达式应全部为 PUSH_BOOL 常量，
      不残留任何运行时类型计算指令。 */
-  auto dir = std::filesystem::temp_directory_path() / "clux_ext_fold";
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_ext_fold";
   std::filesystem::create_directories(dir);
   std::string src = (dir / "prog.cx").string();
   std::string cxs = (dir / "prog.cxs").string();

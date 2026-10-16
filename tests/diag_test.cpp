@@ -188,7 +188,7 @@ TEST_F(DiagTest, PrintAllSmoke) {
 
 TEST_F(DiagTest, PrintSnippetBlockRustStyle) {
     /* 真实存在的临时文件 → 输出 Rust 风格源码片段块 */
-    std::string path = std::filesystem::temp_directory_path().string();
+    std::string path = clux_test_temp_dir();
     path += "/clux_diag_snippet.txt";
     {
         FILE *fp = fopen(path.c_str(), "wb");

@@ -110,7 +110,7 @@ class FfiStructTest : public ::testing::Test {
   /* 写临时 clux 源文件（自动补 printf 前言）并运行；返回驱动状态 */
   int run(const std::string &src) {
     std::string path =
-        (std::filesystem::temp_directory_path() /
+        (clux_test_path() /
          ("clux_ffi_struct_" + std::to_string(counter_++) + ".cx"))
             .string();
     std::string full = clux_with_printf_prelude(src);
@@ -332,7 +332,7 @@ TEST_F(FfiStructTest, StructFfiSurvivesContainerRoundTrip) {
                     "  var b: Big = .Big{ .a = 1, .b = 2, .c = 3.5 };\n"
                     "  if (td::clux_big_sum(b) != 6) { verdict = 2; }\n" +
                     kReport;
-  auto dir = std::filesystem::temp_directory_path();
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir());
   std::string path = (dir / "clux_ffi_struct_rt.cx").string();
   std::string bin = (dir / "clux_ffi_struct_rt.cxb").string();
   FILE *fp = fopen(path.c_str(), "wb");

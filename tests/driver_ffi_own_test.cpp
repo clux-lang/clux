@@ -23,18 +23,6 @@ extern "C" {
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  static int counter = 0;
-  std::string path = "clux_ffi_own_" + std::to_string(counter++) + ".cx";
-  FILE *fp = fopen(path.c_str(), "wb");
-  if (!fp) {
-    ADD_FAILURE() << "cannot open temp source file: " << path;
-    return path;
-  }
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path;
-}
 
 /* 只关心**声明期**的拒绝：诊断出现在编译阶段（driver_run_file 返回 1）。
    这些声明引用的 C 符号不存在，但类型约束先于 dlsym 解析失败。 */

@@ -5,20 +5,11 @@
 
 extern "C" {
 #include "driver/driver.h"
+#include "test_common.h"
 }
 
 namespace {
 
-std::string write_temp_file(const std::string &content) {
-  auto path = std::filesystem::temp_directory_path() / "clux_comptime_XXXXXX";
-  auto path_str = path.string();
-  static int counter = 0;
-  path_str += std::to_string(counter++);
-  FILE *fp = fopen(path_str.c_str(), "wb");
-  fwrite(content.data(), 1, content.size(), fp);
-  fclose(fp);
-  return path_str;
-}
 
 /* 运行一段源码，返回退出码（0 = 程序内自检全通过） */
 int run_src(const std::string &src) {
