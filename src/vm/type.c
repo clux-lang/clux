@@ -281,30 +281,25 @@ bool type_contains_ptr_or_slice(const type_t *t) {
     }
 }
 
-/* ---- own 资源判定（见 type.h） ---- */
-
-/* 所有权纯编译期——类型不携带 ownership，本函数始终返回 false。
-   保留供链接兼容；调用方应改用 sig->param_ownerships[i] == OWN_OWN
-   或 value_ownership(v) == OWN_OWN 判定。 */
-bool type_owns_resources(const type_t *t) {
-    (void)t;
-    return false;
-}
-
-/* ---- fatal 将亡值是否携带可转移的堆资源（见 type.h） ---- */
-
-/* 所有权纯编译期——类型不携带 ownership，本函数始终返回 false。
-   保留供链接兼容；调用方应改用 sig->return_ownership == OWN_FATAL
-   或 value_ownership(v) == OWN_FATAL 判定。 */
-bool type_fatal_carries_resource(const type_t *t) {
-    (void)t;
-    return false;
-}
+/* ---- 类型层所有权谓词：**已删除**（2026-10 所有权重构） ----
+ *
+ * `type_owns_resources` / `type_fatal_carries_resource` / `type_contains_ref`
+ * 原先在类型层判定 own/fatal/ref，随重构全部失效：**所有权不再由类型携带**
+ * （`type_t` 无 ownership 字段），且**复合类型已禁止携带指针/切片**，类型层
+ * 没有可判定的对象。三者均已无调用方，故删除。
+ *
+ * 判定入口现为：
+ *   - 符号层：`sema_symbol_t::ownership`
+ *   - 值层：  `value_ownership(v)`
+ *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
+ *   - 以及 `ffi_c_abi_reject_reason_own(t, own)`（C ABI 约束，所有权由调用方传入）
+ */
 
 /* ---- ref 判定（见 type.h） ---- */
 
-/* 所有权纯编译期——类型不携带 ownership，本函数始终返回 false。
-   保留供链接兼容；调用方应改用 sym->ownership == OWN_REF 判定。 */
+/* 注：类型层无 ownership，本函数恒 false，仅保留给**尚未迁移的调用点**
+   编译通过（当前调用点都已在条件中与符号层 ownership 并列，恒假项不影响语义）。
+   新代码请用 `sym->ownership == OWN_REF`。 */
 bool type_contains_ref(const type_t *t) {
     (void)t;
     return false;
@@ -466,12 +461,6 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_interrupt = &g_type_interrupt;
     vm->type_opaque = &g_type_opaque;
     vm->type_module = &g_type_module;
-}
-
-/* 所有权纯编译期——fatal 不再是独立的类型变体，只是 value/symbol 层的
-   ownership 状态。fatal_bases 登记表不再需要，保留空函数供链接兼容。 */
-void type_fatal_bind_base(vm_t *vm, const type_t *variant, const type_t *base) {
-    (void)vm; (void)variant; (void)base;
 }
 
 /* 所有权纯编译期——fatal 不再是独立类型，base 就是 t 本身。 */

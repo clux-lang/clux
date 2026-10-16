@@ -195,30 +195,22 @@ static inline ownership_t sema_type_expr_ownership(const ast_node_t *type_expr) 
   }
 }
 
-/* ---- 复合类型的 own 资源判定（move/clone 拦截与 fatal 变体的判定基础） ----
+/* ---- 复合类型的 own 资源判定：**已删除**（2026-10 所有权重构） ----
  *
- * `type_directly_owns`（vm/type.h）：顶层直接是 own/share/weak 指针或 own 切片。
- * `sema_type_contains_owned_resource`（sema.c 定义）：**递归**——顶层直接持有，
- * 或 struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素
- * 持有。
+ * 原先有 `sema_type_contains_owned_resource`（递归）与
+ * `sema_type_contains_own_resource`（仅 own）两个类型层谓词，用于
+ * "含 own 字段的复合类型不可隐式拷贝"的判定与 fatal 变体构造。
  *
- * 为什么需要"递归"版本：含 own 字段的结构体**本身**的 ownership 是 OWN_NONE，
- * 用 `type_is_own`/`type_directly_owns` 都判不出来——而它恰恰是 M3 R1
- * "unique 所有权不可隐式拷贝"要拦的对象（浅拷贝会与源共享内嵌堆块 → 双释放）。
+ * 二者随重构失效并已删除，原因有二：
+ *   1. **所有权已从类型层迁移到值/符号层**——`type_t` 不再携带 ownership，
+ *      类型层无从判定 own（原实现退化为恒返回 false 的空壳）；
+ *   2. **复合类型已禁止携带指针/切片**——"含 own 字段的复合类型"这一形态
+ *      当前不存在，递归判定没有作用对象。
  *
- * 为什么 fatal 不算"持有资源"：fatal 是"必被接管的将亡值"标记，其顶层值在
- * sema 里必然被 move/return 消费（消费后 ptr=NULL）；字段位置的 fatal 由运行期
- * 释放路径处理（见 type_ptr.c 的 ptr_free_owned_recursive）。
- *
- * 与 comptime.c 的全局变量 own 检查（静态函数，语义更窄：不含 weak）**有意
- * 不同**，故各留一份、不复用。 */
-bool sema_type_contains_owned_resource(const type_t *t);
-
-/** `sema_type_contains_own_resource`：仅检查 **own** 资源（不含 share/weak）。
- *  与 `sema_type_contains_owned_resource` 的区别在于顶层不匹配 share/weak
- *  指针/切片，递归落入字段后也只认 OWN_OWN——用于 R1 copy 禁止判定（share/weak
- *  引用计数共享，拷贝合法；own 唯一所有权拷贝 = 双释放）。 */
-bool sema_type_contains_own_resource(const type_t *t);
+ * 现在的判据入口是**符号/值层**：`sema_symbol_t::ownership`（声明处所有权）与
+ * `value_ownership()`（值层所有权）。将来恢复含指针的复合类型时，应按
+ * **扁平槽位表**（类型 → own 槽位偏移）重新设计，而不是恢复这两个递归谓词。
+ */
 struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
 
 

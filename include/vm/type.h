@@ -507,12 +507,6 @@ bool type_has_const(const type_t *t);
 char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
                                ownership_t ownership, const char *fallback);
 
-/** 已废弃：所有权迁移到 symbol/value 层，类型不携带 ownership。 */
-static inline bool type_directly_owns(const type_t *t) {
-  (void)t;
-  return false;
-}
-
 /**
  * 类型是否为指针或切片（TYPE_KIND_PTR / TYPE_KIND_SLICE，任意所有权修饰）。
  * 用于"复合类型字段不得携带指针/切片"的检查——恢复到只有普通指针的场景：
@@ -532,38 +526,14 @@ static inline bool type_is_ptr_or_slice(const type_t *t) {
  */
 bool type_contains_ptr_or_slice(const type_t *t);
 
-/**
- * 类型是否（**递归**）拥有堆资源——即"持有 own/share/weak 指针或 own 切片"，
- * 或 struct/tuple/union 的任一字段/元素/member、option 内层、数组元素持有。
- *
- * 判定的用途：M3 §7 唯一所有权——含 own 资源的**值**不可隐式拷贝（浅拷贝会与
- * 源共享内嵌堆块 → 作用域退出双释放）。因此"参数/返回值/赋值目标持有资源而
- * 来源不是将亡值（fatal）"就必须拒绝，要求显式 move()/clone()。
- *
- * 为什么需要**递归**版本：含 own 字段的结构体**本身**的 ownership 是 OWN_NONE，
- * 用 type_is_own / type_directly_owns 都判不出来——而它恰恰是要拦的对象。
- *
- * 为什么 fatal 不算"持有资源"：fatal 是"必被接管的将亡值"标记，其顶层值必然被
- * move/return 消费（消费后 ptr=NULL）；字段位置的 fatal 由运行期释放路径处理
- * （type_ptr.c 的 ptr_free_owned_recursive）。所以 fatal 来源**是**合法初始化源
- * （它把所有权交出来）。
- *
- * cunion 不参与判定：其析构本就是 no-op（无 tag，开发者自负），与 clone/dispose
- * 的既有语义一致。
+/* 注：原 `type_owns_resources` / `type_fatal_carries_resource` / `type_directly_owns`
+ * 三个**类型层所有权谓词**已删除（2026-10 所有权重构）：所有权从类型层迁移到
+ * 值/符号层（`type_t` 不再携带 ownership），且复合类型已禁止携带指针/切片，
+ * 类型层没有可判定的对象。判定入口现为：
+ *   - 符号层：`sema_symbol_t::ownership`
+ *   - 值层：  `value_ownership(v)`
+ *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
  */
-bool type_owns_resources(const type_t *t);
-
-/**
- * fatal **将亡值**是否携带可转移的堆资源——即"跨函数边界转移所有权"是否有
- * 实际内容可转：
- *   - `fatal *T` / `fatal []T`：是（裸指针 / 切片堆块要交给对方）；
- *   - `fatal T`（T 为含 own 字段的复合类型）：是（内嵌堆块要交出去）；
- *   - 其它 fatal 形态（无资源可转移）：否。
- *
- * 用于 func_vcall 的参数接收与返回值交回：只有带资源时才走 value_move
- * （转移——源被掏空是**必须**的，否则双方共享堆块）；否则走 clone（拷贝）。
- */
-bool type_fatal_carries_resource(const type_t *t);
 
 /**
  * 取 `t` 的 **fatal 变体**（fatal T 将亡值，m3-design §3.3）——**唯一的权威
@@ -599,25 +569,20 @@ const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
  */
 const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
 
-/**
- * 记录"`fatal` 变体 `variant` 由 `base` 派生"（写 `variant->fatal_base = base`）。
- * 由各 `type_*_intern_with_ownership(…, OWN_FATAL)` **在 seal 之后**调用：
- *   - seal 可能把新分配的对象 dedup 掉并返回池中已有实例（struct 非 unique 时），
- *     因此必须在拿到最终实例之后再写，否则写进的是被回收的临时对象；
- *   - `base == variant`（未真正派生新变体）时不写，避免自指。
- * 幂等：已记录则保持首次记录（同一逻辑类型的 base 是唯一的）。
- */
-void type_fatal_bind_base(vm_t *vm, const type_t *variant, const type_t *base);
+/* 注：原 `type_fatal_bind_base`（登记 fatal 变体 → base）已删除——fatal 不再是
+ * 独立类型变体，没有"变体身份"需要登记或折回（`type_fatal_base_of` 现为恒等）。 */
 
 /**
  * 类型是否（**递归**）含 ref 指针——顶层 `ref *T` / `ref []T`，或
  * struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素含
  * ref。
  *
- * 判定的用途（M3 §5 强制规则）：ref 的作用域**必须标注**——含 ref 的类型出现
- * 在变量声明或返回值位置时，没有 `'<a,b> T` 标注就无法确定借用的存活上限，
- * 指针会逃逸到标注之外（悬垂）。变量声明侧（stmt.c 的 check_var_annot）与
- * 返回值侧（sema.c 的 sema_check_ret_ref_annot）共用本判定，两处规则一致。
+ * ⚠️ **已失效**（2026-10 所有权重构）：类型不携带 ownership，本函数恒返回 false。
+ * 保留仅为让尚未迁移的调用点编译通过（那些调用点都已把类型层判据与**符号层**
+ * `sym->ownership` 并列，恒假项不影响语义）。判定的正确入口：
+ *   - 顶层 ref：`sym->ownership == OWN_REF`
+ *   - 值层：    `value_ownership(v) == OWN_REF`
+ * 含 ref 字段的复合类型当前不支持（复合类型禁止携带指针/切片）。
  */
 bool type_contains_ref(const type_t *t);
 

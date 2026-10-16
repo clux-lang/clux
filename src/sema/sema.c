@@ -277,28 +277,16 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
 }
 
 /* ===========================================================================
- * 复合类型的 own 资源判定 + fatal 变体构造（m3-design §3.3/§7）
+ * 复合类型的 own 资源判定：**已删除**（2026-10 所有权重构）
+ *
+ * 原先的 `sema_type_contains_owned_resource` / `sema_type_contains_own_resource`
+ * 是类型层递归谓词，随重构失效（类型层不再携带 ownership；且复合类型已禁止
+ * 携带指针/切片，"含 own 字段的复合类型"这一形态当前不存在），已无调用方，
+ * 故连同 `type_directly_owns` 空壳一并删除。
+ *
+ * 判据入口现为**符号/值层**：`sema_symbol_t::ownership` 与 `value_ownership()`。
+ * 将来恢复含指针的复合类型时，按**扁平槽位表**重新设计，不恢复这两个谓词。
  * =========================================================================== */
-
-bool sema_type_contains_owned_resource(const type_t *t) {
-  if (!t) return false;
-  /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针、
-     own 切片直接持有资源，无需递归。
-     NOTE: 所有权已从 type 层迁移到 symbol/value 层——type_t.ownership 恒为
-     OWN_NONE，type_directly_owns 现阶段恒返回 false。本函数保留供尚未迁移
-     的调用点编译通过，语义上等价于"类型层无法判定 own 资源"。 */
-  return type_directly_owns(t);
-}
-
-/** 仅检查 OWN_OWN。 */
-bool sema_type_contains_own_resource(const type_t *t) {
-  if (!t) return false;
-  /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针/切片持有资源。
-     所有权已从 type 层迁移到 symbol/value 层——类型不携带 ownership，
-     顶层指针/切片的 own 判定由调用方通过 sym->ownership 检查。 */
-  (void)t;
-  return false;
-}
 
 
 /* move(x) / clone(x) 的**产物类型**（将亡值变体，m3-design §3.3/§7）。

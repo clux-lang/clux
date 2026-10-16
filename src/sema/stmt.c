@@ -385,15 +385,13 @@ static void borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
       return;
     }
     case AST_IDENT: {
-      /* **不能**用 init_borrow_src 取源符号：它只认 own/ref/opaque 类型，
-         含 ref 的**聚合**（struct/tuple/array/union）会被它滤掉 —— 实测
-         `g = h`（h 是含 ref 的 struct）因此取不到源、"继承源变量借源"这条
-         路径整条失效。这里只要求"是变量且类型含 ref"（与声明侧记录的条件一致）。 */
+      /* 借源可以是：顶层 own/ref 指针、opaque、或承载借源集合的变量。
+         注：含 ref 字段的**聚合**类型已不支持（复合类型禁止携带指针/切片），
+         所以判据只看符号层 ownership，不再有类型层的 `type_contains_ref`。 */
       sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)e)->name);
       if (!s || s->kind != SEMA_SYM_VAR || !s->type) return;
-      if (!type_contains_ref(s->type) && s->ownership != OWN_OWN &&
-          s->ownership != OWN_REF &&
-          s->type->kind != TYPE_KIND_OPAQUE)
+      if (s->ownership != OWN_OWN && s->ownership != OWN_REF &&
+          s->type->kind != TYPE_KIND_OPAQUE && s->borrow_set_count == 0)
         return;
       /* 源自身是聚合 → 继承它的借源集合（声明/赋值点已记）；
          源是顶层 ref/own → 它自己就是借源。 */
@@ -612,12 +610,11 @@ static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_s
 static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
                             sema_scope_t *scope, const type_t *vt,
                             sema_symbol_t *sym) {
-  /* 所有权迁移到值/symbol 层后，type_contains_ref 恒返回 false（类型不
-     携带 ownership）。顶层 ref（sym->ownership == OWN_REF）的标注检查和
-     annot 记录仍须执行——重绑定逃逸校验依赖 annot_count > 0。含 ref 字段
-     的聚合类型暂不支持（type_contains_ref no-op），由他处放行。 */
-  if (!vt || (!type_contains_ref(vt) &&
-              !(sym && sym->ownership == OWN_REF)))
+  /* 只有**顶层 ref**（sym->ownership == OWN_REF）需要标注检查与 annot 记录
+     ——重绑定逃逸校验依赖 annot_count > 0。
+     注：含 ref 字段的聚合类型已不支持（复合类型禁止携带指针/切片），
+     所以不再有类型层的 `type_contains_ref` 判据。 */
+  if (!vt || !(sym && sym->ownership == OWN_REF))
     return;
 
   strslice_t *names = NULL;
@@ -907,13 +904,13 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      ——防级联。 */
   if (sym->type) check_var_annot(sema, vd, scope, sym->type, sym);
 
-  /* §5 聚合借源记录：含 ref 字段的聚合变量把 init 的借源集合记在符号上，
-     供后续**赋值**校验"新值的存活不超出本变量承诺的上限"。
-     只记不报——声明侧的"必须标注"由 check_var_annot 负责。 */
-  if (sym->type && vd->init && vd->init->kind != AST_NIL &&
-      type_contains_ref(sym->type) && sym->ownership != OWN_REF) {
-    borrow_collect(sema, vd->init, scope, sym);
-  }
+  /* §5 聚合借源记录：**当前不可达**。
+     原先这里为"含 ref 字段的聚合变量"记录 init 的借源集合，供赋值时校验
+     "新值的存活不超出承诺上限"。现阶段复合类型（struct/tuple/array/union）
+     **禁止携带指针/切片**（ownership-refactor §2026-10-16），含 ref 字段的聚合
+     不存在，故判据恒假。
+     将来恢复含指针的聚合时：判据应改为"符号层/类型层的聚合 ref 槽位表"
+     （而不是已废弃的类型层 `type_contains_ref`），再启用 borrow_collect。 */
 
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
@@ -1174,14 +1171,21 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
       if (sym) {
         sym->flow_init = true;
         sym->moved = false;
-        /* §5 赋值**作用域检查**（含 ref 字段的聚合类型）：
-           目标 `g` 的标注集合是它对"本值活多久"的**承诺**；新值的实际存活上限
-           是 rhs 的**借源集合**（各 ref 字段借自谁 → 活不过谁）。要求
+        /* §5 赋值**作用域检查**（含 ref 字段的聚合类型）。
+           ⚠️ **现阶段不可达**：判据 `type_contains_ref` 是类型层谓词，所有权迁移
+           到值/符号层后恒返回 false；而复合类型**禁止携带指针/切片**
+           （ownership-refactor 2026-10-16），含 ref 字段的聚合不存在，
+           `sym->ownership != OWN_REF` 的聚合也判不出来。
+           逻辑**保留**（含语义说明与三处实现要点），供将来恢复含指针的聚合时启用
+           ——届时把判据换成"符号层/类型层的聚合 ref 槽位表"即可。
+
+           语义：目标 `g` 的标注集合是它对"本值活多久"的**承诺**；新值的实际存活
+           上限是 rhs 的**借源集合**（各 ref 字段借自谁 → 活不过谁）。要求
            `目标的每个锚点 ⊆ 某个借源的定义作用域`（目标存活 ≤ 源存活），
            否则目标会活过它借的东西 → 悬垂：
              var g: '<p> H = .H{ .r = p };   // 承诺活到 p
              g = .H{ .r = gx.& };            // 源借自全局 gx（更久）→ 目标会活过它
-           此前只查顶层 ref 重绑定（下面的 R3 分支），含 ref 字段的聚合完全没查。 */
+           顶层 ref 的重绑定检查见下面的 R3 分支。 */
         if (sym->type && type_contains_ref(sym->type) && sym->ownership != OWN_REF) {
           sema_symbol_t srcs = {0};
           borrow_collect(sema, as->value, scope, &srcs);
