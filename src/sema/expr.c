@@ -2895,10 +2895,10 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       if (!fatal) return val_void(sema);
       bool is_clone = n->op && token_is(n->op, "clone");
       /* 所有权纯编译期：fatal 是值层状态，不再有独立 fatal 类型变体。
-         produces_fatal = 操作数携带资源（指针/切片/含 own 的复合类型）。 */
+         move/clone 对**指针 / 切片**产生将亡值（标量无资源，fatal 折叠为自身）。
+         注：复合类型字段禁止携带指针/切片，所以不存在"含 own 的复合类型"这一形态。 */
       bool produces_fatal = ot && (ot->kind == TYPE_KIND_PTR ||
-                                   ot->kind == TYPE_KIND_SLICE ||
-                                   sema_type_contains_owned_resource(ot));
+                                   ot->kind == TYPE_KIND_SLICE);
 
       /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
          TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有
@@ -2948,7 +2948,6 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
            不能 move。 */
         if (src && src->kind == SEMA_SYM_VAR && src->is_capture &&
             (src->ownership == OWN_OWN ||
-             sema_type_contains_owned_resource(src->type) ||
              src->type->kind == TYPE_KIND_FUNC)) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "cannot move closure capture '%.*s': the capture slot is "
@@ -2966,10 +2965,10 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
         if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            (src->ownership == OWN_OWN ||
-             sema_type_contains_owned_resource(src->type))) {
-          /* `own *T` 与**含 own 资源的复合类型**同规则（所有权扩散）：move 后
-             源不再持有资源 → 标记 moved，后续读取报 "used after move"。 */
+            src->ownership == OWN_OWN) {
+          /* `own *T`（含 own 切片同规则）：move 后源不再持有资源 →
+             标记 moved，后续读取报 "used after move"。
+             判据是**符号层 ownership**——所有权已从类型层迁移到值/符号层。 */
           if (src->borrow_count > 0) {
             diag_error(
                 sema->diag, sema_loc(sema, *node),

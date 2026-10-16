@@ -825,22 +825,6 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "(own is move-only; use move() or clone())",
                      (int)vd->name.len, vd->name.ptr, itn);
           sym->flow_init = false; /* copy 失败 = 未初始化 */
-        } else if (sema_type_contains_own_resource(sym->type) &&
-                   !sema_value_is_fatal(init)) {
-          /* R1 的**所有权扩散**（m3-design §7）：声明类型**含** own 资源
-             （struct/tuple/union/array/option 内嵌 own 字段）时与 own 指针同规则
-             ——只能由 fatal 将亡值初始化（构造表达式 / move() / clone() /
-             fatal 返回值），直接赋一个具名变量 = copy → 两个值共享内嵌堆块
-             → 作用域退出双释放（实测 access violation）。 */
-          char tn[64], itn[64];
-          sema_type_name(sym->type, tn, sizeof(tn));
-          sema_type_name(value_type(init), itn, sizeof(itn));
-          diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize variable '%.*s' of type %s with %s: "
-                     "the type contains owned pointers and is move-only "
-                     "(use move() or clone())",
-                     (int)vd->name.len, vd->name.ptr, tn, itn);
-          sym->flow_init = false;
         } else {
           value_t *dst = value_make_shadow(sema->vm, sym->type);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
@@ -1182,28 +1166,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                    rn, (int)name.len, name.ptr);
         return;
       }
-      /* R1 的**所有权扩散**（与 shadow_var_def 的声明路径同规则）：左值类型
-         **含** own 资源（struct/tuple/union/array/option 内嵌 own 字段）时，
-         赋值同样是"释放旧值 + 接管新值"，不能按值拷贝——`b = a` 会让 b 与 a
-         共享内嵌堆块 → 双释放。必须 `b = move(a)` / `b = clone(a)`。
-         判据用递归 sema_type_contains_own_resource（own 指针本身由上方
-         type_is_own 分支覆盖；含 own 字段的复合类型 ownership 是 OWN_NONE，
-         必须递归才判得出来）。
-         注：`b = .T{...}`（构造表达式产 fatal）合法——它是将亡值，赋值即转移。
-         注 2：share/weak 引用计数共享已移除。 */
-      if (lt && !sema_value_is_fatal(lhs) &&
-          sema_type_contains_own_resource(lt) &&
-          !sema_value_is_fatal(rhs)) {
-        char tn[64], rn[64];
-        sema_type_name(lt, tn, sizeof(tn));
-        sema_type_name(value_type(rhs), rn, sizeof(rn));
-        diag_error(sema->diag, sema_loc(sema, as->value),
-                   "cannot copy %s into variable '%.*s' of type %s: the type "
-                   "contains owned pointers and is move-only "
-                   "(use move() or clone())",
-                   rn, (int)name.len, name.ptr, tn);
-        return;
-      }
+      /* 注 2：share/weak 引用计数共享已移除。
+         注 3：原先这里还有一条"含 own 字段的复合类型赋值须 move/clone"的守卫
+         （所有权扩散）。复合类型字段现已禁止携带指针/切片，该形态不存在；
+         own 指针本身的 copy 拦截由上方分支负责（判据是**值/符号层 ownership**，
+         不是类型层——所有权已从类型剥离）。 */
       if (sym) {
         sym->flow_init = true;
         sym->moved = false;
@@ -2875,48 +2842,12 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
                    "move(p), or use ref for borrowing)",
                    (int)vd->name.len, vd->name.ptr);
       }
-      /* R1 的**所有权扩散**（m3-design §4/§7）：参数类型**含** own 资源
-         （struct/tuple/union/array/option 内嵌 own 字段）时，"按值传 = 拷贝"
-         会让调用方与被调用方共享内嵌堆块 → 被调用方作用域退出即双释放。
-         因此与 own 指针同规则：**只能写成 `fatal T`**（调用点 move/clone 传入，
-         函数内 move 接管），只想借用就写 `ref *T`。
-         判据用递归 sema_type_contains_own_resource（own 指针本身由上方
-         type_is_own 分支覆盖；含 own 字段的复合类型其 ownership 是 OWN_NONE，
-         必须递归才判得出来）。 */
-      if (ps->type && !sema_sym_is_fatal(ps) &&
-          sema_type_contains_own_resource(ps->type)) {
-        char tn[64];
-        sema_type_name(ps->type, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                   "function parameter '%.*s' of type '%s' contains owned "
-                   "pointers and cannot be passed by value (use 'fatal %s' and "
-                   "take ownership inside with move(), or 'ref *%s' to borrow)",
-                   (int)vd->name.len, vd->name.ptr, tn, tn, tn);
-      }
-      /* §5 强制规则（与变量声明 check_var_annot / 返回值
-         sema_check_ret_ref_annot 同一条）：参数类型**含 ref 字段**（聚合内嵌
-         ref）时**必须标注作用域**——聚合内 ref 字段的借源无法静态推断，不标注
-         就是指针逃逸（调用点不知道这个借用能活多久）。标注挂在参数类型槽位上：
-         `func f(h: '<p> Holder, p: ref *i32)`。
-         **顶层 `ref *T` / `ref []T` 不在此列**：那是"借用"本身的声明形式（与
-         变量声明的 `type_is_ref` 例外、返回值侧的 top_ref 分支完全对应），它的
-         存活由调用点单源推断承担，强制标注只会让每个借用参数都要写 `'<*>` 之类
-         的噪声。 */
-      if (ps->type && ps->ownership != OWN_REF &&
-          type_contains_ref(ps->type)) {
-        strslice_t *an = NULL;
-        size_t ac = 0;
-        sema_annot_peek(vd->type_expr, &an, &ac);
-        if (ac == 0) {
-          char tn[64];
-          sema_type_name(ps->type, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                     "parameter '%.*s' of type '%s' contains ref pointers and "
-                     "must declare their scope (annotate the parameter type, "
-                     "e.g. \"'<a> %s\")",
-                     (int)vd->name.len, vd->name.ptr, tn, tn);
-        }
-      }
+      /* 注：原先这里还有一条"参数类型**含** own 资源的复合类型不能按值传"的
+         检查（所有权扩散）。复合类型字段现已禁止携带指针/切片，该形态不存在；
+         own 指针/slice 参数由上方 `ps->ownership == OWN_OWN` 分支拦截。
+         §5 强制规则（参数类型**含 ref 字段**必标注）同理——含 ref 字段的聚合
+         类型已不支持，**顶层 `ref *T` / `ref []T` 是"借用"本身的声明形式**，
+         不在强制标注之列（其存活由调用点单源推断承担）。 */
     }
     value_t *pv = value_make_shadow(sema->vm,
                                     ps && ps->type ? ps->type
