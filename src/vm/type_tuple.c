@@ -388,11 +388,9 @@ void type_tuple_add_elem(vm_t *vm, const type_t *t, const type_t *etype) {
     tt->elem_count = n + 1;
 }
 
-/* 按（元素类型 + 顺序 + ownership）判断两元组是否等价（去重 intern 用）。
-   ownership 必须参与比较：fatal <T1,T2> 与 <T1,T2> 元素相同但是不同的
-   所有权类型（将亡值变体 vs 普通值），漏比会把 fatal 变体去重掉。 */
+/* 按（元素类型 + 顺序）判断两元组是否等价（去重 intern 用）。所有权已
+   迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
 static bool tuple_same(const tuple_type_t *a, const tuple_type_t *b) {
-    if (a->base.ownership != b->base.ownership) return false;
     if (a->elem_count != b->elem_count) return false;
     for (size_t i = 0; i < a->elem_count; i++) {
         if (a->elems[i].type != b->elems[i].type) return false;
@@ -471,13 +469,8 @@ const type_t *type_tuple_seal(vm_t *vm, const type_t *t) {
     tt->base.align = max_align;
     tt->base.sealed = true;
 
-    /* 重建类型名 "<T1, T2>"（fatal 变体加 "fatal " 前缀） */
+    /* 重建类型名 "<T1, T2>"。所有权已迁移到值层，不再有 fatal 变体前缀。 */
     char *name = tuple_type_name(vm->alloc, tt);
-    if (name && tt->base.ownership == OWN_FATAL) {
-        char *prefixed = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL, name);
-        allocator_free(vm->alloc, (void **)&name);
-        name = prefixed;
-    }
     if (name) tt->base.name = (strslice_t){ name, strlen(name) };
 
     vec_push(vm->tuple_types, vm->alloc, tt); /* 密封后入池（去重 intern） */
@@ -493,15 +486,16 @@ const type_t *type_tuple_intern(vm_t *vm, const tuple_elem_t *elems,
     return type_tuple_intern_with_ownership(vm, elems, count, OWN_NONE);
 }
 
-/* 带 ownership 的一次性快捷（见 type_tuple.h）：ownership 在 seal 之前设。 */
+/* 带 ownership 的一次性快捷（见 type_tuple.h）。所有权已迁移到值层，类型层
+ * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
 const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *elems,
                                                size_t count,
                                                ownership_t ownership) {
+    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
     /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。不向操作数栈
      * 压入 type value。去重 intern 由 type_tuple_seal 完成。 */
     if (!vm) return NULL;
     tuple_type_t *tt = tuple_type_create_open(vm);
-    tt->base.ownership = ownership;
 
     /* 拷贝元素表（vm 拥有） */
     if (count > 0) {
@@ -521,21 +515,6 @@ const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *ele
         /* 密封失败（如元素类型未解析）：回收开放对象 */
         allocator_free(vm->alloc, (void **)&tt);
         return NULL;
-    }
-    /* fatal 变体：seal 生成的名字是普通规范名（"<T1, T2>"），此处覆盖为
-       "fatal <T1, T2>"（变体自持名字，vm 拥有——seal 时那份已被 type_set_name
-       释放）。与 struct 的 fatal 变体同款。 */
-    if (ownership == OWN_FATAL) {
-        char *base_name = tuple_type_name(vm->alloc, (const tuple_type_t *)t);
-        if (base_name) {
-            char *nm = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL,
-                                                base_name);
-            allocator_free(vm->alloc, (void **)&base_name);
-            if (nm) {
-                type_set_name(vm, t, (strslice_t){ nm, strlen(nm) });
-                allocator_free(vm->alloc, (void **)&nm);
-            }
-        }
     }
     return t;
 }

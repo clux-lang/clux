@@ -72,8 +72,9 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t);
 /** 一次性构造（func_type_push + add_param* + set_return + set_variadic + seal
  *  的快捷方式，不向 vm 栈压入 type value，供 C 侧构造 func type 用）。 */
 const type_t *type_func_sig(vm_t *vm, const type_t *const *params,
+                            const ownership_t *param_ownerships,
                             size_t param_count, const type_t *return_type,
-                            bool is_variadic);
+                            ownership_t return_ownership, bool is_variadic);
 
 /** 取 func type 的返回类型（非 func type 返回 NULL） */
 static inline const type_t *func_type_return(const type_t *t) {

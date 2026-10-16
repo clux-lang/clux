@@ -94,7 +94,8 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
         ret = value_as(rt, const type_t *);
     }
     const type_t *sig = type_func_sig(vm, nparams > 0 ? params_arr : NULL,
-                                      nparams, ret, /*is_variadic=*/false);
+                                      NULL, nparams, ret, OWN_NONE,
+                                      /*is_variadic=*/false);
     if (!sig)
         return ctfe_err(ctx, "ctfe: failed to construct function literal signature");
 
@@ -466,27 +467,23 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         return type_as_value(vm, at);
     }
     case AST_PTR: {
-        /* 指针类型表达式 own *T / ref *T / fatal *T（类型即表达式，m3-design
-           §3）：递归求值被指向类型 T → 按所有权修饰 type_ptr_intern（三种
-           所有权是独立 intern 实例）→ 返回 type value。与 AST_ARRAY 同构。 */
+        /* 指针类型表达式 *T（所有权纯编译期——类型不区分 own/ref/fatal，
+           只有一种指针类型 *T）：递归求值被指向类型 T → type_ptr_intern
+           → 返回 type value。与 AST_ARRAY 同构。 */
         ast_ptr_t *n = (ast_ptr_t *)node;
         value_t *bt = ctfe_eval(ctx, n->base_type);
         if (value_is_error(vm, bt)) return bt;
         if (!value_is_type(bt, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: pointer base must be a type");
         const type_t *base = value_as(bt, const type_t *);
-        ownership_t own_tag;
+        /* 校验 ownership token 合法性（所有权纯编译期，不传入类型系统） */
         strslice_t own = token_strslice(n->ownership);
-        if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-            own_tag = OWN_OWN;
-        } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-            own_tag = OWN_REF;
-        } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-            own_tag = OWN_FATAL;
-        } else {
+        if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
+              (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
+              (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
             return ctfe_err(ctx, "ctfe: unsupported pointer ownership");
         }
-        const type_t *pt = type_ptr_intern(vm, own_tag, base);
+        const type_t *pt = type_ptr_intern(vm, base);
         if (!pt) return ctfe_err(ctx, "ctfe: failed to construct pointer type");
         return type_as_value(vm, pt);
     }
@@ -511,7 +508,8 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             ret = value_as(rt, const type_t *);
         }
         const type_t *sig = type_func_sig(vm, np > 0 ? params_arr : NULL,
-                                          np, ret, /*is_variadic=*/false);
+                                          NULL, np, ret, OWN_NONE,
+                                          /*is_variadic=*/false);
         if (!sig)
             return ctfe_err(ctx, "ctfe: failed to construct function signature type");
         return type_as_value(vm, sig);

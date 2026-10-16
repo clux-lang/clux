@@ -168,15 +168,13 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->array_types) vm->array_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* 去重 intern（按 elem_type + length **+ ownership**）：命中已有 sealed
-       类型则复用并手工回收本开放类型。ownership 必须参与比较——fatal [N]T
-       与 [N]T 元素/长度相同但是**不同所有权**的类型（fatal 是将亡值变体，
-       漏比会把 fatal 变体去重成普通数组，跨函数边界的将被消费标记随之丢失）。 */
+    /* 去重 intern（按 elem_type + length）：命中已有 sealed 类型则复用并
+       手工回收本开放类型。所有权已迁移到值层，类型层恒为 OWN_NONE，不再
+       参与比较。 */
     size_t n = vec_len(vm->array_types);
     for (size_t i = 0; i < n; i++) {
         const array_type_t *other = (const array_type_t *)vec_get(vm->array_types, i);
         if (other && other != at && type_is_sealed(&other->base) &&
-            other->base.ownership == at->base.ownership &&
             other->elem_type == at->elem_type && other->length == at->length) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 at 的 type value 由 value_seal 负责
@@ -200,17 +198,10 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
     at->base.align   = at->layout_align;
     at->base.sealed  = true;
 
-    /* 重建类型名（含 length：固定长度 [elem; N]，未定长 [elem]）；
-       ownership == OWN_FATAL（fatal 变体）时加 "fatal " 前缀。 */
+    /* 重建类型名（含 length：固定长度 [elem; N]，未定长 [elem]）。所有权
+       已迁移到值层，不再有 fatal 变体前缀。 */
     char *base_name = array_type_name(vm->alloc, at->elem_type, at->length);
     if (!base_name) panic("vm: out of memory allocating array type name");
-    if (at->base.ownership == OWN_FATAL) {
-        char *prefixed = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL,
-                                                  base_name);
-        allocator_free(vm->alloc, (void **)&base_name);
-        if (!prefixed) panic("vm: out of memory allocating array type name");
-        base_name = prefixed;
-    }
     at->base.name = (strslice_t){ base_name, strlen(base_name) };
 
     vec_push(vm->array_types, vm->alloc, at);  /* 密封后入池（去重 intern） */
@@ -221,19 +212,18 @@ const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count)
     return type_array_intern_with_ownership(vm, elem_type, count, OWN_NONE);
 }
 
-/* 带 ownership 的一次性快捷（见 type_array.h）。array_type_set_elem 拒绝已密封
- * 类型，故 ownership 必须在 seal 之前设——这正是本函数与 type_array_intern 的
- * 唯一差别。 */
+/* 带 ownership 的一次性快捷（见 type_array.h）。所有权已迁移到值层，类型层
+ * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
 const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
                                                size_t count,
                                                ownership_t ownership) {
+    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
      * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
      * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
      * 压栈只会污染操作数栈（嵌套构造场景曾因此栈布局错位）。 */
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
-    ((type_t *)t)->ownership = ownership;
     array_type_set_elem(vm, t, elem_type);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);

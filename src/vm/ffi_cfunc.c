@@ -250,8 +250,8 @@ static value_t *builtin_cfunc_ptr_cfunc(vm_t *vm, func_t *self, size_t argc,
 /* 注册 cfunc_ptr 到 vm->global_scope（调用方在 vm_new 内调用）。 */
 void vm_register_cfunc_ptr(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_opaque,
-                                      /*is_variadic=*/true);
+    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm->type_opaque,
+                                      OWN_NONE, /*is_variadic=*/true);
     if (!sig) return;
     value_t *fnv = func_new(vm, builtin_cfunc_ptr_cfunc, NULL, vm->root_scope,
                             sig, STRSLICE_LIT("cfunc_ptr"));

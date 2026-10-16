@@ -16,12 +16,9 @@
  * 切片类型（m4-design §1/§10）
  *
  * 切片 = 胖指针 { void *ptr; uint64_t len; }，与指针对齐但多一个 len 字段。
- * 三种所有权修饰对应三个独立 type 实例（own/ref/fatal，由 type_t.ownership 区分），
- * 运行期零标志（同 M3 §13.2）。不存在 share/weak 切片。
- *
- * own []T   → 总拥有堆块，dispose 释放（make 产物接管后）
- * ref []T   → 总借用，dispose 跳过
- * fatal []T → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
+ * 所有权纯编译期——类型不区分 own/ref/fatal，只有一种切片类型 []T。
+ * 运行期零标志：clone/dispose/cast 不按所有权分派，堆释放由 sema 生成
+ * FREE 指令负责。
  * =========================================================================== */
 
 /* ---- 内部工具 ---- */
@@ -54,27 +51,6 @@ void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len) {
         ptr_clear_owned_recursive(vm, elem, p);
 }
 
-/* ---- 释放堆块（按 kind 分派） ---- */
-
-static void slice_free_heap(vm_t *vm, const value_t *v) {
-    if (!v || value_is_shadow(v)) return;
-    const type_t *t = value_type(v);
-    if (!t) return;
-    slice_value_t *sv = (slice_value_t *)value_data(v);
-    if (!sv || !sv->ptr) return;
-    if (!type_is_slice(t)) return;
-    if (t->ownership == OWN_OWN || t->ownership == OWN_FATAL) {
-        /* 递归释放元素内嵌 own 字段，再释放堆块 */
-        const type_t *et = slice_type_elem(t);
-        if (et) slice_free_elems(vm, et, sv->ptr, sv->len);
-        void *heap = sv->ptr;
-        sv->ptr = NULL;
-        sv->len = 0;
-        allocator_free(vm->alloc, &heap);
-    }
-    /* ref：无堆块 */
-}
-
 /* ---- 索引读取辅助 ---- */
 
 static bool slice_read_index(vm_t *vm, value_t *index, size_t *out) {
@@ -100,35 +76,8 @@ static value_t *slice_clone(vm_t *vm, value_t *v) {
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
-
-    if (t->ownership == OWN_OWN) {
-        /* 深拷贝：分配新堆块 + 逐元素克隆 */
-        const type_t *et = slice_type_elem(t);
-        if (!et) return value_make_error(vm, "slice: missing elem type");
-        if (!sv->ptr) return slice_make_value(vm, t, NULL, 0);
-        /* 分配 len * et->size 的堆块 */
-        size_t total = (size_t)sv->len * et->size;
-        void *new_heap = allocator_new_ex(vm->alloc, "slice_heap", total,
-                                          NULL, NULL, NULL, 1);
-        if (!new_heap) panic("vm: out of memory cloning slice");
-        /* 逐元素克隆 */
-        const uint8_t *sp = (const uint8_t *)sv->ptr;
-        uint8_t *dp = (uint8_t *)new_heap;
-        for (uint64_t i = 0; i < sv->len; i++, sp += et->size, dp += et->size) {
-            void *se = ptr_clone_block(vm, et, sp);
-            memcpy(dp, se, et->size);
-            allocator_free(vm->alloc, (void **)&se);
-        }
-        return slice_make_value(vm, t, new_heap, sv->len);
-    }
-    if (t->ownership == OWN_FATAL) {
-        /* 转移语义：新值接管 (ptr, len)，源置空 */
-        value_t *nv = slice_make_value(vm, t, sv->ptr, sv->len);
-        ((slice_value_t *)value_data(v))->ptr = NULL;
-        ((slice_value_t *)value_data(v))->len = 0;
-        return nv;
-    }
-    /* ref：浅拷贝 ptr+len（借用） */
+    /* 所有权纯编译期——clone 统一为浅拷贝胖指针（ptr+len）。
+       深拷贝由 CLONE 指令（op_clone）显式调用 ptr_clone_block 完成。 */
     return slice_make_value(vm, t, sv->ptr, sv->len);
 }
 
@@ -139,15 +88,15 @@ static value_t *slice_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    /* 覆盖前释放旧值（own/fatal 释放堆块；ref 跳过） */
-    slice_free_heap(vm, dst);
+    /* 所有权纯编译期——assign 不释放旧堆块（由 sema 在赋值点生成 FREE）。 */
     const type_t *dt = value_type(dst);
     memcpy(value_data(dst), value_data(src), dt->size);
     return dst;
 }
 
 static void slice_dispose(vm_t *vm, value_t *v) {
-    slice_free_heap(vm, v);
+    /* 所有权纯编译期——dispose 不释放堆块（由 FREE 指令负责）。 */
+    (void)vm; (void)v;
 }
 
 /* ---- eq/ne：胖指针比较（ptr 相同 && len 相同） ---- */
@@ -262,32 +211,10 @@ static value_t *slice_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     const type_t *src = value_type(v);
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
 
-    /* own → ref 借用（同 elem 的 own → ref，§3.2）：复制 ptr+len，不释放 */
-    if (src->ownership == OWN_OWN && target &&
-        target->ownership == OWN_REF &&
-        slice_type_elem(src) == slice_type_elem(target)) {
-        return slice_make_value(vm, target, sv->ptr, sv->len);
-    }
-
-    /* fatal → own 接管（§3.3）：新值接管 (ptr,len)，源置空防双释放 */
-    if (src->ownership == OWN_FATAL && target &&
-        target->ownership == OWN_OWN &&
-        slice_type_elem(src) == slice_type_elem(target)) {
-        value_t *nv = slice_make_value(vm, target, sv->ptr, sv->len);
-        ((slice_value_t *)value_data(v))->ptr = NULL;
-        ((slice_value_t *)value_data(v))->len = 0;
-        return nv;
-    }
-
-    /* ref → ref（copy = 浅拷贝 ptr+len） */
-    if (src->ownership == OWN_REF && target &&
-        target->ownership == OWN_REF &&
-        slice_type_elem(src) == slice_type_elem(target)) {
-        return slice_make_value(vm, target, sv->ptr, sv->len);
-    }
-
-    /* 同类型身份拷贝 */
-    if (src == target) {
+    /* 所有权纯编译期——类型不区分 own/ref/fatal，同 elem 即同类型。
+       ownership 降级/接管由 sema 在编译期控制。 */
+    if (src == target ||
+        (target && slice_type_elem(src) == slice_type_elem(target))) {
         return slice_make_value(vm, target, sv->ptr, sv->len);
     }
 
@@ -306,13 +233,12 @@ static value_t *slice_explicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     return value_make_error(vm, "slice: unsupported explicit cast for slice");
 }
 
-/* ---- 鸭子类型判断 ---- */
+/* ---- 鸭子类型判断（所有权纯编译期，类型不区分 ownership） ---- */
 
 static bool slice_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (a == b) return true;
     if (!b) return false;
     if (!type_is_slice(a) || !type_is_slice(b)) return false;
-    if (a->ownership != b->ownership) return false;
     return type_equal(vm, slice_type_elem(a), slice_type_elem(b));
 }
 
@@ -320,32 +246,21 @@ static bool slice_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
     if (sub == sup) return true;
     if (!sup) return false;
     if (!type_is_slice(sub)) return false;
-    if (sub->ownership != sup->ownership) return false;
     return type_extends(vm, slice_type_elem(sub), slice_type_elem(sup));
 }
 
-/* ---- 类型名： "own []T" / "ref []T" / "fatal []T" ---- */
+/* ---- 类型名： "[]T"（所有权纯编译期，类型名不携带 ownership 前缀） ---- */
 
-static char *slice_name(allocator_t *alloc, ownership_t ownership,
-                        const type_t *elem) {
-    const char *owner;
-    switch (ownership) {
-    case OWN_OWN:   owner = "own ";   break;
-    case OWN_REF:   owner = "ref ";   break;
-    case OWN_FATAL: owner = "fatal "; break;
-    default:        owner = "";        break;
-    }
-    size_t ol = strlen(owner);
+static char *slice_name(allocator_t *alloc, const type_t *elem) {
     size_t bl = elem && elem->name.ptr ? elem->name.len : 0;
-    /* "own " + "[]" + elem_name + '\0' */
+    /* "[]" + elem_name + '\0' */
     char *buf = allocator_new_ex(alloc, "char", sizeof(char), NULL, NULL, NULL,
-                                 ol + 2 + bl + 1);
+                                 2 + bl + 1);
     if (!buf) return NULL;
-    memcpy(buf, owner, ol);
-    buf[ol] = '[';
-    buf[ol + 1] = ']';
-    if (bl) memcpy(buf + ol + 2, elem->name.ptr, bl);
-    buf[ol + 2 + bl] = '\0';
+    buf[0] = '[';
+    buf[1] = ']';
+    if (bl) memcpy(buf + 2, elem->name.ptr, bl);
+    buf[2 + bl] = '\0';
     return buf;
 }
 
@@ -353,37 +268,7 @@ static char *slice_name(allocator_t *alloc, ownership_t ownership,
  * vtable 定义
  * =========================================================================== */
 
-const vtable_t VTABLE_SLICE_OWN = {
-    .eq = slice_eq, .ne = slice_ne,
-    .dispose = slice_dispose,
-    .clone = slice_clone,
-    .assign = slice_assign,
-    .implicit_cast = slice_implicit_cast,
-    .explicit_cast = slice_explicit_cast,
-    .get_index = slice_get_index,
-    .set_index = slice_set_index,
-    .length = slice_length,
-    .type_equal = slice_type_equal,
-    .type_extends = slice_type_extends,
-    .type_seal = type_slice_seal,
-};
-
-const vtable_t VTABLE_SLICE_REF = {
-    .eq = slice_eq, .ne = slice_ne,
-    .dispose = slice_dispose,
-    .clone = slice_clone,
-    .assign = slice_assign,
-    .implicit_cast = slice_implicit_cast,
-    .explicit_cast = slice_explicit_cast,
-    .get_index = slice_get_index,
-    .set_index = slice_set_index,
-    .length = slice_length,
-    .type_equal = slice_type_equal,
-    .type_extends = slice_type_extends,
-    .type_seal = type_slice_seal,
-};
-
-const vtable_t VTABLE_SLICE_FATAL = {
+const vtable_t VTABLE_SLICE = {
     .eq = slice_eq, .ne = slice_ne,
     .dispose = slice_dispose,
     .clone = slice_clone,
@@ -402,28 +287,20 @@ const vtable_t VTABLE_SLICE_FATAL = {
  * 两遍构造协议
  * =========================================================================== */
 
-static slice_type_t *slice_type_create_open(vm_t *vm, ownership_t ownership) {
+static slice_type_t *slice_type_create_open(vm_t *vm) {
     slice_type_t *st = (slice_type_t *)allocator_new_ex(
         vm->alloc, "slice_type_t", sizeof(slice_type_t), NULL, NULL, NULL, 1);
     if (!st) panic("vm: out of memory allocating slice type");
     memset(st, 0, sizeof(slice_type_t));
-    switch (ownership) {
-    case OWN_OWN:   st->base.vtable = &VTABLE_SLICE_OWN;   break;
-    case OWN_REF:   st->base.vtable = &VTABLE_SLICE_REF;   break;
-    case OWN_FATAL: st->base.vtable = &VTABLE_SLICE_FATAL; break;
-    default:
-        panic("vm: invalid slice ownership");
-        break;
-    }
+    st->base.vtable = &VTABLE_SLICE;
     st->base.kind = TYPE_KIND_SLICE;
-    st->base.ownership = ownership;
     /* name/size/align 由 seal 按 elem 填充；elem_type 由 SET_TYPE 设定 */
     return st;
 }
 
-const type_t *type_slice_push(vm_t *vm, ownership_t ownership) {
+const type_t *type_slice_push(vm_t *vm) {
     if (!vm) return NULL;
-    slice_type_t *st = slice_type_create_open(vm, ownership);
+    slice_type_t *st = slice_type_create_open(vm);
     vec_push(vm->stack, vm->alloc, type_as_value(vm, &st->base));
     return &st->base;
 }
@@ -445,12 +322,11 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->slice_types) vm->slice_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* dedup intern by (ownership, elem_type) */
+    /* dedup intern by elem_type（所有权纯编译期——只有一种切片类型 []T） */
     size_t n = vec_len(vm->slice_types);
     for (size_t i = 0; i < n; i++) {
         const slice_type_t *other = (const slice_type_t *)vec_get(vm->slice_types, i);
         if (other && other != st && type_is_sealed(&other->base) &&
-            other->base.ownership == st->base.ownership &&
             other->elem_type == st->elem_type) {
             if (st->base.name.ptr) {
                 char *np = (char *)st->base.name.ptr;
@@ -465,7 +341,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     st->base.align  = _Alignof(slice_value_t);
     st->base.sealed = true;
 
-    char *name = slice_name(vm->alloc, st->base.ownership, st->elem_type);
+    char *name = slice_name(vm->alloc, st->elem_type);
     if (!name) panic("vm: out of memory allocating slice type name");
     st->base.name = (strslice_t){ name, strlen(name) };
 
@@ -473,14 +349,9 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     return &st->base;
 }
 
-const type_t *type_slice_intern(vm_t *vm, ownership_t ownership,
-                                const type_t *elem) {
+const type_t *type_slice_intern(vm_t *vm, const type_t *elem) {
     if (!vm || !elem) return NULL;
-    if (ownership != OWN_OWN && ownership != OWN_REF &&
-        ownership != OWN_FATAL) {
-        return NULL;
-    }
-    slice_type_t *st = slice_type_create_open(vm, ownership);
+    slice_type_t *st = slice_type_create_open(vm);
     st->elem_type = elem;
     return type_slice_seal(vm, &st->base);
 }

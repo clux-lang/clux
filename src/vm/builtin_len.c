@@ -77,8 +77,8 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
 void vm_register_len(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
 
-    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_u64,
-                                      /*is_variadic=*/true);
+    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm->type_u64,
+                                      OWN_NONE, /*is_variadic=*/true);
     if (!sig) return;
 
     value_t *fnv = func_new(vm, builtin_len_cfunc, NULL, vm->root_scope,

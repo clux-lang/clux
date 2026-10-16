@@ -126,7 +126,14 @@ value_t *value_alloc_shell(allocator_t *alloc, const type_t *type, void *data) {
     value_t *v = value_alloc(alloc);
     v->type = type;
     v->data = data;
-    v->ownership = OWN_OWN;   /* 默认拥有 data */
+    /* 所有权默认值：只有指针/切片拥有堆资源（OWN_OWN），其余类型无所有权
+       （OWN_NONE）。类型值、函数值、标量、error/interrupt 等都不携带
+       所有权——旧模型用 type_t.ownership 判定，value->ownership 被忽略；
+       所有权迁移到值层后 value->ownership 成为唯一来源，必须正确初始化。 */
+    v->ownership = (type && (type->kind == TYPE_KIND_PTR ||
+                             type->kind == TYPE_KIND_SLICE))
+                       ? OWN_OWN
+                       : OWN_NONE;
     return v;
 }
 
@@ -435,7 +442,7 @@ value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
                                            const type_t *)) {
     if (!vm || !v || !target || !cfg) return NULL;
     const type_t *src = v->type;
-    if (!src || !type_is_fatal(src) || type_is_fatal(target)) return NULL;
+    if (!src || value_ownership(v) != OWN_FATAL) return NULL;
     if (src->kind != target->kind) return NULL;   /* 只认同 kind 的 fatal 变体 */
     if (src->size != target->size) return NULL;   /* 布局必须一致才能重贴标签 */
     if (!cfg(vm, target, src)) return NULL;       /* 各类型的布局兼容判定 */
@@ -447,13 +454,12 @@ value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
     return value_make(vm, target, data);
 }
 
-/* 隐式转换/身份拷贝的 data 分配：持有资源才对象图克隆（见 vm/value_deepcopy.h） */
+/* 隐式转换/身份拷贝的 data 分配：持有资源才对象图克隆（见 vm/value_deepcopy.h）。
+   所有权纯编译期——复合类型字段禁止携带指针/切片，只有指针/切片类型持有资源，
+   但指针/切片的深拷贝由 CLONE 指令（ptr_clone_block）负责，不走此路径。
+   此函数只处理复合类型/标量的浅拷贝。 */
 void *value_alloc_data_own(vm_t *vm, const type_t *t, const void *src_data) {
     if (!vm || !t || !src_data) return NULL;
-    if (type_owns_resources(t)) {
-        void *cloned = ptr_clone_block(vm, t, src_data);
-        if (cloned) return cloned;
-    }
     return value_alloc_data_copy(vm->alloc, t, src_data);
 }
 
@@ -477,30 +483,16 @@ value_t *value_relabel_into(vm_t *vm, value_t *v, const type_t *target) {
     return v;
 }
 
-/* 聚合块写入：持有资源的字段深拷贝（见 vm/value_owncopy.h） */
+/* 聚合块写入：持有资源的字段深拷贝（见 vm/value_owncopy.h）。
+   所有权纯编译期——复合类型字段禁止携带指针/切片，ft 永远不含 own 资源，
+   直接 memcpy 即可。保留 ptr_clone_block 路径供未来扩展。 */
 void *value_own_copy_into(vm_t *vm, void *dst, const value_t *src,
                           const type_t *ft) {
     uint8_t *p = (uint8_t *)dst;
     if (!dst || !src || !ft || !value_data(src)) return p;
-    if (!type_owns_resources(ft)) {
-        memcpy(p, value_data(src), ft->size);
-        return p;
-    }
-    /* 持有资源：**对象图克隆**（ptr_clone_block）。不能用 value_clone——
-       后者对 `own *T` 是**浅拷贝指针**，克隆体与源共享同一个堆块 → 双释放
-       （实测 access violation）。 */
-    void *cloned = ptr_clone_block(vm, ft, value_data(src));
-    if (!cloned) {
-        memcpy(p, value_data(src), ft->size);
-        return p;
-    }
-    memcpy(p, cloned, ft->size);
-    /* ptr_clone_block 返回的是**它自己分配的一块临时 data**：字节已拷进 dst，
-       这块临时块必须回收——否则每构造一个含 own 的字段就泄漏一个 data 块
-       （实测 8 字节/次，正是本函数此前的泄漏根因）。
-       回收它**不能**用 value_dispose：那会连带 dispose 内部的 own 子块，而 dst
-       已经持有那些子块的引用。这里只把临时块本身还给分配器。 */
-    allocator_free(vm->alloc, &cloned);
+    /* 所有权纯编译期——复合类型字段禁止携带指针/切片，ft 永远不含 own 资源，
+       直接 memcpy 即可。 */
+    memcpy(p, value_data(src), ft->size);
     return p;
 }
 

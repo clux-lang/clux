@@ -7,6 +7,10 @@
 #include "diag/diagnostic.h"
 #include "parser/ast_node.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_scope_annot.h"
+#include "parser/ast_slice_type.h"
+#include "parser/parse_utils.h"
 #include "parser/type_qual.h"
 #include "sema/symbol.h"
 #include "vm/vm.h"
@@ -107,6 +111,7 @@ typedef struct sema_type_t {
  */
 typedef struct sema_fn_ctx_t {
     const type_t   *return_type;
+    ownership_t     return_ownership;
     ast_func_def_t *def;
     bool            walking_comptime;
     sema_scope_t   *local_func_base;
@@ -133,15 +138,61 @@ typedef struct sema_expr_ctx_t {
  * 只有两个：**move(x)**（AST_MOVE）与 **return x**（walk_return）。三处判定
  * （move 标记、return 标记、函数结束的未消费检查）统一走本组接口，判据只此
  * 一处定义——此前分散在三段代码里各写一遍 `PTR_FATAL || SLICE_FATAL`，其中
- * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。 */
-static inline bool sema_type_is_fatal(const type_t *t) {
-  return type_is_fatal(t);
+ * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。
+ *
+ * 所有权纯编译期——fatal 判据从 symbol.ownership 读取，不再从 type_t.ownership。 */
+static inline bool sema_sym_is_fatal(const sema_symbol_t *sym) {
+  return sym && sym->ownership == OWN_FATAL;
+}
+/* 兼容旧调用：从 value 的 ownership 判 fatal */
+static inline bool sema_value_is_fatal(const value_t *v) {
+  return v && value_ownership(v) == OWN_FATAL;
 }
 static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
   if (sym) sym->moved = true;
 }
 static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
   return sym && sym->moved;
+}
+
+/* ---- 所有权纯编译期：从类型表达式 AST 节点提取 ownership ----
+ *
+ * 类型表达式 `own *T` / `ref *T` / `fatal *T` / `own []T` 等携带 ownership
+ * token，但 resolve_type_expr 现在只返回类型 *T / []T（不携带 ownership）。
+ * 本函数从 AST 节点提取 ownership，供符号创建时设置 sym->ownership。
+ *
+ * 顶层是 AST_PTR / AST_SLICE_TYPE → 从 ownership token 文本解析。
+ * 其它类型表达式（标识符、复合类型等）→ OWN_NONE。
+ * const/volatile 限定符穿透到 sub。 */
+static inline ownership_t sema_type_expr_ownership(const ast_node_t *type_expr) {
+  if (!type_expr) return OWN_NONE;
+  switch (type_expr->kind) {
+  case AST_SCOPE_ANNOT:
+    /* '<a> ref *T → 穿透标注节点取 sub 的 ownership（ref）。标注节点
+       保留在 AST（sema_resolve_type_slot 只折叠 sub），所有权从 sub 提取。 */
+    return sema_type_expr_ownership(
+        ((const ast_scope_annot_t *)type_expr)->sub);
+  case AST_PTR: {
+    const ast_ptr_t *p = (const ast_ptr_t *)type_expr;
+    if (!p->ownership) return OWN_NONE;
+    strslice_t own = token_strslice(p->ownership);
+    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
+    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
+    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
+    return OWN_NONE;
+  }
+  case AST_SLICE_TYPE: {
+    const ast_slice_type_t *s = (const ast_slice_type_t *)type_expr;
+    if (!s->ownership) return OWN_NONE;
+    strslice_t own = token_strslice(s->ownership);
+    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
+    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
+    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
+    return OWN_NONE;
+  }
+  default:
+    return OWN_NONE;
+  }
 }
 
 /* ---- 复合类型的 own 资源判定（move/clone 拦截与 fatal 变体的判定基础） ----
@@ -444,7 +495,7 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count);
  * 出的返回类型。返回 true = 通过（非 ref 返回 / 无返回类型 / 已标注）。
  */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt);
+                              const type_t *rt, ownership_t return_ownership);
 
 /**
  * 作用域嵌套比较（m3-design §5）：a 沿 parent 链可达 b（或 a == b）→

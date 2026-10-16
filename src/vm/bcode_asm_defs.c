@@ -107,7 +107,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
 
     [BCODE_PUSH_CUNION]    = { "PUSH_CUNION",   { BCODE_ASM_OP_NONE } },
 
-    [BCODE_PUSH_PTR]       = { "PUSH_PTR",      { BCODE_ASM_OP_U8 } },
+    [BCODE_PUSH_PTR]       = { "PUSH_PTR",      { BCODE_ASM_OP_NONE } },
     [BCODE_NEW]            = { "NEW",           { BCODE_ASM_OP_NONE } },
     [BCODE_PTR_GET]        = { "PTR_GET",       { BCODE_ASM_OP_NONE } },
     [BCODE_PTR_SET]        = { "PTR_SET",       { BCODE_ASM_OP_NONE } },
@@ -116,7 +116,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_CLONE]          = { "CLONE",         { BCODE_ASM_OP_NONE } },
     [BCODE_DISPOSE]        = { "DISPOSE",       { BCODE_ASM_OP_NONE } },
 
-    [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_U8 } },
+    [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_NONE } },
     [BCODE_SLICE]          = { "SLICE",         { BCODE_ASM_OP_U8 } },
     [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32 } },
 

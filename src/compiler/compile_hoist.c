@@ -217,22 +217,20 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       emit_define_type(c, st->id);
       break;
     case TYPE_KIND_PTR:
-      /* PUSH_PTR <ownership> 压开放指针类型（base_type=NULL，不入池）→
+      /* PUSH_PTR 压开放指针类型（base_type=NULL，不入池）→
          DEFINE_TYPE <id> 声明登记（不设 base；base 是引用依赖，pass 2
          LOAD_TYPE 拉回即可，无环——指针密封不依赖 base 布局）。
-         所有权正交编码在 type_t.ownership，操作数传 ownership_t 值。 */
+         所有权纯编译期——类型不区分 ownership，PUSH_PTR 无 ownership 操作数。 */
       bcode_write_op(c->bc, BCODE_PUSH_PTR);
-      bcode_write_u8(c->bc, (uint8_t)st->type->ownership);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
     case TYPE_KIND_SLICE:
-      /* PUSH_SLICE <ownership> 压开放切片类型（elem=NULL，不入池）→
+      /* PUSH_SLICE 压开放切片类型（elem=NULL，不入池）→
          DEFINE_TYPE <id> 声明登记（不设 elem；elem 是引用依赖，pass 2
          LOAD_TYPE 拉回即可，无环——切片密封不依赖 elem 布局）。
-         所有权正交编码在 type_t.ownership，操作数传 ownership_t 值。 */
+         所有权纯编译期——类型不区分 ownership，PUSH_SLICE 无 ownership 操作数。 */
       bcode_write_op(c->bc, BCODE_PUSH_SLICE);
-      bcode_write_u8(c->bc, (uint8_t)st->type->ownership);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;

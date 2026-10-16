@@ -335,11 +335,9 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     st->field_count = n + 1;
 }
 
-/* 按 (字段名 + 类型 + 顺序 + ownership) 判断两结构体是否等价（去重 intern 用）。
- * ownership 参与比较：fatal Node 与 Node 字段表相同但 ownership 不同，是
- * 不同类型（fatal 是将亡值，普通 struct 不是）。 */
+/* 按 (字段名 + 类型 + 顺序) 判断两结构体是否等价（去重 intern 用）。所有权
+ * 已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
 static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
-    if (a->base.ownership != b->base.ownership) return false;
     if (a->field_count != b->field_count) return false;
     for (size_t i = 0; i < a->field_count; i++) {
         const struct_field_t *fa = &a->fields[i];
@@ -666,26 +664,22 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
     return t;
 }
 
-/* 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，设
- * ownership，密封为新的 struct_type_t（与 base 同布局不同 ownership——去重时
- * struct_same 按 ownership 区分）。用于 `fatal Box`（ownership=OWN_FATAL）：
- * "将亡值"变体，跨函数边界传递含 own 字段的结构体时由 move()/clone() 产出、
- * 由参数/返回值接收方接管。
+/* 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，密封为
+ * 新的 struct_type_t（与 base 同布局）。所有权已迁移到值层，类型层恒为
+ * OWN_NONE；保留 ownership 参数仅为兼容既有调用方签名，不再写入类型。
  *
- * **布局与 base 完全相同**（size/align/字段偏移逐字相同）——ownership 是
- * type_t 上的正交标记，不参与布局。因此 fatal 变体与 base 的值可以按同一份
- * 内存布局整块 memcpy 互换（move 的实现正是如此）。
+ * **布局与 base 完全相同**（size/align/字段偏移逐字相同）。
  *
  * 显示名**不在此设定**：本对象由 struct_type_create_open 创建，其 dispose 会
  * 释放 base.name，而 base 的名字可能借用外部存储（编译期 arena）。调用方
- * （sema）在密封后用 type_set_name 设一个 vm 自有的名（如 "fatal Box"）——
- * 与具名 struct 的既有做法一致（见 struct_compose.c）。 */
+ * （sema）在密封后用 type_set_name 设一个 vm 自有的名——与具名 struct 的
+ * 既有做法一致（见 struct_compose.c）。 */
 const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
                                                 ownership_t ownership) {
     if (!vm || !base || base->kind != TYPE_KIND_STRUCT) return NULL;
+    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
     const struct_type_t *src = (const struct_type_t *)base;
     struct_type_t *st = struct_type_create_open(vm);
-    st->base.ownership = ownership;
     /* 拷贝字段表（vm 拥有；名深拷贝；offset 拷贝——布局与 base 相同） */
     if (src->field_count > 0) {
         struct_field_t *copy = (struct_field_t *)allocator_new_ex(

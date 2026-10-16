@@ -474,22 +474,10 @@ static bool is_poison(sema_t *sema, const value_t *v) {
  * 重新 intern 的兜底逻辑（与 `stmt.c` 的 static `strip_fatal` 同源）。
  */
 static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
-  if (!t || !type_is_fatal(t)) return t;
-  /* 登记表给出规范 base —— 具名 struct 标了 unique、不参与 intern 去重，
-     只靠下面"按布局重新 intern"会每次新建实例，身份永不相等。 */
-  const type_t *base = type_fatal_base_of(sema->vm, t);
-  if (base && base != t && !type_is_fatal(base)) return base;
-
-  /* 复合类型不再有 fatal 变体——只有指针/切片需要回退。 */
-  vm_t *vm = sema->vm;
-  switch (t->kind) {
-    case TYPE_KIND_PTR:
-      return type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
-    case TYPE_KIND_SLICE:
-      return type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
-    default:
-      return t;
-  }
+  /* 所有权迁移到值/symbol 层后，fatal 不再是类型层概念——type_is_fatal(t)
+     恒为 false，本函数退化为恒等返回 t。保留签名以减少调用方改动。 */
+  (void)sema;
+  return t;
 }
 
 /**
@@ -624,7 +612,10 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
                直接传 own/ref 变量 = 隐式 copy——运行期 NEW 会把指针值原样
                复制进新堆块 → 内外两个 own 指向同一堆块 → 作用域退出 double
                free。 */
-            if (type_is_own(ft) && !type_is_fatal(value_type(fv))) {
+            /* 所有权迁移：ft 是 struct 字段类型（无对应 symbol/value），
+               type_is_own(ft) 恒为 false；fatal 判据改走值层。整体条件恒假，
+               保留结构以待字段级 ownership 落地。 */
+            if (false && !sema_value_is_fatal(fv)) {
               char fn[64];
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, value),
@@ -931,7 +922,10 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
              own/ref 变量 = 隐式 copy → 新堆块与外变量两个 own 指向同一
              堆块 → double free（new own *i32{p} 必须写
              new own *i32{move(p)}）。 */
-          if (type_is_own(t) && !type_is_fatal(value_type(fv))) {
+          /* 所有权迁移：t 是 new 的目标类型（无对应 symbol/value），
+             type_is_own(t) 恒为 false；fatal 判据改走值层。整体条件恒假，
+             保留结构以待目标类型 ownership 落地。 */
+          if (false && !sema_value_is_fatal(fv)) {
             char fn[64];
             sema_type_name(value_type(fv), fn, sizeof fn);
             diag_error(sema->diag, sema_loc(sema, f),
@@ -951,14 +945,16 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
         }
       }
 
-      /* 返回 fatal *T 类型的 shadow——new 产新堆块，与
+      /* 返回 fatal *T 的 shadow——new 产新堆块，与
          clone/move 统一：所有"产新堆块"路径都返回 fatal（§3.3 将亡值），
          由 var 定义/参数/return 显式接管为 own（value_assign → implicit_cast
-         fatal→own 转移）。运行期 NEW 指令按 fatal 类型压栈。 */
-      const type_t *pt = type_ptr_intern(sema->vm, OWN_FATAL, t);
+         fatal→own 转移）。所有权纯编译期：fatal 是值层 ownership 状态。 */
+      const type_t *pt = type_ptr_intern(sema->vm, t);
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
-      return value_make_shadow(sema->vm, pt);
+      value_t *r = value_make_shadow(sema->vm, pt);
+      value_set_ownership(r, OWN_FATAL);
+      return r;
 }
 
 /* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
@@ -1682,7 +1678,9 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
 
       /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
          解包由显式 .! assert 承担，见 docs m2-design §12.5） */
-      return value_make_shadow(sema->vm, value_type(v));
+      value_t *sv = value_make_shadow(sema->vm, value_type(v));
+      value_set_ownership(sv, sym ? sym->ownership : OWN_NONE);
+      return sv;
 }
 
 /* M6 FFI：剥掉 const/volatile 限定符（它们是同一份数据的限定视图，C ABI 描述符
@@ -1723,8 +1721,11 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
   if (pt->kind == TYPE_KIND_FLOAT) return at == pt; /* 同型（f32/f64 不可混） */
   if (pt == sema->vm->type_opaque)
     return at == sema->vm->type_opaque || type_is_ptr(at) ||
-           (type_is_slice(at) && (at->ownership == OWN_REF ||
-                                  at->ownership == OWN_FATAL)) ||
+           /* 所有权迁移：at 是形参/实参类型（无对应 value），at->ownership
+              恒为 OWN_NONE——切片不再经 ownership 放行进 opaque，只靠
+              type_is_ptr/type_is_slice 的 kind 判定。保留 false 分支待
+              值层 ownership 接入 FFI 实参匹配。 */
+           (type_is_slice(at) && false) ||
            at->kind == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
   /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
@@ -2042,7 +2043,13 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
           sema_anon_pop(sema, ct_pushed);
         }
         const type_t *rt = func_type_return(sig_type);
-        return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+        value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+        /* 函数返回值 ownership：fatal→OWN_FATAL，ref→OWN_REF，其余 OWN_NONE */
+        if (rt && sig_type && sig_type->kind == TYPE_KIND_FUNC) {
+          const func_sig_t *sig = &((const func_type_t *)sig_type)->sig;
+          value_set_ownership(sv, sig->return_ownership);
+        }
+        return sv;
       }
 
       /* M6 FFI：extern cfunc 调用（`<库>::<名>(...)`）——callee 是 AST_SCOPE_REF 且库
@@ -2151,7 +2158,9 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                            "extern call %s: argument %zu: cannot pass this value "
                            "as the declared parameter type", qual, ai + 1);
             }
-            return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+            value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+            value_set_ownership(sv, sig->return_ownership);
+            return sv;
           }
         }
       }
@@ -2267,13 +2276,19 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                      "data: argument must be array/slice/str, got %s", tn);
           return val_void(sema);
         }
-        const type_t *rp = type_ptr_intern(sema->vm, OWN_REF, elem);
+        const type_t *rp = type_ptr_intern(sema->vm, elem);
         if (!rp) return val_void(sema);
         sema_type_register(sema, rp);
         call->is_data_call = true;
         return value_make_shadow(sema->vm, rp);
       }
 
+      /* 函数返回值 ownership：从签名 return_ownership 读取（fatal/ref/none）。
+         函数永不能返回 own（§4 已拦截），所以此处只会有 OWN_FATAL / OWN_REF / OWN_NONE。 */
+      if (result && fnt && fnt->kind == TYPE_KIND_FUNC) {
+        const func_sig_t *sig = &((const func_type_t *)fnt)->sig;
+        value_set_ownership(result, sig->return_ownership);
+      }
       return result; /* shadow in → shadow out（return_type shadow） */
 }
 
@@ -2549,7 +2564,7 @@ static value_t *ex_slice(sema_t *sema, ast_node_t **node,
       }
 
       /* 恒产 ref []T */
-      const type_t *slice_t = type_slice_intern(sema->vm, OWN_REF,
+      const type_t *slice_t = type_slice_intern(sema->vm,
                                                  et ? et : sema->vm->type_void);
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
@@ -2853,12 +2868,14 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
         }
       }
 
-      /* 返回 fatal []T shadow——make 产新堆块，与 new 统一 */
-      const type_t *slice_t = type_slice_intern(sema->vm, OWN_FATAL,
-                                                 et);
+      /* 返回 fatal []T shadow——make 产新堆块，与 new 统一。
+         所有权纯编译期：fatal 是值层 ownership 状态。 */
+      const type_t *slice_t = type_slice_intern(sema->vm, et);
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
-      return value_make_shadow(sema->vm, slice_t);
+      value_t *r = value_make_shadow(sema->vm, slice_t);
+      value_set_ownership(r, OWN_FATAL);
+      return r;
 }
 
 /* AST_MOVE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -2877,7 +2894,11 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       const type_t *fatal = sema_fatal_variant_of(sema, ot);
       if (!fatal) return val_void(sema);
       bool is_clone = n->op && token_is(n->op, "clone");
-      bool produces_fatal = (fatal != ot);
+      /* 所有权纯编译期：fatal 是值层状态，不再有独立 fatal 类型变体。
+         produces_fatal = 操作数携带资源（指针/切片/含 own 的复合类型）。 */
+      bool produces_fatal = ot && (ot->kind == TYPE_KIND_PTR ||
+                                   ot->kind == TYPE_KIND_SLICE ||
+                                   sema_type_contains_owned_resource(ot));
 
       /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
          TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有
@@ -2926,7 +2947,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
            槽位。所以闭包内的捕获值（`own *T` 或含 own 的聚合）只能 clone/借用，
            不能 move。 */
         if (src && src->kind == SEMA_SYM_VAR && src->is_capture &&
-            (type_is_own(src->type) ||
+            (src->ownership == OWN_OWN ||
              sema_type_contains_owned_resource(src->type) ||
              src->type->kind == TYPE_KIND_FUNC)) {
           diag_error(sema->diag, sema_loc(sema, *node),
@@ -2940,12 +2961,12 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         }
       }
 
-      if (!is_clone && (produces_fatal || type_is_fatal(ot)) &&
+      if (!is_clone && (produces_fatal || sema_value_is_fatal(operand)) &&
           n->operand->kind == AST_IDENT) {
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
         if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            (type_is_own(src->type) ||
+            (src->ownership == OWN_OWN ||
              sema_type_contains_owned_resource(src->type))) {
           /* `own *T` 与**含 own 资源的复合类型**同规则（所有权扩散）：move 后
              源不再持有资源 → 标记 moved，后续读取报 "used after move"。 */
@@ -2960,11 +2981,13 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
             src->moved = true;
           }
         } else if (src && src->kind == SEMA_SYM_VAR &&
-                   sema_type_is_fatal(src->type)) {
+                   sema_sym_is_fatal(src)) {
           sema_mark_fatal_consumed(src);
         }
       }
-      return value_make_shadow(sema->vm, fatal);
+      value_t *r = value_make_shadow(sema->vm, fatal);
+      value_set_ownership(r, OWN_FATAL);
+      return r;
 }
 
 /* AST_INT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -3258,7 +3281,7 @@ static value_t *ex_addr(sema_t *sema, ast_node_t **node,
                    "cannot take address of value of unknown type");
         return val_void(sema);
       }
-      const type_t *pt = type_ptr_intern(sema->vm, OWN_REF, t);
+      const type_t *pt = type_ptr_intern(sema->vm, t);
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       return value_make_shadow(sema->vm, pt);

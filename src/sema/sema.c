@@ -283,17 +283,20 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
 bool sema_type_contains_owned_resource(const type_t *t) {
   if (!t) return false;
   /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针、
-     own 切片直接持有资源，无需递归。 */
+     own 切片直接持有资源，无需递归。
+     NOTE: 所有权已从 type 层迁移到 symbol/value 层——type_t.ownership 恒为
+     OWN_NONE，type_directly_owns 现阶段恒返回 false。本函数保留供尚未迁移
+     的调用点编译通过，语义上等价于"类型层无法判定 own 资源"。 */
   return type_directly_owns(t);
 }
 
 /** 仅检查 OWN_OWN。 */
 bool sema_type_contains_own_resource(const type_t *t) {
   if (!t) return false;
-  /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针/切片持有资源。 */
-  if (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) {
-    return t->ownership == OWN_OWN;
-  }
+  /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针/切片持有资源。
+     所有权已从 type 层迁移到 symbol/value 层——类型不携带 ownership，
+     顶层指针/切片的 own 判定由调用方通过 sym->ownership 检查。 */
+  (void)t;
   return false;
 }
 
@@ -517,8 +520,8 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                              ? resolve_type_expr(sema, ft->return_type)
                              : NULL;
       if (ft->return_type && !rt) return NULL;
-      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
-                           /*is_variadic=*/false);
+      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, NULL, n, rt,
+                           OWN_NONE, /*is_variadic=*/false);
     }
     case AST_TYPE_REF: {
       /* 具名类型引用（sema 登记过的类型，如 "__type_0"）→ 查 types 队列。
@@ -559,27 +562,23 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      ownership_t ownership;
+      /* 所有权纯编译期——校验 ownership token 合法性，但不传入类型系统。
+         ownership 由调用方在 symbol 层记录。 */
       strslice_t own = token_strslice(ptr->ownership);
-      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-        ownership = OWN_OWN;
-      } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-        ownership = OWN_REF;
-      } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-        ownership = OWN_FATAL;
-      } else {
+      if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
+            (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
+            (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
         return NULL;
       }
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       if (!base) return NULL;
-      return type_ptr_intern(sema->vm, ownership, base);
+      return type_ptr_intern(sema->vm, base);
     }
     case AST_SLICE_TYPE: {
-      /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
-         按所有权修饰 token 文本分派 type_slice_intern（三种所有权是独立
-         intern 实例）。
+      /* 切片类型（m4-design §1/§10）：[]T（所有权纯编译期，类型不区分
+         own/ref/fatal）。
          裸 []T（ownership=NULL）不合法——parser 在 parse_primary 层暂存
          为 ownership=NULL 的 AST_SLICE_TYPE，此处校验拒绝。 */
       ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
@@ -589,15 +588,11 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "'fatal []T'");
         return NULL;
       }
-      ownership_t ownership;
+      /* 校验 ownership token 合法性（所有权纯编译期，不传入类型系统） */
       strslice_t own = token_strslice(sl->ownership);
-      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) {
-        ownership = OWN_OWN;
-      } else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) {
-        ownership = OWN_REF;
-      } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
-        ownership = OWN_FATAL;
-      } else {
+      if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
+            (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
+            (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported slice ownership '%.*s' (use own/ref/fatal)",
                    (int)own.len, own.ptr);
@@ -610,7 +605,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "slice type cannot contain pointer or slice");
         return NULL;
       }
-      return type_slice_intern(sema->vm, ownership, elem);
+      return type_slice_intern(sema->vm, elem);
     }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
@@ -690,9 +685,12 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
        实测此前只查顶层 ref，`func f(p: ref *i32): Holder`（Holder 含 ref 字段）
        静默放行。 */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt) {
+                              const type_t *rt, ownership_t return_ownership) {
   if (!rt || !fn->return_expr) return true;
-  bool top_ref = type_is_ref(rt);
+  /* 所有权已从 type 层迁移到 symbol/value 层——rt 是 intern 后的类型，
+     ownership 恒为 OWN_NONE。顶层 ref 判定从调用方传入的 return_ownership
+     读取（须在 sema_resolve_type_slot 折叠 AST 之前提取）。 */
+  bool top_ref = return_ownership == OWN_REF;
   bool compound_ref = !top_ref && type_contains_ref(rt);
   if (!top_ref && !compound_ref) return true;
   strslice_t *names = NULL;
@@ -924,8 +922,8 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
                     (int)efd->name.len, efd->name.ptr);
   if (qn <= 0 || (size_t)qn >= sizeof(qual)) return resolved;
   const type_t *sig =
-      type_func_sig(sema->vm, ptypes, pn, rt ? rt : sema->vm->type_void,
-                    efd->is_variadic);
+      type_func_sig(sema->vm, ptypes, NULL, pn, rt ? rt : sema->vm->type_void,
+                    OWN_NONE, efd->is_variadic);
   if (sig) {
     /* `.ast` 指向声明节点：调用点需要它取返回类型表达式（程序自定义类型的
        "按类型值返回"要用，见 sema/expr.c 的 FFI 返回类型码映射）。 */
@@ -1234,16 +1232,29 @@ static void pass2_types(sema_t *sema, bool speculative) {
 
     /* 参数/返回类型槽位解析。**未解析成功则不建签名**（留待下一轮试跑或
        最终正式报错）——否则会用 NULL 参数构造出半有效的签名并把它标记为
-       已完成，后续轮次不再重试。 */
+       已完成，后续轮次不再重试。
+       ownership 时序：speculative 轮会折叠 AST（AST_PTR→AST_TYPE_REF），
+       正式轮再从 AST 提取会得到 OWN_NONE。若签名已建（sym->type 非空），
+       从签名的 param_ownerships/return_ownership 读取；否则从原始 AST 提取。 */
     bool unresolved = false;
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;
+    ownership_t *powns = NULL;
+    const func_sig_t *existing_sig = (sym->type && sym->type->kind == TYPE_KIND_FUNC)
+                                         ? &((const func_type_t *)sym->type)->sig
+                                         : NULL;
     if (nparams > 0) {
       params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
                                 NULL, NULL, NULL, nparams);
+      powns = allocator_new_ex(sema->vm->alloc, "ownership_t", sizeof(ownership_t),
+                               NULL, NULL, NULL, nparams);
       size_t j = 0;
       for (ast_node_t *p = fn->params; p; p = p->next, j++) {
         ast_var_def_t *vd = (ast_var_def_t *)p;
+        ownership_t pown = (existing_sig && existing_sig->param_ownerships &&
+                            j < existing_sig->param_count)
+                               ? existing_sig->param_ownerships[j]
+                               : sema_type_expr_ownership(vd->type_expr);
         const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t) {
           if (!speculative)
@@ -1253,9 +1264,13 @@ static void pass2_types(sema_t *sema, bool speculative) {
           unresolved = true;
         }
         params[j] = t; /* 失败置 NULL，位置对齐，func_shadow_call 校验时跳过 */
+        powns[j] = pown;
       }
     }
 
+    ownership_t ret_own = existing_sig
+                              ? existing_sig->return_ownership
+                              : (fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE);
     const type_t *rt = NULL;
     if (fn->return_expr) {
       rt = sema_resolve_type_slot(sema, &fn->return_expr);
@@ -1267,6 +1282,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
     }
     if (unresolved) {
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
+      if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
       continue; /* 保持未就绪，等下一轮（符号 type 仍为 NULL） */
     }
     /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。
@@ -1274,9 +1290,10 @@ static void pass2_types(sema_t *sema, bool speculative) {
        **每次都要跑**：签名可能已在试跑轮解析完毕（下面会跳过重建），但试跑轮
        的诊断进了临时缓冲被丢弃——正式轮必须补报；试跑轮里也只是做检查、
        不产生状态。 */
-    sema_check_ret_ref_annot(sema, fn, rt);
+    sema_check_ret_ref_annot(sema, fn, rt, ret_own);
     if (sym->type) { /* 签名已就绪（试跑轮已解析）：无需重建 */
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
+      if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
       continue;
     }
 
@@ -1286,7 +1303,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
        签名类型**登记进 sema->types**（与数组/const 同机制）——签名本质是
        普通类型，且函数指针作参数时签名引用签名，须经 hoist 两遍扫描
        依赖后序构造（参数/返回类型已在此前解析登记，父先入队）。 */
-    const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
+    const type_t *sig = type_func_sig(sema->vm, params, powns, nparams, rt, ret_own, false);
     sym->type = sig;
     sym->ast = f;
     /* 签名类型提升：登记 + 递归依赖登记；fn->sig_id 记录（compiler
@@ -1294,8 +1311,9 @@ static void pass2_types(sema_t *sema, bool speculative) {
     const sema_type_t *st = sema_type_register(sema, sig);
     if (st) fn->sig_id = st->id;
 
-    /* params 临时数组已被 type_func_sig 复制，此处释放 */
+    /* params/powns 临时数组已被 type_func_sig 复制，此处释放 */
     if (params) allocator_free(sema->vm->alloc, (void **)&params);
+    if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
   }
 }
 
@@ -1530,8 +1548,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
      并产出 usize 返回类型（C 的 size_t：随架构变化）。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *lsig = type_func_sig(sema->vm, NULL, 0, vm_type_usize(sema->vm),
-                                       /*is_variadic=*/true);
+    const type_t *lsig = type_func_sig(sema->vm, NULL, NULL, 0, vm_type_usize(sema->vm),
+                                       OWN_NONE, /*is_variadic=*/true);
     uint32_t lfid = 0;
     if (sema->vm->functions) {
       size_t nf = vec_len(sema->vm->functions);
@@ -1557,11 +1575,11 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      sema 调用点特判按实参类型精化返回类型为 `ref *<元素类型>`（str → ref *u8），
      运行期也按实参类型重新推导。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *ref_opaque = type_ptr_intern(sema->vm, OWN_REF,
+    const type_t *ref_opaque = type_ptr_intern(sema->vm,
                                                sema->vm->type_opaque);
     const type_t *dsig = ref_opaque
-                             ? type_func_sig(sema->vm, NULL, 0, ref_opaque,
-                                             /*is_variadic=*/true)
+                             ? type_func_sig(sema->vm, NULL, NULL, 0, ref_opaque,
+                                             OWN_NONE, /*is_variadic=*/true)
                              : NULL;
     uint32_t dfid = 0;
     if (sema->vm->functions) {
@@ -1588,9 +1606,9 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      注册为 variadic（0 固定参数）——具体 §2 校验在运行期由 cfunc 内部完成
      （与 len 同一套路），返回类型 opaque。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *csig = type_func_sig(sema->vm, NULL, 0,
+    const type_t *csig = type_func_sig(sema->vm, NULL, NULL, 0,
                                        sema->vm->type_opaque,
-                                       /*is_variadic=*/true);
+                                       OWN_NONE, /*is_variadic=*/true);
     uint32_t cfid = 0;
     if (sema->vm->functions) {
       size_t nf = vec_len(sema->vm->functions);

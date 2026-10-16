@@ -719,12 +719,12 @@ static value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
    MOVE = 转移（O(1)，源 ptr=NULL TDZ，产物 fatal）；CLONE = 深拷贝（own 分配
    新堆块，产物 fatal；ref 复制指针值）。 */
 
-/* PUSH_PTR <ownership>：分配空 ptr type（开放，base_type=NULL，不入池）+ 压其
+/* PUSH_PTR：分配空 ptr type（开放，base_type=NULL，不入池）+ 压其
  * type value（type_ptr_push 压栈；对应两遍构造声明阶段的起点）。
- * ownership = 所有权修饰（OWN_OWN/REF/FATAL/SHARE/WEAK，u8 立即数）。 */
+ * 所有权纯编译期——只有一种指针类型 *T，无 ownership 操作数。 */
 static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint8_t ownership = bcode_read_u8(bc, pc);
-    type_ptr_push(vm, (ownership_t)ownership);
+    (void)bc; (void)pc;
+    type_ptr_push(vm);
     return NULL;
 }
 
@@ -752,9 +752,9 @@ static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "new: missing type slot");
     /* new 产 fatal *T（m3-design §3.3 统一接管协议）：新堆块是"将亡值"，
        由 DEFINE/赋值经 implicit_cast fatal→own 显式接管为 own。 */
-    const type_t *pt = type_ptr_intern(vm, OWN_FATAL, t);
+    const type_t *pt = type_ptr_intern(vm, t);
     if (!pt)
-        return value_make_error(vm, "new: cannot make fatal pointer type");
+        return value_make_error(vm, "new: cannot make pointer type");
     if (value_is_shadow(member))
         return value_make_shadow(vm, pt);
     /* 成员值 → T：同类型直接用（身份，不 clone——value_implicit_cast 同类型
@@ -831,9 +831,9 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     const type_t *t = v ? value_type(v) : NULL;
     if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR)
         return value_make_error(vm, "addr: cannot take address of void/error value");
-    const type_t *pt = type_ptr_intern(vm, OWN_REF, t);
+    const type_t *pt = type_ptr_intern(vm, t);
     if (!pt)
-        return value_make_error(vm, "addr: cannot make ref pointer type");
+        return value_make_error(vm, "addr: cannot make pointer type");
     if (value_is_shadow(v))
         return value_make_shadow(vm, pt);
     return ptr_make_value(vm, pt, value_data(v)); /* ref 借用：不拥有 */
@@ -846,15 +846,9 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
    指令与 `type_*_intern_with_ownership` 供 hoist 物化声明里的 fatal 类型。 */
 
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
- * 弹值 → 压 fatal 同类型值：
- *   - own 指针：新值接管裸指针，源 data 清零（TDZ——运行期兜底
- *     防双释放；sema TDZ 检查 Step B 叠加）
- *   - own/fatal 切片：同指针（接管 (ptr,len)，源置空）
- *   - **含 own 字段的复合类型（struct/tuple/array/option/union）**：整块 memcpy
- *     到新值（裸字节复制，O(size)），再把**源**顶层的 own/fatal 指针字段递归
- *     置 NULL——堆块所有权随 memcpy 转移到新值，源不再持有，作用域退出时不会
- *     与接管方双释放（承接"复合类型 move 只需 memcpy + 清源顶层 own 指针"）。
- *   - 其他（ref/借用/标量）：平凡复制（ref 是 copy 语义）
+ * 所有权纯编译期——move 没有运行期逻辑，只是 sema 把变量的 ownership
+ * 从 own 标记为 fatal。运行期 MOVE = 纯 memcpy（位复制），不清空源指针。
+ * 堆释放由 sema 生成 FREE 指令负责。
  * shadow → 同类型 shadow。 */
 static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
@@ -862,58 +856,16 @@ static value_t *op_move(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-    if (type_is_own(t) || type_is_fatal(t)) {
-        if (type_is_ptr(t)) {
-            /* 指针转移：新值接管裸指针，源置 NULL（TDZ，运行期兜底防双释放） */
-            const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
-            const type_t *fatal = type_is_fatal(t)
-                                      ? t
-                                      : type_ptr_intern(vm, OWN_FATAL,
-                                                        ptr_type_base(t));
-            if (!fatal) return value_make_error(vm, "move: cannot make fatal pointer type");
-            value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
-            ((ptr_value_t *)value_data(v))->ptr = NULL;
-            return nv;
-        }
-        if (type_is_slice(t)) {
-            /* 切片转移：新值接管 (ptr, len)，源置空 */
-            const slice_value_t *sv = (const slice_value_t *)value_data(v);
-            const type_t *fatal = type_is_fatal(t)
-                                      ? t
-                                      : type_slice_intern(vm, OWN_FATAL,
-                                                          slice_type_elem(t));
-            if (!fatal) return value_make_error(vm, "move: cannot make fatal slice type");
-            value_t *nv = slice_make_value(vm, fatal, sv->ptr, sv->len);
-            ((slice_value_t *)value_data(v))->ptr = NULL;
-            ((slice_value_t *)value_data(v))->len = 0;
-            return nv;
-        }
-    }
-    /* 复合类型（含 own 字段）：memcpy + 递归清空源的 own/fatal 指针字段。
-       ptr_clone_block 不适用（那是深拷贝）；这里要的是**位复制 + 源清空**。
-       产物保持 base 类型：fatal 是**编译期**的所有权标记，运行期不为同一逻辑
-       类型维护两个实例（曾因构造点物化 fatal 变体导致形参/实参类型不一致 →
-       数组族在函数边界上被误判为普通值）。转移点按语义完成转移。 */
-    if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
-        t->kind != TYPE_KIND_VOID && value_data(v)) {
-        void *data = value_alloc_data(vm->alloc, t);
-        memcpy(data, value_data(v), t->size);
-        /* 源对象图的 own/fatal 指针全部置 NULL（不释放）：堆块已归新值。
-           ref 借用与标量不受影响（ptr_clear_owned_recursive 按字段类型分派）。 */
-        ptr_clear_owned_recursive(vm, t, value_data(v));
-        return value_make(vm, t, data);
-    }
-    return value_clone(vm, v);  /* 标量 / ref：平凡复制 */
+    if (!t || !value_data(v)) return value_clone(vm, v);
+    /* 纯 memcpy：位复制，不清空源。 */
+    void *data = value_alloc_data(vm->alloc, t);
+    memcpy(data, value_data(v), t->size);
+    return value_make(vm, t, data);
 }
 
 /* CLONE（无操作数）：**深拷贝**（clone(x)，m3-design §7）。
- * 弹值 → 压 fatal 同类型值（vtable->clone 分派）：
- *   - own 指针：深拷贝——分配新堆块，新指针独立（fatal 接管）
- *   - ref/借用：复制指针值（指向同一处）
- *   - **含 own 字段的复合类型**：ptr_clone_block 逐字段深拷贝对象图（own 字段
- *     分配独立新堆块；ref 字段按"借用"复制指针），产物为 fatal 变体。
- *     **源值保持有效**——clone 是"复制"语义（与 clone(own *T) 一致），跨函数
- *     边界的所有权转移走 MOVE / fatal 参数路径，不走 clone。
+ * 所有权纯编译期——clone 做深拷贝（ptr_clone_block 对象图克隆），
+ * 不再包 fatal 类型、不清空源指针。
  * shadow → 同类型 shadow。 */
 static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
@@ -921,82 +873,22 @@ static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-
-    /* 复合类型：整块深拷贝（对象图克隆）后保持 base 类型——与 op_move 同理 */
-    if (t && t->kind != TYPE_KIND_TYPE && t->kind != TYPE_KIND_ERROR &&
-        t->kind != TYPE_KIND_VOID && value_data(v) &&
-        !(type_is_ptr(t) || type_is_slice(t))) {
-        void *data = ptr_clone_block(vm, t, value_data(v));
-        return value_make(vm, t, data);
-    }
-
-    value_t *copied = value_clone(vm, v);
-    if (value_is_error(vm, copied)) return copied;
-    /* clone 产物是 fatal（将亡值，m3-design §3.3）——指针与切片包一层
-       fatal 类型；非指针原样返回。 */
-    if (type_is_ptr(t) && (type_is_own(t) || type_is_ref(t))) {
-        const type_t *fatal = type_ptr_intern(vm, OWN_FATAL,
-                                              ptr_type_base(t));
-        if (!fatal) return value_make_error(vm, "clone: cannot make fatal pointer type");
-        const ptr_value_t *pv = (const ptr_value_t *)value_data(copied);
-        value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
-        ((ptr_value_t *)value_data(copied))->ptr = NULL;
-        return nv;
-    }
-    if (type_is_slice(t) && (type_is_own(t) || type_is_ref(t))) {
-        const type_t *fatal = type_slice_intern(vm, OWN_FATAL,
-                                                slice_type_elem(t));
-        if (!fatal) return value_make_error(vm, "clone: cannot make fatal slice type");
-        const slice_value_t *sv = (const slice_value_t *)value_data(copied);
-        value_t *nv = slice_make_value(vm, fatal, sv->ptr, sv->len);
-        ((slice_value_t *)value_data(copied))->ptr = NULL;
-        ((slice_value_t *)value_data(copied))->len = 0;
-        return nv;
-    }
-    return copied;
+    if (!t || !value_data(v)) return value_clone(vm, v);
+    /* 深拷贝：对象图克隆（指针分配新堆块，复合类型逐字段递归）。 */
+    void *data = ptr_clone_block(vm, t, value_data(v));
+    return value_make(vm, t, data);
 }
 
 /* value_move（供 MOVE 指令与函数调用/返回的**所有权转移**共用，m3-design §7）：
- * 把 v 的所有权无损交给调用方，返回接管方持有的新值（fatal 变体类型），
- * 并清空 v 内部的 own/fatal 指针使 v 不再持有任何资源（作用域退出时安全）。
- *
- * 为什么需要它：函数参数/返回值在类型相同时走的是 vtable->clone 路径，而
- * "把含 own 字段的复合值传出去"必须是**转移**而不是深拷贝——深拷贝会白分配
- * 一整套对象图，而且调用方仍持有原件（语义上就不是 move 了）。ptr/slice 的
- * 转移规则与 op_move 完全一致，故同一份实现。 */
+ * 所有权纯编译期——move = 纯 memcpy（位复制），不清空源指针。
+ * 堆释放由 sema 生成 FREE 指令负责。 */
 value_t *value_move(vm_t *vm, value_t *v) {
     if (!v) return v;
     if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
     if (!t || !value_data(v)) return v;
-
-    if (type_is_ptr(t)) {
-        const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
-        const type_t *fatal = type_is_fatal(t)
-                                  ? t
-                                  : type_ptr_intern(vm, OWN_FATAL, ptr_type_base(t));
-        if (!fatal) return value_make_error(vm, "move: cannot make fatal pointer type");
-        value_t *nv = ptr_make_value(vm, fatal, pv->ptr);
-        ((ptr_value_t *)value_data(v))->ptr = NULL; /* 源不再持有 */
-        return nv;
-    }
-    if (type_is_slice(t)) {
-        const slice_value_t *sv = (const slice_value_t *)value_data(v);
-        const type_t *fatal = type_is_fatal(t)
-                                  ? t
-                                  : type_slice_intern(vm, OWN_FATAL, slice_type_elem(t));
-        if (!fatal) return value_make_error(vm, "move: cannot make fatal slice type");
-        value_t *nv = slice_make_value(vm, fatal, sv->ptr, sv->len);
-        ((slice_value_t *)value_data(v))->ptr = NULL;
-        ((slice_value_t *)value_data(v))->len = 0;
-        return nv;
-    }
-
-    /* 复合类型：memcpy 位复制 + 清空源（见 op_move 同款说明）——产物保持
-       base 类型（fatal 是编译期标记）。 */
     void *data = value_alloc_data(vm->alloc, t);
     memcpy(data, value_data(v), t->size);
-    ptr_clear_owned_recursive(vm, t, value_data(v));
     return value_make(vm, t, data);
 }
 
@@ -1042,13 +934,13 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
 
 /* ---- M4 切片段（m4-design §1/§2/§4） ---- */
 
-/* PUSH_SLICE <ownership>：分配空 slice type（开放，elem=NULL，不入池）+ 压其
+/* PUSH_SLICE：分配空 slice type（开放，elem=NULL，不入池）+ 压其
  * type value（type_slice_push 压栈；对应两遍构造声明阶段的起点）。
- * ownership = 所有权修饰（OWN_OWN/REF/FATAL，u8 立即数）。
+ * 所有权纯编译期——只有一种切片类型 []T，无 ownership 操作数。
  * 与 op_push_ptr 同构。 */
 static value_t *op_push_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint8_t ownership = bcode_read_u8(bc, pc);
-    type_slice_push(vm, (ownership_t)ownership);
+    (void)bc; (void)pc;
+    type_slice_push(vm);
     return NULL;
 }
 
@@ -1104,9 +996,9 @@ static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "exec: slice cannot determine element type");
 
     /* 构造 ref []T 切片类型 */
-    const type_t *ref_slice = type_slice_intern(vm, OWN_REF, elem);
+    const type_t *ref_slice = type_slice_intern(vm, elem);
     if (!ref_slice)
-        return value_make_error(vm, "exec: slice cannot make ref slice type");
+        return value_make_error(vm, "exec: slice cannot make slice type");
 
     if (value_is_shadow(self))
         return value_make_shadow(vm, ref_slice);
@@ -1178,9 +1070,9 @@ static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "make: missing element type slot");
 
     /* 构造 fatal []T 切片类型 */
-    const type_t *fatal_slice = type_slice_intern(vm, OWN_FATAL, elem);
+    const type_t *fatal_slice = type_slice_intern(vm, elem);
     if (!fatal_slice)
-        return value_make_error(vm, "make: cannot make fatal slice type");
+        return value_make_error(vm, "make: cannot make slice type");
 
     /* shadow 模式：只返回类型 shadow（sema 只做类型检查） */
     bool any_shadow = (len_v && value_is_shadow(len_v));
@@ -2257,8 +2149,8 @@ static value_t *op_data(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!elem)
         return value_make_error(vm, "data: sequence has no element type");
 
-    const type_t *pt = type_ptr_intern(vm, OWN_REF, elem);
-    if (!pt) return value_make_error(vm, "data: cannot make ref pointer type");
+    const type_t *pt = type_ptr_intern(vm, elem);
+    if (!pt) return value_make_error(vm, "data: cannot make pointer type");
     if (value_is_shadow(sv)) return value_make_shadow(vm, pt);
     return ptr_make_value(vm, pt, first); /* ref 借用：不拥有 */
 }
@@ -2513,10 +2405,10 @@ static value_t *op_member_call(vm_t *vm, bytecode_t *bc, size_t *pc) {
             self_arg = receiver;
         } else {
             /* 值 receiver → ref *T 借用指针（与 op_addr 同款） */
-            const type_t *pt = type_ptr_intern(vm, OWN_REF, rt);
+            const type_t *pt = type_ptr_intern(vm, rt);
             if (!pt) {
                 for (uint32_t i = 0; i <= argc; i++) exec_stack_pop(vm);
-                return value_make_error(vm, "exec: MEMBER_CALL: cannot make ref pointer");
+                return value_make_error(vm, "exec: MEMBER_CALL: cannot make pointer");
             }
             if (value_is_shadow(receiver))
                 self_arg = value_make_shadow(vm, pt);

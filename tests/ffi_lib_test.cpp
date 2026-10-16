@@ -243,7 +243,7 @@ TEST(FfiCApiTest, RejectsCluxSpecificTypes) {
   ASSERT_NE(vm, nullptr);
   /* option 与切片是 clux 专有，无 C 表示 → 必须拒绝并给出原因 */
   const type_t *opt = type_option_intern(vm, vm->type_i32);
-  const type_t *slice = type_slice_intern(vm, OWN_OWN, vm->type_i32);
+  const type_t *slice = type_slice_intern(vm, vm->type_i32);
   if (opt) {
     const char *why = ffi_c_abi_reject_reason(opt);
     EXPECT_NE(why, nullptr);

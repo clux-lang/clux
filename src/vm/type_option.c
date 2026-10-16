@@ -184,14 +184,12 @@ const type_t *type_option_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->option_types) vm->option_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* 去重 intern（按 inner 指针 + ownership）：命中已有 sealed 类型则复用并
-       手工回收本开放类型。ownership 参与比较——fatal ?T 与 ?T 内层相同但是
-       不同的所有权类型（将亡值变体 vs 普通值）。 */
+    /* 去重 intern（按 inner 指针）：命中已有 sealed 类型则复用并手工回收
+       本开放类型。所有权已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
     size_t n = vec_len(vm->option_types);
     for (size_t i = 0; i < n; i++) {
         const option_type_t *other = (const option_type_t *)vec_get(vm->option_types, i);
         if (other && other != ot && type_is_sealed(&other->base) &&
-            other->base.ownership == ot->base.ownership &&
             other->inner == ot->inner) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 ot 的 type value 由 value_seal 负责
@@ -213,15 +211,10 @@ const type_t *type_option_seal(vm_t *vm, const type_t *t) {
     ot->base.align  = ot->inner->align > 1 ? ot->inner->align : 1;
     ot->base.sealed = true;
 
-    /* 重建类型名 "?<inner 名>"（inner 密封后名字已定；fatal 变体加前缀） */
+    /* 重建类型名 "?<inner 名>"（inner 密封后名字已定）。所有权已迁移到值
+       层，不再有 fatal 变体前缀。 */
     char *name = option_name(vm->alloc, ot->inner);
     if (!name) panic("vm: out of memory allocating optional type name");
-    if (ot->base.ownership == OWN_FATAL) {
-        char *prefixed = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL, name);
-        allocator_free(vm->alloc, (void **)&name);
-        if (!prefixed) panic("vm: out of memory allocating optional type name");
-        name = prefixed;
-    }
     ot->base.name = (strslice_t){ name, strlen(name) };
 
     vec_push(vm->option_types, vm->alloc, ot);  /* 密封后入池（去重 intern） */
@@ -236,31 +229,18 @@ const type_t *type_option_intern(vm_t *vm, const type_t *inner) {
     return type_option_intern_with_ownership(vm, inner, OWN_NONE);
 }
 
-/* 带 ownership 的一次性快捷（见 type_option.h）：ownership 在 seal 之前设。 */
+/* 带 ownership 的一次性快捷（见 type_option.h）。所有权已迁移到值层，类型层
+ * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
 const type_t *type_option_intern_with_ownership(vm_t *vm, const type_t *inner,
                                                 ownership_t ownership) {
+    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
     /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。
      * 与 type_option_push 的区别：不向操作数栈压入 type value（嵌套构造
      * 场景避免栈布局污染）。去重 intern 由 type_option_seal 完成。 */
     if (!vm || !inner) return NULL;
     option_type_t *ot = option_type_create_open(vm);
-    ot->base.ownership = ownership;
     ot->inner = inner;
     const type_t *t = type_option_seal(vm, &ot->base);
-    /* fatal 变体：seal 内的 option_name 只给 "?T"，此处覆盖为 "fatal ?T"
-       （变体自持名字，vm 拥有——seal 时那份已被 type_set_name 释放）。 */
-    if (t && ownership == OWN_FATAL && t != inner) {
-        char *base_name = option_name(vm->alloc, type_option_inner(t));
-        if (base_name) {
-            char *nm = type_name_with_ownership(vm->alloc, NULL, OWN_FATAL,
-                                                base_name);
-            allocator_free(vm->alloc, (void **)&base_name);
-            if (nm) {
-                type_set_name(vm, t, (strslice_t){ nm, strlen(nm) });
-                allocator_free(vm->alloc, (void **)&nm);
-            }
-        }
-    }
     return t;
 }
 

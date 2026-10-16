@@ -63,8 +63,10 @@ typedef enum type_kind_t {
  */
 typedef struct func_sig_t {
     const type_t **params;      /* array[param_count]; 元素可为 NULL = 无类型约束 */
+    ownership_t   *param_ownerships; /* array[param_count]; 每个参数的 ownership */
     size_t         param_count;
     const type_t  *return_type; /* NULL = void */
+    ownership_t    return_ownership;  /* 返回值的 ownership */
     bool           is_variadic;
 } func_sig_t;
 
@@ -83,7 +85,6 @@ typedef struct type_t {
     size_t          size;       /* 该类型数据的字节大小 */
     size_t          align;      /* 该类型数据的对齐要求 */
     type_kind_t     kind;       /* 粗粒度分类（鸭子类型判断用） */
-    ownership_t     ownership;  /* 所有权修饰（own/ref/fatal/share/weak，正交于 kind） */
     bool            sealed;     /* 是否已密封（构造完成后置位；内置基础类型创建即 true） */
     uint32_t        id;         /* 类型全局唯一 id：内建类型固定（vm_init_builtins 按序），
                                    程序类型由编译器按 sema 解析的实例指针去重分配。
@@ -359,36 +360,42 @@ typedef struct cunion_type_t {
     size_t           member_count;
 } cunion_type_t;
 
-/* ---- 所有权辅助查询（type_t.ownership 的语义判断） ---- */
+/* ---- 所有权辅助查询（已废弃：所有权迁移到 value/symbol 层） ---- */
+/* type_t.ownership 字段已删除。以下函数保留供链接兼容，恒返回 false。
+   调用方应改用 sym->ownership / value_ownership() 判定所有权。 */
 
-/** 类型是否为 own 修饰（own *T / own []T）。 */
+/** 已废弃：所有权迁移到 symbol/value 层，类型不携带 ownership。 */
 static inline bool type_is_own(const type_t *t) {
-    return t && t->ownership == OWN_OWN;
+    (void)t;
+    return false;
 }
 
-/** 类型是否为 ref 修饰（ref *T / ref []T）。 */
+/** 已废弃：同上。 */
 static inline bool type_is_ref(const type_t *t) {
-    return t && t->ownership == OWN_REF;
+    (void)t;
+    return false;
 }
 
-/** 类型是否为 fatal 修饰（fatal *T / fatal []T / fatal T）。 */
+/** 已废弃：同上。 */
 static inline bool type_is_fatal(const type_t *t) {
-    return t && t->ownership == OWN_FATAL;
+    (void)t;
+    return false;
 }
 
-/** 类型是否为指针（TYPE_KIND_PTR，任意所有权修饰）。 */
+/** 类型是否为指针（TYPE_KIND_PTR）。 */
 static inline bool type_is_ptr(const type_t *t) {
     return t && t->kind == TYPE_KIND_PTR;
 }
 
-/** 类型是否为切片（TYPE_KIND_SLICE，任意所有权修饰）。 */
+/** 类型是否为切片（TYPE_KIND_SLICE）。 */
 static inline bool type_is_slice(const type_t *t) {
     return t && t->kind == TYPE_KIND_SLICE;
 }
 
-/** 类型是否拥有堆资源（own 修饰的指针或切片，需释放）。 */
+/** 已废弃：同上。 */
 static inline bool type_owns_resource(const type_t *t) {
-    return t && t->ownership == OWN_OWN;
+    (void)t;
+    return false;
 }
 
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
@@ -500,11 +507,10 @@ bool type_has_const(const type_t *t);
 char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
                                ownership_t ownership, const char *fallback);
 
-/** 复合类型是否**直接**拥有堆资源：own 指针或 own 切片。
- *  只判顶层，不递归字段——递归判定见 type_owns_resources。 */
+/** 已废弃：所有权迁移到 symbol/value 层，类型不携带 ownership。 */
 static inline bool type_directly_owns(const type_t *t) {
-  return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) &&
-         type_owns_resource(t);
+  (void)t;
+  return false;
 }
 
 /**

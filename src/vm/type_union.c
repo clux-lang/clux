@@ -280,10 +280,9 @@ static bool union_member_same(const union_member_t *a, const union_member_t *b) 
     return a->payload_type == b->payload_type;
 }
 
-/* 按（member 名 + tag + payload 类型 + ownership）判断两 union 是否等价
-   （去重 intern 用）。ownership 参与比较——fatal 变体与普通值不同型。 */
+/* 按（member 名 + tag + payload 类型）判断两 union 是否等价（去重 intern
+   用）。所有权已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
 static bool union_same(const union_type_t *a, const union_type_t *b) {
-    if (a->base.ownership != b->base.ownership) return false;
     if (a->member_count != b->member_count) return false;
     for (size_t i = 0; i < a->member_count; i++) {
         if (!union_member_same(&a->members[i], &b->members[i])) return false;
@@ -392,16 +391,17 @@ const type_t *type_union_intern(vm_t *vm, const union_member_t *members,
     return type_union_intern_with_ownership(vm, members, count, OWN_NONE);
 }
 
-/* 带 ownership 的一次性快捷（见 type_union.h）：ownership 在 seal 之前设。 */
+/* 带 ownership 的一次性快捷（见 type_union.h）。所有权已迁移到值层，类型层
+ * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
 const type_t *type_union_intern_with_ownership(vm_t *vm,
                                                const union_member_t *members,
                                                size_t count,
                                                ownership_t ownership) {
+    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
     /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。不向操作数栈
      * 压入 type value。去重 intern 由 type_union_seal 完成。 */
     if (!vm || !members || count == 0) return NULL;
     union_type_t *ut = union_type_create_open(vm);
-    ut->base.ownership = ownership;
 
     /* 拷贝 member 表（vm 拥有；名深拷贝；payload 类型按成员逐个复制） */
     union_member_t *copy = (union_member_t *)allocator_new_ex(
