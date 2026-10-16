@@ -875,17 +875,43 @@ static void pass0_imports(sema_t *sema, ast_program_t *prog) {
  * 交给 `pass1c_extern_abi` 处理。`report=true` 时才产出诊断（避免同一错误两次）。 */
 static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
   const type_t *ptypes[64];
+  ownership_t powns[64];
   size_t pn = 0;
   bool resolved = true;
+  /* 符号名（限定名 "<lib>::<name>"），既用于注册也用于回查已建签名。 */
+  char qual[512];
+  int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                    (int)efd->lib_name.len, efd->lib_name.ptr,
+                    (int)efd->name.len, efd->name.ptr);
+  sema_symbol_t *prior =
+      (qn > 0 && (size_t)qn < sizeof(qual))
+          ? sema_lookup(sema->global_scope, strslice_from_bytes(qual, (size_t)qn))
+          : NULL;
+  const func_sig_t *prior_sig =
+      (prior && prior->type && prior->type->kind == TYPE_KIND_FUNC)
+          ? &((const func_type_t *)prior->type)->sig
+          : NULL;
+
   for (ast_node_t *p = efd->params; p && pn < 64; p = p->next) {
     ast_var_def_t *pvd = (ast_var_def_t *)p;
+    /* ownership 时序：本次函数**首次**执行时会折叠 AST（AST_PTR→AST_TYPE_REF），
+       折叠后 `sema_type_expr_ownership` 只会得到 OWN_NONE。所以优先从已建签名
+       读回，其次用**解析器缓存**的 `pvd->ownership`（折叠前提取，与 vm 的
+       ownership_t 同编码），最后才是就地提取。 */
+    ownership_t pown =
+        (prior_sig && prior_sig->param_ownerships && pn < prior_sig->param_count)
+            ? prior_sig->param_ownerships[pn]
+            : (pvd->ownership != AST_OWN_NONE
+                   ? (ownership_t)pvd->ownership
+                   : sema_type_expr_ownership(pvd->type_expr));
     const type_t *pt = sema_resolve_type_slot(sema, &pvd->type_expr);
     if (!pt) {
       resolved = false;
-      ptypes[pn++] = NULL;
+      ptypes[pn] = NULL;
+      powns[pn++] = pown;
       continue;
     }
-    const char *why = ffi_c_abi_reject_reason(pt);
+    const char *why = ffi_c_abi_reject_reason_own(pt, pown);
     if (!why && pt->kind == TYPE_KIND_VOID)
       why = "void is not a valid parameter type";
     if (why && report) {
@@ -895,15 +921,22 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
                  (int)efd->name.len, efd->name.ptr,
                  (int)pvd->name.len, pvd->name.ptr, why);
     }
-    ptypes[pn++] = pt;
+    ptypes[pn] = pt;
+    powns[pn] = pown;
+    pn++;
   }
   const type_t *rt = sema->vm->type_void;
+  ownership_t ret_own = prior_sig
+                            ? prior_sig->return_ownership
+                            : (efd->return_expr
+                                   ? sema_type_expr_ownership(efd->return_expr)
+                                   : OWN_NONE);
   if (efd->return_expr) {
     rt = sema_resolve_type_slot(sema, &efd->return_expr);
     if (!rt) {
       resolved = false;
     } else if (report) {
-      const char *rwhy = ffi_c_abi_reject_reason(rt);
+      const char *rwhy = ffi_c_abi_reject_reason_own(rt, ret_own);
       if (rwhy) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
                    "extern cfunc %.*s::%.*s: return type: %s",
@@ -916,14 +949,13 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
 
   /* 注册限定名函数符号 "<lib>::<name>"（`::` 分支据此解析）。
      **不分配 fid**：无函数体、不进运行时函数队列。 */
-  char qual[512];
-  int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
-                    (int)efd->lib_name.len, efd->lib_name.ptr,
-                    (int)efd->name.len, efd->name.ptr);
   if (qn <= 0 || (size_t)qn >= sizeof(qual)) return resolved;
+  /* **签名携带真实 ownership**（不是硬编码 OWN_NONE）——它是折叠后唯一还能
+     读到所有权的地方，pass1c 的 pass1c_extern_abi 复审依赖它（否则 AST 已折叠
+     成 AST_TYPE_REF，ownership token 丢失，`own *T` 会漏过 C ABI 约束）。 */
   const type_t *sig =
-      type_func_sig(sema->vm, ptypes, NULL, pn, rt ? rt : sema->vm->type_void,
-                    OWN_NONE, efd->is_variadic);
+      type_func_sig(sema->vm, ptypes, powns, pn,
+                    rt ? rt : sema->vm->type_void, ret_own, efd->is_variadic);
   if (sig) {
     /* `.ast` 指向声明节点：调用点需要它取返回类型表达式（程序自定义类型的
        "按类型值返回"要用，见 sema/expr.c 的 FFI 返回类型码映射）。 */
@@ -966,7 +998,10 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
     return false;
   }
   if (report) {
-    const char *why = ffi_c_abi_reject_reason(vt);
+    const char *why = ffi_c_abi_reject_reason_own(
+        vt, evd->ownership != AST_OWN_NONE
+                ? (ownership_t)evd->ownership
+                : sema_type_expr_ownership(evd->type_expr));
     uint32_t kind = 0;
     if (!why && vt->kind == TYPE_KIND_VOID) why = "void is not a value type";
     if (!why && !ffi_data_kind_of(vt, sema->vm, &kind) &&

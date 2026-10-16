@@ -2,6 +2,39 @@
 #include "parser/parse_expr.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_error.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_slice_type.h"
+#include "parser/ast_scope_annot.h"
+#include <string.h>   /* memcmp */
+
+/**
+ * 从类型表达式提取顶层所有权编码（声明见 ast_var_def.h）。
+ *
+ * **必须在类型槽位折叠前调用**：`sema_resolve_type_slot` 会把 AST_PTR /
+ * AST_SLICE_TYPE 折叠成 AST_TYPE_REF，此后 ownership token 不复存在。
+ * 放在 .c 而非头文件内联，是因为需要 `token_strslice`（parse_utils）与
+ * 三种类型节点的完整定义。
+ */
+uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr) {
+    if (!type_expr) return AST_OWN_NONE;
+    if (type_expr->kind == AST_SCOPE_ANNOT) {
+        /* '<a> ref *T：标注节点保留，所有权在 sub 上 */
+        return ast_type_expr_ownership_code(
+            ((const ast_scope_annot_t *)type_expr)->sub);
+    }
+    const token_t *tok = NULL;
+    if (type_expr->kind == AST_PTR) {
+        tok = ((const ast_ptr_t *)type_expr)->ownership;
+    } else if (type_expr->kind == AST_SLICE_TYPE) {
+        tok = ((const ast_slice_type_t *)type_expr)->ownership;
+    }
+    if (!tok) return AST_OWN_NONE;
+    strslice_t s = token_strslice(tok);
+    if (s.len == 3 && memcmp(s.ptr, "own", 3) == 0) return AST_OWN_OWN;
+    if (s.len == 3 && memcmp(s.ptr, "ref", 3) == 0) return AST_OWN_REF;
+    if (s.len == 5 && memcmp(s.ptr, "fatal", 5) == 0) return AST_OWN_FATAL;
+    return AST_OWN_NONE;
+}
 
 ast_node_t *parse_var_def(parser_t *p) {
     uint32_t tb = p->pos;
@@ -65,6 +98,9 @@ ast_node_t *parse_var_def(parser_t *p) {
     ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
     ((ast_var_def_t *)node)->name      = name;
     ((ast_var_def_t *)node)->type_expr = type_expr;
+    /* 所有权必须在类型槽位折叠前缓存（折叠后 ownership token 丢失）——
+       extern 声明（extern cfunc/var）到 Pass 1c 复审 ABI 时还要用它。 */
+    ((ast_var_def_t *)node)->ownership = ast_type_expr_ownership_code(type_expr);
     ((ast_var_def_t *)node)->init      = init;
     return node;
 }

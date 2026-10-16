@@ -8,6 +8,7 @@ extern "C" {
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
     ast_node_t  base;
@@ -15,6 +16,21 @@ typedef struct {
     ast_node_t *type_expr;   /* 类型表达式（NULL = 推断；AST_IDENT/AST_CONST/AST_VOLATILE） */
     ast_node_t *init;        /* 初始化表达式（必须存在；AST_UNDEF = 未初始化声明） */
     bool        is_comptime; /* comptime var：右值必须编译期可计算，引用点折叠为常量 */
+
+    /* 声明类型的**所有权**（own/ref/fatal，由解析器在类型槽位折叠前从
+     * AST_PTR / AST_SLICE_TYPE 的 ownership token 提取并缓存）。
+     *
+     * 为什么需要缓存：`sema_resolve_type_slot` 会把 `AST_PTR` 折叠成
+     * `AST_TYPE_REF`，**丢失 ownership token**；此后 `sema_type_expr_ownership`
+     * 只会返回 OWN_NONE。变量定义路径在 Pass 2a 折叠前就地取值，所以不受影响；
+     * 但 **extern 声明（`extern cfunc` / `extern var`）的参数与类型槽位在
+     * Pass 1 就被折叠**，到 Pass 1c 复审 ABI 约束时已无从提取
+     * （`own *T` 因此漏过 C ABI 检查）。这里缓存一份，供那些路径读取。
+     *
+     * 编码与 `ownership_t`（`vm/ownership.h`）一致：0=OWN_NONE、1=OWN_OWN、
+     * 2=OWN_REF、3=OWN_FATAL。用 `uint8_t` 而非 `ownership_t` 是为了不让
+     * parser 层头文件依赖 vm 层头文件。 */
+    uint8_t     ownership;
 
     /* ---- M6 FFI：`extern var <库>::<名>: T;`（动态库导出的**全局数据符号**）----
      * 与 `extern cfunc` 对称、与 `extern lib` 配套：名字是库里的数据符号，
@@ -40,6 +56,26 @@ static inline ast_node_t *ast_var_def_new(arena_t *arena,
 
 /** 解析变量定义 var name[:type] = init; 初始化必须存在。 */
 ast_node_t *parse_var_def(parser_t *p);
+
+/* ---- 所有权编码（与 vm 的 ownership_t 数值一致，避免 parser 依赖 vm 头）---- */
+enum {
+    AST_OWN_NONE  = 0,
+    AST_OWN_OWN   = 1,
+    AST_OWN_REF   = 2,
+    AST_OWN_FATAL = 3,
+};
+
+/**
+ * 从类型表达式提取顶层所有权编码（`own *T` / `ref []T` …）。
+ *
+ * **必须在类型槽位折叠前调用**（`sema_resolve_type_slot` 会把 AST_PTR /
+ * AST_SLICE_TYPE 折叠成 AST_TYPE_REF，丢失 ownership token）。所以本函数由
+ * **解析器**在构造变量定义/参数时调用，把结果缓存进 `ast_var_def_t::ownership`。
+ *
+ * 实现见 `src/parser/parse_var_def.c`（那里包含 token/类型节点头）。
+ */
+uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr);
+
 
 /** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。
  * M6 FFI：声明动态库导出的全局数据符号；无初始化器，符号由 dlsym 在运行期解析。

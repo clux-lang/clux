@@ -419,26 +419,25 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
  * tag union、切片、元组、闭包、类型值）没有 C 对应，必须**在编译期拒绝**而不是
  * 猜着传参。返回 NULL 表示"可用于 C ABI"，否则返回人类可读的拒绝原因。
  *
- * 允许：整数/浮点/bool/str/opaque/enum/struct/cunion/指针（weak·fatal·ref/share）
+ * 允许：整数/浮点/bool/str/opaque/enum/struct/cunion/指针（fatal·ref）
  *       + void（仅作返回类型；作为参数由调用方另行判断）。
  * 拒绝：option、tag union、切片（胖指针）、元组、闭包（函数类型）、类型值、
  *       模块/错误/中断等引擎内部类型。
+ *
+ * `own` 是**该位置的所有权**，由调用方传入（见 ffi_c_abi_reject_reason_own）：
+ * 所有权已从类型层迁移到值/符号层，`type_t` 不携带 ownership，所以 own 的
+ * 判定必须由调用方从类型槽位解析后传入，不能靠类型本身。
  */
-const char *ffi_c_abi_reject_reason(const type_t *t) {
+const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     if (!t) return "missing type";
-    /* C 侧没有所有权概念（m6-design §2.3/§9.3"禁止 own *T"）：**含 own 资源的
-       类型不能出现在 C ABI 签名里**——包括
-         - `own *T` / `own []T`（顶层 own 指针本身）；
-         - **递归含 own 字段的复合类型**（struct / tuple / …）：C 只看到裸指针
-           字段，会拿到一个仍由 clux 拥有的堆块（谁来 free？），语义无法表达。
+    /* C 侧没有所有权概念（m6-design §2.3/§9.3"禁止 own *T"）：**own 资源不能
+       出现在 C ABI 签名里**——`own *T` / `own []T`（顶层 own 指针本身）。
        这是"签名即约束"：非法在**声明处**被拒，而不是等到调用点。
-       判据与语言侧同一套（type_owns_resources）——FFI 边界不该比语言内部更宽松。
-       注意 share/weak 也返回 true（同为 RC 资源），一并拒绝；ref/fatal 指针
-       不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal 指针）。
-       在 per-kind 分派**之前**判，是为了覆盖 TYPE_KIND_PTR（下方分支无脑放行，
-       原先漏掉了顶层 `own *T`）。 */
-    if (type_owns_resources(t))
-        return "the type contains owned pointers (own *T / own []T / own fields) "
+       ref/fatal 指针不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal）。
+       注：share/weak 已随 RC 系移除；复合类型字段禁止携带指针，所以不存在
+       "递归含 own 字段的复合类型"这一形态。 */
+    if (own == OWN_OWN)
+        return "the type is owned (own *T / own []T) "
                "and cannot cross the C ABI (C has no ownership; declare the "
                "parameter or return type without own, or use 'ref *T' / "
                "'fatal *T' for pointers)";
@@ -453,7 +452,7 @@ const char *ffi_c_abi_reject_reason(const type_t *t) {
     case TYPE_KIND_CUNION:
     case TYPE_KIND_VOID: /* 仅作返回类型；参数位置的检查由调用方负责 */
     case TYPE_KIND_PTR:
-        /* weak/fatal/ref/share 指针都是 C ABI 兼容的指针宽度 */
+        /* fatal/ref 指针都是 C ABI 兼容的指针宽度（own 已在上方按所有权拒绝） */
         return NULL;
     case TYPE_KIND_OPTION:
         return "option has no C representation";
@@ -473,6 +472,11 @@ const char *ffi_c_abi_reject_reason(const type_t *t) {
     default:
         return "type is not C ABI compatible";
     }
+}
+
+/* 便捷包装：不关心所有权（运行期编组路径）时用。 */
+const char *ffi_c_abi_reject_reason(const type_t *t) {
+    return ffi_c_abi_reject_reason_own(t, OWN_NONE);
 }
 
 /* ---- M6 FFI：数据符号（extern var）的类型 ↔ 宽度/类别码 ----

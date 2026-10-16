@@ -1,15 +1,18 @@
-// driver_ffi_own_test.cpp —— extern cfunc/var 签名不得含 own 资源
+// driver_ffi_own_test.cpp —— extern cfunc/var 签名不得含 own
 //
-// 规则（m6-design §2.3/§9.3"禁止 `own *T`"的推广）：**C 侧没有所有权概念**，
-// 所以含 own 资源的类型不能出现在 C ABI 签名里——包括
-//   - 顶层 `own *T`（既有规则，实现曾漏：`TYPE_KIND_PTR` 在 per-kind 分派里
-//     无脑放行，m6-design 明写要拒）；
-//   - **递归含 own 字段的复合类型**（struct/tuple/…）：C 只看到裸指针字段，会拿到
-//     一个仍由 clux 拥有的堆块（谁来 free？），语义无法表达。
+// 规则（m6-design §2.3/§9.3"禁止 `own *T`"）：**C 侧没有所有权概念**，所以
+// own 资源不能出现在 C ABI 签名里——顶层 `own *T` / `own []T` 在**参数位、
+// 返回位、extern var 类型位**都必须被拒。
 //
 // 这是"**签名即约束**"：非法在**声明处**被拒，而不是等调用点。
-// 判定与语言侧同一套（type_owns_resources），FFI 边界不比语言内部更宽松。
 // ref *T / fatal *T 不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal 指针）。
+//
+// **判定入口是 ownership 而不是类型**（2026-10 重构后）：所有权已从类型层迁移到
+// 值/符号层，`type_t` 不携带 ownership，所以 `ffi_c_abi_reject_reason_own` 需要
+// 调用方传入该位置的所有权。extern 声明的类型槽位在 Pass 1 就被折叠
+// （AST_PTR→AST_TYPE_REF，ownership token 丢失），因此解析器在折叠前把所有权
+// 缓存进 `ast_var_def_t::ownership`，sema 从那里读取——否则 `own *T` 会**静默
+// 漏过** C ABI 检查（本文件即该回归的护栏）。
 
 #include <gtest/gtest.h>
 #include <cstdio>

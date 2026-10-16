@@ -87,7 +87,15 @@ bool ffi_call_int(void *sym, size_t argc, const int64_t *argv, int64_t *out,
  * 无需 libffi 的动态汇编（本仓库 Windows x64 的 libffi win64 汇编路径有问题，见
  * docs/m6-design.md §14.4）。argc ≤ 4 时全部参数为 double；返回写 *out。
  */
-/** §2 C ABI 类型约束：NULL = 可用；否则返回拒绝原因（见 m6-design §2.1/§2.2）。 */
+/** §2 C ABI 类型约束：NULL = 可用；否则返回拒绝原因（见 m6-design §2.1/§2.2）。
+ *
+ * `own` 是该位置的所有权（所有权已从类型层迁移到值/符号层，`type_t` 不再
+ * 携带 ownership，所以 own 必须由调用方从类型槽位解析后传入）。
+ * 运行期编组等拿不到编译期所有权的路径传 `OWN_NONE`——那里的签名已在 sema
+ * 声明处校验过。 */
+const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own);
+
+/** 便捷包装：不关心所有权时用（等价于 own=OWN_NONE）。 */
 const char *ffi_c_abi_reject_reason(const type_t *t);
 
 /* ---- M6 FFI：动态库导出的**数据符号**（`extern var <库>::<名>: T;`）----

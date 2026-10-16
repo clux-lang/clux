@@ -62,6 +62,9 @@ static ast_node_t *parse_param(parser_t *p) {
     ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
     ((ast_var_def_t *)node)->name      = name;
     ((ast_var_def_t *)node)->type_expr = type_expr;
+    /* 所有权必须在类型槽位折叠前缓存（折叠后 token 丢失）——extern cfunc 的
+       参数到 Pass 1c 复审 C ABI 约束时还要用它（`own *T` 参数必须被拒）。 */
+    ((ast_var_def_t *)node)->ownership = ast_type_expr_ownership_code(type_expr);
     /* init 为 NULL：参数定义无初始化表达式 */
     return node;
 }
@@ -138,6 +141,7 @@ static ast_node_t *parse_capture_item(parser_t *p) {
         ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
         ((ast_var_def_t *)node)->name      = name;
         ((ast_var_def_t *)node)->type_expr = type_expr;
+        ((ast_var_def_t *)node)->ownership = ast_type_expr_ownership_code(type_expr);
         ((ast_var_def_t *)node)->init      = init;
         return node;
     }
@@ -630,6 +634,9 @@ ast_node_t *parse_extern_var(parser_t *p, uint32_t tb) {
     ast_var_def_t *vd = (ast_var_def_t *)node;
     vd->name          = vname;
     vd->type_expr     = type_expr;
+    /* 所有权缓存（折叠前）——extern var 到 Pass 1c 复审 ABI 时要用：
+       `extern var <lib>::<名>: own *T` 必须被拒（C 无所有权）。 */
+    vd->ownership     = ast_type_expr_ownership_code(type_expr);
     vd->init          = NULL; /* 声明而非定义：库里已有那块内存 */
     vd->is_extern_var = true;
     vd->lib_name      = lib;
