@@ -539,8 +539,6 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_keyword(p, "own"))       op_tok = cur_token(p);
     else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
     else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
-    else if (check_keyword(p, "share"))     op_tok = cur_token(p);
-    else if (check_keyword(p, "weak"))      op_tok = cur_token(p);
 
     /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
@@ -773,30 +771,24 @@ ast_node_t *parse_unary(parser_t *p) {
         return node;
     }
 
-    /* 修饰词已被 advance 消费（本分支只处理 own/ref/fatal/share/weak 五种），
+    /* 修饰词已被 advance 消费（本分支只处理 own/ref/fatal 三种），
        游标现停在修饰词之后。 */
     advance(p);
     skip_trivia(p);
 
-    /* 指针类型 own/ref/fatal/share/weak *T / 切片类型 own/ref/fatal []T
+    /* 指针类型 own/ref/fatal *T / 切片类型 own/ref/fatal []T
        （m4-design §1）：'*' 是指针语法，'[]' 是切片语法，必须紧跟 ownership
-       修饰（own i32 不合法）。share/weak 无切片形态（RC 系不适用切片）。
+       修饰（own i32 不合法）。
        消费 '*' 或 '[]' 后再解析被指向/元素类型 T。 */
     if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
-        token_is(op_tok, "fatal") || token_is(op_tok, "share") ||
-        token_is(op_tok, "weak")) {
-        /* 切片路径：own []T / ref []T / fatal []T（share/weak []T 不合法） */
+        token_is(op_tok, "fatal")) {
+        /* 切片路径：own []T / ref []T / fatal []T */
         if (check_symbol(p, "[")) {
             /* 保存位置以便回退到 '[' 前做错误诊断 */
             uint32_t bracket_pos = p->pos;
             advance(p);
             skip_trivia(p);
             if (check_symbol(p, "]")) {
-                if (token_is(op_tok, "share") || token_is(op_tok, "weak")) {
-                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                         "slice does not support 'share'/'weak' "
-                                         "ownership (use 'own'/'ref'/'fatal')");
-                }
                 advance(p);
                 skip_trivia(p);
                 ast_node_t *elem_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);

@@ -182,8 +182,7 @@ value** 返回，由 `exec_drive` 捕获停机。
 
 指针类型与签名同族：`PUSH_PTR <kind> → DEFINE_TYPE → LOAD_TYPE → SET_TYPE 设 base → SEAL`。
 **运行期零所有权标志**——所有权由 `type_t.ownership` 正交字段编码（own 总拥有 /
-ref 总借用 / fatal 在非空时拥有 / share RC 强引用 / weak RC 弱引用），type kind
-统一为 `TYPE_KIND_PTR`。
+ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR`。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|

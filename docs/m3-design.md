@@ -11,10 +11,9 @@
 
 所有语法决策由用户 2026-09-29 逐项确认。
 
-> **实现状态：✅ 已完成（§3–§12 + §13.2）**。单所有权系（`own`/`ref`/`fatal`）与
-> RC 系（`share`/`weak`）均已落地，测试见 `tests/driver_m3_test.cpp`；实现位置：
-> `src/vm/type_ptr.c`（含 `rc_block_t`：atomic 强/弱计数 + CAS `upgrade`）、
-> `src/vm/builtin_upgrade.c`（`upgrade` 内建）。
+> **实现状态**：单所有权系（`own`/`ref`/`fatal`）已落地，测试见
+> `tests/driver_m3_test.cpp`。RC 系（`share`/`weak`）已于 2026-10-16 移除
+> （§12），待后续重新设计。
 >
 > **§13.3–§13.4（销毁点的编译期生成）仍未实现**：当前销毁走 VM 运行时路径
 > （`scope_destroy` 遍历 owned → `ptr_free_owned_recursive` 递归释放），
@@ -33,7 +32,7 @@
 | 系统 | 类型 | 定位 |
 |------|------|------|
 | 单所有权系 | `own` / `ref` / `fatal` | 已实现 |
-| 引用计数系 | `share` / `weak` | 已实现（§12） |
+| 引用计数系 | `share` / `weak` | 已移除（§12），待后续重新设计 |
 
 两套系统相对独立，不是同一机制的两面。
 
@@ -69,7 +68,7 @@ var b: ref *i32 = a;   // ref 由 own 隐式产生
 
 - **move/clone 的返回值**，表示将亡值（所有权必须转移）
 - **禁止命名**：`var p: fatal *i32 = ...;` 非法——fatal 不能作为变量类型标注
-- **禁止丢弃**：表达式结束时若未被 own 接收 / 函数（fatal 参数）接收 / share 创建（§12.1）→ **编译错误**（不是运行时销毁，是编译期接管检查）
+- **禁止丢弃**：表达式结束时若未被 own 接收 / 函数（fatal 参数）接收 → **编译错误**（不是运行时销毁，是编译期接管检查）
 - **生命周期 = 一整个表达式**：fatal 值可在表达式中任意流转（含 `as` 转换），只是不能存进变量
 - **sema 视角是真实匿名 value**：无名字的临时值
 - **函数签名是唯一例外的 fatal 场景**（见 §4）
@@ -502,7 +501,6 @@ r.* = 123;      // 解引用赋值（SET）
 ### 9.4 非指针捕获
 
 - 标量 / 复制语义复合类型 —— 无需标注，clone 值（现有语义不变）
-- **share/weak 豁免**：share/weak 是运行时普通值（§12.6），允许捕获，无需标注
 
 ### 9.5 检查规则汇总
 
@@ -513,7 +511,6 @@ r.* = 123;      // 解引用赋值（SET）
 | ref *T | ✓ | 闭包必须带作用域标注 |
 | opaque | ✓ | 视同 ref（借用），闭包必须带标注 |
 | 标量/复合 | ✓ | clone 值，无约束 |
-| share/weak | ✓ | 普通值，无约束 |
 
 ### 9.6 闭包返回捕获 ref 的标注关系
 
@@ -534,7 +531,6 @@ r.* = 123;      // 解引用赋值（SET）
 - **禁止全局 own**（含任何嵌套位置）：`var g: own *T = undefined;` **不合法**
   - 原因：全局变量初始化为 `undefined` 时，编译期控制流分析**无法保守感知何时已赋值有效**，检查器失去确定性
   - **禁止含 own 字段的聚合结构作全局变量**
-- **禁止全局 share**（含任何嵌套位置）：与全局 own 同理——`= undefined` 的延迟初始化使检查器失去确定性；且 share 是**真实运行时 RC 结构**（引用计数 + 目标地址），需要**堆分配**，全局静态存储期在编译期无法完成堆分配
 - 全局值域 = **复制语义**（标量 / 数组 / 仅含 ref 的复合类型）
 - 全局只有 **ref**（指向全局值的引用指针，标注 `'<*>`）
 
@@ -551,6 +547,12 @@ r.* = 123;      // 解引用赋值（SET）
 ---
 
 ## 12. 引用计数系（share / weak）
+
+> **已移除**（2026-10-16）：share/weak RC 引用计数体系已全部移除。share/weak
+> 关键字、`rc_block_t` 控制块、`upgrade` 内置函数、`OWN_SHARE`/`OWN_WEAK`
+> 枚举值、`VTABLE_PTR_SHARE`/`VTABLE_PTR_WEAK` vtable、fatal→share 创建通道
+> 全部删除。RC 系依赖单所有权体系的 fatal 产物作为创建源，在单所有权重构
+> 期间先行移除。share/weak 语义待后续重新设计。下方内容保留作历史记录。
 
 与单所有权相对独立的第二套指针系统（§2）。与单所有权"编译期检查 + 运行期零成本"不同，RC 系是**真实的运行时数据结构**：
 
@@ -622,13 +624,11 @@ move/clone 产物或 new 的分配均可流向 **share** 作为 RC 创建源。
 
 ### 12.8 开放点（无，骨架定稿）
 
-RC 系 share/weak 语义已全部定稿（2026-09-29）：创建源 fatal、weak 只从 share 派生、copy 计数、延迟销毁、`upgrade` 内置函数、atomic 计数、share 普通值、单向隔离、禁止全局 share。
-
-**实现状态：✅ 已实现**（本节此前写作"实现待后续里程碑"，为过期表述）。落地形态：
+**实现状态：已移除**（2026-10-16）。此前落地形态为
 `src/vm/type_ptr.c` 的 `rc_block_t { atomic_uint strong; atomic_uint weak; /* payload 紧随 */ }`
 与 `rc_block_new` / `rc_block_strong_inc|dec` / `rc_block_weak_inc|dec` / `rc_block_upgrade`
 （CAS 递增强计数），`upgrade` 以**内建函数**提供（`src/vm/builtin_upgrade.c`，
-返回 `?share *T`），类型 kind 为 `TYPE_KIND_PTR_SHARE` / `TYPE_KIND_PTR_WEAK`。
+返回 `?share *T`）。以上全部已删除，待后续重新设计。
 
 ---
 

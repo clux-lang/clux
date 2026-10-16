@@ -482,9 +482,9 @@ static bool type_contains_own(const type_t *t) {
   if (!t) return false;
   switch (t->kind) {
     case TYPE_KIND_PTR:
-      /* §10 禁止全局 own/share 指针（own 需作用域退出销毁、share 需堆分配，
-         全局静态期无法完成）。ref/fatal/weak 不持有资源，允许。 */
-      return t->ownership == OWN_OWN || t->ownership == OWN_SHARE;
+      /* §10 禁止全局 own 指针（own 需作用域退出销毁，
+         全局静态期无法完成）。ref/fatal 不持有资源，允许。 */
+      return t->ownership == OWN_OWN;
     case TYPE_KIND_SLICE:
       /* §9.4 禁止全局 own []T（同 own *T）。ref/fatal 不持有资源，允许。 */
       return t->ownership == OWN_OWN;
@@ -598,7 +598,7 @@ bool sema_eval_global_var(sema_t *sema, ast_var_def_t *vd,
 
   /* §10 全局规则（m3-design §10）：禁止全局 own（含任何嵌套位置）。
      全局变量类型含 own 指针 → 不合法（undefined 延迟初始化使检查器
-     失去确定性）。share 系未实现（§12 后续），暂不检查。 */
+     失去确定性）。 */
   if (sym->type && type_contains_own(sym->type)) {
     char tn[64];
     sema_type_name(sym->type, tn, sizeof(tn));

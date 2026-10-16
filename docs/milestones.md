@@ -43,11 +43,13 @@
 
 ---
 
-## M3: 指针与所有权系统 ✅ 已完成（§3–§12 + §13.2）
+## M3: 指针与所有权系统 ✅ 已完成（§3–§11 + §13.2）
 
-**目标**：轻量单所有权 + 指针系统（无全局 borrow checker、函数边界黑盒、运行期零检查）；另含 RC 系 `share`/`weak`
+**目标**：轻量单所有权 + 指针系统（无全局 borrow checker、函数边界黑盒、运行期零检查）
 
-**语言特性**：`own *T` / `ref *T` / `fatal *T`、作用域标注 `'<a,b>`、`move` / `clone`、`new T{...}`、后置 `.&` / `.*`、`opaque`（≈ C `void*`）、可空指针 `?*T`、闭包捕获规则、RC 系 `share *T` / `weak *T`（`rc_block_t` + atomic 计数 + CAS `upgrade` 内建）
+> **2026-10-16 更新**：RC 系 `share`/`weak` 已移除（§12），待后续重新设计。
+
+**语言特性**：`own *T` / `ref *T` / `fatal *T`、作用域标注 `'<a,b>`、`move` / `clone`、`new T{...}`、后置 `.&` / `.*`、`opaque`（≈ C `void*`）、可空指针 `?*T`、闭包捕获规则
 
 **交付标准**：全部单元测试通过 ✅（[tests/driver_m3_test.cpp](../tests/driver_m3_test.cpp)）
 

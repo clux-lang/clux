@@ -1048,7 +1048,7 @@ TEST_F(ExecTest, SetTypeNameNonTypeValueReturnsError) {
 /* ================================================================ */
 
 /* 函数 id 表：程序函数 id 从 FUNC_ID_PROGRAM_BASE(=64) 起（compiler 分配），
-   内建函数 id 由 func_new 按注册顺序自动分配（upgrade=0、len=1、cfunc_ptr=2；
+   内建函数 id 由 func_new 按注册顺序自动分配（len=0、cfunc_ptr=1；
    printf 已不是内建）。以下测试直接写字节码驱动三条函数指令（与 compiler
    注册段的运行时语义一致）。 */
 
@@ -1159,7 +1159,7 @@ TEST_F(ExecTest, SetFuncNameNonFuncValueReturnsError) {
 /* LOAD_FUNCTION <id>：函数值加载                                      */
 /* ================================================================ */
 
-/* LOAD_FUNCTION 加载内建函数（id 0 = `upgrade`——printf 已从内建删除，
+/* LOAD_FUNCTION 加载内建函数（id 0 = `len`——printf 已从内建删除，
    改由 libc 经 FFI 提供，见 docs/m6-design.md §14.19）：data 指向 func_t，
    type 为签名类型（func value 可调用）。这里按 id 0 + 名字非空断言，
    不写死具体内建名（内建清单会变）。 */
@@ -1174,7 +1174,7 @@ TEST_F(ExecTest, LoadFunctionBuiltin) {
     func_t *fn = *(func_t **)value_data(v);
     ASSERT_NE(fn, nullptr);
     ASSERT_NE(fn->name.ptr, nullptr);
-    EXPECT_EQ(fn->id, 0u); /* 内建按注册顺序分配 id：upgrade、len、cfunc_ptr */
+    EXPECT_EQ(fn->id, 0u); /* 内建按注册顺序分配 id：len、cfunc_ptr */
 }
 
 /* LOAD_FUNCTION 加载程序函数（BIND_FUNC 登记 id=64）：函数值携带签名，

@@ -7,7 +7,7 @@
  *
  * 落地位置（按类型族，而不是在通用入口一刀切）：
  *   - struct / cunion：各自 vtable 的 implicit_cast 识别"目标只是给源加了限定"；
- *   - 指针：ptr_implicit_cast（含 share/weak 引用计数维护）；
+ *   - 指针：ptr_implicit_cast；
  *   - 标量：int/float vtable（原本就支持 volatile/const 视图）；
  *   - 字段读取：sema 的 ex_member 先剥限定再查字段（**读** const 值合法，
  *     写由赋值路径按 const 规则拒绝）；

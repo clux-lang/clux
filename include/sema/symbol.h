@@ -53,7 +53,6 @@ SEMA_SYM_EXTERN_VAR, /* M6 FFI：`extern var <库>::<名>: T;` 的**数据符号
 typedef enum {
   SEMA_BUILTIN_NONE = 0,
   SEMA_BUILTIN_LEN,       /* len(s) -> usize（序列元信息） */
-  SEMA_BUILTIN_UPGRADE,   /* upgrade(w) -> ?share *T（weak 升级，返回类型随实参精化） */
   SEMA_BUILTIN_DATA,      /* data(s) -> ref *T（取首元素指针，C ABI 适配；专用指令） */
   SEMA_BUILTIN_CFUNC_PTR, /* cfunc_ptr(f) -> opaque（clux 函数 → C 函数指针） */
 } sema_builtin_op_t;

@@ -9,7 +9,7 @@
    是编译期分析结构，运行期完全解耦
 2. **运行期只有显式指令**——sema 在作用域退出点明确插入 FREE 语句销毁 own 块，
    无 SCOPE_EXIT 运行期遍历；type_t 纯布局无 ownership
-3. **share/weak 与 own 体系彻底分离**——两套独立系统，唯一桥接 fatal→share 创建
+3. **share/weak 已移除**——RC 引用计数体系先行移除，待后续重新设计
 4. **语法冻结不动**——本次只做实现层重构，关键字/标注/move/clone/new 形态不变
 
 ---
@@ -105,15 +105,12 @@ scope:  零堆块记录，无 SCOPE_EXIT 遍历
 - `set_field` / `set_index` 触发反向挂载分析
 - 销毁零递归：对每个扁平槽位操作
 
-## 3. share/weak 完全分离
+## 3. share/weak 已移除（2026-10-16）
 
-| | own 体系 | share/weak 体系 |
-|---|---|---|
-| 数据结构 | 编译期 block 记录（own 反向挂载，单拥有者） | `rc_block_t`（atomic strong/weak 计数，多拥有者） |
-| 所有权 | 单 value | 多 value 共享（计数） |
-| 销毁 | 编译期生成 FREE 序列 | 计数归零时 RC 块释放 |
-| 桥接 | — | fatal → share 创建（唯一通道） |
-| 类型 | type_t 无 ownership | 独立 rc 类型族（不占 ownership_t） |
+share/weak RC 引用计数体系已全部移除（依赖单所有权 fatal 产物作为创建源，
+在单所有权重构期间先行移除）。`rc_block_t` 控制块、`upgrade` 内置函数、
+`OWN_SHARE`/`OWN_WEAK` 枚举值、`VTABLE_PTR_SHARE`/`VTABLE_PTR_WEAK` vtable、
+fatal→share 创建通道全部删除。share/weak 语义待后续重新设计。
 
 ## 4. 实施阶段（P1-P5）
 
@@ -123,7 +120,7 @@ scope:  零堆块记录，无 SCOPE_EXIT 遍历
 | P2 | sema 所有权分析接入：new/move/clone/构造/参数/返回全路径维护红黑树改 own；set_field/set_index 反向挂载；作用域退出点批量取块标记待 FREE | 所有权矩阵探针逐格比对现状输出 |
 | P3 | compiler 生成 NEW/MOVE/FREE 指令 + 作用域退出点 FREE 序列；运行期新增三条指令，删除 ptr_free_owned_recursive/ptr_clear_owned_recursive/ptr_type_needs_scan；DEFER 前移编译期挂载，删除 BCODE_DEFER/scope 级 defer 栈 | 矩阵 119+49 全绿，泄漏零 |
 | P4 | 类型系统去 ownership：删 type_t.ownership、fatal 变体、fatal_bases、SET_OWNERSHIP、PUSH_PTR/SLICE 的 ownership 操作数、vtable 按 ownership 分派 | 1868 测试全绿 |
-| P5 | 函数边界/FFI 改编译期判定 + share/weak 独立类型族 | 全量+泄漏零 |
+| P5 | 函数边界/FFI 改编译期判定 + share/weak 重新设计 | 全量+泄漏零 |
 
 ### 4.1 P1 内部决策（已定）
 
@@ -164,7 +161,7 @@ scope:  零堆块记录，无 SCOPE_EXIT 遍历
 
 ## 5. 保留的语义（不破坏现有测试/语法）
 
-- `own` / `ref` / `fatal` / `share` / `weak` 关键字语法不变
+- `own` / `ref` / `fatal` 关键字语法不变（`share` / `weak` 已移除）
 - `'<a,b>` 作用域标注保留——尤其函数边界：返回值 ref 必标注，调用点不深入函数体
   即可逃逸分析
 - `move` / `clone` / `new` / `set_field` / `set_index` 语法形态不变

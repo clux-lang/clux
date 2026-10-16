@@ -376,16 +376,6 @@ static inline bool type_is_fatal(const type_t *t) {
     return t && t->ownership == OWN_FATAL;
 }
 
-/** 类型是否为 share 修饰（share *T，RC 系，§12）。 */
-static inline bool type_is_share(const type_t *t) {
-    return t && t->ownership == OWN_SHARE;
-}
-
-/** 类型是否为 weak 修饰（weak *T，RC 系，§12）。 */
-static inline bool type_is_weak(const type_t *t) {
-    return t && t->ownership == OWN_WEAK;
-}
-
 /** 类型是否为指针（TYPE_KIND_PTR，任意所有权修饰）。 */
 static inline bool type_is_ptr(const type_t *t) {
     return t && t->kind == TYPE_KIND_PTR;
@@ -396,11 +386,9 @@ static inline bool type_is_slice(const type_t *t) {
     return t && t->kind == TYPE_KIND_SLICE;
 }
 
-/** 类型是否拥有堆资源（own/share/weak 修饰的指针或切片，需递归释放/增减计数）。 */
+/** 类型是否拥有堆资源（own 修饰的指针或切片，需释放）。 */
 static inline bool type_owns_resource(const type_t *t) {
-    return t && (t->ownership == OWN_OWN ||
-                 t->ownership == OWN_SHARE ||
-                 t->ownership == OWN_WEAK);
+    return t && t->ownership == OWN_OWN;
 }
 
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
@@ -512,7 +500,7 @@ bool type_has_const(const type_t *t);
 char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
                                ownership_t ownership, const char *fallback);
 
-/** 复合类型是否**直接**拥有堆资源：own/share/weak 指针或 own 切片。
+/** 复合类型是否**直接**拥有堆资源：own 指针或 own 切片。
  *  只判顶层，不递归字段——递归判定见 type_owns_resources。 */
 static inline bool type_directly_owns(const type_t *t) {
   return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) &&

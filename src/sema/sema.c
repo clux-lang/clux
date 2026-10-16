@@ -282,13 +282,12 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
 
 bool sema_type_contains_owned_resource(const type_t *t) {
   if (!t) return false;
-  /* 复合类型字段禁止携带指针/切片——只有顶层 own/share/weak 指针、
+  /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针、
      own 切片直接持有资源，无需递归。 */
   return type_directly_owns(t);
 }
 
-/** 仅检查 OWN_OWN（不含 share/weak）。
- *  share/weak 引用计数共享、拷贝安全，不触发 R1 move-only 禁止。 */
+/** 仅检查 OWN_OWN。 */
 bool sema_type_contains_own_resource(const type_t *t) {
   if (!t) return false;
   /* 复合类型字段禁止携带指针/切片——只有顶层 own 指针/切片持有资源。 */
@@ -556,9 +555,8 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return NULL;
     }
     case AST_PTR: {
-      /* 指针类型（m3-design §3/§12）：own *T / ref *T / fatal *T /
-         share *T / weak *T。按所有权修饰 token 文本分派 type_ptr_intern
-        （五种所有权是独立 intern 实例）。
+      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。按所有权修饰
+         token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
       ownership_t ownership;
@@ -569,10 +567,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         ownership = OWN_REF;
       } else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) {
         ownership = OWN_FATAL;
-      } else if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0) {
-        ownership = OWN_SHARE;
-      } else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0) {
-        ownership = OWN_WEAK;
       } else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
@@ -585,7 +579,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_SLICE_TYPE: {
       /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
          按所有权修饰 token 文本分派 type_slice_intern（三种所有权是独立
-         intern 实例）。不存在 share/weak 切片（RC 系不适用切片）。
+         intern 实例）。
          裸 []T（ownership=NULL）不合法——parser 在 parse_primary 层暂存
          为 ownership=NULL 的 AST_SLICE_TYPE，此处校验拒绝。 */
       ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
@@ -1531,38 +1525,6 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       sema_scope_new(sema->vm->alloc, SEMA_SCOPE_GLOBAL, NULL);
   if (!sema->global_scope) return false;
 
-  /* 预注册 upgrade 内置函数（§12.4：upgrade(weak *T) -> ?share *T）。
-     与 VM 侧 vm_register_upgrade 对应。泛型 T：注册为 variadic（0 固定参数），
-     返回 ?share *opaque 占位——sema 调用点特判从实参 weak *T 推断 ?share *T。
-     fid 从 vm->functions 按名查询（内建 id 按注册顺序，见 vm_new）。 */
-  {
-    const type_t *share_opaque = type_ptr_intern(sema->vm, OWN_SHARE,
-                                                 sema->vm->type_opaque);
-    const type_t *opt_share = share_opaque
-        ? type_option_intern(sema->vm, share_opaque) : NULL;
-    const type_t *usig = opt_share
-        ? type_func_sig(sema->vm, NULL, 0, opt_share, /*is_variadic=*/true)
-        : NULL;
-    uint32_t ufid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 7 &&
-            memcmp(bf->name.ptr, "upgrade", 7) == 0) {
-          ufid = bf->id;
-          break;
-        }
-      }
-    }
-    if (usig) {
-      sema_symbol_t uinit = {.kind = SEMA_SYM_FUNC, .type = usig,
-                             .is_active = true, .fid = ufid,
-                             .builtin_op = SEMA_BUILTIN_UPGRADE};
-      sema_scope_define(sema->global_scope, STRSLICE_LIT("upgrade"), &uinit);
-    }
-  }
-
   /* 预注册 len 内置函数（m4-design §5/§11.3：len(s) -> usize，即 C 的 size_t）。
      与 VM 侧 vm_register_len 对应。len 接受任意可长度的值（数组/切片/str），
      注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
@@ -1624,7 +1586,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   /* 预注册 cfunc_ptr 内置函数（M6 Phase 5：cfunc_ptr(f) -> opaque，C 函数指针）。
      与 VM 侧 vm_register_cfunc_ptr 对应。参数是任意函数值（cfunc 定义），
      注册为 variadic（0 固定参数）——具体 §2 校验在运行期由 cfunc 内部完成
-     （与 len/upgrade 同一套路），返回类型 opaque。fid 从 vm->functions 按名查询。 */
+     （与 len 同一套路），返回类型 opaque。fid 从 vm->functions 按名查询。 */
   {
     const type_t *csig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_opaque,

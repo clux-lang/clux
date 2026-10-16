@@ -672,36 +672,7 @@ TEST(Driver, StepBClosureReturnRefAnnotEscapesRejected) {
   std::remove(path.c_str());
 }
 
-/* ---- M3 §12 RC 引用计数系（share/weak/upgrade） ---- */
-
-TEST(Driver, ShareCreateAndDeref) {
-  /* share 创建（fatal→share 隐式）+ 解引用读写（§12.1/§12.2） */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: share *i32 = new i32{42};\n"
-      "  if (s.* != 42) { return 1; }\n"
-      "  s.* = 99;\n"
-      "  if (s.* != 99) { return 2; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, ShareCopySharedMutation) {
-  /* share copy = strong+1，两个 share 指向同一对象（§12.2） */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: share *i32 = new i32{42};\n"
-      "  var s2: share *i32 = s;\n"
-      "  if (s2.* != 42) { return 1; }\n"
-      "  s2.* = 99;\n"
-      "  if (s.* != 99) { return 2; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
+/* ---- M3 §12 RC 引用计数系（share/weak/upgrade）已移除 ---- */
 
 TEST(Driver, AnonConstructFieldEvaluatedOnce) {
   /* 回归：匿名构造 `.{...}` 的推断分支曾漏 `return`，控制流继续落入具名构造

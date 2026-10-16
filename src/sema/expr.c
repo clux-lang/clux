@@ -2210,29 +2210,6 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
          名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
          "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
 
-      /* upgrade（§12.4）：泛型 T 从实参 weak *T 推断，返回类型由占位
-         ?share *opaque 精化为 ?share *T。 */
-      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_UPGRADE &&
-          argc == 1 && arg_shadows[0]) {
-        const type_t *at = value_type(arg_shadows[0]);
-        if (at && type_is_weak(at)) {
-          const type_t *base = ptr_type_base(at);
-          if (base) {
-            const type_t *share_t = type_ptr_intern(sema->vm,
-                OWN_SHARE, base);
-            if (share_t) {
-              const type_t *opt_t = type_option_intern(sema->vm, share_t);
-              if (opt_t) {
-                /* upgrade 特判：直接换用更精确的返回类型 shadow。原 result 是
-                   scope 拥有的值——不得手工 dispose（那会留下 owned 里的悬垂
-                   条目），交由作用域退出统一释放。 */
-                result = value_make_shadow(sema->vm, opt_t);
-              }
-            }
-          }
-        }
-      }
-
       /* len（m4-design §5/§11.3）：注册为 variadic，参数类型不经签名校验——
          此处校验实参是可长序列（array/slice/str）。返回类型由注册签名给出
          （usize），无需替换。 */

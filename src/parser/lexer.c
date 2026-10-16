@@ -73,10 +73,10 @@ static const char *const g_keywords[] = {
     "fatal",
     "for",     "from",   "func",   "i16",     "i32",     "i64",      "i8",
     "if",      "import", "is",     "len",     "lib",     "make",    "move",    "new",
-    "nil",     "own",    "opaque",  "ref",    "return",  "share",
+    "nil",     "own",    "opaque",  "ref",    "return",
     "sizeof",  "str",    "struct",  "switch", "true",    "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",
-    "union",   "usize",  "var",     "void",    "volatile", "weak",  "while",
+    "union",   "usize",  "var",     "void",    "volatile", "while",
 };
 
 /* ---- Internal: character classes ---- */

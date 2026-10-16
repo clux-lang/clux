@@ -377,8 +377,7 @@ static sema_scope_t *borrow_src_anchor_scope(sema_t *sema, sema_symbol_t *s) {
    会复制字段的裸指针/胖指针，导致双释放或悬垂指针）——return 等转移点必须
    显式 move() 或 clone()。
    **顶层** own/fatal 指针/切片不在此判定——它们有各自的 clone vtable 正确
-   处理（ptr_clone 深拷贝 / fatal 转移），return 顶层 fatal 是合法消费点（§4）。
-   share/weak 是 RC 系，clone 走增计数路径，不在此拦截（§12）。 */
+   处理（ptr_clone 深拷贝 / fatal 转移），return 顶层 fatal 是合法消费点（§4）。 */
 static bool type_contains_own_or_fatal(const type_t *t) {
   if (!t) return false;
   switch (t->kind) {
@@ -425,7 +424,7 @@ static bool type_contains_own_or_fatal(const type_t *t) {
     case TYPE_KIND_ARRAY:
       return type_contains_own_or_fatal(array_type_elem(t));
     default:
-      return false; /* 标量/str/bool/ref/share/weak/type/error/opaque */
+      return false; /* 标量/str/bool/ref/type/error/opaque */
   }
 }
 
@@ -1082,7 +1081,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
          type_is_own 分支覆盖；含 own 字段的复合类型 ownership 是 OWN_NONE，
          必须递归才判得出来）。
          注：`b = .T{...}`（构造表达式产 fatal）合法——它是将亡值，赋值即转移。
-         注 2：share/weak 引用计数共享、拷贝安全，不在此列。 */
+         注 2：share/weak 引用计数共享已移除。 */
       if (lt && !type_is_fatal(lt) &&
           sema_type_contains_own_resource(lt) &&
           !type_is_fatal(value_type(rhs))) {

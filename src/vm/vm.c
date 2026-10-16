@@ -18,7 +18,6 @@
 #include "core/vec.h"
 
 extern void vm_init_builtins(vm_t *vm);
-extern void vm_register_upgrade(vm_t *vm);
 extern void vm_register_len(vm_t *vm);
 extern void vm_register_cfunc_ptr(vm_t *vm);
 
@@ -192,9 +191,6 @@ vm_t *vm_new(allocator_t *alloc) {
        调用（`extern lib "*" as c;` + `extern func c::printf(format: str, ...): i32;`），
        走 BCODE_EXTERN_CALL → libffi（定参/变参都精确）。此前那个"魔改版"自带
        格式解析与 `%v` 扩展，已整体删除（见 docs/m6-design.md §14.19）。 */
-
-    /* upgrade 内置函数（§12.4：weak *T -> ?share *T） */
-    vm_register_upgrade(vm);
 
     /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> usize） */
     vm_register_len(vm);
