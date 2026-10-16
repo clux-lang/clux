@@ -1568,6 +1568,11 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 验证：强制全量重编 **0 告警 / 0 错误**；全量 **1725/1725 PASSED / 0 FAILED**、0 泄漏；
       示例 **44/44** `run` 与 44/44 `emit → run .cxb`、format 幂等 **46/46**。
 74. **defer（延迟执行块）：闭包值 + 作用域 defer 栈，pop_scope 时内存释放前逆序调用**（2026-10）
+    - > **实现已更新**（2026-10-16，`docs/ownership-refactor.md` §4.2 决策 E）：
+      > DEFER 前移到编译期——sema 改写为 `AST_FUNC_DEF` + 作用域退出点 `CALL` 序列；
+      > 运行期 `BCODE_DEFER` / `scope_t::defers` / `scope_run_defers` 全删，
+      > `vm_pop_scope` 回归"只弹栈销毁"。下方描述保留作历史记录，当前实现以
+      > `ownership-refactor.md` 为准。语法形态、捕获语义（clone 值、LIFO、嵌套）不变。
     - **语法/口径**：`defer ['<a,b>] [|cap, (name: T = init)|] { body }`。捕获列表
       **复用闭包那一套**（`parse_capture_list` 改为导出后直接调用；作用域标注同样复用
       `parse_scope_annotation`），空捕获三种写法等价——省略、`defer || {`、`defer | | {`

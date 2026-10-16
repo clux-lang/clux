@@ -377,24 +377,6 @@ TEST(DriverM4, StrSliceAsFunctionParam) {
 
 /* ---- M4 §9 所有权交互 + §7 切片比较 ---- */
 
-TEST(DriverM4, NestedSlice) {
-  /* §9.5 嵌套切片 []own []T：make 内层切片 + 外层切片 + 二维下标 */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var row0: own []i32 = make(i32, 3, 1, 2, 3);\n"
-      "  var row1: own []i32 = make(i32, 3, 4, 5, 6);\n"
-      "  var grid: own []own []i32 = make(own []i32, 2, row0, row1);\n"
-      "  if (len(grid) != 2u64) { return 1; }\n"
-      "  if (grid[0][0] != 1) { return 2; }\n"
-      "  if (grid[0][2] != 3) { return 3; }\n"
-      "  if (grid[1][0] != 4) { return 4; }\n"
-      "  if (grid[1][2] != 6) { return 5; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 TEST(DriverM4, SliceEqualitySameView) {
   /* §7 切片比较 ==：同一数组切同一范围 → ptr+len 相同 → 相等 */
   std::string path = write_temp_file(
@@ -418,26 +400,6 @@ TEST(DriverM4, SliceEqualityDifferentRange) {
       "  var a: ref []i32 = arr[0:3];\n"
       "  var b: ref []i32 = arr[0:2];\n"
       "  if (a == b) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(DriverM4, SliceAsStructField) {
-  /* §9.6 切片作 struct 字段：own []u8 字段 + u64 字段（char 字面量是 u8） */
-  std::string path = write_temp_file(
-      "struct Buffer {\n"
-      "  data: own []u8;\n"
-      "  cap:  u64;\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var d: own []u8 = make(u8, 4, 'A', 'B', 'C', 'D');\n"
-      "  var buf: Buffer = .Buffer { .data = d, .cap = 4u64 };\n"
-      "  if (len(buf.data) != 4u64) { return 1; }\n"
-      "  if (buf.data[0] != 'A') { return 2; }\n"
-      "  if (buf.data[3] != 'D') { return 3; }\n"
-      "  if (buf.cap != 4u64) { return 4; }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

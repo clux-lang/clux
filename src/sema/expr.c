@@ -480,45 +480,15 @@ static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
   const type_t *base = type_fatal_base_of(sema->vm, t);
   if (base && base != t && !type_is_fatal(base)) return base;
 
+  /* 复合类型不再有 fatal 变体——只有指针/切片需要回退。 */
   vm_t *vm = sema->vm;
   switch (t->kind) {
     case TYPE_KIND_PTR:
       return type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
     case TYPE_KIND_SLICE:
       return type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
-    case TYPE_KIND_STRUCT:
-      return type_struct_intern_with_ownership(vm, t, OWN_NONE);
-    case TYPE_KIND_TUPLE: {
-      size_t n = tuple_type_elem_count(t);
-      tuple_elem_t elems[n > 0 ? n : 1];
-      for (size_t i = 0; i < n; i++) {
-        const tuple_elem_t *e = tuple_type_elem(t, i);
-        elems[i].type = e ? e->type : NULL;
-        elems[i].offset = 0;
-      }
-      return type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
-                                              OWN_NONE);
-    }
-    case TYPE_KIND_ARRAY:
-      return type_array_intern_with_ownership(vm, array_type_elem(t),
-                                              array_type_len(t), OWN_NONE);
-    case TYPE_KIND_OPTION:
-      return type_option_intern_with_ownership(vm, type_option_inner(t),
-                                               OWN_NONE);
-    case TYPE_KIND_UNION: {
-      size_t n = union_type_member_count(t);
-      union_member_t members[n > 0 ? n : 1];
-      for (size_t i = 0; i < n; i++) {
-        const union_member_t *m = union_type_member(t, i);
-        members[i].name = m ? m->name : STRSLICE_EMPTY;
-        members[i].tag = m ? m->tag : (uint32_t)i;
-        members[i].payload_type = m ? m->payload_type : NULL;
-      }
-      return type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
-                                              OWN_NONE);
-    }
     default:
-      return t; /* 无该变体的形态 */
+      return t;
   }
 }
 
@@ -527,8 +497,8 @@ static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
  *
  * `?T` 构造器（`.?T{...}` / `new ?T{...}`）的字段语义是"内层提升为 some"，
  * 而内层类型是**非 fatal** 的 `T`：`fatal` 只标记"将亡值"，option 的 value 槽位
- * 不是将亡值位。但字段表达式往往本身就是**构造表达式**（`.?I{ .I{...} }` 的内层
- * `.I{...}`），`ex_construct_fatal` 会把它标成 `fatal I` —— 于是 `ft != inner`
+ * 不是将亡值位。但字段表达式往往是 move/clone 产物（标成 `fatal T`），
+ * 于是 `ft != inner`
  * 误报 "cannot initialize optional ?I with fatal I"。
  *
  * 归一后比较：`fatal I` 与 `I` 逐字节同布局，接受它既正确也不会破坏所有权
@@ -1580,41 +1550,6 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
         idx += 1;
       }
       return value_make_shadow(sema->vm, t);
-}
-
-/* 构造表达式 `.T{...}` 的**所有权扩散**包装（单所有权体系，m3-design §7/§3.3）：
- * 构造产物是**新堆块**（内嵌 own 字段），语义上就是"将亡值"——因此当 T 含 own
- * 资源时，产物类型是 **fatal T**，而不是 T 本身。后果（都是想要的）：
- *   - `.Box{ .p = new i32{1} }` 不能隐式拷贝，必须由 own 变量接管（赋值的
- *     fatal → own 转移）或 move()/clone() 显式转移；
- *   - 直接传给 `fatal Box` 形参合法（不必再写 move(...)）；
- *   - 作为字段值赋给 `own` 字段 / 含 own 字段的字段，走 fatal → 目标 的转移。
- *
- * 覆盖 struct / union / tuple / option / array（只要类型含 own 资源）；不含 own
- * 的平凡类型原样返回（fatal 对无资源类型无意义——sema_fatal_variant_of 直接返回
- * t）。**cunion 是刻意的例外**：它的 dispose 是 no-op（无 tag、开发者自负），把
- * 产物标成 fatal 只会让所有权规则与销毁语义脱节。
- *
- * **sema 与运行期类型必须一致**——这是本规则的实现要点，也是踩过的坑：
- * 只把 sema 的 shadow 类型改成 fatal、编译器照旧发普通类型的 LOAD_TYPE，会让
- * 运行期值带着**非 fatal** 的类型却走到 `fatal T` 形参/返回位：那里靠
- * `type_fatal_carries_resource` 判定"要不要转移"，看到非 fatal 就退化成 clone，
- * 于是构造产生的临时值仍持有内嵌堆块 → 作用域退出双释放（实测 access violation）。
- * 因此这里同时把构造节点的**类型槽位**改写为 fatal 变体，让编译器发
- * `LOAD_TYPE <fatal 变体 id>`：运行期 CONSTRUCT 产出 fatal 类型的值（与 base
- * 逐字节同布局，构造逻辑完全无感），转移判定与 sema 严格对齐。
- * 覆盖 struct / union / tuple / option / array（只要类型含 own 资源）；不含 own
- * 的平凡类型原样返回（fatal 对无资源类型无意义——sema_fatal_variant_of 直接返回
- * t）。**cunion 是刻意的例外**：它的 dispose 是 no-op（无 tag、开发者自负），把
- * 产物标成 fatal 只会让所有权规则与销毁语义脱节。 */
-static value_t *ex_construct_fatal(sema_t *sema, ast_node_t **node,
-                                   sema_scope_t *scope) {
-  value_t *r = ex_construct(sema, node, scope);
-  if (is_poison(sema, r)) return r;
-  const type_t *t = value_type(r);
-  if (!t || !sema_type_contains_owned_resource(t)) return r;
-  const type_t *fatal = sema_fatal_variant_of(sema, t);  if (!fatal || fatal == t) return r;
-  return value_make_shadow(sema->vm, fatal);
 }
 
 /* AST_IDENT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -3518,7 +3453,7 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
     case AST_MOVE:
       return ex_move(sema, node, scope);
     case AST_CONSTRUCT:
-      return ex_construct_fatal(sema, node, scope);
+      return ex_construct(sema, node, scope);
     case AST_FUNC_DEF:
       return ex_func_def(sema, node, scope);
     case AST_FUNC_REF:

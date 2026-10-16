@@ -133,102 +133,7 @@ LibKeeper *StructRecursiveTest::keep = nullptr;
 
 }  // namespace
 
-/* ---- 正向 1：自引用指针字段（单链表）——构造 / 遍历 / 字段读 ---- */
-TEST_F(StructRecursiveTest, SelfPointerLinkedList) {
-  expect_verdict(
-      "struct Node { v: i32; next: ?ref *const Node; }\n"
-      "func sum(n: ref *const Node): i32 {\n"
-      "  var acc: i32 = 0;\n"
-      "  var cur: ref *const Node = n;\n"
-      "  while (true) {\n"
-      "    acc += cur.v;\n"
-      "    var nx: '<*> ?ref *const Node = cur.next;\n"
-      "    if (nx == nil) { break; }\n"
-      "    cur = nx.!;\n"
-      "  }\n"
-      "  return acc;\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var a: '<*> Node = .Node{ .v = 1, .next = .?ref *const Node{nil} };\n"
-      "  var b: '<*> Node = .Node{ .v = 2, .next = a.& };\n"
-      "  var c: '<*> Node = .Node{ .v = 3, .next = b.& };\n"
-      "  if (sum(c.&) != 6) { return report(1); }\n"
-      "  if (c.next.!.v != 2) { return report(2); }\n"
-      "  if (c.v != 3) { return report(3); }\n"
-      "  if (c.next.!.next.!.v != 1) { return report(4); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 2：自引用 + 方法糖（方法体里沿 next 递归遍历） ---- */
-TEST_F(StructRecursiveTest, MethodWalksSelfReference) {
-  expect_verdict(
-      "struct Node {\n"
-      "  v: i32;\n"
-      "  next: ?ref *const Node;\n"
-      "  func sum(self: ref *const Node): i32 {\n"
-      "    var acc: i32 = 0;\n"
-      "    var cur: ref *const Node = self;\n"
-      "    while (true) {\n"
-      "      acc += cur.v;\n"
-      "      var nx: '<*> ?ref *const Node = cur.next;\n"
-      "      if (nx == nil) { break; }\n"
-      "      cur = nx.!;\n"
-      "    }\n"
-      "    return acc;\n"
-      "  }\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var a: '<*> Node = .Node{ .v = 4, .next = .?ref *const Node{nil} };\n"
-      "  var b: '<*> Node = .Node{ .v = 5, .next = a.& };\n"
-      "  if (b.sum() != 9) { return report(1); }\n"
-      "  if (Node::sum(a.&) != 4) { return report(2); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 3：互相引用（A ↔ B），两侧都是可空指针字段 ---- */
-TEST_F(StructRecursiveTest, MutualReferences) {
-  expect_verdict(
-      "struct A { name: i32; b: ?ref *const B; }\n"
-      "struct B { tag: i32; a: ?ref *const A; }\n"
-      "func main(): i32 {\n"
-      "  var x: '<*> B = .B{ .tag = 2, .a = .?ref *const A{nil} };\n"
-      "  var y: '<*> A = .A{ .name = 1, .b = x.& };\n"
-      "  x.a = y.&;\n"
-      "  if (y.b.!.tag != 2) { return report(1); }\n"
-      "  if (x.a.!.name != 1) { return report(2); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 4：递归函数 + 二叉树（左右子树都是自身） ---- */
-TEST_F(StructRecursiveTest, BinaryTreeDepth) {
-  expect_verdict(
-      "struct Tree { v: i32; left: ?ref *const Tree; right: ?ref *const Tree; }\n"
-      "func depth(t: ref *const Tree): i32 {\n"
-      "  var l: i32 = 0;\n"
-      "  var r: i32 = 0;\n"
-      "  var ln: '<*> ?ref *const Tree = t.left;\n"
-      "  if (ln != nil) { l = depth(ln.!); }\n"
-      "  var rn: '<*> ?ref *const Tree = t.right;\n"
-      "  if (rn != nil) { r = depth(rn.!); }\n"
-      "  if (l > r) { return l + 1; }\n"
-      "  return r + 1;\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var leaf: '<*> Tree = .Tree{ .v = 1, .left = .?ref *const Tree{nil},"
-      " .right = .?ref *const Tree{nil} };\n"
-      "  var mid: '<*> Tree = .Tree{ .v = 2, .left = leaf.&,"
-      " .right = .?ref *const Tree{nil} };\n"
-      "  var root: '<*> Tree = .Tree{ .v = 3, .left = mid.&, .right = leaf.& };\n"
-      "  if (depth(root.&) != 3) { return report(1); }\n"
-      "  if (depth(leaf.&) != 1) { return report(2); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 5：函数类型字段的签名直接点名自身（手写虚表不再需要 opaque） ---- */
+/* ---- 正向 2：函数类型字段的签名直接点名自身（手写虚表不再需要 opaque） ---- */
 TEST_F(StructRecursiveTest, FunctionFieldWithSelfSignature) {
   expect_verdict(
       "struct Shape { area: func(ref *const Shape) -> i32; r: i32; }\n"
@@ -244,40 +149,7 @@ TEST_F(StructRecursiveTest, FunctionFieldWithSelfSignature) {
       "}\n");
 }
 
-/* ---- 正向 6：递归字段里的数组/切片包装（布局延迟定型） ---- */
-TEST_F(StructRecursiveTest, DerivedWrapperLayoutIsFinalized) {
-  expect_verdict(
-      "struct Node { v: i32; kids: ?ref *[2]Node; }\n"
-      "struct Plain { v: i32; kids: ?ref *[2]Plain; }\n"
-      "struct List { v: i32; rest: own []ref *const List; }\n"
-      "func main(): i32 {\n"
-      "  if (sizeof(Node) != sizeof(Plain)) { return report(1); }\n"
-      "  if (sizeof([2]Node) != 2u64 * sizeof(Node)) { return report(2); }\n"
-      "  if (sizeof([3]Node) != 3u64 * sizeof(Node)) { return report(3); }\n"
-      "  if (sizeof(List) != sizeof(ref []ref *const List) + 8u64) {"
-      " return report(4); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 7：T → ?T 提升同时加限定符（ref *T → ?ref *const T） ---- */
-TEST_F(StructRecursiveTest, OptionLiftAddsQualifier) {
-  expect_verdict(
-      "struct Box { p: ?ref *const i32; }\n"
-      "func main(): i32 {\n"
-      "  var v: i32 = 7;\n"
-      "  var o: '<*> ?ref *const i32 = v.&;\n"
-      "  if (o.!.* != 7) { return report(1); }\n"
-      "  var b: '<*> Box = .Box{ .p = v.& };\n"
-      "  if (b.p.!.* != 7) { return report(2); }\n"
-      "  b.p = .?ref *const i32{nil};\n"
-      "  var chk: '<*> ?ref *const i32 = b.p;\n"
-      "  if (chk != nil) { return report(3); }\n"
-      "  return report(0);\n"
-      "}\n");
-}
-
-/* ---- 正向 8：前向引用（自身不参与环）仍然照旧 ---- */
+/* ---- 正向 3：前向引用（自身不参与环）仍然照旧 ---- */
 TEST_F(StructRecursiveTest, ForwardReferenceUnaffected) {
   expect_verdict(
       "struct Early { l: Late; n: i32; }\n"

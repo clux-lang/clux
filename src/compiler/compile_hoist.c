@@ -114,16 +114,6 @@ static void emit_seal(compiler_t *c) {
   st_push(c, -1);
 }
 
-/* SET_OWNERSHIP <ownership>：peek 栈顶开放类型 → 设其所有权修饰（无栈深变化）。
- * 用于 `fatal T` 的将亡值变体（T 为含 own 资源的复合类型）：复合类型的 ownership
- * 恒为 OWN_NONE，必须在 **seal 之前**把变体的 ownership 设成 OWN_FATAL，否则
- * SEAL 会按 ownership 去重到普通类型，运行期就找不到 fatal 变体了。 */
-static void emit_set_ownership(compiler_t *c, ownership_t ownership) {
-  bcode_write_op(c->bc, BCODE_SET_OWNERSHIP);
-  bcode_write_u8(c->bc, (uint8_t)ownership);
-  /* peek，无栈深变化 */
-}
-
 /* ===========================================================================
  * pass 1：声明所有类型
  *
@@ -249,33 +239,6 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
     default:
       hoist_builtin(c, st); /* 内建别名（防御分支） */
       break;
-  }
-
-  /* fatal 复合类型变体（`fatal T`，T 为 struct/tuple/array/option/union）：
-     上面各分支只 PUSH + DEFINE_TYPE 出**普通**（ownership=NONE）的开放对象；
-     变体的所有权必须在 SEAL 之前补上，否则 SEAL 会按 ownership 去重回普通类型
-     → 运行期 op_move/op_clone 找不到 fatal 变体（`compound_fatal_variant` 拿不
-     到），移动语义退化成浅拷贝。做法：LOAD_TYPE 拉回刚登记的开放对象 →
-     SET_OWNERSHIP FATAL（**就地**改该开放对象的 ownership 字段；对象已登记在
-     types_by_id）→ POP 清掉 LOAD_TYPE 的临时 type value（声明阶段必须净栈深 0，
-     否则会污染后续类型声明的栈账）。pass 2 照旧 LOAD_TYPE <id> → 设字段 → SEAL，
-     seal 时按 ownership 去重到本变体。 */
-  if (st->type && st->type->ownership == OWN_FATAL &&
-      st->type->kind != TYPE_KIND_PTR && st->type->kind != TYPE_KIND_SLICE) {
-    switch (st->type->kind) {
-      case TYPE_KIND_STRUCT:
-      case TYPE_KIND_TUPLE:
-      case TYPE_KIND_ARRAY:
-      case TYPE_KIND_OPTION:
-      case TYPE_KIND_UNION:
-        emit_load_type(c, st->id);
-        emit_set_ownership(c, OWN_FATAL);
-        bcode_write_op(c->bc, BCODE_POP); /* 清掉 LOAD_TYPE 的临时值 */
-        st_push(c, -1);
-        break;
-      default:
-        break; /* 无该槽位的类型（防御） */
-    }
   }
 }
 

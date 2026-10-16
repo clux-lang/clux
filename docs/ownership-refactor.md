@@ -15,6 +15,15 @@
 ---
 
 > ### 实现状态：P1/P2 已完成（2026-10-15 提交），P3 FREE/DEFER 字节码已定稿（§4.2），实施中
+>
+> **2026-10-16 前置重构**：复合类型（struct/tuple/array/union/option/cunion）字段
+> 禁止携带指针/切片类型（sema 层强制）。移除复合类型递归释放机制
+> （ptr_free_owned_recursive / ptr_clear_owned_recursive / ptr_clone_block /
+> ptr_type_needs_scan 的复合分支）、fatal 复合变体系统（type_set_ownership /
+> make_fatal_variant / ex_construct_fatal / BCODE_SET_OWNERSHIP 处理函数 /
+> type_owns_resources / type_contains_ref 的递归分支）。指针/切片只能出现在
+> 变量声明/参数/返回值等顶层位置。自引用链表/树等结构待后续重新设计。
+> 测试 1868→1781（删除 87 个指针字段相关测试）。
 
 ---
 

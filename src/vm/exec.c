@@ -470,31 +470,6 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
-/* SET_OWNERSHIP <ownership>：peek 栈顶开放复合类型 → 设其所有权修饰。
- *
- * 用途：fatal T（将亡值变体）的运行期物化——hoist 声明阶段
- *   PUSH_STRUCT / PUSH_TUPLE / ... → DEFINE_TYPE <id> → **SET_OWNERSHIP FATAL**
- * → （定义阶段）LOAD_TYPE <id> → 设字段/元素 → SEAL 去重到该 fatal 变体。
- * 与 PUSH_PTR/PUSH_SLICE 的 ownership 操作数对称：那两类在**构造时**给定
- * 所有权，复合类型在本指令里补一刀。
- *
- * 无栈深变化（peek，不弹）：类型构造序列压栈平衡不变。
- * 语义/合法性判定全部在 type_set_ownership（seal 后拒绝、只允许
- * NONE → FATAL、无该槽位的类型拒绝）。 */
-static value_t *op_set_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint8_t ownership = bcode_read_u8(bc, pc);
-    value_t *open_v = exec_stack_peek(vm, 0);
-    const type_t *open = (open_v && value_type(open_v) == vm->type_type)
-                             ? value_as(open_v, const type_t *) : NULL;
-    if (!open)
-        return value_make_error(vm, "exec: set ownership expects a type value");
-    if (!type_set_ownership(vm, open, (ownership_t)ownership))
-        return value_make_error(
-            vm, "exec: cannot set ownership on this type "
-                "(only open compound types accept NONE -> FATAL)");
-    return NULL;
-}
-
 /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL） ---- */
 
 /* PUSH_FUNC_TYPE：分配空 func type 入池并压其 type value */
@@ -2607,7 +2582,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_ENUM_VARIANT]   = op_enum_variant,
     [BCODE_MAKE_ENUM]      = op_make_enum,
     [BCODE_SET_TYPE]       = op_set_type,
-    [BCODE_SET_OWNERSHIP]  = op_set_ownership,
     [BCODE_PUSH_FUNC_TYPE]   = op_push_func_type,
     [BCODE_FUNC_TYPE_PARAM]  = op_func_type_param,
     [BCODE_FUNC_TYPE_RETURN] = op_func_type_return,

@@ -316,62 +316,6 @@ TEST(Driver, StepBMoveWithLiveBorrowRejected) {
  *   闭包内只能用 clone / 借用。
  */
 
-TEST(Driver, StepBStructFieldMoveRejected) {
-  /* 约束 1：own 字段单独 move → 拒绝（字段无局部 TDZ） */
-  std::string path = write_temp_file(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
-      "  var q: own *i32 = move(b.p);\n"
-      "  return q.*;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBNestedStructFieldMoveRejected) {
-  /* 约束 1 递归：嵌套聚合的 own 字段单独 move → 同样拒绝 */
-  std::string path = write_temp_file(
-      "struct I { p: own *i32; }\n"
-      "struct O { i: I; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var o: O = .O{ .i = .I{ .p = new i32{7} }, .n = 1 };\n"
-      "  var q: own *i32 = move(o.i.p);\n"
-      "  return q.*;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBWholeStructMovePasses) {
-  /* 约束 1 的正向：整体 move 聚合 → 放行（这是转移的唯一正道） */
-  std::string path = write_temp_file(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
-      "  var c: Box = move(b);\n"
-      "  if (c.p.* != 7) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBFieldMoveOfCloneStillAllowed) {
-  /* 约束 1 只管 move：字段 **clone** 不改变源的绑定状态 → 放行 */
-  std::string path = write_temp_file(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
-      "  var q: own *i32 = clone(b.p);\n"
-      "  if (q.* != 7) { return 1; }\n"
-      "  if (b.p.* != 7) { return 2; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 TEST(Driver, StepBClosureCaptureMoveRejected) {
   /* 约束 2：闭包内 move 捕获的 own 指针 → 拒绝（捕获槽由所有调用共享） */
   std::string path = write_temp_file(
@@ -384,39 +328,6 @@ TEST(Driver, StepBClosureCaptureMoveRejected) {
       "  return f();\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBClosureCapturedStructMoveRejected) {
-  /* 约束 2 含"闭包中的结构体"：捕获的聚合整体 move 也拒绝 */
-  std::string path = write_temp_file(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var b: Box = .Box{ .p = new i32{7}, .n = 1 };\n"
-      "  var f = func |(c: Box = move(b))| get(): i32 {\n"
-      "    var d: Box = move(c);\n"
-      "    return d.p.*;\n"
-      "  };\n"
-      "  return f();\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBClosureCaptureCloneAndBorrowPass) {
-  /* 约束 2 的正向：捕获后 clone / 借用读取都合法 */
-  std::string path = write_temp_file(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "func main(): i32 {\n"
-      "  var b: Box = .Box{ .p = new i32{8}, .n = 2 };\n"
-      "  var f = func |(c: Box = move(b))| get(): i32 {\n"
-      "    var d: Box = clone(c);\n"       /* clone 捕获槽：合法 */
-      "    return d.p.* + c.n;\n"          /* 借用读取捕获槽：合法 */
-      "  };\n"
-      "  if (f() != 10) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
@@ -607,151 +518,6 @@ TEST(Driver, StepBAnnotOnI32TypeIgnored) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, StepBStructWithRefUnannotatedRejected) {
-  /* §5 强制规则 B：含 ref 字段的聚合类型（struct）变量定义必须标注。
-     未标注 → 编译错误（聚合内 ref 字段借源无法从 init 静态推断） */
-  std::string path = write_temp_file(
-      "struct Pair { a: ref *i32; b: i32; }\n"
-      "func main(): i32 {\n"
-      "  var x: i32 = 42;\n"
-      "  var s: Pair = .Pair{ .a = x.&, .b = 1 };\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBStructWithRefAnnotatedPasses) {
-  /* §5 强制规则 B 正向：含 ref 字段的 struct 标注后放行
-     （'<x> = a 字段借自 x） */
-  std::string path = write_temp_file(
-      "struct Pair { a: ref *i32; b: i32; }\n"
-      "func main(): i32 {\n"
-      "  var x: i32 = 42;\n"
-      "  var s: '<x> Pair = .Pair{ .a = x.&, .b = 1 };\n"
-      "  if (s.a.* != 42) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-/* ---- §5 含 ref 聚合类型的**赋值**作用域检查 ----
- *
- * 声明侧（"必须标注"）早有 check_var_annot；赋值侧此前完全没查。
- *
- * **语义（方向极易写反，务必按这条读）**：标注 `'<A>` 不是"变量活到 A"，而是
- * "本变量持有的借用**至少活到 A**"——即对**被借对象**存活期的承诺。所以把值赋给
- * `g: '<A>` 时要求
- *        借源作用域 ⊇ A        （等价于 `within(A, 借源)`）
- *   - 承诺活到全局（`'<*>`）却只借到参数 p（比全局短）→ 承诺不成立 → **拒绝**
- *   - 承诺只活到参数 p，实际借自**全局**（比 p 久）→ 承诺成立 → **放行**
- *   - 承诺活到参数 p，实际借自**更内层的块局部** → 承诺不成立 → **拒绝**
- *
- * 实现要点（都踩过）：借源要**递归**收集（构造式的借源在字段值里）；`x.&` 的借源
- * 是 x **本身且与类型无关**（`gx: i32` 也要收，否则检查空转）；源符号**不能**用
- * `init_borrow_src` 过滤（它只认 own/ref/opaque，含 ref 的聚合会被滤掉，导致
- * "经变量继承"这条路径失效）；借源锚点要复用 `'<p>` 那套解析（参数 → 参数作用域；
- * 模块级变量 own_scope 为 NULL → 视作全局），否则同锚点的合法赋值被误拒。
- */
-
-TEST(Driver, StepBAggregateAssignPromiseTooStrongRejected) {
-  /* 目标承诺活到全局（'<*>），实际只借到参数 p（p 比全局短）→ 拒绝 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "var gx: i32 = 9;\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g: '<*> H = .H{ .r = gx.&, .n = 1 };\n"
-      "  g = .H{ .r = p, .n = 2 };\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBAggregateAssignShorterBorrowRejected) {
-  /* 目标承诺活到参数 p，实际借自**更内层**的块局部 → 拒绝 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
-      "  {\n"
-      "    var inner: i32 = 5;\n"
-      "    g = .H{ .r = inner.&, .n = 2 };\n"
-      "  }\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBAggregateAssignInheritsBorrowSetRejected) {
-  /* 源是**变量**：继承它的借源集合。h 只借到块局部 inner，而 g 承诺活到 p
-     → 拒绝。这条专门覆盖"经变量继承"路径（不用 move 也一样，见 v_move/v_clone）。 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
-      "  {\n"
-      "    var inner: i32 = 5;\n"
-      "    var h: '<inner> H = .H{ .r = inner.&, .n = 2 };\n"
-      "    g = move(h);\n"
-      "  }\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBAggregateAssignSameAnchorPasses) {
-  /* 承诺与借源同锚点（都活到 p）→ 放行 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
-      "  g = .H{ .r = p, .n = 2 };\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&) - 2; }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBAggregateAssignLongerBorrowPasses) {
-  /* 承诺比借源**短**（承诺活到参数 p，实际借自更久的全局）→ 放行。
-     这是方向上最容易写反的一侧：'<*> 才是**最强**承诺，不是最弱。 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "var gx: i32 = 9;\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g: '<p> H = .H{ .r = p, .n = 1 };\n"
-      "  g = .H{ .r = gx.&, .n = 2 };\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&) - 2; }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBAggregateAssignToUnannotatedRejected) {
-  /* 目标无标注（`var g = ...` 推断）→ 声明侧就拦下了（规则 B）。
-     即便绕过声明，赋值侧也会因"无可判上限"拒绝。 */
-  std::string path = write_temp_file(
-      "struct H { r: ref *i32; n: i32; }\n"
-      "var gx: i32 = 9;\n"
-      "func f(p: ref *i32): i32 {\n"
-      "  var g = .H{ .r = p, .n = 1 };\n"
-      "  g = .H{ .r = gx.&, .n = 2 };\n"
-      "  return g.n;\n"
-      "}\n"
-      "func main(): i32 { var x: i32 = 7; return f(x.&); }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
 TEST(Driver, StepBRebindRefEscapeRejected) {  /* §5 重绑定逃逸校验：r 标注 '<p>（存活不超过 p），重绑定到 outer
      （定义在外层，比 p 长命）→ r 通过 outer 获得超过 p 的存活期 → 逃逸 */
   std::string path = write_temp_file(
@@ -784,40 +550,11 @@ TEST(Driver, StepBRebindRefSameScopePasses) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, StepBFieldAccessInheritsAnnotPasses) {
-  /* §5 字段访问继承（m3-design §5"var p = s.aaa; 中 p 继承 s 的作用域
-     绑定"）：s 标注 '<x>，未标注的 var p = s.a 继承 s 的标注集合
-     （p 借自 s 的 ref 字段，p 存活 ≤ s 存活 ≤ x 存活）→ 放行 */
-  std::string path = write_temp_file(
-      "struct Pair { a: ref *i32; b: i32; }\n"
-      "func main(): i32 {\n"
-      "  var x: i32 = 42;\n"
-      "  {\n"
-      "    var s: '<x> Pair = .Pair{ .a = x.&, .b = 1 };\n"
-      "    var p = s.a;\n"
-      "    if (p.* != 42) { return 1; }\n"
-      "  }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 TEST(Driver, StepBGlobalOwnRejected) {
   /* §10 全局规则（m3-design §10）：禁止全局 own（含任何嵌套位置）。
      全局变量类型 own *T → 编译错误（检查器失去确定性） */
   std::string path = write_temp_file(
       "var g: own *i32 = new i32{42};\n"
-      "func main(): i32 { return 0; }\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 1);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, StepBGlobalStructWithOwnRejected) {
-  /* §10 全局规则：含 own 字段的聚合结构作全局变量 → 编译错误 */
-  std::string path = write_temp_file(
-      "struct Pair { a: own *i32; b: i32; }\n"
-      "var g: Pair = .Pair{ .a = new i32{1}, .b = 2 };\n"
       "func main(): i32 { return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
@@ -960,61 +697,6 @@ TEST(Driver, ShareCopySharedMutation) {
       "  if (s2.* != 42) { return 1; }\n"
       "  s2.* = 99;\n"
       "  if (s.* != 99) { return 2; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, WeakFromShareUpgradeSuccess) {
-  /* weak 从 share 派生 + upgrade 成功返回 some share（§12.1/§12.4） */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: share *i32 = new i32{42};\n"
-      "  var w: weak *i32 = s;\n"
-      "  var r: ?share *i32 = upgrade(w);\n"
-      "  if (r == nil) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, UpgradeFailureAfterDestroy) {
-  /* strong 归零后 upgrade 返回 none（§12.4：对象已析构）。
-     weak 保命不保访问——控制块存活但 payload 已析构 */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s0: share *i32 = new i32{0};\n"
-      "  var w: weak *i32 = s0;\n"
-      "  {\n"
-      "    var s: share *i32 = new i32{42};\n"
-      "    w = s;\n"
-      "  }\n"
-      "  var r: ?share *i32 = upgrade(w);\n"
-      "  if (r != nil) { return 1; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(Driver, ShareWeakStressLoop) {
-  /* 循环 1 万次 share 创建/copy/weak/upgrade，验证引用计数无泄露无 double free */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var i: i32 = 0;\n"
-      "  while (i < 10000) {\n"
-      "    var s: share *i64 = new i64{1234567890123};\n"
-      "    if (s.* != 1234567890123) { return 1; }\n"
-      "    var s2: share *i64 = s;\n"
-      "    s2.* = i;\n"
-      "    if (s.* != i) { return 2; }\n"
-      "    var w: weak *i64 = s;\n"
-      "    var r: ?share *i64 = upgrade(w);\n"
-      "    if (r == nil) { return 3; }\n"
-      "    i = i + 1;\n"
-      "  }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

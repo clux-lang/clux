@@ -126,7 +126,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `UNION_MEMBER` | `STR`（member 名） | **peek** 开放 union → 追加 member（tag = 追加序，payload_type 暂 NULL，随后配一个 `DEFINE_FIELD`）。 |
 | `PUSH_CUNION` | — | 分配空 C 语义 union 类型（开放态，member 追加走 `DEFINE_FIELD`，**无 tag**）→ 压其 type value。 |
 | `SET_TYPE` | — | 弹栈顶 type value（sub）→ 设为栈顶开放对象的 sub / base / inner（`LOAD_TYPE` → `SET_TYPE` → `SEAL`）。 |
-| `SET_OWNERSHIP` | `U8`（ownership） | **peek** 栈顶开放复合类型（struct/tuple/array/option/union）→ 设其 `ownership`。只允许 `OWN_NONE → OWN_FATAL`（产出 `fatal T` 将亡值变体，见 §4.7）；已密封 / 无该槽位的类型 → 运行期 error。无栈深变化（peek）。 |
+| `SET_OWNERSHIP` | `U8`（ownership） | **已废弃**（保留枚举值，无处理函数）。复合类型禁止携带指针/切片字段后，fatal 复合变体不再存在。 |
 | `DEFINE_TYPE` | `U32`（类型 id） | 弹 type value（**声明**：消费栈）→ 绑定程序 id（≥64）写入 `t->id` 并登记 `vm->types_by_id`（幂等，多 id 可别名同一类型）。 |
 | `SEAL` | — | 弹 type value（**定义收尾**：消费栈）→ 经 `value_seal` 分派 `vtable->type_seal`：按类型各自池查重 intern、计算布局、置 `sealed`；去重命中则回收开放对象并重定向栈引用；随后按开放对象自身 id 幂等重绑登记（避免登记表悬垂）。 |
 | `CREATE_CONST` | — | 一次性快捷：弹 type value → `type_const_intern` → 压回（不走向上两遍构造；编译器 hoist 区用 `PUSH_CONST`+`SET_TYPE`+`SEAL`）。 |
@@ -143,7 +143,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value → 拷贝显示名到 vm 堆（随对象释放）。仅具名函数定义写入，匿名函数字面量不写。 |
 | `SET_CLOSURE` | `STR`（捕获名） | 弹栈顶捕获值 → **clone** 进**栈下**函数对象（`peek` 栈下 1 位）的 `closure_scope` 捕获槽（define-or-replace，替换占位 undefined）。闭包为 clone 值语义。 |
 | `MAKE_FUNCTION` | `U32`（函数 id） | 从 `functions_by_id` 拉**基底**函数对象 → 实例化**独立新实例**（共享 entry_pc/cfunc/type/name/id，新 `closure_scope` 按基底捕获槽名以 undefined 占位）→ 压栈。函数定义每次求值生成新对象（循环内多个闭包互不干扰），对标 `LOAD_FUNCTION` 的"同一对象"引用语义。 |
-| `DEFER` | — | 弹栈顶函数值 → 借用登记进当前作用域的 **defer 栈**（延迟执行块 `defer ... { }`，见 §4.14 与 `docs/m6-design.md` §14.26）。 |
+| `DEFER` | — | **已废弃**（保留枚举值，无处理函数）。DEFER 已前移到编译期，见 §4.14。 |
 
 ### 4.5 值构造 / 字段与下标访问
 
@@ -202,8 +202,8 @@ struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携
 （双释放）。`fatal T` 是其载体：
 
 - **类型**：与 T **逐字节同布局**、仅 `ownership = OWN_FATAL` 不同的独立 intern
-  实例（去重按「字段表 + ownership」区分）。运行期物化：`PUSH_XXXX` →
-  `DEFINE_TYPE <id>` → `SET_OWNERSHIP FATAL` → （定义阶段）设字段 → `SEAL`。
+  实例。**仅限顶层指针/切片**——复合类型禁止携带指针/切片字段后，fatal 复合变体
+  不再存在。运行期物化：指针/切片在 `PUSH_PTR`/`PUSH_SLICE` 构造时直接指定 ownership。
 - **产出**：`MOVE` / `CLONE` 指令（见上表）；`new` / `make` 亦产 fatal（指针/切片形态）。
 - **接管**：`fatal T → T` 的隐式转换（`DEFINE` 路径）**转移**所有权——memcpy
   顶层后清空源的 own/fatal 指针；指针/切片的 `fatal → own` 同理。
@@ -329,8 +329,8 @@ struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
 | `PUSH_SCOPE` | — | `scope_new(alloc, current)` 进入新作用域。 |
-| `POP_SCOPE` | — | 弹出并销毁当前作用域：**先逆序执行本作用域的 defer 栈**（见 `DEFER`），再回收本块全部临时值（`dispose owned` + 释放 vars/scope）。 |
-| `DEFER` | — | 弹栈顶**函数值**（defer 的无参 void 闭包）→ **借用**登记进**当前作用域**的 defer 栈（`scope_t::defers`，登记序）。作用域退出时在 dispose/销毁**之前**逆序（LIFO）弹出逐个 `value_call`；返回值不传给消费点（error 值打 stderr）。值本体归 `owned`（`MAKE_FUNCTION` 自动 track），栈只存指针 → 无泄漏/无 double free。见 §14.26。 |
+| `POP_SCOPE` | — | 弹出并销毁当前作用域，回收本块全部临时值（`dispose owned` + 释放 vars/scope）。**defer 不再在运行期执行**（见下）。 |
+| `DEFER` | — | **已废弃**（保留枚举值，无处理函数）。DEFER 已前移到编译期——sema 把 `defer` 改写为 `AST_FUNC_DEF` + 作用域退出点 `CALL` 序列（见 `docs/ownership-refactor.md` §4.2 决策 E）。运行期 `POP_SCOPE` 不再执行任何 defer。 |
 | `POP` | — | 丢弃栈顶引用（不释放，归 scope 管理）。 |
 | `HALT` | — | 停止执行（注册段之后拦截落入函数体区）。 |
 

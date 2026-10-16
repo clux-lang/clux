@@ -121,7 +121,6 @@ const vtable_t VTABLE_OPTION = {
     .explicit_cast = option_explicit_cast,
     .type_equal = option_type_equal,
     .type_extends = option_type_extends,
-    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_option_seal, /* 开放构造路径（PUSH_OPT → SEAL）密封入口 */
 };
 

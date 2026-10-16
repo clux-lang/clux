@@ -399,6 +399,16 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
           break;
         }
       }
+      /* 复合类型字段不得携带指针或切片——恢复到只有普通指针的场景。
+         指针/切片只能出现在变量声明/参数/返回值等顶层位置。 */
+      if (type_contains_ptr_or_slice(ft)) {
+        diag_error(sema->diag, sema_loc(sema, sf->type),
+                   "struct '%.*s': field '%.*s' has pointer or slice type; "
+                   "compound types cannot contain pointer/slice fields",
+                   (int)sd->name.len, sd->name.ptr, (int)sf->name.len,
+                   sf->name.ptr);
+        bad = true;
+      }
       ftype[i] = ft;
       fname[i] = sf->name;
     }

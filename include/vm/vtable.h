@@ -81,18 +81,6 @@ typedef struct vtable_t {
     bool    (*type_equal)(vm_t *vm, const type_t *a, const type_t *b);
     bool    (*type_extends)(vm_t *vm, const type_t *sub, const type_t *sup);
 
-    /* ---- 类型所有权设置（SET_OWNERSHIP 命令归一） ----
-       由 type_set_ownership(vm, type_value, ownership) 代理调用：把栈上**尚未
-       密封**的复合类型（struct/tuple/array/option/union）的 ownership 由
-       OWN_NONE 置为 OWN_FATAL，产出该类型的"将亡值"变体（fatal T，m3-design
-       §3.3）。复合类型的 ownership 恒为 OWN_NONE，唯一例外就是本槽位产出的
-       fatal 变体——因此合法转换只有 NONE → FATAL 一条。
-       NULL 槽位 = 该类型不支持所有权设置（标量/指针/切片/...）：标量与复合
-       类型无关；指针/切片的所有权在**构造时**由 PUSH_PTR/PUSH_SLICE 的操作数
-       给定，不走本槽位。已密封 → 拒绝（与其它类型写入 API 同一不变量）。 */
-    bool (*type_set_ownership)(vm_t *vm, const type_t *self,
-                               ownership_t ownership);
-
     /* ---- 类型密封（SEAL 命令归一：type value 构造收尾） ---- */
     /* 由 value_seal(vm, type_value) 代理调用：type_value->data 即 const type_t*，
        分派 data->vtable->type_seal。回调负责：计算规范名 + 标记 sealed +

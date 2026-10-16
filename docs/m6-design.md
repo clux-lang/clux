@@ -2000,6 +2000,17 @@ struct Node2 { v: i32; kids: ?ref *[2]Node2; }          // 数组包装（布局
 
 ### 14.26 defer（延迟执行块）：闭包值 + 作用域 defer 栈（第 74 项，2026-10）
 
+> **实现已更新**（2026-10-16，`docs/ownership-refactor.md` §4.2 决策 E）：
+> DEFER 从"运行期 `BCODE_DEFER` 指令 + `scope_t::defers` 栈 + `vm_pop_scope` 逆序
+> `scope_run_defers`"前移到**编译期**。sema 把 `defer` 改写为 `AST_FUNC_DEF`
+> （块入口实例化 + 捕获绑定，与局部函数同构），在**作用域退出点**（块尾 / RET 前 /
+> break·continue 跨出层）逐层逆序发 `PUSH __defer_N; CALL 0; POP`。运行期
+> `BCODE_DEFER` / `scope_t::defers` / `scope_add_defer` / `scope_run_defers` 全删，
+> `vm_pop_scope` 回归"只弹栈销毁"。下方"口径选择"中涉及 `BCODE_DEFER`、defer 栈、
+> `scope_run_defers` 的描述是**历史方案**，保留作为设计推理记录；**当前实现以
+> `docs/ownership-refactor.md` §4.2 为准**。语法形态、捕获语义（clone 值、LIFO、
+> 嵌套、defer 体内再登记 defer）全部不变。
+
 **目标**：语言层新增 `defer` 类"糖"——语义上等价于"在当前作用域创建一个**带闭包
 的无参 void 函数值**"，把它压进**当前作用域的 defer 栈**；作用域退出
 （`pop_scope`）时在**内存释放之前**把栈**逆序**弹出来逐个调用（用户明确要求：

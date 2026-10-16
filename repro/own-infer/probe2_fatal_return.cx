@@ -1,8 +1,0 @@
-// fatal 复合返回值 → 推断为基础类型
-struct Test { data: own *i32; n: i32 }
-func mk(n: i32): fatal Test { return move(.Test{ .data = new i32{n}, .n = n }); }
-func main(): i32 {
-    var a = mk(7);
-    if (a.data.* != 7 || a.n != 7) { return 1; }
-    return 0;
-}

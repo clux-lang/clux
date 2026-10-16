@@ -38,39 +38,18 @@
  * seal 之后不可变——两个写入 API 对 sealed 类型拒绝，把不变量固化在代码里。
  * =========================================================================== */
 
-/* ---- 生命周期：clone / assign / dispose（字段递归） ---- */
+/* ---- 生命周期：clone / assign / dispose ---- */
 
-/* 结构体是否**含**需递归处理的 own 资源（顶层字段直接是 own/share/weak
-   指针或 own 切片，或字段本身是含 own 的聚合）。与 sema 侧
-   type_contains_own_or_fatal 同义，但只看 own 系（fatal 是"必被接管"的
-   将亡值，不算资源持有者）。 */
-static bool struct_owns_resources(const struct_type_t *st) {
-    for (size_t i = 0; i < st->field_count; i++) {
-        if (ptr_type_needs_scan(st->fields[i].type)) return true;
-    }
-    return false;
-}
+/* 结构体字段禁止携带指针/切片（sema 保证），因此结构体永远不含 own 资源——
+   clone/dispose 全部走平凡 memcpy 路径，无需字段级递归释放/深拷贝。 */
 
 static value_t *struct_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
 
-    /* 含 own 资源的结构体：字段级深拷贝（ptr_clone_block 递归克隆对象图）——
-       own/fatal 指针字段分配**独立新堆块**，ref 字段复制指针值（借用共享）。
-       两个实例各自独占完整对象图，各自递归销毁，无共享堆块 = 无双释放。
-       源值**保持有效**（clone 是"复制"语义，不是转移——转移走 value_move /
-       op_move / fatal 参数与返回值路径），因此本函数不得清空源的 own 指针：
-       它同时服务 `var b = clone(a)`（a 必须仍可用）、scope_define 的借用
-       materialize 与 FIELD_GET 的字段取值（源是父值内部）。 */
-    if (t->kind == TYPE_KIND_STRUCT && struct_owns_resources((const struct_type_t *)t)) {
-        void *data = ptr_clone_block(vm, t, value_data(v));
-        return value_make(vm, t, data);
-    }
-
-    /* 平凡结构体（data 全平凡：字段是裸字节块，字符串归 vm 字符串池）：
-       整块 memcpy 即可——sema 已保证不隐式拷贝含 own 字段的值，而真正需要
-       逐字段的路径（含 own / fatal 变体）走上一条分支。 */
+    /* 平凡结构体（字段全为标量/嵌套复合/字符串，无指针/切片）：
+       整块 memcpy 即可。 */
     void *data = value_alloc_data(vm->alloc, t);
     memcpy(data, value_data(v), t->size);
     return value_make(vm, t, data);
@@ -95,18 +74,8 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
 }
 
 static void struct_dispose(vm_t *vm, value_t *v) {
-    const type_t *t = value_type(v);
-    /* 含 own 资源的结构体（含 fatal 变体）：递归释放 own 指针字段指向的堆块。
-       **委托 ptr_free_owned_recursive**（不在此复写字段遍历）——它与
-       scope_destroy 走的是同一个实现，两条析构路径（scope 统一销毁 / vtable
-       dispose）语义必须逐字一致，否则会出现"作用域退出漏掉某类字段"这类只在
-       一条路径上出现的泄漏。data 块本身由 value_dispose 统一释放。
-       平凡结构体（无 own 字段）无需释放。 */
-    if (t && t->kind == TYPE_KIND_STRUCT &&
-        struct_owns_resources((const struct_type_t *)t)) {
-        void *data = value_data(v);
-        if (data) ptr_free_owned_recursive(vm, t, data);
-    }
+    /* 结构体字段禁止携带指针/切片——无 own 堆块需递归释放。
+       data 块本身由 value_dispose 统一释放。 */
     (void)vm; (void)v;
 }
 
@@ -198,27 +167,8 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
     if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: implicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
-    /* fatal → fatal 同布局不同 type_t*（compound_fatal_variant 创建的变体与
-       hoist 构造的变体可能是不同 type_t* 但字段表完全一致）：源是**将亡值**，
-       走转移（memcpy + 清空源 own 指针），不是深拷贝。深拷贝白分配一整套对象图
-       且源仍持有原件，语义上也不是 fatal 应有的行为；浅 memcpy 不清源则双释放。
-       与 value_move 复合类型路径同款。 */
-    if (type_is_fatal(value_type(v)) && type_is_fatal(target) &&
-        struct_owns_resources((const struct_type_t *)target)) {
-        void *data = value_alloc_data(vm->alloc, target);
-        memcpy(data, value_data(v), target->size);
-        ptr_clear_owned_recursive(vm, value_type(v), value_data(v));
-        return value_make(vm, target, data);
-    }
-    /* 同布局、不同 type_t 实例、**含 own 资源**：必须**对象图克隆**，不能整块
-       浅拷贝——浅拷贝会让新值与源共享内嵌 own 堆块，两侧析构各释放一次 →
-       双释放（实测 access violation）。推断路径常见：构造产出的 base 实例与
-       hoist 物化 / sema 剥离出的 base 实例不是同一个 type_t*。 */
-    if (struct_owns_resources((const struct_type_t *)target)) {
-        void *data = ptr_clone_block(vm, target, value_data(v));
-        if (!data) data = value_alloc_data_copy(vm->alloc, target, value_data(v));
-        return value_make(vm, target, data);
-    }
+    /* 结构体字段禁止携带指针/切片——平凡 memcpy 即可（无内嵌 own 堆块
+       需深拷贝/清空）。 */
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
     return value_make(vm, target, data);
 }
@@ -261,7 +211,6 @@ const vtable_t VTABLE_STRUCT = {
     .explicit_cast = struct_explicit_cast,
     .type_equal = struct_type_equal,
     .type_extends = struct_type_extends,
-    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_struct_seal, /* 开放构造路径（PUSH_STRUCT → SEAL）密封入口 */
 };
 

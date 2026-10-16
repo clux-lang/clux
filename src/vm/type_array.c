@@ -425,7 +425,7 @@ const vtable_t VTABLE_ARRAY = {
     .assign    = array_assign,
     .implicit_cast = array_implicit_cast,
     .explicit_cast = array_explicit_cast,
-    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
+
     .type_seal = array_type_seal,
 };
 

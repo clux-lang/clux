@@ -169,7 +169,6 @@ const vtable_t VTABLE_UNION = {
     .explicit_cast = union_explicit_cast,
     .type_equal = union_type_equal,
     .type_extends = union_type_extends,
-    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_union_seal, /* 开放构造路径（PUSH_UNION → SEAL）密封入口 */
 };
 

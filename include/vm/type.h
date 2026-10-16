@@ -503,30 +503,7 @@ static inline bool type_has_quals(const type_t *t) {
  */
 bool type_has_const(const type_t *t);
 
-/**
- * 设置**未密封**复合类型的所有权修饰（SET_OWNERSHIP 命令的唯一入口）。
- *
- * 语义：把 t 的 ownership 由 OWN_NONE 置为 OWN_FATAL（fatal T 将亡值变体，
- * m3-design §3.3）。复合类型（struct/tuple/array/option/union）的 ownership
- * 恒为 OWN_NONE，fatal 是其唯一合法取值，故只允许 NONE → FATAL 一条转换。
- *
- * 拒绝（返回 false，类型一字不改）：
- *   - t 为 NULL / 已密封（与其它类型写入 API 同一不变量：seal 后不可变）；
- *   - t 的 ownership 已非 OWN_NONE（幂等重放不视为错误由调用方处理）；
- *   - ownership 参数不是 OWN_FATAL；
- *   - t 的 vtable 无 type_set_ownership 槽位（标量/指针/切片/func/...——
- *     标量与所有权无关，指针/切片的所有权在构造期由 PUSH_PTR/PUSH_SLICE
- *     的操作数给定）。
- */
-bool type_set_ownership(vm_t *vm, const type_t *t, ownership_t ownership);
 
-/** vtable 槽位 type_set_ownership 的**共享实现**：开放复合类型（struct /
- *  tuple / array / option / union）的所有权语义完全相同（ownership 字段是
- *  type_t 上的正交属性，与各类型的字段表/元素表无关），因此五个 vtable 共用
- *  这一个回调，避免把同一行赋值抄五遍。仅由 type_set_ownership 代理调用
- *  （它已做完 seal / ownership / 合法性判定），此处只落字段。 */
-bool type_set_ownership_default(vm_t *vm, const type_t *self,
-                                ownership_t ownership);
 
 /** 构造"<ownership 前缀> + base 名"的类型显示名（堆分配，vm 拥有）。
  *  ownership == OWN_FATAL 时前缀为 "fatal "，否则原样拷贝 base 名。
@@ -541,6 +518,25 @@ static inline bool type_directly_owns(const type_t *t) {
   return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE) &&
          type_owns_resource(t);
 }
+
+/**
+ * 类型是否为指针或切片（TYPE_KIND_PTR / TYPE_KIND_SLICE，任意所有权修饰）。
+ * 用于"复合类型字段不得携带指针/切片"的检查——恢复到只有普通指针的场景：
+ * 指针和切片只能出现在变量声明/参数/返回值等顶层位置，不能嵌进 struct/tuple/
+ * array/union/option 的字段或元素。
+ */
+static inline bool type_is_ptr_or_slice(const type_t *t) {
+    return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE);
+}
+
+/**
+ * 类型是否（**递归**）含指针或切片——顶层是指针/切片，或 struct/tuple/union/
+ * cunion 的任一字段/元素/member、option 内层、数组元素含指针或切片。
+ *
+ * 用于"复合类型字段不得携带指针/切片"的编译期检查：struct/tuple/array/union/
+ * option 的每个字段/元素类型如果递归含指针或切片，sema 报编译错误。
+ */
+bool type_contains_ptr_or_slice(const type_t *t);
 
 /**
  * 类型是否（**递归**）拥有堆资源——即"持有 own/share/weak 指针或 own 切片"，

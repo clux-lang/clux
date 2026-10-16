@@ -329,7 +329,6 @@ const vtable_t VTABLE_TUPLE = {
     .length = tuple_length,
     .type_equal = tuple_type_equal,
     .type_extends = tuple_type_extends,
-    .type_set_ownership = type_set_ownership_default, /* fatal T 变体（SET_OWNERSHIP） */
     .type_seal = type_tuple_seal, /* 开放构造路径（PUSH_TUPLE → SEAL）密封入口 */
 };
 

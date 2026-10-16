@@ -598,6 +598,7 @@ static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
   if (!t || !type_is_fatal(t)) return NULL;
   vm_t *vm = sema->vm;
   const type_t *r = NULL;
+  /* 复合类型不再有 fatal 变体——只有指针/切片需要回退。 */
   switch (t->kind) {
     case TYPE_KIND_PTR:
       r = type_ptr_intern(vm, OWN_OWN, ptr_type_base(t));
@@ -605,45 +606,6 @@ static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
     case TYPE_KIND_SLICE:
       r = type_slice_intern(vm, OWN_OWN, slice_type_elem(t));
       break;
-    case TYPE_KIND_STRUCT:
-      r = type_struct_intern_with_ownership(vm, t, OWN_NONE);
-      break;
-    case TYPE_KIND_TUPLE: {
-      size_t n = tuple_type_elem_count(t);
-      tuple_elem_t elems[n > 0 ? n : 1];
-      for (size_t i = 0; i < n; i++) {
-        const tuple_elem_t *e = tuple_type_elem(t, i);
-        elems[i].type = e ? e->type : NULL;
-        elems[i].offset = 0;
-      }
-      r = type_tuple_intern_with_ownership(vm, n > 0 ? elems : NULL, n,
-                                            OWN_NONE);
-      break;
-    }
-    case TYPE_KIND_ARRAY: {
-      const type_t *elem = array_type_elem(t);
-      size_t len = array_type_len(t);
-      r = type_array_intern_with_ownership(vm, elem, len, OWN_NONE);
-      break;
-    }
-    case TYPE_KIND_OPTION: {
-      const type_t *inner = type_option_inner(t);
-      r = type_option_intern_with_ownership(vm, inner, OWN_NONE);
-      break;
-    }
-    case TYPE_KIND_UNION: {
-      size_t n = union_type_member_count(t);
-      union_member_t members[n > 0 ? n : 1];
-      for (size_t i = 0; i < n; i++) {
-        const union_member_t *m = union_type_member(t, i);
-        members[i].name = m ? m->name : STRSLICE_EMPTY;
-        members[i].tag = m ? m->tag : (uint32_t)i;
-        members[i].payload_type = m ? m->payload_type : NULL;
-      }
-      r = type_union_intern_with_ownership(vm, n > 0 ? members : NULL, n,
-                                            OWN_NONE);
-      break;
-    }
     default:
       return NULL;
   }

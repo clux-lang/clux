@@ -1121,6 +1121,15 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       ok = false;
       continue;
     }
+    if (type_contains_ptr_or_slice(ft)) {
+      diag_error(sema->diag, sema_loc(sema, sf->type),
+                 "union '%.*s': member '%.*s' has pointer or slice type; "
+                 "compound types cannot contain pointer/slice fields",
+                 (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
+      ok = false;
+      continue;
+    }
     members[i].payload_type = ft;
   }
 
@@ -1222,6 +1231,15 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     if (!ft) {
       diag_error(sema->diag, sema_loc(sema, sf->type),
                  "cunion '%.*s': unknown field type for '%.*s'",
+                 (int)cd->name.len, cd->name.ptr, (int)sf->name.len,
+                 sf->name.ptr);
+      ok = false;
+      continue;
+    }
+    if (type_contains_ptr_or_slice(ft)) {
+      diag_error(sema->diag, sema_loc(sema, sf->type),
+                 "cunion '%.*s': member '%.*s' has pointer or slice type; "
+                 "compound types cannot contain pointer/slice fields",
                  (int)cd->name.len, cd->name.ptr, (int)sf->name.len,
                  sf->name.ptr);
       ok = false;

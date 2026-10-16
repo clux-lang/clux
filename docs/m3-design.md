@@ -239,10 +239,15 @@ var c: Box = mk(9);                 // fatal → Box 的接管 = 转移
 - **无资源折叠**：T 不含 own 资源时 `fatal T` 折叠为 T 本身（不引入互不兼容的
   新类型）。`own T` / `ref T`（T 非指针/切片）非法。
 - **销毁**：与 T 完全相同的递归路径（按字段偏移分派，与 ownership 无关）。
-- **运行期物化**：hoist 声明阶段 `LOAD_TYPE <id>` → `SET_OWNERSHIP FATAL` →
-  `SEAL` 按 ownership 去重（见 `docs/bytecode-mnemonics.md` §4.7）。
+- **运行期物化**：~~hoist 声明阶段 `LOAD_TYPE <id>` → `SET_OWNERSHIP FATAL` →
+  `SEAL` 按 ownership 去重~~ **已废弃**（2026-10-16 重构：复合类型禁止携带
+  指针/切片字段，fatal 复合变体不再存在。fatal 仅限顶层 `fatal *T` / `fatal []T`，
+  构造时直接指定 ownership）。
 
 ### 7.2 所有权**扩散**：含 own 字段的复合类型整体进入单所有权体系
+
+> **已废弃**（2026-10-16）：复合类型字段禁止携带指针/切片，本节描述的
+> "含 own 字段的复合类型"场景不再存在。自引用数据结构待后续重新设计。
 
 §7 的规则此前只落在 `own *T` 这一形态上，复合类型（struct/tuple/union/option/
 array）**递归含** own 指针时没有被覆盖——四个漏水点：
