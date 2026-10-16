@@ -452,9 +452,19 @@ TEST_F(DeferTest, TopLevelDeferRejected) {
       "func main(): i32 { return 0; }\n");
 }
 
-/* ---- comptime 求值内 defer 明确拒绝（运行期作用域退出钩子，CTFE 无此层） ---- */
-TEST_F(DeferTest, ComptimeDeferRejected) {
-  expect_compile_error(
-      "comptime func f(): i32 { defer { } return 1; }\n"
-      "func main(): i32 { return f(); }\n");
+/* ---- comptime 求值内 defer 正常工作（defer 改写为编译期语法糖后，
+ *        __defer_N 函数 + call 在 CTFE 中自然执行，不再依赖运行期作用域退出） ---- */
+TEST_F(DeferTest, ComptimeDeferWorks) {
+  expect_verdict(
+      "comptime func f(): i32 {\n"
+      "  var x: i32 = 1;\n"
+      "  defer |x| { x = x + 10; }\n"
+      "  defer |x| { x = x + 100; }\n"
+      "  return x;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var r: i32 = f();\n"
+      "  if (r != 1) { return report(9); }\n"
+      "  return report(0);\n"
+      "}\n");
 }

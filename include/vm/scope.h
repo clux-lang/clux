@@ -19,11 +19,6 @@ extern "C" {
  * - 变量查找沿 parent 链向上递归（当前 -> parent -> ... -> global）
  * - 作用域退出时通过 owned 销毁所有 value
  * - children 向量记录所有子作用域，用于 error 传播时砍掉整个子树
- * - defers 是**借用**向量（value_t*，不拥有值）：本作用域登记的全部 defer
- *   闭包值，按登记序存放；作用域退出时**逆序**执行（LIFO）。值本体的生命
- *   周期仍由 owned 统一管理（defer 栈只存指针），因此既不泄漏也不会 double
- *   free——执行完 defer 后 owned 照常 dispose 这些函数值（func value 的
- *   dispose 是 no-op，func_t 本体归 vm->functions）。
  * - frame 是与父子关系同步的轻量节点（frame.parent == parent->frame，
  *   根作用域 frame.parent == NULL）：value 借用 &scope->frame 标记所属
  *   作用域，所有权分析经 parent 链判定逃逸（见 scope_frame.h）
@@ -36,7 +31,6 @@ typedef struct scope_t {
     strmap_t       *vars;      /* name -> value_t* 借用映射（不拥有 value） */
     vec_t          *owned;     /* value_t* 所有 value（scope 拥有生命周期） */
     vec_t          *children;  /* scope_t* 子作用域（不拥有，子自行管理生命周期） */
-    vec_t          *defers;    /* value_t* 借用（defer 闭包值，登记序；逆序执行） */
     allocator_t    *alloc;     /* 借用 vm 的 allocator */
 } scope_t;
 
@@ -98,31 +92,6 @@ value_t *scope_lookup(const scope_t *scope, strslice_t name);
 static inline scope_t *scope_parent(const scope_t *scope) {
     return scope ? scope->parent : NULL;
 }
-
-/* ---- defer 栈（延迟执行块）---- */
-
-/**
- * 登记一个 defer 闭包值到 scope 的 defer 栈（**借用**，不接管所有权）。
- * 值本体必须已由该 scope（或外层）的 owned 列表持有——正常路径是
- * BCODE_DEFER 弹出的、由 MAKE_FUNCTION 刚构造并 auto-track 进当前 scope
- * 的函数值。栈空时无操作。
- */
-void scope_add_defer(vm_t *vm, scope_t *scope, value_t *v);
-
-/**
- * **逆序**（LIFO）执行 scope 的 defer 栈：逐个 value_call(闭包, 无参)，
- * 全部执行完后清空栈。执行期间临时把 vm->current_scope 切到本 scope
- * （闭包体沿作用域链查找本 scope 的变量），返回前恢复。
- *
- * 调用时机：vm_pop_scope 在 scope_destroy（dispose owned + 释放 scope）
- * **之前**调用本函数——defer 体内因此能正常读到本作用域的一切（含
- * own/fatal 变量与它们指向的堆块）。defer 的返回值不传给任何消费点
- * （作用域正在销毁，没有接收方，与 `_ = expr` 丢弃语义一致）：唯一例外是
- * error 值（引擎级失败）会以 `defer: <消息>` 打到 stderr，避免 defer 体
- * 静默半途而废——不影响控制流与退出码。
- * 无 defer（绝大多数作用域）时零开销直接返回。
- */
-void scope_run_defers(vm_t *vm, scope_t *scope);
 
 #ifdef __cplusplus
 }

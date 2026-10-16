@@ -1835,26 +1835,6 @@ static value_t *op_pop_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
-/* DEFER：弹栈顶**函数值**（defer 的无参 void 闭包）→ 借用登记进**当前
- * 作用域**的 defer 栈（scope_t::defers，登记序）。作用域退出时由
- * vm_pop_scope → scope_run_defers 逆序执行（在 dispose/销毁之前）。
- *
- * 值的所有权不转移：MAKE_FUNCTION 构造的实例已 auto-track 进同一个 scope
- * 的 owned 列表，本指令只记指针（栈里不存值本体 → 无泄漏、无 double free）。
- * 校验栈顶确实是函数值：非函数值只可能来自编译器 bug，返回硬错误而非崩溃。 */
-static value_t *op_defer(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)bc; (void)pc;
-    value_t *d = exec_stack_pop(vm);
-    if (!d) return value_make_error(vm, "exec: defer expects a function value");
-    const type_t *t = value_type(d);
-    if (!t || t->kind != TYPE_KIND_FUNC)
-        return value_make_error(vm, "exec: defer expects a function value");
-    if (!vm->current_scope)
-        return value_make_error(vm, "exec: defer without an active scope");
-    scope_add_defer(vm, vm->current_scope, d);
-    return NULL;
-}
-
 /* ---- M5 模块系统 ---- */
 
 /* IMPORT <str>：模块规范路径。查 vm->modules 表，构造模块值压栈。
@@ -2685,7 +2665,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_EXTERN_LOAD]     = op_extern_load,
     [BCODE_EXTERN_STORE]    = op_extern_store,
     [BCODE_DATA]            = op_data,
-    [BCODE_DEFER]           = op_defer,
     [BCODE_LOAD_ATTR]       = op_load_attr,
     [BCODE_STORE_ATTR]      = op_store_attr,
     [BCODE_MARK_UNIQUE]     = op_mark_unique,

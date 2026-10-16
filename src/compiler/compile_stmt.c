@@ -20,7 +20,6 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
-#include "parser/ast_defer.h"
 #include "parser/ast_deref.h"
 #include "parser/lexer.h"
 
@@ -314,6 +313,9 @@ void compile_struct_member_init(compiler_t *c, ast_struct_def_t *n) {
   }
 }
 
+/* 前向声明：compile_block_body 遍历时对 return/break/continue 调用 */
+static void compile_exit_with_defers(compiler_t *c, ast_node_t *node);
+
 void compile_block_body(compiler_t *c, ast_block_t *b) {
   for (ast_node_t *s = b->stmts; s; s = s->next)
     if (s->kind == AST_TYPE_DEF || s->kind == AST_ENUM_DEF ||
@@ -346,7 +348,62 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
       }
       continue;
     }
+    /* return/break/continue：退出点 defer calls 挂载在节点 defers 字段，
+       compiler 先求值返回值/准备跳转，再编译 defer calls，最后发 RET/JMP。
+       不在语句链中插入 defer calls，块尾正常退出路径单独追加。 */
+    if (s->kind == AST_RETURN || s->kind == AST_BREAK ||
+        s->kind == AST_CONTINUE) {
+      compile_exit_with_defers(c, s);
+      if (c->failed) return;
+      continue;
+    }
     compile_stmt(c, s);
+  }
+}
+
+/* return/break/continue 退出点 + 挂载的 defer calls 编译。
+   sema desugar_defers 把沿作用域链收集的 defer call 语句挂载到退出点
+   节点的 defers 字段。compiler 先编译退出点的值/跳转准备，然后编译
+   defers 链中的 call 语句，最后发实际的 RET/JMP——保证：
+   - return 值在 defer 之前求值（压栈后 defer 执行，最后 RET 弹出返回值）
+   - defer 在实际跳转之前执行（break/continue 先跑 defer 再 POP+JMP）
+   - 不引入临时变量，避免 fatal/ref/own 语义被 var 定义改变 */
+static void compile_exit_with_defers(compiler_t *c, ast_node_t *node) {
+  /* return：先编译返回值压栈 */
+  if (node->kind == AST_RETURN) {
+    ast_return_t *n = (ast_return_t *)node;
+    if (n->value) {
+      compile_expr(c, n->value);             /* 栈: [retval] */
+    } else {
+      bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* void return */
+      st_push(c, 1);
+    }
+    /* 编译挂载的 defer calls */
+    for (ast_node_t *d = node->defers; d; d = d->next) {
+      compile_stmt(c, d);
+      if (c->failed) return;
+    }
+    bcode_write_op(c->bc, BCODE_RET);        /* 栈顶即返回值 */
+    st_push(c, -1);                          /* 返回值被 RET 消费 */
+    return;
+  }
+  /* break/continue：先编译 defer calls，再 balance_scopes_out + JMP */
+  for (ast_node_t *d = node->defers; d; d = d->next) {
+    compile_stmt(c, d);
+    if (c->failed) return;
+  }
+  if (node->kind == AST_BREAK) {
+    if (!c->loop_stack) { c_error(c, node, "break outside loop"); return; }
+    size_t out = c->scope_depth - c->loop_stack->scope_depth;
+    balance_scopes_out(c, out);
+    bcode_write_op(c->bc, BCODE_JMP);
+    emit_jump(c, c->loop_stack->break_label);
+  } else { /* AST_CONTINUE */
+    if (!c->loop_stack) { c_error(c, node, "continue outside loop"); return; }
+    size_t out = c->scope_depth - c->loop_stack->scope_depth;
+    balance_scopes_out(c, out);
+    bcode_write_op(c->bc, BCODE_JMP);
+    emit_jump(c, c->loop_stack->continue_label);
   }
 }
 
@@ -823,27 +880,8 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     /* 局部函数定义：compile_block_body 入口提升已处理（注册段字节码），
        定义点跳过。 */
     break;
-  case AST_DEFER: {
-    /* defer ['<a,b>] [|caps|] { body }：
-         1. compile_expr(closure) —— 与源码里手写的函数字面量**同一套**发射：
-            MAKE_FUNCTION <fid>（从基底实例化独立新实例，closure_scope 捕获槽
-            undefined 占位）+ 每捕获 [捕获值, SET_CLOSURE "name"]（纯 id 捕获
-            PUSH 外层变量值、括号捕获定义点求值）→ 函数值留栈顶。
-         2. BCODE_DEFER —— 弹该函数值 → 登记进**当前作用域**的 defer 栈
-            （scope_t::defers，借用指针；值本体仍归 scope->owned 所有，统一
-            释放）。作用域退出（vm_pop_scope）时在 dispose/销毁**之前**逆序
-            弹出逐个 value_call。
-       栈净 0（+1 函数值，DEFER -1）——defer 是语句，无值产生。 */
-    ast_defer_t *d = (ast_defer_t *)node;
-    if (!d->closure) {
-      c_error(c, node, "compiler: defer without closure body");
-      return;
-    }
-    compile_expr(c, (ast_node_t *)d->closure); /* 栈: [func value] */
-    bcode_write_op(c->bc, BCODE_DEFER);        /* 弹 1 → 登记进当前 scope */
-    st_push(c, -1);
-    break;
-  }
+  /* AST_DEFER 已在 sema Pass 3a desugar_defers 中改写为 AST_FUNC_DEF +
+     退出点 call（AST_EXPR_STMT），到达 compiler 时已不存在 AST_DEFER。 */
   case AST_ERROR:
     c_error(c, node, "compile aborted on parse error node");
     return;

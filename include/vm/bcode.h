@@ -240,17 +240,6 @@ typedef enum {
                              * 必须像 `x.&`（ADDR）那样在调用点就地完成：编译器压序列的
                              * 借用视图，本指令从中读出真实的 ptr 字段。 */
 
-    /* ---- defer（延迟执行块；**追加在末尾**，不动既有编号）---- */
-    BCODE_DEFER,            /* 无操作数：弹栈顶**函数值**（无参 void 闭包，
-                             * 与函数字面量同一套 MAKE_FUNCTION + SET_CLOSURE 发射）
-                             * → 借用登记进**当前作用域**的 defer 栈
-                             * （scope_t::defers，登记序）。作用域退出
-                             * （vm_pop_scope → scope_run_defers）时在 dispose
-                             * 与 scope 销毁**之前**逆序弹出逐个 value_call。
-                             * 值本体不进 defer 栈的所有权：它由 value_make 自动
-                             * track 进同一个 scope 的 owned 列表，栈里只存借用
-                             * 指针——既不泄漏也不 double-free。 */
-
     /* ---- struct 方法调用（**追加在末尾**，不动既有编号）----
      *
      * 不复用 CALL：方法 func value 存在 struct_type 的 attributes 表中，而非

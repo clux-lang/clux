@@ -220,6 +220,11 @@ typedef struct sema_t {
        comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
     uint32_t      func_id_next;
 
+    /* defer 改写计数器：每个 defer 语句改写为临时函数定义 __defer_N，
+       N 从 0 起在 sema 生命周期内单调递增（块内唯一，跨块亦唯一——
+       名字仅用于 sema/compiler 内部绑定，不暴露给用户）。 */
+    uint32_t      defer_seq;
+
     /* **表达式求值上下文**：匿名构造目标类型栈（见 sema_expr_ctx_t）。 */
     sema_expr_ctx_t ex;
 

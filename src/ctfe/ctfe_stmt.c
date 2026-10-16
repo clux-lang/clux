@@ -97,7 +97,28 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
                 vm_pop_scope(vm);
                 return r;
             }
-            if (ctx->ctrl != CTFE_CTRL_NONE) break;
+            if (ctx->ctrl != CTFE_CTRL_NONE) {
+                /* 退出点节点上挂载的 defer calls（desugar_defers 设到
+                   defers 字段）仍需执行——先跑 defer 再退出块。
+                   保存/恢复 ctrl + ret_value：defer call 是无参 void 函数，
+                   ctfe_call_ast_fn 会重置 ctrl/ret_value，不能让 defer
+                   覆盖外层 return/break/continue 的控制流状态。 */
+                ctfe_ctrl_t saved_ctrl = ctx->ctrl;
+                value_t *saved_ret = ctx->ret_value;
+                for (ast_node_t *d = s->defers; d; d = d->next) {
+                    ctx->ctrl = CTFE_CTRL_NONE;
+                    ctx->ret_value = NULL;
+                    value_t *dr = ctfe_eval_stmt(ctx, d);
+                    if (value_is_error(vm, dr)) {
+                        dr = ctfe_hoist_error(ctx, dr);
+                        vm_pop_scope(vm);
+                        return dr;
+                    }
+                }
+                ctx->ctrl = saved_ctrl;
+                ctx->ret_value = saved_ret;
+                break;
+            }
         }
         /* 块 pop 前：RETURN 值上移，防止 pop 销毁（嵌套块逐层上移） */
         ctfe_hoist_return(ctx);
@@ -289,13 +310,10 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     }
     case AST_EMPTY_STMT:
         return value_make_undefined(vm); /* ; 空语句：无操作 */
-    case AST_DEFER:
-        /* defer 是**运行期**作用域退出钩子：CTFE 没有"作用域栈退出时回调"
-        这一层（解释器逐语句求值，块 pop 直接 vm_pop_scope），因此 comptime
-        求值里明确拒绝而不是静默丢弃（静默丢弃会让 comptime 与运行期语义
-        分叉：同一个函数在 comptime 调用点少跑一次延迟块）。 */
-        return ctfe_err(ctx, "ctfe: 'defer' is not supported in comptime "
-                             "evaluation (it is a runtime scope-exit hook)");
+    /* AST_DEFER 已在 sema Pass 3a desugar_defers 中改写为 AST_FUNC_DEF +
+       退出点 call（AST_EXPR_STMT），到达 CTFE 时已不存在 AST_DEFER。
+       defer 体内的函数定义和 call 语句走正常的 AST_FUNC_DEF / AST_EXPR_STMT
+       路径，CTFE 自然执行，不再需要拒绝。 */
     case AST_FUNC_DEF: {
         /* comptime body 内函数定义语句（func inc(){}）：求值函数值
            （ctfe_eval_func_def 已绑定名字到当前 vm 作用域，供后续

@@ -27,6 +27,9 @@ typedef struct ast_node {
     struct ast_node *parent;      /* 父节点（构建时填充） */
     struct ast_node *next;        /* 兄弟链（语句列表/参数/实参） */
     bool             is_exported;/* M5：export 前缀标记（全局声明进入模块导出表） */
+    struct ast_node *defers;     /* 退出点 defer call 链（仅 AST_RETURN/
+                                   AST_BREAK/AST_CONTINUE，sema desugar_defers
+                                   设置；compiler 在 RET/JMP 前编译执行） */
 } ast_node_t;
 
 /* ================================================================ */

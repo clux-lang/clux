@@ -126,7 +126,6 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_EXTERN_STORE] = { "EXTERN_STORE",  { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
     [BCODE_GET_MEMBER]     = { "GET_MEMBER",    { BCODE_ASM_OP_STR } },
     [BCODE_DATA]           = { "DATA",          { BCODE_ASM_OP_NONE } },
-    [BCODE_DEFER]          = { "DEFER",         { BCODE_ASM_OP_NONE } },
     [BCODE_MEMBER_CALL]    = { "MEMBER_CALL",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32 } },
     [BCODE_LOAD_ATTR]      = { "LOAD_ATTR",     { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },
     [BCODE_STORE_ATTR]     = { "STORE_ATTR",    { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },

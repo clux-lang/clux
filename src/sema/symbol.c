@@ -23,6 +23,7 @@ sema_scope_t *sema_scope_new(allocator_t *alloc, sema_scope_kind_t kind,
   scope->alloc = alloc;
   scope->children = vec_new(alloc, false); /* 元素由递归销毁管理，非 vec_free */
   scope->symbols = strmap_new(alloc, true); /* owns sema_symbol_t* */
+  scope->defers = vec_new(alloc, false);    /* 借用 ast_func_def_t*（arena 托管） */
   scope->kind = kind;
   return scope;
 }
@@ -43,6 +44,9 @@ void sema_scope_destroy(sema_scope_t **scope) {
   /* 2. 符号的 ast 借用 AST（arena 管理），不释放；直接销毁符号表 */
   strmap_free(alloc, &self->symbols);
 
+  /* 2b. defers 向量：借用指针（AST arena 托管），仅释放向量结构 */
+  vec_free(alloc, &self->defers);
+
   /* 3. 释放自身 */
   allocator_free(alloc, (void **)scope);
 }
@@ -61,6 +65,32 @@ size_t sema_scope_children_count(const sema_scope_t *scope) {
 sema_scope_t *sema_scope_child(const sema_scope_t *scope, size_t idx) {
   if (!scope) return NULL;
   return (sema_scope_t *)vec_get(scope->children, idx);
+}
+
+/* ---- defer 登记/收集（Pass 3a build_block 用） ---- */
+
+void sema_scope_add_defer(sema_scope_t *scope, ast_node_t *fn) {
+  if (!scope || !fn || !scope->defers) return;
+  vec_push(scope->defers, scope->alloc, fn);
+}
+
+size_t sema_scope_collect_defers(sema_scope_t *from_scope,
+                                 const sema_scope_t *stop_scope,
+                                 ast_node_t **out, size_t cap) {
+  if (!from_scope || !out || cap == 0) return 0;
+  /* 沿 parent 链从内到外收集各层 defers，每层内部按登记顺序逆序（LIFO）。
+     最终输出顺序 = 执行顺序：
+     [最内层最后登记的defer, ..., 最内层第一个defer,
+      次内层最后登记的defer, ..., 次内层第一个defer, ...] */
+  size_t count = 0;
+  for (sema_scope_t *s = from_scope; s && s != stop_scope; s = s->parent) {
+    if (!s->defers) continue;
+    size_t n = vec_len(s->defers);
+    for (size_t i = n; i > 0 && count < cap; i--) {
+      out[count++] = (ast_node_t *)vec_get(s->defers, i - 1);
+    }
+  }
+  return count;
 }
 
 /* ---- 符号操作 ---- */

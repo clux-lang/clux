@@ -215,6 +215,11 @@ struct _sema_scope_t {
   allocator_t    *alloc;    /* 借用调用方的 allocator（内部操作自取） */
   vec_t          *children; /* sema_scope_t* 子作用域（按出现顺序，不拥有） */
   strmap_t       *symbols;  /* name -> sema_symbol_t*（owns_value=true） */
+  vec_t          *defers;   /* ast_node_t* 借用（AST arena 托管，实际为
+                               ast_func_def_t*——base 是 ast_node_t 首字段）：
+                               defer 改写为临时函数定义后登记于此，供作用域
+                               退出点（块尾/return/break/continue）逆序插入
+                               call 语句（Pass 3a build_block 收集） */
   sema_scope_kind_t kind;
 };
 typedef struct _sema_scope_t sema_scope_t;
@@ -271,6 +276,19 @@ sema_symbol_t *sema_lookup(const sema_scope_t *scope, strslice_t name);
  */
 sema_symbol_t *sema_scope_find_local(const sema_scope_t *scope,
                                      strslice_t name);
+
+/* ---- defer 登记/收集（Pass 3a build_block 用） ---- */
+
+/** 登记一个 defer 临时函数定义到当前作用域的 defers 向量（借用指针，
+    AST arena 托管）。作用域退出点逆序调用。 */
+void sema_scope_add_defer(sema_scope_t *scope, ast_node_t *fn);
+
+/** 从 from_scope 沿 parent 链向上到 stop_scope（不含）收集沿途各层 defers，
+    逆序（从内到外）写入 out 数组。返回总数。out 容量由 cap 限定。
+    用于 return/break/continue 前插入逆序 call 序列。 */
+size_t sema_scope_collect_defers(sema_scope_t *from_scope,
+                                 const sema_scope_t *stop_scope,
+                                 ast_node_t **out, size_t cap);
 
 #ifdef __cplusplus
 }
