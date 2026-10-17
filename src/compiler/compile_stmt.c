@@ -886,21 +886,18 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   case AST_ERROR:
     c_error(c, node, "compile aborted on parse error node");
     return;
-  case AST_FREE: {
-    /* `FREE <expr>`：编译操作数表达式压栈，再发 FREE（只消费栈顶）。
-       **compiler 不知道任何类型结构**——"释放什么"完全由 sema 生成的
-       expr 决定。目前简单指针下 expr 就是变量引用（→ PUSH <name>），
-       于是字节码是 `PUSH <name>` + `FREE`；将来复杂类型的展开（循环 /
-       判断 / get_field / get_index）同样只是别的 expr，编译器无需改动。
-       `operand` 是操作数兄弟链链首（组合式释放时多于一条）。 */
-    ast_free_t *n = (ast_free_t *)node;
-    for (ast_node_t *op = n->operand; op; op = op->next) {
-      compile_expr(c, op);                   /* 栈: [handle] */
-      bcode_write_op(c->bc, BCODE_FREE);     /* 释放栈顶 */
-      st_push(c, -1);
+  case AST_FREE:
+    /* `FREE <expr>` 本质是**表达式**（结果 void），语句位置直接复用表达式
+       编译路径。sema 也可能把它包进 AST_EXPR_STMT，两种形态都合法。
+       操作数是兄弟链（组合式释放 = 多于一条），逐条编译。 */
+    for (ast_node_t *op = ((ast_free_t *)node)->operand; op; op = op->next) {
+      ast_free_t one = *(const ast_free_t *)node;
+      one.base.next = NULL;
+      one.operand   = op;
+      compile_expr(c, &one.base);          /* 编译一条 FREE，净 0 栈 */
+      if (c->failed) return;
     }
     break;
-  }
   default:
     c_error(c, node, "unsupported statement node '%s'", ast_kind_name(node->kind));
     return;

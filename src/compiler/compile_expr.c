@@ -9,6 +9,7 @@
 #include "parser/ast_scope_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
+#include "parser/ast_free.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
@@ -1026,6 +1027,21 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     compile_expr(c, n->operand);        /* 栈: [value] */
     bcode_write_op(c->bc, BCODE_ADDR);
     st_push(c, 0);                      /* 弹 1 压 1，净 0 */
+    break;
+  }
+  case AST_FREE: {
+    /* `FREE <expr>` 是**表达式**（结果 void）：编译操作数压栈，再发 FREE
+       （只消费栈顶）。**compiler 不知道任何类型结构**——"释放什么"完全由
+       sema 生成的操作数表达式决定（struct 槽位 → FIELD_GET 链、数组/切片
+       元素 → INDEX 链、闭包捕获 → FIELD_GET 按捕获名）。
+       所有权模型 A 方案：销毁在 sema 侧**完全由 AST 生成**，切片插 for、
+       optional/union 插 if，退出点插入的是**语句列表**而不是单条 FREE。 */
+    ast_free_t *n = (ast_free_t *)node;
+    if (n->operand) {
+      compile_expr(c, n->operand);         /* 栈: [handle] */
+      bcode_write_op(c->bc, BCODE_FREE);   /* 释放栈顶，净 -1 */
+      st_push(c, -1);
+    }
     break;
   }
   case AST_MOVE: {

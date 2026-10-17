@@ -617,11 +617,13 @@ TEST(Driver, StepBClosureOwnBareCaptureRejected) {
 }
 
 TEST(Driver, StepBClosureMoveCapturePasses) {
-  /* §9.1 move 捕获：|(q = move(p))| 推断 own *T，转移所有权 */
+  /* §9.1 move 捕获：|(q = move(p))| 推断 own *T，转移所有权。
+     **捕获了 own 的闭包本身即 OWN**（唯一的 own 产生式），所以变量初始化
+     必须显式 `move(...)`（`var f = <closure>` 会被拒：OWN 不能给 NONE 位置）。 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{42};\n"
-      "  var f = func |(q = move(p))| get(): i32 { return q.*; };\n"
+      "  var f = move(func |(q = move(p))| get(): i32 { return q.*; });\n"
       "  if (f() != 42) { return 1; }\n"
       "  return 0;\n"
       "}\n");
@@ -630,11 +632,12 @@ TEST(Driver, StepBClosureMoveCapturePasses) {
 }
 
 TEST(Driver, StepBClosureCloneCapturePasses) {
-  /* §9.1 clone 捕获：|(q = clone(p))| 深拷贝，原对象不变 */
+  /* §9.1 clone 捕获：|(q = clone(p))| 深拷贝，原对象不变。
+     同 MoveCapture：闭包含 own 捕获即 OWN → 初始化须 `clone(...)`。 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{42};\n"
-      "  var f = func |(q = clone(p))| get(): i32 { return q.*; };\n"
+      "  var f = clone(func |(q = clone(p))| get(): i32 { return q.*; });\n"
       "  if (f() != 42) { return 1; }\n"
       "  if (p.* != 42) { return 2; }\n"
       "  return 0;\n"
