@@ -488,6 +488,9 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         }
         elems_arr[i].type   = pt;
         elems_arr[i].offset = 0; /* seal 统一布局 */
+        /* 槽位所有权：先解析后提取会丢 token，故须在 resolve 前取——
+           这里 pt 已解析，改从原始类型表达式取（未被折叠的兄弟节点）。 */
+        elems_arr[i].ownership = sema_type_expr_ownership(et);
       }
       return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
     }

@@ -308,6 +308,13 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
       }
     }
     fields[i].type = ft;
+    /* 匿名构造的字段槽位所有权：字段值若是将亡值（new/move/clone/
+       含 own 字段的构造），该槽位即接管所有权 → OWN；否则 NONE。
+       ref 槽位在匿名构造里由 type_expr 一侧决定，此处无显式标注 → NONE。 */
+    fields[i].ownership =
+        (fv && !value_is_error(sema->vm, fv) && sema_value_is_fatal(fv))
+            ? OWN_OWN
+            : OWN_NONE;
   }
 
   /* 第三遍：构造匿名 struct 类型 + 登记 sema_type（hoist 提升区） */

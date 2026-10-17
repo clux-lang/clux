@@ -1134,6 +1134,8 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       continue;
     }
     members[i].payload_type = ft;
+    /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
+    members[i].ownership = sema_type_expr_ownership(sf->type);
   }
 
   if (!ok) {
@@ -1249,6 +1251,8 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
       continue;
     }
     members[i].type = ft;
+    /* 槽位所有权（cunion 无 tag，不参与自动销毁——记录仅为类型描述完整） */
+    members[i].ownership = sema_type_expr_ownership(sf->type);
   }
 
   if (!ok) {

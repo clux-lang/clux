@@ -312,8 +312,8 @@ const type_t *type_struct_alloc_open(vm_t *vm) {
 
 /* DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略）。
  * 开放阶段动态扩容（field_count 递增）。 */
-void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
-                           const type_t *ftype) {
+void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
+                              const type_t *ftype, ownership_t ownership) {
     if (!vm || !t || t->kind != TYPE_KIND_STRUCT || type_is_sealed(t)) return;
     struct_type_t *st = (struct_type_t *)t;
 
@@ -328,11 +328,19 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     if (n > 0) memcpy(nf, st->fields, n * sizeof(struct_field_t));
     if (st->fields) allocator_free(vm->alloc, (void **)&st->fields);
 
-    nf[n].name   = nbuf;
-    nf[n].offset = 0;  /* 布局在 seal 时统一计算 */
-    nf[n].type   = ftype;
+    nf[n].name      = nbuf;
+    nf[n].offset    = 0;  /* 布局在 seal 时统一计算 */
+    nf[n].type      = ftype;
+    /* 槽位所有权：类型描述的一部分（销毁序列从 type 对象反推的依据） */
+    nf[n].ownership = ownership;
     st->fields = nf;
     st->field_count = n + 1;
+}
+
+/* 兼容包装：槽位所有权缺省 OWN_NONE（普通字段）。 */
+void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
+                           const type_t *ftype) {
+    type_struct_add_field_ex(vm, t, name, ftype, OWN_NONE);
 }
 
 /* 按 (字段名 + 类型 + 顺序) 判断两结构体是否等价（去重 intern 用）。所有权

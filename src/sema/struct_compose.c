@@ -355,12 +355,17 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
 
   const type_t **ftype = NULL;
   strslice_t     *fname = NULL;
+  /* 每个字段槽位的所有权（销毁序列从 type 对象反推的依据；类型描述的一部分） */
+  ownership_t    *fown  = NULL;
   if (nfs > 0) {
     ftype = (const type_t **)arena_alloc(sema->arena, nfs * sizeof(type_t *),
                                          ALIGNOF(max_align_t));
     fname = (strslice_t *)arena_alloc(sema->arena, nfs * sizeof(strslice_t),
                                       ALIGNOF(max_align_t));
-    if (!ftype || !fname) return SEMA_COMPOSE_FAILED;
+    fown  = (ownership_t *)arena_alloc(sema->arena, nfs * sizeof(ownership_t),
+                                       ALIGNOF(max_align_t));
+    if (!ftype || !fname || !fown) return SEMA_COMPOSE_FAILED;
+    for (size_t k = 0; k < nfs; k++) fown[k] = OWN_NONE;
     bool pending = false, bad = false;
     size_t i = 0;
     for (ast_node_t *f = sd->fields; f; f = f->next, i++) {
@@ -374,6 +379,9 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
         pending = true;
         continue;
       }
+      /* **先提取槽位所有权，再解析**：sema_resolve_type_slot 会把
+         AST_PTR/AST_SLICE_TYPE 折叠成 AST_TYPE_REF，之后 token 丢失。 */
+      ownership_t field_own = sema_type_expr_ownership(sf->type);
       const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
       if (!ft) {
         if (slot_names_type_symbol(sema, sf->type)) {
@@ -411,6 +419,7 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
       }
       ftype[i] = ft;
       fname[i] = sf->name;
+      fown[i]  = field_own;
     }
     if (bad) return SEMA_COMPOSE_FAILED;
     if (pending) return SEMA_COMPOSE_DEFERRED;
@@ -567,7 +576,7 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
   {
     size_t i = 0;
     for (ast_node_t *f = sd->fields; f; f = f->next, i++)
-      type_struct_add_field(vm, t, fname[i], ftype[i]);
+      type_struct_add_field_ex(vm, t, fname[i], ftype[i], fown[i]);
   }
 
   if (nembs > 0) {

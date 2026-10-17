@@ -60,7 +60,15 @@ const type_t *type_struct_push(vm_t *vm);
  * 不向操作数栈压 type value；密封由 type_struct_seal 完成。 */
 const type_t *type_struct_alloc_open(vm_t *vm);
 
-/** DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略） */
+/** DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略）
+ *
+ * `ownership` 是该**字段槽位**的所有权（own/ref/fatal/none，见
+ * struct_field_t::ownership）。它是类型描述的一部分，且参与 intern 去重。
+ * 传 OWN_NONE 等价于"普通字段"。 */
+void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
+                              const type_t *ftype, ownership_t ownership);
+
+/** 兼容包装：不关心槽位所有权时用（等价于 ownership = OWN_NONE）。 */
 void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
                            const type_t *ftype);
 
