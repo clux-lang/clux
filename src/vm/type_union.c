@@ -414,6 +414,10 @@ const type_t *type_union_intern_with_ownership(vm_t *vm,
         copy[i].name         = (strslice_t){ nbuf, members[i].name.len };
         copy[i].tag          = members[i].tag;
         copy[i].payload_type = members[i].payload_type;
+        /* **槽位所有权必须一起拷贝**：它是类型描述的一部分（销毁序列据此
+           生成 `if (v is m) { FREE v.m }`），漏拷会让 own 成员被判成 NONE
+           ——CONSTRUCT 不产 FATAL，销毁序列为空 → 静默泄漏。 */
+        copy[i].ownership    = members[i].ownership;
     }
     ut->members = copy;
     ut->member_count = count;

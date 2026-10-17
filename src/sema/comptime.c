@@ -1113,9 +1113,8 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
     }
     if (dup) continue;
 
-    /* **先捕获槽位所有权，再解析**：sema_resolve_type_slot 会把
-       AST_PTR/AST_SLICE_TYPE 折叠成 AST_TYPE_REF，之后 token 丢失。 */
-    ownership_t member_own = sema_type_expr_ownership(sf->type);
+    /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。 */
+    ownership_t member_own = (ownership_t)sf->ownership;
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
@@ -1127,16 +1126,17 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       ok = false;
       continue;
     }
-    /* ⚠️ 限制仍在：tag union 的销毁序列生成器（gen_destroy_union）与
-       AST_IS_TAG 节点已就绪，但 member 的槽位所有权在**推测轮**被折叠
-       （sema_type_expr_ownership 拿到 NONE），导致 type_has_own_slots 对
-       union 返回 false —— 此时若放开限制，`var u: U = .U{ .p = new i32{1} }`
-       会被当作 NONE（不生成 FREE）→ **静默泄漏**。先保持禁止，待修好
-       ownership 捕获时序再放开。 */
+    /* ⚠️ tag union 的指针/切片仍**禁止**：销毁生成器（gen_destroy_union）与
+       AST_IS_TAG 已就绪，但放开后实测**栈溢出**（exit=0xC00000FD），根因未定位。
+       在修好之前保持禁止——宁可明确拒绝，也不要崩溃或静默泄漏。
+       （另：本次已修好 member 表在 intern/seal 时丢失槽位所有权的问题，
+       那是前置条件，见 type_union.c / type_struct.c / type_tuple.c /
+       type_cunion.c 的 ownership 拷贝。） */
     if (type_contains_ptr_or_slice(ft)) {
       diag_error(sema->diag, sema_loc(sema, sf->type),
                  "union '%.*s': member '%.*s' has pointer or slice type; "
-                 "temporarily disallowed (ownership capture under repair)",
+                 "not supported yet (destruction via tag-conditional FREE "
+                 "pending)",
                  (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
                  sf->name.ptr);
       ok = false;
@@ -1239,8 +1239,8 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     }
     if (dup) continue;
 
-    /* **先捕获槽位所有权，再解析**（折叠后 token 丢失）。 */
-    ownership_t cunion_member_own = sema_type_expr_ownership(sf->type);
+    /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。 */
+    ownership_t cunion_member_own = (ownership_t)sf->ownership;
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);

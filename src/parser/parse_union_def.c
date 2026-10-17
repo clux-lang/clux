@@ -1,4 +1,5 @@
 #include "parser/ast_union_def.h"
+#include "parser/ast_var_def.h"  /* ast_type_expr_ownership_code */
 #include "parser/parse_expr.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_struct_def.h"
@@ -80,6 +81,8 @@ ast_node_t *parse_union_def(parser_t *p) {
         if (!fn) return NULL;
         ((ast_struct_field_t *)fn)->name = fname;
         ((ast_struct_field_t *)fn)->type = ftype;
+    ((ast_struct_field_t *)fn)->ownership =
+        ast_type_expr_ownership_code(ftype);   /* 折叠前缓存槽位所有权 */
         ast_append(&fields, &fields_last, NULL, fn);
 
         /* 分号分隔，} 结束 */

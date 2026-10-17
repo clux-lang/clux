@@ -53,6 +53,11 @@ typedef struct {
     ast_node_t  base;    /* kind = AST_STRUCT_FIELD */
     strslice_t  name;    /* 字段名 */
     ast_node_t *type;    /* 字段类型表达式 */
+    /* 字段槽位所有权的**解析期缓存**（编码见 ast_var_def.h 的 AST_OWN_*）。
+       为什么在解析期就存：`type` 会在 sema 的推测轮里被折叠成 AST_TYPE_REF，
+       折叠后 ownership token 丢失，正式轮再取只会得到 NONE（union/cunion 的
+       `own` 成员曾因此判不出来）。与 `ast_var_def_t::ownership` 同一做法。 */
+    uint8_t     ownership;
 } ast_struct_field_t;
 
 static inline ast_node_t *ast_struct_def_new(arena_t *arena,

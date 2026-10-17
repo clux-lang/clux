@@ -333,6 +333,7 @@ const type_t *type_cunion_intern(vm_t *vm, const cunion_member_t *members,
             if (!nbuf) panic("vm: out of memory interning cunion member name");
             copy[i].name = (strslice_t){ nbuf, members[i].name.len };
             copy[i].type = members[i].type;
+            copy[i].ownership = members[i].ownership;
         }
         ct->members = copy;
         ct->member_count = count;

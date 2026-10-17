@@ -384,6 +384,9 @@ void type_tuple_add_elem(vm_t *vm, const type_t *t, const type_t *etype) {
 
     ne[n].offset = 0;  /* 布局在 seal 时统一计算 */
     ne[n].type   = etype;
+    /* 开放构造路径（PUSH_TUPLE/SEAL）没有槽位所有权信息 → OWN_NONE；
+       数组元素表由 sema 直接 intern，不走这里。 */
+    ne[n].ownership = OWN_NONE;
     tt->elems = ne;
     tt->elem_count = n + 1;
 }
@@ -508,6 +511,8 @@ const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *ele
         for (size_t i = 0; i < count; i++) {
             copy[i].offset = 0; /* seal 统一计算 */
             copy[i].type   = elems[i].type;
+            /* 槽位所有权随元素表一起拷贝（销毁序列与 CONSTRUCT→FATAL 依赖它） */
+            copy[i].ownership = elems[i].ownership;
         }
         tt->elems = copy;
         tt->elem_count = count;

@@ -379,9 +379,10 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
         pending = true;
         continue;
       }
-      /* **先提取槽位所有权，再解析**：sema_resolve_type_slot 会把
-         AST_PTR/AST_SLICE_TYPE 折叠成 AST_TYPE_REF，之后 token 丢失。 */
-      ownership_t field_own = sema_type_expr_ownership(sf->type);
+      /* 槽位所有权读**解析期缓存**（`ast_struct_field_t::ownership`）：
+         推测轮会把 `sf->type` 折叠成 AST_TYPE_REF，之后 token 丢失，
+         再取只会得到 NONE。 */
+      ownership_t field_own = (ownership_t)sf->ownership;
       const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
       if (!ft) {
         if (slot_names_type_symbol(sema, sf->type)) {

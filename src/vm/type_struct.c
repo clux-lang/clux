@@ -564,6 +564,7 @@ bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
                     nf[out].name   = struct_field_name_dup(vm, sp->fields[k].name);
                     nf[out].offset = 0;
                     nf[out].type   = sp->fields[k].type;
+                    nf[out].ownership = sp->fields[k].ownership;
                     out++;
                 }
             }
@@ -571,6 +572,7 @@ bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
                 nf[out].name   = struct_field_name_dup(vm, st->fields[fi].name);
                 nf[out].offset = 0;
                 nf[out].type   = st->fields[fi].type;
+                nf[out].ownership = st->fields[fi].ownership;
                 out++;
             }
         }
@@ -665,6 +667,8 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
             copy[i].name   = struct_field_name_dup(vm, fields[i].name);
             copy[i].offset = 0; /* seal 统一计算 */
             copy[i].type   = fields[i].type;
+            /* 槽位所有权随字段表一起拷贝（销毁序列与 CONSTRUCT→FATAL 依赖它） */
+            copy[i].ownership = fields[i].ownership;
         }
         st->fields = copy;
         st->field_count = count;
@@ -701,6 +705,7 @@ const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
             copy[i].name   = struct_field_name_dup(vm, src->fields[i].name);
             copy[i].offset = src->fields[i].offset;
             copy[i].type   = src->fields[i].type;
+            copy[i].ownership = src->fields[i].ownership;
         }
         st->fields = copy;
         st->field_count = src->field_count;
