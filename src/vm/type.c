@@ -238,6 +238,54 @@ char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
 
 /* ---- 递归指针/切片判定（见 type.h）---- */
 
+bool type_has_own_slots(const type_t *t) {
+    if (!t) return false;
+    switch (t->kind) {
+        case TYPE_KIND_STRUCT: {
+            const struct_type_t *st = (const struct_type_t *)t;
+            for (size_t i = 0; i < st->field_count; i++) {
+                if (st->fields[i].ownership == OWN_OWN) return true;
+                if (type_has_own_slots(st->fields[i].type)) return true;
+            }
+            return false;
+        }
+        case TYPE_KIND_TUPLE: {
+            const tuple_type_t *tt = (const tuple_type_t *)t;
+            for (size_t i = 0; i < tt->elem_count; i++) {
+                if (tt->elems[i].ownership == OWN_OWN) return true;
+                if (type_has_own_slots(tt->elems[i].type)) return true;
+            }
+            return false;
+        }
+        case TYPE_KIND_UNION: {
+            const union_type_t *ut = (const union_type_t *)t;
+            for (size_t i = 0; i < ut->member_count; i++) {
+                if (ut->members[i].ownership == OWN_OWN) return true;
+                if (type_has_own_slots(ut->members[i].payload_type)) return true;
+            }
+            return false;
+        }
+        case TYPE_KIND_CUNION: {
+            const cunion_type_t *ct = (const cunion_type_t *)t;
+            for (size_t i = 0; i < ct->member_count; i++) {
+                if (ct->members[i].ownership == OWN_OWN) return true;
+                if (type_has_own_slots(ct->members[i].type)) return true;
+            }
+            return false;
+        }
+        case TYPE_KIND_OPTION:
+            return type_has_own_slots(((const option_type_t *)t)->inner);
+        case TYPE_KIND_CONST:
+        case TYPE_KIND_VOLATILE:
+            return type_has_own_slots(type_qualifier_sub(t));
+        case TYPE_KIND_ARRAY:
+            return type_has_own_slots(((const array_type_t *)t)->elem_type);
+        default:
+            /* ptr / slice 是叶子：其 own 性由所在**槽位**的 ownership 记录 */
+            return false;
+    }
+}
+
 bool type_contains_ptr_or_slice(const type_t *t) {
     if (!t) return false;
     if (type_is_ptr_or_slice(t)) return true;

@@ -407,16 +407,11 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
           break;
         }
       }
-      /* 复合类型字段不得携带指针或切片——恢复到只有普通指针的场景。
-         指针/切片只能出现在变量声明/参数/返回值等顶层位置。 */
-      if (type_contains_ptr_or_slice(ft)) {
-        diag_error(sema->diag, sema_loc(sema, sf->type),
-                   "struct '%.*s': field '%.*s' has pointer or slice type; "
-                   "compound types cannot contain pointer/slice fields",
-                   (int)sd->name.len, sd->name.ptr, (int)sf->name.len,
-                   sf->name.ptr);
-        bad = true;
-      }
+      /* 注：原先这里禁止"结构体字段携带指针/切片"。该限制现已**放开**——
+         所有权与类型解耦后，字段的 own/ref 由 `struct_field_t::ownership`
+         记录（类型描述的一部分），销毁序列由 sema 按 type 对象生成：
+         只有 own 槽位进销毁序列，ref 槽位不进。因此 ref 字段不再有
+         "被误当作 own 释放"的风险。 */
       ftype[i] = ft;
       fname[i] = sf->name;
       fown[i]  = field_own;

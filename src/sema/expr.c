@@ -965,6 +965,15 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
 }
 
 /* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
+/* 构造结果值的状态（所有权模型 §0.3）：
+   字段含 own 槽位的 CONSTRUCT 产 **FATAL**（将亡值）——聚合必须由 `own` 位置
+   接收。判定依据是 type 对象上的槽位所有权（装饰器会改类型，AST 不可信）。 */
+static value_t *construct_result(sema_t *sema, const type_t *t) {
+  value_t *v = value_make_shadow(sema->vm, t);
+  if (v && type_has_own_slots(t)) value_set_ownership(v, OWN_FATAL);
+  return v;
+}
+
 static value_t *ex_construct(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
@@ -1028,7 +1037,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
            **再求值一遍**，对含 move() 的字段会留下假的 "used after move"
            （实测：`var c: Cell = .{ .v = (move(p)).* };` 被误拒，
            而同样代码写具名构造 `.Cell{...}` 正常）。 */
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       } else {
         t = sema_resolve_type_slot(sema, &n->type);
         if (!t) return val_void(sema);
@@ -1070,7 +1079,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
             }
           }
         }
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       }
 
       if (t->kind == TYPE_KIND_STRUCT) {
@@ -1194,7 +1203,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
           ast_append(&new_head, &new_last, NULL, slot[i]);
         n->fields      = new_head;
         n->fields_last = new_last;
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       }
 
       if (t->kind == TYPE_KIND_TUPLE) {
@@ -1283,7 +1292,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
           ast_append(&new_head, &new_last, NULL, slot[i]);
         n->fields      = new_head;
         n->fields_last = new_last;
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       }
 
       if (t->kind == TYPE_KIND_UNION) {
@@ -1374,7 +1383,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
         /* member 下标写回节点（compiler 发 tag 哨兵用） */
         n->member_tag = (uint32_t)mi;
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       }
 
       if (t->kind == TYPE_KIND_CUNION) {
@@ -1466,7 +1475,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
         /* member 下标写回节点（compiler 发哨兵用；cunion 无 tag，不写 data） */
         n->member_tag = (uint32_t)mi;
-        return value_make_shadow(sema->vm, t);
+        return construct_result(sema, t);
       }
 
       if (t->kind != TYPE_KIND_ARRAY) {
@@ -1552,7 +1561,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
         }
         idx += 1;
       }
-      return value_make_shadow(sema->vm, t);
+      return construct_result(sema, t);
 }
 
 /* AST_IDENT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -2902,10 +2911,13 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       if (!fatal) return val_void(sema);
       bool is_clone = n->op && token_is(n->op, "clone");
       /* 所有权纯编译期：fatal 是值层状态，不再有独立 fatal 类型变体。
-         move/clone 对**指针 / 切片**产生将亡值（标量无资源，fatal 折叠为自身）。
-         注：复合类型字段禁止携带指针/切片，所以不存在"含 own 的复合类型"这一形态。 */
+         move/clone 产生将亡值：**指针/切片**整体转移；**含 own 槽位的聚合**
+         也携带资源（其 own 字段），同样产 FATAL。标量无资源 → fatal 折叠为
+         自身，故不在此列。
+         判据读 type 对象（`type_has_own_slots`），与销毁序列生成器同一权威。 */
       bool produces_fatal = ot && (ot->kind == TYPE_KIND_PTR ||
-                                   ot->kind == TYPE_KIND_SLICE);
+                                   ot->kind == TYPE_KIND_SLICE ||
+                                   type_has_own_slots(ot));
 
       /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
          TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有

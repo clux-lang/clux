@@ -541,6 +541,18 @@ static inline bool type_is_ptr_or_slice(const type_t *t) {
  */
 bool type_contains_ptr_or_slice(const type_t *t);
 
+/**
+ * 该类型**是否含 own 槽位**（递归，从 type 对象判定）。
+ *
+ * 用于所有权模型的 CONSTRUCT 规则：字段含 own 的构造产 **FATAL** 将亡值
+ * （聚合必须由 `own` 位置接收）。
+ *
+ * 判定依据是 `struct_field_t::ownership` 等**槽位所有权**——它记在 type 对象上
+ * （装饰器会改类型，所以定义 AST 与构造式都不可信），不是 `type_t.ownership`。
+ * 叶子（ptr / slice）本身不算"含 own 槽位"：它们的 own 性由所在**槽位**记录。
+ */
+bool type_has_own_slots(const type_t *t);
+
 /* 注：原 `type_owns_resources` / `type_fatal_carries_resource` / `type_directly_owns`
  * 三个**类型层所有权谓词**已删除（2026-10 所有权重构）：所有权从类型层迁移到
  * 值/符号层（`type_t` 不再携带 ownership），且复合类型已禁止携带指针/切片，

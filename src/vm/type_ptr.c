@@ -96,6 +96,39 @@ bool ptr_type_needs_scan(const type_t *t) {
     }
 }
 
+/* 只释放**这一个**指针/切片的堆块，**不递归**被指向值/元素。
+   供 `FREE` 指令使用——A 方案（编译期 AST 生成销毁序列）下，被指向值的
+   own 槽位由 sema 生成的 `FREE v.f` 逐条释放，运行期不再按类型递归扫描。
+
+   这是一处**语义收紧**：旧 `ptr_free_owned_recursive` 会沿被指向类型无差别
+   递归所有指针字段（含 ref 槽位），一旦聚合能携带 ref 指针就会把借用目标的
+   栈地址也 free 掉（实测 0xC0000005）。改为非递归后，销毁序列**只**含 sema
+   判定为 own 的槽位，该错误没有产生路径。 */
+void ptr_free_block_only(vm_t *vm, const type_t *t, void *data) {
+    if (!vm || !t || !data) return;
+    switch (t->kind) {
+    case TYPE_KIND_PTR: {
+        ptr_value_t *pv = (ptr_value_t *)data;
+        if (!pv->ptr) return;
+        void *heap = pv->ptr;
+        pv->ptr = NULL;   /* 置空防双释放 */
+        allocator_free(vm->alloc, &heap);
+        return;
+    }
+    case TYPE_KIND_SLICE: {
+        slice_value_t *sv = (slice_value_t *)data;
+        if (!sv->ptr) return;
+        void *heap = sv->ptr;
+        sv->ptr = NULL;
+        sv->len = 0;
+        allocator_free(vm->alloc, &heap);
+        return;
+    }
+    default:
+        return;
+    }
+}
+
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {

@@ -121,6 +121,16 @@ bool ptr_type_needs_scan(const type_t *t);
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
 
 /**
+ * 只释放**这一个**指针/切片的堆块，**不递归**被指向值/元素。
+ *
+ * 供 `FREE` 指令使用：A 方案下销毁序列完全由 sema 按 AST 生成（被指向值的
+ * own 槽位由 `FREE v.f` 逐条释放），运行期**不再**按类型递归扫描。旧的递归版
+ * 会沿被指向类型无差别递归**所有**指针字段（含 `ref` 槽位）——聚合一旦能携带
+ * ref 指针，就会把借用目标的栈地址也 free 掉（实测 0xC0000005）。
+ */
+void ptr_free_block_only(vm_t *vm, const type_t *t, void *data);
+
+/**
  * 递归清空 data 块内所有 own/fatal 指针的 ptr（**不释放**，m3-design
  * §3.3 接管辅助）。与 ptr_free_owned_recursive 同遍历（own/fatal 指针 +
  * struct/tuple/array/option/union 按字段/元素/tag 递归），但只置 ptr=NULL：

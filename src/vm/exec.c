@@ -936,7 +936,10 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!v || value_is_shadow(v)) return NULL;
     const type_t *t = value_type(v);
     if (!t || !value_data(v)) return NULL;
-    ptr_free_owned_recursive(vm, t, value_data(v));
+    /* A 方案：sema 已按 type 对象生成"被指向值 own 槽位"的逐条 FREE，
+       这里只释放**这一个**堆块，不再按类型递归——否则会把 ref 槽位指向的
+       借用目标也 free 掉（实测 0xC0000005）。 */
+    ptr_free_block_only(vm, t, value_data(v));
     return NULL;
 }
 

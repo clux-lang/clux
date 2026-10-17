@@ -200,9 +200,17 @@ static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
   if (!t || !access) return true;
   t = type_strip_quals(t);
   switch (t->kind) {
-    case TYPE_KIND_PTR:
+    case TYPE_KIND_PTR: {
+      /* 被指向值的 own 槽位**先**释放（`v.f` 会自动解引用到堆块内容），
+         再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。 */
+      const type_t *base = ptr_type_base(t);
+      if (base && !gen_destroy(sema, base, access, head, tail)) return false;
+      destroy_append(head, tail, ast_free_new(sema->arena, access));
+      return true;
+    }
     case TYPE_KIND_SLICE:
-      /* 叶子：整体释放（FREE <access>） */
+      /* 叶子：整体释放（FREE <access>）。元素内嵌的 own 槽位需要 `for`，
+         待补（当前类型层禁止元素含指针/切片）。 */
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
     case TYPE_KIND_STRUCT:
