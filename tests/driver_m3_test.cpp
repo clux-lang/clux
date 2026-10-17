@@ -537,8 +537,8 @@ TEST(Driver, StepBAnnotGlobalStarPasses) {
 }
 
 TEST(Driver, StepBAnnotOnI32TypeIgnored) {
-  /* §5 标注仅对含 ref 指针的类型有效：'<x> i32（标量）不触发逃逸检查
-     （type_contains_ref=false），放行 */
+  /* §5 标注仅对 ref 位置有效：`'<x> i32`（标量，ownership 为 none）不触发
+     逃逸检查 → 放行。判定入口是**符号层 ownership**（不是类型层谓词）。 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var x: i32 = 1;\n"

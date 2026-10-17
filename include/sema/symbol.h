@@ -145,29 +145,17 @@ struct _sema_symbol_t {
   sema_scope_t *own_scope;
   /* §5 作用域标注集合（重绑定逃逸校验用）：显式标注（'<p> ref *T）时
      记录 names/count；未标注的顶层 ref 推断为定义作用域（annot_count=0，
-     重绑定时按 own_scope 作锚点）。含 ref 字段的聚合类型强制标注（规则 B）
-     也记录于此。重绑定 r = q 时用新借源 q 的 own_scope 对此集合做逃逸
-     比较。仅变量符号有意义。 */
+     重绑定时按 own_scope 作锚点）。重绑定 r = q 时用新借源 q 的 own_scope
+     对此集合做逃逸比较。仅变量符号有意义。 */
   strslice_t *annot_names;
   size_t      annot_count;
-  /* §5 聚合类型的**借源集合**（含 ref 字段的 struct/tuple/array/union）。
-     顶层 ref 用单个 borrow_src 就能表达借源；聚合值的 ref 字段可能**多源**
-     （`.H{ .a = p, .b = q }`），所以这里存一个符号集合。
-
-     值的**真实存活上限** = min(各借源的定义作用域)——与用户声明的标注
-     （annot_names）是两回事：标注是"承诺"，借源是"事实"。赋值
-     `g = <rhs>` 时要求 `g` 的标注锚点落在 rhs 的**某个**借源作用域之内
-     （目标存活 ≤ 源存活），否则目标会活过它借的东西。
-
-     记录点：变量声明（从 init 递归收集）与赋值（从 rhs 收集并覆盖）。
-     为什么需要它：聚合的 ref 借源无法从类型静态推断（构造式可能多源），
-     只靠标注无法校验赋值是否真的把更长寿命的借用塞进更短寿命的目标。
-
-     固定容量（8）避免为每个变量符号加一次堆分配与释放；超出容量的借源被
-     忽略——宁可少收（偏保守地不报）也不引入分配失败路径。 */
-#define SEMA_BORROW_SET_MAX 8
-  struct _sema_symbol_t *borrow_set[SEMA_BORROW_SET_MAX];
-  size_t                 borrow_set_count;
+  /* 注：原 `borrow_set[]` / `borrow_set_count`（§5 聚合类型的多源借源集合）
+     已删除——它服务的"含 ref 字段的聚合赋值作用域检查"随复合类型禁止携带
+     指针/切片而不可达，整条机制（borrow_collect / borrow_set_add /
+     borrow_src_anchor_scope）一并移除。顶层 ref 的单源借源仍由下面的
+     `borrow_src` 表达，不受影响。
+     将来恢复含指针的聚合时，按扁平槽位表（docs/ownership-refactor.md §2.5）
+     重新设计多源借源。 */
   /* ---- 所有权状态（纯编译期，运行期不感知）----
    * 变量声明的所有权修饰（own/ref/fatal/none），从 AST 的 ownership token
    * 解析设置。所有权从类型层迁移到值层后，类型 `*T` 不再区分 own/ref/fatal，

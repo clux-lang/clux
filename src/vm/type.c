@@ -281,29 +281,21 @@ bool type_contains_ptr_or_slice(const type_t *t) {
     }
 }
 
-/* ---- 类型层所有权谓词：**已删除**（2026-10 所有权重构） ----
+/* ---- 类型层所有权谓词：**已全部删除**（2026-10 所有权重构） ----
  *
- * `type_owns_resources` / `type_fatal_carries_resource` / `type_contains_ref`
- * 原先在类型层判定 own/fatal/ref，随重构全部失效：**所有权不再由类型携带**
- * （`type_t` 无 ownership 字段），且**复合类型已禁止携带指针/切片**，类型层
- * 没有可判定的对象。三者均已无调用方，故删除。
+ * 原先的 `type_owns_resources` / `type_fatal_carries_resource` /
+ * `type_contains_ref` / `type_directly_owns` 都在类型层判定 own/fatal/ref，
+ * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段），
+ * 且**复合类型已禁止携带指针/切片**，类型层没有可判定的对象。
  *
  * 判定入口现为：
  *   - 符号层：`sema_symbol_t::ownership`
  *   - 值层：  `value_ownership(v)`
  *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
- *   - 以及 `ffi_c_abi_reject_reason_own(t, own)`（C ABI 约束，所有权由调用方传入）
+ *   - C ABI： `ffi_c_abi_reject_reason_own(t, own)`（所有权由调用方传入）
+ *
+ * 完整模型见 docs/ownership-refactor.md §0（值状态的流动检查）。
  */
-
-/* ---- ref 判定（见 type.h） ---- */
-
-/* 注：类型层无 ownership，本函数恒 false，仅保留给**尚未迁移的调用点**
-   编译通过（当前调用点都已在条件中与符号层 ownership 并列，恒假项不影响语义）。
-   新代码请用 `sym->ownership == OWN_REF`。 */
-bool type_contains_ref(const type_t *t) {
-    (void)t;
-    return false;
-}
 
 /* ---- type_promote ---- */
 

@@ -570,21 +570,16 @@ const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
 const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
 
 /* 注：原 `type_fatal_bind_base`（登记 fatal 变体 → base）已删除——fatal 不再是
- * 独立类型变体，没有"变体身份"需要登记或折回（`type_fatal_base_of` 现为恒等）。 */
-
-/**
- * 类型是否（**递归**）含 ref 指针——顶层 `ref *T` / `ref []T`，或
- * struct/tuple/union/cunion 的任一字段/元素/member、option 内层、数组元素含
- * ref。
+ * 独立类型变体，没有"变体身份"需要登记或折回（`type_fatal_base_of` 现为恒等）。
  *
- * ⚠️ **已失效**（2026-10 所有权重构）：类型不携带 ownership，本函数恒返回 false。
- * 保留仅为让尚未迁移的调用点编译通过（那些调用点都已把类型层判据与**符号层**
- * `sym->ownership` 并列，恒假项不影响语义）。判定的正确入口：
- *   - 顶层 ref：`sym->ownership == OWN_REF`
- *   - 值层：    `value_ownership(v) == OWN_REF`
- * 含 ref 字段的复合类型当前不支持（复合类型禁止携带指针/切片）。
+ * 注：原 `type_contains_ref`（类型层递归判 ref）也已删除。所有权从类型层迁移到
+ * 值/符号层后它恒返回 false，且含 ref 字段的聚合当前不支持（复合类型禁止携带
+ * 指针/切片）。ref 的判定入口：
+ *   - 符号层：`sema_symbol_t::ownership == OWN_REF`
+ *   - 值层：  `value_ownership(v) == OWN_REF`
+ *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
+ * 完整模型见 docs/ownership-refactor.md §0。
  */
-bool type_contains_ref(const type_t *t);
 
 /** const 类型 intern（按 sub 指针去重，vm 拥有生命周期） */
 const type_t *type_const_intern(vm_t *vm, const type_t *sub);
