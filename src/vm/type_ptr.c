@@ -52,18 +52,46 @@ void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
  * 消费一次）。
  * =========================================================================== */
 
-/* 目标是否含需递归销毁的 own 指针（指针 + 切片）。
-   复合类型（struct/tuple/array/option/union）禁止携带指针/切片字段，
-   因此不再需要递归扫描——它们只含平凡标量或嵌套复合类型。
-   所有权纯编译期——运行期不再按 ownership 区分，只要类型是指针/切片
-   就可能有堆块需要释放（调用方——FREE/DISPOSE——保证只对需要的值调用）。 */
+/* 目标是否含需递归销毁的 own 指针（指针 + 切片，**递归含复合类型字段**）。
+   所有权纯编译期——运行期不再按 ownership 区分，只要类型（递归）是指针/切片
+   就可能有堆块需要释放（调用方——FREE/DISPOSE——保证只对需要的值调用）。
+
+   **cunion 不参与**：其所有成员共享同一块内存且无 tag，无法静态判断哪个成员
+   是活跃的——按成员递归销毁会误释放/双释放。因此 cunion 内的指针归开发者
+   自负（与 cunion 的 dispose 恒为 no-op 一致）。 */
 bool ptr_type_needs_scan(const type_t *t) {
     if (!t) return false;
+    if (type_is_ptr_or_slice(t)) return true;
     switch (t->kind) {
-    case TYPE_KIND_PTR:
-    case TYPE_KIND_SLICE:
-        return true;
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        for (size_t i = 0; i < st->field_count; i++)
+            if (ptr_type_needs_scan(st->fields[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        for (size_t i = 0; i < tt->elem_count; i++)
+            if (ptr_type_needs_scan(tt->elems[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_UNION: {
+        const union_type_t *ut = (const union_type_t *)t;
+        for (size_t i = 0; i < ut->member_count; i++)
+            if (ptr_type_needs_scan(ut->members[i].payload_type)) return true;
+        return false;
+    }
+    case TYPE_KIND_OPTION:
+        return ptr_type_needs_scan(((const option_type_t *)t)->inner);
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE:
+        return ptr_type_needs_scan(type_qualifier_sub(t));
+    case TYPE_KIND_ARRAY: {
+        const array_type_t *at = (const array_type_t *)t;
+        return ptr_type_needs_scan(at->elem_type);
+    }
     default:
+        /* cunion：见上（无 tag，无法判定活跃成员）；标量/字符串/opaque 等 */
         return false;
     }
 }
@@ -98,8 +126,69 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         allocator_free(vm->alloc, &heap);
         return;
     }
+    case TYPE_KIND_STRUCT: {
+        /* 结构体：按字段偏移逐个递归销毁含 own 指针的字段。 */
+        const struct_type_t *st = (const struct_type_t *)t;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (f->type && ptr_type_needs_scan(f->type))
+                ptr_free_owned_recursive(vm, f->type, p + f->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            if (e->type && ptr_type_needs_scan(e->type))
+                ptr_free_owned_recursive(vm, e->type, p + e->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_UNION: {
+        /* tag union：只有**当前 tag 对应的 payload** 是活的，只销毁它。 */
+        const union_type_t *ut = (const union_type_t *)t;
+        if (ut->member_count == 0) return;
+        uint64_t tag = union_read_tag_raw(data, union_type_tag_size(t));
+        if (tag >= ut->member_count) return;   /* 非法 tag：防御性跳过 */
+        const type_t *pt = ut->members[tag].payload_type;
+        if (pt && ptr_type_needs_scan(pt))
+            ptr_free_owned_recursive(vm, pt,
+                                     (uint8_t *)data + union_type_payload_offset(t));
+        return;
+    }
+    case TYPE_KIND_OPTION: {
+        /* ?T：仅 ok 时 value 字段是活的。 */
+        if (!option_ok(data)) return;
+        const type_t *inner = type_option_inner(t);
+        if (inner && ptr_type_needs_scan(inner))
+            ptr_free_owned_recursive(
+                vm, inner,
+                (uint8_t *)data + option_value_offset(t));
+        return;
+    }
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE: {
+        const type_t *sub = type_qualifier_sub(t);
+        if (sub && ptr_type_needs_scan(sub))
+            ptr_free_owned_recursive(vm, sub, data);
+        return;
+    }
+    case TYPE_KIND_ARRAY: {
+        /* [N]T：逐元素递归销毁（连续内存，按元素大小步进）。 */
+        const array_type_t *at = (const array_type_t *)t;
+        const type_t *et = at->elem_type;
+        if (!et || !ptr_type_needs_scan(et)) return;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < at->length; i++, p += et->size)
+            ptr_free_owned_recursive(vm, et, p);
+        return;
+    }
     default:
-        /* 标量/字符串/cunion/opaque 等：无 own 堆块可销毁 */
+        /* 标量/字符串/cunion/opaque/func 等：无 own 堆块可销毁
+           （cunion 无 tag，无法判定活跃成员——开发者自负）。 */
         return;
     }
 }
@@ -132,8 +221,63 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         sv->len = 0;
         return;
     }
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (f->type && ptr_type_needs_scan(f->type))
+                ptr_clear_owned_recursive(vm, f->type, p + f->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            if (e->type && ptr_type_needs_scan(e->type))
+                ptr_clear_owned_recursive(vm, e->type, p + e->offset);
+        }
+        return;
+    }
+    case TYPE_KIND_UNION: {
+        const union_type_t *ut = (const union_type_t *)t;
+        if (ut->member_count == 0) return;
+        uint64_t tag = union_read_tag_raw(data, union_type_tag_size(t));
+        if (tag >= ut->member_count) return;
+        const type_t *pt = ut->members[tag].payload_type;
+        if (pt && ptr_type_needs_scan(pt))
+            ptr_clear_owned_recursive(vm, pt,
+                                      (uint8_t *)data + union_type_payload_offset(t));
+        return;
+    }
+    case TYPE_KIND_OPTION: {
+        if (!option_ok(data)) return;
+        const type_t *inner = type_option_inner(t);
+        if (inner && ptr_type_needs_scan(inner))
+            ptr_clear_owned_recursive(vm, inner,
+                                      (uint8_t *)data + option_value_offset(t));
+        return;
+    }
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE: {
+        const type_t *sub = type_qualifier_sub(t);
+        if (sub && ptr_type_needs_scan(sub))
+            ptr_clear_owned_recursive(vm, sub, data);
+        return;
+    }
+    case TYPE_KIND_ARRAY: {
+        const array_type_t *at = (const array_type_t *)t;
+        const type_t *et = at->elem_type;
+        if (!et || !ptr_type_needs_scan(et)) return;
+        uint8_t *p = (uint8_t *)data;
+        for (size_t i = 0; i < at->length; i++, p += et->size)
+            ptr_clear_owned_recursive(vm, et, p);
+        return;
+    }
     default:
-        /* 标量/字符串/ref *T/cunion/opaque 等：无 own 指针可清 */
+        /* 标量/字符串/cunion/opaque/func 等：无 own 指针可清 */
         return;
     }
 }
@@ -193,6 +337,87 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         }
         slice_value_t new_sv = { new_heap, ss->len };
         memcpy(dst, &new_sv, sizeof(slice_value_t));
+        break;
+    }
+    case TYPE_KIND_STRUCT: {
+        /* 结构体：整块 memcpy 后，把含指针的字段替换成深拷贝结果。 */
+        memcpy(dst, src, type->size);
+        const struct_type_t *st = (const struct_type_t *)type;
+        for (size_t i = 0; i < st->field_count; i++) {
+            const struct_field_t *f = &st->fields[i];
+            if (!f->type || !ptr_type_needs_scan(f->type)) continue;
+            void *sub = ptr_clone_block(vm, f->type,
+                                        (const uint8_t *)src + f->offset);
+            memcpy((uint8_t *)dst + f->offset, sub, f->type->size);
+            allocator_free(vm->alloc, &sub);
+        }
+        break;
+    }
+    case TYPE_KIND_TUPLE: {
+        memcpy(dst, src, type->size);
+        const tuple_type_t *tt = (const tuple_type_t *)type;
+        for (size_t i = 0; i < tt->elem_count; i++) {
+            const tuple_elem_t *e = &tt->elems[i];
+            if (!e->type || !ptr_type_needs_scan(e->type)) continue;
+            void *sub = ptr_clone_block(vm, e->type,
+                                        (const uint8_t *)src + e->offset);
+            memcpy((uint8_t *)dst + e->offset, sub, e->type->size);
+            allocator_free(vm->alloc, &sub);
+        }
+        break;
+    }
+    case TYPE_KIND_UNION: {
+        /* tag union：tag 字节原样拷贝，只深拷贝**当前 tag** 的 payload。 */
+        memcpy(dst, src, type->size);
+        const union_type_t *ut = (const union_type_t *)type;
+        if (ut->member_count == 0) break;
+        uint64_t tag = union_read_tag_raw(src, union_type_tag_size(type));
+        if (tag >= ut->member_count) break;   /* 非法 tag：保持 memcpy 结果 */
+        const type_t *pt = ut->members[tag].payload_type;
+        if (!pt || !ptr_type_needs_scan(pt)) break;
+        size_t poff = union_type_payload_offset(type);
+        void *sub = ptr_clone_block(vm, pt, (const uint8_t *)src + poff);
+        memcpy((uint8_t *)dst + poff, sub, pt->size);
+        allocator_free(vm->alloc, &sub);
+        break;
+    }
+    case TYPE_KIND_OPTION: {
+        memcpy(dst, src, type->size);
+        if (!option_ok(src)) break;
+        const type_t *inner = type_option_inner(type);
+        if (!inner || !ptr_type_needs_scan(inner)) break;
+        size_t voff = option_value_offset(type);
+        void *sub = ptr_clone_block(vm, inner, (const uint8_t *)src + voff);
+        memcpy((uint8_t *)dst + voff, sub, inner->size);
+        allocator_free(vm->alloc, &sub);
+        break;
+    }
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE: {
+        const type_t *sub_t = type_qualifier_sub(type);
+        if (sub_t && ptr_type_needs_scan(sub_t)) {
+            void *sub = ptr_clone_block(vm, sub_t, src);
+            memcpy(dst, sub, sub_t->size);
+            allocator_free(vm->alloc, &sub);
+        } else {
+            memcpy(dst, src, type->size);
+        }
+        break;
+    }
+    case TYPE_KIND_ARRAY: {
+        const array_type_t *at = (const array_type_t *)type;
+        const type_t *et = at->elem_type;
+        if (!et || !ptr_type_needs_scan(et)) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        const uint8_t *sp2 = (const uint8_t *)src;
+        uint8_t *dp2 = (uint8_t *)dst;
+        for (size_t i = 0; i < at->length; i++, sp2 += et->size, dp2 += et->size) {
+            void *se = ptr_clone_block(vm, et, sp2);
+            memcpy(dp2, se, et->size);
+            allocator_free(vm->alloc, &se);
+        }
         break;
     }
     default:
