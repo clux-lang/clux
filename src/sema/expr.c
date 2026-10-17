@@ -3296,7 +3296,22 @@ static value_t *ex_func_def(sema_t *sema, ast_node_t **node,
       ast_func_def_t *fn = (ast_func_def_t *)*node;
       const type_t *sig = sema_check_func_literal(sema, fn, scope);
       if (!sig) return val_void(sema);
-      return value_make_shadow(sema->vm, sig);
+      value_t *fv = value_make_shadow(sema->vm, sig);
+      /* **捕获了 own 的闭包，它自己就是 OWN**（所有权模型里唯一的 own 产生式）。
+         为什么不经 FATAL：函数是"定义 + 绑定名字"，定义本身已经把
+         `fatal → move → own` 折叠掉了。因此它只能被 `own` 位置接收，
+         写 `var f = <closure>` 会因"OWN 不能赋给 NONE 位置"被拒，
+         必须显式 `var f = move(<closure>)`。
+         捕获槽的所有权由 resolve_func_captures 回写进 AST 节点（cv->ownership）。 */
+      if (fn->captures) {
+        for (ast_node_t *c = fn->captures; c; c = c->next) {
+          if (((ast_var_def_t *)c)->ownership == AST_OWN_OWN) {
+            value_set_ownership(fv, OWN_OWN);
+            break;
+          }
+        }
+      }
+      return fv;
 }
 
 /* AST_FUNC_REF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */

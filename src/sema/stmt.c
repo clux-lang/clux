@@ -163,9 +163,46 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     strslice_t name_slice = strslice_from_bytes(name_buf, nlen);
 
     ast_node_t *ident = ast_ident_new(sema->arena, 0, 0);
-    ast_node_t *free_stmt = ast_free_new(sema->arena, ident);
-    if (!ident || !free_stmt) continue;
+    if (!ident) continue;
     ((ast_ident_t *)ident)->name = name_slice;
+
+    /* ---- 含 own 捕获的闭包：按捕获槽**逐个展开**释放 ----
+       闭包 = 捕获结构体 + 函数实现，捕获槽就是它的字段，所以这里生成
+       `FREE f.<cap>`（编译器发 PUSH f; FIELD_GET "<cap>"; FREE；
+       VM 的 op_field_get 支持按名读闭包捕获槽）。只释放 own 捕获，
+       ref 捕获是借用不释放。 */
+    if (sym->closure_captures) {
+      for (ast_node_t *c = sym->closure_captures; c; c = c->next) {
+        ast_var_def_t *cv = (ast_var_def_t *)c;
+        if (cv->ownership != AST_OWN_OWN) continue;
+        ast_node_t *obj = ast_ident_new(sema->arena, 0, 0);
+        if (!obj) continue;
+        ((ast_ident_t *)obj)->name = name_slice;
+        ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
+        if (!mem) continue;
+        /* 捕获名也需 arena 持久化（cv->name 指向 token 流，需转 NUL 串） */
+        size_t cl = cv->name.len;
+        char *cbuf = (char *)arena_calloc(sema->arena, cl + 1, 1,
+                                          ALIGNOF(max_align_t));
+        if (!cbuf) continue;
+        memcpy(cbuf, cv->name.ptr, cl);
+        ((ast_member_t *)mem)->object = obj;
+        ((ast_member_t *)mem)->field = strslice_from_bytes(cbuf, cl);
+
+        ast_node_t *fs = ast_free_new(sema->arena, mem);
+        if (!fs) continue;
+        if (!head) {
+          head = tail = fs;
+        } else {
+          tail->next = fs;
+          tail = fs;
+        }
+      }
+      continue; /* 闭包本身不是指针/切片，没有"整体释放"这一步 */
+    }
+
+    ast_node_t *free_stmt = ast_free_new(sema->arena, ident);
+    if (!free_stmt) continue;
 
     if (!head) {
       head = free_stmt;
@@ -532,6 +569,22 @@ static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
   return t;
 }
 
+/* 该表达式是否"含 own 捕获的闭包"（穿透 move/clone）。
+   所有权模型：闭包 = 捕获结构体 + 函数实现，捕获了 own 的闭包**本身即 OWN**
+   （唯一的 own 产生式——函数定义把 fatal→move→own 折叠了）。
+   因此 `var f = <closure>` 被拒（OWN 不能给 NONE 位置），必须
+   `var f = move(<closure>)`：move 产 FATAL → 变量推断为 own 绑定。
+   捕获槽的所有权由 resolve_func_captures 回写进 `ast_var_def_t::ownership`。 */
+static const ast_func_def_t *own_closure_of(ast_node_t *e) {
+  if (!e) return NULL;
+  if (e->kind == AST_MOVE) return own_closure_of(((ast_move_t *)e)->operand);
+  if (e->kind != AST_FUNC_DEF) return NULL;
+  ast_func_def_t *fd = (ast_func_def_t *)e;
+  for (ast_node_t *c = fd->captures; c; c = c->next)
+    if (((ast_var_def_t *)c)->ownership == AST_OWN_OWN) return fd;
+  return NULL;
+}
+
 static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
@@ -683,6 +736,15 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
              fatal 复合类型剥离为 T（OWN_NONE，字段各自持所有权）。 */
           if (vt->kind == TYPE_KIND_PTR || vt->kind == TYPE_KIND_SLICE)
             sym->ownership = OWN_OWN;
+          /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
+             并记住捕获链供 FREE 展开（逐捕获槽释放）。 */
+          else if (vt->kind == TYPE_KIND_FUNC) {
+            const ast_func_def_t *oc = own_closure_of(vd->init);
+            if (oc) {
+              sym->ownership = OWN_OWN;
+              sym->closure_captures = oc->captures;
+            }
+          }
           /* 将推断出的类型写回 type_expr（AST_TYPE_REF），让 compiler 发
              LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
              类型路径：value_implicit_cast(fatal init → own/none 接管），

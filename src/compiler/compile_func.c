@@ -17,6 +17,7 @@
 #include "parser/ast_if.h"
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
+#include "parser/ast_move.h"
 #include "parser/ast_program.h"
 #include "parser/ast_return.h"
 #include "parser/ast_sizeof.h"
@@ -247,6 +248,14 @@ static void prescan_expr(compiler_t *c, ast_node_t *n) {
       break;
     case AST_UNARY:
       prescan_expr(c, ((ast_unary_t *)n)->operand);
+      break;
+    /* move(x) / clone(x)：**必须下钻 operand**——闭包字面量（AST_FUNC_DEF）
+       可能就包在这里（`var f = move(func |...| ...)`）。原先漏了这个分支，
+       导致 move/clone 内的函数字面量从未被收集进 funcs_all：hoist 区不构造
+       基底对象，定义点的 `MAKE_FUNCTION <fid>` 查不到基底 → 运行期
+       "exec: unknown function id"。 */
+    case AST_MOVE:
+      prescan_expr(c, ((ast_move_t *)n)->operand);
       break;
     case AST_CALL: {
       ast_call_t *cl = (ast_call_t *)n;

@@ -870,8 +870,10 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         const type_t *it = init_bad ? sema->vm->type_void : value_type(init);
         if (!init_bad && sema_value_is_fatal(init)) {
           const type_t *base = ptr_type_base(it);
-          it = base ? type_ptr_intern(sema->vm, base)
-                    : it;
+          it = base ? type_ptr_intern(sema->vm, base) : it;
+          /* 捕获接管了将亡值 → 该捕获槽**持有所有权**（OWN）。
+             这决定了闭包本身的产出状态：捕获了 own 的闭包即 OWN。 */
+          cs->ownership = OWN_OWN;
         }
         cs->type = it;
       }
@@ -919,6 +921,11 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     }
     cs->flow_init = true; /* 捕获即初始化（闭包持有 clone 值） */
     cs->is_active = true; /* 函数体 walk 时可见（sema_lookup 激活过滤） */
+    /* 把解析出的所有权**回写进 AST 节点**（`ast_var_def_t::ownership`）。
+       用途：闭包字面量产出值的状态判定——捕获了 own 的闭包本身是 **OWN**
+       （唯一的 own 产生式：函数定义即"定义 + 绑定名字"，折叠了
+       fatal→move→own）。消费者是 `ex_func_def`，它只能从 AST 读。 */
+    cv->ownership = (uint8_t)cs->ownership;
   }
 
   /* §9.3 ref/opaque 捕获强制标注（m3-design §9）：闭包是隐式 struct，
