@@ -1393,6 +1393,27 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* const/volatile 限定只是同一份数据的视图：剥掉再按底层布局查字段
        （`ref *const T` 自动解引用后得到的就是 `const T` 值）。 */
     t = type_strip_quals(t);
+    /* ---- 闭包分支（**仅 VM 层面**，sema 不放行用户写 `f.capture`）----
+       闭包的本质是「捕获结构体 + 函数实现」：捕获槽就是它的字段。
+       编译器为"销毁 own 捕获"生成的 `PUSH f; FIELD_GET "cap"; FREE`
+       序列依赖这条路径——sema 不提供该语法，只有编译器生成的字节码走它。
+       返回捕获值的**借用引用**（data 指向捕获槽的 value data），
+       于是 FREE 能就地把槽位置 NULL，与结构体字段的语义一致。 */
+    if (t && t->kind == TYPE_KIND_FUNC) {
+        if (value_is_shadow(self))
+            return value_make_shadow(vm, t);   /* shadow：无捕获可读 */
+        const func_t *const *fp = (const func_t *const *)value_data(self);
+        const func_t *fn = fp ? *fp : NULL;
+        if (!fn || !fn->closure_scope)
+            return value_make_error(vm, "exec: closure has no captures");
+        value_t *cap = scope_lookup(fn->closure_scope, name);
+        if (!cap)
+            return value_make_error(vm, "exec: no such closure capture");
+        /* 捕获槽本身可能就是 shadow（占位）→ 直接返回它 */
+        if (value_is_shadow(cap))
+            return cap;
+        return value_make_borrowed(vm, value_type(cap), value_data(cap));
+    }
     if (!t || t->kind != TYPE_KIND_STRUCT) {
         /* union 分支：字段名 = member 名，按名反查 → 读 data 首部 tag →
            tag 不符 → error value（引擎级硬错误 = panic，对齐数组越界）；
