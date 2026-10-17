@@ -8,6 +8,7 @@
 #include "parser/ast_node.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_slice_type.h"
 #include "parser/parse_utils.h"
@@ -185,6 +186,17 @@ static inline ownership_t sema_type_expr_ownership(const ast_node_t *type_expr) 
     const ast_slice_type_t *s = (const ast_slice_type_t *)type_expr;
     if (!s->ownership) return OWN_NONE;
     strslice_t own = token_strslice(s->ownership);
+    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
+    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
+    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
+    return OWN_NONE;
+  }
+  case AST_OWNED_TYPE: {
+    /* `fatal T` / `own T`（T 非指针/切片）：所有权同样在修饰词 token 上。
+       `own T` 是所有权与类型解耦后的形态（T 为含 own 字段的聚合时使用）。 */
+    const ast_owned_type_t *o = (const ast_owned_type_t *)type_expr;
+    if (!o->ownership) return OWN_NONE;
+    strslice_t own = token_strslice(o->ownership);
     if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
     if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
     if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;

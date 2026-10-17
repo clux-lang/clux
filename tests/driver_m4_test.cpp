@@ -396,13 +396,12 @@ TEST(DriverM4, SliceEqualityDifferentRange) {
   std::remove(path.c_str());
 }
 
-TEST(DriverM4, FatalSliceAsFunctionParam) {
-  /* §9.2 fatal []T 作函数参数：make 产 fatal []T 直接传递，
-     函数内须 move 接管（fatal 参数必须被消费） */
+TEST(DriverM4, OwnSliceAsFunctionParam) {
+  /* §0.5：`own []T` **可以**作函数参数——参数位用 own 接收所有权。
+     调用点 `first(make(...))`：make 产 FATAL → 形参 OWN（函数负责释放）。 */
   std::string path = write_temp_file(
-      "func first(s: fatal []i32): i32 {\n"
-      "  var owned: own []i32 = move(s);\n"
-      "  return owned[0];\n"
+      "func first(s: own []i32): i32 {\n"
+      "  return s[0];\n"
       "}\n"
       "func main(): i32 {\n"
       "  var r: i32 = first(make(i32, 3, 42, 99, 7));\n"
@@ -510,10 +509,11 @@ TEST(DriverM4, ScopeAnnotationSliceReturn) {
 
 /* ---- §9.2 禁止 own []T 作函数参数 ---- */
 
-TEST(DriverM4, OwnSliceParamRejected) {
-  /* §9.2 own []T 不能作函数参数（须用 fatal/ref）→ 编译错误 */
+TEST(DriverM4, FatalSliceParamRejected) {
+  /* §0.5：`fatal []T` **不能**作函数参数——`fatal` 描述的是"调用表达式"的值，
+     不是形参的接收能力。要接所有权请用 `own []T`（见 OwnSliceAsFunctionParam）。 */
   std::string path = write_temp_file(
-      "func bad(s: own []i32): i32 {\n"
+      "func bad(s: fatal []i32): i32 {\n"
       "  return s[0];\n"
       "}\n"
       "func main(): i32 {\n"

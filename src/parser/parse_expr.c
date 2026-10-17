@@ -810,26 +810,32 @@ ast_node_t *parse_unary(parser_t *p) {
         }
 
         if (!check_symbol(p, "*")) {
-            /* `*` / `[]` 都没有 → 不是指针/切片，而是**所有权限定的复合类型**
-               `fatal T`（m3-design §3.3：将亡值变体的载体，T 为 struct/tuple/
-               array/option/union 这类可能内嵌 own 字段的复合类型）。此时游标
-               仍停在修饰词之后（check_symbol 不消费），直接解析基础类型 T 即可
-               （右绑定力同指针/切片）。
-               合法组合只有 `fatal T`（own/ref 限定复合类型无意义——复合值本身
-               没有"借用/独占"这回事，借用走 ref *T / ref []T），其余在此处直接
-               报错，不留到 sema 产出难懂的诊断。 */
-            if (!token_is(op_tok, "fatal")) {
+            /* `*` / `[]` 都没有 → **所有权限定的非指针类型**（`fatal T` / `own T`）。
+               节点统一为 AST_OWNED_TYPE（带 ownership token）。
+
+               按所有权模型（docs/ownership-refactor.md §0）：所有权是**值状态**，
+               不是类型的修饰，所以**语法层不policing"哪个类型能被哪个修饰词限定"**
+               ——`own i32` 也可以写出来；它是否**可用**由流动规则决定（`own` 位置
+               需要将亡值，而 `i32` 没有 FATAL 产生式 → 永远无法初始化，自然淘汰）。
+               这同时为将来的 `own T`（T 为含 own 字段的聚合）留出通路。
+
+               `ref T`（T 非指针）仍在此拒绝：借用需要一个**可借出的值**，
+               而当前没有"非指针值的借用"这一产生式（借用走 `ref *T` /
+               `ref []T` / `x.&`）。 */
+            if (!token_is(op_tok, "fatal") && !token_is(op_tok, "own")) {
                 return ast_error_new(
                     p->diag, p->tokens, p->arena, tb, p->pos,
-                    "only 'fatal' can qualify a non-pointer type "
+                    "only 'fatal' / 'own' can qualify a non-pointer type "
                     "(write 'own *T' / 'ref *T' / 'own []T' for pointers and "
-                    "slices, or 'fatal T' for a compound value's dying value)");
+                    "slices, 'fatal T' for a dying compound value, or 'own T' "
+                    "to take ownership of one)");
             }
             ast_node_t *ot_base = parse_expr_prec(p, PREFIX_RIGHT_PREC);
             if (!ot_base || ot_base->kind == AST_ERROR) {
                 if (!ot_base) {
                     return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                         "expected type after 'fatal'");
+                                         "expected type after the ownership "
+                                         "qualifier");
                 }
                 return ot_base;
             }

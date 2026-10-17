@@ -817,9 +817,13 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         if (sym->ownership == OWN_OWN && !sema_value_is_fatal(init)) {
           char itn[64];
           sema_type_name(value_type(init), itn, sizeof(itn));
+          /* 措辞不用"pointer"：所有权已与类型解耦，`own` 是**位置对值的
+             状态要求**（需要将亡值/FATAL），任何类型都可能出现在这里。
+             `own i32` 正是经由这条规则被淘汰——i32 没有 FATAL 产生式。 */
           diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize own pointer '%.*s' with %s "
-                     "(own is move-only; use move() or clone())",
+                     "cannot initialize own value '%.*s' with %s: an 'own' "
+                     "binding must take over a dying value (FATAL), produced by "
+                     "new / move / clone (or a fatal-returning call)",
                      (int)vd->name.len, vd->name.ptr, itn);
           sym->flow_init = false; /* copy 失败 = 未初始化 */
         } else {
@@ -2835,23 +2839,25 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     if (ps) {
       ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
       ps->is_active = true; /* 参数进入函数体立即可见 */
-      /* R1（参数类型约束，m3-design §4）：参数只能 ref 或 fatal，不能 own
-         ——own 是单所有权，传 own 参数会分裂所有权（调用方销毁 + 参数接管
-         双释放）。own 场景：调用方 move(p) 传 fatal，函数体用 own 变量接收
-         （本地接管）或 return 出去。 */
-      if (ps->type && ps->ownership == OWN_OWN) {
+      /* **参数位只允许 `own` / `ref` / none**（所有权模型 §0.5）。
+         - `own` 形参：调用点必须以将亡值（FATAL）传入（`f(move(p))`）。
+           接收后**形参的值状态是 OWN**，由函数负责释放（或 move 出去、
+           或随 `fatal` 返回位离开）——不会与调用方分裂所有权，因为调用点的
+           源已被 move 进 TDZ。
+         - `fatal` **不能作形参**：`fatal` 描述的是"函数调用表达式"的值
+           （见 §0.3），不是形参的接收能力。传所有权请写 `own`。 */
+      if (ps->type && ps->ownership == OWN_FATAL) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                   "function parameter '%.*s' cannot be own pointer/slice (use "
-                   "fatal and take ownership inside with var x: own *T = "
-                   "move(p), or use ref for borrowing)",
+                   "function parameter '%.*s' cannot be 'fatal': fatal describes "
+                   "the value of a *call expression*, not a parameter. Use "
+                   "'own' to take ownership (call with `f(move(x))`) or 'ref' "
+                   "to borrow",
                    (int)vd->name.len, vd->name.ptr);
       }
-      /* 注：原先这里还有一条"参数类型**含** own 资源的复合类型不能按值传"的
-         检查（所有权扩散）。复合类型字段现已禁止携带指针/切片，该形态不存在；
-         own 指针/slice 参数由上方 `ps->ownership == OWN_OWN` 分支拦截。
-         §5 强制规则（参数类型**含 ref 字段**必标注）同理——含 ref 字段的聚合
-         类型已不支持，**顶层 `ref *T` / `ref []T` 是"借用"本身的声明形式**，
-         不在强制标注之列（其存活由调用点单源推断承担）。 */
+      /* 注：§5 强制规则（参数类型**含 ref 字段**必标注）现无对象——含 ref 字段
+         的聚合类型暂不支持（复合类型禁止携带指针/切片）。**顶层 `ref *T` /
+         `ref []T` 是"借用"本身的声明形式**，不在强制标注之列
+         （其存活由调用点单源推断承担）。 */
     }
     value_t *pv = value_make_shadow(sema->vm,
                                     ps && ps->type ? ps->type

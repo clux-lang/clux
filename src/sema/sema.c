@@ -603,23 +603,16 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return resolve_type_expr(sema, sa->sub);
     }
     case AST_OWNED_TYPE: {
-      /* `fatal T`（m3-design §3.3）：所有权限定的**非指针**类型。
-         复合类型字段禁止携带指针/切片后，复合类型不再持有 own 资源——
-         fatal 限定对复合类型无意义，原样返回 base 类型。 */
+      /* `fatal T` / `own T`：所有权限定的**非指针**类型。
+         按所有权模型（docs/ownership-refactor.md §0）：所有权是**值状态**，
+         不进类型——所以类型**解析结果就是 base 类型本身**，限定词只用于
+         记录"该位置要求什么状态的值"（由 sema_type_expr_ownership 从 token 取）。
+         这里**不再 policing 哪个修饰词能用**：`own i32` 也可解析为 `i32`，
+         它是否**可用**由流动规则决定（`own` 位置需要将亡值，`i32` 没有
+         FATAL 产生式 → 初始化点自然报错淘汰）。 */
       ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
-      if (ot->ownership) {
-        strslice_t own = token_strslice(ot->ownership);
-        if (!(own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)) {
-          diag_error(sema->diag, sema_loc(sema, type_expr),
-                     "unsupported type ownership '%.*s' (only 'fatal' can "
-                     "qualify a non-pointer type)",
-                     (int)own.len, own.ptr);
-          return NULL;
-        }
-      }
       const type_t *base = resolve_type_expr(sema, ot->base_type);
       if (!base) return NULL;
-      /* 复合类型无 own 资源 → fatal 无意义，原样返回 base */
       return base;
     }
     default:
@@ -675,6 +668,21 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
                               const type_t *rt, ownership_t return_ownership) {
   if (!rt || !fn->return_expr) return true;
+  /* **返回位只允许 `ref` / `fatal` / `none`**（所有权模型 §0.4）：
+     `own` 不能作返回标注——调用点拿到的是"调用表达式"的值，
+     若返回位是 `own`，该值状态是 OWN，而 OWN 只能流向 `ref` 位置
+     （既不能给 own、也不能给 NONE），等于把一个无处安放的状态交给调用方。
+     要交所有权请标 `fatal`（调用点即可用 own 位置接收）。 */
+  if (return_ownership == OWN_OWN) {
+    char tn[64];
+    sema_type_name(rt, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+               "function '%.*s' cannot return 'own %s': a return type can only "
+               "be ref, fatal or none (use 'fatal %s' to hand ownership to the "
+               "caller, or 'ref *%s' to lend it)",
+               (int)fn->name.len, fn->name.ptr, tn, tn, tn);
+    return false;
+  }
   /* 所有权已从 type 层迁移到 symbol/value 层——rt 是 intern 后的类型，
      ownership 恒为 OWN_NONE。顶层 ref 判定从调用方传入的 return_ownership
      读取（须在 sema_resolve_type_slot 折叠 AST 之前提取）。 */

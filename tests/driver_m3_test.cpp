@@ -233,12 +233,14 @@ TEST(Driver, StepBFatalParamMustBeConsumed) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, StepBFatalParamConsumedByMovePasses) {
-  /* R1 正向：fatal 参数 move 接管放行 */
+TEST(Driver, StepBOwnParamConsumedPasses) {
+  /* 所有权模型 §0.5：**参数位用 `own` 接收所有权**（不是 `fatal`）。
+     调用点以将亡值传入（`take(move(p))`：FATAL → 形参 OWN），
+     函数内形参的值状态是 OWN，由函数负责释放。
+     （`fatal` 只用于返回值——它描述的是"调用表达式"的值。） */
   std::string path = write_temp_file(
-      "func take(p: fatal *i32): i32 {\n"
-      "  var q: own *i32 = move(p);\n"
-      "  return q.*;\n"
+      "func take(p: own *i32): i32 {\n"
+      "  return p.*;\n"
       "}\n"
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
@@ -250,15 +252,27 @@ TEST(Driver, StepBFatalParamConsumedByMovePasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, StepBFatalParamIsRejected) {
+  /* §0.5：`fatal` **不能作形参**——它描述的是"函数调用表达式"整体的值，
+     不是形参的接收能力。要接所有权请写 `own`。 */
+  std::string path = write_temp_file(
+      "func take(p: fatal *i32): i32 {\n"
+      "  return p.*;\n"
+      "}\n"
+      "func main(): i32 { return 0; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, StepBFatalChainThroughReturnPasses) {
-  /* §4：return new 产物（fatal）+ fatal 参数接收 + move 接管，完整传递链 */
+  /* §0.3/§0.5：`fatal` 返回的函数 → **调用表达式产 FATAL** → 可被 `own` 形参接收。
+     完整链：mk_fatal() 产 FATAL → take(own) 接收为 OWN。 */
   std::string path = write_temp_file(
       "func mk_fatal(): fatal *i32 {\n"
       "  return new i32{5};\n"
       "}\n"
-      "func take(p: fatal *i32): i32 {\n"
-      "  var q: own *i32 = move(p);\n"
-      "  return q.*;\n"
+      "func take(p: own *i32): i32 {\n"
+      "  return p.*;\n"
       "}\n"
       "func main(): i32 {\n"
       "  var v: i32 = take(mk_fatal());\n"
@@ -717,10 +731,12 @@ TEST(Driver, AnonConstructFieldEvaluatedOnce) {
  * "fatal parameter 'p' is not consumed"（诊断文本自己写的是
  * "take ownership with move() or return it"）。判据现与函数结束的
  * 未消费检查（PTR_FATAL || SLICE_FATAL）一致。 */
-TEST(Driver, FatalSliceParamReturnedIsConsumed) {
+TEST(Driver, OwnSliceParamReturnedIsConsumed) {
+  /* §0.5：`own []T` 作形参（参数位用 own，不是 fatal）。
+     调用点 `id(move(s))`：FATAL → 形参 OWN；形参再作为 `fatal []T` 返回位交出。 */
   std::string path = write_temp_file(
-      "func id(p: fatal []i32): fatal []i32 {\n"
-      "  return p;\n"
+      "func id(p: own []i32): fatal []i32 {\n"
+      "  return move(p);\n"
       "}\n"
       "func main(): i32 {\n"
       "  var s: own []i32 = make(i32, 2, 9, 9);\n"
