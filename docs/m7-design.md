@@ -59,7 +59,7 @@
 类型参数列表紧跟声明关键字与名字之后，用方括号包裹，逗号分隔：
 
 ```
-func map[T, U](xs: []T, f: func(T) -> U): []U { ... }
+func map[T, U](xs: ref []T, f: func(T) -> U): ref []U { ... }
 struct Vec[T] { data: *T; len: u64; }
 enum Option[T] { Some(T), None }
 type Pair[T, U] = <T, U>;
@@ -77,7 +77,7 @@ type Pair[T, U] = <T, U>;
 
 ```
 func make_array[T, N: comptime u64](): [N]T { ... }
-func fixed_buf[T, CAP: comptime u64](xs: []T): [CAP]T { ... }
+func fixed_buf[T, CAP: comptime u64](xs: ref []T): [CAP]T { ... }
 ```
 
 **决策依据**：
@@ -109,13 +109,13 @@ default_vec[f64, 20]()     // T=f64, N=20
 
 ```
 // 函数调用：从实参推导类型参数
-func map[T, U](xs: []T, f: func(T) -> U): []U { ... }
+func map[T, U](xs: ref []T, f: func(T) -> U): ref []U { ... }
 
 var arr: [3]i32 = .{1, 2, 3};
-var doubled = map(arr, func(x: i32): i32 { return x * 2; });
-// 推导：xs: []T = [3]i32 → T=i32（数组元素类型）
+var doubled = map(arr[:], func(x: i32): i32 { return x * 2; });
+// 推导：xs: ref []T = ref []i32（arr[:] 切片化） → T=i32（切片元素类型）
 //        f: func(T)->U = func(i32)->i32 → U=i32
-// 结果类型：[]i32
+// 结果类型：ref []i32
 
 // 类型上下文：必须显式标注
 var v: Vec[i32] = Vec[i32]::new();    // 显式 Vec[i32]
@@ -211,7 +211,7 @@ func recurse[T](depth: u64): void {
 
 ```
 // 泛型定义（未实例化）
-func map[T, U](xs: []T, f: func(T) -> U): []U {
+func map[T, U](xs: ref []T, f: func(T) -> U): ref []U {
     var out: [xs.len]U = .{};
     for (i = 0; i < xs.len; i += 1) {
         out[i] = f(xs[i]);
@@ -221,7 +221,7 @@ func map[T, U](xs: []T, f: func(T) -> U): []U {
 
 // 实例化 map[i32, f64]（T=i32, U=f64）
 // → 生成 ast_func_def_t 副本，类型槽位替换：
-func map$i32$f64(xs: []i32, f: func(i32) -> f64): []f64 {
+func map$i32$f64(xs: ref []i32, f: func(i32) -> f64): ref []f64 {
     var out: [xs.len]f64 = .{};
     for (i = 0; i < xs.len; i += 1) {
         out[i] = f(xs[i]);
@@ -357,7 +357,7 @@ sema 流水线：
 
 - **compiler**：看到的是 `map$i32$f64`（普通函数名）与 `Vec$i32`（普通类型，经 `sema_type_register` 分配了 id）。hoist 区按正常流程发 `PUSH_FUNC_TYPE` / `DEFINE_TYPE` / 字段定义 / `SEAL`；函数体按正常流程编译。compiler **不知道**这是泛型实例。
 - **VM**：看到的是普通的 `func_t`（独立 fid/entry_pc）与普通的 `type_t`（独立 id/字段表）。运行期**无泛型概念**，无 vtable 间接、无类型描述符字典、无动态分派。
-- **字节码**：实例的字节码与手写的非泛型版本逐字节一致（`map[i32, f64]` 的字节码 = 手写 `func map_i32_f64(xs: []i32, f: func(i32)->f64): []f64 { ... }` 的字节码）。
+- **字节码**：实例的字节码与手写的非泛型版本逐字节一致（`map[i32, f64]` 的字节码 = 手写 `func map_i32_f64(xs: ref []i32, f: func(i32)->f64): ref []f64 { ... }` 的字节码）。
 
 ---
 
@@ -424,7 +424,7 @@ error: cannot apply '+' to values of type str
 ### 19. 推导失败的诊断
 
 ```
-func map[T, U](xs: []T, f: func(T) -> U): []U { ... }
+func map[T, U](xs: ref []T, f: func(T) -> U): ref []U { ... }
 
 // 推导失败：xs 是 i32（非切片），无法推导 T
 map(42, func(x: i32): i32 { return x; });
@@ -435,7 +435,7 @@ error: cannot deduce type argument T for map[T,U]
   |
 3 |     map(42, func(x: i32): i32 { return x; });
   |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- note: parameter 'xs' expected []T, got i32
+ note: parameter 'xs' expected ref []T, got i32
  note: add explicit type arguments, e.g. map<i32, i32>(...)
 ```
 
@@ -501,7 +501,7 @@ func f[T]() {
 
 ### 25. 泛型函数的函数值类型
 
-**未实例化的泛型定义只是符号，不是值**——无具体签名、无 fid/entry_pc，无法分配 `func_t`。clux 的函数值类型是具体签名 `func(i32)->i32`，未实例化的 `map` 签名是 `func(∀T,U)([]T, func(T)->U)->[]U`——这种多态签名不是 clux 类型系统能表达的类型。
+**未实例化的泛型定义只是符号，不是值**——无具体签名、无 fid/entry_pc，无法分配 `func_t`。clux 的函数值类型是具体签名 `func(i32)->i32`，未实例化的 `map` 签名是 `func(∀T,U)(ref []T, func(T)->U)->ref []U`——这种多态签名不是 clux 类型系统能表达的类型。
 
 **只有实例化后才是实体**：
 
@@ -513,10 +513,10 @@ var f = map[i32, f64];          // ✓ 实例化后是普通函数实体，可�
 
 **规则**：
 
-- **作函数参数**：`func apply(g: ???) { ... }` 传 `map` 不允许。必须传实例 `map[i32,f64]`，参数类型写具体签名 `func([]i32, func(i32)->f64)->[]f64`。
+- **作函数参数**：`func apply(g: ???) { ... }` 传 `map` 不允许。必须传实例 `map[i32,f64]`，参数类型写具体签名 `func(ref []i32, func(i32)->f64)->ref []f64`。
 - **高阶泛型场景的替代方案**：用泛型函数包裹——
   ```
-  func apply_map[T, U](g: func([]T, func(T)->U)->[]U, xs: []T, f: func(T)->U): []U {
+  func apply_map[T, U](g: func(ref []T, func(T)->U)->ref []U, xs: ref []T, f: func(T)->U): ref []U {
       return g(xs, f);
   }
   // 调用：apply_map(map[i32, f64], arr, func(x: i32): f64 { ... });
