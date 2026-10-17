@@ -370,6 +370,9 @@ bool struct_type_compatible(vm_t *vm, const type_t *a, const type_t *b) {
         if (fa->name.ptr && fb->name.ptr &&
             memcmp(fa->name.ptr, fb->name.ptr, fa->name.len) != 0) return false;
         if ((fa->name.ptr == NULL) != (fb->name.ptr == NULL)) return false;
+        /* **槽位所有权参与去重**：`{ r: ref *i32 }` 与 `{ r: own *i32 }`
+           布局相同但销毁语义不同（前者不释放、后者释放），必须是不同类型。 */
+        if (fa->ownership != fb->ownership) return false;
         if (!type_equal(vm, fa->type, fb->type)) return false;
     }
     return true;

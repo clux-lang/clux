@@ -207,6 +207,13 @@ typedef struct struct_field_t {
     strslice_t     name;   /* 字段名（seal 时拷贝，vm 拥有） */
     size_t         offset; /* 字段在 data 块中的字节偏移（seal 时布局计算） */
     const type_t  *type;   /* 字段类型（引用，不拥有；须已密封） */
+    /* 该**字段槽位**的所有权（own / ref / fatal / none）。
+       这是**合法的类型描述**：类型描述的是"结构里有几个可挂载所有权的槽位"，
+       而不是"这个值是不是 own"（后者是值状态，禁止记在 type_t 上）。
+       装饰器会改造类型，所以销毁序列必须从 type 对象反推——定义 AST 描述的是
+       装饰器之前的形态、构造式只覆盖被写入的字段，两者都不可信。
+       **参与 intern 去重**：own 槽位与 ref 槽位是不同类型（销毁语义不同）。 */
+    ownership_t    ownership;
 } struct_field_t;
 
 typedef struct struct_type_t {
@@ -283,6 +290,8 @@ typedef struct struct_type_t {
 typedef struct tuple_elem_t {
     size_t        offset; /* 元素在 data 块中的字节偏移（seal 时布局计算） */
     const type_t *type;   /* 元素类型（引用，不拥有；须已密封） */
+    /* 该**元素槽位**的所有权（合法性说明同 struct_field_t::ownership） */
+    ownership_t   ownership;
 } tuple_elem_t;
 
 typedef struct tuple_type_t {
@@ -320,6 +329,8 @@ typedef struct union_member_t {
     const type_t   *payload_type; /* member payload 类型（seal 时引用，归
                                      type 池；不可为 NULL——所有 member
                                      都有类型） */
+    /* 该 **payload 槽位** 的所有权（合法性说明同 struct_field_t::ownership） */
+    ownership_t     ownership;
 } union_member_t;
 
 typedef struct union_type_t {
@@ -352,6 +363,10 @@ typedef struct union_type_t {
 typedef struct cunion_member_t {
     strslice_t    name;  /* member 名（seal 时拷贝，vm 拥有） */
     const type_t *type;  /* member 类型（引用，须已密封；不可为 NULL） */
+    /* 该 member 槽位的所有权（合法性说明同 struct_field_t::ownership）。
+       ⚠️ cunion 无 tag，运行期无法判定哪个 member 活跃 → 其 own 槽位**不参与**
+       自动销毁（销毁序列不为 cunion 生成 FREE），由开发者自负。 */
+    ownership_t   ownership;
 } cunion_member_t;
 
 typedef struct cunion_type_t {

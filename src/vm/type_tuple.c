@@ -410,6 +410,8 @@ bool tuple_type_compatible(vm_t *vm, const type_t *a, const type_t *b) {
     const tuple_type_t *tb = (const tuple_type_t *)b;
     if (ta->elem_count != tb->elem_count) return false;
     for (size_t i = 0; i < ta->elem_count; i++) {
+        /* 槽位所有权参与去重（同 struct：布局相同但销毁语义不同 → 不同类型） */
+        if (ta->elems[i].ownership != tb->elems[i].ownership) return false;
         if (!type_equal(vm, ta->elems[i].type, tb->elems[i].type)) return false;
     }
     return true;
