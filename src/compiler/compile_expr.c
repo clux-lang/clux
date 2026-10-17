@@ -14,6 +14,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_is_tag.h"
 #include "parser/ast_member.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_unwrap.h"
@@ -1027,6 +1028,21 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     compile_expr(c, n->operand);        /* 栈: [value] */
     bcode_write_op(c->bc, BCODE_ADDR);
     st_push(c, 0);                      /* 弹 1 压 1，净 0 */
+    break;
+  }
+  case AST_IS_TAG: {
+    /* sema 生成的 tag 判定：编译 object → `IS_TAG <tag>`（弹 union 值 → 压
+       bool）。与用户写 `v is m` 编译出的指令完全一致，只是 tag 已由 sema
+       填好（不需要 token_t）。 */
+    ast_is_tag_t *n = (ast_is_tag_t *)node;
+    if (!n->object) {
+      c_error(c, node, "is_tag: missing object");
+      return;
+    }
+    compile_expr(c, n->object);            /* 栈: [value] */
+    bcode_write_op(c->bc, BCODE_IS_TAG);
+    bcode_write_u32(c->bc, n->tag);        /* 弹 value → 压 bool */
+    st_push(c, 0);
     break;
   }
   case AST_FREE: {

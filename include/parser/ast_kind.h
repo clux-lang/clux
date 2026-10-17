@@ -115,6 +115,13 @@ typedef enum {
                             退出点按类型生成 expr（简单指针 = 变量引用 → PUSH
                             <name>），compiler 编译 expr 后发 BCODE_FREE
                             （只消费栈顶）。compiler 不知道类型结构。 */
+    AST_IS_TAG,          /* `<object> is <member>` 的**直接形态**（sema 生成）：
+                            object 求值得 union 值，tag 是编译期已知的 member
+                            编号（uint32）→ compiler 直接发 `IS_TAG <tag>`。
+                            为什么不复用 AST_BINARY："is" 的 op 是 `token_t*`，
+                            而 sema 无法合成词法 token。仅用于 sema 生成的
+                            销毁序列（own tag union 的条件 FREE），不出现在
+                            用户源码中。 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

@@ -16,6 +16,7 @@
 #include "parser/ast_func_type.h"
 #include "parser/ast_if.h"
 #include "parser/ast_index.h"
+#include "parser/ast_is_tag.h"
 #include "parser/ast_member.h"
 #include "parser/ast_move.h"
 #include "parser/ast_program.h"
@@ -256,6 +257,9 @@ static void prescan_expr(compiler_t *c, ast_node_t *n) {
        "exec: unknown function id"。 */
     case AST_MOVE:
       prescan_expr(c, ((ast_move_t *)n)->operand);
+      break;
+    case AST_IS_TAG:
+      prescan_expr(c, ((ast_is_tag_t *)n)->object);
       break;
     case AST_CALL: {
       ast_call_t *cl = (ast_call_t *)n;

@@ -34,6 +34,7 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_if.h"
+#include "parser/ast_is_tag.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_return.h"
 #include "parser/ast_walk.h"
@@ -162,10 +163,51 @@ static void destroy_append(ast_node_t **head, ast_node_t **tail,
 }
 
 /* 为 `access` 所指、类型为 `t` 的值生成销毁语句，追加进 (head, tail)。
- * `access` 是已经构造好的左值表达式（变量引用 / 字段访问 / 元素访问）。
  * 返回 false = 遇到**暂不支持**的形态（含 own 槽位却无法静态展开）。 */
 static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
                         ast_node_t **head, ast_node_t **tail);
+
+/* tag union：按 member 逐个生成 `if (v is m) { <payload 的销毁序列> }`。
+   判 tag 用 AST_IS_TAG（sema 生成的直接形态——`is` 的 op 是 token_t*，
+   sema 无法合成，故该节点直接携带 tag 编号）。 */
+static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
+                              ast_node_t *access, ast_node_t **head,
+                              ast_node_t **tail) {
+  for (size_t i = 0; i < ut->member_count; i++) {
+    const union_member_t *m = &ut->members[i];
+    if (!m->payload_type || !m->name.ptr) continue;
+    const type_t *pt = type_strip_quals(m->payload_type);
+    bool leaf = pt && (pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE);
+    if (leaf && m->ownership != OWN_OWN) continue;   /* ref/fatal 槽位不释放 */
+
+    /* then 体：该 member 的销毁序列 */
+    ast_node_t *field = ast_member_new(sema->arena, 0, 0);
+    if (!field) return false;
+    ((ast_member_t *)field)->object = access;
+    ((ast_member_t *)field)->field  = m->name;
+
+    ast_node_t *body_head = NULL, *body_tail = NULL;
+    if (!gen_destroy(sema, pt, field, &body_head, &body_tail)) return false;
+    if (!body_head) continue;   /* 该 member 无 own 槽位 → 不需要条件释放 */
+
+    ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
+    if (!blk) return false;
+    ((ast_block_t *)blk)->stmts = body_head;
+
+    ast_node_t *cond = ast_is_tag_new(sema->arena, 0, 0);
+    if (!cond) return false;
+    ((ast_is_tag_t *)cond)->object = access;
+    ((ast_is_tag_t *)cond)->tag    = m->tag;
+
+    ast_node_t *ifn = ast_if_new(sema->arena, 0, 0);
+    if (!ifn) return false;
+    ((ast_if_t *)ifn)->cond      = cond;
+    ((ast_if_t *)ifn)->then_body = blk;
+
+    destroy_append(head, tail, ifn);
+  }
+  return true;
+}
 
 /* 结构体：逐字段展开。 */
 static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
@@ -220,10 +262,15 @@ static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
        option 的 ok / union 的 tag 也要运行期判断）。当前类型层仍禁止复合
        类型携带指针/切片，故这些形态还不能出现；一旦放开，此处必须补上
        `for` / `if` 生成，否则 own 槽位会泄漏。 */
+    case TYPE_KIND_UNION:
+      return gen_destroy_union(sema, (const union_type_t *)t, access, head,
+                               tail);
+    /* 以下形态需要**循环**才能静态展开（切片长度运行期才知）：
+       `own []T`（T 含 own 槽位）要生成 `for`，待补。当前类型层仍禁止
+       切片元素为指针/切片，故这些形态还不能出现。 */
     case TYPE_KIND_TUPLE:
     case TYPE_KIND_ARRAY:
     case TYPE_KIND_OPTION:
-    case TYPE_KIND_UNION:
     case TYPE_KIND_CUNION:
     case TYPE_KIND_FUNC:
     default:

@@ -1113,6 +1113,9 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
     }
     if (dup) continue;
 
+    /* **先捕获槽位所有权，再解析**：sema_resolve_type_slot 会把
+       AST_PTR/AST_SLICE_TYPE 折叠成 AST_TYPE_REF，之后 token 丢失。 */
+    ownership_t member_own = sema_type_expr_ownership(sf->type);
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
@@ -1124,10 +1127,16 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       ok = false;
       continue;
     }
+    /* ⚠️ 限制仍在：tag union 的销毁序列生成器（gen_destroy_union）与
+       AST_IS_TAG 节点已就绪，但 member 的槽位所有权在**推测轮**被折叠
+       （sema_type_expr_ownership 拿到 NONE），导致 type_has_own_slots 对
+       union 返回 false —— 此时若放开限制，`var u: U = .U{ .p = new i32{1} }`
+       会被当作 NONE（不生成 FREE）→ **静默泄漏**。先保持禁止，待修好
+       ownership 捕获时序再放开。 */
     if (type_contains_ptr_or_slice(ft)) {
       diag_error(sema->diag, sema_loc(sema, sf->type),
                  "union '%.*s': member '%.*s' has pointer or slice type; "
-                 "compound types cannot contain pointer/slice fields",
+                 "temporarily disallowed (ownership capture under repair)",
                  (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
                  sf->name.ptr);
       ok = false;
@@ -1135,7 +1144,7 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
     }
     members[i].payload_type = ft;
     /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
-    members[i].ownership = sema_type_expr_ownership(sf->type);
+    members[i].ownership = member_own;
   }
 
   if (!ok) {
@@ -1230,6 +1239,8 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     }
     if (dup) continue;
 
+    /* **先捕获槽位所有权，再解析**（折叠后 token 丢失）。 */
+    ownership_t cunion_member_own = sema_type_expr_ownership(sf->type);
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
@@ -1252,7 +1263,7 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     }
     members[i].type = ft;
     /* 槽位所有权（cunion 无 tag，不参与自动销毁——记录仅为类型描述完整） */
-    members[i].ownership = sema_type_expr_ownership(sf->type);
+    members[i].ownership = cunion_member_own;
   }
 
   if (!ok) {
