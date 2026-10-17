@@ -130,6 +130,99 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
  * 返回语句链首（按变量声明序），NULL = 无 own 变量。
  * **仅遍历本 scope 自身符号**（不沿 parent 链）——每个 scope 各自在自己的
  * 退出点生成自己的释放。 */
+/* ===========================================================================
+ * 销毁序列生成器（A 方案：完全 AST 生成，从 **type 对象**反推）
+ *
+ * 为什么不读 AST：装饰器会改造类型，所以"定义 AST"描述的是装饰器之前的形态、
+ * 构造式只覆盖被写入的字段——两者都可能与最终类型不符。type 对象在装饰器之后
+ * 仍是权威（槽位所有权记在 struct_field_t::ownership 上，见 type.h）。
+ *
+ * 判定规则（关键：区分"叶子"与"复合"）：
+ *   - **叶子**（ptr / slice）：有独立分配，**仅当该槽位 ownership == OWN**
+ *     才生成 FREE。ref / fatal 槽位是借用/将亡值，不归本值所有 → 不释放。
+ *   - **复合**（struct / tuple / …）：值本身没有独立分配，其内部 own 槽位
+ *     在结构上属于外层值 → **无条件递归**（与字段自身的 ownership 无关）。
+ *
+ * 这样 `struct Holder { r: ref *i32; p: own *i32 }` 的销毁序列只含 `FREE v.p`
+ * ——`r` 根本不会进序列，此前"运行期递归释放所有指针字段"导致的
+ * 0xC0000005（把 ref 指向的栈地址也 free 了）从根上消失。
+ * =========================================================================== */
+
+/* 把 n 追加到 (head, tail) 单链尾部。 */
+static void destroy_append(ast_node_t **head, ast_node_t **tail,
+                           ast_node_t *n) {
+  if (!n) return;
+  n->next = NULL;
+  if (!*head) {
+    *head = *tail = n;
+  } else {
+    (*tail)->next = n;
+    *tail = n;
+  }
+}
+
+/* 为 `access` 所指、类型为 `t` 的值生成销毁语句，追加进 (head, tail)。
+ * `access` 是已经构造好的左值表达式（变量引用 / 字段访问 / 元素访问）。
+ * 返回 false = 遇到**暂不支持**的形态（含 own 槽位却无法静态展开）。 */
+static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
+                        ast_node_t **head, ast_node_t **tail);
+
+/* 结构体：逐字段展开。 */
+static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
+                               ast_node_t *access, ast_node_t **head,
+                               ast_node_t **tail) {
+  for (size_t i = 0; i < st->field_count; i++) {
+    const struct_field_t *f = &st->fields[i];
+    if (!f->type || !f->name.ptr) continue;
+    const type_t *ft = type_strip_quals(f->type);
+    if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE)) {
+      /* 叶子：只有 own 槽位才释放 */
+      if (f->ownership != OWN_OWN) continue;
+      ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
+      if (!mem) return false;
+      ((ast_member_t *)mem)->object = access;
+      ((ast_member_t *)mem)->field  = f->name; /* vm 拥有，生命周期长于 AST */
+      destroy_append(head, tail, ast_free_new(sema->arena, mem));
+      continue;
+    }
+    /* 复合字段：递归（无论字段自身 ownership——其 own 槽位归外层值） */
+    ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
+    if (!mem) return false;
+    ((ast_member_t *)mem)->object = access;
+    ((ast_member_t *)mem)->field  = f->name;
+    if (!gen_destroy(sema, ft, mem, head, tail)) return false;
+  }
+  return true;
+}
+
+static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
+                        ast_node_t **head, ast_node_t **tail) {
+  if (!t || !access) return true;
+  t = type_strip_quals(t);
+  switch (t->kind) {
+    case TYPE_KIND_PTR:
+    case TYPE_KIND_SLICE:
+      /* 叶子：整体释放（FREE <access>） */
+      destroy_append(head, tail, ast_free_new(sema->arena, access));
+      return true;
+    case TYPE_KIND_STRUCT:
+      return gen_destroy_struct(sema, (const struct_type_t *)t, access, head,
+                                tail);
+    /* 以下形态需要**循环或条件**才能静态展开（切片长度运行期才知、
+       option 的 ok / union 的 tag 也要运行期判断）。当前类型层仍禁止复合
+       类型携带指针/切片，故这些形态还不能出现；一旦放开，此处必须补上
+       `for` / `if` 生成，否则 own 槽位会泄漏。 */
+    case TYPE_KIND_TUPLE:
+    case TYPE_KIND_ARRAY:
+    case TYPE_KIND_OPTION:
+    case TYPE_KIND_UNION:
+    case TYPE_KIND_CUNION:
+    case TYPE_KIND_FUNC:
+    default:
+      return true;
+  }
+}
+
 static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
   if (!scope || !scope->symbols) return NULL;
   const vec_t *keys = strmap_keys(scope->symbols);
@@ -201,20 +294,13 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
       continue; /* 闭包本身不是指针/切片，没有"整体释放"这一步 */
     }
 
-    ast_node_t *free_stmt = ast_free_new(sema->arena, ident);
-    if (!free_stmt) continue;
-
-    if (!head) {
-      head = free_stmt;
-      tail = free_stmt;
-    } else {
-      tail->next = free_stmt;
-      tail = free_stmt;
-    }
+    /* ---- 一般形态：交给销毁序列生成器（按 type 对象递归展开）----
+       叶子（ptr/slice）→ `FREE v`；struct → 逐 own 槽位 `FREE v.f`。
+       生成器已按 type 对象判定哪些槽位是 own，故 `ref` 槽位不会进序列。 */
+    if (!gen_destroy(sema, sym->type, ident, &head, &tail)) continue;
   }
   return head;
 }
-
 /* 沿 scope parent 链到 stop_scope（不含）收集各层 own 变量的 FREE 语句链。
    与 collect_defer_calls 同构——FREE 在 defer calls 之后执行（追加到 defers
    链末尾）。返回 FREE 语句链首（按执行顺序：内层 scope 先），NULL = 无。 */
