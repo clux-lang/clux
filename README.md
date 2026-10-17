@@ -186,6 +186,27 @@ including the `examples/` sweep and the `.cxs ⇄ .cxb` round-trip.
 > .\build\clux_test.exe
 > ```
 
+## Source encoding
+
+All source and documentation files are **UTF-8 without BOM**. (The exception is
+`third_party/`, whose MSVC project files need a BOM to be recognised as UTF-8.)
+
+Historical note: some editors on Chinese-locale Windows save as GBK, and `.cpp`
+files had crept in with a UTF-8 BOM. Both make Chinese comments render as mojibake
+in other tools. To check (and catch such files landing in a pull request):
+
+```sh
+python tools/check_encoding.py          # exit 0 = clean, 1 = reports offenders
+```
+
+If you see mojibake when reading files in a terminal, check the terminal's codepage
+before suspecting the file — on a GBK console, `Get-Content`/`type` render valid
+UTF-8 Chinese as garbage:
+
+```powershell
+$OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+```
+
 ## License
 
 See repository license terms.
