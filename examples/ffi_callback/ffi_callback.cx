@@ -81,3 +81,10 @@ func main(): i32 {
     }
     return 0;
 }
+comptime func add(val:i32):func(cb:func(i32,i32)->i32)->func(i32,i32)->i32 {
+    return comptime func|val|(cb:func(i32,i32)->i32):func(i32,i32)->i32 {
+        return func|val,cb|(a:i32,b:i32):i32 {
+            return cb(a,b)+val;
+        }
+    }
+}

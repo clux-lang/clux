@@ -92,7 +92,26 @@ struct func_t {
     void           *ffi_closure;
     void           *ffi_closure_ctx;
     void           *ffi_closure_code;
+
+    /* ---- 编译期：该函数字面量对应的 AST 节点（`ast_func_def_t*`）----
+     * CTFE 求值字面量时填入，供**常量闭包折叠**取回参数/函数体（此时
+     * sema_func_by_id 可能尚未登记该字面量：pass_globals 早于 Pass 3b）。
+     * 运行期对象恒 NULL；不参与任何运行期语义。 */
+    const void     *ct_literal;
 };
+
+/**
+ * 闭包捕获写入：按 `capture_type` 槽位先销毁旧值（own 槽位释放），
+ * 再 implicit_cast + memcpy 写入 `env` 块。
+ *
+ * 两个调用方：运行期 `SET_CLOSURE`（op_set_closure）与**编译期常量闭包的
+ * 物化**（CTFE 让 comptime 函数返回带捕获的闭包时，捕获值以常量形式写进
+ * 实例 env，随后由 sema 编码成 MAKE_FUNCTION + SET_CLOSURE 序列）。
+ *
+ * 返回 NULL 成功；否则返回**静态**错误文本（调用方包成 error value / 诊断）。
+ */
+const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
+                               value_t *val);
 
 /* ---- 函数 id 分段（function.c / compile_func.c 共用） ---- */
 /* 内建函数固定 id 0..(FUNC_ID_BUILTIN_COUNT-1)（vm 自动分配：func_new 内

@@ -1845,3 +1845,29 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       §79 里那两个 Windows CRT 数据符号用例）。Linux 上 `ffi_callback` /
       `ffi_process` / `ffi_assert` 三个示例直接跑通，`ffi_extern_var` 按预期在
       编译期报未知库别名；`bc emit -D` 产物可直接 run。
+
+81. **函数是编译期的值：comptime 函数返回函数（含闭包）**（2026-10）
+    - **需求（用户提出）**：装饰器的前置能力——"comptime 函数能返回正常函数，
+      理论上函数就是编译期的值"。
+    - **落地**：
+      * comptime 函数返回**普通函数**（全局函数 / 体内定义的局部函数 /
+        struct 方法）→ 折叠为 `AST_FUNC_REF`（`LOAD_FUNCTION <fid>`）。
+      * comptime 函数返回**闭包**（`func |f, n| ...`）→ **常量闭包**：
+        CTFE 求值字面量时按捕获值物化实例 env（`func_instantiate_raw` +
+        `func_closure_store`，与运行期 `MAKE_FUNCTION`/`SET_CLOSURE` 同构）；
+        sema 编码为 "func id + 捕获常量表"（`sema_ct_capture_t`）；
+        折叠成**克隆的 func 字面量**（括号捕获 `|(name: T = 值)|`），
+        compiler 走既有函数字面量路径 —— **零新指令、零容器格式变更**
+        （`.cxb` 里就是 MAKE_FUNCTION + SET_CLOSURE，实测 `.cxb→.cxs→.cxb`
+        字节往返可运行）。
+      * 捕获值必须是编译期常量；捕获运行期变量给出明确诊断
+        （`ctfe: cannot capture runtime variable 'x'`）。
+    - **新增 API**：`func_closure_store`（`vm/function.h`，SET_CLOSURE 与 CTFE
+      物化共用）、`sema_ct_const_t::captures/capture_count`、
+      `func_t::ct_literal`（编译期字面量 AST，供折叠取回参数/函数体；
+      `pass_globals` 早于 Pass 3b，`sema_func_by_id` 此时查不到字面量）。
+    - **测试**：`tests/comptime_closure_test.cpp` 8 例——返回普通函数、返回体内
+      定义的函数、返回捕获常量的闭包、返回捕获**函数值**的闭包（装饰器核心
+      形态）、多捕获、`.cxb` 往返（含反汇编出现 MAKE_FUNCTION/SET_CLOSURE）、
+      捕获运行期变量的诊断、装饰后仍是可传参的一等值。
+    - 验证：Windows 全量 **2126/2126 PASSED**；WSL2 Ubuntu 全量 **2123 passed / 2 skipped**（跳过为既有 Windows CRT 数据符号用例）。

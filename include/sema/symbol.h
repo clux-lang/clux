@@ -78,6 +78,8 @@ typedef struct _sema_scope_t sema_scope_t;
  * 字符串 strslice 指向 arena 复制的缓冲区（生命周期 = sema arena，
  * 跨 sema/compile 阶段安全）。type 是 vm 类型池指针（借用，生命周期 = vm）。
  */
+struct sema_ct_capture; /* 见下：闭包捕获（值常量） */
+
 typedef struct sema_ct_const {
   const type_t *type;  /* 常量类型 */
   int64_t       i;     /* i8..i64, u8..u32（按位图存） */
@@ -86,10 +88,26 @@ typedef struct sema_ct_const {
   bool          b;     /* bool */
   strslice_t    s;     /* 字符串（arena 复制） */
   uint32_t      func_id; /* 函数引用（TYPE_KIND_FUNC，sema 分配 fid） */
+  /* 闭包常量（TYPE_KIND_FUNC 且带捕获）：捕获名 + 值（arena 分配）。
+     captures == NULL / capture_count == 0 → 纯函数引用（无捕获）。 */
+  struct sema_ct_capture *captures;
+  size_t                  capture_count;
+  /* 闭包常量的**字面量 AST**（`ast_func_def_t*`，借用）：折叠时据此克隆
+     出 MAKE_FUNCTION + SET_CLOSURE 所需的函数字面量。NULL = 非字面量。 */
+  const struct ast_node *lit_ast;
   /* 数组（TYPE_KIND_ARRAY）：arena 分配的连续元素编码 */
   struct sema_ct_const *elems; /* count 个元素常量（arena 分配） */
   size_t                count; /* 元素个数 */
 } sema_ct_const_t;
+
+/* 闭包常量的一格捕获：名字（借用 capture_type 字段名）+ 值常量。
+   comptime 函数返回的闭包用它编码成 MAKE_FUNCTION + SET_CLOSURE 序列。 */
+typedef struct sema_ct_capture {
+  strslice_t      name;
+  struct sema_ct_const value;
+} sema_ct_capture_t;
+
+
 
 /*
  * sema 侧符号表：纯编译期元数据

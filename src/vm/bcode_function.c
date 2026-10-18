@@ -68,6 +68,7 @@ func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     fn->base.capture_type = base->capture_type;
     fn->base.env_dispose_fid = base->env_dispose_fid;
     fn->base.env_clone_fid   = base->env_clone_fid;
+    fn->base.ct_literal      = base->ct_literal;
     if (base->capture_type && base->capture_type->base.size > 0) {
         void *env = allocator_new_ex(vm->alloc, "closure_env",
                                      base->capture_type->base.size, NULL, NULL, NULL,

@@ -1691,23 +1691,12 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     t = type_strip_quals(t);
     if (t && t->kind == TYPE_KIND_FUNC) {
         /* 闭包捕获写入（与结构体 FIELD_SET 同构）：按 capture_type 槽位
-           所有权先销毁旧值，再 implicit_cast + memcpy 写入 env 块。 */
+           所有权先销毁旧值，再 implicit_cast + memcpy 写入 env 块。
+           实现与"编译期常量闭包物化"共用（func_closure_store）。 */
         if (value_is_shadow(self)) return self;
         func_t *fn = *(func_t **)value_data(self);
-        if (!fn || !fn->capture_type || !fn->env)
-            return value_make_error(vm, "exec: closure has no captures");
-        const type_t *ct = &fn->capture_type->base;
-        int fi = struct_type_find_field(ct, name);
-        if (fi < 0)
-            return value_make_error(vm, "exec: no such closure capture");
-        const struct_field_t *f = struct_type_field(ct, (size_t)fi);
-        if (!f || !f->type)
-            return value_make_error(vm, "exec: closure capture type missing");
-        value_t *casted = value_implicit_cast(vm, val, f->type);
-        if (value_is_error(vm, casted)) return casted;
-        void *dst = (uint8_t *)fn->env + f->offset;
-        ptr_free_slot_value(vm, f->type, f->ownership, dst);
-        memcpy(dst, value_data(casted), f->type->size);
+        const char *cerr = func_closure_store(vm, fn, name, val);
+        if (cerr) return value_make_error(vm, cerr);
         return self;
     }
     if (!t || t->kind != TYPE_KIND_STRUCT) {
@@ -1919,6 +1908,23 @@ static value_t *op_set_func_captures(vm_t *vm, bytecode_t *bc, size_t *pc) {
    值，随后每个捕获 [值, SET_CLOSURE "name"]，栈下 1 位即目标函数。闭包为
    clone 值语义（捕获独立副本，非引用）；提升区已用 undefined 占位（scope
    层 define-or-replace：scope_set 替换，void 占位无 assign 槽不走 value_assign）。 */
+const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
+                               value_t *val) {
+    if (!fn || !fn->capture_type || !fn->env)
+        return "exec: closure has no captures";
+    const type_t *ct = &fn->capture_type->base;
+    int fi = struct_type_find_field(ct, name);
+    if (fi < 0) return "exec: no such closure capture";
+    const struct_field_t *f = struct_type_field(ct, (size_t)fi);
+    if (!f || !f->type) return "exec: closure capture type missing";
+    value_t *casted = value_implicit_cast(vm, val, f->type);
+    if (value_is_error(vm, casted)) return "exec: closure capture type mismatch";
+    void *dst = (uint8_t *)fn->env + f->offset;
+    ptr_free_slot_value(vm, f->type, f->ownership, dst);
+    memcpy(dst, value_data(casted), f->type->size);
+    return NULL;
+}
+
 static value_t *op_set_closure(vm_t *vm, bytecode_t *bc, size_t *pc) {
     strslice_t name = bcode_read_str(bc, pc);
     value_t *cap = exec_stack_pop(vm);

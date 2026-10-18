@@ -762,6 +762,27 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+### comptime 函数可以返回函数（含闭包）
+
+**函数是编译期的值**：comptime 函数可以把函数作为返回值，返回的函数在运行期
+是一等值（`var g = mk(); g(3)`），带捕获的闭包也可以：
+
+```c
+comptime func make_add(n: i32): func(i32) -> i32 {
+    return func |n| addn(x: i32): i32 { return x + n; };
+}
+
+var add10 = make_add(10);      // 编译期折叠为"函数 + 捕获常量 10"
+```
+
+- 捕获值必须是**编译期常量**；捕获运行期变量报错
+  （`cannot capture runtime variable 'x'`）。
+- 物化方式：CTFE 求值字面量时按捕获值建实例 env，sema 编码成
+  "func id + 捕获常量表"，折叠成 `MAKE_FUNCTION` + `SET_CLOSURE` 序列，
+  随容器（`.cxb`/`.cxs`）落盘。
+- 由此可实现**装饰器**（见 `[[<expr>]]`）：装饰器就是"接收函数值、返回函数值"
+  的 comptime 函数。
+
 ### 动态库声明的条件后缀（按场景选库）
 
 同一个逻辑库在不同平台叫法不同（C 运行库 = `msvcrt` / `libc.so.6` /

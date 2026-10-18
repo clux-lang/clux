@@ -35,6 +35,7 @@
 #include "parser/lexer.h"
 #include "parser/parse_utils.h"
 #include "sema/symbol.h"
+#include "vm/bcode_function.h"  /* func_instantiate_raw：常量闭包实例化 */
 #include "vm/function.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
@@ -115,6 +116,98 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
     func_t *fn = func_new_program_ref(vm, sig, n->name, fid);
     if (!fn)
         return ctfe_err(ctx, "ctfe: out of memory creating function literal");
+    fn->ct_literal = n; /* 常量闭包折叠需要字面量 AST（见 function.h） */
+
+    /* 带捕获的字面量 = **编译期常量闭包**：把捕获值物化进实例 env。
+       —— 与运行期 `MAKE_FUNCTION <fid>` + `SET_CLOSURE <name>` 完全同构：
+          实例持有 capture_type（捕获聚合结构体）+ env 块，捕获值按槽位写入。
+       —— 为什么必须现在做：comptime 函数返回闭包时，返回的是这个 func 值；
+          没有 env 的话编码出来的常量只有 func_id，运行期调用会报
+          "closure has no captures"。
+       —— 捕获类型此时由**捕获值的类型**就地合成（sema 的 Pass 3b 尚未跑到字面量，
+          n->capture_type_id 还是 0）；稍后 sema 按同样字段（名/类型/OWN_NONE）
+          重算会**去重**到同一个 struct 类型。捕获名两端一致，SET_CLOSURE 的
+          字段偏移因此不会错位。
+       —— 捕获值必须是编译期常量（编码阶段 sema_ct_encode 递归校验）；
+          引用运行期变量在这里就报错，而不是留到折叠失败。 */
+    if (n->captures) {
+        size_t nc = 0;
+        for (ast_node_t *c = n->captures; c; c = c->next) nc++;
+        value_t **capv = (value_t **)allocator_new_ex(
+            vm->alloc, "ctfe_captures", sizeof(value_t *), NULL, NULL, NULL,
+            nc);
+        struct_field_t *fields = (struct_field_t *)allocator_new_ex(
+            vm->alloc, "ctfe_capture_fields", sizeof(struct_field_t), NULL, NULL,
+            NULL, nc);
+        if (!capv || !fields) {
+            if (capv) allocator_free(vm->alloc, (void **)&capv);
+            if (fields) allocator_free(vm->alloc, (void **)&fields);
+            return ctfe_err(ctx, "ctfe: out of memory capturing closure");
+        }
+        size_t k = 0;
+        value_t *bad = NULL;
+        for (ast_node_t *c = n->captures; c; c = c->next, k++) {
+            ast_var_def_t *cv = (ast_var_def_t *)c;
+            value_t *cap = NULL;
+            if (cv->init) {
+                cap = ctfe_eval(ctx, cv->init);
+                if (value_is_error(vm, cap)) {
+                    bad = cap;
+                    break;
+                }
+            } else {
+                cap = scope_lookup(vm->current_scope, cv->name);
+                if (!cap) {
+                    bad = ctfe_errf(
+                        ctx, "ctfe: cannot capture undefined variable '%.*s'",
+                        (int)cv->name.len, cv->name.ptr);
+                    break;
+                }
+                if (value_is_shadow(cap)) {
+                    bad = ctfe_errf(
+                        ctx,
+                        "ctfe: cannot capture runtime variable '%.*s' "
+                        "(closures returned from comptime functions may only "
+                        "capture compile-time constants)",
+                        (int)cv->name.len, cv->name.ptr);
+                    break;
+                }
+            }
+            capv[k] = cap;
+            memset(&fields[k], 0, sizeof(fields[k]));
+            fields[k].name = cv->name;
+            fields[k].type = value_type(cap);
+            fields[k].ownership = OWN_NONE; /* 编译期常量：无堆所有权 */
+        }
+        if (!bad) {
+            const type_t *ct = type_struct_intern(vm, fields, nc);
+            if (!ct) bad = ctfe_err(ctx, "ctfe: cannot intern capture type");
+            if (ct && ctx->sema) {
+                const sema_type_t *st = sema_type_register(ctx->sema, ct);
+                if (st) n->capture_type_id = st->id;
+                if (st) n->capture_type_id = st->id;
+            }
+            if (!bad) {
+                fn->capture_type = (const struct_type_t *)ct;
+                fn->env_dispose_fid = n->env_dispose_fid;
+                fn->env_clone_fid = n->env_clone_fid;
+                func_t *inst = func_instantiate_raw(vm, fn);
+                if (!inst) bad = ctfe_err(ctx, "ctfe: out of memory creating closure instance");
+                for (size_t i = 0; !bad && i < nc; i++) {
+                    ast_var_def_t *cv = (ast_var_def_t *)n->captures;
+                    for (size_t j = 0; j < i && cv; j++) cv = (ast_var_def_t *)cv->base.next;
+                    const char *cerr =
+                        cv ? func_closure_store(vm, inst, cv->name, capv[i]) : "capture name missing";
+                    if (cerr) bad = ctfe_errf(ctx, "ctfe: %s", cerr);
+                }
+                if (!bad) fn = inst; /* 值里放**实例**（实例归 vm->functions 所有） */
+            }
+        }
+        allocator_free(vm->alloc, (void **)&capv);
+        allocator_free(vm->alloc, (void **)&fields);
+        if (bad) return bad;
+    }
+
     void *data = value_alloc_data_copy(vm->alloc, sig, &fn);
     value_t *fv = value_make(vm, sig, data);
 

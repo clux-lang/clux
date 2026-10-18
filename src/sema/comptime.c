@@ -174,10 +174,35 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
        data 存 func_t*（CTFE 经 func_new_program_ref 构造的引用对象，或 scope
        里真实函数值）。编码函数 id（func_t->id：sema 分配的程序 fid 或内建
        id），折叠为 AST_FUNC_REF（compiler 发 LOAD_FUNCTION <id>）——与函数
-       是否有 name 无关（匿名字面量无名字也可折叠）。 */
+       是否有 name 无关（匿名字面量无名字也可折叠）。
+       带捕获的闭包（CTFE 已实例化出 env）额外编码捕获表：折叠时生成
+       MAKE_FUNCTION + SET_CLOSURE 序列，否则运行期调用会报
+       "closure has no captures"。 */
     func_t *fn = *(func_t **)value_data(v);
     if (!fn) return false;
     out->func_id = fn->id;
+    out->lit_ast = (const struct ast_node *)fn->ct_literal;
+    if (fn->capture_type && fn->env) {
+      const type_t *ct = &fn->capture_type->base;
+      size_t count = struct_type_field_count(ct);
+      if (count > 0) {
+        sema_ct_capture_t *caps = (sema_ct_capture_t *)arena_calloc(
+            sema->arena, count, sizeof(sema_ct_capture_t),
+            ALIGNOF(max_align_t));
+        if (!caps) return false;
+        const char *base = (const char *)fn->env;
+        for (size_t i = 0; i < count; i++) {
+          const struct_field_t *f = struct_type_field(ct, i);
+          if (!f || !f->type) return false;
+          caps[i].name = f->name; /* type_struct_intern 深拷贝过捕获名 */
+          value_t *fv =
+              value_make_borrowed(vm, f->type, (void *)(base + f->offset));
+          if (!fv || !sema_ct_encode(sema, fv, &caps[i].value)) return false;
+        }
+        out->captures = caps;
+        out->capture_count = count;
+      }
+    }
     return true;
   }
   return false; /* void/type/其他复合：不可折叠 */
@@ -315,7 +340,50 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     return cnode;
   }
   if (t->kind == TYPE_KIND_FUNC) {
-    /* 函数引用常量：折叠为 AST_FUNC_REF（纯 id 标识——compiler 直接发
+    /* 带捕获的闭包常量：折叠为**克隆的 func 字面量**——共享原字面量的
+       params/body/fid/capture_type_id，把 captures 换成"括号捕获"形态
+       （`|(name: T = <值常量>)|`）。compiler 对函数字面量本就发
+       MAKE_FUNCTION <fid> + 逐捕获 <值> + SET_CLOSURE <name>，因此**零感知**，
+       不需要新的 AST kind / 指令。 */
+    if (ct->capture_count > 0 && ct->captures) {
+      ast_func_def_t *orig = NULL;
+      /* 优先用 CTFE 记下的字面量 AST：pass_globals 阶段该字面量可能还没登记
+         进 sema->funcs（Pass 3b 才 walk 到函数体里的字面量）。 */
+      if (ct->lit_ast && ct->lit_ast->kind == AST_FUNC_DEF) {
+        orig = (ast_func_def_t *)ct->lit_ast;
+      } else {
+        sema_func_t *sf = sema_func_by_id(sema, ct->func_id);
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+          orig = (ast_func_def_t *)sf->def;
+      }
+      if (!orig) return NULL;
+      ast_func_def_t *lit = (ast_func_def_t *)arena_calloc(
+          arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
+      if (!lit) return NULL;
+      *lit = *orig; /* 共享参数/函数体/fid/签名/捕获类型 id */
+      lit->base.next = NULL;
+      lit->captures = NULL;
+      ast_node_t *head = NULL, *last = NULL;
+      for (size_t i = 0; i < ct->capture_count; i++) {
+        ast_node_t *cn =
+            ast_var_def_new(arena, origin->tok_begin, origin->tok_end);
+        if (!cn) return NULL;
+        ast_var_def_t *cv = (ast_var_def_t *)cn;
+        cv->name = ct->captures[i].name;
+        cv->type_expr =
+            sema_ct_type_ref(sema, ct->captures[i].value.type, origin);
+        cv->init = sema_ct_lit(sema, origin, &ct->captures[i].value);
+        if (!cv->init) return NULL;
+        if (last)
+          last->next = cn;
+        else
+          head = cn;
+        last = cn;
+      }
+      lit->captures = head;
+      return &lit->base;
+    }
+    /* 纯函数引用常量：折叠为 AST_FUNC_REF（纯 id 标识——compiler 直接发
        LOAD_FUNCTION <fid> 加载真实函数值，与函数是否有 name 无关：
        匿名字面量无名字也可折叠）。 */
     ast_node_t *ref =
