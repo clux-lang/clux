@@ -9,7 +9,7 @@
 //
 // 折叠产物直接喂给类型槽位：数组边界 [sizeof(a)]i32 编译期展开为 [4]i32。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // ---- sizeof / alignof 内建标量 ----

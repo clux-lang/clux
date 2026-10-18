@@ -121,7 +121,7 @@ TEST(ClosureAggregate, RefCaptureNotFreed) {
 TEST(ClosureAggregate, CfuncHasNoCaptureEnv) {
   /* cfunc 声明 = 普通函数指针（无捕获、无 capture_type）：调用路径与闭包无关。 */
   clux_expect_ok(
-      "extern lib \"*\" as libc;\n"
+      "extern lib libc from \"*\";\n"
       "extern cfunc libc::abs(x: i32): i32;\n"
       "func main(): i32 {\n"
       "  if (libc::abs(-5) != 5) { return 1; }\n"

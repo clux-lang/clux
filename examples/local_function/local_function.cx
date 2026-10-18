@@ -13,7 +13,7 @@
 //   - 不可访问：未在捕获列表中声明的外层局部变量（编译期拒绝）
 //   - comptime 局部函数：调用点编译期折叠，零运行时指令
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func global_add(a: i32, b: i32): i32 {
     return a + b;

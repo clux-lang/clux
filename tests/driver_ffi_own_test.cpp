@@ -29,7 +29,7 @@ namespace {
 
 /* 只关心**声明期**的拒绝：诊断出现在编译阶段（driver_run_file 返回 1）。
    这些声明引用的 C 符号不存在，但类型约束先于 dlsym 解析失败。 */
-const char *kPrelude = "extern lib \"*\" as libc;\n";
+const char *kPrelude = "extern lib libc from \"*\";\n";
 
 } // namespace
 
@@ -85,12 +85,12 @@ TEST(DriverFfiOwn, RefAndFatalPointersAreStillAccepted) {
   /* §2.3：只允许 ref/fatal 指针——它们不持有资源，仍按指针宽度放行。
      **真的调用真实 C 符号**（msvcrt 的 strlen + 测试库的 clux_first_i32），
      确保 exit 0 来自"跑通"而不是"被拒后没崩"。
-     注：`extern lib "*"` 这类**通配库**在加载期就解析全部声明符号，所以正例必须
+     注：`extern lib <别名> from "*"` 这类**通配库**在加载期就解析全部声明符号，所以正例必须
      挂真实库（惰性解析只对具体库路径生效）。 */
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::strlen(p: ref *u8): u64;\n"
-      "extern lib \"clux_ffi_testdata.dll\" as td;\n"
+      "extern lib td from \"clux_ffi_testdata.dll\";\n"
       "extern cfunc td::clux_first_i32(p: fatal *i32): i32;\n"
       "func main(): i32 {\n"
       "  var s: str = \"hello\";\n"
@@ -108,7 +108,7 @@ TEST(DriverFfiOwn, PlainStructIsStillAccepted) {
      `clux_point_sum(CluxPoint)` 验证。 */
   std::string path = write_temp_file(
       "struct Point { x: i32; y: i32 }\n"
-      "extern lib \"clux_ffi_testdata.dll\" as td;\n"
+      "extern lib td from \"clux_ffi_testdata.dll\";\n"
       "extern cfunc td::clux_point_sum(p: Point): i32;\n"
       "extern cfunc td::clux_point_make(x: i32, y: i32): Point;\n"
       "func main(): i32 {\n"

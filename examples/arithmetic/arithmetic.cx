@@ -1,5 +1,5 @@
 // arithmetic.cx — M1 样例：算术/位运算、一元运算、复合赋值、类型转换 as
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var a: i32 = 40;

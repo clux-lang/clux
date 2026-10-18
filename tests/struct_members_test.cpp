@@ -100,9 +100,9 @@ class StructMembersTest : public ::testing::Test {
   void expect_verdict(const std::string &body) {
     static int counter = 0;
     std::string src =
-        "extern lib \"" +
+        "extern lib td from \"" +
         std::string(kTestLib) +
-        "\" as td;\n"
+        "\";\n"
         "extern var td::td_i32: i32;\n" +
         body +
         "func report(v: i32): i32 { td::td_i32 = v; return v; }\n";

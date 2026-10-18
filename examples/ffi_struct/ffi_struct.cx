@@ -17,7 +17,7 @@ struct DivT {
     rem: i32;
 } // 对应 C 的 div_t（字段名/顺序/宽度都一致）
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 extern cfunc libc::div(num: i32, den: i32): DivT; // 按值返回结构体

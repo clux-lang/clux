@@ -12,7 +12,7 @@
 // 注：sema 阶段类型表达式仍按依赖序编译期求值（CTFE 无前向引用），
 // 别名链须按依赖序声明；提升只作用于"类型构造"这一运行期阶段。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 type Local = i32; // 全局同名 type：用于演示局部遮蔽
 

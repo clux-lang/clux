@@ -7,7 +7,7 @@
 //   判等     仅同 enum 实例间（Color::Red == Color::Green），vs 底层报错
 
 // 底层 i32 的枚举：variant 显式整数值
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 enum Color: i32 {Red = 1, Green = 2, Blue = 3}
 

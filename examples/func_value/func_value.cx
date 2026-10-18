@@ -10,7 +10,7 @@
 //   - 显式类型标注：var g: func(i32,i32)->i32 = add; 重新赋值另一函数
 //   - 变量遮蔽函数名：var add = ...; 后 add 是变量，函数名不可见
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func add(a: i32, b: i32): i32 {
     return a + b;

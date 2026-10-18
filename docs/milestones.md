@@ -1711,3 +1711,39 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       身份不同失败；`.cxs` 助记符表与扩展高亮同步（118 条）。
     - 验证：全量重编 **0 告警**；**2086/2086 PASSED**；`examples` 45/45（run 与
       emit→run 均通过）；`fmt` 幂等 48/48；`.cxs` 样本 5/5。
+
+78. **FFI 动态库表示形式：通用库名（CMake 风格）取代完整文件名**（2026-10）
+    - **动机（用户指出）**：`extern lib "<完整文件名>" as <别名>;` 把平台文件名
+      写死在源码里（`msvcrt.dll` / `libc.so.6`），**无法跨平台**。参考 CMake 的
+      同名风格改成**通用库名**，执行器按平台展开候选文件。
+    - **新语法**：`extern lib <别名> from "<库名>";`（与 `import <别名> from
+      "<路径>"` 同形，别名在前）：
+      ```c
+      extern lib libc   from "c";        // c.dll / libc.so / c.so
+      extern lib user32 from "user32";   // 通用名，自动补 .dll
+      extern lib libc   from "*";        // 当前进程自身（不变）
+      ```
+      旧形式**已删除**；解析器对它给出**迁移提示**（而不是笼统语法错误）。
+    - **解析（`vm/ffi_lib.c`）**：候选序列 = **as-is**（显式路径 / 已带后缀的
+      文件名 / 系统搜索路径上的裸名字）→ 平台候选（Windows `<name>.dll`；
+      macOS `lib<name>.dylib` / `<name>.dylib` / `lib<name>.so` / `<name>.so`；
+      其它 `lib<name>.so` / `<name>.so`），逐个尝试，第一个成功者即加载；失败时
+      诊断里**列出试过的候选名**（"名字拼错/不在搜索路径"最好定位）。
+    - **容器（关键）**：`ffi_lib_t` 同时记**声明的通用名**（`ffi_lib_name`）与
+      实际命中的候选（`ffi_lib_path`，诊断用）；`.cxb`/`.cxs` 序列化写**通用名**
+      ——产物不再携带解析后的绝对路径，因此可跨机器/跨平台搬运（加载侧按名字
+      重新展开候选）。旧 `.cxb` 里存的是显式文件名，靠 as-is 候选继续可加载。
+    - **迁移**：示例/测试/文档共 63 个文件改用新语法（脚本迁移 + 人工校正）；
+      Windows 专用示例（msvcrt）改用通用名 `msvcrt` 以体现新写法。
+    - **测试**：新增 `tests/parse_extern_lib_test.cpp`（新语法解析 / 显式路径 /
+      旧形式迁移提示 / 缺 `from` / 空库名 / 非标识符别名；
+      `ParseExternLibTest.*` 6 例）；`tests/ffi_lib_test.cpp` 新增 4 例（通用名
+      自动补平台后缀并能解析符号、显式文件名 as-is、失败诊断列出候选、`"*"` 伪库
+      名字）；`tests/driver_module_bcode_test.cpp` 新增/改写 3 例（缺 `from`
+      语法错误、旧形式迁移提示、`ContainerStoresGenericLibraryName` 断言容器里
+      存的是通用名且**不含**平台文件名）。
+    - **文档**：m6-design §1.1（语法 + 候选规则 + 容器语义）、bytecode-mnemonics
+      （`externlib "<库名>" as <别名>` 存通用名）、language-spec（printf 一节）、
+      `include/vm/ffi_lib.h` 的契约注释。
+    - 验证：全量重编 **0 告警**；**2098/2098 PASSED**；`examples` 45/45（run 与
+      emit→run 均通过）；`.cxs` 样本 5/5。

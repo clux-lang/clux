@@ -745,7 +745,7 @@ M1 曾把 C 的 printf 硬编码成内建函数（还额外提供 `%v`"打印任
 （走 `BCODE_EXTERN_CALL` → libffi 精确类型调用；定参与 C 变参都支持）：
 
 ```c
-extern lib "*" as libc;                    // "*" = 当前进程自身（已链接进来的库）
+extern lib libc from "*";   // "*" = 当前进程自身（已链接进来的库）
 extern func libc::printf(format: str, ...): void;
 
 func main(): i32 {

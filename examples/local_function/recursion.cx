@@ -12,7 +12,7 @@
 //   - 反注释验证：func fact(n) {...} 不带捕获 → 编译期报错
 //     "local function cannot reference sibling or self"
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // ---- 自递归：阶乘（捕获自身）----

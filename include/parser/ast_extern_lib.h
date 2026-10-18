@@ -12,22 +12,27 @@ extern "C" {
 
 /* extern lib 声明节点（M6 FFI）：
  *
- *     extern lib "<路径>" as <名>;
- *     extern lib "libc.so.6" as libc;
+ *     extern lib <别名> from "<库名>";
+ *     extern lib libc from "c";        // → c.dll / libc.so / c.so（按平台）
+ *     extern lib libc from "*";        // 当前进程自身（RTLD_DEFAULT 语义）
+ *     extern lib td   from "clux_ffi_testdata";   // 通用名，找平台文件
+ *     extern lib x    from "/abs/libfoo.so";      // 显式路径也接受
  *
- * **判据是关键字 `extern lib`，不是文件后缀**：路径只是"交给运行期
- * dlopen/LoadLibrary 的加载参数"，同一路径也可能是普通数据或源码模块，
- * 因此不做任何后缀判类、也不因此产生"看起来像动态库"的诊断。
- * `import`（AST_IMPORT）语义保持不变——只表示源码模块。
+ * **`<库名>` 是通用名（generic name），不是文件名**：加载器按平台展开候选
+ * （Windows `name.dll`；Linux `libname.so` / `name.so`；macOS 再加 `.dylib`）
+ * 逐个尝试——与 CMake 的同名风格一致，源码因此跨平台。显式路径/文件名同样
+ * 接受（加载器先按 as-is 尝试）。判据仍是关键字 `extern lib`，加载器不按
+ * 后缀判类，无法加载时由操作系统给原因。
  *
- * 该库名随后被 `extern cfunc <库>::<函数>(...)` 引用（sema/M6 Phase 3+）。
- * 与 import 一样，compiler 不为本声明生成运行期字节码：加载在 sema 阶段
- * 完成（dlopen 句柄存 module_t->dl_handle）。
+ * 该库名随后被 `extern cfunc <库>::<函数>(...)` 引用。与 import 一样，
+ * compiler 不为本声明生成运行期字节码：加载在编译/加载期完成，句柄存进
+ * module_t->ffi_libs；`.cxb`/`.cxs` 容器里保存的是**通用名**（不是解析后的
+ * 绝对路径），产物因此可跨平台搬运。
  */
 typedef struct {
     ast_node_t  base;   /* kind = AST_EXTERN_LIB */
     strslice_t  alias;  /* 库别名（命名空间，extern cfunc 以 <alias>::<fn> 引用） */
-    strslice_t  path;   /* 动态库路径（字符串字面量内容，去引号） */
+    strslice_t  name;   /* 通用库名 / 显式路径（字符串字面量内容，去引号） */
 } ast_extern_lib_t;
 
 static inline ast_node_t *ast_extern_lib_new(arena_t *arena, uint32_t tok_begin,
@@ -41,7 +46,7 @@ static inline ast_node_t *ast_extern_lib_new(arena_t *arena, uint32_t tok_begin,
     return &n->base;
 }
 
-/** 解析 `extern lib "<path>" as <alias>;`（调用方已消费 `extern` 关键字，tb 为其下标） */
+/** 解析 `extern lib <alias> from "<name>";`（调用方已消费 `extern`，tb 为其下标） */
 ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb);
 
 #ifdef __cplusplus

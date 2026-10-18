@@ -6,7 +6,7 @@
 //     与定义位置无关），出块恢复全局定义
 //   - 局部 type 前向引用：定义在后、使用在前合法（提升机制）
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 type T = i32; // 全局 type
 

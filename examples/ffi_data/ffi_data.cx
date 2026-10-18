@@ -22,7 +22,7 @@
 //     指针只为"喂 C"而生；clux 侧遍历用序列本身（`s[i]`），或者只解引用首元素
 //     （`p.*`）。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 
 extern cfunc libc::printf(format: str, ...): void;
 extern cfunc libc::memcmp(a: opaque, b: opaque, n: usize): i32;

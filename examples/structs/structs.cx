@@ -14,7 +14,7 @@
 //           写/复合 → FIELD_SET（隐式转换 + 深拷贝回写）
 
 // 全局 struct：字段显式类型
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 struct Point {
     x: i32;

@@ -14,7 +14,7 @@
 //   - 字面量/局部函数 body 内不能访问外层局部变量（捕获需闭包，暂不支持），
 //     只能访问参数与全局函数
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 comptime func make_inc(): func(i32) -> i32 {
     return func(x: i32): i32 {

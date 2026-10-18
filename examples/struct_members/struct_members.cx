@@ -22,7 +22,7 @@
 //   - 只读方法把接收者写成 `ref *const T`；`ref *T` 会**自动**加 const 传进去，
 //     但反向（去 const）不允许，所以只读方法里写 `self.field = v` 会被拒绝。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void; // M6 起 printf 由 libc 提供
 
 struct Counter {

@@ -763,8 +763,8 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
             if (n->kind != AST_EXTERN_LIB) continue;
             ast_extern_lib_t *el = (ast_extern_lib_t *)n;
             char pathbuf[512], aliasbuf[256];
-            snprintf(pathbuf, sizeof(pathbuf), "%.*s", (int)el->path.len,
-                     el->path.ptr);
+            snprintf(pathbuf, sizeof(pathbuf), "%.*s", (int)el->name.len,
+                     el->name.ptr);
             snprintf(aliasbuf, sizeof(aliasbuf), "%.*s", (int)el->alias.len,
                      el->alias.ptr);
             char err[512] = {0};

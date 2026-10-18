@@ -23,8 +23,9 @@
 struct ffi_lib_t {
     allocator_t *alloc;
     void        *handle; /* HMODULE / void*（dlopen）；进程伪库为 NULL */
-    char        *path;   /* owned 副本 */
-    bool         is_process; /* true = `extern lib "*" as x;`（当前进程自身） */
+    char        *path;   /* owned：实际加载成功的参数（诊断用；进程伪库为 "*"） */
+    char        *name;   /* owned：**声明的通用库名**（序列化用它 → 产物可跨平台） */
+    bool         is_process; /* true = `extern lib x from "*";`（当前进程自身） */
 };
 
 /* allocator 分类名（泄漏报告里据此显示来源） */
@@ -60,16 +61,57 @@ static void ffi_set_err(char *err, size_t ecap, const char *fmt, ...) {
     va_end(ap);
 }
 
-ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *path, char *err,
+/* ---- 通用库名 → 平台候选文件名（CMake 的 find_library 风格）----
+ *
+ * `extern lib libc from "c";` 里的 `"c"` 是**通用名**：加载器按平台展开候选，
+ * 逐个尝试，第一个能加载的就是它。这样同一份源码在 Windows/Linux/macOS 上都能
+ * 工作，`.cxb` 里存的也是这个名字（而不是解析后的绝对路径）。
+ *
+ *   Windows : <name>.dll
+ *   macOS   : lib<name>.dylib, <name>.dylib, lib<name>.so, <name>.so
+ *   其它    : lib<name>.so, <name>.so
+ *
+ * 第一个候选恒为 **as-is**（`<name>` 原样）：显式路径（`/usr/lib/libfoo.so`）、
+ * 已带平台后缀的文件名（`foo.dll`，旧产物里的写法）、以及系统搜索路径上的
+ * 裸文件名都能直接命中，旧 `.cxb`/`.cxs` 因此继续可用。
+ */
+#define FFI_CANDIDATE_MAX 6
+#define FFI_CANDIDATE_LEN 512
+
+static size_t ffi_name_candidates(const char *name, char out[][FFI_CANDIDATE_LEN],
+                                  size_t cap) {
+    size_t n = 0;
+    if (cap == 0) return 0;
+    /* 1) as-is：显式路径 / 带后缀文件名 / 旧产物 */
+    snprintf(out[n], FFI_CANDIDATE_LEN, "%s", name);
+    n++;
+#if defined(_WIN32)
+    if (n < cap) {
+        snprintf(out[n], FFI_CANDIDATE_LEN, "%s.dll", name);
+        n++;
+    }
+#elif defined(__APPLE__)
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.dylib", name); n++; }
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.dylib", name);    n++; }
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.so", name);    n++; }
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.so", name);       n++; }
+#else
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.so", name); n++; }
+    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.so", name);    n++; }
+#endif
+    return n;
+}
+
+ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *name, char *err,
                         size_t ecap) {
-    if (!alloc || !path || !*path) {
-        ffi_set_err(err, ecap, "ffi: empty library path");
+    if (!alloc || !name || !*name) {
+        ffi_set_err(err, ecap, "ffi: empty library name");
         return NULL;
     }
-    /* M6 FFI：特殊路径 `"*"` = **当前进程自身**（RTLD_DEFAULT 语义）——libc 这类库
-       进程启动时就已链接进来，没有文件需要加载。返回一个不带 OS 句柄的伪库，
-       符号解析转交 ffi_sym_current_process（见 ffi_lib_sym）。 */
-    if (strcmp(path, FFI_PROCESS_ALIAS) == 0) {
+    /* 特殊名 `"*"` = **当前进程自身**（RTLD_DEFAULT 语义）——libc 这类库进程
+       启动时就已链接进来，没有文件需要加载。返回不带 OS 句柄的伪库，符号解析
+       转交 ffi_sym_current_process（见 ffi_lib_sym）。 */
+    if (strcmp(name, FFI_PROCESS_ALIAS) == 0) {
         ffi_lib_t *lib =
             (ffi_lib_t *)allocator_new(alloc, &g_ffi_lib_class, 1);
         if (!lib) {
@@ -79,36 +121,58 @@ ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *path, char *err,
         lib->alloc = alloc;
         lib->handle = NULL;
         lib->is_process = true;
-        lib->path = ffi_dup(alloc, path);
-        if (!lib->path) {
+        lib->path = ffi_dup(alloc, name);
+        lib->name = ffi_dup(alloc, name);
+        if (!lib->path || !lib->name) {
+            if (lib->path) allocator_free(alloc, (void **)&lib->path);
+            if (lib->name) allocator_free(alloc, (void **)&lib->name);
             allocator_free(alloc, (void **)&lib);
             ffi_set_err(err, ecap, "ffi: out of memory");
             return NULL;
         }
         return lib;
     }
-    /* **只按内容判定**：把路径原样交给操作系统加载器；不做后缀检查。 */
+
+    /* 通用名展开候选 → 逐个交给操作系统加载器（**只按内容判定**，不做后缀
+       检查）。记录第一个候选的 OS 错误文本用于诊断；全部失败时把试过的候选名
+       一起报出来（"找不到库"最常见的原因就是名字拼错/不在搜索路径上）。 */
+    char cand[FFI_CANDIDATE_MAX][FFI_CANDIDATE_LEN];
+    const size_t ncand = ffi_name_candidates(name, cand, FFI_CANDIDATE_MAX);
+    void *h = NULL;
+    size_t tried = 0;
+    char first_err[256] = {0};
+    char tried_names[FFI_CANDIDATE_LEN * 2] = {0};
+    for (size_t i = 0; i < ncand; i++) {
+        tried = i + 1;
+        size_t used = strlen(tried_names);
+        snprintf(tried_names + used, sizeof(tried_names) - used, "%s%s",
+                 used ? ", " : "", cand[i]);
 #ifdef _WIN32
-    HMODULE h = LoadLibraryA(path);
+        h = (void *)LoadLibraryA(cand[i]);
+        if (h) break;
+        if (!first_err[0])
+            snprintf(first_err, sizeof(first_err), "LoadLibrary error %lu",
+                     (unsigned long)GetLastError());
+#else
+        h = dlopen(cand[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) break;
+        if (!first_err[0]) {
+            const char *e = dlerror();
+            snprintf(first_err, sizeof(first_err), "%s",
+                     e ? e : "unknown dlopen error");
+        }
+#endif
+    }
     if (!h) {
         ffi_set_err(err, ecap,
-                    "ffi: cannot load library '%s' (LoadLibrary error %lu)",
-                    path, (unsigned long)GetLastError());
+                    "ffi: cannot load library '%s' (tried: %s; %s)", name,
+                    tried_names, first_err[0] ? first_err : "load failed");
         return NULL;
     }
-#else
-    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-        const char *e = dlerror();
-        ffi_set_err(err, ecap, "ffi: cannot load library '%s' (%s)", path,
-                    e ? e : "unknown dlopen error");
-        return NULL;
-    }
-#endif
     ffi_lib_t *lib = (ffi_lib_t *)allocator_new(alloc, &g_ffi_lib_class, 1);
     if (!lib) {
 #ifdef _WIN32
-        FreeLibrary(h);
+        FreeLibrary((HMODULE)h);
 #else
         dlclose(h);
 #endif
@@ -116,22 +180,24 @@ ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *path, char *err,
         return NULL;
     }
     lib->alloc  = alloc;
-    lib->handle = (void *)h;
+    lib->handle = h;
     lib->is_process = false;
-    lib->path   = ffi_dup(alloc, path);
-    if (!lib->path) {
+    lib->path   = ffi_dup(alloc, cand[tried - 1]); /* 实际命中的那一个 */
+    lib->name   = ffi_dup(alloc, name);            /* 声明的通用名（序列化用） */
+    if (!lib->path || !lib->name) {
 #ifdef _WIN32
-        FreeLibrary(h);
+        FreeLibrary((HMODULE)h);
 #else
         dlclose(h);
 #endif
+        if (lib->path) allocator_free(alloc, (void **)&lib->path);
+        if (lib->name) allocator_free(alloc, (void **)&lib->name);
         allocator_free(alloc, (void **)&lib);
         ffi_set_err(err, ecap, "ffi: out of memory");
         return NULL;
     }
     return lib;
 }
-
 void *ffi_lib_sym(const ffi_lib_t *lib, const char *name, char *err,
                   size_t ecap) {
     if (!lib || !name || !*name) {
@@ -172,6 +238,7 @@ void ffi_lib_close(ffi_lib_t *lib) {
     if (lib->handle) dlclose(lib->handle);
 #endif
     if (lib->path) allocator_free(alloc, (void **)&lib->path);
+    if (lib->name) allocator_free(alloc, (void **)&lib->name);
     allocator_free(alloc, (void **)&lib);
 }
 
@@ -251,6 +318,10 @@ void *ffi_sym_current_process(const char *name, char *err, size_t ecap) {
 
 const char *ffi_lib_path(const ffi_lib_t *lib) {
     return (lib && lib->path) ? lib->path : "";
+}
+
+const char *ffi_lib_name(const ffi_lib_t *lib) {
+    return (lib && lib->name) ? lib->name : "";
 }
 
 /* ---- 调用层 ----

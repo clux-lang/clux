@@ -23,7 +23,7 @@
 //     （attribute = 字段 + `var` 属性 + `func` 方法；**字段是唯一例外**，字段同名
 //     一律报错——见测试套件里的覆盖用例）。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 struct Base {

@@ -13,7 +13,7 @@
 //   实现     构造 → CONSTRUCT；读 → INDEX_GET（借用引用零拷贝）；
 //           写 → INDEX_SET（隐式转换 + 深拷贝回写）
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // 具名构造：.T{...} 按元素序布值

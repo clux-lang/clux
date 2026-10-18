@@ -1,5 +1,5 @@
 // functions.cx — M1 样例：函数定义（参数+返回类型）、前向引用、递归、调用、bool 字面量
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func add(a: i32, b: i32): i32 {
     return a + b;

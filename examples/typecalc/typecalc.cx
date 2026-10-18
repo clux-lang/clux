@@ -6,7 +6,7 @@
 //   别名     内建类型别名在签名中透明（func(i32,i32):i32）
 
 // 基础别名：内建 rhs 折叠为类型引用
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 type MyInt = i32;
 

@@ -190,14 +190,14 @@ TEST(DriverModuleBcode, CyclicImportRejectedBeforeEmit) {
 /* ================================================================
  * M6 FFI：extern lib 语法定稿 + Phase 2 前端落地
  *
- * 判据是关键字（`extern lib`），**路径只是 dlopen 参数**——绝不按 .so/.dll/
+ * 判据是关键字（`extern lib`），**库名是通用名**（加载器展开成 .dll/.so 候选，显式路径也接受）——绝不按 .so/.dll
  * .dylib 后缀判类（后缀不代表文件类型）。`import` 语义保持 M5 不变。
  * Phase 2 完成前端（lexer/parser/AST/fmt）；运行期（dlopen/dlsym）尚未接入，
  * 因此 sema 必须给出**明确诊断**而不是静默放行。
  * ================================================================ */
 
 /* extern lib 现在**真的加载**动态库（driver 在 lexer pool 释放前扫描 AST →
-   ffi_lib_open → 句柄挂 module_t.ffi，模块销毁时关闭）。判据是关键字，路径只是
+   ffi_lib_open → 句柄挂 module_t.ffi，模块销毁时关闭）。判据是关键字，库名只是
    加载参数；能否加载由操作系统按内容判定（不按后缀）。 */
 #if defined(_WIN32)
 const char *kDriverSystemLib = "msvcrt.dll";
@@ -208,8 +208,8 @@ const char *kDriverSystemLib = "libc.so.6";
 #endif
 
 TEST(DriverM6, ExternLibLoadsRealLibrary) {
-  std::string src = std::string("extern lib \"") + kDriverSystemLib +
-                    "\" as crt;\nfunc main(): i32 { return 0; }\n";
+  std::string src = std::string("extern lib crt from \"") + kDriverSystemLib +
+                    "\";\nfunc main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "clux_m6_lib");
   EXPECT_EQ(driver_run_file(path.c_str()), 0); /* 加载成功且无泄漏 */
   std::remove(path.c_str());
@@ -217,7 +217,7 @@ TEST(DriverM6, ExternLibLoadsRealLibrary) {
 
 TEST(DriverM6, ExternLibMissingLibraryIsDiagnosed) {
   std::string path = write_temp_file(
-      "extern lib \"definitely_no_such_library_xyz\" as bad;\n"
+      "extern lib bad from \"definitely_no_such_library_xyz\";\n"
       "func main(): i32 { return 0; }\n", "clux_m6_missing");
   /* 加载失败 → 诊断（文案来自操作系统），不得静默放行 */
   EXPECT_NE(driver_run_file(path.c_str()), 0);
@@ -226,26 +226,26 @@ TEST(DriverM6, ExternLibMissingLibraryIsDiagnosed) {
 
 /* Phase 3 起支持**库表**：多库（不同别名）允许；同别名重复则诊断。 */
 TEST(DriverM6, TwoExternLibsWithDistinctAliasesAreAllowed) {
-  std::string src = std::string("extern lib \"") + kDriverSystemLib +
-                    "\" as a;\n" + "extern lib \"" + kDriverSystemLib +
-                    "\" as b;\nfunc main(): i32 { return 0; }\n";
+  std::string src = std::string("extern lib a from \"") + kDriverSystemLib +
+                    "\";\n" + "extern lib b from \"" + kDriverSystemLib +
+                    "\";\nfunc main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "clux_m6_two");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
 TEST(DriverM6, DuplicateExternLibAliasIsDiagnosed) {
-  std::string src = std::string("extern lib \"") + kDriverSystemLib +
-                    "\" as a;\n" + "extern lib \"" + kDriverSystemLib +
-                    "\" as a;\nfunc main(): i32 { return 0; }\n";
+  std::string src = std::string("extern lib a from \"") + kDriverSystemLib +
+                    "\";\n" + "extern lib a from \"" + kDriverSystemLib +
+                    "\";\nfunc main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "clux_m6_dup");
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
 TEST(DriverM6, ExternCfuncMissingSymbolIsDiagnosed) {
-  std::string src = std::string("extern lib \"") + kDriverSystemLib +
-                    "\" as crt;\n" +
+  std::string src = std::string("extern lib crt from \"") + kDriverSystemLib +
+                    "\";\n" +
                     "extern cfunc crt::clux_no_such_symbol_xyz(n: u64): opaque;\n"
                     "func main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "clux_m6_sym");
@@ -253,11 +253,27 @@ TEST(DriverM6, ExternCfuncMissingSymbolIsDiagnosed) {
   std::remove(path.c_str());
 }
 
-TEST(DriverM6, ExternLibRequiresAsClause) {
+TEST(DriverM6, ExternLibRequiresFromClause) {
+  /* 新语法：extern lib <别名> from "<库名>"; —— 缺 from 是语法错误 */
   std::string path = write_temp_file(
-      "extern lib \"libc.so.6\";\n"
+      "extern lib crt \"msvcrt\";\n"
       "func main(): i32 { return 0; }\n", "clux_m6_bad");
-  EXPECT_NE(driver_run_file(path.c_str()), 0); /* 语法错误：缺 as <alias> */
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("from"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+TEST(DriverM6, ExternLibOldPathFormRejectedWithMigrationHint) {
+  /* 旧形式 `extern lib "<路径>" as <别名>;`（完整文件名，跨平台不可用）已删除：
+     解析器必须给出**迁移提示**，而不是笼统语法错误 */
+  std::string path = write_temp_file(
+      "extern lib \"*\" as libc;\n"
+      "func main(): i32 { return 0; }\n", "clux_m6_oldform");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("no longer supported"), std::string::npos) << err;
+  EXPECT_NE(err.find("from"), std::string::npos) << err;
   std::remove(path.c_str());
 }
 
@@ -273,7 +289,7 @@ TEST(DriverM6, ExternRequiresLibKeyword) {
 
 TEST(DriverM6, ExternCfuncParsesAndIsDiagnosed) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::malloc(size: u64): opaque;\n"
       "func main(): i32 { return 0; }\n", "clux_m6_ecf");
   /* M6 打通后：仅**声明** extern cfunc 合法（占位"未实现"诊断已移除）；调用由 SourceLevelFfiCall* 覆盖 */
@@ -299,7 +315,7 @@ TEST(DriverM6, ExternCfuncRejectsCaptureList) {
 
 TEST(DriverM6, VariadicExternCfuncIsParsedNotSyntaxError) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::printf(format: str, ...): i32;\n"
       "func main(): i32 { return 0; }\n", "clux_m6_var");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -322,7 +338,7 @@ TEST(DriverM6, VariadicRejectedInNormalFunc) {
  */
 TEST(DriverM6, FfiCallSiteGetsExplicitNotImplementedDiagnostic) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::malloc(size: u64): opaque;\n"
       "func main(): i32 {\n"
       "  var p: opaque = crt::malloc(16);\n"
@@ -336,7 +352,7 @@ TEST(DriverM6, FfiCallSiteGetsExplicitNotImplementedDiagnostic) {
 /* ---- M6 §2：extern cfunc 签名必须是 C ABI（切片/option 等一律拒绝）---- */
 TEST(DriverM6, ExternCfuncNonCApiSignatureRejected) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::f(s: fatal []i32): i32;\n"
       "func main(): i32 { return 0; }\n", "clux_m6_cabi");
   EXPECT_NE(driver_run_file(path.c_str()), 0); /* 切片：胖指针，非 C ABI */
@@ -345,7 +361,7 @@ TEST(DriverM6, ExternCfuncNonCApiSignatureRejected) {
 
 TEST(DriverM6, ExternCfuncOptionReturnRejected) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::g(x: i32): ?i32;\n"
       "func main(): i32 { return 0; }\n", "clux_m6_cabi2");
   EXPECT_NE(driver_run_file(path.c_str()), 0); /* option：无 C 表示 */
@@ -397,7 +413,7 @@ TEST(DriverM6, ExternCallAsmRoundTripIsByteIdentical) {
  */
 TEST(DriverM6, SourceLevelFfiCallIntegerAndFloat) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "extern cfunc crt::abs(x: i32): i32;\n"
       "extern cfunc crt::sqrt(x: f64): f64;\n"
       "func main(): i32 {\n"
@@ -412,7 +428,7 @@ TEST(DriverM6, SourceLevelFfiCallIntegerAndFloat) {
 /* 反例：调用未声明的 FFI 符号 → sema 明确诊断（no matching extern cfunc） */
 TEST(DriverM6, SourceLevelFfiCallUndeclaredSymbolRejected) {
   std::string path = write_temp_file(
-      "extern lib \"msvcrt.dll\" as crt;\n"
+      "extern lib crt from \"msvcrt.dll\";\n"
       "func main(): i32 { return crt::nope(1); }\n", "clux_m6_srcbad");
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -437,7 +453,7 @@ namespace {
 
 /* 纯 clux qsort 回调程序（`main` 自检：升序 + 首尾 + 回调计数）。 */
 std::string ffi_qsort_program(const std::string &lib) {
-  return std::string("extern lib \"") + lib + "\" as crt;\n" +
+  return std::string("extern lib crt from \"") + lib + "\";\n" +
          "extern cfunc crt::qsort(base: opaque, n: u64, size: u64, "
          "cmp: opaque): void;\n" +
          "var CALLS: i32 = 0;\n" +
@@ -470,6 +486,33 @@ TEST(DriverM6, FfiProgramRunsFromCxb) {
   EXPECT_EQ(driver_run_bin(bin.c_str()), 0); /* 修复前：no loaded library */
   std::remove(src.c_str());
   std::remove(bin.c_str());
+}
+
+/* 容器里存的是**声明的通用库名**（不是解析后的绝对路径）——产物因此可跨平台
+   搬运：同一个 .cxb 在另一台机器上按名字重新展开候选。 */
+TEST(DriverM6, ContainerStoresGenericLibraryName) {
+  std::string src = write_temp_file(
+      "extern lib td from \"clux_ffi_testdata\";\n"
+      "extern var td::td_i32: i32;\n"
+      "func main(): i32 {\n"
+      "  td::td_i32 = 7;\n"
+      "  return 0;\n"
+      "}\n",
+      "clux_m6_generic");
+  std::string bin = src + ".cxb";
+  std::string asm_path = src + ".cxs";
+  ASSERT_EQ(driver_build_bin(src.c_str(), bin.c_str()), 0);
+  ASSERT_EQ(driver_bin_to_asm(bin.c_str(), asm_path.c_str()), 0);
+  const std::string text = read_all(asm_path);
+  EXPECT_NE(text.find("externlib \"clux_ffi_testdata\" as td"), std::string::npos)
+      << text;
+  /* 不得写出解析后的平台文件名（那就又不可跨平台了） */
+  EXPECT_EQ(text.find("clux_ffi_testdata.dll"), std::string::npos) << text;
+  EXPECT_EQ(text.find("libclux_ffi_testdata.so"), std::string::npos) << text;
+  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
+  std::remove(src.c_str());
+  std::remove(bin.c_str());
+  std::remove(asm_path.c_str());
 }
 
 /* FFI 程序从 .cxs（汇编文本）运行：externlib 指令必须被还原成库表 */
@@ -517,8 +560,8 @@ TEST(DriverM6, FfiInDependencyModuleRunsFromCxb) {
   std::string main_src = hint + "main.cx";
   FILE *f = fopen(dep.c_str(), "wb");
   ASSERT_NE(f, nullptr);
-  fputs((std::string("extern lib \"") + kDriverSystemLib +
-         "\" as crt;\n"
+  fputs((std::string("extern lib crt from \"") + kDriverSystemLib +
+         "\";\n"
          "extern cfunc crt::abs(x: i32): i32;\n"
          "export func dist(a: i32, b: i32): i32 { return crt::abs(a - b); }\n")
             .c_str(),

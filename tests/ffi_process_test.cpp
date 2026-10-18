@@ -1,11 +1,11 @@
 /* M6 FFI：特殊外部模块 `*`（当前进程自身）
  *
- * libc 这类库在进程启动时就已链接进来，不需要（也不该）用 `extern lib "<文件>"`
- * 再加载一次。`extern lib "*" as <别名>;` 声明的就是"当前进程"这个伪库：
+ * libc 这类库在进程启动时就已链接进来，不需要（也不该）用 `extern lib <别名> from "<库名>"`
+ * 再加载一次。`extern lib <别名> from "*";` 声明的就是"当前进程"这个伪库：
  * 符号解析走 RTLD_DEFAULT 的等价实现（POSIX 直接 `dlsym(RTLD_DEFAULT, …)`；
  * Windows = 主模块 + 遍历已加载模块，见 `ffi_sym_current_process`）。
  *
- *     extern lib "*" as c;
+ *     extern lib c from "*";
  *     extern func  c::abs(x: i32): i32;      // 与 `extern cfunc` 等价
  *     extern cfunc c::strlen(s: str): u64;
  *     extern var   c::_fmode: i32;
@@ -99,7 +99,7 @@ class FfiProcessBcodeTest : public ::testing::Test {
     vm = vm_new(alloc);
     bc = bcode_new(alloc);
 
-    /* `extern lib "*" as c;` 的等价物：打开"进程伪库"并放进库表 */
+    /* `extern lib c from "*";` 的等价物：打开"进程伪库"并放进库表 */
     char err[256] = {0};
     ffi_lib_t *lib = ffi_lib_open(alloc, kHostLib, err, sizeof err);
     ASSERT_NE(lib, nullptr) << "err=" << err;
@@ -185,14 +185,14 @@ TEST_F(FfiProcessBcodeTest, UnknownProcessSymbolIsDiagnosed) {
 }
 
 /* ================================================================
- * ② 源码级：`extern lib "*" as c;` 的完整用法
+ * ② 源码级：`extern lib c from "*";` 的完整用法
  * ================================================================ */
 
 namespace {
 
 /* 进程库的端到端程序：函数（i32/u64 返回）、数据符号读写、`extern func` 同义写法 */
 std::string process_program() {
-  return std::string("extern lib \"") + kHostLib + "\" as c;\n" +
+  return std::string("extern lib c from \"") + kHostLib + "\";\n" +
          "extern func  c::abs(x: i32): i32;\n" +
          "extern cfunc c::strlen(s: str): u64;\n" +
          "extern var   c::_fmode: i32;\n" +
@@ -251,7 +251,7 @@ TEST(FfiProcessSource, SurvivesCxbAndCxsRoundTrip) {
 /* `extern func c::f(...)` 与 `extern cfunc c::f(...)` 产生相同语义；
    fmt 统一渲染成规范写法 `extern cfunc`（语义不变的归一化）。 */
 TEST(FfiProcessSource, ExternFuncIsSynonymOfExternCfunc) {
-  std::string src = std::string("extern lib \"") + kHostLib + "\" as c;\n" +
+  std::string src = std::string("extern lib c from \"") + kHostLib + "\";\n" +
                     "extern func c::abs(x: i32): i32;\n"
                     "func main(): i32 { return c::abs(-7) - 7; }\n";
   std::string path = write_temp_file(src, "proc_syn");
@@ -270,7 +270,7 @@ TEST(FfiProcessSource, ExternFuncIsSynonymOfExternCfunc) {
    读；这里确认写：改 `_fmode` 再还原，两次都从宿主侧复核。 */
 TEST(FfiProcessSource, DataSymbolWriteIsVisibleInProcess) {
   const int32_t old = host_fmode();
-  std::string src = std::string("extern lib \"") + kHostLib + "\" as c;\n" +
+  std::string src = std::string("extern lib c from \"") + kHostLib + "\";\n" +
                     "extern var c::_fmode: i32;\n"
                     "func main(): i32 { c::_fmode = 16384; return 0; }\n";
   std::string path = write_temp_file(src, "proc_write");
@@ -280,7 +280,7 @@ TEST(FfiProcessSource, DataSymbolWriteIsVisibleInProcess) {
 
   char restore[512];
   snprintf(restore, sizeof restore,
-           "extern lib \"%s\" as c;\n"
+           "extern lib c from \"%s\";\n"
            "extern var c::_fmode: i32;\n"
            "func main(): i32 { c::_fmode = %d; return 0; }\n",
            kHostLib, (int)old);
@@ -297,7 +297,7 @@ TEST(FfiProcessSource, DataSymbolWriteIsVisibleInProcess) {
 /* u64 返回必须造 u64 值：`strlen(s) != 5u64` 这个比较在旧编码下会报
    `implicit cast: not a widening conversion`（i64 vs u64）。 */
 TEST(FfiReturnAndArgs, UnsignedReturnTypeMatchesDeclaration) {
-  std::string src = std::string("extern lib \"") + kHostLib + "\" as c;\n" +
+  std::string src = std::string("extern lib c from \"") + kHostLib + "\";\n" +
                     "extern cfunc c::strlen(s: str): u64;\n"
                     "func main(): i32 {\n"
                     "  var n: u64 = c::strlen(\"hello\");\n"
@@ -313,7 +313,7 @@ TEST(FfiReturnAndArgs, UnsignedReturnTypeMatchesDeclaration) {
    进程里没有的符号 —— 都要在编译期给出明确诊断（类型不符此前完全不校验，
    会静默按 int64 传参）。 */
 TEST(FfiReturnAndArgs, ArgumentAndReturnDiagnostics) {
-  const std::string lib = std::string("extern lib \"") + kHostLib + "\" as c;\n";
+  const std::string lib = std::string("extern lib c from \"") + kHostLib + "\";\n";
   std::vector<std::pair<std::string, std::string>> cases = {
       /* 数量不符 */
       {lib + "extern cfunc c::abs(x: i32): i32;\n"

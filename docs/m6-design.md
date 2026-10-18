@@ -3,7 +3,7 @@
 ## 设计原则
 
 clux 采用标准 C ABI，通过 `cfunc` / `extern cfunc` / `extern var` 实现与 C 代码互操作
-（`extern lib "<路径>" as <别名>;` 声明动态库）。
+（`extern lib <别名> from "<库名>";` 声明动态库，库名是通用名）。
 运行期动态调用使用 libffi（git submodule 引入），无需手写 trampoline。
 
 > **实现状态：✅ Phase 1–5 全部落地 + 聚合类型完备（M6 完成）** —— 前端（`extern lib` /
@@ -52,14 +52,28 @@ import libc from "libc.dll";         /* Windows */
 import libc from "libobjc.dylib";   /* macOS */
 ```
 
-- **语法定稿（2026-10，Phase 2 已落地）**：动态库由**关键字**声明，判据是
-  `extern lib`，**绝不按后缀判类**（后缀不表示文件类型）：
+- **语法定稿（2026-10；2026-10 二次修订：通用库名）**：动态库由**关键字**声明，
+  形式是 `extern lib <别名> from "<库名>";`，判据是 `extern lib`，**绝不按后缀
+  判类**（后缀不表示文件类型）：
 
   ```
-  extern lib "libc.so.6" as libc;     /* 路径只是 dlopen 参数 */
-  extern lib "user32.dll" as user32;
+  extern lib libc   from "c";        /* 通用名：加载器展开成 c.dll / libc.so */
+  extern lib user32 from "user32";   /* Windows: user32.dll */
+  extern lib fmt    from "fmt";      /* 找不到时报出试过的候选名 */
   ```
 
+  - **`<库名>` 是通用名（generic name），不是文件名**（与 CMake 的
+    `target_link_libraries` / `find_library` 同名风格一致）：加载器按平台展开
+    候选逐个尝试——Windows `<name>.dll`；macOS `lib<name>.dylib` /
+    `<name>.dylib` / `lib<name>.so` / `<name>.so`；其它 `lib<name>.so` /
+    `<name>.so`。第一个候选恒为 **as-is**，因此显式路径
+    （`from "/usr/lib/libfoo.so"`）、已带平台后缀的文件名、系统搜索路径上的
+    裸文件名都能直接命中（旧写法迁移过来的显式文件名继续可用）。
+  - 源码因此**跨平台**：同一份 `.cx` 在三个平台上都写 `from "c"`；
+    `.cxb`/`.cxs` 容器里存的也是**通用名**而不是解析后的绝对路径。
+  - `<库名>` 写成 `"*"` 表示**当前进程自身**（RTLD_DEFAULT 语义，见 §14.18）。
+  - 旧写法 `extern lib "<路径>" as <别名>;` **已删除**（完整文件名写死在源码里，
+    无法跨平台）；解析器对它给出**迁移提示**，指明新形式。
   - `import`（AST_IMPORT）语义**保持不变**：只表示源码模块 ✓
   - 上面的 `import libc from "libc.so.6";` 形式**已废弃**（它会让 import 一条
     语句承担两种语义，且诱导按后缀推断）
@@ -499,7 +513,7 @@ void ffi_closure_callback(ffi_cif *cif, void *ret, void **args, void *user_data)
 
 | 部分 | 位置 | 证据 |
 |------|------|------|
-| 语法定稿 `extern lib "<路径>" as <名>;`（关键字判据，不做后缀判类） | lexer / parser / AST_EXTERN_LIB / fmt | `clux format` 幂等保留；`fake.dll` 文本文件加载失败 |
+| 语法定稿 `extern lib <名> from "<库名>";`（关键字判据，不做后缀判类） | lexer / parser / AST_EXTERN_LIB / fmt | `clux format` 幂等保留；`fake.dll` 文本文件加载失败 |
 | `cfunc <名>(参数): 返回 { 体 }` 定义 | AST 标志 `is_cfunc` + `parse_cfunc_def` | 解析/类型检查通过，format 保留 `cfunc` |
 | `extern cfunc <库>::<名>(参数): 返回;`（含 `...`） | `parse_extern_cfunc` + lexer 合成 `...` | 解析通过；format 原样保留 `crt::printf(format: str, ...): i32;` |
 | 动态库加载（dlopen/LoadLibrary）+ 句柄生命周期 | `src/vm/ffi_lib.c`、`module_t.ffi_libs`（别名 → 句柄） | 真实加载 msvcrt/kernel32；重复别名诊断 |
@@ -633,7 +647,7 @@ libffi 仅在需要结构体/变参/回调时再回头处理其汇编构建。**
 
 **测试（源码级）**
 4. `tests/driver_module_bcode_test.cpp` 增源码级用例：
-   `extern lib "msvcrt.dll" as crt; extern cfunc crt::strlen(s: str): u64;`
+   `extern lib crt from "msvcrt.dll"; extern cfunc crt::strlen(s: str): u64;`
    `func main(): i32 { if (crt::strlen("hello") != 5) { return 1; } return 0; }` → 期望 exit 0；
    另加 `crt::malloc(16)` 返回指针非空、`crt::sqrt(9.0)` 浮点、以及缺库/缺符号的反例。
 5. 文档：`docs/m6-design.md` §14.2 标注"已实现"，milestones 追加对应条目。
@@ -980,7 +994,7 @@ libc `qsort` 用 clux 比较函数排序（`examples/ffi_callback/ffi_callback.c
 `FfiCallbackE2E.PureCluxProgramSortsWithCQsortCallback` 的受检样本）：
 
 ```c
-extern lib "msvcrt.dll" as crt;
+extern lib crt from "msvcrt.dll";
 extern cfunc crt::qsort(base: opaque, n: u64, size: u64, cmp: opaque): void;
 
 var CALLS: i32 = 0;
@@ -1064,7 +1078,7 @@ clux bc emit examples/ffi_callback/ffi_callback.cx -o f.cxb && clux run f.cxb
    （`gb_module_section` 唯一实现，vm 路径与图路径共用）。
    顺带修掉一个陷阱：反序列化的模块循环里 `if (ecount == 0) continue;` 会**跳过
    FFI 段**——改成 `if (ecount > 0) { ... }` 后继续往下读。
-3. 文本形态：`externlib "<库路径>" as <别名>` 指令（有声明才写，因此**非 FFI 产物的
+3. 文本形态：`externlib "<库名>" as <别名>` 指令（有声明才写；存**通用库名**而不是解析后的路径，产物因此可跨平台搬运。**非 FFI 产物的
    `.cxs` 与旧格式逐字一致**，旧手工样本与往返测试不受影响）。
 4. 加载侧（`driver_execute_graph` 重建 `module_t` 之后）：按表 `ffi_lib_open` 填
    `mod->ffi_libs`；模块此时已 `vm_module_bind` 进 `vm->modules`，失败路径由
@@ -1083,7 +1097,7 @@ clux bc emit examples/ffi_callback/ffi_callback.cx -o f.cxb && clux run f.cxb
 **全局变量**。
 
 ```c
-extern lib "msvcrt.dll" as crt;
+extern lib crt from "msvcrt.dll";
 extern var crt::_fmode: i32;       // 文件打开模式
 extern var crt::_osplatform: u32;  // 平台标识
 extern var crt::_pgmptr: opaque;   // 程序路径指针
@@ -1160,10 +1174,10 @@ func main(): i32 {
 ### 14.18 ✅ 特殊外部模块 `"*"`：当前进程自身（RTLD_DEFAULT 语义）
 
 libc 这类库在进程启动时就已链接进来，**不需要也不该**再 `dlopen` 一次。把
-`extern lib` 的**路径写成 `"*"`** 就声明了一个"当前进程"伪库：
+`extern lib` 的**库名写成 `"*"`** 就声明了一个"当前进程"伪库：
 
 ```c
-extern lib "*" as c;              // 没有文件被加载：这是"进程自身"
+extern lib c from "*";              // 没有文件被加载：这是"进程自身"
 extern func  c::abs(x: i32): i32; // extern func 与 extern cfunc 等价
 extern cfunc c::strlen(s: str): u64;
 extern var   c::_osplatform: u32; // 进程里的数据符号同样可读
@@ -1193,7 +1207,7 @@ func main(): i32 {
     不需要任何额外字段；
   - `ffi_lib_close` 对无句柄的伪库自然安全（`if (handle)` 才 FreeLibrary/dlclose）。
 - **判据仍是关键字 + 路径**：`"*"` 是**路径**的取值之一（另一个是任意文件名），
-  与"按后缀判类"无关——`extern lib "*.dll"` 之类仍然只是普通路径，交给加载器判定。
+  与"按后缀判类"无关——`extern lib x from "*.dll"` 之类仍然只是普通名字，交给加载器判定。
 
 #### 14.18.2 顺带修掉的两个真缺陷（都由 `*` 用例暴露）
 
@@ -1241,7 +1255,7 @@ M6 有了 FFI（调用 + 数据符号 + 回调 + 当前进程库 `"*"`）之后�
 `::` 左侧先按作用域解析，**局部变量会遮蔽库别名**）：
 
 ```c
-extern lib "*" as libc;                              // 当前进程自身
+extern lib libc from "*";                              // 当前进程自身
 extern func libc::printf(format: str, ...): void;    // 返回值用不到就声明 void
 ```
 

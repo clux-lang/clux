@@ -258,7 +258,7 @@ struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携
   sema 在**调用点**按同样口径校验数量与类型（整数族 ⇄ 整数族、指针 ⇄ 指针/切片/str、
   浮点只在浮点签名里、浮点变参拒绝）——见 `docs/m6-design.md` §14.18.2。
 - **来源**：clux 源码里的 `extern cfunc <库>::<名>(...)` / `extern func <库>::<名>(...)`
-  调用点（两者等价）；`extern lib "<路径>" as <别名>;` 提供别名与其加载路径。
+  调用点（两者等价）；`extern lib <别名> from "<库名>";` 提供别名与其**通用库名**（加载器按平台展开候选，容器里也存这个名字）。
   **判据是关键字，不按文件后缀判类**；路径写成 `"*"` 表示**当前进程自身**
   （RTLD_DEFAULT 语义，见 §14.18），此时不加载任何文件。
 - **诊断**：库别名未加载、符号不存在、`lib::name` 畸形、实参过多/类型不符，均返回 error 值（`exec:` 前缀，含库名与符号名）。
@@ -388,7 +388,7 @@ v2 容器从"单模块"扩展为"模块表"；M6 再补上 **FFI 库表**（v3�
   里）。`owner_index` 指向"值真正所在的模块"——`export * from "./x"` 代理导出的
   值借用依赖模块的 `global_scope`，编译期已解析成最终表，容器只记录值的位置，
   加载方即可原样重建（owner ≤ 自身，因此按表序解析总是可行）。
-- **FFI 库表（v3）必须随容器携带**：`extern lib "<路径>" as <别名>;` 的**别名**是
+- **FFI 库表（v3）必须随容器携带**：`extern lib <别名> from "<库名>";` 的**别名**是
   运行期 `EXTERN_CALL "别名::符号"` 的查表键，**路径**是 `dlopen`/`LoadLibrary`
   参数（判据是关键字与内容，**不按 `.dll`/`.so` 后缀判类**）。库表**按模块**存
   （依赖模块的声明归它自己），加载侧在重建 `module_t` 后按表 `ffi_lib_open`
@@ -404,7 +404,7 @@ v2 容器从"单模块"扩展为"模块表"；M6 再补上 **FFI 库表**（v3�
   直写，owner 下标由文本携带）、`bcode_graph_from_file` / `bcode_graph_deserial`、
   `bcode_graph_disasm_to_file` / `bcode_graph_asm_from_file`（文本形态）。
 - 文本形态（`.cxs`）的指令行：`MODULE "<源码路径>" <导入者下标>`（多模块）、
-  `export <名字> <owner 下标>`、`externlib "<库路径>" as <别名>`（M6；**有声明才写**）。
+  `export <名字> <owner 下标>`、`externlib "<库名>" as <别名>`（M6；**有声明才写**；存通用库名）。
   单模块且无 FFI 的产物与旧格式**逐字一致**（不写任何指令行），`examples/asm` 的
   手写 `.cxs` 样本与既有往返测试因此不受影响。
 
@@ -432,7 +432,7 @@ v2 容器从"单模块"扩展为"模块表"；M6 再补上 **FFI 库表**（v3�
 
 ```
 MODULE "./math" 1          ; 依赖模块：**源码里写的路径** + 导入者模块下标（1 = 入口）
-externlib "msvcrt.dll" as crt   ; M6 FFI：该模块的 extern lib（别名 → 库路径；有声明才写）
+externlib "msvcrt" as crt        ; M6 FFI：该模块的 extern lib（别名 → 通用库名；有声明才写）
 export add 0               ; 导出项：名字 + owner 模块下标（0 = 本表第 0 个模块）
 _start:                    ; 该模块的反汇编代码（原样交给单模块汇编器）
     ...
@@ -485,7 +485,7 @@ clux bc disasm <file.cxb>   [-o PATH]   # .cxb → .cxs 汇编文本
    函数体头部按**倒序** `PUSH_UNDEFINED; DEFINE "param"` 绑定参数（调用时实参按序
    压栈，栈顶是最后一个参数）。
 4. **调用外部函数必须走 FFI**（M6 起 `printf` 等不再是内建）：文件顶部写
-   `externlib "<库路径>" as <别名>`（`"*"` = 进程自身符号），调用点写
+   `externlib "<库名>" as <别名>`（`"*"` = 进程自身符号；库名是通用名，加载器按平台展开候选），调用点写
    `EXTERN_CALL "<别名>::<符号>" <argc> <packed>`，`packed = 返回类型码 | 变参 << 8 |
    固定参数个数 << 16`——`printf` 恒为 `65792`。老写法 `PUSH "printf"; CALL N` 会
    在运行期报 `exec: undefined variable`（`examples/asm/*.cxs` 曾因此全部失效）。
@@ -497,7 +497,7 @@ clux bc disasm <file.cxb>   [-o PATH]   # .cxb → .cxs 汇编文本
 `clux bc disasm` 的真实产物（源码：声明 libc 的 printf 后调用它，见 §14.19）：
 
 ```c
-extern lib "*" as libc;
+extern lib libc from "*";
 extern func libc::printf(format: str, ...): void;
 func main(): void {
     var a = .[3]i32{1,2,3};

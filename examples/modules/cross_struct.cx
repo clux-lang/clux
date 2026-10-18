@@ -4,7 +4,7 @@
 //   xxx::Test::method() 静态方法调用 + 实例方法调用
 
 import shapes from "./lib/shapes";
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 func main(): i32 {

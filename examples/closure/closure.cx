@@ -19,7 +19,7 @@
 // 与无捕获函数的差异：无捕获函数 body 内访问外层局部变量编译期拒绝
 // （未在捕获列表中声明的变量不属于闭包）。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func make_adder(): func(i32) -> i32 {
     var base = 10;

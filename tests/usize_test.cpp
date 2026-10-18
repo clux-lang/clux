@@ -147,10 +147,10 @@ class UsizeSourceTest : public ::testing::Test {
   std::string make_source(const std::string &body) {
     return "struct Buf { n: usize; cap: usize; }\n"
            "func size_of(x: usize): usize { return x; }\n"
-           "extern lib \"*\" as libc;\n"
-           "extern lib \"" +
+           "extern lib libc from \"*\";\n"
+           "extern lib td from \"" +
            std::string(kTestLib) +
-           "\" as td;\n"
+           "\";\n"
            "extern var td::td_i32: i32;\n"
            "extern cfunc libc::malloc(n: usize): opaque;\n"
            "extern cfunc libc::memset(p: opaque, v: i32, n: usize): opaque;\n"

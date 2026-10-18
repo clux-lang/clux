@@ -126,11 +126,22 @@ ast_node_t *parse_reexport(parser_t *p) {
 
 /* ---- parse_extern_lib（M6 FFI）---- */
 
-/** 解析 `extern lib "<path>" as <alias>;`
+/** 解析 `extern lib <别名> from "<库名>";`
  *
  * 调用方（parse_program）已消费 `extern` 关键字，tb 为其 token 下标（诊断跨度
- * 从 `extern` 起算）。**路径只是 dlopen 参数**：这里不做任何后缀检查或库类型
- * 判定——"这是动态库"完全由 `extern lib` 这一显式语法表达。
+ * 从 `extern` 起算）。
+ *
+ * **库名是通用名（generic name），不是文件名**：语法上写 `extern lib libc from
+ * "c";`，执行器按平台把 `c` 展开成候选文件（Windows `c.dll`；Linux
+ * `libc.so` / `c.so`；macOS 再加 `libc.dylib` / `c.dylib`）逐个尝试——与 CMake
+ * 的 `find_library`/`target_link_libraries` 同名风格一致，源码因此**跨平台**。
+ * 特殊名 `"*"` 仍表示"当前进程自身"。
+ *
+ * 也接受显式路径/文件名（`from "/abs/libfoo.so"`、`from "foo.dll"`）：解析器
+ * 原样保留字符串，由加载器先按 as-is 尝试，失败再走通用名候选。
+ *
+ * 旧形式 `extern lib "<路径>" as <别名>;` 已删除，这里给出**迁移提示**而不是
+ * 笼统语法错误。
  */
 ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb) {
     if (!expect_keyword(p, "lib")) {
@@ -138,30 +149,44 @@ ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb) {
                              "expected 'lib' after 'extern'");
     }
     skip_trivia(p);
-    if (!check_kind(p, TOKEN_TYPE_STRING)) {
-        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "expected dynamic library path string after 'extern lib'");
+    /* 旧语法：extern lib "<路径>" as <别名>; —— 明确指引迁移 */
+    if (check_kind(p, TOKEN_TYPE_STRING)) {
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos,
+            "old form 'extern lib \"<path>\" as <alias>;' is no longer "
+            "supported; write 'extern lib <alias> from \"<name>\";' instead "
+            "(<name> is a generic library name such as \"c\", resolved to "
+            "c.dll / libc.so by the loader)");
     }
-    strslice_t path_text = token_strslice(cur_token(p));
-    advance(p);
-    skip_trivia(p);
-    /* 去掉首尾引号（与 import 路径同一约定：路径不做转义展开） */
-    strslice_t path = path_text;
-    if (path.len >= 2 && path.ptr[0] == '"')
-        path = strslice_from_bytes(path.ptr + 1, path.len - 2);
-
-    if (!expect_keyword(p, "as")) {
-        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "expected 'as' in 'extern lib \"<path>\" as <name>;'");
-    }
-    skip_trivia(p);
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "expected library alias identifier after 'as'");
+                             "expected library alias identifier after 'extern lib'");
     }
     strslice_t alias = token_strslice(cur_token(p));
     advance(p);
     skip_trivia(p);
+    if (!expect_keyword(p, "from")) {
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos,
+            "expected 'from' in 'extern lib <alias> from \"<name>\";'");
+    }
+    skip_trivia(p);
+    if (!check_kind(p, TOKEN_TYPE_STRING)) {
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos,
+            "expected library name string after 'from'");
+    }
+    strslice_t name_text = token_strslice(cur_token(p));
+    advance(p);
+    skip_trivia(p);
+    /* 去掉首尾引号（与 import 路径同一约定：字符串不做转义展开） */
+    strslice_t name = name_text;
+    if (name.len >= 2 && name.ptr[0] == '"')
+        name = strslice_from_bytes(name.ptr + 1, name.len - 2);
+    if (name.len == 0) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "extern lib: empty library name");
+    }
     if (!expect_symbol(p, ";")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after extern lib declaration");
@@ -169,6 +194,6 @@ ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb) {
     ast_node_t *n = ast_extern_lib_new(p->arena, tb, p->pos);
     if (!n) return NULL;
     ((ast_extern_lib_t *)n)->alias = alias;
-    ((ast_extern_lib_t *)n)->path  = path;
+    ((ast_extern_lib_t *)n)->name  = name;
     return n;
 }

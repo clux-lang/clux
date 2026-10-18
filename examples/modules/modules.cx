@@ -11,7 +11,7 @@
 //            （规范路径作为 key）。
 //   循环依赖  编译期检测并报错（依赖链打印）。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 import math from "./lib/math";
 import api from "./lib/api";

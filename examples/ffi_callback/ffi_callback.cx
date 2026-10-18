@@ -3,7 +3,7 @@
 // 本示例全程只用 clux 源码，不写任何宿主 C 代码，却让 **libc 的 qsort**
 // 用 clux 定义的比较函数把数组排好序：
 //
-//   1. `extern lib "msvcrt.dll" as crt;`   —— 加载 C 运行库（判据是关键字，
+//   1. `extern lib crt from "msvcrt";`   —— 加载 C 运行库（判据是关键字，
 //      路径只是加载参数；**不按 .dll/.so 后缀判类**）
 //   2. `extern cfunc crt::qsort(...): void;` —— 声明要调用的 C 函数
 //   3. `cfunc cmp(a, b): i32 { ... }`      —— 定义 C ABI 函数（cfunc = 可被 C 调用）
@@ -18,9 +18,9 @@
 // 平台说明：C 运行库的名字随平台而变（Windows `msvcrt.dll`、Linux `libc.so.6`、
 // macOS `libSystem.B.dylib`）；libffi 端口目前只提供 Windows x64 构建。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
-extern lib "msvcrt.dll" as crt;
+extern lib crt from "msvcrt";
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
 //                          int (*cmp)(const void *, const void *));

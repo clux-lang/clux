@@ -91,6 +91,77 @@ TEST_F(FfiLibTest, FakeSuffixDoesNotImplyLibrary) {
   std::remove(path.c_str());
 }
 
+/* ---- 通用库名（generic name，CMake find_library 风格）----
+ *
+ * `extern lib td from "clux_ffi_testdata";` 里的名字**不带平台后缀**，加载器按
+ * 平台展开候选：Windows `clux_ffi_testdata.dll`；Linux `libclux_ffi_testdata.so`
+ * （再退化到 `clux_ffi_testdata.so`）；macOS 还有 `.dylib`。
+ *
+ * 测试 DLL 由 CMake 放在测试可执行文件旁：Windows 的默认搜索顺序包含 exe 目录，
+ * 因此能直接命中；POSIX 上是否命中取决于 rpath/LD_LIBRARY_PATH，命中不了就跳过
+ * （不把"环境搜索路径"当成语言语义的一部分来断言）。
+ */
+TEST_F(FfiLibTest, OpensByGenericNameAndAddsPlatformSuffix) {
+  char err[512] = {0};
+  ffi_lib_t *lib = ffi_lib_open(alloc_, "clux_ffi_testdata", err, sizeof(err));
+  if (!lib) GTEST_SKIP() << "test library not on the loader search path: " << err;
+
+  /* 句柄记住**声明的通用名**（序列化用它，产物才能跨平台），
+     而 path 是实际命中的那个候选（诊断用）。
+     注意 Windows 的 LoadLibrary 对无扩展名的名字会自动补 `.dll`，所以
+     as-is 候选就可能命中——这里只要求 path 属于该通用名展开出的候选。 */
+  EXPECT_STREQ(ffi_lib_name(lib), "clux_ffi_testdata");
+  const std::string p = ffi_lib_path(lib);
+  EXPECT_TRUE(p == "clux_ffi_testdata" ||
+              p == "clux_ffi_testdata.dll" ||
+              p == "libclux_ffi_testdata.so" ||
+              p == "clux_ffi_testdata.so" ||
+              p == "libclux_ffi_testdata.dylib" ||
+              p == "clux_ffi_testdata.dylib")
+      << p;
+
+  /* 名字对了，符号也要能解析（td_i32 是测试库的导出变量） */
+  void *sym = ffi_lib_sym(lib, "td_i32", err, sizeof(err));
+  EXPECT_NE(sym, nullptr) << err;
+  ffi_lib_close(lib);
+}
+
+/* 显式文件名/路径仍然可用：第一个候选恒为 as-is（旧产物与绝对路径兼容） */
+TEST_F(FfiLibTest, ExplicitFileNameStillLoadsAsIs) {
+  char err[512] = {0};
+#if defined(_WIN32)
+  const char *explicit_name = "clux_ffi_testdata.dll";
+#else
+  const char *explicit_name = "libclux_ffi_testdata.so";
+#endif
+  ffi_lib_t *lib = ffi_lib_open(alloc_, explicit_name, err, sizeof(err));
+  if (!lib) GTEST_SKIP() << "test library not on the loader search path: " << err;
+  EXPECT_STREQ(ffi_lib_name(lib), explicit_name);
+  EXPECT_STREQ(ffi_lib_path(lib), explicit_name);
+  ffi_lib_close(lib);
+}
+
+/* 失败诊断必须列出**试过的候选名**（否则"名字拼错/不在搜索路径"极难定位） */
+TEST_F(FfiLibTest, MissingLibraryErrorListsTriedCandidates) {
+  char err[1024] = {0};
+  EXPECT_EQ(ffi_lib_open(alloc_, "definitely_no_such_library_xyz", err,
+                         sizeof(err)),
+            nullptr);
+  const std::string msg(err);
+  EXPECT_NE(msg.find("tried:"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("definitely_no_such_library_xyz.dll"), std::string::npos)
+      << msg;
+}
+
+/* `"*"` = 当前进程自身：伪库的名字与路径都是 `*` */
+TEST_F(FfiLibTest, ProcessPseudoLibKeepsStarName) {
+  char err[128] = {0};
+  ffi_lib_t *lib = ffi_lib_open(alloc_, "*", err, sizeof(err));
+  ASSERT_NE(lib, nullptr) << err;
+  EXPECT_STREQ(ffi_lib_name(lib), "*");
+  EXPECT_STREQ(ffi_lib_path(lib), "*");
+  ffi_lib_close(lib);
+}
 TEST_F(FfiLibTest, EmptyPathRejected) {
   char err[128] = {0};
   EXPECT_EQ(ffi_lib_open(alloc_, "", err, sizeof(err)), nullptr);

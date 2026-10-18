@@ -1,6 +1,6 @@
 /* M6 FFI：`extern var` —— 动态库导出的**全局数据符号**
  *
- * `extern lib "..." as lib;` + `extern var lib::name: T;` 声明库里的全局变量：
+ * `extern lib lib from "...";` + `extern var lib::name: T;` 声明库里的全局变量：
  * 运行期 dlsym/GetProcAddress 得到**变量地址**（数据符号的"符号地址"就是变量
  * 地址），读写都直接作用于库里的那块内存——没有本地副本，因此它是**左值**
  * （`lib::name = v;` 走 EXTERN_STORE，读取走 EXTERN_LOAD）。
@@ -269,7 +269,7 @@ namespace {
 /* 覆盖全部可编组宽度的读：每个值都与库里初值比对，返回 0 才算通过。
    返回码即第一个失败的序号（便于定位是哪个宽度错了）。 */
 std::string all_widths_read_program() {
-  return std::string("extern lib \"") + kTestDataLib + "\" as td;\n" +
+  return std::string("extern lib td from \"") + kTestDataLib + "\";\n" +
          "extern var td::td_i8: i8;\n"
          "extern var td::td_i16: i16;\n"
          "extern var td::td_i32: i32;\n"
@@ -312,7 +312,7 @@ TEST(FfiExternVarSource, WritesAllScalarWidthsAndRestores) {
   const uint8_t u8_orig = read_lib_global<uint8_t>("td_u8");
   const bool bool_orig = read_lib_global<bool>("td_bool");
 
-  std::string src = std::string("extern lib \"") + kTestDataLib + "\" as td;\n" +
+  std::string src = std::string("extern lib td from \"") + kTestDataLib + "\";\n" +
                     "extern var td::td_i32: i32;\n"
                     "extern var td::td_u8: u8;\n"
                     "extern var td::td_f64: f64;\n"
@@ -340,7 +340,7 @@ TEST(FfiExternVarSource, WritesAllScalarWidthsAndRestores) {
   /* 还原：直接经 clux 的写入路径（顺带再验一次 store） */
   char restore[1024];
   snprintf(restore, sizeof restore,
-           "extern lib \"%s\" as td;\n"
+           "extern lib td from \"%s\";\n"
            "extern var td::td_i32: i32;\n"
            "extern var td::td_u8: u8;\n"
            "extern var td::td_f64: f64;\n"
@@ -366,7 +366,7 @@ TEST(FfiExternVarSource, WritesAllScalarWidthsAndRestores) {
 /* 复合赋值：`+= / -= / *=` 走 EXTERN_LOAD → op → EXTERN_STORE，语义与普通变量一致 */
 TEST(FfiExternVarSource, CompoundAssignmentReadsThenStores) {
   const int32_t orig = read_lib_global<int32_t>("td_i32");
-  std::string src = std::string("extern lib \"") + kTestDataLib + "\" as td;\n" +
+  std::string src = std::string("extern lib td from \"") + kTestDataLib + "\";\n" +
                     "extern var td::td_i32: i32;\n"
                     "extern var td::td_f64: f64;\n"
                     "func main(): i32 {\n"
@@ -390,7 +390,7 @@ TEST(FfiExternVarSource, CompoundAssignmentReadsThenStores) {
   /* 还原（经 clux 写回） */
   char restore[512];
   snprintf(restore, sizeof restore,
-           "extern lib \"%s\" as td;\n"
+           "extern lib td from \"%s\";\n"
            "extern var td::td_i32: i32;\n"
            "extern var td::td_f64: f64;\n"
            "func main(): i32 { td::td_i32 = %d; td::td_f64 = 2.5; return 0; }\n",
@@ -407,7 +407,7 @@ TEST(FfiExternVarSource, CompoundAssignmentReadsThenStores) {
 TEST(FfiExternVarSource, OpaquePointerRoundTripsThroughLibraryMemory) {
   void *orig = read_lib_global<void *>("td_ptr");
   ASSERT_NE(orig, nullptr);
-  std::string src = std::string("extern lib \"") + kTestDataLib + "\" as td;\n" +
+  std::string src = std::string("extern lib td from \"") + kTestDataLib + "\";\n" +
                     "extern var td::td_ptr: opaque;\n"
                     "func main(): i32 {\n"
                     "  var p: opaque = td::td_ptr;\n"
@@ -457,7 +457,7 @@ TEST(FfiExternVarSource, RunsThroughCxbAndCxsRoundTrip) {
 TEST(FfiExternVarSource, Diagnostics) {
   const std::string lib = kTestDataLib;
   const std::string decl_lib =
-      "extern lib \"" + lib + "\" as td;\n";
+      "extern lib td from \"" + lib + "\";\n";
   /* （源码, 标签）。源码先存进 std::string 再取 c_str()——不能对临时串取指针。 */
   std::vector<std::pair<std::string, std::string>> cases = {
       /* 未声明的库别名 */

@@ -7,7 +7,7 @@
 //         操作数）→ 之后是 `ctfe: cannot determine operand type`（未传 sema_scope）。
 // 修复后：exit 0，输出 `sizeof(Ty)=4 b=7`。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 func main(): i32 {

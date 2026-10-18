@@ -19,7 +19,7 @@
 //   函数名是预登记的名字引用（作用域绑定 + 提升）；函数字面量是表达式
 //   求值点即时构造的匿名函数对象（无作用域绑定），引用点零构造。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func apply(f: func(i32, i32) -> i32, x: i32, y: i32): i32 {
     return f(x, y);

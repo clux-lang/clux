@@ -1,5 +1,5 @@
 // literals.cx — M1 样例：整数字面量（多进制+后缀）、浮点、布尔、字符、字符串
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     // 整数：十进制 / 十六进制 / 八进制 / 二进制

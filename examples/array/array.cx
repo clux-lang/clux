@@ -10,7 +10,7 @@
 //   - 越界检查：INDEX_GET/SET 运行时越界返回 error
 
 // 数组作为函数参数（按值拷贝，函数内修改不影响实参）
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func sum_arr(a: [3]i32): i32 {
     return a[0] + a[1] + a[2];

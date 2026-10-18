@@ -15,7 +15,7 @@
 // 顺序编译期求值（CTFE 无前向引用），故别名链须按依赖序声明。
 
 // ---- 别名链（sema 按依赖序求值，运行时统一收进提升区两遍构造）----
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 type Elem = i64; // 基础元素类型
 type Pair = [2]Elem; // 数组类型：依赖 Elem

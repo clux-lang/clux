@@ -273,8 +273,8 @@ TEST_F(FfiCallbackE2E, CluxComparatorDrivesCQsort) {
 
 /* 用例 3：clux 回调内部**再回调进 C**（`crt::abs`）——Phase 3 × Phase 5 */
 TEST_F(FfiCallbackE2E, CluxCallbackItselfCallsBackIntoC) {
-  std::string src = std::string("extern lib \"") + kSystemLib +
-                    "\" as crt;\n"
+  std::string src = std::string("extern lib crt from \"") + kSystemLib +
+                    "\";\n"
                     "extern cfunc crt::abs(x: i32): i32;\n"
                     "func abs_add(a: i32, b: i32): i32 {\n"
                     "  return crt::abs(a) + crt::abs(b);\n"
@@ -404,8 +404,8 @@ TEST_F(FfiCallbackE2E, CfuncPtrRejectsNonCApiSignature) {
  * ================================================================ */
 TEST_F(FfiCallbackE2E, PureCluxProgramSortsWithCQsortCallback) {
   std::string src =
-      std::string("extern lib \"") + kSystemLib +
-      "\" as crt;\n"
+      std::string("extern lib crt from \"") + kSystemLib +
+      "\";\n"
       "extern cfunc crt::qsort(base: opaque, n: u64, size: u64, cmp: opaque): void;\n"
       "var CALLS: i32 = 0;\n"
       "cfunc cmp(a: opaque, b: opaque): i32 {\n"

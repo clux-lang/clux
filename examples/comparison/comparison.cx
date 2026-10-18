@@ -6,7 +6,7 @@
 //     truthy——数值须显式 `as bool` 才能作条件
 //   - 链式组合：比较结果可再参与逻辑运算（括号组合）
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var a: i32 = 10;

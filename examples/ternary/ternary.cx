@@ -4,7 +4,7 @@
 //   惰性：  只求值选中的分支，未选中分支不求值
 //   类型：  两分支类型必须一致（sema 检查）
 //   折叠：  comptime 上下文中三元在编译期求值（ctfe），零运行时指令
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     var a: i32 = 3;

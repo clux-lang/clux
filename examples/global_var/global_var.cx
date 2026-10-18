@@ -1,5 +1,5 @@
 // global_var.cx — 全局变量：运行时实体（可读可写），init 编译期折叠为字面量或函数
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 var g: i32 = 42; // 显式类型 + 字面量
 var s: str = "hello"; // 字符串全局变量

@@ -92,8 +92,8 @@ class StructRecursiveTest : public ::testing::Test {
 
   void expect_verdict(const std::string &body) {
     static int counter = 0;
-    std::string src = "extern lib \"" + std::string(kTestLib) +
-                      "\" as td;\n"
+    std::string src = "extern lib td from \"" + std::string(kTestLib) +
+                      "\";\n"
                       "extern var td::td_i32: i32;\n" +
                       body +
                       "func report(v: i32): i32 { td::td_i32 = v; return v; }\n";

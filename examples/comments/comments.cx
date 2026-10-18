@@ -1,7 +1,7 @@
 // comments.cx — M1 样例：行注释与块注释
 // 这是行注释：从 // 到行尾被忽略
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 /* 这是块注释：
    可以跨越多行 */

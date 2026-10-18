@@ -19,9 +19,15 @@ extern "C" {
  * **本层不需要 libffi**：libffi 只服务于后续的"动态调用"（Phase 4）与"回调"
  * （Phase 5）。因此库加载与符号解析路径可以先独立落地并测试。
  *
- * 判据与语法一致：本层只接受"要加载哪个文件"的路径，**不做任何后缀判类**
- * （`.dll`/`.so`/`.dylib` 都只是名字；同名文件也可能是普通数据）。错误一律
- * 由操作系统判定（如 ERROR_BAD_EXE_FORMAT），不由扩展名推断。
+ * **输入是"通用库名"（generic name），不是文件名**（与 CMake 同名风格一致）：
+ * 源码写 `extern lib libc from "c";`，本层按平台展开候选逐个尝试——
+ * Windows `<name>.dll`；macOS `lib<name>.dylib` / `<name>.dylib` /
+ * `lib<name>.so` / `<name>.so`；其它 `lib<name>.so` / `<name>.so`。
+ * 第一个候选恒为 **as-is**：显式路径（`/usr/lib/libfoo.so`）、已带后缀的文件名、
+ * 系统搜索路径上的裸文件名都直接命中（旧产物兼容）。
+ *
+ * **不做任何后缀判类**：`.dll`/`.so`/`.dylib` 只是名字；同名文件也可能是普通
+ * 数据。错误一律由操作系统判定（如 ERROR_BAD_EXE_FORMAT），不由扩展名推断。
  *
  * 错误约定：失败返回 NULL，并把人类可读原因写入调用方提供的 `err` 缓冲
  * （NUL 终止；ecap 为 0 时忽略）。成功时 err 不被写入。
@@ -29,8 +35,9 @@ extern "C" {
 
 typedef struct ffi_lib_t ffi_lib_t; /* opaque：内部持 OS 句柄与路径副本 */
 
-/** 打开动态库。成功返回句柄（owned，须 ffi_lib_close），失败返回 NULL。 */
-ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *path, char *err,
+/** 打开动态库（通用名 → 平台候选文件）。成功返回句柄（owned，须
+ * ffi_lib_close），失败返回 NULL 并在 err 里列出试过的候选名。 */
+ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *name, char *err,
                         size_t ecap);
 
 /** 解析符号（函数或数据）。失败返回 NULL 并写入 err。 */
@@ -176,8 +183,12 @@ bool ffi_call_typed(void *sym, size_t argc,
                     const struct _ffi_type *ret_type, void **arg_values,
                     void *ret_value, char *err, size_t ecap);
 
-/** 本句柄的加载路径（借用，永不为 NULL）。 */
+/** 本句柄**实际加载成功**的参数（借用，永不为 NULL；诊断用）。 */
 const char *ffi_lib_path(const ffi_lib_t *lib);
+
+/** 本句柄**声明的通用库名**（借用，永不为 NULL）。序列化用它——存通用名而
+ * 不是解析后的绝对路径，`.cxb`/`.cxs` 产物才能跨平台搬运。 */
+const char *ffi_lib_name(const ffi_lib_t *lib);
 
 #ifdef __cplusplus
 }

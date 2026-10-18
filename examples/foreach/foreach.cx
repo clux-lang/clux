@@ -11,7 +11,7 @@
 //
 // 展开形状、两种迭代器形态与理由见 include/desugar/desugar.h。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 var CALLS = 0;

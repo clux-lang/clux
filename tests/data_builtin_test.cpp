@@ -102,10 +102,10 @@ class DataBuiltinTest : public ::testing::Test {
   /* 源码 + 前言，运行并把判定值写进 td_i32 */
   void expect_verdict(const std::string &body) {
     std::string src =
-        "extern lib \"*\" as libc;\n"
-        "extern lib \"" +
+        "extern lib libc from \"*\";\n"
+        "extern lib td from \"" +
         std::string(kTestLib) +
-        "\" as td;\n"
+        "\";\n"
         "extern var td::td_i32: i32;\n"
         "extern cfunc td::clux_sum_i32(p: ref *i32, n: usize): i32;\n"
         "extern cfunc td::clux_first_i32(p: ref *i32): i32;\n"
@@ -205,9 +205,9 @@ TEST_F(DataBuiltinTest, ResultTypeIsExactRefPointer) {
 
 /* ⑥ 诊断：实参不是序列 / 参数个数不对 */
 TEST_F(DataBuiltinTest, Diagnostics) {
-  const std::string lib = std::string("extern lib \"") + kTestLib + "\" as td;\n";
+  const std::string lib = std::string("extern lib td from \"") + kTestLib + "\";\n";
   expect_compile_error("func main(): i32 { var p: ref *i32 = data(5); return 0; }\n");
-  expect_compile_error("extern lib \"*\" as libc;\n"
+  expect_compile_error("extern lib libc from \"*\";\n"
                        "func main(): i32 { var g: str = \"x\"; "
                        "var q: opaque = data(g, g); return 0; }\n");
   (void)lib;

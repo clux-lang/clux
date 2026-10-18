@@ -1,4 +1,4 @@
-// ffi_process.cx — M6 FFI：`extern lib "*" as <别名>;` = **当前进程自身**
+// ffi_process.cx — M6 FFI：`extern lib <别名> from "*";` = **当前进程自身**
 //
 // libc 这类库在进程启动时就已经链接进来了，不需要（也不该）再 `dlopen` 一次。
 // 把**路径写成 "*"** 就声明了一个"当前进程"伪库：没有任何文件被加载，符号解析
@@ -6,7 +6,7 @@
 //   - POSIX：`dlsym(RTLD_DEFAULT, name)`（可执行文件 + 依赖 + RTLD_GLOBAL 的库）
 //   - Windows：先主模块、再遍历已加载模块（CRT 的 abs/strlen 都在这里）
 // 别名照常起，函数/数据符号照常用 `<别名>::<名>` 引用——与显式加载某个文件
-// （`extern lib "msvcrt.dll" as crt;`）走**完全同一条**编译与运行通路。
+// （`extern lib crt from "msvcrt.dll";`）走**完全同一条**编译与运行通路。
 //
 // `extern func libc::abs(...)` 与 `extern cfunc libc::abs(...)` 等价（限定名已经表明它
 // 来自外部库）；`cfunc` 是规范写法（显式标注 C ABI），`clux format` 会统一渲染成它。
@@ -17,7 +17,7 @@
 // printf 也在这里声明——M6 起它**不再是内建**，而是 libc 里的普通函数，
 // 经 FFI（libffi 精确类型：定参 + C 变参提升）调用。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void; // 返回值用不到，声明为 void
 
 extern cfunc libc::abs(x: i32): i32; // 与 extern cfunc 等价

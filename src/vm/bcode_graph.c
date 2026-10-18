@@ -294,8 +294,10 @@ static uint8_t *graph_serial_mem(allocator_t *alloc, const vm_t *vm,
             }
         }
 
-        /* M6 FFI：本模块的 extern lib 库表（别名 → 路径）。key 是 alloc 拥有的
-           别名，path 借用句柄内部的副本——仅本次序列化使用，不必拷贝。 */
+        /* M6 FFI：本模块的 extern lib 库表（别名 → **通用库名**）。key 是 alloc
+           拥有的别名，name 借用句柄内部的副本——仅本次序列化使用，不必拷贝。
+           存通用名（"c"）而不是解析后的绝对路径（"C:\Windows\System32\..."）：
+           产物因此可以搬到别的机器/别的平台，由加载器按平台重新展开候选。 */
         const vec_t *fkeys = mod->ffi_libs ? strmap_keys(mod->ffi_libs) : NULL;
         size_t fcount = fkeys ? vec_len((vec_t *)fkeys) : 0;
         char **ffi_aliases = NULL;
@@ -320,7 +322,7 @@ static uint8_t *graph_serial_mem(allocator_t *alloc, const vm_t *vm,
                 ffi_lib_t *lib =
                     alias ? (ffi_lib_t *)strmap_get(mod->ffi_libs, alias) : NULL;
                 ffi_aliases[f] = (char *)alias;
-                ffi_paths[f] = lib ? (char *)ffi_lib_path(lib) : NULL;
+                ffi_paths[f] = lib ? (char *)ffi_lib_name(lib) : NULL;
                 if (!ffi_aliases[f] || !ffi_paths[f]) {
                     ok = false; /* 库表里有空项：容器会写出不可加载的产物 */
                     break;

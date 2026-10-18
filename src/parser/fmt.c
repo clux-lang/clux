@@ -1054,14 +1054,15 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             break;
         }
         case AST_EXTERN_LIB: {
-            /* extern lib "<path>" as <alias>;——AST 中 path 已去引号，渲染补回。
-               漏掉本分支会让声明被渲染成空（数据损坏），与 AST_IMPORT 同理。 */
+            /* extern lib <alias> from "<name>";——AST 中 name 已去引号，渲染补回。
+               漏掉本分支会让声明被渲染成空（数据损坏），与 AST_IMPORT 同理。
+               name 是**通用库名**（如 "c"），不是文件名；显式路径也原样保留。 */
             ast_extern_lib_t *el = (ast_extern_lib_t *)node;
-            sb_str(&f->sb, "extern lib \"");
-            sb_put(&f->sb, el->path.ptr, el->path.len);
-            sb_str(&f->sb, "\" as ");
+            sb_str(&f->sb, "extern lib ");
             sb_put(&f->sb, el->alias.ptr, el->alias.len);
-            sb_str(&f->sb, ";");
+            sb_str(&f->sb, " from \"");
+            sb_put(&f->sb, el->name.ptr, el->name.len);
+            sb_str(&f->sb, "\";");
             break;
         }        case AST_IMPORT: {
             /* import <alias> from "<path>";——AST 中的 path 已去掉引号

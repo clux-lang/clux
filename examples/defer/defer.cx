@@ -18,7 +18,7 @@
 //   - 捕获是值语义 → defer 体内**不能直接改写外层局部变量**；要观察结果请写
 //     全局变量，或捕获 ref 通过指针改内存（本示例两种都用到）。
 
-extern lib "*" as libc;
+extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
 
 var seq: i32 = 0; // 拼接用的全局序列（defer 体内可写全局）

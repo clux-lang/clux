@@ -40,7 +40,7 @@ inline std::filesystem::path clux_test_path() {
 
 /**
  * M6 FFI：`printf` **不再是内建**——它是 libc 的函数，由源码用 FFI 声明后调用
- * （`extern lib "*" as libc;` + `extern func libc::printf(format: str, ...): void;`；
+ * （`extern lib libc from "*";` + `extern cfunc libc::printf(format: str, ...): void;`；
  * 别名用 `libc` 而不是 `c`：**局部变量会遮蔽库别名**）。
  *
  * 测试里要**运行**的 clux 片段凡是用到 `libc::printf(`，统一在写文件前补上这两行
@@ -53,7 +53,7 @@ inline std::string clux_with_printf_prelude(const std::string &body) {
   if (body.find("libc::printf(") == std::string::npos) return body;
   /* 幂等：已声明则原样返回（有些测试文件在调用处又显式加了一次）。 */
   if (body.find("extern func libc::printf(") != std::string::npos) return body;
-  return std::string("extern lib \"*\" as libc;\n"
+  return std::string("extern lib libc from \"*\";\n"
                      "extern func libc::printf(format: str, ...): void;\n") +
          body;
 }

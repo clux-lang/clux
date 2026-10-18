@@ -142,8 +142,8 @@ int FfiStructTest::counter_ = 0;
 const char *kReport = "  td::td_i32 = verdict;\n  return verdict;\n}\n";
 
 std::string prelude() {
-  return std::string("extern lib \"") + kTestLib +
-         "\" as td;\n"
+  return std::string("extern lib td from \"") + kTestLib +
+         "\";\n"
          "extern cfunc td::clux_point_sum(p: Point): i32;\n"
          "extern cfunc td::clux_dpoint_sum(p: DPoint): f64;\n"
          "extern cfunc td::clux_big_sum(v: Big): i64;\n"
@@ -276,7 +276,7 @@ TEST_F(FfiStructTest, EnumParamReturnAndDataSymbol) {
    比对（str 不能下标），顺带验证 clux 的 str 实参也能传给 C 的 char* 形参。 */
 TEST_F(FfiStructTest, CharPtrReturnAsStr) {
   expect_verdict(std::string(kTypes) + prelude() +
-                 "extern lib \"*\" as libc;\n"
+                 "extern lib libc from \"*\";\n"
                  "extern cfunc libc::strcmp(a: str, b: str): i32;\n"
                  "func main(): i32 {\n"
                  "  var verdict: i32 = 0;\n"
@@ -307,7 +307,7 @@ TEST_F(FfiStructTest, ProgramTypesInFfiSignatures) {
      prelude() 里的同名声明重复） */
   expect_verdict(std::string(kTypes) +
                  "type Pt = Point;\n"
-                 "extern lib \"" + kTestLib + "\" as td;\n"
+                 "extern lib td from \"" + kTestLib + "\";\n"
                  "extern var td::td_i32: i32;\n"
                  "extern cfunc td::clux_point_ptr_sum(p: ref *Pt): i32;\n"
                  "func main(): i32 {\n"
