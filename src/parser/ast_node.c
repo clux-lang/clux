@@ -34,6 +34,7 @@ static const char *g_kind_names[] = {
     [AST_FOR_INDEX]  = "for_index",
     [AST_CLONE]      = "clone",
     [AST_TAKE]       = "take",
+    [AST_TAKE_SLOT]  = "take_slot",
     [AST_BINARY]     = "binary",
     [AST_UNARY]      = "unary",
     [AST_CALL]       = "call",

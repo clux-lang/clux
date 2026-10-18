@@ -138,7 +138,10 @@ typedef enum {
                             （申请新块 + 拷贝字节）。只用于不含 own 槽位的类型；
                             复合类型的逐槽位展开由 sema 生成构造/NEW/循环 AST。
                             "clone" 的 op 是 token_t*，sema 无法合成。 */
-    AST_TAKE,            /* 把值移出变量的直接形态（sema 生成，语义 = move）：
+    AST_TAKE,
+    AST_TAKE_SLOT,       /* 把值从**内存槽位**取出并置零（cunion 成员 move）：
+                            operand 是槽位左值访问 → TAKE_SLOT（拷贝值 + memset
+                            槽位）。cunion 不安全：这样 move 才是真转移。 */            /* 把值移出变量的直接形态（sema 生成，语义 = move）：
                             operand → MOVE。用于扁平化 clone 的切片路径把临时
                             变量里的深拷贝结果移出（临时变量已标 moved，不再
                             FREE）。"move" 的 op 同样是 token_t*。 */

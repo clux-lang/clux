@@ -312,6 +312,11 @@ typedef enum {
                          * 释放一遍旧 own 槽位（double free）。本指令只做
                          * implicit_cast + memcpy（C 后端 `x = v;`），不释放旧值。
                          * 栈：弹 value → 压回 dst（赋值表达式值）。 */
+    BCODE_TAKE_SLOT,        /* 弹**指向槽位的借用值** → 拷贝该值压回，并把槽位
+                             * memset 为 0（"真转移"）。仅用于 cunion 成员的
+                             * `_ = move(c.p)` / `var q = move(c.p)`：cunion 是
+                             * 不安全类型（无 tag、不参与所有权运算），置零后重复
+                             * move 变 no-op、不留悬垂指针。 */
     BCODE_FREE_RECURSIVE, /* 弹指针 → 按槽位所有权**递归**释放被指向值的 own 槽位，
                            * 再释放块本体。仅用于自引用类型（链表/树）的销毁边：
                            * 静态展开在编译期无法穷尽。普通类型仍走逐槽位 FREE。 */

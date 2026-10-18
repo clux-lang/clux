@@ -659,6 +659,31 @@ struct __add_closure { __add_fn_t callee; struct { int a; } env; };
 实现：parser 的 `parse_reserved_ident_error`（所有声明位置 + 表达式引用），
 编译器内部名由 sema/compiler 直接生成（不经过 parser），不受影响。
 
+### 7.1.12 cunion 成员 move 放宽：不受路径限制、不进 TDZ（2026-10）
+
+cunion 是**不安全类型**：无 tag、成员共享 offset 0、**不参与所有权运算**，
+编译器不保证重复释放/错误释放能被发现。因此它的成员 move 采用"用户自负"语义
+（tag union 不受影响，仍走"直接变量根 → 整体 TDZ"的严格规则）：
+
+| 形态 | 结果 |
+|---|---|
+| `_ = move(c.p)`（直接变量） | 允许 |
+| `_ = move(s.c.p)`（嵌在 struct 里） | 允许（旧规则拒绝） |
+| `_ = move(p.c.p)`（经指针） | 允许（旧规则拒绝） |
+| `var q: own *i32 = move(s.c.p)` | 允许（真正转移） |
+| 整体 TDZ | **不进入**——整体仍可读、可再次 move |
+| 重复 `_ = move(c.p)` | 安全：运行期 `TAKE_SLOT` 把槽位 memset 0 → 第二次是对 NULL 的 no-op |
+
+实现：
+- sema `ex_move`：`static_lvalue_type` 静态判定"成员所属容器是 cunion"（不重复
+  求值），放行约束 1（字段不可 move）与约束 0（来源必须拥有该值），且**不登记
+  union_root**（=> 不进 TDZ、不做 R3 借用检查）；
+- 操作数包成新节点 `AST_TAKE_SLOT` → 新指令 `TAKE_SLOT`：拷贝槽位值成独立值 +
+  `memset(槽位, 0, sizeof(T))`（"真转移"）。这样 `var q = move(c.p)` 之后
+  cunion 里不留悬垂指针，重复 move 也不会二次释放。
+- 副作用：`_ = move(c.p)` 之后读 `c.n` 得 0（槽位已清零）——对不安全类型这是
+  明确且可预期的行为。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion

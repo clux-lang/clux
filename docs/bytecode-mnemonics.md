@@ -196,6 +196,7 @@ ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR
 | `ADDR` | — | 弹值 → 压 `ref *T` 指针（`x.&` 后置取址，借用）。 |
 | `MOVE`（已移除） | — | **2026-10 移除**：所有权纯编译期——`move(x)` 的转移由 sema 完成（源进 TDZ、销毁序列跳过），运行期就是普通取值，无需指令。 |
 | `CLONE`（已移除） | — | **2026-10 移除**：复合类型/指针/切片的 clone 走生成的 __clone*_<n> 函数；闭包值（env 捕获聚合）/cunion 被指向值/无 prelude 的切片走 __deep_clone(v) **内置函数**（普通 CALL，对象图深拷贝）。 |
+| `TAKE_SLOT` | — | 弹**指向槽位的借用值** → 拷贝成独立新值压回，并把槽位 `memset 0`（真转移）。仅用于 **cunion 成员 move**（`_ = move(c.p)` / `var q = move(s.c.p)`）：cunion 不安全（无 tag、不参与所有权运算），置零后重复 move 是 no-op、不留悬垂指针。 |
 | `FREE_RECURSIVE` | — | 弹指针 → 按槽位所有权**递归**释放被指向值的 own 槽位，再释放块本体。**已不再发射**（2026-10 起自引用类型改用生成的 `__destroy_<n>` 递归调用，见 ownership-refactor §7.1.7）；保留指令仅为兼容旧 `.cxb`。 |
 | `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。**注意**：`_ = expr` 的显式销毁/丢弃已由 sema 在编译期分类（`ast_assign_t::discard_mode`）——自有资源展开成扁平 FREE 序列（语句 prelude），借用/无资源只 `POP`；`DISPOSE` 仅作为**回退**（sema 无法生成 prelude 时）。 |
 

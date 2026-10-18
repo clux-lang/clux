@@ -92,13 +92,17 @@ TEST(UnionMemberMove, WholeValueTdzAfterMemberMove) {
 }
 
 TEST(UnionMemberMove, CunionWholeTdzAfterMemberMove) {
-  clux_expect_reject(std::string(kC) +
-                     "func main(): i32 {\n"
-                     "  var c: C = .C{ .p = new i32{7} };\n"
-                     "  _ = move(c.p);\n"
-                     "  return c.n;\n"
-                     "}\n",
-                     "used after move", "um_cunion_tdz");
+  /* 2026-10 放宽：cunion 是**不安全类型**（无 tag、不参与所有权运算），成员
+     move 不再让整体进 TDZ —— 整体仍可读（槽位已被 TAKE_SLOT 置 0）；
+     重复/错误释放由用户负责。tag union 仍严格（见 UnionMemberMove 其他用例）。 */
+  clux_expect_ok(std::string(kC) +
+                 "func main(): i32 {\n"
+                 "  var c: C = .C{ .p = new i32{7} };\n"
+                 "  _ = move(c.p);\n"
+                 "  if (c.n != 0) { return 1; }\n"
+                 "  return 0;\n"
+                 "}\n",
+                 "um_cunion_no_tdz");
 }
 
 TEST(UnionMemberMove, DoubleMemberMoveRejected) {

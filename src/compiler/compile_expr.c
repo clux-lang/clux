@@ -36,6 +36,7 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_move.h"
 #include "parser/ast_take.h"
+#include "parser/ast_take_slot.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "vm/type_slice.h"
@@ -938,6 +939,16 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     ast_take_t *n = (ast_take_t *)node;
     if (!n->operand) { c_error(c, node, "take: missing operand"); return; }
     compile_expr(c, n->operand);
+    break;
+  }
+  case AST_TAKE_SLOT: {
+    /* cunion 成员 move 的"真转移"（sema 生成）：operand 求值得**指向槽位的
+       借用值** → TAKE_SLOT（拷贝成独立值 + 槽位 memset 0）。 */
+    ast_take_slot_t *n = (ast_take_slot_t *)node;
+    if (!n->operand) { c_error(c, node, "take_slot: missing operand"); return; }
+    compile_expr(c, n->operand);
+    bcode_write_op(c->bc, BCODE_TAKE_SLOT);
+    st_push(c, 0);
     break;
   }
   case AST_MOVE: {

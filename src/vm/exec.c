@@ -1001,6 +1001,22 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* TAKE_SLOT：弹**指向槽位的借用值** → 拷贝该值压回独立新值，并把槽位
+ * memset 为 0（"真转移"）。cunion 成员 move 专用：cunion 是不安全类型
+ * （无 tag、不参与所有权运算），置零后重复 move 变 no-op、不留悬垂指针。 */
+static value_t *op_take_slot(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (!v) return NULL;
+    if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return v;
+    void *dst = value_alloc_data(vm->alloc, t);
+    memcpy(dst, value_data(v), t->size);
+    memset(value_data(v), 0, t->size);   /* 槽位置零：真转移 */
+    return value_make(vm, t, dst);
+}
+
 /* FREE_RECURSIVE：**自引用类型**的销毁边。
  * 弹指针值 → 按槽位所有权递归释放**被指向值**的 own 槽位（与
  * ptr_free_owned_recursive 同一权威），再释放块本体。
@@ -2792,6 +2808,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_MEMBER_CALL]     = op_member_call,
     [BCODE_FREE]            = op_free,
     [BCODE_FREE_RECURSIVE]  = op_free_recursive,
+    [BCODE_TAKE_SLOT]       = op_take_slot,
     [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
 };
 

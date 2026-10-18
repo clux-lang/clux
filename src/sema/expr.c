@@ -46,6 +46,7 @@
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_clone.h"
 #include "parser/ast_take.h"
+#include "parser/ast_take_slot.h"
 #include "parser/ast_for_index.h"
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
@@ -3783,6 +3784,76 @@ static ast_node_t *sema_gen_clone(sema_t *sema, sema_scope_t *scope,
   return gen_clone_expr(sema, scope, t, access, OWN_OWN, true);
 }
 
+/* 左值路径的**静态类型**（不重复求值；供 move 的"容器类型"判定）：
+   ident → 符号类型；member → 字段/member 类型（指针自动解引用一层）；
+   deref → 被指向类型；index → 元素类型；unwrap → inner。失败返回 NULL。 */
+static const type_t *static_lvalue_type(sema_t *sema, sema_scope_t *scope,
+                                        ast_node_t *e) {
+  if (!e) return NULL;
+  switch (e->kind) {
+  case AST_IDENT: {
+    sema_symbol_t *s = sema_lookup(scope, ((const ast_ident_t *)e)->name);
+    return s && s->type ? type_strip_quals(s->type) : NULL;
+  }
+  case AST_MEMBER: {
+    const ast_member_t *m = (const ast_member_t *)e;
+    const type_t *ot = static_lvalue_type(sema, scope, m->object);
+    if (!ot) return NULL;
+    const type_t *base = type_strip_quals(ptr_type_base(ot));
+    const type_t *ct = base ? base : ot;   /* 指针上的成员访问自动解引用 */
+    if (!ct) return NULL;
+    if (ct->kind == TYPE_KIND_STRUCT) {
+      int i = struct_type_find_field(ct, m->field);
+      if (i < 0) return NULL;
+      const struct_field_t *f = struct_type_field(ct, (size_t)i);
+      return f ? type_strip_quals(f->type) : NULL;
+    }
+    if (ct->kind == TYPE_KIND_UNION) {
+      int i = union_type_find_member(ct, m->field);
+      if (i < 0) return NULL;
+      const union_member_t *mm = union_type_member(ct, (size_t)i);
+      return mm ? type_strip_quals(mm->payload_type) : NULL;
+    }
+    if (ct->kind == TYPE_KIND_CUNION) {
+      int i = cunion_type_find_member(ct, m->field);
+      if (i < 0) return NULL;
+      const cunion_member_t *cm = cunion_type_member(ct, (size_t)i);
+      return cm ? type_strip_quals(cm->type) : NULL;
+    }
+    return NULL;
+  }
+  case AST_DEREF: {
+    const type_t *pt =
+        static_lvalue_type(sema, scope, ((const ast_deref_t *)e)->operand);
+    return pt ? type_strip_quals(ptr_type_base(pt)) : NULL;
+  }
+  case AST_INDEX: {
+    const ast_index_t *ix = (const ast_index_t *)e;
+    const type_t *ot = static_lvalue_type(sema, scope, ix->object);
+    if (!ot) return NULL;
+    if (ot->kind == TYPE_KIND_ARRAY)
+      return type_strip_quals(array_type_elem(ot));
+    if (ot->kind == TYPE_KIND_SLICE)
+      return type_strip_quals(slice_type_elem(ot));
+    if (ot->kind == TYPE_KIND_PTR) {
+      const type_t *b = type_strip_quals(ptr_type_base(ot));
+      if (b && b->kind == TYPE_KIND_ARRAY)
+        return type_strip_quals(array_type_elem(b));
+      if (b && b->kind == TYPE_KIND_SLICE)
+        return type_strip_quals(slice_type_elem(b));
+    }
+    return NULL;
+  }
+  case AST_UNWRAP: {
+    const type_t *ot =
+        static_lvalue_type(sema, scope, ((const ast_unwrap_t *)e)->operand);
+    return ot ? type_strip_quals(type_option_inner(ot)) : NULL;
+  }
+  default:
+    return NULL;
+  }
+}
+
 /* AST_MOVE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 static value_t *ex_move(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -3841,18 +3912,45 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
               union_root = s;
               union_root_name = ((ast_ident_t *)m->object)->name;
             }
-          } else if (bt && bt->kind == TYPE_KIND_CUNION) {
-            int mi = cunion_type_find_member(bt, m->field);
-            const cunion_member_t *mm =
-                mi >= 0 ? cunion_type_member(bt, (size_t)mi) : NULL;
-            const type_t *mt = mm ? type_strip_quals(mm->type) : NULL;
-            if (mt && (mt->kind == TYPE_KIND_PTR ||
-                       mt->kind == TYPE_KIND_SLICE ||
-                       type_has_own_slots(mt))) {
-              union_root = s;
-              union_root_name = ((ast_ident_t *)m->object)->name;
-            }
           }
+          /* cunion 成员 move **不再**登记 union_root（2026-10）：cunion 是
+             不安全类型（无 tag、成员共享 offset 0、不参与所有权运算），它的成员
+             move 走"用户自负"路径——不受访问路径限制、**不进 TDZ**、运行期
+             真转移（TAKE_SLOT 把槽位置零）。见下方 cunion_member_move 的处理。 */
+        }
+      }
+
+      /* ---- cunion 成员 move：**放宽为不受限、不进 TDZ**（2026-10）----
+         cunion 是**不安全类型**：无 tag、成员共享 offset 0、不参与所有权运算，
+         编译器不保证重复释放/错误释放能被发现。因此对它的成员 move 采用
+         "用户自负"语义：
+           - 任意访问路径都允许：`_ = move(c.p)` / `_ = move(s.c.p)` /
+             `_ = move(p.c.p)`（嵌套、经指针均可）——这是 cunion 指针成员在
+             这些形态下**唯一的释放途径**；
+           - **不进入 TDZ**：整体仍可读 / 可再次 move（重复释放由用户负责；
+             FREE 后槽位指针被置 NULL，重复 FREE 是 no-op）；
+           - 跳过"来源必须拥有该值"检查（cunion 槽位没有所有权记录）。
+         tag union 仍是严格语义（直接变量根 → 整体 TDZ），不受影响。 */
+      bool cunion_member_move = false;
+      if (!is_clone && n->operand && n->operand->kind == AST_MEMBER) {
+        const ast_member_t *cm = (const ast_member_t *)n->operand;
+        const type_t *ct = static_lvalue_type(sema, scope, cm->object);
+        if (ct && ct->kind == TYPE_KIND_CUNION) cunion_member_move = true;
+      }
+
+      /* cunion 成员 move 的**运行期真转移**：把操作数包成 AST_TAKE_SLOT ——
+         读取槽位值后把槽位 memset 为 0。于是：
+           - `_ = move(c.p)` 之后槽位是 NULL → 重复 move 是 no-op（不会二次释放）；
+           - `var q = move(c.p)` 之后 cunion 里不残留悬垂指针。
+         语义上仍是"用户自负"（cunion 无 tag、不参与所有权运算，编译器不保证
+         重复/错误释放）。 */
+      if (cunion_member_move) {
+        ast_node_t *slot = ast_take_slot_new(sema->arena, (*node)->tok_begin,
+                                             (*node)->tok_end);
+        if (slot) {
+          ((ast_take_slot_t *)slot)->operand = n->operand;
+          slot->next = (*node)->next;
+          *node = slot;
         }
       }
 
@@ -3868,7 +3966,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
 
          **union / cunion 成员豁免**（见上）：布局局部 = 整体，整体进 TDZ。
          `clone` 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone && !union_root &&
+      if (!is_clone && !union_root && !cunion_member_move &&
           (n->operand->kind == AST_MEMBER || n->operand->kind == AST_INDEX)) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "cannot move a struct/aggregate field or element "
@@ -3883,7 +3981,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          ref 返回、解引用读到的被指向内容）都不拥有堆块——move 它只会把借用
          当所有权，销毁时 free 借用源（实测 0xC0000005）。
          clone 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone && !union_root && produces_fatal &&
+      if (!is_clone && !union_root && !cunion_member_move && produces_fatal &&
           value_ownership(operand) != OWN_OWN &&
           value_ownership(operand) != OWN_FATAL) {
         diag_error(sema->diag, sema_loc(sema, *node),
