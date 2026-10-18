@@ -38,6 +38,9 @@ uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr) {
     if (s.len == 3 && memcmp(s.ptr, "own", 3) == 0) return AST_OWN_OWN;
     if (s.len == 3 && memcmp(s.ptr, "ref", 3) == 0) return AST_OWN_REF;
     if (s.len == 5 && memcmp(s.ptr, "fatal", 5) == 0) return AST_OWN_FATAL;
+    /* share / weak 不是所有权修饰，是**真实类型**（`share *T` / `weak *T`）：
+       RC 语义编码在指针类型对象上（ptr_type_t.rc），槽位所有权仍是 NONE
+       （可拷贝）。销毁判定看**类型** rather than 槽位所有权。 */
     return AST_OWN_NONE;
 }
 

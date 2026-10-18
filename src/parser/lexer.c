@@ -77,6 +77,7 @@ static const char *const g_keywords[] = {
     "sizeof",  "str",    "struct",  "switch", "true",    "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",
     "union",   "usize",  "var",     "void",    "volatile", "while",
+    "share",   "weak",   /* RC 系（§12，2026-10 重新引入） */
 };
 
 /* ---- Internal: character classes ---- */

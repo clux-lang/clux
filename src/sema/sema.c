@@ -546,19 +546,28 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      /* 所有权纯编译期——校验 ownership token 合法性，但不传入类型系统。
-         ownership 由调用方在 symbol 层记录。 */
+      /* 所有权分两类：
+         - own/ref/fatal：**纯编译期**——校验 token 合法性，不进类型系统
+           （ownership 由调用方在 symbol 层记录）；
+         - share/weak（§12 RC 系）：**类型层属性**——copy = 计数 +1、drop =
+           计数 -1 由指针类型的 vtable 承担，所以这里落到带 rc 的 intern 实例。 */
       strslice_t own = token_strslice(ptr->ownership);
-      if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
-            (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
-            (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
+      uint8_t rc = 0;
+      if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0)
+        rc = 1;
+      else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0)
+        rc = 2;
+      else if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
+                 (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
+                 (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
         return NULL;
       }
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       if (!base) return NULL;
-      return type_ptr_intern(sema->vm, base);
+      return rc ? type_ptr_intern_rc(sema->vm, base, rc)
+                : type_ptr_intern(sema->vm, base);
     }
     case AST_SLICE_TYPE: {
       /* 切片类型（m4-design §1/§10）：[]T（所有权纯编译期，类型不区分
@@ -1574,6 +1583,42 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
                              .is_active = true, .fid = lfid,
                              .builtin_op = SEMA_BUILTIN_LEN};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("len"), &linit);
+    }
+  }
+
+  /* 预注册 RC 内置函数（share/weak 是真实类型，源码不写这些名字）：
+       - __make_share(p)：fatal/own *T → share *T（§12.1 创建通道）
+       - __weak_get(w)  ：weak *T → ?share *T（§12.4 原子升级，`.get()` 语法糖） */
+  {
+    const type_t *vsig = type_func_sig(sema->vm, NULL, NULL, 0,
+                                       sema->vm->type_opaque, OWN_NONE,
+                                       /*is_variadic=*/true);
+    if (vsig) {
+      const char *names[2] = {"__make_share", "__weak_get"};
+      sema_builtin_op_t ops[2] = {SEMA_BUILTIN_MAKE_SHARE,
+                                  SEMA_BUILTIN_WEAK_GET};
+      for (int k = 0; k < 2; k++) {
+        uint32_t fid = 0;
+        if (sema->vm->functions) {
+          size_t nf = vec_len(sema->vm->functions);
+          for (size_t i = 0; i < nf; i++) {
+            func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+            if (bf && bf->name.ptr &&
+                bf->name.len == strlen(names[k]) &&
+                memcmp(bf->name.ptr, names[k], bf->name.len) == 0) {
+              fid = bf->id;
+              break;
+            }
+          }
+        }
+        sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = vsig,
+                              .is_active = true, .fid = fid,
+                              .builtin_op = ops[k]};
+        sema_scope_define(sema->global_scope,
+                          strslice_from_bytes((char *)names[k],
+                                              strlen(names[k])),
+                          &init);
+      }
     }
   }
 

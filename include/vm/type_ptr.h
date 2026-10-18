@@ -13,6 +13,8 @@ extern "C" {
 
 /** 指针类型 vtable（所有权纯编译期，类型不区分 own/ref/fatal） */
 extern const vtable_t VTABLE_PTR;
+extern const vtable_t VTABLE_PTR_SHARE;  /* share *T：copy=+1，drop=-1 */
+extern const vtable_t VTABLE_PTR_WEAK;   /* weak *T：copy=+1，drop=-1（弱计数） */
 
 /* ================================================================ */
 /* 指针类型（ptr_type_t，继承 type_t，m3-design §3）                 */
@@ -35,7 +37,7 @@ typedef struct ptr_type_t ptr_type_t;  /* 定义见 vm/type.h */
 
 /** PUSH_PTR：分配开放 ptr_type（base_type=NULL，不入池）+ 压其 type value。
  *  所有权纯编译期——类型不区分 own/ref/fatal，只有一种指针类型 *T。 */
-const type_t *type_ptr_push(vm_t *vm);
+const type_t *type_ptr_push(vm_t *vm, uint8_t rc);
 
 /** SET_TYPE 运行期用：设被指向类型 T（密封后静默忽略） */
 void type_ptr_set_base(vm_t *vm, const type_t *t, const type_t *base);
@@ -47,6 +49,65 @@ const type_t *type_ptr_seal(vm_t *vm, const type_t *t);
  *  不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。
  *  所有权纯编译期——类型不区分 own/ref/fatal。 */
 const type_t *type_ptr_intern(vm_t *vm, const type_t *base);
+
+/** 取/建 RC 指针类型：rc = 1（share）/ 2（weak），0 等同 type_ptr_intern。 */
+const type_t *type_ptr_intern_rc(vm_t *vm, const type_t *base, uint8_t rc);
+
+/** 是否为 share / weak 指针类型（RC 形态）。 */
+static inline bool type_is_share(const type_t *t) {
+    return t && t->kind == TYPE_KIND_PTR && ((const ptr_type_t *)t)->rc == 1;
+}
+static inline bool type_is_weak(const type_t *t) {
+    return t && t->kind == TYPE_KIND_PTR && ((const ptr_type_t *)t)->rc == 2;
+}
+/** RC 指针的共享形态：share/weak 都指向 RC 块内的 payload。 */
+static inline bool type_is_rc_ptr(const type_t *t) {
+    return type_is_share(t) || type_is_weak(t);
+}
+
+/* ---- RC 控制块（share/weak，m3-design §12）---- */
+
+/** RC 块：头部（强/弱计数）紧跟 payload（T 的数据）；share/weak 的 ptr 字段
+ *  指向 payload（于是 `p.*` 语义不变）。计数是 atomic（§12.5）。 */
+typedef struct rc_block_t {
+    /* 计数（atomic；原子操作由 type_ptr.c 用 __atomic_* 内建完成，
+       这样头文件在 C / C++ 两种语言下都能编译）。 */
+    unsigned      strong;    /* share 计数 */
+    unsigned      weak;      /* weak 计数 + 1（strong 自占一个 weak 引用） */
+    allocator_t  *alloc;
+    const type_t *type;      /* payload 类型（析构递归用） */
+    bool          destroyed; /* strong→0 后 payload 已析构 */
+} rc_block_t;
+
+/** payload 地址（头部之后按 type->align 对齐） */
+static inline void *rc_block_payload(rc_block_t *rc) {
+    size_t hdr = sizeof(rc_block_t);
+    size_t align = (rc && rc->type && rc->type->align) ? rc->type->align : 1;
+    size_t aligned = (hdr + align - 1) & ~(align - 1);
+    return (uint8_t *)rc + aligned;
+}
+
+/** 由 payload 反查控制块（与 rc_block_payload 同一对齐公式） */
+static inline rc_block_t *rc_block_of(const type_t *t, void *payload) {
+    size_t hdr = sizeof(rc_block_t);
+    size_t align = (t && t->align) ? t->align : 1;
+    size_t aligned = (hdr + align - 1) & ~(align - 1);
+    return (rc_block_t *)((uint8_t *)payload - aligned);
+}
+
+rc_block_t *rc_block_new(vm_t *vm, const type_t *payload_type);
+void rc_block_strong_inc(rc_block_t *rc);
+void rc_block_strong_dec(vm_t *vm, rc_block_t *rc);
+void rc_block_weak_inc(rc_block_t *rc);
+void rc_block_weak_dec(vm_t *vm, rc_block_t *rc);
+/** 原子升级：strong>0 则 +1 并返回 payload，否则 NULL。 */
+void *rc_block_upgrade(rc_block_t *rc);
+
+/** `own/fatal *T` → `share *T`（fatal 创建通道，§12.1）：新建 RC 块（payload
+ *  = 被指向值拷贝，接管其内的资源所有权），原堆块释放。 */
+value_t *ptr_make_share_from_fatal(vm_t *vm, value_t *fatal_val);
+/** `share *T` → `weak *T`（弱计数 +1）。 */
+value_t *ptr_make_weak_from_share(vm_t *vm, value_t *share_val);
 
 /** 取指针类型的被指向类型 T（非指针返回 NULL） */
 static inline const type_t *ptr_type_base(const type_t *t) {
@@ -155,6 +216,11 @@ void ptr_free_block_only(vm_t *vm, const type_t *t, void *data);
  * Struct 字段里的 own *T），不止顶层直接指针。
  */
 void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data);
+
+/** 把数据块里的**每一个 share/weak 槽位**计数 +1（拷贝进新槽位 = 引用 +1）。
+ *  构造 / 字段写入 / 闭包捕获 / 数组元素等 memcpy 之后调用；own 指针不参与
+ *  （那是转移，源会被清空）。 */
+void ptr_rc_inc_recursive(vm_t *vm, const type_t *t, void *data);
 
 /**
  * 深拷贝 type 类型的数据块（对象图克隆，m3-design §7"深拷贝整个对象图"）：

@@ -238,6 +238,40 @@ char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
 
 /* ---- 递归指针/切片判定（见 type.h）---- */
 
+bool type_has_rc_slots(const type_t *t) {
+    if (!t) return false;
+    switch (t->kind) {
+        case TYPE_KIND_PTR:
+            return type_is_rc_ptr(t);
+        case TYPE_KIND_STRUCT: {
+            const struct_type_t *st = (const struct_type_t *)t;
+            for (size_t i = 0; i < st->field_count; i++)
+                if (type_has_rc_slots(st->fields[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_TUPLE: {
+            const tuple_type_t *tt = (const tuple_type_t *)t;
+            for (size_t i = 0; i < tt->elem_count; i++)
+                if (type_has_rc_slots(tt->elems[i].type)) return true;
+            return false;
+        }
+        case TYPE_KIND_UNION: {
+            const union_type_t *ut = (const union_type_t *)t;
+            for (size_t i = 0; i < ut->member_count; i++)
+                if (type_has_rc_slots(ut->members[i].payload_type)) return true;
+            return false;
+        }
+        case TYPE_KIND_ARRAY:
+            return type_has_rc_slots(array_type_elem(t));
+        case TYPE_KIND_SLICE:
+            return type_has_rc_slots(slice_type_elem(t));
+        case TYPE_KIND_OPTION:
+            return type_has_rc_slots(type_option_inner(t));
+        default:
+            return false;
+    }
+}
+
 bool type_has_own_slots(const type_t *t) {
     if (!t) return false;
     switch (t->kind) {

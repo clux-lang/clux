@@ -539,6 +539,8 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_keyword(p, "own"))       op_tok = cur_token(p);
     else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
     else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
+    else if (check_keyword(p, "share"))     op_tok = cur_token(p);
+    else if (check_keyword(p, "weak"))      op_tok = cur_token(p);
 
     /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
@@ -781,7 +783,8 @@ ast_node_t *parse_unary(parser_t *p) {
        修饰（own i32 不合法）。
        消费 '*' 或 '[]' 后再解析被指向/元素类型 T。 */
     if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
-        token_is(op_tok, "fatal")) {
+        token_is(op_tok, "fatal") || token_is(op_tok, "share") ||
+        token_is(op_tok, "weak")) {
         /* 切片路径：own []T / ref []T / fatal []T */
         if (check_symbol(p, "[")) {
             /* 保存位置以便回退到 '[' 前做错误诊断 */
@@ -822,7 +825,8 @@ ast_node_t *parse_unary(parser_t *p) {
                `ref T`（T 非指针）仍在此拒绝：借用需要一个**可借出的值**，
                而当前没有"非指针值的借用"这一产生式（借用走 `ref *T` /
                `ref []T` / `x.&`）。 */
-            if (!token_is(op_tok, "fatal") && !token_is(op_tok, "own")) {
+            if (!token_is(op_tok, "fatal") && !token_is(op_tok, "own") &&
+                !token_is(op_tok, "share") && !token_is(op_tok, "weak")) {
                 return ast_error_new(
                     p->diag, p->tokens, p->arena, tb, p->pos,
                     "only 'fatal' / 'own' can qualify a non-pointer type "

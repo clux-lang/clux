@@ -108,7 +108,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
 
     [BCODE_PUSH_CUNION]    = { "PUSH_CUNION",   { BCODE_ASM_OP_NONE } },
 
-    [BCODE_PUSH_PTR]       = { "PUSH_PTR",      { BCODE_ASM_OP_NONE } },
+    [BCODE_PUSH_PTR]      = { "PUSH_PTR",      { BCODE_ASM_OP_U8 } },
     [BCODE_NEW]            = { "NEW",           { BCODE_ASM_OP_NONE } },
     [BCODE_PTR_GET]        = { "PTR_GET",       { BCODE_ASM_OP_NONE } },
     [BCODE_PTR_SET]        = { "PTR_SET",       { BCODE_ASM_OP_NONE } },

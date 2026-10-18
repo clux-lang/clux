@@ -1975,6 +1975,44 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
        * 指针 → 原样），sema 不再改写 AST。 */
       if (call->callee && call->callee->kind == AST_MEMBER) {
         ast_member_t *mem = (ast_member_t *)call->callee;
+        /* **`.get()` 语法糖**（§12.4）：`weak *T` 的升级入口。不是全局函数
+           （避免与业务函数重名），只在 weak 指针上按成员调用解析。sema 把它
+           改写成对内置 `__weak_get` 的调用，返回 `?share *T`。 */
+        {
+          const type_t *wot = NULL;
+          if (mem->field.len == 3 && memcmp(mem->field.ptr, "get", 3) == 0 &&
+              mem->object && mem->object->kind == AST_IDENT) {
+            sema_symbol_t *os =
+                sema_lookup(scope, ((ast_ident_t *)mem->object)->name);
+            if (os && os->type) wot = os->type;
+          }
+          if (wot && type_is_weak(wot)) {
+            ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
+            ast_node_t *ncall = ast_call_new(sema->arena, 0, 0);
+            if (!callee || !ncall) return val_void(sema);
+            ((ast_ident_t *)callee)->name =
+                strslice_from_bytes("__weak_get", 10);
+            callee->is_generated = true;
+            ((ast_call_t *)ncall)->callee = callee;
+            ((ast_call_t *)ncall)->args = mem->object;
+            mem->object = NULL;
+            ncall->is_generated = true;
+            ast_node_t *orig_next = (*node)->next;
+            *node = ncall;
+            (*node)->next = orig_next;
+            /* 类型：?share *T（与 __weak_get 一致） */
+            const type_t *base = ptr_type_base(wot);
+            const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
+            if (!st) return val_void(sema);
+            sema_type_register(sema, st);
+            const type_t *opt = type_option_intern_own(sema->vm, st, OWN_NONE);
+            if (!opt) return val_void(sema);
+            sema_type_register(sema, opt);
+            value_t *sv = value_make_shadow(sema->vm, opt);
+            value_set_ownership(sv, OWN_NONE);
+            return sv;
+          }
+        }
         const type_t *ot = NULL;
         if (mem->object && mem->object->kind == AST_IDENT) {
           sema_symbol_t *os =
@@ -2400,6 +2438,46 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
          的实参是副本，取不到调用方的存储身份，见 ast_call.h / vm/bcode.h）。 */
       /* __deep_clone(v)：运行期对象图深拷贝（闭包 env / cunion 兜底）。
          返回**同类型 fatal**（将亡值）：消费者按所有权规则接管。 */
+      /* __make_share(p)：fatal/own `*T` → `share *T`（RC 创建通道）。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_MAKE_SHARE) {
+        value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
+        if (!arg || is_poison(sema, arg)) return val_void(sema);
+        const type_t *at = value_type(arg);
+        const type_t *base = at ? ptr_type_base(at) : NULL;
+        if (!base || type_is_rc_ptr(at)) {
+          diag_error(sema->diag, sema_loc(sema, call->callee),
+                     "share creation needs a plain `own *T` / fatal `*T` source");
+          return val_void(sema);
+        }
+        const type_t *st = type_ptr_intern_rc(sema->vm, base, 1);
+        if (!st) return val_void(sema);
+        sema_type_register(sema, st);
+        value_t *sv = value_make_shadow(sema->vm, st);
+        value_set_ownership(sv, OWN_NONE); /* share 是普通可拷贝值 */
+        return sv;
+      }
+      /* __weak_get(w)：`weak *T` → `?share *T`（原子升级；死对象得 nil）。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_WEAK_GET) {
+        value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
+        if (!arg || is_poison(sema, arg)) return val_void(sema);
+        const type_t *at = value_type(arg);
+        if (!type_is_weak(at)) {
+          diag_error(sema->diag, sema_loc(sema, call->callee),
+                     ".get() is only available on `weak *T` values");
+          return val_void(sema);
+        }
+        const type_t *base = ptr_type_base(at);
+        const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
+        if (!st) return val_void(sema);
+        sema_type_register(sema, st);
+        const type_t *opt = type_option_intern_own(sema->vm, st, OWN_NONE);
+        if (!opt) return val_void(sema);
+        sema_type_register(sema, opt);
+        value_t *sv = value_make_shadow(sema->vm, opt);
+        value_set_ownership(sv, OWN_NONE);
+        return sv;
+      }
+
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_DEEP_CLONE) {
         value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
         if (!arg || is_poison(sema, arg) || value_is_type(arg, TYPE_KIND_VOID))
@@ -3879,6 +3957,38 @@ static const type_t *static_lvalue_type(sema_t *sema, sema_scope_t *scope,
   }
 }
 
+/* **RC 创建通道**（§12.1）：目标类型是 `share *T`、源值是将亡（FATAL）或
+   own 的普通 `*T` → 把源表达式改写成对内置 `__make_share` 的调用（sema 生成，
+   源码不写 `__` 名字），并把值的类型/状态换成 `share *T`（普通可拷贝值）。
+   成功返回 true（*pvalue / *pv 已替换）。 */
+bool rc_adapt_share_init(sema_t *sema, const type_t *target,
+                         ast_node_t **pvalue, value_t **pv) {
+  if (!sema || !target || !type_is_share(target) || !pvalue || !pv) return false;
+  const type_t *base = ptr_type_base(target);
+  value_t *v = *pv;
+  if (!base || !v || value_is_error(sema->vm, v) || value_is_type(v, TYPE_KIND_VOID))
+    return false;
+  const type_t *st = value_type(v);
+  if (!st || st->kind != TYPE_KIND_PTR || ptr_type_base(st) != base) return false;
+  if (type_is_rc_ptr(st)) return false;                    /* 已是 share/weak */
+  if (!(sema_value_is_fatal(v) || value_ownership(v) == OWN_OWN)) return false;
+
+  ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
+  ast_node_t *call = ast_call_new(sema->arena, 0, 0);
+  if (!callee || !call || !*pvalue) return false;
+  ((ast_ident_t *)callee)->name = strslice_from_bytes("__make_share", 12);
+  callee->is_generated = true;
+  ((ast_call_t *)call)->callee = callee;
+  ((ast_call_t *)call)->args = *pvalue;
+  call->is_generated = true;
+  *pvalue = call;
+
+  value_t *sv = value_make_shadow(sema->vm, target);
+  value_set_ownership(sv, OWN_NONE);   /* share 是普通值（copy = 计数 +1） */
+  *pv = sv;
+  return true;
+}
+
 /* AST_MOVE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 static value_t *ex_move(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -4396,6 +4506,14 @@ static value_t *ex_deref(sema_t *sema, ast_node_t **node,
       if (is_poison(sema, operand))
         return val_void(sema);
       const type_t *ot = value_type(operand);
+      /* **weak *T 不能直接解引用**（§12.4）：弱引用不保证对象存活，必须先
+         `.get()` 升级成 `?share *T`（死对象得 nil），访问路径因此天然无竞态。 */
+      if (type_is_weak(ot)) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot dereference a 'weak *T': a weak reference may already "
+                   "be dead (use `w.get()` to upgrade it to `?share *T`)");
+        return val_void(sema);
+      }
       const type_t *base = ptr_type_base(ot);
       if (!base) {
         char tn[64];

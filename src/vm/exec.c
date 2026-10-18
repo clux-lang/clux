@@ -796,8 +796,8 @@ static value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * type value（type_ptr_push 压栈；对应两遍构造声明阶段的起点）。
  * 所有权纯编译期——只有一种指针类型 *T，无 ownership 操作数。 */
 static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)bc; (void)pc;
-    type_ptr_push(vm);
+    uint8_t rc = bcode_read_u8(bc, pc);
+    type_ptr_push(vm, rc);
     return NULL;
 }
 
@@ -1013,6 +1013,12 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
             }
             allocator_free(vm->alloc, &fn->env);
         }
+        return NULL;
+    }
+    /* **share/weak：递减计数**（真实类型，RC 语义在 vtable 的 dispose 里）。
+       计数归零才由 RC 块析构 payload；weak 观察者因此永不悬空。 */
+    if (type_is_rc_ptr(t)) {
+        if (t->vtable && t->vtable->dispose) t->vtable->dispose(vm, v);
         return NULL;
     }
     /* A 方案：sema 已按 type 对象生成"被指向值 own 槽位"的逐条 FREE，

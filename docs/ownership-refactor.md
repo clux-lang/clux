@@ -729,6 +729,26 @@ cunion 是**不安全类型**：无 tag、成员共享 offset 0、**不参与所
 **收益**：闭包路径彻底不需要运行期类型内省，也不再使用 `__deep_clone`
 （`__deep_clone` 现在只剩 cunion 被指向值的"无主块拷贝"这一处）。
 
+### 7.1.15 RC 系重新引入：`share *T` / `weak *T` 是**真实类型**（2026-10）
+
+RC 系曾在 M3 实现、后因单所有权重构整体移除；现在以"真实类型"的形态重新引入
+（**不是所有权修饰**——语法上像 `own *T`，语义上是独立类型）：
+
+| 维度 | 说明 |
+|---|---|
+| 类型层 | `ptr_type_t.rc`（0 普通 / 1 share / 2 weak）参与去重 intern；独立 vtable `VTABLE_PTR_SHARE` / `VTABLE_PTR_WEAK`；字节码 `PUSH_PTR <u8 rc>` 让类型表也带形态 |
+| 控制块 | `rc_block_t`：`strong` / `weak` 计数（`__atomic_*` 内建，跨线程安全）+ payload 紧随（`rc_block_payload`）；share/weak 的 `ptr` 指向 payload，`p.*` 语义不变 |
+| copy | 一切拷贝路径计数 +1：vtable clone/assign + **`ptr_rc_inc_recursive`**（构造/字段写入/闭包捕获/数组元素等 `value_own_copy_into` 路径） |
+| drop | 一切销毁路径计数 -1：`op_free` 的 RC 分支、`ptr_free_owned_recursive`、`ptr_clear_owned_recursive`、生成的销毁函数（`gen_destroy` 的 RC 指针分支） |
+| 销毁判定 | RC 是类型不是所有权 → `type_has_rc_slots(t)` 递归判定"含 RC 槽位"，`make_free_stmts` / 赋值点销毁 / `gen_destroy_slot` / `gen_destroy_elems` / `gen_destroy_struct` 据此把普通变量与字段也纳入销毁 |
+| 创建 | `var s: share *T = <fatal/own *T>` → sema 改写成 `__make_share(...)`（§12.1 创建通道）；借用源拒绝 |
+| 弱化 | `share *T → weak *T` 隐式（weak+1）；反向只能经 `.get()` |
+| 升级 | **`.get()` 成员调用**（不是全局 `upgrade`，避免与业务函数重名）→ `__weak_get` → `?share *T`；死对象得 nil |
+| 解引用 | `weak *T` 直接 `w.*` 是**编译错误**（弱引用可能已死） |
+
+生命周期：strong→0 析构 payload（递归释放内嵌 own/share，weak 观察者因此永不
+悬空）但**保留内存**；weak→0 才释放控制块。循环引用由用户负责（用 weak 打破）。
+
 ### 7.2 仍未闭环的边界（2026-10 审计后）
 
 核心链路（转移 / 销毁 / clone / 赋值点 / 借用闸门 / 闭包 / cunion 成员释放）
@@ -744,7 +764,10 @@ cunion 是**不安全类型**：无 tag、成员共享 offset 0、**不参与所
 3. **运行期递归辅助仍在回退路径**：`__deep_clone`（现仅 cunion 被指向值的
    无主块拷贝；闭包已改走 env vtable 生成函数）、`DISPOSE`（sema 无法生成 prelude
    时）、`compound_assign_transfer` 的旧值释放。
-4. **share / weak 引用计数**：已整体移除，单所有权是唯一模型；RC 语义待重新设计。
+4. **share / weak 引用计数**：已按"真实类型"重新引入（§7.1.15）——
+   创建通道（fatal→share）、copy/drop 计数、weak `.get()` 升级、弱解引用拒绝、
+   RC 槽位进入销毁生成均已落地；仍未覆盖：跨模块共享（同一对象跨模块类型
+   身份）、RC 与 cunion 的交互（cunion 不参与所有权，故也不参与计数）。
 5. **FFI 边界（声明责任，编译器不校验）**：内嵌 own 的聚合在 clux 侧只有 FATAL
    产生式；C 返回含 own 的聚合属 FFI 声明错误，由声明者负责。
 6. **cunion 指针成员的"部分释放"**：`_ = move(c.p)` 已支持任意路径（含嵌套/经

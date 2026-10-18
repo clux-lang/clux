@@ -168,6 +168,13 @@ typedef struct enum_variant_t {
 typedef struct ptr_type_t {
     type_t       base;
     const type_t *base_type;  /* 被指向类型 T（引用，不拥有） */
+    /* 引用计数形态（m3-design §12 重新引入）：
+       0 = 普通指针（own/ref/fatal —— 所有权纯编译期，运行期裸指针）
+       1 = **share *T**（强引用计数，copy 即 +1，drop 即 -1）
+       2 = **weak *T**（弱引用计数，`.get()` 原子升级为 ?share *T）
+       RC 形态是**类型层属性**（vtable 分派随类型走），因此 struct 字段 /
+       数组元素 / 闭包捕获里的 share/weak 都自动获得计数语义。 */
+    uint8_t       rc;
 } ptr_type_t;
 
 /**
@@ -560,6 +567,12 @@ bool type_contains_ptr_or_slice(const type_t *t);
  * 叶子（ptr / slice）本身不算"含 own 槽位"：它们的 own 性由所在**槽位**记录。
  */
 bool type_has_own_slots(const type_t *t);
+
+/** 判定类型是否**含 share/weak 槽位**（递归：struct 字段 / tuple 元素 /
+ *  union 成员 / array 元素 / slice 元素 / option inner）。
+ *  RC 指针是真实类型而不是所有权，所以"普通变量"也可能需要递减计数——
+ *  销毁生成据此把它算作"需要销毁的值"。 */
+bool type_has_rc_slots(const type_t *t);
 
 /* 注：原 `type_owns_resources` / `type_fatal_carries_resource` / `type_directly_owns`
  * 三个**类型层所有权谓词**已删除（2026-10 所有权重构）：所有权从类型层迁移到

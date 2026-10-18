@@ -590,11 +590,16 @@ move/clone 产物或 new 的分配均可流向 **share** 作为 RC 创建源。
 - share 数 = 访问权；weak 数 = 保命权
 - 与 Rust"强归零即释放"不同，clux 用"保留但禁止访问"换取 weak 永不悬空
 
-### 12.4 weak 是观察器：经内置函数升级
+### 12.4 weak 是观察器：`.get()` 成员调用升级
 
-- weak 自身不能直接访问对象——访问必须先升级为 share
-- 升级使用**内置函数 `upgrade`**（语义参考 Rust `Weak::upgrade()` / C++ `weak_ptr::lock()`）：检查强引用是否存活：存活 → 返回 share（计数 +1）；否则返回 nil
-- 返回值类型 `?share`（option），调用形态 `upgrade(w)`
+- weak 自身不能直接访问对象——**解引用 weak 是编译错误**，访问必须先升级为 share
+- 升级使用**成员调用语法 `w.get()`**（语义参考 Rust `Weak::upgrade()` / C++
+  `weak_ptr::lock()`）：原子检查强引用是否存活 → 存活则返回 share（计数 +1），
+  否则返回 nil
+- 返回值类型 `?share *T`（option），调用形态 `w.get()`
+- **不用全局函数 `upgrade`**：名字太泛、容易和业务函数重名；`.get()` 绑定在
+  weak 指针类型上，天然不占全局命名空间（sema 改写成内置 `__weak_get`）
+- 早期实现曾因 member_call 未实现而采用全局内置函数，2026-10 起改为 `.get()`
 - 访问路径强制经升级接口，天然消除 §12.3"禁止访问"的运行期歧义——无强引用时升级得 nil，无从访问
 
 ### 12.5 线程安全：atomic 计数

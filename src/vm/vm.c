@@ -21,6 +21,7 @@ extern void vm_init_builtins(vm_t *vm);
 extern void vm_register_len(vm_t *vm);
 extern void vm_register_cfunc_ptr(vm_t *vm);
 extern void vm_register_deep_clone(vm_t *vm);
+extern void vm_register_rc_builtins(vm_t *vm);
 
 static class_t g_vm_class = {
     .name       = "clux.vm",
@@ -193,6 +194,7 @@ vm_t *vm_new(allocator_t *alloc) {
     /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> usize） */
     vm_register_len(vm);
     vm_register_deep_clone(vm);
+    vm_register_rc_builtins(vm);
 
     /* cfunc_ptr 内置函数（M6 Phase 5：clux 函数 → C 函数指针 / 回调） */
     vm_register_cfunc_ptr(vm);

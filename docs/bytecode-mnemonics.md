@@ -189,7 +189,7 @@ ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `PUSH_PTR` | `U8`（ownership） | 分配空指针类型（开放态，base=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL / _SHARE / _WEAK`。 |
+| `PUSH_PTR` | `U8`（rc：0 普通 / 1 share / 2 weak） | 分配开放指针类型并压其 type value。share/weak 是**真实类型**（RC 形态），所以形态随类型走而不是所有权；后续 `SET_TYPE` 设 base、`SEAL` 按 (base, rc) 去重 intern。 |
 | `NEW` | — | **只申请内存**（2026-10 与 `CONSTRUCT` 统一）：弹一个整数（字节数）→ 申请该大小的原始块（清零）→ 压 `opaque` 句柄（data 里存裸指针）。后续 `CONSTRUCT` 以该句柄为 dest 在块上构造对象；`new T{...}` 编译为 `PUSH_U64 sizeof(T); NEW; <type>; <fields>; CONSTRUCT n`（结果 `fatal *T`）。C 后端等价：`calloc(1, size)`。 |
 | `PTR_GET` | — | 弹指针值 → 压被指向 `T` 的**值副本**（`r.*` 解引用 GET）。 |
 | `PTR_SET` | — | 弹指针值 + val → 隐式转换后写回被指向 `T` → 压回指针（`r.* = v`）。 |

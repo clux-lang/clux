@@ -603,6 +603,11 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
  * 返回 true = 通过；false = 已发出诊断。`what` 是槽位的人类可读名
  * （如 "union field 'p'"），用于拼诊断。
  */
+/** RC 创建通道（§12.1）：`share *T` 目标 + fatal/own `*T` 源 → 改写成
+ *  `__make_share` 调用并返回 share 类型 shadow（见 expr.c 实现）。 */
+bool rc_adapt_share_init(sema_t *sema, const type_t *target,
+                         ast_node_t **pvalue, value_t **pv);
+
 bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
                           const type_t *slot_type, ast_node_t *value,
                           value_t *fv, const char *what);

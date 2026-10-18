@@ -6,6 +6,7 @@
 #include "vm/type_array.h"
 #include "vm/type_slice.h"
 #include "vm/type_ptr.h"
+#include "vm/type_option.h"
 #include "core/panic.h"
 
 #include <string.h>
@@ -122,4 +123,69 @@ void vm_register_deep_clone(vm_t *vm) {
                             sig, STRSLICE_LIT("__deep_clone"));
     if (!fnv) return;
     (void)scope_define(vm, vm->global_scope, "__deep_clone", fnv);
+}
+
+/* ---- RC 系内置（m3-design §12，2026-10 重新引入）----
+   share/weak 是**真实类型**（`share *T` / `weak *T`），不是所有权修饰：
+   - `__make_share(p)`：fatal/own `*T` → `share *T`（RC 创建通道，§12.1）；
+   - `__weak_get(w)`  ：`weak *T` → `?share *T`（原子升级，§12.4；死对象得 nil）。
+   两者都是 sema 生成的调用（源码不写这些名字——`__` 前缀是保留空间），
+   因此不需要新指令，也不污染全局命名。 */
+static value_t *builtin_make_share_cfunc(vm_t *vm, func_t *self, size_t argc,
+                                         value_t **args) {
+    (void)self;
+    if (argc != 1 || !args[0])
+        return value_make_error(vm, "__make_share: expects exactly 1 argument");
+    value_t *v = args[0];
+    if (value_is_shadow(v)) {
+        const type_t *t = value_type(v);
+        const type_t *base = t ? ((const ptr_type_t *)t)->base_type : NULL;
+        const type_t *st = base ? type_ptr_intern_rc(vm, base, 1) : NULL;
+        return st ? value_make_shadow(vm, st) : v;
+    }
+    value_t *r = ptr_make_share_from_fatal(vm, v);
+    return r ? r : value_make_error(vm, "__make_share: expects a pointer value");
+}
+
+static value_t *builtin_weak_get_cfunc(vm_t *vm, func_t *self, size_t argc,
+                                       value_t **args) {
+    (void)self;
+    if (argc != 1 || !args[0])
+        return value_make_error(vm, "__weak_get: expects exactly 1 argument");
+    value_t *v = args[0];
+    const type_t *t = value_type(v);
+    if (!type_is_weak(t))
+        return value_make_error(vm, "__weak_get: expects a weak pointer");
+    const type_t *base = ptr_type_base(t);
+    const type_t *st = base ? type_ptr_intern_rc(vm, base, 1) : NULL;
+    if (!st) return value_make_error(vm, "__weak_get: bad weak pointer type");
+    const type_t *opt = type_option_intern_own(vm, st, OWN_NONE);
+    if (!opt) return value_make_error(vm, "__weak_get: cannot build option type");
+    if (value_is_shadow(v)) return value_make_shadow(vm, opt);
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+    /* 原子升级：strong>0 → strong+1（这份计数直接归 option 里的 share） */
+    void *payload = pv->ptr ? rc_block_upgrade(rc_block_of(base, pv->ptr)) : NULL;
+    void *data = value_alloc_data(vm->alloc, opt);
+    if (!data) return value_make_error(vm, "__weak_get: out of memory");
+    memset(data, 0, opt->size);
+    if (payload) {
+        *(bool *)data = true; /* some */
+        memcpy((uint8_t *)data + option_value_offset(opt), &payload,
+               sizeof(payload));
+    }
+    return value_make(vm, opt, data);
+}
+
+void vm_register_rc_builtins(vm_t *vm) {
+    if (!vm || !vm->global_scope) return;
+    const type_t *sig1 = type_func_sig(vm, NULL, NULL, 0, vm->type_opaque,
+                                       OWN_NONE, /*is_variadic=*/true);
+    if (sig1) {
+        value_t *fnv = func_new(vm, builtin_make_share_cfunc, NULL,
+                                vm->root_scope, sig1, STRSLICE_LIT("__make_share"));
+        if (fnv) (void)scope_define(vm, vm->global_scope, "__make_share", fnv);
+        value_t *gw = func_new(vm, builtin_weak_get_cfunc, NULL,
+                               vm->root_scope, sig1, STRSLICE_LIT("__weak_get"));
+        if (gw) (void)scope_define(vm, vm->global_scope, "__weak_get", gw);
+    }
 }
