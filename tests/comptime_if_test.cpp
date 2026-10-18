@@ -106,13 +106,15 @@ TEST(ComptimeIf, BreakBelongsToEnclosingLoop) {
                  "cif_break");
 }
 
-TEST(ComptimeIf, DefersInBranchBelongToEnclosingBlock) {
-  /* 分支不是作用域：defer 注册到外层块（函数退出时执行）——允许。 */
-  clux_expect_ok(prog("  comptime if (true) {\n"
-                      "    var p: own *i32 = new i32{7};\n"
-                      "    defer |(q: own *i32 = move(p))| { }\n"
-                      "  }\n"),
-                 "cif_defer");
+TEST(ComptimeIf, DeferInsideBranchRejected) {
+  /* 前脱糖层（parser → sema）先于裁剪运行：分支里的 defer 会生成一个
+     闭包名 + 外层退出点的调用，而分支随后可能被裁剪掉 → 名字悬空。
+     因此 `defer` 不允许出现在 `comptime if` 分支内（写在外面即可）。 */
+  clux_expect_reject(
+      prog("  comptime if (true) {\n"
+           "    defer |(q: i32 = 1)| { }\n"
+           "  }\n"),
+      "cannot be used inside a 'comptime if' branch", "cif_defer_rejected");
 }
 
 TEST(ComptimeIf, NestedFuncInsideBranchIsAllowed) {

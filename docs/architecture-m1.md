@@ -103,7 +103,27 @@ func add(a:i32, b:i32):i32 {
 - Pass 3 拆分为 3a/3b 两个子阶段：作用域结构与类型检查彻底分离。3a 只建结构（scope 树 + 符号表，不做类型检查），3b 按树遍历做类型检查（scope 管理与检查逻辑不纠缠）
 - 后续里程碑加入 struct/union 等类型定义后，Pass 1 同样收集类型名，Pass 2 处理类型内部结构
 
-## 2. 模块职责
+### 1.x 前脱糖层（desugar，2026-10）
+
+管线在 parser 与 sema 之间新增一层**前脱糖**（`src/desugar/`，库 `clux_desugar`）：
+
+```
+lex → parse(AST) → **desugar(纯 AST 变换)** → sema(pass0..3b) → compile → VM
+```
+
+- **只做语法结构改写**：不查符号表、不做类型检查、不建 sema 作用域、不分配
+  函数 id —— 因此可脱离语义层独立推理/测试；
+- 入口：`desugar_program(desugar_t*, ast_program_t*)`，由 driver 在 parse
+  成功之后、创建 sema 之前调用（`src/driver/driver.c`）；
+- 当前变换：**defer 脱糖** —— `defer [|捕获|] { ... }` 改写成匿名局部函数
+  定义（`__defer_N`）+ 各退出点（块尾 / `return` / `break` / `continue`）的
+  逆序调用语句。sema 因此只看到普通 `AST_FUNC_DEF` + `AST_EXPR_STMT`。
+- 与 `comptime if` 的边界：裁剪需要编译期常量求值（语义），仍在 sema Pass 3a；
+  由于脱糖先于裁剪，**分支内不允许 `defer`**（否则被裁剪的分支会留下悬空的
+  闭包名），由脱糖层直接诊断。
+- `format` 不走 desugar：格式化只解析、不脱糖，保持源码形态。
+
+## 2## 2. 模块职责
 
 ### 2.1 Lexer (include/parser/lexer.h, src/parser/lexer.c)
 

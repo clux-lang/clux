@@ -1,4 +1,5 @@
 #include "driver/driver.h"
+#include "desugar/desugar.h"
 #include "driver/compile_module.h"
 #include "module/module_path.h"
 #include "module/package.h"
@@ -589,6 +590,19 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
         lexer_close(&lexer);
         vec_free(alloc, &pool);
         return NULL;
+    }
+
+    /* 4b. **前脱糖**（parser → sema 之间的纯 AST 变换）：
+       defer → 匿名局部函数 + 退出点调用。这一层不看符号表/不做类型检查，
+       只按 AST 结构改写；sema 因此只看到普通函数定义 + 普通调用语句。 */
+    {
+      desugar_t ds = desugar_make(arena, diag, pool);
+      desugar_program(&ds, (ast_program_t *)ast);
+      if (diag && diag_has_error(diag)) {
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+      }
     }
 
     /* 5. sema（独立创建，用完即销毁；借用 vm 的全局表） */

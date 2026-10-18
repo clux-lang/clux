@@ -96,6 +96,18 @@ if(CLUX_SEMA_SOURCES)
   list(APPEND CLUX_STAGE_LIBS clux_sema)
 endif()
 
+# ---------------------------------------------------------------------------
+# 前脱糖层（parser → sema 之间的纯 AST 变换）
+# ---------------------------------------------------------------------------
+file(GLOB CLUX_DESUGAR_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/desugar/*.c")
+if(CLUX_DESUGAR_SOURCES)
+  add_library(clux_desugar STATIC ${CLUX_DESUGAR_SOURCES})
+  target_include_directories(clux_desugar PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(clux_desugar PUBLIC clux_core clux_parser clux_diag ICU::uc ICU::i18n)
+  clux_target_warnings(clux_desugar)
+  list(APPEND CLUX_STAGE_LIBS clux_desugar)
+endif()
 file(GLOB CLUX_DIAG_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/diag/*.c")
 if(CLUX_DIAG_SOURCES)
@@ -163,7 +175,7 @@ file(GLOB CLUX_DRIVER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/driver/*.c")
 add_library(clux_driver STATIC ${CLUX_DRIVER_SOURCES})
 target_include_directories(clux_driver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_diag clux_compiler clux_module ICU::uc ICU::i18n)
+target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_desugar clux_diag clux_compiler clux_module ICU::uc ICU::i18n)
 clux_target_warnings(clux_driver)
 
 # ---------------------------------------------------------------------------
