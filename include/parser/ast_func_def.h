@@ -53,6 +53,11 @@ typedef struct {
                                 全局函数经 sema_type_register 分配，局部函数提升时解析分配） */
     uint32_t    fid;         /* 函数 id（compiler 预扫描分配，LOAD_FUNCTION <fid> 用；
                                 hoist 函数注册区构造时 BIND_FUNC <fid> 携带） */
+
+    /* `[[<expr>]]` 装饰器链（表达式兄弟链，源码序；NULL = 无）。
+       **只被前脱糖消费**：[[d1]] [[d2]] func f(...) 展开为"源函数 + 装饰后绑定"，
+       展开后本字段清空（sema/compiler 看不到装饰器）。 */
+    ast_node_t *decorators;
 } ast_func_def_t;
 
 static inline ast_node_t *ast_func_def_new(arena_t *arena,

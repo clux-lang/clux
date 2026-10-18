@@ -182,9 +182,11 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
         if (!bad) {
             const type_t *ct = type_struct_intern(vm, fields, nc);
             if (!ct) bad = ctfe_err(ctx, "ctfe: cannot intern capture type");
+            /* 写回 capture_type_id：编译期要能为该字面量生成 SET_FUNC_CAPTURES
+               （否则运行期实例没有 env，SET_CLOSURE 报 "function has no capture
+               env"）。 */
             if (ct && ctx->sema) {
                 const sema_type_t *st = sema_type_register(ctx->sema, ct);
-                if (st) n->capture_type_id = st->id;
                 if (st) n->capture_type_id = st->id;
             }
             if (!bad) {

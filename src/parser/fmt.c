@@ -855,6 +855,18 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
 
 static void render_stmt(fmt_t *f, ast_node_t *node) {
     if (!node) return;
+    /* 装饰器前缀 `[[<expr>]]`（只出现在 var / func 声明上）：必须原样渲染，
+       否则格式化会把"装饰后的声明"悄悄变回普通声明（语义丢失）。 */
+    if (node->kind == AST_FUNC_DEF || node->kind == AST_VAR_DEF) {
+        ast_node_t *decs = (node->kind == AST_FUNC_DEF)
+                               ? ((ast_func_def_t *)node)->decorators
+                               : ((ast_var_def_t *)node)->decorators;
+        for (ast_node_t *d = decs; d; d = d->next) {
+            sb_str(&f->sb, "[[");
+            render_expr(f, d);
+            sb_str(&f->sb, "]] ");
+        }
+    }
     switch (node->kind) {
         case AST_VAR_DEF: {
             ast_var_def_t *v = (ast_var_def_t *)node;
@@ -1423,6 +1435,12 @@ static void render_scope_annot_names(fmt_t *f, const strslice_t *names,
 
 static void render_func_def(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
+    /* 装饰器前缀（顶层函数走这条渲染路径，不经过 render_stmt） */
+    for (ast_node_t *d = fn->decorators; d; d = d->next) {
+        sb_str(&f->sb, "[[");
+        render_expr(f, d);
+        sb_str(&f->sb, "]] ");
+    }
     if (fn->is_comptime) sb_str(&f->sb, "comptime ");
     /* M6 FFI：cfunc 定义必须原样渲染为 `cfunc`——渲染成 `func` 会静默改变语义
        （C ABI 导出 vs 普通函数），与 import/reexport 漏分支同类问题。 */

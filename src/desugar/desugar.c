@@ -16,6 +16,7 @@
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_for.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_foreach.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_if.h"
@@ -532,9 +533,246 @@ static void ds_prune_extern_libs(desugar_t *ds, ast_program_t *prog) {
   }
 }
 
+
+/* ===========================================================================
+ * 装饰器展开（`[[<expr>]]`，前脱糖）
+ *
+ * 装饰器是**编译期函数**：接收"被装饰的值"，返回"装饰后的值"。
+ *
+ *   [[ann]] var a = 123;                    ⇒  var a = ann(123);
+ *   [[ann]] func f(...): T { body }         ⇒  func __decor_N_f(...): T { body }
+ *                                              var f = ann(__decor_N_f);
+ *   struct S { [[ann]] func m(self: ref *S, ...) { body } }
+ *                                           ⇒  struct S { func m(...) { return __decorval_N_m(self, ...); } }
+ *                                              func __decorsrc_N_m(self: ref *S, ...) { body }
+ *                                              var __decorval_N_m = ann(__decorsrc_N_m);
+ *
+ * 设计要点：
+ *   - **装饰器必须是 comptime 函数**：展开结果 `var f = ann(<源>)` 是全局变量的
+ *     编译期常量初始化器（语言契约：全局 init 必须可折）。这直接来自
+ *     "函数是编译期的值"（comptime 函数能返回函数/闭包）。
+ *   - 应用顺序与 Python 一致：`[[a]] [[b]] f` ⇒ `a(b(f))`（源码里靠前的先包）。
+ *   - 顶层函数**保持函数身份**：`f` 仍是函数（递归、取函数值都正常），装饰只发生
+ *     一次（模块初始化期折叠成常量闭包），不像"每次调用重新装饰"那样破坏状态。
+ *   - 方法必须留在**方法表**里（`obj.m()` 走 MEMBER_CALL），所以成员变成"包装
+ *     方法"（转发到模块级装饰值），原方法体搬到模块级源函数。
+ *   - 合成名一律 `__` 前缀（保留给编译器生成的名字，用户不可声明）。
+ * =========================================================================== */
+
+/** 合成保留名：`__<kind>_<seq>_<原名>`（arena 拥有）。 */
+static strslice_t ds_synth_name(desugar_t *ds, const char *kind,
+                                strslice_t orig) {
+  char buf[256];
+  int n = snprintf(buf, sizeof buf, "__%s_%u_%.*s", kind, ++ds->seq,
+                   (int)orig.len, orig.ptr ? orig.ptr : "");
+  if (n < 0) n = 0;
+  if ((size_t)n >= sizeof buf) n = (int)sizeof buf - 1;
+  char *p = (char *)arena_alloc(ds->arena, (size_t)n + 1, 1);
+  if (!p) return orig;
+  memcpy(p, buf, (size_t)n + 1);
+  return strslice_from_bytes(p, (size_t)n);
+}
+
+static ast_node_t *ds_new_ident(desugar_t *ds, strslice_t name, uint32_t tb,
+                                uint32_t te) {
+  ast_node_t *n = ast_ident_new(ds->arena, tb, te);
+  if (n) ((ast_ident_t *)n)->name = name;
+  return n;
+}
+
+static ast_node_t *ds_call(desugar_t *ds, ast_node_t *callee, ast_node_t *args,
+                           ast_node_t *args_last, uint32_t tb, uint32_t te) {
+  ast_node_t *n = ast_call_new(ds->arena, tb, te);
+  if (!n) return NULL;
+  ast_call_t *c = (ast_call_t *)n;
+  c->callee = callee;
+  c->args = args;
+  c->args_last = args_last;
+  return n;
+}
+
+/** 把装饰器链按"源码序从内到外"包在 `value` 上：[[a]] [[b]] v ⇒ a(b(v))。 */
+static ast_node_t *ds_apply_decorators(desugar_t *ds, ast_node_t *decs,
+                                       ast_node_t *value, uint32_t tb,
+                                       uint32_t te) {
+  size_t n = 0;
+  for (ast_node_t *d = decs; d; d = d->next) n++;
+  if (n == 0) return value;
+  ast_node_t **arr = (ast_node_t **)arena_calloc(
+      ds->arena, n, sizeof(ast_node_t *), ALIGNOF(max_align_t));
+  if (!arr) return value;
+  size_t i = 0;
+  for (ast_node_t *d = decs; d; d = d->next) arr[i++] = d;
+  value->next = NULL;
+  for (i = n; i > 0; i--) {
+    ast_node_t *callee = arr[i - 1];
+    callee->next = NULL;
+    ast_node_t *call = ds_call(ds, callee, value, value, tb, te);
+    if (!call) return value;
+    value->next = NULL;
+    value = call;
+  }
+  return value;
+}
+
+/** 变量装饰：`[[ann]] var a = v;` ⇒ `var a = ann(v);`。 */
+static void ds_decorate_var(desugar_t *ds, ast_var_def_t *vd) {
+  ast_node_t *decs = vd->decorators;
+  if (!decs) return;
+  vd->decorators = NULL;
+  if (!vd->init || vd->init->kind == AST_UNDEF) {
+    ds_error(ds, (ast_node_t *)vd,
+             "decorated declaration must have an initializer");
+    return;
+  }
+  vd->init = ds_apply_decorators(ds, decs, vd->init, vd->base.tok_begin,
+                                 vd->base.tok_end);
+}
+
+/** 包装体：`return <callee>(<参数们>);`（void 返回时用表达式语句）。 */
+static ast_node_t *ds_forward_body(desugar_t *ds, ast_func_def_t *fn,
+                                   strslice_t callee_name) {
+  uint32_t tb = fn->base.tok_begin, te = fn->base.tok_end;
+  ast_node_t *args = NULL, *args_last = NULL;
+  for (ast_node_t *p = fn->params; p; p = p->next) {
+    ast_var_def_t *pd = (ast_var_def_t *)p;
+    ast_node_t *a = ds_new_ident(ds, pd->name, tb, te);
+    if (!a) return NULL;
+    if (args_last)
+      args_last->next = a;
+    else
+      args = a;
+    args_last = a;
+  }
+  ast_node_t *callee = ds_new_ident(ds, callee_name, tb, te);
+  ast_node_t *call = ds_call(ds, callee, args, args_last, tb, te);
+  if (!call) return NULL;
+  ast_node_t *stmt = NULL;
+  if (fn->return_expr) {
+    stmt = ast_return_new(ds->arena, tb, te);
+    if (stmt) ((ast_return_t *)stmt)->value = call;
+  } else {
+    stmt = ast_expr_stmt_new(ds->arena, tb, te);
+    if (stmt) ((ast_expr_stmt_t *)stmt)->expr = call;
+  }
+  if (!stmt) return NULL;
+  ast_node_t *blk = ast_block_new(ds->arena, tb, te);
+  if (!blk) return NULL;
+  ((ast_block_t *)blk)->stmts = stmt;
+  ((ast_block_t *)blk)->stmts_last = stmt;
+  return blk;
+}
+
+/** 顶层函数装饰：源函数改名 + `var <名> = 装饰(<源>);` 紧随其后。 */
+static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
+  ast_node_t *decs = fn->decorators;
+  if (!decs) return NULL;
+  fn->decorators = NULL;
+  uint32_t tb = fn->base.tok_begin, te = fn->base.tok_end;
+  strslice_t visible = fn->name;
+  strslice_t hidden = ds_synth_name(ds, "decor", visible);
+  fn->name = hidden;
+
+  ast_node_t *src = ds_new_ident(ds, hidden, tb, te);
+  if (!src) return NULL;
+  ast_node_t *init = ds_apply_decorators(ds, decs, src, tb, te);
+  ast_node_t *var = ast_var_def_new(ds->arena, tb, te);
+  if (!var) return NULL;
+  ((ast_var_def_t *)var)->name = visible;
+  ((ast_var_def_t *)var)->init = init;
+  return var;
+}
+
+/** 方法装饰：成员变包装方法；源函数 + 装饰值放模块级（插在 struct 之后）。 */
+static ast_node_t *ds_decorate_method(desugar_t *ds, ast_func_def_t *m,
+                                      ast_node_t **out_tail) {
+  ast_node_t *decs = m->decorators;
+  if (!decs) return NULL;
+  m->decorators = NULL;
+  uint32_t tb = m->base.tok_begin, te = m->base.tok_end;
+  strslice_t visible = m->name;
+  strslice_t src_name = ds_synth_name(ds, "decorsrc", visible);
+  strslice_t val_name = ds_synth_name(ds, "decorval", visible);
+
+  /* 1) 模块级源函数：克隆成员（共享参数 / 返回类型 / 函数体），改名。 */
+  ast_func_def_t *src = (ast_func_def_t *)arena_calloc(
+      ds->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
+  if (!src) return NULL;
+  *src = *m;
+  src->base.next = NULL;
+  src->name = src_name;
+  src->decorators = NULL;
+  src->fid = 0;
+  src->sig_id = 0;
+  src->capture_type_id = 0;
+  src->env_dispose_fid = 0;
+  src->env_clone_fid = 0;
+  src->is_comptime = false;
+
+  /* 2) 成员变成包装方法：`return __decorval(self, ...);` */
+  m->body = ds_forward_body(ds, m, val_name);
+  if (!m->body) return NULL;
+
+  /* 3) `var __decorval = 装饰(__decorsrc);` */
+  ast_node_t *ident = ds_new_ident(ds, src_name, tb, te);
+  if (!ident) return NULL;
+  ast_node_t *init = ds_apply_decorators(ds, decs, ident, tb, te);
+  ast_node_t *var = ast_var_def_new(ds->arena, tb, te);
+  if (!var) return NULL;
+  ((ast_var_def_t *)var)->name = val_name;
+  ((ast_var_def_t *)var)->init = init;
+
+  /* 链：src → var（源函数在前，var 依赖它折叠） */
+  src->base.next = var;
+  *out_tail = var;
+  return &src->base;
+}
+
+/** 遍历全部顶层声明，展开装饰器（struct 成员里的方法/属性同样处理）。 */
+static void ds_expand_decorators(desugar_t *ds, ast_program_t *prog) {
+  ast_node_t **link = &prog->funcs;
+  while (*link) {
+    ast_node_t *n = *link;
+    if (n->kind == AST_VAR_DEF) {
+      ds_decorate_var(ds, (ast_var_def_t *)n);
+    } else if (n->kind == AST_FUNC_DEF) {
+      ast_node_t *var = ds_decorate_top_func(ds, (ast_func_def_t *)n);
+      if (var) {
+        var->next = n->next;
+        n->next = var;
+      }
+    } else if (n->kind == AST_STRUCT_DEF) {
+      ast_struct_def_t *st = (ast_struct_def_t *)n;
+      ast_node_t *gen_head = NULL, *gen_tail = NULL;
+      for (ast_node_t *m = st->members; m; m = m->next) {
+        if (m->kind == AST_VAR_DEF) {
+          ds_decorate_var(ds, (ast_var_def_t *)m);
+        } else if (m->kind == AST_FUNC_DEF) {
+          ast_node_t *tail = NULL;
+          ast_node_t *head =
+              ds_decorate_method(ds, (ast_func_def_t *)m, &tail);
+          if (head) {
+            if (gen_tail)
+              gen_tail->next = head;
+            else
+              gen_head = head;
+            gen_tail = tail;
+          }
+        }
+      }
+      if (gen_head) {
+        gen_tail->next = n->next;
+        n->next = gen_head;
+      }
+    }
+    link = &(*link)->next;
+  }
+}
+
 void desugar_program(desugar_t *ds, ast_program_t *prog) {
   if (!ds || !prog) return;
-  /* 先裁剪条件不满足的 extern lib 声明，再做其余展开 */
+  /* 先展开装饰器（纯语法改写：装饰器链包成调用），再裁剪 extern lib 条件 */
+  ds_expand_decorators(ds, prog);
   ds_prune_extern_libs(ds, prog);
   for (ast_node_t *n = prog->funcs; n; n = n->next) {
     switch (n->kind) {

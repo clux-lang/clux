@@ -762,6 +762,31 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+### 装饰器 `[[<expr>]]`
+
+声明前可以写装饰器：`[[ann]]` 把 `ann` 应用到该声明上。装饰器是**编译期函数**
+（接收被装饰的值，返回装饰后的值），展开发生在**前脱糖**（parser → sema 之间，
+纯语法改写，sema/compiler 看不到 `[[...]]`）：
+
+```c
+[[twice]] var a = 21;              // ⇒ var a = twice(21);
+[[twice]] [[plus1]] var b = 3;     // ⇒ var b = twice(plus1(3))（源码靠前的先包）
+[[add100]] func dbl(x: i32): i32 { return x * 2; }
+                                   // ⇒ dbl 在模块初始化期装饰一次：dbl = add100(源函数)
+struct Point {
+    [[keep]] func get(self: ref *Point): i32 { return self.x; }
+}                                  // ⇒ 成员变成转发包装方法，原方法体搬到模块级源函数
+```
+
+- 允许修饰：**全局变量**、**函数**（含 **struct 方法**）。其它声明报
+  ``decorators `[[...]]` are only allowed on 'var' and 'func' declarations``。
+- 装饰器在**编译期求值**（全局初始化器必须可折叠）：值装饰器任意 comptime 函数；
+  函数/方法装饰器必须是 comptime 且返回函数（闭包也可以，见上一节）。
+- 顶层函数装饰后**仍是函数**（可递归、可当值），装饰只发生一次——不像"每次调用
+  重新装饰"那样破坏记忆化等状态。
+- 方法签名 = 接收者作为第一个参数：`func(ref *T) -> R`，装饰器按该签名编写。
+- `[[` 必须以 `]]` 闭合（缺一个 `]` 是语法错误，不会被当成普通声明）。
+
 ### comptime 函数可以返回函数（含闭包）
 
 **函数是编译期的值**：comptime 函数可以把函数作为返回值，返回的函数在运行期

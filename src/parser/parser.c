@@ -10,6 +10,7 @@
 #include "parser/ast_import.h"
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_reexport.h"
+#include "parser/parse_expr.h"
 #include "parser/parse_stmt.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_cunion_def.h"
@@ -84,6 +85,52 @@ static bool has_lexical_errors(parser_t *p) {
     return false;
 }
 
+/* 装饰器前缀 `[[<expr>]]`（零或多个）：返回表达式兄弟链（源码序，NULL = 无）。
+ *
+ * 只在**声明起始位置**调用，因此看到 `[` 就只可能是装饰器（顶层 / struct 体内
+ * 没有以 `[` 开头的语句）。表达式沿用既有 parse_expr——`[[dec(1)]]`、
+ * `[[a.b]]` 都自然支持。
+ *
+ * 出错时把诊断交给外层（解析错误节点已由 parse_expr/expect 记录），返回已收集
+ * 的部分，避免二次报错。 */
+ast_node_t *parse_decorator_prefixes(parser_t *p) {
+    ast_node_t *head = NULL, *last = NULL;
+    for (;;) {
+        skip_trivia(p);
+        if (!check_symbol(p, "[")) break;
+        size_t save = p->pos;
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (!check_symbol(p, "[")) { /* 单个 `[`：不是装饰器 */
+            p->pos = (uint32_t)save;
+            break;
+        }
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *expr = parse_expr(p);
+        if (!expr || expr->kind == AST_ERROR) break;
+        skip_trivia(p);
+        if (!expect_symbol(p, "]")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ']]' to close decorator");
+        }
+        skip_trivia(p);
+        if (!expect_symbol(p, "]")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ']]' to close decorator");
+        }
+        expr->next = NULL;
+        expr->tok_begin = tb;
+        if (last)
+            last->next = expr;
+        else
+            head = expr;
+        last = expr;
+    }
+    return head;
+}
+
 ast_node_t *parse_program(parser_t *p) {
     uint32_t tb = p->pos;
 
@@ -95,6 +142,8 @@ ast_node_t *parse_program(parser_t *p) {
 
     while (!at_end(p)) {
         ast_node_t *func = NULL;
+        ast_node_t *decorators = parse_decorator_prefixes(p);
+        if (at_end(p)) break;
         if (check_keyword(p, "comptime")) {
             /* comptime 前缀：comptime func 标记 + 挂链；comptime var（全局
                编译期常量）挂 funcs 链，sema pass_globals 消费后摘除。 */
@@ -225,6 +274,20 @@ ast_node_t *parse_program(parser_t *p) {
             continue;
         } else {
             func = parse_func_def(p);
+        }
+        if (decorators && decorators->kind == AST_ERROR) {
+            func = decorators; /* 装饰器语法错误：替换整个声明 */
+        } else if (decorators && func && func->kind != AST_ERROR) {
+            if (func->kind == AST_FUNC_DEF) {
+                ((ast_func_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_VAR_DEF) {
+                ((ast_var_def_t *)func)->decorators = decorators;
+            } else {
+                func = ast_error_new(
+                    p->diag, p->tokens, p->arena, func->tok_begin, p->pos,
+                    "decorators `[[...]]` are only allowed on 'var' and "
+                    "'func' declarations");
+            }
         }
         if (!func) {
             /* 语法错误。recover_partial（formatter 用）时保留错误前的 AST：

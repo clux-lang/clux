@@ -51,6 +51,10 @@ typedef struct {
      * `lib_name` 是 `extern lib` 的别名（与 ast_func_def_t 的同名字段一致）。 */
     bool        is_extern_var;
     strslice_t  lib_name;
+
+    /* `[[<expr>]]` 装饰器链（表达式兄弟链，源码序；NULL = 无）。
+       **只被前脱糖消费**：[[d1]] [[d2]] var a = v 展开为 a = d1(d2(v))。 */
+    ast_node_t *decorators;
 } ast_var_def_t;
 
 static inline ast_node_t *ast_var_def_new(arena_t *arena,

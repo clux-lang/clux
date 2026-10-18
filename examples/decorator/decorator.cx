@@ -1,0 +1,61 @@
+// decorator.cx — 装饰器语法 `[[<expr>]]`
+//
+// 装饰器是**编译期函数**：接收"被装饰的值"，返回"装饰后的值"。语法是声明前的
+// `[[<expr>]]`，可以叠多个（与 Python 一致：源码靠前的先包）。
+//
+//   [[ann]] var a = 123;        ⇒  var a = ann(123);
+//   [[ann]] func f(...) {…}     ⇒  func __decor_N_f(...) {…}   // 源函数
+//                                  var f = ann(__decor_N_f);     // 装饰后的函数值
+//   struct S { [[ann]] func m(...) {…} }
+//                               ⇒  成员变成"转发包装方法"，原方法体搬到模块级源函数
+//
+// 展开发生在前脱糖（parser → sema 之间）——**纯语法改写**，sema/compiler 看不到
+// `[[...]]`。装饰器在编译期求值（全局初始化器必须可折叠），因此函数装饰器要用
+// comptime 函数（它能返回函数/闭包，见 comptime_closure 能力）。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+// ---- 值装饰器：i32 -> i32 ----
+comptime func twice(n: i32): i32 { return n * 2; }
+comptime func plus1(n: i32): i32 { return n + 1; }
+
+// ---- 函数装饰器：包一层（返回闭包） ----
+comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {
+    return func |f| w(x: i32): i32 { return f(x) + 100; };
+}
+
+func double(x: i32): i32 { return x * 2; }
+
+// 1) 全局变量：var a = twice(21)
+[[twice]] var a = 21;
+
+// 2) 多个装饰器：twice(plus1(3)) = 8
+[[twice]] [[plus1]] var b = 3;
+
+// 3) 顶层函数：dbl = add100(double)，只装饰一次（模块初始化期）
+[[add100]] func dbl(x: i32): i32 { return double(x); }
+
+// 4) 方法装饰：成员 get 变成转发包装方法（源方法体在模块级）
+struct Point {
+    x: i32;
+    [[keep]] func get(self: ref *Point): i32 { return self.x; }
+}
+
+// 恒等装饰器：方法装饰器目前要求"接收者签名一致"
+comptime func keep(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {
+    return f;
+}
+
+func main(): i32 {
+    libc::printf("a = %d\n", a);            // 42
+    libc::printf("b = %d\n", b);            // 8
+    libc::printf("dbl(5) = %d\n", dbl(5));  // 110
+    var p = .Point{ .x = 7 };
+    libc::printf("p.get() = %d\n", p.get()); // 7
+
+    if (a != 42 || b != 8 || dbl(5) != 110 || p.get() != 7) {
+        return 1;
+    }
+    return 0;
+}

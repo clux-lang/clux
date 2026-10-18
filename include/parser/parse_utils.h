@@ -78,6 +78,13 @@ ast_node_t *parse_reserved_ident_error(parser_t *p, const token_t *tok,
 
 /* ---- 诊断 ---- */
 
+/**
+ * 解析装饰器前缀 `[[<expr>]]`（零或多个，返回表达式兄弟链；NULL = 无）。
+ * 只在**声明起始位置**调用（顶层 / struct 成员循环开头）——那里见到 `[`
+ * 只可能是装饰器。失败时返回已收集的前缀（诊断由内部 parse_expr/expect 记录）。
+ */
+ast_node_t *parse_decorator_prefixes(parser_t *p);
+
 /** 报告语法错误（不改变游标），置 has_error。 */
 void parse_error(parser_t *p, const char *fmt, ...);
 

@@ -59,6 +59,22 @@ ast_node_t *parse_struct_def(parser_t *p) {
         /* '}' 结束字段列表（含尾随分号后直接 '}' 的情况） */
         if (check_symbol(p, "}")) break;
 
+        /* 装饰器前缀 `[[<expr>]]`：只允许修饰 var / func 成员
+           （`[[dec]] func m(self: ref *S) {...}` 是方法装饰器）。 */
+        ast_node_t *member_decorators = parse_decorator_prefixes(p);
+        if (member_decorators && member_decorators->kind == AST_ERROR)
+            return member_decorators;
+        skip_trivia(p);
+        if (check_symbol(p, "}")) {
+            if (member_decorators) {
+                return ast_error_new(p->diag, p->tokens, p->arena,
+                                     member_decorators->tok_begin, p->pos,
+                                     "decorators `[[...]]` must be followed by "
+                                     "a 'var' or 'func' member declaration");
+            }
+            break;
+        }
+
         /* ---- 结构体嵌入（结构体组合）：`...Base;` ----
          * 纯语法：只记录名字与"出现在自己第几个字段之前"（此时 fields 链的
          * 长度就是 field_index）。字段的实际组合（遍历 Base 的 **type** 复制
@@ -105,14 +121,22 @@ ast_node_t *parse_struct_def(parser_t *p) {
         if (check_keyword(p, "var")) {
             ast_node_t *mv = parse_var_def(p);
             if (!mv || mv->kind == AST_ERROR) return mv;
+            if (member_decorators) ((ast_var_def_t *)mv)->decorators = member_decorators;
             ast_append(&members, &members_last, NULL, mv);
             continue;
         }
         if (check_keyword(p, "func")) {
             ast_node_t *mf = parse_func_def(p);
             if (!mf || mf->kind == AST_ERROR) return mf;
+            if (member_decorators) ((ast_func_def_t *)mf)->decorators = member_decorators;
             ast_append(&members, &members_last, NULL, mf);
             continue;
+        }
+        if (member_decorators) {
+            return ast_error_new(p->diag, p->tokens, p->arena,
+                                 member_decorators->tok_begin, p->pos,
+                                 "decorators `[[...]]` are only allowed on "
+                                 "'var' and 'func' declarations");
         }
 
         /* 字段名：标识符 */
