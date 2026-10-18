@@ -63,12 +63,28 @@ import libc from "libobjc.dylib";   /* macOS */
   ```
 
   - **`<库名>` 是通用名（generic name），不是文件名**（与 CMake 的
-    `target_link_libraries` / `find_library` 同名风格一致）：加载器按平台展开
-    候选逐个尝试——Windows `<name>.dll`；macOS `lib<name>.dylib` /
-    `<name>.dylib` / `lib<name>.so` / `<name>.so`；其它 `lib<name>.so` /
-    `<name>.so`。第一个候选恒为 **as-is**，因此显式路径
-    （`from "/usr/lib/libfoo.so"`）、已带平台后缀的文件名、系统搜索路径上的
-    裸文件名都能直接命中（旧写法迁移过来的显式文件名继续可用）。
+    `target_link_libraries` / `find_library` 同名风格一致）：加载器把名字展开成
+    **跨平台候选并集**（不按编译期 OS 分支）逐个尝试：
+
+    | 顺序 | 候选 | 典型来源 |
+    |---|---|---|
+    | 1 | `<name>`（as-is） | 显式路径 / 已带后缀的文件名 / 裸名字 |
+    | 2 | `<name>.dll` | Windows |
+    | 3 | `lib<name>.so` | Linux / ELF（GNU 前缀，最常见） |
+    | 4 | `<name>.so` | Linux / ELF（无前缀） |
+    | 5 | `lib<name>.dylib` | macOS |
+    | 6 | `<name>.dylib` | macOS（无前缀） |
+
+    为什么不做 OS 分支：扩展名只影响"当前加载器能否装载"，不影响语义——
+    Windows 的 `LoadLibraryA("libfoo.so")` 能装载**任何** PE（扩展名不参与判定），
+    MinGW/MSYS 产出的 `.so` 因此可以直接用；Linux 上 `dlopen("foo.dll")` 只是一次
+    失败的 open。同一份 `.cxb` 搬到另一个平台也不必改名字。
+  - **装载两轮**：① 按名字（系统搜索路径——Windows 含 exe 目录与 PATH；Linux/
+    macOS 是 ld.so 缓存与 `LD_LIBRARY_PATH`）；② 按 `<可执行文件目录>/<候选>`
+    前缀。Linux/macOS 默认**不**搜索可执行文件目录，而"库与程序放一起分发"是最
+    常见的用法，第二轮补齐；它排在后面，系统库优先，避免同目录同名文件劫持。
+  - 失败诊断列出试过的候选名与第一条 OS 错误（`(+ <exe 目录>/{same})` 表示第二轮
+    也试过同名候选），"名字拼错 / 不在搜索路径"因此一眼可见。
   - 源码因此**跨平台**：同一份 `.cx` 在三个平台上都写 `from "c"`；
     `.cxb`/`.cxs` 容器里存的也是**通用名**而不是解析后的绝对路径。
   - `<库名>` 写成 `"*"` 表示**当前进程自身**（RTLD_DEFAULT 语义，见 §14.18）。

@@ -16,6 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -39,6 +43,16 @@ const char *kSystemLib = "msvcrt.dll";
 const char *kSystemLib = "libSystem.B.dylib";
 #else
 const char *kSystemLib = "libc.so.6";
+#endif
+
+/* 数学库：glibc 的 libm 与 libc 分离（sqrt/pow 不在 libc 里），
+   Windows/macOS 则由 CRT/System 提供。 */
+#if defined(_WIN32)
+const char *kMathLib = "msvcrt.dll";
+#elif defined(__APPLE__)
+const char *kMathLib = "libSystem.B.dylib";
+#else
+const char *kMathLib = "libm.so.6";
 #endif
 
 std::string write_file(const char *name, const std::string &content) {
@@ -111,13 +125,19 @@ TEST_F(FfiLibTest, OpensByGenericNameAndAddsPlatformSuffix) {
      注意 Windows 的 LoadLibrary 对无扩展名的名字会自动补 `.dll`，所以
      as-is 候选就可能命中——这里只要求 path 属于该通用名展开出的候选。 */
   EXPECT_STREQ(ffi_lib_name(lib), "clux_ffi_testdata");
+  /* path 是**实际命中的候选**：可能是相对候选名（系统搜索路径命中），也可能是
+     `<exe 目录>/<候选>`（exe 目录回退命中——Linux 上常见）。两者都接受。 */
   const std::string p = ffi_lib_path(lib);
-  EXPECT_TRUE(p == "clux_ffi_testdata" ||
-              p == "clux_ffi_testdata.dll" ||
-              p == "libclux_ffi_testdata.so" ||
-              p == "clux_ffi_testdata.so" ||
-              p == "libclux_ffi_testdata.dylib" ||
-              p == "clux_ffi_testdata.dylib")
+  auto ends_with = [](const std::string &s, const char *suf) {
+    const size_t n = std::strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+  };
+  EXPECT_TRUE(ends_with(p, "clux_ffi_testdata") ||
+              ends_with(p, "clux_ffi_testdata.dll") ||
+              ends_with(p, "libclux_ffi_testdata.so") ||
+              ends_with(p, "clux_ffi_testdata.so") ||
+              ends_with(p, "libclux_ffi_testdata.dylib") ||
+              ends_with(p, "clux_ffi_testdata.dylib"))
       << p;
 
   /* 名字对了，符号也要能解析（td_i32 是测试库的导出变量） */
@@ -137,7 +157,13 @@ TEST_F(FfiLibTest, ExplicitFileNameStillLoadsAsIs) {
   ffi_lib_t *lib = ffi_lib_open(alloc_, explicit_name, err, sizeof(err));
   if (!lib) GTEST_SKIP() << "test library not on the loader search path: " << err;
   EXPECT_STREQ(ffi_lib_name(lib), explicit_name);
-  EXPECT_STREQ(ffi_lib_path(lib), explicit_name);
+  /* 命中可能是 `<exe 目录>/<显式文件名>`（exe 目录回退），只要求以文件名结尾 */
+  const std::string p = ffi_lib_path(lib);
+  EXPECT_TRUE(p == explicit_name ||
+              (p.size() > std::strlen(explicit_name) &&
+               p.compare(p.size() - std::strlen(explicit_name),
+                         std::strlen(explicit_name), explicit_name) == 0))
+      << p;
   ffi_lib_close(lib);
 }
 
@@ -154,6 +180,67 @@ TEST_F(FfiLibTest, MissingLibraryErrorListsTriedCandidates) {
 }
 
 /* `"*"` = 当前进程自身：伪库的名字与路径都是 `*` */
+/* 候选表是**跨平台并集**：不按编译期 OS 分支，顺序固定且可断言。
+ * 这是"同一份源码 / 同一份 .cxb 在 Windows/Linux/macOS 都能跑"的契约实体。 */
+TEST_F(FfiLibTest, CandidatesArePlatformAgnosticUnion) {
+  char out[FFI_LIB_CANDIDATE_MAX][FFI_LIB_CANDIDATE_LEN];
+  const size_t n = ffi_library_candidates("c", out, FFI_LIB_CANDIDATE_MAX);
+  ASSERT_EQ(n, 6u);
+  EXPECT_STREQ(out[0], "c");          /* as-is：显式路径 / 带后缀 / 裸名字 */
+  EXPECT_STREQ(out[1], "c.dll");      /* Windows */
+  EXPECT_STREQ(out[2], "libc.so");    /* ELF（GNU 前缀） */
+  EXPECT_STREQ(out[3], "c.so");       /* ELF（无前缀） */
+  EXPECT_STREQ(out[4], "libc.dylib"); /* Mach-O（GNU 前缀） */
+  EXPECT_STREQ(out[5], "c.dylib");    /* Mach-O（无前缀） */
+
+  /* 显式路径仍然排第一（as-is），后续候选不会覆盖它 */
+  const size_t m =
+      ffi_library_candidates("/usr/lib/libfoo.so", out, FFI_LIB_CANDIDATE_MAX);
+  ASSERT_EQ(m, 6u);
+  EXPECT_STREQ(out[0], "/usr/lib/libfoo.so");
+
+  /* cap 不是硬编码 6：按需截断 */
+  EXPECT_EQ(ffi_library_candidates("c", out, 2), 2u);
+  EXPECT_STREQ(out[1], "c.dll");
+}
+
+#if defined(_WIN32)
+/* **不直接区分操作系统**（用户要求）：Windows 的 LoadLibraryA 对带扩展名的名字
+ * 按内容装载——`.so` 命名的 PE 同样能加载。这里把测试 DLL 复制成
+ * `lib<名字>.so`，再用**通用名**打开：命中的必然是候选里的 `lib<名字>.so`，
+ * 从而证明 Windows 上 .so 也在候选表里、且真的可用（MinGW/MSYS 产物即此形态）。 */
+TEST_F(FfiLibTest, WindowsLoadsSoNamedPeThroughCandidateUnion) {
+  char exe_path[MAX_PATH] = {0};
+  const DWORD len = GetModuleFileNameA(nullptr, exe_path, (DWORD)sizeof exe_path);
+  ASSERT_GT(len, 0u) << "GetModuleFileNameA failed: " << GetLastError();
+  std::string dir(exe_path);
+  const size_t slash = dir.find_last_of("\\/");
+  ASSERT_NE(slash, std::string::npos);
+  dir = dir.substr(0, slash + 1);
+
+  const std::string src = dir + "clux_ffi_testdata.dll";
+  const std::string dst = dir + "libclux_ffi_soalias.so";
+  std::error_code ec;
+  std::filesystem::copy_file(src, dst,
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+  if (ec) GTEST_SKIP() << "cannot stage .so copy: " << ec.message();
+
+  char err[512] = {0};
+  ffi_lib_t *lib = ffi_lib_open(alloc_, "clux_ffi_soalias", err, sizeof(err));
+  EXPECT_NE(lib, nullptr) << "err=" << err;
+  if (lib) {
+    EXPECT_STREQ(ffi_lib_name(lib), "clux_ffi_soalias");
+    /* 命中的是候选里的 lib<name>.so（as-is / <name>.dll 都不存在） */
+    EXPECT_STREQ(ffi_lib_path(lib), "libclux_ffi_soalias.so");
+    void *sym = ffi_lib_sym(lib, "td_i32", err, sizeof(err));
+    EXPECT_NE(sym, nullptr) << err;
+    ffi_lib_close(lib);
+  }
+  std::filesystem::remove(dst, ec);
+}
+#endif
+
 TEST_F(FfiLibTest, ProcessPseudoLibKeepsStarName) {
   char err[128] = {0};
   ffi_lib_t *lib = ffi_lib_open(alloc_, "*", err, sizeof(err));
@@ -234,7 +321,7 @@ TEST_F(FfiLibTest, CallRejectsNullSymbolAndTooManyArgs) {
 
 TEST_F(FfiLibTest, LibffiCallsFloatFunctionSqrt) {
   char err[512] = {0};
-  ffi_lib_t *lib = ffi_lib_open(alloc_, kSystemLib, err, sizeof(err));
+  ffi_lib_t *lib = ffi_lib_open(alloc_, kMathLib, err, sizeof(err));
   ASSERT_NE(lib, nullptr) << "err=" << err;
   void *p_sqrt = ffi_lib_sym(lib, "sqrt", err, sizeof(err));
   ASSERT_NE(p_sqrt, nullptr) << "err=" << err;
@@ -251,7 +338,7 @@ TEST_F(FfiLibTest, LibffiCallsFloatFunctionSqrt) {
 
 TEST_F(FfiLibTest, LibffiCallsTwoDoubleFunctionPow) {
   char err[512] = {0};
-  ffi_lib_t *lib = ffi_lib_open(alloc_, kSystemLib, err, sizeof(err));
+  ffi_lib_t *lib = ffi_lib_open(alloc_, kMathLib, err, sizeof(err));
   ASSERT_NE(lib, nullptr) << "err=" << err;
   void *p_pow = ffi_lib_sym(lib, "pow", err, sizeof(err));
   ASSERT_NE(p_pow, nullptr) << "err=" << err;
@@ -269,7 +356,7 @@ TEST_F(FfiLibTest, LibffiCallsTwoDoubleFunctionPow) {
 /* ---- 浮点调用：sqrt / pow（经 ffi_call_f64，不需要 libffi）---- */
 TEST_F(FfiLibTest, CallFloatFunctionSqrt) {
   char err[512] = {0};
-  ffi_lib_t *lib = ffi_lib_open(alloc_, kSystemLib, err, sizeof(err));
+  ffi_lib_t *lib = ffi_lib_open(alloc_, kMathLib, err, sizeof(err));
   ASSERT_NE(lib, nullptr) << "err=" << err;
   void *p_sqrt = ffi_lib_sym(lib, "sqrt", err, sizeof(err));
   ASSERT_NE(p_sqrt, nullptr) << "err=" << err;
@@ -281,7 +368,7 @@ TEST_F(FfiLibTest, CallFloatFunctionSqrt) {
 
 TEST_F(FfiLibTest, CallTwoDoubleFunctionPow) {
   char err[512] = {0};
-  ffi_lib_t *lib = ffi_lib_open(alloc_, kSystemLib, err, sizeof(err));
+  ffi_lib_t *lib = ffi_lib_open(alloc_, kMathLib, err, sizeof(err));
   ASSERT_NE(lib, nullptr) << "err=" << err;
   void *p_pow = ffi_lib_sym(lib, "pow", err, sizeof(err));
   ASSERT_NE(p_pow, nullptr) << "err=" << err;

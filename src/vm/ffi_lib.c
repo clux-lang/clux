@@ -6,6 +6,7 @@
 #include "vm/type_cunion.h"  /* cunion 成员/布局（同上） */
 #include "vm/type_enum.h"    /* enum 底层类型（描述符 = 底层整数） */
 
+#include <stdarg.h>   /* va_list/va_start：ffi_set_err（POSIX 不会由 stdio.h 传递引入） */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>   /* malloc/free：libffi 描述符树（同闭包 box 的约定） */
@@ -15,6 +16,10 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>   /* readlink：/proc/self/exe（可执行文件目录） */
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> /* _NSGetExecutablePath */
+#endif
 #endif
 
 #ifdef CLUX_HAVE_LIBFFI
@@ -61,44 +66,104 @@ static void ffi_set_err(char *err, size_t ecap, const char *fmt, ...) {
     va_end(ap);
 }
 
-/* ---- 通用库名 → 平台候选文件名（CMake 的 find_library 风格）----
+/* ---- 通用库名 → 候选文件名（CMake 的 find_library 风格；**不区分操作系统**）----
  *
- * `extern lib libc from "c";` 里的 `"c"` 是**通用名**：加载器按平台展开候选，
- * 逐个尝试，第一个能加载的就是它。这样同一份源码在 Windows/Linux/macOS 上都能
- * 工作，`.cxb` 里存的也是这个名字（而不是解析后的绝对路径）。
+ * `extern lib libc from "c";` 里的 `"c"` 是**通用名**：加载器把名字展开成一组
+ * 候选文件名，逐个交给操作系统加载器尝试，第一个能加载的就是它。这样同一份
+ * 源码、同一份 `.cxb` 在 Windows/Linux/macOS 上都能工作。
  *
- *   Windows : <name>.dll
- *   macOS   : lib<name>.dylib, <name>.dylib, lib<name>.so, <name>.so
- *   其它    : lib<name>.so, <name>.so
+ * 候选表是**跨平台的并集**，不按编译期 OS 分支（用户要求：不直接区分操作系统）：
  *
- * 第一个候选恒为 **as-is**（`<name>` 原样）：显式路径（`/usr/lib/libfoo.so`）、
- * 已带平台后缀的文件名（`foo.dll`，旧产物里的写法）、以及系统搜索路径上的
- * 裸文件名都能直接命中，旧 `.cxb`/`.cxs` 因此继续可用。
+ *     1) <name>                  as-is：显式路径 / 已带后缀的文件名 / 裸名字
+ *     2) <name>.dll              Windows 常规
+ *     3) lib<name>.so            Linux / 其它 ELF 平台的常规（GNU 前缀）
+ *     4) <name>.so               不带 lib 前缀的 .so
+ *     5) lib<name>.dylib         macOS 常规
+ *     6) <name>.dylib            不带 lib 前缀的 .dylib
+ *
+ * 为什么不做 OS 分支：扩展名只影响"能否被当前加载器装载"，不影响语义——
+ *   - Windows 上 `LoadLibraryA("libfoo.so")` 能装载**任何** PE（扩展名不参与
+ *     判定），MinGW/MSYS 产出的 `.so` 因此可以直接用；
+ *   - Linux 上 `dlopen("foo.dll")` 只是失败，代价是一次失败的 open；
+ *   - 同一份 `.cxb` 搬到另一个平台不必改名字，候选并集让它自动命中。
+ * 唯一有代价的是"名字存在但不可装载"的诊断稍长（列出全部候选）。
  */
-#define FFI_CANDIDATE_MAX 6
+#define FFI_CANDIDATE_MAX 8
 #define FFI_CANDIDATE_LEN 512
 
-static size_t ffi_name_candidates(const char *name, char out[][FFI_CANDIDATE_LEN],
-                                  size_t cap) {
-    size_t n = 0;
-    if (cap == 0) return 0;
-    /* 1) as-is：显式路径 / 带后缀文件名 / 旧产物 */
-    snprintf(out[n], FFI_CANDIDATE_LEN, "%s", name);
-    n++;
+/* 单个候选的实际装载（只按内容判定）。失败时把**第一条** OS 错误写进
+   first_err（供最终诊断用），返回 NULL。 */
+static void *ffi_try_load(const char *path, char *first_err, size_t ecap) {
+    void *h = NULL;
+#ifdef _WIN32
+    h = (void *)LoadLibraryA(path);
+    if (!h && first_err && !first_err[0])
+        snprintf(first_err, ecap, "LoadLibrary error %lu",
+                 (unsigned long)GetLastError());
+#else
+    h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!h && first_err && !first_err[0]) {
+        const char *e = dlerror();
+        snprintf(first_err, ecap, "%s", e ? e : "unknown dlopen error");
+    }
+#endif
+    return h;
+}
+
+/* 可执行文件所在目录（带结尾分隔符；失败返回 false）。
+   Linux/BSD 用 /proc/self/exe，macOS 用 _NSGetExecutablePath，Windows 用
+   GetModuleFileNameA。用途：库与程序放一起分发时，第二轮候选按它拼绝对路径。 */
+static bool ffi_exe_dir(char *out, size_t cap) {
+    if (!out || cap < 2) return false;
+    char buf[FFI_CANDIDATE_LEN * 2];
 #if defined(_WIN32)
-    if (n < cap) {
-        snprintf(out[n], FFI_CANDIDATE_LEN, "%s.dll", name);
+    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)sizeof buf);
+    if (n == 0 || n >= sizeof buf) return false;
+#elif defined(__APPLE__)
+    uint32_t sz = (uint32_t)sizeof buf;
+    if (_NSGetExecutablePath(buf, &sz) != 0) return false;
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+#endif
+    size_t len = strlen(buf);
+    /* 去掉文件名，再去掉末尾分隔符（调用方用 '/' 拼接） */
+    size_t cut = len;
+    for (size_t i = len; i > 0; i--) {
+        char ch = buf[i - 1];
+        if (ch == '/' || ch == '\\') { cut = i - 1; break; }
+    }
+    while (cut > 0 && (buf[cut - 1] == '/' || buf[cut - 1] == '\\')) cut--;
+    if (cut == 0 || cut >= cap) return false;
+    memcpy(out, buf, cut);
+    out[cut] = '\0';
+    return true;
+}
+size_t ffi_library_candidates(const char *name, char out[][FFI_CANDIDATE_LEN],
+                              size_t cap) {
+    static const struct {
+        const char *prefix;
+        const char *suffix;
+    } kForms[] = {
+        { "",    ""       }, /* 1) as-is */
+        { "",    ".dll"   }, /* 2) Windows */
+        { "lib", ".so"    }, /* 3) ELF（GNU 前缀） */
+        { "",    ".so"    }, /* 4) ELF（无前缀） */
+        { "lib", ".dylib" }, /* 5) Mach-O（GNU 前缀） */
+        { "",    ".dylib" }, /* 6) Mach-O（无前缀） */
+    };
+    if (cap == 0) return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(kForms) / sizeof(kForms[0]) && n < cap; i++) {
+        if (i == 0) {
+            snprintf(out[n], FFI_CANDIDATE_LEN, "%s", name);
+        } else {
+            snprintf(out[n], FFI_CANDIDATE_LEN, "%s%s%s", kForms[i].prefix, name,
+                     kForms[i].suffix);
+        }
         n++;
     }
-#elif defined(__APPLE__)
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.dylib", name); n++; }
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.dylib", name);    n++; }
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.so", name);    n++; }
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.so", name);       n++; }
-#else
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "lib%s.so", name); n++; }
-    if (n < cap) { snprintf(out[n], FFI_CANDIDATE_LEN, "%s.so", name);    n++; }
-#endif
     return n;
 }
 
@@ -134,39 +199,46 @@ ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *name, char *err,
     }
 
     /* 通用名展开候选 → 逐个交给操作系统加载器（**只按内容判定**，不做后缀
-       检查）。记录第一个候选的 OS 错误文本用于诊断；全部失败时把试过的候选名
-       一起报出来（"找不到库"最常见的原因就是名字拼错/不在搜索路径上）。 */
+       检查）。两轮尝试：
+         ① 按名字（系统搜索路径：Windows 含 exe 目录与 PATH；Linux/macOS 是
+            ld.so 缓存与 LD_LIBRARY_PATH）；
+         ② 按 **可执行文件所在目录** 前缀——Linux/macOS 没有"exe 目录"这个默认
+            搜索项，而"库与程序放一起分发"是最常见的用法。放在第二轮而不是第一
+            轮：系统库优先，避免同目录同名文件劫持（安全默认）。
+       记录第一个 OS 错误文本用于诊断；全部失败时把试过的候选名一起报出来。 */
     char cand[FFI_CANDIDATE_MAX][FFI_CANDIDATE_LEN];
-    const size_t ncand = ffi_name_candidates(name, cand, FFI_CANDIDATE_MAX);
+    const size_t ncand = ffi_library_candidates(name, cand, FFI_CANDIDATE_MAX);
     void *h = NULL;
-    size_t tried = 0;
+    char hit[FFI_CANDIDATE_LEN * 2] = {0};
     char first_err[256] = {0};
     char tried_names[FFI_CANDIDATE_LEN * 2] = {0};
-    for (size_t i = 0; i < ncand; i++) {
-        tried = i + 1;
+    for (size_t i = 0; i < ncand && !h; i++) {
         size_t used = strlen(tried_names);
         snprintf(tried_names + used, sizeof(tried_names) - used, "%s%s",
                  used ? ", " : "", cand[i]);
-#ifdef _WIN32
-        h = (void *)LoadLibraryA(cand[i]);
-        if (h) break;
-        if (!first_err[0])
-            snprintf(first_err, sizeof(first_err), "LoadLibrary error %lu",
-                     (unsigned long)GetLastError());
-#else
-        h = dlopen(cand[i], RTLD_NOW | RTLD_LOCAL);
-        if (h) break;
-        if (!first_err[0]) {
-            const char *e = dlerror();
-            snprintf(first_err, sizeof(first_err), "%s",
-                     e ? e : "unknown dlopen error");
+        h = ffi_try_load(cand[i], first_err, sizeof(first_err));
+        if (h) snprintf(hit, sizeof(hit), "%s", cand[i]);
+    }
+    /* 第二轮：<可执行文件目录>/<候选>（仅相对名；绝对路径已由 as-is 命中）。
+       诊断保持紧凑：名字列表只报一次，第二轮用 "(+ <dir>/{same})" 概括。 */
+    char exe_note[FFI_CANDIDATE_LEN + 16] = {0};
+    if (!h && name[0] != '/' && !(name[0] && name[1] == ':')) {
+        char exe_dir[FFI_CANDIDATE_LEN] = {0};
+        if (ffi_exe_dir(exe_dir, sizeof(exe_dir))) {
+            snprintf(exe_note, sizeof(exe_note), " + %s/{same}", exe_dir);
+            for (size_t i = 0; i < ncand && !h; i++) {
+                char full[FFI_CANDIDATE_LEN * 2];
+                snprintf(full, sizeof(full), "%s/%s", exe_dir, cand[i]);
+                h = ffi_try_load(full, first_err, sizeof(first_err));
+                if (h) snprintf(hit, sizeof(hit), "%s", full);
+            }
         }
-#endif
     }
     if (!h) {
         ffi_set_err(err, ecap,
-                    "ffi: cannot load library '%s' (tried: %s; %s)", name,
-                    tried_names, first_err[0] ? first_err : "load failed");
+                    "ffi: cannot load library '%s' (tried: %s%s; %s)", name,
+                    tried_names, exe_note,
+                    first_err[0] ? first_err : "load failed");
         return NULL;
     }
     ffi_lib_t *lib = (ffi_lib_t *)allocator_new(alloc, &g_ffi_lib_class, 1);
@@ -182,7 +254,7 @@ ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *name, char *err,
     lib->alloc  = alloc;
     lib->handle = h;
     lib->is_process = false;
-    lib->path   = ffi_dup(alloc, cand[tried - 1]); /* 实际命中的那一个 */
+    lib->path   = ffi_dup(alloc, hit[0] ? hit : name); /* 实际命中的那一个 */
     lib->name   = ffi_dup(alloc, name);            /* 声明的通用名（序列化用） */
     if (!lib->path || !lib->name) {
 #ifdef _WIN32

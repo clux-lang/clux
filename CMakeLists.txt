@@ -34,6 +34,21 @@ add_subdirectory(third_party/icu)
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   add_subdirectory(third_party/libffi-port)
 endif()
+# M6 FFI：POSIX 用**系统 libffi**（Ubuntu: libffi-dev 提供 -lffi 与 ffi.h）。
+# 统一成同一个 FFI::ffi 目标，下游（clux_vm / 测试）不必区分来源：Windows 走
+# third_party 端口，Linux/macOS 走系统库，两者都带 CLUX_HAVE_LIBFFI=1。
+if(NOT TARGET FFI::ffi AND UNIX)
+  find_library(CLUX_LIBFFI_LIBRARY NAMES ffi libffi)
+  if(CLUX_LIBFFI_LIBRARY)
+    add_library(FFI::ffi INTERFACE IMPORTED)
+    set_target_properties(FFI::ffi PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${CLUX_LIBFFI_LIBRARY}"
+      INTERFACE_COMPILE_DEFINITIONS "CLUX_HAVE_LIBFFI=1")
+    message(STATUS "FFI: using system libffi: ${CLUX_LIBFFI_LIBRARY}")
+  else()
+    message(STATUS "FFI: system libffi not found (typed FFI calls disabled)")
+  endif()
+endif()
 
 add_executable(clux src/main.c)
 clux_target_warnings(clux)

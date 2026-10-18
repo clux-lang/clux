@@ -20,11 +20,16 @@ extern "C" {
  * （Phase 5）。因此库加载与符号解析路径可以先独立落地并测试。
  *
  * **输入是"通用库名"（generic name），不是文件名**（与 CMake 同名风格一致）：
- * 源码写 `extern lib libc from "c";`，本层按平台展开候选逐个尝试——
- * Windows `<name>.dll`；macOS `lib<name>.dylib` / `<name>.dylib` /
- * `lib<name>.so` / `<name>.so`；其它 `lib<name>.so` / `<name>.so`。
- * 第一个候选恒为 **as-is**：显式路径（`/usr/lib/libfoo.so`）、已带后缀的文件名、
- * 系统搜索路径上的裸文件名都直接命中（旧产物兼容）。
+ * 源码写 `extern lib libc from "c";`，本层把名字展开成一组候选文件名逐个尝试，
+ * 第一个能加载的就是它。候选表是**跨平台并集、不按 OS 分支**（见
+ * `ffi_library_candidates`）：`<name>`（as-is）、`<name>.dll`、`lib<name>.so`、
+ * `<name>.so`、`lib<name>.dylib`、`<name>.dylib`。扩展名只影响能否被当前加载器
+ * 装载，不影响语义——Windows 的 `LoadLibraryA("libfoo.so")` 能装载任何 PE，
+ * 因此 MinGW 产出的 `.so` 也能直接用。
+ *
+ * 装载分**两轮**：① 按名字（系统搜索路径）；② 按 `<可执行文件目录>/<候选>`
+ * 前缀——Linux/macOS 默认不搜索可执行文件目录，而"库与程序放一起分发"是最常见
+ * 的用法；第二轮排在后面，系统库优先，避免同目录同名文件劫持。
  *
  * **不做任何后缀判类**：`.dll`/`.so`/`.dylib` 只是名字；同名文件也可能是普通
  * 数据。错误一律由操作系统判定（如 ERROR_BAD_EXE_FORMAT），不由扩展名推断。
@@ -35,10 +40,26 @@ extern "C" {
 
 typedef struct ffi_lib_t ffi_lib_t; /* opaque：内部持 OS 句柄与路径副本 */
 
-/** 打开动态库（通用名 → 平台候选文件）。成功返回句柄（owned，须
+/** 打开动态库（通用名 → 候选文件，跨平台并集）。成功返回句柄（owned，须
  * ffi_lib_close），失败返回 NULL 并在 err 里列出试过的候选名。 */
 ffi_lib_t *ffi_lib_open(allocator_t *alloc, const char *name, char *err,
                         size_t ecap);
+
+/** 候选文件名表的最大条目数 / 单条最大长度（`ffi_library_candidates` 用）。 */
+#define FFI_LIB_CANDIDATE_MAX 8
+#define FFI_LIB_CANDIDATE_LEN 512
+
+/**
+ * 把通用库名展开成候选文件名（**跨平台并集，不按编译期 OS 分支**）：
+ *   `<name>`（as-is）、`<name>.dll`、`lib<name>.so`、`<name>.so`、
+ *   `lib<name>.dylib`、`<name>.dylib`
+ *
+ * 返回写入的条目数（≤ cap，≤ 6）。`out` 的每行是 NUL 终止的候选名，
+ * 调用方按顺序逐个尝试。导出它是为了**可测**：候选表是"跨平台"这一契约的
+ * 实体，测试直接断言顺序与内容，而不用靠"在某平台加载成功"间接推断。
+ */
+size_t ffi_library_candidates(const char *name, char out[][FFI_LIB_CANDIDATE_LEN],
+                              size_t cap);
 
 /** 解析符号（函数或数据）。失败返回 NULL 并写入 err。 */
 void *ffi_lib_sym(const ffi_lib_t *lib, const char *name, char *err, size_t ecap);

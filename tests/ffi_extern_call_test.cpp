@@ -32,6 +32,18 @@ void ffi_cfree(void *p) { std::free(p); }
 
 const char *kMod = "ffi_extern_mod";
 
+/* 各平台的系统 C 库 / 数学库（POSIX 上 sqrt 在 libm，不在 libc） */
+#if defined(_WIN32)
+const char *kSystemLib = "msvcrt.dll";
+const char *kMathLib = "msvcrt.dll";
+#elif defined(__APPLE__)
+const char *kSystemLib = "libSystem.B.dylib";
+const char *kMathLib = "libSystem.B.dylib";
+#else
+const char *kSystemLib = "libc.so.6";
+const char *kMathLib = "libm.so.6";
+#endif
+
 class FfiExternCallTest : public ::testing::Test {
  protected:
   allocator_t *alloc = nullptr;
@@ -44,8 +56,12 @@ class FfiExternCallTest : public ::testing::Test {
     bc = bcode_new(alloc);
 
     char err[256] = {0};
-    ffi_lib_t *lib = ffi_lib_open(alloc, "msvcrt.dll", err, sizeof(err));
+    ffi_lib_t *lib = ffi_lib_open(alloc, kSystemLib, err, sizeof(err));
     ASSERT_NE(lib, nullptr) << "err=" << err;
+    /* 数学符号（sqrt 等）在 glibc 里属于 libm，与 libc 分开；Windows/macOS 由
+       CRT/System 提供。这里挂成独立别名，测试用 "math::sqrt"。 */
+    ffi_lib_t *math = ffi_lib_open(alloc, kMathLib, err, sizeof(err));
+    ASSERT_NE(math, nullptr) << "err=" << err;
 
     /* 模块只承载库表：bc/scope/exports 传 NULL（module_destroy 均做空检查） */
     module_t *mod = module_new(alloc, nullptr, nullptr, nullptr, kMod);
@@ -53,6 +69,7 @@ class FfiExternCallTest : public ::testing::Test {
     mod->ffi_libs = strmap_new(alloc, /*owns_value=*/false);
     ASSERT_NE(mod->ffi_libs, nullptr);
     strmap_insert(mod->ffi_libs, alloc, "crt", lib);
+    strmap_insert(mod->ffi_libs, alloc, "math", math);
     vm_module_bind(vm, kMod, mod);
 
     /* 处理器据此（bc->module_path → vm->modules）找到本模块的库表 */
@@ -129,7 +146,7 @@ TEST_F(FfiExternCallTest, CallsSqrtThroughExternCall) {
   bcode_write_op(bc, BCODE_PUSH_F64);
   bcode_write_f64(bc, 9.0);
   bcode_write_op(bc, BCODE_EXTERN_CALL);
-  bcode_write_str(bc, STRSLICE_LIT("crt::sqrt"));
+  bcode_write_str(bc, STRSLICE_LIT("math::sqrt"));
   bcode_write_u32(bc, 1); /* argc */
   bcode_write_u32(bc, 4); /* ret_kind = F64 */
   bcode_write_op(bc, BCODE_HALT);

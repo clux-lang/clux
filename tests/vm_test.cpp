@@ -162,6 +162,10 @@ TEST_F(VmLifecycle, NestedScopes) {
 
 /* pop global scope 应 panic — panic 调用 abort()，用 EXPECT_DEATH 测试 */
 TEST_F(VmLifecycle, PopGlobalPanics) {
+    /* threadsafe 风格（fork + exec）：fast 风格在部分 POSIX 布局下会拿不到子进程的
+       stderr（前面的用例重定向过 stderr），报 "died but not with expected error"。
+       两种风格都验证同一条不变式：pop global scope 必须 panic，消息含固定文本。 */
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
     EXPECT_DEATH({
         vm->current_scope = vm->global_scope;
         vm_pop_scope(vm);

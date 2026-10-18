@@ -1,5 +1,7 @@
 #ifndef _H_CLUX_CORE_ALLOCATOR_
 #define _H_CLUX_CORE_ALLOCATOR_
+#include <stddef.h> /* size_t（Windows 的 CRT 头会传递引入，POSIX 不会） */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

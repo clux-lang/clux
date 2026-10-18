@@ -29,6 +29,17 @@ namespace {
 
 /* 只关心**声明期**的拒绝：诊断出现在编译阶段（driver_run_file 返回 1）。
    这些声明引用的 C 符号不存在，但类型约束先于 dlsym 解析失败。 */
+#if defined(_WIN32)
+const char *kSystemLib = "msvcrt.dll";
+const char *kTestLib = "clux_ffi_testdata.dll";
+#elif defined(__APPLE__)
+const char *kSystemLib = "libSystem.B.dylib";
+const char *kTestLib = "libclux_ffi_testdata.dylib";
+#else
+const char *kSystemLib = "libc.so.6";
+const char *kTestLib = "libclux_ffi_testdata.so";
+#endif
+
 const char *kPrelude = "extern lib libc from \"*\";\n";
 
 } // namespace
@@ -88,9 +99,9 @@ TEST(DriverFfiOwn, RefAndFatalPointersAreStillAccepted) {
      注：`extern lib <别名> from "*"` 这类**通配库**在加载期就解析全部声明符号，所以正例必须
      挂真实库（惰性解析只对具体库路径生效）。 */
   std::string path = write_temp_file(
-      "extern lib crt from \"msvcrt.dll\";\n"
-      "extern cfunc crt::strlen(p: ref *u8): u64;\n"
-      "extern lib td from \"clux_ffi_testdata.dll\";\n"
+      std::string("extern lib crt from \"") + kSystemLib + "\";\n" +
+      "extern cfunc crt::strlen(p: ref *u8): u64;\n" +
+      std::string("extern lib td from \"") + kTestLib + "\";\n" +
       "extern cfunc td::clux_first_i32(p: fatal *i32): i32;\n"
       "func main(): i32 {\n"
       "  var s: str = \"hello\";\n"
@@ -107,8 +118,9 @@ TEST(DriverFfiOwn, PlainStructIsStillAccepted) {
   /* 不含 own 的平凡 struct 按值跨 C ABI 依旧合法（布局 1:1）——真调用测试库的
      `clux_point_sum(CluxPoint)` 验证。 */
   std::string path = write_temp_file(
-      "struct Point { x: i32; y: i32 }\n"
-      "extern lib td from \"clux_ffi_testdata.dll\";\n"
+      std::string("struct Point { x: i32; y: i32 }\n"
+                  "extern lib td from \"") +
+          kTestLib + "\";\n" +
       "extern cfunc td::clux_point_sum(p: Point): i32;\n"
       "extern cfunc td::clux_point_make(x: i32, y: i32): Point;\n"
       "func main(): i32 {\n"

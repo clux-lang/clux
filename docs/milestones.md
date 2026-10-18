@@ -1747,3 +1747,45 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `include/vm/ffi_lib.h` 的契约注释。
     - 验证：全量重编 **0 告警**；**2098/2098 PASSED**；`examples` 45/45（run 与
       emit→run 均通过）；`.cxs` 样本 5/5。
+
+79. **FFI 库解析跨平台化：候选并集 + exe 目录回退 + Linux/WSL 实跑**（2026-10）
+    - **用户反馈**：①"当前环境有 WSL，可以试下 linux 的 so 支持"；②"windows 上 so
+      也需要支持（不直接区分操作系统）"。
+    - **候选表改成跨平台并集**（`ffi_library_candidates`，`vm/ffi_lib.c`）——不再按
+      编译期 OS 分支：
+      `<name>`（as-is）、`<name>.dll`、`lib<name>.so`、`<name>.so`、
+      `lib<name>.dylib`、`<name>.dylib`。
+      判据是"当前加载器能否装载"，不是扩展名：Windows 的 `LoadLibraryA("x.so")`
+      能装载**任何** PE（扩展名不参与判定），MinGW/MSYS 产出的 `.so` 因此可直接
+      用；Linux 上 `dlopen("x.dll")` 只是一次失败的 open。同一份 `.cxb` 搬到另一
+      个平台无需改名字（容器里存的就是通用名）。
+    - **装载两轮**：① 按名字（系统搜索路径）；② `<可执行文件目录>/<候选>`——
+      Linux/macOS 默认**不**搜索 exe 目录，而"库与程序放一起分发"是最常见的用法。
+      第二轮排在后面：系统库优先，避免同目录同名文件劫持（安全默认）。
+      诊断保持紧凑：名字候选列一次，第二轮用 `(+ <exe 目录>/{same})` 概括。
+    - **测试**：`tests/ffi_lib_test.cpp` 新增 `CandidatesArePlatformAgnosticUnion`
+      （断言 6 条候选的顺序与内容、显式路径排第一、cap 截断）与
+      `WindowsLoadsSoNamedPeThroughCandidateUnion`（把测试 DLL 复制成
+      `lib<名字>.so`，用通用名打开 → 命中的正是 `.so` 候选，符号可解析）。
+    - **Linux/WSL 实测**（WSL2 Ubuntu 26.04 / gcc 15 / CMake 4.2）——期间修掉三处
+      **既有的 POSIX 可移植性缺口**（此前只在 Windows 构建过）：
+      1. `include/core/allocator.h` 用 `size_t` 却没包含 `<stddef.h>`（Windows CRT
+         头传递引入，POSIX 不引）；
+      2. `src/vm/ffi_lib.c` 用 `va_list` 却没包含 `<stdarg.h>`；
+      3. `CMakeLists.txt` 在 POSIX 上没接 libffi：新增 `find_library(ffi)` 并把它
+         封装成同一个 `FFI::ffi` 目标（带 `CLUX_HAVE_LIBFFI=1`），Windows 仍走
+         `third_party/libffi-port`。
+      ICU 源码复用 Windows 侧 `build/_deps` 缓存（WSL 到 GitHub 不可达），
+      以 `FETCHCONTENT_FULLY_DISCONNECTED=ON` 离线配置。
+    - **顺带修掉的测试可移植性**（Linux 实测暴露，均为既有问题）：
+      `ffi_lib_test` 的 sqrt/pow 改用平台数学库（glibc 的 libm）；
+      `ffi_extern_call_test` / `driver_ffi_own_test` 的系统库与测试库名改为平台常量；
+      `ffi_process_test` 里依赖 Windows CRT 数据符号（`_fmode`）的两例在 POSIX 上
+      `GTEST_SKIP`（程序体的数据符号段也只在 Windows 拼入）；
+      `VmLifecycle.PopGlobalPanics` 的死亡测试改用 threadsafe 风格（fast 风格在
+      POSIX 上会拿不到子进程 stderr）。
+    - 验证：Windows 全量 **2100/2100**；WSL2 Ubuntu 26.04 构建 **0 告警**、
+      全量 **2097 passed / 2 skipped**（跳过项即上面两个 Windows CRT 数据符号用例）。
+      `libclux_ffi_testdata.so` 由通用名 `"clux_ffi_testdata"` 命中候选
+      `libclux_ffi_testdata.so`（走 exe 目录回退，未设 `LD_LIBRARY_PATH`）；
+      libffi 走系统库（`-- FFI: using system libffi: libffi.so`）。
