@@ -484,6 +484,12 @@ func <name>(<params>):<return_type> { ... }  // 具名（名字仅作显示名�
   定义点（局部函数/字面量）`MAKE_FUNCTION <fid>` 按基底实例化独立新实例
 - 函数定义每次求值生成**独立新实例**（共享基底 entry_pc/id/type/name，独立
   `closure_scope`）——循环内多个闭包捕获互不干扰；hoist 区基底对全局函数即最终实例
+- **预扫描的覆盖面是运行期正确性前提**：字面量可出现在**任意表达式位置**
+  （`new T{ .f = func… }`、`make(T, N, func…)`、`move(...)`、数组/元组/结构体构造、
+  切片与下标、三元…）。预扫描因此不手写"哪些字段是子节点"的 switch，而是复用共享
+  AST 遍历器（`src/parser/ast_walk.c`）。漏掉一种节点 ⇒ 该处的字面量不进 hoist 区
+  ⇒ 定义点 `MAKE_FUNCTION <fid>` 在 `functions_by_id` 里查不到 ⇒ 运行期
+  `exec: unknown function id`（历史缺陷：`move(...)` 与 `new T{…}` 各漏过一次）。
 
 #### 4.1.2 闭包（捕获列表）
 

@@ -1,34 +1,19 @@
 #include "compiler/compiler.h"
 #include "core/panic.h"
-#include "parser/ast_alignof.h"
-#include "parser/ast_array.h"
 #include "parser/ast_assign.h"
-#include "parser/ast_binary.h"
 #include "parser/ast_block.h"
-#include "parser/ast_call.h"
-#include "parser/ast_const.h"
-#include "parser/ast_construct.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
 #include "parser/ast_func_def.h"
-#include "parser/ast_func_type.h"
 #include "parser/ast_if.h"
-#include "parser/ast_index.h"
-#include "parser/ast_is_tag.h"
-#include "parser/ast_member.h"
-#include "parser/ast_move.h"
 #include "parser/ast_program.h"
 #include "parser/ast_return.h"
-#include "parser/ast_sizeof.h"
 #include "parser/ast_switch.h"
-#include "parser/ast_ternary.h"
-#include "parser/ast_typeof.h"
 #include "parser/ast_type_def.h"
-#include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
-#include "parser/ast_volatile.h"
+#include "parser/ast_walk.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
 
@@ -107,7 +92,10 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
    函数对象时分配，单一来源）、追加 funcs_all 队列（fid 序）。comptime func
    不入队列（不进入运行时）；其 body 由 prescan_func_body 无条件递归——body
    内嵌套函数/字面量会被 comptime 调用点折叠产物（LOAD_FUNCTION <fid>）引用，
-   必须收集构造。 */
+   必须收集构造。
+   **幂等**：同一 AST_FUNC_DEF 只入队一次。遍历器统一驱动后，同一节点可能被
+   多条路径到达（sema 生成的销毁序列会复用 operand 子树），重复入队会让 hoist
+   区为同一个 fid 构造两个基底对象。 */
 static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
   if (fn->is_comptime) return;
   /* M6 FFI：extern cfunc 声明**无体**（符号由 driver 用 dlsym 解析）——不进运行时
@@ -119,6 +107,10 @@ static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
             (int)fn->name.len, fn->name.ptr);
     return;
   }
+  size_t n = vec_len(c->funcs_all);
+  for (size_t i = 0; i < n; i++) {
+    if (vec_get(c->funcs_all, i) == (const void *)fn) return; /* 已收集 */
+  }
   vec_push(c->funcs_all, c->alloc, fn);
 }
 
@@ -127,6 +119,20 @@ static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
 static void prescan_expr(compiler_t *c, ast_node_t *n);
 static void prescan_stmt(compiler_t *c, ast_node_t *n);
 static void prescan_block(compiler_t *c, ast_block_t *b);
+static void prescan_func_body(compiler_t *c, ast_func_def_t *fn);
+
+/* 表达式预扫描的 visit 回调：收集函数字面量并**显式下钻其函数体**。
+ * 遍历器不进入函数体（AST_FUNC_DEF 对它是叶子），所以体内嵌套的函数/字面量
+ * 要靠这里递归 prescan_func_body 补齐。 */
+static ast_walk_action_t prescan_expr_visit(ast_node_t *n, void *user) {
+  compiler_t *c = (compiler_t *)user;
+  if (n && n->kind == AST_FUNC_DEF) {
+    ast_func_def_t *fn = (ast_func_def_t *)n;
+    prescan_func(c, fn);
+    prescan_func_body(c, fn);
+  }
+  return AST_WALK_CONTINUE;
+}
 
 /* 函数体：body（块）+ return_expr（类型表达式，不含函数定义——类型槽位
    是 AST_TYPE_REF/内建名；函数类型 func(...)->T 是 AST_FUNC_TYPE，非定义）。
@@ -242,85 +248,16 @@ static void prescan_block(compiler_t *c, ast_block_t *b) {
 
 static void prescan_expr(compiler_t *c, ast_node_t *n) {
   if (!n) return;
-  switch (n->kind) {
-    case AST_BINARY:
-      prescan_expr(c, ((ast_binary_t *)n)->lhs);
-      prescan_expr(c, ((ast_binary_t *)n)->rhs);
-      break;
-    case AST_UNARY:
-      prescan_expr(c, ((ast_unary_t *)n)->operand);
-      break;
-    /* move(x) / clone(x)：**必须下钻 operand**——闭包字面量（AST_FUNC_DEF）
-       可能就包在这里（`var f = move(func |...| ...)`）。原先漏了这个分支，
-       导致 move/clone 内的函数字面量从未被收集进 funcs_all：hoist 区不构造
-       基底对象，定义点的 `MAKE_FUNCTION <fid>` 查不到基底 → 运行期
-       "exec: unknown function id"。 */
-    case AST_MOVE:
-      prescan_expr(c, ((ast_move_t *)n)->operand);
-      break;
-    case AST_IS_TAG:
-      prescan_expr(c, ((ast_is_tag_t *)n)->object);
-      break;
-    case AST_CALL: {
-      ast_call_t *cl = (ast_call_t *)n;
-      prescan_expr(c, cl->callee);
-      for (ast_node_t *a = cl->args; a; a = a->next) prescan_expr(c, a);
-      break;
-    }
-    case AST_MEMBER:
-      prescan_expr(c, ((ast_member_t *)n)->object);
-      break;
-    case AST_INDEX:
-      prescan_expr(c, ((ast_index_t *)n)->object);
-      for (ast_node_t *i = ((ast_index_t *)n)->indices; i; i = i->next)
-        prescan_expr(c, i);
-      break;
-    case AST_ARRAY:
-      prescan_expr(c, ((ast_array_t *)n)->base_type);
-      prescan_expr(c, ((ast_array_t *)n)->length);
-      break;
-    case AST_CONSTRUCT:
-      prescan_expr(c, ((ast_construct_t *)n)->type);
-      for (ast_node_t *f = ((ast_construct_t *)n)->fields; f; f = f->next)
-        prescan_expr(c, f);
-      break;
-    case AST_CONST:
-      prescan_expr(c, ((ast_const_t *)n)->sub);
-      break;
-    case AST_VOLATILE:
-      prescan_expr(c, ((ast_volatile_t *)n)->sub);
-      break;
-    case AST_SIZEOF:
-      prescan_expr(c, ((ast_sizeof_t *)n)->operand);
-      break;
-    case AST_ALIGNOF:
-      prescan_expr(c, ((ast_alignof_t *)n)->operand);
-      break;
-    case AST_TYPEOF:
-      prescan_expr(c, ((ast_typeof_t *)n)->operand);
-      break;
-    case AST_FUNC_TYPE:
-      for (ast_node_t *p = ((ast_func_type_t *)n)->params; p; p = p->next)
-        prescan_expr(c, p);
-      prescan_expr(c, ((ast_func_type_t *)n)->return_type);
-      break;
-    case AST_TERNARY: {
-      ast_ternary_t *t = (ast_ternary_t *)n;
-      prescan_expr(c, t->cond);
-      prescan_expr(c, t->then_branch);
-      prescan_expr(c, t->else_branch);
-      break;
-    }
-    case AST_FUNC_DEF: {
-      /* 函数字面量（表达式内函数值）：收集 + 递归 body */
-      ast_func_def_t *fn = (ast_func_def_t *)n;
-      prescan_func(c, fn);
-      prescan_func_body(c, fn);
-      break;
-    }
-    default:
-      break; /* 叶子节点（字面量/标识符/引用/类型引用）无函数定义 */
-  }
+  /* **不再手写"哪些字段是子节点"的 switch**——那是一次又一次的运行期
+   * `exec: unknown function id`：函数字面量没被收集 → hoist 注册区不构造基底
+   * 对象 → 定义点 `MAKE_FUNCTION <fid>` 在 functions_by_id 里查不到。
+   *   历史：`AST_MOVE` 漏过一次（`var f = move(func|…|…)`），`AST_NEW` 又漏过
+   *   一次（`new Box{ .cb = func(){…} }` —— 字段链从未被下钻）。
+   * "哪些字段是子节点"是 AST 的结构事实，唯一来源是共享遍历器
+   * （src/parser/ast_walk.c）：它覆盖全部表达式/类型表达式的直接子节点，链式
+   * 字段（字段表/实参表/下标表…）逐项展开。**函数体不在其中**（AST_FUNC_DEF
+   * 对遍历器是叶子，避免它越界进入另一套语句层语义），由 visit 回调显式下钻。 */
+  ast_walk_preorder(n, prescan_expr_visit, c);
 }
 
 /**
