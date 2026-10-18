@@ -343,6 +343,10 @@ int bcode_graph_asm_parse(allocator_t *alloc, const char *text, size_t len,
     /* 先切段：指令行只出现在行首（无反汇编缩进），因此按行首关键字切分 */
     asm_section_t *secs = NULL;
     size_t nsec = 0, cap = 0;
+    /* 模块映像表：声明在跳转标签之前（fail 路径统一经 bcode_graph_free 释放，
+       未分配时为 NULL —— 此前 fail 路径既不释放该数组、也不释放循环内新建的
+       import_path，`asm: module N failed to assemble` 会报两条内存泄漏） */
+    bcode_module_image_t *mods = NULL;
     const char *p = text;
     const char *end = text + len;
 
@@ -485,7 +489,7 @@ int bcode_graph_asm_parse(allocator_t *alloc, const char *text, size_t len,
     }
 
     /* 组装图：入口 = 第一段 path 为空者（裸 MODULE / 单模块默认） */
-    bcode_module_image_t *mods = (bcode_module_image_t *)allocator_new_ex(
+    mods = (bcode_module_image_t *)allocator_new_ex(
         alloc, "clux.vm.graph.mods", sizeof(bcode_module_image_t) * nsec, NULL,
         NULL, NULL, 1);
     if (!mods) goto oom;
@@ -494,7 +498,10 @@ int bcode_graph_asm_parse(allocator_t *alloc, const char *text, size_t len,
     size_t entry = (size_t)-1;
     for (size_t i = 0; i < nsec; i++) {
         asm_section_t *s = &secs[i];
+        /* 所有权转移：段持有者交棒给模块映像，段侧置 NULL（fail 路径只按
+           mods 释放，不重复释放） */
         char *path = s->path;
+        s->path = NULL;
         if (!path) {
             path = (char *)allocator_new_ex(alloc, "clux.vm.graph.path", 1, NULL,
                                             NULL, NULL, 1);
@@ -550,6 +557,18 @@ int bcode_graph_asm_parse(allocator_t *alloc, const char *text, size_t len,
 oom:
     fprintf(stderr, "asm: out of memory\n");
 fail:
+    /* 已建好的模块映像（含 import_path / 导数表 / FFI 表 / 已组装的字节码）：
+       交给 bcode_graph_free 统一释放，避免部分构建产物泄漏。secs 侧转移过的
+       字段均已置 NULL，不会重复释放。 */
+    if (mods) {
+        bcode_graph_t partial;
+        bcode_graph_init(&partial);
+        partial.alloc = alloc;
+        partial.modules = mods;
+        partial.count = nsec;
+        bcode_graph_free(&partial);
+        mods = NULL;
+    }
     if (secs) {
         for (size_t i = 0; i < nsec; i++) {
             if (secs[i].code.data) allocator_free(alloc, (void **)&secs[i].code.data);

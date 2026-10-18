@@ -1,6 +1,8 @@
 ; factorial.cxs - 递归求阶乘（fact(10) = 3628800）
 ; 类型提升区（hoist 两遍扫描）：pass 1 声明全部签名（fact id 64 / main id 65），
 ; pass 2 定义 + SEAL 封闭（依赖后序）；引导段 LOAD_TYPE 拉回签名注册函数
+externlib "*" as libc
+
 _start:
     ; pass 1 声明所有类型
     push_func_type
@@ -59,12 +61,11 @@ rec:
     ret
 main:
     push_scope
-    push "printf"
     push_string "fact(10) = %d\n"
     push "fact"
     push_i32 10
     call 1
-    call 2
+    extern_call "libc::printf" 2 65792
     pop
     pop_scope
     push_undefined

@@ -483,6 +483,11 @@ clux bc disasm <file.cxb>   [-o PATH]   # .cxb → .cxs 汇编文本
 3. **函数体区**：各函数体以 `RET` 结尾，入口由 `PUSH_FUNCTION` 记录的 pc 进入；
    函数体头部按**倒序** `PUSH_UNDEFINED; DEFINE "param"` 绑定参数（调用时实参按序
    压栈，栈顶是最后一个参数）。
+4. **调用外部函数必须走 FFI**（M6 起 `printf` 等不再是内建）：文件顶部写
+   `externlib "<库路径>" as <别名>`（`"*"` = 进程自身符号），调用点写
+   `EXTERN_CALL "<别名>::<符号>" <argc> <packed>`，`packed = 返回类型码 | 变参 << 8 |
+   固定参数个数 << 16`——`printf` 恒为 `65792`。老写法 `PUSH "printf"; CALL N` 会
+   在运行期报 `exec: undefined variable`（`examples/asm/*.cxs` 曾因此全部失效）。
 
 ---
 

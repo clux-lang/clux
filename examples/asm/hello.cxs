@@ -1,6 +1,13 @@
 ; hello.cxs - 最小可运行示例：打印一行字符串
 ; 类型提升区（hoist 两遍扫描）：pass 1 声明 main 签名（开放对象登记 id 64），
 ; pass 2 定义（设返回类型 + SEAL 封闭）；引导段 _start 注册 main，再由虚拟机调用 main
+;
+; 输出走 M6 FFI：`externlib "*" as libc` 声明库表（别名 → 进程自身），
+; `extern_call "libc::printf" <argc> <packed>` 调用（printf 自 M6 起不再是内建，
+; 老写法 `push "printf"; call N` 会运行期报 undefined variable）。
+; packed = 返回 void(0) | 变参(<<8) | 固定参数个数(<<16)，故 printf 恒为 65792。
+externlib "*" as libc
+
 _start:
     ; pass 1 声明所有类型
     push_func_type
@@ -20,9 +27,8 @@ _start:
     halt
 main:
     push_scope
-    push "printf"
     push_string "hello, clux\n"
-    call 1
+    extern_call "libc::printf" 1 65792
     pop
     pop_scope
     push_undefined

@@ -1631,3 +1631,48 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 验证：强制全量重编（touch 全部 src/include/tests）**190 步 / 0 告警 / 0 错误**；
       全量 **1749/1749 PASSED / 0 FAILED**、无 `memory leak` 报告；示例 **45/45** `run`
       与 45/45 `emit → run .cxb`、format 幂等 **47/47**（`fmt(fmt(x)) == fmt(x)`）。
+75. **语义收紧：类型不是运行期值（`var` 不能接收类型）+ `type T = typeof(a)` 可用**（2026-10）
+    - **起点是一个崩溃**：`var ty = typeof(a);` 后 `sizeof(ty)` → `0xC0000005`。
+      `ex_sizeof_alignof` 用 `value_is_type(op, TYPE_KIND_TYPE)` 判"是不是 type value"，
+      但**类型为 `type` 的变量读出来是 shadow（data = NULL）**，`value_as` 解引用空指针。
+    - **口径（用户确认）**：`typeof` 返回的是**类型**，类型不能由 `var` 接收——
+      绑类型只有 `type`：`type Ty = typeof(a);`。`var t = i32;` / `var t = <i32,i32>;`
+      同理拒绝（``cannot initialize 't' with a type value … bind it with `type <name> = <type expr>` ``）。类型表达式仍可用于**类型位置**（`type` 右值、
+      类型标注、cast 目标、`sizeof`/`alignof`/`typeof` 的操作数）与类型计算。
+    - **连带修好两处**（否则正确写法也跑不通）：
+      ① `type T = typeof(a)` 曾被 type-rhs 预检误报 `'a' is a variable, not a type`
+      （预检错误地下钻 typeof/sizeof/alignof 的**表达式**操作数）→ 新增
+      `AST_WALK_SKIP_CHILDREN` 遍历动作，预检对这三者不下钻；
+      ② 局部 type def 提升到块入口求值时，同块 `var a` 尚未激活 →
+      `ctfe: cannot determine operand type`；`ctfe_operand_type` 增加"按声明查找"
+      回退（并给 `sema_eval_type_def` 传 `sema_scope`）。
+    - **防御**：新增 `value_is_type_value()`（要求 data 非空），`sizeof`/`alignof`/
+      `typeof`/`const`/`volatile` 一律用它判类型实体——即使未来放开某条 shadow 路径
+      也不会再空指针解引用。
+    - **测试**：`SemaTest.TypeValueNotBindableToVar` / `…Literal`、
+      `SemaTest.TypeAliasChainViaTypeDecl`、`SemaTest.TypeDefRhsTypeofLocalVar`、
+      `SemaTest.SizeofTypeofOperandIsUsize`、`SemaTest.TypeExpressionsInTypePosition`、
+      `SemaTest.TypeExpressionNotBindableToVar`、
+      `Driver.RunFileTypeDefTypeValueRejectedInVarInit`、
+      `Driver.RunFileTypeDefRhsTypeofLocalVarPasses`、
+      `Driver.RunFileTypeValueInVarInitRejectedWithHint`、
+      `Driver.RunFileTypeExpressionsInTypePositionPass`、
+      `Driver.RunFileTypeExpressionInVarInitRejected`（4 种类型表达式逐个验）；
+      原先编码"类型可绑进变量"的 6 个测试按新语义重写。
+    - **文档**：`m2-design.md` §8 增补口径；`repro/sema-defects/README.md` D 段更正。
+76. **`.cxs` 手写样本复活：FFI 声明 + `bc asm` 失败路径泄漏**（2026-10）
+    - **现象**：`examples/asm/*.cxs` 5 个样本全部"能汇编、运行报
+      `exec: undefined variable`"——printf 自 M6 起不再是内建，样本却仍写
+      `push "printf"; call N`。它们恰好是"手写汇编怎么调外部函数"的唯一示例。
+    - **修复**：样本改用 `externlib "*" as libc` + `extern_call "libc::printf"
+      <argc> 65792`（文本格式早已支持 `externlib` 行，只是样本没跟上）；`hello.cxs`
+      头部补充 packed 编码说明。
+    - **顺带**：`bcode_graph_asm_parse` 的失败路径漏释放两处——模块映像表
+      `clux.vm.graph.mods` 与循环内新建的入口 `import_path`（`clux.vm.graph.path`）。
+      改为把 `import_path` 所有权移交模块映像、失败时交 `bcode_graph_free` 统一释放。
+    - **测试（此前 `.cxs → 图` 零覆盖）**：新增 `tests/bcode_graph_text_test.cpp`
+      （解析 externlib / 往返保留 `externlib` 行 / 失败不泄漏 / 坏 `externlib` 行拒绝）、
+      `tests/asm_examples_test.cpp`（5 个样本逐个 `asm → run`，并结构性断言不再出现
+      内建 printf 写法）。
+    - 验证：全量 **2081/2081 PASSED / 0 FAILED**；`examples` 入口 45/45、`.cxs` 5/5
+      均可运行并输出预期结果。

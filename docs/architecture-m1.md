@@ -1399,14 +1399,14 @@ clang: error: no such file or directory: '<build>/third_party/icu/icu_data_gen.c
 ## 5. 测试策略
 
 - **单元测试**：Lexer、Parser、Sema、VM（type/vtable/value/scope/function）、字节码（容器 / 汇编 / 反汇编 / 序列化）、核心容器（allocator / vec / string / 映射 / stream）各模块独立测试
-- **集成测试**：`.cx` 程序端到端执行（经 `driver_run_file`）并比对输出；`.cxs → .cxb → .cxs → .cxb` 往返字节级稳定。`foreach` 的输出断言例外地**spawn CLI**（`clux run`，见 `tests/foreach_test.cpp`）——程序的 `libc::printf` 解析到系统 CRT，与测试进程 CRT 不是同一实例，进程内 fd 重定向抓不到它。
+- **集成测试**：`.cx` 程序端到端执行（经 `driver_run_file`）并比对输出；`.cxs → .cxb → .cxs → .cxb` 往返字节级稳定。`foreach` 的输出断言例外地**spawn CLI**（`clux run`，见 `tests/foreach_test.cpp`）——程序的 `libc::printf` 解析到系统 CRT，与测试进程 CRT 不是同一实例，进程内 fd 重定向抓不到它。`examples/asm/*.cxs` 由 `tests/asm_examples_test.cpp` 逐个 `driver_asm_to_bin → driver_run_bin`（失败即回归：M6 删内建 printf 后这些样本曾全部失效）；`.cxs` 文本形态的解析/渲染由 `tests/bcode_graph_text_test.cpp` 覆盖（含 `externlib` 行与失败路径不泄漏）。
 
 **当前规模**（2026-10 实测，Windows / clang 22.1.8 / Debug）：
 
 | 项目 | 结果 |
 |------|------|
-| 注册测试数 | 2067 |
-| `clux_test` 通过 | 2067 / 2067 |
+| 注册测试数 | 2081 |
+| `clux_test` 通过 | 2081 / 2081 |
 | `examples/*/*.cx` 入口示例 | 45 / 45 通过（手工全量 sweep） |
 | `examples/asm/*.cxs` | 5 / 5 通过 |
 

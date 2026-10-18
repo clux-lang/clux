@@ -1,5 +1,7 @@
 ; loop.cxs - while 风格循环：累加 1..10
 ; 类型提升区（hoist 两遍扫描）：pass 1 声明 main 签名，pass 2 定义 + SEAL 封闭
+externlib "*" as libc
+
 _start:
     ; pass 1 声明所有类型
     push_func_type
@@ -41,10 +43,9 @@ loop:
         store "i"
         jmp [loop]
 end:
-    push "printf"
     push_string "sum(1..10) = %d\n"
     push "sum"
-    call 2
+    extern_call "libc::printf" 2 65792
     pop
     push_undefined
     ret
