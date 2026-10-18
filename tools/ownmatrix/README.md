@@ -102,8 +102,13 @@ python tools/ownmatrix/run_matrix.py
 
 1. **`cunion` 不参与所有权运算**（设计如此，2026-10）：成员**可以是指针/切片**
    （类型层限制已放开），但无 tag → 不生成销毁序列、不产 FATAL、
-   `type_has_own_slots(cunion)` 恒 false；`new` 放进去的堆块生命周期由开发者
-   自负（与 C union 语义一致），后续如何管理暂缓。
+   `type_has_own_slots(cunion)` 恒 false。指针成员的释放途径见下条
+   （`_ = move(c.p)`）。
+2. **union / cunion 成员 move 豁免**（2026-10）：“局部 = 整体”的内存布局让
+   `move(u.a)` / `_ = move(c.p)` 合法——整体进 TDZ，作用域退出不再销毁整体。
+   这是 **cunion 指针成员的官方释放途径**（无 tag、不自动销毁）。经指针
+   （`p.a`）或嵌套结构（`s.u.a`）仍拒绝（整体 TDZ 会泄漏堆块/漏掉兄弟 own
+   槽位）。配套修了“move 后重新赋值”的二次释放（`STORE_REINIT`）。
 2. `clone` 只深拷贝 own 槽位（切片缓冲区总是深拷贝，元素按槽位所有权决定是否
    递归克隆），ref 槽位保持借用指针——与销毁序列同一套规则。
 3. **clone 已扁平化**（2026-10）：`clone(x)` 由 sema 在编译期展开为构造 / NEW /

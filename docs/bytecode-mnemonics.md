@@ -77,7 +77,8 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
 | `PUSH` | `STR` | 按名字在 scope 链查找并压**借用引用**（不 clone、不转移所有权）。 |
-| `STORE` | `STR` | `dst = scope_lookup(name)`，`value_assign(dst, pop())` → 压回结果引用。 |
+| `STORE` | `STR` | `dst = scope_lookup(name)`，`value_assign(dst, pop())` → 压回结果引用（深语义：先释放 dst 旧值内嵌 own 块再拷贝）。 |
+| `STORE_REINIT` | `STR` | **重新初始化已 move（TDZ）的变量**（R2 恢复）：旧内容所有权已随 move 转移，只做 `implicit_cast + memcpy`（C 后端 `x = v;`），**不释放旧值**（否则二次释放 → 0xC0000005）→ 压回结果引用。 |
 | `STORE_NIL` | `STR` | `?T` 变量置 none：查找变量 → 置 `ok=false` → 压回 dst（**只置 tag**，不释放/清零 value 字段）。 |
 | `PUSH_STRING` | `STR` | 压字符串字面量借用引用。 |
 | `PUSH_VALUE` | `U32`（offset） | 压 `stack[sp-1-offset]` 的借用引用（offset=0 即 dup 栈顶；深层取址）。 |

@@ -3557,6 +3557,54 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
                                    ot->kind == TYPE_KIND_SLICE ||
                                    type_has_own_slots(ot));
 
+      /* ---- union / cunion 成员 move 豁免（2026-10）----
+         union / cunion 的成员与整体**共享同一块内存布局**（cunion 全 offset 0；
+         tag union 的 payload 共用 payload 区）——"局部 = 整体"。move 成员就是把
+         整体交出去：整体进 TDZ 既没有"per-field TDZ 无法记录"的问题，也是
+         **cunion 指针成员的唯一释放途径**（`_ = move(c.p)`）。
+
+         约束（只对**直接变量根**成立，见下）：
+           - 根必须是 `ast_member.object` 直接是变量标识符（`u.a`）——经指针
+             （`p.a`，sema 已改写为 `p.*.a`）或嵌套结构（`s.u.a`）时，整体 TDZ 会
+             跳过其他 own 槽位/堆块的销毁 → 泄漏，故不豁免（保持"字段不可 move"）；
+           - tag union：member 槽位所有权必须是 **OWN**（ref payload 是借用，不能
+             转移）；cunion：成员类型含资源（指针/切片/含 own 槽位聚合）即可
+             （cunion 不参与所有权运算，槽位所有权恒 NONE）；
+           - 根变量有**存活借用**时拒绝（与整体 move 同一 R3 规则）。 */
+      sema_symbol_t *union_root = NULL;
+      strslice_t union_root_name = STRSLICE_EMPTY;
+      if (!is_clone && n->operand->kind == AST_MEMBER) {
+        ast_member_t *m = (ast_member_t *)n->operand;
+        if (m->object && m->object->kind == AST_IDENT) {
+          sema_symbol_t *s =
+              sema_lookup(scope, ((ast_ident_t *)m->object)->name);
+          const type_t *bt =
+              s && s->kind == SEMA_SYM_VAR && s->type
+                  ? type_strip_quals(s->type)
+                  : NULL;
+          if (bt && bt->kind == TYPE_KIND_UNION) {
+            int mi = union_type_find_member(bt, m->field);
+            const union_member_t *mm =
+                mi >= 0 ? union_type_member(bt, (size_t)mi) : NULL;
+            if (mm && mm->payload_type && mm->ownership == OWN_OWN) {
+              union_root = s;
+              union_root_name = ((ast_ident_t *)m->object)->name;
+            }
+          } else if (bt && bt->kind == TYPE_KIND_CUNION) {
+            int mi = cunion_type_find_member(bt, m->field);
+            const cunion_member_t *mm =
+                mi >= 0 ? cunion_type_member(bt, (size_t)mi) : NULL;
+            const type_t *mt = mm ? type_strip_quals(mm->type) : NULL;
+            if (mt && (mt->kind == TYPE_KIND_PTR ||
+                       mt->kind == TYPE_KIND_SLICE ||
+                       type_has_own_slots(mt))) {
+              union_root = s;
+              union_root_name = ((ast_ident_t *)m->object)->name;
+            }
+          }
+        }
+      }
+
       /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
          TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有
          "局部 TDZ"：`move(s.p)` 把值/资源从字段里掏走，却没有任何地方记录
@@ -3567,8 +3615,9 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          `move(p.x)`（标量字段）整条漏掉（实测放行）。所以这里独立判断
          "操作数是不是字段/元素访问"。
 
+         **union / cunion 成员豁免**（见上）：布局局部 = 整体，整体进 TDZ。
          `clone` 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone &&
+      if (!is_clone && !union_root &&
           (n->operand->kind == AST_MEMBER || n->operand->kind == AST_INDEX)) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "cannot move a struct/aggregate field or element "
@@ -3583,7 +3632,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          ref 返回、解引用读到的被指向内容）都不拥有堆块——move 它只会把借用
          当所有权，销毁时 free 借用源（实测 0xC0000005）。
          clone 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone && produces_fatal &&
+      if (!is_clone && !union_root && produces_fatal &&
           value_ownership(operand) != OWN_OWN &&
           value_ownership(operand) != OWN_FATAL) {
         diag_error(sema->diag, sema_loc(sema, *node),
@@ -3664,6 +3713,23 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         ast_node_t *gen = sema_gen_clone(sema, scope, ot, n->operand);
         if (gen) *node = gen;
       }
+      /* union / cunion 成员 move：**整体进 TDZ**（"局部 = 整体"）。
+         作用域退出不再销毁整体——payload 已移出，由接管方销毁；不标 TDZ 会让
+         销毁序列（tag union 的 own payload）二次 FREE 同一块。 */
+      if (!is_clone && union_root) {
+        if (union_root->borrow_count > 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "cannot move a member of '%.*s': %d live borrow(s) still "
+                     "reference it (borrows must end before move)",
+                     (int)union_root_name.len, union_root_name.ptr,
+                     union_root->borrow_count);
+        } else if (produces_fatal) {
+          union_root->moved = true;
+          if (sema_sym_is_fatal(union_root))
+            sema_mark_fatal_consumed(union_root);
+        }
+      }
+
       value_t *r = value_make_shadow(sema->vm, fatal);
       value_set_ownership(r, OWN_FATAL);
       return r;

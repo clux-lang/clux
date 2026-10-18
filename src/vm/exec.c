@@ -87,6 +87,38 @@ static value_t *op_store(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_assign(vm, dst, src);
 }
 
+/* STORE_REINIT <name>：**重新初始化已 move（TDZ）的变量**（R2 恢复）。
+ *
+ * move 之后变量内容的所有权已转移（内存里的字节是陈旧值，sema 因 moved 跳过
+ * 销毁）。此时 `x = new …` 若走普通 STORE → value_assign →
+ * compound_assign_transfer 会按旧字节再释放一遍 own 槽位 → 与接管方重复释放
+ * （实测 0xC0000005：`var c = move(b); b = .Box{…};`）。
+ * 本指令只做 implicit_cast + memcpy（C 后端 `x = v;` 的等价语义），不触碰旧值。
+ * 栈：弹 value → 压回 dst（赋值表达式值）。 */
+static value_t *op_store_reinit(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *src = exec_stack_pop(vm);
+    value_t *dst = scope_lookup(vm->current_scope, name);
+    if (!dst) return value_make_error(vm, "exec: undefined variable in assignment");
+    if (value_is_error(vm, src)) return src;
+    if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
+    const type_t *dt = value_type(dst);
+    if (!dt || !value_data(dst))
+        return value_make_error(vm, "exec: reinit requires an initialized variable");
+    if (dt->kind == TYPE_KIND_OPTION && value_type(src) != dt) {
+        value_t *casted = value_implicit_cast(vm, src, dt);
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
+    }
+    if (value_type(src) != dt) {
+        value_t *casted = value_implicit_cast(vm, src, dt);
+        if (value_is_error(vm, casted)) return casted;
+        src = casted;
+    }
+    memcpy(value_data(dst), value_data(src), dt->size);
+    return dst;
+}
+
 /* STORE_NIL <name>：?T 变量置 none（a = nil）。非真实 assign 操作——只置
  * ok tag = false，value 字段不动（nil 无值可写；旧 value 资源归 scope 统一
  * 释放）。压回 dst（赋值表达式值）。 */
@@ -2573,6 +2605,7 @@ static value_t *op_halt(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH]           = op_push,
     [BCODE_STORE]          = op_store,
+    [BCODE_STORE_REINIT]   = op_store_reinit,
     [BCODE_STORE_NIL]      = op_store_nil,
     [BCODE_PUSH_STR]       = op_push_str,
     [BCODE_PUSH_I8]        = op_push_i8,

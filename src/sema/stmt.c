@@ -1830,6 +1830,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
          不是类型层——所有权已从类型剥离）。 */
       if (sym) {
         sym->flow_init = true;
+        /* R2 恢复：赋值成功 → moved 清除。**之前**是 moved 的变量，旧内容所有权
+           已随 move 转移（内存里是陈旧字节）——重新赋值必须走 STORE_REINIT
+           （只 memcpy，不释放旧值），否则运行期 compound_assign_transfer 会按
+           旧字节二次释放 own 槽位（实测 0xC0000005）。 */
+        if (sym->moved) as->reinit = true;
         sym->moved = false;
         /* 注：这里原先还有一条"含 ref 字段的聚合类型赋值作用域检查"
            （判据 `type_contains_ref`）。所有权从类型层迁移到值/符号层后该谓词

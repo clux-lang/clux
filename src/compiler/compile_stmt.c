@@ -604,7 +604,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       /* 赋值点旧值销毁（sema 生成）：右值已求值（可能读过旧值），写之前
          释放旧堆块。FREE 链净栈深 0，不影响 [value]。 */
       for (ast_node_t *d = n->destroy; d; d = d->next) compile_stmt(c, d);
-      bcode_write_op(c->bc, BCODE_STORE);
+      bcode_write_op(c->bc, n->reinit ? BCODE_STORE_REINIT : BCODE_STORE);
       bcode_write_str(c->bc, name);            /* STORE 压回结果，栈: [result] */
       bcode_write_op(c->bc, BCODE_POP);        /* 赋值是语句：丢弃结果 */
       st_push(c, -1);

@@ -26,6 +26,13 @@ typedef struct {
              语句本身不发任何指令
          3 = 回退：运行期 `DISPOSE`（sema 无法生成 prelude 时） */
     uint8_t        discard_mode;
+
+    /* `x = …` 的目标变量在赋值前处于 **moved（TDZ）** 状态：旧内容的所有权已
+       随 move 转移（内存里是陈旧字节），重新赋值（R2 恢复）必须走
+       `STORE_REINIT`（只 implicit_cast + memcpy，不释放旧值）——否则运行期
+       `compound_assign_transfer` 会按旧字节二次释放 own 槽位（double free）。
+       sema 写、compiler 读。 */
+    bool           reinit;
 } ast_assign_t;
 
 static inline ast_node_t *ast_assign_new(arena_t *arena,

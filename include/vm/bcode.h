@@ -304,6 +304,12 @@ typedef enum {
      * 无栈深变化。 */
     BCODE_SET_FIELD_OWNERSHIP, /* u8 ownership：peek 开放 struct/union/cunion →
                                 * 设最后追加字段/member 的槽位所有权。 */
+    BCODE_STORE_REINIT, /* STR name：**重新初始化已 move（TDZ）的变量**（R2 恢复）。
+                         * 旧内容的所有权已随 move 转移、内存里是陈旧字节——普通
+                         * STORE 走 value_assign → compound_assign_transfer 会再
+                         * 释放一遍旧 own 槽位（double free）。本指令只做
+                         * implicit_cast + memcpy（C 后端 `x = v;`），不释放旧值。
+                         * 栈：弹 value → 压回 dst（赋值表达式值）。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

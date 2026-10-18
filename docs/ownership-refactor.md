@@ -452,6 +452,29 @@ clone 只**读**槽位（`FIELD_GET` / `INDEX_GET`）并拷贝，不改变源的
 | 借用变量作用域结束（`borrow_count--`） | 恢复允许 |
 | 重绑定 `r = b.p`（旧源递减、新源递增） | 同定义点 |
 
+### 7.1.4 union / cunion 成员 move 豁免 + `STORE_REINIT`（2026-10）
+
+**union / cunion 的成员与整体共享同一块内存布局**（cunion 全 offset 0；tag
+union 的 payload 共用 payload 区）——"局部 = 整体"。因此 `move(u.a)` 合法：整体进
+TDZ（符号级 `moved`），作用域退出不再销毁整体（payload 已移出，由接管方销毁）。
+这也是 **cunion 指针成员的唯一释放途径**：`_ = move(c.p)`（cunion 不参与自动
+销毁，此前"成员不可 move"让它的指针永远无法释放）。
+
+| 形态 | 结果 |
+|---|---|
+| `u.a`（`u: U`，a 是 **own** payload）、`c.p`（`c: C`，成员类型含资源） | **允许**：整体 TDZ |
+| `_ = move(u.a)` / `_ = move(c.p)` | **允许**：显式销毁成员（整体 TDZ） |
+| `move(p.a)`（`p: own *U`，sema 已改写为 `p.*.a`） | 拒绝（整体 TDZ 会让 p 的堆块泄漏） |
+| `move(s.u.a)`（union 嵌在 struct 里） | 拒绝（整体 TDZ 会漏掉兄弟 own 槽位） |
+| `move(u.b)`（无资源成员）、`move(u.ref_payload)` | 拒绝（不转移所有权） |
+| 根变量有存活借用 | 拒绝（R3，同整体 move） |
+
+配套修复（**move 后重新赋值**，R2 恢复的既有缺陷）：`var c = move(b); b = .Box{…};`
+此前 `STORE` → `value_assign` → `compound_assign_transfer` 会按**旧字节**二次释放
+own 槽位（0xC0000005）。新增 `STORE_REINIT <name>`：目标变量在赋值前是 moved 时
+由 sema 置 `ast_assign_t::reinit`，compiler 改发该指令——只 `implicit_cast +
+memcpy`（C 后端 `x = v;`），不释放旧值。
+
 ### 7.2 仍未支持
 
 **cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个
