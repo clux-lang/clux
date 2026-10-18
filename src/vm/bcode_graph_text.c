@@ -93,7 +93,7 @@ char *bcode_graph_disasm_mem(allocator_t *alloc, const bcode_graph_t *g,
             }
             tb_cstr(&b, "\n");
         }
-        /* M6 FFI：`extern lib "<路径>" as <别名>;` → 文本指令
+        /* M6 FFI：`extern lib <别名> from "<库名>";` → 文本指令
            `externlib "<路径>" as <别名>`（同一模块段内，紧随 MODULE 之后）。
            没有 FFI 声明的模块不写任何行 —— 非 FFI 产物的文本因此与旧格式
            **逐字一致**（旧 .cxs 手工样本与往返测试不受影响）。 */

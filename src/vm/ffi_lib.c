@@ -276,7 +276,7 @@ void *ffi_lib_sym(const ffi_lib_t *lib, const char *name, char *err,
         ffi_set_err(err, ecap, "ffi: empty symbol name");
         return NULL;
     }
-    /* 进程伪库（`extern lib "*" as x;`）：查当前进程的全局作用域 */
+    /* 进程伪库（`extern lib x from "*";`）：查当前进程的全局作用域 */
     if (lib->is_process) return ffi_sym_current_process(name, err, ecap);
 #ifdef _WIN32
     FARPROC p = GetProcAddress((HMODULE)lib->handle, name);

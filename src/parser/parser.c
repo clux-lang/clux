@@ -123,7 +123,7 @@ ast_node_t *parse_program(parser_t *p) {
                阶段完成）。 */
             func = parse_import(p);
         } else if (check_keyword(p, "extern")) {
-            /* M6 FFI：extern lib "<path>" as <alias>;（动态库声明）
+            /* M6 FFI：extern lib <alias> from "<name>";（动态库声明）
                判据是关键字，不做后缀判类。extern cfunc 在后续阶段接入同一前缀。 */
             uint32_t xtb = p->pos;
             advance(p);

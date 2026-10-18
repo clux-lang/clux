@@ -135,7 +135,7 @@ static bool gb_module_section(gbuf_t *b, const char *import_path,
         if (!gb_u32(b, owners ? owners[e] : 0)) return false;
     }
 
-    /* M6 FFI（v3）：别名 → 库路径。`extern lib "path" as alias;` 的别名是运行期
+    /* M6 FFI（v3）：别名 → 库路径。`extern lib <alias> from "<name>";` 的别名是运行期
        `EXTERN_CALL "alias::sym"` 的查表键，路径是 dlopen 参数（**按内容判类，
        不按后缀**）。 */
     if (!gb_u32(b, (uint32_t)fcount)) return false;

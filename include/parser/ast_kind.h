@@ -115,7 +115,7 @@ typedef enum {
     /* --- M5 模块系统 --- */
     AST_IMPORT,          /* import <alias> from "<path>"; — 导入模块为命名空间 */
     AST_REEXPORT,        /* export * from "<path>"; — 代理导出依赖模块的全部导出符号 */
-    AST_EXTERN_LIB,      /* extern lib "<path>" as <alias>; — M6 FFI 动态库声明（关键字判据，不按后缀） */
+    AST_EXTERN_LIB,      /* extern lib <alias> from "<name>"; — M6 FFI 动态库声明（关键字判据，不按后缀） */
     AST_EXPORT,          /* export <decl> — 标记全局定义进入模块导出表（前缀修饰） */
 
     /* --- sema 生成的内部节点（不出现在用户源码中）--- */

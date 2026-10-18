@@ -2083,7 +2083,7 @@ static value_t *ffi_resolve_symbol(vm_t *vm, bytecode_t *bc, strslice_t qual,
         char msg[320];
         snprintf(msg, sizeof(msg),
                  "exec: %s: no loaded library '%s' in this module "
-                 "(declare `extern lib \"...\" as %s;`)", what, alias, alias);
+                 "(declare `extern lib %s from \"<name>\";`)", what, alias, alias);
         return value_make_error(vm, msg);
     }
     char err[512] = {0};

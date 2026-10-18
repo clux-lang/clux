@@ -966,7 +966,7 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
     if (!libsym || libsym->kind != SEMA_SYM_EXTERN_LIB) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)evd),
                  "extern var %s uses undeclared library '%.*s' "
-                 "(add `extern lib \"...\" as %.*s;`)",
+                 "(add `extern lib %.*s from \"<name>\";`)",
                  qual, (int)evd->lib_name.len, evd->lib_name.ptr,
                  (int)evd->lib_name.len, evd->lib_name.ptr);
     }

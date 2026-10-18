@@ -1826,8 +1826,22 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       声明，Windows 实跑输出 `runtime strlen("hello") = 5`）。
     - **文档**：m6-design §1.1（条件后缀小节）、language-spec（"动态库声明的
       条件后缀"）、README（M6 FFI 状态）、`include/core/ffi_cond.h` 契约注释。
+    - **示例处理**（条件后缀让"按平台选库"在示例里落地）：
+      * `examples/ffi_callback`：`crt` 改成三平台条件声明（`msvcrt` / `libc.so.6`
+        / `libSystem.B.dylib`）。`qsort` 三平台都有，示例因此**在 Linux 上也能跑**
+        （`qsort called the clux comparator 8 times`）。
+      * `examples/ffi_process`：去掉 Windows 专用的 `libc::_osplatform`
+        （数据符号只有 Windows CRT 有），保留跨平台的 `abs` / `strlen` / `printf`，
+        示例回到三平台可跑；数据符号的演示指向 `ffi_extern_var`。
+      * `examples/ffi_extern_var`：`_fmode` / `_osplatform` / `_pgmptr` 是
+        Windows CRT 数据符号、POSIX 无等价物 → 声明加
+        `assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32")`，头部明确"本示例
+        Windows 专用"；其它平台在第一个 `crt::` 引用处即报"未知库别名"。
+      * 顺带修掉 4 处仍在提示**已删除旧语法**的诊断/注释
+        （``add `extern lib "..." as crt;` `` → ``extern lib crt from "<name>";``）。
     - 验证：Windows 全量 **2118/2118 PASSED**；examples 49 个 `.cx` 全过（含新增
       示例）；`fmt` 幂等（examples+repro 共 79 文件，条件后缀原样保留）；
       `.cxs` 样本 5/5；WSL2 Ubuntu 全量 **2115 passed / 2 skipped**（跳过项是
-      §79 里那两个 Windows CRT 数据符号用例），且示例在 Linux 上自动选中
-      `libc.so.6`（`runtime strlen("hello") = 5`）、`bc emit -D` 产物可直接 run。
+      §79 里那两个 Windows CRT 数据符号用例）。Linux 上 `ffi_callback` /
+      `ffi_process` / `ffi_assert` 三个示例直接跑通，`ffi_extern_var` 按预期在
+      编译期报未知库别名；`bc emit -D` 产物可直接 run。

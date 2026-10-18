@@ -536,7 +536,7 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
 /** 解析 `extern cfunc <lib>::<name>(params): ret;`（调用方已消费 `extern`）。
  * 无函数体：符号在运行期由 dlsym/GetProcAddress 从库句柄解析（Phase 3/4）。
  * `...` 允许（C 可变参数）；捕获列表非法（C 无闭包）。
- * `<lib>` 是 `extern lib "..." as <lib>;` 声明的别名；路径 `"*"` 表示
+ * `<lib>` 是 `extern lib <lib> from "..."` 声明的别名；库名 `"*"` 表示
  * **当前进程自身**（已链接进来的符号，见 ffi_lib.c）。 */
 ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb) {
     return parse_extern_cfunc_kw(p, tb, "cfunc");
@@ -555,7 +555,7 @@ ast_node_t *parse_extern_cfunc_kw(parser_t *p, uint32_t tb, const char *kw) {
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected library alias in extern cfunc <lib>::<name> "
-                             "(alias comes from `extern lib \"...\" as <alias>;`)");
+                             "(alias comes from `extern lib <alias> from \"<name>\";`)");
     }
     strslice_t lib = token_strslice(cur_token(p));
     advance(p);
@@ -600,7 +600,7 @@ ast_node_t *parse_extern_var(parser_t *p, uint32_t tb) {
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected library alias in extern var <lib>::<name> "
-                             "(alias comes from `extern lib \"...\" as <alias>;`)");
+                             "(alias comes from `extern lib <alias> from \"<name>\";`)");
     }
     strslice_t lib = token_strslice(cur_token(p));
     advance(p);

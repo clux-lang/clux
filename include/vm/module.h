@@ -47,7 +47,7 @@ typedef struct module_t {
     char       *importer;
 
     /* ---- M6 FFI：extern lib 库表（别名 → 动态库句柄；owned，destroy 关闭全部）----
-     * 别名即源码里 `extern lib "..." as <名>;` 的 <名>，`extern cfunc <名>::<fn>`
+     * 别名即源码里 `extern lib <名> from "...";` 的 <名>，`extern cfunc <名>::<fn>`
      * 依此查表取句柄再 dlsym。NULL = 本模块没有 extern lib（懒创建）。 */
     strmap_t   *ffi_libs;
 } module_t;

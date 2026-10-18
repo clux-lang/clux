@@ -89,7 +89,7 @@ uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr);
 
 /** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。
  * M6 FFI：声明动态库导出的全局数据符号；无初始化器，符号由 dlsym 在运行期解析。
- * 别名来自 `extern lib "..." as <lib>;`（路径 `"*"` = 当前进程自身）。 */
+ * 别名来自 `extern lib <lib> from "...";`（路径 `"*"` = 当前进程自身）。 */
 ast_node_t *parse_extern_var(parser_t *p, uint32_t tb);
 
 #ifdef __cplusplus

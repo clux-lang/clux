@@ -42,7 +42,7 @@ typedef enum {
   SEMA_SYM_FUNC,   /* 函数（用户函数 + 内建函数，如 printf） */
   SEMA_SYM_TYPE,   /* 类型定义（type 名字） */
   SEMA_SYM_MODULE, /* 模块（M5：import 别名，关联 module_t*，:: 成员访问用） */
-SEMA_SYM_EXTERN_LIB, /* M6 FFI：`extern lib "..." as <名>` 的库别名（:: 成员访问用） */
+SEMA_SYM_EXTERN_LIB, /* M6 FFI：`extern lib <名> from "..."` 的库别名（:: 成员访问用） */
 SEMA_SYM_EXTERN_VAR, /* M6 FFI：`extern var <库>::<名>: T;` 的**数据符号**
                         （限定名 "<库>::<名>" 注册；可读可写，运行期 dlsym 解析） */
 } sema_symbol_kind_t;

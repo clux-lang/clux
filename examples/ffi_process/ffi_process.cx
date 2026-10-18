@@ -6,7 +6,11 @@
 //   - POSIX：`dlsym(RTLD_DEFAULT, name)`（可执行文件 + 依赖 + RTLD_GLOBAL 的库）
 //   - Windows：先主模块、再遍历已加载模块（CRT 的 abs/strlen 都在这里）
 // 别名照常起，函数/数据符号照常用 `<别名>::<名>` 引用——与显式加载某个文件
-// （`extern lib crt from "msvcrt.dll";`）走**完全同一条**编译与运行通路。
+// （`extern lib crt from "msvcrt" assert(...);`）走**完全同一条**编译与运行通路。
+//
+// 因此本示例只用**跨平台**的符号（abs / strlen / printf），三平台都能跑；
+// 数据符号（`extern var`）的读写见 `examples/ffi_extern_var`
+// （那个示例用的是 Windows CRT 的 `_fmode`／`_osplatform`／`_pgmptr`，故仅 Windows 可跑）。
 //
 // `extern func libc::abs(...)` 与 `extern cfunc libc::abs(...)` 等价（限定名已经表明它
 // 来自外部库）；`cfunc` 是规范写法（显式标注 C ABI），`clux format` 会统一渲染成它。
@@ -20,9 +24,8 @@
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void; // 返回值用不到，声明为 void
 
-extern cfunc libc::abs(x: i32): i32; // 与 extern cfunc 等价
+extern cfunc libc::abs(x: i32): i32; // 与 extern func 等价
 extern cfunc libc::strlen(s: str): u64;
-extern var libc::_osplatform: u32; // 进程里的数据符号同样可读
 
 func main(): i32 {
     // 函数：整数与**无符号返回值**都按声明类型落地（u64 就是 u64）
@@ -39,11 +42,6 @@ func main(): i32 {
         return 3;
     }
 
-    // 数据符号：读到的是进程里那块内存（现代 Windows 上 _osplatform = 2）
-    if (libc::_osplatform == 0u32) {
-        return 4;
-    }
-
-    libc::printf("abs(-7)=%d strlen(\"%s\")=%u _osplatform=%u\n", libc::abs(-7), s, n, libc::_osplatform);
+    libc::printf("abs(-7)=%d strlen(\"%s\")=%u\n", libc::abs(-7), s, n);
     return 0;
 }
