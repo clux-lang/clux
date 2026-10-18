@@ -3,6 +3,7 @@
 #include "parser/parse_utils.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include <string.h>   /* memcmp */
@@ -27,6 +28,10 @@ uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr) {
         tok = ((const ast_ptr_t *)type_expr)->ownership;
     } else if (type_expr->kind == AST_SLICE_TYPE) {
         tok = ((const ast_slice_type_t *)type_expr)->ownership;
+    } else if (type_expr->kind == AST_OWNED_TYPE) {
+        /* `own T` / `fatal T`（T 非指针/切片）：闭包字段 `own func(...)->T`、
+           含 own 槽位聚合的 `own Box` 等。所有权在修饰词 token 上。 */
+        tok = ((const ast_owned_type_t *)type_expr)->ownership;
     }
     if (!tok) return AST_OWN_NONE;
     strslice_t s = token_strslice(tok);

@@ -148,8 +148,15 @@ static bool slot_owns_value(const type_t *ft, ownership_t own) {
 
 /* 叶子槽位在非 own 时**不**递归；复合槽位只在内部还有 own 槽位时下钻。 */
 static bool slot_needs_visit(const type_t *ft, ownership_t own) {
+    const type_t *s0 = type_strip_quals(ft);
+    /* **闭包槽位**（FUNC）：只有 **own** 槽位才释放（own 闭包字段 → 释放其
+       env 的 own 捕获）；ref/none 槽位一律不碰。
+       注意：不能走下面"复合槽位无条件递归"的规则——闭包可以**捕获自身**
+       （`func |fib| fib(...)`），共享同一实例，无条件递归会沿自引用无限下降
+       （实测栈溢出）。 */
+    if (s0 && s0->kind == TYPE_KIND_FUNC) return own == OWN_OWN;
     if (!slot_owns_value(ft, own)) return false;
-    const type_t *s = type_strip_quals(ft);
+    const type_t *s = s0;
     if (s && (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE))
         return true; /* own 叶子 → 释放 */
     return type_has_own_slots(ft); /* 复合：内部无 own 槽位就不必下钻 */
@@ -165,6 +172,23 @@ void ptr_free_slot_value(vm_t *vm, const type_t *slot_type, ownership_t own,
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
+    case TYPE_KIND_FUNC: {
+        /* **闭包 = 捕获聚合结构体**：按 capture_type 的槽位所有权释放 env 里
+           的 own 捕获，再释放 env 块（与 op_free 的闭包分支一致）。用于结构体
+           的 own 闭包字段在运行期递归销毁（赋值点/丢弃/复合赋值）路径。 */
+        func_t **fp = (func_t **)data;
+        func_t *fn = fp ? *fp : NULL;
+        if (!fn || !fn->capture_type || !fn->env) return;
+        const struct_type_t *ct = fn->capture_type;
+        for (size_t i = 0; i < ct->field_count; i++) {
+            const struct_field_t *f = &ct->fields[i];
+            if (!f->type) continue;
+            ptr_free_slot_value(vm, f->type, f->ownership,
+                                (uint8_t *)fn->env + f->offset);
+        }
+        allocator_free(vm->alloc, &fn->env);
+        return;
+    }
     case TYPE_KIND_PTR: {
         /* 指针：ptr≠NULL → 先递归销毁堆块内容（T 含 own 字段时内嵌堆块
            一并释放），再释放本堆块，置 ptr=NULL 防双释放。

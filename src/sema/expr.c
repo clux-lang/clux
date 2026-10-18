@@ -3283,6 +3283,10 @@ static bool clone_needs_deep(const type_t *t, ownership_t slot_own,
     case TYPE_KIND_PTR:
     case TYPE_KIND_SLICE:
       return top_level || slot_own == OWN_OWN;
+    case TYPE_KIND_FUNC:
+      /* 闭包 = 捕获聚合结构体：own 槽位（含 own 捕获）必须深拷贝 env；
+         ref/none 槽位是借用/共享引用 → 普通拷贝。 */
+      return top_level || slot_own == OWN_OWN;
     default:
       return type_has_own_slots(t);
   }
@@ -3490,6 +3494,19 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
   }
   case TYPE_KIND_SLICE:
     return gen_clone_call(sema, 2, s, access, /*by_address=*/false);
+  case TYPE_KIND_FUNC: {
+    /* 闭包值的深拷贝：env 的捕获聚合类型只有运行期才知道 → 调用运行期的
+       `__deep_clone(v)`（对象图克隆，闭包分支会新建实例并克隆 env）。 */
+    ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
+    ast_node_t *call = ast_call_new(sema->arena, 0, 0);
+    if (!callee || !call) return NULL;
+    ((ast_ident_t *)callee)->name = strslice_from_bytes("__deep_clone", 12);
+    callee->is_generated = true;
+    ((ast_call_t *)call)->callee = callee;
+    ((ast_call_t *)call)->args = access;
+    call->is_generated = true;
+    return call;
+  }
   case TYPE_KIND_OPTION:
   case TYPE_KIND_UNION:
     /* 联合/可空的 tag 判定只能在运行期 → 值克隆函数体内用三元表达式处理 */
@@ -3875,8 +3892,12 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          也携带资源（其 own 字段），同样产 FATAL。标量无资源 → fatal 折叠为
          自身，故不在此列。
          判据读 type 对象（`type_has_own_slots`），与销毁序列生成器同一权威。 */
+      /* FUNC（闭包）同样产 FATAL：闭包 = 捕获聚合结构体，可能携带 own 捕获
+         （运行期才知道），因此按"携带资源"处理——`move(cl)` 可赋给 own 槽位/
+         变量，`_ = move(cl)` 即显式销毁。 */
       bool produces_fatal = ot && (ot->kind == TYPE_KIND_PTR ||
                                    ot->kind == TYPE_KIND_SLICE ||
+                                   ot->kind == TYPE_KIND_FUNC ||
                                    type_has_own_slots(ot));
 
       /* ---- union / cunion 成员 move 豁免（2026-10）----
@@ -3994,21 +4015,11 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
 
-        /* ---- 约束 2：**闭包（`TYPE_KIND_FUNC` 值）不可 move** ----
-           闭包本质是携带捕获状态的**结构体**（语法糖），且语言里不存在"闭包"
-           这个整体变量可供整体 move；它的捕获槽又不能单独 move（见约束 3）。
-           所以闭包值整体也不允许 move。 */
-        if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            src->type->kind == TYPE_KIND_FUNC) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "cannot move closure '%.*s': a closure is a struct carrying "
-                     "its capture state (syntactic sugar), and there is no "
-                     "'closure' whole value to move (call it, or pass it by "
-                     "reference)",
-                     (int)((ast_ident_t *)n->operand)->name.len,
-                     ((ast_ident_t *)n->operand)->name.ptr);
-          return value_make_shadow(sema->vm, fatal);
-        }
+        /* 注：闭包值（TYPE_KIND_FUNC）**可以 move**（2026-10 起）——闭包 =
+           捕获聚合结构体（env 块），move 是合法的所有权转移：源进 TDZ、
+           目标接管 env（own 捕获随之转移）；`_ = move(cl)` 即显式销毁闭包
+           （FREE 按 capture_type 聚合释放 env 的 own 捕获 + env 块）。它捕获槽
+           仍然不可 move（见下方约束 3：捕获槽被每次调用共享，不能留在 TDZ）。 */
 
         /* ---- 约束 3：**闭包捕获不可 move**（含捕获里的结构体）----
            捕获符号定义在闭包的捕获作用域上，而闭包每次调用共享同一份捕获

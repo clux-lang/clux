@@ -537,6 +537,15 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
   if (!t || !access) return true;
   t = type_strip_quals(t);
   switch (t->kind) {
+    case TYPE_KIND_FUNC:
+      /* **闭包 = 捕获聚合结构体**：销毁一个 func 值 = `FREE <access>` ——
+         VM 的 FREE 分支按 capture_type 的槽位所有权释放 env 里的 own 捕获，
+         再释放 env 块本体（§7.1.10）。这条分支覆盖**赋值点销毁**
+         （`f = clone(...)` 覆盖旧闭包）、结构体里的 func 字段、显式销毁等
+         一切"按类型生成销毁序列"的位置；作用域退出走的是 make_free_stmts 的
+         FUNC 专用分支（同样生成单个 FREE，不会重复）。 */
+      destroy_append(head, tail, ast_free_new(sema->arena, access));
+      return true;
     case TYPE_KIND_PTR: {
       /* 被指向值的 own 槽位**先**释放（`v.f` 会自动解引用到堆块内容），
          再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。
@@ -690,7 +699,6 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       return true;
     }
     case TYPE_KIND_CUNION:
-    case TYPE_KIND_FUNC:
     default:
       return true;
   }
@@ -707,7 +715,35 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     const char *name = (const char *)vec_get(keys, i);
     if (!name) continue;
     sema_symbol_t *sym = (sema_symbol_t *)strmap_get(scope->symbols, name);
-    if (!sym || sym->kind != SEMA_SYM_VAR) continue;
+    if (!sym) continue;
+    /* ---- 局部函数 / defer 闭包（SEMA_SYM_FUNC 符号）----
+       闭包 = 捕获聚合结构体（env 块）：定义点创建的实例持有 env，捕获里的
+       own 值必须随**作用域退出**释放（`FREE <name>` → VM 按 capture_type
+       聚合释放 env 的 own 捕获 + env 块）。无捕获的局部函数
+       （capture_type_id == 0）没有 env → 跳过。
+       defer 的语义顺序由调用方保证：块尾先执行 defer calls，再追加 FREE。 */
+    if (sym->kind == SEMA_SYM_FUNC) {
+      /* comptime 函数体：CTFE 解释执行，不支持 FREE 节点——跳过（编译期
+         闭包的捕获不进入运行时生命周期）。 */
+      if (sema->fn.walking_comptime) continue;
+      const ast_func_def_t *fd = (const ast_func_def_t *)sym->ast;
+      if (!fd || fd->base.kind != AST_FUNC_DEF || fd->capture_type_id == 0)
+        continue;
+      size_t flen = strlen(name);
+      char *fbuf = (char *)arena_calloc(sema->arena, flen + 1, 1,
+                                        ALIGNOF(max_align_t));
+      if (!fbuf) continue;
+      memcpy(fbuf, name, flen);
+      ast_node_t *fid = ast_ident_new(sema->arena, 0, 0);
+      if (!fid) continue;
+      ((ast_ident_t *)fid)->name = strslice_from_bytes(fbuf, flen);
+      ast_node_t *fs = ast_free_new(sema->arena, fid);
+      if (!fs) continue;
+      if (!head) head = tail = fs;
+      else { tail->next = fs; tail = fs; }
+      continue;
+    }
+    if (sym->kind != SEMA_SYM_VAR) continue;
     if (!sym->type) continue;
     /* 仅 **own** 变量需要显式释放。判据用符号层的 `sym->ownership`
        （所有权已从类型层迁移到值/符号层——类型不携带 ownership，
@@ -2199,6 +2235,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     if (!own_value) own_value = sema_value_is_fatal(rhs);
     bool has_res = rt && (rt->kind == TYPE_KIND_PTR ||
                           rt->kind == TYPE_KIND_SLICE ||
+                          rt->kind == TYPE_KIND_FUNC ||
                           type_has_own_slots(rt));
     if (!own_value || !has_res) {
       as->discard_mode = 1;   /* 借用 / 无资源：expr + POP */
@@ -2371,7 +2408,11 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     if (sym && sym->type && sym->flow_init && !sym->moved &&
         sym->ownership == OWN_OWN &&
         (sym->type->kind == TYPE_KIND_PTR ||
-         sym->type->kind == TYPE_KIND_SLICE)) {
+         sym->type->kind == TYPE_KIND_SLICE ||
+         sym->type->kind == TYPE_KIND_FUNC)) {
+      /* FUNC：闭包 = 捕获聚合结构体。`func_assign` 只是 memcpy（不释放旧
+         env）→ 旧闭包的 own 捕获必须在这里 `FREE f` 掉（VM 按 capture_type
+         聚合释放）。own 闭包是 move-only，唯一持有者，安全。 */
       size_t nlen = name.len;
       char *nbuf = (char *)arena_calloc(sema->arena, nlen + 1, 1,
                                         ALIGNOF(max_align_t));
