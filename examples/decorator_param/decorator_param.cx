@@ -1,0 +1,69 @@
+// decorator_param.cx — 带参数的装饰器 `[[dec(args)]]`
+//
+// 规则：**被装饰的声明恒为最后一个实参**。
+//
+//   [[dec(args)]] func f(...) {…}   ⇒  var f = dec(args, <源函数>);
+//   [[dec(args)]] var v = init;     ⇒  var v = dec(args, <init>);
+//   struct S { [[dec(args)]] func m(...) {…} }
+//                                   ⇒  var __decorval = dec(args, <模块级源方法>);
+//                                      成员 m 变成转发包装方法
+//   [[a(1)]] [[b(2)]] f             ⇒  a(1, b(2, f))（源码靠前的先包）
+//
+// 为什么是这个形状：comptime 函数目前**不是一等值**（`return comptime func …`
+// 会被拒绝），所以装饰器不写成"返回装饰器、再在编译期调用一次"，而是把源声明
+// 直接作为最后一个实参传进去——装饰器就是普通 comptime 函数，返回值是装饰后的
+// 函数（常量闭包）。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+func double(x: i32): i32 { return x * 2; }
+
+// ---- 参数化装饰器：参数在前，源声明在最后 ----
+comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {
+    return func |n, f| w(x: i32): i32 { return f(x) + n; };
+}
+
+comptime func scale(k: i32, f: func(i32) -> i32): func(i32) -> i32 {
+    return func |k, f| s(x: i32): i32 { return f(x) * k; };
+}
+
+comptime func plus(n: i32, v: i32): i32 { return v + n; }
+
+// 方法装饰器：接收者（self）是源方法的第一个参数，同样放在最后
+comptime func addm(n: i32, f: func(ref *Point) -> i32): func(ref *Point) -> i32 {
+    return func |n, f| w(self: ref *Point): i32 { return f(self) + n; };
+}
+
+// 1) 参数化值装饰器：[[plus(1)]] var v = 41; ⇒ plus(1, 41)
+[[plus(1)]] var v = 41;
+
+// 2) 参数化函数装饰器：[[add(100)]] func dbl ⇒ add(100, 源) → dbl(5) = 110
+[[add(100)]] func dbl(x: i32): i32 { return double(x); }
+
+// 3) 参数化装饰器链：[[scale(10)]] [[add(5)]] combo ⇒ scale(10, add(5, 源))
+//    combo(1) = (1*2 + 5) * 10 = 70
+[[scale(10)]] [[add(5)]] func combo(x: i32): i32 { return double(x); }
+
+// 4) 参数化方法装饰器：p.get() = 7 + 100 = 107
+struct Point {
+    x: i32;
+    [[addm(100)]] func get(self: ref *Point): i32 { return self.x; }
+    func plain(self: ref *Point): i32 { return self.x + 1; }
+}
+
+func main(): i32 {
+    libc::printf("v = %d\n", v);                 // 42
+    libc::printf("dbl(5) = %d\n", dbl(5));       // 110
+    libc::printf("combo(1) = %d\n", combo(1));   // 70
+
+    var p = .Point{ .x = 7 };
+    libc::printf("p.get() = %d\n", p.get());     // 107
+    libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
+
+    if (v != 42 || dbl(5) != 110 || combo(1) != 70 || p.get() != 107 ||
+        p.plain() != 8) {
+        return 1;
+    }
+    return 0;
+}

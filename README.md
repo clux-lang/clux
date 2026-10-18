@@ -108,7 +108,7 @@ clux build <file.cx>                  # native backend — not implemented yet
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error), `2` runtime error.
 
-Examples live in `examples/` — 39 entry directories (one or more `.cx` files each,
+Examples live in `examples/` — 42 entry directories (one or more `.cx` files each,
 one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules
 imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
 so every top-level `.cx` is runnable.

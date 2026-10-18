@@ -1943,7 +1943,13 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **测试**（`tests/decorator_test.cpp` 增至 18 例）：带参数的函数装饰器、
       参数化链、带参数的值装饰器、带参数的方法装饰器；原有 14 例不受影响
       （非调用形态的装饰器走原路径）。
-    - 文档：language-spec 新增"带参数的装饰器"小节（含 comet 函数非一等值的
+    - **新增示例**：`examples/decorator_param/decorator_param.cx`——参数化值装饰器
+      （`[[plus(1)]] var v = 41`）、参数化函数装饰器（`[[add(100)]] func dbl`）、
+      参数化链（`[[scale(10)]] [[add(5)]] func combo`）、参数化方法装饰器
+      （`[[addm(100)]] func get(self: ref *Point)`）。Windows/Linux 输出一致：
+      `v=42 dbl(5)=110 combo(1)=70 p.get()=107 p.plain()=8`；`clux format` 幂等且
+      保留带参数的装饰器前缀。
+    - 文档：language-spec 新增"带参数的装饰器"小节（含 comptime 函数非一等值的
       说明）；本条记录调研结论与未采用的路线。
     - 验证：Windows 全量 **2144/2144 PASSED**；WSL2 Ubuntu 全量 **2141 passed /
       2 skipped**；examples 50 个 `.cx` 全过。
