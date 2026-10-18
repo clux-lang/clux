@@ -783,6 +783,20 @@ struct Point {
   **局部**变量/局部函数上的装饰器直接拒绝（装饰器展开是"全局绑定 + 模块初始化
   期折叠"语义，函数体里没有对应形态）：
   ``decorators `[[...]]` are only allowed on top-level 'var' / 'func' declarations ...``。
+- **带参数的装饰器**：`[[dec(args)]]` 把被装饰的声明追加为**最后一个实参**
+  （`[[dec]]` 的零参数情形也符合这条规则）：
+
+  ```c
+  comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {
+      return func |n, f| w(x: i32): i32 { return f(x) + n; };
+  }
+  [[add(100)]] func dbl(x: i32): i32 { return x * 2; }   // ⇒ dbl = add(100, 源)
+  [[scale(10)]] [[add(5)]] func combo(...)               // ⇒ scale(10, add(5, 源))
+  ```
+
+  这样装饰器就是普通 comptime 函数，**不需要**"返回 comptime 函数、再在编译期
+  调用一次"（comptime 函数目前不是一等值：`comptime function 'x' cannot be
+  used as a value`）。
 - 装饰器在**编译期求值**（全局初始化器必须可折叠）：值装饰器任意 comptime 函数；
   函数/方法装饰器必须是 comptime 且返回函数（闭包也可以，见上一节）。
 - 顶层函数装饰后**仍是函数**（可递归、可当值），装饰只发生一次——不像"每次调用

@@ -1914,3 +1914,36 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       两处修完，"值装饰 + 函数装饰 + 方法装饰"同文件共存可跑。
     - 验证：Windows 全量 **2138/2138 PASSED**；示例 50 个 `.cx` 全过；fmt 幂等
       （`[[...]]` 保留）；WSL2 Ubuntu 全量 **2135 passed / 2 skipped**。
+
+83. **调研 + 实现：带参数的装饰器 `[[dec(args)]]`**（2026-10）
+    - **调研问题（用户提出）**：comptime 函数作为 comptime 函数的返回值可能吗？
+      理论上这是带参数装饰器的基础。
+    - **调研结论（实测）**：
+      1. **comptime 函数目前不是一等值**——`comptime func id(): func(i32)->i32
+         { return twice; }` 报 `ctfe: comptime function 'twice' cannot be used
+         as a value`；`comptime` 是声明标记（`ast_func_def_t.is_comptime`），
+         不是类型的一部分，类型系统里没有"comptime 函数类型"。
+      2. **返回普通函数/闭包是可行的**（常量闭包，见第 81 项）。
+      3. **带参数装饰器并不需要第 1 点**：只需要"装饰器表达式在编译期可折叠"。
+         实测 `add(100, src)`（源函数作为最后一个实参）在**今天的 CTFE** 上
+         就能折叠成常量闭包。
+      4. 另一条路（"让 comptime 函数返回装饰器闭包，再在编译期调用它"）目前
+         卡在 `ctfe: function id N is not a clux function definition`——CTFE 的
+         调用路径按 id 查 `sema_func_by_id`，而 comptime 体内创建的字面量不登记
+         进 sema 函数表（只有 fid）。试过加宽该路径（用 `fn->ct_literal` 回退 +
+         从 env 绑捕获），仍卡在嵌套闭包创建时捕获绑定拿不到调用帧作用域，
+         故本轮**不采用**该路线。
+    - **采用的设计**：`[[dec(args)]] decl` ⇒ **`dec(args, <decl>)`**——被装饰的
+      声明恒为**最后一个实参**（`[[dec]]` 是零参数情形，规则统一）。纯前脱糖
+      改写，零 CTFE 改动、零容器格式变更。
+      * 函数：`dec(args, __decor_N_f)` → `var f = ...`；
+      * 值：`dec(args, <init>)`；
+      * 方法：`dec(args, __decorsrc_N_m)`；
+      * 链：`[[scale(10)]] [[add(5)]] f` ⇒ `scale(10, add(5, f))`。
+    - **测试**（`tests/decorator_test.cpp` 增至 18 例）：带参数的函数装饰器、
+      参数化链、带参数的值装饰器、带参数的方法装饰器；原有 14 例不受影响
+      （非调用形态的装饰器走原路径）。
+    - 文档：language-spec 新增"带参数的装饰器"小节（含 comet 函数非一等值的
+      说明）；本条记录调研结论与未采用的路线。
+    - 验证：Windows 全量 **2144/2144 PASSED**；WSL2 Ubuntu 全量 **2141 passed /
+      2 skipped**；examples 50 个 `.cx` 全过。

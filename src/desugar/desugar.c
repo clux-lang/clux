@@ -607,6 +607,22 @@ static ast_node_t *ds_apply_decorators(desugar_t *ds, ast_node_t *decs,
   for (i = n; i > 0; i--) {
     ast_node_t *callee = arr[i - 1];
     callee->next = NULL;
+    /* **带参数的装饰器** `[[dec(args)]]`：把被装饰的值追加为**最后一个实参**
+       → `dec(args, <值>)`。于是装饰器就是一个普通 comptime 函数
+       （`comptime func dec(n: i32, f: func(...)) -> func(...)`），不需要
+       "返回 comptime 函数再在编译期调用一次"。零额外语法：`[[dec]]` 走
+       `dec(<值>)`，`[[dec(args)]]` 走 `dec(args, <值>)`，规则统一。 */
+    if (callee->kind == AST_CALL) {
+      ast_call_t *c = (ast_call_t *)callee;
+      value->next = NULL;
+      if (c->args_last)
+        c->args_last->next = value;
+      else
+        c->args = value;
+      c->args_last = value;
+      value = callee;
+      continue;
+    }
     ast_node_t *call = ds_call(ds, callee, value, value, tb, te);
     if (!call) return value;
     value->next = NULL;

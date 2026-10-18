@@ -252,3 +252,55 @@ TEST(Decorator, MixedDecoratorsInOneProgram) {
       "}\n",
       "decor_mixed");
 }
+
+/* 带参数的装饰器：`[[dec(args)]] decl` ⇒ `dec(args, <decl>)`——被装饰的声明
+   恒为**最后一个实参**，于是装饰器就是普通 comptime 函数，不需要"返回
+   comptime 函数再在编译期调用一次"。 */
+TEST(Decorator, ParameterizedFunctionDecorator) {
+  clux_expect_ok(
+      "comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "  return func |n, f| w(x: i32): i32 { return f(x) + n; };\n"
+      "}\n"
+      "func double(x: i32): i32 { return x * 2; }\n"
+      "[[add(100)]] func dbl(x: i32): i32 { return double(x); }\n"
+      "func main(): i32 { return dbl(5) == 110 ? 0 : 1; }\n",
+      "decor_param_func");
+}
+
+/* 带参数装饰器的链：`[[scale(10)]] [[add(5)]] f` ⇒ scale(10, add(5, f)) */
+TEST(Decorator, ParameterizedDecoratorChain) {
+  clux_expect_ok(
+      "comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "  return func |n, f| w(x: i32): i32 { return f(x) + n; };\n"
+      "}\n"
+      "comptime func scale(k: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "  return func |k, f| s(x: i32): i32 { return f(x) * k; };\n"
+      "}\n"
+      "func double(x: i32): i32 { return x * 2; }\n"
+      "[[scale(10)]] [[add(5)]] func combo(x: i32): i32 { return double(x); }\n"
+      "func main(): i32 { return combo(1) == 70 ? 0 : 1; }\n",
+      "decor_param_chain");
+}
+
+/* 带参数的值装饰器：`[[plus(1)]] var v = 41` ⇒ plus(1, 41) */
+TEST(Decorator, ParameterizedValueDecorator) {
+  clux_expect_ok(
+      "comptime func plus(n: i32, v: i32): i32 { return v + n; }\n"
+      "[[plus(1)]] var v = 41;\n"
+      "func main(): i32 { return v == 42 ? 0 : 1; }\n",
+      "decor_param_var");
+}
+
+/* 带参数的方法装饰器：源方法（接收者为首参）作为最后一个实参 */
+TEST(Decorator, ParameterizedMethodDecorator) {
+  clux_expect_ok(
+      "struct P { x: i32; [[addm(100)]] func get(self: ref *P): i32 { return self.x; } }\n"
+      "comptime func addm(n: i32, f: func(ref *P) -> i32): func(ref *P) -> i32 {\n"
+      "  return func |n, f| w(self: ref *P): i32 { return f(self) + n; };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = .P{ .x = 7 };\n"
+      "  return p.get() == 107 ? 0 : 1;\n"
+      "}\n",
+      "decor_param_method");
+}
