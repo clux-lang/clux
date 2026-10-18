@@ -690,11 +690,20 @@ construct 1          ; 弹出 1 个元素值 + 类型位，完成数组值构造
 ### 4. switch = 编译期 desugar
 
 解析为嵌套 if 链（`var __switch_N = cond; if (...) {} else if ...`），无独立 switch 语义。**已实现**（2026-09-20）：token_t 不透明（struct 定义在 lexer.c）无法在 parser 层合成 `==` token 做字面 desugar，改由**独立 `AST_SWITCH` 节点 + sema/compiler 内联语义**（语义等价，见 §4 特性清单）：
-
 - parser：`AST_SWITCH`（cond + `AST_SWITCH_CASE` 兄弟链 + `default_body`），分支 `(模式列表)->{块}`，逗号分隔模式 = `||` 链；重复 default / 空模式列表 / 缺 `->` → 解析期诊断
 - sema（Pass 3b `walk_switch`）：cond shadow 求值一次（C 局部持有，不注册临时符号——`__switch_N` 是编译期实现细节）；每模式 `value_eq` 校验（不可比 → `switch pattern type mismatch`）；分支体各建子作用域（3a `build_block` 按声明序 add_child，3b 索引对齐消费）；flow meet 沿用快照机制——**有 default → 全路径覆盖（after 直接覆盖）**，**无 default → 穿透路径保持分支前状态并入 AND meet**（与 else 缺失同语义）；`definitely_returns` 仅当有 default 且全分支返回
 - compiler：`__switch_N` 临时变量（`compiler_t.switch_seq` 计数器命名，memset 0 初始化，嵌套 switch 经子作用域遮蔽天然安全）DEFINE 一次；每模式 `PUSH tmp + 模式求值 + EQ + JNZ 跳分支体`（短接），全模式未命中 `JMP next`；分支体尾部 `JMP end`（无 fallthrough）；default 兜底；`end` 收尾
 - CTFE（comptime 函数）同步支持：cond → 逐模式 `value_eq` 短接 → 命中执行 / 未命中走 default（不 push scope，与 CTFE if 一致）
+
+> **另一种脱糖：`foreach`（2026-10）**。switch 选择"独立节点 + sema/compiler
+> 内联语义"，`foreach` 则走**独立的前脱糖层**（`src/desugar/`，parser 之后、
+> sema 之前）：`foreach ([var] a [: T] of b) { … }` 被展开成普通的
+> `var __arr_N = b; for (var __idx_N: usize = 0; __idx_N < len(__arr_N);
+> __idx_N = __idx_N + 1) { var a = __arr_N[__idx_N]; … }`，
+> **sema / compiler / CTFE 完全看不到 AST_FOREACH**。展开形状、为什么用 `for`
+> 而不是 `while`（`continue` 必须跳到步进段）、为什么裸标识符迭代器不落临时变量
+> （own 容器 move-only）见 `include/desugar/desugar.h` 与
+> [architecture-m1.md](architecture-m1.md) §1.x。
 
 ### 5. enum 严格分离
 

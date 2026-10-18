@@ -183,6 +183,34 @@ TEST(Fmt, ControlKeywordSpaceBeforeParen) {
               "}\n");
 }
 
+/* foreach：`foreach (` 是控制流形态（空格在括号前），三种头部都必须完整回显。
+   fmt 不走脱糖（只解析，保持源码形态），漏渲染会静默丢掉整个循环体。 */
+TEST(Fmt, ForeachKeepsAllHeaderForms) {
+    const char *src =
+        "func main():void{\n"
+        "var a=.[2]i32{1,2};\n"
+        "var e=0;\n"
+        "foreach(var x of a){\n"
+        "e=e+x;\n"
+        "}\n"
+        "foreach(e of a){}\n"
+        "foreach(var p:ref *i32 of a){}\n"
+        "}\n";
+    std::string out = fmt(src);
+    EXPECT_EQ(out,
+              "func main(): void {\n"
+              "    var a = .[2]i32{ 1, 2 };\n"
+              "    var e = 0;\n"
+              "    foreach (var x of a) {\n"
+              "        e = e + x;\n"
+              "    }\n"
+              "    foreach (e of a) {}\n"
+              "    foreach (var p: ref *i32 of a) {}\n"
+              "}\n");
+    /* 幂等：再格式化一次不变（format 的核心不变量之一） */
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
+
 TEST(Fmt, DoWhile) {
     std::string out = fmt(
         "func main():void{\n"

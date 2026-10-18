@@ -1,6 +1,7 @@
 #include "parser/parse_stmt.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_comptime_if.h"
+#include "parser/parse_foreach.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_assign.h"
@@ -29,6 +30,8 @@
 
 ast_node_t *parse_stmt(parser_t *p) {
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
+    /* foreach：for-each 语法糖（前脱糖展开成索引 for 循环） */
+    if (check_keyword(p, "foreach")) return parse_foreach(p);
     if (check_keyword(p, "var"))    return parse_var_def(p);
     if (check_keyword(p, "func"))   return parse_func_def(p);
     if (check_keyword(p, "type"))   return parse_type_def(p);

@@ -10,7 +10,6 @@ extern "C" {
 #include "diag/diagnostic.h"
 #include "parser/ast_node.h"
 #include "parser/ast_program.h"
-#include "parser/lexer.h"
 
 /**
  * 前脱糖（front-end desugaring）——**parser 之后、sema 之前**的一层纯 AST
@@ -23,16 +22,56 @@ extern "C" {
  *
  * 这层**不认识语义概念**：不知道"闭包 / 函数 / 返回值 / 作用域"。
  *
- * 典型变换（本层该做的事，示例待落地）：
+ * 已落地的变换：`foreach`（for-each 语法糖）
  *
- *     foreach (var a of b) { <body> }
- *   ⇒
- *     var __idx_0 = 0;
- *     while (__idx_0 < len(b)) {
- *         var a = b[__idx_0];
- *         <body>
- *         __idx_0 += 1;
+ *     foreach ([var] a [: T] of b) { <body> }
+ *
+ * 迭代器 `b` **不是裸标识符**时（调用 / 切片 / 成员访问…先求值一次，落临时变量）：
+ *
+ *     {
+ *         var __arr_N = b;
+ *         for (var __idx_N: usize = 0usize;
+ *              __idx_N < len(__arr_N);
+ *              __idx_N = __idx_N + 1usize) {
+ *             var a [: T] = __arr_N[__idx_N];    // `var` 形态：每轮新声明
+ *             // 或者（无 `var` 形态）：a = __arr_N[__idx_N];
+ *             <body>
+ *         }
  *     }
+ *
+ * 迭代器 `b` 是**裸标识符**时，条件与下标直接引用 `b`（不复制、也不多包一层块）：
+ *
+ *     for (var __idx_N: usize = 0usize;
+ *          __idx_N < len(b);
+ *          __idx_N = __idx_N + 1usize) {
+ *         var a [: T] = b[__idx_N];
+ *         <body>
+ *     }
+ *
+ * **为什么步进放在 `for` 的 update 段，而不是 `while` 体尾**：`continue` 跳向
+ * update 段（for）而不是循环条件（while 体尾的 `__idx_N = __idx_N + 1` 会被
+ * 跳过 → 死循环）。展开因此落在 AST_FOR 上，而不是 AST_WHILE。
+ *
+ * **为什么裸标识符迭代器不落临时变量**：own 容器是 move-only，`var __arr_N = s`
+ * 会被 sema 拒（"own is move-only; use move() or clone()"），而 `len(s)` /
+ * `s[i]` 只是读。代价是"迭代器只求值一次"只对非标识符成立——裸标识符按名字
+ * 逐轮读取，所以循环体内修改该容器会影响后续迭代（想遍历快照就先 `var copy =
+ * v;` 再遍历 copy）。
+ *
+ * **为什么非标识符形态外面再包一个块**：`__arr_N` 是展开内部的临时名，不该泄漏
+ * 到用户作用域——否则同一块里两个 foreach 的临时变量都活到块尾，own 迭代器的
+ * 释放点也会错位。块作用域把它的生命周期精确圈在循环内（`__idx_N` 本来就在
+ * for 作用域里）。
+ *
+ * **合成节点一律继承源 `foreach` 的 token 区间**（诊断指向用户的代码），
+ * 运算符（`<` / `+` / `=`）用 `arena_token_symbol` 在 arena 里合成——与 parser
+ * 合成 `<<`/`>>` 的机制同一套，不需要往 token pool 里塞 token，也不存在
+ * "合成 token 没有源码位置"的问题。
+ *
+ * 合成节点一律**继承源 `foreach` 的 token 区间**（诊断指向用户的代码），
+ * 运算符（`<` / `+` / `=`）用 `arena_token_symbol` 在 arena 里合成——与 parser
+ * 合成 `<<`/`>>` 的机制同一套，不需要往 token pool 里塞 token，也不存在
+ * "合成 token 没有源码位置"的问题。
  *
  * **不属于本层**的脱糖：
  *   - `defer`（**后脱糖**）：需要"函数 / 返回值 / 块作用域"这些语义结构，
@@ -41,10 +80,10 @@ extern "C" {
  *   - `comptime if` 裁剪：需要编译期常量求值，在 sema Pass 3a。
  */
 typedef struct desugar_t {
-  arena_t    *arena;   /* 合成节点分配 */
-  diag_buf_t *diag;    /* 诊断缓冲（NULL = 静默） */
-  vec_t      *tokens;  /* token pool（诊断定位） */
-  uint32_t    seq;     /* 合成名字序号（`__idx_N` 等） */
+  arena_t    *arena;  /* 合成节点 / 合成 token 分配 */
+  diag_buf_t *diag;   /* 诊断缓冲（NULL = 静默） */
+  vec_t      *tokens; /* token pool（只读：合成节点的源码定位） */
+  uint32_t    seq;    /* 合成名字序号（`__arr_N` / `__idx_N`） */
 } desugar_t;
 
 /** 对整个程序做前脱糖（遍历 prog->funcs 的全部函数定义）。 */

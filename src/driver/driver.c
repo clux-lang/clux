@@ -593,8 +593,9 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
     }
 
     /* 4b. **前脱糖**（parser → sema 之间的纯 AST 变换）：
-       defer → 匿名局部函数 + 退出点调用。这一层不看符号表/不做类型检查，
-       只按 AST 结构改写；sema 因此只看到普通函数定义 + 普通调用语句。 */
+       `foreach` → 索引 for 循环这类纯语法结构改写。这一层不看符号表 / 不做
+       类型检查，只按 AST 结构改写；sema 因此看不到 AST_FOREACH。
+       （`defer` 是**后脱糖**，在 sema 内、comptime if 裁剪之后处理。） */
     {
       desugar_t ds = desugar_make(arena, diag, pool);
       desugar_program(&ds, (ast_program_t *)ast);

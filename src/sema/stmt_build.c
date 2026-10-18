@@ -991,6 +991,14 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
                      s->kind == AST_BREAK ? "break" : "continue");
         }
         break;
+      case AST_FOREACH:
+        /* 前脱糖（src/desugar/desugar.c）必须把 foreach 展开成索引 for 循环：
+           走到语义层说明前端漏展开。**不能静默跳过**——那会整条循环消失、
+           程序"编译通过但少做了事"。 */
+        diag_error(sema->diag, sema_loc(sema, s),
+                   "internal: 'foreach' reached semantic analysis unexpanded "
+                   "(front-end desugaring bug)");
+        break;
       default:
         break; /* 其他语句不创建作用域 */
     }

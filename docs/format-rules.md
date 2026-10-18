@@ -56,8 +56,10 @@ clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `s
 - **运算符后的 `(` 须空格**：`a + (b)`、`x = (y)`，不得紧贴成 `+(` / `=(`。
 - **函数调用 / 泛型实例化的 `(` 紧贴**：`main(`、`foo(`、`Vec(i32)` 不插空格。
 - **控制流关键字的 `(` 须空格**：`if (cond)`、`while (cond)`、`for (...)`、
-  `foreach (x of ...)`、`switch (...)`。注意 clux 的 `foreach`/`switch` 等软关键字
-  在词法期以标识符身份产出，故按**文本**判定而非 `kind == KEYWORD`。
+  `foreach (x of ...)`、`switch (...)`。格式化器以 **AST 语句种类**判定这条间距
+  （`render_stmt` 的 `AST_IF`/`AST_WHILE`/`AST_FOR`/`AST_FOREACH`/`AST_SWITCH`
+  分支各自输出 `"<关键字> ("`），不依赖 token 的 kind；因此 `foreach` 这类后来
+  加入的关键字无需动词法层。
 
 ### 一元前缀运算符
 

@@ -1,0 +1,103 @@
+// foreach.cx — 样例：for-each 语法糖（**前脱糖**展开成索引 for 循环）
+//
+//   foreach ([var] a [: T] of b) { … }
+//
+//   - `var a`：每轮**新声明**元素变量（类型可推断，或 `: T` 显式指定）
+//   - 不带 `var`：每轮写回**已定义**变量
+//   - 迭代器是**裸标识符**时不复制（own 容器 move-only，直接可遍历）；
+//     其他表达式（调用、切片、成员访问…）先求值到临时变量 → **只求值一次**
+//   - 展开成 `for`（步进在 update 段）→ `continue` 不会跳过步进
+//   - break / continue / return / defer / 嵌套 foreach 都按源码直觉工作
+//
+// 展开形状、两种迭代器形态与理由见 include/desugar/desugar.h。
+
+extern lib "*" as libc;
+extern cfunc libc::printf(format: str, ...): void;
+
+var CALLS = 0;
+
+func make_row(n: i32): [3]i32 {
+    CALLS = CALLS + 1;
+    return .[3]i32{ n, n * 2, n * 3 };
+}
+
+func sum_own(s: own []i32): i32 {
+    var acc = 0;
+    foreach (var v of s) {
+        acc = acc + v;
+    }
+    return acc;
+}
+
+func main(): i32 {
+    // ---- 1. `var` 形态：每轮新声明（类型由元素推断）----
+    var a = .[5]i32{ 10, 20, 30, 40, 50 };
+    var sum = 0;
+    foreach (var x of a) {
+        sum = sum + x;
+    }
+    libc::printf("1) sum = %d\n", sum);
+
+    // ---- 2. 不带 `var`：写回已定义变量 ----
+    var cur = 0;
+    foreach (cur of a) {
+        if (cur > 20) {
+            break;
+        }
+        libc::printf("2) cur = %d\n", cur);
+    }
+
+    // ---- 3. continue：步进不会被跳过（展开成 for，不是 while）----
+    var odd = 0;
+    foreach (var x of a) {
+        if (x % 20 == 0) {
+            continue;
+        }
+        odd = odd + x;
+    }
+    libc::printf("3) odd = %d\n", odd);
+
+    // ---- 4. 显式类型 / 借用元素：own 元素以 ref *T 借出 ----
+    var ptrs: own [] own *i32 = make(own *i32, 3, new i32{ 1 }, new i32{ 2 },
+                                     new i32{ 3 });
+    var deref = 0;
+    foreach (var p: ref *i32 of ptrs) {
+        deref = deref + p.*;
+    }
+    libc::printf("4) deref = %d, len = %d\n", deref, len(ptrs));
+
+    // ---- 5. 非标识符迭代器：先求值到临时变量（只调用一次）----
+    var once = 0;
+    foreach (var v of make_row(5)) {
+        once = once + v;
+    }
+    libc::printf("5) once = %d, calls = %d\n", once, CALLS);
+
+    // ---- 6. own 容器（裸标识符迭代器 → 不复制，循环后仍可用）----
+    var s: own []i32 = make(i32, 3, 7, 8, 9);
+    libc::printf("6) sum_own = %d\n", sum_own(move(s)));
+
+    // ---- 7. 切片表达式 + 嵌套 foreach ----
+    var m = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };
+    var total = 0;
+    foreach (var row of m) {
+        foreach (var cell of row) {
+            total = total + cell;
+        }
+    }
+    libc::printf("7) total = %d\n", total);
+
+    // ---- 8. return：在循环里提前返回 ----
+    libc::printf("8) first_big = %d\n", first_big(a));
+
+    return 0;
+}
+
+func first_big(a: [5]i32): i32 {
+    foreach (var x of a) {
+        if (x >= 40) {
+            return x;
+        }
+    }
+    return -1;
+}

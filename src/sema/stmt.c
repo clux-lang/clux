@@ -1614,6 +1614,7 @@ static void borrow_carry_merge(sema_t *sema, sema_symbol_t *carrier,
 /* 访问路径的根变量符号（`s2.q` → s2；`p.a.b` → p）。 */
 static sema_symbol_t *borrow_root_symbol(sema_t *sema, ast_node_t *e,
                                          sema_scope_t *scope) {
+  (void)sema; /* 签名与同族 helper 一致（调用点统一传 sema），此处不消费 */
   ast_node_t *cur = e;
   while (cur) {
     switch (cur->kind) {
@@ -3891,6 +3892,14 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       }
       break;
     }
+    case AST_FOREACH:
+      /* 前脱糖（src/desugar/desugar.c）必须把 foreach 展开成索引 for 循环；
+         到达这里说明前端漏展开。不静默跳过：漏一条循环会让程序"编译通过但
+         少做了事"（Pass 3a 的 build 同款诊断在此前触发，这里防止单跑 3b）。 */
+      diag_error(sema->diag, sema_loc(sema, stmt),
+                 "internal: 'foreach' reached semantic analysis unexpanded "
+                 "(front-end desugaring bug)");
+      break;
     default:
       break;
   }

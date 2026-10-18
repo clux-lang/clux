@@ -230,6 +230,11 @@ if(BUILD_TESTS)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   target_link_libraries(clux_test PRIVATE clux_core clux_cmd clux_parser clux_driver clux_vm ${CLUX_STAGE_LIBS} icu_data_init ICU::data GTest::gtest)
   clux_target_warnings(clux_test)
+  # 少数端到端用例要断言程序**自己打印的输出**（tests/foreach_test.cpp）：clux 的
+  # `libc::printf` 由 FFI 解析到系统 CRT，与测试进程自身 CRT 不是同一实例，进程内
+  # fd 重定向抓不到 → 改为子进程跑 CLI（`<同目录>/clux.exe run …`）。因此 CLI 必须
+  # 随测试一起构建，否则 `--target clux_test` 会留下一个不存在/过期的 clux.exe。
+  add_dependencies(clux_test clux)
 
   # M6 FFI：extern var（动态库导出的**数据符号**）的测试素材。
   # 系统库里没有"各种宽度的可写全局数据符号"可用（msvcrt 只有 int/指针那几类），

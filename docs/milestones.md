@@ -24,7 +24,7 @@
 
 **目标**：补全语言功能达到 C 的表达力（指针除外），保持 clux 自己的语法风格
 
-**语言特性**：struct、enum（严格分离）、tag union、cunion、静态数组 `[N]T`、元组 `<T1,T2>`、switch（if 语法糖）、do-while、type 别名 + 类型计算、sizeof/alignof/typeof、函数类型与函数字面量、位运算复合赋值、三元表达式、元组↔数组互转、optional `?T` + nil 重构、comptime var/func、CTFE、const/volatile 真实类型、fill 值包、鸭子类型协议、字节码工具链
+**语言特性**：struct、enum（严格分离）、tag union、cunion、静态数组 `[N]T`、元组 `<T1,T2>`、switch（if 语法糖）、do-while、`foreach`（for-each 前脱糖 → 索引 `for`，见 `src/desugar/`）、type 别名 + 类型计算、sizeof/alignof/typeof、函数类型与函数字面量、位运算复合赋值、三元表达式、元组↔数组互转、optional `?T` + nil 重构、comptime var/func、CTFE、const/volatile 真实类型、fill 值包、鸭子类型协议、字节码工具链
 
 **交付标准**：全部单元测试通过 + 新 examples 端到端通过 ✅
 
@@ -36,6 +36,7 @@
 - Phase 3: Sema 扩展（`resolve_type` 升级 + 类型计算 + 鸭子类型检查）✅
 - Phase 4: 构造 + 访问（`.<type>{...}` + 字段访问 + enum variant + 新字节码）✅
 - Phase 5: 控制流 + 表达式补全（switch desugar + do-while + 三元 + 位运算复合赋值）✅
+- Phase 5b: `foreach`（2026-10）——**前脱糖层**（`src/desugar/`，parser → sema 之间的纯 AST 变换）展开成索引 `for`；`tests/desugar_test.cpp` 断言 AST 形状，`tests/foreach_test.cpp` 端到端 ✅
 - Phase 6: 集成 + 测试（examples + 全测试通过 + 文档更新）✅
 - 工具链（非主线）：字节码 `.cxb` 与汇编 `.cxs`，统一由 `bc` 子命令提供（`bc emit` 源码→字节码 / `bc asm` 汇编 / `bc disasm` 反汇编，`-o` 指定输出）；`run` 按内容判定（有 `CXBC` 头当字节码，否则源码）；`build` 专责未来的机器码二进制（未实现）✅ 已完成（2026-09-12）
 

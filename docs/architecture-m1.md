@@ -114,15 +114,50 @@ lex → parse(AST) → 前脱糖(纯 AST 变形) → sema(pass0..3b，含 compti
 
 | 阶段 | 位置 | 认识什么 | 内容 |
 |---|---|---|---|
-| **前脱糖** | `src/desugar/`（库 `clux_desugar`），parser 之后 sema 之前 | 只认识**语法形状**；不知道"闭包 / 函数 / 返回值 / 作用域"，不查符号表、不做类型检查 | 形如 `foreach (var a of b) { … }` → `while` 索引循环 这类纯 AST 变形 |
+| **前脱糖** | `src/desugar/`（库 `clux_desugar`），parser 之后 sema 之前 | 只认识**语法形状**；不知道"闭包 / 函数 / 返回值 / 作用域"，不查符号表、不做类型检查 | `foreach` → 索引 `for` 循环（见下）这类纯 AST 变形 |
 | **后脱糖** | sema 内部（`stmt_build.c::desugar_defers`），**`comptime if` 裁剪之后** | 需要"函数 / 返回值 / 块作用域"结构 | `defer` → 匿名局部函数 + 退出点（块尾 / return / break / continue）逆序调用 |
 
 为什么 `defer` 必须在裁剪之后：它要生成"闭包 + 退出点调用"这种依赖语义结构的
 代码；若先于裁剪，被裁剪分支里的 defer 会留下悬空的闭包名。
 
-`format` 两段脱糖都不走（只解析，保持源码形态）。
+`format` 两段脱糖都不走（只解析，保持源码形态）——`fmt` 以 **AST 渲染**回源码，
+`AST_FOREACH` 有独立渲染分支（`foreach (var a of b) { … }` 逐字保留，`continue`
+不会被格式化改写成展开形态）。
 
-## 2## 2. 模块职责
+#### 前脱糖已实现：`foreach`（for-each 语法糖）
+
+```
+foreach ([var] a [: T] of b) { <body> }
+⇒
+{
+    var __arr_N = b;                        // 仅当 b **不是裸标识符**
+    for (var __idx_N: usize = 0usize;
+         __idx_N < len(__arr_N);
+         __idx_N = __idx_N + 1usize) {
+        var a [: T] = __arr_N[__idx_N];     // `var` 形态：每轮新声明
+        // 或：a = __arr_N[__idx_N];        // 无 `var` 形态：写回已定义变量
+        <body>
+    }
+}
+```
+
+- **为什么展开成 `for` 而不是 `while`**：`continue` 跳向 update 段（for）而不是
+  循环条件（while 体尾的 `__idx_N = __idx_N + 1` 会被跳过 → 死循环）。
+- **为什么裸标识符迭代器不落临时变量**：own 容器是 move-only，`var __arr = s`
+  会被 sema 拒（要求 `move()`/`clone()`）；而 `len(s)` / `s[i]` 只是读。
+  其他形态（调用 / 切片 / 成员访问…）先求值到临时变量 → **只求值一次**。
+- **为什么外层再包一个块**：临时变量 `__arr_N` 不该泄漏到用户作用域，own 迭代器
+  的释放点也因此精确圈在循环内。
+- 合成节点一律**继承源 `foreach` 的 token 区间**（诊断指向用户代码，而不是
+  `<desugar>`）；运算符（`<` / `+` / `=`）用 `arena_token_symbol` 在 arena 里合成
+  ——与 parser 合成 `<<`/`>>` 同一机制，不往 token pool 里塞 token。
+- 覆盖：嵌套 foreach、闭包 / defer / 局部函数 / comptime func 体内的 foreach
+  （walker 下钻函数字面量与语句层的所有块）。
+- 测试：`tests/desugar_test.cpp`（AST 形状，完全不经 sema）、
+  `tests/foreach_test.cpp`（端到端输出，含 `continue` 不跳过步进、迭代器只求值
+  一次、own 容器可直接遍历、闭包 / defer / comptime func 内组合）。
+
+## 2. 模块职责
 
 ### 2.1 Lexer (include/parser/lexer.h, src/parser/lexer.c)
 
@@ -1364,15 +1399,15 @@ clang: error: no such file or directory: '<build>/third_party/icu/icu_data_gen.c
 ## 5. 测试策略
 
 - **单元测试**：Lexer、Parser、Sema、VM（type/vtable/value/scope/function）、字节码（容器 / 汇编 / 反汇编 / 序列化）、核心容器（allocator / vec / string / 映射 / stream）各模块独立测试
-- **集成测试**：`.cx` 程序端到端执行（经 `driver_run_file`）并比对输出；`examples/` 全量扫描；`.cxs → .cxb → .cxs → .cxb` 往返字节级稳定
+- **集成测试**：`.cx` 程序端到端执行（经 `driver_run_file`）并比对输出；`.cxs → .cxb → .cxs → .cxb` 往返字节级稳定。`foreach` 的输出断言例外地**spawn CLI**（`clux run`，见 `tests/foreach_test.cpp`）——程序的 `libc::printf` 解析到系统 CRT，与测试进程 CRT 不是同一实例，进程内 fd 重定向抓不到它。
 
 **当前规模**（2026-10 实测，Windows / clang 22.1.8 / Debug）：
 
 | 项目 | 结果 |
 |------|------|
-| 注册测试数 | 1570 |
-| `clux_test` 通过 | 1570 / 1570 |
-| `examples/*/*.cx` 入口示例 | 35 / 35 通过 |
+| 注册测试数 | 2062 |
+| `clux_test` 通过 | 2062 / 2062 |
+| `examples/*/*.cx` 入口示例 | 45 / 45 通过（手工全量 sweep） |
 | `examples/asm/*.cxs` | 5 / 5 通过 |
 
 > **运行前提**：部分测试经 `temp_directory_path()` / `tmpnam` 写临时文件；若宿主拒绝

@@ -23,6 +23,7 @@
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
 #include "parser/ast_for.h"
+#include "parser/ast_foreach.h"
 #include "parser/ast_return.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_assign.h"
@@ -1187,6 +1188,24 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             if (fo->update) render_expr(f, fo->update);
             sb_ch(&f->sb, ')');
             render_block(f, fo->body);
+            break;
+        }
+        case AST_FOREACH: {
+            /* foreach ([var] name [: T] of iterable) { … }——语法糖的**源码形态**
+               必须完整回显（fmt 不走脱糖，见 docs/architecture-m1.md §1.x；
+               漏渲染会让格式化产物丢掉整个循环体 = 静默数据损坏）。 */
+            ast_foreach_t *fe = (ast_foreach_t *)node;
+            sb_str(&f->sb, "foreach (");
+            if (fe->is_decl) sb_str(&f->sb, "var ");
+            sb_put(&f->sb, fe->name.ptr, fe->name.len);
+            if (fe->type_expr) {
+                sb_str(&f->sb, ": ");
+                render_expr(f, fe->type_expr);
+            }
+            sb_str(&f->sb, " of ");
+            render_expr(f, fe->iterable);
+            sb_ch(&f->sb, ')');
+            render_block(f, fe->body);
             break;
         }
         case AST_RETURN: {

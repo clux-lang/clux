@@ -14,7 +14,9 @@
 #include "parser/ast_func_type.h"
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
+#include "parser/ast_make.h"
 #include "parser/ast_move.h"
+#include "parser/ast_new.h"
 #include "parser/ast_option.h"
 #include "parser/ast_is_tag.h"
 #include "parser/ast_opt_is_some.h"
@@ -24,6 +26,7 @@
 #include "parser/ast_owned_type.h"
 #include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
+#include "parser/ast_slice.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_tuple.h"
@@ -131,6 +134,28 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
     }
     case AST_MEMBER:
       return ast_walk_preorder(((ast_member_t *)node)->object, visit, user);
+    /* 以下三种一度漏在 switch 之外（落入 default 被当叶子），它们的子节点是
+       普通表达式 —— `var f = .Box{ .cb = func(){ … } };` / `make(T, N, f())` /
+       `a[lo:hi]` 里的函数字面量因此遍历不到（前脱糖漏下钻 → 闭包里的 foreach
+       不展开）。type_rhs_uses_var / probe_type_slot 的谓词只关心类型表达式，
+       补全不影响它们；补全是纯增量。 */
+    case AST_NEW: { /* new T{ fields }（type 可 NULL = 匿名构造） */
+      ast_new_t *n = (ast_new_t *)node;
+      return ast_walk_preorder(n->type, visit, user) &&
+             visit_chain(n->fields, visit, user);
+    }
+    case AST_MAKE: { /* make(T, N, inits...) */
+      ast_make_t *n = (ast_make_t *)node;
+      return ast_walk_preorder(n->elem_type, visit, user) &&
+             ast_walk_preorder(n->length, visit, user) &&
+             visit_chain(n->inits, visit, user);
+    }
+    case AST_SLICE: { /* expr[low:high]（low/high 可 NULL） */
+      ast_slice_t *n = (ast_slice_t *)node;
+      return ast_walk_preorder(n->object, visit, user) &&
+             ast_walk_preorder(n->low, visit, user) &&
+             ast_walk_preorder(n->high, visit, user);
+    }
     case AST_UNWRAP:
       return ast_walk_preorder(((ast_unwrap_t *)node)->operand, visit, user);
     case AST_ADDR:

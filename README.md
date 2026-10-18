@@ -36,7 +36,10 @@ compile → VM). M6 (FFI) is designed but not started. See `docs/milestones.md`.
   computation (`extends`, `==`, `?:`); `sizeof` / `alignof` / `typeof`; function types
   `func(...)->T` and function literals; optional `?T` with `nil` (no path narrowing) and
   `.!` unwrap; `comptime var` / `comptime func`; `const` / `volatile` as real types;
-  fill value packs `.[N]T{ <v, M> }`; `.cxb` / `.cxs` bytecode toolchain.
+  fill value packs `.[N]T{ <v, M> }`; `.cxb` / `.cxs` bytecode toolchain;
+  **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
+  desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
+  sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
 - **M3 — pointers and ownership**: single-ownership `own *T` / `ref *T` / `fatal *T`
   with explicit scope annotations (`'<a>`), `move` / `clone`, `new T{...}`, postfix
   `.&` / `.*`, `opaque` (≈ `void*`), closure capture rules; RC family `share *T` /
@@ -104,7 +107,10 @@ clux build <file.cx>                  # native backend — not implemented yet
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error), `2` runtime error.
 
-Examples live in `examples/` — 35 entry programs (one `.cx` per directory) plus 5 `.cxs` bytecode-assembly files. Modules imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`), so every top-level `.cx` is runnable.
+Examples live in `examples/` — 39 entry directories (one or more `.cx` files each,
+one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules
+imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
+so every top-level `.cx` is runnable.
 Try:
 
 ```sh
@@ -127,6 +133,7 @@ Hand-written bytecode round-trip:
 ```
 src/core/        allocator, arena, vec, rbtree, strmap, omap, stream, string
 src/parser/      lexer + recursive-descent / Pratt parser (+ source formatter)
+src/desugar/     front-end desugaring (parser → sema; `foreach` → index `for`)
 src/vm/          value engine: type/vtable, value, scope, function, bytecode, module
 src/sema/        semantic analysis (shadow-value driven) + comptime
 src/ctfe/        compile-time evaluation (AST interpreter for constant slots)
@@ -169,9 +176,11 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-1570 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
-core containers; integration tests execute programs end-to-end through `driver_run_file`,
-including the `examples/` sweep and the `.cxs ⇄ .cxb` round-trip.
+2062 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
+core containers; integration tests execute programs end-to-end through `driver_run_file`
+(for `foreach` the CLI is spawned so the program's own `printf` output can be
+asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the
+`.cxs ⇄ .cxb` round-trip.
 
 > **Host requirement for the whole suite**: some tests create temp files via
 > `std::filesystem::temp_directory_path()` / `tmpnam`. On hosts where spawned
