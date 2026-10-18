@@ -12,6 +12,8 @@
 // 展开发生在前脱糖（parser → sema 之间）——**纯语法改写**，sema/compiler 看不到
 // `[[...]]`。装饰器在编译期求值（全局初始化器必须可折叠），因此函数装饰器要用
 // comptime 函数（它能返回函数/闭包，见 comptime_closure 能力）。
+//
+// 只允许**顶层**：全局 var / 全局 func / struct 成员；局部声明上的装饰器报错。
 
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
@@ -25,6 +27,11 @@ comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {
     return func |f| w(x: i32): i32 { return f(x) + 100; };
 }
 
+// ---- 方法装饰器：接收者作为第一个参数，返回"包一层"的新方法 ----
+comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {
+    return func |f| w(self: ref *Point): i32 { return f(self) + 100; };
+}
+
 func double(x: i32): i32 { return x * 2; }
 
 // 1) 全局变量：var a = twice(21)
@@ -36,25 +43,22 @@ func double(x: i32): i32 { return x * 2; }
 // 3) 顶层函数：dbl = add100(double)，只装饰一次（模块初始化期）
 [[add100]] func dbl(x: i32): i32 { return double(x); }
 
-// 4) 方法装饰：成员 get 变成转发包装方法（源方法体在模块级）
+// 4) 方法装饰：get 变成"包装方法"，实际调用的是装饰后的闭包
 struct Point {
     x: i32;
-    [[keep]] func get(self: ref *Point): i32 { return self.x; }
-}
-
-// 恒等装饰器：方法装饰器目前要求"接收者签名一致"
-comptime func keep(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {
-    return f;
+    [[add100m]] func get(self: ref *Point): i32 { return self.x; }
+    func plain(self: ref *Point): i32 { return self.x + 1; }
 }
 
 func main(): i32 {
-    libc::printf("a = %d\n", a);            // 42
-    libc::printf("b = %d\n", b);            // 8
-    libc::printf("dbl(5) = %d\n", dbl(5));  // 110
+    libc::printf("a = %d\n", a);             // 42
+    libc::printf("b = %d\n", b);             // 8
+    libc::printf("dbl(5) = %d\n", dbl(5));   // 110
     var p = .Point{ .x = 7 };
-    libc::printf("p.get() = %d\n", p.get()); // 7
+    libc::printf("p.get() = %d\n", p.get());     // 107（7 + 100）
+    libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
 
-    if (a != 42 || b != 8 || dbl(5) != 110 || p.get() != 7) {
+    if (a != 42 || b != 8 || dbl(5) != 110 || p.get() != 107 || p.plain() != 8) {
         return 1;
     }
     return 0;
