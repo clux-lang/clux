@@ -138,6 +138,29 @@ bool expect_symbol(parser_t *p, const char *sym) {
     return false;
 }
 
+ast_node_t *parse_reserved_ident_error(parser_t *p, const token_t *tok,
+                                       const char *what) {
+    if (!p || !tok) return NULL;
+    strslice_t s = token_strslice(tok);
+    const char *w = what ? what : "identifier";
+    if (s.len >= 2 && s.ptr && s.ptr[0] == '_' && s.ptr[1] == '_') {
+        p->has_error = true;
+        return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos + 1,
+                             "invalid %s '%.*s': identifiers starting with '__' "
+                             "are reserved for compiler-generated names (and "
+                             "future magic methods)",
+                             w, (int)s.len, s.ptr);
+    }
+    if (s.len == 1 && s.ptr && s.ptr[0] == '_') {
+        p->has_error = true;
+        return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos + 1,
+                             "invalid %s '_': '_' is the discard marker and "
+                             "cannot be used as an identifier",
+                             w);
+    }
+    return NULL;
+}
+
 /* ---- 诊断 ---- */
 
 void parse_error(parser_t *p, const char *fmt, ...) {

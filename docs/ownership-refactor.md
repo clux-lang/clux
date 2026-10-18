@@ -646,6 +646,19 @@ struct __add_closure { __add_fn_t callee; struct { int a; } env; };
 
 `closure_scope` 只剩"调用帧作用域链的挂点"（parent = root_scope），不再承载捕获。
 
+### 7.1.11 保留标识符：`__` 前缀与裸 `_`（2026-10）
+
+生成的销毁/clone 函数与闭包聚合重构引入了大量 `__` 前缀内部名
+（`__destroy_<n>` / `__clone_<n>` / `__cloneptr_<n>` / `__cloneslice_<n>` /
+`__ctx` / `__deep_clone` / `__cl_<n>`）。据此确立语言规则：
+
+- `__` 开头 = 编译器生成名 + 未来魔法方法的保留空间（用户代码不得声明/引用）；
+- 裸 `_` = 丢弃标记，不能作标识符；
+- `a__b`、`_tmp` 合法。
+
+实现：parser 的 `parse_reserved_ident_error`（所有声明位置 + 表达式引用），
+编译器内部名由 sema/compiler 直接生成（不经过 parser），不受影响。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion

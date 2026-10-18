@@ -30,10 +30,14 @@
 static ast_node_t *parse_param(parser_t *p) {
     uint32_t tb = p->pos;
 
-    /* 参数名：标识符 */
+    /* 参数名：标识符（保留名：`__` 前缀 / 裸 `_` 拒绝） */
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected parameter name");
+    }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "parameter name");
+        if (rerr) return rerr;
     }
     strslice_t name = token_strslice(cur_token(p));
     advance(p);
@@ -96,6 +100,10 @@ static ast_node_t *parse_capture_item(parser_t *p) {
         if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected capture name after '('");
+        }
+        {
+            ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "capture name");
+            if (rerr) return rerr;
         }
         strslice_t name = token_strslice(cur_token(p));
         advance(p);
@@ -256,6 +264,10 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     strslice_t name = pre_name.len > 0 ? pre_name : STRSLICE_EMPTY;
     if (pre_name.len == 0 &&
         check_kind(p, TOKEN_TYPE_IDENTIFIER) && !check_symbol(p, "(")) {
+        {
+            ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "function name");
+            if (rerr) return rerr;
+        }
         name = token_strslice(cur_token(p));
         advance(p);
         skip_trivia(p);

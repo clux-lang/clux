@@ -60,6 +60,14 @@ ast_node_t *parse_import(parser_t *p) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected namespace alias after 'import'");
     }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "namespace alias");
+        if (rerr) return rerr;
+    }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "library alias");
+        if (rerr) return rerr;
+    }
     strslice_t alias = token_strslice(cur_token(p));
     advance(p);
     skip_trivia(p);

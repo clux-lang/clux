@@ -22,6 +22,10 @@ ast_node_t *parse_enum_def(parser_t *p) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected enum name after 'enum'");
     }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "enum name");
+        if (rerr) return rerr;
+    }
     strslice_t name = token_strslice(cur_token(p));
     advance(p);
     skip_trivia(p);
@@ -66,6 +70,10 @@ ast_node_t *parse_enum_def(parser_t *p) {
                                  "expected variant name in enum definition");
         }
         uint32_t vb = p->pos;
+        {
+            ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "enum variant");
+            if (rerr) return rerr;
+        }
         strslice_t vname = token_strslice(cur_token(p));
         advance(p);
         skip_trivia(p);

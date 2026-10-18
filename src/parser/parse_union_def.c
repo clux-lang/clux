@@ -26,6 +26,10 @@ ast_node_t *parse_union_def(parser_t *p) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected union name after 'union'");
     }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "union name");
+        if (rerr) return rerr;
+    }
     strslice_t name = token_strslice(cur_token(p));
     advance(p);
     skip_trivia(p);
@@ -53,6 +57,10 @@ ast_node_t *parse_union_def(parser_t *p) {
         if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "expected field name in union definition");
+        }
+        {
+            ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "field name");
+            if (rerr) return rerr;
         }
         uint32_t fb = p->pos;
         strslice_t fname = token_strslice(cur_token(p));

@@ -16,6 +16,9 @@ ast_node_t *parse_block(parser_t *p) {
         ast_node_t *stmt = parse_stmt(p);
         if (!stmt || stmt->kind == AST_ERROR) {
             if (!stmt) {
+                /* 子解析器已经产出精确诊断（如保留标识符规则）→ 不再叠加
+                   "expected statement" 级联。 */
+                if (p->has_error) return NULL;
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                      "expected statement in block");
             }

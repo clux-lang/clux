@@ -97,6 +97,24 @@ nil     comptime extends
 - 关键字按 2.1 的 ASCII 表识别，Unicode 标识符不会与关键字冲突
 - 不具备 ID_Start 的字符（如 `€`、`©`、emoji）是**词法错误**，见 2.7
 
+**保留标识符（2026-10）**
+
+编译器大量使用 `__` 前缀的内部名字（生成的 `__destroy_<n>` / `__clone_<n>` /
+`__cloneptr_<n>` / `__cloneslice_<n>`、闭包上下文 `__ctx`、clone 兜底
+`__deep_clone`、切片临时 `__cl_<n>` 等），因此把该名字空间保留出来：
+
+- 以 **`__` 开头**的标识符**保留**给编译器生成名与**未来的魔法方法**
+  （`__init__` 一类）——用户代码不得声明**或引用**，诊断：
+  `invalid <what> '__x': identifiers starting with '__' are reserved for
+  compiler-generated names (and future magic methods)`
+- **裸 `_`** 是丢弃标记（`_ = expr`），不能作为标识符（变量 / 参数 / 字段 /
+  类型名 / 捕获名 …），诊断：`'_' is the discard marker and cannot be used as
+  an identifier`
+- 名字**中间**含 `__`（`a__b`）与**单下划线开头**（`_tmp`）合法
+
+该规则在所有声明位置（变量 / 参数 / 捕获 / 函数 / 类型 / `struct` / `union` /
+`cunion` / `enum` / 字段 / import 别名）与表达式引用位置统一执行。
+
 ### 2.5.1 源文件编码与 BOM
 
 - 源文件必须是 **UTF-8**

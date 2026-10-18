@@ -15,6 +15,10 @@ ast_node_t *parse_type_def(parser_t *p) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected type name after 'type'");
     }
+    {
+        ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "type name");
+        if (rerr) return rerr;
+    }
     strslice_t name = token_strslice(cur_token(p));
     advance(p);
     skip_trivia(p);

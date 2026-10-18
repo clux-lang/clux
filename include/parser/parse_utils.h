@@ -63,6 +63,18 @@ bool expect_keyword(parser_t *p, const char *kw);
 
 /** 当前 token 必须是指定符号，成功则消费返回 true；失败报错返回 false，不推进游标。 */
 bool expect_symbol(parser_t *p, const char *sym);
+/**
+ * 保留标识符检查（语言规则）：
+ *   - 以 **`__`** 开头的标识符保留给**编译器生成名**（`__destroy_<n>` /
+ *     `__clone_<n>` / `__ctx` / `__cl_<n>` …）与未来的魔法方法 —— 用户代码
+ *     不得以 `__` 开头声明/引用标识符；
+ *   - 裸 **`_`** 是丢弃标记（`_ = expr`），不能作为标识符使用。
+ * 名字中间含 `__`（如 `a__b`）或单下划线开头（如 `_tmp`）均合法。
+ * 非法时产出诊断并返回 false。`what` 用于诊断措辞（如 "variable name"）。
+ */
+ast_node_t *parse_reserved_ident_error(parser_t *p, const token_t *tok,
+                                       const char *what);
+
 
 /* ---- 诊断 ---- */
 
