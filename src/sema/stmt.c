@@ -26,6 +26,7 @@
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_for_index.h"
 #include "parser/ast_move.h"
+#include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
@@ -72,6 +73,7 @@
 #include "parser/ast_walk.h"
 #include "parser/lexer.h"
 #include "parser/ast_move.h"
+#include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"   /* ast_move_t（借源收集剥 move/clone） */
 #include "parser/ast_addr.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
@@ -744,32 +746,43 @@ static void name_to_cstr(strslice_t s, char *buf, size_t cap) {
   buf[n] = '\0';
 }
 
-/* ---- R3 借用登记/释放（m3-design §7） ---- */
+/* ---- R3 借用登记/释放（m3-design §7，2026-10 多源） ---- */
 
-/* 借源登记（幂等切换）：var 绑定新借用源 src（或 NULL=解除）。
-   旧源递减、新源递增——重绑定（r = c;）切换借用目标。 */
-static void borrow_switch(sema_symbol_t *var, sema_symbol_t *src) {
-  if (var->borrow_src) var->borrow_src->borrow_count--;
-  var->borrow_src = src;
-  if (src) src->borrow_count++;
+/* 借源集合释放：每个来源 borrow_count--（借用载体作用域退出 / 换绑前调用）。 */
+static void borrow_srcs_release(sema_symbol_t *var) {
+  if (!var) return;
+  for (borrow_src_node_t *n = var->borrow_srcs; n; n = n->next) {
+    if (n->sym) n->sym->borrow_count--;
+  }
+  var->borrow_srcs = NULL;
+  var->borrow_src_count = 0;
 }
 
-/* 从初始化表达式提取借用源符号（仅变量标识符直读：var q: ref *i32 = p /
-   var q: opaque = p）。new/move/clone 产物是自有堆块（非借用），opaque
-   从指针隐式转换、as 恢复（链式借 opaque 的源）不登记——链式借用由
-   opaque 变量自身的 borrow_src 传递。返回 NULL = 非借用绑定。 */
-static sema_symbol_t *init_borrow_src(sema_t *sema, ast_node_t *init,
-                                      sema_scope_t *scope) {
-  (void)sema; /* 仅查符号表，无 vm 交互 */
-  if (!init || init->kind != AST_IDENT) return NULL;
-  sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)init)->name);
-  if (!s || s->kind != SEMA_SYM_VAR) return NULL;
-  /* 源类型是 own/ref 指针，或 opaque（链式借用载体）——登记借用 */
-  if (s->type && (s->ownership == OWN_OWN ||
-                  s->ownership == OWN_REF ||
-                  s->type->kind == TYPE_KIND_OPAQUE))
-    return s;
-  return NULL;
+/* 借源集合登记（幂等切换）：先释放旧集合，再按 srcs[0..n) 建立新集合
+   （去重；每个来源 borrow_count++；节点 arena 分配）。 */
+static void borrow_srcs_set(sema_t *sema, sema_symbol_t *var,
+                            sema_symbol_t **srcs, size_t n) {
+  if (!var) return;
+  borrow_srcs_release(var);
+  borrow_src_node_t *tail = NULL;
+  for (size_t i = 0; i < n; i++) {
+    sema_symbol_t *s = srcs[i];
+    if (!s) continue;
+    bool dup = false;
+    for (borrow_src_node_t *k = var->borrow_srcs; k; k = k->next) {
+      if (k->sym == s) { dup = true; break; }
+    }
+    if (dup) continue;
+    borrow_src_node_t *node = (borrow_src_node_t *)arena_calloc(
+        sema->arena, 1, sizeof(borrow_src_node_t), ALIGNOF(max_align_t));
+    if (!node) break;
+    node->sym = s;
+    if (tail) tail->next = node;
+    else var->borrow_srcs = node;
+    tail = node;
+    s->borrow_count++;
+    var->borrow_src_count++;
+  }
 }
 
 /* ---- R3 派生规则：**从聚合的 own 槽位借出** → 聚合本身是借源（2026-10） ----
@@ -959,23 +972,135 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
   return owned ? root : NULL;
 }
 
-/* 变量定义点借用登记：声明类型是 ref *T 或 opaque，且初始化表达式是
-   **裸变量**（`= p`）或**从聚合 own 槽位借出**（`= b.p` / `= a[i]` / `= o.!` /
-   `= p.*.f` / `= x.&`）→ 登记借源（源 borrow_count++）。
-   显式类型已知才能判定借用载体。 */
+/* 借源收集（**保守**）：把一个"借用表达式"的静态可判来源**全部**收集。
+ *
+ * 编译期不可能精确判定（停机问题）——例如
+ *     func fn(a: ref *T, b: ref *T): '<a,b> ref *T {
+ *         if (a.* == 1) { return a; } else { return b; }
+ *     }
+ * 返回值到底来自 a 还是 b 无法静态分析。因此**保守**处理：返回值同时继承
+ * 返回标注里**每个参数名**对应实参的来源（本函数按标注名映射到实参并递归）。
+ *
+ * 支持形态：
+ *   - 裸变量（`= p`，own/ref 指针或 opaque；opaque 链式继承 p 的来源）；
+ *   - 从聚合 own 槽位借出（`= b.p` / `= a[i]` / `= o.!` / `= p.*.f`）；
+ *   - `x.&`（取址借存储）；
+ *   - 用户函数调用：返回标注（`'<a,b> ref *T`）→ 形参名 → 实参递归；
+ *   - 内建 `data(s)`：借 s 的存储 → 收集 s 的来源。
+ * 返回收集数量（去重；上限 cap，超出丢弃已收集项之后的——保守限度）。
+ */
+static size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
+                             sema_symbol_t **out, size_t cap);
+
+static size_t borrow_collect_add(sema_symbol_t **out, size_t n, size_t cap,
+                                 sema_symbol_t *s) {
+  if (!s || n >= cap) return n;
+  for (size_t i = 0; i < n; i++)
+    if (out[i] == s) return n;   /* 去重 */
+  out[n] = s;
+  return n + 1;
+}
+
+static size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
+                             sema_symbol_t **out, size_t cap) {
+  if (!e || cap == 0) return 0;
+  size_t n = 0;
+  switch (e->kind) {
+  case AST_IDENT: {
+    sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)e)->name);
+    if (!s || s->kind != SEMA_SYM_VAR) return 0;
+    bool carrier = s->type && (s->ownership == OWN_OWN ||
+                               s->ownership == OWN_REF ||
+                               s->type->kind == TYPE_KIND_OPAQUE);
+    if (!carrier) return 0;
+    n = borrow_collect_add(out, n, cap, s);
+    /* 链式借用（opaque / ref 变量再借出）：继承其来源 */
+    for (borrow_src_node_t *k = s->borrow_srcs; k; k = k->next)
+      n = borrow_collect_add(out, n, cap, k->sym);
+    return n;
+  }
+  case AST_MEMBER:
+  case AST_INDEX:
+  case AST_DEREF:
+  case AST_UNWRAP: {
+    sema_symbol_t *root = borrow_source_from_owned_path(sema, e, scope);
+    if (root) n = borrow_collect_add(out, n, cap, root);
+    return n;
+  }
+  case AST_ADDR: {
+    ast_addr_t *a = (ast_addr_t *)e;
+    return borrow_collect(sema, a->operand, scope, out, cap);
+  }
+  case AST_CALL: {
+    ast_call_t *call = (ast_call_t *)e;
+    sema_symbol_t *csym = NULL;
+    if (call->callee && call->callee->kind == AST_IDENT) {
+      csym = sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
+    } else if (call->callee && call->callee->kind == AST_FUNC_REF) {
+      /* sema 常把 callee 折叠成 AST_FUNC_REF（名字保留，供内建判定） */
+      const ast_func_ref_t *fr = (const ast_func_ref_t *)call->callee;
+      if (fr->name.ptr) csym = sema_lookup(scope, fr->name);
+    }
+    /* 内建 data(s)：借 s 的存储（§8.4）→ 收集 s 的来源 */
+    if (csym && csym->kind == SEMA_SYM_FUNC &&
+        csym->builtin_op == SEMA_BUILTIN_DATA) {
+      return borrow_collect(sema, call->args, scope, out, cap);
+    }
+    /* 用户函数：返回标注里的**参数名**即来源声明（可多个）→ 映射到实参 */
+    const ast_func_def_t *fn = NULL;
+    if (csym && csym->kind == SEMA_SYM_FUNC && csym->ast &&
+        csym->ast->kind == AST_FUNC_DEF) {
+      fn = (const ast_func_def_t *)csym->ast;
+    } else if (call->callee && call->callee->kind == AST_FUNC_REF) {
+      sema_func_t *sf =
+          sema_func_by_id(sema, ((const ast_func_ref_t *)call->callee)->fid);
+      if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+        fn = (const ast_func_def_t *)sf->def;
+    }
+    if (!fn || !fn->return_expr) return 0;
+    strslice_t *names = NULL;
+    size_t ncnt = 0;
+    sema_annot_peek(fn->return_expr, &names, &ncnt);
+    if (!names || ncnt == 0) return 0;
+    for (size_t k = 0; k < ncnt; k++) {
+      ast_node_t *arg = call->args;
+      for (ast_node_t *p = fn->params; p && arg; p = p->next, arg = arg->next) {
+        const ast_var_def_t *pd = (const ast_var_def_t *)p;
+        if (!strslice_eq(pd->name, names[k])) continue;
+        n += borrow_collect(sema, arg, scope, out + n, cap - n);
+        break;
+      }
+    }
+    return n;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* 变量定义点借用登记：声明类型是 ref *T 或 opaque → 收集初始化表达式的
+   **全部**静态可判来源并登记（集合，见 sema_symbol_t::borrow_srcs）。
+   兜底：表达式来源不可判（外部调用/未知来源）时，**注解即来源**——
+   调用点标注里写的名字（`var r: '<b,c> ref *T = …`）本身就是借源声明。 */
 static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
                                    ast_node_t *init, sema_scope_t *scope) {
   if (!sym || !sym->type) return;
   if (sym->ownership != OWN_REF &&
       sym->type->kind != TYPE_KIND_OPAQUE)
     return;
-  sema_symbol_t *src = init_borrow_src(sema, init, scope);
-  if (!src) src = borrow_source_from_owned_path(sema, init, scope);
-  borrow_switch(sym, src);
+  sema_symbol_t *srcs[16];
+  size_t n = borrow_collect(sema, init, scope, srcs, 16);
+  if (n == 0 && sym->annot_names) {
+    for (size_t i = 0; i < sym->annot_count; i++) {
+      sema_symbol_t *a = sema_lookup(scope, sym->annot_names[i]);
+      if (a && a->kind == SEMA_SYM_VAR) n = borrow_collect_add(srcs, n, 16, a);
+    }
+  }
+  borrow_srcs_set(sema, sym, srcs, n);
 }
 
 
-/* 作用域退出：遍历本作用域直接符号，递减 borrow_src 的 borrow_count。
+/* 作用域退出：遍历本作用域直接符号，释放借源集合（每个来源 borrow_count--）。
    借用载体随作用域消亡，源符号恢复可 move（§7"有 ref 存活禁止 move"的
    存活边界 = 借用变量所在作用域）。 */
 void sema_scope_release_borrows(sema_scope_t *scope) {
@@ -985,10 +1110,7 @@ void sema_scope_release_borrows(sema_scope_t *scope) {
   for (size_t k = 0; k < nk; k++) {
     const char *key = (const char *)vec_get(keys, k);
     sema_symbol_t *sym = (sema_symbol_t *)strmap_get(scope->symbols, key);
-    if (sym && sym->borrow_src) {
-      sym->borrow_src->borrow_count--;
-      sym->borrow_src = NULL;
-    }
+    if (sym) borrow_srcs_release(sym);
   }
 }
 
@@ -1881,42 +2003,53 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
            将来恢复含指针的聚合时，判据应改为"聚合的 ref 槽位表"（扁平槽位模型，
            见 docs/ownership-refactor.md §2.5），而不是恢复类型层递归谓词。
            顶层 ref 的重绑定检查见下面的 R3 分支。 */
-        /* R3 重绑定切换借源：ref/opaque 变量 r = c; 换借目标（旧源递减
-           新源递增）。赋值右值直读变量才登记（与定义点同规则）。 */
+        /* R3 重绑定切换借源：ref/opaque 变量 r = c; 换借目标（旧来源集合
+           释放、新来源集合登记，与定义点同一收集器——含函数返回值按标注
+           继承多来源）。 */
         if (sym->type &&
             (sym->ownership == OWN_REF ||
              sym->type->kind == TYPE_KIND_OPAQUE)) {
-          sema_symbol_t *src = init_borrow_src(sema, as->value, scope);
-          if (!src)
-            src = borrow_source_from_owned_path(sema, as->value, scope);
-          /* §5 重绑定逃逸校验（m3-design §5"重绑定时校验是否逃逸"）：
-             r 的标注集合（定义时记录）须涵盖新借源的定义作用域——
-             新借源存活不得超过标注声明的存活上限，否则重绑定引入悬垂。
-             annot_count=0 = 定义时跳过（无可判借源），重绑定同样跳过。 */
-          if (src && src->own_scope && sym->annot_count > 0) {
+          sema_symbol_t *srcs[16];
+          size_t nsrc = borrow_collect(sema, as->value, scope, srcs, 16);
+          if (nsrc == 0 && sym->annot_names) {
             for (size_t i = 0; i < sym->annot_count; i++) {
-              sema_scope_t *anchor =
-                  annot_anchor_scope(sema, sym->annot_names[i], scope);
-              if (!anchor) {
-                diag_error(sema->diag, sema_loc(sema, as->value),
-                           "scope annotation '%.*s' does not name a parameter, "
-                           "global or local variable",
-                           (int)sym->annot_names[i].len,
-                           sym->annot_names[i].ptr);
-                continue;
-              }
-              if (!sema_scope_within(src->own_scope, anchor)) {
-                diag_error(sema->diag, sema_loc(sema, as->value),
-                           "rebinding ref variable '%.*s' escapes scope "
-                           "annotation '%.*s' (new source's scope is not "
-                           "nested within the annotated scope)",
-                           (int)name.len, name.ptr,
-                           (int)sym->annot_names[i].len,
-                           sym->annot_names[i].ptr);
+              sema_symbol_t *a = sema_lookup(scope, sym->annot_names[i]);
+              if (a && a->kind == SEMA_SYM_VAR)
+                nsrc = borrow_collect_add(srcs, nsrc, 16, a);
+            }
+          }
+          /* §5 重绑定逃逸校验（m3-design §5"重绑定时校验是否逃逸"）：
+             r 的标注集合（定义时记录）须涵盖**每个**新借源的定义作用域——
+             任一来源存活超出标注上限即逃逸。annot_count=0 = 定义时无标注，
+             重绑定同样跳过。 */
+          if (sym->annot_count > 0) {
+            for (size_t k = 0; k < nsrc; k++) {
+              sema_symbol_t *src = srcs[k];
+              if (!src || !src->own_scope) continue;
+              for (size_t i = 0; i < sym->annot_count; i++) {
+                sema_scope_t *anchor =
+                    annot_anchor_scope(sema, sym->annot_names[i], scope);
+                if (!anchor) {
+                  diag_error(sema->diag, sema_loc(sema, as->value),
+                             "scope annotation '%.*s' does not name a "
+                             "parameter, global or local variable",
+                             (int)sym->annot_names[i].len,
+                             sym->annot_names[i].ptr);
+                  continue;
+                }
+                if (!sema_scope_within(src->own_scope, anchor)) {
+                  diag_error(sema->diag, sema_loc(sema, as->value),
+                             "rebinding ref variable '%.*s' escapes scope "
+                             "annotation '%.*s' (new source's scope is not "
+                             "nested within the annotated scope)",
+                             (int)name.len, name.ptr,
+                             (int)sym->annot_names[i].len,
+                             sym->annot_names[i].ptr);
+                }
               }
             }
           }
-          borrow_switch(sym, src);
+          borrow_srcs_set(sema, sym, srcs, nsrc);
         }
       }
     }
