@@ -28,6 +28,7 @@
 #include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
+#include "parser/ast_new.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
@@ -74,8 +75,10 @@
 #include "parser/lexer.h"
 #include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
-#include "parser/ast_addr.h"   /* ast_move_t（借源收集剥 move/clone） */
-#include "parser/ast_addr.h"   /* ast_addr_t（x.& 的借源是取址目标） */
+#include "parser/ast_addr.h"
+#include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */
+#include "parser/ast_addr.h"
+#include "parser/ast_new.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -1115,6 +1118,273 @@ void sema_scope_release_borrows(sema_scope_t *scope) {
 }
 
 
+/* ==== 聚合 ref 槽位的借源载体（2026-10）====
+ *
+ * 构造本质上是"逐字段赋值"的语法糖：
+ *     var s2 = <undefined>;  s2.q = b.p;          // 底层逻辑
+ * 因此 `var s2: S = .S{ .q = b.p };` 与 `s2.q = b.p;` 都必须把 **b** 登记为
+ * s2 的借源——s2 里存着指向 b 拥有堆块的 ref；b 被 move 后该 ref 悬垂。
+ * 聚合变量（carrier）因此也拥有借源集合（与 ref 变量同一机制），字段赋值 /
+ * 构造 / 拷贝 / new 都往里合并来源；scope 退出统一释放。
+ */
+
+/* 类型里是否存在 ref 槽位（借用载体）。cunion 不参与所有权运算 → 无 ref 槽位。 */
+static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
+                                size_t depth) {
+  if (!t || depth >= 32) return false;
+  const type_t *s = type_strip_quals(t);
+  for (size_t i = 0; i < depth; i++)
+    if (path[i] == s) return false;   /* 自引用类型：环上已判定无 ref 槽位 */
+  path[depth] = s;
+  depth++;
+  switch (s->kind) {
+  case TYPE_KIND_STRUCT: {
+    const struct_type_t *st = (const struct_type_t *)s;
+    for (size_t i = 0; i < st->field_count; i++) {
+      const struct_field_t *f = &st->fields[i];
+      const type_t *ft = type_strip_quals(f->type);
+      if (!ft) continue;
+      if ((ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE) &&
+          f->ownership == OWN_REF)
+        return true;
+      if (type_has_ref_slots_rec(ft, path, depth)) return true;
+    }
+    return false;
+  }
+  case TYPE_KIND_TUPLE: {
+    const tuple_type_t *tt = (const tuple_type_t *)s;
+    for (size_t i = 0; i < tt->elem_count; i++) {
+      const tuple_elem_t *e = &tt->elems[i];
+      const type_t *et = type_strip_quals(e->type);
+      if (!et) continue;
+      if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+          e->ownership == OWN_REF)
+        return true;
+      if (type_has_ref_slots_rec(et, path, depth)) return true;
+    }
+    return false;
+  }
+  case TYPE_KIND_UNION: {
+    const union_type_t *ut = (const union_type_t *)s;
+    for (size_t i = 0; i < ut->member_count; i++) {
+      const union_member_t *m = &ut->members[i];
+      const type_t *pt = type_strip_quals(m->payload_type);
+      if (!pt) continue;
+      if ((pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE) &&
+          m->ownership == OWN_REF)
+        return true;
+      if (type_has_ref_slots_rec(pt, path, depth)) return true;
+    }
+    return false;
+  }
+  case TYPE_KIND_OPTION: {
+    const option_type_t *ot = (const option_type_t *)s;
+    const type_t *in = type_strip_quals(ot->inner);
+    if (!in) return false;
+    if ((in->kind == TYPE_KIND_PTR || in->kind == TYPE_KIND_SLICE) &&
+        ot->inner_ownership == OWN_REF)
+      return true;
+    return type_has_ref_slots_rec(in, path, depth);
+  }
+  case TYPE_KIND_ARRAY: {
+    const array_type_t *at = (const array_type_t *)s;
+    const type_t *et = type_strip_quals(at->elem_type);
+    if (!et) return false;
+    if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+        at->elem_ownership == OWN_REF)
+      return true;
+    return type_has_ref_slots_rec(et, path, depth);
+  }
+  case TYPE_KIND_SLICE: {
+    const type_t *et = type_strip_quals(slice_type_elem(s));
+    if (!et) return false;
+    if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+        slice_type_elem_ownership(s) == OWN_REF)
+      return true;
+    return type_has_ref_slots_rec(et, path, depth);
+  }
+  case TYPE_KIND_PTR:
+    /* 指针本身无“槽位所有权”；其被指向值里的 ref 槽位仍让载体成立
+       （销毁该指针会连带销毁 ref 槽位所在的块 → 借源必须存活）。 */
+    return type_has_ref_slots_rec(ptr_type_base(s), path, depth);
+  default:
+    return false;   /* 标量 / cunion / func / opaque */
+  }
+}
+
+/* 入口（带环检测：自引用类型 `struct Node { next: ?own *Node }` 不能无限递归）。 */
+static bool type_has_ref_slots(const type_t *t) {
+  const type_t *path[32];
+  return type_has_ref_slots_rec(t, path, 0);
+}
+
+/* 构造字段链里收集 ref 槽位的借源：type 是构造目标类型，fields 是构造
+   字段值链（AST_FILL 只取一次、nil 跳过）。 */
+static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
+                                    ast_node_t *fields, sema_scope_t *scope,
+                                    sema_symbol_t **out, size_t cap, size_t n);
+
+/* 收集"类型 t、槽位所有权 slot_own 的值表达式 e"中所有 ref 槽位的借源。 */
+static size_t borrow_collect_value(sema_t *sema, const type_t *t,
+                                   ownership_t slot_own, ast_node_t *e,
+                                   sema_scope_t *scope, sema_symbol_t **out,
+                                   size_t cap, size_t n) {
+  if (!t || !e || n >= cap) return n;
+  const type_t *s = type_strip_quals(t);
+  if (!s) return n;
+  /* 叶子槽位：ref 槽位的值表达式本身就是借用 → 收集来源 */
+  if (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE) {
+    if (slot_own == OWN_REF) {
+      sema_symbol_t *tmp[16];
+      size_t m = borrow_collect(sema, e, scope, tmp, 16);
+      for (size_t i = 0; i < m; i++)
+        n = borrow_collect_add(out, n, cap, tmp[i]);
+      return n;
+    }
+    /* own 指针的 pointee 里若有 ref 槽位：构造是 `new T{…}`（按字段收集） */
+    if (s->kind == TYPE_KIND_PTR && e->kind == AST_NEW) {
+      const ast_new_t *nv = (const ast_new_t *)e;
+      const type_t *base = type_strip_quals(ptr_type_base(s));
+      if (base && type_has_ref_slots(base))
+        return borrow_collect_fields(sema, base, nv->fields, scope, out, cap, n);
+    }
+    return n;
+  }
+  /* 复合：构造表达式 → 逐字段；拷贝（直读变量）→ 继承其借源集合 */
+  if (e->kind == AST_CONSTRUCT) {
+    return borrow_collect_fields(sema, s, ((const ast_construct_t *)e)->fields,
+                                 scope, out, cap, n);
+  }
+  if (e->kind == AST_IDENT) {
+    sema_symbol_t *src = sema_lookup(scope, ((const ast_ident_t *)e)->name);
+    if (!src || src->kind != SEMA_SYM_VAR) return n;
+    for (borrow_src_node_t *k = src->borrow_srcs; k; k = k->next)
+      n = borrow_collect_add(out, n, cap, k->sym);
+  }
+  return n;
+}
+
+/* 构造字段链：按声明序（sema 已把具名构造重排为声明序）逐槽位收集。 */
+static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
+                                    ast_node_t *fields, sema_scope_t *scope,
+                                    sema_symbol_t **out, size_t cap, size_t n) {
+  if (!t || !fields) return n;
+  const type_t *s = type_strip_quals(t);
+  if (!s) return n;
+  size_t idx = 0;
+  if (s->kind == TYPE_KIND_STRUCT) {
+    const struct_type_t *st = (const struct_type_t *)s;
+    for (ast_node_t *f = fields; f && idx < st->field_count; f = f->next, idx++) {
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((const ast_construct_field_t *)f)->value;
+      if (!value || value->kind == AST_NIL) continue;
+      const struct_field_t *fd = &st->fields[idx];
+      n = borrow_collect_value(sema, fd->type, fd->ownership, value, scope,
+                               out, cap, n);
+    }
+    return n;
+  }
+  if (s->kind == TYPE_KIND_TUPLE) {
+    const tuple_type_t *tt = (const tuple_type_t *)s;
+    for (ast_node_t *f = fields; f && idx < tt->elem_count; f = f->next, idx++) {
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((const ast_construct_field_t *)f)->value;
+      if (!value || value->kind == AST_NIL) continue;
+      n = borrow_collect_value(sema, tt->elems[idx].type,
+                               tt->elems[idx].ownership, value, scope, out, cap,
+                               n);
+    }
+    return n;
+  }
+  if (s->kind == TYPE_KIND_ARRAY) {
+    const array_type_t *at = (const array_type_t *)s;
+    for (ast_node_t *f = fields; f; f = f->next) {
+      if (f->kind == AST_FILL) {
+        n = borrow_collect_value(sema, at->elem_type, at->elem_ownership,
+                                 ((const ast_fill_t *)f)->value, scope, out,
+                                 cap, n);
+        continue;   /* fill 重复同一值，来源相同 */
+      }
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((const ast_construct_field_t *)f)->value;
+      if (!value || value->kind == AST_NIL) continue;
+      n = borrow_collect_value(sema, at->elem_type, at->elem_ownership, value,
+                               scope, out, cap, n);
+    }
+    return n;
+  }
+  if (s->kind == TYPE_KIND_OPTION) {
+    const option_type_t *ot = (const option_type_t *)s;
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((const ast_construct_field_t *)f)->value;
+    if (!f || f->kind == AST_NIL) return n;
+    return borrow_collect_value(sema, ot->inner, ot->inner_ownership, f, scope,
+                                out, cap, n);
+  }
+  if (s->kind == TYPE_KIND_UNION) {
+    const union_type_t *ut = (const union_type_t *)s;
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((const ast_construct_field_t *)f)->value;
+    if (!f || f->kind == AST_NIL) return n;
+    /* 具名构造：按字段名定位 member；否则用 AST 上的 member_tag（sema 填） */
+    return borrow_collect_value(sema, ut->member_count ? ut->members[0].payload_type
+                                                       : NULL,
+                                ut->member_count ? ut->members[0].ownership
+                                                 : OWN_NONE,
+                                f, scope, out, cap, n);
+  }
+  return n;
+}
+
+/* 把来源合并进载体（carrier）的借源集合：**不释放旧集合**——字段级重绑定
+   无法逐槽位精确回收，保守保留（只会更严格，不会漏拦）。 */
+static void borrow_carry_merge(sema_t *sema, sema_symbol_t *carrier,
+                               sema_symbol_t **srcs, size_t n) {
+  if (!carrier) return;
+  for (size_t i = 0; i < n; i++) {
+    sema_symbol_t *s = srcs[i];
+    if (!s) continue;
+    bool dup = false;
+    for (borrow_src_node_t *k = carrier->borrow_srcs; k; k = k->next) {
+      if (k->sym == s) { dup = true; break; }
+    }
+    if (dup) continue;
+    borrow_src_node_t *node = (borrow_src_node_t *)arena_calloc(
+        sema->arena, 1, sizeof(borrow_src_node_t), ALIGNOF(max_align_t));
+    if (!node) return;
+    node->sym = s;
+    node->next = carrier->borrow_srcs;
+    carrier->borrow_srcs = node;
+    carrier->borrow_src_count++;
+    s->borrow_count++;
+  }
+}
+
+/* 访问路径的根变量符号（`s2.q` → s2；`p.a.b` → p）。 */
+static sema_symbol_t *borrow_root_symbol(sema_t *sema, ast_node_t *e,
+                                         sema_scope_t *scope) {
+  ast_node_t *cur = e;
+  while (cur) {
+    switch (cur->kind) {
+    case AST_IDENT: {
+      sema_symbol_t *s = sema_lookup(scope, ((const ast_ident_t *)cur)->name);
+      return (s && s->kind == SEMA_SYM_VAR) ? s : NULL;
+    }
+    case AST_MEMBER: cur = ((const ast_member_t *)cur)->object; break;
+    case AST_INDEX: cur = ((const ast_index_t *)cur)->object; break;
+    case AST_DEREF: cur = ((const ast_deref_t *)cur)->operand; break;
+    case AST_UNWRAP: cur = ((const ast_unwrap_t *)cur)->operand; break;
+    default: return NULL;
+    }
+  }
+  return NULL;
+}
+
 /* 作用域嵌套比较：a 沿 parent 链可达 b（或 a == b）→ a 嵌套于 b。
    b 为 NULL（锚点解析失败）恒 true（保守放行，错误由解析方报）。 */
 bool sema_scope_within(const sema_scope_t *a, const sema_scope_t *b) {
@@ -1572,6 +1842,19 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
   shadow_borrow_register(sema, sym, vd->init, scope);
+
+  /* 聚合 ref 槽位的**借源载体**：构造 = 逐字段赋值的语法糖
+     （var s = .S{ .q = b.p } ≡ s.q = b.p），因此把构造/拷贝里 ref 值的来源
+     合并到该变量；scope 退出时统一释放（sema_scope_release_borrows）。 */
+  if (sym && sym->type && vd->init &&
+      !(sym->ownership == OWN_REF ||
+        sym->type->kind == TYPE_KIND_OPAQUE) &&
+      type_has_ref_slots(sym->type)) {
+    sema_symbol_t *csrcs[16];
+    size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE, vd->init,
+                                     scope, csrcs, 16, 0);
+    if (cn) borrow_carry_merge(sema, sym, csrcs, cn);
+  }
 
   /* 定义 shadow value 到当前 VM scope（与 sema scope 树同构；名字取自 ast）。
      定义完成 → 符号激活（sema_lookup 跳过未激活符号，自引用解析到外层） */
@@ -2051,6 +2334,18 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
           }
           borrow_srcs_set(sema, sym, srcs, nsrc);
         }
+
+        /* 聚合（含 ref 槽位）**整体赋值**：换值 = 换借源集合（旧集合释放，
+           新集合从右值构造/拷贝里收集）。ref/opaque 变量走上一条 R3 分支。 */
+        if (sym->type &&
+            !(sym->ownership == OWN_REF ||
+              sym->type->kind == TYPE_KIND_OPAQUE) &&
+            type_has_ref_slots(sym->type)) {
+          sema_symbol_t *csrcs[16];
+          size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE,
+                                           as->value, scope, csrcs, 16, 0);
+          borrow_srcs_set(sema, sym, csrcs, cn);
+        }
       }
     }
     return;
@@ -2214,6 +2509,15 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
   }
   if (!et) return;
 
+  /* 元素是 ref 槽位（或含 ref 槽位）：`s[i] = b.p` 把 b 登记为载体的借源。 */
+  if (et_own == OWN_REF || type_has_ref_slots(et)) {
+    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
+    sema_symbol_t *csrcs[16];
+    size_t cn = borrow_collect_value(sema, et, et_own, as->value, scope,
+                                     csrcs, 16, 0);
+    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
+  }
+
   /* **赋值点旧值销毁**：`a[i] = v` 是纯覆盖（INDEX_SET 只 memcpy），
      旧元素里的 own 堆块必须先释放。own 叶子 / 含 own 槽位的复合元素
      都要展开（ref 元素跳过）。 */
@@ -2368,6 +2672,17 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   if (value_is_error(sema->vm, rhs) ||
       value_is_type(rhs, TYPE_KIND_VOID))
     return;
+
+  /* 字段是 ref 槽位（或含 ref 槽位）：`s2.q = b.p` 把 b 登记为 s2 的借源
+     ——s2 里存着指向 b 拥有堆块的 ref，b 被 move 后该 ref 悬垂。 */
+  if (!rhs_nil && ft &&
+      (slot_own == OWN_REF || type_has_ref_slots(ft))) {
+    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
+    sema_symbol_t *csrcs[16];
+    size_t cn = borrow_collect_value(sema, ft, slot_own, as->value, scope,
+                                     csrcs, 16, 0);
+    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
+  }
 
   if (rhs_nil) {
     if (!ft || ft->kind != TYPE_KIND_OPTION) {
@@ -2635,6 +2950,16 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
       value_is_type(rhs, TYPE_KIND_VOID))
     return;
 
+  /* 字段是 ref 槽位（或含 ref 槽位）：`s2.q = b.p` 把 b 登记为 s2 的借源
+     ——s2 里存着指向 b 拥有堆块的 ref，b 被 move 后该 ref 悬垂。 */
+  if (!rhs_nil && ft && type_has_ref_slots(ft)) {
+    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
+    sema_symbol_t *csrcs[16];
+    size_t cn = borrow_collect_value(sema, ft, OWN_NONE, as->value, scope,
+                                     csrcs, 16, 0);
+    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
+  }
+
   if (rhs_nil) {
     if (!ft || ft->kind != TYPE_KIND_OPTION) {
       char tn[64];
@@ -2664,6 +2989,14 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
+    /* 被指向值含 ref 槽位：`p.* = .S{ .q = b.p }` 把 b 登记为 p 的借源。 */
+    if (ft && type_has_ref_slots(ft)) {
+      sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
+      sema_symbol_t *csrcs[16];
+      size_t cn = borrow_collect_value(sema, ft, OWN_NONE, as->value, scope,
+                                       csrcs, 16, 0);
+      if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
+    }
     /* **赋值点旧值销毁**：`p.* = v` 是纯覆盖（PTR_SET 只 memcpy），
        旧被指向值里的 own 槽位必须先释放。只对 **own 指针**生成——
        经 ref 指针写别人拥有的内容时不能替对方释放（借用方不拥有）。 */
