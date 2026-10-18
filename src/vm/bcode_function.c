@@ -66,6 +66,8 @@ func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     fn->base.id          = base->id;   /* 共享基底 id（不重复登记 functions_by_id） */
     fn->base.name        = base->name; /* 借用基底名字 */
     fn->base.capture_type = base->capture_type;
+    fn->base.env_dispose_fid = base->env_dispose_fid;
+    fn->base.env_clone_fid   = base->env_clone_fid;
     if (base->capture_type && base->capture_type->base.size > 0) {
         void *env = allocator_new_ex(vm->alloc, "closure_env",
                                      base->capture_type->base.size, NULL, NULL, NULL,

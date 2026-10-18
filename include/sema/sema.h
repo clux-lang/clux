@@ -283,6 +283,12 @@ typedef struct sema_t {
        在 Pass 3 解析中追加，队列驱动、可增长）。sema 拥有元素生命周期。 */
     vec_t        *funcs;        /* sema_func_t* */
 
+    /* **含捕获的函数**（闭包字面量 / 局部函数 / defer）：元素是 ast_func_def_t*。
+       resolve_func_captures 建好 env 结构体后登记；sema_analyze 收尾时为每个条目
+       生成 env 的 vtable（__destroy_<env> / __clone_<env>）并把 fid 写回 AST，
+       compiler 在 hoist 随 SET_FUNC_CAPTURES 写入函数对象。 */
+    vec_t        *closures;
+
     /* 类型队列：sema 层解析过的全部类型（resolve_type_expr 登记 + comptime
        折叠逆向登记），按 type_t 指针去重，驱动编译器 hoist 类型提升区。
        sema 拥有元素生命周期。 */
@@ -442,6 +448,18 @@ bool sema_analyze(sema_t *sema, ast_node_t *program);
  *  compiler 预扫描据此为它们构造函数对象（LOAD_TYPE sig_id + PUSH_FUNCTION +
  *  BIND_FUNC）并在全局作用域绑定名字（LOAD_FUNCTION + DEFINE）。 */
 void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program);
+
+/** 为闭包 env 类型生成/取得两个 vtable 函数（见 ast_func_def_t 的
+ *  env_dispose_fid / env_clone_fid）：
+ *   - `__destroy_<env>(dv: ref *Env)`（复用销毁函数生成器）→ *dispose_fid
+ *   - `__clone_<env>(dv: ref *Env): fatal Env`（复用 clone 函数生成器）→ *clone_fid
+ * 返回 false = 生成失败（类型不可销毁/克隆，例如 env 含 cunion 指针）。 */
+/** 取/生成类型 t 的 clone 函数（三种形态之一），返回其 fid（0 = 失败）。
+ *  形态：0 值克隆（dv: ref *T）、1 指针克隆（dv: ref *U）、2 切片克隆。 */
+uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t);
+
+bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
+                         uint32_t *dispose_fid, uint32_t *clone_fid);
 
 /** 把 Pass 3b 期间按需生成的 clone 函数追加到程序函数链尾部（sema_analyze 收尾）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program);

@@ -142,7 +142,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `DEFINE` | `STR` | 弹栈定义变量：**永远双弹 `[value, type-spec]`**（type-spec 为 type value 或 `undefined`；undefined 表示从值推断类型）。函数定义亦走此指令（`PUSH_UNDEFINED` 作 type-spec）。 |
 | `PUSH_FUNCTION` | `U32`（entry pc / 标签） | 弹栈顶签名类型 → 构造 `bcode_function_t{entry_pc}`（自建孤立 `closure_scope`，`fn->id` 默认 0）→ 压 func value。 |
 | `BIND_FUNC` | `U32`（函数 id） | **peek** 栈顶 func value（不弹栈）→ 填 `fn->id = id` 并登记 `functions_by_id`（幂等）。id 单一来源。 |
-| `SET_FUNC_CAPTURES` | `U32`（env 类型 id） | peek 栈顶 func value → 登记闭包的**捕获聚合类型**（struct，字段 = 捕获槽 + 槽位所有权）。clone/free/字段读写按该类型处理（闭包当结构体）；cfunc 无此字段。 |
+| `SET_FUNC_CAPTURES` | `U32`（env 类型 id）`U32`（dispose fid）`U32`（clone fid） | peek 栈顶 func value → 登记闭包的**捕获聚合类型**（struct，字段 = 捕获槽 + 槽位所有权）与两个**生成函数** id：`__destroy_<env>(dv: ref *Env)`（释放 env 的 own 捕获）与 `__clone_<env>(dv: ref *Env): fatal Env`（深拷贝 env）。闭包 clone/free 时**间接调用**它们——函数签名不带闭包信息，但生成函数在定义点就知道布局；cfunc 没有捕获，不发本指令。 |
 | `SET_FUNC_NAME` | `STR` | **peek** 栈顶 func value → 拷贝显示名到 vm 堆（随对象释放）。仅具名函数定义写入，匿名函数字面量不写。 |
 | `SET_CLOSURE` | `STR`（捕获名） | 弹捕获值 → 写入**栈下函数对象**的 env 块对应字段（闭包 = 捕获聚合结构体）：按 `capture_type` 的槽位所有权先销毁旧值，`implicit_cast` 后 memcpy 到字段偏移。shadow/占位语义同前。 |
 | `MAKE_FUNCTION` | `U32`（函数 id） | 从 `functions_by_id` 拉**基底**函数对象 → 实例化**独立新实例**（共享 entry_pc/cfunc/type/name/id，新 `closure_scope` 按基底捕获槽名以 undefined 占位）→ 压栈。函数定义每次求值生成新对象（循环内多个闭包互不干扰），对标 `LOAD_FUNCTION` 的"同一对象"引用语义。 |

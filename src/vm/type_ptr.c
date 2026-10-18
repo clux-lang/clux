@@ -173,12 +173,30 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_FUNC: {
-        /* **闭包 = 捕获聚合结构体**：按 capture_type 的槽位所有权释放 env 里
-           的 own 捕获，再释放 env 块（与 op_free 的闭包分支一致）。用于结构体
-           的 own 闭包字段在运行期递归销毁（赋值点/丢弃/复合赋值）路径。 */
+        /* **闭包 = 捕获聚合结构体 + vtable**：优先调用生成函数
+           `__destroy_<env>(dv: ref *Env)` 释放 env 的 own 捕获，再释放 env 块；
+           没有 vtable（老/退化路径）才按 capture_type 内省。用于结构体的 own
+           闭包字段在运行期递归销毁（赋值点/丢弃/复合赋值）路径。 */
         func_t **fp = (func_t **)data;
         func_t *fn = fp ? *fp : NULL;
-        if (!fn || !fn->capture_type || !fn->env) return;
+        if (!fn) return;
+        if (fn->env_dispose_fid != 0 && fn->env && fn->capture_type) {
+            func_t *df = vm_func_load(vm, fn->env_dispose_fid);
+            const type_t *pt =
+                type_ptr_intern(vm, (const type_t *)fn->capture_type);
+            if (df && pt) {
+                void *pdata = value_alloc_data_copy(vm->alloc, pt, &fn->env);
+                value_t *pv = pdata ? value_make(vm, pt, pdata) : NULL;
+                value_t *fv = func_value_ref(vm, df);
+                if (pv && fv) {
+                    value_t *args[1] = {pv};
+                    (void)value_call(vm, fv, args, 1);
+                }
+            }
+            allocator_free(vm->alloc, &fn->env);
+            return;
+        }
+        if (!fn->capture_type || !fn->env) return;
         const struct_type_t *ct = fn->capture_type;
         for (size_t i = 0; i < ct->field_count; i++) {
             const struct_field_t *f = &ct->fields[i];
@@ -411,6 +429,32 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         if (!nf || !nf->env) {
             memcpy(dst, src, type->size);
             break;
+        }
+        /* **vtable 优先**：调用生成函数 `__clone_<env>(dv: ref *Env): fatal Env`
+           深拷贝 env，把结果字节拷进新实例的 env 块。生成函数在定义点就知道
+           捕获布局（含切片捕获需要的 prelude），比运行期内省更精确。 */
+        if (sfn->env_clone_fid != 0) {
+            func_t *cf = vm_func_load(vm, sfn->env_clone_fid);
+            const type_t *pt =
+                type_ptr_intern(vm, (const type_t *)sfn->capture_type);
+            if (cf && pt) {
+                const void *src_env = sfn->env;
+                void *pdata = value_alloc_data_copy(vm->alloc, pt, &src_env);
+                value_t *pv = pdata ? value_make(vm, pt, pdata) : NULL;
+                value_t *fv = func_value_ref(vm, cf);
+                if (pv && fv) {
+                    value_t *args[1] = {pv};
+                    value_t *r = value_call(vm, fv, args, 1);
+                    if (r && !value_is_error(vm, r) && value_data(r) &&
+                        sfn->capture_type->base.size > 0) {
+                        memcpy(nf->env, value_data(r),
+                               sfn->capture_type->base.size);
+                        memcpy(dst, &nf, sizeof(nf));
+                        break;
+                    }
+                }
+            }
+            /* vtable 调用失败 → 退回按槽位内省克隆（保守路径）。 */
         }
         const struct_type_t *ct = sfn->capture_type;
         for (size_t i = 0; i < ct->field_count; i++) {

@@ -982,6 +982,27 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (t->kind == TYPE_KIND_FUNC) {
         func_t **fp = (func_t **)value_data(v);
         func_t *fn = fp ? *fp : NULL;
+        /* **vtable 优先**：闭包 env 的 own 捕获由**生成函数**释放
+           `__destroy_<env>(dv: ref *Env)`（sema 为每个含捕获的函数生成，fid
+           存在函数对象上）。这正是"函数签名不带闭包信息"的解法：生成函数在
+           定义点就知道 capture_type，运行期只需间接调用，不必再做类型内省。 */
+        if (fn && fn->env_dispose_fid != 0 && fn->env && fn->capture_type) {
+            func_t *df = vm_func_load(vm, fn->env_dispose_fid);
+            const type_t *pt =
+                type_ptr_intern(vm, (const type_t *)fn->capture_type);
+            if (df && pt) {
+                value_t *pv = NULL;
+                void *pdata = value_alloc_data_copy(vm->alloc, pt, &fn->env);
+                if (pdata) pv = value_make(vm, pt, pdata);
+                value_t *fv = func_value_ref(vm, df);
+                if (pv && fv) {
+                    value_t *args[1] = {pv};
+                    (void)value_call(vm, fv, args, 1);
+                }
+            }
+            allocator_free(vm->alloc, &fn->env);
+            return NULL;
+        }
         if (fn && fn->capture_type && fn->env) {
             const struct_type_t *ct = fn->capture_type;
             for (size_t i = 0; i < ct->field_count; i++) {
@@ -1852,6 +1873,8 @@ static value_t *op_set_func_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
    后续步骤把它用于捕获存储 / clone / free / 调用上下文。 */
 static value_t *op_set_func_captures(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t id = bcode_read_u32(bc, pc);
+    uint32_t dispose_fid = bcode_read_u32(bc, pc);
+    uint32_t clone_fid = bcode_read_u32(bc, pc);
     value_t *fv = exec_stack_peek(vm, 0);
     const type_t *t = fv ? value_type(fv) : NULL;
     if (!t || t->kind != TYPE_KIND_FUNC)
@@ -1861,6 +1884,8 @@ static value_t *op_set_func_captures(vm_t *vm, bytecode_t *bc, size_t *pc) {
         return value_make_error(vm, "exec: bad capture type id");
     func_t *fn = *(func_t **)value_data(fv);
     fn->capture_type = (const struct_type_t *)ct;
+    fn->env_dispose_fid = dispose_fid;
+    fn->env_clone_fid = clone_fid;
     return NULL;
 }
 

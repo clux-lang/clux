@@ -9,6 +9,14 @@
  *   - clone：按 env 的槽位所有权深/浅拷贝到**新实例**的新 env；
  *   - free：`FREE <闭包>` → 释放 env 里的 own 捕获 + env 块本体。
  * cfunc 不受影响：没有捕获、没有 capture_type，就是普通函数指针值。
+ *
+ * **env vtable（2026-10）**：函数签名不带闭包信息，所以 clone/free 无法在调用点
+ * 生成——解法是给每个含捕获的函数生成两个函数：
+ *   - `__destroy_<env>(dv: ref *Env)`：释放 env 的 own 捕获；
+ *   - `__clone_<env>(dv: ref *Env): fatal Env`：深拷贝 env。
+ * 两个 fid 存在函数对象上（`SET_FUNC_CAPTURES <env> <dispose> <clone>`），
+ * clone/free 时**间接调用**它们——与 C 后端把 callee/dispose/clone 放进闭包结构
+ * 一一对应，运行期不再需要类型内省（闭包路径也不再使用 `__deep_clone`）。
  */
 #include <gtest/gtest.h>
 
@@ -120,4 +128,57 @@ TEST(ClosureAggregate, CfuncHasNoCaptureEnv) {
       "  return 0;\n"
       "}\n",
       "ca_cfunc");
+}
+
+/* ==================== env vtable：生成 dispose/clone 函数并挂到函数对象 ==================== */
+
+TEST(ClosureAggregate, VtableFnsGenerated) {
+  std::string text;
+  ASSERT_TRUE(disasm_of(
+                  "func main(): i32 {\n"
+                  "  var p: own *i32 = new i32{7};\n"
+                  "  var f = clone(func |(q: own *i32 = move(p))| get(): i32 {"
+                  " return q.*; });\n"
+                  "  if (f() != 7) { return 1; }\n"
+                  "  return 0;\n"
+                  "}\n",
+                  "ca_vtable", &text))
+      << text;
+  /* SET_FUNC_CAPTURES <env 类型 id> <dispose fid> <clone fid>：两个 fid 都非 0 */
+  EXPECT_NE(text.find("SET_FUNC_CAPTURES "), std::string::npos) << text;
+  bool saw_nonzero = false;
+  {
+    size_t pos = 0;
+    while ((pos = text.find("SET_FUNC_CAPTURES ", pos)) != std::string::npos) {
+      unsigned env = 0, dis = 0, cln = 0;
+      if (std::sscanf(text.c_str() + pos, "SET_FUNC_CAPTURES %u %u %u", &env,
+                      &dis, &cln) == 3 &&
+          env != 0 && dis != 0 && cln != 0)
+        saw_nonzero = true;
+      pos += 1;
+    }
+  }
+  EXPECT_TRUE(saw_nonzero) << text;
+  /* 生成的 env 销毁/clone 函数出现在字节码里（DEFINE 绑定到全局名） */
+  EXPECT_NE(text.find("\"__destroy_"), std::string::npos) << text;
+  EXPECT_NE(text.find("\"__clone_"), std::string::npos) << text;
+  /* 闭包路径不再用运行期对象图克隆兜底 */
+  EXPECT_EQ(text.find("\"__deep_clone\""), std::string::npos) << text;
+}
+
+TEST(ClosureAggregate, CfuncHasNoVtableFids) {
+  std::string text;
+  ASSERT_TRUE(disasm_of(
+                  "func add(a: i32, b: i32): i32 { return a + b; }\n"
+                  "func main(): i32 {\n"
+                  "  var f: func(i32)->i32 = func(x: i32): i32 { return x; };\n"
+                  "  var g: func(i32,i32)->i32 = add;\n"   /* 无捕获：普通函数值 */
+                  "  if (f(3) != 3) { return 1; }\n"
+                  "  if (g(2, 3) != 5) { return 2; }\n"
+                  "  return 0;\n"
+                  "}\n",
+                  "ca_cfunc_vtable", &text))
+      << text;
+  /* cfunc 没有 capture_type / vtable：不出现 SET_FUNC_CAPTURES */
+  EXPECT_EQ(text.find("SET_FUNC_CAPTURES"), std::string::npos) << text;
 }

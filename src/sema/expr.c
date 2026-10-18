@@ -3460,6 +3460,14 @@ static ast_node_t *gen_clone_call(sema_t *sema, uint8_t kind, const type_t *key,
   return call;
 }
 
+/* 取/生成类型 t 的 clone 函数并返回其 fid（供闭包 env vtable 使用）。 */
+uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t) {
+  if (!sema || !t) return 0;
+  ast_node_t *callee = clone_fn_callee(sema, kind, t);
+  if (!callee) return 0;
+  return ((const ast_func_ref_t *)callee)->fid;
+}
+
 /* 收尾：把生成的 clone 函数追加到程序函数链尾部（sema_analyze 调用）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return;

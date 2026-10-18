@@ -702,6 +702,33 @@ cunion 是**不安全类型**：无 tag、成员共享 offset 0、**不参与所
 可 move/显式销毁、可放进 own 字段/选项/数组/切片、clone 深拷贝 env、赋值点与
 作用域退出都按 capture_type 的槽位所有权释放。
 
+### 7.1.14 闭包 env vtable：用生成函数取代运行期内省（2026-10）
+
+**问题**：函数签名不携带闭包信息（`func(i32)->i32` 不说明捕获布局），所以
+`clone(closure)` / `free(closure)` 在**调用点**无法生成销毁/clone 序列——只能
+退化成运行期按 `capture_type` 内省（早先甚至用 `__deep_clone` 兜底）。
+
+**解法**（与 C 后端 `struct { callee, env, dispose, clone }` 一一对应）：给**每个
+含捕获的函数**在 sema 收尾生成两个函数（复用现有的销毁/clone 生成器，env 是
+普通 struct 类型，所以正是它们）：
+
+| 生成函数 | 作用 |
+|---|---|
+| `__destroy_<env>(dv: ref *Env)` | 释放 env 里的 own 捕获（scope 退出 / 赋值点 / 显式销毁） |
+| `__clone_<env>(dv: ref *Env): fatal Env` | 深拷贝 env（闭包 clone 时把结果字节拷进新实例的 env 块） |
+
+两个 fid 随 `SET_FUNC_CAPTURES <env 类型 id> <dispose fid> <clone fid>` 写进
+**函数对象**（`func_t::env_dispose_fid/env_clone_fid`，实例化时继承）。于是：
+
+- `op_free` / `ptr_free_owned_recursive` 的 FUNC 分支：有 dispose fid → 构造
+  `*Env` 借用指针值 + 间接 `CALL` 生成函数 → 释放 env 块；没有则退回按 capture_type
+  内省（兼容路径）；
+- `ptr_clone_block(FUNC)`：有 clone fid → 间接调用生成函数，把返回的 Env 字节拷进
+  新实例 env；没有则退回逐槽位内省。
+
+**收益**：闭包路径彻底不需要运行期类型内省，也不再使用 `__deep_clone`
+（`__deep_clone` 现在只剩 cunion 被指向值的"无主块拷贝"这一处）。
+
 ### 7.2 仍未闭环的边界（2026-10 审计后）
 
 核心链路（转移 / 销毁 / clone / 赋值点 / 借用闸门 / 闭包 / cunion 成员释放）
@@ -714,8 +741,9 @@ cunion 是**不安全类型**：无 tag、成员共享 offset 0、**不参与所
 2. **深结构的运行时递归**：销毁/克隆对自引用类型生成"函数自递归"（正确），但深
    链表/深树会吃栈；`__deep_clone`（闭包 env 兜底）同样是运行期递归。彻底 flat
    需要为链表形态生成 while 循环（形状相关，属未来优化）。
-3. **运行期递归辅助仍在回退路径**：`__deep_clone`（闭包/cunion/无 prelude 兜底）、
-   `DISPOSE`（sema 无法生成 prelude 时）、`compound_assign_transfer` 的旧值释放。
+3. **运行期递归辅助仍在回退路径**：`__deep_clone`（现仅 cunion 被指向值的
+   无主块拷贝；闭包已改走 env vtable 生成函数）、`DISPOSE`（sema 无法生成 prelude
+   时）、`compound_assign_transfer` 的旧值释放。
 4. **share / weak 引用计数**：已整体移除，单所有权是唯一模型；RC 语义待重新设计。
 5. **FFI 边界（声明责任，编译器不校验）**：内嵌 own 的聚合在 clux 侧只有 FATAL
    产生式；C 返回含 own 的聚合属 FFI 声明错误，由声明者负责。

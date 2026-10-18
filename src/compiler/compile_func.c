@@ -399,8 +399,13 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
      + 槽位所有权）。VM 层据此把闭包当聚合值：clone 深拷贝捕获、free 按槽位
      所有权释放、字段读写按槽位类型。实例化（MAKE_FUNCTION）复制该字段。 */
   if (fn->capture_type_id != 0) {
+    /* SET_FUNC_CAPTURES <env 类型 id> <dispose fid> <clone fid>：
+       env 是捕获聚合结构体；两个 fid 是 sema 为它生成的 `__destroy_<env>` /
+       `__clone_<env>`（闭包 clone/free 走生成函数，不再运行期内省）。 */
     bcode_write_op(c->bc, BCODE_SET_FUNC_CAPTURES);
     bcode_write_u32(c->bc, fn->capture_type_id);
+    bcode_write_u32(c->bc, fn->env_dispose_fid);
+    bcode_write_u32(c->bc, fn->env_clone_fid);
   }
 
   /* 4. 捕获槽：**不再需要占位**。闭包 = { 实现, env }，env 是捕获聚合结构体

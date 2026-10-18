@@ -63,6 +63,15 @@ struct func_t {
        分配（zeroed），SET_CLOSURE 按字段偏移写入；字段读取/写入/克隆/释放
        全部按 capture_type 的槽位规则进行（与结构体完全同构）。无捕获 = NULL。 */
     void           *env;
+
+    /* 闭包 env 的**生成函数** id（"闭包 = 捕获聚合结构体 + vtable"）：
+       - env_dispose_fid：`__destroy_<env>(dv: ref *Env)` —— 释放 env 的 own 捕获；
+       - env_clone_fid  ：`__clone_<env>(dv: ref *Env): fatal Env` —— 深拷贝 env。
+       0 = 无（无捕获 / env 无资源）。clone/free 时**间接调用**它们（而不是按
+       capture_type 运行期内省），与 C 后端 `struct { callee, env, dispose, clone }`
+       一一对应。 */
+    uint32_t        env_dispose_fid;
+    uint32_t        env_clone_fid;
     scope_t        *root_scope;
     const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;
@@ -106,6 +115,11 @@ void vm_func_bind(vm_t *vm, uint32_t id, func_t *fn);
  * vm->functions 池）。
  */
 func_t *vm_func_load(vm_t *vm, uint32_t id);
+
+/** 把一个 func_t 包成**借用**的 func 值（data 是 func_t*，与 LOAD_FUNCTION
+ *  一致；不 clone、不实例化）。用于 VM 内部按 fid 间接调用生成的 env vtable
+ *  函数（`__destroy_<env>` / `__clone_<env>`）。 */
+value_t *func_value_ref(vm_t *vm, func_t *fn);
 
 /* ---- 生命周期 ---- */
 

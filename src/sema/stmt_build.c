@@ -1049,7 +1049,11 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         allocator_free(sema->vm->alloc, (void **)&fields);
         if (cap) {
           const sema_type_t *st = sema_type_register(sema, cap);
-          if (st) fn->capture_type_id = st->id;
+          if (st) {
+            fn->capture_type_id = st->id;
+            /* 登记：sema_analyze 收尾为它生成 env 的 vtable（dispose/clone）。 */
+            if (sema->closures) vec_push(sema->closures, sema->vm->alloc, fn);
+          }
         }
       }
     }

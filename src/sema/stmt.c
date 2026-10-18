@@ -319,6 +319,47 @@ static bool gen_destroy_fn_call(sema_t *sema, const type_t *t,
   return true;
 }
 
+/* 闭包 env 的 vtable 生成（见 ast_func_def_t::env_dispose_fid / env_clone_fid）：
+   直接复用"生成的销毁函数 / clone 函数"两个生成器 —— env 是普通 struct 类型，
+   所以正是 `__destroy_<env>(dv: ref *Env)` 与 `__clone_<env>(dv: ref *Env):
+   fatal Env`。生成的函数在 sema_analyze 收尾统一追加到 prog->funcs。 */
+bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
+                         uint32_t *dispose_fid, uint32_t *clone_fid) {
+  if (dispose_fid) *dispose_fid = 0;
+  if (clone_fid) *clone_fid = 0;
+  const type_t *env = env_type ? type_strip_quals(env_type) : NULL;
+  if (!sema || !env || env->kind != TYPE_KIND_STRUCT) return false;
+
+  /* 销毁：只有含 own 槽位的 env 才需要 dispose。 */
+  if (type_has_own_slots(env)) {
+    ast_node_t *callee = destroy_fn_callee(sema, env);
+    if (!callee) return false;
+    if (dispose_fid) *dispose_fid = ((const ast_func_ref_t *)callee)->fid;
+  }
+  /* clone：含 own 槽位（或指针/切片槽位）才需要深拷贝 env。 */
+  {
+    bool need = type_has_own_slots(env);
+    if (!need) {
+      /* env 里可能有 own 指针/切片槽位但 type_has_own_slots 已覆盖；这里只在
+         明确含资源时生成（否则 clone = 字节拷贝，不需要函数）。 */
+      for (size_t i = 0; i < ((const struct_type_t *)env)->field_count && !need;
+           i++) {
+        const struct_field_t *f = &((const struct_type_t *)env)->fields[i];
+        const type_t *ft = f ? type_strip_quals(f->type) : NULL;
+        if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE) &&
+            f->ownership == OWN_OWN)
+          need = true;
+      }
+    }
+    if (need) {
+      uint32_t cf = sema_gen_clone_fn_fid(sema, 0 /*value*/, env);
+      if (!cf) return false;
+      if (clone_fid) *clone_fid = cf;
+    }
+  }
+  return true;
+}
+
 /* 收尾：把生成的销毁函数追加到程序函数链尾部（sema_analyze 调用）。 */
 void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return;

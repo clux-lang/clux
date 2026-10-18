@@ -127,3 +127,10 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
     /* 签名信息归 vm 类型池所有，func_t 不释放 sig_type */
     allocator_free(alloc, (void **)pfn);
 }
+
+value_t *func_value_ref(vm_t *vm, func_t *fn) {
+    if (!vm || !fn || !fn->type) return NULL;
+    void *data = value_alloc_data_copy(vm->alloc, fn->type, &fn);
+    if (!data) return NULL;
+    return value_make(vm, fn->type, data);
+}
