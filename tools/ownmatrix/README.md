@@ -113,7 +113,13 @@ python tools/ownmatrix/run_matrix.py
    递归克隆），ref 槽位保持借用指针——与销毁序列同一套规则。
 3. **clone 已扁平化**（2026-10）：`clone(x)` 由 sema 在编译期展开为构造 / NEW /
    循环序列（`NEW` 只申请内存、`CONSTRUCT` 在给定 dest 上构造），运行期不再按
-   类型递归；`CLONE` 指令只剩叶子用途与闭包/comptime 回退。
+   类型递归；`CLONE` 指令只剩叶子用途、**自引用类型（链表/树）的环边**与
+   闭包/comptime 回退。
+4. **深层 / 自引用类型**（2026-10 修）：`struct Outer { b: own *Box }` 的 own
+   指针字段递归展开销毁（修复前只 FREE 掉 Box 块 → `Box.p` 泄漏）；链表/树/
+   互递归的销毁环边用 `FREE_RECURSIVE`（运行期递归）、clone 环边用 `CLONE`；
+   `ptr_clear_owned_recursive` 改为**只清指针、不进被指向值**（旧实现会改写
+   共享堆块：`new Mid{ .i = move(inner) }` 后 `mid.i.p` 变 NULL）。
 
 2026-10 本轮补上的缺口（已修复，回归见 `tests/own_aggregate_test.cpp`）：
 `tuple` 逐元素、`[N]own *T` / `[N]Box` 运行期 for、`own []own *T` / `own []Box`

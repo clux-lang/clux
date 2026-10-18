@@ -310,6 +310,9 @@ typedef enum {
                          * 释放一遍旧 own 槽位（double free）。本指令只做
                          * implicit_cast + memcpy（C 后端 `x = v;`），不释放旧值。
                          * 栈：弹 value → 压回 dst（赋值表达式值）。 */
+    BCODE_FREE_RECURSIVE, /* 弹指针 → 按槽位所有权**递归**释放被指向值的 own 槽位，
+                           * 再释放块本体。仅用于自引用类型（链表/树）的销毁边：
+                           * 静态展开在编译期无法穷尽。普通类型仍走逐槽位 FREE。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

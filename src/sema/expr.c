@@ -3208,6 +3208,9 @@ static ast_node_t *clone_construct(sema_t *sema, const type_t *t,
   return n;
 }
 
+static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
+                                       const type_t *t, ast_node_t *access,
+                                       ownership_t slot_own, bool top_level);
 static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
                                   const type_t *t, ast_node_t *access,
                                   ownership_t slot_own, bool top_level);
@@ -3253,6 +3256,25 @@ bool sema_append_prelude(sema_t *sema, ast_node_t *stmts) {
   while (tail->next) tail = tail->next;
   tail->next = stmts;
   return true;
+}
+
+/* **环检测包装**（自引用类型：链表/树）：扁平化 clone 按类型对象递归展开，
+   展开路径上再次遇到同类型时静态展开无法穷尽 —— 该边退化为运行期 `CLONE`
+   （申请新块 + 按槽位所有权递归深拷贝），其余部分保持构造式展开。 */
+static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
+                                  const type_t *t, ast_node_t *access,
+                                  ownership_t slot_own, bool top_level) {
+  if (!t || !access) return NULL;
+  const type_t *s = type_strip_quals(t);
+  for (uint32_t k = 0; k < sema->clone_depth; k++) {
+    if (sema->clone_path[k] == s) return clone_leaf(sema, access);
+  }
+  if (sema->clone_depth >= 32) return clone_leaf(sema, access);
+  sema->clone_path[sema->clone_depth++] = s;
+  ast_node_t *e = gen_clone_expr_impl(sema, scope, t, access, slot_own,
+                                      top_level);
+  sema->clone_depth--;
+  return e;
 }
 
 /* []T 的深拷贝（长度运行期才知）：prelude 生成临时变量 + make + for 循环，
@@ -3390,9 +3412,9 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
 /* 生成「深拷贝 t 值」的表达式。access 是**被拷贝值的访问表达式**（变量/字段/
    下标/解引用链，纯读、可重复求值）。
    深拷贝判定为假时返回 access 本身（普通拷贝：借用/字节拷贝）。 */
-static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
-                                  const type_t *t, ast_node_t *access,
-                                  ownership_t slot_own, bool top_level) {
+static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
+                                       const type_t *t, ast_node_t *access,
+                                       ownership_t slot_own, bool top_level) {
   if (!t || !access) return NULL;
   const type_t *s = type_strip_quals(t);
   if (!clone_needs_deep(s, slot_own, top_level)) return access;

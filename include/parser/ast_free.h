@@ -35,6 +35,10 @@ extern "C" {
 typedef struct {
     ast_node_t  base;
     ast_node_t *operand;  /* 操作数表达式兄弟链链首（释放它所指的块） */
+    /* **递归释放**：自引用类型（链表/树）的类型展开在编译期无法穷尽——
+       该边退化为运行期递归（`FREE_RECURSIVE`：按槽位所有权递归释放被指向值
+       的 own 槽位，再释放块本体）。普通类型保持逐槽位静态展开（flat）。 */
+    bool         recursive;
 } ast_free_t;
 
 static inline ast_node_t *ast_free_new(arena_t *arena, ast_node_t *operand) {

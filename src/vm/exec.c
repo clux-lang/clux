@@ -1008,6 +1008,27 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* FREE_RECURSIVE：**自引用类型**的销毁边。
+ * 弹指针值 → 按槽位所有权递归释放**被指向值**的 own 槽位（与
+ * ptr_free_owned_recursive 同一权威），再释放块本体。
+ * 普通类型由 sema 逐槽位静态展开成 FREE 序列（flat，C 后端可直接翻译）；
+ * 只有链表/树这类编译期无法穷尽的环才退化为本指令（运行期递归）。 */
+static value_t *op_free_recursive(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (!v || value_is_shadow(v)) return NULL;
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return NULL;
+    if (t->kind == TYPE_KIND_PTR) {
+        ptr_value_t *pv = (ptr_value_t *)value_data(v);
+        const type_t *base = ptr_type_base(t);
+        if (pv->ptr && base) ptr_free_owned_recursive(vm, base, pv->ptr);
+    }
+    /* 块本体照常释放（ptr 释放被指向块 / slice 释放缓冲） */
+    ptr_free_block_only(vm, t, value_data(v));
+    return NULL;
+}
+
 /* ---- M4 切片段（m4-design §1/§2/§4） ---- */
 
 /* PUSH_SLICE：分配空 slice type（开放，elem=NULL，不入池）+ 压其
@@ -2717,6 +2738,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_MARK_UNIQUE]     = op_mark_unique,
     [BCODE_MEMBER_CALL]     = op_member_call,
     [BCODE_FREE]            = op_free,
+    [BCODE_FREE_RECURSIVE]  = op_free_recursive,
     [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
 };
 

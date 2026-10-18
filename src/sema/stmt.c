@@ -172,7 +172,14 @@ static void destroy_append(ast_node_t **head, ast_node_t **tail,
 }
 
 /* 为 `access` 所指、类型为 `t` 的值生成销毁语句，追加进 (head, tail)。
- * 返回 false = 遇到**暂不支持**的形态（含 own 槽位却无法静态展开）。 */
+ * 返回 false = 遇到**暂不支持**的形态（含 own 槽位却无法静态展开）。
+ *
+ * **自引用类型**（链表/树）的类型展开在编译期无法穷尽：展开路径上再次遇到
+ * 同类型时，该边退化为 `FREE_RECURSIVE`（运行期按槽位所有权递归释放被指向值
+ * 的 own 槽位，再释放块本体）；其余部分保持逐槽位静态展开（flat，C 后端可
+ * 直接翻译）。环只能经指针形成，故检测点在 PTR 分支。 */
+static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
+                             ast_node_t **head, ast_node_t **tail);
 static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
                         ast_node_t **head, ast_node_t **tail);
 
@@ -220,6 +227,24 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
   return true;
 }
 
+/* 环检测包装：把当前类型压入展开路径再进 impl（见前向声明处的说明）。 */
+static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
+                        ast_node_t **head, ast_node_t **tail) {
+  if (!t || !access) return true;
+  const type_t *s = type_strip_quals(t);
+  if (sema->destroy_depth >= 32) {
+    /* 展开过深（异常类型图）：该边退化为运行期递归释放 */
+    ast_node_t *rf = ast_free_new(sema->arena, access);
+    if (rf) ((ast_free_t *)rf)->recursive = true;
+    destroy_append(head, tail, rf);
+    return true;
+  }
+  sema->destroy_path[sema->destroy_depth++] = s;
+  bool ok = gen_destroy_impl(sema, t, access, head, tail);
+  sema->destroy_depth--;
+  return ok;
+}
+
 /* 结构体：逐字段展开。 */
 static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
                                ast_node_t *access, ast_node_t **head,
@@ -229,13 +254,15 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
     if (!f->type || !f->name.ptr) continue;
     const type_t *ft = type_strip_quals(f->type);
     if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE)) {
-      /* 叶子：只有 own 槽位才释放 */
+      /* 叶子：只有 own 槽位才释放。**必须递归进被指向值**（PTR/SLICE 分支会
+         展开被指向聚合的 own 槽位 / 切片元素），否则 `struct Outer { b: own
+         *Box }` 只 FREE 掉 Box 块，Box.p 泄漏（实测 leak）。 */
       if (f->ownership != OWN_OWN) continue;
       ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
       if (!mem) return false;
       ((ast_member_t *)mem)->object = access;
       ((ast_member_t *)mem)->field  = f->name; /* vm 拥有，生命周期长于 AST */
-      destroy_append(head, tail, ast_free_new(sema->arena, mem));
+      if (!gen_destroy(sema, ft, mem, head, tail)) return false;
       continue;
     }
     /* 复合字段：递归（无论字段自身 ownership——其 own 槽位归外层值） */
@@ -347,8 +374,8 @@ static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
   return true;
 }
 
-static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
-                        ast_node_t **head, ast_node_t **tail) {
+static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
+                             ast_node_t **head, ast_node_t **tail) {
   if (!t || !access) return true;
   t = type_strip_quals(t);
   switch (t->kind) {
@@ -367,6 +394,17 @@ static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
          内层堆块泄漏）。 */
       const type_t *base = ptr_type_base(t);
       if (base) {
+        /* **自引用类型**：展开路径上已出现该被指向类型（链表/树）→ 该边交给
+           运行期递归释放（内容 + 块），静态展开到此为止。 */
+        const type_t *bs = type_strip_quals(base);
+        for (uint32_t k = 0; k < sema->destroy_depth; k++) {
+          if (sema->destroy_path[k] == bs) {
+            ast_node_t *rf = ast_free_new(sema->arena, access);
+            if (rf) ((ast_free_t *)rf)->recursive = true;
+            destroy_append(head, tail, rf);
+            return true;
+          }
+        }
         ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
         if (!deref) return false;
         ((ast_deref_t *)deref)->operand = access;

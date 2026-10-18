@@ -929,7 +929,9 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     ast_free_t *n = (ast_free_t *)node;
     if (n->operand) {
       compile_expr(c, n->operand);         /* 栈: [handle] */
-      bcode_write_op(c->bc, BCODE_FREE);   /* 释放栈顶，净 -1 */
+      /* recursive：自引用类型（链表/树）的销毁边 —— 运行期递归释放被指向值的
+         own 槽位；普通类型由 sema 逐槽位静态展开，走普通 FREE。 */
+      bcode_write_op(c->bc, n->recursive ? BCODE_FREE_RECURSIVE : BCODE_FREE);
       st_push(c, -1);
     }
     break;

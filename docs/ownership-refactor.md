@@ -475,21 +475,56 @@ own 槽位（0xC0000005）。新增 `STORE_REINIT <name>`：目标变量在赋�
 由 sema 置 `ast_assign_t::reinit`，compiler 改发该指令——只 `implicit_cast +
 memcpy`（C 后端 `x = v;`），不释放旧值。
 
-### 7.2 仍未支持
+### 7.1.5 深层 / 自引用类型的销毁与 clone（2026-10 审查修复）
 
-**cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个
-member 活跃，销毁序列不为它生成 FREE（`gen_destroy` 走 default）。因此
-`type_has_own_slots(cunion)` 恒 false：含 cunion 的聚合不产 FATAL、不生成销毁序列；
-cunion 成员槽位所有权在 sema 侧恒记 `OWN_NONE`。成员**可以是指针/切片**
-（类型层限制已放开），但 `new` 放进去的堆块生命周期由开发者自负（与 C union 语义
-一致）——后续如何管理暂缓。
+审查"所有权是否闭环"时发现并修掉三处真实缺陷（回归：`tests/deep_ownership_test.cpp`）：
 
-**`clone` 与 ref 槽位**：clone 只深拷贝 own 槽位（切片缓冲区总是深拷贝），
-ref 槽位保持借用指针——与销毁序列同一套槽位规则。
+1. **struct 的 own 指针字段必须递归进被指向值**：`struct Outer { b: own *Box }`
+   之前只 `FREE` 掉 Box 块，`Box.p` 泄漏。`gen_destroy_struct` 现在对 own 叶子
+   字段调用 `gen_destroy`（PTR/SLICE 分支展开被指向聚合 / 切片元素）。
+2. **自引用类型（链表/树/互递归）**：静态展开会无限递归。销毁与 clone 都加了
+   **展开路径环检测**（`sema_t::destroy_path` / `clone_path`）——环边退化为运行期
+   原语：销毁用新指令 `FREE_RECURSIVE`（按槽位所有权递归释放被指向值 + 释放块），
+   clone 用 `CLONE`（申请新块 + 递归深拷贝）。非环部分仍逐槽位静态展开。
+3. **`ptr_clear_owned_recursive` 只清指针、**绝不进被指向值**（写时修正）**：
+   旧实现递归进 pointee 清内层 own 指针，会**改写共享堆块**——
+   `new Mid{ .i = move(inner) }` 之后 `mid.i.p` 变成 NULL（实测 3 层链构造后读 p
+   报 null deref）。所有权随 memcpy 转移：堆块与其内部指针都归接管方，源侧只需
+   把指针置 NULL 防二次释放。
 
-**clone 回退路径**：闭包（`TYPE_KIND_FUNC` 值）与无语句上下文（comptime 折叠）
-仍走运行期 `CLONE`（`ptr_clone_block`）；`ptr_clone_block` 因此保留但只作为回退。
+| 形态 | 结果 |
+|---|---|
+| `struct Outer { b: own *Box }`、三层链 | 销毁逐槽位递归展开（无泄漏） |
+| `struct Node { next: ?own *Node }`（链表）、`Tree`（双指针树）、互递归 A↔B | 环边 `FREE_RECURSIVE`（运行期递归，正确无泄漏）；clone 环边 `CLONE` |
+| `new Mid{ .i = move(inner) }` 后再读 `mid.i.p` | 修复后正确 |
 
+### 7.2 仍未闭环的边界（2026-10 审查清单）
+
+核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion
+成员）已闭环并有回归；以下边界**仍未闭环**，按影响排序：
+
+1. **R3 借用跟踪只覆盖"变量定义点的访问路径"**：`ref` 经**函数调用**返回
+   （`var r: '<b> ref *T = take(b.p);`）或**存进另一个聚合的 ref 字段**
+   （`var s2 = .S{ .q = b.p };`）时，b 不会被登记为借源 → `move(b)` 仍放行，
+   存在悬垂可能（探针 `g4b`）。闭环需要"注解锚点登记借源 + 聚合 ref 槽位的
+   借源集合"，是独立设计（§2.5 扁平槽位表方向）。
+2. **自引用类型的环边非扁平**：链表/树/互递归的销毁环边用 `FREE_RECURSIVE`
+   （运行期递归），clone 环边用 `CLONE`（运行期递归）——**正确**但违背"C 后端
+   零类型递归"的目标；C 后端需为自引用类型生成循环或类型专用辅助函数
+   （如 `destroy_Node(Node*)` 的 while 循环）。
+3. **cunion 指针成员的释放仅限直接变量成员**：`_ = move(c.p)`；cunion 嵌在
+   struct 里（`s.c.p`）或经指针（`p.c.p`）仍拒绝——整体 TDZ 会漏掉兄弟
+   own 槽位/堆块。要闭环需要"部分 TDZ"或对 cunion 生成显式销毁钩子。
+4. **运行期递归辅助仍留在回退路径**：`DISPOSE`（sema 无法生成 prelude 时）、
+   `compound_assign_transfer` / `FIELD_SET` 的旧值释放、`CLONE` 环边——这些
+   仍是按类型递归，未扁平化。
+5. **share / weak 引用计数**：已整体移除，单所有权是唯一模型；RC 语义待重新
+   设计（不阻塞单所有权闭环）。
+6. **FFI 边界**：`own`/`fatal` 不跨 C ABI（签名校验拒绝）；聚合内嵌 own 指针
+   传给 C 时按字节传递、所有权不跟踪——需要 C ABI 所有权规则（谁释放）。
+7. **`?T` 的 nil 判定只允许变量**：`var x: ?T` 可 `x != nil`；字段/元素
+   （`n.next != nil`）报 "nil can only be compared with an optional variable"
+   ——链表判空只能先绑定变量或直接 `.!`。语言层小缺口，与所有权正交。
 ### 7.3 开发环境注意事项（踩过的坑）
 
 | 事项 | 说明 |

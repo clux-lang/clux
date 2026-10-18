@@ -272,12 +272,14 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR: {
+        /* **只清指针，绝不进被指向值**（2026-10 修正）。
+           所有权随 memcpy 转移：堆块现在归接管方；被指向值内部的 own 指针
+           也归**该堆块**（接管方持有），与源无关。旧实现递归进 pointee 清
+           内层指针，会**改写共享堆块**——`new Mid{ .i = move(inner) }` 之后
+           `mid.i.p` 变成 NULL（实测：三层链构造后读 p 报 null deref）。
+           源侧防双释放只需要把指针置 NULL：源不再引用该块，销毁时跳过。 */
         ptr_value_t *pv = (ptr_value_t *)data;
-        if (!pv->ptr) return;
-        const type_t *base = ptr_type_base(t);
-        if (base && ptr_type_needs_scan(base))
-            ptr_clear_owned_recursive(vm, base, pv->ptr);
-        pv->ptr = NULL;  /* 只清指针：堆块已归接管方，不释放 */
+        pv->ptr = NULL;
         return;
     }
     case TYPE_KIND_SLICE: {
