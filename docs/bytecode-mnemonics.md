@@ -218,7 +218,7 @@ struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携
 |--------|--------|------|
 | `PUSH_SLICE` | `U8`（ownership） | 分配空切片类型（开放态，elem=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL`。 |
 | `SLICE` | `U8`（flags） | bit0 = low 存在，bit1 = high 存在；弹 self + 按 flags 弹 high/low → 压 `ref []T` 胖指针（`s[low:high]`，**恒产 ref []T**；省略 low=0、high=len）。含运行期边界检查 `0 <= low <= high <= len`。 |
-| `MAKE` | `U32`（init_count） | 弹 init_count 个初始值 + 弹 length + 弹 elem type → 分配 `len * elem_size` 堆块并逐元素布值 → 压 `fatal []T`（`make(T, N, init...)` 宏函数）。 |
+| `MAKE` | `U32`（init_count）+ `U8`（元素槽位所有权） | 弹 init_count 个初始值 + 弹 length + 弹 elem type → 分配 `len * elem_size` 堆块并逐元素布值 → 压 `fatal []T`（`make(T, N, init...)` 宏函数）。元素槽位所有权让运行期构造的切片类型与 sema 侧一致（`make(own *i32, …)` 的元素按 own 销毁）。 |
 
 ### 4.9 模块（M5）
 

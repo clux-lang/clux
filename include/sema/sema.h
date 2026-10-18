@@ -280,6 +280,10 @@ typedef struct sema_t {
        名字仅用于 sema/compiler 内部绑定，不暴露给用户）。 */
     uint32_t      defer_seq;
 
+    /* 销毁序列里的生成循环计数器：`for i in 0..len(src)` 的循环变量名
+       __del_i_N，N 从 0 起单调递增（块内唯一；仅 sema/compiler 内部使用）。 */
+    uint32_t      destroy_seq;
+
     /* **表达式求值上下文**：匿名构造目标类型栈（见 sema_expr_ctx_t）。 */
     sema_expr_ctx_t ex;
 

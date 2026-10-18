@@ -252,6 +252,8 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count);
 static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
                               size_t count);
+/* 槽位所有权写入（定义在 define_struct 之前；array/slice/option 也要用） */
+static void emit_slot_ownership(compiler_t *c, ownership_t own);
 
 /* 引用依赖类型压栈辅助：先把依赖**定义出来**（密封）再 LOAD_TYPE <id> 拉回。
  *
@@ -294,6 +296,7 @@ static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
+  emit_slot_ownership(c, array_type_elem_ownership(t)); /* 元素槽位所有权 */
   emit_seal(c);                            /* 封闭算布局（去重时重绑登记） */
 }
 
@@ -452,6 +455,7 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 elem → 设进 open */
   st_push(c, -1);
+  emit_slot_ownership(c, slice_type_elem_ownership(t)); /* 元素槽位所有权 */
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
   /* elem 先定义（emit_dep_type）：切片自身 layout 恒定，但 elem 的身份必须已定型 */
 }
@@ -540,6 +544,7 @@ static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_dep_type(c, inner, done, count);  /* 栈: [open, inner] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 inner → 设进 open */
   st_push(c, -1);
+  emit_slot_ownership(c, type_option_inner_ownership(t)); /* inner 槽位所有权 */
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 

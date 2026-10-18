@@ -273,15 +273,26 @@ bool type_has_own_slots(const type_t *t) {
             }
             return false;
         }
-        case TYPE_KIND_OPTION:
-            return type_has_own_slots(((const option_type_t *)t)->inner);
+        case TYPE_KIND_OPTION: {
+            const option_type_t *ot = (const option_type_t *)t;
+            if (ot->inner_ownership == OWN_OWN) return true;
+            return type_has_own_slots(ot->inner);
+        }
         case TYPE_KIND_CONST:
         case TYPE_KIND_VOLATILE:
             return type_has_own_slots(type_qualifier_sub(t));
-        case TYPE_KIND_ARRAY:
-            return type_has_own_slots(((const array_type_t *)t)->elem_type);
+        case TYPE_KIND_ARRAY: {
+            const array_type_t *at = (const array_type_t *)t;
+            if (at->elem_ownership == OWN_OWN) return true;
+            return type_has_own_slots(at->elem_type);
+        }
+        case TYPE_KIND_SLICE: {
+            const slice_type_t *st = (const slice_type_t *)t;
+            if (st->elem_ownership == OWN_OWN) return true;
+            return type_has_own_slots(st->elem_type);
+        }
         default:
-            /* ptr / slice 是叶子：其 own 性由所在**槽位**的 ownership 记录 */
+            /* ptr 是叶子：其 own 性由所在**槽位**的 ownership 记录 */
             return false;
     }
 }

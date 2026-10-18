@@ -643,6 +643,15 @@ static value_t *op_set_field_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
     case TYPE_KIND_CUNION:
         type_cunion_set_last_member_ownership(vm, t, (ownership_t)own);
         return NULL;
+    case TYPE_KIND_ARRAY:
+        array_type_set_elem_ownership(vm, t, (ownership_t)own);
+        return NULL;
+    case TYPE_KIND_SLICE:
+        type_slice_set_elem_ownership(vm, t, (ownership_t)own);
+        return NULL;
+    case TYPE_KIND_OPTION:
+        type_option_set_inner_ownership(vm, t, (ownership_t)own);
+        return NULL;
     default:
         return NULL;   /* 其它类型无槽位表：防御性忽略 */
     }
@@ -1098,6 +1107,7 @@ static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * own 指针清空（ptr_clear_owned_recursive 防双释放）。 */
 static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t init_count = bcode_read_u32(bc, pc);
+    uint8_t elem_own = bcode_read_u8(bc, pc);
 
     /* 逆序弹 N 个初始值 */
     value_t *inits[init_count > 0 ? init_count : 1];
@@ -1112,8 +1122,10 @@ static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!elem)
         return value_make_error(vm, "make: missing element type slot");
 
-    /* 构造 fatal []T 切片类型 */
-    const type_t *fatal_slice = type_slice_intern(vm, elem);
+    /* 构造 fatal []T 切片类型（元素槽位所有权随指令立即数——`make(own *i32,…)`
+       的元素要按 own 释放，类型必须与 sema 侧一致才能去重成功） */
+    const type_t *fatal_slice =
+        type_slice_intern_own(vm, elem, (ownership_t)elem_own);
     if (!fatal_slice)
         return value_make_error(vm, "make: cannot make slice type");
 
@@ -1218,7 +1230,8 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {    uint32_t
         if (len != SIZE_MAX && (size_t)n > len)
             return value_make_error(vm,
                 "construct: array element count mismatch");
-        return value_make_array(vm, et, n > 0 ? elems : NULL, n);
+        return value_make_array_own(vm, et, n > 0 ? elems : NULL, n,
+                                    array_type_elem_ownership(t));
     }
 
     /* ?T 构造器（二值单槽位，docs m2-design §12.2）：n 必须 == 1（sema

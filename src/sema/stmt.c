@@ -21,6 +21,10 @@
 #include "parser/ast_walk.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_walk.h"
+#include "parser/ast_int_lit.h"
+#include "parser/ast_unwrap.h"
+#include "parser/ast_opt_is_some.h"
+#include "parser/ast_for_index.h"
 #include "parser/ast_index.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_member.h"
@@ -239,6 +243,95 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
   return true;
 }
 
+/* ---- 逐元素 / 条件销毁的生成辅助 ----
+ *
+ * tuple / array / slice / option 的槽位不是具名成员，sema 需要现造访问表达式：
+ *   - tuple / array / slice 元素：`<access>[i]`（AST_INDEX，索引 = 字面量或
+ *     循环变量）；
+ *   - option inner：`<access>.!`（AST_UNWRAP，借用引用；先由
+ *     AST_OPT_IS_SOME 的 `if (v != nil)` 守卫）；
+ *   - 循环：AST_FOR_INDEX（`for i in 0..len(src)`）。计数器名 `__del_i_N`
+ *     由 sema 分配（arena NUL 串），compiler 侧是私有 i64 变量。
+ * 这些都是**直接形态**节点：`<` / `+` / `!= nil` 的 token 由 lexer 拥有，
+ * sema 无法合成 AST_BINARY/AST_UNARY（与 `is` 同一问题，见 AST_IS_TAG）。 */
+
+/* 现造 `<object>[<index>]` 下标访问节点（indices 兄弟链单元素）。 */
+static ast_node_t *make_index_access(sema_t *sema, ast_node_t *object,
+                                     ast_node_t *index) {
+  ast_node_t *ix = ast_index_new(sema->arena, 0, 0);
+  if (!ix) return NULL;
+  ((ast_index_t *)ix)->object       = object;
+  ((ast_index_t *)ix)->indices      = index;
+  ((ast_index_t *)ix)->indices_last = index;
+  return ix;
+}
+
+/* 现造整数字面量节点（i64 后缀：与生成循环的 i64 计数器同宽，避免比较时
+   隐式提升出歧义）。 */
+static ast_node_t *make_int_lit_i64(sema_t *sema, uint64_t v) {
+  ast_node_t *n = ast_int_lit_new(sema->arena, 0, 0);
+  if (!n) return NULL;
+  ((ast_int_lit_t *)n)->value = v;
+  ((ast_int_lit_t *)n)->type  = strslice_from_bytes("i64", 3);
+  return n;
+}
+
+/* 现造循环计数器变量名 `__del_i_<seq>`（arena NUL 串，块内唯一）。 */
+static bool make_loop_var_name(sema_t *sema, char *buf, size_t cap,
+                               strslice_t *out) {
+  int n = snprintf(buf, cap, "__del_i_%u", sema->destroy_seq++);
+  if (n <= 0 || (size_t)n >= cap) return false;
+  char *heap = (char *)arena_calloc(sema->arena, (size_t)n + 1, 1,
+                                    ALIGNOF(max_align_t));
+  if (!heap) return false;
+  memcpy(heap, buf, (size_t)n);
+  *out = strslice_from_bytes(heap, (size_t)n);
+  return true;
+}
+
+/* 单个**槽位**的销毁：叶子（ptr/slice）只在 own 槽位释放；复合无条件递归
+   （其内部 own 槽位归外层值）。与 struct/tuple/union member 的判定同一规则。 */
+static bool gen_destroy_slot(sema_t *sema, const type_t *slot_type,
+                             ownership_t slot_own, ast_node_t *access,
+                             ast_node_t **head, ast_node_t **tail) {
+  if (!slot_type || !access) return true;
+  const type_t *s = type_strip_quals(slot_type);
+  if (s && (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE)) {
+    if (slot_own != OWN_OWN) return true;   /* ref/fatal 槽位不释放 */
+  }
+  return gen_destroy(sema, slot_type, access, head, tail);
+}
+
+/* 为**元素类型**（array / slice）生成逐元素销毁循环体：
+   `for <var> in 0..len(src) { <body> }` 的 body（引用 <var> 访问当前元素）。
+   `slot_own` 是元素槽位所有权（[N]own *T 的 own / ref / none）。
+   元素无 own 槽位时不生成任何语句（body_head=NULL，调用方跳过整个循环）。 */
+static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
+                              ownership_t slot_own, ast_node_t *access,
+                              strslice_t var_name, ast_node_t **body_head,
+                              ast_node_t **body_tail) {
+  *body_head = *body_tail = NULL;
+  if (!elem_type) return true;
+  const type_t *es = type_strip_quals(elem_type);
+  bool leaf = es && (es->kind == TYPE_KIND_PTR || es->kind == TYPE_KIND_SLICE);
+  if (leaf && slot_own != OWN_OWN) return true;   /* ref/fatal 元素不释放 */
+
+  /* 元素访问：<access>[<var>] */
+  ast_node_t *idx = ast_ident_new(sema->arena, 0, 0);
+  if (!idx) return false;
+  ((ast_ident_t *)idx)->name = var_name;
+  ast_node_t *elem = make_index_access(sema, access, idx);
+  if (!elem) return false;
+
+  ast_node_t *bh = NULL, *bt = NULL;
+  if (!gen_destroy_slot(sema, elem_type, slot_own, elem, &bh, &bt))
+    return false;
+  if (!bh) return true;   /* 元素没有 own 槽位 → 无需循环 */
+  *body_head = bh;
+  *body_tail = bt;
+  return true;
+}
+
 static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
                         ast_node_t **head, ast_node_t **tail) {
   if (!t || !access) return true;
@@ -267,27 +360,124 @@ static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
     }
-    case TYPE_KIND_SLICE:
-      /* 叶子：整体释放（FREE <access>）。元素内嵌的 own 槽位需要 `for`，
-         待补（当前类型层禁止元素含指针/切片）。 */
+    case TYPE_KIND_SLICE: {
+      /* []T：先逐元素销毁（元素槽位 own 才释放，运行期长度 → for 循环），
+         再 FREE 整个切片堆块（顺序不能反：先 FREE 就找不到元素了）。 */
+      char name_buf[64];
+      strslice_t var_name = STRSLICE_EMPTY;
+      if (!make_loop_var_name(sema, name_buf, sizeof name_buf, &var_name))
+        return false;
+      ast_node_t *bh = NULL, *bt = NULL;
+      if (!gen_destroy_elems(sema, slice_type_elem(t),
+                             slice_type_elem_ownership(t), access, var_name,
+                             &bh, &bt))
+        return false;
+      if (bh) {
+        ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
+        if (!blk) return false;
+        ((ast_block_t *)blk)->stmts = bh;
+        blk->is_generated = true;
+
+        ast_node_t *loop = ast_for_index_new(sema->arena, 0, 0);
+        if (!loop) return false;
+        ((ast_for_index_t *)loop)->var    = var_name;
+        ((ast_for_index_t *)loop)->source = access;
+        ((ast_for_index_t *)loop)->body   = blk;
+        destroy_append(head, tail, loop);
+      }
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
+    }
     case TYPE_KIND_STRUCT:
       return gen_destroy_struct(sema, (const struct_type_t *)t, access, head,
                                 tail);
-    /* 以下形态需要**循环或条件**才能静态展开（切片长度运行期才知、
-       option 的 ok / union 的 tag 也要运行期判断）。当前类型层仍禁止复合
-       类型携带指针/切片，故这些形态还不能出现；一旦放开，此处必须补上
-       `for` / `if` 生成，否则 own 槽位会泄漏。 */
     case TYPE_KIND_UNION:
       return gen_destroy_union(sema, (const union_type_t *)t, access, head,
                                tail);
-    /* 以下形态需要**循环**才能静态展开（切片长度运行期才知）：
-       `own []T`（T 含 own 槽位）要生成 `for`，待补。当前类型层仍禁止
-       切片元素为指针/切片，故这些形态还不能出现。 */
-    case TYPE_KIND_TUPLE:
-    case TYPE_KIND_ARRAY:
-    case TYPE_KIND_OPTION:
+    case TYPE_KIND_TUPLE: {
+      /* <T1,T2,…>：逐元素展开（元素槽位 own 才释放；复合递归）。
+         元素访问 = `access[i]`（INDEX_GET；i 是编译期字面量）。 */
+      const tuple_type_t *tt = (const tuple_type_t *)t;
+      for (size_t i = 0; i < tt->elem_count; i++) {
+        const type_t *et = tt->elems[i].type;
+        if (!et) continue;
+        ast_node_t *idxv = make_int_lit_i64(sema, (uint64_t)i);
+        if (!idxv) return false;
+        ast_node_t *elem = make_index_access(sema, access, idxv);
+        if (!elem) return false;
+        if (!gen_destroy_slot(sema, et, tt->elems[i].ownership, elem, head,
+                              tail))
+          return false;
+      }
+      return true;
+    }
+    case TYPE_KIND_ARRAY: {
+      /* [N]T：`for i in 0..len(a) { <T 的销毁序列> }`。
+         定长数组也走运行期 LENGTH（长度语义统一、无需另发常量）。 */
+      const array_type_t *at = (const array_type_t *)t;
+      char name_buf[64];
+      strslice_t var_name = STRSLICE_EMPTY;
+      if (!make_loop_var_name(sema, name_buf, sizeof name_buf, &var_name))
+        return false;
+      ast_node_t *bh = NULL, *bt = NULL;
+      if (!gen_destroy_elems(sema, at->elem_type, at->elem_ownership, access,
+                             var_name, &bh, &bt))
+        return false;
+      if (bh) {
+        ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
+        if (!blk) return false;
+        ((ast_block_t *)blk)->stmts = bh;
+        blk->is_generated = true;
+
+        ast_node_t *loop = ast_for_index_new(sema->arena, 0, 0);
+        if (!loop) return false;
+        ((ast_for_index_t *)loop)->var    = var_name;
+        ((ast_for_index_t *)loop)->source = access;
+        ((ast_for_index_t *)loop)->body   = blk;
+        destroy_append(head, tail, loop);
+      }
+      return true;
+    }
+    case TYPE_KIND_OPTION: {
+      /* ?T：`if (v != nil) { <T 的销毁序列，作用于 v.! > }`。
+         inner 槽位 own 才释放（ref 跳过）；复合 inner 递归。
+         判空用 AST_OPT_IS_SOME（直接形态：compiler 发 OPT_IS_NONE + NOT），
+         取值用 AST_UNWRAP（编译器发 UNWRAP，借用引用 value 字段）。 */
+      const option_type_t *ot = (const option_type_t *)t;
+      const type_t *inner = ot->inner;
+      if (!inner) return true;
+      ownership_t inner_own = ot->inner_ownership;
+      const type_t *is = type_strip_quals(inner);
+      bool leaf = is && (is->kind == TYPE_KIND_PTR || is->kind == TYPE_KIND_SLICE);
+      if (leaf && inner_own != OWN_OWN) return true;
+
+      ast_node_t *unwrap = ast_unwrap_new(sema->arena, 0, 0);
+      if (!unwrap) return false;
+      ((ast_unwrap_t *)unwrap)->operand = access;
+
+      ast_node_t *bh = NULL, *bt = NULL;
+      if (!gen_destroy_slot(sema, inner, inner_own, unwrap, &bh, &bt))
+        return false;
+      if (!bh) return true;
+
+      ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
+      if (!blk) return false;
+      ((ast_block_t *)blk)->stmts = bh;
+      blk->is_generated = true;
+
+      ast_node_t *cond = ast_opt_is_some_new(sema->arena, 0, 0);
+      if (!cond) return false;
+      ((ast_opt_is_some_t *)cond)->object    = access;
+      ((ast_opt_is_some_t *)cond)->want_some = true;
+
+      ast_node_t *ifn = ast_if_new(sema->arena, 0, 0);
+      if (!ifn) return false;
+      ((ast_if_t *)ifn)->cond      = cond;
+      ((ast_if_t *)ifn)->then_body = blk;
+      ifn->is_generated = true;
+      destroy_append(head, tail, ifn);
+      return true;
+    }
     case TYPE_KIND_CUNION:
     case TYPE_KIND_FUNC:
     default:
@@ -1237,6 +1427,36 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
 
     if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
 
+    /* **赋值点旧值销毁**（A 方案 §2.3 表 "旧块摘挂"）：`p = new i32{2}` 这类
+       覆盖自有堆块的位置，旧块必须先释放（否则再也找不到 → 泄漏）。
+       由 sema 生成销毁序列挂在 as->destroy，compiler 在「右值求值之后、
+       STORE 之前」逐条编译（右值可能读旧值，顺序不能反）。
+
+       只对 **ptr / slice** 生成：聚合（struct/tuple/union/array/option）的
+       `value_assign` 走 compound_assign_transfer，运行期已按槽位所有权
+       释放旧值——这里再生成会双释放。指针/切片的 assign 是纯 memcpy
+       （设计如此：释放权归 sema），所以旧值只能由这里释放。
+       move 过的变量（moved）已交出堆块，不再释放；未初始化（flow_init=false）
+       也没有旧值。 */
+    if (sym && sym->type && sym->flow_init && !sym->moved &&
+        sym->ownership == OWN_OWN &&
+        (sym->type->kind == TYPE_KIND_PTR ||
+         sym->type->kind == TYPE_KIND_SLICE)) {
+      size_t nlen = name.len;
+      char *nbuf = (char *)arena_calloc(sema->arena, nlen + 1, 1,
+                                        ALIGNOF(max_align_t));
+      if (nbuf) {
+        memcpy(nbuf, name.ptr, nlen);
+        ast_node_t *old = ast_ident_new(sema->arena, 0, 0);
+        if (old) {
+          ((ast_ident_t *)old)->name = strslice_from_bytes(nbuf, nlen);
+          ast_node_t *dhead = NULL, *dtail = NULL;
+          if (gen_destroy(sema, sym->type, old, &dhead, &dtail))
+            as->destroy = dhead;
+        }
+      }
+    }
+
     /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true
        （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。
        R1（own 不可 copy，§3.1）：own *T 变量被赋值 = copy → 编译错误
@@ -1458,14 +1678,33 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
      校验越界；此处直接按 0 号元素类型校验可赋值性——元素类型同构，
      任意位置校验等价） */
   const type_t *et;
+  ownership_t et_own = OWN_NONE;
   if (bt->kind == TYPE_KIND_TUPLE) {
     et = tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type : NULL;
+    /* 元素槽位所有权按编译期下标取（越界已被 sema_expr 拒绝） */
+    if (ix->indices && ix->indices->kind == AST_INT_LIT) {
+      uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
+      const tuple_elem_t *te = tuple_type_elem(bt, (size_t)k);
+      if (te) et_own = te->ownership;
+    }
   } else if (type_is_slice(bt)) {
     et = slice_type_elem(bt);
+    et_own = slice_type_elem_ownership(bt);
   } else {
     et = array_type_elem(bt);
+    et_own = array_type_elem_ownership(bt);
   }
   if (!et) return;
+
+  /* **赋值点旧值销毁**：`a[i] = v` 是纯覆盖（INDEX_SET 只 memcpy），
+     旧元素里的 own 堆块必须先释放。own 叶子 / 含 own 槽位的复合元素
+     都要展开（ref 元素跳过）。 */
+  {
+    ast_node_t *dh = NULL, *dt = NULL;
+    if (gen_destroy_slot(sema, et, et_own, as->target, &dh, &dt))
+      as->destroy = dh;
+  }
+
   value_t *dst = value_make_shadow(sema->vm, et);
   if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
     char tn[64], rn[64];
@@ -1907,6 +2146,13 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
+    /* **赋值点旧值销毁**：`p.* = v` 是纯覆盖（PTR_SET 只 memcpy），
+       旧被指向值里的 own 槽位必须先释放。只对 **own 指针**生成——
+       经 ref 指针写别人拥有的内容时不能替对方释放（借用方不拥有）。 */
+    if (value_ownership(base) == OWN_OWN && ft) {
+      ast_node_t *dh = NULL, *dt = NULL;
+      if (gen_destroy(sema, ft, as->target, &dh, &dt)) as->destroy = dh;
+    }
     /* 简单赋值：value_assign 校验被指向类型可赋值性 */
     value_t *dst = value_make_shadow(sema->vm, ft);
     if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {

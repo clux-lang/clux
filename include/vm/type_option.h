@@ -43,12 +43,20 @@ const type_t *type_option_push(vm_t *vm);
 /** SET_TYPE 运行期用：设被包裹类型 T（密封后静默忽略） */
 void type_option_set_inner(vm_t *vm, const type_t *t, const type_t *inner);
 
-/** SEAL：按 inner 去重 intern + 计算 C 布局 + 置 sealed。返回该 const type */
+/** SET_FIELD_OWNERSHIP 运行期用（option 分支）：设 inner 槽位的所有权（seal 前）。 */
+void type_option_set_inner_ownership(vm_t *vm, const type_t *t,
+                                     ownership_t own);
+
+/** SEAL：按 (inner + inner 所有权) 去重 intern + 计算 C 布局 + 置 sealed。 */
 const type_t *type_option_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_option_push + set_inner + seal）：sema 解析 ?T 用。
  *  不向操作数栈压 type value（嵌套构造场景避免栈布局污染）。 */
 const type_t *type_option_intern(vm_t *vm, const type_t *inner);
+
+/** 带 **inner 槽位所有权** 的一次性构造：`?own *T` 等。 */
+const type_t *type_option_intern_own(vm_t *vm, const type_t *inner,
+                                     ownership_t inner_ownership);
 
 /** 带 ownership 的一次性快捷：ownership 在 seal **之前**设。用于
  *  `fatal ?T`——内层含 own 资源的 optional 跨函数边界的将亡值变体
@@ -60,6 +68,13 @@ const type_t *type_option_intern_with_ownership(vm_t *vm, const type_t *inner,
 static inline const type_t *type_option_inner(const type_t *t) {
     return (t && t->kind == TYPE_KIND_OPTION) ? ((const option_type_t *)t)->inner
                                               : NULL;
+}
+
+/** 取 option 类型 inner 槽位的所有权（非 option 返回 OWN_NONE） */
+static inline ownership_t type_option_inner_ownership(const type_t *t) {
+    return (t && t->kind == TYPE_KIND_OPTION)
+               ? ((const option_type_t *)t)->inner_ownership
+               : OWN_NONE;
 }
 
 /* ---- option 值块访问器（data 为 struct Optional_T 内存布局） ---- */

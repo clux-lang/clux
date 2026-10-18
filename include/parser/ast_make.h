@@ -19,6 +19,9 @@ typedef struct {
     ast_node_t *length;     /* 长度表达式 N */
     ast_node_t *inits;      /* 初始值兄弟链（init...，可含 AST_FILL） */
     ast_node_t *inits_last;
+    /* 元素槽位的所有权（sema 解析时写入；编进 MAKE 指令，让运行期构造的
+       切片类型与 sema 侧一致——`make(own *i32, …)` 的元素要按 own 释放）。 */
+    uint8_t     elem_ownership;
 } ast_make_t;
 
 static inline ast_node_t *ast_make_new(arena_t *arena,

@@ -17,6 +17,7 @@
 #include "parser/ast_move.h"
 #include "parser/ast_option.h"
 #include "parser/ast_is_tag.h"
+#include "parser/ast_opt_is_some.h"
 #include "parser/ast_owned_type.h"
 #include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
@@ -56,6 +57,9 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_ptr_t *)node)->base_type, visit, user);
     case AST_IS_TAG:
       return ast_walk_preorder(((ast_is_tag_t *)node)->object, visit, user);
+    case AST_OPT_IS_SOME:
+      return ast_walk_preorder(((ast_opt_is_some_t *)node)->object, visit,
+                               user);
     case AST_OWNED_TYPE:
       return ast_walk_preorder(((ast_owned_type_t *)node)->base_type, visit,
                                user);

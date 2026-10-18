@@ -442,55 +442,46 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
     }
     case AST_OPTION: {
-      /* ?T optional 类型修饰：递归解析内层 T → 按 (inner) 去重 intern。
-         与 const/volatile 同族（类型即表达式，嵌套递归）。
-         禁止内层为指针/切片——复合类型不得携带指针字段。 */
-      const type_t *sub = resolve_type_expr(sema, ((ast_option_t *)type_expr)->sub);
-      if (sub && type_contains_ptr_or_slice(sub)) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "option type cannot contain pointer or slice");
-        return NULL;
-      }
-      return sub ? type_option_intern(sema->vm, sub) : NULL;
+      /* ?T optional 类型修饰：递归解析内层 T → 按 (inner + inner 槽位所有权)
+         去重 intern。与 const/volatile 同族（类型即表达式，嵌套递归）。
+         内层可以是指针/切片/含 own 槽位的聚合——`?own *T` 的 own 记在类型
+         描述上（销毁序列 `if (v != nil)` 据此决定是否 FREE `v.!`）。
+         所有权必须在 resolve **之前**取（折叠会丢 ownership token）。 */
+      ast_option_t *op = (ast_option_t *)type_expr;
+      ownership_t inner_own = sema_type_expr_ownership(op->sub);
+      const type_t *sub = resolve_type_expr(sema, op->sub);
+      return sub ? type_option_intern_own(sema->vm, sub, inner_own) : NULL;
     }
     case AST_ARRAY: {
       /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →
-         按 (elem_type, length) 去重 intern。边界槽位支持嵌套数组
-         （[2][3]i32 = 元素类型是 [3]i32）。
-         禁止元素为指针/切片——复合类型不得携带指针字段。 */
+         按 (elem_type, length, 元素槽位所有权) 去重 intern。边界槽位支持嵌套
+         数组（[2][3]i32 = 元素类型是 [3]i32）。
+         元素可以是指针/切片/含 own 槽位的聚合——`[N]own *T` 的 own 记在类型
+         描述上（销毁序列 `for i in 0..N` 据此决定是否 FREE `a[i]`）。 */
       ast_array_t *arr = (ast_array_t *)type_expr;
+      ownership_t elem_own = sema_type_expr_ownership(arr->base_type);
       const type_t *base = resolve_type_expr(sema, arr->base_type);
       if (!base) return NULL;
-      if (type_contains_ptr_or_slice(base)) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "array type cannot contain pointer or slice");
-        return NULL;
-      }
       size_t len;
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
-      return type_array_intern(sema->vm, base, len);
+      return type_array_intern_own(sema->vm, base, len, elem_own);
     }
     case AST_TUPLE: {
       /* <T1,T2,...> 元组类型：逐元素递归解析（可为任意类型表达式，
-         含嵌套元组/数组）→ 按（元素类型+顺序）去重 intern。
-         禁止元素为指针/切片——复合类型不得携带指针字段。 */
+         含嵌套元组/数组）→ 按（元素类型 + 顺序 + 元素槽位所有权）去重 intern。
+         元素可以是指针/切片/含 own 槽位的聚合（销毁序列逐元素展开）。 */
       ast_tuple_t *tp = (ast_tuple_t *)type_expr;
       size_t n = sema_count_siblings(tp->elem_types);
       tuple_elem_t elems_arr[n > 0 ? n : 1];
       size_t i = 0;
       for (ast_node_t *et = tp->elem_types; et; et = et->next, i++) {
+        /* 所有权必须在 resolve **之前**取（折叠会丢 ownership token） */
+        ownership_t eown = sema_type_expr_ownership(et);
         const type_t *pt = resolve_type_expr(sema, et);
         if (!pt) return NULL;
-        if (type_contains_ptr_or_slice(pt)) {
-          diag_error(sema->diag, sema_loc(sema, et),
-                     "tuple type cannot contain pointer or slice");
-          return NULL;
-        }
         elems_arr[i].type   = pt;
         elems_arr[i].offset = 0; /* seal 统一布局 */
-        /* 槽位所有权：先解析后提取会丢 token，故须在 resolve 前取——
-           这里 pt 已解析，改从原始类型表达式取（未被折叠的兄弟节点）。 */
-        elems_arr[i].ownership = sema_type_expr_ownership(et);
+        elems_arr[i].ownership = eown;
       }
       return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
     }
@@ -591,12 +582,11 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       }
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
-      if (type_contains_ptr_or_slice(elem)) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "slice type cannot contain pointer or slice");
-        return NULL;
-      }
-      return type_slice_intern(sema->vm, elem);
+      /* 元素槽位所有权（`own []own *T` 的元素是 own 叶子；销毁序列
+         `for i in 0..len` 据此决定是否 FREE `s[i]`）。所有权须在 resolve
+         之前取——折叠会丢 ownership token。 */
+      ownership_t elem_own = sema_type_expr_ownership(sl->elem_type);
+      return type_slice_intern_own(sema->vm, elem, elem_own);
     }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，

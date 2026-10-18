@@ -15,6 +15,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_is_tag.h"
+#include "parser/ast_opt_is_some.h"
 #include "parser/ast_member.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_unwrap.h"
@@ -1088,6 +1089,22 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     st_push(c, 0);
     break;
   }
+  case AST_OPT_IS_SOME: {
+    /* sema 生成的 nil 判定：编译 object → `OPT_IS_NONE`（弹 ?T → 压
+       bool：none=true）；want_some（源码 `v != nil`）时再发 `NOT`。
+       与用户写 `v != nil` 编译出的指令序列一致，只是不需要 token_t
+       （AST_BINARY 的 op 是 lexer 拥有的 token）。 */
+    ast_opt_is_some_t *n = (ast_opt_is_some_t *)node;
+    if (!n->object) {
+      c_error(c, node, "opt_is_some: missing object");
+      return;
+    }
+    compile_expr(c, n->object);            /* 栈: [value] */
+    bcode_write_op(c->bc, BCODE_OPT_IS_NONE); /* 弹 ?T → 压 bool（none） */
+    if (n->want_some) bcode_write_op(c->bc, BCODE_NOT);
+    st_push(c, 0);
+    break;
+  }
   case AST_FREE: {
     /* `FREE <expr>` 是**表达式**（结果 void）：编译操作数压栈，再发 FREE
        （只消费栈顶）。**compiler 不知道任何类型结构**——"释放什么"完全由
@@ -1205,6 +1222,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
     bcode_write_op(c->bc, BCODE_MAKE);
     bcode_write_u32(c->bc, (uint32_t)icount);
+    bcode_write_u8(c->bc, n->elem_ownership); /* 元素槽位所有权（类型一致） */
     st_push(c, -((int)icount) - 1);     /* MAKE 弹 icount+2 压 1，净 -(icount+1) */
     break;
   }

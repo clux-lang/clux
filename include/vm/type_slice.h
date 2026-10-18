@@ -37,17 +37,29 @@ const type_t *type_slice_push(vm_t *vm);
 /** SET_TYPE 运行期用：设元素类型 T（密封后静默忽略） */
 void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem);
 
-/** SEAL：按 (elem_type, ownership) 去重 intern + 置 sealed。返回该 const type */
+/** SET_FIELD_OWNERSHIP 运行期用（slice 分支）：设元素槽位的所有权（seal 前）。 */
+void type_slice_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own);
+
+/** SEAL：按 (elem_type, 元素所有权) 去重 intern + 置 sealed。返回该 const type */
 const type_t *type_slice_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_slice_push + set_elem + seal）：sema 解析 []T 用。
- *  不向操作数栈压 type value。
- *  所有权纯编译期——类型不区分 own/ref/fatal。 */
+ *  不向操作数栈压 type value。 */
 const type_t *type_slice_intern(vm_t *vm, const type_t *elem);
+
+/** 带**元素槽位所有权**的一次性构造：`own []own *T` 等。 */
+const type_t *type_slice_intern_own(vm_t *vm, const type_t *elem,
+                                    ownership_t elem_ownership);
 
 /** 取切片类型的元素类型 T（非切片返回 NULL） */
 static inline const type_t *slice_type_elem(const type_t *t) {
     return type_is_slice(t) ? ((const slice_type_t *)t)->elem_type : NULL;
+}
+
+/** 取切片类型元素槽位的所有权（非切片返回 OWN_NONE） */
+static inline ownership_t slice_type_elem_ownership(const type_t *t) {
+    return type_is_slice(t) ? ((const slice_type_t *)t)->elem_ownership
+                            : OWN_NONE;
 }
 
 /* ================================================================ */

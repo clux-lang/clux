@@ -18,6 +18,12 @@ extern const vtable_t VTABLE_ARRAY;
 value_t *value_make_array(vm_t *vm, const type_t *elem_type,
                           value_t **elems, size_t count);
 
+/** 带**元素槽位所有权**的数组值构造：构造出的数组类型与 (elem, count,
+ *  elem_own) 去重一致（`[N]own *T` 的元素按 own 销毁）。 */
+value_t *value_make_array_own(vm_t *vm, const type_t *elem_type,
+                              value_t **elems, size_t count,
+                              ownership_t elem_ownership);
+
 /* ================================================================ */
 /* 数组类型（array_type_t，继承 type_t）                              */
 /* ================================================================ */
@@ -50,6 +56,10 @@ typedef struct array_type_t {
     const type_t *elem_type;  /* 元素类型（引用，不拥有）；由 set_elem 设定 */
     size_t        length;     /* 编译期元素数量；SIZE_MAX = 动态/未定长切片 */
     bool          formed;     /* 是否已定长成形（set_elem + set_count 后为真） */
+    /* 该 **元素槽位** 的所有权（合法性说明同 struct_field_t::ownership）：
+       `[N]own *T` 的元素是 own 叶子；销毁序列 `for i in 0..N` 要据此决定是否
+       FREE `a[i]`。参与去重 intern（own 元素与 ref 元素是不同类型）。 */
+    ownership_t   elem_ownership;
     /* sealed 已提升到基类 type_t（见 type.h）；密封后不可再修改 elem/length */
     size_t        layout_size;  /* 密封后：元素总字节数 = elem_type->size*length */
     size_t        layout_align; /* 密封后：对齐 = elem_type->align */
@@ -69,6 +79,9 @@ const type_t *array_type_push(vm_t *vm);
  *  t 须为 array_type_push 返回的开放数组类型，重复调用 / sealed 后静默忽略。 */
 void array_type_set_elem(vm_t *vm, const type_t *t, const type_t *elem_type);
 
+/** SET_FIELD_OWNERSHIP 运行期用（array 分支）：设元素槽位的所有权（seal 前）。 */
+void array_type_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own);
+
 /** 设置元素数量（对应字节码 define_bound N），标记 formed；仅一次有效，
  *  重复调用 / sealed 后静默忽略。t 须为 array_type_push 返回的开放数组类型。 */
 void array_type_set_count(vm_t *vm, const type_t *t, size_t count);
@@ -80,6 +93,11 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t);
 
 /** 一次性构造（push_array + set_elem + set_count + seal 的快捷方式） */
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count);
+
+/** 带**元素槽位所有权**的一次性构造：`[N]own *T` / `[N]ref *T` 等。
+ *  所有权在 seal 之前写入并参与去重 intern。 */
+const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
+                                    size_t count, ownership_t elem_ownership);
 
 /** 带 ownership 的一次性构造：与 type_array_intern 同，但数组类型的
  *  ownership 在 seal **之前**设为 ownership。用于 `fatal [N]T`——含 own
@@ -93,6 +111,13 @@ const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type
 static inline const type_t *array_type_elem(const type_t *t) {
     return (t && t->kind == TYPE_KIND_ARRAY) ? ((const array_type_t *)t)->elem_type
                                              : NULL;
+}
+
+/** 取数组类型元素槽位的所有权（非数组类型返回 OWN_NONE） */
+static inline ownership_t array_type_elem_ownership(const type_t *t) {
+    return (t && t->kind == TYPE_KIND_ARRAY)
+               ? ((const array_type_t *)t)->elem_ownership
+               : OWN_NONE;
 }
 
 /** 取数组类型的编译期元素数量（动态/未定长返回 SIZE_MAX；非数组返回 0） */

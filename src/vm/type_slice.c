@@ -239,6 +239,10 @@ static bool slice_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (a == b) return true;
     if (!b) return false;
     if (!type_is_slice(a) || !type_is_slice(b)) return false;
+    /* 元素槽位所有权是类型描述的一部分：`[]own *T` 与 `[]ref *T` 是不同类型
+       （销毁语义不同），不能互相赋值。 */
+    if (slice_type_elem_ownership(a) != slice_type_elem_ownership(b))
+        return false;
     return type_equal(vm, slice_type_elem(a), slice_type_elem(b));
 }
 
@@ -312,6 +316,14 @@ void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem) {
     ((slice_type_t *)t)->elem_type = elem;
 }
 
+/* SET_FIELD_OWNERSHIP 运行期用（slice 分支）：设元素槽位的所有权（seal 前）。 */
+void type_slice_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own) {
+    (void)vm;
+    if (!t || type_is_sealed(t)) return;
+    if (!type_is_slice(t)) return;
+    ((slice_type_t *)t)->elem_ownership = own;
+}
+
 const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t) return NULL;
     if (!type_is_slice(t)) return NULL;
@@ -322,12 +334,13 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->slice_types) vm->slice_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* dedup intern by elem_type（所有权纯编译期——只有一种切片类型 []T） */
+    /* dedup intern by (elem_type + 元素槽位所有权) */
     size_t n = vec_len(vm->slice_types);
     for (size_t i = 0; i < n; i++) {
         const slice_type_t *other = (const slice_type_t *)vec_get(vm->slice_types, i);
         if (other && other != st && type_is_sealed(&other->base) &&
-            other->elem_type == st->elem_type) {
+            other->elem_type == st->elem_type &&
+            other->elem_ownership == st->elem_ownership) {
             if (st->base.name.ptr) {
                 char *np = (char *)st->base.name.ptr;
                 allocator_free(vm->alloc, (void **)&np);
@@ -350,9 +363,16 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_slice_intern(vm_t *vm, const type_t *elem) {
+    return type_slice_intern_own(vm, elem, OWN_NONE);
+}
+
+/* 带元素槽位所有权的一次性构造（`own []own *T` 等）。 */
+const type_t *type_slice_intern_own(vm_t *vm, const type_t *elem,
+                                    ownership_t elem_ownership) {
     if (!vm || !elem) return NULL;
     slice_type_t *st = slice_type_create_open(vm);
     st->elem_type = elem;
+    st->elem_ownership = elem_ownership;
     return type_slice_seal(vm, &st->base);
 }
 

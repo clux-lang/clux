@@ -179,12 +179,16 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     case TYPE_KIND_SLICE: {
-        /* []T：拥有堆块 → 先递归销毁元素内嵌 own 字段，再释放堆块，
-           置 ptr=NULL 防双释放。 */
+        /* []T：拥有堆块 → 先按**元素槽位所有权**销毁元素内嵌 own 槽位，
+           再释放堆块，置 ptr=NULL 防双释放。 */
         slice_value_t *sv = (slice_value_t *)data;
         if (!sv->ptr) return;
         const type_t *et = slice_type_elem(t);
-        if (et) slice_free_elems(vm, et, sv->ptr, sv->len);
+        if (et && slot_needs_visit(et, slice_type_elem_ownership(t))) {
+            uint8_t *p = (uint8_t *)sv->ptr;
+            for (uint64_t i = 0; i < sv->len; i++, p += et->size)
+                ptr_free_owned_recursive(vm, et, p);
+        }
         void *heap = sv->ptr;
         sv->ptr = NULL;
         sv->len = 0;
@@ -225,10 +229,11 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     case TYPE_KIND_OPTION: {
-        /* ?T：仅 ok 时 value 字段是活的。 */
+        /* ?T：仅 ok 时 value 字段是活的；inner 槽位的所有权决定释放/跳过。 */
         if (!option_ok(data)) return;
         const type_t *inner = type_option_inner(t);
-        if (inner && ptr_type_needs_scan(inner))
+        if (inner &&
+            slot_needs_visit(inner, type_option_inner_ownership(t)))
             ptr_free_owned_recursive(
                 vm, inner,
                 (uint8_t *)data + option_value_offset(t));
@@ -242,10 +247,11 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     case TYPE_KIND_ARRAY: {
-        /* [N]T：逐元素递归销毁（连续内存，按元素大小步进）。 */
+        /* [N]T：按**元素槽位所有权**逐元素释放（own 叶子释放、ref 跳过；
+           复合元素无条件递归）。 */
         const array_type_t *at = (const array_type_t *)t;
         const type_t *et = at->elem_type;
-        if (!et || !ptr_type_needs_scan(et)) return;
+        if (!et || !slot_needs_visit(et, at->elem_ownership)) return;
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < at->length; i++, p += et->size)
             ptr_free_owned_recursive(vm, et, p);
@@ -385,17 +391,31 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
             break;
         }
         const type_t *et = slice_type_elem(type);
-        if (!et) {
+        if (!et || et->size == 0) {
             memcpy(dst, src, type->size);
             break;
         }
+        /* 切片**总是**深拷贝缓冲区（own []T 的缓冲区归本值所有，clone 必须
+           独立）——浅拷贝会让两个切片共享同一堆块，作用域退出各 FREE 一次
+           → 双释放（实测 0xC0000005）。元素内容是否递归深拷贝由**元素槽位
+           所有权**决定：own 元素/含 own 槽位的元素要克隆，ref 元素只拷贝
+           借用指针（借用目标不归本值所有）。 */
         size_t total = (size_t)ss->len * et->size;
+        if (total == 0) {
+            memcpy(dst, src, type->size);
+            break;
+        }
         void *new_heap = allocator_new_ex(vm->alloc, "slice_heap", total,
                                           NULL, NULL, NULL, 1);
         if (!new_heap) panic("vm: out of memory cloning slice block");
         const uint8_t *sp = (const uint8_t *)ss->ptr;
         uint8_t *dp = (uint8_t *)new_heap;
+        bool deep = slot_needs_visit(et, slice_type_elem_ownership(type));
         for (uint64_t i = 0; i < ss->len; i++, sp += et->size, dp += et->size) {
+            if (!deep) {
+                memcpy(dp, sp, et->size);
+                continue;
+            }
             void *se = ptr_clone_block(vm, et, sp);
             memcpy(dp, se, et->size);
             allocator_free(vm->alloc, (void **)&se);
@@ -405,12 +425,13 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         break;
     }
     case TYPE_KIND_STRUCT: {
-        /* 结构体：整块 memcpy 后，把含指针的字段替换成深拷贝结果。 */
+        /* 结构体：整块 memcpy 后，把**own 槽位**替换成深拷贝结果
+           （ref 槽位保持浅拷贝 = 借用目标不变）。 */
         memcpy(dst, src, type->size);
         const struct_type_t *st = (const struct_type_t *)type;
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
-            if (!f->type || !ptr_type_needs_scan(f->type)) continue;
+            if (!f->type || !slot_needs_visit(f->type, f->ownership)) continue;
             void *sub = ptr_clone_block(vm, f->type,
                                         (const uint8_t *)src + f->offset);
             memcpy((uint8_t *)dst + f->offset, sub, f->type->size);
@@ -423,7 +444,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         const tuple_type_t *tt = (const tuple_type_t *)type;
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
-            if (!e->type || !ptr_type_needs_scan(e->type)) continue;
+            if (!e->type || !slot_needs_visit(e->type, e->ownership)) continue;
             void *sub = ptr_clone_block(vm, e->type,
                                         (const uint8_t *)src + e->offset);
             memcpy((uint8_t *)dst + e->offset, sub, e->type->size);
@@ -432,14 +453,15 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         break;
     }
     case TYPE_KIND_UNION: {
-        /* tag union：tag 字节原样拷贝，只深拷贝**当前 tag** 的 payload。 */
+        /* tag union：tag 字节原样拷贝，只深拷贝**当前 tag 的 own payload**。 */
         memcpy(dst, src, type->size);
         const union_type_t *ut = (const union_type_t *)type;
         if (ut->member_count == 0) break;
         uint64_t tag = union_read_tag_raw(src, union_type_tag_size(type));
         if (tag >= ut->member_count) break;   /* 非法 tag：保持 memcpy 结果 */
-        const type_t *pt = ut->members[tag].payload_type;
-        if (!pt || !ptr_type_needs_scan(pt)) break;
+        const union_member_t *m = &ut->members[tag];
+        const type_t *pt = m->payload_type;
+        if (!pt || !slot_needs_visit(pt, m->ownership)) break;
         size_t poff = union_type_payload_offset(type);
         void *sub = ptr_clone_block(vm, pt, (const uint8_t *)src + poff);
         memcpy((uint8_t *)dst + poff, sub, pt->size);
@@ -450,7 +472,9 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         memcpy(dst, src, type->size);
         if (!option_ok(src)) break;
         const type_t *inner = type_option_inner(type);
-        if (!inner || !ptr_type_needs_scan(inner)) break;
+        if (!inner ||
+            !slot_needs_visit(inner, type_option_inner_ownership(type)))
+            break;
         size_t voff = option_value_offset(type);
         void *sub = ptr_clone_block(vm, inner, (const uint8_t *)src + voff);
         memcpy((uint8_t *)dst + voff, sub, inner->size);
@@ -472,7 +496,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
     case TYPE_KIND_ARRAY: {
         const array_type_t *at = (const array_type_t *)type;
         const type_t *et = at->elem_type;
-        if (!et || !ptr_type_needs_scan(et)) {
+        if (!et || !slot_needs_visit(et, at->elem_ownership)) {
             memcpy(dst, src, type->size);
             break;
         }

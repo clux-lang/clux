@@ -124,6 +124,10 @@ typedef struct volatile_type_t {
 typedef struct option_type_t {
     type_t       base;
     const type_t *inner;  /* 被 optional 包裹的类型 T（引用，不拥有） */
+    /* 该 **inner 槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
+       `?own *T` 的 own 必须记在类型描述上——销毁序列 `if (v != nil)` 要据此
+       决定是否 FREE `v.!`；参与去重 intern。 */
+    ownership_t  inner_ownership;
 } option_type_t;
 
 /**
@@ -180,6 +184,10 @@ typedef struct ptr_type_t {
 typedef struct slice_type_t {
     type_t       base;
     const type_t *elem_type;  /* 元素类型 T（引用，不拥有） */
+    /* 该 **元素槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
+       `own []own *T` 的元素才是 own 叶子；销毁序列 `for i in 0..len` 要据此
+       决定是否 FREE `s[i]`。参与去重 intern。 */
+    ownership_t  elem_ownership;
 } slice_type_t;
 
 typedef struct enum_type_t {

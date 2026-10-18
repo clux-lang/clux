@@ -765,6 +765,13 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           }
           if (fv && !value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID) && et) {
+            char what[96];
+            snprintf(what, sizeof what, "array element %zu", idx);
+            if (!sema_check_slot_flow(sema, array_type_elem_ownership(t), et,
+                                      f, fv, what)) {
+              idx += 1;
+              continue;
+            }
             value_t *dst = value_make_shadow(sema->vm, et);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -806,6 +813,12 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
+            } else if (ft == inner) {
+              /* inner 槽位接收规则（?own *T 只接 FATAL 等） */
+              char what[96];
+              snprintf(what, sizeof what, "optional inner");
+              sema_check_slot_flow(sema, type_option_inner_ownership(t), inner,
+                                   f, fv, what);
             }
           }
         }
@@ -1128,6 +1141,11 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
+            } else if (ft == inner) {
+              char what[96];
+              snprintf(what, sizeof what, "optional inner");
+              sema_check_slot_flow(sema, type_option_inner_ownership(t), inner,
+                                   f, fv, what);
             }
           }
         }
@@ -1617,6 +1635,13 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
         if (fv && !value_is_error(sema->vm, fv) &&
             !value_is_type(fv, TYPE_KIND_VOID) && et) {
+          char what[96];
+          snprintf(what, sizeof what, "array element %zu", idx);
+          if (!sema_check_slot_flow(sema, array_type_elem_ownership(t), et, f,
+                                    fv, what)) {
+            idx += 1;
+            continue;
+          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -2870,6 +2895,10 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
          sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
       ast_make_t *n = (ast_make_t *)*node;
 
+      /* 元素槽位所有权必须在 resolve **之前**取（折叠会丢 ownership token） */
+      ownership_t elem_own = sema_type_expr_ownership(n->elem_type);
+      n->elem_ownership = (uint8_t)elem_own;
+
       /* 解析元素类型 T */
       const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
       if (!et) return val_void(sema);
@@ -2901,6 +2930,13 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
           value_t *fv = sema_expr(sema, &((ast_fill_t *)it)->value, scope);
           if (is_poison(sema, fv))
             return val_void(sema);
+          if (!sema_check_slot_flow(sema, elem_own, et,
+                                    ((ast_fill_t *)it)->value, fv,
+                                    "make element")) {
+            total += cnt;
+            link = &it->next;
+            continue;
+          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -2915,6 +2951,12 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
           it = *link; /* 折叠可能替换节点：刷新游标，后续 it->next 才有效 */
           if (is_poison(sema, fv))
             return val_void(sema);
+          if (!sema_check_slot_flow(sema, elem_own, et, it, fv,
+                                    "make element")) {
+            total += 1;
+            link = &it->next;
+            continue;
+          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -2956,8 +2998,9 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
       }
 
       /* 返回 fatal []T shadow——make 产新堆块，与 new 统一。
-         所有权纯编译期：fatal 是值层 ownership 状态。 */
-      const type_t *slice_t = type_slice_intern(sema->vm, et);
+         所有权纯编译期：fatal 是值层 ownership 状态。
+         元素槽位所有权进类型（`make(own *i32, …)` 的元素按 own 释放）。 */
+      const type_t *slice_t = type_slice_intern_own(sema->vm, et, elem_own);
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
       value_t *r = value_make_shadow(sema->vm, slice_t);

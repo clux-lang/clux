@@ -146,6 +146,15 @@ void array_type_set_elem(vm_t *vm, const type_t *t, const type_t *elem_type) {
     at->elem_type = elem_type;
 }
 
+/* SET_FIELD_OWNERSHIP 运行期用（array 分支）：设元素槽位的所有权（seal 前）。 */
+void array_type_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own) {
+    (void)vm;
+    if (!t || t->kind != TYPE_KIND_ARRAY) return;
+    array_type_t *at = (array_type_t *)t;
+    if (type_is_sealed(t)) return;
+    at->elem_ownership = own;
+}
+
 void array_type_set_count(vm_t *vm, const type_t *t, size_t count) {
     (void)vm;
     if (!t || t->kind != TYPE_KIND_ARRAY) return;
@@ -168,14 +177,15 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->array_types) vm->array_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* 去重 intern（按 elem_type + length）：命中已有 sealed 类型则复用并
-       手工回收本开放类型。所有权已迁移到值层，类型层恒为 OWN_NONE，不再
-       参与比较。 */
+    /* 去重 intern（按 elem_type + length + 元素槽位所有权）：命中已有 sealed
+       类型则复用并手工回收本开放类型。`[N]own *T` 与 `[N]ref *T` 是不同类型
+       （销毁语义不同），所有权必须进键。 */
     size_t n = vec_len(vm->array_types);
     for (size_t i = 0; i < n; i++) {
         const array_type_t *other = (const array_type_t *)vec_get(vm->array_types, i);
         if (other && other != at && type_is_sealed(&other->base) &&
-            other->elem_type == at->elem_type && other->length == at->length) {
+            other->elem_type == at->elem_type && other->length == at->length &&
+            other->elem_ownership == at->elem_ownership) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 at 的 type value 由 value_seal 负责
              * 重定向到 other（避免悬空）；此处仅手工回收 at。 */
@@ -209,15 +219,12 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count) {
-    return type_array_intern_with_ownership(vm, elem_type, count, OWN_NONE);
+    return type_array_intern_own(vm, elem_type, count, OWN_NONE);
 }
 
-/* 带 ownership 的一次性快捷（见 type_array.h）。所有权已迁移到值层，类型层
- * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
-const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
-                                               size_t count,
-                                               ownership_t ownership) {
-    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
+/* 带**元素槽位所有权**的一次性构造（`[N]own *T` 等，见 type_array.h）。 */
+const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
+                                    size_t count, ownership_t elem_ownership) {
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
      * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
      * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
@@ -225,8 +232,17 @@ const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
     array_type_set_elem(vm, t, elem_type);
+    array_type_set_elem_ownership(vm, t, elem_ownership);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);
+}
+
+/* 兼容包装：旧签名（参数曾表示"数组类型本身的 ownership"，已废弃）——
+   现在等价于元素槽位所有权。 */
+const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
+                                               size_t count,
+                                               ownership_t ownership) {
+    return type_array_intern_own(vm, elem_type, count, ownership);
 }
 
 /* ================================================================ */
@@ -425,9 +441,17 @@ const vtable_t VTABLE_ARRAY = {
 
 value_t *value_make_array(vm_t *vm, const type_t *elem_type,
                           value_t **elems, size_t count) {
+    return value_make_array_own(vm, elem_type, elems, count, OWN_NONE);
+}
+
+/* 带元素槽位所有权的数组值构造：类型用 (elem, count, elem_own) 去重，
+   与声明处/hoist 构造的数组类型一致（`[N]own *T` 的元素按 own 销毁）。 */
+value_t *value_make_array_own(vm_t *vm, const type_t *elem_type,
+                              value_t **elems, size_t count,
+                              ownership_t elem_ownership) {
     if (!vm || !elem_type) return NULL;
 
-    const type_t *at = type_array_intern(vm, elem_type, count);
+    const type_t *at = type_array_intern_own(vm, elem_type, count, elem_ownership);
     if (!at) return value_make_error(vm, "array: failed to intern array type");
 
     /* 分配连续元素块（at->size = count * elem_type->size，seal 时已计算） */

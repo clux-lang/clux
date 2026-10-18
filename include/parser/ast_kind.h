@@ -123,6 +123,17 @@ typedef enum {
                             销毁序列（own tag union 的条件 FREE），不出现在
                             用户源码中。 */
 
+    AST_OPT_IS_SOME,     /* `<object> != nil` 的**直接形态**（sema 生成）：
+                            object 求值得 ?T，compiler 发 `OPT_IS_NONE [+ NOT]`。
+                            为什么不复用 AST_BINARY："!=" 的 op 是 `token_t*`，
+                            sema 无法合成词法 token。仅用于 own ?T 的销毁序列
+                            （`if (v != nil) { <inner 销毁序列> }`）。 */
+    AST_FOR_INDEX,       /* `for (i = 0; i < len(src); i = i + 1)` 的**直接形态**
+                            （sema 生成）：计数器名 + 容器表达式 + body。
+                            为什么不拼 AST_FOR + AST_BINARY：`<` / `+` 的 op 是
+                            token_t*，sema 无法合成。仅用于逐元素销毁序列
+                            （own []T / [N]T 元素含 own 槽位）。 */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

@@ -118,7 +118,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
 
     [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_NONE } },
     [BCODE_SLICE]          = { "SLICE",         { BCODE_ASM_OP_U8 } },
-    [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32 } },
+    [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32, BCODE_ASM_OP_U8 } },
 
     [BCODE_IMPORT]         = { "IMPORT",        { BCODE_ASM_OP_STR } },
     [BCODE_EXTERN_CALL]  = { "EXTERN_CALL",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32, BCODE_ASM_OP_U32 } },

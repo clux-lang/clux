@@ -11,6 +11,7 @@
 #include "parser/ast_block.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
+#include "parser/ast_for_index.h"
 #include "parser/ast_if.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_free.h"
@@ -50,6 +51,8 @@ static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
     compile_expr(c, ix->object);    /* 栈: [self] */
     compile_expr(c, ix->indices);   /* 栈: [self, index] */
     compile_expr(c, n->value);      /* 栈: [self, index, val] */
+    /* 赋值点旧值销毁（sema 生成；INDEX_SET 是纯覆盖，不释放旧元素） */
+    for (ast_node_t *d = n->destroy; d; d = d->next) compile_stmt(c, d);
     bcode_write_op(c->bc, BCODE_INDEX_SET); /* 弹 3 压 1（self） */
     st_push(c, -2);
     bcode_write_op(c->bc, BCODE_POP);       /* 赋值是语句：丢弃结果 */
@@ -187,6 +190,9 @@ static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
   if (token_is(n->op, "=")) {
     compile_expr(c, d->operand);             /* 栈: [ptr] */
     compile_expr(c, n->value);               /* 栈: [ptr, val] */
+    /* 赋值点旧值销毁（sema 生成；PTR_SET 是纯覆盖，不释放旧被指向内容的
+       own 槽位） */
+    for (ast_node_t *ds = n->destroy; ds; ds = ds->next) compile_stmt(c, ds);
     bcode_write_op(c->bc, BCODE_PTR_SET);    /* 弹 2 压 1（ptr） */
     st_push(c, -1);
     bcode_write_op(c->bc, BCODE_POP);        /* 赋值是语句：丢弃结果 */
@@ -582,6 +588,9 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       }
       /* 直接赋值：value → STORE name */
       compile_expr(c, n->value);               /* 栈: [value] */
+      /* 赋值点旧值销毁（sema 生成）：右值已求值（可能读过旧值），写之前
+         释放旧堆块。FREE 链净栈深 0，不影响 [value]。 */
+      for (ast_node_t *d = n->destroy; d; d = d->next) compile_stmt(c, d);
       bcode_write_op(c->bc, BCODE_STORE);
       bcode_write_str(c->bc, name);            /* STORE 压回结果，栈: [result] */
       bcode_write_op(c->bc, BCODE_POP);        /* 赋值是语句：丢弃结果 */
@@ -858,6 +867,69 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
 
     c->loop_stack = lc.next;
     balance_pop(c);                          /* 退出 for 作用域 */
+    break;
+  }
+  case AST_FOR_INDEX: {
+    /* sema 生成的逐元素循环（销毁序列用）：`for (i=0; i<len(src); ++i) body`。
+       计数器是**编译器私有**的 u64 变量（名字由 sema 分配、块内唯一）——
+       与 LENGTH 的返回类型一致（u64），避免 i64/u64 混合比较触发
+       "not a widening conversion"。body 里以 `src[i]` 访问当前元素。 */
+    ast_for_index_t *n = (ast_for_index_t *)node;
+    if (!n->var.ptr || !n->source || !n->body) {
+      c_error(c, node, "compiler: for_index requires var/source/body");
+      return;
+    }
+    balance_push(c);                          /* 循环变量作用域 */
+    bcode_write_op(c->bc, BCODE_PUSH_U64);    /* 栈: [0] */
+    bcode_write_u64(c->bc, 0);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);   /* 栈: [0, u64 type] */
+    bcode_write_u32(c->bc, c->vm->type_u64->id);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_DEFINE);
+    bcode_write_str(c->bc, n->var);
+    st_push(c, -2);
+
+    compile_label_t loop_top, loop_end, loop_cont;
+    label_init(&loop_top);
+    label_init(&loop_end);
+    label_init(&loop_cont);
+
+    compile_loop_t lc;
+    lc.break_label = &loop_end;
+    lc.continue_label = &loop_cont;
+    lc.scope_depth = c->scope_depth;
+    lc.next = c->loop_stack;
+    c->loop_stack = &lc;
+
+    label_here(c, &loop_top);
+    bcode_write_op(c->bc, BCODE_PUSH);        /* 栈: [i] */
+    bcode_write_str(c->bc, n->var);
+    st_push(c, 1);
+    compile_expr(c, n->source);               /* 栈: [i, src] */
+    bcode_write_op(c->bc, BCODE_LENGTH);      /* 栈: [i, len] （u64） */
+    bcode_write_op(c->bc, BCODE_LT);          /* 栈: [i < len] */
+    bcode_write_op(c->bc, BCODE_JZ);
+    emit_jump(c, &loop_end);                  /* 栈: [] */
+
+    compile_stmt(c, n->body);                 /* 元素销毁序列 */
+
+    label_here(c, &loop_cont);
+    bcode_write_op(c->bc, BCODE_PUSH);        /* 栈: [i] */
+    bcode_write_str(c->bc, n->var);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_PUSH_U64);
+    bcode_write_u64(c->bc, 1);
+    bcode_write_op(c->bc, BCODE_ADD);         /* 栈: [i + 1] */
+    bcode_write_op(c->bc, BCODE_STORE);
+    bcode_write_str(c->bc, n->var);           /* 栈: [i'] */
+    bcode_write_op(c->bc, BCODE_POP);         /* 栈: [] */
+    bcode_write_op(c->bc, BCODE_JMP);
+    emit_jump(c, &loop_top);
+    label_here(c, &loop_end);
+
+    c->loop_stack = lc.next;
+    balance_pop(c);
     break;
   }
   case AST_BREAK: {

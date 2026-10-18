@@ -12,6 +12,10 @@ typedef struct {
     ast_node_t    *target;      /* 左值表达式子节点（目前仅支持 AST_IDENT） */
     const token_t *op;          /* 赋值运算符 token（= / += / -= / *= / /= / %=） */
     ast_node_t    *value;       /* 右值 */
+    /* 赋值点**旧值销毁序列**（sema 生成；语句链，compiler 在「右值求值之后、
+       写入之前」逐条编译）。用于 `p = new …` 这类覆盖自有堆块的位置：
+       旧块必须先释放，否则再也找不到 → 泄漏。复合赋值不需要（同址运算）。 */
+    ast_node_t    *destroy;
 } ast_assign_t;
 
 static inline ast_node_t *ast_assign_new(arena_t *arena,
