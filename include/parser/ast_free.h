@@ -44,6 +44,7 @@ static inline ast_node_t *ast_free_new(arena_t *arena, ast_node_t *operand) {
     n->base.kind      = AST_FREE;
     n->base.tok_begin = 0;  /* 编译器生成节点：tok_begin=0 标记 */
     n->base.tok_end   = 0;
+    n->base.is_generated = true;  /* Pass 3b 不回走（见 stmt.c walk_stmt） */
     n->operand        = operand;
     return &n->base;
 }

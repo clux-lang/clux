@@ -15,6 +15,9 @@ typedef struct {
     ast_node_t *type;          /* 类型表达式（NULL = 匿名构造） */
     ast_node_t *fields;        /* 字段值表达式兄弟链（head） */
     ast_node_t *fields_last;   /* 字段值表达式兄弟链（tail） */
+    /* union/cunion 构造的 member 下标哨兵（sema 按名定位后写回；compiler
+       据此发 tag/subscript 立即数，与 AST_CONSTRUCT::member_tag 同协议）。 */
+    uint32_t    member_tag;
 } ast_new_t;
 
 static inline ast_node_t *ast_new_new(arena_t *arena,

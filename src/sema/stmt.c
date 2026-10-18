@@ -193,6 +193,7 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
     ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
     if (!blk) return false;
     ((ast_block_t *)blk)->stmts = body_head;
+    blk->is_generated = true;   /* Pass 3b 不回走（3a 未为其建作用域） */
 
     ast_node_t *cond = ast_is_tag_new(sema->arena, 0, 0);
     if (!cond) return false;
@@ -203,6 +204,7 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
     if (!ifn) return false;
     ((ast_if_t *)ifn)->cond      = cond;
     ((ast_if_t *)ifn)->then_body = blk;
+    ifn->is_generated = true;
 
     destroy_append(head, tail, ifn);
   }
@@ -244,9 +246,24 @@ static bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
   switch (t->kind) {
     case TYPE_KIND_PTR: {
       /* 被指向值的 own 槽位**先**释放（`v.f` 会自动解引用到堆块内容），
-         再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。 */
+         再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。
+         **必须显式解引用**：用户写的 `p.f` 由 sema_expr 就地改写成
+         `p.*.f`（AST_MEMBER 的指针自动解引用），但本生成器不过 sema_expr，
+         直接写 `p.f` 编译出来就是 `PUSH p; FIELD_GET "f"` —— VM 的
+         FIELD_GET / IS_TAG 只接受 struct/union/cunion **值**，拿到指针
+         会报 "field get expects a struct..."（实测）。包一层 AST_DEREF
+         后与用户写法逐字节一致（编译器发 PTR_GET）。
+         这一层对**嵌套指针**也必不可少：`own *own *T` 的被指向值本身是
+         一个 own 指针，销毁它 = 释放 `p.*` 指向的堆块（FREE p.*），再
+         FREE p；缺了解引用就会把同一个 `p` FREE 两次（实测：双层 FREE、
+         内层堆块泄漏）。 */
       const type_t *base = ptr_type_base(t);
-      if (base && !gen_destroy(sema, base, access, head, tail)) return false;
+      if (base) {
+        ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
+        if (!deref) return false;
+        ((ast_deref_t *)deref)->operand = access;
+        if (!gen_destroy(sema, base, deref, head, tail)) return false;
+      }
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
     }
@@ -315,10 +332,15 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     ((ast_ident_t *)ident)->name = name_slice;
 
     /* ---- 含 own 捕获的闭包：按捕获槽**逐个展开**释放 ----
-       闭包 = 捕获结构体 + 函数实现，捕获槽就是它的字段，所以这里生成
-       `FREE f.<cap>`（编译器发 PUSH f; FIELD_GET "<cap>"; FREE；
-       VM 的 op_field_get 支持按名读闭包捕获槽）。只释放 own 捕获，
-       ref 捕获是借用不释放。 */
+       闭包 = 捕获结构体 + 函数实现，捕获槽就是它的字段。**捕获槽类型来自
+       type 对象**（cv->resolved_type，sema 在捕获解析时写入），交给同一个
+       销毁序列生成器展开：
+       - `own *T` 捕获 → `FREE f.<cap>`（外加被指向值的 own 槽位）；
+       - 含 own 槽位的聚合捕获（struct/union/…）→ 逐槽位 `FREE f.<cap>.x`
+         （tag union 还会带 `if (f.<cap> is m)` 条件）——旧实现只发
+         `FREE f.<cap>`，对聚合是空操作，捕获块内嵌的堆块全部泄漏
+         （实测：`move` 捕获含 own 指针的 struct → 4 字节泄漏）。
+       ref 捕获是借用，不释放。 */
     if (sym->closure_captures) {
       for (ast_node_t *c = sym->closure_captures; c; c = c->next) {
         ast_var_def_t *cv = (ast_var_def_t *)c;
@@ -337,13 +359,19 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
         ((ast_member_t *)mem)->object = obj;
         ((ast_member_t *)mem)->field = strslice_from_bytes(cbuf, cl);
 
-        ast_node_t *fs = ast_free_new(sema->arena, mem);
-        if (!fs) continue;
-        if (!head) {
-          head = tail = fs;
+        if (cv->resolved_type) {
+          if (!gen_destroy(sema, cv->resolved_type, mem, &head, &tail))
+            continue;
         } else {
-          tail->next = fs;
-          tail = fs;
+          /* 防御：类型未知时退回旧行为（只释放指针槽本身） */
+          ast_node_t *fs = ast_free_new(sema->arena, mem);
+          if (!fs) continue;
+          if (!head) {
+            head = tail = fs;
+          } else {
+            tail->next = fs;
+            tail = fs;
+          }
         }
       }
       continue; /* 闭包本身不是指针/切片，没有"整体释放"这一步 */
@@ -842,6 +870,40 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "new / move / clone (or a fatal-returning call)",
                      (int)vd->name.len, vd->name.ptr, itn);
           sym->flow_init = false; /* copy 失败 = 未初始化 */
+        } else if (sym->ownership != OWN_OWN &&
+                   sema_value_is_fatal(init)) {
+          /* **反向规则**（§0.4）：FATAL 必须被 own 位置接住。非 own 位置
+             接收将亡值 = 值消失而内部 own 槽位无人释放 → 静默泄漏；更糟
+             时源与目标同名不同状态（双释放）。聚合（含 own 槽位的
+             struct/union/tuple）的 CONSTRUCT 就产 FATAL，因此
+             `var b: Box = .Box{ .p = new i32{1} }` 必须写成
+             `var b: own Box = …`（或 move() 进已有 own 变量）。 */
+          char tn[64], itn[64];
+          sema_type_name(sym->type, tn, sizeof(tn));
+          sema_type_name(value_type(init), itn, sizeof(itn));
+          diag_error(sema->diag, sema_loc(sema, vd->init),
+                     "cannot initialize '%.*s' of type %s with the dying value "
+                     "(FATAL) of type %s: a value holding owned resources must "
+                     "be caught by an 'own' position (declare it `own %s`, or "
+                     "use move()/clone() and store the result there)",
+                     (int)vd->name.len, vd->name.ptr, tn, itn, tn);
+          sym->flow_init = false;
+        } else if (sym->ownership == OWN_NONE &&
+                   value_ownership(init) == OWN_OWN &&
+                   type_has_own_slots(sym->type)) {
+          /* 非 own 位置的 copy：读 own **聚合**变量得到 OWN 值，复制会让
+             两个位置共享同一批内嵌堆块 → 双释放。own 是 move-only。
+             判据限定 `type_has_own_slots`：只有"内部挂 own 槽位"的聚合
+             才有这个问题；指针 → opaque 的擦除（`var q: opaque = p`）是
+             借用式视图，不转移所有权，仍按原语义放行。 */
+          char tn[64];
+          sema_type_name(sym->type, tn, sizeof(tn));
+          diag_error(sema->diag, sema_loc(sema, vd->init),
+                     "cannot initialize '%.*s' of type %s by copying an own "
+                     "value: own is move-only (use move() or clone(), or "
+                     "declare the target `own %s`)",
+                     (int)vd->name.len, vd->name.ptr, tn, tn);
+          sym->flow_init = false;
         } else {
           value_t *dst = value_make_shadow(sema->vm, sym->type);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
@@ -874,7 +936,11 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         if (stripped) {
           vt = stripped;
           /* fatal 指针/切片剥离为 own（变量接管将亡值 → own 所有权）；
-             fatal 复合类型剥离为 T（OWN_NONE，字段各自持所有权）。 */
+             **fatal 复合类型同理**：变量接管后就是内部 own 槽位的所有者，
+             否则作用域退出时没有任何 free 序列 → 静默泄漏（实测
+             `var u = .U{ .p = new i32{1} }` 的 4 字节堆块从未释放）。
+             类型仍是 T（所有权不进类型），只是符号层记 OWN_OWN，
+             让 make_free_stmts 按 type 对象展开销毁序列。 */
           if (vt->kind == TYPE_KIND_PTR || vt->kind == TYPE_KIND_SLICE)
             sym->ownership = OWN_OWN;
           /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
@@ -885,6 +951,10 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
               sym->ownership = OWN_OWN;
               sym->closure_captures = oc->captures;
             }
+          } else if (type_has_own_slots(vt)) {
+            /* 聚合（含 own 槽位的 struct/tuple/union/array）接管：
+               变量成为内部 own 槽位的所有者（销毁序列由 type 对象展开）。 */
+            sym->ownership = OWN_OWN;
           }
           /* 将推断出的类型写回 type_expr（AST_TYPE_REF），让 compiler 发
              LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
@@ -1434,7 +1504,9 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   if (!bad && bt && ptr_type_base(bt)) {
     const type_t *pbase = ptr_type_base(bt);
     const type_t *ub = type_strip_quals(pbase);
-    if (ub && (ub->kind == TYPE_KIND_STRUCT || ub->kind == TYPE_KIND_CUNION)) {
+    if (ub && (ub->kind == TYPE_KIND_STRUCT ||
+               ub->kind == TYPE_KIND_CUNION ||
+               ub->kind == TYPE_KIND_UNION)) {
       if (type_has_quals(pbase)) {
         diag_error(sema->diag, sema_loc(sema, &as->base),
                    "cannot assign to field through a pointer to const value");
@@ -1468,6 +1540,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
      字段名全局唯一——sema 已校验，命中即得字段类型） */
   int idx = -1;
   const type_t *ft = NULL;
+  ownership_t slot_own = OWN_NONE;
   if (!bad) {
     if (bt->kind == TYPE_KIND_STRUCT) {
       idx = struct_type_find_field(bt, m->field);
@@ -1478,6 +1551,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
         bad = true;
       } else {
         ft = struct_type_field(bt, (size_t)idx)->type;
+        slot_own = struct_type_field(bt, (size_t)idx)->ownership;
       }
     } else if (bt->kind == TYPE_KIND_UNION) {
       /* union 字段：字段名 = member 名（tag 名），按名反查 member →
@@ -1494,6 +1568,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 payload 必存在 */
         } else {
           ft = mem->payload_type;
+          slot_own = mem->ownership;
         }
       }
     } else {
@@ -1511,6 +1586,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 member 类型必存在 */
         } else {
           ft = mem->type;
+          slot_own = mem->ownership;
         }
       }
     }
@@ -1566,6 +1642,13 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
+    /* own 槽位接收规则（§0.4）：字段/成员位置也是槽位——own 槽位只接
+       FATAL，非 own 复合槽位不得 copy OWN 聚合（与构造/`new` 同一张表）。 */
+    char what[96];
+    snprintf(what, sizeof what, "field '%.*s'", (int)m->field.len,
+             m->field.ptr);
+    if (!sema_check_slot_flow(sema, slot_own, ft, as->value, rhs, what))
+      return;
     /* 简单赋值：value_assign 校验字段类型可赋值性 */
     value_t *dst = value_make_shadow(sema->vm, ft);
     if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
@@ -2310,6 +2393,19 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
 static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
                                 sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
+  /* **sema 生成的销毁语句不再回走**（`is_generated`，见 gen_destroy_* /
+     ast_free_new）：销毁序列的类型判定已由 type 对象完成，回走没有新信息；
+     而回走复合生成形态会造成两类错误：
+     - `AST_IF`/`AST_BLOCK` 会到 3a 建的 scope 树里消费子作用域，但生成
+       节点没有对应作用域 → "scope tree desync"；
+     - `AST_IS_TAG` 是 sema 内部直接形态节点，不是用户表达式，sema_expr
+       未登记 → "unhandled expression node"。
+     生成节点只由 compiler 消费（见 compile_stmt / compile_expr）。
+     **注意**：defer 改写的 `__defer_N()` 调用语句同样是生成节点（tok_begin
+     == 0），但**必须继续 walk**——它们要建 sema 符号/VM 绑定，CTFE 求值
+     comptime 函数体时靠它解析到 `__defer_N`。故这里只按 `is_generated`
+     跳过销毁语句，不按 tok_begin 一刀切。 */
+  if (stmt->is_generated) return r;
   switch (stmt->kind) {
     case AST_VAR_DEF:
       shadow_var_def(sema, (ast_var_def_t *)stmt, scope);

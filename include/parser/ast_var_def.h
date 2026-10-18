@@ -10,12 +10,22 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
+/* 前置声明：解析层不依赖 vm 层头文件，但闭包捕获槽的销毁序列生成器
+   （sema 的 gen_destroy）需要捕获槽的**实际类型**（type 对象是唯一权威）。 */
+struct type_t;
+
 typedef struct {
     ast_node_t  base;
     strslice_t  name;        /* 变量名 */
     ast_node_t *type_expr;   /* 类型表达式（NULL = 推断；AST_IDENT/AST_CONST/AST_VOLATILE） */
     ast_node_t *init;        /* 初始化表达式（必须存在；AST_UNDEF = 未初始化声明） */
     bool        is_comptime; /* comptime var：右值必须编译期可计算，引用点折叠为常量 */
+
+    /* sema 写入：该变量/捕获槽解析后的**实际类型**（可为 NULL）。
+     * 目前唯一消费者是闭包捕获槽的销毁序列（stmt.c make_free_stmts）——
+     * 捕获槽类型不在 AST 里（推断捕获无 type_expr），而销毁序列必须按 type
+     * 对象的槽位所有权展开（own *T → FREE、含 own 字段的聚合 → 逐槽位）。 */
+    const struct type_t *resolved_type;
 
     /* 声明类型的**所有权**（own/ref/fatal，由解析器在类型槽位折叠前从
      * AST_PTR / AST_SLICE_TYPE 的 ownership token 提取并缓存）。

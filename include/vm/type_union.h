@@ -109,6 +109,11 @@ void type_union_add_member(vm_t *vm, const type_t *t, strslice_t name);
  *  类型（名拷贝到 vm 堆）。密封后静默忽略。 */
 void type_union_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype);
 
+/** SET_FIELD_OWNERSHIP 运行期用（union 分支）：设最后追加 member 的槽位
+ *  所有权（seal 前）。销毁序列按它判定该 member 的 payload 是否要释放。 */
+void type_union_set_last_member_ownership(vm_t *vm, const type_t *t,
+                                          ownership_t own);
+
 /** SEAL：拷贝 member 表 + 布局 + 去重 intern + 置 sealed */
 const type_t *type_union_seal(vm_t *vm, const type_t *t);
 

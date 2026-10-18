@@ -1126,22 +1126,14 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       ok = false;
       continue;
     }
-    /* ⚠️ tag union 的指针/切片仍**禁止**：销毁生成器（gen_destroy_union）与
-       AST_IS_TAG 已就绪，但放开后实测**栈溢出**（exit=0xC00000FD），根因未定位。
-       在修好之前保持禁止——宁可明确拒绝，也不要崩溃或静默泄漏。
-       （另：本次已修好 member 表在 intern/seal 时丢失槽位所有权的问题，
-       那是前置条件，见 type_union.c / type_struct.c / type_tuple.c /
-       type_cunion.c 的 ownership 拷贝。） */
-    if (type_contains_ptr_or_slice(ft)) {
-      diag_error(sema->diag, sema_loc(sema, sf->type),
-                 "union '%.*s': member '%.*s' has pointer or slice type; "
-                 "not supported yet (destruction via tag-conditional FREE "
-                 "pending)",
-                 (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
-                 sf->name.ptr);
-      ok = false;
-      continue;
-    }
+    /* tag union 的 member **可以携带指针/切片**（2026-10 放开）。
+       曾经禁止是因为放开后运行期栈溢出（0xC00000FD）；根因是 sema 在
+       Pass 3b 重新 walk 自己生成的销毁语句（`if (v is m) { FREE v.m }`）：
+       AST_IF 会去消费 3a 没建的作用域、AST_IS_TAG 不是用户表达式。
+       修复：生成节点用 `ast_node_t::is_generated` 标记、walk_stmt 跳过
+       （见 stmt.c）。销毁序列本身由 gen_destroy_union 按 type 对象的
+       槽位所有权生成（`if (v is m) { <payload 销毁序列> }`），
+       member 的槽位所有权在解析期缓存（sf->ownership），并参与 intern。 */
     members[i].payload_type = ft;
     /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
     members[i].ownership = member_own;

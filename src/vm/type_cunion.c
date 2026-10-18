@@ -223,11 +223,25 @@ void type_cunion_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype)
     m->type = ftype;
 }
 
+/* SET_FIELD_OWNERSHIP 运行期用（cunion 分支）：设最后追加 member 的槽位
+   所有权（seal 前）。cunion 不参与自动销毁，但去重键含 ownership（类型
+   描述的一部分），须与 sema 侧一致。 */
+void type_cunion_set_last_member_ownership(vm_t *vm, const type_t *t,
+                                           ownership_t own) {
+    if (!vm || !t || t->kind != TYPE_KIND_CUNION || type_is_sealed(t)) return;
+    cunion_type_t *ct = (cunion_type_t *)t;
+    if (ct->member_count == 0) return;
+    ct->members[ct->member_count - 1].ownership = own;
+}
+
 /* ---- 密封期：布局计算 + 去重 intern ---- */
 
 /* 按 (member 表内容) 判断两 cunion 是否等价（去重 intern 用）：
-   member 名 + 顺序一致，且类型指针一致。 */
+   member 名 + 顺序一致，类型指针一致，**且槽位所有权一致**（所有权是
+   类型描述的一部分，见 docs/ownership-refactor.md §0.8；struct/tuple/union
+   的去重键都含 ownership）。 */
 static bool cunion_member_same(const cunion_member_t *a, const cunion_member_t *b) {
+    if (a->ownership != b->ownership) return false;
     if (a->name.len != b->name.len) return false;
     if (a->name.ptr && b->name.ptr &&
         memcmp(a->name.ptr, b->name.ptr, a->name.len) != 0) return false;

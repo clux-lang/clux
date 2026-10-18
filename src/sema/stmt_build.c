@@ -853,14 +853,42 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           cs->type = sema_resolve_type_slot(sema, &cv->type_expr);
         }
         if (!init_bad && cs->type) {
-          value_t *dst = value_make_shadow(sema->vm, cs->type);
-          if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
+          /* 捕获槽是**具名位置**（与 var 定义同一张表，§0.4）：
+             - 非 own 捕获槽收 FATAL = 值消失而内部 own 槽位无人释放
+               → 静默泄漏（实测 `|(bb: T = move(a))|` 的堆块从未释放）。
+               必须写 `|(bb: own T = move(a))|`。
+             - 非 own 捕获槽 copy OWN 聚合 → 两处共享内嵌堆块 → 双释放。 */
+          char what[96];
+          snprintf(what, sizeof what, "capture '%.*s'", (int)cv->name.len,
+                   cv->name.ptr);
+          if (cs->ownership != OWN_OWN && sema_value_is_fatal(init)) {
             char tn[64], itn[64];
             sema_type_name(cs->type, tn, sizeof(tn));
             sema_type_name(value_type(init), itn, sizeof(itn));
             diag_error(sema->diag, sema_loc(sema, cv->init),
-                       "cannot initialize capture '%.*s' of type %s with %s",
-                       (int)cv->name.len, cv->name.ptr, tn, itn);
+                       "cannot initialize %s of type %s with the dying value "
+                       "(FATAL) of type %s: a capture holding owned resources "
+                       "must be an own capture (declare it `own %s`)",
+                       what, tn, itn, tn);
+          } else if (cs->ownership == OWN_NONE &&
+                     value_ownership(init) == OWN_OWN &&
+                     type_has_own_slots(cs->type)) {
+            char tn[64];
+            sema_type_name(cs->type, tn, sizeof(tn));
+            diag_error(sema->diag, sema_loc(sema, cv->init),
+                       "cannot initialize %s of type %s by copying an own "
+                       "value: own is move-only (use move() or clone())",
+                       what, tn);
+          } else {
+            value_t *dst = value_make_shadow(sema->vm, cs->type);
+            if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
+              char tn[64], itn[64];
+              sema_type_name(cs->type, tn, sizeof(tn));
+              sema_type_name(value_type(init), itn, sizeof(itn));
+              diag_error(sema->diag, sema_loc(sema, cv->init),
+                         "cannot initialize capture '%.*s' of type %s with %s",
+                         (int)cv->name.len, cv->name.ptr, tn, itn);
+            }
           }
         }
       } else {
@@ -926,6 +954,8 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
        （唯一的 own 产生式：函数定义即"定义 + 绑定名字"，折叠了
        fatal→move→own）。消费者是 `ex_func_def`，它只能从 AST 读。 */
     cv->ownership = (uint8_t)cs->ownership;
+    /* 捕获槽的实际类型（销毁序列从 type 对象反推用；推断捕获无 type_expr） */
+    cv->resolved_type = cs->type;
   }
 
   /* §9.3 ref/opaque 捕获强制标注（m3-design §9）：闭包是隐式 struct，

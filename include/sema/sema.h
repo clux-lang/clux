@@ -477,6 +477,19 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
                      const char *what);
 
 /**
+ * 槽位接收规则（§0.4/§0.5，与 own 变量定义/形参同一张表）——聚合构造、
+ * `new` 字段/成员/元素初始化、字段赋值共用（expr.c 实现）：
+ *   - own 槽位只接受将亡值（FATAL：new / move / clone / 构造产物 /
+ *     fatal 返回值）；
+ *   - 非 own 复合槽位不得用 copy 收下 OWN 聚合（own 是 move-only）。
+ * 返回 true = 通过；false = 已发出诊断。`what` 是槽位的人类可读名
+ * （如 "union field 'p'"），用于拼诊断。
+ */
+bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
+                          const type_t *slot_type, ast_node_t *value,
+                          value_t *fv, const char *what);
+
+/**
  * R3 借用释放（m3-design §7）：作用域退出时遍历本作用域符号，递减
  * borrow_src 的 borrow_count 并清空 borrow_src。stmt.c 各 vm_pop_scope
  * 前调用（借用载体随作用域消亡，源符号恢复可 move）。

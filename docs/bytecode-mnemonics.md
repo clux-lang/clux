@@ -120,6 +120,7 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `MAKE_ENUM` | — | 弹 type value + 弹底层整数值 → 按底层宽度截断构造 enum 值。 |
 | `PUSH_STRUCT` | — | 分配空 struct 类型（开放态，fields=NULL）→ 压其 type value。 |
 | `DEFINE_FIELD` | `STR`（字段名） | 弹栈顶字段 type value → **peek** 开放 struct / cunion → 追加具名字段。 |
+| `SET_FIELD_OWNERSHIP` | `U8`（ownership） | **peek** 开放 struct / union / cunion → 把**最后追加**的字段 / member 的**槽位所有权**设为立即数（在 `DEFINE_FIELD` / `APPEND_ELEM` 之后、`SEAL` 之前）。槽位所有权是类型描述的一部分：参与类型去重 intern，并驱动运行期"覆盖旧值前按槽位释放"（own 叶子释放、ref 借用跳过）。`OWN_NONE` 可不发（缺省即 NONE）。无栈深变化。 |
 | `PUSH_TUPLE` | — | 分配空 tuple 类型（开放态，elems=NULL）→ 压其 type value。 |
 | `APPEND_ELEM` | — | 弹栈顶元素 type value → **peek** 开放 tuple → 追加**匿名**元素（长度 = 追加次数）。 |
 | `PUSH_UNION` | — | 分配空 tag union 类型（开放态，members=NULL）→ 压其 type value。 |

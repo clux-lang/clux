@@ -267,12 +267,28 @@ void type_union_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype) 
     m->payload_type = ftype;
 }
 
+/* SET_FIELD_OWNERSHIP 运行期用（union 分支）：设最后追加 member 的槽位
+   所有权（seal 前）。销毁序列按它判定该 member 的 payload 是否要释放。 */
+void type_union_set_last_member_ownership(vm_t *vm, const type_t *t,
+                                          ownership_t own) {
+    if (!vm || !t || t->kind != TYPE_KIND_UNION || type_is_sealed(t)) return;
+    union_type_t *ut = (union_type_t *)t;
+    if (ut->member_count == 0) return;
+    ut->members[ut->member_count - 1].ownership = own;
+}
+
 /* ---- 密封期：布局计算 + 去重 intern ---- */
 
 /* 按 (member 表内容) 判断两 union 是否等价（去重 intern 用）：
-   member 名 + 顺序一致，且 payload 类型指针一致。 */
+   member 名 + 顺序一致，payload 类型指针一致，**且槽位所有权一致**。
+   所有权是类型描述的一部分（docs/ownership-refactor.md §0.8）：漏掉它会让
+   `union A { p: own *i32 }` 与 `union B { p: ref *i32 }`（成员名/payload
+   相同）被 intern 成同一个类型——后定义者继承前者的槽位所有权，销毁序列
+   就会错（实测：B 的 ref 成员被当成 own，构造直接报 "own slot" 或运行期
+   释放借用目标）。struct / tuple 的去重键早已包含 ownership，此处对齐。 */
 static bool union_member_same(const union_member_t *a, const union_member_t *b) {
     if (a->tag != b->tag) return false;
+    if (a->ownership != b->ownership) return false;
     if (a->name.len != b->name.len) return false;
     if (a->name.ptr && b->name.ptr &&
         memcmp(a->name.ptr, b->name.ptr, a->name.len) != 0) return false;
@@ -280,8 +296,8 @@ static bool union_member_same(const union_member_t *a, const union_member_t *b) 
     return a->payload_type == b->payload_type;
 }
 
-/* 按（member 名 + tag + payload 类型）判断两 union 是否等价（去重 intern
-   用）。所有权已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
+/* 按（member 名 + tag + payload 类型 + 槽位所有权）判断两 union 是否等价
+   （去重 intern 用）。 */
 static bool union_same(const union_type_t *a, const union_type_t *b) {
     if (a->member_count != b->member_count) return false;
     for (size_t i = 0; i < a->member_count; i++) {

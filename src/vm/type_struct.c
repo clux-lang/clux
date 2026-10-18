@@ -343,8 +343,20 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
     type_struct_add_field_ex(vm, t, name, ftype, OWN_NONE);
 }
 
-/* 按 (字段名 + 类型 + 顺序) 判断两结构体是否等价（去重 intern 用）。所有权
- * 已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
+/* SET_FIELD_OWNERSHIP 运行期用：设最后追加字段的槽位所有权（seal 前）。
+   供 bytecode hoist 把 sema 的槽位所有权带进运行期构造的类型对象。 */
+void type_struct_set_last_field_ownership(vm_t *vm, const type_t *t,
+                                          ownership_t own) {
+    if (!vm || !t || t->kind != TYPE_KIND_STRUCT || type_is_sealed(t)) return;
+    struct_type_t *st = (struct_type_t *)t;
+    if (st->field_count == 0) return;   /* 无字段：无处写入 */
+    st->fields[st->field_count - 1].ownership = own;
+}
+
+/* 按 (字段名 + 类型 + 顺序 + **槽位所有权**) 判断两结构体是否等价
+ * （去重 intern 用）。所有权是类型描述的一部分（docs/ownership-refactor.md
+ * §0.8），漏掉它会让 `struct A { p: own *i32 }` 与 `struct B { p: ref *i32 }`
+ * 被 intern 成同一个类型，销毁序列随之出错。 */
 static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
     if (a->field_count != b->field_count) return false;
     for (size_t i = 0; i < a->field_count; i++) {

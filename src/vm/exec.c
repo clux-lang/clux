@@ -616,6 +616,38 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make_error(vm, "exec: define field expects an open struct, union or cunion type on top");
 }
 
+/* SET_FIELD_OWNERSHIP <u8 own>：把栈顶开放类型**最后追加**的字段 / 元素 /
+ * member 的槽位所有权设为立即数（seal 后忽略；无弹栈）。
+ *
+ * 为什么需要：DEFINE_FIELD 只带字段名/类型，运行期构造的类型对象槽位所有权
+ * 恒为 OWN_NONE；而"就地覆盖旧值"的运行期路径（FIELD_SET / 复合赋值 /
+ * DISPOSE）按槽位所有权决定释放什么（own 叶子释放、ref 借用跳过）。缺了它
+ * own 槽位会被当成普通字段（泄漏），ref 借用目标会被误释放（悬垂 free）。
+ * 具名 struct 还带 MARK_UNIQUE（seal 跳过去重），也不能靠"去重到 sema 那份
+ * 带 ownership 的类型"来补。 */
+static value_t *op_set_field_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t own = bcode_read_u8(bc, pc);
+    value_t *tv = exec_stack_peek(vm, 0);
+    const type_t *t = (tv && value_type(tv) == vm->type_type)
+                          ? value_as(tv, const type_t *) : NULL;
+    if (!t)
+        return value_make_error(vm,
+            "exec: set field ownership expects an open type on top");
+    switch (t->kind) {
+    case TYPE_KIND_STRUCT:
+        type_struct_set_last_field_ownership(vm, t, (ownership_t)own);
+        return NULL;
+    case TYPE_KIND_UNION:
+        type_union_set_last_member_ownership(vm, t, (ownership_t)own);
+        return NULL;
+    case TYPE_KIND_CUNION:
+        type_cunion_set_last_member_ownership(vm, t, (ownership_t)own);
+        return NULL;
+    default:
+        return NULL;   /* 其它类型无槽位表：防御性忽略 */
+    }
+}
+
 /* ADD_EMBED <embed_type_id>：peek 栈顶开放 struct → vm_type_load 拉回 embed
  * 类型 → type_struct_add_embed 追加到 embeds 表（seal 前可编辑）。
  * 无栈深变化（peek 不弹）。逐个追加，与 DEFINE_FIELD 同构。 */
@@ -1504,6 +1536,9 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
             if (value_is_error(vm, casted)) return casted;
             void *dst = (uint8_t *)value_data(self) +
                         union_type_payload_offset(t);
+            /* 覆盖旧 payload：先按 member 槽位所有权销毁旧值（own member
+               释放、ref member 跳过），否则旧 payload 的 own 堆块泄漏。 */
+            ptr_free_slot_value(vm, m->payload_type, m->ownership, dst);
             /* data 全平凡：直接覆盖 payload（memcpy 可拷贝） */
             memcpy(dst, value_data(casted), m->payload_type->size);
             return self;
@@ -1536,6 +1571,8 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *casted = value_implicit_cast(vm, val, f->type);
     if (value_is_error(vm, casted)) return casted;
     void *dst = (uint8_t *)value_data(self) + f->offset;
+    /* 覆盖旧字段：先按字段槽位所有权销毁旧值（own 槽位释放、ref 槽位跳过）。 */
+    ptr_free_slot_value(vm, f->type, f->ownership, dst);
     /* data 全平凡：直接覆盖字段（memcpy 可拷贝） */
     memcpy(dst, value_data(casted), f->type->size);
     return self;
@@ -2584,6 +2621,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_MARK_UNIQUE]     = op_mark_unique,
     [BCODE_MEMBER_CALL]     = op_member_call,
     [BCODE_FREE]            = op_free,
+    [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
 };
 
 /* ================================================================ */

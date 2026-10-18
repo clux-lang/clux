@@ -129,6 +129,38 @@ void ptr_free_block_only(vm_t *vm, const type_t *t, void *data) {
     }
 }
 
+/* 槽位判定（与 sema 的 gen_destroy 同一规则，type 对象是唯一权威）：
+   - 叶子（ptr / slice）：只有槽位 ownership == OWN 才归本值所有 → 释放/递归；
+   - 复合（struct/tuple/union/option/array/…）：值本身没有独立分配，其内部
+     own 槽位在结构上属于外层值 → **无条件递归**（由内层按自己的槽位再判）。
+   这条区分是"运行期不再无差别释放 ref"的关键——旧实现只看
+   ptr_type_needs_scan（只问"有没有指针"），于是会把 ref 借用目标也 free 掉
+   （实测：含 ref member 的 own union 重新赋值 → 0xC0000005）。 */
+static bool slot_owns_value(const type_t *ft, ownership_t own) {
+    if (!ft) return false;
+    const type_t *s = type_strip_quals(ft);
+    if (!s) return false;
+    if (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE)
+        return own == OWN_OWN;
+    return true; /* 复合槽位：递归进去，由内层槽位决定释放什么 */
+}
+
+/* 叶子槽位在非 own 时**不**递归；复合槽位只在内部还有 own 槽位时下钻。 */
+static bool slot_needs_visit(const type_t *ft, ownership_t own) {
+    if (!slot_owns_value(ft, own)) return false;
+    const type_t *s = type_strip_quals(ft);
+    if (s && (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE))
+        return true; /* own 叶子 → 释放 */
+    return type_has_own_slots(ft); /* 复合：内部无 own 槽位就不必下钻 */
+}
+
+void ptr_free_slot_value(vm_t *vm, const type_t *slot_type, ownership_t own,
+                         void *data) {
+    if (!vm || !slot_type || !data) return;
+    if (!slot_needs_visit(slot_type, own)) return;
+    ptr_free_owned_recursive(vm, slot_type, data);
+}
+
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
@@ -160,12 +192,12 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     case TYPE_KIND_STRUCT: {
-        /* 结构体：按字段偏移逐个递归销毁含 own 指针的字段。 */
+        /* 结构体：按字段偏移逐个递归销毁**own 槽位**（ref/fatal 槽位跳过）。 */
         const struct_type_t *st = (const struct_type_t *)t;
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
-            if (f->type && ptr_type_needs_scan(f->type))
+            if (f->type && slot_needs_visit(f->type, f->ownership))
                 ptr_free_owned_recursive(vm, f->type, p + f->offset);
         }
         return;
@@ -175,7 +207,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
-            if (e->type && ptr_type_needs_scan(e->type))
+            if (e->type && slot_needs_visit(e->type, e->ownership))
                 ptr_free_owned_recursive(vm, e->type, p + e->offset);
         }
         return;
@@ -186,9 +218,9 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (ut->member_count == 0) return;
         uint64_t tag = union_read_tag_raw(data, union_type_tag_size(t));
         if (tag >= ut->member_count) return;   /* 非法 tag：防御性跳过 */
-        const type_t *pt = ut->members[tag].payload_type;
-        if (pt && ptr_type_needs_scan(pt))
-            ptr_free_owned_recursive(vm, pt,
+        const union_member_t *m = &ut->members[tag];
+        if (m->payload_type && slot_needs_visit(m->payload_type, m->ownership))
+            ptr_free_owned_recursive(vm, m->payload_type,
                                      (uint8_t *)data + union_type_payload_offset(t));
         return;
     }

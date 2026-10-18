@@ -121,6 +121,20 @@ bool ptr_type_needs_scan(const type_t *t);
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
 
 /**
+ * 按**槽位所有权**销毁一个槽位里的旧值（就地覆盖前调用）：
+ *   - 叶子（ptr / slice）：仅 `own == OWN_OWN` 时释放该堆块；
+ *   - 复合（struct/tuple/union/…）：内部 own 槽位归本值所有 → 递归展开
+ *     （内层 ref 槽位一律跳过）。
+ *
+ * 与 sema 的 gen_destroy 同一规则（type 对象是唯一权威）。供 FIELD_SET 等
+ * "覆盖旧值"的运行期路径使用——sema 侧的赋值点销毁序列尚未实现（见
+ * docs/ownership-refactor.md §7），但这些路径的旧值不能直接丢弃，否则
+ * 旧值里的 own 堆块再也找不到 → 泄漏。
+ */
+void ptr_free_slot_value(vm_t *vm, const type_t *slot_type, ownership_t own,
+                         void *data);
+
+/**
  * 只释放**这一个**指针/切片的堆块，**不递归**被指向值/元素。
  *
  * 供 `FREE` 指令使用：A 方案下销毁序列完全由 sema 按 AST 生成（被指向值的

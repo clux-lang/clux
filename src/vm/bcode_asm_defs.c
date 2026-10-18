@@ -131,6 +131,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_STORE_ATTR]     = { "STORE_ATTR",    { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },
     [BCODE_MARK_UNIQUE]    = { "MARK_UNIQUE",   { BCODE_ASM_OP_NONE } },
     [BCODE_FREE]           = { "FREE",          { BCODE_ASM_OP_NONE } },
+    [BCODE_SET_FIELD_OWNERSHIP] = { "SET_FIELD_OWNERSHIP", { BCODE_ASM_OP_U8 } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

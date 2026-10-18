@@ -463,6 +463,17 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
  * SEAL 封闭（C 对齐布局 + 去重 intern；去重时按自身 id 重绑登记）。
  * 字段类型是布局依赖（密封计算 offset/size 需要字段 size/
  * align 已确定）→ 依赖后序 + 环检测。 */
+/* 槽位所有权（类型描述的一部分：参与类型去重 intern，且驱动运行期
+   "就地覆盖旧值前按槽位释放"的路径——own 叶子释放、ref 借用跳过）。
+   `DEFINE_FIELD` / `APPEND_ELEM` 只带名字/类型，槽位所有权缺省 NONE，故
+   在追加之后补发 SET_FIELD_OWNERSHIP（作用于最后追加的字段/元素/member）。
+   OWN_NONE 不必发（缺省即 NONE）。 */
+static void emit_slot_ownership(compiler_t *c, ownership_t own) {
+  if (own == OWN_NONE) return;
+  bcode_write_op(c->bc, BCODE_SET_FIELD_OWNERSHIP);
+  bcode_write_u8(c->bc, (uint8_t)own);
+}
+
 static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
                           size_t count) {
   const type_t *t = st->type;
@@ -477,6 +488,7 @@ static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, f->name);        /* 弹 field_type → 追加进 open */
     st_push(c, -1);
+    emit_slot_ownership(c, f->ownership);   /* 槽位所有权（own 字段） */
   }
 
   /* 嵌入表（`...Base`）：sema 组合阶段已设置 embeds，此处逐个 ADD_EMBED
@@ -549,6 +561,7 @@ static void define_tuple(compiler_t *c, const sema_type_t *st, uint8_t *done,
     emit_dep_type(c, e->type, done, count); /* 栈: [open, elem_type] */
     bcode_write_op(c->bc, BCODE_APPEND_ELEM); /* 弹 elem_type → 追加进 open */
     st_push(c, -1);
+    emit_slot_ownership(c, e->ownership);   /* 槽位所有权（own 元素） */
   }
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
@@ -580,6 +593,7 @@ static void define_union(compiler_t *c, const sema_type_t *st, uint8_t *done,
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, m->name);       /* 弹 member_type → 设当前 member */
     st_push(c, -1);
+    emit_slot_ownership(c, m->ownership);  /* 槽位所有权（own member） */
   }
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
@@ -609,6 +623,7 @@ static void define_cunion(compiler_t *c, const sema_type_t *st, uint8_t *done,
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, m->name);       /* 弹 member_type → 追加 member + 设类型 */
     st_push(c, -1);
+    emit_slot_ownership(c, m->ownership);  /* 槽位所有权（随 sema 一致） */
   }
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */

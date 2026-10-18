@@ -868,9 +868,9 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        - struct/tuple：N 字段（sema 已重排为声明序）→ 先压类型位走
          CONSTRUCT N 得 T 值 → 再补压类型位 → [T值, type_value]
        - array：N 元素（fill 展开 + nil）→ 同 struct 路径
-       - union/cunion：恰好 1 个具名字段（payload 值）→ NEW 按 payload
-         implicit_cast（member_tag 未定义，union 构造的 tag 哨兵协议仅
-         AST_CONSTRUCT 支持——union new 为未验证路径，保持单字段编译）
+       - union/cunion：恰好 1 个具名字段 → 与 AST_CONSTRUCT 同款 tag/member
+         哨兵协议（sema 已把 member 下标写回 `n->member_tag`）：
+         [type_value, tag, payload] → CONSTRUCT 2 → 补压类型位 → NEW
        最后 NEW 指令弹 2 压 1（成员值 + 类型位 → fatal *T 指针）。 */
     ast_new_t *n = (ast_new_t *)node;
     /* 注意：类型位不在开头压——struct/tuple/array 走 CONSTRUCT（消费类型
@@ -970,8 +970,63 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
          [type_value, member]——补压 type_value（compile_type_expr 契约：
          类型表达式压类型值）。 */
       compile_type_expr(c, n->type);
+    } else if (t->kind == TYPE_KIND_UNION || t->kind == TYPE_KIND_CUNION) {
+      /* union/cunion：与 AST_CONSTRUCT 同款 **tag/member 哨兵协议**：
+         [type_value, tag_idx, payload] → CONSTRUCT 2（按 tag/subscript 定位
+         member → implicit_cast → 写 payload）→ 补压类型位 → NEW。
+         此前这里把 payload 直接交给 NEW，指望 NEW 把 payload 隐式转换成
+         union——union 的 implicit_cast 只接受同类型，必然报
+         "implicit cast: not a widening conversion"（实测），即
+         `new U{...}` 对任何 union 都不可用。 */
+      compile_type_expr(c, n->type);      /* 栈: [type_value] */
+      uint32_t tag = n->member_tag;       /* sema 按名定位后写回的下标 */
+      if (tag < 128) {
+        bcode_write_op(c->bc, BCODE_PUSH_I8);
+        bcode_write_i8(c->bc, (int8_t)tag);
+      } else if (tag < 32768) {
+        bcode_write_op(c->bc, BCODE_PUSH_I16);
+        bcode_write_i16(c->bc, (int16_t)tag);
+      } else {
+        bcode_write_op(c->bc, BCODE_PUSH_I32);
+        bcode_write_i32(c->bc, (int32_t)tag);
+      }
+      st_push(c, 1);
+      ast_node_t *f = n->fields;
+      ast_node_t *value = f;
+      if (f && f->kind == AST_CONSTRUCT_FIELD)
+        value = ((ast_construct_field_t *)f)->value;
+      if (!value) {
+        c_error(c, node, "compiler: new requires exactly 1 field");
+        return;
+      }
+      if (value->kind == AST_NIL) {
+        /* nil payload：member 须 ?T（sema 已校验）→ PUSH_OPT_NONE */
+        const type_t *mt = NULL;
+        if (tag < ((t->kind == TYPE_KIND_UNION)
+                       ? (uint32_t)((const union_type_t *)t)->member_count
+                       : (uint32_t)((const cunion_type_t *)t)->member_count)) {
+          mt = (t->kind == TYPE_KIND_UNION)
+                   ? union_type_member(t, tag)->payload_type
+                   : cunion_type_member(t, tag)->type;
+        }
+        const sema_type_t *mst = mt ? c_sema_type_find_ptr(c->sema_types, mt)
+                                    : NULL;
+        if (!mst) {
+          c_error(c, value, "compiler: optional union member type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, mst->id);
+        st_push(c, 1);
+      } else {
+        compile_expr(c, value);           /* 栈: [type_value, tag, payload] */
+      }
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, 2);
+      st_push(c, -3);
+      compile_type_expr(c, n->type);      /* 栈: [union 值, type_value] */
     } else {
-      /* 标量/option/union/cunion：恰好 1 个字段（sema 已校验） */
+      /* 标量/option：恰好 1 个字段（sema 已校验） */
       ast_node_t *f = n->fields;
       if (f && f->kind == AST_CONSTRUCT_FIELD)
         f = ((ast_construct_field_t *)f)->value;
@@ -981,18 +1036,6 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
         if (t->kind == TYPE_KIND_OPTION) {
           const type_t *inner = type_option_inner(t);
           fst = c_sema_type_find_ptr(c->sema_types, inner ? inner : t);
-        } else if (t->kind == TYPE_KIND_UNION || t->kind == TYPE_KIND_CUNION) {
-          const ast_construct_field_t *cf =
-              (const ast_construct_field_t *)n->fields;
-          const int mi = (t->kind == TYPE_KIND_UNION)
-                             ? union_type_find_member(t, cf->name)
-                             : cunion_type_find_member(t, cf->name);
-          const type_t *mt = (mi >= 0)
-                                 ? ((t->kind == TYPE_KIND_UNION)
-                                        ? union_type_member(t, (size_t)mi)->payload_type
-                                        : cunion_type_member(t, (size_t)mi)->type)
-                                 : NULL;
-          fst = mt ? c_sema_type_find_ptr(c->sema_types, mt) : NULL;
         }
         if (!fst) {
           c_error(c, f, "compiler: optional new field type not registered");
