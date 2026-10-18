@@ -395,6 +395,14 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
     bcode_write_str(c->bc, fn->name);
   }
 
+  /* 4. SET_FUNC_CAPTURES <type_id>：闭包的捕获聚合类型（struct，字段 = 捕获槽
+     + 槽位所有权）。VM 层据此把闭包当聚合值：clone 深拷贝捕获、free 按槽位
+     所有权释放、字段读写按槽位类型。实例化（MAKE_FUNCTION）复制该字段。 */
+  if (fn->capture_type_id != 0) {
+    bcode_write_op(c->bc, BCODE_SET_FUNC_CAPTURES);
+    bcode_write_u32(c->bc, fn->capture_type_id);
+  }
+
   /* 4. 捕获槽占位：每捕获 PUSH_UNDEFINED (+1) + SET_CLOSURE "name"（弹 cap
      → scope_set 定义或替换，净 0）——基底 closure_scope 先以 undefined
      绑定捕获名。定义点 MAKE_FUNCTION 实例化新实例时复制这些槽名（strmap_keys

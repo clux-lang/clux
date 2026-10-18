@@ -30,7 +30,14 @@ typedef struct {
     bool        is_extern_cfunc; /* extern cfunc 声明（无体，运行期 dlsym 查找） */
     bool        is_variadic;     /* 参数表以 ... 结尾（仅 extern cfunc 允许） */
     strslice_t  lib_name;        /* extern cfunc 的库别名（<lib>::<name> 的 lib 部分） */
-    uint32_t    sig_id;      /* 签名类型 id（sema 3b 填充，compiler LOAD_TYPE <sig_id> 用；
+    uint32_t    sig_id;
+
+    /* 闭包**捕获聚合类型** id（0 = 无捕获）：捕获槽表登记成一个 struct 类型
+       （fields = 捕获名 + 类型 + 槽位所有权），VM 层据此把闭包当作聚合值处
+       理——clone 深拷贝捕获、free 按槽位所有权释放、字段读写走同一套规则
+       （§7.1.10 "闭包 = 捕获结构体"）。编译器在 hoist 注册函数对象后发
+       `SET_FUNC_CAPTURES <id>`。 */
+    uint32_t       capture_type_id;      /* 签名类型 id（sema 3b 填充，compiler LOAD_TYPE <sig_id> 用；
                                 全局函数经 sema_type_register 分配，局部函数提升时解析分配） */
     uint32_t    fid;         /* 函数 id（compiler 预扫描分配，LOAD_FUNCTION <fid> 用；
                                 hoist 函数注册区构造时 BIND_FUNC <fid> 携带） */

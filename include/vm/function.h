@@ -51,6 +51,12 @@ typedef value_t *(*cfunc_t)(vm_t *vm, func_t *self, size_t argc, value_t **args)
 struct func_t {
     cfunc_t         cfunc;
     scope_t        *closure_scope;
+
+    /* 闭包的**捕获聚合类型**（struct；NULL = 无捕获/非闭包）。由
+       `SET_FUNC_CAPTURES <type_id>` 在 hoist 注册函数对象时写入，实例化时
+       复制。VM 层据此把闭包当聚合值处理：clone 深拷贝捕获、free 按槽位
+       所有权释放、字段读写按槽位类型。 */
+    const struct struct_type_t *capture_type;
     scope_t        *root_scope;
     const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;

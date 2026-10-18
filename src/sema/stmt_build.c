@@ -1,6 +1,7 @@
 #include "sema/sema.h"
 #include "core/panic.h"
 #include "vm/type_ptr.h"
+#include "vm/type_struct.h"
 #include "parser/ast_alignof.h"
 #include "parser/ast_array.h"
 #include "parser/ast_block.h"
@@ -1017,7 +1018,45 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
       }
     }
   }
+  /* 捕获聚合类型（§7.1.10 "闭包 = 捕获结构体"）：把捕获槽表登记成一个 struct
+     类型（name / 类型 / **槽位所有权**），VM 层据此把闭包当聚合值处理 ——
+     clone 深拷贝捕获、free 按槽位所有权释放、字段读写按槽位类型。
+     编译器在 hoist 注册函数对象后发 `SET_FUNC_CAPTURES <id>`（fn->capture_type_id）。 */
+  {
+    size_t nc = 0;
+    for (ast_node_t *c = fn->captures; c; c = c->next) {
+      ast_var_def_t *cv = (ast_var_def_t *)c;
+      sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+      if (cs && cs->type) nc++;
+    }
+    if (nc > 0) {
+      struct_field_t *fields = (struct_field_t *)allocator_new_ex(
+          sema->vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL,
+          NULL, nc);
+      if (fields) {
+        size_t k = 0;
+        for (ast_node_t *c = fn->captures; c && k < nc; c = c->next) {
+          ast_var_def_t *cv = (ast_var_def_t *)c;
+          sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
+          if (!cs || !cs->type) continue;
+          memset(&fields[k], 0, sizeof(fields[k]));
+          fields[k].name      = cv->name;   /* type_struct_intern 深拷贝 */
+          fields[k].type      = cs->type;
+          fields[k].ownership = cs->ownership;
+          k++;
+        }
+        const type_t *cap = type_struct_intern(sema->vm, fields, k);
+        allocator_free(sema->vm->alloc, (void **)&fields);
+        if (cap) {
+          const sema_type_t *st = sema_type_register(sema, cap);
+          if (st) fn->capture_type_id = st->id;
+        }
+      }
+    }
+  }
 }
+
+
 
 /* ===========================================================================
  * 函数字面量（表达式内 AST_FUNC_DEF，sema_expr 求值用）

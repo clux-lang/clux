@@ -65,6 +65,7 @@ value_t *func_instantiate(vm_t *vm, func_t *base) {
     fn->base.type        = base->type;
     fn->base.id          = base->id;   /* 共享基底 id（不重复登记 functions_by_id） */
     fn->base.name        = base->name; /* 借用基底名字 */
+    fn->base.capture_type = base->capture_type; /* 捕获聚合类型 */
     fn->base.closure_scope     = scope_new(vm->alloc, NULL);
     fn->base.owns_closure_scope = true;
     fn->entry_pc = (base->cfunc == bcode_call_cfunc)

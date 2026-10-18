@@ -1796,6 +1796,25 @@ static value_t *op_set_func_name(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* SET_FUNC_CAPTURES <type_id>：peek 栈顶 func value（不弹栈），登记闭包的
+   **捕获聚合类型**（struct，字段 = 捕获槽 + 槽位所有权）。这是"闭包 = 捕获结构体"
+   重构的第 1 步：先把 env 的**具名 struct 类型**挂到函数对象上（对 C 后端而言，
+   就是 `struct __xxx_closure { callee; struct { ... } env; }` 里那个 env 类型）。
+   后续步骤把它用于捕获存储 / clone / free / 调用上下文。 */
+static value_t *op_set_func_captures(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t id = bcode_read_u32(bc, pc);
+    value_t *fv = exec_stack_peek(vm, 0);
+    const type_t *t = fv ? value_type(fv) : NULL;
+    if (!t || t->kind != TYPE_KIND_FUNC)
+        return value_make_error(vm, "exec: set func captures expects a function value");
+    const type_t *ct = vm_type_load(vm, id);
+    if (!ct || ct->kind != TYPE_KIND_STRUCT)
+        return value_make_error(vm, "exec: bad capture type id");
+    func_t *fn = *(func_t **)value_data(fv);
+    fn->capture_type = (const struct_type_t *)ct;
+    return NULL;
+}
+
 /* SET_CLOSURE <name>：弹栈顶捕获值 → clone 进栈下函数对象的 closure_scope
    捕获槽。调用约定（compiler 保证）：定义点先 LOAD_FUNCTION <fid> 压函数
    值，随后每个捕获 [值, SET_CLOSURE "name"]，栈下 1 位即目标函数。闭包为
@@ -2672,6 +2691,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_FUNCTION]  = op_push_function,
     [BCODE_BIND_FUNC]      = op_bind_func,
     [BCODE_SET_FUNC_NAME]  = op_set_func_name,
+    [BCODE_SET_FUNC_CAPTURES] = op_set_func_captures,
     [BCODE_SET_CLOSURE]    = op_set_closure,
     [BCODE_MAKE_FUNCTION]  = op_make_function,
     [BCODE_CALL]           = op_call,
