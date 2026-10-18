@@ -433,6 +433,25 @@ clone 只**读**槽位（`FIELD_GET` / `INDEX_GET`）并拷贝，不改变源的
 销毁后变量进入 TDZ，重新赋值（`p = new …`）恢复（R2）；重复 `_ = move(p)` 报
 "used after move"。等价 C：`free(p); p = NULL;` / 逐槽位 `free(p->f)`。
 
+### 7.1.3 R3 派生：聚合 own 槽位被借用 → 禁止 move（2026-10）
+
+"有 ref 存活的 own 不可 move"原本只覆盖**裸变量**借用（`var r: ref *T = p`）——
+复合类型禁止携带指针时代的边界。聚合恢复 own 槽位后，派生规则补上：
+`var r: ref *i32 = b.p`（p 是 **own** 字段）借的是 **b 拥有的堆块**，于是把 b
+登记为 r 的借源，`move(b)` / `_ = move(b)` 被拒绝（`b->borrow_count > 0`）。
+
+判定沿访问路径（`borrow_source_from_owned_path`，stmt.c）走类型对象：
+`MEMBER` / `INDEX` / `DEREF` / `UNWRAP` / `ADDR` 逐跳判定"借出的目标是否归根变量
+所有"（own 字段/元素/inner/payload、own 指针的被指向内容、含 own 槽位的存储）。
+
+| 形态 | 是否禁止 move |
+|---|---|
+| `ref *i32 = b.p`（p own）、`a[0]`、`o.!`、`u.a`、`b.p`（b 是 own `*Box`）、`b.&`、`o.inner.p` | **禁止** |
+| `ref *i32 = b.q`（q **ref** 字段——借的是 b 之外的块） | 允许 |
+| `ref *i32 = b.n.&`（标量字段；存储随 b 的作用域存活） | 允许 |
+| 借用变量作用域结束（`borrow_count--`） | 恢复允许 |
+| 重绑定 `r = b.p`（旧源递减、新源递增） | 同定义点 |
+
 ### 7.2 仍未支持
 
 **cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个

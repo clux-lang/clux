@@ -26,6 +26,7 @@
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_for_index.h"
 #include "parser/ast_move.h"
+#include "parser/ast_addr.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
@@ -70,7 +71,8 @@
 #include "parser/ast_dowhile.h"
 #include "parser/ast_walk.h"
 #include "parser/lexer.h"
-#include "parser/ast_move.h"   /* ast_move_t（借源收集剥 move/clone） */
+#include "parser/ast_move.h"
+#include "parser/ast_addr.h"   /* ast_move_t（借源收集剥 move/clone） */
 #include "parser/ast_addr.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
@@ -732,8 +734,197 @@ static sema_symbol_t *init_borrow_src(sema_t *sema, ast_node_t *init,
   return NULL;
 }
 
-/* 变量定义点借用登记：声明类型是 ref *T 或 opaque 且 init 直读变量 →
-   登记借源（源 borrow_count++）。显式类型已知才能判定借用载体。 */
+/* ---- R3 派生规则：**从聚合的 own 槽位借出** → 聚合本身是借源（2026-10） ----
+ *
+ * 旧登记只认**裸变量标识符**（`var r: ref *T = p`）——那是"复合类型禁止携带
+ * 指针/切片"时代的边界（见 shadow_var_def 的注）：当时不存在"从聚合的 own
+ * 字段借出"的形态。聚合现在可以携带 own 槽位，派生规则必须补上：
+ *
+ *   `var r: ref *i32 = b.p`（p 是 **own** 字段）借的是 **b 拥有的堆块**。
+ *   这与"有 ref 存活的 own 不可 move"是同一条规则（R3）：move(b) 会把 b 拥有
+ *   的堆块交给新 owner，新 owner 可能更早销毁 → 活借用悬垂。所以把 b 登记为
+ *   r 的借源（b->borrow_count++），move(b) / `_ = move(b)` 即被拒绝。
+ *
+ * 精确边界（"**own** 字段有 ref 存活才禁 move"）：
+ *   - 借 own 字段 / own 元素 / own inner / own 指针的被指向内容
+ *     （`b.p`、`a[i]`、`o.!`、`p.*.f`、`p.f`）→ 登记根变量；
+ *   - 借 **ref 字段**（`b.q`，q: ref *T）→ **不登记**（借的是 b 之外的块）；
+ *   - `x.&` / `b.&`：借的是该**存储**，存储带 own 槽位（或本身是根拥有的
+ *     指针/切片）→ 登记根变量；
+ *   - 路径无法静态确定（调用/强制转换/非字面量元组下标）→ 不登记（保守跳过，
+ *     与旧行为一致）。
+ */
+typedef struct {
+  ast_kind_t kind;
+  ast_node_t *node;
+} borrow_hop_t;
+
+/* 把访问路径（叶→根）拆成 hop 数组；根必须是变量标识符。
+   返回 hop 数（0 = 根就是 ident）；-1 = 不是可识别的访问路径。 */
+static int borrow_path_hops(ast_node_t *e, borrow_hop_t *hops, int cap,
+                            ast_node_t **root_ident) {
+  int n = 0;
+  while (e && e->kind != AST_IDENT) {
+    if (n >= cap) return -1;
+    switch (e->kind) {
+    case AST_MEMBER:
+      hops[n].kind = AST_MEMBER;
+      hops[n].node = e;
+      e = ((ast_member_t *)e)->object;
+      break;
+    case AST_INDEX:
+      hops[n].kind = AST_INDEX;
+      hops[n].node = e;
+      e = ((ast_index_t *)e)->object;
+      break;
+    case AST_DEREF:
+      hops[n].kind = AST_DEREF;
+      hops[n].node = e;
+      e = ((ast_deref_t *)e)->operand;
+      break;
+    case AST_UNWRAP:
+      hops[n].kind = AST_UNWRAP;
+      hops[n].node = e;
+      e = ((ast_unwrap_t *)e)->operand;
+      break;
+    default:
+      return -1;
+    }
+    n++;
+  }
+  if (!e || e->kind != AST_IDENT) return -1;
+  *root_ident = e;
+  return n;
+}
+
+/* 路径借用的目标是否归根变量所有（也用于 `x.&` 的"存储归根"判定）。
+   返回借源符号；NULL = 不是"从根 own 槽位借出"。 */
+static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
+                                                    ast_node_t *init,
+                                                    sema_scope_t *scope) {
+  (void)sema;   /* 只用符号表与类型对象 */
+  if (!init) return NULL;
+  bool is_addr = init->kind == AST_ADDR;
+  ast_node_t *path = is_addr ? ((ast_addr_t *)init)->operand : init;
+  if (!path) return NULL;
+  borrow_hop_t hops[16];
+  ast_node_t *root_ident = NULL;
+  int n = borrow_path_hops(path, hops, 16, &root_ident);
+  if (n < 0) return NULL;
+  if (n == 0 && !is_addr) return NULL;   /* 裸变量：init_borrow_src 负责 */
+  sema_symbol_t *root =
+      sema_lookup(scope, ((ast_ident_t *)root_ident)->name);
+  if (!root || root->kind != SEMA_SYM_VAR || !root->type) return NULL;
+
+  const type_t *cur = root->type;
+  bool root_owned =
+      (root->ownership == OWN_OWN || root->ownership == OWN_FATAL);
+  const type_t *ct0 = type_strip_quals(cur);
+  bool ptr_owned = root_owned && ct0 &&
+                   (ct0->kind == TYPE_KIND_PTR ||
+                    ct0->kind == TYPE_KIND_SLICE);
+  bool storage = true;   /* 当前值存储是否归根（根的值存储归根） */
+
+  for (int i = n - 1; i >= 0; i--) {
+    const type_t *ct = type_strip_quals(cur);
+    ast_node_t *h = hops[i].node;
+    if (hops[i].kind == AST_DEREF) {
+      if (!ct || ct->kind != TYPE_KIND_PTR) return NULL;
+      storage = ptr_owned;   /* 解引用得到的内存归根当且仅当指针值归根 */
+      cur = ptr_type_base(ct);
+      continue;              /* ptr_owned 继承：own *own *T 链式解引用仍归根 */
+    }
+    if (hops[i].kind == AST_UNWRAP) {
+      if (!ct || ct->kind != TYPE_KIND_OPTION) return NULL;
+      if (storage) ptr_owned = (type_option_inner_ownership(ct) == OWN_OWN);
+      cur = type_option_inner(ct);
+      continue;
+    }
+    if (hops[i].kind == AST_INDEX) {
+      ast_index_t *ix = (ast_index_t *)h;
+      if (!ix->indices || ix->indices->kind != AST_INT_LIT) return NULL;
+      uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
+      if (!ct) return NULL;
+      if (ct->kind == TYPE_KIND_ARRAY) {
+        if (storage) ptr_owned = (array_type_elem_ownership(ct) == OWN_OWN);
+        cur = array_type_elem(ct);
+        continue;
+      }
+      if (ct->kind == TYPE_KIND_SLICE) {
+        if (storage || ptr_owned)
+          ptr_owned = (slice_type_elem_ownership(ct) == OWN_OWN);
+        storage = storage || ptr_owned;   /* 元素在缓冲里 */
+        cur = slice_type_elem(ct);
+        continue;
+      }
+      if (ct->kind == TYPE_KIND_TUPLE) {
+        const tuple_elem_t *te = tuple_type_elem(ct, (size_t)k);
+        if (!te) return NULL;
+        if (storage) ptr_owned = (te->ownership == OWN_OWN);
+        cur = te->type;
+        continue;
+      }
+      return NULL;
+    }
+    /* MEMBER */
+    {
+      ast_member_t *m = (ast_member_t *)h;
+      if (!ct) return NULL;
+      if (ct->kind == TYPE_KIND_PTR) {
+        if (!ptr_owned) return NULL;   /* 穿过 ref/借用指针：借的是别人的块 */
+        ct = type_strip_quals(ptr_type_base(ct));
+        storage = true;
+        ptr_owned = false;
+      }
+      if (!ct) return NULL;
+      if (ct->kind == TYPE_KIND_STRUCT) {
+        int fi = struct_type_find_field(ct, m->field);
+        const struct_field_t *f =
+            fi >= 0 ? struct_type_field(ct, (size_t)fi) : NULL;
+        if (!f || !f->type) return NULL;
+        const type_t *ft = type_strip_quals(f->type);
+        if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE)) {
+          ptr_owned = storage && (f->ownership == OWN_OWN);
+          storage = false;
+        } else {
+          ptr_owned = false;   /* 复合字段：存储仍是根的存储 */
+        }
+        cur = f->type;
+        continue;
+      }
+      if (ct->kind == TYPE_KIND_UNION) {
+        int mi = union_type_find_member(ct, m->field);
+        const union_member_t *mm =
+            mi >= 0 ? union_type_member(ct, (size_t)mi) : NULL;
+        if (!mm || !mm->payload_type) return NULL;
+        const type_t *pt = type_strip_quals(mm->payload_type);
+        if (pt && (pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE)) {
+          ptr_owned = storage && (mm->ownership == OWN_OWN);
+          storage = false;
+        } else {
+          ptr_owned = false;
+        }
+        cur = mm->payload_type;
+        continue;
+      }
+      /* cunion 不参与所有权运算：指针成员不登记（借用/开发者自负） */
+      return NULL;
+    }
+  }
+
+  const type_t *ft = type_strip_quals(cur);
+  bool owned = ptr_owned || (storage && ft && type_has_own_slots(ft));
+  if (is_addr) {
+    if (!storage) return NULL;   /* 借的是根之外的存储 */
+    owned = owned || (ft && type_has_own_slots(ft));
+  }
+  return owned ? root : NULL;
+}
+
+/* 变量定义点借用登记：声明类型是 ref *T 或 opaque，且初始化表达式是
+   **裸变量**（`= p`）或**从聚合 own 槽位借出**（`= b.p` / `= a[i]` / `= o.!` /
+   `= p.*.f` / `= x.&`）→ 登记借源（源 borrow_count++）。
+   显式类型已知才能判定借用载体。 */
 static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
                                    ast_node_t *init, sema_scope_t *scope) {
   if (!sym || !sym->type) return;
@@ -741,6 +932,7 @@ static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
       sym->type->kind != TYPE_KIND_OPAQUE)
     return;
   sema_symbol_t *src = init_borrow_src(sema, init, scope);
+  if (!src) src = borrow_source_from_owned_path(sema, init, scope);
   borrow_switch(sym, src);
 }
 
@@ -1208,12 +1400,14 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
 
   /* 注：原先这里还有"含 ref 字段的聚合变量记录 init 借源集合"的一步
      （`borrow_collect`），供赋值时校验"新值存活不超出承诺上限"。
-     复合类型禁止携带指针/切片后该形态不存在，判据恒假——整条借源集合机制
-     （`borrow_set` / `borrow_collect` / `borrow_set_add` / `borrow_src_anchor_scope`）
-     已随 §5 聚合赋值检查一并删除。顶层 ref 的借源仍由下面的
-     `shadow_borrow_register` 单源登记（`borrow_src`），不受影响。
-     将来恢复含指针的聚合时，用扁平槽位表（docs/ownership-refactor.md §2.5）
-     重新设计多源借源，而不是恢复这套被删的递归收集。 */
+     复合类型禁止携带指针/切片时代该形态不存在，整条借源集合机制
+     （`borrow_set` / `borrow_collect` / …）随之删除。
+     聚合恢复携带 own 槽位后（2026-10），**从聚合 own 槽位借出**的借源由
+     `shadow_borrow_register` 里的 `borrow_source_from_owned_path` 补上：
+     沿访问路径（MEMBER/INDEX/DEREF/UNWRAP/ADDR）判定借出的目标是否归根变量
+     所有（own 字段/元素/inner/payload、own 指针的被指向内容、含 own 槽位的
+     存储），是则把**根变量**登记为借源（单源 `borrow_src`）——
+     move(根变量) 因此被 R3 拒绝。ref 字段/标量字段/借用指针穿透不登记。 */
 
   /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
      分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
@@ -1650,6 +1844,8 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
             (sym->ownership == OWN_REF ||
              sym->type->kind == TYPE_KIND_OPAQUE)) {
           sema_symbol_t *src = init_borrow_src(sema, as->value, scope);
+          if (!src)
+            src = borrow_source_from_owned_path(sema, as->value, scope);
           /* §5 重绑定逃逸校验（m3-design §5"重绑定时校验是否逃逸"）：
              r 的标注集合（定义时记录）须涵盖新借源的定义作用域——
              新借源存活不得超过标注声明的存活上限，否则重绑定引入悬垂。
