@@ -1,0 +1,32 @@
+// closure_block_var.cx — 缺陷复现：局部函数体内的**嵌套块变量**被误判为"外层局部"
+//
+// 修复前：`local function cannot access outer local 't' (add it to the capture
+// list)` —— 即使 `t` 就是函数体内 `if` 块里声明的变量。
+// 根因：sema 的 func_own_symbol 只查 fscope / param_scope 的**直系**声明，
+// 没查函数体里嵌套块（if / while / for init / 子块）的作用域。
+// 影响：函数体内任何块级变量、以及 `foreach` 展开出的
+//       `for (var __idx_N …)` 在闭包里直接编译失败。
+//
+// 期望修复后：输出 `11`（t=10 来自 if 块，a[0]=1）。
+// 回归：tests/driver_func_closure_test.cpp 的
+//       RunFileClosureLocalBlockScopedVars / RunFileClosureOuterLocalStillRejected。
+
+extern lib "*" as libc;
+extern cfunc libc::printf(format: str, ...): void;
+
+func main(): i32 {
+    var a = .[2]i32{ 1, 2 };
+    var f = func |a| (): i32 {
+        if (len(a) > 0u64) {
+            var t = 10; /* 函数体内嵌套块声明 */
+            var i = 0;
+            for (i = 0; i < 1; i = i + 1) {
+                t = t + a[i];
+            }
+            return t;
+        }
+        return 0;
+    };
+    libc::printf("%d\n", f());
+    return 0;
+}

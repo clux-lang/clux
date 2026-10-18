@@ -109,16 +109,28 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
   }
 }
 
-/* 函数自身符号归属检查（捕获检查用）：sym 是函数可见链上的符号（fscope
-   直系捕获 / param_scope 直系参数）→ true。false = 外层局部（需捕获）或
-   非函数自身符号。参数在参数层（fscope 子 scope），捕获在 fscope——参数
-   遮蔽捕获，两者同属函数自身符号，放行。 */
+/* 函数自身符号归属检查（捕获检查用）：sym 是**函数自身子树**里的符号 → true。
+   false = 外层局部（需捕获）或非函数自身符号。
+
+   自身子树 = fscope（捕获层，捕获符号注册在此）及其全部后代：
+   param_scope（参数层，fscope 子）+ 函数体 block + 体内每一层块 / for 作用域。
+   参数在参数层，捕获在 fscope——参数遮蔽捕获，两者同属函数自身符号，放行。
+
+   **必须查后代作用域，不能只查 fscope / param_scope 的直系**：函数体内
+   `if (c) { var t = … }`、`for (var i = …)` 的变量定义在**嵌套块作用域**，
+   只查直系会把它们误判成"外层局部"（`local function cannot access outer
+   local 't'`）——这是 foreach 展开（生成 `for (var __idx_N …)`）在闭包里
+   报错的根因。符号的 own_scope 由 3b 定义点写入，引用点必然在其后（TDZ），
+   因此此刻可用。 */
 static bool func_own_symbol(sema_t *sema, strslice_t name,
                             sema_symbol_t *sym) {
   if (!sema->fn.local_func_base) return false;
   if (sema_scope_find_local(sema->fn.local_func_base, name) == sym) return true;
   if (sema->fn.local_func_param_scope &&
       sema_scope_find_local(sema->fn.local_func_param_scope, name) == sym)
+    return true;
+  if (sym->own_scope &&
+      sema_scope_within(sym->own_scope, sema->fn.local_func_base))
     return true;
   return false;
 }

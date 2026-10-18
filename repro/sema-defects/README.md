@@ -172,6 +172,30 @@ shadow ⇒ 步进赋值从未类型检查（`j = "x"` 也能编译通过）。`d
 | `compiler_t::current_scope` | 2 写 0 读 | 删除 |
 | ~~`flow_snap.after`~~ | **报告称只写，实测在用**（`stmt.c:1547/1634/1664` 等） | **保留** |
 
+## J. 局部函数体内的嵌套块变量被误判为"外层局部" ✅ 已修
+
+函数体里任何**块级**变量（`if` 体、`while` 体、`for` 的 init 变量、子块）都
+不属于"外层局部"，应当无需捕获即可访问。`func_own_symbol` 只查 fscope /
+param_scope 的**直系**声明，把嵌套块里的符号判成外层局部。
+
+**触发面比"闭包"本身大得多**：`foreach` 的前脱糖展开成
+`for (var __idx_N: usize = 0usize; …)`，于是**闭包里的 foreach 一律编译失败**。
+
+| 文件 | 修复前 | 修复后 |
+|---|---|---|
+| `closure_block_var.cx` | ❌ `local function cannot access outer local 't' (add it to the capture list)` | ✅ exit 0（输出 `11`） |
+
+**修复**：`func_own_symbol`（`src/sema/expr.c`）追加"符号的 `own_scope` 是否在
+`local_func_base` 子树内"的判定——`sema_scope_within(sym->own_scope, fscope)`
+覆盖 fscope → param_scope → 函数体块 → 每层块 / for 作用域。真正的**外层局部**
+仍在子树之外，照样要求写进捕获列表（对照用例
+`RunFileClosureOuterLocalStillRejected`）。
+
+**回归**：`tests/driver_func_closure_test.cpp` 的
+`RunFileClosureLocalBlockScopedVars`（if / for / while 三种块）、
+`RunFileClosureOuterLocalStillRejected`（对照）；`tests/foreach_test.cpp` 的
+`InsideClosureBody` / `InsideLocalFunction`。
+
 ## 未能证实的报告结论（记录以免被当作事实）
 
 - **nil 比较绕过 TDZ/moved 检查**：对照实验显示"移动后的 POD 可选值普通读取"也

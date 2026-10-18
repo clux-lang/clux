@@ -116,6 +116,53 @@ TEST(Driver, RunFileClosureNoCaptureForwardRefOk) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileClosureLocalBlockScopedVars) {
+  /* 回归：局部函数体内**嵌套块作用域**声明的变量（if 体、for 的 init、
+     while 体、函数体的子块）属于函数自身，不是"外层局部"。
+     此前 func_own_symbol 只查 fscope / param_scope 的**直系**声明，嵌套块
+     里的变量会被误判成外层局部（`local function cannot access outer local
+     't'`）；foreach 展开成 `for (var __idx_N …)` 后因此在闭包里直接编译失败。 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var a = .[2]i32{ 1, 2 };\n"
+      "  var f = func |a| (): i32 {\n"
+      "    var acc = 0;\n"
+      "    if (len(a) > 0u64) {\n"
+      "      var t = 10;              /* if 体内声明 */\n"
+      "      acc = acc + t;\n"
+      "    }\n"
+      "    for (var i = 0; i < 2; i = i + 1) {\n"
+      "      acc = acc + a[i];        /* for init 变量 */\n"
+      "    }\n"
+      "    var w = 0;\n"
+      "    while (w < 2) {\n"
+      "      var inner = 3;           /* while 体内声明 */\n"
+      "      acc = acc + inner;\n"
+      "      w = w + 1;\n"
+      "    }\n"
+      "    return acc;\n"
+      "  };\n"
+      "  libc::printf(\"%d\\n\", f());\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileClosureOuterLocalStillRejected) {
+  /* 对照：**真正的**外层局部（不在闭包作用域子树里）仍必须出现在捕获列表 */
+  std::string path = write_temp_file(
+      "func main():void {\n"
+      "  var outer = 1;\n"
+      "  var f = func (): i32 {\n"
+      "    var t = 2;\n"
+      "    return outer + t;\n"
+      "  };\n"
+      "  var v = f();\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileClosureLoopRebind) {
   /* 循环内重建闭包：每次迭代捕获当前 i 的 clone → 0*10 + 1*10 + 2*10 = 30 */
   std::string path = write_temp_file(
