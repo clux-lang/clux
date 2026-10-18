@@ -64,6 +64,7 @@ static value_t *bool_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
             target == vm->type_i32 || target == vm->type_i64 ||
             target == vm->type_u8 || target == vm->type_u16 ||
             target == vm->type_u32 || target == vm->type_u64 ||
+            target == vm->type_usize ||
             target == vm->type_f32 || target == vm->type_f64)
             return value_make_shadow(vm, target);
         return value_make_error(vm, "explicit cast: incompatible target type");
@@ -79,7 +80,8 @@ static value_t *bool_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     }
 
     if (target == vm->type_u8 || target == vm->type_u16 ||
-        target == vm->type_u32 || target == vm->type_u64) {
+        target == vm->type_u32 || target == vm->type_u64 ||
+        target == vm->type_usize) {
         uint64_t uv = bv ? 1 : 0;
         void *data = value_alloc_data_copy(vm->alloc, target, &uv);
         return value_make(vm, target, data);

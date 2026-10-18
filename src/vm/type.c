@@ -405,7 +405,8 @@ static type_cat_t type_category(const vm_t *vm, const type_t *t) {
     if (t == vm->type_i8 || t == vm->type_i16 ||
         t == vm->type_i32 || t == vm->type_i64) return CAT_SINT;
     if (t == vm->type_u8 || t == vm->type_u16 ||
-        t == vm->type_u32 || t == vm->type_u64) return CAT_UINT;
+        t == vm->type_u32 || t == vm->type_u64 ||
+        t == vm->type_usize) return CAT_UINT;
     if (t == vm->type_f32 || t == vm->type_f64) return CAT_FLOAT;
     return CAT_NONE;
 }
@@ -420,8 +421,11 @@ static int type_rank_val(const vm_t *vm, const type_t *t) {
     if (t == vm->type_u32)  return 6;
     if (t == vm->type_i64)  return 7;
     if (t == vm->type_u64)  return 8;
-    if (t == vm->type_f32)  return 9;
-    if (t == vm->type_f64)  return 10;
+    /* usize 独立类型（平台宽度无符号整数）：提升时优先成为结果类型，
+       与同宽无符号类型之间可双向隐式转换（见 type_int.c 的宽度规则）。 */
+    if (t == vm->type_usize) return 9;
+    if (t == vm->type_f32)  return 10;
+    if (t == vm->type_f64)  return 11;
     return -1;  /* 非数值类型 */
 }
 
@@ -433,6 +437,13 @@ const type_t *type_promote(const vm_t *vm, const type_t *a, const type_t *b) {
 
     if (ca == CAT_NONE || cb == CAT_NONE) return NULL;  /* 非数值类型 */
     if (ca != cb) return NULL;  /* 不同类别（bool/int/float）不协商 */
+
+    /* usize 与同宽无符号类型（64 位 u64 / 32 位 u32）：表示相同，按 usize
+       收敛（结果类型 = 平台宽度类型，语义上最贴近"长度/容量"运算）。 */
+    if (ca == CAT_UINT && (a == vm->type_usize || b == vm->type_usize)) {
+        const type_t *other = (a == vm->type_usize) ? b : a;
+        if (other->size == vm->type_usize->size) return vm->type_usize;
+    }
 
     int ra = type_rank_val(vm, a);
     int rb = type_rank_val(vm, b);
@@ -467,6 +478,7 @@ static type_t g_type_error;
 static type_t g_type_interrupt;
 static type_t g_type_opaque;
 static type_t g_type_module;
+static type_t g_type_usize;
 
 void vm_init_builtins(vm_t *vm) {
     static const char S_I8[]  = "i8",   S_I16[] = "i16", S_I32[] = "i32", S_I64[] = "i64";
@@ -478,6 +490,7 @@ void vm_init_builtins(vm_t *vm) {
     static const char S_INTERRUPT[] = "interrupt";
     static const char S_OPAQUE[] = "opaque";
     static const char S_MODULE[] = "module";
+    static const char S_USIZE[] = "usize";
 
     /* 函数签名类型池（type_func_sig intern 用）；元素由 vm_destroy 手动释放，
        vec 只持有指针数组（与 scope owned 同一模式） */
@@ -527,6 +540,14 @@ void vm_init_builtins(vm_t *vm) {
                               sizeof(void *), alignof(void *),
                               TYPE_KIND_MODULE, true, 18 };
 
+    /* `usize`（C 的 size_t）：**独立**无符号整数类型，宽度/对齐 = 指针宽度。
+       与 u64/u32 只是"同宽时表示相同"，类型身份不同（typeof/type_equal/FFI
+       描述符都分开）。id 18 紧随 opaque（17）；module 不占 id 表，故不冲突。
+       vm_register_builtin_types 另把它登记进 global scope 与 type id 表。 */
+    g_type_usize = (type_t){ &VTABLE_INT_UNSIGNED, STRSLICE_LIT(S_USIZE),
+                             sizeof(void *), alignof(void *),
+                             TYPE_KIND_INT, true, 18 };
+
     vm->type_i8   = &g_type_i8;
     vm->type_i16  = &g_type_i16;
     vm->type_i32  = &g_type_i32;
@@ -546,6 +567,7 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_interrupt = &g_type_interrupt;
     vm->type_opaque = &g_type_opaque;
     vm->type_module = &g_type_module;
+    vm->type_usize = &g_type_usize;
 }
 
 /* 所有权纯编译期——fatal 不再是独立类型，base 就是 t 本身。 */

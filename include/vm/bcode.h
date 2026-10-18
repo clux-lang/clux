@@ -320,6 +320,15 @@ typedef enum {
     BCODE_FREE_RECURSIVE, /* 弹指针 → 按槽位所有权**递归**释放被指向值的 own 槽位，
                            * 再释放块本体。仅用于自引用类型（链表/树）的销毁边：
                            * 静态展开在编译期无法穷尽。普通类型仍走逐槽位 FREE。 */
+
+    /* ---- usize 立即数（**追加在末尾**，不动既有编号）----
+     * U64 操作数 → 压一个 **usize 类型**的值（宽度按运行平台截断）。
+     *
+     * 为什么不能复用 PUSH_U64：usize 是**独立类型**（不是 u64 别名），而
+     * PUSH_U64 产生的是 u64 值——identity 严格的地方（`?usize{...}` 选项提升、
+     * 结构体字段构造、FFI 实参类型）会因"类型不匹配"失败。操作数固定 8 字节，
+     * 因此 `.cxb` 仍可跨架构搬运：32 位宿主读入后按 usize=u32 截断。 */
+    BCODE_PUSH_USIZE,       /* U64 立即数 → usize 值（宽度 = 平台指针宽度） */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----
@@ -345,6 +354,10 @@ typedef enum {
 /* 数据符号：**按类型值读写**（指令前由 `compile_type_expr` 压入类型值）。
  * struct/cunion/enum 走这里——读写字节数 = 该类型的 size。 */
 #define BCODE_FFI_DATA_TYPED 13u
+/* 数据符号：`usize`（C 的 `size_t`）。usize 是**独立类型**，宽度随架构
+ * （64 位 → 8 / 32 位 → 4），因此必须有独立码：复用 U64/U32 会把返回值/
+ * 全局的类型还原成 u64/u32，丢掉 usize 身份。 */
+#define BCODE_FFI_DATA_USIZE 14u
 
 /* ---- BCODE_EXTERN_CALL 的 ret_kind（返回类型码）----
  * 前 5 个是 v0 的原始编码（`.cxb` 兼容：旧容器里只有这些值，语义保持不变）：
@@ -373,6 +386,9 @@ typedef enum {
  * struct/cunion/enum 等程序自定义类型走这里——宽度/布局必须查类型，
  * 用一个小整数码表达不了。 */
 #define BCODE_FFI_RET_TYPED 14u
+/* 返回 `usize`（C 的 `size_t`）：如 strlen/malloc 这类 size_t 返回的函数。
+ * 与 BCODE_FFI_DATA_USIZE 同源——宽度按运行平台还原成 usize 类型。 */
+#define BCODE_FFI_RET_USIZE 15u
 
 /* ---- ret_kind 操作数的高位：变参信息（M6 FFI；与低 8 位的类型码共用一个 u32）----
  * 不新增第四个操作数的理由：`EXTERN_CALL` 的 `.cxs` 文本与旧 `.cxb` 都按

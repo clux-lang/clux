@@ -367,6 +367,12 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       bcode_write_op(c->bc, BCODE_PUSH_U32); bcode_write_u32(c->bc, (uint32_t)n->value);
     } else if (strslice_eq(n->type, STRSLICE_LIT("u64"))) {
       bcode_write_op(c->bc, BCODE_PUSH_U64); bcode_write_u64(c->bc, (uint64_t)n->value);
+    } else if (strslice_eq(n->type, STRSLICE_LIT("usize"))) {
+      /* usize 是**独立类型**：必须用 PUSH_USIZE 造 usize 类型的值（PUSH_U64
+         造的是 u64，`?usize{...}` 提升、结构体字段、FFI 实参等处会因类型身份
+         不同而失败）。操作数恒 8 字节，VM 按平台宽度截断。 */
+      bcode_write_op(c->bc, BCODE_PUSH_USIZE);
+      bcode_write_u64(c->bc, (uint64_t)n->value);
     } else {
       c_error(c, node, "unsupported integer literal type '%.*s'",
               (int)n->type.len, n->type.ptr);
@@ -549,14 +555,15 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       }
       break;
     case 4:
-      if (u == c->vm->type_u32) {
+      /* usize 也是 4 字节（32 位平台）的无符号底层类型 */
+      if (u == c->vm->type_u32 || u == c->vm->type_usize) {
         bcode_write_op(c->bc, BCODE_PUSH_U32); bcode_write_u32(c->bc, (uint32_t)n->value);
       } else {
         bcode_write_op(c->bc, BCODE_PUSH_I32); bcode_write_i32(c->bc, (int32_t)n->value);
       }
       break;
     default:
-      if (u == c->vm->type_u64) {
+      if (u == c->vm->type_u64 || u == c->vm->type_usize) {
         bcode_write_op(c->bc, BCODE_PUSH_U64); bcode_write_u64(c->bc, (uint64_t)n->value);
       } else {
         bcode_write_op(c->bc, BCODE_PUSH_I64); bcode_write_i64(c->bc, (int64_t)n->value);

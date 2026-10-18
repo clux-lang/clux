@@ -685,8 +685,9 @@ value_t *type_as_value(vm_t *vm, const type_t *t);
    按序登记，error/interrupt 紧随其后）；程序类型 id 由 type_id_alloc 从
    TYPE_ID_PROGRAM_BASE 起**全 VM 全局分配**（见下方说明）。 */
 /* opaque 内建 id 17（vm_init_builtins 创建，vm_register_builtin_types 登记
-   进 global scope，LOAD_TYPE <17> 直接可查；sema_type_register 跳过登记）。 */
-#define TYPE_ID_BUILTIN_COUNT 18u
+   进 global scope，LOAD_TYPE <17> 直接可查；sema_type_register 跳过登记）。
+   usize 内建 id 18（同上；独立类型，不是 u64/u32 的别名）。 */
+#define TYPE_ID_BUILTIN_COUNT 19u
 #define TYPE_ID_PROGRAM_BASE   64u
 
 /**

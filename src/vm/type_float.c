@@ -193,6 +193,7 @@ static value_t *float_explicit_cast(vm_t *vm, value_t *v, const type_t *target) 
             target == vm->type_i32 || target == vm->type_i64 ||
             target == vm->type_u8 || target == vm->type_u16 ||
             target == vm->type_u32 || target == vm->type_u64 ||
+            target == vm->type_usize ||
             target == vm->type_bool)
             return value_make_shadow(vm, target);
         return value_make_error(vm, "explicit cast: incompatible target type");
@@ -208,7 +209,8 @@ static value_t *float_explicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     if (target == vm->type_i8 || target == vm->type_i16 ||
         target == vm->type_i32 || target == vm->type_i64 ||
         target == vm->type_u8 || target == vm->type_u16 ||
-        target == vm->type_u32 || target == vm->type_u64) {
+        target == vm->type_u32 || target == vm->type_u64 ||
+        target == vm->type_usize) {
         void *data = value_alloc_data(vm->alloc, target);
         switch (target->size) {
             case 1: *(int8_t  *)data = (int8_t)dv;  break;

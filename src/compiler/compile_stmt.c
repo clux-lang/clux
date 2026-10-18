@@ -27,6 +27,16 @@
 
 #include <stdio.h>
 
+/* 压一个 `usize` 常量（平台宽度无符号整数，C 的 size_t）。
+   为什么不是 PUSH_U64：usize 是独立类型（宽度随架构），32 位平台上
+   LOAD_TYPE <usize id> 压的类型 size=4，值必须按 4 字节常量压入，否则
+   DEFINE 会把 8 字节值截断/越界读取。用法见 AST_FOR_INDEX。 */
+static void emit_usize_const(compiler_t *c, uint64_t v) {
+  bcode_write_op(c->bc, BCODE_PUSH_USIZE);
+  bcode_write_u64(c->bc, v);
+  st_push(c, 1);
+}
+
 /* ===========================================================================
  * 语句节点
  *
@@ -893,20 +903,19 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   }
   case AST_FOR_INDEX: {
     /* sema 生成的逐元素循环（销毁序列用）：`for (i=0; i<len(src); ++i) body`。
-       计数器是**编译器私有**的 u64 变量（名字由 sema 分配、块内唯一）——
-       与 LENGTH 的返回类型一致（u64），避免 i64/u64 混合比较触发
-       "not a widening conversion"。body 里以 `src[i]` 访问当前元素。 */
+       计数器是**编译器私有**的 usize 变量（名字由 sema 分配、块内唯一）——
+       必须与 LENGTH 的返回类型一致（usize，C 的 size_t），否则 32 位平台上
+       是 u64 与 u32 混合比较，触发 "not a widening conversion"。
+       body 里以 `src[i]` 访问当前元素。 */
     ast_for_index_t *n = (ast_for_index_t *)node;
     if (!n->var.ptr || !n->source || !n->body) {
       c_error(c, node, "compiler: for_index requires var/source/body");
       return;
     }
     balance_push(c);                          /* 循环变量作用域 */
-    bcode_write_op(c->bc, BCODE_PUSH_U64);    /* 栈: [0] */
-    bcode_write_u64(c->bc, 0);
-    st_push(c, 1);
-    bcode_write_op(c->bc, BCODE_LOAD_TYPE);   /* 栈: [0, u64 type] */
-    bcode_write_u32(c->bc, c->vm->type_u64->id);
+    emit_usize_const(c, 0);                   /* 栈: [0] */
+    bcode_write_op(c->bc, BCODE_LOAD_TYPE);   /* 栈: [0, usize type] */
+    bcode_write_u32(c->bc, vm_type_usize(c->vm)->id);
     st_push(c, 1);
     bcode_write_op(c->bc, BCODE_DEFINE);
     bcode_write_str(c->bc, n->var);
@@ -940,8 +949,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     bcode_write_op(c->bc, BCODE_PUSH);        /* 栈: [i] */
     bcode_write_str(c->bc, n->var);
     st_push(c, 1);
-    bcode_write_op(c->bc, BCODE_PUSH_U64);
-    bcode_write_u64(c->bc, 1);
+    emit_usize_const(c, 1);                   /* usize 1，与计数器同类型 */
     bcode_write_op(c->bc, BCODE_ADD);         /* 栈: [i + 1] */
     bcode_write_op(c->bc, BCODE_STORE);
     bcode_write_str(c->bc, n->var);           /* 栈: [i'] */

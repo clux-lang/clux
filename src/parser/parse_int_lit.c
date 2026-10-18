@@ -117,12 +117,10 @@ ast_node_t *parse_int_lit(parser_t *p) {
                                      (unsigned long long)value, (int)next.len, next.ptr);
             }
             type = next;
-            /* `usize` 是**别名**（C 的 size_t，随架构）→ 字面量归一化成平台上的
-               具体宽度名（64 位 u64 / 32 位 u32），这样字面量的类型与 `usize`
-               指向的 type_t 完全一致（编译器按宽度选 PUSH_U* 指令）。 */
-            if (strslice_eq(next, STRSLICE_LIT("usize")))
-                type = (sizeof(void *) == 8) ? STRSLICE_LIT("u64")
-                                             : STRSLICE_LIT("u32");
+            /* `usize` 是**独立类型**（不是 u64/u32 的别名）：字面量的类型名
+               原样保留为 "usize"，由 sema/编译器解析成 usize 的 type_t，发码用
+               `PUSH_USIZE`（VM 按平台宽度截断）。这样做还有一个好处：fmt 打印
+               字面量时保持 `123usize` 不变，不会重写成 u64。 */
             advance(p);
         }
     }

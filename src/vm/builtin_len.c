@@ -68,18 +68,19 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
     }
 
     void *data = value_alloc_data(vm->alloc, vm_type_usize(vm));
-    *(uint64_t *)data = len;
+    if (vm_type_usize(vm)->size == 4) *(uint32_t *)data = (uint32_t)len;
+    else                              *(uint64_t *)data = len;
     return value_make(vm, vm_type_usize(vm), data);
 }
 
 /* 注册 len 到 vm->global_scope（调用方在 vm_new 内调用）。
-   签名：len(s) -> u64（泛型 s，variadic）。
+   签名：len(s) -> usize（泛型 s，variadic；usize = C 的 size_t，独立类型）。
    由于 s 是泛型参数，注册为 variadic（0 个固定参数 + variadic），参数类型
-   不经签名校验（cfunc 内部自验可长性）。返回类型 u64。 */
+   不经签名校验（cfunc 内部自验可长性）。返回类型 usize。 */
 void vm_register_len(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
 
-    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm->type_u64,
+    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm_type_usize(vm),
                                       OWN_NONE, /*is_variadic=*/true);
     if (!sig) return;
 

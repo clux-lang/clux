@@ -56,7 +56,8 @@ static void eval_print_value(vm_t *vm, value_t *v) {
     return;
   }
   if (t == vm->type_u8 || t == vm->type_u16 ||
-      t == vm->type_u32 || t == vm->type_u64) {
+      t == vm->type_u32 || t == vm->type_u64 ||
+      t == vm->type_usize) {
     uint64_t u;
     switch (t->size) {
     case 1: u = *(const uint8_t  *)value_data(v); break;

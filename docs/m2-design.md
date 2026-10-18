@@ -169,7 +169,7 @@ do { ... } while (cond);    // 后置条件循环
 ### 8. sizeof / alignof / typeof（SEMA→CTFE 桥梁）✅ 已实现（2026-09-29）
 
 ```
-sizeof(T)        // 返回 usize（C 的 size_t，随架构：64 位 = u64 / 32 位 = u32）
+sizeof(T)        // 返回 usize（C 的 size_t；**独立类型**，宽度 = 指针宽度）
 sizeof(expr)     // 对表达式做 shadow 计算，不真实执行
 alignof(T)       // 返回 u64
 typeof(expr)     // 返回 type value

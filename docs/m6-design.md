@@ -20,8 +20,9 @@ clux 采用标准 C ABI，通过 `cfunc` / `extern cfunc` / `extern var` 实现�
 >
 > **C 类型覆盖（§14.20）**：标量 `i8..u64`/`f32`/`f64`/`bool`、指针族、`opaque`、
 > **`str`（char\*）**、**`enum`**、**`struct`/`cunion` 按值**（传参、返回、变参位置、
-> 回调双向）全部支持；**`usize` = C 的 `size_t`**（别名：64 位平台即 `u64`，
-> 32 位平台即 `u32`），FFI 里声明 C 的 `size_t` 形参就用它；**程序自定义类型可出现
+> 回调双向）全部支持；**`usize` = C 的 `size_t`**（**独立类型**，宽度 = 指针宽度：64 位 = 8 / 32 位 = 4；
+> 有自己的描述符码 `BCODE_FFI_DATA_USIZE` / `BCODE_FFI_RET_USIZE`，返回值类型还原成 `usize`
+> 而不是 u64/u32），FFI 里声明 C 的 `size_t` 形参就用它；**程序自定义类型可出现
 > 在 FFI 签名里**（含 `type` 别名与指向它们的指针，修掉了 pass 顺序缺陷）。
 > `struct` 的描述符按字段递归构造，`cunion` 等价建模为"size/align 个整数成员"
 > （libffi 无 union 类型）。
@@ -1124,7 +1125,10 @@ func main(): i32 {
 | 编码 | `ffi_data_kind_of`（类型→码）与 `ffi_data_type_of`（码→类型+宽度）**成对实现在 `vm/ffi_lib.c`**，避免两处清单漂移 |
 
 `kind` 码：`0..3` = i8/i16/i32/i64、`4..7` = u8/u16/u32/u64、`8/9` = f32/f64、
-`10` = opaque（指针宽度）、`11` = bool。
+`10` = opaque（指针宽度）、`11` = bool、`12` = str（char\*）、`13` = 按类型值读写
+（struct/cunion/enum）、`14` = **usize（C 的 `size_t`）**。
+返回码 `BCODE_FFI_RET_*` 同源，另有 `15` = **usize**——`strlen`/`malloc` 这类
+`size_t` 返回的函数，返回值类型必须还原成 `usize`（独立类型），不能落成 u64/u32。
 
 #### 14.17.3 两个真踩到的坑
 

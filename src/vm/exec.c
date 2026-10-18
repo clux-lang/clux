@@ -176,6 +176,19 @@ static value_t *op_push_u64(vm_t *vm, bytecode_t *bc, size_t *pc) {
     void *data = value_alloc_data_copy(vm->alloc, vm->type_u64, &v);
     return value_make(vm, vm->type_u64, data);
 }
+/* usize 立即数：操作数恒 8 字节（`.cxb` 跨架构可搬运），按平台宽度截断后
+   造成 **usize 类型**的值——PUSH_U64 造的是 u64，identity 严格处会类型不匹配。 */
+static value_t *op_push_usize(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint64_t v = bcode_read_u64(bc, pc);
+    const type_t *ut = vm_type_usize(vm);
+    if (ut->size == 4) {
+        uint32_t v32 = (uint32_t)v;
+        void *data = value_alloc_data_copy(vm->alloc, ut, &v32);
+        return value_make(vm, ut, data);
+    }
+    void *data = value_alloc_data_copy(vm->alloc, ut, &v);
+    return value_make(vm, ut, data);
+}
 static value_t *op_push_f32(vm_t *vm, bytecode_t *bc, size_t *pc) {
     float v = bcode_read_f32(bc, pc);
     void *data = value_alloc_data_copy(vm->alloc, vm->type_f32, &v);
@@ -2183,6 +2196,7 @@ static uint32_t ffi_ret_to_data_kind(uint32_t rk) {
     case BCODE_FFI_RET_U16: return BCODE_FFI_DATA_U16;
     case BCODE_FFI_RET_U32: return BCODE_FFI_DATA_U32;
     case BCODE_FFI_RET_U64: return BCODE_FFI_DATA_U64;
+    case BCODE_FFI_RET_USIZE: return BCODE_FFI_DATA_USIZE;
     case BCODE_FFI_RET_F32: return BCODE_FFI_DATA_F32;
     case BCODE_FFI_RET_F64: return BCODE_FFI_DATA_F64;
     case BCODE_FFI_RET_BOOL: return BCODE_FFI_DATA_BOOL;
@@ -2847,6 +2861,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_FREE_RECURSIVE]  = op_free_recursive,
     [BCODE_TAKE_SLOT]       = op_take_slot,
     [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
+    [BCODE_PUSH_USIZE]      = op_push_usize,
 };
 
 /* ================================================================ */

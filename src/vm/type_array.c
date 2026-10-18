@@ -253,16 +253,20 @@ const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type
 /* vtable 实现                                                      */
 /* ================================================================ */
 
-/* ---- length: 返回 u64 元素个数 ---- */
+/* ---- length: 返回 usize 元素个数（C 的 size_t） ---- */
 
 static value_t *array_length(vm_t *vm, value_t *self) {
+    /* 长度 = usize（C 的 size_t，独立类型，宽度随架构）：u64 在 32 位平台
+       上宽度是错的。 */
+    const type_t *ut = vm_type_usize(vm);
     if (value_is_shadow(self))
-        return value_make_shadow(vm, vm->type_u64);
+        return value_make_shadow(vm, ut);
     /* 借用 self 的 type 也是数组类型（元素类型），length 从类型取 */
     size_t n = array_type_len(value_type(self));
-    void *data = value_alloc_data(vm->alloc, vm->type_u64);
-    *(uint64_t *)data = (uint64_t)n;
-    return value_make(vm, vm->type_u64, data);
+    void *data = value_alloc_data(vm->alloc, ut);
+    if (ut->size == 4) *(uint32_t *)data = (uint32_t)n;
+    else               *(uint64_t *)data = (uint64_t)n;
+    return value_make(vm, ut, data);
 }
 
 /* ---- get_index: self[index] -> 借用引用（data 指向块内业务内存） ---- */

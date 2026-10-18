@@ -496,6 +496,8 @@ bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind
     if (t == v->type_u16) { *out_kind = BCODE_FFI_DATA_U16; return true; }
     if (t == v->type_u32) { *out_kind = BCODE_FFI_DATA_U32; return true; }
     if (t == v->type_u64) { *out_kind = BCODE_FFI_DATA_U64; return true; }
+    /* usize（C 的 size_t）是独立类型：自己的码，宽度按运行平台 */
+    if (t == v->type_usize) { *out_kind = BCODE_FFI_DATA_USIZE; return true; }
     if (t == v->type_f32) { *out_kind = BCODE_FFI_DATA_F32; return true; }
     if (t == v->type_f64) { *out_kind = BCODE_FFI_DATA_F64; return true; }
     if (t == v->type_bool) { *out_kind = BCODE_FFI_DATA_BOOL; return true; }
@@ -519,6 +521,9 @@ const type_t *ffi_data_type_of(const struct vm_t *vm, uint32_t kind,
     case BCODE_FFI_DATA_U16: if (out_size) *out_size = 2; return v->type_u16;
     case BCODE_FFI_DATA_U32: if (out_size) *out_size = 4; return v->type_u32;
     case BCODE_FFI_DATA_U64: if (out_size) *out_size = 8; return v->type_u64;
+    case BCODE_FFI_DATA_USIZE:
+        if (out_size) *out_size = sizeof(void *);
+        return v->type_usize;
     case BCODE_FFI_DATA_F32: if (out_size) *out_size = 4; return v->type_f32;
     case BCODE_FFI_DATA_F64: if (out_size) *out_size = 8; return v->type_f64;
     case BCODE_FFI_DATA_BOOL:
@@ -547,6 +552,9 @@ const void *ffi_data_ffi_type(uint32_t kind) {
     case BCODE_FFI_DATA_U16: return &ffi_type_uint16;
     case BCODE_FFI_DATA_U32: return &ffi_type_uint32;
     case BCODE_FFI_DATA_U64: return &ffi_type_uint64;
+    /* size_t：宽度随目标架构（与 C 的 size_t 同宽） */
+    case BCODE_FFI_DATA_USIZE:
+        return sizeof(void *) == 4 ? &ffi_type_uint32 : &ffi_type_uint64;
     case BCODE_FFI_DATA_F32: return &ffi_type_float;
     case BCODE_FFI_DATA_F64: return &ffi_type_double;
     case BCODE_FFI_DATA_BOOL: return &ffi_type_uint8;

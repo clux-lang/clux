@@ -49,6 +49,7 @@ typedef struct vm_t {
     type_t *type_interrupt; /* interrupt 类型（引擎级控制流哨兵） */
     type_t *type_opaque; /* opaque 类型（≈ C void*，id 17，M3 §8.4） */
     type_t *type_module; /* 模块类型（M5，命名空间值，不可实例化/赋值/传递） */
+    type_t *type_usize;  /* usize：**独立**的无符号整数类型（id 18，宽度 = 指针） */
 
     /* ---- 函数签名类型池（按签名去重 intern，vm 拥有生命周期） ---- */
     vec_t *sig_types;    /* func_type_t*，元素为签名类型（sig 非空） */
@@ -131,17 +132,24 @@ typedef struct vm_t {
     strmap_t    *modules;  /* 规范路径(C字符串) → module_t*（vm 拥有生命周期） */
 } vm_t;
 
-/* ---- `usize`：C 的 size_t 在 clux 里的名字（**随架构变化**）----
+/* ---- `usize`：C 的 size_t 在 clux 里的名字（**独立类型**，宽度随架构）----
  *
- * 与 C 的 `typedef` 同义：`usize` **就是**平台上的无符号整数类型本身
- * （指针宽度 = 8 → `u64`；= 4 → `u32`），不是新类型。因此：
- *   - `usize` 与底层类型可以互相赋值/比较（无隐式转换障碍）；
- *   - FFI 里声明 `usize` 即 C 的 `size_t`，描述符走同一张表（§14.20）；
- *   - 大小/长度类内建（`len`/`sizeof`/`alignof`）返回它，代码才真正可移植
- *     （此前一律返回 u64，在 32 位平台上宽度是错的）。
- * 名字注册见 `vm_register_builtin_types`（vm.c）。 */
+ * `usize` **不是** `u64`/`u32` 的别名，而是自己的 `type_t`（id 18，NAME 即
+ * "usize"，kind INT、无符号、size/align = 指针宽度）。它等价于 C 的 `size_t`
+ * 这个**语义角色**，但在类型系统里是独立身份：
+ *   - `typeof(1usize) != typeof(1u64)`、`usize` 与 `u64` 的 type value 不相等
+ *     （`usize extends u64` 为假），错误信息里也显示 `usize`；
+ *   - **与同宽无符号类型隐式互转**（64 位 usize ↔ u64，32 位 usize ↔ u32）：
+ *     同宽同符号 = 表示完全相同，无信息损失，因此按 C 的 size_t 习惯仍可
+ *     直接混用；变宽时按现有宽度规则（拓宽隐式、缩窄显式）；
+ *   - FFI 里声明 `usize` 即 C 的 `size_t`，有自己的描述符码
+ *     （`BCODE_FFI_DATA_USIZE` / `BCODE_FFI_RET_USIZE`）；
+ *   - 大小/长度类内建（`len`/`sizeof`/`alignof`/`[N]` 下标/for_index 循环变量）
+ *     一律用它，代码才真正可移植（u64 在 32 位平台上宽度是错的）。
+ * 名字注册见 `vm_register_builtin_types`（vm.c），类型实体见 `vm_init_builtins`
+ * （type.c）。 */
 static inline const type_t *vm_type_usize(const vm_t *vm) {
-    return (sizeof(void *) == 8) ? vm->type_u64 : vm->type_u32;
+    return vm->type_usize;
 }
 
 /** 创建 VM（初始化内置类型、全局作用域、调用栈） */

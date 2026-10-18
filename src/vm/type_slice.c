@@ -196,12 +196,15 @@ static value_t *slice_set_index(vm_t *vm, value_t *self, value_t *index,
 }
 
 static value_t *slice_length(vm_t *vm, value_t *self) {
+    /* 长度 = usize（C 的 size_t，独立类型，宽度随架构） */
+    const type_t *ut = vm_type_usize(vm);
     if (value_is_shadow(self))
-        return value_make_shadow(vm, vm->type_u64);
+        return value_make_shadow(vm, ut);
     const slice_value_t *sv = (const slice_value_t *)value_data(self);
-    void *data = value_alloc_data(vm->alloc, vm->type_u64);
-    *(uint64_t *)data = sv->len;
-    return value_make(vm, vm->type_u64, data);
+    void *data = value_alloc_data(vm->alloc, ut);
+    if (ut->size == 4) *(uint32_t *)data = (uint32_t)sv->len;
+    else               *(uint64_t *)data = (uint64_t)sv->len;
+    return value_make(vm, ut, data);
 }
 
 /* ---- 类型转换 ---- */

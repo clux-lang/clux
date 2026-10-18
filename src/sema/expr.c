@@ -2350,6 +2350,8 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             else if (rt == sema->vm->type_u16) rk = BCODE_FFI_RET_U16;
             else if (rt == sema->vm->type_u32) rk = BCODE_FFI_RET_U32;
             else if (rt == sema->vm->type_u64) rk = BCODE_FFI_RET_U64;
+            /* usize（独立类型，C 的 size_t）：自己的返回码，宽度随平台 */
+            else if (rt == vm_type_usize(sema->vm)) rk = BCODE_FFI_RET_USIZE;
             else if (rt == sema->vm->type_bool) rk = BCODE_FFI_RET_BOOL;
             else if (rt == sema->vm->type_f32) rk = BCODE_FFI_RET_F32;
             else if (rt == sema->vm->type_f64) rk = BCODE_FFI_RET_F64;

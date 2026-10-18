@@ -1256,7 +1256,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       新增 `examples/ffi_struct/ffi_struct.cx`：用 libc 真实的 `div` 演示按值返回
       结构体、`getenv` 演示 char\* 返回（结构体按值**传参**的可移植库函数不存在，
       那条路径由测试库覆盖）。
-65. **`usize`：C 的 `size_t`（随架构变化）**
+65. **`usize`：C 的 `size_t`（随架构变化）**（第 77 项已把它从"别名"改成独立类型）
     - **动机（用户指出）**："之前把 size 大小统一成 u64 了"——`len`/`sizeof`/`alignof`
       一律返回 u64，在 32 位平台上宽度是错的；FFI 里声明 C 的 `size_t` 形参也只能
       写死 u64。
@@ -1676,3 +1676,38 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       内建 printf 写法）。
     - 验证：全量 **2081/2081 PASSED / 0 FAILED**；`examples` 入口 45/45、`.cxs` 5/5
       均可运行并输出预期结果。
+77. **`usize` 改成独立类型（C 的 `size_t` 语义角色，但不与 u64 同一）**（2026-10；取代第 65 项的"别名"设计）
+    - **动机（用户指出）**：`usize` 必须是独立数字类型，大小与操作系统架构一致
+      （相当于 C 的 `size_t`），而不是 `u64`/`u32` 换个名字。
+    - **类型实体**：新增内建单例 `vm->type_usize`（`src/vm/type.c`）——kind INT、
+      无符号 vtable、`size/align = sizeof(void*)`、name `"usize"`、**id 18**
+      （`TYPE_ID_BUILTIN_COUNT` 18 → 19，紧随 opaque 17；module 不占 id 表）。
+      `vm_type_usize()` 从"按指针宽度返回 u64/u32"改为直接返回该单例；
+      `vm_register_builtin_types` 只做 id 表 + global scope 登记（不再是别名绑定）。
+    - **整数族**：`type_int.c` 的 `is_unsigned_int` 纳入 usize（算术/位运算/比较/
+      转换都按无符号整数走）；**隐式转换的宽窄判定改用 `type->size`**（同宽 = 表示
+      相同 → 允许；缩窄拒绝）——序号比较会把 `usize → u64` 误判成缩窄；
+      `type_promote` 里 usize 与同宽无符号类型收敛为 usize，其余按 rank。
+    - **长度语义统一**：`len(...)`（签名 + 运行时值）、数组/切片 `length`、
+      `sizeof`/`alignof`（sema 折叠 + CTFE `ctfe_make_int`）、`for (i in …)` 的
+      计数器（`compile_stmt.c` 新增 `emit_usize_const`）、`[N]` 边界全部是 usize。
+    - **字面量**：`5usize` 不再归一化成 u64/u32（`parse_int_lit.c`），类型名原样
+      保留为 `usize`，编译器按 `usize->size` 选 `PUSH_U64`/`PUSH_U32`；fmt 因此
+      也不再把它重写成 u64（顺带修掉一个格式化破坏源码的坑）。
+    - **FFI**：新增 `BCODE_FFI_DATA_USIZE`(14) 与 `BCODE_FFI_RET_USIZE`(15)——
+      `ffi_data_kind_of` / `ffi_data_type_of` / `ffi_data_ffi_type`（uint32/uint64
+      按平台）/ `ffi_ret_to_data_kind` / sema 的返回码映射全部接上。`strlen` 这类
+      `size_t` 返回的函数现在真的得到 `usize`（此前会退化成 u64）。
+    - **其它**：`bool`/`float` 的显式转换目标、`clux eval` 的整数打印、
+      `comptime` 常量编解码、enum 底层/变体值白名单、enum 变体发码都认识 usize。
+    - **测试**：`tests/usize_test.cpp` 重写 + 扩充（VM 层断言"独立身份"：与
+      u64/u32 不是同一个 type_t、id 表可查、len 返回它；源码层 6 例：长度语义、
+      同宽双向隐式/变宽显式、类型身份 `usize == u64` 为假、字段/参数/返回、
+      FFI size_t 往返、sizeof 折叠类型；负例：与有符号类型隐式混合被拒）。
+    - **文档**：language-spec §2.1/§2.3/§3.1、m2-design §8、m6-design §14.20 的
+      码表、architecture-m1 规模表。
+    - **新增指令**：`PUSH_USIZE`（U64 操作数 → usize 值，VM 按平台截断）——
+      `PUSH_U64` 造的是 u64，`?usize{...}` 提升/结构体字段/FFI 实参等处会因类型
+      身份不同失败；`.cxs` 助记符表与扩展高亮同步（118 条）。
+    - 验证：全量重编 **0 告警**；**2086/2086 PASSED**；`examples` 45/45（run 与
+      emit→run 均通过）；`fmt` 幂等 48/48；`.cxs` 样本 5/5。

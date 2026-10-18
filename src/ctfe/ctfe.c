@@ -47,7 +47,7 @@ const char *ctfe_slice_to_cstr(strslice_t s, char *buf, size_t cap) {
     return buf;
 }
 
-/* 按类型宽度构造整数值（i8..u64） */
+/* 按类型宽度构造整数值（i8..u64 / usize） */
 value_t *ctfe_make_int(ctfe_ctx_t *ctx, const type_t *t, uint64_t v) {
     void *data = value_alloc_data(ctx->vm->alloc, t);
     if (t == ctx->vm->type_i8)  *(int8_t  *)data = (int8_t)v;
@@ -58,6 +58,11 @@ value_t *ctfe_make_int(ctfe_ctx_t *ctx, const type_t *t, uint64_t v) {
     else if (t == ctx->vm->type_u16) *(uint16_t *)data = (uint16_t)v;
     else if (t == ctx->vm->type_u32) *(uint32_t *)data = (uint32_t)v;
     else if (t == ctx->vm->type_u64) *(uint64_t *)data = (uint64_t)v;
+    /* usize（独立类型，宽度随架构）：按 size 写，不按名字 */
+    else if (t == ctx->vm->type_usize) {
+        if (t->size == 4) *(uint32_t *)data = (uint32_t)v;
+        else *(uint64_t *)data = (uint64_t)v;
+    }
     else {
         /* 非整数类型：data 已分配，按错误路径释放 */
         allocator_free(ctx->vm->alloc, (void **)&data);
@@ -78,6 +83,7 @@ const type_t *ctfe_int_lit_type(ctfe_ctx_t *ctx, strslice_t suffix) {
     if (strslice_eq(suffix, STRSLICE_LIT("u16"))) return vm->type_u16;
     if (strslice_eq(suffix, STRSLICE_LIT("u32"))) return vm->type_u32;
     if (strslice_eq(suffix, STRSLICE_LIT("u64"))) return vm->type_u64;
+    if (strslice_eq(suffix, STRSLICE_LIT("usize"))) return vm_type_usize(vm);
     return NULL;
 }
 

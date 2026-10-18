@@ -73,10 +73,9 @@ static void vm_register_builtin_types(vm_t *vm) {
         }
     }
 
-    /* `usize` = C 的 size_t：**别名**（与 typedef 同义），指向平台上的无符号
-       整数类型本身（64 位 → u64，32 位 → u32，见 vm_type_usize）。注册成第二个
-       名字而不是新 type_t：这样 `usize` 与底层类型完全同一，可互相赋值/比较，
-       FFI 描述符也复用同一张表。 */
+    /* `usize`（C 的 size_t）：**独立的 type_t**（id 18，见 vm_init_builtins），
+       不是 u64/u32 的别名——typeof/type_equal/FFI 描述符都按自己的身份走。
+       这里只把它登记进 id 表与 global scope（`LOAD_TYPE 18` / 名字查找）。 */
     {
         const type_t *t = vm_type_usize(vm);
         vm_type_bind(vm, (uint32_t)t->id, t);

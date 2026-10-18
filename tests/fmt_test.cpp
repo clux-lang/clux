@@ -951,3 +951,18 @@ TEST(Fmt, ClosureScopeAnnotationPreserved) {
         << out2;
     EXPECT_EQ(out2, fmt(out2.c_str()));
 }
+
+/* `usize` 字面量：后缀必须原样保留（usize 是独立类型；此前解析期归一化成
+   u64/u32，格式化会把 `123usize` 改写成 `123u64`，等于悄悄改源码语义面）。 */
+TEST(Fmt, UsizeSuffixPreserved) {
+    std::string out = fmt("func main():i32{\n"
+                          "var a:usize=123usize;\n"
+                          "var b=1usize+2usize;\n"
+                          "if(a!=b){return 1;}\n"
+                          "return 0;\n"
+                          "}\n");
+    EXPECT_NE(out.find("123usize"), std::string::npos) << out;
+    EXPECT_NE(out.find("1usize + 2usize"), std::string::npos) << out;
+    EXPECT_EQ(out.find("123u64"), std::string::npos) << out;
+    EXPECT_EQ(out, fmt(out.c_str()));
+}

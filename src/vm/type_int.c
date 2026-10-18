@@ -7,35 +7,12 @@
 /* 类型分类辅助                                                      */
 /* ================================================================ */
 
-typedef enum {
-    RANK_NONE = 0,
-    RANK_BOOL = 1,
-    RANK_I8   = 2,
-    RANK_U8   = 3,
-    RANK_I16  = 4,
-    RANK_U16  = 5,
-    RANK_I32  = 6,
-    RANK_U32  = 7,
-    RANK_I64  = 8,
-    RANK_U64  = 9,
-    RANK_F32  = 10,
-    RANK_F64  = 11,
-} type_rank_t;
-
-static type_rank_t type_rank(const vm_t *vm, const type_t *t) {
-    if (t == vm->type_bool) return RANK_BOOL;
-    if (t == vm->type_i8)   return RANK_I8;
-    if (t == vm->type_u8)   return RANK_U8;
-    if (t == vm->type_i16)  return RANK_I16;
-    if (t == vm->type_u16)  return RANK_U16;
-    if (t == vm->type_i32)  return RANK_I32;
-    if (t == vm->type_u32)  return RANK_U32;
-    if (t == vm->type_i64)  return RANK_I64;
-    if (t == vm->type_u64)  return RANK_U64;
-    if (t == vm->type_f32)  return RANK_F32;
-    if (t == vm->type_f64)  return RANK_F64;
-    return RANK_NONE;
-}
+/* 整数类型集合（含 usize）。**无符号集合把 usize 算进来**是关键：usize 是
+   独立类型（不是 u64/u32 别名），但语义上是"平台宽度的无符号整数"，因此
+   算术/位运算/比较/转换都与 u* 同族。
+   注意：隐式转换的**宽窄**判定一律用 `type->size` 而不是类型序号——
+   usize 与同宽无符号类型（64 位 u64 / 32 位 u32）表示完全相同，必须能双向
+   隐式互转；序号比较会把它误判成单向（见 uint_implicit_cast）。 */
 
 static bool is_signed_int(const vm_t *vm, const type_t *t) {
     return t == vm->type_i8 || t == vm->type_i16 ||
@@ -44,7 +21,8 @@ static bool is_signed_int(const vm_t *vm, const type_t *t) {
 
 static bool is_unsigned_int(const vm_t *vm, const type_t *t) {
     return t == vm->type_u8 || t == vm->type_u16 ||
-           t == vm->type_u32 || t == vm->type_u64;
+           t == vm->type_u32 || t == vm->type_u64 ||
+           t == vm->type_usize;
 }
 
 static bool is_int_type(const vm_t *vm, const type_t *t) {
@@ -390,10 +368,11 @@ static value_t *sint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         if (!value_is_error(vm, q)) return q;
     }
 
-    type_rank_t sr = type_rank(vm, value_type(v));
-    type_rank_t tr = type_rank(vm, target);
-
-    if (tr <= sr)
+    /* 宽度规则：目标不得**窄于**源。同宽 = 表示完全相同（无信息损失），允许；
+       更窄 = 缩窄，拒绝。用宽度而不是"类型序号"判：usize 与同宽无符号类型
+       （64 位 u64 / 32 位 u32）必须能隐式互转，而 usize 在序号表里排在 u64
+       之后——序号比较会把 usize → u64 误判成缩窄。 */
+    if (target->size < value_type(v)->size)
         return value_make_error(vm, "implicit cast: not a widening conversion");
 
     /* signed → unsigned 拒绝（设计：signed/unsigned 不隐式混合，须显式
@@ -418,10 +397,8 @@ static value_t *uint_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
         if (!value_is_error(vm, q)) return q;
     }
 
-    type_rank_t sr = type_rank(vm, value_type(v));
-    type_rank_t tr = type_rank(vm, target);
-
-    if (tr <= sr)
+    /* 宽度规则同 signed：同宽（usize ↔ 平台无符号类型）允许，缩窄拒绝 */
+    if (target->size < value_type(v)->size)
         return value_make_error(vm, "implicit cast: not a widening conversion");
 
     if (is_signed_int(vm, target))

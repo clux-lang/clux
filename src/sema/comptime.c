@@ -86,7 +86,7 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
 
   if (t == vm->type_i8 || t == vm->type_i16 || t == vm->type_i32 ||
       t == vm->type_i64 || t == vm->type_u8 || t == vm->type_u16 ||
-      t == vm->type_u32 || t == vm->type_u64) {
+      t == vm->type_u32 || t == vm->type_u64 || t == vm->type_usize) {
     return encode_int(vm, v, out);
   }
   if (t == vm->type_f32 || t == vm->type_f64) {
@@ -243,7 +243,7 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
 
   if (t == vm->type_i8 || t == vm->type_i16 || t == vm->type_i32 ||
       t == vm->type_i64 || t == vm->type_u8 || t == vm->type_u16 ||
-      t == vm->type_u32 || t == vm->type_u64) {
+      t == vm->type_u32 || t == vm->type_u64 || t == vm->type_usize) {
     ast_node_t *n = ast_int_lit_new(arena, tb, te);
     if (!n) return NULL;
     ast_int_lit_t *il = (ast_int_lit_t *)n;
@@ -890,7 +890,8 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
   bool is_int = (underlying == vm->type_i8 || underlying == vm->type_i16 ||
                  underlying == vm->type_i32 || underlying == vm->type_i64 ||
                  underlying == vm->type_u8 || underlying == vm->type_u16 ||
-                 underlying == vm->type_u32 || underlying == vm->type_u64);
+                 underlying == vm->type_u32 || underlying == vm->type_u64 ||
+                 underlying == vm->type_usize);
   if (!is_int) {
     char tn[64];
     sema_type_name(underlying, tn, sizeof(tn));
@@ -945,7 +946,8 @@ bool sema_eval_enum_def(sema_t *sema, ast_enum_def_t *ed, sema_scope_t *scope) {
     bool is_int_v = (vt == vm->type_i8 || vt == vm->type_i16 ||
                      vt == vm->type_i32 || vt == vm->type_i64 ||
                      vt == vm->type_u8 || vt == vm->type_u16 ||
-                     vt == vm->type_u32 || vt == vm->type_u64);
+                     vt == vm->type_u32 || vt == vm->type_u64 ||
+                     vt == vm->type_usize);
     if (!is_int_v) {
       char tn[64];
       sema_type_name(vt, tn, sizeof(tn));
