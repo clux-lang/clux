@@ -113,7 +113,6 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PTR_GET]        = { "PTR_GET",       { BCODE_ASM_OP_NONE } },
     [BCODE_PTR_SET]        = { "PTR_SET",       { BCODE_ASM_OP_NONE } },
     [BCODE_ADDR]           = { "ADDR",          { BCODE_ASM_OP_NONE } },
-    [BCODE_CLONE]          = { "CLONE",         { BCODE_ASM_OP_NONE } },
     [BCODE_DISPOSE]        = { "DISPOSE",       { BCODE_ASM_OP_NONE } },
 
     [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_NONE } },

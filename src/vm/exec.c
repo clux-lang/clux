@@ -915,22 +915,6 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * 从 own 标记为 fatal。运行期 MOVE = 纯 memcpy（位复制），不清空源指针。
  * 堆释放由 sema 生成 FREE 指令负责。
  * shadow → 同类型 shadow。 */
-/* CLONE（无操作数）：**深拷贝**（clone(x)，m3-design §7）。
- * 所有权纯编译期——clone 做深拷贝（ptr_clone_block 对象图克隆），
- * 不再包 fatal 类型、不清空源指针。
- * shadow → 同类型 shadow。 */
-static value_t *op_clone(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)bc; (void)pc;
-    value_t *v = exec_stack_pop(vm);
-    if (value_is_shadow(v))
-        return value_make_shadow(vm, value_type(v));
-    const type_t *t = value_type(v);
-    if (!t || !value_data(v)) return value_clone(vm, v);
-    /* 深拷贝：对象图克隆（指针分配新堆块，复合类型逐字段递归）。 */
-    void *data = ptr_clone_block(vm, t, value_data(v));
-    return value_make(vm, t, data);
-}
-
 /* value_move（供 MOVE 指令与函数调用/返回的**所有权转移**共用，m3-design §7）：
  * 所有权纯编译期——move = 纯 memcpy（位复制），不清空源指针。
  * 堆释放由 sema 生成 FREE 指令负责。 */
@@ -2792,7 +2776,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PTR_GET]         = op_ptr_get,
     [BCODE_PTR_SET]         = op_ptr_set,
     [BCODE_ADDR]            = op_addr,
-    [BCODE_CLONE]           = op_clone,
     [BCODE_DISPOSE]         = op_dispose,
     [BCODE_PUSH_SLICE]      = op_push_slice,
     [BCODE_SLICE]           = op_slice,

@@ -5,6 +5,7 @@
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_slice.h"
+#include "vm/type_ptr.h"
 #include "core/panic.h"
 
 #include <string.h>
@@ -89,4 +90,36 @@ void vm_register_len(vm_t *vm) {
     if (!stored || value_is_error(vm, stored)) {
         return;
     }
+}
+
+/* __deep_clone(v)：运行期**深拷贝**一个值（对象图克隆，与已删除的 CLONE
+   指令同一实现：ptr_clone_block）。用途收窄为"静态类型表达不了克隆语义"的
+   形态——闭包值（env 的捕获聚合类型只有运行期才知道）与 cunion 被指向值。
+   普通复合类型/指针/切片的 clone 仍由 sema 生成的 clone 函数完成。 */
+static value_t *builtin_deep_clone_cfunc(vm_t *vm, func_t *self, size_t argc,
+                                         value_t **args) {
+    (void)self;
+    if (argc != 1 || !args[0])
+        return value_make_error(vm, "__deep_clone: expects exactly 1 argument");
+    value_t *v = args[0];
+    if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) {
+        void *data = t ? value_alloc_data_copy(vm->alloc, t, value_data(v)) : NULL;
+        return t ? value_make(vm, t, data) : v;
+    }
+    void *nb = ptr_clone_block(vm, t, value_data(v));
+    return value_make(vm, t, nb);
+}
+
+void vm_register_deep_clone(vm_t *vm) {
+    if (!vm || !vm->global_scope) return;
+    /* 变参签名：sema 在调用点按实参类型精化返回类型（与 len/data 同款）。 */
+    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm->type_opaque,
+                                      OWN_NONE, /*is_variadic=*/true);
+    if (!sig) return;
+    value_t *fnv = func_new(vm, builtin_deep_clone_cfunc, NULL, vm->root_scope,
+                            sig, STRSLICE_LIT("__deep_clone"));
+    if (!fnv) return;
+    (void)scope_define(vm, vm->global_scope, "__deep_clone", fnv);
 }

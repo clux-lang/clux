@@ -1575,6 +1575,34 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  /* 预注册 __deep_clone 内置函数（运行期对象图深拷贝）：静态类型表达不了
+     克隆语义的形态（闭包值 / cunion 被指向值 / 无 prelude 的切片）在 sema
+     里改写为对它的调用，因此 CLONE 指令可以彻底移除。变参签名，调用点按实参
+     类型精化返回类型（同类型 fatal）。fid 从 vm->functions 按名查询。 */
+  {
+    const type_t *dsig = type_func_sig(sema->vm, NULL, NULL, 0,
+                                       sema->vm->type_opaque, OWN_NONE,
+                                       /*is_variadic=*/true);
+    uint32_t dfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 12 &&
+            memcmp(bf->name.ptr, "__deep_clone", 12) == 0) {
+          dfid = bf->id;
+          break;
+        }
+      }
+    }
+    if (dsig) {
+      sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = dsig,
+                            .is_active = true, .fid = dfid,
+                            .builtin_op = SEMA_BUILTIN_DEEP_CLONE};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("__deep_clone"), &init);
+    }
+  }
+
   /* 预注册 data 内置函数（C ABI 适配：data(array/slice/str) -> ref *T，取首元素
      指针）。与 VM 侧 vm_register_data 对应。注册为 variadic（0 固定参数）——
      sema 调用点特判按实参类型精化返回类型为 `ref *<元素类型>`（str → ref *u8），

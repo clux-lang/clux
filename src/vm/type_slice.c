@@ -77,7 +77,7 @@ static value_t *slice_clone(vm_t *vm, value_t *v) {
     const type_t *t = value_type(v);
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
     /* 所有权纯编译期——clone 统一为浅拷贝胖指针（ptr+len）。
-       深拷贝由 CLONE 指令（op_clone）显式调用 ptr_clone_block 完成。 */
+       深拷贝由生成的 clone 函数 / __deep_clone 内置函数调用 ptr_clone_block 完成。 */
     return slice_make_value(vm, t, sv->ptr, sv->len);
 }
 

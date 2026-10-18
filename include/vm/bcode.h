@@ -197,7 +197,6 @@ typedef enum {
     BCODE_PTR_SET,          /* 弹指针值 + val → 写回被指向 T（r.* = v 解引用
                                SET；val 隐式转换 → T）→ 压回指针 */
     BCODE_ADDR,             /* 弹值 → 压 ref *T 指针（x.& 后置取址，借用） */
-    BCODE_CLONE,            /* 弹值 → 压深拷贝值（clone(x)，value_clone 分派） */
     BCODE_DISPOSE,          /* 无操作数：弹值 → 递归释放其内嵌 own 堆块
                                （`_ = expr` 显式丢弃 fatal/own，m3-design
                                §3.3：fatal 必被 own 接管，_ = 丢弃例外）→

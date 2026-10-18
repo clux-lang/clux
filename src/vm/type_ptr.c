@@ -553,7 +553,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
 }
 
 /* clone：所有权纯编译期——运行期 clone 统一为浅拷贝指针值。
-   深拷贝由 CLONE 指令（op_clone）显式调用 ptr_clone_block 完成，
+   深拷贝由生成的 clone 函数 / __deep_clone 内置函数调用 ptr_clone_block 完成，
    vtable->clone 只做浅拷贝（指针值复制）。 */
 static value_t *ptr_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))

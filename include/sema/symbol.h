@@ -55,6 +55,7 @@ typedef enum {
   SEMA_BUILTIN_LEN,       /* len(s) -> usize（序列元信息） */
   SEMA_BUILTIN_DATA,      /* data(s) -> ref *T（取首元素指针，C ABI 适配；专用指令） */
   SEMA_BUILTIN_CFUNC_PTR, /* cfunc_ptr(f) -> opaque（clux 函数 → C 函数指针） */
+  SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v) -> 同类型 fatal（对象图深拷贝兜底） */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */

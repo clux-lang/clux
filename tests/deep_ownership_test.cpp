@@ -5,8 +5,8 @@
  *   1. **struct 的 own 指针字段**必须递归进被指向值展开（`struct Outer { b: own
  *      *Box }` 之前只 FREE 掉 Box 块，Box.p 泄漏）；
  *   2. **自引用类型**（链表/树/互递归）的静态展开会无限递归 → 环边退化为
- *      `FREE_RECURSIVE`（运行期按槽位所有权递归释放）；clone 的环边退化为
- *      `CLONE`；
+ *      `FREE_RECURSIVE`（运行期按槽位所有权递归释放，现已改生成销毁函数）；
+ *      clone 的环边走生成的 clone 函数（自递归）；
  *   3. **`ptr_clear_owned_recursive` 只清指针、不进被指向值**（旧实现会改写
  *      共享堆块：`new Mid{ .i = move(inner) }` 后 `mid.i.p` 变 NULL）。
  */

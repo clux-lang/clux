@@ -2397,6 +2397,17 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
          返回类型精化为 `ref *<元素类型>`（str → ref *u8，即 C 的 const char*）。
          置 is_data_call：compiler 改发 BCODE_DATA 指令（不是 CALL——内置 cfunc
          的实参是副本，取不到调用方的存储身份，见 ast_call.h / vm/bcode.h）。 */
+      /* __deep_clone(v)：运行期对象图深拷贝（闭包 env / cunion 兜底）。
+         返回**同类型 fatal**（将亡值）：消费者按所有权规则接管。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_DEEP_CLONE) {
+        value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
+        if (!arg || is_poison(sema, arg) || value_is_type(arg, TYPE_KIND_VOID))
+          return val_void(sema);
+        value_t *sv = value_make_shadow(sema->vm, value_type(arg));
+        value_set_ownership(sv, OWN_FATAL);
+        return sv;
+      }
+
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_DATA) {
         if (argc != 1) {
           diag_error(sema->diag, sema_loc(sema, &call->base),
@@ -3260,14 +3271,6 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
                             const type_t *t, ast_node_t *access,
                             ast_node_t **head, ast_node_t **tail);
 
-/* 叶子深拷贝：`AST_CLONE` → CLONE（申请新块 + 拷贝字节）。 */
-static ast_node_t *clone_leaf(sema_t *sema, ast_node_t *access) {
-  ast_node_t *n = ast_clone_new(sema->arena, 0, 0);
-  if (!n || !access) return NULL;
-  ((ast_clone_t *)n)->operand = access;
-  return n;
-}
-
 /* 该**槽位/值**是否需要深拷贝（申请新块）——与销毁序列的槽位规则一致：
    叶子（ptr/slice）看槽位所有权（顶层 clone 恒深拷贝，与旧 CLONE 语义一致）；
    复合看是否含 own 槽位。 */
@@ -3478,7 +3481,7 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
   switch (s->kind) {
   case TYPE_KIND_PTR: {
     const type_t *base = ptr_type_base(s);
-    if (!base) return clone_leaf(sema, access);
+    if (!base) return NULL;
     /* 指针克隆一律走生成的 `__cloneptr_<U>`：函数体 `new U{ … }` 分配新块
        （被指向值含 own 槽位时逐槽位克隆；标量/指针/opaque 等单字段构造 = 整块
        拷贝）。不再用 CLONE 兜底（cunion/闭包除外，见 impl）。 */
@@ -3507,7 +3510,7 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
    表达式结果 = TAKE(临时变量)。 */
 static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
                                    const type_t *t, ast_node_t *access) {
-  if (!sema->cur_stmt) return clone_leaf(sema, access); /* 回退：CLONE 深拷贝 */
+  if (!sema->cur_stmt) return NULL; /* 无语句上下文：交给运行期 __deep_clone 兜底 */
 
   const type_t *elem = slice_type_elem(t);
   ownership_t eown = slice_type_elem_ownership(t);
@@ -3517,7 +3520,7 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   snprintf(ibuf, sizeof ibuf, "__cl_i_%u", n);
   strslice_t vname = clone_cstr(sema, nbuf);
   strslice_t iname = clone_cstr(sema, ibuf);
-  if (!vname.ptr || !iname.ptr) return clone_leaf(sema, access);
+  if (!vname.ptr || !iname.ptr) return NULL;
 
   /* 临时变量符号：own（结果被 TAKE 移出）+ moved=true（块退出不生成 FREE） */
   sema_symbol_t sym;
@@ -3530,23 +3533,23 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   sym.is_active  = true;
   sym.own_scope  = scope;
   if (!sema_scope_define(scope, vname, &sym))
-    return clone_leaf(sema, access);
+    return NULL;
 
   /* 1) var __cl_N: []T = make(T, len(access));  —— MAKE 0（零初始化缓冲区） */
   ast_node_t *vd = ast_var_def_new(sema->arena, 0, 0);
-  if (!vd) return clone_leaf(sema, access);
+  if (!vd) return NULL;
   vd->is_generated = true;
   ast_var_def_t *v = (ast_var_def_t *)vd;
   v->name      = vname;
   v->type_expr = sema_gen_type_ref(sema, t);
   ast_node_t *mk = ast_make_new(sema->arena, 0, 0);
-  if (!mk || !v->type_expr) return clone_leaf(sema, access);
+  if (!mk || !v->type_expr) return NULL;
   mk->is_generated = true;
   ast_make_t *m = (ast_make_t *)mk;
   m->elem_type      = sema_gen_type_ref(sema, elem);
   m->elem_ownership = (uint8_t)eown;
   m->length         = clone_len_call(sema, access);
-  if (!m->elem_type || !m->length) return clone_leaf(sema, access);
+  if (!m->elem_type || !m->length) return NULL;
   v->init = mk;
 
   /* 2) for __cl_i_N in 0..len(access) { __cl_N[__cl_i_N] = <元素 clone>; } */
@@ -3558,31 +3561,31 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   ast_node_t *lhs = clone_index(sema, clone_ident(sema, vname),
                                 clone_ident(sema, iname));
   ast_node_t *as = ast_assign_new(sema->arena, 0, 0);
-  if (!elem_clone || !lhs || !as) return clone_leaf(sema, access);
+  if (!elem_clone || !lhs || !as) return NULL;
   as->is_generated = true;
   ((ast_assign_t *)as)->target = lhs;
   ((ast_assign_t *)as)->op     = NULL;   /* NULL = 普通赋值（compiler 特判） */
   ((ast_assign_t *)as)->value  = elem_clone;
 
   ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
-  if (!blk) return clone_leaf(sema, access);
+  if (!blk) return NULL;
   blk->is_generated = true;
   ((ast_block_t *)blk)->stmts      = as;
   ((ast_block_t *)blk)->stmts_last = as;
 
   ast_node_t *loop = ast_for_index_new(sema->arena, 0, 0);
-  if (!loop) return clone_leaf(sema, access);
+  if (!loop) return NULL;
   ((ast_for_index_t *)loop)->var    = iname;
   ((ast_for_index_t *)loop)->source = access;
   ((ast_for_index_t *)loop)->body   = blk;
 
   vd->next = loop;
   loop->next = NULL;
-  if (!sema_append_prelude(sema, vd)) return clone_leaf(sema, access);
+  if (!sema_append_prelude(sema, vd)) return NULL;
 
   /* 3) 表达式 = TAKE(__cl_N) */
   ast_node_t *tk = ast_take_new(sema->arena, 0, 0);
-  if (!tk) return clone_leaf(sema, access);
+  if (!tk) return NULL;
   ((ast_take_t *)tk)->operand = clone_ident(sema, vname);
   return tk;
 }
@@ -3633,7 +3636,7 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
     else if (els == branch) els = access;
     expr = clone_ternary(sema, cond, branch, els);
   }
-  return expr ? expr : (as_new ? clone_leaf(sema, access) : access);
+  return expr ? expr : (as_new ? NULL : access);
 }
 
 /* 生成「深拷贝 t 值」的表达式。access 是**被拷贝值的访问表达式**（变量/字段/
@@ -3649,7 +3652,7 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
   switch (s->kind) {
     case TYPE_KIND_PTR: {
       const type_t *base = ptr_type_base(s);
-      if (!base) return clone_leaf(sema, access);
+      if (!base) return NULL;
       const type_t *bs = type_strip_quals(base);
       ast_node_t *deref = clone_deref(sema, access);
       if (!deref) return NULL;
@@ -3677,7 +3680,7 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
         case TYPE_KIND_CUNION:
           /* cunion 无所有权、成员布局重叠 → 无法用逐字段构造表达"整块克隆"；
              保留 CLONE（整块 memcpy）语义。 */
-          return clone_leaf(sema, access);
+          return NULL;
         default:
           /* 标量 / 指针（双层）/ opaque / str / enum / bool：**单字段构造**
              `new T{ pointee }` —— CONSTRUCT 1 拷贝同类型值到新块，与 CLONE
@@ -3689,20 +3692,20 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
       return gen_clone_slice(sema, scope, t, access);
     case TYPE_KIND_OPTION: {
       ast_node_t *e = gen_clone_option(sema, scope, t, access, false);
-      return e ? e : clone_leaf(sema, access);
+      return e ? e : NULL;
     }
     case TYPE_KIND_UNION: {
       ast_node_t *e = gen_clone_union(sema, scope, t, access, false);
-      return e ? e : clone_leaf(sema, access);
+      return e ? e : NULL;
     }
     case TYPE_KIND_STRUCT:
     case TYPE_KIND_TUPLE:
     case TYPE_KIND_ARRAY: {
       ast_node_t *fields = NULL, *ftail = NULL;
       if (!gen_clone_slots(sema, scope, t, access, &fields, &ftail))
-        return clone_leaf(sema, access);
+        return NULL;
       ast_node_t *n = clone_construct(sema, t, fields, 0, false);
-      return n ? n : clone_leaf(sema, access);
+      return n ? n : NULL;
     }
     default:
       return access;   /* 标量/cunion 等：普通拷贝 */
@@ -3968,7 +3971,28 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
           *node = lit;
         } else {
           ast_node_t *gen = sema_gen_clone(sema, scope, ot, n->operand);
-          if (gen) *node = gen;
+          if (gen) {
+            *node = gen;
+          } else {
+            /* 静态无法表达深拷贝的形态：闭包值（env 的捕获聚合类型只有运行期
+               才知道）、cunion 被指向值、无语句上下文的切片 clone
+               → 改写为运行期 `__deep_clone(v)`（对象图克隆，同 ptr_clone_block）。
+               这样 CLONE 指令可以彻底移除——深拷贝统一由生成函数或该内置函数承担。 */
+            ast_node_t *callee = ast_ident_new(sema->arena, (*node)->tok_begin,
+                                               (*node)->tok_end);
+            ast_node_t *call = ast_call_new(sema->arena, (*node)->tok_begin,
+                                            (*node)->tok_end);
+            if (callee && call) {
+              ((ast_ident_t *)callee)->name =
+                  strslice_from_bytes("__deep_clone", 12);
+              callee->is_generated = true;
+              ((ast_call_t *)call)->callee = callee;
+              ((ast_call_t *)call)->args = n->operand;
+              call->is_generated = true;
+              call->next = (*node)->next;
+              *node = call;
+            }
+          }
         }
       }
       /* union / cunion 成员 move：**整体进 TDZ**（"局部 = 整体"）。

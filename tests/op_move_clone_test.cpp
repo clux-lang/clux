@@ -1,10 +1,10 @@
 /*
- * MOVE 指令已彻底移除；CLONE 收窄为"无法用构造表达"的形态。
+ * MOVE 与 CLONE 指令均已彻底移除。
  *
  * 所有权是**纯编译期**的：`move(x)` 的转移语义由 sema 完成（源进 TDZ、销毁
  * 序列跳过），运行期就是普通取值 → 不再需要 MOVE 指令。`clone(x)` 由 sema
- * 改写为生成的 clone 函数调用；只有**闭包值**（捕获结构体）与 cunion 被指向
- * 值、comptime 上下文仍走运行期 CLONE（对象图深拷贝）。
+ * 改写为生成的 clone 函数调用；闭包值 / cunion 被指向值 / 无 prelude 的切片
+ * 改写为 `__deep_clone(v)` 内置函数调用（对象图深拷贝）——CLONE 指令已删除。
  */
 #include <gtest/gtest.h>
 
@@ -118,11 +118,12 @@ TEST(OpCloneNarrowed, SliceCloneHasNoCloneOpcode) {
   EXPECT_NE(text.find("PUSH \"__cloneslice_0\""), std::string::npos) << text;
 }
 
-/* ==================== 剩余的 CLONE：闭包值 ==================== */
+/* ==================== 闭包 clone：__deep_clone 内置函数 ==================== */
 
 TEST(OpCloneNarrowed, ClosureCloneStillDeepCopiesCaptures) {
-  /* 闭包 = 捕获结构体 + 函数实现；捕获结构体不是普通复合类型（类型层无字段），
-     无法用构造表达 → 仍走 CLONE（对象图深拷贝）。语义：克隆独立于原闭包。 */
+  /* 闭包 = 捕获聚合结构体（env）；env 的捕获类型只有运行期才知道，静态类型
+     表达不了 → sema 改写为 `__deep_clone(v)` 内置函数调用（对象图深拷贝）。
+     语义：克隆独立于原闭包。 */
   clux_expect_ok(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{42};\n"
@@ -132,4 +133,23 @@ TEST(OpCloneNarrowed, ClosureCloneStillDeepCopiesCaptures) {
       "  return 0;\n"
       "}\n",
       "op_clone_closure");
+}
+
+TEST(OpCloneNarrowed, ClosureVariableCloneUsesDeepCloneBuiltin) {
+  /* `clone(闭包变量)`：静态类型是签名 → 走 __deep_clone 内置函数（不再是 CLONE
+     指令）；深拷贝 env，源闭包与克隆互不影响。 */
+  std::string text;
+  ASSERT_TRUE(disasm_of(
+                  "func main(): i32 {\n"
+                  "  var p: own *i32 = new i32{42};\n"
+                  "  var g = clone(func |(q: own *i32 = move(p))| get(): i32 {"
+                  " return q.*; });\n"
+                  "  var f = clone(g);\n"
+                  "  if (f() != 42) { return 1; }\n"
+                  "  return 0;\n"
+                  "}\n",
+                  "op_clone_closure_var", &text))
+      << text;
+  EXPECT_EQ(text.find("\nCLONE\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("PUSH \"__deep_clone\""), std::string::npos) << text;
 }

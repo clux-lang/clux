@@ -35,7 +35,6 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_move.h"
-#include "parser/ast_clone.h"
 #include "parser/ast_take.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
@@ -932,17 +931,6 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
     break;
   }
-  case AST_CLONE: {
-    /* 扁平化 clone 的**叶子**形态（sema 生成）：operand → CLONE（申请新块 +
-       拷贝字节）。只用于不含 own 槽位的类型（标量/无 own 字段聚合/指向无 own
-       槽位内容的指针）——复合类型的逐槽位展开由 sema 生成构造/NEW/循环 AST。 */
-    ast_clone_t *n = (ast_clone_t *)node;
-    if (!n->operand) { c_error(c, node, "clone: missing operand"); return; }
-    compile_expr(c, n->operand);
-    bcode_write_op(c->bc, BCODE_CLONE);
-    st_push(c, 0);
-    break;
-  }
   case AST_TAKE: {
     /* clone 切片路径的尾步（sema 生成）：把预填好的临时变量读出。
        **所有权纯编译期**：读出就是普通取值（借用），块退出不生成 FREE 由
@@ -953,18 +941,17 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_MOVE: {
-    /* 所有权原语 move(x) / clone(x)（m3-design §7）。
-       - move：**所有权纯编译期**，转移语义由 sema 完成（源进 TDZ、销毁序列
-         跳过），运行期就是普通取值 → **不发指令**（MOVE 指令已移除）。
-       - clone：sema 已把可克隆的值改写成生成的 clone 函数调用；走到这里的
-         clone 只剩「无法用构造表达」的形态（闭包值 / comptime 上下文）→ 保留
-         运行期 CLONE（对象图深拷贝）。 */
+    /* 所有权原语 move(x)（m3-design §7）。**所有权纯编译期**：转移语义由
+       sema 完成（源进 TDZ、销毁序列跳过），运行期就是普通取值 → 不发指令
+       （MOVE 指令已移除）。`clone(x)` 由 sema 改写为
+       「生成的 __clone* 函数调用」或（闭包/cunion/无 prelude 形态）
+       「__deep_clone 内置函数调用」——**CLONE 指令已移除**，不会走到这里。 */
     ast_move_t *n = (ast_move_t *)node;
-    compile_expr(c, n->operand);        /* 栈: [value] */
     if (n->op && token_is(n->op, "clone")) {
-      bcode_write_op(c->bc, BCODE_CLONE);
-      st_push(c, 0);                    /* 弹 1 压 1，净 0 */
+      c_error(c, node, "internal: clone should have been rewritten by sema");
+      return;
     }
+    compile_expr(c, n->operand);        /* 栈: [value] */
     break;
   }
   case AST_INDEX: {
