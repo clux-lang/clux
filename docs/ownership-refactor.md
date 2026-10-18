@@ -749,6 +749,21 @@ RC 系曾在 M3 实现、后因单所有权重构整体移除；现在以"真实
 生命周期：strong→0 析构 payload（递归释放内嵌 own/share，weak 观察者因此永不
 悬空）但**保留内存**；weak→0 才释放控制块。循环引用由用户负责（用 weak 打破）。
 
+### 7.1.16 `comptime if` 的裁剪点（2026-10）
+
+`comptime if` 在 Pass 3a 的 `build_block` 入口（`comptime if_splice`，先于
+`desugar_defers`）把节点替换成存活分支的语句链。选择这个位置的原因：
+
+- 3a 是符号注册 / 作用域树 / 控制流分析的唯一入口 —— 丢弃分支因此**完全
+  不进入语义层**；
+- 3b 与 compiler 遍历同一条 `block->stmts` 链 —— 三个下游阶段零改动；
+- 存活分支的语句成为外层块的一部分 —— "大括号不是作用域" 由**拼接**天然
+  保证（对照普通 `if`：`build_func_if` 为两个分支各建 `SEMA_SCOPE_BLOCK`）。
+
+限制（v1）：条件需 3a 可求值（字面量 / 全局 comptime var / sizeof / 运算符）；
+分支内禁止 `comptime var`/`comptime func`；`comptime func` 体内不支持；条件里
+不能调用 comptime 函数。
+
 ### 7.2 仍未闭环的边界（2026-10 审计后）
 
 核心链路（转移 / 销毁 / clone / 赋值点 / 借用闸门 / 闭包 / cunion 成员释放）

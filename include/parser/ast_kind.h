@@ -21,6 +21,10 @@ typedef enum {
                             struct 同构平铺字段；无 tag，所有 member 共享 offset 0） */
     AST_ASSIGN,          /* name = expr; / name += expr; */
     AST_IF,              /* if cond { then } [else { else_body }] */
+    AST_COMPTIME_IF,     /* comptime if (const_expr) { … } [else …]：**编译期
+                            裁剪**（sema Pass 3a 把存活分支拼接进外层块；丢弃
+                            分支只做语法检查；大括号不是作用域）。sema 之后
+                            不再出现在语句链中。 */
     AST_SWITCH,          /* switch(cond) { (pat,..)->{..} default->{..} } */
     AST_SWITCH_CASE,     /* switch 分支（模式列表 + 分支体，仅 switch 内出现） */
     AST_WHILE,           /* while cond { body } */

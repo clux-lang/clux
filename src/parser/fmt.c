@@ -18,6 +18,7 @@
 #include "parser/ast_block.h"
 #include "parser/ast_defer.h"
 #include "parser/ast_if.h"
+#include "parser/ast_comptime_if.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
@@ -1096,6 +1097,23 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "...");
             sb_put(&f->sb, emb->name.ptr, emb->name.len);
             sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_COMPTIME_IF: {
+            ast_comptime_if_t *ci = (ast_comptime_if_t *)node;
+            sb_str(&f->sb, "comptime if (");
+            render_expr(f, ci->cond);
+            sb_ch(&f->sb, ')');
+            render_block(f, ci->then_body);
+            if (ci->else_body) {
+                if (ci->else_body->kind == AST_COMPTIME_IF) {
+                    sb_str(&f->sb, " else ");
+                    render_stmt(f, ci->else_body);
+                } else {
+                    sb_str(&f->sb, " else");
+                    render_block(f, ci->else_body);
+                }
+            }
             break;
         }
         case AST_IF: {

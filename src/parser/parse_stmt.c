@@ -1,5 +1,6 @@
 #include "parser/parse_stmt.h"
 #include "parser/parse_expr.h"
+#include "parser/parse_comptime_if.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_assign.h"
@@ -77,8 +78,10 @@ ast_node_t *parse_comptime_stmt(parser_t *p) {
         if (n && n->kind != AST_ERROR) ((ast_func_def_t *)n)->is_comptime = true;
         return n;
     }
+    /* comptime if：编译期条件语句（sema Pass 3a 做语法树裁剪） */
+    if (check_keyword(p, "if")) return parse_comptime_if(p);
     return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                         "expected 'var' or 'func' after 'comptime'");
+                         "expected 'var', 'func' or 'if' after 'comptime'");
 }
 
 /* ================================================================ */

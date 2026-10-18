@@ -16,6 +16,7 @@ static const char *g_kind_names[] = {
     [AST_CUNION_DEF] = "cunion_def",
     [AST_ASSIGN]     = "assign",
     [AST_IF]         = "if",
+    [AST_COMPTIME_IF] = "comptime_if",
     [AST_SWITCH]     = "switch",
     [AST_SWITCH_CASE] = "switch_case",
     [AST_WHILE]      = "while",

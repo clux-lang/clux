@@ -2,6 +2,7 @@
 #include "core/panic.h"
 #include "vm/type_ptr.h"
 #include "vm/type_struct.h"
+#include "vm/type_error.h"
 #include "parser/ast_alignof.h"
 #include "parser/ast_array.h"
 #include "parser/ast_block.h"
@@ -11,6 +12,8 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
+#include "ctfe/ctfe.h"
+#include "parser/ast_comptime_if.h"
 #include "parser/ast_option.h"
 #include "parser/ast_return.h"
 #include "parser/ast_sizeof.h"
@@ -441,6 +444,203 @@ static const sema_scope_t *find_func_stop(sema_scope_t *scope) {
    块尾追加逆序 call，return/break/continue 前插入沿途 defer call。
    在 build_block 正式遍历**之前**调用——改写后 build_block 看到的
    是纯 AST_FUNC_DEF + AST_EXPR_STMT。 */
+/* ===========================================================================
+ * comptime if：**编译期条件语句的语法树裁剪**（Pass 3a，2026-10）
+ *
+ * 语义要点：
+ *   - 条件必须在此刻可编译期求值（CTFE：字面量 / 全局 comptime var /
+ *     sizeof·alignof / 运算符组合），结果必须是 bool；
+ *   - 存活分支的语句**拼接**进外层块——大括号是**剪枝范围，不是作用域**：
+ *     `comptime if (f) { var a = 1; } else { var a = 2; } printf(a);` 合法，
+ *     `var a` 落在外层作用域，return/break/continue 归属外层结构；
+ *   - 丢弃分支**只经过解析期语法检查**（不注册符号、不做类型检查、不分配
+ *     fid、不注册 defer）——这是"平台相关代码可以类型完全不同"的基础；
+ *   - 分支内**禁止** `comptime var` / `comptime func`（结构检查覆盖嵌套块，
+ *     但不进入函数体：嵌套函数体是独立作用域）；
+ *   - `comptime if` 不能出现在 `comptime func` 体内（CTFE 解释执行，条件可能
+ *     依赖参数）——v1 直接拒绝。
+ *
+ * 为什么在 3a 做：3a 是符号注册/作用域树构建/控制流分析的唯一入口
+ * （`build_block`），且 3b 与 compiler 遍历的是同一条 `block->stmts` 链——
+ * 这里拼接后，下游三个阶段完全看不到 `comptime if`，**不需要任何改动**。
+ * =========================================================================== */
+
+/* 分支结构检查：递归扫描语句（含嵌套块 / if / 循环 / switch），
+   **不进入函数体**（AST_FUNC_DEF / AST_DEFER 的闭包都是独立函数作用域）。 */
+static void ctif_check_branch_stmt(sema_t *sema, ast_node_t *s);
+
+static void ctif_check_branch_block(sema_t *sema, ast_node_t *body) {
+  if (!body) return;
+  if (body->kind == AST_BLOCK)
+    ctif_check_branch_stmt(sema, ((ast_block_t *)body)->stmts);
+  else if (body->kind == AST_COMPTIME_IF)
+    ctif_check_branch_stmt(sema, body); /* else-if 链 */
+}
+
+static void ctif_check_branch_stmt(sema_t *sema, ast_node_t *s) {
+  for (; s; s = s->next) {
+    switch (s->kind) {
+    case AST_VAR_DEF: {
+      ast_var_def_t *vd = (ast_var_def_t *)s;
+      if (vd->is_comptime)
+        diag_error(sema->diag, sema_loc(sema, s),
+                   "a 'comptime var' cannot be defined inside a 'comptime if' "
+                   "branch (declare it before the 'comptime if')");
+      break;
+    }
+    case AST_FUNC_DEF: {
+      ast_func_def_t *fd = (ast_func_def_t *)s;
+      if (fd->is_comptime)
+        diag_error(sema->diag, sema_loc(sema, s),
+                   "a 'comptime func' cannot be defined inside a 'comptime if' "
+                   "branch (declare it before the 'comptime if')");
+      /* 不进入函数体：嵌套函数是独立作用域 */
+      break;
+    }
+    case AST_DEFER:
+      /* defer 的闭包是独立函数作用域：不进入 */
+      break;
+    case AST_BLOCK:
+      ctif_check_branch_stmt(sema, ((ast_block_t *)s)->stmts);
+      break;
+    case AST_IF: {
+      ast_if_t *it = (ast_if_t *)s;
+      ctif_check_branch_block(sema, it->then_body);
+      ctif_check_branch_block(sema, it->else_body);
+      break;
+    }
+    case AST_COMPTIME_IF: {
+      ast_comptime_if_t *ci = (ast_comptime_if_t *)s;
+      ctif_check_branch_block(sema, ci->then_body);
+      ctif_check_branch_block(sema, ci->else_body);
+      break;
+    }
+    case AST_WHILE: {
+      ast_while_t *w = (ast_while_t *)s;
+      ctif_check_branch_block(sema, w->body);
+      break;
+    }
+    case AST_DOWHILE: {
+      ast_dowhile_t *d = (ast_dowhile_t *)s;
+      ctif_check_branch_block(sema, d->body);
+      break;
+    }
+    case AST_FOR: {
+      ast_for_t *fo = (ast_for_t *)s;
+      ctif_check_branch_stmt(sema, fo->init);
+      ctif_check_branch_block(sema, fo->body);
+      break;
+    }
+    case AST_SWITCH: {
+      ast_switch_t *sw = (ast_switch_t *)s;
+      for (ast_node_t *c = sw->cases; c; c = c->next) {
+        ast_switch_case_t *sc = (ast_switch_case_t *)c;
+        ctif_check_branch_block(sema, sc->body);
+      }
+      ctif_check_branch_block(sema, sw->default_body);
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+
+/* 条件求值：CTFE 直接解释条件表达式（字面量 / 全局 comptime var（已在
+   root_scope 绑定）/ sizeof·alignof / 运算符）。失败时产出诊断并返回 false。 */
+static bool ctif_eval_cond(sema_t *sema, sema_scope_t *scope, ast_node_t *cond,
+                           bool *out) {
+  if (!cond) return false;
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = sema->vm;
+  ctx.sema = sema;
+  ctx.sema_scope = scope;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *r = ctfe_eval(&ctx, cond);
+  if (!r || value_is_error(sema->vm, r)) {
+    const char *msg = NULL;
+    if (r) {
+      error_data_t *ed = (error_data_t *)value_data(r);
+      msg = ed && ed->message ? ed->message : NULL;
+    }
+    diag_error(sema->diag, sema_loc(sema, cond),
+               "'comptime if' condition is not a compile-time constant%s%s",
+               msg ? ": " : "", msg ? msg : "");
+    return false;
+  }
+  if (value_type(r) != sema->vm->type_bool) {
+    char tn[64];
+    sema_type_name(value_type(r), tn, sizeof tn);
+    diag_error(sema->diag, sema_loc(sema, cond),
+               "'comptime if' condition must be bool (got %s)", tn);
+    return false;
+  }
+  *out = *(const bool *)value_data(r);
+  return true;
+}
+
+/* 主流程：把块内（含嵌套块）的 comptime if 替换成存活分支的语句链。
+   返回 true = 发生过裁剪。 */
+static void comptime_if_splice(sema_t *sema, ast_block_t *block,
+                               sema_scope_t *scope) {
+  if (!block || !block->stmts) return;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (ast_node_t **cur = &block->stmts; *cur;) {
+      ast_node_t *s = *cur;
+      if (s->kind != AST_COMPTIME_IF) {
+        cur = &s->next;
+        continue;
+      }
+      ast_comptime_if_t *ci = (ast_comptime_if_t *)s;
+
+      /* comptime func 体内不支持（CTFE 解释执行，条件可能依赖参数） */
+      if (sema->fn.walking_comptime) {
+        diag_error(sema->diag, sema_loc(sema, s),
+                   "'comptime if' is not supported inside a 'comptime func' "
+                   "(its body is interpreted by CTFE; the condition may depend "
+                   "on parameters)");
+        *cur = s->next;
+        changed = true;
+        break;
+      }
+
+      /* 结构检查（两个分支都查：这是纯语法形状规则） */
+      ctif_check_branch_block(sema, ci->then_body);
+      ctif_check_branch_block(sema, ci->else_body);
+
+      bool taken = false;
+      if (!ctif_eval_cond(sema, scope, ci->cond, &taken)) {
+        /* 已诊断：整条语句丢弃（避免下游二次诊断） */
+        *cur = s->next;
+        changed = true;
+        break;
+      }
+
+      /* 存活分支的语句链：then/else 既可能是块，也可能是 else-if 的
+         comptime if 节点本身；没有 else 且条件为假 → 整条消失。 */
+      ast_node_t *pick = taken ? ci->then_body : ci->else_body;
+      ast_node_t *chain = NULL;
+      if (pick) {
+        chain = pick->kind == AST_BLOCK ? ((ast_block_t *)pick)->stmts : pick;
+      }
+      if (chain) {
+        ast_node_t *tail = chain;
+        while (tail->next) tail = tail->next;
+        tail->next = s->next;   /* 接上 if 之后的语句 */
+        *cur = chain;
+      } else {
+        *cur = s->next;
+      }
+      changed = true;
+      break; /* 重新从头扫描（拼接进来的链可能还含 comptime if） */
+    }
+  }
+}
+
 static void desugar_defers(sema_t *sema, ast_block_t *block,
                            sema_scope_t *scope) {
   /* 第一遍：替换 AST_DEFER → AST_FUNC_DEF，登记进 scope->defers。
@@ -527,6 +727,12 @@ static void desugar_defers(sema_t *sema, ast_block_t *block,
 
 static build_result_t build_block(sema_t *sema, ast_block_t *block,
                                   sema_scope_t *scope) {
+  /* **comptime if：编译期裁剪**（必须先于 desugar_defers / 符号注册）：
+     把 `comptime if` 节点替换成存活分支的语句链——丢弃分支从此不被任何
+     后续阶段看到（只有解析期语法检查），存活分支的语句成为外层块的一部分
+     （大括号不是作用域）。 */
+  comptime_if_splice(sema, block, scope);
+
   /* defer 语法糖改写：在正式遍历前把 AST_DEFER 替换为 AST_FUNC_DEF +
      退出点 call，后续遍历与 Pass 3b 完全不感知 defer。 */
   desugar_defers(sema, block, scope);

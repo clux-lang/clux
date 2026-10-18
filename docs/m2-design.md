@@ -319,7 +319,52 @@ name:                     ; 标签定义（去空白后形如 "name:"，无内�
 
 ---
 
-#### 2.x 基本类型构造（2026-10）
+#### 2.y `comptime if`：编译期语法树裁剪（2026-10）
+
+```clux
+comptime var TARGET: const i32 = 2;
+
+func main(): i32 {
+  comptime if (TARGET == 1) {
+    var a = 1;                 // 只有存活分支参与语义检查
+  } else if (TARGET == 2) {
+    var a = 2;
+  } else {
+    var a = "different type";  // 丢弃分支只做**语法**检查
+  }
+  return a - 2;                // 大括号不是作用域：分支里的 var 落在外层
+}
+```
+
+**语义**
+
+- 条件必须可**编译期求值**：字面量、全局 `comptime var`、`sizeof`/`alignof`、
+  以及它们的运算符组合；结果必须是 `bool`；
+- 存活分支的语句**拼接进外层块**——大括号是**剪枝范围，不是作用域**：
+  分支里声明的变量在 `comptime if` 之后可见；两个分支可以分别声明同名变量
+  （只有一个存活）；`return` / `break` / `continue` 归属外层结构；`defer`
+  注册到外层块（函数退出时执行）；
+- **丢弃分支只经过解析期语法检查**：不注册符号、不做类型检查、不分配函数 id
+  ——所以平台相关代码可以类型完全不同；
+- 分支内**禁止** `comptime var` / `comptime func`（先在外面声明）；结构检查
+  递归覆盖嵌套块，但**不进入函数体**（嵌套函数是独立作用域）；
+- `comptime if` 不能出现在 `comptime func` 体内（其 body 由 CTFE 解释执行，
+  条件可能依赖参数）。
+
+**限制**
+
+- 只能是**语句**（不能写成表达式 `var x = comptime if ...`）；
+- 条件不能用运行期变量、comptime 函数调用（v2 可放开）；
+- 丢弃分支里的拼写错误/类型错误是**静默**的（这正是特性）；
+- 若某分支无条件 `return`，其后语句仍然触发"unreachable statement"——把两条
+  路径写成 `if/else` 即可。
+
+**实现位置**：sema Pass 3a 的 `build_block` 入口（`comptime_if_splice`），在
+`desugar_defers` 与符号注册之前完成拼接；Pass 3b 与 compiler 遍历同一条语句链，
+**不需要任何改动**。parser：`ast_comptime_if.h` / `parse_comptime_if.c`；
+条件求值走 CTFE（`ctfe_eval`）。
+
+### 2.x 基本类型构造（2026-10）
 
 `.<type>{<value>}` 同样适用于**基本类型**（`i8..i64` / `u8..u64` / `usize` /
 `f32` / `f64` / `bool` / `str`）：
