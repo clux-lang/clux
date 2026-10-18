@@ -24,90 +24,25 @@
 #include <cstring>
 #include <string>
 
-#ifdef _WIN32
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
-
-extern "C" {
-#include "driver/driver.h"
-}
-
 #include "test_common.h"
 
 namespace {
 
-/* 运行 driver_run_file，同时把 stderr 重定向到临时文件（用于断言
-   "无 memory leak" / 诊断文本）。返回退出码；*err 收全部 stderr。 */
-int run_capture(const std::string &path, std::string *err) {
-  fflush(stderr);
-  const std::string cap = clux_test_temp_dir() + "/tu_own_stderr.txt";
-  std::string dummy; // slurp 前确保文件存在（空实现覆盖）
-  FILE *f = fopen(cap.c_str(), "wb");
-  if (!f) {
-    ADD_FAILURE() << "cannot open stderr capture file";
-    return driver_run_file(path.c_str());
-  }
-  fclose(f);
-#ifdef _WIN32
-  FILE *tmp = nullptr;
-  if (fopen_s(&tmp, cap.c_str(), "wb") != 0 || !tmp) {
-    ADD_FAILURE() << "cannot reopen stderr capture file";
-    return driver_run_file(path.c_str());
-  }
-  const int saved = _dup(2);
-  _dup2(_fileno(tmp), 2);
-  const int rc = driver_run_file(path.c_str());
-  fflush(stderr);
-  _dup2(saved, 2);
-  _close(saved);
-  fclose(tmp);
-#else
-  FILE *tmp = fopen(cap.c_str(), "wb");
-  if (!tmp) {
-    ADD_FAILURE() << "cannot reopen stderr capture file";
-    return driver_run_file(path.c_str());
-  }
-  fflush(stderr);
-  const int saved = dup(2);
-  dup2(fileno(tmp), 2);
-  const int rc = driver_run_file(path.c_str());
-  fflush(stderr);
-  dup2(saved, 2);
-  close(saved);
-  fclose(tmp);
-#endif
-  if (err) *err = slurp(cap);
-  (void)dummy;
-  return rc;
-}
-
-/* 正例：退出 0 且没有泄漏报告。 */
-void expect_ok(const std::string &src, const std::string &tag = "tuown") {
-  const std::string path = write_temp_file(src, tag);
-  std::string err;
-  const int rc = run_capture(path, &err);
-  EXPECT_EQ(rc, 0) << src << "\n--- stderr ---\n" << err;
-  EXPECT_EQ(err.find("memory leak"), std::string::npos)
-      << "destruction sequence leaked: \n" << err << "\n--- src ---\n" << src;
-}
-
-/* 负例：编译期拒绝（driver 返回 1），且诊断里出现 needle。 */
-void expect_reject(const std::string &src, const char *needle,
-                   const std::string &tag = "tuown_bad") {
-  const std::string path = write_temp_file(src, tag);
-  std::string err;
-  const int rc = run_capture(path, &err);
-  EXPECT_EQ(rc, 1) << src << "\n--- stderr ---\n" << err;
-  if (needle) {
-    EXPECT_NE(err.find(needle), std::string::npos)
-        << "expected diagnostic containing '" << needle << "'\n--- stderr ---\n"
-        << err << "\n--- src ---\n" << src;
-  }
-}
-
 const char *kU = "union U { p: own *i32; n: i32 }\n";
+
+/* 本地别名：断言"退出 0 + 无 memory leak" / 编译期拒绝 + 诊断文本。
+   实现在 tests/test_common.h（clux_run_capture / clux_expect_ok /
+   clux_expect_reject），供多个所有权测试文件共用。 */
+using ::clux_expect_ok;
+using ::clux_expect_reject;
+
+inline void expect_ok(const std::string &src, const std::string &tag) {
+  clux_expect_ok(src, tag);
+}
+inline void expect_reject(const std::string &src, const char *needle,
+                          const std::string &tag) {
+  clux_expect_reject(src, needle, tag);
+}
 
 } // namespace
 

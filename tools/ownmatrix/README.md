@@ -89,27 +89,32 @@ python tools/ownmatrix/run_matrix.py
 > 2026-10 的另一处：捕获槽销毁原来只发 `FREE f.<cap>`，对**聚合捕获**是空操作
 > （内嵌 own 堆块全泄漏）；现在按捕获槽的 type 对象展开（`ast_var_def_t::resolved_type`）。
 
-## 当前已知缺口（2026-10 复查）
+## 当前已知缺口（2026-10 复查②）
 
 矩阵 119 格的最新结果（`python tools/ownmatrix/run_matrix.py`）：
 
 | 族 | 结果 |
 |---|---|
-| `struct` / `nested` / `deep` / `union` | **15/17 ok**（10/11 两格被"数组类型不得含指针/切片"挡住，见下） |
-| `tuple` / `array` / `optinner` | 全列 `REJECT`（**类型层临时限制**，见下） |
+| 全部 7 族（`struct` / `nested` / `deep` / `tuple` / `array` / `union` / `optinner`） | **17/17 ok**（含 10/11 的数组元素 move/clone 两格） |
 
-**零崩溃、零泄漏**（`LEAK` / 崩溃码均为 0）。闭包维度：C2 在四族 `ok`，
-其余六种写法按 §9.1 设计上应拒绝（纯 id 捕获 own 聚合 = copy）。
+**零崩溃、零泄漏**（`LEAK` / 崩溃码均为 0）。闭包维度：C2（move 捕获）在 7 族
+全部 `ok`；其余六种写法按 §9.1 设计上应拒绝（纯 id 捕获 own 聚合 = copy）。
 
-1. **`tuple` / `array` / `option` 仍禁止携带指针/切片**（类型层，sema.c 的
-   `type_contains_ptr_or_slice`）——销毁序列需要 `for`（切片/数组运行期长度）
-   与 `if (ok)`（option），生成器尚未补。这是矩阵里 3 族 + 10/11 两格的
-   `REJECT` 来源（明确拒绝，不是泄漏/崩溃）。
-2. **赋值点旧值销毁**（A 方案 §2.3 表）尚未实现：`own` **指针变量**重新赋值
-   （`p = new i32{2}`）会泄漏旧块——`ptr_assign` 按设计不释放旧堆块，而 sema
-   还没在赋值点生成 FREE 序列。聚合（struct/union）变量赋值走
-   `compound_assign_transfer`、字段覆盖走 `ptr_free_slot_value`，均按槽位所有权
-   释放旧值（已校验无泄漏）；指针这一条是剩余缺口。
+1. **`cunion` 不参与自动销毁**（设计如此）：无 tag，运行期无法判定哪个 member
+   活跃，销毁序列不为它生成 FREE；其指针/切片成员仍被类型层限制拒绝（明确
+   报错，不是静默泄漏）。
+2. `clone` 只深拷贝 own 槽位（切片缓冲区总是深拷贝，元素按槽位所有权决定是否
+   递归克隆），ref 槽位保持借用指针——与销毁序列同一套规则。
+
+2026-10 本轮补上的缺口（已修复，回归见 `tests/own_aggregate_test.cpp`）：
+`tuple` 逐元素、`[N]own *T` / `[N]Box` 运行期 for、`own []own *T` / `own []Box`
+逐元素循环、`?own *T` / `?Box` 的 `if (v != nil)`，以及**赋值点旧值销毁**
+（`p = new …` / `a[i] = …` / `p.* = …` —— A 方案 §2.3 的"旧块摘挂"）。
+配套：新直接形态节点 `AST_OPT_IS_SOME`（`!= nil` 的 op 是 token_t*）与
+`AST_FOR_INDEX`（u64 计数器循环）；`array_type_t::elem_ownership` /
+`slice_type_t::elem_ownership` / `option_type_t::inner_ownership` 进类型描述与
+去重键；hoist 对 array/slice/option 也发 `SET_FIELD_OWNERSHIP`；`MAKE` 指令带
+元素所有权立即数；`clone` 的切片分支总是深拷贝缓冲区（浅拷贝会双释放）。
 
 ### 已修复（留档，避免回退）
 

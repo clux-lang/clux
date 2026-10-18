@@ -9,6 +9,16 @@
 #include <gtest/gtest.h>
 #include <string>
 
+extern "C" {
+#include "driver/driver.h"
+}
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 /**
  * 测试用临时文件的落点：**工作区内的 `build/tmp/test`**，不是系统 temp。
  *
@@ -117,6 +127,74 @@ inline std::string slurp(const std::string &path) {
   while ((n = fread(buf, 1, sizeof buf, fp)) > 0) out.append(buf, n);
   fclose(fp);
   return out;
+}
+
+/**
+ * 运行 driver_run_file，同时把 stderr 重定向到临时文件。
+ *
+ * 用途：断言"**无内存泄漏**"（driver 在进程内跑完后 allocator 会把泄漏报告
+ * 打到 stderr）与**编译期诊断文本**。泄漏是本项目最常见的失效形态之一：
+ * 销毁序列漏一条就留一个未释放堆块，而退出码仍是 0——只看 rc 会漏掉。
+ *
+ * 返回 driver 的退出码；*err 收全部 stderr（可为 nullptr）。
+ */
+inline int clux_run_capture(const std::string &path, std::string *err) {
+  fflush(stderr);
+  const std::string cap = clux_test_temp_dir() + "/clux_capture_stderr.txt";
+#ifdef _WIN32
+  FILE *tmp = nullptr;
+  if (fopen_s(&tmp, cap.c_str(), "wb") != 0 || !tmp) {
+    ADD_FAILURE() << "clux_run_capture: cannot open " << cap;
+    return 1;
+  }
+  const int saved = _dup(2);
+  _dup2(_fileno(tmp), 2);
+  const int rc = driver_run_file(path.c_str());
+  fflush(stderr);
+  _dup2(saved, 2);
+  _close(saved);
+  fclose(tmp);
+#else
+  FILE *tmp = fopen(cap.c_str(), "wb");
+  if (!tmp) {
+    ADD_FAILURE() << "clux_run_capture: cannot open " << cap;
+    return 1;
+  }
+  const int saved = dup(2);
+  dup2(fileno(tmp), 2);
+  const int rc = driver_run_file(path.c_str());
+  fflush(stderr);
+  dup2(saved, 2);
+  close(saved);
+  fclose(tmp);
+#endif
+  if (err) *err = slurp(cap);
+  return rc;
+}
+
+/** 正例：退出码 0，且 stderr 里没有 `memory leak`。 */
+inline void clux_expect_ok(const std::string &src,
+                           const std::string &tag = "clux_own") {
+  const std::string path = write_temp_file(src, tag);
+  std::string err;
+  const int rc = clux_run_capture(path, &err);
+  EXPECT_EQ(rc, 0) << src << "\n--- stderr ---\n" << err;
+  EXPECT_EQ(err.find("memory leak"), std::string::npos)
+      << "destruction sequence leaked:\n" << err << "\n--- src ---\n" << src;
+}
+
+/** 负例：编译期拒绝（driver 返回 1），且诊断包含 needle。 */
+inline void clux_expect_reject(const std::string &src, const char *needle,
+                               const std::string &tag = "clux_own_bad") {
+  const std::string path = write_temp_file(src, tag);
+  std::string err;
+  const int rc = clux_run_capture(path, &err);
+  EXPECT_EQ(rc, 1) << src << "\n--- stderr ---\n" << err;
+  if (needle) {
+    EXPECT_NE(err.find(needle), std::string::npos)
+        << "expected diagnostic containing '" << needle << "'\n--- stderr ---\n"
+        << err << "\n--- src ---\n" << src;
+  }
 }
 
 #endif /* CLUX_TEST_COMMON_H */
