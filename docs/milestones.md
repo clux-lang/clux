@@ -1901,9 +1901,16 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       fmt 保留前缀。
     - **新增示例**：`examples/decorator/decorator.cx`（四种形态一次演示，
       Windows/Linux 均输出 `a=42 b=8 dbl(5)=110 p.get()=7`）。
-    - **已知限制**：方法装饰器目前要求"接收者签名一致"的装饰器——返回**带 ref
-      参数闭包**的装饰器会在 sema 捕获改写处报 `undefined variable '__ctx'`
-      （常量闭包的 capture_type_id 提前写回与 comptime 函数体内 walk 的交互），
-      待下一轮修。顶层函数与变量的闭包装饰器不受影响。
+    - **修掉的两个真实缺陷**（方法装饰器返回"带 ref 参数闭包"时暴露，\`decor_all\`
+      组合用例才触发）：
+      1. 捕获读取在第一次 walk 时被改写成 \`__ctx.env.<cap>\` 并**就地写回 AST**；
+         同一函数体随后被再次类型检查（字面量重复 walk）时按符号查找 \`__ctx\`
+         → 误报 \`undefined variable '__ctx'\`。修法：\`ex_ident\` 对**生成节点**
+         \`__ctx\` 不走作用域查找（它只存在于运行期调用帧），直接按当前函数签名
+         给 shadow。
+      2. 具名字面量在 CTFE 里**重复折叠**（sema 试跑轮 + 正式轮）时再次
+         \`scope_define\` 同名 → \`duplicate variable definition\`。修法：已存在则
+         \`scope_set\`（幂等）。
+      两处修完，"值装饰 + 函数装饰 + 方法装饰"同文件共存可跑。
     - 验证：Windows 全量 **2138/2138 PASSED**；示例 50 个 `.cx` 全过；fmt 幂等
       （`[[...]]` 保留）；WSL2 Ubuntu 全量 **2135 passed / 2 skipped**。

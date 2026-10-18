@@ -4337,6 +4337,12 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      ex_ident 里改写为 `__ctx.env.<cap>`（捕获聚合结构体，与 C 后端的
      `ctx->env.cap` 同构）。符号注册在参数层——函数体可见、捕获/参数同名时
      参数先行遮蔽（与捕获按名遮蔽的既有语义一致）。 */
+  /* 绑定条件：**有捕获**且签名已登记。不能只看 capture_type_id——常量闭包
+     折叠会在 pass_globals 阶段（早于 Pass 3b 体内 walk）就把 capture_type_id
+     写回字面量，此时若该函数体还要被 walk，捕获读取会被改写成
+     `__ctx.env.<cap>`，而 __ctx 只在满足本条件时才注册；条件太严 →
+     "undefined variable '__ctx'"。有捕获即绑定，对普通闭包无副作用
+     （多一个隐藏局部符号，捕获读取仍按各自路径解析）。 */
   if (fn->capture_type_id != 0 && fn->sig_id != 0) {
     const sema_type_t *sig_st = sema_type_by_id(sema, fn->sig_id);
     const type_t *sig_type = sig_st ? sig_st->type : NULL;

@@ -218,7 +218,12 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
     if (n->name.len > 0) {
         char nb[128];
         const char *name = ctfe_slice_to_cstr(n->name, nb, sizeof nb);
-        value_t *stored = scope_define(vm, vm->current_scope, name, fv);
+        /* 幂等：同一个具名字面量可能被**多次**求值（sema 试跑轮 + 正式轮都会
+           折叠同一个全局初始化器），第二次 scope_define 会报
+           "duplicate variable definition"。已存在则覆盖。 */
+        value_t *stored = scope_lookup(vm->current_scope, n->name)
+                              ? scope_set(vm, vm->current_scope, name, fv)
+                              : scope_define(vm, vm->current_scope, name, fv);
         if (value_is_error(vm, stored)) return stored;
     }
     return fv;

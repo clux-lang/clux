@@ -1884,6 +1884,20 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
                    (int)n->name.len, n->name.ptr);
         return val_void(sema);
       }
+      /* 生成节点 `__ctx`（闭包调用帧的隐藏局部）：**不做作用域查找**。
+         捕获读取在第一次 walk 时被改写成 `__ctx.env.<cap>` 并就地写回 AST；
+         之后同一条函数体可能被再次类型检查（字面量重复 walk），重新求值
+         生成链时若按符号查找就会误报 "undefined variable '__ctx'"——
+         它只存在于运行期调用帧。这里按当前函数的签名类型直接给 shadow。 */
+      if (n->base.is_generated && n->name.len == 5 && n->name.ptr &&
+          memcmp(n->name.ptr, "__ctx", 5) == 0) {
+        const sema_type_t *ctx_sig = sema->fn.def
+                                         ? sema_type_by_id(sema, sema->fn.def->sig_id)
+                                         : NULL;
+        return value_make_shadow(sema->vm, ctx_sig && ctx_sig->type
+                                               ? ctx_sig->type
+                                               : sema->vm->type_void);
+      }
       value_t *v = scope_lookup(sema->vm->current_scope, n->name);
       if (!v) {
         diag_error(sema->diag, sema_loc(sema, *node),

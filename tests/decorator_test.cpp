@@ -201,3 +201,54 @@ TEST(Decorator, SingleBracketExpressionsStillWork) {
       "}\n",
       "decor_single_bracket");
 }
+
+/* 方法装饰器可以返回**带 ref 参数的闭包**（"包一层"的真装饰器）：
+   `p.get()` → 装饰后的闭包 → 捕获的源函数。这条覆盖了此前两个缺陷：
+   ① 捕获读取改写后的 `__ctx.env.<cap>` 在重复 walk 时报 undefined variable；
+   ② 具名字面量在重复折叠时报 duplicate variable definition。 */
+TEST(Decorator, MethodDecoratorMayReturnRefClosure) {
+  clux_expect_ok(
+      "struct Point {\n"
+      "  x: i32;\n"
+      "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
+      "  func plain(self: ref *Point): i32 { return self.x + 1; }\n"
+      "}\n"
+      "comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {\n"
+      "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = .Point{ .x = 7 };\n"
+      "  if (p.get() != 107) { return 1; }\n"
+      "  if (p.plain() != 8) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "decor_method_closure");
+}
+
+/* 同文件里"值装饰 + 函数装饰 + 方法装饰"共存（此前只有组合时才会暴露
+   重复折叠 / __ctx 问题，单个用例是绿的）。 */
+TEST(Decorator, MixedDecoratorsInOneProgram) {
+  clux_expect_ok(
+      "comptime func twice(n: i32): i32 { return n * 2; }\n"
+      "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "  return func |f| w(x: i32): i32 { return f(x) + 100; };\n"
+      "}\n"
+      "func double(x: i32): i32 { return x * 2; }\n"
+      "[[twice]] var a = 21;\n"
+      "[[add100]] func dbl(x: i32): i32 { return double(x); }\n"
+      "struct Point {\n"
+      "  x: i32;\n"
+      "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
+      "}\n"
+      "comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {\n"
+      "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = .Point{ .x = 7 };\n"
+      "  if (a != 42) { return 1; }\n"
+      "  if (dbl(5) != 110) { return 2; }\n"
+      "  if (p.get() != 107) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "decor_mixed");
+}
