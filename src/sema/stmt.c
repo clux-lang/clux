@@ -562,6 +562,9 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
        moved 变量已被转移（TDZ），不需要释放。
        comptime 变量不进入运行时，不需要释放。 */
     if (sym->moved || sym->is_comptime) continue;
+    /* 定义点尚未走到（提前 return/break 的路径）→ 该变量在运行时还不存在，
+       不能生成销毁（否则 PUSH 一个尚未 DEFINE 的名字 → undefined variable）。 */
+    if (!sym->declared) continue;
     if (sym->ownership != OWN_OWN) continue;
     /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
        目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
@@ -1583,6 +1586,9 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
   if (!sym) return; /* 3a 重复定义已诊断，符号未注册 */
+  /* Pass 3b 已走到定义点：此后收集销毁/借源时才包含该变量（提前 return 的
+     路径不会销毁后面才声明的变量）。 */
+  sym->declared = true;
 
   /* comptime var：编译期求值 + 符号表编码（sema_eval_comptime_var）。
      定义点不进入 VM scope——调用方（walk_block）负责从语句链摘除；

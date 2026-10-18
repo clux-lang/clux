@@ -677,12 +677,14 @@ TEST_F(SemaTest, NilCompareNonOptionalErrors) {
     expect_message(0, "is not optional; cannot compare with nil");
 }
 
-TEST_F(SemaTest, NilCanOnlyCompareWithOptionalVariable) {
+TEST_F(SemaTest, NilCompareWithNonOptionalExpressionErrors) {
+    /* nil 比较另一侧是**任意 ?T 表达式**（不再只允许变量）；非 ?T → 报错，
+       诊断里带实际类型（不是"只允许变量"的旧限制）。 */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  if (nil == 0) { }"
         "}"));
-    expect_message(0, "nil can only be compared with an optional variable");
+    expect_message(0, "is not optional; cannot compare with nil");
 }
 
 TEST_F(SemaTest, NilAssignToNonOptionalErrors) {

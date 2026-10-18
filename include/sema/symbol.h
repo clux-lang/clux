@@ -129,6 +129,11 @@ struct _sema_symbol_t {
                          "used before initialization"。仅变量符号有意义。 */
   bool is_active;     /* 符号是否已定义到 VM scope（运行时可见）。函数/内置
                          符号注册即激活；变量在 shadow_var_def 定义时激活。 */
+  bool declared;      /* Pass 3b 是否已走到**定义点**（局部变量：3a 预注册全部块内
+                         变量，但 3b 按源序逐个处理定义）。销毁收集
+                         （make_free_stmts）只包含已声明的变量——否则提前 return
+                         的路径会销毁**后面才声明**的变量（字节码 PUSH 一个尚未
+                         DEFINE 的名字 → 运行期 "undefined variable"）。 */
   bool moved;         /* 所有权转移状态（Step B，m3-design §7）：move(x) 后源
                          变量失去所有权，进入 TDZ——读取报 "used after move"。
                          重新赋值（=）恢复可用。仅变量符号有意义。 */

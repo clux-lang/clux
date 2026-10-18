@@ -534,6 +534,20 @@ memcpy`（C 后端 `x = v;`），不释放旧值。
 | `struct Node { next: ?own *Node }`（链表）、`Tree`（双指针树）、互递归 A↔B | 环边 `FREE_RECURSIVE`（运行期递归，正确无泄漏）；clone 环边 `CLONE` |
 | `new Mid{ .i = move(inner) }` 后再读 `mid.i.p` | 修复后正确 |
 
+### 7.1.6 作用域销毁的**声明顺序**（2026-10 修复）
+
+Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作用域里的所有符号"
+收集销毁序列 → **提前 return 的路径会销毁后面才声明的变量**：
+
+    var a: i32 = 1;
+    if (a == 1) { return 1; }
+    var p: own *i32 = new i32{ 7 };   // 旧实现：return 1 的销毁里 PUSH "p"（未 DEFINE）
+                                      // → 运行期 "undefined variable"
+
+修复：符号带 `declared` 标记（Pass 3b 走到定义点才置位；参数/捕获在注册时即
+置位），`make_free_stmts` 只收集 `declared` 的变量。`break`/`continue` 路径同理
+（只销毁"源序上已经过定义点"的变量；跨迭代的少量泄漏属于可接受的保守方向）。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion

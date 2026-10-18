@@ -213,7 +213,8 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
     sema_symbol_t init = {
         .kind = SEMA_SYM_VAR,
         .type = sema_resolve_type_slot(sema, &vd->type_expr),
-        .ownership = pown};
+        .ownership = pown,
+        .declared = true};   /* 参数在函数入口即存在 */
     if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p),
                  "duplicate parameter '%.*s'", (int)vd->name.len,
@@ -244,7 +245,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
-                              .ownership = cown};
+                              .ownership = cown, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
                      "capture '%.*s' duplicates another capture",
@@ -1107,7 +1108,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
-                              .ownership = cown};
+                              .ownership = cown, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
                      "capture '%.*s' duplicates another capture",

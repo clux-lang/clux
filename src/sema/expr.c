@@ -4415,20 +4415,26 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
      返回 bool shadow。x 非 ?T 与 nil 比较 → 编译错误（str/func 无空值）。 */
   if ((token_is(b->op, "==") || token_is(b->op, "!=")) &&
       (b->lhs->kind == AST_NIL || b->rhs->kind == AST_NIL)) {
-    ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
-    if (other->kind != AST_IDENT) {
-      diag_error(sema->diag, sema_loc(sema, &b->base),
-                 "nil can only be compared with an optional variable");
+    /* 另一侧可以是**任意 ?T 表达式**（变量 / 字段 / 下标 / 解引用 / 解包 /
+       调用结果 …）——早期只允许变量是过严限制（`n.next != nil` 无法写，
+       链表判空只能先绑变量）。这里对表达式求值一次再判类型；编译期为
+       OPT_IS_NONE（tag 专用指令），不进入 vtable eq 分派。 */
+    /* 注意：必须把**节点槽位**交给 sema_expr（sema 可能把表达式改写/折叠，
+       例如调用结果落成临时变量）——只传局部副本会让 compiler 仍编译旧节点，
+       运行期报 "undefined variable"。 */
+    ast_node_t **other_slot = (b->lhs->kind == AST_NIL) ? &b->rhs : &b->lhs;
+    value_t *ov = sema_expr(sema, other_slot, scope);
+    if (value_is_error(sema->vm, ov) ||
+        value_is_type(ov, TYPE_KIND_VOID))
       return value_make_shadow(sema->vm, sema->vm->type_bool);
-    }
-    ast_ident_t *oid = (ast_ident_t *)other;
-    sema_symbol_t *sym = sema_lookup(scope, oid->name);
-    const type_t *ot = sym ? sym->type : NULL;
+    const type_t *ot = value_type(ov);
+    if (ot) ot = type_strip_quals(ot);
     if (!ot || ot->kind != TYPE_KIND_OPTION) {
+      char tn[64];
+      sema_type_name(ot, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &b->base),
-                 "variable '%.*s' is not optional; cannot compare with nil",
-                 (int)oid->name.len, oid->name.ptr);
-      return value_make_shadow(sema->vm, sema->vm->type_bool);
+                 "value of type %s is not optional; cannot compare with nil",
+                 tn);
     }
     return value_make_shadow(sema->vm, sema->vm->type_bool);
   }

@@ -639,15 +639,11 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
     /* nil 判定（docs m2-design §12.5）：x==nil / nil==x → PUSH x +
        OPT_IS_NONE（true=none）；x!=nil / nil!=x → PUSH x + OPT_IS_NONE
-       + NOT。tag 比较专用指令，不进入 vtable eq 分派。sema 已保证另一
-       侧是 ?T 变量（AST_IDENT）。 */
+       + NOT。tag 比较专用指令，不进入 vtable eq 分派。另一侧是**任意 ?T
+       表达式**（变量/字段/下标/解引用/解包/调用结果）——sema 已校验类型。 */
     if ((token_is(n->op, "==") || token_is(n->op, "!=")) &&
         (n->lhs->kind == AST_NIL || n->rhs->kind == AST_NIL)) {
       ast_node_t *other = n->lhs->kind == AST_NIL ? n->rhs : n->lhs;
-      if (other->kind != AST_IDENT) {
-        c_error(c, node, "nil can only be compared with an optional variable");
-        return;
-      }
       compile_expr(c, other);                 /* 栈: [x] */
       bcode_write_op(c->bc, BCODE_OPT_IS_NONE); /* 弹 x → bool(none)，栈: [bool] */
       if (token_is(n->op, "!=")) {
