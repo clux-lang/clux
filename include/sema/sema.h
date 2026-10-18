@@ -452,6 +452,24 @@ location_t sema_loc(sema_t *sema, ast_node_t *node);
 void sema_type_name(const type_t *t, char *buf, size_t cap);
 
 /**
+ * 生成**类型引用表达式**（AST_TYPE_REF）：已登记类型取 sema 登记名
+ * （`__type_N`）；内建标量（未登记）取规范名，compiler 的 AST_TYPE_REF 分支
+ * 用 `type_lookup` 兜底。用于 sema 生成的构造 / NEW / 临时变量声明（扁平化
+ * clone、显式销毁）。返回 NULL = 分配失败。
+ */
+ast_node_t *sema_gen_type_ref(sema_t *sema, const type_t *t);
+
+/**
+ * 把**生成语句链**追加到当前语句的 prelude（compiler 在语句主体之前、
+ * 同一作用域编译）。返回 false = 不在语句上下文（如 comptime 折叠）或分配
+ * 失败——调用方应回退（运行期指令 / DISPOSE）。
+ *
+ * 用途：扁平化 clone 的切片路径（临时变量 + make + 循环）与显式销毁
+ * `_ = move(x)` 的销毁序列。
+ */
+bool sema_append_prelude(sema_t *sema, ast_node_t *stmts);
+
+/**
  * Pass 3a 作用域树构建（stmt_build.c 实现）：遍历 sema->funcs 队列，对每个函数
  * 按词法块结构建树，只注册符号（名字 + 声明类型 + TDZ 标志），不做类型检查。
  * 作用域树存入 sema_func_t::scope。

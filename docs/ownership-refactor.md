@@ -417,6 +417,22 @@ clone 只**读**槽位（`FIELD_GET` / `INDEX_GET`）并拷贝，不改变源的
 从不对字段/元素发 move。因此字段级 `clone(a.b)` 合法（含切片字段——走 prelude
 临时变量 + TAKE），字段/元素级 `move` 仍一律拒绝（sema `ex_move` 约束 1）。
 
+### 7.1.2 显式销毁 `_ = move(x)`（2026-10）
+
+`_ = expr` 不再一律走运行期 `DISPOSE`（递归对象图）——sema 按来源分类，把"提前
+销毁"编成与作用域退出**同一套扁平槽位展开**（`ast_assign_t::discard_mode`）：
+
+| 写法 | 语义 / 生成 |
+|---|---|
+| `_ = move(x)`（x 是 own/fatal 变量） | 在**当前位置**生成 x 的销毁序列（ptr/slice → `FREE x`，聚合 → 逐槽位），x 已由 move 标 moved → 作用域退出不再释放 |
+| `_ = <将亡值>`（`new` / 构造 / `clone` / 返回 fatal 的调用） | 生成临时变量 `__disc_N: own T = undefined` + `__disc_N = <expr>` + 销毁序列（临时符号标 moved，块退出不再 FREE） |
+| `_ = <借用/无资源>`（ref 变量、`x.&`、字段读、标量） | 只求值 + `POP`——**不得 DISPOSE**：借用不拥有堆块，释放会破坏借用源（实测 0xC0000005） |
+| `_ = x`（own/fatal 变量**不 move**） | **拒绝**：own 不可 copy；显式销毁必须写 `_ = move(x)` |
+| `move(ref)` / `move(x.&)` / `move(p.*)` | **拒绝**（`ex_move` 约束 0）：借用不拥有堆块，move 会把借用当所有权 |
+
+销毁后变量进入 TDZ，重新赋值（`p = new …`）恢复（R2）；重复 `_ = move(p)` 报
+"used after move"。等价 C：`free(p); p = NULL;` / 逐槽位 `free(p->f)`。
+
 ### 7.2 仍未支持
 
 **cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个

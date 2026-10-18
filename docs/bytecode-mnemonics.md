@@ -194,7 +194,7 @@ ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR
 | `ADDR` | — | 弹值 → 压 `ref *T` 指针（`x.&` 后置取址，借用）。 |
 | `MOVE` | — | 弹值 → 压**将亡值（fatal 变体）**：own 指针/切片转移裸指针（源置空）；含 own 字段的复合类型**整块 memcpy + 递归清空源顶层 own/fatal 指针**（`move(x)` 的所有权转移）。 |
 | `CLONE` | — | 弹值 → 压**将亡值（fatal 变体）**：深拷贝（`ptr_clone_block` 递归对象图），源保持有效。**注意**：用户 `clone(x)` 已由 sema 在编译期展开为构造 / NEW / 循环序列（扁平化，见 `sema_gen_clone`），运行期 `CLONE` 只剩**叶子**用途（标量/无 own 槽位聚合/指向无 own 槽位内容的指针）与闭包等回退路径。 |
-| `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。用于 `_ = expr` 显式丢弃 fatal / own；借用（ref、`x.&`）跳过。 |
+| `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。**注意**：`_ = expr` 的显式销毁/丢弃已由 sema 在编译期分类（`ast_assign_t::discard_mode`）——自有资源展开成扁平 FREE 序列（语句 prelude），借用/无资源只 `POP`；`DISPOSE` 仅作为**回退**（sema 无法生成 prelude 时）。 |
 
 **复合类型的将亡值变体 `fatal T`**（`fatal T` 类型表达式，T 为含 own 资源的
 struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携带所有权，

@@ -572,11 +572,20 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     /* 左值标识符名（目前仅支持 AST_IDENT，由 parser/sema 保证） */
     strslice_t name = ((ast_ident_t *)n->target)->name;
     if (token_is(n->op, "=") && strslice_eq(name, STRSLICE_LIT("_"))) {
-      /* 显式丢弃：_ = expr → 求值右值 + DISPOSE（递归释放值内嵌 own 堆块
-         ——fatal/own 丢弃场景，m3-design §3.3；ref/借用 no-op）。不 STORE
-         （_ 不是变量），不 POP（DISPOSE 自身消费栈顶，不压回）。 */
+      /* 显式销毁 / 丢弃：`_ = expr`（sema 已按 discard_mode 分类，见
+         ast_assign.h）。_ 不是变量：不 STORE。
+           mode 2：sema 已把销毁序列放进语句 prelude（编译 expr + 逐槽位
+                   FREE），语句本身不发指令；
+           mode 1：借用/无资源 → 求值后 POP（**不得 DISPOSE**：借用不拥有
+                   堆块，释放会破坏借用源）；
+           其它  ：回退 DISPOSE（递归释放值内嵌 own 堆块）。 */
+      if (n->discard_mode == 2) break;
       compile_expr(c, n->value);               /* 栈: [value] */
-      bcode_write_op(c->bc, BCODE_DISPOSE);    /* 递归释放 own 堆块 */
+      if (n->discard_mode == 1) {
+        bcode_write_op(c->bc, BCODE_POP);
+      } else {
+        bcode_write_op(c->bc, BCODE_DISPOSE);
+      }
       st_push(c, -1);
       break;
     }

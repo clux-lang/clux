@@ -25,6 +25,9 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_for_index.h"
+#include "parser/ast_move.h"
+#include "parser/ast_undef.h"
+#include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_member.h"
@@ -274,6 +277,16 @@ static ast_node_t *make_int_lit_i64(sema_t *sema, uint64_t v) {
   ((ast_int_lit_t *)n)->value = v;
   ((ast_int_lit_t *)n)->type  = strslice_from_bytes("i64", 3);
   return n;
+}
+
+/* 把任意 C 串复制成 arena 持久化的 NUL 串 → strslice（生成变量名用）。 */
+static strslice_t discard_name(sema_t *sema, const char *s) {
+  size_t n = strlen(s);
+  char *buf = (char *)arena_calloc(sema->arena, n + 1, 1,
+                                   ALIGNOF(max_align_t));
+  if (!buf) return STRSLICE_EMPTY;
+  memcpy(buf, s, n);
+  return strslice_from_bytes(buf, n);
 }
 
 /* 现造循环计数器变量名 `__del_i_<seq>`（arena NUL 串，块内唯一）。 */
@@ -1339,13 +1352,146 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   }
   strslice_t name = ((ast_ident_t *)as->target)->name;
 
-  /* 显式丢弃：_ = expr（不查符号表，直接求值右值） */
+  /* ===== 显式销毁 / 丢弃：`_ = expr`（m3-design §3.3）=====
+     sema 在**当前位置**生成销毁序列（与作用域退出同一套扁平槽位展开），把
+     "提前释放"编成显式 FREE 序列——与 `move` 一起构成"显式销毁"：
+         `_ = move(x)`        —— 销毁整个变量 x（x 标 moved，退出不再释放）
+         `_ = new T{...}`     —— 丢弃将亡值（临时变量 + 销毁）
+         `_ = clone(x)`       —— 同上（源不受影响）
+         `_ = <借用/无资源>`  —— 只求值 + POP（**不得 DISPOSE**：借用不拥有）
+     `as->discard_mode` 告诉 compiler 走哪条路径（见 ast_assign.h）。
+     拒绝：`_ = x`（own/fatal 变量**不 move**）——own 不可 copy；
+           `move(ref)` —— 借用不拥有堆块（ex_move 约束 0）。 */
   if (strslice_eq(name, STRSLICE_LIT("_"))) {
-    if (!token_is(as->op, "=")) {
+    if (!as->op || !token_is(as->op, "=")) {
       diag_error(sema->diag, sema_loc(sema, &as->base),
                  "discard '_' only supports simple assignment '='");
+      sema_expr(sema, &as->value, scope);
+      return;
     }
-    sema_expr(sema, &as->value, scope);
+    /* move(x) 形态先记下（sema_expr 之后节点仍是 AST_MOVE） */
+    bool is_move = as->value && as->value->kind == AST_MOVE &&
+                   ((ast_move_t *)as->value)->op &&
+                   token_is(((ast_move_t *)as->value)->op, "move");
+    ast_node_t *mv_ident = NULL;
+    if (is_move) {
+      ast_move_t *mv = (ast_move_t *)as->value;
+      if (mv->operand && mv->operand->kind == AST_IDENT) mv_ident = mv->operand;
+    }
+
+    value_t *rhs = sema_expr(sema, &as->value, scope);
+    if (!rhs || value_is_error(sema->vm, rhs) ||
+        value_is_type(rhs, TYPE_KIND_VOID))
+      return;
+    const type_t *rt = value_type(rhs);
+
+    /* 目标变量符号（ident 或 move(ident)） */
+    ast_node_t *vsym_node = mv_ident;
+    if (!vsym_node && !is_move && as->value &&
+        as->value->kind == AST_IDENT)
+      vsym_node = as->value;
+    sema_symbol_t *vsym = vsym_node
+        ? sema_lookup(scope, ((ast_ident_t *)vsym_node)->name)
+        : NULL;
+
+    /* `_ = x`（own/fatal 变量不 move）→ 拒绝：这不是"销毁"，是 own 拷贝。 */
+    if (vsym && vsym->kind == SEMA_SYM_VAR && !is_move &&
+        (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym))) {
+      strslice_t vn = ((ast_ident_t *)vsym_node)->name;
+      diag_error(sema->diag, sema_loc(sema, &as->base),
+                 "cannot discard '%.*s' by copy: an own value must be "
+                 "transferred — use `_ = move(%.*s)` for explicit destruction "
+                 "(or clone() to copy)",
+                 (int)vn.len, vn.ptr, (int)vn.len, vn.ptr);
+      as->discard_mode = 1;   /* 编译已失败，防后续再生成 */
+      return;
+    }
+
+    /* 该值是否有**自有资源**需要释放：来源是 own/fatal（而不是借用）且类型
+       含资源（指针/切片/含 own 槽位的聚合）。 */
+    bool own_value = false;
+    if (vsym && vsym->kind == SEMA_SYM_VAR)
+      own_value = (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym));
+    if (!own_value) own_value = sema_value_is_fatal(rhs);
+    bool has_res = rt && (rt->kind == TYPE_KIND_PTR ||
+                          rt->kind == TYPE_KIND_SLICE ||
+                          type_has_own_slots(rt));
+    if (!own_value || !has_res) {
+      as->discard_mode = 1;   /* 借用 / 无资源：expr + POP */
+      return;
+    }
+
+    ast_node_t *dh = NULL, *dt = NULL;
+    if (vsym && vsym->type &&
+        (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym))) {
+      /* 变量：直接销毁它（move 已在 ex_move 标 moved / 消费 fatal） */
+      ast_node_t *id = ast_ident_new(sema->arena, 0, 0);
+      if (id) {
+        ((ast_ident_t *)id)->name = ((ast_ident_t *)vsym_node)->name;
+        if (!gen_destroy(sema, vsym->type, id, &dh, &dt)) dh = NULL;
+      }
+      if (!dh) {
+        as->discard_mode = 3;   /* 回退：运行期 DISPOSE */
+        return;
+      }
+      if (!sema_append_prelude(sema, dh)) {
+        as->discard_mode = 3;
+        return;
+      }
+      as->discard_mode = 2;
+      return;
+    }
+
+    /* 将亡值（new / 构造 / clone / 返回 fatal 的调用）：临时变量 + 赋值 +
+       销毁序列。临时变量是 own，符号标 moved（销毁由生成的序列完成，块退出
+       不再 FREE）。 */
+    uint32_t dn = sema->clone_seq++;
+    char nb[64];
+    snprintf(nb, sizeof nb, "__disc_%u", dn);
+    strslice_t tname = discard_name(sema, nb);
+    if (!tname.ptr) { as->discard_mode = 3; return; }
+    sema_symbol_t dsym;
+    memset(&dsym, 0, sizeof dsym);
+    dsym.kind      = SEMA_SYM_VAR;
+    dsym.type      = rt;
+    dsym.ownership = OWN_OWN;
+    dsym.flow_init = true;
+    dsym.moved     = true;
+    dsym.is_active = true;
+    dsym.own_scope = scope;
+    if (!sema_scope_define(scope, tname, &dsym)) {
+      as->discard_mode = 3;
+      return;
+    }
+    ast_node_t *vd   = ast_var_def_new(sema->arena, 0, 0);
+    ast_node_t *ud   = ast_undef_new(sema->arena, 0, 0);
+    ast_node_t *tre  = sema_gen_type_ref(sema, rt);
+    ast_node_t *asgn = ast_assign_new(sema->arena, 0, 0);
+    ast_node_t *lhs  = ast_ident_new(sema->arena, 0, 0);
+    ast_node_t *did  = ast_ident_new(sema->arena, 0, 0);
+    if (!vd || !ud || !tre || !asgn || !lhs || !did) {
+      as->discard_mode = 3;
+      return;
+    }
+    vd->is_generated = true;
+    ((ast_var_def_t *)vd)->name      = tname;
+    ((ast_var_def_t *)vd)->type_expr = tre;
+    ((ast_var_def_t *)vd)->init      = ud;
+    asgn->is_generated = true;
+    ((ast_assign_t *)asgn)->target = lhs;
+    ((ast_assign_t *)asgn)->op     = NULL;   /* NULL = 普通赋值（compiler 特判） */
+    ((ast_assign_t *)asgn)->value  = as->value;
+    ((ast_ident_t *)lhs)->name = tname;
+    ((ast_ident_t *)did)->name = tname;
+    if (!gen_destroy(sema, rt, did, &dh, &dt)) dh = NULL;
+    vd->next = asgn;
+    asgn->next = dh;
+    if (dh) dt->next = NULL;
+    if (!sema_append_prelude(sema, vd)) {
+      as->discard_mode = 3;
+      return;
+    }
+    as->discard_mode = 2;
     return;
   }
 

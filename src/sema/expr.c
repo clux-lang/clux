@@ -3057,7 +3057,7 @@ static strslice_t clone_cstr(sema_t *sema, const char *s) {
 
 /* 类型引用表达式：登记类型 → AST_TYPE_REF <__type_N>；内建标量走规范名
    （compiler 的 AST_TYPE_REF 分支对未登记名用 type_lookup 兜底）。 */
-static ast_node_t *clone_type_ref(sema_t *sema, const type_t *t) {
+ast_node_t *sema_gen_type_ref(sema_t *sema, const type_t *t) {
   if (!t) return NULL;
   ast_node_t *n = ast_type_ref_new(sema->arena, 0, 0);
   if (!n) return NULL;
@@ -3192,14 +3192,14 @@ static ast_node_t *clone_construct(sema_t *sema, const type_t *t,
   n->is_generated = true;
   if (as_new) {
     ast_new_t *c = (ast_new_t *)n;
-    c->type        = clone_type_ref(sema, t);
+    c->type        = sema_gen_type_ref(sema, t);
     c->fields      = fields;
     c->fields_last = fields;
     c->member_tag  = member_tag;
     if (!c->type) return NULL;
   } else {
     ast_construct_t *c = (ast_construct_t *)n;
-    c->type        = clone_type_ref(sema, t);
+    c->type        = sema_gen_type_ref(sema, t);
     c->fields      = fields;
     c->fields_last = fields;
     c->member_tag  = member_tag;
@@ -3241,7 +3241,7 @@ static bool clone_needs_deep(const type_t *t, ownership_t slot_own,
 
 /* 把生成语句追加到当前语句的 prelude（compiler 在语句主体前编译）。
    无语句上下文（comptime 折叠）返回 false —— 调用方回退到运行期 CLONE。 */
-static bool clone_add_prelude(sema_t *sema, ast_node_t *stmts) {
+bool sema_append_prelude(sema_t *sema, ast_node_t *stmts) {
   if (!stmts) return false;
   ast_node_t *stmt = sema->cur_stmt;
   if (!stmt) return false;
@@ -3290,12 +3290,12 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   vd->is_generated = true;
   ast_var_def_t *v = (ast_var_def_t *)vd;
   v->name      = vname;
-  v->type_expr = clone_type_ref(sema, t);
+  v->type_expr = sema_gen_type_ref(sema, t);
   ast_node_t *mk = ast_make_new(sema->arena, 0, 0);
   if (!mk || !v->type_expr) return clone_leaf(sema, access);
   mk->is_generated = true;
   ast_make_t *m = (ast_make_t *)mk;
-  m->elem_type      = clone_type_ref(sema, elem);
+  m->elem_type      = sema_gen_type_ref(sema, elem);
   m->elem_ownership = (uint8_t)eown;
   m->length         = clone_len_call(sema, access);
   if (!m->elem_type || !m->length) return clone_leaf(sema, access);
@@ -3330,7 +3330,7 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
 
   vd->next = loop;
   loop->next = NULL;
-  if (!clone_add_prelude(sema, vd)) return clone_leaf(sema, access);
+  if (!sema_append_prelude(sema, vd)) return clone_leaf(sema, access);
 
   /* 3) 表达式 = TAKE(__cl_N) */
   ast_node_t *tk = ast_take_new(sema->arena, 0, 0);
@@ -3575,6 +3575,20 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
                    "(fields have no per-field TDZ, so a moved-out field cannot be "
                    "tracked or refilled; move the whole value instead — "
                    "`move(s)` — or use clone() to copy the field)");
+        return value_make_shadow(sema->vm, fatal);
+      }
+
+      /* ---- 约束 0：**move 的来源必须拥有该值** ----
+         own / fatal 才能转移所有权；ref/借用（`x.&`、字段/元素读、ref 变量、
+         ref 返回、解引用读到的被指向内容）都不拥有堆块——move 它只会把借用
+         当所有权，销毁时 free 借用源（实测 0xC0000005）。
+         clone 不受限：拷贝不改变源的绑定状态。 */
+      if (!is_clone && produces_fatal &&
+          value_ownership(operand) != OWN_OWN &&
+          value_ownership(operand) != OWN_FATAL) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot move a borrowed value: move transfers ownership, but "
+                   "a ref/borrow does not own the block (use clone() to copy)");
         return value_make_shadow(sema->vm, fatal);
       }
 
