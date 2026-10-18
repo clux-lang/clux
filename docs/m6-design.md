@@ -88,6 +88,35 @@ import libc from "libobjc.dylib";   /* macOS */
   - 源码因此**跨平台**：同一份 `.cx` 在三个平台上都写 `from "c"`；
     `.cxb`/`.cxs` 容器里存的也是**通用名**而不是解析后的绝对路径。
   - `<库名>` 写成 `"*"` 表示**当前进程自身**（RTLD_DEFAULT 语义，见 §14.18）。
+
+  - **条件后缀（第二阶段，2026-10）**：库名之后可跟一个 `assert(<条件>)`，
+    用来表达"这个库只在某些场景存在/可用"：
+
+    ```c
+    extern lib crt from "msvcrt"          assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
+    extern lib crt from "libc.so.6"       assert(OS_TYPE == "LINUX");
+    extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
+    extern lib crt from "c"               assert(BUILD_FLAVOR == "dev" && OS_ARCH == "X64");
+    ```
+
+    - **求值时机 = 前脱糖（desugar，parser → sema 之间）**：条件为假的那条
+      `extern lib` **整条被裁剪**——不加载、不登记别名、不校验符号。因此同一
+      别名写多条、条件互斥，天然不冲突（只有一条存活）；sema/driver/容器都
+      看不到被裁剪的声明。
+    - **条件语言**只有 `KEY == "值"`、`KEY != "值"`、`&&`、`||`（可用括号，
+      `&&` 优先级高于 `||`）。键是**注入**的、值恒为字符串：
+      * 内建：`OS_TYPE`（`WIN64` / `WIN32` / `LINUX` / `MACOS` / `BSD`）、
+        `OS_ARCH`（`X64` / `X86` / `ARM64` / `ARM`）；
+      * 命令行 `-D KEY=VALUE`（可重复，同名覆盖内建）：
+        `clux run app.cx -D BUILD_FLAVOR=dev`、`clux bc emit app.cx -D ...`。
+    - **键不是变量**：程序里看不见 `OS_TYPE`，它只在 `assert(...)` 里可见。
+    - **未定义的键 = 编译错误**（`unknown define 'X' (inject it with -D X=<value>)`）：
+      拼错若静默成 false，整条声明会被无声裁剪，排查成本很高。
+    - 键集合是**进程级全局静态表**（`include/core/ffi_cond.h`，无堆分配），
+      desugar / 解析器 / 测试直接读写同一张表。
+    - fmt 原样保留条件后缀（漏渲染会把"仅 Windows 生效"变成"永远生效"）。
+    - 由于容器只记录**存活**的声明，断言是**编译期**决定：`.cxb` 仍是平台相关
+      产物，换平台请按平台重新编译（与 CMake `-D` 的构建期语义一致）。
   - 旧写法 `extern lib "<路径>" as <别名>;` **已删除**（完整文件名写死在源码里，
     无法跨平台）；解析器对它给出**迁移提示**，指明新形式。
   - `import`（AST_IMPORT）语义**保持不变**：只表示源码模块 ✓

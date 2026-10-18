@@ -49,6 +49,25 @@ int cmd_take_short_output(const cmd_args_t *args,
                           const char **out_pos, size_t *out_posn,
                           size_t out_cap);
 
+/**
+ * 从位置参数序列里剥离 `-D KEY=VALUE` / `-DKEY=VALUE`（可重复；CMake 风格）。
+ *
+ * 与 `cmd_take_short_output` 同因：`cmd_args_parse` 只认 `--`，单横线的 `-D`
+ * 会落进位置参数，必须由 handler 显式扫描。剥离后的其余位置参数按序写入
+ * `out_pos`（容量 pos_cap），`-D` 的 `KEY=VALUE` 写入 `out_kv`（容量 kv_cap）。
+ *
+ * @return 0 正常；1 出现 `-D` 但缺值；2 `KEY=VALUE` 条目超出 kv_cap
+ */
+int cmd_take_defines(const char *const *in, size_t n, const char **out_pos,
+                     size_t *out_posn, size_t pos_cap, const char **out_kv,
+                     size_t *out_kvn, size_t kv_cap);
+
+/**
+ * 把收集到的 `KEY=VALUE` 条目写进**全局 FFI 键表**（core/ffi_cond.h）——
+ * `extern lib ... assert(...)` 的求值就查这张表。非法条目打印错误并返回 1。
+ */
+int cmd_apply_defines(const char *const *kv, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

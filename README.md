@@ -57,9 +57,10 @@ compile → VM). M6 (FFI) is designed but not started. See `docs/milestones.md`.
 
 **Not yet implemented**
 
-- M6 FFI (`cfunc` / `extern cfunc`, libffi, `dlopen`): designed in `docs/m6-design.md`,
-  not implemented. Dynamic-library binding must be expressed **explicitly** when it
-  lands — not inferred from a filename suffix.
+- M6 FFI 已实现（`extern lib <别名> from "<库名>"` + `extern cfunc` / `extern var`，
+  libffi / dlopen；库名是**通用名**，按平台展开候选文件）。声明可带条件后缀
+  `assert(OS_TYPE == "WIN64" ...)`，编译期裁剪不匹配的声明；键用 `-D KEY=VALUE`
+  注入。详见 `docs/m6-design.md`。
 - `clux build` (native machine-code backend, M7/M12): prints `not implemented`.
 - `clux test` subcommand: prints `not implemented` — run `build/clux_test` or `ctest`.
 - Error handling (M8) and a standard library (M9).
@@ -176,7 +177,7 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-2100 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
+2118 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
 core containers; integration tests execute programs end-to-end through `driver_run_file`
 (for `foreach` the CLI is spawned so the program's own `printf` output can be
 asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the

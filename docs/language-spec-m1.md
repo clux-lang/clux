@@ -762,6 +762,38 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+### 动态库声明的条件后缀（按场景选库）
+
+同一个逻辑库在不同平台叫法不同（C 运行库 = `msvcrt` / `libc.so.6` /
+`libSystem.B.dylib`）。`extern lib` 因此支持一个可选的条件后缀：
+
+```
+extern lib <别名> from "<库名>" [assert(<条件>)];
+```
+
+条件在**编译该模块时**（前脱糖阶段）求值；为假的那条声明**整条被裁剪**
+（不加载、不登记别名、不校验符号）。同一别名写多条、条件互斥即可跨平台：
+
+```c
+extern lib crt from "msvcrt"           assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
+extern lib crt from "libc.so.6"        assert(OS_TYPE == "LINUX");
+extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
+extern func crt::strlen(s: str): usize;
+```
+
+条件语言（刻意极小）：
+
+```
+cond := cmp ( '&&' cmp )*  ('||' 的优先级低于 '&&')
+cmp  := KEY ( '==' | '!=' ) "字符串"
+```
+
+- `KEY` 是**注入的键**，值恒为字符串；键**不是变量**，程序别处看不见它。
+- 内建键：`OS_TYPE`（`WIN64` / `WIN32` / `LINUX` / `MACOS` / `BSD`）、
+  `OS_ARCH`（`X64` / `X86` / `ARM64` / `ARM`）。
+- 其它键由命令行注入（可重复，同名覆盖内建）：`clux run app.cx -D BUILD_FLAVOR=dev`。
+- 未定义的键是**编译错误**（拼错不会静默变成 false）。
+
 ## 6. 语义规则
 
 ### 6.1 作用域

@@ -33,6 +33,9 @@ typedef struct {
     ast_node_t  base;   /* kind = AST_EXTERN_LIB */
     strslice_t  alias;  /* 库别名（命名空间，extern cfunc 以 <alias>::<fn> 引用） */
     strslice_t  name;   /* 通用库名 / 显式路径（字符串字面量内容，去引号） */
+    /* 可选的 `assert(<条件>)` 条件后缀（规范化文本；空 = 无条件）。
+       条件为假时**整条声明在前脱糖阶段被裁剪**（见 core/ffi_cond.h）。 */
+    strslice_t  cond;
 } ast_extern_lib_t;
 
 static inline ast_node_t *ast_extern_lib_new(arena_t *arena, uint32_t tok_begin,
@@ -46,7 +49,9 @@ static inline ast_node_t *ast_extern_lib_new(arena_t *arena, uint32_t tok_begin,
     return &n->base;
 }
 
-/** 解析 `extern lib <alias> from "<name>";`（调用方已消费 `extern`，tb 为其下标） */
+/** 解析 `extern lib <alias> from "<name>" [assert(<cond>)];`（调用方已消费
+ *  `extern`，tb 为其下标）。`assert` 是**软关键字**（该位置按文本匹配），
+ *  条件文本经 ffi_cond_validate 立即校验，错误定位在声明上。 */
 ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb);
 
 #ifdef __cplusplus

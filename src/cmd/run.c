@@ -1,4 +1,5 @@
 #include "cmd/run.h"
+#include "cmd/path.h"
 #include "cmd/package.h"
 #include "driver/driver.h"
 
@@ -21,7 +22,7 @@
  * 二进制/源码由**内容**区分：以 "CXBC" 二进制头开头者当字节码执行。 */
 
 static const char *USAGE =
-    "usage: clux run [subpkg|<file>]\n";
+    "usage: clux run [subpkg|<file>] [-D KEY=VALUE]...\n";
 
 /* 判断字符串是否像文件路径：
  *   - 以 "./" 或 ".\" 或 "../" 或 "..\" 开头（相对路径，/ 与 \ 均可）
@@ -47,7 +48,23 @@ static int looks_like_file(const char *s) {
 int cmd_run(const cmd_args_t *args) {
     if (!args) return 1;
 
-    const char *arg0 = cmd_args_pos(args, 0);
+    /* `-D KEY=VALUE`（可重复）：注入 extern lib 的 assert 条件键表。
+       剥离后其余位置参数才是"子包名 / 文件路径"。 */
+    const char *pos[16];
+    size_t np = 0;
+    const char *kv[32];
+    size_t nkv = 0;
+    int derr = cmd_take_defines((const char *const *)args->posargs, args->posc, pos, &np, 16, kv,
+                                &nkv, 32);
+    if (derr != 0) {
+        fprintf(stderr, derr == 1 ? "run: -D requires KEY=VALUE\n"
+                                  : "run: too many -D options\n");
+        fputs(USAGE, stderr);
+        return 1;
+    }
+    if (cmd_apply_defines(kv, nkv) != 0) return 1;
+
+    const char *arg0 = np > 0 ? pos[0] : NULL;
 
     /* 无参数：从 clux.mod 查找入口 */
     if (!arg0) {

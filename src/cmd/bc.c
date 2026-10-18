@@ -18,7 +18,7 @@
  * 输出路径省略时按输入同名换扩展名；亦可用第二位置参数代替 -o。 */
 
 static const char *USAGE =
-    "usage: clux bc <emit|asm|disasm> <file> [-o PATH]\n"
+    "usage: clux bc <emit|asm|disasm> <file> [-o PATH] [-D KEY=VALUE]...\n"
     "\n"
     "  emit    <file.cx>   compile source into .cxb binary bytecode\n"
     "  asm     <file.cxs>  assemble .cxs text assembly into .cxb binary\n"
@@ -47,6 +47,23 @@ int cmd_bc(const cmd_args_t *args) {
         fputs(USAGE, stderr);
         return 1;
     }
+
+    /* `-D KEY=VALUE`（可重复）：emit 编译时注入 extern lib 的 assert 条件键。
+       先剥离再取子操作/输入/输出，顺序与 `-o` 无关。 */
+    const char *dpos[8];
+    size_t dnp = 0;
+    const char *kv[32];
+    size_t nkv = 0;
+    int derr = cmd_take_defines(pos, np, dpos, &dnp, 8, kv, &nkv, 32);
+    if (derr != 0) {
+        fprintf(stderr, derr == 1 ? "bc: -D requires KEY=VALUE\n"
+                                  : "bc: too many -D options\n");
+        fputs(USAGE, stderr);
+        return 1;
+    }
+    if (cmd_apply_defines(kv, nkv) != 0) return 1;
+    np = dnp;
+    for (size_t i = 0; i < dnp; i++) pos[i] = dpos[i];
 
     const char *op = (np > 0) ? pos[0] : NULL;
     if (!op) {

@@ -1,8 +1,10 @@
+#include "core/ffi_cond.h" /* assert(<cond>) 语法校验 */
 #include "parser/ast_import.h"
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_error.h"
 #include "parser/parse_utils.h"
+#include <string.h>
 
 /* ---- 公共：`from "<path>"` 解析 ---- */
 
@@ -126,6 +128,12 @@ ast_node_t *parse_reexport(parser_t *p) {
 
 /* ---- parse_extern_lib（M6 FFI）---- */
 
+/* 前置声明：条件采集的辅助函数定义在本函数之后（保持阅读顺序：
+   主解析流程在前、细节在后）。 */
+static bool cur_is_soft_keyword(const parser_t *p, const char *kw);
+static ast_node_t *parse_assert_cond(parser_t *p, uint32_t tb,
+                                     strslice_t *out_cond);
+
 /** 解析 `extern lib <别名> from "<库名>";`
  *
  * 调用方（parse_program）已消费 `extern` 关键字，tb 为其 token 下标（诊断跨度
@@ -187,6 +195,25 @@ ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "extern lib: empty library name");
     }
+
+    /* 可选条件后缀：`assert( <cond> )`（'assert' 是**软关键字**：只在这个位置
+       按文本识别，不占词法关键字）。条件文本按 token 规范化成
+       `KEY == "V" && ...` 存入 AST，并立即做**语法**校验（键是否存在留到
+       前脱糖求值时判定，那才有全局键表）。 */
+    strslice_t cond = STRSLICE_EMPTY;
+    if (cur_is_soft_keyword(p, "assert")) {
+        advance(p);
+        skip_trivia(p);
+        if (!expect_symbol(p, "(")) {
+            return ast_error_new(
+                p->diag, p->tokens, p->arena, tb, p->pos,
+                "expected '(' after 'assert' in extern lib declaration");
+        }
+        ast_node_t *cerr = parse_assert_cond(p, tb, &cond);
+        if (cerr) return cerr;
+        skip_trivia(p);
+    }
+
     if (!expect_symbol(p, ";")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ';' after extern lib declaration");
@@ -194,6 +221,97 @@ ast_node_t *parse_extern_lib(parser_t *p, uint32_t tb) {
     ast_node_t *n = ast_extern_lib_new(p->arena, tb, p->pos);
     if (!n) return NULL;
     ((ast_extern_lib_t *)n)->alias = alias;
-    ((ast_extern_lib_t *)n)->name  = name;
+    ((ast_extern_lib_t *)n)->name = name;
+    ((ast_extern_lib_t *)n)->cond = cond;
     return n;
+}
+
+/* ---- extern lib 的 assert(<cond>) 条件采集 ---- */
+
+/** 当前位置的 token 是否为文本 `kw` 的标识符/关键字（软关键字）。 */
+static bool cur_is_soft_keyword(const parser_t *p, const char *kw) {
+    if (!p || p->pos >= vec_len(p->tokens)) return false;
+    const token_t *t = (const token_t *)vec_get(p->tokens, p->pos);
+    token_kind_t k = token_get_kind(t);
+    if (k != TOKEN_TYPE_IDENTIFIER && k != TOKEN_TYPE_KEYWORD) return false;
+    strslice_t s = token_strslice(t);
+    size_t n = strlen(kw);
+    return s.len == n && memcmp(s.ptr, kw, n) == 0;
+}
+
+static bool is_trivia_kind(token_kind_t k) {
+    return k == TOKEN_TYPE_WHITESPACE || k == TOKEN_TYPE_COMMENT ||
+           k == TOKEN_TYPE_MULTILINE_COMMENT;
+}
+
+/**
+ * 采集 `assert(` 之后到匹配 `)` 之前的 token 文本，规范化为单空格分隔的
+ * 条件字符串（arena 拥有），并做语法校验；成功时 p->pos 停在 `)` 之后。
+ * 出错时返回错误节点（**不是** NULL），调用方直接把它返回给上层。
+ *
+ * 这里只做"取文本 + 找匹配括号"，语法判断全部交给 ffi_cond_validate，
+ * 避免两套语法实现漂移。
+ */
+static ast_node_t *parse_assert_cond(parser_t *p, uint32_t tb,
+                                     strslice_t *out_cond) {
+    size_t start = p->pos;
+    int depth = 0;
+    size_t close = (size_t)-1;
+    for (size_t i = p->pos; i < vec_len(p->tokens); i++) {
+        const token_t *t = (const token_t *)vec_get(p->tokens, i);
+        token_kind_t k = token_get_kind(t);
+        if (is_trivia_kind(k)) continue;
+        if (k == TOKEN_TYPE_EOF) break;
+        strslice_t s = token_strslice(t);
+        if (k == TOKEN_TYPE_SYMBOL && s.len == 1) {
+            if (s.ptr[0] == '(') {
+                depth++;
+            } else if (s.ptr[0] == ')') {
+                if (depth == 0) {
+                    close = i;
+                    break;
+                }
+                depth--;
+            }
+        }
+    }
+    if (close == (size_t)-1) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "unterminated 'assert(' in extern lib declaration");
+    }
+
+    /* 规范化：token 之间单空格；'(' 后与 ')' 前不留空格 */
+    size_t cap = 1;
+    for (size_t i = start; i < close; i++) {
+        const token_t *t = (const token_t *)vec_get(p->tokens, i);
+        if (is_trivia_kind(token_get_kind(t))) continue;
+        cap += token_strslice(t).len + 1;
+    }
+    char *buf = (char *)arena_alloc(p->arena, cap, 1);
+    if (!buf) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "extern lib: out of memory");
+    }
+    size_t used = 0;
+    bool prev_open = false;
+    for (size_t i = start; i < close; i++) {
+        const token_t *t = (const token_t *)vec_get(p->tokens, i);
+        if (is_trivia_kind(token_get_kind(t))) continue;
+        strslice_t s = token_strslice(t);
+        bool is_close = (s.len == 1 && s.ptr[0] == ')');
+        if (used > 0 && !prev_open && !is_close) buf[used++] = ' ';
+        memcpy(buf + used, s.ptr, s.len);
+        used += s.len;
+        prev_open = (s.len == 1 && s.ptr[0] == '(');
+    }
+    buf[used] = '\0';
+
+    char err[256] = {0};
+    if (!ffi_cond_validate(buf, err, sizeof err)) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos, "%s",
+                             err);
+    }
+    *out_cond = strslice_from_bytes(buf, used);
+    p->pos = close + 1; /* 跳过 ')' */
+    return NULL;
 }

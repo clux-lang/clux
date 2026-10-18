@@ -1789,3 +1789,45 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `libclux_ffi_testdata.so` 由通用名 `"clux_ffi_testdata"` 命中候选
       `libclux_ffi_testdata.so`（走 exe 目录回退，未设 `LD_LIBRARY_PATH`）；
       libffi 走系统库（`-- FFI: using system libffi: libffi.so`）。
+
+80. **FFI 导入第二阶段：`extern lib ... assert(<条件>)` 条件后缀**（2026-10）
+    - **需求（用户提出）**：实际动态库是否导入、导入哪一个，在不同场景下不同，
+      静态的 `extern lib` 不够用。方案：可选后缀
+      `assert(<key> == <value>)` / `assert(<key> != <value>)`，键由编译/运行时
+      注入（类似 CMake `-D`），值恒为字符串；OS 注入默认键（如 `OS_TYPE`）；
+      只支持基本 `||` / `&&`；键**不是变量**，只在 assert 里可见。
+    - **设计决定（用户确认）**：**编译期求值**——条件不满足时**整条 extern lib
+      语句被裁剪**，于是"两条不同平台的 `extern lib crt from ...`"不冲突
+      （`crt` 只生效一条）。实现落在**前脱糖**（parser → sema 之间），与
+      `foreach` 展开同一层；sema / driver / 容器都看不到被裁剪的声明。
+    - **键集合 = 进程级全局静态表**（用户明确要求）：`include/core/ffi_cond.h`
+      + `src/core/ffi_cond.c`（无堆分配）。内建 `OS_TYPE`（`WIN64`/`WIN32`/
+      `LINUX`/`MACOS`/`BSD`）、`OS_ARCH`（`X64`/`X86`/`ARM64`/`ARM`）；
+      命令行 `-D KEY=VALUE` / `-DKEY=VALUE`（可重复，同名覆盖内建）。
+    - **条件语言**：`KEY == "值"`、`KEY != "值"`、`&&`、`||`、括号；
+      `&&` 优先级高于 `||`（与 C 一致）。未定义的键**报错**（
+      `unknown define 'X' (inject it with -D X=<value>)`）——拼错若静默为
+      false，整条声明会被无声裁剪。
+    - **语法**：`extern lib <别名> from "<库名>" assert(<条件>);`。`assert` 是
+      **软关键字**（只在该位置按文本识别，不占词法关键字，`var assert = 1;`
+      照常可用）。解析期采集 token 并规范化成单空格文本，同时做语法校验
+      （键是否存在留到脱糖时判定）；fmt 原样保留后缀（幂等，漏渲染会把
+      "仅 Windows 生效"变成"永远生效"）。
+    - **CLI**：`clux run ... [-D KEY=VALUE]...` 与 `clux bc emit ... [-D ...]`
+      （`cmd/path.c` 的 `cmd_take_defines` / `cmd_apply_defines`；单横线选项由
+      handler 显式扫描，与 `-o` 同一约定）。help/usage 同步。
+    - **测试**：新增 `tests/ffi_assert_test.cpp` 18 例——条件语言（内建键注入、
+      覆盖、6 类语法错误、`&&`/`||` 优先级与括号、未知键）、解析（AST 规范化
+      文本 / 无后缀 / 畸形条件 / `assert` 软关键字）、端到端（同别名互斥声明
+      只生效一条、`-D OS_TYPE=LINUX` 切换、未知键编译期报错、自定义键切换、
+      `bc emit` 容器只留存活声明）、fmt 幂等、`-D` 参数收集（两 token / 粘连 /
+      缺值 / 超容量）。
+    - **新增示例**：`examples/ffi_assert/ffi_assert.cx`（三平台各一条 `crt`
+      声明，Windows 实跑输出 `runtime strlen("hello") = 5`）。
+    - **文档**：m6-design §1.1（条件后缀小节）、language-spec（"动态库声明的
+      条件后缀"）、README（M6 FFI 状态）、`include/core/ffi_cond.h` 契约注释。
+    - 验证：Windows 全量 **2118/2118 PASSED**；examples 49 个 `.cx` 全过（含新增
+      示例）；`fmt` 幂等（examples+repro 共 79 文件，条件后缀原样保留）；
+      `.cxs` 样本 5/5；WSL2 Ubuntu 全量 **2115 passed / 2 skipped**（跳过项是
+      §79 里那两个 Windows CRT 数据符号用例），且示例在 Linux 上自动选中
+      `libc.so.6`（`runtime strlen("hello") = 5`）、`bc emit -D` 产物可直接 run。

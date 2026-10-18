@@ -1,0 +1,33 @@
+// ffi_assert.cx — FFI 导入的**条件后缀**：按平台选库
+//
+// 同一个逻辑库（C 运行库）在各平台叫法不同，而源码不该被写死。`extern lib`
+// 可以带一个可选的条件后缀：
+//
+//     extern lib <别名> from "<库名>" assert(<条件>);
+//
+// 条件在**编译该模块时**求值（前脱糖阶段）；为假的那条声明**整条被裁剪**
+// （不加载、不登记别名、不校验符号）。所以同一别名写多条、条件互斥，不会冲突。
+//
+// 条件语言只有三种东西：`KEY == "值"`、`KEY != "值"`、`&&` / `||`（可用括号）。
+// 键是**注入**的（不是变量，程序别处看不见它）：
+//   OS_TYPE  内建：WIN64 / WIN32 / LINUX / MACOS / BSD
+//   OS_ARCH  内建：X64 / X86 / ARM64 / ARM
+//   其它键用命令行注入，例如：clux run ffi_assert.cx -D BUILD_FLAVOR=dev
+//   （未注入的键在求值时报错——拼错不会静默变成 false）
+// 注意：键**不是变量**，程序里看不见它们，只能在 assert 里用。
+
+extern lib libc from "*";
+extern func libc::printf(format: str, ...): void;
+
+// C 运行库：三平台各写一条，只有一个 OS_TYPE 条件成立；
+// 其余两条在编译期就被整条裁剪，不会互相冲突（别名都叫 crt）。
+extern lib crt from "msvcrt" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
+extern lib crt from "libc.so.6" assert(OS_TYPE == "LINUX");
+extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
+extern func crt::strlen(s: str): usize;
+
+func main(): i32 {
+    var n: usize = crt::strlen("hello");
+    libc::printf("runtime strlen(\"hello\") = %d\n", n as i32);
+    return 0;
+}

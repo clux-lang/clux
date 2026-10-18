@@ -1062,7 +1062,15 @@ static void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_put(&f->sb, el->alias.ptr, el->alias.len);
             sb_str(&f->sb, " from \"");
             sb_put(&f->sb, el->name.ptr, el->name.len);
-            sb_str(&f->sb, "\";");
+            sb_str(&f->sb, "\"");
+            /* 条件后缀必须原样渲染：漏掉它 = 格式化把"仅在 Windows 生效"的
+               声明变成"永远生效"（整条声明被静默改语义，比丢声明更隐蔽）。 */
+            if (el->cond.len > 0) {
+                sb_str(&f->sb, " assert(");
+                sb_put(&f->sb, el->cond.ptr, el->cond.len);
+                sb_str(&f->sb, ")");
+            }
+            sb_str(&f->sb, ";");
             break;
         }        case AST_IMPORT: {
             /* import <alias> from "<path>";——AST 中的 path 已去掉引号

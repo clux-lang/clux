@@ -46,7 +46,7 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "run",
-        .usage = "clux run [subpkg|<file>]",
+        .usage = "clux run [subpkg|<file>] [-D KEY=VALUE]...",
         .help =
             "Run a clux program.\n"
             "\n"
@@ -58,6 +58,11 @@ static const cmd_t g_cmds[] = {
             "A relative/absolute path is treated as a file; anything else is\n"
             "a sub-package name.\n"
             "\n"
+            "-D KEY=VALUE  inject a build-time define (repeatable). Keys are\n"
+            "              visible only inside `extern lib ... assert(...)`;\n"
+            "              builtin keys: OS_TYPE (WIN64/WIN32/LINUX/MACOS/BSD),\n"
+            "              OS_ARCH (X64/X86/ARM64/ARM).\n"
+            "\n"
             "The input kind is decided by CONTENT, not by extension:\n"
             "  - starts with the CXBC binary header -> run as bytecode\n"
             "  - otherwise                           -> compile as clux source",
@@ -65,7 +70,7 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "bc",
-        .usage = "clux bc <emit|asm|disasm> <file> [-o PATH]",
+        .usage = "clux bc <emit|asm|disasm> <file> [-o PATH] [-D KEY=VALUE]...",
         .help =
             "Bytecode tools (non-mainline; debug / distribution).\n"
             "\n"
@@ -73,7 +78,10 @@ static const cmd_t g_cmds[] = {
             "  asm     <file.cxs>  assemble text assembly into .cxb binary\n"
             "  disasm  <file.cxb>  disassemble binary bytecode into .cxs text\n"
             "\n"
-            "PATH omitted => same name as input with the new extension.",
+            "PATH omitted => same name as input with the new extension.\n"
+            "\n"
+            "emit also accepts -D KEY=VALUE (repeatable): build-time defines\n"
+            "used by `extern lib ... assert(...)` (see `clux run --help`).",
         .handler = cmd_bc,
     },
     {

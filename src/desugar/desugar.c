@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/ffi_cond.h"  /* extern lib 的 assert(<cond>) 求值 */
 #include "core/strslice.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_binary.h"
@@ -13,6 +14,7 @@
 #include "parser/ast_defer.h"
 #include "parser/ast_dowhile.h"
 #include "parser/ast_expr_stmt.h"
+#include "parser/ast_extern_lib.h"
 #include "parser/ast_for.h"
 #include "parser/ast_foreach.h"
 #include "parser/ast_func_def.h"
@@ -484,8 +486,56 @@ static void ds_walk_stmt(desugar_t *ds, ast_node_t *stmt) {
   }
 }
 
+/* ===========================================================================
+ * extern lib 的条件裁剪（前脱糖）
+ *
+ * `extern lib crt from "msvcrt" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");`
+ * 这类声明按**编译期注入的全局键表**（core/ffi_cond.h）判定：条件为假 → 整条
+ * 声明从函数/全局链表里摘除，sema/driver/容器都看不到它。于是"各平台各写一条
+ * 同别名声明"天然不冲突（只有一条存活）。
+ *
+ * 为什么放在前脱糖：这是**纯 AST 变形**（不查符号表、不做类型检查），与
+ * `foreach` 展开同一层；放这里的好处是后续所有阶段（sema 的别名登记、driver
+ * 的 dlopen 与 dlsym 校验、.cxb/.cxs 的 FFI 段）都不用知道条件存在。
+ * =========================================================================== */
+
+/** 摘除条件为假（或求值失败）的 AST_EXTERN_LIB 节点。 */
+static void ds_prune_extern_libs(desugar_t *ds, ast_program_t *prog) {
+  ast_node_t **link = &prog->funcs;
+  while (*link) {
+    ast_node_t *n = *link;
+    if (n->kind != AST_EXTERN_LIB) {
+      link = &n->next;
+      continue;
+    }
+    ast_extern_lib_t *el = (ast_extern_lib_t *)n;
+    if (el->cond.len == 0) { /* 无条件：永远生效 */
+      link = &n->next;
+      continue;
+    }
+    char cond[512];
+    size_t clen = el->cond.len < sizeof(cond) - 1 ? el->cond.len : sizeof(cond) - 1;
+    memcpy(cond, el->cond.ptr, clen);
+    cond[clen] = '\0';
+
+    bool keep = true;
+    char err[256] = {0};
+    if (!ffi_cond_eval(cond, &keep, err, sizeof err)) {
+      ds_error(ds, n, err);
+      keep = false;
+    }
+    if (keep) {
+      link = &n->next;
+      continue;
+    }
+    *link = n->next; /* 裁剪：后续阶段完全看不到这条声明 */
+  }
+}
+
 void desugar_program(desugar_t *ds, ast_program_t *prog) {
   if (!ds || !prog) return;
+  /* 先裁剪条件不满足的 extern lib 声明，再做其余展开 */
+  ds_prune_extern_libs(ds, prog);
   for (ast_node_t *n = prog->funcs; n; n = n->next) {
     switch (n->kind) {
       case AST_FUNC_DEF:
