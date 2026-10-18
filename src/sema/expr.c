@@ -1746,6 +1746,35 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
         return value_make_shadow(sema->vm, sym->type);
       }
 
+      /* **闭包捕获读取**：改写为 `__ctx.env.<cap>`（捕获聚合结构体）。
+         __ctx 是调用帧绑定的隐藏局部（被调用的 func 值），`.env` 是 env 块的
+         借用 struct 值（VM FIELD_GET 的闭包分支），`.cap` 就是普通结构体字段
+         ——运行时不再有"按名查 closure_scope"的隐式捕获读取。 */
+      if (sym && sym->kind == SEMA_SYM_VAR && sym->is_capture &&
+          sema->fn.def && sema->fn.def->capture_type_id != 0) {
+        uint32_t tb = (*node)->tok_begin, te = (*node)->tok_end;
+        ast_node_t *ctx = ast_ident_new(sema->arena, tb, te);
+        ast_node_t *env = ast_member_new(sema->arena, tb, te);
+        ast_node_t *cap = ast_member_new(sema->arena, tb, te);
+        if (ctx && env && cap) {
+          ctx->is_generated = true;
+          env->is_generated = true;
+          cap->is_generated = true;
+          ((ast_ident_t *)ctx)->name = strslice_from_bytes("__ctx", 5);
+          ((ast_member_t *)env)->object = ctx;
+          ((ast_member_t *)env)->field = strslice_from_bytes("env", 3);
+          ((ast_member_t *)cap)->object = env;
+          ((ast_member_t *)cap)->field = n->name;
+          cap->next = (*node)->next;
+          *node = cap;
+          /* 不求值生成链（__ctx 是 VM 调用帧的隐藏局部，sema 作用域里不需要
+             它）：直接按捕获槽类型/所有权产出 shadow。 */
+          value_t *csv = value_make_shadow(sema->vm, sym->type);
+          value_set_ownership(csv, sym->ownership);
+          return csv;
+        }
+      }
+
       if (sym && !sym->flow_init) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "variable '%.*s' used before initialization",
@@ -2453,6 +2482,18 @@ static value_t *ex_member(sema_t *sema, ast_node_t **node,
           ot = base;
         }
       }
+      /* 闭包 `.env`：func 值的捕获聚合结构体（capture_type）。这是 sema 为
+         "捕获读取 → __ctx.env.<cap>" 改写提供的类型入口；用户源码里没有
+         `f.env` 语法（sema 不放行对闭包值的字段访问）。 */
+      if (ot->kind == TYPE_KIND_FUNC && sema->fn.def &&
+          sema->fn.def->capture_type_id != 0 && n->field.len == 3 &&
+          memcmp(n->field.ptr, "env", 3) == 0) {
+        const sema_type_t *caps =
+            sema_type_by_id(sema, sema->fn.def->capture_type_id);
+        if (caps && caps->type)
+          return value_make_shadow(sema->vm, caps->type);
+      }
+
       if (ot->kind == TYPE_KIND_UNION) {
         /* union 字段：字段名 = member 名（tag 名），按名反查 member →
            返回该 member 的 payload 类型 shadow。运行期 FIELD_GET 按 tag
@@ -3917,8 +3958,18 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          原 AST_MOVE 节点 → compiler 退化为运行期 CLONE 指令。
          语义返回值不变：仍是 fatal 阴影（所有权判定与消费规则完全一致）。 */
       if (is_clone) {
-        ast_node_t *gen = sema_gen_clone(sema, scope, ot, n->operand);
-        if (gen) *node = gen;
+        /* `clone(<func 字面量>)`：字面量在定义点**本来就产出全新实例**（新的
+           函数对象 + 新的 env 块），再深拷贝一份既浪费，又会让那个中间实例的
+           捕获（own 堆块）随临时值丢弃而泄漏。直接当作转移：把字面量节点提到
+           调用点（所有权照常交给消费者）。 */
+        if (n->operand && n->operand->kind == AST_FUNC_DEF) {
+          ast_node_t *lit = n->operand;
+          lit->next = (*node)->next;
+          *node = lit;
+        } else {
+          ast_node_t *gen = sema_gen_clone(sema, scope, ot, n->operand);
+          if (gen) *node = gen;
+        }
       }
       /* union / cunion 成员 move：**整体进 TDZ**（"局部 = 整体"）。
          作用域退出不再销毁整体——payload 已移出，由接管方销毁；不标 TDZ 会让

@@ -57,6 +57,12 @@ struct func_t {
        复制。VM 层据此把闭包当聚合值处理：clone 深拷贝捕获、free 按槽位
        所有权释放、字段读写按槽位类型。 */
     const struct struct_type_t *capture_type;
+
+    /* 捕获 env 块（裸数据块，布局 = capture_type）：闭包 = { 函数实现, env }，
+       env 就是"捕获结构体"的实例。由 func_instantiate_raw 按 capture_type
+       分配（zeroed），SET_CLOSURE 按字段偏移写入；字段读取/写入/克隆/释放
+       全部按 capture_type 的槽位规则进行（与结构体完全同构）。无捕获 = NULL。 */
+    void           *env;
     scope_t        *root_scope;
     const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;

@@ -51,6 +51,7 @@ typedef struct bcode_function_t {
  *   untracked（调用方管理）：value_dispose(vm, v) 释放 data 块与 value_t，
  *   函数对象本体归 vm->functions，由 vm_destroy 统一释放。
  */
+func_t *func_instantiate_raw(vm_t *vm, func_t *base);
 value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
                             uint32_t entry_pc,
                             scope_t *root_scope,

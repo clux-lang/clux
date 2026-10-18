@@ -403,21 +403,11 @@ size_t compile_func_reg_hoist(compiler_t *c, ast_func_def_t *fn) {
     bcode_write_u32(c->bc, fn->capture_type_id);
   }
 
-  /* 4. 捕获槽占位：每捕获 PUSH_UNDEFINED (+1) + SET_CLOSURE "name"（弹 cap
-     → scope_set 定义或替换，净 0）——基底 closure_scope 先以 undefined
-     绑定捕获名。定义点 MAKE_FUNCTION 实例化新实例时复制这些槽名（strmap_keys
-     枚举 + undefined 占位），SET_CLOSURE 用真实捕获值替换——函数提升后、
-     定义点前被调用 → 捕获槽是 undefined，函数体读到 → 引擎级错误（TDZ
-     语义）。全局函数 captures 恒空（sema 拒绝捕获），此循环不执行。函数值
-     留在栈顶供后续 BIND/名字绑定段使用。 */
-  for (ast_node_t *cap = fn->captures; cap; cap = cap->next) {
-    ast_var_def_t *cv = (ast_var_def_t *)cap;
-    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
-    st_push(c, 1);
-    bcode_write_op(c->bc, BCODE_SET_CLOSURE);
-    bcode_write_str(c->bc, cv->name);
-    st_push(c, -1);
-  }
+  /* 4. 捕获槽：**不再需要占位**。闭包 = { 实现, env }，env 是捕获聚合结构体
+     的实例（按 capture_type 分配，见 func_instantiate）；实例化时 env 块
+     zero 初始化，真实捕获值由定义点的 SET_CLOSURE 写入。基底对象不参与捕获
+     （全局函数 captures 恒空；字面量/局部函数的基底只作模板）。函数值留在
+     栈顶供后续 BIND/名字绑定段使用。 */
 
   /* 5. POP：消费 BIND_FUNC/SET_FUNC_NAME 用毕的 func value（二者均 peek
      不弹栈）。名字绑定由 compile_func_bind 另行 LOAD_FUNCTION 压新函数

@@ -182,6 +182,16 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     /* 4. push 匿名局部作用域 */
     vm_push_scope(vm);
 
+    /* 4.5 闭包上下文绑定：`__ctx` = 当前被调用的 func 值（含 env 块）。
+       函数体里的**捕获读取**已被 sema 改写为 `__ctx.env.<cap>`（捕获聚合结构
+       体），运行时与结构体字段访问完全同构 —— 不再有"按名查 closure_scope"
+       的隐式捕获读取。 */
+    if (fn->capture_type) {
+        value_t *ctxv = value_clone(vm, callee);
+        if (ctxv && !value_is_error(vm, ctxv))
+            scope_define(vm, vm->current_scope, "__ctx", ctxv);
+    }
+
     /* 5. safe_cast + clone 参数到当前作用域（value_clone 自动注册到 owned） */
     value_t *local_args[argc > 0 ? argc : 1];
     value_t *ret = NULL;

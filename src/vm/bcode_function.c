@@ -54,7 +54,7 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
    独立（复制基底捕获槽名 + undefined 占位，定义点 SET_CLOSURE 逐个替换）。
    名字借用基底（owns_name=false）——基底 owns_name=true（SET_FUNC_NAME 堆
    拷贝）由 func_destroy 随基底释放，新实例共享 strslice 指针不释放。 */
-value_t *func_instantiate(vm_t *vm, func_t *base) {
+func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     if (!vm || !base || !base->type) return NULL;
     bcode_function_t *fn = (bcode_function_t *)allocator_new(
         vm->alloc, &g_bcode_function_class, 1);
@@ -65,7 +65,15 @@ value_t *func_instantiate(vm_t *vm, func_t *base) {
     fn->base.type        = base->type;
     fn->base.id          = base->id;   /* 共享基底 id（不重复登记 functions_by_id） */
     fn->base.name        = base->name; /* 借用基底名字 */
-    fn->base.capture_type = base->capture_type; /* 捕获聚合类型 */
+    fn->base.capture_type = base->capture_type;
+    if (base->capture_type && base->capture_type->base.size > 0) {
+        void *env = allocator_new_ex(vm->alloc, "closure_env",
+                                     base->capture_type->base.size, NULL, NULL, NULL,
+                                     1);
+        if (!env) panic("vm: out of memory allocating closure env");
+        memset(env, 0, base->capture_type->base.size);
+        fn->base.env = env;
+    } /* 捕获聚合类型 */
     fn->base.closure_scope     = scope_new(vm->alloc, NULL);
     fn->base.owns_closure_scope = true;
     fn->entry_pc = (base->cfunc == bcode_call_cfunc)
@@ -76,16 +84,15 @@ value_t *func_instantiate(vm_t *vm, func_t *base) {
     /* 复制基底捕获槽名 + undefined 占位（strmap_keys 只读 key 向量）。
        定义点 SET_CLOSURE 用真实捕获值替换（scope_set）——提升后定义点前
        调用 → 捕获槽 undefined（TDZ 语义，与 hoist 区占位一致）。 */
-    if (base->closure_scope && base->closure_scope->vars) {
-        const vec_t *keys = strmap_keys(base->closure_scope->vars);
-        for (size_t i = 0; i < vec_len(keys); i++) {
-            const char *key = (const char *)vec_get(keys, i);
-            value_t *u = value_make_undefined(vm);
-            scope_set(vm, fn->base.closure_scope, key, u);
-        }
-    }
+    /* 捕获不再放 scope：env 块（按 capture_type 分配）才是捕获存储，
+       closure_scope 只作为调用期作用域链的挂点（parent = root_scope）。 */
 
     if (vm->functions) vec_push(vm->functions, vm->alloc, fn);
+    return (func_t *)fn;
+}
+value_t *func_instantiate(vm_t *vm, func_t *base) {
+    func_t *fn = func_instantiate_raw(vm, base);
+    if (!fn) return NULL;
     void *data = value_alloc_data_copy(vm->alloc, base->type, &fn);
     return value_make(vm, base->type, data);
 }

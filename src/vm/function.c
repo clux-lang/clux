@@ -1,4 +1,5 @@
 #include "vm/function.h"
+#include "vm/type_ptr.h"
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/ffi_lib.h"   /* M6 Phase 5：函数对象持有的 C 回调闭包 */
@@ -115,6 +116,14 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
         allocator_free(alloc, &fn->ffi_closure_ctx);
     }
     fn->ffi_closure_code = NULL;
+    /* 闭包 env 块（捕获结构体实例）：先按 capture_type 的槽位所有权清理残留
+       （sema 生成的 `FREE f.<cap>` 已把 own 捕获槽置 NULL，这里只兜底），
+       再释放块本体。 */
+    if (fn->env) {
+        /* env 块的**内嵌 own 槽位**由 sema 生成的 FREE 负责；这里只兜底释放
+           env 块本体（函数对象销毁时其 data 已不可达）。 */
+        allocator_free(alloc, &fn->env);
+    }
     /* 签名信息归 vm 类型池所有，func_t 不释放 sig_type */
     allocator_free(alloc, (void **)pfn);
 }

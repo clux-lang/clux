@@ -745,40 +745,22 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
          `FREE f.<cap>`，对聚合是空操作，捕获块内嵌的堆块全部泄漏
          （实测：`move` 捕获含 own 指针的 struct → 4 字节泄漏）。
        ref 捕获是借用，不释放。 */
-    if (sym->closure_captures) {
-      for (ast_node_t *c = sym->closure_captures; c; c = c->next) {
-        ast_var_def_t *cv = (ast_var_def_t *)c;
-        if (cv->ownership != AST_OWN_OWN) continue;
-        ast_node_t *obj = ast_ident_new(sema->arena, 0, 0);
-        if (!obj) continue;
+    /* ---- 闭包（func 值）：**单个 FREE** ----
+       闭包 = 捕获聚合结构体（env 块）。VM 的 FREE 分支按 capture_type 的槽位
+       所有权释放 env 里的 own 捕获，再释放 env 块本体 —— 与结构体销毁同构。
+       因此 sema 不再需要枚举捕获槽（旧实现按字面量捕获表生成 `FREE f.<cap>`，
+       对 `var f = clone(g)` 这种非字面量初始化无法枚举，会漏释放）。 */
+    if (type_strip_quals(sym->type)->kind == TYPE_KIND_FUNC) {
+      ast_node_t *obj = ast_ident_new(sema->arena, 0, 0);
+      if (obj) {
         ((ast_ident_t *)obj)->name = name_slice;
-        ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
-        if (!mem) continue;
-        /* 捕获名也需 arena 持久化（cv->name 指向 token 流，需转 NUL 串） */
-        size_t cl = cv->name.len;
-        char *cbuf = (char *)arena_calloc(sema->arena, cl + 1, 1,
-                                          ALIGNOF(max_align_t));
-        if (!cbuf) continue;
-        memcpy(cbuf, cv->name.ptr, cl);
-        ((ast_member_t *)mem)->object = obj;
-        ((ast_member_t *)mem)->field = strslice_from_bytes(cbuf, cl);
-
-        if (cv->resolved_type) {
-          if (!gen_destroy(sema, cv->resolved_type, mem, &head, &tail))
-            continue;
-        } else {
-          /* 防御：类型未知时退回旧行为（只释放指针槽本身） */
-          ast_node_t *fs = ast_free_new(sema->arena, mem);
-          if (!fs) continue;
-          if (!head) {
-            head = tail = fs;
-          } else {
-            tail->next = fs;
-            tail = fs;
-          }
+        ast_node_t *fs = ast_free_new(sema->arena, obj);
+        if (fs) {
+          if (!head) head = tail = fs;
+          else { tail->next = fs; tail = fs; }
         }
       }
-      continue; /* 闭包本身不是指针/切片，没有"整体释放"这一步 */
+      continue;
     }
 
     /* ---- 一般形态：交给销毁序列生成器（按 type 对象递归展开）----
@@ -1930,10 +1912,16 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
           /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
              并记住捕获链供 FREE 展开（逐捕获槽释放）。 */
           else if (vt->kind == TYPE_KIND_FUNC) {
+            /* 闭包 = 捕获聚合结构体：**含 own 捕获**的闭包是 own（move-only），
+               销毁 = `FREE f`（VM 按 capture_type 释放 env 里的 own 捕获）。 */
             const ast_func_def_t *oc = own_closure_of(vd->init);
             if (oc) {
               sym->ownership = OWN_OWN;
-              sym->closure_captures = oc->captures;
+            } else if (sema_value_is_fatal(init) ||
+                       value_ownership(init) == OWN_OWN) {
+              /* 非字面量初始化（clone(g) / move(g)）：结果依赖运行期 capture_type
+                 → 保守标 own，FREE 时由 VM 按槽位所有权释放。 */
+              sym->ownership = OWN_OWN;
             }
           } else if (type_has_own_slots(vt)) {
             /* 聚合（含 own 槽位的 struct/tuple/union/array）接管：
@@ -3211,6 +3199,26 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
 
 /* ---- 语句：控制流 ---- */
 
+/* 捕获读取被改写为 `__ctx.env.<cap>`（捕获聚合结构体）后的**同构识别**：
+   返回捕获名。返回 ref 的 §6/§9 检查（来源必须是参数/捕获/全局、标注不得
+   更宽）按名字做静态分析，必须能看穿这个改写。 */
+static bool capture_access_name(ast_node_t *e, strslice_t *out) {
+  if (!e || e->kind != AST_MEMBER) return false;
+  ast_member_t *cap = (ast_member_t *)e;
+  if (!cap->object || cap->object->kind != AST_MEMBER) return false;
+  ast_member_t *env = (ast_member_t *)cap->object;
+  if (!env->object || env->object->kind != AST_IDENT) return false;
+  if (env->field.len != 3 || !env->field.ptr ||
+      memcmp(env->field.ptr, "env", 3) != 0)
+    return false;
+  ast_ident_t *ctx = (ast_ident_t *)env->object;
+  if (ctx->name.len != 5 || !ctx->name.ptr ||
+      memcmp(ctx->name.ptr, "__ctx", 5) != 0)
+    return false;
+  *out = cap->field;
+  return true;
+}
+
 static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                   sema_scope_t *scope) {
   block_result_t r = {.definitely_returns = true};
@@ -3232,37 +3240,37 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
         } else if (sema->fn.return_ownership == OWN_REF &&
-                   rt->value->kind == AST_IDENT) {
+                   (rt->value->kind == AST_IDENT ||
+                    capture_access_name(rt->value, &(strslice_t){0}))) {
           /* R3（返回 ref 来源，m3-design §6）：返回值 ref 的（标注）作用域
              必然来自参数或全局——本地 own 变量/临时借用不能作为返回值 ref
              来源（返回后栈上值销毁，借用悬垂）。检查：return 的值是
              标识符时，须是 ref/fatal 参数（fatal 返回继续传递所有权）或
              全局 ref。非标识符表达式（x.& 取栈值地址等）一律拒绝。 */
-          sema_symbol_t *rs =
-              sema_lookup(scope, ((ast_ident_t *)rt->value)->name);
+          strslice_t rname = ((ast_ident_t *)rt->value)->name;
+          if (rt->value->kind != AST_IDENT)
+            capture_access_name(rt->value, &rname);
+          sema_symbol_t *rs = sema_lookup(scope, rname);
           if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
               rs->ownership == OWN_REF) {
             /* §6 返回 ref 来源：必须是参数或全局。参数层符号
                （sema_lookup 沿 scope 链第一个命中）或全局符号放行；
                本地 own 的 ref 变量/外层局部借用 → 悬垂 → 拒绝。 */
-            sema_symbol_t *g = sema_lookup(sema->global_scope,
-                                           ((ast_ident_t *)rt->value)->name);
+            sema_symbol_t *g = sema_lookup(sema->global_scope, rname);
             /* 参数判定：遍历真实参数列表（body 顶层变量也注册在
                param_scope，sema_scope_find_local 无法区分） */
             bool is_param = false;
             for (ast_node_t *p = sema->fn.def ? sema->fn.def->params : NULL;
                  p && !is_param; p = p->next) {
               ast_var_def_t *pvd = (ast_var_def_t *)p;
-              is_param = pvd->name.len == ((ast_ident_t *)rt->value)->name.len &&
-                         memcmp(pvd->name.ptr, ((ast_ident_t *)rt->value)->name.ptr,
-                                pvd->name.len) == 0;
+              is_param = pvd->name.len == rname.len &&
+                         memcmp(pvd->name.ptr, rname.ptr, pvd->name.len) == 0;
             }
             bool is_global = g == rs;
             /* §9 闭包捕获视同特殊参数：返回 ref 可来自捕获变量
                （调用闭包时闭包对象必然存活，捕获的 ref 有效） */
             bool is_capture = false;
             if (sema->fn.def && sema->fn.def->captures) {
-              strslice_t rname = ((ast_ident_t *)rt->value)->name;
               for (ast_node_t *c = sema->fn.def->captures; c; c = c->next) {
                 ast_var_def_t *cv = (ast_var_def_t *)c;
                 if (cv->name.len == rname.len &&
@@ -3277,8 +3285,7 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                          "cannot return ref borrowed from local "
                          "'%.*s' (returned ref must come from a parameter, "
                          "capture or global)",
-                         (int)((ast_ident_t *)rt->value)->name.len,
-                         ((ast_ident_t *)rt->value)->name.ptr);
+                         (int)rname.len, rname.ptr);
             }
             /* §9 闭包返回捕获 ref 的标注关系检查：返回值标注的每个锚点
                须嵌套于闭包标注的每个锚点（返回值存活 ≤ 闭包存活 ≤ 锚点）。
@@ -4163,6 +4170,29 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     char nb[256];
     name_to_cstr(vd->name, nb, sizeof nb);
     scope_define(sema->vm, sema->vm->current_scope, nb, pv);
+  }
+
+  /* 闭包调用上下文（隐藏局部）：`__ctx` = 当前被调用的 func 值。捕获读取在
+     ex_ident 里改写为 `__ctx.env.<cap>`（捕获聚合结构体，与 C 后端的
+     `ctx->env.cap` 同构）。符号注册在参数层——函数体可见、捕获/参数同名时
+     参数先行遮蔽（与捕获按名遮蔽的既有语义一致）。 */
+  if (fn->capture_type_id != 0 && fn->sig_id != 0) {
+    const sema_type_t *sig_st = sema_type_by_id(sema, fn->sig_id);
+    const type_t *sig_type = sig_st ? sig_st->type : NULL;
+    if (sig_type) {
+      sema_symbol_t ctxsym;
+      memset(&ctxsym, 0, sizeof ctxsym);
+      ctxsym.kind       = SEMA_SYM_VAR;
+      ctxsym.type       = sig_type;
+      ctxsym.ownership  = OWN_REF;   /* 借用：ctx 是调用方传进来的 func 值 */
+      ctxsym.flow_init  = true;
+      ctxsym.is_active  = true;
+      ctxsym.own_scope  = sf->param_scope;
+      sema_scope_define(sf->param_scope, strslice_from_bytes("__ctx", 5),
+                        &ctxsym);
+      value_t *csv = value_make_shadow(sema->vm, sig_type);
+      scope_define(sema->vm, sema->vm->current_scope, "__ctx", csv);
+    }
   }
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成；

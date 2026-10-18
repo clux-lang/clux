@@ -614,6 +614,34 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
 struct/指针/切片的 clone 反汇编里不再出现 `CLONE`（改用生成的 `__clone*`）；
 闭包 clone 仍深拷贝捕获。
 
+### 7.1.10 闭包 = 捕获聚合结构体（2026-10 重构）
+
+闭包不再用 scope 存捕获，而是**聚合结构体**（与 C 后端一一对应）：
+
+```c
+struct __add_closure;                                  /* clux: func 值 */
+typedef void (*__add_fn_t)(struct __add_closure *ctx, int b);
+struct __add_closure { __add_fn_t callee; struct { int a; } env; };
+```
+
+| 层 | 表示 |
+|---|---|
+| sema | 每个闭包字面量登记 **env 捕获结构体类型**（字段 = 捕获名 + 类型 + **槽位所有权**），`ast_func_def_t::capture_type_id` |
+| compiler | hoist 注册函数对象后发 `SET_FUNC_CAPTURES <env 类型 id>`；定义点 `SET_CLOSURE <cap>` 写 env 字段 |
+| VM | `func_t` 持有 `capture_type` + `env`（**裸数据块**，按 capture_type 布局；实例化时 zero 分配） |
+
+由此得到的统一语义（**不再有闭包特判**）：
+
+| 操作 | 实现 |
+|---|---|
+| 捕获读取 | sema 把捕获引用改写为 `__ctx.env.<cap>`（`__ctx` = 调用帧隐藏局部 = 被调 func 值）；VM `FIELD_GET` 闭包分支返回 env 块的借用 struct / 槽位借用 —— 与结构体字段完全同构 |
+| 捕获写入 | `SET_CLOSURE <name>`：按 env 字段偏移 + 槽位所有权（`ptr_free_slot_value` + implicit_cast + memcpy） |
+| clone | `ptr_clone_block(FUNC)`：新建实例（新 env）+ 逐捕获槽按槽位所有权深/浅拷贝 → **克隆与源完全独立**（旧实现是浅拷贝 func 指针） |
+| free | `FREE <闭包>`：按 capture_type 释放 env 里的 own 捕获 + env 块本体（与结构体字段销毁同构）；sema 不再枚举捕获表 |
+| cfunc | **不参与**：没有捕获、`capture_type == NULL`，就是普通函数指针值 |
+
+`closure_scope` 只剩"调用帧作用域链的挂点"（parent = root_scope），不再承载捕获。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion

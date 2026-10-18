@@ -1,4 +1,5 @@
 #include "vm/type_ptr.h"
+#include "vm/bcode_function.h"
 #include "vm/type.h"
 #include "vm/type_opaque.h"
 #include "vm/type_option.h"
@@ -371,6 +372,39 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
 void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
     void *dst = value_alloc_data(vm->alloc, type);
     switch (type->kind) {
+    case TYPE_KIND_FUNC: {
+        /* **闭包 = 捕获聚合结构体**（env 块）：clone 与结构体同构——
+           新建函数实例（env 块按 capture_type 分配），逐捕获槽按**槽位所有权**
+           深/浅拷贝进新 env（own → ptr_clone_block；ref/无资源 → memcpy）。
+           cfunc（无 capture_type）走平凡拷贝 = 函数指针值。 */
+        const func_t *const *fp = (const func_t *const *)src;
+        const func_t *sfn = fp ? *fp : NULL;
+        if (!sfn || !sfn->capture_type || !sfn->env) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        func_t *nf = func_instantiate_raw(vm, (func_t *)sfn);
+        if (!nf || !nf->env) {
+            memcpy(dst, src, type->size);
+            break;
+        }
+        const struct_type_t *ct = sfn->capture_type;
+        for (size_t i = 0; i < ct->field_count; i++) {
+            const struct_field_t *f = &ct->fields[i];
+            if (!f->type || f->type->size == 0) continue;
+            const void *cs = (const uint8_t *)sfn->env + f->offset;
+            void *cd = (uint8_t *)nf->env + f->offset;
+            if (slot_needs_visit(f->type, f->ownership)) {
+                void *nb = ptr_clone_block(vm, f->type, cs);
+                memcpy(cd, nb, f->type->size);
+                allocator_free(vm->alloc, &nb);
+            } else {
+                memcpy(cd, cs, f->type->size);
+            }
+        }
+        memcpy(dst, &nf, sizeof(nf));
+        break;
+    }
     case TYPE_KIND_PTR: {
         const ptr_value_t *sp = (const ptr_value_t *)src;
         if (sp->ptr) {

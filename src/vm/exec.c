@@ -988,6 +988,28 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!v || value_is_shadow(v)) return NULL;
     const type_t *t = value_type(v);
     if (!t || !value_data(v)) return NULL;
+    /* **闭包 = 捕获聚合结构体**：FREE 一个闭包值 = 按 capture_type 的槽位
+       所有权释放 env 里的 own 捕获（与结构体字段销毁同构），随后释放 env 块
+       本身。这覆盖"闭包变量不是由字面量初始化"的形态（`var f = clone(g)`
+       —— sema 无法静态枚举 g 的捕获）；字面量初始化路径上 sema 已生成的
+       `FREE f.<cap>` 会先把捕获槽置 NULL，这里跳过（防双释放）。
+       own 闭包是 move-only（唯一所有者），因此在 FREE 处释放 env 是安全的；
+       ref/无资源闭包（NONE）不生成 FREE，env 随函数对象统一回收。 */
+    if (t->kind == TYPE_KIND_FUNC) {
+        func_t **fp = (func_t **)value_data(v);
+        func_t *fn = fp ? *fp : NULL;
+        if (fn && fn->capture_type && fn->env) {
+            const struct_type_t *ct = fn->capture_type;
+            for (size_t i = 0; i < ct->field_count; i++) {
+                const struct_field_t *f = &ct->fields[i];
+                if (!f->type) continue;
+                ptr_free_slot_value(vm, f->type, f->ownership,
+                                    (uint8_t *)fn->env + f->offset);
+            }
+            allocator_free(vm->alloc, &fn->env);
+        }
+        return NULL;
+    }
     /* A 方案：sema 已按 type 对象生成"被指向值 own 槽位"的逐条 FREE，
        这里只释放**这一个**堆块，不再按类型递归——否则会把 ref 槽位指向的
        借用目标也 free 掉（实测 0xC0000005）。 */
@@ -1538,19 +1560,25 @@ static value_t *op_field_get(vm_t *vm, bytecode_t *bc, size_t *pc) {
        返回捕获值的**借用引用**（data 指向捕获槽的 value data），
        于是 FREE 能就地把槽位置 NULL，与结构体字段的语义一致。 */
     if (t && t->kind == TYPE_KIND_FUNC) {
+        /* **闭包 = 捕获聚合结构体**（env 块）：字段访问与结构体完全同构 ——
+           `f.env` 给 env 块（capture_type 的借用 struct 值），`f.<cap>` 按
+           capture_type 的字段偏移给借用槽位（FREE/读取都就地生效）。 */
         if (value_is_shadow(self))
-            return value_make_shadow(vm, t);   /* shadow：无捕获可读 */
+            return value_make_shadow(vm, t);   /* shadow：无布局可读 */
         const func_t *const *fp = (const func_t *const *)value_data(self);
         const func_t *fn = fp ? *fp : NULL;
-        if (!fn || !fn->closure_scope)
+        if (!fn || !fn->capture_type || !fn->env)
             return value_make_error(vm, "exec: closure has no captures");
-        value_t *cap = scope_lookup(fn->closure_scope, name);
-        if (!cap)
+        const type_t *ct = &fn->capture_type->base;
+        if (name.len == 3 && memcmp(name.ptr, "env", 3) == 0)
+            return value_make_borrowed(vm, ct, fn->env);
+        int fi = struct_type_find_field(ct, name);
+        if (fi < 0)
             return value_make_error(vm, "exec: no such closure capture");
-        /* 捕获槽本身可能就是 shadow（占位）→ 直接返回它 */
-        if (value_is_shadow(cap))
-            return cap;
-        return value_make_borrowed(vm, value_type(cap), value_data(cap));
+        const struct_field_t *f = struct_type_field(ct, (size_t)fi);
+        if (!f || !f->type)
+            return value_make_error(vm, "exec: closure capture type missing");
+        return value_make_borrowed(vm, f->type, (uint8_t *)fn->env + f->offset);
     }
     if (!t || t->kind != TYPE_KIND_STRUCT) {
         /* union 分支：字段名 = member 名，按名反查 → 读 data 首部 tag →
@@ -1615,6 +1643,27 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* const/volatile 视图：剥掉再按底层布局定位字段（写入本身由 sema
        按 const 规则拦截——这里只负责布局）。 */
     t = type_strip_quals(t);
+    if (t && t->kind == TYPE_KIND_FUNC) {
+        /* 闭包捕获写入（与结构体 FIELD_SET 同构）：按 capture_type 槽位
+           所有权先销毁旧值，再 implicit_cast + memcpy 写入 env 块。 */
+        if (value_is_shadow(self)) return self;
+        func_t *fn = *(func_t **)value_data(self);
+        if (!fn || !fn->capture_type || !fn->env)
+            return value_make_error(vm, "exec: closure has no captures");
+        const type_t *ct = &fn->capture_type->base;
+        int fi = struct_type_find_field(ct, name);
+        if (fi < 0)
+            return value_make_error(vm, "exec: no such closure capture");
+        const struct_field_t *f = struct_type_field(ct, (size_t)fi);
+        if (!f || !f->type)
+            return value_make_error(vm, "exec: closure capture type missing");
+        value_t *casted = value_implicit_cast(vm, val, f->type);
+        if (value_is_error(vm, casted)) return casted;
+        void *dst = (uint8_t *)fn->env + f->offset;
+        ptr_free_slot_value(vm, f->type, f->ownership, dst);
+        memcpy(dst, value_data(casted), f->type->size);
+        return self;
+    }
     if (!t || t->kind != TYPE_KIND_STRUCT) {
         /* union 分支：与 FIELD_GET 同款 tag 检查——字段存在但 tag 不符
            → error value（引擎级硬错误，对齐数组越界） */
@@ -1828,18 +1877,33 @@ static value_t *op_set_closure(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (!t || t->kind != TYPE_KIND_FUNC)
         return value_make_error(vm, "exec: set closure expects a function value below");
     func_t *fn = *(func_t **)value_data(fv);
-    if (!fn->closure_scope)
-        return value_make_error(vm, "exec: function has no closure scope");
+    if (!fn->capture_type)
+        return value_make_error(vm, "exec: function has no capture env");
+    if (!fn->env) {
+        /* 基底对象（hoist 注册）惰性分配 env：实例化时已按 capture_type 分配，
+           这里只兜底直接对基底写捕获的情况。 */
+        void *env = allocator_new_ex(vm->alloc, "closure_env",
+                                     fn->capture_type->base.size, NULL, NULL,
+                                     NULL, 1);
+        if (!env) return value_make_error(vm, "exec: out of memory for capture env");
+        memset(env, 0, fn->capture_type->base.size);
+        fn->env = env;
+    }
 
-    /* clone 进 closure_scope（scope_set 临时切 current_scope，clone 自动 track
-       到 owned；占位 undefined 先被销毁替换） */
-    char buf[256];
-    if (name.len >= sizeof(buf))
-        return value_make_error(vm, "exec: closure capture name too long");
-    memcpy(buf, name.ptr, name.len);
-    buf[name.len] = '\0';
-    value_t *stored = scope_set(vm, fn->closure_scope, buf, cap);
-    if (!stored) return value_make_error(vm, "exec: failed to set closure capture");
+    /* 写 env 块的捕获槽（与结构体 FIELD_SET 同构）：按槽位所有权销毁旧值，
+       implicit_cast 到字段类型，memcpy 进 env 偏移。 */
+    const type_t *ct = &fn->capture_type->base;
+    int fi = struct_type_find_field(ct, name);
+    if (fi < 0)
+        return value_make_error(vm, "exec: no such closure capture");
+    const struct_field_t *f = struct_type_field(ct, (size_t)fi);
+    if (!f || !f->type)
+        return value_make_error(vm, "exec: closure capture type missing");
+    value_t *casted = value_implicit_cast(vm, cap, f->type);
+    if (value_is_error(vm, casted)) return casted;
+    void *dst = (uint8_t *)fn->env + f->offset;
+    ptr_free_slot_value(vm, f->type, f->ownership, dst);
+    memcpy(dst, value_data(casted), f->type->size);
     return NULL;
 }
 
