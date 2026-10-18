@@ -592,6 +592,28 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
   为此修了 `compile_exit_with_defers` 不编译 prelude 的缺陷（否则 prelude 被
   静默丢弃 → 运行期 "undefined variable"）。
 
+### 7.1.9 移除 `MOVE`、收窄 `CLONE`（2026-10）
+
+**`MOVE` 已彻底移除**（指令 + 发射 + 汇编表 + 处理函数）。理由：所有权是
+**纯编译期**语义——`move(x)` 的转移在 sema 完成（源进 TDZ、销毁序列跳过、
+借用检查），运行期与普通取值完全一致；`a = move(b)` 与 `a = b` 的字节码只差
+一条冗余指令。`value_move()` 仍保留给函数调用/返回的内部转移。
+
+**`CLONE` 收窄**为只剩"无法用构造表达"的形态：
+
+| `clone(x)` 的形态 | 现在的方式 |
+|---|---|
+| struct / tuple / array / option / union（值） | `CALL __clone_<n>(&x)` |
+| `own *U`（指针，含标量/struct/指针/opaque 的 U） | `CALL __cloneptr_<n>(x)`，体内 `new U{ … }`（单字段构造 = 整块拷贝） |
+| `own []T` | `CALL __cloneslice_<n>(x)` |
+| **闭包值**（捕获结构体，类型层无字段） | 仍走运行期 `CLONE`（对象图深拷贝） |
+| `own *cunion`（成员布局重叠、无所有权） | 仍走 `CLONE`（整块 memcpy） |
+| comptime / 无语句上下文 | 仍走 `CLONE` 兜底 |
+
+对应回归：`tests/op_move_clone_test.cpp` —— move 程序的反汇编里不再出现 `MOVE`；
+struct/指针/切片的 clone 反汇编里不再出现 `CLONE`（改用生成的 `__clone*`）；
+闭包 clone 仍深拷贝捕获。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion

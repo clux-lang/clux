@@ -3438,12 +3438,9 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
   case TYPE_KIND_PTR: {
     const type_t *base = ptr_type_base(s);
     if (!base) return clone_leaf(sema, access);
-    const type_t *bs = type_strip_quals(base);
-    bool base_deep = (bs->kind == TYPE_KIND_PTR || bs->kind == TYPE_KIND_SLICE ||
-                      type_has_own_slots(base));
-    if (!base_deep) return clone_leaf(sema, access);
-    if (bs->kind == TYPE_KIND_PTR)
-      return clone_leaf(sema, access);   /* 双层指针：保持浅拷贝语义 */
+    /* 指针克隆一律走生成的 `__cloneptr_<U>`：函数体 `new U{ … }` 分配新块
+       （被指向值含 own 槽位时逐槽位克隆；标量/指针/opaque 等单字段构造 = 整块
+       拷贝）。不再用 CLONE 兜底（cunion/闭包除外，见 impl）。 */
     return gen_clone_call(sema, 1, base, access, /*by_address=*/false);
   }
   case TYPE_KIND_SLICE:
@@ -3588,10 +3585,11 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
         ? clone_construct(sema, t, field, m->tag, as_new) : NULL;
     ast_node_t *cond = clone_is_tag(sema, access, m->tag);
     if (!branch || !cond) continue;
-    /* else：上一轮链；首轮（最内层）用兜底——非法 tag 时按位拷贝
-       （不可达路径的防御；语义上 tag 一定命中某个 member）。 */
+    /* else：上一轮链；首轮（最内层）用**最后一个 member 的分支**兜底
+       （不可达路径的防御：tag 一定命中某个 member）。 */
     ast_node_t *els = expr;
-    if (!els) els = as_new ? clone_leaf(sema, access) : access;
+    if (!els) els = branch;
+    else if (els == branch) els = access;
     expr = clone_ternary(sema, cond, branch, els);
   }
   return expr ? expr : (as_new ? clone_leaf(sema, access) : access);
@@ -3612,39 +3610,38 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
       const type_t *base = ptr_type_base(s);
       if (!base) return clone_leaf(sema, access);
       const type_t *bs = type_strip_quals(base);
-      bool base_deep = (bs->kind == TYPE_KIND_PTR || bs->kind == TYPE_KIND_SLICE ||
-                        type_has_own_slots(base));
-      if (!base_deep) return clone_leaf(sema, access);
       ast_node_t *deref = clone_deref(sema, access);
-      if (!deref) return clone_leaf(sema, access);
+      if (!deref) return NULL;
       switch (bs->kind) {
         case TYPE_KIND_OPTION:
         case TYPE_KIND_UNION: {
           /* ?T / union 的 tag 判定在运行期 → 逐分支 `new` */
-          ast_node_t *e = (bs->kind == TYPE_KIND_OPTION)
-              ? gen_clone_option(sema, scope, base, deref, true)
-              : gen_clone_union(sema, scope, base, deref, true);
-          return e ? e : clone_leaf(sema, access);
+          return (bs->kind == TYPE_KIND_OPTION)
+                     ? gen_clone_option(sema, scope, base, deref, true)
+                     : gen_clone_union(sema, scope, base, deref, true);
         }
         case TYPE_KIND_SLICE: {
           ast_node_t *inner = gen_clone_expr(sema, scope, base, deref,
                                              OWN_OWN, true);
-          ast_node_t *n = inner ? clone_construct(sema, base, inner, 0, true)
-                                : NULL;
-          return n ? n : clone_leaf(sema, access);
+          return inner ? clone_construct(sema, base, inner, 0, true) : NULL;
         }
-        default: {
+        case TYPE_KIND_STRUCT:
+        case TYPE_KIND_TUPLE:
+        case TYPE_KIND_ARRAY: {
           ast_node_t *fields = NULL, *ftail = NULL;
-          if (bs->kind == TYPE_KIND_STRUCT || bs->kind == TYPE_KIND_TUPLE ||
-              bs->kind == TYPE_KIND_ARRAY) {
-            if (!gen_clone_slots(sema, scope, base, deref, &fields, &ftail))
-              return clone_leaf(sema, access);
-            ast_node_t *n = clone_construct(sema, base, fields, 0, true);
-            return n ? n : clone_leaf(sema, access);
-          }
-          /* 指针/标量等：申请新块 + 拷贝字节 */
-          return clone_leaf(sema, access);
+          if (!gen_clone_slots(sema, scope, base, deref, &fields, &ftail))
+            return NULL;
+          return clone_construct(sema, base, fields, 0, true);
         }
+        case TYPE_KIND_CUNION:
+          /* cunion 无所有权、成员布局重叠 → 无法用逐字段构造表达"整块克隆"；
+             保留 CLONE（整块 memcpy）语义。 */
+          return clone_leaf(sema, access);
+        default:
+          /* 标量 / 指针（双层）/ opaque / str / enum / bool：**单字段构造**
+             `new T{ pointee }` —— CONSTRUCT 1 拷贝同类型值到新块，与 CLONE
+             的"申请新块 + 拷贝字节"等价（不再需要 CLONE）。 */
+          return clone_construct(sema, base, deref, 0, true);
       }
     }
     case TYPE_KIND_SLICE:

@@ -944,26 +944,27 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_TAKE: {
-    /* 扁平化 clone 的切片路径尾步（sema 生成）：把预填好的临时变量移出
-       （语义 = move）→ MOVE（分配新数据块并按字节转移；临时变量在 sema 侧
-       已标 moved，块退出不生成 FREE）。 */
+    /* clone 切片路径的尾步（sema 生成）：把预填好的临时变量读出。
+       **所有权纯编译期**：读出就是普通取值（借用），块退出不生成 FREE 由
+       sema 的 moved 标记保证——不再需要运行期 MOVE 指令。 */
     ast_take_t *n = (ast_take_t *)node;
     if (!n->operand) { c_error(c, node, "take: missing operand"); return; }
     compile_expr(c, n->operand);
-    bcode_write_op(c->bc, BCODE_MOVE);
-    st_push(c, 0);
     break;
   }
   case AST_MOVE: {
-    /* 所有权原语 move(x)/clone(x)（m3-design §7）：operand → MOVE/CLONE
-       （弹值 → 同类型新值，Step A 静默）。op 为原语关键字 token。 */
+    /* 所有权原语 move(x) / clone(x)（m3-design §7）。
+       - move：**所有权纯编译期**，转移语义由 sema 完成（源进 TDZ、销毁序列
+         跳过），运行期就是普通取值 → **不发指令**（MOVE 指令已移除）。
+       - clone：sema 已把可克隆的值改写成生成的 clone 函数调用；走到这里的
+         clone 只剩「无法用构造表达」的形态（闭包值 / comptime 上下文）→ 保留
+         运行期 CLONE（对象图深拷贝）。 */
     ast_move_t *n = (ast_move_t *)node;
     compile_expr(c, n->operand);        /* 栈: [value] */
-    if (n->op && token_is(n->op, "clone"))
+    if (n->op && token_is(n->op, "clone")) {
       bcode_write_op(c->bc, BCODE_CLONE);
-    else
-      bcode_write_op(c->bc, BCODE_MOVE);
-    st_push(c, 0);                      /* 弹 1 压 1，净 0 */
+      st_push(c, 0);                    /* 弹 1 压 1，净 0 */
+    }
     break;
   }
   case AST_INDEX: {
