@@ -1576,10 +1576,68 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
         return construct_result(sema, t);
       }
 
+      /* **基本类型构造**（2026-10）：`.i32{123}` / `.bool{true}` /
+         `.f64{1.5}` / `.str{"hi"}` —— 单值构造。
+           - 恰好 1 个字段（位置值，不写字段名）；
+           - 值可与目标类型不同（按隐式转换，如 `.i64{7}` / `.f64{1}`）；
+           - 结果是该类型的**普通值**（OWN_NONE，可拷贝）——与字面量同构，
+             只是把类型显式写出来。`var a = .i32{123};` ≡ `var a: i32 = 123;`。 */
+      if (t && (t->kind == TYPE_KIND_INT || t->kind == TYPE_KIND_FLOAT ||
+                t->kind == TYPE_KIND_BOOL || t->kind == TYPE_KIND_STR)) {
+        ast_node_t *field = n->fields;
+        if (!field) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "basic type construct requires exactly one value "
+                     "(`.%s{<value>}`)",
+                     t->name.ptr ? t->name.ptr : "T");
+          return val_void(sema);
+        }
+        if (field->next) {
+          diag_error(sema->diag, sema_loc(sema, field->next),
+                     "basic type construct takes exactly one value (got more)");
+          return val_void(sema);
+        }
+        /* 字段形态：具名 `.i32{ .value = 1 }` 拒绝（基本类型是位置值）；
+           位置值 `.i32{123}` 的字段节点是**表达式本身**（与数组元素同款）。 */
+        ast_node_t *value = field;
+        if (field->kind == AST_CONSTRUCT_FIELD) {
+          ast_construct_field_t *cf = (ast_construct_field_t *)field;
+          if (cf->name.len != 0) {
+            diag_error(sema->diag, sema_loc(sema, field),
+                       "basic type construct takes a positional value "
+                       "(write `.%s{<value>}`, without a field name)",
+                       t->name.ptr ? t->name.ptr : "T");
+            return val_void(sema);
+          }
+          value = cf->value;
+        }
+        {
+          value_t *fv = sema_expr(sema, &value, scope);
+          if (is_poison(sema, fv)) return val_void(sema);
+          /* 可赋值性：同类型身份 / 隐式转换（i32 → i64、int → f64）；
+             隐式不行再试**显式转换**（`.<type>{...}` 显式写出类型，允许收窄，
+             语义等同 C 复合字面量 `(T){v}`）。 */
+          value_t *dst = value_make_shadow(sema->vm, t);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
+            value_t *ex = value_explicit_cast(sema->vm, fv, t);
+            if (value_is_error(sema->vm, ex)) {
+              char tn[64], fn[64];
+              sema_type_name(t, tn, sizeof tn);
+              sema_type_name(value_type(fv), fn, sizeof fn);
+              diag_error(sema->diag, sema_loc(sema, value),
+                         "cannot initialize %s with %s in basic type construct",
+                         tn, fn);
+              return val_void(sema);
+            }
+          }
+          return construct_result(sema, t);
+        }
+      }
+
       if (t->kind != TYPE_KIND_ARRAY) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "construct: unsupported type (only array, optional, struct "
-                   "and tuple implemented)");
+                   "construct: unsupported type (only basic types, array, "
+                   "optional, struct, tuple, union and cunion implemented)");
         return val_void(sema);
       }
 

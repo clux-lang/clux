@@ -1482,8 +1482,14 @@ static value_t *construct_value(vm_t *vm, const type_t *t, value_t **elems,
     if (n >= 1 && elems[0]) {
         value_t *src = elems[0];
         if (value_type(src) != t) {
-            src = value_implicit_cast(vm, src, t);
-            if (value_is_error(vm, src)) return src;
+            /* 先试隐式转换（字面量 i32 → i64 等）；失败再试**显式转换**——
+               `.<type>{<value>}` 显式写出了目标类型，语义等同 C 的复合字面量
+               `(T){v}`，因此允许收窄（`.u8{200}`、`.i32{3.7}`）。 */
+            value_t *casted = value_implicit_cast(vm, src, t);
+            if (value_is_error(vm, casted))
+                casted = value_explicit_cast(vm, src, t);
+            if (value_is_error(vm, casted)) return casted;
+            src = casted;
         }
         void *data = value_alloc_data(vm->alloc, t);
         memcpy(data, value_data(src), t->size);

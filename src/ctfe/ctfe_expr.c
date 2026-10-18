@@ -564,8 +564,21 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             if (!agg) return ctfe_err(ctx, "ctfe: out of memory constructing aggregate");
             return agg;
         }
+        /* 基本类型构造 `.i32{123}`（2026-10）：单值 + 隐式（失败则显式）转换。 */
+        if (t->kind == TYPE_KIND_INT || t->kind == TYPE_KIND_FLOAT ||
+            t->kind == TYPE_KIND_BOOL || t->kind == TYPE_KIND_STR) {
+            if (!n->fields || n->fields->next)
+                return ctfe_err(ctx, "ctfe: basic type construct needs exactly one value");
+            value_t *fv = ctfe_eval(ctx, n->fields);
+            if (value_is_error(vm, fv)) return fv;
+            if (value_type(fv) == t) return value_clone(vm, fv);
+            value_t *casted = value_implicit_cast(vm, fv, t);
+            if (value_is_error(vm, casted))
+                casted = value_explicit_cast(vm, fv, t);
+            return casted;
+        }
         if (t->kind != TYPE_KIND_ARRAY)
-            return ctfe_err(ctx, "ctfe: construct only supports array/struct/tuple types");
+            return ctfe_err(ctx, "ctfe: construct only supports basic/array/struct/tuple types");
         const type_t *et = array_type_elem(t);
         size_t len = array_type_len(t);
 
