@@ -246,6 +246,17 @@ typedef struct module_t *(*sema_import_resolver_t)(void *user,
                                                    ast_node_t *import_node,
                                                    strslice_t raw);
 
+/* 生成的销毁函数（sema_destroy_fn_t）：每个**含 own 槽位的复合类型**一个
+ * `__destroy_<n>(dv: ref *T)`，函数体销毁 T 值的 own 槽位（不释放值自身）。
+ * 销毁点只发 `CALL __destroy_<n>(&value)`；自引用类型（链表/树）由函数自身
+ * 递归调用，天然终止。type 是去限定后的类型对象（intern 后唯一）。 */
+typedef struct sema_destroy_fn {
+    const type_t          *type;
+    ast_node_t            *fn;    /* AST_FUNC_DEF（sema_attach_destroy_fns 追加到 prog） */
+    strslice_t             name;
+    struct sema_destroy_fn *next;
+} sema_destroy_fn_t;
+
 typedef struct sema_t {
     vm_t         *vm;           /* 复用 VM 类型注册表 + vtable + shadow value */
     diag_buf_t   *diag;         /* 诊断收集器 */
@@ -287,6 +298,19 @@ typedef struct sema_t {
     /* 扁平化 clone 的临时变量/循环变量计数器：__cl_N / __cl_i_N，N 从 0 起
        单调递增（块内唯一）。 */
     uint32_t      clone_seq;
+
+    /* ---- 生成的销毁函数（2026-10，方案 B：所有复合类型统一走函数调用）----
+       每个含 own 槽位的复合类型生成一次 `__destroy_<n>(dv: ref *T)`：
+         - 销毁点（作用域退出/return/break/continue/赋值点/显式销毁）只发
+           `CALL __destroy_<n>(&value)`，不再内联展开整棵槽位树；
+         - 函数体内部：叶子槽位 FREE、复合槽位 CALL（自引用类型 = 递归调用自身）；
+         - C 后端可逐函数翻译（函数体是平铺的 FREE/CALL/循环）。
+       `destroy_fns` 是注册表（按类型对象指针去重）；`destroy_fn_seq` 是命名计数；
+       生成的函数在 sema_analyze 结束时统一追加到 prog->funcs（compiler 预扫描
+       会为它们构造函数对象 + 全局名字绑定）。 */
+    sema_destroy_fn_t *destroy_fns;
+    uint32_t           destroy_fn_seq;
+
 
     /* **类型展开环检测**（自引用类型：链表/树）。销毁序列（gen_destroy）与
        扁平化 clone（gen_clone_expr）都按类型对象递归展开；一旦展开路径上
@@ -389,6 +413,12 @@ void sema_set_import_resolver(sema_t *sema, sema_import_resolver_t resolve,
  * 作用域树在返回后保持有效（持久化数据，交字节码编译器复用）。
  */
 bool sema_analyze(sema_t *sema, ast_node_t *program);
+
+/** 把 Pass 3b 期间按需生成的销毁函数追加到程序函数链尾部（sema_analyze 收尾调用）。
+ *  compiler 预扫描据此为它们构造函数对象（LOAD_TYPE sig_id + PUSH_FUNCTION +
+ *  BIND_FUNC）并在全局作用域绑定名字（LOAD_FUNCTION + DEFINE）。 */
+void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program);
+
 
 /**
  * 销毁 sema 上下文。不销毁作用域树（调用方通过 sema_scope_destroy 释放）

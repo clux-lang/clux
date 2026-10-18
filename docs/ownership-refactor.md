@@ -548,6 +548,30 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
 置位），`make_free_stmts` 只收集 `declared` 的变量。`break`/`continue` 路径同理
 （只销毁"源序上已经过定义点"的变量；跨迭代的少量泄漏属于可接受的保守方向）。
 
+### 7.1.7 生成的销毁函数（方案 B，2026-10）
+
+含 own 槽位的**复合类型**不再在每个销毁点内联展开整棵槽位树，而是**生成一次**
+`__destroy_<n>(dv: ref *T)`：
+
+| 位置 | 生成物 |
+|---|---|
+| 作用域退出 / return / break / continue / 赋值点 / 显式销毁 | `CALL __destroy_<n>(&value)`（值 → 取地址） |
+| `own *T` 槽位 / 变量 | `CALL __destroy_<T>(pointer)`（指针值本身）+ `FREE pointer` |
+| 函数体内：叶子槽位 | `FREE <slot>` |
+| 函数体内：复合槽位 | `CALL __destroy_<U>(&slot)` |
+| **自引用类型**（链表/树） | 函数体调用**自身**（递归），不再需要运行期 `FREE_RECURSIVE` |
+
+实现要点：
+- 注册表 `sema->destroy_fns`（按类型对象指针去重）；生成顺序是"**先登记再生成
+  body**"，自引用类型在生成 body 时命中注册表 → 直接发 CALL，递归终止；
+- 函数签名 `void(ref *T)` 经 `type_func_sig` + `sema_type_register` 登记
+  （`fn->sig_id`，compiler hoist 用）；形参类型表达式用 `sema_gen_type_ref(*T)`，
+  所有权在**槽位**上（`AST_VAR_DEF::ownership = REF`）；
+- 生成的函数在 `sema_analyze` 收尾统一追加到 `prog->funcs`（`sema_attach_destroy_fns`），
+  compiler 预扫描照常构造对象 + 全局名字绑定 → 销毁点的 `CALL` 按名字解析；
+- 收益：销毁点 O(1) 指令（不再按槽位树膨胀）；C 后端逐函数翻译（函数体内是平铺的
+  FREE/CALL/循环）；递归类型自然终止。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion
@@ -558,10 +582,10 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
    （无返回标注）或**函数指针**传出的借用只能靠调用点标注兜底；闭包 `defer`
    捕获的 ref 不登记（捕获结构体的 ref 槽位等同聚合字段，已在 borrow_carry_merge
    覆盖范围内的是构造/赋值路径）。
-2. **自引用类型的环边非扁平**：链表/树/互递归的销毁环边用 `FREE_RECURSIVE`
-   （运行期递归），clone 环边用 `CLONE`（运行期递归）——**正确**但违背"C 后端
-   零类型递归"的目标；C 后端需为自引用类型生成循环或类型专用辅助函数
-   （如 `destroy_Node(Node*)` 的 while 循环）。
+2. **自引用类型的销毁已走生成函数**（§7.1.7）：函数体对 `next`/子节点递归调用
+   自身（**正确**、代码只展开一次）；但仍是**运行期递归**——深链表会吃栈。
+   彻底 flat 需要为链表形态生成 while 循环（形状相关，暂未做）。
+   clone 的环边仍用 `CLONE`（运行期递归）。
 3. **cunion 指针成员的释放仅限直接变量成员**：`_ = move(c.p)`；cunion 嵌在
    struct 里（`s.c.p`）或经指针（`p.c.p`）仍拒绝——整体 TDZ 会漏掉兄弟
    own 槽位/堆块。要闭环需要"部分 TDZ"或对 cunion 生成显式销毁钩子。

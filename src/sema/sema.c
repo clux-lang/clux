@@ -1677,5 +1677,10 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     sema_walk_function(sema, sf);
   }
 
+  /* Pass 3b 期间按需生成的销毁函数（每个含 own 槽位的复合类型一个）：统一追加到
+     程序函数链尾部 —— compiler 预扫描为它们构造函数对象 + 全局名字绑定，
+     销毁点发的 `CALL __destroy_<n>` 才能解析到。 */
+  if (!diag_has_error(sema->diag)) sema_attach_destroy_fns(sema, program);
+
   return !diag_has_error(sema->diag);
 }
