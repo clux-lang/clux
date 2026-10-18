@@ -319,3 +319,68 @@ fatal→share 创建通道全部删除。share/weak 语义待后续重新设计�
 **所有所有权操作**（new/move/clone/构造/参数/返回/销毁全链路编译期生成）。DEFER
 的"作用域退出点 CALL 序列"与 FREE 序列同源：每层作用域的退出协议统一为
 **逆序 CALL 该层 defer → FREE 该层块 → POP_SCOPE**，编译期一次性生成，运行期只执行显式指令。
+
+---
+
+## 7. 当前进度与交接（2026-10-18）
+
+### 7.1 已可用（有探针验证、无泄漏）
+
+| 形态 | 说明 |
+|---|---|
+| `own *T` / `own []T`（元素为标量） | 销毁：`FREE v` |
+| **含 own 字段的 struct**（含嵌套 `A{b:B}`、`B{p:own *i32}`） | 销毁：逐 own 槽位 `FREE v.p`；`ref` 槽位**不进**序列 |
+| **含 own 捕获的闭包** | 闭包含 own 捕获即 **OWN**（唯一不经 FATAL 的 own 产生式）；销毁：`FREE f.<cap>`（VM 的 `FIELD_GET` 支持按名读闭包捕获槽，sema 不放行该语法） |
+| `move` / `clone` 聚合 | `move(OWN) → FATAL`；**聚合的 own 值必须走 move**，否则源不标 moved → 双释放 |
+
+关键实现点：
+- 销毁序列**完全由 AST 生成**（`gen_destroy`，`stmt.c`），从 **type 对象**反推
+  （§0.8）。槽位所有权记在字段结构体上（`struct_field_t::ownership` 等），
+  **参与 intern 去重键**。
+- 叶子（ptr/slice）**仅当槽位 ownership == OWN** 才 FREE；复合**无条件递归**。
+- 运行期 `FREE` 用 `ptr_free_block_only`（**不递归**）。旧的
+  `ptr_free_owned_recursive` 会无差别释放所有指针字段（含 ref）→ 曾导致
+  `own *Holder`（Holder 含 ref 字段）崩在 `0xC0000005`。
+- `CONSTRUCT` 的字段含 own 槽位 → 产 `OWN_FATAL`（`construct_result`）。
+
+### 7.2 未完成 + **精确阻塞点**
+
+**A. tag union（`union U { p: own *i32; }`）——最接近完成**
+
+已完成：`gen_destroy_union`（每个 own member 一条
+`if (v is m) { <payload 销毁序列> }`）、`AST_IS_TAG` 节点（`ast_is_tag.h`，
+compiler 发 `IS_TAG <tag>`）、member 表 ownership 传播。
+
+**阻塞**：放开 `comptime.c` 的 union 指针限制后，运行期**栈溢出**
+（`exit=-1073741571` = `0xC00000FD`）。已确认 `type_has_own_slots(U)` 返回 true
+且 `member 0 own=1`（打印验证）后崩溃，故可疑点在**生成的 AST 被 compiler
+编译的路径**（`AST_IF` + `AST_IS_TAG` + `AST_BLOCK` 组合），而非所有权判定。
+建议先单独给 `AST_IS_TAG` 写一个最小用例（不经销毁生成），确认它能编译执行。
+
+**B. `own ?T`**
+
+需要 `if (v != nil) { <inner 的销毁序列> }`。AST 侧需组合 `AST_BINARY`（`!=`）
++ `AST_NIL`——注意 `AST_BINARY::op` 是 `token_t*`，sema 无法合成 token
+（与 `is` 同一问题），可能也需要一个直接形态节点。
+
+**C. `own []T`（元素含 own 槽位）**
+
+需要 `for` 循环。`ast_for_t` 字段已知；难点是生成的循环变量需要 compiler 侧
+可接受的形态（sema 已运行完，不会为它建符号）。
+
+**D. tuple / array / cunion 的指针限制**
+
+`gen_destroy` 里已留分支占位（返回 true 但什么都不生成——**放开限制前必须补上
+生成，否则静默泄漏**）。cunion 无 tag，按设计**永不参与**自动销毁。
+
+### 7.3 开发环境注意事项（踩过的坑）
+
+| 事项 | 说明 |
+|---|---|
+| **构建** | `cmake --build build --target clux clux_test`（clang，无 gcc） |
+| **跑测试** | 必须先 `$env:TEMP="$PWD\build\tmp\gtesttemp"; $env:TMP=$env:TEMP`——否则 `fopen` 被拒（errno 13）导致 UCRT 断言、套件**提前中止**（看起来"大部分绿"其实没跑完） |
+| **脚本改文件必须归一化行尾** | 仓库已统一 **LF**（`.gitattributes` 强制）。用 Python 文本模式写入会得到 CRLF（Windows 默认），造成 `+1071/−1062` 的假 diff。写文件用 `io.open(..., "w", newline="")`，或改完跑一次 `build/tmp/to_lf2.py` 风格的行尾归一化。 |
+| **编码检查** | `python tools/check_encoding.py`（UTF-8 无 BOM；`third_party/` 豁免） |
+| **读文件** | 用 `read` 工具或 Python `encoding="utf-8"`；**PowerShell `Get-Content`/`Select-String` 会按 GBK 解码 UTF-8 文件而显示乱码**（不是文件问题） |
+| **submodule** | `third_party/gtest`、`third_party/libffi` 是 submodule，**不要修改**其内容 |
+| 探针 | 放在 `build/tmp/`（git 忽略） |
