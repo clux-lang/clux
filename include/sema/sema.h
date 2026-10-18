@@ -284,6 +284,16 @@ typedef struct sema_t {
        __del_i_N，N 从 0 起单调递增（块内唯一；仅 sema/compiler 内部使用）。 */
     uint32_t      destroy_seq;
 
+    /* 扁平化 clone 的临时变量/循环变量计数器：__cl_N / __cl_i_N，N 从 0 起
+       单调递增（块内唯一）。 */
+    uint32_t      clone_seq;
+
+    /* **当前正在 walk 的语句**（Pass 3b 设置，进入 walk_stmt 时保存/恢复）。
+       扁平化 clone 的切片路径需要把"临时变量 + make + for 循环"语句挂到
+       当前语句的 prelude 上（compiler 在语句主体之前编译）。为 NULL 表示
+       不在语句上下文（如 comptime 折叠）→ clone 回退到运行期 CLONE 指令。 */
+    ast_node_t   *cur_stmt;
+
     /* **表达式求值上下文**：匿名构造目标类型栈（见 sema_expr_ctx_t）。 */
     sema_expr_ctx_t ex;
 

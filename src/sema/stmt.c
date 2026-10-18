@@ -2636,8 +2636,14 @@ static block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
    迭代器遍历子 scope 的 children——与原版共享外层迭代器相比，嵌套消费
    不再污染浅层（第二个 for 的 init 变量因此找不到定义点）。 */
 
+/* walk_stmt 的**包装**：维护 sema->cur_stmt（扁平化 clone 的切片路径要把
+   生成的 prelude 语句挂到"当前语句"上）。保存/恢复保证嵌套语句（if/while
+   体里的赋值等）结束后外层语句恢复正确。 */
 static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
-                                sema_scope_t *scope, size_t *idx) {
+                                sema_scope_t *scope, size_t *idx);
+
+static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
+                                     sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
   /* **sema 生成的销毁语句不再回走**（`is_generated`，见 gen_destroy_* /
      ast_free_new）：销毁序列的类型判定已由 type 对象完成，回走没有新信息；
@@ -2738,6 +2744,16 @@ static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
     default:
       break;
   }
+  return r;
+}
+
+/* 见上文包装声明：进入语句时设置 cur_stmt，离开时恢复（嵌套安全）。 */
+static block_result_t walk_stmt(sema_t *sema, ast_node_t *stmt,
+                                sema_scope_t *scope, size_t *idx) {
+  ast_node_t *saved = sema->cur_stmt;
+  sema->cur_stmt = stmt;
+  block_result_t r = walk_stmt_impl(sema, stmt, scope, idx);
+  sema->cur_stmt = saved;
   return r;
 }
 

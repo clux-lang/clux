@@ -134,6 +134,15 @@ typedef enum {
                             token_t*，sema 无法合成。仅用于逐元素销毁序列
                             （own []T / [N]T 元素含 own 槽位）。 */
 
+    AST_CLONE,           /* 叶子深拷贝的直接形态（sema 生成）：operand → CLONE
+                            （申请新块 + 拷贝字节）。只用于不含 own 槽位的类型；
+                            复合类型的逐槽位展开由 sema 生成构造/NEW/循环 AST。
+                            "clone" 的 op 是 token_t*，sema 无法合成。 */
+    AST_TAKE,            /* 把值移出变量的直接形态（sema 生成，语义 = move）：
+                            operand → MOVE。用于扁平化 clone 的切片路径把临时
+                            变量里的深拷贝结果移出（临时变量已标 moved，不再
+                            FREE）。"move" 的 op 同样是 token_t*。 */
+
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;
 

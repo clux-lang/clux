@@ -47,7 +47,7 @@
 static void compile_assign_index(compiler_t *c, ast_assign_t *n) {
   ast_index_t *ix = (ast_index_t *)n->target;
 
-  if (token_is(n->op, "=")) {
+  if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     compile_expr(c, ix->object);    /* 栈: [self] */
     compile_expr(c, ix->indices);   /* 栈: [self, index] */
     compile_expr(c, n->value);      /* 栈: [self, index, val] */
@@ -115,7 +115,7 @@ static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
   }
   strslice_t q = strslice_from_bytes(qual, (size_t)qn);
 
-  if (token_is(n->op, "=")) {
+  if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     /* TYPED（struct/cunion/enum）：先压类型值，再压值 → 指令弹 2 写 size 字节；
        非 TYPED：只压值 → 指令弹 1。两者最终都净 -1（赋值是语句）。 */
     if (t->ffi_var_kind == BCODE_FFI_DATA_TYPED)
@@ -156,7 +156,7 @@ static void compile_assign_extern_var(compiler_t *c, ast_assign_t *n) {
 static void compile_assign_struct_attr(compiler_t *c, ast_assign_t *n) {
   ast_scope_ref_t *t = (ast_scope_ref_t *)n->target;
 
-  if (token_is(n->op, "=")) {
+  if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     compile_expr(c, n->value);               /* 栈: [value] */
     bcode_write_op(c->bc, BCODE_STORE_ATTR);
     bcode_write_u32(c->bc, t->struct_attr_type_id);
@@ -187,7 +187,7 @@ static void compile_assign_struct_attr(compiler_t *c, ast_assign_t *n) {
 static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
   ast_deref_t *d = (ast_deref_t *)n->target;
 
-  if (token_is(n->op, "=")) {
+  if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     compile_expr(c, d->operand);             /* 栈: [ptr] */
     compile_expr(c, n->value);               /* 栈: [ptr, val] */
     /* 赋值点旧值销毁（sema 生成；PTR_SET 是纯覆盖，不释放旧被指向内容的
@@ -233,7 +233,7 @@ static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
 static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
   ast_member_t *m = (ast_member_t *)n->target;
 
-  if (token_is(n->op, "=")) {
+  if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     compile_expr(c, m->object);              /* 栈: [self] */
     compile_expr(c, n->value);               /* 栈: [self, val] */
     bcode_write_op(c->bc, BCODE_FIELD_SET);  /* 弹 2 压 1（self） */
@@ -416,6 +416,10 @@ static void compile_exit_with_defers(compiler_t *c, ast_node_t *node) {
 
 void compile_stmt(compiler_t *c, ast_node_t *node) {
   if (!node || c->failed) return;
+  /* **语句前置序列**（sema 生成的扁平化 clone 切片路径）：临时变量定义 +
+     make + 逐元素循环，必须在语句主体之前、**同一作用域**编译。 */
+  for (ast_node_t *pre = node->prelude; pre; pre = pre->next)
+    compile_stmt(c, pre);
   switch (node->kind) {
   case AST_VAR_DEF: {
     ast_var_def_t *n = (ast_var_def_t *)node;
@@ -576,7 +580,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
       st_push(c, -1);
       break;
     }
-    if (token_is(n->op, "=")) {
+    if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
       if (n->value->kind == AST_NIL) {
         /* nil 赋值（a = nil；sema 已校验 a 为 ?T）：STORE_NIL <name> 只置
            ok=false，压回 dst；POP 丢弃（赋值是语句）。STORE_NIL +1、

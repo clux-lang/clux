@@ -32,6 +32,12 @@ typedef struct ast_node {
     struct ast_node *defers;     /* 退出点 defer call 链（仅 AST_RETURN/
                                    AST_BREAK/AST_CONTINUE，sema desugar_defers
                                    设置；compiler 在 RET/JMP 前编译执行） */
+    struct ast_node *prelude;    /* **语句前置序列**（sema 生成，compiler 在语句
+                                   主体之前编译）：扁平化 clone 的切片路径需要
+                                   临时变量 + make + for 循环，这些语句挂在
+                                   当前语句上。临时变量定义在**当前块作用域**
+                                   （prelude 语句在同一作用域编译，不额外压
+                                   作用域）。非语句节点通常为 NULL。 */
 } ast_node_t;
 
 /* ================================================================ */

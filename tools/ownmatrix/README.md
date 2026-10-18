@@ -100,11 +100,15 @@ python tools/ownmatrix/run_matrix.py
 **零崩溃、零泄漏**（`LEAK` / 崩溃码均为 0）。闭包维度：C2（move 捕获）在 7 族
 全部 `ok`；其余六种写法按 §9.1 设计上应拒绝（纯 id 捕获 own 聚合 = copy）。
 
-1. **`cunion` 不参与自动销毁**（设计如此）：无 tag，运行期无法判定哪个 member
-   活跃，销毁序列不为它生成 FREE；其指针/切片成员仍被类型层限制拒绝（明确
-   报错，不是静默泄漏）。
+1. **`cunion` 不参与所有权运算**（设计如此，2026-10）：成员**可以是指针/切片**
+   （类型层限制已放开），但无 tag → 不生成销毁序列、不产 FATAL、
+   `type_has_own_slots(cunion)` 恒 false；`new` 放进去的堆块生命周期由开发者
+   自负（与 C union 语义一致），后续如何管理暂缓。
 2. `clone` 只深拷贝 own 槽位（切片缓冲区总是深拷贝，元素按槽位所有权决定是否
    递归克隆），ref 槽位保持借用指针——与销毁序列同一套规则。
+3. **clone 已扁平化**（2026-10）：`clone(x)` 由 sema 在编译期展开为构造 / NEW /
+   循环序列（`NEW` 只申请内存、`CONSTRUCT` 在给定 dest 上构造），运行期不再按
+   类型递归；`CLONE` 指令只剩叶子用途与闭包/comptime 回退。
 
 2026-10 本轮补上的缺口（已修复，回归见 `tests/own_aggregate_test.cpp`）：
 `tuple` 逐元素、`[N]own *T` / `[N]Box` 运行期 for、`own []own *T` / `own []Box`

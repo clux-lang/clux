@@ -377,14 +377,53 @@ fatal→share 创建通道全部删除。share/weak 语义待后续重新设计�
 - 变量定义/捕获位还有**反向规则**（§0.4）：FATAL 不得进非 own 位置
   （`var b: Box = .Box{…}` 必须写 `own Box`）；own 聚合不得 copy。
 
+### 7.1.1 NEW / CONSTRUCT 统一 + **扁平化 clone**（2026-10）
+
+**NEW 只管申请内存，CONSTRUCT 负责构造**（C 后端等价的关键，理由同 FREE）：
+
+| 指令 | 职责 |
+|---|---|
+| `NEW` | 弹字节数 → 申请原始块（清零）→ 压 `opaque` 句柄（C: `calloc(1, size)`） |
+| `CONSTRUCT n` | `[dest, type_value, v1..vN]`：dest=`undefined` → 新建值块（栈值，C: 局部变量）；dest=`opaque` → 在 NEW 的块上构造，结果 `fatal *T`（C: 堆块） |
+
+于是源码两种形态归一为同一条指令序列：
+`new T{...}` → `PUSH_U64 sizeof(T); NEW; <type>; <fields>; CONSTRUCT n`；
+`.T{...}` → `PUSH_UNDEFINED; <type>; <fields>; CONSTRUCT n`。
+
+**clone 扁平化**：`clone(x)` 不再交给运行期按类型递归（`ptr_clone_block`），
+由 sema 在**编译期**展开成显式「申请 + 赋值」序列（与销毁序列对称）：
+
+| 类型 | 生成形态 |
+|---|---|
+| 无 own 槽位（标量 / cunion / 无 own 字段聚合） | 值本身（普通拷贝） |
+| 叶子指针（指向无 own 槽位内容）、标量叶子 | `CLONE`（申请新块 + 拷贝字节） |
+| struct / tuple / `[N]T`（含 own 槽位） | `.T{ <逐槽位 clone/拷贝> }`（构造 = 申请 + 赋值） |
+| `?T`（inner 含 own 槽位） | `(v != nil) ? .?T{ clone(v.!) } : .?T{ nil }`（三元；直接形态节点） |
+| union（含 own 槽位） | `(v is m1) ? .U{ .m1 = clone(v.m1) } : …`（三元链，`member_tag` 逐分支） |
+| `own *U`（U 需深拷贝） | `new U{ <逐槽位 clone/拷贝> }`（`?U`/union 则为逐分支 `new`） |
+| `own []T` | prelude：`var __cl_N: []T = make(T, len(v))`（MAKE 0）+ `for i … { __cl_N[i] = <元素 clone> }`，表达式 = `AST_TAKE(__cl_N)`（MOVE 移出） |
+
+深拷贝的槽位规则与销毁一致（own 叶子才释放/克隆，ref 跳过；复合递归）。
+新增直接形态节点（`token_t*` 无法合成）：`AST_CLONE`（叶子 CLONE）、
+`AST_TAKE`（移出临时变量）；slice 路径用 `sema->cur_stmt->prelude`（compiler
+在语句主体前、同一作用域编译）承载临时变量与循环。
+运行期只剩 `CLONE / NEW / CONSTRUCT / MAKE` 这些「申请 + 拷贝」原语——
+没有按类型递归的辅助函数，C 后端可逐条等价翻译。
+
 ### 7.2 仍未支持
 
-**cunion 不参与自动销毁**（设计如此）：无 tag，运行期无法判定哪个 member 活跃，
-销毁序列不为 cunion 生成 FREE（`gen_destroy` 走 default）。其指针/切片成员仍被
-类型层限制拒绝，不会产生静默泄漏。
+**cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个
+member 活跃，销毁序列不为它生成 FREE（`gen_destroy` 走 default）。因此
+`type_has_own_slots(cunion)` 恒 false：含 cunion 的聚合不产 FATAL、不生成销毁序列；
+cunion 成员槽位所有权在 sema 侧恒记 `OWN_NONE`。成员**可以是指针/切片**
+（类型层限制已放开），但 `new` 放进去的堆块生命周期由开发者自负（与 C union 语义
+一致）——后续如何管理暂缓。
 
-**`clone` 与 ref 槽位**：`clone` 只深拷贝 own 槽位（缓冲区对切片总是深拷贝），
+**`clone` 与 ref 槽位**：clone 只深拷贝 own 槽位（切片缓冲区总是深拷贝），
 ref 槽位保持借用指针——与销毁序列同一套槽位规则。
+
+**clone 回退路径**：闭包（`TYPE_KIND_FUNC` 值）与无语句上下文（comptime 折叠）
+仍走运行期 `CLONE`（`ptr_clone_block`）；`ptr_clone_block` 因此保留但只作为回退。
 
 ### 7.3 开发环境注意事项（踩过的坑）
 
