@@ -241,3 +241,69 @@ TEST(FlatClone, SliceOfStructs) {
                  "}\n",
                  "fc_slice_struct");
 }
+
+/* ==================== move 的**字段/元素级**限制（clone 不触碰） ====================
+ *
+ * TDZ 是**符号级**的（只跟踪变量名）：`move(a.b)` 把资源从字段里掏走，却没有任何
+ * 地方记录 `a.b` 已失效——同一字段可重复 move、被读成悬垂值。所以 move 只作用于
+ * **整个变量**，字段/元素只能连整个聚合一起 move（sema `ex_move` 约束 1）。
+ *
+ * 扁平化 clone 与这条限制的关系：
+ *   - clone 只**读**槽位（FIELD_GET / INDEX_GET）并拷贝，不改变源的绑定状态；
+ *   - 唯一的 move-out（`AST_TAKE`）只作用于 sema 生成的**整个临时变量**（__cl_N），
+ *     从不对字段/元素发 move。
+ * 下面 4 例把这条边界钉住（前两例拒绝、后两例允许）。
+ */
+
+TEST(FlatClone, MoveStructFieldRejected) {
+  clux_expect_reject(
+      "struct Box { p: own *i32; n: i32 }\n"
+      "func main(): i32 {\n"
+      "  var b: own Box = .Box{ .p = new i32{1}, .n = 1 };\n"
+      "  var q: own *i32 = move(b.p);\n"   /* 字段没有局部 TDZ */
+      "  return q.*;\n"
+      "}\n",
+      "cannot move a struct/aggregate field or element", "fc_move_field");
+}
+
+TEST(FlatClone, MoveArrayElementRejected) {
+  clux_expect_reject(
+      "func main(): i32 {\n"
+      "  var a: own [2]own *i32 = .[2]own *i32{ new i32{1}, new i32{2} };\n"
+      "  var q: own *i32 = move(a[0]);\n"  /* 元素同理 */
+      "  return q.*;\n"
+      "}\n",
+      "cannot move a struct/aggregate field or element", "fc_move_elem");
+}
+
+TEST(FlatClone, CloneStructFieldAllowed) {
+  /* 字段级 clone 合法：拷贝不改变源字段的绑定状态，两个块互相独立。 */
+  clux_expect_ok(
+      "struct Box { p: own *i32; n: i32 }\n"
+      "func main(): i32 {\n"
+      "  var b: own Box = .Box{ .p = new i32{7}, .n = 1 };\n"
+      "  var q: own *i32 = clone(b.p);\n"
+      "  if (q.* != 7) { return 1; }\n"
+      "  if (b.p.* != 7) { return 2; }\n"
+      "  q.* = 9;\n"
+      "  if (b.p.* != 7) { return 3; }\n"   /* 独立堆块 */
+      "  return 0;\n"
+      "}\n",
+      "fc_clone_field");
+}
+
+TEST(FlatClone, CloneSliceFieldAllowed) {
+  /* 字段级 clone（切片）：扁平化走 prelude 临时变量 + TAKE（对**整个临时变量**
+     move），从不对字段发 move；缓冲独立。 */
+  clux_expect_ok(
+      "struct Holder { s: own []i32 }\n"
+      "func main(): i32 {\n"
+      "  var h: own Holder = .Holder{ .s = make(i32, 2, 1, 2) };\n"
+      "  var c: own []i32 = clone(h.s);\n"
+      "  c[0] = 9;\n"
+      "  if (h.s[0] != 1) { return 1; }\n"
+      "  if (c[0] != 9) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "fc_clone_slice_field");
+}

@@ -410,6 +410,13 @@ fatal→share 创建通道全部删除。share/weak 语义待后续重新设计�
 运行期只剩 `CLONE / NEW / CONSTRUCT / MAKE` 这些「申请 + 拷贝」原语——
 没有按类型递归的辅助函数，C 后端可逐条等价翻译。
 
+**与 "move 不能作用于字段/元素" 的关系**（TDZ 是**符号级**的，只跟踪变量名：
+`move(a.b)` 掏空字段却无处记录失效，同一字段可重复 move、读到悬垂值）：
+clone 只**读**槽位（`FIELD_GET` / `INDEX_GET`）并拷贝，不改变源的绑定状态；
+唯一的 move-out（`AST_TAKE`）只作用于 sema 生成的**整个临时变量**（`__cl_N`），
+从不对字段/元素发 move。因此字段级 `clone(a.b)` 合法（含切片字段——走 prelude
+临时变量 + TAKE），字段/元素级 `move` 仍一律拒绝（sema `ex_move` 约束 1）。
+
 ### 7.2 仍未支持
 
 **cunion 不参与所有权运算**（设计如此，2026-10 定）：无 tag，运行期无法判定哪个
