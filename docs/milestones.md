@@ -1891,7 +1891,11 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `]]` 闭合是**语法错误**（不会被吞成普通声明）。
     - **fmt**：var / 顶层函数 / 成员三处渲染都保留 `[[...]]`（漏渲染会静默丢掉
       装饰语义）。
-    - **测试**：`tests/decorator_test.cpp` 9 例——全局变量、多装饰器顺序、顶层
+    - **只允许顶层**（用户补充要求）：局部变量/局部函数上的装饰器**明确拒绝**
+      （`decorators [[...]] are only allowed on top-level 'var' / 'func'
+      declarations (and struct members), not on local declarations`）——装饰器展开是
+      "全局绑定 + 模块初始化期折叠"，函数体里没有对应形态。
+    - **测试**：`tests/decorator_test.cpp` 12 例——全局变量、多装饰器顺序、顶层
       函数（装饰一次 + 仍是一等值）、struct 方法、普通函数（可折叠）也能当装饰器、
       不可折叠装饰器报编译期错误、非 var/func 声明拒绝、未闭合 `]]` 语法错误、
       fmt 保留前缀。
@@ -1901,5 +1905,5 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       参数闭包**的装饰器会在 sema 捕获改写处报 `undefined variable '__ctx'`
       （常量闭包的 capture_type_id 提前写回与 comptime 函数体内 walk 的交互），
       待下一轮修。顶层函数与变量的闭包装饰器不受影响。
-    - 验证：Windows 全量 **2135/2135 PASSED**；示例 50 个 `.cx` 全过；fmt 幂等
-      （`[[...]]` 保留）；WSL 见同轮记录。
+    - 验证：Windows 全量 **2138/2138 PASSED**；示例 50 个 `.cx` 全过；fmt 幂等
+      （`[[...]]` 保留）；WSL2 Ubuntu 全量 **2135 passed / 2 skipped**。

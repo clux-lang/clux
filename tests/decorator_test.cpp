@@ -158,3 +158,46 @@ TEST(Decorator, FmtPreservesDecorators) {
   EXPECT_NE(once.find("[[twice]] var a = 21;"), std::string::npos) << once;
   EXPECT_NE(once.find("[[twice]] [[twice]] func f"), std::string::npos) << once;
 }
+
+/* 装饰器**只允许顶层**：局部变量上的装饰器必须明确拒绝（而不是落成难懂的
+   语法错误或悄悄忽略）。 */
+TEST(Decorator, LocalVarDecoratorRejected) {
+  const std::string src =
+      "comptime func twice(n: i32): i32 { return n * 2; }\n"
+      "func main(): i32 {\n"
+      "  [[twice]] var a = 21;\n"
+      "  return a;\n"
+      "}\n";
+  std::string path = write_temp_file(src, "decor_local_var");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("only allowed on top-level"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+/* 局部函数同理（装饰器展开是"全局绑定 + 模块初始化期折叠"语义）。 */
+TEST(Decorator, LocalFunctionDecoratorRejected) {
+  const std::string src =
+      "comptime func twice(n: i32): i32 { return n * 2; }\n"
+      "func main(): i32 {\n"
+      "  [[twice]] func inc(x: i32): i32 { return x + 1; }\n"
+      "  return inc(1);\n"
+      "}\n";
+  std::string path = write_temp_file(src, "decor_local_func");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("only allowed on top-level"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+/* 单个 `[` 的数组/下标表达式不受影响（装饰器识别是 `[[` 两连字符）。 */
+TEST(Decorator, SingleBracketExpressionsStillWork) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var a = .[3]i32{ 7, 8, 9 };\n"
+      "  var i: i32 = 1;\n"
+      "  if (a[i] != 8) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "decor_single_bracket");
+}

@@ -29,6 +29,28 @@
 /* ================================================================ */
 
 ast_node_t *parse_stmt(parser_t *p) {
+    /* 装饰器 `[[<expr>]]` **只允许顶层**（全局 var / 全局 func / struct 成员）。
+       局部变量/局部函数上出现装饰器 → 明确拒绝：装饰器展开是"全局绑定"语义
+       （`var a = ann(v)` / `var f = ann(源函数)`，依赖模块初始化期折叠），
+       在函数体里没有对应形态。这里先看清 `[[` 再报，避免落成难懂的
+       "expected expression"。 */
+    if (check_symbol(p, "[")) {
+        size_t save = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (check_symbol(p, "[")) {
+            p->pos = (uint32_t)save;
+            uint32_t tb = p->pos;
+            (void)parse_decorator_prefixes(p);
+            skip_trivia(p);
+            return ast_error_new(
+                p->diag, p->tokens, p->arena, tb, p->pos,
+                "decorators `[[...]]` are only allowed on top-level 'var' / "
+                "'func' declarations (and struct members), not on local "
+                "declarations");
+        }
+        p->pos = (uint32_t)save; /* 单个 `[`：数组/下标表达式，交给表达式语句 */
+    }
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
     /* foreach：for-each 语法糖（前脱糖展开成索引 for 循环） */
     if (check_keyword(p, "foreach")) return parse_foreach(p);

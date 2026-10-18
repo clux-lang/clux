@@ -778,8 +778,11 @@ struct Point {
 }                                  // ⇒ 成员变成转发包装方法，原方法体搬到模块级源函数
 ```
 
-- 允许修饰：**全局变量**、**函数**（含 **struct 方法**）。其它声明报
-  ``decorators `[[...]]` are only allowed on 'var' and 'func' declarations``。
+- **只允许顶层**：全局变量、全局函数、**struct 方法**（结构体成员）。其它声明报
+  ``decorators `[[...]]` are only allowed on 'var' and 'func' declarations``；
+  **局部**变量/局部函数上的装饰器直接拒绝（装饰器展开是"全局绑定 + 模块初始化
+  期折叠"语义，函数体里没有对应形态）：
+  ``decorators `[[...]]` are only allowed on top-level 'var' / 'func' declarations ...``。
 - 装饰器在**编译期求值**（全局初始化器必须可折叠）：值装饰器任意 comptime 函数；
   函数/方法装饰器必须是 comptime 且返回函数（闭包也可以，见上一节）。
 - 顶层函数装饰后**仍是函数**（可递归、可当值），装饰只发生一次——不像"每次调用
