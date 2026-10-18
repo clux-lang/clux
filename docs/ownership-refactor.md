@@ -108,10 +108,10 @@
 `compile_stmt` 逐条编译 `defers` 链，故 `for` / `if` 可直接入链，退出协议无需改动。
 
 **已落地**：`FREE` 改为表达式（`0adc72e`）；闭包 own 捕获按 `FIELD_GET` 展开
-（`d96940d`，闭包槽位名可直接从 AST 枚举，故先于 struct 完成）。
-**未落地**：struct/tuple/array/option/union 的槽位展开；放开"复合类型禁止携带
-指针/切片"（依赖上一条——目前运行期递归销毁分不清 own / ref 槽位，放开后实测
-`own *Holder` 的 FREE 会释放 ref 字段指向的栈地址 → 0xC0000005）。
+（`d96940d`）；struct / tag union 的槽位展开、`own *聚合`（先解引用再逐槽位）、
+`new U{…}`、闭包聚合捕获槽（2026-10，见 §7.1）。
+**未落地**：tuple / array / option 的槽位展开（需要 `for` / `if (ok)` 生成，
+类型层仍禁止其携带指针/切片）；`own` 指针变量的赋值点旧值销毁（见 §7.2 D）。
 
 
 ### 0.9 本模型取代的机制
@@ -322,56 +322,73 @@ fatal→share 创建通道全部删除。share/weak 语义待后续重新设计�
 
 ---
 
-## 7. 当前进度与交接（2026-10-18）
+## 7. 当前进度与交接（2026-10-18 复查）
 
-### 7.1 已可用（有探针验证、无泄漏）
+### 7.1 已可用（有探针 + 回归测试验证、无泄漏）
 
 | 形态 | 说明 |
 |---|---|
 | `own *T` / `own []T`（元素为标量） | 销毁：`FREE v` |
 | **含 own 字段的 struct**（含嵌套 `A{b:B}`、`B{p:own *i32}`） | 销毁：逐 own 槽位 `FREE v.p`；`ref` 槽位**不进**序列 |
-| **含 own 捕获的闭包** | 闭包含 own 捕获即 **OWN**（唯一不经 FATAL 的 own 产生式）；销毁：`FREE f.<cap>`（VM 的 `FIELD_GET` 支持按名读闭包捕获槽，sema 不放行该语法） |
+| **含 own 指针的 tag union**（`union U { p: own *i32; n: i32 }`） | 销毁：每个 own member 一条 `if (v is m) { <payload 销毁序列> }`；只释放当前 tag 的 payload，ref member 跳过；tag 宽度跨 128 边界（`PUSH_I16` / `IS_TAG`）验证过 |
+| **指针指向含 own 槽位的聚合**（`own *Box`、`own *U`） | 销毁序列先解引用再逐槽位：`FREE p.*.f …` 然后 `FREE p`（嵌套指针 `own *own *T` 同理，不再双 FREE / 泄漏） |
+| **堆上的 tag union**（`new U{...}` → `own *U`） | `new` 走 tag 哨兵 + `CONSTRUCT 2`（此前 payload 直接交给 NEW，union 隐式转换必失败）；`p.field` 成员访问对 union 指针也自动解引用 |
+| **含 own 聚合捕获的闭包** | 捕获槽销毁按**捕获槽的 type 对象**展开（`ast_var_def_t::resolved_type`）：`own *T` → `FREE f.cap`，聚合 → 逐槽位（union 带 `if (f.cap is m)`）。旧实现只发 `FREE f.cap`，聚合捕获内嵌堆块全泄漏 |
 | `move` / `clone` 聚合 | `move(OWN) → FATAL`；**聚合的 own 值必须走 move**，否则源不标 moved → 双释放 |
+| 聚合的 own 形参 / `fatal` 返回 / 循环 / break / continue | 销毁序列在退出点按 type 展开（`collect_free_stmts`） |
+| **字段覆盖旧值**（`s.u = .U{…}`） | 运行期先按**槽位所有权**销毁旧值（`ptr_free_slot_value`：own 叶子释放、ref 跳过），再 memcpy |
+| **union 变量重新赋值** | `compound_assign_transfer` 的旧值释放改为**按槽位所有权**（`ptr_free_owned_recursive` 重写）——旧 tag 是 ref payload 时不再 free 借用目标（曾 0xC0000005） |
 
 关键实现点：
 - 销毁序列**完全由 AST 生成**（`gen_destroy`，`stmt.c`），从 **type 对象**反推
   （§0.8）。槽位所有权记在字段结构体上（`struct_field_t::ownership` 等），
-  **参与 intern 去重键**。
+  **参与 intern 去重键**（struct / tuple 早已如此；本轮补上 union / cunion——
+  否则 `union A { p: own *i32 }` 与 `union B { p: ref *i32 }` 会被去重成同一个
+  类型，后定义者继承前者的所有权）。
 - 叶子（ptr/slice）**仅当槽位 ownership == OWN** 才 FREE；复合**无条件递归**。
-- 运行期 `FREE` 用 `ptr_free_block_only`（**不递归**）。旧的
-  `ptr_free_owned_recursive` 会无差别释放所有指针字段（含 ref）→ 曾导致
-  `own *Holder`（Holder 含 ref 字段）崩在 `0xC0000005`。
-- `CONSTRUCT` 的字段含 own 槽位 → 产 `OWN_FATAL`（`construct_result`）。
+- sema 生成的销毁语句带 `ast_node_t::is_generated`，Pass 3b **不再回走**
+  （否则 `AST_IF` 去消费 3a 没建的作用域、`AST_IS_TAG` 不是用户表达式——
+  这就是早期"栈溢出 / scope tree desync"的根因）。defer 的 `__defer_N()` 调用
+  同样 tok_begin=0，但**必须继续 walk**（CTFE 依赖），故用显式标记而非 tok_begin。
+- 运行期 `FREE` 用 `ptr_free_block_only`（**不递归**），被指向值的 own 槽位由
+  sema 生成的 `FREE v.f` 逐条释放。运行期仍保留的递归路径（DISPOSE / 复合赋值 /
+  字段覆盖）已统一改为**按槽位所有权**（own 叶子释放、ref 跳过），type 对象是唯一权威。
+- 运行期类型对象也带槽位所有权：hoist 用新指令 `SET_FIELD_OWNERSHIP <own>` 在
+  `DEFINE_FIELD` / `APPEND_ELEM` 之后补写（否则运行期看到的是缺省 NONE——
+  具名 struct 还带 `MARK_UNIQUE`，不会去重到 sema 那份带 ownership 的类型）。
+- `CONSTRUCT` 的字段含 own 槽位 → 产 `OWN_FATAL`（`construct_result`）；
+  构造/`new`/捕获/字段赋值的槽位接收规则统一在 `sema_check_slot_flow`：
+  own 槽位只接 FATAL、非 own 复合槽位不得 copy OWN 聚合。
+- 变量定义/捕获位还有**反向规则**（§0.4）：FATAL 不得进非 own 位置
+  （`var b: Box = .Box{…}` 必须写 `own Box`）；own 聚合不得 copy。
 
 ### 7.2 未完成 + **精确阻塞点**
 
-**A. tag union（`union U { p: own *i32; }`）——最接近完成**
-
-已完成：`gen_destroy_union`（每个 own member 一条
-`if (v is m) { <payload 销毁序列> }`）、`AST_IS_TAG` 节点（`ast_is_tag.h`，
-compiler 发 `IS_TAG <tag>`）、member 表 ownership 传播。
-
-**阻塞**：放开 `comptime.c` 的 union 指针限制后，运行期**栈溢出**
-（`exit=-1073741571` = `0xC00000FD`）。已确认 `type_has_own_slots(U)` 返回 true
-且 `member 0 own=1`（打印验证）后崩溃，故可疑点在**生成的 AST 被 compiler
-编译的路径**（`AST_IF` + `AST_IS_TAG` + `AST_BLOCK` 组合），而非所有权判定。
-建议先单独给 `AST_IS_TAG` 写一个最小用例（不经销毁生成），确认它能编译执行。
-
-**B. `own ?T`**
+**A. `own ?T`（inner 含 own 槽位）**
 
 需要 `if (v != nil) { <inner 的销毁序列> }`。AST 侧需组合 `AST_BINARY`（`!=`）
 + `AST_NIL`——注意 `AST_BINARY::op` 是 `token_t*`，sema 无法合成 token
-（与 `is` 同一问题），可能也需要一个直接形态节点。
+（与 `is` 同一问题），可能也需要一个直接形态节点（类似 `AST_IS_TAG`）。
 
-**C. `own []T`（元素含 own 槽位）**
+**B. `own []T`（元素含 own 槽位）**
 
 需要 `for` 循环。`ast_for_t` 字段已知；难点是生成的循环变量需要 compiler 侧
 可接受的形态（sema 已运行完，不会为它建符号）。
 
-**D. tuple / array / cunion 的指针限制**
+**C. tuple / array / cunion 的指针限制**
 
 `gen_destroy` 里已留分支占位（返回 true 但什么都不生成——**放开限制前必须补上
-生成，否则静默泄漏**）。cunion 无 tag，按设计**永不参与**自动销毁。
+生成，否则静默泄漏**）。tuple/array 需要 `for`/逐元素展开；cunion 无 tag，按设计
+**永不参与**自动销毁。
+
+**D. 赋值点旧值销毁（A 方案 §2.3 表的剩余项）**
+
+`own` **指针变量**重新赋值（`p = new i32{2}`）会泄漏旧块：`ptr_assign` 按设计
+"不释放旧堆块（由 sema 在赋值点生成 FREE）"，而 sema 侧的赋值点销毁序列**还没
+实现**。聚合变量赋值走 `compound_assign_transfer`、字段覆盖走
+`ptr_free_slot_value`，都不泄漏；**只剩指针变量这一条**。后续实现时注意：
+FREE 必须在 rhs 求值之后、STORE 之前发出（rhs 可能读旧值），并在 `compound_assign_transfer`
+里去掉"释放旧值"那一步（避免双释放）。
 
 ### 7.3 开发环境注意事项（踩过的坑）
 

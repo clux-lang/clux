@@ -53,36 +53,38 @@ for f in FAM:
     T, C = f["t"], f["ctor"]
     rd = lambda v: f["read"].replace("{0}", v)
 
-    w(f, "01_ctor_explicit", "  var a: %s = %s;\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, rd("a")))
+    w(f, "01_ctor_explicit", "  var a: own %s = %s;\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, rd("a")))
     w(f, "02_ctor_infer",    "  var a = %s;\n  if (!(%s)) { return 1; }\n  return 0;" % (C, rd("a")))
-    w(f, "03_move_local",    "  var a: %s = %s;\n  var b: %s = move(a);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, rd("b")))
-    w(f, "04_clone_local",   "  var a: %s = %s;\n  var b: %s = clone(a);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, rd("a"), rd("b")))
-    w(f, "05_move_discard",  "  var a: %s = %s;\n  _ = move(a);\n  return 0;" % (T, C))
+    w(f, "03_move_local",    "  var a: own %s = %s;\n  var b: own %s = move(a);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, rd("b")))
+    w(f, "04_clone_local",   "  var a: own %s = %s;\n  var b: own %s = clone(a);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, rd("a"), rd("b")))
+    w(f, "05_move_discard",  "  var a: own %s = %s;\n  _ = move(a);\n  return 0;" % (T, C))
     w(f, "06_discard_ctor",  "  _ = %s;\n  return 0;" % C)
-    w(f, "07_scope_exit",    "  {\n    var a: %s = %s;\n    if (!(%s)) { return 1; }\n  }\n  return 0;" % (T, C, rd("a")))
-    w(f, "08_assign_move",   "  var a: %s = %s;\n  var b: %s = %s;\n  b = move(a);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, C, rd("b")))
-    w(f, "09_assign_clone",  "  var a: %s = %s;\n  var b: %s = %s;\n  b = clone(a);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, C, rd("a"), rd("b")))
-    w(f, "10_elem_move",     "  var a: %s = %s;\n  var g: [1]%s = .[1]%s{ move(a) };\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, T, rd("g[0]")))
-    w(f, "11_elem_clone",    "  var a: %s = %s;\n  var g: [1]%s = .[1]%s{ clone(a) };\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, T, rd("g[0]"), rd("a")))
-    w(f, "16_double_move",   "  var a: %s = %s;\n  var b: %s = move(a);\n  var c: %s = move(b);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, T, rd("c")))
-    w(f, "17_move_clone",    "  var a: %s = %s;\n  var b: %s = move(a);\n  var c: %s = clone(b);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, T, rd("b"), rd("c")))
+    w(f, "07_scope_exit",    "  {\n    var a: own %s = %s;\n    if (!(%s)) { return 1; }\n  }\n  return 0;" % (T, C, rd("a")))
+    w(f, "08_assign_move",   "  var a: own %s = %s;\n  var b: own %s = %s;\n  b = move(a);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, C, rd("b")))
+    w(f, "09_assign_clone",  "  var a: own %s = %s;\n  var b: own %s = %s;\n  b = clone(a);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, C, rd("a"), rd("b")))
+    w(f, "10_elem_move",     "  var a: own %s = %s;\n  var g: own [1]%s = .[1]%s{ move(a) };\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, T, rd("g[0]")))
+    w(f, "11_elem_clone",    "  var a: own %s = %s;\n  var g: own [1]%s = .[1]%s{ clone(a) };\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, T, rd("g[0]"), rd("a")))
+    w(f, "16_double_move",   "  var a: own %s = %s;\n  var b: own %s = move(a);\n  var c: own %s = move(b);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, T, T, rd("c")))
+    w(f, "17_move_clone",    "  var a: own %s = %s;\n  var b: own %s = move(a);\n  var c: own %s = clone(b);\n  if (!(%s)) { return 1; }\n  if (!(%s)) { return 2; }\n  return 0;" % (T, C, T, T, rd("b"), rd("c")))
 
     helpers = (
-        "func take(x: fatal %s): i32 {\n"
-        "  var o: %s = move(x);\n"
+        # 形参位置只有 own / ref（docs/ownership-refactor.md §0.5）：
+        # fatal 描述的是**调用表达式**的值，不是形参；接管用 own。
+        "func take(x: own %s): i32 {\n"
+        "  var o: own %s = move(x);\n"
         "  if (!(%s)) { return 1; }\n"
         "  return 0;\n"
         "}\n"
         "func mkone(): fatal %s {\n"
         "  return move(%s);\n"
         "}\n"
-        "func fwd(x: fatal %s): fatal %s {\n"
-        "  return x;\n"
+        "func fwd(x: own %s): fatal %s {\n"
+        "  return move(x);\n"
         "}\n" % (T, T, rd("o"), T, C, T, T)
     )
     w(f, "12_fatal_param",  "  if (take(%s) != 0) { return 1; }\n  return 0;" % C, helpers)
-    w(f, "13_fatal_return", "  var o: %s = mkone();\n  if (!(%s)) { return 1; }\n  return 0;" % (T, rd("o")), helpers)
-    w(f, "14_param_move",   "  var j: %s = %s;\n  if (take(move(j)) != 0) { return 1; }\n  return 0;" % (T, C), helpers)
-    w(f, "15_fatal_forward", "  var o: %s = fwd(%s);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, rd("o")), helpers)
+    w(f, "13_fatal_return", "  var o: own %s = mkone();\n  if (!(%s)) { return 1; }\n  return 0;" % (T, rd("o")), helpers)
+    w(f, "14_param_move",   "  var j: own %s = %s;\n  if (take(move(j)) != 0) { return 1; }\n  return 0;" % (T, C), helpers)
+    w(f, "15_fatal_forward", "  var o: own %s = fwd(%s);\n  if (!(%s)) { return 1; }\n  return 0;" % (T, C, rd("o")), helpers)
 
 print("generated %d files in %s" % (made, DIR))

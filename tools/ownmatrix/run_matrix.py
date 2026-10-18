@@ -52,7 +52,10 @@ for op in ops:
     row = "%-22s" % op
     for f in fams:
         rc, err = results.get((op, f), ("-", ""))
-        if rc == 0:
+        if rc == 0 and "memory leak" in err:
+            # exit 0 但 stderr 有泄漏报告：销毁序列漏了 own 槽位（也是坏格）
+            cell = "LEAK"
+        elif rc == 0:
             cell = "ok"
         elif rc == 1:
             cell = "REJECT"

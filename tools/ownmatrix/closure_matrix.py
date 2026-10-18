@@ -25,13 +25,13 @@ OPS = {
  "C1_capture_direct":
    "  var f = func |a| get(): i32 {{ return {E}; }};\n  if (f() != 3) {{ return 1; }}\n  return 0;",
  "C2_capture_paren_move":
-   "  var f = func |(bb: {T} = move(a))| get(): i32 {{ return {E2}; }};\n  if (f() != 3) {{ return 1; }}\n  return 0;",
+   "  var f = move(func |(bb: own {T} = move(a))| get(): i32 {{ return {E2}; }});\n  if (f() != 3) {{ return 1; }}\n  return 0;",
  "C3_capture_then_discard":
    "  var f = func |a| get(): i32 {{ return {E}; }};\n  if (f() != 3) {{ return 1; }}\n  _ = move(a);\n  return 0;",
  "C4_capture_then_clone":
-   "  var f = func |a| get(): i32 {{ return {E}; }};\n  var c: {T} = clone(a);\n  if (f() != 3) {{ return 1; }}\n  _ = move(c);\n  return 0;",
+   "  var f = func |a| get(): i32 {{ return {E}; }};\n  var c: own {T} = clone(a);\n  if (f() != 3) {{ return 1; }}\n  _ = move(c);\n  return 0;",
  "C5_two_captures":
-   "  var b: {T} = {C};\n  var f = func |a, b| get(): i32 {{ return {E}; }};\n  if (f() != 3) {{ return 1; }}\n  return 0;",
+   "  var b: own {T} = {C};\n  var f = func |a, b| get(): i32 {{ return {E}; }};\n  if (f() != 3) {{ return 1; }}\n  return 0;",
  "C6_defer_capture":
    "  defer |a| {{ }};\n  return 0;",
  "C7_capture_in_block":
@@ -46,7 +46,7 @@ for fn, (defs, T, C, E) in FAM.items():
         e2 = E.replace("{0}", "bb")
         src = body.format(T=T, C=C, E=e, E2=e2)
         text = (defs + "\n" if defs else "") + \
-               "func main(): i32 {\n  var a: %s = %s;\n%s\n}\n" % (T, C, src)
+               "func main(): i32 {\n  var a: own %s = %s;\n%s\n}\n" % (T, C, src)
         p = os.path.join(D, "%s__%s.cx" % (fn, on))
         open(p, "w", encoding="utf-8").write(text)
         made += 1

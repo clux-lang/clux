@@ -42,6 +42,10 @@ python tools/ownmatrix/run_matrix.py
 `12` fatal 形参 · `13` fatal 返回 · `14` 具名实参 move 传入 ·
 `15` fatal 形参原样 return（转发） · `16` 二次 move · `17` move 后 clone
 
+> 2026-10 更新：显式标注用 **`own T`**（含 own 槽位的构造产 FATAL，NONE 位置
+> 接不住——见 docs/ownership-refactor.md §0.4）；形参位置用 **`own T`**
+> （`fatal` 描述的是调用表达式的值，不是形参，§0.5），`fatal` 只用于返回位。
+
 每格断言**字段值**（`a.p.* == 7 && a.n == 3` 之类），所以"跑通"不只是没崩，
 值也必须对。
 
@@ -49,8 +53,9 @@ python tools/ownmatrix/run_matrix.py
 
 | 类别 | 含义 |
 |---|---|
-| `ok` | exit 0 |
-| `REJECT` | exit 1 —— **需人工判定**：合理的语义拒绝（如普通 `T` 形参应改 `fatal T`）还是真缺口 |
+| `ok` | exit 0 且 stderr 无泄漏报告 |
+| `REJECT` | exit 1 —— **需人工判定**：合理的语义拒绝（如类型层临时限制）还是真缺口 |
+| `LEAK` | exit 0 但 stderr 有 `memory leak` —— 销毁序列漏了 own 槽位（**真 bug**） |
 | `ACCESS_VIOLATION` / `HEAP_CORRUPTION` / … | 崩溃码，**真 bug** |
 | `TIMEOUT` | 挂起（可能是析构死循环） |
 
@@ -65,26 +70,59 @@ python tools/ownmatrix/run_matrix.py
 | 写法 | 内容 |
 |---|---|
 | `C1` | 纯 id 捕获 |
-| `C2` | 括号捕获 + `move` |
+| `C2` | 括号捕获 + `move`（**唯一能捕获含 own 聚合的形态**：`(bb: own T = move(a))` + `var f = move(...)`） |
 | `C3` | 捕获后把源 `move` 走 |
 | `C4` | 捕获后再 `clone` 源 |
 | `C5` | 同时捕获两个含 own 的值 |
 | `C6` | `defer` 捕获（复用同一套捕获解析） |
 | `C7` | 块内捕获（闭包更早释放） |
 
-当前结果：**七族 49/49 干净**（`optinner` 随下面两条缺口修复后也全通）。
+当前结果：**C2 在 struct/nested/deep/union 四族 `ok`**；其余写法是**设计上应拒绝**
+的形态——纯 id 捕获 `own` 聚合 = copy（§9.1 明令禁止，必须 `(bb = move(a))`），
+所以它们报 `DIAG`（诊断）而不是缺陷。`tuple` / `array` / `optinner` 族仍被类型层
+限制挡住（见下）。
 
 > 附注：`closure_scope` 的生命周期**并非无人管理**——`vm_destroy` 会对每个函数
 > 调 `scope_destroy(vm, &fn->closure_scope)`。此前的捕获泄漏根因是
 > `value_own_copy_into` 没有回收 `ptr_clone_block` 的中间块（每构造一个含 own 的
 > 字段泄漏 8 字节），**不含闭包的程序同样泄漏**；见 `minimal_probe.py` 的对照。
+> 2026-10 的另一处：捕获槽销毁原来只发 `FREE f.<cap>`，对**聚合捕获**是空操作
+> （内嵌 own 堆块全泄漏）；现在按捕获槽的 type 对象展开（`ast_var_def_t::resolved_type`）。
 
-## 当前已知缺口
+## 当前已知缺口（2026-10 复查）
 
-**（无）** —— 截至本次，矩阵的 119 + 49 格全部 `ok`。
+矩阵 119 格的最新结果（`python tools/ownmatrix/run_matrix.py`）：
+
+| 族 | 结果 |
+|---|---|
+| `struct` / `nested` / `deep` / `union` | **15/17 ok**（10/11 两格被"数组类型不得含指针/切片"挡住，见下） |
+| `tuple` / `array` / `optinner` | 全列 `REJECT`（**类型层临时限制**，见下） |
+
+**零崩溃、零泄漏**（`LEAK` / 崩溃码均为 0）。闭包维度：C2 在四族 `ok`，
+其余六种写法按 §9.1 设计上应拒绝（纯 id 捕获 own 聚合 = copy）。
+
+1. **`tuple` / `array` / `option` 仍禁止携带指针/切片**（类型层，sema.c 的
+   `type_contains_ptr_or_slice`）——销毁序列需要 `for`（切片/数组运行期长度）
+   与 `if (ok)`（option），生成器尚未补。这是矩阵里 3 族 + 10/11 两格的
+   `REJECT` 来源（明确拒绝，不是泄漏/崩溃）。
+2. **赋值点旧值销毁**（A 方案 §2.3 表）尚未实现：`own` **指针变量**重新赋值
+   （`p = new i32{2}`）会泄漏旧块——`ptr_assign` 按设计不释放旧堆块，而 sema
+   还没在赋值点生成 FREE 序列。聚合（struct/union）变量赋值走
+   `compound_assign_transfer`、字段覆盖走 `ptr_free_slot_value`，均按槽位所有权
+   释放旧值（已校验无泄漏）；指针这一条是剩余缺口。
 
 ### 已修复（留档，避免回退）
 
+0. **tag union 携带 own 指针**（2026-10）：放开 `union_member_t` 的指针/切片限制
+   后，sema 在 Pass 3b 回走自己生成的销毁语句 → `AST_IF` 消费 3a 未建的作用域 /
+   `AST_IS_TAG` 不是用户表达式（`scope tree desync` / `unhandled expression node`，
+   更早表现为栈溢出）。修法：`ast_node_t::is_generated` 标记生成节点、`walk_stmt`
+   跳过。配套：`own *聚合` 的销毁序列补 `AST_DEREF`（`v.f` 不能直接对指针发
+   FIELD_GET/IS_TAG）；`new U{...}` 走 tag 哨兵 + CONSTRUCT；运行期"覆盖旧值"
+   按槽位所有权释放（`ptr_free_slot_value`）；`union`/`cunion` 去重键补 ownership；
+   hoist 用新指令 `SET_FIELD_OWNERSHIP` 把槽位所有权带进运行期类型对象；闭包
+   聚合捕获槽按 type 对象展开销毁。回归：`tests/tag_union_own_test.cpp`（26 例，
+   每例断言 exit 0 + 无泄漏）。
 1. **`optinner` 全列**（原：`cannot initialize optional ?I with fatal I`）
    两层根因：sema 的 option 字段类型比对没把 fatal 折回 base；而折回时"按同布局
    重新 intern"对**具名 struct 不可靠**（标了 `unique`、不参与去重，每次新建实例）。
@@ -109,9 +147,11 @@ python tools/ownmatrix/run_matrix.py
 
 ### 尚未拦截（sema 侧，非缺陷但规则不齐）
 
-捕获 **`own *T` 裸变量**已被拦（`cannot capture own/fatal pointer … use move()`），
-但**含 own 字段的复合类型按值捕获（纯 id）未被拦**——目前走深拷贝语义（安全、无
-泄漏），与 §7.2"复合类型赋值禁止 copy"不一致。是否要求显式 `clone()`/`move()` 待定。
+捕获 **`own *T` 裸变量**已被拦（`cannot capture own/fatal pointer … use move()`）。
+**含 own 槽位的聚合按值捕获（纯 id）**同样已被拦——`resolve_func_captures` 用
+"捕获槽也是具名位置"的规则：非 own 捕获槽收 FATAL 报 `must be an own capture`，
+copy OWN 聚合报 move-only。要捕获含 own 的聚合只有一种形态：
+`var f = move(func |(bb: own T = move(a))| ...)`（见闭包矩阵 C2）。
 
 ### ref 聚合的作用域检查（另一个维度，见 `docs/m3-design.md` §5/§5.1）
 
