@@ -376,6 +376,15 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
    - defer 在实际跳转之前执行（break/continue 先跑 defer 再 POP+JMP）
    - 不引入临时变量，避免 fatal/ref/own 语义被 var 定义改变 */
 static void compile_exit_with_defers(compiler_t *c, ast_node_t *node) {
+  /* **语句前置序列**：退出语句（return/break/continue）同样可能有 prelude
+     （sema 生成的扁平化 clone 切片路径 + 生成的 clone 函数体：函数体只有一条
+     `return <clone 表达式>`，切片的临时变量/循环全挂在它的 prelude 上）。
+     compile_block_body 对退出语句走本函数而不是 compile_stmt，因此这里必须
+     补上 prelude 编译，否则 prelude 被静默丢弃 → 运行期 "undefined variable"。 */
+  for (ast_node_t *pre = node->prelude; pre; pre = pre->next) {
+    compile_stmt(c, pre);
+    if (c->failed) return;
+  }
   /* return：先编译返回值压栈 */
   if (node->kind == AST_RETURN) {
     ast_return_t *n = (ast_return_t *)node;

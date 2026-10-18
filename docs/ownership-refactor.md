@@ -572,6 +572,26 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
 - 收益：销毁点 O(1) 指令（不再按槽位树膨胀）；C 后端逐函数翻译（函数体内是平铺的
   FREE/CALL/循环）；递归类型自然终止。
 
+### 7.1.8 生成的 clone 函数（2026-10，与销毁函数同构）
+
+`clone()` 不再在调用点扁平展开整个槽位树，而是生成一次 clone 函数（三种形态）：
+
+| 形态 | 生成物 | 用途 |
+|---|---|---|
+| kind 0 | `__clone_<n>(dv: ref *T): fatal T` | 值克隆（struct/tuple/array/option/union） |
+| kind 1 | `__cloneptr_<n>(dv: ref *U): fatal *U` | 指针克隆（申请新块 + 克隆被指向值） |
+| kind 2 | `__cloneslice_<n>(dv: ref []T): fatal []T` | 切片克隆（循环逐元素 clone） |
+
+- 调用点：`clone(x)` → `CALL __clone*_<n>(...)`（值 → `&x`；指针/切片 → 值本身）；
+- 函数体：`return <clone 表达式>`，内部按槽位展开；嵌套复合/指针/切片槽位再发
+  CALL（**运行时递归是合理的**，扁平化留给未来优化）；
+- **自引用类型**（链表/树）由函数自身递归（`__clone_1` ↔ `__cloneptr_2`），
+  天然终止，`CLONE` 指令只剩"无 own 槽位的叶子"（纯 memcpy）用途；
+- 注册表 `sema->clone_fns` 按 (kind, key) 去重，先登记再生成 body；
+- 切片路径的 prelude（临时变量 + make + 循环）挂在函数的 **return 语句** 上——
+  为此修了 `compile_exit_with_defers` 不编译 prelude 的缺陷（否则 prelude 被
+  静默丢弃 → 运行期 "undefined variable"）。
+
 ### 7.2 仍未闭环的边界（2026-10 审查清单）
 
 核心链路（转移 / 销毁 / clone / 槽位借用 / 赋值点 / 显式销毁 / union-cunion
@@ -586,20 +606,23 @@ Pass 3a 预注册块内**全部**变量（供前向解析），旧实现按"作�
    自身（**正确**、代码只展开一次）；但仍是**运行期递归**——深链表会吃栈。
    彻底 flat 需要为链表形态生成 while 循环（形状相关，暂未做）。
    clone 的环边仍用 `CLONE`（运行期递归）。
-3. **cunion 指针成员的释放仅限直接变量成员**：`_ = move(c.p)`；cunion 嵌在
+3. **clone 的环边**（§7.1.8）：已改为生成函数 + 运行时递归调用（正确、代码只展开
+   一次）；与销毁同理，深结构吃栈，彻底 flat 的 while 循环属未来优化。
+   `CLONE` 指令只剩"无 own 槽位叶子"的 memcpy 用途。
+4. **cunion 指针成员的释放仅限直接变量成员**：`_ = move(c.p)`；cunion 嵌在
    struct 里（`s.c.p`）或经指针（`p.c.p`）仍拒绝——整体 TDZ 会漏掉兄弟
    own 槽位/堆块。要闭环需要"部分 TDZ"或对 cunion 生成显式销毁钩子。
-4. **运行期递归辅助仍留在回退路径**：`DISPOSE`（sema 无法生成 prelude 时）、
+5. **运行期递归辅助仍留在回退路径**：`DISPOSE`（sema 无法生成 prelude 时）、
    `compound_assign_transfer` / `FIELD_SET` 的旧值释放、`CLONE` 环边——这些
    仍是按类型递归，未扁平化。
-5. **share / weak 引用计数**：已整体移除，单所有权是唯一模型；RC 语义待重新
+6. **share / weak 引用计数**：已整体移除，单所有权是唯一模型；RC 语义待重新
    设计（不阻塞单所有权闭环）。
-6. **FFI 边界（声明责任，编译器不校验）**：内嵌 own 的聚合在 clux 侧只有 FATAL
+7. **FFI 边界（声明责任，编译器不校验）**：内嵌 own 的聚合在 clux 侧只有 FATAL
    产生式（构造产 FATAL、FATAL 只能进 own 位置），因此 `f(‹FATAL 聚合›)` 是显式
    移交；C 返回含 own 的聚合（`extern cfunc …(): Box`）则是 **FFI 声明错误**——
    C 侧没有所有权概念，写这种签名的人必须自己保证不泄漏/不双释放。编译器无法
    校验（与 `own`/`fatal` 指针本身一样，只在声明处拒绝 `own` 位置）。
-7. **`?T` 的 nil 判定只允许变量**：`var x: ?T` 可 `x != nil`；字段/元素
+8. **`?T` 的 nil 判定只允许变量**：`var x: ?T` 可 `x != nil`；字段/元素
    （`n.next != nil`）报 "nil can only be compared with an optional variable"
    ——链表判空只能先绑定变量或直接 `.!`。语言层小缺口，与所有权正交。
 ### 7.3 开发环境注意事项（踩过的坑）

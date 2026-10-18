@@ -5,6 +5,7 @@
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
+#include "parser/ast_return.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
@@ -3258,23 +3259,210 @@ bool sema_append_prelude(sema_t *sema, ast_node_t *stmts) {
   return true;
 }
 
-/* **环检测包装**（自引用类型：链表/树）：扁平化 clone 按类型对象递归展开，
-   展开路径上再次遇到同类型时静态展开无法穷尽 —— 该边退化为运行期 `CLONE`
-   （申请新块 + 按槽位所有权递归深拷贝），其余部分保持构造式展开。 */
+/* ==== 生成的 clone 函数（与销毁函数同构，2026-10）====
+ *
+ * clone() 调用点只发 `CALL __clone*_<n>(...)`；函数体内部按槽位展开，嵌套
+ * 复合/指针/切片槽位再调用对应函数 —— 自引用类型（链表/树）由函数自身递归，
+ * 天然终止（不再依赖运行期 CLONE 兜底）。运行时递归是合理的，扁平化留给未来。
+ *
+ * 三种形态（key 是去限定后的类型）：
+ *   kind 0 `__clone_<n>(dv: ref *T): fatal T`        —— 值克隆（T 为复合值类型）
+ *   kind 1 `__cloneptr_<n>(dv: ref *U): fatal *U`    —— 指针克隆（新块 + 克隆被指向值）
+ *   kind 2 `__cloneslice_<n>(dv: ref []T): fatal []T`—— 切片克隆（循环逐元素 clone）
+ */
+static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
+                                       const type_t *t, ast_node_t *access,
+                                       ownership_t slot_own, bool top_level);
+static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
+                                   const type_t *t, ast_node_t *access);
+
+/* 调用点用的 callee 节点（每个调用点独立节点，不与注册表共享）。 */
+static ast_node_t *clone_fn_callee_node(sema_t *sema,
+                                        const sema_clone_fn_t *reg) {
+  ast_node_t *callee = ast_func_ref_new(sema->arena, 0, 0);
+  if (!callee) return NULL;
+  ((ast_func_ref_t *)callee)->fid = ((const ast_func_def_t *)reg->fn)->fid;
+  ((ast_func_ref_t *)callee)->name = reg->name;
+  return callee;
+}
+
+/* 取（必要时**生成**）clone 函数，返回 callee。生成顺序与销毁函数一致：
+ * **先登记再生成 body**，自引用类型在生成 body 时命中注册表 → 递归终止。 */
+static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
+                                   const type_t *key) {
+  const type_t *k = type_strip_quals(key);
+  if (!k) return NULL;
+  for (sema_clone_fn_t *f = sema->clone_fns; f; f = f->next) {
+    if (f->kind == kind && f->type == k) return clone_fn_callee_node(sema, f);
+  }
+
+  const char *prefix = kind == 0   ? "__clone_"
+                       : kind == 1 ? "__cloneptr_"
+                                   : "__cloneslice_";
+  char nb[40];
+  int nl = snprintf(nb, sizeof(nb), "%s%u", prefix, sema->clone_fn_seq++);
+  if (nl <= 0 || (size_t)nl >= sizeof(nb)) return NULL;
+  char *name_buf = (char *)arena_calloc(sema->arena, (size_t)nl + 1, 1,
+                                        ALIGNOF(max_align_t));
+  if (!name_buf) return NULL;
+  memcpy(name_buf, nb, (size_t)nl);
+  strslice_t name = strslice_from_bytes(name_buf, (size_t)nl);
+
+  /* 形参/返回类型：
+       kind 0 → 形参 *T，返回 T
+       kind 1 → 形参 *U，返回 *U
+       kind 2 → 形参 []T，返回 []T */
+  const type_t *pt = (kind == 2) ? k : type_ptr_intern(sema->vm, k);
+  if (!pt) return NULL;
+  const type_t *ret = (kind == 0) ? k : pt;
+
+  ast_func_def_t *fn = (ast_func_def_t *)arena_calloc(
+      sema->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
+  if (!fn) return NULL;
+  fn->base.kind = AST_FUNC_DEF;
+  fn->base.is_generated = true;
+  fn->name = name;
+  sema_func_id_alloc(sema, fn);
+  if (fn->fid == 0) return NULL;
+
+  ast_node_t *pnode = ast_var_def_new(sema->arena, 0, 0);
+  ast_node_t *ptexpr = sema_gen_type_ref(sema, pt);
+  if (!pnode || !ptexpr) return NULL;
+  ((ast_var_def_t *)pnode)->name = strslice_from_bytes("dv", 2);
+  ((ast_var_def_t *)pnode)->type_expr = ptexpr;
+  ((ast_var_def_t *)pnode)->ownership = 2; /* AST_OWN_REF */
+  fn->params = pnode;
+
+  const type_t *sigparams[1] = {pt};
+  ownership_t sigowns[1] = {OWN_REF};
+  const type_t *sig = type_func_sig(sema->vm, sigparams, sigowns, 1, ret,
+                                    OWN_FATAL, false);
+  if (!sig) return NULL;
+  const sema_type_t *st = sema_type_register(sema, sig);
+  if (st) fn->sig_id = st->id;
+
+  ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
+  if (!blk) return NULL;
+  blk->is_generated = true;
+  fn->body = blk;
+
+  /* **先登记再生成 body**（自引用类型递归在此终止） */
+  sema_clone_fn_t *wrap = (sema_clone_fn_t *)arena_calloc(
+      sema->arena, 1, sizeof(sema_clone_fn_t), ALIGNOF(max_align_t));
+  if (!wrap) return NULL;
+  wrap->type = k;
+  wrap->kind = kind;
+  wrap->fn = (ast_node_t *)fn;
+  wrap->name = name;
+  wrap->next = sema->clone_fns;
+  sema->clone_fns = wrap;
+
+  /* body：`return <clone 表达式>` —— 用 impl（槽位级展开；嵌套槽位再发 CALL）。
+     生成期间把 cur_stmt 指到 return 语句，切片 prelude（make + 循环）才有的挂。 */
+  ast_node_t *vid = ast_ident_new(sema->arena, 0, 0);
+  ast_node_t *ret_stmt = ast_return_new(sema->arena, 0, 0);
+  if (!vid || !ret_stmt) return NULL;
+  vid->is_generated = true;
+  ((ast_ident_t *)vid)->name = ((ast_var_def_t *)pnode)->name;
+
+  ast_node_t *prev_stmt = sema->cur_stmt;
+  sema->cur_stmt = ret_stmt;
+  ast_node_t *expr = NULL;
+  if (kind == 0) {
+    ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
+    if (deref) ((ast_deref_t *)deref)->operand = vid;
+    expr = deref ? gen_clone_expr_impl(sema, sema->global_scope, k, deref,
+                                       OWN_OWN, true)
+                 : NULL;
+  } else if (kind == 1) {
+    /* 形参就是 *U 指针值；impl 的 PTR 分支按 `new U{…}` 生成 */
+    expr = gen_clone_expr_impl(sema, sema->global_scope, pt, vid, OWN_OWN, true);
+  } else {
+    expr = gen_clone_slice(sema, sema->global_scope, k, vid);
+  }
+  sema->cur_stmt = prev_stmt;
+  if (!expr) return NULL;
+  ((ast_return_t *)ret_stmt)->value = expr;
+  ret_stmt->is_generated = true;
+  ((ast_block_t *)blk)->stmts = ret_stmt;
+  ((ast_block_t *)blk)->stmts_last = ret_stmt;
+
+  return clone_fn_callee_node(sema, wrap);
+}
+
+/* 调用 clone 函数：by_address = true → 实参 `&access`（值）；false → 实参就是
+   access（它本身已经是指针/切片值）。 */
+static ast_node_t *gen_clone_call(sema_t *sema, uint8_t kind, const type_t *key,
+                                  ast_node_t *access, bool by_address) {
+  if (!access) return NULL;
+  ast_node_t *callee = clone_fn_callee(sema, kind, key);
+  if (!callee) return NULL;
+  ast_node_t *arg = access;
+  if (by_address) {
+    arg = ast_addr_new(sema->arena, 0, 0);
+    if (!arg) return NULL;
+    ((ast_addr_t *)arg)->operand = access;
+  }
+  ast_node_t *call = ast_call_new(sema->arena, 0, 0);
+  if (!call) return NULL;
+  ((ast_call_t *)call)->callee = callee;
+  ((ast_call_t *)call)->args = arg;
+  call->is_generated = true;
+  return call;
+}
+
+/* 收尾：把生成的 clone 函数追加到程序函数链尾部（sema_analyze 调用）。 */
+void sema_attach_clone_fns(sema_t *sema, ast_node_t *program) {
+  if (!sema || !program || program->kind != AST_PROGRAM) return;
+  ast_program_t *prog = (ast_program_t *)program;
+  for (sema_clone_fn_t *f = sema->clone_fns; f; f = f->next) {
+    if (!f->fn) continue;
+    f->fn->next = NULL;
+    if (prog->funcs_last) prog->funcs_last->next = f->fn;
+    else prog->funcs = f->fn;
+    prog->funcs_last = f->fn;
+  }
+}
+
+/* **调用入口**（销毁点/槽位/`clone()` 共用）：需要深拷贝时发 CALL 到生成的
+ * clone 函数，否则返回 access（普通拷贝）。 */
 static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
                                   const type_t *t, ast_node_t *access,
                                   ownership_t slot_own, bool top_level) {
+  (void)scope;
   if (!t || !access) return NULL;
   const type_t *s = type_strip_quals(t);
-  for (uint32_t k = 0; k < sema->clone_depth; k++) {
-    if (sema->clone_path[k] == s) return clone_leaf(sema, access);
+  if (!s) return NULL;
+  if (!clone_needs_deep(s, slot_own, top_level)) return access;
+  switch (s->kind) {
+  case TYPE_KIND_PTR: {
+    const type_t *base = ptr_type_base(s);
+    if (!base) return clone_leaf(sema, access);
+    const type_t *bs = type_strip_quals(base);
+    bool base_deep = (bs->kind == TYPE_KIND_PTR || bs->kind == TYPE_KIND_SLICE ||
+                      type_has_own_slots(base));
+    if (!base_deep) return clone_leaf(sema, access);
+    if (bs->kind == TYPE_KIND_PTR)
+      return clone_leaf(sema, access);   /* 双层指针：保持浅拷贝语义 */
+    return gen_clone_call(sema, 1, base, access, /*by_address=*/false);
   }
-  if (sema->clone_depth >= 32) return clone_leaf(sema, access);
-  sema->clone_path[sema->clone_depth++] = s;
-  ast_node_t *e = gen_clone_expr_impl(sema, scope, t, access, slot_own,
-                                      top_level);
-  sema->clone_depth--;
-  return e;
+  case TYPE_KIND_SLICE:
+    return gen_clone_call(sema, 2, s, access, /*by_address=*/false);
+  case TYPE_KIND_OPTION:
+  case TYPE_KIND_UNION:
+    /* 联合/可空的 tag 判定只能在运行期 → 值克隆函数体内用三元表达式处理 */
+    if (type_has_own_slots(s))
+      return gen_clone_call(sema, 0, s, access, /*by_address=*/true);
+    return access;
+  case TYPE_KIND_STRUCT:
+  case TYPE_KIND_TUPLE:
+  case TYPE_KIND_ARRAY:
+    if (type_has_own_slots(s))
+      return gen_clone_call(sema, 0, s, access, /*by_address=*/true);
+    return access;
+  default:
+    return access;   /* 标量 / cunion 等：普通拷贝 */
+  }
 }
 
 /* []T 的深拷贝（长度运行期才知）：prelude 生成临时变量 + make + for 循环，
