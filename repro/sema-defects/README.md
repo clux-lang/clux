@@ -100,12 +100,16 @@ comptime var 不生成运行期字节码、其常量只编码在符号表（`sym
 2. struct 构造两条路径（AST_NEW / AST_CONSTRUCT）与 `infer_anon_struct` 在字段数
    检查**之前**显式拒绝 fill；
 3. 连带补齐 4 种**类型表达式**在表达式位置的分支（`AST_TUPLE` / `AST_FUNC_TYPE` /
-   `AST_OPTION` / `AST_PTR`）——它们此前同样落 `default` 被静默吞掉，
-   `var x = <i32,i32>;` 之类合法写法会失败。
+   `AST_OPTION` / `AST_PTR`）——它们此前同样落 `default` 被静默吞掉，**类型位置**
+   （`type T = <i32,i32>;` 式的槽位）会失败。
+   > 2026-10 语义收紧：类型不是运行期值，`var x = <i32,i32>;` 现在是**明确错误**
+   > （"cannot initialize with a type value … bind it with `type`"），不再有"类型值
+   > 绑进变量"的合法写法；这 4 种表达式只在类型位置可用。
 
 **回归**：`SemaTest.FillInStructConstructorRejected`、
-`SemaTest.TypeExpressionsAreValuesInExpressionPosition`、
-`Driver.RunFileTypeExpressionsAsValuesPass`。
+`SemaTest.TypeExpressionsInTypePosition`、`SemaTest.TypeExpressionNotBindableToVar`、
+`Driver.RunFileTypeExpressionsInTypePositionPass`、
+`Driver.RunFileTypeExpressionInVarInitRejected`。
 
 ## E. 被导入模块内的 struct 构造运行期失败（M5） ✅ 已修
 
@@ -195,6 +199,35 @@ param_scope 的**直系**声明，把嵌套块里的符号判成外层局部。
 `RunFileClosureLocalBlockScopedVars`（if / for / while 三种块）、
 `RunFileClosureOuterLocalStillRejected`（对照）；`tests/foreach_test.cpp` 的
 `InsideClosureBody` / `InsideLocalFunction`。
+
+## K. `var t = typeof(a)` 绑类型 + `sizeof(t)` 空指针崩溃 ✅ 已修
+
+类型不是运行期值：`var` 不能接收 type value。旧语义允许 `var t = i32;` /
+`var t = typeof(a);`（符号类型被定成元类型 `type`，data = NULL），于是任何把
+操作数当 **type value** 消费的地方（`sizeof(t)` / `alignof(t)` / `const t` /
+`volatile t` / `typeof(t)`）都会 `value_as(op, const type_t *)` 解引用空指针。
+
+| 文件 | 修复前 | 修复后 |
+|---|---|---|
+| `type_value_var_crash.cx` | ❌ `exit -1073741819`（0xC0000005，无诊断） | ✅ exit 1，明确诊断 + 正确写法提示 |
+| `type_typeof_local.cx` | ❌ `'a' is a variable, not a type`（预检下钻 typeof 的操作数） | ✅ exit 0（输出 `sizeof(Ty)=4 b=7`） |
+
+**修复**：
+1. `shadow_var_def`（`src/sema/stmt.c`）：init 求值为 type value → 报
+   ``cannot initialize 't' with a type value … bind it with `type <name> = <type expr>` ``；
+2. `type_rhs_uses_var`（同文件）的预检不再下钻 `typeof`/`sizeof`/`alignof` 的操作数
+   （新增遍历动作 `AST_WALK_SKIP_CHILDREN`）；
+3. `sema_eval_type_def` 传 `ctx.sema_scope`，`ctfe_operand_type` 增加"按声明查找"
+   回退（局部 type def 提升到块入口时，同块 `var a` 尚未激活）；
+4. 防御：`value_is_type_value()`（`include/vm/value.h`，要求 data 非空）替换
+   `sizeof`/`alignof`/`typeof`/`const`/`volatile` 里的 `value_is_type(…, TYPE_KIND_TYPE)`
+   判据。
+
+**回归**：`SemaTest.TypeValueNotBindableToVar` /
+`TypeValueNotBindableToVarLiteral` / `TypeDefRhsTypeofLocalVar` /
+`SizeofTypeofOperandIsUsize` / `TypeExpressionsInTypePosition` /
+`TypeExpressionNotBindableToVar`；`Driver.RunFileTypeDefTypeValueRejectedInVarInit` /
+`RunFileTypeDefRhsTypeofLocalVarPasses` / `RunFileTypeValueInVarInitRejectedWithHint`。
 
 ## 未能证实的报告结论（记录以免被当作事实）
 

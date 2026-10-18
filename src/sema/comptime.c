@@ -796,6 +796,11 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
   memset(&ctx, 0, sizeof(ctx));
   ctx.vm = vm;
   ctx.sema = sema;
+  /* 作用域：CTFE 的标识符回退（ctfe_operand_type）按 sema 作用域链取符号的
+     **静态类型**——`type T = typeof(a)` 里的局部变量 a 在块入口提升求值时还没
+     进 VM scope，只能从 sema 符号表拿类型。不传 scope 时该回退会跳过局部符号，
+     误报 "ctfe: cannot determine operand type"。 */
+  ctx.sema_scope = scope;
   ctx.budget = 100000;
   ctx.max_depth = 128;
   value_t *sh = ctfe_eval(&ctx, td->expr);

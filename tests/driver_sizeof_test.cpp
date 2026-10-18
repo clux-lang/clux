@@ -45,6 +45,43 @@ TEST(Driver, RunFileSizeofAlignofTypeofPasses) {
   std::remove(path.c_str());
 }
 
+TEST(Driver, RunFileTypeDefRhsTypeofLocalVarPasses) {
+  /* **typeof 的正确用法**（`type` 绑定类型，`var` 只收值）：
+     `var a: i64 = 5; type T = typeof(a); var b: T = 7;`
+     局部 type def 在块入口提升求值，typeof 的操作数尚未激活——必须仍能取到
+     静态类型。顺带验证 `sizeof(typeof(a))` = 8（类型实体 → 宽度）。 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: i64 = 5;\n"
+      "  type T = typeof(a);\n"
+      "  var b: T = 7;\n"
+      "  if (sizeof(T) != 8u64) { return 1; }\n"
+      "  if (sizeof(typeof(a)) != 8u64) { return 2; }\n"
+      "  if (b != 7) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeValueInVarInitRejectedWithHint) {
+  /* 反面：`var t = typeof(a);` 是错误——类型不能由 var 接收，诊断指向 `type`。
+     此前它被接受（符号定成元类型 type），随后 `sizeof(t)` 空指针解引用崩溃。 */
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: i32 = 1;\n"
+      "  var t = typeof(a);\n"
+      "  return 0;\n"
+      "}\n");
+  std::string err;
+  const int rc = clux_run_capture(path, &err);
+  EXPECT_EQ(rc, 1) << err;
+  EXPECT_NE(err.find("with a type value"), std::string::npos) << err;
+  EXPECT_NE(err.find("type <name> = <type expr>"), std::string::npos)
+      << "诊断应提示正确写法：\n" << err;
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileSizeofNonConstRejected) {
   /* sizeof 操作数必须是编译期可求值的类型/表达式；值表达式走 shadow
      求值后取类型——合法。此处验证运行期无 SIZEOF 指令残留路径可跑 */

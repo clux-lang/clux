@@ -244,18 +244,44 @@ TEST(Driver, CompileErrorPathDoesNotLeakSemaScopeTree) {
       << captured;
 }
 
-TEST(Driver, RunFileTypeExpressionsAsValuesPass) {
-  /* 回归：元组/签名/可选/指针这 4 种**类型表达式**在表达式位置求值为类型值
-     （类型即表达式）。此前它们没有 case，落入 sema_expr 的 default 静默返回
-     void shadow，`var x = <i32,i32>;` 之类合法写法会以误导性诊断失败。 */
+TEST(Driver, RunFileTypeExpressionsInTypePositionPass) {
+  /* 回归：类型表达式在**类型位置**求值为类型值（类型即表达式）。此前部分节点
+     没有 case，落入 sema_expr 的 default 静默返回 void shadow，类型槽位会以
+     误导性诊断失败。 */
   std::string path = write_temp_file(
+      "type TF = func(i32)->i32;\n"
+      "type TP = own *i32;\n"
+      "type TA = [2]i32;\n"
       "func main(): i32 {\n"
-      "  var t = <i32, i32>;\n"
-      "  var f = func(i32)->i32;\n"
-      "  var o = ?i32;\n"
-      "  var p = own *i32;\n"
-      "  return 0;\n"
+      "  var f: TF = undefined;\n"
+      "  var p: TP = undefined;\n"
+      "  var a: TA = .[2]i32{ 3, 4 };\n"
+      "  var t: <i32, i32> = .<i32, i32>{ 1, 2 };\n"
+      "  var o: ?i32 = nil;\n"
+      "  return a[0] + t[0];\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileTypeExpressionInVarInitRejected) {
+  /* 同一批类型表达式放进 **var 初始化位置**是错误：类型不是运行期值，只能由
+     `type` 绑定。四种形态逐个验证（每次独立流水线），诊断必须指出写法。 */
+  const char *cases[] = {
+      "var t = <i32, i32>;",
+      "var f = func(i32)->i32;",
+      "var o = ?i32;",
+      "var p = own *i32;",
+  };
+  for (const char *decl : cases) {
+    std::string src = std::string("func main(): i32 {\n  ") + decl +
+                      "\n  return 0;\n}\n";
+    std::string path = write_temp_file(src, "type_value_in_var");
+    std::string err;
+    const int rc = clux_run_capture(path, &err);
+    EXPECT_EQ(rc, 1) << decl << "\n" << err;
+    EXPECT_NE(err.find("with a type value"), std::string::npos)
+        << decl << "\n--- stderr ---\n" << err;
+    std::remove(path.c_str());
+  }
 }

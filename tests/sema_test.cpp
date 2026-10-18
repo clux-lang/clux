@@ -1907,7 +1907,7 @@ TEST_F(SemaTest, TypeDefAliasChain) {
     EXPECT_TRUE(analyze(
         "type A = i64;"
         "type B = A;"
-        "func main(): void { var x:B = 5; var t = B; var y = x; }"));
+        "func main(): void { var x:B = 5; var y = x; }"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
@@ -1954,18 +1954,66 @@ TEST_F(SemaTest, TypeDefLocalNestedBlock) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, TypeDefTypeValueExpr) {
-    /* type value 是真实值（非 shadow）：可作表达式（typeof 桥梁） */
+TEST_F(SemaTest, TypeValueNotBindableToVar) {
+    /* **类型不是运行期值**：`var t = T;`（T 为全局 type）必须拒绝——类型只能由
+       `type <name> = <type expr>` 绑定。此前这类写法被接受并把变量定成元类型
+       `type`，随后任何按 type value 消费它的地方（`sizeof(t)`/`const t`）都会
+       读空 data（实测 0xC0000005）。 */
+    EXPECT_FALSE(analyze("type T = i32; func main(): void { var t = T; }"));
+    expect_message(0, "cannot initialize 't' with a type value");
+}
+
+TEST_F(SemaTest, TypeValueNotBindableToVarLiteral) {
+    /* 类型字面量直接赋给 var 同样拒绝（不仅是别名） */
+    EXPECT_FALSE(analyze("func main(): void { var t = i32; }"));
+    expect_message(0, "cannot initialize 't' with a type value");
+}
+
+TEST_F(SemaTest, TypeAliasChainViaTypeDecl) {
+    /* 正确写法：`type` 绑定（局部别名链 + 类型标注使用） */
     EXPECT_TRUE(analyze(
         "type T = i32;"
-        "func main(): void { var t = T; }"));
+        "func main(): void { type U = T; var x: U = 1; }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeDefRhsTypeofLocalVar) {
+    /* **typeof 的正确用法**：`type T = typeof(a);`（类型由 type 绑定，不经 var）。
+       局部 type def 提升到块入口求值，此时 `var a` 还没走到定义点（符号未激活），
+       ctfe 的标识符回退必须按**声明**拿静态类型——此前会误报
+       "ctfe: cannot determine operand type"；更早以前则是 "a is a variable,
+       not a type"（type rhs 预检错误地下钻了 typeof 的操作数）。 */
+    EXPECT_TRUE(analyze(
+        "func main(): void {"
+        "  var a: i64 = 5;"
+        "  type T = typeof(a);"
+        "  var b: T = 7;"
+        "  b = b + 1;"
+        "}"));
     EXPECT_FALSE(diag_has_error(diag_));
 
     sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
     ASSERT_NE(fscope, nullptr);
-    sema_symbol_t *t = sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("t"));
-    ASSERT_NE(t, nullptr);
-    EXPECT_EQ(t->type, vm_->type_type); /* 推断为 type 类型 */
+    sema_symbol_t *b =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("b"));
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(b->type, vm_->type_i64); /* T = typeof(a) = i64 */
+}
+
+TEST_F(SemaTest, SizeofTypeofOperandIsUsize) {
+    /* `sizeof(typeof(x))`：typeof 产真实 type value（data 指向 type_t），
+       sizeof 解引用 data 取宽度——不能落进"类型为 type 的 shadow"分支
+       （那是空指针解引用，曾经 0xC0000005）。 */
+    EXPECT_TRUE(analyze(
+        "func main(): void { var a: i64 = 1; var n = sizeof(typeof(a)); }"));
+    EXPECT_FALSE(diag_has_error(diag_));
+
+    sema_scope_t *fscope = sema_scope_child(sema_->global_scope, 0);
+    ASSERT_NE(fscope, nullptr);
+    sema_symbol_t *n =
+        sema_scope_find_local(func_param_scope(fscope), STRSLICE_LIT("n"));
+    ASSERT_NE(n, nullptr);
+    EXPECT_EQ(n->type, vm_type_usize(vm_));
 }
 
 TEST_F(SemaTest, TypeDefRhsNotType) {
@@ -3750,19 +3798,32 @@ TEST_F(SemaTest, ForUpdateValidAssignmentPasses) {
     EXPECT_FALSE(diag_has_error(diag_));
 }
 
-TEST_F(SemaTest, TypeExpressionsAreValuesInExpressionPosition) {
-    /* 回归：元组/签名/可选/指针这 4 种**类型表达式**在表达式位置求值为类型值
-       （类型即表达式）。此前它们没有 case，落入 default 静默返回 void shadow：
-       `var x = <i32,i32>;` 会以 "cannot initialize ... with void" 之类误导性
-       形式失败。 */
+TEST_F(SemaTest, TypeExpressionsInTypePosition) {
+    /* 类型表达式在**类型位置**必须可用（类型即表达式）：`type` 右值（函数 /
+     * 指针 / 数组别名）、类型标注位（元组 / 可选）。此前部分节点没有 case，
+     * 落入 sema_expr 的 default 静默返回 void shadow，类型槽位会以误导性形式
+     * 失败。 */
     EXPECT_TRUE(analyze(
+        "type TF = func(i32)->i32;"
+        "type TP = own *i32;"
+        "type TA = [2]i32;"
         "func main(): void {"
-        "  var t = <i32, i32>;"
-        "  var f = func(i32)->i32;"
-        "  var o = ?i32;"
-        "  var p = own *i32;"
+        "  var f: TF = undefined;"
+        "  var p: TP = undefined;"
+        "  var a: TA = .[2]i32{ 1, 2 };"
+        "  var t: <i32, i32> = .<i32, i32>{ 1, 2 };"
+        "  var o: ?i32 = nil;"
         "}"));
     EXPECT_FALSE(diag_has_error(diag_));
+}
+
+TEST_F(SemaTest, TypeExpressionNotBindableToVar) {
+    /* 类型表达式放进 **var 初始化位置** 是错误（类型不是运行期值）：
+       `var t = <i32,i32>;` 不再"合法但静默"，而是明确诊断。覆盖 4 种形态
+       （元组 / 函数签名 / 可选 / 指针）——多形态逐条验证放在 driver 层
+       （RunFileTypeExpressionInVarInitRejected，可重复起独立流水线）。 */
+    EXPECT_FALSE(analyze("func main(): void { var f = func(i32)->i32; }"));
+    expect_message(0, "cannot initialize 'f' with a type value");
 }
 
 TEST_F(SemaTest, AnonCtPushPopTokenIsSymmetric) {

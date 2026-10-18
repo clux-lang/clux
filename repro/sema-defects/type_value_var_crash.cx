@@ -1,0 +1,17 @@
+// type_value_var_crash.cx —— 缺陷 K：类型值绑进变量 → 空指针崩溃
+//
+// 修复前：exit -1073741819（0xC0000005，无任何诊断）——`var t = i32;` 把变量
+//         类型定成元类型 `type`（shadow，data = NULL），随后 `sizeof(t)` 按
+//         type value 解引用 data 就是空指针。
+// 修复后：exit 1，编译期明确拒绝，并提示正确写法：
+//         cannot initialize 't' with a type value: a type is not a runtime
+//         value (bind it with `type <name> = <type expr>`)
+//
+// 正确写法见 type_typeof_local.cx：类型只能由 `type` 绑定。
+
+func main(): i32 {
+    var a: i32 = 1;
+    var t = typeof(a); // ← 错误：typeof 返回类型，var 不能接收
+    var n = sizeof(t); // ← 修复前这里崩溃
+    return n as i32;
+}

@@ -285,14 +285,12 @@ TEST(Driver, RunFileLocalFuncShadowsGlobalRejected) {
 }
 
 TEST(Driver, RunFileTypeDefLocalHoistedExprRef) {
-  /* 提升的 type 名作表达式引用（type value）：运行期块入口 DEFINE 先于
-     使用点——var t = Local 引用定义在后的 type Local */
+  /* 提升的局部 type 名作**类型标注**引用：运行期块入口 DEFINE 先于使用点——
+     `var x: Local` 引用定义在后的 `type Local`（类型提升到块入口） */
   std::string path = write_temp_file(
       "func main():i32 {\n"
-      "  var t = Local;\n"
+      "  var x: Local = 7;\n"
       "  type Local = i32;\n"
-      "  var x:i32 = 7;\n"
-      "  _ = t;\n"
       "  return x;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -328,16 +326,27 @@ TEST(Driver, RunFileTypeDefUnknownTypeRejected) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileTypeDefTypeValueExpr) {
-  /* type value 是真实值：可作表达式（var t = T 推断为 type 类型） */
+TEST(Driver, RunFileTypeDefTypeValueRejectedInVarInit) {
+  /* 类型不是运行期值：`var t = T;`（T 为 type/别名）编译期拒绝 */
   std::string path = write_temp_file(
       "type T = i32;\n"
       "func main():i32 {\n"
       "  var t = T;\n"
       "  return 0;\n"
       "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
   std::remove(path.c_str());
+
+  /* 正确写法：`type` 绑定，再当类型用 */
+  std::string ok = write_temp_file(
+      "type T = i32;\n"
+      "func main():i32 {\n"
+      "  type Alias = T;\n"
+      "  var v: Alias = 7;\n"
+      "  return v;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(ok.c_str()), 0);
+  std::remove(ok.c_str());
 }
 
 /* 函数签名类型端到端：type F = func(i32,i32)->i32（M2 函数类型）。

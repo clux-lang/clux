@@ -1,0 +1,19 @@
+// type_typeof_local.cx —— typeof 的正确用法：`type` 绑定类型
+//
+// `type Ty = typeof(a);` 局部 type def 提升到块入口求值，此时同块的 `var a`
+// 还没走到定义点（符号未激活）——ctfe 的标识符回退按**声明**取静态类型。
+//
+// 修复前：`'a' is a variable, not a type`（type rhs 预检错误地下钻 typeof 的
+//         操作数）→ 之后是 `ctfe: cannot determine operand type`（未传 sema_scope）。
+// 修复后：exit 0，输出 `sizeof(Ty)=4 b=7`。
+
+extern lib "*" as libc;
+extern cfunc libc::printf(format: str, ...): void;
+
+func main(): i32 {
+    var a: i32 = 1;
+    type Ty = typeof(a);
+    var b: Ty = 7;
+    libc::printf("sizeof(Ty)=%d b=%d\n", sizeof(Ty) as i32, b);
+    return 0;
+}

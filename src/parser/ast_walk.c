@@ -176,6 +176,8 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
 
 bool ast_walk_preorder(ast_node_t *node, ast_visit_fn visit, void *user) {
   if (!node) return true;
-  if (visit(node, user) == AST_WALK_STOP) return false;
+  ast_walk_action_t act = visit(node, user);
+  if (act == AST_WALK_STOP) return false;
+  if (act == AST_WALK_SKIP_CHILDREN) return true;
   return ast_visit_children(node, visit, user);
 }

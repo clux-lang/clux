@@ -80,6 +80,21 @@ type_kind_t value_kind(const value_t *v);
 bool value_is_type(const value_t *v, type_kind_t kind);
 
 /**
+ * 是否是**真实的 type value**：值为元类型 `type` **且** data 非空（data 指向
+ * `type_t`，可用 `value_as(v, const type_t *)` 取）。
+ *
+ * 与 `value_is_type(v, TYPE_KIND_TYPE)` 的区别：后者只说明"该表达式的**类型**
+ * 是 `type`"，对 **shadow**（data == NULL，sema 的类型占位值）同样成立——此时
+ * 解引用 data 就是空指针解引用。需要类型实体时一律用本函数判定。
+ *
+ * （`var t = i32;` 这类"类型绑进变量"已由 sema 拒绝，本判据用于防御其它
+ * shadow 路径：它们只应被当作"类型是 type 的普通表达式"处理。）
+ */
+static inline bool value_is_type_value(const value_t *v) {
+  return value_is_type(v, TYPE_KIND_TYPE) && value_data(v) != NULL;
+}
+
+/**
  * value 的类型是否含 const 修饰（沿 sub 链递归）：const i32 → true；
  * volatile(const(i32)) → true；volatile(i32) → false。
  * sema 仅在延迟初始化（TDZ 首次赋值豁免）时使用；赋值拦截下沉 vtable。

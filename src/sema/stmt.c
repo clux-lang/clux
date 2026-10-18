@@ -1909,6 +1909,17 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sema_anon_pop(sema, ct_pushed);
     bool init_bad = value_is_error(sema->vm, init) ||
                     value_is_type(init, TYPE_KIND_VOID);
+    /* 类型不是运行期值（语言语义）：`var t = i32;` / `var t = typeof(x);` 都
+       不能把 type value 绑进变量——**绑类型用 `type <name> = <type expr>`**。
+       此前这类写法被静默接受（符号类型 = 元类型 type），随后任何按"type value"
+       消费它的地方（`sizeof(t)` / `const t` …）都会读空 data（实测 0xC0000005）。 */
+    if (!init_bad && value_is_type(init, TYPE_KIND_TYPE)) {
+      diag_error(sema->diag, sema_loc(sema, vd->init),
+                 "cannot initialize '%.*s' with a type value: a type is not a "
+                 "runtime value (bind it with `type <name> = <type expr>`)",
+                 (int)vd->name.len, vd->name.ptr);
+      init_bad = true;
+    }
     /* 错误恢复产物（init 已诊断）不提升确定性 */
     sym->flow_init = !init_bad;
 
@@ -3936,6 +3947,14 @@ typedef struct {
 
 static ast_walk_action_t probe_uses_var(ast_node_t *n, void *user) {
   uses_var_probe_t *p = (uses_var_probe_t *)user;
+  /* typeof / sizeof / alignof 的操作数是**表达式**（变量名是合法的：`typeof(a)`
+     就是取 a 的类型），不是类型名引用——不下钻，否则
+     `var a: i32 = 1; type T = typeof(a);` 会被误报成 "'a' is a variable, not
+     a type"。这三者的操作数若要引用类型，本身就写在类型槽位里，由其它检查覆盖。 */
+  if (n->kind == AST_TYPEOF || n->kind == AST_SIZEOF ||
+      n->kind == AST_ALIGNOF) {
+    return AST_WALK_SKIP_CHILDREN;
+  }
   if (n->kind != AST_IDENT) return AST_WALK_CONTINUE;
   strslice_t name = ((ast_ident_t *)n)->name;
   for (size_t i = 0; i < p->prior_n; i++) {

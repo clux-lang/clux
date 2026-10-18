@@ -184,7 +184,12 @@ typeof(expr)     // 返回 type value
 - **实现要点**（2026-09-29）：
   - sema 表达式路径折叠：sizeof/alignof → `AST_INT_LIT(usize)`，typeof → `AST_TYPE_REF`（sema 登记类型名）——**完全编译期，运行期零指令残留**（disasm 验证）
   - 类型槽位路径（`var t: typeof(a)` / `[sizeof(i32)]u32`）：sema 3a 检测 `type_has_ct_op` 推迟到 3b 定义点重解析，`sema_resolve_inner` 经 ctfe 求值类型槽位
-  - type value 操作数须解引用 `value_as(op, const type_t *)`（`value_type` 返回元类型 size=8，直接读取会得错值——sizeof(u8) 折叠成 8）
+  - type value 操作数须解引用 `value_as(op, const type_t *)`（`value_type` 返回元类型 size=8，直接读取会得错值——sizeof(u8) 折叠成 8）；判据用 `value_is_type_value`（**data 非空**）：类型为 `type` 的 **shadow**（data=NULL）不是类型实体，按 type value 解引用就是空指针解引用（`sizeof(t)` 曾 0xC0000005）
+  - **类型不是运行期值，`var` 不能接收类型**（2026-10 定稿）：
+    - `var t = i32;` / `var t = typeof(a);` / `var t = <i32,i32>;` 一律**编译期错误**（``cannot initialize 't' with a type value … bind it with `type <name> = <type expr>` ``）；
+    - 绑类型的唯一方式是 `type`：`type T = typeof(a);`（局部/全局均可，局部 type def 提升到块入口求值，`typeof` 的操作数按**声明**取静态类型，不要求已初始化）；
+    - 类型表达式仍可出现在**类型位置**（`type` 右值、类型标注、cast 目标、`sizeof`/`alignof`/`typeof` 的操作数），也仍可参与类型计算（`extends` / `==` / 三元）；
+    - 背景：旧语义把类型值绑进变量（符号类型 = 元类型 `type`），任何按 type value 消费它的地方都会读空 data → 崩溃；收紧后该类崩溃不可达。
   - **signed↔unsigned 不隐式互转**（2026-09-29 用户确认）：sema shadow 与运行时真实值语义一致（`sint_implicit_cast` shadow 分支移到方向检查后），混合错误在 sema 编译期报，显式后缀字面量（`1u64`）放行
   - 示例：`examples/sizeof/sizeof.cx`
 

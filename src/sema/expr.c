@@ -4353,7 +4353,9 @@ static value_t *ex_const(sema_t *sema, ast_node_t **node,
       value_t *sub = sema_expr(sema, &n->sub, scope);
       if (is_poison(sema, sub))
         return val_void(sema);
-      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
+      /* 必须是**类型实体**（real type value，data=type_t*）：类型为 `type` 的
+         普通表达式（shadow）不是类型，不能在这里解引用 data。 */
+      if (!value_is_type_value(sub)) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "'const' requires a type operand");
         return val_void(sema);
@@ -4372,7 +4374,7 @@ static value_t *ex_volatile(sema_t *sema, ast_node_t **node,
       value_t *sub = sema_expr(sema, &n->sub, scope);
       if (is_poison(sema, sub))
         return val_void(sema);
-      if (!value_is_type(sub, TYPE_KIND_TYPE)) {
+      if (!value_is_type_value(sub)) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "'volatile' requires a type operand");
         return val_void(sema);
@@ -4403,8 +4405,12 @@ static value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node,
         return val_void(sema);
       /* type value（data=type_t*）解引用 data；普通 shadow value 取
          value_type。注意 value_type(type value) 返回元类型 vm->type_type
-         （size=8），直接读取会得错值——sizeof(u8) 折叠成 8。 */
-      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+         （size=8），直接读取会得错值——sizeof(u8) 折叠成 8。
+         `value_is_type_value` 额外要求 data 非空：类型为 `type` 的 **shadow**
+         （data=NULL）不是类型实体，若按 type value 解引用就是空指针解引用
+         （`sizeof(t)` 曾是 0xC0000005）。此时退化为"操作数的静态类型是
+         `type`"，即 sizeof(type) = 指针宽度，行为良定义。 */
+      const type_t *t = value_is_type_value(op)
                             ? value_as(op, const type_t *)
                             : value_type(op);
       uint64_t n = (*node)->kind == AST_SIZEOF ? (uint64_t)t->size
@@ -4432,8 +4438,9 @@ static value_t *ex_typeof(sema_t *sema, ast_node_t **node,
       value_t *op = sema_expr(sema, &n->operand, scope);
       if (is_poison(sema, op))
         return val_void(sema);
-      /* 同上：type value 解引用 data，普通值取 value_type */
-      const type_t *t = value_is_type(op, TYPE_KIND_TYPE)
+      /* 同上：type value 解引用 data，普通值取 value_type
+         （value_is_type_value 要求 data 非空，避免 shadow 空指针解引用） */
+      const type_t *t = value_is_type_value(op)
                             ? value_as(op, const type_t *)
                             : value_type(op);
       ast_node_t *ref = sema_ct_type_ref(sema, t, *node);

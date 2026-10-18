@@ -170,6 +170,21 @@ static value_t *ctfe_make_aggregate(vm_t *vm, const type_t *t,
     return value_make(vm, t, data);
 }
 
+/* 沿 sema 作用域链查找**符号本身**，不看激活状态（is_active）。
+ *
+ * 为什么需要：`type T = typeof(a)` 的 RHS 在**块入口**求值（局部 type 提升），
+ * 此时同块里 `var a` 还没走到定义点，符号未激活；而 sema_lookup 会跳过未激活
+ * 符号（那是为了 TDZ 语义）。typeof/sizeof/alignof 只要**静态类型**，与"值是否
+ * 已初始化"无关，因此这里退一步按声明查找。 */
+static sema_symbol_t *ctfe_lookup_symbol_any(const sema_scope_t *scope,
+                                             strslice_t name) {
+    for (const sema_scope_t *s = scope; s; s = s->parent) {
+        sema_symbol_t *sym = sema_scope_find_local(s, name);
+        if (sym) return sym;
+    }
+    return NULL;
+}
+
 static const type_t *ctfe_operand_type(ctfe_ctx_t *ctx, ast_node_t *opnd) {
     vm_t *vm = ctx->vm;
     value_t *v = ctfe_eval(ctx, opnd);
@@ -189,6 +204,9 @@ static const type_t *ctfe_operand_type(ctfe_ctx_t *ctx, ast_node_t *opnd) {
                                      : NULL;
             if (!sym)
                 sym = sema_lookup(ctx->sema->global_scope, id->name);
+            /* 提升期（type def 在块入口求值）局部 var 尚未激活 → 按声明查找 */
+            if (!sym && ctx->sema_scope)
+                sym = ctfe_lookup_symbol_any(ctx->sema_scope, id->name);
             if (sym && sym->type) return sym->type;
         }
     }
