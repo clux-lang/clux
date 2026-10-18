@@ -152,6 +152,11 @@ void *value_alloc_data(allocator_t *alloc, const type_t *type);
 /** 分配数据块并用源数据初始化（memcpy） */
 void *value_alloc_data_copy(allocator_t *alloc, const type_t *type, const void *src);
 
+/** 按**字节数**分配一块原始内存（清零；value_data 类，FREE 可直接释放）。
+ *  用于 `NEW`：`new` 只负责"申请内存"（C 后端即 `malloc(size)`），构造由
+ *  `CONSTRUCT <dest=该句柄>` 完成——两者分离，逐字段赋值与 C 一一对应。 */
+void *value_alloc_raw(allocator_t *alloc, size_t size);
+
 /* ---- 运算分派: a + b => a.type->vtable->add(vm, a, b) ---- */
 
 value_t *value_add(vm_t *vm, value_t *a, value_t *b);

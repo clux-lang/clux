@@ -265,14 +265,14 @@ bool type_has_own_slots(const type_t *t) {
             }
             return false;
         }
-        case TYPE_KIND_CUNION: {
-            const cunion_type_t *ct = (const cunion_type_t *)t;
-            for (size_t i = 0; i < ct->member_count; i++) {
-                if (ct->members[i].ownership == OWN_OWN) return true;
-                if (type_has_own_slots(ct->members[i].type)) return true;
-            }
+        case TYPE_KIND_CUNION:
+            /* **cunion 不参与所有权运算**（2026-10 定）：无 tag，运行期无法
+               判定哪个 member 活跃，销毁序列不为它生成 FREE。因此这里恒为
+               false——含 cunion 的聚合不会被判定为"含 own 槽位"，构造不产
+               FATAL、变量不必写 own；cunion 内部的指针成员生命周期由开发者
+               自负（与 C union 语义一致）。成员槽位所有权在 sema 侧恒记
+               OWN_NONE（见 comptime.c cunion 解析）。 */
             return false;
-        }
         case TYPE_KIND_OPTION: {
             const option_type_t *ot = (const option_type_t *)t;
             if (ot->inner_ownership == OWN_OWN) return true;

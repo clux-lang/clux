@@ -35,6 +35,8 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_move.h"
+#include "parser/ast_clone.h"
+#include "parser/ast_take.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "vm/type_slice.h"
@@ -90,6 +92,254 @@ void emit_push_opt_none(compiler_t *c, ast_node_t *type_expr) {
   bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
   bcode_write_u32(c->bc, st->id);
   st_push(c, 1);
+}
+
+/* ---- 统一构造发射器（`.T{...}` 栈值 / `new T{...}` 堆块，2026-10） ----
+ *
+ * **NEW / CONSTRUCT 职责分离**后的唯一发射点：
+ *   - `new T{...}`：先 `PUSH_U64 sizeof(T); NEW` 申请**原始块**（C: calloc），
+ *     再以该块句柄为 dest 构造 → 结果 fatal *T；
+ *   - `.T{...}`：dest = `undefined`（新建值块，C: 局部变量），构造 → 结果值 T。
+ * 栈协议统一为 `[dest, type_value, v1..vN]` → `CONSTRUCT <n>`（弹 n+2 压 1）。
+ *
+ * 逐类型字段发射（与 sema 的完全显式契约一致）：
+ *   - struct / tuple：声明序 N 个字段（nil 字段 → PUSH_OPT_NONE <字段类型 id>）；
+ *   - array：fill 展开 + nil 元素 + 普通元素（fill count 已折叠为字面量）；
+ *   - option：恰好 1 个字段（nil → PUSH_OPT_NONE <option 类型 id>）；
+ *   - union / cunion：member 下标哨兵 + payload（nil → PUSH_OPT_NONE）；
+ *   - 标量 / 指针：恰好 1 个成员值（CONSTRUCT 单成员 = 隐式转换 + memcpy）。
+ */
+static void emit_construct(compiler_t *c, ast_node_t *node,
+                           ast_node_t *type_expr, const type_t *t,
+                           ast_node_t *fields, uint32_t member_tag,
+                           bool is_new) {
+  if (!t) return;
+
+  if (is_new) {
+    /* 只申请内存：NEW 收字节数（未初始化语义，VM 清零便于调试） */
+    bcode_write_op(c->bc, BCODE_PUSH_U64);
+    bcode_write_u64(c->bc, (uint64_t)t->size);
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_NEW);   /* 弹 size → 压 opaque 原始块句柄 */
+    st_push(c, 0);
+  } else {
+    bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* dest = 无（新建值块） */
+    st_push(c, 1);
+  }
+  compile_type_expr(c, type_expr);      /* 栈: [dest, type_value] */
+
+  size_t fcount = 0;
+
+  switch (t->kind) {
+  case TYPE_KIND_STRUCT: {
+    const struct_type_t *st = (const struct_type_t *)t;
+    for (ast_node_t *f = fields; f; f = f->next, fcount++) {
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((ast_construct_field_t *)f)->value;
+      if (value->kind == AST_NIL) {
+        const sema_type_t *fst =
+            (fcount < st->field_count)
+                ? c_sema_type_find_ptr(c->sema_types, st->fields[fcount].type)
+                : NULL;
+        if (!fst) {
+          c_error(c, value, "compiler: optional field type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, fst->id);
+        st_push(c, 1);
+      } else {
+        compile_expr(c, value);
+      }
+    }
+    break;
+  }
+  case TYPE_KIND_TUPLE: {
+    const tuple_type_t *tt = (const tuple_type_t *)t;
+    for (ast_node_t *f = fields; f; f = f->next, fcount++) {
+      ast_node_t *value = f;
+      if (f->kind == AST_CONSTRUCT_FIELD)
+        value = ((ast_construct_field_t *)f)->value;
+      if (value->kind == AST_NIL) {
+        const sema_type_t *est =
+            (fcount < tt->elem_count)
+                ? c_sema_type_find_ptr(c->sema_types, tt->elems[fcount].type)
+                : NULL;
+        if (!est) {
+          c_error(c, value, "compiler: optional element type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, est->id);
+        st_push(c, 1);
+      } else {
+        compile_expr(c, value);
+      }
+    }
+    break;
+  }
+  case TYPE_KIND_ARRAY: {
+    const type_t *et = array_type_elem(t);
+    for (ast_node_t *f = fields; f; f = f->next) {
+      if (f->kind == AST_FILL) {
+        ast_fill_t *fl = (ast_fill_t *)f;
+        uint64_t cnt = 0;
+        if (fl->count && fl->count->kind == AST_INT_LIT) {
+          cnt = ((ast_int_lit_t *)fl->count)->value;
+        } else {
+          c_error(c, fl->count ? fl->count : f,
+                  "fill count must be a compile-time constant");
+          return;
+        }
+        if (fl->value->kind == AST_NIL) {
+          const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+          if (!est) {
+            c_error(c, f, "compiler: optional element type not registered");
+            return;
+          }
+          for (uint64_t k = 0; k < cnt; k++) {
+            bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+            bcode_write_u32(c->bc, est->id);
+            st_push(c, 1);
+          }
+        } else {
+          for (uint64_t k = 0; k < cnt; k++) compile_expr(c, fl->value);
+        }
+        fcount += (size_t)cnt;
+      } else if (f->kind == AST_NIL) {
+        const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
+        if (!est) {
+          c_error(c, f, "compiler: optional element type not registered");
+          return;
+        }
+        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+        bcode_write_u32(c->bc, est->id);
+        st_push(c, 1);
+        fcount++;
+      } else {
+        compile_expr(c, f);
+        fcount++;
+      }
+    }
+    break;
+  }
+  case TYPE_KIND_OPTION: {
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((ast_construct_field_t *)f)->value;
+    if (f && f->kind == AST_NIL) {
+      emit_push_opt_none(c, type_expr);
+    } else if (f) {
+      compile_expr(c, f);
+    } else {
+      c_error(c, node, "compiler: optional constructor requires 1 field");
+      return;
+    }
+    fcount = 1;
+    break;
+  }
+  case TYPE_KIND_UNION: {
+    const union_type_t *ut = (const union_type_t *)t;
+    uint32_t tag = member_tag;
+    if (tag < 128) {
+      bcode_write_op(c->bc, BCODE_PUSH_I8);
+      bcode_write_i8(c->bc, (int8_t)tag);
+    } else if (tag < 32768) {
+      bcode_write_op(c->bc, BCODE_PUSH_I16);
+      bcode_write_i16(c->bc, (int16_t)tag);
+    } else {
+      bcode_write_op(c->bc, BCODE_PUSH_I32);
+      bcode_write_i32(c->bc, (int32_t)tag);
+    }
+    st_push(c, 1);
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((ast_construct_field_t *)f)->value;
+    if (f && f->kind == AST_NIL) {
+      const union_member_t *m =
+          (tag < ut->member_count) ? &ut->members[tag] : NULL;
+      const sema_type_t *mst =
+          m ? c_sema_type_find_ptr(c->sema_types, m->payload_type) : NULL;
+      if (!mst) {
+        c_error(c, node, "compiler: optional union member type not registered");
+        return;
+      }
+      bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+      bcode_write_u32(c->bc, mst->id);
+      st_push(c, 1);
+    } else if (f) {
+      compile_expr(c, f);
+    } else {
+      c_error(c, node, "compiler: union constructor requires 1 field");
+      return;
+    }
+    fcount = 2;
+    break;
+  }
+  case TYPE_KIND_CUNION: {
+    const cunion_type_t *ct = (const cunion_type_t *)t;
+    uint32_t tag = member_tag;
+    if (tag < 128) {
+      bcode_write_op(c->bc, BCODE_PUSH_I8);
+      bcode_write_i8(c->bc, (int8_t)tag);
+    } else if (tag < 32768) {
+      bcode_write_op(c->bc, BCODE_PUSH_I16);
+      bcode_write_i16(c->bc, (int16_t)tag);
+    } else {
+      bcode_write_op(c->bc, BCODE_PUSH_I32);
+      bcode_write_i32(c->bc, (int32_t)tag);
+    }
+    st_push(c, 1);
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((ast_construct_field_t *)f)->value;
+    if (f && f->kind == AST_NIL) {
+      const cunion_member_t *m =
+          (tag < ct->member_count) ? &ct->members[tag] : NULL;
+      const sema_type_t *mst =
+          m ? c_sema_type_find_ptr(c->sema_types, m->type) : NULL;
+      if (!mst) {
+        c_error(c, node, "compiler: optional cunion member type not registered");
+        return;
+      }
+      bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
+      bcode_write_u32(c->bc, mst->id);
+      st_push(c, 1);
+    } else if (f) {
+      compile_expr(c, f);
+    } else {
+      c_error(c, node, "compiler: cunion constructor requires 1 field");
+      return;
+    }
+    fcount = 2;
+    break;
+  }
+  default: {
+    /* 标量 / 指针 / opaque 等：恰好 1 个成员值。
+       CONSTRUCT 单成员 = 隐式转换到 t + memcpy（与 C 的 `*(T*)dst = v` 对应）。 */
+    ast_node_t *f = fields;
+    if (f && f->kind == AST_CONSTRUCT_FIELD)
+      f = ((ast_construct_field_t *)f)->value;
+    if (!f) {
+      c_error(c, node, "compiler: scalar constructor requires 1 field");
+      return;
+    }
+    if (f->kind == AST_NIL) {
+      c_error(c, node, "compiler: nil is not a scalar constructor field");
+      return;
+    }
+    compile_expr(c, f);
+    fcount = 1;
+    break;
+  }
+  }
+
+  bcode_write_op(c->bc, BCODE_CONSTRUCT);
+  bcode_write_u32(c->bc, (uint32_t)fcount);
+  /* 压了 dest + type + fcount（= fcount+2），CONSTRUCT 弹 fcount+2 压 1 →
+     净变化 -(fcount+1)。 */
+  st_push(c, -((int)fcount + 1));
 }
 
 void compile_expr(compiler_t *c, ast_node_t *node) {
@@ -589,263 +839,13 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_CONSTRUCT: {
-    /* 类型字面量构造 .<type>{ fields }：
-       1. 类型位：compile_type_expr（[N]T / ?T → 声明-定义两步构造，
-          LOAD_TYPE 留类型值栈顶；常规路径 sema 已替换为 AST_TYPE_REF）
-       2. 各字段值按序压栈（栈: [type_value, v1..vN]；fill 展开为 N 份
-          v；nil 字段 → PUSH_OPT_NONE <option id>）
-       3. CONSTRUCT N：弹 N 个成员值 + 类型位 → 值（结果压栈）
-       栈深净变化 -(N)：压 N+1，CONSTRUCT 弹 N+1 压 1。
-       构造完全显式（docs m2-design §12.4）：总元素数 = Σfill counts +
-       显式字段数，sema 已校验 == 数组长度（无 0 填充、无 AST_UNDEF
-       自动补发）；fill 的 count 已被 sema 折叠为 AST_INT_LIT 立即数。 */
+    /* 类型字面量构造 `.T{...}`（栈值）：统一发射器 emit_construct，
+       dest = undefined → CONSTRUCT 在新建值块上逐槽位写入。 */
     ast_construct_t *n = (ast_construct_t *)node;
-    compile_type_expr(c, n->type);              /* 栈: [type_value] */
-
     const type_t *t = c_resolve_type(c, n->type);
     if (!t) { c_error(c, n->type, "unknown construct type"); return; }
-
-    if (t->kind == TYPE_KIND_OPTION) {
-      /* ?T 构造器（二值单槽位）：字段数强制 == 1（sema 已校验）。
-         nil → PUSH_OPT_NONE（none 态）；T 字段 → 压值，CONSTRUCT(1)
-         的 option 分支做隐式提升（some 态）。 */
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        if (f->kind == AST_NIL) {
-          emit_push_opt_none(c, n->type);
-        } else {
-          compile_expr(c, f);
-        }
-        fcount++;
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
-      break;
-    }
-
-    if (t->kind == TYPE_KIND_STRUCT) {
-      /* struct 构造（具名/匿名，sema 已折叠匿名 type 为 AST_TYPE_REF）：
-         字段数已由 sema 校验 == 类型字段数。按字段序压值：
-         - 具名字段（AST_CONSTRUCT_FIELD）取 value 编译（sema 已按名匹配
-           到正确字段，运行期 CONSTRUCT 按声明序布值——具名字段编译序即
-           AST 链序，与类型字段表序一致）
-         - nil 字段 → 字段须 ?T（sema 已校验）→ PUSH_OPT_NONE <field id>
-         CONSTRUCT N 弹 N+1 压 1。 */
-      const struct_type_t *st = (const struct_type_t *)t;
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        ast_node_t *value = f;
-        if (f->kind == AST_CONSTRUCT_FIELD)
-          value = ((ast_construct_field_t *)f)->value;
-        if (value->kind == AST_NIL) {
-          /* nil 字段：须 ?T（sema 已校验），发 PUSH_OPT_NONE <field type id>。
-             id 用字段类型（option 类型须已登记；sema 已 resolve 字段类型） */
-          const sema_type_t *fst =
-              c_sema_type_find_ptr(c->sema_types, st->fields[fcount].type);
-          if (!fst) {
-            c_error(c, value, "compiler: optional field type not registered");
-            return;
-          }
-          bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-          bcode_write_u32(c->bc, fst->id);
-          st_push(c, 1);
-        } else {
-          compile_expr(c, value);
-        }
-        fcount++;
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
-      break;
-    }
-
-    if (t->kind == TYPE_KIND_TUPLE) {
-      /* tuple 构造（具名/匿名，sema 已折叠匿名 type 为 AST_TYPE_REF）：
-         元素数已由 sema 校验 == 类型元素数。元组元素匿名 → 字段链只能是
-         值表达式（sema 已校验无具名/值包字段），按元素序压值：
-         - nil 元素 → 元素须 ?T（sema 已校验）→ PUSH_OPT_NONE <elem id>
-         CONSTRUCT N 弹 N+1 压 1。 */
-      const tuple_type_t *tt = (const tuple_type_t *)t;
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        if (f->kind == AST_NIL) {
-          const sema_type_t *est =
-              c_sema_type_find_ptr(c->sema_types, tt->elems[fcount].type);
-          if (!est) {
-            c_error(c, f, "compiler: optional element type not registered");
-            return;
-          }
-          bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-          bcode_write_u32(c->bc, est->id);
-          st_push(c, 1);
-        } else {
-          compile_expr(c, f);
-        }
-        fcount++;
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
-      break;
-    }
-
-    if (t->kind == TYPE_KIND_UNION) {
-      /* union 构造（.Value{.i = 42}，struct 同构单字段，显式 tag 哨兵协议）：
-         sema 已校验恰好 1 个具名字段 + 按名定位 member 并写回 member_tag
-         （member 下标）。编译序列：
-           1. type_value（compile_type_expr 已压）
-           2. tag 哨兵：member_tag 是 member 下标（0..member_count-1），
-              < 128 → PUSH_I8（op_construct union 分支按 size 1 读 int8）；
-              < 32768 → PUSH_I16（size 2 读 int16）；否则 PUSH_I32
-           3. payload 值：compile 具名字段的 value（nil 字段 → 须 ?T，
-              PUSH_OPT_NONE <member payload type id>）
-           4. CONSTRUCT 2：栈 [type_value, tag_value, payload_value]
-              弹 3 压 1（union 分支按 tag 值定位 member → implicit_cast →
-              blit 到 payload_offset）
-         栈深净变化 -1：压 3，CONSTRUCT 弹 3 压 1。 */
-      ast_node_t *f = n->fields; /* 恰好 1 个（sema 已校验） */
-      uint32_t tag = n->member_tag;
-      if (tag < 128) {
-        bcode_write_op(c->bc, BCODE_PUSH_I8);
-        bcode_write_i8(c->bc, (int8_t)tag);
-      } else if (tag < 32768) {
-        bcode_write_op(c->bc, BCODE_PUSH_I16);
-        bcode_write_i16(c->bc, (int16_t)tag);
-      } else {
-        bcode_write_op(c->bc, BCODE_PUSH_I32);
-        bcode_write_i32(c->bc, (int32_t)tag);
-      }
-      st_push(c, 1);
-      ast_node_t *value = f;
-      if (f->kind == AST_CONSTRUCT_FIELD)
-        value = ((ast_construct_field_t *)f)->value;
-      if (value->kind == AST_NIL) {
-        /* nil payload：member 须 ?T（sema 已校验），发 PUSH_OPT_NONE */
-        const union_type_t *ut = (const union_type_t *)t;
-        const union_member_t *m = &ut->members[tag];
-        const sema_type_t *mst =
-            c_sema_type_find_ptr(c->sema_types, m->payload_type);
-        if (!mst) {
-          c_error(c, value, "compiler: optional union member type not registered");
-          return;
-        }
-        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-        bcode_write_u32(c->bc, mst->id);
-        st_push(c, 1);
-      } else {
-        compile_expr(c, value);
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, 2);
-      st_push(c, -3);
-      break;
-    }
-
-    if (t->kind == TYPE_KIND_CUNION) {
-      /* cunion 构造（.C{.i = 42}，struct 同构单字段，member 下标哨兵协议）：
-         sema 已校验恰好 1 个具名字段 + 按名定位 member 并写回 member_tag
-         （member 下标）。与 tag union 同款协议（区别：cunion 无 tag——运行期
-         op_construct 不把下标写进 data，blit 到 offset 0 即联合体本体）：
-           1. type_value（compile_type_expr 已压）
-           2. member 下标哨兵：member_tag < 128 → PUSH_I8；< 32768 →
-              PUSH_I16；否则 PUSH_I32（op_construct cunion 分支按宽度读整数）
-           3. payload 值：compile 具名字段的 value（nil 字段 → 须 ?T，
-              PUSH_OPT_NONE <member type id>）
-           4. CONSTRUCT 2：栈 [type_value, member_idx, payload_value]
-              弹 3 压 1（按 member 下标定位 member 类型 → implicit_cast →
-              memcpy 到 offset 0）
-         栈深净变化 -1：压 3，CONSTRUCT 弹 3 压 1。 */
-      ast_node_t *f = n->fields; /* 恰好 1 个（sema 已校验） */
-      uint32_t tag = n->member_tag;
-      if (tag < 128) {
-        bcode_write_op(c->bc, BCODE_PUSH_I8);
-        bcode_write_i8(c->bc, (int8_t)tag);
-      } else if (tag < 32768) {
-        bcode_write_op(c->bc, BCODE_PUSH_I16);
-        bcode_write_i16(c->bc, (int16_t)tag);
-      } else {
-        bcode_write_op(c->bc, BCODE_PUSH_I32);
-        bcode_write_i32(c->bc, (int32_t)tag);
-      }
-      st_push(c, 1);
-      ast_node_t *value = f;
-      if (f->kind == AST_CONSTRUCT_FIELD)
-        value = ((ast_construct_field_t *)f)->value;
-      if (value->kind == AST_NIL) {
-        /* nil payload：member 须 ?T（sema 已校验），发 PUSH_OPT_NONE */
-        const cunion_type_t *ct = (const cunion_type_t *)t;
-        const cunion_member_t *m = &ct->members[tag];
-        const sema_type_t *mst =
-            c_sema_type_find_ptr(c->sema_types, m->type);
-        if (!mst) {
-          c_error(c, value, "compiler: optional cunion member type not registered");
-          return;
-        }
-        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-        bcode_write_u32(c->bc, mst->id);
-        st_push(c, 1);
-      } else {
-        compile_expr(c, value);
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, 2);
-      st_push(c, -3);
-      break;
-    }
-
-    if (t->kind != TYPE_KIND_ARRAY) {
-      c_error(c, node, "construct: unsupported type (only array, optional, struct, tuple, union and cunion implemented)");
-      return;
-    }
-
-    /* 数组构造：fill 展开 + nil 元素（元素须 ?T，sema 已校验）+ 普通字段 */
-    const type_t *et = array_type_elem(t);
-    size_t fcount = 0;
-    for (ast_node_t *f = n->fields; f; f = f->next) {
-      if (f->kind == AST_FILL) {
-        /* <v,N>：count 已折叠为 AST_INT_LIT，N 份 v 依次压栈 */
-        ast_fill_t *fl = (ast_fill_t *)f;
-        uint64_t cnt = 0;
-        if (fl->count && fl->count->kind == AST_INT_LIT) {
-          cnt = ((ast_int_lit_t *)fl->count)->value;
-        } else {
-          c_error(c, fl->count ? fl->count : f,
-                  "fill count must be a compile-time constant");
-          return;
-        }
-        if (fl->value->kind == AST_NIL) {
-          /* nil 填充：元素须 ?T（sema 已校验），发 N 份 PUSH_OPT_NONE */
-          const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
-          if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
-          for (uint64_t k = 0; k < cnt; k++) {
-            bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-            bcode_write_u32(c->bc, est->id);
-            st_push(c, 1);
-          }
-        } else {
-          for (uint64_t k = 0; k < cnt; k++) {
-            compile_expr(c, fl->value);         /* 栈: [type_value, v..] */
-          }
-        }
-        fcount += (size_t)cnt;
-      } else if (f->kind == AST_NIL) {
-        /* nil 字段：元素须 ?T（sema 已校验）→ PUSH_OPT_NONE */
-        const sema_type_t *est = c_sema_type_find_ptr(c->sema_types, et);
-        if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
-        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-        bcode_write_u32(c->bc, est->id);
-        st_push(c, 1);
-        fcount++;
-      } else {
-        compile_expr(c, f);                     /* 栈: [type_value, v1..vN] */
-        fcount++;
-      }
-    }
-    bcode_write_op(c->bc, BCODE_CONSTRUCT);
-    bcode_write_u32(c->bc, (uint32_t)fcount);
-    st_push(c, -((int)fcount));                 /* CONSTRUCT 弹 N+1 压 1 */
+    emit_construct(c, node, n->type, t, n->fields, n->member_tag,
+                   /*is_new=*/false);
     break;
   }
   case AST_MEMBER: {
@@ -860,200 +860,14 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     break;
   }
   case AST_NEW: {
-    /* new T{...}（m3-design §8.1）：.T{...} 的堆分配形态 → fatal *T
-       （§3.3 统一接管协议：new/clone/move 都产将亡值，由 DEFINE/赋值
-       implicit_cast 接管为 own）。与 AST_CONSTRUCT 同构，但类型位压栈
-       时机不同（统一 NEW 协议 [member, type_value]，type_value 在顶）：
-       - 标量/option：恰好 1 字段（标量 new i32{123}；option new ?T{v}）
-         ——先编译成员值，后补压类型位 → [member, type_value]
-       - struct/tuple：N 字段（sema 已重排为声明序）→ 先压类型位走
-         CONSTRUCT N 得 T 值 → 再补压类型位 → [T值, type_value]
-       - array：N 元素（fill 展开 + nil）→ 同 struct 路径
-       - union/cunion：恰好 1 个具名字段 → 与 AST_CONSTRUCT 同款 tag/member
-         哨兵协议（sema 已把 member 下标写回 `n->member_tag`）：
-         [type_value, tag, payload] → CONSTRUCT 2 → 补压类型位 → NEW
-       最后 NEW 指令弹 2 压 1（成员值 + 类型位 → fatal *T 指针）。 */
+    /* `new T{...}`（堆分配）：统一发射器 emit_construct 先申请原始块
+       （NEW <sizeof(T)>），再在块上逐槽位构造（CONSTRUCT dest=块句柄），
+       结果 fatal *T（§3.3 统一接管协议：由 DEFINE/赋值接管为 own）。 */
     ast_new_t *n = (ast_new_t *)node;
-    /* 注意：类型位不在开头压——struct/tuple/array 走 CONSTRUCT（消费类型
-       位）后补压；标量分支在字段编译后压。NEW 统一协议 [member, type_value]
-       （type_value 在顶，op_new 先弹类型位再弹成员值）。 */
     const type_t *t = c_resolve_type(c, n->type);
     if (!t) { c_error(c, n->type, "unknown construct type"); return; }
-
-    if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
-      /* struct/tuple：先压类型位（CONSTRUCT 协议 [type_value, v1..vN]），
-         编译全部字段 → CONSTRUCT N（得 T 值）→ 补压类型位 → NEW。
-         nil 字段 → 字段须 ?T（sema 已校验）→ PUSH_OPT_NONE <field id>。 */
-      compile_type_expr(c, n->type);      /* 栈: [type_value] */
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        ast_node_t *value = f;
-        if (f->kind == AST_CONSTRUCT_FIELD)
-          value = ((ast_construct_field_t *)f)->value;
-        if (value->kind == AST_NIL) {
-          const type_t *ft = (t->kind == TYPE_KIND_STRUCT)
-                                 ? ((const struct_type_t *)t)->fields[fcount].type
-                                 : ((const tuple_type_t *)t)->elems[fcount].type;
-          const sema_type_t *fst =
-              c_sema_type_find_ptr(c->sema_types, ft);
-          if (!fst) {
-            c_error(c, value, "compiler: optional field type not registered");
-            return;
-          }
-          bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-          bcode_write_u32(c->bc, fst->id);
-          st_push(c, 1);
-        } else {
-          compile_expr(c, value);
-        }
-        fcount++;
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
-      /* CONSTRUCT 已消费类型位（弹 N+1 压 1 = T 值）；NEW 协议需要
-         [type_value, member]——补压 type_value（compile_type_expr 契约：
-         类型表达式压类型值）。 */
-      compile_type_expr(c, n->type);
-    } else if (t->kind == TYPE_KIND_ARRAY) {
-      /* array：先压类型位（CONSTRUCT 协议）→ fill 展开 + nil 元素（元素
-         须 ?T，sema 已校验）+ 普通元素 → CONSTRUCT N（得 T 值）→ 补压
-         类型位 → NEW */
-      compile_type_expr(c, n->type);      /* 栈: [type_value] */
-      const type_t *et = array_type_elem(t);
-      size_t fcount = 0;
-      for (ast_node_t *f = n->fields; f; f = f->next) {
-        if (f->kind == AST_FILL) {
-          ast_fill_t *fl = (ast_fill_t *)f;
-          uint64_t cnt = 0;
-          if (fl->count && fl->count->kind == AST_INT_LIT) {
-            cnt = ((ast_int_lit_t *)fl->count)->value;
-          } else {
-            c_error(c, fl->count ? fl->count : f,
-                    "fill count must be a compile-time constant");
-            return;
-          }
-          if (fl->value->kind == AST_NIL) {
-            const sema_type_t *est =
-                c_sema_type_find_ptr(c->sema_types, et);
-            if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
-            for (uint64_t k = 0; k < cnt; k++) {
-              bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-              bcode_write_u32(c->bc, est->id);
-              st_push(c, 1);
-            }
-          } else {
-            for (uint64_t k = 0; k < cnt; k++)
-              compile_expr(c, fl->value);
-          }
-          fcount += (size_t)cnt;
-        } else {
-          ast_node_t *value = f;
-          if (f->kind == AST_CONSTRUCT_FIELD)
-            value = ((ast_construct_field_t *)f)->value;
-          if (value->kind == AST_NIL) {
-            const sema_type_t *est =
-                c_sema_type_find_ptr(c->sema_types, et);
-            if (!est) { c_error(c, f, "compiler: optional element type not registered"); return; }
-            bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-            bcode_write_u32(c->bc, est->id);
-            st_push(c, 1);
-          } else {
-            compile_expr(c, value);
-          }
-          fcount++;
-        }
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, (uint32_t)fcount);
-      st_push(c, -((int)fcount));
-      /* CONSTRUCT 已消费类型位（弹 N+1 压 1 = T 值）；NEW 协议需要
-         [type_value, member]——补压 type_value（compile_type_expr 契约：
-         类型表达式压类型值）。 */
-      compile_type_expr(c, n->type);
-    } else if (t->kind == TYPE_KIND_UNION || t->kind == TYPE_KIND_CUNION) {
-      /* union/cunion：与 AST_CONSTRUCT 同款 **tag/member 哨兵协议**：
-         [type_value, tag_idx, payload] → CONSTRUCT 2（按 tag/subscript 定位
-         member → implicit_cast → 写 payload）→ 补压类型位 → NEW。
-         此前这里把 payload 直接交给 NEW，指望 NEW 把 payload 隐式转换成
-         union——union 的 implicit_cast 只接受同类型，必然报
-         "implicit cast: not a widening conversion"（实测），即
-         `new U{...}` 对任何 union 都不可用。 */
-      compile_type_expr(c, n->type);      /* 栈: [type_value] */
-      uint32_t tag = n->member_tag;       /* sema 按名定位后写回的下标 */
-      if (tag < 128) {
-        bcode_write_op(c->bc, BCODE_PUSH_I8);
-        bcode_write_i8(c->bc, (int8_t)tag);
-      } else if (tag < 32768) {
-        bcode_write_op(c->bc, BCODE_PUSH_I16);
-        bcode_write_i16(c->bc, (int16_t)tag);
-      } else {
-        bcode_write_op(c->bc, BCODE_PUSH_I32);
-        bcode_write_i32(c->bc, (int32_t)tag);
-      }
-      st_push(c, 1);
-      ast_node_t *f = n->fields;
-      ast_node_t *value = f;
-      if (f && f->kind == AST_CONSTRUCT_FIELD)
-        value = ((ast_construct_field_t *)f)->value;
-      if (!value) {
-        c_error(c, node, "compiler: new requires exactly 1 field");
-        return;
-      }
-      if (value->kind == AST_NIL) {
-        /* nil payload：member 须 ?T（sema 已校验）→ PUSH_OPT_NONE */
-        const type_t *mt = NULL;
-        if (tag < ((t->kind == TYPE_KIND_UNION)
-                       ? (uint32_t)((const union_type_t *)t)->member_count
-                       : (uint32_t)((const cunion_type_t *)t)->member_count)) {
-          mt = (t->kind == TYPE_KIND_UNION)
-                   ? union_type_member(t, tag)->payload_type
-                   : cunion_type_member(t, tag)->type;
-        }
-        const sema_type_t *mst = mt ? c_sema_type_find_ptr(c->sema_types, mt)
-                                    : NULL;
-        if (!mst) {
-          c_error(c, value, "compiler: optional union member type not registered");
-          return;
-        }
-        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-        bcode_write_u32(c->bc, mst->id);
-        st_push(c, 1);
-      } else {
-        compile_expr(c, value);           /* 栈: [type_value, tag, payload] */
-      }
-      bcode_write_op(c->bc, BCODE_CONSTRUCT);
-      bcode_write_u32(c->bc, 2);
-      st_push(c, -3);
-      compile_type_expr(c, n->type);      /* 栈: [union 值, type_value] */
-    } else {
-      /* 标量/option：恰好 1 个字段（sema 已校验） */
-      ast_node_t *f = n->fields;
-      if (f && f->kind == AST_CONSTRUCT_FIELD)
-        f = ((ast_construct_field_t *)f)->value;
-      if (f && f->kind == AST_NIL) {
-        /* nil 字段：字段须 ?T（sema 已校验）→ PUSH_OPT_NONE <field id> */
-        const sema_type_t *fst = NULL;
-        if (t->kind == TYPE_KIND_OPTION) {
-          const type_t *inner = type_option_inner(t);
-          fst = c_sema_type_find_ptr(c->sema_types, inner ? inner : t);
-        }
-        if (!fst) {
-          c_error(c, f, "compiler: optional new field type not registered");
-          return;
-        }
-        bcode_write_op(c->bc, BCODE_PUSH_OPT_NONE);
-        bcode_write_u32(c->bc, fst->id);
-      } else if (f) {
-        compile_expr(c, f);               /* 栈: [member] */
-      } else {
-        c_error(c, node, "compiler: new requires exactly 1 field");
-        return;
-      }
-      compile_type_expr(c, n->type);      /* 栈: [member, type_value] */
-    }
-    bcode_write_op(c->bc, BCODE_NEW);   /* 弹 2 压 1（fatal *T 指针） */
-    st_push(c, -1);
+    emit_construct(c, node, n->type, t, n->fields, n->member_tag,
+                   /*is_new=*/true);
     break;
   }
   case AST_DEREF: {
@@ -1118,6 +932,28 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       bcode_write_op(c->bc, BCODE_FREE);   /* 释放栈顶，净 -1 */
       st_push(c, -1);
     }
+    break;
+  }
+  case AST_CLONE: {
+    /* 扁平化 clone 的**叶子**形态（sema 生成）：operand → CLONE（申请新块 +
+       拷贝字节）。只用于不含 own 槽位的类型（标量/无 own 字段聚合/指向无 own
+       槽位内容的指针）——复合类型的逐槽位展开由 sema 生成构造/NEW/循环 AST。 */
+    ast_clone_t *n = (ast_clone_t *)node;
+    if (!n->operand) { c_error(c, node, "clone: missing operand"); return; }
+    compile_expr(c, n->operand);
+    bcode_write_op(c->bc, BCODE_CLONE);
+    st_push(c, 0);
+    break;
+  }
+  case AST_TAKE: {
+    /* 扁平化 clone 的切片路径尾步（sema 生成）：把预填好的临时变量移出
+       （语义 = move）→ MOVE（分配新数据块并按字节转移；临时变量在 sema 侧
+       已标 moved，块退出不生成 FREE）。 */
+    ast_take_t *n = (ast_take_t *)node;
+    if (!n->operand) { c_error(c, node, "take: missing operand"); return; }
+    compile_expr(c, n->operand);
+    bcode_write_op(c->bc, BCODE_MOVE);
+    st_push(c, 0);
     break;
   }
   case AST_MOVE: {

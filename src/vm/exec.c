@@ -780,43 +780,35 @@ static value_t *op_push_ptr(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * 返回 fatal *T 类型 value（ptr_value_t{堆块}——接管后变 own，作用域退出时
  * ptr_dispose 释放堆块，m3-design §3.1/§3.3）。 */
 static value_t *op_new(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    /* NEW（无操作数）：**堆分配构造**（new T{...}，m3-design §8.1）。
-     * 统一协议 [member, type_value]（type_value 在顶，与 CONSTRUCT 相反——
-     * compiler 对 struct/tuple/array 先 CONSTRUCT 得 T 值再补压类型位，
-     * 标量先压成员值再压类型位）：先弹类型位，再弹成员值。 */
+    /* NEW（无操作数）：**只申请内存**，构造交给 CONSTRUCT（2026-10 统一）。
+     * 弹一个整数（字节数）→ 申请该大小的原始块（清零）→ 压 opaque 句柄
+     * （data 里存裸指针）。后续 `CONSTRUCT` 以该句柄为 dest，在这块内存上
+     * 构造对象。C 后端等价：`void *blk = calloc(1, size);`。
+     * 与 CONSTRUCT 分离后，"申请"与"逐字段赋值"各自可翻译——这是 C 后端
+     * 等价编译的关键（同 FREE 的理由）。 */
     (void)bc; (void)pc;
-    value_t *type_v = exec_stack_pop(vm);   /* 栈顶：类型位 */
-    value_t *member = exec_stack_pop(vm);   /* 栈底：成员值 */
-    const type_t *t = (type_v && value_type(type_v) == vm->type_type)
-                          ? value_as(type_v, const type_t *) : NULL;
-    if (!t)
-        return value_make_error(vm, "new: missing type slot");
-    /* new 产 fatal *T（m3-design §3.3 统一接管协议）：新堆块是"将亡值"，
-       由 DEFINE/赋值经 implicit_cast fatal→own 显式接管为 own。 */
-    const type_t *pt = type_ptr_intern(vm, t);
-    if (!pt)
-        return value_make_error(vm, "new: cannot make pointer type");
-    if (value_is_shadow(member))
-        return value_make_shadow(vm, pt);
-    /* 成员值 → T：同类型直接用（身份，不 clone——value_implicit_cast 同类型
-       短路 value_clone 浅拷贝，会与成员共享内嵌 own 堆块）；异类型才隐式转换
-       （字面量 i32 → i64 等宽度提升；fatal → own 接管产物在 cast 内转移）。 */
-    value_t *casted = member;
-    if (value_type(member) != t) {
-        casted = value_implicit_cast(vm, member, t);
-        if (value_is_error(vm, casted)) return casted;
+    value_t *size_v = exec_stack_pop(vm);
+    if (size_v && value_is_shadow(size_v))
+        return value_make_shadow(vm, vm->type_opaque);
+    uint64_t size = 0;
+    if (size_v && value_data(size_v)) {
+        const type_t *st = value_type(size_v);
+        void *sd = value_data(size_v);
+        int64_t sv = 0;
+        switch (st->size) {
+        case 1: sv = *(const int8_t  *)sd; break;
+        case 2: sv = *(const int16_t *)sd; break;
+        case 4: sv = *(const int32_t *)sd; break;
+        default: sv = *(const int64_t *)sd; break;
+        }
+        size = (uint64_t)(sv < 0 ? 0 : sv);
     }
-    void *heap = value_alloc_data(vm->alloc, t);  /* 清零：未指定字段自动零值 */
-    memcpy(heap, value_data(casted), t->size);    /* data 全平凡：blit 成员值 */
-    /* 成员值已复制进堆块：所有权随 memcpy 转移给堆块——清空源对象图内所有
-       own/fatal 指针（ptr_clear_owned_recursive 递归置 ptr=NULL，覆盖复合
-       类型内嵌 own 字段：new Node{ .inner = new i32{...} } 的 Node 值内部
-       own *i32 字段、new own *i32{move(p)} 的 fatal→own 接管产物），防作用域
-       退出时源与堆块双释放。堆块归 new 产物递归销毁；ref 借用不受影响。 */
-    ptr_clear_owned_recursive(vm, t, value_data(casted));
-    return ptr_make_value(vm, pt, heap);    /* fatal *T：拥有堆块 */
+    void *blk = size > 0 ? value_alloc_raw(vm->alloc, (size_t)size) : NULL;
+    void *data = value_alloc_data(vm->alloc, vm->type_opaque);
+    if (!data) return value_make_error(vm, "new: out of memory");
+    *(void **)data = blk;
+    return value_make(vm, vm->type_opaque, data);
 }
-
 /* PTR_GET（无操作数）：**解引用取值**（r.*，m3-design §8.2）。
  * 弹指针值 → 取被指向 T 值副本（data 指向 ptr 目标，借用到 T 值；零拷贝——
  * 引用的是堆块/栈值业务内存，生命周期 = 持有者）。shadow → base 的 shadow。 */
@@ -1205,22 +1197,12 @@ static void *construct_field_copy(vm_t *vm, void *dst, const value_t *src,
  * 先弹 type_value（栈上类型构造产物，如 push_array...seal 留下的 array type
  * value），再逐个弹 N 个成员值（栈顶为 vN，逆序收集为 elems[0..n-1] = v1..vN）。
  * 按类型种类分派：当前仅实现 array 分支（struct/tuple 待后续 Phase）。 */
-static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {    uint32_t n = bcode_read_u32(bc, pc);
-
-    /* 栈上收集 N 个成员值（仅指针，不拥有 value）。VLA 与 op_call 的 args 同款。
-       栈布局：..., type_value, v1, ..., vN（type 在底、vN 在顶），故先弹 vN..v1，
-       逆序写入使 elems[0..n-1] = v1..vN，最后再弹类型位。 */
-    value_t *elems[n > 0 ? n : 1];
-    for (uint32_t i = 0; i < n; i++)
-        elems[n - 1 - i] = exec_stack_pop(vm);
-
-    /* 类型位在 N 个成员值之下 */
-    value_t *type_v = exec_stack_pop(vm);
-    const type_t *t = (type_v && value_type(type_v) == vm->type_type)
-                          ? value_as(type_v, const type_t *) : NULL;
-    if (!t)
-        return value_make_error(vm, "construct: missing type slot");
-
+/* ---- 在既定类型上"构造值"（不关心 dest） ----
+ * 返回新值（数据块已分配）；失败返回 error。从 op_construct 拆出：统一
+ * NEW/CONSTRUCT 后，栈值构造（dest=undefined）与堆块构造（dest=opaque 原始块，
+ * 见 op_construct 尾部的搬运逻辑）共用同一套逐槽位写入。 */
+static value_t *construct_value(vm_t *vm, const type_t *t, value_t **elems,
+                                uint32_t n) {
     /* 仅实现 array + option 分支 */
     if (t->kind == TYPE_KIND_ARRAY) {
         const type_t *et = array_type_elem(t);
@@ -1405,9 +1387,77 @@ static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {    uint32_t
         return value_make(vm, t, data);
     }
 
-    /* 非 array/option/struct/tuple/union/cunion 类型暂未实现 */
+    /* 标量 / 指针 / opaque 等（无可展开的槽位）：单成员值 → 该类型本身。
+       `new i32{123}`、`new *T{…}` 的"构造"落在这一支：隐式转换 + memcpy 到
+       新值块（与 C 后端 `*(T*)dst = (T)value` 对应）。 */
+    if (n >= 1 && elems[0]) {
+        value_t *src = elems[0];
+        if (value_type(src) != t) {
+            src = value_implicit_cast(vm, src, t);
+            if (value_is_error(vm, src)) return src;
+        }
+        void *data = value_alloc_data(vm->alloc, t);
+        memcpy(data, value_data(src), t->size);
+        return value_make(vm, t, data);
+    }
+
     return value_make_error(vm,
-        "construct: unsupported type (only array, optional, struct, tuple, union and cunion implemented)");
+        "construct: unsupported type (only array, optional, struct, tuple, "
+        "union, cunion and scalar implemented)");
+}
+
+/* ---- 值构造（construct N）：[dest, type_value, v1..vN] → 值 / fatal *T ----
+ *
+ * **NEW / CONSTRUCT 职责分离**（2026-10 统一）：
+ *   - `NEW`（无操作数）只**申请内存**：弹一个字节数（usize）→ 压 opaque 原始块
+ *     句柄（data 存裸指针）；
+ *   - `CONSTRUCT` 在**给定 dest 上**构造对象：
+ *       dest = undefined → 新建值数据块（栈值/临时值；C 后端即局部变量）；
+ *       dest = opaque    → NEW 申请的原始块（C 后端即 malloc 出来的堆块）。
+ * 因此两种源码形态归一为同一条指令序列：
+ *   `new T{...}`  → `PUSH_U64 sizeof(T); NEW; <type>; <fields>; CONSTRUCT n`
+ *                   （结果 fatal *T，由 DEFINE/赋值接管为 own）
+ *   `.T{...}`     → `PUSH_UNDEFINED;     <type>; <fields>; CONSTRUCT n`（结果值 T）
+ * 构造 = 逐槽位写入（申请与赋值分离），与 C 后端可逐条对应。
+ */
+static value_t *op_construct(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint32_t n = bcode_read_u32(bc, pc);
+
+    /* 栈上收集 N 个成员值（仅指针，不拥有 value）。栈布局：
+       ..., dest, type_value, v1, ..., vN（vN 在顶），逆序收集使
+       elems[0..n-1] = v1..vN，再弹类型位与 dest。 */
+    value_t *elems[n > 0 ? n : 1];
+    for (uint32_t i = 0; i < n; i++)
+        elems[n - 1 - i] = exec_stack_pop(vm);
+
+    value_t *type_v = exec_stack_pop(vm);
+    const type_t *t = (type_v && value_type(type_v) == vm->type_type)
+                          ? value_as(type_v, const type_t *) : NULL;
+    if (!t)
+        return value_make_error(vm, "construct: missing type slot");
+
+    value_t *dest = exec_stack_pop(vm);
+    bool heap = dest && value_type(dest) == vm->type_opaque;
+    if (dest && !heap && !value_is_undefined(vm, dest))
+        return value_make_error(
+            vm, "construct: dest must be undefined or an allocated block "
+                "(NEW)");
+
+    value_t *v = construct_value(vm, t, elems, n);
+    if (value_is_error(vm, v)) return v;
+    if (!heap) return v;   /* 栈值/临时值：构造结果就是值本身 */
+
+    /* 堆块：把构造结果搬进 NEW 申请的原始块，返回 fatal *T。
+       源容器的 own 指针在搬运后清空——所有权随字节转移给堆块（与旧 NEW 的
+       清源逻辑一致；防源容器与堆块共享同一批块 → 双释放）。 */
+    const type_t *pt = type_ptr_intern(vm, t);
+    if (!pt) return value_make_error(vm, "construct: cannot make pointer type");
+    if (value_is_shadow(v)) return value_make_shadow(vm, pt);
+    void *blk = value_data(dest) ? *(void **)value_data(dest) : NULL;
+    if (!blk) return value_make_error(vm, "construct: allocation is NULL");
+    memcpy(blk, value_data(v), t->size);
+    ptr_clear_owned_recursive(vm, (type_t *)t, value_data(v));
+    return ptr_make_value(vm, pt, blk);
 }
 
 /* ---- 下标读取（get_item）：self[index] -> 元素 ----

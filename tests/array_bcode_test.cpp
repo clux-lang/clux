@@ -73,6 +73,7 @@ TEST_F(ArrayBcodeTest, ConstructArrayValueFromElements) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -96,6 +97,7 @@ TEST_F(ArrayBcodeTest, ConstructThenIndexGet) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -120,6 +122,7 @@ TEST_F(ArrayBcodeTest, ConstructThenIndexSetThenGet) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -147,6 +150,7 @@ TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsReturnsError) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -171,6 +175,7 @@ TEST_F(ArrayBcodeTest, IndexSetOutOfBoundsReturnsError) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -196,6 +201,7 @@ TEST_F(ArrayBcodeTest, NegativeIndexIsOutOfBounds) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -220,6 +226,7 @@ TEST_F(ArrayBcodeTest, LengthReturnsElementCount) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -258,6 +265,7 @@ TEST_F(ArrayBcodeTest, ConstructPartialFillZeroPads) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_undefined\n"
@@ -281,6 +289,7 @@ TEST_F(ArrayBcodeTest, ConstructPartialFillKeepsFirstElement) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_undefined\n"
@@ -305,6 +314,7 @@ TEST_F(ArrayBcodeTest, ConstructCountExceedsReturnsError) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -320,18 +330,20 @@ TEST_F(ArrayBcodeTest, ConstructCountExceedsReturnsError) {
     EXPECT_TRUE(value_is_error(vm, r));
 }
 
-/* 非 array 类型走 construct 目前报错（struct/tuple 待后续） */
-TEST_F(ArrayBcodeTest, ConstructNonArrayTypeReturnsError) {
-    const char *src =
+/* 标量构造（统一 NEW/CONSTRUCT 后支持）：dest=undefined + 类型位 + 单成员值
+   → CONSTRUCT 1 = 隐式转换 + memcpy（C 后端 `*(T*)dst = v`）。 */
+TEST_F(ArrayBcodeTest, ConstructScalarValue) {
+    ASSERT_TRUE(assemble_and_run(
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load \"i32\"\n"
         "    push_i32 1\n"
         "    construct 1\n"
-        "    halt\n";
-    bcode_destroy(&bc);
-    ASSERT_EQ(bcode_asm_parse(alloc, src, strlen(src), &bc), 0);
-    value_t *r = exec_run(vm, bc);
-    ASSERT_NE(r, nullptr);
-    EXPECT_TRUE(value_is_error(vm, r));
+        "    halt\n"));
+
+    value_t *top = stack_top();
+    ASSERT_NE(top, nullptr);
+    EXPECT_EQ(value_type(top), vm->type_i32);
+    EXPECT_EQ(read_sint(top), 1);
 }
 
 /* 两次 construct 构造两个数组值：value_make_array 不得残留 type value 到
@@ -345,6 +357,7 @@ TEST_F(ArrayBcodeTest, ConstructTwiceLeavesNoTypeValueOnStack) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 1\n"
         "    push_i32 2\n"
@@ -355,6 +368,7 @@ TEST_F(ArrayBcodeTest, ConstructTwiceLeavesNoTypeValueOnStack) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -381,6 +395,7 @@ TEST_F(ArrayBcodeTest, ConstructNestedArray) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"         /* [open_outer] */
         "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
         "    push_array\n"         /* [open_outer, open_inner] */
         "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
@@ -399,6 +414,7 @@ TEST_F(ArrayBcodeTest, ConstructNestedArray) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"       /* [t_outer, t_inner] */
         "    push_i32 1\n"
         "    push_i32 2\n"
@@ -410,6 +426,7 @@ TEST_F(ArrayBcodeTest, ConstructNestedArray) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"       /* [t_outer, arr_inner1, t_inner2] */
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -440,6 +457,7 @@ TEST_F(ArrayBcodeTest, IndexCompoundViaPushValueDup) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -472,6 +490,7 @@ TEST_F(ArrayBcodeTest, IndexGetOutOfBoundsViaExpr) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 7\n"
         "    push_i32 8\n"
@@ -495,6 +514,7 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
         /* 构造外层 [2][2]i32（同 ConstructNestedArray 序列） */
         "    push_array\n"         /* [open_outer] */
         "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
         "    push_array\n"         /* [open_outer, open_inner] */
         "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
@@ -505,6 +525,7 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
         "    load_type 64\n"       /* [open_outer, t_inner] */
         "    define_bound 2\n"     /* 弹 t_inner 设外层元素类型 */
         "    seal\n"               /* 弹 t_outer，密封（按自身 id 65 重绑登记） */
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 65\n"       /* [t_outer] */
         "    push_array\n"
         "    define_type 64\n"
@@ -512,6 +533,7 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"       /* [t_outer, t_inner] */
         "    push_i32 1\n"
         "    push_i32 2\n"
@@ -522,6 +544,7 @@ TEST_F(ArrayBcodeTest, MultidimIndexSetViaBorrowedRef) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"       /* [t_outer, row0, t_inner] */
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -554,6 +577,7 @@ TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
     ASSERT_TRUE(assemble_and_run(
         "    push_array\n"         /* [open_outer] */
         "    define_type 65\n"     /* 声明：open_outer 绑 id 65 + 登记 */
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 65\n"       /* 拉回 open_outer（定义起点） */
         "    push_array\n"         /* [open_outer, open_inner] */
         "    define_type 64\n"     /* 声明：open_inner 绑 id 64 + 登记 */
@@ -564,6 +588,7 @@ TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
         "    load_type 64\n"       /* [open_outer, t_inner] */
         "    define_bound 2\n"     /* 弹 t_inner 设外层元素类型 */
         "    seal\n"               /* 弹 t_outer，密封（按自身 id 65 重绑登记） */
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 65\n"       /* [t_outer] */
         "    push_array\n"
         "    define_type 64\n"
@@ -571,6 +596,7 @@ TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 1\n"
         "    push_i32 2\n"
@@ -581,6 +607,7 @@ TEST_F(ArrayBcodeTest, BorrowedRefIsNonOwning) {
         "    load \"i32\"\n"
         "    define_bound 2\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 3\n"
         "    push_i32 4\n"
@@ -609,6 +636,7 @@ TEST_F(ArrayBcodeTest, ConstructAndIndexAsmDisasmRoundTrip) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_i32 10\n"
         "    push_i32 20\n"
@@ -671,6 +699,7 @@ TEST_F(ArrayBcodeTest, DuplicateArrayTypeInternedOnce) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_array\n"
         "    define_type 64\n"
@@ -698,6 +727,7 @@ TEST_F(ArrayBcodeTest, DistinctElemAndLengthAreDistinct) {
         "    load \"i32\"\n"
         "    define_bound 3\n"
         "    seal\n"
+        "    push_undefined\n"   /* dest：栈值构造（无堆块） */
         "    load_type 64\n"
         "    push_array\n"
         "    define_type 65\n"

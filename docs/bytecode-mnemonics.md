@@ -155,7 +155,7 @@ value** 返回，由 `exec_drive` 捕获停机。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `CONSTRUCT` | `U32`（成员数 N） | 栈布局 `…, type_value, v1 … vN`（类型在底、vN 在顶）：先逆序弹 N 个成员值，再弹类型位，按类型种类构造 value。`array` 分支允许部分填充（缺失位为零值）；`struct` 分支字段数须一致、逐字段 `value_implicit_cast` + blit；`union` / `cunion` 分支成员数须 == 2（**显式 tag / member 下标哨兵** + payload）。 |
+| `CONSTRUCT` | `U32`（成员数 N） | 栈布局 `…, dest, type_value, v1 … vN`（dest 在底、vN 在顶）：先逆序弹 N 个成员值，再弹类型位、弹 dest，按类型种类构造。**dest 决定"构造到哪里"**：`undefined` → 新建值数据块（栈值/临时值，C: 局部变量）；`opaque`（NEW 返回的原始块句柄）→ 直接在块上构造，结果压 `fatal *T`（C: `malloc` 出来的堆块）。`array` 分支允许部分填充（缺失位为零值）；`struct` 分支字段数须一致、逐字段 `value_implicit_cast` + blit；`union` / `cunion` 分支成员数须 == 2（**显式 tag / member 下标哨兵** + payload）；标量/指针分支成员数 == 1（`implicit_cast` + memcpy）。 |
 | `FIELD_GET` | `STR`（字段名） | 弹 self → 按名查偏移 → 压**借用引用**（is_own=false，data 指向 self 数据块内偏移，零拷贝；绑定/返回时经 clone materialize）。union 分支反查 member + **运行期 tag 校验**（不符 → 硬错误）；cunion 分支写/读 offset 0、无 tag 校验。 |
 | `FIELD_SET` | `STR`（字段名） | 弹 self + val → `value_implicit_cast` 到字段类型 → dispose 旧值 → blit 新值 → **压回 self**（链式复用）。复合赋值 `p.x op= v` 编译为 `PUSH_VALUE 0` + `FIELD_GET` + op + `FIELD_SET`。 |
 | `INDEX_GET` | — | `get_item`：栈 `…, self, index` → 弹 index、self → `vtable->get_index` → 压元素副本（**消费 self**）。 |
@@ -188,12 +188,12 @@ ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
 | `PUSH_PTR` | `U8`（ownership） | 分配空指针类型（开放态，base=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL / _SHARE / _WEAK`。 |
-| `NEW` | — | 弹类型位 + 1 个成员值 → 按类型构造 `own *T` 堆块（`new T{...}`）。 |
+| `NEW` | — | **只申请内存**（2026-10 与 `CONSTRUCT` 统一）：弹一个整数（字节数）→ 申请该大小的原始块（清零）→ 压 `opaque` 句柄（data 里存裸指针）。后续 `CONSTRUCT` 以该句柄为 dest 在块上构造对象；`new T{...}` 编译为 `PUSH_U64 sizeof(T); NEW; <type>; <fields>; CONSTRUCT n`（结果 `fatal *T`）。C 后端等价：`calloc(1, size)`。 |
 | `PTR_GET` | — | 弹指针值 → 压被指向 `T` 的**值副本**（`r.*` 解引用 GET）。 |
 | `PTR_SET` | — | 弹指针值 + val → 隐式转换后写回被指向 `T` → 压回指针（`r.* = v`）。 |
 | `ADDR` | — | 弹值 → 压 `ref *T` 指针（`x.&` 后置取址，借用）。 |
 | `MOVE` | — | 弹值 → 压**将亡值（fatal 变体）**：own 指针/切片转移裸指针（源置空）；含 own 字段的复合类型**整块 memcpy + 递归清空源顶层 own/fatal 指针**（`move(x)` 的所有权转移）。 |
-| `CLONE` | — | 弹值 → 压**将亡值（fatal 变体）**：指针/切片/复合类型均为**深拷贝**（`ptr_clone_block` 递归对象图：own 字段分配独立新堆块，ref 字段复制指针），**源保持有效**。 |
+| `CLONE` | — | 弹值 → 压**将亡值（fatal 变体）**：深拷贝（`ptr_clone_block` 递归对象图），源保持有效。**注意**：用户 `clone(x)` 已由 sema 在编译期展开为构造 / NEW / 循环序列（扁平化，见 `sema_gen_clone`），运行期 `CLONE` 只剩**叶子**用途（标量/无 own 槽位聚合/指向无 own 槽位内容的指针）与闭包等回退路径。 |
 | `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。用于 `_ = expr` 显式丢弃 fatal / own；借用（ref、`x.&`）跳过。 |
 
 **复合类型的将亡值变体 `fatal T`**（`fatal T` 类型表达式，T 为含 own 资源的

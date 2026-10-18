@@ -1231,8 +1231,6 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     }
     if (dup) continue;
 
-    /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。 */
-    ownership_t cunion_member_own = (ownership_t)sf->ownership;
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
@@ -1244,18 +1242,13 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
       ok = false;
       continue;
     }
-    if (type_contains_ptr_or_slice(ft)) {
-      diag_error(sema->diag, sema_loc(sema, sf->type),
-                 "cunion '%.*s': member '%.*s' has pointer or slice type; "
-                 "compound types cannot contain pointer/slice fields",
-                 (int)cd->name.len, cd->name.ptr, (int)sf->name.len,
-                 sf->name.ptr);
-      ok = false;
-      continue;
-    }
+    /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。
+       **cunion 不参与所有权运算**：无论成员类型写了什么 own/ref 修饰，
+       槽位所有权一律记 OWN_NONE —— cunion 无 tag，运行期无法判定哪个
+       member 活跃，销毁序列不为它生成 FREE，构造也不要求"own 槽位收
+       FATAL"。指针/切片的生命周期由开发者自负（与 C union 语义一致）。 */
     members[i].type = ft;
-    /* 槽位所有权（cunion 无 tag，不参与自动销毁——记录仅为类型描述完整） */
-    members[i].ownership = cunion_member_own;
+    members[i].ownership = OWN_NONE;
   }
 
   if (!ok) {
