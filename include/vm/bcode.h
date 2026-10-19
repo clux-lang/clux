@@ -329,6 +329,10 @@ typedef enum {
      * 结构体字段构造、FFI 实参类型）会因"类型不匹配"失败。操作数固定 8 字节，
      * 因此 `.cxb` 仍可跨架构搬运：32 位宿主读入后按 usize=u32 截断。 */
     BCODE_PUSH_USIZE,       /* U64 立即数 → usize 值（宽度 = 平台指针宽度） */
+    BCODE_MATERIALIZE,      /* 无操作数：把栈顶值**物化**成独立副本（value_clone）。
+                               用于 return 值：先物化再执行 defer/FREE（那些清理
+                               可能释放返回值所借用的堆块），否则 RET 会把悬垂
+                               借用交给调用方（实测读到已释放内存）。 */
     BCODE_PUSH_CFUNC_TYPE,  /* 无操作数：压入一个**开放**的 cfunc 类型
                                （TYPE_KIND_CFUNC，C 函数指针）；后续用
                                FUNC_TYPE_PARAM/RETURN 追加签名、SEAL 密封。

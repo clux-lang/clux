@@ -135,6 +135,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_FREE_RECURSIVE] = { "FREE_RECURSIVE", { BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_USIZE]     = { "PUSH_USIZE",     { BCODE_ASM_OP_U64 } },
     [BCODE_PUSH_CFUNC_TYPE] = { "PUSH_CFUNC_TYPE", { BCODE_ASM_OP_NONE } },
+    [BCODE_MATERIALIZE]    = { "MATERIALIZE",    { BCODE_ASM_OP_NONE } },
     [BCODE_TAKE_SLOT]     = { "TAKE_SLOT",     { BCODE_ASM_OP_NONE } },
 };
 

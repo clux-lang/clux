@@ -763,3 +763,58 @@ TEST(Driver, FatalSliceParamNotConsumedStillRejected) {
   EXPECT_NE(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ================================================================ */
+/* return 值物化：own 形参 + return <解引用> 不得读到已释放内存        */
+/* （BCODE_MATERIALIZE：先把返回值物化成独立值，再跑 defer/FREE）      */
+/* ================================================================ */
+
+TEST(ReturnMaterialize, OwnParamDerefReturn) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "func own_i32(a0: own *i32): i32 { return a0.*; }\n"
+      "func own_box_val(a0: own *Box): Box { return a0.*; }\n"
+      "func own_box_field(a0: own *Box): i32 { return a0.*.v; }\n"
+      "func main(): i32 {\n"
+      "  var p1 = new i32{ 42 };\n"
+      "  if (own_i32(move(p1)) != 42) { return 1; }\n"
+      "  var b1 = new Box{ .v = 43 };\n"
+      "  var r = own_box_val(move(b1));\n"
+      "  if (r.v != 43) { return 2; }\n"
+      "  var b2 = new Box{ .v = 44 };\n"
+      "  if (own_box_field(move(b2)) != 44) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ret_materialize_own_param");
+}
+
+/* 对照：局部中转一直正确，防止回归时误改这条路径 */
+TEST(ReturnMaterialize, OwnParamLocalHop) {
+  clux_expect_ok(
+      "func f(a0: own *i32): i32 {\n"
+      "  var v = a0.*;\n"
+      "  return v;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = new i32{ 7 };\n"
+      "  if (f(move(p)) != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ret_materialize_local");
+}
+
+/* 返回 struct 字段借用（ref 形参）+ defer 也会触发物化路径：值必须仍然正确 */
+TEST(ReturnMaterialize, RefParamWithDefer) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "func f(b: ref *Box): i32 {\n"
+      "  defer { }\n"
+      "  return b.*.v;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var b = new Box{ .v = 9 };\n"
+      "  if (f(b.*.&) != 9) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ret_materialize_defer");
+}

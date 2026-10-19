@@ -404,6 +404,13 @@ static void compile_exit_with_defers(compiler_t *c, ast_node_t *node) {
       bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED); /* void return */
       st_push(c, 1);
     }
+    /* defers 链里可能有 sema 追加的 **FREE**（own 局部/形参释放）：那会释放
+       返回值正在借用的堆块。因此有 defers 时先把返回值物化成独立副本，再跑
+       defer/FREE —— 等价于"返回值先落到临时变量"（形参不过是临时变量）。 */
+    if (node->defers) {
+      bcode_write_op(c->bc, BCODE_MATERIALIZE);
+      /* 栈净变化 0（弹 1 压 1） */
+    }
     /* 编译挂载的 defer calls */
     for (ast_node_t *d = node->defers; d; d = d->next) {
       compile_stmt(c, d);

@@ -2049,3 +2049,25 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       提前到 Pass 3a（类型槽位尚未折叠）并记录 init 的原始形态。为保持 master
       绿色，本轮**回退了这段半成品**。
     - 验证（本轮）：Windows 全量 **2166/2166 PASSED**（既有用例零回归）。
+
+86. **修复：`return <解引用>` 读到已释放内存（own 形参）**（2026-10）
+    - **症状**：`func f(a0: own *i32): i32 { return a0.*; }` 返回值是垃圾——
+      Windows 为 `0xDDDDDDDD`（MSVC 调试堆的已释放填充），Linux 为 `0`；而
+      `var v = a0.*; return v;` 正确。调用方 `f(move(p))` 后读 `p` 所指堆块
+      得到已释放内存。
+    - **根因**：`return a0.*` 压栈的是**借用视图**（data 指向参数堆块）。退出点
+      的 defers 链里挂着 sema 为 own 形参生成的 `FREE`（`compile_exit_with_defers`
+      的顺序是"先算返回值 → 再跑 defer/FREE → 最后 RET"），FREE 释放了那个堆块，
+      RET 于是把悬垂借用交给调用方。局部中转之所以正确，是因为 STORE 先把值拷成
+      独立副本——形参本质上就是临时变量，返回值也应走同一条物化路径。
+    - **修法**：新增字节码 `BCODE_MATERIALIZE`（无操作数：栈顶值 → `value_clone`
+      独立副本；栈净变化 0）。`compile_exit_with_defers` 在**有 defers** 时于
+      返回值压栈之后、defer/FREE 之前发一条 `MATERIALIZE`。无 defers 的普通
+      return 不需要（`func_vcall` 第 7 步本来就在作用域销毁前 clone）。
+    - **验证**：新增 `ReturnMaterialize.*` 3 例（own 形参解引用返回 / 局部中转
+      对照 / ref 形参 + defer）；Windows 全量 **2171/2171 PASSED**；新示例
+      `examples/own_param_return`（44 个入口目录）在 Windows/Linux 输出一致；
+      WSL2 全量 **2168 passed / 2 skipped**。
+    - **遗留（下一步）**：`own` 形参未被消费（没 `move` 出去也没 `return`）时只
+      泄漏、没有诊断——对标 `fatal` 形参的 "is not consumed" 检查需补上；以及
+      `cfunc(...)` → `func(...)` 的包装生成（见第 85 项）。

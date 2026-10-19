@@ -1,0 +1,33 @@
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+struct Box {
+    v: i32;
+}
+
+// own 形参 + return <解引用>（曾经读到已释放内存：Windows 0xDDDDDDDD / Linux 0）
+func own_i32(a0: own *i32): i32 { return a0.*; }
+func own_box_val(a0: own *Box): Box { return a0.*; }
+func own_box_field(a0: own *Box): i32 { return a0.*.v; }
+
+// own 形参 + 局部中转（一直正确，作为对照）
+func own_i32_local(a0: own *i32): i32 {
+    var v = a0.*;
+    return v;
+}
+
+func main(): i32 {
+    var p1 = new i32{ 42 };
+    if (own_i32(move(p1)) != 42) { return 1; }
+
+    var b1 = new Box{ .v = 43 };
+    var r = own_box_val(move(b1));
+    if (r.v != 43) { return 2; }
+
+    var b2 = new Box{ .v = 44 };
+    if (own_box_field(move(b2)) != 44) { return 3; }
+
+    var p2 = new i32{ 45 };
+    if (own_i32_local(move(p2)) != 45) { return 4; }
+    return 0;
+}

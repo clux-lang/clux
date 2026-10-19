@@ -519,6 +519,23 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
 /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL） ---- */
 
 /* PUSH_FUNC_TYPE：分配空 func type 入池并压其 type value */
+/* MATERIALIZE（无操作数）：栈顶值 → 独立副本（value_clone）。
+ *
+ * 为什么需要：`return <借用视图>`（典型 `return a0.*`，a0 是 own 形参）压栈的
+ * 是**指向参数堆块**的借用；随后 defers 链里的 FREE 释放该堆块，RET 就把悬垂
+ * 借用交给调用方 → 调用方读到已释放内存（Windows 调试堆 0xDDDDDDDD、Linux 0）。
+ * 语义上形参就是临时变量：返回值必须**先落成独立值**，再做作用域清理。 */
+static value_t *op_materialize(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    if (!v) return NULL;
+    if (value_is_error(vm, v) || value_is_interrupt(vm, v)) return v;
+    if (value_is_shadow(v)) return v; /* 无数据可物化 */
+    value_t *copy = value_clone(vm, v);
+    if (!copy || value_is_error(vm, copy)) return copy ? copy : v;
+    return copy;
+}
+
 static value_t *op_push_cfunc_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     cfunc_type_push(vm); /* 压入**开放** cfunc 类型（与 PUSH_FUNC_TYPE 同构） */
@@ -2885,6 +2902,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
     [BCODE_PUSH_USIZE]      = op_push_usize,
     [BCODE_PUSH_CFUNC_TYPE] = op_push_cfunc_type,
+    [BCODE_MATERIALIZE]      = op_materialize,
 };
 
 /* ================================================================ */
