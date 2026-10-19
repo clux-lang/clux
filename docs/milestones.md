@@ -2086,7 +2086,7 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       不再释放（无双释放）。
     - **验证**：新增 `OwnParam.*` 3 例（转移 / 嵌套 move / own *Box），泄漏会让进程
       非 0 退出，故 rc==0 即覆盖；Windows 全量 **2174/2174 PASSED**；examples 53 个
-      `.cx` 全过。
+      `.cx` 全过；WSL2 全量 **2171 passed / 2 skipped**。
     - **遗留（下一步）**：① `ref` 调用之后再调用 `own` 形参函数的组合仍会漏一个块
       （`leak_split.cx` 形态：`ref_only(b1)` + `own_only(move(b2))`；单独跑任一都不
       漏），疑似 R3 借用记录影响后续 FREE 生成，需单查；② own 形参未消费目前不报错
