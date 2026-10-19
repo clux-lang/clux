@@ -637,6 +637,9 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
+            /* 字段类型是 func 时，`cfunc_ptr(<命名 cfunc>)` 自动转包装。 */
+            if (ft && ft->kind == TYPE_KIND_FUNC)
+              sema_maybe_wrap_cfunc_expr(sema, &slot[i], ft, scope);
             bool ct_pushed = sema_anon_push(sema, ft);
             fv = sema_expr(sema, &slot[i], scope);
             sema_anon_pop(sema, ct_pushed);
@@ -1472,6 +1475,9 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
           value_t *fv = NULL;
           bool is_nil_field = value->kind == AST_NIL;
           if (!is_nil_field) {
+            /* 字段类型是 func 时，`cfunc_ptr(<命名 cfunc>)` 自动转包装。 */
+            if (ft && ft->kind == TYPE_KIND_FUNC)
+              sema_maybe_wrap_cfunc_expr(sema, &slot[i], ft, scope);
             bool ct_pushed = sema_anon_push(sema, ft);
             fv = sema_expr(sema, &slot[i], scope);
             sema_anon_pop(sema, ct_pushed);
@@ -2629,6 +2635,8 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
           const type_t *pt = (is_instance)
               ? func_type_param(sig_type, ai + 1)  /* skip self */
               : func_type_param(sig_type, ai);
+          if (pt && pt->kind == TYPE_KIND_FUNC)
+            sema_maybe_wrap_cfunc_expr(sema, slot, pt, scope);
           bool ct_pushed = sema_anon_push(sema, pt);
           sema_expr(sema, slot, scope);
           sema_anon_pop(sema, ct_pushed);

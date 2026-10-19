@@ -422,3 +422,58 @@ TEST(CfuncToFunc, RuntimePointerRejected) {
   EXPECT_EQ(clux_run_capture(path, &err), 1);
   std::remove(path.c_str());
 }
+
+/* 其余转换位置：return / 赋值 / struct 字段 / 方法实参 */
+TEST(CfuncToFunc, ReturnPosition) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "type Cmp = func(i32, i32) -> i32;\n"
+      "func build_cb(): Cmp { return cfunc_ptr(cmp); }\n"
+      "func main(): i32 {\n"
+      "  var f = build_cb();\n"
+      "  if (f(9, 4) != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_return");
+}
+
+TEST(CfuncToFunc, AssignPosition) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "func main(): i32 {\n"
+      "  var g: func(i32, i32) -> i32 = cmp;\n"
+      "  g = cfunc_ptr(cmp);\n"
+      "  if (g(7, 2) != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_assign");
+}
+
+TEST(CfuncToFunc, StructFieldPosition) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "struct Holder { cb: func(i32, i32) -> i32; }\n"
+      "func main(): i32 {\n"
+      "  var h = .Holder{ .cb = cfunc_ptr(cmp) };\n"
+      "  if (h.cb(6, 1) != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_field");
+}
+
+TEST(CfuncToFunc, MethodArgumentPosition) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "struct Calc {\n"
+      "  base: i32;\n"
+      "  func run(self: ref *Calc, f: func(i32, i32) -> i32): i32 {\n"
+      "    return f(self.base, 1);\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c = .Calc{ .base = 10 };\n"
+      "  if (c.run(cfunc_ptr(cmp)) != 9) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_method");
+}

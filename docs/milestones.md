@@ -2141,3 +2141,19 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       调用实参 / 运行期指针拒绝）；新示例 `examples/cfunc_to_func`（入口目录 44 → 45）。
     - **验证**：Windows 全量 **2183/2183 PASSED**、examples 54 个 `.cx` 全过、fmt 幂等；
       WSL2 全量 **2180 passed / 2 skipped**。
+
+90. **`cfunc(...)` → `func(...)` 覆盖全部转换位置**（2026-10）
+    - 第 89 项只接了**变量初始化**与**普通调用实参**；本轮补齐：
+      * **return**：`func build(): Cmp { return cfunc_ptr(cmp); }`（在 walk_return
+        入口按 `sema->fn.return_type` 包装）。
+      * **赋值（左值为变量）**：`f = cfunc_ptr(cmp);`（shadow_assign 求出左值类型后、
+        右值求值前包装）。
+      * **struct 字段**：`.Holder{ .cb = cfunc_ptr(cmp) }`（ex_construct / ex_new 的
+        字段求值前按字段类型包装；匿名构造走 infer_anon_struct 的字段求值路径同样
+        生效）。
+      * **方法调用实参**：`c.run(cfunc_ptr(cmp))`（方法实参循环内按形参类型包装）。
+    - 全部复用 `sema_maybe_wrap_cfunc_expr`（与第 89 项同一份生成器/校验）。
+    - 测试：`CfuncToFunc.*` 增至 10 例（新增 return / assign / struct field /
+      method arg 四例）。
+    - 验证：Windows 全量 **2187/2187 PASSED**、examples 54 个 `.cx` 全过；
+      WSL2 全量 **2184 passed / 2 skipped**。

@@ -2738,6 +2738,9 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
   /* 简单赋值 RHS 匿名构造注入：左值类型已知 → push anon_ct，使 RHS 的
      .{...} 推断目标类型（q: Point = .{...} 赋值给已声明变量）。 */
   const type_t *lt_ty = value_type(lhs);
+  /* `f = cfunc_ptr(<命名 cfunc>)`（f 为 func 类型）→ 自动生成包装。 */
+  if (lt_ty && lt_ty->kind == TYPE_KIND_FUNC && !rhs_nil)
+    sema_maybe_wrap_cfunc_expr(sema, &as->value, lt_ty, scope);
   value_t *rhs = NULL;
   if (rhs_nil) {
     rhs = NULL;
@@ -3653,6 +3656,9 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                   sema_scope_t *scope) {
   block_result_t r = {.definitely_returns = true};
   if (rt->value) {
+    /* `return cfunc_ptr(<命名 cfunc>)` 在返回类型是 func 时自动生成包装。 */
+    if (sema->fn.return_type && sema->fn.return_type->kind == TYPE_KIND_FUNC)
+      sema_maybe_wrap_cfunc_expr(sema, &rt->value, sema->fn.return_type, scope);
     value_t *v = sema_expr(sema, &rt->value, scope);
     bool v_bad = value_is_error(sema->vm, v) ||
                  value_is_type(v, TYPE_KIND_VOID);
