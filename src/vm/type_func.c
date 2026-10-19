@@ -232,6 +232,36 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
             local_args[i] = moved;
             continue;
         }
+        /* own 形参（`own *T` / `own []T`）：所有权**真正转移**进被调方。
+           形参就是临时变量——被调方拥有它，作用域退出时由 sema 生成的 FREE
+           释放；调用方已 move（TDZ），不会再释放。
+           为什么不能走下面的 implicit_cast 分支：`move()` 是纯编译期（不发
+           指令），实参到达这里是调用方槽位的**借用视图**（OWN_REF）。浅拷贝
+           指针后 ownership 仍是 REF，被调方的 FREE 成了 no-op，而调用方已经
+           move → 堆块永久泄漏（实测 `func f(a: own *i32) { ... }` 每次调用
+           漏 4 字节）。这里复制值本体（指针/切片描述符，8~16 字节，不深入
+           对象图）并把 ownership 置为 OWN_OWN。 */
+        if (sig && sig->params && sig->param_ownerships &&
+            i < sig->param_count && sig->params[i] &&
+            sig->param_ownerships[i] == OWN_OWN &&
+            (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
+            value_ownership(args[i]) == OWN_REF) {
+            value_t *owned = value_clone(vm, args[i]);
+            if (!owned || value_is_error(vm, owned)) {
+                is_error = true;
+                ret = owned ? owned
+                            : value_make_error(vm, "func call: out of memory "
+                                                   "while binding own parameter");
+                break;
+            }
+            value_set_ownership(owned, OWN_OWN);
+            if (value_type(owned) != sig->params[i]) {
+                value_t *relabeled = value_relabel_into(vm, owned, sig->params[i]);
+                if (relabeled) owned = relabeled;
+            }
+            local_args[i] = owned;
+            continue;
+        }
         if (sig && sig->params && i < sig->param_count && sig->params[i]
             && value_type(args[i]) != sig->params[i]) {
             /* safe_cast: implicit_cast（auto-tracked），失败返回 error */

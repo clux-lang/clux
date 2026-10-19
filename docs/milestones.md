@@ -2071,3 +2071,24 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **遗留（下一步）**：`own` 形参未被消费（没 `move` 出去也没 `return`）时只
       泄漏、没有诊断——对标 `fatal` 形参的 "is not consumed" 检查需补上；以及
       `cfunc(...)` → `func(...)` 的包装生成（见第 85 项）。
+
+87. **own 形参 = 临时变量：所有权真正转移**（2026-10）
+    - **症状**：`func f(a: own *i32): i32 { return a.*; }` 值已正确（86 修复），但
+      每次调用**泄漏** 4 字节（`memory leak detected ... count=4`）。
+    - **根因**：`move(x)` 是纯编译期（不发指令），实参到达 `func_vcall` 时是调用方
+      槽位的**借用视图**（ownership = OWN_REF）。`func_vcall` 的所有权转移分支只
+      认 `OWN_FATAL`（而 `fatal` 形参已在语言层禁用，实际不可达），`own` 形参落到
+      `value_implicit_cast` 浅拷贝分支：被调方并未真正拥有该值，作用域退出时 sema
+      生成的 FREE 变成 no-op；调用方又已 move（TDZ）不释放 → 堆块永久泄漏。
+    - **修法**：`func_vcall` 为 `own` 形参（指针/切片）新增分支——复制值本体
+      （指针/切片描述符，8~16 字节，不深入对象图）并把 ownership 置为 `OWN_OWN`，
+      再按形参类型重贴标签。被调方由此真正拥有：退出时 FREE 生效，调用方已 move
+      不再释放（无双释放）。
+    - **验证**：新增 `OwnParam.*` 3 例（转移 / 嵌套 move / own *Box），泄漏会让进程
+      非 0 退出，故 rc==0 即覆盖；Windows 全量 **2174/2174 PASSED**；examples 53 个
+      `.cx` 全过。
+    - **遗留（下一步）**：① `ref` 调用之后再调用 `own` 形参函数的组合仍会漏一个块
+      （`leak_split.cx` 形态：`ref_only(b1)` + `own_only(move(b2))`；单独跑任一都不
+      漏），疑似 R3 借用记录影响后续 FREE 生成，需单查；② own 形参未消费目前不报错
+      （由被调方 FREE 兜底，语义上与 `fatal` 的"必须消费"不同，待定）；
+      ③ `cfunc(...)` → `func(...)` 包装生成（第 85 项）。

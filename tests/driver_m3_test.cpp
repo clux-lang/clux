@@ -818,3 +818,43 @@ TEST(ReturnMaterialize, RefParamWithDefer) {
       "}\n",
       "ret_materialize_defer");
 }
+
+/* ================================================================ */
+/* own 形参 = 临时变量：所有权真正转移（被调方 FREE 生效，不泄漏）     */
+/* ================================================================ */
+
+TEST(OwnParam, OwnershipTransferred) {
+  /* 泄漏会让进程以非 0 退出（内存检查在进程结束时跑），因此 rc == 0 即覆盖 */
+  clux_expect_ok(
+      "func f(a: own *i32): i32 { return a.*; }\n"
+      "func main(): i32 {\n"
+      "  var p = new i32{ 42 };\n"
+      "  if (f(move(p)) != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_transfer");
+}
+
+TEST(OwnParam, NestedMove) {
+  clux_expect_ok(
+      "func g(a: own *i32): i32 { return a.*; }\n"
+      "func f(a: own *i32): i32 { return g(move(a)); }\n"
+      "func main(): i32 {\n"
+      "  var p = new i32{ 7 };\n"
+      "  if (f(move(p)) != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_nested");
+}
+
+TEST(OwnParam, OwnBoxParam) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "func f(a: own *Box): i32 { return a.*.v; }\n"
+      "func main(): i32 {\n"
+      "  var b = new Box{ .v = 43 };\n"
+      "  if (f(move(b)) != 43) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_box");
+}
