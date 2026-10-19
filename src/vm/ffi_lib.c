@@ -574,9 +574,11 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
 const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     if (!t) return "missing type";
     /* 所有权修饰在 C ABI 里是**契约**，不是表示层：
-         - `own *T` / `own opaque`：**合法**——C 接管这个指针（例如 `free(p)`），
-           clux 侧交出所有权；`malloc(): own *T` 这类"调用方接管返回值"同理。
-           C 侧看到的始终是裸指针，所有权只是 clux 侧的值状态。
+         - **参数** `own *T` / `own opaque`：**合法**——C 接管这个指针
+           （例如 `free(p)`），clux 侧交出所有权。C 侧看到的始终是裸指针，
+           所有权只是 clux 侧的值状态。
+         - **返回** `own`：非法（在 check_extern_cfunc 处单独拒绝）——把所有权
+           交给调用方要用 `fatal T`，与用户函数返回类型的规则一致。
          - `own []T`：**非法**——切片是胖指针，C 侧根本没有这个表示。
          - `own T`（聚合按值）：非法——按值传聚合时字段所有权无法在 C 侧表达。
        ref/fatal 指针本来就按指针宽度放行。 */

@@ -822,10 +822,13 @@ var d: opaque = ...;              // ✗ 报错：bare 'opaque' is not allowed
 返回接管型指针（如 `malloc`）写 `fatal opaque` 或 `own opaque`，把所有权交回 C
 （如 `free`）写 `own opaque` —— 与 `own`/`ref` 在其他指针上的含义一致。
 
-**C ABI 里的所有权**：`own *T` / `own opaque` 在 `extern cfunc` 签名里是**合法**
-的——C 侧看到的是裸指针，所有权只是 clux 侧的契约（`malloc(): own *T` 表示调用方
-接管返回值；`free(p: own *T)` 表示把所有权交回 C、由 C 释放）。**切片**例外：
-`own []T` 是胖指针，C 侧没有对应表示，声明即报错。
+**C ABI 里的所有权**（参数与返回不对称）：
+
+- **参数** `own *T` / `own opaque`：**合法**——C 接管这个指针（如 `free(p: own *T)`
+  由 C 释放），clux 侧交出所有权。
+- **返回**：只能用 `fatal *T` / `fatal opaque`（"所有权交给调用方"），**不能**写
+  `own`——与用户函数返回类型的规则一致（`own` 是"参数交给 C"的方向）。
+- **切片**：`own []T` 是胖指针，C 侧没有对应表示，声明即报错。
 
 #### FFI 里的函数指针用 `cfunc(...)` 声明（不要写 `opaque`）
 

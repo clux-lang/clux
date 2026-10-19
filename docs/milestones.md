@@ -2222,3 +2222,19 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       （`own []T` 仍拒绝）。
     - **验证**：Windows 全量 **2192/2192 PASSED**、examples 54 个 `.cx` 全过；
       WSL2 全量 **2189 passed / 2 skipped**。
+
+94. **修正：extern 返回类型不接受 `own`（用 `fatal`）**（2026-10，用户指正）
+    - 第 93 项把"extern 返回 `own *T` 对调用方视为将亡值"做进了 sema——**不必要
+      也不应该**：返回方向的所有权归属本来就该用 `fatal` 表达（把所有权交给调用
+      方），与用户函数返回类型的规则一致（"a return type can only be ref, fatal
+      or none"）。
+    - 现规则（参数/返回不对称）：
+      * 参数 `own *T` / `own opaque`：合法（C 接管，如 `free(p: own *T)`）；
+      * 返回 `own ...`：**声明处报错**
+        ``return type cannot be 'own': use 'fatal T' to hand ownership to the
+        caller (own is for parameters passed to C)``；
+      * `own []T` 与 `own T`（聚合按值）仍非法（无 C 表示）。
+    - 回退了 sema 里 own→fatal 的映射；`usize_test` 的 `malloc` 声明改回
+      `fatal *u8`（与 `driver_module_bcode_test` 一致）。
+    - **验证**：Windows 全量 **2192/2192 PASSED**、examples 54 个 `.cx` 全过；
+      WSL2 全量 **2189 passed / 2 skipped**。

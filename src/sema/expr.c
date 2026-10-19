@@ -2769,11 +2769,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                            "as the declared parameter type", qual, ai + 1);
             }
             value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
-            /* extern 返回 `own *T` / `own opaque`：对**调用方**来说这就是将亡值
-               （必须被 own 绑定 / move 接管），与 `fatal` 返回同义——否则
-               `var p: own *T = libc::malloc(...)` 会被"own 绑定需要将亡值"拒绝。 */
-            value_set_ownership(sv, sig->return_ownership == OWN_OWN ? OWN_FATAL
-                                                                     : sig->return_ownership);
+            value_set_ownership(sv, sig->return_ownership);
             return sv;
           }
         }

@@ -360,7 +360,7 @@ TEST(OpaqueOwnership, FfiSignaturesUseQualifiedOpaque) {
 TEST(OpaqueOwnership, OwnPointerInFfiSignatures) {
   clux_expect_ok(
       "extern lib libc from \"*\";\n"
-      "extern cfunc libc::malloc(n: usize): own *u8;\n"
+      "extern cfunc libc::malloc(n: usize): fatal *u8;\n"
       "extern cfunc libc::free(p: own *u8): void;\n"
       "func main(): i32 {\n"
       "  var p: own *u8 = libc::malloc(8usize);\n"

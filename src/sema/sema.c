@@ -950,12 +950,23 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
     if (!rt) {
       resolved = false;
     } else if (report) {
-      const char *rwhy = ffi_c_abi_reject_reason_own(rt, ret_own);
-      if (rwhy) {
+      /* **返回位置不接受 own**：把所有权交给调用方要用 `fatal`（与用户函数
+         返回类型的规则一致）。`own` 只用于参数（把所有权交给 C）。 */
+      if (ret_own == OWN_OWN) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
-                   "extern cfunc %.*s::%.*s: return type: %s",
+                   "extern cfunc %.*s::%.*s: return type cannot be 'own': use "
+                   "'fatal T' to hand ownership to the caller (own is for "
+                   "parameters passed to C)",
                    (int)efd->lib_name.len, efd->lib_name.ptr,
-                   (int)efd->name.len, efd->name.ptr, rwhy);
+                   (int)efd->name.len, efd->name.ptr);
+      } else {
+        const char *rwhy = ffi_c_abi_reject_reason_own(rt, ret_own);
+        if (rwhy) {
+          diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
+                     "extern cfunc %.*s::%.*s: return type: %s",
+                     (int)efd->lib_name.len, efd->lib_name.ptr,
+                     (int)efd->name.len, efd->name.ptr, rwhy);
+        }
       }
     }
   }
