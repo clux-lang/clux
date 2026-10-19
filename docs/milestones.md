@@ -2029,4 +2029,19 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       闭包，局部声明没有运行时形态。`parse_stmt` 遇到语句位置的 `cfunc` 直接报
       `cfunc definitions are only allowed at top level (...)`（此前落到表达式语句
       的 "expected ';'"）。language-spec 已写入该约束。
+    - **设计结论（2026-10，用户指正）**：`cfunc(...)` → `func(...)` 的隐式转换
+      **必须拒绝 `own` 形参**。C 函数没有所有权语义（C 侧可能接管、也可能只读），
+      包装体把 own 值交给 C 之后，clux 侧与 C 侧谁释放无法静态确定 → 直接传
+      own 必然 double free 或泄漏。因此转换仅允许**非 owning** 形参/返回值
+      （`ref *T` / 裸指针 / opaque / 标量），错误信息提示改用 `ref *T`。
+      推论：包装体因此**不需要**合成 `move(...)`，比最初设想更简单。
+    - **实现进展与卡点（同日，未提交）**：sema 侧"命名源 → 无捕获包装函数
+      字面量"的骨架已写好（参数/返回从 `func_sig_t` 取、C ABI 兼容用
+      `ffi_arg_acceptable`、包装体 `return cmp(a0, a1);`），`var f: func(...)
+      = cmp;` 走通；但 `var f: func(...) = cfunc_ptr(cmp);` 不触发——**Pass 3a
+      已经把 init 的实参折叠成 AST_FUNC_REF（name 可能为空）**，钩子放在 Pass 3b
+      的 `shadow_var_def` 里时，`cfunc_ptr` 的实参形态与假设不一致。下一步：把
+      识别改为"按 fid 反查 cfunc 定义 + 兼容 AST_IDENT/AST_FUNC_REF"，或把钩子
+      提前到 Pass 3a（类型槽位尚未折叠）并记录 init 的原始形态。为保持 master
+      绿色，本轮**回退了这段半成品**。
     - 验证（本轮）：Windows 全量 **2166/2166 PASSED**（既有用例零回归）。
