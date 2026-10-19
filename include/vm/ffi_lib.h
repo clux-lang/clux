@@ -126,6 +126,10 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own);
 /** 便捷包装：不关心所有权时用（等价于 own=OWN_NONE）。 */
 const char *ffi_c_abi_reject_reason(const type_t *t);
 
+/** 聚合（struct/cunion）字段的递归 C ABI 校验：失败时把原因（含字段类型）写进 err。 */
+bool ffi_c_abi_check_aggregate(const type_t *t, const struct vm_t *vm, char *err,
+                               size_t ecap);
+
 /* ---- M6 FFI：动态库导出的**数据符号**（`extern var <库>::<名>: T;`）----
  *
  * dlsym/GetProcAddress 对数据符号返回的**就是变量地址**，因此读写都直接作用于

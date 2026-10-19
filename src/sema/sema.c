@@ -926,6 +926,12 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
       continue;
     }
     const char *why = ffi_c_abi_reject_reason_own(pt, pown);
+    /* 聚合（struct/cunion）要**递归**检查字段：字段本身必须能跨 C ABI。
+       用 libffi 描述符构造做校验，失败原因（含字段类型名）直接报在声明处。 */
+    char agg_err[256] = {0};
+    if (!why && !ffi_c_abi_check_aggregate(pt, sema->vm, agg_err,
+                                           sizeof agg_err))
+      why = agg_err[0] ? agg_err : "aggregate field cannot cross the C ABI";
     if (!why && pt->kind == TYPE_KIND_VOID)
       why = "void is not a valid parameter type";
     if (why && report) {
@@ -961,6 +967,10 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
                    (int)efd->name.len, efd->name.ptr);
       } else {
         const char *rwhy = ffi_c_abi_reject_reason_own(rt, ret_own);
+        char agg_rerr[256] = {0};
+        if (!rwhy && !ffi_c_abi_check_aggregate(rt, sema->vm, agg_rerr,
+                                                sizeof agg_rerr))
+          rwhy = agg_rerr[0] ? agg_rerr : "aggregate field cannot cross the C ABI";
         if (rwhy) {
           diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
                      "extern cfunc %.*s::%.*s: return type: %s",

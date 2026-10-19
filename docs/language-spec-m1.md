@@ -822,13 +822,18 @@ var d: opaque = ...;              // ✗ 报错：bare 'opaque' is not allowed
 返回接管型指针（如 `malloc`）写 `fatal opaque` 或 `own opaque`，把所有权交回 C
 （如 `free`）写 `own opaque` —— 与 `own`/`ref` 在其他指针上的含义一致。
 
-**C ABI 里的所有权**（参数与返回不对称）：
+**C ABI 里的所有权与聚合**（参数与返回不对称）：
 
 - **参数** `own *T` / `own opaque`：**合法**——C 接管这个指针（如 `free(p: own *T)`
   由 C 释放），clux 侧交出所有权。
 - **返回**：只能用 `fatal *T` / `fatal opaque`（"所有权交给调用方"），**不能**写
   `own`——与用户函数返回类型的规则一致（`own` 是"参数交给 C"的方向）。
-- **切片**：`own []T` 是胖指针，C 侧没有对应表示，声明即报错。
+- **结构体 / cunion**：可按值传递（`own S` 也可），但字段会**递归检查**：字段
+  本身必须能跨 C ABI（标量、枚举、嵌套 struct/cunion、指针、opaque…）。
+- **数组**：C 里数组形参**退化为指针**、且没有数组返回值——所以数组本身不是合法
+  的 FFI 类型。要传数组请把形参声明成指针（`ref *T` / `ref opaque`），调用方传
+  `data(a)` / `a.&`。
+- **切片 / 元组 / tag union / option**：没有 C 表示，声明即报错。
 
 #### FFI 里的函数指针用 `cfunc(...)` 声明（不要写 `opaque`）
 

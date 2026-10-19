@@ -2238,3 +2238,19 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `fatal *u8`（与 `driver_module_bcode_test` 一致）。
     - **验证**：Windows 全量 **2192/2192 PASSED**、examples 54 个 `.cx` 全过；
       WSL2 全量 **2189 passed / 2 skipped**。
+
+95. **C ABI 聚合规则：结构体按值 + 递归检查；数组退化为指针；无数组返回**（2026-10，用户指正）
+    - 第 93/94 项后仍有两处不对：`own` 一刀切拒绝聚合、以及把数组当"按值聚合"。
+    - 现规则（用户定）：
+      * **结构体 / cunion**：可按值传递（`own S` 也合法），但字段必须**递归**可跨
+        C ABI——声明处就用 libffi 描述符构造做递归校验（`ffi_c_abi_check_aggregate`），
+        报错带字段类型名（如 `ffi: type cannot cross the C ABI (<i32, i32>)`）。
+      * **数组**：C 里形参退化为指针、且没有数组返回值 → 数组**不是**合法 FFI 类型；
+        报错直接给出替代写法（`ref *T` / `ref opaque` + `data(a)`）。移除了上一版
+        误加的"数组按值 = struct 描述符"。
+      * `own` 只允许：指针、opaque、struct、cunion。
+    - **测试**（`OpaqueOwnership.*` 增至 9 例）：`StructByValueLegal`、
+      `ArrayParamRejected`、`ArrayReturnRejected`、`StructFieldRecursivelyChecked`、
+      `OwnPointerInFfiSignatures`、`OwnSliceRejectedInFfi` 等。
+    - **验证**：Windows 全量 **2196/2196 PASSED**、examples 54 个 `.cx` 全过；
+      WSL2 全量 **2193 passed / 2 skipped**。

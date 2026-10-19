@@ -5,6 +5,7 @@
 #include "vm/type_struct.h"  /* 结构体字段表（构造 libffi struct 描述符） */
 #include "vm/type_cunion.h"  /* cunion 成员/布局（同上） */
 #include "vm/type_enum.h"    /* enum 底层类型（描述符 = 底层整数） */
+#include "vm/type_array.h"   /* 数组：按值 = 同布局 struct 描述符 */
 
 #include <stdarg.h>   /* va_list/va_start：ffi_set_err（POSIX 不会由 stdio.h 传递引入） */
 #include <stdint.h>
@@ -582,11 +583,23 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
          - `own []T`：**非法**——切片是胖指针，C 侧根本没有这个表示。
          - `own T`（聚合按值）：非法——按值传聚合时字段所有权无法在 C 侧表达。
        ref/fatal 指针本来就按指针宽度放行。 */
+    /* `own` 能修饰的 C ABI 类型：指针、opaque、以及**有 C 按值表示**的聚合
+       （struct / cunion —— 字段还需递归可表示，见 ffi_c_abi_check_aggregate）。
+       数组**不在此列**：C 里数组形参退化为指针、且没有数组返回值，所以它根本没有
+       "按值表示"（要传数组请声明指针 + `data(a)`）。切片（胖指针）、元组、
+       tag union、option、func、type value 同样没有 C 表示 → 拒绝。 */
     if (own == OWN_OWN && t->kind != TYPE_KIND_PTR &&
-        t->kind != TYPE_KIND_OPAQUE)
-        return "the type is owned (own T) and cannot cross the C ABI "
-               "(own is only meaningful for pointers: 'own *T' / 'own opaque'; "
-               "slices are fat pointers with no C representation)";
+        t->kind != TYPE_KIND_OPAQUE && t->kind != TYPE_KIND_STRUCT &&
+        t->kind != TYPE_KIND_CUNION)
+        return "the type is owned (own T) and cannot cross the C ABI: own can "
+               "qualify pointers ('own *T' / 'own opaque') and aggregates with a "
+               "C by-value representation (struct / cunion); arrays decay to "
+               "pointers in C (use 'ref *T' + data(a)), and slices/tuples/tag "
+               "unions/options have no C representation";
+    if (t->kind == TYPE_KIND_ARRAY)
+        return "array has no by-value C representation: arrays decay to pointers "
+               "in C (and C cannot return arrays) — declare the parameter as "
+               "'ref *T' / 'ref opaque' and pass data(a) / a.& instead";
     switch (t->kind) {
     case TYPE_KIND_INT:
     case TYPE_KIND_FLOAT:
@@ -623,6 +636,22 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     default:
         return "type is not C ABI compatible";
     }
+}
+
+/* 聚合类型的**递归** C ABI 校验（声明处用）：
+ * struct / cunion 的字段本身必须能跨 C ABI（标量、枚举、嵌套 struct/cunion、
+ * 指针、opaque……）。失败时把 libffi 描述符构造给出的具体原因（含字段类型名）
+ * 写进 err —— 比在调用点才暴露 "parameter N: ..." 更早、更准。
+ * 非聚合类型直接通过（由 ffi_c_abi_reject_reason_own 管）。 */
+bool ffi_c_abi_check_aggregate(const type_t *t, const struct vm_t *vm, char *err,
+                               size_t ecap) {
+    if (!t) return true;
+    if (t->kind != TYPE_KIND_STRUCT && t->kind != TYPE_KIND_CUNION) return true;
+    bool owned = false;
+    const void *desc = ffi_type_for(t, vm, &owned, err, ecap);
+    if (!desc) return false;
+    if (owned) ffi_type_release(desc);
+    return true;
 }
 
 /* 便捷包装：不关心所有权（运行期编组路径）时用。 */

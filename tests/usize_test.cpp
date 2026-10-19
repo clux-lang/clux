@@ -380,6 +380,56 @@ TEST(OpaqueOwnership, OwnSliceRejectedInFfi) {
   std::string err;
   EXPECT_EQ(clux_run_capture(path, &err), 1);
   EXPECT_NE(err.find("cannot cross the C ABI"), std::string::npos) << err;
-  EXPECT_NE(err.find("slices are fat pointers"), std::string::npos) << err;
+  EXPECT_NE(err.find("slices/tuples/tag unions/options have no C representation"),
+            std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+/* C ABI 聚合规则（用户定）：
+   - struct / cunion 可按值传递，但字段要**递归**可跨 C ABI；
+   - 数组退化为指针（C 传统），数组本身不是合法 FFI 类型，也没有数组返回值。 */
+TEST(OpaqueOwnership, StructByValueLegal) {
+  clux_expect_ok(
+      "extern lib libc from \"*\";\n"
+      "struct Point { x: i32; y: i32; }\n"
+      "extern cfunc libc::abs(s: Point): i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "ffi_struct_by_value");
+}
+
+TEST(OpaqueOwnership, ArrayParamRejected) {
+  std::string path = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::abs2(a: [2]i32): i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "ffi_array_param");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("arrays decay to pointers"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+TEST(OpaqueOwnership, ArrayReturnRejected) {
+  std::string path = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::abs3(): [2]i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "ffi_array_ret");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("cannot return arrays"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+TEST(OpaqueOwnership, StructFieldRecursivelyChecked) {
+  std::string path = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "struct S { t: <i32, i32>; }\n"
+      "extern cfunc libc::abs4(s: S): i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "ffi_struct_bad_field");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("cannot cross the C ABI"), std::string::npos) << err;
   std::remove(path.c_str());
 }
