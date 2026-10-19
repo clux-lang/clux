@@ -2092,3 +2092,26 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       漏），疑似 R3 借用记录影响后续 FREE 生成，需单查；② own 形参未消费目前不报错
       （由被调方 FREE 兜底，语义上与 `fatal` 的"必须消费"不同，待定）；
       ③ `cfunc(...)` → `func(...)` 包装生成（第 85 项）。
+
+88. **修复：签名去重忽略所有权 → own 形参丢语义（组合泄漏）**（2026-10）
+    - **症状**：先调用一个 `ref` 形参函数，再调用 `own` 形参函数（哪怕形参完全
+      没用到），后者每次调用泄漏一个堆块；单独跑任一函数都不漏。`memory leak
+      detected ... count=4`。
+    - **根因**：函数签名在类型池里按**类型**去重（`func_sig_eq`），比较了参数
+      类型/返回类型/变参，却漏了 `param_ownerships` 与 `return_ownership`。
+      `func(a: ref *T)` 与 `func(a: own *T)` 的形参类型相同（所有权是编译期
+      属性、不进类型），于是两者被 intern 成**同一个签名实例**：pass 3a 从签名
+      读回的 ownership 变成"先建成的那个"——先有 `ref` 就永远读回 `ref`，
+      `own` 形参因此不生成 FREE → 泄漏。
+    - **修法**：
+      1. `func_sig_eq` 增加 `return_ownership` 与逐参数 `param_ownerships`
+         比较（NULL 按全 NONE 处理）——签名身份 = 类型 + 所有权。
+      2. 类型表达式 `func(ref *T) -> i32` 解析时也从 AST 提取每个参数/返回的
+         所有权（`sema_type_expr_ownership`）传给 `type_func_sig`，否则"写出来
+         的 `func(ref *T)->i32`"与"从声明推导的签名"会成为两个实例，装饰器报
+         `cannot convert func(*Wrap): i32 to func(*Wrap): i32`（两者打印相同，
+         极难定位）。
+    - **验证**：`OwnParam.*` 增至 6 例（含 `RefThenOwnSignatureInterning` 复现
+      组合泄漏、`FuncTypeExpressionOwnershipMatches` 复现装饰器报错）；
+      Windows 全量 **2177/2177 PASSED**、examples 53 个 `.cx` 全过；所有探针
+      程序（`leak_split` / `leak_probe2` / `own_param_probe4` 等）泄漏计数为 0；WSL2 全量 **2174 passed / 2 skipped**。

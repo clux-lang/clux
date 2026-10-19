@@ -858,3 +858,59 @@ TEST(OwnParam, OwnBoxParam) {
       "}\n",
       "own_param_box");
 }
+
+/* ================================================================ */
+/* 签名去重必须带上所有权：ref 形参函数之后的 own 形参函数不得丢掉    */
+/* own 语义（否则形参不生成 FREE → 每次调用泄漏一个堆块）             */
+/* ================================================================ */
+
+TEST(OwnParam, RefThenOwnSignatureInterning) {
+  /* 泄漏会让进程以非 0 退出，rc==0 即覆盖；两个函数形参类型相同、只有
+     所有权不同，签名若被错误去重成一个实例，own_only 的形参就不会被释放。 */
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "func ref_only(a: ref *Box): i32 { return a.*.v; }\n"
+      "func own_only(a: own *Box): i32 { return a.*.v; }\n"
+      "func own_const(a: own *Box): i32 { return 99; }\n"
+      "func main(): i32 {\n"
+      "  var b1 = new Box{ .v = 42 };\n"
+      "  if (ref_only(b1) != 42) { return 1; }\n"
+      "  var b2 = new Box{ .v = 43 };\n"
+      "  if (own_only(move(b2)) != 43) { return 2; }\n"
+      "  var b3 = new Box{ .v = 44 };\n"
+      "  if (own_const(move(b3)) != 99) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_sig_interning");
+}
+
+/* 类型表达式里的所有权（`func(ref *T) -> i32`）必须与声明推导出的签名一致，
+   否则装饰器/高阶函数会报 "cannot convert func(*Wrap): i32 to func(*Wrap): i32" */
+TEST(OwnParam, FuncTypeExpressionOwnershipMatches) {
+  clux_expect_ok(
+      "comptime func idm(f: func(ref *Wrap) -> i32): func(ref *Wrap) -> i32 {\n"
+      "  return f;\n"
+      "}\n"
+      "struct Wrap {\n"
+      "  x: i32;\n"
+      "  [[idm]] func get(self: ref *Wrap): i32 { return self.x; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var w = .Wrap{ .x = 9 };\n"
+      "  if (w.get() != 9) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_functype_expr");
+}
+
+/* own 形参的解引用返回（86 修复）在签名去重修复后仍然正确 */
+TEST(OwnParam, DerefReturnStillMaterialized) {
+  clux_expect_ok(
+      "func f(a: own *i32): i32 { return a.*; }\n"
+      "func main(): i32 {\n"
+      "  var p = new i32{ 7 };\n"
+      "  if (f(move(p)) != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "own_param_deref_after_interning");
+}

@@ -1405,8 +1405,8 @@ clang: error: no such file or directory: '<build>/third_party/icu/icu_data_gen.c
 
 | 项目 | 结果 |
 |------|------|
-| 注册测试数 | 2174 |
-| `clux_test` 通过 | 2174 / 2174 |
+| 注册测试数 | 2177 |
+| `clux_test` 通过 | 2177 / 2177 |
 | `examples/*/*.cx` 入口示例 | 45 / 45 通过（手工全量 sweep） |
 | `examples/asm/*.cxs` | 5 / 5 通过 |
 

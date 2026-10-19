@@ -422,14 +422,29 @@ const vtable_t VTABLE_FUNC = {
 /* ================================================================ */
 
 /* 比较两签名是否等价（按 params/return_type/is_variadic 指针比较去重） */
+/* 签名相等：类型之外的**所有权**也必须一致。
+ *
+ * 为什么必须比较 ownership：函数类型在结内去重（intern），签名是函数值的
+ * **类型身份**。`func(a: ref *T)` 与 `func(a: own *T)` 的形参类型相同（所有权
+ * 是编译期属性、不进类型），若去重时忽略 ownership，两者会共享同一个签名实例，
+ * 随后 pass 3a 从签名读回的 ownership 就是"先建成的那一个"——实测：先出现
+ * `ref *T` 形参函数后，`own *T` 形参函数会被当成 ref → 形参不生成 FREE →
+ * 每次调用泄漏一个堆块（`leak_split.cx` 形态）。返回类型的所有权同理。 */
 static bool func_sig_eq(const func_sig_t *a, const func_sig_t *b) {
     if (!a || !b) return false;
     if (a->param_count != b->param_count) return false;
     if (a->is_variadic != b->is_variadic) return false;
     if (a->return_type != b->return_type) return false;
+    if (a->return_ownership != b->return_ownership) return false;
     if (a->param_count > 0 &&
         memcmp(a->params, b->params, a->param_count * sizeof(type_t *)) != 0)
         return false;
+    /* `param_ownerships` 可为 NULL（未知，按全 NONE 处理） */
+    for (size_t i = 0; i < a->param_count; i++) {
+        ownership_t ao = a->param_ownerships ? a->param_ownerships[i] : OWN_NONE;
+        ownership_t bo = b->param_ownerships ? b->param_ownerships[i] : OWN_NONE;
+        if (ao != bo) return false;
+    }
     return true;
 }
 

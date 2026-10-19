@@ -495,23 +495,33 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       ast_func_type_t *ft = (ast_func_type_t *)type_expr;
       size_t n = sema_count_siblings(ft->params);
       const type_t *params_arr[n > 0 ? n : 1];
+      ownership_t owns_arr[n > 0 ? n : 1];
       size_t i = 0;
       for (ast_node_t *pr = ft->params; pr; pr = pr->next, i++) {
         const type_t *pt = resolve_type_expr(sema, pr);
         if (!pt) return NULL;
         params_arr[i] = pt;
+        /* 类型表达式里的所有权修饰（`func(ref *T) -> i32`）必须一并记入签名：
+           签名按 (类型, 所有权) 去重，否则写出来的 `func(ref *T)->i32` 与
+           `func f(self: ref *T)` 推导出的签名会成为两个不同实例，互相不可
+           转换（实测装饰器报 "cannot convert func(*Wrap): i32 to func(*Wrap):
+           i32"——两者打印完全相同）。 */
+        owns_arr[i] = sema_type_expr_ownership(pr);
       }
       const type_t *rt = ft->return_type
                              ? resolve_type_expr(sema, ft->return_type)
                              : NULL;
       if (ft->return_type && !rt) return NULL;
+      ownership_t ret_own =
+          ft->return_type ? sema_type_expr_ownership(ft->return_type) : OWN_NONE;
       /* `cfunc(...)` = **C 函数指针**（无 env）：独立类型，与 func(...) 互不
          兼容（用户要求"不互通"）。只在 FFI 边界出现。 */
       if (ft->is_c_abi)
         return type_cfunc_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
                               /*is_variadic=*/false);
-      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, NULL, n, rt,
-                           OWN_NONE, /*is_variadic=*/false);
+      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL,
+                           n > 0 ? owns_arr : NULL, n, rt, ret_own,
+                           /*is_variadic=*/false);
     }
     case AST_TYPE_REF: {
       /* 具名类型引用（sema 登记过的类型，如 "__type_0"）→ 查 types 队列。
