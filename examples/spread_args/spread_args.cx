@@ -1,21 +1,38 @@
-// spread_args.cx — 实参展开 `...expr`
+// spread_args.cx — 实参展开 `...expr`（函数调用 + 构造）
 //
-// 在函数调用的实参位置写 `...expr`，把**编译期长度已知**的数组或元组摊开成
-// 多个实参（sema 阶段展开成 `expr[0], expr[1], …`）：
+// 一、函数调用的实参位置：把**编译期长度已知**的数组/元组摊开成多个实参
+//     （sema 阶段展开成 `expr[0], expr[1], …`）：
 //
-//   fn(a, ...b, c)   ⇒   fn(a, b[0], b[1], …, c)
+//       fn(a, ...b, c)   ⇒   fn(a, b[0], b[1], …, c)
+//
+// 二、构造器（普通 `.T{...}` 与 `new T{...}`）：
+//     - **struct 目标**：按字段 kv 展开
+//         `.Point{ ...p }`  ⇒  `.Point{ .x = p.x, .y = p.y }`
+//       展开 + 显式字段可混用；同名字段**后写的覆盖先写的**
+//       （`.Point{ ...p, .x = 10 }`）。异构 struct 按**字段名**兼容。
+//     - **数组/元组目标**：按位置展开
+//         `.[2]i32{ ...arr }`  ⇒  `.[2]i32{ arr[0], arr[1] }`
 //
 // 规则：
-//   - 只接受数组（`[N]T`）与元组（`<T1,T2,…>`）；切片 `[]T` 的长度运行期才知道，
-//     会报 spread operand must be an array or tuple with a compile-time-known length。
-//   - 操作数必须是**可复读的位置表达式**（变量 / 成员访问）：展开后每个元素都是
-//     一次 `operand[i]` 读取，带副作用的表达式（调用、构造…）会被重复求值，
-//     因此要求先落到临时变量。
-//   - 空数组展开出 0 个实参：`fn(a, ...empty)` ⇒ `fn(a)`。
-//   - 可以出现在实参列表的任意位置，也可以和普通实参混用。
+//   - 只接受编译期长度已知的形状：`[N]T`、`<T1,T2,…>`、struct；切片 `[]T`
+//     会报 "must be a struct, array or tuple with a compile-time-known shape"。
+//   - 操作数必须是**可复读的位置表达式**（变量 / 成员访问）：展开后每个字段/
+//     元素都是一次 `operand.f` / `operand[i]` 读取，带副作用的表达式会被重复
+//     求值，因此要求先落到临时变量。
+//   - 空数组展开出 0 个实参/字段。
 
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): void;
+
+struct Point {
+    x: i32;
+    y: i32;
+}
+
+struct Pair {
+    x: i32;
+    y: i32;
+}
 
 struct Box {
     pair: [2]i32;
@@ -26,6 +43,7 @@ func sum3(a: i32, b: i32, c: i32): i32 { return a + b + c; }
 func sum4(a: i32, b: i32, c: i32, d: i32): i32 { return a + b + c + d; }
 
 func main(): i32 {
+    // ---- 一、函数调用 ----
     // ① 数组展开（中间位置）：sum4(1, 2, 3, 4) = 10
     var arr = .[2]i32{ 2, 3 };
     libc::printf("sum4(1, ...arr, 4) = %d\n", sum4(1, ...arr, 4));
@@ -46,9 +64,40 @@ func main(): i32 {
     var nums = .[2]i32{ 3, 4 };
     libc::printf("printf: %d+%d\n", ...nums);
 
+    // ---- 二、构造器 ----
+    var p = .Point{ .x = 3, .y = 4 };
+
+    // ⑥ struct 按字段 kv 展开
+    var q = .Point{ ...p };
+    libc::printf("q = (%d, %d)\n", q.x, q.y);
+
+    // ⑦ new + 展开
+    var r = new Point{ ...p };
+    libc::printf("r = (%d, %d)\n", r.*.x, r.*.y);
+
+    // ⑧ 异构 struct 按字段名兼容
+    var pr = .Pair{ ...p };
+    libc::printf("pr = (%d, %d)\n", pr.x, pr.y);
+
+    // ⑨ 展开 + 显式字段：同名字段后写的覆盖先写的 → (10, 4)
+    var s = .Point{ ...p, .x = 10 };
+    libc::printf("s = (%d, %d)\n", s.x, s.y);
+
+    // ⑩ 数组/元组构造按位置展开
+    var arr2 = .[2]i32{ ...arr };
+    var tup2 = .<i32, i32>{ ...tup };
+    libc::printf("arr2 = (%d, %d), tup2 = (%d, %d)\n", arr2[0], arr2[1],
+                 tup2[0], tup2[1]);
+
     if (sum4(1, ...arr, 4) != 10) { return 1; }
     if (sum3(...tup, 5) != 35) { return 2; }
     if (sum2(...box.pair) != 15) { return 3; }
     if (sum2(1, 2, ...empty) != 3) { return 4; }
+    if (q.x != 3 || q.y != 4) { return 5; }
+    if (r.*.x != 3 || r.*.y != 4) { return 6; }
+    if (pr.x != 3 || pr.y != 4) { return 7; }
+    if (s.x != 10 || s.y != 4) { return 8; }
+    if (arr2[0] != 2 || arr2[1] != 3) { return 9; }
+    if (tup2[0] != 10 || tup2[1] != 20) { return 10; }
     return 0;
 }

@@ -159,6 +159,26 @@ static bool is_assign_op_token(const token_t *tok) {
  *     保证 '>' 不被当比较运算符消费，N 解析在 '>' 前停止）
  */
 static ast_node_t *parse_construct_field(parser_t *p) {
+    /* 字段展开：`...expr`（调用实参的同一语法；构造器里由 sema 按目标类型
+       决定"struct 字段 kv"还是"数组/元组按位置"展开）。 */
+    skip_trivia(p);
+    if (check_symbol(p, "...")) {
+        uint32_t sb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand)
+                return ast_error_new(p->diag, p->tokens, p->arena, sb, p->pos,
+                                     "expected expression after '...' in "
+                                     "constructor");
+            return operand;
+        }
+        ast_node_t *spread = ast_spread_new(p->arena, sb, p->pos);
+        if (!spread) return NULL;
+        ((ast_spread_t *)spread)->operand = operand;
+        return spread;
+    }
     /* 值包：<v,N> */
     if (check_symbol(p, "<")) {
         uint32_t fb = p->pos;

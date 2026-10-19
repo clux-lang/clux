@@ -528,6 +528,13 @@ static const type_t *option_field_type_normalized(sema_t *sema, const type_t *ft
   return expr_strip_fatal(sema, ft);
 }
 
+/* 构造器展开 `...operand`（实现见 ex_construct 之前的定义）：struct 目标按
+   字段 kv，array/tuple 目标按位置。前置声明供 ex_new 使用。 */
+static bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields,
+                                         ast_node_t **fields_last,
+                                         sema_scope_t *scope,
+                                         const type_t *target);
+
 /* AST_NEW 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
 static value_t *ex_new(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
@@ -551,6 +558,12 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
         t = sema_resolve_type_slot(sema, &n->type);
         if (!t) return val_void(sema);
       }
+
+      /* `...operand` 展开（与 `.T{...}` 同一份实现：struct 目标按字段 kv，
+         array/tuple 目标按位置）。 */
+      if (!sema_expand_construct_spread(sema, &n->fields, &n->fields_last,
+                                        scope, t))
+        return val_void(sema);
 
       /* 字段数量与逐字段可赋值性校验（struct/tuple/array/union/cunion 同
          AST_CONSTRUCT 语义；scalar 等无字段类型 = 1 个空字段集合）。Step A
@@ -1063,6 +1076,191 @@ bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
   return true;
 }
 
+/* ===========================================================================
+ * 构造器里的展开 `...operand`
+ *
+ *   .Point{ ...s }        ⇒ .Point{ .x = s.x, .y = s.y, … }   （struct：字段 kv）
+ *   .[3]i32{ ...arr }     ⇒ .[3]i32{ arr[0], arr[1], arr[2] }（array/tuple：位置）
+ *   new Point{ ...s }     ⇒ 同上（AST_NEW 内部的构造同样走这里）
+ *
+ * 目标类型决定形态：struct 目标 ⇒ 操作数必须是 struct（按操作数字段表展开）；
+ * array/tuple 目标 ⇒ 操作数必须是同长度的数组/元组（按操作数元素个数展开，
+ * 长度不符由外层"字段数"检查报错）。
+ *
+ * 与函数实参展开一致：操作数必须是**位置表达式**（变量/成员访问）——展开后
+ * 每个字段/元素都是一次 `operand.f` / `operand[i]` 读取。
+ * =========================================================================== */
+static bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields,
+                                         ast_node_t **fields_last,
+                                         sema_scope_t *scope,
+                                         const type_t *target) {
+  ast_node_t **slot = fields;
+  while (*slot) {
+    ast_node_t *f = *slot;
+    if (f->kind != AST_SPREAD) {
+      slot = &f->next;
+      continue;
+    }
+    ast_spread_t *sp = (ast_spread_t *)f;
+    ast_node_t *op = sp->operand;
+    if (!op || (op->kind != AST_IDENT && op->kind != AST_MEMBER)) {
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "spread operand in a constructor must be a variable or a "
+                 "field access (it is read once per field/element; bind "
+                 "temporaries first)");
+      return false;
+    }
+    /* 操作数类型：决定按 kv 还是按位置展开。 */
+    value_t *ov = sema_expr(sema, &sp->operand, scope);
+    if (is_poison(sema, ov)) return false;
+    const type_t *ot = value_type(ov);
+    if (!ot) return false;
+
+    if (ot->kind == TYPE_KIND_STRUCT) {
+      /* struct：按操作数的字段表展开成具名字段。 */
+      if (target && target->kind != TYPE_KIND_STRUCT &&
+          target->kind != TYPE_KIND_CUNION) {
+        char tn[64];
+        sema_type_name(target, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "cannot spread a struct into a constructor of type %s", tn);
+        return false;
+      }
+      size_t cnt = struct_type_field_count(ot);
+      ast_node_t *head = NULL, *tail = NULL;
+      for (size_t i = 0; i < cnt; i++) {
+        const struct_field_t *sf = struct_type_field(ot, i);
+        if (!sf) return false;
+        /* 目标 struct 必须真有这个字段：直接报"没有该字段"，比落到字段数
+           不符（expected N fields, got M）好定位。 */
+        if (target && target->kind == TYPE_KIND_STRUCT &&
+            struct_type_find_field(target, sf->name) < 0) {
+          diag_error(sema->diag, sema_loc(sema, f),
+                     "struct '%.*s' has no field '%.*s' (from spread operand)",
+                     (int)target->name.len, target->name.ptr,
+                     (int)sf->name.len, sf->name.ptr);
+          return false;
+        }
+        ast_node_t *mem = ast_member_new(sema->arena, f->tok_begin, f->tok_end);
+        if (!mem) return false;
+        mem->is_generated = true;
+        ((ast_member_t *)mem)->object = sp->operand;
+        ((ast_member_t *)mem)->field = sf->name;
+        ast_node_t *cf =
+            ast_construct_field_new(sema->arena, f->tok_begin, f->tok_end);
+        if (!cf) return false;
+        cf->is_generated = true;
+        ((ast_construct_field_t *)cf)->name = sf->name;
+        ((ast_construct_field_t *)cf)->value = mem;
+        if (tail) {
+          tail->next = cf;
+          tail = cf;
+        } else {
+          head = tail = cf;
+        }
+      }
+      if (head) {
+        tail->next = f->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = f->next;
+      }
+      continue;
+    }
+
+    if (ot->kind == TYPE_KIND_ARRAY || ot->kind == TYPE_KIND_TUPLE) {
+      /* array / tuple：按位置展开成 `operand[i]`。 */
+      if (target && target->kind == TYPE_KIND_STRUCT) {
+        char tn[64];
+        sema_type_name(target, tn, sizeof(tn));
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "cannot spread an array/tuple into a struct constructor "
+                   "(%s needs named fields)",
+                   tn);
+        return false;
+      }
+      size_t cnt = (ot->kind == TYPE_KIND_ARRAY) ? array_type_len(ot)
+                                                 : tuple_type_elem_count(ot);
+      ast_node_t *head = NULL, *tail = NULL;
+      for (size_t i = 0; i < cnt; i++) {
+        ast_node_t *idx = ast_index_new(sema->arena, f->tok_begin, f->tok_end);
+        if (!idx) return false;
+        idx->is_generated = true;
+        ast_node_t *lit =
+            ast_int_lit_new(sema->arena, f->tok_begin, f->tok_end);
+        if (!lit) return false;
+        lit->is_generated = true;
+        ((ast_int_lit_t *)lit)->type = strslice_from_bytes("i32", 3);
+        ((ast_int_lit_t *)lit)->value = i;
+        ((ast_index_t *)idx)->object = sp->operand;
+        ((ast_index_t *)idx)->indices = lit;
+        ((ast_index_t *)idx)->indices_last = lit;
+        if (tail) {
+          tail->next = idx;
+          tail = idx;
+        } else {
+          head = tail = idx;
+        }
+      }
+      if (head) {
+        tail->next = f->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = f->next;
+      }
+      continue;
+    }
+
+    {
+      char tn[64];
+      sema_type_name(ot, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, f),
+                 "spread operand in a constructor must be a struct, array or "
+                 "tuple with a compile-time-known shape, got %s",
+                 tn);
+      return false;
+    }
+  }
+  /* struct 目标：同名字段**后写的覆盖先写的**（与显式重复字段的既有语义一致），
+     因此 `.{ ...p, .x = 10 }` 合法：展开出的 `.x` 被后面的显式 `.x` 覆盖。
+     去重保留每个名字的**最后一次**出现，其余字段保序。 */
+  if (target && target->kind == TYPE_KIND_STRUCT) {
+    ast_node_t *kept = NULL, *kept_last = NULL;
+    for (ast_node_t *f = *fields; f; f = f->next) {
+      bool dup = false;
+      if (f->kind == AST_CONSTRUCT_FIELD) {
+        strslice_t nm = ((ast_construct_field_t *)f)->name;
+        for (ast_node_t *g = f->next; g; g = g->next) {
+          if (g->kind == AST_CONSTRUCT_FIELD) {
+            strslice_t gn = ((ast_construct_field_t *)g)->name;
+            if (gn.len == nm.len && gn.ptr && nm.ptr &&
+                memcmp(gn.ptr, nm.ptr, nm.len) == 0) {
+              dup = true;
+              break;
+            }
+          }
+        }
+      }
+      if (dup) continue;
+      if (kept_last)
+        kept_last->next = f;
+      else
+        kept = f;
+      kept_last = f;
+    }
+    if (kept_last) kept_last->next = NULL;
+    *fields = kept;
+  }
+
+  /* fields_last 重算（展开改变链尾） */
+  ast_node_t *last = NULL;
+  for (ast_node_t *x = *fields; x; x = x->next) last = x;
+  if (fields_last) *fields_last = last;
+  return true;
+}
+
 static value_t *ex_construct(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* 类型字面量构造 .<type>{ fields }：求值类型位为真实类型，校验
@@ -1071,6 +1269,18 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
          当前实现 array + option + struct + tuple 分支。 */
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t;
+      /* `...operand` 展开先于一切字段处理（具名/匿名、new/普通构造共用）。
+         目标类型：具名构造解析类型位；匿名构造取 anon_ct 栈顶（可能没有）。 */
+      {
+        const type_t *ct_target = NULL;
+        if (n->type)
+          ct_target = sema_resolve_type_slot(sema, &n->type);
+        else if (sema->ex.anon_ct_depth > 0)
+          ct_target = sema->ex.anon_ct[sema->ex.anon_ct_depth - 1];
+        if (!sema_expand_construct_spread(sema, &n->fields, &n->fields_last,
+                                           scope, ct_target))
+          return val_void(sema);
+      }
       if (!n->type) {
         /* 匿名构造 .{...}（m2-design §2）：字段即全部类型信息。目标 struct
            时按目标字段表驱动推断（infer_anon_struct：按名匹配 + 按目标字段

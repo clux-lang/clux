@@ -737,6 +737,29 @@ sum2(1, 2, ...empty);      // 空数组 ⇒ 0 个实参
 - 可与普通实参、C 变参（`extern cfunc` 的 `...`）混用；展开后照常做参数数量
   与类型检查。
 
+**构造器里的展开**（普通 `.T{...}` 与 `new T{...}` 同规则）：
+
+- **struct 目标 → 按字段 kv 展开**，异构 struct 按**字段名**兼容：
+
+  ```c
+  var p = .Point{ .x = 3, .y = 4 };
+  var q = .Point{ ...p };               // ⇒ .Point{ .x = p.x, .y = p.y }
+  var r = new Point{ ...p };            // 堆分配同样是字段拷贝
+  var s = .Point{ ...p, .x = 10 };      // 展开 + 显式字段；同名后写覆盖先写
+  var a: Point = .{ ...p };             // 匿名构造同样支持
+  ```
+
+- **数组/元组目标 → 按位置展开**：
+
+  ```c
+  var arr2 = .[2]i32{ ...arr };         // ⇒ .[2]i32{ arr[0], arr[1] }
+  var tup2 = .<i32, i32>{ ...tup };
+  ```
+
+- 操作数同样必须是**位置表达式**；目标 struct 没有的字段报
+  `struct 'T' has no field 'x' (from spread operand)`；把 struct 展开进数组
+  构造（或反向）报 `cannot spread a struct into a constructor of type …`。
+
 ## 5. 内建函数
 
 ### len / data（序列元信息与 C ABI 适配）

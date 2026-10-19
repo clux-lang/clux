@@ -1980,3 +1980,20 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **文档**：language-spec §4.6（表达式）新增"实参展开"小节。
     - 验证：Windows 全量 **2155/2155 PASSED**；examples 52 个 `.cx` 全过；
       fmt 幂等且保留 `...`；WSL2 Ubuntu 全量 **2152 passed / 2 skipped**。
+    - **扩展（同日）：构造器里的展开**（用户要求）——`.T{...}` 与 `new T{...}`
+      同样支持：
+      * **struct 目标按字段 kv 展开**（`struct_type_field` 驱动的
+        `AST_CONSTRUCT_FIELD` + `AST_MEMBER` 链），异构 struct 按字段名兼容；
+        目标没有的字段直接报 `has no field 'x' (from spread operand)`。
+      * **数组/元组目标按位置展开**（`operand[i]`）。
+      * 展开与显式字段可混用：同名字段**后写的覆盖先写的**（展开后按名去重，
+        保留最后一次出现），因此 `.Point{ ...p, .x = 10 }` 合法。
+      * 形态不符（struct→数组构造等）报 `cannot spread a struct into a
+        constructor of type …`；切片仍拒绝。
+      * 实现：`sema_expand_construct_spread`（字段链 + 目标类型）在
+        `ex_construct` 与 `ex_new` 两处入口调用；解析器
+        `parse_construct_field` 接受 `...expr`。
+      * 测试：`SpreadConstruct.*` 11 例（struct/new/异构/覆盖/匿名/位置/
+        缺字段/struct→数组/切片/容器往返/fmt），示例扩展为十种形态。
+      * 验证：Windows 全量 **2166/2166 PASSED**；examples 52 个 `.cx` 全过；
+        fmt 幂等且保留构造里的 `...`；WSL2 Ubuntu 全量 **2163 passed / 2 skipped**。

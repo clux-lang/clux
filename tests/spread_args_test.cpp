@@ -175,3 +175,170 @@ TEST(SpreadArgs, FmtPreservesSpread) {
   delete_allocator(&a);
   EXPECT_NE(once.find("sum2(...arr)"), std::string::npos) << once;
 }
+
+/* ================================================================ */
+/* 构造器里的展开：`.T{...s}` / `new T{...s}` / `.[N]T{...b}`         */
+/* ================================================================ */
+
+namespace {
+const char *kStructs =
+    "struct Point { x: i32; y: i32; }\n"
+    "struct Pair { x: i32; y: i32; }\n"
+    "struct Other { z: i32; }\n";
+std::string ssrc(const std::string &body) {
+  return std::string(kStructs) + body;
+}
+} // namespace
+
+/* struct 目标：按字段 kv 展开 `.Point{ ...p }` */
+TEST(SpreadConstruct, StructByName) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var p = .Point{ .x = 3, .y = 4 };\n"
+                      "  var q = .Point{ ...p };\n"
+                      "  return (q.x == 3 && q.y == 4) ? 0 : 1;\n"
+                      "}\n"),
+                 "spread_c_struct");
+}
+
+/* new + 展开（堆分配路径走同一份展开） */
+TEST(SpreadConstruct, NewWithSpread) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var p = .Point{ .x = 5, .y = 6 };\n"
+                      "  var r = new Point{ ...p };\n"
+                      "  if (r.*.x != 5 || r.*.y != 6) { return 1; }\n"
+                      "  return 0;\n"
+                      "}\n"),
+                 "spread_c_new");
+}
+
+/* 异构 struct 按**字段名**展开（结构兼容即可，不要求同一类型） */
+TEST(SpreadConstruct, StructCompatibleByName) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var p = .Point{ .x = 7, .y = 8 };\n"
+                      "  var q = .Pair{ ...p };\n"
+                      "  return (q.x == 7 && q.y == 8) ? 0 : 1;\n"
+                      "}\n"),
+                 "spread_c_compat");
+}
+
+/* 展开 + 显式字段：同名字段后写的覆盖先写的 */
+TEST(SpreadConstruct, ExplicitFieldOverridesSpread) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var p = .Point{ .x = 3, .y = 4 };\n"
+                      "  var q = .Point{ ...p, .x = 10 };\n"
+                      "  return (q.x == 10 && q.y == 4) ? 0 : 1;\n"
+                      "}\n"),
+                 "spread_c_override");
+}
+
+/* 匿名构造 + 展开：目标类型来自声明 */
+TEST(SpreadConstruct, AnonymousConstruct) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var p = .Point{ .x = 1, .y = 2 };\n"
+                      "  var a: Point = .{ ...p };\n"
+                      "  return (a.x == 1 && a.y == 2) ? 0 : 1;\n"
+                      "}\n"),
+                 "spread_c_anon");
+}
+
+/* 数组/元组构造：按位置展开 */
+TEST(SpreadConstruct, ArrayAndTuplePositional) {
+  clux_expect_ok(ssrc("func main(): i32 {\n"
+                      "  var arr = .[2]i32{ 5, 6 };\n"
+                      "  var arr2 = .[2]i32{ ...arr };\n"
+                      "  if (arr2[0] != 5 || arr2[1] != 6) { return 1; }\n"
+                      "  var tup = .<i32, i32>{ 7, 8 };\n"
+                      "  var tup2 = .<i32, i32>{ ...tup };\n"
+                      "  if (tup2[0] != 7 || tup2[1] != 8) { return 2; }\n"
+                      "  return 0;\n"
+                      "}\n"),
+                 "spread_c_pos");
+}
+
+/* 目标 struct 没有该字段 → 直接报"没有该字段（来自展开）" */
+TEST(SpreadConstruct, MissingFieldRejected) {
+  std::string path = write_temp_file(
+      ssrc("func main(): i32 {\n"
+           "  var p = .Point{ .x = 3, .y = 4 };\n"
+           "  var o = .Other{ ...p };\n"
+           "  return 0;\n"
+           "}\n"),
+      "spread_c_missing");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("has no field 'x' (from spread operand)"),
+            std::string::npos)
+      << err;
+  std::remove(path.c_str());
+}
+
+/* struct 展开到数组构造 → 拒绝 */
+TEST(SpreadConstruct, StructIntoArrayRejected) {
+  std::string path = write_temp_file(
+      ssrc("func main(): i32 {\n"
+           "  var p = .Point{ .x = 3, .y = 4 };\n"
+           "  var b = .[2]i32{ ...p };\n"
+           "  return 0;\n"
+           "}\n"),
+      "spread_c_s2a");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("cannot spread a struct into a constructor"), std::string::npos)
+      << err;
+  std::remove(path.c_str());
+}
+
+/* 切片展开到构造 → 拒绝（长度运行期才知道） */
+TEST(SpreadConstruct, SliceRejected) {
+  std::string path = write_temp_file(
+      ssrc("func main(): i32 {\n"
+           "  var arr = .[2]i32{ 1, 2 };\n"
+           "  var s = arr[0:2];\n"
+           "  var b = .[2]i32{ ...s };\n"
+           "  return 0;\n"
+           "}\n"),
+      "spread_c_slice");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("must be a struct, array or tuple"), std::string::npos)
+      << err;
+  std::remove(path.c_str());
+}
+
+/* 构造展开随容器落盘：emit → run .cxb */
+TEST(SpreadConstruct, SurvivesCxbRoundTrip) {
+  const std::string program =
+      ssrc("func main(): i32 {\n"
+           "  var p = .Point{ .x = 3, .y = 4 };\n"
+           "  var q = .Point{ ...p };\n"
+           "  var r = new Point{ ...p };\n"
+           "  if (q.x != 3 || q.y != 4) { return 1; }\n"
+           "  if (r.*.x != 3 || r.*.y != 4) { return 2; }\n"
+           "  return 0;\n"
+           "}\n");
+  std::string path = write_temp_file(program, "spread_c_rt");
+  std::string bin = path + ".cxb";
+  ASSERT_EQ(driver_build_bin(path.c_str(), bin.c_str()), 0);
+  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
+  std::remove(path.c_str());
+  std::remove(bin.c_str());
+}
+
+/* fmt：构造里的 `...` 也必须原样保留 */
+TEST(SpreadConstruct, FmtPreservesSpread) {
+  const char *code = "struct Point { x: i32; y: i32; }\n"
+                     "func main(): i32 {\n"
+                     "    var p = .Point{ .x = 1, .y = 2 };\n"
+                     "    var q = .Point{ ...p };\n"
+                     "    var r = new Point{ ...p };\n"
+                     "    return 0;\n"
+                     "}\n";
+  allocator_t *a = create_allocator(malloc, free);
+  char *out = fmt_format_source(a, code, std::strlen(code), nullptr);
+  ASSERT_NE(out, nullptr);
+  const std::string once(out);
+  allocator_free(a, (void **)&out);
+  delete_allocator(&a);
+  EXPECT_NE(once.find(".Point{ ...p }"), std::string::npos) << once;
+  EXPECT_NE(once.find("new Point{ ...p }"), std::string::npos) << once;
+}
