@@ -64,6 +64,10 @@ typedef enum {
     AST_UNDEF,           /* undefined（未初始化声明标记，sema 数据流分析消费） */
     AST_NIL,             /* nil（内置类型字面量值，函数 0 初始化/未来空指针） */
 
+    AST_SPREAD,          /* `...expr` 实参展开（仅函数调用实参位置；parser 与 sema
+                            之间，sema 展开成 `expr[0], expr[1], …` 的 AST_INDEX 链，
+                            compiler/CTFE 看不到本节点）。 */
+
     AST_ERROR,           /* 解析错误恢复节点（记录错误位置，占位） */
 
     /* --- 类型修饰（类型即表达式，M2 关键架构决策 6）---

@@ -1,0 +1,54 @@
+// spread_args.cx — 实参展开 `...expr`
+//
+// 在函数调用的实参位置写 `...expr`，把**编译期长度已知**的数组或元组摊开成
+// 多个实参（sema 阶段展开成 `expr[0], expr[1], …`）：
+//
+//   fn(a, ...b, c)   ⇒   fn(a, b[0], b[1], …, c)
+//
+// 规则：
+//   - 只接受数组（`[N]T`）与元组（`<T1,T2,…>`）；切片 `[]T` 的长度运行期才知道，
+//     会报 spread operand must be an array or tuple with a compile-time-known length。
+//   - 操作数必须是**可复读的位置表达式**（变量 / 成员访问）：展开后每个元素都是
+//     一次 `operand[i]` 读取，带副作用的表达式（调用、构造…）会被重复求值，
+//     因此要求先落到临时变量。
+//   - 空数组展开出 0 个实参：`fn(a, ...empty)` ⇒ `fn(a)`。
+//   - 可以出现在实参列表的任意位置，也可以和普通实参混用。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+struct Box {
+    pair: [2]i32;
+}
+
+func sum2(a: i32, b: i32): i32 { return a + b; }
+func sum3(a: i32, b: i32, c: i32): i32 { return a + b + c; }
+func sum4(a: i32, b: i32, c: i32, d: i32): i32 { return a + b + c + d; }
+
+func main(): i32 {
+    // ① 数组展开（中间位置）：sum4(1, 2, 3, 4) = 10
+    var arr = .[2]i32{ 2, 3 };
+    libc::printf("sum4(1, ...arr, 4) = %d\n", sum4(1, ...arr, 4));
+
+    // ② 元组展开（前置）：sum3(10, 20, 5) = 35
+    var tup = .<i32, i32>{ 10, 20 };
+    libc::printf("sum3(...tup, 5) = %d\n", sum3(...tup, 5));
+
+    // ③ 成员访问作操作数：sum2(7, 8) = 15
+    var box = .Box{ .pair = .[2]i32{ 7, 8 } };
+    libc::printf("sum2(...box.pair) = %d\n", sum2(...box.pair));
+
+    // ④ 空数组：0 个实参 → sum2(1, 2) = 3
+    var empty = .[0]i32{};
+    libc::printf("sum2(1, 2, ...empty) = %d\n", sum2(1, 2, ...empty));
+
+    // ⑤ 与 C 变参混用：printf("%d+%d\n", 3, 4)
+    var nums = .[2]i32{ 3, 4 };
+    libc::printf("printf: %d+%d\n", ...nums);
+
+    if (sum4(1, ...arr, 4) != 10) { return 1; }
+    if (sum3(...tup, 5) != 35) { return 2; }
+    if (sum2(...box.pair) != 15) { return 3; }
+    if (sum2(1, 2, ...empty) != 3) { return 4; }
+    return 0;
+}

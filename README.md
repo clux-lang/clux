@@ -108,7 +108,7 @@ clux build <file.cx>                  # native backend — not implemented yet
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error), `2` runtime error.
 
-Examples live in `examples/` — 42 entry directories (one or more `.cx` files each,
+Examples live in `examples/` — 43 entry directories (one or more `.cx` files each,
 one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules
 imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
 so every top-level `.cx` is runnable.
@@ -177,7 +177,7 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-2144 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
+2155 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
 core containers; integration tests execute programs end-to-end through `driver_run_file`
 (for `foreach` the CLI is spawned so the program's own `printf` output can be
 asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the

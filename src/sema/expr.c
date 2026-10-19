@@ -17,6 +17,7 @@
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
+#include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
 #include "parser/ast_move.h"
@@ -2041,9 +2042,100 @@ static const struct_type_t *find_runtime_attr_owner(const type_t *t,
 }
 
 /* AST_CALL 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+/* ===========================================================================
+ * 实参展开 `...operand`（sema 阶段）
+ *
+ *   fn(a, ...b, c)   ⇒   fn(a, b[0], b[1], …, c)
+ *
+ * 语义要点：
+ *   - 操作数必须是**编译期长度已知**的数组或元组（`[N]T` / `<T1,T2,…>`）；
+ *     切片（长度运行期才知道）一律拒绝。
+ *   - 操作数必须是**可复读的位置表达式**（变量 / 成员访问）：展开后每个元素
+ *     都是一次 `operand[i]` 读取，带副作用的表达式（调用/构造…）会被重复求值，
+ *     所以这里直接拒绝，并要求先落一个临时变量。
+ *   - 空数组展开出 **0 个实参**（`fn(a, ...empty, c)` ⇒ `fn(a, c)`）。
+ *   - 展开是**就地**的（改写实参链），因此可重入：第二次调用时链中已无
+ *     AST_SPREAD，直接返回。
+ * =========================================================================== */
+static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
+                                    sema_scope_t *scope) {
+  ast_node_t **slot = &call->args;
+  while (*slot) {
+    ast_node_t *a = *slot;
+    if (a->kind != AST_SPREAD) {
+      slot = &a->next;
+      continue;
+    }
+    ast_spread_t *sp = (ast_spread_t *)a;
+    ast_node_t *op = sp->operand;
+    if (!op ||
+        (op->kind != AST_IDENT && op->kind != AST_MEMBER)) {
+      diag_error(sema->diag, sema_loc(sema, a),
+                 "spread operand must be a variable or a field access "
+                 "(it is read once per element; bind temporaries first)");
+      return false;
+    }
+    /* 取类型：sema_expr 只做 shadow 求值（不产生运行期代码）；随后每个
+       `operand[i]` 会各自重读一次——操作数是位置表达式，无副作用。 */
+    value_t *v = sema_expr(sema, &sp->operand, scope);
+    if (is_poison(sema, v)) return false;
+    const type_t *t = value_type(v);
+    size_t n = 0;
+    if (t && t->kind == TYPE_KIND_ARRAY) {
+      n = array_type_len(t);
+    } else if (t && t->kind == TYPE_KIND_TUPLE) {
+      n = tuple_type_elem_count(t);
+    } else {
+      char tn[64];
+      sema_type_name(t, tn, sizeof(tn));
+      diag_error(sema->diag, sema_loc(sema, a),
+                 "spread operand must be an array or tuple with a "
+                 "compile-time-known length, got %s",
+                 tn);
+      return false;
+    }
+    /* 构造 operand[0] … operand[n-1] 链 */
+    ast_node_t *head = NULL, *tail = NULL;
+    for (size_t i = 0; i < n; i++) {
+      ast_node_t *idx = ast_index_new(sema->arena, a->tok_begin, a->tok_end);
+      if (!idx) return false;
+      idx->is_generated = true;
+      ast_node_t *lit = ast_int_lit_new(sema->arena, a->tok_begin, a->tok_end);
+      if (!lit) return false;
+      lit->is_generated = true;
+      ((ast_int_lit_t *)lit)->type = strslice_from_bytes("i32", 3);
+      ((ast_int_lit_t *)lit)->value = i;
+      ((ast_index_t *)idx)->object = sp->operand;
+      ((ast_index_t *)idx)->indices = lit;
+      ((ast_index_t *)idx)->indices_last = lit;
+      if (tail) {
+        tail->next = idx;
+        tail = idx;
+      } else {
+        head = tail = idx;
+      }
+    }
+    if (head) {
+      tail->next = a->next;
+      *slot = head;
+      slot = &tail->next;
+    } else {
+      *slot = a->next; /* 空数组：0 个实参 */
+    }
+  }
+  /* 重算 args_last（展开会改变链尾；O(n) 但只在 sema 跑一次） */
+  ast_node_t *last = NULL;
+  for (ast_node_t *a = call->args; a; a = a->next) last = a;
+  call->args_last = last;
+  return true;
+}
+
 static value_t *ex_call(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
+      /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
+         实参链）。失败时诊断已记录。 */
+      if (!sema_expand_spread_args(sema, call, scope)) return val_void(sema);
       /* ---- 方法调用糖（结构体命名空间成员）----
        *   a.b(args)   —— 实例方法：receiver = a（值或指针），self 隐式首参
        *   T::f(args)  —— 静态方法：receiver = T 的 type value，无 self

@@ -1953,3 +1953,30 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       说明）；本条记录调研结论与未采用的路线。
     - 验证：Windows 全量 **2144/2144 PASSED**；WSL2 Ubuntu 全量 **2141 passed /
       2 skipped**；examples 50 个 `.cx` 全过。
+
+84. **实参展开 `...expr`（数组/元组摊开成多个实参）**（2026-10）
+    - **需求（用户提出）**：`...` 用于函数调用，处理**编译期长度已知**的对象
+      （数组、元组），支持 `fn(a, ...b, c)`；`...b` 在 sema 阶段展开为
+      `b[0], b[1], …`。
+    - **实现**：
+      * 语法/解析：新增 `AST_SPREAD`（`include/parser/ast_spread.h`）；
+        实参解析统一走 `parse_call_arg`（`...expr` 前缀）。
+      * AST 只存在于 parser 与 sema 之间；`fmt` 渲染 `...expr`（漏渲染会让
+        格式化把展开悄悄改成单实参）。
+      * sema：`ex_call` 最开头调 `sema_expand_spread_args` —— 就地改写实参链，
+        把 `...operand` 替换成 `operand[0..n-1]`（`AST_INDEX` + 整型字面量，
+        节点标 `is_generated`）。因此方法调用 / FFI 变参 / 普通调用共用同一
+        展开点；展开可重入（第二次已无 AST_SPREAD）。
+      * 长度来源：`array_type_len`（`[N]T`）/ `tuple_type_elem_count`（`<T1,T2>`）；
+        切片拒绝（长度运行期才知道）。
+      * 操作数限制为**位置表达式**（标识符 / 成员访问）：展开后每元素重读一次，
+        带副作用的表达式会被重复求值 → 直接拒绝并要求先落临时变量。
+      * 空数组展开出 **0 个实参**（`fn(a, ...empty, c)` ⇒ `fn(a, c)`）。
+    - **测试**：`tests/spread_args_test.cpp` 11 例——数组中间位置、元组前置、
+      成员操作数、空数组、FFI 变参 + 展开、方法调用 + 展开、切片拒绝、
+      副作用操作数拒绝、展开后数量不符、`.cxb` 往返、fmt 保留 `...`。
+    - **新增示例**：`examples/spread_args/spread_args.cx`（五种形态，
+      Windows/Linux 输出一致）。
+    - **文档**：language-spec §4.6（表达式）新增"实参展开"小节。
+    - 验证：Windows 全量 **2155/2155 PASSED**；examples 52 个 `.cx` 全过；
+      fmt 幂等且保留 `...`；WSL2 Ubuntu 全量 **2152 passed / 2 skipped**。

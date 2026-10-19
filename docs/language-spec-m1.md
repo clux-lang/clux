@@ -716,6 +716,27 @@ return;
 | 12     | `! ~ -`(一元)      | 右     |
 | 13     | `()`(函数调用)      | 左     |
 
+**实参展开 `...expr`**：函数调用的实参位置可以把**编译期长度已知**的数组/元组
+摊开成多个实参（sema 阶段展开为 `expr[0], expr[1], …`，compiler/CTFE 看不到
+展开语法）：
+
+```c
+var arr = .[2]i32{ 2, 3 };
+sum4(1, ...arr, 4);        // ⇒ sum4(1, 2, 3, 4)
+var tup = .<i32, i32>{ 10, 20 };
+sum3(...tup, 5);           // ⇒ sum3(10, 20, 5)
+sum2(...box.pair);         // 成员访问作操作数
+sum2(1, 2, ...empty);      // 空数组 ⇒ 0 个实参
+```
+
+- 只接受 `[N]T` 与 `<T1,T2,…>`：切片 `[]T` 的长度运行期才知道 →
+  `spread operand must be an array or tuple with a compile-time-known length`。
+- 操作数必须是**位置表达式**（变量 / 成员访问）：展开后每个元素都是一次
+  `operand[i]` 读取，带副作用的表达式（调用/构造）会被重复求值 →
+  `spread operand must be a variable or a field access`。
+- 可与普通实参、C 变参（`extern cfunc` 的 `...`）混用；展开后照常做参数数量
+  与类型检查。
+
 ## 5. 内建函数
 
 ### len / data（序列元信息与 C ABI 适配）

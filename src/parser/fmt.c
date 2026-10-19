@@ -32,6 +32,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
+#include "parser/ast_spread.h"
 #include "parser/ast_array.h"
 #include "parser/ast_tuple.h"
 #include "parser/ast_construct.h"
@@ -746,6 +747,13 @@ static void render_expr(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, ", ");
             render_expr(f, fl->count);
             sb_ch(&f->sb, '>');
+            break;
+        }
+        case AST_SPREAD: {
+            /* 实参展开 `...expr`（漏渲染会导致格式化把展开悄悄改成单实参） */
+            ast_spread_t *sp = (ast_spread_t *)node;
+            sb_str(&f->sb, "...");
+            render_expr(f, sp->operand);
             break;
         }
         case AST_FUNC_DEF: {

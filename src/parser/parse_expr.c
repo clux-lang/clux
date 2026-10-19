@@ -18,6 +18,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
+#include "parser/ast_spread.h"
 #include "parser/ast_array.h"
 #include "parser/ast_tuple.h"
 #include "parser/ast_func_def.h"
@@ -907,6 +908,32 @@ ast_node_t *parse_unary(parser_t *p) {
 /** 后缀绑定力 = 25（M1 文档，函数调用最高） */
 #define POSTFIX_LEFT_PREC 25
 
+/* 实参解析：支持前缀展开 `...expr`（数组/元组摊开成多个实参）。
+ *
+ * `...` 是 lexer 的三字符 SYMBOL token（与结构体嵌入 / 变参声明复用同款
+ * 拼写，语境不重叠）。展开语义在 sema：这里只负责把操作数记录下来。 */
+static ast_node_t *parse_call_arg(parser_t *p) {
+    skip_trivia(p);
+    if (check_symbol(p, "...")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *operand = parse_expr(p);
+        if (!operand || operand->kind == AST_ERROR) {
+            if (!operand)
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected expression after '...' in call "
+                                     "arguments");
+            return operand;
+        }
+        ast_node_t *spread = ast_spread_new(p->arena, tb, p->pos);
+        if (!spread) return NULL;
+        ((ast_spread_t *)spread)->operand = operand;
+        return spread;
+    }
+    return parse_expr(p);
+}
+
 static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
     for (;;) {
         skip_trivia(p);
@@ -949,7 +976,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             ast_node_t *args = NULL, *args_last = NULL;
 
             if (!check_symbol(p, ")")) {
-                ast_node_t *arg = parse_expr(p);
+                ast_node_t *arg = parse_call_arg(p);
                 if (!arg || arg->kind == AST_ERROR) {
                     if (!arg) {
                         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -963,7 +990,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 while (check_symbol(p, ",")) {
                     advance(p);
                     skip_trivia(p);
-                    arg = parse_expr(p);
+                    arg = parse_call_arg(p);
                     if (!arg || arg->kind == AST_ERROR) {
                         if (!arg) {
                             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
