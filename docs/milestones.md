@@ -2208,3 +2208,17 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       sizeof/alignof / FFI 里 `fatal opaque` 返回 + `own opaque` 形参）。
     - **验证**：Windows 全量 **2190/2190 PASSED**、examples 54 个 `.cx` 全过；
       WSL2 全量 **2187 passed / 2 skipped**。
+
+93. **C ABI：`own *T` 合法（只有切片非法）**（2026-10，用户指正）
+    - **症状/问题**：`ffi_c_abi_reject_reason_own` 一律拒绝 `own` 出现在 extern
+      签名里（"C has no ownership"）。但 C 函数接管指针所有权是完全正当的
+      ——`free(p)` 就是 C 释放，`malloc()` 的返回值由调用方接管。
+    - **修法**：`own` 只在**非指针/非 opaque** 类型上拒绝（`own T` 聚合按值没有
+      C 表示；`own []T` 是胖指针，本来就被 slice 分支拒绝）；`own *T` 与
+      `own opaque` 放行。extern 返回 `own *T` 时，对调用方视为**将亡值**
+      （与 `fatal` 返回同义），`var p: own *T = libc::malloc(...)` 因此可用。
+    - **测试**：`OpaqueOwnership.OwnPointerInFfiSignatures`（`malloc(): own *u8` +
+      `free(p: own *u8)` 实跑通）、`OpaqueOwnership.OwnSliceRejectedInFfi`
+      （`own []T` 仍拒绝）。
+    - **验证**：Windows 全量 **2192/2192 PASSED**、examples 54 个 `.cx` 全过；
+      WSL2 全量 **2189 passed / 2 skipped**。

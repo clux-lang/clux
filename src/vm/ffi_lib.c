@@ -573,21 +573,18 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
  */
 const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     if (!t) return "missing type";
-    /* C 侧没有所有权概念（m6-design §2.3/§9.3"禁止 own *T"）：**own 资源不能
-       出现在 C ABI 签名里**——`own *T` / `own []T`（顶层 own 指针本身）。
-       这是"签名即约束"：非法在**声明处**被拒，而不是等到调用点。
-       ref/fatal 指针不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal）。
-       注：share/weak 已随 RC 系移除；复合类型字段禁止携带指针，所以不存在
-       "递归含 own 字段的复合类型"这一形态。 */
-    /* **例外：`opaque`（void*）**。C 侧看到的始终是裸指针，所有权只是 clux
-       侧的价值状态——`malloc(): own opaque`（调用方接管）与
-       `free(p: own opaque)`（把所有权交回 C）都是有意义的声明，因此放行。
-       `own *T` / `own []T` 仍然拒绝（那是"把 clux 拥有的对象交给 C"）。 */
-    if (own == OWN_OWN && t->kind != TYPE_KIND_OPAQUE)
-        return "the type is owned (own *T / own []T) "
-               "and cannot cross the C ABI (C has no ownership; declare the "
-               "parameter or return type without own, or use 'ref *T' / "
-               "'fatal *T' for pointers)";
+    /* 所有权修饰在 C ABI 里是**契约**，不是表示层：
+         - `own *T` / `own opaque`：**合法**——C 接管这个指针（例如 `free(p)`），
+           clux 侧交出所有权；`malloc(): own *T` 这类"调用方接管返回值"同理。
+           C 侧看到的始终是裸指针，所有权只是 clux 侧的值状态。
+         - `own []T`：**非法**——切片是胖指针，C 侧根本没有这个表示。
+         - `own T`（聚合按值）：非法——按值传聚合时字段所有权无法在 C 侧表达。
+       ref/fatal 指针本来就按指针宽度放行。 */
+    if (own == OWN_OWN && t->kind != TYPE_KIND_PTR &&
+        t->kind != TYPE_KIND_OPAQUE)
+        return "the type is owned (own T) and cannot cross the C ABI "
+               "(own is only meaningful for pointers: 'own *T' / 'own opaque'; "
+               "slices are fat pointers with no C representation)";
     switch (t->kind) {
     case TYPE_KIND_INT:
     case TYPE_KIND_FLOAT:
@@ -599,7 +596,7 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     case TYPE_KIND_CUNION:
     case TYPE_KIND_VOID: /* 仅作返回类型；参数位置的检查由调用方负责 */
     case TYPE_KIND_PTR:
-        /* fatal/ref 指针都是 C ABI 兼容的指针宽度（own 已在上方按所有权拒绝） */
+        /* 指针一律指针宽度（own/ref/fatal 只影响 clux 侧所有权契约） */
         return NULL;
     case TYPE_KIND_CFUNC:
         /* C 函数指针（`cfunc(i32) -> i32`）：C 侧就是裸函数指针，指针宽，无

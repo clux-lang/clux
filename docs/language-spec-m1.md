@@ -819,8 +819,13 @@ var d: opaque = ...;              // ✗ 报错：bare 'opaque' is not allowed
 
 任何指针都可隐式转成 `opaque`（擦除类型信息，字节/所有权不变），反向用显式
 `as`（`p as ref *i32`）。FFI 里：C 的 `void*` 形参写 `ref opaque`（借用），
-返回接管型指针（如 `malloc`）写 `fatal opaque`，把所有权交回 C（如 `free`）
-写 `own opaque` —— 与 `own`/`ref` 在其他指针上的含义一致。
+返回接管型指针（如 `malloc`）写 `fatal opaque` 或 `own opaque`，把所有权交回 C
+（如 `free`）写 `own opaque` —— 与 `own`/`ref` 在其他指针上的含义一致。
+
+**C ABI 里的所有权**：`own *T` / `own opaque` 在 `extern cfunc` 签名里是**合法**
+的——C 侧看到的是裸指针，所有权只是 clux 侧的契约（`malloc(): own *T` 表示调用方
+接管返回值；`free(p: own *T)` 表示把所有权交回 C、由 C 释放）。**切片**例外：
+`own []T` 是胖指针，C 侧没有对应表示，声明即报错。
 
 #### FFI 里的函数指针用 `cfunc(...)` 声明（不要写 `opaque`）
 

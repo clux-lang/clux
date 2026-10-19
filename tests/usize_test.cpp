@@ -354,3 +354,32 @@ TEST(OpaqueOwnership, FfiSignaturesUseQualifiedOpaque) {
       "}\n",
       "opaque_ffi_qualified");
 }
+
+/* C ABI 里 `own *T` 是**合法**的（C 函数接管指针所有权：free 型 / malloc 型）；
+   只有切片（胖指针）没有 C 表示。 */
+TEST(OpaqueOwnership, OwnPointerInFfiSignatures) {
+  clux_expect_ok(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::malloc(n: usize): own *u8;\n"
+      "extern cfunc libc::free(p: own *u8): void;\n"
+      "func main(): i32 {\n"
+      "  var p: own *u8 = libc::malloc(8usize);\n"
+      "  libc::free(move(p));\n"
+      "  return 0;\n"
+      "}\n",
+      "ffi_own_ptr");
+}
+
+/* 切片仍然是非法 C ABI 类型（胖指针） */
+TEST(OpaqueOwnership, OwnSliceRejectedInFfi) {
+  std::string path = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::free2(p: own []u8): void;\n"
+      "func main(): i32 { return 0; }\n",
+      "ffi_own_slice");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("cannot cross the C ABI"), std::string::npos) << err;
+  EXPECT_NE(err.find("slices are fat pointers"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
