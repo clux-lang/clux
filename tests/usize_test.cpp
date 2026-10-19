@@ -152,9 +152,9 @@ class UsizeSourceTest : public ::testing::Test {
            std::string(kTestLib) +
            "\";\n"
            "extern var td::td_i32: i32;\n"
-           "extern cfunc libc::malloc(n: usize): opaque;\n"
-           "extern cfunc libc::memset(p: opaque, v: i32, n: usize): opaque;\n"
-           "extern cfunc libc::free(p: opaque): void;\n"
+           "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
+           "extern cfunc libc::memset(p: ref opaque, v: i32, n: usize): fatal opaque;\n"
+           "extern cfunc libc::free(p: own opaque): void;\n"
            "extern cfunc libc::strlen(s: str): usize;\n"
            "func main(): i32 {\n"
            "  var verdict: i32 = 0;\n" +
@@ -188,8 +188,8 @@ TEST_F(UsizeSourceTest, LenSizeofAlignofReturnUsize) {
       "  if (n != 5usize) { verdict = 1; }\n"
       "  if (len(\"hello\") != 5u64) { verdict = 2; }\n" /* 同宽：可隐式互转 */
       "  if (sizeof(usize) != sizeof(str)) { verdict = 3; }\n"
-      "  if (sizeof(usize) != sizeof(opaque)) { verdict = 4; }\n"
-      "  if (alignof(usize) != alignof(opaque)) { verdict = 5; }\n"
+      "  if (sizeof(usize) != sizeof(ref opaque)) { verdict = 4; }\n"
+      "  if (alignof(usize) != alignof(ref opaque)) { verdict = 5; }\n"
       "  if (sizeof(Buf) != sizeof(usize) * 2usize) { verdict = 6; }\n"
       "  if (sizeof(u8) != 1usize) { verdict = 7; }\n");
 }
@@ -241,7 +241,7 @@ TEST_F(UsizeSourceTest, UsizeInFieldsParamsAndReturns) {
 TEST_F(UsizeSourceTest, UsizeIsCSizeTInFfiSignatures) {
   expect_verdict(
       "  // malloc/memset/free 的 size_t 形参、strlen 的 size_t 返回\n"
-      "  var p: opaque = libc::malloc(64usize);\n"
+      "  var p: own opaque = libc::malloc(64usize);\n"
       "  _ = libc::memset(p, 65, 64usize);\n"
       "  libc::free(p);\n"
       "  var n: usize = libc::strlen(\"hello\");\n"
@@ -308,4 +308,49 @@ TEST_F(UsizeSourceTest, BytecodeRoundTripKeepsUsize) {
 
   std::remove(path.c_str());
   std::remove(bin.c_str());
+}
+
+/* ================================================================ */
+/* opaque 是 void* 语义的指针：必须带所有权修饰                       */
+/* ================================================================ */
+
+TEST(OpaqueOwnership, BareOpaqueRejected) {
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: opaque = undefined;\n"
+      "  return 0;\n"
+      "}\n",
+      "opaque_bare");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("bare 'opaque' is not allowed"), std::string::npos) << err;
+  EXPECT_NE(err.find("own opaque"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+TEST(OpaqueOwnership, QualifiedOpaqueAccepted) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var a: ref opaque = undefined;\n"
+      "  var b: own opaque = undefined;\n"
+      "  var c: fatal opaque = undefined;\n"
+      "  if (sizeof(ref opaque) != sizeof(usize)) { return 1; }\n"
+      "  if (alignof(ref opaque) != alignof(usize)) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "opaque_qualified");
+}
+
+/* FFI：C 的 void* 形参写 ref opaque，接受 ref *T；返回 own/fatal opaque。 */
+TEST(OpaqueOwnership, FfiSignaturesUseQualifiedOpaque) {
+  clux_expect_ok(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
+      "extern cfunc libc::free(p: own opaque): void;\n"
+      "func main(): i32 {\n"
+      "  var p: own opaque = libc::malloc(8usize);\n"
+      "  libc::free(move(p));\n"
+      "  return 0;\n"
+      "}\n",
+      "opaque_ffi_qualified");
 }

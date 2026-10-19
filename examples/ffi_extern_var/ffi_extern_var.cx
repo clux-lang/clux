@@ -27,7 +27,7 @@ extern lib crt from "msvcrt" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
 
 extern var crt::_fmode: i32; // 文件打开模式（int 全局变量）
 extern var crt::_osplatform: u32; // 平台标识（Win32 NT = 2）
-extern var crt::_pgmptr: opaque; // 程序路径指针（指针宽度 → opaque）
+extern var crt::_pgmptr: ref opaque; // 程序路径指针（指针宽度 → opaque）
 
 func main(): i32 {
     // 读：EXTERN_LOAD 按类型宽度从符号地址取字节
@@ -52,8 +52,8 @@ func main(): i32 {
         return 3;
     }
 
-    // 指针宽度的数据符号：读出来是 opaque（clux 不解引用 opaque，只能原样传递）
-    var prog: opaque = crt::_pgmptr;
+    // 指针宽度的数据符号：读出来是 ref opaque（clux 不解引用 opaque，只能原样传递）
+    var prog: ref opaque = crt::_pgmptr;
     crt::_pgmptr = prog;
 
     // 平台标识读一下即可（现代 Windows 上是 2 = VER_PLATFORM_WIN32_NT）

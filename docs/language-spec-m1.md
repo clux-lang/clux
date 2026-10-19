@@ -806,6 +806,22 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+#### `opaque` 必须带所有权修饰
+
+`opaque` 是**指针**（`void *` 语义），所以和 `*T` 一样**必须**写所有权修饰：
+
+```c
+var a: ref opaque = undefined;    // 借用视图（C 的 const void*）
+var b: own opaque = malloc(8);    // 接管所有权
+var c: fatal opaque = ...;        // 将亡值
+var d: opaque = ...;              // ✗ 报错：bare 'opaque' is not allowed
+```
+
+任何指针都可隐式转成 `opaque`（擦除类型信息，字节/所有权不变），反向用显式
+`as`（`p as ref *i32`）。FFI 里：C 的 `void*` 形参写 `ref opaque`（借用），
+返回接管型指针（如 `malloc`）写 `fatal opaque`，把所有权交回 C（如 `free`）
+写 `own opaque` —— 与 `own`/`ref` 在其他指针上的含义一致。
+
 #### FFI 里的函数指针用 `cfunc(...)` 声明（不要写 `opaque`）
 
 C 函数接受/返回函数指针时，签名里应写**真实类型**，而不是 `opaque`：

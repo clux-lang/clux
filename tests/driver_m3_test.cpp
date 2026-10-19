@@ -130,7 +130,7 @@ TEST(Driver, PtrOpaqueRoundtrip) {
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
-      "  var q: opaque = p;\n"
+      "  var q: ref opaque = p;\n"
       "  var r: ref *i32 = q as ref *i32;\n"
       "  if (r.* != 7) { return 1; }\n"
       "  r.* = 88;\n"
@@ -403,7 +403,7 @@ TEST(Driver, StepBOpaqueBorrowBlocksMove) {
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{1};\n"
-      "  var q: opaque = p;\n"
+      "  var q: ref opaque = p;\n"
       "  var r: ref *i32 = q as ref *i32;\n"
       "  var c: own *i32 = move(p);\n"
       "  return 0;\n"

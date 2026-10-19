@@ -431,7 +431,20 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       /* 类型名引用：i32/bool 等关键字类型名与用户类型名（IDENTIFIER）
          统一为 AST_IDENT（类型即表达式），查类型表。 */
       ast_ident_t *id = (ast_ident_t *)type_expr;
-      return type_lookup(sema->vm, id->name);
+      const type_t *t = type_lookup(sema->vm, id->name);
+      /* **裸 `opaque` 不合法**：opaque 是 `void *` 语义的**指针**，和 `*T` 一样
+         必须带所有权修饰（`own opaque` / `ref opaque` / `fatal opaque`）。
+         只在"所有权修饰符的 base 位置"（AST_PTR / AST_OWNED_TYPE 的 base）放行。
+         注意：折叠后的 AST_TYPE_REF（name = "opaque"）走上面的 TYPE_REF 分支，
+         不会误报——那里只可能是已经通过校验的 `ref opaque` 之类。 */
+      if (t && t == sema->vm->type_opaque && sema->opaque_base_ctx == 0) {
+        diag_error(sema->diag, sema_loc(sema, type_expr),
+                   "bare 'opaque' is not allowed: opaque is a pointer type "
+                   "(`void *`), so it needs an ownership qualifier — use "
+                   "'own opaque' / 'ref opaque' / 'fatal opaque'");
+        return NULL;
+      }
+      return t;
     }
     case AST_CONST: {
       /* const 类型修饰：嵌套递归（const const T 收敛为 const T） */
@@ -580,7 +593,9 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "unsupported pointer ownership");
         return NULL;
       }
+      sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
+      sema->opaque_base_ctx--;
       if (!base) return NULL;
       return rc ? type_ptr_intern_rc(sema->vm, base, rc)
                 : type_ptr_intern(sema->vm, base);
@@ -631,7 +646,9 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          它是否**可用**由流动规则决定（`own` 位置需要将亡值，`i32` 没有
          FATAL 产生式 → 初始化点自然报错淘汰）。 */
       ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
+      sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ot->base_type);
+      sema->opaque_base_ctx--;
       if (!base) return NULL;
       return base;
     }

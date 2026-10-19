@@ -209,7 +209,7 @@ TEST_F(DataBuiltinTest, Diagnostics) {
   expect_compile_error("func main(): i32 { var p: ref *i32 = data(5); return 0; }\n");
   expect_compile_error("extern lib libc from \"*\";\n"
                        "func main(): i32 { var g: str = \"x\"; "
-                       "var q: opaque = data(g, g); return 0; }\n");
+                       "var q: ref opaque = data(g, g); return 0; }\n");
   (void)lib;
 }
 

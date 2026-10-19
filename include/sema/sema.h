@@ -305,6 +305,10 @@ typedef struct sema_t {
        预扫描只读取不再分配——fid 单一来源在 sema（用户函数对象创建即持 id，
        comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
     uint32_t      func_id_next;
+  /* >0 表示"当前正在解析所有权修饰符（own/ref/fatal）的 base 类型"：
+     AST_PTR / AST_OWNED_TYPE 的 base 位置允许 `opaque`；裸 `opaque` 是
+     指针缺少所有权修饰（opaque 是 `void *` 语义），必须报错。 */
+  size_t        opaque_base_ctx;
 
     /* defer 改写计数器：每个 defer 语句改写为临时函数定义 __defer_N，
        N 从 0 起在 sema 生命周期内单调递增（块内唯一，跨块亦唯一——

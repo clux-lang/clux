@@ -258,7 +258,7 @@ TEST(DriverM6, DuplicateExternLibAliasIsDiagnosed) {
 TEST(DriverM6, ExternCfuncMissingSymbolIsDiagnosed) {
   std::string src = std::string("extern lib crt from \"") + kDriverSystemLib +
                     "\";\n" +
-                    "extern cfunc crt::clux_no_such_symbol_xyz(n: u64): opaque;\n"
+                    "extern cfunc crt::clux_no_such_symbol_xyz(n: u64): fatal opaque;\n"
                     "func main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "clux_m6_sym");
   EXPECT_NE(driver_run_file(path.c_str()), 0); /* dlsym 解析失败 → 诊断 */
@@ -302,7 +302,7 @@ TEST(DriverM6, ExternRequiresLibKeyword) {
 TEST(DriverM6, ExternCfuncParsesAndIsDiagnosed) {
   std::string path = write_temp_file(
       std::string("extern lib crt from \"") + kDriverSystemLib + "\";\n" +
-      "extern cfunc crt::malloc(size: u64): opaque;\n"
+      "extern cfunc crt::malloc(size: u64): fatal opaque;\n"
       "func main(): i32 { return 0; }\n", "clux_m6_ecf");
   /* M6 打通后：仅**声明** extern cfunc 合法（占位"未实现"诊断已移除）；调用由 SourceLevelFfiCall* 覆盖 */
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -311,7 +311,7 @@ TEST(DriverM6, ExternCfuncParsesAndIsDiagnosed) {
 
 TEST(DriverM6, ExternCfuncRequiresQualifiedName) {
   std::string path = write_temp_file(
-      "extern cfunc crt.malloc(size: u64): opaque;\n", "clux_m6_ecf2");
+      "extern cfunc crt.malloc(size: u64): fatal opaque;\n", "clux_m6_ecf2");
   EXPECT_NE(driver_run_file(path.c_str()), 0); /* 缺 :: → 语法错 */
   std::remove(path.c_str());
 }
@@ -351,9 +351,9 @@ TEST(DriverM6, VariadicRejectedInNormalFunc) {
 TEST(DriverM6, FfiCallSiteGetsExplicitNotImplementedDiagnostic) {
   std::string path = write_temp_file(
       std::string("extern lib crt from \"") + kDriverSystemLib + "\";\n" +
-      "extern cfunc crt::malloc(size: u64): opaque;\n"
+      "extern cfunc crt::malloc(size: u64): fatal opaque;\n"
       "func main(): i32 {\n"
-      "  var p: opaque = crt::malloc(16);\n"
+      "  var p: own opaque = crt::malloc(16);\n"
       "  return 0;\n"
       "}\n", "clux_m6_callsite");
   /* M6 打通后：调用点不再报"未实现"，源码级调用由 SourceLevelFfiCall* 覆盖 */
@@ -467,10 +467,10 @@ namespace {
 /* 纯 clux qsort 回调程序（`main` 自检：升序 + 首尾 + 回调计数）。 */
 std::string ffi_qsort_program(const std::string &lib) {
   return std::string("extern lib crt from \"") + lib + "\";\n" +
-         "extern cfunc crt::qsort(base: opaque, n: u64, size: u64, "
-         "cmp: opaque): void;\n" +
+         "extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64, "
+         "cmp: cfunc(ref opaque, ref opaque) -> i32): void;\n" +
          "var CALLS: i32 = 0;\n" +
-         "cfunc cmp(a: opaque, b: opaque): i32 {\n" +
+         "cfunc cmp(a: ref opaque, b: ref opaque): i32 {\n" +
          "  CALLS = CALLS + 1;\n" +
          "  var x: i32 = (a as ref *i32).*;\n" +
          "  var y: i32 = (b as ref *i32).*;\n" +

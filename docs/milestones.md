@@ -2184,3 +2184,27 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **验证**：Windows 全量 **2187/2187 PASSED**、examples 54 个 `.cx` 全过；
       `examples/ffi_callback` 输出 "qsort called the clux comparator 10 times"；
       WSL2 全量 **2184 passed / 2 skipped**（Linux 上该样例同样升序、回调 8 次）。
+
+92. **`opaque` 改为必须带所有权修饰（裸 opaque 非法）**（2026-10）
+    - **动机（用户提出）**：早期把 `opaque` 实现成了"万能指针类型"，但它其实是
+      `void *` 语义的**指针**——和 `*T` 一样必须写 `own`/`ref`/`fatal`，裸 `opaque`
+      本来就不该合法。
+    - **实现**：
+      * sema 新增 `opaque_base_ctx` 计数：解析 `AST_PTR` / `AST_OWNED_TYPE` 的 base
+        期间放行；其余位置解析到 `opaque` 直接报
+        ``bare 'opaque' is not allowed: opaque is a pointer type (`void *`), so it
+        needs an ownership qualifier — use 'own opaque' / 'ref opaque' /
+        'fatal opaque'``（与既有"裸 []T 非法"同一套规则）。
+      * parser：所有权修饰后可跟 `opaque`（`ref opaque` / `own opaque` /
+        `fatal opaque`，此前只允许 own/fatal 修饰非指针类型）。
+      * C ABI：`own opaque` 在 extern 签名里**放行**（C 侧只看到裸指针，所有权是
+        clux 侧的值状态；`malloc(): fatal opaque`、`free(p: own opaque)` 因此合法）；
+        `own *T` / `own []T` 仍然拒绝。
+      * CTFE / sema_expr 支持 `AST_OWNED_TYPE`（`sizeof(ref opaque)`、`alignof(...)`
+        这类类型实参表达式）。
+      * 迁移：examples（ffi_callback / ffi_data / ffi_extern_var）与 tests 里所有裸
+        `opaque` 改成 `ref opaque`（借用视图）或 `own/fatal opaque`（接管所有权）。
+    - **测试**：新增 `OpaqueOwnership.*` 3 例（裸 opaque 拒绝 / 三种修饰 +
+      sizeof/alignof / FFI 里 `fatal opaque` 返回 + `own opaque` 形参）。
+    - **验证**：Windows 全量 **2190/2190 PASSED**、examples 54 个 `.cx` 全过；
+      WSL2 全量 **2187 passed / 2 skipped**。

@@ -29,8 +29,8 @@ extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
 //                          int (*cmp)(const void *, const void *));
-extern cfunc crt::qsort(base: opaque, n: u64, size: u64,
-                        cmp: cfunc(opaque, opaque) -> i32): void;
+extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64,
+                        cmp: cfunc(ref opaque, ref opaque) -> i32): void;
 
 // 回调次数：由 C 侧触发的 clux 函数体修改**模块全局变量**（可写），
 // 用来证明"确实是 C 库在调用我们"。
@@ -38,7 +38,7 @@ var CALLS: i32 = 0;
 
 // C ABI 函数（可被 C 调用）：三值比较，等价于 C 的
 //   int cmp(const void *a, const void *b) { int x = *(int*)a, y = *(int*)b; ... }
-cfunc cmp(a: opaque, b: opaque): i32 {
+cfunc cmp(a: ref opaque, b: ref opaque): i32 {
     CALLS = CALLS + 1;
     var x: i32 = (a as ref *i32).*;
     var y: i32 = (b as ref *i32).*;

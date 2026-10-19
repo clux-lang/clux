@@ -314,7 +314,7 @@ TEST(CfuncScope, LocalCfuncDefinitionRejected) {
       "extern lib libc from \"*\";\n"
       "extern cfunc libc::printf(format: str, ...): void;\n"
       "func main(): i32 {\n"
-      "  cfunc cmp(a: opaque, b: opaque): i32 { return 0; }\n"
+      "  cfunc cmp(a: ref opaque, b: ref opaque): i32 { return 0; }\n"
       "  return 0;\n"
       "}\n";
   std::string path = write_temp_file(src, "local_cfunc");
@@ -413,7 +413,7 @@ TEST(CfuncToFunc, RuntimePointerRejected) {
   std::string path = write_temp_file(
       "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
       "func main(): i32 {\n"
-      "  var p: opaque = cfunc_ptr(cmp);\n"
+      "  var p: ref opaque = cfunc_ptr(cmp);\n"
       "  var f: func(i32, i32) -> i32 = p;\n"
       "  return 0;\n"
       "}\n",

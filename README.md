@@ -177,7 +177,7 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-2187 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
+2190 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
 core containers; integration tests execute programs end-to-end through `driver_run_file`
 (for `foreach` the CLI is spawned so the program's own `printf` output can be
 asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the

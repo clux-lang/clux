@@ -408,9 +408,9 @@ TEST(FfiExternVarSource, OpaquePointerRoundTripsThroughLibraryMemory) {
   void *orig = read_lib_global<void *>("td_ptr");
   ASSERT_NE(orig, nullptr);
   std::string src = std::string("extern lib td from \"") + kTestDataLib + "\";\n" +
-                    "extern var td::td_ptr: opaque;\n"
+                    "extern var td::td_ptr: ref opaque;\n"
                     "func main(): i32 {\n"
-                    "  var p: opaque = td::td_ptr;\n"
+                    "  var p: ref opaque = td::td_ptr;\n"
                     "  td::td_ptr = p;\n"
                     "  return 0;\n"
                     "}\n";

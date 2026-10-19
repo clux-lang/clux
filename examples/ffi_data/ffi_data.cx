@@ -25,8 +25,8 @@
 extern lib libc from "*";
 
 extern cfunc libc::printf(format: str, ...): void;
-extern cfunc libc::memcmp(a: opaque, b: opaque, n: usize): i32;
-extern cfunc libc::strlen(s: opaque): usize;
+extern cfunc libc::memcmp(a: ref opaque, b: ref opaque, n: usize): i32;
+extern cfunc libc::strlen(s: ref opaque): usize;
 
 // clux 侧遍历：拿序列（不是指针）
 func sum(a: ref []i32): i32 {

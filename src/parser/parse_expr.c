@@ -856,8 +856,12 @@ ast_node_t *parse_unary(parser_t *p) {
                `ref T`（T 非指针）仍在此拒绝：借用需要一个**可借出的值**，
                而当前没有"非指针值的借用"这一产生式（借用走 `ref *T` /
                `ref []T` / `x.&`）。 */
-            if (!token_is(op_tok, "fatal") && !token_is(op_tok, "own") &&
-                !token_is(op_tok, "share") && !token_is(op_tok, "weak")) {
+            /* `opaque` 是**指针**（`void *` 语义）：三种所有权修饰都合法
+               （`own opaque` / `ref opaque` / `fatal opaque`）。 */
+            bool opaque_base = check_keyword(p, "opaque");
+            if (!opaque_base && !token_is(op_tok, "fatal") &&
+                !token_is(op_tok, "own") && !token_is(op_tok, "share") &&
+                !token_is(op_tok, "weak")) {
                 return ast_error_new(
                     p->diag, p->tokens, p->arena, tb, p->pos,
                     "only 'fatal' / 'own' can qualify a non-pointer type "

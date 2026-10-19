@@ -25,6 +25,7 @@
 #include "parser/ast_int_lit.h"
 #include "parser/ast_new.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
@@ -585,6 +586,12 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return ctfe_err(ctx, "ctfe: array length too large");
         const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
+    }
+    case AST_OWNED_TYPE: {
+        /* `fatal T` / `own T` / `ref opaque`：所有权限定的**非指针**类型。
+           所有权是值状态、不进类型——求值结果就是 base 的类型值。 */
+        ast_owned_type_t *ot = (ast_owned_type_t *)node;
+        return ctfe_eval(ctx, ot->base_type);
     }
     case AST_PTR: {
         /* 指针类型表达式 *T（所有权纯编译期——类型不区分 own/ref/fatal，

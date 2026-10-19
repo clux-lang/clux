@@ -5165,6 +5165,10 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return ex_type_expr(sema, node, scope);
     case AST_PTR:
       return ex_type_expr(sema, node, scope);
+    case AST_OWNED_TYPE:
+      /* `ref opaque` / `fatal T` / `own T` 出现在**表达式位置**（典型
+         `sizeof(ref opaque)`）：与 AST_PTR 同族，求值为类型值。 */
+      return ex_type_expr(sema, node, scope);
     case AST_TYPE_REF:
       return ex_type_ref(sema, node, scope);
     case AST_SCOPE_REF:

@@ -320,7 +320,7 @@ static void *call_for_code_ptr(CompiledClux &unit, const char *fn_name,
 TEST_F(FfiCallbackE2E, CfuncPtrBuiltinYieldsCFunctionPointerFromSource) {
   ASSERT_TRUE(unit.compile(
       "cfunc add(a: i32, b: i32): i32 { return a + b; }\n"
-      "func get_cb(): opaque { return cfunc_ptr(add); }\n",
+      "func get_cb(): cfunc(i32, i32) -> i32 { return cfunc_ptr(add); }\n",
       "srcptr"));
   bool err = false;
   void *code_from_clux = call_for_code_ptr(unit, "get_cb", &err);
@@ -350,11 +350,11 @@ TEST_F(FfiCallbackE2E, CfuncPtrBuiltinYieldsCFunctionPointerFromSource) {
 TEST_F(FfiCallbackE2E, CluxSourceComparatorSortsThroughCQsort) {
   ASSERT_TRUE(unit.compile(
       "var CALLS: i32 = 0;\n"
-      "cfunc raw_cmp(a: opaque, b: opaque): i32 {\n"
+      "cfunc raw_cmp(a: ref opaque, b: ref opaque): i32 {\n"
       "  CALLS = CALLS + 1;\n"
       "  return 0;\n"
       "}\n"
-      "func get_cb(): opaque { return cfunc_ptr(raw_cmp); }\n"
+      "func get_cb(): cfunc(ref opaque, ref opaque) -> i32 { return cfunc_ptr(raw_cmp); }\n"
       "func calls(): i32 { return CALLS; }\n",
       "srcqsort"));
   bool err = false;
@@ -389,7 +389,7 @@ TEST_F(FfiCallbackE2E, CluxSourceComparatorSortsThroughCQsort) {
 TEST_F(FfiCallbackE2E, CfuncPtrRejectsNonCApiSignature) {
   ASSERT_TRUE(unit.compile(
       "cfunc bad(x: ?i32): i32 { return 0; }\n"
-      "func get_bad(): opaque { return cfunc_ptr(bad); }\n",
+      "func get_bad(): cfunc(i32, i32) -> i32 { return cfunc_ptr(bad); }\n",
       "badcabi"));
   value_t *fn = unit.lookup("get_bad");
   ASSERT_NE(fn, nullptr);
@@ -410,10 +410,10 @@ TEST_F(FfiCallbackE2E, PureCluxProgramSortsWithCQsortCallback) {
   std::string src =
       std::string("extern lib crt from \"") + kSystemLib +
       "\";\n"
-      "extern cfunc crt::qsort(base: opaque, n: u64, size: u64,\n"
-      "                        cmp: cfunc(opaque, opaque) -> i32): void;\n"
+      "extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64,\n"
+      "                        cmp: cfunc(ref opaque, ref opaque) -> i32): void;\n"
       "var CALLS: i32 = 0;\n"
-      "cfunc cmp(a: opaque, b: opaque): i32 {\n"
+      "cfunc cmp(a: ref opaque, b: ref opaque): i32 {\n"
       "  CALLS = CALLS + 1;\n"
       "  var x: i32 = (a as ref *i32).*;\n"
       "  var y: i32 = (b as ref *i32).*;\n"

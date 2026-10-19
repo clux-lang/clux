@@ -579,7 +579,11 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
        ref/fatal 指针不持有资源，仍按指针宽度放行（§2.3 只允许 ref/fatal）。
        注：share/weak 已随 RC 系移除；复合类型字段禁止携带指针，所以不存在
        "递归含 own 字段的复合类型"这一形态。 */
-    if (own == OWN_OWN)
+    /* **例外：`opaque`（void*）**。C 侧看到的始终是裸指针，所有权只是 clux
+       侧的价值状态——`malloc(): own opaque`（调用方接管）与
+       `free(p: own opaque)`（把所有权交回 C）都是有意义的声明，因此放行。
+       `own *T` / `own []T` 仍然拒绝（那是"把 clux 拥有的对象交给 C"）。 */
+    if (own == OWN_OWN && t->kind != TYPE_KIND_OPAQUE)
         return "the type is owned (own *T / own []T) "
                "and cannot cross the C ABI (C has no ownership; declare the "
                "parameter or return type without own, or use 'ref *T' / "
