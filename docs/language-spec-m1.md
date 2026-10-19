@@ -806,6 +806,22 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+#### `cfunc` 定义只能在顶层
+
+`cfunc` 定义（C ABI 函数，可交给 C 用）**只能声明在顶层，且必须有名字**：
+
+```c
+cfunc cmp(a: opaque, b: opaque): i32 { ... }   // ✓ 全局、有名字
+func main(): i32 {
+    cfunc local(...): ... { ... }              // ✗ 局部 cfunc 没有意义
+}
+```
+
+理由：`cfunc` 没有闭包/捕获环境——局部声明没有对应的运行时形态；它的用途只有
+"把函数地址交给 C"（`cfunc_ptr(name)`）与作为 `cfunc(...)` 类型的值参与 FFI 边界。
+局部写法报
+``cfunc definitions are only allowed at top level (a cfunc has no closure environment, ...)``。
+
 ### 装饰器 `[[<expr>]]`
 
 声明前可以写装饰器：`[[ann]]` 把 `ann` 应用到该声明上。装饰器是**编译期函数**

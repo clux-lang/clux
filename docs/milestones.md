@@ -2025,4 +2025,8 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       3. `cfunc` 值的调用（可选，需新指令走 libffi）；当前若直接调用会报
          "cannot call value of type cfunc(...)"。
       4. 测试 + language-spec/m6-design 文档。
+    - **限制（用户补充）**：`cfunc` 定义**只能顶层且必须有名字**——cfunc 没有
+      闭包，局部声明没有运行时形态。`parse_stmt` 遇到语句位置的 `cfunc` 直接报
+      `cfunc definitions are only allowed at top level (...)`（此前落到表达式语句
+      的 "expected ';'"）。language-spec 已写入该约束。
     - 验证（本轮）：Windows 全量 **2166/2166 PASSED**（既有用例零回归）。

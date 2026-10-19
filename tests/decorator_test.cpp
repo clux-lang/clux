@@ -304,3 +304,37 @@ TEST(Decorator, ParameterizedMethodDecorator) {
       "}\n",
       "decor_param_method");
 }
+
+/* ================================================================ */
+/* cfunc 定义只能在顶层（用户补充约束）                               */
+/* ================================================================ */
+
+TEST(CfuncScope, LocalCfuncDefinitionRejected) {
+  const std::string src =
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::printf(format: str, ...): void;\n"
+      "func main(): i32 {\n"
+      "  cfunc cmp(a: opaque, b: opaque): i32 { return 0; }\n"
+      "  return 0;\n"
+      "}\n";
+  std::string path = write_temp_file(src, "local_cfunc");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("only allowed at top level"), std::string::npos) << err;
+  EXPECT_NE(err.find("no closure environment"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+/* 顶层 cfunc 定义照常可用，并且能当 func 值传给高阶函数 */
+TEST(CfuncScope, TopLevelCfuncWorksAsFunctionValue) {
+  clux_expect_ok(
+      "cfunc add2(a: i32, b: i32): i32 { return a + b; }\n"
+      "func apply(f: func(i32, i32) -> i32): i32 { return f(10, 20); }\n"
+      "func main(): i32 {\n"
+      "  var f: func(i32, i32) -> i32 = add2;\n"
+      "  if (apply(add2) != 30) { return 1; }\n"
+      "  if (f(3, 4) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "toplevel_cfunc_value");
+}

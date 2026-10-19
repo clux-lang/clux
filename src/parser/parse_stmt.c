@@ -51,6 +51,20 @@ ast_node_t *parse_stmt(parser_t *p) {
         }
         p->pos = (uint32_t)save; /* 单个 `[`：数组/下标表达式，交给表达式语句 */
     }
+    /* `cfunc` 只能**顶层**（且必须有名字）：cfunc 没有闭包/捕获环境，局部声明
+       没有对应运行时形态（它的唯一用途是把函数地址交给 C，或作为
+       `cfunc(...)` 类型的值参与 FFI 边界）。这里给出明确诊断，而不是落到
+       表达式语句的 "expected ';'"。 */
+    if (check_keyword(p, "cfunc")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos,
+            "cfunc definitions are only allowed at top level (a cfunc has no "
+            "closure environment, so a local one has no meaning); declare it "
+            "globally and use `cfunc_ptr(name)` when passing it to C");
+    }
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
     /* foreach：for-each 语法糖（前脱糖展开成索引 for 循环） */
     if (check_keyword(p, "foreach")) return parse_foreach(p);
