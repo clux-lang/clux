@@ -306,7 +306,11 @@ static void *call_for_code_ptr(CompiledClux &unit, const char *fn_name,
     return nullptr;
   }
   value_t *r = value_call(unit.vm, fn, nullptr, 0);
-  if (!r || value_is_error(unit.vm, r) || value_type(r) != unit.vm->type_opaque) {
+  /* cfunc_ptr 现在返回**类型化的 C 函数指针**（cfunc(...)），不再是 opaque；
+     两者都表示"C 函数指针"，测试只关心取出的代码地址。 */
+  if (!r || value_is_error(unit.vm, r) || !value_type(r) ||
+      (value_type(r) != unit.vm->type_opaque &&
+       value_type(r)->kind != TYPE_KIND_CFUNC)) {
     *is_error = true;
     return nullptr;
   }
@@ -406,7 +410,8 @@ TEST_F(FfiCallbackE2E, PureCluxProgramSortsWithCQsortCallback) {
   std::string src =
       std::string("extern lib crt from \"") + kSystemLib +
       "\";\n"
-      "extern cfunc crt::qsort(base: opaque, n: u64, size: u64, cmp: opaque): void;\n"
+      "extern cfunc crt::qsort(base: opaque, n: u64, size: u64,\n"
+      "                        cmp: cfunc(opaque, opaque) -> i32): void;\n"
       "var CALLS: i32 = 0;\n"
       "cfunc cmp(a: opaque, b: opaque): i32 {\n"
       "  CALLS = CALLS + 1;\n"

@@ -23,6 +23,7 @@
  * 保证。设计稿里"cfunc 值自身即 C 函数指针、clux 调用经 ffi_call 走同一个指针"
  * 的形态未采用——clux 侧调用仍走解释器直调（少一次 ABI 往返）。
  */
+#include "vm/type_cfunc.h"
 #include "vm/vm.h"
 #include "vm/function.h"
 #include "vm/type_func.h"
@@ -137,6 +138,18 @@ static void cfunc_closure_handler(void *ret, void **args, void *user) {
 
 #endif /* CLUX_HAVE_LIBFFI */
 
+/* 由 func 签名构造对应的 `cfunc(...)` 类型（C 函数指针）。失败返回 NULL
+ * （调用方回退 opaque，保持可用性）。 */
+static const type_t *cfunc_ptr_result_type(vm_t *vm, const type_t *sig) {
+    if (!vm || !sig || sig->kind != TYPE_KIND_FUNC) return NULL;
+    size_t n = func_type_param_count(sig);
+    const type_t *params[CFUNC_CLOSURE_MAX_ARGS];
+    if (n > CFUNC_CLOSURE_MAX_ARGS) return NULL;
+    for (size_t i = 0; i < n; i++) params[i] = func_type_param(sig, i);
+    return type_cfunc_sig(vm, n > 0 ? params : NULL, n, func_type_return(sig),
+                          /*is_variadic=*/false);
+}
+
 /* ---- 内建函数 `cfunc_ptr(f)` ----
  * 签名（sema 侧同）：variadic + 返回 opaque —— 参数类型在 cfunc 内部自验
  * （与 len/upgrade 同一套路）。返回的 opaque 值 data 即 trampoline 地址。 */
@@ -162,11 +175,16 @@ static value_t *builtin_cfunc_ptr_cfunc(vm_t *vm, func_t *self, size_t argc,
     if (!fn || !fn->cfunc)
         return value_make_error(vm, "cfunc_ptr: function is not callable");
 
+    /* 返回类型 = **对应签名的 cfunc 类型**（不是 opaque）：函数指针在 C 侧就是
+       类型化的指针，FFI 声明里可以直接写 `cmp: cfunc(opaque, opaque) -> i32`。
+       data 仍是 trampoline 地址（指针宽），与 opaque 同形。 */
+    const type_t *cft = cfunc_ptr_result_type(vm, sig);
+
     /* 已创建：复用同一 trampoline（C 侧可比较指针相等，且不重复占可执行内存） */
     if (fn->ffi_closure_code) {
         int64_t raw = (int64_t)(intptr_t)fn->ffi_closure_code;
-        return value_make(vm, vm->type_opaque,
-                          value_alloc_data_copy(vm->alloc, vm->type_opaque, &raw));
+        const type_t *crt = cft ? cft : vm->type_opaque;
+        return value_make(vm, crt, value_alloc_data_copy(vm->alloc, crt, &raw));
     }
 
     if (func_type_is_variadic(sig))
@@ -242,8 +260,9 @@ static value_t *builtin_cfunc_ptr_cfunc(vm_t *vm, func_t *self, size_t argc,
     fn->ffi_closure_code = code;
 
     int64_t raw = (int64_t)(intptr_t)code;
-    return value_make(vm, vm->type_opaque,
-                      value_alloc_data_copy(vm->alloc, vm->type_opaque, &raw));
+    const type_t *cft_rt = cft ? cft : vm->type_opaque;
+    return value_make(vm, cft_rt,
+                      value_alloc_data_copy(vm->alloc, cft_rt, &raw));
 #endif /* CLUX_HAVE_LIBFFI */
 }
 

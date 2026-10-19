@@ -57,6 +57,7 @@
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_func.h"
+#include "vm/type_cfunc.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -2172,6 +2173,9 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
   if (pt->kind == TYPE_KIND_FLOAT) return at == pt; /* 同型（f32/f64 不可混） */
   if (pt == sema->vm->type_opaque)
     return at == sema->vm->type_opaque || type_is_ptr(at) ||
+           /* C 函数指针（cfunc(...)）在 C 里就是裸指针：老声明把它写成
+              `opaque`（如 `cb: opaque`）时仍要能接受 `cfunc_ptr(f)`。 */
+           at->kind == TYPE_KIND_CFUNC ||
            /* 所有权迁移：at 是形参/实参类型（无对应 value），at->ownership
               恒为 OWN_NONE——切片不再经 ownership 放行进 opaque，只靠
               type_is_ptr/type_is_slice 的 kind 判定。保留 false 分支待
@@ -2179,6 +2183,11 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
            (type_is_slice(at) && false) ||
            at->kind == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
+  /* C 函数指针形参（`cfunc(...)`）：接受同型 cfunc、`opaque` 与各种指针
+     （C 里都是裸函数指针/void*）。 */
+  if (pt->kind == TYPE_KIND_CFUNC)
+    return at == pt || at == sema->vm->type_opaque || type_is_ptr(at) ||
+           at->kind == TYPE_KIND_CFUNC;
   /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
      指针/切片等也要求完全一致。**两侧都归一化到 fatal 变体**再比身份：
      只升一侧会永不相等，从而误拒 `fatal *T` 形参接收 `own *T` 变量（两者是
@@ -2823,6 +2832,27 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
       /* len（m4-design §5/§11.3）：注册为 variadic，参数类型不经签名校验——
          此处校验实参是可长序列（array/slice/str）。返回类型由注册签名给出
          （usize），无需替换。 */
+      /* `cfunc_ptr(f)` 的返回类型：按 f 的签名精化为 `cfunc(...)`（C 函数指针），
+         而不是 opaque——这样 FFI 声明可以写真实的函数类型
+         `cmp: cfunc(opaque, opaque) -> i32`，调用点也能按类型检查。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_CFUNC_PTR &&
+          argc == 1 && arg_shadows[0] &&
+          value_type(arg_shadows[0]) &&
+          value_type(arg_shadows[0])->kind == TYPE_KIND_FUNC) {
+        const type_t *fsig = value_type(arg_shadows[0]);
+        size_t n = func_type_param_count(fsig);
+        const type_t *params[16];
+        if (n <= 16) {
+          for (size_t i = 0; i < n; i++) params[i] = func_type_param(fsig, i);
+          const type_t *cft = type_cfunc_sig(sema->vm, n > 0 ? params : NULL, n,
+                                             func_type_return(fsig), false);
+          if (cft) {
+            sema_type_register(sema, cft);
+            return value_make_shadow(sema->vm, cft);
+          }
+        }
+      }
+
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_LEN && argc == 1 &&
           arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);

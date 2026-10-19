@@ -80,6 +80,12 @@ static value_t *opaque_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
     /* 仅同类型身份拷贝（opaque → opaque）；任意指针 → opaque 的隐式转换
        由指针 vtable 提供（ptr_implicit_cast 检测目标为 opaque）。 */
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    /* C 函数指针（cfunc(...)）→ opaque：两者都是裸指针，字节同形。
+       （反向的 opaque → 指针由指针 vtable 的 explicit_cast 承担。） */
+    if (value_type(v) && value_type(v)->kind == TYPE_KIND_CFUNC) {
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
+        return value_make(vm, target, data);
+    }
     if (value_type(v) == target) {
         void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);

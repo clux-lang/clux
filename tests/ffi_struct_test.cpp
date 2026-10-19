@@ -156,7 +156,7 @@ std::string prelude() {
          "extern cfunc td::clux_point_va_sum(n: i32, ...): i32;\n"
          "extern cfunc td::clux_color_next(c: Color): Color;\n"
          "extern cfunc td::clux_greeting(): str;\n"
-         "extern cfunc td::clux_call_point_cb(cb: opaque, x: i32, y: i32): i32;\n"
+         "extern cfunc td::clux_call_point_cb(cb: cfunc(Point) -> Point, x: i32, y: i32): i32;\n"
          "extern var td::td_point: Point;\n"
          "extern var td::td_color: Color;\n"
          "extern var td::td_i32: i32;\n";

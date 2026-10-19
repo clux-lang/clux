@@ -597,6 +597,11 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     case TYPE_KIND_PTR:
         /* fatal/ref 指针都是 C ABI 兼容的指针宽度（own 已在上方按所有权拒绝） */
         return NULL;
+    case TYPE_KIND_CFUNC:
+        /* C 函数指针（`cfunc(i32) -> i32`）：C 侧就是裸函数指针，指针宽，无
+           env/捕获——这正是它区别于 TYPE_KIND_FUNC（clux 函数值，带 env）的
+           地方。FFI 边界**只**允许这个类型。 */
+        return NULL;
     case TYPE_KIND_OPTION:
         return "option has no C representation";
     case TYPE_KIND_UNION:
@@ -752,6 +757,7 @@ const void *ffi_type_for(const type_t *t, const struct vm_t *vm, bool *out_owned
     if (vm && ffi_data_kind_of(t, vm, &dk)) return ffi_data_ffi_type(dk);
     switch (t->kind) {
     case TYPE_KIND_PTR:
+    case TYPE_KIND_CFUNC: /* C 函数指针：与 void* 同宽同传法 */
         return ffi_data_ffi_type(BCODE_FFI_DATA_PTR);
     case TYPE_KIND_ENUM: {
         const type_t *u = enum_type_underlying(t);

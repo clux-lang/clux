@@ -551,7 +551,14 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
     size_t n = vec_len(vm->sig_types);
     for (size_t i = 0; i < n; i++) {
         const func_type_t *other = (const func_type_t *)vec_get(vm->sig_types, i);
+        /* **只与 FUNC-kind 的实例去重**：cfunc 类型也放在 vm->sig_types 池里
+           （按 (kind, 签名) 分池），签名比较不看 kind，若不排除会把 func 签名
+           误配到 cfunc 实例上——实测：先声明 `extern cfunc …(cmp: cfunc(opaque,
+           opaque)->i32)` 后，用户 `cfunc cmp(...)` 定义的符号类型变成
+           cfunc(...)，ex_ident 的 FUNC 分支不再命中，报
+           "variable 'cmp' used before initialization"。 */
         if (other && other != ft && type_is_sealed(&other->base) &&
+            other->base.kind == TYPE_KIND_FUNC &&
             func_sig_eq(&other->sig, &ft->sig)) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 ft 的 type value 由 value_seal 负责

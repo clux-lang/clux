@@ -806,6 +806,26 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+#### FFI 里的函数指针用 `cfunc(...)` 声明（不要写 `opaque`）
+
+C 函数接受/返回函数指针时，签名里应写**真实类型**，而不是 `opaque`：
+
+```c
+// qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *))
+extern cfunc crt::qsort(base: opaque, n: usize, size: usize,
+                        cmp: cfunc(opaque, opaque) -> i32): void;
+
+cfunc cmp(a: opaque, b: opaque): i32 { ... }
+crt::qsort(data(arr), 5, 4, cfunc_ptr(cmp));
+```
+
+- `cfunc(...)` 是 **C 函数指针**：指针宽、无 env，正是 C ABI 允许的形态；
+  `func(...)`（clux 函数值，带 env）**不能**跨 C ABI。
+- `cfunc_ptr(f)` 的返回类型就是 `cfunc(<f 的参数>) -> <f 的返回>`，因此与声明
+  直接匹配；`own`/`ref` 等所有权修饰照常写入（C 侧契约）。
+- 旧写法 `cmp: opaque` 仍然可用（`opaque` 与 `cfunc(...)` 在 C 里都是裸指针，
+  双向隐式转换），但新代码应写真实类型——签名即文档，类型检查也能挡住传错函数。
+
 #### `cfunc(...)` → `func(...)`：自动生成包装
 
 **命名 cfunc** 可以隐式转成 `func(...)`：sema 生成一个**无捕获**的包装函数字面量，

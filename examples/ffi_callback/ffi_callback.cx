@@ -13,6 +13,8 @@
 //      （libffi 生成的 trampoline；同一函数重复取用会复用同一指针）
 //   5. `crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp))` —— 数组地址与函数指针一起交给 C 库
 //      C 侧每次比较都回调进 clux 函数体：libffi trampoline → 解释器 → 返回值回写 C
+//      函数指针参数声明成**真实函数类型** `cfunc(opaque, opaque) -> i32`
+//      （不是 opaque）：签名即文档，类型检查也能挡住传错函数。
 //
 // 比较函数拿到的是元素**地址**（C 的 `const void *`），因此参数声明为 `opaque`
 // 再显式 `as ref *i32` 解引用取值 —— 与 C 里写 `*(const int*)a` 等价。
@@ -27,7 +29,8 @@ extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
 //                          int (*cmp)(const void *, const void *));
-extern cfunc crt::qsort(base: opaque, n: u64, size: u64, cmp: opaque): void;
+extern cfunc crt::qsort(base: opaque, n: u64, size: u64,
+                        cmp: cfunc(opaque, opaque) -> i32): void;
 
 // 回调次数：由 C 侧触发的 clux 函数体修改**模块全局变量**（可写），
 // 用来证明"确实是 C 库在调用我们"。

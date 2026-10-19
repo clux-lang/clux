@@ -2157,3 +2157,30 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       method arg 四例）。
     - 验证：Windows 全量 **2187/2187 PASSED**、examples 54 个 `.cx` 全过；
       WSL2 全量 **2184 passed / 2 skipped**。
+
+91. **FFI：函数指针参数用真实类型 `cfunc(...)` 声明**（2026-10，cfunc 系列的落点）
+    - **动机（用户提出）**：FFI 函数接受函数指针时，不应像老样例那样把参数声明成
+      `opaque`，而应声明**真实函数类型**——签名即文档，类型检查也能挡住传错函数。
+    - **实现**：
+      * `ffi_c_abi_reject_reason_own` 放行 `TYPE_KIND_CFUNC`（C 函数指针，指针宽）；
+        `ffi_type_for` 把它映射到指针描述符。
+      * `ffi_arg_acceptable`：`cfunc(...)` 形参接受同型 cfunc / `opaque` / 指针；
+        `opaque` 形参反过来也接受 `cfunc(...)`（老声明兼容）。
+      * **`cfunc_ptr(f)` 返回类型**精化为 `func` 签名对应的 `cfunc(...)`：
+        VM builtin 用 `type_cfunc_sig` 建值（data 仍是 trampoline 地址），sema 在
+        调用点按实参签名产出同型 shadow 并 `sema_type_register`。
+      * `opaque` vtable 的 `implicit_cast` 接受 cfunc 源（`func get_cb(): opaque
+        { return cfunc_ptr(add); }` 这类老写法继续可用）。
+    - **顺带修的真 bug**：`func_type_seal` 的去重循环没有按 kind 过滤
+      `vm->sig_types` 池（该池同时装 func 与 cfunc 类型，签名比较不看 kind）→
+      先出现 `extern cfunc …(cb: cfunc(...))` 后，用户 `cfunc cmp(...)` 定义的符号
+      类型被误配成 cfunc，`ex_ident` 的 FUNC 分支不再命中，报
+      "variable 'cmp' used before initialization"。
+    - **样例/测试迁移**：`examples/ffi_callback` 的 qsort 声明改为
+      `cmp: cfunc(opaque, opaque) -> i32`；`tests/ffi_callback_e2e_test.cpp`、
+      `tests/driver_module_bcode_test.cpp`（.cxs 程序）、
+      `tests/ffi_struct_test.cpp`（结构体按值回调 `cfunc(Point) -> Point`）同步
+      改成真实函数类型。
+    - **验证**：Windows 全量 **2187/2187 PASSED**、examples 54 个 `.cx` 全过；
+      `examples/ffi_callback` 输出 "qsort called the clux comparator 10 times"；
+      WSL2 全量 **2184 passed / 2 skipped**（Linux 上该样例同样升序、回调 8 次）。
