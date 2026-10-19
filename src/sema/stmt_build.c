@@ -1338,8 +1338,12 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     }
     if (ptypes) ptypes[j] = t; /* 失败置 NULL，位置对齐，签名校验时跳过 */
     if (powns) powns[j] = pown;
+    /* **is_active = true**：参数在函数入口即生效。缺了这个，sema_lookup
+       （只认 is_active 符号）在函数体里找不到参数——`func (a: own *T): i32 {
+       return f(move(a)); }` 会误报 "cannot move a borrowed value" 和
+       "cannot copy a value holding owned resources"（实测）。 */
     sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = t,
-                          .ownership = pown};
+                          .ownership = pown, .is_active = true};
     if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p), "duplicate parameter '%.*s'",
                  (int)vd->name.len, vd->name.ptr);

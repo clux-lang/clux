@@ -2346,6 +2346,23 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
       /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
          实参链）。失败时诊断已记录。 */
       if (!sema_expand_spread_args(sema, call, scope)) return val_void(sema);
+      /* 实参位置的 `cfunc(...)` → `func(...)`：先按被调函数签名把 cfunc 指针
+         实参替换成生成的包装字面量（与变量初始化同一条路径）。只在 callee 是
+         普通函数名时做；方法调用/FFI 各有自己的签名解析路径。 */
+      if (call->callee && call->callee->kind == AST_IDENT && call->args) {
+        sema_symbol_t *cs =
+            sema_lookup(scope, ((ast_ident_t *)call->callee)->name);
+        if (cs && cs->kind == SEMA_SYM_FUNC && cs->type &&
+            cs->type->kind == TYPE_KIND_FUNC) {
+          size_t pi = 0;
+          for (ast_node_t **slot = &call->args; *slot;
+               slot = &(*slot)->next, pi++) {
+            const type_t *pt = func_type_param(cs->type, pi);
+            if (pt && pt->kind == TYPE_KIND_FUNC)
+              sema_maybe_wrap_cfunc_expr(sema, slot, pt, scope);
+          }
+        }
+      }
       /* ---- 方法调用糖（结构体命名空间成员）----
        *   a.b(args)   —— 实例方法：receiver = a（值或指针），self 隐式首参
        *   T::f(args)  —— 静态方法：receiver = T 的 type value，无 self

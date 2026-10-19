@@ -42,6 +42,9 @@
 #include "parser/ast_for.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_owned_type.h"
+#include "parser/ast_slice_type.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_if.h"
 #include "parser/ast_is_tag.h"
@@ -1826,6 +1829,284 @@ static const ast_func_def_t *own_closure_of(ast_node_t *e) {
   return NULL;
 }
 
+/* ===========================================================================
+ * `cfunc(...)` → `func(...)` 隐式转换
+ *
+ * 语义（用户定）：cfunc 形参上的所有权就是**C 侧所有权契约**——
+ *   - `own`：C 函数内部会释放 → 包装体必须 `move(p)` 交出去（否则 clux 与 C
+ *     各释放一次 = double free）；
+ *   - `ref`：C 内部不释放 → 直接传引用；clux 侧继续持有并回收。
+ * 外层 func 的类型**由 cfunc 声明生成**，因此两侧签名（含所有权）必然一致，
+ * 不需要处理不匹配组合。
+ *
+ * 生成的包装是**无捕获**的函数字面量：它按**名字**调用那个 cfunc，所以不需要
+ * 把运行期函数指针捕获进闭包（也就不需要"调用指针"的新指令）。运行期指针
+ * （变量里的 cfunc 值、FFI 返回的函数指针）没有可静态确定的被调者 → 拒绝。
+ * =========================================================================== */
+
+/* `cfunc_ptr(<命名 cfunc>)` / 命名 cfunc 本身 → 该 cfunc 定义的 AST；否则 NULL。 */
+static ast_func_def_t *cfunc_source_def(sema_t *sema, sema_scope_t *scope,
+                                        ast_node_t *expr) {
+  ast_node_t *arg = expr;
+  bool via_ptr = false;
+  if (expr && expr->kind == AST_CALL) {
+    ast_call_t *call = (ast_call_t *)expr;
+    if (!call->callee || call->callee->kind != AST_IDENT) return NULL;
+    strslice_t cn = ((ast_ident_t *)call->callee)->name;
+    if (cn.len != 9 || !cn.ptr || memcmp(cn.ptr, "cfunc_ptr", 9) != 0)
+      return NULL;
+    if (sema_count_siblings(call->args) != 1 || !call->args) return NULL;
+    via_ptr = true;
+    arg = call->args;
+  }
+  if (!arg) return NULL;
+  ast_func_def_t *def = NULL;
+  if (arg->kind == AST_IDENT) {
+    sema_symbol_t *sym = sema_lookup(scope, ((ast_ident_t *)arg)->name);
+    if (sym && sym->kind == SEMA_SYM_FUNC) {
+      if (sym->ast && sym->ast->kind == AST_FUNC_DEF)
+        def = (ast_func_def_t *)sym->ast;
+      else if (sym->fid) {
+        sema_func_t *sf = sema_func_by_id(sema, sym->fid);
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+          def = (ast_func_def_t *)sf->def;
+      }
+    }
+  } else if (arg->kind == AST_FUNC_REF) {
+    sema_func_t *sf = sema_func_by_id(sema, ((ast_func_ref_t *)arg)->fid);
+    if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+      def = (ast_func_def_t *)sf->def;
+  }
+  (void)via_ptr;
+  if (!def || !def->is_cfunc) return NULL;
+  return def;
+}
+
+static strslice_t synth_name(sema_t *sema, const char *s) {
+  size_t len = strlen(s);
+  char *buf = (char *)arena_alloc(sema->arena, len + 1, 1);
+  if (!buf) return STRSLICE_EMPTY;
+  memcpy(buf, s, len + 1);
+  return strslice_from_bytes(buf, len);
+}
+
+/* 所有权修饰 token（合成）：own/ref/fatal。生成的形参类型表达式靠它携带所有权。 */
+static token_t *synth_own_token(sema_t *sema, ownership_t own, ast_node_t *origin) {
+  const char *txt = own == OWN_OWN ? "own"
+                    : own == OWN_REF ? "ref"
+                    : own == OWN_FATAL ? "fatal"
+                    : NULL;
+  if (!txt) return NULL;
+  /* 位置：生成的节点统一归到 origin 的源码位置。 */
+  location_t loc = sema_loc(sema, origin);
+  return (token_t *)arena_token_symbol(sema->arena, txt, &loc);
+}
+
+/* 生成包装函数字面量（无捕获）。所有权/返回类型不匹配返回 NULL（已诊断）。 */
+static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
+                                     const type_t *target, ast_node_t *origin,
+                                     const func_sig_t *src_sig) {
+  const func_sig_t *sig = &((const func_type_t *)target)->sig;
+  size_t nparams = sema_count_siblings(src->params);
+  if (sig->param_count != nparams) {
+    diag_error(sema->diag, sema_loc(sema, origin),
+               "cannot convert cfunc(...) to func(...): the cfunc declares %zu "
+               "parameters but func type has %zu",
+               nparams, sig->param_count);
+    return NULL;
+  }
+
+  uint32_t tb = src->base.tok_begin, te = src->base.tok_end;
+  ast_node_t *params = NULL, *params_last = NULL;
+  ast_node_t *args = NULL, *args_last = NULL;
+  size_t i = 0;
+  for (ast_node_t *sp = src->params; sp; sp = sp->next, i++) {
+    ast_var_def_t *svd = (ast_var_def_t *)sp;
+    const type_t *src_pt = sema_resolve_type_slot(sema, &svd->type_expr);
+    const type_t *tgt_pt = func_type_param(target, i);
+    /* 源所有权以 **cfunc 的签名**为准：pass 3b 时形参 AST 已折叠成
+       AST_TYPE_REF，从 AST 提取会得到 OWN_NONE（只有正式轮才拿得到）。 */
+    ownership_t src_own = (src_sig && src_sig->param_ownerships &&
+                           i < src_sig->param_count)
+                              ? src_sig->param_ownerships[i]
+                              : sema_type_expr_ownership(svd->type_expr);
+    ownership_t tgt_own = sig->param_ownerships ? sig->param_ownerships[i]
+                                                : OWN_NONE;
+    if (!src_pt || !tgt_pt || src_pt != tgt_pt || src_own != tgt_own) {
+      diag_error(sema->diag, sema_loc(sema, origin),
+                 "cannot convert cfunc(...) to func(...): parameter %zu of the "
+                 "cfunc has a different type or ownership",
+                 i + 1);
+      return NULL;
+    }
+
+    char nb[32];
+    snprintf(nb, sizeof nb, "__cfp%zu", i);
+    ast_node_t *tref = sema_ct_type_ref(sema, tgt_pt, origin);
+    if (!tref) return NULL;
+    ast_node_t *texpr = tref;
+    if (tgt_own != OWN_NONE) {
+      /* 所有权修饰必须体现在**类型表达式**上，否则生成的包装签名会丢掉
+         own/ref（sema 从 AST 提取所有权）。形态按被修饰类型分三种：
+           `own *T`    → AST_PTR{own, base_type = T}      （T = 被指向类型）
+           `own []T`   → AST_SLICE_TYPE{own, elem_type = T}
+           `own T`     → AST_OWNED_TYPE{own, base_type = T}（聚合/标量）
+         **注意**要包在 T 上而不是 `*T` 上——否则会生成 `ref **Box`。 */
+      token_t *own_tok = synth_own_token(sema, tgt_own, origin);
+      if (!own_tok) return NULL;
+      if (type_is_ptr(tgt_pt)) {
+        ast_node_t *inner =
+            sema_ct_type_ref(sema, ((const ptr_type_t *)tgt_pt)->base_type, origin);
+        if (!inner) return NULL;
+        ast_node_t *ptr = ast_ptr_new(sema->arena, tb, te);
+        if (!ptr) return NULL;
+        ((ast_ptr_t *)ptr)->ownership = own_tok;
+        ((ast_ptr_t *)ptr)->base_type = inner;
+        texpr = ptr;
+      } else if (type_is_slice(tgt_pt)) {
+        ast_node_t *inner = sema_ct_type_ref(
+            sema, ((const slice_type_t *)tgt_pt)->elem_type, origin);
+        if (!inner) return NULL;
+        ast_node_t *sl = ast_slice_type_new(sema->arena, tb, te);
+        if (!sl) return NULL;
+        ((ast_slice_type_t *)sl)->ownership = own_tok;
+        ((ast_slice_type_t *)sl)->elem_type = inner;
+        texpr = sl;
+      } else {
+        ast_node_t *own_t = ast_owned_type_new(sema->arena, tb, te);
+        if (!own_t) return NULL;
+        ((ast_owned_type_t *)own_t)->ownership = own_tok;
+        ((ast_owned_type_t *)own_t)->base_type = tref;
+        texpr = own_t;
+      }
+    }
+    ast_node_t *vn = ast_var_def_new(sema->arena, tb, te);
+    if (!vn) return NULL;
+    ast_var_def_t *pv = (ast_var_def_t *)vn;
+    pv->name = synth_name(sema, nb);
+    pv->type_expr = texpr;
+    pv->ownership = (uint8_t)tgt_own;
+    if (params_last) params_last->next = vn; else params = vn;
+    params_last = vn;
+
+    ast_node_t *a = ast_ident_new(sema->arena, tb, te);
+    if (!a) return NULL;
+    ((ast_ident_t *)a)->name = synth_name(sema, nb);
+    a->is_generated = true;
+    if (tgt_own == OWN_OWN) {
+      /* own 形参：C 内部会释放 → 必须 move 交出所有权。 */
+      location_t loc = sema_loc(sema, origin);
+      ast_node_t *mvn = ast_move_new(sema->arena, tb, te);
+      if (!mvn) return NULL;
+      ((ast_move_t *)mvn)->op =
+          (token_t *)arena_token_symbol(sema->arena, "move", &loc);
+      ((ast_move_t *)mvn)->operand = a;
+      a = mvn;
+      a->is_generated = true;
+    }
+    if (args_last) args_last->next = a; else args = a;
+    args_last = a;
+  }
+
+  const type_t *tgt_ret = func_type_return(target);
+  const type_t *src_ret =
+      src->return_expr ? sema_resolve_type_slot(sema, &src->return_expr) : NULL;
+  ownership_t src_ret_own =
+      src_sig ? src_sig->return_ownership
+              : (src->return_expr ? sema_type_expr_ownership(src->return_expr)
+                                  : OWN_NONE);
+  if (tgt_ret != src_ret || src_ret_own != sig->return_ownership) {
+    diag_error(sema->diag, sema_loc(sema, origin),
+               "cannot convert cfunc(...) to func(...): return type or "
+               "ownership differs");
+    return NULL;
+  }
+
+  ast_node_t *callee = ast_ident_new(sema->arena, tb, te);
+  if (!callee) return NULL;
+  ((ast_ident_t *)callee)->name = src->name;
+  callee->is_generated = true;
+  ast_node_t *call = ast_call_new(sema->arena, tb, te);
+  if (!call) return NULL;
+  ((ast_call_t *)call)->callee = callee;
+  ((ast_call_t *)call)->args = args;
+  ((ast_call_t *)call)->args_last = args_last;
+
+  ast_node_t *stmt;
+  if (tgt_ret) {
+    stmt = ast_return_new(sema->arena, tb, te);
+    if (stmt) ((ast_return_t *)stmt)->value = call;
+  } else {
+    stmt = ast_expr_stmt_new(sema->arena, tb, te);
+    if (stmt) ((ast_expr_stmt_t *)stmt)->expr = call;
+  }
+  if (!stmt) return NULL;
+  ast_node_t *blk = ast_block_new(sema->arena, tb, te);
+  if (!blk) return NULL;
+  ((ast_block_t *)blk)->stmts = stmt;
+  ((ast_block_t *)blk)->stmts_last = stmt;
+
+  ast_node_t *lit = ast_func_def_new(sema->arena, tb, te);
+  if (!lit) return NULL;
+  ast_func_def_t *fd = (ast_func_def_t *)lit;
+  fd->name = STRSLICE_EMPTY;
+  fd->params = params;
+  fd->params_last = params_last;
+  fd->return_expr = tgt_ret ? sema_ct_type_ref(sema, tgt_ret, origin) : NULL;
+  fd->body = blk;
+  /* **不要**标记 is_generated：sema 会跳过 generated 语句/节点的 walk，
+     参数符号就不会注册，函数体里的 `move(__cfp0)` 解析不到符号。 */
+  return lit;
+}
+
+/**
+ * `*slot` 是 cfunc 指针表达式、目标是 func 类型时，替换成生成的包装字面量。
+ * 变量初始化与**调用实参**共用（两者都是"表达式要变成 func 值"）。
+ * 返回 true 表示已改写。
+ */
+bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
+                                const type_t *target, sema_scope_t *scope) {
+  if (!slot || !*slot) return false;
+  if (!target || target->kind != TYPE_KIND_FUNC) return false;
+  if ((*slot)->kind == AST_UNDEF) return false;
+  ast_func_def_t *src = cfunc_source_def(sema, scope, *slot);
+  if (!src) {
+    /* `cfunc_ptr(<非命名 cfunc>)`：给出针对性诊断（否则落到
+       "cannot initialize ... with opaque"）。 */
+    if ((*slot)->kind == AST_CALL) {
+      ast_call_t *call = (ast_call_t *)*slot;
+      if (call->callee && call->callee->kind == AST_IDENT) {
+        strslice_t cn = ((ast_ident_t *)call->callee)->name;
+        if (cn.len == 9 && cn.ptr && memcmp(cn.ptr, "cfunc_ptr", 9) == 0) {
+          diag_error(sema->diag, sema_loc(sema, *slot),
+                     "cannot convert a C function pointer to func(...): the "
+                     "wrapper is generated from a named cfunc; write "
+                     "`cfunc_ptr(<named cfunc>)`");
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  const sema_type_t *src_st = src->sig_id ? sema_type_by_id(sema, src->sig_id) : NULL;
+  const func_sig_t *src_sig =
+      (src_st && src_st->type && src_st->type->kind == TYPE_KIND_FUNC)
+          ? &((const func_type_t *)src_st->type)->sig
+          : NULL;
+  ast_node_t *lit = gen_cfunc_wrapper(sema, src, target, *slot, src_sig);
+  if (!lit) return true;
+  lit->next = (*slot)->next;
+  *slot = lit;
+  return true;
+}
+
+/** 变量初始化位置的薄封装（保留原调用点写法）。 */
+static void sema_maybe_wrap_cfunc_init(sema_t *sema, ast_var_def_t *vd,
+                                       sema_scope_t *scope,
+                                       const type_t *target) {
+  sema_maybe_wrap_cfunc_expr(sema, &vd->init, target, scope);
+}
+
 static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
@@ -1845,6 +2126,10 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     if (!sym->ct_valid) sema_eval_comptime_var(sema, vd, scope);
     return;
   }
+
+  /* `cfunc(...)` → `func(...)`：生成按名调用 cfunc 的无捕获包装（own 形参
+     自动 move，交给 C 释放）。 */
+  sema_maybe_wrap_cfunc_init(sema, vd, scope, sym->type);
 
   /* §5 锚点解析基础：记录定义所在作用域（own_scope）。作用域标注
      '<p> ref *T 中的 p 解析为符号后取其 own_scope 作锚点作用域。 */

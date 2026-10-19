@@ -338,3 +338,87 @@ TEST(CfuncScope, TopLevelCfuncWorksAsFunctionValue) {
       "}\n",
       "toplevel_cfunc_value");
 }
+
+/* ================================================================ */
+/* cfunc(...) → func(...)：sema 生成无捕获包装                        */
+/* ================================================================ */
+
+TEST(CfuncToFunc, NamedCfuncPtrConverts) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "func main(): i32 {\n"
+      "  var f: func(i32, i32) -> i32 = cfunc_ptr(cmp);\n"
+      "  if (f(5, 3) != 2) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_basic");
+}
+
+TEST(CfuncToFunc, RefParamPassedThrough) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "cfunc peek(a: ref *Box): i32 { return a.*.v; }\n"
+      "func main(): i32 {\n"
+      "  var b = new Box{ .v = 42 };\n"
+      "  var f: func(ref *Box) -> i32 = cfunc_ptr(peek);\n"
+      "  if (f(b.*.&) != 42) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_ref");
+}
+
+TEST(CfuncToFunc, OwnParamMovedIntoWrapper) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "cfunc take(a: own *Box): i32 { return a.*.v; }\n"
+      "func main(): i32 {\n"
+      "  var b = new Box{ .v = 43 };\n"
+      "  var g: func(own *Box) -> i32 = cfunc_ptr(take);\n"
+      "  if (g(move(b)) != 43) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_own");
+}
+
+/* 手写等价的字面量（own 形参 + move 传参）也必须工作：字面量参数符号要
+   is_active，否则 sema_lookup 找不到参数，误报 "cannot move a borrowed
+   value" */
+TEST(CfuncToFunc, LiteralOwnParamMove) {
+  clux_expect_ok(
+      "struct Box { v: i32; }\n"
+      "cfunc take(a: own *Box): i32 { return a.*.v; }\n"
+      "func main(): i32 {\n"
+      "  var f = func (a: own *Box): i32 { return take(move(a)); };\n"
+      "  var b = new Box{ .v = 44 };\n"
+      "  if (f(move(b)) != 44) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_literal");
+}
+
+/* 调用实参位置同样自动转换（`apply(cfunc_ptr(cmp))`） */
+TEST(CfuncToFunc, CallArgumentPosition) {
+  clux_expect_ok(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "func apply(f: func(i32, i32) -> i32): i32 { return f(10, 20); }\n"
+      "func main(): i32 {\n"
+      "  if (apply(cfunc_ptr(cmp)) != -10) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_arg");
+}
+
+/* 运行期指针（非命名源）必须给出针对性诊断 */
+TEST(CfuncToFunc, RuntimePointerRejected) {
+  std::string path = write_temp_file(
+      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
+      "func main(): i32 {\n"
+      "  var p: opaque = cfunc_ptr(cmp);\n"
+      "  var f: func(i32, i32) -> i32 = p;\n"
+      "  return 0;\n"
+      "}\n",
+      "cfunc2func_runtime_ptr");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  std::remove(path.c_str());
+}

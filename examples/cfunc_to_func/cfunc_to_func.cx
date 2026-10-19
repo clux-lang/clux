@@ -1,0 +1,61 @@
+// cfunc_to_func.cx — `cfunc(...)` 显式/隐式转成 `func(...)`
+//
+// 背景：`cfunc` 是 **C 函数指针**（无捕获环境），`func` 是 clux 函数值（带 env）。
+// 二者类型不同、不可直接互换；但**命名 cfunc** 可以转成 func——sema 生成一个
+// **无捕获的包装函数字面量**，按名字调用那个 cfunc：
+//
+//   var f: func(i32, i32) -> i32 = cfunc_ptr(cmp);
+//     ⇒ var f: func(i32, i32) -> i32 = func (__cfp0: i32, __cfp1: i32): i32 {
+//           return cmp(__cfp0, __cfp1);
+//       };
+//
+// 所有权（cfunc 形参上的修饰就是 C 侧契约）：
+//   - `own`：C 函数内部会释放 → 包装体自动 `move(p)` 把所有权交给 C
+//     （`func aaa(a0: own *i32): i32 { return bbb(move(a0)); }`）；
+//   - `ref`：C 内部不释放（借用）→ 包装体直接传引用，clux 侧继续持有。
+//
+// 限制：只有**命名 cfunc**（必然在顶层）能转——包装体按名字调用它，不需要把
+// 运行期指针捕获进闭包。运行期函数指针（变量里的 cfunc 值、FFI 返回的函数指针）
+// 没有可静态确定的被调者，会报错。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+struct Box {
+    v: i32;
+}
+
+// 纯标量 cfunc
+cfunc cmp(a: i32, b: i32): i32 { return a - b; }
+
+// ref 形参：C 内部不释放
+cfunc peek(a: ref *Box): i32 { return a.*.v; }
+
+// own 形参：C 内部释放（这里只读，真实 C 函数会 free）
+cfunc take(a: own *Box): i32 { return a.*.v; }
+
+func apply(f: func(i32, i32) -> i32): i32 { return f(10, 20); }
+
+func main(): i32 {
+    // ① 标量签名：cfunc_ptr(cmp) → func
+    var f: func(i32, i32) -> i32 = cfunc_ptr(cmp);
+    libc::printf("f(5, 3) = %d\n", f(5, 3));
+
+    // ② 也能传给高阶函数
+    libc::printf("apply(cfunc_ptr(cmp)) = %d\n", apply(cfunc_ptr(cmp)));
+
+    // ③ ref 形参：借用传递
+    var b = new Box{ .v = 42 };
+    var g: func(ref *Box) -> i32 = cfunc_ptr(peek);
+    libc::printf("g(&b) = %d\n", g(b.*.&));
+
+    // ④ own 形参：包装体 move 交给 C
+    var c = new Box{ .v = 43 };
+    var h: func(own *Box) -> i32 = cfunc_ptr(take);
+    libc::printf("h(move(c)) = %d\n", h(move(c)));
+
+    if (f(5, 3) != 2) { return 1; }
+    if (apply(cfunc_ptr(cmp)) != -10) { return 2; }
+    if (g(b.*.&) != 42) { return 3; }
+    return 0;
+}

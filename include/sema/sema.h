@@ -662,6 +662,10 @@ uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn);
  */
 sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid);
 
+/** `cfunc(...)` → `func(...)`：把表达式槽位替换成生成的包装字面量（实参/初始化共用）。 */
+bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
+                                const type_t *target, sema_scope_t *scope);
+
 #ifdef __cplusplus
 }
 #endif

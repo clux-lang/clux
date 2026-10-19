@@ -2115,3 +2115,29 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       组合泄漏、`FuncTypeExpressionOwnershipMatches` 复现装饰器报错）；
       Windows 全量 **2177/2177 PASSED**、examples 53 个 `.cx` 全过；所有探针
       程序（`leak_split` / `leak_probe2` / `own_param_probe4` 等）泄漏计数为 0；WSL2 全量 **2174 passed / 2 skipped**。
+
+89. **`cfunc(...)` → `func(...)`：sema 生成无捕获包装**（2026-10，完成第 85 项）
+    - **语义（用户定）**：cfunc 形参上的所有权就是 **C 侧契约**——`own` 表示 C 内部
+      会释放 → 包装体必须 `move(p)` 交出所有权；`ref` 表示 C 不释放 → 直接传引用。
+      外层 func 的类型由 cfunc 声明生成，两侧签名（类型 + 所有权）必然一致。
+    - **实现**：
+      * `cfunc_source_def`：把 `cfunc_ptr(<命名 cfunc>)`（或命名 cfunc 本身）解析到
+        cfunc 定义的 AST（兼容 AST_IDENT 与已折叠的 AST_FUNC_REF）。
+      * `gen_cfunc_wrapper`：生成**无捕获**函数字面量
+        `func (__cfp0: T0, …): R { return <cfunc>(move(__cfp0), …); }`。形参类型表达式
+        按种类重建：`own *T` → AST_PTR{own, T}、`own []T` → AST_SLICE_TYPE、
+        `own T` → AST_OWNED_TYPE（所有权在 AST 上，sema 从 AST 读）；
+        所有权 token 用 `arena_token_symbol` 合成。
+      * 接入两处：变量初始化（`shadow_var_def`）与**调用实参**（`ex_call` 顶部按
+        被调函数签名逐位包装，`sema_maybe_wrap_cfunc_expr` 两个位置共用）。
+      * 签名校验：参数类型与所有权、返回类型与所有权都必须与 cfunc 声明一致；
+        类型表达式里的 `func(ref *T)` 也带所有权（第 88 项）。
+      * 运行期指针（非命名源）报针对性诊断。
+    - **顺带修复的真 bug**：`sema_check_func_literal` 注册字面量参数时漏了
+      `is_active = true`，而 `sema_lookup` 只认 active 符号——导致**任何**函数字面量
+      引用自己的参数都解析不到（实测 `func (a: own *Box): i32 { return take(move(a)); }`
+      误报 "cannot move a borrowed value"）。补上后字面量参数正常。
+    - **测试**：`CfuncToFunc.*` 6 例（标量转换 / ref 直传 / own 自动 move / 手写字面量 /
+      调用实参 / 运行期指针拒绝）；新示例 `examples/cfunc_to_func`（入口目录 44 → 45）。
+    - **验证**：Windows 全量 **2183/2183 PASSED**、examples 54 个 `.cx` 全过、fmt 幂等；
+      WSL2 全量 **2180 passed / 2 skipped**。

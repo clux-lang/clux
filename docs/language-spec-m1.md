@@ -806,6 +806,36 @@ func main(): i32 {
   （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
 - 其余内建函数（`len` / `upgrade` / `cfunc_ptr`）保持不变。
 
+#### `cfunc(...)` → `func(...)`：自动生成包装
+
+**命名 cfunc** 可以隐式转成 `func(...)`：sema 生成一个**无捕获**的包装函数字面量，
+按名字调用那个 cfunc（所以不需要把运行期指针捕获进闭包）：
+
+```c
+cfunc cmp(a: i32, b: i32): i32 { return a - b; }
+
+var f: func(i32, i32) -> i32 = cfunc_ptr(cmp);
+// 等价于：
+var f: func(i32, i32) -> i32 = func (__cfp0: i32, __cfp1: i32): i32 {
+    return cmp(__cfp0, __cfp1);
+};
+```
+
+**所有权**：cfunc 形参上的修饰就是 **C 侧所有权契约**，包装体按它处理——
+
+| cfunc 形参 | 含义 | 包装体 |
+|---|---|---|
+| `own *T` / `own []T` | C 函数**内部释放**该参数 | 自动 `move(p)` 把所有权交给 C |
+| `ref *T` | C 内部**不释放**（借用） | 直接传引用；clux 侧继续持有并回收 |
+
+两侧签名（类型 + 所有权）必然一致——外层 `func` 的类型由 cfunc 声明生成；不一致
+会直接报错。转换在**变量初始化**与**调用实参**位置都生效
+（`apply(cfunc_ptr(cmp))`）。
+
+**限制**：只有命名 cfunc（必然在顶层）能转；运行期函数指针（变量里的 cfunc 值、
+FFI 返回的函数指针）没有可静态确定的被调者 → 报错
+``cannot convert a C function pointer to func(...): the wrapper is generated from a named cfunc``。
+
 #### `cfunc` 定义只能在顶层
 
 `cfunc` 定义（C ABI 函数，可交给 C 用）**只能声明在顶层，且必须有名字**：
