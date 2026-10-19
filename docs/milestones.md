@@ -2029,12 +2029,16 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       闭包，局部声明没有运行时形态。`parse_stmt` 遇到语句位置的 `cfunc` 直接报
       `cfunc definitions are only allowed at top level (...)`（此前落到表达式语句
       的 "expected ';'"）。language-spec 已写入该约束。
-    - **设计结论（2026-10，用户指正）**：`cfunc(...)` → `func(...)` 的隐式转换
-      **必须拒绝 `own` 形参**。C 函数没有所有权语义（C 侧可能接管、也可能只读），
-      包装体把 own 值交给 C 之后，clux 侧与 C 侧谁释放无法静态确定 → 直接传
-      own 必然 double free 或泄漏。因此转换仅允许**非 owning** 形参/返回值
-      （`ref *T` / 裸指针 / opaque / 标量），错误信息提示改用 `ref *T`。
-      推论：包装体因此**不需要**合成 `move(...)`，比最初设想更简单。
+    - **设计结论（2026-10，用户两次指正后的最终语义）**：cfunc 形参上的所有权
+      修饰就是**C 侧所有权契约**：
+      * `own` = 该 C 函数**内部释放**这个参数 → 包装体必须 `move(p)` 交出去
+        （`func aaa(a0: own *i32): i32 { return bbb(move(a0)); }` 里的 move
+        是**必须的**，否则 clux 侧与 C 侧各释放一次 = double free）；
+      * `ref` = C 内部**不释放** → 直接传引用；clux 侧继续持有并在作用域结束时
+        释放（目标形参是 own 时，包装体自己负责回收）。
+      因此转换**允许** own 形参，只是包装体按 cfunc 声明的所有权逐个决定
+      "move 还是直接传"；不匹配的组合（目标 `ref` ↔ cfunc `own`，即 C 会释放
+      一个 clux 不拥有的借用）才拒绝。
     - **实现进展与卡点（同日，未提交）**：sema 侧"命名源 → 无捕获包装函数
       字面量"的骨架已写好（参数/返回从 `func_sig_t` 取、C ABI 兼容用
       `ffi_arg_acceptable`、包装体 `return cmp(a0, a1);`），`var f: func(...)
