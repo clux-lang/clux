@@ -1,5 +1,6 @@
 #include "sema/sema.h"
 #include "sema/struct_compose.h" /* 结构体组合（`...Base;`）pass */
+#include "vm/type_cfunc.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
@@ -504,6 +505,11 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                              ? resolve_type_expr(sema, ft->return_type)
                              : NULL;
       if (ft->return_type && !rt) return NULL;
+      /* `cfunc(...)` = **C 函数指针**（无 env）：独立类型，与 func(...) 互不
+         兼容（用户要求"不互通"）。只在 FFI 边界出现。 */
+      if (ft->is_c_abi)
+        return type_cfunc_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
+                              /*is_variadic=*/false);
       return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, NULL, n, rt,
                            OWN_NONE, /*is_variadic=*/false);
     }

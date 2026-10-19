@@ -2,6 +2,7 @@
 #include "core/panic.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
+#include "vm/type_cfunc.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
@@ -140,6 +141,12 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       /* PUSH_FUNC_TYPE 压开放签名对象 → DEFINE_TYPE <id> 声明登记（不设
          参数/返回字段；签名引用签名时开放对象已可 LOAD_TYPE 拉回） */
       bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
+    case TYPE_KIND_CFUNC:
+      /* cfunc（C 函数指针签名）：同一套两步模型，open 类型是 CFUNC kind。 */
+      bcode_write_op(c->bc, BCODE_PUSH_CFUNC_TYPE);
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
@@ -353,7 +360,7 @@ static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
  * 不会与 sema 既有类型去重的类型，身份稳定。 */
 static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
                         size_t count) {
-  const type_t *t = st->type;
+  const type_t *t = st->type; /* FUNC 或 CFUNC：两条协议完全同构 */
 
   emit_load_type(c, st->id);               /* 栈: [open_func_type] */
 
@@ -378,6 +385,33 @@ static void define_func(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_seal(c);                            /* 密封签名（去重时重绑登记） */
   /* 参数/返回也先定义依赖（见 emit_dep_type 的说明）：签名自身 layout 恒定，
      但内部类型的**身份**必须先定型，否则 seal 去重回收会留下悬垂基底。 */
+}
+
+/* cfunc 定义：与 define_func 同构（LOAD_TYPE → 逐个参数 → 返回 → SEAL），
+ * 签名从 cfunc_type_sig 取（func_type_* 访问器只认 TYPE_KIND_FUNC）。 */
+static void define_cfunc(compiler_t *c, const sema_type_t *st, uint8_t *done,
+                         size_t count) {
+  const type_t *t = st->type;
+  const func_sig_t *sig = cfunc_type_sig(t);
+  if (!sig) return;
+
+  emit_load_type(c, st->id); /* 栈: [open_cfunc_type] */
+  for (size_t i = 0; i < sig->param_count; i++) {
+    const type_t *pt = sig->params ? sig->params[i] : NULL;
+    if (!pt) continue;
+    emit_ref_dep_type(c, pt, done, count); /* 栈: [open, param] */
+    bcode_write_op(c->bc, BCODE_FUNC_TYPE_PARAM);
+    st_push(c, -1);
+  }
+  if (sig->return_type) {
+    emit_ref_dep_type(c, sig->return_type, done, count);
+    bcode_write_op(c->bc, BCODE_FUNC_TYPE_RETURN);
+    st_push(c, -1);
+  }
+  if (sig->is_variadic) {
+    bcode_write_op(c->bc, BCODE_FUNC_TYPE_VARARG);
+  }
+  emit_seal(c);
 }
 
 /* 限定符（const/volatile）定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 sub 先
@@ -668,6 +702,9 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       break;
     case TYPE_KIND_FUNC:
       define_func(c, st, done, count);
+      break;
+    case TYPE_KIND_CFUNC:
+      define_cfunc(c, st, done, count);
       break;
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE:

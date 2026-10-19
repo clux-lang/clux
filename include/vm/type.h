@@ -51,6 +51,10 @@ typedef enum type_kind_t {
     TYPE_KIND_SLICE,     /* []T：切片胖指针（own/ref/fatal 由 ownership 区分） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
     TYPE_KIND_MODULE,    /* 模块命名空间值（M5，data=module_t*，不可实例化/赋值/传递） */
+TYPE_KIND_CFUNC,     /* cfunc(P…) -> R：**C 函数指针**（无 env，size=指针）。
+                        与 TYPE_KIND_FUNC（clux 函数值，带 env）**互不兼容**；
+                        仅用于 FFI 边界（extern cfunc 的参数/返回值、
+                        extern var 的类型）。data = 裸代码指针。 */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
 } type_kind_t;
 

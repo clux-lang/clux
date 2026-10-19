@@ -3,6 +3,7 @@
 #include "vm/value.h"
 #include "vm/value_owncopy.h"  /* value_own_copy_into（构造字段写入） */
 #include "vm/type.h"
+#include "vm/type_cfunc.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
 #include "vm/type_option.h"
@@ -518,13 +519,19 @@ static value_t *op_set_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
 /* ---- func type 构造（与 array type 统一：PUSH → SET → SEAL） ---- */
 
 /* PUSH_FUNC_TYPE：分配空 func type 入池并压其 type value */
+static value_t *op_push_cfunc_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    cfunc_type_push(vm); /* 压入**开放** cfunc 类型（与 PUSH_FUNC_TYPE 同构） */
+    return NULL;
+}
+
 static value_t *op_push_func_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     func_type_push(vm);  /* 压入 func type 的 type value（见 func_type_push） */
     return NULL;
 }
 
-/* 取栈顶的 func type（调用前已确保其为当前构造目标，位于栈顶） */
+/* 取栈顶的**签名类型**（func 或 cfunc；调用前已确保它是当前构造目标） */
 static const type_t *stack_top_func_type(vm_t *vm) {
     value_t *ftv = exec_stack_peek(vm, 0);
     return (ftv && value_type(ftv) == vm->type_type)
@@ -538,7 +545,10 @@ static value_t *op_func_type_param(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *pv = exec_stack_pop(vm);
     const type_t *param = *(const type_t **)value_data(pv);
     const type_t *ft = stack_top_func_type(vm);
-    func_type_add_param(vm, ft, param);
+    if (type_is_cfunc(ft))
+        cfunc_type_add_param(vm, ft, param);
+    else
+        func_type_add_param(vm, ft, param);
     return NULL;
 }
 
@@ -548,7 +558,10 @@ static value_t *op_func_type_return(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *rv = exec_stack_pop(vm);
     const type_t *ret = *(const type_t **)value_data(rv);
     const type_t *ft = stack_top_func_type(vm);
-    func_type_set_return(vm, ft, ret);
+    if (type_is_cfunc(ft))
+        cfunc_type_set_return(vm, ft, ret);
+    else
+        func_type_set_return(vm, ft, ret);
     return NULL;
 }
 
@@ -556,7 +569,10 @@ static value_t *op_func_type_return(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static value_t *op_func_type_vararg(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     const type_t *ft = stack_top_func_type(vm);
-    func_type_set_variadic(vm, ft, true);
+    if (type_is_cfunc(ft))
+        cfunc_type_set_variadic(vm, ft, true);
+    else
+        func_type_set_variadic(vm, ft, true);
     return NULL;
 }
 
@@ -2868,6 +2884,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_TAKE_SLOT]       = op_take_slot,
     [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
     [BCODE_PUSH_USIZE]      = op_push_usize,
+    [BCODE_PUSH_CFUNC_TYPE] = op_push_cfunc_type,
 };
 
 /* ================================================================ */

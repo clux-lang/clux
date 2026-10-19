@@ -329,6 +329,10 @@ typedef enum {
      * 结构体字段构造、FFI 实参类型）会因"类型不匹配"失败。操作数固定 8 字节，
      * 因此 `.cxb` 仍可跨架构搬运：32 位宿主读入后按 usize=u32 截断。 */
     BCODE_PUSH_USIZE,       /* U64 立即数 → usize 值（宽度 = 平台指针宽度） */
+    BCODE_PUSH_CFUNC_TYPE,  /* 无操作数：压入一个**开放**的 cfunc 类型
+                               （TYPE_KIND_CFUNC，C 函数指针）；后续用
+                               FUNC_TYPE_PARAM/RETURN 追加签名、SEAL 密封。
+                               与 PUSH_FUNC_TYPE 的区别只在类型 kind。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

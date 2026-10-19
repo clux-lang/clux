@@ -1997,3 +1997,32 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
         缺字段/struct→数组/切片/容器往返/fmt），示例扩展为十种形态。
       * 验证：Windows 全量 **2166/2166 PASSED**；examples 52 个 `.cx` 全过；
         fmt 幂等且保留构造里的 `...`；WSL2 Ubuntu 全量 **2163 passed / 2 skipped**。
+
+85. **`cfunc(...)` 类型：C 函数指针（类型层，WIP）**（2026-10）
+    - **需求（用户提出）**：FFI 类型优化——支持 `cfunc(i32, i32) -> i32` 形式的
+      类型（本质是 C 函数指针），与 `func(i32, i32) -> i32`（clux 函数值，**带
+      env**）**互不互通**；FFI 边界只允许 C 函数指针形态。
+    - **已落地（本轮）**：
+      * 解析：`cfunc(...)` 作为类型表达式（`AST_FUNC_TYPE.is_c_abi`），与
+        `func(...)` 同一生成式入口。
+      * 新类型 kind `TYPE_KIND_CFUNC`：`cfunc_type_t { base; func_sig_t sig; }`，
+        size/align = 指针宽，vtable `VTABLE_CFUNC`（指针语义：平凡拷贝、指针
+        相等、`implicit_cast` → opaque），**按签名 intern 去重**，与
+        `TYPE_KIND_FUNC` 是不同类型（身份比较永不相等）。
+      * 运行期构造协议与 func 同构：`PUSH_CFUNC_TYPE`（新字节码）+
+        `FUNC_TYPE_PARAM/RETURN/VARARG`（按栈顶类型 kind 分派）+
+        `SEAL`（vtable 的 `type_seal` → `cfunc_type_seal`）；compiler 的
+        hoist 声明/定义两遍、`compile_type_expr` 都已接入。
+      * `type Cmp = cfunc(opaque, opaque) -> i32;` 可用，`sizeof(Cmp) = 8`。
+    - **待办（下一步）**：
+      1. sema 全面拒绝 `func(...)` ↔ `cfunc(...)` 的赋值/传参/返回/字段/初始化
+         （目前 `var d: Cmp = add;` 会漏到运行期报
+         "type does not support implicit cast"，需要在 sema 的槽位校验里加
+         显式判据与"func 带 env"的提示）。
+      2. FFI 编组：`extern cfunc` 的参数/返回值、`extern var` 的类型、
+         `cfunc_ptr(f)` 的返回类型（改用 cfunc 而非 opaque）、EXTERN_CALL 的
+         实参/返回值（指针描述符）。
+      3. `cfunc` 值的调用（可选，需新指令走 libffi）；当前若直接调用会报
+         "cannot call value of type cfunc(...)"。
+      4. 测试 + language-spec/m6-design 文档。
+    - 验证（本轮）：Windows 全量 **2166/2166 PASSED**（既有用例零回归）。

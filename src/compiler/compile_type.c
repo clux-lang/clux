@@ -231,7 +231,9 @@ void compile_type_expr(compiler_t *c, ast_node_t *type_expr) {
        （types_by_id 幂等），语义无害。 */
     ast_func_type_t *ft = (ast_func_type_t *)type_expr;
 
-    bcode_write_op(c->bc, BCODE_PUSH_FUNC_TYPE); /* 栈: [open_func_type] */
+    /* `cfunc(...)`：同一套两步协议，只是 open 类型是 C 函数指针（无 env）。 */
+    bcode_write_op(c->bc, ft->is_c_abi ? BCODE_PUSH_CFUNC_TYPE
+                                       : BCODE_PUSH_FUNC_TYPE);
     st_push(c, 1);
 
     uint32_t tid = temp_type_id(c, type_expr);

@@ -41,6 +41,7 @@
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
+#include "vm/type_cfunc.h"
 #include "vm/type_func.h"
 #include "vm/type_ptr.h"
 #include "vm/type_struct.h"
@@ -626,9 +627,13 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                 return ctfe_err(ctx, "ctfe: func return type must be a type");
             ret = value_as(rt, const type_t *);
         }
-        const type_t *sig = type_func_sig(vm, np > 0 ? params_arr : NULL,
-                                          NULL, np, ret, OWN_NONE,
-                                          /*is_variadic=*/false);
+        /* `cfunc(...)` = C 函数指针类型（无 env）；与 func(...) 互不兼容。 */
+        const type_t *sig =
+            n->is_c_abi
+                ? type_cfunc_sig(vm, np > 0 ? params_arr : NULL, np, ret,
+                                 /*is_variadic=*/false)
+                : type_func_sig(vm, np > 0 ? params_arr : NULL, NULL, np, ret,
+                                OWN_NONE, /*is_variadic=*/false);
         if (!sig)
             return ctfe_err(ctx, "ctfe: failed to construct function signature type");
         return type_as_value(vm, sig);

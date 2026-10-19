@@ -22,6 +22,7 @@
 #include "parser/ast_array.h"
 #include "parser/ast_tuple.h"
 #include "parser/ast_func_def.h"
+#include "parser/ast_func_type.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
 #include "parser/ast_scope_ref.h"
@@ -270,6 +271,15 @@ ast_node_t *parse_primary(parser_t *p) {
     if (check_keyword(p, "func")) {
         node = parse_func_like(p, AST_FUNC_TYPE, "func");
         if (node) return node;
+    }
+    /* `cfunc(...) -> T`：C 函数指针类型（FFI 边界专用；与 func 互不兼容）。 */
+    if (check_keyword(p, "cfunc")) {
+        node = parse_func_like(p, AST_FUNC_TYPE, "cfunc");
+        if (node) {
+            if (node->kind == AST_FUNC_TYPE)
+                ((ast_func_type_t *)node)->is_c_abi = true;
+            return node;
+        }
     }
 
     node = parse_bool_lit(p);    if (node) return node;
