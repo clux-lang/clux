@@ -187,3 +187,45 @@ TEST(Reflect, OwnershipKeysRemoved) {
       << err;
   std::remove(path.c_str());
 }
+
+/* 所有权成为类型修饰后，type 定义可把它记进类型（P1a）：
+   `type X = own i32;` → X.kind = "own"、X.ownership = "own"、
+   X.unqualified 剥回 i32；布局与 i32 相同（运行期剥离/穿透，零行为）。 */
+TEST(Reflect, OwnershipAsType) {
+  clux_expect_ok(
+      "type O = own i32;\n"
+      "type R = ref *i32;\n"
+      "type FA = fatal i32;\n"
+      "func main(): i32 {\n"
+      "  if (O.kind != \"own\") { return 1; }\n"
+      "  if (O.ownership != \"own\") { return 2; }\n"
+      "  if (O.size != 4usize) { return 3; }\n"                  /* 布局 = 底层 */
+      "  if (O.unqualified.name != \"i32\") { return 4; }\n"
+      "  if (O.unqualified.kind != \"int\") { return 5; }\n"
+      "  if (R.kind != \"ref\") { return 6; }\n"
+      "  if (R.ownership != \"ref\") { return 7; }\n"
+      "  if (R.target_type.name != \"i32\") { return 8; }\n"     /* 属性穿透到 sub */
+      "  if (FA.kind != \"fatal\") { return 9; }\n"
+      "  if (FA.ownership != \"fatal\") { return 10; }\n"
+      "  if (i32.ownership != \"none\") { return 11; }\n"
+      "  return 0;\n"
+      "}\n",
+      "reflect_ownership_type");
+}
+
+/* 所有权类型参与签名：`type F = func(own i32) -> fatal i32;` 的形参/返回类型
+   各自带所有权修饰（同名 key 在 func 上仍然工作）。 */
+TEST(Reflect, OwnershipInSignature) {
+  clux_expect_ok(
+      "struct S { x: i32; }\n"
+      "type P = own *S;\n"
+      "type F = func(P) -> i32;\n"
+      "func main(): i32 {\n"
+      "  if (P.kind != \"own\") { return 1; }\n"
+      "  if (P.target_type.name != \"S\") { return 2; }\n"
+      "  if (F.param_type(0).ownership != \"own\") { return 3; }\n"
+      "  if (F.param_type(0).kind != \"own\") { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "reflect_ownership_sig");
+}

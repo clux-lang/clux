@@ -214,6 +214,13 @@ void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub) {
         case TYPE_KIND_VOLATILE:
             ((volatile_type_t *)t)->sub = sub;
             break;
+        /* 所有权修饰（own/ref/fatal）：也是限定，SET_TYPE 设 sub；SEAL 时按
+           "运行期剥离"直接返回 sub（所有权零运行期行为）。 */
+        case TYPE_KIND_OWN:
+        case TYPE_KIND_REF:
+        case TYPE_KIND_FATAL:
+            ((ownership_type_t *)t)->sub = sub;
+            break;
         default:
             break; /* 非限定类型静默忽略 */
     }

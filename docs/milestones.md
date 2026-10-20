@@ -2363,3 +2363,21 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       剥链与 ownership_of 穿透、相等与不隐式兼容）。
     - **验证**：Windows 全量 **2230/2230 PASSED**、examples 全过；
       WSL2 全量 **2227 passed / 2 skipped**。
+
+101. **所有权升级为类型构造 · P1a：类型定义把所有权记进类型**（2026-10）
+    - `sema_eval_type_def`：RHS 带所有权修饰（`own i32` / `ref *i32` / `fatal i32`）时，
+      把解析出的裸类型包成 `own T` / `ref T` / `fatal T` 再登记。于是
+      `type O = own i32;` 之后 `O.kind == "own"`、`O.ownership == "own"`、
+      `O.unqualified.name == "i32"`、`O.size == 4`（布局与底层相同），`O.target_type`
+      等属性 key 自动穿透（与 const/volatile 同一套 `unqualified`/穿透规则）。
+    - 签名里的所有权类型同样成立：`type F = func(own *S) -> i32;` 的
+      `F.param_type(0).ownership == "own"`。
+    - **运行期剥离（用户规则）**：新增 `PUSH_OWN` / `PUSH_REF` / `PUSH_FATAL` 三个开放
+      构造字节码（与 PUSH_CONST 同构），`SET_TYPE sub` 后 **SEAL 直接返回 sub**——
+      程序 id 映射到裸类型实例，运行期不保留所有权修饰、零行为；
+      `type_qual_set_sub` 扩展覆盖这三种 kind。
+    - 语义不变：类型定义只是把"本来靠 value-state/AST 记录的所有权"记进类型；
+      值判定仍是旧机制（P2 才切换），Windows 全量 2230 → **2232** 全绿。
+    - **测试**：`Reflect.OwnershipAsType`（kind/ownership/size/unqualified/穿透）、
+      `Reflect.OwnershipInSignature`（签名形参所有权）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**、examples 全过。

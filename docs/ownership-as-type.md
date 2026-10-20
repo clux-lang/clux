@@ -96,7 +96,7 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
   新增 `ownership`（`"own"/"ref"/"fatal"/"none"`）与 `unqualified` 剥修饰。
 - 此阶段不构造任何新类型 → 行为零变化；测试覆盖 intern/剥修饰/反射 key。
 
-### P1 类型解析产出所有权类型（并行期）
+### P1 类型解析产出所有权类型（并行期）—— 🚧 P1a 已完成（2026-10）
 - `sema_resolve_type_slot` / 类型表达式解析：`own T` → `own T` 类型；函数参数、返回、
   字段、`?T`、切片/数组元素、`cfunc(...)` 签名全部按类型记录。
 - 与此同时**保留** value-state 机制照常工作（两套并行）——测试断言

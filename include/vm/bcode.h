@@ -103,6 +103,11 @@ typedef enum {
     BCODE_CREATE_CONST,    /* 弹 type value → type_const_intern → type value 压回 */
     BCODE_CREATE_VOLATILE, /* 弹 type value → type_volatile_intern → type value 压回 */
     BCODE_PUSH_CONST,      /* 分配空 const type（开放，sub=NULL，不入池）+ 压其 type value */
+    /* 所有权修饰的开放构造（own/ref/fatal）。SEAL 时**剥成裸类型**：运行期
+       不保留所有权修饰（docs/ownership-as-type.md §2.5），组装出的类型就是 sub。 */
+    BCODE_PUSH_OWN,        /* 分配空 own type（开放，sub=NULL） */
+    BCODE_PUSH_REF,        /* 分配空 ref type（开放，sub=NULL） */
+    BCODE_PUSH_FATAL,      /* 分配空 fatal type（开放，sub=NULL） */
     BCODE_PUSH_VOLATILE,   /* 分配空 volatile type（开放，sub=NULL，不入池）+ 压其 type value */
     BCODE_PUSH_OPT,        /* 分配空 optional type（开放，inner=NULL，不入池）+ 压其 type value */
     BCODE_PUSH_ENUM,       /* 分配空 enum type（开放，underlying=NULL，不入池）+ 压其 type value */

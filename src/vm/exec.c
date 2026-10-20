@@ -3,6 +3,7 @@
 #include "vm/value.h"
 #include "vm/value_owncopy.h"  /* value_own_copy_into（构造字段写入） */
 #include "vm/type.h"
+#include "vm/type_ownership.h"
 #include "vm/type_cfunc.h"
 #include "vm/type_func.h"
 #include "vm/type_array.h"
@@ -402,6 +403,32 @@ static value_t *op_create_volatile(vm_t *vm, bytecode_t *bc, size_t *pc) {
     const type_t *vt = type_volatile_intern(vm, t);
     if (!vt) return value_make_error(vm, "exec: cannot make volatile type");
     return type_as_value(vm, vt);
+}
+
+/* ---- 所有权修饰的开放构造（PUSH_OWN/PUSH_REF/PUSH_FATAL） ----
+ *
+ * 与 const/volatile 同样的两步协议（PUSH_x → SET_TYPE sub → SEAL），但 SEAL
+ * 结果是**裸类型**：所有权是纯编译期概念，运行期剥离/穿透（零行为）。于是
+ * 类型的 program id 映射到 sub 的实例，`LOAD_TYPE <id>` 拿到的就是裸类型。
+ */
+static value_t *op_push_ownership(vm_t *vm, type_kind_t kind) {
+  ownership_type_t *ot = type_ownership_push_open(vm, kind);
+  if (!ot) return value_make_error(vm, "exec: PUSH_OWN: out of memory");
+  vec_push(vm->stack, vm->alloc, type_as_value(vm, &ot->base));
+  return NULL;
+}
+
+static value_t *op_push_own(vm_t *vm, bytecode_t *bc, size_t *pc) {
+  (void)bc; (void)pc;
+  return op_push_ownership(vm, TYPE_KIND_OWN);
+}
+static value_t *op_push_ref(vm_t *vm, bytecode_t *bc, size_t *pc) {
+  (void)bc; (void)pc;
+  return op_push_ownership(vm, TYPE_KIND_REF);
+}
+static value_t *op_push_fatal(vm_t *vm, bytecode_t *bc, size_t *pc) {
+  (void)bc; (void)pc;
+  return op_push_ownership(vm, TYPE_KIND_FATAL);
 }
 
 /* ---- 限定类型开放构造（PUSH_CONST/PUSH_VOLATILE + SET_TYPE + SEAL） ---- */
@@ -2830,6 +2857,9 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_CREATE_CONST]   = op_create_const,
     [BCODE_CREATE_VOLATILE]= op_create_volatile,
     [BCODE_PUSH_CONST]     = op_push_const,
+    [BCODE_PUSH_OWN]       = op_push_own,
+    [BCODE_PUSH_REF]       = op_push_ref,
+    [BCODE_PUSH_FATAL]     = op_push_fatal,
     [BCODE_PUSH_VOLATILE]  = op_push_volatile,
     [BCODE_PUSH_OPT]       = op_push_opt,
     [BCODE_PUSH_ENUM]      = op_push_enum,

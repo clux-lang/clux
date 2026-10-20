@@ -197,6 +197,14 @@ static ownership_type_t *ownership_type_create_open(vm_t *vm, type_kind_t kind) 
   return ot;
 }
 
+/* 开放构造（字节码 PUSH_OWN/REF/FATAL 用）：sub=NULL，不入池 */
+ownership_type_t *type_ownership_push_open(vm_t *vm, type_kind_t kind) {
+  if (!vm) return NULL;
+  if (kind != TYPE_KIND_OWN && kind != TYPE_KIND_REF && kind != TYPE_KIND_FATAL)
+    return NULL;
+  return ownership_type_create_open(vm, kind);
+}
+
 /* 开放构造 + 设 sub + 密封 + 按 (kind, sub) 去重 intern，一次完成 */
 const type_t *type_ownership_intern(vm_t *vm, type_kind_t kind,
                                     const type_t *sub) {
@@ -228,11 +236,21 @@ const type_t *type_ownership_intern(vm_t *vm, type_kind_t kind,
   return &ot->base;
 }
 
+/* SEAL：**运行期剥离**——所有权是纯编译期概念，组装出的类型就是 sub（裸类型）。
+ * 于是 program id 映射到 sub 实例，`LOAD_TYPE <id>` / 值分配拿到的都是裸类型；
+ * 编译期反射看到的修饰类型由 sema 自己的类型表提供（不经运行期 SEAL）。 */
 static const type_t *ownership_type_seal(vm_t *vm, const type_t *t) {
-  if (!vm || !t) return NULL;
-  if (type_is_sealed(t)) return t;
-  return type_ownership_intern(vm, t->kind,
-                               ((const ownership_type_t *)t)->sub);
+  if (!t) return NULL;
+  const type_t *sub = ((const ownership_type_t *)t)->sub;
+  if (!sub) return NULL;
+  /* 开放对象用完即弃（未入池，名字尚未生成） */
+  ownership_type_t *ot = (ownership_type_t *)t;
+  if (ot->base.name.ptr) {
+    char *np = (char *)ot->base.name.ptr;
+    allocator_free(vm->alloc, (void **)&np);
+  }
+  allocator_free(vm->alloc, (void **)&ot);
+  return sub;
 }
 
 /* ---- 查询辅助 ---- */

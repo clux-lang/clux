@@ -17,6 +17,9 @@
 /** 三种 kind 共用一张 vtable（全部槽位代理到 sub）。 */
 extern const vtable_t VTABLE_OWNERSHIP;
 
+/** 开放构造（PUSH_OWN/REF/FATAL 用）：sub=NULL、不入池、不压栈。 */
+ownership_type_t *type_ownership_push_open(vm_t *vm, type_kind_t kind);
+
 /** 构造/去重 intern：kind 必须是 TYPE_KIND_OWN / REF / FATAL。 */
 const type_t *type_ownership_intern(vm_t *vm, type_kind_t kind,
                                     const type_t *sub);

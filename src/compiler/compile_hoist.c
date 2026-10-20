@@ -163,6 +163,19 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
       st_push(c, 1);
       emit_define_type(c, st->id);
       break;
+    case TYPE_KIND_OWN:
+    case TYPE_KIND_REF:
+    case TYPE_KIND_FATAL:
+      /* 所有权修饰：开放构造（PUSH_OWN/REF/FATAL）→ DEFINE_TYPE 登记。
+         运行期 SEAL 会**剥成裸 sub**（所有权零运行期行为），所以这个 id 最终
+         指向 sub 的实例。 */
+      bcode_write_op(c->bc,
+                     st->type->kind == TYPE_KIND_OWN     ? BCODE_PUSH_OWN
+                     : st->type->kind == TYPE_KIND_REF   ? BCODE_PUSH_REF
+                                                         : BCODE_PUSH_FATAL);
+      st_push(c, 1);
+      emit_define_type(c, st->id);
+      break;
     case TYPE_KIND_OPTION:
       /* PUSH_OPT 压开放对象（inner=NULL，不入池）→ DEFINE_TYPE <id> 声明
          登记（不设 inner；向前引用安全——inner 可后声明） */
@@ -709,6 +722,11 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
     case TYPE_KIND_CONST:
     case TYPE_KIND_VOLATILE:
       define_qual(c, st, done, count);
+      break;
+    case TYPE_KIND_OWN:
+    case TYPE_KIND_REF:
+    case TYPE_KIND_FATAL:
+      define_qual(c, st, done, count); /* SET_TYPE sub + SEAL（SEAL 剥成 sub） */
       break;
     case TYPE_KIND_OPTION:
       define_option(c, st, done, count);
