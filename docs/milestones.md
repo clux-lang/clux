@@ -2309,3 +2309,16 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       新示例 `examples/reflect`（入口目录 47）。
     - **验证**：Windows 全量 **2213/2213 PASSED**、examples 56 个 `.cx` 全过、fmt 幂等；
       WSL2 全量 **2210 passed / 2 skipped**。
+
+98. **反射 key 覆盖补齐 + 成员反射的阻塞点**（2026-10）
+    - 新增测试 6 例：union（member 名/payload 类型/tag）、cunion（无 tag）、tuple（元素
+      个数/类型/偏移）、option（`inner_type`）、ptr（`target_type`/`rc` = plain/share/weak）、
+      const/volatile（`kind` 如实返回 + 属性自动穿透 + `unqualified`）。
+      `tests/reflect_kinds_test.cpp`；反射测试合计 16 例。
+    - **`method_type` / `method_*` / `attribute_*` 暂缓**：`struct_type_t.attributes` /
+      `methods` / `member_scope` 是**运行期**由 `STORE_ATTR` 填充的（`compile_struct_member_init`
+      → `op_store_attr` → `type_struct_add_method`），sema 阶段为空；成员在 sema 里只以
+      全局符号 `T::name` 或 struct def AST 的形式存在。设计文档 §10 给出两条路线
+      （A：sema 成员登记表，推荐；B：反射时现场遍历 def AST）。本轮先把这些 key
+      从 key 表里拿掉，避免返回误导性的 0。
+    - **验证**：Windows 全量 **2219/2219 PASSED**。

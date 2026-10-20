@@ -343,3 +343,32 @@ P0/P1/P2 不依赖任何未实现的语言特性，可以立刻做；P3 等泛�
 | 5 | kind / ownership 的表示 | **编译期字符串**（自描述），不引入内建枚举 |
 | 6 | 命名风格 | **snake_case**（`field_count`，与 reflect-design.md 一致） |
 | 7 | type 的传递 | **走泛型（M7）**；`comptime func` 不接受 `type` 参数 |
+
+---
+
+## 10. 已知阻塞：方法 / 属性反射（`method_type` 等）
+
+`method_count` / `method_name(i)` / `method_type(name)` / `attribute_*` **暂未实现**，
+原因是当前实现里它们没有可读的编译期数据源：
+
+- `struct_type_t.attributes` / `methods` / `member_scope` 是**运行期**才填的：
+  `compile_struct_member_init` 为每个成员发 `LOAD_FUNCTION`/初始化 + `STORE_ATTR`，
+  由 VM 的 `op_store_attr` 调 `type_struct_add_method` 写进去——**sema 阶段这两张表
+  是空的**。
+- 成员声明在 sema 里只有两种存在形式：全局符号 `T::name`（函数/变量声明），以及
+  struct def AST 的 `members` 链。前者能按名查（`sema_lookup(gs, "T::name")`），
+  但要**按索引枚举**得扫全局符号表并按前缀过滤；后者要现场解析参数类型表达式才能
+  得到方法签名。
+
+两条可选实现路线：
+
+| 路线 | 做法 | 代价 |
+|---|---|---|
+| **A（推荐）** | sema 建**成员登记表**：处理 struct def 时把 `{name, kind, type}` 记进 `sema`（type → 成员表），反射直接读 | 需要在函数签名解析完成后回填（顺序：struct def → 成员 func 签名 → 回填），新增一点 sema 状态 |
+| B | 反射时现场遍历 struct def AST，按需 `resolve_type_expr` 参数/返回类型 | 无新状态，但会在反射路径里复制一份签名解析逻辑（易与主路径漂移） |
+
+A 的额外好处：`attribute_*` / `method_*` 都能一次拿到，且与 `T::x` 的查找共用同一份
+登记（未来还能给 `std/Reflect` 的泛型库层直接用）。
+
+在实现之前，`method_*` / `attribute_*` 这些 key **不在 key 表里**（写 `T.method_count`
+会得到"没有该反射成员"的诊断，而不是误导性的 0）。
