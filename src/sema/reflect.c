@@ -1,4 +1,7 @@
 #include "sema/reflect.h"
+#include "sema/sema.h"
+#include "sema/struct_compose.h"
+#include "sema/symbol.h"
 
 #include "core/arena.h"
 #include "core/vec.h"
@@ -128,14 +131,15 @@ bool sema_reflect_is_key(strslice_t key) {
       "kind",           "field_count",      "field_name",
       "field_type",     "field_offset",     "embed_count",
       "embed_type",     "method_count",     "method_name",
-      "attribute_count", "attribute_name",  "attribute_type",
-      "variant_count",  "variant_name",     "variant_value",
-      "underlying",     "member_count",     "member_name",
-      "member_type",    "member_tag",       "param_count",
-      "param_type",     "return_type",      "is_variadic",
-      "is_c_abi",       "elem_count",       "elem_type",
-      "elem_offset",    "target_type",      "rc",
-      "inner_type",     "unqualified",      "length",
+      "method_type",    "attribute_count",  "attribute_name",
+      "attribute_type", "variant_count",    "variant_name",
+      "variant_value",  "underlying",       "member_count",
+      "member_name",    "member_type",      "member_tag",
+      "param_count",    "param_type",       "return_type",
+      "is_variadic",    "is_c_abi",         "elem_count",
+      "elem_type",      "elem_offset",      "target_type",
+      "rc",             "inner_type",       "unqualified",
+      "length",
   };
   for (size_t i = 0; i < sizeof(kAll) / sizeof(kAll[0]); i++)
     if (key_is(key, kAll[i])) return true;
@@ -225,38 +229,6 @@ static const char *kind_keys(const type_t *T) {
   }
 }
 
-/* 属性名排序（确定性输出）：strmap 无序 → 取 key 列表排序后按索引取 */
-static const char *sorted_attr_name(const struct_type_t *st, size_t idx,
-                                    size_t *count_out) {
-  *count_out = st->attributes ? strmap_size(st->attributes) : 0;
-  if (!st->attributes || idx >= *count_out) return NULL;
-  const vec_t *keys = strmap_keys(st->attributes);
-  size_t n = keys ? vec_len(keys) : 0;
-  if (n == 0) return NULL;
-  const char **arr = (const char **)malloc(n * sizeof(char *));
-  if (!arr) return NULL;
-  for (size_t i = 0; i < n; i++) arr[i] = (const char *)vec_get(keys, i);
-  /* 简单插入排序（属性数量很小） */
-  for (size_t i = 1; i < n; i++) {
-    const char *v = arr[i];
-    size_t j = i;
-    while (j > 0 && strcmp(arr[j - 1], v) > 0) {
-      arr[j] = arr[j - 1];
-      j--;
-    }
-    arr[j] = v;
-  }
-  const char *pick = idx < n ? arr[idx] : NULL;
-  /* 拷贝到静态缓冲：调用方马上用，且只取一个 */
-  static char buf[256];
-  if (pick) {
-    snprintf(buf, sizeof buf, "%s", pick);
-    pick = buf;
-  }
-  free(arr);
-  return pick;
-}
-
 /* 通用 key（所有 kind 都有）：返回 true 表示已处理 */
 static bool lookup_common(const type_t *T, strslice_t key, sema_rv_t *out,
                           char *err, size_t ecap) {
@@ -282,11 +254,169 @@ static bool lookup_common(const type_t *T, strslice_t key, sema_rv_t *out,
   return false;
 }
 
-bool sema_reflect_lookup(const type_t *T, strslice_t key, bool has_index,
-                         uint64_t index, sema_rv_t *out, char *err,
-                         size_t ecap) {
+/* ===========================================================================
+ * 结构体成员（方法 / 静态属性）反射 —— 路线 A：读 sema 的成员作用域
+ *
+ * `struct_type_t.attributes` / `methods` 是**运行期** STORE_ATTR 才填的，sema
+ * 阶段为空；但 sema 在 `SEMA_SYM_TYPE` 符号上维护了**成员作用域**
+ * （`sym->member_scope`，成员名 → sema_symbol_t，方法带 func 类型、属性带变量
+ * 类型），`T::x` 查找（sema_struct_find_member）走的就是它。反射直接复用这份
+ * 编译期登记，不另建表。
+ * =========================================================================== */
+
+static sema_scope_t *struct_member_scope(struct sema_t *sema, const type_t *T) {
+  if (!sema || !T || !T->name.ptr) return NULL;
+  const type_t *base = type_strip_quals(T);
+  if (!base || base->kind != TYPE_KIND_STRUCT) return NULL;
+  sema_symbol_t *sym = sema_lookup(sema->global_scope, base->name);
+  return sym ? sym->member_scope : NULL;
+}
+
+static bool member_key(strslice_t key) {
+  return key_is(key, "method_count") || key_is(key, "method_name") ||
+         key_is(key, "method_type") || key_is(key, "attribute_count") ||
+         key_is(key, "attribute_name") || key_is(key, "attribute_type");
+}
+
+/* 收集成员名（methods_only: FUNC / VAR），按名排序（strmap 无序 → 确定性）。
+   返回 malloc 数组（名字借用成员作用域），调用方 free 数组本身。 */
+static size_t collect_member_names(struct sema_t *sema, const type_t *T,
+                                   bool methods_only, const char ***out) {
+  *out = NULL;
+  sema_scope_t *ms = struct_member_scope(sema, T);
+  if (!ms || !ms->symbols) return 0;
+  const vec_t *keys = strmap_keys(ms->symbols);
+  size_t n = keys ? vec_len(keys) : 0;
+  const char **arr = (const char **)malloc((n ? n : 1) * sizeof(char *));
+  if (!arr) return 0;
+  size_t cnt = 0;
+  for (size_t i = 0; i < n; i++) {
+    const char *k = (const char *)vec_get(keys, i);
+    if (!k) continue;
+    sema_symbol_t *sym = sema_lookup(ms, strslice_from_bytes(k, strlen(k)));
+    if (!sym) continue;
+    bool is_method = sym->kind == SEMA_SYM_FUNC;
+    if (is_method != methods_only) continue;
+    arr[cnt++] = k;
+  }
+  for (size_t i = 1; i < cnt; i++) {
+    const char *v = arr[i];
+    size_t j = i;
+    while (j > 0 && strcmp(arr[j - 1], v) > 0) {
+      arr[j] = arr[j - 1];
+      j--;
+    }
+    arr[j] = v;
+  }
+  *out = arr;
+  return cnt;
+}
+
+static bool member_lookup(struct sema_t *sema, const type_t *T, strslice_t key,
+                          const sema_reflect_arg_t *arg, sema_rv_t *out,
+                          char *err, size_t ecap) {
+  const bool is_method = !key_is(key, "attribute_count") &&
+                         !key_is(key, "attribute_name") &&
+                         !key_is(key, "attribute_type");
+  if (!struct_member_scope(sema, T)) {
+    set_err(err, ecap, "'%s' has no %s members",
+            T && T->name.ptr ? (const char *)T->name.ptr : "?",
+            is_method ? "method" : "attribute");
+    return false;
+  }
+  if (key_is(key, "method_count") || key_is(key, "attribute_count")) {
+    const char **arr = NULL;
+    size_t n = collect_member_names(sema, T, is_method, &arr);
+    free((void *)arr);
+    rv_usize(out, (uint64_t)n);
+    return true;
+  }
+  if (key_is(key, "method_name") || key_is(key, "attribute_name") ||
+      key_is(key, "attribute_type")) {
+    if (!arg || arg->kind != SEMA_RARG_INDEX) {
+      set_err(err, ecap, "'%.*s' requires an index argument", (int)key.len,
+              key.ptr);
+    return false;
+    }
+    const char **arr = NULL;
+    size_t n = collect_member_names(sema, T, is_method, &arr);
+    if (arg->index >= n) {
+      set_err(err, ecap, "%s index %llu out of range (there are %zu %ss)",
+              is_method ? "method" : "attribute",
+              (unsigned long long)arg->index, n, is_method ? "method" : "attribute");
+      free((void *)arr);
+    return false;
+    }
+    const char *nm = arr[arg->index];
+    if (key_is(key, "method_name") || key_is(key, "attribute_name")) {
+      rv_str(out, strslice_from_bytes(nm, strlen(nm)));
+    } else {
+      sema_symbol_t *sym = sema_struct_find_member(
+          sema, T, strslice_from_bytes(nm, strlen(nm)), NULL, NULL);
+      if (!sym || !sym->type) {
+        set_err(err, ecap, "attribute '%s' has no type", nm);
+        free((void *)arr);
+    return false;
+      }
+      rv_type(out, sym->type);
+    }
+    free((void *)arr);
+    return true;
+  }
+  if (key_is(key, "method_type")) {
+    if (!arg || arg->kind != SEMA_RARG_NAME) {
+      set_err(err, ecap, "'method_type' requires a method name argument "
+                         "(e.g. T.method_type(\"run\"))");
+    return false;
+    }
+    sema_symbol_t *sym =
+        sema_struct_find_member(sema, T, arg->name, NULL, NULL);
+    if (!sym) {
+      set_err(err, ecap, "no member named '%.*s' in '%s'",
+              (int)arg->name.len, arg->name.ptr,
+              T->name.ptr ? (const char *)T->name.ptr : "?");
+    return false;
+    }
+    if (sym->kind != SEMA_SYM_FUNC) {
+      set_err(err, ecap, "'%.*s' is an attribute, not a method",
+              (int)arg->name.len, arg->name.ptr);
+    return false;
+    }
+    if (!sym->type || sym->type->kind != TYPE_KIND_FUNC) {
+      set_err(err, ecap, "method '%.*s' has no signature", (int)arg->name.len,
+              arg->name.ptr);
+    return false;
+    }
+    rv_type(out, sym->type);
+    return true;
+  }
+  return false;
+}
+
+bool sema_reflect_eval(struct sema_t *sema, const type_t *T, strslice_t key,
+                       const sema_reflect_arg_t *arg, sema_rv_t *out,
+                       char *err, size_t ecap) {
+  const type_t *base = T ? type_strip_quals(T) : NULL;
+  if (base && base->kind == TYPE_KIND_STRUCT && member_key(key))
+    return member_lookup(sema, base, key, arg, out, err, ecap);
+  return sema_reflect_lookup(T, key, arg, out, err, ecap);
+}
+
+sema_rarg_t sema_reflect_arg_kind(const type_t *T, strslice_t key) {
+  const type_t *base = T ? type_strip_quals(T) : NULL;
+  if (!base) return SEMA_RARG_NONE;
+  if (key_is(key, "method_type")) return SEMA_RARG_NAME;
+  return sema_reflect_needs_index(base, key) ? SEMA_RARG_INDEX
+                                             : SEMA_RARG_NONE;
+}
+
+bool sema_reflect_lookup(const type_t *T, strslice_t key,
+                         const sema_reflect_arg_t *arg, sema_rv_t *out,
+                         char *err, size_t ecap) {
   if (!T || !out) return false;
   memset(out, 0, sizeof *out);
+  const bool has_index = arg && arg->kind == SEMA_RARG_INDEX;
+  const uint64_t index = has_index ? arg->index : 0;
 
   /* 通用 key 对任何 kind 都成立（含 const/volatile 自身） */
   if (lookup_common(T, key, out, err, ecap)) return true;
@@ -303,8 +433,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key, bool has_index,
       rv_type(out, sub);
       return true;
     }
-    return sub ? sema_reflect_lookup(sub, key, has_index, index, out, err, ecap)
-               : false;
+    return sub ? sema_reflect_lookup(sub, key, arg, out, err, ecap) : false;
   }
 
   const char *kname = sema_reflect_kind_name(T);
@@ -318,14 +447,6 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key, bool has_index,
     }
     if (key_is(key, "embed_count")) {
       rv_usize(out, (uint64_t)st->embed_count);
-      return true;
-    }
-    if (key_is(key, "method_count")) {
-      rv_usize(out, st->methods ? (uint64_t)vec_len(st->methods) : 0);
-      return true;
-    }
-    if (key_is(key, "attribute_count")) {
-      rv_usize(out, st->attributes ? (uint64_t)strmap_size(st->attributes) : 0);
       return true;
     }
     if (key_is(key, "field_name") || key_is(key, "field_type") ||
@@ -367,32 +488,6 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key, bool has_index,
       }
       const char *m = (const char *)vec_get(st->methods, index);
       rv_str(out, strslice_from_bytes(m ? m : "", m ? strlen(m) : 0));
-      return true;
-    }
-    if (key_is(key, "attribute_name") || key_is(key, "attribute_type")) {
-      if (!has_index) {
-        set_err(err, ecap, "'%s': '%.*s' requires an index argument", kname,
-                (int)key.len, key.ptr);
-        return false;
-      }
-      size_t cnt = 0;
-      const char *nm = sorted_attr_name(st, index, &cnt);
-      if (!nm) {
-        set_err(err, ecap, "%s: attribute index %llu out of range (%zu attrs)",
-                kname, (unsigned long long)index, cnt);
-        return false;
-      }
-      if (key_is(key, "attribute_name")) {
-        rv_str(out, strslice_from_bytes(nm, strlen(nm)));
-      } else {
-        value_t *v = st->attributes ? (value_t *)strmap_get(st->attributes, nm)
-                                    : NULL;
-        if (!v || !value_type(v)) {
-          set_err(err, ecap, "%s: cannot read attribute '%s'", kname, nm);
-          return false;
-        }
-        rv_type(out, value_type(v));
-      }
       return true;
     }
   }

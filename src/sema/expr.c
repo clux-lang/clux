@@ -3152,6 +3152,33 @@ static bool reflect_eval_index(sema_t *sema, ast_node_t *arg,
   return true;
 }
 
+/* 名字实参（`method_type("run")`）：编译期常量字符串。 */
+static bool reflect_eval_name_arg(sema_t *sema, ast_node_t *arg,
+                                  sema_scope_t *scope, strslice_t *out) {
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = sema->vm;
+  ctx.sema = sema;
+  ctx.sema_scope = scope;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *v = ctfe_eval(&ctx, arg);
+  if (!v || value_is_error(sema->vm, v)) {
+    diag_error(sema->diag, sema_loc(sema, arg),
+               "reflection: name argument must be a compile-time constant string");
+    return false;
+  }
+  if (value_type(v) != sema->vm->type_str || !value_data(v)) {
+    diag_error(sema->diag, sema_loc(sema, arg),
+               "reflection: name argument must be a string");
+    return false;
+  }
+  const char *s = *(const char *const *)value_data(v);
+  if (!s) s = "";
+  *out = strslice_from_bytes(s, strlen(s));
+  return true;
+}
+
 /* 是否是"反射表达式"（`T.key(i)`，接收者是类型或另一个反射表达式）。
    链式场景要先把它折叠成类型引用，外层才拿得到接收者类型。 */
 static bool is_reflect_expr(ast_node_t *n) {
@@ -3198,7 +3225,7 @@ static bool reflect_member(sema_t *sema, ast_node_t **node,
                m->field.ptr);
     return true;
   }
-  if (!sema_reflect_lookup(T, m->field, false, 0, &rv, err, sizeof err)) {
+  if (!sema_reflect_eval(sema, T, m->field, NULL, &rv, err, sizeof err)) {
     diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
     return true;
   }
@@ -3218,11 +3245,12 @@ static bool reflect_member_call(sema_t *sema, ast_node_t **node,
   if (!T) return false;
   sema_rv_t rv;
   char err[512] = {0};
-  if (!sema_reflect_needs_index(T, m->field)) {
+  sema_rarg_t ak = sema_reflect_arg_kind(T, m->field);
+  if (ak == SEMA_RARG_NONE) {
     /* 未知 key → 走 lookup 让它给出"没有该成员 + 可用列表"的诊断；
-       已知但不带索引的 key → "takes no arguments"。 */
+       已知但不带实参的 key → "takes no arguments"。 */
     if (!sema_reflect_is_key(m->field)) {
-      if (!sema_reflect_lookup(T, m->field, true, 0, &rv, err, sizeof err))
+      if (!sema_reflect_eval(sema, T, m->field, NULL, &rv, err, sizeof err))
         diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
       return true;
     }
@@ -3234,13 +3262,21 @@ static bool reflect_member_call(sema_t *sema, ast_node_t **node,
   size_t nargs = sema_count_siblings(call->args);
   if (nargs != 1) {
     diag_error(sema->diag, sema_loc(sema, *node),
-               "reflection: '%.*s' expects exactly 1 index argument, got %zu",
-               (int)m->field.len, m->field.ptr, nargs);
+               "reflection: '%.*s' expects exactly 1 %s argument, got %zu",
+               (int)m->field.len, m->field.ptr,
+               ak == SEMA_RARG_INDEX ? "index" : "name", nargs);
     return true;
   }
-  uint64_t idx = 0;
-  if (!reflect_eval_index(sema, call->args, scope, &idx)) return true;
-  if (!sema_reflect_lookup(T, m->field, true, idx, &rv, err, sizeof err)) {
+  sema_reflect_arg_t rarg;
+  memset(&rarg, 0, sizeof rarg);
+  rarg.kind = ak;
+  if (ak == SEMA_RARG_INDEX) {
+    if (!reflect_eval_index(sema, call->args, scope, &rarg.index)) return true;
+  } else {
+    if (!reflect_eval_name_arg(sema, call->args, scope, &rarg.name))
+      return true;
+  }
+  if (!sema_reflect_eval(sema, T, m->field, &rarg, &rv, err, sizeof err)) {
     diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
     return true;
   }

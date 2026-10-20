@@ -2322,3 +2322,21 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       （A：sema 成员登记表，推荐；B：反射时现场遍历 def AST）。本轮先把这些 key
       从 key 表里拿掉，避免返回误导性的 0。
     - **验证**：Windows 全量 **2219/2219 PASSED**。
+
+99. **反射：方法 / 属性成员（路线 A —— 复用 sema 成员作用域）**（2026-10，用户选 A）
+    - 问题：`struct_type_t.attributes` / `methods` / `member_scope` 是运行期 STORE_ATTR
+      才填的，sema 阶段为空 → 反射读不到。
+    - 方案 A：sema 在 `SEMA_SYM_TYPE` 符号上已有**成员作用域**（`sym->member_scope`，
+      成员名 → 符号，方法带 func 类型、属性带变量类型；`T::x` 的解析走它），反射直接
+      复用，不另建登记表。
+    - 新增 key：`method_count` / `method_name(i)`（按名排序）/ `method_type(name)`
+      （复用 `sema_struct_find_member`：含嵌入继承 + 歧义诊断）/ `attribute_count` /
+      `attribute_name(i)` / `attribute_type(i)`。
+    - 引入实参种类（`sema_rarg_t`：NONE / INDEX / NAME）+ `sema_reflect_eval(sema, …)`
+      作为统一入口（sema 折叠与 CTFE 共用）。
+    - 修正：成员 lookup 的错误路径原先返回 true（out 未写）→ 折叠出空字符串；
+      统一改为 `return false + err`。
+    - **测试**：`tests/reflect_members_test.cpp` 7 例（方法签名/名字排序/属性/继承方法/
+      未知方法/属性不是方法/索引越界 + 无成员）；反射合计 23 例。
+    - **验证**：Windows 全量 **2226/2226 PASSED**、examples 全过、fmt 幂等；
+      WSL2 全量 **2223 passed / 2 skipped**。

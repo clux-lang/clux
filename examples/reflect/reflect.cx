@@ -5,6 +5,8 @@
 //
 //   T.name / T.size / T.align / T.kind        通用（kind 是编译期字符串）
 //   T.field_count / T.field_name(i) / ...     struct / union / cunion / tuple / enum / func
+//   T.method_count / T.method_type("run")     struct 成员（方法）
+//   T.attribute_count / T.attribute_type(i)   struct 成员（静态属性）
 //   T.<key> 可链式：T.field_type(0).name
 //   类型值不能存变量 → 绑定反射出的类型用 `type Alias = T.field_type(0);`
 //
@@ -17,9 +19,17 @@ extern cfunc libc::printf(format: str, ...): void;
 struct Point {
     x: i32;
     y: i64;
-}
+};
 
 enum Color: i32 { Red = 1, Green = 2 }
+
+struct Runner {
+    var speed: i32 = 0;
+    var tag: i64 = 0;
+
+    func run(self: ref *Runner, a: i32): i64 { return 1i64; }
+    func stop(self: ref *Runner): void { }
+}
 
 type A3 = [3]i32;
 type Cb = func(i32) -> i64;
@@ -43,14 +53,26 @@ func main(): i32 {
                  Color.variant_value(0) as i32, Color.variant_name(1),
                  Color.variant_value(1) as i32, Color.underlying.name);
 
-    // ④ 数组 / func
+    // ④ 成员：方法签名（按名）+ 静态属性
+    libc::printf("Runner: methods=%d attrs=%d\n",
+                 Runner.method_count as i32, Runner.attribute_count as i32);
+    libc::printf("  method0 = %s\n", Runner.method_name(0));
+    libc::printf("  run: params=%d p0=%s ret=%s variadic=%d\n",
+                 Runner.method_type("run").param_count as i32,
+                 Runner.method_type("run").param_type(0).name,
+                 Runner.method_type("run").return_type.name,
+                 Runner.method_type("run").is_variadic as i32);
+    libc::printf("  attr0 = %s type=%s\n", Runner.attribute_name(0),
+                 Runner.attribute_type(0).name);
+
+    // ⑤ 数组 / func
     libc::printf("A3: kind=%s length=%d elem=%s\n", A3.kind, A3.length as i32,
                  A3.elem_type.name);
     libc::printf("Cb: kind=%s params=%d p0=%s ret=%s c_abi=%d\n", Cb.kind,
                  Cb.param_count as i32, Cb.param_type(0).name,
                  Cb.return_type.name, Cb.is_c_abi as i32);
 
-    // ⑤ 链式 + typeof 入口
+    // ⑥ 链式 + typeof 入口
     struct H { t: <i32, f64>; }
     libc::printf("H.t: e0=%s e1=%s\n", H.field_type(0).elem_type(0).name,
                  H.field_type(0).elem_type(1).name);
@@ -58,7 +80,7 @@ func main(): i32 {
     libc::printf("typeof(v): name=%s size=%d\n", typeof(v).name,
                  typeof(v).size as i32);
 
-    // ⑥ 绑定反射出的类型
+    // ⑦ 绑定反射出的类型
     type F0 = H.field_type(0);
     libc::printf("F0: elems=%d\n", F0.elem_count as i32);
     return 0;

@@ -527,8 +527,8 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         const type_t *T = value_as(tv, const type_t *);
         sema_rv_t rv;
         char rerr[512] = {0};
-        if (!sema_reflect_lookup(T, m->field, false, 0, &rv, rerr,
-                                 sizeof rerr))
+        if (!sema_reflect_eval(ctx->sema, T, m->field, NULL, &rv, rerr,
+                               sizeof rerr))
             return ctfe_err(ctx, rerr);
         value_t *out = sema_reflect_value(vm, &rv);
         return out ? out : ctfe_err(ctx, "ctfe: reflection produced no value");
@@ -545,8 +545,10 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                     if (value_is_error(vm, tv)) return tv;
                     if (value_is_type(tv, TYPE_KIND_TYPE)) {
                         const type_t *T = value_as(tv, const type_t *);
-                        uint64_t idx = 0;
-                        if (sema_reflect_needs_index(T, rm->field)) {
+                        sema_reflect_arg_t rarg;
+                        memset(&rarg, 0, sizeof rarg);
+                        rarg.kind = sema_reflect_arg_kind(T, rm->field);
+                        if (rarg.kind == SEMA_RARG_INDEX) {
                             if (!rc->args || rc->args->next)
                                 return ctfe_err(
                                     ctx, "ctfe: reflection expects 1 index");
@@ -568,14 +570,12 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                                 return ctfe_err(ctx,
                                                 "ctfe: reflection index must be "
                                                 "non-negative");
-                            idx = (uint64_t)s;
+                            rarg.index = (uint64_t)s;
                         }
                         sema_rv_t rv;
                         char rerr[512] = {0};
-                        if (!sema_reflect_lookup(T, rm->field,
-                                                 sema_reflect_needs_index(
-                                                     T, rm->field),
-                                                 idx, &rv, rerr, sizeof rerr))
+                        if (!sema_reflect_eval(ctx->sema, T, rm->field, &rarg,
+                                               &rv, rerr, sizeof rerr))
                             return ctfe_err(ctx, rerr);
                         value_t *out = sema_reflect_value(vm, &rv);
                         return out ? out

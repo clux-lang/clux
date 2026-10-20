@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+struct sema_t; /* sema_reflect_eval 用（避免与 sema.h 循环包含） */
+
 #include "core/strslice.h"
 #include "vm/type.h"
 #include "vm/value.h"
@@ -49,6 +51,31 @@ bool sema_reflect_needs_index(const type_t *T, strslice_t key);
 /** key 是否是反射成员名（带/不带索引都算）。链式表达式识别用。 */
 bool sema_reflect_is_key(strslice_t key);
 
+/* 反射 key 的实参种类（按类型判定）：无参 / 索引（`field_type(0)`）/
+   名字（`method_type("run")`）。 */
+typedef enum {
+  SEMA_RARG_NONE = 0,
+  SEMA_RARG_INDEX,
+  SEMA_RARG_NAME
+} sema_rarg_t;
+
+typedef struct {
+  sema_rarg_t kind;
+  uint64_t    index;
+  strslice_t  name;
+} sema_reflect_arg_t;
+
+sema_rarg_t sema_reflect_arg_kind(const type_t *T, strslice_t key);
+
+/**
+ * 反射求值入口（sema / CTFE 共用）：成员 key（方法/属性）走 sema 的 struct
+ * 成员作用域（`SEMA_SYM_TYPE` 符号的 member_scope——**编译期**就有），其余交给
+ * sema_reflect_lookup。sema 可为 NULL（纯类型 key 不需要）。
+ */
+bool sema_reflect_eval(struct sema_t *sema, const type_t *T, strslice_t key,
+                       const sema_reflect_arg_t *arg, sema_rv_t *out,
+                       char *err, size_t ecap);
+
 /** rv → 真实 value（CTFE 与 sema 共用）；失败返回 NULL。 */
 value_t *sema_reflect_value(vm_t *vm, const sema_rv_t *rv);
 
@@ -57,9 +84,9 @@ value_t *sema_reflect_value(vm_t *vm, const sema_rv_t *rv);
  * 成功返回 true（写 out）；失败返回 false，并在 err 中写诊断文本
  * （包含可用 key 列表 / 越界 / kind 不符等原因）。
  */
-bool sema_reflect_lookup(const type_t *T, strslice_t key, bool has_index,
-                         uint64_t index, sema_rv_t *out, char *err,
-                         size_t ecap);
+bool sema_reflect_lookup(const type_t *T, strslice_t key,
+                         const sema_reflect_arg_t *arg, sema_rv_t *out,
+                         char *err, size_t ecap);
 
 /** 类型 kind 的字符串名（"struct" / "int" …）；未知返回 "unknown"。 */
 const char *sema_reflect_kind_name(const type_t *T);

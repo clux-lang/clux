@@ -346,29 +346,28 @@ P0/P1/P2 不依赖任何未实现的语言特性，可以立刻做；P3 等泛�
 
 ---
 
-## 10. 已知阻塞：方法 / 属性反射（`method_type` 等）
+## 10. 方法 / 属性反射：读 sema 的成员作用域（路线 A，已实现）
 
-`method_count` / `method_name(i)` / `method_type(name)` / `attribute_*` **暂未实现**，
-原因是当前实现里它们没有可读的编译期数据源：
+**问题**：`struct_type_t.attributes` / `methods` / `member_scope` 是**运行期**由
+`compile_struct_member_init` → `STORE_ATTR` → `op_store_attr` → `type_struct_add_method`
+填充的；sema 阶段这两张表是空的，反射读不到。
 
-- `struct_type_t.attributes` / `methods` / `member_scope` 是**运行期**才填的：
-  `compile_struct_member_init` 为每个成员发 `LOAD_FUNCTION`/初始化 + `STORE_ATTR`，
-  由 VM 的 `op_store_attr` 调 `type_struct_add_method` 写进去——**sema 阶段这两张表
-  是空的**。
-- 成员声明在 sema 里只有两种存在形式：全局符号 `T::name`（函数/变量声明），以及
-  struct def AST 的 `members` 链。前者能按名查（`sema_lookup(gs, "T::name")`），
-  但要**按索引枚举**得扫全局符号表并按前缀过滤；后者要现场解析参数类型表达式才能
-  得到方法签名。
+**实现（路线 A）**：sema 其实在 `SEMA_SYM_TYPE` 符号上维护了**成员作用域**
+（`sym->member_scope`：成员名 → `sema_symbol_t`；方法带 func 类型、属性带变量类型），
+`T::x` 的解析（`sema_struct_find_member`，含嵌入继承与歧义诊断）走的就是它。
+反射直接复用这份**编译期**登记，不另建表：
 
-两条可选实现路线：
-
-| 路线 | 做法 | 代价 |
+| key | 返回 | 实现 |
 |---|---|---|
-| **A（推荐）** | sema 建**成员登记表**：处理 struct def 时把 `{name, kind, type}` 记进 `sema`（type → 成员表），反射直接读 | 需要在函数签名解析完成后回填（顺序：struct def → 成员 func 签名 → 回填），新增一点 sema 状态 |
-| B | 反射时现场遍历 struct def AST，按需 `resolve_type_expr` 参数/返回类型 | 无新状态，但会在反射路径里复制一份签名解析逻辑（易与主路径漂移） |
+| `method_count` | `usize` | 成员作用域中 `SEMA_SYM_FUNC` 符号数 |
+| `method_name(i)` | `str` | 方法名按名排序后取第 i 个 |
+| `method_type(name)` | `type` | `sema_struct_find_member(T, name)` → 符号的 func 类型（含继承） |
+| `attribute_count` | `usize` | 成员作用域中 `SEMA_SYM_VAR` 符号数 |
+| `attribute_name(i)` | `str` | 属性名按名排序后取第 i 个 |
+| `attribute_type(i)` | `type` | 属性符号的类型 |
 
-A 的额外好处：`attribute_*` / `method_*` 都能一次拿到，且与 `T::x` 的查找共用同一份
-登记（未来还能给 `std/Reflect` 的泛型库层直接用）。
-
-在实现之前，`method_*` / `attribute_*` 这些 key **不在 key 表里**（写 `T.method_count`
-会得到"没有该反射成员"的诊断，而不是误导性的 0）。
+- 枚举用 `strmap_keys` + 排序（strmap 无序 → 确定性输出）。
+- 按名查询复用 `sema_struct_find_member`：沿 `...Base` 嵌入链递归，多处命中报歧义。
+- 属性名与实例字段名可重名，互不影响（不同 key 空间）。
+- 出错路径统一 `return false + err`（早期版本曾把错误路径当成功、折叠出空串——
+  已修正，测试固定）。
