@@ -1,0 +1,56 @@
+// comptime_foreach.cx — 编译期展开的 foreach（数组 / 元组）
+//
+// 语法与位置与其它 `comptime` 语句相同（块语句位置）：
+//
+//   comptime foreach (var x of 容器) { ... }     // 每轮新声明 x
+//   comptime foreach (x of 容器) { ... }         // 每轮给已定义的 x 赋值
+//
+// 容器必须是**长度在编译期已知**的数组（[N]T）或元组（<T1,T2,…>）；
+// 展开在 sema Pass 3a 完成——循环体被**逐元素复制**，每份都是独立作用域：
+//
+//   { var x = c[0]; <body> } { var x = c[1]; <body> } …
+//
+// 因此：
+//   - 元组的元素类型可以各不相同，循环体在每份副本里按**该元素的实际类型**
+//     检查（下面 ③ 用 sizeof(typeof(x)) 演示）；
+//   - 零运行时循环开销（没有索引变量、没有 len() 调用）；
+//   - 切片（长度运行期才知道）被拒绝——请用 [N]T 或元组。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+func main(): i32 {
+    // ① 数组：逐元素展开（x 是运行时元素值，索引是编译期常量）
+    var arr = .[3]i32{ 10, 20, 30 };
+    comptime foreach (var x of arr) {
+        libc::printf("arr = %d\n", x);
+    }
+
+    // ② 已定义变量形态：每轮 x = arr[i]
+    var y: i32 = 0;
+    comptime foreach (y of arr) {
+        libc::printf("y = %d\n", y);
+    }
+
+    // ③ 元组：元素类型各不相同，每份副本按元素类型检查
+    var t = .<i32, f64, i32>{ 1, 2.5, 3 };
+    comptime foreach (var e of t) {
+        libc::printf("elem width = %d\n", sizeof(typeof(e)) as i32);
+    }
+
+    // ④ 嵌套：外层 2 次 × 内层 2 次 = 4 份
+    var a = .[2]i32{ 1, 2 };
+    var b = .[2]i32{ 10, 20 };
+    comptime foreach (var p of a) {
+        comptime foreach (var q of b) {
+            libc::printf("%d+%d=%d\n", p, q, p + q);
+        }
+    }
+
+    // ⑤ comptime var 容器：元素是编译期常量
+    comptime var NAMES = .[2]i32{ 5, 6 };
+    comptime foreach (var n of NAMES) {
+        libc::printf("names = %d\n", n);
+    }
+    return 0;
+}

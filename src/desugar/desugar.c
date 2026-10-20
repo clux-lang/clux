@@ -175,6 +175,9 @@ static ast_node_t *ds_expand_foreach(desugar_t *ds, ast_foreach_t *fe) {
   const uint32_t nb = fe->name_tok ? fe->name_tok : tb;
   const uint32_t ne = fe->name_tok ? fe->name_tok + 1 : te;
 
+  /* comptime foreach 留给 sema（Pass 3a）展开：长度需要**类型**，前脱糖没有
+     类型信息。这里直接原样返回（调用方判断 kind 不为 AST_FOREACH 即跳过）。 */
+  if (fe->is_comptime) return NULL;
   if (!fe->body || fe->body->kind != AST_BLOCK || !fe->iterable ||
       !fe->name.ptr) {
     ds_error(ds, &fe->base, "malformed 'foreach' (missing iterable or body)");
@@ -376,7 +379,14 @@ static void ds_walk_stmt_list(desugar_t *ds, ast_node_t *owner,
     ast_node_t *s = *cur;
 
     if (s->kind == AST_FOREACH) {
-      ast_node_t *repl = ds_expand_foreach(ds, (ast_foreach_t *)s);
+      ast_foreach_t *fe0 = (ast_foreach_t *)s;
+      /* `comptime foreach` 留给 sema Pass 3a 展开（长度需要类型信息）：
+         原样保留，继续扫描后续语句。 */
+      if (fe0->is_comptime) {
+        cur = &s->next;
+        continue;
+      }
+      ast_node_t *repl = ds_expand_foreach(ds, fe0);
       if (!repl) {
         /* 已诊断（或静默模式）：丢弃该语句，别让 sema 见到 AST_FOREACH。 */
         *cur = s->next;

@@ -2254,3 +2254,29 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `OwnPointerInFfiSignatures`、`OwnSliceRejectedInFfi` 等。
     - **验证**：Windows 全量 **2196/2196 PASSED**、examples 54 个 `.cx` 全过；
       WSL2 全量 **2193 passed / 2 skipped**。
+
+96. **`comptime foreach`：编译期展开的遍历（数组 / 元组）**（2026-10，用户要求）
+    - 语法与位置：`comptime foreach (var a of c) { … }` / `comptime foreach (a of c)`，
+      与 `comptime if` / `comptime var` 同一位置（块语句）。
+    - 语义：按**编译期已知长度**把循环体逐元素复制成 N 份独立作用域：
+      `{ var a = c[0]; <body> } { var a = c[1]; <body> } …`。元组元素类型可以各不
+      相同——每份副本按该元素的**实际类型**检查（测试用 `sizeof(typeof(e))` 验证
+      i32/f64 宽度不同）；零运行时循环开销。
+    - 实现（Pass 3a，与 `comptime if` 同一机制 `comptime_foreach_splice`）：
+      * 前脱糖**不**展开它（长度需要类型）；sema 看到 `AST_FOREACH{is_comptime}`，
+        展开后 compiler 永远见不到，作用域树按展开后的语句建。
+      * 循环体的 N 份副本**按 token 区间重新解析**（`parser_create` + `parse_block`
+        定位到 body 起点）——不需要给 AST 写深拷贝，副本天然独立且 token 下标仍指
+        向原始源码（诊断位置正确）。
+      * 容器类型解析：符号已解析 → 用它；推断型 var（3a 里 type 仍为 NULL）→ 回看
+        声明 AST（`sema_scope_t.block_ast` 沿外层块链查找），支持
+        `var a = .[N]T{…}` / `.<…>{…}` / 显式标注 / `comptime var`。
+      * 容器不是裸标识符时先绑定 `__cfcN: T = <expr>`（只求值一次）。
+      * 诊断：切片 `container is a slice — its length is only known at runtime`；
+        非数组/元组 `requires an array or tuple with a compile-time-known length`；
+        无法静态定型 `annotate it (var c: [N]T = …)`。
+    - **测试**：`ComptimeForeach.*` 7 例（数组展开 / 赋值形态 / 元组逐元素类型 /
+      嵌套 / comptime var 容器 / 切片拒绝 / 非序列拒绝）；新示例
+      `examples/comptime_foreach`（入口目录 46）。
+    - **验证**：Windows 全量 **2203/2203 PASSED**、examples 55 个 `.cx` 全过；
+      WSL2 全量 **2200 passed / 2 skipped**。

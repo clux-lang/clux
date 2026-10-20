@@ -14,6 +14,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
+#include "parser/ast_foreach.h"
 #include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
@@ -119,8 +120,15 @@ ast_node_t *parse_comptime_stmt(parser_t *p) {
     }
     /* comptime if：编译期条件语句（sema Pass 3a 做语法树裁剪） */
     if (check_keyword(p, "if")) return parse_comptime_if(p);
+    /* comptime foreach：编译期展开（数组/元组，长度编译期已知；Pass 3a 展开） */
+    if (check_keyword(p, "foreach")) {
+        ast_node_t *n = parse_foreach(p);
+        if (n && n->kind == AST_FOREACH) ((ast_foreach_t *)n)->is_comptime = true;
+        return n;
+    }
     return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                         "expected 'var', 'func' or 'if' after 'comptime'");
+                         "expected 'var', 'func', 'if' or 'foreach' after "
+                         "'comptime'");
 }
 
 /* ================================================================ */

@@ -262,6 +262,10 @@ struct _sema_scope_t {
                                退出点（块尾/return/break/continue）逆序插入
                                call 语句（Pass 3a build_block 收集） */
   sema_scope_kind_t kind;
+  /* 该作用域对应的**块/语句 AST**（Pass 3a 建树时填）：`comptime foreach`
+     展开需要在 3a 里查"容器变量在同一块/外层块中的声明类型"，而 3b 之前
+     推断型 var（`var a = .[3]i32{…}`）的符号 type 还是 NULL——只能回看 AST。 */
+  ast_node_t     *block_ast;
 };
 typedef struct _sema_scope_t sema_scope_t;
 

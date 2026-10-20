@@ -914,3 +914,106 @@ TEST(OwnParam, DerefReturnStillMaterialized) {
       "}\n",
       "own_param_deref_after_interning");
 }
+
+/* ================================================================ */
+/* comptime foreach：编译期展开（数组 / 元组）                        */
+/* ================================================================ */
+
+TEST(ComptimeForeach, ArrayUnrolled) {
+  clux_expect_ok(
+      "var SUM: i32 = 0;\n"
+      "func main(): i32 {\n"
+      "  var arr = .[3]i32{ 10, 20, 30 };\n"
+      "  comptime foreach (var x of arr) { SUM = SUM + x; }\n"
+      "  if (SUM != 60) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_array");
+}
+
+TEST(ComptimeForeach, ExistingVariableForm) {
+  clux_expect_ok(
+      "var LAST: i32 = 0;\n"
+      "func main(): i32 {\n"
+      "  var arr = .[3]i32{ 1, 2, 3 };\n"
+      "  var y: i32 = 0;\n"
+      "  comptime foreach (y of arr) { LAST = y; }\n"
+      "  if (LAST != 3) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_assign_form");
+}
+
+/* 元组：每份副本按**该元素的实际类型**检查（i32 / f64 宽度不同） */
+TEST(ComptimeForeach, TuplePerElementTypes) {
+  clux_expect_ok(
+      "var W: i32 = 0;\n"
+      "func main(): i32 {\n"
+      "  var t = .<i32, f64>{ 1, 2.5 };\n"
+      "  comptime foreach (var e of t) {\n"
+      "    W = W + (sizeof(typeof(e)) as i32);\n"
+      "  }\n"
+      "  if (W != 12) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_tuple_types");
+}
+
+TEST(ComptimeForeach, Nested) {
+  clux_expect_ok(
+      "var N: i32 = 0;\n"
+      "func main(): i32 {\n"
+      "  var a = .[2]i32{ 1, 2 };\n"
+      "  var b = .[2]i32{ 10, 20 };\n"
+      "  comptime foreach (var p of a) {\n"
+      "    comptime foreach (var q of b) { N = N + p * q; }\n"
+      "  }\n"
+      "  if (N != 90) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_nested");
+}
+
+TEST(ComptimeForeach, ComptimeVarContainer) {
+  clux_expect_ok(
+      "var S: i32 = 0;\n"
+      "func main(): i32 {\n"
+      "  comptime var C = .[2]i32{ 5, 6 };\n"
+      "  comptime foreach (var v of C) { S = S + v; }\n"
+      "  if (S != 11) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_comptime_var");
+}
+
+/* 切片长度运行期才知道 → 拒绝 */
+TEST(ComptimeForeach, SliceRejected) {
+  std::string path = write_temp_file(
+      "func main(): i32 {\n"
+      "  var arr = .[3]i32{ 1, 2, 3 };\n"
+      "  var s = arr[0:3];\n"
+      "  comptime foreach (var x of s) { }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_slice");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("container is a slice"), std::string::npos) << err;
+  std::remove(path.c_str());
+}
+
+/* 非数组/元组容器 → 拒绝 */
+TEST(ComptimeForeach, NonSequenceRejected) {
+  std::string path = write_temp_file(
+      "struct P { x: i32; }\n"
+      "func main(): i32 {\n"
+      "  var p = .P{ .x = 1 };\n"
+      "  comptime foreach (var x of p) { }\n"
+      "  return 0;\n"
+      "}\n",
+      "ctfe_fe_struct");
+  std::string err;
+  EXPECT_EQ(clux_run_capture(path, &err), 1);
+  EXPECT_NE(err.find("requires an array or tuple"), std::string::npos) << err;
+  std::remove(path.c_str());
+}

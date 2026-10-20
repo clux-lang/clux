@@ -309,6 +309,8 @@ typedef struct sema_t {
      AST_PTR / AST_OWNED_TYPE 的 base 位置允许 `opaque`；裸 `opaque` 是
      指针缺少所有权修饰（opaque 是 `void *` 语义），必须报错。 */
   size_t        opaque_base_ctx;
+  /* comptime foreach 展开的临时变量序号（__cfcN）。 */
+  uint32_t      foreach_seq;
 
     /* defer 改写计数器：每个 defer 语句改写为临时函数定义 __defer_N，
        N 从 0 起在 sema 生命周期内单调递增（块内唯一，跨块亦唯一——

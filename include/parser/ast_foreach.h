@@ -44,6 +44,10 @@ typedef struct {
     ast_node_t *iterable;   /* `of` 之后的表达式 */
     ast_node_t *body;       /* AST_BLOCK */
     bool        is_decl;    /* true = `var a`（新声明）；false = 已定义变量 */
+    /* true = `comptime foreach`：**编译期展开**（数组/元组，长度编译期已知）。
+       前脱糖**不**展开它（sema Pass 3a 的 comptime_foreach_splice 负责），
+       因此 sema 会看到该节点；sema 展开后 compiler 永远看不到。 */
+    bool        is_comptime;
 } ast_foreach_t;
 
 static inline ast_node_t *ast_foreach_new(arena_t *arena, uint32_t tok_begin,

@@ -901,6 +901,27 @@ func main(): i32 {
 局部写法报
 ``cfunc definitions are only allowed at top level (a cfunc has no closure environment, ...)``。
 
+### `comptime foreach`：编译期展开的遍历
+
+与其它 `comptime` 语句同一位置（块语句），按**编译期已知长度**的数组或元组把
+循环体逐元素复制（展开）：
+
+```c
+var arr = .[3]i32{ 10, 20, 30 };
+comptime foreach (var x of arr) { print(x); }   // ⇒ { var x = arr[0]; … } 三份
+
+var t = .<i32, f64>{ 1, 2.5 };
+comptime foreach (var e of t) { … }             // 每份按该元素的**实际类型**检查
+```
+
+- `foreach (x of c)`（不带 `var`）形式每轮给已定义的 `x` 赋值。
+- 容器只能是 **`[N]T` 数组**或 **`<T1,T2,…>` 元组**；切片长度运行期才知道 →
+  报错（`container is a slice`）。容器变量的类型要么显式标注，要么来自
+  `.[N]T{…}` / `.<…>{…}` 字面量（推断自函数调用等无法静态定型时会要求标注）。
+- 展开发生在 sema Pass 3a：作用域树按展开后的语句建，3b/compiler 见不到
+  `comptime foreach`；零运行时循环开销。
+- 循环体里可嵌套 `comptime foreach`；`comptime var` 容器也可（元素折叠为常量）。
+
 ### 装饰器 `[[<expr>]]`
 
 声明前可以写装饰器：`[[ann]]` 把 `ann` 应用到该声明上。装饰器是**编译期函数**
