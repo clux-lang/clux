@@ -2382,3 +2382,18 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `Reflect.OwnershipInSignature`（签名形参所有权）。
     - **验证**：Windows 全量 **2232/2232 PASSED**、examples 全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+102. **所有权升级为类型构造 · P1b 实测结论：与 P2 合并**（2026-10）
+    - 尝试把 struct 字段类型、函数签名参数/返回类型也换成 `own T` / `ref T` / `fatal T`
+      （保留旧判定），实测：
+      * 只包 struct 字段 → **62 个测试失败**；
+      * 再加上签名参数/返回 → **108 个**；
+      * 在 `type_equal`/`type_extends` 里加"所有权透明"过渡桥 → 仍 **109 个**（大量比较
+        走指针身份 `==` / `value_implicit_cast` 身份短路 / 各子系统自己的类型断言）。
+    - 结论（已写进 docs/ownership-as-type.md）：**产出与判定必须同一提交内按子系统
+      一起切换**，P1b 因此与 P2 合并为 4 个批次（option/切片/数组 → struct 字段 →
+      函数签名 → 删除槽位字段）。
+    - 本轮只保留无风险的成果：`type_ownership_apply(vm, own, t)` 便捷构造（P2 批次用）；
+      其余改动全部回滚，全量保持 **2232/2232** 绿。
+    - 说明：这个"失败数据"本身是有价值的——它量化了"所有权不在类型里"的耦合面积
+      （约 100 个测试覆盖的判定点），批次划分就按这个面积从小到大排。

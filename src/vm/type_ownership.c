@@ -253,6 +253,16 @@ static const type_t *ownership_type_seal(vm_t *vm, const type_t *t) {
   return sub;
 }
 
+const type_t *type_ownership_apply(vm_t *vm, ownership_t own,
+                                   const type_t *t) {
+  if (!vm || !t || own == OWN_NONE) return t;
+  type_kind_t kind = own == OWN_OWN     ? TYPE_KIND_OWN
+                     : own == OWN_REF   ? TYPE_KIND_REF
+                                        : TYPE_KIND_FATAL;
+  const type_t *w = type_ownership_intern(vm, kind, t);
+  return w ? w : t;
+}
+
 /* ---- 查询辅助 ---- */
 
 ownership_t type_ownership_of(const type_t *t) {

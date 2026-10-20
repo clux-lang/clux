@@ -24,6 +24,9 @@ ownership_type_t *type_ownership_push_open(vm_t *vm, type_kind_t kind);
 const type_t *type_ownership_intern(vm_t *vm, type_kind_t kind,
                                     const type_t *sub);
 
+/** 若 own != OWN_NONE，返回 t 的所有权修饰类型（intern）；否则原样返回 t。 */
+const type_t *type_ownership_apply(vm_t *vm, ownership_t own, const type_t *t);
+
 /** 取修饰类型的 sub（own/ref/fatal）；无修饰返回 NULL。 */
 const type_t *type_ownership_sub(const type_t *t);
 
