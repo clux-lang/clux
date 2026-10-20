@@ -2361,4 +2361,5 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - **语义不变**：本阶段不构造这些类型（类型解析产出是 P1），2226 → **2230** 全绿。
     - **测试**：`tests/type_ownership_test.cpp` 4 例（intern/布局/kind 名、去重、
       剥链与 ownership_of 穿透、相等与不隐式兼容）。
-    - **验证**：Windows 全量 **2230/2230 PASSED**、examples 全过。
+    - **验证**：Windows 全量 **2230/2230 PASSED**、examples 全过；
+      WSL2 全量 **2227 passed / 2 skipped**。
