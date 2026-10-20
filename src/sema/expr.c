@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/reflect.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -63,6 +64,7 @@
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
+#include "vm/type_int.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "vm/type_opaque.h"
@@ -2355,12 +2357,22 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
   return true;
 }
 
+/* 前置声明：反射调用折叠（定义在 ex_member 之前的 helper 区）。 */
+static bool reflect_member_call(sema_t *sema, ast_node_t **node,
+                                sema_scope_t *scope, value_t **out);
+
 static value_t *ex_call(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
       /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
          实参链）。失败时诊断已记录。 */
       if (!sema_expand_spread_args(sema, call, scope)) return val_void(sema);
+      /* `T.<key>(i)`：type value 上的反射调用，先于方法调用解析。 */
+      {
+        value_t *rsv = NULL;
+        if (reflect_member_call(sema, node, scope, &rsv))
+          return rsv ? rsv : val_void(sema);
+      }
       /* 实参位置的 `cfunc(...)` → `func(...)`：先按被调函数签名把 cfunc 指针
          实参替换成生成的包装字面量（与变量初始化同一条路径）。只在 callee 是
          普通函数名时做；方法调用/FFI 各有自己的签名解析路径。 */
@@ -2975,6 +2987,267 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
 }
 
 /* AST_MEMBER 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+/* ===========================================================================
+ * 反射注入（`T.<key>` / `T.<key>(i)`）—— sema 折叠为常量
+ *
+ * 设计见 docs/reflect-builtin-design.md：
+ *   - 接收者必须是 **type value**（类型名 / typeof(x) / 类型别名 / 反射链式结果）；
+ *   - 值域 str / usize / type / bool（kind 与 ownership 都是 str，自描述）；
+ *   - 折叠成字面量/类型引用，运行期零指令。
+ * =========================================================================== */
+
+/* 该 AST 形态可能是类型表达式（用于安静地尝试 resolve，避免对变量成员访问
+   误报类型诊断）。 */
+static bool reflect_may_be_type(ast_node_t *n) {
+  if (!n) return false;
+  switch (n->kind) {
+  case AST_IDENT:
+  case AST_TYPE_REF:
+  case AST_TYPEOF:
+  case AST_ARRAY:
+  case AST_TUPLE:
+  case AST_FUNC_TYPE:
+  case AST_OPTION:
+  case AST_PTR:
+  case AST_SLICE_TYPE:
+  case AST_OWNED_TYPE:
+  case AST_CONST:
+  case AST_VOLATILE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* 接收者若是类型表达式，返回其类型；否则 NULL（安静）。 */
+static const type_t *reflect_receiver_type(sema_t *sema, ast_node_t *obj) {
+  if (!reflect_may_be_type(obj)) return NULL;
+  return resolve_type_expr(sema, obj);
+}
+
+/* arena 拷贝字符串（字面量要活到 compiler 阶段） */
+static strslice_t reflect_str(sema_t *sema, const char *s) {
+  size_t n = s ? strlen(s) : 0;
+  char *buf = (char *)arena_alloc(sema->arena, n + 1, 1);
+  if (!buf) return STRSLICE_EMPTY;
+  if (n) memcpy(buf, s, n);
+  buf[n] = '\0';
+  return strslice_from_bytes(buf, n);
+}
+
+/* 折叠产物 → 表达式节点（替换 *node）。返回该表达式的 shadow 值。 */
+static value_t *reflect_fold(sema_t *sema, ast_node_t **node,
+                             const sema_rv_t *rv) {
+  ast_node_t *old = *node;
+  ast_node_t *lit = NULL;
+  value_t *sv = NULL;
+  switch (rv->kind) {
+  case SEMA_RV_STR: {
+    lit = ast_string_lit_new(sema->arena, old->tok_begin, old->tok_end);
+    if (!lit) return val_void(sema);
+    strslice_t s = reflect_str(sema, rv->s.ptr ? (const char *)rv->s.ptr : "");
+    /* 注意：rv->s 可能带内嵌 NUL 之外的内容——按 len 截断拷贝更准确 */
+    if (rv->s.ptr && rv->s.len > 0) {
+      char *buf = (char *)arena_alloc(sema->arena, rv->s.len + 1, 1);
+      if (!buf) return val_void(sema);
+      memcpy(buf, rv->s.ptr, rv->s.len);
+      buf[rv->s.len] = '\0';
+      s = strslice_from_bytes(buf, rv->s.len);
+    }
+    ((ast_string_lit_t *)lit)->text = s;
+    sv = value_make_shadow(sema->vm, sema->vm->type_str);
+    break;
+  }
+  case SEMA_RV_USIZE: {
+    lit = ast_int_lit_new(sema->arena, old->tok_begin, old->tok_end);
+    if (!lit) return val_void(sema);
+    ((ast_int_lit_t *)lit)->type = STRSLICE_LIT("usize");
+    ((ast_int_lit_t *)lit)->value = (int64_t)rv->u;
+    sv = value_make_shadow(sema->vm, vm_type_usize(sema->vm));
+    break;
+  }
+  case SEMA_RV_I64: {
+    lit = ast_int_lit_new(sema->arena, old->tok_begin, old->tok_end);
+    if (!lit) return val_void(sema);
+    ((ast_int_lit_t *)lit)->type = STRSLICE_LIT("i64");
+    ((ast_int_lit_t *)lit)->value = rv->i;
+    sv = value_make_shadow(sema->vm, sema->vm->type_i64);
+    break;
+  }
+  case SEMA_RV_BOOL: {
+    lit = ast_bool_lit_new(sema->arena, old->tok_begin, old->tok_end);
+    if (!lit) return val_void(sema);
+    ((ast_bool_lit_t *)lit)->value = rv->b;
+    sv = value_make_shadow(sema->vm, sema->vm->type_bool);
+    break;
+  }
+  case SEMA_RV_TYPE: {
+    const type_t *t = rv->t;
+    if (!t) {
+      diag_error(sema->diag, sema_loc(sema, old),
+                 "reflection: this member has no type");
+      return val_void(sema);
+    }
+    const sema_type_t *st = sema_type_register(sema, t);
+    lit = ast_type_ref_new(sema->arena, old->tok_begin, old->tok_end);
+    if (!lit) return val_void(sema);
+    ((ast_type_ref_t *)lit)->name = st ? st->name : t->name;
+    sv = type_as_value(sema->vm, t);
+    break;
+  }
+  default:
+    return val_void(sema);
+  }
+  lit->is_generated = true;
+  lit->next = old->next;
+  *node = lit;
+  return sv;
+}
+
+/* 索引实参：编译期常量（CTFE 求值）→ 非负整数。 */
+static bool reflect_eval_index(sema_t *sema, ast_node_t *arg,
+                               sema_scope_t *scope, uint64_t *out) {
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = sema->vm;
+  ctx.sema = sema;
+  ctx.sema_scope = scope;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *v = ctfe_eval(&ctx, arg);
+  if (!v || value_is_error(sema->vm, v)) {
+    diag_error(sema->diag, sema_loc(sema, arg),
+               "reflection: index argument must be a compile-time constant");
+    return false;
+  }
+  const type_t *vt = value_type(v);
+  if (!vt || vt->kind != TYPE_KIND_INT || !value_data(v)) {
+    diag_error(sema->diag, sema_loc(sema, arg),
+               "reflection: index argument must be an integer");
+    return false;
+  }
+  int64_t sv = 0;
+  switch (vt->size) {
+  case 1: sv = vt->vtable == &VTABLE_INT_SIGNED
+                   ? *(const int8_t *)value_data(v)
+                   : *(const uint8_t *)value_data(v);
+          break;
+  case 2: sv = vt->vtable == &VTABLE_INT_SIGNED
+                   ? *(const int16_t *)value_data(v)
+                   : *(const uint16_t *)value_data(v);
+          break;
+  case 4: sv = vt->vtable == &VTABLE_INT_SIGNED
+                   ? *(const int32_t *)value_data(v)
+                   : *(const uint32_t *)value_data(v);
+          break;
+  default: sv = *(const int64_t *)value_data(v); break;
+  }
+  if (sv < 0) {
+    diag_error(sema->diag, sema_loc(sema, arg),
+               "reflection: index must be non-negative, got %lld",
+               (long long)sv);
+    return false;
+  }
+  *out = (uint64_t)sv;
+  return true;
+}
+
+/* 是否是"反射表达式"（`T.key(i)`，接收者是类型或另一个反射表达式）。
+   链式场景要先把它折叠成类型引用，外层才拿得到接收者类型。 */
+static bool is_reflect_expr(ast_node_t *n) {
+  if (!n) return false;
+  /* `T.key` 形式：接收者是类型表达式或另一个反射表达式 */
+  if (n->kind == AST_MEMBER) {
+    ast_member_t *m = (ast_member_t *)n;
+    if (!sema_reflect_is_key(m->field)) return false;
+    if (reflect_may_be_type(m->object)) return true;
+    return is_reflect_expr(m->object);
+  }
+  /* `T.key(i)` 形式 */
+  if (n->kind == AST_CALL) {
+    ast_call_t *c = (ast_call_t *)n;
+    if (!c->callee || c->callee->kind != AST_MEMBER) return false;
+    return is_reflect_expr(c->callee);
+  }
+  return false;
+}
+
+/* 链式接收者：先折叠内层反射调用（把节点换成类型引用/字面量）。 */
+static bool reflect_prefold(sema_t *sema, ast_node_t **obj, sema_scope_t *scope) {
+  if (!obj || !*obj || !is_reflect_expr(*obj)) return true;
+  value_t *v = sema_expr(sema, obj, scope);
+  return !is_poison(sema, v);
+}
+
+/* ex_member 的反射分支：接收者是类型 + key 命中 → 折叠。
+   handled == true 表示已处理，*out 为折叠结果的 shadow（诊断失败时 NULL）。 */
+static bool reflect_member(sema_t *sema, ast_node_t **node,
+                           sema_scope_t *scope, value_t **out) {
+  ast_member_t *m = (ast_member_t *)*node;
+  *out = NULL;
+  if (!reflect_prefold(sema, &m->object, scope)) return true;
+  const type_t *T = reflect_receiver_type(sema, m->object);
+  if (!T) return false;
+  sema_rv_t rv;
+  char err[512] = {0};
+  if (sema_reflect_needs_index(T, m->field)) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "reflection: '%.*s' requires an index argument (write "
+               "T.%.*s(0))",
+               (int)m->field.len, m->field.ptr, (int)m->field.len,
+               m->field.ptr);
+    return true;
+  }
+  if (!sema_reflect_lookup(T, m->field, false, 0, &rv, err, sizeof err)) {
+    diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
+    return true;
+  }
+  *out = reflect_fold(sema, node, &rv);
+  return true;
+}
+
+/* ex_call 的反射分支：`T.key(i)`。返回 true 表示已处理（*out 为结果 shadow）。 */
+static bool reflect_member_call(sema_t *sema, ast_node_t **node,
+                                sema_scope_t *scope, value_t **out) {
+  ast_call_t *call = (ast_call_t *)*node;
+  *out = NULL;
+  if (!call->callee || call->callee->kind != AST_MEMBER) return false;
+  ast_member_t *m = (ast_member_t *)call->callee;
+  if (!reflect_prefold(sema, &m->object, scope)) return true;
+  const type_t *T = reflect_receiver_type(sema, m->object);
+  if (!T) return false;
+  sema_rv_t rv;
+  char err[512] = {0};
+  if (!sema_reflect_needs_index(T, m->field)) {
+    /* 未知 key → 走 lookup 让它给出"没有该成员 + 可用列表"的诊断；
+       已知但不带索引的 key → "takes no arguments"。 */
+    if (!sema_reflect_is_key(m->field)) {
+      if (!sema_reflect_lookup(T, m->field, true, 0, &rv, err, sizeof err))
+        diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
+      return true;
+    }
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "reflection: '%.*s' takes no arguments", (int)m->field.len,
+               m->field.ptr);
+    return true;
+  }
+  size_t nargs = sema_count_siblings(call->args);
+  if (nargs != 1) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "reflection: '%.*s' expects exactly 1 index argument, got %zu",
+               (int)m->field.len, m->field.ptr, nargs);
+    return true;
+  }
+  uint64_t idx = 0;
+  if (!reflect_eval_index(sema, call->args, scope, &idx)) return true;
+  if (!sema_reflect_lookup(T, m->field, true, idx, &rv, err, sizeof err)) {
+    diag_error(sema->diag, sema_loc(sema, *node), "%s", err);
+    return true;
+  }
+  *out = reflect_fold(sema, node, &rv);
+  return true;
+}
+
 static value_t *ex_member(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* 字段读取 p.field：object 求值 → 校验 struct/union → 按名查字段
@@ -2984,6 +3257,12 @@ static value_t *ex_member(sema_t *sema, ast_node_t **node,
          （sema 不感知运行期 tag——运行期 FIELD_GET 反查 member + tag 校验，
          不符返回 error value 即 panic）。 */
       ast_member_t *n = (ast_member_t *)*node;
+      /* `T.<key>`：接收者是 type value 时按反射 key 折叠（见 reflect_member）。 */
+      {
+        value_t *rsv = NULL;
+        if (reflect_member(sema, node, scope, &rsv))
+          return rsv ? rsv : val_void(sema);
+      }
       value_t *obj = sema_expr(sema, &n->object, scope);
       if (is_poison(sema, obj))
         return val_void(sema);

@@ -1,0 +1,65 @@
+// reflect.cx — 编译期反射：`T.<key>`（类型值成员注入）
+//
+// 元数据在 sema 阶段折叠成常量（与 sizeof/typeof 同族），运行期零开销、零存储。
+// 设计见 docs/reflect-builtin-design.md。
+//
+//   T.name / T.size / T.align / T.kind        通用（kind 是编译期字符串）
+//   T.field_count / T.field_name(i) / ...     struct / union / cunion / tuple / enum / func
+//   T.<key> 可链式：T.field_type(0).name
+//   类型值不能存变量 → 绑定反射出的类型用 `type Alias = T.field_type(0);`
+//
+// 所有权（own/ref/fatal）**不在反射里**：它是类型的一部分（参与 intern），
+// 释放序列由编译器从类型生成，反射再暴露一遍是冗余的。
+
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+struct Point {
+    x: i32;
+    y: i64;
+}
+
+enum Color: i32 { Red = 1, Green = 2 }
+
+type A3 = [3]i32;
+type Cb = func(i32) -> i64;
+
+func main(): i32 {
+    // ① 通用
+    libc::printf("i32: %s size=%d align=%d kind=%s\n", i32.name,
+                 i32.size as i32, i32.align as i32, i32.kind);
+
+    // ② struct 字段
+    libc::printf("Point: kind=%s fields=%d\n", Point.kind,
+                 Point.field_count as i32);
+    libc::printf("  field0 = %s off=%d type=%s\n", Point.field_name(0),
+                 Point.field_offset(0) as i32, Point.field_type(0).name);
+    libc::printf("  field1 = %s off=%d type=%s\n", Point.field_name(1),
+                 Point.field_offset(1) as i32, Point.field_type(1).name);
+
+    // ③ enum
+    libc::printf("Color: variants=%d [%s=%d, %s=%d] underlying=%s\n",
+                 Color.variant_count as i32, Color.variant_name(0),
+                 Color.variant_value(0) as i32, Color.variant_name(1),
+                 Color.variant_value(1) as i32, Color.underlying.name);
+
+    // ④ 数组 / func
+    libc::printf("A3: kind=%s length=%d elem=%s\n", A3.kind, A3.length as i32,
+                 A3.elem_type.name);
+    libc::printf("Cb: kind=%s params=%d p0=%s ret=%s c_abi=%d\n", Cb.kind,
+                 Cb.param_count as i32, Cb.param_type(0).name,
+                 Cb.return_type.name, Cb.is_c_abi as i32);
+
+    // ⑤ 链式 + typeof 入口
+    struct H { t: <i32, f64>; }
+    libc::printf("H.t: e0=%s e1=%s\n", H.field_type(0).elem_type(0).name,
+                 H.field_type(0).elem_type(1).name);
+    var v: i64 = 3;
+    libc::printf("typeof(v): name=%s size=%d\n", typeof(v).name,
+                 typeof(v).size as i32);
+
+    // ⑥ 绑定反射出的类型
+    type F0 = H.field_type(0);
+    libc::printf("F0: elems=%d\n", F0.elem_count as i32);
+    return 0;
+}

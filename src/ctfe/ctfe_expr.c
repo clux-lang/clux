@@ -1,5 +1,6 @@
 #include "ctfe/ctfe.h"
 #include <stdio.h>
+#include "sema/reflect.h"
 #include "sema/sema.h"
 
 #include "core/panic.h"
@@ -10,6 +11,7 @@
 #include "parser/ast_binary.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
+#include "parser/ast_member.h"
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
@@ -510,7 +512,79 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (token_is(n->op, "~"))  return value_bnot(vm, v);
         return ctfe_err(ctx, "ctfe: unsupported unary operator");
     }
+    /* 反射注入（`T.key` / `T.key(i)`）：CTFE 里同样按类型元数据折叠。
+       `type Alias = T.field_type(0);` 这类类型定义 RHS 由 CTFE 求值，所以
+       反射必须在这里也能用（与 sema 的折叠共用 sema_reflect_lookup）。 */
+    case AST_MEMBER: {
+        ast_member_t *m = (ast_member_t *)node;
+        /* 非反射成员：CTFE 不支持普通成员访问，报同款错误（原 default 文案）。 */
+        if (!sema_reflect_is_key(m->field))
+            return ctfe_err(ctx, "ctfe: unsupported expression node");
+        value_t *tv = ctfe_eval(ctx, m->object);
+        if (value_is_error(vm, tv)) return tv;
+        if (!value_is_type(tv, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: reflection receiver is not a type");
+        const type_t *T = value_as(tv, const type_t *);
+        sema_rv_t rv;
+        char rerr[512] = {0};
+        if (!sema_reflect_lookup(T, m->field, false, 0, &rv, rerr,
+                                 sizeof rerr))
+            return ctfe_err(ctx, rerr);
+        value_t *out = sema_reflect_value(vm, &rv);
+        return out ? out : ctfe_err(ctx, "ctfe: reflection produced no value");
+    }
+
     case AST_CALL: {
+        /* 反射调用 `T.key(i)`：callee 是成员访问、接收者是类型、key 带索引。 */
+        {
+            ast_call_t *rc = (ast_call_t *)node;
+            if (rc->callee && rc->callee->kind == AST_MEMBER) {
+                ast_member_t *rm = (ast_member_t *)rc->callee;
+                if (sema_reflect_is_key(rm->field)) {
+                    value_t *tv = ctfe_eval(ctx, rm->object);
+                    if (value_is_error(vm, tv)) return tv;
+                    if (value_is_type(tv, TYPE_KIND_TYPE)) {
+                        const type_t *T = value_as(tv, const type_t *);
+                        uint64_t idx = 0;
+                        if (sema_reflect_needs_index(T, rm->field)) {
+                            if (!rc->args || rc->args->next)
+                                return ctfe_err(
+                                    ctx, "ctfe: reflection expects 1 index");
+                            value_t *iv = ctfe_eval(ctx, rc->args);
+                            if (value_is_error(vm, iv)) return iv;
+                            const type_t *it = value_type(iv);
+                            if (!it || it->kind != TYPE_KIND_INT || !value_data(iv))
+                                return ctfe_err(
+                                    ctx, "ctfe: reflection index must be an integer");
+                            int64_t s = 0;
+                            switch (it->size) {
+                            case 4: s = *(const int32_t *)value_data(iv); break;
+                            case 8: s = *(const int64_t *)value_data(iv); break;
+                            default:
+                                return ctfe_err(
+                                    ctx, "ctfe: unsupported reflection index width");
+                            }
+                            if (s < 0)
+                                return ctfe_err(ctx,
+                                                "ctfe: reflection index must be "
+                                                "non-negative");
+                            idx = (uint64_t)s;
+                        }
+                        sema_rv_t rv;
+                        char rerr[512] = {0};
+                        if (!sema_reflect_lookup(T, rm->field,
+                                                 sema_reflect_needs_index(
+                                                     T, rm->field),
+                                                 idx, &rv, rerr, sizeof rerr))
+                            return ctfe_err(ctx, rerr);
+                        value_t *out = sema_reflect_value(vm, &rv);
+                        return out ? out
+                                   : ctfe_err(ctx,
+                                              "ctfe: reflection produced no value");
+                    }
+                }
+            }
+        }
         ast_call_t *n = (ast_call_t *)node;
         if (n->callee && n->callee->kind == AST_IDENT) {
             ast_ident_t *id = (ast_ident_t *)n->callee;

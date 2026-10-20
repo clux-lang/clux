@@ -121,7 +121,6 @@ make(T, N, init...)   // T 是元素类型表达式
 | `field_name(i)` | `str` | 第 i 个字段名（声明序） |
 | `field_type(i)` | `type` | 第 i 个字段类型（type value） |
 | `field_offset(i)` | `usize` | 第 i 个字段偏移 |
-| `field_ownership(i)` | `Ownership` | 槽位所有权（own/ref/fatal/none） |
 | `embed_count` | `usize` | `...Base;` 嵌入数 |
 | `embed_type(i)` | `type` | 第 i 个嵌入类型 |
 | `method_count` | `usize` | 方法数（`methods` vec，登记序） |
@@ -148,10 +147,8 @@ make(T, N, init...)   // T 是元素类型表达式
 | `member_name(i)` | `str` | member/tag 名 |
 | `member_type(i)` | `type` | payload 类型 |
 | `member_tag(i)` | `usize` | tag 编号 |
-| `member_ownership(i)` | `Ownership` | payload 槽位所有权 |
 
-**cunion**：`member_count` / `member_name(i)` / `member_type(i)` / `member_ownership(i)`
-（无 tag）。
+**cunion**：`member_count` / `member_name(i)` / `member_type(i)`（无 tag）。
 
 **func / cfunc**
 
@@ -159,48 +156,33 @@ make(T, N, init...)   // T 是元素类型表达式
 |---|---|---|
 | `param_count` | `usize` | 形参数 |
 | `param_type(i)` | `type` | 第 i 个形参类型 |
-| `param_ownership(i)` | `Ownership` | 形参槽位所有权 |
 | `return_type` | `type` | 返回类型（void 也返回 `void` 的 type value） |
-| `return_ownership` | `Ownership` | 返回槽位所有权 |
 | `is_variadic` | `bool` | 变参 |
 | `is_c_abi` | `bool` | `cfunc(...)` 为 true，`func(...)` 为 false |
 
-### 3.10 为什么必须暴露所有权：`own *T` 与 `ref *T` 的 type 是**同一个**
+### 3.10 为什么**不**暴露槽位所有权（用户修正）
 
-所有权是**槽位属性**、不进类型（`type_t` 不带 ownership），所以：
+初版设计打算暴露 `field_ownership(i)` 等 key，理由写的是"反射生成的销毁序列需要
+知道字段是不是 own"。这个理由**不成立**（用户指正）：
 
-```c
-struct Node {
-    value: i32;
-    next: own *Node;     // 拥有：销毁时要 FREE
-}
-struct View {
-    value: i32;
-    next: ref *Node;     // 借用：销毁时**不能** FREE
-}
-```
+1. **所有权是类型的一部分**。`struct_field_t.ownership` 参与结构体类型的 intern
+   去重：`struct N { next: own *Node }` 与 `struct V { next: ref *Node }` 是**两个
+   不同的类型**。同一个类型不可能既有 own 槽位又有 ref 槽位——所以"这个字段是不是
+   own"**完全由类型决定**，不是值的运行期状态。
+2. **释放序列由编译器从类型生成**（`gen_destroy_impl` / `type_has_own_slots`），
+   调用点无需任何元数据：`FREE`/销毁语句在编译期就定死了。
+3. 因此反射再暴露一遍槽位所有权是**冗余信息**：任何需要它的编译器路径（cfunc→func
+   包装的 `move(p)`、切片逐元素 FREE、结构体销毁）都直接读类型，而不是读反射。
 
-`Node.next` 与 `View.next` 的 `field_type(1)` **都返回 `*Node`**——只看类型，
-反射无法区分"该字段需要 move/free"还是"只是借来看"。若没有
-`field_ownership(i)`，任何**由反射生成的销毁/克隆/序列化/FFI 包装**都会做错：
+结论：**v0 不暴露 `*_ownership` key**。若将来某个用户级库确实需要它（例如生成
+"逐字段拷贝" 的泛型代码时判断要不要 `move`），那是**泛型 + 类型级查询**的范畴，
+等 M7 再议；届时它也只是 `T` 的又一个 key，加回来是一行表项。
 
-```c
-// 伪造：一个 comptime 生成 drop 序列的库
-comptime func gen_drop(T: type): void {
-    // 只有 own 槽位才需要 move/FREE；ref/fatal 槽位不能碰
-    if (T.field_ownership(1) == "own") { free(node.next); }
-}
-```
-
-同理 `param_ownership(i)` 决定包装体要不要 `move(p)`（正是 cfunc→func 包装
-需要的信息）、`elem_ownership` 决定切片销毁要不要逐元素 FREE。**这是反射里
-唯一无法从"类型"推出的元数据**，所以必须由 builtin 暴露。
-
-**array**：`elem_type` / `elem_ownership` / `len`
-**slice**：`elem_type` / `elem_ownership`
+**array**：`elem_type``elem_type` / `elem_ownership` / **`length`**（注意不是 `len`——`len` 是关键字，`T.len` 过不了 parser）
+**slice**：`elem_type`
 **ptr**：`target_type` / `rc`（`0` 普通、`1` share、`2` weak）
-**tuple**：`elem_count` / `elem_type(i)` / `elem_offset(i)` / `elem_ownership(i)`
-**option**：`inner_type` / `inner_ownership`
+**tuple**：`elem_count` / `elem_type(i)` / `elem_offset(i)`
+**option**：`inner_type`
 **const / volatile**：`unqualified`（剥限定后的类型）
 
 ### 3.9 kind / ownership 返回**编译期字符串**（不引入内建枚举）
@@ -217,17 +199,10 @@ comptime func gen_drop(T: type): void {
 "cunion" "ptr" "slice" "opaque" "module" "cfunc"
 ```
 
-`*_ownership(...)` 的取值（与 `ownership_t` 一一对应）：
-
-```
-"none" "own" "ref" "fatal"
-```
-
 判断种类用普通字符串比较即可：
 
 ```c
 if (T.kind == "struct") { … }          // 编译期折叠成常量比较
-if (T.field_ownership(1) == "own") { … }
 ```
 
 > 为什么不用数值：把 kind/ownership 暴露成数字会逼用户记 0..22 的映射，
@@ -364,7 +339,7 @@ P0/P1/P2 不依赖任何未实现的语言特性，可以立刻做；P3 等泛�
 | 1 | 注入面 | **C：type value 成员注入 `T.<key>`** |
 | 2 | 元数据集合形状 | **计数 + 索引**（`field_count` / `field_name(i)`），不用 `[N]str` 数组 |
 | 3 | 属性枚举顺序 | **按名排序**（确定性） |
-| 4 | 所有权元数据 | **暴露**（`field_ownership(i)` / `param_ownership(i)` / `elem_ownership` / `inner_ownership`），返回 `str`；用途示例见 §3.10 |
+| 4 | 所有权元数据 | **不暴露**（用户修正）：所有权是类型的一部分（参与 intern），释放序列由编译器从类型生成，反射再暴露一遍是冗余信息；详见 §3.10 |
 | 5 | kind / ownership 的表示 | **编译期字符串**（自描述），不引入内建枚举 |
 | 6 | 命名风格 | **snake_case**（`field_count`，与 reflect-design.md 一致） |
 | 7 | type 的传递 | **走泛型（M7）**；`comptime func` 不接受 `type` 参数 |

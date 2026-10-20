@@ -2280,3 +2280,32 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       `examples/comptime_foreach`（入口目录 46）。
     - **验证**：Windows 全量 **2203/2203 PASSED**、examples 55 个 `.cx` 全过；
       WSL2 全量 **2200 passed / 2 skipped**。
+
+97. **反射 builtin 注入 P0/P1：`T.<key>`（type value 成员注入）**（2026-10）
+    - 设计见 [reflect-builtin-design.md](reflect-builtin-design.md)；本轮实现 P0+P1。
+    - **注入面**：`T.<key>`——接收者是 type value（类型名 / `typeof(x)` / 类型别名 /
+      反射链式结果）。零关键字增长，与 `p.x`（实例字段）、`T::x`（静态成员）分离。
+    - **实现**：
+      * `src/sema/reflect.c`：key → 值 的核心（输入 `const type_t*` + key + 可选索引，
+        输出 str/usize/i64/bool/type 描述），sema 与 CTFE 共用一份。
+      * sema（`ex_member` / `ex_call`）：识别 type value 接收者 → `sema_reflect_lookup`
+        → 折叠成字面量/类型引用（`AST_STR_LIT` / `AST_INT_LIT(usize)` / `AST_TYPE_REF` /
+        booleans）。链式（`T.field_type(0).elem_type(1).name`）先折叠内层。
+      * CTFE：同样支持反射 key——`type Alias = T.field_type(0);` 这类类型定义 RHS 由
+        CTFE 求值，因此反射必须在那里也可用（共用同一 lookup）。
+      * 索引实参必须是编译期常量（CTFE 求值）；诊断覆盖：未知 key（列出该 kind 可用
+        key）、key 与 kind 不符、越界、缺索引、非常量索引。
+    - **key 表**：通用 `name/size/align/kind`（`kind` 是编译期字符串，自描述；
+      如 `"struct"`/`"int"`/`"cfunc"`）；struct（字段/嵌入/方法/属性，属性**按名排序**）；
+      enum；union/cunion；func/cfunc（含 `is_variadic`/`is_c_abi`）；array（**`length`**，
+      因 `len` 是关键字）/slice/ptr（`target_type`/`rc`）/tuple/option/const-volatile
+      （`unqualified` + 属性自动穿透）。
+    - **所有权 key 不暴露**（用户修正）：所有权是类型的一部分（`struct_field_t.ownership`
+      参与 intern），销毁/克隆序列由编译器从类型生成（`gen_destroy_impl` /
+      `type_has_own_slots`）——反射再暴露一遍是冗余信息，且不存在"同一类型既有 own 又有
+      ref 槽位"的场景。`T.field_ownership(i)` 因此**不存在**（测试固定该行为）。
+    - **测试**：`tests/reflect_test.cpp` 10 例（通用/别名透明、struct 字段、enum+数组+元组、
+      func 签名、链式与 `type` 绑定、未知 key/kind 不符/越界/索引错误/所有权 key 已移除）。
+      新示例 `examples/reflect`（入口目录 47）。
+    - **验证**：Windows 全量 **2213/2213 PASSED**、examples 56 个 `.cx` 全过、fmt 幂等；
+      WSL2 全量 **2210 passed / 2 skipped**。
