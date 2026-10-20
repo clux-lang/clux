@@ -63,6 +63,30 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 
 ---
 
+## 2.5 运行期语义：**剥离 / 穿透，零行为**（用户澄清）
+
+所有权修饰符是**纯编译期**概念：运行期把它们**剥掉**，只看底层 `sub`，不产生任何
+行为差异。落地成三条硬规则：
+
+1. **没有运行期标志**。`value_t.ownership` 直接删除（不是"以后再说"）——运行期的
+   `value_t` 只有 `type`（裸类型）+ `data`；`value_set_ownership` / `value_ownership` /
+   `value_is_borrowed` 全部消失。
+2. **运行期类型永远是裸类型**。任何进入运行期的类型引用（`LOAD_TYPE` / `DEFINE_TYPE` /
+   构造指令的 type_id / 字段布局 / FFI 描述符 / 值分配）都先 `type_strip_ownership`：
+   `own T`、`ref T`、`fatal T` 与 `T` 在运行期是**同一个** `type_t`（同 size/align/vtable）。
+   在 `value_make` / 类型指令入口加 debug 断言"运行期类型不带所有权修饰"。
+3. **所有"要不要销毁/要不要拷贝"的决策都在编译期**。现在的 `value_is_borrowed()` 分支
+   （60 处 `OWN_REF`）不是"运行期事实"，而是"编译期没决定好"：编译器在**需要独立值时**
+   发 materialize/clone（`BCODE_MATERIALIZE` 已有），否则按裸类型传指针。所以这些分支
+   在 P2 逐个删除，而不是改成运行期判断。
+
+随之而来的结构选择：`own T` 这类类型仍 intern 在 vm 类型池里（它们要参与类型相等、
+反射、签名），但**运行期指令只引用剥过的类型**；两者布局相同，因此 `type_equivalence`
+不受影响。销毁序列（`gen_destroy_impl` / `type_has_own_slots`）在**编译期**看未剥的
+类型图决定，生成的字节码里只出现裸类型。
+
+---
+
 ## 3. 实施阶段（每阶段全绿 + 独立提交）
 
 ### P0 基础设施（纯增量，不改语义）
@@ -89,7 +113,8 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 每块独立跑全量，出问题单独回滚。
 
 ### P3 删除旧机制
-- 删 `value_t.ownership`、`value_set_ownership`、`value_ownership`、`value_is_borrowed`、
+- 删 `value_t.ownership`、`value_set_ownership`、`value_ownership`、`value_is_borrowed`（连同
+  P2 已删除的 60 处 `OWN_REF` 分支）、
   `sema_type_expr_ownership`、8 个槽位所有权字段、`func_sig_eq` 所有权比较。
 - 反射把 `ownership` / `unqualified` 正式纳入 key 表（含 `field_type(i).ownership` 链式）。
 - 更新文档（language-spec 所有权章节、architecture、reflect 设计 §3.10 改写为"所有权是
@@ -97,16 +122,22 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 
 ---
 
-## 4. 最大风险：运行期借用标志
+## 4. P2 的"运行期边界"清单（剥离点）
 
-`OWN_REF` 在运行期用于"不要释放"（`value_is_borrowed`，60 处 `OWN_REF` 引用）。改成
-类型后，**每个**销毁点都必须能从静态类型决定：绑定（`var y = x.*`）要 materialize、
-`data()` 返回的指针、临时值、`vec`/切片元素借用等。P2 的第 1 步会先做**站点审计**：
-把 60 处分类（编译期可判定 / 需要 materialize / 真是运行期事实），再逐类替换。
-如果审计发现某类确实无法静态判定，那一处保留一个**局部**运行期标记（不回到全局
-`value_t.ownership`），并记录原因。
+按"运行期只看裸类型"的规则，逐个边界检查（每条都是 1-3 行改动，不再是风险）：
 
----
+| 边界 | 处理 |
+|---|---|
+| `value_make` / `value_alloc_data` | 断言 + 剥（防御式：调用方本应已剥） |
+| `BCODE_LOAD_TYPE` / `DEFINE_TYPE` / 构造 | 剥后取 type_id |
+| 字段布局 / `struct_type_seal` | 字段类型存入类型池时剥（布局只关心 sub） |
+| FFI 描述符（`ffi_type_for`） | 剥后按裸类型映射 |
+| `gen_destroy_impl` / 销毁序列 | **不剥**：编译期按未剥类型图决定 FREE 集合 |
+| `x.*` 读取 / `data()` / 切片元素 | 编译期决定是否 materialize（已有 `BCODE_MATERIALIZE`） |
+| 比较 / 打印 / 哈希等通用 vtable | 剥后按裸类型分派 |
+
+替换完毕后在 debug build 打开"运行期类型必须无修饰"断言，全量跑一遍即可确认没有
+漏网的穿透点。
 
 ## 5. 兼容与验证
 
@@ -127,3 +158,4 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 | Q4 | `move(x)` 的结果类型 | `fatal T`；绑定/传参时变为 `own T`（消费） |
 | Q5 | `ref T` 能否作为字段类型（借用存进结构体） | 沿用现有规则（逃逸检查禁止），类型层允许 |
 | Q6 | 反射 key 命名：`ownership`（str）还是 `T.is_own` 布尔族 | `ownership` 一个 str，另加 `unqualified`（与 const/volatile 同一 key 名） |
+| Q7 | 运行期类型池是否也存 `own T`？ | 存（参与相等/反射/签名），但**运行期指令只引用剥过的类型**，并在 debug 断言"运行期类型无修饰" |
