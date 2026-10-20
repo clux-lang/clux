@@ -2380,4 +2380,5 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       值判定仍是旧机制（P2 才切换），Windows 全量 2230 → **2232** 全绿。
     - **测试**：`Reflect.OwnershipAsType`（kind/ownership/size/unqualified/穿透）、
       `Reflect.OwnershipInSignature`（签名形参所有权）。
-    - **验证**：Windows 全量 **2232/2232 PASSED**、examples 全过。
+    - **验证**：Windows 全量 **2232/2232 PASSED**、examples 全过；
+      WSL2 全量 **2229 passed / 2 skipped**。
