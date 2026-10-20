@@ -1,4 +1,5 @@
 #include "vm/type.h"
+#include "vm/type_ownership.h"
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/function.h"
@@ -136,6 +137,10 @@ const type_t *type_qualifier_sub(const type_t *t) {
         return ((const const_type_t *)t)->sub;
     if (t->kind == TYPE_KIND_VOLATILE)
         return ((const volatile_type_t *)t)->sub;
+    /* 所有权修饰（own/ref/fatal）也是限定，剥链统一处理 */
+    if (t->kind == TYPE_KIND_OWN || t->kind == TYPE_KIND_REF ||
+        t->kind == TYPE_KIND_FATAL)
+        return type_ownership_sub(t);
     return NULL;
 }
 
@@ -152,8 +157,9 @@ void type_sync_derived_layout(vm_t *vm, const type_t *sub) {
         for (size_t r = 0; r < nroots; r++) {
             const type_t *root = roots[r];
             /* const / volatile：布局 = sub 的布局 */
-            vec_t *pools[2] = {vm->const_types, vm->volatile_types};
-            for (size_t p = 0; p < 2; p++) {
+            vec_t *pools[3] = {vm->const_types, vm->volatile_types,
+                               vm->ownership_types};
+            for (size_t p = 0; p < 3; p++) {
                 vec_t *pool = pools[p];
                 if (!pool) continue;
                 size_t n = vec_len(pool);

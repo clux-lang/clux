@@ -119,6 +119,7 @@ vm_t *vm_new(allocator_t *alloc) {
        intern 用；元素由 vm_destroy 手动释放，vec 只持有指针数组） */
     vm->const_types = vec_new(alloc, /*owns_element=*/false);
     vm->volatile_types = vec_new(alloc, /*owns_element=*/false);
+    vm->ownership_types = vec_new(alloc, /*owns_element=*/false);
 
     /* optional 修饰类型池（type_option_intern / type_option_seal intern 用；
        元素由 vm_destroy 手动释放，vec 只持有指针数组） */
@@ -304,6 +305,20 @@ void vm_destroy(vm_t **pvm) {
             allocator_free(vm->alloc, (void **)&vt);
         }
         vec_free(vm->alloc, &vm->volatile_types);
+    }
+    if (vm->ownership_types) {
+        size_t n = vec_len(vm->ownership_types);
+        for (size_t i = 0; i < n; i++) {
+            ownership_type_t *ot =
+                (ownership_type_t *)vec_get(vm->ownership_types, i);
+            if (!ot) continue;
+            if (ot->base.name.ptr) {
+                char *np = (char *)ot->base.name.ptr;
+                allocator_free(vm->alloc, (void **)&np);
+            }
+            allocator_free(vm->alloc, (void **)&ot);
+        }
+        vec_free(vm->alloc, &vm->ownership_types);
     }
 
     /* 数组类型池：释放 name + 结构体（elem_type 归底层类型，不在此释放） */

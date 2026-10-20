@@ -2340,3 +2340,25 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       未知方法/属性不是方法/索引越界 + 无成员）；反射合计 23 例。
     - **验证**：Windows 全量 **2226/2226 PASSED**、examples 全过、fmt 幂等；
       WSL2 全量 **2223 passed / 2 skipped**。
+
+100. **所有权升级为类型构造 · P0 基础设施**（2026-10，用户提出并确认决策）
+    - 动机：所有权原来记在 `value_t`（值状态），导致反射不能暴露、签名手比、销毁递归手写
+      等割裂；改为**类型修饰**（与 const/volatile 同构）后自然进入反射与泛型。
+    - **用户澄清（关键）**：运行期只做**剥离/穿透**——所有权零运行期行为。
+      因此：没有运行期标志（`value_t.ownership` 将删除）、运行期类型永远是裸类型、
+      销毁/拷贝决策全在编译期。
+    - 本轮（P0，纯增量）：
+      * 新增 `TYPE_KIND_OWN / TYPE_KIND_REF / TYPE_KIND_FATAL` + `ownership_type_t`
+        （三种共用一个布局：`base` + `sub`）。
+      * `src/vm/type_ownership.c`：`VTABLE_OWNERSHIP`（全部槽位代理到 sub，与 const 同构）、
+        `type_ownership_intern`（按 (kind, sub) 去重）、`type_ownership_sub`、
+        `type_ownership_of`（穿透 const/volatile）、`type_strip_ownership`（运行期边界用）。
+      * 池 `vm->ownership_types`（三种 kind 同池）+ 销毁；`type_qualifier_sub` 统一覆盖
+        own/ref/fatal；`type_sync_derived_layout` 把所有权池纳入布局同步。
+      * 反射：`kind` 返回 `"own"/"ref"/"fatal"`；新增通用 key `ownership`
+        （`"own"/"ref"/"fatal"/"none"`，穿透 const/volatile）；`unqualified` 扩展到所有权修饰。
+      * `type_is_own/ref/fatal` 从恒 false 的废弃桩恢复为真实判定。
+    - **语义不变**：本阶段不构造这些类型（类型解析产出是 P1），2226 → **2230** 全绿。
+    - **测试**：`tests/type_ownership_test.cpp` 4 例（intern/布局/kind 名、去重、
+      剥链与 ownership_of 穿透、相等与不隐式兼容）。
+    - **验证**：Windows 全量 **2230/2230 PASSED**、examples 全过。

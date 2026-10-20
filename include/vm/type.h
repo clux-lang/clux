@@ -56,6 +56,10 @@ TYPE_KIND_CFUNC,     /* cfunc(P…) -> R：**C 函数指针**（无 env，size=�
                         仅用于 FFI 边界（extern cfunc 的参数/返回值、
                         extern var 的类型）。data = 裸代码指针。 */
     TYPE_KIND_COUNT,     /* 哨兵：复合段上界（> TYPE_KIND_INTERRUPT 且 < COUNT 即复合类型） */
+    /* ---- 所有权修饰（与 const/volatile 同构，纯编译期：运行期剥离/穿透）---- */
+    TYPE_KIND_OWN,       /* own T：拥有资源（move-only，持有者销毁） */
+    TYPE_KIND_REF,       /* ref T：借用（持有者不销毁） */
+    TYPE_KIND_FATAL,     /* fatal T：将亡（必须消费一次） */
 } type_kind_t;
 
 /**
@@ -388,32 +392,42 @@ typedef struct cunion_member_t {
     ownership_t   ownership;
 } cunion_member_t;
 
+/* ownership_type_t: own / ref / fatal 修饰类型（三种 kind 共用一个布局）
+ *
+ * 与 const/volatile 同构：持 sub 指针，布局（size/align）= sub 的布局，
+ * 运算/vtable 槽位代理到 sub。**运行期不出现**：所有运行期类型引用先经
+ * type_strip_ownership 剥成裸类型（见 docs/ownership-as-type.md §2.5）。
+ * 语义（可否拷贝/move、销毁责任）由 sema 按类型判定。 */
+typedef struct ownership_type_t {
+    type_t        base;
+    const type_t *sub; /* 被修饰类型（引用，不拥有；须已密封） */
+} ownership_type_t;
+
 typedef struct cunion_type_t {
     type_t           base;
     cunion_member_t *members;  /* member 表（seal 时拷贝，vm 拥有） */
     size_t           member_count;
 } cunion_type_t;
 
-/* ---- 所有权辅助查询（已废弃：所有权迁移到 value/symbol 层） ---- */
-/* type_t.ownership 字段已删除。以下函数保留供链接兼容，恒返回 false。
-   调用方应改用 sym->ownership / value_ownership() 判定所有权。 */
+/* ---- 所有权修饰查询（2026-10 重构：所有权是**类型修饰**，与 const/volatile 同级）
+ *
+ * `own T` / `ref T` / `fatal T` 是独立类型（参与相等与 intern），但**运行期剥离**：
+ * 运行期指令只引用裸类型。语义判定（move/拷贝/销毁责任）在 sema。
+ * 见 docs/ownership-as-type.md。 */
 
-/** 已废弃：所有权迁移到 symbol/value 层，类型不携带 ownership。 */
+/** 是否为 `own T`。 */
 static inline bool type_is_own(const type_t *t) {
-    (void)t;
-    return false;
+    return t && t->kind == TYPE_KIND_OWN;
 }
 
-/** 已废弃：同上。 */
+/** 是否为 `ref T`。 */
 static inline bool type_is_ref(const type_t *t) {
-    (void)t;
-    return false;
+    return t && t->kind == TYPE_KIND_REF;
 }
 
-/** 已废弃：同上。 */
+/** 是否为 `fatal T`。 */
 static inline bool type_is_fatal(const type_t *t) {
-    (void)t;
-    return false;
+    return t && t->kind == TYPE_KIND_FATAL;
 }
 
 /** 类型是否为指针（TYPE_KIND_PTR）。 */

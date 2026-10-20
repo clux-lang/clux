@@ -89,7 +89,7 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 
 ## 3. 实施阶段（每阶段全绿 + 独立提交）
 
-### P0 基础设施（纯增量，不改语义）
+### P0 基础设施（纯增量，不改语义）—— ✅ 已完成（2026-10）
 - 三个新 kind + 三个类型池（`vm->own_types/ref_types/fatal_types`）+ intern + 访问器
   （`type_is_own/ref/fatal`、`type_ownership_of`、`type_qualifier_sub` 扩展）。
 - 布局同步、`type_kind` 字符串名、反射 key：`kind` → `"own"`/`"ref"`/`"fatal"`，

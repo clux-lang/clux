@@ -57,6 +57,8 @@ typedef struct vm_t {
     /* ---- const/volatile 修饰类型池（按 sub 去重 intern，vm 拥有生命周期） ---- */
     vec_t *const_types;    /* const_type_t*，元素为 const 修饰类型 */
     vec_t *volatile_types; /* volatile_type_t*，元素为 volatile 修饰类型 */
+    vec_t *ownership_types; /* ownership_type_t*：own/ref/fatal 修饰类型
+                              （三种 kind 同池，按 (kind, sub) 去重） */
 
     /* ---- optional 修饰类型池（按 inner 去重 intern，vm 拥有生命周期） ---- */
     vec_t *option_types;   /* option_type_t*，元素为 optional 修饰类型 */
