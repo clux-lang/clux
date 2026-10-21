@@ -690,7 +690,7 @@ func k[T extends <*? & []?>](x: T) { ... }      // T 是二元组，首元是指
 - **所有权**：`own *T` / `ref *T` / `*T` 是三个独立类型。`T extends *?` 只匹配**裸指针**；要匹配带所有权的指针必须显式写 `own *?` / `ref *?` / `fatal *?`。
 - **`?` 是整棵类型的通配符**：`*?` 里的 `?` 匹配被指向的任意完整类型（含 `const i32`、`own *i32`）；`own *?` 已固定指针节点的所有权，`?` 只通配 pointee。
 - **限定符嵌套按节点顺序匹配**：`own const *T` 与 `const own *T` 是两棵不同的类型树，PATTERN 必须逐层同构；`type_qualifier_sub` 只用于剥限定链，不改变匹配的严格性。
-- **`share` / `weak` 是指针自身的 rc 形态**（`TYPE_KIND_PTR` 的 rc 字段），不是所有权修饰符：`*?` 匹配任意指针（含 `share *T` / `weak *T`）；M7 的 PATTERN 不提供 share/weak 限定语法。
+- **`share` / `weak` 是 `TYPE_KIND_PTR` 的 rc 形态**（0 普通 / 1 share / 2 weak），属于指针类型身份：`*?` 只匹配**普通指针**（rc=0），`share *?` / `weak *?` 分别只匹配对应 RC 变体。PATTERN 本身就是类型表达式，这三种写法天然可用。
 - **`volatile` 在类型解析阶段已折叠为 sub**（m2-design §10），不会出现在匹配用的类型图里——它对匹配自然透明，不是特殊规则。
 
 示例：
@@ -705,6 +705,7 @@ g[*i32](mp);        // ✓ 裸指针
 g[*const i32](cp);  // ✓ 指针节点无所有权修饰；? 匹配 const i32
 g[own *i32](op);    // ✗ own *i32 的指针节点是 own，不是裸 *
 g[ref *i32](rp);    // ✗
+g[share *i32](sp);  // ✗ rc=1，不是普通指针（要匹配 RC 变体需写 share *?）
 
 func h[T extends own *?](p: T) { ... }
 h[own *i32](op);    // ✓
@@ -1208,7 +1209,7 @@ func sum[T, E extends IContainer[T, E]](c: *T): E { ... }   // T=self类型, E=�
 | `extends` 重载分派（§27） | M7 不纳入（只过滤不分派） | 同名同元数泛型=重复定义，避免 overload resolution |
 | comptime 值参数 `extends`（§27） | 不写（仅类型参数可 `extends`） | 值域约束超出本轮 |
 | `extends` 析取/合取（§28） | `extends A | B`（OR）+ `extends A & B`（AND），`&` 优先级高于 `|`，支持括号 | 单泛型内部结构匹配组合，不是重载分派；短路求值 |
-| 限定符匹配（§29.1） | `const` / `own` / `ref` / `fatal` 严格一致：PATTERN 带限定符则 T 必须同限定符，不带则 T 也不带；不做协变/逆变 | 限定符是类型构造，约束判断类型身份而非赋值兼容；协变会放行错误的限定符组合 |
+| 限定符匹配（§29.1） | `const` / `own` / `ref` / `fatal` 严格一致：PATTERN 带限定符则 T 必须同限定符，不带则 T 也不带；指针 rc（普通 / share / weak）同样参与；不做协变/逆变 | 限定符是类型构造，约束判断类型身份而非赋值兼容；协变会放行错误的限定符组合 |
 | 所有权与 `extends`（§29.1） | 参与匹配：`own *?` / `ref *?` / `*?` 分别只匹配对应所有权的指针 | 所有权是类型修饰（独立 `TYPE_KIND`），与 const 同属类型身份 |
 | struct `extends`（§29.2） | 只检查字段表（完全相等），不看属性/方法 | 复用 M2 struct_type_compatible 语义，名义属性/方法不参与结构匹配 |
 | 类型别名与 `extends`（§29.2） | 天然透明（无需特殊规则） | 别名在引擎内部就是展开类型（M2 §5），sema 层无别名实体 |
