@@ -1,6 +1,7 @@
 # clux 格式化规则（clux format）
 
-clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `src/parser/fmt.c`）。
+clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `src/parser/fmt.c` +
+`fmt_expr.c` / `fmt_stmt.c` / `fmt_decl.c`）。
 它**不重排代码结构、不改写语义**，只规整空白、缩进与注释位置，并保证：
 
 - **声明完整**：`union` / `cunion` / `struct` / `enum` / `type` / `import` / `export`
@@ -9,7 +10,8 @@ clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `s
 - **幂等**：对格式化结果再跑一次 `clux format`，输出逐字节不变。
 
 > 实现说明：格式化器是**基于 AST 渲染 + token pool 提供注释/空行信息**的混合实现
-> （`render_stmt` / `render_expr` 遍历 AST，`mount_comments` 从 token 池挂载注释），
+> （`fmt_expr.c` / `fmt_stmt.c` 的 `render_expr` / `render_stmt` 遍历 AST，
+> `mount_comments` 从 token 池挂载注释），
 > 因此"注释天然保留"来自 token 池，而结构来自 AST。
 >
 > 上述三条性质在 2026-10 曾全部被破坏（union/import/export 被静默删除、单遍不幂等），
@@ -54,10 +56,11 @@ clux 附带一个源码格式化器（命令 `clux format <file>`，实现见 `s
   见 `is_operator`：赋值类（`=`/`+=`/`*=`/…）、算术（`+ - * / %`）、比较
   （`== != < > <= >=`）、逻辑/位（`&& || & | ^ << >>`）、`!` `~` `->` `=>`。
 - **运算符后的 `(` 须空格**：`a + (b)`、`x = (y)`，不得紧贴成 `+(` / `=(`。
-- **函数调用 / 泛型实例化的 `(` 紧贴**：`main(`、`foo(`、`Vec(i32)` 不插空格。
+- **函数调用 / 泛型实例化的 `(` 紧贴**：`main(`、`foo(`、`Vec[i32]::new(` 不插空格。
+  泛型实参用**方括号**（`Vec[i32]`，不是 `Vec(i32)`）——`(` 只属于调用/构造。
 - **控制流关键字的 `(` 须空格**：`if (cond)`、`while (cond)`、`for (...)`、
   `foreach (x of ...)`、`switch (...)`。格式化器以 **AST 语句种类**判定这条间距
-  （`render_stmt` 的 `AST_IF`/`AST_WHILE`/`AST_FOR`/`AST_FOREACH`/`AST_SWITCH`
+  （`fmt_stmt.c` 的 `render_stmt` 的 `AST_IF`/`AST_WHILE`/`AST_FOR`/`AST_FOREACH`/`AST_SWITCH`
   分支各自输出 `"<关键字> ("`），不依赖 token 的 kind；因此 `foreach` 这类后来
   加入的关键字无需动词法层。
 
