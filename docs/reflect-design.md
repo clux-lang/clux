@@ -13,7 +13,11 @@
 - **泛型一路传递**——`TypeInfo[T]` → `StructInfo[T]` → `FieldInfo[T, idx]` → `TypeInfo[FieldType]`，泛型参数贯穿整个反射数据树，每个方法在编译期解析到具体的 builtin 调用。
 - **interface 不参与反射**——interface 不是类型（§31.4），没有反射元数据。
 
-> **实现状态：📋 设计阶段**。本文档不含实现计划。反射依赖 M7 泛型 + CTFE + builtin 关键字。
+> **实现状态（2026-10-22 复核）**：
+> - **注入面已改为 `T.<key>`**（type value 的成员注入），不再使用 builtin 关键字/关键字宏；
+>   P0–P2 已实现并有测试覆盖，见 [reflect-builtin-design.md](reflect-builtin-design.md)。
+> - **本文档只保留 `std/Reflect` 库（P3）的设计**：`TypeInfo[T]` / `StructInfo[T]` /
+>   `FieldInfo[T, idx]` 等泛型封装，依赖 M7 泛型 + CTFE；不含实现计划。
 
 ---
 
