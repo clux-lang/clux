@@ -959,22 +959,41 @@ const diagnostic_t *diag_items(const diag_buf_t *db);
 
 **核心契约：** sema 是处理类型错误的最后一个阶段。sema 通过后，字节码编译器和 VM 可以假定一切类型正确，运行时不再做类型检查。vtable 运算返回的 error value 被 sema 捕获并转为诊断，不传播到下游。
 
-**类型解析预留：** 所有类型解析收敛到独立入口 `resolve_type(sema, name)`，M1 内部为 `type_find(vm, name)` 查表。未来类型本身是编译期表达式（`[N]T` / `[]T` / `*T` / `<T1,T2>` / const 修饰），需要替换为类型表达式求值器（type_expr AST → type_t），该接口形态保证调用方不变。
+**类型解析：** 所有类型解析收敛到 `resolve_type_expr(sema, ast_node_t *)`（类型表达式 AST → `type_t *`），槽位消费统一走 `sema_resolve_type_slot`（解析 + 就地折叠为 `AST_TYPE_REF`）。M1 时代的 `resolve_type(sema, name)` 查表入口已被取代：类型是编译期表达式（`[N]T` / `[]T` / `*T` / `<T1,T2>` / const/volatile/option/函数类型，M7 起还有泛型实参），`sema_resolve_inner` 按 AST kind 递归求值；未知构造报 `unsupported type expression`。
 
 #### 2.9.1 模块结构
 
 ```
 include/sema/
-  sema.h       — sema_t 上下文 + 公共 API (sema_create / sema_analyze / sema_destroy)
-                 + internal 段（resolve_type / sema_loc / sema_expr 等跨文件声明）
-  symbol.h     — sema_symbol_t, sema_scope_t（sema 侧符号表）
+  sema.h          — sema_t 上下文 + 公共 API（sema_create / sema_analyze / sema_destroy）
+                     + 跨文件 API（resolve_type_expr / sema_resolve_type_slot / sema_loc / sema_expr …）
+  symbol.h        — sema_symbol_t, sema_scope_t（sema 侧符号表）
+  struct_compose.h— 结构体组合（`...Base;`）
+  comptime.h      — comptime 求值 / 类型登记接口
+  reflect.h       — type value 反射 key
 
-src/sema/（按语法节点类别拆分）
-  sema.c       — 上下文管理 + 三遍编排 + Pass 1/2（函数名收集 + 类型解析）
-  stmt_build.c — Pass 3a 作用域树构建 + 控制流分析（返回路径完整性 / unreachable）
-  stmt.c       — Pass 3b 语句 walker（shadow value 运行 + 确定性赋值分析）
-  expr.c       — 表达式 walker（shadow value 求值）
-  symbol.c     — sema 侧符号表实现
+src/sema/（2026-10 按职责/语法域拆分）
+  sema.c          — 上下文管理 + sema_analyze 编排 + 公共查询（sema_loc / type_name / func_by_id）
+  sema_type.c     — 类型表达式求值/登记（resolve_type_expr、sema_resolve_type_slot、数组边界）
+  sema_pass.c     — Pass 0/1/1b/1c/1d/2 + comptime globals（import、名字、extern ABI、struct 成员）
+  stmt_build.c    — Pass 3a 入口/函数作用域树 + 局部函数提升
+  stmt_build_block.c    — build_block / build_func_if
+  stmt_build_func.c     — 闭包捕获解析 / 函数字面量检查
+  stmt_build_defer.c    — defer 改写 + comptime if 拼接
+  stmt_build_foreach.c  — comptime foreach 展开
+  stmt.c          — Pass 3b 语句 walker 入口 + 块/函数驱动
+  stmt_flow.c     — return / while / do-while / for / if / switch
+  stmt_var.c      — 变量定义 / struct 方法 / cfunc 包装
+  stmt_assign.c   — 赋值与复合赋值
+  stmt_borrow.c   — 借用源收集 / 确定性赋值快照 / 作用域借用释放
+  stmt_destroy.c  — 销毁序列生成（`__destroy_<n>`）
+  expr.c          — 表达式分派 + 公共 shadow 辅助
+  expr_construct.c / expr_new.c — 构造 / new
+  expr_call.c     — 调用 + FFI 实参校验
+  expr_access.c   — 成员/下标/切片/作用域引用 + 反射折叠
+  expr_ops.c      — ident / move / 字面量 / 一元 / 类型表达式 / 取址解引用
+  expr_clone.c    — clone 代码生成
+  symbol.c        — sema 侧符号表实现
 ```
 
 sema 侧符号表是**纯编译期元数据**（名字 → 类型 + 定义节点）：符号真正重要的是"名字"，名字是符号表映射的 key。**运行态（shadow value）的 lookup/define 不经过符号表**——通过与 sema 作用域树**同构的 VM scope 树**（`scope_t::vars`）完成，名字从定义节点 ast 提取（`ast_var_def_t::name` / `ast_func_def_t::name`），保证两棵作用域树严格对齐。
@@ -1105,7 +1124,7 @@ x = x + 3;               // 块级 VM scope 已 pop → outer x
 ```
 
 ```c
-/* 变量读取（expr.c AST_IDENT）：从 VM scope 链 lookup shadow value，
+/* 变量读取（expr_ops.c 的 AST_IDENT 处理器）：从 VM scope 链 lookup shadow value，
    未初始化检查走符号表 flow_init（确定性赋值分析，VM 值层不感知） */
 value_t *v = scope_lookup(sema->vm->current_scope, n->name);
 if (!v)        { /* undefined variable 诊断 */ }

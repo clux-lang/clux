@@ -4,7 +4,7 @@
 > **类型的组合**，而不是 `value_t` 上的状态。这样它自然进入反射与泛型体系，也能消掉
 > 现在一堆"所有权不在类型里"导致的特殊处理和纠结。
 >
-> **现状（代码事实）**：`ownership_t` 记在 `value_t` 上（`include/vm/ownership.h`），
+> **重构前状态（2026-10 之前）**：`ownership_t` 记在 `value_t` 上（`include/vm/ownership.h`），
 > 由 `value_set_ownership` / `value_ownership` 读写（22 + 27 处调用）；类型层只有
 > **槽位**所有权：`struct_field_t.ownership`、`tuple_elem_t.ownership`、
 > `union_member_t.ownership`、`cunion_member_t.ownership`、`option_type_t.inner_ownership`、
@@ -13,6 +13,8 @@
 > 特殊处理散布在：`func_sig_eq` 手比所有权、extern 签名规则、cfunc→func 包装的 `move`、
 > `type_has_own_slots` 手写递归、`OWN_FATAL` 只存在于 sema、反射被禁止暴露所有权（因为那是
 > 值的状态）……
+>
+> **2026-10 复核**：以上字段/入口在 P3a–P3f 后已**全部删除**；现状以 §3/§4 为准。
 
 ---
 
@@ -160,10 +162,10 @@ P1b/B1 的实测结论是"产出侧与判定侧必须同一提交切换"。本�
   * 函数形参/返回的所有权在 AST 折叠成 `AST_TYPE_REF` 后 token 丢失——现在
     从解析出的**类型**回读（`type_ownership_of`）。
 
-**仍未做（P3）**：`value_t.ownership` / `value_set_ownership` / `value_ownership` /
-`value_is_borrowed` 仍作为运行期借用镜像存在；8 个槽位所有权字段仍在；sema 的
-move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）。P3 删除这些字段并把
-判定改为只读类型。
+**P3 之前的状态（历史）**：`value_t.ownership` / `value_set_ownership` /
+`value_ownership` / `value_is_borrowed` 当时仍作为运行期借用镜像存在；8 个槽位所有权
+字段仍在；sema 的 move/fatal/借用判定仍从符号/值状态读取。**P3a–P3f 已完成删除**，
+判定改为只读类型（见下一节）。
 
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
@@ -259,7 +261,9 @@ WSL2 全量 **2229 passed / 2 skipped**。
 
 ---
 
-## 6. 待确认决策
+## 6. 决策记录（Q1–Q7，均已确认并落地）
+
+> **2026-10 复核**：以下决策均已实现（以 §3/§4 为准）；表内文字保留当时的建议。
 
 | # | 问题 | 建议 |
 |---|---|---|
@@ -269,4 +273,4 @@ WSL2 全量 **2229 passed / 2 skipped**。
 | Q4 | `move(x)` 的结果类型 | `fatal T`；绑定/传参时变为 `own T`（消费） |
 | Q5 | `ref T` 能否作为字段类型（借用存进结构体） | 沿用现有规则（逃逸检查禁止），类型层允许 |
 | Q6 | 反射 key 命名：`ownership`（str）还是 `T.is_own` 布尔族 | `ownership` 一个 str，另加 `unqualified`（与 const/volatile 同一 key 名） |
-| Q7 | 运行期类型池是否也存 `own T`？ | 存（参与相等/反射/签名），但**运行期指令只引用剥过的类型**，并在 debug 断言"运行期类型无修饰" |
+| Q7 | 运行期类型池是否也存 `own T`？ | 存（参与相等/反射/签名）；**值/顶层类型剥壳，槽位类型保留修饰**（`LOAD_TYPE_OWNED`），销毁/克隆按槽位类型判定 |
