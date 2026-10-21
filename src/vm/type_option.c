@@ -171,12 +171,6 @@ void type_option_set_inner(vm_t *vm, const type_t *t, const type_t *inner) {
 }
 
 /* SET_FIELD_OWNERSHIP 运行期用（option 分支）：设 inner 槽位的所有权（seal 前）。 */
-void type_option_set_inner_ownership(vm_t *vm, const type_t *t,
-                                     ownership_t own) {
-    (void)vm;
-    if (!t || t->kind != TYPE_KIND_OPTION || type_is_sealed(t)) return;
-    ((option_type_t *)t)->inner_ownership = own;
-}
 
 /* SEAL：按 C 对齐规则计算布局（struct Optional_T{bool ok;T value;}，
  * value 偏移 align_up(1, alignof(T))），按 inner 指针去重 intern，标记
@@ -241,13 +235,13 @@ const type_t *type_option_intern(vm_t *vm, const type_t *inner) {
 /* 带 **inner 槽位所有权**的一次性构造（`?own *T` 等，见 type_option.h）。 */
 const type_t *type_option_intern_own(vm_t *vm, const type_t *inner,
                                      ownership_t inner_ownership) {
+    (void)inner_ownership; /* 所有权已编码在 inner 类型上 */
     /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。
      * 与 type_option_push 的区别：不向操作数栈压入 type value（嵌套构造
      * 场景避免栈布局污染）。去重 intern 由 type_option_seal 完成。 */
     if (!vm || !inner) return NULL;
     option_type_t *ot = option_type_create_open(vm);
     ot->inner = inner;
-    ot->inner_ownership = inner_ownership;
     const type_t *t = type_option_seal(vm, &ot->base);
     return t;
 }

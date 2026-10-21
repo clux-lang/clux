@@ -147,13 +147,6 @@ void array_type_set_elem(vm_t *vm, const type_t *t, const type_t *elem_type) {
 }
 
 /* SET_FIELD_OWNERSHIP 运行期用（array 分支）：设元素槽位的所有权（seal 前）。 */
-void array_type_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own) {
-    (void)vm;
-    if (!t || t->kind != TYPE_KIND_ARRAY) return;
-    array_type_t *at = (array_type_t *)t;
-    if (type_is_sealed(t)) return;
-    at->elem_ownership = own;
-}
 
 void array_type_set_count(vm_t *vm, const type_t *t, size_t count) {
     (void)vm;
@@ -224,6 +217,7 @@ const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count)
 /* 带**元素槽位所有权**的一次性构造（`[N]own *T` 等，见 type_array.h）。 */
 const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
                                     size_t count, ownership_t elem_ownership) {
+    (void)elem_ownership; /* 所有权已编码在 elem_type 上 */
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
      * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
      * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
@@ -231,7 +225,6 @@ const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
     array_type_set_elem(vm, t, elem_type);
-    array_type_set_elem_ownership(vm, t, elem_ownership);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);
 }

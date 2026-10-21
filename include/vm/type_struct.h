@@ -77,8 +77,6 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
 /** SET_FIELD_OWNERSHIP 运行期用：把**最后追加**字段的槽位所有权设为 own
  *  （seal 之前；sealed 后静默忽略）。供 bytecode hoist 把 sema 的槽位
  *  所有权带进运行期构造的类型对象（否则运行期按槽位释放旧值的路径失效）。 */
-void type_struct_set_last_field_ownership(vm_t *vm, const type_t *t,
-                                          ownership_t own);
 
 /** SEAL：拷贝字段表 + C 对齐布局 + 按 (字段名+类型+顺序) 去重 intern + 置 sealed。
  *

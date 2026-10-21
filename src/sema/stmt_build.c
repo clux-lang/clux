@@ -1538,7 +1538,6 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           memset(&fields[k], 0, sizeof(fields[k]));
           fields[k].name      = cv->name;   /* type_struct_intern 深拷贝 */
           fields[k].type      = cs->type;
-          fields[k].ownership = type_ownership_of(cs->type);
           k++;
         }
         const type_t *cap = type_struct_intern(sema->vm, fields, k);

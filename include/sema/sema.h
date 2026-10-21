@@ -141,7 +141,7 @@ typedef struct sema_expr_ctx_t {
  * 一处定义——此前分散在三段代码里各写一遍 `PTR_FATAL || SLICE_FATAL`，其中
  * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。
  *
- * 所有权纯编译期——fatal 判据从 symbol.ownership 读取，不再从 type_t.ownership。 */
+ * 所有权纯编译期——fatal 判据从 symbol.ownership 读取，不再从 类型所有权修饰。 */
 /** 符号的所有权：直接由符号类型派生（所有权是类型修饰，符号不再存副本）。 */
 static inline ownership_t sema_sym_ownership(const sema_symbol_t *sym) {
   return (sym && sym->type) ? type_ownership_of(sym->type) : OWN_NONE;

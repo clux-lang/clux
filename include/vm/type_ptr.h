@@ -126,7 +126,7 @@ static inline const type_t *ptr_type_base(const type_t *t) {
 /**
  * 指针值（data 块布局）。三种指针的 value data 统一为 { 裸指针 }：
  *   - ptr：指向目标内存（new 堆块 / 栈上值 / 借用目标）
- *   - 所有权由 type_t.ownership 区分（m3-design §13.2：运行期零标志）：
+ *   - 所有权由 类型所有权修饰 区分（m3-design §13.2：运行期零标志）：
  *     own *T    → 总拥有堆块，dispose 释放（new 产物接管后）
  *     ref *T    → 总借用，dispose 跳过（指向栈值 / 他人堆块）
  *     fatal *T  → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
@@ -146,7 +146,7 @@ static inline void *ptr_value_target(const value_t *v) {
     return ((const ptr_value_t *)value_data(v))->ptr;
 }
 
-/** 构造指针值：目标地址（三种指针统一，所有权由 type_t.ownership 区分，
+/** 构造指针值：目标地址（三种指针统一，所有权由 类型所有权修饰 区分，
  *  m3-design §13.2 运行期零标志） */
 value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 

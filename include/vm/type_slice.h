@@ -39,7 +39,6 @@ const type_t *type_slice_push(vm_t *vm);
 void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem);
 
 /** SET_FIELD_OWNERSHIP 运行期用（slice 分支）：设元素槽位的所有权（seal 前）。 */
-void type_slice_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own);
 
 /** SEAL：按 (elem_type, 元素所有权) 去重 intern + 置 sealed。返回该 const type */
 const type_t *type_slice_seal(vm_t *vm, const type_t *t);
@@ -72,7 +71,7 @@ static inline ownership_t slice_type_elem_ownership(const type_t *t) {
  *   - ptr：指向元素序列首地址（own 堆分配 / ref 借用 / fatal 将亡值）
  *   - len：元素数量（u64）
  *
- * 所有权由 type_t.ownership 区分（运行期零标志，同 M3 §13.2）：
+ * 所有权由 类型所有权修饰 区分（运行期零标志，同 M3 §13.2）：
  *   own []T   → 总拥有堆块，dispose 释放（make 产物接管后）
  *   ref []T   → 总借用，dispose 跳过（指向他人堆块 / 数组内联内存）
  *   fatal []T → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）

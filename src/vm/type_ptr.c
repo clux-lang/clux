@@ -692,7 +692,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         if (tag >= ut->member_count) break;   /* 非法 tag：保持 memcpy 结果 */
         const union_member_t *m = &ut->members[tag];
         const type_t *pt = m->payload_type;
-        if (!pt || !slot_needs_visit(pt, m->ownership)) break;
+        if (!pt || !slot_needs_visit(pt, type_ownership_of(pt))) break;
         size_t poff = union_type_payload_offset(type);
         void *sub = ptr_clone_block(vm, pt, (const uint8_t *)src + poff);
         memcpy((uint8_t *)dst + poff, sub, pt->size);

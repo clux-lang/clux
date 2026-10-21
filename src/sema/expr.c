@@ -339,10 +339,6 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
     /* 匿名构造的字段槽位所有权：字段值若是将亡值（new/move/clone/
        含 own 字段的构造），该槽位即接管所有权 → OWN；否则 NONE。
        ref 槽位在匿名构造里由 type_expr 一侧决定，此处无显式标注 → NONE。 */
-    fields[i].ownership =
-        (fv && !value_is_error(sema->vm, fv) && sema_value_is_fatal(fv))
-            ? OWN_OWN
-            : OWN_NONE;
   }
 
   /* 第三遍：构造匿名 struct 类型 + 登记 sema_type（hoist 提升区） */
@@ -909,7 +905,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           const union_member_t *m = union_type_member(t, (size_t)mi);
           if (m && m->payload_type) {
             mt = m->payload_type;
-            slot_own = m->ownership;
+            slot_own = type_ownership_of(m->payload_type);
           }
         } else {
           const int mi = cunion_type_find_member(t, cf->name);
@@ -4812,7 +4808,8 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
             int mi = union_type_find_member(bt, m->field);
             const union_member_t *mm =
                 mi >= 0 ? union_type_member(bt, (size_t)mi) : NULL;
-            if (mm && mm->payload_type && mm->ownership == OWN_OWN) {
+            if (mm && mm->payload_type &&
+                type_ownership_of(mm->payload_type) == OWN_OWN) {
               union_root = s;
               union_root_name = ((ast_ident_t *)m->object)->name;
             }

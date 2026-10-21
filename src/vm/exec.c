@@ -750,36 +750,13 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * own 槽位会被当成普通字段（泄漏），ref 借用目标会被误释放（悬垂 free）。
  * 具名 struct 还带 MARK_UNIQUE（seal 跳过去重），也不能靠"去重到 sema 那份
  * 带 ownership 的类型"来补。 */
+/* SET_FIELD_OWNERSHIP <u8 own>：历史指令。槽位所有权已由槽位类型携带，
+   运行期类型在 hoist 时用 LOAD_TYPE_OWNED 构造，本指令保留为无操作（兼容
+   旧 .cxs / 字节码）。 */
 static value_t *op_set_field_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    uint8_t own = bcode_read_u8(bc, pc);
-    value_t *tv = exec_stack_peek(vm, 0);
-    const type_t *t = (tv && value_type(tv) == vm->type_type)
-                          ? value_as(tv, const type_t *) : NULL;
-    if (!t)
-        return value_make_error(vm,
-            "exec: set field ownership expects an open type on top");
-    switch (t->kind) {
-    case TYPE_KIND_STRUCT:
-        type_struct_set_last_field_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    case TYPE_KIND_UNION:
-        type_union_set_last_member_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    case TYPE_KIND_CUNION:
-        type_cunion_set_last_member_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    case TYPE_KIND_ARRAY:
-        array_type_set_elem_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    case TYPE_KIND_SLICE:
-        type_slice_set_elem_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    case TYPE_KIND_OPTION:
-        type_option_set_inner_ownership(vm, t, (ownership_t)own);
-        return NULL;
-    default:
-        return NULL;   /* 其它类型无槽位表：防御性忽略 */
-    }
+    (void)vm;
+    (void)bcode_read_u8(bc, pc);
+    return NULL;
 }
 
 /* ADD_EMBED <embed_type_id>：peek 栈顶开放 struct → vm_type_load 拉回 embed

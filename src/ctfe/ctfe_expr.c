@@ -205,8 +205,7 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
             capv[k] = cap;
             memset(&fields[k], 0, sizeof(fields[k]));
             fields[k].name = cv->name;
-            fields[k].type = value_type(cap);
-            fields[k].ownership = OWN_NONE; /* 编译期常量：无堆所有权 */
+            fields[k].type = value_type(cap); /* 编译期常量：无堆所有权 */
         }
         if (!bad) {
             const type_t *ct = type_struct_intern(vm, fields, nc);

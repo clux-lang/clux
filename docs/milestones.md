@@ -2506,3 +2506,12 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 槽位字段从此只写不读（P3e-2b 删除）。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+112. **所有权升级为类型构造 · P3e-2b：删除槽位所有权字段**（2026-10）
+    - 删除 7 个槽位所有权字段：struct_field / tuple_elem / union_member /
+      cunion_member 的 `ownership`，option/slice/array 的 inner/elem ownership。
+    - 删除对应的 setter 与 hoist 的 `SET_FIELD_OWNERSHIP` 发射；旧指令保留为
+      no-op（兼容旧 .cxs）。槽位所有权现在只存在于槽位类型上。
+    - 同步删除类型相等/去重里的所有权镜像比较；更新 cunion 测试的 member 初始化。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

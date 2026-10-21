@@ -26,9 +26,9 @@ static float   read_f32(const value_t *v) { return *(const float *)value_data(v)
 
 /* U { i: i32; f: f32; b: bool } member 表（name 借用栈上字面量，intern 深拷贝） */
 static cunion_member_t three_members[3] = {
-    { .name = STRSLICE_LIT("i"), .type = nullptr, .ownership = OWN_NONE },
-    { .name = STRSLICE_LIT("f"), .type = nullptr, .ownership = OWN_NONE },
-    { .name = STRSLICE_LIT("b"), .type = nullptr, .ownership = OWN_NONE },
+    { .name = STRSLICE_LIT("i"), .type = nullptr },
+    { .name = STRSLICE_LIT("f"), .type = nullptr },
+    { .name = STRSLICE_LIT("b"), .type = nullptr },
 };
 
 /* ================================================================ */
@@ -60,16 +60,16 @@ TEST_F(CUnionTypeTest, InternDedup) {
     const type_t *b = type_cunion_intern(vm, three_members, 3);
     /* 不同 member 顺序 → 不同类型 */
     cunion_member_t swapped[3] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i32, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("b"), .type = vm->type_bool, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("f"), .type = vm->type_f32, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i32 },
+        { .name = STRSLICE_LIT("b"), .type = vm->type_bool },
+        { .name = STRSLICE_LIT("f"), .type = vm->type_f32 },
     };
     const type_t *c = type_cunion_intern(vm, swapped, 3);
     /* 同 member 名但类型不同 → 不同类型 */
     cunion_member_t i64_i32[3] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i64, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("f"), .type = vm->type_f32, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("b"), .type = vm->type_bool, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i64 },
+        { .name = STRSLICE_LIT("f"), .type = vm->type_f32 },
+        { .name = STRSLICE_LIT("b"), .type = vm->type_bool },
     };
     const type_t *d = type_cunion_intern(vm, i64_i32, 3);
     EXPECT_EQ(a, b);
@@ -119,8 +119,8 @@ TEST_F(CUnionTypeTest, BuildAndSeal) {
 /* 布局：i64 + f32 → size = align_up(8,8) = 8，align = 8（C union max 语义） */
 TEST_F(CUnionTypeTest, LayoutMaxSizeAlign) {
     cunion_member_t fields[2] = {
-        { .name = STRSLICE_LIT("a"), .type = vm->type_i64, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("b"), .type = vm->type_f32, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("a"), .type = vm->type_i64 },
+        { .name = STRSLICE_LIT("b"), .type = vm->type_f32 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 2);
     ASSERT_NE(t, nullptr);
@@ -153,8 +153,8 @@ TEST_F(CUnionTypeTest, AddMemberAfterSealIgnored) {
    同一块内存按各自类型解释） */
 TEST_F(CUnionTypeTest, ValueRoundTripSharedMemory) {
     cunion_member_t fields[2] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i32, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("f"), .type = vm->type_f32, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i32 },
+        { .name = STRSLICE_LIT("f"), .type = vm->type_f32 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 2);
     ASSERT_NE(t, nullptr);
@@ -173,8 +173,8 @@ TEST_F(CUnionTypeTest, ValueRoundTripSharedMemory) {
 /* eq / ne：memcmp 字节比较（C union 语义） */
 TEST_F(CUnionTypeTest, EqMemcmp) {
     cunion_member_t fields[2] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i32, .ownership = OWN_NONE },
-        { .name = STRSLICE_LIT("f"), .type = vm->type_f32, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i32 },
+        { .name = STRSLICE_LIT("f"), .type = vm->type_f32 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 2);
     ASSERT_NE(t, nullptr);
@@ -209,7 +209,7 @@ TEST_F(CUnionTypeTest, EqMemcmp) {
 /* assign：同 cunion 实例 memcpy 覆盖（平凡拷贝，与 struct_assign 同款） */
 TEST_F(CUnionTypeTest, AssignMemcpy) {
     cunion_member_t fields[1] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i64, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i64 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 1);
     ASSERT_NE(t, nullptr);
@@ -230,7 +230,7 @@ TEST_F(CUnionTypeTest, AssignMemcpy) {
 /* clone：整块 memcpy 深拷贝（独立副本） */
 TEST_F(CUnionTypeTest, CloneMemcpy) {
     cunion_member_t fields[1] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i64, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i64 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 1);
     ASSERT_NE(t, nullptr);
@@ -250,7 +250,7 @@ TEST_F(CUnionTypeTest, CloneMemcpy) {
 /* 类型转换：仅同实例身份拷贝；不同 cunion 实例 → error */
 TEST_F(CUnionTypeTest, CastSameInstanceIdentityOnly) {
     cunion_member_t fields[1] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i32, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i32 },
     };
     const type_t *t = type_cunion_intern(vm, fields, 1);
     ASSERT_NE(t, nullptr);
@@ -267,7 +267,7 @@ TEST_F(CUnionTypeTest, CastSameInstanceIdentityOnly) {
 
     /* 不同 cunion 实例（同构但独立 intern）→ 隐式转换拒绝 */
     cunion_member_t fields3[1] = {
-        { .name = STRSLICE_LIT("i"), .type = vm->type_i64, .ownership = OWN_NONE },
+        { .name = STRSLICE_LIT("i"), .type = vm->type_i64 },
     };
     const type_t *t3 = type_cunion_intern(vm, fields3, 1);
     value_t *r = value_implicit_cast(vm, a, t3);

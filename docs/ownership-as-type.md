@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a–P3e-2a 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a–P3e-2b 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -209,32 +209,38 @@ WSL2 全量 **2229 passed / 2 skipped**。
 - ✅ **P3e-2a：运行期槽位类型保留所有权**。新增 `LOAD_TYPE_OWNED` 指令；
   hoist 的 struct/tuple/union/option/array/slice 槽位改用该指令构造带修饰的
   运行期类型；运行期 free/clone/assign 全部改为 `type_ownership_of(槽位类型)`；
-  类型相等/去重不再比较槽位所有权镜像字段。槽位字段从此只写不读。
-- **待办（P3e-2b）**：删除 7 个槽位所有权字段及其写入 API（`SET_FIELD_OWNERSHIP`
-  等）、AST 上的 ownership 缓存，以及运行期 `borrowed` 视图位（与借用
-  materialize 改造一起删除）。
+  类型相等/去重不再比较槽位所有权镜像字段。
+- ✅ **P3e-2b：删除 7 个槽位所有权字段**。`struct_field_t.ownership`、
+  `tuple_elem_t.ownership`、`union_member_t.ownership`、`cunion_member_t.ownership`、
+  `option_type_t.inner_ownership`、`slice_type_t.elem_ownership`、
+  `array_type_t.elem_ownership` 全部删除；对应的 `SET_FIELD_OWNERSHIP` 发射与
+  setter 删除（旧指令保留为 no-op）。槽位所有权现在只存在于槽位类型上。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
+- **待办**：AST 上的 ownership 缓存（解析期语法缓存）、运行期 `borrowed` 视图位
+  （与借用 materialize 改造一起删除）。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。
 
 ---
 
-## 4. P2 的"运行期边界"清单（剥离点）
+## 4. 运行期边界清单（值层剥离，槽位保留）
 
-按"运行期只看裸类型"的规则，逐个边界检查（每条都是 1-3 行改动，不再是风险）：
+按"值/顶层类型剥离，槽位类型保留修饰"的规则，逐个边界检查：
 
 | 边界 | 处理 |
 |---|---|
-| `value_make` / `value_alloc_data` | 断言 + 剥（防御式：调用方本应已剥） |
-| `BCODE_LOAD_TYPE` / `DEFINE_TYPE` / 构造 | 剥后取 type_id |
-| 字段布局 / `struct_type_seal` | 字段类型存入类型池时剥（布局只关心 sub） |
+| `value_make` / `value_alloc_data` | 值层类型已剥（调用方保证） |
+| `BCODE_LOAD_TYPE` / `DEFINE_TYPE` / 构造 | 剥后取 type_id（值类型裸） |
+| 槽位类型（struct 字段 / tuple 元素 / union payload / option inner / array & slice elem） | `BCODE_LOAD_TYPE_OWNED` 保留修饰（运行期销毁按它判定） |
+| 字段布局 / `struct_type_seal` | 布局只按 sub 计算；修饰与 sub 同布局 |
 | FFI 描述符（`ffi_type_for`） | 剥后按裸类型映射 |
-| `gen_destroy_impl` / 销毁序列 | **不剥**：编译期按未剥类型图决定 FREE 集合 |
-| `x.*` 读取 / `data()` / 切片元素 | 编译期决定是否 materialize（已有 `BCODE_MATERIALIZE`） |
-| 比较 / 打印 / 哈希等通用 vtable | 剥后按裸类型分派 |
+| `gen_destroy_impl` / 销毁序列 | 编译期按未剥类型图决定 FREE 集合 |
+| 运行期 `ptr_free_*` / `ptr_clone_*` / `compound_assign_transfer` | 按槽位类型判定；递归入口先 `type_strip_quals` |
+| 索引 / 长度 / 取地址 / tag 判定 | `type_strip_quals` 后分派（所有权布局透明） |
+| 比较 / 打印 / 哈希等通用 vtable | 穿透修饰后按裸类型分派 |
 
-替换完毕后在 debug build 打开"运行期类型必须无修饰"断言，全量跑一遍即可确认没有
-漏网的穿透点。
+运行期**不需要**"类型无修饰"断言（槽位类型合法地带修饰）；改为断言
+`value_t` 不含所有权状态——值层零状态、判定全由类型承担。
 
 ## 5. 兼容与验证
 

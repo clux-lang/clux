@@ -314,6 +314,7 @@ const type_t *type_struct_alloc_open(vm_t *vm) {
  * 开放阶段动态扩容（field_count 递增）。 */
 void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
                               const type_t *ftype, ownership_t ownership) {
+    (void)ownership; /* 所有权已编码在 ftype 上 */
     if (!vm || !t || t->kind != TYPE_KIND_STRUCT || type_is_sealed(t)) return;
     struct_type_t *st = (struct_type_t *)t;
 
@@ -332,7 +333,6 @@ void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
     nf[n].offset    = 0;  /* 布局在 seal 时统一计算 */
     nf[n].type      = ftype;
     /* 槽位所有权：类型描述的一部分（销毁序列从 type 对象反推的依据） */
-    nf[n].ownership = ownership;
     st->fields = nf;
     st->field_count = n + 1;
 }
@@ -345,13 +345,6 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
 
 /* SET_FIELD_OWNERSHIP 运行期用：设最后追加字段的槽位所有权（seal 前）。
    供 bytecode hoist 把 sema 的槽位所有权带进运行期构造的类型对象。 */
-void type_struct_set_last_field_ownership(vm_t *vm, const type_t *t,
-                                          ownership_t own) {
-    if (!vm || !t || t->kind != TYPE_KIND_STRUCT || type_is_sealed(t)) return;
-    struct_type_t *st = (struct_type_t *)t;
-    if (st->field_count == 0) return;   /* 无字段：无处写入 */
-    st->fields[st->field_count - 1].ownership = own;
-}
 
 /* 按 (字段名 + 类型 + 顺序 + **槽位所有权**) 判断两结构体是否等价
  * （去重 intern 用）。所有权是类型描述的一部分（docs/ownership-refactor.md
@@ -575,16 +568,14 @@ bool type_struct_insert_embed_fields(vm_t *vm, const type_t *t,
                     nf[out].name   = struct_field_name_dup(vm, sp->fields[k].name);
                     nf[out].offset = 0;
                     nf[out].type   = sp->fields[k].type;
-                    nf[out].ownership = sp->fields[k].ownership;
-                    out++;
+                                    out++;
                 }
             }
             if (fi < own) {
                 nf[out].name   = struct_field_name_dup(vm, st->fields[fi].name);
                 nf[out].offset = 0;
                 nf[out].type   = st->fields[fi].type;
-                nf[out].ownership = st->fields[fi].ownership;
-                out++;
+                            out++;
             }
         }
 
@@ -679,8 +670,7 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
             copy[i].offset = 0; /* seal 统一计算 */
             copy[i].type   = fields[i].type;
             /* 槽位所有权随字段表一起拷贝（销毁序列与 CONSTRUCT→FATAL 依赖它） */
-            copy[i].ownership = fields[i].ownership;
-        }
+                }
         st->fields = copy;
         st->field_count = count;
     }
@@ -716,8 +706,7 @@ const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
             copy[i].name   = struct_field_name_dup(vm, src->fields[i].name);
             copy[i].offset = src->fields[i].offset;
             copy[i].type   = src->fields[i].type;
-            copy[i].ownership = src->fields[i].ownership;
-        }
+                }
         st->fields = copy;
         st->field_count = src->field_count;
     }

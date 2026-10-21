@@ -320,12 +320,6 @@ void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem) {
 }
 
 /* SET_FIELD_OWNERSHIP 运行期用（slice 分支）：设元素槽位的所有权（seal 前）。 */
-void type_slice_set_elem_ownership(vm_t *vm, const type_t *t, ownership_t own) {
-    (void)vm;
-    if (!t || type_is_sealed(t)) return;
-    if (!type_is_slice(t)) return;
-    ((slice_type_t *)t)->elem_ownership = own;
-}
 
 const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t) return NULL;
@@ -371,10 +365,10 @@ const type_t *type_slice_intern(vm_t *vm, const type_t *elem) {
 /* 带元素槽位所有权的一次性构造（`own []own *T` 等）。 */
 const type_t *type_slice_intern_own(vm_t *vm, const type_t *elem,
                                     ownership_t elem_ownership) {
+    (void)elem_ownership; /* 所有权已编码在 elem 类型上 */
     if (!vm || !elem) return NULL;
     slice_type_t *st = slice_type_create_open(vm);
     st->elem_type = elem;
-    st->elem_ownership = elem_ownership;
     return type_slice_seal(vm, &st->base);
 }
 

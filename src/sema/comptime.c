@@ -1210,9 +1210,7 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
        槽位所有权生成（`if (v is m) { <payload 销毁序列> }`），
        member 的槽位所有权在解析期缓存（sf->ownership），并参与 intern。 */
     members[i].payload_type = ft;
-    ownership_t member_own = type_ownership_of(ft);
     /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
-    members[i].ownership = member_own;
   }
 
   if (!ok) {
@@ -1324,7 +1322,6 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
        member 活跃，销毁序列不为它生成 FREE，构造也不要求"own 槽位收
        FATAL"。指针/切片的生命周期由开发者自负（与 C union 语义一致）。 */
     members[i].type = ft;
-    members[i].ownership = OWN_NONE;
   }
 
   if (!ok) {

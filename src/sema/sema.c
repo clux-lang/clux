@@ -518,7 +518,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         if (!pt) return NULL;
         elems_arr[i].type   = pt;
         elems_arr[i].offset = 0; /* seal 统一布局 */
-        elems_arr[i].ownership = type_ownership_of(pt);
       }
       return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
     }

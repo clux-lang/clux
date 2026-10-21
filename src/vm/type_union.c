@@ -269,13 +269,6 @@ void type_union_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype) 
 
 /* SET_FIELD_OWNERSHIP 运行期用（union 分支）：设最后追加 member 的槽位
    所有权（seal 前）。销毁序列按它判定该 member 的 payload 是否要释放。 */
-void type_union_set_last_member_ownership(vm_t *vm, const type_t *t,
-                                          ownership_t own) {
-    if (!vm || !t || t->kind != TYPE_KIND_UNION || type_is_sealed(t)) return;
-    union_type_t *ut = (union_type_t *)t;
-    if (ut->member_count == 0) return;
-    ut->members[ut->member_count - 1].ownership = own;
-}
 
 /* ---- 密封期：布局计算 + 去重 intern ---- */
 
@@ -432,8 +425,7 @@ const type_t *type_union_intern_with_ownership(vm_t *vm,
         /* **槽位所有权必须一起拷贝**：它是类型描述的一部分（销毁序列据此
            生成 `if (v is m) { FREE v.m }`），漏拷会让 own 成员被判成 NONE
            ——CONSTRUCT 不产 FATAL，销毁序列为空 → 静默泄漏。 */
-        copy[i].ownership    = members[i].ownership;
-    }
+        }
     ut->members = copy;
     ut->member_count = count;
 

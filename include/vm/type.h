@@ -24,7 +24,7 @@ typedef struct scope_t scope_t;
  * 鸭子类型判断的基础：复合/修饰类型按 kind 而非实例指针分类。
  * 粗粒度（INT/FLOAT 覆盖全部宽度变体），细粒度差异由 name/size 承载。
  * 所有权修饰（own/ref/fatal/share/weak）不再编码在 kind 中——改为
- * type_t.ownership 正交字段（见 ownership_t）。
+ * 类型所有权修饰 正交字段（见 ownership_t）。
  */
 typedef enum type_kind_t {
     TYPE_KIND_VOID     = 0,
@@ -46,7 +46,7 @@ typedef enum type_kind_t {
     TYPE_KIND_ENUM,
     TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
-    /* ---- 指针与切片（所有权由 type_t.ownership 正交修饰） ---- */
+    /* ---- 指针与切片（所有权由 类型所有权修饰 正交修饰） ---- */
     TYPE_KIND_PTR,       /* *T：指针（own/ref/fatal/share/weak 由 ownership 区分） */
     TYPE_KIND_SLICE,     /* []T：切片胖指针（own/ref/fatal 由 ownership 区分） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
@@ -133,7 +133,6 @@ typedef struct option_type_t {
     /* 该 **inner 槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
        `?own *T` 的 own 必须记在类型描述上——销毁序列 `if (v != nil)` 要据此
        决定是否 FREE `v.!`；参与去重 intern。 */
-    ownership_t  inner_ownership;
 } option_type_t;
 
 /**
@@ -163,7 +162,7 @@ typedef struct enum_variant_t {
  * 五种所有权修饰：own *T（独占，作用域退出自动销毁）、ref *T（借用，
  * 无所有权）、fatal *T（临时，表达式结束未被 own 接收 = 编译错误）、
  * share *T（RC 强引用，copy = 计数+1）、weak *T（RC 弱引用，从 share
- * 派生，经 upgrade 升级为 share）。所有权由 type_t.ownership 字段编码
+ * 派生，经 upgrade 升级为 share）。所有权由 类型所有权修饰 字段编码
  * （ownership_t），同一 base_type 的五种指针是五个独立 intern 实例
  * （ownership 区分所有权）。
  *
@@ -187,7 +186,7 @@ typedef struct ptr_type_t {
  * slice_type_t: 切片类型（type_t 的扩展，m4-design §1/§10）
  *
  * 与指针同构——胖指针 { ptr, len: u64 }。三种所有权修饰（own/ref/fatal）
- * 由 type_t.ownership 字段编码（ownership_t），同一 elem_type 的三种切片
+ * 由 类型所有权修饰 字段编码（ownership_t），同一 elem_type 的三种切片
  * 是三个独立 intern 实例。不存在 share/weak 切片。
  *
  * size = sizeof(slice_value_t) = 2 * sizeof(void*)（16 字节/64 位平台）
@@ -200,7 +199,6 @@ typedef struct slice_type_t {
     /* 该 **元素槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
        `own []own *T` 的元素才是 own 叶子；销毁序列 `for i in 0..len` 要据此
        决定是否 FREE `s[i]`。参与去重 intern。 */
-    ownership_t  elem_ownership;
 } slice_type_t;
 
 typedef struct enum_type_t {
@@ -234,7 +232,6 @@ typedef struct struct_field_t {
        装饰器会改造类型，所以销毁序列必须从 type 对象反推——定义 AST 描述的是
        装饰器之前的形态、构造式只覆盖被写入的字段，两者都不可信。
        **参与 intern 去重**：own 槽位与 ref 槽位是不同类型（销毁语义不同）。 */
-    ownership_t    ownership;
 } struct_field_t;
 
 typedef struct struct_type_t {
@@ -312,7 +309,6 @@ typedef struct tuple_elem_t {
     size_t        offset; /* 元素在 data 块中的字节偏移（seal 时布局计算） */
     const type_t *type;   /* 元素类型（引用，不拥有；须已密封） */
     /* 该**元素槽位**的所有权（合法性说明同 struct_field_t::ownership） */
-    ownership_t   ownership;
 } tuple_elem_t;
 
 typedef struct tuple_type_t {
@@ -351,7 +347,6 @@ typedef struct union_member_t {
                                      type 池；不可为 NULL——所有 member
                                      都有类型） */
     /* 该 **payload 槽位** 的所有权（合法性说明同 struct_field_t::ownership） */
-    ownership_t     ownership;
 } union_member_t;
 
 typedef struct union_type_t {
@@ -384,10 +379,6 @@ typedef struct union_type_t {
 typedef struct cunion_member_t {
     strslice_t    name;  /* member 名（seal 时拷贝，vm 拥有） */
     const type_t *type;  /* member 类型（引用，须已密封；不可为 NULL） */
-    /* 该 member 槽位的所有权（合法性说明同 struct_field_t::ownership）。
-       ⚠️ cunion 无 tag，运行期无法判定哪个 member 活跃 → 其 own 槽位**不参与**
-       自动销毁（销毁序列不为 cunion 生成 FREE），由开发者自负。 */
-    ownership_t   ownership;
 } cunion_member_t;
 
 /* ownership_type_t: own / ref / fatal 修饰类型（三种 kind 共用一个布局）
@@ -618,7 +609,7 @@ bool type_contains_ptr_or_slice(const type_t *t);
  * （聚合必须由 `own` 位置接收）。
  *
  * 判定依据是 `struct_field_t::ownership` 等**槽位所有权**——它记在 type 对象上
- * （装饰器会改类型，所以定义 AST 与构造式都不可信），不是 `type_t.ownership`。
+ * （装饰器会改类型，所以定义 AST 与构造式都不可信），不是 `类型所有权修饰`。
  * 叶子（ptr / slice）本身不算"含 own 槽位"：它们的 own 性由所在**槽位**记录。
  */
 bool type_has_own_slots(const type_t *t);

@@ -353,7 +353,7 @@ bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
         const struct_field_t *f = &((const struct_type_t *)env)->fields[i];
         const type_t *ft = f ? type_strip_quals(f->type) : NULL;
         if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE) &&
-            f->ownership == OWN_OWN)
+            type_ownership_of(f->type) == OWN_OWN)
           need = true;
       }
     }
@@ -1170,7 +1170,7 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
       if (type_kind_of(ct) == TYPE_KIND_TUPLE) {
         const tuple_elem_t *te = tuple_type_elem(ct, (size_t)k);
         if (!te) return NULL;
-        if (storage) ptr_owned = (te->ownership == OWN_OWN);
+        if (storage) ptr_owned = (type_ownership_of(te->type) == OWN_OWN);
         cur = te->type;
         continue;
       }
@@ -1194,7 +1194,7 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
         if (!f || !f->type) return NULL;
         const type_t *ft = type_strip_quals(f->type);
         if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE)) {
-          ptr_owned = storage && (f->ownership == OWN_OWN);
+          ptr_owned = storage && (type_ownership_of(f->type) == OWN_OWN);
           storage = false;
         } else {
           ptr_owned = false;   /* 复合字段：存储仍是根的存储 */
@@ -1209,7 +1209,8 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
         if (!mm || !mm->payload_type) return NULL;
         const type_t *pt = type_strip_quals(mm->payload_type);
         if (pt && (type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE)) {
-          ptr_owned = storage && (mm->ownership == OWN_OWN);
+          ptr_owned = storage &&
+                       (type_ownership_of(mm->payload_type) == OWN_OWN);
           storage = false;
         } else {
           ptr_owned = false;
@@ -1401,7 +1402,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const type_t *ft = type_strip_quals(f->type);
       if (!ft) continue;
       if ((type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE) &&
-          f->ownership == OWN_REF)
+          type_ownership_of(f->type) == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(ft, path, depth)) return true;
     }
@@ -1414,7 +1415,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const type_t *et = type_strip_quals(e->type);
       if (!et) continue;
       if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
-          e->ownership == OWN_REF)
+          type_ownership_of(e->type) == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(et, path, depth)) return true;
     }
@@ -1427,7 +1428,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const type_t *pt = type_strip_quals(m->payload_type);
       if (!pt) continue;
       if ((type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE) &&
-          m->ownership == OWN_REF)
+          type_ownership_of(m->payload_type) == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(pt, path, depth)) return true;
     }
@@ -3182,7 +3183,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 member 类型必存在 */
         } else {
           ft = mem->type;
-          slot_own = mem->ownership;
+          slot_own = OWN_NONE;   /* cunion 不参与所有权运算 */
         }
       }
     }

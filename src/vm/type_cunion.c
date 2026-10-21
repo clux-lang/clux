@@ -226,13 +226,6 @@ void type_cunion_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype)
 /* SET_FIELD_OWNERSHIP 运行期用（cunion 分支）：设最后追加 member 的槽位
    所有权（seal 前）。cunion 不参与自动销毁，但去重键含 ownership（类型
    描述的一部分），须与 sema 侧一致。 */
-void type_cunion_set_last_member_ownership(vm_t *vm, const type_t *t,
-                                           ownership_t own) {
-    if (!vm || !t || t->kind != TYPE_KIND_CUNION || type_is_sealed(t)) return;
-    cunion_type_t *ct = (cunion_type_t *)t;
-    if (ct->member_count == 0) return;
-    ct->members[ct->member_count - 1].ownership = own;
-}
 
 /* ---- 密封期：布局计算 + 去重 intern ---- */
 
@@ -346,8 +339,7 @@ const type_t *type_cunion_intern(vm_t *vm, const cunion_member_t *members,
             if (!nbuf) panic("vm: out of memory interning cunion member name");
             copy[i].name = (strslice_t){ nbuf, members[i].name.len };
             copy[i].type = members[i].type;
-            copy[i].ownership = members[i].ownership;
-        }
+                }
         ct->members = copy;
         ct->member_count = count;
     }

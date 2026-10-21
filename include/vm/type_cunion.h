@@ -73,8 +73,6 @@ void type_cunion_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype)
 
 /** SET_FIELD_OWNERSHIP 运行期用（cunion 分支）：设最后追加 member 的槽位
  *  所有权（seal 前）。 */
-void type_cunion_set_last_member_ownership(vm_t *vm, const type_t *t,
-                                           ownership_t own);
 
 /** SEAL：拷贝 member 表 + 布局 + 去重 intern + 置 sealed */
 const type_t *type_cunion_seal(vm_t *vm, const type_t *t);
