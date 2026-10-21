@@ -122,14 +122,13 @@ clux 的 VM 以**字节码**作为可执行中间表示。编译期把 AST 降�
 | `MAKE_ENUM` | — | 弹 type value + 弹底层整数值 → 按底层宽度截断构造 enum 值。 |
 | `PUSH_STRUCT` | — | 分配空 struct 类型（开放态，fields=NULL）→ 压其 type value。 |
 | `DEFINE_FIELD` | `STR`（字段名） | 弹栈顶字段 type value → **peek** 开放 struct / cunion → 追加具名字段。 |
-| `SET_FIELD_OWNERSHIP` | `U8`（ownership） | **peek** 开放 struct / union / cunion → 把**最后追加**的字段 / member 的**槽位所有权**设为立即数（在 `DEFINE_FIELD` / `APPEND_ELEM` 之后、`SEAL` 之前）。槽位所有权是类型描述的一部分：参与类型去重 intern，并驱动运行期"覆盖旧值前按槽位释放"（own 叶子释放、ref 借用跳过）。`OWN_NONE` 可不发（缺省即 NONE）。无栈深变化。 |
 | `PUSH_TUPLE` | — | 分配空 tuple 类型（开放态，elems=NULL）→ 压其 type value。 |
 | `APPEND_ELEM` | — | 弹栈顶元素 type value → **peek** 开放 tuple → 追加**匿名**元素（长度 = 追加次数）。 |
 | `PUSH_UNION` | — | 分配空 tag union 类型（开放态，members=NULL）→ 压其 type value。 |
 | `UNION_MEMBER` | `STR`（member 名） | **peek** 开放 union → 追加 member（tag = 追加序，payload_type 暂 NULL，随后配一个 `DEFINE_FIELD`）。 |
 | `PUSH_CUNION` | — | 分配空 C 语义 union 类型（开放态，member 追加走 `DEFINE_FIELD`，**无 tag**）→ 压其 type value。 |
 | `SET_TYPE` | — | 弹栈顶 type value（sub）→ 设为栈顶开放对象的 sub / base / inner（`LOAD_TYPE` → `SET_TYPE` → `SEAL`）。 |
-| `SET_OWNERSHIP` | `U8`（ownership） | **已废弃**（保留枚举值，无处理函数）。复合类型禁止携带指针/切片字段后，fatal 复合变体不再存在。 |
+| `SET_OWNERSHIP` | `U8`（ownership） | **已废弃**（保留枚举值，无处理函数；仅为旧 `.cxb` 兼容）。所有权已升级为**类型构造**（独立 `TYPE_KIND`），不再向已分配类型写所有权字段——现在用 `PUSH_OWN`/`PUSH_REF`/`PUSH_FATAL` 或 `LOAD_TYPE_OWNED`。 |
 | `DEFINE_TYPE` | `U32`（类型 id） | 弹 type value（**声明**：消费栈）→ 绑定程序 id（≥64）写入 `t->id` 并登记 `vm->types_by_id`（幂等，多 id 可别名同一类型）。 |
 | `SEAL` | — | 弹 type value（**定义收尾**：消费栈）→ 经 `value_seal` 分派 `vtable->type_seal`：按类型各自池查重 intern、计算布局、置 `sealed`；去重命中则回收开放对象并重定向栈引用；随后按开放对象自身 id 幂等重绑登记（避免登记表悬垂）。 |
 | `CREATE_CONST` | — | 一次性快捷：弹 type value → `type_const_intern` → 压回（不走向上两遍构造；编译器 hoist 区用 `PUSH_CONST`+`SET_TYPE`+`SEAL`）。 |
@@ -184,12 +183,18 @@ value** 返回，由 `exec_drive` 捕获停机。
 
 ### 4.7 指针与所有权（M3）
 
-指针类型与签名同族：`PUSH_PTR <kind> → DEFINE_TYPE → LOAD_TYPE → SET_TYPE 设 base → SEAL`。
-**运行期零所有权标志**——所有权由 `type_t.ownership` 正交字段编码（own 总拥有 /
-ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR`。
+指针/切片与签名同族：`PUSH_PTR <rc> → DEFINE_TYPE → LOAD_TYPE → SET_TYPE 设 base → SEAL`。
+**运行期类型图没有"所有权字段"**——`own` / `ref` / `fatal` 是**独立的类型构造**
+（`TYPE_KIND_OWN/REF/FATAL`，`sub` 指向被修饰类型，布局与 `sub` 相同）：
+`own *T` / `ref *T` / `*T` 是三个不同的 intern 类型。指针/切片本体是裸类型
+（`TYPE_KIND_PTR` 带 rc、`TYPE_KIND_SLICE` 带 elem）；所有权修饰由 hoist 用
+`PUSH_OWN`/`PUSH_REF`/`PUSH_FATAL`（开放构造）或 `LOAD_TYPE_OWNED`（运行期套壳）
+建立，槽位类型因此保留所有权修饰。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
+| `LOAD_TYPE_OWNED` | `U8`（1=own / 2=ref / 3=fatal） | 弹裸类型 → `type_ownership_intern` 成 `own`/`ref`/`fatal` 包装 → 压回。用于**槽位类型**：运行期类型图保留槽位所有权，销毁/克隆按槽位类型判定。 |
+| `PUSH_OWN` / `PUSH_REF` / `PUSH_FATAL` | — | 分配空所有权类型（开放态，sub=NULL）→ 压其 type value；hoist 定义 `own T` 等具名类型时用（`DEFINE_TYPE → LOAD_TYPE → SET_TYPE → SEAL`）。 |
 | `PUSH_PTR` | `U8`（rc：0 普通 / 1 share / 2 weak） | 分配开放指针类型并压其 type value。share/weak 是**真实类型**（RC 形态），所以形态随类型走而不是所有权；后续 `SET_TYPE` 设 base、`SEAL` 按 (base, rc) 去重 intern。 |
 | `NEW` | — | **只申请内存**（2026-10 与 `CONSTRUCT` 统一）：弹一个整数（字节数）→ 申请该大小的原始块（清零）→ 压 `opaque` 句柄（data 里存裸指针）。后续 `CONSTRUCT` 以该句柄为 dest 在块上构造对象；`new T{...}` 编译为 `PUSH_U64 sizeof(T); NEW; <type>; <fields>; CONSTRUCT n`（结果 `fatal *T`）。C 后端等价：`calloc(1, size)`。 |
 | `PTR_GET` | — | 弹指针值 → 压被指向 `T` 的**值副本**（`r.*` 解引用 GET）。 |
@@ -201,29 +206,29 @@ ref 总借用 / fatal 在非空时拥有），type kind 统一为 `TYPE_KIND_PTR
 | `FREE_RECURSIVE` | — | 弹指针 → 按槽位所有权**递归**释放被指向值的 own 槽位，再释放块本体。**已不再发射**（2026-10 起自引用类型改用生成的 `__destroy_<n>` 递归调用，见 ownership-refactor §7.1.7）；保留指令仅为兼容旧 `.cxb`。 |
 | `DISPOSE` | — | 弹值 → 递归释放其内嵌 own 堆块（不压回）。**注意**：`_ = expr` 的显式销毁/丢弃已由 sema 在编译期分类（`ast_assign_t::discard_mode`）——自有资源展开成扁平 FREE 序列（语句 prelude），借用/无资源只 `POP`；`DISPOSE` 仅作为**回退**（sema 无法生成 prelude 时）。 |
 
-**复合类型的将亡值变体 `fatal T`**（`fatal T` 类型表达式，T 为含 own 资源的
-struct/tuple/array/option/union）：M3 只允许指针/切片跨函数边界携带所有权，
-含 own 字段的复合类型因此无法通过参数/返回值转移——浅拷贝会与源共享内嵌堆块
-（双释放）。`fatal T` 是其载体：
+**将亡值类型 `fatal T`**：`fatal` 是**通用类型修饰**——`T` 可以是任意类型
+（指针、切片、struct/tuple/array/option/union）。`fatal T` 与 `T` **逐字节同布局**，
+是独立的 intern 类型（`TYPE_KIND_FATAL`，`sub = T`）：
 
-- **类型**：与 T **逐字节同布局**、仅 `ownership = OWN_FATAL` 不同的独立 intern
-  实例。**仅限顶层指针/切片**——复合类型禁止携带指针/切片字段后，fatal 复合变体
-  不再存在。运行期物化：指针/切片在 `PUSH_PTR`/`PUSH_SLICE` 构造时直接指定 ownership。
-- **产出**：`MOVE` / `CLONE` 指令（见上表）；`new` / `make` 亦产 fatal（指针/切片形态）。
-- **接管**：`fatal T → T` 的隐式转换（`DEFINE` 路径）**转移**所有权——memcpy
-  顶层后清空源的 own/fatal 指针；指针/切片的 `fatal → own` 同理。
+- **类型**：由 `PUSH_FATAL`（开放构造）或 `LOAD_TYPE_OWNED 3`（运行期套壳）建立；
+  槽位类型（字段/元素/参数）保留修饰，值的顶层类型仍剥壳。
+- **产出**：`move(x)` / `clone(x)` 的表达式结果类型；`new` / `make` 产
+  `fatal *T` / `fatal []T`。
+- **接管**：`fatal T → own T`（绑定/传参）与 `fatal T → ref T` 是零拷贝重贴标签；
+  消费（`move`/`return`）由 sema 做流分析，运行期没有转移指令。
 - **消费**：fatal 参数必须被 `move()` 接管或 `return` 出去（sema R1 检查）。
 
 ### 4.8 切片（M4）
 
-切片是胖指针 `{ void *ptr; uint64 len; }`，三种所有权修饰（own/ref/fatal）由
-`type_t.ownership` 编码，与指针对齐。
+切片是胖指针 `{ void *ptr; uint64 len; }`；切片本体是裸 `TYPE_KIND_SLICE`
+（elem 类型带元素槽位修饰），外层 `own` / `ref` / `fatal` 由独立的
+`TYPE_KIND_OWN/REF/FATAL` 包装（与指针对齐，见 §4.7）。
 
 | 助记符 | 操作数 | 语义 |
 |--------|--------|------|
-| `PUSH_SLICE` | `U8`（ownership） | 分配空切片类型（开放态，elem=NULL）→ 压其 type value。ownership ∈ `OWN_OWN / _REF / _FATAL`。 |
+| `PUSH_SLICE` | — | 分配空切片类型（开放态，elem=NULL）→ 压其 type value。切片本体不带所有权；`own []T` 等由 `PUSH_OWN`/`PUSH_REF`/`PUSH_FATAL` 或 `LOAD_TYPE_OWNED` 在类型图上套壳。 |
 | `SLICE` | `U8`（flags） | bit0 = low 存在，bit1 = high 存在；弹 self + 按 flags 弹 high/low → 压 `ref []T` 胖指针（`s[low:high]`，**恒产 ref []T**；省略 low=0、high=len）。含运行期边界检查 `0 <= low <= high <= len`。 |
-| `MAKE` | `U32`（init_count）+ `U8`（元素槽位所有权） | 弹 init_count 个初始值 + 弹 length + 弹 elem type → 分配 `len * elem_size` 堆块并逐元素布值 → 压 `fatal []T`（`make(T, N, init...)` 宏函数）。元素槽位所有权让运行期构造的切片类型与 sema 侧一致（`make(own *i32, …)` 的元素按 own 销毁）。 |
+| `MAKE` | `U32`（init_count） | 弹 init_count 个初始值 + 弹 length + 弹 elem type → 分配 `len * elem_size` 堆块并逐元素布值 → 压 `fatal []T`（`make(T, N, init...)` 宏函数）。元素槽位所有权由 **elem 类型本身**携带（`make(own *i32, …)` 的元素类型就是 `own *i32`），不再有独立的所有权操作数。 |
 
 ### 4.9 模块（M5）
 
@@ -475,7 +480,7 @@ clux bc disasm <file.cxb>   [-o PATH]   # .cxb → .cxs 汇编文本
 
 1. **类型提升区（hoist）两遍**：
    - pass 1 声明：`PUSH_ARRAY` / `PUSH_FUNC_TYPE` / `PUSH_CONST` / `PUSH_VOLATILE` /
-     `PUSH_PTR <kind>` / `PUSH_SLICE <kind>` … → `DEFINE_TYPE <id>`；
+     `PUSH_PTR <rc>` / `PUSH_SLICE` / `PUSH_OWN` / `PUSH_REF` / `PUSH_FATAL` … → `DEFINE_TYPE <id>`；
    - （全局类型定义的名字绑定插在两遍之间：`LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "Name"`）
    - pass 2 定义：`LOAD_TYPE <id>` → `DEFINE_BOUND N` / `FUNC_TYPE_PARAM`* /
      `FUNC_TYPE_RETURN` / `DEFINE_FIELD` / `SET_TYPE` → `SEAL`（依赖后序）。
