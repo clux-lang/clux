@@ -161,56 +161,9 @@ static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
   return sym && sym->moved;
 }
 
-/* ---- 所有权纯编译期：从类型表达式 AST 节点提取 ownership ----
- *
- * 类型表达式 `own *T` / `ref *T` / `fatal *T` / `own []T` 等携带 ownership
- * token，但 resolve_type_expr 现在只返回类型 *T / []T（不携带 ownership）。
- * 本函数从 AST 节点提取 ownership，供符号创建时设置 sym->ownership。
- *
- * 顶层是 AST_PTR / AST_SLICE_TYPE → 从 ownership token 文本解析。
- * 其它类型表达式（标识符、复合类型等）→ OWN_NONE。
- * const/volatile 限定符穿透到 sub。 */
-static inline ownership_t sema_type_expr_ownership(const ast_node_t *type_expr) {
-  if (!type_expr) return OWN_NONE;
-  switch (type_expr->kind) {
-  case AST_SCOPE_ANNOT:
-    /* '<a> ref *T → 穿透标注节点取 sub 的 ownership（ref）。标注节点
-       保留在 AST（sema_resolve_type_slot 只折叠 sub），所有权从 sub 提取。 */
-    return sema_type_expr_ownership(
-        ((const ast_scope_annot_t *)type_expr)->sub);
-  case AST_PTR: {
-    const ast_ptr_t *p = (const ast_ptr_t *)type_expr;
-    if (!p->ownership) return OWN_NONE;
-    strslice_t own = token_strslice(p->ownership);
-    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
-    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
-    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
-    return OWN_NONE;
-  }
-  case AST_SLICE_TYPE: {
-    const ast_slice_type_t *s = (const ast_slice_type_t *)type_expr;
-    if (!s->ownership) return OWN_NONE;
-    strslice_t own = token_strslice(s->ownership);
-    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
-    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
-    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
-    return OWN_NONE;
-  }
-  case AST_OWNED_TYPE: {
-    /* `fatal T` / `own T`（T 非指针/切片）：所有权同样在修饰词 token 上。
-       `own T` 是所有权与类型解耦后的形态（T 为含 own 字段的聚合时使用）。 */
-    const ast_owned_type_t *o = (const ast_owned_type_t *)type_expr;
-    if (!o->ownership) return OWN_NONE;
-    strslice_t own = token_strslice(o->ownership);
-    if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0) return OWN_OWN;
-    if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) return OWN_REF;
-    if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0) return OWN_FATAL;
-    return OWN_NONE;
-  }
-  default:
-    return OWN_NONE;
-  }
-}
+/* 所有权由**类型**携带：类型表达式解析（sema_resolve_inner）直接产出
+ * `own T` / `ref T` / `fatal T` 包装类型。语义分析需要所有权时一律用
+ * `type_ownership_of(已解析类型)`，不再从 AST token 反查。 */
 
 /* ---- 复合类型的 own 资源判定：**已删除**（2026-10 所有权重构） ----
  *
@@ -646,7 +599,7 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count);
  * 出的返回类型。返回 true = 通过（非 ref 返回 / 无返回类型 / 已标注）。
  */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt, ownership_t return_ownership);
+                              const type_t *rt);
 
 /**
  * 作用域嵌套比较（m3-design §5）：a 沿 parent 链可达 b（或 a == b）→

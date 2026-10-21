@@ -243,13 +243,9 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
     } else {
       for (ast_node_t *c = fn->captures; c; c = c->next) {
         ast_var_def_t *cv = (ast_var_def_t *)c;
-        ownership_t cown = cv->type_expr
-                              ? sema_type_expr_ownership(cv->type_expr)
-                              : OWN_NONE;
         const type_t *ct = NULL;
         if (cv->type_expr) {
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
-          if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
@@ -1606,25 +1602,19 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   /* 参数注册（与 build_func_tree 同构，注册到参数层）+ 签名参数类型收集 */
   size_t nparams = sema_count_siblings(fn->params);
   const type_t **ptypes = NULL;
-  ownership_t *powns = NULL;
   if (nparams > 0) {
     ptypes = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
                               NULL, NULL, NULL, nparams);
-    powns = allocator_new_ex(sema->vm->alloc, "ownership_t", sizeof(ownership_t),
-                             NULL, NULL, NULL, nparams);
   }
   size_t j = 0;
   for (ast_node_t *p = fn->params; p; p = p->next, j++) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
-    ownership_t pown = sema_type_expr_ownership(vd->type_expr);
     const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
-    if (pown == OWN_NONE && t) pown = type_ownership_of(t);
     if (!t) {
       diag_error(sema->diag, sema_loc(sema, p), "unknown type in parameter '%.*s'",
                  (int)vd->name.len, vd->name.ptr);
     }
     if (ptypes) ptypes[j] = t; /* 失败置 NULL，位置对齐，签名校验时跳过 */
-    if (powns) powns[j] = pown;
     /* **is_active = true**：参数在函数入口即生效。缺了这个，sema_lookup
        （只认 is_active 符号）在函数体里找不到参数——`func (a: own *T): i32 {
        return f(move(a)); }` 会误报 "cannot move a borrowed value" 和
@@ -1647,13 +1637,9 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     } else {
       for (ast_node_t *c = fn->captures; c; c = c->next) {
         ast_var_def_t *cv = (ast_var_def_t *)c;
-        ownership_t cown = cv->type_expr
-                              ? sema_type_expr_ownership(cv->type_expr)
-                              : OWN_NONE;
         const type_t *ct = NULL;
         if (cv->type_expr) {
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
-          if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
@@ -1673,18 +1659,16 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   resolve_func_captures(sema, fn, fscope, outer);
 
   /* 返回路径完整性：非 void 字面量所有路径必须 return */
-  ownership_t lit_ret_own = fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
   const type_t *rt = NULL;
   if (fn->return_expr) {
     rt = sema_resolve_type_slot(sema, &fn->return_expr);
-    if (lit_ret_own == OWN_NONE && rt) lit_ret_own = type_ownership_of(rt);
     if (!rt) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
                  "unknown return type in function literal");
     }
   }
   /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
-  sema_check_ret_ref_annot(sema, fn, rt, lit_ret_own);
+  sema_check_ret_ref_annot(sema, fn, rt);
   if (rt && type_kind_of(rt) != TYPE_KIND_VOID && !r.definitely_returns) {
     char nb[128];
     if (fn->name.len)
@@ -1700,7 +1684,6 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
   if (ptypes) allocator_free(sema->vm->alloc, (void **)&ptypes);
-  if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
 
   /* walk body：捕获 shadow 定义到捕获层 VM scope，参数 shadow 定义到参数层
      VM scope（子层，遮蔽捕获——与运行时 func_vcall 结构一致）；捕获检查按

@@ -430,6 +430,19 @@ const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id) {
  * 类型表达式求值
  * =========================================================================== */
 
+/* 所有权修饰 token → ownership_t（仅类型解析内部使用）。 */
+static ownership_t ownership_token_own(const token_t *tok) {
+  if (!tok) return OWN_NONE;
+  strslice_t own = token_strslice(tok);
+  if (own.len == 3 && own.ptr && memcmp(own.ptr, "own", 3) == 0)
+    return OWN_OWN;
+  if (own.len == 3 && own.ptr && memcmp(own.ptr, "ref", 3) == 0)
+    return OWN_REF;
+  if (own.len == 5 && own.ptr && memcmp(own.ptr, "fatal", 5) == 0)
+    return OWN_FATAL;
+  return OWN_NONE;
+}
+
 /* 纯求值（不登记、不替换槽位）：switch 分派类型表达式节点 → 类型单例。
  * 由 resolve_type_expr（登记）与递归 sub 解析共用。 */
 static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
@@ -473,9 +486,10 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          描述上（销毁序列 `if (v != nil)` 据此决定是否 FREE `v.!`）。
          所有权必须在 resolve **之前**取（折叠会丢 ownership token）。 */
       ast_option_t *op = (ast_option_t *)type_expr;
-      ownership_t inner_own = sema_type_expr_ownership(op->sub);
       const type_t *sub = resolve_type_expr(sema, op->sub);
-      return sub ? type_option_intern_own(sema->vm, sub, inner_own) : NULL;
+      if (!sub) return NULL;
+      /* 所有权已编码在 inner 类型上（`?own *T` 的 inner 就是 `own *T`）。 */
+      return type_option_intern_own(sema->vm, sub, type_ownership_of(sub));
     }
     case AST_ARRAY: {
       /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →
@@ -484,12 +498,12 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          元素可以是指针/切片/含 own 槽位的聚合——`[N]own *T` 的 own 记在类型
          描述上（销毁序列 `for i in 0..N` 据此决定是否 FREE `a[i]`）。 */
       ast_array_t *arr = (ast_array_t *)type_expr;
-      ownership_t elem_own = sema_type_expr_ownership(arr->base_type);
       const type_t *base = resolve_type_expr(sema, arr->base_type);
       if (!base) return NULL;
       size_t len;
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
-      return type_array_intern_own(sema->vm, base, len, elem_own);
+      return type_array_intern_own(sema->vm, base, len,
+                                   type_ownership_of(base));
     }
     case AST_TUPLE: {
       /* <T1,T2,...> 元组类型：逐元素递归解析（可为任意类型表达式，
@@ -500,13 +514,11 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       tuple_elem_t elems_arr[n > 0 ? n : 1];
       size_t i = 0;
       for (ast_node_t *et = tp->elem_types; et; et = et->next, i++) {
-        /* 所有权必须在 resolve **之前**取（折叠会丢 ownership token） */
-        ownership_t eown = sema_type_expr_ownership(et);
         const type_t *pt = resolve_type_expr(sema, et);
         if (!pt) return NULL;
         elems_arr[i].type   = pt;
         elems_arr[i].offset = 0; /* seal 统一布局 */
-        elems_arr[i].ownership = eown;
+        elems_arr[i].ownership = type_ownership_of(pt);
       }
       return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
     }
@@ -629,12 +641,11 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
         return NULL;
       }
       /* 元素槽位所有权（`own []own *T` 的元素是 own 叶子；销毁序列
-         `for i in 0..len` 据此决定是否 FREE `s[i]`）。所有权须在 resolve
-         之前取——折叠会丢 ownership token。 */
-      ownership_t elem_own = sema_type_expr_ownership(sl->elem_type);
+         `for i in 0..len` 据此决定是否 FREE `s[i]`）。类型已携带它。 */
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
-      const type_t *sl_t = type_slice_intern_own(sema->vm, elem, elem_own);
+      const type_t *sl_t = type_slice_intern_own(sema->vm, elem,
+                                                 type_ownership_of(elem));
       if (!sl_t) return NULL;
       return type_ownership_apply(sema->vm, oq, sl_t);
     }
@@ -651,7 +662,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          `own T` / `ref T` / `fatal T` 这个独立类型（布局与 T 相同）。
          是否**可用**仍由流动规则决定（`own` 位置需要 FATAL 产生式）。 */
       ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
-      ownership_t oq = sema_type_expr_ownership(type_expr);
+      ownership_t oq = ownership_token_own(ot->ownership);
       sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ot->base_type);
       sema->opaque_base_ctx--;
@@ -705,8 +716,9 @@ void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
    注：`'<a> ref *T` 是**ref 产生式**（§0.3）——调用点拿到 REF 状态的值，
    只能流向 `ref` 位置，不可 move。 */
 bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt, ownership_t return_ownership) {
+                              const type_t *rt) {
   if (!rt || !fn->return_expr) return true;
+  ownership_t return_ownership = type_ownership_of(rt);
   /* **返回位只允许 `ref` / `fatal` / `none`**（所有权模型 §0.4）：
      `own` 不能作返回标注——调用点拿到的是"调用表达式"的值，
      若返回位是 `own`，该值状态是 OWN，而 OWN 只能流向 `ref` 位置
@@ -895,7 +907,6 @@ static void pass0_imports(sema_t *sema, ast_program_t *prog) {
  * 交给 `pass1c_extern_abi` 处理。`report=true` 时才产出诊断（避免同一错误两次）。 */
 static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
   const type_t *ptypes[64];
-  ownership_t powns[64];
   size_t pn = 0;
   bool resolved = true;
   /* 符号名（限定名 "<lib>::<name>"），既用于注册也用于回查已建签名。 */
@@ -903,34 +914,16 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
   int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
                     (int)efd->lib_name.len, efd->lib_name.ptr,
                     (int)efd->name.len, efd->name.ptr);
-  sema_symbol_t *prior =
-      (qn > 0 && (size_t)qn < sizeof(qual))
-          ? sema_lookup(sema->global_scope, strslice_from_bytes(qual, (size_t)qn))
-          : NULL;
-  const func_sig_t *prior_sig =
-      (prior && prior->type && type_kind_of(prior->type) == TYPE_KIND_FUNC)
-          ? &((const func_type_t *)type_strip_ownership(prior->type))->sig
-          : NULL;
 
   for (ast_node_t *p = efd->params; p && pn < 64; p = p->next) {
     ast_var_def_t *pvd = (ast_var_def_t *)p;
-    /* ownership 时序：本次函数**首次**执行时会折叠 AST（AST_PTR→AST_TYPE_REF），
-       折叠后 `sema_type_expr_ownership` 只会得到 OWN_NONE。所以优先从已建签名
-       读回，其次用**解析器缓存**的 `pvd->ownership`（折叠前提取，与 vm 的
-       ownership_t 同编码），最后才是就地提取。 */
-    ownership_t pown =
-        (prior_sig && prior && prior->type)
-            ? type_ownership_of(func_type_param(prior->type, pn))
-            : (pvd->ownership != AST_OWN_NONE
-                   ? (ownership_t)pvd->ownership
-                   : sema_type_expr_ownership(pvd->type_expr));
     const type_t *pt = sema_resolve_type_slot(sema, &pvd->type_expr);
     if (!pt) {
       resolved = false;
-      ptypes[pn] = NULL;
-      powns[pn++] = pown;
+      ptypes[pn++] = NULL;
       continue;
     }
+    ownership_t pown = type_ownership_of(pt);
     const char *why = ffi_c_abi_reject_reason_own(pt, pown);
     /* 聚合（struct/cunion）要**递归**检查字段：字段本身必须能跨 C ABI。
        用 libffi 描述符构造做校验，失败原因（含字段类型名）直接报在声明处。 */
@@ -947,19 +940,13 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
                  (int)efd->name.len, efd->name.ptr,
                  (int)pvd->name.len, pvd->name.ptr, why);
     }
-    ptypes[pn] = pt;
-    powns[pn] = pown;
-    pn++;
+    ptypes[pn++] = pt;
   }
   const type_t *rt = sema->vm->type_void;
-  ownership_t ret_own =
-      (prior_sig && prior && prior->type)
-          ? type_ownership_of(func_type_return(prior->type))
-          : (efd->return_expr
-                 ? sema_type_expr_ownership(efd->return_expr)
-                 : OWN_NONE);
+  ownership_t ret_own = OWN_NONE;
   if (efd->return_expr) {
     rt = sema_resolve_type_slot(sema, &efd->return_expr);
+    ret_own = type_ownership_of(rt);
     if (!rt) {
       resolved = false;
     } else if (report) {
@@ -1040,10 +1027,8 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
     return false;
   }
   if (report) {
-    const char *why = ffi_c_abi_reject_reason_own(
-        vt, evd->ownership != AST_OWN_NONE
-                ? (ownership_t)evd->ownership
-                : sema_type_expr_ownership(evd->type_expr));
+    const char *why =
+        ffi_c_abi_reject_reason_own(vt, type_ownership_of(vt));
     uint32_t kind = 0;
     if (!why && type_kind_of(vt) == TYPE_KIND_VOID) why = "void is not a value type";
     if (!why && !ffi_data_kind_of(vt, sema->vm, &kind) &&
@@ -1316,16 +1301,12 @@ static void pass2_types(sema_t *sema, bool speculative) {
     bool unresolved = false;
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;
-    ownership_t *powns = NULL;
     if (nparams > 0) {
       params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
                                 NULL, NULL, NULL, nparams);
-      powns = allocator_new_ex(sema->vm->alloc, "ownership_t", sizeof(ownership_t),
-                               NULL, NULL, NULL, nparams);
       size_t j = 0;
       for (ast_node_t *p = fn->params; p; p = p->next, j++) {
         ast_var_def_t *vd = (ast_var_def_t *)p;
-        ownership_t pown = sema_type_expr_ownership(vd->type_expr);
         const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t) {
           if (!speculative)
@@ -1335,16 +1316,12 @@ static void pass2_types(sema_t *sema, bool speculative) {
           unresolved = true;
         }
         params[j] = t; /* 失败置 NULL，位置对齐，func_shadow_call 校验时跳过 */
-        powns[j] = pown;
       }
     }
 
-    ownership_t ret_own =
-        fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
     const type_t *rt = NULL;
     if (fn->return_expr) {
       rt = sema_resolve_type_slot(sema, &fn->return_expr);
-      if (ret_own == OWN_NONE && rt) ret_own = type_ownership_of(rt);
       if (!rt) {
         if (!speculative)
           diag_error(sema->diag, sema_loc(sema, f), "unknown return type");
@@ -1353,7 +1330,6 @@ static void pass2_types(sema_t *sema, bool speculative) {
     }
     if (unresolved) {
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
-      if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
       continue; /* 保持未就绪，等下一轮（符号 type 仍为 NULL） */
     }
     /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。
@@ -1361,10 +1337,9 @@ static void pass2_types(sema_t *sema, bool speculative) {
        **每次都要跑**：签名可能已在试跑轮解析完毕（下面会跳过重建），但试跑轮
        的诊断进了临时缓冲被丢弃——正式轮必须补报；试跑轮里也只是做检查、
        不产生状态。 */
-    sema_check_ret_ref_annot(sema, fn, rt, ret_own);
+    sema_check_ret_ref_annot(sema, fn, rt);
     if (sym->type) { /* 签名已就绪（试跑轮已解析）：无需重建 */
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
-      if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
       continue;
     }
 
@@ -1382,9 +1357,8 @@ static void pass2_types(sema_t *sema, bool speculative) {
     const sema_type_t *st = sema_type_register(sema, sig);
     if (st) fn->sig_id = st->id;
 
-    /* params/powns 临时数组已被 type_func_sig 复制，此处释放 */
+    /* params 临时数组已被 type_func_sig 复制，此处释放 */
     if (params) allocator_free(sema->vm->alloc, (void **)&params);
-    if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
   }
 }
 

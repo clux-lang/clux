@@ -2477,3 +2477,14 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       vtable 的 free/clone/assign 使用），不再是编译期判定的依据。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+109. **所有权升级为类型构造 · P3d-2：删除 AST 所有权提取入口**（2026-10）
+    - `sema_type_expr_ownership` 删除；option/数组/元组/切片元素、extern cfunc /
+      全局函数签名、extern var、捕获、函数字面量全部改为
+      `type_ownership_of(已解析类型)`。
+    - CTFE 的类型表达式求值补上所有权：`AST_PTR` / `AST_SLICE_TYPE` /
+      `AST_OWNED_TYPE` 产出包装类型，数组元素槽位按元素类型记录所有权。
+      于是 `type X = own *T;` 不再依赖 P1a 的“类型定义后补包”分支（已删除）。
+    - `sema_check_ret_ref_annot` 不再接收 ownership 参数，内部从返回类型派生。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

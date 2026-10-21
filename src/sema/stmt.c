@@ -4245,42 +4245,32 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
                                    sema_scope_t *scope) {
   size_t nparams = sema_count_siblings(fn->params);
   const type_t **params = NULL;
-  ownership_t *powns = NULL;
   if (nparams > 0) {
     params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
                               NULL, NULL, NULL, nparams);
-    powns = allocator_new_ex(sema->vm->alloc, "ownership_t", sizeof(ownership_t),
-                             NULL, NULL, NULL, nparams);
     size_t j = 0;
     for (ast_node_t *p = fn->params; p; p = p->next, j++) {
       ast_var_def_t *vd = (ast_var_def_t *)p;
-      ownership_t pown = sema_type_expr_ownership(vd->type_expr);
       const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
-      /* 类型本身已携带所有权（P2）：AST 折叠成 AST_TYPE_REF 后 token 已丢，
-         从解析出的类型补回所有权。 */
-      if (pown == OWN_NONE && t) pown = type_ownership_of(t);
       if (!t) {
         diag_error(sema->diag, sema_loc(sema, p),
                    "unknown type in parameter '%.*s'",
                    (int)vd->name.len, vd->name.ptr);
       }
       params[j] = t; /* 失败置 NULL，位置对齐，func_shadow_call 校验时跳过 */
-      powns[j] = pown;
     }
   }
 
-  ownership_t ret_own = fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
   const type_t *rt = NULL;
   if (fn->return_expr) {
     rt = sema_resolve_type_slot(sema, &fn->return_expr);
-    if (ret_own == OWN_NONE && rt) ret_own = type_ownership_of(rt);
     if (!rt) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
                  "unknown return type");
     }
   }
   /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
-  sema_check_ret_ref_annot(sema, fn, rt, ret_own);
+  sema_check_ret_ref_annot(sema, fn, rt);
   const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
   /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */
   sema_symbol_t *sym = sema_lookup(scope, fn->name);
@@ -4305,7 +4295,6 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
   }
 
   if (params) allocator_free(sema->vm->alloc, (void **)&params);
-  if (powns) allocator_free(sema->vm->alloc, (void **)&powns);
 }
 
 /* ===========================================================================

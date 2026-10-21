@@ -3805,13 +3805,11 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
          sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
       ast_make_t *n = (ast_make_t *)*node;
 
-      /* 元素槽位所有权必须在 resolve **之前**取（折叠会丢 ownership token） */
-      ownership_t elem_own = sema_type_expr_ownership(n->elem_type);
-      n->elem_ownership = (uint8_t)elem_own;
-
-      /* 解析元素类型 T */
+      /* 解析元素类型 T（所有权已编码在类型上） */
       const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
       if (!et) return val_void(sema);
+      ownership_t elem_own = type_ownership_of(et);
+      n->elem_ownership = (uint8_t)elem_own;
 
       /* 求值长度 N（shadow 求值，运行期可变） */
       value_t *lenv = sema_expr(sema, &n->length, scope);

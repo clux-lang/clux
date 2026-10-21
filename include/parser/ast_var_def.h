@@ -27,15 +27,12 @@ typedef struct {
      * 对象的槽位所有权展开（own *T → FREE、含 own 字段的聚合 → 逐槽位）。 */
     const struct type_t *resolved_type;
 
-    /* 声明类型的**所有权**（own/ref/fatal，由解析器在类型槽位折叠前从
-     * AST_PTR / AST_SLICE_TYPE 的 ownership token 提取并缓存）。
+    /* 声明位置的所有权修饰缓存（own/ref/fatal）。
      *
-     * 为什么需要缓存：`sema_resolve_type_slot` 会把 `AST_PTR` 折叠成
-     * `AST_TYPE_REF`，**丢失 ownership token**；此后 `sema_type_expr_ownership`
-     * 只会返回 OWN_NONE。变量定义路径在 Pass 2a 折叠前就地取值，所以不受影响；
-     * 但 **extern 声明（`extern cfunc` / `extern var`）的参数与类型槽位在
-     * Pass 1 就被折叠**，到 Pass 1c 复审 ABI 约束时已无从提取
-     * （`own *T` 因此漏过 C ABI 检查）。这里缓存一份，供那些路径读取。
+     * **所有权现在由类型携带**：`sema_resolve_type_slot` 解析出的类型本身就是
+     * `own T` / `ref T` / `fatal T`，判定一律用 `type_ownership_of(类型)`。
+     * 这个 AST 字段只是解析期缓存（sema 在解析完成后按类型回写），新代码不要
+     * 依赖它。
      *
      * 编码与 `ownership_t`（`vm/ownership.h`）一致：0=OWN_NONE、1=OWN_OWN、
      * 2=OWN_REF、3=OWN_FATAL。用 `uint8_t` 而非 `ownership_t` 是为了不让

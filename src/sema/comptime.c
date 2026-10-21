@@ -896,24 +896,6 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
   }
   const type_t *t = value_as(sh, const type_t *);
 
-  /* P1a（docs/ownership-as-type.md）：类型定义是类型的"一等公民"入口——
-     把类型表达式上的所有权修饰**记录进类型**（own T / ref T / fatal T）。
-     所有权类型与裸类型布局相同且运行期剥离，因此这里不改变任何运行期行为；
-     收益是 `type X = own i32;` 之后 `X.kind == "own"`、`X.ownership`、
-     `X.unqualified` 都能反射出来，且泛型/签名可以按类型区分布局相同的变体。 */
-  {
-    ownership_t own = sema_type_expr_ownership(td->expr);
-    /* 类型解析已经产出 own/ref/fatal 修饰类型（P2）；这里只在**尚未携带**时补包，
-       避免 `type R = ref *i32;` 变成 `ref (ref *i32)`。 */
-    if (own != OWN_NONE && type_ownership_of(t) == OWN_NONE) {
-      type_kind_t okind = own == OWN_OWN     ? TYPE_KIND_OWN
-                          : own == OWN_REF   ? TYPE_KIND_REF
-                                             : TYPE_KIND_FATAL;
-      const type_t *wrapped = type_ownership_intern(vm, okind, t);
-      if (wrapped) t = wrapped;
-    }
-  }
-
   /* 2. rhs 折叠为 AST_TYPE_REF（登记 + 名字引用；内建类型不登记 → 名字 =
      规范名，编译器经 type_lookup 兜底 → LOAD_TYPE <内建 id>）。复合类型
      由 sema_ct_type_ref 递归登记，整个 rhs 收敛为单个类型引用。 */

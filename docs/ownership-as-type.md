@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a / P3b / P3c / P3d-1 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a / P3b / P3c / P3d 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -198,11 +198,15 @@ WSL2 全量 **2229 passed / 2 skipped**。
   `type_ownership_of(槽位类型)`（cunion 槽位按语义恒为 NONE）。7 个槽位字段暂时保留，
   但只作为**运行期类型镜像**（hoist 产物，供运行期 vtable 的 free/clone/assign 使用），
   不再是任何编译期判定的依据。
-- **待办（P3d-2 / P3e）**：删除 7 个槽位所有权字段（需要把运行期
-  free/clone/assign 改为只走编译期生成的序列，或让运行期槽位类型保留所有权信息）、
-  `sema_type_expr_ownership`、AST 上的 ownership 缓存、
-  `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳，以及运行期 `borrowed`
-  视图位（最终与借用 materialize 改造一起删除）。
+- ✅ **P3d-2：删除 AST 侧的所有权提取入口**。`sema_type_expr_ownership` 删除；
+  所有消费者（option/数组/元组/切片元素、extern/全局函数签名、extern var、捕获、
+  函数字面量）改为 `type_ownership_of(已解析类型)`。CTFE 的类型表达式求值也补上
+  所有权（`AST_PTR` / `AST_SLICE_TYPE` / `AST_OWNED_TYPE` 及数组元素槽位），
+  `type X = own *T` 不再依赖 P1a 的“类型定义后补包”。
+- **待办（P3e）**：删除 7 个槽位所有权字段（需要把运行期 free/clone/assign
+  改为只走编译期生成的序列，或让运行期槽位类型保留所有权信息）、
+  AST 上的 ownership 缓存、`type_fatal_variant_of` / `type_fatal_base_of`
+  恒等壳，以及运行期 `borrowed` 视图位（最终与借用 materialize 改造一起删除）。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。
