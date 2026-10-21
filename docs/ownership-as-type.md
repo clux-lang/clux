@@ -175,8 +175,9 @@ WSL2 全量 **2229 passed / 2 skipped**。
   所有权查询改为 `value_type_ownership(v)`（由类型派生），sema 的写入改为
   `value_set_type_ownership(vm, v, own)`（同布局重贴标签）。
 - 运行期只剩一个 **`borrowed` 视图位**：data 指向父值 data 块内部（字段/元素
-  借用视图），只回答"dispose 时是否释放 data 块"。它不是所有权状态；
-  `value_is_borrowed` 谓词暂时保留，等 P3c 与借用 materialize 改造一起处理。
+  借用视图），只回答"dispose 时是否释放 data 块"。它不是所有权状态。
+  **决定保留、不再优化**：这只是 VM 的零拷贝读实现细节，不影响 C 后端 /
+  LLVM IR 的生成（那里按 C 的值语义自动处理生命周期）。
 - 顺带修掉：FUNC 类型被 `own/fatal` 包装后，sema 里直接
   `(func_type_t *)value_type(...)` 强转读签名会越界/读到错误签名（`clone(func…)`
   的调用返回类型变成 `fatal i32`）——所有这类强转改为先 `type_strip_ownership`。
@@ -224,8 +225,8 @@ WSL2 全量 **2229 passed / 2 skipped**。
   `type_*_intern_with_ownership` / setter 与 `SET_FIELD_OWNERSHIP` 指令。
   所有权修饰仍保留在 AST 的类型表达式 token（`ast_ptr_t::ownership` 等），
   那是**语法**，不是语义副本。
-- **待办**：运行期 `borrowed` 视图位（借用视图，与 materialize 改造一起删除）；
-  它不是 own/ref/fatal 所有权状态。
+- **不计划改动**：运行期 `borrowed` 视图位。它是 VM 的借用视图实现细节，
+  不是 own/ref/fatal 所有权状态，也不进入生成的 C 代码 / LLVM IR。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。
 
 ---

@@ -2527,3 +2527,10 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - `MAKE` 指令去掉所有权字节操作数（元素所有权由元素类型携带），同步汇编表。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+114. **决策：运行期 `borrowed` 视图位保留，不做 materialize 改造收尾**（2026-10）
+    - `value_t.borrowed` 只服务于 VM 的零拷贝字段/元素读取（dispose 不释放父块），
+      是运行期实现细节，不是 own/ref/fatal 所有权状态。
+    - C 语言按值语义自动处理生命周期，该位不影响生成的 C 代码或 LLVM IR；
+      因此不再为删除它做借用 materialize 改造。
+    - 所有权重构（P3a–P3f）已完成；本项作为**有意保留**记录在此。
