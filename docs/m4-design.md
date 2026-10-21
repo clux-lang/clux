@@ -12,13 +12,15 @@
 
 > **实现状态：✅ 已完成（2026-10-09）**。本设计已落地并有测试覆盖
 > （`tests/driver_m4_test.cpp`、`src/vm/type_slice.c`、`src/vm/builtin_len.c`）。
-> 实现与本文档的两处偏差（**以代码为准**）：
-> 1. §13 Phase 4 列出的计划指令名与实际不符——实际指令为 `PUSH_SLICE <kind>` /
+> 实现与本文档的偏差（**以代码为准**）：
+> 1. §13 Phase 4 列出的计划指令名与实际不符——实际指令为 `PUSH_SLICE`（无操作数）/
 >    `SLICE <flags>`（`[a:b]`）/ `MAKE <init_count>`（`make`），下标访问**复用**
 >    `INDEX_GET` / `INDEX_SET`，`len` **不是指令**而是内建函数（编译为 `CALL`）。
 >    详见 [bytecode-mnemonics.md](bytecode-mnemonics.md)。
-> 2. §10.1 的三个 type kind 是最终形态（§13 Phase 1 里"单一 `TYPE_KIND_SLICE`"
->    的旧写法已废弃）。
+> 2. **切片所有权模型已被 2026-10 的所有权升级取代**：不再有
+>    `TYPE_KIND_SLICE_OWN/_REF/_FATAL`；现在是单个 `TYPE_KIND_SLICE`（裸切片，持 elem），
+>    外层 `own`/`ref`/`fatal` 是独立的 `TYPE_KIND_OWN/REF/FATAL` 包装（与指针一致）。
+>    详见 [ownership-as-type.md](ownership-as-type.md)。
 >
 > 本文档后续只作设计记录；改动请同步 [milestones.md](milestones.md)。
 
@@ -312,19 +314,21 @@ type View = struct {
 
 ### 10.1 新增 type kind
 
-与指针对齐——三种所有权修饰是三个独立 type kind：
+切片本体是**一个** type kind（`TYPE_KIND_SLICE`），所有权是**外层类型修饰**
+（与指针完全对齐，见 [ownership-as-type.md](ownership-as-type.md)）：
 
 ```
-TYPE_KIND_SLICE_OWN    // own []T：拥有堆分配，作用域退出自动释放
-TYPE_KIND_SLICE_REF    // ref []T：借用，不拥有
-TYPE_KIND_SLICE_FATAL  // fatal []T：将亡值，move/clone 产物
+TYPE_KIND_SLICE         // 裸切片 {ptr,len}：元素类型为 elem_type
+TYPE_KIND_OWN   { sub } // own []T：拥有堆分配，作用域退出自动释放
+TYPE_KIND_REF   { sub } // ref []T：借用，不拥有
+TYPE_KIND_FATAL { sub } // fatal []T：将亡值，move/clone 产物
 ```
 
 - 不存在 `TYPE_KIND_SLICE_SHARE` / `TYPE_KIND_SLICE_WEAK`——切片不参与 RC 系
-- `slice_type_t` 继承 `type_t`，持 `elem_type` 指针 + 所有权 kind
+- `slice_type_t` 继承 `type_t`，持 `elem_type` 指针（**不带所有权字段**）
 - 两遍构造协议：`type_slice_push` / `type_slice_set_elem` / `type_slice_seal`（同 array/ptr）
-- intern 池：`vm->slice_types`，按 (elem_type, kind) 去重
-- 运行期零标志——所有权由 type kind 区分（同 M3 §13.2 指针设计）
+- intern 池：`vm->slice_types` 按 `elem_type` 去重；所有权包装按 `(kind, sub)` 去重
+- 运行期零所有权标志——所有权由类型 kind 区分（同 M3 §13.2 指针设计）
 
 ### 10.2 与数组的关系
 
@@ -417,7 +421,7 @@ make ( type_expr , expr , init... ) -> fatal []T
 ## 13. 实现路线
 
 ### Phase 1: 类型系统 ✅
-- `TYPE_KIND_SLICE_OWN` / `_REF` / `_FATAL` 三个枚举 + `slice_type_t` 结构（§10.1，最终形态）
+- `TYPE_KIND_SLICE` + `slice_type_t` 结构（§10.1；所有权由外层 `OWN/REF/FATAL` 包装）
 - vtable（clone/dispose/assign/eq/ne/get_index/set_index）
 - intern 池 + 两遍构造协议（`type_slice_push` / `type_slice_set_elem` / `type_slice_seal`）
 - const 修饰支持
@@ -436,7 +440,8 @@ make ( type_expr , expr , init... ) -> fatal []T
 - 作用域标注 / 函数边界 / 闭包捕获 / 全局规则扩展
 
 ### Phase 4: compiler + VM ✅（指令名以实际实现为准）
-- 类型构造：`PUSH_SLICE <kind:u8>`（声明）+ `LOAD_TYPE` → `SET_TYPE`（设 elem）→ `SEAL`
+- 类型构造：`PUSH_SLICE`（无操作数，声明）+ `LOAD_TYPE` → `SET_TYPE`（设 elem）→ `SEAL`；
+  所有权外套 `PUSH_OWN`/`PUSH_REF`/`PUSH_FATAL` 或 `LOAD_TYPE_OWNED`
 - 切片表达式 `[a:b]`：`SLICE <flags:u8>`（bit0=low 存在，bit1=high 存在），恒产 `ref []T`
 - `make` 宏：`MAKE <init_count:u32>`（弹初值 + length + elem type）
 - 下标访问：**复用** `INDEX_GET` / `INDEX_SET`（未新增 `SLICE_GET` / `SLICE_SET`）
