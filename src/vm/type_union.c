@@ -449,6 +449,7 @@ const type_t *type_union_intern_with_ownership(vm_t *vm,
  * =========================================================================== */
 
 int union_type_find_member(const type_t *t, strslice_t name) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_UNION) return -1;
     const union_type_t *ut = (const union_type_t *)t;
     for (size_t i = 0; i < ut->member_count; i++) {

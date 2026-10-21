@@ -36,18 +36,21 @@ extern "C" {
 
 /** 取枚举类型的底层类型（非枚举返回 NULL） */
 static inline const type_t *enum_type_underlying(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ENUM) ? ((const enum_type_t *)t)->underlying
                                             : NULL;
 }
 
 /** 取枚举类型的 variant 数量（非枚举返回 0） */
 static inline size_t enum_type_variant_count(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ENUM) ? ((const enum_type_t *)t)->variant_count
                                             : 0;
 }
 
 /** 取第 i 个 variant（越界/非枚举返回 NULL） */
 static inline const enum_variant_t *enum_type_variant(const type_t *t, size_t i) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_ENUM) return NULL;
     const enum_type_t *et = (const enum_type_t *)t;
     return (i < et->variant_count) ? &et->variants[i] : NULL;

@@ -1,5 +1,6 @@
 #include "sema/comptime.h"
 #include "sema/sema.h"
+#include "vm/type_ownership.h"
 #include "core/panic.h"
 #include "vm/type_ptr.h"
 #include "vm/type_struct.h"
@@ -214,7 +215,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
      AST_TYPE_REF，无法再从 token 提取。 */
   sema_symbol_t *fn_sym = sema_lookup(parent, fn->name);
   const func_sig_t *fn_sig = NULL;
-  if (fn_sym && fn_sym->type && fn_sym->type->kind == TYPE_KIND_FUNC)
+  if (fn_sym && fn_sym->type && type_kind_of(fn_sym->type) == TYPE_KIND_FUNC)
     fn_sig = &((const func_type_t *)fn_sym->type)->sig;
   size_t param_idx = 0;
   for (ast_node_t *p = fn->params; p; p = p->next, param_idx++) {
@@ -223,9 +224,11 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
                         param_idx < fn_sig->param_count)
                            ? fn_sig->param_ownerships[param_idx]
                            : OWN_NONE;
+    const type_t *ptype = sema_resolve_type_slot(sema, &vd->type_expr);
+    if (pown == OWN_NONE && ptype) pown = type_ownership_of(ptype);
     sema_symbol_t init = {
         .kind = SEMA_SYM_VAR,
-        .type = sema_resolve_type_slot(sema, &vd->type_expr),
+        .type = ptype,
         .ownership = pown,
         .declared = true};   /* 参数在函数入口即存在 */
     if (!sema_scope_define(pscope, vd->name, &init)) {
@@ -256,6 +259,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
         const type_t *ct = NULL;
         if (cv->type_expr) {
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
+          if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
                               .ownership = cown, .declared = true};
@@ -285,7 +289,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   const type_t *rt = fn->return_expr
                          ? sema_resolve_type_slot(sema, &fn->return_expr)
                          : NULL;
-  if (rt && rt->kind != TYPE_KIND_VOID && !r.definitely_returns) {
+  if (rt && type_kind_of(rt) != TYPE_KIND_VOID && !r.definitely_returns) {
     diag_error(sema->diag, sema_loc(sema, &fn->base),
                "function '%.*s' must return a value on all paths",
                (int)fn->name.len, fn->name.ptr);
@@ -901,10 +905,10 @@ static ast_node_t *gen_comptime_foreach(sema_t *sema, ast_block_t *block,
 
   size_t n = 0;
   bool is_arr = false;
-  if (ct->kind == TYPE_KIND_ARRAY) {
+  if (type_kind_of(ct) == TYPE_KIND_ARRAY) {
     is_arr = true;
     n = array_type_len(ct);
-  } else if (ct->kind == TYPE_KIND_TUPLE) {
+  } else if (type_kind_of(ct) == TYPE_KIND_TUPLE) {
     n = tuple_type_elem_count(ct);
   } else {
     char tn[64];
@@ -1478,7 +1482,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs || !cs->type) continue;
     if (cs->ownership == OWN_REF ||
-        cs->type->kind == TYPE_KIND_OPAQUE) {
+        type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;
       break;
     }
@@ -1626,6 +1630,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
     ast_var_def_t *vd = (ast_var_def_t *)p;
     ownership_t pown = sema_type_expr_ownership(vd->type_expr);
     const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
+    if (pown == OWN_NONE && t) pown = type_ownership_of(t);
     if (!t) {
       diag_error(sema->diag, sema_loc(sema, p), "unknown type in parameter '%.*s'",
                  (int)vd->name.len, vd->name.ptr);
@@ -1661,6 +1666,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
         const type_t *ct = NULL;
         if (cv->type_expr) {
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
+          if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
                               .ownership = cown, .declared = true};
@@ -1685,6 +1691,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   const type_t *rt = NULL;
   if (fn->return_expr) {
     rt = sema_resolve_type_slot(sema, &fn->return_expr);
+    if (lit_ret_own == OWN_NONE && rt) lit_ret_own = type_ownership_of(rt);
     if (!rt) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
                  "unknown return type in function literal");
@@ -1692,7 +1699,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   }
   /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
   sema_check_ret_ref_annot(sema, fn, rt, lit_ret_own);
-  if (rt && rt->kind != TYPE_KIND_VOID && !r.definitely_returns) {
+  if (rt && type_kind_of(rt) != TYPE_KIND_VOID && !r.definitely_returns) {
     char nb[128];
     if (fn->name.len)
       name_to_cstr(fn->name, nb, sizeof nb);
@@ -1703,7 +1710,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   }
 
   /* 签名解析 + 登记（compiler hoist LOAD_TYPE <sig_id> 用） */
-  ownership_t ret_own = fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
+  ownership_t ret_own = lit_ret_own;
   const type_t *sig = type_func_sig(sema->vm, ptypes, powns, nparams, rt, ret_own, false);
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;

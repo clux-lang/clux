@@ -36,12 +36,14 @@ extern "C" {
 
 /** 取结构体类型的字段数量（非 struct 返回 0） */
 static inline size_t struct_type_field_count(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_STRUCT) ? ((const struct_type_t *)t)->field_count
                                               : 0;
 }
 
 /** 取第 i 个字段（越界/非 struct 返回 NULL） */
 static inline const struct_field_t *struct_type_field(const type_t *t, size_t i) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_STRUCT) return NULL;
     const struct_type_t *st = (const struct_type_t *)t;
     return (i < st->field_count) ? &st->fields[i] : NULL;

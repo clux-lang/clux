@@ -33,12 +33,7 @@ const type_t *type_ownership_sub(const type_t *t);
 /** 类型上携带的所有权（穿透 const/volatile）；无则 OWN_NONE。 */
 ownership_t type_ownership_of(const type_t *t);
 
-/**
- * 剥掉所有权修饰，返回**运行期**应使用的裸类型。
- * `own T`/`ref T`/`fatal T` → T；无修饰原样返回。
- * 这是运行期边界（值分配 / 类型指令 / FFI 描述符）必须调用的规范化函数；
- * 编译期的销毁序列判定要用**未剥**的类型。
- */
-const type_t *type_strip_ownership(const type_t *t);
+/* `type_strip_ownership` 定义在 type.h（static inline）——结构化访问器与
+ * 运行期边界都要用，避免每个编译单元为一行循环多一次外部调用。 */
 
 #endif /* _H_CLUX_VM_TYPE_OWNERSHIP_ */

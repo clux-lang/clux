@@ -134,14 +134,39 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
   `T.ownership` / `T.kind` 正确，且既有语义（2226 例）不变。
 - 槽位字段暂留（写入等于类型里的所有权），便于逐步切换。
 
-### P2 切换判定到类型
-逐块把"看值状态/AST"改成"看类型"：
-1. sema 的 move/fatal 消费检查、借用逃逸、拷贝禁止；
-2. 销毁序列（`gen_destroy_impl` / `type_has_own_slots`）只读类型；
-3. FFI 规则（`ffi_c_abi_reject_reason_own`、extern `fatal` 返回）；
-4. cfunc→func 包装的 `move(p)`；
-5. option/切片/数组元素销毁。
-每块独立跑全量，出问题单独回滚。
+### P2 切换判定到类型 —— ✅ 核心「产出与判定同批切换」已完成（2026-10）
+
+P1b/B1 的实测结论是"产出侧与判定侧必须同一提交切换"。本轮按这一点一次性完成：
+
+- **类型解析产出所有权类型**：`AST_PTR` / `AST_SLICE_TYPE` / `AST_OWNED_TYPE` 直接
+  `type_ownership_apply` 出 `own T` / `ref T` / `fatal T`；`?T`、`[N]T`、`[]T`、
+  元组、结构字段、联合成员、函数签名的槽位类型随之携带所有权。
+- **值产生侧一起切换**：`new` / `make` → `fatal *T` / `fatal []T`；`x.&` 与
+  `data()` → `ref *T`；`move` / `clone` → `fatal T`；调用表达式 = 签名返回类型
+  （已含 `fatal` / `ref`）。
+- **结构视图透明**：新增 `type_strip_ownership` / `type_kind_of`；`type_strip_quals`
+  与全部 `type_*` 访问器（ptr/slice/option/array/tuple/struct/union/cunion/
+  func/cfunc/opaque）穿透所有权修饰；sema/ctfe/compiler 的 kind 判定统一改走
+  `type_kind_of`（276 处），`own T` 不再被误判为"不是指针/不是切片"。
+- **所有权转换**：`value_implicit_cast` 增加 `fatal T → own T` / `fatal T → ref T` /
+  `own T → ref T` 的重贴标签（布局相同，零拷贝）；反向不成立。
+- **FFI**：`ffi_c_abi_reject_reason_own` / `ffi_type_for` / `ffi_data_kind_of` /
+  `ffi_data_kind_needs_type` 一律先剥裸类型；所有权仍从类型读。
+- **顺带修掉的真问题**：
+  * `sema_eval_type_def` 与类型解析重复包装（`type R = ref *i32` 曾是
+    `ref (ref *i32)`）——现在只在尚未携带时补包；
+  * `cfunc → func` 包装体把已带 `ref` 的形参类型又包了一层（曾生成
+    `ref **Box`）——现在直接引用带所有权的类型；
+  * 函数形参/返回的所有权在 AST 折叠成 `AST_TYPE_REF` 后 token 丢失——现在
+    从解析出的**类型**回读（`type_ownership_of`）。
+
+**仍未做（P3）**：`value_t.ownership` / `value_set_ownership` / `value_ownership` /
+`value_is_borrowed` 仍作为运行期借用镜像存在；8 个槽位所有权字段仍在；sema 的
+move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）。P3 删除这些字段并把
+判定改为只读类型。
+
+验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
+WSL2 全量 **2229 passed / 2 skipped**。
 
 ### P3 删除旧机制
 - 删 `value_t.ownership`、`value_set_ownership`、`value_ownership`、`value_is_borrowed`（连同

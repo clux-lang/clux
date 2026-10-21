@@ -153,13 +153,13 @@ bool sema_reflect_is_key(strslice_t key) {
 
 bool sema_reflect_needs_index(const type_t *T, strslice_t key) {
   if (!T) return false;
-  if (T->kind == TYPE_KIND_CONST || T->kind == TYPE_KIND_VOLATILE) {
+  if (type_kind_of(T) == TYPE_KIND_CONST || type_kind_of(T) == TYPE_KIND_VOLATILE) {
     const type_t *sub = type_qualifier_sub(T);
     return sub ? sema_reflect_needs_index(sub, key) : key_has_index(key);
   }
   /* 数组 / 切片的 elem_type、elem_ownership **不带索引**（元素类型唯一定义）；
      元组的同名 key 按索引取第 i 个元素类型。 */
-  if (T->kind == TYPE_KIND_ARRAY || type_is_slice(T)) {
+  if (type_kind_of(T) == TYPE_KIND_ARRAY || type_is_slice(T)) {
     if (key_is(key, "elem_type")) return false;
   }
   return key_has_index(key);
@@ -277,7 +277,7 @@ static bool lookup_common(const type_t *T, strslice_t key, sema_rv_t *out,
 static sema_scope_t *struct_member_scope(struct sema_t *sema, const type_t *T) {
   if (!sema || !T || !T->name.ptr) return NULL;
   const type_t *base = type_strip_quals(T);
-  if (!base || base->kind != TYPE_KIND_STRUCT) return NULL;
+  if (!base || type_kind_of(base) != TYPE_KIND_STRUCT) return NULL;
   sema_symbol_t *sym = sema_lookup(sema->global_scope, base->name);
   return sym ? sym->member_scope : NULL;
 }
@@ -392,7 +392,7 @@ static bool member_lookup(struct sema_t *sema, const type_t *T, strslice_t key,
               (int)arg->name.len, arg->name.ptr);
     return false;
     }
-    if (!sym->type || sym->type->kind != TYPE_KIND_FUNC) {
+    if (!sym->type || type_kind_of(sym->type) != TYPE_KIND_FUNC) {
       set_err(err, ecap, "method '%.*s' has no signature", (int)arg->name.len,
               arg->name.ptr);
     return false;
@@ -407,7 +407,7 @@ bool sema_reflect_eval(struct sema_t *sema, const type_t *T, strslice_t key,
                        const sema_reflect_arg_t *arg, sema_rv_t *out,
                        char *err, size_t ecap) {
   const type_t *base = T ? type_strip_quals(T) : NULL;
-  if (base && base->kind == TYPE_KIND_STRUCT && member_key(key))
+  if (base && type_kind_of(base) == TYPE_KIND_STRUCT && member_key(key))
     return member_lookup(sema, base, key, arg, out, err, ecap);
   return sema_reflect_lookup(T, key, arg, out, err, ecap);
 }
@@ -432,7 +432,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   if (lookup_common(T, key, out, err, ecap)) return true;
 
   /* const/volatile：`unqualified` 剥限定；其余 key **自动穿透**到被限定类型 */
-  if (T->kind == TYPE_KIND_CONST || T->kind == TYPE_KIND_VOLATILE ||
+  if (type_kind_of(T) == TYPE_KIND_CONST || type_kind_of(T) == TYPE_KIND_VOLATILE ||
       T->kind == TYPE_KIND_OWN || T->kind == TYPE_KIND_REF ||
       T->kind == TYPE_KIND_FATAL) {
     const type_t *sub = type_qualifier_sub(T);
@@ -451,7 +451,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   const char *kname = sema_reflect_kind_name(T);
 
   /* ---- struct ---- */
-  if (T->kind == TYPE_KIND_STRUCT) {
+  if (type_kind_of(T) == TYPE_KIND_STRUCT) {
     const struct_type_t *st = (const struct_type_t *)T;
     if (key_is(key, "field_count")) {
       rv_usize(out, (uint64_t)st->field_count);
@@ -505,7 +505,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   }
 
   /* ---- enum ---- */
-  if (T->kind == TYPE_KIND_ENUM) {
+  if (type_kind_of(T) == TYPE_KIND_ENUM) {
     const enum_type_t *et = (const enum_type_t *)T;
     if (key_is(key, "variant_count")) {
       rv_usize(out, (uint64_t)et->variant_count);
@@ -530,7 +530,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   }
 
   /* ---- union / cunion ---- */
-  if (T->kind == TYPE_KIND_UNION) {
+  if (type_kind_of(T) == TYPE_KIND_UNION) {
     const union_type_t *ut = (const union_type_t *)T;
     if (key_is(key, "member_count")) {
       rv_usize(out, (uint64_t)ut->member_count);
@@ -550,7 +550,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
       return true;
     }
   }
-  if (T->kind == TYPE_KIND_CUNION) {
+  if (type_kind_of(T) == TYPE_KIND_CUNION) {
     const cunion_type_t *ct = (const cunion_type_t *)T;
     if (key_is(key, "member_count")) {
       rv_usize(out, (uint64_t)ct->member_count);
@@ -570,9 +570,9 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   }
 
   /* ---- func / cfunc ---- */
-  if (T->kind == TYPE_KIND_FUNC || T->kind == TYPE_KIND_CFUNC) {
+  if (type_kind_of(T) == TYPE_KIND_FUNC || type_kind_of(T) == TYPE_KIND_CFUNC) {
     const func_sig_t *sig =
-        T->kind == TYPE_KIND_FUNC ? &((const func_type_t *)T)->sig
+        type_kind_of(T) == TYPE_KIND_FUNC ? &((const func_type_t *)T)->sig
                                   : cfunc_type_sig(T);
     if (sig) {
       if (key_is(key, "param_count")) {
@@ -588,7 +588,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
         return true;
       }
       if (key_is(key, "is_c_abi")) {
-        rv_bool(out, T->kind == TYPE_KIND_CFUNC);
+        rv_bool(out, type_kind_of(T) == TYPE_KIND_CFUNC);
         return true;
       }
       if (key_is(key, "param_type")) {
@@ -604,7 +604,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   }
 
   /* ---- array / slice / ptr / tuple / option ---- */
-  if (T->kind == TYPE_KIND_ARRAY) {
+  if (type_kind_of(T) == TYPE_KIND_ARRAY) {
     if (key_is(key, "elem_type")) {
       rv_type(out, array_type_elem(T));
       return true;
@@ -633,7 +633,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
       return true;
     }
   }
-  if (T->kind == TYPE_KIND_TUPLE) {
+  if (type_kind_of(T) == TYPE_KIND_TUPLE) {
     const tuple_type_t *tt = (const tuple_type_t *)T;
     if (key_is(key, "elem_count")) {
       rv_usize(out, (uint64_t)tt->elem_count);
@@ -651,7 +651,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
       return true;
     }
   }
-  if (T->kind == TYPE_KIND_OPTION) {
+  if (type_kind_of(T) == TYPE_KIND_OPTION) {
     if (key_is(key, "inner_type")) {
       rv_type(out, type_option_inner(T));
       return true;

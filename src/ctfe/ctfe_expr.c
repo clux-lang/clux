@@ -260,7 +260,7 @@ static value_t *ctfe_make_aggregate(vm_t *vm, const type_t *t,
         if (!fields[i]) continue;
         const type_t *ft = NULL;
         size_t off = 0;
-        if (t->kind == TYPE_KIND_STRUCT) {
+        if (type_kind_of(t) == TYPE_KIND_STRUCT) {
             const struct_field_t *f = struct_type_field(t, i);
             if (f) { ft = f->type; off = f->offset; }
         } else {
@@ -367,7 +367,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             sema_symbol_t *sym =
                 sema_lookup(ctx->sema->global_scope, n->name);
             if (sym && sym->kind == SEMA_SYM_FUNC && sym->type &&
-                sym->type->kind == TYPE_KIND_FUNC) {
+                type_kind_of(sym->type) == TYPE_KIND_FUNC) {
                 if (sym->is_comptime) {
                     return ctfe_errf(ctx,
                                 "ctfe: comptime function '%.*s' cannot be used as a value",
@@ -555,7 +555,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                             value_t *iv = ctfe_eval(ctx, rc->args);
                             if (value_is_error(vm, iv)) return iv;
                             const type_t *it = value_type(iv);
-                            if (!it || it->kind != TYPE_KIND_INT || !value_data(iv))
+                            if (!it || type_kind_of(it) != TYPE_KIND_INT || !value_data(iv))
                                 return ctfe_err(
                                     ctx, "ctfe: reflection index must be an integer");
                             int64_t s = 0;
@@ -647,7 +647,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         value_t *lv = ctfe_eval(ctx, n->length);
         if (value_is_error(vm, lv)) return lv;
         const type_t *lt = value_type(lv);
-        if (!lt || lt->kind != TYPE_KIND_INT)
+        if (!lt || type_kind_of(lt) != TYPE_KIND_INT)
             return ctfe_err(ctx, "ctfe: array length must be an integer constant");
         uint64_t raw = 0;
         switch (lt->size) {
@@ -747,12 +747,12 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(ty, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: construct type must be a type");
         const type_t *t = value_as(ty, const type_t *);
-        if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+        if (type_kind_of(t) == TYPE_KIND_STRUCT || type_kind_of(t) == TYPE_KIND_TUPLE) {
             /* struct / tuple 构造（comptime var 支持所有类型）：字段按类型表序
                求值 → 编译期构造聚合值。具名字段链已由 sema 重排为表序
                （sema_expr 的 struct 分支"值节点直链"），此处按链序位置化即可。 */
             size_t nf = ctfe_count_siblings(n->fields);
-            size_t expect = (t->kind == TYPE_KIND_STRUCT)
+            size_t expect = (type_kind_of(t) == TYPE_KIND_STRUCT)
                                 ? struct_type_field_count(t)
                                 : tuple_type_elem_count(t);
             if (nf != expect)
@@ -769,8 +769,8 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return agg;
         }
         /* 基本类型构造 `.i32{123}`（2026-10）：单值 + 隐式（失败则显式）转换。 */
-        if (t->kind == TYPE_KIND_INT || t->kind == TYPE_KIND_FLOAT ||
-            t->kind == TYPE_KIND_BOOL || t->kind == TYPE_KIND_STR) {
+        if (type_kind_of(t) == TYPE_KIND_INT || type_kind_of(t) == TYPE_KIND_FLOAT ||
+            type_kind_of(t) == TYPE_KIND_BOOL || type_kind_of(t) == TYPE_KIND_STR) {
             if (!n->fields || n->fields->next)
                 return ctfe_err(ctx, "ctfe: basic type construct needs exactly one value");
             value_t *fv = ctfe_eval(ctx, n->fields);
@@ -781,7 +781,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                 casted = value_explicit_cast(vm, fv, t);
             return casted;
         }
-        if (t->kind != TYPE_KIND_ARRAY)
+        if (type_kind_of(t) != TYPE_KIND_ARRAY)
             return ctfe_err(ctx, "ctfe: construct only supports basic/array/struct/tuple types");
         const type_t *et = array_type_elem(t);
         size_t len = array_type_len(t);
@@ -872,7 +872,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                             (int)fd->name.len, fd->name.ptr);
             }
             const sema_type_t *st = sema_type_by_id(ctx->sema, fd->sig_id);
-            if (!st || !st->type || st->type->kind != TYPE_KIND_FUNC) {
+            if (!st || !st->type || type_kind_of(st->type) != TYPE_KIND_FUNC) {
                 return ctfe_errf(ctx, "ctfe: function id %u missing signature",
                                  n->fid);
             }
@@ -884,7 +884,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         }
         /* 内建函数 / CTFE 字面量引用：vm->functions 按 id 复用现有对象 */
         func_t *fn = ctfe_func_by_id(vm, n->fid);
-        if (!fn || !fn->type || fn->type->kind != TYPE_KIND_FUNC) {
+        if (!fn || !fn->type || type_kind_of(fn->type) != TYPE_KIND_FUNC) {
             return ctfe_errf(ctx, "ctfe: unknown function id %u", n->fid);
         }
         void *data = value_alloc_data_copy(vm->alloc, fn->type, &fn);
@@ -908,7 +908,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(ty, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: enum reference type must be a type");
         const type_t *t = value_as(ty, const type_t *);
-        if (t->kind != TYPE_KIND_ENUM)
+        if (type_kind_of(t) != TYPE_KIND_ENUM)
             return ctfe_err(ctx, "ctfe: enum reference type is not an enum");
         const type_t *u = enum_type_underlying(t);
         if (!u) return ctfe_err(ctx, "ctfe: enum type missing underlying");

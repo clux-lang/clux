@@ -46,12 +46,14 @@ typedef struct value_t value_t;
 
 /** 取 union 类型的 member 数量（非 union 返回 0） */
 static inline size_t union_type_member_count(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_UNION) ? ((const union_type_t *)t)->member_count
                                              : 0;
 }
 
 /** 取第 i 个 member（越界/非 union 返回 NULL） */
 static inline const union_member_t *union_type_member(const type_t *t, size_t i) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_UNION) return NULL;
     const union_type_t *ut = (const union_type_t *)t;
     return (i < ut->member_count) ? &ut->members[i] : NULL;
@@ -59,12 +61,14 @@ static inline const union_member_t *union_type_member(const type_t *t, size_t i)
 
 /** 取 union 的 payload 联合体起始偏移（非 union 返回 0） */
 static inline size_t union_type_payload_offset(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_UNION) ? ((const union_type_t *)t)->payload_offset
                                              : 0;
 }
 
 /** 取 union 的 tag 宽度（非 union 返回 0） */
 static inline size_t union_type_tag_size(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_UNION) ? ((const union_type_t *)t)->tag_size
                                              : 0;
 }

@@ -66,12 +66,14 @@ const type_t *type_option_intern_with_ownership(vm_t *vm, const type_t *inner,
 
 /** 取 option 类型的 inner（非 option 返回 NULL） */
 static inline const type_t *type_option_inner(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_OPTION) ? ((const option_type_t *)t)->inner
                                               : NULL;
 }
 
 /** 取 option 类型 inner 槽位的所有权（非 option 返回 OWN_NONE） */
 static inline ownership_t type_option_inner_ownership(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_OPTION)
                ? ((const option_type_t *)t)->inner_ownership
                : OWN_NONE;
@@ -81,6 +83,7 @@ static inline ownership_t type_option_inner_ownership(const type_t *t) {
 
 /** value 字段偏移（offsetof(value) = align_up(sizeof(bool), alignof(T))） */
 static inline size_t option_value_offset(const type_t *t) {
+    t = type_strip_ownership(t);
     const type_t *inner = type_option_inner(t);
     size_t a = inner ? inner->align : 1;
     /* align_up(1, a) = max(1, a) */
@@ -94,6 +97,7 @@ static inline bool option_ok(const void *data) {
 
 /** value 字段指针（data + offset；借用引用窄化目标） */
 static inline void *option_value(const void *data, const type_t *t) {
+    t = type_strip_ownership(t);
     return (uint8_t *)data + option_value_offset(t);
 }
 

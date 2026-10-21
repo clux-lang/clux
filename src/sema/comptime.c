@@ -110,7 +110,7 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->s = strslice_from_bytes(buf, len);
     return true;
   }
-  if (t->kind == TYPE_KIND_ARRAY) {
+  if (type_kind_of(t) == TYPE_KIND_ARRAY) {
     /* 数组常量：逐个元素递归编码到 arena 连续块（借用引用
        value_array_at 遍历块内业务内存，元素深拷贝递归）。 */
     size_t count = value_array_count(v);
@@ -130,12 +130,12 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->elems = es;
     return true;
   }
-  if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+  if (type_kind_of(t) == TYPE_KIND_STRUCT || type_kind_of(t) == TYPE_KIND_TUPLE) {
     /* struct/tuple 常量（comptime var 支持所有类型）：按类型表序逐字段递归编码，
        `elems` 复用为字段值数组（与数组元素同一表示）。字段值以**借用 value**
        （value_make_borrowed 指向目标块内的字段偏移）递归编码，布局语义与运行期
        op_construct 的 struct/tuple 分支一致。 */
-    size_t count = (t->kind == TYPE_KIND_STRUCT) ? struct_type_field_count(t)
+    size_t count = (type_kind_of(t) == TYPE_KIND_STRUCT) ? struct_type_field_count(t)
                                                  : tuple_type_elem_count(t);
     out->count = count;
     if (count == 0) {
@@ -149,7 +149,7 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     for (size_t i = 0; i < count; i++) {
       const type_t *ft = NULL;
       size_t off = 0;
-      if (t->kind == TYPE_KIND_STRUCT) {
+      if (type_kind_of(t) == TYPE_KIND_STRUCT) {
         const struct_field_t *f = struct_type_field(t, i);
         if (f) { ft = f->type; off = f->offset; }
       } else {
@@ -163,14 +163,14 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
     out->elems = es;
     return true;
   }
-  if (t->kind == TYPE_KIND_ENUM) {
+  if (type_kind_of(t) == TYPE_KIND_ENUM) {
     /* 枚举常量：底层恒为整型，编码底层整数值（i 字段按底层宽度读）。
        折叠为 AST_SCOPE_REF（compiler 发 LOAD_TYPE + PUSH_I* + MAKE_ENUM，
        与源码引用 Color::Red 同构）。 */
     out->i = enum_read_ct_int(v);
     return true;
   }
-  if (t->kind == TYPE_KIND_FUNC) {
+  if (type_kind_of(t) == TYPE_KIND_FUNC) {
     /* 函数引用（comptime 函数体内引用的普通/内建函数值，或函数字面量值）：
        data 存 func_t*（CTFE 经 func_new_program_ref 构造的引用对象，或 scope
        里真实函数值）。编码函数 id（func_t->id：sema 分配的程序 fid 或内建
@@ -297,7 +297,7 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     ((ast_string_lit_t *)n)->text = ct->s; /* arena 复制，生命周期 = arena */
     return n;
   }
-  if (t->kind == TYPE_KIND_ARRAY) {
+  if (type_kind_of(t) == TYPE_KIND_ARRAY) {
     /* 复杂类型常量：写回为 AST_CONSTRUCT（.<type>{ fields }）节点。
        type 位递归构造类型表达式（[N]T → AST_ARRAY 嵌套），fields 为
        逐个元素递归折叠的字面量兄弟链。下游 compiler 按标准构造路径
@@ -319,7 +319,7 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     cn->fields_last = flast;
     return cnode;
   }
-  if (t->kind == TYPE_KIND_STRUCT || t->kind == TYPE_KIND_TUPLE) {
+  if (type_kind_of(t) == TYPE_KIND_STRUCT || type_kind_of(t) == TYPE_KIND_TUPLE) {
     /* struct/tuple 常量：与数组同机制折叠为 AST_CONSTRUCT——type 位递归构造
        类型表达式，fields 为按**类型表序**位置化的字面量兄弟链（struct 用具名
        构造亦可，位置化更简单且运行期 op_construct 按表序布值，语义等价）。 */
@@ -340,7 +340,7 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     cn->fields_last = flast;
     return cnode;
   }
-  if (t->kind == TYPE_KIND_FUNC) {
+  if (type_kind_of(t) == TYPE_KIND_FUNC) {
     /* 带捕获的闭包常量：折叠为**克隆的 func 字面量**——共享原字面量的
        params/body/fid/capture_type_id，把 captures 换成"括号捕获"形态
        （`|(name: T = <值常量>)|`）。compiler 对函数字面量本就发
@@ -393,7 +393,7 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
     ((ast_func_ref_t *)ref)->fid = ct->func_id;
     return ref;
   }
-  if (t->kind == TYPE_KIND_ENUM) {
+  if (type_kind_of(t) == TYPE_KIND_ENUM) {
     /* 枚举常量：折叠为 AST_SCOPE_REF（type_expr 登记为 AST_TYPE_REF +
        底层整数值）。variant 名留空——compiler 分支只用 type_expr/value
        （LOAD_TYPE + PUSH_I* + MAKE_ENUM），与源码引用同构。 */
@@ -903,7 +903,9 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
      `X.unqualified` 都能反射出来，且泛型/签名可以按类型区分布局相同的变体。 */
   {
     ownership_t own = sema_type_expr_ownership(td->expr);
-    if (own != OWN_NONE) {
+    /* 类型解析已经产出 own/ref/fatal 修饰类型（P2）；这里只在**尚未携带**时补包，
+       避免 `type R = ref *i32;` 变成 `ref (ref *i32)`。 */
+    if (own != OWN_NONE && type_ownership_of(t) == OWN_NONE) {
       type_kind_t okind = own == OWN_OWN     ? TYPE_KIND_OWN
                           : own == OWN_REF   ? TYPE_KIND_REF
                                              : TYPE_KIND_FATAL;

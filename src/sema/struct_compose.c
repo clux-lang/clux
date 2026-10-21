@@ -153,7 +153,7 @@ static bool slot_blocked_by_unsealed(sema_t *sema, ast_node_t *slot,
       if (!nm.ptr) return false;
       sema_symbol_t *sym = find_global(sema, nm);
       if (!sym || sym->kind != SEMA_SYM_TYPE || !sym->type) return false;
-      if (sym->type->kind != TYPE_KIND_STRUCT || type_is_sealed(sym->type))
+      if (type_kind_of(sym->type) != TYPE_KIND_STRUCT || type_is_sealed(sym->type))
         return false;
       if (behind_ind) return false; /* 指针/切片/func 之下：只需身份（布局恒定） */
       if (out) {
@@ -297,7 +297,7 @@ static const type_t *resolve_embed_struct(sema_t *sema, const ast_struct_def_t *
   }
   if (!es->type) return NULL; /* 前向引用：本轮还没就绪（不报错） */
   const type_t *bt = es->type;
-  if (bt->kind != TYPE_KIND_STRUCT) {
+  if (type_kind_of(bt) != TYPE_KIND_STRUCT) {
     char tn[128];
     sema_type_name(bt, tn, sizeof tn);
     diag_error(sema->diag, sema_loc(sema, (ast_node_t *)&emb->base),
@@ -456,7 +456,7 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
          该 pass 的 report_embed_cycles 先一步报出，所以不会无限延后。 */
       if (!bs->type || !type_is_sealed(bs->type)) return SEMA_COMPOSE_DEFERRED;
       const type_t *bt = bs->type;
-      if (bt->kind != TYPE_KIND_STRUCT) {
+      if (type_kind_of(bt) != TYPE_KIND_STRUCT) {
         resolve_embed_struct(sema, sd, emb); /* 报"不是结构体类型" */
         return SEMA_COMPOSE_FAILED;
       }
@@ -948,7 +948,7 @@ static void collect_member_sources(sema_t *sema, const struct_type_t *st,
   const type_t *const *emb = type_struct_embeds(&st->base, &ne);
   for (size_t i = 0; i < ne; i++) {
     const type_t *bt = emb[i];
-    if (!bt || bt->kind != TYPE_KIND_STRUCT) continue;
+    if (!bt || type_kind_of(bt) != TYPE_KIND_STRUCT) continue;
     const struct_type_t *bs = (const struct_type_t *)bt;
     /* 命中判定：查 Base 类型的 member_scope 中是否有名为 `name` 的符号 */
     sema_symbol_t *bs_sym = find_global(sema, bs->base.name);
@@ -983,7 +983,7 @@ static sema_symbol_t *find_inherited_member(sema_t *sema, const type_t *t,
                                             ast_node_t *tnode,
                                             const struct_type_t **out_owner) {
   const type_t *base = type_strip_quals(t);
-  if (!base || base->kind != TYPE_KIND_STRUCT) return NULL;
+  if (!base || type_kind_of(base) != TYPE_KIND_STRUCT) return NULL;
   const struct_type_t *st = (const struct_type_t *)base;
 
   const struct_type_t *src[COMPOSE_MAX_SRC];
@@ -1024,7 +1024,7 @@ sema_symbol_t *sema_struct_find_member(sema_t *sema, const type_t *t,
   if (out_owner) *out_owner = NULL;
   if (!sema || !t || !name.ptr || name.len == 0) return NULL;
   const type_t *base = type_strip_quals(t);
-  if (!base || base->kind != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
+  if (!base || type_kind_of(base) != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
 
   /* 1. 自己优先：查 member_scope */
   sema_symbol_t *ms = find_own_member(sema, base, name);
@@ -1042,7 +1042,7 @@ strslice_t *sema_struct_member_lookup(sema_t *sema, const type_t *t,
                                       ast_node_t *tnode) {
   if (!sema || !t || !name.ptr || name.len == 0) return NULL;
   const type_t *base = type_strip_quals(t);
-  if (!base || base->kind != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
+  if (!base || type_kind_of(base) != TYPE_KIND_STRUCT || !base->name.ptr) return NULL;
 
   /* 1. 自己优先：查 member_scope */
   sema_symbol_t *ms = find_own_member(sema, base, name);

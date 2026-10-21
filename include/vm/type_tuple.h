@@ -38,12 +38,14 @@ extern const vtable_t VTABLE_TUPLE;
 
 /** 取元组类型的元素数量（非 tuple 返回 0） */
 static inline size_t tuple_type_elem_count(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_TUPLE) ? ((const tuple_type_t *)t)->elem_count
                                               : 0;
 }
 
 /** 取第 i 个元素（越界/非 tuple 返回 NULL） */
 static inline const tuple_elem_t *tuple_type_elem(const type_t *t, size_t i) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_TUPLE) return NULL;
     const tuple_type_t *tt = (const tuple_type_t *)t;
     return (i < tt->elem_count) ? &tt->elems[i] : NULL;

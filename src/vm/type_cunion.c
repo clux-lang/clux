@@ -364,6 +364,7 @@ const type_t *type_cunion_intern(vm_t *vm, const cunion_member_t *members,
  * =========================================================================== */
 
 int cunion_type_find_member(const type_t *t, strslice_t name) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_CUNION) return -1;
     const cunion_type_t *ct = (const cunion_type_t *)t;
     for (size_t i = 0; i < ct->member_count; i++) {

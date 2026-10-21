@@ -1,4 +1,5 @@
 #include "vm/value.h"
+#include "vm/type_ownership.h"
 #include "vm/vm.h"
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
@@ -122,7 +123,8 @@ type_kind_t value_kind(const value_t *v) {
 
 bool value_is_type(const value_t *v, type_kind_t kind) {
     if (!v || !v->type) return kind == TYPE_KIND_VOID;
-    return v->type->kind == kind;
+    /* `own T` / `ref T` / `fatal T` 与 T 的结构/布局相同：按裸类型判定。 */
+    return type_kind_of(v->type) == kind;
 }
 
 bool value_has_const(const value_t *v) {
@@ -569,10 +571,38 @@ value_t *value_implicit_qualify(vm_t *vm, value_t *v, const type_t *target) {
     return value_make(vm, target, data);
 }
 
+/* 所有权修饰之间的隐式转换（布局相同，纯重贴标签）：
+ *   fatal T → own T   接管将亡值（"消费"）
+ *   fatal T → ref T   以借用视图消费（调用方立即失去所有权）
+ *   own T   → ref T   借出（源仍拥有）
+ *   own/fatal T → T   只读视图（旧模型的等价落点）
+ * 反向（ref → own 等）不允许：那会凭空产生所有权。
+ * 运行期类型已经剥离所有权，所以本分支只在编译期 shadow 路径生效。 */
+static bool ownership_cast_ok(ownership_t from, ownership_t to) {
+    if (from == to) return true;
+    if (from == OWN_FATAL)
+        return to == OWN_OWN || to == OWN_REF || to == OWN_NONE;
+    if (from == OWN_OWN) return to == OWN_REF || to == OWN_NONE;
+    if (from == OWN_REF) return to == OWN_NONE;
+    return false;
+}
+
 value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_error(vm, v)) return v;
     if (!v || !v->type) {
         return value_make_error(vm, "cannot implicitly cast void");
+    }
+    if (v->type != target) {
+        ownership_t from = type_ownership_of(v->type);
+        ownership_t to = type_ownership_of(target);
+        if (from != to && type_strip_ownership(v->type) ==
+                              type_strip_ownership(target) &&
+            ownership_cast_ok(from, to)) {
+            if (value_is_shadow(v)) return value_make_shadow(vm, target);
+            /* 运行期：两者裸类型相同，重贴标签即可（所有权是编译期概念）。 */
+            v->type = target;
+            return v;
+        }
     }
     if (v->type == target) {
         /* 类型相同：把值 materialize 到当前作用域。**必须用

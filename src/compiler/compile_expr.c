@@ -80,7 +80,7 @@ void emit_push_opt_none(compiler_t *c, ast_node_t *type_expr) {
     c_error(c, type_expr, "unknown type in nil initializer");
     return;
   }
-  if (t->kind != TYPE_KIND_OPTION) {
+  if (type_kind_of(t) != TYPE_KIND_OPTION) {
     c_error(c, type_expr, "compiler: nil initializer requires an optional type");
     return;
   }
@@ -530,7 +530,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
       st = c_sema_type_find_name(c->sema_types,
                                  ((ast_type_ref_t *)n->type_expr)->name);
     }
-    if (!st || !st->type || st->type->kind != TYPE_KIND_ENUM) {
+    if (!st || !st->type || type_kind_of(st->type) != TYPE_KIND_ENUM) {
       c_error(c, node, "unknown enum type in enum reference");
       return;
     }

@@ -109,12 +109,14 @@ const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type
 
 /** 取数组类型的元素类型（非数组类型返回 NULL） */
 static inline const type_t *array_type_elem(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ARRAY) ? ((const array_type_t *)t)->elem_type
                                              : NULL;
 }
 
 /** 取数组类型元素槽位的所有权（非数组类型返回 OWN_NONE） */
 static inline ownership_t array_type_elem_ownership(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ARRAY)
                ? ((const array_type_t *)t)->elem_ownership
                : OWN_NONE;
@@ -122,22 +124,26 @@ static inline ownership_t array_type_elem_ownership(const type_t *t) {
 
 /** 取数组类型的编译期元素数量（动态/未定长返回 SIZE_MAX；非数组返回 0） */
 static inline size_t array_type_len(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ARRAY) ? ((const array_type_t *)t)->length : 0;
 }
 
 /** 数组类型是否已密封（非数组类型返回 false；sealed 定义在基类 type_t） */
 static inline bool array_type_is_sealed(const type_t *t) {
+    t = type_strip_ownership(t);
     return type_is_sealed(t) && t->kind == TYPE_KIND_ARRAY;
 }
 
 /** 取数组类型的编译期内存布局总字节数（未密封/非数组返回 0） */
 static inline size_t array_type_layout_size(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ARRAY) ? ((const array_type_t *)t)->layout_size
                                              : 0;
 }
 
 /** 取数组类型的编译期对齐（未密封/非数组返回 0） */
 static inline size_t array_type_layout_align(const type_t *t) {
+    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_ARRAY) ? ((const array_type_t *)t)->layout_align
                                              : 0;
 }

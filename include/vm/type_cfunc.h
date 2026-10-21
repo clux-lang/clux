@@ -36,6 +36,7 @@ typedef struct cfunc_type_t {
 
 /** 类型是否为 cfunc（C 函数指针） */
 static inline bool type_is_cfunc(const type_t *t) {
+    t = type_strip_ownership(t);
     return t && t->kind == TYPE_KIND_CFUNC;
 }
 

@@ -252,6 +252,7 @@ char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
 /* ---- 递归指针/切片判定（见 type.h）---- */
 
 bool type_has_rc_slots(const type_t *t) {
+    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
         case TYPE_KIND_PTR:
@@ -286,6 +287,7 @@ bool type_has_rc_slots(const type_t *t) {
 }
 
 bool type_has_own_slots(const type_t *t) {
+    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
         case TYPE_KIND_STRUCT: {
@@ -345,6 +347,7 @@ bool type_has_own_slots(const type_t *t) {
 }
 
 bool type_contains_ptr_or_slice(const type_t *t) {
+    t = type_strip_ownership(t);
     if (!t) return false;
     if (type_is_ptr_or_slice(t)) return true;
     switch (t->kind) {

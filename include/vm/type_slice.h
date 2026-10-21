@@ -53,11 +53,13 @@ const type_t *type_slice_intern_own(vm_t *vm, const type_t *elem,
 
 /** 取切片类型的元素类型 T（非切片返回 NULL） */
 static inline const type_t *slice_type_elem(const type_t *t) {
+    t = type_strip_ownership(t);
     return type_is_slice(t) ? ((const slice_type_t *)t)->elem_type : NULL;
 }
 
 /** 取切片类型元素槽位的所有权（非切片返回 OWN_NONE） */
 static inline ownership_t slice_type_elem_ownership(const type_t *t) {
+    t = type_strip_ownership(t);
     return type_is_slice(t) ? ((const slice_type_t *)t)->elem_ownership
                             : OWN_NONE;
 }

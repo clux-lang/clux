@@ -55,13 +55,16 @@ const type_t *type_ptr_intern_rc(vm_t *vm, const type_t *base, uint8_t rc);
 
 /** 是否为 share / weak 指针类型（RC 形态）。 */
 static inline bool type_is_share(const type_t *t) {
+    t = type_strip_ownership(t);
     return t && t->kind == TYPE_KIND_PTR && ((const ptr_type_t *)t)->rc == 1;
 }
 static inline bool type_is_weak(const type_t *t) {
+    t = type_strip_ownership(t);
     return t && t->kind == TYPE_KIND_PTR && ((const ptr_type_t *)t)->rc == 2;
 }
 /** RC 指针的共享形态：share/weak 都指向 RC 块内的 payload。 */
 static inline bool type_is_rc_ptr(const type_t *t) {
+    t = type_strip_ownership(t);
     return type_is_share(t) || type_is_weak(t);
 }
 
@@ -89,6 +92,7 @@ static inline void *rc_block_payload(rc_block_t *rc) {
 
 /** 由 payload 反查控制块（与 rc_block_payload 同一对齐公式） */
 static inline rc_block_t *rc_block_of(const type_t *t, void *payload) {
+    t = type_strip_ownership(t);
     size_t hdr = sizeof(rc_block_t);
     size_t align = (t && t->align) ? t->align : 1;
     size_t aligned = (hdr + align - 1) & ~(align - 1);
@@ -111,6 +115,7 @@ value_t *ptr_make_weak_from_share(vm_t *vm, value_t *share_val);
 
 /** 取指针类型的被指向类型 T（非指针返回 NULL） */
 static inline const type_t *ptr_type_base(const type_t *t) {
+    t = type_strip_ownership(t);
     return type_is_ptr(t) ? ((const ptr_type_t *)t)->base_type : NULL;
 }
 

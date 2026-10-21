@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -198,7 +199,7 @@ static bool type_needs_destroy_fn(const type_t *t) {
   if (!t) return false;
   const type_t *s = type_strip_quals(t);
   if (!s) return false;
-  if (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE) return false;
+  if (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE) return false;
   return type_has_own_slots(s);
 }
 
@@ -331,7 +332,7 @@ bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
   if (dispose_fid) *dispose_fid = 0;
   if (clone_fid) *clone_fid = 0;
   const type_t *env = env_type ? type_strip_quals(env_type) : NULL;
-  if (!sema || !env || env->kind != TYPE_KIND_STRUCT) return false;
+  if (!sema || !env || type_kind_of(env) != TYPE_KIND_STRUCT) return false;
 
   /* 销毁：只有含 own 槽位的 env 才需要 dispose。 */
   if (type_has_own_slots(env)) {
@@ -349,7 +350,7 @@ bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
            i++) {
         const struct_field_t *f = &((const struct_type_t *)env)->fields[i];
         const type_t *ft = f ? type_strip_quals(f->type) : NULL;
-        if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE) &&
+        if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE) &&
             f->ownership == OWN_OWN)
           need = true;
       }
@@ -399,7 +400,7 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
     const union_member_t *m = &ut->members[i];
     if (!m->payload_type || !m->name.ptr) continue;
     const type_t *pt = type_strip_quals(m->payload_type);
-    bool leaf = pt && (pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE);
+    bool leaf = pt && (type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE);
     if (leaf && m->ownership != OWN_OWN) continue;   /* ref/fatal 槽位不释放 */
 
     /* then 体：该 member 的销毁序列 */
@@ -455,7 +456,7 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
     const struct_field_t *f = &st->fields[i];
     if (!f->type || !f->name.ptr) continue;
     const type_t *ft = type_strip_quals(f->type);
-    if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE)) {
+    if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE)) {
       /* 叶子：只有 own 槽位才释放。**必须递归进被指向值**（PTR/SLICE 分支会
          展开被指向聚合的 own 槽位 / 切片元素），否则 `struct Outer { b: own
          *Box }` 只 FREE 掉 Box 块，Box.p 泄漏（实测 leak）。 */
@@ -543,7 +544,7 @@ static bool gen_destroy_slot(sema_t *sema, const type_t *slot_type,
   /* **share/weak 槽位总是释放一次**（真实类型，不是所有权）：无论槽位标注
      什么，它都持有一份 RC 引用；释放 = 递减计数。 */
   if (s && type_is_rc_ptr(s)) return gen_destroy(sema, slot_type, access, head, tail);
-  if (s && (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE)) {
+  if (s && (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE)) {
     if (slot_own != OWN_OWN) return true;   /* ref/fatal 槽位不释放 */
   }
   return gen_destroy(sema, slot_type, access, head, tail);
@@ -560,7 +561,7 @@ static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
   *body_head = *body_tail = NULL;
   if (!elem_type) return true;
   const type_t *es = type_strip_quals(elem_type);
-  bool leaf = es && (es->kind == TYPE_KIND_PTR || es->kind == TYPE_KIND_SLICE);
+  bool leaf = es && (type_kind_of(es) == TYPE_KIND_PTR || type_kind_of(es) == TYPE_KIND_SLICE);
   if (leaf && slot_own != OWN_OWN && !type_is_rc_ptr(es)) return true;
   /* ^ share/weak 元素是真实类型：每个元素都持有一份 RC 引用，必须逐个递减 */
 
@@ -618,7 +619,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       const type_t *base = ptr_type_base(t);
       if (base) {
         const type_t *bs = type_strip_quals(base);
-        if (bs && (bs->kind == TYPE_KIND_PTR || bs->kind == TYPE_KIND_SLICE)) {
+        if (bs && (type_kind_of(bs) == TYPE_KIND_PTR || type_kind_of(bs) == TYPE_KIND_SLICE)) {
           /* 被指向值本身是叶子（`own *own *T` / `own *[]T`）：地址就是它自身，
              交给 impl 释放（`FREE access.*`；切片还带元素循环）。 */
           ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
@@ -724,7 +725,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       if (!inner) return true;
       ownership_t inner_own = ot->inner_ownership;
       const type_t *is = type_strip_quals(inner);
-      bool leaf = is && (is->kind == TYPE_KIND_PTR || is->kind == TYPE_KIND_SLICE);
+      bool leaf = is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE);
       if (leaf && inner_own != OWN_OWN) return true;
 
       ast_node_t *unwrap = ast_unwrap_new(sema->arena, 0, 0);
@@ -1124,21 +1125,21 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
       (root->ownership == OWN_OWN || root->ownership == OWN_FATAL);
   const type_t *ct0 = type_strip_quals(cur);
   bool ptr_owned = root_owned && ct0 &&
-                   (ct0->kind == TYPE_KIND_PTR ||
-                    ct0->kind == TYPE_KIND_SLICE);
+                   (type_kind_of(ct0) == TYPE_KIND_PTR ||
+                    type_kind_of(ct0) == TYPE_KIND_SLICE);
   bool storage = true;   /* 当前值存储是否归根（根的值存储归根） */
 
   for (int i = n - 1; i >= 0; i--) {
     const type_t *ct = type_strip_quals(cur);
     ast_node_t *h = hops[i].node;
     if (hops[i].kind == AST_DEREF) {
-      if (!ct || ct->kind != TYPE_KIND_PTR) return NULL;
+      if (!ct || type_kind_of(ct) != TYPE_KIND_PTR) return NULL;
       storage = ptr_owned;   /* 解引用得到的内存归根当且仅当指针值归根 */
       cur = ptr_type_base(ct);
       continue;              /* ptr_owned 继承：own *own *T 链式解引用仍归根 */
     }
     if (hops[i].kind == AST_UNWRAP) {
-      if (!ct || ct->kind != TYPE_KIND_OPTION) return NULL;
+      if (!ct || type_kind_of(ct) != TYPE_KIND_OPTION) return NULL;
       if (storage) ptr_owned = (type_option_inner_ownership(ct) == OWN_OWN);
       cur = type_option_inner(ct);
       continue;
@@ -1148,19 +1149,19 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
       if (!ix->indices || ix->indices->kind != AST_INT_LIT) return NULL;
       uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
       if (!ct) return NULL;
-      if (ct->kind == TYPE_KIND_ARRAY) {
+      if (type_kind_of(ct) == TYPE_KIND_ARRAY) {
         if (storage) ptr_owned = (array_type_elem_ownership(ct) == OWN_OWN);
         cur = array_type_elem(ct);
         continue;
       }
-      if (ct->kind == TYPE_KIND_SLICE) {
+      if (type_kind_of(ct) == TYPE_KIND_SLICE) {
         if (storage || ptr_owned)
           ptr_owned = (slice_type_elem_ownership(ct) == OWN_OWN);
         storage = storage || ptr_owned;   /* 元素在缓冲里 */
         cur = slice_type_elem(ct);
         continue;
       }
-      if (ct->kind == TYPE_KIND_TUPLE) {
+      if (type_kind_of(ct) == TYPE_KIND_TUPLE) {
         const tuple_elem_t *te = tuple_type_elem(ct, (size_t)k);
         if (!te) return NULL;
         if (storage) ptr_owned = (te->ownership == OWN_OWN);
@@ -1173,20 +1174,20 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
     {
       ast_member_t *m = (ast_member_t *)h;
       if (!ct) return NULL;
-      if (ct->kind == TYPE_KIND_PTR) {
+      if (type_kind_of(ct) == TYPE_KIND_PTR) {
         if (!ptr_owned) return NULL;   /* 穿过 ref/借用指针：借的是别人的块 */
         ct = type_strip_quals(ptr_type_base(ct));
         storage = true;
         ptr_owned = false;
       }
       if (!ct) return NULL;
-      if (ct->kind == TYPE_KIND_STRUCT) {
+      if (type_kind_of(ct) == TYPE_KIND_STRUCT) {
         int fi = struct_type_find_field(ct, m->field);
         const struct_field_t *f =
             fi >= 0 ? struct_type_field(ct, (size_t)fi) : NULL;
         if (!f || !f->type) return NULL;
         const type_t *ft = type_strip_quals(f->type);
-        if (ft && (ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE)) {
+        if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE)) {
           ptr_owned = storage && (f->ownership == OWN_OWN);
           storage = false;
         } else {
@@ -1195,13 +1196,13 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
         cur = f->type;
         continue;
       }
-      if (ct->kind == TYPE_KIND_UNION) {
+      if (type_kind_of(ct) == TYPE_KIND_UNION) {
         int mi = union_type_find_member(ct, m->field);
         const union_member_t *mm =
             mi >= 0 ? union_type_member(ct, (size_t)mi) : NULL;
         if (!mm || !mm->payload_type) return NULL;
         const type_t *pt = type_strip_quals(mm->payload_type);
-        if (pt && (pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE)) {
+        if (pt && (type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE)) {
           ptr_owned = storage && (mm->ownership == OWN_OWN);
           storage = false;
         } else {
@@ -1263,7 +1264,7 @@ static size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
     if (!s || s->kind != SEMA_SYM_VAR) return 0;
     bool carrier = s->type && (s->ownership == OWN_OWN ||
                                s->ownership == OWN_REF ||
-                               s->type->kind == TYPE_KIND_OPAQUE);
+                               type_kind_of(s->type) == TYPE_KIND_OPAQUE);
     if (!carrier) return 0;
     n = borrow_collect_add(out, n, cap, s);
     /* 链式借用（opaque / ref 变量再借出）：继承其来源 */
@@ -1338,7 +1339,7 @@ static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
                                    ast_node_t *init, sema_scope_t *scope) {
   if (!sym || !sym->type) return;
   if (sym->ownership != OWN_REF &&
-      sym->type->kind != TYPE_KIND_OPAQUE)
+      type_kind_of(sym->type) != TYPE_KIND_OPAQUE)
     return;
   sema_symbol_t *srcs[16];
   size_t n = borrow_collect(sema, init, scope, srcs, 16);
@@ -1393,7 +1394,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const struct_field_t *f = &st->fields[i];
       const type_t *ft = type_strip_quals(f->type);
       if (!ft) continue;
-      if ((ft->kind == TYPE_KIND_PTR || ft->kind == TYPE_KIND_SLICE) &&
+      if ((type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE) &&
           f->ownership == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(ft, path, depth)) return true;
@@ -1406,7 +1407,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const tuple_elem_t *e = &tt->elems[i];
       const type_t *et = type_strip_quals(e->type);
       if (!et) continue;
-      if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+      if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
           e->ownership == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(et, path, depth)) return true;
@@ -1419,7 +1420,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
       const union_member_t *m = &ut->members[i];
       const type_t *pt = type_strip_quals(m->payload_type);
       if (!pt) continue;
-      if ((pt->kind == TYPE_KIND_PTR || pt->kind == TYPE_KIND_SLICE) &&
+      if ((type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE) &&
           m->ownership == OWN_REF)
         return true;
       if (type_has_ref_slots_rec(pt, path, depth)) return true;
@@ -1430,7 +1431,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
     const option_type_t *ot = (const option_type_t *)s;
     const type_t *in = type_strip_quals(ot->inner);
     if (!in) return false;
-    if ((in->kind == TYPE_KIND_PTR || in->kind == TYPE_KIND_SLICE) &&
+    if ((type_kind_of(in) == TYPE_KIND_PTR || type_kind_of(in) == TYPE_KIND_SLICE) &&
         ot->inner_ownership == OWN_REF)
       return true;
     return type_has_ref_slots_rec(in, path, depth);
@@ -1439,7 +1440,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
     const array_type_t *at = (const array_type_t *)s;
     const type_t *et = type_strip_quals(at->elem_type);
     if (!et) return false;
-    if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+    if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
         at->elem_ownership == OWN_REF)
       return true;
     return type_has_ref_slots_rec(et, path, depth);
@@ -1447,7 +1448,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
   case TYPE_KIND_SLICE: {
     const type_t *et = type_strip_quals(slice_type_elem(s));
     if (!et) return false;
-    if ((et->kind == TYPE_KIND_PTR || et->kind == TYPE_KIND_SLICE) &&
+    if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
         slice_type_elem_ownership(s) == OWN_REF)
       return true;
     return type_has_ref_slots_rec(et, path, depth);
@@ -1482,7 +1483,7 @@ static size_t borrow_collect_value(sema_t *sema, const type_t *t,
   const type_t *s = type_strip_quals(t);
   if (!s) return n;
   /* 叶子槽位：ref 槽位的值表达式本身就是借用 → 收集来源 */
-  if (s->kind == TYPE_KIND_PTR || s->kind == TYPE_KIND_SLICE) {
+  if (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE) {
     if (slot_own == OWN_REF) {
       sema_symbol_t *tmp[16];
       size_t m = borrow_collect(sema, e, scope, tmp, 16);
@@ -1491,7 +1492,7 @@ static size_t borrow_collect_value(sema_t *sema, const type_t *t,
       return n;
     }
     /* own 指针的 pointee 里若有 ref 槽位：构造是 `new T{…}`（按字段收集） */
-    if (s->kind == TYPE_KIND_PTR && e->kind == AST_NEW) {
+    if (type_kind_of(s) == TYPE_KIND_PTR && e->kind == AST_NEW) {
       const ast_new_t *nv = (const ast_new_t *)e;
       const type_t *base = type_strip_quals(ptr_type_base(s));
       if (base && type_has_ref_slots(base))
@@ -1521,7 +1522,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
   const type_t *s = type_strip_quals(t);
   if (!s) return n;
   size_t idx = 0;
-  if (s->kind == TYPE_KIND_STRUCT) {
+  if (type_kind_of(s) == TYPE_KIND_STRUCT) {
     const struct_type_t *st = (const struct_type_t *)s;
     for (ast_node_t *f = fields; f && idx < st->field_count; f = f->next, idx++) {
       ast_node_t *value = f;
@@ -1534,7 +1535,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     }
     return n;
   }
-  if (s->kind == TYPE_KIND_TUPLE) {
+  if (type_kind_of(s) == TYPE_KIND_TUPLE) {
     const tuple_type_t *tt = (const tuple_type_t *)s;
     for (ast_node_t *f = fields; f && idx < tt->elem_count; f = f->next, idx++) {
       ast_node_t *value = f;
@@ -1547,7 +1548,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     }
     return n;
   }
-  if (s->kind == TYPE_KIND_ARRAY) {
+  if (type_kind_of(s) == TYPE_KIND_ARRAY) {
     const array_type_t *at = (const array_type_t *)s;
     for (ast_node_t *f = fields; f; f = f->next) {
       if (f->kind == AST_FILL) {
@@ -1565,7 +1566,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     }
     return n;
   }
-  if (s->kind == TYPE_KIND_OPTION) {
+  if (type_kind_of(s) == TYPE_KIND_OPTION) {
     const option_type_t *ot = (const option_type_t *)s;
     ast_node_t *f = fields;
     if (f && f->kind == AST_CONSTRUCT_FIELD)
@@ -1574,7 +1575,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     return borrow_collect_value(sema, ot->inner, ot->inner_ownership, f, scope,
                                 out, cap, n);
   }
-  if (s->kind == TYPE_KIND_UNION) {
+  if (type_kind_of(s) == TYPE_KIND_UNION) {
     const union_type_t *ut = (const union_type_t *)s;
     ast_node_t *f = fields;
     if (f && f->kind == AST_CONSTRUCT_FIELD)
@@ -1890,18 +1891,6 @@ static strslice_t synth_name(sema_t *sema, const char *s) {
   return strslice_from_bytes(buf, len);
 }
 
-/* 所有权修饰 token（合成）：own/ref/fatal。生成的形参类型表达式靠它携带所有权。 */
-static token_t *synth_own_token(sema_t *sema, ownership_t own, ast_node_t *origin) {
-  const char *txt = own == OWN_OWN ? "own"
-                    : own == OWN_REF ? "ref"
-                    : own == OWN_FATAL ? "fatal"
-                    : NULL;
-  if (!txt) return NULL;
-  /* 位置：生成的节点统一归到 origin 的源码位置。 */
-  location_t loc = sema_loc(sema, origin);
-  return (token_t *)arena_token_symbol(sema->arena, txt, &loc);
-}
-
 /* 生成包装函数字面量（无捕获）。所有权/返回类型不匹配返回 NULL（已诊断）。 */
 static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
                                      const type_t *target, ast_node_t *origin,
@@ -1942,44 +1931,12 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
 
     char nb[32];
     snprintf(nb, sizeof nb, "__cfp%zu", i);
+    /* 形参类型表达式直接用**已带所有权修饰的类型引用**（tgt_pt = own *T /
+       ref []T …）：类型解析现在会产出包装类型，无需再按 token 手工重建
+       （旧实现把 `ref *Box` 又包了一层 → `ref **Box`）。 */
     ast_node_t *tref = sema_ct_type_ref(sema, tgt_pt, origin);
     if (!tref) return NULL;
     ast_node_t *texpr = tref;
-    if (tgt_own != OWN_NONE) {
-      /* 所有权修饰必须体现在**类型表达式**上，否则生成的包装签名会丢掉
-         own/ref（sema 从 AST 提取所有权）。形态按被修饰类型分三种：
-           `own *T`    → AST_PTR{own, base_type = T}      （T = 被指向类型）
-           `own []T`   → AST_SLICE_TYPE{own, elem_type = T}
-           `own T`     → AST_OWNED_TYPE{own, base_type = T}（聚合/标量）
-         **注意**要包在 T 上而不是 `*T` 上——否则会生成 `ref **Box`。 */
-      token_t *own_tok = synth_own_token(sema, tgt_own, origin);
-      if (!own_tok) return NULL;
-      if (type_is_ptr(tgt_pt)) {
-        ast_node_t *inner =
-            sema_ct_type_ref(sema, ((const ptr_type_t *)tgt_pt)->base_type, origin);
-        if (!inner) return NULL;
-        ast_node_t *ptr = ast_ptr_new(sema->arena, tb, te);
-        if (!ptr) return NULL;
-        ((ast_ptr_t *)ptr)->ownership = own_tok;
-        ((ast_ptr_t *)ptr)->base_type = inner;
-        texpr = ptr;
-      } else if (type_is_slice(tgt_pt)) {
-        ast_node_t *inner = sema_ct_type_ref(
-            sema, ((const slice_type_t *)tgt_pt)->elem_type, origin);
-        if (!inner) return NULL;
-        ast_node_t *sl = ast_slice_type_new(sema->arena, tb, te);
-        if (!sl) return NULL;
-        ((ast_slice_type_t *)sl)->ownership = own_tok;
-        ((ast_slice_type_t *)sl)->elem_type = inner;
-        texpr = sl;
-      } else {
-        ast_node_t *own_t = ast_owned_type_new(sema->arena, tb, te);
-        if (!own_t) return NULL;
-        ((ast_owned_type_t *)own_t)->ownership = own_tok;
-        ((ast_owned_type_t *)own_t)->base_type = tref;
-        texpr = own_t;
-      }
-    }
     ast_node_t *vn = ast_var_def_new(sema->arena, tb, te);
     if (!vn) return NULL;
     ast_var_def_t *pv = (ast_var_def_t *)vn;
@@ -2067,7 +2024,7 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
 bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
                                 const type_t *target, sema_scope_t *scope) {
   if (!slot || !*slot) return false;
-  if (!target || target->kind != TYPE_KIND_FUNC) return false;
+  if (!target || type_kind_of(target) != TYPE_KIND_FUNC) return false;
   if ((*slot)->kind == AST_UNDEF) return false;
   ast_func_def_t *src = cfunc_source_def(sema, scope, *slot);
   if (!src) {
@@ -2090,7 +2047,7 @@ bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
   }
   const sema_type_t *src_st = src->sig_id ? sema_type_by_id(sema, src->sig_id) : NULL;
   const func_sig_t *src_sig =
-      (src_st && src_st->type && src_st->type->kind == TYPE_KIND_FUNC)
+      (src_st && src_st->type && type_kind_of(src_st->type) == TYPE_KIND_FUNC)
           ? &((const func_type_t *)src_st->type)->sig
           : NULL;
   ast_node_t *lit = gen_cfunc_wrapper(sema, src, target, *slot, src_sig);
@@ -2164,7 +2121,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                  (int)vd->name.len, vd->name.ptr);
     } else {
       var_type_slot_reparse(sema, vd, scope);
-      if (sym->type && sym->type->kind != TYPE_KIND_OPTION) {
+      if (sym->type && type_kind_of(sym->type) != TYPE_KIND_OPTION) {
         char tn[64];
         sema_type_name(sym->type, tn, sizeof tn);
         diag_error(sema->diag, sema_loc(sema, vd->init),
@@ -2234,7 +2191,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         if (type_is_share(sym->type) && init && !init_bad &&
             !value_is_error(sema->vm, init)) {
           const type_t *it = value_type(init);
-          if (it && it->kind == TYPE_KIND_PTR && !type_is_rc_ptr(it) &&
+          if (it && type_kind_of(it) == TYPE_KIND_PTR && !type_is_rc_ptr(it) &&
               value_ownership(init) != OWN_OWN &&
               !sema_value_is_fatal(init)) {
             diag_error(sema->diag, sema_loc(sema, vd->init),
@@ -2331,11 +2288,11 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
              `var u = .U{ .p = new i32{1} }` 的 4 字节堆块从未释放）。
              类型仍是 T（所有权不进类型），只是符号层记 OWN_OWN，
              让 make_free_stmts 按 type 对象展开销毁序列。 */
-          if (vt->kind == TYPE_KIND_PTR || vt->kind == TYPE_KIND_SLICE)
+          if (type_kind_of(vt) == TYPE_KIND_PTR || type_kind_of(vt) == TYPE_KIND_SLICE)
             sym->ownership = OWN_OWN;
           /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
              并记住捕获链供 FREE 展开（逐捕获槽释放）。 */
-          else if (vt->kind == TYPE_KIND_FUNC) {
+          else if (type_kind_of(vt) == TYPE_KIND_FUNC) {
             /* 闭包 = 捕获聚合结构体：**含 own 捕获**的闭包是 own（move-only），
                销毁 = `FREE f`（VM 按 capture_type 释放 env 里的 own 捕获）。 */
             const ast_func_def_t *oc = own_closure_of(vd->init);
@@ -2419,7 +2376,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      合并到该变量；scope 退出时统一释放（sema_scope_release_borrows）。 */
   if (sym && sym->type && vd->init &&
       !(sym->ownership == OWN_REF ||
-        sym->type->kind == TYPE_KIND_OPAQUE) &&
+        type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
       type_has_ref_slots(sym->type)) {
     sema_symbol_t *csrcs[16];
     size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE, vd->init,
@@ -2621,9 +2578,9 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     if (vsym && vsym->kind == SEMA_SYM_VAR)
       own_value = (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym));
     if (!own_value) own_value = sema_value_is_fatal(rhs);
-    bool has_res = rt && (rt->kind == TYPE_KIND_PTR ||
-                          rt->kind == TYPE_KIND_SLICE ||
-                          rt->kind == TYPE_KIND_FUNC ||
+    bool has_res = rt && (type_kind_of(rt) == TYPE_KIND_PTR ||
+                          type_kind_of(rt) == TYPE_KIND_SLICE ||
+                          type_kind_of(rt) == TYPE_KIND_FUNC ||
                           type_has_own_slots(rt));
     if (!own_value || !has_res) {
       as->discard_mode = 1;   /* 借用 / 无资源：expr + POP */
@@ -2739,7 +2696,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
      .{...} 推断目标类型（q: Point = .{...} 赋值给已声明变量）。 */
   const type_t *lt_ty = value_type(lhs);
   /* `f = cfunc_ptr(<命名 cfunc>)`（f 为 func 类型）→ 自动生成包装。 */
-  if (lt_ty && lt_ty->kind == TYPE_KIND_FUNC && !rhs_nil)
+  if (lt_ty && type_kind_of(lt_ty) == TYPE_KIND_FUNC && !rhs_nil)
     sema_maybe_wrap_cfunc_expr(sema, &as->value, lt_ty, scope);
   value_t *rhs = NULL;
   if (rhs_nil) {
@@ -2770,7 +2727,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
       /* nil 赋值（docs m2-design §12.5/12.6）：a = nil → STORE_NIL <name>
          （运行期只置 ok=false，不释放 value 字段）。左值必须 ?T 类型。 */
       const type_t *lt = value_type(lhs);
-      if (!lt || lt->kind != TYPE_KIND_OPTION) {
+      if (!lt || type_kind_of(lt) != TYPE_KIND_OPTION) {
         char tn[64];
         sema_type_name(lt, tn, sizeof tn);
         diag_error(sema->diag, sema_loc(sema, as->value),
@@ -2798,9 +2755,9 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
        也没有旧值。 */
     if (sym && sym->type && sym->flow_init && !sym->moved &&
         (type_has_rc_slots(sym->type) || sym->ownership == OWN_OWN) &&
-        (sym->type->kind == TYPE_KIND_PTR ||
-         sym->type->kind == TYPE_KIND_SLICE ||
-         sym->type->kind == TYPE_KIND_FUNC ||
+        (type_kind_of(sym->type) == TYPE_KIND_PTR ||
+         type_kind_of(sym->type) == TYPE_KIND_SLICE ||
+         type_kind_of(sym->type) == TYPE_KIND_FUNC ||
          type_has_rc_slots(sym->type))) {
       /* FUNC：闭包 = 捕获聚合结构体。`func_assign` 只是 memcpy（不释放旧
          env）→ 旧闭包的 own 捕获必须在这里 `FREE f` 掉（VM 按 capture_type
@@ -2871,7 +2828,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
            继承多来源）。 */
         if (sym->type &&
             (sym->ownership == OWN_REF ||
-             sym->type->kind == TYPE_KIND_OPAQUE)) {
+             type_kind_of(sym->type) == TYPE_KIND_OPAQUE)) {
           sema_symbol_t *srcs[16];
           size_t nsrc = borrow_collect(sema, as->value, scope, srcs, 16);
           if (nsrc == 0 && sym->annot_names) {
@@ -2919,7 +2876,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
            新集合从右值构造/拷贝里收集）。ref/opaque 变量走上一条 R3 分支。 */
         if (sym->type &&
             !(sym->ownership == OWN_REF ||
-              sym->type->kind == TYPE_KIND_OPAQUE) &&
+              type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
             type_has_ref_slots(sym->type)) {
           sema_symbol_t *csrcs[16];
           size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE,
@@ -3009,8 +2966,8 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
   const type_t *bt = bad ? NULL : value_type(base);
   /* 限定视图不影响字段定位（写 const 由下方 value_has_const(base) 拒绝） */
   if (!bad) bt = type_strip_quals(bt);
-  if (!bad && (!bt || (bt->kind != TYPE_KIND_ARRAY &&
-                       bt->kind != TYPE_KIND_TUPLE &&
+  if (!bad && (!bt || (type_kind_of(bt) != TYPE_KIND_ARRAY &&
+                       type_kind_of(bt) != TYPE_KIND_TUPLE &&
                        !type_is_slice(bt)))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
@@ -3072,7 +3029,7 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
      任意位置校验等价） */
   const type_t *et;
   ownership_t et_own = OWN_NONE;
-  if (bt->kind == TYPE_KIND_TUPLE) {
+  if (type_kind_of(bt) == TYPE_KIND_TUPLE) {
     et = tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type : NULL;
     /* 元素槽位所有权按编译期下标取（越界已被 sema_expr 拒绝） */
     if (ix->indices && ix->indices->kind == AST_INT_LIT) {
@@ -3113,7 +3070,7 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     sema_type_name(et, tn, sizeof(tn));
     sema_type_name(value_type(rhs), rn, sizeof(rn));
     diag_error(sema->diag, sema_loc(sema, as->value),
-               bt->kind == TYPE_KIND_TUPLE
+               type_kind_of(bt) == TYPE_KIND_TUPLE
                    ? "cannot assign %s to tuple element of type %s"
                    : "cannot assign %s to array/slice element of type %s",
                rn, tn);
@@ -3145,9 +3102,9 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   if (!bad && bt && ptr_type_base(bt)) {
     const type_t *pbase = ptr_type_base(bt);
     const type_t *ub = type_strip_quals(pbase);
-    if (ub && (ub->kind == TYPE_KIND_STRUCT ||
-               ub->kind == TYPE_KIND_CUNION ||
-               ub->kind == TYPE_KIND_UNION)) {
+    if (ub && (type_kind_of(ub) == TYPE_KIND_STRUCT ||
+               type_kind_of(ub) == TYPE_KIND_CUNION ||
+               type_kind_of(ub) == TYPE_KIND_UNION)) {
       if (type_has_quals(pbase)) {
         diag_error(sema->diag, sema_loc(sema, &as->base),
                    "cannot assign to field through a pointer to const value");
@@ -3165,9 +3122,9 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       bt = ub;
     }
   }
-  if (!bad && (!bt || (bt->kind != TYPE_KIND_STRUCT &&
-                       bt->kind != TYPE_KIND_UNION &&
-                       bt->kind != TYPE_KIND_CUNION))) {
+  if (!bad && (!bt || (type_kind_of(bt) != TYPE_KIND_STRUCT &&
+                       type_kind_of(bt) != TYPE_KIND_UNION &&
+                       type_kind_of(bt) != TYPE_KIND_CUNION))) {
     char tn[64];
     sema_type_name(bt, tn, sizeof(tn));
     diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -3183,7 +3140,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   const type_t *ft = NULL;
   ownership_t slot_own = OWN_NONE;
   if (!bad) {
-    if (bt->kind == TYPE_KIND_STRUCT) {
+    if (type_kind_of(bt) == TYPE_KIND_STRUCT) {
       idx = struct_type_find_field(bt, m->field);
       if (idx < 0) {
         diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -3194,7 +3151,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
         ft = struct_type_field(bt, (size_t)idx)->type;
         slot_own = struct_type_field(bt, (size_t)idx)->ownership;
       }
-    } else if (bt->kind == TYPE_KIND_UNION) {
+    } else if (type_kind_of(bt) == TYPE_KIND_UNION) {
       /* union 字段：字段名 = member 名（tag 名），按名反查 member →
          该 member 的 payload 类型即字段类型 */
       int mi = union_type_find_member(bt, m->field);
@@ -3265,7 +3222,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   }
 
   if (rhs_nil) {
-    if (!ft || ft->kind != TYPE_KIND_OPTION) {
+    if (!ft || type_kind_of(ft) != TYPE_KIND_OPTION) {
       char tn[64];
       sema_type_name(ft, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, as->value),
@@ -3541,7 +3498,7 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   }
 
   if (rhs_nil) {
-    if (!ft || ft->kind != TYPE_KIND_OPTION) {
+    if (!ft || type_kind_of(ft) != TYPE_KIND_OPTION) {
       char tn[64];
       sema_type_name(ft, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, as->value),
@@ -3657,7 +3614,7 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
   block_result_t r = {.definitely_returns = true};
   if (rt->value) {
     /* `return cfunc_ptr(<命名 cfunc>)` 在返回类型是 func 时自动生成包装。 */
-    if (sema->fn.return_type && sema->fn.return_type->kind == TYPE_KIND_FUNC)
+    if (sema->fn.return_type && type_kind_of(sema->fn.return_type) == TYPE_KIND_FUNC)
       sema_maybe_wrap_cfunc_expr(sema, &rt->value, sema->fn.return_type, scope);
     value_t *v = sema_expr(sema, &rt->value, scope);
     bool v_bad = value_is_error(sema->vm, v) ||
@@ -3773,7 +3730,7 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     }
   } else {
     if (sema->fn.return_type &&
-        sema->fn.return_type->kind != TYPE_KIND_VOID) {
+        type_kind_of(sema->fn.return_type) != TYPE_KIND_VOID) {
       char tn[64];
       sema_type_name(sema->fn.return_type, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, &rt->base),
@@ -4300,6 +4257,9 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
       ast_var_def_t *vd = (ast_var_def_t *)p;
       ownership_t pown = sema_type_expr_ownership(vd->type_expr);
       const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
+      /* 类型本身已携带所有权（P2）：AST 折叠成 AST_TYPE_REF 后 token 已丢，
+         从解析出的类型补回所有权。 */
+      if (pown == OWN_NONE && t) pown = type_ownership_of(t);
       if (!t) {
         diag_error(sema->diag, sema_loc(sema, p),
                    "unknown type in parameter '%.*s'",
@@ -4314,6 +4274,7 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
   const type_t *rt = NULL;
   if (fn->return_expr) {
     rt = sema_resolve_type_slot(sema, &fn->return_expr);
+    if (ret_own == OWN_NONE && rt) ret_own = type_ownership_of(rt);
     if (!rt) {
       diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
                  "unknown return type");

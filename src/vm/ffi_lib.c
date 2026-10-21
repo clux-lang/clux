@@ -5,7 +5,8 @@
 #include "vm/type_struct.h"  /* 结构体字段表（构造 libffi struct 描述符） */
 #include "vm/type_cunion.h"  /* cunion 成员/布局（同上） */
 #include "vm/type_enum.h"    /* enum 底层类型（描述符 = 底层整数） */
-#include "vm/type_array.h"   /* 数组：按值 = 同布局 struct 描述符 */
+#include "vm/type_array.h"       /* 数组：按值 = 同布局 struct 描述符 */
+#include "vm/type_ownership.h"
 
 #include <stdarg.h>   /* va_list/va_start：ffi_set_err（POSIX 不会由 stdio.h 传递引入） */
 #include <stdint.h>
@@ -574,6 +575,12 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
  */
 const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
     if (!t) return "missing type";
+    /* 所有权现在记在类型上：`ref *T` 的有效类型是 `*T`、所有权是 REF。
+       结构/ABI 判定一律看裸类型；所有权从类型读（调用方给的 own 与之取并）。 */
+    if (type_ownership_of(t) != OWN_NONE) {
+        if (own == OWN_NONE) own = type_ownership_of(t);
+        t = type_strip_ownership(t);
+    }
     /* 所有权修饰在 C ABI 里是**契约**，不是表示层：
          - **参数** `own *T` / `own opaque`：**合法**——C 接管这个指针
            （例如 `free(p)`），clux 侧交出所有权。C 侧看到的始终是裸指针，
@@ -645,6 +652,7 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
  * 非聚合类型直接通过（由 ffi_c_abi_reject_reason_own 管）。 */
 bool ffi_c_abi_check_aggregate(const type_t *t, const struct vm_t *vm, char *err,
                                size_t ecap) {
+    t = type_strip_ownership(t);
     if (!t) return true;
     if (t->kind != TYPE_KIND_STRUCT && t->kind != TYPE_KIND_CUNION) return true;
     bool owned = false;
@@ -667,6 +675,7 @@ const char *ffi_c_abi_reject_reason(const type_t *t) {
  * 指针类型（opaque）用 PTR = 指针宽度。 */
 bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind) {
     if (!t || !vm || !out_kind) return false;
+    t = type_strip_ownership(t);
     const vm_t *v = (const vm_t *)vm;
     if (t == v->type_i8)  { *out_kind = BCODE_FFI_DATA_I8;  return true; }
     if (t == v->type_i16) { *out_kind = BCODE_FFI_DATA_I16; return true; }
@@ -750,6 +759,7 @@ const void *ffi_data_ffi_type(uint32_t kind) {
 
 /* 该类型作数据符号时是否**必须**把类型随指令落盘（宽度/布局要查类型表）。 */
 bool ffi_data_kind_needs_type(const type_t *t) {
+    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_STRUCT:
@@ -784,6 +794,8 @@ const void *ffi_type_for(const type_t *t, const struct vm_t *vm, bool *out_owned
         ffi_set_err(err, ecap, "ffi: missing type");
         return NULL;
     }
+    /* 运行期/描述符只看裸类型（所有权是 clux 编译期契约）。 */
+    t = type_strip_ownership(t);
     /* 标量（含 str → 指针）：libffi 静态描述符，无需释放 */
     uint32_t dk = 0;
     if (vm && ffi_data_kind_of(t, vm, &dk)) return ffi_data_ffi_type(dk);

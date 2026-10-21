@@ -280,24 +280,3 @@ ownership_t type_ownership_of(const type_t *t) {
   }
   return OWN_NONE;
 }
-
-const type_t *type_strip_ownership(const type_t *t) {
-  const type_t *p = t;
-  bool stripped = false;
-  while (p) {
-    if (p->kind == TYPE_KIND_OWN || p->kind == TYPE_KIND_REF ||
-        p->kind == TYPE_KIND_FATAL) {
-      p = ((const ownership_type_t *)p)->sub;
-      stripped = true;
-      continue;
-    }
-    break;
-  }
-  if (!stripped) return t;
-  /* 剥完后若外层是 const/volatile，重建一个对应修饰（保持限定语义） */
-  if (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE) {
-    /* const/volatile 自身会穿透到 sub；此处按 const/volatile 重包 */
-    return t; /* 极少见：调用方应先用 type_qualifier_sub 剥限定 */
-  }
-  return p;
-}

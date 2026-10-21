@@ -415,6 +415,35 @@ typedef struct cunion_type_t {
  * 运行期指令只引用裸类型。语义判定（move/拷贝/销毁责任）在 sema。
  * 见 docs/ownership-as-type.md。 */
 
+/**
+ * 剥掉最外层的所有权修饰（own/ref/fatal）链，返回裸类型；无修饰原样返回。
+ *
+ * **纯类型视图**：`own T` / `ref T` / `fatal T` 与 `T` 布局相同、运行期剥离，
+ * 所以凡是"只看结构/布局"的访问器与判定都应先剥这一层。区别只存在于
+ * sema 的所有权流动检查（`type_ownership_of` 取修饰词）与反射。
+ *
+ * 只剥所有权，不剥 const/volatile（那是 `type_strip_quals` 的职责）。
+ */
+static inline const type_t *type_strip_ownership(const type_t *t) {
+    while (t) {
+        if (t->kind == TYPE_KIND_OWN || t->kind == TYPE_KIND_REF ||
+            t->kind == TYPE_KIND_FATAL) {
+            const type_t *sub = ((const ownership_type_t *)t)->sub;
+            if (!sub) break;
+            t = sub;
+            continue;
+        }
+        break;
+    }
+    return t;
+}
+
+/** 剥掉所有权后的 kind（结构化判定用的"有效 kind"）。 */
+static inline type_kind_t type_kind_of(const type_t *t) {
+    t = type_strip_ownership(t);
+    return t ? t->kind : TYPE_KIND_VOID;
+}
+
 /** 是否为 `own T`。 */
 static inline bool type_is_own(const type_t *t) {
     return t && t->kind == TYPE_KIND_OWN;
@@ -430,14 +459,14 @@ static inline bool type_is_fatal(const type_t *t) {
     return t && t->kind == TYPE_KIND_FATAL;
 }
 
-/** 类型是否为指针（TYPE_KIND_PTR）。 */
+/** 类型是否为指针（TYPE_KIND_PTR；穿透 own/ref/fatal 修饰）。 */
 static inline bool type_is_ptr(const type_t *t) {
-    return t && t->kind == TYPE_KIND_PTR;
+    return type_kind_of(t) == TYPE_KIND_PTR;
 }
 
-/** 类型是否为切片（TYPE_KIND_SLICE）。 */
+/** 类型是否为切片（TYPE_KIND_SLICE；穿透 own/ref/fatal 修饰）。 */
 static inline bool type_is_slice(const type_t *t) {
-    return t && t->kind == TYPE_KIND_SLICE;
+    return type_kind_of(t) == TYPE_KIND_SLICE;
 }
 
 /** 已废弃：同上。 */
@@ -448,7 +477,7 @@ static inline bool type_owns_resource(const type_t *t) {
 
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
 static inline bool type_is_option(const type_t *t) {
-    return t && t->kind == TYPE_KIND_OPTION;
+    return type_kind_of(t) == TYPE_KIND_OPTION;
 }
 
 /* 取 option 类型的 inner（非 option 返回 NULL）：见 vm/type_option.h
@@ -524,10 +553,19 @@ void type_sync_derived_layout(vm_t *vm, const type_t *sub);
  *  无修饰时原样返回。用于"指针自动解引用后按 base 查字段/构造描述符"
  *  这类只关心底层布局的判定。 */
 static inline const type_t *type_strip_quals(const type_t *t) {
-    while (t && (t->kind == TYPE_KIND_CONST || t->kind == TYPE_KIND_VOLATILE)) {
-        const type_t *sub = (t->kind == TYPE_KIND_CONST)
-                                ? ((const const_type_t *)t)->sub
-                                : ((const volatile_type_t *)t)->sub;
+    while (t) {
+        const type_t *sub = NULL;
+        switch (t->kind) {
+        case TYPE_KIND_CONST:    sub = ((const const_type_t *)t)->sub; break;
+        case TYPE_KIND_VOLATILE: sub = ((const volatile_type_t *)t)->sub; break;
+        /* 所有权修饰也是"限定链"的一环：结构/布局视图一律穿透。 */
+        case TYPE_KIND_OWN:
+        case TYPE_KIND_REF:
+        case TYPE_KIND_FATAL:
+            sub = ((const ownership_type_t *)t)->sub;
+            break;
+        default: break;
+        }
         if (!sub) break;
         t = sub;
     }
@@ -562,7 +600,8 @@ char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
  * array/union/option 的字段或元素。
  */
 static inline bool type_is_ptr_or_slice(const type_t *t) {
-    return t && (t->kind == TYPE_KIND_PTR || t->kind == TYPE_KIND_SLICE);
+    type_kind_t k = type_kind_of(t);
+    return k == TYPE_KIND_PTR || k == TYPE_KIND_SLICE;
 }
 
 /**

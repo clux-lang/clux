@@ -755,6 +755,7 @@ const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
  * =========================================================================== */
 
 int struct_type_find_field(const type_t *t, strslice_t name) {
+    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_STRUCT) return -1;
     const struct_type_t *st = (const struct_type_t *)t;
     for (size_t i = 0; i < st->field_count; i++) {

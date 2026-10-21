@@ -2407,3 +2407,22 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       的类型必须**成套**切换。
     - 因此 P2 从"按声明侧子系统分批"改为**一次性协调切换**（一条分支内完成：产出 +
       值产生侧 + 判定，最后整体验证）。B1 改动已全部回滚，全量保持 2232/2232。
+
+104. **所有权升级为类型构造 · P2 核心：产出与判定同批切换**（2026-10）
+    - 按 B1 实测结论（产出侧与判定侧必须同一提交），一次性把**类型解析**与
+      **值产生**都切到「所有权 = 类型修饰」：
+      * `own *T` / `ref *T` / `fatal *T` 由类型解析直接产出包装类型；
+        `?T`、`[N]T`、`[]T`、元组、字段、签名槽位类型随之携带所有权。
+      * 产生侧：`new` / `make` → `fatal *T` / `fatal []T`；`x.&` / `data()` →
+        `ref *T`；`move` / `clone` → `fatal T`；调用返回类型来自签名。
+      * 结构化视图透明：`type_strip_ownership` / `type_kind_of`；`type_strip_quals`
+        与全部类型访问器穿透所有权；sema/ctfe/compiler 的 kind 判定统一改走
+        `type_kind_of`（276 处）。
+      * `value_implicit_cast` 支持 `fatal→own/ref`、`own→ref` 的零拷贝重贴标签。
+      * FFI（ABI 判定 / 描述符 / extern var 类型码）一律剥裸类型、所有权从类型读。
+    - 顺带修掉：类型别名重复包装、cfunc→func 包装生成 `ref **Box`、AST 折叠后
+      形参/返回所有权丢失（改为从类型回读）。
+    - **未做（P3）**：`value_t.ownership` 等运行期借用镜像、8 个槽位所有权字段、
+      符号/值层判定尚未删除——当前与类型保持一致，是下一阶段的清理对象。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      fmt 幂等 53/53；WSL2 全量 **2229 passed / 2 skipped**。

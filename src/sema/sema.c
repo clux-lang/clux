@@ -6,6 +6,7 @@
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
+#include "vm/type_ownership.h"
 #include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -159,7 +160,7 @@ bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
     return false;
   }
   const type_t *t = value_type(r);
-  if (!t || t->kind != TYPE_KIND_INT) {
+  if (!t || type_kind_of(t) != TYPE_KIND_INT) {
     diag_error(sema->diag, sema_loc(sema, b),
                "array length must be an integer constant");
     return false;
@@ -225,7 +226,10 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       break;
     }
     case TYPE_KIND_CONST:
-    case TYPE_KIND_VOLATILE: {
+    case TYPE_KIND_VOLATILE:
+    case TYPE_KIND_OWN:
+    case TYPE_KIND_REF:
+    case TYPE_KIND_FATAL: {
       const type_t *sub = type_qualifier_sub(t);
       if (sub) sema_type_register(sema, sub);
       break;
@@ -304,11 +308,16 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
  * 返回 NULL = 无法构造（类型槽位内部错误），调用方转 val_void。 */
 const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *ot) {
   if (!sema || !ot) return NULL;
-  /* 变体构造是**唯一权威**，在 VM 层（vm/type.h 的 type_fatal_variant_of）——
-     sema 与运行期必须拿到同一个实例，否则会 intern 出同布局不同身份的 fatal
-     副本，转移判定在函数边界上落空。sema 这层只多做一件事：把变体登记进
-     sema 类型表（hoist 需要它按名 LOAD_TYPE 物化）。 */
-  const type_t *fatal = type_fatal_variant_of(sema->vm, ot);
+  /* 所有权是类型修饰：fatal 变体 = 在**裸类型**外面套 `fatal`。
+     `fatal T` 幂等；标量/无资源的类型 move 后仍是原类型。 */
+  if (type_ownership_of(ot) == OWN_FATAL) return ot;
+  const type_t *core = type_strip_ownership(ot);
+  if (!core) return NULL;
+  bool resource = type_is_ptr(core) || type_is_slice(core) ||
+                  type_kind_of(core) == TYPE_KIND_FUNC ||
+                  type_has_own_slots(core);
+  if (!resource) return ot;
+  const type_t *fatal = type_ownership_apply(sema->vm, OWN_FATAL, core);
   if (fatal) sema_type_register(sema, fatal);
   return fatal;
 }
@@ -571,24 +580,25 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return NULL;
     }
     case AST_PTR: {
-      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。按所有权修饰
-         token 文本分派 type_ptr_intern（三种所有权是独立 intern 实例）。
+      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。所有权是**类型
+         修饰**（docs/ownership-as-type.md）：`own *T` / `ref *T` / `fatal *T`
+         是三个独立类型，裸 `*T` 是它们共同的结构底层。
          递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      /* 所有权分两类：
-         - own/ref/fatal：**纯编译期**——校验 token 合法性，不进类型系统
-           （ownership 由调用方在 symbol 层记录）；
-         - share/weak（§12 RC 系）：**类型层属性**——copy = 计数 +1、drop =
-           计数 -1 由指针类型的 vtable 承担，所以这里落到带 rc 的 intern 实例。 */
       strslice_t own = token_strslice(ptr->ownership);
       uint8_t rc = 0;
+      ownership_t oq = OWN_NONE;
       if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0)
         rc = 1;
       else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0)
         rc = 2;
-      else if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
-                 (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
-                 (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
+      else if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0)
+        oq = OWN_OWN;
+      else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0)
+        oq = OWN_REF;
+      else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)
+        oq = OWN_FATAL;
+      else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported pointer ownership");
         return NULL;
@@ -597,12 +607,14 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       sema->opaque_base_ctx--;
       if (!base) return NULL;
-      return rc ? type_ptr_intern_rc(sema->vm, base, rc)
-                : type_ptr_intern(sema->vm, base);
+      /* RC 系（share/weak）是真实类型；own/ref/fatal 是类型修饰。 */
+      const type_t *pt = rc ? type_ptr_intern_rc(sema->vm, base, rc)
+                            : type_ptr_intern(sema->vm, base);
+      if (!pt) return NULL;
+      return type_ownership_apply(sema->vm, oq, pt);
     }
     case AST_SLICE_TYPE: {
-      /* 切片类型（m4-design §1/§10）：[]T（所有权纯编译期，类型不区分
-         own/ref/fatal）。
+      /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
          裸 []T（ownership=NULL）不合法——parser 在 parse_primary 层暂存
          为 ownership=NULL 的 AST_SLICE_TYPE，此处校验拒绝。 */
       ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
@@ -612,23 +624,29 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "'fatal []T'");
         return NULL;
       }
-      /* 校验 ownership token 合法性（所有权纯编译期，不传入类型系统） */
       strslice_t own = token_strslice(sl->ownership);
-      if (!((own.len == 3 && memcmp(own.ptr, "own", 3) == 0) ||
-            (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0) ||
-            (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0))) {
+      ownership_t oq = OWN_NONE;
+      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0)
+        oq = OWN_OWN;
+      else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0)
+        oq = OWN_REF;
+      else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)
+        oq = OWN_FATAL;
+      else {
         diag_error(sema->diag, sema_loc(sema, type_expr),
                    "unsupported slice ownership '%.*s' (use own/ref/fatal)",
                    (int)own.len, own.ptr);
         return NULL;
       }
-      const type_t *elem = resolve_type_expr(sema, sl->elem_type);
-      if (!elem) return NULL;
       /* 元素槽位所有权（`own []own *T` 的元素是 own 叶子；销毁序列
          `for i in 0..len` 据此决定是否 FREE `s[i]`）。所有权须在 resolve
          之前取——折叠会丢 ownership token。 */
       ownership_t elem_own = sema_type_expr_ownership(sl->elem_type);
-      return type_slice_intern_own(sema->vm, elem, elem_own);
+      const type_t *elem = resolve_type_expr(sema, sl->elem_type);
+      if (!elem) return NULL;
+      const type_t *sl_t = type_slice_intern_own(sema->vm, elem, elem_own);
+      if (!sl_t) return NULL;
+      return type_ownership_apply(sema->vm, oq, sl_t);
     }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
@@ -638,19 +656,17 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return resolve_type_expr(sema, sa->sub);
     }
     case AST_OWNED_TYPE: {
-      /* `fatal T` / `own T`：所有权限定的**非指针**类型。
-         按所有权模型（docs/ownership-refactor.md §0）：所有权是**值状态**，
-         不进类型——所以类型**解析结果就是 base 类型本身**，限定词只用于
-         记录"该位置要求什么状态的值"（由 sema_type_expr_ownership 从 token 取）。
-         这里**不再 policing 哪个修饰词能用**：`own i32` 也可解析为 `i32`，
-         它是否**可用**由流动规则决定（`own` 位置需要将亡值，`i32` 没有
-         FATAL 产生式 → 初始化点自然报错淘汰）。 */
+      /* `fatal T` / `own T` / `ref T`：所有权限定的**非指针**类型。
+         所有权是类型修饰（docs/ownership-as-type.md），解析结果为
+         `own T` / `ref T` / `fatal T` 这个独立类型（布局与 T 相同）。
+         是否**可用**仍由流动规则决定（`own` 位置需要 FATAL 产生式）。 */
       ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
+      ownership_t oq = sema_type_expr_ownership(type_expr);
       sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ot->base_type);
       sema->opaque_base_ctx--;
       if (!base) return NULL;
-      return base;
+      return type_ownership_apply(sema->vm, oq, base);
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */
@@ -902,7 +918,7 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
           ? sema_lookup(sema->global_scope, strslice_from_bytes(qual, (size_t)qn))
           : NULL;
   const func_sig_t *prior_sig =
-      (prior && prior->type && prior->type->kind == TYPE_KIND_FUNC)
+      (prior && prior->type && type_kind_of(prior->type) == TYPE_KIND_FUNC)
           ? &((const func_type_t *)prior->type)->sig
           : NULL;
 
@@ -932,7 +948,7 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
     if (!why && !ffi_c_abi_check_aggregate(pt, sema->vm, agg_err,
                                            sizeof agg_err))
       why = agg_err[0] ? agg_err : "aggregate field cannot cross the C ABI";
-    if (!why && pt->kind == TYPE_KIND_VOID)
+    if (!why && type_kind_of(pt) == TYPE_KIND_VOID)
       why = "void is not a valid parameter type";
     if (why && report) {
       diag_error(sema->diag, sema_loc(sema, p),
@@ -1038,7 +1054,7 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
                 ? (ownership_t)evd->ownership
                 : sema_type_expr_ownership(evd->type_expr));
     uint32_t kind = 0;
-    if (!why && vt->kind == TYPE_KIND_VOID) why = "void is not a value type";
+    if (!why && type_kind_of(vt) == TYPE_KIND_VOID) why = "void is not a value type";
     if (!why && !ffi_data_kind_of(vt, sema->vm, &kind) &&
         !ffi_data_kind_needs_type(vt))
       why = "type cannot be read/written as an external data symbol";
@@ -1310,7 +1326,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;
     ownership_t *powns = NULL;
-    const func_sig_t *existing_sig = (sym->type && sym->type->kind == TYPE_KIND_FUNC)
+    const func_sig_t *existing_sig = (sym->type && type_kind_of(sym->type) == TYPE_KIND_FUNC)
                                          ? &((const func_type_t *)sym->type)->sig
                                          : NULL;
     if (nparams > 0) {
