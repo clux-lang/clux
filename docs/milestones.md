@@ -40,7 +40,7 @@
 - Phase 6: 集成 + 测试（examples + 全测试通过 + 文档更新）✅
 - 工具链（非主线）：字节码 `.cxb` 与汇编 `.cxs`，统一由 `bc` 子命令提供（`bc emit` 源码→字节码 / `bc asm` 汇编 / `bc disasm` 反汇编，`-o` 指定输出）；`run` 按内容判定（有 `CXBC` 头当字节码，否则源码）；`build` 专责未来的机器码二进制（未实现）✅ 已完成（2026-09-12）
 
-**明确未实现**：`.?`（try）仅词法预留（`operator '.?' (try) is not implemented yet`）；struct 方法；struct/tuple 下标访问（当前仅数组/切片）；switch 模式解构绑定（当前仅值匹配）。
+**明确未实现**：`.?`（try）仅词法预留（`operator '.?' (try) is not implemented yet`）；struct 下标访问（struct 按字段名访问；数组/切片/元组下标已支持）；switch 模式解构绑定（当前仅值匹配）。struct 方法已落地（2026-10，见 `tests/struct_members_test.cpp`）。
 
 ---
 
@@ -56,11 +56,11 @@
 
 **设计文档**：[m3-design.md](m3-design.md)
 
-**明确未实现（后续里程碑）**：
+**后续工作**：
 - **销毁点的编译期生成**（§13.3–§13.4）：**已完成**（2026-10）——销毁序列由 sema 从
   **类型**生成 `__destroy_<n>` 函数，调用点只发 `CALL __destroy_<n>`；多后端统一仍待
   M10 C 后端 / M12 原生后端落地。
-- **FFI 落地**：`extern func malloc/free` 等语法已定（§8.4），具体 C 互操作归 M6。
+- **FFI 互操作**：**已完成**（M6，2026-10）。
 - **同步原语**：竞争写由开发者负责，属标准库范围（M9）。
 
 ---
@@ -107,10 +107,10 @@
 
 **设计文档**：[m5-design-v2.md](m5-design-v2.md)（**已落地的设计**）；[m5-design.md](m5-design.md)（v1 原始设计，部分内容已被 v2 与本轮修正取代）
 
-**实现位置**：`src/driver/module_path.c`（路径分类/归一化/解析/存在性）、
+**实现位置**：`src/module/module_path.c`（路径分类/归一化/解析/存在性）、
 `src/driver/driver.c` 的 `compile_module`（递归编译 + 导出表构建与代理合并）、
-`src/sema/sema.c` 的 `pass0_imports`、`src/parser/parse_import.c`
-（`parse_import` / `parse_reexport`）、`src/vm/exec.c` 的 `op_import` / `op_get_member`。
+`src/sema/sema_pass.c` 的 `pass0_imports`、`src/parser/parse_import.c`
+（`parse_import` / `parse_reexport`）、`src/vm/exec_call.c` 的 `op_import` / `op_get_member`。
 
 **约定**：example 目录**顶层 `.cx` 是入口程序**，其导入的模块放在该目录的
 子目录中（如 `examples/modules/lib/*.cx`）——模块文件没有 `main`，不作为独立示例运行。
