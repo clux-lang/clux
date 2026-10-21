@@ -30,25 +30,28 @@
 
 | kind | 元数据 | 来源 |
 |---|---|---|
-| 所有类型 | `name`（规范名）、`size`、`align`、`kind` | `type_t.name/size/align/kind` |
-| struct | `field_count`、每字段 `name / offset / type / ownership` | `struct_type_t.fields[]`（`struct_field_t`） |
+| 所有类型 | `name`（规范名）、`size`、`align`、`kind`、`ownership`（`"own"/"ref"/"fatal"/"none"`）、`unqualified`（剥 `const`/`volatile`/所有权修饰后的类型） | `type_t` 字段 + `type_ownership_of` / `type_strip_quals` |
+| struct | `field_count`、每字段 `name / offset / type` | `struct_type_t.fields[]`（`struct_field_t`） |
 | struct（组合） | `embed_count`、每个 `embed_type(i)` | `struct_type_t.embeds[]`、`embed_count` |
 | struct（成员） | `method_count/method_name(i)`、`attribute_count/attribute_name(i)/attribute_type(i)` | `struct_type_t.methods`（vec，登记序）、`attributes`（strmap，**无序**）、`member_scope` |
-| tuple | `elem_count`、每元素 `type / offset / ownership` | `tuple_type_t.elems[]` |
+| tuple | `elem_count`、每元素 `type / offset` | `tuple_type_t.elems[]` |
 | enum | `variant_count`、每变体 `name / value`、`underlying` | `enum_type_t.variants[]`、`underlying` |
-| union（tag） | `member_count`、每 member `name / tag / payload_type / ownership` | `union_type_t.members[]` |
-| cunion | `member_count`、每 member `name / type / ownership` | `cunion_type_t.members[]` |
-| func | `param_count`、每参数 `type / ownership`、`return_type / return_ownership`、`is_variadic` | `func_sig_t` |
+| union（tag） | `member_count`、每 member `name / tag / payload_type` | `union_type_t.members[]` |
+| cunion | `member_count`、每 member `name / type` | `cunion_type_t.members[]` |
+| func | `param_count`、每参数 `type`、`return_type`、`is_variadic` | `func_sig_t` |
 | cfunc | 同 func，另 `is_c_abi = true` | `cfunc_type_t.sig` |
-| array | `elem_type`、`len`、`elem_ownership` | `array_type_t` |
-| slice | `elem_type`、`elem_ownership` | `slice_type_t` |
+| array | `elem_type`、`length` | `array_type_t` |
+| slice | `elem_type` | `slice_type_t` |
 | ptr | `target_type`、`rc`（0 普通 / 1 share / 2 weak） | `ptr_type_t.base_type/rc` |
-| option | `inner_type`、`inner_ownership` | `option_type_t` |
-| const / volatile | `unqualified`（剥限定后的类型） | `const_type_t.sub` / `volatile_type_t.sub` |
+| option | `inner_type` | `option_type_t` |
+| const / volatile / own / ref / fatal | `unqualified`（剥限定后的类型） | 对应 `*_type_t.sub` |
 
-**注意**：所有权（own/ref/fatal）是**槽位属性**，存在 `struct_field_t.ownership`、
-`tuple_elem_t.ownership`、`func_sig_t.param_ownerships[]` 等处；`type_t` 本身不带
-所有权。反射要暴露它，只能取这些**槽位**上的值，不能问"这个类型是不是 own"。
+**注意**：所有权（`own`/`ref`/`fatal`）与 `const`/`volatile` 一样是**类型修饰**——
+`own *T`、`ref *T`、`*T` 是三个不同的 `TYPE_KIND`、各自 intern。槽位（struct 字段、
+tuple 元素、函数参数/返回、数组/切片元素、option inner）**没有独立的 ownership
+字段**：槽位的类型本身携带修饰。因此反射不提供 `field_ownership(i)` 之类的按槽位
+key——读 `T.field_type(i).ownership` / `T.param_type(i).ownership` 即可；
+`ownership` / `unqualified` 对**任意类型值**可用。
 
 ---
 
@@ -63,7 +66,7 @@
 - ❌ 关键字 +20：`typename`、`field_count`、`field_name`、`field_type`、
   `field_offset`、`methods`、`attributes`、`variant_count`… 全部变成保留字，
   用户代码里的同名标识符立刻失效；词法/语法/诊断/文档全要同步。
-- ❌ 不可扩展：以后加一个元数据（例如 `field_ownership`）就要再动语言关键字。
+- ❌ 不可扩展：以后加一个元数据（例如 `field_doc`）就要再动语言关键字。
 
 ### 方案 B：宏函数（`make(T, N, …)` 的做法）
 
@@ -160,25 +163,27 @@ make(T, N, init...)   // T 是元素类型表达式
 | `is_variadic` | `bool` | 变参 |
 | `is_c_abi` | `bool` | `cfunc(...)` 为 true，`func(...)` 为 false |
 
-### 3.10 为什么**不**暴露槽位所有权（用户修正）
+### 3.10 所有权从类型读：暴露 `ownership`，不提供按槽位的 key
 
-初版设计打算暴露 `field_ownership(i)` 等 key，理由写的是"反射生成的销毁序列需要
-知道字段是不是 own"。这个理由**不成立**（用户指正）：
+所有权（own/ref/fatal）与 `const`/`volatile` 一样是**类型修饰**（`own *T`、`ref *T`、
+`*T` 各自独立 intern）。因此：
 
-1. **所有权是类型的一部分**。`struct_field_t.ownership` 参与结构体类型的 intern
-   去重：`struct N { next: own *Node }` 与 `struct V { next: ref *Node }` 是**两个
-   不同的类型**。同一个类型不可能既有 own 槽位又有 ref 槽位——所以"这个字段是不是
-   own"**完全由类型决定**，不是值的运行期状态。
-2. **释放序列由编译器从类型生成**（`gen_destroy_impl` / `type_has_own_slots`），
-   调用点无需任何元数据：`FREE`/销毁语句在编译期就定死了。
-3. 因此反射再暴露一遍槽位所有权是**冗余信息**：任何需要它的编译器路径（cfunc→func
-   包装的 `move(p)`、切片逐元素 FREE、结构体销毁）都直接读类型，而不是读反射。
+1. **通用 key `ownership`**：任意类型值都能问 `T.ownership`，返回 `"own"` /
+   `"ref"` / `"fatal"` / `"none"`；`T.unqualified` 返回剥掉 `const`/`volatile`/
+   所有权修饰后的类型。这是"所有权是类型信息"的直接体现。
+2. **不提供 `field_ownership(i)` / `param_ownership(i)` 等按槽位的 key**：槽位没有
+   独立的所有权字段，槽位的**类型本身**带修饰——`T.field_type(i).ownership`、
+   `T.param_type(i).ownership`、`T.elem_type.ownership` 已经能回答；再开一套平行
+   key 会让"类型里的所有权"和"槽位上的所有权"两份信息存在漂移风险。
+3. **释放序列仍由编译器从类型生成**（`gen_destroy_impl` / `type_has_own_slots`）：
+   调用点无需元数据，`FREE`/销毁语句在编译期就定死了；反射暴露所有权是为**用户级
+   泛型/代码生成**（例如逐字段 clone 时判断要不要 move），不是给编译器用。
 
-结论：**v0 不暴露 `*_ownership` key**。若将来某个用户级库确实需要它（例如生成
-"逐字段拷贝" 的泛型代码时判断要不要 `move`），那是**泛型 + 类型级查询**的范畴，
-等 M7 再议；届时它也只是 `T` 的又一个 key，加回来是一行表项。
+> 历史：2026-10 所有权升级为类型构造之前，本文档曾写"v0 不暴露 `*_ownership`"——
+> 当时所有权是 `value_t` / 槽位字段上的状态，反射确实无从问"这个类型是不是 own"。
+> `docs/ownership-as-type.md` P0 起所有权进入类型层，该结论随之作废。
 
-**array**：`elem_type``elem_type` / `elem_ownership` / **`length`**（注意不是 `len`——`len` 是关键字，`T.len` 过不了 parser）
+**array**：`elem_type` / **`length`**（注意不是 `len`——`len` 是关键字，`T.len` 过不了 parser；元素类型本身携带所有权）
 **slice**：`elem_type`
 **ptr**：`target_type` / `rc`（`0` 普通、`1` share、`2` weak）
 **tuple**：`elem_count` / `elem_type(i)` / `elem_offset(i)`
@@ -196,8 +201,10 @@ make(T, N, init...)   // T 是元素类型表达式
 ```
 "void" "bool" "int" "float" "str" "type" "func" "error" "interrupt"
 "const" "volatile" "option" "struct" "array" "tuple" "enum" "union"
-"cunion" "ptr" "slice" "opaque" "module" "cfunc"
+"cunion" "ptr" "slice" "opaque" "module" "cfunc" "own" "ref" "fatal"
 ```
+
+`T.ownership` 的取值：`"own"` / `"ref"` / `"fatal"` / `"none"`（非限定类型）。
 
 判断种类用普通字符串比较即可：
 
@@ -220,7 +227,7 @@ if (T.kind == "struct") { … }          // 编译期折叠成常量比较
 2. **实参**：索引（`usize`）与名字（`str`）实参必须是**编译期常量**——用 CTFE
    求值（`ctfe_eval`）；非常量 → 报错 `reflection index must be a compile-time constant`。
 3. **折叠产物**（sema 就地替换，compiler 零感知）：
-   * `str`（含 `kind` / `*_ownership`）→ `AST_STR_LIT`
+   * `str`（含 `kind` / `ownership` / `unqualified`）→ `AST_STR_LIT`
    * `usize` → `AST_INT_LIT`（type = `usize`）
    * `type` → `AST_TYPE_REF`（指向已登记类型；`sema_type_register`）
    * `bool` / `i64` → 对应字面量
@@ -261,7 +268,7 @@ if (T.kind == "struct") { … }          // 编译期折叠成常量比较
 | 情形 | 规则 |
 |---|---|
 | `const T` / `volatile T` | `kind` 如实返回 `"const"` / `"volatile"`（自描述，否则这两个 kind 永远不可见）；`name/size/align` 按限定形态显示/计算（`size` 与底层相同）；**kind-specific key 自动穿透限定**（`const Point` 上取 `field_count` 等价于 `Point.field_count`），另给 `unqualified` 取剥限定后的类型 |
-| `?T` | 有独立 kind（Option）；`inner_type` / `inner_ownership`；`name` 为 `?i32` |
+| `?T` | 有独立 kind（Option）；`inner_type`（inner 类型本身携带所有权，如 `?own *T` 的 `inner_type.ownership == "own"`）；`name` 为 `?i32` |
 | `func(...)` vs `cfunc(...)` | 两个 kind（Func / Cfunc）；`is_c_abi` 区分 |
 | struct 组合（`...Base;`） | `fields[]` 已含嵌入字段（组合期插入），`field_count` 与之一致；`embed_*` 额外给出嵌入类型表 |
 | struct 属性/方法 | 属性是无序 strmap → **按键名排序**输出（确定性）；方法用 `methods` vec 的登记序。继承（嵌入）成员不复制进 `attributes`，`T::f` 查找才沿 `embeds` 递归——反射**不展开继承**（v0，避免歧义）；后续可加 `inherited_*` |
@@ -324,7 +331,7 @@ P0/P1 因此**不依赖**泛型；只有 P3（`std/Reflect` 库）需要等 M7�
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
 | **P0** | sema 的 `T.<key>` 识别（通用 key：`name`/`size`/`align`/`kind`）+ 折叠为常量；诊断脚手架 | 无 |
-| **P1** | struct（字段/嵌入/方法/属性）、enum、union、cunion、tuple、array、slice、ptr、option、func/cfunc 的 key 全套；`*_ownership` 返回 `str` | 无 |
+| **P1** | struct（字段/嵌入/方法/属性）、enum、union、cunion、tuple、array、slice、ptr、option、func/cfunc 的 key 全套；通用 `ownership` / `unqualified` 返回 `str` / `type` | 无 |
 | **P2** | 链式类型值（`Point.field_type(1).name`）、`type Alias = T.field_type(i)`、`sizeof(T.field_type(i))` 的端到端验证 | P0/P1 |
 | **P3** | `std/Reflect` 库（`TypeInfo[T]` / `StructInfo[T]` / `FieldInfo[T, idx]`，形状见 reflect-design.md） | **M7 泛型** |
 
@@ -339,7 +346,7 @@ P0/P1/P2 不依赖任何未实现的语言特性，可以立刻做；P3 等泛�
 | 1 | 注入面 | **C：type value 成员注入 `T.<key>`** |
 | 2 | 元数据集合形状 | **计数 + 索引**（`field_count` / `field_name(i)`），不用 `[N]str` 数组 |
 | 3 | 属性枚举顺序 | **按名排序**（确定性） |
-| 4 | 所有权元数据 | **不暴露**（用户修正）：所有权是类型的一部分（参与 intern），释放序列由编译器从类型生成，反射再暴露一遍是冗余信息；详见 §3.10 |
+| 4 | 所有权元数据 | **作为类型信息暴露**：任意类型值都有 `ownership`（`"own"/"ref"/"fatal"/"none"`）与 `unqualified`；不提供按槽位的 `*_ownership` key（槽位类型本身带所有权）；详见 §3.10 |
 | 5 | kind / ownership 的表示 | **编译期字符串**（自描述），不引入内建枚举 |
 | 6 | 命名风格 | **snake_case**（`field_count`，与 reflect-design.md 一致） |
 | 7 | type 的传递 | **走泛型（M7）**；`comptime func` 不接受 `type` 参数 |
