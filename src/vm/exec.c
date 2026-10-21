@@ -1,6 +1,7 @@
 #include "vm/exec.h"
 #include "vm/vm.h"
 #include "vm/value.h"
+#include "vm/type_error.h"
 #include "vm/value_owncopy.h"  /* value_own_copy_into（构造字段写入） */
 #include "vm/type.h"
 #include "vm/type_ownership.h"
@@ -244,6 +245,25 @@ static value_t *op_load_type(vm_t *vm, bytecode_t *bc, size_t *pc) {
     const type_t *t = vm_type_load(vm, id);
     if (!t) return value_make_error(vm, "exec: unknown type id");
     return type_as_value(vm, t);
+}
+
+/* LOAD_TYPE_OWNED <u8 own>：弹栈顶**裸类型** type value，套上所有权修饰后压回。
+   槽位类型用它保留所有权（运行期销毁/克隆按槽位类型判定，不再读镜像字段）。 */
+static value_t *op_load_type_owned(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    uint8_t own = bcode_read_u8(bc, pc);
+    value_t *tv = exec_stack_pop(vm);
+    if (!tv || value_type(tv) != vm->type_type)
+        return value_make_error(vm, "exec: load type owned expects a type value");
+    const type_t *sub = value_as(tv, const type_t *);
+    type_kind_t kind = own == 1   ? TYPE_KIND_OWN
+                       : own == 2 ? TYPE_KIND_REF
+                       : own == 3 ? TYPE_KIND_FATAL
+                                  : TYPE_KIND_VOID;
+    if (kind == TYPE_KIND_VOID || !sub)
+        return value_make_error(vm, "exec: invalid ownership modifier");
+    const type_t *w = type_ownership_intern(vm, kind, sub);
+    if (!w) return value_make_error(vm, "exec: failed to intern ownership type");
+    return type_as_value(vm, w);
 }
 
 /* LOAD_FUNCTION <id>：从 functions_by_id 查表，压入该函数的 func value。
@@ -966,7 +986,8 @@ static value_t *op_ptr_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
-    const type_t *t = v ? value_type(v) : NULL;
+    /* 取地址只看裸类型（槽位类型可能带所有权修饰）。 */
+    const type_t *t = v ? type_strip_quals(value_type(v)) : NULL;
     if (!t || t->kind == TYPE_KIND_VOID || t->kind == TYPE_KIND_ERROR)
         return value_make_error(vm, "addr: cannot take address of void/error value");
     const type_t *pt = type_ptr_intern(vm, t);
@@ -1043,7 +1064,8 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     value_t *v = exec_stack_pop(vm);
     if (!v || value_is_shadow(v)) return NULL;
-    const type_t *t = value_type(v);
+    /* 槽位类型带所有权修饰：销毁分派看裸类型。 */
+    const type_t *t = type_strip_quals(value_type(v));
     if (!t || !value_data(v)) return NULL;
     /* **闭包 = 捕获聚合结构体**：FREE 一个闭包值 = 按 capture_type 的槽位
        所有权释放 env 里的 own 捕获（与结构体字段销毁同构），随后释放 env 块
@@ -1081,7 +1103,7 @@ static value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
             for (size_t i = 0; i < ct->field_count; i++) {
                 const struct_field_t *f = &ct->fields[i];
                 if (!f->type) continue;
-                ptr_free_slot_value(vm, f->type, f->ownership,
+                ptr_free_slot_value(vm, f->type, type_ownership_of(f->type),
                                     (uint8_t *)fn->env + f->offset);
             }
             allocator_free(vm->alloc, &fn->env);
@@ -1337,7 +1359,8 @@ static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
 static value_t *op_is_tag(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t tag = bcode_read_u32(bc, pc);
     value_t *v = exec_stack_pop(vm);
-    const type_t *t = v ? value_type(v) : NULL;
+    /* 槽位类型可能带所有权修饰：tag 判定看裸类型。 */
+    const type_t *t = v ? type_strip_quals(value_type(v)) : NULL;
     if (!t || t->kind != TYPE_KIND_UNION)
         return value_make_error(vm, "exec: is tag requires a union value");
     if (value_is_shadow(v))
@@ -1392,7 +1415,8 @@ static value_t *construct_value(vm_t *vm, const type_t *t, value_t **elems,
         const type_t *mt = value_type(member);
         if (mt == t)
             return member;                     /* 已是 ?T（nil 字段 none 值块） */
-        if (inner && mt == inner)
+        /* 运行期槽位类型保留所有权，而值类型是布局相同的裸类型：按裸类型比较。 */
+        if (inner && type_strip_ownership(mt) == type_strip_ownership(inner))
             return value_lift_option(vm, member, t);  /* T → some 提升 */
         return value_make_error(vm,
             "construct: optional field type mismatch");
@@ -1785,7 +1809,8 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
                         union_type_payload_offset(t);
             /* 覆盖旧 payload：先按 member 槽位所有权销毁旧值（own member
                释放、ref member 跳过），否则旧 payload 的 own 堆块泄漏。 */
-            ptr_free_slot_value(vm, m->payload_type, m->ownership, dst);
+            ptr_free_slot_value(vm, m->payload_type,
+                                     type_ownership_of(m->payload_type), dst);
             /* data 全平凡：直接覆盖 payload（memcpy 可拷贝） */
             memcpy(dst, value_data(casted), m->payload_type->size);
             return self;
@@ -1819,7 +1844,7 @@ static value_t *op_field_set(vm_t *vm, bytecode_t *bc, size_t *pc) {
     if (value_is_error(vm, casted)) return casted;
     void *dst = (uint8_t *)value_data(self) + f->offset;
     /* 覆盖旧字段：先按字段槽位所有权销毁旧值（own 槽位释放、ref 槽位跳过）。 */
-    ptr_free_slot_value(vm, f->type, f->ownership, dst);
+    ptr_free_slot_value(vm, f->type, type_ownership_of(f->type), dst);
     /* data 全平凡：直接覆盖字段（memcpy 可拷贝） */
     memcpy(dst, value_data(casted), f->type->size);
     return self;
@@ -1980,7 +2005,7 @@ const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
     value_t *casted = value_implicit_cast(vm, val, f->type);
     if (value_is_error(vm, casted)) return "exec: closure capture type mismatch";
     void *dst = (uint8_t *)fn->env + f->offset;
-    ptr_free_slot_value(vm, f->type, f->ownership, dst);
+    ptr_free_slot_value(vm, f->type, type_ownership_of(f->type), dst);
     memcpy(dst, value_data(casted), f->type->size);
     return NULL;
 }
@@ -2018,7 +2043,7 @@ static value_t *op_set_closure(vm_t *vm, bytecode_t *bc, size_t *pc) {
     value_t *casted = value_implicit_cast(vm, cap, f->type);
     if (value_is_error(vm, casted)) return casted;
     void *dst = (uint8_t *)fn->env + f->offset;
-    ptr_free_slot_value(vm, f->type, f->ownership, dst);
+    ptr_free_slot_value(vm, f->type, type_ownership_of(f->type), dst);
     memcpy(dst, value_data(casted), f->type->size);
     return NULL;
 }
@@ -2830,6 +2855,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_PUSH_VALUE]     = op_push_value,
     [BCODE_LOAD]           = op_load,
     [BCODE_LOAD_TYPE]      = op_load_type,
+    [BCODE_LOAD_TYPE_OWNED] = op_load_type_owned,
     [BCODE_LOAD_FUNCTION]  = op_load_function,
     [BCODE_SET_TYPE_NAME]  = op_set_type_name,
     [BCODE_PUSH_UNDEFINED] = op_push_undefined,

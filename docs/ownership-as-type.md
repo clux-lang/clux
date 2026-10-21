@@ -63,27 +63,27 @@ TYPE_KIND_FATAL  { sub }   将亡：必须被消费一次（move 出去或显式
 
 ---
 
-## 2.5 运行期语义：**剥离 / 穿透，零行为**（用户澄清）
+## 2.5 运行期语义：**值层零状态，槽位类型保留修饰**
 
-所有权修饰符是**纯编译期**概念：运行期把它们**剥掉**，只看底层 `sub`，不产生任何
-行为差异。落地成三条硬规则：
+所有权修饰符不产生运行期值状态，但**类型图里的槽位位置保留修饰**，让销毁/克隆可以
+按类型判定。落地成三条硬规则：
 
-1. **没有运行期标志**。`value_t.ownership` 直接删除（不是"以后再说"）——运行期的
-   `value_t` 只有 `type`（裸类型）+ `data`；`value_set_ownership` / `value_ownership` /
-   `value_is_borrowed` 全部消失。
-2. **运行期类型永远是裸类型**。任何进入运行期的类型引用（`LOAD_TYPE` / `DEFINE_TYPE` /
-   构造指令的 type_id / 字段布局 / FFI 描述符 / 值分配）都先 `type_strip_ownership`：
-   `own T`、`ref T`、`fatal T` 与 `T` 在运行期是**同一个** `type_t`（同 size/align/vtable）。
-   在 `value_make` / 类型指令入口加 debug 断言"运行期类型不带所有权修饰"。
-3. **所有"要不要销毁/要不要拷贝"的决策都在编译期**。现在的 `value_is_borrowed()` 分支
-   （60 处 `OWN_REF`）不是"运行期事实"，而是"编译期没决定好"：编译器在**需要独立值时**
-   发 materialize/clone（`BCODE_MATERIALIZE` 已有），否则按裸类型传指针。所以这些分支
-   在 P2 逐个删除，而不是改成运行期判断。
+1. **没有运行期值标志**。`value_t` 只有 `type` + `data`（+ 借用视图位）；没有
+   `ownership` 字段，也没有"这个值是否 own"的运行期标志。
+2. **值类型是裸的，槽位类型带修饰**。`LOAD_TYPE` / `DEFINE_TYPE` / 构造指令的
+   type_id / FFI 描述符 / 值分配仍先 `type_strip_ownership`，所以值本身的类型是裸的。
+   但槽位位置（struct 字段、tuple 元素、union payload、option inner、array/slice
+   元素）在 hoist 时用 `LOAD_TYPE_OWNED` 构造为 `own T` / `ref T` / `fatal T`：
+   运行期的 free/clone/assign 直接 `type_ownership_of(槽位类型)` 判定，不再依赖
+   类型对象里的镜像字节。所有运行期操作在分派前用
+   `type_strip_quals` / `type_kind_of` 穿透修饰（布局相同）。
+3. **所有"要不要销毁/要不要拷贝"的决策都由类型决定**。销毁序列在编译期看未剥的
+   类型图生成；运行期递归 free/clone 只在自引用类型（链表/树）等编译期无法穷尽的
+   位置使用，且同样按槽位类型判定。编译器在需要独立值时发 materialize/clone
+   （`BCODE_MATERIALIZE`），不靠运行期"借用标志"猜测。
 
-随之而来的结构选择：`own T` 这类类型仍 intern 在 vm 类型池里（它们要参与类型相等、
-反射、签名），但**运行期指令只引用剥过的类型**；两者布局相同，因此 `type_equivalence`
-不受影响。销毁序列（`gen_destroy_impl` / `type_has_own_slots`）在**编译期**看未剥的
-类型图决定，生成的字节码里只出现裸类型。
+由此，`own T` 类型仍 intern 在 vm 类型池里（参与类型相等、反射、签名）。值级
+`type_equivalence` 不受影响；槽位级的相等比较由槽位类型自身的修饰承担。
 
 ---
 
@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a / P3b / P3c / P3d / P3e-1 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a–P3e-2a 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -206,9 +206,13 @@ WSL2 全量 **2229 passed / 2 skipped**。
 - ✅ **P3e-1：删除 fatal 变体恒等壳**。`type_fatal_variant_of` /
   `type_fatal_base_of` 删除；FFI 同型比较直接剥所有权后比裸类型。struct/union
   字段的槽位所有权写入也改为从字段类型派生（不再读 AST 缓存）。
-- **待办（P3e-2）**：删除 7 个槽位所有权字段（需要把运行期 free/clone/assign
-  改为只走编译期生成的序列，或让运行期槽位类型保留所有权信息）、AST 上的
-  ownership 缓存，以及运行期 `borrowed` 视图位（与借用 materialize 改造一起删除）。
+- ✅ **P3e-2a：运行期槽位类型保留所有权**。新增 `LOAD_TYPE_OWNED` 指令；
+  hoist 的 struct/tuple/union/option/array/slice 槽位改用该指令构造带修饰的
+  运行期类型；运行期 free/clone/assign 全部改为 `type_ownership_of(槽位类型)`；
+  类型相等/去重不再比较槽位所有权镜像字段。槽位字段从此只写不读。
+- **待办（P3e-2b）**：删除 7 个槽位所有权字段及其写入 API（`SET_FIELD_OWNERSHIP`
+  等）、AST 上的 ownership 缓存，以及运行期 `borrowed` 视图位（与借用
+  materialize 改造一起删除）。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。

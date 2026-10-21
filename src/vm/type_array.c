@@ -184,8 +184,7 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
     for (size_t i = 0; i < n; i++) {
         const array_type_t *other = (const array_type_t *)vec_get(vm->array_types, i);
         if (other && other != at && type_is_sealed(&other->base) &&
-            other->elem_type == at->elem_type && other->length == at->length &&
-            other->elem_ownership == at->elem_ownership) {
+            other->elem_type == at->elem_type && other->length == at->length) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 at 的 type value 由 value_seal 负责
              * 重定向到 other（避免悬空）；此处仅手工回收 at。 */

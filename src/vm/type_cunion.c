@@ -241,7 +241,6 @@ void type_cunion_set_last_member_ownership(vm_t *vm, const type_t *t,
    类型描述的一部分，见 docs/ownership-refactor.md §0.8；struct/tuple/union
    的去重键都含 ownership）。 */
 static bool cunion_member_same(const cunion_member_t *a, const cunion_member_t *b) {
-    if (a->ownership != b->ownership) return false;
     if (a->name.len != b->name.len) return false;
     if (a->name.ptr && b->name.ptr &&
         memcmp(a->name.ptr, b->name.ptr, a->name.len) != 0) return false;

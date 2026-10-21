@@ -50,6 +50,9 @@ typedef enum {
     BCODE_PUSH_VALUE,      /* offset：压入 stack[sp-1-offset] 借用引用 */
     BCODE_LOAD,            /* strtable 索引：从 global scope 查 type value 压栈 */
     BCODE_LOAD_TYPE,       /* u32 id：从 vm->types_by_id 查表压 type value 栈 */
+    BCODE_LOAD_TYPE_OWNED, /* u8 own：弹裸类型 → intern 成 own/ref/fatal 包装 → 压回。
+                              用于**槽位类型**：运行期类型图保留槽位所有权，销毁/克隆
+                              不再依赖 type 里的镜像字段。 */
     BCODE_LOAD_FUNCTION,   /* u32 id：从 vm->functions_by_id 查表压 func value 栈
                                （函数值运行期加载：变量/参数/返回值传递） */
     BCODE_SET_TYPE_NAME,   /* strtable 索引：弹栈顶 type value → 设置显示名

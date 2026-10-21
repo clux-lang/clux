@@ -1016,8 +1016,12 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        inits 支持 <v,M> fill 展开（同数组构造），nil 元素须 ?T（sema 已
        校验）。clux 无默认零值，init_count 须 == length（sema 已校验）。 */
     ast_make_t *n = (ast_make_t *)node;
-    /* 元素类型位 */
+    /* 元素类型位：运行期槽位类型保留所有权（make 的 []own *T 元素类型）。 */
     compile_type_expr(c, n->elem_type);  /* 栈: [elem_type] */
+    if (n->elem_ownership != OWN_NONE) {
+      bcode_write_op(c->bc, BCODE_LOAD_TYPE_OWNED);
+      bcode_write_u8(c->bc, n->elem_ownership);
+    }
     /* 长度值（可运行期值） */
     compile_expr(c, n->length);          /* 栈: [elem_type, length] */
     /* 初始值逐个压栈（fill 展开 + nil → PUSH_OPT_NONE） */

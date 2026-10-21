@@ -1,4 +1,5 @@
 #include "vm/type_slice.h"
+#include "vm/type_ownership.h"
 #include "vm/type_ptr.h"
 #include "vm/type_array.h"
 #include "vm/vm.h"
@@ -11,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* ===========================================================================
  * 切片类型（m4-design §1/§10）
@@ -244,8 +246,6 @@ static bool slice_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (!type_is_slice(a) || !type_is_slice(b)) return false;
     /* 元素槽位所有权是类型描述的一部分：`[]own *T` 与 `[]ref *T` 是不同类型
        （销毁语义不同），不能互相赋值。 */
-    if (slice_type_elem_ownership(a) != slice_type_elem_ownership(b))
-        return false;
     return type_equal(vm, slice_type_elem(a), slice_type_elem(b));
 }
 
@@ -342,8 +342,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
     for (size_t i = 0; i < n; i++) {
         const slice_type_t *other = (const slice_type_t *)vec_get(vm->slice_types, i);
         if (other && other != st && type_is_sealed(&other->base) &&
-            other->elem_type == st->elem_type &&
-            other->elem_ownership == st->elem_ownership) {
+            other->elem_type == st->elem_type) {
             if (st->base.name.ptr) {
                 char *np = (char *)st->base.name.ptr;
                 allocator_free(vm->alloc, (void **)&np);

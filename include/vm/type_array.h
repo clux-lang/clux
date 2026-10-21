@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "vm/type.h"
+#include "vm/type_ownership.h"
 
 /** 数组类型 vtable */
 extern const vtable_t VTABLE_ARRAY;
@@ -116,10 +117,7 @@ static inline const type_t *array_type_elem(const type_t *t) {
 
 /** 取数组类型元素槽位的所有权（非数组类型返回 OWN_NONE） */
 static inline ownership_t array_type_elem_ownership(const type_t *t) {
-    t = type_strip_ownership(t);
-    return (t && t->kind == TYPE_KIND_ARRAY)
-               ? ((const array_type_t *)t)->elem_ownership
-               : OWN_NONE;
+  return type_kind_of(t) == TYPE_KIND_ARRAY ? type_ownership_of(array_type_elem(t)) : OWN_NONE;
 }
 
 /** 取数组类型的编译期元素数量（动态/未定长返回 SIZE_MAX；非数组返回 0） */

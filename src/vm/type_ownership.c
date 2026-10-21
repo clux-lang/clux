@@ -141,6 +141,38 @@ static bool ow_type_extends(vm_t *vm, const type_t *sub, const type_t *sup) {
 
 static const type_t *ownership_type_seal(vm_t *vm, const type_t *t);
 
+/* 容器运算代理：槽位类型带所有权修饰时，索引/长度仍按裸类型分派。 */
+static value_t *ow_get_index(vm_t *vm, value_t *self, value_t *index) {
+  const type_t *sub = type_ownership_sub(value_type(self));
+  if (!sub || !sub->vtable || !sub->vtable->get_index)
+    return value_make_error(vm, "ownership type: unsupported indexing");
+  const type_t *saved = value_swap_type(self, sub);
+  value_t *r = sub->vtable->get_index(vm, self, index);
+  value_restore_type(self, saved);
+  return r;
+}
+
+static value_t *ow_set_index(vm_t *vm, value_t *self, value_t *index,
+                             value_t *val) {
+  const type_t *sub = type_ownership_sub(value_type(self));
+  if (!sub || !sub->vtable || !sub->vtable->set_index)
+    return value_make_error(vm, "ownership type: unsupported indexing");
+  const type_t *saved = value_swap_type(self, sub);
+  value_t *r = sub->vtable->set_index(vm, self, index, val);
+  value_restore_type(self, saved);
+  return r;
+}
+
+static value_t *ow_length(vm_t *vm, value_t *self) {
+  const type_t *sub = type_ownership_sub(value_type(self));
+  if (!sub || !sub->vtable || !sub->vtable->length)
+    return value_make_error(vm, "ownership type: unsupported length");
+  const type_t *saved = value_swap_type(self, sub);
+  value_t *r = sub->vtable->length(vm, self);
+  value_restore_type(self, saved);
+  return r;
+}
+
 const vtable_t VTABLE_OWNERSHIP = {
     .add = ow_add, .sub = ow_sub, .mul = ow_mul, .div = ow_div,
     .mod = ow_mod, .neg = ow_neg,
@@ -150,6 +182,9 @@ const vtable_t VTABLE_OWNERSHIP = {
     .shl = ow_shl, .shr = ow_shr,
     .lnot = ow_lnot,
     .call = ow_call,
+    .get_index = ow_get_index,
+    .set_index = ow_set_index,
+    .length = ow_length,
     .extends = NULL,
     .dispose = ow_dispose,
     .clone = ow_clone,

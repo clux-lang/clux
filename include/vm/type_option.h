@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "vm/type.h"
+#include "vm/type_ownership.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -73,10 +74,7 @@ static inline const type_t *type_option_inner(const type_t *t) {
 
 /** 取 option 类型 inner 槽位的所有权（非 option 返回 OWN_NONE） */
 static inline ownership_t type_option_inner_ownership(const type_t *t) {
-    t = type_strip_ownership(t);
-    return (t && t->kind == TYPE_KIND_OPTION)
-               ? ((const option_type_t *)t)->inner_ownership
-               : OWN_NONE;
+  return type_kind_of(t) == TYPE_KIND_OPTION ? type_ownership_of(type_option_inner(t)) : OWN_NONE;
 }
 
 /* ---- option 值块访问器（data 为 struct Optional_T 内存布局） ---- */

@@ -97,8 +97,6 @@ static bool option_type_equal(vm_t *vm, const type_t *a, const type_t *b) {
     if (a == b) return true;
     if (!b || b->kind != TYPE_KIND_OPTION) return false;
     /* inner 槽位所有权是类型描述的一部分（`?own *T` ≠ `?ref *T`）。 */
-    if (type_option_inner_ownership(a) != type_option_inner_ownership(b))
-        return false;
     return type_equal(vm, type_option_inner(a), type_option_inner(b));
 }
 
@@ -201,8 +199,7 @@ const type_t *type_option_seal(vm_t *vm, const type_t *t) {
     for (size_t i = 0; i < n; i++) {
         const option_type_t *other = (const option_type_t *)vec_get(vm->option_types, i);
         if (other && other != ot && type_is_sealed(&other->base) &&
-            other->inner == ot->inner &&
-            other->inner_ownership == ot->inner_ownership) {
+            other->inner == ot->inner) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 ot 的 type value 由 value_seal 负责
              * 重定向到 other（避免悬空）；此处仅手工回收 ot。 */

@@ -573,6 +573,9 @@ static bool ownership_cast_ok(ownership_t from, ownership_t to) {
         return to == OWN_OWN || to == OWN_REF || to == OWN_NONE;
     if (from == OWN_OWN) return to == OWN_REF || to == OWN_NONE;
     if (from == OWN_REF) return to == OWN_NONE;
+    /* 裸类型 → 所有权修饰：运行期构造/写入带修饰槽位时必须允许（所有权是
+       编译期契约，sema 已校验来源；这里只做同布局重贴标签）。 */
+    if (from == OWN_NONE) return true;
     return false;
 }
 
@@ -584,8 +587,10 @@ value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (v->type != target) {
         ownership_t from = type_ownership_of(v->type);
         ownership_t to = type_ownership_of(target);
-        if (from != to && type_strip_ownership(v->type) ==
-                              type_strip_ownership(target) &&
+        /* 裸类型相同（布局等价）且所有权方向允许：纯重贴标签。
+           即使两侧都是 OWN（例如槽位类型与表达式类型来自不同 intern 实例），
+           也直接落到目标类型——所有权是编译期契约，运行期只认布局。 */
+        if (type_strip_ownership(v->type) == type_strip_ownership(target) &&
             ownership_cast_ok(from, to)) {
             if (value_is_shadow(v)) return value_make_shadow(vm, target);
             /* 运行期：两者裸类型相同，重贴标签即可（所有权是编译期概念）。 */

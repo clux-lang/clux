@@ -306,6 +306,11 @@ static void emit_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
   }
 }
 
+static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
+                              size_t count);
+static void emit_slot_type(compiler_t *c, const type_t *t, uint8_t *done,
+                           size_t count);
+
 /* 数组定义：LOAD_TYPE <id> 拉回开放对象 → 依赖 elem 先定义（密封）→
  * LOAD_TYPE <elem id> → DEFINE_BOUND N → SEAL（按自身 id 幂等更新登记） */
 static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
@@ -314,7 +319,7 @@ static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *elem = array_type_elem(t);
 
   emit_load_type(c, st->id);               /* 栈: [open_array_type] */
-  emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
+  emit_slot_type(c, elem, done, count);  /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
@@ -362,6 +367,21 @@ static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
   }
   define_one(c, dst, done, count);
   emit_load_type(c, dst->id);
+}
+
+/* 槽位类型：所有权修饰要在**运行期类型图**里保留（`own *T` 的字段/元素/内层
+   类型就是 `own *T`），销毁/克隆据此判定。做法：先把裸类型压栈，再用
+   LOAD_TYPE_OWNED 套上修饰。无所有权修饰时退化为普通依赖加载。 */
+static void emit_slot_type(compiler_t *c, const type_t *t, uint8_t *done,
+                           size_t count) {
+  ownership_t own = type_ownership_of(t);
+  if (own == OWN_NONE) {
+    emit_ref_dep_type(c, t, done, count);
+    return;
+  }
+  emit_ref_dep_type(c, type_strip_quals(t), done, count);
+  bcode_write_op(c->bc, BCODE_LOAD_TYPE_OWNED);
+  bcode_write_u8(c->bc, (uint8_t)own);
 }
 
 /* func 签名定义：LOAD_TYPE <id> 拉回开放签名对象 → 参数类型（emit_ref_dep_type：
@@ -501,7 +521,7 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *elem = slice_type_elem(t);
 
   emit_load_type(c, st->id);             /* 栈: [open_slice_type] */
-  emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
+  emit_slot_type(c, elem, done, count);  /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 elem → 设进 open */
   st_push(c, -1);
   emit_slot_ownership(c, type_ownership_of(slice_type_elem(t))); /* 元素槽位所有权 */
@@ -537,7 +557,7 @@ static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
   for (size_t i = 0; i < n; i++) {
     const struct_field_t *f = struct_type_field(t, i);
     if (!f || !f->type) continue;
-    emit_dep_type(c, f->type, done, count); /* 栈: [open, field_type] */
+    emit_slot_type(c, f->type, done, count); /* 栈: [open, field_type] */
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, f->name);        /* 弹 field_type → 追加进 open */
     st_push(c, -1);
@@ -590,7 +610,7 @@ static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
   const type_t *inner = type_option_inner(t);
 
   emit_load_type(c, st->id);             /* 栈: [open_option_type] */
-  emit_dep_type(c, inner, done, count);  /* 栈: [open, inner] */
+  emit_slot_type(c, inner, done, count); /* 栈: [open, inner] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 inner → 设进 open */
   st_push(c, -1);
   emit_slot_ownership(c, type_ownership_of(type_option_inner(t))); /* inner 槽位所有权 */
@@ -612,7 +632,7 @@ static void define_tuple(compiler_t *c, const sema_type_t *st, uint8_t *done,
   for (size_t i = 0; i < n; i++) {
     const tuple_elem_t *e = tuple_type_elem(t, i);
     if (!e || !e->type) continue;
-    emit_dep_type(c, e->type, done, count); /* 栈: [open, elem_type] */
+    emit_slot_type(c, e->type, done, count); /* 栈: [open, elem_type] */
     bcode_write_op(c->bc, BCODE_APPEND_ELEM); /* 弹 elem_type → 追加进 open */
     st_push(c, -1);
     emit_slot_ownership(c, type_ownership_of(e->type)); /* 槽位所有权（own 元素） */
@@ -643,7 +663,7 @@ static void define_union(compiler_t *c, const sema_type_t *st, uint8_t *done,
 
     const type_t *pt = m->payload_type;
     if (!pt) continue;                     /* 防御：member 类型必存在 */
-    emit_dep_type(c, pt, done, count);     /* 栈: [open, member_type] */
+    emit_slot_type(c, pt, done, count);    /* 栈: [open, member_type] */
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, m->name);       /* 弹 member_type → 设当前 member */
     st_push(c, -1);

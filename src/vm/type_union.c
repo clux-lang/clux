@@ -288,7 +288,6 @@ void type_union_set_last_member_ownership(vm_t *vm, const type_t *t,
    释放借用目标）。struct / tuple 的去重键早已包含 ownership，此处对齐。 */
 static bool union_member_same(const union_member_t *a, const union_member_t *b) {
     if (a->tag != b->tag) return false;
-    if (a->ownership != b->ownership) return false;
     if (a->name.len != b->name.len) return false;
     if (a->name.ptr && b->name.ptr &&
         memcmp(a->name.ptr, b->name.ptr, a->name.len) != 0) return false;

@@ -32,7 +32,8 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
         return value_make_error(vm, "len: expects 1 argument");
 
     value_t *sv = args[0];
-    const type_t *st = value_type(sv);
+    /* 槽位类型可能带所有权修饰（own []T 等）：长度判定看裸类型。 */
+    const type_t *st = type_strip_quals(value_type(sv));
 
     /* shadow：只算类型——len 恒返回 usize（C 的 size_t，随架构变化） */
     if (value_is_shadow(sv))

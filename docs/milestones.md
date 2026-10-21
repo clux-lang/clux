@@ -2496,3 +2496,13 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 更新 `type.h` 的所有权判定入口注释（符号/槽位/签名层均已改为类型携带）。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+111. **所有权升级为类型构造 · P3e-2a：运行期槽位类型保留所有权**（2026-10）
+    - 新增 `LOAD_TYPE_OWNED` 字节码：弹裸类型 → intern 成 own/ref/fatal 包装 → 压回。
+    - hoist 的 struct/tuple/union/option/array/slice 槽位改用该指令，运行期类型图的
+      槽位位置保留所有权修饰；值/顶层类型仍然剥离。
+    - 运行期 free/clone/assign/索引/长度/取地址/tag 判定全部改为按槽位类型判定，
+      并在分派前穿透修饰；类型相等/去重不再比较槽位所有权镜像字段。
+    - 槽位字段从此只写不读（P3e-2b 删除）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

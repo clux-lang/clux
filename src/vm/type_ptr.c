@@ -1,4 +1,5 @@
 #include "vm/type_ptr.h"
+#include "vm/type_ownership.h"
 #include "vm/bcode_function.h"
 #include "vm/type.h"
 #include "vm/type_opaque.h"
@@ -108,6 +109,8 @@ bool ptr_type_needs_scan(const type_t *t) {
    判定为 own 的槽位，该错误没有产生路径。 */
 void ptr_free_block_only(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
+    /* 槽位类型在运行期保留所有权修饰（LOAD_TYPE_OWNED）；结构判定看裸类型。 */
+    t = type_strip_quals(t);
     switch (t->kind) {
     case TYPE_KIND_PTR: {
         ptr_value_t *pv = (ptr_value_t *)data;
@@ -167,13 +170,21 @@ static bool slot_needs_visit(const type_t *ft, ownership_t own) {
 
 void ptr_free_slot_value(vm_t *vm, const type_t *slot_type, ownership_t own,
                          void *data) {
+    (void)own;
     if (!vm || !slot_type || !data) return;
-    if (!slot_needs_visit(slot_type, own)) return;
+    /* 所有权以槽位类型为准（运行期槽位类型带修饰）。 */
+    ownership_t slot_own = type_ownership_of(slot_type);
+    if (!slot_needs_visit(slot_type, slot_own)) return;
+    slot_type = type_strip_quals(slot_type);
+    if (!slot_type) return;
     ptr_free_owned_recursive(vm, slot_type, data);
 }
 
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
+    /* 槽位类型可能带所有权修饰（LOAD_TYPE_OWNED）；递归销毁看裸类型。 */
+    t = type_strip_quals(t);
+    if (!t) return;
     switch (t->kind) {
     case TYPE_KIND_FUNC: {
         /* **闭包 = 捕获聚合结构体 + vtable**：优先调用生成函数
@@ -204,7 +215,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         for (size_t i = 0; i < ct->field_count; i++) {
             const struct_field_t *f = &ct->fields[i];
             if (!f->type) continue;
-            ptr_free_slot_value(vm, f->type, f->ownership,
+            ptr_free_slot_value(vm, f->type, type_ownership_of(f->type),
                                 (uint8_t *)fn->env + f->offset);
         }
         allocator_free(vm->alloc, &fn->env);
@@ -260,7 +271,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
-            if (f->type && slot_needs_visit(f->type, f->ownership))
+            if (f->type && slot_needs_visit(f->type, type_ownership_of(f->type)))
                 ptr_free_owned_recursive(vm, f->type, p + f->offset);
         }
         return;
@@ -270,7 +281,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
-            if (e->type && slot_needs_visit(e->type, e->ownership))
+            if (e->type && slot_needs_visit(e->type, type_ownership_of(e->type)))
                 ptr_free_owned_recursive(vm, e->type, p + e->offset);
         }
         return;
@@ -282,7 +293,8 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         uint64_t tag = union_read_tag_raw(data, union_type_tag_size(t));
         if (tag >= ut->member_count) return;   /* 非法 tag：防御性跳过 */
         const union_member_t *m = &ut->members[tag];
-        if (m->payload_type && slot_needs_visit(m->payload_type, m->ownership))
+        if (m->payload_type && slot_needs_visit(m->payload_type,
+                                 type_ownership_of(m->payload_type)))
             ptr_free_owned_recursive(vm, m->payload_type,
                                      (uint8_t *)data + union_type_payload_offset(t));
         return;
@@ -310,7 +322,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
            复合元素无条件递归）。 */
         const array_type_t *at = (const array_type_t *)t;
         const type_t *et = at->elem_type;
-        if (!et || !slot_needs_visit(et, at->elem_ownership)) return;
+        if (!et || !slot_needs_visit(et, type_ownership_of(et))) return;
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < at->length; i++, p += et->size)
             ptr_free_owned_recursive(vm, et, p);
@@ -512,6 +524,9 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
    注意：clone_block 只做深拷贝——是否深拷贝指针由调用方（value_clone /
    CLONE 指令）决定，不在本函数内按 ownership 分派。 */
 void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
+    /* 槽位类型带所有权修饰：克隆只关心裸类型的布局/分派。 */
+    type = type_strip_quals(type);
+    if (!type) return NULL;
     void *dst = value_alloc_data(vm->alloc, type);
     switch (type->kind) {
     case TYPE_KIND_FUNC: {
@@ -562,7 +577,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
             if (!f->type || f->type->size == 0) continue;
             const void *cs = (const uint8_t *)sfn->env + f->offset;
             void *cd = (uint8_t *)nf->env + f->offset;
-            if (slot_needs_visit(f->type, f->ownership)) {
+            if (slot_needs_visit(f->type, type_ownership_of(f->type))) {
                 void *nb = ptr_clone_block(vm, f->type, cs);
                 memcpy(cd, nb, f->type->size);
                 allocator_free(vm->alloc, &nb);
@@ -647,7 +662,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         const struct_type_t *st = (const struct_type_t *)type;
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
-            if (!f->type || !slot_needs_visit(f->type, f->ownership)) continue;
+            if (!f->type || !slot_needs_visit(f->type, type_ownership_of(f->type))) continue;
             void *sub = ptr_clone_block(vm, f->type,
                                         (const uint8_t *)src + f->offset);
             memcpy((uint8_t *)dst + f->offset, sub, f->type->size);
@@ -660,7 +675,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         const tuple_type_t *tt = (const tuple_type_t *)type;
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
-            if (!e->type || !slot_needs_visit(e->type, e->ownership)) continue;
+            if (!e->type || !slot_needs_visit(e->type, type_ownership_of(e->type))) continue;
             void *sub = ptr_clone_block(vm, e->type,
                                         (const uint8_t *)src + e->offset);
             memcpy((uint8_t *)dst + e->offset, sub, e->type->size);
@@ -712,7 +727,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
     case TYPE_KIND_ARRAY: {
         const array_type_t *at = (const array_type_t *)type;
         const type_t *et = at->elem_type;
-        if (!et || !slot_needs_visit(et, at->elem_ownership)) {
+        if (!et || !slot_needs_visit(et, type_ownership_of(et))) {
             memcpy(dst, src, type->size);
             break;
         }
