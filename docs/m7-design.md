@@ -682,33 +682,39 @@ func k[T extends <*? & []?>](x: T) { ... }      // T 是二元组，首元是指
 
 `extends` 递归向下解构匹配（§27）在以下类型构造上有特殊规则：
 
-#### 29.1 `const` 限定符协变
+#### 29.1 限定符与所有权按类型身份匹配
 
-`const` 限定符在 `extends` 匹配中是**协变**的——PATTERN 的 const 比 T 的 const "更宽松或相等"才通过：
+`const` 与所有权修饰符（`own` / `ref` / `fatal`）都是**类型构造**：`const T` 与 `T`、`own *T` / `ref *T` / `*T` 在类型系统中都是**不同的类型**（各自 intern）。`extends` 在 PATTERN 与 T 的对应节点上按**结构身份**匹配——PATTERN 带限定符时 T 必须带同一个限定符，PATTERN 不带时 T 也不带。**不引入协变/逆变**：`const i32` 能赋给 `i32` 是值层的 const 规则，与约束判断无关；`extends` 判断的是类型身份，不是赋值兼容性。
 
-- **`const T extends T` 通过**（const 是 T 的子类型——const 可接受 T 的值，T 的值可安全视为 const）。
-- **`T extends const T` 不通过**（const T 不可安全视为可变 T——会破坏 const 保证）。
+- **`const`**：`T extends const ?` 只匹配 const 类型；`T extends ?` 匹配任意完整类型（含 const）。
+- **所有权**：`own *T` / `ref *T` / `*T` 是三个独立类型。`T extends *?` 只匹配**裸指针**；要匹配带所有权的指针必须显式写 `own *?` / `ref *?` / `fatal *?`。
+- **`?` 是整棵类型的通配符**：`*?` 里的 `?` 匹配被指向的任意完整类型（含 `const i32`、`own *i32`）；`own *?` 已固定指针节点的所有权，`?` 只通配 pointee。
+- **限定符嵌套按节点顺序匹配**：`own const *T` 与 `const own *T` 是两棵不同的类型树，PATTERN 必须逐层同构；`type_qualifier_sub` 只用于剥限定链，不改变匹配的严格性。
+- **`share` / `weak` 是指针自身的 rc 形态**（`TYPE_KIND_PTR` 的 rc 字段），不是所有权修饰符：`*?` 匹配任意指针（含 `share *T` / `weak *T`）；M7 的 PATTERN 不提供 share/weak 限定语法。
+- **`volatile` 在类型解析阶段已折叠为 sub**（m2-design §10），不会出现在匹配用的类型图里——它对匹配自然透明，不是特殊规则。
 
-递归向下解构时，**每个节点的 const 状态按此规则独立判定**：
+示例：
 
 ```
 func f[T extends const ?](x: T) { ... }
-f[const i32](c);   // ✓ const i32 extends const ? 通过
-f[i32](v);          // ✓ i32 extends const ? 通过（const 协变：i32 可视为 const i32）
+f[const i32](c);    // ✓ const i32 是 const 类型
+f[i32](v);          // ✗ i32 不是 const 类型（没有 const 协变）
 
 func g[T extends *?](p: T) { ... }
-h[*const i32](cp);  // ✓ *const i32 extends *? 通过（? 匹配 const i32）
-h[*i32](mp);        // ✓ *i32 extends *? 通过
+g[*i32](mp);        // ✓ 裸指针
+g[*const i32](cp);  // ✓ 指针节点无所有权修饰；? 匹配 const i32
+g[own *i32](op);    // ✗ own *i32 的指针节点是 own，不是裸 *
+g[ref *i32](rp);    // ✗
 
-// 逆变示例（不通过）：
+func h[T extends own *?](p: T) { ... }
+h[own *i32](op);    // ✓
+h[*i32](mp);        // ✗ 裸指针不是 own *T
+h[ref *i32](rp);    // ✗
+
 func k[T extends *const ?](p: T) { ... }
-k[*i32](mp);        // ✗ *i32 extends *const ? 不通过（可变指针不可视为 const 指针）
-k[*const i32](cp);  // ✓ *const i32 extends *const ? 通过
+k[*i32](mp);        // ✗ ? 要求 const i32
+k[*const i32](cp);  // ✓
 ```
-
-**一般化**：PATTERN 无 const 而 T 有 const → 通过（const 协变）；PATTERN 有 const 而 T 无 const → 不通过（逆变失败）；两者 const 状态一致 → 通过。
-
-**所有权不参与匹配**：所有权是值层属性不是类型层属性（M3 所有权重构后 `type_t.ownership` 已删除，`own *T`/`ref *T`/`*T` 合并为同一类型）。`extends` 只匹配类型，所有权限定符对匹配**透明**——`own *T` 与 `*T` 在 `extends` 匹配中是同一类型，匹配结果相同。
 
 #### 29.2 struct 只检查字段表
 
@@ -1056,7 +1062,7 @@ struct Writer implements IWriter[Writer] {
 
 **检查时机**：struct 声明 `implements IWriter[Writer]` 时，sema 检查 Writer 是否有 interface 声明的所有属性与方法，签名匹配：
 
-- **属性签名匹配**：Writer 必须有 `var fd: i32`——类型完全相等，复用 §29 的 const 协变等规则。
+- **属性签名匹配**：Writer 必须有 `var fd: i32`——类型完全相等，复用 §29.1 的类型身份匹配（限定符与所有权严格一致）。
 - **方法签名匹配**：Writer 必须有 `func write(self: *Writer, data: ref []u8)`——self 类型 `*T` 替换为 `*Writer` 后，**参数数量 + 参数类型 + 返回类型严格匹配**（§29.5，不引入协变/逆变）。
 - 缺少任一属性/方法或签名不匹配 → 编译期报错，指向 struct 声明点与 interface 声明点。
 
@@ -1202,8 +1208,8 @@ func sum[T, E extends IContainer[T, E]](c: *T): E { ... }   // T=self类型, E=�
 | `extends` 重载分派（§27） | M7 不纳入（只过滤不分派） | 同名同元数泛型=重复定义，避免 overload resolution |
 | comptime 值参数 `extends`（§27） | 不写（仅类型参数可 `extends`） | 值域约束超出本轮 |
 | `extends` 析取/合取（§28） | `extends A | B`（OR）+ `extends A & B`（AND），`&` 优先级高于 `|`，支持括号 | 单泛型内部结构匹配组合，不是重载分派；短路求值 |
-| `const` 协变（§29.1） | `const T extends T` 通过，`T extends const T` 不通过，递归每节点独立判定 | const 是 T 的子类型，协变安全；逆变破坏 const 保证 |
-| 所有权与 `extends`（§29.1） | 不参与匹配（透明） | 所有权是值层属性不是类型层属性，M3 重构后类型层无所有权区分 |
+| 限定符匹配（§29.1） | `const` / `own` / `ref` / `fatal` 严格一致：PATTERN 带限定符则 T 必须同限定符，不带则 T 也不带；不做协变/逆变 | 限定符是类型构造，约束判断类型身份而非赋值兼容；协变会放行错误的限定符组合 |
+| 所有权与 `extends`（§29.1） | 参与匹配：`own *?` / `ref *?` / `*?` 分别只匹配对应所有权的指针 | 所有权是类型修饰（独立 `TYPE_KIND`），与 const 同属类型身份 |
 | struct `extends`（§29.2） | 只检查字段表（完全相等），不看属性/方法 | 复用 M2 struct_type_compatible 语义，名义属性/方法不参与结构匹配 |
 | 类型别名与 `extends`（§29.2） | 天然透明（无需特殊规则） | 别名在引擎内部就是展开类型（M2 §5），sema 层无别名实体 |
 | `?` 匹配 void（§29.3） | 匹配（无例外） | void 也是类型；void 的使用限制由现有类型系统拦截，非泛型约束职责 |
