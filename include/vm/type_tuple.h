@@ -65,12 +65,7 @@ const type_t *type_tuple_seal(vm_t *vm, const type_t *t);
 const type_t *type_tuple_intern(vm_t *vm, const tuple_elem_t *elems,
                                 size_t count);
 
-/** 带 ownership 的一次性快捷：ownership 在 seal **之前**设。用于
- *  `fatal <T1,T2>`——含 own 字段的元组跨函数边界的将亡值变体
- *  （去重按 元素表 + ownership 区分）。 */
-const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *elems,
-                                               size_t count,
-                                               ownership_t ownership);
+
 
 /**
  * 元组兼容判断（鸭子类型，m2-design §3）：两 tuple 类型元素类型（type_equal，

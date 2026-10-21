@@ -161,7 +161,7 @@ static value_t *builtin_weak_get_cfunc(vm_t *vm, func_t *self, size_t argc,
     const type_t *base = ptr_type_base(t);
     const type_t *st = base ? type_ptr_intern_rc(vm, base, 1) : NULL;
     if (!st) return value_make_error(vm, "__weak_get: bad weak pointer type");
-    const type_t *opt = type_option_intern_own(vm, st, OWN_NONE);
+    const type_t *opt = type_option_intern(vm, st);
     if (!opt) return value_make_error(vm, "__weak_get: cannot build option type");
     if (value_is_shadow(v)) return value_make_shadow(vm, opt);
     const ptr_value_t *pv = (const ptr_value_t *)value_data(v);

@@ -62,21 +62,9 @@ const type_t *type_struct_push(vm_t *vm);
  * 不向操作数栈压 type value；密封由 type_struct_seal 完成。 */
 const type_t *type_struct_alloc_open(vm_t *vm);
 
-/** DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略）
- *
- * `ownership` 是该**字段槽位**的所有权（own/ref/fatal/none，见
- * struct_field_t::ownership）。它是类型描述的一部分，且参与 intern 去重。
- * 传 OWN_NONE 等价于"普通字段"。 */
-void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
-                              const type_t *ftype, ownership_t ownership);
-
-/** 兼容包装：不关心槽位所有权时用（等价于 ownership = OWN_NONE）。 */
+/** DEFINE_FIELD 运行期用：追加字段（开放 struct；槽位所有权已编码在 ftype 上）。 */
 void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
                            const type_t *ftype);
-
-/** SET_FIELD_OWNERSHIP 运行期用：把**最后追加**字段的槽位所有权设为 own
- *  （seal 之前；sealed 后静默忽略）。供 bytecode hoist 把 sema 的槽位
- *  所有权带进运行期构造的类型对象（否则运行期按槽位释放旧值的路径失效）。 */
 
 /** SEAL：拷贝字段表 + C 对齐布局 + 按 (字段名+类型+顺序) 去重 intern + 置 sealed。
  *
@@ -161,12 +149,7 @@ bool type_struct_is_unique(const type_t *t);
 const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
                                  size_t count);
 
-/** 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，设
- *  ownership，密封为新的 struct_type_t。与 base 同布局不同 ownership
- *  （去重时 struct_same 按 ownership 区分）。用于 fatal Node
- *  （ownership=OWN_FATAL）。 */
-const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
-                                                ownership_t ownership);
+
 
 /**
  * 结构兼容判断（鸭子类型，m2-design §2）：两 struct 类型字段名 + 字段类型

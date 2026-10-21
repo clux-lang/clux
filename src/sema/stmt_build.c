@@ -1439,11 +1439,6 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     }
     cs->flow_init = true; /* 捕获即初始化（闭包持有 clone 值） */
     cs->is_active = true; /* 函数体 walk 时可见（sema_lookup 激活过滤） */
-    /* 把解析出的所有权**回写进 AST 节点**（`ast_var_def_t::ownership`）。
-       用途：闭包字面量产出值的状态判定——捕获了 own 的闭包本身是 **OWN**
-       （唯一的 own 产生式：函数定义即"定义 + 绑定名字"，折叠了
-       fatal→move→own）。消费者是 `ex_func_def`，它只能从 AST 读。 */
-    cv->ownership = (uint8_t)sema_sym_ownership(cs);
     /* 捕获槽的实际类型（销毁序列从 type 对象反推用；推断捕获无 type_expr） */
     cv->resolved_type = cs->type;
   }
@@ -1459,12 +1454,9 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     if (!cs || !cs->type) continue;
     /* 旧语义：只有**显式声明为 ref** 的捕获（或纯 id 捕获外层 ref 变量、
        或 opaque）才强制作用域标注；从 init 推断出的 ref（`|(r = x.&)|`）
-       不在此列。注意 cv->ownership 已被上面的捕获解析回写成**解析结果**，
-       这里要按捕获形态还原“声明侧”的修饰词。 */
-    ownership_t declared;
-    if (cv->type_expr) declared = (ownership_t)cv->ownership;
-    else if (cv->init) declared = OWN_NONE;
-    else declared = sema_sym_ownership(cs);
+       不在此列。声明侧修饰直接从解析后的捕获类型读。 */
+    ownership_t declared = type_ownership_of(cv->resolved_type);
+    if (!cv->type_expr && cv->init) declared = OWN_NONE;
     if (declared == OWN_REF ||
         type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;

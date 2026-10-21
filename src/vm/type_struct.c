@@ -312,9 +312,8 @@ const type_t *type_struct_alloc_open(vm_t *vm) {
 
 /* DEFINE_FIELD 运行期用：追加字段（名拷贝到 vm 堆；密封后静默忽略）。
  * 开放阶段动态扩容（field_count 递增）。 */
-void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
-                              const type_t *ftype, ownership_t ownership) {
-    (void)ownership; /* 所有权已编码在 ftype 上 */
+void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
+                           const type_t *ftype) {
     if (!vm || !t || t->kind != TYPE_KIND_STRUCT || type_is_sealed(t)) return;
     struct_type_t *st = (struct_type_t *)t;
 
@@ -335,12 +334,6 @@ void type_struct_add_field_ex(vm_t *vm, const type_t *t, strslice_t name,
     /* 槽位所有权：类型描述的一部分（销毁序列从 type 对象反推的依据） */
     st->fields = nf;
     st->field_count = n + 1;
-}
-
-/* 兼容包装：槽位所有权缺省 OWN_NONE（普通字段）。 */
-void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
-                           const type_t *ftype) {
-    type_struct_add_field_ex(vm, t, name, ftype, OWN_NONE);
 }
 
 /* SET_FIELD_OWNERSHIP 运行期用：设最后追加字段的槽位所有权（seal 前）。
@@ -690,53 +683,6 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
  * 释放 base.name，而 base 的名字可能借用外部存储（编译期 arena）。调用方
  * （sema）在密封后用 type_set_name 设一个 vm 自有的名——与具名 struct 的
  * 既有做法一致（见 struct_compose.c）。 */
-const type_t *type_struct_intern_with_ownership(vm_t *vm, const type_t *base,
-                                                ownership_t ownership) {
-    if (!vm || !base || base->kind != TYPE_KIND_STRUCT) return NULL;
-    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
-    const struct_type_t *src = (const struct_type_t *)base;
-    struct_type_t *st = struct_type_create_open(vm);
-    /* 拷贝字段表（vm 拥有；名深拷贝；offset 拷贝——布局与 base 相同） */
-    if (src->field_count > 0) {
-        struct_field_t *copy = (struct_field_t *)allocator_new_ex(
-            vm->alloc, "struct_field_t", sizeof(struct_field_t), NULL, NULL,
-            NULL, src->field_count);
-        if (!copy) panic("vm: out of memory interning struct type (ownership)");
-        for (size_t i = 0; i < src->field_count; i++) {
-            copy[i].name   = struct_field_name_dup(vm, src->fields[i].name);
-            copy[i].offset = src->fields[i].offset;
-            copy[i].type   = src->fields[i].type;
-                }
-        st->fields = copy;
-        st->field_count = src->field_count;
-    }
-    /* 拷贝嵌入表（组合 struct 的 embeds——与字段表同构快照） */
-    if (src->embed_count > 0) {
-        const type_t **ecopy = (const type_t **)allocator_new_ex(
-            vm->alloc, "type_t*", sizeof(const type_t *), NULL, NULL, NULL,
-            src->embed_count);
-        if (!ecopy) panic("vm: out of memory interning struct embeds (ownership)");
-        for (size_t i = 0; i < src->embed_count; i++)
-            ecopy[i] = src->embeds[i];
-        st->embeds = ecopy;
-        st->embed_count = src->embed_count;
-    }
-    /* unique 跟随 base：具名 struct 的 fatal 副本仍保持独立身份 */
-    st->unique = src->unique;
-    /* 运行时成员共享 base 的容器（借用——不拷贝、不拥有）：
-       fatal 变体与 base 是同一类型的不同所有权视图，成员（方法/静态属性）
-       是同一份。dispose 只在 base 对象上释放（fatal 副本的 dispose 时这些
-       字段是借用，不会重复释放——strmap_free/vec_free 对 NULL 安全，
-       但这里它们非 NULL 且是借用的，所以 dispose 中需要跳过）。
-       为避免 fatal 副本 dispose 时误释放 base 的容器，fatal 副本不拷贝
-       这三个指针——成员访问走 base 类型（type_strip_quals 去掉 fatal 后
-       得到 base，sema/VM 成员查找都先 strip 限定符）。 */
-    /* st->member_scope = NULL; st->attributes = NULL; st->methods = NULL;
-       — memset 已清零，保持 NULL：成员访问经 type_strip_quals 走 base 类型 */
-    const type_t *t = type_struct_seal(vm, &st->base);
-    if (!t) allocator_free(vm->alloc, (void **)&st);
-    return t;
-}
 
 /* ===========================================================================
  * 字段查找

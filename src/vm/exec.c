@@ -741,23 +741,6 @@ static value_t *op_define_field(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make_error(vm, "exec: define field expects an open struct, union or cunion type on top");
 }
 
-/* SET_FIELD_OWNERSHIP <u8 own>：把栈顶开放类型**最后追加**的字段 / 元素 /
- * member 的槽位所有权设为立即数（seal 后忽略；无弹栈）。
- *
- * 为什么需要：DEFINE_FIELD 只带字段名/类型，运行期构造的类型对象槽位所有权
- * 恒为 OWN_NONE；而"就地覆盖旧值"的运行期路径（FIELD_SET / 复合赋值 /
- * DISPOSE）按槽位所有权决定释放什么（own 叶子释放、ref 借用跳过）。缺了它
- * own 槽位会被当成普通字段（泄漏），ref 借用目标会被误释放（悬垂 free）。
- * 具名 struct 还带 MARK_UNIQUE（seal 跳过去重），也不能靠"去重到 sema 那份
- * 带 ownership 的类型"来补。 */
-/* SET_FIELD_OWNERSHIP <u8 own>：历史指令。槽位所有权已由槽位类型携带，
-   运行期类型在 hoist 时用 LOAD_TYPE_OWNED 构造，本指令保留为无操作（兼容
-   旧 .cxs / 字节码）。 */
-static value_t *op_set_field_ownership(vm_t *vm, bytecode_t *bc, size_t *pc) {
-    (void)vm;
-    (void)bcode_read_u8(bc, pc);
-    return NULL;
-}
 
 /* ADD_EMBED <embed_type_id>：peek 栈顶开放 struct → vm_type_load 拉回 embed
  * 类型 → type_struct_add_embed 追加到 embeds 表（seal 前可编辑）。
@@ -978,8 +961,7 @@ static value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc) {
 /* 注：曾经有过 compound_fatal_variant（把复合值包成运行期 fatal 变体类型）。
    已删除——运行期不为同一逻辑类型维护两个实例：fatal 是**编译期**的所有权
    标记（sema 的类型解析据此产将亡值），运行期的转移在"转移点"按语义完成
-   （见 value_move / func_vcall 的 fatal 形参分支）。保留 `SET_OWNERSHIP`
-   指令与 `type_*_intern_with_ownership` 供 hoist 物化声明里的 fatal 类型。 */
+   （见 value_move / func_vcall 的 fatal 形参分支）。 */
 
 /* MOVE（无操作数）：**所有权转移**（move(x)，m3-design §7）。
  * 所有权纯编译期——move 没有运行期逻辑，只是 sema 把变量的 ownership
@@ -1260,8 +1242,6 @@ static value_t *op_slice(vm_t *vm, bytecode_t *bc, size_t *pc) {
  * own 指针清空（ptr_clear_owned_recursive 防双释放）。 */
 static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
     uint32_t init_count = bcode_read_u32(bc, pc);
-    uint8_t elem_own = bcode_read_u8(bc, pc);
-
     /* 逆序弹 N 个初始值 */
     value_t *inits[init_count > 0 ? init_count : 1];
     for (uint32_t i = 0; i < init_count; i++)
@@ -1278,7 +1258,7 @@ static value_t *op_make(vm_t *vm, bytecode_t *bc, size_t *pc) {
     /* 构造 fatal []T 切片类型（元素槽位所有权随指令立即数——`make(own *i32,…)`
        的元素要按 own 释放，类型必须与 sema 侧一致才能去重成功） */
     const type_t *fatal_slice =
-        type_slice_intern_own(vm, elem, (ownership_t)elem_own);
+        type_slice_intern(vm, elem);
     if (!fatal_slice)
         return value_make_error(vm, "make: cannot make slice type");
 
@@ -1374,8 +1354,7 @@ static value_t *construct_value(vm_t *vm, const type_t *t, value_t **elems,
         if (len != SIZE_MAX && (size_t)n > len)
             return value_make_error(vm,
                 "construct: array element count mismatch");
-        return value_make_array_own(vm, et, n > 0 ? elems : NULL, n,
-                                    array_type_elem_ownership(t));
+        return value_make_array(vm, et, n > 0 ? elems : NULL, n);
     }
 
     /* ?T 构造器（二值单槽位，docs m2-design §12.2）：n 必须 == 1（sema
@@ -2932,7 +2911,6 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_FREE]            = op_free,
     [BCODE_FREE_RECURSIVE]  = op_free_recursive,
     [BCODE_TAKE_SLOT]       = op_take_slot,
-    [BCODE_SET_FIELD_OWNERSHIP] = op_set_field_ownership,
     [BCODE_PUSH_USIZE]      = op_push_usize,
     [BCODE_PUSH_CFUNC_TYPE] = op_push_cfunc_type,
     [BCODE_MATERIALIZE]      = op_materialize,

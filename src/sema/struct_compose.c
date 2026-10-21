@@ -355,18 +355,13 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
 
   const type_t **ftype = NULL;
   strslice_t     *fname = NULL;
-  /* 每个字段槽位的所有权（销毁序列从 type 对象反推的依据；类型描述的一部分） */
-  ownership_t    *fown  = NULL;
   if (nfs > 0) {
     ftype = (const type_t **)arena_alloc(sema->arena, nfs * sizeof(type_t *),
                                          ALIGNOF(max_align_t));
     fname = (strslice_t *)arena_alloc(sema->arena, nfs * sizeof(strslice_t),
                                       ALIGNOF(max_align_t));
-    fown  = (ownership_t *)arena_alloc(sema->arena, nfs * sizeof(ownership_t),
-                                       ALIGNOF(max_align_t));
-    if (!ftype || !fname || !fown) return SEMA_COMPOSE_FAILED;
-    for (size_t k = 0; k < nfs; k++) fown[k] = OWN_NONE;
-    bool pending = false, bad = false;
+    if (!ftype || !fname) return SEMA_COMPOSE_FAILED;
+      bool pending = false, bad = false;
     size_t i = 0;
     for (ast_node_t *f = sd->fields; f; f = f->next, i++) {
       ast_struct_field_t *sf = (ast_struct_field_t *)f;
@@ -414,7 +409,6 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
          "被误当作 own 释放"的风险。 */
       ftype[i] = ft;
       fname[i] = sf->name;
-      fown[i]  = ft ? type_ownership_of(ft) : OWN_NONE;
     }
     if (bad) return SEMA_COMPOSE_FAILED;
     if (pending) return SEMA_COMPOSE_DEFERRED;
@@ -571,7 +565,7 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
   {
     size_t i = 0;
     for (ast_node_t *f = sd->fields; f; f = f->next, i++)
-      type_struct_add_field_ex(vm, t, fname[i], ftype[i], fown[i]);
+      type_struct_add_field(vm, t, fname[i], ftype[i]);
   }
 
   if (nembs > 0) {

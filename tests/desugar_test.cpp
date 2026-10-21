@@ -444,8 +444,6 @@ TEST_F(DesugarTest, ExplicitElementTypeIsPreserved) {
   ast_node_t *te = ((ast_var_def_t *)bind)->type_expr;
   ASSERT_NE(te, nullptr);
   EXPECT_EQ(te->kind, AST_PTR);
-  /* 所有权编码在类型槽位折叠前就已提取（与 parse_var_def 同一口径） */
-  EXPECT_EQ(((ast_var_def_t *)bind)->ownership, AST_OWN_REF);
 }
 
 /* 多个 foreach / 嵌套 foreach：序号唯一，内层也被展开。 */

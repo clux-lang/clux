@@ -396,22 +396,10 @@ const type_t *type_union_seal(vm_t *vm, const type_t *t) {
 
 const type_t *type_union_intern(vm_t *vm, const union_member_t *members,
                                 size_t count) {
-    return type_union_intern_with_ownership(vm, members, count, OWN_NONE);
-}
-
-/* 带 ownership 的一次性快捷（见 type_union.h）。所有权已迁移到值层，类型层
- * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
-const type_t *type_union_intern_with_ownership(vm_t *vm,
-                                               const union_member_t *members,
-                                               size_t count,
-                                               ownership_t ownership) {
-    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
-    /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。不向操作数栈
-     * 压入 type value。去重 intern 由 type_union_seal 完成。 */
+    /* 一次性快捷（开放构造 + 立即密封）：member 槽位所有权已编码在 payload 类型上。 */
     if (!vm || !members || count == 0) return NULL;
     union_type_t *ut = union_type_create_open(vm);
 
-    /* 拷贝 member 表（vm 拥有；名深拷贝；payload 类型按成员逐个复制） */
     union_member_t *copy = (union_member_t *)allocator_new_ex(
         vm->alloc, "union_member_t", sizeof(union_member_t), NULL, NULL,
         NULL, count);
@@ -422,16 +410,12 @@ const type_t *type_union_intern_with_ownership(vm_t *vm,
         copy[i].name         = (strslice_t){ nbuf, members[i].name.len };
         copy[i].tag          = members[i].tag;
         copy[i].payload_type = members[i].payload_type;
-        /* **槽位所有权必须一起拷贝**：它是类型描述的一部分（销毁序列据此
-           生成 `if (v is m) { FREE v.m }`），漏拷会让 own 成员被判成 NONE
-           ——CONSTRUCT 不产 FATAL，销毁序列为空 → 静默泄漏。 */
-        }
+    }
     ut->members = copy;
     ut->member_count = count;
 
     const type_t *t = type_union_seal(vm, &ut->base);
-    if (!t) allocator_free(vm->alloc, (void **)&ut); /* 密封失败（如字段类型
-                                                       未解析）：回收开放对象 */
+    if (!t) allocator_free(vm->alloc, (void **)&ut);
     return t;
 }
 

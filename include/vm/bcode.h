@@ -298,22 +298,6 @@ typedef enum {
     BCODE_FREE,             /* 无操作数：弹栈顶值 → 递归释放其 own 堆块。
                              * 栈深 -1。不按名解析、不做所有权判定。 */
 
-    /* ---- 槽位所有权写入（**追加在末尾**，不动既有编号）----
-     *
-     * `DEFINE_FIELD` / `APPEND_ELEM` 追加字段/元素时槽位所有权缺省 OWN_NONE，
-     * 但所有权是**类型描述的一部分**（销毁序列从 type 对象反推的权威来源，
-     * 见 docs/ownership-refactor.md §0.8），且参与类型去重 intern
-     * （struct/tuple/union/cunion 的 same 判定都比较 ownership）。不带进
-     * 运行期构造的类型对象，运行期"就地覆盖旧值前按槽位释放"的路径就会把
-     * own 槽位当普通字段（静默泄漏），或把 ref 借用目标当成自己的（悬垂
-     * free）。具名 struct 还带 MARK_UNIQUE（seal 跳过去重），不能指望去重
-     * 到 sema 那份带 ownership 的类型。
-     *
-     * 语义：peek 栈顶开放类型 → 把**最后追加**的字段/元素/member 的槽位
-     * 所有权设为立即数；seal 之后静默忽略（与其它开放期写入指令一致）。
-     * 无栈深变化。 */
-    BCODE_SET_FIELD_OWNERSHIP, /* u8 ownership：peek 开放 struct/union/cunion →
-                                * 设最后追加字段/member 的槽位所有权。 */
     BCODE_STORE_REINIT, /* STR name：**重新初始化已 move（TDZ）的变量**（R2 恢复）。
                          * 旧内容的所有权已随 move 转移、内存里是陈旧字节——普通
                          * STORE 走 value_assign → compound_assign_transfer 会再

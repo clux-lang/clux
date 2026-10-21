@@ -486,17 +486,7 @@ const type_t *type_tuple_seal(vm_t *vm, const type_t *t) {
 
 const type_t *type_tuple_intern(vm_t *vm, const tuple_elem_t *elems,
                                 size_t count) {
-    return type_tuple_intern_with_ownership(vm, elems, count, OWN_NONE);
-}
-
-/* 带 ownership 的一次性快捷（见 type_tuple.h）。所有权已迁移到值层，类型层
- * 恒为 OWN_NONE；保留参数仅为兼容既有调用方签名，不再写入类型。 */
-const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *elems,
-                                               size_t count,
-                                               ownership_t ownership) {
-    (void)ownership;  /* 所有权迁移到值层，类型不再携带 ownership */
-    /* 一次性快捷（开放构造 + 立即密封）：供 sema/C 侧直接使用。不向操作数栈
-     * 压入 type value。去重 intern 由 type_tuple_seal 完成。 */
+    /* 一次性快捷（开放构造 + 立即密封）：元素槽位所有权已编码在元素类型上。 */
     if (!vm) return NULL;
     tuple_type_t *tt = tuple_type_create_open(vm);
 
@@ -509,8 +499,7 @@ const type_t *type_tuple_intern_with_ownership(vm_t *vm, const tuple_elem_t *ele
         for (size_t i = 0; i < count; i++) {
             copy[i].offset = 0; /* seal 统一计算 */
             copy[i].type   = elems[i].type;
-            /* 槽位所有权随元素表一起拷贝（销毁序列与 CONSTRUCT→FATAL 依赖它） */
-                }
+        }
         tt->elems = copy;
         tt->elem_count = count;
     }

@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a–P3e-2b 已完成（2026-10）
+### P3 删除旧机制 —— ✅ P3a–P3f 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -217,8 +217,15 @@ WSL2 全量 **2229 passed / 2 skipped**。
   setter 删除（旧指令保留为 no-op）。槽位所有权现在只存在于槽位类型上。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
-- **待办**：AST 上的 ownership 缓存（解析期语法缓存）、运行期 `borrowed` 视图位
-  （与借用 materialize 改造一起删除）。
+- ✅ **P3f：清理 AST 缓存与遗留 API**。删除 `ast_var_def.ownership`、
+  `ast_struct_field.ownership`、`ast_make.elem_ownership`（它们的读取改为
+  `type_ownership_of(resolved_type/字段类型/元素类型)`），删除
+  `ast_type_expr_ownership_code`；删除 `type_*_intern_own` /
+  `type_*_intern_with_ownership` / setter 与 `SET_FIELD_OWNERSHIP` 指令。
+  所有权修饰仍保留在 AST 的类型表达式 token（`ast_ptr_t::ownership` 等），
+  那是**语法**，不是语义副本。
+- **待办**：运行期 `borrowed` 视图位（借用视图，与 materialize 改造一起删除）；
+  它不是 own/ref/fatal 所有权状态。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。
 
 ---

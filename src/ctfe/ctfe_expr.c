@@ -682,8 +682,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         }
         if (raw > (uint64_t)SIZE_MAX)
             return ctfe_err(ctx, "ctfe: array length too large");
-        const type_t *at = type_array_intern_own(vm, elem, (size_t)raw,
-                                                 type_ownership_of(elem));
+        const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
     }
     case AST_OWNED_TYPE: {
@@ -724,8 +723,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         ownership_t oq = ctfe_token_ownership(n->ownership);
         if (oq == OWN_NONE)
             return ctfe_err(ctx, "ctfe: unsupported slice ownership");
-        const type_t *st = type_slice_intern_own(vm, elem,
-                                                 type_ownership_of(elem));
+        const type_t *st = type_slice_intern(vm, elem);
         if (!st) return ctfe_err(ctx, "ctfe: failed to construct slice type");
         return ctfe_owned_type_value(ctx, st, oq);
     }

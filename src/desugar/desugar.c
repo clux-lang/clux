@@ -275,10 +275,6 @@ static ast_node_t *ds_expand_foreach(desugar_t *ds, ast_foreach_t *fe) {
     v->name = fe->name;
     v->type_expr = fe->type_expr;
     v->init = elem;
-    /* 所有权编码必须在**类型槽位折叠前**取出（与 parse_var_def 同一口径：
-       sema 的 sema_resolve_type_slot 会把 AST_PTR / AST_SLICE_TYPE 折叠成
-       AST_TYPE_REF，之后就取不到 ownership token 了）。 */
-    v->ownership = ast_type_expr_ownership_code(fe->type_expr);
     bind = vd;
   } else {
     const token_t *op_set = ds_op(ds, "=", &loc);

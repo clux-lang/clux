@@ -489,7 +489,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       const type_t *sub = resolve_type_expr(sema, op->sub);
       if (!sub) return NULL;
       /* 所有权已编码在 inner 类型上（`?own *T` 的 inner 就是 `own *T`）。 */
-      return type_option_intern_own(sema->vm, sub, type_ownership_of(sub));
+      return type_option_intern(sema->vm, sub);
     }
     case AST_ARRAY: {
       /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →
@@ -502,8 +502,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       if (!base) return NULL;
       size_t len;
       if (!sema_eval_array_bound(sema, &arr->length, &len)) return NULL;
-      return type_array_intern_own(sema->vm, base, len,
-                                   type_ownership_of(base));
+      return type_array_intern(sema->vm, base, len);
     }
     case AST_TUPLE: {
       /* <T1,T2,...> 元组类型：逐元素递归解析（可为任意类型表达式，
@@ -643,8 +642,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          `for i in 0..len` 据此决定是否 FREE `s[i]`）。类型已携带它。 */
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
-      const type_t *sl_t = type_slice_intern_own(sema->vm, elem,
-                                                 type_ownership_of(elem));
+      const type_t *sl_t = type_slice_intern(sema->vm, elem);
       if (!sl_t) return NULL;
       return type_ownership_apply(sema->vm, oq, sl_t);
     }

@@ -21,9 +21,7 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
 
 /** 带**元素槽位所有权**的数组值构造：构造出的数组类型与 (elem, count,
  *  elem_own) 去重一致（`[N]own *T` 的元素按 own 销毁）。 */
-value_t *value_make_array_own(vm_t *vm, const type_t *elem_type,
-                              value_t **elems, size_t count,
-                              ownership_t elem_ownership);
+
 
 /* ================================================================ */
 /* 数组类型（array_type_t，继承 type_t）                              */
@@ -92,19 +90,6 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t);
 
 /** 一次性构造（push_array + set_elem + set_count + seal 的快捷方式） */
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count);
-
-/** 带**元素槽位所有权**的一次性构造：`[N]own *T` / `[N]ref *T` 等。
- *  所有权在 seal 之前写入并参与去重 intern。 */
-const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
-                                    size_t count, ownership_t elem_ownership);
-
-/** 带 ownership 的一次性构造：与 type_array_intern 同，但数组类型的
- *  ownership 在 seal **之前**设为 ownership。用于 `fatal [N]T`——含 own
- *  元素（如 [N]Box）的定长数组跨函数边界的将亡值变体。ownership 恒为
- *  OWN_NONE，唯一合法取值是 OWN_FATAL（去重按 (elem,length,ownership) 区分）。 */
-const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
-                                               size_t count,
-                                               ownership_t ownership);
 
 /** 取数组类型的元素类型（非数组类型返回 NULL） */
 static inline const type_t *array_type_elem(const type_t *t) {

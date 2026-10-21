@@ -16,33 +16,6 @@
  * 放在 .c 而非头文件内联，是因为需要 `token_strslice`（parse_utils）与
  * 三种类型节点的完整定义。
  */
-uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr) {
-    if (!type_expr) return AST_OWN_NONE;
-    if (type_expr->kind == AST_SCOPE_ANNOT) {
-        /* '<a> ref *T：标注节点保留，所有权在 sub 上 */
-        return ast_type_expr_ownership_code(
-            ((const ast_scope_annot_t *)type_expr)->sub);
-    }
-    const token_t *tok = NULL;
-    if (type_expr->kind == AST_PTR) {
-        tok = ((const ast_ptr_t *)type_expr)->ownership;
-    } else if (type_expr->kind == AST_SLICE_TYPE) {
-        tok = ((const ast_slice_type_t *)type_expr)->ownership;
-    } else if (type_expr->kind == AST_OWNED_TYPE) {
-        /* `own T` / `fatal T`（T 非指针/切片）：闭包字段 `own func(...)->T`、
-           含 own 槽位聚合的 `own Box` 等。所有权在修饰词 token 上。 */
-        tok = ((const ast_owned_type_t *)type_expr)->ownership;
-    }
-    if (!tok) return AST_OWN_NONE;
-    strslice_t s = token_strslice(tok);
-    if (s.len == 3 && memcmp(s.ptr, "own", 3) == 0) return AST_OWN_OWN;
-    if (s.len == 3 && memcmp(s.ptr, "ref", 3) == 0) return AST_OWN_REF;
-    if (s.len == 5 && memcmp(s.ptr, "fatal", 5) == 0) return AST_OWN_FATAL;
-    /* share / weak 不是所有权修饰，是**真实类型**（`share *T` / `weak *T`）：
-       RC 语义编码在指针类型对象上（ptr_type_t.rc），槽位所有权仍是 NONE
-       （可拷贝）。销毁判定看**类型** rather than 槽位所有权。 */
-    return AST_OWN_NONE;
-}
 
 ast_node_t *parse_var_def(parser_t *p) {
     uint32_t tb = p->pos;
@@ -112,7 +85,6 @@ ast_node_t *parse_var_def(parser_t *p) {
     ((ast_var_def_t *)node)->type_expr = type_expr;
     /* 所有权必须在类型槽位折叠前缓存（折叠后 ownership token 丢失）——
        extern 声明（extern cfunc/var）到 Pass 1c 复审 ABI 时还要用它。 */
-    ((ast_var_def_t *)node)->ownership = ast_type_expr_ownership_code(type_expr);
     ((ast_var_def_t *)node)->init      = init;
     return node;
 }

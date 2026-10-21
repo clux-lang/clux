@@ -2515,3 +2515,15 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - 同步删除类型相等/去重里的所有权镜像比较；更新 cunion 测试的 member 初始化。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+113. **所有权升级为类型构造 · P3f：清理 AST 缓存与遗留 API**（2026-10）
+    - 删除 AST 上的所有权副本：`ast_var_def.ownership`、`ast_struct_field.ownership`、
+      `ast_make.elem_ownership`；捕获 own 判定、字段构建、make 元素所有权全部改为
+      `type_ownership_of(已解析类型)`。
+    - 删除 `ast_type_expr_ownership_code`。
+    - 删除遗留 API：`type_{array,slice,option}_intern_own`、
+      `type_*_intern_with_ownership`、各 `*_set_*_ownership` setter、
+      `SET_FIELD_OWNERSHIP` 指令（枚举/汇编表/执行器）。
+    - `MAKE` 指令去掉所有权字节操作数（元素所有权由元素类型携带），同步汇编表。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

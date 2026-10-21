@@ -211,30 +211,13 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count) {
-    return type_array_intern_own(vm, elem_type, count, OWN_NONE);
-}
-
-/* 带**元素槽位所有权**的一次性构造（`[N]own *T` 等，见 type_array.h）。 */
-const type_t *type_array_intern_own(vm_t *vm, const type_t *elem_type,
-                                    size_t count, ownership_t elem_ownership) {
-    (void)elem_ownership; /* 所有权已编码在 elem_type 上 */
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
-     * 与 array_type_push 的区别：不把 type value 压入操作数栈——本函数供
-     * sema resolve_type_expr 与 value_make_array 等非字节码路径使用，
-     * 压栈只会污染操作数栈（嵌套构造场景曾因此栈布局错位）。 */
+     * 元素槽位所有权已编码在 elem_type 上（`[N]own *T` 的 elem 即 `own *T`）。 */
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
     array_type_set_elem(vm, t, elem_type);
     array_type_set_count(vm, t, count);
     return array_type_seal(vm, t);
-}
-
-/* 兼容包装：旧签名（参数曾表示"数组类型本身的 ownership"，已废弃）——
-   现在等价于元素槽位所有权。 */
-const type_t *type_array_intern_with_ownership(vm_t *vm, const type_t *elem_type,
-                                               size_t count,
-                                               ownership_t ownership) {
-    return type_array_intern_own(vm, elem_type, count, ownership);
 }
 
 /* ================================================================ */
@@ -437,17 +420,9 @@ const vtable_t VTABLE_ARRAY = {
 
 value_t *value_make_array(vm_t *vm, const type_t *elem_type,
                           value_t **elems, size_t count) {
-    return value_make_array_own(vm, elem_type, elems, count, OWN_NONE);
-}
-
-/* 带元素槽位所有权的数组值构造：类型用 (elem, count, elem_own) 去重，
-   与声明处/hoist 构造的数组类型一致（`[N]own *T` 的元素按 own 销毁）。 */
-value_t *value_make_array_own(vm_t *vm, const type_t *elem_type,
-                              value_t **elems, size_t count,
-                              ownership_t elem_ownership) {
     if (!vm || !elem_type) return NULL;
 
-    const type_t *at = type_array_intern_own(vm, elem_type, count, elem_ownership);
+    const type_t *at = type_array_intern(vm, elem_type, count);
     if (!at) return value_make_error(vm, "array: failed to intern array type");
 
     /* 分配连续元素块（at->size = count * elem_type->size，seal 时已计算） */

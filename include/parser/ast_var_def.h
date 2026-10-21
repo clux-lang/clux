@@ -27,17 +27,6 @@ typedef struct {
      * 对象的槽位所有权展开（own *T → FREE、含 own 字段的聚合 → 逐槽位）。 */
     const struct type_t *resolved_type;
 
-    /* 声明位置的所有权修饰缓存（own/ref/fatal）。
-     *
-     * **所有权现在由类型携带**：`sema_resolve_type_slot` 解析出的类型本身就是
-     * `own T` / `ref T` / `fatal T`，判定一律用 `type_ownership_of(类型)`。
-     * 这个 AST 字段只是解析期缓存（sema 在解析完成后按类型回写），新代码不要
-     * 依赖它。
-     *
-     * 编码与 `ownership_t`（`vm/ownership.h`）一致：0=OWN_NONE、1=OWN_OWN、
-     * 2=OWN_REF、3=OWN_FATAL。用 `uint8_t` 而非 `ownership_t` 是为了不让
-     * parser 层头文件依赖 vm 层头文件。 */
-    uint8_t     ownership;
 
     /* ---- M6 FFI：`extern var <库>::<名>: T;`（动态库导出的**全局数据符号**）----
      * 与 `extern cfunc` 对称、与 `extern lib` 配套：名字是库里的数据符号，
@@ -85,7 +74,6 @@ enum {
  *
  * 实现见 `src/parser/parse_var_def.c`（那里包含 token/类型节点头）。
  */
-uint8_t ast_type_expr_ownership_code(const ast_node_t *type_expr);
 
 
 /** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。

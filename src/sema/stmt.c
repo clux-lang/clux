@@ -257,7 +257,6 @@ static ast_node_t *destroy_fn_callee(sema_t *sema, const type_t *t) {
   if (!pnode || !ptexpr) return NULL;
   ((ast_var_def_t *)pnode)->name = strslice_from_bytes("dv", 2);
   ((ast_var_def_t *)pnode)->type_expr = ptexpr;
-  ((ast_var_def_t *)pnode)->ownership = 2; /* AST_OWN_REF（与 ownership_t 同编码） */
   fn->params = pnode;
 
   /* 签名 void(ref *T)：登记进 sema->types（hoist 两遍扫描构造），记 sig_id */
@@ -1840,7 +1839,8 @@ static const ast_func_def_t *own_closure_of(ast_node_t *e) {
   if (e->kind != AST_FUNC_DEF) return NULL;
   ast_func_def_t *fd = (ast_func_def_t *)e;
   for (ast_node_t *c = fd->captures; c; c = c->next)
-    if (((ast_var_def_t *)c)->ownership == AST_OWN_OWN) return fd;
+    if (type_ownership_of(((ast_var_def_t *)c)->resolved_type) == OWN_OWN)
+      return fd;
   return NULL;
 }
 
@@ -1951,7 +1951,6 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
     ast_var_def_t *pv = (ast_var_def_t *)vn;
     pv->name = synth_name(sema, nb);
     pv->type_expr = texpr;
-    pv->ownership = (uint8_t)tgt_own;
     if (params_last) params_last->next = vn; else params = vn;
     params_last = vn;
 

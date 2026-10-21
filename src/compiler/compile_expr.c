@@ -1017,10 +1017,11 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        校验）。clux 无默认零值，init_count 须 == length（sema 已校验）。 */
     ast_make_t *n = (ast_make_t *)node;
     /* 元素类型位：运行期槽位类型保留所有权（make 的 []own *T 元素类型）。 */
+    ownership_t elem_own = type_ownership_of(c_resolve_type(c, n->elem_type));
     compile_type_expr(c, n->elem_type);  /* 栈: [elem_type] */
-    if (n->elem_ownership != OWN_NONE) {
+    if (elem_own != OWN_NONE) {
       bcode_write_op(c->bc, BCODE_LOAD_TYPE_OWNED);
-      bcode_write_u8(c->bc, n->elem_ownership);
+      bcode_write_u8(c->bc, (uint8_t)elem_own);
     }
     /* 长度值（可运行期值） */
     compile_expr(c, n->length);          /* 栈: [elem_type, length] */
@@ -1066,7 +1067,6 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     }
     bcode_write_op(c->bc, BCODE_MAKE);
     bcode_write_u32(c->bc, (uint32_t)icount);
-    bcode_write_u8(c->bc, n->elem_ownership); /* 元素槽位所有权（类型一致） */
     st_push(c, -((int)icount) - 1);     /* MAKE 弹 icount+2 压 1，净 -(icount+1) */
     break;
   }

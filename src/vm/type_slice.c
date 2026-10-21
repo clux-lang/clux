@@ -359,13 +359,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_slice_intern(vm_t *vm, const type_t *elem) {
-    return type_slice_intern_own(vm, elem, OWN_NONE);
-}
-
-/* 带元素槽位所有权的一次性构造（`own []own *T` 等）。 */
-const type_t *type_slice_intern_own(vm_t *vm, const type_t *elem,
-                                    ownership_t elem_ownership) {
-    (void)elem_ownership; /* 所有权已编码在 elem 类型上 */
+    /* 元素槽位所有权已编码在 elem 类型上（`[]own *T` 的 elem 即 `own *T`）。 */
     if (!vm || !elem) return NULL;
     slice_type_t *st = slice_type_create_open(vm);
     st->elem_type = elem;

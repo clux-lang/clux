@@ -2433,7 +2433,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
             if (!st) return val_void(sema);
             sema_type_register(sema, st);
-            const type_t *opt = type_option_intern_own(sema->vm, st, OWN_NONE);
+            const type_t *opt = type_option_intern(sema->vm, st);
             if (!opt) return val_void(sema);
             sema_type_register(sema, opt);
             value_t *sv = value_make_shadow(sema->vm, opt);
@@ -2922,7 +2922,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
         if (!st) return val_void(sema);
         sema_type_register(sema, st);
-        const type_t *opt = type_option_intern_own(sema->vm, st, OWN_NONE);
+        const type_t *opt = type_option_intern(sema->vm, st);
         if (!opt) return val_void(sema);
         sema_type_register(sema, opt);
         value_t *sv = value_make_shadow(sema->vm, opt);
@@ -3796,7 +3796,6 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
       const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
       if (!et) return val_void(sema);
       ownership_t elem_own = type_ownership_of(et);
-      n->elem_ownership = (uint8_t)elem_own;
 
       /* 求值长度 N（shadow 求值，运行期可变） */
       value_t *lenv = sema_expr(sema, &n->length, scope);
@@ -3895,7 +3894,7 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
       /* 返回 fatal []T shadow——make 产新堆块，与 new 统一。
          所有权纯编译期：fatal 是值层 ownership 状态。
          元素槽位所有权进类型（`make(own *i32, …)` 的元素按 own 释放）。 */
-      const type_t *slice_base = type_slice_intern_own(sema->vm, et, elem_own);
+      const type_t *slice_base = type_slice_intern(sema->vm, et);
       if (!slice_base) return val_void(sema);
       /* `make(T, N, ...)` 产新堆块：类型是 **fatal []T**（同 new）。 */
       const type_t *slice_t =
@@ -4220,7 +4219,6 @@ static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
   if (!pnode || !ptexpr) return NULL;
   ((ast_var_def_t *)pnode)->name = strslice_from_bytes("dv", 2);
   ((ast_var_def_t *)pnode)->type_expr = ptexpr;
-  ((ast_var_def_t *)pnode)->ownership = 2; /* AST_OWN_REF */
   fn->params = pnode;
 
   const type_t *sigparams[1] = {pt};
@@ -4411,7 +4409,6 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   mk->is_generated = true;
   ast_make_t *m = (ast_make_t *)mk;
   m->elem_type      = sema_gen_type_ref(sema, elem);
-  m->elem_ownership = (uint8_t)eown;
   m->length         = clone_len_call(sema, access);
   if (!m->elem_type || !m->length) return NULL;
   v->init = mk;
@@ -5342,7 +5339,8 @@ static value_t *ex_func_def(sema_t *sema, ast_node_t **node,
          捕获槽的所有权由 resolve_func_captures 回写进 AST 节点（cv->ownership）。 */
       if (fn->captures) {
         for (ast_node_t *c = fn->captures; c; c = c->next) {
-          if (((ast_var_def_t *)c)->ownership == AST_OWN_OWN) {
+          if (type_ownership_of(((ast_var_def_t *)c)->resolved_type) ==
+              OWN_OWN) {
             value_set_type_ownership(sema->vm, fv, OWN_OWN);
             break;
           }

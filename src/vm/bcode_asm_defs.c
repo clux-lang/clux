@@ -121,7 +121,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
 
     [BCODE_PUSH_SLICE]     = { "PUSH_SLICE",    { BCODE_ASM_OP_NONE } },
     [BCODE_SLICE]          = { "SLICE",         { BCODE_ASM_OP_U8 } },
-    [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32, BCODE_ASM_OP_U8 } },
+    [BCODE_MAKE]           = { "MAKE",          { BCODE_ASM_OP_U32 } },
 
     [BCODE_IMPORT]         = { "IMPORT",        { BCODE_ASM_OP_STR } },
     [BCODE_EXTERN_CALL]  = { "EXTERN_CALL",   { BCODE_ASM_OP_STR, BCODE_ASM_OP_U32, BCODE_ASM_OP_U32 } },
@@ -134,7 +134,6 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_STORE_ATTR]     = { "STORE_ATTR",    { BCODE_ASM_OP_U32, BCODE_ASM_OP_STR } },
     [BCODE_MARK_UNIQUE]    = { "MARK_UNIQUE",   { BCODE_ASM_OP_NONE } },
     [BCODE_FREE]           = { "FREE",          { BCODE_ASM_OP_NONE } },
-    [BCODE_SET_FIELD_OWNERSHIP] = { "SET_FIELD_OWNERSHIP", { BCODE_ASM_OP_U8 } },
     [BCODE_STORE_REINIT]  = { "STORE_REINIT",  { BCODE_ASM_OP_STR } },
     [BCODE_FREE_RECURSIVE] = { "FREE_RECURSIVE", { BCODE_ASM_OP_NONE } },
     [BCODE_PUSH_USIZE]     = { "PUSH_USIZE",     { BCODE_ASM_OP_U64 } },

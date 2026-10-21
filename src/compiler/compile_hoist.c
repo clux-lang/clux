@@ -533,11 +533,8 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
  * SEAL 封闭（C 对齐布局 + 去重 intern；去重时按自身 id 重绑登记）。
  * 字段类型是布局依赖（密封计算 offset/size 需要字段 size/
  * align 已确定）→ 依赖后序 + 环检测。 */
-/* 槽位所有权（类型描述的一部分：参与类型去重 intern，且驱动运行期
-   "就地覆盖旧值前按槽位释放"的路径——own 叶子释放、ref 借用跳过）。
-   `DEFINE_FIELD` / `APPEND_ELEM` 只带名字/类型，槽位所有权缺省 NONE，故
-   在追加之后补发 SET_FIELD_OWNERSHIP（作用于最后追加的字段/元素/member）。
-   OWN_NONE 不必发（缺省即 NONE）。 */
+/* 槽位所有权由槽位类型携带：define_struct 用 emit_slot_type 把字段类型
+   （`own *T` 等）带进运行期类型图，不再需要 SET_FIELD_OWNERSHIP 补发。 */
 static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
                           size_t count) {
   const type_t *t = st->type;
