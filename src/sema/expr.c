@@ -1041,7 +1041,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       value_t *r = value_make_shadow(sema->vm, pt);
-      value_set_ownership(r, OWN_FATAL);
+      value_set_type_ownership(sema->vm, r, OWN_FATAL);
       return r;
 }
 
@@ -1051,7 +1051,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
    接收。判定依据是 type 对象上的槽位所有权（装饰器会改类型，AST 不可信）。 */
 static value_t *construct_result(sema_t *sema, const type_t *t) {
   value_t *v = value_make_shadow(sema->vm, t);
-  if (v && type_has_own_slots(t)) value_set_ownership(v, OWN_FATAL);
+  if (v && type_has_own_slots(t)) value_set_type_ownership(sema->vm, v, OWN_FATAL);
   return v;
 }
 
@@ -1081,7 +1081,7 @@ bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
                what, fn);
     return false;
   }
-  if (slot_own == OWN_NONE && value_ownership(fv) == OWN_OWN &&
+  if (slot_own == OWN_NONE && value_type_ownership(fv) == OWN_OWN &&
       slot_type && type_has_own_slots(slot_type)) {
     char tn[64];
     sema_type_name(slot_type, tn, sizeof tn);
@@ -2074,7 +2074,7 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
           /* 不求值生成链（__ctx 是 VM 调用帧的隐藏局部，sema 作用域里不需要
              它）：直接按捕获槽类型/所有权产出 shadow。 */
           value_t *csv = value_make_shadow(sema->vm, sym->type);
-          value_set_ownership(csv, sym->ownership);
+          value_set_type_ownership(sema->vm, csv, sym->ownership);
           return csv;
         }
       }
@@ -2146,7 +2146,7 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
       /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
          解包由显式 .! assert 承担，见 docs m2-design §12.5） */
       value_t *sv = value_make_shadow(sema->vm, value_type(v));
-      value_set_ownership(sv, sym ? sym->ownership : OWN_NONE);
+      value_set_type_ownership(sema->vm, sv, sym ? sym->ownership : OWN_NONE);
       return sv;
 }
 
@@ -2447,7 +2447,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
             if (!opt) return val_void(sema);
             sema_type_register(sema, opt);
             value_t *sv = value_make_shadow(sema->vm, opt);
-            value_set_ownership(sv, OWN_NONE);
+            value_set_type_ownership(sema->vm, sv, OWN_NONE);
             return sv;
           }
         }
@@ -2644,7 +2644,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
           }
         }
         if (!sig_type) return val_void(sema);
-        const func_sig_t *sig = &((const func_type_t *)sig_type)->sig;
+        const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(sig_type))->sig;
         /* 实参校验（参数数量 + 隐式转换），与 value_call 的 shadow 校验同构。
            实例方法：第一个参数是 self（接收者），实参从 args 开始对齐 self
            之后的形参。静态方法：无 self，实参从 args 开始对齐全部形参。 */
@@ -2674,8 +2674,8 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
         /* 函数返回值 ownership：fatal→OWN_FATAL，ref→OWN_REF，其余 OWN_NONE */
         if (rt && sig_type && type_kind_of(sig_type) == TYPE_KIND_FUNC) {
-          const func_sig_t *sig = &((const func_type_t *)sig_type)->sig;
-          value_set_ownership(sv, sig->return_ownership);
+          const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(sig_type))->sig;
+          value_set_type_ownership(sema->vm, sv, sig->return_ownership);
         }
         return sv;
       }
@@ -2749,7 +2749,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                          qual);
               return val_void(sema);
             }
-            const func_sig_t *sig = &((const func_type_t *)fs->type)->sig;
+            const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(fs->type))->sig;
             call->is_ffi_call = true;
             /* 返回类型码 + 变参信息打包（编解码见 vm/bcode.h）。
                变参调用必须知道"前几个是固定参数"，运行期才能按 C 的约定铺寄存器/
@@ -2792,7 +2792,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                            "as the declared parameter type", qual, ai + 1);
             }
             value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
-            value_set_ownership(sv, sig->return_ownership);
+            value_set_type_ownership(sema->vm, sv, sig->return_ownership);
             return sv;
           }
         }
@@ -2919,7 +2919,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         if (!st) return val_void(sema);
         sema_type_register(sema, st);
         value_t *sv = value_make_shadow(sema->vm, st);
-        value_set_ownership(sv, OWN_NONE); /* share 是普通可拷贝值 */
+        value_set_type_ownership(sema->vm, sv, OWN_NONE); /* share 是普通可拷贝值 */
         return sv;
       }
       /* __weak_get(w)：`weak *T` → `?share *T`（原子升级；死对象得 nil）。 */
@@ -2940,7 +2940,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         if (!opt) return val_void(sema);
         sema_type_register(sema, opt);
         value_t *sv = value_make_shadow(sema->vm, opt);
-        value_set_ownership(sv, OWN_NONE);
+        value_set_type_ownership(sema->vm, sv, OWN_NONE);
         return sv;
       }
 
@@ -2949,7 +2949,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         if (!arg || is_poison(sema, arg) || value_is_type(arg, TYPE_KIND_VOID))
           return val_void(sema);
         value_t *sv = value_make_shadow(sema->vm, value_type(arg));
-        value_set_ownership(sv, OWN_FATAL);
+        value_set_type_ownership(sema->vm, sv, OWN_FATAL);
         return sv;
       }
 
@@ -2990,15 +2990,15 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         sema_type_register(sema, rp);
         call->is_data_call = true;
         value_t *sv = value_make_shadow(sema->vm, rp);
-        value_set_ownership(sv, OWN_REF);
+        value_set_type_ownership(sema->vm, sv, OWN_REF);
         return sv;
       }
 
       /* 函数返回值 ownership：从签名 return_ownership 读取（fatal/ref/none）。
          函数永不能返回 own（§4 已拦截），所以此处只会有 OWN_FATAL / OWN_REF / OWN_NONE。 */
       if (result && fnt && type_kind_of(fnt) == TYPE_KIND_FUNC) {
-        const func_sig_t *sig = &((const func_type_t *)fnt)->sig;
-        value_set_ownership(result, sig->return_ownership);
+        const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(fnt))->sig;
+        value_set_type_ownership(sema->vm, result, sig->return_ownership);
       }
       return result; /* shadow in → shadow out（return_type shadow） */
 }
@@ -3924,7 +3924,7 @@ static value_t *ex_make(sema_t *sema, ast_node_t **node,
       if (!slice_t) return val_void(sema);
       sema_type_register(sema, slice_t);
       value_t *r = value_make_shadow(sema->vm, slice_t);
-      value_set_ownership(r, OWN_FATAL);
+      value_set_type_ownership(sema->vm, r, OWN_FATAL);
       return r;
 }
 
@@ -4750,7 +4750,7 @@ bool rc_adapt_share_init(sema_t *sema, const type_t *target,
   const type_t *st = value_type(v);
   if (!st || type_kind_of(st) != TYPE_KIND_PTR || ptr_type_base(st) != base) return false;
   if (type_is_rc_ptr(st)) return false;                    /* 已是 share/weak */
-  if (!(sema_value_is_fatal(v) || value_ownership(v) == OWN_OWN)) return false;
+  if (!(sema_value_is_fatal(v) || value_type_ownership(v) == OWN_OWN)) return false;
 
   ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
   ast_node_t *call = ast_call_new(sema->arena, 0, 0);
@@ -4763,7 +4763,7 @@ bool rc_adapt_share_init(sema_t *sema, const type_t *target,
   *pvalue = call;
 
   value_t *sv = value_make_shadow(sema->vm, target);
-  value_set_ownership(sv, OWN_NONE);   /* share 是普通值（copy = 计数 +1） */
+  value_set_type_ownership(sema->vm, sv, OWN_NONE);   /* share 是普通值（copy = 计数 +1） */
   *pv = sv;
   return true;
 }
@@ -4900,8 +4900,8 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
          当所有权，销毁时 free 借用源（实测 0xC0000005）。
          clone 不受限：拷贝不改变源的绑定状态。 */
       if (!is_clone && !union_root && !cunion_member_move && produces_fatal &&
-          value_ownership(operand) != OWN_OWN &&
-          value_ownership(operand) != OWN_FATAL) {
+          value_type_ownership(operand) != OWN_OWN &&
+          value_type_ownership(operand) != OWN_FATAL) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "cannot move a borrowed value: move transfers ownership, but "
                    "a ref/borrow does not own the block (use clone() to copy)");
@@ -5019,7 +5019,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
       }
 
       value_t *r = value_make_shadow(sema->vm, fatal);
-      value_set_ownership(r, OWN_FATAL);
+      value_set_type_ownership(sema->vm, r, OWN_FATAL);
       return r;
 }
 
@@ -5336,7 +5336,7 @@ static value_t *ex_addr(sema_t *sema, ast_node_t **node,
       if (!pt) return val_void(sema);
       sema_type_register(sema, pt);
       value_t *r = value_make_shadow(sema->vm, pt);
-      value_set_ownership(r, OWN_REF);
+      value_set_type_ownership(sema->vm, r, OWN_REF);
       return r;
 }
 
@@ -5360,7 +5360,7 @@ static value_t *ex_func_def(sema_t *sema, ast_node_t **node,
       if (fn->captures) {
         for (ast_node_t *c = fn->captures; c; c = c->next) {
           if (((ast_var_def_t *)c)->ownership == AST_OWN_OWN) {
-            value_set_ownership(fv, OWN_OWN);
+            value_set_type_ownership(sema->vm, fv, OWN_OWN);
             break;
           }
         }

@@ -20,16 +20,10 @@ struct value_t {
     const type_t     *type;
     void             *data;
     bool              is_shadow;
-    /* 所有权状态（值层编码，2026-10 重构）：
-     *   OWN_NONE — 无所有权（shadow 值、引擎内部对象）
-     *   OWN_OWN  — 拥有 data（dispose 释放 data 块 + 递归释放内嵌 own 资源）
-     *   OWN_REF  — 借用引用（data 指向父值内部，dispose 跳过释放）
-     *   OWN_FATAL— 将亡值（sema 编译期状态，运行期不使用）
-     *
-     * **运行期约束**：exec/scope/value 等运行期代码只通过 value_is_borrowed
-     * 间接区分 OWN_REF（借用）vs 非借用，不直接读写 ownership 字段。
-     * OWN_FATAL 仅供 sema 编译期使用，运行期永远不产生也不读取该状态。 */
-    ownership_t       ownership;
+    /* 运行期视图位：data 指向父值 data 块内部（字段/元素借用视图）。
+       它**不是所有权状态**——只回答"dispose 时是否释放 data 块"。
+       所有权的静态部分（own/ref/fatal）已经编码在 value->type 里。 */
+    bool              borrowed;
     const scope_frame_t *frame; /* 借用：所属作用域的父子关系节点（&scope->frame） */
 };
 
@@ -103,12 +97,14 @@ scope_t *value_scope(const value_t *v) {
     return (v && v->frame) ? scope_from_frame(v->frame) : NULL;
 }
 
-ownership_t value_ownership(const value_t *v) {
-    return v ? v->ownership : OWN_NONE;
+ownership_t value_type_ownership(const value_t *v) {
+    return v ? type_ownership_of(v->type) : OWN_NONE;
 }
 
-void value_set_ownership(value_t *v, ownership_t own) {
-    if (v) v->ownership = own;
+void value_set_type_ownership(vm_t *vm, value_t *v, ownership_t own) {
+    if (!v || !v->type) return;
+    const type_t *core = type_strip_ownership(v->type);
+    v->type = type_ownership_apply(vm, own, core);
 }
 
 bool value_is_void(const value_t *v) {
@@ -138,14 +134,7 @@ value_t *value_alloc_shell(allocator_t *alloc, const type_t *type, void *data) {
     value_t *v = value_alloc(alloc);
     v->type = type;
     v->data = data;
-    /* 所有权默认值：只有指针/切片拥有堆资源（OWN_OWN），其余类型无所有权
-       （OWN_NONE）。类型值、函数值、标量、error/interrupt 等都不携带
-       所有权——旧模型用 type_t.ownership 判定，value->ownership 被忽略；
-       所有权迁移到值层后 value->ownership 成为唯一来源，必须正确初始化。 */
-    v->ownership = (type && (type->kind == TYPE_KIND_PTR ||
-                             type->kind == TYPE_KIND_SLICE))
-                       ? OWN_OWN
-                       : OWN_NONE;
+    v->borrowed = false;
     return v;
 }
 
@@ -156,8 +145,8 @@ value_t *value_make(vm_t *vm, const type_t *type, void *data) {
 }
 
 /* 借用引用：data 指向父值 data 块内的业务内存偏移（C 语义 &arr[i]），
-   ownership=OWN_REF，dispose 跳过 data 释放。value 是引擎内部内存对象（含
-   type/ownership 等元数据），借用引用的 data 指向的是业务数据而非引擎对象。
+   borrowed=true，dispose 跳过 data 释放。value 是引擎内部内存对象，借用引用的
+   data 指向的是业务数据而非引擎对象。
    借用值只匿名存活于表达式链中，绑定（DEFINE/STORE/RET/clone）时经
    value_clone materialize 成独立深拷贝。frame 指向当前求值作用域（借用
    引用匿名存活于当前表达式链，不随 data 归属父值）。 */
@@ -165,14 +154,14 @@ value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *data) {
     value_t *v = value_alloc(vm->alloc);
     v->type = type;
     v->data = data;     /* 业务内存：父值 data 块内偏移 */
-    v->ownership = OWN_REF;
+    v->borrowed = true;
     v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
 }
 
 bool value_is_borrowed(const value_t *v) {
-    return v && !v->is_shadow && v->ownership == OWN_REF;
+    return v && !v->is_shadow && v->borrowed;
 }
 
 
@@ -184,7 +173,7 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type) {
     v->type = type;
     v->data = NULL;
     v->is_shadow = true;
-    v->ownership = OWN_NONE;   /* shadow 无数据所有权概念 */
+    v->borrowed = false;
     v->frame = vm->current_scope ? &vm->current_scope->frame : NULL;
     scope_track(vm, vm->current_scope, v);
     return v;
@@ -434,7 +423,7 @@ void value_dispose(vm_t *vm, value_t *v) {
         /* shadow 值无 data，跳过 dispose 和 data 释放 */
         if (!v->is_shadow) {
             /* 借用引用（OWN_REF）：data 指向父值内部，不拥有，跳过 dispose 与释放 */
-            if (v->ownership != OWN_REF) {
+            if (!v->borrowed) {
                 if (v->type->vtable && v->type->vtable->dispose) {
                     v->type->vtable->dispose(vm, v);
                 }
@@ -454,7 +443,7 @@ value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
                                            const type_t *)) {
     if (!vm || !v || !target || !cfg) return NULL;
     const type_t *src = v->type;
-    if (!src || value_ownership(v) != OWN_FATAL) return NULL;
+    if (!src || value_type_ownership(v) != OWN_FATAL) return NULL;
     if (src->kind != target->kind) return NULL;   /* 只认同 kind 的 fatal 变体 */
     if (src->size != target->size) return NULL;   /* 布局必须一致才能重贴标签 */
     if (!cfg(vm, target, src)) return NULL;       /* 各类型的布局兼容判定 */

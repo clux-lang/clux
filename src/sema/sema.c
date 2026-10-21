@@ -291,7 +291,7 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
  * 携带指针/切片，"含 own 字段的复合类型"这一形态当前不存在），已无调用方，
  * 故连同 `type_directly_owns` 空壳一并删除。
  *
- * 判据入口现为**符号/值层**：`sema_symbol_t::ownership` 与 `value_ownership()`。
+ * 判据入口现为**符号/值层**：`sema_symbol_t::ownership` 与 `value_type_ownership()`。
  * 将来恢复含指针的复合类型时，按**扁平槽位表**重新设计，不恢复这两个谓词。
  * =========================================================================== */
 
@@ -919,7 +919,7 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
           : NULL;
   const func_sig_t *prior_sig =
       (prior && prior->type && type_kind_of(prior->type) == TYPE_KIND_FUNC)
-          ? &((const func_type_t *)prior->type)->sig
+          ? &((const func_type_t *)type_strip_ownership(prior->type))->sig
           : NULL;
 
   for (ast_node_t *p = efd->params; p && pn < 64; p = p->next) {
@@ -1327,7 +1327,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
     const type_t **params = NULL;
     ownership_t *powns = NULL;
     const func_sig_t *existing_sig = (sym->type && type_kind_of(sym->type) == TYPE_KIND_FUNC)
-                                         ? &((const func_type_t *)sym->type)->sig
+                                         ? &((const func_type_t *)type_strip_ownership(sym->type))->sig
                                          : NULL;
     if (nparams > 0) {
       params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),

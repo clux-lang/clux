@@ -572,7 +572,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   /* ---- func / cfunc ---- */
   if (type_kind_of(T) == TYPE_KIND_FUNC || type_kind_of(T) == TYPE_KIND_CFUNC) {
     const func_sig_t *sig =
-        type_kind_of(T) == TYPE_KIND_FUNC ? &((const func_type_t *)T)->sig
+        type_kind_of(T) == TYPE_KIND_FUNC ? &((const func_type_t *)type_strip_ownership(T))->sig
                                   : cfunc_type_sig(T);
     if (sig) {
       if (key_is(key, "param_count")) {

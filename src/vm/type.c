@@ -399,7 +399,7 @@ bool type_contains_ptr_or_slice(const type_t *t) {
  *
  * 判定入口现为：
  *   - 符号层：`sema_symbol_t::ownership`
- *   - 值层：  `value_ownership(v)`
+ *   - 值层：  `value_type_ownership(v)`
  *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
  *   - C ABI： `ffi_c_abi_reject_reason_own(t, own)`（所有权由调用方传入）
  *

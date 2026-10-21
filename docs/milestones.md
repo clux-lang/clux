@@ -2426,3 +2426,19 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       符号/值层判定尚未删除——当前与类型保持一致，是下一阶段的清理对象。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       fmt 幂等 53/53；WSL2 全量 **2229 passed / 2 skipped**。
+
+105. **所有权升级为类型构造 · P3a：删除值层所有权状态**（2026-10）
+    - `value_t.ownership`、`value_set_ownership`、`value_ownership` 删除；值只剩
+      `type / data / is_shadow / borrowed / frame`。新增
+      `value_type_ownership(v)`（类型派生）与
+      `value_set_type_ownership(vm, v, own)`（同布局重贴标签），原 49 处调用点全部迁移。
+    - 运行期保留唯一 `borrowed` 位：data 指向父值内部（字段/元素借用视图），只决定
+      dispose 是否释放 data 块；它不是所有权状态。`value_is_borrowed` 暂时保留，
+      留给 P3c 与借用 materialize 改造一起收尾。
+    - 修复：FUNC 类型被 `own/fatal` 包装后，sema 直接强转 `func_type_t*` 读取签名
+      会读到垃圾（`clone(func…)` 的调用结果被当成 `fatal i32`）；所有此类强转
+      先剥所有权修饰。
+    - 同步更新 `ownership.h` / `type.h` / `sema.h` 的过时注释（所有权是类型修饰，
+      值上不再有状态）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

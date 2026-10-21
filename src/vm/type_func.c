@@ -70,7 +70,7 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
     if (!ct || ct->vtable != &VTABLE_FUNC || ct == vm->type_func) {
         return value_make_error(vm, "func call: function has no signature");
     }
-    const func_sig_t *sig = &((const func_type_t *)ct)->sig;
+    const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(ct))->sig;
     /* 192：最长的诊断（"argument N: cannot copy a value holding owned resources
        into parameter of type <类型名> (use move() or clone(), or declare the
        parameter as 'ref *T' to borrow)"）在类型名较长时约 150 字符。 */
@@ -104,10 +104,10 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
            本函数是"实参 → 形参"转换的**唯一**判定点：运行期 func_vcall 与 sema
            的 shadow 调用都经过这里，因此规则只此一处。
            所有权纯编译期——形参 ownership 从 sig->param_ownerships[i] 读取，
-           实参 fatal 从 value_ownership(args[i]) 读取。 */
+           实参 fatal 从 value_type_ownership(args[i]) 读取。 */
         if (i < sig->param_count && sig->params[i] &&
             sig->param_ownerships && sig->param_ownerships[i] == OWN_OWN &&
-            value_ownership(args[i]) != OWN_FATAL) {
+            value_type_ownership(args[i]) != OWN_FATAL) {
             char pn[64];
             sig_type_name(sig->params[i], pn, sizeof pn);
             snprintf(msg, sizeof msg,
@@ -156,7 +156,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
        func 基类（vm->type_func，无签名）→ sig=NULL 跳过校验 */
     const type_t *st = (ct && ct->vtable == &VTABLE_FUNC && ct != vm->type_func)
                            ? ct : NULL;
-    const func_sig_t *sig = st ? &((const func_type_t *)st)->sig : NULL;
+    const func_sig_t *sig = st ? &((const func_type_t *)type_strip_ownership(st))->sig : NULL;
 
     /* 参数数量检查：非 variadic 函数拒绝多余实参 */
     if (sig && !sig->is_variadic && argc > sig->param_count) {
@@ -207,12 +207,12 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
            **多余的深拷贝**（白分配一整套对象图），而且调用方实参仍持有原件，
            "转移"就名不副实。这里显式走 value_move：接管资源 + 清空源。
            所有权纯编译期——形参 ownership 从 sig->param_ownerships[i] 读取，
-           实参 ownership 从 value_ownership(args[i]) 读取。 */
+           实参 ownership 从 value_type_ownership(args[i]) 读取。 */
         if (sig && sig->params && sig->param_ownerships &&
             i < sig->param_count && sig->params[i] &&
             sig->param_ownerships[i] == OWN_FATAL &&
             (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
-            value_ownership(args[i]) == OWN_OWN) {
+            value_type_ownership(args[i]) == OWN_OWN) {
             value_t *moved = value_move(vm, args[i]);
             if (value_is_error(vm, moved)) {
                 is_error = true;
@@ -245,7 +245,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
             i < sig->param_count && sig->params[i] &&
             sig->param_ownerships[i] == OWN_OWN &&
             (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
-            value_ownership(args[i]) == OWN_REF) {
+            value_type_ownership(args[i]) == OWN_REF) {
             value_t *owned = value_clone(vm, args[i]);
             if (!owned || value_is_error(vm, owned)) {
                 is_error = true;
@@ -254,7 +254,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                                                    "while binding own parameter");
                 break;
             }
-            value_set_ownership(owned, OWN_OWN);
+            value_set_type_ownership(vm, owned, OWN_OWN);
             if (value_type(owned) != sig->params[i]) {
                 value_t *relabeled = value_relabel_into(vm, owned, sig->params[i]);
                 if (relabeled) owned = relabeled;
@@ -331,7 +331,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
             sig->return_ownership == OWN_FATAL &&
             (type_is_ptr(sig->return_type) ||
              type_is_slice(sig->return_type)) &&
-            value_ownership(ret) == OWN_OWN) {
+            value_type_ownership(ret) == OWN_OWN) {
             /* 声明返回值带资源：**转移**（与形参接收同款）。产物是 base 类型，
                按声明的 fatal 返回类型重贴标签后再交回调用方。 */
             ret = value_move(vm, ret);

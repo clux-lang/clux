@@ -147,7 +147,7 @@ static inline bool sema_sym_is_fatal(const sema_symbol_t *sym) {
 }
 /* 兼容旧调用：从 value 的 ownership 判 fatal */
 static inline bool sema_value_is_fatal(const value_t *v) {
-  return v && value_ownership(v) == OWN_FATAL;
+  return v && value_type_ownership(v) == OWN_FATAL;
 }
 static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
   if (sym) sym->moved = true;
@@ -220,7 +220,7 @@ static inline ownership_t sema_type_expr_ownership(const ast_node_t *type_expr) 
  *      当前不存在，递归判定没有作用对象。
  *
  * 现在的判据入口是**符号/值层**：`sema_symbol_t::ownership`（声明处所有权）与
- * `value_ownership()`（值层所有权）。将来恢复含指针的复合类型时，应按
+ * `value_type_ownership()`（类型层所有权）。将来恢复含指针的复合类型时，应按
  * **扁平槽位表**（类型 → own 槽位偏移）重新设计，而不是恢复这两个递归谓词。
  */
 struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */

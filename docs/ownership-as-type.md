@@ -168,13 +168,24 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制
-- 删 `value_t.ownership`、`value_set_ownership`、`value_ownership`、`value_is_borrowed`（连同
-  P2 已删除的 60 处 `OWN_REF` 分支）、
-  `sema_type_expr_ownership`、8 个槽位所有权字段、`func_sig_eq` 所有权比较。
-- 反射把 `ownership` / `unqualified` 正式纳入 key 表（含 `field_type(i).ownership` 链式）。
-- 更新文档（language-spec 所有权章节、architecture、reflect 设计 §3.10 改写为"所有权是
-  类型修饰符，故可反射"）、milestones。
+### P3 删除旧机制 —— 🚧 P3a 已完成（2026-10）
+
+- ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
+  `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
+  所有权查询改为 `value_type_ownership(v)`（由类型派生），sema 的写入改为
+  `value_set_type_ownership(vm, v, own)`（同布局重贴标签）。
+- 运行期只剩一个 **`borrowed` 视图位**：data 指向父值 data 块内部（字段/元素
+  借用视图），只回答"dispose 时是否释放 data 块"。它不是所有权状态；
+  `value_is_borrowed` 谓词暂时保留，等 P3c 与借用 materialize 改造一起处理。
+- 顺带修掉：FUNC 类型被 `own/fatal` 包装后，sema 里直接
+  `(func_type_t *)value_type(...)` 强转读签名会越界/读到错误签名（`clone(func…)`
+  的调用返回类型变成 `fatal i32`）——所有这类强转改为先 `type_strip_ownership`。
+- **待办（P3b/P3c）**：8 个槽位所有权字段（struct/tuple/union/cunion/option/
+  slice/array/签名）、`func_sig_eq` 的所有权比较、`sema_type_expr_ownership`、
+  AST 上的 ownership 缓存、`type_fatal_variant_of` / `type_fatal_base_of` 恒等壳。
+- 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
+  已在文档层面成立。
+- 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。
 
 ---
 

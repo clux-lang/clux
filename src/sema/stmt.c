@@ -1895,7 +1895,7 @@ static strslice_t synth_name(sema_t *sema, const char *s) {
 static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
                                      const type_t *target, ast_node_t *origin,
                                      const func_sig_t *src_sig) {
-  const func_sig_t *sig = &((const func_type_t *)target)->sig;
+  const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(target))->sig;
   size_t nparams = sema_count_siblings(src->params);
   if (sig->param_count != nparams) {
     diag_error(sema->diag, sema_loc(sema, origin),
@@ -2048,7 +2048,7 @@ bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
   const sema_type_t *src_st = src->sig_id ? sema_type_by_id(sema, src->sig_id) : NULL;
   const func_sig_t *src_sig =
       (src_st && src_st->type && type_kind_of(src_st->type) == TYPE_KIND_FUNC)
-          ? &((const func_type_t *)src_st->type)->sig
+          ? &((const func_type_t *)type_strip_ownership(src_st->type))->sig
           : NULL;
   ast_node_t *lit = gen_cfunc_wrapper(sema, src, target, *slot, src_sig);
   if (!lit) return true;
@@ -2108,7 +2108,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = false;
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_ownership(var_value, sym->ownership);
+    value_set_type_ownership(sema->vm, var_value, sym->ownership);
   } else if (vd->init && vd->init->kind == AST_NIL) {
     /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
        nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
@@ -2133,7 +2133,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = true; /* nil 是确定值（已初始化） */
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_ownership(var_value, sym->ownership);
+    value_set_type_ownership(sema->vm, var_value, sym->ownership);
   } else {
     /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量）。
        匿名构造注入：显式声明类型已知 → push anon_ct，使 init 的 .{...}
@@ -2192,7 +2192,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
             !value_is_error(sema->vm, init)) {
           const type_t *it = value_type(init);
           if (it && type_kind_of(it) == TYPE_KIND_PTR && !type_is_rc_ptr(it) &&
-              value_ownership(init) != OWN_OWN &&
+              value_type_ownership(init) != OWN_OWN &&
               !sema_value_is_fatal(init)) {
             diag_error(sema->diag, sema_loc(sema, vd->init),
                        "cannot create '%.*s' of type %s from a borrowed value: "
@@ -2236,7 +2236,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      (int)vd->name.len, vd->name.ptr, tn, itn, tn);
           sym->flow_init = false;
         } else if (sym->ownership == OWN_NONE &&
-                   value_ownership(init) == OWN_OWN &&
+                   value_type_ownership(init) == OWN_OWN &&
                    type_has_own_slots(sym->type)) {
           /* 非 own 位置的 copy：读 own **聚合**变量得到 OWN 值，复制会让
              两个位置共享同一批内嵌堆块 → 双释放。own 是 move-only。
@@ -2265,7 +2265,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       var_value =
           value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-      value_set_ownership(var_value, sym->ownership);
+      value_set_type_ownership(sema->vm, var_value, sym->ownership);
     } else {
       /* 推断类型：init 类型即变量类型。
          R1（own 不可 copy，§3.1）：var p = q; 且 init 是 own *T 且非
@@ -2299,7 +2299,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
             if (oc) {
               sym->ownership = OWN_OWN;
             } else if (sema_value_is_fatal(init) ||
-                       value_ownership(init) == OWN_OWN) {
+                       value_type_ownership(init) == OWN_OWN) {
               /* 非字面量初始化（clone(g) / move(g)）：结果依赖运行期 capture_type
                  → 保守标 own，FREE 时由 VM 按槽位所有权释放。 */
               sym->ownership = OWN_OWN;
@@ -2333,7 +2333,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
           sym->flow_init = false;
           vt = sema->vm->type_void;
         }
-      } else if (vt && value_ownership(init) == OWN_OWN &&
+      } else if (vt && value_type_ownership(init) == OWN_OWN &&
                  !sema_value_is_fatal(init)) {
         char itn[64];
         sema_type_name(vt, itn, sizeof(itn));
@@ -2346,7 +2346,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       sym->type = vt;
       var_value = value_make_shadow(sema->vm, vt);
-      value_set_ownership(var_value, sym->ownership);
+      value_set_type_ownership(sema->vm, var_value, sym->ownership);
     }
   }
 
@@ -2793,7 +2793,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
                  (int)name.len, name.ptr, tn);
     } else {
       const type_t *lt = value_type(lhs);
-      if (lt && value_ownership(lhs) == OWN_OWN &&
+      if (lt && value_type_ownership(lhs) == OWN_OWN &&
           !sema_value_is_fatal(rhs)) {
         char rn[64];
         sema_type_name(value_type(rhs), rn, sizeof(rn));
@@ -3537,7 +3537,7 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
     /* **赋值点旧值销毁**：`p.* = v` 是纯覆盖（PTR_SET 只 memcpy），
        旧被指向值里的 own 槽位必须先释放。只对 **own 指针**生成——
        经 ref 指针写别人拥有的内容时不能替对方释放（借用方不拥有）。 */
-    if (value_ownership(base) == OWN_OWN && ft) {
+    if (value_type_ownership(base) == OWN_OWN && ft) {
       ast_node_t *dh = NULL, *dt = NULL;
       if (gen_destroy(sema, ft, as->target, &dh, &dt)) as->destroy = dh;
     }

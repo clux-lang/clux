@@ -631,46 +631,27 @@ bool type_has_own_slots(const type_t *t);
  *  销毁生成据此把它算作"需要销毁的值"。 */
 bool type_has_rc_slots(const type_t *t);
 
-/* 注：原 `type_owns_resources` / `type_fatal_carries_resource` / `type_directly_owns`
- * 三个**类型层所有权谓词**已删除（2026-10 所有权重构）：所有权从类型层迁移到
- * 值/符号层（`type_t` 不再携带 ownership），且复合类型已禁止携带指针/切片，
- * 类型层没有可判定的对象。判定入口现为：
- *   - 符号层：`sema_symbol_t::ownership`
- *   - 值层：  `value_ownership(v)`
+/* 注：所有权现在**就是类型修饰**（docs/ownership-as-type.md）。判定入口：
+ *   - 类型层：`type_ownership_of(t)`（穿透 const/volatile），
+ *             `type_is_own/ref/fatal(t)`（看最外层修饰）
+ *   - 符号层：`sema_symbol_t::ownership`（声明处的修饰词，与符号类型一致）
+ *   - 槽位层：`struct_field_t::ownership` 等（P3b 待删除，当前由槽位类型派生）
  *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
+ *             （P3b 待删除，当前与参数/返回类型一致）
  */
 
 /**
- * 取 `t` 的 **fatal 变体**（fatal T 将亡值，m3-design §3.3）——**唯一的权威
- * 定义**，sema 与运行期共用：
- *   - `t` 已是 fatal → 返回 `t`（幂等）；
- *   - 指针/切片（own/share/weak/ref）→ `*_intern` 成 OWN_FATAL 变体（顶层所有权
- *     升级；无资源可转的形态返回 NULL）；
- *   - 复合类型（struct/tuple/array/option/union）**且递归含 own 资源** →
- *     走各自的 `*_intern_with_ownership(…, OWN_FATAL)`；
- *   - 其余（无资源可转、或本来就不是所有权形态）→ 返回 `t` 自身（fatal 标记无意义）。
+ * 取 `t` 的 **fatal 变体**：所有权是类型修饰，fatal 变体就是 `fatal T` 包装
+ * （`type_ownership_apply(vm, OWN_FATAL, type_strip_ownership(t))`）。
  *
- * **为什么必须在 VM 层统一**：fatal 变体是 intern 出来的独立 `type_t`，各
- * 复合类型各有自己的去重键。若 sema 与运行期各自"拼"变体（一个传字段表指针、
- * 一个传字段表副本，或元素类型用了 fatal 变体而非 base），会造出**同布局但不同
- * 身份**的多个 fatal 实例——形参与实参比对失败，转移判定落空，最终表现为
- * "普通值 → fatal 类型"的非法转换或双释放。集中的一处定义消除了这类分叉。
+ * 该 VM 层入口现在只是恒等（保留给 FFI 的可接受性比较）。P3b 会把它与
+ * `type_fatal_base_of` 一起删除，改由 sema 的 `sema_fatal_variant_of` 统一构造。
  */
 const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
 
 /**
- * 取 fatal 变体的 **base 类型**（fatal T → T；fatal *T → own *T；
- * fatal []T → own []T）。非 fatal 输入原样返回。
- *
- * 实现要点：优先返回创建时缓存的 `t->fatal_base`（**规范身份**）；
- * 未缓存时才退回"按同布局重新 intern"。前者是唯一可靠路径——具名 struct 标了
- * `unique`、不参与 intern 去重，重新 intern 会每次新建实例，指针永不等于原 base。
- *
- * 用途：sema/运行期需要"把 fatal 字段折回它声明的类型"时比较身份
- * （例：`.?I{ .I{...} }` 的 option 内层比对）。
- *
- * **注意返回的指针可能是新建的 intern 实例**，因此只应用于**比较/判定**，
- * 不要拿去当类型注册名（它没有登记名）。
+ * 取 fatal 变体的 base：`fatal T → T`，非 fatal 原样返回。
+ * 所有权剥离后就是 `type_strip_ownership(t)`；保留为语义入口（P3b 删除）。
  */
 const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
 
@@ -681,7 +662,7 @@ const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
  * 值/符号层后它恒返回 false，且含 ref 字段的聚合当前不支持（复合类型禁止携带
  * 指针/切片）。ref 的判定入口：
  *   - 符号层：`sema_symbol_t::ownership == OWN_REF`
- *   - 值层：  `value_ownership(v) == OWN_REF`
+ *   - 值层：  `value_type_ownership(v) == OWN_REF`（类型派生）
  *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
  * 完整模型见 docs/ownership-refactor.md §0。
  */

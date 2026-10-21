@@ -216,7 +216,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   sema_symbol_t *fn_sym = sema_lookup(parent, fn->name);
   const func_sig_t *fn_sig = NULL;
   if (fn_sym && fn_sym->type && type_kind_of(fn_sym->type) == TYPE_KIND_FUNC)
-    fn_sig = &((const func_type_t *)fn_sym->type)->sig;
+    fn_sig = &((const func_type_t *)type_strip_ownership(fn_sym->type))->sig;
   size_t param_idx = 0;
   for (ast_node_t *p = fn->params; p; p = p->next, param_idx++) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
@@ -1385,7 +1385,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
                        "must be an own capture (declare it `own %s`)",
                        what, tn, itn, tn);
           } else if (cs->ownership == OWN_NONE &&
-                     value_ownership(init) == OWN_OWN &&
+                     value_type_ownership(init) == OWN_OWN &&
                      type_has_own_slots(cs->type)) {
             char tn[64];
             sema_type_name(cs->type, tn, sizeof(tn));
