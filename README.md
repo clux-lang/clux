@@ -18,8 +18,8 @@ func main(): i32 {
 
 ## Status
 
-M1–M5 are implemented and interpretable end-to-end (lex → parse → sema → bytecode
-compile → VM). M6 (FFI) is designed but not started. See `docs/milestones.md`.
+M1–M6 are implemented and runnable end-to-end (lex → parse → sema → bytecode
+compile → VM). M7 (generics) is designed but not started; see `docs/milestones.md`.
 
 **Language features available today**
 
@@ -54,14 +54,16 @@ compile → VM). M6 (FFI) is designed but not started. See `docs/milestones.md`.
   globals, and circular-dependency detection. Imports must be relative: any other path
   is rejected with one diagnostic — **import kind is never inferred from the file
   extension** (a `.so`/`.dll` suffix does not mean "dynamic library").
+- **M6 — FFI**: `extern lib <alias> from "<library>"` (`"*"` = the current process),
+  `extern cfunc` / `extern func` declarations via libffi, `cfunc` definitions usable as
+  C callbacks, `extern var` global data symbols, conditional declarations
+  (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), and recursive C-ABI type checking
+  (scalars, pointers, `opaque`, `str`, struct / cunion / enum).
 
 **Not yet implemented**
 
-- M6 FFI 已实现（`extern lib <别名> from "<库名>"` + `extern cfunc` / `extern var`，
-  libffi / dlopen；库名是**通用名**，按平台展开候选文件）。声明可带条件后缀
-  `assert(OS_TYPE == "WIN64" ...)`，编译期裁剪不匹配的声明；键用 `-D KEY=VALUE`
-  注入。详见 `docs/m6-design.md`。
-- `clux build` (native machine-code backend, M7/M12): prints `not implemented`.
+- M7 generics: designed in `docs/m7-design.md`, not started.
+- `clux build` (native machine-code backend, M10/M12): prints `not implemented`.
 - `clux test` subcommand: prints `not implemented` — run `build/clux_test` or `ctest`.
 - Error handling (M8) and a standard library (M9).
 

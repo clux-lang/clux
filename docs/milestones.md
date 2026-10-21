@@ -1,8 +1,8 @@
 # clux 里程碑规划
 
-> **状态基准**：M1–M5 均已实现并端到端可运行。本文档记录各里程碑的交付内容、
-> 设计文档入口、以及**明确尚未实现的部分**（避免"文档说完成、代码没有"）。
-> 验证方式见文末"当前验证状态"。
+> **状态基准**：M1–M6 均已实现并端到端可运行；M7（泛型）设计已完成、待实现。
+> 本文档记录各里程碑的交付内容、设计文档入口、以及**明确尚未实现的部分**
+> （避免"文档说完成、代码没有"）。验证方式见文末"当前验证状态"。
 
 ## M1: 最小可执行子集 ✅ 已完成
 
@@ -48,16 +48,18 @@
 
 **目标**：轻量单所有权 + 指针系统（无全局 borrow checker、函数边界黑盒、运行期零检查）
 
-> **2026-10-16 更新**：RC 系 `share`/`weak` 已移除（§12），待后续重新设计。
+> **2026-10 更新**：RC 系 `share`/`weak` 已**重新引入**（§12；`upgrade` 内建 + 原子控制块）。`own`/`ref`/`fatal` 升级为**类型修饰**（`docs/ownership-as-type.md`）。
 
-**语言特性**：`own *T` / `ref *T` / `fatal *T`、作用域标注 `'<a,b>`、`move` / `clone`、`new T{...}`、后置 `.&` / `.*`、`opaque`（≈ C `void*`）、可空指针 `?*T`、闭包捕获规则
+**语言特性**：`own *T` / `ref *T` / `fatal *T`（类型修饰，可为非指针类型）、作用域标注 `'<a,b>`、`move` / `clone`、`new T{...}`、后置 `.&` / `.*`、`opaque`（≈ C `void*`）、可空指针 `?*T`、闭包捕获规则；RC 系 `share *T` / `weak *T` + `upgrade` 内建
 
 **交付标准**：全部单元测试通过 ✅（[tests/driver_m3_test.cpp](../tests/driver_m3_test.cpp)）
 
 **设计文档**：[m3-design.md](m3-design.md)
 
 **明确未实现（后续里程碑）**：
-- **销毁点的编译期生成**（§13.3–§13.4）：当前销毁由 VM 运行时完成（`scope_destroy` 遍历 owned → `ptr_free_owned_recursive` 递归释放 + vtable dispose）；"compiler 层生成销毁点、多后端统一"待 M7 C 后端 / M12 原生后端落地。
+- **销毁点的编译期生成**（§13.3–§13.4）：**已完成**（2026-10）——销毁序列由 sema 从
+  **类型**生成 `__destroy_<n>` 函数，调用点只发 `CALL __destroy_<n>`；多后端统一仍待
+  M10 C 后端 / M12 原生后端落地。
 - **FFI 落地**：`extern func malloc/free` 等语法已定（§8.4），具体 C 互操作归 M6。
 - **同步原语**：竞争写由开发者负责，属标准库范围（M9）。
 
@@ -115,40 +117,41 @@
 
 ---
 
-## M6: FFI 系统（待实现，设计已完成）
+## M6: FFI 系统 ✅ 已完成
 
 **依赖**：模块系统（M5 ✅）
 
-**语言特性（设计）**：`import libc from "libc.so.6"` 动态库导入；`extern cfunc libc::malloc(size: u64): fatal opaque;` 声明（`dlsym` 查找）；`cfunc name(...) { ... }` 定义（C ABI，可作回调传给 C）；libffi 驱动动态调用与 closure；C 兼容类型约束（禁止 `own *T` / option / tag union / slice / 闭包）
+**语言特性**：`extern lib <别名> from "<库名>"`（`"*"` = 当前进程自身）；`extern cfunc` / `extern func` 声明（libffi 动态调用）；`cfunc name(...) { ... }` 定义（C ABI，可作回调传给 C）；`extern var` 全局数据符号读写；声明条件后缀 `assert(...)` + `-D` 注入；C ABI 类型递归校验（标量 / 指针 / `opaque` / `str` / struct / cunion / enum，切片与非指针 `own` 拒绝）。
 
-**设计文档**：[m6-design.md](m6-design.md)
+**设计文档**：[m6-design.md](m6-design.md)（实现差异见其 §14）
 
-**当前状态**：`src/` 无任何 FFI 代码，`CMakeLists.txt` 未引入 libffi，lexer 无 `cfunc` / `extern` 关键字。M5 已实现模块相对路径导入与代理导出，并统一拒绝非相对路径——M6 接续该位置时**必须重新决定动态库的绑定语法**：不得以 `.so`/`.dll`/`.dylib` 后缀判定"这是动态库"（后缀不表示文件类型），需用显式语法表达绑定意图，详见 [m6-design.md](m6-design.md) §1.1。
+**当前状态**：已实现并落地——`src/vm/ffi_lib.c` / `ffi_cfunc.c`（dlsym / libffi / 闭包）、`src/parser/parse_import.c`（extern 声明解析）、sema 的 `pass1c_extern_abi`、driver 的库加载与 `.cxb/.cxs` FFI 段。`clux build` 的原生产物仍待 M10 / M12。
 
 ---
 
 ## 后续里程碑（待详细设计）
 
-- **M7**: 转译 C 后端（`clux build` 的机器码目标之一；亦承接 M3 §13.3 销毁点编译期生成）
+- **M7**: 泛型（参数化多态）——设计已完成，见 [m7-design.md](m7-design.md)
 - **M8**: 错误处理机制
 - **M9**: 标准库 v1（含字符串库、同步原语）
-- **M12**: 原生后端（与 M7 共享编译期所有权分析）
+- **M10**: 转译 C 后端（`clux build` 的机器码目标之一；亦承接 M3 §13.3 的编译期销毁序列生成）
+- **M12**: 原生后端（与 M10 共享编译期所有权分析）
 
 ---
 
 ## 当前验证状态
 
-在 Windows / clang 22.1.8 / Ninja / Debug 下实测（2026-10 复验，含本轮代码修复）：
+在 Windows / clang 22.1.8 / Ninja / Debug 下实测（**2026-10-22 复验**）：
 
 | 项目 | 结果 |
 |------|------|
-| 注册测试数（`ctest -N` / `--gtest_list_tests`） | 1570 |
-| `clux_test` 实际通过 | **1570 / 1570** |
-| `examples/*/*.cx` 入口示例端到端 | 35 / 35 |
+| 注册测试数（`ctest -N` / `--gtest_list_tests`） | 2232 |
+| `clux_test` 实际通过 | **2232 / 2232** |
+| `examples/*/*.cx` 入口示例端到端 | 47 / 47 |
 | 入口示例退出时泄漏报告 | 0 |
 | `examples/asm/*.cxs` → `bc asm` → `run` | 5 / 5 |
 | `.cxs → .cxb → .cxs → .cxb` 字节一致性 | 5 / 5 |
-| `clux format` 幂等（examples 全量 .cx） | 37 / 37 |
+| `clux format` 幂等（examples 全量 .cx） | 56 / 56 |
 
 > **示例扫描范围**：`examples/<name>/*.cx` 是入口程序（各目录一个），
 > `<name>/lib/*.cx` 等子目录中的是它导入的模块（无 `main`，不单独运行）。
@@ -286,7 +289,7 @@
      边界/别名/签名/表达式/make/sizeof × 全部类型 × 晚期求值/逆序书写）。
 
 **仍未完成**：M6 FFI（未开始，其动态库绑定语法需按"不以后缀判类"重新定稿）、
-`clux build`（M7/M12 机器码后端）、M8 错误处理、M9 标准库。
+`clux build`（M10/M12 机器码后端）、M8 错误处理、M9 标准库。
 17. **sema 结构重构（第一轮）**：拆 `sema_expr` + 作用域对位自检
    - `src/sema/expr.c` 的 `sema_expr` 原是 **2114 行**单函数（34 个 case，最大
      case 588 行）。按 AST kind 抽出 **27 个静态处理器**

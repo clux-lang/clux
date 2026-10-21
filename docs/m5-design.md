@@ -499,5 +499,5 @@ typedef struct {
 
 - **包导入**（`import std from "std"`）：需要包管理器 + 标准库目录约定
 - **选择性导入**（`import { printf } from "./std"`）：暂不实现
-- **C 后端符号消减**：`std::printf` → `std_printf` 重命名（M7 C 后端实现）
+- **C 后端符号消减**：`std::printf` → `std_printf` 重命名（M10 C 后端实现）
 - **模块缓存**（.cxb 预编译）：增量编译

@@ -455,7 +455,7 @@ export main 2
   `.cxb → .cxs` 共用同一渲染器）。含 `externlib` 的 FFI 产物同样满足该不变式。
 ## 6. `bc` 子命令
 
-字节码工具链**非主线**（主线是 `build` 产出机器码，M7/M12 实现），归 `bc` 子命令：
+字节码工具链**非主线**（主线是 `build` 产出机器码，M10/M12 实现），归 `bc` 子命令：
 
 ```
 clux bc emit   <file.cx>    [-o PATH]   # 源码 → .cxb
