@@ -2455,3 +2455,16 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       （不再靠签名侧数组旁路携带）。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+107. **所有权升级为类型构造 · P3c：删除符号层的所有权副本**（2026-10）
+    - `sema_symbol_t` 删除 `ownership` 字段；新增 `sema_sym_ownership(sym)`
+      （由 `sym->type` 派生），全仓 40+ 处读写迁移。
+    - 变量/捕获的推断所有权直接写进类型：`strip_fatal` 把 `fatal T` 升为
+      `own T`（指针/切片/闭包/含 own 槽位的聚合）或剥成裸类型；删掉推断分支
+      里手写的 `sym->ownership = OWN_OWN`。
+    - `sema_fn_ctx_t.return_ownership` 删除，返回位规则（own 禁止 / ref 必标注）
+      改读 `return_type`。
+    - 保留捕获标注检查的旧语义：显式 `ref` 捕获 / 纯 id 外层 ref / opaque 才要求
+      作用域标注（`|(r = x.&)|` 推断式 ref 不强制）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

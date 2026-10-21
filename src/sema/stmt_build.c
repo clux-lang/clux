@@ -217,11 +217,9 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   for (ast_node_t *p = fn->params; p; p = p->next, param_idx++) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
     const type_t *ptype = sema_resolve_type_slot(sema, &vd->type_expr);
-    ownership_t pown = ptype ? type_ownership_of(ptype) : OWN_NONE;
     sema_symbol_t init = {
         .kind = SEMA_SYM_VAR,
         .type = ptype,
-        .ownership = pown,
         .declared = true};   /* 参数在函数入口即存在 */
     if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p),
@@ -253,8 +251,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
           if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
-        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
-                              .ownership = cown, .declared = true};
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
                      "capture '%.*s' duplicates another capture",
@@ -1045,9 +1042,6 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         const type_t *vt = NULL;
         /* 所有权须在 sema_resolve_type_slot 之前提取——该函数会把
            AST_PTR/AST_SLICE_TYPE 折叠为 AST_TYPE_REF，丢失 ownership token。 */
-        ownership_t var_own = vd->type_expr
-                                  ? sema_type_expr_ownership(vd->type_expr)
-                                  : OWN_NONE;
         if (vd->type_expr) {
           /* 类型槽位解析：若名字被待绑定局部 type 遮蔽（type_shadowed_by_local_def），
              跳过 vm scope 解析（会错误落到外层全局），sym->type 留 NULL 由 3b
@@ -1068,8 +1062,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
           }
         }
         sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = vt,
-                              .is_comptime = vd->is_comptime,
-                              .ownership = var_own};
+                              .is_comptime = vd->is_comptime,};
         if (!sema_scope_define(scope, vd->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, s),
                      "duplicate variable '%.*s'", (int)vd->name.len,
@@ -1241,9 +1234,6 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
         /* init 变量注册到 for scope */
         if (fr->init && fr->init->kind == AST_VAR_DEF) {
           ast_var_def_t *vd = (ast_var_def_t *)fr->init;
-          ownership_t for_own = vd->type_expr
-                                    ? sema_type_expr_ownership(vd->type_expr)
-                                    : OWN_NONE;
           const type_t *vt = NULL;
           if (vd->type_expr) {
             /* 同 AST_VAR_DEF：局部 type 遮蔽则推迟，否则常规解析（失败留
@@ -1253,8 +1243,7 @@ static build_result_t build_block(sema_t *sema, ast_block_t *block,
               vt = sema_resolve_type_slot(sema, &vd->type_expr);
             }
           }
-          sema_symbol_t init_sym = {.kind = SEMA_SYM_VAR, .type = vt,
-                                    .ownership = for_own};
+          sema_symbol_t init_sym = {.kind = SEMA_SYM_VAR, .type = vt,};
           if (!sema_scope_define(for_scope, vd->name, &init_sym)) {
             diag_error(sema->diag, sema_loc(sema, fr->init),
                        "duplicate variable '%.*s'", (int)vd->name.len,
@@ -1367,7 +1356,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           char what[96];
           snprintf(what, sizeof what, "capture '%.*s'", (int)cv->name.len,
                    cv->name.ptr);
-          if (cs->ownership != OWN_OWN && sema_value_is_fatal(init)) {
+          if (sema_sym_ownership(cs) != OWN_OWN && sema_value_is_fatal(init)) {
             char tn[64], itn[64];
             sema_type_name(cs->type, tn, sizeof(tn));
             sema_type_name(value_type(init), itn, sizeof(itn));
@@ -1376,7 +1365,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
                        "(FATAL) of type %s: a capture holding owned resources "
                        "must be an own capture (declare it `own %s`)",
                        what, tn, itn, tn);
-          } else if (cs->ownership == OWN_NONE &&
+          } else if (sema_sym_ownership(cs) == OWN_NONE &&
                      value_type_ownership(init) == OWN_OWN &&
                      type_has_own_slots(cs->type)) {
             char tn[64];
@@ -1403,11 +1392,10 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
            无 fatal 变量——fatal 自动转 own *T（闭包成为所有权持有者）。 */
         const type_t *it = init_bad ? sema->vm->type_void : value_type(init);
         if (!init_bad && sema_value_is_fatal(init)) {
-          const type_t *base = ptr_type_base(it);
-          it = base ? type_ptr_intern(sema->vm, base) : it;
-          /* 捕获接管了将亡值 → 该捕获槽**持有所有权**（OWN）。
+          /* 捕获接管了将亡值 → 该捕获槽**持有所有权**（OWN），类型升为 own T。
              这决定了闭包本身的产出状态：捕获了 own 的闭包即 OWN。 */
-          cs->ownership = OWN_OWN;
+          it = type_ownership_apply(sema->vm, OWN_OWN,
+                                    type_strip_ownership(it));
         }
         cs->type = it;
       }
@@ -1437,12 +1425,12 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         continue;
       }
       cs->type = outer_sym->type; /* 捕获 clone 值，类型即外层变量类型 */
-      cs->ownership = outer_sym->ownership; /* 所有权跟随 value/symbol */
+      /* cs->type 已等于 outer_sym->type（所有权随之携带） */
       /* §9.1 own 裸捕获禁止：纯 id 捕获 own *T = copy（own 禁止 copy，
          §3.1）→ 必须显式 move()/clone()。fatal 同理（裸捕获 fatal 变量
          = copy 将亡值，须 move/clone 接管）。 */
       if (outer_sym->type &&
-          (outer_sym->ownership == OWN_OWN ||
+          (sema_sym_ownership(outer_sym) == OWN_OWN ||
            sema_sym_is_fatal(outer_sym))) {
         diag_error(sema->diag, sema_loc(sema, c),
                    "cannot capture own/fatal pointer '%.*s' by value "
@@ -1459,7 +1447,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
        用途：闭包字面量产出值的状态判定——捕获了 own 的闭包本身是 **OWN**
        （唯一的 own 产生式：函数定义即"定义 + 绑定名字"，折叠了
        fatal→move→own）。消费者是 `ex_func_def`，它只能从 AST 读。 */
-    cv->ownership = (uint8_t)cs->ownership;
+    cv->ownership = (uint8_t)sema_sym_ownership(cs);
     /* 捕获槽的实际类型（销毁序列从 type 对象反推用；推断捕获无 type_expr） */
     cv->resolved_type = cs->type;
   }
@@ -1473,7 +1461,15 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     ast_var_def_t *cv = (ast_var_def_t *)c;
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs || !cs->type) continue;
-    if (cs->ownership == OWN_REF ||
+    /* 旧语义：只有**显式声明为 ref** 的捕获（或纯 id 捕获外层 ref 变量、
+       或 opaque）才强制作用域标注；从 init 推断出的 ref（`|(r = x.&)|`）
+       不在此列。注意 cv->ownership 已被上面的捕获解析回写成**解析结果**，
+       这里要按捕获形态还原“声明侧”的修饰词。 */
+    ownership_t declared;
+    if (cv->type_expr) declared = (ownership_t)cv->ownership;
+    else if (cv->init) declared = OWN_NONE;
+    else declared = sema_sym_ownership(cs);
+    if (declared == OWN_REF ||
         type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;
       break;
@@ -1546,7 +1542,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           memset(&fields[k], 0, sizeof(fields[k]));
           fields[k].name      = cv->name;   /* type_struct_intern 深拷贝 */
           fields[k].type      = cs->type;
-          fields[k].ownership = cs->ownership;
+          fields[k].ownership = type_ownership_of(cs->type);
           k++;
         }
         const type_t *cap = type_struct_intern(sema->vm, fields, k);
@@ -1633,8 +1629,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
        （只认 is_active 符号）在函数体里找不到参数——`func (a: own *T): i32 {
        return f(move(a)); }` 会误报 "cannot move a borrowed value" 和
        "cannot copy a value holding owned resources"（实测）。 */
-    sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = t,
-                          .ownership = pown, .is_active = true};
+    sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = t, .is_active = true};
     if (!sema_scope_define(pscope, vd->name, &init)) {
       diag_error(sema->diag, sema_loc(sema, p), "duplicate parameter '%.*s'",
                  (int)vd->name.len, vd->name.ptr);
@@ -1660,8 +1655,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
           ct = sema_resolve_type_slot(sema, &cv->type_expr);
           if (cown == OWN_NONE && ct) cown = type_ownership_of(ct);
         }
-        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct,
-                              .ownership = cown, .declared = true};
+        sema_symbol_t init = {.kind = SEMA_SYM_VAR, .type = ct, .declared = true};
         if (!sema_scope_define(fscope, cv->name, &init)) {
           diag_error(sema->diag, sema_loc(sema, c),
                      "capture '%.*s' duplicates another capture",
@@ -1702,7 +1696,6 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   }
 
   /* 签名解析 + 登记（compiler hoist LOAD_TYPE <sig_id> 用） */
-  ownership_t ret_own = lit_ret_own;
   const type_t *sig = type_func_sig(sema->vm, ptypes, nparams, rt, false);
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
@@ -1721,7 +1714,6 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   sema->fn.local_func_param_scope = pscope;
   sema->fn.def = fn; /* walk_return §6/§9 判定用（captures 查当前闭包） */
   sema->fn.return_type = rt;
-  sema->fn.return_ownership = lit_ret_own; /* 折叠前提取（同 L1091） */
   /* 字面量 body 是真实调用点（最终进入运行时字节码）：body 内 comptime
      调用照常折叠（即使本字面量定义在 comptime func body 内）。 */
   sema->fn.walking_comptime = false;

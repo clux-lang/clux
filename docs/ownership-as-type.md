@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a / P3b 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a / P3b / P3c 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -187,9 +187,16 @@ WSL2 全量 **2229 passed / 2 skipped**。
   `return_ownership` 的分配、释放、比较与全部调用点都删掉（`type_func_sig`
   从 7 参简化为 5 参，22 处调用点迁移）。生成的 destroy/clone helper 也把
   `ref` 形参与 `fatal` 返回直接编进类型。
-- **待办（P3c）**：8 个槽位所有权字段（struct/tuple/union/cunion/option/
-  slice/array）、`sema_type_expr_ownership`、`sema->fn.return_ownership`、
-  AST 上的 ownership 缓存、`type_fatal_variant_of` / `type_fatal_base_of` 恒等壳。
+- ✅ **P3c：符号层的所有权副本已删除**。`sema_symbol_t` 不再有 `ownership`
+  字段；所有判定改 `sema_sym_ownership(sym)`（由 `sym->type` 派生）。变量/捕获
+  推断出的所有权直接写进类型（`strip_fatal`：`fatal T` → `own T`），删掉 30+
+  处 `sym->ownership` 读写；`sema_fn_ctx_t.return_ownership` 也删除，返回位判定
+  改读 `return_type`。捕获的作用域标注检查保留“声明侧修饰词”的旧语义
+  （显式 ref / 纯 id 外层 ref / opaque 才要求标注）。
+- **待办（P3d）**：7 个槽位所有权字段（struct/tuple/union/cunion/option/
+  slice/array）、`sema_type_expr_ownership`、AST 上的 ownership 缓存、
+  `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳，以及运行期 `borrowed`
+  视图位（最终与借用 materialize 改造一起删除）。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。

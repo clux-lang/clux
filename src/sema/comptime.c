@@ -554,7 +554,7 @@ static bool type_contains_own(const type_t *t) {
       /* §10 禁止全局 own 指针（own 需作用域退出销毁，
          全局静态期无法完成）。ref/fatal 不持有资源，允许。
          所有权已从 type 层迁移到 symbol/value 层——类型不携带 ownership，
-         顶层指针/切片的 own 判定由调用方通过 sym->ownership 检查。 */
+         顶层指针/切片的 own 判定由调用方通过 sema_sym_ownership(sym) 检查。 */
       return false;
     case TYPE_KIND_SLICE:
       /* §9.4 禁止全局 own []T（同 own *T）。ref/fatal 不持有资源，允许。

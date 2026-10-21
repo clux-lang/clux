@@ -200,15 +200,8 @@ struct _sema_symbol_t {
      `borrow_src` 表达，不受影响。
      将来恢复含指针的聚合时，按扁平槽位表（docs/ownership-refactor.md §2.5）
      重新设计多源借源。 */
-  /* ---- 所有权状态（纯编译期，运行期不感知）----
-   * 变量声明的所有权修饰（own/ref/fatal/none），从 AST 的 ownership token
-   * 解析设置。所有权从类型层迁移到值层后，类型 `*T` 不再区分 own/ref/fatal，
-   * 变量的所有权状态记录在此。仅变量符号有意义。
-   * - OWN_OWN：拥有堆资源，退出点 sema 生成 FREE 指令释放
-   * - OWN_REF：借用引用，无堆资源
-   * - OWN_FATAL：将亡值，move 产物（变量 ownership 从 OWN_OWN 变为 OWN_FATAL）
-   * - OWN_NONE：无所有权概念（标量/复合类型等） */
-  ownership_t ownership;
+  /* 所有权**不单独存**：直接由 `type` 携带（own T / ref T / fatal T）。
+     读取入口：`sema_sym_ownership(sym)` / `sema_sym_is_fatal(sym)`。 */
 
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——

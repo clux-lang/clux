@@ -1,6 +1,7 @@
 #ifndef _H_CLUX_SEMA_SEMA_
 #define _H_CLUX_SEMA_SEMA_
 #include "core/allocator.h"
+#include "vm/type_ownership.h"
 #include "core/arena.h"
 #include "core/strslice.h"
 #include "core/vec.h"
@@ -111,8 +112,7 @@ typedef struct sema_type_t {
  * - loop_depth: 循环嵌套深度（0 = 不在循环中），break/continue 位置检查用
  */
 typedef struct sema_fn_ctx_t {
-    const type_t   *return_type;
-    ownership_t     return_ownership;
+    const type_t   *return_type; /* 返回所有权编码在这个类型里 */
     ast_func_def_t *def;
     bool            walking_comptime;
     sema_scope_t   *local_func_base;
@@ -142,8 +142,13 @@ typedef struct sema_expr_ctx_t {
  * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。
  *
  * 所有权纯编译期——fatal 判据从 symbol.ownership 读取，不再从 type_t.ownership。 */
+/** 符号的所有权：直接由符号类型派生（所有权是类型修饰，符号不再存副本）。 */
+static inline ownership_t sema_sym_ownership(const sema_symbol_t *sym) {
+  return (sym && sym->type) ? type_ownership_of(sym->type) : OWN_NONE;
+}
+
 static inline bool sema_sym_is_fatal(const sema_symbol_t *sym) {
-  return sym && sym->ownership == OWN_FATAL;
+  return sema_sym_ownership(sym) == OWN_FATAL;
 }
 /* 兼容旧调用：从 value 的 ownership 判 fatal */
 static inline bool sema_value_is_fatal(const value_t *v) {

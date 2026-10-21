@@ -822,7 +822,7 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
       else { tail->next = rf; tail = rf; }
       continue;
     }
-    /* 仅 **own** 变量需要显式释放。判据用符号层的 `sym->ownership`
+    /* 仅 **own** 变量需要显式释放。判据用符号层的 `sema_sym_ownership(sym)`
        （所有权已从类型层迁移到值/符号层——类型不携带 ownership，
        所以**不能**用类型层的谓词判断）。
        moved 变量已被转移（TDZ），不需要释放。
@@ -832,7 +832,7 @@ static ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
        不能生成销毁（否则 PUSH 一个尚未 DEFINE 的名字 → undefined variable）。 */
     if (!sym->declared) continue;
     /* own 变量必销毁；**含 share/weak 槽位的普通变量**也要销毁（递减计数）。 */
-    if (sym->ownership != OWN_OWN && !type_has_rc_slots(sym->type)) continue;
+    if (sema_sym_ownership(sym) != OWN_OWN && !type_has_rc_slots(sym->type)) continue;
     /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
        目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
        将来复杂类型在此按类型展开（optional→判断 / 数组→循环 / tuple→
@@ -1124,7 +1124,7 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
 
   const type_t *cur = root->type;
   bool root_owned =
-      (root->ownership == OWN_OWN || root->ownership == OWN_FATAL);
+      (sema_sym_ownership(root) == OWN_OWN || sema_sym_ownership(root) == OWN_FATAL);
   const type_t *ct0 = type_strip_quals(cur);
   bool ptr_owned = root_owned && ct0 &&
                    (type_kind_of(ct0) == TYPE_KIND_PTR ||
@@ -1264,8 +1264,8 @@ static size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
   case AST_IDENT: {
     sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)e)->name);
     if (!s || s->kind != SEMA_SYM_VAR) return 0;
-    bool carrier = s->type && (s->ownership == OWN_OWN ||
-                               s->ownership == OWN_REF ||
+    bool carrier = s->type && (sema_sym_ownership(s) == OWN_OWN ||
+                               sema_sym_ownership(s) == OWN_REF ||
                                type_kind_of(s->type) == TYPE_KIND_OPAQUE);
     if (!carrier) return 0;
     n = borrow_collect_add(out, n, cap, s);
@@ -1340,7 +1340,7 @@ static size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope,
 static void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym,
                                    ast_node_t *init, sema_scope_t *scope) {
   if (!sym || !sym->type) return;
-  if (sym->ownership != OWN_REF &&
+  if (sema_sym_ownership(sym) != OWN_REF &&
       type_kind_of(sym->type) != TYPE_KIND_OPAQUE)
     return;
   sema_symbol_t *srcs[16];
@@ -1716,11 +1716,11 @@ static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_s
 static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
                             sema_scope_t *scope, const type_t *vt,
                             sema_symbol_t *sym) {
-  /* 只有**顶层 ref**（sym->ownership == OWN_REF）需要标注检查与 annot 记录
+  /* 只有**顶层 ref**（sema_sym_ownership(sym) == OWN_REF）需要标注检查与 annot 记录
      ——重绑定逃逸校验依赖 annot_count > 0。
      注：含 ref 字段的聚合类型已不支持（复合类型禁止携带指针/切片），
      所以不再有类型层的 `type_contains_ref` 判据。 */
-  if (!vt || !(sym && sym->ownership == OWN_REF))
+  if (!vt || !(sym && sema_sym_ownership(sym) == OWN_REF))
     return;
 
   strslice_t *names = NULL;
@@ -1729,7 +1729,7 @@ static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
   if (count == 0) {
     /* §5 强制规则 B：含 ref 字段的聚合类型（非顶层 ref）必须标注。
        顶层 ref *T 走推断语义（不强制）。 */
-    if (!sym || sym->ownership != OWN_REF) {
+    if (!sym || sema_sym_ownership(sym) != OWN_REF) {
       char tn[64];
       sema_type_name(vt, tn, sizeof(tn));
       diag_error(sema->diag, sema_loc(sema, vd->type_expr ? vd->type_expr
@@ -1809,11 +1809,16 @@ static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
  *   为 own 而非要求显式标注。
  * 返回 NULL = 非 fatal 类型或无法处理。 */
 static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
-  /* 所有权迁移到值/symbol 层后，fatal 不再是类型层概念——type_is_fatal(t)
-     恒为 false，fatal *T 的类型即 *T（类型登记不携带 ownership）。本函数
-     退化为恒等返回 t（非 NULL 输入），与 expr.c 的 expr_strip_fatal 同源。 */
-  (void)sema;
-  return t;
+  if (!sema || !t) return t;
+  if (type_ownership_of(t) != OWN_FATAL) return t;
+  const type_t *core = type_strip_ownership(t);
+  if (!core) return NULL;
+  /* fatal 指针/切片/闭包/含 own 槽位的聚合：变量接管为 own；
+     标量/无 own 槽位的复合类型：fatal 无意义，落回裸类型。 */
+  bool resource = type_is_ptr(core) || type_is_slice(core) ||
+                  type_kind_of(core) == TYPE_KIND_FUNC ||
+                  type_has_own_slots(core);
+  return resource ? type_ownership_apply(sema->vm, OWN_OWN, core) : core;
 }
 
 /* 该表达式是否"含 own 捕获的闭包"（穿透 move/clone）。
@@ -1895,8 +1900,8 @@ static strslice_t synth_name(sema_t *sema, const char *s) {
 
 /* 生成包装函数字面量（无捕获）。所有权/返回类型不匹配返回 NULL（已诊断）。 */
 static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
-                                     const type_t *target, ast_node_t *origin,
-                                     const func_sig_t *src_sig) {
+                                     const type_t *target,
+                                     ast_node_t *origin) {
   const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(target))->sig;
   size_t nparams = sema_count_siblings(src->params);
   if (sig->param_count != nparams) {
@@ -2040,12 +2045,7 @@ bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
     }
     return false;
   }
-  const sema_type_t *src_st = src->sig_id ? sema_type_by_id(sema, src->sig_id) : NULL;
-  const func_sig_t *src_sig =
-      (src_st && src_st->type && type_kind_of(src_st->type) == TYPE_KIND_FUNC)
-          ? &((const func_type_t *)type_strip_ownership(src_st->type))->sig
-          : NULL;
-  ast_node_t *lit = gen_cfunc_wrapper(sema, src, target, *slot, src_sig);
+  ast_node_t *lit = gen_cfunc_wrapper(sema, src, target, *slot);
   if (!lit) return true;
   lit->next = (*slot)->next;
   *slot = lit;
@@ -2103,7 +2103,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = false;
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_type_ownership(sema->vm, var_value, sym->ownership);
+    value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
   } else if (vd->init && vd->init->kind == AST_NIL) {
     /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
        nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
@@ -2128,7 +2128,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = true; /* nil 是确定值（已初始化） */
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_type_ownership(sema->vm, var_value, sym->ownership);
+    value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
   } else {
     /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量）。
        匿名构造注入：显式声明类型已知 → push anon_ct，使 init 的 .{...}
@@ -2200,7 +2200,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         /* R1（own 不可 copy，§3.1）：own *T 声明只能由 fatal 将亡值
            （move/clone/new/make 产物或函数返回值）初始化——直接赋 own/ref
            变量 = copy → 编译错误。 */
-        if (sym->ownership == OWN_OWN && !sema_value_is_fatal(init)) {
+        if (sema_sym_ownership(sym) == OWN_OWN && !sema_value_is_fatal(init)) {
           char itn[64];
           sema_type_name(value_type(init), itn, sizeof(itn));
           /* 措辞不用"pointer"：所有权已与类型解耦，`own` 是**位置对值的
@@ -2212,7 +2212,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "new / move / clone (or a fatal-returning call)",
                      (int)vd->name.len, vd->name.ptr, itn);
           sym->flow_init = false; /* copy 失败 = 未初始化 */
-        } else if (sym->ownership != OWN_OWN &&
+        } else if (sema_sym_ownership(sym) != OWN_OWN &&
                    sema_value_is_fatal(init)) {
           /* **反向规则**（§0.4）：FATAL 必须被 own 位置接住。非 own 位置
              接收将亡值 = 值消失而内部 own 槽位无人释放 → 静默泄漏；更糟
@@ -2230,7 +2230,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "use move()/clone() and store the result there)",
                      (int)vd->name.len, vd->name.ptr, tn, itn, tn);
           sym->flow_init = false;
-        } else if (sym->ownership == OWN_NONE &&
+        } else if (sema_sym_ownership(sym) == OWN_NONE &&
                    value_type_ownership(init) == OWN_OWN &&
                    type_has_own_slots(sym->type)) {
           /* 非 own 位置的 copy：读 own **聚合**变量得到 OWN 值，复制会让
@@ -2260,7 +2260,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       var_value =
           value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-      value_set_type_ownership(sema->vm, var_value, sym->ownership);
+      value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
     } else {
       /* 推断类型：init 类型即变量类型。
          R1（own 不可 copy，§3.1）：var p = q; 且 init 是 own *T 且非
@@ -2283,26 +2283,22 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
              `var u = .U{ .p = new i32{1} }` 的 4 字节堆块从未释放）。
              类型仍是 T（所有权不进类型），只是符号层记 OWN_OWN，
              让 make_free_stmts 按 type 对象展开销毁序列。 */
-          if (type_kind_of(vt) == TYPE_KIND_PTR || type_kind_of(vt) == TYPE_KIND_SLICE)
-            sym->ownership = OWN_OWN;
           /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
              并记住捕获链供 FREE 展开（逐捕获槽释放）。 */
-          else if (type_kind_of(vt) == TYPE_KIND_FUNC) {
+          if (type_kind_of(vt) == TYPE_KIND_FUNC) {
             /* 闭包 = 捕获聚合结构体：**含 own 捕获**的闭包是 own（move-only），
                销毁 = `FREE f`（VM 按 capture_type 释放 env 里的 own 捕获）。 */
             const ast_func_def_t *oc = own_closure_of(vd->init);
             if (oc) {
-              sym->ownership = OWN_OWN;
+              /* 闭包含 own 捕获：strip_fatal 已把类型升为 own func(...)。 */
             } else if (sema_value_is_fatal(init) ||
                        value_type_ownership(init) == OWN_OWN) {
               /* 非字面量初始化（clone(g) / move(g)）：结果依赖运行期 capture_type
-                 → 保守标 own，FREE 时由 VM 按槽位所有权释放。 */
-              sym->ownership = OWN_OWN;
+                 → 保守按 own 处理（strip_fatal 已升级类型）。 */
             }
           } else if (type_has_own_slots(vt)) {
             /* 聚合（含 own 槽位的 struct/tuple/union/array）接管：
-               变量成为内部 own 槽位的所有者（销毁序列由 type 对象展开）。 */
-            sym->ownership = OWN_OWN;
+               变量成为内部 own 槽位的所有者（strip_fatal 已升级类型）。 */
           }
           /* 将推断出的类型写回 type_expr（AST_TYPE_REF），让 compiler 发
              LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
@@ -2341,7 +2337,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       sym->type = vt;
       var_value = value_make_shadow(sema->vm, vt);
-      value_set_type_ownership(sema->vm, var_value, sym->ownership);
+      value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
     }
   }
 
@@ -2370,7 +2366,7 @@ static void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      （var s = .S{ .q = b.p } ≡ s.q = b.p），因此把构造/拷贝里 ref 值的来源
      合并到该变量；scope 退出时统一释放（sema_scope_release_borrows）。 */
   if (sym && sym->type && vd->init &&
-      !(sym->ownership == OWN_REF ||
+      !(sema_sym_ownership(sym) == OWN_REF ||
         type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
       type_has_ref_slots(sym->type)) {
     sema_symbol_t *csrcs[16];
@@ -2556,7 +2552,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
 
     /* `_ = x`（own/fatal 变量不 move）→ 拒绝：这不是"销毁"，是 own 拷贝。 */
     if (vsym && vsym->kind == SEMA_SYM_VAR && !is_move &&
-        (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym))) {
+        (sema_sym_ownership(vsym) == OWN_OWN || sema_sym_is_fatal(vsym))) {
       strslice_t vn = ((ast_ident_t *)vsym_node)->name;
       diag_error(sema->diag, sema_loc(sema, &as->base),
                  "cannot discard '%.*s' by copy: an own value must be "
@@ -2571,7 +2567,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
        含资源（指针/切片/含 own 槽位的聚合）。 */
     bool own_value = false;
     if (vsym && vsym->kind == SEMA_SYM_VAR)
-      own_value = (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym));
+      own_value = (sema_sym_ownership(vsym) == OWN_OWN || sema_sym_is_fatal(vsym));
     if (!own_value) own_value = sema_value_is_fatal(rhs);
     bool has_res = rt && (type_kind_of(rt) == TYPE_KIND_PTR ||
                           type_kind_of(rt) == TYPE_KIND_SLICE ||
@@ -2584,7 +2580,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
 
     ast_node_t *dh = NULL, *dt = NULL;
     if (vsym && vsym->type &&
-        (vsym->ownership == OWN_OWN || sema_sym_is_fatal(vsym))) {
+        (sema_sym_ownership(vsym) == OWN_OWN || sema_sym_is_fatal(vsym))) {
       /* 变量：直接销毁它（move 已在 ex_move 标 moved / 消费 fatal） */
       ast_node_t *id = ast_ident_new(sema->arena, 0, 0);
       if (id) {
@@ -2615,7 +2611,8 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
     memset(&dsym, 0, sizeof dsym);
     dsym.kind      = SEMA_SYM_VAR;
     dsym.type      = rt;
-    dsym.ownership = OWN_OWN;
+    dsym.type = type_ownership_apply(sema->vm, OWN_OWN,
+                                   type_strip_ownership(dsym.type));
     dsym.flow_init = true;
     dsym.moved     = true;
     dsym.is_active = true;
@@ -2749,7 +2746,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
        move 过的变量（moved）已交出堆块，不再释放；未初始化（flow_init=false）
        也没有旧值。 */
     if (sym && sym->type && sym->flow_init && !sym->moved &&
-        (type_has_rc_slots(sym->type) || sym->ownership == OWN_OWN) &&
+        (type_has_rc_slots(sym->type) || sema_sym_ownership(sym) == OWN_OWN) &&
         (type_kind_of(sym->type) == TYPE_KIND_PTR ||
          type_kind_of(sym->type) == TYPE_KIND_SLICE ||
          type_kind_of(sym->type) == TYPE_KIND_FUNC ||
@@ -2822,7 +2819,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
            释放、新来源集合登记，与定义点同一收集器——含函数返回值按标注
            继承多来源）。 */
         if (sym->type &&
-            (sym->ownership == OWN_REF ||
+            (sema_sym_ownership(sym) == OWN_REF ||
              type_kind_of(sym->type) == TYPE_KIND_OPAQUE)) {
           sema_symbol_t *srcs[16];
           size_t nsrc = borrow_collect(sema, as->value, scope, srcs, 16);
@@ -2870,7 +2867,7 @@ static void shadow_assign(sema_t *sema, ast_assign_t *as,
         /* 聚合（含 ref 槽位）**整体赋值**：换值 = 换借源集合（旧集合释放，
            新集合从右值构造/拷贝里收集）。ref/opaque 变量走上一条 R3 分支。 */
         if (sym->type &&
-            !(sym->ownership == OWN_REF ||
+            !(sema_sym_ownership(sym) == OWN_REF ||
               type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
             type_has_ref_slots(sym->type)) {
           sema_symbol_t *csrcs[16];
@@ -3627,7 +3624,8 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
           sema_type_name(value_type(v), rn, sizeof(rn));
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
-        } else if (sema->fn.return_ownership == OWN_REF &&
+        } else if (sema->fn.return_type &&
+                   type_ownership_of(sema->fn.return_type) == OWN_REF &&
                    (rt->value->kind == AST_IDENT ||
                     capture_access_name(rt->value, &(strslice_t){0}))) {
           /* R3（返回 ref 来源，m3-design §6）：返回值 ref 的（标注）作用域
@@ -3640,7 +3638,7 @@ static block_result_t walk_return(sema_t *sema, ast_return_t *rt,
             capture_access_name(rt->value, &rname);
           sema_symbol_t *rs = sema_lookup(scope, rname);
           if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
-              rs->ownership == OWN_REF) {
+              sema_sym_ownership(rs) == OWN_REF) {
             /* §6 返回 ref 来源：必须是参数或全局。参数层符号
                （sema_lookup 沿 scope 链第一个命中）或全局符号放行；
                本地 own 的 ref 变量/外层局部借用 → 悬垂 → 拒绝。 */
@@ -4511,9 +4509,6 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      保持。 */
   sema->fn.walking_comptime = fn->is_comptime;
 
-  /* 所有权须在 sema_resolve_type_slot 之前提取——该函数折叠 AST 节点。 */
-  sema->fn.return_ownership =
-      fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
   sema->fn.return_type =
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
   sema->fn.def = fn;
@@ -4522,7 +4517,8 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      own——own 是单所有权，跨函数传 own 会破坏唯一所有权（调用方已销毁 /
      返回值无法显式接管）。返回 own *T / own []T 应改写为返回 fatal *T /
      fatal []T（调用点 `var p: own *T = f()` 经 fatal→own 接管）。 */
-  if (sema->fn.return_type && sema->fn.return_ownership == OWN_OWN) {
+  if (sema->fn.return_type &&
+      type_ownership_of(sema->fn.return_type) == OWN_OWN) {
     diag_error(sema->diag, sema_loc(sema, fn->return_expr),
                "function cannot return own pointer/slice (return fatal *T / "
                "fatal []T instead; the caller takes ownership via "
@@ -4559,7 +4555,7 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
            源已被 move 进 TDZ。
          - `fatal` **不能作形参**：`fatal` 描述的是"函数调用表达式"的值
            （见 §0.3），不是形参的接收能力。传所有权请写 `own`。 */
-      if (ps->type && ps->ownership == OWN_FATAL) {
+      if (ps->type && sema_sym_ownership(ps) == OWN_FATAL) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
                    "function parameter '%.*s' cannot be 'fatal': fatal describes "
                    "the value of a *call expression*, not a parameter. Use "
@@ -4598,7 +4594,8 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
       memset(&ctxsym, 0, sizeof ctxsym);
       ctxsym.kind       = SEMA_SYM_VAR;
       ctxsym.type       = sig_type;
-      ctxsym.ownership  = OWN_REF;   /* 借用：ctx 是调用方传进来的 func 值 */
+      ctxsym.type = type_ownership_apply(sema->vm, OWN_REF,
+                                     type_strip_ownership(ctxsym.type));
       ctxsym.flow_init  = true;
       ctxsym.is_active  = true;
       ctxsym.own_scope  = sf->param_scope;

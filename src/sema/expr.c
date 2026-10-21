@@ -2074,7 +2074,7 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
           /* 不求值生成链（__ctx 是 VM 调用帧的隐藏局部，sema 作用域里不需要
              它）：直接按捕获槽类型/所有权产出 shadow。 */
           value_t *csv = value_make_shadow(sema->vm, sym->type);
-          value_set_type_ownership(sema->vm, csv, sym->ownership);
+          value_set_type_ownership(sema->vm, csv, sema_sym_ownership(sym));
           return csv;
         }
       }
@@ -2146,7 +2146,7 @@ static value_t *ex_ident(sema_t *sema, ast_node_t **node,
       /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
          解包由显式 .! assert 承担，见 docs m2-design §12.5） */
       value_t *sv = value_make_shadow(sema->vm, value_type(v));
-      value_set_type_ownership(sema->vm, sv, sym ? sym->ownership : OWN_NONE);
+      value_set_type_ownership(sema->vm, sv, sym ? sema_sym_ownership(sym) : OWN_NONE);
       return sv;
 }
 
@@ -4404,7 +4404,6 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   memset(&sym, 0, sizeof sym);
   sym.kind       = SEMA_SYM_VAR;
   sym.type       = t;
-  sym.ownership  = OWN_OWN;
   sym.flow_init  = true;
   sym.moved      = true;
   sym.is_active  = true;
@@ -4918,7 +4917,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
            槽位。所以闭包内的捕获值（`own *T` 或含 own 的聚合）只能 clone/借用，
            不能 move。 */
         if (src && src->kind == SEMA_SYM_VAR && src->is_capture &&
-            (src->ownership == OWN_OWN ||
+            (sema_sym_ownership(src) == OWN_OWN ||
              type_kind_of(src->type) == TYPE_KIND_FUNC)) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "cannot move closure capture '%.*s': the capture slot is "
@@ -4936,7 +4935,7 @@ static value_t *ex_move(sema_t *sema, ast_node_t **node,
         sema_symbol_t *src =
             sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
         if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            src->ownership == OWN_OWN) {
+            sema_sym_ownership(src) == OWN_OWN) {
           /* `own *T`（含 own 切片同规则）：move 后源不再持有资源 →
              标记 moved，后续读取报 "used after move"。
              判据是**符号层 ownership**——所有权已从类型层迁移到值/符号层。 */
