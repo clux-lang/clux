@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a / P3b 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -180,8 +180,15 @@ WSL2 全量 **2229 passed / 2 skipped**。
 - 顺带修掉：FUNC 类型被 `own/fatal` 包装后，sema 里直接
   `(func_type_t *)value_type(...)` 强转读签名会越界/读到错误签名（`clone(func…)`
   的调用返回类型变成 `fatal i32`）——所有这类强转改为先 `type_strip_ownership`。
-- **待办（P3b/P3c）**：8 个槽位所有权字段（struct/tuple/union/cunion/option/
-  slice/array/签名）、`func_sig_eq` 的所有权比较、`sema_type_expr_ownership`、
+- ✅ **P3b：函数签名的所有权数组已删除**。`func_sig_t` 只剩
+  `params / param_count / return_type / is_variadic`；形参/返回所有权一律由
+  类型携带（`type_ownership_of(sig->params[i])` / `type_ownership_of(return_type)`）。
+  `func_sig_eq` 不再手比所有权（类型相等即包含）；`param_ownerships` /
+  `return_ownership` 的分配、释放、比较与全部调用点都删掉（`type_func_sig`
+  从 7 参简化为 5 参，22 处调用点迁移）。生成的 destroy/clone helper 也把
+  `ref` 形参与 `fatal` 返回直接编进类型。
+- **待办（P3c）**：8 个槽位所有权字段（struct/tuple/union/cunion/option/
+  slice/array）、`sema_type_expr_ownership`、`sema->fn.return_ownership`、
   AST 上的 ownership 缓存、`type_fatal_variant_of` / `type_fatal_base_of` 恒等壳。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。

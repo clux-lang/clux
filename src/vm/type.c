@@ -400,7 +400,7 @@ bool type_contains_ptr_or_slice(const type_t *t) {
  * 判定入口现为：
  *   - 符号层：`sema_symbol_t::ownership`
  *   - 值层：  `value_type_ownership(v)`
- *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
+ *   - 签名层：参数/返回类型本身（`func_sig_t.params[i]` / `return_type`）
  *   - C ABI： `ffi_c_abi_reject_reason_own(t, own)`（所有权由调用方传入）
  *
  * 完整模型见 docs/ownership-refactor.md §0（值状态的流动检查）。

@@ -213,19 +213,11 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
      所有权从函数签名类型的 param_ownerships 数组读取——pass2_types 在
      build_func_tree 之前已建好签名（含 ownership），AST 节点此时已折叠为
      AST_TYPE_REF，无法再从 token 提取。 */
-  sema_symbol_t *fn_sym = sema_lookup(parent, fn->name);
-  const func_sig_t *fn_sig = NULL;
-  if (fn_sym && fn_sym->type && type_kind_of(fn_sym->type) == TYPE_KIND_FUNC)
-    fn_sig = &((const func_type_t *)type_strip_ownership(fn_sym->type))->sig;
   size_t param_idx = 0;
   for (ast_node_t *p = fn->params; p; p = p->next, param_idx++) {
     ast_var_def_t *vd = (ast_var_def_t *)p;
-    ownership_t pown = (fn_sig && fn_sig->param_ownerships &&
-                        param_idx < fn_sig->param_count)
-                           ? fn_sig->param_ownerships[param_idx]
-                           : OWN_NONE;
     const type_t *ptype = sema_resolve_type_slot(sema, &vd->type_expr);
-    if (pown == OWN_NONE && ptype) pown = type_ownership_of(ptype);
+    ownership_t pown = ptype ? type_ownership_of(ptype) : OWN_NONE;
     sema_symbol_t init = {
         .kind = SEMA_SYM_VAR,
         .type = ptype,
@@ -1711,7 +1703,7 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
 
   /* 签名解析 + 登记（compiler hoist LOAD_TYPE <sig_id> 用） */
   ownership_t ret_own = lit_ret_own;
-  const type_t *sig = type_func_sig(sema->vm, ptypes, powns, nparams, rt, ret_own, false);
+  const type_t *sig = type_func_sig(sema->vm, ptypes, nparams, rt, false);
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
   if (ptypes) allocator_free(sema->vm->alloc, (void **)&ptypes);

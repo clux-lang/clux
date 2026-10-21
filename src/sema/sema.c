@@ -517,32 +517,22 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       ast_func_type_t *ft = (ast_func_type_t *)type_expr;
       size_t n = sema_count_siblings(ft->params);
       const type_t *params_arr[n > 0 ? n : 1];
-      ownership_t owns_arr[n > 0 ? n : 1];
       size_t i = 0;
       for (ast_node_t *pr = ft->params; pr; pr = pr->next, i++) {
         const type_t *pt = resolve_type_expr(sema, pr);
         if (!pt) return NULL;
-        params_arr[i] = pt;
-        /* 类型表达式里的所有权修饰（`func(ref *T) -> i32`）必须一并记入签名：
-           签名按 (类型, 所有权) 去重，否则写出来的 `func(ref *T)->i32` 与
-           `func f(self: ref *T)` 推导出的签名会成为两个不同实例，互相不可
-           转换（实测装饰器报 "cannot convert func(*Wrap): i32 to func(*Wrap):
-           i32"——两者打印完全相同）。 */
-        owns_arr[i] = sema_type_expr_ownership(pr);
+        params_arr[i] = pt; /* 类型已携带所有权修饰（ref/own/fatal） */
       }
       const type_t *rt = ft->return_type
                              ? resolve_type_expr(sema, ft->return_type)
                              : NULL;
       if (ft->return_type && !rt) return NULL;
-      ownership_t ret_own =
-          ft->return_type ? sema_type_expr_ownership(ft->return_type) : OWN_NONE;
       /* `cfunc(...)` = **C 函数指针**（无 env）：独立类型，与 func(...) 互不
          兼容（用户要求"不互通"）。只在 FFI 边界出现。 */
       if (ft->is_c_abi)
         return type_cfunc_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
                               /*is_variadic=*/false);
-      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL,
-                           n > 0 ? owns_arr : NULL, n, rt, ret_own,
+      return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
                            /*is_variadic=*/false);
     }
     case AST_TYPE_REF: {
@@ -929,8 +919,8 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
        读回，其次用**解析器缓存**的 `pvd->ownership`（折叠前提取，与 vm 的
        ownership_t 同编码），最后才是就地提取。 */
     ownership_t pown =
-        (prior_sig && prior_sig->param_ownerships && pn < prior_sig->param_count)
-            ? prior_sig->param_ownerships[pn]
+        (prior_sig && prior && prior->type)
+            ? type_ownership_of(func_type_param(prior->type, pn))
             : (pvd->ownership != AST_OWN_NONE
                    ? (ownership_t)pvd->ownership
                    : sema_type_expr_ownership(pvd->type_expr));
@@ -962,11 +952,12 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
     pn++;
   }
   const type_t *rt = sema->vm->type_void;
-  ownership_t ret_own = prior_sig
-                            ? prior_sig->return_ownership
-                            : (efd->return_expr
-                                   ? sema_type_expr_ownership(efd->return_expr)
-                                   : OWN_NONE);
+  ownership_t ret_own =
+      (prior_sig && prior && prior->type)
+          ? type_ownership_of(func_type_return(prior->type))
+          : (efd->return_expr
+                 ? sema_type_expr_ownership(efd->return_expr)
+                 : OWN_NONE);
   if (efd->return_expr) {
     rt = sema_resolve_type_slot(sema, &efd->return_expr);
     if (!rt) {
@@ -1005,8 +996,8 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
      读到所有权的地方，pass1c 的 pass1c_extern_abi 复审依赖它（否则 AST 已折叠
      成 AST_TYPE_REF，ownership token 丢失，`own *T` 会漏过 C ABI 约束）。 */
   const type_t *sig =
-      type_func_sig(sema->vm, ptypes, powns, pn,
-                    rt ? rt : sema->vm->type_void, ret_own, efd->is_variadic);
+      type_func_sig(sema->vm, ptypes, pn,
+                    rt ? rt : sema->vm->type_void, efd->is_variadic);
   if (sig) {
     /* `.ast` 指向声明节点：调用点需要它取返回类型表达式（程序自定义类型的
        "按类型值返回"要用，见 sema/expr.c 的 FFI 返回类型码映射）。 */
@@ -1326,9 +1317,6 @@ static void pass2_types(sema_t *sema, bool speculative) {
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;
     ownership_t *powns = NULL;
-    const func_sig_t *existing_sig = (sym->type && type_kind_of(sym->type) == TYPE_KIND_FUNC)
-                                         ? &((const func_type_t *)type_strip_ownership(sym->type))->sig
-                                         : NULL;
     if (nparams > 0) {
       params = allocator_new_ex(sema->vm->alloc, "type_t*", sizeof(type_t *),
                                 NULL, NULL, NULL, nparams);
@@ -1337,10 +1325,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
       size_t j = 0;
       for (ast_node_t *p = fn->params; p; p = p->next, j++) {
         ast_var_def_t *vd = (ast_var_def_t *)p;
-        ownership_t pown = (existing_sig && existing_sig->param_ownerships &&
-                            j < existing_sig->param_count)
-                               ? existing_sig->param_ownerships[j]
-                               : sema_type_expr_ownership(vd->type_expr);
+        ownership_t pown = sema_type_expr_ownership(vd->type_expr);
         const type_t *t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t) {
           if (!speculative)
@@ -1354,12 +1339,12 @@ static void pass2_types(sema_t *sema, bool speculative) {
       }
     }
 
-    ownership_t ret_own = existing_sig
-                              ? existing_sig->return_ownership
-                              : (fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE);
+    ownership_t ret_own =
+        fn->return_expr ? sema_type_expr_ownership(fn->return_expr) : OWN_NONE;
     const type_t *rt = NULL;
     if (fn->return_expr) {
       rt = sema_resolve_type_slot(sema, &fn->return_expr);
+      if (ret_own == OWN_NONE && rt) ret_own = type_ownership_of(rt);
       if (!rt) {
         if (!speculative)
           diag_error(sema->diag, sema_loc(sema, f), "unknown return type");
@@ -1389,7 +1374,7 @@ static void pass2_types(sema_t *sema, bool speculative) {
        签名类型**登记进 sema->types**（与数组/const 同机制）——签名本质是
        普通类型，且函数指针作参数时签名引用签名，须经 hoist 两遍扫描
        依赖后序构造（参数/返回类型已在此前解析登记，父先入队）。 */
-    const type_t *sig = type_func_sig(sema->vm, params, powns, nparams, rt, ret_own, false);
+    const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
     sym->type = sig;
     sym->ast = f;
     /* 签名类型提升：登记 + 递归依赖登记；fn->sig_id 记录（compiler
@@ -1634,8 +1619,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
      并产出 usize 返回类型（C 的 size_t：随架构变化）。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *lsig = type_func_sig(sema->vm, NULL, NULL, 0, vm_type_usize(sema->vm),
-                                       OWN_NONE, /*is_variadic=*/true);
+    const type_t *lsig = type_func_sig(sema->vm, NULL, 0, vm_type_usize(sema->vm),
+                                       /*is_variadic=*/true);
     uint32_t lfid = 0;
     if (sema->vm->functions) {
       size_t nf = vec_len(sema->vm->functions);
@@ -1660,8 +1645,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
        - __make_share(p)：fatal/own *T → share *T（§12.1 创建通道）
        - __weak_get(w)  ：weak *T → ?share *T（§12.4 原子升级，`.get()` 语法糖） */
   {
-    const type_t *vsig = type_func_sig(sema->vm, NULL, NULL, 0,
-                                       sema->vm->type_opaque, OWN_NONE,
+    const type_t *vsig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_opaque,
                                        /*is_variadic=*/true);
     if (vsig) {
       const char *names[2] = {"__make_share", "__weak_get"};
@@ -1697,8 +1682,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      里改写为对它的调用，因此 CLONE 指令可以彻底移除。变参签名，调用点按实参
      类型精化返回类型（同类型 fatal）。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *dsig = type_func_sig(sema->vm, NULL, NULL, 0,
-                                       sema->vm->type_opaque, OWN_NONE,
+    const type_t *dsig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_opaque,
                                        /*is_variadic=*/true);
     uint32_t dfid = 0;
     if (sema->vm->functions) {
@@ -1728,8 +1713,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *ref_opaque = type_ptr_intern(sema->vm,
                                                sema->vm->type_opaque);
     const type_t *dsig = ref_opaque
-                             ? type_func_sig(sema->vm, NULL, NULL, 0, ref_opaque,
-                                             OWN_NONE, /*is_variadic=*/true)
+                             ? type_func_sig(sema->vm, NULL, 0, ref_opaque,
+                                             /*is_variadic=*/true)
                              : NULL;
     uint32_t dfid = 0;
     if (sema->vm->functions) {
@@ -1756,9 +1741,9 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
      注册为 variadic（0 固定参数）——具体 §2 校验在运行期由 cfunc 内部完成
      （与 len 同一套路），返回类型 opaque。fid 从 vm->functions 按名查询。 */
   {
-    const type_t *csig = type_func_sig(sema->vm, NULL, NULL, 0,
+    const type_t *csig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_opaque,
-                                       OWN_NONE, /*is_variadic=*/true);
+                                       /*is_variadic=*/true);
     uint32_t cfid = 0;
     if (sema->vm->functions) {
       size_t nf = vec_len(sema->vm->functions);

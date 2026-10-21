@@ -80,8 +80,8 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
 void vm_register_len(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
 
-    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm_type_usize(vm),
-                                      OWN_NONE, /*is_variadic=*/true);
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm_type_usize(vm),
+                                      /*is_variadic=*/true);
     if (!sig) return;
 
     value_t *fnv = func_new(vm, builtin_len_cfunc, NULL, vm->root_scope,
@@ -117,8 +117,8 @@ static value_t *builtin_deep_clone_cfunc(vm_t *vm, func_t *self, size_t argc,
 void vm_register_deep_clone(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
     /* 变参签名：sema 在调用点按实参类型精化返回类型（与 len/data 同款）。 */
-    const type_t *sig = type_func_sig(vm, NULL, NULL, 0, vm->type_opaque,
-                                      OWN_NONE, /*is_variadic=*/true);
+    const type_t *sig = type_func_sig(vm, NULL, 0, vm->type_opaque,
+                                      /*is_variadic=*/true);
     if (!sig) return;
     value_t *fnv = func_new(vm, builtin_deep_clone_cfunc, NULL, vm->root_scope,
                             sig, STRSLICE_LIT("__deep_clone"));
@@ -179,8 +179,8 @@ static value_t *builtin_weak_get_cfunc(vm_t *vm, func_t *self, size_t argc,
 
 void vm_register_rc_builtins(vm_t *vm) {
     if (!vm || !vm->global_scope) return;
-    const type_t *sig1 = type_func_sig(vm, NULL, NULL, 0, vm->type_opaque,
-                                       OWN_NONE, /*is_variadic=*/true);
+    const type_t *sig1 = type_func_sig(vm, NULL, 0, vm->type_opaque,
+                                       /*is_variadic=*/true);
     if (sig1) {
         value_t *fnv = func_new(vm, builtin_make_share_cfunc, NULL,
                                 vm->root_scope, sig1, STRSLICE_LIT("__make_share"));

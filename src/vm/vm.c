@@ -267,8 +267,7 @@ void vm_destroy(vm_t **pvm) {
             func_type_t *ft = (func_type_t *)vec_get(vm->sig_types, i);
             if (!ft) continue;
             if (ft->sig.params) allocator_free(vm->alloc, (void **)&ft->sig.params);
-            if (ft->sig.param_ownerships) allocator_free(vm->alloc, (void **)&ft->sig.param_ownerships);
-            if (ft->base.name.ptr) {
+                if (ft->base.name.ptr) {
                 char *np = (char *)ft->base.name.ptr;
                 allocator_free(vm->alloc, (void **)&np);
             }

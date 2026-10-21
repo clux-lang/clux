@@ -247,7 +247,10 @@ static ast_node_t *destroy_fn_callee(sema_t *sema, const type_t *t) {
   if (fn->fid == 0) return NULL;
 
   /* 形参 dv: ref *T —— 类型 = intern 的 `*T`；槽位所有权 = REF（不拥有） */
-  const type_t *pt = type_ptr_intern(sema->vm, s);
+  const type_t *pt0 = type_ptr_intern(sema->vm, s);
+  if (!pt0) return NULL;
+  /* 形参是借用：`ref *T`（所有权进类型）。 */
+  const type_t *pt = type_ownership_apply(sema->vm, OWN_REF, pt0);
   if (!pt) return NULL;
   ast_node_t *pnode = ast_var_def_new(sema->arena, 0, 0);
   ast_node_t *ptexpr = sema_gen_type_ref(sema, pt); /* 登记 *T + AST_TYPE_REF */
@@ -259,9 +262,8 @@ static ast_node_t *destroy_fn_callee(sema_t *sema, const type_t *t) {
 
   /* 签名 void(ref *T)：登记进 sema->types（hoist 两遍扫描构造），记 sig_id */
   const type_t *sigparams[1] = {pt};
-  ownership_t sigowns[1] = {OWN_REF};
-  const type_t *sig = type_func_sig(sema->vm, sigparams, sigowns, 1,
-                                    sema->vm->type_void, OWN_NONE, false);
+  const type_t *sig = type_func_sig(sema->vm, sigparams, 1,
+                                    sema->vm->type_void, false);
   if (!sig) return NULL;
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
@@ -1913,14 +1915,9 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
     ast_var_def_t *svd = (ast_var_def_t *)sp;
     const type_t *src_pt = sema_resolve_type_slot(sema, &svd->type_expr);
     const type_t *tgt_pt = func_type_param(target, i);
-    /* 源所有权以 **cfunc 的签名**为准：pass 3b 时形参 AST 已折叠成
-       AST_TYPE_REF，从 AST 提取会得到 OWN_NONE（只有正式轮才拿得到）。 */
-    ownership_t src_own = (src_sig && src_sig->param_ownerships &&
-                           i < src_sig->param_count)
-                              ? src_sig->param_ownerships[i]
-                              : sema_type_expr_ownership(svd->type_expr);
-    ownership_t tgt_own = sig->param_ownerships ? sig->param_ownerships[i]
-                                                : OWN_NONE;
+    /* 所有权现在编码在类型上（AST 折叠后也能读回）。 */
+    ownership_t src_own = type_ownership_of(src_pt);
+    ownership_t tgt_own = type_ownership_of(tgt_pt);
     if (!src_pt || !tgt_pt || src_pt != tgt_pt || src_own != tgt_own) {
       diag_error(sema->diag, sema_loc(sema, origin),
                  "cannot convert cfunc(...) to func(...): parameter %zu of the "
@@ -1968,11 +1965,9 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
   const type_t *tgt_ret = func_type_return(target);
   const type_t *src_ret =
       src->return_expr ? sema_resolve_type_slot(sema, &src->return_expr) : NULL;
-  ownership_t src_ret_own =
-      src_sig ? src_sig->return_ownership
-              : (src->return_expr ? sema_type_expr_ownership(src->return_expr)
-                                  : OWN_NONE);
-  if (tgt_ret != src_ret || src_ret_own != sig->return_ownership) {
+  ownership_t src_ret_own = type_ownership_of(src_ret);
+  if (tgt_ret != src_ret ||
+      src_ret_own != type_ownership_of(tgt_ret)) {
     diag_error(sema->diag, sema_loc(sema, origin),
                "cannot convert cfunc(...) to func(...): return type or "
                "ownership differs");
@@ -4282,7 +4277,7 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
   }
   /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
   sema_check_ret_ref_annot(sema, fn, rt, ret_own);
-  const type_t *sig = type_func_sig(sema->vm, params, powns, nparams, rt, ret_own, false);
+  const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
   /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */
   sema_symbol_t *sym = sema_lookup(scope, fn->name);
   if (sym) {

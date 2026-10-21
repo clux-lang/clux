@@ -100,7 +100,7 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
         ret = value_as(rt, const type_t *);
     }
     const type_t *sig = type_func_sig(vm, nparams > 0 ? params_arr : NULL,
-                                      NULL, nparams, ret, OWN_NONE,
+                                      nparams, ret,
                                       /*is_variadic=*/false);
     if (!sig)
         return ctfe_err(ctx, "ctfe: failed to construct function literal signature");
@@ -713,8 +713,8 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             n->is_c_abi
                 ? type_cfunc_sig(vm, np > 0 ? params_arr : NULL, np, ret,
                                  /*is_variadic=*/false)
-                : type_func_sig(vm, np > 0 ? params_arr : NULL, NULL, np, ret,
-                                OWN_NONE, /*is_variadic=*/false);
+                : type_func_sig(vm, np > 0 ? params_arr : NULL, np, ret,
+                                /*is_variadic=*/false);
         if (!sig)
             return ctfe_err(ctx, "ctfe: failed to construct function signature type");
         return type_as_value(vm, sig);

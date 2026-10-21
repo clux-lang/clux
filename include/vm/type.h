@@ -71,10 +71,8 @@ TYPE_KIND_CFUNC,     /* cfunc(P…) -> R：**C 函数指针**（无 env，size=�
  */
 typedef struct func_sig_t {
     const type_t **params;      /* array[param_count]; 元素可为 NULL = 无类型约束 */
-    ownership_t   *param_ownerships; /* array[param_count]; 每个参数的 ownership */
     size_t         param_count;
-    const type_t  *return_type; /* NULL = void */
-    ownership_t    return_ownership;  /* 返回值的 ownership */
+    const type_t  *return_type; /* NULL = void；所有权编码在参数/返回类型上 */
     bool           is_variadic;
 } func_sig_t;
 

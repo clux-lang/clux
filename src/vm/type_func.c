@@ -1,4 +1,5 @@
 #include "vm/type_func.h"
+#include "vm/type_ownership.h"
 #include "vm/value.h"
 #include "vm/value_deepcopy.h" /* value_relabel_into（fatal 形参重贴标签） */
 #include "vm/function.h"
@@ -103,10 +104,10 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
            这正是本缺陷（复合类型跨函数边界）的入口之一。
            本函数是"实参 → 形参"转换的**唯一**判定点：运行期 func_vcall 与 sema
            的 shadow 调用都经过这里，因此规则只此一处。
-           所有权纯编译期——形参 ownership 从 sig->param_ownerships[i] 读取，
-           实参 fatal 从 value_type_ownership(args[i]) 读取。 */
+           形参所有权编码在参数类型上（type_ownership_of），
+           实参 fatal 由 value_type_ownership 读取。 */
         if (i < sig->param_count && sig->params[i] &&
-            sig->param_ownerships && sig->param_ownerships[i] == OWN_OWN &&
+            type_ownership_of(sig->params[i]) == OWN_OWN &&
             value_type_ownership(args[i]) != OWN_FATAL) {
             char pn[64];
             sig_type_name(sig->params[i], pn, sizeof pn);
@@ -206,11 +207,10 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
            下方 else 分支对同类型走 value_clone —— 对含 own 字段的复合类型那是一次
            **多余的深拷贝**（白分配一整套对象图），而且调用方实参仍持有原件，
            "转移"就名不副实。这里显式走 value_move：接管资源 + 清空源。
-           所有权纯编译期——形参 ownership 从 sig->param_ownerships[i] 读取，
-           实参 ownership 从 value_type_ownership(args[i]) 读取。 */
-        if (sig && sig->params && sig->param_ownerships &&
-            i < sig->param_count && sig->params[i] &&
-            sig->param_ownerships[i] == OWN_FATAL &&
+           形参所有权编码在参数类型上（type_ownership_of），
+           实参所有权由 value_type_ownership 读取。 */
+        if (sig && sig->params && i < sig->param_count && sig->params[i] &&
+            type_ownership_of(sig->params[i]) == OWN_FATAL &&
             (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
             value_type_ownership(args[i]) == OWN_OWN) {
             value_t *moved = value_move(vm, args[i]);
@@ -241,9 +241,8 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
            move → 堆块永久泄漏（实测 `func f(a: own *i32) { ... }` 每次调用
            漏 4 字节）。这里复制值本体（指针/切片描述符，8~16 字节，不深入
            对象图）并把 ownership 置为 OWN_OWN。 */
-        if (sig && sig->params && sig->param_ownerships &&
-            i < sig->param_count && sig->params[i] &&
-            sig->param_ownerships[i] == OWN_OWN &&
+        if (sig && sig->params && i < sig->param_count && sig->params[i] &&
+            type_ownership_of(sig->params[i]) == OWN_OWN &&
             (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
             value_type_ownership(args[i]) == OWN_REF) {
             value_t *owned = value_clone(vm, args[i]);
@@ -254,7 +253,6 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                                                    "while binding own parameter");
                 break;
             }
-            value_set_type_ownership(vm, owned, OWN_OWN);
             if (value_type(owned) != sig->params[i]) {
                 value_t *relabeled = value_relabel_into(vm, owned, sig->params[i]);
                 if (relabeled) owned = relabeled;
@@ -300,8 +298,8 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                           交给下方第 7 步做"转移 + 重贴标签"。原因：base→fatal 不是
                           一个合法的隐式转换方向（各族的 implicit_cast 只认
                           fatal→base 的接管），在此 cast 会直接失败。
-                          所有权纯编译期——return ownership 从 sig->return_ownership 读取。 */
-                       !(sig->return_ownership == OWN_FATAL &&
+                          所有权编码在返回类型上。 */
+                       !(type_ownership_of(sig->return_type) == OWN_FATAL &&
                          (type_is_ptr(sig->return_type) ||
                           type_is_slice(sig->return_type)))) {
                 /* safe_cast 返回值到声明的返回类型（auto-tracked 到 callee scope）。
@@ -328,7 +326,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     vm->current_scope = caller_scope;
     if (ret && value_type(ret)) {
         if (sig && sig->return_type &&
-            sig->return_ownership == OWN_FATAL &&
+            type_ownership_of(sig->return_type) == OWN_FATAL &&
             (type_is_ptr(sig->return_type) ||
              type_is_slice(sig->return_type)) &&
             value_type_ownership(ret) == OWN_OWN) {
@@ -435,16 +433,9 @@ static bool func_sig_eq(const func_sig_t *a, const func_sig_t *b) {
     if (a->param_count != b->param_count) return false;
     if (a->is_variadic != b->is_variadic) return false;
     if (a->return_type != b->return_type) return false;
-    if (a->return_ownership != b->return_ownership) return false;
     if (a->param_count > 0 &&
         memcmp(a->params, b->params, a->param_count * sizeof(type_t *)) != 0)
         return false;
-    /* `param_ownerships` 可为 NULL（未知，按全 NONE 处理） */
-    for (size_t i = 0; i < a->param_count; i++) {
-        ownership_t ao = a->param_ownerships ? a->param_ownerships[i] : OWN_NONE;
-        ownership_t bo = b->param_ownerships ? b->param_ownerships[i] : OWN_NONE;
-        if (ao != bo) return false;
-    }
     return true;
 }
 
@@ -568,7 +559,6 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
                 allocator_free(vm->alloc, (void **)&np);
             }
             if (ft->sig.params) allocator_free(vm->alloc, (void **)&ft->sig.params);
-            if (ft->sig.param_ownerships) allocator_free(vm->alloc, (void **)&ft->sig.param_ownerships);
             allocator_free(vm->alloc, (void **)&ft);
             return &other->base;
         }
@@ -585,9 +575,8 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_func_sig(vm_t *vm, const type_t *const *params,
-                            const ownership_t *param_ownerships,
                             size_t param_count, const type_t *return_type,
-                            ownership_t return_ownership, bool is_variadic) {
+                            bool is_variadic) {
     /* 一次性快捷（func_type_push + add_param* + set_return + set_variadic +
      * seal）；内部走 create_open（不向 vm 栈压入 type value，供 C 侧直接用）。
      * 入池由 func_type_seal 完成。 */
@@ -601,21 +590,8 @@ const type_t *type_func_sig(vm_t *vm, const type_t *const *params,
         memcpy(pcopy, params, param_count * sizeof(type_t *));
         ft->sig.params = pcopy;
         ft->sig.param_count = param_count;
-
-        /* 所有权纯编译期——参数 ownership 数组随签名存储 */
-        ownership_t *ocopy = (ownership_t *)allocator_new_ex(
-            vm->alloc, "ownership_t", sizeof(ownership_t), NULL, NULL, NULL,
-            param_count);
-        if (!ocopy) panic("vm: out of memory allocating function signature ownership");
-        if (param_ownerships) {
-            memcpy(ocopy, param_ownerships, param_count * sizeof(ownership_t));
-        } else {
-            memset(ocopy, 0, param_count * sizeof(ownership_t));
-        }
-        ft->sig.param_ownerships = ocopy;
     }
     ft->sig.return_type = return_type;
-    ft->sig.return_ownership = return_ownership;
     ft->sig.is_variadic = is_variadic;
     return func_type_seal(vm, &ft->base);
 }

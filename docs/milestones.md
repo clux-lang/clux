@@ -2442,3 +2442,16 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       值上不再有状态）。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+106. **所有权升级为类型构造 · P3b：删除函数签名的所有权数组**（2026-10）
+    - `func_sig_t` 删除 `param_ownerships` / `return_ownership`，只保留
+      `params / param_count / return_type / is_variadic`。形参/返回所有权一律由
+      类型携带（`type_ownership_of`）。
+    - `func_sig_eq` 删除手工所有权比较（类型相等即包含所有权）；`func_type_seal`
+      / `vm_destroy` 不再释放 ownership 数组。
+    - `type_func_sig` 签名从 7 参简化为 5 参，22 处调用点全部迁移；sema/ctfe/
+      builtin/FFI 的签名构造与读取同步简化。
+    - sema 生成的 destroy/clone helper 把 `ref` 形参与 `fatal` 返回直接编进类型
+      （不再靠签名侧数组旁路携带）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

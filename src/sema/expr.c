@@ -2672,11 +2672,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         }
         const type_t *rt = func_type_return(sig_type);
         value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
-        /* 函数返回值 ownership：fatal→OWN_FATAL，ref→OWN_REF，其余 OWN_NONE */
-        if (rt && sig_type && type_kind_of(sig_type) == TYPE_KIND_FUNC) {
-          const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(sig_type))->sig;
-          value_set_type_ownership(sema->vm, sv, sig->return_ownership);
-        }
+        /* 返回值的所有权已编码在返回类型里（shadow 直接按 rt 构造）。 */
         return sv;
       }
 
@@ -2792,7 +2788,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
                            "as the declared parameter type", qual, ai + 1);
             }
             value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
-            value_set_type_ownership(sema->vm, sv, sig->return_ownership);
+    
             return sv;
           }
         }
@@ -2994,12 +2990,7 @@ static value_t *ex_call(sema_t *sema, ast_node_t **node,
         return sv;
       }
 
-      /* 函数返回值 ownership：从签名 return_ownership 读取（fatal/ref/none）。
-         函数永不能返回 own（§4 已拦截），所以此处只会有 OWN_FATAL / OWN_REF / OWN_NONE。 */
-      if (result && fnt && type_kind_of(fnt) == TYPE_KIND_FUNC) {
-        const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(fnt))->sig;
-        value_set_type_ownership(sema->vm, result, sig->return_ownership);
-      }
+      /* 返回值的所有权已编码在返回类型里（shadow 按返回类型构造）。 */
       return result; /* shadow in → shadow out（return_type shadow） */
 }
 
@@ -4218,9 +4209,14 @@ static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
        kind 0 → 形参 *T，返回 T
        kind 1 → 形参 *U，返回 *U
        kind 2 → 形参 []T，返回 []T */
-  const type_t *pt = (kind == 2) ? k : type_ptr_intern(sema->vm, k);
+  const type_t *pt0 = (kind == 2) ? k : type_ptr_intern(sema->vm, k);
+  if (!pt0) return NULL;
+  /* 形参是借用（ref）、返回是将亡值（fatal）：所有权写进类型。 */
+  const type_t *pt = type_ownership_apply(sema->vm, OWN_REF, pt0);
   if (!pt) return NULL;
-  const type_t *ret = (kind == 0) ? k : pt;
+  const type_t *ret0 = (kind == 0) ? k : pt0;
+  const type_t *ret = type_ownership_apply(sema->vm, OWN_FATAL, ret0);
+  if (!ret) return NULL;
 
   ast_func_def_t *fn = (ast_func_def_t *)arena_calloc(
       sema->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
@@ -4240,9 +4236,7 @@ static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
   fn->params = pnode;
 
   const type_t *sigparams[1] = {pt};
-  ownership_t sigowns[1] = {OWN_REF};
-  const type_t *sig = type_func_sig(sema->vm, sigparams, sigowns, 1, ret,
-                                    OWN_FATAL, false);
+  const type_t *sig = type_func_sig(sema->vm, sigparams, 1, ret, false);
   if (!sig) return NULL;
   const sema_type_t *st = sema_type_register(sema, sig);
   if (st) fn->sig_id = st->id;
