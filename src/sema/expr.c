@@ -501,13 +501,9 @@ static bool is_poison(sema_t *sema, const value_t *v) {
     if (is_poison((sema), (v))) return val_void((sema));                       \
   } while (0)
 
-/**
- * 取 fatal 变体的 **base 类型**（fatal T → T，fatal *T → own *T，
- * fatal []T → own []T，…）。非 fatal 输入原样返回。
- *
- * 优先走 VM 的登记表 `type_fatal_base_of`（**规范身份**）；未登记时退回按布局
- * 重新 intern 的兜底逻辑（与 `stmt.c` 的 static `strip_fatal` 同源）。
- */
+/** 取 fatal 变体的 base 类型：`fatal T` → T；非 fatal 输入原样返回。
+ * 所有权是类型修饰后，option 内层比较只需要看裸类型（见
+ * `option_inner_type_ok`），这个入口保留给调用点的语义命名。 */
 static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
   /* 所有权迁移到值/symbol 层后，fatal 不再是类型层概念——type_is_fatal(t)
      恒为 false，本函数退化为恒等返回 t。保留签名以减少调用方改动。 */
@@ -2202,15 +2198,10 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
     return at == pt || at == sema->vm->type_opaque || type_is_ptr(at) ||
            type_kind_of(at) == TYPE_KIND_CFUNC;
   /* 结构体/cunion 按值：要求**同型**（描述符按字段构造，布局必须完全一致）。
-     指针/切片等也要求完全一致。**两侧都归一化到 fatal 变体**再比身份：
-     只升一侧会永不相等，从而误拒 `fatal *T` 形参接收 `own *T` 变量（两者是
-     同布局的不同 intern 实例）。归一后 own / fatal / 构造产物统一落在同一个
-     intern 实例；`ref *T` 不持有资源、不参与升级，仍然只与 `ref *T` 匹配
-     （借用语义不同，不予放行——`move(x.&)` 不会把借用变成所有权）。 */
-  const type_t *pfn = type_fatal_variant_of(sema->vm, pt);
-  const type_t *afn = type_fatal_variant_of(sema->vm, at);
-  if (pfn && afn) return pfn == afn;
-  return pt == at;
+     所有权已经是类型的一部分：两侧都先剥到裸类型再比身份，于是
+     `own *T` / `fatal *T` 与 `*T` 在 C ABI 表示上等价；`ref *T` 也按裸指针
+     表示处理（C 侧看不到借用语义）。 */
+  return type_strip_ownership(pt) == type_strip_ownership(at);
 }
 
 /* M6 FFI：变参（`...`）位置的额外实参是否可搬运。整数族/浮点/指针/str 都可以

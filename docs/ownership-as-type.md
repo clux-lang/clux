@@ -168,7 +168,7 @@ move/fatal/借用判定仍从符号/值状态读取（与类型保持一致）�
 验证：Windows 全量 **2232/2232**、examples 53 个入口全过、fmt 幂等 53/53；
 WSL2 全量 **2229 passed / 2 skipped**。
 
-### P3 删除旧机制 —— 🚧 P3a / P3b / P3c / P3d 已完成（2026-10）
+### P3 删除旧机制 —— 🚧 P3a / P3b / P3c / P3d / P3e-1 已完成（2026-10）
 
 - ✅ **值层所有权状态已删除**：`value_t.ownership`、`value_set_ownership`、
   `value_ownership` 全部移除。值只剩 `type / data / is_shadow / borrowed / frame`。
@@ -203,10 +203,12 @@ WSL2 全量 **2229 passed / 2 skipped**。
   函数字面量）改为 `type_ownership_of(已解析类型)`。CTFE 的类型表达式求值也补上
   所有权（`AST_PTR` / `AST_SLICE_TYPE` / `AST_OWNED_TYPE` 及数组元素槽位），
   `type X = own *T` 不再依赖 P1a 的“类型定义后补包”。
-- **待办（P3e）**：删除 7 个槽位所有权字段（需要把运行期 free/clone/assign
-  改为只走编译期生成的序列，或让运行期槽位类型保留所有权信息）、
-  AST 上的 ownership 缓存、`type_fatal_variant_of` / `type_fatal_base_of`
-  恒等壳，以及运行期 `borrowed` 视图位（最终与借用 materialize 改造一起删除）。
+- ✅ **P3e-1：删除 fatal 变体恒等壳**。`type_fatal_variant_of` /
+  `type_fatal_base_of` 删除；FFI 同型比较直接剥所有权后比裸类型。struct/union
+  字段的槽位所有权写入也改为从字段类型派生（不再读 AST 缓存）。
+- **待办（P3e-2）**：删除 7 个槽位所有权字段（需要把运行期 free/clone/assign
+  改为只走编译期生成的序列，或让运行期槽位类型保留所有权信息）、AST 上的
+  ownership 缓存，以及运行期 `borrowed` 视图位（与借用 materialize 改造一起删除）。
 - 反射已把 `ownership` / `unqualified` 纳入 key 表；“所有权是类型修饰符，故可反射”
   已在文档层面成立。
 - 验证：Windows 全量 2232/2232、examples 53 全过；WSL2 全量 2229 passed / 2 skipped。

@@ -593,16 +593,3 @@ void vm_init_builtins(vm_t *vm) {
     vm->type_module = &g_type_module;
     vm->type_usize = &g_type_usize;
 }
-
-/* 所有权纯编译期——fatal 不再是独立类型，base 就是 t 本身。 */
-const type_t *type_fatal_base_of(vm_t *vm, const type_t *t) {
-    (void)vm;
-    return t;
-}
-
-/* 所有权纯编译期——fatal 不再是独立类型变体，原样返回 t。
-   sema 在值层标记 ownership=OWN_FATAL，运行期不感知。 */
-const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t) {
-    (void)vm;
-    return t;
-}

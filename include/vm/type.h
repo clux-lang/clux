@@ -632,37 +632,24 @@ bool type_has_rc_slots(const type_t *t);
 /* 注：所有权现在**就是类型修饰**（docs/ownership-as-type.md）。判定入口：
  *   - 类型层：`type_ownership_of(t)`（穿透 const/volatile），
  *             `type_is_own/ref/fatal(t)`（看最外层修饰）
- *   - 符号层：`sema_symbol_t::ownership`（声明处的修饰词，与符号类型一致）
- *   - 槽位层：`struct_field_t::ownership` 等（P3b 待删除，当前由槽位类型派生）
- *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
- *             （P3b 待删除，当前与参数/返回类型一致）
+ *   - 符号层：`sema_sym_ownership(sym)`（由 sym->type 派生，符号不存副本）
+ *   - 槽位层：槽位类型本身（`struct_field_t::type` 等）；`ownership` 字段只是
+ *             hoist 产出的运行期镜像，不是编译期判定的依据
+ *   - 签名层：参数/返回类型本身（签名不另存 ownership 数组）
  */
 
-/**
- * 取 `t` 的 **fatal 变体**：所有权是类型修饰，fatal 变体就是 `fatal T` 包装
- * （`type_ownership_apply(vm, OWN_FATAL, type_strip_ownership(t))`）。
+/* fatal 变体现在是类型修饰 `fatal T`，由 sema 的 `sema_fatal_variant_of`
+ * 构造；VM 层不再需要 `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳。 */
+
+
+/* 注：fatal 是类型修饰 `fatal T`，没有"独立变体身份"需要登记或折回；
+ * `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳已删除。
  *
- * 该 VM 层入口现在只是恒等（保留给 FFI 的可接受性比较）。P3b 会把它与
- * `type_fatal_base_of` 一起删除，改由 sema 的 `sema_fatal_variant_of` 统一构造。
- */
-const type_t *type_fatal_variant_of(vm_t *vm, const type_t *t);
-
-/**
- * 取 fatal 变体的 base：`fatal T → T`，非 fatal 原样返回。
- * 所有权剥离后就是 `type_strip_ownership(t)`；保留为语义入口（P3b 删除）。
- */
-const type_t *type_fatal_base_of(vm_t *vm, const type_t *t);
-
-/* 注：原 `type_fatal_bind_base`（登记 fatal 变体 → base）已删除——fatal 不再是
- * 独立类型变体，没有"变体身份"需要登记或折回（`type_fatal_base_of` 现为恒等）。
- *
- * 注：原 `type_contains_ref`（类型层递归判 ref）也已删除。所有权从类型层迁移到
- * 值/符号层后它恒返回 false，且含 ref 字段的聚合当前不支持（复合类型禁止携带
- * 指针/切片）。ref 的判定入口：
- *   - 符号层：`sema_symbol_t::ownership == OWN_REF`
+ * 注：原 `type_contains_ref`（类型层递归判 ref）也已删除。ref 的判定入口：
+ *   - 类型层：`type_ownership_of(t) == OWN_REF`
+ *   - 符号层：`sema_sym_ownership(sym) == OWN_REF`
  *   - 值层：  `value_type_ownership(v) == OWN_REF`（类型派生）
- *   - 签名层：`func_sig_t::param_ownerships[i]` / `return_ownership`
- * 完整模型见 docs/ownership-refactor.md §0。
+ *   - 签名层：参数/返回类型本身
  */
 
 /** const 类型 intern（按 sub 指针去重，vm 拥有生命周期） */

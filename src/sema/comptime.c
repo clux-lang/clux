@@ -1190,7 +1190,6 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
     if (dup) continue;
 
     /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。 */
-    ownership_t member_own = (ownership_t)sf->ownership;
     /* 字段类型解析（sema_resolve_type_slot：折叠为 AST_TYPE_REF，别名透明）
        ——内建类型名与已登记的具名类型均可用；未知类型报错。 */
     const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
@@ -1211,6 +1210,7 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
        槽位所有权生成（`if (v is m) { <payload 销毁序列> }`），
        member 的槽位所有权在解析期缓存（sf->ownership），并参与 intern。 */
     members[i].payload_type = ft;
+    ownership_t member_own = type_ownership_of(ft);
     /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
     members[i].ownership = member_own;
   }

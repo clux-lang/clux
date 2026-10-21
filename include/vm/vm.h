@@ -103,7 +103,7 @@ typedef struct vm_t {
 
     /* 注：原 `fatal_bases`（fatal 变体 → base 的派生关系登记表）已随所有权重构
        删除——fatal 不再是独立的类型变体，而是 value/symbol 层的 ownership 状态，
-       所以"变体身份折回"这个问题整体不存在了（`type_fatal_base_of` 现在是恒等）。
+       所以"变体身份折回"这个问题整体不存在了（fatal 就是类型修饰）。
        详见 docs/ownership-refactor.md。 */
 
     /* ---- 函数对象池（func_t / bcode_function_t*，vm 统一持有生命周期） ---- */

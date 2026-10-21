@@ -2488,3 +2488,11 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
     - `sema_check_ret_ref_annot` 不再接收 ownership 参数，内部从返回类型派生。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+110. **所有权升级为类型构造 · P3e-1：删除 fatal 变体恒等壳**（2026-10）
+    - 删除 `type_fatal_variant_of` / `type_fatal_base_of`（两者早已退化为恒等）；
+      FFI 同型比较改为 `type_strip_ownership(a) == type_strip_ownership(b)`。
+    - struct/union 字段的槽位所有权写入改为从字段类型派生（不再读 AST 缓存）。
+    - 更新 `type.h` 的所有权判定入口注释（符号/槽位/签名层均已改为类型携带）。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。
