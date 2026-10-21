@@ -403,7 +403,8 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
     if (!m->payload_type || !m->name.ptr) continue;
     const type_t *pt = type_strip_quals(m->payload_type);
     bool leaf = pt && (type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE);
-    if (leaf && m->ownership != OWN_OWN) continue;   /* ref/fatal 槽位不释放 */
+    if (leaf && type_ownership_of(m->payload_type) != OWN_OWN)
+      continue;   /* ref/fatal 槽位不释放 */
 
     /* then 体：该 member 的销毁序列 */
     ast_node_t *field = ast_member_new(sema->arena, 0, 0);
@@ -462,7 +463,7 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
       /* 叶子：只有 own 槽位才释放。**必须递归进被指向值**（PTR/SLICE 分支会
          展开被指向聚合的 own 槽位 / 切片元素），否则 `struct Outer { b: own
          *Box }` 只 FREE 掉 Box 块，Box.p 泄漏（实测 leak）。 */
-      if (f->ownership != OWN_OWN && !type_is_rc_ptr(ft)) continue;
+      if (type_ownership_of(f->type) != OWN_OWN && !type_is_rc_ptr(ft)) continue;
       ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
       if (!mem) return false;
       ((ast_member_t *)mem)->object = access;
@@ -648,7 +649,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
         return false;
       ast_node_t *bh = NULL, *bt = NULL;
       if (!gen_destroy_elems(sema, slice_type_elem(t),
-                             slice_type_elem_ownership(t), access, var_name,
+                             type_ownership_of(slice_type_elem(t)), access, var_name,
                              &bh, &bt))
         return false;
       if (bh) {
@@ -684,7 +685,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
         if (!idxv) return false;
         ast_node_t *elem = make_index_access(sema, access, idxv);
         if (!elem) return false;
-        if (!gen_destroy_slot(sema, et, tt->elems[i].ownership, elem, head,
+        if (!gen_destroy_slot(sema, et, type_ownership_of(tt->elems[i].type), elem, head,
                               tail))
           return false;
       }
@@ -699,7 +700,8 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       if (!make_loop_var_name(sema, name_buf, sizeof name_buf, &var_name))
         return false;
       ast_node_t *bh = NULL, *bt = NULL;
-      if (!gen_destroy_elems(sema, at->elem_type, at->elem_ownership, access,
+      if (!gen_destroy_elems(sema, at->elem_type,
+                            type_ownership_of(at->elem_type), access,
                              var_name, &bh, &bt))
         return false;
       if (bh) {
@@ -725,7 +727,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       const option_type_t *ot = (const option_type_t *)t;
       const type_t *inner = ot->inner;
       if (!inner) return true;
-      ownership_t inner_own = ot->inner_ownership;
+      ownership_t inner_own = type_ownership_of(ot->inner);
       const type_t *is = type_strip_quals(inner);
       bool leaf = is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE);
       if (leaf && inner_own != OWN_OWN) return true;
@@ -1142,7 +1144,8 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
     }
     if (hops[i].kind == AST_UNWRAP) {
       if (!ct || type_kind_of(ct) != TYPE_KIND_OPTION) return NULL;
-      if (storage) ptr_owned = (type_option_inner_ownership(ct) == OWN_OWN);
+      if (storage)
+        ptr_owned = (type_ownership_of(type_option_inner(ct)) == OWN_OWN);
       cur = type_option_inner(ct);
       continue;
     }
@@ -1152,13 +1155,14 @@ static sema_symbol_t *borrow_source_from_owned_path(sema_t *sema,
       uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
       if (!ct) return NULL;
       if (type_kind_of(ct) == TYPE_KIND_ARRAY) {
-        if (storage) ptr_owned = (array_type_elem_ownership(ct) == OWN_OWN);
+        if (storage)
+        ptr_owned = (type_ownership_of(array_type_elem(ct)) == OWN_OWN);
         cur = array_type_elem(ct);
         continue;
       }
       if (type_kind_of(ct) == TYPE_KIND_SLICE) {
         if (storage || ptr_owned)
-          ptr_owned = (slice_type_elem_ownership(ct) == OWN_OWN);
+          ptr_owned = (type_ownership_of(slice_type_elem(ct)) == OWN_OWN);
         storage = storage || ptr_owned;   /* 元素在缓冲里 */
         cur = slice_type_elem(ct);
         continue;
@@ -1434,7 +1438,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
     const type_t *in = type_strip_quals(ot->inner);
     if (!in) return false;
     if ((type_kind_of(in) == TYPE_KIND_PTR || type_kind_of(in) == TYPE_KIND_SLICE) &&
-        ot->inner_ownership == OWN_REF)
+        type_ownership_of(ot->inner) == OWN_REF)
       return true;
     return type_has_ref_slots_rec(in, path, depth);
   }
@@ -1443,7 +1447,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
     const type_t *et = type_strip_quals(at->elem_type);
     if (!et) return false;
     if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
-        at->elem_ownership == OWN_REF)
+        type_ownership_of(at->elem_type) == OWN_REF)
       return true;
     return type_has_ref_slots_rec(et, path, depth);
   }
@@ -1451,7 +1455,7 @@ static bool type_has_ref_slots_rec(const type_t *t, const type_t **path,
     const type_t *et = type_strip_quals(slice_type_elem(s));
     if (!et) return false;
     if ((type_kind_of(et) == TYPE_KIND_PTR || type_kind_of(et) == TYPE_KIND_SLICE) &&
-        slice_type_elem_ownership(s) == OWN_REF)
+        type_ownership_of(slice_type_elem(s)) == OWN_REF)
       return true;
     return type_has_ref_slots_rec(et, path, depth);
   }
@@ -1532,7 +1536,8 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
         value = ((const ast_construct_field_t *)f)->value;
       if (!value || value->kind == AST_NIL) continue;
       const struct_field_t *fd = &st->fields[idx];
-      n = borrow_collect_value(sema, fd->type, fd->ownership, value, scope,
+      n = borrow_collect_value(sema, fd->type, type_ownership_of(fd->type), value,
+                             scope,
                                out, cap, n);
     }
     return n;
@@ -1545,7 +1550,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
         value = ((const ast_construct_field_t *)f)->value;
       if (!value || value->kind == AST_NIL) continue;
       n = borrow_collect_value(sema, tt->elems[idx].type,
-                               tt->elems[idx].ownership, value, scope, out, cap,
+                               type_ownership_of(tt->elems[idx].type), value, scope, out, cap,
                                n);
     }
     return n;
@@ -1554,7 +1559,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     const array_type_t *at = (const array_type_t *)s;
     for (ast_node_t *f = fields; f; f = f->next) {
       if (f->kind == AST_FILL) {
-        n = borrow_collect_value(sema, at->elem_type, at->elem_ownership,
+        n = borrow_collect_value(sema, at->elem_type, type_ownership_of(at->elem_type),
                                  ((const ast_fill_t *)f)->value, scope, out,
                                  cap, n);
         continue;   /* fill 重复同一值，来源相同 */
@@ -1563,7 +1568,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
       if (f->kind == AST_CONSTRUCT_FIELD)
         value = ((const ast_construct_field_t *)f)->value;
       if (!value || value->kind == AST_NIL) continue;
-      n = borrow_collect_value(sema, at->elem_type, at->elem_ownership, value,
+      n = borrow_collect_value(sema, at->elem_type, type_ownership_of(at->elem_type), value,
                                scope, out, cap, n);
     }
     return n;
@@ -1574,7 +1579,8 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     if (f && f->kind == AST_CONSTRUCT_FIELD)
       f = ((const ast_construct_field_t *)f)->value;
     if (!f || f->kind == AST_NIL) return n;
-    return borrow_collect_value(sema, ot->inner, ot->inner_ownership, f, scope,
+    return borrow_collect_value(sema, ot->inner, type_ownership_of(ot->inner), f,
+                                scope,
                                 out, cap, n);
   }
   if (type_kind_of(s) == TYPE_KIND_UNION) {
@@ -1586,7 +1592,7 @@ static size_t borrow_collect_fields(sema_t *sema, const type_t *t,
     /* 具名构造：按字段名定位 member；否则用 AST 上的 member_tag（sema 填） */
     return borrow_collect_value(sema, ut->member_count ? ut->members[0].payload_type
                                                        : NULL,
-                                ut->member_count ? ut->members[0].ownership
+                                ut->member_count ? type_ownership_of(ut->members[0].payload_type)
                                                  : OWN_NONE,
                                 f, scope, out, cap, n);
   }
@@ -3027,14 +3033,14 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
     if (ix->indices && ix->indices->kind == AST_INT_LIT) {
       uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
       const tuple_elem_t *te = tuple_type_elem(bt, (size_t)k);
-      if (te) et_own = te->ownership;
+      if (te) et_own = type_ownership_of(te->type);
     }
   } else if (type_is_slice(bt)) {
     et = slice_type_elem(bt);
-    et_own = slice_type_elem_ownership(bt);
+    et_own = type_ownership_of(slice_type_elem(bt));
   } else {
     et = array_type_elem(bt);
-    et_own = array_type_elem_ownership(bt);
+    et_own = type_ownership_of(array_type_elem(bt));
   }
   if (!et) return;
 
@@ -3141,7 +3147,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
         bad = true;
       } else {
         ft = struct_type_field(bt, (size_t)idx)->type;
-        slot_own = struct_type_field(bt, (size_t)idx)->ownership;
+        slot_own = type_ownership_of(struct_type_field(bt, (size_t)idx)->type);
       }
     } else if (type_kind_of(bt) == TYPE_KIND_UNION) {
       /* union 字段：字段名 = member 名（tag 名），按名反查 member →
@@ -3158,7 +3164,7 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 payload 必存在 */
         } else {
           ft = mem->payload_type;
-          slot_own = mem->ownership;
+          slot_own = type_ownership_of(mem->payload_type);
         }
       }
     } else {

@@ -293,7 +293,10 @@ bool type_has_own_slots(const type_t *t) {
         case TYPE_KIND_STRUCT: {
             const struct_type_t *st = (const struct_type_t *)t;
             for (size_t i = 0; i < st->field_count; i++) {
-                if (st->fields[i].ownership == OWN_OWN) return true;
+                /* 编译期：槽位类型携带所有权；运行期：类型已剥离，回退到
+                   hoist 写入的槽位字段。 */
+                if (type_ownership_of(st->fields[i].type) == OWN_OWN ||
+                    st->fields[i].ownership == OWN_OWN) return true;
                 if (type_has_own_slots(st->fields[i].type)) return true;
             }
             return false;
@@ -301,7 +304,8 @@ bool type_has_own_slots(const type_t *t) {
         case TYPE_KIND_TUPLE: {
             const tuple_type_t *tt = (const tuple_type_t *)t;
             for (size_t i = 0; i < tt->elem_count; i++) {
-                if (tt->elems[i].ownership == OWN_OWN) return true;
+                if (type_ownership_of(tt->elems[i].type) == OWN_OWN ||
+                    tt->elems[i].ownership == OWN_OWN) return true;
                 if (type_has_own_slots(tt->elems[i].type)) return true;
             }
             return false;
@@ -309,7 +313,8 @@ bool type_has_own_slots(const type_t *t) {
         case TYPE_KIND_UNION: {
             const union_type_t *ut = (const union_type_t *)t;
             for (size_t i = 0; i < ut->member_count; i++) {
-                if (ut->members[i].ownership == OWN_OWN) return true;
+                if (type_ownership_of(ut->members[i].payload_type) == OWN_OWN ||
+                    ut->members[i].ownership == OWN_OWN) return true;
                 if (type_has_own_slots(ut->members[i].payload_type)) return true;
             }
             return false;
@@ -324,7 +329,8 @@ bool type_has_own_slots(const type_t *t) {
             return false;
         case TYPE_KIND_OPTION: {
             const option_type_t *ot = (const option_type_t *)t;
-            if (ot->inner_ownership == OWN_OWN) return true;
+            if (type_ownership_of(ot->inner) == OWN_OWN ||
+                ot->inner_ownership == OWN_OWN) return true;
             return type_has_own_slots(ot->inner);
         }
         case TYPE_KIND_CONST:
@@ -332,12 +338,14 @@ bool type_has_own_slots(const type_t *t) {
             return type_has_own_slots(type_qualifier_sub(t));
         case TYPE_KIND_ARRAY: {
             const array_type_t *at = (const array_type_t *)t;
-            if (at->elem_ownership == OWN_OWN) return true;
+            if (type_ownership_of(at->elem_type) == OWN_OWN ||
+                at->elem_ownership == OWN_OWN) return true;
             return type_has_own_slots(at->elem_type);
         }
         case TYPE_KIND_SLICE: {
             const slice_type_t *st = (const slice_type_t *)t;
-            if (st->elem_ownership == OWN_OWN) return true;
+            if (type_ownership_of(st->elem_type) == OWN_OWN ||
+                st->elem_ownership == OWN_OWN) return true;
             return type_has_own_slots(st->elem_type);
         }
         default:

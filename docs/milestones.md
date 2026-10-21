@@ -2468,3 +2468,12 @@ compiler 的 `prescan_expr`/`prescan_stmt` 因含语句层语义与 fid 动作�
       作用域标注（`|(r = x.&)|` 推断式 ref 不强制）。
     - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
       WSL2 全量 **2229 passed / 2 skipped**。
+
+108. **所有权升级为类型构造 · P3d-1：槽位判定改为读类型**（2026-10）
+    - 销毁序列（struct/tuple/union/array/slice/option）、clone 展平、构造槽位校验、
+      借用源分析、`type_has_own_slots`、hoist 的 `SET_FIELD_OWNERSHIP` 全部改为
+      `type_ownership_of(槽位类型)`；cunion 槽位按语义恒为 NONE。
+    - 7 个槽位字段暂时保留，但只作为**运行期类型镜像**（hoist 产物，供运行期
+      vtable 的 free/clone/assign 使用），不再是编译期判定的依据。
+    - **验证**：Windows 全量 **2232/2232 PASSED**；examples 53 个入口全过；
+      WSL2 全量 **2229 passed / 2 skipped**。

@@ -672,7 +672,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
             char what[96];
             snprintf(what, sizeof what, "struct field '%.*s'",
                      (int)st->fields[i].name.len, st->fields[i].name.ptr);
-            if (!sema_check_slot_flow(sema, st->fields[i].ownership, ft, value,
+            if (!sema_check_slot_flow(sema, type_ownership_of(st->fields[i].type), ft, value,
                                       fv, what))
               continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
@@ -748,7 +748,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
                      !value_is_type(fv, TYPE_KIND_VOID) && et) {
             char what[96];
             snprintf(what, sizeof what, "tuple element %zu", i);
-            if (!sema_check_slot_flow(sema, tt->elems[i].ownership, et, value,
+            if (!sema_check_slot_flow(sema, type_ownership_of(tt->elems[i].type), et, value,
                                       fv, what))
               continue;
             value_t *dst = value_make_shadow(sema->vm, et);
@@ -819,7 +819,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
               !value_is_type(fv, TYPE_KIND_VOID) && et) {
             char what[96];
             snprintf(what, sizeof what, "array element %zu", idx);
-            if (!sema_check_slot_flow(sema, array_type_elem_ownership(t), et,
+            if (!sema_check_slot_flow(sema, type_ownership_of(array_type_elem(t)), et,
                                       f, fv, what)) {
               idx += 1;
               continue;
@@ -869,7 +869,7 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
               /* inner 槽位接收规则（?own *T 只接 FATAL 等） */
               char what[96];
               snprintf(what, sizeof what, "optional inner");
-              sema_check_slot_flow(sema, type_option_inner_ownership(t), inner,
+              sema_check_slot_flow(sema, type_ownership_of(type_option_inner(t)), inner,
                                    f, fv, what);
             }
           }
@@ -929,7 +929,9 @@ static value_t *ex_new(sema_t *sema, ast_node_t **node,
           const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
           if (m && m->type) {
             mt = m->type;
-            slot_own = m->ownership;
+            /* cunion 不参与所有权运算（无 tag，运行期无法判定活跃成员）：
+               成员槽位一律按 NONE 处理（与既有语义一致）。 */
+            slot_own = OWN_NONE;
           }
         }
         if (!mt) return val_void(sema);
@@ -1397,7 +1399,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
             } else if (ft != t) {
               char what[96];
               snprintf(what, sizeof what, "optional inner");
-              sema_check_slot_flow(sema, type_option_inner_ownership(t), inner,
+              sema_check_slot_flow(sema, type_ownership_of(type_option_inner(t)), inner,
                                    f, fv, what);
             }
           }
@@ -1512,7 +1514,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
             char what[96];
             snprintf(what, sizeof what, "struct field '%.*s'",
                      (int)st->fields[i].name.len, st->fields[i].name.ptr);
-            if (!sema_check_slot_flow(sema, st->fields[i].ownership, ft, value,
+            if (!sema_check_slot_flow(sema, type_ownership_of(st->fields[i].type), ft, value,
                                       fv, what))
               continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
@@ -1608,7 +1610,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
                      !value_is_type(fv, TYPE_KIND_VOID) && et) {
             char what[96];
             snprintf(what, sizeof what, "tuple element %zu", i);
-            if (!sema_check_slot_flow(sema, tt->elems[i].ownership, et, value,
+            if (!sema_check_slot_flow(sema, type_ownership_of(tt->elems[i].type), et, value,
                                       fv, what))
               continue;
             value_t *dst = value_make_shadow(sema->vm, et);
@@ -1707,7 +1709,8 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
           char what[96];
           snprintf(what, sizeof what, "union field '%.*s'",
                    (int)cf->name.len, cf->name.ptr);
-          if (!sema_check_slot_flow(sema, m->ownership, m->payload_type, value,
+          if (!sema_check_slot_flow(sema, type_ownership_of(m->payload_type),
+                                 m->payload_type, value,
                                     fv, what))
             return val_void(sema);
           /* 可赋值性校验（safe_cast：同类型身份通过；结构兼容隐式转换；
@@ -1951,7 +1954,7 @@ static value_t *ex_construct(sema_t *sema, ast_node_t **node,
             !value_is_type(fv, TYPE_KIND_VOID) && et) {
           char what[96];
           snprintf(what, sizeof what, "array element %zu", idx);
-          if (!sema_check_slot_flow(sema, array_type_elem_ownership(t), et, f,
+          if (!sema_check_slot_flow(sema, type_ownership_of(array_type_elem(t)), et, f,
                                     fv, what)) {
             idx += 1;
             continue;
@@ -4390,7 +4393,7 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   if (!sema->cur_stmt) return NULL; /* 无语句上下文：交给运行期 __deep_clone 兜底 */
 
   const type_t *elem = slice_type_elem(t);
-  ownership_t eown = slice_type_elem_ownership(t);
+  ownership_t eown = type_ownership_of(slice_type_elem(t));
   uint32_t n = sema->clone_seq++;
   char nbuf[64], ibuf[64];
   snprintf(nbuf, sizeof nbuf, "__cl_%u", n);
@@ -4473,7 +4476,7 @@ static ast_node_t *gen_clone_option(sema_t *sema, sema_scope_t *scope,
                                     bool as_new) {
   const option_type_t *ot = (const option_type_t *)t;
   const type_t *inner = ot->inner;
-  ownership_t iown = ot->inner_ownership;
+  ownership_t iown = type_ownership_of(ot->inner);
   ast_node_t *unwrap = clone_unwrap(sema, access);
   ast_node_t *some_val = unwrap
       ? gen_clone_expr(sema, scope, inner, unwrap, iown, false)
@@ -4498,7 +4501,8 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
     if (!m->payload_type) continue;
     ast_node_t *mv = clone_member(sema, access, m->name);
     ast_node_t *payload = mv
-        ? gen_clone_expr(sema, scope, m->payload_type, mv, m->ownership, false)
+        ? gen_clone_expr(sema, scope, m->payload_type, mv,
+                             type_ownership_of(m->payload_type), false)
         : NULL;
     ast_node_t *field = payload ? clone_field(sema, m->name, payload) : NULL;
     ast_node_t *branch = field
@@ -4603,7 +4607,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
       if (!f->type || !f->name.ptr) continue;
       ast_node_t *mem = clone_member(sema, access, f->name);
       ast_node_t *e = mem ? gen_clone_expr(sema, scope, f->type, mem,
-                                           f->ownership, false)
+                                           type_ownership_of(f->type), false)
                           : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }
@@ -4620,7 +4624,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
       ast_node_t *ix = clone_int_lit(sema, (uint64_t)i);
       ast_node_t *e = ix ? gen_clone_expr(sema, scope, el->type,
                                           clone_index(sema, access, ix),
-                                          el->ownership, false)
+                                          type_ownership_of(el->type), false)
                          : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }
@@ -4637,7 +4641,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
       ast_node_t *ix = clone_int_lit(sema, (uint64_t)i);
       ast_node_t *e = ix ? gen_clone_expr(sema, scope, at->elem_type,
                                           clone_index(sema, access, ix),
-                                          at->elem_ownership, false)
+                                          type_ownership_of(at->elem_type), false)
                          : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }

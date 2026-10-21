@@ -318,7 +318,7 @@ static void define_array(compiler_t *c, const sema_type_t *st, uint8_t *done,
   bcode_write_op(c->bc, BCODE_DEFINE_BOUND); /* 弹 elem → 设进 open */
   bcode_write_u32(c->bc, (uint32_t)array_type_len(t));
   st_push(c, -1);
-  emit_slot_ownership(c, array_type_elem_ownership(t)); /* 元素槽位所有权 */
+  emit_slot_ownership(c, type_ownership_of(array_type_elem(t))); /* 元素槽位所有权 */
   emit_seal(c);                            /* 封闭算布局（去重时重绑登记） */
 }
 
@@ -504,7 +504,7 @@ static void define_slice(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_ref_dep_type(c, elem, done, count); /* 栈: [open, elem] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 elem → 设进 open */
   st_push(c, -1);
-  emit_slot_ownership(c, slice_type_elem_ownership(t)); /* 元素槽位所有权 */
+  emit_slot_ownership(c, type_ownership_of(slice_type_elem(t))); /* 元素槽位所有权 */
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
   /* elem 先定义（emit_dep_type）：切片自身 layout 恒定，但 elem 的身份必须已定型 */
 }
@@ -541,7 +541,7 @@ static void define_struct(compiler_t *c, const sema_type_t *st, uint8_t *done,
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, f->name);        /* 弹 field_type → 追加进 open */
     st_push(c, -1);
-    emit_slot_ownership(c, f->ownership);   /* 槽位所有权（own 字段） */
+    emit_slot_ownership(c, type_ownership_of(f->type)); /* 槽位所有权（own 字段） */
   }
 
   /* 嵌入表（`...Base`）：sema 组合阶段已设置 embeds，此处逐个 ADD_EMBED
@@ -593,7 +593,7 @@ static void define_option(compiler_t *c, const sema_type_t *st, uint8_t *done,
   emit_dep_type(c, inner, done, count);  /* 栈: [open, inner] */
   bcode_write_op(c->bc, BCODE_SET_TYPE); /* 弹 inner → 设进 open */
   st_push(c, -1);
-  emit_slot_ownership(c, type_option_inner_ownership(t)); /* inner 槽位所有权 */
+  emit_slot_ownership(c, type_ownership_of(type_option_inner(t))); /* inner 槽位所有权 */
   emit_seal(c);                          /* 封闭（去重时重绑登记） */
 }
 
@@ -615,7 +615,7 @@ static void define_tuple(compiler_t *c, const sema_type_t *st, uint8_t *done,
     emit_dep_type(c, e->type, done, count); /* 栈: [open, elem_type] */
     bcode_write_op(c->bc, BCODE_APPEND_ELEM); /* 弹 elem_type → 追加进 open */
     st_push(c, -1);
-    emit_slot_ownership(c, e->ownership);   /* 槽位所有权（own 元素） */
+    emit_slot_ownership(c, type_ownership_of(e->type)); /* 槽位所有权（own 元素） */
   }
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
@@ -647,7 +647,7 @@ static void define_union(compiler_t *c, const sema_type_t *st, uint8_t *done,
     bcode_write_op(c->bc, BCODE_DEFINE_FIELD);
     bcode_write_str(c->bc, m->name);       /* 弹 member_type → 设当前 member */
     st_push(c, -1);
-    emit_slot_ownership(c, m->ownership);  /* 槽位所有权（own member） */
+    emit_slot_ownership(c, type_ownership_of(m->payload_type)); /* 槽位所有权（own member） */
   }
 
   emit_seal(c);                            /* 封闭（去重时重绑登记） */
