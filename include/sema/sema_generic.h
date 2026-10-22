@@ -61,6 +61,7 @@ typedef struct sema_generic_instance {
     bool                  has_pack;
     bool                  pack_is_value; /* P9：comptime 值参数包（...N: comptime） */
     strslice_t            pack_name;
+    strslice_t            pack_param_name; /* 变参形参名 `args`（...Args） */
     size_t                pack_offset;
     size_t                pack_count;
     ast_node_t           *instance;  /* 合成声明（prog->funcs 中，arena；
@@ -143,6 +144,25 @@ const type_t *sema_generic_instantiate_type(
 bool sema_generic_parse_explicit_args(sema_t *sema, sema_symbol_t *generic_sym,
                                       ast_node_t *indices, size_t *out_count,
                                       sema_generic_arg_t **out_args);
+
+/** 当前 active 实例的**类型参数包变参形参**是否名为 name。 */
+bool sema_generic_pack_is_param(sema_t *sema, strslice_t name);
+
+/** 生成参数包元素表达式 `__pack_arg_i`；move_own 时对含 own 槽位的元素
+ *  自动包 `move(...)`（供展开 / 裸 args 元组构造使用）。 */
+ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,
+                                       const sema_generic_instance_t *inst,
+                                       size_t index, bool move_own,
+                                       uint32_t tb, uint32_t te);
+
+/** 构造 `<...Args>{ __pack_arg_... }` 表达式（裸 args 的显式 tuple 值）。 */
+ast_node_t *sema_generic_pack_tuple_expr(sema_t *sema,
+                                         const sema_generic_instance_t *inst,
+                                         uint32_t tb, uint32_t te);
+
+/** 构造 `<...Args>` 类型表达式（`.{ ...args }` 的显式目标类型）。 */
+ast_node_t *sema_generic_pack_tuple_type_expr(
+    sema_t *sema, const sema_generic_instance_t *inst, uint32_t tb, uint32_t te);
 
 /** 两阶段：walk 本模块所有尚未 walked 的泛型实例（含 walk 过程中新增的）。
  *  返回 true = 至少推进了一个实例（调用方据此跨模块循环到耗尽）。 */

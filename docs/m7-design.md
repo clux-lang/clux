@@ -24,8 +24,8 @@
 > 产物）、跨模块实例的诊断位置已重绑 token pool，签名期错误的实例链 note
 > 仍可补强。跨模块 interface（`implements il::IW[S]` / `T extends il::IW[T]`）
 > 与泛型方法显式类型实参（`v.method[U](...)` / `Type::method[U](...)`）
-> 已支持；运行期可变参数的 tuple 形参表示见
-> [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)（设计草案）。
+> 已支持；运行期可变参数采用**编译期 AST 展开**（无 tuple 局部变量、
+> 不改 ABI），见 [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)。
 > **跨模块实例归属（2026-10-22 已落地）**：两阶段模块流水线——所有模块先
 > prepare（保留 sema/prog/funcs/types），跨模块解析走 sema 符号表，全局
 > worklist 把实例直接加入定义模块；最后按依赖序 compile/register。类型登记
@@ -66,7 +66,7 @@
 | 生命周期参数 / 借用求解 | **不纳入**（与 M3 一致） |
 | 泛型特化（partial specialization） | **不纳入** |
 | variadic 泛型 / 参数包 `...Args`（§30） | 纳入（**仅编译期可变**，非运行期可变） |
-| 参数包值展开 `...args` 转发 | **不纳入**（M7 仅设计语法预留，实现留待后续） |
+| 参数包值展开 `...args` 转发 | **已实现**（编译期 AST 展开；own 自动 move） |
 | 运行期可变参数（C `va_list` 风格） | **不纳入**（M7 仅编译期可变，单态化定长） |
 
 ---
@@ -927,42 +927,52 @@ func print[...Args](fmt: str, args: ...Args): void { ... }
 func print(fmt: str, arg_0: i32, arg_1: i32): void;
 ```
 
-> 注：`arg_0`/`arg_1` 仅是本文档的**伪代码概念名**，用于说明实例化后的签名形态。**函数体内无法访问这些名字**——它们不是真实标识符。函数体内只能访问聚合后的 `args` 元组（见 §30.3）。
+> 注：`__pack_arg_i` 是本文档的**伪代码概念名**，用于说明实例化后的签名形态。**函数体内无法访问这些名字**——它们不是真实标识符。函数体内只能通过 `args[i]` / `len(args)` / `...args` 使用参数包（见 §30.3）。
 
-#### 30.3 函数体内 args 是元组（sema 入口聚合）
+#### 30.3 函数体内 args 是纯编译期展开（无运行期 tuple）
 
-实例化后签名是分离参数，但**用户在函数体内访问的 `args` 是一个元组值**。sema 在函数实例入口处**自动插入聚合代码**，把分离的可变参数 `arg_0, arg_1, ...` 聚合成元组，绑定到 `args` 名字：
+`args: ...Args` **不是运行期变量，也不生成 tuple 局部变量**。实例化时
+`Args` 已完全确定，sema 对 `args` 的所有使用点做 AST 变换：
+
+```
+args[INDEX]   -> __pack_arg_INDEX       （INDEX 必须编译期常量）
+len(args)     -> 整数字面量 pack_count
+...args       -> __pack_arg_0, ..., __pack_arg_N-1
+裸 args       -> 诊断：没有运行期值
+.{ ...args }  -> 显式 tuple 构造 .<T0,...,TN-1>{ __pack_arg_0, ... }
+```
 
 ```
 // 用户写的函数体：
 func print[...Args](fmt: str, args: ...Args): void {
-    // args 是元组，类型 <...Args>
-    var n = len(args);       // 元组长度（编译期常量）
-    var first = args[0];     // 按下标访问（clux 元组下标语法）
-    var second = args[1];
-    for (i = 0; i < len(args); i += 1) {
-        // ... 遍历（for-index，元组本身支持下标+长度）
-    }
+    var n = len(args);       // 折叠为常量 N
+    var first = args[0];     // 折叠为 __pack_arg_0
+    var second = args[1];    // 折叠为 __pack_arg_1
 }
 
-// 实例化 print[i32, i32] 后，sema 等价于生成：
-func print(fmt: str, arg_0: i32, arg_1: i32): void {
-    var args: <i32, i32> = .{arg_0, arg_1};   // sema 自动插入的聚合
-    // 用户函数体（args.len=2, args[0] 类型 i32, args[1] 类型 i32）
+// 实例化 print[i32, i32] 后：
+func print$i32$i32(fmt: str, __pack_arg_0: i32, __pack_arg_1: i32): void {
+    // 函数体里没有 args 变量；上面的使用点已直接替换为形参/常量
 }
 ```
 
-**访问语法遵守 clux 元组规则**：
-- `args[0]`/`args[1]`/... —— 按下标访问（clux 元组下标语法，非 `args.0`）。
-- `len(args)` —— 元组长度（clux `len()` 内建，编译期常量，= Args 包元素数）。
-- 遍历用 **for-index**（元组本身支持下标+长度，已支持，无需新增语法）。
+**规则**：
+- `args[i]`：索引必须是编译期整数；越界编译期诊断；运行期没有下标。
+- `len(args)`：编译期常量 `usize`。
+- `...args`：展开为分离实参；`own`/`fatal`/含 own 槽位的元素自动
+  `move`（消费式转发）。
+- 裸 `args`：没有运行期值；需要 tuple 时显式 `.{ ...args }`。
+- 因此**没有**隐式聚合 tuple、没有运行期元组描述符、没有额外 ABI。
+- 不能用运行期循环变量 `i` 做 `args[i]`；需要遍历时按固定下标展开或
+  显式构造 tuple。
 
 **compiler/VM 零感知**：
-- compiler 看到的是普通函数 `print(fmt: str, arg_0: i32, arg_1: i32)`（分离参数）。
-- 调用点 `print("...", 123, 234)` 是普通调用（独立实参，不是元组）——与 C `printf` 调用形态一致。
-- 元组聚合是 sema 在实例化时插入的局部变量构造，对 compiler/VM 透明。
+- compiler 看到的是普通函数 `print(fmt: str, __pack_arg_0: i32, __pack_arg_1: i32)`
+  （分离参数，名字只是合成形参）。
+- 调用点 `print("...", 123, 234)` 是普通调用（独立实参，不是元组）。
+- 参数包展开、`len` 折叠、`...args` 展开都在 sema 完成，对 compiler/VM 透明。
 
-#### 30.4 展开语法 `...`（类型展开纳入，值展开预留）
+#### 30.4 展开语法 `...`（类型展开 + 值展开）
 
 `...` 前缀有两种展开：
 
@@ -974,15 +984,19 @@ func print(fmt: str, arg_0: i32, arg_1: i32): void {
   // Tuple[i32, str] = <i32, str>
   ```
 
-- **值展开 `...args`**（M7 仅设计语法预留，实现留待后续）：将编译期已知长度的元组/数组展开为独立实参序列，用于函数调用转发。`...` 可用于编译期已知长度的元组和数组做参数展开，例如 `fprintf(stdout, fmt, ...args)` 的再传递场景。
+- **值展开 `...args`**（已实现）：编译期已知长度的数组/元组/参数包展开为
+  独立实参序列。参数包 `...args` 在 sema 中展开为隐藏形参；`own`/`fatal`
+  元素自动 `move`（消费式转发）。
 
-  ```
-  func forward[...Args](f: func(...Args)->void, args: ...Args): void {
-      f(...args);    // 值展开：args 元组展开为独立实参传给 f（M7 预留，后续实现）
+  ```clux
+  func sum[...Args](args: ...Args): i32 { ... }
+  func forward[...Args](args: ...Args): i32 {
+      return sum(...args);   // 展开为 sum(__pack_arg_0, ...)
   }
   ```
 
-  **M7 不实现值展开**——这是未来的单独语法，需再设计（涉及展开位置语义、与元组/数组的交互、嵌套展开等）。M7 仅在语法层预留 `...expr` 形式，sema 遇到时报错引导（`value pack expansion not implemented in M7`）。
+  数组/元组值展开同样按元素下标改写为独立实参；空展开为 0 个实参。
+  运行期没有“展开”字节码，全部是 sema 的 AST 重写。
 
 #### 30.5 类型别名与部分应用
 
@@ -1277,7 +1291,7 @@ func sum[T, E extends IContainer[T, E]](c: *T): E { ... }   // T=self类型, E=�
 | 可变参数签名（§30.2） | 实例化后是分离参数（arg_0, arg_1, ...），体内不可访问这些名字 | compiler/VM 看到普通定长函数，调用点独立实参（C printf 形态） |
 | 入口聚合（§30.3） | sema 在实例入口插入聚合代码，绑定 args 元组 | 用户体内访问 args 元组（<...Args>），用 args[i]/len(args)（clux 元组语法） |
 | 类型展开（§30.4） | `<...Args>` 纳入，普通类型表达式 | 用于类型别名/字段类型/变量声明 |
-| 值展开（§30.4） | M7 仅语法预留，不实现（后续单独设计） | `...args` 转发场景（fprintf(stdout,fmt,...args)）需展开位置语义等再设计 |
+| 值展开（§30.4） | 已实现（数组/元组/参数包；own 自动 move） | `...args` 转发场景编译期展开为独立实参 |
 | 遍历（§30.3） | for-index（元组本身支持下标+长度，已支持） | 无需新增语法 |
 | 类型别名与部分应用（§30.5） | `type T[...Args]=<...Args>` 纳入；部分应用允许 | 函数参数推导本来就支持部分传参+推导混合 |
 | 空包（§30.6） | Args=[] → 空元组 <> | print("fmt") 合法，len(args)=0 |

@@ -227,6 +227,45 @@ const struct_type_t *find_runtime_attr_owner(const type_t *t,
  *   - 展开是**就地**的（改写实参链），因此可重入：第二次调用时链中已无
  *     AST_SPREAD，直接返回。
  * =========================================================================== */
+/* `...args` 展开到只含一个类型参数包的泛型函数时，直接以 Args 元素为
+ * 显式类型实参，避免 `move(__pack_arg)` 的 fatal 值状态污染类型推导。 */
+static ast_node_t *pack_spread_explicit_callee(sema_t *sema, ast_node_t *callee,
+                                               const sema_generic_instance_t *gi,
+                                               sema_scope_t *scope) {
+  if (!callee || !gi || !gi->has_pack || gi->pack_is_value) return NULL;
+  sema_symbol_t *gsym = NULL;
+  if (callee->kind == AST_IDENT)
+    gsym = sema_lookup(scope, ((ast_ident_t *)callee)->name);
+  else if (callee->kind == AST_SCOPE_REF)
+    gsym = sema_cross_generic_symbol(sema, callee);
+  if (!gsym || !gsym->is_generic || !gsym->ast ||
+      gsym->ast->kind != AST_FUNC_DEF)
+    return NULL;
+  ast_func_def_t *gdef = (ast_func_def_t *)gsym->ast;
+  if (gdef->generic.count != 1) return NULL;
+  ast_node_t *gp = gdef->generic.first;
+  if (!gp || !((ast_generic_param_t *)gp)->is_pack) return NULL;
+
+  ast_node_t *indices = NULL, *last = NULL;
+  for (size_t i = 0; i < gi->pack_count; i++) {
+    const sema_generic_arg_t *a = &gi->args[gi->pack_offset + i];
+    ast_node_t *ref = sema_gen_type_ref(sema, a->type);
+    if (!ref) return NULL;
+    ref->next = NULL;
+    if (last) last->next = ref;
+    else indices = ref;
+    last = ref;
+  }
+  ast_node_t *idx = ast_index_new(sema->arena, callee->tok_begin,
+                                  callee->tok_end);
+  if (!idx) return NULL;
+  idx->is_generated = true;
+  ((ast_index_t *)idx)->object = callee;
+  ((ast_index_t *)idx)->indices = indices;
+  ((ast_index_t *)idx)->indices_last = last;
+  return idx;
+}
+
 static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
                                     sema_scope_t *scope) {
   ast_node_t **slot = &call->args;
@@ -238,6 +277,36 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
     }
     ast_spread_t *sp = (ast_spread_t *)a;
     ast_node_t *op = sp->operand;
+    /* `...args`（类型参数包）：编译期展开为隐藏形参；含 own 槽位的元素
+       自动 move 交出所有权。 */
+    if (op && op->kind == AST_IDENT &&
+        sema_generic_pack_is_param(sema,
+                                  ((ast_ident_t *)op)->name)) {
+      const sema_generic_instance_t *gi = sema->generics.active_inst;
+      if (call->callee && call->callee->kind != AST_INDEX) {
+        ast_node_t *explicit_callee =
+            pack_spread_explicit_callee(sema, call->callee, gi, scope);
+        if (explicit_callee) call->callee = explicit_callee;
+      }
+      ast_node_t *head = NULL, *tail = NULL;
+      for (size_t i = 0; i < gi->pack_count; i++) {
+        ast_node_t *e = sema_generic_pack_arg_expr(
+            sema, gi, i, /*move_own=*/true, a->tok_begin, a->tok_end);
+        if (!e) return false;
+        e->next = NULL;
+        if (tail) tail->next = e;
+        else head = e;
+        tail = e;
+      }
+      if (head) {
+        tail->next = a->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = a->next;
+      }
+      continue;
+    }
     if (!op ||
         (op->kind != AST_IDENT && op->kind != AST_MEMBER)) {
       diag_error(sema->diag, sema_loc(sema, a),
@@ -578,9 +647,17 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         ast_ident_t *cid = (ast_ident_t *)call->callee;
         sema_symbol_t *cs = sema_lookup(scope, cid->name);
         const sema_generic_instance_t *gi = sema->generics.active_inst;
-        if (cs && cs->builtin_op == SEMA_BUILTIN_LEN && gi && gi->has_pack &&
-            gi->pack_is_value && call->args->kind == AST_IDENT &&
-            strslice_eq(((ast_ident_t *)call->args)->name, gi->pack_name)) {
+        bool is_value_pack =
+            gi && gi->has_pack && gi->pack_is_value &&
+            call->args->kind == AST_IDENT &&
+            strslice_eq(((ast_ident_t *)call->args)->name, gi->pack_name);
+        bool is_type_pack =
+            gi && gi->has_pack && !gi->pack_is_value &&
+            call->args->kind == AST_IDENT &&
+            sema_generic_pack_is_param(
+                sema, ((ast_ident_t *)call->args)->name);
+        if (cs && cs->builtin_op == SEMA_BUILTIN_LEN &&
+            (is_value_pack || is_type_pack)) {
           ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
                                             (*node)->tok_end);
           if (!lit) return val_void(sema);

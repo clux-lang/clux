@@ -513,6 +513,64 @@ value_t *ex_member(sema_t *sema, ast_node_t **node,
 /* P9：comptime 值参数包 `...N: comptime u64` 的索引消费 `N[i]`。
  * 在实例化体内把 `N[i]` 折叠为对应值的整数字面量（编译期 tuple 语义；
  * 裸 `N` 无标量含义，不绑定）。 */
+/* 类型参数包变参 `args[i]`：编译期折叠为隐藏形参 `__pack_arg_i`。
+ * Args 已知，索引必须是编译期整数；不产生运行期 tuple。 */
+static value_t *type_pack_index_try(sema_t *sema, ast_node_t **node,
+                                    ast_index_t *n) {
+  const sema_generic_instance_t *gi = sema->generics.active_inst;
+  if (!gi || !gi->has_pack || gi->pack_is_value) return NULL;
+  if (!n->object || n->object->kind != AST_IDENT) return NULL;
+  if (!sema_generic_pack_is_param(
+          sema, ((ast_ident_t *)n->object)->name))
+    return NULL;
+  if (sema_count_siblings(n->indices) != 1) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "variadic parameter '%.*s' expects exactly one index",
+               (int)gi->pack_param_name.len, gi->pack_param_name.ptr);
+    return val_void(sema);
+  }
+  uint64_t raw = 0;
+  ast_node_t *idx_expr = n->indices;
+  if (idx_expr->kind == AST_INT_LIT) {
+    raw = ((ast_int_lit_t *)idx_expr)->value;
+  } else {
+    ctfe_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.vm = sema->vm;
+    ctx.sema = sema;
+    ctx.budget = 100000;
+    ctx.max_depth = 128;
+    value_t *r = ctfe_eval(&ctx, idx_expr);
+    if (!r || value_is_error(sema->vm, r) || !value_type(r) ||
+        type_kind_of(value_type(r)) != TYPE_KIND_INT) {
+      diag_error(sema->diag, sema_loc(sema, idx_expr),
+                 "variadic parameter index must be a compile-time integer");
+      return val_void(sema);
+    }
+    switch (value_type(r)->size) {
+    case 1: raw = *(const uint8_t *)value_data(r); break;
+    case 2: raw = *(const uint16_t *)value_data(r); break;
+    case 4: raw = *(const uint32_t *)value_data(r); break;
+    default: raw = *(const uint64_t *)value_data(r); break;
+    }
+  }
+  if (raw >= gi->pack_count) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "variadic parameter '%.*s' index %llu out of range (count %zu)",
+               (int)gi->pack_param_name.len, gi->pack_param_name.ptr,
+               (unsigned long long)raw, gi->pack_count);
+    return val_void(sema);
+  }
+  const sema_generic_arg_t *a = &gi->args[gi->pack_offset + raw];
+  ast_node_t *id = sema_generic_pack_arg_expr(
+      sema, gi, (size_t)raw, /*move_own=*/false, (*node)->tok_begin,
+      (*node)->tok_end);
+  if (!id) return val_void(sema);
+  id->next = (*node)->next;
+  *node = id;
+  return value_make_shadow(sema->vm, a->type);
+}
+
 static value_t *value_pack_index_try(sema_t *sema, ast_node_t **node,
                                      ast_index_t *n) {
   const sema_generic_instance_t *gi = sema->generics.active_inst;
@@ -597,6 +655,10 @@ value_t *ex_index(sema_t *sema, ast_node_t **node,
       ast_index_t *n = (ast_index_t *)*node;
 
       /* P9：`N[i]`（comptime 值参数包）先折叠为整数字面量。 */
+      {
+        value_t *pv = type_pack_index_try(sema, node, n);
+        if (pv) return pv;
+      }
       {
         value_t *pv = value_pack_index_try(sema, node, n);
         if (pv) return pv;

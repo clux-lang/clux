@@ -19,6 +19,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_move.h"
 #include "parser/ast_option.h"
 #include "parser/ast_owned_type.h"
 #include "parser/ast_program.h"
@@ -258,6 +259,78 @@ static ast_node_t *make_pack_tuple_type(sema_t *sema,
     return t;
 }
 
+bool sema_generic_pack_is_param(sema_t *sema, strslice_t name) {
+    const sema_generic_instance_t *inst = sema ? sema->generics.active_inst : NULL;
+    return inst && inst->has_pack && !inst->pack_is_value &&
+           inst->pack_param_name.ptr &&
+           strslice_eq(inst->pack_param_name, name);
+}
+
+/* 参数包元素是否需要显式 move 才能离开形参：own/fatal 修饰，或内部有
+   own 槽位（fatal 是值状态，类型层可能只体现为 own/own slots）。 */
+static bool pack_elem_needs_move(const type_t *t) {
+    if (!t) return false;
+    ownership_t o = type_ownership_of(t);
+    if (o == OWN_OWN || o == OWN_FATAL) return true;
+    return type_has_own_slots(type_strip_quals(t));
+}
+
+ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,
+                                       const sema_generic_instance_t *inst,
+                                       size_t index, bool move_own,
+                                       uint32_t tb, uint32_t te) {
+    if (!sema || !inst || index >= inst->pack_count) return NULL;
+    const sema_generic_arg_t *a = &inst->args[inst->pack_offset + index];
+    char nm[64];
+    snprintf(nm, sizeof nm, "__pack_arg_%llu", (unsigned long long)index);
+    ast_node_t *id = ast_ident_new(sema->arena, tb, te);
+    if (!id) return NULL;
+    ((ast_ident_t *)id)->name = arena_copy(sema->arena, nm, strlen(nm));
+    id->is_generated = true;
+    if (move_own && pack_elem_needs_move(a->type)) {
+        location_t loc = {0};
+        ast_node_t *mv = ast_move_new(sema->arena, tb, te);
+        if (!mv) return NULL;
+        ((ast_move_t *)mv)->op =
+            (token_t *)arena_token_symbol(sema->arena, "move", &loc);
+        ((ast_move_t *)mv)->operand = id;
+        mv->is_generated = true;
+        return mv;
+    }
+    return id;
+}
+
+ast_node_t *sema_generic_pack_tuple_type_expr(
+    sema_t *sema, const sema_generic_instance_t *inst, uint32_t tb,
+    uint32_t te) {
+    if (!sema || !inst || !inst->has_pack) return NULL;
+    return make_pack_tuple_type(sema, inst, tb, te);
+}
+
+ast_node_t *sema_generic_pack_tuple_expr(sema_t *sema,
+                                         const sema_generic_instance_t *inst,
+                                         uint32_t tb, uint32_t te) {
+    if (!sema || !inst || !inst->has_pack) return NULL;
+    ast_node_t *tuple_ty = make_pack_tuple_type(sema, inst, tb, te);
+    ast_node_t *ctor = ast_construct_new(sema->arena, tb, te);
+    if (!tuple_ty || !ctor) return NULL;
+    ((ast_construct_t *)ctor)->type = tuple_ty;
+    ast_node_t *head = NULL, *last = NULL;
+    for (size_t i = 0; i < inst->pack_count; i++) {
+        ast_node_t *e = sema_generic_pack_arg_expr(sema, inst, i,
+                                                   /*move_own=*/true, tb, te);
+        if (!e) return NULL;
+        e->next = NULL;
+        if (!head) head = e;
+        else last->next = e;
+        last = e;
+    }
+    ((ast_construct_t *)ctor)->fields = head;
+    ((ast_construct_t *)ctor)->fields_last = last;
+    return ctor;
+}
+
+
 /* P5b：把 `args: ...Args` 展开为
  *
  *     func f(<fixed params>, __pack_arg_0: T0, ..., __pack_arg_N-1: TN-1)
@@ -328,48 +401,11 @@ static bool materialize_pack_params(sema_t *sema, ast_func_def_t *fn,
     fn->params = head;
     fn->params_last = last;
 
-    /* 入口聚合：var args: <T...> = .{ __pack_arg_i, ... }; */
-    ast_node_t *tuple_ty = make_pack_tuple_type(sema, inst, tb, te);
-    ast_node_t *ctor_ty = make_pack_tuple_type(sema, inst, tb, te);
-    if (!tuple_ty || !ctor_ty) return false;
+    /* 变参形参名用于 AST 折叠（args[i]/len(args)/...args/裸 args）。 */
+    inst->pack_param_name = ((ast_var_def_t *)pack_param)->name;
 
-    ast_node_t *ctor = ast_construct_new(sema->arena, tb, te);
-    if (!ctor) return false;
-    ((ast_construct_t *)ctor)->type = ctor_ty;
-
-    ast_node_t *fhead = NULL, *flast = NULL;
-    for (size_t i = 0; i < inst->pack_count; i++) {
-        snprintf(nm, sizeof nm, "__pack_arg_%llu", (unsigned long long)i);
-        ast_node_t *id = ast_ident_new(sema->arena, tb, te);
-        if (!id) return false;
-        ((ast_ident_t *)id)->name = arena_copy(sema->arena, nm, strlen(nm));
-        id->is_generated = true;
-        id->next = NULL;
-        if (!fhead) fhead = id;
-        else flast->next = id;
-        flast = id;
-    }
-    ((ast_construct_t *)ctor)->fields = fhead;
-    ((ast_construct_t *)ctor)->fields_last = flast;
-
-    ast_node_t *agg = ast_var_def_new(sema->arena, tb, te);
-    if (!agg) return false;
-    ast_var_def_t *av = (ast_var_def_t *)agg;
-    /* 聚合变量名 = **函数参数名**（`args`），不是泛型包名（`Args`）——
-       设计里两者大小写不同：`func f[...Args](args: ...Args)`。 */
-    av->name = ((ast_var_def_t *)pack_param)->name;
-    av->type_expr = tuple_ty;
-    av->init = ctor;
-    /* 注意：**不要**标 is_generated——Pass 3b 会跳过 generated 语句，聚合变量
-       就不会注册符号，函数体里的 `args` 解析不到。构造/ident 子节点可保持
-       generated（只是表达式）。 */
-
-    if (fn->body && fn->body->kind == AST_BLOCK) {
-        ast_block_t *blk = (ast_block_t *)fn->body;
-        agg->next = blk->stmts;
-        blk->stmts = agg;
-        if (!blk->stmts_last) blk->stmts_last = agg;
-    }
+    /* 不再合成 `var args: <...> = ...` 局部 tuple：所有 args 使用点都在
+       sema 中做 AST 变换（见 sema_generic_pack_*）。 */
     return true;
 }
 

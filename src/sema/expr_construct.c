@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/sema_generic.h"
 #include "sema/reflect.h"
 #include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -434,6 +435,29 @@ bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields,
     }
     ast_spread_t *sp = (ast_spread_t *)f;
     ast_node_t *op = sp->operand;
+    /* `.{ ...args }`：Args 已知，展开为隐藏形参字段；own 元素自动 move。 */
+    if (op && op->kind == AST_IDENT &&
+        sema_generic_pack_is_param(sema, ((ast_ident_t *)op)->name)) {
+      const sema_generic_instance_t *gi = sema->generics.active_inst;
+      ast_node_t *head = NULL, *tail = NULL;
+      for (size_t i = 0; i < gi->pack_count; i++) {
+        ast_node_t *e = sema_generic_pack_arg_expr(
+            sema, gi, i, /*move_own=*/true, f->tok_begin, f->tok_end);
+        if (!e) return false;
+        e->next = NULL;
+        if (tail) tail->next = e;
+        else head = e;
+        tail = e;
+      }
+      if (head) {
+        tail->next = f->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = f->next;
+      }
+      continue;
+    }
     if (!op || (op->kind != AST_IDENT && op->kind != AST_MEMBER)) {
       diag_error(sema->diag, sema_loc(sema, f),
                  "spread operand in a constructor must be a variable or a "
@@ -600,6 +624,20 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
          当前实现 array + option + struct + tuple 分支。 */
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t;
+      /* `. { ...args }`：Args 已知，直接给出 `<...Args>` 目标类型；
+         spread 随后展开成隐藏形参（不经过运行期 tuple）。 */
+      if (!n->type && n->fields && !n->fields->next &&
+          n->fields->kind == AST_SPREAD) {
+        ast_spread_t *sp = (ast_spread_t *)n->fields;
+        if (sp->operand && sp->operand->kind == AST_IDENT &&
+            sema_generic_pack_is_param(
+                sema, ((ast_ident_t *)sp->operand)->name)) {
+          n->type = sema_generic_pack_tuple_type_expr(
+              sema, sema->generics.active_inst, n->base.tok_begin,
+              n->base.tok_end);
+          if (!n->type) return val_void(sema);
+        }
+      }
       /* `...operand` 展开先于一切字段处理（具名/匿名、new/普通构造共用）。
          目标类型：具名构造解析类型位；匿名构造取 anon_ct 栈顶（可能没有）。 */
       {

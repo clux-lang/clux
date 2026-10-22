@@ -589,9 +589,10 @@ token pool 重绑。
 - 签名期错误（如返回类型未知）尚未输出实例链 note；体错误已覆盖。
 - comptime 值包“裸 `N` 作为 tuple 值”：设计只说“编译期 tuple 消费”，未给
   语法。当前定义为 `N[i]` / `len(N)` / `[N[0]]T`，裸 `N` 明确报错。
-- 运行期可变参数（tuple 形参）：设计见
+- 运行期可变参数：采用**编译期 AST 展开**（`args[i]`/`len`/`...args`；
+  不生成 tuple 局部变量、不改 ABI），设计见
   [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)，
-  尚未实现。
+  已实现；裸 `args` 明确诊断，需要 tuple 时显式 `.{ ...args }`。
 
 
 

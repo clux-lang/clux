@@ -134,7 +134,20 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
          字面量 AST 节点（sema_ct_lit，arena 分配），下游（编译器）零感知。 */
       ast_ident_t *n = (ast_ident_t *)*node;
 
-      /* P9：comptime 值参数包不是标量；裸 `N` 没有运行时绑定。 */
+      /* 类型参数包变参不是运行期变量：只允许 args[i] / len(args) /
+         ...args 这三类纯 AST 变换；需要 tuple 值时显式 `.{ ...args }`。 */
+      if (sema_generic_pack_is_param(sema, n->name)) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "variadic parameter '%.*s' has no runtime value; use "
+                   "'%.*s[i]', 'len(%.*s)', '...%.*s', or explicitly "
+                   "construct a tuple with '.{ ...%.*s }'",
+                   (int)n->name.len, n->name.ptr, (int)n->name.len,
+                   n->name.ptr, (int)n->name.len, n->name.ptr,
+                   (int)n->name.len, n->name.ptr, (int)n->name.len,
+                   n->name.ptr);
+        return val_void(sema);
+      }
+
       if (sema->generics.active_inst) {
         const sema_generic_instance_t *gi = sema->generics.active_inst;
         if (gi->has_pack && gi->pack_is_value &&

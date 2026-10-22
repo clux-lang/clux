@@ -789,9 +789,9 @@ TEST(GenericMethod, StaticGenericMethod) {
 
 TEST(GenericPack, TupleTypeExpansion) {
     clux_expect_ok(
-        "func passthrough[...Args](args: ...Args): <...Args> { return args; }\n"
+        "func passthrough[...Args](args: ...Args): <...Args> { return .{ ...args }; }\n"
         "func count[...Args](args: ...Args): u64 {\n"
-        "    var copy: <...Args> = args;\n"
+        "    var copy: <...Args> = .{ ...args };\n"
         "    return len(copy);\n"
         "}\n"
         "func main(): i32 {\n"
@@ -1110,4 +1110,27 @@ TEST(GenericMethod, StaticExplicitTypeArguments) {
         "}\n"
         "func main(): i32 { return S::build[i32](1) - 7; }\n",
         "generic_static_method_explicit");
+}
+
+TEST(GenericPack, OwnElementMoveAndForward) {
+    clux_expect_ok(
+        "func first[...Args](args: ...Args): i32 {\n"
+        "  var p: own *i32 = move(args[0]);\n"
+        "  return p.*;\n"
+        "}\n"
+        "func forward[...Args](args: ...Args): i32 {\n"
+        "  return first(...args);\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var x: own *i32 = new i32{ .i32{7} };\n"
+        "  return forward[own *i32](move(x)) - 7;\n"
+        "}\n",
+        "generic_pack_own_forward");
+}
+
+TEST(GenericReject, BareParameterPackName) {
+    clux_expect_reject(
+        "func f[...Args](args: ...Args): <...Args> { return args; }\n"
+        "func main(): i32 { var t = f[i32](1); return t[0]; }\n",
+        "has no runtime value", "generic_pack_bare_args");
 }
