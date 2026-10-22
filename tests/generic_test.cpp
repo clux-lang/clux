@@ -1235,3 +1235,21 @@ TEST(ComptimeIf, GenericPatternSpecializationFmt) {
     EXPECT_NE(once.find("extends own *?"), std::string::npos) << once;
     EXPECT_EQ(fmt_source(once.c_str()), once);
 }
+
+TEST(ComptimeIf, GenericPatternMixedExpression) {
+    clux_expect_ok(
+        "func Test[T, N: comptime u64](arg: T): void {\n"
+        "  comptime if (T extends own *? && N == (1 as u64)) {\n"
+        "    var a = move(arg);\n"
+        "  } else {\n"
+        "    var a = arg;\n"
+        "  }\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var p: own *i32 = new i32{ .i32{7} };\n"
+        "  Test[own *i32, 1](move(p));\n"
+        "  Test[i32, 2](5);\n"
+        "  return 0;\n"
+        "}\n",
+        "generic_comptime_pattern_mixed");
+}

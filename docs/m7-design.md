@@ -676,29 +676,31 @@ error: type argument 'str' does not satisfy constraint 'T extends *?'
 
 诊断记入实例化栈（§18），与实例化链一同展开。
 
-#### 27.1 `comptime if (T extends PATTERN)`：实例内特化
+#### 27.1 `extends PATTERN` 作为普通表达式（含 comptime if 特化）
 
-`extends` 也可作为 **comptime if 的条件**，在实例化时按 `T` 的具体类型
-做 PATTERN 匹配（`sema_pattern_match`），结果折叠为 bool；分支随后由
-`comptime if` 的 AST 裁剪处理，丢弃分支不再做类型检查：
+`extends` 的 RHS 统一按 PATTERN 解析（可含 `?` 通配），表达式仍遵循普通
+优先级/短路/三元规则；sema/CTFE 求值时折叠为 bool。因此它可以直接混在
+任意编译期表达式里，而不是只允许作为 `comptime if` 的整个条件：
 
 ```clux
-func Test[T](arg: T): void {
-    comptime if (T extends own *?) {
-        var a = move(arg);     // T = own *X 分支
+func Test[T, N: comptime u64](arg: T): void {
+    comptime if (T extends own *? && N == (1 as u64)) {
+        var a = move(arg);     // T = own *X 且 N=1
     } else {
         var a = arg;
     }
 }
 
-Test(move(p));   // T 推断为 own *i32 → then 分支
-Test(5);         // T = i32 → else 分支
+Test[own *i32, 1](move(p));   // then 分支
+Test[i32, 2](5);              // else 分支
 ```
 
-- 条件仍是纯编译期求值（CTFE）；`extends` RHS 使用 PATTERN 语法，
-  支持 `?`、`own/ref/fatal *?`、slice/array/tuple/func/qual 等；
+- `extends` 是 sema/CTFE 表达式，固定折叠为 bool；可与 `&&`/`||`/`!`/
+  三元/括号任意组合；
+- RHS PATTERN 支持 `?`、`own/ref/fatal *?`、slice/array/tuple/func/qual；
 - 与泛型参数表里的 `extends` 共用同一匹配器，语义一致；
-- 普通 `comptime if (bool_expr)` 不受影响。
+- `comptime if` 只负责对折叠后的 bool 做 AST 裁剪，不再对 `extends`
+  做任何特殊语法处理。
 
 ### 28. `extends` 组合：析取 `|` 与合取 `&`
 

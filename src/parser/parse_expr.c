@@ -14,6 +14,7 @@
 #include "parser/ast_nil.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_binary.h"
+#include "parser/ast_pattern.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
@@ -1501,8 +1502,14 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
            语义在消费层感知：sema shadow 求值 lhs、解析 rhs 类型；
            compiler 编译 lhs + rhs（类型值）→ BCODE_CAST。 */
 
-        /* 递归解析右侧，传入右绑定力作为最小绑定力 */
-        ast_node_t *rhs = parse_expr_prec(p, rp);
+        /* 递归解析右侧，传入右绑定力作为最小绑定力。
+           `extends` 的 RHS 是 PATTERN（可含 `?` 通配），不是普通表达式；
+           它仍作为普通二元表达式参与外层优先级/短路/三元组合，由
+           sema/CTFE 折叠为 bool。 */
+        ast_node_t *rhs =
+            token_is(op_tok, "extends")
+                ? parse_pattern(p)
+                : parse_expr_prec(p, rp);
         if (!rhs || rhs->kind == AST_ERROR) {
             if (!rhs) {
                 return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,
