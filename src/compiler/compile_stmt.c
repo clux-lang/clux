@@ -363,6 +363,13 @@ void compile_block_body(compiler_t *c, ast_block_t *b) {
         compile_func_capture_bind(c, fn, false);
         if (c->failed) return;
       }
+      /* 测试模式：defer 改写生成的 __defer_N 在定义点注册到当前
+         scope，error 展开时由 scope_destroy_subtree 调用。 */
+      if (c->vm->test_mode && fn->name.len >= 8 && fn->name.ptr &&
+          memcmp(fn->name.ptr, "__defer_", 8) == 0) {
+        bcode_write_op(c->bc, BCODE_REGISTER_DEFER);
+        bcode_write_str(c->bc, fn->name);
+      }
       continue;
     }
     /* return/break/continue：退出点 defer calls 挂载在节点 defers 字段，
@@ -471,6 +478,10 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
     bcode_write_str(c->bc, n->name);
     /* DEFINE 永远双弹弹掉全部，栈深归零 */
     st_push(c, -2);
+    if (c->vm->test_mode && n->free_on_error) {
+      bcode_write_op(c->bc, BCODE_REGISTER_CLEANUP);
+      bcode_write_str(c->bc, n->name);
+    }
     break;
   }
   case AST_TYPE_DEF: {

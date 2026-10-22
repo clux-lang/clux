@@ -2,6 +2,7 @@
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/type_error.h"
+#include "vm/type_ptr.h"
 #include "core/strmap.h"
 #include "core/panic.h"
 
@@ -26,9 +27,13 @@ scope_t *scope_new(allocator_t *alloc, scope_t *parent) {
     s->vars     = strmap_new(alloc, /*owns_value=*/false);
     s->owned    = vec_new(alloc, /*owns_element=*/false);
     s->children = vec_new(alloc, /*owns_element=*/false);
+    s->defers   = vec_new(alloc, /*owns_element=*/false);
+    s->cleanup_names = vec_new(alloc, /*owns_element=*/false);
     if (!s->vars)     panic("vm: out of memory allocating scope vars");
     if (!s->owned)    panic("vm: out of memory allocating scope owned");
     if (!s->children) panic("vm: out of memory allocating scope children");
+    if (!s->defers)   panic("vm: out of memory allocating scope defers");
+    if (!s->cleanup_names) panic("vm: out of memory allocating scope cleanup names");
 
     /* 注册到父作用域的 children */
     if (parent && parent->children) {
@@ -77,6 +82,15 @@ void scope_destroy(vm_t *vm, scope_t **pscope) {
 
     /* 3. 释放 children 向量（不拥有元素，仅释放向量结构） */
     vec_free(scope->alloc, &scope->children);
+    vec_free(scope->alloc, &scope->defers);
+    if (scope->cleanup_names) {
+        size_t cn = vec_len(scope->cleanup_names);
+        for (size_t i = 0; i < cn; i++) {
+            char *nm = (char *)vec_get(scope->cleanup_names, i);
+            if (nm) allocator_free(scope->alloc, (void **)&nm);
+        }
+        vec_free(scope->alloc, &scope->cleanup_names);
+    }
 
     /* 4. 释放 scope 结构体 */
     allocator_free(scope->alloc, (void **)pscope);
@@ -92,8 +106,49 @@ void scope_destroy_subtree(vm_t *vm, scope_t **pscope) {
         scope_destroy_subtree(vm, &child);
     }
 
-    /* 2. 销毁自身（从父作用域的 children 中移除 + dispose vars + free） */
+    /* 2. 测试模式：error 展开时 LIFO 执行本作用域已注册的 defer。
+       正常路径的 defer 已由 compiler 在退出点显式调用；这里只处理异常。 */
+    if (scope->defers) {
+        size_t dn = vec_len(scope->defers);
+        for (size_t i = dn; i > 0; i--) {
+            value_t *fn = (value_t *)vec_get(scope->defers, i - 1);
+            if (fn) (void)value_call(vm, fn, NULL, 0);
+        }
+        vec_free(scope->alloc, &scope->defers);
+    }
+
+    /* 3. 测试模式：异常展开时 FREE 已注册的 own 变量。正常路径的 FREE
+       已由 compiler 在退出点执行；此处按变量名查当前 scope。 */
+    if (scope->cleanup_names) {
+        size_t cn = vec_len(scope->cleanup_names);
+        for (size_t i = cn; i > 0; i--) {
+            const char *nm = (const char *)vec_get(scope->cleanup_names, i - 1);
+            if (!nm) continue;
+            value_t *v = scope_lookup(scope, strslice_from_cstr(nm));
+            if (!v || value_is_borrowed(v) || !value_data(v)) continue;
+            const type_t *t = type_strip_quals(value_type(v));
+            if (t) ptr_free_owned_recursive(vm, t, value_data(v));
+        }
+    }
+
+    /* 4. 销毁自身（从父作用域的 children 中移除 + dispose vars + free） */
     scope_destroy(vm, pscope);
+}
+
+void scope_register_defer(vm_t *vm, scope_t *scope, value_t *fn) {
+    (void)vm;
+    if (!scope || !fn || !scope->defers) return;
+    vec_push(scope->defers, scope->alloc, fn);
+}
+
+void scope_register_cleanup(vm_t *vm, scope_t *scope, strslice_t name) {
+    if (!scope || !scope->cleanup_names || !name.ptr) return;
+    char *copy = (char *)allocator_new_ex(scope->alloc, "scope.cleanup",
+                                          name.len + 1, NULL, NULL, NULL, 1);
+    if (!copy) return;
+    memcpy(copy, name.ptr, name.len);
+    copy[name.len] = '\0';
+    vec_push(scope->cleanup_names, scope->alloc, copy);
 }
 
 void scope_track(vm_t *vm, scope_t *scope, value_t *v) {

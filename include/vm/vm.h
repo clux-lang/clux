@@ -139,6 +139,11 @@ typedef struct vm_t {
     bytecode_t  *bc;      /* 当前执行中的字节码模块（嵌套调用时切换） */
     size_t       pc;      /* 当前指令指针（code 流字节偏移） */
     bool         halted;  /* error 出现即停止 */
+    /* 测试模式 / 当前 test 上下文（assert/mock 只允许 test 内使用） */
+    bool         test_mode;
+    bool         in_test;
+    bool         test_failed;
+    vec_t       *mock_entries; /* clux_mock_entry_t*（测试 mock 栈） */
 
     /* ---- 字符串池（str 生命周期托管，vm_str_intern 去重 intern） ---- */
     vec_t       *strs;     /* 池内字符串块（char*，含 NUL 终止符；不 owns，vm_destroy 手动释放） */
@@ -203,6 +208,9 @@ module_t *vm_module_lookup(vm_t *vm, const char *path);
  * data=module_t*）压栈返回。未找到返回 NULL。
  */
 value_t *vm_import(vm_t *vm, const char *path);
+
+/** 测试模式：恢复所有 mock 并释放 mock 栈。 */
+void vm_mock_unmock_all(vm_t *vm);
 
 #ifdef __cplusplus
 }

@@ -86,8 +86,15 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "test",
-        .usage = "clux test [options]",
-        .help = "Run tests.",
+        .usage = "clux test [<file.cx>]",
+        .help =
+            "Run tests.\n"
+            "\n"
+            "  clux test <file.cx>  run test blocks in one source file\n"
+            "  clux test            run all .cx test blocks in the clux.mod package\n"
+            "\n"
+            "Test blocks are ignored by `build` / `run`. Results are printed in\n"
+            "a gtest-like format; exits nonzero if any test fails.",
         .handler = cmd_test,
     },
     {

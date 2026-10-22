@@ -104,6 +104,8 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_OPT_NONE]  = { "PUSH_OPT_NONE",  { BCODE_ASM_OP_U32 } },
     [BCODE_UNWRAP]         = { "UNWRAP",         { BCODE_ASM_OP_NONE } },
     [BCODE_OPT_TAKE]       = { "OPT_TAKE",       { BCODE_ASM_OP_NONE } },
+    [BCODE_REGISTER_DEFER] = { "REGISTER_DEFER", { BCODE_ASM_OP_STR } },
+    [BCODE_REGISTER_CLEANUP]={ "REGISTER_CLEANUP",{ BCODE_ASM_OP_STR } },
     [BCODE_OPT_IS_NONE]    = { "OPT_IS_NONE",    { BCODE_ASM_OP_NONE } },
     [BCODE_LENGTH]         = { "LENGTH",        { BCODE_ASM_OP_NONE } },
 

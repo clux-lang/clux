@@ -15,6 +15,7 @@
 #include "parser/ast_import.h"
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_reexport.h"
+#include "parser/ast_test.h"
 #include "parser/ast_block.h"
 #include "parser/ast_defer.h"
 #include "parser/ast_if.h"
@@ -269,6 +270,14 @@ void render_node(fmt_t *f, ast_node_t *node) {
     if (!node) return;
     if (node->kind == AST_FUNC_DEF) {
         render_func_def(f, node);
+        return;
+    }
+    if (node->kind == AST_TEST) {
+        ast_test_t *t = (ast_test_t *)node;
+        sb_str(&f->sb, "test \"");
+        sb_put(&f->sb, t->name.ptr, t->name.len);
+        sb_ch(&f->sb, '"');
+        render_block(f, t->body);
         return;
     }
     render_stmt(f, node);

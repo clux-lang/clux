@@ -40,6 +40,7 @@ module_t *module_new(allocator_t *alloc, bytecode_t *bc,
     mod->prepared = false;
     mod->finalized = false;
     mod->sema_exports = NULL;
+    mod->test_cases = NULL;
 
     /* 拷贝规范路径（module 拥有副本） */
     size_t len = strlen(canonical) + 1;
@@ -100,6 +101,17 @@ void module_destroy(vm_t *vm, module_t **pmod) {
     if (mod->sema) sema_destroy(&mod->sema);
     if (mod->sema_exports) strmap_free(alloc, &mod->sema_exports);
     if (mod->sema_global) sema_scope_destroy(&mod->sema_global);
+    if (mod->test_cases) {
+        size_t n = vec_len(mod->test_cases);
+        for (size_t i = 0; i < n; i++) {
+            module_test_case_t *tc = (module_test_case_t *)vec_get(mod->test_cases, i);
+            if (!tc) continue;
+            if (tc->display_name) allocator_free(alloc, (void **)&tc->display_name);
+            if (tc->func_name) allocator_free(alloc, (void **)&tc->func_name);
+            allocator_free(alloc, (void **)&tc);
+        }
+        vec_free(alloc, &mod->test_cases);
+    }
 
     allocator_free(alloc, (void **)&mod);
 }

@@ -63,6 +63,12 @@ int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool);
  */
 int driver_run_file(const char *path);
 
+/** 测试模式：编译文件及 import 模块，执行其中所有 test 块。 */
+int driver_test_file(const char *path);
+
+/** 测试模式：编译一组源码文件（项目模式），统一执行测试。 */
+int driver_test_sources(const char *const *paths, size_t count);
+
 /**
  * 编译流水线（加载 → 词法 → 语法 → 语义 → 编译字节码）后停止，**不执行**
  * 程序，仅将产物 `bytecode_t` 反汇编为字符格式汇编并写出到 `out_path`

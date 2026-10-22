@@ -589,6 +589,10 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
   /* Pass 3b 已走到定义点：此后收集销毁/借源时才包含该变量（提前 return 的
      路径不会销毁后面才声明的变量）。 */
   sym->declared = true;
+  if (sema->vm->test_mode && !vd->is_comptime && sym->type &&
+      (sema_sym_ownership(sym) == OWN_OWN ||
+       type_has_own_slots(type_strip_ownership(sym->type))))
+    vd->free_on_error = true;
 
   /* comptime var：编译期求值 + 符号表编码（sema_eval_comptime_var）。
      定义点不进入 VM scope——调用方（walk_block）负责从语句链摘除；

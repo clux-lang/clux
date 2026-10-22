@@ -169,6 +169,10 @@ typedef enum {
     BCODE_OPT_TAKE,         /* 无操作数：弹 ?T 借用值 → none panic；some 则把
                                payload 移出、源 tag 置 false，返回 T；inner 为
                                own T 时返回 fatal T。take(x) 专用。 */
+    BCODE_REGISTER_DEFER,   /* [strtable_idx]：测试模式把当前作用域的
+                               __defer_N 注册到 scope->defers（error 展开用）。 */
+    BCODE_REGISTER_CLEANUP, /* [strtable_idx]：测试模式把 own 变量名注册到
+                               scope->cleanup_names（error 展开时 FREE）。 */
     BCODE_OPT_IS_NONE,      /* 无操作数：弹 ?T 值 → 压 bool（ok tag == false）
                                （nil 判定 x==nil / nil==x → OPT_IS_NONE；
                                x!=nil / nil!=x → OPT_IS_NONE + NOT。

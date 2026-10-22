@@ -31,6 +31,8 @@ typedef struct scope_t {
     strmap_t       *vars;      /* name -> value_t* 借用映射（不拥有 value） */
     vec_t          *owned;     /* value_t* 所有 value（scope 拥有生命周期） */
     vec_t          *children;  /* scope_t* 子作用域（不拥有，子自行管理生命周期） */
+    vec_t          *defers;    /* 测试模式注册的 defer 闭包（error 展开时调用） */
+    vec_t          *cleanup_names; /* 测试模式注册的 own 变量名（error 展开时 FREE） */
     allocator_t    *alloc;     /* 借用 vm 的 allocator */
 } scope_t;
 
@@ -87,6 +89,12 @@ value_t *scope_set(vm_t *vm, scope_t *scope, const char *name, value_t *v);
 
 /** 查找变量（沿 parent 链递归），未找到返回 NULL */
 value_t *scope_lookup(const scope_t *scope, strslice_t name);
+
+/** 测试模式：注册 defer 闭包；error 展开时 LIFO 调用。 */
+void scope_register_defer(vm_t *vm, scope_t *scope, value_t *fn);
+
+/** 测试模式：注册 own 变量名；error 展开时按类型递归 FREE。 */
+void scope_register_cleanup(vm_t *vm, scope_t *scope, strslice_t name);
 
 /** 获取当前作用域的父作用域 */
 static inline scope_t *scope_parent(const scope_t *scope) {

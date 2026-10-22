@@ -258,6 +258,19 @@ value_t *op_push_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+value_t *op_register_defer(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    value_t *fn = scope_lookup(vm->current_scope, name);
+    if (fn) scope_register_defer(vm, vm->current_scope, fn);
+    return NULL;
+}
+
+value_t *op_register_cleanup(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    strslice_t name = bcode_read_str(bc, pc);
+    scope_register_cleanup(vm, vm->current_scope, name);
+    return NULL;
+}
+
 value_t *op_pop_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
     (void)bc; (void)pc;
     vm_pop_scope(vm);

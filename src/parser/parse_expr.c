@@ -1059,6 +1059,8 @@ ast_node_t *parse_unary(parser_t *p) {
  *
  * `...` 是 lexer 的三字符 SYMBOL token（与结构体嵌入 / 变参声明复用同款
  * 拼写，语境不重叠）。展开语义在 sema：这里只负责把操作数记录下来。 */
+static void rewrite_assert_call(parser_t *p, ast_call_t *call);
+
 static ast_node_t *parse_call_arg(parser_t *p) {
     skip_trivia(p);
     if (check_symbol(p, "...")) {
@@ -1167,6 +1169,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             ((ast_call_t *)node)->callee    = lhs;
             ((ast_call_t *)node)->args      = args;
             ((ast_call_t *)node)->args_last = args_last;
+            rewrite_assert_call(p, (ast_call_t *)node);
             lhs = node;
             continue;
         }
@@ -1356,6 +1359,57 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
 }
 
 /* ---- parse_expr_prec: Pratt 核心 ---- */
+
+/* assert(expr) 在 parser 阶段补一个表达式源码字符串参数：
+   assert(bool, "expr")。这样失败时能打印原始表达式，且不在运行期做反射。 */
+static void rewrite_assert_call(parser_t *p, ast_call_t *call) {
+    if (!p || !call || !call->callee || call->callee->kind != AST_IDENT)
+        return;
+    ast_ident_t *id = (ast_ident_t *)call->callee;
+    if (!(id->name.len == 6 && memcmp(id->name.ptr, "assert", 6) == 0))
+        return;
+    if (!call->args || call->args->next) return;
+    ast_node_t *arg = call->args;
+    if (arg->kind == AST_ERROR || arg->tok_end <= arg->tok_begin) return;
+    const token_t *last =
+        (const token_t *)vec_get(p->tokens, arg->tok_end - 1);
+    if (!last) return;
+    /* 二元表达式的 tok_begin 通常指向运算符，不能直接当起点。
+       从 assert 的 callee 之后找到调用左括号，再取括号后的源码起点。 */
+    const token_t *open = NULL;
+    uint32_t callee_pos = call->callee->tok_begin;
+    for (uint32_t i = callee_pos + 1; i < arg->tok_end; i++) {
+        const token_t *t = (const token_t *)vec_get(p->tokens, i);
+        if (t && token_get_kind(t) == TOKEN_TYPE_SYMBOL &&
+            token_is(t, "(")) {
+            open = t;
+            break;
+        }
+    }
+    if (!open) return;
+    size_t flen = 0, llen = 0;
+    const char *fp = token_get_text(open, &flen) + flen;
+    const char *lp = token_get_text(last, &llen);
+    if (!fp || !lp || lp < fp) return;
+    const char *end = lp + llen;
+    while (fp < end && (*fp == ' ' || *fp == '\t' || *fp == '\n' ||
+                        *fp == '\r'))
+        fp++;
+    while (end > fp && (end[-1] == ' ' || end[-1] == '\t' ||
+                        end[-1] == '\n' || end[-1] == '\r'))
+        end--;
+    size_t n = (size_t)(end - fp);
+    char *buf = (char *)arena_alloc(p->arena, n ? n : 1, 1);
+    if (!buf) return;
+    if (n) memcpy(buf, fp, n);
+    ast_node_t *lit = ast_string_lit_new(p->arena, arg->tok_begin,
+                                         arg->tok_end);
+    if (!lit) return;
+    ((ast_string_lit_t *)lit)->text = strslice_from_bytes(buf, n);
+    lit->next = NULL;
+    arg->next = lit;
+    call->args_last = lit;
+}
 
 ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
     /* 1. 前缀：一元或原子 */

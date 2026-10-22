@@ -108,6 +108,7 @@ typedef enum {
                             a.?（try，仅词法预留，语义未实现） */
     AST_TRY,             /* struct result 的 .? / .! 表达式（sema 生成）：
                             临时绑定 + ok/value + early return/panic */
+    AST_TEST,            /* 顶层 test "Suite.Name" { ... }（仅测试模式使用） */
 
     /* --- 编译期运算符（SEMA→CTFE 桥梁，m2-design §8）---
      * sizeof/alignof/typeof 是前缀运算符：操作数只做 shadow 求值（仅取

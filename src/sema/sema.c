@@ -258,6 +258,30 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  /* 测试内建 assert(bool, "expr")：只在 test 模式可见。普通构建里使用
+     assert 会得到未定义符号诊断。 */
+  if (sema->vm->test_mode) {
+    const type_t *aparams[2] = {sema->vm->type_bool, sema->vm->type_str};
+    const type_t *asig = type_func_sig(sema->vm, aparams, 2,
+                                       sema->vm->type_void, false);
+    if (asig) {
+      sema_symbol_t ainit = {.kind = SEMA_SYM_FUNC, .type = asig,
+                             .is_active = true};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("assert"), &ainit);
+    }
+    const type_t *msig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_void, true);
+    if (msig) {
+      const char *names[] = {"mock", "unmock", "mock_method", "unmock_method"};
+      for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        sema_symbol_t minit = {.kind = SEMA_SYM_FUNC, .type = msig,
+                               .is_active = true};
+        sema_scope_define(sema->global_scope, strslice_from_cstr(names[i]),
+                          &minit);
+      }
+    }
+  }
+
   /* take(x)：optional payload 移出（?T -> T；?own T -> fatal T）。纯 sema/
      compiler 指令，不注册 VM 函数。 */
   {

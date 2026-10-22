@@ -29,6 +29,11 @@ typedef struct _sema_scope_t sema_scope_t;
  *
  * module 对象归 vm 拥有，vm_destroy 统一释放。sema 用完即销毁，产物转移给 module。
  */
+typedef struct module_test_case {
+    char *display_name;   /* "Suite.Name"（owned） */
+    char *func_name;      /* 生成的 __clux_test_N（owned） */
+} module_test_case_t;
+
 typedef struct module_t {
     bytecode_t *bc;             /* 模块字节码（owned） */
     scope_t    *global_scope;   /* 模块全局作用域（owned） */
@@ -79,6 +84,8 @@ typedef struct module_t {
     bool prepared;
     bool finalized;
     strmap_t *sema_exports;
+    /* 测试模式收集的 test 用例（owned；普通构建为空） */
+    vec_t *test_cases;
 } module_t;
 
 /**

@@ -6,6 +6,7 @@
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_interface_def.h"
+#include "parser/ast_test.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_error.h"
 #include "parser/ast_import.h"
@@ -132,6 +133,19 @@ ast_node_t *parse_decorator_prefixes(parser_t *p) {
     return head;
 }
 
+/* 顶层 test 块的判定：标识符 `test` 后跟字符串。不能把 test 做成全局
+   关键字——现有代码/测试里有名为 test 的普通函数。 */
+static bool at_test_block(parser_t *p) {
+    const token_t *t = cur_token(p);
+    if (!t || !token_is(t, "test")) return false;
+    uint32_t save = p->pos;
+    advance(p);
+    skip_trivia(p);
+    bool is_str = check_kind(p, TOKEN_TYPE_STRING);
+    p->pos = save;
+    return is_str;
+}
+
 ast_node_t *parse_program(parser_t *p) {
     uint32_t tb = p->pos;
 
@@ -145,7 +159,9 @@ ast_node_t *parse_program(parser_t *p) {
         ast_node_t *func = NULL;
         ast_node_t *decorators = parse_decorator_prefixes(p);
         if (at_end(p)) break;
-        if (check_keyword(p, "comptime")) {
+        if (at_test_block(p)) {
+            func = parse_test_block(p);
+        } else if (check_keyword(p, "comptime")) {
             /* comptime 前缀：comptime func 标记 + 挂链；comptime var（全局
                编译期常量）挂 funcs 链，sema pass_globals 消费后摘除。 */
             uint32_t ctb = p->pos;

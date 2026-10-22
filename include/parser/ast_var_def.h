@@ -20,6 +20,7 @@ typedef struct {
     ast_node_t *type_expr;   /* 类型表达式（NULL = 推断；AST_IDENT/AST_CONST/AST_VOLATILE） */
     ast_node_t *init;        /* 初始化表达式（必须存在；AST_UNDEF = 未初始化声明） */
     bool        is_comptime; /* comptime var：右值必须编译期可计算，引用点折叠为常量 */
+    bool        free_on_error; /* test 模式：own 变量在异常展开时需 FREE */
 
     /* sema 写入：该变量/捕获槽解析后的**实际类型**（可为 NULL）。
      * 目前唯一消费者是闭包捕获槽的销毁序列（stmt.c make_free_stmts）——

@@ -115,6 +115,8 @@ value_t *op_take_slot(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_union_member(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_unwrap(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_opt_take(vm_t *vm, bytecode_t *bc, size_t *pc);
+value_t *op_register_defer(vm_t *vm, bytecode_t *bc, size_t *pc);
+value_t *op_register_cleanup(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_add(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_sub(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_mul(vm_t *vm, bytecode_t *bc, size_t *pc);

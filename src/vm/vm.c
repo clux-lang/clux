@@ -21,6 +21,9 @@
 extern void vm_init_builtins(vm_t *vm);
 extern void vm_register_len(vm_t *vm);
 extern void vm_register_panic(vm_t *vm);
+extern void vm_register_assert(vm_t *vm);
+extern void vm_register_mock(vm_t *vm);
+extern void vm_mock_unmock_all(vm_t *vm);
 extern void vm_register_cfunc_ptr(vm_t *vm);
 extern void vm_register_deep_clone(vm_t *vm);
 extern void vm_register_rc_builtins(vm_t *vm);
@@ -200,6 +203,8 @@ vm_t *vm_new(allocator_t *alloc) {
     /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> usize） */
     vm_register_len(vm);
     vm_register_panic(vm);
+    vm_register_assert(vm);
+    vm_register_mock(vm);
     vm_register_deep_clone(vm);
     vm_register_rc_builtins(vm);
 
@@ -212,6 +217,9 @@ vm_t *vm_new(allocator_t *alloc) {
 void vm_destroy(vm_t **pvm) {
     if (!pvm || !*pvm) return;
     vm_t *vm = *pvm;
+
+    /* 测试 mock 栈：先恢复绑定（slot 仍在模块作用域中），再销毁模块。 */
+    vm_mock_unmock_all(vm);
 
     /* 模块表（M5）：必须在作用域链之前销毁。
        module 的 global_scope 以 vm->global_scope 为 parent（内建类型可见），

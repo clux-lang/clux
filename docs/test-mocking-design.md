@@ -7,7 +7,7 @@
 > unmock("mock_fn");
 > ```
 >
-> 状态：可行性调研（2026-10-23）。未实现。
+> 状态：VM 阶段已实现（2026-10-23）；C 后端方案见第 9 节。
 
 ---
 
@@ -313,6 +313,20 @@ unmock_all();
 6. 再考虑测试库 API；per-instance mock 作为独立可选特性。
 
 ## 9. C 后端可行性
+
+已实现（VM）：
+
+```clux
+mock("name", target, replacement);
+unmock("name");
+mock_method(Type, "method", replacement);
+unmock_method(Type, "method");
+```
+
+- 运行期用 VM 内建改全局函数槽 / `struct_type->attributes`；
+- 保存原值 clone，`unmock` / 每个 test 结束恢复；
+- 自动 `unmock_all`；
+- 泛型方法的 type value 参数用 `typeof(b)` 获取。
 
 前提：C 后端会把方法编译成“函数指针对象 + 全局函数实现”，匿名/临时
 函数也提升为全局函数。这对 mock 总体是**有利**的，但需要明确调用边界。

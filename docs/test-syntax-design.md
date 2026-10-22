@@ -1,7 +1,8 @@
 # clux 测试语法与执行方案
 
-> 状态：需求收集中。以下条目按用户口述逐条记录，尚未实现。
-> 已完成的 mock 架构调研见 [test-mocking-design.md](test-mocking-design.md)。
+> 状态：最小测试框架已在当前 **字节码 + VM** 后端实现（2026-10-23）。
+> mock 架构调研见 [test-mocking-design.md](test-mocking-design.md)。
+> 当前 VM 为临时态；后续切 C 后端，语义保持不变。
 
 ---
 
@@ -332,6 +333,46 @@ if (!expr) {
 8. 最后迁移到 C 后端时重写 runner（语义保持不变）。
 
 ---
+
+---
+
+## VM 阶段实现状态
+
+已落地：
+
+- 顶层 `test "Suite.Name" { ... }`：普通构建丢弃；test 模式转为
+  `__clux_test_N` 无参 void 函数；
+- `clux test <file.cx>` 单文件；
+- `clux test`（`clux.mod`）遍历包内全部 `.cx`（跳过 deps）；
+- `assert(expr)`：
+  - parser 自动补表达式源码字符串；
+  - 运行期检查 test 上下文；
+  - 失败打印 `assert failed: <expr>`；
+  - 通过 VM error 传播终止当前 test，运行器继续下一个；
+- test 上下文 `vm->in_test`；
+- 错误展开清理：
+  - test 模式 defer 在定义点注册，`scope_destroy_subtree` LIFO 调用；
+  - own 变量在定义点注册 cleanup name，错误展开时递归 FREE；
+- `mock(name, target, replacement)` / `unmock(name)`；
+- `mock_method(Type, "name", replacement)` / `unmock_method(Type, "name")`：
+  - 支持实例方法、静态方法、泛型实例（`typeof(b)` 取类型值）；
+  - 方法表在 `struct_type->attributes`，运行期替换；
+- 每个 test 结束后自动 `unmock_all`；
+- gtest 风格 stdout 输出。
+
+实现差异：
+
+- 当前 VM 由 driver 逐个调用 test 函数（不是生成 clux 测试 main），
+  失败后继续；语义等价，C 后端可生成静态函数 + main。
+- assert 用 error 值实现穿透；语义等价于当前 test 提前 return，
+  defer/own cleanup 在 error 展开时执行。
+
+已知限制：
+
+- 覆盖率、过滤、并发、参数化、setup/teardown 暂不做；
+- 单个实例的方法 mock 未做（当前类型级）；
+- 方法 replacement 签名必须包含 `self`；
+- 泛型方法的 type value 参数用 `typeof(变量)` 获取。
 
 ## 已确认决定
 

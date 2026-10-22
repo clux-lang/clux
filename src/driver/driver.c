@@ -25,6 +25,8 @@
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_interface_def.h"
 #include "parser/ast_reexport.h"
+#include "parser/ast_test.h"
+#include "parser/ast_block.h"
 #include "parser/ast_extern_lib.h"
 #include "diag/diagnostic.h"
 #include "sema/sema.h"
@@ -47,6 +49,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- Internal: byte buffer class (for file-backed source buffers) ---- */
 
@@ -297,7 +300,140 @@ int driver_run_file(const char *path) {
   return 0;
 }
 
-/* ---- Test/utility entry: lex into a pool (text dangles after return) ---- */
+int driver_test_file(const char *path) {
+  if (!path) {
+    fprintf(stderr, "test: no input file\n");
+    return 1;
+  }
+  return driver_test_sources(&path, 1);
+}
+
+int driver_test_sources(const char *const *paths, size_t count) {
+  if (!paths || count == 0) return 1;
+  allocator_t *alloc = create_allocator(malloc, free);
+  if (!alloc) return 1;
+  arena_t *arena = arena_new_default(alloc);
+  if (!arena) { delete_allocator(&alloc); return 1; }
+  diag_buf_t *diag = diag_buf_new(alloc);
+  if (!diag) { arena_destroy(alloc, &arena); delete_allocator(&alloc); return 1; }
+  vm_t *vm = vm_new(alloc);
+  if (!vm) { diag_buf_destroy(&diag); arena_destroy(alloc, &arena); delete_allocator(&alloc); return 1; }
+  vm->test_mode = true;
+
+  scope_t *orig_root = vm->root_scope;
+  scope_t *orig_current = vm->current_scope;
+  vec_t *path_stack = vec_new(alloc, false);
+  if (!path_stack) { vm_destroy(&vm); diag_buf_destroy(&diag); arena_destroy(alloc, &arena); delete_allocator(&alloc); return 1; }
+
+  for (size_t pi = 0; pi < count; pi++) {
+    if (!paths[pi]) continue;
+    char *entry_path = module_path_normalize(alloc, paths[pi]);
+    if (!entry_path) {
+      vec_free(alloc, &path_stack);
+      vm_destroy(&vm);
+      diag_buf_destroy(&diag);
+      arena_destroy(alloc, &arena);
+      delete_allocator(&alloc);
+      return 1;
+    }
+    module_t *entry = compile_module(vm, alloc, diag, arena, entry_path, path_stack);
+    allocator_free(alloc, (void **)&entry_path);
+    if (!entry) {
+      diag_print_all(diag);
+      vec_free(alloc, &path_stack);
+      vm->root_scope = orig_root;
+      vm->current_scope = orig_current;
+      vm_destroy(&vm);
+      diag_buf_destroy(&diag);
+      arena_destroy(alloc, &arena);
+      delete_allocator(&alloc);
+      return 1;
+    }
+  }
+  vec_free(alloc, &path_stack);
+
+  /* 统计全部模块中的 test */
+  size_t total = 0, suites = 0;
+  char suite_names[256][128];
+  if (vm->module_order) {
+    for (size_t i = 0; i < vec_len(vm->module_order); i++) {
+      module_t *m = (module_t *)vec_get(vm->module_order, i);
+      if (!m || !m->test_cases) continue;
+      total += vec_len(m->test_cases);
+      for (size_t j = 0; j < vec_len(m->test_cases); j++) {
+        module_test_case_t *tc = (module_test_case_t *)vec_get(m->test_cases, j);
+        const char *dot = tc && tc->display_name ? strchr(tc->display_name, '.') : NULL;
+        size_t n = dot ? (size_t)(dot - tc->display_name) : (tc->display_name ? strlen(tc->display_name) : 0);
+        if (n >= 128) n = 127;
+        bool seen = false;
+        for (size_t k = 0; k < suites; k++)
+          if (strlen(suite_names[k]) == n && memcmp(suite_names[k], tc->display_name, n) == 0) { seen = true; break; }
+        if (!seen && suites < 256) {
+          memcpy(suite_names[suites], tc->display_name, n);
+          suite_names[suites][n] = '\0';
+          suites++;
+        }
+      }
+    }
+  }
+
+  printf("[==========] Running %zu tests from %zu test suites.\n", total, suites);
+  size_t passed = 0, failed = 0;
+  if (vm->module_order) {
+    for (size_t i = 0; i < vec_len(vm->module_order); i++) {
+      module_t *m = (module_t *)vec_get(vm->module_order, i);
+      if (!m || !m->test_cases) continue;
+      for (size_t j = 0; j < vec_len(m->test_cases); j++) {
+        module_test_case_t *tc = (module_test_case_t *)vec_get(m->test_cases, j);
+        if (!tc) continue;
+        value_t *fn = scope_lookup(m->global_scope, strslice_from_cstr(tc->func_name));
+        printf("[ RUN      ] %s\n", tc->display_name);
+        clock_t start = clock();
+        bool ok = fn != NULL;
+        if (fn) {
+          vm->root_scope = m->global_scope;
+          vm->current_scope = m->global_scope;
+          vm->bc = m->bc;
+          vm->in_test = true;
+          vm->test_failed = false;
+          vm->halted = false;
+          value_t *r = value_call(vm, fn, NULL, 0);
+          if (value_is_error(vm, r)) {
+            ok = false;
+            error_data_t *ed = (error_data_t *)value_data(r);
+            fprintf(stderr, "test %s: %s\n", tc->display_name,
+                    ed && ed->message ? ed->message : "runtime error");
+          }
+          vm->in_test = false;
+          vm->test_failed = false;
+          vm_mock_unmock_all(vm);
+        }
+        clock_t end = clock();
+        double ms = (double)(end - start) * 1000.0 / (double)CLOCKS_PER_SEC;
+        if (ok) {
+          passed++;
+          printf("[       OK ] %s (%.0f ms)\n", tc->display_name, ms);
+        } else {
+          failed++;
+          printf("[  FAILED  ] %s (%.0f ms)\n", tc->display_name, ms);
+        }
+      }
+    }
+  }
+  printf("[==========] %zu tests from %zu test suites ran.\n", total, suites);
+  printf("[  PASSED  ] %zu tests.\n", passed);
+  if (failed) printf("[  FAILED  ] %zu tests.\n", failed);
+
+  vm->root_scope = orig_root;
+  vm->current_scope = orig_current;
+  vm_destroy(&vm);
+  diag_buf_destroy(&diag);
+  arena_destroy(alloc, &arena);
+  delete_allocator(&alloc);
+  return failed == 0 ? 0 : 1;
+}
+
+
 
 int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool) {
   lexer_t *lexer = NULL;
@@ -592,11 +728,91 @@ static strmap_t *build_sema_exports(vm_t *vm, allocator_t *alloc, sema_t *sema,
     }
     return map;
 }
+/* 将顶层 test 块转成无参 void 函数（测试模式），普通构建直接摘除。 */
+static bool driver_prepare_test_blocks(vm_t *vm, allocator_t *alloc,
+                                       arena_t *arena, module_t *mod,
+                                       ast_node_t *ast) {
+  if (!vm || !alloc || !arena || !mod || !ast || ast->kind != AST_PROGRAM)
+    return false;
+  ast_program_t *prog = (ast_program_t *)ast;
+  if (vm->test_mode && !mod->test_cases) {
+    mod->test_cases = vec_new(alloc, /*owns_element=*/false);
+    if (!mod->test_cases) return false;
+  }
+
+  ast_node_t *prev = NULL;
+  ast_node_t *s = prog->funcs;
+  size_t seq = 0;
+  while (s) {
+    ast_node_t *next = s->next;
+    if (s->kind != AST_TEST) {
+      prev = s;
+      s = next;
+      continue;
+    }
+
+    if (!vm->test_mode) {
+      if (prev) prev->next = next;
+      else prog->funcs = next;
+      if (prog->funcs_last == s) prog->funcs_last = prev;
+      s = next;
+      continue;
+    }
+
+    ast_test_t *t = (ast_test_t *)s;
+    char nb[64];
+    snprintf(nb, sizeof nb, "__clux_test_%zu", seq++);
+    size_t nlen = strlen(nb);
+    char *ncopy = (char *)arena_alloc(arena, nlen, 1);
+    if (!ncopy) return false;
+    memcpy(ncopy, nb, nlen);
+
+    ast_node_t *fn_node = ast_func_def_new(arena, s->tok_begin, s->tok_end);
+    if (!fn_node) return false;
+    ast_func_def_t *fn = (ast_func_def_t *)fn_node;
+    fn->name = (strslice_t){ncopy, nlen};
+    fn->params = NULL;
+    fn->params_last = NULL;
+    fn->return_expr = NULL; /* void */
+    fn->body = t->body;
+    fn->owner_module = mod;
+    fn->base.next = next;
+
+    size_t dlen = t->name.len;
+    char *dname = (char *)allocator_new_ex(alloc, "test.name", dlen + 1,
+                                           NULL, NULL, NULL, 1);
+    char *fname = (char *)allocator_new_ex(alloc, "test.func", nlen + 1,
+                                           NULL, NULL, NULL, 1);
+    module_test_case_t *tc = (module_test_case_t *)allocator_new_ex(
+        alloc, "test.case", sizeof(*tc), NULL, NULL, NULL, 1);
+    if (!dname || !fname || !tc) {
+      if (dname) allocator_free(alloc, (void **)&dname);
+      if (fname) allocator_free(alloc, (void **)&fname);
+      if (tc) allocator_free(alloc, (void **)&tc);
+      return false;
+    }
+    memcpy(dname, t->name.ptr, dlen);
+    dname[dlen] = '\0';
+    memcpy(fname, nb, nlen);
+    fname[nlen] = '\0';
+    tc->display_name = dname;
+    tc->func_name = fname;
+    vec_push(mod->test_cases, alloc, tc);
+
+    if (prev) prev->next = fn_node;
+    else prog->funcs = fn_node;
+    if (prog->funcs_last == s) prog->funcs_last = fn_node;
+    prev = fn_node;
+    s = next;
+  }
+  return true;
+}
+
 static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
                                     diag_buf_t *diag, arena_t *arena,
                                     const char *canonical, vec_t *path_stack,
                                     bool prepare_only) {
-    if (!vm || !alloc || !diag || !canonical) return NULL;
+
     module_t *mod = NULL;
 
     /* 1. 循环依赖检测必须先于 cache：两阶段下模块 stub 在 sema 前已登记，
@@ -695,6 +911,18 @@ static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
     mod->src_tokens = pool;
     mod->src_ast = ast;
     vm_module_bind(vm, canonical, mod);
+
+    if (!driver_prepare_test_blocks(vm, alloc, arena, mod, ast)) {
+        fprintf(stderr, "compile: failed to prepare test blocks\n");
+        mod->src_lexer = NULL;
+        mod->src_tokens = NULL;
+        mod->src_ast = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
 
     /* 5. sema（保留到 module 销毁；跨模块实例化/两阶段 finalize 使用） */
     sema_t *sema = sema_create(vm, diag, pool, arena);

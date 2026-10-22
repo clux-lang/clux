@@ -77,6 +77,7 @@ static const char *g_kind_names[] = {
     [AST_SCOPE_REF]   = "scope_ref",
     [AST_TERNARY]    = "ternary",
     [AST_UNWRAP]     = "unwrap",
+    [AST_TEST]       = "test",
     [AST_SIZEOF]     = "sizeof",
     [AST_ALIGNOF]    = "alignof",
     [AST_TYPEOF]     = "typeof",
