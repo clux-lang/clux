@@ -40,7 +40,16 @@
 #include "parser/ast_unary.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_unwrap.h"
+#include "parser/ast_try.h"
 #include "parser/ast_volatile.h"
+#include "parser/ast_assign.h"
+#include "parser/ast_var_def.h"
+#include "parser/ast_dowhile.h"
+#include "parser/ast_for.h"
+#include "parser/ast_if.h"
+#include "parser/ast_switch.h"
+#include "parser/ast_while.h"
+#include "sema_stmt_internal.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_block.h"
@@ -803,6 +812,25 @@ value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
         return val_void(sema);
 
       const type_t *ot = value_type(operand);
+      /* struct result 的 `.?' / `.!'：表达式级临时变量 + early return。 */
+      if (ot && type_kind_of(ot) == TYPE_KIND_STRUCT) {
+        sema_try_info_t info;
+        if (sema_try_probe(sema, *node, scope, &info)) {
+          ast_node_t *tr = ast_try_new(sema->arena, (*node)->tok_begin,
+                                       (*node)->tok_end);
+          if (!tr) return val_void(sema);
+          ast_try_t *tt = (ast_try_t *)tr;
+          tt->setup = info.setup;
+          tt->ok_call = info.ok_call;
+          tt->value_call = info.value_call;
+          tt->tail_stmt = info.tail_stmt;
+          tt->panic_mode = uw->op && token_is(uw->op, "!");
+          tr->is_generated = true;
+          tr->next = (*node)->next;
+          *node = tr;
+          return value_make_shadow(sema->vm, info.value_type);
+        }
+      }
       if (!ot || type_kind_of(ot) != TYPE_KIND_OPTION) {
         char tn[64], ob[16];
         size_t len = 0;

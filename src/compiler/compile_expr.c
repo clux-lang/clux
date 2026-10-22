@@ -19,6 +19,7 @@
 #include "parser/ast_member.h"
 #include "parser/ast_nil.h"
 #include "parser/ast_unwrap.h"
+#include "parser/ast_try.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_type_ref.h"
@@ -426,6 +427,35 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     ast_unwrap_t *n = (ast_unwrap_t *)node;
     compile_expr(c, n->operand);
     bcode_write_op(c->bc, BCODE_UNWRAP);
+    break;
+  }
+  case AST_TRY: {
+    /* struct result 的 .? / .! 表达式：临时变量在表达式局部作用域中
+       求值一次；失败分支 early RET（panic 分支不返回）。 */
+    ast_try_t *n = (ast_try_t *)node;
+    int base = c->stack_depth;
+    compile_stmt(c, n->setup);       /* var temp = <operand>; */
+
+    compile_expr(c, n->ok_call);     /* 栈: [bool] */
+    bcode_write_op(c->bc, BCODE_JZ);
+    compile_label_t fail_l, end_l;
+    label_init(&fail_l);
+    label_init(&end_l);
+    emit_jump(c, &fail_l);           /* 弹 bool */
+
+    compile_expr(c, n->value_call);  /* 成功值：栈 base+1 */
+    /* 值可能借用临时变量的存储（成员返回借用视图）；POP_SCOPE 前
+       物化成独立值。 */
+    bcode_write_op(c->bc, BCODE_MATERIALIZE);
+    bcode_write_op(c->bc, BCODE_JMP);
+    emit_jump(c, &end_l);
+
+    label_here(c, &fail_l);
+    c->stack_depth = base;           /* 失败分支从 base 重新计栈 */
+    compile_stmt(c, n->tail_stmt);   /* AST_RETURN 或 panic 表达式语句 */
+
+    label_here(c, &end_l);
+    c->stack_depth = base + 1;
     break;
   }
   case AST_TYPE_REF: {

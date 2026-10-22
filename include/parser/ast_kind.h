@@ -106,6 +106,8 @@ typedef enum {
     AST_TERNARY,         /* cond ? then : else 三元条件表达式 */
     AST_UNWRAP,          /* optional 解包：a.!（assert，none 时 panic）/
                             a.?（try，仅词法预留，语义未实现） */
+    AST_TRY,             /* struct result 的 .? / .! 表达式（sema 生成）：
+                            临时绑定 + ok/value + early return/panic */
 
     /* --- 编译期运算符（SEMA→CTFE 桥梁，m2-design §8）---
      * sizeof/alignof/typeof 是前缀运算符：操作数只做 shadow 求值（仅取

@@ -1,10 +1,9 @@
 # `.?' 作为表达式 + own payload 的可行性研究
 
-> 状态：设计研究（2026-10-23）。当前 `.?' / struct `.!' 是**语句级**
-> 语法糖（var / 简单赋值），见
+> 状态：copyable Result 的 **AST_TRY 表达式 + early RET 已实现**
+> （2026-10-23）；`take_opt` own 原语已实现；own Result 的泛型
+> `value(): T` 仍受返回所有权限制。设计见
 > [error-handling-design.md](error-handling-design.md)。
-
----
 
 ## 1. 当前实现为什么限制在赋值语句
 
@@ -31,7 +30,7 @@ if (__try_N.ok()) {
 
 ---
 
-## 2. 表达式化：技术上可行
+## 2. 表达式化：已实现（copyable）
 
 把 `.?' 变成 `AST_TRY` 表达式节点，sema 生成：
 
@@ -163,7 +162,7 @@ var v = move(r).?;
 
 ---
 
-## 4. 编译器改动点
+## 4. 编译器改动点（已落地）
 
 - 新 AST kind `AST_TRY`：
   - `temp`（表达式局部变量名/R）；
@@ -249,16 +248,13 @@ take 只解决“own payload 怎么取出来”，**不解决 `.?' 只能在赋�
 
 ## 6. 结论
 
-- **copyable Result 的 `.?' 表达式化：可行**，主要是 AST/compiler
-  控制流和栈深度管理，不需要改 VM opcode。
-- **own payload：可行，但前提是消费整个 Result**：
-  - 不能把 `value()` 设计成从聚合字段 move；
-  - 需要 `into_value(self: own R): fatal T` / `into_error(...)`；
-  - `.?' 对 own 左值要求 `move(r)`，并消费整个 Result。
-- “表达式里 return”不是不可逾越的问题：VM RET 会丢弃当前帧的临时值，
-  compiler 只需维护编译期 stack_depth，并把 FREE/defers 当作普通
-  return 处理。
-- 下一阶段建议顺序：
-  1. 实现 copyable 的 `AST_TRY` 表达式（不改变现有 Result 协议）；
-  2. 给 Result 增加 own 消费协议；
-  3. 再打开 own `.?'，并明确 `move(r)` 的调用点语义。
+- **copyable Result 的 `.?' 表达式化：已实现**（AST_TRY + early RET）；
+- **`take_opt` own 原语：已实现**（`?T -> T` / `?own T -> fatal T`）；
+- **own 的泛型 Result `value(): T`：仍不可行**，需要 `ResultOwned` 或
+  编译器按具体 T 生成 take；
+- “表达式里 return”已用 early RET 解决：VM RET 丢弃当前帧临时值，
+  compiler 维护编译期 stack_depth + defers。
+- 下一阶段：
+  1. 用 `ResultOwned` 原型验证 own payload；
+  2. 表达式 `.?' 在 own payload 上切到 `take_opt`；
+  3. C 后端用语句表达式生成对应 early return。

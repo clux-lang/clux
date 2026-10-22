@@ -222,3 +222,49 @@ TEST(ErrorHandling, TakeOptionalField) {
       "}\n",
       "take_field");
 }
+
+TEST(ErrorHandling, TryAsExpression) {
+  clux_expect_ok(
+      std::string(kResult) +
+          "func half(x: i32): R {\n"
+          "  if (x < 0) { return .R{ .okf = false, .v = 0, .e = 3 }; }\n"
+          "  return .R{ .okf = true, .v = x / 2, .e = 0 };\n"
+          "}\n"
+          "func id(v: i32): i32 { return v; }\n"
+          "func use(x: i32): R {\n"
+          "  var rr: R = .R{ .okf = true, .v = 0, .e = 0 };\n"
+          "  rr.v = id(half(x).?) + 1;\n"
+          "  return rr;\n"
+          "}\n"
+          "func main(): i32 {\n"
+          "  var a: R = use(8);\n"
+          "  if (a.value() != 5) { return 1; }\n"
+          "  var b: R = use(-1);\n"
+          "  if (b.error() != 3) { return 2; }\n"
+          "  return 0;\n"
+          "}\n",
+      "try_expression");
+}
+
+TEST(ErrorHandling, TryExpressionInLoop) {
+  clux_expect_ok(
+      std::string(kResult) +
+          "func half(x: i32): R {\n"
+          "  if (x < 0) { return .R{ .okf = false, .v = 0, .e = 3 }; }\n"
+          "  return .R{ .okf = true, .v = x / 2, .e = 0 };\n"
+          "}\n"
+          "func use(x: i32): R {\n"
+          "  var i: i32 = 0;\n"
+          "  var sum: i32 = 0;\n"
+          "  while (i < 3) {\n"
+          "    sum = sum + half(x + i).?;\n"
+          "    i = i + 1;\n"
+          "  }\n"
+          "  return .R{ .okf = true, .v = sum, .e = 0 };\n"
+          "}\n"
+          "func main(): i32 {\n"
+          "  var a: R = use(8);\n"
+          "  return a.value() - 7;\n"
+          "}\n",
+      "try_expression_loop");
+}
