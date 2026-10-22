@@ -1137,11 +1137,22 @@ TEST(GenericReject, BareParameterPackName) {
 
 TEST(GenericPack, OwnElementTupleReturn) {
     clux_expect_ok(
-        "func pack[...Args](args: ...Args): <...Args> { return .{ ...args }; }\n"
+        "func pack[...Args](args: ...Args): fatal <...Args> { return .{ ...args }; }\n"
         "func main(): i32 {\n"
         "  var x: own *i32 = new i32{ .i32{7} };\n"
         "  var t = pack[own *i32](move(x));\n"
         "  return t[0].* - 7;\n"
         "}\n",
         "generic_pack_own_tuple_return");
+}
+
+TEST(GenericReject, OwnPackReturnMustBeFatal) {
+    clux_expect_reject(
+        "func pack[...Args](args: ...Args): <...Args> { return .{ ...args }; }\n"
+        "func main(): i32 {\n"
+        "  var x: own *i32 = new i32{ .i32{7} };\n"
+        "  var t = pack[own *i32](move(x));\n"
+        "  return t[0].* - 7;\n"
+        "}\n",
+        "contains own slots", "generic_pack_own_return_fatal");
 }

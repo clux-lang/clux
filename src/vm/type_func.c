@@ -335,7 +335,8 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
         if (sig && sig->return_type &&
             type_ownership_of(sig->return_type) == OWN_FATAL &&
             (type_is_ptr(sig->return_type) ||
-             type_is_slice(sig->return_type)) &&
+             type_is_slice(sig->return_type) ||
+             type_has_own_slots(sig->return_type)) &&
             value_type_ownership(ret) == OWN_OWN) {
             /* 声明返回值带资源：**转移**（与形参接收同款）。产物是 base 类型，
                按声明的 fatal 返回类型重贴标签后再交回调用方。 */

@@ -156,9 +156,11 @@ return .{ ...args };
 聚合字段只在用户明确写 `.{ ...args }` 时出现，且构造时直接 move 隐藏形参，
 不需要对 tuple 字段做 per-field TDZ。
 
-**函数返回含 own 槽位的聚合**：调用结果是将亡值（FATAL）。VM 不再对返回
-tuple 做 `value_clone`（clone 会让 callee 的返回临时无人释放），而是
-`value_move` 并标 FATAL；sema 的 call shadow 同样标 FATAL。于是
+**函数返回含 own 槽位的聚合**：返回类型**必须显式标 `fatal`**
+（如 `fatal <...Args>`）；裸 `<...Args>` 按值返回会直接诊断，因为调用方
+无法安全接管。调用结果是将亡值（FATAL）。VM 不再对返回 tuple 做
+`value_clone`（clone 会让 callee 的返回临时无人释放），而是 `value_move`
+并标 FATAL；sema 的 call shadow 同样标 FATAL。于是
 `var t = pack[own *i32](move(x));` 自动推断为 own 绑定并生成销毁序列，
 `.cxb` 往返也不泄漏。
 

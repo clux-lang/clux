@@ -800,6 +800,18 @@ bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
                (int)fn->name.len, fn->name.ptr, tn, tn, tn);
     return false;
   }
+  /* 含 own 槽位的聚合（如 `<own *T>`）按值返回必须显式 fatal：调用点
+     拿到的是将亡值，裸类型会让调用方无法接管，返回临时也无人释放。 */
+  if (return_ownership == OWN_NONE && type_has_own_slots(rt)) {
+    char tn[64];
+    sema_type_name(rt, tn, sizeof(tn));
+    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
+               "function '%.*s' cannot return %s by value: its type contains "
+               "own slots; declare the return type as 'fatal %s' so the caller "
+               "takes ownership",
+               (int)fn->name.len, fn->name.ptr, tn, tn);
+    return false;
+  }
   if (return_ownership != OWN_REF) return true;
   strslice_t *names = NULL;
   size_t count = 0;
