@@ -186,7 +186,59 @@ var v = move(r).?;
 
 ---
 
-## 5. 结论
+## 5. 备选方案：`?own T` 的运行时 take
+
+另一个更局部的方案是给 optional own 增加一个**原地 take** 操作：
+
+```text
+take(x: lvalue ?own T) -> own T
+  x == nil  -> panic
+  x != nil  -> 返回 payload（所有权转移），同时把 x 置为 nil
+```
+
+它比 `into_value` 更小：
+
+- 移动的是 optional 槽位里的整个 payload，不是聚合字段的局部 move；
+- 清 tag 后，Result 析构时看到 `nil`，不会二次释放；
+- 失败分支不调用 take，error 侧照常析构；
+- 对 `?own *X`、`?own Struct`（payload 整体带 own 槽位）都成立。
+
+Result 方法可以写成（self 必须是可变 ref，不能是 `ref *const`）：
+
+```clux
+func value(self: ref *Result[T, E]): T {
+    return take(self.val);
+}
+```
+
+### 但它不能单独解决泛型 Result 的返回值所有权
+
+如果 `T = own *X`，`value()` 的签名就是 `value(self): T`，实例化后是
+“返回 own *X”——而 clux 的返回位只允许 ref/fatal/none，**own 返回类型
+本身非法**。
+
+因此 take 方案仍然需要下面之一：
+
+1. 专门的 owned Result（例如 `ResultOwned[X, E]`，payload 是 `?own *X`，
+   `take_value(self): fatal *X`），不让同一个 `Result[T,E]` 同时承担
+   copyable 和 owned 两种返回类型；
+2. 或 `.?' 在编译器里直接根据具体 `T` 生成 take，而不是通过泛型
+   `value(): T` 方法；
+3. 或引入“返回值所有权多态”，这会扩大语言模型，不建议仅为 Result 引入。
+
+### 与表达式化的关系
+
+take 只解决“own payload 怎么取出来”，**不解决 `.?' 只能在赋值语句里**。
+表达式 `.?' 仍然需要 AST_TRY + early RET 方案。
+
+建议落地顺序：
+
+1. 实现 optional take 原语（`OPT_TAKE` / `take(x)`）并测试 `?own *X`；
+2. 用 `ResultOwned` 原型验证 own payload；
+3. 再做 copyable 的表达式 `.?'；
+4. 最后决定是否让 owned Result 也走统一 `.?' 语法。
+
+## 6. 结论
 
 - **copyable Result 的 `.?' 表达式化：可行**，主要是 AST/compiler
   控制流和栈深度管理，不需要改 VM opcode。
