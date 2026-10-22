@@ -1266,3 +1266,42 @@ TEST(GenericPack, ValuePackSpreadAndTuple) {
         "}\n",
         "generic_value_pack_spread");
 }
+
+TEST(GenericType, RecursiveUnion) {
+    clux_expect_ok(
+        "union U[T] { A: T; B: own *U[T]; }\n"
+        "func main(): i32 {\n"
+        "  var u: own U[i32] = .U[i32]{ .A = 7 };\n"
+        "  return u.A - 7;\n"
+        "}\n",
+        "generic_recursive_union");
+}
+
+TEST(GenericType, MutuallyRecursiveUnion) {
+    clux_expect_ok(
+        "union A[T] { x: T; b: own *B[T]; }\n"
+        "union B[T] { y: T; a: own *A[T]; }\n"
+        "func main(): i32 {\n"
+        "  var a: own A[i32] = .A[i32]{ .x = 7 };\n"
+        "  return a.x - 7;\n"
+        "}\n",
+        "generic_mutual_recursive_union");
+}
+
+TEST(GenericType, EnumGenericBaseType) {
+    clux_expect_ok(
+        "enum E[T]: T { A = 1, B = 2 }\n"
+        "func main(): i32 {\n"
+        "  var x: E[i32] = E[i32]::A;\n"
+        "  return (x as i32) - 1;\n"
+        "}\n",
+        "generic_enum_base_type");
+}
+
+TEST(GenericReject, RecursiveAliasStillUnsupported) {
+    clux_expect_reject(
+        "type Rec[T] = own *Rec[T];\n"
+        "func main(): i32 { var x: Rec[i32] = undefined; return 0; }\n",
+        "recursive generic type 'Rec' is not supported yet",
+        "generic_recursive_alias");
+}

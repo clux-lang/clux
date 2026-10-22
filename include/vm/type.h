@@ -355,6 +355,7 @@ typedef struct union_type_t {
     size_t          member_count;
     size_t          payload_offset; /* payload 联合体起始偏移（tag 对齐后） */
     size_t          tag_size;       /* tag 整数值宽度（按 member_count 自适应） */
+    bool            unique;         /* 命名实例：seal 跳过去重 intern */
 } union_type_t;
 
 /**

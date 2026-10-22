@@ -209,6 +209,18 @@ static union_type_t *union_type_create_open(vm_t *vm) {
 }
 
 /* PUSH_UNION：分配空 union_type（members=NULL，不入池）+ 压其 type value */
+const type_t *type_union_open(vm_t *vm) {
+    if (!vm) return NULL;
+    union_type_t *ut = union_type_create_open(vm);
+    return ut ? &ut->base : NULL;
+}
+
+void type_union_mark_unique(vm_t *vm, const type_t *t) {
+    (void)vm;
+    if (!t || t->kind != TYPE_KIND_UNION) return;
+    ((union_type_t *)t)->unique = true;
+}
+
 const type_t *type_union_push(vm_t *vm) {
     if (!vm) return NULL;
     union_type_t *ut = union_type_create_open(vm);
@@ -362,9 +374,11 @@ const type_t *type_union_seal(vm_t *vm, const type_t *t) {
     if (!vm->union_types) vm->union_types = vec_new(vm->alloc, /*owns_element=*/false);
 
     /* 去重 intern：命中已有 sealed 类型则复用并手工回收本开放类型
-       （allocator_free 自动调 dispose_fn 释放 member 表） */
+       （allocator_free 自动调 dispose_fn 释放 member 表）。命名实例
+       （unique）跳过，保证递归泛型 union 的 self 指针不指向被回收的
+       开放对象。 */
     size_t n = vec_len(vm->union_types);
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; !ut->unique && i < n; i++) {
         const union_type_t *other = (const union_type_t *)vec_get(vm->union_types, i);
         if (other && other != ut && type_is_sealed(&other->base) &&
             union_same(other, ut)) {

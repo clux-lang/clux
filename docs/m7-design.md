@@ -890,6 +890,13 @@ h[func(i32)->str](g);      // ✗ 参数数不匹配（2 ≠ 1）
 
 - **构造器（类型名）名义匹配**——PATTERN 与 T 的类型名必须相同。
 - **类型参数递归匹配**——泛型 enum/union 的类型参数按 §27 递归向下解构匹配（通配符 `?` 可用）。
+- **递归引用**：泛型 union 支持经指针/切片/optional 自引用（实例化时先登记开放
+  union type，字段解析完再 seal）；直接按值自包含仍报错。泛型 struct 同构支持。
+- **泛型 enum 的语义**：enum 本质是“值安全的常量”，泛型参数用于其 **base
+  类型描述**（如 `enum E[T]: T`），不参与递归布局；enum 没有 payload
+  自引用形态。
+- **递归别名**：alias 没有独立 type_t 占位，`type Rec[T] = own *Rec[T]`
+  仍明确拒绝（diagnostic: recursive generic type ... not supported yet）。
 - **变体表不参与结构匹配**——enum/union 是名义类型，变体（`Some`/`None`/`Ok`/`Err`）的内部结构不参与 `extends` 匹配。变体表相同但名字不同的类型不通过。
 
 ```

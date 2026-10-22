@@ -105,6 +105,12 @@ static inline void union_store_tag_raw(void *data, size_t ts, uint64_t tag) {
 /** PUSH_UNION：分配空 union_type（members=NULL，不入池）+ 压其 type value */
 const type_t *type_union_push(vm_t *vm);
 
+/** 分配开放 union_type（不压操作数栈）；泛型实例的递归 placeholder 用。 */
+const type_t *type_union_open(vm_t *vm);
+
+/** 标记命名实例：seal 时跳过去重 intern，自己的 type_t 身份不被合并。 */
+void type_union_mark_unique(vm_t *vm, const type_t *t);
+
 /** UNION_MEMBER 运行期用：追加 member（名拷贝到 vm 堆，tag = 追加序；
  *  member 类型经 type_union_set_member_type 写入。密封后静默忽略） */
 void type_union_add_member(vm_t *vm, const type_t *t, strslice_t name);

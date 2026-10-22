@@ -1748,9 +1748,82 @@ static const type_t *build_union_instance(sema_t *sema, ast_union_def_t *ud,
                                           sema_generic_instance_t *inst) {
     sema_symbol_t *sym = ensure_type_symbol(sema, ud->name, (ast_node_t *)ud);
     if (!sym) return NULL;
-    if (!sema_eval_union_def(sema, ud, sema->global_scope)) return NULL;
-    inst->type = sym->type;
-    return inst->type;
+    vm_t *vm = sema->vm;
+
+    /* 与 struct 同构：先分配开放 union 并登记，字段里的 `own *U[T]`
+       才能拿到同一个 type_t；最后再 seal。 */
+    const type_t *open = type_union_open(vm);
+    if (!open) return NULL;
+    type_union_mark_unique(vm, open);
+    const sema_type_t *st = sema_type_register(sema, open);
+    if (!st) return NULL;
+    ud->type_id = st->id;
+    if (!type_set_name(vm, open, ud->name)) return NULL;
+    value_t *tv = type_as_value(vm, open);
+    if (!tv) return NULL;
+    char nb[256];
+    if (ud->name.len >= sizeof nb) return NULL;
+    memcpy(nb, ud->name.ptr, ud->name.len);
+    nb[ud->name.len] = '\0';
+    scope_define(vm, vm->current_scope, nb, tv);
+    sym->type = open;
+    inst->type = open;
+
+    bool ok = true;
+    for (ast_node_t *fn = ud->fields; fn; fn = fn->next) {
+        ast_struct_field_t *sf = (ast_struct_field_t *)fn;
+        bool dup = false;
+        for (ast_node_t *prev = ud->fields; prev && prev != fn;
+             prev = prev->next) {
+            ast_struct_field_t *pf = (ast_struct_field_t *)prev;
+            if (pf->name.len == sf->name.len && pf->name.ptr &&
+                memcmp(pf->name.ptr, sf->name.ptr, sf->name.len) == 0) {
+                diag_error(sema->diag, sema_loc(sema, fn),
+                           "union '%.*s': duplicate member name '%.*s'",
+                           (int)ud->name.len, ud->name.ptr,
+                           (int)sf->name.len, sf->name.ptr);
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            ok = false;
+            continue;
+        }
+        const type_t *ft = sema_resolve_type_slot(sema, &sf->type);
+        if (!ft) {
+            diag_error(sema->diag, sema_loc(sema, sf->type),
+                       "union '%.*s': unknown field type for '%.*s'",
+                       (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
+                       sf->name.ptr);
+            ok = false;
+            continue;
+        }
+        if (type_strip_quals(ft) == open) {
+            diag_error(sema->diag, sema_loc(sema, sf->type),
+                       "union '%.*s' contains itself by value in '%.*s'; use "
+                       "own/ref pointer or slice indirection",
+                       (int)ud->name.len, ud->name.ptr, (int)sf->name.len,
+                       sf->name.ptr);
+            ok = false;
+            continue;
+        }
+        type_union_add_member(vm, open, sf->name);
+        type_union_set_member_type(vm, open, ft);
+    }
+    if (!ok) return NULL;
+    const type_t *sealed = type_union_seal(vm, open);
+    if (!sealed) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)ud),
+                   "generic union instance '%.*s' could not be completed",
+                   (int)ud->name.len, ud->name.ptr);
+        return NULL;
+    }
+    inst->type = sealed;
+    sym->type = sealed;
+    sym->is_active = true;
+    sym->flow_init = true;
+    return sealed;
 }
 
 static const type_t *build_alias_instance(sema_t *sema, ast_type_def_t *td,
