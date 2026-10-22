@@ -1134,3 +1134,14 @@ TEST(GenericReject, BareParameterPackName) {
         "func main(): i32 { var t = f[i32](1); return t[0]; }\n",
         "has no runtime value", "generic_pack_bare_args");
 }
+
+TEST(GenericPack, OwnElementTupleReturn) {
+    clux_expect_ok(
+        "func pack[...Args](args: ...Args): <...Args> { return .{ ...args }; }\n"
+        "func main(): i32 {\n"
+        "  var x: own *i32 = new i32{ .i32{7} };\n"
+        "  var t = pack[own *i32](move(x));\n"
+        "  return t[0].* - 7;\n"
+        "}\n",
+        "generic_pack_own_tuple_return");
+}

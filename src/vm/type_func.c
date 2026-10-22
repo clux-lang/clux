@@ -132,8 +132,15 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
         /* variadic 额外参数：求值但类型不限 */
     }
 
-    return value_make_shadow(vm, sig->return_type ? sig->return_type
-                                                  : vm->type_void);
+    value_t *ret = value_make_shadow(
+        vm, sig->return_type ? sig->return_type : vm->type_void);
+    /* 返回含 own 槽位的聚合 = 将亡值：调用点若直接 `var t = f()`，sema 需要
+       按 FATAL 接管（自动推断为 own 并生成销毁序列），否则返回值原临时
+       无人释放（4 字节堆块泄漏）。 */
+    if (ret && !value_is_error(vm, ret) && sig->return_type &&
+        type_has_own_slots(sig->return_type))
+        value_set_type_ownership(vm, ret, OWN_FATAL);
+    return ret;
 }
 
 static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t argc) {
@@ -337,6 +344,14 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                 value_t *relabeled = value_relabel_into(vm, ret, sig->return_type);
                 if (relabeled) ret = relabeled;
             }
+        } else if (sig && sig->return_type &&
+                   type_has_own_slots(sig->return_type)) {
+            /* 返回含 own 槽位的聚合：必须**转移**而不是 clone——clone 会
+               深拷贝元素，但 callee 的返回值临时本身无人释放（4 字节堆块
+               泄漏）。转移后按 FATAL 交回调用方，由变量/上下文接管。 */
+            ret = value_move(vm, ret);
+            if (ret && !value_is_error(vm, ret))
+                value_set_type_ownership(vm, ret, OWN_FATAL);
         } else {
             ret = value_clone(vm, ret);
         }

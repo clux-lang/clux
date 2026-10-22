@@ -407,7 +407,14 @@ static void compile_exit_with_defers(compiler_t *c, ast_node_t *node) {
     /* defers 链里可能有 sema 追加的 **FREE**（own 局部/形参释放）：那会释放
        返回值正在借用的堆块。因此有 defers 时先把返回值物化成独立副本，再跑
        defer/FREE —— 等价于"返回值先落到临时变量"（形参不过是临时变量）。 */
-    if (node->defers) {
+    /* 返回的是构造/ move 出来的**新值**时无需再 clone：它不属于任何
+       局部借用，defer/FREE 不会释放它。此前一律 MATERIALIZE 会对含 own
+       槽位的 tuple 深拷贝一次，原临时值无人释放（4 字节堆块泄漏）。 */
+    bool fresh_value = n->value &&
+                       (n->value->kind == AST_CONSTRUCT ||
+                        n->value->kind == AST_MOVE ||
+                        n->value->kind == AST_NEW);
+    if (node->defers && !fresh_value) {
       bcode_write_op(c->bc, BCODE_MATERIALIZE);
       /* 栈净变化 0（弹 1 压 1） */
     }
