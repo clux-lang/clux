@@ -83,6 +83,15 @@ if (a.ok()) {
 赋值形式 `b = a.?` 的分支挂在 **prelude**（赋值语句本身变为 no-op），
 目标变量必须是已声明、可 copy 的简单变量。
 
+左值可以是任意表达式；展开时先绑定临时变量，保证只求值一次：
+
+```clux
+var __try_N: R = half(x);
+if (__try_N.ok()) { ... } else { ... }
+```
+
+因此 `var v = half(x).?;` 可以直接写，`half(x)` 只调用一次。
+
 ## 5. panic
 
 `panic` 是内建函数：
@@ -183,8 +192,7 @@ func half(x: i32): Result[i32, str] {
 }
 
 func use(x: i32): Result[i32, str] {
-    var r = half(x);
-    var v = r.?;   // 失败时 return Result[i32,str]::of_error(r.error())
+    var v = half(x).?;   // 临时变量 __try_N 接住 half(x)，只求值一次
     return Result[i32, str]::of_value(v + 1);
 }
 ```
@@ -197,13 +205,11 @@ func use(x: i32): Result[i32, str] {
 - 两个 payload 用 `?T` / `?E` 表示，构造一侧时另一侧写 `nil`；
 - `panic()` 只能返回固定字符串（泛型 E 无法通用转 `str`，除非标准库
   给 E 增加 interface 约束/格式化协议）；
-- 当前 `.?' / `.!' 的左值要求是变量/字段；`half(x).?` 需要先
-  `var r = half(x); var v = r.?;`，后续可扩展为自动绑定临时变量；
 - 静态构造需要显式 `Result[T,E]::of_value(...)`，暂不做返回类型反向推导。
 
 ## 11. 实现落点
 
-- `src/sema/stmt_try.c`：协议分析、生成 `if`、`of_error`/panic 分支
+- `src/sema/stmt_try.c`：协议分析、临时变量绑定、生成 `if`、`of_error`/panic 分支
 - `src/sema/stmt_var.c`：var 形式，预声明 `undefined` + postlude
 - `src/sema/stmt_assign.c`：赋值形式，prelude + `sugar_noop`
 - `src/sema/stmt_flow.c`：可达分支 flow meet + panic noreturn

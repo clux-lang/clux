@@ -181,7 +181,8 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       ast_node_t *iff = sema_try_make_if(sema, &info, as->target, NULL, tb,
                                          te);
       if (iff) {
-        as->base.prelude = iff;
+        info.setup->next = iff;
+        as->base.prelude = info.setup;
         as->sugar_noop = true;
         ts->flow_init = true;
       }

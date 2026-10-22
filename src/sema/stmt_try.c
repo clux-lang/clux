@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "core/arena.h"
 
 #include "parser/ast_assign.h"
 #include "parser/ast_block.h"
@@ -19,6 +20,8 @@
 
 #include "sema_stmt_internal.h"
 #include "sema_expr_internal.h"
+#include <stdio.h>
+#include <string.h>
 
 static ast_node_t *member_call(sema_t *sema, ast_node_t *operand,
                                const char *name, uint32_t tb, uint32_t te) {
@@ -130,15 +133,53 @@ bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
                     sema_try_info_t *out) {
     if (!sema || !unwrap || unwrap->kind != AST_UNWRAP || !out) return false;
     ast_unwrap_t *u = (ast_unwrap_t *)unwrap;
-    if (!u->operand ||
-        (u->operand->kind != AST_IDENT && u->operand->kind != AST_MEMBER))
-        return false;
+    if (!u->operand) return false;
     value_t *ov = sema_expr(sema, &u->operand, scope);
     if (is_poison(sema, ov) || !value_type(ov) ||
         type_kind_of(value_type(ov)) != TYPE_KIND_STRUCT)
         return false;
+    const type_t *ot = value_type(ov);
+    if (type_ownership_of(ot) == OWN_OWN ||
+        type_ownership_of(ot) == OWN_FATAL || type_has_own_slots(ot)) {
+        diag_error(sema->diag, sema_loc(sema, u->operand),
+                   "error-handling sugar operand must be a copyable value");
+        return false;
+    }
+
+    /* 左值表达式只求值一次：var __try_N: R = <operand>; */
+    char nb[64], cn[64];
+    uint32_t seq = sema->try_seq++;
+    snprintf(nb, sizeof nb, "__try_%llu", (unsigned long long)seq);
+    snprintf(cn, sizeof cn, "__try_%llu", (unsigned long long)seq);
+    ast_var_def_t *tv = (ast_var_def_t *)ast_var_def_new(
+        sema->arena, u->operand->tok_begin, u->operand->tok_end);
+    if (!tv) return false;
+    size_t nlen = strlen(nb);
+    char *ncopy = (char *)arena_alloc(sema->arena, nlen, 1);
+    if (!ncopy) return false;
+    memcpy(ncopy, nb, nlen);
+    tv->name = (strslice_t){ncopy, nlen};
+    tv->type_expr = sema_gen_type_ref(sema, ot);
+    tv->init = u->operand;
+    tv->resolved_type = ot;
+    tv->base.is_generated = true;
+    if (!tv->type_expr) return false;
+
+    sema_symbol_t tinit = {.kind = SEMA_SYM_VAR, .type = ot,
+                           .is_active = true, .flow_init = true,
+                           .declared = true};
+    if (!sema_scope_define(scope, tv->name, &tinit)) return false;
+    value_t *shadow = value_make_shadow(sema->vm, ot);
+    if (shadow) scope_define(sema->vm, sema->vm->current_scope, cn, shadow);
+
+    ast_node_t *tid = ast_ident_new(sema->arena, tv->base.tok_begin,
+                                    tv->base.tok_end);
+    if (!tid) return false;
+    ((ast_ident_t *)tid)->name = tv->name;
     bool panic_mode = u->op && token_is(u->op, "!");
-    return sema_try_analyze(sema, u->operand, scope, panic_mode, out);
+    if (!sema_try_analyze(sema, tid, scope, panic_mode, out)) return false;
+    out->setup = &tv->base;
+    return true;
 }
 
 ast_node_t *sema_try_make_if(sema_t *sema, const sema_try_info_t *info,

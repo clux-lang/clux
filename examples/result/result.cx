@@ -37,8 +37,7 @@ func half(x: i32): Result[i32, str] {
 }
 
 func use(x: i32): Result[i32, str] {
-    var r = half(x);
-    var v = r.?;
+    var v = half(x).?;
     return Result[i32, str]::of_value(v + 1);
 }
 

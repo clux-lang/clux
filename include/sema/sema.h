@@ -299,6 +299,8 @@ typedef struct sema_t {
     /* 扁平化 clone 的临时变量/循环变量计数器：__cl_N / __cl_i_N，N 从 0 起
        单调递增（块内唯一）。 */
     uint32_t      clone_seq;
+    /* 错误处理语法糖左值临时变量计数器：__try_N。 */
+    uint32_t      try_seq;
 
     /* ---- 生成的销毁函数（2026-10，方案 B：所有复合类型统一走函数调用）----
        每个含 own 槽位的复合类型生成一次 `__destroy_<n>(dv: ref *T)`：

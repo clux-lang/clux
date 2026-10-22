@@ -156,8 +156,7 @@ TEST(ErrorHandling, GenericResultStruct) {
       "  return Result[i32, str]::of_value(x / 2);\n"
       "}\n"
       "func use(x: i32): Result[i32, str] {\n"
-      "  var r = half(x);\n"
-      "  var v = r.?;\n"
+      "  var v = half(x).?;\n"
       "  return Result[i32, str]::of_value(v + 1);\n"
       "}\n"
       "func main(): i32 {\n"
@@ -168,4 +167,24 @@ TEST(ErrorHandling, GenericResultStruct) {
       "  return 0;\n"
       "}\n",
       "error_generic_result");
+}
+
+TEST(ErrorHandling, TryOperandEvaluatedOnce) {
+  clux_expect_ok(
+      std::string(kResult) +
+          "var calls: i32 = 0;\n"
+          "func mk(): R {\n"
+          "  calls = calls + 1;\n"
+          "  return .R{ .okf = true, .v = 6, .e = 0 };\n"
+          "}\n"
+          "func use(): R {\n"
+          "  var v = mk().?;\n"
+          "  return .R{ .okf = true, .v = v, .e = 0 };\n"
+          "}\n"
+          "func main(): i32 {\n"
+          "  var a: R = use();\n"
+          "  if (calls != 1) { return 1; }\n"
+          "  return a.value() - 6;\n"
+          "}\n",
+      "error_try_once");
 }

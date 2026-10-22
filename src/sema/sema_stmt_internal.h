@@ -47,10 +47,11 @@ void borrow_srcs_set(sema_t *sema, sema_symbol_t *var, sema_symbol_t **srcs, siz
 /* `a.?` / struct `a.!` 语法糖的分析结果（stmt_try.c）。 */
 typedef struct sema_try_info {
     const type_t *value_type;
-    ast_node_t   *ok_call;      /* a.ok() */
-    ast_node_t   *value_call;   /* a.value() */
-    ast_node_t   *error_call;   /* a.error()（返回分支用 / panic 分支不用） */
-    ast_node_t   *panic_call;   /* a.panic()（panic 分支用） */
+    ast_node_t   *setup;        /* `var __try_N: R = <operand>;`（先求值一次） */
+    ast_node_t   *ok_call;      /* __try_N.ok() */
+    ast_node_t   *value_call;   /* __try_N.value() */
+    ast_node_t   *error_call;   /* __try_N.error()（返回分支用 / panic 分支不用） */
+    ast_node_t   *panic_call;   /* __try_N.panic()（panic 分支用） */
     ast_node_t   *tail_stmt;    /* AST_RETURN 或 AST_EXPR_STMT(panic) */
 }
 sema_try_info_t;

@@ -569,7 +569,10 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       ((ast_ident_t *)target)->name = vd->name;
       ast_node_t *iff =
           sema_try_make_if(sema, &info, target, NULL, tb, te);
-      if (iff) vd->base.postlude = iff;
+      if (iff) {
+        info.setup->next = iff;
+        vd->base.postlude = info.setup;
+      }
       return;
     }
   }
