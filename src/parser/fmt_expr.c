@@ -32,6 +32,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
 #include "parser/ast_index.h"
+#include "parser/ast_pack_type.h"
 #include "parser/ast_spread.h"
 #include "parser/ast_array.h"
 #include "parser/ast_tuple.h"
@@ -565,6 +566,13 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, ", ");
             render_expr(f, fl->count);
             sb_ch(&f->sb, '>');
+            break;
+        }
+        case AST_PACK_TYPE: {
+            /* 函数参数类型 `...Args`（泛型参数包） */
+            ast_pack_type_t *pt = (ast_pack_type_t *)node;
+            sb_str(&f->sb, "...");
+            sb_put(&f->sb, pt->name.ptr, pt->name.len);
             break;
         }
         case AST_SPREAD: {

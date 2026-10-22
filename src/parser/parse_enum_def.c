@@ -30,6 +30,13 @@ ast_node_t *parse_enum_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
+    /* M7 泛型参数表：enum Option[T] { ... } */
+    ast_generic_params_t generic = {0};
+    if (check_symbol(p, "[")) {
+        ast_node_t *gerr = parse_generic_params(p, &generic);
+        if (gerr) return gerr;
+    }
+
     /* 底层类型：: expr（必须） */
     if (!check_symbol(p, ":")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -122,5 +129,6 @@ ast_node_t *parse_enum_def(parser_t *p) {
     ((ast_enum_def_t *)node)->underlying_type = underlying;
     ((ast_enum_def_t *)node)->variants        = variants;
     ((ast_enum_def_t *)node)->variants_last   = variants_last;
+    ((ast_enum_def_t *)node)->generic         = generic;
     return node;
 }

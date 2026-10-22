@@ -2,7 +2,7 @@
 #include "core/panic.h"
 #include "core/vec.h"
 #include "parser/ast_program.h"
-#include "parser/ast_func_def.h"
+#include "parser/ast_decl.h"
 #include "parser/lexer.h"
 
 #include <stdarg.h>
@@ -191,6 +191,7 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      后续函数签名/变量类型槽位引用名字时类型已可查；pass 2 密封后名字解析
      到最终类型（DEFINE 只存引用，不依赖密封）。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (ast_decl_is_generic(f)) continue;
     if (f->kind != AST_TYPE_DEF && f->kind != AST_ENUM_DEF &&
         f->kind != AST_STRUCT_DEF && f->kind != AST_UNION_DEF &&
         f->kind != AST_CUNION_DEF)
@@ -236,6 +237,7 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      必须在函数对象提升区（BIND_FUNC）之后——func 成员 LOAD_FUNCTION <fid>
      取回 func value 需先经 BIND_FUNC 登记到 functions_by_id。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (ast_decl_is_generic(f)) continue;
     if (f->kind != AST_STRUCT_DEF) continue;
     ast_struct_def_t *sd = (ast_struct_def_t *)f;
     if (!sd->members) continue;
@@ -253,6 +255,7 @@ bytecode_t *compiler_compile(compiler_t *c, ast_node_t *program) {
      仅顶层函数（prog->funcs 中的 AST_FUNC_DEF）——局部函数在定义点
      compile_block_body 绑定（提升语义），函数字面量无作用域绑定。 */
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
+    if (ast_decl_is_generic(f)) continue;
     if (f->kind != AST_FUNC_DEF) continue;
     ast_func_def_t *fn = (ast_func_def_t *)f;
     if (fn->is_comptime) continue;

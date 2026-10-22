@@ -27,6 +27,7 @@
 #include "parser/ast_extern_lib.h"
 #include "diag/diagnostic.h"
 #include "sema/sema.h"
+#include "sema/sema_generic.h"
 #include "sema/symbol.h"
 #include "compiler/compiler.h"
 #include "vm/vm.h"
@@ -474,6 +475,25 @@ static char *dup_cstr(allocator_t *alloc, const char *s, size_t len) {
     p[len] = '\0';
     return p;
 }
+static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
+                                    diag_buf_t *diag, arena_t *arena,
+                                    const char *canonical, vec_t *path_stack,
+                                    bool prepare_only);
+
+typedef struct {
+    vm_t       *vm;
+    allocator_t *alloc;
+    diag_buf_t *diag;
+    arena_t    *arena;
+} driver_finalize_ctx_t;
+
+static module_t *driver_finalize_cb(void *user, module_t *mod) {
+    driver_finalize_ctx_t *c = (driver_finalize_ctx_t *)user;
+    if (!c || !mod) return NULL;
+    return compile_module_impl(c->vm, c->alloc, c->diag, c->arena,
+                               mod->canonical, NULL, false);
+}
+
 static struct module_t *driver_resolve_import(void *user, sema_t *sema,
                                               ast_node_t *import_node,
                                               strslice_t raw) {
@@ -506,8 +526,8 @@ static struct module_t *driver_resolve_import(void *user, sema_t *sema,
 
     /* 递归编译被导入模块（同步走完整流水线 lex→parse→sema→compile→注册段
        执行）；compile_module 内部有 cache 查找 + 循环依赖检测。 */
-    module_t *mod = compile_module(c->vm, c->alloc, c->diag, c->arena, canonical,
-                                   c->path_stack);
+    module_t *mod = compile_module_impl(c->vm, c->alloc, c->diag, c->arena,
+                                      canonical, c->path_stack, true);
     if (!mod) {
         diag_error(c->diag, sema_loc(sema, import_node),
                    "failed to import module '%s'", canonical);
@@ -524,21 +544,64 @@ static struct module_t *driver_resolve_import(void *user, sema_t *sema,
     return mod;
 }
 
-module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
-                         arena_t *arena, const char *canonical,
-                         vec_t *path_stack) {    if (!vm || !alloc || !diag || !canonical) return NULL;
+/* 阶段 1 导出符号表：name → sema_symbol_t*（借用）。跨模块 sema 解析在
+   依赖模块尚未 finalize 时使用。`export *` 递归并入依赖模块的表。 */
+static strmap_t *build_sema_exports(vm_t *vm, allocator_t *alloc, sema_t *sema,
+                                    ast_node_t *ast) {
+    if (!vm || !alloc || !sema || !ast || ast->kind != AST_PROGRAM) return NULL;
+    strmap_t *map = strmap_new(alloc, /*owns_value=*/false);
+    if (!map) return NULL;
+    vec_t *names = collect_export_names(alloc, ast);
+    if (names) {
+        size_t n = vec_len(names);
+        for (size_t i = 0; i < n; i++) {
+            char *name = (char *)vec_get(names, i);
+            if (!name) continue;
+            sema_symbol_t *sym = sema_scope_find_local(
+                sema->global_scope, strslice_from_cstr(name));
+            if (sym) strmap_insert(map, alloc, name, sym);
+            allocator_free(alloc, (void **)&name);
+        }
+        vec_free(alloc, &names);
+    }
+    ast_program_t *prog = (ast_program_t *)ast;
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind != AST_REEXPORT) continue;
+        ast_reexport_t *re = (ast_reexport_t *)n;
+        module_import_kind_t kind = MODULE_IMPORT_MODULE;
+        char *dep_path = module_path_resolve(alloc, re->path,
+                                             sema->module_path, &kind);
+        if (!dep_path) continue;
+        module_t *dep = vm_module_lookup(vm, dep_path);
+        allocator_free(alloc, (void **)&dep_path);
+        if (!dep || !dep->sema_exports) continue;
+        const vec_t *keys = strmap_keys(dep->sema_exports);
+        size_t kn = keys ? vec_len((vec_t *)keys) : 0;
+        for (size_t i = 0; i < kn; i++) {
+            const char *key = (const char *)vec_get((vec_t *)keys, i);
+            if (!key) continue;
+            if (strmap_get(map, key)) continue;
+            sema_symbol_t *sym =
+                (sema_symbol_t *)strmap_get(dep->sema_exports, key);
+            if (sym) strmap_insert(map, alloc, key, sym);
+        }
+    }
+    return map;
+}
+static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
+                                    diag_buf_t *diag, arena_t *arena,
+                                    const char *canonical, vec_t *path_stack,
+                                    bool prepare_only) {
+    if (!vm || !alloc || !diag || !canonical) return NULL;
+    module_t *mod = NULL;
 
-    /* 1. cache 查找：已编译直接返回 */
-    module_t *cached = vm_module_lookup(vm, canonical);
-    if (cached) return cached;
-
-    /* 2. 循环依赖检测：检查 canonical 是否在 path_stack 中 */
+    /* 1. 循环依赖检测必须先于 cache：两阶段下模块 stub 在 sema 前已登记，
+       若先查 cache 会把正在 prepare 的模块当成完成，漏掉环。 */
     if (path_stack) {
         size_t n = vec_len(path_stack);
         for (size_t i = 0; i < n; i++) {
             const char *p = (const char *)vec_get(path_stack, i);
             if (p && strcmp(p, canonical) == 0) {
-                /* 打印循环依赖链 */
                 fprintf(stderr, "error: circular dependency detected:\n");
                 for (size_t j = i; j < n; j++) {
                     const char *cp = (const char *)vec_get(path_stack, j);
@@ -549,6 +612,16 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
                 return NULL;
             }
         }
+    }
+
+    /* 2. cache 查找：prepare 阶段直接复用；非 prepare 时对已 prepare 的模块
+       跳到 finalize（两阶段第二遍）。 */
+    module_t *cached = vm_module_lookup(vm, canonical);
+    if (cached) {
+        if (prepare_only || cached->finalized) return cached;
+        if (!cached->prepared) return cached;
+        mod = cached;
+        goto finalize_module;
     }
 
     /* 3. push 到路径栈 */
@@ -606,18 +679,42 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
       }
     }
 
-    /* 5. sema（独立创建，用完即销毁；借用 vm 的全局表） */
+    /* 4c. 两阶段流水线：模块对象在 sema 前创建并登记，跨模块 sema 可在
+       依赖模块尚未 finalize 时通过其 sema 符号表解析。 */
+    mod = module_new(alloc, NULL, NULL, NULL, canonical);
+    if (!mod) {
+        lexer_close(&lexer);
+        vec_free(alloc, &pool);
+        return NULL;
+    }
+    mod->src_lexer = lexer;
+    mod->src_tokens = pool;
+    mod->src_ast = ast;
+    vm_module_bind(vm, canonical, mod);
+
+    /* 5. sema（保留到 module 销毁；跨模块实例化/两阶段 finalize 使用） */
     sema_t *sema = sema_create(vm, diag, pool, arena);
     if (!sema) {
+        mod->src_lexer = NULL;
+        mod->src_tokens = NULL;
+        mod->src_ast = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         lexer_close(&lexer);
         vec_free(alloc, &pool);
         return NULL;
     }
     /* 注入 import 解析回调：sema 遇 import 时回调到 driver（路径规范化 +
        存在性检查 + 递归编译 + 循环依赖检测），sema 自身不认识 driver。 */
+    sema->module_path = canonical;
+    sema->current_module = mod;
     driver_import_ctx_t imp_ctx = {vm,    alloc,      diag,
                                    arena, path_stack, canonical};
     sema_set_import_resolver(sema, driver_resolve_import, &imp_ctx);
+
+    driver_finalize_ctx_t fin_ctx = {vm, alloc, diag, arena};
+    sema->module_finalize.finalize = driver_finalize_cb;
+    sema->module_finalize.user = &fin_ctx;
 
     bool sema_ok = sema_analyze(sema, ast);
     sema_scope_t *scope_tree = sema->global_scope;
@@ -627,28 +724,57 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
         sema_destroy(&sema);
         /* 诊断留给最外层入口打印（见上方 parse 分支说明） */
         if (scope_tree) sema_scope_destroy(&scope_tree);
+        mod->src_lexer = NULL;
+        mod->src_tokens = NULL;
+        mod->src_ast = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         lexer_close(&lexer);
         vec_free(alloc, &pool);
         return NULL;
     }
+
+    /* 阶段 1 导出符号：供尚未 finalize 的依赖模块被跨模块 sema 解析。 */
+    mod->sema_exports = build_sema_exports(vm, alloc, sema, ast);
+    mod->sema = sema;
+    mod->sema_global = scope_tree;
+    mod->prepared = true;
+    if (vm->module_order) vec_push(vm->module_order, alloc, mod);
+
+    if (prepare_only) {
+        if (path_stack && vec_len(path_stack) > 0) vec_pop(path_stack);
+        return mod;
+    }
+
+finalize_module:
+    /* 两阶段第二遍：从保留的 sema/AST 生成 bytecode → 注册 → exports。 */
+    ast = mod->src_ast;
+    pool = (vec_t *)mod->src_tokens;
+    lexer = mod->src_lexer;
+    sema = mod->sema;
+    scope_tree = mod->sema_global;
+    sema_types = sema ? sema->types : NULL;
+    canonical = mod->canonical;
 
     /* 6. compile（AST + sema 作用域树 → 字节码） */
     compiler_t *comp = compiler_new(alloc, vm, diag, pool, scope_tree,
                                     sema_types);
     if (!comp) {
-        sema_destroy(&sema);
-        if (scope_tree) sema_scope_destroy(&scope_tree);
-        lexer_close(&lexer);
-        vec_free(alloc, &pool);
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         return NULL;
     }
+    comp->module_path = canonical;
     bytecode_t *bc = compiler_compile(comp, ast);
     compiler_destroy(&comp);
-    sema_destroy(&sema);
-    if (scope_tree) sema_scope_destroy(&scope_tree);
 
     if (!bc) {
         /* 诊断留给最外层入口打印（见上方 parse 分支说明） */
+        mod->src_lexer = NULL;
+        mod->src_tokens = NULL;
+        mod->src_ast = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         lexer_close(&lexer);
         vec_free(alloc, &pool);
         return NULL;
@@ -688,8 +814,11 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
                 canonical, ed && ed->message ? ed->message : "execution error");
         scope_destroy(vm, &module_scope);
         bcode_destroy(&bc);
-        lexer_close(&lexer);
-        vec_free(alloc, &pool);
+        mod->bc = NULL;
+        mod->global_scope = NULL;
+        mod->exports = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         return NULL;
     }
 
@@ -840,21 +969,36 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
         if (exports) strmap_free(alloc, &exports);
         scope_destroy(vm, &module_scope);
         bcode_destroy(&bc);
+        mod->src_lexer = NULL;
+        mod->src_tokens = NULL;
+        mod->src_ast = NULL;
+        vm_module_unbind(vm, mod->canonical);
+        module_destroy(vm, &mod);
         return NULL;
     }
 
-    /* AST name 已拷贝完毕，lexer/pool 安全释放 */
-    lexer_close(&lexer);
-    vec_free(alloc, &pool);
+    /* M7 跨模块泛型：lexer/pool **不再释放**，随 module 保留（导入方需要
+       重新解析定义点 token 区间）。所有权在 module_new 成功后转移给 module；
+       失败分支负责释放。 */
 
-    /* 9. 构建 module_t 并注册到 vm->modules */
-    module_t *mod = module_new(alloc, bc, module_scope, exports, canonical);
-    if (!mod) {
-        fprintf(stderr, "compile: out of memory creating module '%s'\n", canonical);
-if (exports) strmap_free(alloc, &exports);
-        scope_destroy(vm, &module_scope);
-        bcode_destroy(&bc);
-        return NULL;
+    /* 9. module 对象已在 4c 创建；此处挂上 finalize 产物并登记。 */
+    mod->bc = bc;
+    bc->module_path = mod->canonical; /* owned by module */
+    mod->global_scope = module_scope;
+    mod->exports = exports;
+    mod->src_ast = ast;
+    mod->sema_global = scope_tree;
+    mod->sema = sema;
+    mod->prepared = true;
+    mod->finalized = true;
+    /* 模块保留 token pool 后，诊断可能发生在 canonical 临时串释放之后：
+       把每个 token 的 filename 重绑到 module 自己持有的规范路径。 */
+    if (pool && mod->canonical) {
+        size_t tn = vec_len(pool);
+        for (size_t ti = 0; ti < tn; ti++) {
+            token_t *tk = (token_t *)vec_get(pool, ti);
+            token_set_location_filename(tk, mod->canonical);
+        }
     }
     mod->ffi_libs = ffi_libs;  /* M6 FFI：库表所有权转移给模块（destroy 关闭全部） */
     vm_module_bind(vm, canonical, mod);
@@ -867,6 +1011,44 @@ if (exports) strmap_free(alloc, &exports);
     return mod;
 }
 
+module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
+                         arena_t *arena, const char *canonical,
+                         vec_t *path_stack) {
+    module_t *entry =
+        compile_module_impl(vm, alloc, diag, arena, canonical, path_stack, true);
+    if (!entry) return NULL;
+    if (diag_has_error(diag)) return NULL;
+
+    /* 阶段 1.5：全局泛型实例 worklist。实例已直接进入 owner 模块的
+       prog/funcs/types；跨模块交替 walk 直到所有模块都没有 pending。 */
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+        if (!vm->module_order) break;
+        size_t mn = vec_len(vm->module_order);
+        for (size_t i = 0; i < mn; i++) {
+            module_t *m = (module_t *)vec_get(vm->module_order, i);
+            if (m && m->sema && sema_generic_drain_pending(m->sema))
+                progressed = true;
+        }
+        if (diag_has_error(diag)) return NULL;
+    }
+
+    /* 阶段 2：按依赖序 compile/register/exports。 */
+    if (vm->module_order) {
+        size_t n = vec_len(vm->module_order);
+        for (size_t i = 0; i < n; i++) {
+            module_t *m = (module_t *)vec_get(vm->module_order, i);
+            if (!m || !m->prepared || m->finalized) continue;
+
+            if (!compile_module_impl(vm, alloc, diag, arena, m->canonical, NULL,
+                                     false))
+                return NULL;
+            if (diag_has_error(diag)) return NULL;
+        }
+    }
+    return entry;
+}
 int driver_build_asm(const char *src_path, const char *out_path) {
     if (!src_path || !out_path) return 1;
 
@@ -906,7 +1088,6 @@ int driver_build_bin(const char *src_path, const char *out_path) {
 /* ================================================================ */
 /* run -asm：汇编 .cxs 文本 → 字节码 → 执行                          */
 /* ================================================================ */
-
 
 /* 模块图执行（定义见下方 ".cxb 模块图加载与执行" 段）：run -asm 与 run -bin
    共用——两者都先把落盘形态解析成模块图，再按依赖序执行。 */

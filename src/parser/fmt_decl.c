@@ -99,6 +99,34 @@
 
 void render_node(fmt_t *f, ast_node_t *node);
 
+/* 泛型参数表：[T, U = i32, N: comptime u64, ...Args]
+ * 参数形态必须逐项保留（漏渲染 = 格式化静默改变语义/丢参数）。 */
+void render_generic_params(fmt_t *f, const ast_generic_params_t *list) {
+    if (!list || list->count == 0) return;
+    sb_ch(&f->sb, '[');
+    bool first = true;
+    for (ast_node_t *n = list->first; n; n = n->next) {
+        if (!first) sb_str(&f->sb, ", ");
+        ast_generic_param_t *gp = (ast_generic_param_t *)n;
+        if (gp->is_pack) sb_str(&f->sb, "...");
+        sb_put(&f->sb, gp->name.ptr, gp->name.len);
+        if (gp->is_comptime) {
+            sb_str(&f->sb, ": comptime ");
+            render_expr(f, gp->type_expr);
+        }
+        if (gp->constraint) {
+            sb_str(&f->sb, " extends ");
+            render_pattern(f, gp->constraint);
+        }
+        if (gp->default_expr) {
+            sb_str(&f->sb, " = ");
+            render_expr(f, gp->default_expr);
+        }
+        first = false;
+    }
+    sb_ch(&f->sb, ']');
+}
+
 void render_func_def(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
     /* 装饰器前缀（顶层函数走这条渲染路径，不经过 render_stmt） */
@@ -126,6 +154,7 @@ void render_func_def(fmt_t *f, ast_node_t *node) {
         sb_ch(&f->sb, ' ');
     }
     sb_put(&f->sb, fn->name.ptr, fn->name.len);
+    render_generic_params(f, &fn->generic);
     sb_ch(&f->sb, '(');
     bool first = true;
     for (ast_node_t *p = fn->params; p; p = p->next) {
@@ -167,6 +196,7 @@ void render_func_literal(fmt_t *f, ast_node_t *node) {
         sb_ch(&f->sb, ' ');
         sb_put(&f->sb, fn->name.ptr, fn->name.len);
     }
+    render_generic_params(f, &fn->generic);
     sb_ch(&f->sb, '(');
     bool first = true;
     for (ast_node_t *p = fn->params; p; p = p->next) {

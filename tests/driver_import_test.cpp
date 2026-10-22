@@ -329,3 +329,139 @@ TEST(DriverImport, ProgramTypeIdsUniqueAcrossModules) {
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
+
+/* ================================================================
+ * M7 P7：跨模块泛型实例化
+ * ================================================================ */
+
+TEST(DriverImport, CrossModuleGenericTypeFunctionAlias) {
+  ImportCase c("generic_tfa");
+  std::string mod = c.write("glib",
+      "export struct Box[T] { value: T; }\n"
+      "export func id[T](x: T): T { return x; }\n"
+      "export type Pair[T] = <T, T>;\n");
+  std::string main_path = c.entry("main",
+      "import glib from \"" + mod + "\";\n"
+      "func main(): i32 {\n"
+      "  var b: glib::Box[i32] = .{ .value = 5 };\n"
+      "  var x = glib::id[i32](7);\n"
+      "  var p: glib::Pair[i32] = .<i32, i32>{ 1, 2 };\n"
+      "  return b.value + x + p[0] + p[1] - 15;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericMethod) {
+  ImportCase c("generic_method");
+  std::string mod = c.write("glib",
+      "export struct Box[T] {\n"
+      "  value: T;\n"
+      "  func get(self: ref *const Box[T]): T { return self.value; }\n"
+      "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+      "    var b: Box[U] = .{ .value = f(self.value) };\n"
+      "    return b;\n"
+      "  }\n"
+      "}\n");
+  std::string main_path = c.entry("main",
+      "import glib from \"" + mod + "\";\n"
+      "func main(): i32 {\n"
+      "  var b: glib::Box[i32] = .{ .value = 5 };\n"
+      "  var c = b.map_into(func(v: i32): i32 { return v + 1; });\n"
+      "  return b.get() + c.get() - 11;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericSameNameIsolated) {
+  ImportCase c("generic_dup");
+  std::string m1 = c.write("l1",
+      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value; } }\n");
+  std::string m2 = c.write("l2",
+      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value + 100; } }\n");
+  std::string main_path = c.entry("main",
+      "import l1 from \"" + m1 + "\";\n"
+      "import l2 from \"" + m2 + "\";\n"
+      "func main(): i32 {\n"
+      "  var a: l1::Box[i32] = .{ .value = 5 };\n"
+      "  var b: l2::Box[i32] = .{ .value = 1 };\n"
+      "  return a.get() + b.get() - 106;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericReexport) {
+  ImportCase c("generic_reexport");
+  std::string lib = c.write("glib",
+      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value; } }\n");
+  std::string api = c.write("gapi",
+      "export * from \"" + lib + "\";\n");
+  std::string main_path = c.entry("main",
+      "import api from \"" + api + "\";\n"
+      "func main(): i32 {\n"
+      "  var b: api::Box[i32] = .{ .value = 12 };\n"
+      "  return b.get() - 12;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+/* ================================================================
+ * M7 归属：跨模块泛型实例按定义模块解析全局/私有/import 别名
+ * ================================================================ */
+
+TEST(DriverImport, CrossModuleGenericUsesDefinitionGlobals) {
+  ImportCase c("generic_owner_globals");
+  std::string mod = c.write("glib",
+      "export var base: i32 = 100;\n"
+      "export func add_base[T](x: T): i32 { return base + x as i32; }\n"
+      "export struct Counter[T] {\n"
+      "  value: T;\n"
+      "  func bump(self: ref *Counter[T]): i32 { base = base + 1; return base; }\n"
+      "}\n");
+  std::string main_path = c.entry("main",
+      "import gl from \"" + mod + "\";\n"
+      "var base: i32 = 5;\n"
+      "func main(): i32 {\n"
+      "  var a = gl::add_base[i32](1);\n"
+      "  if (a != 101) { return 1; }\n"
+      "  var c: gl::Counter[i32] = .{ .value = 1 };\n"
+      "  var b = c.bump();\n"
+      "  if (b != 102) { return 2; }\n"
+      "  if (gl::base != 102) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericUsesDefinitionImportAndPrivate) {
+  ImportCase c("generic_owner_env");
+  std::string helper = c.write("helper",
+      "export func inc(x: i32): i32 { return x + 1; }\n");
+  std::string mod = c.write("glib",
+      "import helper from \"" + helper + "\";\n"
+      "func private_fn(): i32 { return 7; }\n"
+      "export func call_helper[T](x: T): i32 { return helper::inc(41); }\n"
+      "export func call_private[T](x: T): i32 { return private_fn(); }\n");
+  std::string main_path = c.entry("main",
+      "import gl from \"" + mod + "\";\n"
+      "func main(): i32 {\n"
+      "  if (gl::call_helper[i32](1) != 42) { return 1; }\n"
+      "  if (gl::call_private[i32](1) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericGlobalsCxb) {
+  ImportCase c("generic_owner_cxb");
+  std::string mod = c.write("glib",
+      "export var base: i32 = 100;\n"
+      "export func add_base[T](x: T): i32 { return base + x as i32; }\n");
+  std::string main_path = c.entry("main",
+      "import gl from \"" + mod + "\";\n"
+      "func main(): i32 { return gl::add_base[i32](1) - 101; }\n");
+  auto bin = (c.dir() / "prog.cxb").string();
+  ASSERT_EQ(driver_build_bin(main_path.c_str(), bin.c_str()), 0);
+  std::remove(main_path.c_str());
+  std::remove((c.dir() / "glib.cx").string().c_str());
+  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
+}

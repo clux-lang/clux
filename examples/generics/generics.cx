@@ -1,0 +1,48 @@
+// generics.cx — M7 泛型：函数单态化 / 类型实例 / 方法 / 推导 / 递归 /
+//               comptime 值参数 / 参数包 / extends 约束 / interface / 泛型方法
+extern lib libc from "*";
+extern cfunc libc::printf(format: str, ...): void;
+
+func id[T](x: T): T { return x; }
+func first[T, U](a: T, b: U): T { return a; }
+func fact[T](x: T): T {
+    if (x <= 1) { return 1; }
+    return x * fact[T](x - 1);
+}
+
+interface IBox[T, Self] {
+    var value: T;
+    func get(self: ref *const Self): T;
+}
+
+struct Box[T] implements IBox[T, Box[T]] {
+    value: T;
+    func get(self: ref *const Box[T]): T { return self.value; }
+    func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {
+        var b: Box[U] = .{ .value = f(self.value) };
+        return b;
+    }
+}
+
+struct Matrix[T, N: comptime u64] { data: [N]T; }
+
+func pack_size[...Args](tag: str, args: ...Args): u64 { return len(args); }
+func read_ptr[T extends ?*?](p: T): i32 { return p.*; }
+func value_pack[...N: comptime u64](): u64 { return N[0] + len(N); }
+
+func main(): void {
+    var a: i32 = id[i32](42);
+    var b: f64 = id(2.5);
+    var c: i32 = first(7, 1.5);
+    var box: Box[i32] = .{ .value = 9 };
+    var mapped = box.map_into(func(x: i32): i32 { return x + 1; });
+    var m: Matrix[i32, 3] = .{ .data = .[3]i32{ 1, 2, 3 } };
+    var f: func(i32) -> i32 = fact[i32];
+    var n = pack_size[i32, str]("pack", 1, "x");
+    var v: i32 = 5;
+    var r: ref *i32 = v.&;
+    var pv = read_ptr(r);
+    var vp = value_pack[7u64, 8u64]();
+    libc::printf("%d %.1f %d %d %d %d %llu %d %d %llu\n", a, b, c, box.get(),
+                 mapped.get(), m.data[2], f(5), n, pv, vp);
+}

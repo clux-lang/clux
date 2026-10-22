@@ -84,7 +84,7 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
-#include "sema/comptime.h"
+#include "sema/sema_generic.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "vm/type_array.h"
 #include "vm/type_func.h"
@@ -167,6 +167,8 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
        type_expr 可能是 AST_IDENT（首次访问）或 AST_TYPE_REF（被 ex_scope_ref
        折叠过）——两种情况都取类型名查全局符号。 */
     ast_scope_ref_t *er = (ast_scope_ref_t *)as->target;
+    /* M7：`Vec[i32]::attr = v` —— 类型位实例化 + 改写为运行时类型名。 */
+    (void)sema_generic_rewrite_type_expr(sema, &er->type_expr);
     strslice_t type_name = STRSLICE_EMPTY;
     if (er->type_expr && er->type_expr->kind == AST_IDENT)
       type_name = ((ast_ident_t *)er->type_expr)->name;

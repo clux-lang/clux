@@ -1,4 +1,5 @@
 #include "vm/vm.h"
+#include "sema/sema.h"
 #include "vm/type.h"
 #include "vm/type_module.h"
 #include "vm/type_array.h"
@@ -114,6 +115,13 @@ vm_t *vm_new(allocator_t *alloc) {
        扩容登记。内建 id 分配计数器从 0 起（func_new 自动分配 < 程序段）。 */
     vm->functions_by_id = vec_new(alloc, /*owns_element=*/false);
     vm->next_builtin_func_id = 0;
+    vm->next_program_func_id = FUNC_ID_PROGRAM_BASE;
+    vm->module_order = vec_new(alloc, /*owns_element=*/false);
+    vm->defined_type_ids = vec_new(alloc, /*owns_element=*/false);
+    vm->generic_type_names = strmap_new(alloc, /*owns_value=*/false);
+    vm->type_id_by_ptr = strmap_new(alloc, /*owns_value=*/false);
+    vm->defined_type_ids_global = vec_new(alloc, /*owns_element=*/false);
+    vm->sema_types_global = vec_new(alloc, /*owns_element=*/false);
 
     /* const/volatile 修饰类型池（type_const_intern / type_volatile_intern
        intern 用；元素由 vm_destroy 手动释放，vec 只持有指针数组） */
@@ -223,6 +231,19 @@ void vm_destroy(vm_t **pvm) {
             if (mod) module_destroy(vm, &mod);
         }
         strmap_free(vm->alloc, &vm->modules);
+    }
+    if (vm->module_order) vec_free(vm->alloc, &vm->module_order);
+    if (vm->defined_type_ids) vec_free(vm->alloc, &vm->defined_type_ids);
+    if (vm->generic_type_names) strmap_free(vm->alloc, &vm->generic_type_names);
+    if (vm->type_id_by_ptr) strmap_free(vm->alloc, &vm->type_id_by_ptr);
+    if (vm->defined_type_ids_global) vec_free(vm->alloc, &vm->defined_type_ids_global);
+    if (vm->sema_types_global) {
+        size_t stn = vec_len(vm->sema_types_global);
+        for (size_t sti = 0; sti < stn; sti++) {
+            sema_type_t *st = (sema_type_t *)vec_get(vm->sema_types_global, sti);
+            allocator_free(vm->alloc, (void **)&st);
+        }
+        vec_free(vm->alloc, &vm->sema_types_global);
     }
 
     /* 销毁作用域链：root_scope 是 global 的子作用域 */
@@ -485,6 +506,11 @@ void vm_module_bind(vm_t *vm, const char *path, module_t *mod) {
     /* 幂等：同一路径重复登记，旧 module 由调用方释放（strmap_insert 返回旧值） */
     void *old = strmap_insert(vm->modules, vm->alloc, path, mod);
     (void)old; /* 调用方应避免重复注册；旧值不释放（可能导致泄漏，但不应发生） */
+}
+
+void vm_module_unbind(vm_t *vm, const char *path) {
+    if (!vm || !path || !vm->modules) return;
+    strmap_remove(vm->modules, path);
 }
 
 module_t *vm_module_lookup(vm_t *vm, const char *path) {

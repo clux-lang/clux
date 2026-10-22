@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 #include <stdbool.h>
@@ -46,6 +47,12 @@ typedef struct {
     bool        cycle_reported;
     uint32_t    type_id;         /* sema 登记的类型 id（TYPE_ID_PROGRAM_BASE+idx；
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
+    /* M7 泛型参数表（count == 0 = 普通结构体）。 */
+    ast_generic_params_t generic;
+    /* M7 §31.2：`struct W implements IWriter[W], ISerializable { ... }`
+       的接口类型表达式链（AST_IDENT / AST_INDEX），声明序。 */
+    ast_node_t *implements;
+    ast_node_t *implements_last;
 } ast_struct_def_t;
 
 /* 单个字段声明（独立节点，兄弟链挂接在 ast_struct_def_t::fields） */

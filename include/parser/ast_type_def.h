@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 #include <stdbool.h>
@@ -13,6 +14,8 @@ typedef struct {
     ast_node_t  base;
     strslice_t  name;        /* 类型名 */
     ast_node_t *expr;        /* 类型表达式（sema 求值后折叠为 AST_TYPE_REF） */
+    /* M7 泛型参数表（count == 0 = 普通类型别名）。 */
+    ast_generic_params_t generic;
 } ast_type_def_t;
 
 static inline ast_node_t *ast_type_def_new(arena_t *arena,

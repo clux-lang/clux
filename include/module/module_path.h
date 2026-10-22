@@ -59,6 +59,14 @@ char *module_path_resolve(allocator_t *alloc, strslice_t raw,
 bool module_path_exists(const char *path);
 
 /**
+ * 计算从**模块文件** from 到目标模块 to 的相对路径（纯词法，结果用 '/'）。
+ * 用于泛型实例归属：实例函数注册时 `IMPORT <relative>` 拉取定义模块对象，
+ * 再把函数 root_scope 指到它。返回 alloc 分配、NUL 终止；失败 NULL。
+ */
+char *module_path_relative(allocator_t *alloc, const char *from,
+                           const char *to);
+
+/**
  * 统一 import 路径解析：相对路径 + 非路径（deps 包导入）。
  *
  *   - 相对路径（./ ../）：同 module_path_resolve，相对 importer 拼接 + 补 .cx。

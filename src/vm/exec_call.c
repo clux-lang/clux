@@ -1,3 +1,5 @@
+#include "vm/module.h"
+#include "vm/function.h"
 #include "vm/exec.h"
 #include "vm/vm.h"
 #include "vm/value.h"
@@ -84,6 +86,28 @@ value_t *op_bind_func(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return NULL;
 }
 
+/* SET_ROOT_SCOPE：弹 module 值 → 设置其下 func value 的 root_scope。
+ * M7 跨模块泛型实例归属定义模块：函数体里的全局变量/import 别名按定义
+ * 模块的 runtime global_scope 解析，而不是导入方。 */
+value_t *op_set_root_scope(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc;
+    (void)pc;
+    value_t *mv = exec_stack_pop(vm);
+    if (!mv || value_type(mv) != vm->type_module)
+        return value_make_error(vm, "exec: SET_ROOT_SCOPE expects a module value");
+    module_t *mod = value_as(mv, module_t *);
+    value_t *fv = exec_stack_peek(vm, 0);
+    const type_t *t = fv ? value_type(fv) : NULL;
+    if (!t || t->kind != TYPE_KIND_FUNC)
+        return value_make_error(vm,
+                                "exec: SET_ROOT_SCOPE expects a function below "
+                                "the module value");
+    func_t *fn = *(func_t **)value_data(fv);
+    /* 只改 root_scope；closure_scope->parent 由 func_vcall 每次调用时按
+       fn->root_scope 重新接线（与普通函数调用语义一致）。 */
+    if (mod && mod->global_scope) fn->root_scope = mod->global_scope;
+    return NULL;
+}
 /* SET_FUNC_NAME <name>：peek 栈顶 func value（不弹栈），拷贝名字到 vm 堆
    （owns_name=true，func_destroy 释放），覆盖函数显示名 */
 value_t *op_set_func_name(vm_t *vm, bytecode_t *bc, size_t *pc) {

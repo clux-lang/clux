@@ -23,6 +23,13 @@ ast_node_t *parse_type_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
+    /* M7 泛型参数表：type Pair[T, U] = <T, U>; */
+    ast_generic_params_t generic = {0};
+    if (check_symbol(p, "[")) {
+        ast_node_t *gerr = parse_generic_params(p, &generic);
+        if (gerr) return gerr;
+    }
+
     /* 类型表达式：= expr（必须） */
     if (!check_symbol(p, "=")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -49,5 +56,6 @@ ast_node_t *parse_type_def(parser_t *p) {
     ast_node_t *node = ast_type_def_new(p->arena, tb, p->pos);
     ((ast_type_def_t *)node)->name = name;
     ((ast_type_def_t *)node)->expr = expr;
+    ((ast_type_def_t *)node)->generic = generic;
     return node;
 }

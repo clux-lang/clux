@@ -5,6 +5,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_interface_def.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_error.h"
 #include "parser/ast_import.h"
@@ -225,6 +226,8 @@ ast_node_t *parse_program(parser_t *p) {
                 func = parse_union_def(p);
             } else if (check_keyword(p, "cunion")) {
                 func = parse_cunion_def(p);
+            } else if (check_keyword(p, "interface")) {
+                func = parse_interface_def(p);
             } else {
                 func = ast_error_new(p->diag, p->tokens, p->arena, etb, p->pos,
                                      "expected declaration after 'export'");
@@ -260,6 +263,10 @@ ast_node_t *parse_program(parser_t *p) {
                member 共享 offset 0，C FFI 布局），进入字节码，运行时 hoist
                构造 cunion 类型 + 绑定名字。 */
             func = parse_cunion_def(p);
+        } else if (check_keyword(p, "interface")) {
+            /* M7 §31：interface 是编译期实体（无运行时表示），仍挂在
+               prog->funcs 链上供 sema 登记符号/检查 implements。 */
+            func = parse_interface_def(p);
         } else if (check_keyword(p, "var")) {
             /* 全局变量定义 var name[:type] = init; 挂 funcs 链（非 comptime）。
                sema pass_globals 折叠 init 为字面量/函数引用后保留——进入

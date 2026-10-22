@@ -7,6 +7,7 @@
 #include "vm/type_slice.h"
 #include "vm/type_ptr.h"
 #include "vm/type_option.h"
+#include "vm/type_tuple.h"
 #include "core/panic.h"
 
 #include <string.h>
@@ -63,9 +64,13 @@ value_t *builtin_len_cfunc(vm_t *vm, func_t *self, size_t argc,
         len = s ? (uint64_t)strlen(s) : 0;
         break;
     }
+    case TYPE_KIND_TUPLE:
+        /* 元组：长度是编译期常量（M7 参数包聚合的 `args` 靠它遍历） */
+        len = (uint64_t)tuple_type_elem_count(st);
+        break;
     default:
         return value_make_error(vm, "len: argument is not a sequence "
-                                     "(array/slice/str)");
+                                     "(array/slice/str/tuple)");
     }
 
     void *data = value_alloc_data(vm->alloc, vm_type_usize(vm));

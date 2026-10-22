@@ -2,6 +2,8 @@
 #define _H_CLUX_PARSER_FMT_INTERNAL_
 /* 内部头：fmt.c 拆分后的共享上下文与跨文件声明（parser 私有）。 */
 #include "parser/fmt.h"
+#include "parser/ast_generic_param.h"
+#include "parser/ast_pattern.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +43,8 @@ void render_comma_list(fmt_t *f, ast_node_t *head);
 void render_expr(fmt_t *f, ast_node_t *node);
 void render_func_def(fmt_t *f, ast_node_t *node);
 void render_func_literal(fmt_t *f, ast_node_t *node);
+void render_generic_params(fmt_t *f, const ast_generic_params_t *list);
+void render_pattern(fmt_t *f, ast_node_t *pat);
 void render_node(fmt_t *f, ast_node_t *node);
 void render_param(fmt_t *f, ast_node_t *n);
 void render_program(fmt_t *f, ast_node_t *node);

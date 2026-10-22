@@ -868,9 +868,24 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         /* nil 不是 value：CTFE 表达式位置不合法（sema 已拦截，防御性报错） */
         return ctfe_err(ctx, "ctfe: 'nil' is not an expression");
     case AST_INDEX: {
+        /* M7：泛型类型实例化 `Vec[i32]` 也是 AST_INDEX。类型值的求值走
+           sema 的实例化入口（与类型槽位同一份实现），CTFE 只把结果包装成
+           type value——类型别名的 RHS / 类型计算里出现泛型实例时可用。 */
+        ast_index_t *n = (ast_index_t *)node;
+        if (ctx->sema && n->object && n->object->kind == AST_IDENT) {
+            strslice_t gname = ((ast_ident_t *)n->object)->name;
+            sema_symbol_t *gs = ctx->sema->global_scope
+                                    ? sema_scope_find_local(
+                                          ctx->sema->global_scope, gname)
+                                    : NULL;
+            if (gs && gs->is_generic) {
+                const type_t *gt = resolve_type_expr(ctx->sema, node);
+                if (!gt) return ctfe_err(ctx, "ctfe: generic type instantiation failed");
+                return type_as_value(vm, gt);
+            }
+        }
         /* 右值下标 a[i]：object → index → value_get_index（与运行期
            INDEX_GET 语义一致）。indices 由 sema 保证单索引。 */
-        ast_index_t *n = (ast_index_t *)node;
         value_t *self = ctfe_eval(ctx, n->object);
         if (value_is_error(vm, self)) return self;
         value_t *index = ctfe_eval(ctx, n->indices);

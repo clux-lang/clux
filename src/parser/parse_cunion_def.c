@@ -34,6 +34,14 @@ ast_node_t *parse_cunion_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
+    /* cunion 不参与泛型体系（m7-design §29.6：仅 FFI/optional/tag union
+       使用，与 cfunc 同属 FFI 边界）。 */
+    if (check_symbol(p, "[")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "cunion cannot be generic (cunion is FFI-only and "
+                             "does not participate in M7 generics)");
+    }
+
     /* 字段（member）列表：{ ... } */
     if (!expect_symbol(p, "{")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

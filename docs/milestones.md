@@ -131,7 +131,14 @@
 
 ## 后续里程碑（待详细设计）
 
-- **M7**: 泛型（参数化多态）——设计已完成，见 [m7-design.md](m7-design.md)
+- **M7**: 泛型（参数化多态）——设计已完成，见 [m7-design.md](m7-design.md)；
+  实现阶段与文件级落点见 [m7-implementation-plan.md](m7-implementation-plan.md)。
+  **当前进度（2026-10-22，M7 完成）**：P0 前端语法 + P1 单态化地基 + P2 泛型函数
+  + P3 调用点推导/默认类型实参 + P4 泛型类型 + P4b 泛型方法 + P4c 静态泛型方法
+  + P5a comptime 值参数 + P5b 类型参数包 + P5c `<...Args>` / 别名 / struct
+  参数包 + P6a `extends` 结构约束 + P6b `interface`（含 `&` 组合）
+  + P7 跨模块泛型实例化（含泛型 reexport）+ P9 comptime **值**参数包已落地；
+  泛型 interface 嵌入实参仍待实现。
 - **M8**: 错误处理机制
 - **M9**: 标准库 v1（含字符串库、同步原语）
 - **M10**: 转译 C 后端（`clux build` 的机器码目标之一；亦承接 M3 §13.3 的编译期销毁序列生成）
@@ -145,9 +152,9 @@
 
 | 项目 | 结果 |
 |------|------|
-| 注册测试数（`ctest -N` / `--gtest_list_tests`） | 2232 |
-| `clux_test` 实际通过 | **2232 / 2232** |
-| `examples/*/*.cx` 入口示例端到端 | 47 / 47 |
+| 注册测试数（`ctest -N` / `--gtest_list_tests`） | 2313 |
+| `clux_test` 实际通过 | **2313 / 2313** |
+| `examples/*/*.cx` 入口示例端到端 | 54 / 54（含 `examples/generics`） |
 | 入口示例退出时泄漏报告 | 0 |
 | `examples/asm/*.cxs` → `bc asm` → `run` | 5 / 5 |
 | `.cxs → .cxb → .cxs → .cxb` 字节一致性 | 5 / 5 |

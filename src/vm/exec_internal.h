@@ -12,6 +12,7 @@ value_t *op_add_embed(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_addr(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_append_elem(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_bind_func(vm_t *vm, bytecode_t *bc, size_t *pc);
+value_t *op_set_root_scope(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_bnot(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_call(vm_t *vm, bytecode_t *bc, size_t *pc);
 value_t *op_cast(vm_t *vm, bytecode_t *bc, size_t *pc);

@@ -260,6 +260,32 @@ static ast_node_t *parse_construct_field(parser_t *p) {
     return parse_expr(p);
 }
 
+/* 元组类型元素：普通类型，或 `...Args` 类型参数包展开（M7 §30.4）。
+   展开节点复用 AST_SPREAD，sema 的 tuple 类型解析按 active 泛型实例展开。 */
+static ast_node_t *parse_tuple_elem(parser_t *p) {
+    if (check_symbol(p, "...")) {
+        uint32_t sb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+            return ast_error_new(p->diag, p->tokens, p->arena, sb, p->pos,
+                                 "expected parameter pack name after '...' in "
+                                 "tuple type");
+        }
+        strslice_t name = token_strslice(cur_token(p));
+        advance(p);
+        ast_node_t *id = ast_ident_new(p->arena, sb, p->pos);
+        if (!id) return NULL;
+        ((ast_ident_t *)id)->name = name;
+        ast_node_t *sp = ast_spread_new(p->arena, sb, p->pos);
+        if (!sp) return NULL;
+        ((ast_spread_t *)sp)->operand = id;
+        skip_trivia(p);
+        return sp;
+    }
+    return parse_unary(p);
+}
+
 /* ---- parse_primary: 原子表达式入口 ---- */
 
 ast_node_t *parse_primary(parser_t *p) {
@@ -388,7 +414,7 @@ ast_node_t *parse_primary(parser_t *p) {
         if (!check_symbol(p, ">")) {
             /* 元素类型用 parse_unary：支持 const/volatile 修饰、嵌套
                [M]T 数组、嵌套 <T1,T2> 元组 */
-            ast_node_t *et = parse_unary(p);
+            ast_node_t *et = parse_tuple_elem(p);
             if (!et || et->kind == AST_ERROR) {
                 if (!et) {
                     return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -401,7 +427,7 @@ ast_node_t *parse_primary(parser_t *p) {
             while (check_symbol(p, ",")) {
                 advance(p);
                 skip_trivia(p);
-                et = parse_unary(p);
+                et = parse_tuple_elem(p);
                 if (!et || et->kind == AST_ERROR) {
                     if (!et) {
                         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -556,6 +582,65 @@ ast_node_t *parse_primary(parser_t *p) {
 /** 前缀运算符右绑定力 = 23（M1 文档） */
 #define PREFIX_RIGHT_PREC 23
 
+/* 类型表达式 + 可选的泛型实参后缀：`Vec[i32]`。
+ *
+ * 常规类型标注走 parse_expr_prec（后缀解析已含 `[`），但 `.T{...}` 与
+ * `new T{...}` 的类型位用 parse_unary（只到原子），拿不到 `Vec[i32]`。
+ * 这里在 parse_unary 结果上补一层"仅类型实参"的下标解析（不支持切片——
+ * 类型实参位置出现切片本就是语法错误）。 */
+ast_node_t *parse_type_with_index(parser_t *p) {
+    ast_node_t *t = parse_unary(p);
+    if (!t || t->kind == AST_ERROR) return t;
+    for (;;) {
+        skip_trivia(p);
+        if (!check_symbol(p, "[")) break;
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *indices = NULL, *indices_last = NULL;
+        if (!check_symbol(p, "]")) {
+            ast_node_t *first = parse_expr(p);
+            if (!first || first->kind == AST_ERROR) {
+                if (!first)
+                    return ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                         p->pos,
+                                         "expected type argument in generic "
+                                         "type instantiation");
+                return first;
+            }
+            ast_append(&indices, &indices_last, NULL, first);
+            skip_trivia(p);
+            while (check_symbol(p, ",")) {
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *next = parse_expr(p);
+                if (!next || next->kind == AST_ERROR) {
+                    if (!next)
+                        return ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                             p->pos,
+                                             "expected type argument after ','");
+                    return next;
+                }
+                ast_append(&indices, &indices_last, NULL, next);
+                skip_trivia(p);
+            }
+        }
+        if (!expect_symbol(p, "]")) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected ']' after generic type arguments");
+        }
+        ast_node_t *idx = ast_index_new(p->arena, tb, p->pos);
+        if (!idx) return NULL;
+        ((ast_index_t *)idx)->object = t;
+        ((ast_index_t *)idx)->indices = indices;
+        ((ast_index_t *)idx)->indices_last = indices_last;
+        t = idx;
+        skip_trivia(p);
+    }
+    return t;
+}
+
 ast_node_t *parse_unary(parser_t *p) {
     uint32_t tb = p->pos;
 
@@ -670,7 +755,7 @@ ast_node_t *parse_unary(parser_t *p) {
         ast_node_t *type = NULL;
         /* 匿名构造：'new' 后直接 '{' → type=NULL，目标类型由 sema 依上下文推断 */
         if (!check_symbol(p, "{")) {
-            type = parse_unary(p);
+            type = parse_type_with_index(p);
             if (!type || type->kind == AST_ERROR) {
                 if (!type) {
                     return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
@@ -744,7 +829,7 @@ ast_node_t *parse_unary(parser_t *p) {
         /* 匿名构造：'.' 后直接 '{' → type=NULL，目标类型由 sema 依上下文
          * 推断（var 声明/赋值/嵌套字段）。否则照旧解析具名类型。 */
         if (!check_symbol(p, "{")) {
-            type = parse_unary(p);   /* 类型：i32 / [N]T / const i32 / 嵌套 */
+            type = parse_type_with_index(p);   /* 类型：i32 / [N]T / const i32 / Vec[i32] */
             if (!type || type->kind == AST_ERROR) {
                 if (!type) {
                     return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
@@ -978,7 +1063,15 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
          * a::b::c。'::' 是 lexer 产出的双字符 SYMBOL token。
          * sema 层区分 enum variant vs 模块成员。 */
         if (check_symbol(p, "::")) {
-            if (lhs->kind != AST_IDENT && lhs->kind != AST_SCOPE_REF) {
+            /* M7：泛型类型实例 `Vec[i32]::new` 的 lhs 是 AST_INDEX；只允许
+               "标识符 + 下标链" 形态（sema 再判定它确实是泛型类型）。 */
+            bool index_of_ident =
+                lhs->kind == AST_INDEX &&
+                ((ast_index_t *)lhs)->object &&
+                (((ast_index_t *)lhs)->object->kind == AST_IDENT ||
+                 ((ast_index_t *)lhs)->object->kind == AST_SCOPE_REF);
+            if (lhs->kind != AST_IDENT && lhs->kind != AST_SCOPE_REF &&
+                !index_of_ident) {
                 return ast_error_new(p->diag, p->tokens, p->arena, lhs->tok_begin,
                                      p->pos, "expected type name or module name before '::'");
             }
@@ -1146,10 +1239,17 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 continue;
             }
 
-            /* [] 空括号在 postfix 位置不合法（不是类型——类型在 parse_primary） */
+            /* 空括号：`Tuple[]` 空参数包实例（类型上下文）。运行期对数组
+               写 `a[]` 由 sema 报错；这里先构造空 AST_INDEX。 */
             if (check_symbol(p, "]")) {
-                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                     "expected index expression or ':' after '['");
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *node = ast_index_new(p->arena, tb, p->pos);
+                ((ast_index_t *)node)->object = lhs;
+                ((ast_index_t *)node)->indices = NULL;
+                ((ast_index_t *)node)->indices_last = NULL;
+                lhs = node;
+                continue;
             }
 
             ast_node_t *first = parse_expr(p);

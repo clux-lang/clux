@@ -79,6 +79,7 @@ static const char *const g_keywords[] = {
     "union",   "usize",  "var",     "void",    "volatile", "while",
     "share",   "weak",   /* RC 系（§12，2026-10 重新引入） */
     "foreach", "of",     /* 前脱糖语法糖（-> 索引 for 循环，见 src/desugar/） */
+    "interface", "implements", /* M7 §31：编译期接口 / struct 实现声明 */
 };
 
 /* ---- Internal: character classes ---- */
@@ -625,6 +626,11 @@ token_kind_t token_get_kind(const token_t *self) {
 const location_t *token_get_location(const token_t *self) {
   if (!self) return NULL;
   return &self->location;
+}
+
+void token_set_location_filename(token_t *self, const char *filename) {
+  if (!self) return;
+  self->location.filename = filename;
 }
 
 const char *token_get_text(const token_t *self, size_t *out_len) {

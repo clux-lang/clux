@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 #include <stdbool.h>
@@ -29,6 +30,8 @@ typedef struct {
     ast_node_t *fields_last;
     uint32_t    type_id;         /* sema 登记的类型 id（TYPE_ID_PROGRAM_BASE+idx；
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
+    /* M7 泛型参数表（count == 0 = 普通 tag union）。 */
+    ast_generic_params_t generic;
 } ast_union_def_t;
 
 static inline ast_node_t *ast_union_def_new(arena_t *arena,

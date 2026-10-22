@@ -108,6 +108,11 @@ token_kind_t token_get_kind(const token_t *self);
 /** Return the token location, or NULL. */
 const location_t *token_get_location(const token_t *self);
 
+/** 覆盖 token 位置的 filename 指针（不复制；调用方保证其生命周期）。
+ *  M7 跨模块泛型：模块保留源码/token pool 后，把 filename 重绑到 module 自己
+ *  持有的规范路径，避免原 canonical 临时串释放后诊断输出悬垂。 */
+void token_set_location_filename(token_t *self, const char *filename);
+
 /**
  * Return a slice of the source text covered by the token (zero-copy,
  * O(1)). The slice is NOT NUL-terminated; its length is written to

@@ -25,6 +25,10 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_func_type.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_pack_type.h"
+#include "parser/ast_scope_ref.h"
+#include "parser/ast_spread.h"
+#include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
@@ -42,6 +46,8 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "sema/sema_cross.h"
+#include "sema/sema_generic.h"
 #include "parser/ast_import.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_extern_lib.h"
@@ -296,12 +302,8 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   const sema_type_t *found = sema_type_find(sema, t);
   if (found) return found;
 
+  bool foreign = false;
   size_t n = vec_len(sema->types);
-
-  /* id 全 VM 唯一（type_id_alloc）：vm->types_by_id 是 VM 单表、被所有模块
-     共享，若按"模块内下标 + TYPE_ID_PROGRAM_BASE"分配，两个模块的 id 会重叠，
-     后编译模块的 DEFINE_TYPE 覆盖先者槽位 → 先者 LOAD_TYPE 取到别的模块类型
-     （被导入模块内的 struct 构造会运行期报 "construct: unsupported type"）。 */
   uint32_t id = type_id_alloc(sema->vm);
   if (id == 0) return NULL; /* id 耗尽 */
 
@@ -312,6 +314,12 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   st->type  = t;
   st->id    = id;
   st->index = (uint32_t)n;
+  st->foreign = foreign;
+  if (foreign) {
+    st->name = t->name;
+    vec_push(sema->types, sema->vm->alloc, st);
+    return st;
+  }
 
   /* 名字 "__type_N"（arena 分配，跨 sema/compile 阶段安全） */
   char name[32];
@@ -409,6 +417,26 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                    "'own opaque' / 'ref opaque' / 'fatal opaque'");
         return NULL;
       }
+      if (!t) {
+        sema_symbol_t *gs =
+            sema_scope_find_local(sema->global_scope, id->name);
+        if (gs && gs->kind == SEMA_SYM_INTERFACE) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "'%.*s' is an interface (a compile-time constraint), not "
+                     "a type: use it in 'extends' / 'implements'",
+                     (int)id->name.len, id->name.ptr);
+          return NULL;
+        }
+        /* M7：泛型类型名不能直接当类型用——必须实例化。 */
+        if (gs && gs->is_generic) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "generic type '%.*s' requires type arguments: write "
+                     "'%.*s[...]' to instantiate it",
+                     (int)id->name.len, id->name.ptr, (int)id->name.len,
+                     id->name.ptr);
+          return NULL;
+        }
+      }
       return t;
     }
     case AST_CONST: {
@@ -450,18 +478,58 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_TUPLE: {
       /* <T1,T2,...> 元组类型：逐元素递归解析（可为任意类型表达式，
          含嵌套元组/数组）→ 按（元素类型 + 顺序 + 元素槽位所有权）去重 intern。
-         元素可以是指针/切片/含 own 槽位的聚合（销毁序列逐元素展开）。 */
+         M7 §30.4：元素 `...Args` 在泛型实例内展开为该参数包的类型实参。 */
       ast_tuple_t *tp = (ast_tuple_t *)type_expr;
-      size_t n = sema_count_siblings(tp->elem_types);
-      tuple_elem_t elems_arr[n > 0 ? n : 1];
+      const sema_generic_instance_t *gi = sema->generics.active_inst;
+      size_t total = 0;
+      for (ast_node_t *et = tp->elem_types; et; et = et->next) {
+        if (et->kind == AST_SPREAD) {
+          ast_spread_t *sp = (ast_spread_t *)et;
+          strslice_t nm = sp->operand && sp->operand->kind == AST_IDENT
+                              ? ((ast_ident_t *)sp->operand)->name
+                              : STRSLICE_EMPTY;
+          if (!gi || !gi->has_pack || !strslice_eq(nm, gi->pack_name)) {
+            diag_error(sema->diag, sema_loc(sema, et),
+                       "'...%.*s' does not name a parameter pack of the "
+                       "enclosing generic instance",
+                       (int)nm.len, nm.ptr);
+            return NULL;
+          }
+          total += gi->pack_count;
+        } else {
+          total++;
+        }
+      }
+      tuple_elem_t *elems = NULL;
+      if (total > 0) {
+        elems = (tuple_elem_t *)arena_alloc(
+            sema->arena, total * sizeof(tuple_elem_t), ALIGNOF(max_align_t));
+        if (!elems) return NULL;
+      }
       size_t i = 0;
-      for (ast_node_t *et = tp->elem_types; et; et = et->next, i++) {
+      for (ast_node_t *et = tp->elem_types; et; et = et->next) {
+        if (et->kind == AST_SPREAD) {
+          for (size_t k = 0; k < gi->pack_count; k++) {
+            const sema_generic_arg_t *a = &gi->args[gi->pack_offset + k];
+            if (a->is_value) {
+              diag_error(sema->diag, sema_loc(sema, et),
+                         "comptime value parameter packs are not implemented "
+                         "yet (M7 P5c)");
+              return NULL;
+            }
+            elems[i].type = a->type;
+            elems[i].offset = 0;
+            i++;
+          }
+          continue;
+        }
         const type_t *pt = resolve_type_expr(sema, et);
         if (!pt) return NULL;
-        elems_arr[i].type   = pt;
-        elems_arr[i].offset = 0; /* seal 统一布局 */
+        elems[i].type = pt;
+        elems[i].offset = 0;
+        i++;
       }
-      return type_tuple_intern(sema->vm, n > 0 ? elems_arr : NULL, n);
+      return type_tuple_intern(sema->vm, total > 0 ? elems : NULL, total);
     }
     case AST_FUNC_TYPE: {
       /* 函数签名类型：func(param_types...)->ret。逐参数/返回递归解析
@@ -608,6 +676,71 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       sema->opaque_base_ctx--;
       if (!base) return NULL;
       return type_ownership_apply(sema->vm, oq, base);
+    }
+    case AST_PACK_TYPE: {
+      ast_pack_type_t *pk = (ast_pack_type_t *)type_expr;
+      diag_error(sema->diag, sema_loc(sema, type_expr),
+                 "parameter pack '...%.*s' is only valid as the last parameter "
+                 "of a generic function",
+                 (int)pk->name.len, pk->name.ptr);
+      return NULL;
+    }
+    case AST_INDEX: {
+      /* M7 泛型实例化：Type[arg, ...]（parser 与数组下标共用 AST_INDEX，
+         类型槽位里只可能是泛型实例化）。类型上下文**不推导**（设计 §4），
+         实参必须有显式类型实参。 */
+      ast_index_t *ix = (ast_index_t *)type_expr;
+      sema_symbol_t *gs = NULL;
+      strslice_t gname = STRSLICE_EMPTY;
+      bool cross = false;
+      if (ix->object && ix->object->kind == AST_IDENT) {
+        gname = ((ast_ident_t *)ix->object)->name;
+        gs = sema_scope_find_local(sema->global_scope, gname);
+      } else if (ix->object && ix->object->kind == AST_SCOPE_REF) {
+        cross = true;
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)ix->object;
+        gname = sr->variant;
+        gs = sema_cross_generic_symbol(sema, ix->object);
+        if (!gs) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "'%.*s' is not an exported generic type of the imported "
+                     "module",
+                     (int)sr->variant.len, sr->variant.ptr);
+          return NULL;
+        }
+      }
+      if (gs && gs->is_generic) {
+        if (gs->kind == SEMA_SYM_INTERFACE) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "'%.*s' is an interface (a compile-time constraint), "
+                     "not a type",
+                     (int)gname.len, gname.ptr);
+          return NULL;
+        }
+        if (!gs->ast || (gs->ast->kind != AST_STRUCT_DEF &&
+                         gs->ast->kind != AST_ENUM_DEF &&
+                         gs->ast->kind != AST_UNION_DEF &&
+                         gs->ast->kind != AST_TYPE_DEF)) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "'%.*s' is a generic function, not a type",
+                     (int)gname.len, gname.ptr);
+          return NULL;
+        }
+        size_t n = 0;
+        sema_generic_arg_t *args = NULL;
+        bool ok = sema_generic_parse_explicit_args(sema, gs, ix->indices, &n,
+                                                   &args);
+        const type_t *t =
+            ok ? sema_generic_instantiate_type(sema, gs, args, n, type_expr,
+                                               NULL)
+               : NULL;
+        if (args) allocator_free(sema->vm->alloc, (void **)&args);
+        return t;
+      }
+      (void)cross;
+      diag_error(sema->diag, sema_loc(sema, type_expr),
+                 "unsupported type expression (index on a non-generic type)");
+      return NULL;
     }
     default:
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */

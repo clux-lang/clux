@@ -243,6 +243,24 @@ static uint8_t *graph_serial_mem(allocator_t *alloc, const vm_t *vm,
     size_t count = keys ? vec_len((vec_t *)keys) : 0;
     if (count == 0) return NULL;
 
+    /* 两阶段流水线：模块 stub 在 sema 前按导入顺序登记，strmap 插入序不再
+       保证依赖优先。源码编译时用 vm->module_order（prepare 后序）生成
+       依赖先的 key 向量；加载路径没有 order，退回 map keys。 */
+    vec_t *ordered = NULL;
+    if (vm->module_order && vec_len(vm->module_order) == count) {
+        ordered = vec_new(alloc, /*owns_element=*/false);
+        if (ordered) {
+            size_t on = vec_len(vm->module_order);
+            for (size_t oi = 0; oi < on; oi++) {
+                module_t *om = (module_t *)vec_get(vm->module_order, oi);
+                if (!om || !om->canonical) { vec_free(alloc, &ordered); break; }
+                vec_push(ordered, alloc, (void *)om->canonical);
+            }
+            if (ordered && vec_len(ordered) == count) keys = ordered;
+            else if (ordered) { vec_free(alloc, &ordered); ordered = NULL; }
+        }
+    }
+
     size_t entry_index = graph_index_of(keys, entry->canonical);
     if (entry_index == (size_t)-1) return NULL; /* 入口不在表中：调用方搞错了 */
 
@@ -340,9 +358,11 @@ static uint8_t *graph_serial_mem(allocator_t *alloc, const vm_t *vm,
     }
 
     if (!ok) {
+        if (ordered) vec_free(alloc, &ordered);
         if (b.data) allocator_free(alloc, (void **)&b.data);
         return NULL;
     }
+    if (ordered) vec_free(alloc, &ordered);
     if (out_len) *out_len = b.len;
     return b.data;
 }

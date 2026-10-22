@@ -31,6 +31,12 @@ ast_node_t *parse_primary(parser_t *p);
  */
 ast_node_t *parse_unary(parser_t *p);
 
+/**
+ * 解析一个**类型操作数**：unary 类型 + 可选的 `[args]` 泛型实例下标，
+ * **不消费** `&` / `|` 等二元运算（implements 子句用于 `&` 分隔接口）。
+ */
+ast_node_t *parse_type_with_index(parser_t *p);
+
 #ifdef __cplusplus
 }
 #endif

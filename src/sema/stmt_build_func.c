@@ -311,6 +311,14 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
      内字面量）可能已分配——幂等复用；compiler LOAD_FUNCTION <fid> 用 */
   sema_func_id_alloc(sema, fn);
 
+  /* M7：泛型函数字面量（func[T](...)）留给后续阶段。 */
+  if (fn->generic.count > 0) {
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+               "generic function literals are not implemented yet (M7 P2 "
+               "scope: top-level generic functions only)");
+    return NULL;
+  }
+
   /* 队列登记起点：body 内局部函数（含嵌套字面量内）追加到队尾 */
   size_t n0 = vec_len(sema->funcs);
 

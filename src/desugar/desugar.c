@@ -364,6 +364,9 @@ static void ds_walk_func(desugar_t *ds, ast_func_def_t *fn) {
   ds_walk_stmt(ds, fn->body);
 }
 
+/* M7：单函数前脱糖入口（泛型实例重新解析后的 AST 用）。 */
+void desugar_func(desugar_t *ds, ast_func_def_t *fn) { ds_walk_func(ds, fn); }
+
 /* 遍历一条语句链，把链上的 AST_FOREACH 就地替换成展开后的块。
  * `owner` 是链的所属节点（块），只用于设置新节点的 parent。
  * 返回后 *tail_out 指向链尾（让块节点的 stmts_last 保持一致）。 */

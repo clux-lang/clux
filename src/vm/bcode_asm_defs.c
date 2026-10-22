@@ -140,6 +140,7 @@ const bcode_asm_entry_t BCODE_ASM_TABLE[] = {
     [BCODE_PUSH_CFUNC_TYPE] = { "PUSH_CFUNC_TYPE", { BCODE_ASM_OP_NONE } },
     [BCODE_MATERIALIZE]    = { "MATERIALIZE",    { BCODE_ASM_OP_NONE } },
     [BCODE_TAKE_SLOT]     = { "TAKE_SLOT",     { BCODE_ASM_OP_NONE } },
+    [BCODE_SET_ROOT_SCOPE] = { "SET_ROOT_SCOPE", { BCODE_ASM_OP_NONE } },
 };
 
 const size_t BCODE_ASM_TABLE_COUNT =

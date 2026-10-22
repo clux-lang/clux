@@ -117,6 +117,31 @@ typedef struct vm_t {
        BIND_FUNC <id> 填充 fn->id 并登记进本表。 */
     vec_t    *functions_by_id;    /* func_t*，索引即函数 id */
     uint32_t  next_builtin_func_id; /* func_new 内建 id 分配计数器 */
+    /* M7：程序函数 id 全局分配（跨模块唯一）。此前每个模块 sema 都从
+       FUNC_ID_PROGRAM_BASE 起分配，owner 模块直接编译实例后会与导入方 fid
+       冲突（functions_by_id 后注册覆盖前注册）。 */
+    uint32_t  next_program_func_id;
+
+    /* M7 两阶段模块流水线：源码模块按「依赖先、入口后」的 prepare 顺序。
+       module_t* 借用（归 vm->modules）。 */
+    vec_t    *module_order;
+
+    /* 两阶段：已经被某个模块 compiler hoist DEFINE_TYPE 过的程序类型 id。
+       类型对象全 VM 唯一；跨模块引用时只允许定义一次（无论定义/导入方
+       谁先编译），后续模块只发 LOAD_TYPE。 */
+    vec_t    *defined_type_ids;
+
+    /* 全局泛型实例类型名 → type_t*（mangling 名唯一）。跨 sema 去重。 */
+    strmap_t *generic_type_names;
+
+    /* type_t* → 全局 program type id（跨 sema 复用同一 type_t 的 id）。 */
+    strmap_t *type_id_by_ptr;
+    /* 已发过 DEFINE_TYPE 的 id（compiler 全局只定义一次）。 */
+    vec_t    *defined_type_ids_global;
+
+    /* 全 VM 共享的 sema_type_t 登记表：所有模块的 type id/名字唯一。
+       模块 sema 的 types 指向它；生命周期归 VM。 */
+    vec_t    *sema_types_global;
 
     /* ---- 执行器状态（复用 vm 上下文，不另建 exec_t） ---- */
     vec_t       *stack;   /* 操作数栈：value_t* 借用引用（不拥有，归 scope） */
@@ -174,6 +199,8 @@ void vm_pop_scope(vm_t *vm);
  * vm 拥有 module_t 生命周期（vm_destroy 释放）。
  */
 void vm_module_bind(vm_t *vm, const char *path, module_t *mod);
+/** 移除模块登记（失败路径；不释放 module，调用方负责）。 */
+void vm_module_unbind(vm_t *vm, const char *path);
 
 /**
  * 按规范路径查找模块。返回 module_t*，未找到返回 NULL。

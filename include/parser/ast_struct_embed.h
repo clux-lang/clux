@@ -31,7 +31,10 @@ extern "C" {
  */
 typedef struct {
     ast_node_t base;        /* kind = AST_STRUCT_EMBED */
-    strslice_t name;        /* 被嵌入的结构体名（借用源 token 切片） */
+    strslice_t name;        /* 被嵌入的结构体/接口名（第一段；借用 token） */
+    /* M7 §31.6：interface 成员复制允许泛型实参 `...IWriter[T];`。
+       type_expr = AST_IDENT / AST_INDEX；struct 嵌入时只有 name、此字段为 NULL。 */
+    ast_node_t *type_expr;
     size_t     field_index; /* 该 `...Name;` 出现在**自己**第几个字段之前
                                （0 = 在所有字段之前；== 自有字段数 = 在最后） */
 } ast_struct_embed_t;

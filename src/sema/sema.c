@@ -42,6 +42,8 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "sema/sema_generic.h"
+#include "sema/sema_interface.h"
 #include "parser/ast_import.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_extern_lib.h"
@@ -69,13 +71,25 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->global_scope = NULL;
   sema->funcs = vec_new(vm->alloc, false); /* 元素手动释放（sema_func_t 无 dispose） */
   sema->closures = vec_new(vm->alloc, false);
-  sema->types = vec_new(vm->alloc, false); /* 元素手动释放（sema_type_t 无 dispose） */
+  sema->types = vm->sema_types_global; /* 全 VM 共享类型登记表 */
   sema->fn.return_type = NULL;
   sema->fn.local_func_base = NULL;
   sema->fn.local_func_param_scope = NULL;
   sema->fn.in_call_callee = false;
   sema->fn.loop_depth = 0;
   sema->func_id_next = FUNC_ID_PROGRAM_BASE;
+  sema->generics.instances = NULL;
+  sema->generics.depth = 0;
+  sema->generics.max_depth = 128;
+  sema->generics.active_inst = NULL;
+  sema->prog = NULL;
+  sema->impls = NULL;
+  sema->current_instance = NULL;
+  sema->current_module = NULL;
+  sema->module_path = NULL;
+  sema->pattern_env.names = NULL;
+  sema->pattern_env.types = NULL;
+  sema->pattern_env.count = 0;
   /* import 回调默认未注入：单文件/测试场景下 import 语句报「当前编译模式不支持」 */
   sema->imports.resolve = NULL;
   sema->imports.user = NULL;
@@ -104,7 +118,17 @@ void sema_destroy(sema_t **sema) {
     vec_free(alloc, &(*sema)->funcs);
   }
   if ((*sema)->closures) vec_free(alloc, &(*sema)->closures);
-  if ((*sema)->types) {
+  {
+    sema_impl_t *im = (*sema)->impls;
+    while (im) {
+      sema_impl_t *next = im->next;
+      allocator_free(alloc, (void **)&im);
+      im = next;
+    }
+    (*sema)->impls = NULL;
+  }
+  sema_generic_destroy(*sema);
+  if ((*sema)->types && (*sema)->types != (*sema)->vm->sema_types_global) {
     size_t n = vec_len((*sema)->types);
     for (size_t i = 0; i < n; i++) {
       sema_type_t *st = (sema_type_t *)vec_get((*sema)->types, i);
@@ -144,9 +168,12 @@ size_t sema_count_siblings(const ast_node_t *node) {
 uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn) {
   if (!sema || !fn) return 0;
   if (fn->fid != 0) return fn->fid;
-  if (sema->func_id_next >= FUNC_ID_PROGRAM_BASE &&
-      (uint64_t)sema->func_id_next + 1u <= 0xFFFFFFFFull) {
-    fn->fid = sema->func_id_next++;
+  /* M7：程序 fid 跨模块全局唯一（BIND_FUNC 的 functions_by_id 是 VM 全局表）。 */
+  uint32_t next = sema->vm->next_program_func_id;
+  if (next >= FUNC_ID_PROGRAM_BASE &&
+      (uint64_t)next + 1u <= 0xFFFFFFFFull) {
+    sema->vm->next_program_func_id = next + 1u;
+    fn->fid = next;
     return fn->fid;
   }
   return 0; /* id 溢出 */
@@ -172,6 +199,7 @@ sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
 bool sema_analyze(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return false;
   ast_program_t *prog = (ast_program_t *)program;
+  sema->prog = program;
 
   sema->global_scope =
       sema_scope_new(sema->vm->alloc, SEMA_SCOPE_GLOBAL, NULL);
@@ -345,6 +373,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   pass1c_extern_abi(sema, prog); /* extern cfunc/var 签名校验（程序类型已激活） */
   pass1d_struct_members(sema, prog); /* struct 成员注册（方法入队 + 属性符号） */
   pass2_types(sema, /*speculative=*/false);         /* 函数签名 */
+  /* M7 §31b：implements 校验（方法签名已解析、member_scope 已建立）。 */
+  sema_check_implements_pass(sema, prog);
   pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
 
   /* Pass 3a：作用域树构建 + 控制流分析（符号注册、break/continue 位置检查、
@@ -367,6 +397,13 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
        walk 并标记，其 fscope 挂在临时作用域树上已销毁——跳过防二次 walk
        访问悬空作用域。 */
     if (sf->is_literal_owned) continue;
+    if (sf->is_walked) continue; /* M7：实例在实例化时已同步 walk */
+    if (sf->generic_inst) {
+      /* M7 泛型实例：重绑类型参数后 walk（队列迭代，不递归进实例化栈）。 */
+      sema_generic_walk_instance(sema, sf);
+      sf->is_walked = true;
+      continue;
+    }
     sema_walk_function(sema, sf);
   }
 

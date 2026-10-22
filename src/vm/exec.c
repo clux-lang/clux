@@ -104,6 +104,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_SEAL]             = op_seal,
     [BCODE_PUSH_FUNCTION]  = op_push_function,
     [BCODE_BIND_FUNC]      = op_bind_func,
+    [BCODE_SET_ROOT_SCOPE] = op_set_root_scope,
     [BCODE_SET_FUNC_NAME]  = op_set_func_name,
     [BCODE_SET_FUNC_CAPTURES] = op_set_func_captures,
     [BCODE_SET_CLOSURE]    = op_set_closure,

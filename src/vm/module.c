@@ -1,8 +1,12 @@
 #include "vm/module.h"
+#include "parser/lexer.h"
+#include "core/vec.h"
 #include "vm/ffi_lib.h"
 #include "vm/bcode.h"
 #include "vm/scope.h"
 #include "vm/vm.h"
+#include "sema/symbol.h"
+#include "sema/sema.h"
 #include "core/string.h"
 #include <stdlib.h>
 
@@ -28,6 +32,14 @@ module_t *module_new(allocator_t *alloc, bytecode_t *bc,
     mod->ffi_libs = NULL;  /* M6 FFI：库表懒创建 */
     mod->import_path = NULL;
     mod->importer = NULL;
+    mod->src_lexer = NULL;
+    mod->src_tokens = NULL;
+    mod->src_ast = NULL;
+    mod->sema_global = NULL;
+    mod->sema = NULL;
+    mod->prepared = false;
+    mod->finalized = false;
+    mod->sema_exports = NULL;
 
     /* 拷贝规范路径（module 拥有副本） */
     size_t len = strlen(canonical) + 1;
@@ -81,6 +93,13 @@ void module_destroy(vm_t *vm, module_t **pmod) {
     /* 释放"源码路径 / 导入者"副本（M5 字节码容器记录用） */
     if (mod->import_path) allocator_free(alloc, (void **)&mod->import_path);
     if (mod->importer) allocator_free(alloc, (void **)&mod->importer);
+
+    /* M7 跨模块泛型：释放保留的源码缓冲区 / token pool */
+    if (mod->src_lexer) lexer_close(&mod->src_lexer);
+    if (mod->src_tokens) vec_free(alloc, (vec_t **)&mod->src_tokens);
+    if (mod->sema) sema_destroy(&mod->sema);
+    if (mod->sema_exports) strmap_free(alloc, &mod->sema_exports);
+    if (mod->sema_global) sema_scope_destroy(&mod->sema_global);
 
     allocator_free(alloc, (void **)&mod);
 }

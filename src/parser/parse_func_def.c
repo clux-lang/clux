@@ -1,5 +1,6 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
+#include "parser/ast_pack_type.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_func_type.h"
 #include "parser/parse_expr.h"
@@ -7,6 +8,7 @@
 #include "parser/ast_error.h"
 #include "parser/ast_node.h"
 #include "core/strslice.h"
+#include <string.h>
 
 /* ================================================================ */
 /* parse_func_like: func 统一生成式入口                               */
@@ -52,6 +54,35 @@ static ast_node_t *parse_param(parser_t *p) {
     }
     skip_trivia(p);
 
+    /* M7 参数包参数：`args: ...Args`（必须是最后一个参数；parser 允许出现在
+       任意位置，sema 校验位置）。 */
+    if (check_symbol(p, "...")) {
+        uint32_t pb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+            return ast_error_new(p->diag, p->tokens, p->arena, pb, p->pos,
+                                 "expected parameter pack name after '...'");
+        }
+        {
+            ast_node_t *rerr = parse_reserved_ident_error(
+                p, cur_token(p), "generic parameter pack");
+            if (rerr) return rerr;
+        }
+        strslice_t pack_name = token_strslice(cur_token(p));
+        advance(p);
+        skip_trivia(p);
+
+        ast_node_t *pt = ast_pack_type_new(p->arena, pb, p->pos);
+        if (!pt) return NULL;
+        ((ast_pack_type_t *)pt)->name = pack_name;
+
+        ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
+        ((ast_var_def_t *)node)->name      = name;
+        ((ast_var_def_t *)node)->type_expr = pt;
+        return node;
+    }
+
     ast_node_t *type_expr = parse_scope_annotated_type(p);
     if (!type_expr || type_expr->kind == AST_ERROR) {
         if (!type_expr) {
@@ -84,6 +115,8 @@ static ast_node_t *parse_func_param_item(parser_t *p) {
     }
     return parse_unary(p);
 }
+
+ast_node_t *parse_func_param_decl(parser_t *p) { return parse_param(p); }
 
 /** 解析捕获列表中的单个捕获项 → AST_VAR_DEF：
  *   - 纯 id：name（type_expr/init 均为 NULL；类型取自外层符号）
@@ -271,6 +304,30 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         skip_trivia(p);
     }
 
+    /* M7 泛型参数列表：紧跟声明关键字/名字之后、参数列表之前。
+     *   func f[T, U](...)      语句级定义
+     *   func[T](...)           函数字面量
+     * 函数类型（'->' 分支）不允许泛型参数（多态签名不是 clux 类型）；
+     * cfunc / extern cfunc 保持非泛型（C 无泛型，设计 §22）。 */
+    ast_generic_params_t generic;
+    memset(&generic, 0, sizeof generic);
+    if (check_symbol(p, "[")) {
+        ast_node_t *gerr = parse_generic_params(p, &generic);
+        if (gerr) return gerr;
+        if ((kw && strcmp(kw, "cfunc") == 0) || pre_lib.len > 0) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "cfunc cannot be generic (the C ABI has no "
+                                 "templates)");
+        }
+        /* 泛型函数字面量 + 捕获列表：允许 `func[T] |caps| (...)`
+         * （捕获列表也可以写在 func 之后、泛型参数之前，两条路径都支持）。 */
+        if (!captures && check_symbol(p, "|")) {
+            captures = parse_capture_list(p);
+            if (captures && captures->kind == AST_ERROR) return captures;
+            skip_trivia(p);
+        }
+    }
+
     /* 参数列表：(param_item, param_item, ...)，参数项形态统一解析 */
     if (!expect_symbol(p, "(")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -346,6 +403,13 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         if (expected_kind != AST_FUNC_TYPE) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                                  "function type not allowed here (expected ':' and body)");
+        }
+        /* 多态签名不是 clux 类型：`func[T](...) -> T` 非法（泛型只属于
+           函数定义/字面量）。 */
+        if (generic.count > 0) {
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "function type cannot be generic (a polymorphic "
+                                 "signature is not a clux type)");
         }
         /* 捕获列表不属于函数类型（签名擦除闭包，类型无捕获概念） */
         if (captures) {
@@ -439,6 +503,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         fn->return_expr = return_expr;
         fn->body        = body;
     fn->is_variadic = variadic;
+        fn->generic     = generic;
         return node;
     }
 
@@ -499,6 +564,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     fn->return_expr = return_expr;
     fn->body        = body;
     fn->is_variadic = variadic;
+    fn->generic     = generic;
     return node;
 }
 

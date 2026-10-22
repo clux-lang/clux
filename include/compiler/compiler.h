@@ -68,6 +68,8 @@ typedef struct compiler_t {
     diag_buf_t     *diag;
     bytecode_t     *bc;
     vec_t          *tokens;        /* token pool（借 driver，诊断用位置） */
+    const char     *module_path;   /* 本模块规范路径（driver 注入；跨模块泛型
+                                      实例的相对 IMPORT 计算用） */
 
     /* sema 作用域树（借用，不拥有；编译完成后由 driver 释放） */
     sema_scope_t   *global_scope;

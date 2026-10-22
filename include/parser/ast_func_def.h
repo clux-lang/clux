@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 
@@ -58,6 +59,15 @@ typedef struct {
        **只被前脱糖消费**：[[d1]] [[d2]] func f(...) 展开为"源函数 + 装饰后绑定"，
        展开后本字段清空（sema/compiler 看不到装饰器）。 */
     ast_node_t *decorators;
+
+    /* M7 泛型参数表：func f[T, N: comptime u64](...)。count == 0 = 普通函数。
+       泛型定义本身不产生运行时实体（sema 只登记符号，实例化时再生成
+       mangling 名的普通函数副本）。 */
+    ast_generic_params_t generic;
+    /* M7 跨模块泛型：实例函数的**定义模块**（module_t*；NULL = 本模块）。
+       compiler 据此按定义模块 sema 作用域编译 body，并把运行时 root_scope
+       指到定义模块 module scope。 */
+    void *owner_module;
 } ast_func_def_t;
 
 static inline ast_node_t *ast_func_def_new(arena_t *arena,
@@ -84,6 +94,9 @@ ast_node_t *parse_cfunc_def(parser_t *p);
  */
 ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
                                   const char *kw);
+
+/** 解析参数列表中的单个参数（name: type）——接口签名解析复用。 */
+ast_node_t *parse_func_param_decl(parser_t *p);
 
 /** 解析捕获列表：`| item (, item)* |`（空列表 `||` 返回 NULL）。
  *  闭包（func |...|）与 defer（defer |...|）共用同一份解析——捕获项形态

@@ -106,7 +106,7 @@ file(GLOB CLUX_SEMA_SOURCES CONFIGURE_DEPENDS
 if(CLUX_SEMA_SOURCES)
   add_library(clux_sema STATIC ${CLUX_SEMA_SOURCES})
   target_include_directories(clux_sema PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_link_libraries(clux_sema PUBLIC clux_core clux_parser clux_vm ICU::uc ICU::i18n)
+  target_link_libraries(clux_sema PUBLIC clux_core clux_parser clux_vm clux_desugar ICU::uc ICU::i18n)
   clux_target_warnings(clux_sema)
   list(APPEND CLUX_STAGE_LIBS clux_sema)
 endif()

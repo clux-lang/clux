@@ -34,6 +34,13 @@ ast_node_t *parse_union_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
+    /* M7 泛型参数表：union Result[T, E] { ... } */
+    ast_generic_params_t generic = {0};
+    if (check_symbol(p, "[")) {
+        ast_node_t *gerr = parse_generic_params(p, &generic);
+        if (gerr) return gerr;
+    }
+
     /* 字段（member）列表：{ ... } */
     if (!expect_symbol(p, "{")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -110,5 +117,6 @@ ast_node_t *parse_union_def(parser_t *p) {
     ((ast_union_def_t *)node)->name         = name;
     ((ast_union_def_t *)node)->fields       = fields;
     ((ast_union_def_t *)node)->fields_last  = fields_last;
+    ((ast_union_def_t *)node)->generic      = generic;
     return node;
 }

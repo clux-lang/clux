@@ -11,6 +11,9 @@ extern "C" {
 typedef struct vm_t       vm_t;
 typedef struct scope_t    scope_t;
 typedef struct bytecode_t bytecode_t;
+typedef struct _lexer_t   lexer_t;
+typedef struct ast_node   ast_node_t;
+typedef struct _sema_scope_t sema_scope_t;
 
 /**
  * module_t: 编译期模块对象（M5 模块系统）
@@ -50,6 +53,32 @@ typedef struct module_t {
      * 别名即源码里 `extern lib <名> from "...";` 的 <名>，`extern cfunc <名>::<fn>`
      * 依此查表取句柄再 dlsym。NULL = 本模块没有 extern lib（懒创建）。 */
     strmap_t   *ffi_libs;
+
+    /* ---- M7 跨模块泛型：保留源码侧句柄 ----
+     * 导入方实例化 `mod::Vec[i32]` / `mod::f[i32](...)` 时需要重新解析
+     * 定义点 token 区间。AST 节点在共享 arena 中（借用），但 token 文本
+     * 指向 lexer 的源码缓冲区——因此模块必须保留 lexer 与 token pool
+     * （owned；module_destroy 释放）。src_ast 借用共享 arena。 */
+    lexer_t    *src_lexer;
+    void       *src_tokens;  /* vec_t*（token pool，元素由 pool 拥有） */
+    ast_node_t *src_ast;     /* 顶层 AST_PROGRAM（借用共享 arena） */
+
+    /* M7 跨模块泛型归属：本模块的 **sema 全局作用域**（保留到 module 销毁）。
+       导入方实例化本模块泛型时，实例体必须按定义模块的词法环境解析名字；
+       该作用域持有本模块全局 var/函数/类型/import 别名的 sema 符号。 */
+    sema_scope_t *sema_global;
+
+    /* M7 两阶段模块流水线（进行中）：保留 sema 编译期实例（funcs/prog/
+       types/instances）到 module 销毁。跨模块泛型实例直接加入 owner 模块的
+       prog 后，需要 owner sema 仍可继续实例化/编译。当前先保留，后续 finalize
+       阶段使用。 */
+    struct sema_t *sema;
+    /* 两阶段流水线状态：prepared=sema 已完成；finalized=bytecode/注册/exports
+       已完成。sema_exports 是阶段 1 的导出符号表（name → sema_symbol_t* 借用），
+       供尚未 finalize 的依赖模块被跨模块 sema 解析。 */
+    bool prepared;
+    bool finalized;
+    strmap_t *sema_exports;
 } module_t;
 
 /**

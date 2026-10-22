@@ -54,6 +54,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/sema_generic.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
@@ -132,7 +133,52 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
          comptime var：定义点已从语句链摘除（不在 VM scope），引用点折叠为
          字面量 AST 节点（sema_ct_lit，arena 分配），下游（编译器）零感知。 */
       ast_ident_t *n = (ast_ident_t *)*node;
+
+      /* P9：comptime 值参数包不是标量；裸 `N` 没有运行时绑定。 */
+      if (sema->generics.active_inst) {
+        const sema_generic_instance_t *gi = sema->generics.active_inst;
+        if (gi->has_pack && gi->pack_is_value &&
+            strslice_eq(gi->pack_name, n->name)) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "comptime value parameter pack '%.*s' is a compile-time "
+                     "sequence; use '%.*s[i]' or 'len(%.*s)'",
+                     (int)n->name.len, n->name.ptr, (int)n->name.len,
+                     n->name.ptr, (int)n->name.len, n->name.ptr);
+          return val_void(sema);
+        }
+      }
+
       sema_symbol_t *sym = sema_lookup(scope, n->name);
+
+      /* M7 comptime 值参数：当前正在 walk 的泛型实例有同名值参数时，把引用
+         折叠为字面量（`[N]T` 的边界由 CTFE 配合 VM scope 里的真实值处理；
+         这里处理表达式位置的 `if N > 0` / `N * 2` 等）。 */
+      if (sema->generics.active_inst) {
+        const sema_generic_instance_t *gi = sema->generics.active_inst;
+        for (size_t i = 0; i < gi->param_count && i < gi->arg_count; i++) {
+          if (!gi->args[i].is_value || !gi->param_names) continue;
+          if (!strslice_eq(gi->param_names[i], n->name)) continue;
+          ast_node_t *lit = sema_ct_lit(sema, *node, &gi->args[i].value);
+          if (lit) {
+            lit->next = (*node)->next;
+            *node = lit;
+            return value_make_shadow(sema->vm, gi->args[i].value.type);
+          }
+        }
+      }
+
+      /* M7：泛型定义只登记符号，不是值。函数/类型名必须带类型实参实例化
+         （`f[i32](...)` / `Vec[i32]`）——裸引用给出可操作的诊断。 */
+      if (sym && sym->is_generic) {
+        bool is_func = sym->ast && sym->ast->kind == AST_FUNC_DEF;
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   is_func ? "generic function '%.*s' requires type arguments: "
+                             "write '%.*s[...](...)'"
+                           : "generic type '%.*s' requires type arguments: "
+                             "write '%.*s[...]'",
+                   (int)n->name.len, n->name.ptr, (int)n->name.len, n->name.ptr);
+        return val_void(sema);
+      }
 
       /* 函数引用（函数值，编译期/运行期二元）：符号种类 SYM_FUNC（用户函数
          与内建函数 printf 统一——两者在 sema/ctfe/compiler/vm 视角无区别，

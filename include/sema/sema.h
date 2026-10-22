@@ -64,6 +64,11 @@ typedef struct sema_func_t {
                                        sema_check_func_literal 已同步 walk 并
                                        标记，Pass 3b 驱动循环跳过（防二次 walk
                                        访问已销毁的临时 fscope） */
+    bool          is_walked;        /* M7：泛型实例在实例化时已同步 walk
+                                       （Pass 3b 队列循环跳过，防二次 walk） */
+    struct sema_generic_instance *generic_inst; /* M7：本函数是泛型实例时，
+                                       指向实例记录（Pass 3b walk 前据此重绑
+                                       类型参数；NULL = 普通函数） */
 } sema_func_t;
 
 /**
@@ -89,7 +94,26 @@ typedef struct sema_type_t {
     strslice_t    name;    /* "__type_N"（sema arena 生命周期） */
     uint32_t      id;      /* 全 VM 唯一 program id（type_id_alloc） */
     uint32_t      index;   /* sema->types 中的登记下标（0 起） */
+    bool          foreign; /* 两阶段：该类型已由 owner 模块 sema 定义（本模块
+                              只引用 id/name，compiler hoist 不重复 DEFINE） */
 } sema_type_t;
+
+/**
+ * M7 §31：一个已通过校验的 `implements` 记录（interface 实例）。
+ * type 是 struct 实例类型；iface_def 是 interface AST；args 是接口类型实参
+ * （interface 泛型参数只能是类型，P6b）。用于 `T extends I[...]` 约束匹配。
+ * 节点由 allocator 分配、args 由 arena 分配，随 sema 销毁/arena 回收。
+ */
+typedef struct sema_impl {
+    const type_t      *type;
+    const ast_node_t  *iface_def;
+    const type_t     **args;
+    size_t             arg_count;
+    struct sema_impl  *next;
+} sema_impl_t;
+
+struct sema_generic_instance; /* sema_generic.h；诊断链用 */
+struct module_t;              /* vm/module.h；跨模块实例归属 */
 
 /**
  * sema_fn_ctx_t: **当前正在 walk 的函数**的上下文（Pass 3 期间设置）
@@ -182,6 +206,7 @@ static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
  * **扁平槽位表**（类型 → own 槽位偏移）重新设计，而不是恢复这两个递归谓词。
  */
 struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
+struct sema_generic_instance;
 
 
 /**
@@ -332,6 +357,50 @@ typedef struct sema_t {
         sema_import_resolver_t resolve;
         void                  *user;
     } imports;
+
+    /* 两阶段：sema 在跨模块 struct 静态方法/属性这类必须读 runtime
+       attributes 的路径上，请求 driver 提前 finalize 依赖模块。
+       泛型实例仍由导入方桥接编译，提前 finalize 不丢实例。 */
+    struct {
+        struct module_t *(*finalize)(void *user, struct module_t *mod);
+        void             *user;
+    } module_finalize;
+
+    /* **M7 泛型实例化**：实例表 + 深度计数（见 sema/sema_generic.h）。
+       实例的 AST 副本追加到 prog->funcs（compiler 零感知），实例表只供
+       sema 去重/诊断。depth 在每次实例化进入时 +1、离开时 -1。 */
+    struct {
+        struct sema_generic_instance *instances;
+        uint32_t                      depth;
+        uint32_t                      max_depth;
+        /* 正在 walk 的泛型实例（comptime 值参数的引用要折叠为字面量；
+           见 sema_generic_walk_instance）。 */
+        struct sema_generic_instance *active_inst;
+    } generics;
+
+    /* sema_analyze 的程序根（借用）：实例化把合成声明追加到 prog->funcs
+       尾部，compiler 的预扫描/hoist 直接看到普通声明。NULL = 未进入分析。 */
+    ast_node_t *prog;
+
+    /* M7 §31：struct 已实现的 interface 实例（P6b；见 sema_impl_t）。 */
+    sema_impl_t *impls;
+
+    /* M7 §18：当前正在 walk 的泛型实例（嵌套实例化的 caller 链）。 */
+    struct sema_generic_instance *current_instance;
+
+    /* M7 跨模块泛型：当前实例化/ walk 的**定义模块**词法环境。
+       NULL = 当前模块（普通本地泛型）。module_path 是本 sema 所属模块的
+       规范路径（driver 注入；用于跨模块 mangling 前缀）。 */
+    struct module_t *current_module;
+    const char         *module_path;
+
+    /* `extends` 约束匹配的临时环境：约束参数名 → 当前类型实参（check 期间
+       设置，匹配结束恢复）。只用于 PATTERN 里引用参数名（如 IWriter[T]）。 */
+    struct {
+        strslice_t       *names;
+        const type_t    **types;
+        size_t            count;
+    } pattern_env;
 } sema_t;
 
 /** move(x) / clone(x) 的产物类型（将亡值变体，AST_MOVE 处理器用）：
@@ -525,6 +594,13 @@ bool sema_append_prelude(sema_t *sema, ast_node_t *stmts);
  * 作用域树存入 sema_func_t::scope。
  */
 void sema_build_scope_tree(sema_t *sema);
+
+/**
+ * 为**单个**函数建作用域树（M7 泛型实例用）：与 sema_build_scope_tree 内部
+ * 的 build_func_tree 同一实现，parent = global_scope。实例化发生在 Pass 3b
+ * 期间（全局建树已结束），必须为追加的实例单独建树后才能 walk。
+ */
+void sema_build_func_scope(sema_t *sema, sema_func_t *sf);
 
 /**
  * Pass 3b 单个函数的 shadow VM 运行（stmt.c 实现）。

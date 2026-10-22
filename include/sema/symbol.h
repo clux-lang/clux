@@ -45,6 +45,8 @@ typedef enum {
 SEMA_SYM_EXTERN_LIB, /* M6 FFI：`extern lib <名> from "..."` 的库别名（:: 成员访问用） */
 SEMA_SYM_EXTERN_VAR, /* M6 FFI：`extern var <库>::<名>: T;` 的**数据符号**
                         （限定名 "<库>::<名>" 注册；可读可写，运行期 dlsym 解析） */
+  SEMA_SYM_INTERFACE, /* M7 §31：interface 编译期实体（无 type_t / vtable；
+                         可作 extends 约束，不能作值类型） */
 } sema_symbol_kind_t;
 
 /* ---- 语言级内建操作（sema_symbol_t.builtin_op）----
@@ -208,6 +210,17 @@ struct _sema_symbol_t {
      用户范式改为显式解包：if (a != nil) { var v = a.!; ... }。 ---- */
   /* ---- comptime（M2） ---- */
   bool           is_comptime; /* comptime var/func 标注 */
+  /* ---- M7 泛型 ----
+     泛型定义只登记符号，不是运行时实体：type 为 NULL、无 fid、无 type_t。
+     使用点必须实例化（sema_generic 阶段把 mangling 实例登记为普通符号）。 */
+  bool           is_generic;
+  /* M7 跨模块：泛型定义的 token pool（vec_t*，借用被导入模块，模块存活期
+     内有效）。NULL = 当前模块 sema->tokens。实例化重解析定义点必须用
+     定义所属模块的 token pool（tok_begin/tok_end 是该 pool 的下标）。 */
+  void          *generic_tokens;
+  /* 跨模块泛型 mangling 前缀（如 `mlib$Box`；空 = 无）。保证不同模块的
+     同名泛型实例互不冲突。 */
+  strslice_t     generic_prefix;
   bool           ct_valid;    /* 已编译期求值（常量有效；comptime var 求值成功
                                  或 comptime func 调用折叠后引用点改写） */
   sema_ct_const_t ct;         /* 编译期常量编码（ct_valid 时有效） */

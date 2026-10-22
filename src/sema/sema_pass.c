@@ -20,6 +20,7 @@
 #include "parser/ast_const.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_interface_def.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
 #include "parser/ast_func_def.h"
@@ -354,7 +355,8 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
        定义点不摘除（进入字节码，运行时 DEFINE 绑定 type value）。 */
     if (f->kind == AST_TYPE_DEF) {
       ast_type_def_t *td = (ast_type_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f,
+                            .is_generic = td->generic.count > 0};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, td->name, &init);
       if (!sym) {
@@ -368,7 +370,8 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
        定义点不摘除（进入字节码，运行时 hoist 构造 + 名字绑定）。 */
     if (f->kind == AST_ENUM_DEF) {
       ast_enum_def_t *ed = (ast_enum_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f,
+                            .is_generic = ed->generic.count > 0};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, ed->name, &init);
       if (!sym) {
@@ -382,7 +385,8 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
        定义点不摘除（进入字节码，运行时 hoist 构造 + 名字绑定）。 */
     if (f->kind == AST_STRUCT_DEF) {
       ast_struct_def_t *sd = (ast_struct_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f,
+                            .is_generic = sd->generic.count > 0};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, sd->name, &init);
       if (!sym) {
@@ -394,9 +398,21 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
 
     /* 全局 union 定义：注册符号（暂不激活，pass1b 求值后激活）。
        定义点不摘除（进入字节码，运行时 hoist 构造 + 名字绑定）。 */
+    if (f->kind == AST_INTERFACE_DEF) {
+      ast_interface_def_t *id = (ast_interface_def_t *)f;
+      sema_symbol_t init = {.kind = SEMA_SYM_INTERFACE, .ast = f,
+                            .is_generic = id->generic.count > 0};
+      if (!sema_scope_define(sema->global_scope, id->name, &init)) {
+        diag_error(sema->diag, sema_loc(sema, f), "duplicate name '%.*s'",
+                   (int)id->name.len, id->name.ptr);
+      }
+      continue;
+    }
+
     if (f->kind == AST_UNION_DEF) {
       ast_union_def_t *ud = (ast_union_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f};
+      sema_symbol_t init = {.kind = SEMA_SYM_TYPE, .ast = f,
+                            .is_generic = ud->generic.count > 0};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, ud->name, &init);
       if (!sym) {
@@ -428,6 +444,20 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
                  (int)fn->name.len, fn->name.ptr);
       continue; /* 重复定义不入队 */
     }
+    /* M7 泛型函数：只登记符号（未实例化不是运行时实体——无 fid / 签名 /
+       队列条目）。使用点由泛型实例化路径解析；这里入队会让普通 pass2/3
+       把 `T` 当未知类型。 */
+    if (fn->generic.count > 0) {
+      if (fn->is_comptime) {
+        diag_error(sema->diag, sema_loc(sema, f),
+                   "comptime func cannot be generic in M7");
+      }
+      sym->is_generic = true;
+      sym->is_active = true;
+      sym->ast = f;
+      sym->is_comptime = fn->is_comptime;
+      continue;
+    }
     /* 函数名全局可见（无 TDZ）→ 注册即激活 */
     sym->is_active = true;
     sym->is_comptime = fn->is_comptime;
@@ -440,6 +470,7 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
     sf->scope = NULL;
     sf->param_scope = NULL;
     sf->def_scope = sema->global_scope;
+    sf->is_walked = false;
       /* fid 单一来源：创建 sema 函数对象即分配（comptime func 亦分配——统一
        流程；compiler 预扫描跳过 comptime 不读取，占位无冲突）。符号表 fid
        字段同步（AST_FUNC_REF 替换 / 折叠按 id 查询用） */
@@ -471,6 +502,8 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
     sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, sd->name);
     if (!sym || !sym->is_active || !sym->type) continue; /* 类型未就绪 */
 
+    /* M7 P4b：泛型方法（方法自身带类型参数）在调用点按实例化处理：
+       这里只登记 is_generic 符号，不入队、不解析签名（调用点负责）。 */
     /* 幂等：试跑轮已创建 member_scope 时跳过（不重复创建/注册） */
     if (sym->member_scope) continue;
 
@@ -484,6 +517,21 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
     for (ast_node_t *m = sd->members; m; m = m->next) {
       if (m->kind == AST_FUNC_DEF) {
         ast_func_def_t *fn = (ast_func_def_t *)m;
+        /* M7 P4b：泛型方法只登记符号（is_generic），调用点实例化。 */
+        if (fn->generic.count > 0) {
+          sema_symbol_t ginit = {.kind = SEMA_SYM_FUNC,
+                                 .ast = m,
+                                 .is_generic = true,
+                                 .is_active = true};
+          sema_symbol_t *gmsym = sema_scope_define(mscope, fn->name, &ginit);
+          if (!gmsym) {
+            diag_error(sema->diag, sema_loc(sema, m),
+                       "struct '%.*s': duplicate method '%.*s'",
+                       (int)sd->name.len, sd->name.ptr,
+                       (int)fn->name.len, fn->name.ptr);
+          }
+          continue;
+        }
         sema_symbol_t init = {.kind = SEMA_SYM_FUNC};
         sema_symbol_t *msym = sema_scope_define(mscope, fn->name, &init);
         if (!msym) {
@@ -504,6 +552,7 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
         sf->scope = NULL;
         sf->param_scope = NULL;
         sf->def_scope = mscope; /* struct 方法符号在 member_scope 中 */
+        sf->is_walked = false;
         sema_func_id_alloc(sema, fn);
         msym->fid = fn->fid;
         vec_push(sema->funcs, sema->vm->alloc, sf);
@@ -640,9 +689,10 @@ void pass1b_types(sema_t *sema, ast_program_t *prog, bool speculative) {
       case AST_CUNION_DEF: name = ((ast_cunion_def_t *)f)->name; break;
       default: continue;
     }
-    /* 已求值（激活）→ 跳过：使本函数可反复调用（不动点轮次） */
+    /* 已求值（激活）→ 跳过：使本函数可反复调用（不动点轮次）。
+       泛型定义（is_generic）不产生运行时类型——实例化才生成，永远跳过。 */
     sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, name);
-    if (sym && sym->is_active) continue;
+    if (sym && (sym->is_active || sym->is_generic)) continue;
 
     if (f->kind == AST_TYPE_DEF) {
       sema_eval_type_def(sema, (ast_type_def_t *)f, sema->global_scope);

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "compiler/compiler.h"
 #include "core/panic.h"
 #include "vm/type_array.h"
@@ -270,6 +271,20 @@ static void declare_one(compiler_t *c, const sema_type_t *st) {
  * intern 需 sub 已密封——依赖先定义保证 LOAD_TYPE <依赖 id> 时已密封。
  * =========================================================================== */
 
+static bool type_id_seen(vm_t *vm, uint32_t id) {
+  if (!vm || !vm->defined_type_ids_global) return false;
+  size_t n = vec_len(vm->defined_type_ids_global);
+  for (size_t i = 0; i < n; i++)
+    if ((uintptr_t)vec_get(vm->defined_type_ids_global, i) == (uintptr_t)id)
+      return true;
+  return false;
+}
+
+static void type_id_mark(vm_t *vm, uint32_t id) {
+  if (!vm || !vm->defined_type_ids_global || id < TYPE_ID_PROGRAM_BASE) return;
+  if (!type_id_seen(vm, id))
+    vec_push(vm->defined_type_ids_global, vm->alloc, (void *)(uintptr_t)id);
+}
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count);
 static void emit_ref_dep_type(compiler_t *c, const type_t *dep, uint8_t *done,
@@ -689,6 +704,7 @@ static void define_cunion(compiler_t *c, const sema_type_t *st, uint8_t *done,
 static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
                        size_t count) {
   if (!st) return;
+  if (type_id_seen(c->vm, st->id)) return;
   /* done 下标用**登记下标**（sema_type_t::index），不能用 id - BASE 推算：
      id 已是全 VM 全局分配（跨模块不连续），见 vm/type.h 的 type_id_alloc。 */
   size_t idx = (size_t)st->index;
@@ -760,6 +776,7 @@ static void define_one(compiler_t *c, const sema_type_t *st, uint8_t *done,
       return;
   }
   done[idx] = TYPE_DEF_DONE;
+  type_id_mark(c->vm, st->id);
 }
 
 /* pass 1：声明所有类型（开放对象登记进 types_by_id，顺序无关）。
@@ -772,6 +789,8 @@ void compile_hoist_declare(compiler_t *c) {
 
   for (size_t i = 0; i < n; i++) {
     const sema_type_t *st = (const sema_type_t *)vec_get(c->sema_types, i);
+    if (st && st->id >= TYPE_ID_PROGRAM_BASE && type_id_seen(c->vm, st->id))
+      continue;
     declare_one(c, st);
     if (c->failed) break;
   }

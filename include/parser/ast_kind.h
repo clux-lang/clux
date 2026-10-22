@@ -15,7 +15,25 @@ typedef enum {
     AST_STRUCT_FIELD,    /* 结构体字段声明（name: type，仅 struct 定义体内） */
     AST_STRUCT_EMBED,    /* 结构体嵌入声明 `...Name;`（仅 struct 定义体内；纯语法节点，
                             type 层的字段组合由 sema 在类型 seal 之前完成） */
+    AST_GENERIC_PARAM,   /* 泛型参数声明（仅 func/struct/enum/union/type 的
+                            `[...]` 列表中；见 ast_generic_param.h） */
+    AST_PACK_TYPE,       /* 函数参数类型 `...Args`（泛型参数包的展开位置；
+                            仅函数参数表最后一个参数；见 ast_pack_type.h） */
+    /* --- M7 `extends` 结构约束 PATTERN（仅泛型参数约束位置；见
+     * ast_pattern.h）。这些节点不出现在普通类型表达式/值表达式里。 --- */
+    AST_PAT_WILD,        /* ?：任意单类型（含 void） */
+    AST_PAT_OR,          /* A | B */
+    AST_PAT_AND,         /* A & B */
+    AST_PAT_PTR,         /* [?|own|ref|fatal|share|weak|bare] * <pattern> */
+    AST_PAT_SLICE,       /* [ownership] [] <pattern> */
+    AST_PAT_ARRAY,       /* [N|?] <pattern>（N 字面量或长度通配） */
+    AST_PAT_TUPLE,       /* <p1,...,pn> 或 <?>（任意元数） */
+    AST_PAT_NAME,        /* 具名类型 / 泛型实例 Vec[?] */
+    AST_PAT_FUNC,        /* func(p1,...)->p */
+    AST_PAT_QUAL,        /* const/volatile <pattern> */
     AST_UNION_DEF,       /* union name { field: type; ... }（顶层 union 定义，struct 同构平铺字段） */
+    AST_INTERFACE_DEF,   /* interface name[T] { var/func 签名; ...Base; }（M7 §31
+                            编译期实体，无运行时表示；见 ast_interface_def.h） */
     AST_UNION_MEMBER,    /* union member 声明（field: type，仅 union 定义体内） */
     AST_CUNION_DEF,      /* cunion name { field: type; ... }（顶层 C 语义 union 定义，
                             struct 同构平铺字段；无 tag，所有 member 共享 offset 0） */

@@ -19,7 +19,12 @@ func main(): i32 {
 ## Status
 
 M1–M6 are implemented and runnable end-to-end (lex → parse → sema → bytecode
-compile → VM). M7 (generics) is designed but not started; see `docs/milestones.md`.
+compile → VM). M7 (generics) is implemented: generic functions, generic types
+(`struct`/`enum`/`union`/alias instances with methods, generic methods and
+recursive structs), comptime value parameters (`Matrix[T, N: comptime u64]`),
+type parameter packs including `<...Args>` type expansion, `extends` structure
+constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
+`implements` have landed. See `docs/milestones.md`.
 
 **Language features available today**
 
@@ -62,7 +67,24 @@ compile → VM). M7 (generics) is designed but not started; see `docs/milestones
 
 **Not yet implemented**
 
-- M7 generics: designed in `docs/m7-design.md`, not started.
+- M7 generics: generic `func f[T]` with monomorphization, explicit/inferred
+  type arguments, defaults and asymmetric ownership inference; generic
+  `struct`/`enum`/`union`/`type` aliases with methods (including recursive
+  structs); comptime value parameters (`N: comptime u64`, explicit / inferred
+  from array lengths / defaulted) for functions and types; type parameter
+  packs (`func f[...Args](args: ...Args)`, explicit or inferred, empty packs,
+  `len(args)` / `args[i]` over the entry tuple); `extends` structure
+  constraints with `?` / `<?>` / `?*?`, type/array/tuple/func/generic patterns
+  and `&`/`|` composition; compile-time `interface` declarations,
+  `struct ... implements I[...]` checking (attributes + method signatures),
+  `T extends I[T]` constraints, generic methods (`func map_into[U]`,
+  inferred at the call site and dispatched by direct CALL to the instance),
+  static generic methods, `<...Args>` tuple type expansion (alias and struct
+  parameter packs), cross-module instantiation (`mod::Box[i32]`,
+  `mod::id[i32](...)`, generic methods, generic re-exports), interface
+  composition with `&`, and comptime value parameter packs (`...N: comptime
+  u64` with `N[i]` / `len(N)`). Remaining M7 gaps are tracked in
+  `docs/m7-implementation-plan.md`.
 - `clux build` (native machine-code backend, M10/M12): prints `not implemented`.
 - `clux test` subcommand: prints `not implemented` — run `build/clux_test` or `ctest`.
 - Error handling (M8) and a standard library (M9).
@@ -110,7 +132,7 @@ clux build <file.cx>                  # native backend — not implemented yet
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error), `2` runtime error.
 
-Examples live in `examples/` — 47 entry directories (one or more `.cx` files each,
+Examples live in `examples/` — 54 entry directories (one or more `.cx` files each,
 one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules
 imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
 so every top-level `.cx` is runnable.
@@ -179,7 +201,7 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-2232 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
+2313 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
 core containers; integration tests execute programs end-to-end through `driver_run_file`
 (for `foreach` the CLI is spawned so the program's own `printf` output can be
 asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the

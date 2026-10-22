@@ -278,6 +278,12 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
   build_func_tree(sema, sf, sema->global_scope);
 }
 
+/* M7：单个函数建树（泛型实例在 Pass 3b 实例化时调用）。 */
+void sema_build_func_scope(sema_t *sema, sema_func_t *sf) {
+  if (!sema || !sf) return;
+  build_func(sema, sf);
+}
+
 /* 局部函数注册（Pass 3a build_block AST_FUNC_DEF 分支）：
    - 遮蔽全局函数名 → 显式拒绝（compiler func_ids 是全局平铺名字→fid 映射，
      局部插入会覆盖全局 fid，导致块外引用错绑；M1 明确不支持）
@@ -288,6 +294,16 @@ static void build_func(sema_t *sema, sema_func_t *sf) {
      字节码（compiler 预扫描跳过 comptime） */
 void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   ast_func_def_t *fn = (ast_func_def_t *)s;
+
+  /* M7：局部泛型函数（含泛型函数字面量里的局部函数）暂不支持——
+     单态化实例登记在全局语义（mangling/名称绑定），局部作用域的实例化
+     留给后续阶段。明确报错，避免把 T 当普通未知类型。 */
+  if (fn->generic.count > 0) {
+    diag_error(sema->diag, sema_loc(sema, s),
+               "generic local functions are not implemented yet (M7 P2 scope: "
+               "top-level generic functions only)");
+    return;
+  }
 
   sema_symbol_t *gsym = sema_lookup(sema->global_scope, fn->name);
   if (gsym && gsym->kind == SEMA_SYM_FUNC) {
@@ -314,6 +330,7 @@ void build_local_func(sema_t *sema, ast_node_t *s, sema_scope_t *scope) {
   sf->scope = NULL;
   sf->param_scope = NULL;
   sf->is_local = true;
+  sf->is_walked = false;
   sema_func_id_alloc(sema, fn); /* fid 单一来源：创建函数对象即分配 */
   {
     sema_symbol_t *lsym = sema_scope_find_local(scope, fn->name);

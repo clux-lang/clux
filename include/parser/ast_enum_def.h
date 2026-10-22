@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
+#include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 #include <stdbool.h>
@@ -24,6 +25,8 @@ typedef struct {
     ast_node_t *variants_last;
     uint32_t    type_id;         /* sema 登记的类型 id（TYPE_ID_PROGRAM_BASE+idx；
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
+    /* M7 泛型参数表（count == 0 = 普通枚举）。 */
+    ast_generic_params_t generic;
 } ast_enum_def_t;
 
 /* 单个 variant 声明（独立节点，兄弟链挂接在 ast_enum_def_t::variants） */

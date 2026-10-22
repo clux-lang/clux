@@ -1,4 +1,6 @@
 #include "compiler/compiler.h"
+#include "module/module_path.h"
+#include "vm/module.h"
 #include "core/panic.h"
 #include "parser/ast_assign.h"
 #include "parser/ast_block.h"
@@ -6,7 +8,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
-#include "parser/ast_func_def.h"
+#include "parser/ast_decl.h"
 #include "parser/ast_if.h"
 #include "parser/ast_program.h"
 #include "parser/ast_return.h"
@@ -18,6 +20,7 @@
 #include "parser/ast_dowhile.h"
 
 #include <string.h>
+#include <stdio.h>
 
 /* ===========================================================================
  * 函数节点
@@ -34,6 +37,16 @@
  */
 size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   size_t body = bcode_tell(c->bc);
+
+  /* M7 跨模块实例：实例体按**定义模块**的 sema 词法环境编译
+     （全局变量/函数/import 别名/类型名都在定义模块查找）。 */
+  sema_scope_t *saved_global = c->global_scope;
+  vec_t *saved_tokens = c->tokens;
+  module_t *owner = (module_t *)fn->owner_module;
+  if (owner) {
+    if (owner->sema_global) c->global_scope = owner->sema_global;
+    if (owner->src_tokens) c->tokens = (vec_t *)owner->src_tokens;
+  }
 
   /* 倒序绑定参数：每参数（调用方压入的实参留在栈上）+ 类型说明符 → DEFINE name。
    *
@@ -85,6 +98,8 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
   /* return 兜底：无显式 return 时压 undefined + RET */
   bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
   bcode_write_op(c->bc, BCODE_RET);
+  c->global_scope = saved_global;
+  c->tokens = saved_tokens;
   return body;
 }
 
@@ -97,6 +112,9 @@ size_t compile_func_body(compiler_t *c, ast_func_def_t *fn) {
    多条路径到达（sema 生成的销毁序列会复用 operand 子树），重复入队会让 hoist
    区为同一个 fid 构造两个基底对象。 */
 static void prescan_func(compiler_t *c, ast_func_def_t *fn) {
+  /* M7：泛型定义不是运行时实体（无 fid / 无字节码）；实例是 mangling 名的
+     普通函数定义，已在 sema 实例化时追加到 prog->funcs。 */
+  if (fn->generic.count > 0) return;
   if (fn->is_comptime) return;
   /* M6 FFI：extern cfunc 声明**无体**（符号由 driver 用 dlsym 解析）——不进运行时
      函数队列，也不参与 fid 校验；动态调用属 Phase 4/5。 */
@@ -159,6 +177,8 @@ static void prescan_stmt(compiler_t *c, ast_node_t *n) {
         prescan_expr(c, ((ast_enum_variant_t *)vn)->value);
       break;
     case AST_STRUCT_DEF: {
+      /* M7：泛型结构体定义不是运行时实体（实例才生成 type/AST）。 */
+      if (ast_decl_is_generic(n)) break;
       /* struct 字段类型表达式预扫描（字段类型已由 sema 折叠为 AST_TYPE_REF/
          内建名，防御分支递归字段类型——字段类型是类型表达式，无函数字面量） */
       ast_struct_def_t *sd = (ast_struct_def_t *)n;

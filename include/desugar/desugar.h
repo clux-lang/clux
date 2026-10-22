@@ -8,6 +8,7 @@ extern "C" {
 #include "core/arena.h"
 #include "core/vec.h"
 #include "diag/diagnostic.h"
+#include "parser/ast_func_def.h"
 #include "parser/ast_node.h"
 #include "parser/ast_program.h"
 
@@ -88,6 +89,14 @@ typedef struct desugar_t {
 
 /** 对整个程序做前脱糖（遍历 prog->funcs 的全部函数定义）。 */
 void desugar_program(desugar_t *ds, ast_program_t *prog);
+
+/**
+ * 对**单个函数定义**做前脱糖（M7 泛型实例：从 token 区间重新解析出的
+ * 函数副本不经过 desugar_program，需要单独展开 body 内的 foreach）。
+ * 只做函数体/参数/返回类型里的结构改写，不处理装饰器（调用方负责拒绝
+ * 泛型定义上的装饰器）。
+ */
+void desugar_func(desugar_t *ds, ast_func_def_t *fn);
 
 /** 便捷构造（不接管所有权）。 */
 static inline desugar_t desugar_make(arena_t *arena, diag_buf_t *diag,

@@ -53,7 +53,8 @@
 #include "parser/ast_for_index.h"
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
-#include "sema/comptime.h"
+#include "sema/sema_cross.h"
+#include "sema/sema_generic.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
@@ -509,12 +510,130 @@ value_t *ex_member(sema_t *sema, ast_node_t **node,
 }
 
 /* AST_INDEX 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+/* P9：comptime 值参数包 `...N: comptime u64` 的索引消费 `N[i]`。
+ * 在实例化体内把 `N[i]` 折叠为对应值的整数字面量（编译期 tuple 语义；
+ * 裸 `N` 无标量含义，不绑定）。 */
+static value_t *value_pack_index_try(sema_t *sema, ast_node_t **node,
+                                     ast_index_t *n) {
+  const sema_generic_instance_t *gi = sema->generics.active_inst;
+  if (!gi || !gi->has_pack || !gi->pack_is_value) return NULL;
+  if (!n->object || n->object->kind != AST_IDENT) return NULL;
+  if (!strslice_eq(((ast_ident_t *)n->object)->name, gi->pack_name))
+    return NULL;
+  if (sema_count_siblings(n->indices) != 1) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "value parameter pack '%.*s' expects exactly one index",
+               (int)gi->pack_name.len, gi->pack_name.ptr);
+    return val_void(sema);
+  }
+  uint64_t raw = 0;
+  ast_node_t *idx_expr = n->indices;
+  if (idx_expr->kind == AST_INT_LIT) {
+    raw = ((ast_int_lit_t *)idx_expr)->value;
+  } else {
+    ctfe_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.vm = sema->vm;
+    ctx.sema = sema;
+    ctx.budget = 100000;
+    ctx.max_depth = 128;
+    value_t *r = ctfe_eval(&ctx, idx_expr);
+    if (!r || value_is_error(sema->vm, r) || !value_type(r) ||
+        type_kind_of(value_type(r)) != TYPE_KIND_INT) {
+      diag_error(sema->diag, sema_loc(sema, idx_expr),
+                 "value parameter pack index must be a compile-time integer");
+      return val_void(sema);
+    }
+    switch (value_type(r)->size) {
+    case 1: raw = *(const uint8_t *)value_data(r); break;
+    case 2: raw = *(const uint16_t *)value_data(r); break;
+    case 4: raw = *(const uint32_t *)value_data(r); break;
+    default: raw = *(const uint64_t *)value_data(r); break;
+    }
+  }
+  if (raw >= gi->pack_count) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "value parameter pack '%.*s' index %llu out of range (count %zu)",
+               (int)gi->pack_name.len, gi->pack_name.ptr,
+               (unsigned long long)raw, gi->pack_count);
+    return val_void(sema);
+  }
+  const sema_generic_arg_t *a = &gi->args[gi->pack_offset + raw];
+  if (!a->is_value || !a->value.type) {
+    diag_error(sema->diag, sema_loc(sema, *node),
+               "value parameter pack element is not a compile-time value");
+    return val_void(sema);
+  }
+  uint64_t v = 0;
+  if (a->value.type->kind == TYPE_KIND_BOOL) {
+    v = a->value.b ? 1 : 0;
+  } else if (a->value.type->name.len == 3 && a->value.type->name.ptr &&
+             memcmp(a->value.type->name.ptr, "u64", 3) == 0) {
+    v = a->value.u;
+  } else {
+    switch (a->value.type->size) {
+    case 1: v = (uint8_t)a->value.i; break;
+    case 2: v = (uint16_t)a->value.i; break;
+    case 4: v = (uint32_t)a->value.i; break;
+    default: v = (uint64_t)a->value.i; break;
+    }
+  }
+  ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
+                                    (*node)->tok_end);
+  if (!lit) return val_void(sema);
+  ((ast_int_lit_t *)lit)->value = v;
+  ((ast_int_lit_t *)lit)->type = a->value.type->name;
+  lit->is_generated = true;
+  lit->next = (*node)->next;
+  *node = lit;
+  return value_make_shadow(sema->vm, a->value.type);
+}
+
 value_t *ex_index(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* 下标 / 泛型索引（GAP 延后落点）：parser 只收集 <expr>[<expr,...>
          的 object + indices 链，此处首次可区分——base 是数组 → 下标（GET）；
          base 是类型值 → 泛型实例化语法（M2 未实现，占位诊断）。 */
       ast_index_t *n = (ast_index_t *)*node;
+
+      /* P9：`N[i]`（comptime 值参数包）先折叠为整数字面量。 */
+      {
+        value_t *pv = value_pack_index_try(sema, node, n);
+        if (pv) return pv;
+      }
+
+      /* M7 泛型函数取实例：`id[i32]`（函数值，非调用）。与调用点同一套
+         实例化；改写为 AST_FUNC_REF（fid）——函数值就是普通函数实体。 */
+      if (n->object &&
+          (n->object->kind == AST_IDENT || n->object->kind == AST_SCOPE_REF)) {
+        sema_symbol_t *gs =
+            n->object->kind == AST_IDENT
+                ? sema_lookup(scope, ((ast_ident_t *)n->object)->name)
+                : sema_cross_generic_symbol(sema, n->object);
+        if (gs && gs->is_generic && gs->ast &&
+            gs->ast->kind == AST_FUNC_DEF) {
+          size_t nta = 0;
+          sema_generic_arg_t *eargs = NULL;
+          bool ok = sema_generic_parse_explicit_args(sema, gs, n->indices, &nta,
+                                                     &eargs);
+          const sema_generic_instance_t *inst = NULL;
+          const type_t *sig =
+              ok ? sema_generic_instantiate_func(sema, gs, eargs, nta, *node,
+                                                 &inst)
+                 : NULL;
+          if (eargs) allocator_free(sema->vm->alloc, (void **)&eargs);
+          if (!sig || !inst) return val_void(sema);
+          ast_node_t *ref =
+              ast_func_ref_new(sema->arena, (*node)->tok_begin, (*node)->tok_end);
+          if (!ref) return val_void(sema);
+          ((ast_func_ref_t *)ref)->fid = inst->fid;
+          ref->is_generated = true;
+          ref->next = (*node)->next;
+          *node = ref;
+          return value_make_shadow(sema->vm, sig);
+        }
+      }
+
       value_t *base = sema_expr(sema, &n->object, scope);
       if (is_poison(sema, base))
         return val_void(sema);
@@ -686,6 +805,9 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
          嵌套 AST_SCOPE_REF（lhs 也可以是 AST_SCOPE_REF），递归处理。 */
       ast_scope_ref_t *n = (ast_scope_ref_t *)*node;
 
+      /* M7：`Vec[i32]::member` —— 先把类型位实例化并改写为运行时类型名。 */
+      (void)sema_generic_rewrite_type_expr(sema, &n->type_expr);
+
       /* ---- 跨模块 struct 成员访问：`mod::Type::member` ----
        * type_expr 是嵌套 AST_SCOPE_REF（mod::Type），从模块导出直接解析 struct
        * 类型。被导入模块已完整走完流水线（含 exec_run），运行时
@@ -710,6 +832,45 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
                         ? n->variant.len : sizeof(mbuf) - 1;
         memcpy(mbuf, n->variant.ptr, mn);
         mbuf[mn] = '\0';
+        /* 阶段 1：依赖模块可能尚未 finalize（runtime attributes 未建）→ 用
+           其 sema 成员作用域解析。 */
+        if (inner_er->type_expr &&
+            inner_er->type_expr->kind == AST_IDENT) {
+          sema_symbol_t *modsym = sema_lookup(
+              scope, ((ast_ident_t *)inner_er->type_expr)->name);
+          if (modsym && modsym->kind == SEMA_SYM_MODULE && modsym->module &&
+              !modsym->module->finalized &&
+              sema->module_finalize.finalize) {
+            if (!sema->module_finalize.finalize(sema->module_finalize.user,
+                                                modsym->module))
+              return val_void(sema);
+          }
+          if (modsym && modsym->kind == SEMA_SYM_MODULE && modsym->module &&
+              modsym->module->sema_global) {
+            /* 直接查模块导出的类型符号 member_scope（不依赖 runtime
+               attributes；嵌入继承的回退仍走 sema_struct_find_member）。 */
+            sema_symbol_t *tsym =
+                sema_module_export_symbol(modsym->module, inner_er->variant);
+            sema_symbol_t *ms = NULL;
+            if (tsym && tsym->kind == SEMA_SYM_TYPE && tsym->member_scope)
+              ms = sema_scope_find_local(tsym->member_scope, n->variant);
+            sema_scope_t *saved_global = sema->global_scope;
+            sema->global_scope = modsym->module->sema_global;
+            const struct_type_t *owner1 = NULL;
+            if (!ms)
+              ms = sema_struct_find_member(sema, st, n->variant, *node,
+                                           &owner1);
+            sema->global_scope = saved_global;
+            if (ms && (ms->kind == SEMA_SYM_FUNC || ms->kind == SEMA_SYM_VAR)) {
+              if (owner1 && owner1->base.id != 0) {
+                n->is_struct_attr = true;
+                n->struct_attr_type_id = owner1->base.id;
+              }
+              return ms->type ? value_make_shadow(sema->vm, ms->type)
+                              : val_void(sema);
+            }
+          }
+        }
         const struct_type_t *owner = find_runtime_attr_owner(st, mbuf);
         if (!owner) {
           diag_error(sema->diag, sema_loc(sema, *node),
@@ -834,8 +995,28 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
           return val_void(sema);
         }
         if (sym && sym->kind == SEMA_SYM_MODULE && sym->module) {
-          /* 模块成员访问：从 module->exports 查 variant 名 */
           module_t *mod = sym->module;
+          /* 阶段 1：依赖模块未 finalize 时从 sema_exports 取符号。 */
+          sema_symbol_t *msym =
+              sema_module_export_symbol(mod, n->variant);
+          if (msym) {
+            if (msym->kind == SEMA_SYM_TYPE)
+              return value_make_shadow(sema->vm, sema->vm->type_type);
+            if (msym->kind == SEMA_SYM_FUNC) {
+              if (msym->is_generic) {
+                diag_error(sema->diag, sema_loc(sema, *node),
+                           "generic function '%.*s' requires type arguments",
+                           (int)n->variant.len, n->variant.ptr);
+                return val_void(sema);
+              }
+              return msym->type
+                         ? value_make_shadow(sema->vm, msym->type)
+                         : val_void(sema);
+            }
+            if (msym->kind == SEMA_SYM_VAR && msym->type)
+              return value_make_shadow(sema->vm, msym->type);
+          }
+          /* 模块成员访问：从 module->exports 查 variant 名 */
           char buf[256];
           if (n->variant.len < sizeof(buf)) {
             memcpy(buf, n->variant.ptr, n->variant.len);

@@ -9,6 +9,7 @@
 #include "parser/ast_type_def.h"
 #include "parser/ast_enum_def.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_interface_def.h"
 #include "parser/ast_struct_embed.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
@@ -154,6 +155,7 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             ast_type_def_t *t = (ast_type_def_t *)node;
             sb_str(&f->sb, "type ");
             sb_put(&f->sb, t->name.ptr, t->name.len);
+            render_generic_params(f, &t->generic);
             sb_str(&f->sb, " = ");
             render_expr(f, t->expr);
             sb_ch(&f->sb, ';');
@@ -163,6 +165,7 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             ast_enum_def_t *e = (ast_enum_def_t *)node;
             sb_str(&f->sb, "enum ");
             sb_put(&f->sb, e->name.ptr, e->name.len);
+            render_generic_params(f, &e->generic);
             sb_str(&f->sb, ": ");
             render_expr(f, e->underlying_type);
             sb_str(&f->sb, " {");
@@ -178,6 +181,58 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "}");
             break;
         }
+        case AST_INTERFACE_DEF: {
+            ast_interface_def_t *id = (ast_interface_def_t *)node;
+            sb_str(&f->sb, "interface ");
+            sb_put(&f->sb, id->name.ptr, id->name.len);
+            render_generic_params(f, &id->generic);
+            sb_str(&f->sb, " {");
+            if (!id->members && !id->embeds) {
+                sb_ch(&f->sb, '}');
+                break;
+            }
+            sb_ch(&f->sb, '\n');
+            f->indent++;
+            for (ast_node_t *e = id->embeds; e; e = e->next) {
+                sb_indent(&f->sb, f->indent);
+                sb_str(&f->sb, "...");
+                ast_struct_embed_t *emb = (ast_struct_embed_t *)e;
+                if (emb->type_expr)
+                    render_expr(f, emb->type_expr);
+                else
+                    sb_put(&f->sb, emb->name.ptr, emb->name.len);
+                sb_str(&f->sb, ";\n");
+            }
+            for (ast_node_t *m = id->members; m; m = m->next) {
+                sb_indent(&f->sb, f->indent);
+                if (m->kind == AST_VAR_DEF) {
+                    ast_var_def_t *vd = (ast_var_def_t *)m;
+                    sb_str(&f->sb, "var ");
+                    sb_put(&f->sb, vd->name.ptr, vd->name.len);
+                    sb_str(&f->sb, ": ");
+                    render_expr(f, vd->type_expr);
+                    sb_str(&f->sb, ";\n");
+                } else if (m->kind == AST_FUNC_DEF) {
+                    ast_func_def_t *fn = (ast_func_def_t *)m;
+                    sb_str(&f->sb, "func ");
+                    sb_put(&f->sb, fn->name.ptr, fn->name.len);
+                    sb_ch(&f->sb, '(');
+                    bool first = true;
+                    for (ast_node_t *p = fn->params; p; p = p->next) {
+                        if (!first) sb_str(&f->sb, ", ");
+                        render_param(f, p);
+                        first = false;
+                    }
+                    sb_str(&f->sb, "): ");
+                    render_expr(f, fn->return_expr);
+                    sb_str(&f->sb, ";\n");
+                }
+            }
+            f->indent--;
+            sb_indent(&f->sb, f->indent);
+            sb_ch(&f->sb, '}');
+            break;
+        }
         case AST_STRUCT_DEF: {
             /* struct 体多行展开：每个字段/嵌入/成员独占一行，4 空格缩进。
              * 字段/嵌入后补 ';'，func 成员自带函数体块。注释按源码位置挂载
@@ -186,6 +241,16 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             ast_struct_def_t *s = (ast_struct_def_t *)node;
             sb_str(&f->sb, "struct ");
             sb_put(&f->sb, s->name.ptr, s->name.len);
+            render_generic_params(f, &s->generic);
+            if (s->implements) {
+                sb_str(&f->sb, " implements ");
+                bool first_iface = true;
+                for (ast_node_t *im = s->implements; im; im = im->next) {
+                    if (!first_iface) sb_str(&f->sb, " & ");
+                    render_expr(f, im);
+                    first_iface = false;
+                }
+            }
             sb_str(&f->sb, " {");
 
             bool any = s->fields || s->embeds || s->members;
@@ -305,6 +370,7 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             ast_union_def_t *u = (ast_union_def_t *)node;
             sb_str(&f->sb, "union ");
             sb_put(&f->sb, u->name.ptr, u->name.len);
+            render_generic_params(f, &u->generic);
             sb_str(&f->sb, " {");
             if (!u->fields) {
                 sb_str(&f->sb, "}");
