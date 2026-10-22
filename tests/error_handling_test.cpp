@@ -268,3 +268,33 @@ TEST(ErrorHandling, TryExpressionInLoop) {
           "}\n",
       "try_expression_loop");
 }
+
+TEST(ErrorHandling, ConditionalOwnedResultSignature) {
+  clux_expect_ok(
+      "struct Result[T, E] {\n"
+      "  good: bool;\n"
+      "  val: ?T;\n"
+      "  err: ?E;\n"
+      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
+      "  func value(self: ref *Result[T, E]): (T extends own *? ? fatal T : T) {\n"
+      "    comptime if (T extends own *?) {\n"
+      "      return take_opt(self.val);\n"
+      "    } else {\n"
+      "      return self.val.!;\n"
+      "    }\n"
+      "  }\n"
+      "  func of_value(v: T): (T extends own *? ? fatal Result[T, E] : Result[T, E]) {\n"
+      "    return move(.Result[T, E]{ .good = true, .val = .?T{ move(v) }, .err = nil });\n"
+      "  }\n"
+      "}\n"
+      "func get(x: i32): (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
+      "  return Result[own *i32, str]::of_value(new i32{ .i32{x} });\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var r: own Result[own *i32, str] = get(7);\n"
+      "  var p: own *i32 = r.value();\n"
+      "  if (r.val != nil) { return 1; }\n"
+      "  return p.* - 7;\n"
+      "}\n",
+      "conditional_owned_result");
+}

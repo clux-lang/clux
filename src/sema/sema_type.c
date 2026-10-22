@@ -735,11 +735,26 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
                  "unsupported type expression (index on a non-generic type)");
       return NULL;
     }
-    default:
+    default: {
+      /* 类型表达式里的编译期计算（`(T extends own *? ? fatal T : T)` 等）：
+         交给 CTFE 真实求值，结果必须是 type value。 */
+      ctfe_ctx_t ctx;
+      memset(&ctx, 0, sizeof ctx);
+      ctx.vm = sema->vm;
+      ctx.sema = sema;
+      ctx.sema_scope = sema->global_scope;
+      ctx.budget = 100000;
+      ctx.max_depth = 128;
+      value_t *sh = ctfe_eval(&ctx, type_expr);
+      if (sh && !value_is_error(sema->vm, sh) &&
+          value_is_type(sh, TYPE_KIND_TYPE)) {
+        return value_as(sh, const type_t *);
+      }
       /* M2 扩展点：元组/func 类型表达式 + 类型计算 */
       diag_error(sema->diag, sema_loc(sema, type_expr),
                  "unsupported type expression");
       return NULL;
+    }
   }
 }
 

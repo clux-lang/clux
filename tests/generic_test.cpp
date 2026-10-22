@@ -1318,3 +1318,15 @@ TEST(GenericType, ConditionalOwnershipAlias) {
         "}\n",
         "generic_conditional_own_alias");
 }
+
+TEST(GenericType, ParenthesizedConditionalReturn) {
+    clux_expect_ok(
+        "func f[T](x: T): (T extends own *? ? fatal T : T) { return move(x); }\n"
+        "func main(): i32 {\n"
+        "  var p: own *i32 = new i32{ .i32{7} };\n"
+        "  var q: own *i32 = f[own *i32](move(p));\n"
+        "  var n: i32 = f[i32](5);\n"
+        "  return q.* + n - 12;\n"
+        "}\n",
+        "generic_paren_conditional");
+}
