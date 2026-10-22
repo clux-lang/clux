@@ -9,6 +9,8 @@
 #include "parser/ast_array.h"
 #include "parser/ast_alignof.h"
 #include "parser/ast_binary.h"
+#include "parser/ast_pattern.h"
+#include "sema/sema_pattern.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_member.h"
@@ -501,6 +503,33 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (token_is(n->op, "extends")) {
             value_t *lhs = ctfe_eval(ctx, n->lhs);
             if (value_is_error(vm, lhs)) return lhs;
+            /* PATTERN RHS（如 `own *?`）：lhs 必须是真实类型值，
+               走结构匹配而不是 value_extends。 */
+            switch (n->rhs ? n->rhs->kind : AST_ERROR) {
+            case AST_PAT_WILD:
+            case AST_PAT_OR:
+            case AST_PAT_AND:
+            case AST_PAT_PTR:
+            case AST_PAT_SLICE:
+            case AST_PAT_ARRAY:
+            case AST_PAT_TUPLE:
+            case AST_PAT_NAME:
+            case AST_PAT_FUNC:
+            case AST_PAT_QUAL: {
+                if (!ctx->sema)
+                    return ctfe_err(ctx, "extends: pattern needs sema context");
+                if (!value_is_type_value(lhs))
+                    return ctfe_err(ctx,
+                                    "extends: left side must be a type value");
+                const type_t *lt = value_as(lhs, const type_t *);
+                bool matched = sema_pattern_match(ctx->sema, n->rhs, lt);
+                void *d = value_alloc_data_copy(vm->alloc, vm->type_bool,
+                                                &matched);
+                return value_make(vm, vm->type_bool, d);
+            }
+            default:
+                break;
+            }
             value_t *rhs = ctfe_eval(ctx, n->rhs);
             if (value_is_error(vm, rhs)) return rhs;
             return value_extends(vm, lhs, rhs);

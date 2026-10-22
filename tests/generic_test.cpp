@@ -1207,3 +1207,31 @@ TEST(GenericReject, OwnArgumentMustUseMove) {
         "}\n",
         "cannot copy a value holding owned resources", "generic_pack_own_arg");
 }
+
+TEST(ComptimeIf, GenericPatternSpecialization) {
+    clux_expect_ok(
+        "func Test[T](arg: T): void {\n"
+        "  comptime if (T extends own *?) {\n"
+        "    var a = move(arg);\n"
+        "  } else {\n"
+        "    var a = arg;\n"
+        "  }\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var p: own *i32 = new i32{ .i32{7} };\n"
+        "  Test(move(p));\n"
+        "  Test(5);\n"
+        "  return 0;\n"
+        "}\n",
+        "generic_comptime_pattern_specialize");
+}
+
+TEST(ComptimeIf, GenericPatternSpecializationFmt) {
+    const char *src =
+        "func Test[T](arg: T): void {\n"
+        "  comptime if (T extends own *?) { var a = move(arg); } else { var a = arg; }\n"
+        "}\n";
+    std::string once = fmt_source(src);
+    EXPECT_NE(once.find("extends own *?"), std::string::npos) << once;
+    EXPECT_EQ(fmt_source(once.c_str()), once);
+}

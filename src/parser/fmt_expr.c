@@ -449,7 +449,25 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             sb_ch(&f->sb, ' ');
             sb_put(&f->sb, op, olen);
             sb_ch(&f->sb, ' ');
-            render_expr_paren(f, b->rhs, node, true, rp);
+            if (b->rhs) {
+                switch (b->rhs->kind) {
+                case AST_PAT_WILD:
+                case AST_PAT_OR:
+                case AST_PAT_AND:
+                case AST_PAT_PTR:
+                case AST_PAT_SLICE:
+                case AST_PAT_ARRAY:
+                case AST_PAT_TUPLE:
+                case AST_PAT_NAME:
+                case AST_PAT_FUNC:
+                case AST_PAT_QUAL:
+                    render_pattern(f, b->rhs);
+                    break;
+                default:
+                    render_expr_paren(f, b->rhs, node, true, rp);
+                    break;
+                }
+            }
             break;
         }
         case AST_ASSIGN: {

@@ -676,6 +676,30 @@ error: type argument 'str' does not satisfy constraint 'T extends *?'
 
 诊断记入实例化栈（§18），与实例化链一同展开。
 
+#### 27.1 `comptime if (T extends PATTERN)`：实例内特化
+
+`extends` 也可作为 **comptime if 的条件**，在实例化时按 `T` 的具体类型
+做 PATTERN 匹配（`sema_pattern_match`），结果折叠为 bool；分支随后由
+`comptime if` 的 AST 裁剪处理，丢弃分支不再做类型检查：
+
+```clux
+func Test[T](arg: T): void {
+    comptime if (T extends own *?) {
+        var a = move(arg);     // T = own *X 分支
+    } else {
+        var a = arg;
+    }
+}
+
+Test(move(p));   // T 推断为 own *i32 → then 分支
+Test(5);         // T = i32 → else 分支
+```
+
+- 条件仍是纯编译期求值（CTFE）；`extends` RHS 使用 PATTERN 语法，
+  支持 `?`、`own/ref/fatal *?`、slice/array/tuple/func/qual 等；
+- 与泛型参数表里的 `extends` 共用同一匹配器，语义一致；
+- 普通 `comptime if (bool_expr)` 不受影响。
+
 ### 28. `extends` 组合：析取 `|` 与合取 `&`
 
 单个泛型定义内部，对同一类型参数的多个 `extends` 子模式可用 `|`（析取/OR）与 `&`（合取/AND）组合：

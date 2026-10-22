@@ -585,6 +585,9 @@ token pool 重绑。
 - 泛型方法显式类型实参：`v.method[U](...)` 与 `Type::method[U](...)`
   （callee `AST_INDEX(MEMBER/SCOPE_REF)` 进入方法实例化路径，
   与推导路径共用签名/实参校验）。
+- `comptime if (T extends PATTERN)` 实例内特化：RHS 用 PATTERN 语法，
+  CTFE 调用 `sema_pattern_match` 折叠 bool，再由 comptime if 裁剪分支
+  （支持 `own *?`、`<...>`、slice/array/func 等通配）。
 
 **仍待（需决定是否支持）**
 - 签名期错误（如返回类型未知）尚未输出实例链 note；体错误已覆盖。
