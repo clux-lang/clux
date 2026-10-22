@@ -455,11 +455,13 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
       sym->is_active = true;
       sym->ast = f;
       sym->is_comptime = fn->is_comptime;
+      sym->is_noreturn = fn->is_noreturn;
       continue;
     }
     /* 函数名全局可见（无 TDZ）→ 注册即激活 */
     sym->is_active = true;
     sym->is_comptime = fn->is_comptime;
+    sym->is_noreturn = fn->is_noreturn;
     /* 登记 sema 层函数对象（Pass 3 队列驱动；局部函数/泛型实例将来追加） */
     sema_func_t *sf = allocator_new_ex(sema->vm->alloc, "sema_func_t",
                                        sizeof(sema_func_t), NULL, NULL, NULL,
@@ -521,6 +523,7 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
           sema_symbol_t ginit = {.kind = SEMA_SYM_FUNC,
                                  .ast = m,
                                  .is_generic = true,
+                                 .is_noreturn = fn->is_noreturn,
                                  .is_active = true};
           sema_symbol_t *gmsym = sema_scope_define(mscope, fn->name, &ginit);
           if (!gmsym) {
@@ -542,6 +545,7 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
         }
         msym->is_active = true;
         msym->is_comptime = fn->is_comptime;
+        msym->is_noreturn = fn->is_noreturn;
         /* 登记 sema 层函数对象（与全局函数同构） */
         sema_func_t *sf = allocator_new_ex(sema->vm->alloc, "sema_func_t",
                                            sizeof(sema_func_t), NULL, NULL, NULL,

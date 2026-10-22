@@ -688,10 +688,43 @@ static ast_node_t *ds_forward_body(desugar_t *ds, ast_func_def_t *fn,
   return blk;
 }
 
+/* `[[noreturn]]` / `[[never]]`：语言内建的“永不返回”标记装饰器。
+   它不是普通函数调用；desugar 直接摘掉并写 fn->is_noreturn，sema 调用点
+   按该标记把分支视为终止。 */
+static ast_node_t *ds_take_noreturn(ast_node_t *decs, bool *flag) {
+  ast_node_t *head = NULL, *tail = NULL;
+  for (ast_node_t *d = decs; d; d = d->next) {
+    if (d->kind == AST_IDENT) {
+      strslice_t n = ((ast_ident_t *)d)->name;
+      if ((n.len == 8 && memcmp(n.ptr, "noreturn", 8) == 0) ||
+          (n.len == 5 && memcmp(n.ptr, "never", 5) == 0)) {
+        *flag = true;
+        continue;
+      }
+    }
+    d->next = NULL;
+    if (tail) tail->next = d;
+    else head = d;
+    tail = d;
+  }
+  return head;
+}
+
 /** 顶层函数装饰：源函数改名 + `var <名> = 装饰(<源>);` 紧随其后。 */
 static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
   ast_node_t *decs = fn->decorators;
   if (!decs) return NULL;
+  bool noreturn_marker = false;
+  decs = ds_take_noreturn(decs, &noreturn_marker);
+  if (noreturn_marker) fn->is_noreturn = true;
+  fn->decorators = decs;
+  if (!decs) return NULL;
+  /* 标记与普通装饰器混用：包装后的值不是 noreturn，禁止静默丢标记。 */
+  if (noreturn_marker) {
+    ds_error(ds, (ast_node_t *)fn,
+             "'noreturn' must be the only decorator on a function");
+    return NULL;
+  }
   /* 泛型函数：装饰器必须**每个实例**展开（sema_generic 负责），不能在
      定义点变成普通 var（会丢掉泛型参数）。 */
   if (fn->generic.count > 0) return NULL;
@@ -716,6 +749,16 @@ static ast_node_t *ds_decorate_method(desugar_t *ds, ast_func_def_t *m,
                                       ast_node_t **out_tail) {
   ast_node_t *decs = m->decorators;
   if (!decs) return NULL;
+  bool noreturn_marker = false;
+  decs = ds_take_noreturn(decs, &noreturn_marker);
+  if (noreturn_marker) m->is_noreturn = true;
+  m->decorators = decs;
+  if (!decs) return NULL;
+  if (noreturn_marker) {
+    ds_error(ds, (ast_node_t *)m,
+             "'noreturn' must be the only decorator on a method");
+    return NULL;
+  }
   m->decorators = NULL;
   uint32_t tb = m->base.tok_begin, te = m->base.tok_end;
   strslice_t visible = m->name;

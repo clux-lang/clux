@@ -109,3 +109,27 @@ TEST(ErrorHandling, OwnErrorValueIsRejected) {
       "error value from 'error()' must be copyable",
       "error_own_error");
 }
+
+TEST(ErrorHandling, NoreturnDecoratorUserFunction) {
+  clux_expect_ok(
+      "[[noreturn]] func fail(): void { panic(\"custom fail\"); }\n"
+      "func pick(ok: bool): i32 {\n"
+      "  var b: i32 = undefined;\n"
+      "  if (ok) { b = 7; } else { fail(); }\n"
+      "  return b;\n"
+      "}\n"
+      "func main(): i32 { return pick(true) - 7; }\n",
+      "error_noreturn_user");
+}
+
+TEST(ErrorHandling, NoreturnDecoratorGenericFunction) {
+  clux_expect_ok(
+      "[[noreturn]] func fail[T](): void { panic(\"generic fail\"); }\n"
+      "func pick(ok: bool): i32 {\n"
+      "  var b: i32 = undefined;\n"
+      "  if (ok) { b = 9; } else { fail[i32](); }\n"
+      "  return b;\n"
+      "}\n"
+      "func main(): i32 { return pick(true) - 9; }\n",
+      "error_noreturn_generic");
+}

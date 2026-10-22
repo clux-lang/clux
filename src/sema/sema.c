@@ -252,7 +252,8 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     if (psig) {
       sema_symbol_t pinit = {.kind = SEMA_SYM_FUNC, .type = psig,
                              .is_active = true, .fid = pfid,
-                             .builtin_op = SEMA_BUILTIN_PANIC};
+                             .builtin_op = SEMA_BUILTIN_PANIC,
+                             .is_noreturn = true};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("panic"), &pinit);
     }
   }

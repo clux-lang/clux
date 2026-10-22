@@ -337,6 +337,26 @@ ast_node_t *sema_generic_value_pack_tuple_type_expr(
     return t;
 }
 
+/* 取出内建 `[[noreturn]]` / `[[never]]` 标记（其余装饰器保留）。 */
+static ast_node_t *take_noreturn_marker(ast_node_t *decs, bool *flag) {
+    ast_node_t *head = NULL, *tail = NULL;
+    for (ast_node_t *d = decs; d; d = d->next) {
+        if (d->kind == AST_IDENT) {
+            strslice_t n = ((ast_ident_t *)d)->name;
+            if ((n.len == 8 && memcmp(n.ptr, "noreturn", 8) == 0) ||
+                (n.len == 5 && memcmp(n.ptr, "never", 5) == 0)) {
+                *flag = true;
+                continue;
+            }
+        }
+        d->next = NULL;
+        if (tail) tail->next = d;
+        else head = d;
+        tail = d;
+    }
+    return head;
+}
+
 /* 泛型实例的装饰器：`[[d1]] [[d2]] func f[T]` 在**每个实例**上展开为
  *   包装函数（实例名） + 隐藏源函数（实例体）
  * 包装体：`return d1(d2(源))(实参...)`。源函数用同一 Args 实例化，
@@ -1141,6 +1161,7 @@ static const type_t *instantiate_func_impl(
         return NULL;
     }
     ast_func_def_t *fn = (ast_func_def_t *)parsed;
+    bool def_noreturn = ((const ast_func_def_t *)def)->is_noreturn;
 
     /* 装饰器在**每个实例**上展开：源函数保留实例体，实例名变成包装函数。
        源函数与实例共享参数/返回类型（同一 Args 实例），因此装饰器签名
@@ -1188,6 +1209,7 @@ static const type_t *instantiate_func_impl(
     fn->generic = (ast_generic_params_t){0};
     fn->base.is_exported = false;
     fn->is_comptime = false;
+    fn->is_noreturn = def_noreturn;
     fn->is_variadic = false;
     fn->fid = 0;
     fn->sig_id = 0;
@@ -1584,11 +1606,16 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
         if (m->kind == AST_FUNC_DEF) {
             ast_func_def_t *fn = (ast_func_def_t *)m;
             fn->owner_module = inst->owner_module;
+            bool noreturn_marker = false;
+            fn->decorators =
+                take_noreturn_marker(fn->decorators, &noreturn_marker);
+            if (noreturn_marker) fn->is_noreturn = true;
             if (fn->generic.count > 0) {
                 /* P4b：泛型方法只登记符号，调用点实例化。 */
                 sema_symbol_t ginit = {.kind = SEMA_SYM_FUNC,
                                        .ast = m,
                                        .is_generic = true,
+                                       .is_noreturn = fn->is_noreturn,
                                        .is_active = true};
                 if (!sema_scope_define(mscope, fn->name, &ginit)) {
                     diag_error(sema->diag, sema_loc(sema, m),
@@ -1646,6 +1673,7 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
             }
             msym->is_active = true;
             msym->ast = m;
+            msym->is_noreturn = fn->is_noreturn;
             sema_func_t *sf = (sema_func_t *)allocator_new_ex(
                 sema->vm->alloc, "sema_func_t", sizeof(sema_func_t), NULL, NULL,
                 NULL, 1);

@@ -26,6 +26,7 @@ typedef struct {
     ast_node_t *return_expr; /* 返回类型表达式（NULL = void） */
     ast_node_t *body;        /* AST_BLOCK */
     bool        is_comptime; /* comptime func：调用点编译期求值折叠为常量，不注册到运行时 */
+    bool        is_noreturn; /* `[[noreturn]]`：调用点永不正常返回（TDZ 终止分支） */
     /* ---- M6 FFI ---- */
     bool        is_cfunc;        /* cfunc 定义（有体，C ABI，可被 C 侧 dlsym 调用） */
     bool        is_extern_cfunc; /* extern cfunc 声明（无体，运行期 dlsym 查找） */

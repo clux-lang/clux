@@ -97,8 +97,26 @@ panic(msg: str);   // 打印 "panic: <msg>" 到 stderr，然后以退出码 1 �
 - 终止用 C `_Exit(1)`：不跑 atexit、不弹 Windows abort 对话框，退出码
   与 Linux `_exit(1)` 一致。
 
-## 6. TDZ / never-return 修正
+## 6. `[[noreturn]]` / `[[never]]` 标记装饰器
 
+“不返回”是通用的函数属性，不是 panic 的专属行为。内建标记装饰器：
+
+```clux
+[[noreturn]] func fail(): void { panic("custom fail"); }
+[[noreturn]] func fail_generic[T](): void { panic("generic fail"); }
+```
+
+- desugar 识别并摘除该标记，写 `ast_func_def_t::is_noreturn`；
+- sema 把它复制到函数符号；调用该函数（含显式泛型 `fail[i32]()`）
+  的表达式语句返回 `definitely_returns = true`，不参与 TDZ 汇合；
+- 标记必须是**唯一**装饰器（与普通包装装饰器混用会报错，因为包装后的
+  函数值不再具有“不返回”属性）；
+- 泛型函数/泛型 struct 方法也支持该标记。
+
+`panic` 内建函数同样通过 `is_noreturn` 标记参与 TDZ，不再有独立的
+flow 特殊分支。
+
+## 7. TDZ / never-return 修正
 原来的 if 汇合规则是“两个分支都初始化才初始化”。panic 分支不会继续
 执行，因此不能参与汇合：
 
@@ -118,13 +136,13 @@ return b;   // 合法：else 不落到 join
 `panic(...)` 作为表达式语句时，`walk_stmt` 直接返回
 `definitely_returns = true`。
 
-## 7. 错误返回路径的资源释放
+## 8. 错误返回路径的资源释放
 
 `.?` 的错误分支是真正的 return，必须执行当前作用域已拥有资源的
 释放。生成的 `AST_RETURN` 会挂上 `collect_free_stmts` 的结果；
 `compile_stmt` 的 return 路径会先 materialize 返回值，再执行 FREE。
 
-## 8. 约束与未纳入
+## 9. 约束与未纳入
 
 - `error()` 的返回值禁止 own/fatal/含 own 槽位（语法糖要求可 copy）。
 - `.?` 只用于 result struct；optional 的 try 语义仍未定义。
@@ -132,12 +150,14 @@ return b;   // 合法：else 不落到 join
 - value 为 own/fatal 的 result 不做 `.?' 绑定（需要 move 语义另行设计）。
 - 没有 throw/异常栈；错误就是值。
 
-## 9. 实现落点
+## 10. 实现落点
 
 - `src/sema/stmt_try.c`：协议分析、生成 `if`、`of_error`/panic 分支
 - `src/sema/stmt_var.c`：var 形式，预声明 `undefined` + postlude
 - `src/sema/stmt_assign.c`：赋值形式，prelude + `sugar_noop`
 - `src/sema/stmt_flow.c`：可达分支 flow meet + panic noreturn
+- `src/desugar/desugar.c`：摘除 `[[noreturn]]` / `[[never]]` 标记
+- `src/sema/stmt.c`：按 `sema_symbol_t::is_noreturn` 标记终止分支
 - `src/vm/builtin_panic.c`：stderr + `_Exit(1)`（无 abort 弹窗）
 - `src/compiler/compile_stmt.c`：prelude/postlude 与 sugar no-op
 - `tests/error_handling_test.cpp`

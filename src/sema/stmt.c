@@ -246,10 +246,18 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       bool noreturn = false;
       if (es->expr && es->expr->kind == AST_CALL) {
         ast_call_t *cl = (ast_call_t *)es->expr;
-        if (cl->callee && cl->callee->kind == AST_IDENT) {
-          sema_symbol_t *cs =
-              sema_lookup(scope, ((ast_ident_t *)cl->callee)->name);
-          noreturn = cs && cs->builtin_op == SEMA_BUILTIN_PANIC;
+        ast_node_t *callee = cl->callee;
+        strslice_t cname = {0};
+        if (callee && callee->kind == AST_IDENT)
+          cname = ((ast_ident_t *)callee)->name;
+        else if (callee && callee->kind == AST_INDEX) {
+          ast_node_t *obj = ((ast_index_t *)callee)->object;
+          if (obj && obj->kind == AST_IDENT)
+            cname = ((ast_ident_t *)obj)->name;
+        }
+        if (cname.ptr) {
+          sema_symbol_t *cs = sema_lookup(scope, cname);
+          noreturn = cs && cs->is_noreturn;
         }
       }
       value_t *v = sema_expr(sema, &es->expr, scope);
