@@ -150,7 +150,58 @@ return b;   // 合法：else 不落到 join
 - value 为 own/fatal 的 result 不做 `.?' 绑定（需要 move 语义另行设计）。
 - 没有 throw/异常栈；错误就是值。
 
-## 10. 实现落点
+## 10. 泛型 Result[T, E] 原型
+
+`examples/result/result.cx` 验证了标准库 Result 的可行形态：
+
+```clux
+struct Result[T, E] {
+    good: bool;
+    val: ?T;
+    err: ?E;
+
+    func ok(self: ref *const Result[T, E]): bool { return self.good; }
+    func value(self: ref *const Result[T, E]): T { return self.val.!; }
+    func error(self: ref *const Result[T, E]): E { return self.err.!; }
+    func panic(self: ref *const Result[T, E]): str { return "Result error"; }
+
+    func of_value(v: T): Result[T, E] {
+        return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };
+    }
+    func of_error(e: E): Result[T, E] {
+        return .Result[T, E]{ .good = false, .val = nil, .err = .?E{ e } };
+    }
+}
+```
+
+使用：
+
+```clux
+func half(x: i32): Result[i32, str] {
+    if (x < 0) { return Result[i32, str]::of_error("negative"); }
+    return Result[i32, str]::of_value(x / 2);
+}
+
+func use(x: i32): Result[i32, str] {
+    var r = half(x);
+    var v = r.?;   // 失败时 return Result[i32,str]::of_error(r.error())
+    return Result[i32, str]::of_value(v + 1);
+}
+```
+
+结论：泛型 Result 可以工作，`of_value`/`of_error` 作为泛型 struct 的
+静态方法可以按 `Result[T,E]` 实例化；`.?' 能直接消费它。
+
+已知限制：
+
+- 两个 payload 用 `?T` / `?E` 表示，构造一侧时另一侧写 `nil`；
+- `panic()` 只能返回固定字符串（泛型 E 无法通用转 `str`，除非标准库
+  给 E 增加 interface 约束/格式化协议）；
+- 当前 `.?' / `.!' 的左值要求是变量/字段；`half(x).?` 需要先
+  `var r = half(x); var v = r.?;`，后续可扩展为自动绑定临时变量；
+- 静态构造需要显式 `Result[T,E]::of_value(...)`，暂不做返回类型反向推导。
+
+## 11. 实现落点
 
 - `src/sema/stmt_try.c`：协议分析、生成 `if`、`of_error`/panic 分支
 - `src/sema/stmt_var.c`：var 形式，预声明 `undefined` + postlude

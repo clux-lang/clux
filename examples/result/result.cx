@@ -1,0 +1,52 @@
+// result.cx — 泛型 Result[T, E]（未来标准库错误处理结构的原型）
+//
+// 协议与 .? / .! 语法糖一致：
+//   ok() -> bool
+//   value() -> T
+//   error() -> E
+//   panic() -> str
+//   of_value(v: T) / of_error(e: E) 静态构造
+//
+// 注意：当前 .? / .! 的左值要求是变量/字段（place 表达式）；函数调用结果
+// 需要先绑定到临时变量再解包。
+
+struct Result[T, E] {
+    good: bool;
+    val: ?T;
+    err: ?E;
+
+    func ok(self: ref *const Result[T, E]): bool { return self.good; }
+    func value(self: ref *const Result[T, E]): T { return self.val.!; }
+    func error(self: ref *const Result[T, E]): E { return self.err.!; }
+    func panic(self: ref *const Result[T, E]): str { return "Result error"; }
+
+    func of_value(v: T): Result[T, E] {
+        return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };
+    }
+
+    func of_error(e: E): Result[T, E] {
+        return .Result[T, E]{ .good = false, .val = nil, .err = .?E{ e } };
+    }
+}
+
+func half(x: i32): Result[i32, str] {
+    if (x < 0) {
+        return Result[i32, str]::of_error("negative");
+    }
+    return Result[i32, str]::of_value(x / 2);
+}
+
+func use(x: i32): Result[i32, str] {
+    var r = half(x);
+    var v = r.?;
+    return Result[i32, str]::of_value(v + 1);
+}
+
+func main(): i32 {
+    var a: Result[i32, str] = use(8);
+    if (!a.ok() || a.value() != 5) { return 1; }
+
+    var b: Result[i32, str] = use(-1);
+    if (b.ok() || b.error() != "negative") { return 2; }
+    return 0;
+}

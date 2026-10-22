@@ -133,3 +133,39 @@ TEST(ErrorHandling, NoreturnDecoratorGenericFunction) {
       "func main(): i32 { return pick(true) - 9; }\n",
       "error_noreturn_generic");
 }
+
+TEST(ErrorHandling, GenericResultStruct) {
+  clux_expect_ok(
+      "struct Result[T, E] {\n"
+      "  good: bool;\n"
+      "  val: ?T;\n"
+      "  err: ?E;\n"
+      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
+      "  func value(self: ref *const Result[T, E]): T { return self.val.!; }\n"
+      "  func error(self: ref *const Result[T, E]): E { return self.err.!; }\n"
+      "  func panic(self: ref *const Result[T, E]): str { return \"Result error\"; }\n"
+      "  func of_value(v: T): Result[T, E] {\n"
+      "    return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };\n"
+      "  }\n"
+      "  func of_error(e: E): Result[T, E] {\n"
+      "    return .Result[T, E]{ .good = false, .val = nil, .err = .?E{ e } };\n"
+      "  }\n"
+      "}\n"
+      "func half(x: i32): Result[i32, str] {\n"
+      "  if (x < 0) { return Result[i32, str]::of_error(\"negative\"); }\n"
+      "  return Result[i32, str]::of_value(x / 2);\n"
+      "}\n"
+      "func use(x: i32): Result[i32, str] {\n"
+      "  var r = half(x);\n"
+      "  var v = r.?;\n"
+      "  return Result[i32, str]::of_value(v + 1);\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: Result[i32, str] = use(8);\n"
+      "  if (!a.ok() || a.value() != 5) { return 1; }\n"
+      "  var b: Result[i32, str] = use(-1);\n"
+      "  if (b.ok() || b.error() != \"negative\") { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "error_generic_result");
+}
