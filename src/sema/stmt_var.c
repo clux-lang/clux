@@ -549,16 +549,22 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     if (sema_try_probe(sema, vd->init, scope, &info)) {
       const type_t *vt = info.value_type;
       ownership_t vo = type_ownership_of(vt);
-      if (!vt || vo == OWN_OWN || vo == OWN_FATAL) {
+      if (!vt) {
         diag_error(sema->diag, sema_loc(sema, vd->init),
-                   "error-handling sugar cannot bind a value of ownership "
-                   "'own'/'fatal'");
+                   "error-handling sugar has no value type");
         return;
+      }
+      /* own/fatal 结果：变量声明为 own 核心类型，赋值时接受 fatal 源。 */
+      const type_t *decl = vt;
+      if (vo == OWN_OWN || vo == OWN_FATAL || type_has_own_slots(vt)) {
+        decl = type_ownership_apply(sema->vm, OWN_OWN,
+                                    type_strip_ownership(vt));
+        if (!decl) return;
       }
       uint32_t tb = vd->init->tok_begin, te = vd->init->tok_end;
       vd->init = ast_undef_new(sema->arena, tb, te);
-      vd->type_expr = sema_gen_type_ref(sema, vt);
-      vd->resolved_type = vt;
+      vd->type_expr = sema_gen_type_ref(sema, decl);
+      vd->resolved_type = decl;
       if (!vd->init || !vd->type_expr) return;
       /* 先按普通 `var b: T = undefined` 建符号/作用域 */
       shadow_var_def(sema, vd, scope);
@@ -570,8 +576,12 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       ast_node_t *iff =
           sema_try_make_if(sema, &info, target, NULL, tb, te);
       if (iff) {
-        info.setup->next = iff;
-        vd->base.postlude = info.setup;
+        if (info.setup) {
+          info.setup->next = iff;
+          vd->base.postlude = info.setup;
+        } else {
+          vd->base.postlude = iff;
+        }
       }
       return;
     }

@@ -51,6 +51,13 @@ if (a.ok()) {
 条件跳转 + early `RET`；成功值留在栈顶，失败/panic 分支终止当前函数。
 表达式临时变量定义在求值点所在作用域，循环体内每次迭代重新 DEFINE。
 
+own result 也支持：
+
+- place 左值（变量/字段）直接对原值 `take`，不复制临时；
+- 调用结果等非 place 左值先绑定 own 临时再 take；
+- var / 赋值 / 表达式三种形式都可展开；
+- 目标变量声明为 `own T`，接收 `value()` 返回的 `fatal T`。
+
 ## 3. `b = a.!`（struct 左值）
 
 展开为：
@@ -130,6 +137,10 @@ var p: own *i32 = take_opt(o);
 实现为 `BCODE_OPT_TAKE`，源可选值是借用视图（变量/字段读取），
 清 tag 后源析构不会二次释放。它用于 `ResultOwned` 之类的 owned
 结果类型；copyable Result 仍使用普通 `value()`。
+
+`return .Aggregate{ ... }` 且聚合含 own 槽位时，sema 自动包一层
+`move`，把构造产物作为 fatal 值交给调用方；不再要求手写
+`return move(.Aggregate{...})`。
 
 ## 6. `[[noreturn]]` / `[[never]]` 标记装饰器
 

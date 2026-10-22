@@ -306,27 +306,34 @@ struct Result[T, E] {
         (T.ownership == "own"
             ? fatal Result[T, E]
             : Result[T, E]) {
-        return move(.Result[T, E]{ ... });
+        return .Result[T, E]{ ... };   // own 聚合返回自动包 move
     }
 }
 ```
 
 已验证 `Result[own *i32, str]` 可以构造并 `r.value()` 取出
-`own *i32`。剩余限制：
+`own *i32`。当前状态：
 
-- `.?' 的语句级展开仍要求 operand 可 copy（own Result 的 `.?' 还
-  未打开）；
-- own T 的构造需要 `move(...)` 包裹聚合构造。
+- own Result 的 `.?' 已打开：
+  - place 左值直接对原值 take，不复制临时；
+  - 调用结果等非 place 左值先绑定 own 临时再 take；
+  - var / 赋值 / 表达式三种形式都支持；
+  - 失败分支返回 `of_error`，成功分支把 `value()` 的 fatal T
+    绑定到 own 目标。
+- own T 的构造：`return .Aggregate{...}` 自动包一层 `move`；
+  但往 optional own 槽位里放参数仍需显式 `move(v)`
+  （这是把实参所有权交出去，不是返回构造）.
 
 ## 7. 结论
 
 - **copyable Result 的 `.?' 表达式化：已实现**（AST_TRY + early RET）；
 - **`take_opt` own 原语：已实现**（`?T -> T` / `?own T -> fatal T`）；
-- **own 的泛型 Result `value(): T`：仍不可行**，需要 `ResultOwned` 或
-  编译器按具体 T 生成 take；
+- **own 的泛型 Result：已打通**：
+  - 条件返回类型用 `T.ownership == "own" ? fatal T : T`；
+  - `value()` 内部 `comptime if` + `take_opt`；
+  - `.?' 的 place 左值直接 take，非 place 左值先绑定临时；
+  - 失败分支 `of_error`，var/赋值/表达式三种形式都支持；
+- **own 聚合构造返回自动 move**；
 - “表达式里 return”已用 early RET 解决：VM RET 丢弃当前帧临时值，
   compiler 维护编译期 stack_depth + defers。
-- 下一阶段：
-  1. 用 `ResultOwned` 原型验证 own payload；
-  2. 表达式 `.?' 在 own payload 上切到 `take_opt`；
-  3. C 后端用语句表达式生成对应 early return。
+- 下一步：C 后端用语句表达式生成对应 early return。

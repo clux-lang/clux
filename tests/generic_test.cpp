@@ -1157,15 +1157,15 @@ TEST(GenericReject, OwnPackReturnMustBeFatal) {
         "contains own slots", "generic_pack_own_return_fatal");
 }
 
-TEST(GenericReject, OwnPackConstructReturnNeedsMove) {
-    clux_expect_reject(
+TEST(GenericPack, OwnPackConstructReturnAutoMove) {
+    clux_expect_ok(
         "func pack[...Args](args: ...Args): fatal <...Args> { return .{ ...args }; }\n"
         "func main(): i32 {\n"
         "  var x: own *i32 = new i32{ .i32{7} };\n"
         "  var t = pack[own *i32](move(x));\n"
         "  return t[0].* - 7;\n"
         "}\n",
-        "freshly constructed aggregate", "generic_pack_construct_return_move");
+        "generic_pack_construct_return_auto_move");
 }
 
 TEST(GenericPack, NestedOwnAggregate) {

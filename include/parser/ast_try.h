@@ -22,6 +22,7 @@ typedef struct {
     ast_node_t *value_call;
     ast_node_t *tail_stmt;
     bool        panic_mode;
+    bool        materialize;  /* copyable 结果离开临时前物化 */
 } ast_try_t;
 
 static inline ast_node_t *ast_try_new(arena_t *arena, uint32_t tok_begin,

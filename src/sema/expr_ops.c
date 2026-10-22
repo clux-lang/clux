@@ -825,6 +825,10 @@ value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
           tt->value_call = info.value_call;
           tt->tail_stmt = info.tail_stmt;
           tt->panic_mode = uw->op && token_is(uw->op, "!");
+          tt->materialize =
+              !(type_ownership_of(info.value_type) == OWN_OWN ||
+                type_ownership_of(info.value_type) == OWN_FATAL ||
+                type_has_own_slots(info.value_type));
           tr->is_generated = true;
           tr->next = (*node)->next;
           *node = tr;

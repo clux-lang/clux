@@ -434,7 +434,7 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        求值一次；失败分支 early RET（panic 分支不返回）。 */
     ast_try_t *n = (ast_try_t *)node;
     int base = c->stack_depth;
-    compile_stmt(c, n->setup);       /* var temp = <operand>; */
+    if (n->setup) compile_stmt(c, n->setup);  /* var temp = <operand>; */
 
     compile_expr(c, n->ok_call);     /* 栈: [bool] */
     bcode_write_op(c->bc, BCODE_JZ);
@@ -445,8 +445,9 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
 
     compile_expr(c, n->value_call);  /* 成功值：栈 base+1 */
     /* 值可能借用临时变量的存储（成员返回借用视图）；POP_SCOPE 前
-       物化成独立值。 */
-    bcode_write_op(c->bc, BCODE_MATERIALIZE);
+       物化成独立值。own/fatal 值已是转移出的独立所有权，不再 clone。 */
+    if (n->materialize)
+      bcode_write_op(c->bc, BCODE_MATERIALIZE);
     bcode_write_op(c->bc, BCODE_JMP);
     emit_jump(c, &end_l);
 

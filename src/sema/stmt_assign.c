@@ -161,12 +161,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
         return;
       }
       ownership_t to = type_ownership_of(ts->type);
-      if (to == OWN_OWN || to == OWN_FATAL ||
-          type_has_own_slots(ts->type)) {
-        diag_error(sema->diag, sema_loc(sema, as->target),
-                   "error-handling sugar target must be a copyable value");
-        return;
-      }
+      (void)to;
       value_t *dst = value_make_shadow(sema->vm, ts->type);
       value_t *src = value_make_shadow(sema->vm, info.value_type);
       if (value_is_error(sema->vm, value_assign(sema->vm, dst, src))) {
@@ -181,8 +176,12 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       ast_node_t *iff = sema_try_make_if(sema, &info, as->target, NULL, tb,
                                          te);
       if (iff) {
-        info.setup->next = iff;
-        as->base.prelude = info.setup;
+        if (info.setup) {
+          info.setup->next = iff;
+          as->base.prelude = info.setup;
+        } else {
+          as->base.prelude = iff;
+        }
         as->sugar_noop = true;
         ts->flow_init = true;
       }

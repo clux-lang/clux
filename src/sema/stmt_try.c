@@ -7,6 +7,8 @@
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
+#include "parser/ast_index.h"
+#include "parser/ast_deref.h"
 #include "parser/ast_member.h"
 #include "parser/ast_return.h"
 #include "parser/ast_scope_ref.h"
@@ -93,7 +95,8 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
     }
 
     const type_t *ret = sema->fn.return_type;
-    if (!ret || type_kind_of(ret) != TYPE_KIND_STRUCT) {
+    const type_t *ret_core = type_strip_ownership(ret);
+    if (!ret_core || type_kind_of(ret_core) != TYPE_KIND_STRUCT) {
         diag_error(sema->diag, sema_loc(sema, operand),
                    "'a.?' requires the current function to return a struct "
                    "with 'of_error(error)'");
@@ -104,7 +107,7 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
         (ast_scope_ref_t *)ast_scope_ref_new(sema->arena, tb, te);
     ast_node_t *ocall = ast_call_new(sema->arena, tb, te);
     if (!tref || !sr || !ocall) return false;
-    ((ast_ident_t *)tref)->name = ret->name;
+    ((ast_ident_t *)tref)->name = ret_core->name;
     sr->type_expr = tref;
     sr->variant = strslice_from_cstr("of_error");
     ((ast_call_t *)ocall)->callee = &sr->base;
@@ -129,6 +132,12 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
     return true;
 }
 
+static bool try_place_expr(const ast_node_t *n) {
+    return n && (n->kind == AST_IDENT || n->kind == AST_MEMBER ||
+                 n->kind == AST_INDEX || n->kind == AST_DEREF ||
+                 n->kind == AST_SCOPE_REF);
+}
+
 bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
                     sema_try_info_t *out) {
     if (!sema || !unwrap || unwrap->kind != AST_UNWRAP || !out) return false;
@@ -139,11 +148,18 @@ bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
         type_kind_of(value_type(ov)) != TYPE_KIND_STRUCT)
         return false;
     const type_t *ot = value_type(ov);
-    if (type_ownership_of(ot) == OWN_OWN ||
-        type_ownership_of(ot) == OWN_FATAL || type_has_own_slots(ot)) {
-        diag_error(sema->diag, sema_loc(sema, u->operand),
-                   "error-handling sugar operand must be a copyable value");
-        return false;
+    bool owning = type_ownership_of(ot) == OWN_OWN ||
+                  type_ownership_of(ot) == OWN_FATAL ||
+                  type_has_own_slots(ot);
+
+    /* own result 的 place 左值：直接对它 take，不复制临时。
+       （value() 会 take_opt(self.val)，消费槽位。） */
+    if (owning && try_place_expr(u->operand)) {
+        bool panic_mode = u->op && token_is(u->op, "!");
+        if (!sema_try_analyze(sema, u->operand, scope, panic_mode, out))
+            return false;
+        out->setup = NULL;
+        return true;
     }
 
     /* 左值表达式只求值一次：var __try_N: R = <operand>; */
