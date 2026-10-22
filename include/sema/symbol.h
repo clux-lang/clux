@@ -60,6 +60,7 @@ typedef enum {
   SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v) -> 同类型 fatal（对象图深拷贝兜底） */
   SEMA_BUILTIN_MAKE_SHARE, /* __make_share(p) -> share *T（RC 创建通道） */
   SEMA_BUILTIN_WEAK_GET,   /* __weak_get(w) -> ?share *T（.get() 升级） */
+  SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */
@@ -151,7 +152,7 @@ struct _sema_symbol_t {
                          false = 未初始化（TDZ），读取时编译错误
                          "used before initialization"。仅变量符号有意义。 */
   bool is_active;     /* 符号是否已定义到 VM scope（运行时可见）。函数/内置
-                         符号注册即激活；变量在 shadow_var_def 定义时激活。 */
+                          符号注册即激活；变量在 shadow_var_def 定义时激活。 */
   bool declared;      /* Pass 3b 是否已走到**定义点**（局部变量：3a 预注册全部块内
                          变量，但 3b 按源序逐个处理定义）。销毁收集
                          （make_free_stmts）只包含已声明的变量——否则提前 return

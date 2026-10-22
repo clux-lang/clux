@@ -33,6 +33,9 @@ typedef struct {
        `compound_assign_transfer` 会按旧字节二次释放 own 槽位（double free）。
        sema 写、compiler 读。 */
     bool           reinit;
+    /* sema 错误处理语法糖：真正赋值在 prelude 的 if 分支里完成，本语句
+       只作为占位（compiler 跳过）。 */
+    bool           sugar_noop;
 } ast_assign_t;
 
 static inline ast_node_t *ast_assign_new(arena_t *arena,

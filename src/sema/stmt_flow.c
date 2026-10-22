@@ -456,9 +456,20 @@ block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
     }
   }
 
-  /* meet：两分支都 INIT 才 INIT（else 缺失视为"未赋值分支"） */
-  for (size_t i = 0; i < snap.n; i++)
-    snap.syms[i]->flow_init = snap.after[i] && snap.syms[i]->flow_init;
+  /* meet：可达分支的确定性赋值。终止分支（return/panic）不参与汇合；
+     两分支都终止时整个 if definitely_returns，后续语句不可达。 */
+  for (size_t i = 0; i < snap.n; i++) {
+    bool then_reaches = !tr.definitely_returns;
+    bool else_reaches = !er.definitely_returns;
+    if (!then_reaches && !else_reaches)
+      snap.syms[i]->flow_init = snap.after[i]; /* 值无关，整体返回 */
+    else if (!then_reaches)
+      snap.syms[i]->flow_init = snap.syms[i]->flow_init;
+    else if (!else_reaches)
+      snap.syms[i]->flow_init = snap.after[i];
+    else
+      snap.syms[i]->flow_init = snap.after[i] && snap.syms[i]->flow_init;
+  }
   flow_release(&snap);
 
   r.definitely_returns = tr.definitely_returns && er.definitely_returns;

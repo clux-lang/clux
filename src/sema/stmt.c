@@ -243,6 +243,15 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       break;
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
+      bool noreturn = false;
+      if (es->expr && es->expr->kind == AST_CALL) {
+        ast_call_t *cl = (ast_call_t *)es->expr;
+        if (cl->callee && cl->callee->kind == AST_IDENT) {
+          sema_symbol_t *cs =
+              sema_lookup(scope, ((ast_ident_t *)cl->callee)->name);
+          noreturn = cs && cs->builtin_op == SEMA_BUILTIN_PANIC;
+        }
+      }
       value_t *v = sema_expr(sema, &es->expr, scope);
       if (!value_is_error(sema->vm, v) &&
           !value_is_type(v, TYPE_KIND_VOID)) {
@@ -253,6 +262,7 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
                    "to discard",
                    tn);
       }
+      if (noreturn) r.definitely_returns = true;
       break;
     }
     case AST_FOREACH:

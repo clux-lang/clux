@@ -540,6 +540,39 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                            sema_scope_t *scope) {
   sema_symbol_t *sym = sema_scope_find_local(scope, vd->name);
   if (!sym) return; /* 3a 重复定义已诊断，符号未注册 */
+
+  /* `var b = a.?` / `var b = a.!`（a 为 result struct）：展开为
+     `var b: T = undefined; if (a.ok()) b = a.value(); else ...`。
+     分支放在 postlude：compiler 先 DEFINE b，再编译分支。 */
+  if (vd->init && vd->init->kind == AST_UNWRAP) {
+    sema_try_info_t info;
+    if (sema_try_probe(sema, vd->init, scope, &info)) {
+      const type_t *vt = info.value_type;
+      ownership_t vo = type_ownership_of(vt);
+      if (!vt || vo == OWN_OWN || vo == OWN_FATAL) {
+        diag_error(sema->diag, sema_loc(sema, vd->init),
+                   "error-handling sugar cannot bind a value of ownership "
+                   "'own'/'fatal'");
+        return;
+      }
+      uint32_t tb = vd->init->tok_begin, te = vd->init->tok_end;
+      vd->init = ast_undef_new(sema->arena, tb, te);
+      vd->type_expr = sema_gen_type_ref(sema, vt);
+      vd->resolved_type = vt;
+      if (!vd->init || !vd->type_expr) return;
+      /* 先按普通 `var b: T = undefined` 建符号/作用域 */
+      shadow_var_def(sema, vd, scope);
+      sym = sema_scope_find_local(scope, vd->name);
+      if (sym) sym->flow_init = true;
+      ast_node_t *target = ast_ident_new(sema->arena, tb, te);
+      if (!target) return;
+      ((ast_ident_t *)target)->name = vd->name;
+      ast_node_t *iff =
+          sema_try_make_if(sema, &info, target, NULL, tb, te);
+      if (iff) vd->base.postlude = iff;
+      return;
+    }
+  }
   /* Pass 3b 已走到定义点：此后收集销毁/借源时才包含该变量（提前 return 的
      路径不会销毁后面才声明的变量）。 */
   sym->declared = true;

@@ -43,6 +43,28 @@ size_t borrow_collect_add(sema_symbol_t **out, size_t n, size_t cap, sema_symbol
 size_t borrow_collect_value(sema_t *sema, const type_t *t, ownership_t slot_own, ast_node_t *e, sema_scope_t *scope, sema_symbol_t **out, size_t cap, size_t n);
 sema_symbol_t *borrow_root_symbol(sema_t *sema, ast_node_t *e, sema_scope_t *scope);
 void borrow_srcs_set(sema_t *sema, sema_symbol_t *var, sema_symbol_t **srcs, size_t n);
+
+/* `a.?` / struct `a.!` 语法糖的分析结果（stmt_try.c）。 */
+typedef struct sema_try_info {
+    const type_t *value_type;
+    ast_node_t   *ok_call;      /* a.ok() */
+    ast_node_t   *value_call;   /* a.value() */
+    ast_node_t   *error_call;   /* a.error()（返回分支用 / panic 分支不用） */
+    ast_node_t   *panic_call;   /* a.panic()（panic 分支用） */
+    ast_node_t   *tail_stmt;    /* AST_RETURN 或 AST_EXPR_STMT(panic) */
+}
+sema_try_info_t;
+
+/** 分析 struct 左值的 ok/value/error/panic 协议；非 struct 协议返回 false。 */
+bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
+                      bool panic_mode, sema_try_info_t *out);
+/** 若 unwrap 是 `a.?` / `a.!` 且 a 为 struct，填充 info 并返回 true。 */
+bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
+                    sema_try_info_t *out);
+/** 生成 `if (a.ok()) { target = a.value(); } else { tail; }`。 */
+ast_node_t *sema_try_make_if(sema_t *sema, const sema_try_info_t *info,
+                             ast_node_t *target, ast_node_t *operand,
+                             uint32_t tb, uint32_t te);
 ast_node_t *collect_free_stmts(sema_t *sema, sema_scope_t *from_scope, const sema_scope_t *stop_scope);
 strslice_t discard_name(sema_t *sema, const char *s);
 const sema_scope_t *find_func_stop_sema(sema_scope_t *scope);

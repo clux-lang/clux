@@ -143,6 +143,51 @@ static value_t *(*compound_binop(const token_t *op))(vm_t *, value_t *,
 
 void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
+  /* `b = a.?` / `b = a.!`（a 为 result struct）：展开为
+     `if (a.ok()) b = a.value(); else ...`，赋值在 prelude 完成。 */
+  if (as->value && as->value->kind == AST_UNWRAP) {
+    sema_try_info_t info;
+    if (sema_try_probe(sema, as->value, scope, &info)) {
+      if (!as->target || as->target->kind != AST_IDENT) {
+        diag_error(sema->diag, sema_loc(sema, as->target),
+                   "error-handling sugar requires a simple variable target");
+        return;
+      }
+      sema_symbol_t *ts =
+          sema_lookup(scope, ((ast_ident_t *)as->target)->name);
+      if (!ts || !ts->type) {
+        diag_error(sema->diag, sema_loc(sema, as->target),
+                   "error-handling sugar target is not declared");
+        return;
+      }
+      ownership_t to = type_ownership_of(ts->type);
+      if (to == OWN_OWN || to == OWN_FATAL ||
+          type_has_own_slots(ts->type)) {
+        diag_error(sema->diag, sema_loc(sema, as->target),
+                   "error-handling sugar target must be a copyable value");
+        return;
+      }
+      value_t *dst = value_make_shadow(sema->vm, ts->type);
+      value_t *src = value_make_shadow(sema->vm, info.value_type);
+      if (value_is_error(sema->vm, value_assign(sema->vm, dst, src))) {
+        char a[64], b[64];
+        sema_type_name(ts->type, a, sizeof a);
+        sema_type_name(info.value_type, b, sizeof b);
+        diag_error(sema->diag, sema_loc(sema, as->value),
+                   "cannot assign value of type %s from 'a.?' to %s", b, a);
+        return;
+      }
+      uint32_t tb = as->value->tok_begin, te = as->value->tok_end;
+      ast_node_t *iff = sema_try_make_if(sema, &info, as->target, NULL, tb,
+                                         te);
+      if (iff) {
+        as->base.prelude = iff;
+        as->sugar_noop = true;
+        ts->flow_init = true;
+      }
+      return;
+    }
+  }
   /* 左值：下标表达式 a[i] = v（sema 校验下标合法） */
   if (as->target->kind == AST_INDEX) {
     shadow_assign_index(sema, as, scope);

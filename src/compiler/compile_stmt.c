@@ -570,6 +570,7 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   }
   case AST_ASSIGN: {
     ast_assign_t *n = (ast_assign_t *)node;
+    if (n->sugar_noop) break; /* 实赋值在 prelude if 分支中 */
     /* 下标左值赋值：a[i] = v / a[i] op= v（sema 已校验下标合法）。
        简单赋值 → INDEX_SET；复合赋值 → INDEX_GET → op → INDEX_SET。
        注：复合赋值双求值 base 表达式（读一次写一次），M2 文档注明
@@ -1017,5 +1018,11 @@ void compile_stmt(compiler_t *c, ast_node_t *node) {
   default:
     c_error(c, node, "unsupported statement node '%s'", ast_kind_name(node->kind));
     return;
+  }
+  /* **语句后置序列**（sema 生成的 var 错误处理分支）：必须在语句主体
+     （尤其 var DEFINE）之后、同一作用域编译。 */
+  for (ast_node_t *post = node->postlude; post; post = post->next) {
+    compile_stmt(c, post);
+    if (c->failed) return;
   }
 }

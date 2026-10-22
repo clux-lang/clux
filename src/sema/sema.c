@@ -231,6 +231,32 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  /* panic(msg: str)：错误处理语法糖的终止分支；内建 C 函数（stderr+abort），
+     noreturn 由 builtin_op 识别。 */
+  {
+    const type_t *pparams[1] = {sema->vm->type_str};
+    const type_t *psig = type_func_sig(sema->vm, pparams, 1,
+                                       sema->vm->type_void, false);
+    uint32_t pfid = 0;
+    if (sema->vm->functions) {
+      size_t nf = vec_len(sema->vm->functions);
+      for (size_t i = 0; i < nf; i++) {
+        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
+        if (bf && bf->name.len == 5 &&
+            memcmp(bf->name.ptr, "panic", 5) == 0) {
+          pfid = bf->id;
+          break;
+        }
+      }
+    }
+    if (psig) {
+      sema_symbol_t pinit = {.kind = SEMA_SYM_FUNC, .type = psig,
+                             .is_active = true, .fid = pfid,
+                             .builtin_op = SEMA_BUILTIN_PANIC};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("panic"), &pinit);
+    }
+  }
+
   /* 预注册 RC 内置函数（share/weak 是真实类型，源码不写这些名字）：
        - __make_share(p)：fatal/own *T → share *T（§12.1 创建通道）
        - __weak_get(w)  ：weak *T → ?share *T（§12.4 原子升级，`.get()` 语法糖） */

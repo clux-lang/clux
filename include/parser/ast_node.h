@@ -38,6 +38,9 @@ typedef struct ast_node {
                                    当前语句上。临时变量定义在**当前块作用域**
                                    （prelude 语句在同一作用域编译，不额外压
                                    作用域）。非语句节点通常为 NULL。 */
+    struct ast_node *postlude;   /* **语句后置序列**（sema 生成，compiler 在语句
+                                   主体之后编译）：`var b = a.!` 需要先
+                                   DEFINE b(undefined)，再执行 ok/panic 分支。 */
 } ast_node_t;
 
 /* ================================================================ */
