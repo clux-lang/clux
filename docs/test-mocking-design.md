@@ -312,7 +312,117 @@ unmock_all();
 5. 测试实例方法、静态方法、泛型实例方法、继承覆盖；
 6. 再考虑测试库 API；per-instance mock 作为独立可选特性。
 
-## 9. 结论
+## 9. C 后端可行性
+
+前提：C 后端会把方法编译成“函数指针对象 + 全局函数实现”，匿名/临时
+函数也提升为全局函数。这对 mock 总体是**有利**的，但需要明确调用边界。
+
+### 9.1 方法 mock：天然适合
+
+类型描述符里保存方法表：
+
+```c
+typedef struct clux_fn {
+    void *fn;      /* 提升后的全局函数 */
+    void *env;     /* 闭包捕获环境，可空 */
+} clux_fn_t;
+
+typedef struct clux_type {
+    const char *name;
+    clux_fn_t *methods;   /* name -> function object */
+    ...
+} clux_type_t;
+```
+
+方法调用：
+
+```c
+clux_fn_t *m = clux_find_method(type, "move");
+clux_call(m, self, x, y);   /* m->fn(m->env, self, x, y) */
+```
+
+mock 只需把 `methods["move"]` 替换成另一个 `clux_fn_t`；替换函数同样
+是提升后的全局实现，签名一致即可。
+
+要求：
+
+- 方法调用不能在中端被直接内联/去虚拟化成裸 C 调用；
+- mock 构建下保留方法表查找（或至少保留可替换的 function object）；
+- 实例方法、静态方法共用同一方法表，静态调用不传 self；
+- 泛型实例各有自己的类型描述符/方法表；
+- 继承沿描述符链查找，override 安装在实际 owner 上。
+
+### 9.2 自由函数 mock：需要测试构建的间接层
+
+C 后端如果把：
+
+```clux
+target(1)
+```
+
+直接生成：
+
+```c
+target(1);
+```
+
+那自由函数 mock 无法生效。需要 mock 构建加一层间接：
+
+```c
+clux_call(&__clux_slot_target, 1);
+```
+
+或按名字：
+
+```c
+clux_call(clux_mock_slot("target"), 1);
+```
+
+两种方案：
+
+1. **函数槽 + 间接调用**
+   - 每个可 mock 函数生成一个 `clux_fn_t` 槽；
+   - 调用点加载槽再调用；
+   - release 可恢复直接调用。
+
+2. **函数名字注册表**
+   - 测试构建为所有自由函数生成 `name → clux_fn_t*` 表；
+   - `mock("target", ...)` 按名字查表；
+   - 支持字符串 API，但有注册表体积/初始化成本。
+
+推荐测试构建用 1，字符串 API 通过编译器生成的只读名字表辅助；
+release 不需要 mock 时全部走直接调用。
+
+### 9.3 闭包/临时函数提升
+
+匿名函数提升到全局后表示成 `{fn, env}`：
+
+- replacement 可以是捕获测试局部变量的闭包；
+- mock 安装的是整个 `clux_fn_t`，不仅是裸函数指针；
+- 调用约定统一为 `fn(env, ...)`，因此方法 replacement 也能捕获环境；
+- C 侧类型检查只能做到函数指针签名匹配；clux 类型检查可在
+  `mock` 内建调用点做。
+
+### 9.4 性能与构建模式
+
+- 方法调用本来就经方法表，mock 不增加额外开销；
+- 自由函数在 release 通常是直接调用；mock 构建才走槽/表；
+- 建议增加构建开关：
+  ```text
+  --mockable / CLUX_TEST_MOCK
+  ```
+  只影响测试构建，不拖慢发布代码；
+- 如果未来做跨过程优化/去虚拟化，mock 构建必须关闭对应优化。
+
+### 9.5 C 后端 mock 的边界
+
+- **类型级方法**：可直接替换方法表；
+- **自由函数**：需测试构建间接层；
+- **实例级方法**：仍需 per-instance side table，C 后端也一样；
+- **extern cfunc/FFI**：不在 clux 函数对象体系里，不能 mock；
+- **C 内联静态函数**：若方法实现被内联，必须禁止。
+
+## 10. 结论
 
 **可以实现**，自由函数和方法都有运行期可替换的绑定：
 
