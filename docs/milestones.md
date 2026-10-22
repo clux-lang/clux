@@ -143,8 +143,8 @@
   `extends PATTERN` 表达式均已落地。剩余为签名期实例链诊断 polish
   与已声明的范围外能力（见实现计划 P10）。
 - **M8**: 错误处理机制——`.?` / struct `.!` 语法糖、内建 `panic`
-  （stderr+abort）、panic never-return 的 TDZ 汇合已实现；设计见
-  [error-handling-design.md](error-handling-design.md)。
+  （stderr + 退出码 1，Windows 不弹 abort 对话框）、panic never-return 的
+  TDZ 汇合已实现；设计见 [error-handling-design.md](error-handling-design.md)。
 - **M9**: 标准库 v1（含字符串库、同步原语）
 - **M10**: 转译 C 后端（`clux build` 的机器码目标之一；亦承接 M3 §13.3 的编译期销毁序列生成）
 - **M12**: 原生后端（与 M10 共享编译期所有权分析）

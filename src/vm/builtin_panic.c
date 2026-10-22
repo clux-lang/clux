@@ -9,7 +9,8 @@
 #include <string.h>
 
 /* panic(msg: str) -> void：错误处理语法糖的终止分支。
-   打印到 stderr 后 abort；它不是普通返回函数（sema 标 is_noreturn）。 */
+   打印到 stderr 后以错误码 1 正常退出（`_Exit` 不弹 Windows abort 对话框，
+   也不跑 atexit；与 Linux `_exit(1)` 的退出语义一致）。 */
 static value_t *builtin_panic_cfunc(vm_t *vm, func_t *self, size_t argc,
                                     value_t **args) {
     (void)self;
@@ -27,8 +28,8 @@ static value_t *builtin_panic_cfunc(vm_t *vm, func_t *self, size_t argc,
     }
     fprintf(stderr, "panic: %.*s\n", (int)len, msg);
     fflush(stderr);
-    abort();
-    return value_make_error(vm, "panic did not abort"); /* unreachable */
+    _Exit(1);
+    return value_make_error(vm, "panic did not exit"); /* unreachable */
 }
 
 void vm_register_panic(vm_t *vm) {

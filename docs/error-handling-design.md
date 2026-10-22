@@ -88,12 +88,14 @@ if (a.ok()) {
 `panic` 是内建函数：
 
 ```clux
-panic(msg: str);   // 打印 "panic: <msg>" 到 stderr，然后 C abort()
+panic(msg: str);   // 打印 "panic: <msg>" 到 stderr，然后以退出码 1 结束
 ```
 
 - VM 内建 `builtin_panic.c`，不是 clux 用户函数；
 - 编译器按普通 `CALL` 调用内建 fid；
-- sema 把 `panic(...)` 标记为 **never return**（`SEMA_BUILTIN_PANIC`）。
+- sema 把 `panic(...)` 标记为 **never return**（`SEMA_BUILTIN_PANIC`）；
+- 终止用 C `_Exit(1)`：不跑 atexit、不弹 Windows abort 对话框，退出码
+  与 Linux `_exit(1)` 一致。
 
 ## 6. TDZ / never-return 修正
 
@@ -136,6 +138,6 @@ return b;   // 合法：else 不落到 join
 - `src/sema/stmt_var.c`：var 形式，预声明 `undefined` + postlude
 - `src/sema/stmt_assign.c`：赋值形式，prelude + `sugar_noop`
 - `src/sema/stmt_flow.c`：可达分支 flow meet + panic noreturn
-- `src/vm/builtin_panic.c`：stderr + abort
+- `src/vm/builtin_panic.c`：stderr + `_Exit(1)`（无 abort 弹窗）
 - `src/compiler/compile_stmt.c`：prelude/postlude 与 sugar no-op
 - `tests/error_handling_test.cpp`
