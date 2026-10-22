@@ -246,46 +246,46 @@ take 只解决“own payload 怎么取出来”，**不解决 `.?' 只能在赋�
 3. 再做 copyable 的表达式 `.?'；
 4. 最后决定是否让 owned Result 也走统一 `.?' 语法。
 
-## 6. extends + 三元 + “反射” 做返回值类型转换：调研结果
+## 6. extends / 反射 + 三元做返回值类型转换：调研结果
 
-已确认可行的一部分：
+类型三元表达式的 condition 只要求是 **CTFE 求值的 bool 表达式**，
+不限定 `extends`。以下两种写法都可用：
 
 ```clux
-type Out[T] = T extends own *? ? fatal T : T;
+type Out1[T] = T extends own *? ? fatal T : T;
+type Out2[T] = T.ownership == "own" ? fatal T : T;
 
-func f[T](x: T): Out[T] { return move(x); }
-
-var q: own *i32 = f[own *i32](move(p));  // Out[own *i32] = fatal own *i32
-var n: i32 = f[i32](5);                  // Out[i32] = i32
+func f[T](x: T): (T.ownership == "own" ? fatal T : T) {
+    return move(x);
+}
 ```
 
-- 泛型别名 RHS 现在走 CTFE（`build_alias_instance`），因此
-  `extends PATTERN ? then : else` 在泛型别名里可用；
-- `fatal own *X` 类型是合法的，调用点用 own 变量接住；
-- 不需要 `strip_ownership` 这种类型构造：`fatal T` 在 T=own *X 时
+- 泛型别名 RHS 与括号内联返回类型都会走 CTFE；
+- `T.ownership` 是编译期字符串反射，字符串比较在 CTFE 中求值为 bool；
+- `fatal own *X` 类型合法，调用点用 own 变量接住；
+- 不需要 `strip_ownership` 类型构造：`fatal T` 在 T=own *X 时
   已经能表达“将亡的 own 指针”。
 
-当前限制：
+可选条件形式：
 
-1. **`T.ownership` 反射不参与类型表达式**
-   - `T.ownership` 只在值/comptime 上下文返回 `"own"` 字符串；
-   - `type Out[T] = T.ownership == "own" ? fatal T : T` 会报
-     `unsupported type expression`。
-   - 因此做类型选择要用 PATTERN：`T extends own *?`，而不是字符串比较。
+- `T.ownership == "own"` / `"ref"` / `"fatal"` / `"none"`；
+- `T extends own *?`；
+- 其他 CTFE bool 表达式（如 `sizeof(T) > 8`）。
 
-2. **函数返回位的内联三元需要括号**
+### 仍然存在的限制
+
+1. **函数返回位的内联三元需要括号**
    ```clux
-   func value(...): (T extends own *? ? fatal T : T) { ... }
+   func value(...): (T.ownership == "own" ? fatal T : T) { ... }
    ```
-   括号形式可用；`resolve_type_expr` 对括号内的条件类型走 CTFE。
-   不加括号仍报 `expected '{' for function body`。
+   括号形式可用；不加括号仍报 `expected '{' for function body`。
 
-3. **类型别名定义顺序**
-   - `type ValOut[T] = T extends own *? ? fatal T : T;` 放在 struct 前可用；
-   - `type ResOut[T,E] = ... Result[T,E] ...` 若放在 `Result` 定义前，
-     `Result` 还不存在；放在 struct 后，struct 成员签名又看不到这个别名。
-   - 现在用**括号内联条件类型**绕过：成员签名可直接写
-     `(T extends own *? ? fatal Result[T,E] : Result[T,E])`。
+2. **类型别名定义顺序**
+   - `type ValOut[T] = ...` 放在 struct 前可用；
+   - 引用 `Result[T,E]` 自身的别名若放在 struct 前，`Result` 还不存在；
+     放在 struct 后，struct 成员签名又看不到该别名。
+   - 用**括号内联条件类型**绕过：
+     `(T.ownership == "own" ? fatal Result[T,E] : Result[T,E])`。
 
 ### 对 Result 的实际影响
 
@@ -293,7 +293,8 @@ var n: i32 = f[i32](5);                  // Out[i32] = i32
 
 ```clux
 struct Result[T, E] {
-    func value(self: ref *Result[T, E]): (T extends own *? ? fatal T : T) {
+    func value(self: ref *Result[T, E]):
+        (T.ownership == "own" ? fatal T : T) {
         comptime if (T extends own *?) {
             return take_opt(self.val);
         } else {
@@ -302,7 +303,9 @@ struct Result[T, E] {
     }
 
     func of_value(v: T):
-        (T extends own *? ? fatal Result[T, E] : Result[T, E]) {
+        (T.ownership == "own"
+            ? fatal Result[T, E]
+            : Result[T, E]) {
         return move(.Result[T, E]{ ... });
     }
 }

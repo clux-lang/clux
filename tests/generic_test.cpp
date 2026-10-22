@@ -1330,3 +1330,17 @@ TEST(GenericType, ParenthesizedConditionalReturn) {
         "}\n",
         "generic_paren_conditional");
 }
+
+TEST(GenericType, ReflectionConditionalReturn) {
+    clux_expect_ok(
+        "func f[T](x: T): (T.ownership == \"own\" ? fatal T : T) {\n"
+        "  return move(x);\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var p: own *i32 = new i32{ .i32{7} };\n"
+        "  var q: own *i32 = f[own *i32](move(p));\n"
+        "  var n: i32 = f[i32](5);\n"
+        "  return q.* + n - 12;\n"
+        "}\n",
+        "generic_reflect_conditional");
+}
