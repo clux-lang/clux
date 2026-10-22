@@ -216,6 +216,120 @@ func __clux_test_main(): void {
 
 ---
 
+## 6. 实施评估
+
+整体结论：**语法和最小执行框架可实现；难点集中在“assert 穿透错误
+如何只终止当前用例并继续”、测试块到函数的转换、以及 mock 的方法表。**
+
+### 6.1 低难度
+
+- 顶层 `test "Suite.Name" { ... }` 的解析：
+  - lexer/parser 增加 `AST_TEST`；
+  - 普通 build/run 在 sema/compiler 前丢弃；
+  - 测试模式收集到测试表。
+- 每个 test 转换成一个无参 `void` 函数：
+  - test 块本身就是语句块，AST_BLOCK 可直接作为函数体；
+  - 生成唯一函数名（模块 + 序号）。
+- 测试结果输出、耗时、汇总统计：
+  - driver 层 printf 即可；
+  - gtest 风格是纯展示。
+- 测试上下文标志：
+  - `vm_t` 增加 `in_test`（或测试上下文对象）；
+  - runner 每个用例前设置/清理。
+
+### 6.2 中等难度
+
+- **assert 表达式文本**
+  - AST 只有 token 起止下标；需要从 token pool 还原源码文本；
+  - parser 在解析 `assert(expr)` 时直接生成
+    `__assert(bool, "expr source")` 最稳；
+  - 不需要运行时反射。
+- **assert / mock 只允许在测试上下文**
+  - 内置符号在普通构建可以不注册，但 helper 复用会受影响；
+  - 采用运行期 `in_test` 检查，报错清晰；
+  - 保留字列表要定：`test`、`assert`、`mock`、`unmock`、
+    `mock_method`、`unmock_method`。
+- **项目模式遍历**
+  - 单文件简单；
+  - `clux.mod` 下需要复用项目的源码发现逻辑，收集所有模块的 test；
+  - 测试名跨文件重复需要规则（建议报重复错误）。
+- **mock 自由函数**
+  - 当前自由函数调用发 `PUSH "name"`，全局/模块作用域槽位可替换；
+  - 需要 VM 内建 `mock/unmock` + mock 栈；
+  - 签名校验、原值保存、自动 unmock_all。
+- **测试函数注册**
+  - 不是普通用户函数；需要 `is_test` 标记或独立测试表；
+  - 测试函数不进入正常入口调用。
+
+### 6.3 高难度 / 需要先定方案
+
+1. **assert 穿透错误与继续执行**
+   - VM 的错误返回会从当前调用链一路返回到 `exec_drive`；
+   - `func_vcall` 的 error 路径会销毁 callee 作用域子树，但**不走
+     defer**（代码里明确避免触发 defer）；
+   - 因此 assert 失败：
+     - own 资源通常由作用域销毁释放；
+     - 用户 `defer` 清理不会执行；
+   - 如果测试允许 defer/临时清理，这是必须解决的点。
+
+   可选方案：
+   - 为 test 错误单独实现“干净展开”，执行 defer + FREE 后再返回；
+   - 或明确测试失败时不保证 defer（不推荐作为长期语义）；
+   - C 后端可用 `setjmp/longjmp` 或错误返回自然实现。
+
+2. **“生成测试 main 顺序调用”与继续执行冲突**
+   - 如果测试 main 是普通 clux 函数，第一个 assert 错误会终止整个
+     main，后续用例不会执行；
+   - 当前 VM 没有 try/catch，测试 main 内无法捕获并继续；
+   - 因此当前实现应由 **host runner 逐个调用测试函数**：
+     ```
+     for each test:
+         set in_test
+         call test_fn()
+         if error: record failure
+         unmock_all
+         clear in_test
+     ```
+   - “测试 main”可作为 C 后端的生成物；VM 阶段用 driver 循环更实际。
+
+3. **mock struct 方法**
+   - 调用点走 `MEMBER_CALL`，方法表在
+     `struct_type->attributes`，运行期可替换；
+   - 需要：
+     - 保存原方法值 clone；
+     - 在 member_scope/attributes 安装 replacement；
+     - `unmock_method` 恢复；
+     - 处理继承 owner、静态方法、泛型实例；
+   - 方法 replacement 的签名必须包含 `self`（实例方法）；
+   - 现有用户 API `mock("name", fn, repl)` 不适合方法，需要
+     `mock_method(Type, "name", repl)`。
+
+4. **测试失败的错误类型识别**
+   - 需要区分：
+     - assert 失败（用例失败，继续下一个）；
+     - 普通运行错误/panic（用例失败，继续下一个，或中止整个测试？）；
+     - 编译错误（不执行）。
+   - 建议所有用例级错误都记录失败并继续，最后统一退出码。
+
+### 6.4 暂不做
+
+- 覆盖率、过滤、并发、参数化、setup/teardown；
+- 实例级 mock；
+- C 后端的具体生成（当前 VM 为临时态）。
+
+### 6.5 推荐落地顺序
+
+1. AST_TEST + 普通构建丢弃 + 单文件测试模式；
+2. 生成测试函数 + host runner + gtest 风格输出；
+3. test 上下文 + `assert(bool, "expr")` + 用例失败继续；
+4. 解决 assert 错误的 defer/FREE 展开语义；
+5. mock 自由函数 + 自动 unmock_all；
+6. mock 实例/静态/泛型方法；
+7. 项目模式 `clux.mod` 遍历；
+8. 最后迁移到 C 后端时重写 runner（语义保持不变）。
+
+---
+
 ## 待补充
 
 - assert 的具体形式（`assert(expr)` / `assert_eq` / 消息参数）
