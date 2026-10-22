@@ -42,6 +42,9 @@ compiler/VM 完全看不到它。
 
 1. 删除 `args: ...Args` 形参；
 2. 为每个包元素合成 `__pack_arg_i: Ti` 形参（类型来自实例实参表）；
+   - 若 `Ti` 是**含 own 槽位但未标 own** 的聚合（如 `Outer` 里套
+     `own *i32`），合成形参自动写成 `own Ti`，否则 `move(__pack_arg_i)`
+     会被当作 move 借用而报错；
 3. 记录 `pack_param_name = "args"`；
 4. **不再**插入 `var args: <...> = ...` 聚合语句。
 
@@ -165,6 +168,11 @@ return .{ ...args };
 `value_move` 并标 FATAL；sema 的 call shadow 同样标 FATAL。于是
 `var t = pack[own *i32](move(x));` 自动推断为 own 绑定并生成销毁序列，
 `.cxb` 往返也不泄漏。
+
+这些检查与普通函数走同一条所有权路线：`resolve_instance_sig` 调用
+`sema_check_ret_ref_annot`，实例 body 的 `walk_return` 也执行构造返回
+检查；嵌套的 `own`（struct 字段、tuple 元素、array/option 内部）都由
+`type_has_own_slots` 递归覆盖。
 
 ---
 

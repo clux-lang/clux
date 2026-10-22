@@ -1167,3 +1167,18 @@ TEST(GenericReject, OwnPackConstructReturnNeedsMove) {
         "}\n",
         "freshly constructed aggregate", "generic_pack_construct_return_move");
 }
+
+TEST(GenericPack, NestedOwnAggregate) {
+    clux_expect_ok(
+        "struct Inner { p: own *i32; }\n"
+        "struct Outer { inner: Inner; }\n"
+        "func pack[...Args](args: ...Args): fatal <...Args> {\n"
+        "  return move(.{ ...args });\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var v: own Outer = .Outer{ .inner = .Inner{ .p = new i32{ .i32{7} } } };\n"
+        "  var t = pack[Outer](move(v));\n"
+        "  return t[0].inner.p.* - 7;\n"
+        "}\n",
+        "generic_pack_nested_own");
+}

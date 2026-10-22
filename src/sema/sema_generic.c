@@ -390,7 +390,15 @@ static bool materialize_pack_params(sema_t *sema, ast_func_def_t *fn,
         ast_var_def_t *vd = (ast_var_def_t *)pv;
         vd->name = arena_copy(sema->arena, nm, strlen(nm));
         const sema_generic_arg_t *a = &inst->args[inst->pack_offset + i];
-        vd->type_expr = sema_gen_type_ref(sema, a->type);
+        /* 元素是含 own 槽位但未标 own 的聚合：隐藏形参必须用 `own T`
+           接收，否则形参只是借用视图，body 里 `move(__pack_arg_i)` 会报
+           "cannot move a borrowed value"，也无法负责释放。 */
+        const type_t *ptype = a->type;
+        if (ptype && type_ownership_of(ptype) == OWN_NONE &&
+            type_has_own_slots(type_strip_quals(ptype)))
+            ptype = type_ownership_apply(sema->vm, OWN_OWN,
+                                         type_strip_quals(ptype));
+        vd->type_expr = sema_gen_type_ref(sema, ptype ? ptype : a->type);
         if (!vd->type_expr) return false;
         pv->is_generated = true;
         pv->next = NULL;
