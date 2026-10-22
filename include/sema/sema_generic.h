@@ -148,6 +148,18 @@ bool sema_generic_parse_explicit_args(sema_t *sema, sema_symbol_t *generic_sym,
 /** 当前 active 实例的**类型参数包变参形参**是否名为 name。 */
 bool sema_generic_pack_is_param(sema_t *sema, strslice_t name);
 
+/** 当前 active 实例的 **comptime 值参数包**是否名为 name。 */
+bool sema_generic_value_pack_is_param(sema_t *sema, strslice_t name);
+
+/** 生成值参数包第 index 个元素的字面量表达式（int/bool/str）。 */
+ast_node_t *sema_generic_value_pack_elem_expr(sema_t *sema,
+                                              const sema_generic_instance_t *inst,
+                                              size_t index, uint32_t tb, uint32_t te);
+
+/** 值参数包元素类型组成的 tuple 类型表达式 `<T0,...>`。 */
+ast_node_t *sema_generic_value_pack_tuple_type_expr(
+    sema_t *sema, const sema_generic_instance_t *inst, uint32_t tb, uint32_t te);
+
 /** 生成参数包元素表达式 `__pack_arg_i`；move_own 时对含 own 槽位的元素
  *  自动包 `move(...)`（供展开 / 裸 args 元组构造使用）。 */
 ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,

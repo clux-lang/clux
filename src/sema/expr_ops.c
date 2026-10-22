@@ -154,9 +154,12 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
             strslice_eq(gi->pack_name, n->name)) {
           diag_error(sema->diag, sema_loc(sema, *node),
                      "comptime value parameter pack '%.*s' is a compile-time "
-                     "sequence; use '%.*s[i]' or 'len(%.*s)'",
+                     "sequence; use '%.*s[i]', 'len(%.*s)', spread '...%.*s', "
+                     "or assemble a tuple with '.{ %.*s }'",
                      (int)n->name.len, n->name.ptr, (int)n->name.len,
-                     n->name.ptr, (int)n->name.len, n->name.ptr);
+                     n->name.ptr, (int)n->name.len, n->name.ptr,
+                     (int)n->name.len, n->name.ptr, (int)n->name.len,
+                     n->name.ptr);
           return val_void(sema);
         }
       }

@@ -435,6 +435,30 @@ bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields,
     }
     ast_spread_t *sp = (ast_spread_t *)f;
     ast_node_t *op = sp->operand;
+    /* `...N`（comptime 值参数包）：展开为字面量字段。 */
+    if (op && op->kind == AST_IDENT &&
+        sema_generic_value_pack_is_param(sema,
+                                        ((ast_ident_t *)op)->name)) {
+      const sema_generic_instance_t *gi = sema->generics.active_inst;
+      ast_node_t *head = NULL, *tail = NULL;
+      for (size_t i = 0; i < gi->pack_count; i++) {
+        ast_node_t *e = sema_generic_value_pack_elem_expr(
+            sema, gi, i, f->tok_begin, f->tok_end);
+        if (!e) return false;
+        e->next = NULL;
+        if (tail) tail->next = e;
+        else head = e;
+        tail = e;
+      }
+      if (head) {
+        tail->next = f->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = f->next;
+      }
+      continue;
+    }
     /* `.{ ...args }`：Args 已知，展开为隐藏形参字段；own 元素自动 move。 */
     if (op && op->kind == AST_IDENT &&
         sema_generic_pack_is_param(sema, ((ast_ident_t *)op)->name)) {
@@ -624,6 +648,17 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
          当前实现 array + option + struct + tuple 分支。 */
       ast_construct_t *n = (ast_construct_t *)*node;
       const type_t *t;
+      /* `. { N }`：值参数包没有标量值，元素类型即 tuple 元素类型；
+         用户用构造语法决定是否组装 tuple。 */
+      if (!n->type && n->fields && !n->fields->next &&
+          n->fields->kind == AST_IDENT &&
+          sema_generic_value_pack_is_param(
+              sema, ((ast_ident_t *)n->fields)->name)) {
+        n->type = sema_generic_value_pack_tuple_type_expr(
+            sema, sema->generics.active_inst, n->base.tok_begin,
+            n->base.tok_end);
+        if (!n->type) return val_void(sema);
+      }
       /* `. { ...args }`：Args 已知，直接给出 `<...Args>` 目标类型；
          spread 随后展开成隐藏形参（不经过运行期 tuple）。 */
       if (!n->type && n->fields && !n->fields->next &&
@@ -636,6 +671,39 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
               sema, sema->generics.active_inst, n->base.tok_begin,
               n->base.tok_end);
           if (!n->type) return val_void(sema);
+        }
+      }
+      /* 裸值参数包字段 `.{ N }`：按元素展开为编译期字面量；是否组装
+         tuple 由用户写不写构造语法决定。 */
+      {
+        ast_node_t **slot = &n->fields;
+        while (*slot) {
+          ast_node_t *f = *slot;
+          if (f->kind == AST_IDENT &&
+              sema_generic_value_pack_is_param(
+                  sema, ((ast_ident_t *)f)->name)) {
+            const sema_generic_instance_t *gi =
+                sema->generics.active_inst;
+            ast_node_t *head = NULL, *tail = NULL;
+            for (size_t i = 0; i < gi->pack_count; i++) {
+              ast_node_t *e = sema_generic_value_pack_elem_expr(
+                  sema, gi, i, f->tok_begin, f->tok_end);
+              if (!e) return val_void(sema);
+              e->next = NULL;
+              if (tail) tail->next = e;
+              else head = e;
+              tail = e;
+            }
+            if (head) {
+              tail->next = f->next;
+              *slot = head;
+              slot = &tail->next;
+            } else {
+              *slot = f->next;
+            }
+            continue;
+          }
+          slot = &f->next;
         }
       }
       /* `...operand` 展开先于一切字段处理（具名/匿名、new/普通构造共用）。

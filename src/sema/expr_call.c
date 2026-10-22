@@ -266,6 +266,22 @@ static ast_node_t *pack_spread_explicit_callee(sema_t *sema, ast_node_t *callee,
   return idx;
 }
 
+static ast_node_t *value_pack_literal_chain(
+    sema_t *sema, const sema_generic_instance_t *gi, uint32_t tb,
+    uint32_t te) {
+  ast_node_t *head = NULL, *tail = NULL;
+  for (size_t i = 0; i < gi->pack_count; i++) {
+    ast_node_t *e =
+        sema_generic_value_pack_elem_expr(sema, gi, i, tb, te);
+    if (!e) return NULL;
+    e->next = NULL;
+    if (tail) tail->next = e;
+    else head = e;
+    tail = e;
+  }
+  return head;
+}
+
 static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
                                     sema_scope_t *scope) {
   ast_node_t **slot = &call->args;
@@ -277,6 +293,24 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
     }
     ast_spread_t *sp = (ast_spread_t *)a;
     ast_node_t *op = sp->operand;
+    /* `...N`（comptime 值参数包）：展开为编译期字面量序列。 */
+    if (op && op->kind == AST_IDENT &&
+        sema_generic_value_pack_is_param(sema,
+                                        ((ast_ident_t *)op)->name)) {
+      const sema_generic_instance_t *gi = sema->generics.active_inst;
+      ast_node_t *head =
+          value_pack_literal_chain(sema, gi, a->tok_begin, a->tok_end);
+      if (head) {
+        ast_node_t *tail = head;
+        while (tail->next) tail = tail->next;
+        tail->next = a->next;
+        *slot = head;
+        slot = &tail->next;
+      } else {
+        *slot = a->next;
+      }
+      continue;
+    }
     /* `...args`（类型参数包）：编译期展开为隐藏形参；含 own 槽位的元素
        自动 move 交出所有权。 */
     if (op && op->kind == AST_IDENT &&
@@ -360,6 +394,37 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
       slot = &tail->next;
     } else {
       *slot = a->next; /* 空数组：0 个实参 */
+    }
+  }
+  /* 裸值参数包 `f(N)`：comptime 序列没有标量值，按元素展开为用户决定的
+     实参序列（要 tuple 时写 `.{ N }`）。`len(N)` 是内建特例，保持单实参
+     由调用层折叠。 */
+  bool is_len_call =
+      call->callee && call->callee->kind == AST_IDENT &&
+      strslice_eq(((ast_ident_t *)call->callee)->name,
+                  strslice_from_cstr("len"));
+  if (!is_len_call) {
+    ast_node_t **slot = &call->args;
+    while (*slot) {
+      ast_node_t *a = *slot;
+      if (a->kind == AST_IDENT &&
+          sema_generic_value_pack_is_param(
+              sema, ((ast_ident_t *)a)->name)) {
+        const sema_generic_instance_t *gi = sema->generics.active_inst;
+        ast_node_t *head =
+            value_pack_literal_chain(sema, gi, a->tok_begin, a->tok_end);
+        if (head) {
+          ast_node_t *tail = head;
+          while (tail->next) tail = tail->next;
+          tail->next = a->next;
+          *slot = head;
+          slot = &tail->next;
+        } else {
+          *slot = a->next;
+        }
+        continue;
+      }
+      slot = &a->next;
     }
   }
   /* 重算 args_last（展开会改变链尾；O(n) 但只在 sema 跑一次） */

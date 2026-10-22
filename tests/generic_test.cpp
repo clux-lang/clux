@@ -1253,3 +1253,16 @@ TEST(ComptimeIf, GenericPatternMixedExpression) {
         "}\n",
         "generic_comptime_pattern_mixed");
 }
+
+TEST(GenericPack, ValuePackSpreadAndTuple) {
+    clux_expect_ok(
+        "func sum3(a: u64, b: u64, c: u64): u64 { return a + b + c; }\n"
+        "func f[...N: comptime u64](): u64 {\n"
+        "  var t = .{ N };\n"
+        "  return t[0] + t[1] + t[2] + sum3(N) + sum3(...N);\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  return (f[1u64, 2u64, 3u64]() - 36u64) as i32;\n"
+        "}\n",
+        "generic_value_pack_spread");
+}

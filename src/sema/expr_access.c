@@ -622,26 +622,9 @@ static value_t *value_pack_index_try(sema_t *sema, ast_node_t **node,
                "value parameter pack element is not a compile-time value");
     return val_void(sema);
   }
-  uint64_t v = 0;
-  if (a->value.type->kind == TYPE_KIND_BOOL) {
-    v = a->value.b ? 1 : 0;
-  } else if (a->value.type->name.len == 3 && a->value.type->name.ptr &&
-             memcmp(a->value.type->name.ptr, "u64", 3) == 0) {
-    v = a->value.u;
-  } else {
-    switch (a->value.type->size) {
-    case 1: v = (uint8_t)a->value.i; break;
-    case 2: v = (uint16_t)a->value.i; break;
-    case 4: v = (uint32_t)a->value.i; break;
-    default: v = (uint64_t)a->value.i; break;
-    }
-  }
-  ast_node_t *lit = ast_int_lit_new(sema->arena, (*node)->tok_begin,
-                                    (*node)->tok_end);
+  ast_node_t *lit = sema_generic_value_pack_elem_expr(
+      sema, gi, (size_t)raw, (*node)->tok_begin, (*node)->tok_end);
   if (!lit) return val_void(sema);
-  ((ast_int_lit_t *)lit)->value = v;
-  ((ast_int_lit_t *)lit)->type = a->value.type->name;
-  lit->is_generated = true;
   lit->next = (*node)->next;
   *node = lit;
   return value_make_shadow(sema->vm, a->value.type);

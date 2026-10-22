@@ -385,7 +385,7 @@ func rec[T](): void { rec[own *T](); }   // 深度超限负例
 **验收**（`tests/generic_test.cpp` 的 `GenericPack.*`）：
 显式/推导包、fixed 泛型参数 + 包、空包、`len(args)`、包类型不匹配/泛型类型包负例。
 
-**仍待**：comptime 值参数包 `...N: comptime u64`、`extends <?>` 包约束（P6）。
+**仍待**：`extends <?>` 包约束（P6）；comptime 值参数包已由 P9 落地。
 
 ### P5c `<...Args>` 类型展开 ✅ 已完成（2026-10-22）
 
@@ -489,9 +489,7 @@ token pool 重绑。
 - **泛型 reexport**：`sema_cross.c` 递归扫描 `export * from` 代理链，
   在最终定义模块取 AST/token pool。
 
-**仍待（P10）**：跨模块 interface 的 `implements`/约束写法；泛型方法的
-显式类型实参（`v.method[U](...)`）；签名期错误的实例链 note；comptime
-值参数包的“裸 N 作为 tuple 值”语义（当前明确拒绝并引导 `N[i]` / `len(N)`）。
+**仍待（P10）**：signature 期错误的实例链 note。
 
 ### P9 comptime 值参数包 ✅ 已完成（2026-10-22）
 
@@ -503,16 +501,15 @@ token pool 重绑。
   - `N[i]` 在 sema 折叠为整数字面量（越界/非编译期下标报错）；
   - `len(N)` 折叠为元素个数；
   - 类型位置 `[N[0]]T` 经 CTFE 读取绑定数组；
-  - 裸 `N` 不作标量。
+  - 裸 `N` 在实参/构造字段位置按元素展开为字面量（`f(N)`、`sum(...N)`、
+    `.{ N }`）；是否组装 tuple 由用户决定。裸 `N` 作为标量仍报错。
 - mangling 仍按值实参编码；fmt 渲染 `...N: comptime u64` 幂等。
 
 **验收**（`tests/generic_test.cpp` 的 `GenericValuePack.*` /
 `GenericReject.ValuePack*`）：索引/len、空包、固定+值包、数组长度、
 显式实参要求、越界负例、fmt 幂等。
 
-**仍待（P10）**：跨模块 interface 的 `implements`/约束写法；泛型方法的
-显式类型实参（`v.method[U](...)`）；签名期错误的实例链 note；comptime
-值参数包的“裸 N 作为 tuple 值”语义（当前明确拒绝并引导 `N[i]` / `len(N)`）。
+**仍待（P10）**：signature 期错误的实例链 note。
 
 ### P10 边界审视（2026-10-22）
 
@@ -591,8 +588,7 @@ token pool 重绑。
 
 **仍待（需决定是否支持）**
 - 签名期错误（如返回类型未知）尚未输出实例链 note；体错误已覆盖。
-- comptime 值包“裸 `N` 作为 tuple 值”：设计只说“编译期 tuple 消费”，未给
-  语法。当前定义为 `N[i]` / `len(N)` / `[N[0]]T`，裸 `N` 明确报错。
+- signature 期错误尚未输出实例链 note。
 - 运行期可变参数：采用**编译期 AST 展开**（`args[i]`/`len`/`...args`；
   不生成 tuple 局部变量、不改 ABI），设计见
   [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)，

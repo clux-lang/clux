@@ -19,6 +19,7 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_string_lit.h"
 #include "parser/ast_move.h"
 #include "parser/ast_option.h"
 #include "parser/ast_owned_type.h"
@@ -264,6 +265,73 @@ bool sema_generic_pack_is_param(sema_t *sema, strslice_t name) {
     return inst && inst->has_pack && !inst->pack_is_value &&
            inst->pack_param_name.ptr &&
            strslice_eq(inst->pack_param_name, name);
+}
+
+bool sema_generic_value_pack_is_param(sema_t *sema, strslice_t name) {
+    const sema_generic_instance_t *inst = sema ? sema->generics.active_inst : NULL;
+    return inst && inst->has_pack && inst->pack_is_value &&
+           inst->pack_name.ptr && strslice_eq(inst->pack_name, name);
+}
+
+ast_node_t *sema_generic_value_pack_elem_expr(
+    sema_t *sema, const sema_generic_instance_t *inst, size_t index,
+    uint32_t tb, uint32_t te) {
+    if (!sema || !inst || !inst->has_pack || !inst->pack_is_value ||
+        index >= inst->pack_count)
+        return NULL;
+    const sema_generic_arg_t *a = &inst->args[inst->pack_offset + index];
+    if (!a->is_value || !a->value.type) return NULL;
+    const type_t *vt = a->value.type;
+    ast_node_t *lit = NULL;
+    if (type_kind_of(vt) == TYPE_KIND_STR) {
+        lit = ast_string_lit_new(sema->arena, tb, te);
+        if (!lit) return NULL;
+        ((ast_string_lit_t *)lit)->text = a->value.s;
+    } else {
+        uint64_t v = 0;
+        if (type_kind_of(vt) == TYPE_KIND_BOOL) {
+            v = a->value.b ? 1 : 0;
+        } else if (vt->name.len == 3 && vt->name.ptr &&
+                   memcmp(vt->name.ptr, "u64", 3) == 0) {
+            v = a->value.u;
+        } else {
+            switch (vt->size) {
+            case 1: v = (uint8_t)a->value.i; break;
+            case 2: v = (uint16_t)a->value.i; break;
+            case 4: v = (uint32_t)a->value.i; break;
+            default: v = (uint64_t)a->value.i; break;
+            }
+        }
+        lit = ast_int_lit_new(sema->arena, tb, te);
+        if (!lit) return NULL;
+        ((ast_int_lit_t *)lit)->value = v;
+        ((ast_int_lit_t *)lit)->type = vt->name;
+    }
+    lit->is_generated = true;
+    return lit;
+}
+
+ast_node_t *sema_generic_value_pack_tuple_type_expr(
+    sema_t *sema, const sema_generic_instance_t *inst, uint32_t tb,
+    uint32_t te) {
+    if (!sema || !inst || !inst->has_pack || !inst->pack_is_value) return NULL;
+    ast_node_t *t = ast_tuple_new(sema->arena, tb, te);
+    if (!t) return NULL;
+    ast_node_t *head = NULL, *last = NULL;
+    for (size_t i = 0; i < inst->pack_count; i++) {
+        const sema_generic_arg_t *a = &inst->args[inst->pack_offset + i];
+        if (!a->is_value || !a->value.type) return NULL;
+        ast_node_t *ref = sema_gen_type_ref(sema, a->value.type);
+        if (!ref) return NULL;
+        ref->next = NULL;
+        if (last) last->next = ref;
+        else head = ref;
+        last = ref;
+    }
+    ((ast_tuple_t *)t)->elem_types = head;
+    ((ast_tuple_t *)t)->elem_types_last = last;
+    t->is_generated = true;
+    return t;
 }
 
 /* 参数包元素是否需要显式 move 才能离开形参：own/fatal 修饰，或内部有
