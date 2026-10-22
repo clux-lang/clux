@@ -154,35 +154,51 @@ func __clux_test_main(): void {
 
 运行器负责：
 
-- 每个 test 前设置 test 上下文；
+- 每个 test 前设置 test 上下文与失败标志；
 - 调用 test 函数；
-- 捕获 assert 的穿透错误；
+- assert 失败不会以普通 error 中断 main，而是让 test 函数提前
+  return，main 继续调用下一个；
 - 记录成功/失败与耗时；
 - 每个 test 结束后 `unmock_all`；
 - 继续下一个 test。
 
-### 4.3 assert 是特殊的穿透返回错误
+### 4.3 assert 等价于当前 test 的提前 return
 
 `assert(expr)`：
 
 - `expr` 必须为 true；
 - 失败时打印表达式文本；
-- 返回一个**特殊的穿透错误值**，越过当前 helper/test 函数栈，
-  由测试运行器捕获；
-- 运行器把它记成当前用例失败，终止当前用例；
-- 不终止后续用例，也不退出整个进程（除非最终汇总决定退出码）。
+- 语义上等价于**当前 test 的一条 `return`**：
+  - 设置当前 test 的失败标志；
+  - 退出当前 test 函数；
+  - 不继续执行 test 中 assert 之后的语句；
+  - 下一个 test 继续执行；
+- 不是普通运行错误，也不是 panic。
 
-“穿透”要求：
+因为允许 helper 使用 assert，所以需要“穿透到 test 边界”的
+return：
 
-- helper 不必手工检查/传递错误；
-- VM 函数调用栈展开时，沿途作用域的 own/defer 清理仍需执行；
-- 运行器能区分普通运行错误和 assert 失败，以便打印用例结果；
-- 上下文和 mock 清理由运行器统一完成，业务代码不处理。
+- 在 test 函数体内：直接提前 return；
+- 在 helper 内：把“test 失败 return”信号穿过 helper 调用帧，
+  直到当前 test 函数；
+- 沿途每个帧按正常 return 语义执行 defer / own FREE 清理；
+- test 函数返回后，main 已能继续下一个用例。
+
+因此 assert 的展开类似：
+
+```clux
+if (!expr) {
+    print("assert failed: <expr source>");
+    __test_fail_return();   // 等价 return，穿透到 test 边界
+}
+```
+
+上下文和 mock 清理由运行器统一完成；业务代码不处理。
 
 ### 4.4 保留字与诊断
 
-- `test`、`assert`、`mock`、`unmock` 等测试相关名字按保留字处理，
-  不允许用户定义同名普通函数/变量（最终列表待定）；
+- `test`、`assert`、`mock`、`unmock`、`mock_method`、
+  `unmock_method` 按保留字处理，不允许用户定义同名普通函数/变量；
 - 非 test 上下文使用测试接口要给出明确诊断；
 - 普通 build/run 不生成 test 函数和测试 main。
 
@@ -263,34 +279,21 @@ func __clux_test_main(): void {
 
 ### 6.3 高难度 / 需要先定方案
 
-1. **assert 穿透错误与继续执行**
-   - VM 的错误返回会从当前调用链一路返回到 `exec_drive`；
-   - `func_vcall` 的 error 路径会销毁 callee 作用域子树，但**不走
-     defer**（代码里明确避免触发 defer）；
-   - 因此 assert 失败：
-     - own 资源通常由作用域销毁释放；
-     - 用户 `defer` 清理不会执行；
-   - 如果测试允许 defer/临时清理，这是必须解决的点。
+1. **assert 作为跨帧 test-return 的清理**
+   - assert 语义是当前 test 的 return，不是普通 error；
+   - helper 内 assert 需要把 return 信号传到 test 边界；
+   - 沿途每个帧都要执行正常 return 的 defer / FREE；
+   - 当前 VM 的 error 路径会销毁作用域子树但**不走 defer**，
+     不能直接复用为 assert；
+   - 需要单独实现“test-return 信号 + 正常 return 清理”，
+     或生成清理路径；这是主要实现难点。
 
-   可选方案：
-   - 为 test 错误单独实现“干净展开”，执行 defer + FREE 后再返回；
-   - 或明确测试失败时不保证 defer（不推荐作为长期语义）；
-   - C 后端可用 `setjmp/longjmp` 或错误返回自然实现。
-
-2. **“生成测试 main 顺序调用”与继续执行冲突**
-   - 如果测试 main 是普通 clux 函数，第一个 assert 错误会终止整个
-     main，后续用例不会执行；
-   - 当前 VM 没有 try/catch，测试 main 内无法捕获并继续；
-   - 因此当前实现应由 **host runner 逐个调用测试函数**：
-     ```
-     for each test:
-         set in_test
-         call test_fn()
-         if error: record failure
-         unmock_all
-         clear in_test
-     ```
-   - “测试 main”可作为 C 后端的生成物；VM 阶段用 driver 循环更实际。
+2. **生成测试 main**
+   - assert 等价于 test 函数提前 return，test main 可以继续调用
+     下一个 test，不再需要 try/catch；
+   - 前提是 test 函数能设置失败标志并正常返回；
+   - helper 的跨帧 return 仍是难点 1 的一部分；
+   - 当前 VM 也可以由 host runner 逐个调用，效果等价。
 
 3. **mock struct 方法**
    - 调用点走 `MEMBER_CALL`，方法表在
@@ -322,7 +325,7 @@ func __clux_test_main(): void {
 1. AST_TEST + 普通构建丢弃 + 单文件测试模式；
 2. 生成测试函数 + host runner + gtest 风格输出；
 3. test 上下文 + `assert(bool, "expr")` + 用例失败继续；
-4. 解决 assert 错误的 defer/FREE 展开语义；
+4. 实现 assert 的 test-return 信号 + 沿帧 defer/FREE 清理；
 5. mock 自由函数 + 自动 unmock_all；
 6. mock 实例/静态/泛型方法；
 7. 项目模式 `clux.mod` 遍历；
@@ -330,10 +333,21 @@ func __clux_test_main(): void {
 
 ---
 
+## 已确认决定
+
+- assert 失败等价于当前 test 的提前 return；
+- 沿途按正常 return 语义执行 defer / own FREE 清理；
+- 失败只终止当前 test，下一个 test 继续；
+- 每个 test 结束自动 `unmock_all`；
+- test 块无参、无返回值、不允许嵌套；
+- 方法 mock 使用独立 API：
+  ```clux
+  mock_method(Type, "method", replacement);
+  unmock_method(Type, "method");
+  ```
+
 ## 待补充
 
 - assert 的具体形式（`assert(expr)` / `assert_eq` / 消息参数）
-- 测试块能否有返回值（当前按无返回值）
 - 失败后的进程退出码
 - 项目模式下源码遍历规则
-- mock 接口与 test 块的作用域/自动清理规则
