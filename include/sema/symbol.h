@@ -61,6 +61,7 @@ typedef enum {
   SEMA_BUILTIN_MAKE_SHARE, /* __make_share(p) -> share *T（RC 创建通道） */
   SEMA_BUILTIN_WEAK_GET,   /* __weak_get(w) -> ?share *T（.get() 升级） */
   SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
+  SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T / fatal T（移出 optional payload） */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */

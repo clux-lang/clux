@@ -258,6 +258,19 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
+  /* take(x)：optional payload 移出（?T -> T；?own T -> fatal T）。纯 sema/
+     compiler 指令，不注册 VM 函数。 */
+  {
+    const type_t *tsig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_opaque, true);
+    if (tsig) {
+      sema_symbol_t tinit = {.kind = SEMA_SYM_FUNC, .type = tsig,
+                             .is_active = true, .fid = 0,
+                             .builtin_op = SEMA_BUILTIN_TAKE};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("take_opt"), &tinit);
+    }
+  }
+
   /* 预注册 RC 内置函数（share/weak 是真实类型，源码不写这些名字）：
        - __make_share(p)：fatal/own *T → share *T（§12.1 创建通道）
        - __weak_get(w)  ：weak *T → ?share *T（§12.4 原子升级，`.get()` 语法糖） */

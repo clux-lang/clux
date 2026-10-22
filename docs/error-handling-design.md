@@ -106,6 +106,26 @@ panic(msg: str);   // 打印 "panic: <msg>" 到 stderr，然后以退出码 1 �
 - 终止用 C `_Exit(1)`：不跑 atexit、不弹 Windows abort 对话框，退出码
   与 Linux `_exit(1)` 一致。
 
+## 5.1 `take_opt`
+
+optional own payload 的移出原语：
+
+```clux
+var o: own ?own *i32 = .?own *i32{ new i32{ .i32{7} } };
+var p: own *i32 = take_opt(o);
+// o 已变为 nil；p 拥有指针
+```
+
+语义：
+
+- `?T`（普通 T）→ `T`：拷贝 payload，源置 nil；
+- `?own T` / 含 own 槽位 → `fatal T`：移出 payload，源置 nil；
+- 源为 nil → 运行期 panic。
+
+实现为 `BCODE_OPT_TAKE`，源可选值是借用视图（变量/字段读取），
+清 tag 后源析构不会二次释放。它用于 `ResultOwned` 之类的 owned
+结果类型；copyable Result 仍使用普通 `value()`。
+
 ## 6. `[[noreturn]]` / `[[never]]` 标记装饰器
 
 “不返回”是通用的函数属性，不是 panic 的专属行为。内建标记装饰器：

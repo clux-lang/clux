@@ -188,3 +188,37 @@ TEST(ErrorHandling, TryOperandEvaluatedOnce) {
           "}\n",
       "error_try_once");
 }
+
+TEST(ErrorHandling, TakePlainOptional) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var x: ?i32 = .?i32{ 5 };\n"
+      "  var y: i32 = take_opt(x);\n"
+      "  if (x != nil) { return 1; }\n"
+      "  return y - 5;\n"
+      "}\n",
+      "take_plain");
+}
+
+TEST(ErrorHandling, TakeOwnOptional) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var o: own ?own *i32 = .?own *i32{ new i32{ .i32{7} } };\n"
+      "  var p: own *i32 = take_opt(o);\n"
+      "  if (o != nil) { return 1; }\n"
+      "  return p.* - 7;\n"
+      "}\n",
+      "take_own");
+}
+
+TEST(ErrorHandling, TakeOptionalField) {
+  clux_expect_ok(
+      "struct Node { next: ?own *i32; }\n"
+      "func main(): i32 {\n"
+      "  var n: own Node = .Node{ .next = .?own *i32{ new i32{ .i32{9} } } };\n"
+      "  var p: own *i32 = take_opt(n.next);\n"
+      "  if (n.next != nil) { return 1; }\n"
+      "  return p.* - 9;\n"
+      "}\n",
+      "take_field");
+}

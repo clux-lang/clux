@@ -166,6 +166,9 @@ typedef enum {
                                （a.! assert 解包；零拷贝，data 指向 option 值块
                                内偏移）；ok=false（none）→ panic 错误值
                                （"unwrap '.!' on none optional value"）。 */
+    BCODE_OPT_TAKE,         /* 无操作数：弹 ?T 借用值 → none panic；some 则把
+                               payload 移出、源 tag 置 false，返回 T；inner 为
+                               own T 时返回 fatal T。take(x) 专用。 */
     BCODE_OPT_IS_NONE,      /* 无操作数：弹 ?T 值 → 压 bool（ok tag == false）
                                （nil 判定 x==nil / nil==x → OPT_IS_NONE；
                                x!=nil / nil!=x → OPT_IS_NONE + NOT。

@@ -732,6 +732,18 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
   case AST_CALL: {
     ast_call_t *n = (ast_call_t *)node;
 
+    /* `take(x)`：optional payload 移出（compiler 指令，不是函数调用）。 */
+    if (n->is_take_call) {
+      if (!n->args || n->args->next) {
+        c_error(c, node, "take: expects exactly 1 argument");
+        return;
+      }
+      compile_expr(c, n->args);            /* 栈: [?T 借用视图] */
+      bcode_write_op(c->bc, BCODE_OPT_TAKE);
+      st_push(c, 0);                       /* 弹 1 压 1 */
+      break;
+    }
+
     /* `data(s)`（C ABI 适配，sema 置 is_data_call）：从序列取首元素指针。
        编译成 `compile_expr(arg)` + `DATA` 指令——**不是函数调用**：内置 cfunc
        的实参会被 clone 进被调作用域（保证内置改不到调用方的值），函数形态只能

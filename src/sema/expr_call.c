@@ -1425,9 +1425,35 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
          "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
 
-      /* len（m4-design §5/§11.3）：注册为 variadic，参数类型不经签名校验——
-         此处校验实参是可长序列（array/slice/str）。返回类型由注册签名给出
-         （usize），无需替换。 */
+      /* take(x)：运行时移出 optional payload 并置 nil。
+         - ?T（普通）        -> T
+         - ?own T / 含 own 槽位 -> fatal T（strip own 后加 fatal） */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_TAKE) {
+        if (argc != 1 || !arg_shadows[0]) {
+          diag_error(sema->diag, sema_loc(sema, &call->base),
+                     "take_opt: expects exactly 1 argument");
+          return val_void(sema);
+        }
+        const type_t *ot = value_type(arg_shadows[0]);
+        if (!ot || type_kind_of(ot) != TYPE_KIND_OPTION) {
+          diag_error(sema->diag, sema_loc(sema, call->args),
+                     "take_opt: argument must be an optional value");
+          return val_void(sema);
+        }
+        const type_t *inner = type_option_inner(ot);
+        if (!inner) return val_void(sema);
+        const type_t *core = type_strip_ownership(inner);
+        const type_t *res = inner;
+        if (type_ownership_of(inner) == OWN_OWN ||
+            type_has_own_slots(core)) {
+          res = sema_fatal_variant_of(sema, core);
+          if (!res) return val_void(sema);
+        }
+        call->is_take_call = true;
+        return value_make_shadow(sema->vm, res);
+      }
+
+
       /* `cfunc_ptr(f)` 的返回类型：按 f 的签名精化为 `cfunc(...)`（C 函数指针），
          而不是 opaque——这样 FFI 声明可以写真实的函数类型
          `cmp: cfunc(opaque, opaque) -> i32`，调用点也能按类型检查。 */

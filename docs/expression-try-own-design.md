@@ -186,15 +186,24 @@ var v = move(r).?;
 
 ---
 
-## 5. 备选方案：`?own T` 的运行时 take
+## 5. 备选方案：`?own T` 的运行时 take（已实现原语）
 
 另一个更局部的方案是给 optional own 增加一个**原地 take** 操作：
 
 ```text
-take(x: lvalue ?own T) -> own T
-  x == nil  -> panic
-  x != nil  -> 返回 payload（所有权转移），同时把 x 置为 nil
+take_opt(x: lvalue ?T) -> T
+  T 普通类型       -> 返回 T 的拷贝，x 置 nil
+  T own / 含 own 槽位 -> 返回 fatal T（移出 payload），x 置 nil
+  x == nil        -> panic
 ```
+
+实现为 `BCODE_OPT_TAKE`：
+
+- 弹出 optional 的**借用视图**（变量/字段读取天然是借用）；
+- some：把 payload 字节移到新值，源 tag 置 `false`，源 value 清零；
+- none：运行期错误 `panic: take on none optional value`；
+- own payload 用 `type_ownership_intern(FATAL, core)` 生成 `fatal T`；
+- 普通 payload 直接返回 `T`。
 
 它比 `into_value` 更小：
 
@@ -207,7 +216,7 @@ Result 方法可以写成（self 必须是可变 ref，不能是 `ref *const`）
 
 ```clux
 func value(self: ref *Result[T, E]): T {
-    return take(self.val);
+    return take_opt(self.val);
 }
 ```
 
@@ -233,7 +242,7 @@ take 只解决“own payload 怎么取出来”，**不解决 `.?' 只能在赋�
 
 建议落地顺序：
 
-1. 实现 optional take 原语（`OPT_TAKE` / `take(x)`）并测试 `?own *X`；
+1. 实现 optional take 原语（`OPT_TAKE` / `take_opt(x)`）并测试 `?own *X`；
 2. 用 `ResultOwned` 原型验证 own payload；
 3. 再做 copyable 的表达式 `.?'；
 4. 最后决定是否让 owned Result 也走统一 `.?' 语法。

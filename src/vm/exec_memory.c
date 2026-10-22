@@ -1048,3 +1048,37 @@ value_t *op_unwrap(vm_t *vm, bytecode_t *bc, size_t *pc) {
     return value_make_borrowed(vm, inner,
         (uint8_t *)value_data(v) + option_value_offset(t));
 }
+
+/* OPT_TAKE（无操作数）：`take(x)`。弹 ?T 借用值 → none panic；some 则
+ * 把 payload **移出**（字节拷贝，不做 clone），把源 tag 置 false，返回：
+ *   - inner 是普通类型：T
+ *   - inner 是 own T / 含 own 槽位：fatal T
+ * 源槽位置 nil 后，其析构不再释放 payload（避免 double free）。 */
+value_t *op_opt_take(vm_t *vm, bytecode_t *bc, size_t *pc) {
+    (void)bc; (void)pc;
+    value_t *v = exec_stack_pop(vm);
+    const type_t *t = v ? value_type(v) : NULL;
+    if (!t || t->kind != TYPE_KIND_OPTION)
+        return value_make_error(vm, "exec: take requires an optional value");
+    const type_t *inner = type_option_inner(t);
+    if (!inner) return value_make_error(vm, "exec: take: option has no inner");
+    const type_t *core = type_strip_ownership(inner);
+    bool owned = type_ownership_of(inner) == OWN_OWN ||
+                 type_has_own_slots(core);
+    const type_t *res_t = inner;
+    if (owned) {
+        res_t = type_ownership_intern(vm, TYPE_KIND_FATAL, core);
+        if (!res_t) return value_make_error(vm, "exec: take: fatal type failed");
+    }
+    if (value_is_shadow(v)) return value_make_shadow(vm, res_t);
+    void *data = value_data(v);
+    if (!option_ok(data))
+        return value_make_error(vm, "panic: take on none optional value");
+    void *src = option_value(data, t);
+    void *copy = value_alloc_data_copy(vm->alloc, res_t, src);
+    if (!copy) return value_make_error(vm, "exec: take: out of memory");
+    value_t *out = value_make(vm, res_t, copy);
+    *(bool *)data = false;
+    memset(src, 0, inner->size);
+    return out;
+}

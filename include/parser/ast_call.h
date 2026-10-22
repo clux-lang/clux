@@ -36,6 +36,7 @@ typedef struct {
      * （slice 缓冲区副本 / 数组副本块，调用一结束即悬垂）。因此 sema 置本标志，
      * compiler 改发 `BCODE_DATA` 指令（就地读序列的存储身份，与 `x.&` 同理）。 */
     bool        is_data_call;
+    bool        is_take_call;   /* take(x)：compiler 发 OPT_TAKE 而非 CALL */
     /* ---- struct 方法调用（MEMBER_CALL）----
      * `a.b(args)`（实例方法）/ `T::f(args)`（静态方法）：sema 解析出方法名 +
      * 方法所在的 struct 类型后，置 is_member_call + member_type_id，compiler

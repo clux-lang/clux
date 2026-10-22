@@ -136,6 +136,7 @@ static const bcode_handler_t HANDLERS[] = {
     [BCODE_LENGTH]          = op_length,
     [BCODE_PUSH_OPT_NONE]   = op_push_opt_none,
     [BCODE_UNWRAP]          = op_unwrap,
+    [BCODE_OPT_TAKE]        = op_opt_take,
     [BCODE_OPT_IS_NONE]     = op_opt_is_none,
     [BCODE_PUSH_PTR]        = op_push_ptr,
     [BCODE_NEW]             = op_new,
