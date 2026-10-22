@@ -156,6 +156,18 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     bool v_bad = value_is_error(sema->vm, v) ||
                  value_is_type(v, TYPE_KIND_VOID);
     if (!v_bad) {
+      /* 直接 return 一个含 own 槽位的构造临时：它的值是 OWN（构造产物本人
+         是所有者），不能按值交给调用方；必须显式 move/clone 转成将亡值。 */
+      if (rt->value && rt->value->kind == AST_CONSTRUCT &&
+          type_has_own_slots(value_type(v))) {
+        diag_error(sema->diag, sema_loc(sema, rt->value),
+                   "cannot return a freshly constructed aggregate with own "
+                   "slots by value; wrap it in move(...) or clone(...) to hand "
+                   "ownership to the caller");
+        v_bad = true;
+      }
+    }
+    if (!v_bad) {
       if (!sema->fn.return_type) {
         diag_error(sema->diag, sema_loc(sema, rt->value),
                    "void function cannot return a value");
