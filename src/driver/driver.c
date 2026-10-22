@@ -23,6 +23,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_cunion_def.h"
+#include "parser/ast_interface_def.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_extern_lib.h"
 #include "diag/diagnostic.h"
@@ -434,6 +435,9 @@ static vec_t *collect_export_names(allocator_t *alloc, ast_node_t *program) {
             case AST_STRUCT_DEF: name = ((ast_struct_def_t *)n)->name; break;
             case AST_UNION_DEF:  name = ((ast_union_def_t *)n)->name;  break;
             case AST_CUNION_DEF: name = ((ast_cunion_def_t *)n)->name; break;
+            case AST_INTERFACE_DEF:
+                name = ((ast_interface_def_t *)n)->name;
+                break;
             default: continue; /* export 只修饰声明节点 */
         }
         if (!name.ptr || name.len == 0) continue;

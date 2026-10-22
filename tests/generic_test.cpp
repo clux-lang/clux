@@ -1083,3 +1083,31 @@ TEST(GenericReject, ValuePackBareName) {
         "func main(): i32 { return f[1u64, 2u64]() as i32; }\n",
         "is a compile-time sequence", "value_pack_bare");
 }
+
+TEST(GenericMethod, ExplicitTypeArguments) {
+    clux_expect_ok(
+        "struct Box[T] {\n"
+        "  value: T;\n"
+        "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+        "    var b: Box[U] = .{ .value = f(self.value) };\n"
+        "    return b;\n"
+        "  }\n"
+        "  func get(self: ref *const Box[T]): T { return self.value; }\n"
+        "}\n"
+        "func inc(v: i32): i32 { return v + 1; }\n"
+        "func main(): i32 {\n"
+        "  var b: Box[i32] = .Box[i32]{ .value = 5 };\n"
+        "  var c = b.map_into[i32](inc);\n"
+        "  return c.get() - 6;\n"
+        "}\n",
+        "generic_method_explicit");
+}
+
+TEST(GenericMethod, StaticExplicitTypeArguments) {
+    clux_expect_ok(
+        "struct S {\n"
+        "  func build[U](x: U): i32 { return 7; }\n"
+        "}\n"
+        "func main(): i32 { return S::build[i32](1) - 7; }\n",
+        "generic_static_method_explicit");
+}

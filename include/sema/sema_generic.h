@@ -170,6 +170,14 @@ const type_t *sema_generic_instantiate_method_inferred(
     value_t *const *arg_shadows, size_t argc, const ast_node_t *site,
     const sema_generic_instance_t **out);
 
+/** 显式类型实参的泛型方法调用 `v.method[U](...)`。 */
+const type_t *sema_generic_instantiate_method_explicit(
+    sema_t *sema, sema_symbol_t *method_sym,
+    const sema_generic_instance_t *owner, strslice_t owner_name,
+    const sema_generic_arg_t *args, size_t arg_count,
+    value_t *const *arg_shadows, size_t argc, const ast_node_t *site,
+    const sema_generic_instance_t **out);
+
 /**
  * Pass 3b 队列循环：walk 一个泛型实例函数体。
  *

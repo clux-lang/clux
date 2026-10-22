@@ -591,6 +591,33 @@ ast_node_t *parse_primary(parser_t *p) {
 ast_node_t *parse_type_with_index(parser_t *p) {
     ast_node_t *t = parse_unary(p);
     if (!t || t->kind == AST_ERROR) return t;
+
+    /* 限定名类型/接口：`mod::Type` / `mod::IW[T]`。
+       parse_unary 只到原子，这里先补 `::` 链再补泛型实参下标。 */
+    for (;;) {
+        skip_trivia(p);
+        if (!check_symbol(p, "::")) break;
+        if (t->kind != AST_IDENT && t->kind != AST_SCOPE_REF) {
+            return ast_error_new(p->diag, p->tokens, p->arena, t->tok_begin,
+                                 p->pos,
+                                 "expected module or type name before '::'");
+        }
+        uint32_t stb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
+            return ast_error_new(p->diag, p->tokens, p->arena, stb, p->pos,
+                                 "expected type name after '::'");
+        }
+        strslice_t variant = token_strslice(cur_token(p));
+        advance(p);
+        ast_node_t *node = ast_scope_ref_new(p->arena, stb, p->pos);
+        if (!node) return NULL;
+        ((ast_scope_ref_t *)node)->type_expr = t;
+        ((ast_scope_ref_t *)node)->variant = variant;
+        t = node;
+    }
+
     for (;;) {
         skip_trivia(p);
         if (!check_symbol(p, "[")) break;

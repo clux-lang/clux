@@ -123,6 +123,10 @@ static void render_pat_atom(fmt_t *f, ast_node_t *n) {
     }
     case AST_PAT_NAME: {
         ast_pat_name_t *nm = (ast_pat_name_t *)n;
+        if (nm->qualifier.ptr && nm->qualifier.len) {
+            sb_put(&f->sb, nm->qualifier.ptr, nm->qualifier.len);
+            sb_str(&f->sb, "::");
+        }
         sb_put(&f->sb, nm->name.ptr, nm->name.len);
         if (nm->args) {
             sb_ch(&f->sb, '[');

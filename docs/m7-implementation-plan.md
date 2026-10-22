@@ -577,16 +577,21 @@ token pool 重绑。
   `bc emit → run .cxb`（含泛型方法与 reexport）均已验证。
 
 
+**已支持（2026-10-22）**
+- 跨模块 interface：`implements il::IW[S]`、约束 `T extends il::IW[T]`
+  （parser 支持 `::` 限定名，sema 经 `sema_exports` 解析接口符号；
+  跨模块接口重解析使用 owner 模块 token pool）。
+- 泛型方法显式类型实参：`v.method[U](...)` 与 `Type::method[U](...)`
+  （callee `AST_INDEX(MEMBER/SCOPE_REF)` 进入方法实例化路径，
+  与推导路径共用签名/实参校验）。
+
 **仍待（需决定是否支持）**
-- 跨模块 interface 的 `implements il::IW[S]` 与约束 `T extends il::IW[T]`：
-  parser 的 implements 类型操作数不解析 `::`，PATTERN 名也不支持限定名；
-  sema 已有跨模块 interface 符号基础设施。
-- 泛型方法显式类型实参 `v.method[U](...)` / `Type::method[U](...)`：设计 §5
-  只写推导示例；当前 callee 的 `AST_INDEX(MEMBER/SCOPE_REF)` 未进入方法
-  实例化路径。属一致性扩展。
 - 签名期错误（如返回类型未知）尚未输出实例链 note；体错误已覆盖。
 - comptime 值包“裸 `N` 作为 tuple 值”：设计只说“编译期 tuple 消费”，未给
   语法。当前定义为 `N[i]` / `len(N)` / `[N[0]]T`，裸 `N` 明确报错。
+- 运行期可变参数（tuple 形参）：设计见
+  [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)，
+  尚未实现。
 
 
 

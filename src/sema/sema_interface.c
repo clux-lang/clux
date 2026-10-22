@@ -5,10 +5,12 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_interface_def.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_struct_embed.h"
 #include "parser/ast_var_def.h"
 #include "parser/parser.h"
+#include "sema/sema_cross.h"
 #include "sema/struct_compose.h"
 #include "sema/symbol.h"
 #include "vm/type_func.h"
@@ -30,34 +32,50 @@ typedef struct {
     size_t            arg_count;
 } iface_ref_t;
 
+static sema_symbol_t *iface_symbol_for_base(sema_t *sema, ast_node_t *base,
+                                            strslice_t *out_name) {
+    *out_name = STRSLICE_EMPTY;
+    if (base && base->kind == AST_IDENT) {
+        *out_name = ((ast_ident_t *)base)->name;
+        return sema_scope_find_local(sema->global_scope, *out_name);
+    }
+    if (base && base->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)base;
+        if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) return NULL;
+        sema_symbol_t *modsym = sema_scope_find_local(
+            sema->global_scope, ((ast_ident_t *)sr->type_expr)->name);
+        if (!modsym || modsym->kind != SEMA_SYM_MODULE || !modsym->module)
+            return NULL;
+        *out_name = sr->variant;
+        sema_symbol_t *sym =
+            sema_module_export_symbol(modsym->module, sr->variant);
+        if (sym && !sym->module) sym->module = modsym->module;
+        return sym;
+    }
+    return NULL;
+}
+
 static bool iface_resolve(sema_t *sema, ast_node_t *expr, iface_ref_t *out) {
     memset(out, 0, sizeof(*out));
     if (!expr) return false;
 
-    strslice_t name = STRSLICE_EMPTY;
+    ast_node_t *base = expr;
     ast_node_t *indices = NULL;
-    if (expr->kind == AST_IDENT) {
-        name = ((ast_ident_t *)expr)->name;
-    } else if (expr->kind == AST_INDEX) {
+    if (expr->kind == AST_INDEX) {
         ast_index_t *ix = (ast_index_t *)expr;
-        if (!ix->object || ix->object->kind != AST_IDENT) {
-            diag_error(sema->diag, sema_loc(sema, expr),
-                       "'implements' requires an interface name");
-            return false;
-        }
-        name = ((ast_ident_t *)ix->object)->name;
+        base = ix->object;
         indices = ix->indices;
-    } else {
-        diag_error(sema->diag, sema_loc(sema, expr),
-                   "'implements' requires an interface name (optionally with "
-                   "type arguments)");
-        return false;
     }
-
-    sema_symbol_t *sym = sema_scope_find_local(sema->global_scope, name);
+    strslice_t name = STRSLICE_EMPTY;
+    sema_symbol_t *sym = iface_symbol_for_base(sema, base, &name);
     if (!sym || sym->kind != SEMA_SYM_INTERFACE || !sym->ast) {
-        diag_error(sema->diag, sema_loc(sema, expr),
-                   "'%.*s' is not an interface", (int)name.len, name.ptr);
+        if (name.ptr)
+            diag_error(sema->diag, sema_loc(sema, expr),
+                       "'%.*s' is not an interface", (int)name.len, name.ptr);
+        else
+            diag_error(sema->diag, sema_loc(sema, expr),
+                       "'implements' requires an interface name (optionally "
+                       "with type arguments)");
         return false;
     }
     const ast_interface_def_t *idef = (const ast_interface_def_t *)sym->ast;
@@ -186,16 +204,19 @@ static bool check_one_interface(sema_t *sema, const type_t *st,
 
     /* 閲嶆柊瑙ｆ瀽鎺ュ彛瀹氫箟锛氭垚鍛樼被鍨嬫Ы浣嶄細鍦ㄨВ鏋愪腑鎶樺彔锛岀粷涓嶈兘姹℃煋鍘?AST
        锛堝悓涓€ interface 鍙兘琚涓?struct 瀹炵幇锛夈€?*/
+    vec_t *saved_tokens = sema->tokens;
+    if (ref.sym->module && ref.sym->module->src_tokens)
+        sema->tokens = (vec_t *)ref.sym->module->src_tokens;
     parser_t *rp = parser_create(sema->vm->alloc, sema->arena, sema->tokens);
     if (!rp) panic("sema: out of memory reparsing interface");
     rp->pos = ref.def->tok_begin;
     rp->diag = sema->diag;
     ast_node_t *parsed = parse_interface_def(rp);
     parser_destroy(&rp);
+    sema->tokens = saved_tokens;
     if (!parsed || parsed->kind != AST_INTERFACE_DEF) {
         diag_error(sema->diag, sema_loc(sema, iface_expr),
-                   "internal: failed to materialize interface '%.*s'",
-                   (int)ref.sym->ast->tok_begin, 0);
+                   "internal: failed to materialize interface");
         vm_pop_scope(sema->vm);
         return false;
     }

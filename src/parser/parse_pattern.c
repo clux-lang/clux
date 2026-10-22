@@ -352,9 +352,23 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
 
     /* 具名类型 / 泛型实例 */
     if (is_pattern_name_token(cur_token(p))) {
+        strslice_t qualifier = STRSLICE_EMPTY;
         strslice_t name = token_strslice(cur_token(p));
         advance(p);
         skip_trivia(p);
+        /* 限定名约束：`T extends mod::IW[T]`。 */
+        if (check_symbol(p, "::")) {
+            advance(p);
+            skip_trivia(p);
+            if (!is_pattern_name_token(cur_token(p))) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected interface name after '::'");
+            }
+            qualifier = name;
+            name = token_strslice(cur_token(p));
+            advance(p);
+            skip_trivia(p);
+        }
         ast_node_t *args = NULL, *args_last = NULL;
         if (check_symbol(p, "[")) {
             advance(p);
@@ -388,6 +402,7 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
         ast_node_t *n = ast_pat_name_new(p->arena, tb, p->pos);
         if (!n) return NULL;
         ((ast_pat_name_t *)n)->name = name;
+        ((ast_pat_name_t *)n)->qualifier = qualifier;
         ((ast_pat_name_t *)n)->args = args;
         ((ast_pat_name_t *)n)->args_last = args_last;
         return n;

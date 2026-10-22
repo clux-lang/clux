@@ -1097,6 +1097,42 @@ const type_t *sema_generic_instantiate_method_inferred(    sema_t *sema, sema_sy
     return sig;
 }
 
+const type_t *sema_generic_instantiate_method_explicit(
+    sema_t *sema, sema_symbol_t *method_sym,
+    const sema_generic_instance_t *owner, strslice_t owner_name,
+    const sema_generic_arg_t *args, size_t arg_count,
+    value_t *const *arg_shadows, size_t argc, const ast_node_t *site,
+    const sema_generic_instance_t **out) {
+    if (out) *out = NULL;
+    if (!sema || !method_sym || !method_sym->ast ||
+        method_sym->ast->kind != AST_FUNC_DEF)
+        return NULL;
+    ast_func_def_t *fn = (ast_func_def_t *)method_sym->ast;
+    if (fn->generic.count == 0) return NULL;
+
+    string_t *sb = string_new(sema->vm->alloc);
+    if (!sb) panic("sema: out of memory building method mangling");
+    if (owner_name.len > 0) {
+        string_append_bytes(sb, owner_name.ptr, owner_name.len);
+        string_append_char(sb, '$');
+    }
+    string_append_bytes(sb, fn->name.ptr, fn->name.len);
+    strslice_t prefix =
+        arena_copy(sema->arena, string_cstr(sb), string_len(sb));
+    string_free(&sb);
+
+    if (owner) push_instance_bindings(sema, owner);
+    owner_ctx_t owner_saved =
+        owner_enter(sema, owner ? owner->owner_module : sema->current_module,
+                    owner ? (vec_t *)owner->tokens : NULL);
+    const type_t *sig = instantiate_inferred_impl(
+        sema, method_sym, args, arg_count, arg_shadows, argc, site, out, prefix,
+        (sema_generic_instance_t *)owner);
+    owner_leave(sema, owner_saved);
+    if (owner) vm_pop_scope(sema->vm);
+    return sig;
+}
+
 /* Pass 3b 队列循环：重绑类型参数后 walk 实例函数体。
  * 关键：实例化只做「签名 + 建树」并入队；函数体由外层 for 循环迭代处理。
  * 因此递归实例化（每次类型参数都变化）不会加深 C 调用栈——深度上限由

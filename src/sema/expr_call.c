@@ -352,14 +352,23 @@ static value_t *generic_call_finish(sema_t *sema, ast_call_t *call,
 static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
                                        ast_call_t *call, ast_member_t *mem,
                                        sema_symbol_t *ms, const type_t *st,
-                                       sema_scope_t *scope) {
+                                       ast_node_t *type_args,
+                                       sema_scope_t *scope, value_t *pre_rv) {
   (void)node;
-  ast_func_def_t *mfn = (ast_func_def_t *)ms->ast;
-  if (!mfn || mfn->generic.count == 0) return val_void(sema);
-
-  value_t *rv = sema_expr(sema, &mem->object, scope);
+  value_t *rv = pre_rv ? pre_rv : sema_expr(sema, &mem->object, scope);
   if (is_poison(sema, rv)) return val_void(sema);
   const type_t *rvt = value_type(rv);
+
+  /* 显式实例化入口可能没有预先解析方法符号：用接收者类型补查。 */
+  if (!st) st = rvt ? type_strip_quals(rvt) : NULL;
+  if (!st) return val_void(sema);
+  if (!ms) {
+    const struct_type_t *owner = NULL;
+    ms = sema_struct_find_member(sema, st, mem->field, call->callee, &owner);
+  }
+  if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->ast) return val_void(sema);
+  ast_func_def_t *mfn = (ast_func_def_t *)ms->ast;
+  if (!mfn || mfn->generic.count == 0) return val_void(sema);
 
   /* self 形参是否指针（用于值接收者 → .& 转换）。 */
   ast_var_def_t *self_vd =
@@ -404,8 +413,21 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
   const sema_generic_instance_t *inst = NULL;
   const type_t *sig = NULL;
   if (args_ok) {
-    sig = sema_generic_instantiate_method_inferred(
-        sema, ms, owner, st->name, shadows, argc + 1, call->callee, &inst);
+    if (type_args) {
+      sema_generic_arg_t *eargs = NULL;
+      size_t nta = 0;
+      if (!sema_generic_parse_explicit_args(sema, ms, type_args, &nta, &eargs)) {
+        allocator_free(sema->vm->alloc, (void **)&shadows);
+        return val_void(sema);
+      }
+      sig = sema_generic_instantiate_method_explicit(
+          sema, ms, owner, st->name, eargs, nta, shadows, argc + 1,
+          call->callee, &inst);
+      if (eargs) allocator_free(sema->vm->alloc, (void **)&eargs);
+    } else {
+      sig = sema_generic_instantiate_method_inferred(
+          sema, ms, owner, st->name, shadows, argc + 1, call->callee, &inst);
+    }
   }
   if (!sig || !inst) {
     allocator_free(sema->vm->alloc, (void **)&shadows);
@@ -422,8 +444,36 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
   return r;
 }
 
-/* P4b：静态泛型方法 `Type::method[U]?` 的**推导调用**（无显式方法类型实参）。
- * 无接收者实参：直接以原实参实例化方法，再改写为 CALL 实例 fid。 */
+/* 显式泛型方法调用 `recv.method[U](...)`：callee 是 AST_INDEX(object=MEMBER)。
+ * 先探测方法符号；不是泛型方法时返回 false，交给普通下标/调用路径。 */
+static bool try_explicit_generic_method_call(sema_t *sema, ast_node_t **node,
+                                             ast_call_t *call,
+                                             sema_scope_t *scope,
+                                             value_t **out) {
+  if (!call->callee || call->callee->kind != AST_INDEX) return false;
+  ast_index_t *ix = (ast_index_t *)call->callee;
+  if (!ix->object || ix->object->kind != AST_MEMBER) return false;
+  ast_member_t *mem = (ast_member_t *)ix->object;
+  value_t *rv = sema_expr(sema, &mem->object, scope);
+  if (is_poison(sema, rv)) {
+    *out = val_void(sema);
+    return true;
+  }
+  const type_t *st = value_type(rv);
+  if (!st) return false;
+  st = type_strip_quals(st);
+  const struct_type_t *owner = NULL;
+  sema_symbol_t *ms = sema_struct_find_member(
+      sema, st, mem->field, call->callee, &owner);
+  if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->ast ||
+      ((ast_func_def_t *)ms->ast)->generic.count == 0)
+    return false;
+  *out = ex_generic_method_call(sema, node, call, mem, ms, st, ix->indices,
+                                scope, rv);
+  return true;
+}
+
+
 static value_t *ex_generic_static_method_call(sema_t *sema, ast_call_t *call,
                                               sema_symbol_t *ms,
                                               const type_t *st,
@@ -458,8 +508,66 @@ static value_t *ex_generic_static_method_call(sema_t *sema, ast_call_t *call,
   return r;
 }
 
-value_t *ex_call(sema_t *sema, ast_node_t **node,
-                              sema_scope_t *scope) {
+/* 显式泛型静态方法 `Type::method[U](...)`：callee 是
+ * AST_INDEX(object=AST_SCOPE_REF(..., variant=method))。 */
+static bool try_explicit_generic_static_method_call(sema_t *sema,
+                                                    ast_node_t **node,
+                                                    ast_call_t *call,
+                                                    sema_scope_t *scope,
+                                                    value_t **out) {
+  if (!call->callee || call->callee->kind != AST_INDEX) return false;
+  ast_index_t *ix = (ast_index_t *)call->callee;
+  if (!ix->object || ix->object->kind != AST_SCOPE_REF) return false;
+  ast_scope_ref_t *er = (ast_scope_ref_t *)ix->object;
+  if (!er->type_expr) return false;
+  const type_t *st = resolve_type_expr(sema, er->type_expr);
+  if (!st) return false;
+  const struct_type_t *owner = NULL;
+  sema_symbol_t *ms = sema_struct_find_member(sema, st, er->variant,
+                                               call->callee, &owner);
+  if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->ast ||
+      ((ast_func_def_t *)ms->ast)->generic.count == 0)
+    return false;
+
+  size_t argc = sema_count_siblings(call->args);
+  value_t **shadows = NULL;
+  if (argc > 0) {
+    shadows = (value_t **)allocator_new_ex(
+        sema->vm->alloc, "value_t*", sizeof(value_t *), NULL, NULL, NULL, argc);
+    if (!shadows) return false;
+  }
+  size_t ai = 0;
+  bool ok = true;
+  for (ast_node_t **slot = &call->args; *slot; slot = &(*slot)->next, ai++) {
+    shadows[ai] = sema_expr(sema, slot, scope);
+    if (is_poison(sema, shadows[ai])) ok = false;
+  }
+  sema_generic_arg_t *eargs = NULL;
+  size_t nta = 0;
+  bool args_ok = ok &&
+      sema_generic_parse_explicit_args(sema, ms, ix->indices, &nta, &eargs);
+  const sema_generic_instance_t *owner_inst =
+      sema_generic_find_type_instance(sema, st);
+  const sema_generic_instance_t *inst = NULL;
+  const type_t *sig =
+      args_ok ? sema_generic_instantiate_method_explicit(
+                    sema, ms, owner_inst, st->name, eargs, nta, shadows, argc,
+                    call->callee, &inst)
+              : NULL;
+  if (eargs) allocator_free(sema->vm->alloc, (void **)&eargs);
+  if (!sig || !inst) {
+    if (shadows) allocator_free(sema->vm->alloc, (void **)&shadows);
+    *out = val_void(sema);
+    return true;
+  }
+  call->is_member_call = false;
+  *out = generic_call_finish(sema, call, sig, inst->fid, scope, shadows, argc);
+  if (shadows) allocator_free(sema->vm->alloc, (void **)&shadows);
+  return true;
+}
+
+
+value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
       /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
          实参链）。失败时诊断已记录。 */
@@ -489,6 +597,19 @@ value_t *ex_call(sema_t *sema, ast_node_t **node,
         value_t *rsv = NULL;
         if (reflect_member_call(sema, node, scope, &rsv))
           return rsv ? rsv : val_void(sema);
+      }
+      /* 显式泛型方法调用 `recv.method[U](...)`。 */
+      {
+        value_t *gmv = NULL;
+        if (try_explicit_generic_method_call(sema, node, call, scope, &gmv))
+          return gmv ? gmv : val_void(sema);
+      }
+      /* 显式泛型静态方法 `Type::method[U](...)`。 */
+      {
+        value_t *gsv = NULL;
+        if (try_explicit_generic_static_method_call(sema, node, call, scope,
+                                                    &gsv))
+          return gsv ? gsv : val_void(sema);
       }
       /* ---- M7 泛型函数调用 ----
        *   f[i32, f64](args)   显式类型实参（callee 是 AST_INDEX）
@@ -702,7 +823,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node,
           }
           if (ms && ms->kind == SEMA_SYM_FUNC && ms->is_generic) {
             return ex_generic_method_call(sema, node, call, mem, ms, st,
-                                          scope);
+                                          NULL, scope, NULL);
           }
           if (ms && ms->kind == SEMA_SYM_FUNC) {
             /* 标记为 member_call：compiler 发 MEMBER_CALL，不改写 AST */

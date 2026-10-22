@@ -465,3 +465,52 @@ TEST(DriverImport, CrossModuleGenericGlobalsCxb) {
   std::remove((c.dir() / "glib.cx").string().c_str());
   EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
 }
+
+TEST(DriverImport, CrossModuleInterfaceImplementsAndConstraint) {
+  ImportCase c("cross_interface");
+  std::string mod = c.write("iface",
+      "export interface IW[T] {\n"
+      "  var fd: i32;\n"
+      "  func w(self: ref *T);\n"
+      "}\n");
+  std::string main_path = c.entry("main",
+      "import iface from \"" + mod + "\";\n"
+      "func use_cross[T extends iface::IW[T]](x: T): i32 { return x.fd; }\n"
+      "struct S implements iface::IW[S] {\n"
+      "  fd: i32;\n"
+      "  func w(self: ref *S): void {}\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{ .fd = 7 };\n"
+      "  s.w();\n"
+      "  return use_cross[S](s) - 7;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+
+  auto bin = (c.dir() / "prog.cxb").string();
+  ASSERT_EQ(driver_build_bin(main_path.c_str(), bin.c_str()), 0);
+  std::remove(main_path.c_str());
+  std::remove((c.dir() / "iface.cx").string().c_str());
+  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
+}
+
+TEST(DriverImport, CrossModuleGenericMethodExplicitTypeArgs) {
+  ImportCase c("generic_method_explicit");
+  std::string mod = c.write("gbox",
+      "export struct Box[T] {\n"
+      "  value: T;\n"
+      "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+      "    var b: Box[U] = .{ .value = f(self.value) };\n"
+      "    return b;\n"
+      "  }\n"
+      "  func get(self: ref *const Box[T]): T { return self.value; }\n"
+      "}\n");
+  std::string main_path = c.entry("main",
+      "import gb from \"" + mod + "\";\n"
+      "func main(): i32 {\n"
+      "  var b: gb::Box[i32] = .{ .value = 5 };\n"
+      "  var c = b.map_into[i32](func(v: i32): i32 { return v + 1; });\n"
+      "  return c.get() - 6;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}

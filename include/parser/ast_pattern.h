@@ -72,6 +72,7 @@ typedef struct {
 
 typedef struct {
     ast_node_t base;  /* kind = AST_PAT_NAME */
+    strslice_t qualifier; /* 限定模块名（`mod::IW[T]` 的 mod），无则空 */
     strslice_t name;
     ast_node_t *args; /* 泛型实参 PATTERN 链（可 NULL） */
     ast_node_t *args_last;

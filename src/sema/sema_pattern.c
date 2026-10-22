@@ -2,6 +2,7 @@
 
 #include "parser/ast_int_lit.h"
 #include "parser/ast_pattern.h"
+#include "sema/sema_cross.h"
 #include "sema/sema_generic.h"
 #include "sema/symbol.h"
 #include "vm/type_array.h"
@@ -178,10 +179,15 @@ static bool match_name(sema_t *sema, ast_pat_name_t *pn, const type_t *t) {
             return type_equal(sema->vm, sema->pattern_env.types[i],
                               type_strip_quals(t));
     }
-    sema_symbol_t *gsym = sema->global_scope
-                              ? sema_scope_find_local(sema->global_scope,
-                                                      pn->name)
-                              : NULL;
+    sema_symbol_t *gsym = NULL;
+    if (pn->qualifier.ptr && pn->qualifier.len) {
+        sema_symbol_t *modsym =
+            sema_scope_find_local(sema->global_scope, pn->qualifier);
+        if (modsym && modsym->kind == SEMA_SYM_MODULE && modsym->module)
+            gsym = sema_module_export_symbol(modsym->module, pn->name);
+    } else if (sema->global_scope) {
+        gsym = sema_scope_find_local(sema->global_scope, pn->name);
+    }
     if (gsym && gsym->kind == SEMA_SYM_INTERFACE)
         return match_interface(sema, pn, gsym, t);
     if (pn->args) {

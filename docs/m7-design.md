@@ -20,9 +20,12 @@
 > 别名/struct 参数包、P6a `extends` 结构约束、P6b `interface`
 > （含 `&` 组合与 `...Base[args]` 成员复制）、P7 跨模块泛型实例化
 > （含 `export * from` 泛型 reexport）、P9 comptime **值**参数包均已落地。
-> 已知边界：跨模块 interface 的 `implements`/约束写法、预编译模块作为
-> **泛型定义来源**（`.cxs/.cxb` 只承载已单态化产物）、跨模块实例的诊断
-> 位置已重绑 token pool，签名期错误的实例链 note 仍可补强。
+> 已知边界：预编译模块作为 **泛型定义来源**（`.cxs/.cxb` 只承载已单态化
+> 产物）、跨模块实例的诊断位置已重绑 token pool，签名期错误的实例链 note
+> 仍可补强。跨模块 interface（`implements il::IW[S]` / `T extends il::IW[T]`）
+> 与泛型方法显式类型实参（`v.method[U](...)` / `Type::method[U](...)`）
+> 已支持；运行期可变参数的 tuple 形参表示见
+> [runtime-variadic-tuple-design.md](runtime-variadic-tuple-design.md)（设计草案）。
 > **跨模块实例归属（2026-10-22 已落地）**：两阶段模块流水线——所有模块先
 > prepare（保留 sema/prog/funcs/types），跨模块解析走 sema 符号表，全局
 > worklist 把实例直接加入定义模块；最后按依赖序 compile/register。类型登记
