@@ -1305,3 +1305,16 @@ TEST(GenericReject, RecursiveAliasStillUnsupported) {
         "recursive generic type 'Rec' is not supported yet",
         "generic_recursive_alias");
 }
+
+TEST(GenericType, ConditionalOwnershipAlias) {
+    clux_expect_ok(
+        "type Out[T] = T extends own *? ? fatal T : T;\n"
+        "func f[T](x: T): Out[T] { return move(x); }\n"
+        "func main(): i32 {\n"
+        "  var p: own *i32 = new i32{ .i32{7} };\n"
+        "  var q: own *i32 = f[own *i32](move(p));\n"
+        "  var n: i32 = f[i32](5);\n"
+        "  return q.* + n - 12;\n"
+        "}\n",
+        "generic_conditional_own_alias");
+}

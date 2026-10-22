@@ -1856,6 +1856,23 @@ static const type_t *build_union_instance(sema_t *sema, ast_union_def_t *ud,
 
 static const type_t *build_alias_instance(sema_t *sema, ast_type_def_t *td,
                                           sema_generic_instance_t *inst) {
+    /* 先走 CTFE：泛型别名 RHS 里可能出现 `T extends PATTERN ? fatal T : T`
+       这类类型计算，只有 CTFE 能折叠（resolve_type_expr 只认静态构造）。 */
+    ctfe_ctx_t ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.vm = sema->vm;
+    ctx.sema = sema;
+    ctx.sema_scope = sema->global_scope;
+    ctx.budget = 100000;
+    ctx.max_depth = 128;
+    value_t *sh = ctfe_eval(&ctx, td->expr);
+    if (sh && !value_is_error(sema->vm, sh) &&
+        value_is_type(sh, TYPE_KIND_TYPE)) {
+        const type_t *t = value_as(sh, const type_t *);
+        inst->type = t;
+        return t;
+    }
+    /* 包展开等 CTFE 不覆盖的形态回退到类型解析器。 */
     const type_t *t = resolve_type_expr(sema, td->expr);
     if (!t) return NULL;
     inst->type = t;

@@ -246,7 +246,61 @@ take 只解决“own payload 怎么取出来”，**不解决 `.?' 只能在赋�
 3. 再做 copyable 的表达式 `.?'；
 4. 最后决定是否让 owned Result 也走统一 `.?' 语法。
 
-## 6. 结论
+## 6. extends + 三元 + “反射” 做返回值类型转换：调研结果
+
+已确认可行的一部分：
+
+```clux
+type Out[T] = T extends own *? ? fatal T : T;
+
+func f[T](x: T): Out[T] { return move(x); }
+
+var q: own *i32 = f[own *i32](move(p));  // Out[own *i32] = fatal own *i32
+var n: i32 = f[i32](5);                  // Out[i32] = i32
+```
+
+- 泛型别名 RHS 现在走 CTFE（`build_alias_instance`），因此
+  `extends PATTERN ? then : else` 在泛型别名里可用；
+- `fatal own *X` 类型是合法的，调用点用 own 变量接住；
+- 不需要 `strip_ownership` 这种类型构造：`fatal T` 在 T=own *X 时
+  已经能表达“将亡的 own 指针”。
+
+当前限制：
+
+1. **`T.ownership` 反射不参与类型表达式**
+   - `T.ownership` 只在值/comptime 上下文返回 `"own"` 字符串；
+   - `type Out[T] = T.ownership == "own" ? fatal T : T` 会报
+     `unsupported type expression`。
+   - 因此做类型选择要用 PATTERN：`T extends own *?`，而不是字符串比较。
+
+2. **函数返回位不能直接写内联三元**
+   ```clux
+   func value(...): T extends own *? ? fatal T : T { ... }
+   ```
+   报 `expected '{' for function body`；返回类型位目前不接受三元表达式，
+   只能通过类型别名。
+
+3. **类型别名定义顺序**
+   - `type ValOut[T] = T extends own *? ? fatal T : T;` 放在 struct 前可用；
+   - 但 `type ResOut[T,E] = ... Result[T,E] ...` 若放在 `Result` 定义前，
+     `Result` 还不存在；放在 struct 后，struct 成员签名又看不到这个别名。
+   - 因此当前无法给 `Result[T,E]` 的 `of_value` / `of_error` 直接声明
+     “T own 时返回 fatal Result，否则返回 Result”的条件返回类型。
+
+### 对 Result 的实际影响
+
+- `value()` 可以用 `ValOut[T]` 别名解决（不引用 Result 自身）：
+  ```clux
+  type ValOut[T] = T extends own *? ? fatal T : T;
+  func value(self: ref *Result[T,E]): ValOut[T] { ... }
+  ```
+- 构造函数 `of_value/of_error` 需要返回 `Result[T,E]` 自身，当前没有
+  可用的条件返回类型写法，所以完整泛型 Result 仍需要：
+  - 允许返回位内联条件类型；或
+  - 支持前向声明/允许别名引用后定义的 Result；或
+  - 拆成 `Result`（copyable） + `ResultOwned` 两个类型。
+
+## 7. 结论
 
 - **copyable Result 的 `.?' 表达式化：已实现**（AST_TRY + early RET）；
 - **`take_opt` own 原语：已实现**（`?T -> T` / `?own T -> fatal T`）；
