@@ -2108,9 +2108,20 @@ static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
 }
 
+/* 推断实参类型：fatal 是调用表达式的值状态；形参只接收 own/ref。
+   因此 `f(move(x))` 把 fatal *T 推断为 `own *T`，而不是 fatal 形参。 */
+static const type_t *infer_param_actual(sema_t *sema, const type_t *actual) {
+    if (!actual || type_ownership_of(actual) != OWN_FATAL) return actual;
+    const type_t *core = type_strip_ownership(actual);
+    if (!core) return actual;
+    const type_t *own = type_ownership_apply(sema->vm, OWN_OWN, core);
+    return own ? own : actual;
+}
+
 static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
                           const type_t *actual, const ast_node_t *site) {
     if (!pat || !actual || !b || b->failed) return;
+    actual = infer_param_actual(sema, actual);
     switch (pat->kind) {
     case AST_IDENT: {
         strslice_t nm = ((ast_ident_t *)pat)->name;
@@ -2345,7 +2356,7 @@ static const type_t *instantiate_inferred_impl(
         const type_t *at =
             (av && !value_is_error(sema->vm, av) &&
              !value_is_type(av, TYPE_KIND_VOID))
-                ? value_type(av)
+                ? infer_param_actual(sema, value_type(av))
                 : NULL;
         if (!at) return NULL;
         if (k < exp_pack) {

@@ -1182,3 +1182,28 @@ TEST(GenericPack, NestedOwnAggregate) {
         "}\n",
         "generic_pack_nested_own");
 }
+
+TEST(GenericPack, InferredOwnFromFatal) {
+    clux_expect_ok(
+        "func first[...Args](args: ...Args): i32 {\n"
+        "  var p: own *i32 = move(args[0]);\n"
+        "  return p.*;\n"
+        "}\n"
+        "func deref[T](x: T): i32 { return x.*; }\n"
+        "func main(): i32 {\n"
+        "  var a: own *i32 = new i32{ .i32{7} };\n"
+        "  var b: own *i32 = new i32{ .i32{8} };\n"
+        "  return first(move(a)) + deref(move(b)) - 15;\n"
+        "}\n",
+        "generic_pack_infer_own");
+}
+
+TEST(GenericReject, OwnArgumentMustUseMove) {
+    clux_expect_reject(
+        "func first[...Args](args: ...Args): i32 { return 0; }\n"
+        "func main(): i32 {\n"
+        "  var a: own *i32 = new i32{ .i32{7} };\n"
+        "  return first(a);\n"
+        "}\n",
+        "cannot copy a value holding owned resources", "generic_pack_own_arg");
+}

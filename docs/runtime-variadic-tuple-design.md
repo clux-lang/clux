@@ -42,6 +42,8 @@ compiler/VM 完全看不到它。
 
 1. 删除 `args: ...Args` 形参；
 2. 为每个包元素合成 `__pack_arg_i: Ti` 形参（类型来自实例实参表）；
+   - 推断参数包时，fatal 实参先归一化为 `own Ti`（形参不能是 fatal）；
+     传 own（未 move）按所有权规则拒绝；
    - 若 `Ti` 是**含 own 槽位但未标 own** 的聚合（如 `Outer` 里套
      `own *i32`），合成形参自动写成 `own Ti`，否则 `move(__pack_arg_i)`
      会被当作 move 借用而报错；
