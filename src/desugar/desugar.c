@@ -692,6 +692,9 @@ static ast_node_t *ds_forward_body(desugar_t *ds, ast_func_def_t *fn,
 static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
   ast_node_t *decs = fn->decorators;
   if (!decs) return NULL;
+  /* 泛型函数：装饰器必须**每个实例**展开（sema_generic 负责），不能在
+     定义点变成普通 var（会丢掉泛型参数）。 */
+  if (fn->generic.count > 0) return NULL;
   fn->decorators = NULL;
   uint32_t tb = fn->base.tok_begin, te = fn->base.tok_end;
   strslice_t visible = fn->name;
@@ -771,8 +774,14 @@ static void ds_expand_decorators(desugar_t *ds, ast_program_t *prog) {
       ast_node_t *gen_head = NULL, *gen_tail = NULL;
       for (ast_node_t *m = st->members; m; m = m->next) {
         if (m->kind == AST_VAR_DEF) {
-          ds_decorate_var(ds, (ast_var_def_t *)m);
+          if (st->generic.count == 0)
+            ds_decorate_var(ds, (ast_var_def_t *)m);
         } else if (m->kind == AST_FUNC_DEF) {
+          /* 泛型 struct 的成员方法 / 泛型方法：装饰器必须按实例展开，
+             保留到 sema_generic。 */
+          if (st->generic.count > 0 ||
+              ((ast_func_def_t *)m)->generic.count > 0)
+            continue;
           ast_node_t *tail = NULL;
           ast_node_t *head =
               ds_decorate_method(ds, (ast_func_def_t *)m, &tail);

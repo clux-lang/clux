@@ -448,10 +448,9 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
        队列条目）。使用点由泛型实例化路径解析；这里入队会让普通 pass2/3
        把 `T` 当未知类型。 */
     if (fn->generic.count > 0) {
-      if (fn->is_comptime) {
-        diag_error(sema->diag, sema_loc(sema, f),
-                   "comptime func cannot be generic in M7");
-      }
+      /* 泛型 comptime 函数：M7 允许作为**装饰器模板**使用；实例在 sema_generic
+         中按普通泛型函数单态化，调用点仍只能出现在编译期上下文（装饰器
+         展开体由 CTFE/编译器折叠）。 */
       sym->is_generic = true;
       sym->is_active = true;
       sym->ast = f;

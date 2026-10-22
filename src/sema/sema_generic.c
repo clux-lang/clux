@@ -8,6 +8,9 @@
 #include "desugar/desugar.h"
 #include "parser/ast_array.h"
 #include "parser/ast_block.h"
+#include "parser/ast_call.h"
+#include "parser/ast_return.h"
+#include "parser/ast_expr_stmt.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_enum_def.h"
@@ -332,6 +335,85 @@ ast_node_t *sema_generic_value_pack_tuple_type_expr(
     ((ast_tuple_t *)t)->elem_types_last = last;
     t->is_generated = true;
     return t;
+}
+
+/* 泛型实例的装饰器：`[[d1]] [[d2]] func f[T]` 在**每个实例**上展开为
+ *   包装函数（实例名） + 隐藏源函数（实例体）
+ * 包装体：`return d1(d2(源))(实参...)`。源函数用同一 Args 实例化，
+ * 因而装饰器参数/签名按具体类型生成。 */
+static ast_node_t *generic_apply_decorators(sema_t *sema, ast_node_t *decs,
+                                            ast_node_t *value, uint32_t tb,
+                                            uint32_t te) {
+    size_t n = 0;
+    for (ast_node_t *d = decs; d; d = d->next) n++;
+    if (n == 0) return value;
+    ast_node_t **arr = (ast_node_t **)arena_calloc(
+        sema->arena, n, sizeof(ast_node_t *), ALIGNOF(max_align_t));
+    if (!arr) return value;
+    size_t i = 0;
+    for (ast_node_t *d = decs; d; d = d->next) arr[i++] = d;
+    value->next = NULL;
+    for (i = n; i > 0; i--) {
+        ast_node_t *callee = arr[i - 1];
+        callee->next = NULL;
+        if (callee->kind == AST_CALL) {
+            ast_call_t *c = (ast_call_t *)callee;
+            value->next = NULL;
+            if (c->args_last) c->args_last->next = value;
+            else c->args = value;
+            c->args_last = value;
+            value = callee;
+            continue;
+        }
+        ast_node_t *call = ast_call_new(sema->arena, tb, te);
+        if (!call) return value;
+        ((ast_call_t *)call)->callee = callee;
+        ((ast_call_t *)call)->args = value;
+        ((ast_call_t *)call)->args_last = value;
+        value = call;
+    }
+    return value;
+}
+
+static ast_node_t *generic_decorated_forward_body(
+    sema_t *sema, ast_func_def_t *fn, ast_node_t *decs, strslice_t src_name) {
+    uint32_t tb = fn->base.tok_begin, te = fn->base.tok_end;
+    ast_node_t *args = NULL, *args_last = NULL;
+    for (ast_node_t *p = fn->params; p; p = p->next) {
+        ast_var_def_t *pd = (ast_var_def_t *)p;
+        ast_node_t *a = ast_ident_new(sema->arena, tb, te);
+        if (!a) return NULL;
+        ((ast_ident_t *)a)->name = pd->name;
+        a->next = NULL;
+        if (args_last) args_last->next = a;
+        else args = a;
+        args_last = a;
+    }
+    ast_node_t *src = ast_ident_new(sema->arena, tb, te);
+    if (!src) return NULL;
+    ((ast_ident_t *)src)->name = src_name;
+    ast_node_t *callee =
+        generic_apply_decorators(sema, decs, src, tb, te);
+    ast_node_t *call = ast_call_new(sema->arena, tb, te);
+    if (!callee || !call) return NULL;
+    ((ast_call_t *)call)->callee = callee;
+    ((ast_call_t *)call)->args = args;
+    ((ast_call_t *)call)->args_last = args_last;
+
+    ast_node_t *stmt;
+    if (fn->return_expr) {
+        stmt = ast_return_new(sema->arena, tb, te);
+        if (stmt) ((ast_return_t *)stmt)->value = call;
+    } else {
+        stmt = ast_expr_stmt_new(sema->arena, tb, te);
+        if (stmt) ((ast_expr_stmt_t *)stmt)->expr = call;
+    }
+    if (!stmt) return NULL;
+    ast_node_t *blk = ast_block_new(sema->arena, tb, te);
+    if (!blk) return NULL;
+    ((ast_block_t *)blk)->stmts = stmt;
+    ((ast_block_t *)blk)->stmts_last = stmt;
+    return blk;
 }
 
 /* 参数包元素是否需要显式 move 才能离开形参：own/fatal 修饰，或内部有
@@ -1060,14 +1142,48 @@ static const type_t *instantiate_func_impl(
     }
     ast_func_def_t *fn = (ast_func_def_t *)parsed;
 
-    /* 合成声明必须是「普通函数」：清掉泛型参数/装饰器/导出标记/旧 id。 */
+    /* 装饰器在**每个实例**上展开：源函数保留实例体，实例名变成包装函数。
+       源函数与实例共享参数/返回类型（同一 Args 实例），因此装饰器签名
+       按具体类型生成。 */
+    ast_node_t *decor_src = NULL;
+    strslice_t decor_src_name = {0};
     if (fn->decorators) {
-        diag_error(sema->diag, at,
-                   "decorators on a generic function are not implemented yet");
-        vm_pop_scope(sema->vm);
-        sema->generics.depth--;
-        inst->in_progress = false;
-        return NULL;
+        ast_node_t *decs = fn->decorators;
+        fn->decorators = NULL;
+        char hb[512];
+        int hn = snprintf(hb, sizeof hb, "__decor_src$%.*s",
+                          (int)iname.len, iname.ptr);
+        if (hn <= 0 || (size_t)hn >= sizeof hb) hn = 0;
+        decor_src_name = arena_copy(sema->arena, hb, (size_t)hn);
+        ast_func_def_t *src = (ast_func_def_t *)arena_calloc(
+            sema->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
+        if (!src) panic("sema: out of memory allocating decorated source");
+        static const ast_func_def_t zero_fn;
+        *src = zero_fn;
+        src->base = fn->base;
+        src->base.next = NULL;
+        src->base.is_generated = true;
+        src->base.is_exported = false;
+        src->name = decor_src_name;
+        src->captures = fn->captures;
+        src->scope_annot_names = fn->scope_annot_names;
+        src->scope_annot_count = fn->scope_annot_count;
+        src->params = fn->params;
+        src->params_last = fn->params_last;
+        src->return_expr = fn->return_expr;
+        src->body = fn->body;
+        src->is_comptime = false;
+        src->owner_module = owner_module;
+        decor_src = &src->base;
+
+        fn->body = generic_decorated_forward_body(sema, fn, decs,
+                                                  decor_src_name);
+        if (!fn->body) {
+            vm_pop_scope(sema->vm);
+            sema->generics.depth--;
+            inst->in_progress = false;
+            return NULL;
+        }
     }
     fn->generic = (ast_generic_params_t){0};
     fn->base.is_exported = false;
@@ -1138,6 +1254,36 @@ static const type_t *instantiate_func_impl(
     }
     inst->sig = sig;
     sema_build_func_scope(sema, sf);
+
+    /* 装饰器源函数：登记普通函数符号 + 进入 walk 队列；包装体的
+       `__decor_src$...` 标识符据此解析。 */
+    if (decor_src) {
+        ((ast_func_def_t *)decor_src)->sig_id = fn->sig_id;
+        sema_func_t *src_sf = (sema_func_t *)allocator_new_ex(
+            sema->vm->alloc, "sema_func_t", sizeof(sema_func_t), NULL, NULL,
+            NULL, 1);
+        if (!src_sf) panic("sema: out of memory allocating decorator source");
+        memset(src_sf, 0, sizeof(*src_sf));
+        src_sf->def = decor_src;
+        src_sf->def_scope = sf->def_scope;
+        src_sf->is_local = false;
+        src_sf->is_walked = false;
+        src_sf->generic_inst = inst;
+        sema_func_id_alloc(sema, (ast_func_def_t *)decor_src);
+        sema_symbol_t src_sym = {
+            .kind = SEMA_SYM_FUNC,
+            .ast = decor_src,
+            .fid = ((ast_func_def_t *)decor_src)->fid,
+            .type = sig,
+            .is_active = true,
+        };
+        sema_scope_define(sf->def_scope, decor_src_name, &src_sym);
+        vec_push(dst_funcs, sema->vm->alloc, src_sf);
+        if (dst_prog)
+            ast_append(&dst_prog->funcs, &dst_prog->funcs_last, NULL,
+                       decor_src);
+        sema_build_func_scope(sema, src_sf);
+    }
     types_leave(sema, types_saved);
     owner_leave(sema, owner_saved);
     sema->generics.active_inst = saved_active;
@@ -1422,6 +1568,18 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
     sema_scope_add_child(sema->global_scope, mscope);
     sym->member_scope = mscope;
 
+    sema_t *osema = (inst->owner_module && inst->owner_module->sema)
+                        ? inst->owner_module->sema
+                        : sema;
+    sema_scope_t *gsemascope =
+        (inst->owner_module && inst->owner_module->sema_global)
+            ? inst->owner_module->sema_global
+            : sema->global_scope;
+    ast_program_t *owner_prog =
+        (osema->prog && osema->prog->kind == AST_PROGRAM)
+            ? (ast_program_t *)osema->prog
+            : NULL;
+
     for (ast_node_t *m = sd->members; m; m = m->next) {
         if (m->kind == AST_FUNC_DEF) {
             ast_func_def_t *fn = (ast_func_def_t *)m;
@@ -1441,6 +1599,43 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
                 continue;
             }
             sema_symbol_t init = {.kind = SEMA_SYM_FUNC};
+            ast_node_t *member_src = NULL;
+            strslice_t member_src_name = {0};
+            if (fn->decorators) {
+                ast_node_t *decs = fn->decorators;
+                fn->decorators = NULL;
+                char hb[512];
+                int hn = snprintf(hb, sizeof hb, "__decor_src$%.*s$%.*s",
+                                  (int)sd->name.len, sd->name.ptr,
+                                  (int)fn->name.len, fn->name.ptr);
+                if (hn <= 0 || (size_t)hn >= sizeof hb) hn = 0;
+                member_src_name =
+                    arena_copy(sema->arena, hb, (size_t)hn);
+                ast_func_def_t *src = (ast_func_def_t *)arena_calloc(
+                    sema->arena, 1, sizeof(ast_func_def_t),
+                    ALIGNOF(max_align_t));
+                if (!src)
+                    panic("sema: out of memory allocating decorated method");
+                static const ast_func_def_t zero_method;
+                *src = zero_method;
+                src->base = fn->base;
+                src->base.next = NULL;
+                src->base.is_generated = true;
+                src->name = member_src_name;
+                src->params = fn->params;
+                src->params_last = fn->params_last;
+                src->return_expr = fn->return_expr;
+                src->body = fn->body;
+                src->owner_module = inst->owner_module;
+                member_src = &src->base;
+                fn->body = generic_decorated_forward_body(
+                    sema, fn, decs, member_src_name);
+                if (!fn->body) {
+                    diag_error(sema->diag, sema_loc(sema, m),
+                               "cannot build decorated method wrapper");
+                    continue;
+                }
+            }
             sema_symbol_t *msym = sema_scope_define(mscope, fn->name, &init);
             if (!msym) {
                 diag_error(sema->diag, sema_loc(sema, m),
@@ -1465,6 +1660,33 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
             if (sig) msym->type = sig;
             vec_push(sema->funcs, sema->vm->alloc, sf);
             sema_build_func_scope(sema, sf);
+            if (member_src && sig) {
+                ((ast_func_def_t *)member_src)->sig_id = fn->sig_id;
+                sema_func_t *src_sf = (sema_func_t *)allocator_new_ex(
+                    sema->vm->alloc, "sema_func_t", sizeof(sema_func_t), NULL,
+                    NULL, NULL, 1);
+                if (!src_sf)
+                    panic("sema: out of memory allocating decorated method "
+                          "source");
+                memset(src_sf, 0, sizeof(*src_sf));
+                src_sf->def = member_src;
+                src_sf->def_scope = gsemascope;
+                src_sf->generic_inst = inst;
+                sema_func_id_alloc(sema, (ast_func_def_t *)member_src);
+                sema_symbol_t src_sym = {
+                    .kind = SEMA_SYM_FUNC,
+                    .ast = member_src,
+                    .fid = ((ast_func_def_t *)member_src)->fid,
+                    .type = sig,
+                    .is_active = true,
+                };
+                sema_scope_define(gsemascope, member_src_name, &src_sym);
+                vec_push(osema->funcs, sema->vm->alloc, src_sf);
+                if (owner_prog)
+                    ast_append(&owner_prog->funcs, &owner_prog->funcs_last,
+                               NULL, member_src);
+                sema_build_func_scope(sema, src_sf);
+            }
         } else if (m->kind == AST_VAR_DEF) {
             ast_var_def_t *vd = (ast_var_def_t *)m;
             sema_symbol_t init = {.kind = SEMA_SYM_VAR,

@@ -477,3 +477,45 @@ TEST(CfuncToFunc, MethodArgumentPosition) {
       "}\n",
       "cfunc2func_method");
 }
+
+/* 泛型函数装饰器：每个实例生成独立包装，装饰器按具体类型调用。 */
+TEST(Decorator, GenericFunctionPerInstance) {
+  clux_expect_ok(
+      "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "  return func |f| w(x: i32): i32 { return f(x) + 100; };\n"
+      "}\n"
+      "[[add100]] func g[T](x: T): T { return x; }\n"
+      "func main(): i32 { return g[i32](5) - 105; }\n",
+      "decor_generic_func");
+}
+
+TEST(Decorator, GenericStructMethodPerInstance) {
+  clux_expect_ok(
+      "comptime func idm(f: func(ref *Box[i32]) -> i32): func(ref *Box[i32]) -> i32 {\n"
+      "  return f;\n"
+      "}\n"
+      "struct Box[T] {\n"
+      "  v: T;\n"
+      "  [[idm]] func get(self: ref *Box[T]): i32 { return 7; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var b: Box[i32] = .{ .v = 1 };\n"
+      "  return b.get() - 7;\n"
+      "}\n",
+      "decor_generic_method");
+}
+
+/* 泛型 comptime 装饰器：装饰器自身也按 T 单态化，不限制被装饰函数。 */
+TEST(Decorator, GenericComptimeDecoratorPerInstance) {
+  clux_expect_ok(
+      "comptime func wrap[T](f: func(T) -> T): func(T) -> T {\n"
+      "  return func |f| w(x: T): T { return f(x); };\n"
+      "}\n"
+      "[[wrap]] func f[T](x: T): T { return x; }\n"
+      "func main(): i32 {\n"
+      "  if (f[i32](5) != 5) { return 1; }\n"
+      "  if (f[f64](2.5) != 2.5) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "decor_generic_comptime");
+}

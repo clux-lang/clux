@@ -295,6 +295,9 @@ void compile_prescan_funcs(compiler_t *c, ast_node_t *program) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind == AST_FUNC_DEF) {
       ast_func_def_t *fn = (ast_func_def_t *)f;
+      /* 泛型定义不是运行时实体；其 body 里的函数字面量只在实例 AST 中
+         编译（否则会收集到没有 fid 的泛型模板闭包）。 */
+      if (fn->generic.count > 0) continue;
       prescan_func(c, fn);
       prescan_func_body(c, fn);
     } else {
