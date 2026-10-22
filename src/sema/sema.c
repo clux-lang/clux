@@ -77,7 +77,6 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->fn.local_func_param_scope = NULL;
   sema->fn.in_call_callee = false;
   sema->fn.loop_depth = 0;
-  sema->func_id_next = FUNC_ID_PROGRAM_BASE;
   sema->generics.instances = NULL;
   sema->generics.depth = 0;
   sema->generics.max_depth = 128;

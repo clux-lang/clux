@@ -94,8 +94,6 @@ typedef struct sema_type_t {
     strslice_t    name;    /* "__type_N"（sema arena 生命周期） */
     uint32_t      id;      /* 全 VM 唯一 program id（type_id_alloc） */
     uint32_t      index;   /* sema->types 中的登记下标（0 起） */
-    bool          foreign; /* 两阶段：该类型已由 owner 模块 sema 定义（本模块
-                              只引用 id/name，compiler hoist 不重复 DEFINE） */
 } sema_type_t;
 
 /**
@@ -282,12 +280,6 @@ typedef struct sema_t {
        调用点 callee 标志、循环深度）。字段语义见 sema_fn_ctx_t 文档。 */
     sema_fn_ctx_t fn;
 
-    /* 函数 id 分配计数器：sema 登记每个函数定义（全局函数 pass1_names、
-       局部函数 build_local_func、函数字面量 sema_check_func_literal / CTFE
-       求值）时从 FUNC_ID_PROGRAM_BASE 起统一分配（写回 fn->fid）。compiler
-       预扫描只读取不再分配——fid 单一来源在 sema（用户函数对象创建即持 id，
-       comptime 折叠产物按 fid 加载函数，与 name 无关）。 */
-    uint32_t      func_id_next;
   /* >0 表示"当前正在解析所有权修饰符（own/ref/fatal）的 base 类型"：
      AST_PTR / AST_OWNED_TYPE 的 base 位置允许 `opaque`；裸 `opaque` 是
      指针缺少所有权修饰（opaque 是 `void *` 语义），必须报错。 */

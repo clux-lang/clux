@@ -117,9 +117,6 @@ vm_t *vm_new(allocator_t *alloc) {
     vm->next_builtin_func_id = 0;
     vm->next_program_func_id = FUNC_ID_PROGRAM_BASE;
     vm->module_order = vec_new(alloc, /*owns_element=*/false);
-    vm->defined_type_ids = vec_new(alloc, /*owns_element=*/false);
-    vm->generic_type_names = strmap_new(alloc, /*owns_value=*/false);
-    vm->type_id_by_ptr = strmap_new(alloc, /*owns_value=*/false);
     vm->defined_type_ids_global = vec_new(alloc, /*owns_element=*/false);
     vm->sema_types_global = vec_new(alloc, /*owns_element=*/false);
 
@@ -233,9 +230,6 @@ void vm_destroy(vm_t **pvm) {
         strmap_free(vm->alloc, &vm->modules);
     }
     if (vm->module_order) vec_free(vm->alloc, &vm->module_order);
-    if (vm->defined_type_ids) vec_free(vm->alloc, &vm->defined_type_ids);
-    if (vm->generic_type_names) strmap_free(vm->alloc, &vm->generic_type_names);
-    if (vm->type_id_by_ptr) strmap_free(vm->alloc, &vm->type_id_by_ptr);
     if (vm->defined_type_ids_global) vec_free(vm->alloc, &vm->defined_type_ids_global);
     if (vm->sema_types_global) {
         size_t stn = vec_len(vm->sema_types_global);

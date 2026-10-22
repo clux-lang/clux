@@ -302,7 +302,6 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   const sema_type_t *found = sema_type_find(sema, t);
   if (found) return found;
 
-  bool foreign = false;
   size_t n = vec_len(sema->types);
   uint32_t id = type_id_alloc(sema->vm);
   if (id == 0) return NULL; /* id 耗尽 */
@@ -314,12 +313,6 @@ const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   st->type  = t;
   st->id    = id;
   st->index = (uint32_t)n;
-  st->foreign = foreign;
-  if (foreign) {
-    st->name = t->name;
-    vec_push(sema->types, sema->vm->alloc, st);
-    return st;
-  }
 
   /* 名字 "__type_N"（arena 分配，跨 sema/compile 阶段安全） */
   char name[32];

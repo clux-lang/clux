@@ -329,11 +329,6 @@ typedef enum {
                                （TYPE_KIND_CFUNC，C 函数指针）；后续用
                                FUNC_TYPE_PARAM/RETURN 追加签名、SEAL 密封。
                                与 PUSH_FUNC_TYPE 的区别只在类型 kind。 */
-    BCODE_SET_ROOT_SCOPE,   /* 无操作数（**追加末尾**）：弹栈顶 module 值 →
-                               peek 其下的 func value，令 fn->root_scope =
-                               module->global_scope（实例归属定义模块：
-                               泛型实例体里的全局变量/import 别名按定义模块
-                               解析）。不改变栈深（弹 module 后 func 仍在）。 */
 } bcode_op_t;
 
 /* ---- BCODE_EXTERN_LOAD / BCODE_EXTERN_STORE 的类型码（M6 FFI 数据符号）----

@@ -126,17 +126,8 @@ typedef struct vm_t {
        module_t* 借用（归 vm->modules）。 */
     vec_t    *module_order;
 
-    /* 两阶段：已经被某个模块 compiler hoist DEFINE_TYPE 过的程序类型 id。
-       类型对象全 VM 唯一；跨模块引用时只允许定义一次（无论定义/导入方
-       谁先编译），后续模块只发 LOAD_TYPE。 */
-    vec_t    *defined_type_ids;
-
-    /* 全局泛型实例类型名 → type_t*（mangling 名唯一）。跨 sema 去重。 */
-    strmap_t *generic_type_names;
-
-    /* type_t* → 全局 program type id（跨 sema 复用同一 type_t 的 id）。 */
-    strmap_t *type_id_by_ptr;
-    /* 已发过 DEFINE_TYPE 的 id（compiler 全局只定义一次）。 */
+    /* 已经被某个模块 compiler hoist DEFINE_TYPE 过的程序类型 id。
+       类型对象全 VM 唯一；跨模块引用时只允许定义一次。 */
     vec_t    *defined_type_ids_global;
 
     /* 全 VM 共享的 sema_type_t 登记表：所有模块的 type id/名字唯一。
