@@ -197,6 +197,53 @@ TEST(CBackend, BuildStructArrayPointer) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, ArrayDoesNotDecay) {
+  const std::string src = write_temp_file(
+      "func mutate(a: [2]i32): i32 { a[0] = 9; return a[0]; }\n"
+      "func main(): i32 {\n"
+      "  var a: [2]i32 = .[2]i32{ 1, 2 };\n"
+      "  if (mutate(a) != 9) { return 1; }\n"
+      "  if (a[0] != 1) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_array_value");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildDeferAndOwn) {
+  const std::string src = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "var g: i32 = 0;\n"
+      "func f(): i32 {\n"
+      "  defer { g = g * 10 + 1; }\n"
+      "  defer { g = g * 10 + 2; }\n"
+      "  return 0;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (f() != 0) { return 1; }\n"
+      "  if (g != 21) { return 2; }\n"
+      "  var p: own *Point = new Point{ .x = 4, .y = 5 };\n"
+      "  if (p.x != 4) { return 3; }\n"
+      "  return p.y;\n"
+      "}\n",
+      "cbackend_m4");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 5);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

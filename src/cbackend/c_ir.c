@@ -153,13 +153,14 @@ cir_expr_t *cir_expr_member(arena_t *arena, cir_expr_t *object,
 }
 
 cir_expr_t *cir_expr_index(arena_t *arena, cir_expr_t *object,
-                           cir_expr_t *index) {
+                           cir_expr_t *index, bool array_data) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
     if (!e) return NULL;
     e->kind = CIR_EXPR_INDEX;
     e->lhs = object;
     e->rhs = index;
+    e->array_data = array_data;
     return e;
 }
 
@@ -191,6 +192,17 @@ cir_expr_t *cir_expr_construct(arena_t *arena, cir_type_t *type,
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
     if (!e) return NULL;
     e->kind = CIR_EXPR_CONSTRUCT;
+    e->type = type;
+    e->inits = inits;
+    return e;
+}
+
+cir_expr_t *cir_expr_new(arena_t *arena, cir_type_t *type,
+                         cir_init_t *inits) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_NEW;
     e->type = type;
     e->inits = inits;
     return e;
@@ -255,8 +267,7 @@ cir_function_t *cir_function_new(arena_t *arena, const char *name,
     f->param_count = param_count;
     f->params = params;
     f->body = body;
-    f->source_line = source_line;
-    f->is_entry = is_entry;
+    f->source_line = source_line;    f->is_entry = is_entry;
     return f;
 }
 

@@ -8,6 +8,7 @@
 #include "parser/ast_call.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
+#include "parser/ast_defer.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
@@ -19,6 +20,8 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
+#include "parser/ast_new.h"
+#include "parser/ast_free.h"
 #include "parser/ast_return.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
@@ -33,10 +36,20 @@
 #include <stdio.h>
 #include <string.h>
 
+typedef struct lower_defer {
+    strslice_t name;
+    ast_node_t *body;
+    struct lower_defer *next;
+} lower_defer_t;
+
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
     cir_unit_t *unit;
+    lower_defer_t *defers;
+    cir_stmt_t *cleanup;
+    cir_type_t *return_type;
+    unsigned    ret_seq;
     bool     failed;
 } lower_ctx_t;
 
@@ -118,7 +131,7 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         if (cached) return cached;
         const array_type_t *at = (const array_type_t *)t;
         char name[128];
-        snprintf(name, sizeof name, "clux_a_%u", t->id);
+        snprintf(name, sizeof name, "struct clux_a_%u", t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_ARRAY,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -224,7 +237,7 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         ast_index_t *ix = (ast_index_t *)e;
         cir_expr_t *obj = lower_expr(lc, ix->object);
         cir_expr_t *idx = lower_expr(lc, ix->indices);
-        return obj && idx ? cir_expr_index(lc->arena, obj, idx) : NULL;
+        return obj && idx ? cir_expr_index(lc->arena, obj, idx, true) : NULL;
     }
     case AST_DEREF: {
         ast_deref_t *d = (ast_deref_t *)e;
@@ -251,6 +264,42 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         if (!out) return NULL;
         bool positional = (t && type_kind_of(t) != TYPE_KIND_STRUCT);
         for (ast_node_t *f = c->fields; f; f = f->next) {
+            const char *fname = NULL;
+            ast_node_t *val = f;
+            if (f->kind == AST_CONSTRUCT_FIELD) {
+                ast_construct_field_t *cf = (ast_construct_field_t *)f;
+                val = cf->value;
+                if (!positional) {
+                    char fb[256];
+                    snprintf(fb, sizeof fb, "clux_f_%.*s", (int)cf->name.len,
+                             cf->name.ptr ? cf->name.ptr : "");
+                    fname = copy_arena(lc->arena, fb);
+                }
+            }
+            cir_expr_t *ve = lower_expr(lc, val);
+            if (!ve) return NULL;
+            cir_init_t *init = cir_init_new(lc->arena, fname, ve);
+            if (!init) return NULL;
+            cir_expr_add_init(out, init);
+        }
+        return out;
+    }
+    case AST_NEW: {
+        ast_new_t *n = (ast_new_t *)e;
+        if (!n->type) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                       "c backend: anonymous 'new' requires a type");
+            lc->failed = true;
+            return NULL;
+        }
+        const type_t *t = sema_resolve_type_slot(lc->sema, &n->type);
+        cir_type_t *ct = map_type(lc, t);
+        if (!ct) return NULL;
+        lc->unit->uses_alloc = true;
+        cir_expr_t *out = cir_expr_new(lc->arena, ct, NULL);
+        if (!out) return NULL;
+        bool positional = (t && type_kind_of(t) != TYPE_KIND_STRUCT);
+        for (ast_node_t *f = n->fields; f; f = f->next) {
             const char *fname = NULL;
             ast_node_t *val = f;
             if (f->kind == AST_CONSTRUCT_FIELD) {
@@ -318,17 +367,70 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         const type_t *lt = infer_expr_type(lc, b->lhs);
         return lt ? lt : infer_expr_type(lc, b->rhs);
     }
+    case AST_CALL: {
+        ast_call_t *c = (ast_call_t *)e;
+        sema_func_t *sf = NULL;
+        if (c->callee && c->callee->kind == AST_FUNC_REF)
+            sf = sema_func_by_id(lc->sema, ((ast_func_ref_t *)c->callee)->fid);
+        else if (c->callee && c->callee->kind == AST_IDENT) {
+            sema_symbol_t *sym = sema_lookup(
+                lc->sema->global_scope, ((ast_ident_t *)c->callee)->name);
+            if (sym && sym->ast && sym->ast->kind == AST_FUNC_DEF) {
+                ast_func_def_t *fd = (ast_func_def_t *)sym->ast;
+                if (fd->return_expr)
+                    return sema_resolve_type_slot(lc->sema, &fd->return_expr);
+            }
+        }
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+            ast_func_def_t *fd = (ast_func_def_t *)sf->def;
+            if (fd->return_expr)
+                return sema_resolve_type_slot(lc->sema, &fd->return_expr);
+        }
+        return NULL;
+    }
     default:
         return NULL;
     }
 }
 
+static bool is_defer_name(strslice_t n) {
+    return n.ptr && n.len >= 8 && memcmp(n.ptr, "__defer_", 8) == 0;
+}
+
+static ast_node_t *find_defer_body(lower_ctx_t *lc, strslice_t name) {
+    for (lower_defer_t *d = lc->defers; d; d = d->next)
+        if (d->name.len == name.len &&
+            memcmp(d->name.ptr, name.ptr, name.len) == 0)
+            return d->body;
+    return NULL;
+}
+
 static cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block,
                                bool *ok);
+
+static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok);
+static cir_stmt_t *lower_ast_list(lower_ctx_t *lc, ast_node_t *list, bool *ok);
 
 static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     if (!s || lc->failed) return NULL;
     switch (s->kind) {
+    case AST_FUNC_DEF: {
+        ast_func_def_t *fn = (ast_func_def_t *)s;
+        if (is_defer_name(fn->name)) {
+            lower_defer_t *d = (lower_defer_t *)arena_calloc(
+                lc->arena, 1, sizeof(*d), ALIGNOF(max_align_t));
+            if (!d) return NULL;
+            d->name = fn->name;
+            d->body = fn->body;
+            d->next = lc->defers;
+            lc->defers = d;
+            return NULL;
+        }
+        diag_error(lc->sema->diag, sema_loc(lc->sema, s),
+                   "c backend: local function definitions are not supported");
+        *ok = false;
+        return NULL;
+    }
     case AST_VAR_DEF: {
         ast_var_def_t *vd = (ast_var_def_t *)s;
         const type_t *t = vd->resolved_type;
@@ -361,6 +463,32 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_EXPR_STMT: {
         ast_expr_stmt_t *es = (ast_expr_stmt_t *)s;
+        if (es->expr && es->expr->kind == AST_CALL) {
+            ast_call_t *call = (ast_call_t *)es->expr;
+            strslice_t name = STRSLICE_EMPTY;
+            if (call->callee && call->callee->kind == AST_IDENT)
+                name = ((ast_ident_t *)call->callee)->name;
+            else if (call->callee && call->callee->kind == AST_FUNC_REF) {
+                ast_func_ref_t *ref = (ast_func_ref_t *)call->callee;
+                name = ref->name;
+                if ((!name.ptr || name.len == 0) && lc->sema) {
+                    sema_func_t *sf = sema_func_by_id(lc->sema, ref->fid);
+                    if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+                        name = ((ast_func_def_t *)sf->def)->name;
+                }
+            }
+            if (is_defer_name(name)) {
+                ast_node_t *body = find_defer_body(lc, name);
+                if (body) {
+                    bool okd = true;
+                    cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+                    if (!st) return NULL;
+                    st->body = lower_block(lc, body, &okd);
+                    if (!okd) *ok = false;
+                    return st;
+                }
+            }
+        }
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
         if (!st) return NULL;
         st->expr = lower_expr(lc, es->expr);
@@ -371,13 +499,77 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_RETURN);
         if (!st) return NULL;
         if (r->value) st->expr = lower_expr(lc, r->value);
+        if (s->defers) {
+            /* 先算 return 值到临时变量，再执行 defer/free，最后返回。 */
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            cir_stmt_t *tail = NULL;
+            if (st->expr && lc->return_type &&
+                lc->return_type->kind != CIR_TYPE_VOID) {
+                char tmp[64];
+                snprintf(tmp, sizeof tmp, "clux_ret_%u", lc->ret_seq++);
+                cir_stmt_t *save = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+                if (!save) return NULL;
+                save->type = lc->return_type;
+                save->name = copy_arena(lc->arena, tmp);
+                save->expr = st->expr;
+                blk->body = save;
+                tail = save;
+                st->expr = cir_expr_ident(lc->arena, save->name);
+            }
+            bool okd = true;
+            cir_stmt_t *clean = lower_ast_list(lc, s->defers, &okd);
+            if (!okd) {
+                *ok = false;
+                return NULL;
+            }
+            if (clean) {
+                if (tail) tail->next = clean;
+                else blk->body = clean;
+            }
+            cir_stmt_t *last = blk->body;
+            while (last && last->next) last = last->next;
+            if (last) last->next = st;
+            else blk->body = st;
+            return blk;
+        }
         return st;
     }
     case AST_BREAK: {
-        return cir_stmt_new(lc->arena, CIR_STMT_BREAK);
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_BREAK);
+        if (!st) return NULL;
+        if (s->defers) {
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = lower_ast_list(lc, s->defers, ok);
+            if (!*ok) return NULL;
+            cir_stmt_t *t = blk->body;
+            if (!t) blk->body = st;
+            else {
+                while (t->next) t = t->next;
+                t->next = st;
+            }
+            return blk;
+        }
+        return st;
     }
     case AST_CONTINUE: {
-        return cir_stmt_new(lc->arena, CIR_STMT_CONTINUE);
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_CONTINUE);
+        if (!st) return NULL;
+        if (s->defers) {
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = lower_ast_list(lc, s->defers, ok);
+            if (!*ok) return NULL;
+            cir_stmt_t *t = blk->body;
+            if (!t) blk->body = st;
+            else {
+                while (t->next) t = t->next;
+                t->next = st;
+            }
+            return blk;
+        }
+        return st;
     }
     case AST_BLOCK:
         return lower_block(lc, s, ok);
@@ -425,6 +617,41 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         st->body = lower_block(lc, d->body, ok);
         return st;
     }
+    case AST_DEFER: {
+        ast_defer_t *d = (ast_defer_t *)s;
+        ast_func_def_t *closure = (ast_func_def_t *)d->closure;
+        bool okd = true;
+        cir_stmt_t *body = closure ? lower_block(lc, closure->body, &okd) : NULL;
+        if (!okd) {
+            *ok = false;
+            return NULL;
+        }
+        cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+        if (!blk) return NULL;
+        blk->body = body;
+        blk->next = lc->cleanup;
+        lc->cleanup = blk;
+        return NULL; /* defer 不产生当前位置语句 */
+    }
+    case AST_FREE: {
+        ast_free_t *f = (ast_free_t *)s;
+        lc->unit->uses_alloc = true;
+        cir_stmt_t *head = NULL, *tail = NULL;
+        for (ast_node_t *op = f->operand; op; op = op->next) {
+            cir_expr_t *ex = lower_expr(lc, op);
+            if (!ex) {
+                *ok = false;
+                return head;
+            }
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+            if (!st) return head;
+            st->expr = ex;
+            if (tail) tail->next = st;
+            else head = st;
+            tail = st;
+        }
+        return head;
+    }
     case AST_EMPTY_STMT:
         return NULL;
     default:
@@ -435,8 +662,20 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
 }
 
-static cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {
-    if (!block || block->kind != AST_BLOCK) {
+static cir_stmt_t *lower_ast_list(lower_ctx_t *lc, ast_node_t *list, bool *ok) {
+    cir_stmt_t *head = NULL, *tail = NULL;
+    for (ast_node_t *s = list; s; s = s->next) {
+        cir_stmt_t *st = lower_stmt(lc, s, ok);
+        if (!*ok) return head;
+        if (!st) continue;
+        if (tail) tail->next = st;
+        else head = st;
+        tail = st;
+    }
+    return head;
+}
+
+static cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!block || block->kind != AST_BLOCK) {
         *ok = false;
         return NULL;
     }
@@ -459,6 +698,15 @@ static ast_func_def_t *find_main(ast_program_t *prog) {
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) return fn;
     }
     return NULL;
+}
+
+static void mark_cleanup_returns(cir_stmt_t *s) {
+    for (; s; s = s->next) {
+        if (s->kind == CIR_STMT_RETURN) s->cleanup_return = true;
+        if (s->body) mark_cleanup_returns(s->body);
+        if (s->else_body) mark_cleanup_returns(s->else_body);
+        if (s->init) mark_cleanup_returns(s->init);
+    }
 }
 
 static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
@@ -499,8 +747,15 @@ static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
     }
 
     bool ok = true;
+    lc->cleanup = NULL;
+    lc->defers = NULL;
+    lc->return_type = cret;
+    lc->ret_seq = 0;
     cir_stmt_t *body = lower_block(lc, fn->body, &ok);
     if (!ok) return NULL;
+    cir_stmt_t *cleanup = lc->cleanup;
+    lc->cleanup = NULL;
+    if (cleanup) mark_cleanup_returns(body);
 
     const char *cname = mangle(lc->arena, "clux_fn_", fn->name);
     const char *obj = mangle(lc->arena, "clux_obj_", fn->name);
@@ -510,8 +765,10 @@ static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
         cir_signature_new(lc->arena, tag, cret, pc, ptypes);
     if (!sig) return NULL;
     int line = sema_loc(lc->sema, (ast_node_t *)fn).begin.line;
-    return cir_function_new(lc->arena, cname, obj, sig, pc, params, body, line,
-                            is_entry);
+    cir_function_t *out = cir_function_new(lc->arena, cname, obj, sig, pc, params,
+                                           body, line, is_entry);
+    if (out) out->cleanup = cleanup;
+    return out;
 }
 
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,

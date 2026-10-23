@@ -145,7 +145,8 @@ clux build hello.cx
 - `p.x` / `p.x = 5`；
 - `var a: [3]i32 = .[3]i32{ ... }` / `a[i]`；
 - `ref *Point` / `p.&` / `r.y`；
-- 按值 struct 参数与返回类型。
+- 按值 struct 参数与返回类型；
+- 数组用 `struct { elem data[N]; }` 包装，不使用会退化的 C 数组。
 
 尚未覆盖：
 
@@ -163,14 +164,27 @@ clux build hello.cx
 - move / clone；
 - 作用域清理顺序。
 
-### M4：所有权与清理
+### M4：所有权与清理（已完成基础版）
 
-- own；
-- ref；
-- defer；
-- drop；
-- move / clone；
-- 作用域清理顺序。
+- `defer`；
+- `new T{...}` 堆分配；
+- `own *T` 的自动 `free`；
+- return 前先求值、再执行 defer/free，避免 use-after-free；
+- defer 逆序执行。
+
+当前支持：
+
+- `defer { ... }`；
+- `defer` 在 return / 正常退出时执行；
+- `var p: own *Point = new Point{ ... };`；
+- sema 生成的 `AST_FREE` 降低为 `free`；
+- return 值先落临时变量，再执行清理。
+
+尚未覆盖：
+
+- `drop` / `move` / `clone`；
+- 复合类型内部 own 槽位的递归清理；
+- 异常路径 / break 跨作用域清理的完整验证。
 
 ### M5：函数值、闭包与方法
 
