@@ -166,25 +166,29 @@ clux build hello.cx
 
 ### M4：所有权与清理（已完成基础版）
 
-- `defer`；
-- `new T{...}` 堆分配；
-- `own *T` 的自动 `free`；
-- return 前先求值、再执行 defer/free，避免 use-after-free；
-- defer 逆序执行。
+- sema 生成的 `AST_FREE`；
+- `own *T` 的自动释放；
+- 复合类型 own 槽位的销毁函数；
+- 数组 own 元素的逐元素释放；
+- return 前先求值、再执行清理；
+- 退出点清理按 sema 生成顺序执行。
+
+说明：`defer` / `move` / `clone` 在 sema 之后已经消减为退出点调用/数据流结果，C 后端不重新实现这些语言原语。
 
 当前支持：
 
-- `defer { ... }`；
-- `defer` 在 return / 正常退出时执行；
 - `var p: own *Point = new Point{ ... };`；
-- sema 生成的 `AST_FREE` 降低为 `free`；
-- return 值先落临时变量，再执行清理。
+- `own *T`、`own *own *T`；
+- struct 的 own 字段；
+- `[N]own *T` 的逐元素 free；
+- 由 sema 生成的 `__destroy_*` 函数；
+- `new T{...}` 使用 `clux_new`（calloc + memcpy）。
 
 尚未覆盖：
 
-- `drop` / `move` / `clone`；
-- 复合类型内部 own 槽位的递归清理；
-- 异常路径 / break 跨作用域清理的完整验证。
+- slice / `make`；
+- 复杂 union / optional 的 own 槽位；
+- 异常路径 / 全部跨作用域路径的清理验证。
 
 ### M5：函数值、闭包与方法
 

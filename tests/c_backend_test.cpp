@@ -244,6 +244,28 @@ TEST(CBackend, BuildDeferAndOwn) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildOwnCompositeAndArray) {
+  const std::string src = write_temp_file(
+      "struct Box { p: own *i32; }\n"
+      "func main(): i32 {\n"
+      "  var b: own *Box = new Box{ .p = new i32{7} };\n"
+      "  if (b.p.* != 7) { return 1; }\n"
+      "  var a: own [2]own *i32 = .[2]own *i32{ new i32{1}, new i32{2} };\n"
+      "  if (a[0].* != 1) { return 2; }\n"
+      "  if (a[1].* != 2) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_m4_own");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

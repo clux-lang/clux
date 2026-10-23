@@ -12,6 +12,7 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
+#include "parser/ast_for_index.h"
 #include "parser/ast_dowhile.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_func_ref.h"
@@ -617,6 +618,51 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         st->body = lower_block(lc, d->body, ok);
         return st;
     }
+    case AST_FOR_INDEX: {
+        ast_for_index_t *fi = (ast_for_index_t *)s;
+        const ast_node_t *src = fi->source;
+        const ast_node_t *base = src;
+        bool deref = false;
+        if (src && src->kind == AST_DEREF) {
+            deref = true;
+            base = ((ast_deref_t *)src)->operand;
+        }
+        if (!base || base->kind != AST_IDENT) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, s),
+                       "c backend: generated index loop source must be an array variable (%s)",
+                       src ? ast_kind_name(src->kind) : "-");
+            *ok = false;
+            return NULL;
+        }
+        const char *vn = mangle(lc->arena, "clux_v_", fi->var);
+        const char *raw = mangle(lc->arena, "clux_v_",
+                                 ((ast_ident_t *)base)->name);
+        if (!vn || !raw) return NULL;
+        char srcbuf[512];
+        snprintf(srcbuf, sizeof srcbuf, deref ? "(*%s)" : "%s", raw);
+        const char *an = copy_arena(lc->arena, srcbuf);
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FOR);
+        if (!st) return NULL;
+        cir_stmt_t *init = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+        if (!init) return NULL;
+        init->type = cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t");
+        init->name = vn;
+        init->expr = cir_expr_int(lc->arena, 0);
+        st->init = init;
+        char lenbuf[512];
+        snprintf(lenbuf, sizeof lenbuf,
+                 "(sizeof((%s).data) / sizeof((%s).data[0]))", an, an);
+        cir_expr_t *len = cir_expr_ident(lc->arena,
+                                         copy_arena(lc->arena, lenbuf));
+        st->expr = cir_expr_binary(lc->arena, "<",
+                                   cir_expr_ident(lc->arena, vn), len);
+        st->update = cir_expr_assign(
+            lc->arena, cir_expr_ident(lc->arena, vn), "=",
+            cir_expr_binary(lc->arena, "+", cir_expr_ident(lc->arena, vn),
+                            cir_expr_int(lc->arena, 1)));
+        st->body = lower_block(lc, fi->body, ok);
+        return st;
+    }
     case AST_DEFER: {
         ast_defer_t *d = (ast_defer_t *)s;
         ast_func_def_t *closure = (ast_func_def_t *)d->closure;
@@ -656,7 +702,8 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         return NULL;
     default:
         diag_error(lc->sema->diag, sema_loc(lc->sema, s),
-                   "c backend: unsupported statement");
+                   "c backend: unsupported statement (kind %d)",
+                   (int)s->kind);
         *ok = false;
         return NULL;
     }
