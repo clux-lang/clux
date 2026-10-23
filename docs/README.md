@@ -22,6 +22,10 @@
 12. [测试](whitepaper/11-testing.md)
 13. [工具链与格式](whitepaper/12-tooling.md)
 
+## 工程路线（非规范）
+
+- [C 后端路线](roadmap/c-backend.md)
+
 ## 规范用词
 
 - **必须**：语言或工具强制要求；违反即诊断或拒绝。

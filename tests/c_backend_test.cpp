@@ -1,0 +1,130 @@
+#include "test_common.h"
+
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#endif
+
+namespace {
+
+std::filesystem::path default_exe(const std::string &src) {
+  std::filesystem::path exe(src);
+#ifdef _WIN32
+  exe.replace_extension(".exe");
+#else
+  exe.replace_extension();
+#endif
+  return exe;
+}
+
+std::string cli_path() {
+#ifdef _WIN32
+  char buf[MAX_PATH] = {0};
+  DWORD n = GetModuleFileNameA(nullptr, buf, (DWORD)sizeof buf);
+  std::filesystem::path self(std::string(buf, n));
+  return (self.parent_path() / "clux.exe").string();
+#else
+  std::error_code ec;
+  std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec || self.empty()) return "clux";
+  return (self.parent_path() / "clux").string();
+#endif
+}
+
+std::string q(const std::string &s) { return "\"" + s + "\""; }
+
+int run_build(const std::string &src, const std::string &exe,
+              std::string *err) {
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  const std::string inner =
+      q(cli_path()) + " build " + q(std::filesystem::absolute(src).string());
+#ifdef _WIN32
+  const std::string cmd = "(" + inner + ")";
+#else
+  const std::string cmd = inner;
+#endif
+  int status = std::system(cmd.c_str());
+#ifdef _WIN32
+  const int rc = status;
+#else
+  const int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+#endif
+  if (err) *err = slurp((std::filesystem::path(exe).parent_path() / "cbackend_err.txt").string());
+  return rc;
+}
+
+int run_exe(const std::string &exe) {
+  std::string cmd = q(exe);
+#ifdef _WIN32
+  cmd = "(" + cmd + ")";
+#endif
+  int status = std::system(cmd.c_str());
+#ifdef _WIN32
+  return status;
+#else
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+#endif
+}
+
+} // namespace
+
+TEST(CBackend, BuildMainReturnZero) {
+  const std::string src = write_temp_file(
+      "func main(): i32 { return 0; }\n", "cbackend_zero");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe(src);
+  exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildMainReturnValueAndExpression) {
+  const std::string src = write_temp_file(
+      "func main(): i32 { return (1 + 2) * 3; }\n", "cbackend_expr");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe(src);
+  exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 9);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildMainVoid) {
+  const std::string src = write_temp_file(
+      "func main(): void { }\n", "cbackend_void");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe(src);
+  exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, RejectsMainWithParameters) {
+  const std::string src = write_temp_file(
+      "func main(x: i32): i32 { return x; }\n", "cbackend_param");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe(src);
+  exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 1);
+}

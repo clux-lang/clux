@@ -1,0 +1,152 @@
+# C 后端路线
+
+> 本页是工程路线，不是语言规范。语言语义以 `docs/whitepaper/` 为准。
+
+## 目标
+
+实现 `clux build <file.cx>` 的 C 后端：
+
+- 单个 `.cx` 入口；
+- 无 `clux.mod`；
+- 不处理动态库/静态库链接参数；
+- 生成 C 源文件；
+- 调用宿主 C 编译器生成可执行文件。
+
+第一版保留 VM 后端作为语义参照，C 后端通过全部测试后再切换默认后端。
+
+## 分层
+
+```text
+clux AST（sema 之后、已单态化）
+    → lowering（clux 语义 → C 级语义）
+    → C IR（typed）
+    → C IR optimize
+    → writer（纯输出）
+    → C 源文件
+    → host cc
+    → 可执行文件
+```
+
+### C IR 约束
+
+- C IR 只描述 C 级构造；
+- 函数统一使用 env-first ABI；
+- writer 不负责类型、名字、清理或求值顺序决策；
+- C IR 保留源位置，生成 `#line`。
+
+### 函数表示
+
+每个 clux 函数先表示为：
+
+```c
+struct clux_fn_i32_void {
+    int32_t (*fn)(void *env);
+    void *env;
+};
+```
+
+非捕获函数的 env 为 `NULL`。
+
+C IR 优化阶段可以消除未逃逸的函数对象，退化为直接函数调用；第一版保留对象。
+
+## 里程碑
+
+### M0：最小链路（已完成）
+
+- C IR 节点与 writer；
+- `func main(): i32 { return 0; }`；
+- 生成函数对象、函数声明、函数实现、C `main` wrapper；
+- `clux build x.cx` 调用宿主编译器；
+- 生成可执行文件并以退出码验证。
+
+当前支持：
+
+- 无参 `main`，返回 `i32` 或 `void`；
+- `return <整数表达式>`（整数、`+ - * / %`、一元运算符）；
+- 生成 C 函数对象 struct（`fn + env`）；
+- 生成 C `main` wrapper；
+- 生成文件按类型声明/定义、函数声明、对象定义、函数实现分节。
+
+验收：
+
+```sh
+clux build hello.cx
+./hello
+# exit code 0
+```
+
+### M1：标量与控制流
+
+- i32/u32/usize/bool；
+- 局部变量、赋值；
+- 算术、比较、逻辑、位运算；
+- if / else；
+- while；
+- break / continue；
+- return。
+
+验收：一组返回不同退出码的程序与 VM 后端结果一致。
+
+### M2：函数与调用
+
+- 函数参数、返回值；
+- 直接函数调用；
+- 提前声明/调用顺序；
+- 函数对象 global；
+- `main` 之外的普通函数。
+
+### M3：复合类型
+
+- struct 声明/定义与依赖排序；
+- 字段访问；
+- 数组；
+- 指针与解引用；
+- enum / union / cunion 的最小布局。
+
+### M4：所有权与清理
+
+- own；
+- ref；
+- defer；
+- drop；
+- move / clone；
+- 作用域清理顺序。
+
+### M5：函数值、闭包与方法
+
+- 函数值 struct；
+- 捕获环境；
+- 方法接收者；
+- 方法调用；
+- 函数对象逃逸分析。
+
+### M6：语言特性收敛
+
+- bitfield；
+- metadata 全局常量；
+- test 运行器；
+- 泛型实例完整覆盖；
+- 与 VM 差分测试。
+
+### M7：默认切换
+
+- C 后端跑通全量测试和 examples；
+- `clux build/run` 默认 C；
+- VM 保留为调试后端；
+- 再决定删除字节码路径。
+
+## 第一版明确不做
+
+- `clux.mod`；
+- import；
+- extern lib / extern cfunc / extern var；
+- 动态库/静态库编译参数；
+- 标准库；
+- 跨文件链接；
+- C 编译器参数透传。
+
+## 诊断
+
+- clux 语义错误在 lowering 阶段报告，定位到 `.cx`；
+- 生成 C 的编译错误通过 `#line` 映射回 `.cx`；
+- 内部错误必须附带 C IR 节点或生成 C 行号。

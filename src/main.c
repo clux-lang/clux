@@ -38,10 +38,12 @@ static const cmd_t g_cmds[] = {
         .name = "build",
         .usage = "clux build <file.cx>",
         .help =
-            "Compile clux source into a native machine-code binary.\n"
+            "Compile clux source into a native executable.\n"
             "\n"
-            "Not implemented yet (planned: M7 C backend / M12 native backend).\n"
-            "For bytecode artifacts, use `clux bc`.",
+            "  clux build <file.cx>\n"
+            "\n"
+            "Single-file C backend stage: no clux.mod, imports, FFI or\n"
+            "library link arguments yet.",
         .handler = cmd_build,
     },
     {

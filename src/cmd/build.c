@@ -1,21 +1,49 @@
 #include "cmd/build.h"
+#include "cmd/cmd.h"
+#include "cbackend/c_backend.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-/* clux build：编译为**机器码二进制**（主线产物）。
- *
- * 这是 build 的主线职责——将来由转译/原生后端（M7 转译 C 后端、M12 原生
- * 编译后端）实现，当前尚未落地。
- *
- * 字节码（.cxb）与汇编文本（.cxs）都是**非主线**的中间/调试产物，不属于
- * build 的范畴，请使用 `clux bc`（字节码工具）。 */
+static char *default_output(const char *src) {
+    size_t n = strlen(src);
+    const char *dot = NULL;
+    for (size_t i = n; i > 0; i--) {
+        if (src[i - 1] == '.') {
+            dot = src + i - 1;
+            break;
+        }
+        if (src[i - 1] == '/' || src[i - 1] == '\\') break;
+    }
+    size_t stem = dot ? (size_t)(dot - src) : n;
+#ifdef _WIN32
+    const char *suffix = ".exe";
+#else
+    const char *suffix = "";
+#endif
+    size_t slen = strlen(suffix);
+    char *out = (char *)malloc(stem + slen + 1);
+    if (!out) return NULL;
+    memcpy(out, src, stem);
+    memcpy(out + stem, suffix, slen);
+    out[stem + slen] = '\0';
+    return out;
+}
 
 int cmd_build(const cmd_args_t *args) {
-    (void)args;
-    fprintf(stderr,
-            "build: not implemented\n"
-            "       build is meant to emit a native machine-code binary\n"
-            "       (planned: M7 C backend / M12 native backend).\n"
-            "       For bytecode artifacts, use `clux bc`.\n");
-    return 1;
+    if (!args || args->posc != 1) {
+        fprintf(stderr, "usage: clux build <file.cx>\n");
+        return 1;
+    }
+    const char *src = args->posargs[0];
+    char *out = default_output(src);
+    if (!out) {
+        fprintf(stderr, "build: out of memory\n");
+        return 1;
+    }
+    int rc = cbackend_build_file(src, out);
+    if (rc == 0) printf("built %s\n", out);
+    free(out);
+    return rc;
 }

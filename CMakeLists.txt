@@ -194,6 +194,22 @@ target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema
 clux_target_warnings(clux_driver)
 
 # ---------------------------------------------------------------------------
+# C backend (single-file: sema AST -> C IR -> writer -> host C compiler)
+# ---------------------------------------------------------------------------
+file(GLOB CLUX_CBACKEND_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/cbackend/*.c")
+if(CLUX_CBACKEND_SOURCES)
+  add_library(clux_cbackend STATIC ${CLUX_CBACKEND_SOURCES})
+  target_include_directories(clux_cbackend PUBLIC
+      "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(clux_cbackend PUBLIC clux_core clux_parser clux_vm
+      clux_sema clux_desugar clux_diag ICU::uc ICU::i18n)
+  clux_target_warnings(clux_cbackend)
+  list(APPEND CLUX_STAGE_LIBS clux_cbackend)
+endif()
+
+# ---------------------------------------------------------------------------
 # Command library (subcommand dispatch framework)
 # ---------------------------------------------------------------------------
 add_library(clux_cmd STATIC
@@ -209,7 +225,7 @@ add_library(clux_cmd STATIC
     src/cmd/eval.c
 )
 target_include_directories(clux_cmd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_cmd PUBLIC clux_core clux_driver clux_ctfe clux_module ICU::uc icu_data_init)
+target_link_libraries(clux_cmd PUBLIC clux_core clux_driver clux_ctfe clux_module clux_cbackend ICU::uc icu_data_init)
 clux_target_warnings(clux_cmd)
 
 target_link_libraries(clux PRIVATE
