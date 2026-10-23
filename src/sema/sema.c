@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/metadata.h"
 #include "sema/struct_compose.h" /* 结构体组合（`...Base;`）pass */
 #include "vm/type_cfunc.h"
 #include "vm/type_func.h"
@@ -439,6 +440,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   /* M7 §31b：implements 校验（方法签名已解析、member_scope 已建立）。 */
   sema_check_implements_pass(sema, prog);
   pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
+  sema_metadata_apply_all(sema, prog);
 
   /* Pass 3a：作用域树构建 + 控制流分析（符号注册、break/continue 位置检查、
      不可达语句、非 void 函数返回路径完整性）。快速失败：3a 有错误则

@@ -121,12 +121,11 @@ TEST(Decorator, NonFoldableDecoratorIsRejected) {
 TEST(Decorator, OnlyVarAndFuncCanBeDecorated) {
   const std::string src =
       "comptime func twice(n: i32): i32 { return n * 2; }\n"
-      "[[twice]] type T = i32;\n"
-      "func main(): i32 { return 0; }\n";
+      "func main(): i32 { [[twice]] var x = 1; return 0; }\n";
   std::string path = write_temp_file(src, "decor_bad_kind");
   std::string err;
   EXPECT_EQ(clux_run_capture(path, &err), 1);
-  EXPECT_NE(err.find("only allowed on 'var' and 'func'"), std::string::npos)
+  EXPECT_NE(err.find("only allowed on top-level"), std::string::npos)
       << err;
   std::remove(path.c_str());
 }

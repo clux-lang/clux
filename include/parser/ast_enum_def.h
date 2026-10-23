@@ -27,6 +27,8 @@ typedef struct {
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
     /* M7 泛型参数表（count == 0 = 普通枚举）。 */
     ast_generic_params_t generic;
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 } ast_enum_def_t;
 
 /* 单个 variant 声明（独立节点，兄弟链挂接在 ast_enum_def_t::variants） */

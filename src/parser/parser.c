@@ -307,6 +307,16 @@ ast_node_t *parse_program(parser_t *p) {
                 ((ast_func_def_t *)func)->decorators = decorators;
             } else if (func->kind == AST_VAR_DEF) {
                 ((ast_var_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_STRUCT_DEF) {
+                ((ast_struct_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_ENUM_DEF) {
+                ((ast_enum_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_UNION_DEF) {
+                ((ast_union_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_CUNION_DEF) {
+                ((ast_cunion_def_t *)func)->decorators = decorators;
+            } else if (func->kind == AST_TYPE_DEF) {
+                ((ast_type_def_t *)func)->decorators = decorators;
             } else {
                 func = ast_error_new(
                     p->diag, p->tokens, p->arena, func->tok_begin, p->pos,

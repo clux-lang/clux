@@ -163,11 +163,10 @@ ast_node_t *parse_struct_def(parser_t *p) {
             ast_append(&members, &members_last, NULL, mf);
             continue;
         }
+        if (member_decorators && member_decorators->kind == AST_ERROR)
+            return member_decorators;
         if (member_decorators) {
-            return ast_error_new(p->diag, p->tokens, p->arena,
-                                 member_decorators->tok_begin, p->pos,
-                                 "decorators `[[...]]` are only allowed on "
-                                 "'var' and 'func' declarations");
+            /* 字段装饰器：[[metadata(...)]] / 普通标记，字段节点保存。 */
         }
 
         /* 字段名：标识符 */
@@ -206,6 +205,7 @@ ast_node_t *parse_struct_def(parser_t *p) {
         if (!fn) return NULL;
         ((ast_struct_field_t *)fn)->name = fname;
         ((ast_struct_field_t *)fn)->type = ftype;
+        ((ast_struct_field_t *)fn)->decorators = member_decorators;
         ast_append(&fields, &fields_last, NULL, fn);
 
         /* 分号分隔，} 结束 */

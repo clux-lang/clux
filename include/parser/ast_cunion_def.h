@@ -31,6 +31,8 @@ typedef struct {
     ast_node_t *fields_last;
     uint32_t    type_id;         /* sema 登记的类型 id（TYPE_ID_PROGRAM_BASE+idx；
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 } ast_cunion_def_t;
 
 static inline ast_node_t *ast_cunion_def_new(arena_t *arena,

@@ -5,6 +5,9 @@
 
 #include "core/panic.h"
 #include "core/string.h"
+#include "sema/metadata.h"
+#include "sema/comptime.h"
+#include <string.h>
 #include "core/strslice.h"
 #include "parser/ast_array.h"
 #include "parser/ast_alignof.h"
@@ -588,6 +591,115 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
 
     case AST_CALL: {
+        /* 编译期 get_metadata / get_field_metadata / get_method_metadata：
+           直接读元信息表并折叠为常量。 */
+        {
+            ast_call_t *gc = (ast_call_t *)node;
+            if (gc->callee && gc->callee->kind == AST_INDEX) {
+                ast_index_t *gix = (ast_index_t *)gc->callee;
+                if (gix->object && gix->object->kind == AST_IDENT &&
+                    gix->indices) {
+                    strslice_t gn = ((ast_ident_t *)gix->object)->name;
+                    sema_meta_kind_t gk;
+                    bool is_get = true;
+                    if (strslice_eq(gn, STRSLICE_LIT("get_metadata")))
+                        gk = SEMA_META_TYPE;
+                    else if (strslice_eq(gn, STRSLICE_LIT("get_field_metadata")))
+                        gk = SEMA_META_FIELD;
+                    else if (strslice_eq(gn, STRSLICE_LIT("get_method_metadata")))
+                        gk = SEMA_META_METHOD;
+                    else
+                        is_get = false;
+                    if (is_get) {
+                        value_t *tv = ctfe_eval(ctx, gix->indices);
+                        if (value_is_error(vm, tv)) return tv;
+                        if (!value_is_type_value(tv))
+                            return ctfe_err(ctx,
+                                            "get_metadata[T] requires a type");
+                        const type_t *target = value_as(tv, const type_t *);
+                        ast_node_t *a = gc->args;
+                        strslice_t owner = STRSLICE_EMPTY, key = STRSLICE_EMPTY;
+                        if (gk != SEMA_META_TYPE) {
+                            if (!a) return ctfe_err(ctx, "missing field/method");
+                            value_t *ov = ctfe_eval(ctx, a);
+                            if (value_is_error(vm, ov)) return ov;
+                            if (!ov || value_type(ov) != vm->type_str)
+                                return ctfe_err(ctx, "field/method must be str");
+                            const char *os = *(const char *const *)value_data(ov);
+                            owner = strslice_from_bytes(os, os ? strlen(os) : 0);
+                            a = a->next;
+                        }
+                        if (!a) return ctfe_err(ctx, "missing metadata key");
+                        value_t *kv = ctfe_eval(ctx, a);
+                        if (value_is_error(vm, kv)) return kv;
+                        if (!kv || value_type(kv) != vm->type_str)
+                            return ctfe_err(ctx, "metadata key must be str");
+                        const char *ks = *(const char *const *)value_data(kv);
+                        key = strslice_from_bytes(ks, ks ? strlen(ks) : 0);
+                        sema_type_t *st =
+                            (sema_type_t *)sema_type_find(ctx->sema, target);
+                        const sema_meta_entry_t *e =
+                            sema_meta_find(st, gk, owner, key);
+                        if (!e)
+                            return ctfe_errf(ctx,
+                                             "metadata '%.*s' not found",
+                                             (int)key.len, key.ptr);
+                        ast_node_t *lit =
+                            sema_ct_lit(ctx->sema, node, &e->value);
+                        if (!lit)
+                            return ctfe_err(ctx, "metadata cannot be folded");
+                        return ctfe_eval(ctx, lit);
+                    }
+                }
+            }
+        }
+        /* 编译期 metadata[T]("key", value)：写元信息，返回 void。 */
+        {
+            ast_call_t *mc = (ast_call_t *)node;
+            if (mc->callee && mc->callee->kind == AST_INDEX) {
+                ast_index_t *mix = (ast_index_t *)mc->callee;
+                if (mix->object && mix->object->kind == AST_IDENT &&
+                    strslice_eq(((ast_ident_t *)mix->object)->name,
+                                STRSLICE_LIT("metadata")) &&
+                    mix->indices) {
+                    value_t *tv = ctfe_eval(ctx, mix->indices);
+                    if (value_is_error(vm, tv)) return tv;
+                    if (!value_is_type_value(tv))
+                        return ctfe_err(ctx,
+                                        "metadata[T] requires a type argument");
+                    const type_t *target = value_as(tv, const type_t *);
+                    ast_node_t *ka = mc->args;
+                    ast_node_t *va = ka ? ka->next : NULL;
+                    if (!ka || !va)
+                        return ctfe_err(ctx,
+                                        "metadata[T] requires key and value");
+                    value_t *kv = ctfe_eval(ctx, ka);
+                    if (value_is_error(vm, kv)) return kv;
+                    if (!kv || value_type(kv) != vm->type_str)
+                        return ctfe_err(ctx,
+                                        "metadata key must be a string");
+                    const char *ks = *(const char *const *)value_data(kv);
+                    strslice_t key = strslice_from_bytes(ks, ks ? strlen(ks) : 0);
+                    value_t *vv = ctfe_eval(ctx, va);
+                    if (value_is_error(vm, vv)) return vv;
+                    sema_ct_const_t ct;
+                    if (!ctx->sema || !sema_ct_encode(ctx->sema, vv, &ct))
+                        return ctfe_err(ctx,
+                                        "metadata value cannot be encoded");
+                    sema_type_t *st = (sema_type_t *)sema_type_find(
+                        ctx->sema, target);
+                    if (!st)
+                        return ctfe_err(ctx,
+                                        "metadata target type is not registered");
+                    if (!sema_meta_add(ctx->sema, st, SEMA_META_TYPE,
+                                       STRSLICE_EMPTY, key, &ct))
+                        return ctfe_errf(ctx,
+                                         "duplicate metadata key '%.*s'",
+                                         (int)key.len, key.ptr);
+                    return value_make_undefined(vm);
+                }
+            }
+        }
         /* 反射调用 `T.key(i)`：callee 是成员访问、接收者是类型、key 带索引。 */
         {
             ast_call_t *rc = (ast_call_t *)node;

@@ -60,6 +60,7 @@ typedef struct {
        **只被前脱糖消费**：[[d1]] [[d2]] func f(...) 展开为"源函数 + 装饰后绑定"，
        展开后本字段清空（sema/compiler 看不到装饰器）。 */
     ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 
     /* M7 泛型参数表：func f[T, N: comptime u64](...)。count == 0 = 普通函数。
        泛型定义本身不产生运行时实体（sema 只登记符号，实例化时再生成

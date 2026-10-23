@@ -153,6 +153,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
         }
         case AST_TYPE_DEF: {
             ast_type_def_t *t = (ast_type_def_t *)node;
+            for (ast_node_t *d = t->decorators; d; d = d->next) {
+                sb_str(&f->sb, "[[");
+                render_expr(f, d);
+                sb_str(&f->sb, "]] ");
+            }
             sb_str(&f->sb, "type ");
             sb_put(&f->sb, t->name.ptr, t->name.len);
             render_generic_params(f, &t->generic);
@@ -163,6 +168,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
         }
         case AST_ENUM_DEF: {
             ast_enum_def_t *e = (ast_enum_def_t *)node;
+            for (ast_node_t *d = e->decorators; d; d = d->next) {
+                sb_str(&f->sb, "[[");
+                render_expr(f, d);
+                sb_str(&f->sb, "]] ");
+            }
             sb_str(&f->sb, "enum ");
             sb_put(&f->sb, e->name.ptr, e->name.len);
             render_generic_params(f, &e->generic);
@@ -236,6 +246,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
         case AST_STRUCT_DEF: {
             ast_struct_def_t *s0 = (ast_struct_def_t *)node;
             if (s0->is_bitfield) {
+                for (ast_node_t *d = s0->decorators; d; d = d->next) {
+                    sb_str(&f->sb, "[[");
+                    render_expr(f, d);
+                    sb_str(&f->sb, "]] ");
+                }
                 sb_str(&f->sb, "bitfield ");
                 sb_put(&f->sb, s0->name.ptr, s0->name.len);
                 sb_str(&f->sb, ": ");
@@ -263,6 +278,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
              *（项间独立行注释 + 项后行内注释），空行保留——与 render_block
              * 同款规则。空 struct 紧凑 `{}`。 */
             ast_struct_def_t *s = (ast_struct_def_t *)node;
+            for (ast_node_t *d = s->decorators; d; d = d->next) {
+                sb_str(&f->sb, "[[");
+                render_expr(f, d);
+                sb_str(&f->sb, "]] ");
+            }
             sb_str(&f->sb, "struct ");
             sb_put(&f->sb, s->name.ptr, s->name.len);
             render_generic_params(f, &s->generic);
@@ -335,6 +355,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
                 /* 渲染项本身 */
                 if (it->kind == AST_STRUCT_FIELD) {
                     ast_struct_field_t *sf = (ast_struct_field_t *)it;
+                    for (ast_node_t *d = sf->decorators; d; d = d->next) {
+                        sb_str(&f->sb, "[[");
+                        render_expr(f, d);
+                        sb_str(&f->sb, "]] ");
+                    }
                     sb_put(&f->sb, sf->name.ptr, sf->name.len);
                     sb_str(&f->sb, ": ");
                     render_expr(f, sf->type);
@@ -376,6 +401,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
         case AST_CUNION_DEF: {
             /* C 语义 union：与 struct 同款平铺渲染（member 名: 类型; ...） */
             ast_cunion_def_t *c = (ast_cunion_def_t *)node;
+            for (ast_node_t *d = c->decorators; d; d = d->next) {
+                sb_str(&f->sb, "[[");
+                render_expr(f, d);
+                sb_str(&f->sb, "]] ");
+            }
             sb_str(&f->sb, "cunion ");
             sb_put(&f->sb, c->name.ptr, c->name.len);
             sb_str(&f->sb, " {");
@@ -392,6 +422,11 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             /* tag union：与 struct/cunion 同款平铺渲染（member 名: 类型; ...）。
                漏掉本分支会让 union 声明被渲染成空 + 一个 ';'（数据损坏）。 */
             ast_union_def_t *u = (ast_union_def_t *)node;
+            for (ast_node_t *d = u->decorators; d; d = d->next) {
+                sb_str(&f->sb, "[[");
+                render_expr(f, d);
+                sb_str(&f->sb, "]] ");
+            }
             sb_str(&f->sb, "union ");
             sb_put(&f->sb, u->name.ptr, u->name.len);
             render_generic_params(f, &u->generic);

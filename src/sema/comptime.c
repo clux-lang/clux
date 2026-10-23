@@ -33,6 +33,7 @@
 #include "vm/value.h"
 /* 结构体定义求值（含 `...Base;` 组合）——见 src/sema/struct_compose.c */
 #include "sema/struct_compose.h"
+#include "sema/metadata.h"
 
 #include <string.h>
 
@@ -918,6 +919,7 @@ bool sema_eval_type_def(sema_t *sema, ast_type_def_t *td, sema_scope_t *scope) {
   scope_define(vm, vm->current_scope, nb, tv);
 
   /* 4. 符号激活（TDZ：定义前不可见） */
+  sym->type = t;
   sym->is_active = true;
   sym->flow_init = true;
   return true;

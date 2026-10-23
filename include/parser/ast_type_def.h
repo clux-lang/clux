@@ -16,6 +16,8 @@ typedef struct {
     ast_node_t *expr;        /* 类型表达式（sema 求值后折叠为 AST_TYPE_REF） */
     /* M7 泛型参数表（count == 0 = 普通类型别名）。 */
     ast_generic_params_t generic;
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 } ast_type_def_t;
 
 static inline ast_node_t *ast_type_def_new(arena_t *arena,

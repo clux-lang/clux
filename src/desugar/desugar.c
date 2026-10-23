@@ -691,6 +691,38 @@ static ast_node_t *ds_forward_body(desugar_t *ds, ast_func_def_t *fn,
 /* `[[noreturn]]` / `[[never]]`：语言内建的“永不返回”标记装饰器。
    它不是普通函数调用；desugar 直接摘掉并写 fn->is_noreturn，sema 调用点
    按该标记把分支视为终止。 */
+static bool ds_is_metadata_decorator(const ast_node_t *d) {
+  if (!d || d->kind != AST_CALL) return false;
+  const ast_call_t *c = (const ast_call_t *)d;
+  return c->callee && c->callee->kind == AST_IDENT &&
+         strslice_eq(((const ast_ident_t *)c->callee)->name,
+                     STRSLICE_LIT("metadata"));
+}
+
+/* 把 `[[metadata(...)]]` 从普通装饰器链中摘出：metadata 不是 wrapper，
+   而是编译期标记，交由 sema 处理。 */
+static ast_node_t *ds_take_metadata(ast_node_t *decs, ast_node_t **out_meta) {
+  ast_node_t *head = NULL, *tail = NULL;
+  for (ast_node_t *d = decs; d; d = d->next) {
+    if (ds_is_metadata_decorator(d)) {
+      d->next = NULL;
+      if (*out_meta) {
+        ast_node_t *t = *out_meta;
+        while (t->next) t = t->next;
+        t->next = d;
+      } else {
+        *out_meta = d;
+      }
+      continue;
+    }
+    d->next = NULL;
+    if (tail) tail->next = d;
+    else head = d;
+    tail = d;
+  }
+  return head;
+}
+
 static ast_node_t *ds_take_noreturn(ast_node_t *decs, bool *flag) {
   ast_node_t *head = NULL, *tail = NULL;
   for (ast_node_t *d = decs; d; d = d->next) {
@@ -713,6 +745,9 @@ static ast_node_t *ds_take_noreturn(ast_node_t *decs, bool *flag) {
 /** 顶层函数装饰：源函数改名 + `var <名> = 装饰(<源>);` 紧随其后。 */
 static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
   ast_node_t *decs = fn->decorators;
+  if (!decs) return NULL;
+  decs = ds_take_metadata(decs, &fn->metadata_decorators);
+  fn->decorators = decs;
   if (!decs) return NULL;
   bool noreturn_marker = false;
   decs = ds_take_noreturn(decs, &noreturn_marker);
@@ -748,6 +783,9 @@ static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
 static ast_node_t *ds_decorate_method(desugar_t *ds, ast_func_def_t *m,
                                       ast_node_t **out_tail) {
   ast_node_t *decs = m->decorators;
+  if (!decs) return NULL;
+  decs = ds_take_metadata(decs, &m->metadata_decorators);
+  m->decorators = decs;
   if (!decs) return NULL;
   bool noreturn_marker = false;
   decs = ds_take_noreturn(decs, &noreturn_marker);

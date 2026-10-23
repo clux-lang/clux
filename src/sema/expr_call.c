@@ -56,6 +56,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/metadata.h"
 #include "sema/sema_cross.h"
 #include "sema/sema_generic.h"
 #include "vm/function.h"
@@ -706,6 +707,11 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
          实参链）。失败时诊断已记录。 */
       if (!sema_expand_spread_args(sema, call, scope)) return val_void(sema);
+      {
+        value_t *mv = NULL;
+        if (sema_metadata_try_get(sema, node, scope, &mv))
+          return mv ? mv : val_void(sema);
+      }
       /* P9：`len(N)`（comptime 值参数包）折叠为元素个数常量。 */
       if (call->callee && call->callee->kind == AST_IDENT &&
           call->args && !call->args->next) {

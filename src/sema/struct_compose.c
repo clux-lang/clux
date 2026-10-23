@@ -17,6 +17,7 @@
 #include "parser/ast_tuple.h"
 #include "parser/ast_type_ref.h"
 #include "parser/ast_volatile.h"
+#include "sema/metadata.h"
 #include "sema/comptime.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"

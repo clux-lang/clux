@@ -1,6 +1,6 @@
 # clux 元信息（metadata）设计调研
 
-> 状态：调研（2026-10-23）。未实现。
+> 状态：VM 阶段已实现（2026-10-23）。C 后端全局常量尚未接入。
 
 目标语法：
 
@@ -360,9 +360,9 @@ struct Box[T] {
 
 ---
 
-## 11. 类型装饰器（补充调研）
+## 11. 类型装饰器（已实现基础版）
 
-类型装饰器当前尚未实现，其原理是**一个带泛型参数的 comptime 函数**：
+类型装饰器的原理是**一个带泛型参数的 comptime 函数**：
 
 ```clux
 comptime func LogName[T](): void {
@@ -428,14 +428,25 @@ type Alias = User;
 - `[[metadata("k", v)]]` 声明不可变元信息；
 - `[[LogName]]` 是任意的编译期逻辑（日志、校验、生成其他编译期状态）。
 
-如果希望类型装饰器也能写入元信息，需要额外的编译期 API，例如：
+类型装饰器可以**写入**元信息，编译期 API 是函数形式的 `metadata[T]`：
 
 ```clux
-set_metadata[T]("key", value);
+comptime func controller[T](url: str): void {
+    metadata[T]("controller.url", url);
+}
 ```
 
-并且只能在 comptime 上下文调用。当前用户给出的 API 只有 get，因此第一版
-建议保持两者独立，不开放 `set_metadata`。
+写入只发生在编译期；运行期只能通过 `get_*` 读取。值必须是编译期常量
+（整数 / bool / str / 无捕获函数等）。
+
+编译期同样可以读取：
+
+```clux
+comptime func check[T](): void {
+    var url: str = get_metadata[T]("controller.url");
+    // ...
+}
+```
 
 ### 11.3 与 metadata 的执行顺序
 
@@ -471,14 +482,41 @@ struct User {}
 
 ---
 
-## 12. 待确认
+## 12. 已落地范围
 
-1. 是否接受方案 A（返回条目自己的静态类型、key 必须编译期常量、缺失编译错误）？
-2. 是否需要 `has_metadata` / `has_field_metadata`？
-3. metadata 是否允许挂在 enum/union/bitfield/type alias 上，还是先只做 struct？
-4. 函数元信息是否允许闭包，还是仅无捕获函数？
-5. 继承/嵌入字段的 metadata 查找规则？
-6. 类型装饰器的 `T` 是否就是被装饰的具体类型，并且泛型类型按每个实例执行？
-7. 透明类型别名上的装饰器按底层类型执行是否可接受？
-8. 是否需要 `set_metadata[T]`，让类型装饰器可以写入元信息？
-9. 类型装饰器是否允许带普通参数（`[[LogName("x")]]`）？
+已实现：
+
+- `[[metadata("key", value)]]` 挂在 struct 类型 / 字段 / 方法；
+- 类型别名上的 `[[metadata]]`；
+- `get_metadata[T]("key")` / `get_field_metadata[T]("field", "key")` /
+  `get_method_metadata[T]("method", "key")`；
+- 返回条目自己的静态类型，编译期折叠为常量；缺失 / 重复 key 报错；
+- 值支持整数、bool、str、无捕获函数；
+- 类型装饰器 `[[fn]]` / `[[fn(args)]]`：泛型 comptime 函数，`T` 为目标类型；
+- 类型装饰器内用 `metadata[T]("key", value)` 写元信息；
+- 编译期 `get_metadata[T]` 读取（类型装饰器内可用）；
+- 透明类型别名按底层类型处理；
+- struct 字段/方法 metadata 在函数签名就绪后统一求值（因此函数值可用）。
+
+当前限制：
+
+- 泛型 struct 实例的 metadata 尚未按实例求值（当前仅全局具名类型/别名）；
+- 透明别名指向内建类型（如 `type A = i32`）时没有独立类型对象，metadata
+  无法附着；别名应指向具名类型；
+- enum / union / cunion / bitfield 的类型装饰器已接入，字段 metadata
+  仅 struct 完整；
+- metadata 函数值暂只保证无捕获函数；带捕获闭包未测试；
+- 编译期读取函数值 metadata 尚未完全验证；
+- C 后端仍使用 VM 常量折叠，尚未生成真正的全局常量；
+- 继承/嵌入字段的 metadata 查找未实现。
+
+## 13. 实现落点
+
+- 表：`include/sema/metadata.h`、`src/sema/metadata.c`；
+- 装饰器求值/类型装饰器调用：`src/sema/metadata_apply.c`；
+- 延迟到函数签名就绪后统一应用：`sema_analyze` 中的
+  `sema_metadata_apply_all()`；
+- 编译期读写：`src/ctfe/ctfe_expr.c` 的 `AST_CALL` 分支；
+- 运行期读取：`src/sema/expr_call.c` 中 `sema_metadata_try_get()` 折叠；
+- parser：类型/字段 decorators 槽位与顶层类型装饰器；
+- desugar：把 `metadata` 从普通 wrapper 装饰器中摘出。

@@ -72,6 +72,8 @@ typedef struct {
     uint32_t    bitfield_word_count; /* 隐藏数组元素数 */
     size_t      bitfield_field_count;
     ast_bitfield_field_t *bitfield_fields;
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
     uint32_t    bitfield_underlying_type_id; /* sema 填 */
     uint32_t    bitfield_storage_type_id;    /* sema 填：隐藏数组类型 id */
 } ast_struct_def_t;
@@ -81,6 +83,8 @@ typedef struct ast_struct_field {
     ast_node_t  base;    /* kind = AST_STRUCT_FIELD */
     strslice_t  name;    /* 字段名 */
     ast_node_t *type;    /* 字段类型表达式 */
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 } ast_struct_field_t;
 
 static inline ast_node_t *ast_struct_def_new(arena_t *arena,

@@ -94,6 +94,9 @@ typedef struct sema_type_t {
     strslice_t    name;    /* "__type_N"（sema arena 生命周期） */
     uint32_t      id;      /* 全 VM 唯一 program id（type_id_alloc） */
     uint32_t      index;   /* sema->types 中的登记下标（0 起） */
+    struct sema_meta_entry *type_meta;
+    struct sema_meta_entry *field_meta;
+    struct sema_meta_entry *method_meta;
 } sema_type_t;
 
 /**

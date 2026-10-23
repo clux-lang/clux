@@ -32,6 +32,8 @@ typedef struct {
                                     compiler 顶层名字绑定 LOAD_TYPE 用） */
     /* M7 泛型参数表（count == 0 = 普通 tag union）。 */
     ast_generic_params_t generic;
+    ast_node_t *decorators;
+    ast_node_t *metadata_decorators;
 } ast_union_def_t;
 
 static inline ast_node_t *ast_union_def_new(arena_t *arena,
