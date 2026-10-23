@@ -3,6 +3,7 @@
 #include "sema/comptime.h"
 #include "parser/ast_scope_ref.h"
 #include "sema_expr_internal.h"
+#include "sema/sema_generic.h"
 #include "vm/type_error.h"
 #include "ctfe/ctfe.h"
 #include "parser/ast_call.h"
@@ -234,6 +235,24 @@ void sema_metadata_apply_members(sema_t *sema, const type_t *type,
         ast_func_def_t *fn = (ast_func_def_t *)m;
         for (ast_node_t *d = fn->metadata_decorators; d; d = d->next)
             add_meta_decorator(sema, type, SEMA_META_METHOD, fn->name, d, scope);
+        /* 泛型 struct 的方法装饰器还没经过 desugar 拆分；这里把 metadata
+           标记从 wrapper 链中摘掉，避免实例化时把 metadata 当普通函数调用。 */
+        ast_node_t *head = NULL, *tail = NULL;
+        for (ast_node_t *d = fn->decorators; d;) {
+            ast_node_t *next = d->next;
+            d->next = NULL;
+            if (meta_is_call(d, &(strslice_t){0}, NULL)) {
+                add_meta_decorator(sema, type, SEMA_META_METHOD, fn->name, d,
+                                   scope);
+            } else if (tail) {
+                tail->next = d;
+                tail = d;
+            } else {
+                head = tail = d;
+            }
+            d = next;
+        }
+        fn->decorators = head;
     }
 }
 
@@ -252,6 +271,7 @@ void sema_metadata_apply_all(sema_t *sema, ast_program_t *prog) {
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind == AST_STRUCT_DEF) {
             ast_struct_def_t *sd = (ast_struct_def_t *)n;
+            if (sd->generic.count > 0) continue; /* 实例化时按具体 T 应用 */
             sema_symbol_t *sym =
                 sema_scope_find_local(sema->global_scope, sd->name);
             if (!sym || !sym->type) continue;
@@ -291,6 +311,27 @@ void sema_metadata_apply_all(sema_t *sema, ast_program_t *prog) {
     }
 }
 
+static const type_t *resolve_metadata_type_arg(sema_t *sema,
+                                               ast_node_t *arg,
+                                               sema_scope_t *scope,
+                                               bool *ok) {
+    *ok = false;
+    if (!arg) return NULL;
+    /* 类型槽位解析统一走 sema_resolve_type_slot：它同时处理别名、内建类型
+       和 `Box[i32]` 形式的泛型实例化。 */
+    const type_t *t = sema_resolve_type_slot(sema, &arg);
+    if (t) {
+        *ok = true;
+        return t;
+    }
+    value_t *tv = sema_expr(sema, &arg, scope);
+    if (tv && !value_is_error(sema->vm, tv) && value_is_type_value(tv)) {
+        *ok = true;
+        return value_as(tv, const type_t *);
+    }
+    return NULL;
+}
+
 bool sema_metadata_try_get(sema_t *sema, ast_node_t **node,
                            sema_scope_t *scope, value_t **out) {    if (!node || !*node || (*node)->kind != AST_CALL) return false;
     ast_call_t *call = (ast_call_t *)*node;
@@ -322,16 +363,16 @@ bool sema_metadata_try_get(sema_t *sema, ast_node_t **node,
         *out = val_void(sema);
         return true;
     }
-    value_t *tv = sema_expr(sema, &ix->indices, scope);
-    if (!tv || value_is_error(sema->vm, tv) ||
-        !value_is_type_value(tv)) {
+    bool type_ok = false;
+    const type_t *target =
+        resolve_metadata_type_arg(sema, ix->indices, scope, &type_ok);
+    if (!type_ok || !target) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "%.*s requires a concrete type argument", (int)fname.len,
                    fname.ptr);
         *out = val_void(sema);
         return true;
     }
-    const type_t *target = value_as(tv, const type_t *);
     strslice_t owner = STRSLICE_EMPTY, key = STRSLICE_EMPTY;
     ast_node_t *a = call->args;
     if (kind != SEMA_META_TYPE) {

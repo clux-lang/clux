@@ -45,6 +45,7 @@
 #include "vm/type_ownership.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
+#include "sema/metadata.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h"
 #include "vm/type_struct.h"
@@ -1759,6 +1760,11 @@ static const type_t *build_struct_instance(sema_t *sema, ast_struct_def_t *sd,
         return NULL;
     }
     inst->type = sym->type;
+    /* 泛型实例的装饰器在实例化点执行：字段/方法 metadata 与类型装饰器
+       都绑定到具体实例类型。 */
+    sema_metadata_apply_members(sema, sym->type, sd, sema->global_scope);
+    sema_metadata_apply_type(sema, sym->type, sd->decorators,
+                             sema->global_scope);
     instantiate_struct_members(sema, sd, sym, inst);
     return inst->type;
 }
@@ -2073,6 +2079,9 @@ const type_t *sema_generic_instantiate_type(
     switch (kind) {
     case SEMA_GEN_STRUCT: {
         ast_struct_def_t *sd = (ast_struct_def_t *)parsed;
+        const ast_struct_def_t *orig = (const ast_struct_def_t *)def;
+        sd->decorators = orig->decorators;
+        sd->metadata_decorators = orig->metadata_decorators;
         sd->generic = (ast_generic_params_t){0};
         sd->name = iname;
         inst->instance = parsed;

@@ -50,6 +50,31 @@ TEST(Metadata, FunctionValueAndAlias) {
       "metadata_function_alias");
 }
 
+TEST(Metadata, GenericInstances) {
+  clux_expect_ok(
+      "comptime func controller[T](url: str): void {\n"
+      "  metadata[T](\"controller.url\", url);\n"
+      "}\n"
+      "[[controller(\"/box\")]]\n"
+      "[[metadata(\"size\", sizeof(T))]]\n"
+      "struct Box[T] {\n"
+      "  [[metadata(\"unit\", \"px\")]] x: T;\n"
+      "  [[metadata(\"role\", \"getter\")]]\n"
+      "  func get(self: ref *Box[T]): T { return self.x; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: usize = get_metadata[Box[i32]](\"size\");\n"
+      "  var b: usize = get_metadata[Box[i64]](\"size\");\n"
+      "  var u: str = get_field_metadata[Box[i32]](\"x\", \"unit\");\n"
+      "  var r: str = get_method_metadata[Box[i32]](\"get\", \"role\");\n"
+      "  var c: str = get_metadata[Box[i32]](\"controller.url\");\n"
+      "  if (a != 4usize || b != 8usize || u != \"px\" || r != \"getter\" ||\n"
+      "      c != \"/box\") { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "metadata_generic");
+}
+
 TEST(Metadata, RejectsMissingAndDuplicate) {
   clux_expect_reject(
       "[[metadata(\"x\", 1)]]\n"

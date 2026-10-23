@@ -500,9 +500,10 @@ struct User {}
 
 当前限制：
 
-- 泛型 struct 实例的 metadata 尚未按实例求值（当前仅全局具名类型/别名）；
 - 透明别名指向内建类型（如 `type A = i32`）时没有独立类型对象，metadata
   无法附着；别名应指向具名类型；
+- 泛型实例已按实例求值；但 metadata 值里使用 `sizeof(T)` 等依赖实例参数的
+  表达式，在“编译期 get 触发实例化”的路径上仍需进一步收敛；
 - enum / union / cunion / bitfield 的类型装饰器已接入，字段 metadata
   仅 struct 完整；
 - metadata 函数值暂只保证无捕获函数；带捕获闭包未测试；

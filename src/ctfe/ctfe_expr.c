@@ -611,12 +611,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                     else
                         is_get = false;
                     if (is_get) {
-                        value_t *tv = ctfe_eval(ctx, gix->indices);
-                        if (value_is_error(vm, tv)) return tv;
-                        if (!value_is_type_value(tv))
-                            return ctfe_err(ctx,
-                                            "get_metadata[T] requires a type");
-                        const type_t *target = value_as(tv, const type_t *);
+                        ast_node_t *type_arg = gix->indices;
+                        const type_t *target =
+                            sema_resolve_type_slot(ctx->sema, &type_arg);
+                        if (!target) {
+                            value_t *tv = ctfe_eval(ctx, gix->indices);
+                            if (value_is_error(vm, tv)) return tv;
+                            if (!value_is_type_value(tv))
+                                return ctfe_err(
+                                    ctx, "get_metadata[T] requires a type");
+                            target = value_as(tv, const type_t *);
+                        }
                         ast_node_t *a = gc->args;
                         strslice_t owner = STRSLICE_EMPTY, key = STRSLICE_EMPTY;
                         if (gk != SEMA_META_TYPE) {
