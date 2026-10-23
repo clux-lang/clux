@@ -146,6 +146,30 @@ TEST(CBackend, BuildControlFlowAndCalls) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildForGlobalAndDoWhile) {
+  const std::string src = write_temp_file(
+      "var counter: i32 = 1;\n"
+      "func bump(): i32 { return counter + 1; }\n"
+      "func main(): i32 {\n"
+      "  var sum = 0;\n"
+      "  for (var i = 0; i < 4; i = i + 1) { sum = sum + i; }\n"
+      "  if (sum != 6) { return 1; }\n"
+      "  if (bump() != 2) { return 2; }\n"
+      "  var n = 0;\n"
+      "  do { n += 1; } while (n < 3);\n"
+      "  return n;\n"
+      "}\n",
+      "cbackend_m2");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 3);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

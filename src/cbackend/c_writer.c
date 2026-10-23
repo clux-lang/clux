@@ -58,6 +58,15 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         w(sb, ")");
         break;
     }
+    case CIR_EXPR_ASSIGN:
+        w(sb, "(");
+        w(sb, e->text ? e->text : "clux_v_tmp");
+        w(sb, " ");
+        w(sb, e->op ? e->op : "=");
+        w(sb, " ");
+        write_expr(sb, e->rhs);
+        w(sb, ")");
+        break;
     default:
         w(sb, "0");
         break;
@@ -169,6 +178,39 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         write_indent(sb, indent);
         w(sb, "}\n");
         break;
+    case CIR_STMT_FOR:
+        w(sb, "for (");
+        if (s->init && s->init->kind == CIR_STMT_VAR) {
+            wf(sb, "%s %s",
+               s->init->type && s->init->type->c_name ? s->init->type->c_name
+                                                       : "int32_t",
+               s->init->name ? s->init->name : "clux_v_i");
+            if (s->init->expr) {
+                w(sb, " = ");
+                write_expr(sb, s->init->expr);
+            }
+        } else if (s->init && s->init->kind == CIR_STMT_ASSIGN) {
+            wf(sb, "%s %s ", s->init->name ? s->init->name : "clux_v_i",
+               s->init->op ? s->init->op : "=");
+            write_expr(sb, s->init->expr);
+        }
+        w(sb, "; ");
+        if (s->expr) write_expr(sb, s->expr);
+        w(sb, "; ");
+        if (s->update) write_expr(sb, s->update);
+        w(sb, ") {\n");
+        write_stmt_list(sb, s->body, indent + 1);
+        write_indent(sb, indent);
+        w(sb, "}\n");
+        break;
+    case CIR_STMT_DOWHILE:
+        w(sb, "do {\n");
+        write_stmt_list(sb, s->body, indent + 1);
+        write_indent(sb, indent);
+        w(sb, "} while (");
+        write_expr(sb, s->expr);
+        w(sb, ");\n");
+        break;
     case CIR_STMT_BLOCK:
         w(sb, "{\n");
         write_stmt_list(sb, s->body, indent + 1);
@@ -225,6 +267,18 @@ static void reverse_signatures(cir_signature_t **head) {
     *head = prev;
 }
 
+static void reverse_globals(cir_global_t **head) {
+    cir_global_t *prev = NULL;
+    cir_global_t *cur = *head;
+    while (cur) {
+        cir_global_t *next = cur->next;
+        cur->next = prev;
+        prev = cur;
+        cur = next;
+    }
+    *head = prev;
+}
+
 int cir_write_file(const cir_unit_t *unit, const char *path,
                    allocator_t *alloc) {
     if (!unit || !path || !alloc) return 1;
@@ -260,6 +314,18 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         w(sb, "/* ---- global variables and function objects ---- */\n");
         for (cir_function_t *f = fns; f; f = f->next)
             write_function_object(sb, f);
+        cir_global_t *globals = unit->globals;
+        reverse_globals(&globals);
+        for (cir_global_t *g = globals; g; g = g->next) {
+            wf(sb, "static %s %s",
+               g->type && g->type->c_name ? g->type->c_name : "int32_t",
+               g->name ? g->name : "clux_v_global");
+            if (g->init) {
+                w(sb, " = ");
+                write_expr(sb, g->init);
+            }
+            w(sb, ";\n");
+        }
         w(sb, "\n");
     }
 

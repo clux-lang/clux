@@ -93,6 +93,18 @@ cir_expr_t *cir_expr_call(arena_t *arena, const char *callee,
     return e;
 }
 
+cir_expr_t *cir_expr_assign(arena_t *arena, const char *target,
+                            const char *op, cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_ASSIGN;
+    e->text = target;
+    e->op = op;
+    e->rhs = value;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;
@@ -167,4 +179,10 @@ void cir_unit_add_function(cir_unit_t *u, cir_function_t *fn) {
     if (!u || !fn) return;
     fn->next = u->functions;
     u->functions = fn;
+}
+
+void cir_unit_add_global(cir_unit_t *u, cir_global_t *g) {
+    if (!u || !g) return;
+    g->next = u->globals;
+    u->globals = g;
 }

@@ -6,6 +6,8 @@
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_expr_stmt.h"
+#include "parser/ast_for.h"
+#include "parser/ast_dowhile.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
@@ -139,6 +141,22 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_CALL:
         return lower_call(lc, (ast_call_t *)e);
+    case AST_ASSIGN: {
+        ast_assign_t *a = (ast_assign_t *)e;
+        if (!a->target || a->target->kind != AST_IDENT) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                       "c backend: only identifier assignment expression is supported");
+            lc->failed = true;
+            return NULL;
+        }
+        const char *target = mangle(lc->arena, "clux_v_",
+                                    ((ast_ident_t *)a->target)->name);
+        const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        cir_expr_t *value = lower_expr(lc, a->value);
+        return target && op && value
+                   ? cir_expr_assign(lc->arena, target, op, value)
+                   : NULL;
+    }
     default:
         diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                    "c backend: unsupported expression");
@@ -273,6 +291,24 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         st->body = lower_block(lc, w->body, ok);
         return st;
     }
+    case AST_FOR: {
+        ast_for_t *f = (ast_for_t *)s;
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FOR);
+        if (!st) return NULL;
+        if (f->init) st->init = lower_stmt(lc, f->init, ok);
+        if (f->cond) st->expr = lower_expr(lc, f->cond);
+        if (f->update) st->update = lower_expr(lc, f->update);
+        st->body = lower_block(lc, f->body, ok);
+        return st;
+    }
+    case AST_DOWHILE: {
+        ast_dowhile_t *d = (ast_dowhile_t *)s;
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_DOWHILE);
+        if (!st) return NULL;
+        st->expr = lower_expr(lc, d->cond);
+        st->body = lower_block(lc, d->body, ok);
+        return st;
+    }
     case AST_EMPTY_STMT:
         return NULL;
     default:
@@ -393,6 +429,31 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     cir_unit_add_include(u, arena, "stdint.h");
     cir_unit_add_include(u, arena, "stddef.h");
     cir_unit_add_include(u, arena, "stdbool.h");
+
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind != AST_VAR_DEF) continue;
+        ast_var_def_t *vd = (ast_var_def_t *)n;
+        if (vd->is_comptime || vd->is_extern_var) continue;
+        const type_t *t = vd->resolved_type;
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(sema, &vd->type_expr);
+        if (!t || type_kind_of(t) == TYPE_KIND_VOID)
+            t = infer_expr_type(&lc, vd->init);
+        cir_type_t *ct = map_type(&lc, t);
+        if (!ct) {
+            diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
+                       "c backend: cannot determine global variable type");
+            return NULL;
+        }
+        cir_global_t *g = (cir_global_t *)arena_calloc(
+            arena, 1, sizeof(*g), ALIGNOF(max_align_t));
+        if (!g) return NULL;
+        g->type = ct;
+        g->name = mangle(arena, "clux_v_", vd->name);
+        if (vd->init && vd->init->kind != AST_UNDEF)
+            g->init = lower_expr(&lc, vd->init);
+        cir_unit_add_global(u, g);
+    }
 
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_FUNC_DEF) continue;

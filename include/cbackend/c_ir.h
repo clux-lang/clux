@@ -29,6 +29,7 @@ typedef enum {
     CIR_EXPR_UNARY,
     CIR_EXPR_BINARY,
     CIR_EXPR_CALL,
+    CIR_EXPR_ASSIGN,
 } cir_expr_kind_t;
 
 typedef struct cir_expr {
@@ -50,6 +51,8 @@ typedef enum {
     CIR_STMT_RETURN,
     CIR_STMT_IF,
     CIR_STMT_WHILE,
+    CIR_STMT_FOR,
+    CIR_STMT_DOWHILE,
     CIR_STMT_BLOCK,
     CIR_STMT_BREAK,
     CIR_STMT_CONTINUE,
@@ -61,7 +64,9 @@ typedef struct cir_stmt {
     const char     *op;      /* assign op */
     cir_type_t     *type;    /* var type */
     cir_expr_t     *expr;    /* init / assign value / condition / return value */
-    struct cir_stmt *body;   /* block / then */
+    cir_expr_t     *update;  /* for update */
+    struct cir_stmt *init;   /* for init */
+    struct cir_stmt *body;   /* block / then / loop body */
     struct cir_stmt *else_body;
     struct cir_stmt *next;
 } cir_stmt_t;
@@ -91,12 +96,20 @@ typedef struct cir_function {
     struct cir_function *next;
 } cir_function_t;
 
+typedef struct cir_global {
+    const char  *name;
+    cir_type_t  *type;
+    cir_expr_t  *init;
+    struct cir_global *next;
+} cir_global_t;
+
 typedef struct cir_unit {
     const char  *source_path;
     const char **includes;
     size_t       include_count;
     cir_signature_t *signatures;
     cir_function_t  *functions;
+    cir_global_t    *globals;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -112,6 +125,8 @@ cir_expr_t    *cir_expr_binary(arena_t *arena, const char *op, cir_expr_t *lhs,
                                cir_expr_t *rhs);
 cir_expr_t    *cir_expr_call(arena_t *arena, const char *callee,
                              cir_expr_t *args);
+cir_expr_t    *cir_expr_assign(arena_t *arena, const char *target,
+                               const char *op, cir_expr_t *value);
 void           cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg);
 cir_stmt_t    *cir_stmt_new(arena_t *arena, cir_stmt_kind_t kind);
 void           cir_stmt_append(cir_stmt_t *block, cir_stmt_t *stmt);
@@ -125,6 +140,7 @@ cir_function_t  *cir_function_new(arena_t *arena, const char *name,
                                   bool is_entry);
 void cir_unit_add_signature(cir_unit_t *u, cir_signature_t *sig);
 void cir_unit_add_function(cir_unit_t *u, cir_function_t *fn);
+void cir_unit_add_global(cir_unit_t *u, cir_global_t *g);
 
 #ifdef __cplusplus
 }
