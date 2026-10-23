@@ -243,6 +243,49 @@ static void compile_assign_deref(compiler_t *c, ast_assign_t *n) {
 static void compile_assign_member(compiler_t *c, ast_assign_t *n) {
   ast_member_t *m = (ast_member_t *)n->target;
 
+  if (m->is_bitfield) {
+    if (!n->op || token_is(n->op, "=")) {
+      compile_expr(c, m->object);            /* [self] */
+      compile_expr(c, n->value);             /* [self, value] */
+      bcode_write_op(c->bc, BCODE_BITFIELD_SET);
+      bcode_write_u32(c->bc, m->bit_value_type_id);
+      bcode_write_u32(c->bc, m->bit_offset);
+      bcode_write_u32(c->bc, m->bit_width);
+      bcode_write_u32(c->bc, m->bit_word_bits);
+      st_push(c, -1);
+      bcode_write_op(c->bc, BCODE_POP);
+      st_push(c, -1);
+      return;
+    }
+    compile_expr(c, m->object);              /* [self] */
+    bcode_write_op(c->bc, BCODE_PUSH_VALUE);
+    bcode_write_u32(c->bc, 0);               /* [self, self] */
+    st_push(c, 1);
+    bcode_write_op(c->bc, BCODE_BITFIELD_GET);
+    bcode_write_u32(c->bc, m->bit_value_type_id);
+    bcode_write_u32(c->bc, m->bit_offset);
+    bcode_write_u32(c->bc, m->bit_width);
+    bcode_write_u32(c->bc, m->bit_word_bits);
+    st_push(c, 0);                           /* [self, old] */
+    compile_expr(c, n->value);               /* [self, old, v] */
+    if (token_is(n->op, "+="))      bcode_write_op(c->bc, BCODE_ADD);
+    else if (token_is(n->op, "-=")) bcode_write_op(c->bc, BCODE_SUB);
+    else if (token_is(n->op, "*=")) bcode_write_op(c->bc, BCODE_MUL);
+    else if (token_is(n->op, "/=")) bcode_write_op(c->bc, BCODE_DIV);
+    else if (token_is(n->op, "%=")) bcode_write_op(c->bc, BCODE_MOD);
+    else { c_error(c, &n->base, "unsupported compound assignment"); return; }
+    st_push(c, -1);                          /* [self, new] */
+    bcode_write_op(c->bc, BCODE_BITFIELD_SET);
+    bcode_write_u32(c->bc, m->bit_value_type_id);
+    bcode_write_u32(c->bc, m->bit_offset);
+    bcode_write_u32(c->bc, m->bit_width);
+    bcode_write_u32(c->bc, m->bit_word_bits);
+    st_push(c, -1);
+    bcode_write_op(c->bc, BCODE_POP);
+    st_push(c, -1);
+    return;
+  }
+
   if (!n->op || token_is(n->op, "=")) {   /* op==NULL：sema 生成赋值 */
     compile_expr(c, m->object);              /* 栈: [self] */
     compile_expr(c, n->value);               /* 栈: [self, val] */

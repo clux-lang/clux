@@ -22,6 +22,12 @@ typedef struct {
     uint32_t    member_tag;    /* union 构造：sema 定位的 member 下标（tag 值），
                                   compiler 发 tag 哨兵 + CONSTRUCT 2 用；其他
                                   类型构造未用（0） */
+    bool        is_bitfield;
+    uint32_t    bit_word_bits;
+    uint32_t    bit_field_count;
+    ast_node_t *bit_fields;
+    uint32_t    bit_underlying_type_id;
+    uint32_t    bit_storage_type_id;
 } ast_construct_t;
 
 static inline ast_node_t *ast_construct_new(arena_t *arena,

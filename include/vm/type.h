@@ -288,6 +288,8 @@ typedef struct struct_type_t {
     scope_t    *member_scope;
     strmap_t   *attributes;
     vec_t      *methods;
+    /* 借用的 AST_STRUCT_DEF（仅 bitfield 类型非 NULL；sema 设置） */
+    void       *bitfield_ast;
 } struct_type_t;
 
 /**

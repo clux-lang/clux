@@ -17,6 +17,13 @@ extern "C" {
  * 的逗号分隔不同——见 M2 设计 §2）。字段类型表达式（AST_IDENT/类型修饰等）
  * sema 阶段折叠为类型引用。
  */
+/* bitfield 字段元数据（偏移从 LSB 起，连续位流）。 */
+typedef struct ast_bitfield_field {
+    strslice_t name;
+    uint32_t   offset;
+    uint32_t   width;
+} ast_bitfield_field_t;
+
 typedef struct {
     ast_node_t  base;
     strslice_t  name;            /* 结构体名 */
@@ -53,10 +60,24 @@ typedef struct {
        的接口类型表达式链（AST_IDENT / AST_INDEX），声明序。 */
     ast_node_t *implements;
     ast_node_t *implements_last;
+
+    /* ---- bitfield（sema/compiler 用） ----
+       位域在语法上被改写成一个单字段 struct（隐藏 `__bits` 数组），
+       这些元数据描述逻辑字段。字段按声明顺序从 LSB 连续排布，允许跨
+       底层无符号字的边界。 */
+    bool        is_bitfield;
+    ast_node_t *bitfield_underlying; /* 底层无符号类型表达式 */
+    uint32_t    bitfield_word_bits;  /* u8/u16/u32/u64 的位宽 */
+    uint32_t    bitfield_total_bits; /* 所有字段宽度之和 */
+    uint32_t    bitfield_word_count; /* 隐藏数组元素数 */
+    size_t      bitfield_field_count;
+    ast_bitfield_field_t *bitfield_fields;
+    uint32_t    bitfield_underlying_type_id; /* sema 填 */
+    uint32_t    bitfield_storage_type_id;    /* sema 填：隐藏数组类型 id */
 } ast_struct_def_t;
 
 /* 单个字段声明（独立节点，兄弟链挂接在 ast_struct_def_t::fields） */
-typedef struct {
+typedef struct ast_struct_field {
     ast_node_t  base;    /* kind = AST_STRUCT_FIELD */
     strslice_t  name;    /* 字段名 */
     ast_node_t *type;    /* 字段类型表达式 */
@@ -88,6 +109,9 @@ static inline ast_node_t *ast_struct_field_new(arena_t *arena,
 
 /** 解析结构体定义 struct Name { field: type; ... } */
 ast_node_t *parse_struct_def(parser_t *p);
+
+/** 解析 bitfield Name: u32 { field: width; ... } */
+ast_node_t *parse_bitfield_def(parser_t *p);
 
 #ifdef __cplusplus
 }

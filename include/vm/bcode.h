@@ -173,6 +173,13 @@ typedef enum {
                                __defer_N 注册到 scope->defers（error 展开用）。 */
     BCODE_REGISTER_CLEANUP, /* [strtable_idx]：测试模式把 own 变量名注册到
                                scope->cleanup_names（error 展开时 FREE）。 */
+    BCODE_BITFIELD_GET,     /* u32 type_id, offset, width, word_bits：弹 struct 值，
+                               从隐藏存储提取位域 → 压底层无符号值。 */
+    BCODE_BITFIELD_SET,     /* type_id, offset, width, word_bits：栈 [self, value]，
+                               写字段位域 → 压回 self（不释放旧值）。 */
+    BCODE_BITFIELD_MAKE,    /* type_id, word_bits, word_count, field_count,
+                               [offset,width]*：弹 field_count 个底层值 → 压
+                               [word_count]underlying 数组值。 */
     BCODE_OPT_IS_NONE,      /* 无操作数：弹 ?T 值 → 压 bool（ok tag == false）
                                （nil 判定 x==nil / nil==x → OPT_IS_NONE；
                                x!=nil / nil!=x → OPT_IS_NONE + NOT。

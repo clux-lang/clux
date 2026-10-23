@@ -262,6 +262,8 @@ ast_node_t *parse_program(parser_t *p) {
                funcs 链：sema pass1b 折叠 variant 值 + 登记类型，进入字节码，
                运行时 hoist 构造 enum 类型 + 绑定名字。 */
             func = parse_enum_def(p);
+        } else if (check_keyword(p, "bitfield")) {
+            func = parse_bitfield_def(p);
         } else if (check_keyword(p, "struct")) {
             /* 顶层结构体定义 struct Name { field: type; ... } 挂 funcs 链：
                sema pass1b 折叠字段类型 + 登记类型，进入字节码，运行时 hoist

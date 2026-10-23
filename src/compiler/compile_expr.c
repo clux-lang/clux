@@ -6,6 +6,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_scope_ref.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
@@ -890,6 +891,43 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
     ast_construct_t *n = (ast_construct_t *)node;
     const type_t *t = c_resolve_type(c, n->type);
     if (!t) { c_error(c, n->type, "unknown construct type"); return; }
+    if (n->is_bitfield) {
+      const struct_type_t *bst = (const struct_type_t *)type_strip_quals(t);
+      const ast_struct_def_t *bsd =
+          bst && bst->bitfield_ast ? (const ast_struct_def_t *)bst->bitfield_ast
+                                   : NULL;
+      if (!bsd) { c_error(c, node, "bitfield metadata missing"); return; }
+      /* CONSTRUCT 顺序：[dest, type, elems...]；先压 dest/type，再让
+         BITFIELD_MAKE 吃掉字段值并留下数组。 */
+      bcode_write_op(c->bc, BCODE_PUSH_UNDEFINED);
+      st_push(c, 1);
+      compile_type_expr(c, n->type);
+      st_push(c, 1);
+      size_t fc = 0;
+      for (ast_node_t *f = n->bit_fields; f; f = f->next) {
+        if (f->kind != AST_CONSTRUCT_FIELD) {
+          c_error(c, f, "malformed bitfield constructor");
+          return;
+        }
+        compile_expr(c, ((ast_construct_field_t *)f)->value);
+        st_push(c, 1);
+        fc++;
+      }
+      bcode_write_op(c->bc, BCODE_BITFIELD_MAKE);
+      bcode_write_u32(c->bc, bsd->bitfield_storage_type_id);
+      bcode_write_u32(c->bc, bsd->bitfield_word_bits);
+      bcode_write_u32(c->bc, bsd->bitfield_word_count);
+      bcode_write_u32(c->bc, (uint32_t)fc);
+      for (size_t i = 0; i < fc; i++) {
+        bcode_write_u32(c->bc, bsd->bitfield_fields[i].offset);
+        bcode_write_u32(c->bc, bsd->bitfield_fields[i].width);
+      }
+      st_push(c, (int)(1 - fc));       /* [dest, type, array] */
+      bcode_write_op(c->bc, BCODE_CONSTRUCT);
+      bcode_write_u32(c->bc, 1);
+      st_push(c, -2);
+      break;
+    }
     emit_construct(c, node, n->type, t, n->fields, n->member_tag,
                    /*is_new=*/false);
     break;
@@ -900,6 +938,15 @@ void compile_expr(compiler_t *c, ast_node_t *node) {
        object 是 AST_MEMBER → 递归 FIELD_GET，借用引用偏移链正确。 */
     ast_member_t *n = (ast_member_t *)node;
     compile_expr(c, n->object);       /* 栈: [self] */
+    if (n->is_bitfield) {
+      bcode_write_op(c->bc, BCODE_BITFIELD_GET);
+      bcode_write_u32(c->bc, n->bit_value_type_id);
+      bcode_write_u32(c->bc, n->bit_offset);
+      bcode_write_u32(c->bc, n->bit_width);
+      bcode_write_u32(c->bc, n->bit_word_bits);
+      st_push(c, 0);
+      break;
+    }
     bcode_write_op(c->bc, BCODE_FIELD_GET);
     bcode_write_str(c->bc, n->field);
     st_push(c, 0);                    /* 弹 1 压 1，净 0 */

@@ -63,6 +63,7 @@
 #include "vm/type_cfunc.h"
 #include "vm/type_option.h"
 #include "vm/type_struct.h"
+#include "parser/ast_struct_def.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
@@ -477,6 +478,38 @@ value_t *ex_member(sema_t *sema, ast_node_t **node,
         diag_error(sema->diag, sema_loc(sema, *node),
                    "cannot access field of value of type %s", tn);
         return val_void(sema);
+      }
+      if (type_kind_of(ot) == TYPE_KIND_STRUCT) {
+        const struct_type_t *bst = (const struct_type_t *)ot;
+        if (bst->bitfield_ast) {
+          const ast_struct_def_t *bsd =
+              (const ast_struct_def_t *)bst->bitfield_ast;
+          for (size_t bi = 0; bi < bsd->bitfield_field_count; bi++) {
+            const ast_bitfield_field_t *bf = &bsd->bitfield_fields[bi];
+            if (bf->name.len == n->field.len &&
+                memcmp(bf->name.ptr, n->field.ptr, n->field.len) == 0) {
+              n->is_bitfield = true;
+              n->bit_offset = bf->offset;
+              n->bit_width = bf->width;
+              n->bit_word_bits = bsd->bitfield_word_bits;
+              n->bit_value_type_id = bsd->bitfield_underlying_type_id;
+              n->bit_storage_type_id = bsd->bitfield_storage_type_id;
+              const sema_type_t *ut =
+                  sema_type_by_id(sema, bsd->bitfield_underlying_type_id);
+              const type_t *utype =
+                  ut && ut->type ? ut->type
+                                 : vm_type_load(sema->vm,
+                                                bsd->bitfield_underlying_type_id);
+              return utype ? value_make_shadow(sema->vm, utype)
+                           : val_void(sema);
+            }
+          }
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "bitfield '%.*s' has no field '%.*s'",
+                     (int)ot->name.len, ot->name.ptr, (int)n->field.len,
+                     n->field.ptr);
+          return val_void(sema);
+        }
       }
       int idx = struct_type_find_field(ot, n->field);
       if (idx < 0) {

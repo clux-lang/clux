@@ -234,6 +234,30 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             break;
         }
         case AST_STRUCT_DEF: {
+            ast_struct_def_t *s0 = (ast_struct_def_t *)node;
+            if (s0->is_bitfield) {
+                sb_str(&f->sb, "bitfield ");
+                sb_put(&f->sb, s0->name.ptr, s0->name.len);
+                sb_str(&f->sb, ": ");
+                render_expr(f, s0->bitfield_underlying);
+                sb_str(&f->sb, " {");
+                f->indent++;
+                for (size_t i = 0; i < s0->bitfield_field_count; i++) {
+                    sb_ch(&f->sb, '\n');
+                    sb_indent(&f->sb, f->indent);
+                    ast_bitfield_field_t *bf = &s0->bitfield_fields[i];
+                    sb_put(&f->sb, bf->name.ptr, bf->name.len);
+                    char num[32];
+                    snprintf(num, sizeof num, ": %u;", bf->width);
+                    sb_str(&f->sb, num);
+                }
+                f->indent--;
+                sb_ch(&f->sb, '\n');
+                sb_indent(&f->sb, f->indent);
+                sb_ch(&f->sb, '}');
+                f->at_line_start = false;
+                break;
+            }
             /* struct 体多行展开：每个字段/嵌入/成员独占一行，4 空格缩进。
              * 字段/嵌入后补 ';'，func 成员自带函数体块。注释按源码位置挂载
              *（项间独立行注释 + 项后行内注释），空行保留——与 render_block

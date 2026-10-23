@@ -625,6 +625,21 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
   sym->type      = sealed;
   sym->is_active = true;
   sym->flow_init = true;
+  if (sd->is_bitfield) {
+    struct_type_t *bst = (struct_type_t *)type_strip_quals(sealed);
+    bst->bitfield_ast = sd;
+    /* 隐藏字段是 [N]underlying；登记底层类型 / 存储数组类型 id 供 compiler 用。 */
+    const struct_field_t *hf = struct_type_field(sealed, 0);
+    if (hf && hf->type) {
+      const type_t *arr = type_strip_quals(hf->type);
+      const type_t *underlying = array_type_elem(arr);
+      if (underlying) {
+        sd->bitfield_underlying_type_id = underlying->id;
+      }
+      const sema_type_t *at = sema_type_register(sema, arr);
+      sd->bitfield_storage_type_id = at ? at->id : arr->id;
+    }
+  }
   return SEMA_COMPOSE_OK;
 }
 

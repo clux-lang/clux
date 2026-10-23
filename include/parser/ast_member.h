@@ -12,6 +12,12 @@ typedef struct {
     ast_node_t  base;
     ast_node_t *object;     /* . 左边的表达式 */
     strslice_t  field;      /* . 右边的字段名 */
+    bool        is_bitfield;
+    uint32_t    bit_offset;
+    uint32_t    bit_width;
+    uint32_t    bit_word_bits;
+    uint32_t    bit_value_type_id;
+    uint32_t    bit_storage_type_id;
 } ast_member_t;
 
 static inline ast_node_t *ast_member_new(arena_t *arena,

@@ -22,6 +22,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_member.h"
 #include "parser/ast_move.h"
 #include "parser/ast_new.h"
@@ -783,6 +784,98 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
          字段类型 ∈ {nil, T}。nil 字段 → 运行期 PUSH_OPT_NONE；T 字段 →
          隐式提升 D1。字段类型显式校验（不走 value_assign——option_assign
          的 shadow 短路会绕过类型检查，须在此处直接比较 inner）。 */
+      /* bitfield 构造：.Flags{ .a = 1, .b = 2 }。缺失字段补零；按声明序
+         重排成 bit_fields 链，compiler 用 BITFIELD_MAKE 生成隐藏数组。 */
+      if (type_kind_of(t) == TYPE_KIND_STRUCT) {
+        const struct_type_t *bst = (const struct_type_t *)type_strip_quals(t);
+        if (bst->bitfield_ast) {
+          ast_struct_def_t *bsd = (ast_struct_def_t *)bst->bitfield_ast;
+          const sema_type_t *ut =
+              sema_type_by_id(sema, bsd->bitfield_underlying_type_id);
+          const type_t *utype =
+              ut && ut->type ? ut->type
+                             : vm_type_load(sema->vm,
+                                            bsd->bitfield_underlying_type_id);
+          if (!utype) return val_void(sema);
+          ast_node_t *provided[128] = {0};
+          for (ast_node_t *f = n->fields; f; f = f->next) {
+            if (f->kind != AST_CONSTRUCT_FIELD) {
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "bitfield constructor requires named fields");
+              return val_void(sema);
+            }
+            ast_construct_field_t *cf = (ast_construct_field_t *)f;
+            bool found = false;
+            for (size_t i = 0; i < bsd->bitfield_field_count; i++) {
+              if (bsd->bitfield_fields[i].name.len == cf->name.len &&
+                  memcmp(bsd->bitfield_fields[i].name.ptr, cf->name.ptr,
+                         cf->name.len) == 0) {
+                if (provided[i]) {
+                  diag_error(sema->diag, sema_loc(sema, f),
+                             "construct: duplicate bitfield field '%.*s'",
+                             (int)cf->name.len, cf->name.ptr);
+                  return val_void(sema);
+                }
+                provided[i] = cf->value;
+                value_t *fv = sema_expr(sema, &cf->value, scope);
+                if (fv && !value_is_error(sema->vm, fv)) {
+                  bool int_ok = type_kind_of(utype) == TYPE_KIND_INT &&
+                                type_kind_of(value_type(fv)) == TYPE_KIND_INT;
+                  value_t *casted = int_ok ? fv
+                                           : value_implicit_cast(sema->vm, fv, utype);
+                  if (!casted || value_is_error(sema->vm, casted)) {
+                    char tn[64], fn[64];
+                    sema_type_name(utype, tn, sizeof tn);
+                    sema_type_name(value_type(fv), fn, sizeof fn);
+                    diag_error(sema->diag, sema_loc(sema, cf->value),
+                               "cannot initialize bitfield field '%.*s' with %s "
+                               "(field type %s)",
+                               (int)cf->name.len, cf->name.ptr, fn, tn);
+                  }
+                }
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              diag_error(sema->diag, sema_loc(sema, f),
+                         "bitfield '%.*s' has no field '%.*s'",
+                         (int)t->name.len, t->name.ptr, (int)cf->name.len,
+                         cf->name.ptr);
+              return val_void(sema);
+            }
+          }
+          ast_node_t *head = NULL, *tail = NULL;
+          for (size_t i = 0; i < bsd->bitfield_field_count; i++) {
+            ast_node_t *v = provided[i];
+            if (!v) {
+              v = ast_int_lit_new(sema->arena, n->base.tok_begin,
+                                  n->base.tok_end);
+              if (!v) return val_void(sema);
+              v->is_generated = true;
+              ((ast_int_lit_t *)v)->value = 0;
+              ((ast_int_lit_t *)v)->type = utype->name;
+            }
+            ast_node_t *cf = ast_construct_field_new(
+                sema->arena, n->base.tok_begin, n->base.tok_end);
+            if (!cf) return val_void(sema);
+            cf->is_generated = true;
+            ((ast_construct_field_t *)cf)->name = bsd->bitfield_fields[i].name;
+            ((ast_construct_field_t *)cf)->value = v;
+            if (tail) tail->next = cf;
+            else head = cf;
+            tail = cf;
+          }
+          n->is_bitfield = true;
+          n->bit_word_bits = bsd->bitfield_word_bits;
+          n->bit_field_count = (uint32_t)bsd->bitfield_field_count;
+          n->bit_fields = head;
+          n->bit_underlying_type_id = bsd->bitfield_underlying_type_id;
+          n->bit_storage_type_id = bsd->bitfield_storage_type_id;
+          return construct_result(sema, t);
+        }
+      }
+
       if (type_kind_of(t) == TYPE_KIND_OPTION) {
         size_t nfields = sema_count_siblings(n->fields);
         if (nfields != 1) {

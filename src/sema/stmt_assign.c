@@ -916,15 +916,52 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   ownership_t slot_own = OWN_NONE;
   if (!bad) {
     if (type_kind_of(bt) == TYPE_KIND_STRUCT) {
-      idx = struct_type_find_field(bt, m->field);
-      if (idx < 0) {
-        diag_error(sema->diag, sema_loc(sema, &as->base),
-                   "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
-                   bt->name.ptr, (int)m->field.len, m->field.ptr);
-        bad = true;
+      const struct_type_t *bst = (const struct_type_t *)bt;
+      if (bst->bitfield_ast) {
+        const ast_struct_def_t *bsd =
+            (const ast_struct_def_t *)bst->bitfield_ast;
+        bool found = false;
+        for (size_t bi = 0; bi < bsd->bitfield_field_count; bi++) {
+          const ast_bitfield_field_t *bf = &bsd->bitfield_fields[bi];
+          if (bf->name.len == m->field.len &&
+              memcmp(bf->name.ptr, m->field.ptr, m->field.len) == 0) {
+            const sema_type_t *ut =
+                sema_type_by_id(sema, bsd->bitfield_underlying_type_id);
+            const type_t *utype =
+                ut && ut->type ? ut->type
+                               : vm_type_load(sema->vm,
+                                              bsd->bitfield_underlying_type_id);
+            if (!utype) { bad = true; break; }
+            m->is_bitfield = true;
+            m->bit_offset = bf->offset;
+            m->bit_width = bf->width;
+            m->bit_word_bits = bsd->bitfield_word_bits;
+            m->bit_value_type_id = bsd->bitfield_underlying_type_id;
+            m->bit_storage_type_id = bsd->bitfield_storage_type_id;
+            ft = utype;
+            slot_own = OWN_NONE;
+            found = true;
+            break;
+          }
+        }
+        if (!found && !bad) {
+          diag_error(sema->diag, sema_loc(sema, &as->base),
+                     "bitfield '%.*s' has no field '%.*s'",
+                     (int)bt->name.len, bt->name.ptr, (int)m->field.len,
+                     m->field.ptr);
+          bad = true;
+        }
       } else {
-        ft = struct_type_field(bt, (size_t)idx)->type;
-        slot_own = type_ownership_of(struct_type_field(bt, (size_t)idx)->type);
+        idx = struct_type_find_field(bt, m->field);
+        if (idx < 0) {
+          diag_error(sema->diag, sema_loc(sema, &as->base),
+                     "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
+                     bt->name.ptr, (int)m->field.len, m->field.ptr);
+          bad = true;
+        } else {
+          ft = struct_type_field(bt, (size_t)idx)->type;
+          slot_own = type_ownership_of(struct_type_field(bt, (size_t)idx)->type);
+        }
       }
     } else if (type_kind_of(bt) == TYPE_KIND_UNION) {
       /* union 字段：字段名 = member 名（tag 名），按名反查 member →

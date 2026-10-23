@@ -18,6 +18,12 @@ typedef struct {
     /* union/cunion 构造的 member 下标哨兵（sema 按名定位后写回；compiler
        据此发 tag/subscript 立即数，与 AST_CONSTRUCT::member_tag 同协议）。 */
     uint32_t    member_tag;
+    bool        is_bitfield;
+    uint32_t    bit_word_bits;
+    uint32_t    bit_field_count;
+    ast_node_t *bit_fields;
+    uint32_t    bit_underlying_type_id;
+    uint32_t    bit_storage_type_id;
 } ast_new_t;
 
 static inline ast_node_t *ast_new_new(arena_t *arena,

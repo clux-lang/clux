@@ -117,6 +117,12 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
          AST_CONSTRUCT 语义；scalar 等无字段类型 = 1 个空字段集合）。Step A
          只校验类型层面，字段求值走 sema_expr 递归（含嵌套 new/匿名构造）。 */
       if (type_kind_of(t) == TYPE_KIND_STRUCT) {
+        const struct_type_t *bst = (const struct_type_t *)type_strip_quals(t);
+        if (bst->bitfield_ast) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "new: bitfield heap construction is not supported yet");
+          return val_void(sema);
+        }
         const struct_type_t *st = (const struct_type_t *)t;
         size_t nfields = sema_count_siblings(n->fields);
         /* `<值, 次数>` 填充元素只适用于数组/make 元素位：struct 字段无法用
