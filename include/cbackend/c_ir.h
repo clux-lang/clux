@@ -15,11 +15,29 @@ typedef enum {
     CIR_TYPE_I32,
     CIR_TYPE_USIZE,
     CIR_TYPE_BOOL,
+    CIR_TYPE_STRUCT,
+    CIR_TYPE_ARRAY,
+    CIR_TYPE_PTR,
 } cir_type_kind_t;
+
+typedef struct cir_type cir_type_t;
+typedef struct cir_expr cir_expr_t;
+
+typedef struct cir_field {
+    const char *name;
+    cir_type_t *type;
+    struct cir_field *next;
+} cir_field_t;
 
 typedef struct cir_type {
     cir_type_kind_t kind;
     const char     *c_name;
+    const void     *src;      /* const type_t*（仅做缓存键） */
+    cir_type_t     *elem;     /* array / ptr */
+    size_t          array_len;
+    cir_field_t    *fields;
+    bool            emitted;
+    struct cir_type *next;
 } cir_type_t;
 
 typedef enum {
@@ -30,7 +48,16 @@ typedef enum {
     CIR_EXPR_BINARY,
     CIR_EXPR_CALL,
     CIR_EXPR_ASSIGN,
+    CIR_EXPR_MEMBER,
+    CIR_EXPR_INDEX,
+    CIR_EXPR_CONSTRUCT,
 } cir_expr_kind_t;
+
+typedef struct cir_init {
+    const char *name;  /* named field；NULL = positional */
+    cir_expr_t *value;
+    struct cir_init *next;
+} cir_init_t;
 
 typedef struct cir_expr {
     cir_expr_kind_t kind;
@@ -38,9 +65,11 @@ typedef struct cir_expr {
     bool            bool_value;
     const char     *text;
     const char     *op;
+    cir_type_t     *type;
     struct cir_expr *lhs;
     struct cir_expr *rhs;
     struct cir_expr *args;
+    cir_init_t      *inits;
     struct cir_expr *next;
 } cir_expr_t;
 
@@ -64,6 +93,7 @@ typedef struct cir_stmt {
     const char     *op;      /* assign op */
     cir_type_t     *type;    /* var type */
     cir_expr_t     *expr;    /* init / assign value / condition / return value */
+    cir_expr_t     *lhs;     /* assign target */
     cir_expr_t     *update;  /* for update */
     struct cir_stmt *init;   /* for init */
     struct cir_stmt *body;   /* block / then / loop body */
@@ -110,6 +140,7 @@ typedef struct cir_unit {
     cir_signature_t *signatures;
     cir_function_t  *functions;
     cir_global_t    *globals;
+    cir_type_t      *types;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -117,6 +148,12 @@ void           cir_unit_add_include(cir_unit_t *u, arena_t *arena,
                                     const char *include);
 cir_type_t    *cir_type_new(arena_t *arena, cir_type_kind_t kind,
                             const char *c_name);
+cir_type_t    *cir_type_find(const cir_unit_t *u, const void *src,
+                             cir_type_kind_t kind);
+cir_field_t   *cir_field_new(arena_t *arena, const char *name,
+                             cir_type_t *type);
+void           cir_type_add_field(cir_type_t *t, cir_field_t *f);
+void           cir_unit_add_type(cir_unit_t *u, cir_type_t *t);
 cir_expr_t    *cir_expr_int(arena_t *arena, int64_t value);
 cir_expr_t    *cir_expr_bool(arena_t *arena, bool value);
 cir_expr_t    *cir_expr_ident(arena_t *arena, const char *name);
@@ -125,8 +162,17 @@ cir_expr_t    *cir_expr_binary(arena_t *arena, const char *op, cir_expr_t *lhs,
                                cir_expr_t *rhs);
 cir_expr_t    *cir_expr_call(arena_t *arena, const char *callee,
                              cir_expr_t *args);
-cir_expr_t    *cir_expr_assign(arena_t *arena, const char *target,
+cir_expr_t    *cir_expr_assign(arena_t *arena, cir_expr_t *target,
                                const char *op, cir_expr_t *value);
+cir_expr_t    *cir_expr_member(arena_t *arena, cir_expr_t *object,
+                               const char *field);
+cir_expr_t    *cir_expr_index(arena_t *arena, cir_expr_t *object,
+                              cir_expr_t *index);
+cir_expr_t    *cir_expr_construct(arena_t *arena, cir_type_t *type,
+                                  cir_init_t *inits);
+cir_init_t    *cir_init_new(arena_t *arena, const char *name,
+                            cir_expr_t *value);
+void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);
 void           cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg);
 cir_stmt_t    *cir_stmt_new(arena_t *arena, cir_stmt_kind_t kind);
 void           cir_stmt_append(cir_stmt_t *block, cir_stmt_t *stmt);

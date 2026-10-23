@@ -129,13 +129,39 @@ clux build hello.cx
 
 验收：for/do while/全局变量程序退出码与 VM 后端一致。
 
-### M3：复合类型
+### M3：复合类型（已完成基础版）
 
 - struct 声明/定义与依赖排序；
-- 字段访问；
-- 数组；
-- 指针与解引用；
-- enum / union / cunion 的最小布局。
+- struct 构造与字段读写；
+- 数组类型、数组构造与下标读写；
+- 指针类型、取地址、解引用；
+- 指针字段自动解引用（由 sema 已改写的 AST_DEREF 承接）；
+- 函数按值接收 struct。
+
+当前支持：
+
+- `struct Point { x: i32; y: i32; }`；
+- `.Point{ .x = 2, .y = 3 }`；
+- `p.x` / `p.x = 5`；
+- `var a: [3]i32 = .[3]i32{ ... }` / `a[i]`；
+- `ref *Point` / `p.&` / `r.y`；
+- 按值 struct 参数与返回类型。
+
+尚未覆盖：
+
+- 嵌套复杂布局/联合体/enum；
+- slice / str；
+- 堆分配 `new` / `make`；
+- 数组/结构体的所有权 cleanup（M4）。
+
+验收：struct/数组/指针程序退出码与 VM 后端一致。
+
+- own；
+- ref；
+- defer；
+- drop；
+- move / clone；
+- 作用域清理顺序。
 
 ### M4：所有权与清理
 

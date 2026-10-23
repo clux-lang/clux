@@ -33,6 +33,42 @@ cir_type_t *cir_type_new(arena_t *arena, cir_type_kind_t kind,
     return t;
 }
 
+cir_type_t *cir_type_find(const cir_unit_t *u, const void *src,
+                          cir_type_kind_t kind) {
+    if (!u || !src) return NULL;
+    for (cir_type_t *t = u->types; t; t = t->next)
+        if (t->src == src && t->kind == kind) return t;
+    return NULL;
+}
+
+cir_field_t *cir_field_new(arena_t *arena, const char *name,
+                           cir_type_t *type) {
+    cir_field_t *f = (cir_field_t *)arena_calloc(
+        arena, 1, sizeof(*f), ALIGNOF(max_align_t));
+    if (!f) return NULL;
+    f->name = name;
+    f->type = type;
+    return f;
+}
+
+void cir_type_add_field(cir_type_t *t, cir_field_t *f) {
+    if (!t || !f) return;
+    f->next = NULL;
+    if (!t->fields) {
+        t->fields = f;
+        return;
+    }
+    cir_field_t *p = t->fields;
+    while (p->next) p = p->next;
+    p->next = f;
+}
+
+void cir_unit_add_type(cir_unit_t *u, cir_type_t *t) {
+    if (!u || !t) return;
+    t->next = u->types;
+    u->types = t;
+}
+
 cir_expr_t *cir_expr_int(arena_t *arena, int64_t value) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
@@ -93,15 +129,70 @@ cir_expr_t *cir_expr_call(arena_t *arena, const char *callee,
     return e;
 }
 
-cir_expr_t *cir_expr_assign(arena_t *arena, const char *target,
+cir_expr_t *cir_expr_assign(arena_t *arena, cir_expr_t *target,
                             const char *op, cir_expr_t *value) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
     if (!e) return NULL;
     e->kind = CIR_EXPR_ASSIGN;
-    e->text = target;
+    e->lhs = target;
     e->op = op;
     e->rhs = value;
+    return e;
+}
+
+cir_expr_t *cir_expr_member(arena_t *arena, cir_expr_t *object,
+                            const char *field) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_MEMBER;
+    e->lhs = object;
+    e->text = field;
+    return e;
+}
+
+cir_expr_t *cir_expr_index(arena_t *arena, cir_expr_t *object,
+                           cir_expr_t *index) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_INDEX;
+    e->lhs = object;
+    e->rhs = index;
+    return e;
+}
+
+cir_init_t *cir_init_new(arena_t *arena, const char *name,
+                         cir_expr_t *value) {
+    cir_init_t *i = (cir_init_t *)arena_calloc(
+        arena, 1, sizeof(*i), ALIGNOF(max_align_t));
+    if (!i) return NULL;
+    i->name = name;
+    i->value = value;
+    return i;
+}
+
+void cir_expr_add_init(cir_expr_t *construct, cir_init_t *init) {
+    if (!construct || !init) return;
+    init->next = NULL;
+    if (!construct->inits) {
+        construct->inits = init;
+        return;
+    }
+    cir_init_t *p = construct->inits;
+    while (p->next) p = p->next;
+    p->next = init;
+}
+
+cir_expr_t *cir_expr_construct(arena_t *arena, cir_type_t *type,
+                               cir_init_t *inits) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_CONSTRUCT;
+    e->type = type;
+    e->inits = inits;
     return e;
 }
 

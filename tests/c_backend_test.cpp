@@ -170,6 +170,33 @@ TEST(CBackend, BuildForGlobalAndDoWhile) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildStructArrayPointer) {
+  const std::string src = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "func sum(p: Point): i32 { return p.x + p.y; }\n"
+      "func main(): i32 {\n"
+      "  var p: Point = .Point{ .x = 2, .y = 3 };\n"
+      "  if (p.x != 2 || p.y != 3) { return 1; }\n"
+      "  p.x = 5;\n"
+      "  var r: ref *Point = p.&;\n"
+      "  r.y = 7;\n"
+      "  if (sum(p) != 12) { return 2; }\n"
+      "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
+      "  a[1] += 4;\n"
+      "  if (a[1] != 6) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_m3");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

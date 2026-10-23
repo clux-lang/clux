@@ -60,12 +60,44 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
     }
     case CIR_EXPR_ASSIGN:
         w(sb, "(");
-        w(sb, e->text ? e->text : "clux_v_tmp");
+        write_expr(sb, e->lhs);
         w(sb, " ");
         w(sb, e->op ? e->op : "=");
         w(sb, " ");
         write_expr(sb, e->rhs);
         w(sb, ")");
+        break;
+    case CIR_EXPR_MEMBER:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").");
+        w(sb, e->text ? e->text : "clux_f_field");
+        break;
+    case CIR_EXPR_INDEX:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ")[");
+        write_expr(sb, e->rhs);
+        w(sb, "]");
+        break;
+    case CIR_EXPR_CONSTRUCT:
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        w(sb, "){");
+        {
+            bool first = true;
+            for (const cir_init_t *i = e->inits; i; i = i->next) {
+                if (!first) w(sb, ", ");
+                if (i->name) {
+                    w(sb, ".");
+                    w(sb, i->name);
+                    w(sb, " = ");
+                }
+                write_expr(sb, i->value);
+                first = false;
+            }
+        }
+        w(sb, "}");
         break;
     default:
         w(sb, "0");
@@ -104,6 +136,48 @@ static void write_function_decl(string_t *sb, const cir_function_t *fn) {
     w(sb, ");\n");
 }
 
+static void write_type_defs(string_t *sb, cir_type_t *types) {
+    for (cir_type_t *t = types; t; t = t->next)
+        if (t->kind == CIR_TYPE_STRUCT) wf(sb, "struct %s;\n", t->c_name + 7);
+    w(sb, "\n");
+}
+
+static void emit_type(string_t *sb, cir_type_t *t) {
+    if (!t || t->emitted) return;
+    switch (t->kind) {
+    case CIR_TYPE_STRUCT:
+        t->emitted = true;
+        for (cir_field_t *f = t->fields; f; f = f->next) {
+            if (f->type &&
+                (f->type->kind == CIR_TYPE_STRUCT ||
+                 f->type->kind == CIR_TYPE_ARRAY))
+                emit_type(sb, f->type);
+        }
+        wf(sb, "%s {\n", t->c_name);
+        for (cir_field_t *f = t->fields; f; f = f->next) {
+            wf(sb, "    %s %s;\n",
+               f->type && f->type->c_name ? f->type->c_name : "int32_t",
+               f->name ? f->name : "field");
+        }
+        w(sb, "};\n\n");
+        break;
+    case CIR_TYPE_ARRAY:
+        if (t->elem) emit_type(sb, t->elem);
+        wf(sb, "typedef %s %s[%zu];\n\n",
+           t->elem && t->elem->c_name ? t->elem->c_name : "int32_t",
+           t->c_name ? t->c_name : "clux_array", t->array_len);
+        t->emitted = true;
+        break;
+    default:
+        t->emitted = true;
+        break;
+    }
+}
+
+static void emit_all_types(string_t *sb, cir_type_t *types) {
+    for (cir_type_t *t = types; t; t = t->next) emit_type(sb, t);
+}
+
 static void write_function_object(string_t *sb, const cir_function_t *fn) {
     if (!fn->object || !fn->sig) return;
     wf(sb, "static const struct %s %s = { %s, NULL };\n", fn->sig->tag,
@@ -119,6 +193,18 @@ static void write_c_string(string_t *sb, const char *s) {
 
 static void write_indent(string_t *sb, int indent) {
     for (int i = 0; i < indent; i++) w(sb, "    ");
+}
+
+static void write_cond(string_t *sb, const cir_expr_t *e) {
+    if (e && e->kind == CIR_EXPR_BINARY) {
+        write_expr(sb, e->lhs);
+        w(sb, " ");
+        w(sb, e->op ? e->op : "?");
+        w(sb, " ");
+        write_expr(sb, e->rhs);
+    } else {
+        write_expr(sb, e);
+    }
 }
 
 static void write_stmt_list(string_t *sb, const cir_stmt_t *s, int indent);
@@ -137,8 +223,11 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         w(sb, ";\n");
         break;
     case CIR_STMT_ASSIGN:
-        wf(sb, "%s %s ", s->name ? s->name : "clux_v_tmp",
-           s->op ? s->op : "=");
+        if (s->lhs) write_expr(sb, s->lhs);
+        else wf(sb, "%s", s->name ? s->name : "clux_v_tmp");
+        w(sb, " ");
+        w(sb, s->op ? s->op : "=");
+        w(sb, " ");
         write_expr(sb, s->expr);
         w(sb, ";\n");
         break;
@@ -157,7 +246,7 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         break;
     case CIR_STMT_IF:
         w(sb, "if (");
-        write_expr(sb, s->expr);
+        write_cond(sb, s->expr);
         w(sb, ") {\n");
         write_stmt_list(sb, s->body, indent + 1);
         write_indent(sb, indent);
@@ -172,7 +261,7 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         break;
     case CIR_STMT_WHILE:
         w(sb, "while (");
-        write_expr(sb, s->expr);
+        write_cond(sb, s->expr);
         w(sb, ") {\n");
         write_stmt_list(sb, s->body, indent + 1);
         write_indent(sb, indent);
@@ -195,7 +284,7 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
             write_expr(sb, s->init->expr);
         }
         w(sb, "; ");
-        if (s->expr) write_expr(sb, s->expr);
+        if (s->expr) write_cond(sb, s->expr);
         w(sb, "; ");
         if (s->update) write_expr(sb, s->update);
         w(sb, ") {\n");
@@ -208,7 +297,7 @@ static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         write_stmt_list(sb, s->body, indent + 1);
         write_indent(sb, indent);
         w(sb, "} while (");
-        write_expr(sb, s->expr);
+        write_cond(sb, s->expr);
         w(sb, ");\n");
         break;
     case CIR_STMT_BLOCK:
@@ -289,6 +378,13 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
     for (size_t i = 0; i < unit->include_count; i++)
         wf(sb, "#include <%s>\n", unit->includes[i]);
     w(sb, "\n");
+
+    if (unit->types) {
+        w(sb, "/* ---- composite type declarations ---- */\n");
+        write_type_defs(sb, unit->types);
+        w(sb, "/* ---- composite type definitions ---- */\n");
+        emit_all_types(sb, unit->types);
+    }
 
     cir_signature_t *sigs = unit->signatures;
     reverse_signatures(&sigs);

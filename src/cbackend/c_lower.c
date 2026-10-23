@@ -1,10 +1,14 @@
 #include "cbackend/c_lower.h"
 
 #include "parser/ast_assign.h"
+#include "parser/ast_addr.h"
 #include "parser/ast_binary.h"
 #include "parser/ast_block.h"
 #include "parser/ast_bool_lit.h"
 #include "parser/ast_call.h"
+#include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
+#include "parser/ast_deref.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_for.h"
 #include "parser/ast_dowhile.h"
@@ -12,13 +16,18 @@
 #include "parser/ast_func_ref.h"
 #include "parser/ast_ident.h"
 #include "parser/ast_if.h"
+#include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_member.h"
 #include "parser/ast_return.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
 #include "vm/type.h"
+#include "vm/type_array.h"
+#include "vm/type_ptr.h"
+#include "vm/type_struct.h"
 #include "vm/vm.h"
 
 #include <stdio.h>
@@ -27,6 +36,7 @@
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
+    cir_unit_t *unit;
     bool     failed;
 } lower_ctx_t;
 
@@ -75,6 +85,65 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
     if (t == vm->type_usize) return cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t");
     if (t == vm->type_bool) return cir_type_new(lc->arena, CIR_TYPE_BOOL, "bool");
     if (t == vm->type_void) return cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
+
+    cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_STRUCT);
+    if (cached) return cached;
+
+    if (t->kind == TYPE_KIND_STRUCT) {
+        char name[128];
+        snprintf(name, sizeof name, "struct clux_s_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        size_t n = struct_type_field_count(t);
+        for (size_t i = 0; i < n; i++) {
+            const struct_field_t *sf = struct_type_field(t, i);
+            if (!sf || !sf->type) continue;
+            cir_type_t *ft = map_type(lc, sf->type);
+            if (!ft) return NULL;
+            char fn[256];
+            snprintf(fn, sizeof fn, "clux_f_%.*s", (int)sf->name.len,
+                     sf->name.ptr ? sf->name.ptr : "");
+            cir_field_t *f = cir_field_new(lc->arena,
+                                           copy_arena(lc->arena, fn), ft);
+            if (!f) return NULL;
+            cir_type_add_field(ct, f);
+        }
+        return ct;
+    }
+    if (t->kind == TYPE_KIND_ARRAY) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_ARRAY);
+        if (cached) return cached;
+        const array_type_t *at = (const array_type_t *)t;
+        char name[128];
+        snprintf(name, sizeof name, "clux_a_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_ARRAY,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        ct->array_len = at->length;
+        cir_unit_add_type(lc->unit, ct);
+        ct->elem = map_type(lc, at->elem_type);
+        return ct->elem ? ct : NULL;
+    }
+    if (t->kind == TYPE_KIND_PTR) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_PTR);
+        if (cached) return cached;
+        const type_t *elem = ptr_type_base(t);
+        cir_type_t *et = map_type(lc, elem);
+        if (!et) return NULL;
+        char name[512];
+        snprintf(name, sizeof name, "%s *", et->c_name);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_PTR,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        ct->elem = et;
+        cir_unit_add_type(lc->unit, ct);
+        return ct;
+    }
     lc->failed = true;
     return NULL;
 }
@@ -141,16 +210,70 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_CALL:
         return lower_call(lc, (ast_call_t *)e);
-    case AST_ASSIGN: {
-        ast_assign_t *a = (ast_assign_t *)e;
-        if (!a->target || a->target->kind != AST_IDENT) {
+    case AST_MEMBER: {
+        ast_member_t *m = (ast_member_t *)e;
+        cir_expr_t *obj = lower_expr(lc, m->object);
+        if (!obj) return NULL;
+        char fname[256];
+        snprintf(fname, sizeof fname, "clux_f_%.*s", (int)m->field.len,
+                 m->field.ptr ? m->field.ptr : "");
+        return cir_expr_member(lc->arena, obj,
+                               copy_arena(lc->arena, fname));
+    }
+    case AST_INDEX: {
+        ast_index_t *ix = (ast_index_t *)e;
+        cir_expr_t *obj = lower_expr(lc, ix->object);
+        cir_expr_t *idx = lower_expr(lc, ix->indices);
+        return obj && idx ? cir_expr_index(lc->arena, obj, idx) : NULL;
+    }
+    case AST_DEREF: {
+        ast_deref_t *d = (ast_deref_t *)e;
+        cir_expr_t *v = lower_expr(lc, d->operand);
+        return v ? cir_expr_unary(lc->arena, "*", v) : NULL;
+    }
+    case AST_ADDR: {
+        ast_addr_t *a = (ast_addr_t *)e;
+        cir_expr_t *v = lower_expr(lc, a->operand);
+        return v ? cir_expr_unary(lc->arena, "&", v) : NULL;
+    }
+    case AST_CONSTRUCT: {
+        ast_construct_t *c = (ast_construct_t *)e;
+        if (!c->type) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, e),
-                       "c backend: only identifier assignment expression is supported");
+                       "c backend: anonymous construction requires a type");
             lc->failed = true;
             return NULL;
         }
-        const char *target = mangle(lc->arena, "clux_v_",
-                                    ((ast_ident_t *)a->target)->name);
+        const type_t *t = sema_resolve_type_slot(lc->sema, &c->type);
+        cir_type_t *ct = map_type(lc, t);
+        if (!ct) return NULL;
+        cir_expr_t *out = cir_expr_construct(lc->arena, ct, NULL);
+        if (!out) return NULL;
+        bool positional = (t && type_kind_of(t) != TYPE_KIND_STRUCT);
+        for (ast_node_t *f = c->fields; f; f = f->next) {
+            const char *fname = NULL;
+            ast_node_t *val = f;
+            if (f->kind == AST_CONSTRUCT_FIELD) {
+                ast_construct_field_t *cf = (ast_construct_field_t *)f;
+                val = cf->value;
+                if (!positional) {
+                    char fb[256];
+                    snprintf(fb, sizeof fb, "clux_f_%.*s", (int)cf->name.len,
+                             cf->name.ptr ? cf->name.ptr : "");
+                    fname = copy_arena(lc->arena, fb);
+                }
+            }
+            cir_expr_t *ve = lower_expr(lc, val);
+            if (!ve) return NULL;
+            cir_init_t *init = cir_init_new(lc->arena, fname, ve);
+            if (!init) return NULL;
+            cir_expr_add_init(out, init);
+        }
+        return out;
+    }
+    case AST_ASSIGN: {
+        ast_assign_t *a = (ast_assign_t *)e;
+        cir_expr_t *target = lower_expr(lc, a->target);
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
         cir_expr_t *value = lower_expr(lc, a->value);
         return target && op && value
@@ -229,16 +352,9 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_ASSIGN: {
         ast_assign_t *a = (ast_assign_t *)s;
-        if (!a->target || a->target->kind != AST_IDENT) {
-            diag_error(lc->sema->diag, sema_loc(lc->sema, s),
-                       "c backend: only simple identifier assignment is supported");
-            *ok = false;
-            return NULL;
-        }
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
         if (!st) return NULL;
-        st->name = mangle(lc->arena, "clux_v_",
-                          ((ast_ident_t *)a->target)->name);
+        st->lhs = lower_expr(lc, a->target);
         st->op = a->op ? token_text(lc->arena, a->op) : "=";
         st->expr = lower_expr(lc, a->value);
         return st;
@@ -426,6 +542,7 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     lower_ctx_t lc = {.arena = arena, .sema = sema, .failed = false};
     cir_unit_t *u = cir_unit_new(arena, source_path);
     if (!u) return NULL;
+    lc.unit = u;
     cir_unit_add_include(u, arena, "stdint.h");
     cir_unit_add_include(u, arena, "stddef.h");
     cir_unit_add_include(u, arena, "stdbool.h");
