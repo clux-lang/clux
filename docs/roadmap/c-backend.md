@@ -75,7 +75,7 @@ clux build hello.cx
 # exit code 0
 ```
 
-### M1：标量与控制流
+### M1：标量与控制流（已完成基础版）
 
 - i32/u32/usize/bool；
 - 局部变量、赋值；
@@ -83,7 +83,27 @@ clux build hello.cx
 - if / else；
 - while；
 - break / continue；
-- return。
+- return；
+- 函数参数、直接函数调用；
+- 多函数声明/定义；
+- 局部变量类型推断（字面量与简单表达式）。
+
+当前已支持：
+
+- `func add(a: i32, b: i32): i32` 等普通函数；
+- 直接调用 `add(x, y)`；
+- `var x = 1` 的类型推断；
+- `if` / `else` / `while`；
+- `break` / `continue`；
+- 复合赋值 `+=` 等。
+
+尚未覆盖：
+
+- `for`、`do while`；
+- 全局变量；
+- struct/数组/指针；
+- 字符串；
+- 函数值/闭包。
 
 验收：一组返回不同退出码的程序与 VM 后端结果一致。
 

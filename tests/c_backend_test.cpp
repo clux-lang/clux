@@ -119,6 +119,33 @@ TEST(CBackend, BuildMainVoid) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildControlFlowAndCalls) {
+  const std::string src = write_temp_file(
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "func main(): i32 {\n"
+      "  var x = 1;\n"
+      "  var i = 0;\n"
+      "  while (i < 3) {\n"
+      "    x = inc(x);\n"
+      "    i += 1;\n"
+      "  }\n"
+      "  if (x == 4) {\n"
+      "    return 0;\n"
+      "  } else {\n"
+      "    return 1;\n"
+      "  }\n"
+      "}\n",
+      "cbackend_m1");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

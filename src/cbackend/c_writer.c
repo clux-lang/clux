@@ -25,6 +25,9 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_INT:
         wf(sb, "%lld", (long long)e->int_value);
         break;
+    case CIR_EXPR_BOOL:
+        w(sb, e->bool_value ? "true" : "false");
+        break;
     case CIR_EXPR_IDENT:
         w(sb, e->text ? e->text : "0");
         break;
@@ -43,6 +46,18 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         write_expr(sb, e->rhs);
         w(sb, ")");
         break;
+    case CIR_EXPR_CALL: {
+        w(sb, e->text ? e->text : "<null>");
+        w(sb, "(");
+        bool first = true;
+        for (const cir_expr_t *a = e->args; a; a = a->next) {
+            if (!first) w(sb, ", ");
+            write_expr(sb, a);
+            first = false;
+        }
+        w(sb, ")");
+        break;
+    }
     default:
         w(sb, "0");
         break;
@@ -52,7 +67,7 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
 static void write_params(string_t *sb, const cir_signature_t *sig,
                          bool with_names, const cir_function_t *fn) {
     for (size_t i = 0; i < sig->param_count; i++) {
-        if (i) w(sb, ", ");
+        w(sb, ", ");
         w(sb, sig->params[i] ? sig->params[i]->c_name : "void");
         if (with_names && fn && i < fn->param_count && fn->params[i].name) {
             w(sb, " ");
@@ -93,17 +108,96 @@ static void write_c_string(string_t *sb, const char *s) {
     }
 }
 
+static void write_indent(string_t *sb, int indent) {
+    for (int i = 0; i < indent; i++) w(sb, "    ");
+}
+
+static void write_stmt_list(string_t *sb, const cir_stmt_t *s, int indent);
+
+static void write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
+    if (!s) return;
+    write_indent(sb, indent);
+    switch (s->kind) {
+    case CIR_STMT_VAR:
+        wf(sb, "%s %s", s->type && s->type->c_name ? s->type->c_name : "int32_t",
+           s->name ? s->name : "clux_v_tmp");
+        if (s->expr) {
+            w(sb, " = ");
+            write_expr(sb, s->expr);
+        }
+        w(sb, ";\n");
+        break;
+    case CIR_STMT_ASSIGN:
+        wf(sb, "%s %s ", s->name ? s->name : "clux_v_tmp",
+           s->op ? s->op : "=");
+        write_expr(sb, s->expr);
+        w(sb, ";\n");
+        break;
+    case CIR_STMT_EXPR:
+        write_expr(sb, s->expr);
+        w(sb, ";\n");
+        break;
+    case CIR_STMT_RETURN:
+        if (s->expr) {
+            w(sb, "return ");
+            write_expr(sb, s->expr);
+            w(sb, ";\n");
+        } else {
+            w(sb, "return;\n");
+        }
+        break;
+    case CIR_STMT_IF:
+        w(sb, "if (");
+        write_expr(sb, s->expr);
+        w(sb, ") {\n");
+        write_stmt_list(sb, s->body, indent + 1);
+        write_indent(sb, indent);
+        w(sb, "}");
+        if (s->else_body) {
+            w(sb, " else {\n");
+            write_stmt_list(sb, s->else_body, indent + 1);
+            write_indent(sb, indent);
+            w(sb, "}");
+        }
+        w(sb, "\n");
+        break;
+    case CIR_STMT_WHILE:
+        w(sb, "while (");
+        write_expr(sb, s->expr);
+        w(sb, ") {\n");
+        write_stmt_list(sb, s->body, indent + 1);
+        write_indent(sb, indent);
+        w(sb, "}\n");
+        break;
+    case CIR_STMT_BLOCK:
+        w(sb, "{\n");
+        write_stmt_list(sb, s->body, indent + 1);
+        write_indent(sb, indent);
+        w(sb, "}\n");
+        break;
+    case CIR_STMT_BREAK:
+        w(sb, "break;\n");
+        break;
+    case CIR_STMT_CONTINUE:
+        w(sb, "continue;\n");
+        break;
+    default:
+        break;
+    }
+}
+
+static void write_stmt_list(string_t *sb, const cir_stmt_t *s, int indent) {
+    for (const cir_stmt_t *it = s; it; it = it->next)
+        write_stmt(sb, it, indent);
+}
+
 static void write_function_def(string_t *sb, const cir_function_t *fn) {
     wf(sb, "static %s %s(void *env", fn->sig->ret ? fn->sig->ret->c_name : "void",
        fn->name);
     write_params(sb, fn->sig, true, fn);
     w(sb, ") {\n");
     w(sb, "    (void)env;\n");
-    if (fn->return_expr) {
-        w(sb, "    return ");
-        write_expr(sb, fn->return_expr);
-        w(sb, ";\n");
-    }
+    write_stmt_list(sb, fn->body, 1);
     w(sb, "}\n\n");
 }
 

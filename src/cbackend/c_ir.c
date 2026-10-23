@@ -42,6 +42,15 @@ cir_expr_t *cir_expr_int(arena_t *arena, int64_t value) {
     return e;
 }
 
+cir_expr_t *cir_expr_bool(arena_t *arena, bool value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_BOOL;
+    e->bool_value = value;
+    return e;
+}
+
 cir_expr_t *cir_expr_ident(arena_t *arena, const char *name) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
@@ -73,6 +82,49 @@ cir_expr_t *cir_expr_binary(arena_t *arena, const char *op, cir_expr_t *lhs,
     return e;
 }
 
+cir_expr_t *cir_expr_call(arena_t *arena, const char *callee,
+                          cir_expr_t *args) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_CALL;
+    e->text = callee;
+    e->args = args;
+    return e;
+}
+
+void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
+    if (!call || !arg) return;
+    arg->next = NULL;
+    if (!call->args) {
+        call->args = arg;
+        return;
+    }
+    cir_expr_t *t = call->args;
+    while (t->next) t = t->next;
+    t->next = arg;
+}
+
+cir_stmt_t *cir_stmt_new(arena_t *arena, cir_stmt_kind_t kind) {
+    cir_stmt_t *s = (cir_stmt_t *)arena_calloc(
+        arena, 1, sizeof(*s), ALIGNOF(max_align_t));
+    if (!s) return NULL;
+    s->kind = kind;
+    return s;
+}
+
+void cir_stmt_append(cir_stmt_t *block, cir_stmt_t *stmt) {
+    if (!block || !stmt) return;
+    stmt->next = NULL;
+    if (!block->body) {
+        block->body = stmt;
+        return;
+    }
+    cir_stmt_t *t = block->body;
+    while (t->next) t = t->next;
+    t->next = stmt;
+}
+
 cir_signature_t *cir_signature_new(arena_t *arena, const char *tag,
                                    cir_type_t *ret, size_t param_count,
                                    cir_type_t **params) {
@@ -89,7 +141,7 @@ cir_signature_t *cir_signature_new(arena_t *arena, const char *tag,
 cir_function_t *cir_function_new(arena_t *arena, const char *name,
                                  const char *object, cir_signature_t *sig,
                                  size_t param_count, cir_param_t *params,
-                                 cir_expr_t *return_expr, int source_line,
+                                 cir_stmt_t *body, int source_line,
                                  bool is_entry) {
     cir_function_t *f = (cir_function_t *)arena_calloc(
         arena, 1, sizeof(*f), ALIGNOF(max_align_t));
@@ -99,7 +151,7 @@ cir_function_t *cir_function_new(arena_t *arena, const char *name,
     f->sig = sig;
     f->param_count = param_count;
     f->params = params;
-    f->return_expr = return_expr;
+    f->body = body;
     f->source_line = source_line;
     f->is_entry = is_entry;
     return f;
