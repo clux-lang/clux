@@ -2,6 +2,8 @@
 #include "sema/sema.h"
 #include "sema/comptime.h"
 #include "parser/ast_scope_ref.h"
+#include "parser/ast_sizeof.h"
+#include "parser/ast_alignof.h"
 #include "sema_expr_internal.h"
 #include "sema/sema_generic.h"
 #include "vm/type_error.h"
@@ -41,8 +43,63 @@ static bool meta_is_call(const ast_node_t *d, strslice_t *key,
     return true;
 }
 
+static const type_t *instance_param_type(sema_t *sema, ast_node_t *expr) {
+    if (!expr || expr->kind != AST_IDENT) return NULL;
+    sema_generic_instance_t *inst = sema->generics.active_inst;
+    if (!inst || !inst->param_names || !inst->args) return NULL;
+    strslice_t name = ((ast_ident_t *)expr)->name;
+    size_t n = inst->param_count < inst->arg_count ? inst->param_count
+                                                    : inst->arg_count;
+    for (size_t i = 0; i < n; i++)
+        if (strslice_eq(inst->param_names[i], name) && !inst->args[i].is_value)
+            return inst->args[i].type;
+    return NULL;
+}
+
 static value_t *eval_const_expr(sema_t *sema, ast_node_t *expr,
                                 sema_scope_t *scope) {
+    vm_t *vm = sema->vm;
+    /* 泛型实例的 sizeof/alignof(T) 直接按实参类型求值，避免 CTFE 在
+       外层实例作用域里解析 T 的边界问题。 */
+    if (expr && (expr->kind == AST_SIZEOF || expr->kind == AST_ALIGNOF)) {
+        ast_node_t *opnd = expr->kind == AST_SIZEOF
+                               ? ((ast_sizeof_t *)expr)->operand
+                               : ((ast_alignof_t *)expr)->operand;
+        const type_t *pt = instance_param_type(sema, opnd);
+        if (pt) {
+            uint64_t n = expr->kind == AST_SIZEOF ? (uint64_t)pt->size
+                                                  : (uint64_t)pt->align;
+            void *data = value_alloc_data(vm->alloc, vm->type_usize);
+            if (data) {
+                memcpy(data, &n, sizeof n < vm->type_usize->size
+                                      ? sizeof n
+                                      : vm->type_usize->size);
+                return value_make(vm, vm->type_usize, data);
+            }
+        }
+    }
+    scope_t *saved = vm->current_scope;
+    scope_t *binding_scope = NULL;
+    sema_generic_instance_t *inst = sema->generics.active_inst;
+    if (inst && inst->param_names && inst->args) {
+        binding_scope = scope_new(vm->alloc, saved);
+        if (binding_scope) {
+            vm->current_scope = binding_scope;
+            size_t n = inst->param_count < inst->arg_count
+                           ? inst->param_count
+                           : inst->arg_count;
+            for (size_t i = 0; i < n; i++) {
+                if (inst->args[i].is_value) continue;
+                char nb[256];
+                size_t len = inst->param_names[i].len;
+                if (!len || len >= sizeof nb) continue;
+                memcpy(nb, inst->param_names[i].ptr, len);
+                nb[len] = '\0';
+                value_t *tv = type_as_value(vm, inst->args[i].type);
+                if (tv) scope_define(vm, binding_scope, nb, tv);
+            }
+        }
+    }
     ctfe_ctx_t ctx;
     memset(&ctx, 0, sizeof ctx);
     ctx.vm = sema->vm;
@@ -50,7 +107,14 @@ static value_t *eval_const_expr(sema_t *sema, ast_node_t *expr,
     ctx.sema_scope = scope;
     ctx.budget = 100000;
     ctx.max_depth = 128;
-    return ctfe_eval(&ctx, expr);
+    value_t *r = ctfe_eval(&ctx, expr);
+    if (binding_scope) {
+        vm->current_scope = saved;
+        value_t *out = r ? value_clone(vm, r) : NULL;
+        scope_destroy(vm, &binding_scope);
+        return out;
+    }
+    return r;
 }
 
 static bool add_meta_decorator(sema_t *sema, const type_t *type,
@@ -269,6 +333,7 @@ const sema_meta_entry_t *sema_metadata_lookup(sema_t *sema,
 void sema_metadata_apply_all(sema_t *sema, ast_program_t *prog) {
     if (!sema || !prog || !sema->global_scope) return;
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->is_generated) continue; /* 泛型实例在实例化点已应用 */
         if (n->kind == AST_STRUCT_DEF) {
             ast_struct_def_t *sd = (ast_struct_def_t *)n;
             if (sd->generic.count > 0) continue; /* 实例化时按具体 T 应用 */

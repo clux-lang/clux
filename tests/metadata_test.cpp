@@ -75,6 +75,24 @@ TEST(Metadata, GenericInstances) {
       "metadata_generic");
 }
 
+TEST(Metadata, CompileTimeGenericRead) {
+  clux_expect_ok(
+      "[[metadata(\"size\", sizeof(T))]]\n"
+      "struct Box[T] { x: T; }\n"
+      "comptime func check[U](): void {\n"
+      "  var n: usize = get_metadata[Box[i32]](\"size\");\n"
+      "  if (n == 4usize) { metadata[U](\"ok\", true); }\n"
+      "}\n"
+      "[[check]]\n"
+      "struct S { }\n"
+      "func main(): i32 {\n"
+      "  var b: bool = get_metadata[S](\"ok\");\n"
+      "  if (!b) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "metadata_ct_generic");
+}
+
 TEST(Metadata, RejectsMissingAndDuplicate) {
   clux_expect_reject(
       "[[metadata(\"x\", 1)]]\n"
