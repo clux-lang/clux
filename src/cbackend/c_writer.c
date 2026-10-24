@@ -56,6 +56,28 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         cw_put(sb, "    if (src) memcpy(p, src, n);\n");
         cw_put(sb, "    return p;\n");
         cw_put(sb, "}\n");
+        if (unit->uses_closure_cleanup) {
+            cw_put(sb, "struct clux_closure_node { void *env; "
+                       "struct clux_closure_node *next; };\n");
+            cw_put(sb, "static struct clux_closure_node *clux_closures;\n");
+            cw_put(sb, "static void *clux_closure_new(size_t n, "
+                       "const void *src) {\n");
+            cw_put(sb, "    void *p = clux_new(n, src);\n");
+            cw_put(sb, "    struct clux_closure_node *node = "
+                       "malloc(sizeof(*node));\n");
+            cw_put(sb, "    if (!node) abort();\n");
+            cw_put(sb, "    node->env = p; node->next = clux_closures;\n");
+            cw_put(sb, "    clux_closures = node;\n");
+            cw_put(sb, "    return p;\n");
+            cw_put(sb, "}\n");
+            cw_put(sb, "static void clux_closure_cleanup_all(void) {\n");
+            cw_put(sb, "    while (clux_closures) {\n");
+            cw_put(sb, "        struct clux_closure_node *n = clux_closures;\n");
+            cw_put(sb, "        clux_closures = n->next;\n");
+            cw_put(sb, "        free(n->env); free(n);\n");
+            cw_put(sb, "    }\n");
+            cw_put(sb, "}\n");
+        }
         cw_put(sb, "static void *clux_make(size_t elem_size, size_t len, "
               "const void *src, size_t count) {\n");
         cw_put(sb, "    void *p = calloc(len ? len : 1, elem_size);\n");
@@ -140,9 +162,14 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         if (!f->is_entry) continue;
         cw_put(sb, "int main(void) {\n");
         if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID) {
-            cw_printf(sb, "    return (int)%s(NULL);\n", f->name);
+            cw_printf(sb, "    int clux_ret = (int)%s(NULL);\n", f->name);
+            if (unit->uses_closure_cleanup)
+                cw_put(sb, "    clux_closure_cleanup_all();\n");
+            cw_put(sb, "    return clux_ret;\n");
         } else {
             cw_printf(sb, "    %s(NULL);\n", f->name);
+            if (unit->uses_closure_cleanup)
+                cw_put(sb, "    clux_closure_cleanup_all();\n");
             cw_put(sb, "    return 0;\n");
         }
         cw_put(sb, "}\n");

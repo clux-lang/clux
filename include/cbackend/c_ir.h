@@ -99,6 +99,7 @@ typedef struct cir_expr {
     cir_type_t     *src_type;
     struct cir_signature *sig;
     bool            array_data; /* index through wrapper .data */
+    bool            closure_env; /* allocate via closure registry */
     size_t          tag;
     struct cir_expr *lhs;
     struct cir_expr *rhs;
@@ -184,6 +185,7 @@ typedef struct cir_unit {
     bool             uses_alloc;
     bool             uses_str_cmp;
     bool             uses_opt_unwrap;
+    bool             uses_closure_cleanup;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);

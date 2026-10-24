@@ -169,6 +169,8 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         inits = init;
     }
     cir_expr_t *env_new = cir_expr_new(lc->arena, env, NULL);
+    env_new->closure_env = true;
+    lc->unit->uses_closure_cleanup = true;
     /* inits 取反（构造顺序） */
     for (cir_init_t *it = inits; it;) {
         cir_init_t *next = it->next;
