@@ -46,6 +46,7 @@ static void mark_cleanup_returns(cir_stmt_t *s) {
 cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                                       bool is_entry) {
     lc->locals = NULL;
+    lc->local_decls = NULL;
     if (fn->generic.count > 0) {
         /* 架构契约：泛型在 sema 内实例化完毕，后端只该看到具体函数。
            走到这里说明 sema 漏了实例化（内部错误）。 */

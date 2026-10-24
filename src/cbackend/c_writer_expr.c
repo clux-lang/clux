@@ -116,22 +116,32 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         if (e->rhs) cw_write_expr(sb, e->rhs);
         else cw_put(sb, "0");
         cw_put(sb, "), .len = (");
-        if (e->high) cw_write_expr(sb, e->high);
-        else if (e->src_type && (e->src_type->kind == CIR_TYPE_SLICE ||
-                                 e->src_type->kind == CIR_TYPE_STR)) {
+        if (e->high) {
+            cw_write_expr(sb, e->high);
+            cw_put(sb, " - (");
+            if (e->rhs) cw_write_expr(sb, e->rhs);
+            else cw_put(sb, "0");
+            cw_put(sb, "))");
+        } else if (e->src_type && (e->src_type->kind == CIR_TYPE_SLICE ||
+                                   e->src_type->kind == CIR_TYPE_STR)) {
+            /* `s[low:]`：长度沿用既有 len，只减 low（`.len = (` 由
+               `).len` 收口，不能再多一个 `)`）。 */
             cw_write_expr(sb, e->lhs);
-            cw_put(sb, ").len");
+            cw_put(sb, ").len - (");
+            if (e->rhs) cw_write_expr(sb, e->rhs);
+            else cw_put(sb, "0");
+            cw_put(sb, ")");
         } else {
             cw_put(sb, "sizeof((");
             cw_write_expr(sb, e->lhs);
             cw_put(sb, ").data) / sizeof((");
             cw_write_expr(sb, e->lhs);
-            cw_put(sb, ").data[0]))");
+            cw_put(sb, ").data[0])) - (");
+            if (e->rhs) cw_write_expr(sb, e->rhs);
+            else cw_put(sb, "0");
+            cw_put(sb, ")");
         }
-        cw_put(sb, " - (");
-        if (e->rhs) cw_write_expr(sb, e->rhs);
-        else cw_put(sb, "0");
-        cw_put(sb, ")) }");
+        cw_put(sb, " }");
         break;
     }
     case CIR_EXPR_MAKE: {
@@ -409,6 +419,18 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, ")(");
         cw_write_expr(sb, e->lhs);
         cw_put(sb, "))");
+        break;
+    case CIR_EXPR_BITCAST:
+        /* 布局兼容的复合值重解释（C 不允许 struct 之间的 cast）：把值放
+           进源类型的复合字面量，再按目标类型取址读出左值。 */
+        cw_put(sb, "(*((");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, " *)&(");
+        cw_put(sb, e->src_type && e->src_type->c_name ? e->src_type->c_name
+                                                      : "int32_t");
+        cw_put(sb, "){ ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " }))");
         break;
     case CIR_EXPR_TERNARY:
         cw_put(sb, "((");

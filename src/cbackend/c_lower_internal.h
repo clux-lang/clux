@@ -73,12 +73,14 @@
 typedef struct lower_defer {
     strslice_t name;
     ast_node_t *body;
+    const char *env_name; /* 内联 defer 体时 `__ctx.env` 绑定的捕获结构体局部 */
     struct lower_defer *next;
 } lower_defer_t;
 
 typedef struct lower_local {
     strslice_t name;
     const type_t *type;
+    const char *cname; /* 该声明在 C 里的唯一符号名（同名遮蔽/展开时带后缀） */
     struct lower_local *next;
 } lower_local_t;
 
@@ -141,7 +143,13 @@ typedef struct lower_ctx {
     sema_t  *sema;
     cir_unit_t *unit;
     lower_defer_t *defers;
+    /* 正在内联的 defer 体的捕获结构体局部名（`__ctx.env` → 它）。 */
+    const char *ctx_env_name;
+    unsigned defer_seq;
     lower_local_t *locals;
+    /* 本函数内**曾经声明过**的所有局部（不随块作用域弹出）：用于给 C
+       名字做函数级唯一化（CIR 把块拍平，C 作用域不能依赖花括号）。 */
+    lower_local_t *local_decls;
     lower_local_t *globals; /* 全局变量类型表（推断表达式类型 / 值调用用） */
     lower_capture_t *captures;
     lower_method_t *methods;
@@ -209,6 +217,11 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok);
    成功路径的值由调用方接续（赋值/return）。 */
 cir_stmt_t *lower_try_prefix(lower_ctx_t *lc, ast_try_t *tr, bool *ok);
 void register_local(lower_ctx_t *lc, strslice_t name, const type_t *type);
+/** 返回该局部声明的 C 符号名（未登记返回 NULL）。 */
+const char *lookup_local_cname(lower_ctx_t *lc, strslice_t name);
+/** 布局兼容复合值（匿名推断结构 vs 声明类型）重解释后的 lowering。 */
+cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
+                               ast_node_t *expr);
 void register_global(lower_ctx_t *lc, strslice_t name, const type_t *type);
 const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
 

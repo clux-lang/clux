@@ -2025,6 +2025,43 @@ const type_t *sema_generic_instantiate_type(
         return NULL;
     }
 
+    /* 结构去重：同名缓存之外，按「泛型定义 + 实参身份」再查一次。不同
+       mangling 前缀（方法/嵌套实例的 generic_prefix 不同）会生成不同名字，
+       但语义上是同一个实例类型——必须复用同一个 type_t，否则 C 侧会出现
+       两个布局相同却类型不同的 struct（`s_65` vs `s_77` 不兼容赋值）。 */
+    for (sema_generic_instance_t *e = sema->generics.instances; e;
+         e = e->next) {
+        if (e->kind != kind || e->def != def ||
+            e->arg_count != arg_count || !e->type)
+            continue;
+        bool same = true;
+        for (size_t k = 0; k < arg_count; k++) {
+            if (args[k].is_value != e->args[k].is_value) {
+                same = false;
+                break;
+            }
+            if (!args[k].is_value) {
+                const type_t *x =
+                    args[k].type ? type_strip_quals(args[k].type) : NULL;
+                const type_t *y = e->args[k].type
+                                      ? type_strip_quals(e->args[k].type)
+                                      : NULL;
+                if (x != y) {
+                    same = false;
+                    break;
+                }
+            } else if (memcmp(&args[k].value, &e->args[k].value,
+                              sizeof args[k].value) != 0) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            if (out) *out = e;
+            return e->type;
+        }
+    }
+
     sema_generic_instance_t *inst = (sema_generic_instance_t *)allocator_new_ex(
         sema->vm->alloc, "sema_generic_instance_t",
         sizeof(sema_generic_instance_t), NULL, NULL, NULL, 1);

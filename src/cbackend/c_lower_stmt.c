@@ -18,6 +18,14 @@ static ast_node_t *find_defer_body(lower_ctx_t *lc, strslice_t name) {
     return NULL;
 }
 
+static lower_defer_t *find_defer_entry(lower_ctx_t *lc, strslice_t name) {
+    for (lower_defer_t *d = lc->defers; d; d = d->next)
+        if (d->name.len == name.len &&
+            memcmp(d->name.ptr, name.ptr, name.len) == 0)
+            return d;
+    return NULL;
+}
+
 void register_local(lower_ctx_t *lc, strslice_t name,
                            const type_t *type) {
     if (!name.ptr || !type) return;
@@ -26,8 +34,48 @@ void register_local(lower_ctx_t *lc, strslice_t name,
     if (!l) return;
     l->name = name;
     l->type = type;
+    /* 同一函数内重复声明同名局部（comptime 展开/循环展开会产生）在 C 里
+       不能重定义：按出现顺序加 `_2`、`_3` 后缀。读取走同一张表，因此
+       后续引用解析到当前声明。 */
+    const char *base = module_symbol(lc->arena, lc->unit, "v_", name);
+    if (!base) return;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", base);
+    unsigned seq = 2;
+    bool clash = true;
+    while (clash) {
+        clash = false;
+        for (lower_local_t *o = lc->local_decls; o; o = o->next) {
+            if (o->cname && strcmp(o->cname, buf) == 0) {
+                clash = true;
+                break;
+            }
+        }
+        if (clash) {
+            snprintf(buf, sizeof buf, "%s_%u", base, seq++);
+        }
+    }
+    l->cname = copy_arena(lc->arena, buf);
     l->next = lc->locals;
     lc->locals = l;
+    /* 记入函数级声明全集（不随块弹出）：块拍平后仍保证 C 名字唯一。 */
+    lower_local_t *d = (lower_local_t *)arena_calloc(
+        lc->arena, 1, sizeof(*d), ALIGNOF(max_align_t));
+    if (d) {
+        d->name = name;
+        d->cname = l->cname;
+        d->type = type;
+        d->next = lc->local_decls;
+        lc->local_decls = d;
+    }
+}
+
+const char *lookup_local_cname(lower_ctx_t *lc, strslice_t name) {
+    for (lower_local_t *l = lc->locals; l; l = l->next)
+        if (l->name.len == name.len &&
+            memcmp(l->name.ptr, name.ptr, name.len) == 0)
+            return l->cname;
+    return NULL;
 }
 
 const type_t *lookup_local(lower_ctx_t *lc, strslice_t name) {
@@ -184,6 +232,97 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             d->body = fn->body;
             d->next = lc->defers;
             lc->defers = d;
+            /* 捕获结构体：defer 体内的 `__ctx.env.<cap>` 指向这里声明的
+               局部值（登记点按值复制一次）。 */
+            if (fn->captures) {
+                char tn[96];
+                snprintf(tn, sizeof tn, "struct %sde_%u",
+                         lc->unit->sym_prefix ? lc->unit->sym_prefix
+                                              : "clux_",
+                         lc->fnlit_seq++);
+                cir_type_t *env = cir_type_new(
+                    lc->arena, CIR_TYPE_STRUCT,
+                    copy_arena(lc->arena, tn));
+                if (!env) return NULL;
+                cir_unit_add_type(lc->unit, env);
+                cir_expr_t *ctor = cir_expr_construct(lc->arena, env, NULL);
+                if (!ctor) return NULL;
+                for (ast_node_t *c = fn->captures; c; c = c->next) {
+                    ast_var_def_t *vd = (ast_var_def_t *)c;
+                    const type_t *ct = vd->resolved_type;
+                    if (!ct) ct = lookup_local(lc, vd->name);
+                    if (!ct && vd->type_expr)
+                        ct = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+                    if (!ct) {
+                        diag_error(lc->sema->diag, sema_loc(lc->sema, c),
+                                   "c backend: cannot determine defer "
+                                   "capture type");
+                        lc->failed = true;
+                        *ok = false;
+                        return NULL;
+                    }
+                    cir_type_t *fct = map_type(lc, ct);
+                    if (!fct) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    char fb[256];
+                    snprintf(fb, sizeof fb, "clux_f_%.*s", (int)vd->name.len,
+                             vd->name.ptr ? vd->name.ptr : "");
+                    const char *fname = copy_arena(lc->arena, fb);
+                    cir_field_t *f = cir_field_new(lc->arena, fname, fct);
+                    if (!f) return NULL;
+                    cir_type_add_field(env, f);
+                    const char *vn = lookup_local_cname(lc, vd->name);
+                    cir_expr_t *ve = NULL;
+                    /* 带初始化表达式的捕获（`|(q: ref *Box = p.*.&)|`）：
+                       登记点按该表达式求值。 */
+                    if (vd->init && vd->init->kind != AST_UNDEF) {
+                        ve = lower_expr(lc, vd->init);
+                    }
+                    if (!ve && vn)
+                        ve = cir_expr_ident(lc->arena, vn);
+                    if (!ve) {
+                        /* 捕获可能来自外层闭包的捕获层或全局。 */
+                        for (lower_capture_t *cp = lc->captures; cp;
+                             cp = cp->next)
+                            if (cp->name.len == vd->name.len &&
+                                memcmp(cp->name.ptr, vd->name.ptr,
+                                       cp->name.len) == 0) {
+                                ve = cir_expr_ident(lc->arena, cp->expr);
+                                break;
+                            }
+                    }
+                    if (!ve) {
+                        const char *gn = module_symbol(
+                            lc->arena, lc->unit, "v_", vd->name);
+                        if (gn) ve = cir_expr_ident(lc->arena, gn);
+                    }
+                    if (!ve) {
+                        diag_error(lc->sema->diag, sema_loc(lc->sema, c),
+                                   "c backend: defer capture '%.*s' is not "
+                                   "a local",
+                                   (int)vd->name.len, vd->name.ptr);
+                        lc->failed = true;
+                        *ok = false;
+                        return NULL;
+                    }
+                    cir_init_t *init =
+                        cir_init_new(lc->arena, fname, ve);
+                    if (!init) return NULL;
+                    cir_expr_add_init(ctor, init);
+                }
+                char en[64];
+                snprintf(en, sizeof en, "clux_defer_env_%u",
+                         lc->defer_seq++);
+                d->env_name = copy_arena(lc->arena, en);
+                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+                if (!st) return NULL;
+                st->type = env;
+                st->name = d->env_name;
+                st->expr = ctor;
+                return st;
+            }
             return NULL;
         }
         diag_error(lc->sema->diag, sema_loc(lc->sema, s),
@@ -209,7 +348,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
         if (!st) return NULL;
         st->type = ct;
-        st->name = module_symbol(lc->arena, lc->unit, "v_", vd->name);
+        st->name = lookup_local_cname(lc, vd->name);
         if (vd->init && vd->init->kind == AST_TRY) {
             /* `var v = expr.?;`：先声明 v，再把 try 展开成
                `{ setup; if (!ok) { tail } v = value; }`。 */
@@ -252,7 +391,34 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 cir_expr_t *v = lower_expr(lc, vd->init);
                 st->expr = v ? cir_expr_option(lc->arena, ct, true, v) : NULL;
             } else {
-                st->expr = lower_expr(lc, vd->init);
+                /* 匿名构造（`var b: Box[U] = .{ ... }`）：sema 推断出的
+                   interned 结构与声明类型布局相同但 type_t 不同 → C 里是
+                   两个 struct 类型。把构造的类型槽指向声明类型，直接生成
+                   `(声明类型){ ... }`，避免不兼容赋值。 */
+                bool patched_ctor = false;
+                ast_node_t *saved_ctor_type = NULL;
+                if (vd->init->kind == AST_CONSTRUCT && t &&
+                    type_kind_of(type_strip_quals(t)) == TYPE_KIND_STRUCT) {
+                    ast_construct_t *cc = (ast_construct_t *)vd->init;
+                    const type_t *decl = t;
+                    const type_t *own = cc->type
+                                            ? sema_resolve_type_slot(
+                                                  lc->sema, &cc->type)
+                                            : NULL;
+                    if (type_strip_quals(decl) !=
+                        (own ? type_strip_quals(own) : NULL)) {
+                        ast_node_t *ref =
+                            sema_gen_type_ref(lc->sema, type_strip_quals(t));
+                        if (ref) {
+                            saved_ctor_type = cc->type;
+                            cc->type = ref;
+                            patched_ctor = true;
+                        }
+                    }
+                }
+                st->expr = lower_compat_value(lc, t, vd->init);
+                if (patched_ctor) ((ast_construct_t *)vd->init)->type =
+                    saved_ctor_type;
             }
         }
         return st;
@@ -390,7 +556,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 st->expr = lower_expr(lc, a->value);
             }
         } else {
-            st->expr = lower_expr(lc, a->value);
+            st->expr = lower_compat_value(lc, tt, a->value);
         }
         return st;
     }
@@ -411,12 +577,16 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 }
             }
             if (is_defer_name(name)) {
-                ast_node_t *body = find_defer_body(lc, name);
+                lower_defer_t *de = find_defer_entry(lc, name);
+                ast_node_t *body = de ? de->body : find_defer_body(lc, name);
                 if (body) {
                     bool okd = true;
                     cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
                     if (!st) return NULL;
+                    const char *save_env = lc->ctx_env_name;
+                    lc->ctx_env_name = de ? de->env_name : NULL;
                     st->body = lower_block(lc, body, &okd);
+                    lc->ctx_env_name = save_env;
                     if (!okd) *ok = false;
                     return st;
                 }
@@ -733,6 +903,11 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         lc->unit->uses_alloc = true;
         cir_stmt_t *head = NULL, *tail = NULL;
         for (ast_node_t *op = f->operand; op; op = op->next) {
+            /* `FREE __defer_N`：defer 体已被内联，捕获结构体是栈上局部，
+               没有堆环境可释放。 */
+            if (op->kind == AST_IDENT &&
+                is_defer_name(((ast_ident_t *)op)->name))
+                continue;
             const type_t *ot = infer_expr_type(lc, op);
             cir_expr_t *ex = lower_expr(lc, op);
             if (!ex) {
@@ -753,6 +928,20 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         return head;
     }
     case AST_EMPTY_STMT:
+        return NULL;
+    /* 声明级节点（局部 typedef/struct/enum/union 定义、import/export 等）：
+       sema 已把它们折叠成类型引用/导出标记，类型在用到时按需物化，这里
+       没有对应的 C 语句。 */
+    case AST_TYPE_DEF:
+    case AST_ENUM_DEF:
+    case AST_STRUCT_DEF:
+    case AST_UNION_DEF:
+    case AST_CUNION_DEF:
+    case AST_INTERFACE_DEF:
+    case AST_IMPORT:
+    case AST_REEXPORT:
+    case AST_EXTERN_LIB:
+    case AST_EXPORT:
         return NULL;
     default:
         diag_error(lc->sema->diag, sema_loc(lc->sema, s),
@@ -780,10 +969,23 @@ cir_stmt_t *lower_ast_list(lower_ctx_t *lc, ast_node_t *list, bool *ok) {
     return head;
 }
 
+static cir_stmt_t *lower_block_scoped(lower_ctx_t *lc, ast_node_t *block,
+                                      bool *ok);
+
 cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!block || block->kind != AST_BLOCK) {
         *ok = false;
         return NULL;
     }
+    /* 块作用域：块内局部声明在块结束后失效（同名遮蔽的 C 名字唯一化也
+       依赖这一点回退）。 */
+    lower_local_t *save_locals = lc->locals;
+    cir_stmt_t *result = lower_block_scoped(lc, block, ok);
+    lc->locals = save_locals;
+    return result;
+}
+
+static cir_stmt_t *lower_block_scoped(lower_ctx_t *lc, ast_node_t *block,
+                                      bool *ok) {
     cir_stmt_t *head = NULL, *tail = NULL;
     for (ast_node_t *s = ((ast_block_t *)block)->stmts; s; s = s->next) {
         cir_stmt_t *st = lower_stmt(lc, s, ok);

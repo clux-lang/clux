@@ -99,6 +99,7 @@ typedef enum {
     CIR_EXPR_BITFIELD_SET,
     CIR_EXPR_BITFIELD_MAKE,
     CIR_EXPR_CAST,
+    CIR_EXPR_BITCAST, /* 布局兼容的复合值重解释：`*(T *)&(U){ v }` */
     CIR_EXPR_TERNARY,
     CIR_EXPR_MEM_EQ,
     /* 把右值表达式物化成可寻址的临时左值（C 复合字面量数组）：
@@ -369,6 +370,9 @@ cir_expr_t    *cir_expr_bitfield_make(arena_t *arena, cir_type_t *type,
                                       size_t word_bits, cir_init_t *inits);
 cir_expr_t    *cir_expr_cast(arena_t *arena, cir_type_t *type,
                              cir_expr_t *value);
+/** 布局兼容的复合值重解释（不同 type_t 但布局相同的 struct/元组/cunion）。 */
+cir_expr_t    *cir_expr_bitcast(arena_t *arena, cir_type_t *type,
+                                cir_type_t *src_type, cir_expr_t *value);
 cir_expr_t    *cir_expr_ternary(arena_t *arena, cir_expr_t *cond,
                                 cir_expr_t *then_e, cir_expr_t *else_e);
 cir_expr_t    *cir_expr_mem_eq(arena_t *arena, cir_type_t *type,

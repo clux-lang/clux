@@ -422,6 +422,18 @@ cir_expr_t *cir_expr_cast(arena_t *arena, cir_type_t *type,
     return e;
 }
 
+cir_expr_t *cir_expr_bitcast(arena_t *arena, cir_type_t *type,
+                             cir_type_t *src_type, cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_BITCAST;
+    e->type = type;
+    e->src_type = src_type;
+    e->lhs = value;
+    return e;
+}
+
 cir_expr_t *cir_expr_ternary(arena_t *arena, cir_expr_t *cond,
                              cir_expr_t *then_e, cir_expr_t *else_e) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(

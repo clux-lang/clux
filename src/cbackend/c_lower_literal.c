@@ -259,6 +259,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     }
 
     lc->locals = NULL;
+    lc->local_decls = NULL;
     lc->captures = caps;
     lc->defers = NULL;
     lc->cleanup = NULL;
@@ -306,6 +307,7 @@ cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     cir_type_t *save_ret = lc->return_type;
     unsigned save_ret_seq = lc->ret_seq;
     lc->locals = NULL;
+    lc->local_decls = NULL;
     lc->defers = NULL;
     lc->cleanup = NULL;
     lc->ret_seq = 0;

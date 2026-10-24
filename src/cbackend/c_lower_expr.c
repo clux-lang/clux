@@ -287,6 +287,32 @@ static cir_expr_t *lower_bitfield_construct(lower_ctx_t *lc,
 
 /* ========================== end bitfield ========================== */
 
+cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call);
+
+/* 结构等价但 type_t 不同的复合值（匿名推断结构 vs 声明类型）：按布局
+   重解释成目标类型（C 不允许 struct 间 cast）。 */
+static cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
+                                      ast_node_t *expr) {
+    cir_expr_t *v = lower_expr(lc, expr);
+    if (!v || !target) return v;
+    const type_t *vt = infer_expr_type(lc, expr);
+    if (!vt) return v;
+    const type_t *tt = type_strip_quals(target);
+    const type_t *vs = type_strip_quals(vt);
+    if (tt == vs) return v;
+    type_kind_t kt = type_kind_of(tt), kv = type_kind_of(vs);
+    if (kt != kv) return v;
+    if (kt != TYPE_KIND_STRUCT && kt != TYPE_KIND_TUPLE &&
+        kt != TYPE_KIND_CUNION)
+        return v;
+    cir_type_t *ct = map_type(lc, tt);
+    cir_type_t *st = map_type(lc, vs);
+    if (!ct || !st) return v;
+    if (ct->c_name && st->c_name && strcmp(ct->c_name, st->c_name) == 0)
+        return v;
+    return cir_expr_bitcast(lc->arena, ct, st, v);
+}
+
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     strslice_t cname0 = STRSLICE_EMPTY;
     if (call->callee && call->callee->kind == AST_IDENT)
@@ -550,12 +576,12 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_IDENT: {
         strslice_t name = ((ast_ident_t *)e)->name;
-        if (!lookup_local(lc, name)) {
-            for (lower_capture_t *c = lc->captures; c; c = c->next)
-                if (c->name.len == name.len &&
-                    memcmp(c->name.ptr, name.ptr, name.len) == 0)
-                    return cir_expr_ident(lc->arena, c->expr);
-        }
+        const char *lc_name = lookup_local_cname(lc, name);
+        if (lc_name) return cir_expr_ident(lc->arena, lc_name);
+        for (lower_capture_t *c = lc->captures; c; c = c->next)
+            if (c->name.len == name.len &&
+                memcmp(c->name.ptr, name.ptr, name.len) == 0)
+                return cir_expr_ident(lc->arena, c->expr);
         const char *n = module_symbol(lc->arena, lc->unit, "v_", name);
         return n ? cir_expr_ident(lc->arena, n) : NULL;
     }
@@ -741,7 +767,9 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             strslice_eq(((ast_ident_t *)m->object)->name,
                         STRSLICE_LIT("__ctx")) &&
             strslice_eq(m->field, STRSLICE_LIT("env")))
-            return cir_expr_ident(lc->arena, "clux_v___ctx_env");
+            return cir_expr_ident(
+                lc->arena,
+                lc->ctx_env_name ? lc->ctx_env_name : "clux_v___ctx_env");
         cir_expr_t *obj = lower_expr(lc, m->object);
         if (!obj) return NULL;
         const type_t *ot = infer_expr_type(lc, m->object);
