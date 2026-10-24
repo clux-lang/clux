@@ -1,6 +1,7 @@
 #include "cbackend/c_backend.h"
 
 #include "cbackend/c_lower.h"
+#include "cbackend/c_opt.h"
 #include "cbackend/c_writer.h"
 #include "core/allocator.h"
 #include "core/arena.h"
@@ -218,6 +219,7 @@ int cbackend_build_file(const char *src_path, const char *out_path) {
                                           NULL, NULL, 1);
         if (c_path) {
             snprintf(c_path, plen, "%s.clux.c", out_path);
+            cbackend_optimize(unit);
             if (cir_write_file(unit, c_path, alloc) == 0 &&
                 compile_c(c_path, out_path) == 0) {
                 remove(c_path);

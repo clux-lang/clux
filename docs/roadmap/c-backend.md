@@ -220,14 +220,14 @@ clux build hello.cx
 - 非捕获函数字面量；
 - `func |cap|` 显式捕获闭包；
 - struct 实例方法调用（`p.m()`）；
-- struct 静态方法调用（`T::f()`）。
+- struct 静态方法调用（`T::f()`）；
+- 未被作为函数值引用的函数对象不生成（C IR 优化）。
 
 尚未覆盖：
 
 - 捕获闭包的 own 捕获清理；
 - 泛型方法；
-- 跨模块方法；
-- 函数对象消除优化。
+- 跨模块方法。
 
 ### M6：语言特性收敛
 
@@ -286,6 +286,8 @@ src/cbackend/
   c_lower_infer.c   表达式类型推断
   c_lower_literal.c slice/make/len/闭包等字面量
   c_lower_stmt.c    语句 lowering
+
+  c_opt.c           C IR 优化（函数对象可达性）
 
   c_writer.c        writer 编排
   c_writer_internal.h

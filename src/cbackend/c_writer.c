@@ -140,9 +140,9 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         if (!f->is_entry) continue;
         cw_put(sb, "int main(void) {\n");
         if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID) {
-            cw_printf(sb, "    return (int)%s.fn(%s.env);\n", f->object, f->object);
+            cw_printf(sb, "    return (int)%s(NULL);\n", f->name);
         } else {
-            cw_printf(sb, "    %s.fn(%s.env);\n", f->object, f->object);
+            cw_printf(sb, "    %s(NULL);\n", f->name);
             cw_put(sb, "    return 0;\n");
         }
         cw_put(sb, "}\n");

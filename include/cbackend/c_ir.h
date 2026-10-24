@@ -162,6 +162,7 @@ typedef struct cir_function {
     cir_type_t  *closure_env;
     int          source_line;
     bool         is_entry;   /* 生成 C main wrapper */
+    bool         object_used; /* 函数对象被作为值引用 */
     struct cir_function *next;
 } cir_function_t;
 

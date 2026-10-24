@@ -32,7 +32,7 @@ void cw_write_function_decl(string_t *sb, const cir_function_t *fn) {
 }
 
 void cw_write_function_object(string_t *sb, const cir_function_t *fn) {
-    if (!fn->object || !fn->sig) return;
+    if (!fn->object || !fn->sig || !fn->object_used) return;
     cw_printf(sb, "static const struct %s %s = { %s, NULL };\n", fn->sig->tag,
        fn->object, fn->name);
 }
