@@ -36,6 +36,7 @@
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_option.h"
 #include "parser/ast_return.h"
+#include "parser/ast_scope_ref.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_struct_def.h"
@@ -110,6 +111,8 @@ cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret, size_t pc,
                                cir_type_t **pt);
 const type_t *func_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn);
 ast_func_def_t *func_def_of_ref(lower_ctx_t *lc, ast_func_ref_t *ref);
+lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
+                            strslice_t name);
 
 /* expressions */
 cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e);

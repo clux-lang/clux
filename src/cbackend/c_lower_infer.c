@@ -126,6 +126,30 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CALL: {
         ast_call_t *c = (ast_call_t *)e;
         if (call_is_len(c)) return vm->type_usize;
+        if (c->callee && c->callee->kind == AST_MEMBER) {
+            ast_member_t *m = (ast_member_t *)c->callee;
+            lower_method_t *meth =
+                find_method(lc, c->member_type_id, m->field);
+            if (meth && meth->def->return_expr)
+                return sema_resolve_type_slot(lc->sema,
+                                              &meth->def->return_expr);
+        }
+        if (c->callee && c->callee->kind == AST_SCOPE_REF) {
+            ast_scope_ref_t *sr = (ast_scope_ref_t *)c->callee;
+            uint32_t owner = c->member_type_id;
+            if (!owner && sr->type_expr) {
+                const type_t *t =
+                    sema_resolve_type_slot(lc->sema, &sr->type_expr);
+                if (t) {
+                    const sema_type_t *st = sema_type_find(lc->sema, t);
+                    if (st) owner = st->id;
+                }
+            }
+            lower_method_t *meth = find_method(lc, owner, sr->variant);
+            if (meth && meth->def->return_expr)
+                return sema_resolve_type_slot(lc->sema,
+                                              &meth->def->return_expr);
+        }
         sema_func_t *sf = NULL;
         if (c->callee && c->callee->kind == AST_FUNC_REF)
             sf = sema_func_by_id(lc->sema, ((ast_func_ref_t *)c->callee)->fid);

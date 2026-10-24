@@ -458,6 +458,27 @@ TEST(CBackend, BuildMethods) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildStaticMethod) {
+  const std::string src = write_temp_file(
+      "struct Point {\n"
+      "  x: i32;\n"
+      "  func origin(): Point { return .Point{ .x = 3 }; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = Point::origin();\n"
+      "  return p.x;\n"
+      "}\n",
+      "cbackend_m5_static_method");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 3);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

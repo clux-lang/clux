@@ -3,8 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
-                                   strslice_t name) {
+lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
+                             strslice_t name) {
     for (lower_method_t *m = lc->methods; m; m = m->next) {
         if (m->owner_id == owner_id && m->name.len == name.len &&
             memcmp(m->name.ptr, name.ptr, name.len) == 0)
@@ -14,6 +14,28 @@ static lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
 }
 
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
+    if (call->callee && call->callee->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)call->callee;
+        uint32_t owner = call->member_type_id;
+        if (!owner && sr->type_expr) {
+            const type_t *t = sema_resolve_type_slot(lc->sema, &sr->type_expr);
+            if (t) {
+                const sema_type_t *st = sema_type_find(lc->sema, t);
+                if (st) owner = st->id;
+            }
+        }
+        lower_method_t *m = find_method(lc, owner, sr->variant);
+        if (m) {
+            cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
+            cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
+            for (ast_node_t *a = call->args; a; a = a->next) {
+                cir_expr_t *arg = lower_expr(lc, a);
+                if (!arg) return NULL;
+                cir_expr_append_arg(out, arg);
+            }
+            return out;
+        }
+    }
     if (call->is_member_call && call->callee &&
         call->callee->kind == AST_MEMBER) {
         ast_member_t *mem = (ast_member_t *)call->callee;
