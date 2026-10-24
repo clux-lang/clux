@@ -287,6 +287,11 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         cname0 = ((ast_ident_t *)call->callee)->name;
     else if (call->callee && call->callee->kind == AST_FUNC_REF)
         cname0 = ((ast_func_ref_t *)call->callee)->name;
+    /* M6 FFI：extern cfunc 调用 → 直接调用真实 C 符号；data(s) → 取首元素指针；
+       cfunc_ptr(f) → 生成 C trampoline。 */
+    if (call->is_ffi_call) return lower_ffi_call(lc, call);
+    if (call->is_data_call) return lower_data_call(lc, call);
+    if (call_is_cfunc_ptr(call)) return lower_cfunc_ptr(lc, call);
     /* test 上下文的 `assert(cond, text)`：sema 已把它改写为 (bool, str) 调用，
        这里映射到运行器生成的 clux_assert（失败即退出该用例子进程）。 */
     if (lc->unit->test_runner && strslice_eq(cname0, STRSLICE_LIT("assert"))) {

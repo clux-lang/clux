@@ -239,6 +239,7 @@ clux build hello.cx
 - bitfield；
 - metadata 全局常量；
 - test 运行器；
+- FFI（`extern lib` 链接参数 + `extern cfunc` 声明/调用/回调）；
 - sema 单态化后的具体函数覆盖；
 - 与 VM 差分测试；
 - 构建产物导出（`--emit-c`）。
@@ -308,7 +309,36 @@ clux build hello.cx
   - 输出与 VM 运行器同款 gtest 风格汇总。
 - `clux build` 选项：
   - `--emit-c[=PATH]`：只生成 C 源，不调用 host cc；
-  - `--output=PATH`：指定可执行文件路径。
+  - `--output=PATH`：指定可执行文件路径；
+  - `-D KEY=VALUE`：注入编译期键表（`extern lib ... assert(...)` 用）。
+- M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
+  `src/cbackend/c_lower_ffi.c`）：
+  - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI
+    类型：整数/浮点/bool/str/opaque/struct/cunion/指针/cfunc；enum 按底层
+    整数渲染），调用点直接调用真实 C 符号；`extern func <lib>::<fn>` 是
+    同一 AST；
+  - `str` 的 C ABI 表示是 `const char *`（与 VM 的 str = char* 一致）：
+    实参取 `(v).data`，返回值用 `clux_str_from_c(p)`（`strlen` 求 len）；
+  - `data(s)` → `(s).data`（`is_data_call`），与 `len(s)` 组成 C 的
+    `(T*, n)` 对；
+  - 变参：`...` 固定参数之后的实参按 C 默认实参提升（host cc 完成）；
+  - `cfunc_ptr(f)`：为**无捕获**的命名 clux 函数生成 C trampoline
+    （`static <ret> clux_cb_<f>(...) { return clux_fn_<f>(NULL, ...); }`），
+    `cfunc(...)` 参数/返回类型生成 `clux_cfn_<n>` typedef；带捕获的闭包
+    没有 C 等价物 → 明确拒绝；
+  - `extern lib <alias> from "<name>"`：**不生成 C 代码**，只影响 host cc
+    命令行：
+    - `"*"` → 不链接（符号来自当前进程，如 CRT）；
+    - 通用名 → `-l<name>`，并在产物目录及其上两级目录加 `-L`（找不到时
+      回落到系统搜索路径）；
+    - 显式路径 / 库文件名（`.so`/`.dylib`/`.dll`/`.a`/`.lib`）→ 原样交给
+      链接器；
+    - `assert(<cond>)` 为假时前脱糖已裁剪整条声明 → 不产生链接参数；
+  - 同名 C 符号不同签名的两条 `extern cfunc` 声明在 lowering 阶段报错；
+  - 本后端 `str` 是 `{char*, len}`（16 字节），与 C ABI 的 `char*` 不同 →
+    含 `str` 字段的聚合按值传参与 C 不兼容，declaration 处直接拒绝；
+  - 后端边界自检把 extern 符号登记为“外部定义”，不再误报
+    `has no C definition`。
 - VM 差分测试：`clux run` 现在把 `main` 的整数返回值作为进程退出码，
   与 `clux build` 产物一致；`tests/c_backend_diff_test.cpp` 对同一批程序
   同时跑两个后端并比较退出码。
@@ -319,7 +349,10 @@ clux build hello.cx
 - 测试运行器每个用例独立进程，全局变量在用例之间**不共享**（VM 运行器
   共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
 - `new` bitfield（sema 目前直接拒绝）；
-- 依赖 FFI / `import` 的 examples（第一版明确不做，见“第一版明确不做”）；
+- `extern var`（动态库导出的数据符号）与 `extern cfunc` 返回函数指针；
+- enum 值 / enum 变量（C 后端还没有 enum lowering：`Color::Red`、`var c: Color`
+  都会报“无法确定类型”；`extern cfunc` 的 enum 形参只按底层整数渲染）；
+- 依赖 FFI / `import` 的 examples（`import` 仍属第一版明确不做，见下）；
 - 全量 `examples/` 与 VM 的差分校准（M7）。
 
 ### M7：默认切换
@@ -333,8 +366,7 @@ clux build hello.cx
 
 - `clux.mod`；
 - import；
-- extern lib / extern cfunc / extern var；
-- 动态库/静态库编译参数；
+- `extern var`（动态库数据符号；`extern lib` / `extern cfunc` 已在 M6 支持）；
 - 标准库；
 - 跨文件链接；
 - C 编译器参数透传。

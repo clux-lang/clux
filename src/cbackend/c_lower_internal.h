@@ -17,6 +17,7 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_dowhile.h"
 #include "parser/ast_expr_stmt.h"
+#include "parser/ast_extern_lib.h"
 #include "parser/ast_fill.h"
 #include "parser/ast_float_lit.h"
 #include "parser/ast_for.h"
@@ -88,6 +89,29 @@ typedef struct lower_method {
     struct lower_method *next;
 } lower_method_t;
 
+/* extern cfunc 声明（`<lib>::<name>`）：调用点据此取真实 C 符号名与签名。 */
+typedef struct lower_extern_fn {
+    strslice_t lib;
+    strslice_t name;
+    ast_func_def_t *def;
+    const char *proto; /* 已生成的 C 原型文本（同名冲突检测用） */
+    struct lower_extern_fn *next;
+} lower_extern_fn_t;
+
+/* cfunc(...) 的 C 函数指针 typedef 缓存（同 intern 类型复用同一 typedef）。 */
+typedef struct lower_cfn_typedef {
+    const type_t *src;
+    const char *tag;
+    struct lower_cfn_typedef *next;
+} lower_cfn_typedef_t;
+
+/* `cfunc_ptr(f)` 生成的 C trampoline（每个被指向的函数一个）。 */
+typedef struct lower_cb_wrapper {
+    const ast_func_def_t *def;
+    const char *name;
+    struct lower_cb_wrapper *next;
+} lower_cb_wrapper_t;
+
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
@@ -97,12 +121,17 @@ typedef struct lower_ctx {
     lower_local_t *globals; /* 全局变量类型表（推断表达式类型 / 值调用用） */
     lower_capture_t *captures;
     lower_method_t *methods;
+    lower_extern_fn_t *externs;
+    lower_cfn_typedef_t *cfn_typedefs;
+    lower_cb_wrapper_t *cb_wrappers;
+    const char *ffi_error; /* 最近一次 FFI 类型渲染的具体失败原因（可为 NULL） */
     cir_stmt_t *cleanup;
     cir_type_t *return_type;
     unsigned    ret_seq;
     unsigned    sig_seq;
     unsigned    fnlit_seq;
     unsigned    switch_seq;
+    unsigned    ffi_seq;
     bool        failed;
 } lower_ctx_t;
 
@@ -151,5 +180,12 @@ const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
 /* functions */
 cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                                bool is_entry);
+
+/* M6 FFI：extern lib → 链接参数；extern cfunc → C 原型 + 调用点映射。 */
+void lower_extern_decls(lower_ctx_t *lc, ast_program_t *prog);
+cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call);
+cir_expr_t *lower_data_call(lower_ctx_t *lc, ast_call_t *call);
+cir_expr_t *lower_cfunc_ptr(lower_ctx_t *lc, ast_call_t *call);
+bool call_is_cfunc_ptr(const ast_call_t *c);
 
 #endif

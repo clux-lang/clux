@@ -8,13 +8,14 @@
 #include <string.h>
 
 static const char *USAGE =
-    "usage: clux build <file.cx> [--emit-c[=PATH]] [--output=PATH]\n";
+    "usage: clux build <file.cx> [--emit-c[=PATH]] [--output=PATH] "
+    "[-D KEY=VALUE]...\n";
 
 /* 第一个位置参数（跳过 `--flag` 与 `-x`；cmd_args_parse 只保证数量，
    交错出现的选项会让 posargs 不再连续）。 */
-static const char *first_positional(const cmd_args_t *args) {
-    for (size_t i = 0; i < args->posc; i++) {
-        const char *a = args->posargs[i];
+static const char *first_positional(const char *const *argv, size_t argc) {
+    for (size_t i = 0; i < argc; i++) {
+        const char *a = argv[i];
         if (!a || a[0] == '\0') continue;
         if (a[0] == '-') continue;
         return a;
@@ -52,7 +53,21 @@ int cmd_build(const cmd_args_t *args) {
         fputs(USAGE, stderr);
         return 1;
     }
-    const char *src = first_positional(args);
+    /* `-D KEY=VALUE`（可重复）：extern lib 的 assert(...) 编译期键表。 */
+    const char *pos[16];
+    size_t np = 0;
+    const char *kv[32];
+    size_t nkv = 0;
+    int derr = cmd_take_defines((const char *const *)args->posargs, args->posc,
+                                pos, &np, 16, kv, &nkv, 32);
+    if (derr != 0) {
+        fprintf(stderr, derr == 1 ? "build: -D requires KEY=VALUE\n"
+                                  : "build: too many -D options\n");
+        fputs(USAGE, stderr);
+        return 1;
+    }
+    if (cmd_apply_defines(kv, nkv) != 0) return 1;
+    const char *src = first_positional(pos, np);
     if (!src) {
         fputs(USAGE, stderr);
         return 1;

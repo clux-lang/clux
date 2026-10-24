@@ -7,6 +7,7 @@ cir_unit_t *cir_unit_new(arena_t *arena, const char *source_path) {
     cir_unit_t *u = (cir_unit_t *)arena_calloc(
         arena, 1, sizeof(*u), ALIGNOF(max_align_t));
     if (!u) return NULL;
+    u->arena = arena;
     u->source_path = source_path;
     return u;
 }
@@ -49,10 +50,65 @@ void cir_unit_add_global(cir_unit_t *u, cir_global_t *g) {
 }
 
 void cir_unit_add_raw(cir_unit_t *u, const char *code) {
-    if (!u || !code) return;
-    cir_raw_t *r = (cir_raw_t *)malloc(sizeof(*r));
+    if (!u || !code || !u->arena) return;
+    cir_raw_t *r = (cir_raw_t *)arena_calloc(u->arena, 1, sizeof(*r),
+                                             ALIGNOF(max_align_t));
     if (!r) return;
     r->code = code;
     r->next = u->raw_helpers;
     u->raw_helpers = r;
+}
+
+void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code) {
+    if (!u || !code || !u->arena) return;
+    cir_raw_t *r = (cir_raw_t *)arena_calloc(u->arena, 1, sizeof(*r),
+                                             ALIGNOF(max_align_t));
+    if (!r) return;
+    r->code = code;
+    if (u->extern_typedefs_last) u->extern_typedefs_last->next = r;
+    else u->extern_typedefs = r;
+    u->extern_typedefs_last = r;
+}
+
+void cir_unit_add_extern_decl(cir_unit_t *u, const char *code) {
+    if (!u || !code || !u->arena) return;
+    cir_raw_t *r = (cir_raw_t *)arena_calloc(u->arena, 1, sizeof(*r),
+                                             ALIGNOF(max_align_t));
+    if (!r) return;
+    r->code = code;
+    if (u->extern_decls_last) u->extern_decls_last->next = r;
+    else u->extern_decls = r;
+    u->extern_decls_last = r;
+}
+
+void cir_unit_add_link_arg(cir_unit_t *u, const char *arg) {
+    if (!u || !arg || !u->arena) return;
+    cir_link_arg_t *l = (cir_link_arg_t *)arena_calloc(
+        u->arena, 1, sizeof(*l), ALIGNOF(max_align_t));
+    if (!l) return;
+    l->arg = arg;
+    if (u->link_args_last) u->link_args_last->next = l;
+    else u->link_args = l;
+    u->link_args_last = l;
+}
+
+void cir_unit_add_extern_symbol(cir_unit_t *u, const char *name) {
+    if (!u || !name || !u->arena) return;
+    size_t n = u->extern_symbol_count + 1;
+    const char **arr = (const char **)arena_alloc(
+        u->arena, n * sizeof(*arr), ALIGNOF(max_align_t));
+    if (!arr) return;
+    if (u->extern_symbol_count)
+        memcpy(arr, u->extern_symbols, u->extern_symbol_count * sizeof(*arr));
+    arr[n - 1] = name;
+    u->extern_symbols = arr;
+    u->extern_symbol_count = n;
+}
+
+bool cir_unit_has_extern_symbol(const cir_unit_t *u, const char *name) {
+    if (!u || !name) return false;
+    for (size_t i = 0; i < u->extern_symbol_count; i++)
+        if (u->extern_symbols[i] && strcmp(u->extern_symbols[i], name) == 0)
+            return true;
+    return false;
 }

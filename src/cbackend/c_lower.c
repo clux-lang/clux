@@ -47,9 +47,13 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
         lc->failed = true;
         return NULL;
     }
-    if (fn->is_cfunc || fn->is_extern_cfunc) {
+    if (fn->is_extern_cfunc) {
+        /* extern cfunc 只有声明：原型由 lower_extern_decls 输出，调用点直接
+           调用 C 符号；走到这里说明 sema/AST 形态异常。 */
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
-                   "c backend: unsupported function kind");
+                   "c backend: internal: extern cfunc '%.*s' reached function "
+                   "lowering",
+                   (int)fn->name.len, fn->name.ptr);
         lc->failed = true;
         return NULL;
     }
@@ -130,11 +134,14 @@ static bool unit_has_function(const cir_unit_t *u, const char *name) {
 static bool call_target_known(const cir_unit_t *u, const char *name) {
     static const char *const helpers[] = {
         "clux_new",   "clux_make",       "clux_str_eq", "clux_bf_get",
-        "clux_bf_set", "clux_assert",    "clux_panic_none", NULL};
+        "clux_bf_set", "clux_assert",    "clux_panic_none",
+        "clux_str_from_c", NULL};
     if (!name) return true;
     for (size_t i = 0; helpers[i]; i++)
         if (strcmp(name, helpers[i]) == 0) return true;
     if (strncmp(name, "clux_bf_make_", 13) == 0) return true;
+    /* extern cfunc：符号由外部库定义（原型已在本单元里声明）。 */
+    if (cir_unit_has_extern_symbol(u, name)) return true;
     return unit_has_function(u, name);
 }
 
@@ -235,6 +242,11 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     cir_unit_add_include(u, arena, "stddef.h");
     cir_unit_add_include(u, arena, "stdbool.h");
 
+    /* extern lib → 链接参数；extern cfunc → C 原型 + 调用点映射。
+       必须在 lowering 之前：调用点要按 `<lib>::<name>` 查表。 */
+    lower_extern_decls(&lc, prog);
+    if (lc.failed) return NULL;
+
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_VAR_DEF) continue;
         ast_var_def_t *vd = (ast_var_def_t *)n;
@@ -304,9 +316,9 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         ast_func_def_t *fn = (ast_func_def_t *)n;
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) continue;
         /* 泛型函数模板不生成代码；用到的实例已由 sema 重新解析成具体函数，
-           在下面的遍历里按普通函数 lowering。cfunc/extern 未支持（第一版）。 */
-        if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc)
-            continue;
+           在下面的遍历里按普通函数 lowering。extern cfunc 只有声明（原型由
+           lower_extern_decls 生成），没有可 lowering 的函数体。 */
+        if (fn->generic.count > 0 || fn->is_extern_cfunc) continue;
         cir_function_t *cf = lower_function(&lc, fn, false);
         if (!cf || lc.failed) return NULL;
         cir_unit_add_function(u, cf);

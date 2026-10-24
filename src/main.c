@@ -36,7 +36,8 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "build",
-        .usage = "clux build <file.cx> [--emit-c[=PATH]] [--output=PATH]",
+        .usage = "clux build <file.cx> [--emit-c[=PATH]] [--output=PATH] "
+                 "[-D KEY=VALUE]...",
         .help =
             "Compile clux source into a native executable.\n"
             "\n"
@@ -45,9 +46,20 @@ static const cmd_t g_cmds[] = {
             "  clux build <file.cx> --emit-c=P   write C source to P\n"
             "  clux build <file.cx> --output=P   executable path P\n"
             "\n"
-            "Single-file C backend stage: no clux.mod, imports, FFI or\n"
-            "library link arguments yet. The host C compiler is taken from\n"
-            "$CC (clang on Windows, cc elsewhere).",
+            "Single-file C backend stage: no clux.mod or imports yet.\n"
+            "The host C compiler is taken from $CC (clang on Windows, cc\n"
+            "elsewhere).\n"
+            "\n"
+            "  extern lib <alias> from \"<name>\":\n"
+            "    \"*\" -> no link flag (symbols from the current process)\n"
+            "    generic name -> -l<name> (searched in the output dir and its\n"
+            "                    two parent dirs, then the system paths)\n"
+            "    path / file name -> passed to the linker as-is\n"
+            "  extern cfunc <alias>::<fn>(...): emits an `extern` prototype and\n"
+            "  calls the real C symbol; cfunc_ptr(f) generates a C trampoline.\n"
+            "\n"
+            "-D KEY=VALUE  inject a build-time define (repeatable) used by\n"
+            "              `extern lib ... assert(...)` conditions.",
         .handler = cmd_build,
     },
     {

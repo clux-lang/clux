@@ -6,6 +6,7 @@
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/stream.h"
+#include "core/string.h"
 #include "core/vec.h"
 #include "desugar/desugar.h"
 #include "diag/diagnostic.h"
@@ -86,29 +87,77 @@ static void set_compiler_temp_dir(const char *out_path) {
 #endif
 }
 
-static int compile_c(const char *c_path, const char *out_path) {
+/* 把 `s` 以双引号形式追加到命令行（`"` 与 `\` 转义由调用约定处理：
+ * 这里只处理双引号；Windows/POSIX 的 shell 对路径反斜杠都按字面处理）。 */
+static void cmd_append_quoted(string_t *sb, const char *s) {
+    string_append_char(sb, '"');
+    for (const char *p = s ? s : ""; *p; p++) {
+        if (*p == '"') string_append_char(sb, '\\');
+        string_append_char(sb, *p);
+    }
+    string_append_char(sb, '"');
+}
+
+/* 取 path 的目录部分（不含末尾分隔符）；无分隔符返回 "." 。写入 buf。 */
+static void path_dirname(const char *path, char *buf, size_t cap) {
+    const char *slash = NULL;
+    for (const char *p = path; p && *p; p++)
+        if (*p == '/' || *p == '\\') slash = p;
+    if (!slash) {
+        snprintf(buf, cap, ".");
+        return;
+    }
+    size_t n = (size_t)(slash - path);
+    if (n == 0) n = 1; /* 根目录 "/" */
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, path, n);
+    buf[n] = '\0';
+}
+
+static int compile_c(allocator_t *alloc, const char *c_path, const char *out_path,
+                     const cir_link_arg_t *links) {
     set_compiler_temp_dir(out_path);
     const char *cc = host_cc();
-    char cmd[4096];
-    int n;
-    if (strchr(cc, ' ') || strchr(cc, '\t'))
-        n = snprintf(cmd, sizeof cmd,
-                     "\"%s\" -std=c11 -O0 -o \"%s\" \"%s\"", cc, out_path,
-                     c_path);
-    else
-        n = snprintf(cmd, sizeof cmd, "%s -std=c11 -O0 -o \"%s\" \"%s\"", cc,
-                     out_path, c_path);
-    if (n <= 0 || (size_t)n >= sizeof cmd) {
-        fprintf(stderr, "build: compiler command too long\n");
+    string_t *cmd = string_new(alloc);
+    if (!cmd) {
+        fprintf(stderr, "build: out of memory\n");
         return 1;
     }
-    int rc = system(cmd);
+    if (strchr(cc, ' ') || strchr(cc, '\t')) cmd_append_quoted(cmd, cc);
+    else string_append_cstr(cmd, cc);
+    string_append_cstr(cmd, " -std=c11 -O0 -o ");
+    cmd_append_quoted(cmd, out_path);
+    string_append_char(cmd, ' ');
+    cmd_append_quoted(cmd, c_path);
+
+    /* 通用库名（`-lfoo`）的搜索路径：可执行文件所在目录及其上两级目录
+       （便于把 .lib/.so 与产物放一起；找不到时链接器按系统路径找）。 */
+    char dir[4096], up1[4096], up2[4096];
+    path_dirname(out_path, dir, sizeof dir);
+    path_dirname(dir, up1, sizeof up1);
+    path_dirname(up1, up2, sizeof up2);
+    const char *dirs[3] = {dir, up1, up2};
+    for (int i = 0; i < 3; i++) {
+        if (!dirs[i] || !dirs[i][0]) continue;
+        if (i > 0 && strcmp(dirs[i], dirs[i - 1]) == 0) continue;
+        string_append_cstr(cmd, " -L");
+        cmd_append_quoted(cmd, dirs[i]);
+    }
+    for (const cir_link_arg_t *l = links; l; l = l->next) {
+        if (!l->arg || !l->arg[0]) continue;
+        string_append_char(cmd, ' ');
+        cmd_append_quoted(cmd, l->arg);
+    }
+
+    int rc = system(string_cstr(cmd));
     if (rc != 0) {
-        fprintf(stderr, "build: command: %s\n", cmd);
+        fprintf(stderr, "build: command: %s\n", string_cstr(cmd));
         fprintf(stderr, "build: C compilation failed (compiler: %s)\n", cc);
         fprintf(stderr, "build: generated C kept at '%s'\n", c_path);
+        string_free(&cmd);
         return 1;
     }
+    string_free(&cmd);
     return 0;
 }
 
@@ -338,7 +387,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             fprintf(stderr, "build: cannot write C source '%s'\n", c_path);
         } else if (!compile) {
             rc = 0;
-        } else if (compile_c(c_path, out_path) == 0) {
+        } else if (compile_c(alloc, c_path, out_path, unit->link_args) == 0) {
             /* 成功：中间 C 文件是临时的；失败时保留（见 compile_c 提示）。 */
             remove(c_path);
             rc = 0;

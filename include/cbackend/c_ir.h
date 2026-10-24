@@ -196,6 +196,12 @@ typedef struct cir_raw {
     struct cir_raw *next;
 } cir_raw_t;
 
+/* 传给宿主 C 编译器的一个链接参数（`-lfoo` / `-Ldir` / 库文件路径）。 */
+typedef struct cir_link_arg {
+    const char *arg;
+    struct cir_link_arg *next;
+} cir_link_arg_t;
+
 typedef struct cir_global {
     const char  *name;
     cir_type_t  *type;
@@ -204,6 +210,7 @@ typedef struct cir_global {
 } cir_global_t;
 
 typedef struct cir_unit {
+    arena_t     *arena;
     const char  *source_path;
     const char **includes;
     size_t       include_count;
@@ -212,6 +219,17 @@ typedef struct cir_unit {
     cir_global_t    *globals;
     cir_type_t      *types;
     cir_raw_t       *raw_helpers;
+    /* extern cfunc：C 函数指针 typedef（先）与 extern 原型（后），保持添加顺序。 */
+    cir_raw_t       *extern_typedefs;
+    cir_raw_t       *extern_typedefs_last;
+    cir_raw_t       *extern_decls;
+    cir_raw_t       *extern_decls_last;
+    /* extern lib → 宿主编译器链接参数。 */
+    cir_link_arg_t  *link_args;
+    cir_link_arg_t  *link_args_last;
+    /* extern cfunc 的 C 符号名（自检：这些调用由外部库定义，不在本单元）。 */
+    const char     **extern_symbols;
+    size_t           extern_symbol_count;
     bool             uses_alloc;
     bool             uses_str_cmp;
     bool             uses_opt_unwrap;
@@ -222,6 +240,8 @@ typedef struct cir_unit {
     size_t           test_count;
     bool             uses_assert;
     bool             uses_mem_eq;
+    /* extern cfunc 返回 str：需要 clux_str_from_c(char*) 包装。 */
+    bool             uses_str_from_c;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -320,6 +340,14 @@ void cir_unit_add_signature(cir_unit_t *u, cir_signature_t *sig);
 void cir_unit_add_function(cir_unit_t *u, cir_function_t *fn);
 void cir_unit_add_global(cir_unit_t *u, cir_global_t *g);
 void cir_unit_add_raw(cir_unit_t *u, const char *code);
+/** extern cfunc 的 C 函数指针 typedef / extern 原型（按添加顺序输出）。 */
+void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code);
+void cir_unit_add_extern_decl(cir_unit_t *u, const char *code);
+/** extern lib 的宿主编译器链接参数（按添加顺序输出；去重由调用方负责）。 */
+void cir_unit_add_link_arg(cir_unit_t *u, const char *arg);
+/** extern cfunc 的 C 符号名：后置自检据此放行（定义在外部库）。 */
+void cir_unit_add_extern_symbol(cir_unit_t *u, const char *name);
+bool cir_unit_has_extern_symbol(const cir_unit_t *u, const char *name);
 
 #ifdef __cplusplus
 }

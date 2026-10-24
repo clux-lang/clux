@@ -108,7 +108,7 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
     for (size_t i = 0; i < unit->include_count; i++)
         cw_printf(sb, "#include <%s>\n", unit->includes[i]);
     if (unit->uses_alloc || unit->uses_str_cmp || unit->uses_opt_unwrap ||
-        unit->uses_bitfield || unit->uses_mem_eq) {
+        unit->uses_bitfield || unit->uses_mem_eq || unit->uses_str_from_c) {
         cw_put(sb, "#include <stdlib.h>\n");
         cw_put(sb, "#include <string.h>\n");
     }
@@ -157,6 +157,33 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
                   "(a.len == 0 || memcmp(a.data, b.data, a.len) == 0);\n");
             cw_put(sb, "}\n\n");
         }
+    }
+
+    /* M6 FFI：extern cfunc 的 C 函数指针 typedef / extern 原型，以及 str
+       返回值的 C ABI 包装（`char *` → clux_str）。 */
+    if (unit->uses_str_from_c) {
+        cw_put(sb, "static struct clux_str clux_str_from_c(const char *s) {\n");
+        cw_put(sb, "    struct clux_str r;\n");
+        cw_put(sb, "    r.data = s ? s : \"\";\n");
+        cw_put(sb, "    r.len = s ? strlen(s) : 0;\n");
+        cw_put(sb, "    return r;\n");
+        cw_put(sb, "}\n\n");
+    }
+    if (unit->extern_typedefs) {
+        cw_put(sb, "/* ---- extern cfunc: C function pointer types ---- */\n");
+        for (const cir_raw_t *r = unit->extern_typedefs; r; r = r->next) {
+            cw_put(sb, r->code ? r->code : "");
+            cw_put(sb, "\n");
+        }
+        cw_put(sb, "\n");
+    }
+    if (unit->extern_decls) {
+        cw_put(sb, "/* ---- extern cfunc declarations ---- */\n");
+        for (const cir_raw_t *r = unit->extern_decls; r; r = r->next) {
+            cw_put(sb, r->code ? r->code : "");
+            cw_put(sb, "\n");
+        }
+        cw_put(sb, "\n");
     }
 
     if (unit->test_runner && unit->uses_assert) {

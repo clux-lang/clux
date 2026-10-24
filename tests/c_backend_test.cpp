@@ -967,6 +967,236 @@ TEST(CBackend, BuildNestedGenericAndRvalueReceiver) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+/* ---- M6 FFI：extern lib / extern cfunc ---- */
+
+/* FFI 测试数据库的位置（与 clux 可执行文件同目录，CMake 产出）。 */
+std::filesystem::path ffi_testdata_dir() {
+  return std::filesystem::path(cli_path()).parent_path();
+}
+
+/* 链接用的导入库（Windows .lib / Linux .so / macOS .dylib）。 */
+std::string ffi_testdata_link_path() {
+  std::filesystem::path d = ffi_testdata_dir();
+#ifdef _WIN32
+  return (d / "clux_ffi_testdata.lib").string();
+#elif defined(__APPLE__)
+  return (d / "libclux_ffi_testdata.dylib").string();
+#else
+  return (d / "libclux_ffi_testdata.so").string();
+#endif
+}
+
+/* 运行期动态库文件（与导入库同目录，测试时复制到 exe 旁）。 */
+std::filesystem::path ffi_testdata_runtime() {
+  std::filesystem::path d = ffi_testdata_dir();
+#ifdef _WIN32
+  return d / "clux_ffi_testdata.dll";
+#elif defined(__APPLE__)
+  return d / "libclux_ffi_testdata.dylib";
+#else
+  return d / "libclux_ffi_testdata.so";
+#endif
+}
+
+void copy_ffi_runtime(const std::filesystem::path &dest_dir) {
+  std::error_code ec;
+  std::filesystem::create_directories(dest_dir, ec);
+  std::filesystem::copy_file(ffi_testdata_runtime(),
+                             dest_dir / ffi_testdata_runtime().filename(),
+                             std::filesystem::copy_options::overwrite_existing,
+                             ec);
+}
+
+/* extern lib "*"：符号来自当前进程（CRT），不产生链接参数。 */
+TEST(CBackend, BuildExternCfuncFromProcess) {
+  const std::string src = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::strlen(s: str): usize;\n"
+      "extern cfunc libc::abs(x: i32): i32;\n"
+      "func main(): i32 {\n"
+      "  if (libc::strlen(\"hello\") != 5usize) { return 1; }\n"
+      "  if (libc::abs(0 - 7) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_proc");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* 真实动态库：struct 按值、`data()` 传数组指针、变参（struct …）、
+ * `str` 返回值（strlen 求 len）。 */
+TEST(CBackend, BuildExternCfuncTestdata) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  std::string lib = ffi_testdata_link_path();
+  for (char &c : lib)
+    if (c == '\\') c = '/';
+  const std::string src = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "extern lib td from \"" + lib + "\";\n"
+      "extern cfunc td::clux_point_sum(p: Point): i32;\n"
+      "extern cfunc td::clux_sum_i32(p: ref *i32, n: i32): i32;\n"
+      "extern cfunc td::clux_point_va_sum(n: i32, ...): i32;\n"
+      "extern cfunc td::clux_greeting(): str;\n"
+      "func main(): i32 {\n"
+      "  var p: Point = .Point{ .x = 20, .y = 22 };\n"
+      "  if (td::clux_point_sum(p) != 42) { return 1; }\n"
+      "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
+      "  if (td::clux_sum_i32(data(a), 3) != 6) { return 2; }\n"
+      "  if (td::clux_point_va_sum(2, .Point{ .x = 1, .y = 2 },\n"
+      "                           .Point{ .x = 20, .y = 19 }) != 42)\n"
+      "    { return 3; }\n"
+      "  var g: str = td::clux_greeting();\n"
+      "  if (len(g) != 19usize) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_testdata");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  copy_ffi_runtime(exe.parent_path());
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* 通用库名 → `-l<name>` + 产物目录的 `-L` 搜索。 */
+TEST(CBackend, BuildExternLibGenericName) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  const std::string src = write_temp_file(
+      "extern lib td from \"clux_ffi_testdata\";\n"
+      "extern cfunc td::clux_greeting(): str;\n"
+      "func main(): i32 {\n"
+      "  var g: str = td::clux_greeting();\n"
+      "  if (len(g) != 19usize) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_link");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::filesystem::path dir = exe.parent_path();
+  copy_ffi_runtime(dir);
+  std::error_code ec;
+  /* 通用名链接需要导入库在 -L 搜索目录里（产物目录）。 */
+  std::filesystem::copy_file(
+      ffi_testdata_link_path(),
+      dir / std::filesystem::path(ffi_testdata_link_path()).filename(),
+      std::filesystem::copy_options::overwrite_existing, ec);
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* extern lib 的 `assert(<cond>)` 为假 → 前脱糖裁剪 → 不产生链接参数。 */
+TEST(CBackend, BuildExternLibAssertPruned) {
+  const std::string src = write_temp_file(
+      "extern lib libc from \"*\";\n"
+      "extern lib nope from \"definitely_missing_xyz\" "
+      "assert(OS_TYPE == \"NOPE\");\n"
+      "extern cfunc libc::strlen(s: str): usize;\n"
+      "func main(): i32 {\n"
+      "  if (libc::strlen(\"abc\") != 3usize) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_assert");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* `cfunc_ptr(命名函数)` → 生成 C trampoline；qsort 回调里改全局计数。 */
+TEST(CBackend, BuildExternCfuncCallback) {
+  const std::string src = write_temp_file(
+      "extern lib crt from \"*\";\n"
+      "extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64,\n"
+      "                        cmp: cfunc(ref opaque, ref opaque) -> i32): "
+      "void;\n"
+      "var CALLS: i32 = 0;\n"
+      "cfunc cmp(a: ref opaque, b: ref opaque): i32 {\n"
+      "  CALLS = CALLS + 1;\n"
+      "  var x: i32 = (a as ref *i32).*;\n"
+      "  var y: i32 = (b as ref *i32).*;\n"
+      "  if (x < y) { return -1; }\n"
+      "  if (x > y) { return 1; }\n"
+      "  return 0;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var arr = .[5]i32{4, 2, 5, 1, 3};\n"
+      "  crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp));\n"
+      "  if (arr[0] != 1 || arr[4] != 5) { return 1; }\n"
+      "  for (var i: usize = 0usize; i + 1usize < 5usize;\n"
+      "       i = i + 1usize) {\n"
+      "    if (arr[i] > arr[i + 1usize]) { return 2; }\n"
+      "  }\n"
+      "  if (CALLS < 4) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_callback");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* 带捕获的闭包没有 C 等价物 → 明确拒绝，而不是生成错误代码。 */
+TEST(CBackend, RejectsExternCfuncCapturingCallback) {
+  const std::string src = write_temp_file(
+      "extern lib crt from \"*\";\n"
+      "extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64,\n"
+      "                        cmp: cfunc(ref opaque, ref opaque) -> i32): "
+      "void;\n"
+      "func main(): i32 {\n"
+      "  var k: i32 = 1;\n"
+      "  var cb = func |k| cbc(a: ref opaque, b: ref opaque): i32 {\n"
+      "    return k;\n"
+      "  };\n"
+      "  var arr = .[2]i32{2, 1};\n"
+      "  crt::qsort(arr.&, 2, 4, cfunc_ptr(cb));\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_capture");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 1);
+  EXPECT_FALSE(std::filesystem::exists(exe));
+}
+
+/* 本后端 str = {char*, len}，与 C ABI 的 char* 布局不同：含 str 字段的聚合
+   按值传给 C 会错位 → 声明处拒绝（而不是生成错误代码）。 */
+TEST(CBackend, RejectsExternCfuncAggregateWithStr) {
+  const std::string src = write_temp_file(
+      "struct S { s: str; n: i32; }\n"
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::take_s(x: S): i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "cbackend_ffi_str_agg");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 1);
+  EXPECT_FALSE(std::filesystem::exists(exe));
+}
+
 TEST(CBackend, RejectsCopyOfOwnSlotField) {
   /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
      两个后端一致。 */

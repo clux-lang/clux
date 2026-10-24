@@ -55,6 +55,17 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cir_unit_add_type(lc->unit, ct);
         return ct;
     }
+    /* `opaque`：C 里是 `void *`（FFI 指针/回调实参、`extern cfunc` 的裸指针
+       都用它；`data(s)` / `a.&` 也产生它）。 */
+    if (t == vm->type_opaque) {
+        cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_PTR);
+        if (cached) return cached;
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_PTR, "void *");
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        return ct;
+    }
 
     cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_STRUCT);
     if (cached) return cached;
