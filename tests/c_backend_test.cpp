@@ -967,6 +967,30 @@ TEST(CBackend, BuildNestedGenericAndRvalueReceiver) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, RejectsCopyOfOwnSlotField) {
+  /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
+     两个后端一致。 */
+  const std::string src = write_temp_file(
+      "struct Node { v: i32; n: ?own *Node; }\n"
+      "func f(self: ref *Node): i32 {\n"
+      "  var p = self.n;\n"
+      "  return 0;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: own *Node = new Node{ .v = 1, .n = nil };\n"
+      "  var r: ref *Node = a;\n"
+      "  return f(r);\n"
+      "}\n",
+      "cbackend_own_copy");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_cli({"build", std::filesystem::absolute(src).string()}),
+            1);
+  EXPECT_FALSE(std::filesystem::exists(exe));
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

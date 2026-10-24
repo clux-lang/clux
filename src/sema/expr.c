@@ -201,14 +201,13 @@ bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
                what, fn);
     return false;
   }
-  if (slot_own == OWN_NONE && value_type_ownership(fv) == OWN_OWN &&
-      slot_type && type_has_own_slots(slot_type)) {
+  if (slot_own == OWN_NONE && slot_type && type_has_own_slots(slot_type) &&
+      !sema_value_is_fatal(fv) && sema_value_holds_own(fv)) {
     char tn[64];
     sema_type_name(slot_type, tn, sizeof tn);
     diag_error(sema->diag, sema_loc(sema, value),
-               "cannot initialize %s by copying an own value of type %s: own "
-               "is move-only (use move() or clone(), or declare the slot "
-               "`own`)",
+               "cannot initialize %s by copying a value of type %s that holds "
+               "owned resources: own is move-only (use move() or clone())",
                what, tn);
     return false;
   }

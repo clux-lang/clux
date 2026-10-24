@@ -757,20 +757,20 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "use move()/clone() and store the result there)",
                      (int)vd->name.len, vd->name.ptr, tn, itn, tn);
           sym->flow_init = false;
-        } else if (sema_sym_ownership(sym) == OWN_NONE &&
-                   value_type_ownership(init) == OWN_OWN &&
-                   type_has_own_slots(sym->type)) {
-          /* 非 own 位置的 copy：读 own **聚合**变量得到 OWN 值，复制会让
-             两个位置共享同一批内嵌堆块 → 双释放。own 是 move-only。
-             判据限定 `type_has_own_slots`：只有"内部挂 own 槽位"的聚合
-             才有这个问题；指针 → opaque 的擦除（`var q: opaque = p`）是
-             借用式视图，不转移所有权，仍按原语义放行。 */
+        } else if (sema_sym_ownership(sym) == OWN_NONE && sym->type &&
+                   type_has_own_slots(sym->type) &&
+                   !sema_value_is_fatal(init) && sema_value_holds_own(init)) {
+          /* 非 own 位置的 copy：读 own **聚合**变量/字段/解引用得到携带
+             own 资源的值，复制会让两个位置共享同一批内嵌堆块 → 双释放；
+             借源视图还会在 compound_assign_transfer 里被清空（悬垂）。
+             own 是 move-only。判据覆盖 `?own *T` 这类**嵌套** own 槽位
+             （顶层 ownership 为 NONE，但 type_has_own_slots 为真）。 */
           char tn[64];
           sema_type_name(sym->type, tn, sizeof(tn));
           diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize '%.*s' of type %s by copying an own "
-                     "value: own is move-only (use move() or clone(), or "
-                     "declare the target `own %s`)",
+                     "cannot initialize '%.*s' of type %s by copying a value "
+                     "that holds owned resources: own is move-only (use move() "
+                     "or clone(), or declare the target `own %s`)",
                      (int)vd->name.len, vd->name.ptr, tn, tn);
           sym->flow_init = false;
         } else {
@@ -831,8 +831,15 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
              LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
              类型路径：value_implicit_cast(fatal init → own/none 接管），
              避免变量持有 fatal 类型在 scope 退出时不释放 → 内存泄漏。
-             函数参数不走此路径（参数有显式 fatal 类型标注，合法保留）。 */
+             函数参数不走此路径（参数有显式 fatal 类型标注，合法保留）。
+
+             注意：`strip_fatal` 合成的 `own ?own *T` 这类**所有权包装**类型
+             可能还没登记过（用户没写过这个类型表达式）→ sema_type_find 返回
+             NULL，此前就不生成 type_expr，运行期变量拿到的是源值类型
+             （`var p = clone(q.n); p == nil` 报 "opt is none requires an
+             optional value"）。这里补登记后再生成类型引用。 */
           const sema_type_t *st = sema_type_find(sema, vt);
+          if (!st) st = sema_type_register(sema, vt);
           if (st && st->name.ptr) {
             ast_node_t *ref = ast_type_ref_new(sema->arena,
                                                vd->init->tok_begin,
@@ -851,8 +858,12 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
           sym->flow_init = false;
           vt = sema->vm->type_void;
         }
-      } else if (vt && value_type_ownership(init) == OWN_OWN &&
-                 !sema_value_is_fatal(init)) {
+      } else if (vt && !sema_value_is_fatal(init) &&
+                 sema_value_holds_own(init)) {
+        /* R1（own 不可 copy，§3.1）：var p = q; 且 rhs 携带 own 资源
+           （顶层 own，或 `?own *T` / 含 own 槽位的聚合）→ copy → 编译错误。
+           顶层判据之外还要覆盖**嵌套** own 槽位：字段读 `var p = self.n`
+           拿到的是借源视图，复制后两头都以为自己拥有同一块堆 → 双释放。 */
         char itn[64];
         sema_type_name(vt, itn, sizeof(itn));
         diag_error(sema->diag, sema_loc(sema, vd->init),

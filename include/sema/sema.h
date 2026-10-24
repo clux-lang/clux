@@ -179,6 +179,25 @@ static inline bool sema_sym_is_fatal(const sema_symbol_t *sym) {
 static inline bool sema_value_is_fatal(const value_t *v) {
   return v && value_type_ownership(v) == OWN_FATAL;
 }
+
+/**
+ * 值是否**携带 own 资源**：顶层 own/fatal，或类型含 own 槽位（`?own *T`、
+ * 含 own 字段的聚合、own 元素数组/切片…）。
+ *
+ * own 是 move-only：非 fatal（将亡）的这类值**不能复制到新的存储位置**——
+ * 复制会让两个位置共享同一批堆块（各自析构 = double-free），或者把借源
+ * 视图（字段读/解引用读）里的所有权指针清空（借源被悄悄改成 nil）。
+ * `ref` 借用视图本身不拥有资源，可以复制。
+ */
+static inline bool sema_value_holds_own(const value_t *v) {
+  if (!v) return false;
+  const type_t *t = value_type(v);
+  if (!t) return false;
+  ownership_t o = value_type_ownership(v);
+  if (o == OWN_FATAL || o == OWN_OWN) return true;
+  if (o == OWN_REF) return false;
+  return type_has_own_slots(t);
+}
 static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
   if (sym) sym->moved = true;
 }

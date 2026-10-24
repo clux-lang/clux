@@ -583,6 +583,22 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
          （所有权扩散）。复合类型字段现已禁止携带指针/切片，该形态不存在；
          own 指针本身的 copy 拦截由上方分支负责（判据是**值/符号层 ownership**，
          不是类型层——所有权已从类型剥离）。 */
+      /* 嵌套 own 槽位（`?own *T` / 含 own 字段的聚合）的赋值目标：同样只
+         能由将亡值接管。否则 compound_assign_transfer 会释放左值旧块，并把
+         右值（可能是**借源视图**，如 `p = q.n`）的 own 指针清空——借源被
+         悄悄改成 nil，旧块与借源所有者重复释放（实测 access violation）。 */
+      if (lt && sym && sema_sym_ownership(sym) != OWN_OWN &&
+          type_has_own_slots(lt) && !sema_value_is_fatal(rhs) &&
+          sema_value_holds_own(rhs)) {
+        char tn[64], rn[64];
+        sema_type_name(lt, tn, sizeof(tn));
+        sema_type_name(value_type(rhs), rn, sizeof(rn));
+        diag_error(sema->diag, sema_loc(sema, as->value),
+                   "cannot copy a value of type %s into variable '%.*s' of "
+                   "type %s: own is move-only (use move() or clone())",
+                   rn, (int)name.len, name.ptr, tn);
+        return;
+      }
       if (sym) {
         sym->flow_init = true;
         /* R2 恢复：赋值成功 → moved 清除。**之前**是 moved 的变量，旧内容所有权
