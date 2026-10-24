@@ -33,6 +33,14 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
     const type_t *ret = lc->sema->vm->type_void;
     if (fn->return_expr)
         ret = sema_resolve_type_slot(lc->sema, &fn->return_expr);
+    else if (fn->sig_id) {
+        const sema_type_t *st = sema_type_by_id(lc->sema, fn->sig_id);
+        if (st && st->type &&
+            type_kind_of(st->type) == TYPE_KIND_FUNC) {
+            const type_t *fr = func_type_return(st->type);
+            if (fr) ret = fr;
+        }
+    }
     cir_type_t *cret = map_type(lc, ret);
     if (!cret) return NULL;
 
@@ -176,9 +184,6 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (n->kind != AST_FUNC_DEF) continue;
         ast_func_def_t *fn = (ast_func_def_t *)n;
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) continue;
-        if (fn->name.ptr && fn->name.len >= 7 &&
-            memcmp(fn->name.ptr, "__clone", 7) == 0)
-            continue; /* sema 生成的 clone helper：C 后端不消费 */
         if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc)
             continue;
         cir_function_t *cf = lower_function(&lc, fn, false);

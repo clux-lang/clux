@@ -64,6 +64,7 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
             cw_put(sb, "static void *clux_closure_new(size_t n, "
                        "const void *src, void (*dispose)(void *, void *)) {\n");
             cw_put(sb, "    void *p = clux_new(n, src);\n");
+            cw_put(sb, "    *(size_t *)p = 1;\n");
             cw_put(sb, "    struct clux_closure_node *node = "
                        "malloc(sizeof(*node));\n");
             cw_put(sb, "    if (!node) abort();\n");
@@ -71,7 +72,12 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
             cw_put(sb, "    node->next = clux_closures; clux_closures = node;\n");
             cw_put(sb, "    return p;\n");
             cw_put(sb, "}\n");
+            cw_put(sb, "static void clux_closure_retain(void *env) {\n");
+            cw_put(sb, "    if (env) (*(size_t *)env)++;\n");
+            cw_put(sb, "}\n");
             cw_put(sb, "static void clux_closure_release(void *env) {\n");
+            cw_put(sb, "    if (!env) return;\n");
+            cw_put(sb, "    if (--(*(size_t *)env) > 0) return;\n");
             cw_put(sb, "    struct clux_closure_node **pp = &clux_closures;\n");
             cw_put(sb, "    while (*pp) {\n");
             cw_put(sb, "        struct clux_closure_node *n = *pp;\n");
@@ -91,6 +97,10 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
             cw_put(sb, "        free(n->env); free(n);\n");
             cw_put(sb, "    }\n");
             cw_put(sb, "}\n");
+            cw_put(sb, "#define clux_func_retain(f) ((f).env ? "
+                       "(clux_closure_retain((f).env), (f)) : (f))\n");
+            cw_put(sb, "#define clux_func_release(f) "
+                       "((f).env ? clux_closure_release((f).env) : (void)0)\n");
         }
         cw_put(sb, "static void *clux_make(size_t elem_size, size_t len, "
               "const void *src, size_t count) {\n");

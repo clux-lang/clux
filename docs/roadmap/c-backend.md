@@ -222,12 +222,15 @@ clux build hello.cx
 - struct 实例方法调用（`p.m()`）；
 - struct 静态方法调用（`T::f()`）；
 - 未被作为函数值引用的函数对象不生成（C IR 优化）；
-- own 捕获闭包按 sema 退出点释放 env 并调用 env 销毁函数；
-- 非 own 闭包 env 在 main 退出时统一释放。
+- 函数对象 env 引用计数：复制 retain，销毁 release；
+- `clone(f)` 共享 env 并 retain；
+- own 捕获闭包按 sema 退出点 release，引用归零时执行 env 销毁函数；
+- 非 own 闭包 env 在 main 退出时兜底释放。
 
 尚未覆盖：
 
-- 非 own 闭包 env 的引用计数 / 作用域级释放；
+- 非 own 闭包的作用域级释放；
+- struct/数组字段中的函数值复制路径；
 - 跨模块方法。
 
 说明：泛型在 sema 阶段完成单态化/消减，C 后端只接收具体函数，不需要独立处理泛型。

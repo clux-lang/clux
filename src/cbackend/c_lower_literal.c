@@ -138,6 +138,11 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     if (!env) return NULL;
     cir_unit_add_type(lc->unit, env);
     lc->unit->uses_alloc = true;
+    cir_field_t *refs = cir_field_new(
+        lc->arena, "clux_refs",
+        cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t"));
+    if (!refs) return NULL;
+    cir_type_add_field(env, refs);
 
     cir_init_t *inits = NULL;
     for (ast_node_t *c = fn->captures; c; c = c->next) {
@@ -229,6 +234,23 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     const type_t *ft = func_type_of_def(lc, fn);
     cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
     return ct ? cir_expr_closure(lc->arena, ct, cf->name, env_new) : NULL;
+}
+
+bool func_expr_is_owned(lower_ctx_t *lc, ast_node_t *e) {
+    (void)lc;
+    if (!e) return false;
+    if (e->kind == AST_FUNC_DEF || e->kind == AST_MOVE || e->kind == AST_TAKE)
+        return true;
+    if (e->kind == AST_CALL) {
+        ast_call_t *c = (ast_call_t *)e;
+        strslice_t name = STRSLICE_EMPTY;
+        if (c->callee && c->callee->kind == AST_IDENT)
+            name = ((ast_ident_t *)c->callee)->name;
+        else if (c->callee && c->callee->kind == AST_FUNC_REF)
+            name = ((ast_func_ref_t *)c->callee)->name;
+        if (strslice_eq(name, STRSLICE_LIT("__deep_clone"))) return true;
+    }
+    return false;
 }
 
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn) {

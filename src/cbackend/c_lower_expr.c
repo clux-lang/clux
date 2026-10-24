@@ -13,7 +13,30 @@ lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
     return NULL;
 }
 
+static cir_expr_t *lower_call_arg(lower_ctx_t *lc, ast_node_t *a) {
+    cir_expr_t *arg = lower_expr(lc, a);
+    if (!arg) return NULL;
+    const type_t *ft = infer_expr_type(lc, a);
+    if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC &&
+        !func_expr_is_owned(lc, a))
+        arg = cir_expr_func_retain(lc->arena, arg);
+    return arg;
+}
+
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
+    strslice_t cname0 = STRSLICE_EMPTY;
+    if (call->callee && call->callee->kind == AST_IDENT)
+        cname0 = ((ast_ident_t *)call->callee)->name;
+    else if (call->callee && call->callee->kind == AST_FUNC_REF)
+        cname0 = ((ast_func_ref_t *)call->callee)->name;
+    if (strslice_eq(cname0, STRSLICE_LIT("__deep_clone")) && call->args &&
+        !call->args->next) {
+        const type_t *ft = infer_expr_type(lc, call->args);
+        if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC) {
+            cir_expr_t *obj = lower_expr(lc, call->args);
+            return obj ? cir_expr_func_retain(lc->arena, obj) : NULL;
+        }
+    }
     if (call->callee && call->callee->kind == AST_SCOPE_REF) {
         ast_scope_ref_t *sr = (ast_scope_ref_t *)call->callee;
         uint32_t owner = call->member_type_id;
@@ -29,7 +52,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
             cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
             for (ast_node_t *a = call->args; a; a = a->next) {
-                cir_expr_t *arg = lower_expr(lc, a);
+                cir_expr_t *arg = lower_call_arg(lc, a);
                 if (!arg) return NULL;
                 cir_expr_append_arg(out, arg);
             }
@@ -65,7 +88,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
         cir_expr_append_arg(out, recv);
         for (ast_node_t *a = call->args; a; a = a->next) {
-            cir_expr_t *arg = lower_expr(lc, a);
+            cir_expr_t *arg = lower_call_arg(lc, a);
             if (!arg) return NULL;
             cir_expr_append_arg(out, arg);
         }
@@ -80,7 +103,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             if (!callee) return NULL;
             cir_expr_t *out = cir_expr_func_call(lc->arena, callee, NULL);
             for (ast_node_t *a = call->args; a; a = a->next) {
-                cir_expr_t *arg = lower_expr(lc, a);
+                cir_expr_t *arg = lower_call_arg(lc, a);
                 if (!arg) return NULL;
                 cir_expr_append_arg(out, arg);
             }
@@ -112,7 +135,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     /* env-first ABI：直接调用传 NULL。 */
     cir_expr_append_arg(expr, cir_expr_ident(lc->arena, "NULL"));
     for (ast_node_t *a = call->args; a; a = a->next) {
-        cir_expr_t *arg = lower_expr(lc, a);
+        cir_expr_t *arg = lower_call_arg(lc, a);
         if (!arg) return NULL;
         cir_expr_append_arg(expr, arg);
     }

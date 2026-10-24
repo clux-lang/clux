@@ -126,6 +126,7 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
+bool func_expr_is_owned(lower_ctx_t *lc, ast_node_t *e);
 
 /* statements */
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok);

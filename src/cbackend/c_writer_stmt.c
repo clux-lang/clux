@@ -169,7 +169,8 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         cw_put(sb, "continue;\n");
         break;
     case CIR_STMT_FREE:
-        if (s->expr && s->expr->kind == CIR_EXPR_CLOSURE_RELEASE) {
+        if (s->expr && (s->expr->kind == CIR_EXPR_CLOSURE_RELEASE ||
+                        s->expr->kind == CIR_EXPR_FUNC_RELEASE)) {
             cw_write_expr(sb, s->expr);
             cw_put(sb, ";\n");
         } else {
