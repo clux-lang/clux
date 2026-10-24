@@ -181,12 +181,17 @@ clux build hello.cx
 - `own *T`、`own *own *T`；
 - struct 的 own 字段；
 - `[N]own *T` 的逐元素 free；
+- `own []T` / `ref []T`；
+- `make(T, N, ...)`；
+- `len(s)`；
+- `s[low:high]`；
+- slice 堆块 free；
 - 由 sema 生成的 `__destroy_*` 函数；
 - `new T{...}` 使用 `clux_new`（calloc + memcpy）。
 
 尚未覆盖：
 
-- slice / `make`；
+- `str` 字符串字面量 / UTF-8 切片；
 - 复杂 union / optional 的 own 槽位；
 - 异常路径 / 全部跨作用域路径的清理验证。
 

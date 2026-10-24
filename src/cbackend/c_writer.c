@@ -102,6 +102,81 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         if (e->type && e->type->kind == CIR_TYPE_ARRAY) w(sb, "}");
         w(sb, "}");
         break;
+    case CIR_EXPR_LEN:
+        if (e->type && (e->type->kind == CIR_TYPE_SLICE)) {
+            w(sb, "(");
+            write_expr(sb, e->lhs);
+            w(sb, ").len");
+        } else {
+            w(sb, "(sizeof((");
+            write_expr(sb, e->lhs);
+            w(sb, ").data) / sizeof((");
+            write_expr(sb, e->lhs);
+            w(sb, ").data[0]))");
+        }
+        break;
+    case CIR_EXPR_SLICE: {
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        w(sb, "){ .data = (");
+        write_expr(sb, e->lhs);
+        w(sb, ").data + (");
+        if (e->rhs) write_expr(sb, e->rhs);
+        else w(sb, "0");
+        w(sb, "), .len = (");
+        if (e->high) write_expr(sb, e->high);
+        else if (e->src_type && e->src_type->kind == CIR_TYPE_SLICE) {
+            write_expr(sb, e->lhs);
+            w(sb, ").len");
+        } else {
+            w(sb, "sizeof((");
+            write_expr(sb, e->lhs);
+            w(sb, ").data) / sizeof((");
+            write_expr(sb, e->lhs);
+            w(sb, ").data[0]))");
+        }
+        w(sb, " - (");
+        if (e->rhs) write_expr(sb, e->rhs);
+        else w(sb, "0");
+        w(sb, ")) }");
+        break;
+    }
+    case CIR_EXPR_MAKE: {
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        w(sb, "){ .data = (");
+        w(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+        w(sb, " *)clux_make(sizeof(");
+        w(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+        w(sb, "), ");
+        write_expr(sb, e->lhs);
+        if (e->inits) {
+            w(sb, ", (");
+            w(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+            w(sb, "[]){");
+            bool first = true;
+            for (const cir_init_t *i = e->inits; i; i = i->next) {
+                if (!first) w(sb, ", ");
+                write_expr(sb, i->value);
+                first = false;
+            }
+            w(sb, "}, ");
+            size_t cnt = 0;
+            for (const cir_init_t *i = e->inits; i; i = i->next) cnt++;
+            wf(sb, "%zu", cnt);
+        } else {
+            w(sb, ", NULL, 0");
+        }
+        w(sb, "), .len = ");
+        write_expr(sb, e->lhs);
+        w(sb, " }");
+        break;
+    }
+    case CIR_EXPR_SLICE_DATA:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").data");
+        break;
     case CIR_EXPR_NEW:
         w(sb, "(");
         w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
@@ -170,7 +245,8 @@ static void write_function_decl(string_t *sb, const cir_function_t *fn) {
 
 static void write_type_defs(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next)
-        if (t->kind == CIR_TYPE_STRUCT || t->kind == CIR_TYPE_ARRAY)
+        if (t->kind == CIR_TYPE_STRUCT || t->kind == CIR_TYPE_ARRAY ||
+            t->kind == CIR_TYPE_SLICE)
             wf(sb, "struct %s;\n", t->c_name + 7);
     w(sb, "\n");
 }
@@ -183,7 +259,8 @@ static void emit_type(string_t *sb, cir_type_t *t) {
         for (cir_field_t *f = t->fields; f; f = f->next) {
             if (f->type &&
                 (f->type->kind == CIR_TYPE_STRUCT ||
-                 f->type->kind == CIR_TYPE_ARRAY))
+                 f->type->kind == CIR_TYPE_ARRAY ||
+                 f->type->kind == CIR_TYPE_SLICE))
                 emit_type(sb, f->type);
         }
         wf(sb, "%s {\n", t->c_name);
@@ -200,6 +277,15 @@ static void emit_type(string_t *sb, cir_type_t *t) {
         wf(sb, "    %s data[%zu];\n",
            t->elem && t->elem->c_name ? t->elem->c_name : "int32_t",
            t->array_len);
+        w(sb, "};\n\n");
+        t->emitted = true;
+        break;
+    case CIR_TYPE_SLICE:
+        if (t->elem) emit_type(sb, t->elem);
+        wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_slice");
+        wf(sb, "    %s *data;\n",
+           t->elem && t->elem->c_name ? t->elem->c_name : "int32_t");
+        w(sb, "    size_t len;\n");
         w(sb, "};\n\n");
         t->emitted = true;
         break;
@@ -447,6 +533,14 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         w(sb, "    void *p = calloc(1, n);\n");
         w(sb, "    if (!p) abort();\n");
         w(sb, "    if (src) memcpy(p, src, n);\n");
+        w(sb, "    return p;\n");
+        w(sb, "}\n");
+        w(sb, "static void *clux_make(size_t elem_size, size_t len, "
+              "const void *src, size_t count) {\n");
+        w(sb, "    void *p = calloc(len ? len : 1, elem_size);\n");
+        w(sb, "    if (!p) abort();\n");
+        w(sb, "    if (src && count) memcpy(p, src, "
+              "(count < len ? count : len) * elem_size);\n");
         w(sb, "    return p;\n");
         w(sb, "}\n");
         w(sb, "#define clux_free free\n");

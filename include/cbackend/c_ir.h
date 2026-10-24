@@ -18,6 +18,7 @@ typedef enum {
     CIR_TYPE_STRUCT,
     CIR_TYPE_ARRAY,
     CIR_TYPE_PTR,
+    CIR_TYPE_SLICE,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -52,6 +53,10 @@ typedef enum {
     CIR_EXPR_INDEX,
     CIR_EXPR_CONSTRUCT,
     CIR_EXPR_NEW,
+    CIR_EXPR_SLICE,
+    CIR_EXPR_LEN,
+    CIR_EXPR_MAKE,
+    CIR_EXPR_SLICE_DATA,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -67,9 +72,12 @@ typedef struct cir_expr {
     const char     *text;
     const char     *op;
     cir_type_t     *type;
+    cir_type_t     *elem;
+    cir_type_t     *src_type;
     bool            array_data; /* index through wrapper .data */
     struct cir_expr *lhs;
     struct cir_expr *rhs;
+    struct cir_expr *high;
     struct cir_expr *args;
     cir_init_t      *inits;
     struct cir_expr *next;
@@ -178,6 +186,15 @@ cir_expr_t    *cir_expr_construct(arena_t *arena, cir_type_t *type,
                                   cir_init_t *inits);
 cir_expr_t    *cir_expr_new(arena_t *arena, cir_type_t *type,
                             cir_init_t *inits);
+cir_expr_t    *cir_expr_slice(arena_t *arena, cir_type_t *type,
+                              cir_expr_t *object, cir_expr_t *low,
+                              cir_expr_t *high);
+cir_expr_t    *cir_expr_len(arena_t *arena, cir_expr_t *object,
+                            cir_type_t *object_type);
+cir_expr_t    *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
+                             cir_type_t *elem_type, cir_expr_t *length,
+                             cir_init_t *inits);
+cir_expr_t    *cir_expr_slice_data(arena_t *arena, cir_expr_t *object);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

@@ -266,6 +266,44 @@ TEST(CBackend, BuildOwnCompositeAndArray) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildSliceMakeAndSlice) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s: own []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  if (len(s) != 3usize) { return 1; }\n"
+      "  if (s[1] != 2) { return 2; }\n"
+      "  var t: ref []i32 = s[1:3];\n"
+      "  return t[0] + t[1];\n"
+      "}\n",
+      "cbackend_slice");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 5);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildOwnSlice) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var s: own []own *i32 = make(own *i32, 2, new i32{5}, new i32{6});\n"
+      "  if (len(s) != 2usize) { return 1; }\n"
+      "  return s[0].* + s[1].*;\n"
+      "}\n",
+      "cbackend_own_slice");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 11);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

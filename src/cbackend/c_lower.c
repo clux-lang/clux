@@ -11,6 +11,7 @@
 #include "parser/ast_defer.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_expr_stmt.h"
+#include "parser/ast_fill.h"
 #include "parser/ast_for.h"
 #include "parser/ast_for_index.h"
 #include "parser/ast_dowhile.h"
@@ -20,8 +21,10 @@
 #include "parser/ast_if.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_make.h"
 #include "parser/ast_member.h"
 #include "parser/ast_new.h"
+#include "parser/ast_slice.h"
 #include "parser/ast_free.h"
 #include "parser/ast_return.h"
 #include "parser/ast_unary.h"
@@ -31,6 +34,7 @@
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_ptr.h"
+#include "vm/type_slice.h"
 #include "vm/type_struct.h"
 #include "vm/vm.h"
 
@@ -43,11 +47,18 @@ typedef struct lower_defer {
     struct lower_defer *next;
 } lower_defer_t;
 
+typedef struct lower_local {
+    strslice_t name;
+    const type_t *type;
+    struct lower_local *next;
+} lower_local_t;
+
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
     cir_unit_t *unit;
     lower_defer_t *defers;
+    lower_local_t *locals;
     cir_stmt_t *cleanup;
     cir_type_t *return_type;
     unsigned    ret_seq;
@@ -158,11 +169,29 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cir_unit_add_type(lc->unit, ct);
         return ct;
     }
+    if (t->kind == TYPE_KIND_SLICE) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_SLICE);
+        if (cached) return cached;
+        char name[128];
+        snprintf(name, sizeof name, "struct clux_sl_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_SLICE,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        ct->elem = map_type(lc, slice_type_elem(t));
+        return ct->elem ? ct : NULL;
+    }
     lc->failed = true;
     return NULL;
 }
 
 static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e);
+static cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
+static cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
+static cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
+static const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
+static bool call_is_len(const ast_call_t *c);
 
 static cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     strslice_t name = STRSLICE_EMPTY;
@@ -223,7 +252,12 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                                 : NULL;
     }
     case AST_CALL:
+        if (call_is_len((ast_call_t *)e)) return lower_len(lc, (ast_call_t *)e);
         return lower_call(lc, (ast_call_t *)e);
+    case AST_SLICE:
+        return lower_slice(lc, (ast_slice_t *)e);
+    case AST_MAKE:
+        return lower_make(lc, (ast_make_t *)e);
     case AST_MEMBER: {
         ast_member_t *m = (ast_member_t *)e;
         cir_expr_t *obj = lower_expr(lc, m->object);
@@ -356,6 +390,43 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_BOOL_LIT:
         return vm->type_bool;
+    case AST_IDENT:
+        return lookup_local(lc, ((ast_ident_t *)e)->name);
+    case AST_DEREF: {
+        const type_t *pt = infer_expr_type(lc, ((ast_deref_t *)e)->operand);
+        return pt && type_kind_of(pt) == TYPE_KIND_PTR ? ptr_type_base(pt) : NULL;
+    }
+    case AST_ADDR: {
+        const type_t *bt = infer_expr_type(lc, ((ast_addr_t *)e)->operand);
+        return bt ? type_ptr_intern(lc->sema->vm, bt) : NULL;
+    }
+    case AST_INDEX: {
+        const type_t *bt = infer_expr_type(lc, ((ast_index_t *)e)->object);
+        if (!bt) return NULL;
+        bt = type_strip_quals(bt);
+        if (type_kind_of(bt) == TYPE_KIND_ARRAY)
+            return ((const array_type_t *)bt)->elem_type;
+        if (type_kind_of(bt) == TYPE_KIND_SLICE)
+            return slice_type_elem(bt);
+        return NULL;
+    }
+    case AST_SLICE: {
+        ast_slice_t *s = (ast_slice_t *)e;
+        const type_t *ot = infer_expr_type(lc, s->object);
+        if (!ot) return NULL;
+        ot = type_strip_quals(ot);
+        if (type_kind_of(ot) == TYPE_KIND_ARRAY)
+            return type_slice_intern(vm, ((const array_type_t *)ot)->elem_type);
+        if (type_kind_of(ot) == TYPE_KIND_SLICE) return ot;
+        if (type_kind_of(ot) == TYPE_KIND_STR)
+            return type_slice_intern(vm, type_const_intern(vm, vm->type_u8));
+        return NULL;
+    }
+    case AST_MAKE: {
+        ast_make_t *m = (ast_make_t *)e;
+        const type_t *et = sema_resolve_type_slot(lc->sema, &m->elem_type);
+        return et ? type_slice_intern(vm, et) : NULL;
+    }
     case AST_UNARY:
         return infer_expr_type(lc, ((ast_unary_t *)e)->operand);
     case AST_BINARY: {
@@ -370,6 +441,7 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_CALL: {
         ast_call_t *c = (ast_call_t *)e;
+        if (call_is_len(c)) return vm->type_usize;
         sema_func_t *sf = NULL;
         if (c->callee && c->callee->kind == AST_FUNC_REF)
             sf = sema_func_by_id(lc->sema, ((ast_func_ref_t *)c->callee)->fid);
@@ -406,6 +478,130 @@ static ast_node_t *find_defer_body(lower_ctx_t *lc, strslice_t name) {
     return NULL;
 }
 
+static void register_local(lower_ctx_t *lc, strslice_t name,
+                           const type_t *type) {
+    if (!name.ptr || !type) return;
+    lower_local_t *l = (lower_local_t *)arena_calloc(
+        lc->arena, 1, sizeof(*l), ALIGNOF(max_align_t));
+    if (!l) return;
+    l->name = name;
+    l->type = type;
+    l->next = lc->locals;
+    lc->locals = l;
+}
+
+static const type_t *lookup_local(lower_ctx_t *lc, strslice_t name) {
+    for (lower_local_t *l = lc->locals; l; l = l->next)
+        if (l->name.len == name.len &&
+            memcmp(l->name.ptr, name.ptr, name.len) == 0)
+            return l->type;
+    return NULL;
+}
+
+static bool call_is_len(const ast_call_t *c) {
+    if (!c || !c->callee) return false;
+    if (c->callee->kind == AST_IDENT)
+        return strslice_eq(((const ast_ident_t *)c->callee)->name,
+                           STRSLICE_LIT("len"));
+    if (c->callee->kind == AST_FUNC_REF) {
+        const ast_func_ref_t *r = (const ast_func_ref_t *)c->callee;
+        if (strslice_eq(r->name, STRSLICE_LIT("len"))) return true;
+    }
+    return false;
+}
+
+static cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call) {
+    if (!call->args || call->args->next) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                   "c backend: len() expects one argument");
+        lc->failed = true;
+        return NULL;
+    }
+    ast_node_t *arg = call->args;
+    const type_t *ot = infer_expr_type(lc, arg);
+    if (!ot) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, arg),
+                   "c backend: cannot determine len() operand type");
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_t *obj = lower_expr(lc, arg);
+    cir_type_t *ct = map_type(lc, ot);
+    return obj && ct ? cir_expr_len(lc->arena, obj, ct) : NULL;
+}
+
+static cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl) {
+    const type_t *ot = infer_expr_type(lc, sl->object);
+    if (!ot) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sl),
+                   "c backend: cannot determine slice base type");
+        lc->failed = true;
+        return NULL;
+    }
+    ot = type_strip_quals(ot);
+    const type_t *st = NULL;
+    if (type_kind_of(ot) == TYPE_KIND_ARRAY)
+        st = type_slice_intern(lc->sema->vm,
+                               ((const array_type_t *)ot)->elem_type);
+    else if (type_kind_of(ot) == TYPE_KIND_SLICE)
+        st = ot;
+    if (!st) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sl),
+                   "c backend: unsupported slice base type");
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_t *obj = lower_expr(lc, sl->object);
+    cir_expr_t *lo = sl->low ? lower_expr(lc, sl->low) : NULL;
+    cir_expr_t *hi = sl->high ? lower_expr(lc, sl->high) : NULL;
+    cir_type_t *ct = map_type(lc, st);
+    cir_type_t *otc = map_type(lc, ot);
+    if (!obj || !ct || !otc) return NULL;
+    cir_expr_t *e = cir_expr_slice(lc->arena, ct, obj, lo, hi);
+    if (e) e->src_type = otc;
+    return e;
+}
+
+static cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk) {
+    const type_t *et = sema_resolve_type_slot(lc->sema, &mk->elem_type);
+    if (!et) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)mk),
+                   "c backend: cannot resolve make() element type");
+        lc->failed = true;
+        return NULL;
+    }
+    const type_t *st = type_slice_intern(lc->sema->vm, et);
+    cir_type_t *sct = map_type(lc, st);
+    cir_type_t *ect = map_type(lc, et);
+    cir_expr_t *len = lower_expr(lc, mk->length);
+    if (!sct || !ect || !len) return NULL;
+    lc->unit->uses_alloc = true;
+    cir_expr_t *out = cir_expr_make(lc->arena, sct, ect, len, NULL);
+    if (!out) return NULL;
+    for (ast_node_t *it = mk->inits; it; it = it->next) {
+        if (it->kind == AST_FILL) {
+            ast_fill_t *fill = (ast_fill_t *)it;
+            if (fill->count->kind != AST_INT_LIT) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, it),
+                           "c backend: make() fill count must be constant");
+                lc->failed = true;
+                return NULL;
+            }
+            uint64_t n = ((ast_int_lit_t *)fill->count)->value;
+            for (uint64_t i = 0; i < n; i++) {
+                cir_expr_t *v = lower_expr(lc, fill->value);
+                if (!v) return NULL;
+                cir_expr_add_init(out, cir_init_new(lc->arena, NULL, v));
+            }
+        } else {
+            cir_expr_t *v = lower_expr(lc, it);
+            if (!v) return NULL;
+            cir_expr_add_init(out, cir_init_new(lc->arena, NULL, v));
+        }
+    }
+    return out;
+}
+
 static cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block,
                                bool *ok);
 
@@ -438,6 +634,7 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!t && vd->type_expr) t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
         if (!t || type_kind_of(t) == TYPE_KIND_VOID)
             t = infer_expr_type(lc, vd->init);
+        if (t) register_local(lc, vd->name, t);
         cir_type_t *ct = map_type(lc, t);
         if (!ct) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, s),
@@ -641,6 +838,10 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         char srcbuf[512];
         snprintf(srcbuf, sizeof srcbuf, deref ? "(*%s)" : "%s", raw);
         const char *an = copy_arena(lc->arena, srcbuf);
+        const type_t *stype = lookup_local(lc, ((ast_ident_t *)base)->name);
+        if (stype && deref && type_kind_of(type_strip_quals(stype)) == TYPE_KIND_PTR)
+            stype = ptr_type_base(stype);
+        bool slice_src = stype && type_kind_of(type_strip_quals(stype)) == TYPE_KIND_SLICE;
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FOR);
         if (!st) return NULL;
         cir_stmt_t *init = cir_stmt_new(lc->arena, CIR_STMT_VAR);
@@ -650,8 +851,11 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         init->expr = cir_expr_int(lc->arena, 0);
         st->init = init;
         char lenbuf[512];
-        snprintf(lenbuf, sizeof lenbuf,
-                 "(sizeof((%s).data) / sizeof((%s).data[0]))", an, an);
+        if (slice_src)
+            snprintf(lenbuf, sizeof lenbuf, "(%s).len", an);
+        else
+            snprintf(lenbuf, sizeof lenbuf,
+                     "(sizeof((%s).data) / sizeof((%s).data[0]))", an, an);
         cir_expr_t *len = cir_expr_ident(lc->arena,
                                          copy_arena(lc->arena, lenbuf));
         st->expr = cir_expr_binary(lc->arena, "<",
@@ -684,11 +888,14 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         lc->unit->uses_alloc = true;
         cir_stmt_t *head = NULL, *tail = NULL;
         for (ast_node_t *op = f->operand; op; op = op->next) {
+            const type_t *ot = infer_expr_type(lc, op);
             cir_expr_t *ex = lower_expr(lc, op);
             if (!ex) {
                 *ok = false;
                 return head;
             }
+            if (ot && type_kind_of(ot) == TYPE_KIND_SLICE)
+                ex = cir_expr_slice_data(lc->arena, ex);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
             st->expr = ex;
@@ -758,6 +965,7 @@ static void mark_cleanup_returns(cir_stmt_t *s) {
 
 static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                                       bool is_entry) {
+    lc->locals = NULL;
     if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
                    "c backend: unsupported function kind");
@@ -791,6 +999,7 @@ static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
         if (!ptypes[i]) return NULL;
         params[i].type = ptypes[i];
         params[i].name = mangle(lc->arena, "clux_v_", vd->name);
+        register_local(lc, vd->name, pt);
     }
 
     bool ok = true;

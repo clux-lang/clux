@@ -208,6 +208,54 @@ cir_expr_t *cir_expr_new(arena_t *arena, cir_type_t *type,
     return e;
 }
 
+cir_expr_t *cir_expr_slice(arena_t *arena, cir_type_t *type,
+                           cir_expr_t *object, cir_expr_t *low,
+                           cir_expr_t *high) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_SLICE;
+    e->type = type;
+    e->lhs = object;
+    e->rhs = low;
+    e->high = high;
+    return e;
+}
+
+cir_expr_t *cir_expr_len(arena_t *arena, cir_expr_t *object,
+                         cir_type_t *object_type) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_LEN;
+    e->lhs = object;
+    e->type = object_type;
+    return e;
+}
+
+cir_expr_t *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
+                          cir_type_t *elem_type, cir_expr_t *length,
+                          cir_init_t *inits) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_MAKE;
+    e->type = slice_type;
+    e->elem = elem_type;
+    e->lhs = length;
+    e->inits = inits;
+    return e;
+}
+
+cir_expr_t *cir_expr_slice_data(arena_t *arena, cir_expr_t *object) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_SLICE_DATA;
+    e->lhs = object;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;
