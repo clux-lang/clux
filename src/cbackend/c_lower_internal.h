@@ -116,6 +116,12 @@ typedef struct lower_cb_wrapper {
     struct lower_cb_wrapper *next;
 } lower_cb_wrapper_t;
 
+/* 跨模块 extern 声明去重（同一导入符号只声明一次）。 */
+typedef struct lower_import_decl {
+    const char *name;
+    struct lower_import_decl *next;
+} lower_import_decl_t;
+
 /* extern var（`extern var <lib>::<name>: T;`）：库里的**数据符号**。 */
 typedef struct lower_extern_var {
     strslice_t lib;
@@ -140,6 +146,7 @@ typedef struct lower_ctx {
     lower_extern_var_t *extern_vars;
     lower_cfn_typedef_t *cfn_typedefs;
     lower_cb_wrapper_t *cb_wrappers;
+    lower_import_decl_t *import_decls;
     /* `export struct/union/cunion/enum/type` 的名字：这些类型（的 C 形态）
        无条件进模块头文件。 */
     strslice_t *exported_types;
@@ -161,6 +168,8 @@ const char *mangle(arena_t *arena, const char *prefix, strslice_t name);
 /** 模块符号名：`<unit->sym_prefix><kind><name>`（如 `clux_a61b_fn_main`）。 */
 const char *module_symbol(arena_t *arena, const cir_unit_t *unit,
                           const char *kind, strslice_t name);
+/** 模块短 tag：源文件相对项目根目录（cwd）路径的 FNV-1a 低 16 位。 */
+void module_tag_for_path(const char *src, char *out, size_t cap);
 const char *token_text(arena_t *arena, const token_t *tok);
 const type_t *strip(sema_t *sema, const type_t *t);
 
@@ -213,6 +222,13 @@ bool call_is_cfunc_ptr(const ast_call_t *c);
 /* `export cfunc`：生成 C ABI 包装（无 env），函数名 `clux_<tag>_<name>`，
  * 原型进模块头文件。 */
 void lower_exported_cfunc(lower_ctx_t *lc, ast_func_def_t *fn);
+
+/* M7 import：跨编译单元引用。 */
+cir_expr_t *lower_import_call(lower_ctx_t *lc, ast_call_t *call,
+                              ast_scope_ref_t *sr);
+cir_expr_t *lower_import_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr);
+const char *lower_import_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr);
+bool is_import_scope_ref(lower_ctx_t *lc, ast_scope_ref_t *sr);
 /* `cfunc(...)` → C 函数指针 typedef 名（map_type 用；同 intern 类型复用）。 */
 const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t, bool *ok);
 /* extern var 的读取（`is_str` 时包装成 clux_str）与赋值目标（raw 左值）。 */

@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /**
@@ -50,6 +51,21 @@ int cbackend_emit_object(const char *src_path, const char *obj_path,
 
 /** 等价于 `cbackend_build_file_ex(src, out, NULL)`。 */
 int cbackend_build_file(const char *src_path, const char *out_path);
+
+/* 多文件（import）构建：每个模块独立生成 `.c/.h` 与对象，最后统一链接。
+ * 模块前缀由各自的路径（相对项目根目录）决定，跨模块调用通过导出符号
+ * `clux_<tag>_fn_<name>` / `clux_<tag>_v_<name>` 解析。 */
+typedef struct cbackend_program {
+    const char *build_dir;   /* 镜像根（依赖模块的 .c/.h/.o 放这里；NULL="build"） */
+    const char *entry_c;     /* 入口 .c 路径（NULL = 镜像推导） */
+    const char *entry_obj;   /* 入口目标文件（NULL = 镜像推导） */
+    bool        object_only; /* 只编译到对象（不链接） */
+    bool        emit_c_only; /* 只生成 C/头文件 */
+} cbackend_program_t;
+
+int cbackend_build_program(const char *src_path, const char *out_path,
+                           const cbackend_program_t *pgm,
+                           const cbackend_toolchain_t *tc);
 /**
  * 单文件 C 源生成：只生成一个 .c 文件，不调用 host cc。
  * 不解析 import / clux.mod；当前只支持单文件源码。

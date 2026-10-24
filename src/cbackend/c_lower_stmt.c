@@ -288,6 +288,26 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        /* 跨模块全局变量写：`math::PI = v`（C 符号是导出方模块前缀的全局）。 */
+        if (a->target && a->target->kind == AST_SCOPE_REF &&
+            is_import_scope_ref(lc, (ast_scope_ref_t *)a->target)) {
+            const char *cname = lower_import_var_target(
+                lc, (ast_scope_ref_t *)a->target);
+            if (!cname) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+            if (!st) return NULL;
+            st->lhs = cir_expr_ident(lc->arena, cname);
+            st->op = op;
+            st->expr = lower_expr(lc, a->value);
+            if (!st->lhs || !st->expr) {
+                *ok = false;
+                return NULL;
+            }
+            return st;
+        }
         /* extern var 写：C 符号是普通全局变量（`td_i32 = v;`）；str 目标
            需要把 clux_str 取值成 char*（`.data`）。 */
         if (a->target && a->target->kind == AST_SCOPE_REF &&

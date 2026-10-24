@@ -1311,6 +1311,31 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
     }
     return entry;
 }
+
+/* 只做前端准备（不生成字节码、不执行注册段）：供 C 后端做多编译单元
+ * lowering。泛型实例 worklist 与 compile_module 的阶段 1.5 一致。 */
+module_t *compile_module_prepare(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
+                                 arena_t *arena, const char *canonical,
+                                 vec_t *path_stack) {
+    module_t *entry =
+        compile_module_impl(vm, alloc, diag, arena, canonical, path_stack, true);
+    if (!entry) return NULL;
+    if (diag_has_error(diag)) return NULL;
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+        if (!vm->module_order) break;
+        size_t mn = vec_len(vm->module_order);
+        for (size_t i = 0; i < mn; i++) {
+            module_t *m = (module_t *)vec_get(vm->module_order, i);
+            if (m && m->sema && sema_generic_drain_pending(m->sema))
+                progressed = true;
+        }
+        if (diag_has_error(diag)) return NULL;
+    }
+    return entry;
+}
+
 int driver_build_asm(const char *src_path, const char *out_path) {
     if (!src_path || !out_path) return 1;
 

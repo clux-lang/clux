@@ -375,6 +375,29 @@ clux build hello.cx
   - 回归测试：`CBackend.GeneratesHeaderPairForExports`、
     `HeaderTypesAreTopological`、`ExportedCfuncUsesCApi`、
     `ModulePrefixFromRelativePath`。
+- **import / 多文件编译**（C 后端多编译单元）：
+  - 入口与每个依赖模块各自生成 `.c/.h/.obj`（镜像到构建目录），最后把
+    所有对象**一次链接**成可执行文件；模块缓存保证菱形依赖只编译一次，
+    路径栈检测循环依赖；
+  - 后端走 driver 的**前端准备**路径（新增
+    `compile_module_prepare`：lex→parse→desugar→sema + 泛型实例排空，
+    **不生成字节码、不执行注册段**）——C 后端因此不会在编译期 dlopen
+    `extern lib`，库交给链接器处理；
+  - 跨模块引用 lowering：`mod::fn(...)` → `extern <ret>
+    clux_<depTag>_fn_<name>(void *env, ...)` + 调用（env 传 NULL）；
+    `mod::VAR` → `extern <type> clux_<depTag>_v_<name>`；`export cfunc`
+    走普通 C ABI 入口 `clux_<depTag>_<name>`（str 参数/返回自动编组）；
+    `mod::Type` 在类型位置由 sema 解析（新增 `resolve_type_expr` 的
+    AST_SCOPE_REF 分支），C 侧按同一 VM type_t 生成布局一致的本地类型；
+  - **代理导出**（`export * from`）：导出符号按指针身份在 `module_order`
+    里反查**定义模块**，C 符号前缀用定义模块的 tag（而非 reexport 方）；
+  - `--emit-c` 会写出所有参与模块的 `.c/.h`；`--emit-obj` 编译所有模块；
+    入口模块在链接可执行文件时才要求 `main`（库模块可单独出对象）；
+  - 回归测试：`BuildImportMultiFile`、`BuildImportChainAndDiamond`、
+    `BuildImportReexport`、`RejectsCircularImport`；
+  - 尚未覆盖：跨模块**泛型调用**（`mod::id[i32](...)`：实例在定义模块
+    prog 里，但调用点形态还没有对应 lowering；会报明确错误）、
+    `clux test --backend=c` 的 import（测试运行器仍是单文件前端路径）。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI

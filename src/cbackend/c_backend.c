@@ -10,17 +10,29 @@
 #include "core/vec.h"
 #include "desugar/desugar.h"
 #include "diag/diagnostic.h"
+#include "driver/compile_module.h"
+#include "module/module_path.h"
 #include "parser/ast_program.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_test.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
 #include "sema/sema.h"
+#include "vm/module.h"
 #include "vm/vm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#include <sys/stat.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 static int load_file(allocator_t *alloc, const char *path, char **out,
                      size_t *out_len) {
@@ -163,13 +175,14 @@ static int compile_object(allocator_t *alloc, const char *c_path,
     return 0;
 }
 
-/* 链接一步：`<cc> <obj> -o <out> [-L..] [代码声明的链接参数] [-l..] [ldflags]`。
+/* 链接一步：`<cc> <objs...> -o <out> [-L..] [代码声明的链接参数] [-l..] [ldflags]`。
  *
  * `-L` 顺序：用户 `--lib-path` 优先，随后是产物目录及其上两级（便于把
  * `.lib/.so` 与产物放一起）；再放代码里 `extern lib` 产生的链接参数
  * （`-l<name>` 或库文件路径），最后是用户 `--link-lib`。 */
-static int link_exe(allocator_t *alloc, const char *obj_path,
-                    const char *out_path, const cir_link_arg_t *code_links,
+static int link_exe(allocator_t *alloc, const char *const *objs,
+                    size_t obj_count, const char *out_path,
+                    const cir_link_arg_t *code_links,
                     const cbackend_toolchain_t *tc) {
     set_compiler_temp_dir(out_path);
     const char *cc = host_cc(tc);
@@ -180,8 +193,10 @@ static int link_exe(allocator_t *alloc, const char *obj_path,
     }
     if (strchr(cc, ' ') || strchr(cc, '\t')) cmd_append_quoted(cmd, cc);
     else string_append_cstr(cmd, cc);
-    string_append_char(cmd, ' ');
-    cmd_append_quoted(cmd, obj_path);
+    for (size_t i = 0; i < obj_count; i++) {
+        string_append_char(cmd, ' ');
+        cmd_append_quoted(cmd, objs[i]);
+    }
     string_append_cstr(cmd, " -o ");
     cmd_append_quoted(cmd, out_path);
 
@@ -269,6 +284,307 @@ static char *derive_h_path(const char *c_path) {
         h[n + 2] = '\0';
     }
     return h;
+}
+
+/* -------------------------------------------------------------------------
+ * 多模块（import）构建：镜像路径 + 目录创建 + 逐模块编译
+ * ---------------------------------------------------------------------- */
+
+static void be_norm(char *s) {
+    for (; s && *s; s++)
+        if (*s == '\\') *s = '/';
+}
+
+static bool be_abs(const char *p) {
+    if (!p || !p[0]) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p[1] == ':' && (p[2] == '/' || p[2] == '\\');
+}
+
+/* 若 `src` 在 cwd 之下，写入相对路径。 */
+static bool be_rel_cwd(const char *src, char *buf, size_t cap) {
+    char cwd[4096];
+#ifdef _WIN32
+    if (!_getcwd(cwd, (int)sizeof cwd)) return false;
+#else
+    if (!getcwd(cwd, sizeof cwd)) return false;
+#endif
+    be_norm(cwd);
+    char path[4096];
+    snprintf(path, sizeof path, "%s", src ? src : "");
+    be_norm(path);
+    if (!be_abs(path)) {
+        while (path[0] == '.' && path[1] == '/')
+            memmove(path, path + 2, strlen(path + 2) + 1);
+        if (path[0] == '\0' || strncmp(path, "../", 3) == 0) return false;
+        snprintf(buf, cap, "%s", path);
+        return true;
+    }
+    size_t n = strlen(cwd);
+#ifdef _WIN32
+    bool under = _strnicmp(path, cwd, n) == 0;
+#else
+    bool under = strncmp(path, cwd, n) == 0;
+#endif
+    if (!under) return false;
+    if (path[n] == '/') n++;
+    else if (path[n] != '\0') return false;
+    snprintf(buf, cap, "%s", path + n);
+    return true;
+}
+
+static char *be_concat2(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    char *p = (char *)malloc(na + nb + 1);
+    if (!p) return NULL;
+    memcpy(p, a, na);
+    memcpy(p + na, b, nb);
+    p[na + nb] = '\0';
+    return p;
+}
+
+/* `<build-dir>/<相对 cwd 路径（去扩展名）>`；源在构建目录内时去掉其前缀。 */
+static char *be_mirror_base(const char *src, const char *build_dir) {
+    char rel[4096];
+    if (!be_rel_cwd(src, rel, sizeof rel)) {
+        const char *b = src ? src : "";
+        for (const char *q = src; q && *q; q++)
+            if (*q == '/' || *q == '\\') b = q + 1;
+        snprintf(rel, sizeof rel, "%s", b);
+    }
+    char bd[4096];
+    snprintf(bd, sizeof bd, "%s",
+             (build_dir && *build_dir) ? build_dir : "build");
+    be_norm(bd);
+    size_t bl = strlen(bd);
+    while (bl > 1 && bd[bl - 1] == '/') bd[--bl] = '\0';
+    char bdrel[4096];
+    bdrel[0] = '\0';
+    if (be_abs(bd)) {
+        (void)be_rel_cwd(bd, bdrel, sizeof bdrel);
+    } else {
+        snprintf(bdrel, sizeof bdrel, "%s", bd);
+        while (bdrel[0] == '.' && bdrel[1] == '/')
+            memmove(bdrel, bdrel + 2, strlen(bdrel + 2) + 1);
+    }
+    size_t brl = strlen(bdrel);
+    while (brl > 0 && bdrel[brl - 1] == '/') bdrel[--brl] = '\0';
+    if (brl > 0 && strncmp(rel, bdrel, brl) == 0 && rel[brl] == '/')
+        memmove(rel, rel + brl + 1, strlen(rel + brl + 1) + 1);
+    char *dot = strrchr(rel, '.');
+    if (dot && !strchr(dot, '/')) *dot = '\0';
+    char *base = be_concat2(bd, "/");
+    if (!base) return NULL;
+    char *full = be_concat2(base, rel);
+    free(base);
+    return full;
+}
+
+static bool be_ensure_dir(const char *path) {
+    if (!path || !*path) return true;
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s", path);
+    be_norm(buf);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+#ifdef _WIN32
+        (void)_mkdir(buf);
+#else
+        (void)mkdir(buf, 0777);
+#endif
+        *p = '/';
+    }
+#ifdef _WIN32
+    (void)_mkdir(buf);
+#else
+    (void)mkdir(buf, 0777);
+#endif
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & S_IFDIR) != 0;
+}
+
+static bool be_ensure_parent(const char *file) {
+    if (!file || !*file) return true;
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s", file);
+    be_norm(buf);
+    char *slash = strrchr(buf, '/');
+    if (!slash) return true;
+    *slash = '\0';
+    return be_ensure_dir(buf);
+}
+
+/* 单个模块：lower → 写 .c/.h →（非 emit-c）编译对象。失败返回 NULL。 */
+static cir_unit_t *build_one_module(allocator_t *alloc, arena_t *arena,
+                                    module_t *mod, bool allow_no_main,
+                                    const char *c_path, const char *obj_path,
+                                    bool emit_c_only,
+                                    const cbackend_toolchain_t *tc) {
+    if (!be_ensure_parent(c_path) ||
+        (!emit_c_only && !be_ensure_parent(obj_path))) {
+        fprintf(stderr, "build: cannot create output directory for '%s'\n",
+                c_path);
+        return NULL;
+    }
+    cir_unit_t *u = cbackend_lower(arena, mod->sema,
+                                   (ast_program_t *)mod->src_ast,
+                                   mod->canonical, false, allow_no_main);
+    if (!u) return NULL;
+    cbackend_optimize(u);
+    char *h_path = derive_h_path(c_path);
+    if (!h_path) return NULL;
+    int rc = 0;
+    if (cir_write_pair(u, c_path, h_path, alloc) != 0) {
+        fprintf(stderr, "build: cannot write C source '%s' / header '%s'\n",
+                c_path, h_path);
+        rc = 1;
+    } else if (!emit_c_only) {
+        if (compile_object(alloc, c_path, obj_path, tc) != 0) rc = 1;
+        else remove(c_path);
+    }
+    free(h_path);
+    return rc == 0 ? u : NULL;
+}
+
+int cbackend_build_program(const char *src_path, const char *out_path,
+                           const cbackend_program_t *pgm,
+                           const cbackend_toolchain_t *tc) {
+    if (!src_path) return 1;
+    bool emit_c_only = pgm && pgm->emit_c_only;
+    bool object_only = pgm && pgm->object_only;
+    if (!emit_c_only && !object_only && !out_path) return 1;
+
+    allocator_t *alloc = create_allocator(malloc, free);
+    if (!alloc) return 1;
+    arena_t *arena = arena_new_default(alloc);
+    diag_buf_t *diag = diag_buf_new(alloc);
+    vm_t *vm = vm_new(alloc);
+    if (!arena || !diag || !vm) {
+        if (vm) vm_destroy(&vm);
+        if (diag) diag_buf_destroy(&diag);
+        if (arena) arena_destroy(alloc, &arena);
+        delete_allocator(&alloc);
+        return 1;
+    }
+    int rc = 1;
+    char *entry = module_path_normalize(alloc, src_path);
+    vec_t *path_stack = vec_new(alloc, /*owns_element=*/false);
+    const char **objs = NULL;
+    char **owned = NULL;
+    size_t nobjs = 0, nowned = 0, cap = 0;
+    const char *links[128];
+    size_t nlinks = 0;
+    module_t *main_mod = NULL;
+    if (!entry || !path_stack) {
+        fprintf(stderr, "build: out of memory\n");
+        goto cleanup;
+    }
+    main_mod = compile_module_prepare(vm, alloc, diag, arena, entry, path_stack);
+    if (!main_mod) {
+        if (diag_has_error(diag)) diag_print_all(diag);
+        else fprintf(stderr, "build: cannot compile '%s'\n", src_path);
+        goto cleanup;
+    }
+    size_t nmods = vm->module_order ? vec_len(vm->module_order) : 0;
+    cap = nmods + 1;
+    objs = (const char **)calloc(cap, sizeof(*objs));
+    owned = (char **)calloc(cap * 3, sizeof(*owned));
+    if (!objs || !owned) {
+        fprintf(stderr, "build: out of memory\n");
+        goto cleanup;
+    }
+    const char *build_dir = (pgm && pgm->build_dir) ? pgm->build_dir : "build";
+    for (size_t i = 0; i < nmods; i++) {
+        module_t *mod = (module_t *)vec_get(vm->module_order, i);
+        if (!mod || !mod->sema || !mod->src_ast) continue;
+        bool is_main = (mod == main_mod);
+        char *base = be_mirror_base(mod->canonical, build_dir);
+        if (!base) {
+            fprintf(stderr, "build: out of memory\n");
+            goto cleanup;
+        }
+#ifdef _WIN32
+        const char *obj_ext = ".obj";
+#else
+        const char *obj_ext = ".o";
+#endif
+        char *c_path = (is_main && pgm && pgm->entry_c && *pgm->entry_c)
+                           ? be_concat2(pgm->entry_c, "")
+                           : be_concat2(base, ".c");
+        char *obj_path = (is_main && pgm && pgm->entry_obj && *pgm->entry_obj)
+                             ? be_concat2(pgm->entry_obj, "")
+                             : be_concat2(base, obj_ext);
+        free(base);
+        if (!c_path || !obj_path) {
+            free(c_path);
+            free(obj_path);
+            fprintf(stderr, "build: out of memory\n");
+            goto cleanup;
+        }
+        owned[nowned++] = c_path;
+        owned[nowned++] = obj_path;
+        bool require_main = is_main && !emit_c_only && !object_only;
+        cir_unit_t *u = build_one_module(alloc, arena, mod, !require_main,
+                                         c_path, obj_path, emit_c_only, tc);
+        if (!u) {
+            if (diag_has_error(diag)) diag_print_all(diag);
+            goto cleanup;
+        }
+        if (require_main) {
+            bool has_entry = false;
+            for (cir_function_t *f = u->functions; f; f = f->next)
+                if (f->is_entry) has_entry = true;
+            if (!has_entry) {
+                fprintf(stderr, "build: no 'main' function in '%s'\n",
+                        mod->canonical ? mod->canonical : src_path);
+                goto cleanup;
+            }
+        }
+        /* 合并模块声明的链接参数（extern lib），去重。 */
+        for (cir_link_arg_t *l = u->link_args; l && nlinks < 128; l = l->next) {
+            bool dup = false;
+            for (size_t k = 0; k < nlinks; k++)
+                if (strcmp(links[k], l->arg) == 0) dup = true;
+            if (!dup) links[nlinks++] = l->arg;
+        }
+        if (!emit_c_only) objs[nobjs++] = obj_path;
+    }
+    if (!emit_c_only && !object_only) {
+        cir_link_arg_t *merged = NULL, *tail = NULL;
+        for (size_t i = 0; i < nlinks; i++) {
+            cir_link_arg_t *n =
+                (cir_link_arg_t *)calloc(1, sizeof(*n));
+            if (!n) break;
+            n->arg = links[i];
+            if (tail) tail->next = n;
+            else merged = n;
+            tail = n;
+        }
+        int lrc = link_exe(alloc, objs, nobjs, out_path, merged, tc);
+        while (merged) {
+            cir_link_arg_t *next = merged->next;
+            free(merged);
+            merged = next;
+        }
+        if (lrc != 0) goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (objs) free(objs);
+    if (owned) {
+        for (size_t i = 0; i < nowned; i++) free(owned[i]);
+        free(owned);
+    }
+    if (path_stack) vec_free(alloc, &path_stack);
+    if (entry) allocator_free(alloc, (void **)&entry);
+    if (diag_has_error(diag)) diag_print_all(diag);
+    vm_destroy(&vm);
+    diag_buf_destroy(&diag);
+    arena_destroy(alloc, &arena);
+    delete_allocator(&alloc);
+    return rc;
 }
 
 /* 编译/生成选项。 */
@@ -514,7 +830,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             } else if (compile_object(alloc, c_path, obj, opts->tc) == 0) {
                 ok = true;
                 if (!opts->object_only)
-                    ok = link_exe(alloc, obj, out_path, unit->link_args,
+                    ok = link_exe(alloc, &obj, 1, out_path, unit->link_args,
                                   opts->tc) == 0;
                 if (ok) {
                     /* 成功：C 中间文件是临时的；目标文件与头文件保留。 */

@@ -1787,6 +1787,166 @@ TEST(CBackend, CompileUnitLinksAcrossC) {
   fs::remove_all(dir, ec);
 }
 
+/* import 多文件：每个模块独立生成 .c/.h/.obj，跨模块调用/变量/类型，
+ * 最后统一链接（模块前缀由各自相对路径决定）。 */
+TEST(CBackend, BuildImportMultiFile) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_proj";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("math.cx",
+        "export func add(a: i32, b: i32): i32 { return a + b; }\n"
+        "export var PI: i32 = 42;\n"
+        "export struct Point { x: i32; y: i32; }\n");
+  write("main.cx",
+        "import math from \"./math\";\n"
+        "func main(): i32 {\n"
+        "  var p: math::Point = .math::Point{ .x = 20, .y = 22 };\n"
+        "  if (math::PI != 42) { return 1; }\n"
+        "  return math::add(p.x, p.y) - math::PI;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int build_rc = run_cli({"build", "main.cx"});
+#ifdef _WIN32
+  const char *obj_ext = ".obj";
+  const char *exe_name = "main.exe";
+#else
+  const char *obj_ext = ".o";
+  const char *exe_name = "main";
+#endif
+  EXPECT_EQ(build_rc, 0);
+  fs::current_path(saved);
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_TRUE(fs::exists(proj / "build" / ("math" + std::string(obj_ext))))
+      << "dependency module must be compiled to its own object";
+  EXPECT_TRUE(fs::exists(proj / "build" / ("main" + std::string(obj_ext))));
+  EXPECT_TRUE(fs::exists(proj / "build" / "math.h"));
+  EXPECT_TRUE(fs::exists(proj / "build" / "main.h"));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+
+  /* --emit-c：所有模块的 .c/.h 都写进镜像目录，跨模块调用是 extern 原型。 */
+  fs::current_path(proj, ec);
+  ASSERT_EQ(run_cli({"build", "main.cx", "--emit-c"}), 0);
+  fs::current_path(saved);
+  const std::string c = slurp((proj / "build" / "main.c").string());
+  EXPECT_NE(c.find("#include \"main.h\""), std::string::npos);
+  EXPECT_NE(c.find("_fn_add(void *env"), std::string::npos);
+  EXPECT_NE(c.find("extern "), std::string::npos);
+  EXPECT_TRUE(fs::exists(proj / "build" / "math.c"));
+  fs::remove_all(proj, ec);
+}
+
+/* 依赖链/菱形：a → b → c，且 a 同时直接 import c（c 只编译一次）。 */
+TEST(CBackend, BuildImportChainAndDiamond) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_chain";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("c.cx", "export func base(x: i32): i32 { return x + 1; }\n");
+  write("b.cx",
+        "import c from \"./c\";\n"
+        "export func mid(x: i32): i32 { return c::base(x) * 2; }\n");
+  write("a.cx",
+        "import b from \"./b\";\n"
+        "import c from \"./c\";\n"
+        "func main(): i32 { return b::mid(c::base(20)) - 44; }\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(run_cli({"build", "a.cx"}), 0);
+  fs::current_path(saved);
+#ifdef _WIN32
+  const char *exe_name = "a.exe";
+  const char *obj_ext = ".obj";
+#else
+  const char *exe_name = "a";
+  const char *obj_ext = ".o";
+#endif
+  EXPECT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_TRUE(fs::exists(proj / "build" / ("c" + std::string(obj_ext))));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
+/* 循环 import 必须在编译期报错（driver 的路径栈检测）。 */
+TEST(CBackend, RejectsCircularImport) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_cycle";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("a.cx",
+        "import b from \"./b\";\n"
+        "export func fa(): i32 { return b::fb(); }\n"
+        "func main(): i32 { return fa(); }\n");
+  write("b.cx",
+        "import a from \"./a\";\n"
+        "export func fb(): i32 { return a::fa(); }\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int rc = run_cli({"build", "a.cx"});
+  fs::current_path(saved);
+  EXPECT_EQ(rc, 1);
+  fs::remove_all(proj, ec);
+}
+
+/* 代理导出：`export * from "./base"` 的名字属于 base 模块，跨模块调用必须
+ * 解析到**定义模块**的符号（前缀用定义模块的 tag，而不是 reexport 方）。 */
+TEST(CBackend, BuildImportReexport) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_reexport";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("base.cx", "export func add(a: i32, b: i32): i32 { return a + b; }\n");
+  write("mid.cx", "export * from \"./base\";\n");
+  write("main.cx",
+        "import mid from \"./mid\";\n"
+        "func main(): i32 { return mid::add(20, 22) - 42; }\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(run_cli({"build", "main.cx"}), 0);
+  fs::current_path(saved);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =

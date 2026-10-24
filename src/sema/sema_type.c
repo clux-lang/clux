@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/sema_cross.h" /* 跨模块导出符号（`mod::Type`） */
 #include "sema/struct_compose.h" /* 结构体组合（`...Base;`）pass */
 #include "vm/type_cfunc.h"
 #include "vm/type_func.h"
@@ -736,6 +737,44 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return NULL;
     }
     default: {
+      /* `mod::Type`：跨模块具名类型引用（非泛型；泛型走上面的 AST_INDEX
+         形式 `mod::Type[args]`）。 */
+      if (type_expr->kind == AST_SCOPE_REF) {
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)type_expr;
+        if (sr->type_expr && sr->type_expr->kind == AST_IDENT) {
+          sema_symbol_t *ms = sema_scope_find_local(
+              sema->global_scope, ((ast_ident_t *)sr->type_expr)->name);
+          if (!ms || ms->kind != SEMA_SYM_MODULE || !ms->module) {
+            diag_error(sema->diag, sema_loc(sema, type_expr),
+                       "'%.*s' is not an imported module",
+                       (int)((ast_ident_t *)sr->type_expr)->name.len,
+                       ((ast_ident_t *)sr->type_expr)->name.ptr);
+            return NULL;
+          }
+          sema_symbol_t *es =
+              sema_module_export_symbol(ms->module, sr->variant);
+          if (!es || es->kind != SEMA_SYM_TYPE) {
+            diag_error(sema->diag, sema_loc(sema, type_expr),
+                       "module has no exported type '%.*s'",
+                       (int)sr->variant.len, sr->variant.ptr);
+            return NULL;
+          }
+          if (es->is_generic) {
+            diag_error(sema->diag, sema_loc(sema, type_expr),
+                       "generic type '%.*s' requires type arguments "
+                       "(`mod::Name[args]`)",
+                       (int)sr->variant.len, sr->variant.ptr);
+            return NULL;
+          }
+          if (!es->type) {
+            diag_error(sema->diag, sema_loc(sema, type_expr),
+                       "exported type '%.*s' is not materialized",
+                       (int)sr->variant.len, sr->variant.ptr);
+            return NULL;
+          }
+          return es->type;
+        }
+      }
       /* 类型表达式里的编译期计算（`(T extends own *? ? fatal T : T)` 等）：
          交给 CTFE 真实求值，结果必须是 type value。 */
       ctfe_ctx_t ctx;

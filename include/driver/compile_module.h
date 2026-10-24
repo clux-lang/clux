@@ -32,6 +32,16 @@ module_t *compile_module(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
                          arena_t *arena, const char *canonical,
                          vec_t *path_stack);
 
+/**
+ * 只做**前端准备**（lex → parse → desugar → sema + 泛型实例排空），不生成
+ * 字节码、不执行注册段。C 后端用它编译入口模块与依赖：产物（sema /
+ * src_ast / sema_exports / vm 类型表）足以做 C lowering，也不会因
+ * `extern lib` 在编译期 dlopen 而失败（C 后端把库交给链接器处理）。
+ */
+module_t *compile_module_prepare(vm_t *vm, allocator_t *alloc, diag_buf_t *diag,
+                                 arena_t *arena, const char *canonical,
+                                 vec_t *path_stack);
+
 #ifdef __cplusplus
 }
 #endif

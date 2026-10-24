@@ -318,6 +318,8 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     }
     if (call->callee && call->callee->kind == AST_SCOPE_REF) {
         ast_scope_ref_t *sr = (ast_scope_ref_t *)call->callee;
+        /* 跨模块调用 `mod::fn(...)`。 */
+        if (is_import_scope_ref(lc, sr)) return lower_import_call(lc, call, sr);
         uint32_t owner = call->member_type_id;
         if (!owner && sr->type_expr) {
             const type_t *t = sema_resolve_type_slot(lc->sema, &sr->type_expr);
@@ -421,8 +423,17 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         }
     }
     if (!name.ptr) {
-        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
-                   "c backend: only direct function calls are supported");
+        /* 典型缺口：跨模块泛型调用 `mod::f[i32](...)`（实例由 sema 追加到
+           定义模块的 prog，调用点形态是 AST_INDEX/泛型引用）。 */
+        if (call->callee && call->callee->kind == AST_INDEX) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                       "c backend: cross-module generic calls are not "
+                       "lowered yet (instantiate on the defining module side "
+                       "or call a non-generic wrapper)");
+        } else {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                       "c backend: only direct function calls are supported");
+        }
         lc->failed = true;
         return NULL;
     }
@@ -455,6 +466,8 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         ast_scope_ref_t *sr = (ast_scope_ref_t *)e;
         /* extern var 读取：`td::td_i32` → 库里的数据符号（str 包成 clux_str）。 */
         if (sr->is_ffi_var) return lower_ffi_var_read(lc, sr);
+        /* 跨模块全局变量读取：`math::PI`。 */
+        if (is_import_scope_ref(lc, sr)) return lower_import_var_read(lc, sr);
         /* 枚举 variant `Color::Red`：sema 折叠后 type_expr 是 AST_TYPE_REF，
            `value` 是底层整数值。enum 在 C 侧就是底层整数 → 直接出字面量。 */
         const type_t *t = NULL;
@@ -907,6 +920,17 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                 }
                 value = cir_expr_member(lc->arena, value, "data");
             }
+            return cir_expr_assign(lc->arena, lhs, op, value);
+        }
+        /* 跨模块全局变量写：`math::PI = v`。 */
+        if (a->target && a->target->kind == AST_SCOPE_REF &&
+            is_import_scope_ref(lc, (ast_scope_ref_t *)a->target)) {
+            const char *cname = lower_import_var_target(
+                lc, (ast_scope_ref_t *)a->target);
+            if (!cname) return NULL;
+            cir_expr_t *lhs = cir_expr_ident(lc->arena, cname);
+            cir_expr_t *value = lower_expr(lc, a->value);
+            if (!lhs || !value) return NULL;
             return cir_expr_assign(lc->arena, lhs, op, value);
         }
         cir_expr_t *target = lower_expr(lc, a->target);

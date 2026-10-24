@@ -369,7 +369,9 @@ int cmd_build(const cmd_args_t *args) {
             free(owned);
             goto done;
         }
-        rc = cbackend_generate_c(src, c_path);
+        cbackend_program_t pgm = {
+            .build_dir = build_dir, .entry_c = c_path, .emit_c_only = true};
+        rc = cbackend_build_program(src, NULL, &pgm, &tc);
         if (rc == 0) {
             char *h = h_path_for(c_path);
             if (h && *h) printf("generated %s, %s\n", c_path, h);
@@ -396,7 +398,13 @@ int cmd_build(const cmd_args_t *args) {
             free(owned);
             goto done;
         }
-        rc = cbackend_build_ex(src, NULL, def_c, obj, &tc);
+        cbackend_program_t pgm = {
+            .build_dir = build_dir,
+            .entry_c = def_c,
+            .entry_obj = obj,
+            .object_only = true,
+        };
+        rc = cbackend_build_program(src, NULL, &pgm, &tc);
         if (rc == 0) printf("compiled %s\n", obj);
         free(owned);
         goto done;
@@ -422,7 +430,9 @@ int cmd_build(const cmd_args_t *args) {
         free(exe);
         goto done;
     }
-    rc = cbackend_build_ex(src, exe, def_c, def_obj, &tc);
+    cbackend_program_t pgm = {
+        .build_dir = build_dir, .entry_c = def_c, .entry_obj = def_obj};
+    rc = cbackend_build_program(src, exe, &pgm, &tc);
     if (rc == 0) printf("built %s\n", exe);
     free(exe);
 
