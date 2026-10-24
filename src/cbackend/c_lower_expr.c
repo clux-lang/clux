@@ -762,8 +762,13 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                 return NULL;
             }
             lc->unit->uses_union_check = true;
-            return cir_expr_union_at(lc->arena, map_type(lc, ot), mct, obj, (size_t)mi,
-                                     copy_arena(lc->arena, fb));
+            cir_expr_t *ua = cir_expr_union_at(lc->arena, map_type(lc, ot), mct,
+                                               obj, (size_t)mi,
+                                               copy_arena(lc->arena, fb));
+            /* 左值接收者：必须是可写左值（`s.m = v`），用直接成员访问 + tag
+               检查（复合字面量临时量只是读副本，写进去会丢失）。 */
+            if (ua) ua->array_data = ast_is_lvalue(m->object);
+            return ua;
         }
         if (ot && type_kind_of(ot) == TYPE_KIND_CUNION) {
             int mi = cunion_type_find_member(ot, m->field);

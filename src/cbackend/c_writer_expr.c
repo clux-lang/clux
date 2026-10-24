@@ -217,6 +217,19 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         const char *ut =
             e->src_type ? e->src_type->c_name : "int32_t";
         const char *mt = e->type ? e->type->c_name : "int32_t";
+        if (e->array_data) {
+            /* 左值形态：直接取原对象成员的地址（tag 检查后返回 payload
+               指针），`*(T*)` 是可写左值；接收者是左值，& 合法。 */
+            cw_put(sb, "(*((");
+            cw_put(sb, mt);
+            cw_put(sb, " *)clux_union_at_lvalue(&(");
+            cw_write_expr(sb, e->lhs);
+            cw_printf(sb,
+                      "), %zu, sizeof(((%s *)0)->tag), offsetof(%s, u), "
+                      "\"%s\")))",
+                      e->tag, ut, ut, e->text ? e->text : "clux_m_member");
+            break;
+        }
         cw_put(sb, "(*(");
         cw_put(sb, mt);
         cw_put(sb, " *)clux_union_at(&((");

@@ -298,6 +298,20 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "    }\n");
         cw_put(sb, "    return (char *)p + payload_off;\n");
         cw_put(sb, "}\n");
+        cw_put(sb,
+               "static void *clux_union_at_lvalue(void *p, int64_t expected, "
+               "size_t tag_size, size_t payload_off, const char *member) {\n");
+        cw_put(sb, "    uint64_t tag = 0;\n");
+        cw_put(sb, "    memcpy(&tag, p, tag_size);\n");
+        cw_put(sb, "    if ((int64_t)tag != expected) {\n");
+        cw_put(sb, "        fprintf(stderr, \"run: union member '%s' is not "
+                   "active (tag=%lld, expected=%lld)\\n\", member, "
+                   "(long long)tag, (long long)expected);\n");
+        cw_put(sb, "        fflush(stderr);\n");
+        cw_put(sb, "        abort();\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    return (char *)p + payload_off;\n");
+        cw_put(sb, "}\n");
     }
     cw_put(sb, "\n");
 
