@@ -405,7 +405,10 @@ clux build hello.cx
     但不进头文件（`is_public` 与 `is_exported` 分离）；
   - 尚未覆盖：跨模块**方法**调用（`import` 的结构体实例方法，sema 目前
     报 "struct 'X' has no field 'm'"；属语言层 gap，不是 C 后端问题）、
-    `clux test --backend=c` 的 import（测试运行器仍是单文件前端路径）。
+    跨模块泛型**类型实例**出现在泛型函数体内（`wrap[T](): Box[T]` 跨模块
+    实例化时 sema 报 "construct: expected 0 fields for ...$Box$i32"，同为
+    sema 层问题；单文件内同一写法正常）、`clux test --backend=c` 的
+    import（测试运行器仍是单文件前端路径）。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI
