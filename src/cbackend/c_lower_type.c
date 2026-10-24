@@ -66,6 +66,13 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
         ct->src = t;
+        const struct_type_t *bst = (const struct_type_t *)t;
+        if (bst->bitfield_ast) {
+            const ast_struct_def_t *bsd =
+                (const ast_struct_def_t *)bst->bitfield_ast;
+            ct->is_bitfield = true;
+            ct->bit_word_bits = bsd->bitfield_word_bits;
+        }
         cir_unit_add_type(lc->unit, ct);
         size_t n = struct_type_field_count(t);
         for (size_t i = 0; i < n; i++) {

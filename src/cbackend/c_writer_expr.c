@@ -319,6 +319,71 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         }
         cw_put(sb, ")");
         break;
+    case CIR_EXPR_BITFIELD_GET:
+        cw_put(sb, "((");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "uint64_t");
+        cw_put(sb, ")clux_bf_get((");
+        cw_write_expr(sb, e->lhs);
+        cw_printf(sb, ").data, %zu, %zu, %zu))", e->bit_word_bits,
+                  e->bit_offset, e->bit_width);
+        break;
+    case CIR_EXPR_BITFIELD_SET:
+        cw_put(sb, "clux_bf_set((");
+        cw_write_expr(sb, e->lhs);
+        cw_printf(sb, ").data, %zu, %zu, %zu, (uint64_t)(", e->bit_word_bits,
+                  e->bit_offset, e->bit_width);
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, "))");
+        break;
+    case CIR_EXPR_BITFIELD_MAKE: {
+        size_t n = 0;
+        for (const cir_init_t *i = e->inits; i; i = i->next) n++;
+        if (n == 0) {
+            cw_put(sb, "((");
+            cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+            cw_put(sb, "){0})");
+            break;
+        }
+        cw_put(sb, "clux_bf_make_");
+        cw_put(sb, cw_bf_helper_suffix(e->type));
+        cw_put(sb, "((const struct clux_bf_item[]){");
+        bool first = true;
+        for (const cir_init_t *i = e->inits; i; i = i->next) {
+            if (!first) cw_put(sb, ", ");
+            cw_printf(sb, "{ %zu, %zu, (uint64_t)(", i->bit_offset,
+                      i->bit_width);
+            cw_write_expr(sb, i->value);
+            cw_put(sb, ") }");
+            first = false;
+        }
+        cw_printf(sb, "}, %zu)", n);
+        break;
+    }
+    case CIR_EXPR_CAST:
+        cw_put(sb, "((");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, ")(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, "))");
+        break;
+    case CIR_EXPR_TERNARY:
+        cw_put(sb, "((");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ") ? (");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, ") : (");
+        cw_write_expr(sb, e->high);
+        cw_put(sb, "))");
+        break;
+    case CIR_EXPR_MEM_EQ:
+        cw_put(sb, "(memcmp(&(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, "), &(");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, "), sizeof(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, ")) == 0)");
+        break;
     default:
         cw_put(sb, "0");
         break;

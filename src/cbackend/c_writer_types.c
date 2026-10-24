@@ -115,3 +115,26 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
 void cw_emit_all_types(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next) cw_emit_type(sb, t);
 }
+
+/* 每个被构造过的 bitfield 类型生成一个按值返回的构造函数：
+ *   clux_bf_make_<type>(items, n)
+ * 值以 `struct clux_bf_item { off, width, value }` 数组传入，按位写入后返回。
+ * 只读路径不需要它（clux_bf_get 是通用的）。 */
+void cw_emit_bf_helpers(string_t *sb, cir_type_t *types) {
+    for (cir_type_t *t = types; t; t = t->next) {
+        if (t->kind != CIR_TYPE_STRUCT || !t->is_bitfield || !t->needs_bf_make)
+            continue;
+        if (!t->fields || !t->fields->name || !t->c_name) continue;
+        cw_printf(sb, "static %s clux_bf_make_%s(const struct clux_bf_item *items,"
+                      " size_t n) {\n",
+                  t->c_name, cw_bf_helper_suffix(t));
+        cw_printf(sb, "    %s out;\n", t->c_name);
+        cw_put(sb, "    memset(&out, 0, sizeof out);\n");
+        cw_put(sb, "    for (size_t i = 0; i < n; i++)\n");
+        cw_printf(sb, "        clux_bf_set(out.%s.data, %zu, items[i].off, "
+                      "items[i].width, items[i].value);\n",
+                  t->fields->name, t->bit_word_bits);
+        cw_put(sb, "    return out;\n");
+        cw_put(sb, "}\n\n");
+    }
+}

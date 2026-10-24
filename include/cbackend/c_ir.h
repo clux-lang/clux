@@ -47,6 +47,11 @@ typedef struct cir_type {
     cir_field_t    *fields;
     struct cir_signature *sig;
     bool            emitted;
+    /* bitfield：C 布局是 `struct { <underlying> data[N]; }` 的隐藏单字段
+       struct；逻辑字段按位读写。 */
+    bool            is_bitfield;
+    size_t          bit_word_bits;
+    bool            needs_bf_make; /* 需要按类型生成 clux_bf_make_* 辅助函数 */
     struct cir_type *next;
 } cir_type_t;
 
@@ -80,11 +85,20 @@ typedef enum {
     CIR_EXPR_CLOSURE,
     CIR_EXPR_CLOSURE_RELEASE,
     CIR_EXPR_FUNC_CLONE,
+    CIR_EXPR_BITFIELD_GET,
+    CIR_EXPR_BITFIELD_SET,
+    CIR_EXPR_BITFIELD_MAKE,
+    CIR_EXPR_CAST,
+    CIR_EXPR_TERNARY,
+    CIR_EXPR_MEM_EQ,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
     const char *name;  /* named field；NULL = positional */
     cir_expr_t *value;
+    /* CIR_EXPR_BITFIELD_MAKE / GET / SET：字段位偏移与宽度 */
+    size_t bit_offset;
+    size_t bit_width;
     struct cir_init *next;
 } cir_init_t;
 
@@ -104,6 +118,10 @@ typedef struct cir_expr {
     bool            array_data; /* index through wrapper .data */
     bool            closure_env; /* allocate via closure registry */
     size_t          tag;
+    /* bitfield 读/写/构造：位偏移、宽度、底层字位宽 */
+    size_t          bit_offset;
+    size_t          bit_width;
+    size_t          bit_word_bits;
     struct cir_expr *lhs;
     struct cir_expr *rhs;
     struct cir_expr *high;
@@ -194,6 +212,13 @@ typedef struct cir_unit {
     bool             uses_alloc;
     bool             uses_str_cmp;
     bool             uses_opt_unwrap;
+    bool             uses_bitfield;
+    /* 测试运行器：writer 生成 `int main(int argc, char **argv)` 按用例下标
+       分派；`test_count` 是 test 块个数。 */
+    bool             test_runner;
+    size_t           test_count;
+    bool             uses_assert;
+    bool             uses_mem_eq;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -257,6 +282,21 @@ cir_expr_t    *cir_expr_closure(arena_t *arena, cir_type_t *type,
                                 const char *fn_name, cir_expr_t *env);
 cir_expr_t    *cir_expr_closure_release(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_func_clone(arena_t *arena, cir_expr_t *object);
+cir_expr_t    *cir_expr_bitfield_get(arena_t *arena, cir_expr_t *object,
+                                     size_t offset, size_t width,
+                                     size_t word_bits, cir_type_t *value_type);
+cir_expr_t    *cir_expr_bitfield_set(arena_t *arena, cir_expr_t *object,
+                                     size_t offset, size_t width,
+                                     size_t word_bits, cir_expr_t *value,
+                                     cir_type_t *object_type);
+cir_expr_t    *cir_expr_bitfield_make(arena_t *arena, cir_type_t *type,
+                                      size_t word_bits, cir_init_t *inits);
+cir_expr_t    *cir_expr_cast(arena_t *arena, cir_type_t *type,
+                             cir_expr_t *value);
+cir_expr_t    *cir_expr_ternary(arena_t *arena, cir_expr_t *cond,
+                                cir_expr_t *then_e, cir_expr_t *else_e);
+cir_expr_t    *cir_expr_mem_eq(arena_t *arena, cir_type_t *type,
+                               cir_expr_t *lhs, cir_expr_t *rhs);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

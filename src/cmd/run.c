@@ -24,6 +24,14 @@
 static const char *USAGE =
     "usage: clux run [subpkg|<file>] [-D KEY=VALUE]...\n";
 
+/* 源码运行：main 的整数返回值即进程退出码（与 clux build 产物一致，
+   差分测试依赖这一点）。 */
+static int run_source(const char *path) {
+    int code = 0;
+    int rc = driver_run_file_exit(path, &code);
+    return rc != 0 ? rc : code;
+}
+
 /* 判断字符串是否像文件路径：
  *   - 以 "./" 或 ".\" 或 "../" 或 "..\" 开头（相对路径，/ 与 \ 均可）
  *   - 以 "/" 或 "\" 开头（绝对路径）
@@ -76,7 +84,7 @@ int cmd_run(const cmd_args_t *args) {
         if (driver_detect_input(entry) == DRIVER_INPUT_CXB) {
             rc = driver_run_bin(entry);
         } else {
-            rc = driver_run_file(entry);
+            rc = run_source(entry);
         }
         free(entry);
         return rc;
@@ -95,7 +103,7 @@ int cmd_run(const cmd_args_t *args) {
         if (driver_detect_input(arg0) == DRIVER_INPUT_CXB) {
             return driver_run_bin(arg0);
         }
-        return driver_run_file(arg0);
+        return run_source(arg0);
     }
 
     /* 非文件路径 → 当子包名从 clux.mod 查找 */
@@ -106,7 +114,7 @@ int cmd_run(const cmd_args_t *args) {
     if (driver_detect_input(entry) == DRIVER_INPUT_CXB) {
         rc = driver_run_bin(entry);
     } else {
-        rc = driver_run_file(entry);
+        rc = run_source(entry);
     }
     free(entry);
     return rc;

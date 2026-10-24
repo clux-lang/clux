@@ -36,14 +36,18 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "build",
-        .usage = "clux build <file.cx>",
+        .usage = "clux build <file.cx> [--emit-c[=PATH]] [--output=PATH]",
         .help =
             "Compile clux source into a native executable.\n"
             "\n"
-            "  clux build <file.cx>\n"
+            "  clux build <file.cx>              build an executable next to src\n"
+            "  clux build <file.cx> --emit-c     write C source only (no cc call)\n"
+            "  clux build <file.cx> --emit-c=P   write C source to P\n"
+            "  clux build <file.cx> --output=P   executable path P\n"
             "\n"
             "Single-file C backend stage: no clux.mod, imports, FFI or\n"
-            "library link arguments yet.",
+            "library link arguments yet. The host C compiler is taken from\n"
+            "$CC (clang on Windows, cc elsewhere).",
         .handler = cmd_build,
     },
     {
@@ -88,12 +92,16 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "test",
-        .usage = "clux test [<file.cx>]",
+        .usage = "clux test [<file.cx>] [--backend=vm|c]",
         .help =
             "Run tests.\n"
             "\n"
             "  clux test <file.cx>  run test blocks in one source file\n"
             "  clux test            run all .cx test blocks in the clux.mod package\n"
+            "\n"
+            "  --backend=vm   run tests in the VM backend (default)\n"
+            "  --backend=c    build a C test runner and run each test in its\n"
+            "                 own subprocess (single <file.cx> only)\n"
             "\n"
             "Test blocks are ignored by `build` / `run`. Results are printed in\n"
             "a gtest-like format; exits nonzero if any test fails.",

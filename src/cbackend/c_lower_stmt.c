@@ -1,6 +1,7 @@
 #include "cbackend/c_lower_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool is_defer_name(strslice_t n) {
@@ -32,10 +33,143 @@ const type_t *lookup_local(lower_ctx_t *lc, strslice_t name) {
         if (l->name.len == name.len &&
             memcmp(l->name.ptr, name.ptr, name.len) == 0)
             return l->type;
+    /* 局部变量遮蔽全局变量：先查 locals，再查 globals。 */
+    for (lower_local_t *g = lc->globals; g; g = g->next)
+        if (g->name.len == name.len &&
+            memcmp(g->name.ptr, name.ptr, name.len) == 0)
+            return g->type;
     return NULL;
 }
 
+void register_global(lower_ctx_t *lc, strslice_t name, const type_t *type) {
+    if (!name.ptr || !type) return;
+    lower_local_t *l = (lower_local_t *)arena_calloc(
+        lc->arena, 1, sizeof(*l), ALIGNOF(max_align_t));
+    if (!l) return;
+    l->name = name;
+    l->type = type;
+    l->next = lc->globals;
+    lc->globals = l;
+}
+
+/* switch 的模式比较：`<tmp> == <pattern>`；str 用 clux_str_eq。
+   模式按到达顺序惰性求值（|| 短路），与 VM 的 EQ/JNZ 链一致。
+   注意：传入的 tmp 节点会被放进 call 的 args 链（append 会改写 next），
+   因此每次比较都必须新建一个 ident 节点，不能复用同一个表达式节点。 */
+static cir_expr_t *lower_switch_eq(lower_ctx_t *lc, const type_t *vt,
+                                   const char *tmp_name, ast_node_t *pattern) {
+    cir_expr_t *rhs = lower_expr(lc, pattern);
+    if (!rhs) return NULL;
+    cir_expr_t *tmp = cir_expr_ident(lc->arena, tmp_name);
+    if (!tmp) return NULL;
+    const type_t *pt = infer_expr_type(lc, pattern);
+    bool is_str = (vt && type_kind_of(type_strip_quals(vt)) == TYPE_KIND_STR) ||
+                  (pt && type_kind_of(type_strip_quals(pt)) == TYPE_KIND_STR);
+    if (is_str) {
+        lc->unit->uses_str_cmp = true;
+        cir_expr_t *call = cir_expr_call(lc->arena, "clux_str_eq", NULL);
+        if (!call) return NULL;
+        cir_expr_append_arg(call, tmp);
+        cir_expr_append_arg(call, rhs);
+        return call;
+    }
+    return cir_expr_binary(lc->arena, "==", tmp, rhs);
+}
+
+/* `.?` / `.!`（AST_TRY）的语句化展开。
+ *
+ * sema 生成的 AST_TRY 结构：
+ *   { var temp = <setup.init>;  (setup)
+ *     ok_call ? value_call : <tail_stmt> }   // tail 是 return / panic
+ *
+ * 表达式形式在 C 里没有对应的可移植写法（需要语句 + 早退出），因此本函数
+ * 产出前置语句链：`setup; if (!ok_call) { tail }`，成功值由调用方接续。
+ */
+cir_stmt_t *lower_try_prefix(lower_ctx_t *lc, ast_try_t *tr, bool *ok) {
+    if (!tr) {
+        *ok = false;
+        return NULL;
+    }
+    cir_stmt_t *head = NULL, *tail = NULL;
+    if (tr->setup) {
+        cir_stmt_t *setup = lower_stmt(lc, tr->setup, ok);
+        if (!*ok) return NULL;
+        head = setup;
+        for (cir_stmt_t *t = setup; t; t = t->next) tail = t;
+    }
+    cir_expr_t *ok_call = lower_expr(lc, tr->ok_call);
+    if (!ok_call) {
+        *ok = false;
+        return NULL;
+    }
+    cir_stmt_t *ifs = cir_stmt_new(lc->arena, CIR_STMT_IF);
+    if (!ifs) {
+        *ok = false;
+        return NULL;
+    }
+    ifs->expr = cir_expr_unary(lc->arena, "!", ok_call);
+    if (tr->tail_stmt) {
+        bool ok2 = true;
+        ifs->body = lower_stmt(lc, tr->tail_stmt, &ok2);
+        if (!ok2) {
+            *ok = false;
+            return NULL;
+        }
+    }
+    if (tail) tail->next = ifs;
+    else head = ifs;
+    return head;
+}
+
+/* 由 TRY 的成功值构造赋值/return 时复用的 AST 节点。 */
+static ast_node_t *try_value_return(arena_t *arena, ast_return_t *orig,
+                                    ast_node_t *value) {
+    ast_node_t *ret = ast_return_new(arena, orig->base.tok_begin,
+                                     orig->base.tok_end);
+    if (!ret) return NULL;
+    ((ast_return_t *)ret)->value = value;
+    ret->defers = orig->base.defers;
+    return ret;
+}
+
+static void append_stmt_chain(cir_stmt_t **head, cir_stmt_t **tail,
+                              cir_stmt_t *s) {
+    if (!s) return;
+    if (*tail) (*tail)->next = s;
+    else *head = s;
+    cir_stmt_t *t = s;
+    while (t->next) t = t->next;
+    *tail = t;
+}
+
+static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok);
+
+/* 语句 lowering 入口：先 prelude、再语句主体、最后 postlude。
+ * sema 把 `.?'/`.!' 之类的错误处理语法糖展开成挂在语句上的
+ * prelude/postlude（临时变量 + if 分支），compiler 也是这么消费的。 */
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
+    if (!s || lc->failed) return NULL;
+    bool noop = s->kind == AST_ASSIGN && ((ast_assign_t *)s)->sugar_noop;
+    cir_stmt_t *head = NULL, *tail = NULL;
+    if (s->prelude) {
+        cir_stmt_t *pre = lower_ast_list(lc, s->prelude, ok);
+        if (!*ok) return head;
+        append_stmt_chain(&head, &tail, pre);
+    }
+    if (!noop) {
+        cir_stmt_t *core = lower_stmt_core(lc, s, ok);
+        if (!*ok) return head;
+        append_stmt_chain(&head, &tail, core);
+    }
+    if (s->postlude) {
+        cir_stmt_t *post = lower_ast_list(lc, s->postlude, ok);
+        if (!*ok) return head;
+        append_stmt_chain(&head, &tail, post);
+    }
+    return head;
+}
+
+static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     if (!s || lc->failed) return NULL;
     switch (s->kind) {
     case AST_FUNC_DEF: {
@@ -73,6 +207,38 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!st) return NULL;
         st->type = ct;
         st->name = mangle(lc->arena, "clux_v_", vd->name);
+        if (vd->init && vd->init->kind == AST_TRY) {
+            /* `var v = expr.?;`：先声明 v，再把 try 展开成
+               `{ setup; if (!ok) { tail } v = value; }`。 */
+            ast_try_t *tr = (ast_try_t *)vd->init;
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = lower_try_prefix(lc, tr, ok);
+            if (!*ok) return NULL;
+            ast_node_t *id = ast_ident_new(lc->arena, s->tok_begin, s->tok_end);
+            ast_node_t *as = ast_assign_new(lc->arena, s->tok_begin, s->tok_end);
+            if (!id || !as) {
+                *ok = false;
+                return NULL;
+            }
+            ((ast_ident_t *)id)->name = vd->name;
+            ((ast_assign_t *)as)->target = id;
+            ((ast_assign_t *)as)->value = tr->value_call;
+            bool ok2 = true;
+            cir_stmt_t *assign = lower_stmt(lc, as, &ok2);
+            if (!ok2) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *t = blk->body;
+            if (!t) blk->body = assign;
+            else {
+                while (t->next) t = t->next;
+                t->next = assign;
+            }
+            st->next = blk;
+            return st;
+        }
         if (vd->init && vd->init->kind != AST_UNDEF) {
             const type_t *it = infer_expr_type(lc, vd->init);
             if (vd->init->kind == AST_NIL && t &&
@@ -90,10 +256,52 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_ASSIGN: {
         ast_assign_t *a = (ast_assign_t *)s;
+        if (a->value && a->value->kind == AST_TRY) {
+            /* `x = expr.?;`：赋值目标只求值一次——先取 try 前缀，再用
+               成功值赋值。 */
+            ast_try_t *tr = (ast_try_t *)a->value;
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = lower_try_prefix(lc, tr, ok);
+            if (!*ok) return NULL;
+            ast_node_t *as =
+                ast_assign_new(lc->arena, s->tok_begin, s->tok_end);
+            if (!as) {
+                *ok = false;
+                return NULL;
+            }
+            ((ast_assign_t *)as)->target = a->target;
+            ((ast_assign_t *)as)->value = tr->value_call;
+            ((ast_assign_t *)as)->op = NULL;
+            bool ok2 = true;
+            cir_stmt_t *assign = lower_stmt(lc, as, &ok2);
+            if (!ok2) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *t = blk->body;
+            if (!t) blk->body = assign;
+            else {
+                while (t->next) t = t->next;
+                t->next = assign;
+            }
+            return blk;
+        }
+        const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        if (a->target && a->target->kind == AST_MEMBER &&
+            ((ast_member_t *)a->target)->is_bitfield) {
+            /* bitfield 字段不是 C 左值：按位读改写（CIR_EXPR_BITFIELD_SET）。 */
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st) return NULL;
+            st->expr = lower_bitfield_assign(
+                lc, (ast_member_t *)a->target, op, a->value);
+            if (!st->expr) *ok = false;
+            return st;
+        }
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
         if (!st) return NULL;
         st->lhs = lower_expr(lc, a->target);
-        st->op = a->op ? token_text(lc->arena, a->op) : "=";
+        st->op = op;
         const type_t *tt = infer_expr_type(lc, a->target);
         if (a->value && a->value->kind == AST_NIL && tt &&
             type_kind_of(type_strip_quals(tt)) == TYPE_KIND_OPTION) {
@@ -148,6 +356,33 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_RETURN: {
         ast_return_t *r = (ast_return_t *)s;
+        if (r->value && r->value->kind == AST_TRY) {
+            /* `return expr.?;`：try 前缀 + 用成功值走普通 return 路径
+               （option 包装 / defer / 清理照常生效）。 */
+            ast_try_t *tr = (ast_try_t *)r->value;
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = lower_try_prefix(lc, tr, ok);
+            if (!*ok) return NULL;
+            ast_node_t *ret2 = try_value_return(lc->arena, r, tr->value_call);
+            if (!ret2) {
+                *ok = false;
+                return NULL;
+            }
+            bool ok2 = true;
+            cir_stmt_t *ret_stmt = lower_stmt(lc, ret2, &ok2);
+            if (!ok2) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *t = blk->body;
+            if (!t) blk->body = ret_stmt;
+            else {
+                while (t->next) t = t->next;
+                t->next = ret_stmt;
+            }
+            return blk;
+        }
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_RETURN);
         if (!st) return NULL;
         if (r->value) {
@@ -205,6 +440,70 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         return st;
+    }
+    case AST_SWITCH: {
+        /* switch 是 if 语法糖：先求值一次 cond 存临时变量，再展开成
+           `if (t == p1 || t == p2) {...} else if (...) {...} else {default}`。
+           无 fallthrough；不引入新 IR 节点。 */
+        ast_switch_t *sw = (ast_switch_t *)s;
+        const type_t *vt = infer_expr_type(lc, sw->cond);
+        cir_type_t *cvt = map_type(lc, vt);
+        if (!vt || !cvt) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, s),
+                       "c backend: cannot determine switch condition type");
+            *ok = false;
+            return NULL;
+        }
+        cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+        cir_stmt_t *decl = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+        if (!blk || !decl) return NULL;
+        char tmp[64];
+        snprintf(tmp, sizeof tmp, "clux_switch_%u", lc->switch_seq++);
+        decl->type = cvt;
+        decl->name = copy_arena(lc->arena, tmp);
+        decl->expr = lower_expr(lc, sw->cond);
+        if (!decl->expr) {
+            *ok = false;
+            return NULL;
+        }
+        blk->body = decl;
+        cir_stmt_t *tail = decl;
+
+        cir_stmt_t *chain_head = NULL, *chain_prev = NULL;
+        for (ast_node_t *cs = sw->cases; cs; cs = cs->next) {
+            if (cs->kind != AST_SWITCH_CASE) continue;
+            ast_switch_case_t *sc = (ast_switch_case_t *)cs;
+            cir_expr_t *cond = NULL;
+            for (ast_node_t *pt = sc->patterns; pt; pt = pt->next) {
+                cir_expr_t *eq = lower_switch_eq(lc, vt, decl->name, pt);
+                if (!eq) {
+                    *ok = false;
+                    return NULL;
+                }
+                cond = cond ? cir_expr_binary(lc->arena, "||", cond, eq) : eq;
+            }
+            if (!cond) continue;
+            cir_stmt_t *ifs = cir_stmt_new(lc->arena, CIR_STMT_IF);
+            if (!ifs) return NULL;
+            ifs->expr = cond;
+            ifs->body = lower_block(lc, sc->body, ok);
+            if (!*ok) return NULL;
+            if (chain_prev) chain_prev->else_body = ifs;
+            else chain_head = ifs;
+            chain_prev = ifs;
+        }
+        if (sw->default_body) {
+            cir_stmt_t *def = lower_block(lc, sw->default_body, ok);
+            if (!*ok) return NULL;
+            if (chain_prev) chain_prev->else_body = def;
+            else if (def) {
+                /* 没有 case：default 体直接执行。 */
+                tail->next = def;
+                return blk;
+            }
+        }
+        if (chain_head) tail->next = chain_head;
+        return blk;
     }
     case AST_BREAK: {
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_BREAK);
@@ -397,9 +696,13 @@ cir_stmt_t *lower_ast_list(lower_ctx_t *lc, ast_node_t *list, bool *ok) {
         cir_stmt_t *st = lower_stmt(lc, s, ok);
         if (!*ok) return head;
         if (!st) continue;
+        /* st 可能是一条语句链（prelude / 主体 / postlude）：尾指针要走到链尾，
+           否则下一条语句会覆盖链中后续节点。 */
+        cir_stmt_t *last = st;
+        while (last->next) last = last->next;
         if (tail) tail->next = st;
         else head = st;
-        tail = st;
+        tail = last;
     }
     return head;
 }
@@ -413,9 +716,11 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
         cir_stmt_t *st = lower_stmt(lc, s, ok);
         if (!*ok) return head;
         if (!st) continue;
+        cir_stmt_t *last = st;
+        while (last->next) last = last->next;
         if (tail) tail->next = st;
         else head = st;
-        tail = st;
+        tail = last;
     }
     return head;
 }

@@ -170,8 +170,34 @@ static int driver_lex_into(allocator_t *alloc,
 
 /* ---- Stage ② + ③ + ④: lex → parse → sema ---- */
 
-int driver_run_file(const char *path) {
-  if (!path) {
+/* main 的返回值 → 进程退出码（`clux run` 与 C 后端可执行文件对齐）。
+ * 只有整数返回类型参与；void / 非整数返回 0。 */
+static int main_exit_code(vm_t *vm, value_t *v) {
+    if (!v || value_is_error(vm, v)) return 0;
+    const type_t *t = value_type(v);
+    if (!t) return 0;
+    t = type_strip_quals(t);
+    if (type_kind_of(t) != TYPE_KIND_INT) return 0;
+    if (!value_data(v) || t->size == 0 || t->size > 8) return 0;
+    uint64_t raw = 0;
+    memcpy(&raw, value_data(v), t->size);
+    bool is_signed = t->name.len > 0 && t->name.ptr && t->name.ptr[0] == 'i';
+    if (is_signed) {
+        switch (t->size) {
+        case 1: return (int)(int8_t)raw;
+        case 2: return (int)(int16_t)raw;
+        case 4: return (int)(int32_t)raw;
+        default: return (int)(int64_t)raw;
+        }
+    }
+    return (int)raw;
+}
+
+int driver_run_file(const char *path) { return driver_run_file_exit(path, NULL); }
+
+int driver_run_file_exit(const char *path, int *exit_code) {
+    if (exit_code) *exit_code = 0;
+    if (!path) {
     fprintf(stderr, "run: no input file\n");
     return 1;
   }
@@ -290,6 +316,10 @@ int driver_run_file(const char *path) {
   /* 恢复 vm scope 到原始值（module scope 归 module_destroy 释放） */
   vm->root_scope    = vm_orig_root;
   vm->current_scope = vm_orig_current;
+
+  /* main 的整数返回值即退出码（与 C 后端可执行文件的退出码一致）。 */
+  int code = main_exit_code(vm, mr);
+  if (exit_code) *exit_code = code;
 
   /* module 归 vm->modules 拥有，vm_destroy 统一释放 */
   vm_destroy(&vm);

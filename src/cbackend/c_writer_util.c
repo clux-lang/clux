@@ -33,3 +33,10 @@ void cw_write_c_string(string_t *sb, const char *s) {
         string_append_char(sb, *p);
     }
 }
+
+/* `struct clux_s_5` → `clux_s_5`：bitfield 构造辅助函数名的后缀。 */
+const char *cw_bf_helper_suffix(const cir_type_t *t) {
+    const char *name = t && t->c_name ? t->c_name : "clux_s_bitfield";
+    if (strncmp(name, "struct ", 7) == 0) name += 7;
+    return name;
+}

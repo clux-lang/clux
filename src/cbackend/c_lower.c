@@ -12,6 +12,19 @@ static ast_func_def_t *find_main(ast_program_t *prog) {
     return NULL;
 }
 
+/* 测试运行器：test 块已被改写成 `__clux_test_<n>` 无参 void 函数。 */
+static size_t count_test_funcs(ast_program_t *prog) {
+    size_t n = 0;
+    for (ast_node_t *f = prog->funcs; f; f = f->next) {
+        if (f->kind != AST_FUNC_DEF) continue;
+        strslice_t name = ((ast_func_def_t *)f)->name;
+        if (name.ptr && name.len >= 13 &&
+            memcmp(name.ptr, "__clux_test_", 12) == 0)
+            n++;
+    }
+    return n;
+}
+
 static void mark_cleanup_returns(cir_stmt_t *s) {
     for (; s; s = s->next) {
         if (s->kind == CIR_STMT_RETURN) s->cleanup_return = true;
@@ -92,27 +105,30 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
 }
 
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
-                           const char *source_path) {
+                           const char *source_path, bool test_mode) {
     if (!arena || !sema || !prog || !source_path) return NULL;
     ast_func_def_t *main_fn = find_main(prog);
-    if (!main_fn) {
+    if (!main_fn && !test_mode) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)prog),
                    "c backend: no 'main' function");
         return NULL;
     }
     size_t param_count = 0;
-    for (ast_node_t *p = main_fn->params; p; p = p->next) param_count++;
-    if (param_count != 0) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)main_fn),
-                   "c backend: 'main' must not take parameters");
-        return NULL;
-    }
-    if (main_fn->return_expr) {
-        const type_t *rt = sema_resolve_type_slot(sema, &main_fn->return_expr);
-        if (rt != sema->vm->type_i32 && rt != sema->vm->type_void) {
+    if (main_fn) {
+        for (ast_node_t *p = main_fn->params; p; p = p->next) param_count++;
+        if (param_count != 0) {
             diag_error(sema->diag, sema_loc(sema, (ast_node_t *)main_fn),
-                       "c backend: 'main' must return i32 or void");
+                       "c backend: 'main' must not take parameters");
             return NULL;
+        }
+        if (main_fn->return_expr) {
+            const type_t *rt =
+                sema_resolve_type_slot(sema, &main_fn->return_expr);
+            if (rt != sema->vm->type_i32 && rt != sema->vm->type_void) {
+                diag_error(sema->diag, sema_loc(sema, (ast_node_t *)main_fn),
+                           "c backend: 'main' must return i32 or void");
+                return NULL;
+            }
         }
     }
 
@@ -120,6 +136,12 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     cir_unit_t *u = cir_unit_new(arena, source_path);
     if (!u) return NULL;
     lc.unit = u;
+    /* 测试运行器标记必须在 lowering 之前就位：lowering 里 assert 的映射
+       依赖它。 */
+    if (test_mode) {
+        u->test_runner = true;
+        u->test_count = count_test_funcs(prog);
+    }
     cir_unit_add_include(u, arena, "stdint.h");
     cir_unit_add_include(u, arena, "stddef.h");
     cir_unit_add_include(u, arena, "stdbool.h");
@@ -133,6 +155,7 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
             t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t || type_kind_of(t) == TYPE_KIND_VOID)
             t = infer_expr_type(&lc, vd->init);
+        if (t) register_global(&lc, vd->name, t);
         cir_type_t *ct = map_type(&lc, t);
         if (!ct) {
             diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
@@ -152,6 +175,10 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_STRUCT_DEF) continue;
         ast_struct_def_t *sd = (ast_struct_def_t *)n;
+        /* 泛型 struct 的方法体与类型参数绑定，sema 不会把实例化后的方法体
+           放进 prog->funcs（只有函数实例会被重新解析成独立 AST）。因此 C
+           后端暂时不 lowering 模板方法体；调用点会报“方法未找到”。 */
+        if (sd->generic.count > 0) continue;
         for (ast_node_t *mem = sd->members; mem; mem = mem->next) {
             if (mem->kind != AST_FUNC_DEF) continue;
             ast_func_def_t *m = (ast_func_def_t *)mem;
@@ -190,8 +217,10 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (!cf || lc.failed) return NULL;
         cir_unit_add_function(u, cf);
     }
-    cir_function_t *cm = lower_function(&lc, main_fn, true);
-    if (!cm || lc.failed) return NULL;
-    cir_unit_add_function(u, cm);
+    cir_function_t *cm = main_fn ? lower_function(&lc, main_fn, true) : NULL;
+    if (main_fn) {
+        if (!cm || lc.failed) return NULL;
+        cir_unit_add_function(u, cm);
+    }
     return u;
 }

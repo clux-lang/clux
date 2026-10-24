@@ -63,6 +63,15 @@ int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool);
  */
 int driver_run_file(const char *path);
 
+/**
+ * 同 `driver_run_file`，但把 main 的整数返回值经 `*exit_code` 带回
+ * （void / 非整数 main 记为 0）。`clux run` 用它把退出码传回进程，
+ * 与 `clux build` 生成的可执行文件保持一致（差分测试依赖这一点）。
+ *
+ * 返回：0 成功（此时 *exit_code 有效）；1 编译/运行错误。
+ */
+int driver_run_file_exit(const char *path, int *exit_code);
+
 /** 测试模式：编译文件及 import 模块，执行其中所有 test 块。 */
 int driver_test_file(const char *path);
 

@@ -339,6 +339,85 @@ cir_expr_t *cir_expr_func_clone(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
+cir_expr_t *cir_expr_bitfield_get(arena_t *arena, cir_expr_t *object,
+                                  size_t offset, size_t width,
+                                  size_t word_bits, cir_type_t *value_type) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_BITFIELD_GET;
+    e->lhs = object;
+    e->type = value_type;
+    e->bit_offset = offset;
+    e->bit_width = width;
+    e->bit_word_bits = word_bits;
+    return e;
+}
+
+cir_expr_t *cir_expr_bitfield_set(arena_t *arena, cir_expr_t *object,
+                                  size_t offset, size_t width,
+                                  size_t word_bits, cir_expr_t *value,
+                                  cir_type_t *object_type) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_BITFIELD_SET;
+    e->lhs = object;
+    e->rhs = value;
+    e->type = object_type;
+    e->bit_offset = offset;
+    e->bit_width = width;
+    e->bit_word_bits = word_bits;
+    return e;
+}
+
+cir_expr_t *cir_expr_bitfield_make(arena_t *arena, cir_type_t *type,
+                                   size_t word_bits, cir_init_t *inits) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_BITFIELD_MAKE;
+    e->type = type;
+    e->bit_word_bits = word_bits;
+    e->inits = inits;
+    return e;
+}
+
+cir_expr_t *cir_expr_cast(arena_t *arena, cir_type_t *type,
+                          cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_CAST;
+    e->type = type;
+    e->lhs = value;
+    return e;
+}
+
+cir_expr_t *cir_expr_ternary(arena_t *arena, cir_expr_t *cond,
+                             cir_expr_t *then_e, cir_expr_t *else_e) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_TERNARY;
+    e->lhs = cond;
+    e->rhs = then_e;
+    e->high = else_e;
+    return e;
+}
+
+cir_expr_t *cir_expr_mem_eq(arena_t *arena, cir_type_t *type, cir_expr_t *lhs,
+                            cir_expr_t *rhs) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_MEM_EQ;
+    e->type = type;
+    e->lhs = lhs;
+    e->rhs = rhs;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;

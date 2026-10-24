@@ -60,6 +60,7 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_MEMBER: {
         ast_member_t *m = (ast_member_t *)e;
+        if (m->is_bitfield) return bitfield_value_type(lc, m->bit_value_type_id);
         const type_t *ot = infer_expr_type(lc, m->object);
         if (!ot) return NULL;
         ot = type_strip_quals(ot);
@@ -107,6 +108,11 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         if (!c->type) return NULL;
         return sema_resolve_type_slot(lc->sema, &c->type);
     }
+    case AST_TERNARY: {
+        ast_ternary_t *t = (ast_ternary_t *)e;
+        const type_t *tt = infer_expr_type(lc, t->then_branch);
+        return tt ? tt : infer_expr_type(lc, t->else_branch);
+    }
     case AST_IS_TAG:
     case AST_OPT_IS_SOME:
         return vm->type_bool;
@@ -118,6 +124,10 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return infer_expr_type(lc, ((ast_unary_t *)e)->operand);
     case AST_BINARY: {
         ast_binary_t *b = (ast_binary_t *)e;
+        if (token_is(b->op, "as")) {
+            const type_t *target = sema_resolve_type_slot(lc->sema, &b->rhs);
+            if (target) return target;
+        }
         if (token_is(b->op, "is")) return vm->type_bool;
         if (token_is(b->op, "==") || token_is(b->op, "!=") ||
             token_is(b->op, "<") || token_is(b->op, "<=") ||

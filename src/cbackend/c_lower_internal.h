@@ -41,7 +41,10 @@
 #include "parser/ast_slice.h"
 #include "parser/ast_string_lit.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_switch.h"
 #include "parser/ast_take.h"
+#include "parser/ast_ternary.h"
+#include "parser/ast_try.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_unwrap.h"
@@ -91,6 +94,7 @@ typedef struct lower_ctx {
     cir_unit_t *unit;
     lower_defer_t *defers;
     lower_local_t *locals;
+    lower_local_t *globals; /* 全局变量类型表（推断表达式类型 / 值调用用） */
     lower_capture_t *captures;
     lower_method_t *methods;
     cir_stmt_t *cleanup;
@@ -98,6 +102,7 @@ typedef struct lower_ctx {
     unsigned    ret_seq;
     unsigned    sig_seq;
     unsigned    fnlit_seq;
+    unsigned    switch_seq;
     bool        failed;
 } lower_ctx_t;
 
@@ -126,12 +131,21 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
+/* bitfield：逻辑字段按位读写（storage 是 struct 的隐藏数组字段）。 */
+const type_t *bitfield_value_type(lower_ctx_t *lc, uint32_t type_id);
+const ast_struct_def_t *bitfield_def_of(lower_ctx_t *lc, const type_t *t);
+cir_expr_t *lower_bitfield_assign(lower_ctx_t *lc, ast_member_t *m,
+                                  const char *op, ast_node_t *value);
 
 /* statements */
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok);
 cir_stmt_t *lower_ast_list(lower_ctx_t *lc, ast_node_t *list, bool *ok);
 cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok);
+/* `.?` / `.!`（AST_TRY）的语句化展开：setup + `if (!ok) { tail }`。
+   成功路径的值由调用方接续（赋值/return）。 */
+cir_stmt_t *lower_try_prefix(lower_ctx_t *lc, ast_try_t *tr, bool *ok);
 void register_local(lower_ctx_t *lc, strslice_t name, const type_t *type);
+void register_global(lower_ctx_t *lc, strslice_t name, const type_t *type);
 const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
 
 /* functions */
