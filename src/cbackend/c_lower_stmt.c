@@ -26,6 +26,36 @@ static lower_defer_t *find_defer_entry(lower_ctx_t *lc, strslice_t name) {
     return NULL;
 }
 
+lower_local_fn_t *find_local_fn(lower_ctx_t *lc, strslice_t name) {
+    for (lower_local_fn_t *f = lc->local_fns; f; f = f->next)
+        if (f->name.len == name.len &&
+            memcmp(f->name.ptr, name.ptr, name.len) == 0)
+            return f;
+    return NULL;
+}
+
+void register_local_as(lower_ctx_t *lc, strslice_t name,
+                        const type_t *type, const char *cname) {
+    if (!name.ptr || !type || !cname) return;
+    lower_local_t *l = (lower_local_t *)arena_calloc(
+        lc->arena, 1, sizeof(*l), ALIGNOF(max_align_t));
+    if (!l) return;
+    l->name = name;
+    l->type = type;
+    l->cname = cname;
+    l->next = lc->locals;
+    lc->locals = l;
+    lower_local_t *d = (lower_local_t *)arena_calloc(
+        lc->arena, 1, sizeof(*d), ALIGNOF(max_align_t));
+    if (d) {
+        d->name = name;
+        d->cname = cname;
+        d->type = type;
+        d->next = lc->local_decls;
+        lc->local_decls = d;
+    }
+}
+
 void register_local(lower_ctx_t *lc, strslice_t name,
                            const type_t *type) {
     if (!name.ptr || !type) return;
@@ -325,10 +355,84 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             return NULL;
         }
-        diag_error(lc->sema->diag, sema_loc(lc->sema, s),
-                   "c backend: local function definitions are not supported");
-        lc->failed = true;
-        *ok = false;
+        /* 块内具名函数：无**值捕获**时降成独立 static C 函数（自递归/后向
+           兄弟只是函数引用，env 传 NULL）；有值捕获时降成闭包值局部变量
+           （捕获在定义点 clone；自递归经闭包值暂不支持）。 */
+        bool value_cap = false;
+        for (ast_node_t *c = fn->captures; c; c = c->next) {
+            ast_var_def_t *cd = (ast_var_def_t *)c;
+            const type_t *ct = cd->resolved_type;
+            if (!ct && cd->type_expr)
+                ct = sema_resolve_type_slot(lc->sema, &cd->type_expr);
+            if (!ct || type_kind_of(type_strip_quals(ct)) != TYPE_KIND_FUNC ||
+                (cd->init && cd->init->kind != AST_UNDEF))
+                value_cap = true;
+        }
+        if (value_cap) {
+            cir_expr_t *cl = lower_closure_literal(lc, fn);
+            if (!cl) {
+                *ok = false;
+                return NULL;
+            }
+            const type_t *ft = func_type_of_def(lc, fn);
+            cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
+            if (!ct) {
+                *ok = false;
+                return NULL;
+            }
+            lower_local_fn_t *lfe = find_local_fn(lc, fn->name);
+            const char *vn = (lfe && lfe->is_closure && lfe->var_name)
+                                 ? lfe->var_name
+                                 : module_symbol(lc->arena, lc->unit,
+                                                 "fnval_", fn->name);
+            register_local_as(lc, fn->name, ft, vn);
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (!st) return NULL;
+            st->type = ct;
+            st->name = vn;
+            st->expr = cl;
+            return st;
+        }
+        const char *cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
+        const char *obj = module_symbol(lc->arena, lc->unit, "obj_", fn->name);
+        const type_t *ftype = func_type_of_def(lc, fn);
+        if (!cname || !obj || !ftype) {
+            lc->failed = true;
+            *ok = false;
+            return NULL;
+        }
+        lower_local_fn_t *lf = (lower_local_fn_t *)arena_calloc(
+            lc->arena, 1, sizeof(*lf), ALIGNOF(max_align_t));
+        if (!lf) return NULL;
+        lf->name = fn->name;
+        lf->cname = cname;
+        lf->obj = obj;
+        lf->type = ftype;
+        lower_local_fn_t *save_fns = lc->local_fns;
+        lf->next = lc->local_fns;
+        lc->local_fns = lf;
+
+        lower_local_t *save_locals = lc->locals;
+        lower_defer_t *save_defers = lc->defers;
+        cir_stmt_t *save_cleanup = lc->cleanup;
+        cir_type_t *save_ret = lc->return_type;
+        unsigned save_ret_seq = lc->ret_seq;
+        lc->locals = NULL;
+        lc->defers = NULL;
+        lc->cleanup = NULL;
+        lc->ret_seq = 0;
+        cir_function_t *cf = lower_function(lc, fn, false);
+        lc->locals = save_locals;
+        lc->defers = save_defers;
+        lc->cleanup = save_cleanup;
+        lc->return_type = save_ret;
+        lc->ret_seq = save_ret_seq;
+        lc->local_fns = save_fns;
+        if (!cf) {
+            *ok = false;
+            return NULL;
+        }
+        cir_unit_add_function(lc->unit, cf);
         return NULL;
     }
     case AST_VAR_DEF: {
@@ -979,8 +1083,46 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
     /* 块作用域：块内局部声明在块结束后失效（同名遮蔽的 C 名字唯一化也
        依赖这一点回退）。 */
     lower_local_t *save_locals = lc->locals;
+    lower_local_fn_t *save_fns = lc->local_fns;
+    /* 预登记块内**无值捕获**的具名函数：调用点可能出现在定义之前（自递归/
+       后向兄弟），先建 名字→静态 C 函数 映射。值捕获的走闭包值路径，不在
+       预登记范围内。 */
+    for (ast_node_t *s = ((ast_block_t *)block)->stmts; s; s = s->next) {
+        if (s->kind != AST_FUNC_DEF) continue;
+        ast_func_def_t *fn = (ast_func_def_t *)s;
+        if (is_defer_name(fn->name)) continue;
+        bool value_cap = false;
+        for (ast_node_t *c = fn->captures; c; c = c->next) {
+            ast_var_def_t *cd = (ast_var_def_t *)c;
+            const type_t *ct = cd->resolved_type;
+            if (!ct && cd->type_expr)
+                ct = sema_resolve_type_slot(lc->sema, &cd->type_expr);
+            if (!ct || type_kind_of(type_strip_quals(ct)) != TYPE_KIND_FUNC ||
+                (cd->init && cd->init->kind != AST_UNDEF))
+                value_cap = true;
+        }
+        const char *cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
+        const char *obj = module_symbol(lc->arena, lc->unit, "obj_", fn->name);
+        const type_t *ftype = func_type_of_def(lc, fn);
+        if (!cname || !obj || !ftype) continue;
+        lower_local_fn_t *lf = (lower_local_fn_t *)arena_calloc(
+            lc->arena, 1, sizeof(*lf), ALIGNOF(max_align_t));
+        if (!lf) continue;
+        lf->name = fn->name;
+        lf->cname = cname;
+        lf->obj = obj;
+        lf->type = ftype;
+        if (value_cap) {
+            lf->is_closure = true;
+            lf->var_name = module_symbol(lc->arena, lc->unit, "fnval_",
+                                         fn->name);
+        }
+        lf->next = lc->local_fns;
+        lc->local_fns = lf;
+    }
     cir_stmt_t *result = lower_block_scoped(lc, block, ok);
     lc->locals = save_locals;
+    lc->local_fns = save_fns;
     return result;
 }
 

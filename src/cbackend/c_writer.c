@@ -218,7 +218,8 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     cw_put(sb, "extern size_t strlen(const char *);\n");
     cw_put(sb, "extern void abort(void);\n");
     cw_put(sb, "extern int printf(const char *, ...);\n");
-    cw_put(sb, "extern int fflush(void *);\n\n");
+    cw_put(sb, "extern int fflush(void *);\n");
+    cw_put(sb, "extern void _Exit(int);\n\n");
     if (unit->test_runner || unit->tests) {
         /* 断言运行时用 `struct clux_str` 传消息：测试单元无条件给出定义
            （include guard 与类型发射器共享，重复定义安全）。必须先于
@@ -259,6 +260,19 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     }
     if (unit->uses_opt_unwrap) {
         cw_put(sb, "static void clux_panic_none(void) { abort(); }\n");
+    }
+    if (unit->uses_panic) {
+        cw_put(sb, "#ifndef CLUX_STR_STRUCT_DEFINED\n");
+        cw_put(sb, "#define CLUX_STR_STRUCT_DEFINED\n");
+        cw_put(sb, "struct clux_str { const char *data; size_t len; };\n");
+        cw_put(sb, "#endif\n");
+        cw_put(sb,
+               "static void clux_panic(struct clux_str msg) {\n");
+        cw_put(sb, "    printf(\"panic: %.*s\\n\", (int)msg.len, "
+                   "msg.data ? msg.data : \"\");\n");
+        cw_put(sb, "    fflush(NULL);\n");
+        cw_put(sb, "    _Exit(1);\n");
+        cw_put(sb, "}\n");
     }
     if (unit->uses_index_check) {
         cw_put(sb,

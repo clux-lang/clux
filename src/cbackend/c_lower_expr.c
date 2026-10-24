@@ -333,8 +333,46 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (call->is_ffi_call) return lower_ffi_call(lc, call);
     if (call->is_data_call) return lower_data_call(lc, call);
     if (call_is_cfunc_ptr(call)) return lower_cfunc_ptr(lc, call);
+    /* `panic("msg")`：内建终止分支（打印后 _Exit(1)，与 VM 一致）。 */    if (strslice_eq(cname0, STRSLICE_LIT("panic"))) {
+        lc->unit->uses_panic = true;
+        cir_expr_t *out = cir_expr_call(lc->arena, "clux_panic", NULL);
+        if (!out) return NULL;
+        for (ast_node_t *a = call->args; a; a = a->next) {
+            cir_expr_t *arg = lower_call_arg(lc, a);
+            if (!arg) return NULL;
+            cir_expr_append_arg(out, arg);
+        }
+        return out;
+    }
     /* 跨模块泛型实例调用：sema 已把 callee 改写成实例 FUNC_REF（实例体在
        定义模块的 prog 里），按 fid 在**所有模块**里找回定义模块。 */
+    /* 块内具名函数调用：直接调用降出的 static C 函数（env 传 NULL）。 */
+    if (cname0.ptr) {
+        lower_local_fn_t *lf = find_local_fn(lc, cname0);
+        if (lf && lf->is_closure && lf->var_name) {
+            cir_expr_t *callee = cir_expr_ident(lc->arena, lf->var_name);
+            if (!callee) return NULL;
+            cir_expr_t *lout = cir_expr_func_call(lc->arena, callee, NULL);
+            if (!lout) return NULL;
+            for (ast_node_t *a = call->args; a; a = a->next) {
+                cir_expr_t *arg = lower_call_arg(lc, a);
+                if (!arg) return NULL;
+                cir_expr_append_arg(lout, arg);
+            }
+            return lout;
+        }
+        if (lf) {
+            cir_expr_t *lout = cir_expr_call(lc->arena, lf->cname, NULL);
+            if (!lout) return NULL;
+            cir_expr_append_arg(lout, cir_expr_ident(lc->arena, "NULL"));
+            for (ast_node_t *a = call->args; a; a = a->next) {
+                cir_expr_t *arg = lower_call_arg(lc, a);
+                if (!arg) return NULL;
+                cir_expr_append_arg(lout, arg);
+            }
+            return lout;
+        }
+    }
     if (call->callee && call->callee->kind == AST_FUNC_REF) {
         ast_func_ref_t *ref = (ast_func_ref_t *)call->callee;
         module_t *owner = NULL;
@@ -578,6 +616,16 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         strslice_t name = ((ast_ident_t *)e)->name;
         const char *lc_name = lookup_local_cname(lc, name);
         if (lc_name) return cir_expr_ident(lc->arena, lc_name);
+        /* `var f = inner;`：块内具名函数作为函数值 → 函数对象。 */
+        {
+            lower_local_fn_t *lf = find_local_fn(lc, name);
+            if (lf && lf->is_closure && lf->var_name)
+                return cir_expr_ident(lc->arena, lf->var_name);
+            if (lf) {
+                cir_type_t *ct = map_type(lc, lf->type);
+                if (ct) return cir_expr_func_obj(lc->arena, lf->obj, ct);
+            }
+        }
         for (lower_capture_t *c = lc->captures; c; c = c->next)
             if (c->name.len == name.len &&
                 memcmp(c->name.ptr, name.ptr, name.len) == 0)

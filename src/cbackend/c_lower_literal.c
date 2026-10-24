@@ -121,6 +121,7 @@ static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
 
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lower_local_t *save_locals = lc->locals;
+    lower_local_fn_t *save_local_fns = lc->local_fns;
     lower_capture_t *save_caps = lc->captures;
     unsigned seq = lc->fnlit_seq++;
     char nb[64];
@@ -260,6 +261,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
 
     lc->locals = NULL;
     lc->local_decls = NULL;
+    lc->local_fns = NULL;
     lc->captures = caps;
     lc->defers = NULL;
     lc->cleanup = NULL;
@@ -268,6 +270,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lc->ret_seq = 0;
     cir_function_t *cf = lower_function(lc, fn, false);
     lc->locals = save_locals;
+    lc->local_fns = save_local_fns;
     lc->captures = save_caps;
     lc->return_type = save_ret;
     lc->ret_seq = save_ret_seq;
@@ -308,6 +311,7 @@ cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     unsigned save_ret_seq = lc->ret_seq;
     lc->locals = NULL;
     lc->local_decls = NULL;
+    lc->local_fns = NULL;
     lc->defers = NULL;
     lc->cleanup = NULL;
     lc->ret_seq = 0;

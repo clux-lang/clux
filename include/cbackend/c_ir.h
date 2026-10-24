@@ -284,6 +284,7 @@ typedef struct cir_unit {
     bool             uses_index_check;
     bool             uses_slice_check;
     bool             uses_union_check;
+    bool             uses_panic; /* panic(msg)：打印后 _Exit(1)（与 VM 一致） */
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);

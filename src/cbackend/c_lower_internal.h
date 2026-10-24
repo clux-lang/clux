@@ -77,6 +77,16 @@ typedef struct lower_defer {
     struct lower_defer *next;
 } lower_defer_t;
 
+typedef struct lower_local_fn {
+    strslice_t name;
+    const char *cname; /* 静态 C 函数名 */
+    const char *obj;   /* 函数对象结构名 */
+    const char *var_name; /* 闭包值局部变量名（is_closure 时） */
+    bool is_closure;      /* 有值捕获：调用走闭包值 */
+    const type_t *type;
+    struct lower_local_fn *next;
+} lower_local_fn_t;
+
 typedef struct lower_local {
     strslice_t name;
     const type_t *type;
@@ -143,6 +153,8 @@ typedef struct lower_ctx {
     sema_t  *sema;
     cir_unit_t *unit;
     lower_defer_t *defers;
+    /* 局部具名函数（块内 `func`）：名字 → 静态 C 函数/函数对象。 */
+    lower_local_fn_t *local_fns;
     /* 正在内联的 defer 体的捕获结构体局部名（`__ctx.env` → 它）。 */
     const char *ctx_env_name;
     unsigned defer_seq;
@@ -203,6 +215,8 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
+/** 按名查找块内局部函数（调用点/函数值引用用）。 */
+lower_local_fn_t *find_local_fn(lower_ctx_t *lc, strslice_t name);
 /* bitfield：逻辑字段按位读写（storage 是 struct 的隐藏数组字段）。 */
 const type_t *bitfield_value_type(lower_ctx_t *lc, uint32_t type_id);
 const ast_struct_def_t *bitfield_def_of(lower_ctx_t *lc, const type_t *t);
@@ -217,6 +231,9 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok);
    成功路径的值由调用方接续（赋值/return）。 */
 cir_stmt_t *lower_try_prefix(lower_ctx_t *lc, ast_try_t *tr, bool *ok);
 void register_local(lower_ctx_t *lc, strslice_t name, const type_t *type);
+/** 用指定 C 名登记局部（闭包值局部需要与预登记映射一致）。 */
+void register_local_as(lower_ctx_t *lc, strslice_t name, const type_t *type,
+                       const char *cname);
 /** 返回该局部声明的 C 符号名（未登记返回 NULL）。 */
 const char *lookup_local_cname(lower_ctx_t *lc, strslice_t name);
 /** 布局兼容复合值（匿名推断结构 vs 声明类型）重解释后的 lowering。 */
