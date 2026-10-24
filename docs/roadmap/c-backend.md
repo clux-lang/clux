@@ -243,7 +243,9 @@ clux build hello.cx
   `extern var` 数据符号读写）；
 - sema 单态化后的具体函数覆盖；
 - 与 VM 差分测试；
-- 构建产物导出（`--emit-c`）。
+- 两阶段构建（`.cx → .c → 目标文件 → 链接`）与工具链参数
+  （`--cc/--cflag/--ldflag/-I/-L/-l/-D`）；
+- 构建产物导出（`--emit-c` / `--emit-obj`）。
 
 当前支持：
 
@@ -317,10 +319,22 @@ clux build hello.cx
   - `assert(cond)` 映射为生成的 `clux_assert`（失败打印 `assert failed: ...`
     并以非 0 退出）；
   - 输出与 VM 运行器同款 gtest 风格汇总。
-- `clux build` 选项：
+- `clux build` 选项与两阶段构建：
+  - 流水线：`.cx → .c →（host cc -c）→ 目标文件 → 链接 → 可执行文件`；
+    目标文件保留在产物旁（`<exe>.obj` / `<exe>.o`），可被多文件构建复用；
   - `--emit-c[=PATH]`：只生成 C 源，不调用 host cc；
+  - `--emit-obj[=PATH]`：只编译到目标文件（不链接；对象可被 host cc 独立链接）；
   - `--output=PATH`：指定可执行文件路径；
-  - `-D KEY=VALUE`：注入编译期键表（`extern lib ... assert(...)` 用）。
+  - 工具链参数（全部逐条透传，与代码声明的 `extern lib` 链接参数合并）：
+    - `--cc=PATH`：C 编译器（缺省 `$CC`，再回退平台默认）；
+    - `--cflag=FLAG` / `--ldflag=FLAG`：编译/链接附加参数（可重复）；
+    - `-I DIR` / `--include=DIR`：include 搜索目录（编译阶段）；
+    - `-L DIR` / `--lib-path=DIR`：库搜索目录（链接阶段，先于代码声明的
+      `-l`；其后是产物目录及其上两级）；
+    - `-l LIB` / `--link-lib=LIB`：链接库（链接阶段，排在代码声明的链接
+      参数之后）；
+    - `-D KEY=VALUE`：编译期键表（`extern lib ... assert(...)` 用）；
+  - 编译失败保留 C 源并打印完整命令；链接失败保留 C 源与目标文件。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI
@@ -384,11 +398,8 @@ clux build hello.cx
 
 - `clux.mod`；
 - import；
-- `extern lib` / `extern cfunc` / `extern var` 已在 M6 支持（链接参数、原型、
-  数据符号读写、cfunc 返回值/回调）；
 - 标准库；
-- 跨文件链接；
-- C 编译器参数透传。
+- 跨文件链接（目标文件与工具链参数已就绪，见 M6；多文件驱动属后续阶段）。
 
 ## 诊断
 

@@ -55,7 +55,8 @@ static int load_file(allocator_t *alloc, const char *path, char **out,
     return 0;
 }
 
-static const char *host_cc(void) {
+static const char *host_cc(const cbackend_toolchain_t *tc) {
+    if (tc && tc->compiler && *tc->compiler) return tc->compiler;
     const char *cc = getenv("CC");
     if (cc && *cc) return cc;
 #ifdef _WIN32
@@ -114,10 +115,20 @@ static void path_dirname(const char *path, char *buf, size_t cap) {
     buf[n] = '\0';
 }
 
-static int compile_c(allocator_t *alloc, const char *c_path, const char *out_path,
-                     const cir_link_arg_t *links) {
-    set_compiler_temp_dir(out_path);
-    const char *cc = host_cc();
+/* 在命令行末尾追加一个选项/路径：含空格时整体加引号，否则原样。 */
+static void cmd_append_arg(string_t *sb, const char *s) {
+    if (!s || !*s) return;
+    string_append_char(sb, ' ');
+    if (strchr(s, ' ') || strchr(s, '\t')) cmd_append_quoted(sb, s);
+    else string_append_cstr(sb, s);
+}
+
+/* 编译一步：`<cc> -std=c11 -O0 [cflags] [-I..] -c -o <obj> <c>`。 */
+static int compile_object(allocator_t *alloc, const char *c_path,
+                          const char *obj_path,
+                          const cbackend_toolchain_t *tc) {
+    set_compiler_temp_dir(obj_path);
+    const char *cc = host_cc(tc);
     string_t *cmd = string_new(alloc);
     if (!cmd) {
         fprintf(stderr, "build: out of memory\n");
@@ -125,13 +136,63 @@ static int compile_c(allocator_t *alloc, const char *c_path, const char *out_pat
     }
     if (strchr(cc, ' ') || strchr(cc, '\t')) cmd_append_quoted(cmd, cc);
     else string_append_cstr(cmd, cc);
-    string_append_cstr(cmd, " -std=c11 -O0 -o ");
-    cmd_append_quoted(cmd, out_path);
+    string_append_cstr(cmd, " -std=c11 -O0");
+    if (tc) {
+        for (size_t i = 0; i < tc->cflag_count; i++)
+            cmd_append_arg(cmd, tc->cflags ? tc->cflags[i] : NULL);
+        for (size_t i = 0; i < tc->include_count; i++) {
+            const char *dir = tc->include_dirs ? tc->include_dirs[i] : NULL;
+            if (!dir || !*dir) continue;
+            string_append_cstr(cmd, " -I");
+            cmd_append_quoted(cmd, dir);
+        }
+    }
+    string_append_cstr(cmd, " -c -o ");
+    cmd_append_quoted(cmd, obj_path);
     string_append_char(cmd, ' ');
     cmd_append_quoted(cmd, c_path);
+    int rc = system(string_cstr(cmd));
+    if (rc != 0) {
+        fprintf(stderr, "build: command: %s\n", string_cstr(cmd));
+        fprintf(stderr, "build: C compilation failed (compiler: %s)\n", cc);
+        fprintf(stderr, "build: generated C kept at '%s'\n", c_path);
+        string_free(&cmd);
+        return 1;
+    }
+    string_free(&cmd);
+    return 0;
+}
 
-    /* 通用库名（`-lfoo`）的搜索路径：可执行文件所在目录及其上两级目录
-       （便于把 .lib/.so 与产物放一起；找不到时链接器按系统路径找）。 */
+/* 链接一步：`<cc> <obj> -o <out> [-L..] [代码声明的链接参数] [-l..] [ldflags]`。
+ *
+ * `-L` 顺序：用户 `--lib-path` 优先，随后是产物目录及其上两级（便于把
+ * `.lib/.so` 与产物放一起）；再放代码里 `extern lib` 产生的链接参数
+ * （`-l<name>` 或库文件路径），最后是用户 `--link-lib`。 */
+static int link_exe(allocator_t *alloc, const char *obj_path,
+                    const char *out_path, const cir_link_arg_t *code_links,
+                    const cbackend_toolchain_t *tc) {
+    set_compiler_temp_dir(out_path);
+    const char *cc = host_cc(tc);
+    string_t *cmd = string_new(alloc);
+    if (!cmd) {
+        fprintf(stderr, "build: out of memory\n");
+        return 1;
+    }
+    if (strchr(cc, ' ') || strchr(cc, '\t')) cmd_append_quoted(cmd, cc);
+    else string_append_cstr(cmd, cc);
+    string_append_char(cmd, ' ');
+    cmd_append_quoted(cmd, obj_path);
+    string_append_cstr(cmd, " -o ");
+    cmd_append_quoted(cmd, out_path);
+
+    if (tc) {
+        for (size_t i = 0; i < tc->libdir_count; i++) {
+            const char *dir = tc->lib_dirs ? tc->lib_dirs[i] : NULL;
+            if (!dir || !*dir) continue;
+            string_append_cstr(cmd, " -L");
+            cmd_append_quoted(cmd, dir);
+        }
+    }
     char dir[4096], up1[4096], up2[4096];
     path_dirname(out_path, dir, sizeof dir);
     path_dirname(dir, up1, sizeof up1);
@@ -143,17 +204,26 @@ static int compile_c(allocator_t *alloc, const char *c_path, const char *out_pat
         string_append_cstr(cmd, " -L");
         cmd_append_quoted(cmd, dirs[i]);
     }
-    for (const cir_link_arg_t *l = links; l; l = l->next) {
+    for (const cir_link_arg_t *l = code_links; l; l = l->next) {
         if (!l->arg || !l->arg[0]) continue;
         string_append_char(cmd, ' ');
         cmd_append_quoted(cmd, l->arg);
+    }
+    if (tc) {
+        for (size_t i = 0; i < tc->lib_count; i++) {
+            const char *name = tc->libs ? tc->libs[i] : NULL;
+            if (!name || !*name) continue;
+            string_append_cstr(cmd, " -l");
+            cmd_append_quoted(cmd, name);
+        }
+        for (size_t i = 0; i < tc->ldflag_count; i++)
+            cmd_append_arg(cmd, tc->ldflags ? tc->ldflags[i] : NULL);
     }
 
     int rc = system(string_cstr(cmd));
     if (rc != 0) {
         fprintf(stderr, "build: command: %s\n", string_cstr(cmd));
-        fprintf(stderr, "build: C compilation failed (compiler: %s)\n", cc);
-        fprintf(stderr, "build: generated C kept at '%s'\n", c_path);
+        fprintf(stderr, "build: linking failed (compiler: %s)\n", cc);
         string_free(&cmd);
         return 1;
     }
@@ -171,10 +241,27 @@ static char *derive_c_path(const char *out_path) {
     return c_path;
 }
 
+/* 目标文件路径：`<out>.obj`（Windows）/ `<out>.o`（其它平台）。 */
+static char *derive_obj_path(const char *out_path) {
+#ifdef _WIN32
+    const char *suffix = ".obj";
+#else
+    const char *suffix = ".o";
+#endif
+    size_t plen = strlen(out_path) + strlen(suffix) + 1;
+    char *obj = (char *)malloc(plen);
+    if (!obj) return NULL;
+    snprintf(obj, plen, "%s%s", out_path, suffix);
+    return obj;
+}
+
 /* 编译/生成选项。 */
 typedef struct cbackend_opts {
-    bool     compile;    /* true：调用 host cc 生成可执行文件 */
+    bool     compile;    /* false：只生成 .c；true：继续编译/链接 */
+    bool     object_only; /* true：只编译到目标文件（不链接） */
     bool     tests;      /* 测试运行器模式 */
+    const char *obj_path; /* object_only 时的目标文件路径（NULL = 由 out 推导） */
+    const cbackend_toolchain_t *tc; /* 宿主编译器/链接选项（可 NULL） */
     char  ***out_names;  /* tests：返回 malloc 的用例显示名数组 */
     size_t  *out_count;
 } cbackend_opts_t;
@@ -387,10 +474,33 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             fprintf(stderr, "build: cannot write C source '%s'\n", c_path);
         } else if (!compile) {
             rc = 0;
-        } else if (compile_c(alloc, c_path, out_path, unit->link_args) == 0) {
-            /* 成功：中间 C 文件是临时的；失败时保留（见 compile_c 提示）。 */
-            remove(c_path);
-            rc = 0;
+        } else {
+            /* 两步：先编译成目标文件，再链接成可执行文件（多文件构建时
+               目标文件可被复用；`--emit-obj` 在此停住）。 */
+            char *derived_obj = NULL;
+            const char *obj = opts->obj_path;
+            if (!obj) {
+                derived_obj = derive_obj_path(out_path);
+                obj = derived_obj;
+            }
+            bool ok = false;
+            if (!obj) {
+                fprintf(stderr, "build: out of memory (object path)\n");
+            } else if (compile_object(alloc, c_path, obj, opts->tc) == 0) {
+                ok = true;
+                if (!opts->object_only)
+                    ok = link_exe(alloc, obj, out_path, unit->link_args,
+                                  opts->tc) == 0;
+                if (ok) {
+                    /* 成功：C 中间文件是临时的；目标文件保留。 */
+                    remove(c_path);
+                    rc = 0;
+                }
+                /* 链接失败：目标文件有效，保留便于诊断/手动重链。 */
+            } else {
+                remove(obj); /* 编译失败：删掉半成品目标文件 */
+            }
+            free(derived_obj);
         }
     } else if (!diag_has_error(diag) && !(opts->tests && test_count == 0)) {
         /* 没有诊断却拿不到 C unit：内部失败（降级不当），必须显式报出，
@@ -423,15 +533,35 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
     return rc;
 }
 
-int cbackend_build_file(const char *src_path, const char *out_path) {
+int cbackend_build_file_ex(const char *src_path, const char *out_path,
+                           const cbackend_toolchain_t *tc) {
     if (!src_path || !out_path) return 1;
     char *c_path = derive_c_path(out_path);
     if (!c_path) {
         fprintf(stderr, "build: out of memory\n");
         return 1;
     }
-    cbackend_opts_t opts = {.compile = true};
+    cbackend_opts_t opts = {.compile = true, .tc = tc};
     int rc = cbackend_run_impl(src_path, out_path, c_path, &opts);
+    free(c_path);
+    return rc;
+}
+
+int cbackend_build_file(const char *src_path, const char *out_path) {
+    return cbackend_build_file_ex(src_path, out_path, NULL);
+}
+
+int cbackend_emit_object(const char *src_path, const char *obj_path,
+                         const cbackend_toolchain_t *tc) {
+    if (!src_path || !obj_path) return 1;
+    char *c_path = derive_c_path(obj_path);
+    if (!c_path) {
+        fprintf(stderr, "build: out of memory\n");
+        return 1;
+    }
+    cbackend_opts_t opts = {
+        .compile = true, .object_only = true, .obj_path = obj_path, .tc = tc};
+    int rc = cbackend_run_impl(src_path, obj_path, c_path, &opts);
     free(c_path);
     return rc;
 }

@@ -1,22 +1,50 @@
 #ifndef _H_CLUX_CBACKEND_C_BACKEND_
 #define _H_CLUX_CBACKEND_C_BACKEND_
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * 单文件 C 后端：lex → parse → desugar → sema → C IR → C 源文件 → host cc。
- * 当前只支持无 import、无 clux.mod 的单文件入口。
- */
-int cbackend_build_file(const char *src_path, const char *out_path);
+#include <stddef.h>
 
+/**
+ * C 后端：lex → parse → desugar → sema → C IR → C 源文件 → host cc。
+ * 当前只支持无 import、无 clux.mod 的单文件入口。
+ *
+ * 构建分两步：`.cx → .c → (host cc -c) → .o/.obj`，再用 host cc 链接成
+ * 可执行文件。对象文件保留在产物旁边（多文件构建时可复用）。
+ */
+
+/* 宿主编译器/链接器选项（驱动层从 CLI 收集；数组在调用期间有效，
+ * 元素为 argv 指针，不需要拷贝）。所有字段可省略（NULL/0 = 默认）。 */
+typedef struct cbackend_toolchain {
+    const char *compiler; /* C 编译器（NULL/空 = $CC，再回退平台默认） */
+    const char *const *cflags;      /* 编译选项（逐条，原样传给编译器） */
+    size_t cflag_count;
+    const char *const *ldflags;     /* 链接选项（逐条，原样传给编译器驱动） */
+    size_t ldflag_count;
+    const char *const *include_dirs; /* -I 搜索目录 */
+    size_t include_count;
+    const char *const *lib_dirs;     /* -L 搜索目录 */
+    size_t libdir_count;
+    const char *const *libs;         /* -l 库名（不含 "-l" 前缀） */
+    size_t lib_count;
+} cbackend_toolchain_t;
+
+/** 构建可执行文件：cx → c → o → exe。`tc` 可为 NULL（默认工具链）。 */
+int cbackend_build_file_ex(const char *src_path, const char *out_path,
+                           const cbackend_toolchain_t *tc);
+
+/** 只编译到目标文件（不链接）：cx → c → o。 */
+int cbackend_emit_object(const char *src_path, const char *obj_path,
+                         const cbackend_toolchain_t *tc);
+
+/** 等价于 `cbackend_build_file_ex(src, out, NULL)`。 */
+int cbackend_build_file(const char *src_path, const char *out_path);
 /**
  * 单文件 C 源生成：只生成一个 .c 文件，不调用 host cc。
  * 不解析 import / clux.mod；当前只支持单文件源码。
  */
 int cbackend_generate_c(const char *src_path, const char *c_path);
-
 /**
  * 测试运行器：把顶层 `test "Suite.Name" { ... }` 块改写成无参 void 函数，
  * 生成按 `argv[1]`（用例下标）选择并执行单个用例的 C 可执行文件。

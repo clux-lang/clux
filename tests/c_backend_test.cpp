@@ -1345,6 +1345,128 @@ TEST(CBackend, BuildExternCfuncReturnsCallback) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* ---- 编译/链接拆分与工具链参数 ---- */
+
+std::string host_cc_name() {
+#ifdef _WIN32
+  return "clang";
+#else
+  return "cc";
+#endif
+}
+
+/* 默认构建保留目标文件（多文件构建可复用）：<exe>.obj / <exe>.o。 */
+TEST(CBackend, BuildKeepsObjectFile) {
+  const std::string src =
+      write_temp_file("func main(): i32 { return 9; }\n", "cbackend_obj");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+#ifdef _WIN32
+  std::filesystem::path obj = exe.string() + ".obj";
+#else
+  std::filesystem::path obj = exe.string() + ".o";
+#endif
+  EXPECT_TRUE(std::filesystem::exists(obj));
+  EXPECT_EQ(run_exe(exe.string()), 9);
+  std::filesystem::remove(obj, ec);
+}
+
+/* `--emit-obj`：只编译到目标文件；该对象能被 host cc 独立链接成可执行文件。 */
+TEST(CBackend, EmitObjectOnly) {
+  const std::string src = write_temp_file(
+      "func main(): i32 { return 3; }\n", "cbackend_emitobj");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir());
+#ifdef _WIN32
+  std::filesystem::path obj = dir / "cbackend_emitobj_manual.obj";
+  std::filesystem::path exe = dir / "cbackend_emitobj_manual.exe";
+#else
+  std::filesystem::path obj = dir / "cbackend_emitobj_manual.o";
+  std::filesystem::path exe = dir / "cbackend_emitobj_manual";
+#endif
+  std::error_code ec;
+  std::filesystem::remove(obj, ec);
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_cli({"build", std::filesystem::absolute(src).string(),
+                     "--emit-obj=" + obj.string()}),
+            0);
+  ASSERT_TRUE(std::filesystem::exists(obj));
+  EXPECT_FALSE(std::filesystem::exists(exe)); /* 没有链接 */
+  /* 独立链接（证明目标文件是多文件构建可用的输入）。 */
+  std::string link_cmd = q(host_cc_name()) + " " + q(obj.string()) + " -o " +
+                         q(exe.string());
+#ifdef _WIN32
+  link_cmd = "(" + link_cmd + ")";
+#endif
+  EXPECT_EQ(std::system(link_cmd.c_str()), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 3);
+  std::filesystem::remove(obj, ec);
+  std::filesystem::remove(exe, ec);
+}
+
+/* `--cc/--cflag/--ldflag/-I/--include/-L/--link-lib`：工具链参数与代码声明的
+ * extern lib 一起继承给 host cc；`extern lib "*"` 时不要求代码声明库。 */
+TEST(CBackend, BuildWithCliToolchain) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  const std::string src = write_temp_file(
+      "extern lib td from \"*\";\n"
+      "extern cfunc td::clux_greeting(): str;\n"
+      "func main(): i32 {\n"
+      "  var g: str = td::clux_greeting();\n"
+      "  if (len(g) != 19usize) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_cli_tc");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::filesystem::path dir = exe.parent_path();
+  std::filesystem::create_directories(dir);
+  std::error_code ec;
+  copy_ffi_runtime(dir);
+  std::filesystem::copy_file(
+      ffi_testdata_link_path(),
+      dir / std::filesystem::path(ffi_testdata_link_path()).filename(),
+      std::filesystem::copy_options::overwrite_existing, ec);
+  std::filesystem::remove(exe, ec);
+  const std::string tmp = std::filesystem::absolute(clux_test_temp_dir()).string();
+  std::vector<std::string> args = {
+      "build",
+      std::filesystem::absolute(src).string(),
+      "--output=" + exe.string(),
+      "--cc=" + host_cc_name(),
+      "--cflag=-O1",
+      "--ldflag=-v",
+      "-I",
+      tmp,
+      "--include=" + tmp,
+      "-D",
+      "FOO=1",
+      "-L",
+      dir.string(),
+      "--link-lib=clux_ffi_testdata",
+  };
+  EXPECT_EQ(run_cli(args), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* `--emit-c` 与 `--emit-obj` 互斥。 */
+TEST(CBackend, RejectsConflictingEmitModes) {
+  const std::string src =
+      write_temp_file("func main(): i32 { return 0; }\n", "cbackend_conflict");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"build", std::filesystem::absolute(src).string(),
+                     "--emit-c", "--emit-obj"}),
+            1);
+}
+
 TEST(CBackend, RejectsCopyOfOwnSlotField) {
   /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
      两个后端一致。 */

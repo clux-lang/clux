@@ -36,7 +36,9 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "build",
-        .usage = "clux build <file.cx> [--emit-c[=PATH]] [--output=PATH] "
+        .usage = "clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]] "
+                 "[--output=PATH] [--cc=PATH] [--cflag=FLAG]... "
+                 "[--ldflag=FLAG]... [-I DIR]... [-L DIR]... [-l LIB]... "
                  "[-D KEY=VALUE]...",
         .help =
             "Compile clux source into a native executable.\n"
@@ -44,11 +46,22 @@ static const cmd_t g_cmds[] = {
             "  clux build <file.cx>              build an executable next to src\n"
             "  clux build <file.cx> --emit-c     write C source only (no cc call)\n"
             "  clux build <file.cx> --emit-c=P   write C source to P\n"
+            "  clux build <file.cx> --emit-obj[=P]  compile to an object only\n"
             "  clux build <file.cx> --output=P   executable path P\n"
             "\n"
-            "Single-file C backend stage: no clux.mod or imports yet.\n"
-            "The host C compiler is taken from $CC (clang on Windows, cc\n"
-            "elsewhere).\n"
+            "Pipeline: .cx -> .c -> (cc -c) -> object -> link -> executable.\n"
+            "The object is kept next to the executable (<exe>.obj / <exe>.o).\n"
+            "The host C compiler is $CC (clang on Windows, cc elsewhere) unless\n"
+            "--cc is given.\n"
+            "\n"
+            "Toolchain options (passed through to the host compiler):\n"
+            "  --cc=PATH            C compiler\n"
+            "  --cflag=FLAG         extra compile flag (repeatable)\n"
+            "  --ldflag=FLAG        extra link flag (repeatable)\n"
+            "  -I DIR, --include=DIR      include search dir (repeatable)\n"
+            "  -L DIR, --lib-path=DIR     library search dir (repeatable)\n"
+            "  -l LIB, --link-lib=LIB     link library (repeatable)\n"
+            "  -D KEY=VALUE         build-time define (repeatable)\n"
             "\n"
             "  extern lib <alias> from \"<name>\":\n"
             "    \"*\" -> no link flag (symbols from the current process)\n"
@@ -57,9 +70,7 @@ static const cmd_t g_cmds[] = {
             "    path / file name -> passed to the linker as-is\n"
             "  extern cfunc <alias>::<fn>(...): emits an `extern` prototype and\n"
             "  calls the real C symbol; cfunc_ptr(f) generates a C trampoline.\n"
-            "\n"
-            "-D KEY=VALUE  inject a build-time define (repeatable) used by\n"
-            "              `extern lib ... assert(...)` conditions.",
+            "  extern var <alias>::<name>: T; reads/writes a data symbol.",
         .handler = cmd_build,
     },
     {
