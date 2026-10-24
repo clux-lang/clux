@@ -127,9 +127,19 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
         out->cleanup = cleanup;
         /* `export func`：非 static，并在模块头文件里声明。
            `export cfunc` 走 C ABI 包装（lower_exported_cfunc），内部
-           env-first 函数保持 static。 */
+           env-first 函数保持 static。
+           泛型实例（名字含 `$`）跨模块可见：不加 static（唯一 mangling 名，
+           不会与其他模块冲突），但不进头文件。 */
         out->is_exported = ((ast_node_t *)fn)->is_exported && !is_entry &&
                            !fn->is_cfunc;
+        bool generic_instance = false;
+        for (size_t k = 0; k + 1 <= fn->name.len; k++) {
+            if (fn->name.ptr && fn->name.ptr[k] == '$') {
+                generic_instance = true;
+                break;
+            }
+        }
+        out->is_public = out->is_exported || generic_instance;
     }
     return out;
 }

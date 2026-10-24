@@ -1947,6 +1947,51 @@ TEST(CBackend, BuildImportReexport) {
   fs::remove_all(proj, ec);
 }
 
+/* 跨模块**泛型实例**调用：实例体在定义模块的 prog 里（sema 追加），
+ * 导入方按 `clux_<ownerTag>_fn_<instance>` 生成 extern 并调用；
+ * 泛型实例函数在所有模块里都是 non-static（mangling 名唯一）。 */
+TEST(CBackend, BuildImportCrossModuleGeneric) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_generic";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("lib.cx",
+        "export func id[T](x: T): T { return x; }\n"
+        "export struct Box[T] { v: T; }\n");
+  write("main.cx",
+        "import m from \"./lib\";\n"
+        "func main(): i32 {\n"
+        "  var b: m::Box[i32] = .m::Box[i32]{ .v = 41 };\n"
+        "  return m::id(b.v) + 1 - 42;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(run_cli({"build", "main.cx"}), 0);
+  fs::current_path(saved);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  /* 导入方 .c 里是定义模块的实例符号（`_fn_id$i32`）。 */
+  fs::current_path(proj, ec);
+  ASSERT_EQ(run_cli({"build", "main.cx", "--emit-c"}), 0);
+  fs::current_path(saved);
+  const std::string c = slurp((proj / "build" / "main.c").string());
+  EXPECT_NE(c.find("$id$i32"), std::string::npos) << c;
+  fs::remove_all(proj, ec);
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =

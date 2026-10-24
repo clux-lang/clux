@@ -92,10 +92,10 @@ static void note_import_decl(lower_ctx_t *lc, const char *name,
         cir_unit_add_extern_symbol(lc->unit, name);
 }
 
-/* `extern <ret> <name>(void *env, <params>);`（clux env-first ABI）。 */
-static void emit_import_func_decl(lower_ctx_t *lc, const char *cname,
-                                  const type_t *ft, bool env_first) {
-    const type_t *rt = func_type_return(ft);
+/* `extern <ret> <name>(void *env, <params>);`（clux env-first ABI）。
+ * 跨模块调用（含泛型实例）共用。 */
+void lower_import_func_extern(lower_ctx_t *lc, const char *cname,
+                              const type_t *ft, bool env_first) {    const type_t *rt = func_type_return(ft);
     size_t pc = func_type_param_count(ft);
     cir_type_t *cret = map_type(lc, rt ? rt : lc->sema->vm->type_void);
     if (!cret) {
@@ -180,7 +180,7 @@ cir_expr_t *lower_import_call(lower_ctx_t *lc, ast_call_t *call,
         lc->failed = true;
         return NULL;
     }
-    emit_import_func_decl(lc, cname, ft, /*env_first=*/!is_cfunc);
+    lower_import_func_extern(lc, cname, ft, /*env_first=*/!is_cfunc);
 
     cir_expr_t *out = cir_expr_call(lc->arena, cname, NULL);
     if (!out) {
@@ -277,4 +277,68 @@ const char *lower_import_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr) {
 
 bool is_import_scope_ref(lower_ctx_t *lc, ast_scope_ref_t *sr) {
     return import_module_of(lc, sr) != NULL;
+}
+
+/* 按 fid 在**所有模块**的 sema->funcs 里找函数（跨模块泛型实例登记在
+ * 定义模块的 funcs 队列里，导入方 sema->funcs 里没有）。 */
+sema_func_t *lower_find_func_module(lower_ctx_t *lc, uint32_t fid,
+                                    module_t **out_owner) {
+    if (out_owner) *out_owner = NULL;
+    if (!lc || !lc->sema || !lc->sema->vm || !fid) return NULL;
+    vm_t *vm = lc->sema->vm;
+    if (!vm->module_order) return NULL;
+    size_t n = vec_len(vm->module_order);
+    for (size_t i = 0; i < n; i++) {
+        module_t *m = (module_t *)vec_get(vm->module_order, i);
+        if (!m || !m->sema || !m->sema->funcs) continue;
+        size_t fn = vec_len(m->sema->funcs);
+        for (size_t k = 0; k < fn; k++) {
+            sema_func_t *sf = (sema_func_t *)vec_get(m->sema->funcs, k);
+            if (!sf || !sf->def || sf->def->kind != AST_FUNC_DEF) continue;
+            if (((ast_func_def_t *)sf->def)->fid != fid) continue;
+            if (out_owner) *out_owner = m;
+            return sf;
+        }
+    }
+    return NULL;
+}
+
+/* 跨模块**泛型实例**调用：sema 把调用点的 callee 改写成实例的 FUNC_REF
+ * （fid 在导入方 sema 分配，实例体在定义模块的 prog 里）。按 fid 取回
+ * sema_func_t → 定义模块（def->owner_module）与实例名，生成
+ * `clux_<ownerTag>_fn_<instance>` 的 extern 声明并调用。 */
+cir_expr_t *lower_cross_module_func_call(lower_ctx_t *lc, ast_call_t *call,
+                                         ast_func_def_t *def, sema_func_t *sf) {
+    module_t *owner = (module_t *)def->owner_module;
+    const type_t *ft = (sf && sf->generic_inst) ? sf->generic_inst->sig : NULL;
+    if (!owner) return NULL;
+    if (!ft || type_kind_of(ft) != TYPE_KIND_FUNC) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                   "c backend: cannot resolve cross-module generic instance "
+                   "'%.*s' signature",
+                   (int)def->name.len, def->name.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    char pbuf[64];
+    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    if (!cname) {
+        lc->failed = true;
+        return NULL;
+    }
+    lower_import_func_extern(lc, cname, ft, /*env_first=*/true);
+    if (lc->failed) return NULL;
+    cir_expr_t *out = cir_expr_call(lc->arena, cname, NULL);
+    if (!out) {
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
+    for (ast_node_t *a = call->args; a; a = a->next) {
+        cir_expr_t *arg = lower_expr(lc, a);
+        if (!arg) return NULL;
+        cir_expr_append_arg(out, arg);
+    }
+    return out;
 }

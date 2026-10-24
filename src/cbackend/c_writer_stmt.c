@@ -27,9 +27,10 @@ void cw_write_signature_def(string_t *sb, const cir_signature_t *sig) {
 }
 
 void cw_write_function_decl(string_t *sb, const cir_function_t *fn) {
-    /* 导出函数：非 static，头文件里是 `extern` 声明；其余文件内 `static`。 */
+    /* 导出函数：非 static，头文件里是 `extern` 声明；其余文件内 `static`。
+       跨模块可见的泛型实例也是 public（不带 static），但不进头文件。 */
     cw_printf(sb, "%s%s %s(void *env",
-              fn->is_exported ? "extern " : "static ",
+              fn->is_public ? (fn->is_exported ? "extern " : "") : "static ",
               fn->sig->ret ? fn->sig->ret->c_name : "void", fn->name);
     cw_write_params(sb, fn->sig, true, fn);
     cw_put(sb, ");\n");
@@ -189,7 +190,7 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
 
 void cw_write_function_def(string_t *sb, const cir_function_t *fn) {
     cw_printf(sb, "%s%s %s(void *env",
-              fn->is_exported ? "" : "static ",
+              fn->is_public ? "" : "static ",
               fn->sig->ret ? fn->sig->ret->c_name : "void", fn->name);
     cw_write_params(sb, fn->sig, true, fn);
     cw_put(sb, ") {\n");

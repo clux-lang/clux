@@ -394,9 +394,17 @@ clux build hello.cx
   - `--emit-c` 会写出所有参与模块的 `.c/.h`；`--emit-obj` 编译所有模块；
     入口模块在链接可执行文件时才要求 `main`（库模块可单独出对象）；
   - 回归测试：`BuildImportMultiFile`、`BuildImportChainAndDiamond`、
-    `BuildImportReexport`、`RejectsCircularImport`；
-  - 尚未覆盖：跨模块**泛型调用**（`mod::id[i32](...)`：实例在定义模块
-    prog 里，但调用点形态还没有对应 lowering；会报明确错误）、
+    `BuildImportReexport`、`BuildImportCrossModuleGeneric`、
+    `RejectsCircularImport`；
+  - **跨模块泛型实例**：`mod::f[i32](...)` 的实例由 sema 物化到**定义模块**
+    的 prog（实例函数名带跨模块 mangling 前缀，如
+    `md37d4525$id$i32`），调用点被改写成实例的 FUNC_REF；C 后端按 fid 在
+    `vm->module_order` 的所有 `sema->funcs` 里反查定义模块与实例名，生成
+    `extern ... clux_<ownerTag>_fn_<instance>(void *env, ...)` 并调用。
+    泛型实例函数在所有模块里都是 **non-static**（mangling 名全局唯一），
+    但不进头文件（`is_public` 与 `is_exported` 分离）；
+  - 尚未覆盖：跨模块**方法**调用（`import` 的结构体实例方法，sema 目前
+    报 "struct 'X' has no field 'm'"；属语言层 gap，不是 C 后端问题）、
     `clux test --backend=c` 的 import（测试运行器仍是单文件前端路径）。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：

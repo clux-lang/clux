@@ -198,7 +198,8 @@ typedef struct cir_function {
     int          source_line;
     bool         is_entry;   /* 生成 C main wrapper */
     bool         object_used; /* 函数对象被作为值引用 */
-    bool         is_exported; /* `export func/cfunc`：非 static，进头文件 */
+    bool         is_exported; /* `export func/cfunc`：头文件声明 */
+    bool         is_public;   /* 不加 static（导出函数或跨模块可见的泛型实例） */
     struct cir_function *next;
 } cir_function_t;
 

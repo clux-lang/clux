@@ -54,6 +54,8 @@
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
+#include "sema/sema_generic.h"
+#include "vm/module.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_cfunc.h"
@@ -229,6 +231,16 @@ cir_expr_t *lower_import_call(lower_ctx_t *lc, ast_call_t *call,
 cir_expr_t *lower_import_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr);
 const char *lower_import_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr);
 bool is_import_scope_ref(lower_ctx_t *lc, ast_scope_ref_t *sr);
+/* 跨模块泛型实例调用：`mod::f[i32](...)` 的 callee 已被 sema 改写成实例
+ * 的 FUNC_REF（实例在**定义模块**的 prog 里）。 */
+cir_expr_t *lower_cross_module_func_call(lower_ctx_t *lc, ast_call_t *call,
+                                         ast_func_def_t *def, sema_func_t *sf);
+/** 按 fid 在所有模块的 sema->funcs 里找函数，返回定义模块。 */
+sema_func_t *lower_find_func_module(lower_ctx_t *lc, uint32_t fid,
+                                    module_t **out_owner);
+/* 在导入方 `.c` 里声明一个外部函数原型（`extern <ret> f(void *env, ...);`）。 */
+void lower_import_func_extern(lower_ctx_t *lc, const char *cname,
+                              const type_t *ft, bool env_first);
 /* `cfunc(...)` → C 函数指针 typedef 名（map_type 用；同 intern 类型复用）。 */
 const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t, bool *ok);
 /* extern var 的读取（`is_str` 时包装成 clux_str）与赋值目标（raw 左值）。 */

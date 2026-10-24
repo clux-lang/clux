@@ -292,6 +292,28 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (call->is_ffi_call) return lower_ffi_call(lc, call);
     if (call->is_data_call) return lower_data_call(lc, call);
     if (call_is_cfunc_ptr(call)) return lower_cfunc_ptr(lc, call);
+    /* 跨模块泛型实例调用：sema 已把 callee 改写成实例 FUNC_REF（实例体在
+       定义模块的 prog 里），按 fid 在**所有模块**里找回定义模块。 */
+    if (call->callee && call->callee->kind == AST_FUNC_REF) {
+        ast_func_ref_t *ref = (ast_func_ref_t *)call->callee;
+        module_t *owner = NULL;
+        sema_func_t *sf = ref->fid ? sema_func_by_id(lc->sema, ref->fid) : NULL;
+        if (sf) {
+            if (sf->def && sf->def->kind == AST_FUNC_DEF)
+                owner = (module_t *)((ast_func_def_t *)sf->def)->owner_module;
+        } else if (ref->fid) {
+            sf = lower_find_func_module(lc, ref->fid, &owner);
+        }
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+            ast_func_def_t *df = (ast_func_def_t *)sf->def;
+            if (!owner) owner = (module_t *)df->owner_module;
+            if (owner && lc->sema->current_module &&
+                owner != lc->sema->current_module) {
+                cir_expr_t *r = lower_cross_module_func_call(lc, call, df, sf);
+                if (r || lc->failed) return r;
+            }
+        }
+    }
     /* test 上下文的 `assert(cond, text)`：sema 已把它改写为 (bool, str) 调用，
        这里映射到运行器生成的 clux_assert（失败即退出该用例子进程）。 */
     if (lc->unit->test_runner && strslice_eq(cname0, STRSLICE_LIT("assert"))) {
