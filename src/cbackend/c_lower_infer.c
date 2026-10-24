@@ -32,6 +32,16 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return vm->type_u8;
     case AST_IDENT:
         return lookup_local(lc, ((ast_ident_t *)e)->name);
+    case AST_SCOPE_REF: {
+        /* `Color::Red`：sema 已把 type_expr 折叠成 AST_TYPE_REF，variant 的
+           底层整数存在 value 里；类型就是该 enum 类型（C 侧用底层整数）。 */
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)e;
+        if (sr->type_expr && sr->type_expr->kind == AST_TYPE_REF) {
+            const type_t *t = resolve_type_expr(lc->sema, sr->type_expr);
+            if (t && type_kind_of(t) == TYPE_KIND_ENUM) return t;
+        }
+        return NULL;
+    }
     case AST_FUNC_REF:
         return func_type_of_def(lc, func_def_of_ref(lc, (ast_func_ref_t *)e));
     case AST_FUNC_DEF:

@@ -310,6 +310,39 @@ TEST(CBackendDiff, TernaryAndSwitch) {
   expect_diff(c);
 }
 
+TEST(CBackendDiff, EnumValues) {
+  static const DiffCase c = {
+      "diff_enum",
+      "enum Color: i32 { Red = 1, Green = 2, Blue = 3 }\n"
+      "enum Small: u8 { A = 0u8, B = 200u8 }\n"
+      "struct Paint { color: Color; shade: i32; }\n"
+      "var G: Color = Color::Blue;\n"
+      "func name_of(c: Color): i32 {\n"
+      "  switch (c) {\n"
+      "    (Color::Red) -> { return 10; }\n"
+      "    (Color::Green) -> { return 20; }\n"
+      "    default -> { return 30; }\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c: Color = Color::Green;\n"
+      "  if (c != Color::Green) { return 1; }\n"
+      "  if (G != Color::Blue) { return 2; }\n"
+      "  var p: Paint = .Paint{ .color = Color::Red, .shade = 7 };\n"
+      "  if (p.color != Color::Red) { return 3; }\n"
+      "  var s: Small = Small::B;\n"
+      "  if (s != Small::B) { return 4; }\n"
+      "  if ((c as i32) != 2) { return 5; }\n"
+      "  var arr: [2]Color = .[2]Color{ Color::Red, Color::Blue };\n"
+      "  if (arr[1] != Color::Blue) { return 6; }\n"
+      "  if (sizeof(Color) != 4usize) { return 7; }\n"
+      "  return name_of(Color::Red) + name_of(Color::Green) + p.shade;\n"
+      "}\n",
+      10 + 20 + 7,
+  };
+  expect_diff(c);
+}
+
 TEST(CBackendDiff, GenericInstances) {
   static const DiffCase c = {
       "diff_generics",

@@ -1197,6 +1197,75 @@ TEST(CBackend, RejectsExternCfuncAggregateWithStr) {
   EXPECT_FALSE(std::filesystem::exists(exe));
 }
 
+/* enum 在 C 侧就是底层整数：variant 是常量、变量/字段/数组/switch/cast
+   全部按底层类型处理（含 u8 底层的符号/宽度归一）。 */
+TEST(CBackend, BuildEnumValues) {
+  const std::string src = write_temp_file(
+      "enum Color: i32 { Red = 1, Green = 2, Blue = 3 }\n"
+      "enum Small: u8 { A = 0u8, B = 200u8 }\n"
+      "struct Paint { color: Color; shade: i32; }\n"
+      "var G: Color = Color::Blue;\n"
+      "func name_of(c: Color): i32 {\n"
+      "  switch (c) {\n"
+      "    (Color::Red) -> { return 10; }\n"
+      "    (Color::Green) -> { return 20; }\n"
+      "    default -> { return 30; }\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c: Color = Color::Green;\n"
+      "  if (c != Color::Green) { return 1; }\n"
+      "  if (G != Color::Blue) { return 2; }\n"
+      "  var p: Paint = .Paint{ .color = Color::Red, .shade = 7 };\n"
+      "  if (p.color != Color::Red) { return 3; }\n"
+      "  var s: Small = Small::B;\n"
+      "  if (s != Small::B) { return 4; }\n"
+      "  if ((c as i32) != 2) { return 5; }\n"
+      "  var arr: [2]Color = .[2]Color{ Color::Red, Color::Blue };\n"
+      "  if (arr[1] != Color::Blue) { return 6; }\n"
+      "  if (sizeof(Color) != 4usize) { return 7; }\n"
+      "  if (name_of(Color::Green) != 20) { return 8; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_enum");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* enum 作为 extern cfunc 的形参/返回：C 原型按底层整数，variant 作常量。 */
+TEST(CBackend, BuildEnumExternCfunc) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  std::string lib = ffi_testdata_link_path();
+  for (char &c : lib)
+    if (c == '\\') c = '/';
+  const std::string src = write_temp_file(
+      "enum Color: i32 { Red = 1, Green = 2 }\n"
+      "extern lib td from \"" + lib + "\";\n"
+      "extern cfunc td::clux_color_next(c: Color): Color;\n"
+      "func main(): i32 {\n"
+      "  var c: Color = td::clux_color_next(Color::Red);\n"
+      "  if (c != Color::Green) { return 1; }\n"
+      "  if (td::clux_color_next(Color::Green) != Color::Red) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_enum_ffi");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  copy_ffi_runtime(exe.parent_path());
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
 TEST(CBackend, RejectsCopyOfOwnSlotField) {
   /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
      两个后端一致。 */

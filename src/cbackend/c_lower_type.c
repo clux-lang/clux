@@ -55,6 +55,12 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cir_unit_add_type(lc->unit, ct);
         return ct;
     }
+    /* enum：C 侧就是底层整数（无独立 C enum 类型；variant 由 sema 折叠成
+       整数字面量）。 */
+    if (type_kind_of(t) == TYPE_KIND_ENUM) {
+        const type_t *u = enum_type_underlying(t);
+        return u ? map_type(lc, u) : NULL;
+    }
     /* `opaque`：C 里是 `void *`（FFI 指针/回调实参、`extern cfunc` 的裸指针
        都用它；`data(s)` / `a.&` 也产生它）。 */
     if (t == vm->type_opaque) {

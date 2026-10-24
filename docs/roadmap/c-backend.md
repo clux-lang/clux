@@ -263,6 +263,15 @@ clux build hello.cx
     `全局 comptime var → 字段/方法 metadata + 类型装饰器 → 普通全局变量`；
   - 泛型实例的 metadata 由 sema 在实例化时应用（`Box[i32]` 等）。
 - 显式类型转换 `as`：`CIR_EXPR_CAST` → C cast。
+- enum：**C 侧就是底层整数**（不生成 C enum 类型）：
+  - `enum Color: i32 { ... }` 的变量/字段/数组元素/参数按底层 C 类型
+    （`int32_t` 等）存放；`sizeof`/`alignof` 由 sema 折叠；
+  - variant 引用 `Color::Red`：sema 已把底层值折叠进 `AST_SCOPE_REF.value`，
+    lowering 直接出整数字面量并转成底层 C 类型（`(uint8_t)(-56)` 这类归一，
+    与 VM 的“按底层宽度存字节”语义一致）；
+  - 判等、`as` 转底层类型、switch 模式（`(Color::Red, Color::Blue) -> ...`）
+    都按整数处理；
+  - `extern cfunc` 的 enum 形参/返回直接用底层整数。
 - 三元表达式 `cond ? a : b`：`CIR_EXPR_TERNARY`。
 - switch：按 `if / else if` 链展开（cond 只求值一次 → 临时变量），无
   fallthrough；字符串模式用 `clux_str_eq`，模式惰性求值。
@@ -350,8 +359,6 @@ clux build hello.cx
   共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
 - `new` bitfield（sema 目前直接拒绝）；
 - `extern var`（动态库导出的数据符号）与 `extern cfunc` 返回函数指针；
-- enum 值 / enum 变量（C 后端还没有 enum lowering：`Color::Red`、`var c: Color`
-  都会报“无法确定类型”；`extern cfunc` 的 enum 形参只按底层整数渲染）；
 - 依赖 FFI / `import` 的 examples（`import` 仍属第一版明确不做，见下）；
 - 全量 `examples/` 与 VM 的差分校准（M7）。
 

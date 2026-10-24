@@ -451,6 +451,34 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         return cir_expr_bool(lc->arena, ((ast_bool_lit_t *)e)->value);
     case AST_CHAR_LIT:
         return cir_expr_int(lc->arena, ((ast_char_lit_t *)e)->value);
+    case AST_SCOPE_REF: {
+        /* 枚举 variant `Color::Red`：sema 折叠后 type_expr 是 AST_TYPE_REF，
+           `value` 是底层整数值。enum 在 C 侧就是底层整数 → 直接出字面量。 */
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)e;
+        const type_t *t = NULL;
+        if (sr->type_expr && sr->type_expr->kind == AST_TYPE_REF)
+            t = resolve_type_expr(lc->sema, sr->type_expr);
+        if (t && type_kind_of(t) == TYPE_KIND_ENUM) {
+            cir_type_t *ct = map_type(lc, t);
+            if (!ct) return NULL;
+            cir_expr_t *lit = cir_expr_int(lc->arena, sr->value);
+            if (!lit) return NULL;
+            /* 底层宽度/符号归一：`Small: u8 { B = 200u8 }` 的折叠值是
+               int64（可能按有符号符号扩展成 -56）；C 里 enum 就是底层整数，
+               统一转成底层 C 类型，比较/存储与 VM 的字节语义一致。 */
+            cir_expr_t *cast = cir_expr_cast(lc->arena, ct, lit);
+            if (!cast) return NULL;
+            cast->type = ct;
+            return cast;
+        }
+        diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                   "c backend: unsupported `::` reference '%.*s' (only enum "
+                   "variants are supported; struct static attributes are not "
+                   "implemented yet)",
+                   (int)sr->variant.len, sr->variant.ptr);
+        lc->failed = true;
+        return NULL;
+    }
     case AST_STRING_LIT: {
         ast_string_lit_t *s = (ast_string_lit_t *)e;
         if (!map_type(lc, lc->sema->vm->type_str)) return NULL;
