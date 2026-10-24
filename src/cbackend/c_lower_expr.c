@@ -14,6 +14,27 @@ lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
     return NULL;
 }
 
+/* AST 表达式在生成的 C 里是否是可寻址左值。
+ * 只覆盖会产生 C 左值的形态（变量、解引用、下标、左值的成员）；其余
+ * （调用结果、构造/字面量等）视为右值，需要先物化成临时对象。 */
+static bool ast_is_lvalue(const ast_node_t *e) {
+    if (!e) return false;
+    switch (e->kind) {
+    case AST_IDENT:
+    case AST_DEREF:
+    case AST_INDEX:
+        return true;
+    case AST_MEMBER: {
+        const ast_member_t *m = (const ast_member_t *)e;
+        /* bitfield 字段是位读表达式，不是 C 左值。 */
+        if (m->is_bitfield) return false;
+        return ast_is_lvalue(m->object);
+    }
+    default:
+        return false;
+    }
+}
+
 static cir_expr_t *lower_call_arg(lower_ctx_t *lc, ast_node_t *a) {
     return lower_expr(lc, a);
 }
@@ -303,8 +324,9 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         lower_method_t *m = find_method(lc, owner, sr->variant);
         if (!m) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
-                       "c backend: method '%.*s' not found (methods of generic "
-                       "struct instances are not supported yet)",
+                       "c backend: internal: method '%.*s' has no materialized "
+                       "instance (sema should have instantiated the generic "
+                       "type/method)",
                        (int)sr->variant.len, sr->variant.ptr);
             lc->failed = true;
             return NULL;
@@ -327,8 +349,9 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             find_method(lc, call->member_type_id, mem->field);
         if (!m) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
-                       "c backend: method '%.*s' not found (methods of generic "
-                       "struct instances are not supported yet)",
+                       "c backend: internal: method '%.*s' has no materialized "
+                       "instance (sema should have instantiated the generic "
+                       "type/method)",
                        (int)mem->field.len, mem->field.ptr);
             lc->failed = true;
             return NULL;
@@ -344,8 +367,16 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
                 self_t = sema_resolve_type_slot(lc->sema, &self_vd->type_expr);
         }
         if (self_t && type_kind_of(type_strip_quals(self_t)) == TYPE_KIND_PTR &&
-            (!rt || type_kind_of(type_strip_quals(rt)) != TYPE_KIND_PTR))
+            (!rt || type_kind_of(type_strip_quals(rt)) != TYPE_KIND_PTR)) {
+            /* ref *T 形参：右值接收者（如 `f().m()`）先物化成临时左值，
+               否则 `&(call())` 在 C 里非法。 */
+            if (!ast_is_lvalue(mem->object)) {
+                cir_type_t *rct = rt ? map_type(lc, rt) : NULL;
+                if (!rct) return NULL;
+                recv = cir_expr_temp_lvalue(lc->arena, rct, recv);
+            }
             recv = cir_expr_unary(lc->arena, "&", recv);
+        }
         cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
         cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
         cir_expr_append_arg(out, recv);

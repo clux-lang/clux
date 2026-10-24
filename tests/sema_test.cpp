@@ -3854,4 +3854,99 @@ TEST_F(SemaTest, AnonCtPushPopTokenIsSymmetric) {
     EXPECT_EQ(sema_->ex.anon_ct_depth, 0u);
 }
 
+/* ================================================================ */
+/* 泛型实例化产物：泛型不得遗漏到 sema 之后                            */
+/* ================================================================ */
+
+TEST_F(SemaTest, GenericInstancesAreMaterializedBeforeBackends) {
+    /* 后端（C/VM）只接收具体 AST：泛型函数实例与泛型类型实例都应在 sema
+       内从定义 token 重新解析成干净 AST 并 walk（类型参数被替换成具体类型）。
+       这里直接检查 prog->funcs 中的实例产物：
+         - 存在 name 含 '$' 的 struct 实例定义（generic.count == 0），
+           其方法也都是具体函数（generic.count == 0）；
+         - 实例方法的签名槽位可以**脱离实例绑定**解析成具体类型
+           （`get(): T` → i32）；
+         - 泛型函数实例同样是 generic.count == 0 的具体函数，签名可解析。 */
+    ASSERT_TRUE(analyze(
+        "struct Box[T] {\n"
+        "  v: T;\n"
+        "  func get(self: ref *Box[T]): T { return self.v; }\n"
+        "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
+        "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+        "}\n"
+        "func inc(x: i32): i32 { return x + 1; }\n"
+        "func id[T](x: T): T { return x; }\n"
+        "func main(): i32 {\n"
+        "  var b: Box[i32] = Box[i32]::mk(5);\n"
+        "  var c = id(b.get());\n"
+        "  var d = b.map(inc);\n"
+        "  return c + d - 11;\n"
+        "}\n"));
+    ASSERT_FALSE(diag_has_error(diag_));
+
+    ast_program_t *prog = (ast_program_t *)ast_;
+    size_t instance_structs = 0, instance_methods = 0, instance_funcs = 0;
+    bool saw_concrete_get = false;
+    bool saw_generic_method_instance = false;
+    bool saw_generic_method_template = false;
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind == AST_STRUCT_DEF) {
+            ast_struct_def_t *sd = (ast_struct_def_t *)n;
+            bool mangled = sd->name.ptr &&
+                           memchr(sd->name.ptr, '$', sd->name.len) != nullptr;
+            if (!mangled || sd->generic.count != 0) continue;
+            instance_structs++;
+            for (ast_node_t *m = sd->members; m; m = m->next) {
+                if (m->kind != AST_FUNC_DEF) continue;
+                ast_func_def_t *fn = (ast_func_def_t *)m;
+                if (fn->generic.count != 0) {
+                    /* 泛型方法模板（`map[U]`）留在实例的成员表里等调用点
+                       实例化；它自身不生成代码（与顶层泛型函数模板一致）。 */
+                    saw_generic_method_template = true;
+                    continue;
+                }
+                instance_methods++;
+                if (strslice_eq(fn->name, STRSLICE_LIT("get")) &&
+                    fn->return_expr) {
+                    const type_t *rt =
+                        sema_resolve_type_slot(sema_, &fn->return_expr);
+                    EXPECT_NE(rt, nullptr)
+                        << "instance method return type still needs T binding";
+                    EXPECT_EQ(rt, vm_->type_i32);
+                    saw_concrete_get = true;
+                }
+            }
+        } else if (n->kind == AST_FUNC_DEF) {
+            ast_func_def_t *fn = (ast_func_def_t *)n;
+            if (fn->generic.count != 0 || !n->is_generated) continue;
+            if (!fn->name.ptr ||
+                memchr(fn->name.ptr, '$', fn->name.len) == nullptr)
+                continue;
+            instance_funcs++;
+            /* 泛型方法（`map[U]`）的实例：名字形如 Box$i32$map$i32。 */
+            for (size_t i = 0; i + 4 <= fn->name.len; i++) {
+                if (memcmp(fn->name.ptr + i, "$map", 4) == 0) {
+                    saw_generic_method_instance = true;
+                    break;
+                }
+            }
+            for (ast_node_t *p = fn->params; p; p = p->next) {
+                ast_var_def_t *vd = (ast_var_def_t *)p;
+                EXPECT_NE(sema_resolve_type_slot(sema_, &vd->type_expr), nullptr)
+                    << "instance parameter type must be concrete";
+            }
+            if (fn->return_expr)
+                EXPECT_NE(sema_resolve_type_slot(sema_, &fn->return_expr),
+                          nullptr)
+                    << "instance return type must be concrete";
+        }
+    }
+    EXPECT_GT(instance_structs, 0u);
+    EXPECT_GT(instance_methods, 0u);
+    EXPECT_GT(instance_funcs, 0u);
+    EXPECT_TRUE(saw_concrete_get);
+    EXPECT_TRUE(saw_generic_method_instance);
+    EXPECT_TRUE(saw_generic_method_template);
+}
+
 } /* namespace */

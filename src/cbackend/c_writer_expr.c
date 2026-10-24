@@ -384,6 +384,15 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
         cw_put(sb, ")) == 0)");
         break;
+    case CIR_EXPR_TEMP_LVALUE:
+        /* C99 复合字面量数组：`((T[]){ v })[0]` 是左值，可安全取地址；
+           每次求值都是一个新的临时对象（与 VM 对右值接收者的处理一致）。 */
+        cw_put(sb, "(((");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "[]){ ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " })[0])");
+        break;
     default:
         cw_put(sb, "0");
         break;

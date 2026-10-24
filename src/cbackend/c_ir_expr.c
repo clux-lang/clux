@@ -418,6 +418,17 @@ cir_expr_t *cir_expr_mem_eq(arena_t *arena, cir_type_t *type, cir_expr_t *lhs,
     return e;
 }
 
+cir_expr_t *cir_expr_temp_lvalue(arena_t *arena, cir_type_t *type,
+                                 cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_TEMP_LVALUE;
+    e->type = type;
+    e->lhs = value;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;

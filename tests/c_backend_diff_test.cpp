@@ -363,6 +363,26 @@ TEST(CBackendDiff, ResultSugarAndOptionalFields) {
   expect_diff(c);
 }
 
+TEST(CBackendDiff, GenericStructInstanceMethods) {
+  static const DiffCase c = {
+      "diff_generic_methods",
+      "struct Box[T] {\n"
+      "  v: T;\n"
+      "  func get(self: ref *Box[T]): T { return self.v; }\n"
+      "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
+      "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+      "}\n"
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "func main(): i32 {\n"
+      "  var b = Box[i32]::mk(20);\n"
+      "  var o: Box[Box[i32]] = .Box[Box[i32]]{ .v = b };\n"
+      "  return o.get().get() + b.map(inc);\n"
+      "}\n",
+      41,
+  };
+  expect_diff(c);
+}
+
 TEST(CBackendDiff, NonZeroMainResultPropagates) {
   static const DiffCase c = {
       "diff_exit42",

@@ -891,6 +891,82 @@ TEST(CBackend, BuildResultSugarAndGenericStructInstance) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildGenericStructInstanceMethods) {
+  const std::string src = write_temp_file(
+      "struct Box[T] {\n"
+      "  v: T;\n"
+      "  func get(self: ref *Box[T]): T { return self.v; }\n"
+      "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
+      "  func echo(self: ref *Box[T]): T { var t: T = self.v; return t; }\n"
+      "  func arr(self: ref *Box[T]): [2]T {\n"
+      "    var a: [2]T = .[2]T{ self.v, self.v };\n"
+      "    return a;\n"
+      "  }\n"
+      "  func copy_of(self: ref *Box[T]): Box[T] { return Box[T]::mk(self.v); }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var b: Box[i32] = Box[i32]::mk(21);\n"
+      "  var a = b.arr();\n"
+      "  if (a[0] != 21 || a[1] != 21) { return 1; }\n"
+      "  var c = b.copy_of();\n"
+      "  if (c.get() != 21) { return 2; }\n"
+      "  return b.get() + b.echo() + c.get() - 63;\n"
+      "}\n",
+      "cbackend_generic_methods");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildGenericMethodInsideGenericStruct) {
+  const std::string src = write_temp_file(
+      "struct Box[T] {\n"
+      "  v: T;\n"
+      "  func size_of(self: ref *Box[T]): usize { return sizeof(T); }\n"
+      "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+      "}\n"
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "func main(): i32 {\n"
+      "  var b: Box[i32] = .Box[i32]{ .v = 41 };\n"
+      "  if (b.size_of() != 4usize) { return 1; }\n"
+      "  return b.map(inc);\n"
+      "}\n",
+      "cbackend_generic_method_inst");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 42);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildNestedGenericAndRvalueReceiver) {
+  const std::string src = write_temp_file(
+      "struct Box[T] { v: T; func get(self: ref *Box[T]): T { return self.v; } }\n"
+      "func main(): i32 {\n"
+      "  var inner: Box[i32] = .Box[i32]{ .v = 20 };\n"
+      "  var outer: Box[Box[i32]] = .Box[Box[i32]]{ .v = inner };\n"
+      "  /* 方法调用链：接收者是上一层调用的右值结果 */\n"
+      "  return outer.get().get();\n"
+      "}\n",
+      "cbackend_nested_generic");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 20);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

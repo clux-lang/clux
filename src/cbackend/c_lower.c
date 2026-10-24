@@ -37,7 +37,17 @@ static void mark_cleanup_returns(cir_stmt_t *s) {
 cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                                       bool is_entry) {
     lc->locals = NULL;
-    if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc) {
+    if (fn->generic.count > 0) {
+        /* 架构契约：泛型在 sema 内实例化完毕，后端只该看到具体函数。
+           走到这里说明 sema 漏了实例化（内部错误）。 */
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
+                   "c backend: internal: generic function '%.*s' reached "
+                   "lowering (sema must materialize instances)",
+                   (int)fn->name.len, fn->name.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    if (fn->is_cfunc || fn->is_extern_cfunc) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
                    "c backend: unsupported function kind");
         lc->failed = true;
@@ -102,6 +112,85 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                                            body, line, is_entry);
     if (out) out->cleanup = cleanup;
     return out;
+}
+
+/* ---- 调用目标自检 -------------------------------------------------------
+ * 后端只应看到 sema 已具体化的函数：泛型实例（函数/类型实例）都由 sema
+ * 从定义 token 重新解析成干净 AST 后追加到 prog->funcs，模板本身不生成代码。
+ * 如果某次调用指向一个既不在本 unit、也不是已知运行期辅助函数的名字，
+ * 说明 sema 漏掉了实例化（或用了不支持的 builtin）——在这里报内部错误，
+ * 而不是让 host cc 报 "undeclared function"。 */
+
+static bool unit_has_function(const cir_unit_t *u, const char *name) {
+    for (const cir_function_t *f = u->functions; f; f = f->next)
+        if (f->name && strcmp(f->name, name) == 0) return true;
+    return false;
+}
+
+static bool call_target_known(const cir_unit_t *u, const char *name) {
+    static const char *const helpers[] = {
+        "clux_new",   "clux_make",       "clux_str_eq", "clux_bf_get",
+        "clux_bf_set", "clux_assert",    "clux_panic_none", NULL};
+    if (!name) return true;
+    for (size_t i = 0; helpers[i]; i++)
+        if (strcmp(name, helpers[i]) == 0) return true;
+    if (strncmp(name, "clux_bf_make_", 13) == 0) return true;
+    return unit_has_function(u, name);
+}
+
+static const char *missing_call_in_expr(const cir_unit_t *u,
+                                        const cir_expr_t *e);
+static const char *missing_call_in_list(const cir_unit_t *u,
+                                        const cir_expr_t *e) {
+    for (; e; e = e->next) {
+        const char *m = missing_call_in_expr(u, e);
+        if (m) return m;
+    }
+    return NULL;
+}
+
+static const char *missing_call_in_expr(const cir_unit_t *u,
+                                        const cir_expr_t *e) {
+    if (!e) return NULL;
+    if (e->kind == CIR_EXPR_CALL && !call_target_known(u, e->text))
+        return e->text;
+    const char *m = NULL;
+    if ((m = missing_call_in_expr(u, e->lhs))) return m;
+    if ((m = missing_call_in_expr(u, e->rhs))) return m;
+    if ((m = missing_call_in_expr(u, e->high))) return m;
+    if ((m = missing_call_in_list(u, e->args))) return m;
+    for (const cir_init_t *i = e->inits; i; i = i->next) {
+        if ((m = missing_call_in_expr(u, i->value))) return m;
+    }
+    return NULL;
+}
+
+static const char *missing_call_in_stmt(const cir_unit_t *u,
+                                        const cir_stmt_t *s) {
+    for (; s; s = s->next) {
+        const char *m = NULL;
+        if ((m = missing_call_in_expr(u, s->expr))) return m;
+        if ((m = missing_call_in_expr(u, s->lhs))) return m;
+        if ((m = missing_call_in_expr(u, s->update))) return m;
+        if ((m = missing_call_in_stmt(u, s->init))) return m;
+        if ((m = missing_call_in_stmt(u, s->body))) return m;
+        if ((m = missing_call_in_stmt(u, s->else_body))) return m;
+    }
+    return NULL;
+}
+
+static const char *find_missing_call(const cir_unit_t *u) {
+    for (const cir_function_t *f = u->functions; f; f = f->next) {
+        const char *m = missing_call_in_stmt(u, f->body);
+        if (m) return m;
+        m = missing_call_in_stmt(u, f->cleanup);
+        if (m) return m;
+    }
+    for (const cir_global_t *g = u->globals; g; g = g->next) {
+        const char *m = missing_call_in_expr(u, g->init);
+        if (m) return m;
+    }
+    return NULL;
 }
 
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
@@ -175,13 +264,16 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_STRUCT_DEF) continue;
         ast_struct_def_t *sd = (ast_struct_def_t *)n;
-        /* 泛型 struct 的方法体与类型参数绑定，sema 不会把实例化后的方法体
-           放进 prog->funcs（只有函数实例会被重新解析成独立 AST）。因此 C
-           后端暂时不 lowering 模板方法体；调用点会报“方法未找到”。 */
+        /* 模板 struct 不是实例，不生成代码（与 VM compiler 的
+           `generic.count > 0` 跳过一致）。sema 会把每个用到的类型实例重新
+           解析成**具体** struct（名字含 `$`，generic.count == 0）并追加到
+           prog->funcs，实例方法就在其中。 */
         if (sd->generic.count > 0) continue;
         for (ast_node_t *mem = sd->members; mem; mem = mem->next) {
             if (mem->kind != AST_FUNC_DEF) continue;
             ast_func_def_t *m = (ast_func_def_t *)mem;
+            /* 泛型方法模板（`func map[U]`）：调用点由 sema 实例化，模板不生成
+               代码。 */
             if (m->generic.count > 0 || m->is_comptime) continue;
             strslice_t orig = m->name;
             char mb[256];
@@ -211,6 +303,8 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (n->kind != AST_FUNC_DEF) continue;
         ast_func_def_t *fn = (ast_func_def_t *)n;
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) continue;
+        /* 泛型函数模板不生成代码；用到的实例已由 sema 重新解析成具体函数，
+           在下面的遍历里按普通函数 lowering。cfunc/extern 未支持（第一版）。 */
         if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc)
             continue;
         cir_function_t *cf = lower_function(&lc, fn, false);
@@ -221,6 +315,18 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     if (main_fn) {
         if (!cm || lc.failed) return NULL;
         cir_unit_add_function(u, cm);
+    }
+    if (lc.failed) return NULL;
+
+    /* 泛型必须在 sema 结束前实例化完毕：这里是后端边界上的最后一道自检。 */
+    const char *missing = find_missing_call(u);
+    if (missing) {
+        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)prog),
+                   "c backend: call to '%s' has no C definition "
+                   "(unsupported builtin, or a generic instance that sema did "
+                   "not materialize)",
+                   missing);
+        return NULL;
     }
     return u;
 }

@@ -277,9 +277,27 @@ clux build hello.cx
     `{ setup; if (!ok) { tail } return value; }`；
   - `clux_assert`/`prelude`/`postlude` 的语句链拼接要求尾指针走到链尾
     （否则后续语句会截断链）。
-- 泛型：sema 单态化后的具体函数/类型直接 lowering（`Box[T]`、`id[T]`）；
-  泛型 struct 的**实例**由 sema 重新解析成具体 AST（含方法体），C 后端正常
-  lowering；模板本身不 lowering。
+- 泛型与后端边界（架构契约）：**泛型必须在 sema 内实例化完毕**，后端不处理
+  任何泛型构造。
+  - 函数实例 / 类型实例：sema 从定义 token 区间**重新解析**出干净 AST（
+    `sema_generic.c` 的 `parse_func_def` / `parse_struct_def`），把类型参数
+    替换成具体类型后追加到 `prog->funcs`；
+  - 泛型 struct 的实例方法走同一条路：实例的结构体定义（名字含 `$`）连同
+    方法一起重新解析，`T` 在实例方法签名里已经变成具体类型（可直接
+    `sema_resolve_type_slot`，不依赖实例绑定）；
+  - 泛型方法（`func map[U]`）保留**模板**在成员表里，调用点再实例化成
+    具体函数（同样追加到 `prog->funcs`）；
+  - 模板（顶层泛型函数/结构体、类型参数的成员模板）不生成代码：后端按
+    `generic.count` 跳过（与 VM compiler 的 `compile_func.c` 一致）；
+  - 后端边界自检：`cbackend_lower` 结束时检查所有 CIR 调用目标都有定义
+    （本 unit 函数或已知运行期辅助函数），缺失时报内部错误——把
+    “sema 漏实例化”变成可诊断的失败，而不是 host cc 的
+    `undeclared function`；
+  - 回归测试：`SemaTest.GenericInstancesAreMaterializedBeforeBackends`
+    （sema 侧断言实例产物与具体签名）、
+    `CBackend.BuildGenericStructInstanceMethods` /
+    `BuildGenericMethodInsideGenericStruct` /
+    `BuildNestedGenericAndRvalueReceiver`。
 - test 运行器：`clux test <file.cx> --backend=c`
   - 顶层 `test "Suite.Name" { ... }` 改写成无参 void 函数；
   - 生成 `int main(int argc, char **argv)`：`argv[1]` = 用例下标，执行单个
@@ -301,8 +319,6 @@ clux build hello.cx
 - 测试运行器每个用例独立进程，全局变量在用例之间**不共享**（VM 运行器
   共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
 - `new` bitfield（sema 目前直接拒绝）；
-- 泛型 struct 的**模板方法体**：只有 sema 重新解析出的实例会被 lowering，
-  模板本身跳过（调用模板类型会报“方法未找到”）；
 - 依赖 FFI / `import` 的 examples（第一版明确不做，见“第一版明确不做”）；
 - 全量 `examples/` 与 VM 的差分校准（M7）。
 

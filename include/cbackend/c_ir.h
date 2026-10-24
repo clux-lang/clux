@@ -91,6 +91,9 @@ typedef enum {
     CIR_EXPR_CAST,
     CIR_EXPR_TERNARY,
     CIR_EXPR_MEM_EQ,
+    /* 把右值表达式物化成可寻址的临时左值（C 复合字面量数组）：
+       `(((T[]){ v })[0])`。用于「右值接收者 + ref *T 形参」的方法调用。 */
+    CIR_EXPR_TEMP_LVALUE,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -297,6 +300,8 @@ cir_expr_t    *cir_expr_ternary(arena_t *arena, cir_expr_t *cond,
                                 cir_expr_t *then_e, cir_expr_t *else_e);
 cir_expr_t    *cir_expr_mem_eq(arena_t *arena, cir_type_t *type,
                                cir_expr_t *lhs, cir_expr_t *rhs);
+cir_expr_t    *cir_expr_temp_lvalue(arena_t *arena, cir_type_t *type,
+                                    cir_expr_t *value);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);
