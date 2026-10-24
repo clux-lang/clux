@@ -41,6 +41,16 @@ const char *module_symbol(arena_t *arena, const cir_unit_t *unit,
     int n = snprintf(buf, sizeof buf, "%s%s%.*s", prefix, kind ? kind : "",
                      (int)name.len, name.ptr ? name.ptr : "");
     if (n <= 0 || (size_t)n >= sizeof buf) return NULL;
+    /* sema 的 mangling 可能把类型文本塞进名字（如 `read_ptr$ref *i32`）：
+       C 标识符只允许 [_A-Za-z0-9$]（`$` 是 clang/gcc 扩展），其余替换为
+       `_`。跨模块调用点与定义点都走这里，替换保持确定性一致。 */
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '$')
+            continue;
+        buf[i] = '_';
+    }
     char *p = (char *)arena_alloc(arena, (size_t)n + 1, 1);
     if (!p) return NULL;
     memcpy(p, buf, (size_t)n + 1);

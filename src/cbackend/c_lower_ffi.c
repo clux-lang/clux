@@ -295,6 +295,18 @@ static const type_t *extern_return_type(lower_ctx_t *lc,
 }
 
 static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
+    /* 生成代码自带运行期 ABI 原型（malloc/free/printf/...）：同名 extern
+       cfunc 不再重复声明，否则与自带原型冲突（clux 的 C 产物不与 C 源码
+       兼容编译，只按 ABI 走动态库）。 */
+    static const char *const runtime_abi[] = {
+        "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
+        "strlen", "abort", "printf", "fflush", NULL};
+    for (size_t i = 0; runtime_abi[i]; i++) {
+        strslice_t rn = strslice_from_cstr(runtime_abi[i]);
+        if (rn.len == fn->name.len &&
+            memcmp(rn.ptr, fn->name.ptr, rn.len) == 0)
+            return;
+    }
     bool ok = true;
     size_t nparams = 0;
     for (ast_node_t *p = fn->params; p; p = p->next) nparams++;

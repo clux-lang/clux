@@ -225,7 +225,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
             cw_put(sb, " *)clux_union_at_lvalue(&(");
             cw_write_expr(sb, e->lhs);
             cw_printf(sb,
-                      "), %zu, sizeof(((%s *)0)->tag), offsetof(%s, u), "
+                      "), %zu, sizeof(((%s *)0)->tag), clux_offsetof(%s, u), "
                       "\"%s\")))",
                       e->tag, ut, ut, e->text ? e->text : "clux_m_member");
             break;
@@ -237,7 +237,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, "[]){ ");
         cw_write_expr(sb, e->lhs);
         cw_printf(sb,
-                  " })[0], %zu, sizeof(((%s *)0)->tag), offsetof(%s, u), "
+                  " })[0], %zu, sizeof(((%s *)0)->tag), clux_offsetof(%s, u), "
                   "\"%s\"))",
                   e->tag, ut, ut, e->text ? e->text : "clux_m_member");
         break;

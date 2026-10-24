@@ -1,5 +1,7 @@
 #include "cbackend/c_lower_internal.h"
 
+#include "parser/ast_type_ref.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -186,6 +188,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         }
         diag_error(lc->sema->diag, sema_loc(lc->sema, s),
                    "c backend: local function definitions are not supported");
+        lc->failed = true;
         *ok = false;
         return NULL;
     }
@@ -288,6 +291,23 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        /* `_ = expr`（discard 赋值）：目标不是真实变量，只求值表达式。 */
+        if (a->target && a->target->kind == AST_IDENT &&
+            ((ast_ident_t *)a->target)->name.len == 1 &&
+            ((ast_ident_t *)a->target)->name.ptr &&
+            ((ast_ident_t *)a->target)->name.ptr[0] == '_') {
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st) {
+                *ok = false;
+                return NULL;
+            }
+            st->expr = lower_expr(lc, a->value);
+            if (!st->expr) {
+                *ok = false;
+                return NULL;
+            }
+            return st;
+        }
         /* 跨模块全局变量写：`math::PI = v`（C 符号是导出方模块前缀的全局）。 */
         if (a->target && a->target->kind == AST_SCOPE_REF &&
             is_import_scope_ref(lc, (ast_scope_ref_t *)a->target)) {

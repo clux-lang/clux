@@ -127,6 +127,31 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         }
         return ct;
     }
+    if (t->kind == TYPE_KIND_TUPLE) {
+        /* 元组：C 侧用同构匿名 struct（字段 `clux_f_0..N`），位置构造与
+           下标访问都映射到这些字段。 */
+        char name[128];
+        snprintf(name, sizeof name, "struct %stu_%u", type_prefix(lc), t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        size_t n = tuple_type_elem_count(t);
+        for (size_t i = 0; i < n; i++) {
+            const tuple_elem_t *te = tuple_type_elem(t, i);
+            if (!te || !te->type) return NULL;
+            cir_type_t *ft = map_type(lc, te->type);
+            if (!ft) return NULL;
+            char fn[32];
+            snprintf(fn, sizeof fn, "clux_f_%zu", i);
+            cir_field_t *f =
+                cir_field_new(lc->arena, copy_arena(lc->arena, fn), ft);
+            if (!f) return NULL;
+            cir_type_add_field(ct, f);
+        }
+        return ct;
+    }
     if (t->kind == TYPE_KIND_ARRAY) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_ARRAY);
         if (cached) return cached;

@@ -195,6 +195,10 @@ static const type_t *ctor_field_type(const type_t *t, const ast_node_t *field,
         return NULL;
     }
     if (type_kind_of(st) == TYPE_KIND_ARRAY) return array_type_elem(st);
+    if (type_kind_of(st) == TYPE_KIND_TUPLE) {
+        const tuple_elem_t *te = tuple_type_elem(st, index);
+        return te ? te->type : NULL;
+    }
     return NULL;
 }
 
@@ -621,17 +625,18 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         }
         if (lt && rt && (token_is(b->op, "==") || token_is(b->op, "!=")) &&
             (type_kind_of(type_strip_quals(lt)) == TYPE_KIND_CUNION ||
+             type_kind_of(type_strip_quals(lt)) == TYPE_KIND_TUPLE ||
              type_kind_of(type_strip_quals(lt)) == TYPE_KIND_SLICE ||
              type_kind_of(type_strip_quals(lt)) == TYPE_KIND_FUNC)) {
             /* 复合值的判等：C 不能直接 `==` 结构体。
-               cunion → memcmp；slice → (data,len)；func → (fn,env)。 */
+               cunion/元组 → memcmp；slice → (data,len)；func → (fn,env)。 */
             bool neg = token_is(b->op, "!=");
             type_kind_t k = type_kind_of(type_strip_quals(lt));
             cir_expr_t *l = lower_expr(lc, b->lhs);
             cir_expr_t *r = lower_expr(lc, b->rhs);
             if (!l || !r) return NULL;
             cir_expr_t *eq = NULL;
-            if (k == TYPE_KIND_CUNION) {
+            if (k == TYPE_KIND_CUNION || k == TYPE_KIND_TUPLE) {
                 cir_type_t *ct = map_type(lc, lt);
                 if (!ct) return NULL;
                 lc->unit->uses_mem_eq = true;
@@ -795,15 +800,34 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_INDEX: {
         ast_index_t *ix = (ast_index_t *)e;
+        const type_t *ot = infer_expr_type(lc, ix->object);
+        const type_t *ost = ot ? type_strip_quals(ot) : NULL;
+        /* 元组下标：编译期常量 → 成员 `clux_f_<i>`（读写都是左值）。 */
+        if (ost && type_kind_of(ost) == TYPE_KIND_TUPLE) {
+            int64_t ti = 0;
+            if (ix->indices && ix->indices->kind == AST_INT_LIT)
+                ti = ((ast_int_lit_t *)ix->indices)->value;
+            else {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: tuple index must be a constant");
+                lc->failed = true;
+                return NULL;
+            }
+            cir_expr_t *obj = lower_expr(lc, ix->object);
+            if (!obj) return NULL;
+            char fname[32];
+            snprintf(fname, sizeof fname, "clux_f_%lld", (long long)ti);
+            return cir_expr_member(lc->arena, obj,
+                                   copy_arena(lc->arena, fname));
+        }
         cir_expr_t *obj = lower_expr(lc, ix->object);
         cir_expr_t *idx = lower_expr(lc, ix->indices);
         if (!obj || !idx) return NULL;
         /* 越界保护（与 VM 一致：OOB 视为 panic）：
            - 数组长度是类型常量，索引包成 clux_index_check(idx, N)；
-           - 切片长度在运行期（.len），接收者是左值时才能安全求值两次；
+           - 切片：接收者先落复合字面量临时量（只求值一次），
+             再由 clux_slice_at 做越界检查并返回元素地址；
            - 指针下标是 C 语义，不检查。 */
-        const type_t *ot = infer_expr_type(lc, ix->object);
-        const type_t *ost = ot ? type_strip_quals(ot) : NULL;
         if (ost && type_kind_of(ost) == TYPE_KIND_ARRAY) {
             lc->unit->uses_index_check = true;
             cir_expr_t *chk =
@@ -978,6 +1002,12 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_ASSIGN: {
         ast_assign_t *a = (ast_assign_t *)e;
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        /* `_ = expr`（discard 赋值）：只求值表达式。 */
+        if (a->target && a->target->kind == AST_IDENT &&
+            ((ast_ident_t *)a->target)->name.len == 1 &&
+            ((ast_ident_t *)a->target)->name.ptr &&
+            ((ast_ident_t *)a->target)->name.ptr[0] == '_')
+            return lower_expr(lc, a->value);
         if (a->target && a->target->kind == AST_MEMBER &&
             ((ast_member_t *)a->target)->is_bitfield)
             return lower_bitfield_assign(lc, (ast_member_t *)a->target, op,

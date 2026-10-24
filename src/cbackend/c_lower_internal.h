@@ -58,6 +58,7 @@
 #include "vm/module.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
+#include "vm/type_tuple.h"
 #include "vm/type_cfunc.h"
 #include "vm/type_cunion.h"
 #include "vm/type_enum.h"

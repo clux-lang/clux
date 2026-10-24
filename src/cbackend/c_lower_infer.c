@@ -68,6 +68,14 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
             return ((const array_type_t *)bt)->elem_type;
         if (type_kind_of(bt) == TYPE_KIND_SLICE)
             return slice_type_elem(bt);
+        if (type_kind_of(bt) == TYPE_KIND_TUPLE) {
+            int64_t ti = 0;
+            ast_index_t *ix = (ast_index_t *)e;
+            if (ix->indices && ix->indices->kind == AST_INT_LIT)
+                ti = ((ast_int_lit_t *)ix->indices)->value;
+            const tuple_elem_t *te = tuple_type_elem(bt, (size_t)ti);
+            return te ? te->type : NULL;
+        }
         return NULL;
     }
     case AST_MEMBER: {
@@ -180,6 +188,11 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         if (c->callee && c->callee->kind == AST_FUNC_REF)
             sf = sema_func_by_id(lc->sema, ((ast_func_ref_t *)c->callee)->fid);
         else if (c->callee && c->callee->kind == AST_IDENT) {
+            /* 局部函数值变量（`var f = add; f(...)`）：返回签名返回值。 */
+            const type_t *ft =
+                lookup_local(lc, ((ast_ident_t *)c->callee)->name);
+            if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC)
+                return func_type_return(ft);
             sema_symbol_t *sym = sema_lookup(
                 lc->sema->global_scope, ((ast_ident_t *)c->callee)->name);
             if (sym && sym->ast && sym->ast->kind == AST_FUNC_DEF) {

@@ -169,7 +169,10 @@ static bool call_target_known(const cir_unit_t *u, const char *name) {
     static const char *const helpers[] = {
         "clux_new",   "clux_make",       "clux_str_eq", "clux_bf_get",
         "clux_bf_set", "clux_assert",    "clux_panic_none",
-        "clux_str_from_c", "clux_index_check", "clux_slice_check", NULL};
+        "clux_str_from_c", "clux_index_check", "clux_slice_check",
+        /* 运行期 ABI（自带原型，见 writer 的 runtime prelude） */
+        "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
+        "strlen", "abort", "printf", "fflush", "strncmp", NULL};
     if (!name) return true;
     for (size_t i = 0; helpers[i]; i++)
         if (strcmp(name, helpers[i]) == 0) return true;
