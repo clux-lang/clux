@@ -426,7 +426,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         lc->failed = true;
         return NULL;
     }
-    const char *cname = mangle(lc->arena, "clux_fn_", name);
+    const char *cname = module_symbol(lc->arena, lc->unit, "fn_", name);
     if (!cname) return NULL;
     cir_expr_t *expr = cir_expr_call(lc->arena, cname, NULL);
     if (!expr) return NULL;
@@ -498,7 +498,7 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                     memcmp(c->name.ptr, name.ptr, name.len) == 0)
                     return cir_expr_ident(lc->arena, c->expr);
         }
-        const char *n = mangle(lc->arena, "clux_v_", name);
+        const char *n = module_symbol(lc->arena, lc->unit, "v_", name);
         return n ? cir_expr_ident(lc->arena, n) : NULL;
     }
     case AST_UNARY: {
@@ -660,7 +660,7 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         strslice_t name = ref->name;
         if ((!name.ptr || name.len == 0) && fd) name = fd->name;
         if (!name.ptr) return NULL;
-        const char *obj = mangle(lc->arena, "clux_obj_", name);
+        const char *obj = module_symbol(lc->arena, lc->unit, "obj_", name);
         const type_t *ft = func_type_of_def(lc, fd);
         cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
         return obj && ct ? cir_expr_func_obj(lc->arena, obj, ct) : NULL;

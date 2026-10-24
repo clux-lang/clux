@@ -15,9 +15,11 @@ void cw_write_c_string(string_t *sb, const char *s);
 const char *cw_bf_helper_suffix(const cir_type_t *t);
 
 void cw_write_expr(string_t *sb, const cir_expr_t *e);
-void cw_write_type_defs(string_t *sb, cir_type_t *types);
+void cw_write_type_defs(string_t *sb, cir_type_t *types, bool header_only);
 void cw_emit_type(string_t *sb, cir_type_t *t);
 void cw_emit_all_types(string_t *sb, cir_type_t *types);
+void cw_emit_header_types(string_t *sb, cir_type_t *types);
+void cw_emit_header_signatures(string_t *sb, cir_signature_t *sigs);
 void cw_emit_bf_helpers(string_t *sb, cir_type_t *types);
 
 void cw_write_params(string_t *sb, const cir_signature_t *sig, bool with_names,

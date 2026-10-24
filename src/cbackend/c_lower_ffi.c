@@ -93,8 +93,11 @@ static const char *ffi_cfunc_typedef(lower_ctx_t *lc, const type_t *t,
     for (lower_cfn_typedef_t *d = lc->cfn_typedefs; d; d = d->next)
         if (d->src == t) return d->tag;
 
-    char tagbuf[64];
-    snprintf(tagbuf, sizeof tagbuf, "clux_cfn_%u", lc->ffi_seq++);
+    char tagbuf[96];
+    snprintf(tagbuf, sizeof tagbuf, "%scfn_%u",
+             (lc->unit && lc->unit->sym_prefix) ? lc->unit->sym_prefix
+                                                : "clux_",
+             lc->ffi_seq++);
     lower_cfn_typedef_t *d = (lower_cfn_typedef_t *)arena_calloc(
         lc->arena, 1, sizeof(*d), ALIGNOF(max_align_t));
     if (!d) {
@@ -712,30 +715,11 @@ static lower_cb_wrapper_t *cb_wrapper_find(lower_ctx_t *lc,
     return NULL;
 }
 
-/* 为 `cfunc` 定义生成 C trampoline：
- *     static <ret> clux_cb_<f>(<C 参数...>) { [return] clux_fn_<f>(NULL, ...); }
- * 只有 `cfunc` 是 C ABI 函数（无 env）：`func` / 闭包没有 C 等价物，不能作为
- * C 函数指针（语言语义如此，这里也明确拒绝而不是生成错误代码）。
- * str 参数/返回值在边界上转换（C char* ⇄ clux_str）。 */
-static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
-    lower_cb_wrapper_t *hit = cb_wrapper_find(lc, fn);
-    if (hit) return hit->name;
-    if (!fn->is_cfunc) {
-        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
-                   "c backend: cfunc_ptr requires a `cfunc` definition: only "
-                   "C-ABI functions can become C function pointers (plain "
-                   "`func`/closures have no C representation)");
-        lc->failed = true;
-        return NULL;
-    }
-    if (fn->captures || fn->capture_type_id != 0) {
-        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
-                   "c backend: cfunc_ptr: callback '%.*s' captures variables; "
-                   "a C function pointer has no environment",
-                   (int)fn->name.len, fn->name.ptr);
-        lc->failed = true;
-        return NULL;
-    }
+/* 为 `cfunc` 定义生成 C ABI 包装（可选 static）：
+ *     [static] <ret> <wname>(<C 参数...>) { [return] clux_<tag>_fn_<f>(NULL, ...); }
+ * `cfunc` 没有 env；str 参数/返回值在边界上转换（C char* ⇄ clux_str）。 */
+static const char *build_cfunc_wrapper(lower_ctx_t *lc, ast_func_def_t *fn,
+                                       const char *wname, bool is_static) {
     size_t nparams = 0;
     for (ast_node_t *p = fn->params; p; p = p->next) nparams++;
     const type_t **pt = NULL;
@@ -764,6 +748,7 @@ static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
                            : lc->sema->vm->type_void;
 
     bool ok = true;
+    lc->ffi_error = NULL;
     const char *cret = ffi_c_type(lc, rt, &ok);
     const char **ctypes = NULL;
     if (nparams) {
@@ -774,29 +759,32 @@ static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
             return NULL;
         }
         for (size_t i = 0; i < nparams; i++) {
+            lc->ffi_error = NULL;
             ctypes[i] = ffi_c_type(lc, pt[i], &ok);
             if (!ok) {
                 diag_error(lc->sema->diag,
                            sema_loc(lc->sema, (ast_node_t *)fn),
-                           "c backend: cfunc_ptr: callback parameter %zu type "
-                           "cannot cross the C ABI",
-                           i + 1);
+                           "c backend: cfunc '%.*s' parameter %zu type cannot "
+                           "cross the C ABI: %s",
+                           (int)fn->name.len, fn->name.ptr, i + 1,
+                           lc->ffi_error ? lc->ffi_error : "unsupported type");
                 lc->failed = true;
                 return NULL;
             }
         }
     }
     if (!ok || !cret) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
+                   "c backend: cfunc '%.*s' return type cannot cross the C "
+                   "ABI: %s",
+                   (int)fn->name.len, fn->name.ptr,
+                   lc->ffi_error ? lc->ffi_error : "unsupported type");
         lc->failed = true;
         return NULL;
     }
 
-    char nbuf[512];
-    snprintf(nbuf, sizeof nbuf, "clux_cb_%.*s", (int)fn->name.len,
-             fn->name.ptr ? fn->name.ptr : "");
-    const char *wname = copy_arena(lc->arena, nbuf);
-    const char *target = mangle(lc->arena, "clux_fn_", fn->name);
-    if (!wname || !target) {
+    const char *target = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
+    if (!target || !wname) {
         lc->failed = true;
         return NULL;
     }
@@ -806,7 +794,7 @@ static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
         lc->failed = true;
         return NULL;
     }
-    string_append_cstr(sb, "static ");
+    if (is_static) string_append_cstr(sb, "static ");
     string_append_cstr(sb, cret);
     string_append_cstr(sb, " ");
     string_append_cstr(sb, wname);
@@ -854,6 +842,126 @@ static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
         return NULL;
     }
     cir_unit_add_raw(lc->unit, text);
+    return text;
+}
+
+/* C ABI 原型文本（头文件里的 `extern` 声明）：从签名重新渲染，
+ * 与 build_cfunc_wrapper 的参数类型完全一致。 */
+static void emit_cfunc_prototype_into(lower_ctx_t *lc, ast_func_def_t *fn,
+                                      const char *wname) {
+    size_t nparams = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next) nparams++;
+    bool ok = true;
+    lc->ffi_error = NULL;
+    const type_t *rt = fn->return_expr
+                           ? sema_resolve_type_slot(lc->sema, &fn->return_expr)
+                           : lc->sema->vm->type_void;
+    const char *cret = ffi_c_type(lc, rt, &ok);
+    if (!ok || !cret) {
+        lc->failed = true;
+        return;
+    }
+    string_t *sb = string_new(lc->sema->vm->alloc);
+    if (!sb) {
+        lc->failed = true;
+        return;
+    }
+    string_append_cstr(sb, "extern ");
+    string_append_cstr(sb, cret);
+    string_append_cstr(sb, " ");
+    string_append_cstr(sb, wname);
+    string_append_cstr(sb, "(");
+    if (nparams == 0) string_append_cstr(sb, "void");
+    size_t i = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, i++) {
+        ast_var_def_t *vd = (ast_var_def_t *)p;
+        const type_t *t = vd->resolved_type;
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        lc->ffi_error = NULL;
+        const char *ct = ffi_c_type(lc, t, &ok);
+        if (!ok || !ct) {
+            lc->failed = true;
+            string_free(&sb);
+            return;
+        }
+        if (i) string_append_cstr(sb, ", ");
+        string_append_cstr(sb, ct);
+    }
+    string_append_cstr(sb, ");");
+    const char *text = copy_arena(lc->arena, string_cstr(sb));
+    string_free(&sb);
+    if (!text) {
+        lc->failed = true;
+        return;
+    }
+    cir_unit_add_extern_decl_pub(lc->unit, text);
+}
+
+/* `export cfunc f(...)`：内部仍是 env-first 的 clux 函数；对外生成
+ * `clux_<tag>_<name>` 的 C ABI 包装并进头文件（同一模块内调用仍走内部函数）。 */
+void lower_exported_cfunc(lower_ctx_t *lc, ast_func_def_t *fn) {
+    if (!lc || !fn || lc->failed) return;
+    if (!fn->is_cfunc || fn->is_extern_cfunc) return;
+    const char *wname = module_symbol(lc->arena, lc->unit, "", fn->name);
+    if (!wname) {
+        lc->failed = true;
+        return;
+    }
+    if (!build_cfunc_wrapper(lc, fn, wname, /*is_static=*/false)) return;
+    emit_cfunc_prototype_into(lc, fn, wname);
+    /* 头文件需要签名类型定义：登记起来由 writer 递归展开。 */
+    size_t i = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, i++) {
+        ast_var_def_t *vd = (ast_var_def_t *)p;
+        const type_t *t = vd->resolved_type;
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (t) {
+            cir_type_t *ct = map_type(lc, t);
+            if (ct) cir_unit_add_header_type(lc->unit, ct);
+        }
+    }
+    if (fn->return_expr) {
+        const type_t *t = sema_resolve_type_slot(lc->sema, &fn->return_expr);
+        if (t) {
+            cir_type_t *ct = map_type(lc, t);
+            if (ct) cir_unit_add_header_type(lc->unit, ct);
+        }
+    }
+}
+
+/* 为 `cfunc` 定义生成 C trampoline（`cfunc_ptr` 用，static）。 */
+static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
+    lower_cb_wrapper_t *hit = cb_wrapper_find(lc, fn);
+    if (hit) return hit->name;
+    if (!fn->is_cfunc) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
+                   "c backend: cfunc_ptr requires a `cfunc` definition: only "
+                   "C-ABI functions can become C function pointers (plain "
+                   "`func`/closures have no C representation)");
+        lc->failed = true;
+        return NULL;
+    }
+    if (fn->captures || fn->capture_type_id != 0) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
+                   "c backend: cfunc_ptr: callback '%.*s' captures variables; "
+                   "a C function pointer has no environment",
+                   (int)fn->name.len, fn->name.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    char nbuf[512];
+    snprintf(nbuf, sizeof nbuf, "%scb_%.*s",
+             (lc->unit && lc->unit->sym_prefix) ? lc->unit->sym_prefix
+                                                : "clux_",
+             (int)fn->name.len, fn->name.ptr ? fn->name.ptr : "");
+    const char *wname = copy_arena(lc->arena, nbuf);
+    if (!wname) {
+        lc->failed = true;
+        return NULL;
+    }
+    if (!build_cfunc_wrapper(lc, fn, wname, /*is_static=*/true)) return NULL;
 
     lower_cb_wrapper_t *w = (lower_cb_wrapper_t *)arena_calloc(
         lc->arena, 1, sizeof(*w), ALIGNOF(max_align_t));

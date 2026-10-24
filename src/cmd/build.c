@@ -175,6 +175,22 @@ static bool ensure_parent_dir(const char *file) {
     return ensure_dir(buf);
 }
 
+/* 头文件路径：与 .c 配对（`.c` → `.h`；否则追加 `.h`）。 */
+static char *h_path_for(const char *c_path) {
+    size_t n = strlen(c_path);
+    char *h = (char *)malloc(n + 3);
+    if (!h) return NULL;
+    memcpy(h, c_path, n + 1);
+    if (n >= 2 && h[n - 2] == '.' && h[n - 1] == 'c') {
+        h[n - 1] = 'h';
+    } else {
+        h[n] = '.';
+        h[n + 1] = 'h';
+        h[n + 2] = '\0';
+    }
+    return h;
+}
+
 /* ------------------------------------------------------------------------- */
 
 static char *default_exe_name(const char *base) {
@@ -354,7 +370,12 @@ int cmd_build(const cmd_args_t *args) {
             goto done;
         }
         rc = cbackend_generate_c(src, c_path);
-        if (rc == 0) printf("generated %s\n", c_path);
+        if (rc == 0) {
+            char *h = h_path_for(c_path);
+            if (h && *h) printf("generated %s, %s\n", c_path, h);
+            else printf("generated %s\n", c_path);
+            free(h);
+        }
         free(owned);
         goto done;
     }

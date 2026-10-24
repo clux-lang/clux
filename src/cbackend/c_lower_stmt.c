@@ -206,7 +206,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
         if (!st) return NULL;
         st->type = ct;
-        st->name = mangle(lc->arena, "clux_v_", vd->name);
+        st->name = module_symbol(lc->arena, lc->unit, "v_", vd->name);
         if (vd->init && vd->init->kind == AST_TRY) {
             /* `var v = expr.?;`：先声明 v，再把 try 展开成
                `{ setup; if (!ok) { tail } v = value; }`。 */
@@ -636,8 +636,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             *ok = false;
             return NULL;
         }
-        const char *vn = mangle(lc->arena, "clux_v_", fi->var);
-        const char *raw = mangle(lc->arena, "clux_v_",
+        const char *vn = module_symbol(lc->arena, lc->unit, "v_", fi->var);
+        const char *raw = module_symbol(lc->arena, lc->unit, "v_",
                                  ((ast_ident_t *)base)->name);
         if (!vn || !raw) return NULL;
         char srcbuf[512];

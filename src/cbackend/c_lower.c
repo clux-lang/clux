@@ -1,7 +1,77 @@
 #include "cbackend/c_lower_internal.h"
+#include "cbackend/c_writer.h"
 
 #include <stdio.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#include <stdint.h>
+#else
+#include <stdint.h>
+#include <unistd.h>
+#endif
+
+/* ---- 模块指纹：源文件相对项目根目录（cwd）的路径的短 hash ---- */
+
+static void norm_path_slashes(char *s) {
+    for (; s && *s; s++)
+        if (*s == '\\') *s = '/';
+}
+
+static bool path_is_absolute(const char *p) {
+    if (!p || !p[0]) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p[1] == ':' && (p[2] == '/' || p[2] == '\\');
+}
+
+/* 若 `src` 在 cwd 之下，写入相对路径并返回 true。 */
+static bool source_rel_path(const char *src, char *buf, size_t cap) {
+    char cwd[4096];
+#ifdef _WIN32
+    if (!_getcwd(cwd, (int)sizeof cwd)) return false;
+#else
+    if (!getcwd(cwd, sizeof cwd)) return false;
+#endif
+    norm_path_slashes(cwd);
+    char path[4096];
+    snprintf(path, sizeof path, "%s", src);
+    norm_path_slashes(path);
+
+    if (!path_is_absolute(path)) {
+        while (path[0] == '.' && path[1] == '/')
+            memmove(path, path + 2, strlen(path + 2) + 1);
+        if (path[0] == '\0' || strncmp(path, "../", 3) == 0) return false;
+        snprintf(buf, cap, "%s", path);
+        return true;
+    }
+    size_t n = strlen(cwd);
+#ifdef _WIN32
+    bool under = _strnicmp(path, cwd, n) == 0;
+#else
+    bool under = strncmp(path, cwd, n) == 0;
+#endif
+    if (!under) return false;
+    if (path[n] == '/') n++;
+    else if (path[n] != '\0') return false;
+    snprintf(buf, cap, "%s", path + n);
+    return true;
+}
+
+/* FNV-1a 32-bit，取低 16 位 → 4 位十六进制 tag（如 "a61b"）。 */
+static void module_tag_for_source(const char *src, char *out, size_t cap) {
+    char rel[4096];
+    if (!source_rel_path(src, rel, sizeof rel)) {
+        snprintf(rel, sizeof rel, "%s", src);
+        norm_path_slashes(rel);
+    }
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)rel; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    snprintf(out, cap, "%04x", (unsigned)(h & 0xffffu));
+}
 
 static ast_func_def_t *find_main(ast_program_t *prog) {
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
@@ -91,7 +161,7 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
         ptypes[i] = map_type(lc, pt);
         if (!ptypes[i]) return NULL;
         params[i].type = ptypes[i];
-        params[i].name = mangle(lc->arena, "clux_v_", vd->name);
+        params[i].name = module_symbol(lc->arena, lc->unit, "v_", vd->name);
         register_local(lc, vd->name, pt);
     }
 
@@ -106,15 +176,22 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
     lc->cleanup = NULL;
     if (cleanup) mark_cleanup_returns(body);
 
-    const char *cname = mangle(lc->arena, "clux_fn_", fn->name);
-    const char *obj = mangle(lc->arena, "clux_obj_", fn->name);
+    const char *cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
+    const char *obj = module_symbol(lc->arena, lc->unit, "obj_", fn->name);
     if (!cname || !obj) return NULL;
     cir_signature_t *sig = signature_for(lc, cret, pc, ptypes);
     if (!sig) return NULL;
     int line = sema_loc(lc->sema, (ast_node_t *)fn).begin.line;
     cir_function_t *out = cir_function_new(lc->arena, cname, obj, sig, pc, params,
                                            body, line, is_entry);
-    if (out) out->cleanup = cleanup;
+    if (out) {
+        out->cleanup = cleanup;
+        /* `export func`：非 static，并在模块头文件里声明。
+           `export cfunc` 走 C ABI 包装（lower_exported_cfunc），内部
+           env-first 函数保持 static。 */
+        out->is_exported = ((ast_node_t *)fn)->is_exported && !is_entry &&
+                           !fn->is_cfunc;
+    }
     return out;
 }
 
@@ -232,11 +309,66 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     cir_unit_t *u = cir_unit_new(arena, source_path);
     if (!u) return NULL;
     lc.unit = u;
+    /* 模块指纹：**源文件相对项目根目录（cwd）的路径**——相对路径本身就是
+       它在依赖图里的身份，同一路径在任何机器/任何构建目录下都得到同一个
+       短 hash（多编译单元链接时用 `clux_<hash>_` 前缀区分符号）。 */
+    {
+        char tag[16];
+        module_tag_for_source(source_path, tag, sizeof tag);
+        cir_unit_set_module(u, tag);
+    }
     /* 测试运行器标记必须在 lowering 之前就位：lowering 里 assert 的映射
        依赖它。 */
     if (test_mode) {
         u->test_runner = true;
         u->test_count = count_test_funcs(prog);
+    }
+    /* 导出类型名（`export struct/union/cunion/enum/type`）：C 形态无条件进
+       头文件。enum 渲染成底层整数，不产生 CIR 类型，也就不需要登记。 */
+    {
+        size_t cap = 0;
+        for (ast_node_t *n = prog->funcs; n; n = n->next)
+            if (n->is_exported) cap++;
+        if (cap) {
+            lc.exported_types = (strslice_t *)arena_calloc(
+                arena, cap, sizeof(strslice_t), ALIGNOF(max_align_t));
+            if (!lc.exported_types) return NULL;
+            for (ast_node_t *n = prog->funcs; n; n = n->next) {
+                if (!n->is_exported) continue;
+                strslice_t name = STRSLICE_EMPTY;
+                switch (n->kind) {
+                case AST_STRUCT_DEF: {
+                    ast_struct_def_t *sd = (ast_struct_def_t *)n;
+                    if (sd->generic.count > 0) continue; /* 模板无具体 C 形态 */
+                    name = sd->name;
+                    break;
+                }
+                case AST_UNION_DEF: {
+                    ast_union_def_t *ud = (ast_union_def_t *)n;
+                    if (ud->generic.count > 0) continue;
+                    name = ud->name;
+                    break;
+                }
+                case AST_CUNION_DEF: {
+                    ast_cunion_def_t *cd = (ast_cunion_def_t *)n;
+                    name = cd->name;
+                    break;
+                }
+                case AST_ENUM_DEF:
+                    name = ((ast_enum_def_t *)n)->name;
+                    break;
+                case AST_TYPE_DEF: {
+                    ast_type_def_t *td = (ast_type_def_t *)n;
+                    if (td->generic.count > 0) continue;
+                    name = td->name;
+                    break;
+                }
+                default:
+                    continue;
+                }
+                lc.exported_types[lc.exported_type_count++] = name;
+            }
+        }
     }
     cir_unit_add_include(u, arena, "stdint.h");
     cir_unit_add_include(u, arena, "stddef.h");
@@ -267,7 +399,8 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
             arena, 1, sizeof(*g), ALIGNOF(max_align_t));
         if (!g) return NULL;
         g->type = ct;
-        g->name = mangle(arena, "clux_v_", vd->name);
+        g->name = module_symbol(arena, u, "v_", vd->name);
+        g->is_exported = ((ast_node_t *)vd)->is_exported;
         if (vd->init && vd->init->kind != AST_UNDEF)
             g->init = lower_expr(&lc, vd->init);
         cir_unit_add_global(u, g);
@@ -328,6 +461,13 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (!cm || lc.failed) return NULL;
         cir_unit_add_function(u, cm);
     }
+    /* `export cfunc`：生成 C ABI 包装（内部函数保持 env-first/static）。 */
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind != AST_FUNC_DEF || !n->is_exported) continue;
+        ast_func_def_t *fn = (ast_func_def_t *)n;
+        if (fn->is_cfunc && !fn->is_extern_cfunc)
+            lower_exported_cfunc(&lc, fn);
+    }
     if (lc.failed) return NULL;
 
     /* 泛型必须在 sema 结束前实例化完毕：这里是后端边界上的最后一道自检。 */
@@ -340,5 +480,39 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
                    missing);
         return NULL;
     }
+
+    /* ---- 头文件类型集合 ----
+     * 导出类型（无条件）+ 导出函数/全局的签名类型；递归展开依赖在
+     * cw_mark_header_type 里完成，保证 .h 里的类型按拓扑序（依赖先）输出。
+     * 导出类型即使源码里没有用到也要生成 C 形态（头文件是公开契约）。 */
+    for (size_t i = 0; i < lc.exported_type_count; i++) {
+        sema_symbol_t *ts = sema_lookup(sema->global_scope,
+                                        lc.exported_types[i]);
+        if (ts && ts->kind == SEMA_SYM_TYPE && ts->type) {
+            cir_type_t *ct = map_type(&lc, ts->type);
+            if (ct) cw_mark_header_type(ct);
+        }
+    }
+    for (cir_type_t *t = u->types; t; t = t->next) {
+        if (!t->src) continue;
+        const type_t *ct = (const type_t *)t->src;
+        for (size_t i = 0; i < lc.exported_type_count; i++) {
+            if (strslice_eq(ct->name, lc.exported_types[i])) {
+                cw_mark_header_type(t);
+                break;
+            }
+        }
+    }
+    for (cir_function_t *f = u->functions; f; f = f->next) {
+        if (!f->is_exported || !f->sig) continue;
+        if (f->sig->ret) cw_mark_header_type(f->sig->ret);
+        for (size_t i = 0; i < f->sig->param_count; i++)
+            cw_mark_header_type(f->sig->params[i]);
+    }
+    for (cir_global_t *g = u->globals; g; g = g->next)
+        if (g->is_exported && g->type) cw_mark_header_type(g->type);
+    for (cir_type_ref_t *r = u->header_types; r; r = r->next)
+        cw_mark_header_type(r->type);
+
     return u;
 }

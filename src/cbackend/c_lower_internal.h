@@ -16,6 +16,7 @@
 #include "parser/ast_defer.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_dowhile.h"
+#include "parser/ast_enum_def.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_fill.h"
@@ -46,6 +47,7 @@
 #include "parser/ast_take.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_try.h"
+#include "parser/ast_type_def.h"
 #include "parser/ast_unary.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_unwrap.h"
@@ -138,6 +140,10 @@ typedef struct lower_ctx {
     lower_extern_var_t *extern_vars;
     lower_cfn_typedef_t *cfn_typedefs;
     lower_cb_wrapper_t *cb_wrappers;
+    /* `export struct/union/cunion/enum/type` 的名字：这些类型（的 C 形态）
+       无条件进模块头文件。 */
+    strslice_t *exported_types;
+    size_t exported_type_count;
     const char *ffi_error; /* 最近一次 FFI 类型渲染的具体失败原因（可为 NULL） */
     cir_stmt_t *cleanup;
     cir_type_t *return_type;
@@ -152,6 +158,9 @@ typedef struct lower_ctx {
 /* util */
 const char *copy_arena(arena_t *arena, const char *s);
 const char *mangle(arena_t *arena, const char *prefix, strslice_t name);
+/** 模块符号名：`<unit->sym_prefix><kind><name>`（如 `clux_a61b_fn_main`）。 */
+const char *module_symbol(arena_t *arena, const cir_unit_t *unit,
+                          const char *kind, strslice_t name);
 const char *token_text(arena_t *arena, const token_t *tok);
 const type_t *strip(sema_t *sema, const type_t *t);
 
@@ -201,6 +210,9 @@ cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call);
 cir_expr_t *lower_data_call(lower_ctx_t *lc, ast_call_t *call);
 cir_expr_t *lower_cfunc_ptr(lower_ctx_t *lc, ast_call_t *call);
 bool call_is_cfunc_ptr(const ast_call_t *c);
+/* `export cfunc`：生成 C ABI 包装（无 env），函数名 `clux_<tag>_<name>`，
+ * 原型进模块头文件。 */
+void lower_exported_cfunc(lower_ctx_t *lc, ast_func_def_t *fn);
 /* `cfunc(...)` → C 函数指针 typedef 名（map_type 用；同 intern 类型复用）。 */
 const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t, bool *ok);
 /* extern var 的读取（`is_str` 时包装成 clux_str）与赋值目标（raw 左值）。 */

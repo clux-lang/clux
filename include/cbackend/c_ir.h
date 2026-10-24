@@ -47,6 +47,7 @@ typedef struct cir_type {
     cir_field_t    *fields;
     struct cir_signature *sig;
     bool            emitted;
+    bool            in_header; /* 需要出现在模块头文件里（导出声明/导出类型的闭包） */
     /* bitfield：C 布局是 `struct { <underlying> data[N]; }` 的隐藏单字段
        struct；逻辑字段按位读写。 */
     bool            is_bitfield;
@@ -54,6 +55,13 @@ typedef struct cir_type {
     bool            needs_bf_make; /* 需要按类型生成 clux_bf_make_* 辅助函数 */
     struct cir_type *next;
 } cir_type_t;
+
+/* 头文件类型集合的登记项（lowering 阶段把"导出声明的签名类型"挂上来，
+ * writer 再递归展开依赖）。 */
+typedef struct cir_type_ref {
+    cir_type_t *type;
+    struct cir_type_ref *next;
+} cir_type_ref_t;
 
 typedef enum {
     CIR_EXPR_INT = 0,
@@ -173,6 +181,8 @@ typedef struct cir_signature {
     cir_type_t  *ret;
     size_t       param_count;
     cir_type_t **params;
+    bool         in_header; /* 导出类型/签名引用 → 定义进模块头文件 */
+    bool         emitted;
     struct cir_signature *next;
 } cir_signature_t;
 
@@ -188,6 +198,7 @@ typedef struct cir_function {
     int          source_line;
     bool         is_entry;   /* 生成 C main wrapper */
     bool         object_used; /* 函数对象被作为值引用 */
+    bool         is_exported; /* `export func/cfunc`：非 static，进头文件 */
     struct cir_function *next;
 } cir_function_t;
 
@@ -206,24 +217,34 @@ typedef struct cir_global {
     const char  *name;
     cir_type_t  *type;
     cir_expr_t  *init;
+    bool         is_exported; /* `export var`：非 static，头文件 extern */
     struct cir_global *next;
 } cir_global_t;
 
 typedef struct cir_unit {
     arena_t     *arena;
     const char  *source_path;
+    /* 模块符号前缀：`clux_<tag>_`（tag 是路径短 hash，例如 "a61b"）。 */
+    const char  *module_tag;
+    const char  *sym_prefix;
+    const char  *header_name;  /* 头文件名（.c 里 #include 用；不含目录） */
+    const char  *header_guard; /* 头文件 include guard */
     const char **includes;
     size_t       include_count;
     cir_signature_t *signatures;
     cir_function_t  *functions;
     cir_global_t    *globals;
     cir_type_t      *types;
+    cir_type_ref_t  *header_types; /* 必须进头文件的类型（签名类型，递归展开） */
     cir_raw_t       *raw_helpers;
     /* extern cfunc：C 函数指针 typedef（先）与 extern 原型（后），保持添加顺序。 */
     cir_raw_t       *extern_typedefs;
     cir_raw_t       *extern_typedefs_last;
     cir_raw_t       *extern_decls;
     cir_raw_t       *extern_decls_last;
+    /* 导出声明（`export extern ...` 形态或 export cfunc 原型）：进头文件。 */
+    cir_raw_t       *extern_decls_pub;
+    cir_raw_t       *extern_decls_pub_last;
     /* extern lib → 宿主编译器链接参数。 */
     cir_link_arg_t  *link_args;
     cir_link_arg_t  *link_args_last;
@@ -245,6 +266,10 @@ typedef struct cir_unit {
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
+/** 设置模块短 tag（生成 `clux_<tag>_` 前缀）；tag 必须是稳定短串。 */
+void           cir_unit_set_module(cir_unit_t *u, const char *tag);
+/** 登记"必须进头文件"的类型（导出声明签名里的类型）。 */
+void           cir_unit_add_header_type(cir_unit_t *u, cir_type_t *t);
 void           cir_unit_add_include(cir_unit_t *u, arena_t *arena,
                                     const char *include);
 cir_type_t    *cir_type_new(arena_t *arena, cir_type_kind_t kind,
@@ -343,6 +368,8 @@ void cir_unit_add_raw(cir_unit_t *u, const char *code);
 /** extern cfunc 的 C 函数指针 typedef / extern 原型（按添加顺序输出）。 */
 void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code);
 void cir_unit_add_extern_decl(cir_unit_t *u, const char *code);
+/** 导出声明：进模块头文件（`export` 的 extern cfunc/var 等）。 */
+void cir_unit_add_extern_decl_pub(cir_unit_t *u, const char *code);
 /** extern lib 的宿主编译器链接参数（按添加顺序输出；去重由调用方负责）。 */
 void cir_unit_add_link_arg(cir_unit_t *u, const char *arg);
 /** extern cfunc 的 C 符号名：后置自检据此放行（定义在外部库）。 */

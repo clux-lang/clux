@@ -3,6 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 模块内 C 类型/签名名前缀（`clux_<tag>_`）：多编译单元链接时同名类型
+ * 不再冲突，且头文件里的类型名天然带模块身份。 */
+static const char *type_prefix(lower_ctx_t *lc) {
+    return (lc && lc->unit && lc->unit->sym_prefix) ? lc->unit->sym_prefix
+                                                    : "clux_";
+}
+
 static bool same_sig(const cir_signature_t *s, cir_type_t *ret, size_t pc,
                      cir_type_t **pt) {
     if (!s || !s->ret || !ret) return false;
@@ -21,7 +28,7 @@ cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret,
     for (cir_signature_t *s = lc->unit->signatures; s; s = s->next)
         if (same_sig(s, ret, pc, pt)) return s;
     char tag[64];
-    snprintf(tag, sizeof tag, "clux_sig_%u", lc->sig_seq++);
+    snprintf(tag, sizeof tag, "%ssig_%u", type_prefix(lc), lc->sig_seq++);
     cir_signature_t *s = cir_signature_new(
         lc->arena, copy_arena(lc->arena, tag), ret, pc, pt);
     if (s) cir_unit_add_signature(lc->unit, s);
@@ -91,7 +98,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
 
     if (t->kind == TYPE_KIND_STRUCT) {
         char name[128];
-        snprintf(name, sizeof name, "struct clux_s_%u", t->id);
+        snprintf(name, sizeof name, "struct %ss_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -125,7 +132,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         if (cached) return cached;
         const array_type_t *at = (const array_type_t *)t;
         char name[128];
-        snprintf(name, sizeof name, "struct clux_a_%u", t->id);
+        snprintf(name, sizeof name, "struct %sa_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_ARRAY,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -155,7 +162,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_SLICE);
         if (cached) return cached;
         char name[128];
-        snprintf(name, sizeof name, "struct clux_sl_%u", t->id);
+        snprintf(name, sizeof name, "struct %ssl_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_SLICE,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -168,7 +175,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_OPTION);
         if (cached) return cached;
         char name[128];
-        snprintf(name, sizeof name, "struct clux_opt_%u", t->id);
+        snprintf(name, sizeof name, "struct %sopt_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_OPTION,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -181,7 +188,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_CUNION);
         if (cached) return cached;
         char name[128];
-        snprintf(name, sizeof name, "struct clux_cu_%u", t->id);
+        snprintf(name, sizeof name, "struct %scu_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_CUNION,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;
@@ -235,7 +242,7 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_UNION);
         if (cached) return cached;
         char name[128];
-        snprintf(name, sizeof name, "struct clux_u_%u", t->id);
+        snprintf(name, sizeof name, "struct %su_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_UNION,
                                       copy_arena(lc->arena, name));
         if (!ct) return NULL;

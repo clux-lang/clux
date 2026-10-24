@@ -255,6 +255,22 @@ static char *derive_obj_path(const char *out_path) {
     return obj;
 }
 
+/* 头文件路径：与 .c 配对（`.c` → `.h`；没有 `.c` 后缀时追加 `.h`）。 */
+static char *derive_h_path(const char *c_path) {
+    size_t n = strlen(c_path);
+    char *h = (char *)malloc(n + 3);
+    if (!h) return NULL;
+    memcpy(h, c_path, n + 1);
+    if (n >= 2 && h[n - 2] == '.' && h[n - 1] == 'c') {
+        h[n - 1] = 'h';
+    } else {
+        h[n] = '.';
+        h[n + 1] = 'h';
+        h[n + 2] = '\0';
+    }
+    return h;
+}
+
 /* 编译/生成选项。 */
 typedef struct cbackend_opts {
     bool     compile;    /* false：只生成 .c；true：继续编译/链接 */
@@ -471,8 +487,13 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
 
     if (unit) {
         cbackend_optimize(unit);
-        if (cir_write_file(unit, c_path, alloc) != 0) {
-            fprintf(stderr, "build: cannot write C source '%s'\n", c_path);
+        char *h_path = derive_h_path(c_path);
+        if (!h_path) {
+            fprintf(stderr, "build: out of memory\n");
+        } else if (cir_write_pair(unit, c_path, h_path, alloc) != 0) {
+            fprintf(stderr, "build: cannot write C source '%s' / header "
+                            "'%s'\n",
+                    c_path, h_path);
         } else if (!compile) {
             rc = 0;
         } else {
@@ -483,7 +504,8 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             if (!obj) {
                 derived_obj = derive_obj_path(out_path);
                 obj = derived_obj;
-            }            bool ok = false;
+            }
+            bool ok = false;
             if (!obj) {
                 fprintf(stderr, "build: out of memory (object path)\n");
             } else if (compile_object(alloc, c_path, obj, opts->tc) == 0) {
@@ -492,7 +514,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
                     ok = link_exe(alloc, obj, out_path, unit->link_args,
                                   opts->tc) == 0;
                 if (ok) {
-                    /* 成功：C 中间文件是临时的；目标文件保留。 */
+                    /* 成功：C 中间文件是临时的；目标文件与头文件保留。 */
                     remove(c_path);
                     rc = 0;
                 }
@@ -502,6 +524,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             }
             free(derived_obj);
         }
+        free(h_path);
     } else if (!diag_has_error(diag) && !(opts->tests && test_count == 0)) {
         /* 没有诊断却拿不到 C unit：内部失败（降级不当），必须显式报出，
            避免静默返回 1。 */

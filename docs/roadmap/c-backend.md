@@ -339,8 +339,38 @@ clux build hello.cx
     - `-l LIB` / `--link-lib=LIB`：链接库（链接阶段，排在代码声明的链接
       参数之后）；
     - `-D KEY=VALUE`：编译期键表（`extern lib ... assert(...)` 用）；
-  - 编译成功删中间 `.c`、保留目标文件；链接失败保留 `.c` 与目标文件；
+  - 编译成功删中间 `.c`、保留目标文件与头文件；链接失败保留 `.c`/`.obj`；
     编译失败删半成品目标文件、保留 `.c`。
+- 编译单元（`.c` + `.h` 配对，为多文件/`import` 做准备）：
+  - **模块前缀**：`clux_<tag>_`，tag 是**源文件相对项目根目录（cwd）的
+    路径**的短 hash（FNV-1a 低 16 位，4 位十六进制，如 `a61b`）。相对路径
+    就是模块在依赖图里的身份：同一路径在任何机器/构建目录下前缀稳定；
+    不同目录的同名文件前缀不同。函数 `clux_<tag>_fn_<name>`、全局变量
+    `clux_<tag>_v_<name>`、函数对象 `clux_<tag>_obj_<name>`、类型
+    `struct clux_<tag>_s_<id>`（以及 `a_/sl_/opt_/u_/cu_`、`sig_`、`cfn_`、
+    `cb_`）都带前缀；
+  - **导出规则**（`export` 前缀，parser 支持 func/cfunc/var/type/enum/
+    struct/union/cunion）：
+    - `export func`：头文件 `extern` 原型（env-first ABI），`.c` 定义不加
+      `static`；
+    - `export cfunc`：内部仍是 env-first 的 static 函数，另生成一个
+      **C ABI 包装** `clux_<tag>_<name>(...)`（无 env，str 参数/返回自动
+      编组），头文件里是它的 plain C 原型；
+    - `export var`：头文件 `extern <C 类型> <符号>;`；`.c` 定义非 static；
+    - 其余 `func`/`cfunc`/`var` 全部 `static`（多编译单元链接不冲突）；
+    - `extern cfunc`（外部库声明）仍按 `extern` 原型放在 `.c`（不是本模块
+      定义）；
+  - **头文件类型**：导出类型（无条件，即使源码没用到）+ 导出函数/全局/
+    `export cfunc` 签名的类型闭包；按**拓扑序**（依赖先）输出完整定义：
+    struct/cunion/union 字段、array/option/slice 元素、指针基类型、函数值
+    类型的签名结构体；`struct clux_str` 用
+    `CLUX_STR_STRUCT_DEFINED` 守卫以便多个模块头共存；
+  - `.c` 以 `#include "<模块>.h"` 开头，只定义头文件之外的私有类型；
+  - CLI `--emit-c` 同时产出 `.c`/`.h`；普通构建成功后删 `.c`、保留 `.h`
+    与 `.obj`；
+  - 回归测试：`CBackend.GeneratesHeaderPairForExports`、
+    `HeaderTypesAreTopological`、`ExportedCfuncUsesCApi`、
+    `ModulePrefixFromRelativePath`。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI

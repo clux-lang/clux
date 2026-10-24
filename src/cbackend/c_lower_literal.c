@@ -116,7 +116,7 @@ static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
         if (c->name.len == name.len &&
             memcmp(c->name.ptr, name.ptr, name.len) == 0)
             return c->expr;
-    return mangle(lc->arena, "clux_v_", name);
+    return module_symbol(lc->arena, lc->unit, "v_", name);
 }
 
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
@@ -174,7 +174,8 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         sema_func_t *sf = sema_func_by_id(lc->sema, fn->env_dispose_fid);
         if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
             ast_func_def_t *df = (ast_func_def_t *)sf->def;
-            env_new->op = mangle(lc->arena, "clux_fn_", df->name);
+            env_new->op =
+                module_symbol(lc->arena, lc->unit, "fn_", df->name);
         }
     }
     if (!env_new->op && fn->capture_type_id) {
@@ -182,7 +183,8 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
             if (d->type && d->type->id == fn->capture_type_id && d->fn &&
                 d->fn->kind == AST_FUNC_DEF) {
                 ast_func_def_t *df = (ast_func_def_t *)d->fn;
-                env_new->op = mangle(lc->arena, "clux_fn_", df->name);
+                env_new->op =
+                    module_symbol(lc->arena, lc->unit, "fn_", df->name);
                 break;
             }
         }
@@ -194,7 +196,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         sema_func_t *sf = sema_func_by_id(lc->sema, fn->env_clone_fid);
         if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
             ast_func_def_t *df = (ast_func_def_t *)sf->def;
-            clone_fn = mangle(lc->arena, "clux_fn_", df->name);
+            clone_fn = module_symbol(lc->arena, lc->unit, "fn_", df->name);
         }
     }
     if (!clone_fn && fn->capture_type_id) {
@@ -202,7 +204,8 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
             if (c->kind == 0 && c->type && c->type->id == fn->capture_type_id &&
                 c->fn && c->fn->kind == AST_FUNC_DEF) {
                 ast_func_def_t *df = (ast_func_def_t *)c->fn;
-                clone_fn = mangle(lc->arena, "clux_fn_", df->name);
+                clone_fn =
+                    module_symbol(lc->arena, lc->unit, "fn_", df->name);
                 break;
             }
         }

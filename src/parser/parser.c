@@ -230,6 +230,10 @@ ast_node_t *parse_program(parser_t *p) {
                 }
             } else if (check_keyword(p, "func")) {
                 func = parse_func_def(p);
+            } else if (check_keyword(p, "cfunc")) {
+                /* `export cfunc`：C ABI 函数（无 env）也可导出，
+                   头文件里是 extern 函数声明。 */
+                func = parse_cfunc_def(p);
             } else if (check_keyword(p, "var")) {
                 func = parse_var_def(p);
             } else if (check_keyword(p, "type")) {
