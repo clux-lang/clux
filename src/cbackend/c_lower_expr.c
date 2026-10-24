@@ -785,7 +785,34 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         ast_index_t *ix = (ast_index_t *)e;
         cir_expr_t *obj = lower_expr(lc, ix->object);
         cir_expr_t *idx = lower_expr(lc, ix->indices);
-        return obj && idx ? cir_expr_index(lc->arena, obj, idx, true) : NULL;
+        if (!obj || !idx) return NULL;
+        /* 越界保护（与 VM 一致：OOB 视为 panic）：
+           - 数组长度是类型常量，索引包成 clux_index_check(idx, N)；
+           - 切片长度在运行期（.len），接收者是左值时才能安全求值两次；
+           - 指针下标是 C 语义，不检查。 */
+        const type_t *ot = infer_expr_type(lc, ix->object);
+        const type_t *ost = ot ? type_strip_quals(ot) : NULL;
+        if (ost && type_kind_of(ost) == TYPE_KIND_ARRAY) {
+            lc->unit->uses_index_check = true;
+            cir_expr_t *chk =
+                cir_expr_call(lc->arena, "clux_index_check", NULL);
+            if (!chk) return NULL;
+            cir_expr_append_arg(chk, idx);
+            cir_expr_append_arg(chk, cir_expr_int(
+                                         lc->arena,
+                                         (int64_t)array_type_len(ost)));
+            idx = chk;
+        } else if (ost && type_kind_of(ost) == TYPE_KIND_SLICE &&
+                   ast_is_lvalue(ix->object)) {
+            lc->unit->uses_slice_check = true;
+            cir_expr_t *chk =
+                cir_expr_call(lc->arena, "clux_slice_check", NULL);
+            if (!chk) return NULL;
+            cir_expr_append_arg(chk, idx);
+            cir_expr_append_arg(chk, cir_expr_member(lc->arena, obj, "len"));
+            idx = chk;
+        }
+        return cir_expr_index(lc->arena, obj, idx, true);
     }
     case AST_DEREF: {
         ast_deref_t *d = (ast_deref_t *)e;

@@ -195,6 +195,12 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "#include <stdlib.h>\n");
         cw_put(sb, "#include <string.h>\n");
     }
+    if (unit->uses_index_check || unit->uses_slice_check) {
+        /* 只需要 stderr 与 abort：不拉 <stdlib.h>（用户可能用
+           `extern cfunc qsort/...` 声明与标准库原型冲突）。 */
+        cw_put(sb, "#include <stdio.h>\n");
+        cw_put(sb, "extern void abort(void);\n");
+    }
     if (unit->test_runner || unit->tests) {
         /* 测试运行器：assert 失败打印 + 用例下标解析/计时需要 stdio/stdlib；
            失败用 setjmp/longjmp 回到 runner（**不退出进程**），崩溃（panic /
@@ -245,6 +251,30 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     }
     if (unit->uses_opt_unwrap) {
         cw_put(sb, "static void clux_panic_none(void) { abort(); }\n");
+    }
+    if (unit->uses_index_check) {
+        cw_put(sb,
+               "static int64_t clux_index_check(int64_t idx, int64_t len) {\n");
+        cw_put(sb, "    if (idx < 0 || idx >= len) {\n");
+        cw_put(sb, "        fprintf(stderr, \"run: array index %lld out of "
+                   "bounds (len=%lld)\\n\", (long long)idx, (long long)len);\n");
+        cw_put(sb, "        fflush(stderr);\n");
+        cw_put(sb, "        abort();\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    return idx;\n");
+        cw_put(sb, "}\n");
+    }
+    if (unit->uses_slice_check) {
+        cw_put(sb,
+               "static int64_t clux_slice_check(int64_t idx, int64_t len) {\n");
+        cw_put(sb, "    if (idx < 0 || idx >= len) {\n");
+        cw_put(sb, "        fprintf(stderr, \"run: slice index %lld out of "
+                   "bounds (len=%lld)\\n\", (long long)idx, (long long)len);\n");
+        cw_put(sb, "        fflush(stderr);\n");
+        cw_put(sb, "        abort();\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    return idx;\n");
+        cw_put(sb, "}\n");
     }
     cw_put(sb, "\n");
 

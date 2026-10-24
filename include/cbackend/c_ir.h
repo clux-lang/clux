@@ -276,6 +276,10 @@ typedef struct cir_unit {
     bool             uses_mem_eq;
     /* extern cfunc 返回 str：需要 clux_str_from_c(char*) 包装。 */
     bool             uses_str_from_c;
+    /* 下标越界保护：数组用常量长度、切片用 `.len`（仅左值接收者），
+       writer 生成 `clux_index_check` / `clux_slice_check` 运行时辅助。 */
+    bool             uses_index_check;
+    bool             uses_slice_check;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);

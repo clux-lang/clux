@@ -2134,6 +2134,26 @@ TEST(CBackend, TestRunnerCrashFallback) {
   fs::remove_all(proj, ec);
 }
 
+/* 下标越界保护：数组长度是类型常量，生成的 C 在 `a[i]` 前插入
+ * `clux_index_check(i, N)`，越界打印与 VM 相同的 panic 信息并终止（不是
+ * 静默读出垃圾值）。 */
+TEST(CBackend, IndexBoundsPanic) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
+      "  var i: i32 = 3;\n"
+      "  return a[i];\n"
+      "}\n",
+      "cbackend_index_bounds");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  ASSERT_EQ(run_build(src, exe.string(), nullptr), 0);
+  EXPECT_NE(run_exe(exe.string()), 0)
+      << "out-of-bounds array read must panic, not silently return";
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =
