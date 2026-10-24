@@ -256,6 +256,16 @@ cir_expr_t *cir_expr_slice_data(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
+cir_expr_t *cir_expr_string(arena_t *arena, const char *data, size_t len) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_STRING;
+    e->text = data;
+    e->text_len = len;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;

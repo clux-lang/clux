@@ -5,6 +5,7 @@
 #include "parser/ast_binary.h"
 #include "parser/ast_block.h"
 #include "parser/ast_bool_lit.h"
+#include "parser/ast_char_lit.h"
 #include "parser/ast_call.h"
 #include "parser/ast_construct.h"
 #include "parser/ast_construct_field.h"
@@ -25,6 +26,7 @@
 #include "parser/ast_member.h"
 #include "parser/ast_new.h"
 #include "parser/ast_slice.h"
+#include "parser/ast_string_lit.h"
 #include "parser/ast_free.h"
 #include "parser/ast_return.h"
 #include "parser/ast_unary.h"
@@ -110,6 +112,22 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
     if (t == vm->type_usize) return cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t");
     if (t == vm->type_bool) return cir_type_new(lc->arena, CIR_TYPE_BOOL, "bool");
     if (t == vm->type_void) return cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
+    if (t == vm->type_u8) return cir_type_new(lc->arena, CIR_TYPE_I32, "uint8_t");
+    if (t == vm->type_i8) return cir_type_new(lc->arena, CIR_TYPE_I32, "int8_t");
+    if (t == vm->type_u16) return cir_type_new(lc->arena, CIR_TYPE_I32, "uint16_t");
+    if (t == vm->type_i16) return cir_type_new(lc->arena, CIR_TYPE_I32, "int16_t");
+    if (t == vm->type_u64) return cir_type_new(lc->arena, CIR_TYPE_I32, "uint64_t");
+    if (t == vm->type_i64) return cir_type_new(lc->arena, CIR_TYPE_I32, "int64_t");
+    if (t == vm->type_str) {
+        cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_STR);
+        if (cached) return cached;
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_STR,
+                                      "struct clux_str");
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        return ct;
+    }
 
     cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_STRUCT);
     if (cached) return cached;
@@ -192,6 +210,7 @@ static cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 static cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 static const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
 static bool call_is_len(const ast_call_t *c);
+static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e);
 
 static cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     strslice_t name = STRSLICE_EMPTY;
@@ -233,6 +252,17 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         return cir_expr_int(lc->arena, (int64_t)((ast_int_lit_t *)e)->value);
     case AST_BOOL_LIT:
         return cir_expr_bool(lc->arena, ((ast_bool_lit_t *)e)->value);
+    case AST_CHAR_LIT:
+        return cir_expr_int(lc->arena, ((ast_char_lit_t *)e)->value);
+    case AST_STRING_LIT: {
+        ast_string_lit_t *s = (ast_string_lit_t *)e;
+        if (!map_type(lc, lc->sema->vm->type_str)) return NULL;
+        char *data = (char *)arena_alloc(lc->arena, s->text.len + 1, 1);
+        if (!data) return NULL;
+        if (s->text.len) memcpy(data, s->text.ptr, s->text.len);
+        data[s->text.len] = '\0';
+        return cir_expr_string(lc->arena, data, s->text.len);
+    }
     case AST_IDENT: {
         const char *n = mangle(lc->arena, "clux_v_", ((ast_ident_t *)e)->name);
         return n ? cir_expr_ident(lc->arena, n) : NULL;
@@ -245,6 +275,22 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_BINARY: {
         ast_binary_t *b = (ast_binary_t *)e;
+        const type_t *lt = infer_expr_type(lc, b->lhs);
+        const type_t *rt = infer_expr_type(lc, b->rhs);
+        if (lt && rt && type_strip_quals(lt)->kind == TYPE_KIND_STR &&
+            type_strip_quals(rt)->kind == TYPE_KIND_STR &&
+            (token_is(b->op, "==") || token_is(b->op, "!="))) {
+            lc->unit->uses_str_cmp = true;
+            cir_expr_t *l = lower_expr(lc, b->lhs);
+            cir_expr_t *r = lower_expr(lc, b->rhs);
+            if (!l || !r) return NULL;
+            cir_expr_t *call = cir_expr_call(lc->arena, "clux_str_eq", NULL);
+            cir_expr_append_arg(call, l);
+            cir_expr_append_arg(call, r);
+            if (token_is(b->op, "!="))
+                call = cir_expr_unary(lc->arena, "!", call);
+            return call;
+        }
         const char *op = token_text(lc->arena, b->op);
         cir_expr_t *lhs = lower_expr(lc, b->lhs);
         cir_expr_t *rhs = lower_expr(lc, b->rhs);
@@ -390,6 +436,10 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_BOOL_LIT:
         return vm->type_bool;
+    case AST_STRING_LIT:
+        return vm->type_str;
+    case AST_CHAR_LIT:
+        return vm->type_u8;
     case AST_IDENT:
         return lookup_local(lc, ((ast_ident_t *)e)->name);
     case AST_DEREF: {
@@ -420,8 +470,7 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         if (type_kind_of(ot) == TYPE_KIND_SLICE) return ot;
         if (type_kind_of(ot) == TYPE_KIND_STR)
             return type_slice_intern(vm, type_const_intern(vm, vm->type_u8));
-        return NULL;
-    }
+        return NULL;    }
     case AST_MAKE: {
         ast_make_t *m = (ast_make_t *)e;
         const type_t *et = sema_resolve_type_slot(lc->sema, &m->elem_type);
@@ -545,6 +594,10 @@ static cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl) {
                                ((const array_type_t *)ot)->elem_type);
     else if (type_kind_of(ot) == TYPE_KIND_SLICE)
         st = ot;
+    else if (type_kind_of(ot) == TYPE_KIND_STR)
+        st = type_slice_intern(lc->sema->vm,
+                               type_const_intern(lc->sema->vm,
+                                                 lc->sema->vm->type_u8));
     if (!st) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sl),
                    "c backend: unsupported slice base type");

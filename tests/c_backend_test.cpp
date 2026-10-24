@@ -304,6 +304,30 @@ TEST(CBackend, BuildOwnSlice) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildStringLiteralAndSlice) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: str = \"abc\";\n"
+      "  var b: str = \"abc\";\n"
+      "  if (a != b) { return 1; }\n"
+      "  if (a == \"abd\") { return 2; }\n"
+      "  if (len(a) != 3usize) { return 3; }\n"
+      "  var t: ref []const u8 = a[1:3];\n"
+      "  if (len(t) != 2usize) { return 4; }\n"
+      "  if (t[0] != 'b') { return 5; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_str");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

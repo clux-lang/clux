@@ -19,6 +19,7 @@ typedef enum {
     CIR_TYPE_ARRAY,
     CIR_TYPE_PTR,
     CIR_TYPE_SLICE,
+    CIR_TYPE_STR,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -57,6 +58,7 @@ typedef enum {
     CIR_EXPR_LEN,
     CIR_EXPR_MAKE,
     CIR_EXPR_SLICE_DATA,
+    CIR_EXPR_STRING,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -70,6 +72,7 @@ typedef struct cir_expr {
     int64_t         int_value;
     bool            bool_value;
     const char     *text;
+    size_t          text_len;
     const char     *op;
     cir_type_t     *type;
     cir_type_t     *elem;
@@ -155,6 +158,7 @@ typedef struct cir_unit {
     cir_global_t    *globals;
     cir_type_t      *types;
     bool             uses_alloc;
+    bool             uses_str_cmp;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -195,6 +199,7 @@ cir_expr_t    *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
                              cir_type_t *elem_type, cir_expr_t *length,
                              cir_init_t *inits);
 cir_expr_t    *cir_expr_slice_data(arena_t *arena, cir_expr_t *object);
+cir_expr_t    *cir_expr_string(arena_t *arena, const char *data, size_t len);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

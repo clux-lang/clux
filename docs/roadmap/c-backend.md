@@ -182,6 +182,9 @@ clux build hello.cx
 - struct 的 own 字段；
 - `[N]own *T` 的逐元素 free；
 - `own []T` / `ref []T`；
+- `str` 字符串字面量与按字节 `len`；
+- `str` 比较 `==` / `!=`；
+- `str[low:high]` 转为 `[]const u8`；
 - `make(T, N, ...)`；
 - `len(s)`；
 - `s[low:high]`；
@@ -191,7 +194,7 @@ clux build hello.cx
 
 尚未覆盖：
 
-- `str` 字符串字面量 / UTF-8 切片；
+- `str` 拼接 / 格式化 / FFI C ABI 兼容；
 - 复杂 union / optional 的 own 槽位；
 - 异常路径 / 全部跨作用域路径的清理验证。
 
