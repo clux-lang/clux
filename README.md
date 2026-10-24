@@ -85,8 +85,11 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   composition with `&`, and comptime value parameter packs (`...N: comptime
   u64` with `N[i]` / `len(N)`). Remaining M7 gaps are tracked in
   `docs/m7-implementation-plan.md`.
-- `clux build` (native machine-code backend, M10/M12): prints `not implemented`.
-- `clux test` subcommand: prints `not implemented` — run `build/clux_test` or `ctest`.
+- `clux build` (single-file C backend): generates C and invokes the host C
+  compiler (`--emit-c[=PATH]` writes the C only). See
+  `docs/roadmap/c-backend.md`.
+- `clux test`: runs `test "Suite.Name" { ... }` blocks (VM backend by default;
+  `--backend=c` builds a C test runner, one subprocess per test).
 - Error handling (M8) and a standard library (M9).
 
 ## Build
@@ -121,16 +124,18 @@ Produces:
 
 ```
 clux run <file>                       # run a .cx source (or .cxb bytecode, detected by content)
+clux build <file.cx> [--emit-c[=PATH]] [--output=PATH]   # C backend → native executable
+clux test [<file.cx>] [--backend=vm|c]  # run test blocks
 clux format <file.cx> [-o PATH]       # format source in place (or to PATH / stdout)
 clux bc <emit|asm|disasm> <file> [-o PATH]   # bytecode tools (debug / distribution)
 clux eval <expr>                      # evaluate an expression at compile time (CTFE)
 clux version                          # version info
-clux test                             # reserved for the test suite — not implemented yet
-clux build <file.cx>                  # native backend — not implemented yet
 ```
 
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
-semantic error), `2` runtime error.
+semantic error) or runtime error. `clux run` (source) and the executables
+produced by `clux build` additionally return `main`'s integer result as the
+process exit code.
 
 Examples live in `examples/` — 54 entry directories (one or more `.cx` files each,
 one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules

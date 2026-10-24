@@ -234,13 +234,77 @@ clux build hello.cx
 
 说明：泛型在 sema 阶段完成单态化/消减，C 后端只接收具体函数，不需要独立处理泛型。
 
-### M6：语言特性收敛
+### M6：语言特性收敛（已完成基础版）
 
 - bitfield；
 - metadata 全局常量；
 - test 运行器；
 - sema 单态化后的具体函数覆盖；
-- 与 VM 差分测试。
+- 与 VM 差分测试；
+- 构建产物导出（`--emit-c`）。
+
+当前支持：
+
+- bitfield：
+  - C 布局 = 隐藏字数组（`struct { <underlying> data[N]; }`），与 VM 的
+    `ceil(total_bits / word_bits)` 存储逐字节一致；
+  - `.Flags{ ... }` 构造：全常量时直接生成隐藏数组的常量初始化器（可用于
+    全局变量），含运行期值时生成 `clux_bf_make_<type>` 辅助函数；
+  - 字段读 `f.a` / 写 `f.a = v` / 复合赋值 `f.b += v`：`clux_bf_get` /
+    `clux_bf_set`，位流算法与 `vm/exec_bitfield.c` 相同（跨字、掩码）；
+  - 指针接收者自动解引用（`p.a`，sema 已改写成 `AST_DEREF`）；
+  - bitfield 作为 struct 字段 / 数组元素 / 参数 / 返回值；
+  - `sizeof` / `alignof` 由 sema 折叠。
+- metadata：
+  - `get_metadata` / `get_field_metadata` / `get_method_metadata` 由 sema
+    折叠为字面量，C 后端零运行期查找；
+  - **全局常量初始化器**可以读取 metadata：sema 的顺序调整为
+    `全局 comptime var → 字段/方法 metadata + 类型装饰器 → 普通全局变量`；
+  - 泛型实例的 metadata 由 sema 在实例化时应用（`Box[i32]` 等）。
+- 显式类型转换 `as`：`CIR_EXPR_CAST` → C cast。
+- 三元表达式 `cond ? a : b`：`CIR_EXPR_TERNARY`。
+- switch：按 `if / else if` 链展开（cond 只求值一次 → 临时变量），无
+  fallthrough；字符串模式用 `clux_str_eq`，模式惰性求值。
+- 复合值判等：`cunion` 用 `memcmp`（与 VM 字节比较一致）、slice 用
+  `(data, len)`、函数值用 `(fn, env)`；`!=` 取反。
+- struct 构造的 optional 字段：`nil` → none、非 optional 值 → 隐式 some
+  （sema 会把构造字段链重排成类型表序并去掉字段名，所以字段类型按**下标**
+  对齐）。
+- 错误处理语法糖 `.?' / `.!'（`Result` 风格 struct）：
+  - 变量初始化 / 赋值：消费 sema 生成的 `prelude` / `postlude`（临时变量 +
+    `if (ok) ... else ...`）；
+  - `return expr.?`：sema 生成 `AST_TRY`，lowering 展开成
+    `{ setup; if (!ok) { tail } return value; }`；
+  - `clux_assert`/`prelude`/`postlude` 的语句链拼接要求尾指针走到链尾
+    （否则后续语句会截断链）。
+- 泛型：sema 单态化后的具体函数/类型直接 lowering（`Box[T]`、`id[T]`）；
+  泛型 struct 的**实例**由 sema 重新解析成具体 AST（含方法体），C 后端正常
+  lowering；模板本身不 lowering。
+- test 运行器：`clux test <file.cx> --backend=c`
+  - 顶层 `test "Suite.Name" { ... }` 改写成无参 void 函数；
+  - 生成 `int main(int argc, char **argv)`：`argv[1]` = 用例下标，执行单个
+    用例后退出（0 = 通过）；
+  - CLI 以子进程逐个运行用例，panic/assert 只影响当前用例；
+  - `assert(cond)` 映射为生成的 `clux_assert`（失败打印 `assert failed: ...`
+    并以非 0 退出）；
+  - 输出与 VM 运行器同款 gtest 风格汇总。
+- `clux build` 选项：
+  - `--emit-c[=PATH]`：只生成 C 源，不调用 host cc；
+  - `--output=PATH`：指定可执行文件路径。
+- VM 差分测试：`clux run` 现在把 `main` 的整数返回值作为进程退出码，
+  与 `clux build` 产物一致；`tests/c_backend_diff_test.cpp` 对同一批程序
+  同时跑两个后端并比较退出码。
+
+尚未覆盖：
+
+- 测试运行器的 `mock` / `unmock`（`clux test --backend=c` 暂不支持）；
+- 测试运行器每个用例独立进程，全局变量在用例之间**不共享**（VM 运行器
+  共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
+- `new` bitfield（sema 目前直接拒绝）；
+- 泛型 struct 的**模板方法体**：只有 sema 重新解析出的实例会被 lowering，
+  模板本身跳过（调用模板类型会报“方法未找到”）；
+- 依赖 FFI / `import` 的 examples（第一版明确不做，见“第一版明确不做”）；
+- 全量 `examples/` 与 VM 的差分校准（M7）。
 
 ### M7：默认切换
 
