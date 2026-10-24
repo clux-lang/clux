@@ -1992,6 +1992,87 @@ TEST(CBackend, BuildImportCrossModuleGeneric) {
   fs::remove_all(proj, ec);
 }
 
+/* 跨模块**方法**调用：`p.sum()` 的 `p` 类型定义在别的模块；sema 通过
+ * 定义模块的 member_scope 解析方法符号，C 后端生成定义模块的方法符号
+ * extern 调用。 */
+TEST(CBackend, BuildImportCrossModuleMethod) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_method";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("lib.cx",
+        "export struct Point {\n"
+        "  x: i32;\n"
+        "  func sum(self: ref *Point): i32 { return self.x + 1; }\n"
+        "}\n");
+  write("main.cx",
+        "import m from \"./lib\";\n"
+        "func main(): i32 {\n"
+        "  var p: m::Point = .m::Point{ .x = 20 };\n"
+        "  return p.sum() + 21 - 42;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int rc = run_cli({"build", "main.cx"});
+  fs::current_path(saved);
+  EXPECT_EQ(rc, 0);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
+/* 跨模块泛型函数返回泛型 struct 实例：实例类型经 VM 级按名去重后，
+ * 定义模块实例体里的构造与导入方的字段访问看到同一个类型。 */
+TEST(CBackend, BuildImportGenericReturnType) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "imp_gen_ret";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("lib.cx",
+        "export struct Box[T] { v: T; }\n"
+        "export func wrap[T](x: T): Box[T] { return .Box[T]{ .v = x }; }\n");
+  write("main.cx",
+        "import m from \"./lib\";\n"
+        "func main(): i32 {\n"
+        "  var b: m::Box[i32] = m::wrap(41);\n"
+        "  return b.v + 1 - 42;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int rc = run_cli({"build", "main.cx"});
+  fs::current_path(saved);
+  EXPECT_EQ(rc, 0);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =

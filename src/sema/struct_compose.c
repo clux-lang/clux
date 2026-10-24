@@ -21,6 +21,7 @@
 #include "sema/comptime.h"
 #include "sema/sema.h"
 #include "sema/symbol.h"
+#include "vm/module.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_cunion.h"
@@ -98,6 +99,44 @@ bool ast_struct_def_has_embed(const ast_struct_def_t *sd) {
 static sema_symbol_t *find_global(sema_t *sema, strslice_t name) {
   return sema->global_scope ? sema_scope_find_local(sema->global_scope, name)
                             : NULL;
+}
+
+/* 找 struct 类型**定义处**的 sema 符号。
+ *
+ * 本地模块直接按名查 global_scope；跨模块（`import` 的结构体）时，类型的
+ * member_scope 挂在定义模块的 sema 符号上——按「名字 + type_t 指针身份」在
+ * 各模块的 sema_global / sema_exports 里反查，方法调用/静态属性访问因此
+ * 能跨过编译单元边界。 */
+static sema_symbol_t *find_struct_type_symbol(sema_t *sema, const type_t *t) {
+  if (!sema || !t || !t->name.ptr) return NULL;
+  const type_t *base = type_strip_quals(t);
+  sema_symbol_t *sym = find_global(sema, t->name);
+  if (sym && sym->kind == SEMA_SYM_TYPE && sym->type &&
+      type_strip_quals(sym->type) == base)
+    return sym;
+  vm_t *vm = sema->vm;
+  if (!vm || !vm->module_order) return NULL;
+  size_t n = vec_len(vm->module_order);
+  for (size_t i = 0; i < n; i++) {
+    module_t *m = (module_t *)vec_get(vm->module_order, i);
+    if (!m || m == sema->current_module) continue;
+    if (m->sema_global) {
+      sema_symbol_t *s = sema_scope_find_local(m->sema_global, t->name);
+      if (s && s->kind == SEMA_SYM_TYPE && s->type &&
+          type_strip_quals(s->type) == base)
+        return s;
+    }
+    if (m->sema_exports && t->name.len < 256) {
+      char nb[256];
+      memcpy(nb, t->name.ptr, t->name.len);
+      nb[t->name.len] = '\0';
+      sema_symbol_t *s = (sema_symbol_t *)strmap_get(m->sema_exports, nb);
+      if (s && s->kind == SEMA_SYM_TYPE && s->type &&
+          type_strip_quals(s->type) == base)
+        return s;
+    }
+  }
+  return NULL;
 }
 
 /* ===========================================================================
@@ -960,7 +999,7 @@ static void collect_member_sources(sema_t *sema, const struct_type_t *st,
     if (!bt || type_kind_of(bt) != TYPE_KIND_STRUCT) continue;
     const struct_type_t *bs = (const struct_type_t *)bt;
     /* 命中判定：查 Base 类型的 member_scope 中是否有名为 `name` 的符号 */
-    sema_symbol_t *bs_sym = find_global(sema, bs->base.name);
+    sema_symbol_t *bs_sym = find_struct_type_symbol(sema, bt);
     if (bs_sym && bs_sym->member_scope) {
       sema_symbol_t *ms = sema_scope_find_local(bs_sym->member_scope, name);
       if (ms) {
@@ -980,7 +1019,7 @@ static void collect_member_sources(sema_t *sema, const struct_type_t *st,
 static sema_symbol_t *find_own_member(sema_t *sema, const type_t *t,
                                       strslice_t name) {
   if (!t || !t->name.ptr) return NULL;
-  sema_symbol_t *sym = find_global(sema, t->name);
+  sema_symbol_t *sym = find_struct_type_symbol(sema, t);
   if (!sym || !sym->member_scope) return NULL;
   return sema_scope_find_local(sym->member_scope, name);
 }

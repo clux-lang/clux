@@ -175,6 +175,9 @@ vm_t *vm_new(allocator_t *alloc) {
     /* 模块表（M5：规范路径 → module_t*，vm 拥有 module 生命周期） */
     vm->modules = strmap_new(alloc, /*owns_value=*/false);
 
+    /* 跨模块泛型类型实例去重表（mangling 名 → type_t*，借用类型池） */
+    vm->generic_types = strmap_new(alloc, /*owns_value=*/false);
+
     /* 基本类型注册进 global scope（LOAD 指令按名查 type value） */
     vm_register_builtin_types(vm);
 
@@ -239,6 +242,7 @@ void vm_destroy(vm_t **pvm) {
         }
         strmap_free(vm->alloc, &vm->modules);
     }
+    if (vm->generic_types) strmap_free(vm->alloc, &vm->generic_types);
     if (vm->module_order) vec_free(vm->alloc, &vm->module_order);
     if (vm->defined_type_ids_global) vec_free(vm->alloc, &vm->defined_type_ids_global);
     if (vm->sema_types_global) {

@@ -20,6 +20,7 @@
 #include "core/strmap.h"
 #include "core/string.h"
 #include "sema/sema_cross.h"
+#include "sema/struct_compose.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -301,6 +302,44 @@ sema_func_t *lower_find_func_module(lower_ctx_t *lc, uint32_t fid,
         }
     }
     return NULL;
+}
+
+/* 跨模块结构体方法调用：方法函数体在定义模块的编译单元里（方法名由 sema
+ * 生成为 `__method_<typeId>_<name>`，天然唯一），这里按定义模块的符号生成
+ * extern 声明并补一个 `lower_method_t`，调用点沿用普通方法调用 lowering
+ * （NULL env + self 实参）。 */
+lower_method_t *lower_cross_module_method(lower_ctx_t *lc, uint32_t type_id,
+                                          strslice_t name, ast_node_t *site,
+                                          lower_method_t *out) {
+    if (!out || !type_id) return NULL;
+    const sema_type_t *stt = sema_type_by_id(lc->sema, type_id);
+    if (!stt || !stt->type) return NULL;
+    sema_symbol_t *ms =
+        sema_struct_find_member(lc->sema, stt->type, name, site, NULL);
+    if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->ast ||
+        ms->ast->kind != AST_FUNC_DEF)
+        return NULL;
+    ast_func_def_t *def = (ast_func_def_t *)ms->ast;
+    module_t *owner = NULL;
+    (void)lower_find_func_module(lc, def->fid, &owner);
+    if (!owner) return NULL;
+    const type_t *ft = ms->type;
+    if (!ft || type_kind_of(type_strip_quals(ft)) != TYPE_KIND_FUNC) return NULL;
+    char pbuf[64];
+    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    if (!cname) {
+        lc->failed = true;
+        return NULL;
+    }
+    lower_import_func_extern(lc, cname, ft, /*env_first=*/true);
+    if (lc->failed) return NULL;
+    memset(out, 0, sizeof(*out));
+    out->name = name;
+    out->owner_id = type_id;
+    out->def = def;
+    out->cname = cname;
+    return out;
 }
 
 /* 跨模块**泛型实例**调用：sema 把调用点的 callee 改写成实例的 FUNC_REF

@@ -1992,6 +1992,20 @@ const type_t *sema_generic_instantiate_type(
         arena_copy(sema->arena, string_cstr(sb), string_len(sb));
     string_free(&sb);
 
+    /* 跨模块全局去重：类型实例是 VM 级共享实体（同一个 mangling 名必须
+       对应同一个 type_t，否则会出现同名但字段表不同的两个类型）。 */
+    if (iname.len > 0) {
+        char gkey[512];
+        if (iname.len < sizeof gkey) {
+            memcpy(gkey, iname.ptr, iname.len);
+            gkey[iname.len] = '\0';
+            if (sema->vm->generic_types) {
+                const type_t *known =
+                    (const type_t *)strmap_get(sema->vm->generic_types, gkey);
+                if (known) return known;
+            }
+        }
+    }
 
     for (sema_generic_instance_t *e = sema->generics.instances; e; e = e->next) {
         if (!strslice_eq(e->name, iname)) continue;
@@ -2152,6 +2166,17 @@ const type_t *sema_generic_instantiate_type(
     vm_pop_scope(sema->vm);
     sema->generics.depth--;
     inst->in_progress = false;
+    /* VM 级按名登记：跨模块的同一 mangling 名必须复用同一个 type_t。 */
+    if (result && sema->vm->generic_types) {
+        char gkey[512];
+        if (iname.len > 0 && iname.len < sizeof gkey) {
+            memcpy(gkey, iname.ptr, iname.len);
+            gkey[iname.len] = '\0';
+            if (!strmap_get(sema->vm->generic_types, gkey))
+                strmap_insert(sema->vm->generic_types, sema->vm->alloc, gkey,
+                              (void *)result);
+        }
+    }
     return result;
 }
 

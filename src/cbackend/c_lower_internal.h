@@ -238,6 +238,11 @@ cir_expr_t *lower_cross_module_func_call(lower_ctx_t *lc, ast_call_t *call,
 /** 按 fid 在所有模块的 sema->funcs 里找函数，返回定义模块。 */
 sema_func_t *lower_find_func_module(lower_ctx_t *lc, uint32_t fid,
                                     module_t **out_owner);
+/* 跨模块结构体**方法**调用：按类型 id + 方法名在定义模块找回方法符号，
+ * 生成 extern 并填充 `out`（调用点沿用普通方法调用 lowering）。 */
+lower_method_t *lower_cross_module_method(lower_ctx_t *lc, uint32_t type_id,
+                                          strslice_t name, ast_node_t *site,
+                                          lower_method_t *out);
 /* 在导入方 `.c` 里声明一个外部函数原型（`extern <ret> f(void *env, ...);`）。 */
 void lower_import_func_extern(lower_ctx_t *lc, const char *cname,
                               const type_t *ft, bool env_first);

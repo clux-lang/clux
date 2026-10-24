@@ -1,5 +1,7 @@
 #include "cbackend/c_lower_internal.h"
 
+#include "sema/struct_compose.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -351,6 +353,9 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             }
         }
         lower_method_t *m = find_method(lc, owner, sr->variant);
+        lower_method_t xm;
+        if (!m && owner) m = lower_cross_module_method(lc, owner, sr->variant,
+                                                       call->callee, &xm);
         if (!m) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
                        "c backend: internal: method '%.*s' has no materialized "
@@ -376,6 +381,10 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         ast_member_t *mem = (ast_member_t *)call->callee;
         lower_method_t *m =
             find_method(lc, call->member_type_id, mem->field);
+        lower_method_t xm;
+        if (!m && call->member_type_id)
+            m = lower_cross_module_method(lc, call->member_type_id, mem->field,
+                                          call->callee, &xm);
         if (!m) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
                        "c backend: internal: method '%.*s' has no materialized "

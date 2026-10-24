@@ -403,12 +403,24 @@ clux build hello.cx
     `extern ... clux_<ownerTag>_fn_<instance>(void *env, ...)` 并调用。
     泛型实例函数在所有模块里都是 **non-static**（mangling 名全局唯一），
     但不进头文件（`is_public` 与 `is_exported` 分离）；
-  - 尚未覆盖：跨模块**方法**调用（`import` 的结构体实例方法，sema 目前
-    报 "struct 'X' has no field 'm'"；属语言层 gap，不是 C 后端问题）、
-    跨模块泛型**类型实例**出现在泛型函数体内（`wrap[T](): Box[T]` 跨模块
-    实例化时 sema 报 "construct: expected 0 fields for ...$Box$i32"，同为
-    sema 层问题；单文件内同一写法正常）、`clux test --backend=c` 的
-    import（测试运行器仍是单文件前端路径）。
+  - **跨模块方法**：`p.sum()`（`p` 的类型来自 import）由 sema 在定义模块
+    的 `member_scope` 里解析（`struct_compose.c` 的
+    `find_struct_type_symbol` 按「名字 + type_t 指针身份」跨模块反查）；
+    C 后端把方法（sema 生成名 `__method_<typeId>_<name>`，全局唯一）
+    也标为 `is_public`，导入方按 `clux_<ownerTag>_fn___method_...` 生成
+    extern 调用；
+  - **跨模块泛型类型实例去重**：泛型实例缓存原本是 per-sema 的；定义模块
+    sema 在 walk 泛型函数实例体时引用的类型实例可能已在导入方 sema 创建
+    （同一 mangling 名）→ 会出现两个同名类型对象（一个字段完整、一个空），
+    构造检查报 `expected 0 fields`。现在 VM 增加 `generic_types`
+    （mangling 名 → `type_t*`）做全局按名去重，`wrap[T](): Box[T]` 这类
+    跨模块泛型返回值也正常；
+  - 回归测试：`BuildImportMultiFile`、`BuildImportChainAndDiamond`、
+    `BuildImportReexport`、`BuildImportCrossModuleGeneric`、
+    `BuildImportCrossModuleMethod`、`BuildImportGenericReturnType`、
+    `RejectsCircularImport`；
+  - 尚未覆盖：`clux test --backend=c` 的 import（测试运行器仍是单文件前端
+    路径）。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI

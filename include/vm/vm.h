@@ -153,6 +153,13 @@ typedef struct vm_t {
      * （bc + global_scope + exports）。vm 拥有 module 生命周期。
      * IMPORT <path> 查此表获取 module_t*，构造模块值压栈。 */
     strmap_t    *modules;  /* 规范路径(C字符串) → module_t*（vm 拥有生命周期） */
+
+    /* 跨模块泛型**类型实例**去重（mangling 名 → const type_t*，借用类型池）。
+       泛型实例缓存原本是 per-sema 的：泛型函数实例在定义模块的 sema 里 walk
+       时引用的类型实例可能已在导入方 sema 创建（同一 mangling 名），
+       per-sema 去重会生成两个同名类型对象（一个字段完整、一个空）→ 构造
+       检查报 "expected 0 fields"。类型是 VM 级共享实体，故在这里按名去重。 */
+    strmap_t    *generic_types;
 } vm_t;
 
 /* ---- `usize`：C 的 size_t 在 clux 里的名字（**独立类型**，宽度随架构）----

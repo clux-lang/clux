@@ -139,7 +139,11 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
                 break;
             }
         }
-        out->is_public = out->is_exported || generic_instance;
+        /* 结构体方法（sema 生成名 `__method_<typeId>_<name>`，全局唯一）：
+           跨模块调用时也要能链接到定义模块的实现。 */
+        bool method = fn->name.len > 9 && fn->name.ptr &&
+                      memcmp(fn->name.ptr, "__method_", 9) == 0;
+        out->is_public = out->is_exported || generic_instance || method;
     }
     return out;
 }
