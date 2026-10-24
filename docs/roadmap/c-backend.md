@@ -366,6 +366,10 @@ clux build hello.cx
     类型的签名结构体；`struct clux_str` 用
     `CLUX_STR_STRUCT_DEFINED` 守卫以便多个模块头共存；
   - `.c` 以 `#include "<模块>.h"` 开头，只定义头文件之外的私有类型；
+  - 库模块（没有 `main`）可以单独编译：`--emit-c` / `--emit-obj` 不要求
+    `main`（链接可执行文件时仍要求）；导出符号是真正的 C ABI 入口，
+    手写 C 驱动 `#include "模块.h"` 即可调用并与对象一起链接
+    （回归测试 `CBackend.CompileUnitLinksAcrossC` 覆盖整条链路）；
   - CLI `--emit-c` 同时产出 `.c`/`.h`；普通构建成功后删 `.c`、保留 `.h`
     与 `.obj`；
   - 回归测试：`CBackend.GeneratesHeaderPairForExports`、

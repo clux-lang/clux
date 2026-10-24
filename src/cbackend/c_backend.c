@@ -478,8 +478,11 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             if (sema) {
                 sema->module_path = src_path;
                 if (sema_analyze(sema, ast)) {
+                    /* 只出 C 或只出目标文件时允许没有 main（库模块/编译
+                       单元）；链接可执行文件时仍要求 main。 */
+                    bool allow_no_main = !compile || opts->object_only;
                     unit = cbackend_lower(arena, sema, (ast_program_t *)ast,
-                                          src_path, opts->tests);
+                                          src_path, opts->tests, allow_no_main);
                 }
             }
         }

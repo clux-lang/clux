@@ -19,7 +19,7 @@ extern "C" {
  */
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema,
                            ast_program_t *prog, const char *source_path,
-                           bool test_mode);
+                           bool test_mode, bool allow_no_main);
 
 #ifdef __cplusplus
 }

@@ -1705,6 +1705,89 @@ TEST(CBackend, ModulePrefixFromRelativePath) {
   EXPECT_EQ(pa, pa2);
   fs::remove_all(root, ec);
 }
+/* 真编译单元链路：库模块（无 main）→ --emit-obj + .h；
+ * 手写 C 驱动 include 头文件、调用导出的 C ABI 符号并与对象一起链接。 */
+TEST(CBackend, CompileUnitLinksAcrossC) {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::path(clux_test_temp_dir()) / "unit";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir, ec);
+  {
+    std::FILE *fp = std::fopen((dir / "lib.cx").string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs("export func add(a: i32, b: i32): i32 { return a + b; }\n"
+               "func internal(): i32 { return 1; }\n",
+               fp);
+    std::fclose(fp);
+  }
+#ifdef _WIN32
+  const char *obj_ext = ".obj";
+#else
+  const char *obj_ext = ".o";
+#endif
+  const std::string obj = (dir / ("lib" + std::string(obj_ext))).string();
+  ASSERT_EQ(run_cli({"build", (dir / "lib.cx").string(),
+                     "--emit-obj=" + obj}),
+            0);
+  ASSERT_TRUE(fs::exists(obj)) << "library module must compile without main";
+  ASSERT_TRUE(fs::exists(dir / "lib.h"));
+  const std::string h = slurp((dir / "lib.h").string());
+  const size_t marker = h.find("_fn_add");
+  ASSERT_NE(marker, std::string::npos) << h;
+  const size_t paren = h.find('(', marker);
+  ASSERT_NE(paren, std::string::npos);
+  size_t begin = paren;
+  while (begin > 0) {
+    const char ch = h[begin - 1];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+          (ch >= '0' && ch <= '9') || ch == '_'))
+      break;
+    begin--;
+  }
+  const std::string fname = h.substr(begin, paren - begin);
+  ASSERT_FALSE(fname.empty());
+
+  /* 手写 C 驱动：include 模块头文件，按 env-first ABI 调用导出函数。 */
+  {
+    std::FILE *fp = std::fopen((dir / "driver.c").string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fprintf(fp,
+                 "#include \"lib.h\"\n"
+                 "int main(void) { return (int)(%s(NULL, 40, 2) - 42); }\n",
+                 fname.c_str());
+    std::fclose(fp);
+  }
+  const std::string exe = (dir / ("driver" + std::string(obj_ext == std::string(".obj") ? ".exe" : ""))).string();
+  std::string cmd = q(host_cc_name()) + " -I" + q(dir.string()) + " " +
+                    q((dir / "driver.c").string()) + " " + q(obj) + " -o " +
+                    q(exe);
+#ifdef _WIN32
+  cmd = "(" + cmd + ")";
+  /* 宿主编译器需要可写的临时目录（clux 自己调 cc 时也会把 TMP 指向产物
+     目录；测试进程里同样处理）。 */
+  char old_tmp[4096] = {0}, old_temp[4096] = {0};
+  size_t n_tmp = 0;
+  if (getenv("TMP")) {
+    snprintf(old_tmp, sizeof old_tmp, "%s", getenv("TMP"));
+    n_tmp = strlen(old_tmp);
+  }
+  if (getenv("TEMP")) snprintf(old_temp, sizeof old_temp, "%s", getenv("TEMP"));
+  _putenv_s("TMP", dir.string().c_str());
+  _putenv_s("TEMP", dir.string().c_str());
+#endif
+  const int link_rc = std::system(cmd.c_str());
+#ifdef _WIN32
+  _putenv_s("TMP", n_tmp ? old_tmp : "");
+  _putenv_s("TEMP", old_temp[0] ? old_temp : "");
+#endif
+  ASSERT_EQ(link_rc, 0) << cmd;
+  ASSERT_TRUE(fs::exists(exe));
+  EXPECT_EQ(run_exe(exe), 0);
+  fs::remove_all(dir, ec);
+}
+
+/* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =
       write_temp_file("func main(): i32 { return 0; }\n", "cbackend_conflict");

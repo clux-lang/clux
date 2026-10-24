@@ -278,10 +278,11 @@ static const char *find_missing_call(const cir_unit_t *u) {
 }
 
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
-                           const char *source_path, bool test_mode) {
+                           const char *source_path, bool test_mode,
+                           bool allow_no_main) {
     if (!arena || !sema || !prog || !source_path) return NULL;
     ast_func_def_t *main_fn = find_main(prog);
-    if (!main_fn && !test_mode) {
+    if (!main_fn && !test_mode && !allow_no_main) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)prog),
                    "c backend: no 'main' function");
         return NULL;
