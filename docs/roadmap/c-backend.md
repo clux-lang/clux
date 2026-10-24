@@ -222,14 +222,14 @@ clux build hello.cx
 - struct 实例方法调用（`p.m()`）；
 - struct 静态方法调用（`T::f()`）；
 - 未被作为函数值引用的函数对象不生成（C IR 优化）；
+- 函数对象内嵌 `union clux_env_any env`，不再堆分配 `void *env`；
 - 函数对象携带 `env_clone` / `env_dispose`，指向 sema 生成的 env 函数；
-- `clone(f)` 调用 sema 生成的 env clone 函数，得到独立 env；
-- 函数值销毁直接调用 sema 生成的 env dispose，并释放 env；
-- C 后端不引入引用计数，生命周期由 sema 的 FREE / CLONE 节点驱动。
+- `clone(f)` 调用 sema 生成的 env clone 函数，写入新函数对象的内嵌 env；
+- `FREE f` 调用 env dispose，直接销毁内嵌 env；
+- 闭包上下文不再需要分配/释放，生命周期由 sema 的 FREE / CLONE 节点驱动。
 
 尚未覆盖：
 
-- struct/数组字段中的函数值复制路径；
 - 跨模块方法。
 
 说明：泛型在 sema 阶段完成单态化/消减，C 后端只接收具体函数，不需要独立处理泛型。

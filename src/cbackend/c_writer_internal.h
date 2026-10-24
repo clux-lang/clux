@@ -16,6 +16,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e);
 void cw_write_type_defs(string_t *sb, cir_type_t *types);
 void cw_emit_type(string_t *sb, cir_type_t *t);
 void cw_emit_all_types(string_t *sb, cir_type_t *types);
+void cw_write_env_union(string_t *sb, cir_type_t *types);
 
 void cw_write_params(string_t *sb, const cir_signature_t *sig, bool with_names,
                      const cir_function_t *fn);

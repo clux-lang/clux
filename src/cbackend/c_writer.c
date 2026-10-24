@@ -66,9 +66,8 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         cw_put(sb, "}\n");
         cw_put(sb, "#define clux_free free\n");
         cw_put(sb, "#define clux_func_release(f) do { "
-                   "if ((f).env) { if ((f).env_dispose) "
-                   "(f).env_dispose(NULL, (f).env); free((f).env); } } "
-                   "while (0)\n");
+                   "if ((f).env_dispose) "
+                   "(f).env_dispose(NULL, &(f).env); } while (0)\n");
     }
     if (unit->uses_opt_unwrap) {
         cw_put(sb, "static void clux_panic_none(void) { abort(); }\n");
@@ -87,6 +86,7 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
             cw_put(sb, "}\n\n");
         }
     }
+    cw_write_env_union(sb, unit->types);
 
     cir_signature_t *sigs = unit->signatures;
     reverse_signatures(&sigs);
@@ -108,6 +108,14 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         for (cir_function_t *f = fns; f; f = f->next)
             cw_write_function_decl(sb, f);
         cw_put(sb, "\n");
+        for (cir_signature_t *s = sigs; s; s = s->next) {
+            cw_printf(sb, "static struct %s clux_clone_%s(struct %s f) {\n",
+                      s->tag, s->tag, s->tag);
+            cw_printf(sb, "    struct %s out = f;\n", s->tag);
+            cw_put(sb, "    if (f.env_clone) "
+                       "f.env_clone(&out.env, &f.env);\n");
+            cw_put(sb, "    return out;\n}\n\n");
+        }
         for (cir_raw_t *r = unit->raw_helpers; r; r = r->next) {
             cw_put(sb, r->code ? r->code : "");
             cw_put(sb, "\n");

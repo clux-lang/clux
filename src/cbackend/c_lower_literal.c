@@ -138,6 +138,10 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     if (!env) return NULL;
     cir_unit_add_type(lc->unit, env);
     lc->unit->uses_alloc = true;
+    env->is_closure_env = true;
+    char ef[64];
+    snprintf(ef, sizeof ef, "clux_e_%u", seq);
+    env->env_field = copy_arena(lc->arena, ef);
 
     cir_init_t *inits = NULL;
     for (ast_node_t *c = fn->captures; c; c = c->next) {
@@ -168,8 +172,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         init->next = inits;
         inits = init;
     }
-    cir_expr_t *env_new = cir_expr_new(lc->arena, env, NULL);
-    env_new->closure_env = true;
+    cir_expr_t *env_new = cir_expr_construct(lc->arena, env, NULL);
     if (fn->env_dispose_fid) {
         sema_func_t *sf = sema_func_by_id(lc->sema, fn->env_dispose_fid);
         if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
@@ -217,16 +220,13 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
             char hn[64];
             snprintf(hn, sizeof hn, "clux_env_clone_%u", seq);
             const char *hname = copy_arena(lc->arena, hn);
-            const char *disp = env_new->op ? env_new->op : "NULL";
-            (void)disp;
             size_t need = strlen(hname) + strlen(capct->c_name) +
                           strlen(clone_fn) + 256;
             char *code = (char *)arena_alloc(lc->arena, need, 1);
             if (!code) return NULL;
             snprintf(code, need,
-                     "static void *%s(void *env) {\n"
-                     "    %s clux_tmp = %s(NULL, (%s *)env);\n"
-                     "    return clux_new(sizeof(clux_tmp), &clux_tmp);\n"
+                     "static void %s(void *dst, void *src) {\n"
+                     "    *(%s *)dst = %s(NULL, (%s *)src);\n"
                      "}\n",
                      hname, capct->c_name, clone_fn, capct->c_name);
             cir_unit_add_raw(lc->unit, code);
