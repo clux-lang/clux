@@ -115,12 +115,3 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
 void cw_emit_all_types(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next) cw_emit_type(sb, t);
 }
-
-void cw_write_env_union(string_t *sb, cir_type_t *types) {
-    cw_put(sb, "union clux_env_any {\n");
-    cw_put(sb, "    char clux_dummy;\n");
-    for (cir_type_t *t = types; t; t = t->next)
-        if (t->is_closure_env && t->c_name && t->env_field)
-            cw_printf(sb, "    %s %s;\n", t->c_name, t->env_field);
-    cw_put(sb, "};\n\n");
-}

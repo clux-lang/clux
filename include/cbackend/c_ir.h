@@ -47,8 +47,6 @@ typedef struct cir_type {
     cir_field_t    *fields;
     struct cir_signature *sig;
     bool            emitted;
-    bool            is_closure_env;
-    const char     *env_field;
     struct cir_type *next;
 } cir_type_t;
 

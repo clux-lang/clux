@@ -20,8 +20,8 @@ void cw_write_signature_def(string_t *sb, const cir_signature_t *sig) {
         cw_put(sb, sig->params[i] ? sig->params[i]->c_name : "void");
     }
     cw_put(sb, ");\n");
-    cw_put(sb, "    union clux_env_any env;\n");
-    cw_put(sb, "    void (*env_clone)(void *, void *);\n");
+    cw_put(sb, "    void *env;\n");
+    cw_put(sb, "    void *(*env_clone)(void *);\n");
     cw_put(sb, "    void (*env_dispose)(void *, void *);\n");
     cw_put(sb, "};\n\n");
 }
@@ -35,7 +35,7 @@ void cw_write_function_decl(string_t *sb, const cir_function_t *fn) {
 
 void cw_write_function_object(string_t *sb, const cir_function_t *fn) {
     if (!fn->object || !fn->sig || !fn->object_used) return;
-    cw_printf(sb, "static const struct %s %s = { %s, {0}, NULL, NULL };\n",
+    cw_printf(sb, "static const struct %s %s = { %s, NULL, NULL, NULL };\n",
               fn->sig->tag, fn->object, fn->name);
 }
 

@@ -239,7 +239,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_FUNC_CALL:
         cw_put(sb, "(");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").fn(&(");
+        cw_put(sb, ").fn((");
         cw_write_expr(sb, e->lhs);
         cw_put(sb, ").env");
         for (const cir_expr_t *a = e->args; a; a = a->next) {
@@ -253,13 +253,9 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
         cw_put(sb, "){ .fn = ");
         cw_put(sb, e->text ? e->text : "<null>");
-        cw_put(sb, ", .env = { .");
-        cw_put(sb, e->lhs && e->lhs->type && e->lhs->type->env_field
-                       ? e->lhs->type->env_field
-                       : "clux_dummy");
-        cw_put(sb, " = ");
+        cw_put(sb, ", .env = ");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, " }, .env_clone = ");
+        cw_put(sb, ", .env_clone = ");
         cw_put(sb, e->text2 ? e->text2 : "NULL");
         cw_put(sb, ", .env_dispose = ");
         if (e->op) {
@@ -271,12 +267,23 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, " }");
         break;
     case CIR_EXPR_FUNC_CLONE:
-        cw_put(sb, "clux_clone_");
-        cw_put(sb, e->type && e->type->sig ? e->type->sig->tag
-                                           : "unknown");
-        cw_put(sb, "(");
+        cw_put(sb, "((");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ")");
+        cw_put(sb, ").env ? (");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){ .fn = (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").fn, .env = (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env_clone((");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env), .env_clone = (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env_clone, .env_dispose = (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env_dispose } : (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, "))");
         break;
     case CIR_EXPR_CLOSURE_RELEASE:
         cw_put(sb, "clux_func_release(");
