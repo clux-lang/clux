@@ -330,20 +330,11 @@ cir_expr_t *cir_expr_closure_release(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
-cir_expr_t *cir_expr_func_retain(arena_t *arena, cir_expr_t *object) {
+cir_expr_t *cir_expr_func_clone(arena_t *arena, cir_expr_t *object) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));
     if (!e) return NULL;
-    e->kind = CIR_EXPR_FUNC_RETAIN;
-    e->lhs = object;
-    return e;
-}
-
-cir_expr_t *cir_expr_func_release(arena_t *arena, cir_expr_t *object) {
-    cir_expr_t *e = (cir_expr_t *)arena_calloc(
-        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
-    if (!e) return NULL;
-    e->kind = CIR_EXPR_FUNC_RELEASE;
+    e->kind = CIR_EXPR_FUNC_CLONE;
     e->lhs = object;
     return e;
 }

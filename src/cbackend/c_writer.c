@@ -56,52 +56,6 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         cw_put(sb, "    if (src) memcpy(p, src, n);\n");
         cw_put(sb, "    return p;\n");
         cw_put(sb, "}\n");
-        if (unit->uses_closure_cleanup) {
-            cw_put(sb, "struct clux_closure_node { void *env; "
-                       "void (*dispose)(void *, void *); "
-                       "struct clux_closure_node *next; };\n");
-            cw_put(sb, "static struct clux_closure_node *clux_closures;\n");
-            cw_put(sb, "static void *clux_closure_new(size_t n, "
-                       "const void *src, void (*dispose)(void *, void *)) {\n");
-            cw_put(sb, "    void *p = clux_new(n, src);\n");
-            cw_put(sb, "    *(size_t *)p = 1;\n");
-            cw_put(sb, "    struct clux_closure_node *node = "
-                       "malloc(sizeof(*node));\n");
-            cw_put(sb, "    if (!node) abort();\n");
-            cw_put(sb, "    node->env = p; node->dispose = dispose;\n");
-            cw_put(sb, "    node->next = clux_closures; clux_closures = node;\n");
-            cw_put(sb, "    return p;\n");
-            cw_put(sb, "}\n");
-            cw_put(sb, "static void clux_closure_retain(void *env) {\n");
-            cw_put(sb, "    if (env) (*(size_t *)env)++;\n");
-            cw_put(sb, "}\n");
-            cw_put(sb, "static void clux_closure_release(void *env) {\n");
-            cw_put(sb, "    if (!env) return;\n");
-            cw_put(sb, "    if (--(*(size_t *)env) > 0) return;\n");
-            cw_put(sb, "    struct clux_closure_node **pp = &clux_closures;\n");
-            cw_put(sb, "    while (*pp) {\n");
-            cw_put(sb, "        struct clux_closure_node *n = *pp;\n");
-            cw_put(sb, "        if (n->env == env) {\n");
-            cw_put(sb, "            *pp = n->next;\n");
-            cw_put(sb, "            if (n->dispose) n->dispose(NULL, n->env);\n");
-            cw_put(sb, "            free(n->env); free(n); return;\n");
-            cw_put(sb, "        }\n");
-            cw_put(sb, "        pp = &n->next;\n");
-            cw_put(sb, "    }\n");
-            cw_put(sb, "}\n");
-            cw_put(sb, "static void clux_closure_cleanup_all(void) {\n");
-            cw_put(sb, "    while (clux_closures) {\n");
-            cw_put(sb, "        struct clux_closure_node *n = clux_closures;\n");
-            cw_put(sb, "        clux_closures = n->next;\n");
-            cw_put(sb, "        if (n->dispose) n->dispose(NULL, n->env);\n");
-            cw_put(sb, "        free(n->env); free(n);\n");
-            cw_put(sb, "    }\n");
-            cw_put(sb, "}\n");
-            cw_put(sb, "#define clux_func_retain(f) ((f).env ? "
-                       "(clux_closure_retain((f).env), (f)) : (f))\n");
-            cw_put(sb, "#define clux_func_release(f) "
-                       "((f).env ? clux_closure_release((f).env) : (void)0)\n");
-        }
         cw_put(sb, "static void *clux_make(size_t elem_size, size_t len, "
               "const void *src, size_t count) {\n");
         cw_put(sb, "    void *p = calloc(len ? len : 1, elem_size);\n");
@@ -111,6 +65,10 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         cw_put(sb, "    return p;\n");
         cw_put(sb, "}\n");
         cw_put(sb, "#define clux_free free\n");
+        cw_put(sb, "#define clux_func_release(f) do { "
+                   "if ((f).env) { if ((f).env_dispose) "
+                   "(f).env_dispose(NULL, (f).env); free((f).env); } } "
+                   "while (0)\n");
     }
     if (unit->uses_opt_unwrap) {
         cw_put(sb, "static void clux_panic_none(void) { abort(); }\n");
@@ -150,6 +108,10 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         for (cir_function_t *f = fns; f; f = f->next)
             cw_write_function_decl(sb, f);
         cw_put(sb, "\n");
+        for (cir_raw_t *r = unit->raw_helpers; r; r = r->next) {
+            cw_put(sb, r->code ? r->code : "");
+            cw_put(sb, "\n");
+        }
 
         cw_put(sb, "/* ---- global variables and function objects ---- */\n");
         for (cir_function_t *f = fns; f; f = f->next)
@@ -186,14 +148,9 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         if (!f->is_entry) continue;
         cw_put(sb, "int main(void) {\n");
         if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID) {
-            cw_printf(sb, "    int clux_ret = (int)%s(NULL);\n", f->name);
-            if (unit->uses_closure_cleanup)
-                cw_put(sb, "    clux_closure_cleanup_all();\n");
-            cw_put(sb, "    return clux_ret;\n");
+            cw_printf(sb, "    return (int)%s(NULL);\n", f->name);
         } else {
             cw_printf(sb, "    %s(NULL);\n", f->name);
-            if (unit->uses_closure_cleanup)
-                cw_put(sb, "    clux_closure_cleanup_all();\n");
             cw_put(sb, "    return 0;\n");
         }
         cw_put(sb, "}\n");

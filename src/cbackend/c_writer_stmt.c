@@ -21,6 +21,8 @@ void cw_write_signature_def(string_t *sb, const cir_signature_t *sig) {
     }
     cw_put(sb, ");\n");
     cw_put(sb, "    void *env;\n");
+    cw_put(sb, "    void *(*env_clone)(void *);\n");
+    cw_put(sb, "    void (*env_dispose)(void *, void *);\n");
     cw_put(sb, "};\n\n");
 }
 
@@ -33,8 +35,8 @@ void cw_write_function_decl(string_t *sb, const cir_function_t *fn) {
 
 void cw_write_function_object(string_t *sb, const cir_function_t *fn) {
     if (!fn->object || !fn->sig || !fn->object_used) return;
-    cw_printf(sb, "static const struct %s %s = { %s, NULL };\n", fn->sig->tag,
-       fn->object, fn->name);
+    cw_printf(sb, "static const struct %s %s = { %s, NULL, NULL, NULL };\n",
+              fn->sig->tag, fn->object, fn->name);
 }
 
 void cw_write_indent(string_t *sb, int indent) {
@@ -169,8 +171,7 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         cw_put(sb, "continue;\n");
         break;
     case CIR_STMT_FREE:
-        if (s->expr && (s->expr->kind == CIR_EXPR_CLOSURE_RELEASE ||
-                        s->expr->kind == CIR_EXPR_FUNC_RELEASE)) {
+        if (s->expr && s->expr->kind == CIR_EXPR_CLOSURE_RELEASE) {
             cw_write_expr(sb, s->expr);
             cw_put(sb, ";\n");
         } else {

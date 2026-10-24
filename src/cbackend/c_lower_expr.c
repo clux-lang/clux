@@ -14,13 +14,7 @@ lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
 }
 
 static cir_expr_t *lower_call_arg(lower_ctx_t *lc, ast_node_t *a) {
-    cir_expr_t *arg = lower_expr(lc, a);
-    if (!arg) return NULL;
-    const type_t *ft = infer_expr_type(lc, a);
-    if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC &&
-        !func_expr_is_owned(lc, a))
-        arg = cir_expr_func_retain(lc->arena, arg);
-    return arg;
+    return lower_expr(lc, a);
 }
 
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
@@ -34,7 +28,10 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         const type_t *ft = infer_expr_type(lc, call->args);
         if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC) {
             cir_expr_t *obj = lower_expr(lc, call->args);
-            return obj ? cir_expr_func_retain(lc->arena, obj) : NULL;
+            if (!obj) return NULL;
+            cir_expr_t *cl = cir_expr_func_clone(lc->arena, obj);
+            if (cl) cl->type = map_type(lc, ft);
+            return cl;
         }
     }
     if (call->callee && call->callee->kind == AST_SCOPE_REF) {

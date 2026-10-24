@@ -1,5 +1,6 @@
 #include "cbackend/c_ir.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 cir_unit_t *cir_unit_new(arena_t *arena, const char *source_path) {
@@ -45,4 +46,13 @@ void cir_unit_add_global(cir_unit_t *u, cir_global_t *g) {
     if (!u || !g) return;
     g->next = u->globals;
     u->globals = g;
+}
+
+void cir_unit_add_raw(cir_unit_t *u, const char *code) {
+    if (!u || !code) return;
+    cir_raw_t *r = (cir_raw_t *)malloc(sizeof(*r));
+    if (!r) return;
+    r->code = code;
+    r->next = u->raw_helpers;
+    u->raw_helpers = r;
 }

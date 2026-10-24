@@ -85,9 +85,6 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             } else {
                 st->expr = lower_expr(lc, vd->init);
             }
-            if (t && type_kind_of(type_strip_quals(t)) == TYPE_KIND_FUNC &&
-                !func_expr_is_owned(lc, vd->init) && st->expr)
-                st->expr = cir_expr_func_retain(lc->arena, st->expr);
         }
         return st;
     }
@@ -113,26 +110,6 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
         } else {
             st->expr = lower_expr(lc, a->value);
-        }
-        if (tt && type_kind_of(type_strip_quals(tt)) == TYPE_KIND_FUNC) {
-            if (!func_expr_is_owned(lc, a->value))
-                st->expr = cir_expr_func_retain(lc->arena, st->expr);
-            cir_type_t *ct = map_type(lc, tt);
-            char tmp[64];
-            snprintf(tmp, sizeof tmp, "clux_fncopy_%u", lc->ret_seq++);
-            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
-            cir_stmt_t *init = cir_stmt_new(lc->arena, CIR_STMT_VAR);
-            cir_stmt_t *rel = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-            if (!blk || !init || !rel) return NULL;
-            init->type = ct;
-            init->name = copy_arena(lc->arena, tmp);
-            init->expr = st->expr;
-            rel->expr = cir_expr_func_release(lc->arena, st->lhs);
-            st->expr = cir_expr_ident(lc->arena, init->name);
-            blk->body = init;
-            init->next = rel;
-            rel->next = st;
-            return blk;
         }
         return st;
     }
@@ -393,7 +370,7 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE)
                 ex = cir_expr_slice_data(lc->arena, ex);
             else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC)
-                ex = cir_expr_func_release(lc->arena, ex);
+                ex = cir_expr_closure_release(lc->arena, ex);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
             st->expr = ex;

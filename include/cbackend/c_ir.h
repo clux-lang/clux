@@ -79,8 +79,7 @@ typedef enum {
     CIR_EXPR_FUNC_CALL,
     CIR_EXPR_CLOSURE,
     CIR_EXPR_CLOSURE_RELEASE,
-    CIR_EXPR_FUNC_RETAIN,
-    CIR_EXPR_FUNC_RELEASE,
+    CIR_EXPR_FUNC_CLONE,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -96,6 +95,7 @@ typedef struct cir_expr {
     bool            bool_value;
     const char     *text;
     size_t          text_len;
+    const char     *text2;
     const char     *op;
     cir_type_t     *type;
     cir_type_t     *elem;
@@ -170,6 +170,11 @@ typedef struct cir_function {
     struct cir_function *next;
 } cir_function_t;
 
+typedef struct cir_raw {
+    const char *code;
+    struct cir_raw *next;
+} cir_raw_t;
+
 typedef struct cir_global {
     const char  *name;
     cir_type_t  *type;
@@ -185,10 +190,10 @@ typedef struct cir_unit {
     cir_function_t  *functions;
     cir_global_t    *globals;
     cir_type_t      *types;
+    cir_raw_t       *raw_helpers;
     bool             uses_alloc;
     bool             uses_str_cmp;
     bool             uses_opt_unwrap;
-    bool             uses_closure_cleanup;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -251,8 +256,7 @@ cir_expr_t    *cir_expr_func_call(arena_t *arena, cir_expr_t *callee,
 cir_expr_t    *cir_expr_closure(arena_t *arena, cir_type_t *type,
                                 const char *fn_name, cir_expr_t *env);
 cir_expr_t    *cir_expr_closure_release(arena_t *arena, cir_expr_t *object);
-cir_expr_t    *cir_expr_func_retain(arena_t *arena, cir_expr_t *object);
-cir_expr_t    *cir_expr_func_release(arena_t *arena, cir_expr_t *object);
+cir_expr_t    *cir_expr_func_clone(arena_t *arena, cir_expr_t *object);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);
@@ -270,6 +274,7 @@ cir_function_t  *cir_function_new(arena_t *arena, const char *name,
 void cir_unit_add_signature(cir_unit_t *u, cir_signature_t *sig);
 void cir_unit_add_function(cir_unit_t *u, cir_function_t *fn);
 void cir_unit_add_global(cir_unit_t *u, cir_global_t *g);
+void cir_unit_add_raw(cir_unit_t *u, const char *code);
 
 #ifdef __cplusplus
 }

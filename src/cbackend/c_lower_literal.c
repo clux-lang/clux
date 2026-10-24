@@ -138,11 +138,6 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     if (!env) return NULL;
     cir_unit_add_type(lc->unit, env);
     lc->unit->uses_alloc = true;
-    cir_field_t *refs = cir_field_new(
-        lc->arena, "clux_refs",
-        cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t"));
-    if (!refs) return NULL;
-    cir_type_add_field(env, refs);
 
     cir_init_t *inits = NULL;
     for (ast_node_t *c = fn->captures; c; c = c->next) {
@@ -192,7 +187,52 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
             }
         }
     }
-    lc->unit->uses_closure_cleanup = true;
+    /* 为 clone(f) 生成 env clone 包装：clone 函数返回捕获结构体值，
+       这里把它复制进新的闭包 env。 */
+    const char *clone_fn = NULL;
+    if (fn->env_clone_fid) {
+        sema_func_t *sf = sema_func_by_id(lc->sema, fn->env_clone_fid);
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+            ast_func_def_t *df = (ast_func_def_t *)sf->def;
+            clone_fn = mangle(lc->arena, "clux_fn_", df->name);
+        }
+    }
+    if (!clone_fn && fn->capture_type_id) {
+        for (sema_clone_fn_t *c = lc->sema->clone_fns; c; c = c->next) {
+            if (c->kind == 0 && c->type && c->type->id == fn->capture_type_id &&
+                c->fn && c->fn->kind == AST_FUNC_DEF) {
+                ast_func_def_t *df = (ast_func_def_t *)c->fn;
+                clone_fn = mangle(lc->arena, "clux_fn_", df->name);
+                break;
+            }
+        }
+    }
+    if (clone_fn && fn->capture_type_id) {
+        const sema_type_t *capst =
+            sema_type_by_id(lc->sema, fn->capture_type_id);
+        cir_type_t *capct = capst && capst->type
+                                ? map_type(lc, capst->type)
+                                : NULL;
+        if (capct && capct->c_name) {
+            char hn[64];
+            snprintf(hn, sizeof hn, "clux_env_clone_%u", seq);
+            const char *hname = copy_arena(lc->arena, hn);
+            const char *disp = env_new->op ? env_new->op : "NULL";
+            (void)disp;
+            size_t need = strlen(hname) + strlen(capct->c_name) +
+                          strlen(clone_fn) + 256;
+            char *code = (char *)arena_alloc(lc->arena, need, 1);
+            if (!code) return NULL;
+            snprintf(code, need,
+                     "static void *%s(void *env) {\n"
+                     "    %s clux_tmp = %s(NULL, (%s *)env);\n"
+                     "    return clux_new(sizeof(clux_tmp), &clux_tmp);\n"
+                     "}\n",
+                     hname, capct->c_name, clone_fn, capct->c_name);
+            cir_unit_add_raw(lc->unit, code);
+            env_new->text2 = hname;
+        }
+    }
     /* inits 取反（构造顺序） */
     for (cir_init_t *it = inits; it;) {
         cir_init_t *next = it->next;
@@ -233,24 +273,13 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
 
     const type_t *ft = func_type_of_def(lc, fn);
     cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
-    return ct ? cir_expr_closure(lc->arena, ct, cf->name, env_new) : NULL;
-}
-
-bool func_expr_is_owned(lower_ctx_t *lc, ast_node_t *e) {
-    (void)lc;
-    if (!e) return false;
-    if (e->kind == AST_FUNC_DEF || e->kind == AST_MOVE || e->kind == AST_TAKE)
-        return true;
-    if (e->kind == AST_CALL) {
-        ast_call_t *c = (ast_call_t *)e;
-        strslice_t name = STRSLICE_EMPTY;
-        if (c->callee && c->callee->kind == AST_IDENT)
-            name = ((ast_ident_t *)c->callee)->name;
-        else if (c->callee && c->callee->kind == AST_FUNC_REF)
-            name = ((ast_func_ref_t *)c->callee)->name;
-        if (strslice_eq(name, STRSLICE_LIT("__deep_clone"))) return true;
+    if (!ct) return NULL;
+    cir_expr_t *cl = cir_expr_closure(lc->arena, ct, cf->name, env_new);
+    if (cl) {
+        cl->text2 = env_new->text2;
+        cl->op = env_new->op;
     }
-    return false;
+    return cl;
 }
 
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
