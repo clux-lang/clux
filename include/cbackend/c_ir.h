@@ -25,6 +25,7 @@ typedef enum {
     CIR_TYPE_CUNION,
     CIR_TYPE_F32,
     CIR_TYPE_F64,
+    CIR_TYPE_FUNC,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -44,6 +45,7 @@ typedef struct cir_type {
     cir_type_t     *elem;     /* array / ptr */
     size_t          array_len;
     cir_field_t    *fields;
+    struct cir_signature *sig;
     bool            emitted;
     struct cir_type *next;
 } cir_type_t;
@@ -73,6 +75,9 @@ typedef enum {
     CIR_EXPR_UNION_TAG,
     CIR_EXPR_CUNION_CONSTRUCT,
     CIR_EXPR_FLOAT,
+    CIR_EXPR_FUNC_OBJ,
+    CIR_EXPR_FUNC_CALL,
+    CIR_EXPR_CLOSURE,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -92,6 +97,7 @@ typedef struct cir_expr {
     cir_type_t     *type;
     cir_type_t     *elem;
     cir_type_t     *src_type;
+    struct cir_signature *sig;
     bool            array_data; /* index through wrapper .data */
     size_t          tag;
     struct cir_expr *lhs;
@@ -153,6 +159,7 @@ typedef struct cir_function {
     cir_param_t *params;
     cir_stmt_t  *body;
     cir_stmt_t  *cleanup;
+    cir_type_t  *closure_env;
     int          source_line;
     bool         is_entry;   /* 生成 C main wrapper */
     struct cir_function *next;
@@ -231,6 +238,12 @@ cir_expr_t    *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
 cir_expr_t    *cir_expr_union_tag(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_cunion_construct(arena_t *arena, cir_type_t *type,
                                          const char *field, cir_expr_t *value);
+cir_expr_t    *cir_expr_func_obj(arena_t *arena, const char *object,
+                                 cir_type_t *type);
+cir_expr_t    *cir_expr_func_call(arena_t *arena, cir_expr_t *callee,
+                                  cir_expr_t *args);
+cir_expr_t    *cir_expr_closure(arena_t *arena, cir_type_t *type,
+                                const char *fn_name, cir_expr_t *env);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

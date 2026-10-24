@@ -354,6 +354,40 @@ cir_expr_t *cir_expr_cunion_construct(arena_t *arena, cir_type_t *type,
     return e;
 }
 
+cir_expr_t *cir_expr_func_obj(arena_t *arena, const char *object,
+                              cir_type_t *type) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_FUNC_OBJ;
+    e->text = object;
+    e->type = type;
+    return e;
+}
+
+cir_expr_t *cir_expr_func_call(arena_t *arena, cir_expr_t *callee,
+                               cir_expr_t *args) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_FUNC_CALL;
+    e->lhs = callee;
+    e->args = args;
+    return e;
+}
+
+cir_expr_t *cir_expr_closure(arena_t *arena, cir_type_t *type,
+                             const char *fn_name, cir_expr_t *env) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_CLOSURE;
+    e->type = type;
+    e->text = fn_name;
+    e->lhs = env;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;

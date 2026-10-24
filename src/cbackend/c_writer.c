@@ -265,6 +265,30 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         write_expr(sb, e->lhs);
         w(sb, " }");
         break;
+    case CIR_EXPR_FUNC_OBJ:
+        w(sb, e->text ? e->text : "<null>");
+        break;
+    case CIR_EXPR_FUNC_CALL:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").fn((");
+        write_expr(sb, e->lhs);
+        w(sb, ").env");
+        for (const cir_expr_t *a = e->args; a; a = a->next) {
+            w(sb, ", ");
+            write_expr(sb, a);
+        }
+        w(sb, ")");
+        break;
+    case CIR_EXPR_CLOSURE:
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        w(sb, "){ .fn = ");
+        w(sb, e->text ? e->text : "<null>");
+        w(sb, ", .env = ");
+        write_expr(sb, e->lhs);
+        w(sb, " }");
+        break;
     case CIR_EXPR_NEW:
         w(sb, "(");
         w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
@@ -609,6 +633,9 @@ static void write_function_def(string_t *sb, const cir_function_t *fn) {
     write_params(sb, fn->sig, true, fn);
     w(sb, ") {\n");
     w(sb, "    (void)env;\n");
+    if (fn->closure_env && fn->closure_env->c_name)
+        wf(sb, "    %s clux_v___ctx_env = *(%s *)env;\n",
+           fn->closure_env->c_name, fn->closure_env->c_name);
     bool needs_cleanup = fn->cleanup != NULL;
     if (needs_cleanup && fn->sig->ret &&
         fn->sig->ret->kind != CIR_TYPE_VOID)

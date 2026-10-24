@@ -410,6 +410,54 @@ TEST(CBackend, BuildCUnion) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildFunctionValuesAndClosure) {
+  const std::string src = write_temp_file(
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "func apply(f: func(i32) -> i32, x: i32): i32 { return f(x); }\n"
+      "func main(): i32 {\n"
+      "  var g: func(i32) -> i32 = inc;\n"
+      "  if (g(4) != 5) { return 1; }\n"
+      "  if (apply(inc, 4) != 5) { return 2; }\n"
+      "  var lit: func(i32) -> i32 = func(x: i32): i32 { return x + 2; };\n"
+      "  if (lit(3) != 5) { return 3; }\n"
+      "  var a = 2;\n"
+      "  var cap: func(i32) -> i32 = func |a| (x: i32): i32 { return x + a; };\n"
+      "  return cap(3);\n"
+      "}\n",
+      "cbackend_m5_func");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 5);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildMethods) {
+  const std::string src = write_temp_file(
+      "struct Point {\n"
+      "  x: i32;\n"
+      "  func get(self: ref *Point): i32 { return self.x; }\n"
+      "  func plus(self: ref *Point, y: i32): i32 { return self.x + y; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p = .Point{ .x = 4 };\n"
+      "  if (p.get() != 4) { return 1; }\n"
+      "  return p.plus(3);\n"
+      "}\n",
+      "cbackend_m5_method");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 7);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

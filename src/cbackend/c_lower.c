@@ -32,6 +32,7 @@
 #include "parser/ast_option.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_struct_def.h"
 #include "parser/ast_unwrap.h"
 #include "parser/ast_union_def.h"
 #include "parser/ast_free.h"
@@ -43,6 +44,7 @@
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_cunion.h"
+#include "vm/type_func.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
@@ -65,15 +67,33 @@ typedef struct lower_local {
     struct lower_local *next;
 } lower_local_t;
 
+typedef struct lower_capture {
+    strslice_t name;
+    const char *expr;
+    struct lower_capture *next;
+} lower_capture_t;
+
+typedef struct lower_method {
+    strslice_t name;
+    uint32_t owner_id;
+    ast_func_def_t *def;
+    const char *cname;
+    struct lower_method *next;
+} lower_method_t;
+
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
     cir_unit_t *unit;
     lower_defer_t *defers;
     lower_local_t *locals;
+    lower_capture_t *captures;
+    lower_method_t *methods;
     cir_stmt_t *cleanup;
     cir_type_t *return_type;
     unsigned    ret_seq;
+    unsigned    sig_seq;
+    unsigned    fnlit_seq;
     bool     failed;
 } lower_ctx_t;
 
@@ -111,6 +131,33 @@ static const char *token_text(arena_t *arena, const token_t *tok) {
 static const type_t *strip(sema_t *sema, const type_t *t) {
     (void)sema;
     return t ? type_strip_quals(t) : NULL;
+}
+
+static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t);
+
+static bool same_sig(const cir_signature_t *s, cir_type_t *ret, size_t pc,
+                     cir_type_t **pt) {
+    if (!s || !s->ret || !ret) return false;
+    if (strcmp(s->ret->c_name, ret->c_name) != 0) return false;
+    if (s->param_count != pc) return false;
+    for (size_t i = 0; i < pc; i++) {
+        const char *a = s->params[i] ? s->params[i]->c_name : "void";
+        const char *b = pt[i] ? pt[i]->c_name : "void";
+        if (strcmp(a, b) != 0) return false;
+    }
+    return true;
+}
+
+static cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret,
+                                      size_t pc, cir_type_t **pt) {
+    for (cir_signature_t *s = lc->unit->signatures; s; s = s->next)
+        if (same_sig(s, ret, pc, pt)) return s;
+    char tag[64];
+    snprintf(tag, sizeof tag, "clux_sig_%u", lc->sig_seq++);
+    cir_signature_t *s = cir_signature_new(
+        lc->arena, copy_arena(lc->arena, tag), ret, pc, pt);
+    if (s) cir_unit_add_signature(lc->unit, s);
+    return s;
 }
 
 static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
@@ -251,6 +298,34 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         }
         return ct;
     }
+    if (t->kind == TYPE_KIND_FUNC) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_FUNC);
+        if (cached) return cached;
+        size_t pc = func_type_param_count(t);
+        cir_type_t **pt = NULL;
+        if (pc) {
+            pt = (cir_type_t **)arena_calloc(lc->arena, pc, sizeof(*pt),
+                                             ALIGNOF(max_align_t));
+            if (!pt) return NULL;
+        }
+        for (size_t i = 0; i < pc; i++) {
+            pt[i] = map_type(lc, func_type_param(t, i));
+            if (!pt[i]) return NULL;
+        }
+        cir_type_t *ret = map_type(lc, func_type_return(t));
+        if (!ret) return NULL;
+        cir_signature_t *sig = signature_for(lc, ret, pc, pt);
+        if (!sig) return NULL;
+        char fname[256];
+        snprintf(fname, sizeof fname, "struct %s", sig->tag);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_FUNC,
+                                      copy_arena(lc->arena, fname));
+        if (!ct) return NULL;
+        ct->src = t;
+        ct->sig = sig;
+        cir_unit_add_type(lc->unit, ct);
+        return ct;
+    }
     if (t->kind == TYPE_KIND_UNION) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_UNION);
         if (cached) return cached;
@@ -283,14 +358,111 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
 }
 
 static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e);
+static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
+                                      bool is_entry);
+static cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 static cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
 static cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 static cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 static const type_t *lookup_local(lower_ctx_t *lc, strslice_t name);
 static bool call_is_len(const ast_call_t *c);
 static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e);
+static cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
+
+static const type_t *func_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn) {
+    if (!fn) return NULL;
+    size_t pc = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next) pc++;
+    const type_t **pt = NULL;
+    if (pc) {
+        pt = (const type_t **)arena_calloc(lc->arena, pc, sizeof(*pt),
+                                           ALIGNOF(max_align_t));
+        if (!pt) return NULL;
+    }
+    size_t i = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, i++) {
+        ast_var_def_t *vd = (ast_var_def_t *)p;
+        const type_t *t = vd->resolved_type;
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (!t) return NULL;
+        pt[i] = t;
+    }
+    const type_t *ret = lc->sema->vm->type_void;
+    if (fn->return_expr)
+        ret = sema_resolve_type_slot(lc->sema, &fn->return_expr);
+    return type_func_sig(lc->sema->vm, pt, pc, ret, false);
+}
+
+static ast_func_def_t *func_def_of_ref(lower_ctx_t *lc, ast_func_ref_t *ref) {
+    sema_func_t *sf = sema_func_by_id(lc->sema, ref->fid);
+    if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+        return (ast_func_def_t *)sf->def;
+    return NULL;
+}
+
+static lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
+                                   strslice_t name) {
+    for (lower_method_t *m = lc->methods; m; m = m->next) {
+        if (m->owner_id == owner_id && m->name.len == name.len &&
+            memcmp(m->name.ptr, name.ptr, name.len) == 0)
+            return m;
+    }
+    return NULL;
+}
 
 static cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
+    if (call->is_member_call && call->callee &&
+        call->callee->kind == AST_MEMBER) {
+        ast_member_t *mem = (ast_member_t *)call->callee;
+        lower_method_t *m =
+            find_method(lc, call->member_type_id, mem->field);
+        if (!m) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                       "c backend: method '%.*s' not found",
+                       (int)mem->field.len, mem->field.ptr);
+            lc->failed = true;
+            return NULL;
+        }
+        cir_expr_t *recv = lower_expr(lc, mem->object);
+        if (!recv) return NULL;
+        const type_t *rt = infer_expr_type(lc, mem->object);
+        const type_t *self_t = NULL;
+        ast_var_def_t *self_vd = (ast_var_def_t *)m->def->params;
+        if (self_vd) {
+            self_t = self_vd->resolved_type;
+            if (!self_t && self_vd->type_expr)
+                self_t = sema_resolve_type_slot(lc->sema, &self_vd->type_expr);
+        }
+        if (self_t && type_kind_of(type_strip_quals(self_t)) == TYPE_KIND_PTR &&
+            (!rt || type_kind_of(type_strip_quals(rt)) != TYPE_KIND_PTR))
+            recv = cir_expr_unary(lc->arena, "&", recv);
+        cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
+        cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
+        cir_expr_append_arg(out, recv);
+        for (ast_node_t *a = call->args; a; a = a->next) {
+            cir_expr_t *arg = lower_expr(lc, a);
+            if (!arg) return NULL;
+            cir_expr_append_arg(out, arg);
+        }
+        return out;
+    }
+    /* 函数值调用：callee 是 func 类型变量/表达式。 */
+    if (call->callee && call->callee->kind == AST_IDENT) {
+        const type_t *ft = lookup_local(
+            lc, ((ast_ident_t *)call->callee)->name);
+        if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC) {
+            cir_expr_t *callee = lower_expr(lc, call->callee);
+            if (!callee) return NULL;
+            cir_expr_t *out = cir_expr_func_call(lc->arena, callee, NULL);
+            for (ast_node_t *a = call->args; a; a = a->next) {
+                cir_expr_t *arg = lower_expr(lc, a);
+                if (!arg) return NULL;
+                cir_expr_append_arg(out, arg);
+            }
+            return out;
+        }
+    }
     strslice_t name = STRSLICE_EMPTY;
     if (call->callee && call->callee->kind == AST_IDENT) {
         name = ((ast_ident_t *)call->callee)->name;
@@ -344,7 +516,14 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         return cir_expr_string(lc->arena, data, s->text.len);
     }
     case AST_IDENT: {
-        const char *n = mangle(lc->arena, "clux_v_", ((ast_ident_t *)e)->name);
+        strslice_t name = ((ast_ident_t *)e)->name;
+        if (!lookup_local(lc, name)) {
+            for (lower_capture_t *c = lc->captures; c; c = c->next)
+                if (c->name.len == name.len &&
+                    memcmp(c->name.ptr, name.ptr, name.len) == 0)
+                    return cir_expr_ident(lc->arena, c->expr);
+        }
+        const char *n = mangle(lc->arena, "clux_v_", name);
         return n ? cir_expr_ident(lc->arena, n) : NULL;
     }
     case AST_UNARY: {
@@ -448,12 +627,30 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                    "(use .?T{nil})");
         lc->failed = true;
         return NULL;
+    case AST_FUNC_REF: {
+        ast_func_ref_t *ref = (ast_func_ref_t *)e;
+        ast_func_def_t *fd = func_def_of_ref(lc, ref);
+        strslice_t name = ref->name;
+        if ((!name.ptr || name.len == 0) && fd) name = fd->name;
+        if (!name.ptr) return NULL;
+        const char *obj = mangle(lc->arena, "clux_obj_", name);
+        const type_t *ft = func_type_of_def(lc, fd);
+        cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
+        return obj && ct ? cir_expr_func_obj(lc->arena, obj, ct) : NULL;
+    }
+    case AST_FUNC_DEF:
+        return lower_func_literal(lc, (ast_func_def_t *)e);
     case AST_SLICE:
         return lower_slice(lc, (ast_slice_t *)e);
     case AST_MAKE:
         return lower_make(lc, (ast_make_t *)e);
     case AST_MEMBER: {
         ast_member_t *m = (ast_member_t *)e;
+        if (m->object && m->object->kind == AST_IDENT &&
+            strslice_eq(((ast_ident_t *)m->object)->name,
+                        STRSLICE_LIT("__ctx")) &&
+            strslice_eq(m->field, STRSLICE_LIT("env")))
+            return cir_expr_ident(lc->arena, "clux_v___ctx_env");
         cir_expr_t *obj = lower_expr(lc, m->object);
         if (!obj) return NULL;
         const type_t *ot = infer_expr_type(lc, m->object);
@@ -682,6 +879,10 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return vm->type_u8;
     case AST_IDENT:
         return lookup_local(lc, ((ast_ident_t *)e)->name);
+    case AST_FUNC_REF:
+        return func_type_of_def(lc, func_def_of_ref(lc, (ast_func_ref_t *)e));
+    case AST_FUNC_DEF:
+        return func_type_of_def(lc, (ast_func_def_t *)e);
     case AST_DEREF: {
         const type_t *pt = infer_expr_type(lc, ((ast_deref_t *)e)->operand);
         return pt && type_kind_of(pt) == TYPE_KIND_PTR ? ptr_type_base(pt) : NULL;
@@ -1395,16 +1596,153 @@ static cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
 
     const char *cname = mangle(lc->arena, "clux_fn_", fn->name);
     const char *obj = mangle(lc->arena, "clux_obj_", fn->name);
-    const char *tag = mangle(lc->arena, "clux_sig_", fn->name);
-    if (!cname || !obj || !tag) return NULL;
-    cir_signature_t *sig =
-        cir_signature_new(lc->arena, tag, cret, pc, ptypes);
+    if (!cname || !obj) return NULL;
+    cir_signature_t *sig = signature_for(lc, cret, pc, ptypes);
     if (!sig) return NULL;
     int line = sema_loc(lc->sema, (ast_node_t *)fn).begin.line;
     cir_function_t *out = cir_function_new(lc->arena, cname, obj, sig, pc, params,
                                            body, line, is_entry);
     if (out) out->cleanup = cleanup;
     return out;
+}
+
+static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
+    for (lower_capture_t *c = lc->captures; c; c = c->next)
+        if (c->name.len == name.len &&
+            memcmp(c->name.ptr, name.ptr, name.len) == 0)
+            return c->expr;
+    return mangle(lc->arena, "clux_v_", name);
+}
+
+static cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
+    lower_local_t *save_locals = lc->locals;
+    lower_capture_t *save_caps = lc->captures;
+    unsigned seq = lc->fnlit_seq++;
+    char nb[64];
+    snprintf(nb, sizeof nb, "__closure_%u", seq);
+    size_t n = strlen(nb);
+    char *name = (char *)arena_alloc(lc->arena, n + 1, 1);
+    if (!name) return NULL;
+    memcpy(name, nb, n + 1);
+    fn->name = strslice_from_bytes(name, n);
+
+    char envtag[64];
+    snprintf(envtag, sizeof envtag, "struct clux_env_%u", seq);
+    cir_type_t *env = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
+                                   copy_arena(lc->arena, envtag));
+    if (!env) return NULL;
+    cir_unit_add_type(lc->unit, env);
+    lc->unit->uses_alloc = true;
+
+    cir_init_t *inits = NULL;
+    for (ast_node_t *c = fn->captures; c; c = c->next) {
+        ast_var_def_t *vd = (ast_var_def_t *)c;
+        const type_t *t = vd->resolved_type;
+        if (!t) t = lookup_local(lc, vd->name);
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (!t) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, c),
+                       "c backend: cannot determine closure capture type");
+            lc->failed = true;
+            return NULL;
+        }
+        cir_type_t *ct = map_type(lc, t);
+        if (!ct) return NULL;
+        char fb[256];
+        snprintf(fb, sizeof fb, "clux_f_%.*s", (int)vd->name.len,
+                 vd->name.ptr ? vd->name.ptr : "");
+        cir_field_t *f = cir_field_new(lc->arena,
+                                       copy_arena(lc->arena, fb), ct);
+        if (!f) return NULL;
+        cir_type_add_field(env, f);
+        const char *val = capture_or_var(lc, vd->name);
+        cir_expr_t *ve = cir_expr_ident(lc->arena, val);
+        cir_init_t *init = cir_init_new(lc->arena, f->name, ve);
+        if (!init) return NULL;
+        init->next = inits;
+        inits = init;
+    }
+    cir_expr_t *env_new = cir_expr_new(lc->arena, env, NULL);
+    /* inits 取反（构造顺序） */
+    for (cir_init_t *it = inits; it;) {
+        cir_init_t *next = it->next;
+        cir_expr_add_init(env_new, it);
+        it = next;
+    }
+
+    lower_capture_t *caps = NULL;
+    for (ast_node_t *c = fn->captures; c; c = c->next) {
+        ast_var_def_t *vd = (ast_var_def_t *)c;
+        lower_capture_t *cp = (lower_capture_t *)arena_calloc(
+            lc->arena, 1, sizeof(*cp), ALIGNOF(max_align_t));
+        if (!cp) return NULL;
+        cp->name = vd->name;
+        char eb[512];
+        snprintf(eb, sizeof eb, "((%s *)env)->clux_f_%.*s", envtag,
+                 (int)vd->name.len, vd->name.ptr ? vd->name.ptr : "");
+        cp->expr = copy_arena(lc->arena, eb);
+        cp->next = caps;
+        caps = cp;
+    }
+
+    lc->locals = NULL;
+    lc->captures = caps;
+    lc->defers = NULL;
+    lc->cleanup = NULL;
+    cir_type_t *save_ret = lc->return_type;
+    unsigned save_ret_seq = lc->ret_seq;
+    lc->ret_seq = 0;
+    cir_function_t *cf = lower_function(lc, fn, false);
+    lc->locals = save_locals;
+    lc->captures = save_caps;
+    lc->return_type = save_ret;
+    lc->ret_seq = save_ret_seq;
+    if (!cf) return NULL;
+    cf->closure_env = env;
+    cir_unit_add_function(lc->unit, cf);
+
+    const type_t *ft = func_type_of_def(lc, fn);
+    cir_type_t *ct = ft ? map_type(lc, ft) : NULL;
+    return ct ? cir_expr_closure(lc->arena, ct, cf->name, env_new) : NULL;
+}
+
+static cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
+    if (!fn) return NULL;
+    if (fn->captures || fn->capture_type_id != 0)
+        return lower_closure_literal(lc, fn);
+    char nb[64];
+    snprintf(nb, sizeof nb, "__fnlit_%u", lc->fnlit_seq++);
+    size_t n = strlen(nb);
+    char *name = (char *)arena_alloc(lc->arena, n + 1, 1);
+    if (!name) return NULL;
+    memcpy(name, nb, n + 1);
+    fn->name = strslice_from_bytes(name, n);
+
+    const type_t *ft = func_type_of_def(lc, fn);
+    if (!ft) return NULL;
+
+    lower_local_t *save_locals = lc->locals;
+    lower_defer_t *save_defers = lc->defers;
+    cir_stmt_t *save_cleanup = lc->cleanup;
+    cir_type_t *save_ret = lc->return_type;
+    unsigned save_ret_seq = lc->ret_seq;
+    lc->locals = NULL;
+    lc->defers = NULL;
+    lc->cleanup = NULL;
+    lc->ret_seq = 0;
+
+    cir_function_t *cf = lower_function(lc, fn, false);
+    lc->locals = save_locals;
+    lc->defers = save_defers;
+    lc->cleanup = save_cleanup;
+    lc->return_type = save_ret;
+    lc->ret_seq = save_ret_seq;
+    if (!cf) return NULL;
+    cir_unit_add_function(lc->unit, cf);
+
+    cir_type_t *ct = map_type(lc, ft);
+    return ct ? cir_expr_func_obj(lc->arena, cf->object, ct) : NULL;
 }
 
 cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
@@ -1466,6 +1804,37 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     }
 
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind != AST_STRUCT_DEF) continue;
+        ast_struct_def_t *sd = (ast_struct_def_t *)n;
+        for (ast_node_t *mem = sd->members; mem; mem = mem->next) {
+            if (mem->kind != AST_FUNC_DEF) continue;
+            ast_func_def_t *m = (ast_func_def_t *)mem;
+            if (m->generic.count > 0 || m->is_comptime) continue;
+            strslice_t orig = m->name;
+            char mb[256];
+            snprintf(mb, sizeof mb, "__method_%u_%.*s", sd->type_id,
+                     (int)orig.len, orig.ptr ? orig.ptr : "");
+            size_t mn = strlen(mb);
+            char *cname = (char *)arena_alloc(arena, mn + 1, 1);
+            if (!cname) return NULL;
+            memcpy(cname, mb, mn + 1);
+            m->name = strslice_from_bytes(cname, mn);
+            cir_function_t *cf = lower_function(&lc, m, false);
+            if (!cf || lc.failed) return NULL;
+            cir_unit_add_function(u, cf);
+            lower_method_t *lm = (lower_method_t *)arena_calloc(
+                arena, 1, sizeof(*lm), ALIGNOF(max_align_t));
+            if (!lm) return NULL;
+            lm->name = orig;
+            lm->owner_id = sd->type_id;
+            lm->def = m;
+            lm->cname = cf->name;
+            lm->next = lc.methods;
+            lc.methods = lm;
+        }
+    }
+
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_FUNC_DEF) continue;
         ast_func_def_t *fn = (ast_func_def_t *)n;
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) continue;
@@ -1473,12 +1842,10 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
             continue;
         cir_function_t *cf = lower_function(&lc, fn, false);
         if (!cf || lc.failed) return NULL;
-        cir_unit_add_signature(u, cf->sig);
         cir_unit_add_function(u, cf);
     }
     cir_function_t *cm = lower_function(&lc, main_fn, true);
     if (!cm || lc.failed) return NULL;
-    cir_unit_add_signature(u, cm->sig);
     cir_unit_add_function(u, cm);
     return u;
 }
