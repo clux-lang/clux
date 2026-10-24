@@ -20,6 +20,8 @@ typedef enum {
     CIR_TYPE_PTR,
     CIR_TYPE_SLICE,
     CIR_TYPE_STR,
+    CIR_TYPE_OPTION,
+    CIR_TYPE_UNION,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -28,6 +30,7 @@ typedef struct cir_expr cir_expr_t;
 typedef struct cir_field {
     const char *name;
     cir_type_t *type;
+    size_t      tag;
     struct cir_field *next;
 } cir_field_t;
 
@@ -59,6 +62,12 @@ typedef enum {
     CIR_EXPR_MAKE,
     CIR_EXPR_SLICE_DATA,
     CIR_EXPR_STRING,
+    CIR_EXPR_OPTION,
+    CIR_EXPR_OPT_IS_SOME,
+    CIR_EXPR_UNWRAP,
+    CIR_EXPR_UNION_CONSTRUCT,
+    CIR_EXPR_UNION_MEMBER,
+    CIR_EXPR_UNION_TAG,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -78,6 +87,7 @@ typedef struct cir_expr {
     cir_type_t     *elem;
     cir_type_t     *src_type;
     bool            array_data; /* index through wrapper .data */
+    size_t          tag;
     struct cir_expr *lhs;
     struct cir_expr *rhs;
     struct cir_expr *high;
@@ -200,6 +210,17 @@ cir_expr_t    *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
                              cir_init_t *inits);
 cir_expr_t    *cir_expr_slice_data(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_string(arena_t *arena, const char *data, size_t len);
+cir_expr_t    *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,
+                               cir_expr_t *value);
+cir_expr_t    *cir_expr_opt_is_some(arena_t *arena, cir_expr_t *object,
+                                    bool want_some);
+cir_expr_t    *cir_expr_unwrap(arena_t *arena, cir_expr_t *object);
+cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
+                                        size_t tag, const char *field,
+                                        cir_expr_t *value);
+cir_expr_t    *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
+                                     const char *field);
+cir_expr_t    *cir_expr_union_tag(arena_t *arena, cir_expr_t *object);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

@@ -328,6 +328,63 @@ TEST(CBackend, BuildStringLiteralAndSlice) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildOptionalAndUnion) {
+  const std::string src = write_temp_file(
+      "union Shape { radius: i32; w: i32; }\n"
+      "func main(): i32 {\n"
+      "  var a: ?i32 = 5;\n"
+      "  if (a == nil) { return 1; }\n"
+      "  if (a.! != 5) { return 2; }\n"
+      "  var b: ?i32 = nil;\n"
+      "  if (b != nil) { return 3; }\n"
+      "  var s = .Shape{ .radius = 1 };\n"
+      "  if (s is radius != true) { return 4; }\n"
+      "  if (s is w != false) { return 5; }\n"
+      "  if (s.radius != 1) { return 6; }\n"
+      "  s.radius = 2;\n"
+      "  if (s.radius != 2) { return 7; }\n"
+      "  var e = .Shape{ .w = 3 };\n"
+      "  if (e is w != true) { return 8; }\n"
+      "  if (e.w != 3) { return 9; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_union_opt");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildUnionOwnAndOptionalField) {
+  const std::string src = write_temp_file(
+      "struct R { v: ?i32; }\n"
+      "union U { p: own *i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var r = .R{ .v = .?i32{7} };\n"
+      "  if (r.v == nil) { return 1; }\n"
+      "  if (r.v.! != 7) { return 2; }\n"
+      "  r.v = nil;\n"
+      "  if (r.v != nil) { return 3; }\n"
+      "  var u = .U{ .p = new i32{5} };\n"
+      "  if (u is p != true) { return 4; }\n"
+      "  if (u.p.* != 5) { return 5; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_union_opt_own");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

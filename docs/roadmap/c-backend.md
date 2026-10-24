@@ -185,8 +185,12 @@ clux build hello.cx
 - `str` 字符串字面量与按字节 `len`；
 - `str` 比较 `==` / `!=`；
 - `str[low:high]` 转为 `[]const u8`；
-- `make(T, N, ...)`；
+- tag union 构造 / `is` / 成员读写；
+- `?T` 构造 / `nil` / `!= nil` / `.!` / 隐式 some 包装；
+- optional 字段读写；
+- union own payload 清理；
 - `len(s)`；
+- `make(T, N, ...)`；
 - `s[low:high]`；
 - slice 堆块 free；
 - 由 sema 生成的 `__destroy_*` 函数；
@@ -195,7 +199,8 @@ clux build hello.cx
 尚未覆盖：
 
 - `str` 拼接 / 格式化 / FFI C ABI 兼容；
-- 复杂 union / optional 的 own 槽位；
+- cunion；
+- 泛型实例的完整覆盖；
 - 异常路径 / 全部跨作用域路径的清理验证。
 
 ### M5：函数值、闭包与方法

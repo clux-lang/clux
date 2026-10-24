@@ -206,6 +206,49 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         wf(sb, "%zu", e->text_len);
         w(sb, " }");
         break;
+    case CIR_EXPR_OPTION:
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        if (e->bool_value) {
+            w(sb, "){ .ok = true, .value = ");
+            write_expr(sb, e->lhs);
+            w(sb, " }");
+        } else {
+            w(sb, "){ .ok = false }");
+        }
+        break;
+    case CIR_EXPR_OPT_IS_SOME:
+        if (!e->bool_value) w(sb, "!(");
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").ok");
+        if (!e->bool_value) w(sb, ")");
+        break;
+    case CIR_EXPR_UNWRAP:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").value");
+        break;
+    case CIR_EXPR_UNION_CONSTRUCT:
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        wf(sb, "){ .tag = %zu, .u.", e->tag);
+        w(sb, e->text ? e->text : "clux_m_member");
+        w(sb, " = ");
+        write_expr(sb, e->lhs);
+        w(sb, " }");
+        break;
+    case CIR_EXPR_UNION_MEMBER:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").u.");
+        w(sb, e->text ? e->text : "clux_m_member");
+        break;
+    case CIR_EXPR_UNION_TAG:
+        w(sb, "(");
+        write_expr(sb, e->lhs);
+        w(sb, ").tag");
+        break;
     case CIR_EXPR_NEW:
         w(sb, "(");
         w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
@@ -275,7 +318,8 @@ static void write_function_decl(string_t *sb, const cir_function_t *fn) {
 static void write_type_defs(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next)
         if (t->kind == CIR_TYPE_STRUCT || t->kind == CIR_TYPE_ARRAY ||
-            t->kind == CIR_TYPE_SLICE || t->kind == CIR_TYPE_STR)
+            t->kind == CIR_TYPE_SLICE || t->kind == CIR_TYPE_STR ||
+            t->kind == CIR_TYPE_OPTION || t->kind == CIR_TYPE_UNION)
             wf(sb, "struct %s;\n", t->c_name + 7);
     w(sb, "\n");
 }
@@ -287,9 +331,11 @@ static void emit_type(string_t *sb, cir_type_t *t) {
         t->emitted = true;
         for (cir_field_t *f = t->fields; f; f = f->next) {
             if (f->type &&
-                (f->type->kind == CIR_TYPE_STRUCT ||
+               (f->type->kind == CIR_TYPE_STRUCT ||
                  f->type->kind == CIR_TYPE_ARRAY ||
-                 f->type->kind == CIR_TYPE_SLICE))
+                 f->type->kind == CIR_TYPE_SLICE ||
+                 f->type->kind == CIR_TYPE_OPTION ||
+                 f->type->kind == CIR_TYPE_UNION))
                 emit_type(sb, f->type);
         }
         wf(sb, "%s {\n", t->c_name);
@@ -322,6 +368,34 @@ static void emit_type(string_t *sb, cir_type_t *t) {
         wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_str");
         w(sb, "    const char *data;\n");
         w(sb, "    size_t len;\n");
+        w(sb, "};\n\n");
+        t->emitted = true;
+        break;
+    case CIR_TYPE_OPTION:
+        if (t->elem) emit_type(sb, t->elem);
+        wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_opt");
+        w(sb, "    bool ok;\n");
+        wf(sb, "    %s value;\n",
+           t->elem && t->elem->c_name ? t->elem->c_name : "int32_t");
+        w(sb, "};\n\n");
+        t->emitted = true;
+        break;
+    case CIR_TYPE_UNION:
+        for (cir_field_t *f = t->fields; f; f = f->next)
+            if (f->type && (f->type->kind == CIR_TYPE_STRUCT ||
+                            f->type->kind == CIR_TYPE_ARRAY ||
+                            f->type->kind == CIR_TYPE_SLICE ||
+                            f->type->kind == CIR_TYPE_OPTION ||
+                            f->type->kind == CIR_TYPE_UNION))
+                emit_type(sb, f->type);
+        wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_union");
+        w(sb, "    uint32_t tag;\n");
+        w(sb, "    union {\n");
+        for (cir_field_t *f = t->fields; f; f = f->next)
+            wf(sb, "        %s %s;\n",
+               f->type && f->type->c_name ? f->type->c_name : "int32_t",
+               f->name ? f->name : "member");
+        w(sb, "    } u;\n");
         w(sb, "};\n\n");
         t->emitted = true;
         break;

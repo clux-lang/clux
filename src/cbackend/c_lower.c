@@ -22,11 +22,17 @@
 #include "parser/ast_if.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_is_tag.h"
 #include "parser/ast_make.h"
 #include "parser/ast_member.h"
 #include "parser/ast_new.h"
+#include "parser/ast_nil.h"
+#include "parser/ast_opt_is_some.h"
+#include "parser/ast_option.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_string_lit.h"
+#include "parser/ast_unwrap.h"
+#include "parser/ast_union_def.h"
 #include "parser/ast_free.h"
 #include "parser/ast_return.h"
 #include "parser/ast_unary.h"
@@ -35,9 +41,11 @@
 #include "parser/lexer.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
+#include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "vm/type_struct.h"
+#include "vm/type_union.h"
 #include "vm/vm.h"
 
 #include <stdio.h>
@@ -200,6 +208,46 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         ct->elem = map_type(lc, slice_type_elem(t));
         return ct->elem ? ct : NULL;
     }
+    if (t->kind == TYPE_KIND_OPTION) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_OPTION);
+        if (cached) return cached;
+        char name[128];
+        snprintf(name, sizeof name, "struct clux_opt_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_OPTION,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        ct->elem = map_type(lc, type_option_inner(t));
+        return ct->elem ? ct : NULL;
+    }
+    if (t->kind == TYPE_KIND_UNION) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_UNION);
+        if (cached) return cached;
+        char name[128];
+        snprintf(name, sizeof name, "struct clux_u_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_UNION,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        const union_type_t *ut = (const union_type_t *)t;
+        for (size_t i = 0; i < ut->member_count; i++) {
+            const union_member_t *m = &ut->members[i];
+            if (!m->payload_type) continue;
+            cir_type_t *mt = map_type(lc, m->payload_type);
+            if (!mt) return NULL;
+            char fn[256];
+            snprintf(fn, sizeof fn, "clux_m_%.*s", (int)m->name.len,
+                     m->name.ptr ? m->name.ptr : "");
+            cir_field_t *f = cir_field_new(lc->arena,
+                                           copy_arena(lc->arena, fn), mt);
+            if (!f) return NULL;
+            f->tag = m->tag;
+            cir_type_add_field(ct, f);
+        }
+        return ct;
+    }
     lc->failed = true;
     return NULL;
 }
@@ -277,6 +325,47 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         ast_binary_t *b = (ast_binary_t *)e;
         const type_t *lt = infer_expr_type(lc, b->lhs);
         const type_t *rt = infer_expr_type(lc, b->rhs);
+        if (token_is(b->op, "is")) {
+            const type_t *ut = infer_expr_type(lc, b->lhs);
+            if (!ut || type_kind_of(type_strip_quals(ut)) != TYPE_KIND_UNION) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: 'is' requires a union operand");
+                lc->failed = true;
+                return NULL;
+            }
+            int tag = -1;
+            if (b->rhs->kind == AST_IDENT)
+                tag = union_type_find_member(
+                    type_strip_quals(ut), ((ast_ident_t *)b->rhs)->name);
+            else if (b->rhs->kind == AST_INT_LIT)
+                tag = (int)((ast_int_lit_t *)b->rhs)->value;
+            if (tag < 0) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: unknown union tag");
+                lc->failed = true;
+                return NULL;
+            }
+            cir_expr_t *obj = lower_expr(lc, b->lhs);
+            if (!obj) return NULL;
+            return cir_expr_binary(lc->arena, "==",
+                                   cir_expr_union_tag(lc->arena, obj),
+                                   cir_expr_int(lc->arena, tag));
+        }
+        if ((b->lhs->kind == AST_NIL || b->rhs->kind == AST_NIL) &&
+            (token_is(b->op, "==") || token_is(b->op, "!="))) {
+            ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
+            const type_t *ot = infer_expr_type(lc, other);
+            if (!ot || type_kind_of(type_strip_quals(ot)) != TYPE_KIND_OPTION) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: nil comparison requires optional operand");
+                lc->failed = true;
+                return NULL;
+            }
+            cir_expr_t *obj = lower_expr(lc, other);
+            return obj ? cir_expr_opt_is_some(lc->arena, obj,
+                                              token_is(b->op, "!="))
+                       : NULL;
+        }
         if (lt && rt && type_strip_quals(lt)->kind == TYPE_KIND_STR &&
             type_strip_quals(rt)->kind == TYPE_KIND_STR &&
             (token_is(b->op, "==") || token_is(b->op, "!="))) {
@@ -300,6 +389,31 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CALL:
         if (call_is_len((ast_call_t *)e)) return lower_len(lc, (ast_call_t *)e);
         return lower_call(lc, (ast_call_t *)e);
+    case AST_IS_TAG: {
+        ast_is_tag_t *it = (ast_is_tag_t *)e;
+        cir_expr_t *obj = lower_expr(lc, it->object);
+        if (!obj) return NULL;
+        return cir_expr_binary(lc->arena, "==",
+                               cir_expr_union_tag(lc->arena, obj),
+                               cir_expr_int(lc->arena, it->tag));
+    }
+    case AST_OPT_IS_SOME: {
+        ast_opt_is_some_t *os = (ast_opt_is_some_t *)e;
+        cir_expr_t *obj = lower_expr(lc, os->object);
+        return obj ? cir_expr_opt_is_some(lc->arena, obj, os->want_some)
+                   : NULL;
+    }
+    case AST_UNWRAP: {
+        ast_unwrap_t *uw = (ast_unwrap_t *)e;
+        cir_expr_t *obj = lower_expr(lc, uw->operand);
+        return obj ? cir_expr_unwrap(lc->arena, obj) : NULL;
+    }
+    case AST_NIL:
+        diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                   "c backend: nil requires an optional target type "
+                   "(use .?T{nil})");
+        lc->failed = true;
+        return NULL;
     case AST_SLICE:
         return lower_slice(lc, (ast_slice_t *)e);
     case AST_MAKE:
@@ -308,6 +422,25 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         ast_member_t *m = (ast_member_t *)e;
         cir_expr_t *obj = lower_expr(lc, m->object);
         if (!obj) return NULL;
+        const type_t *ot = infer_expr_type(lc, m->object);
+        if (ot) ot = type_strip_quals(ot);
+        if (ot && type_kind_of(ot) == TYPE_KIND_UNION) {
+            int mi = union_type_find_member(ot, m->field);
+            const union_member_t *mem =
+                mi >= 0 ? union_type_member(ot, (size_t)mi) : NULL;
+            if (!mem) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: unknown union member '%.*s'",
+                           (int)m->field.len, m->field.ptr);
+                lc->failed = true;
+                return NULL;
+            }
+            char fb[256];
+            snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            return cir_expr_union_member(lc->arena, obj,
+                                         copy_arena(lc->arena, fb));
+        }
         char fname[256];
         snprintf(fname, sizeof fname, "clux_f_%.*s", (int)m->field.len,
                  m->field.ptr ? m->field.ptr : "");
@@ -339,6 +472,37 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             return NULL;
         }
         const type_t *t = sema_resolve_type_slot(lc->sema, &c->type);
+        if (t && type_kind_of(t) == TYPE_KIND_OPTION) {
+            cir_type_t *ct = map_type(lc, t);
+            if (!ct) return NULL;
+            ast_node_t *fv = c->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            if (!fv || fv->kind == AST_NIL)
+                return cir_expr_option(lc->arena, ct, false, NULL);
+            cir_expr_t *val = lower_expr(lc, fv);
+            return val ? cir_expr_option(lc->arena, ct, true, val) : NULL;
+        }
+        if (t && type_kind_of(t) == TYPE_KIND_UNION) {
+            cir_type_t *ct = map_type(lc, t);
+            const union_member_t *mem = union_type_member(t, c->member_tag);
+            if (!ct || !mem) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: invalid union constructor");
+                lc->failed = true;
+                return NULL;
+            }
+            ast_node_t *fv = c->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            cir_expr_t *val = lower_expr(lc, fv);
+            if (!val) return NULL;
+            char fb[256];
+            snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            return cir_expr_union_construct(lc->arena, ct, mem->tag,
+                                            copy_arena(lc->arena, fb), val);
+        }
         cir_type_t *ct = map_type(lc, t);
         if (!ct) return NULL;
         cir_expr_t *out = cir_expr_construct(lc->arena, ct, NULL);
@@ -460,6 +624,28 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
             return slice_type_elem(bt);
         return NULL;
     }
+    case AST_MEMBER: {
+        ast_member_t *m = (ast_member_t *)e;
+        const type_t *ot = infer_expr_type(lc, m->object);
+        if (!ot) return NULL;
+        ot = type_strip_quals(ot);
+        if (type_kind_of(ot) == TYPE_KIND_STRUCT) {
+            size_t n = struct_type_field_count(ot);
+            for (size_t i = 0; i < n; i++) {
+                const struct_field_t *f = struct_type_field(ot, i);
+                if (f && f->name.len == m->field.len &&
+                    memcmp(f->name.ptr, m->field.ptr, f->name.len) == 0)
+                    return f->type;
+            }
+        }
+        if (type_kind_of(ot) == TYPE_KIND_UNION) {
+            int mi = union_type_find_member(ot, m->field);
+            const union_member_t *mem =
+                mi >= 0 ? union_type_member(ot, (size_t)mi) : NULL;
+            return mem ? mem->payload_type : NULL;
+        }
+        return NULL;
+    }
     case AST_SLICE: {
         ast_slice_t *s = (ast_slice_t *)e;
         const type_t *ot = infer_expr_type(lc, s->object);
@@ -476,10 +662,23 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         const type_t *et = sema_resolve_type_slot(lc->sema, &m->elem_type);
         return et ? type_slice_intern(vm, et) : NULL;
     }
+    case AST_CONSTRUCT: {
+        ast_construct_t *c = (ast_construct_t *)e;
+        if (!c->type) return NULL;
+        return sema_resolve_type_slot(lc->sema, &c->type);
+    }
+    case AST_IS_TAG:
+    case AST_OPT_IS_SOME:
+        return vm->type_bool;
+    case AST_UNWRAP: {
+        const type_t *ot = infer_expr_type(lc, ((ast_unwrap_t *)e)->operand);
+        return ot ? type_option_inner(ot) : NULL;
+    }
     case AST_UNARY:
         return infer_expr_type(lc, ((ast_unary_t *)e)->operand);
     case AST_BINARY: {
         ast_binary_t *b = (ast_binary_t *)e;
+        if (token_is(b->op, "is")) return vm->type_bool;
         if (token_is(b->op, "==") || token_is(b->op, "!=") ||
             token_is(b->op, "<") || token_is(b->op, "<=") ||
             token_is(b->op, ">") || token_is(b->op, ">=") ||
@@ -699,8 +898,19 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!st) return NULL;
         st->type = ct;
         st->name = mangle(lc->arena, "clux_v_", vd->name);
-        if (vd->init && vd->init->kind != AST_UNDEF)
-            st->expr = lower_expr(lc, vd->init);
+        if (vd->init && vd->init->kind != AST_UNDEF) {
+            const type_t *it = infer_expr_type(lc, vd->init);
+            if (vd->init->kind == AST_NIL && t &&
+                type_kind_of(type_strip_quals(t)) == TYPE_KIND_OPTION) {
+                st->expr = cir_expr_option(lc->arena, ct, false, NULL);
+            } else if (t && type_kind_of(type_strip_quals(t)) == TYPE_KIND_OPTION &&
+                       (!it || type_kind_of(type_strip_quals(it)) != TYPE_KIND_OPTION)) {
+                cir_expr_t *v = lower_expr(lc, vd->init);
+                st->expr = v ? cir_expr_option(lc->arena, ct, true, v) : NULL;
+            } else {
+                st->expr = lower_expr(lc, vd->init);
+            }
+        }
         return st;
     }
     case AST_ASSIGN: {
@@ -709,7 +919,23 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!st) return NULL;
         st->lhs = lower_expr(lc, a->target);
         st->op = a->op ? token_text(lc->arena, a->op) : "=";
-        st->expr = lower_expr(lc, a->value);
+        const type_t *tt = infer_expr_type(lc, a->target);
+        if (a->value && a->value->kind == AST_NIL && tt &&
+            type_kind_of(type_strip_quals(tt)) == TYPE_KIND_OPTION) {
+            cir_type_t *ot = map_type(lc, tt);
+            st->expr = cir_expr_option(lc->arena, ot, false, NULL);
+        } else if (tt && type_kind_of(type_strip_quals(tt)) == TYPE_KIND_OPTION) {
+            const type_t *vt = infer_expr_type(lc, a->value);
+            if (!vt || type_kind_of(type_strip_quals(vt)) != TYPE_KIND_OPTION) {
+                cir_type_t *ot = map_type(lc, tt);
+                cir_expr_t *v = lower_expr(lc, a->value);
+                st->expr = v ? cir_expr_option(lc->arena, ot, true, v) : NULL;
+            } else {
+                st->expr = lower_expr(lc, a->value);
+            }
+        } else {
+            st->expr = lower_expr(lc, a->value);
+        }
         return st;
     }
     case AST_EXPR_STMT: {
@@ -749,7 +975,26 @@ static cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         ast_return_t *r = (ast_return_t *)s;
         cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_RETURN);
         if (!st) return NULL;
-        if (r->value) st->expr = lower_expr(lc, r->value);
+        if (r->value) {
+            const type_t *rt = NULL;
+            if (lc->return_type && lc->return_type->kind == CIR_TYPE_OPTION)
+                rt = (const type_t *)lc->return_type->src;
+            if (r->value->kind == AST_NIL && rt)
+                st->expr = cir_expr_option(lc->arena, lc->return_type, false,
+                                           NULL);
+            else {
+                const type_t *vt = infer_expr_type(lc, r->value);
+                if (rt && (!vt || type_kind_of(type_strip_quals(vt)) !=
+                                     TYPE_KIND_OPTION)) {
+                    cir_expr_t *v = lower_expr(lc, r->value);
+                    st->expr = v ? cir_expr_option(lc->arena,
+                                                   lc->return_type, true, v)
+                                 : NULL;
+                } else {
+                    st->expr = lower_expr(lc, r->value);
+                }
+            }
+        }
         if (s->defers) {
             /* 先算 return 值到临时变量，再执行 defer/free，最后返回。 */
             cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);

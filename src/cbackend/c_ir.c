@@ -266,6 +266,72 @@ cir_expr_t *cir_expr_string(arena_t *arena, const char *data, size_t len) {
     return e;
 }
 
+cir_expr_t *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,
+                            cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_OPTION;
+    e->type = type;
+    e->bool_value = some;
+    e->lhs = value;
+    return e;
+}
+
+cir_expr_t *cir_expr_opt_is_some(arena_t *arena, cir_expr_t *object,
+                                 bool want_some) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_OPT_IS_SOME;
+    e->lhs = object;
+    e->bool_value = want_some;
+    return e;
+}
+
+cir_expr_t *cir_expr_unwrap(arena_t *arena, cir_expr_t *object) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_UNWRAP;
+    e->lhs = object;
+    return e;
+}
+
+cir_expr_t *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
+                                     size_t tag, const char *field,
+                                     cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_UNION_CONSTRUCT;
+    e->type = type;
+    e->tag = tag;
+    e->text = field;
+    e->lhs = value;
+    return e;
+}
+
+cir_expr_t *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
+                                  const char *field) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_UNION_MEMBER;
+    e->lhs = object;
+    e->text = field;
+    return e;
+}
+
+cir_expr_t *cir_expr_union_tag(arena_t *arena, cir_expr_t *object) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_UNION_TAG;
+    e->lhs = object;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;
