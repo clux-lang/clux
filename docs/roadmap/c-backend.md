@@ -258,3 +258,38 @@ clux build hello.cx
 - clux 语义错误在 lowering 阶段报告，定位到 `.cx`；
 - 生成 C 的编译错误通过 `#line` 映射回 `.cx`；
 - 内部错误必须附带 C IR 节点或生成 C 行号。
+
+## 源码布局
+
+```text
+include/cbackend/
+  c_backend.h       入口
+  c_ir.h            C IR 数据结构
+  c_lower.h         lowering 入口
+  c_writer.h        writer 入口
+
+src/cbackend/
+  c_backend.c       单文件驱动：lex/parse/sema → C IR → C 源 → host cc
+
+  c_ir_unit.c       unit / 全局 / 签名 / 函数链表
+  c_ir_type.c       C IR 类型与字段
+  c_ir_expr.c       C IR 表达式
+  c_ir_stmt.c       C IR 语句
+  c_ir_func.c       C IR 函数签名/函数
+
+  c_lower.c         lowering 编排、函数、方法提升
+  c_lower_internal.h
+  c_lower_util.c    arena 字符串 / 名字
+  c_lower_type.c    clux type → C IR type
+  c_lower_expr.c    表达式 lowering
+  c_lower_infer.c   表达式类型推断
+  c_lower_literal.c slice/make/len/闭包等字面量
+  c_lower_stmt.c    语句 lowering
+
+  c_writer.c        writer 编排
+  c_writer_internal.h
+  c_writer_util.c   字符串缓冲辅助
+  c_writer_types.c  类型 section
+  c_writer_expr.c   表达式输出
+  c_writer_stmt.c   语句 / 函数输出
+```

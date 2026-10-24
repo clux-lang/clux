@@ -1,0 +1,293 @@
+#include "cbackend/c_writer_internal.h"
+
+void cw_write_expr(string_t *sb, const cir_expr_t *e) {
+    if (!e) {
+        cw_put(sb, "0");
+        return;
+    }
+    switch (e->kind) {
+    case CIR_EXPR_INT:
+        cw_printf(sb, "%lld", (long long)e->int_value);
+        break;
+    case CIR_EXPR_FLOAT:
+        cw_printf(sb, "(double)%.17g", e->float_value);
+        break;
+    case CIR_EXPR_BOOL:
+        cw_put(sb, e->bool_value ? "true" : "false");
+        break;
+    case CIR_EXPR_IDENT:
+        cw_put(sb, e->text ? e->text : "0");
+        break;
+    case CIR_EXPR_UNARY:
+        cw_put(sb, "(");
+        cw_put(sb, e->op ? e->op : "");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ")");
+        break;
+    case CIR_EXPR_BINARY:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " ");
+        cw_put(sb, e->op ? e->op : "?");
+        cw_put(sb, " ");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, ")");
+        break;
+    case CIR_EXPR_CALL: {
+        cw_put(sb, e->text ? e->text : "<null>");
+        cw_put(sb, "(");
+        bool first = true;
+        for (const cir_expr_t *a = e->args; a; a = a->next) {
+            if (!first) cw_put(sb, ", ");
+            cw_write_expr(sb, a);
+            first = false;
+        }
+        cw_put(sb, ")");
+        break;
+    }
+    case CIR_EXPR_ASSIGN:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " ");
+        cw_put(sb, e->op ? e->op : "=");
+        cw_put(sb, " ");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, ")");
+        break;
+    case CIR_EXPR_MEMBER:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").");
+        cw_put(sb, e->text ? e->text : "clux_f_field");
+        break;
+    case CIR_EXPR_INDEX:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        if (e->array_data) cw_put(sb, ").data[");
+        else cw_put(sb, ")[");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, "]");
+        break;
+    case CIR_EXPR_CONSTRUCT:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){");
+        if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, ".data = {");
+        {
+            bool first = true;
+            for (const cir_init_t *i = e->inits; i; i = i->next) {
+                if (!first) cw_put(sb, ", ");
+                if (i->name) {
+                    cw_put(sb, ".");
+                    cw_put(sb, i->name);
+                    cw_put(sb, " = ");
+                }
+                cw_write_expr(sb, i->value);
+                first = false;
+            }
+        }
+        if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, "}");
+        cw_put(sb, "}");
+        break;
+    case CIR_EXPR_LEN:
+        if (e->type && (e->type->kind == CIR_TYPE_SLICE ||
+                        e->type->kind == CIR_TYPE_STR)) {
+            cw_put(sb, "(");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").len");
+        } else {
+            cw_put(sb, "(sizeof((");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").data) / sizeof((");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").data[0]))");
+        }
+        break;
+    case CIR_EXPR_SLICE: {
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){ .data = (");
+        cw_put(sb, e->type && e->type->elem && e->type->elem->c_name
+                   ? e->type->elem->c_name
+                   : "int32_t");
+        cw_put(sb, " *)");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ".data + (");
+        if (e->rhs) cw_write_expr(sb, e->rhs);
+        else cw_put(sb, "0");
+        cw_put(sb, "), .len = (");
+        if (e->high) cw_write_expr(sb, e->high);
+        else if (e->src_type && (e->src_type->kind == CIR_TYPE_SLICE ||
+                                 e->src_type->kind == CIR_TYPE_STR)) {
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").len");
+        } else {
+            cw_put(sb, "sizeof((");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").data) / sizeof((");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ").data[0]))");
+        }
+        cw_put(sb, " - (");
+        if (e->rhs) cw_write_expr(sb, e->rhs);
+        else cw_put(sb, "0");
+        cw_put(sb, ")) }");
+        break;
+    }
+    case CIR_EXPR_MAKE: {
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){ .data = (");
+        cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+        cw_put(sb, " *)clux_make(sizeof(");
+        cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+        cw_put(sb, "), ");
+        cw_write_expr(sb, e->lhs);
+        if (e->inits) {
+            cw_put(sb, ", (");
+            cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
+            cw_put(sb, "[]){");
+            bool first = true;
+            for (const cir_init_t *i = e->inits; i; i = i->next) {
+                if (!first) cw_put(sb, ", ");
+                cw_write_expr(sb, i->value);
+                first = false;
+            }
+            cw_put(sb, "}, ");
+            size_t cnt = 0;
+            for (const cir_init_t *i = e->inits; i; i = i->next) cnt++;
+            cw_printf(sb, "%zu", cnt);
+        } else {
+            cw_put(sb, ", NULL, 0");
+        }
+        cw_put(sb, "), .len = ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " }");
+        break;
+    }
+    case CIR_EXPR_SLICE_DATA:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").data");
+        break;
+    case CIR_EXPR_STRING:
+        cw_put(sb, "(struct clux_str){ .data = (const char *)\"");
+        cw_write_c_bytes(sb, e->text, e->text_len);
+        cw_put(sb, "\", .len = ");
+        cw_printf(sb, "%zu", e->text_len);
+        cw_put(sb, " }");
+        break;
+    case CIR_EXPR_OPTION:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        if (e->bool_value) {
+            cw_put(sb, "){ .ok = true, .value = ");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, " }");
+        } else {
+            cw_put(sb, "){ .ok = false }");
+        }
+        break;
+    case CIR_EXPR_OPT_IS_SOME:
+        if (!e->bool_value) cw_put(sb, "!(");
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").ok");
+        if (!e->bool_value) cw_put(sb, ")");
+        break;
+    case CIR_EXPR_UNWRAP:
+        cw_put(sb, "((");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").ok ? (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").value : (clux_panic_none(), (");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").value))");
+        break;
+    case CIR_EXPR_UNION_CONSTRUCT:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_printf(sb, "){ .tag = %zu, .u.", e->tag);
+        cw_put(sb, e->text ? e->text : "clux_m_member");
+        cw_put(sb, " = ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " }");
+        break;
+    case CIR_EXPR_UNION_MEMBER:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").u.");
+        cw_put(sb, e->text ? e->text : "clux_m_member");
+        break;
+    case CIR_EXPR_UNION_TAG:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").tag");
+        break;
+    case CIR_EXPR_CUNION_CONSTRUCT:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){ .u.");
+        cw_put(sb, e->text ? e->text : "clux_m_member");
+        cw_put(sb, " = ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " }");
+        break;
+    case CIR_EXPR_FUNC_OBJ:
+        cw_put(sb, e->text ? e->text : "<null>");
+        break;
+    case CIR_EXPR_FUNC_CALL:
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").fn((");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env");
+        for (const cir_expr_t *a = e->args; a; a = a->next) {
+            cw_put(sb, ", ");
+            cw_write_expr(sb, a);
+        }
+        cw_put(sb, ")");
+        break;
+    case CIR_EXPR_CLOSURE:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "){ .fn = ");
+        cw_put(sb, e->text ? e->text : "<null>");
+        cw_put(sb, ", .env = ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " }");
+        break;
+    case CIR_EXPR_NEW:
+        cw_put(sb, "(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, " *)clux_new(sizeof(");
+        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        cw_put(sb, "), ");
+        if (e->inits) {
+            cw_put(sb, "&(");
+            cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+            cw_put(sb, "){");
+            if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, ".data = {");
+            bool first = true;
+            for (const cir_init_t *i = e->inits; i; i = i->next) {
+                if (!first) cw_put(sb, ", ");
+                if (i->name) {
+                    cw_put(sb, ".");
+                    cw_put(sb, i->name);
+                    cw_put(sb, " = ");
+                }
+                cw_write_expr(sb, i->value);
+                first = false;
+            }
+            if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, "}");
+            cw_put(sb, "}");
+        } else {
+            cw_put(sb, "NULL");
+        }
+        cw_put(sb, ")");
+        break;
+    default:
+        cw_put(sb, "0");
+        break;
+    }
+}
