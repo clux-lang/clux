@@ -265,6 +265,34 @@ cir_expr_t *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
     return e;
 }
 
+cir_expr_t *cir_expr_union_at(arena_t *arena, cir_type_t *union_type,
+                              cir_type_t *member_type,
+                              cir_expr_t *object, size_t tag,
+                              const char *field) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_UNION_AT;
+    e->lhs = object;
+    e->text = field;
+    e->tag = tag;
+    e->type = member_type;
+    e->src_type = union_type;
+    return e;
+}
+
+cir_expr_t *cir_expr_slice_at(arena_t *arena, cir_type_t *slice_type,
+                              cir_expr_t *object, cir_expr_t *index) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_SLICE_AT;
+    e->lhs = object;
+    e->rhs = index;
+    e->type = slice_type;
+    return e;
+}
+
 cir_expr_t *cir_expr_union_tag(arena_t *arena, cir_expr_t *object) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));

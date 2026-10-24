@@ -755,8 +755,15 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             char fb[256];
             snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
                      mem->name.ptr ? mem->name.ptr : "");
-            return cir_expr_union_member(lc->arena, obj,
-                                         copy_arena(lc->arena, fb));
+            cir_type_t *mct =
+                mem->payload_type ? map_type(lc, mem->payload_type) : NULL;
+            if (!mct) {
+                lc->failed = true;
+                return NULL;
+            }
+            lc->unit->uses_union_check = true;
+            return cir_expr_union_at(lc->arena, map_type(lc, ot), mct, obj, (size_t)mi,
+                                     copy_arena(lc->arena, fb));
         }
         if (ot && type_kind_of(ot) == TYPE_KIND_CUNION) {
             int mi = cunion_type_find_member(ot, m->field);
@@ -802,15 +809,18 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                                          lc->arena,
                                          (int64_t)array_type_len(ost)));
             idx = chk;
-        } else if (ost && type_kind_of(ost) == TYPE_KIND_SLICE &&
-                   ast_is_lvalue(ix->object)) {
+        } else if (ost && type_kind_of(ost) == TYPE_KIND_SLICE) {
+            /* 切片：接收者先落到复合字面量临时量（只求值一次），再由
+               clux_slice_at 做越界检查并返回元素地址（左值，读写通用）。 */
+            cir_type_t *sct = map_type(lc, ost);
+            if (!sct) {
+                lc->failed = true;
+                return NULL;
+            }
             lc->unit->uses_slice_check = true;
-            cir_expr_t *chk =
-                cir_expr_call(lc->arena, "clux_slice_check", NULL);
-            if (!chk) return NULL;
-            cir_expr_append_arg(chk, idx);
-            cir_expr_append_arg(chk, cir_expr_member(lc->arena, obj, "len"));
-            idx = chk;
+            cir_expr_t *at = cir_expr_slice_at(lc->arena, sct, obj, idx);
+            if (!at) return NULL;
+            return at;
         }
         return cir_expr_index(lc->arena, obj, idx, true);
     }

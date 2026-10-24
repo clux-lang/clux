@@ -85,6 +85,8 @@ typedef enum {
     CIR_EXPR_UNWRAP,
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
+    CIR_EXPR_UNION_AT,   /* 带 tag 校验的 union 成员访问（左值） */
+    CIR_EXPR_SLICE_AT,   /* 带越界校验的切片下标（左值，接收者只求值一次） */
     CIR_EXPR_UNION_TAG,
     CIR_EXPR_CUNION_CONSTRUCT,
     CIR_EXPR_FLOAT,
@@ -280,6 +282,7 @@ typedef struct cir_unit {
        writer 生成 `clux_index_check` / `clux_slice_check` 运行时辅助。 */
     bool             uses_index_check;
     bool             uses_slice_check;
+    bool             uses_union_check;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -336,6 +339,14 @@ cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
                                         cir_expr_t *value);
 cir_expr_t    *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
                                      const char *field);
+/** 带 tag 校验的 union 成员访问：`*(T*)clux_union_at(...)`，左值。 */
+cir_expr_t    *cir_expr_union_at(arena_t *arena, cir_type_t *union_type,
+                                 cir_type_t *member_type,
+                                 cir_expr_t *object, size_t tag,
+                                 const char *field);
+/** 带越界校验的切片下标：接收者只求值一次，结果仍是左值。 */
+cir_expr_t    *cir_expr_slice_at(arena_t *arena, cir_type_t *slice_type,
+                                 cir_expr_t *object, cir_expr_t *index);
 cir_expr_t    *cir_expr_union_tag(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_cunion_construct(arena_t *arena, cir_type_t *type,
                                          const char *field, cir_expr_t *value);

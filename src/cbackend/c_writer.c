@@ -195,10 +195,13 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "#include <stdlib.h>\n");
         cw_put(sb, "#include <string.h>\n");
     }
-    if (unit->uses_index_check || unit->uses_slice_check) {
+    if (unit->uses_index_check || unit->uses_slice_check ||
+        unit->uses_union_check) {
         /* 只需要 stderr 与 abort：不拉 <stdlib.h>（用户可能用
            `extern cfunc qsort/...` 声明与标准库原型冲突）。 */
         cw_put(sb, "#include <stdio.h>\n");
+        if (unit->uses_slice_check || unit->uses_union_check)
+            cw_put(sb, "#include <string.h>\n");
         cw_put(sb, "extern void abort(void);\n");
     }
     if (unit->test_runner || unit->tests) {
@@ -266,14 +269,34 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     }
     if (unit->uses_slice_check) {
         cw_put(sb,
-               "static int64_t clux_slice_check(int64_t idx, int64_t len) {\n");
-        cw_put(sb, "    if (idx < 0 || idx >= len) {\n");
-        cw_put(sb, "        fprintf(stderr, \"run: slice index %lld out of "
-                   "bounds (len=%lld)\\n\", (long long)idx, (long long)len);\n");
+               "static void *clux_slice_at(const void *slice, int64_t idx, "
+               "size_t elem, const char *what) {\n");
+        cw_put(sb, "    struct { void *data; uint64_t len; } h;\n");
+        cw_put(sb, "    memcpy(&h, slice, sizeof h);\n");
+        cw_put(sb, "    if (idx < 0 || (uint64_t)idx >= h.len) {\n");
+        cw_put(sb, "        fprintf(stderr, \"run: %s index %lld out of "
+                   "bounds (len=%llu)\\n\", what, (long long)idx, "
+                   "(unsigned long long)h.len);\n");
         cw_put(sb, "        fflush(stderr);\n");
         cw_put(sb, "        abort();\n");
         cw_put(sb, "    }\n");
-        cw_put(sb, "    return idx;\n");
+        cw_put(sb, "    return (char *)h.data + (size_t)idx * elem;\n");
+        cw_put(sb, "}\n");
+    }
+    if (unit->uses_union_check) {
+        cw_put(sb,
+               "static void *clux_union_at(const void *p, int64_t expected, "
+               "size_t tag_size, size_t payload_off, const char *member) {\n");
+        cw_put(sb, "    uint64_t tag = 0;\n");
+        cw_put(sb, "    memcpy(&tag, p, tag_size);\n");
+        cw_put(sb, "    if ((int64_t)tag != expected) {\n");
+        cw_put(sb, "        fprintf(stderr, \"run: union member '%s' is not "
+                   "active (tag=%lld, expected=%lld)\\n\", member, "
+                   "(long long)tag, (long long)expected);\n");
+        cw_put(sb, "        fflush(stderr);\n");
+        cw_put(sb, "        abort();\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    return (char *)p + payload_off;\n");
         cw_put(sb, "}\n");
     }
     cw_put(sb, "\n");

@@ -213,6 +213,37 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_write_expr(sb, e->lhs);
         cw_put(sb, " }");
         break;
+    case CIR_EXPR_UNION_AT: {
+        const char *ut =
+            e->src_type ? e->src_type->c_name : "int32_t";
+        const char *mt = e->type ? e->type->c_name : "int32_t";
+        cw_put(sb, "(*(");
+        cw_put(sb, mt);
+        cw_put(sb, " *)clux_union_at(&((");
+        cw_put(sb, ut);
+        cw_put(sb, "[]){ ");
+        cw_write_expr(sb, e->lhs);
+        cw_printf(sb,
+                  " })[0], %zu, sizeof(((%s *)0)->tag), offsetof(%s, u), "
+                  "\"%s\"))",
+                  e->tag, ut, ut, e->text ? e->text : "clux_m_member");
+        break;
+    }
+    case CIR_EXPR_SLICE_AT: {
+        const char *st = e->type ? e->type->c_name : "int32_t";
+        const char *et = (e->type && e->type->elem) ? e->type->elem->c_name
+                                                     : "int32_t";
+        cw_put(sb, "(*(");
+        cw_put(sb, et);
+        cw_put(sb, " *)clux_slice_at(&((");
+        cw_put(sb, st);
+        cw_put(sb, "[]){ ");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, " })[0], ");
+        cw_write_expr(sb, e->rhs);
+        cw_printf(sb, ", sizeof(%s), \"slice\"))", et);
+        break;
+    }
     case CIR_EXPR_UNION_MEMBER:
         cw_put(sb, "(");
         cw_write_expr(sb, e->lhs);
