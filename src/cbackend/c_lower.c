@@ -140,10 +140,14 @@ cir_function_t *lower_function(lower_ctx_t *lc, ast_func_def_t *fn,
             }
         }
         /* 结构体方法（sema 生成名 `__method_<typeId>_<name>`，全局唯一）：
-           跨模块调用时也要能链接到定义模块的实现。 */
+           跨模块调用时也要能链接到定义模块的实现。
+           测试函数（`__clux_test_N`）：多文件测试时由入口模块的 runner
+           跨单元调用。 */
         bool method = fn->name.len > 9 && fn->name.ptr &&
                       memcmp(fn->name.ptr, "__method_", 9) == 0;
-        out->is_public = out->is_exported || generic_instance || method;
+        bool test_fn = fn->name.len > 12 && fn->name.ptr &&
+                       memcmp(fn->name.ptr, "__clux_test_", 12) == 0;
+        out->is_public = out->is_exported || generic_instance || method || test_fn;
     }
     return out;
 }
@@ -274,8 +278,26 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
     /* 测试运行器标记必须在 lowering 之前就位：lowering 里 assert 的映射
        依赖它。 */
     if (test_mode) {
+        u->tests = true;
         u->test_runner = true;
         u->test_count = count_test_funcs(prog);
+        /* 用例表：函数符号（`<prefix>fn___clux_test_N`）。显示名与跨模块
+           合并由多文件构建层填充/替换。 */
+        size_t cap = u->test_count ? u->test_count : 1;
+        u->test_cases = (cir_test_case_t *)arena_calloc(
+            arena, cap, sizeof(cir_test_case_t), ALIGNOF(max_align_t));
+        if (!u->test_cases) return NULL;
+        u->test_case_count = 0;
+        for (ast_node_t *f = prog->funcs; f; f = f->next) {
+            if (f->kind != AST_FUNC_DEF) continue;
+            strslice_t name = ((ast_func_def_t *)f)->name;
+            if (!name.ptr || name.len < 13 ||
+                memcmp(name.ptr, "__clux_test_", 12) != 0)
+                continue;
+            u->test_cases[u->test_case_count].symbol =
+                module_symbol(arena, u, "fn_", name);
+            u->test_case_count++;
+        }
     }
     /* 导出类型名（`export struct/union/cunion/enum/type`）：C 形态无条件进
        头文件。enum 渲染成底层整数，不产生 CIR 类型，也就不需要登记。 */

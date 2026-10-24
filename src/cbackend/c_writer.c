@@ -195,7 +195,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "#include <stdlib.h>\n");
         cw_put(sb, "#include <string.h>\n");
     }
-    if (unit->test_runner) {
+    if (unit->test_runner || unit->tests) {
         /* 测试运行器：assert 失败打印 + 用例下标解析需要 stdio/stdlib。 */
         cw_put(sb, "#include <stdio.h>\n");
         cw_put(sb, "#include <stdlib.h>\n");
@@ -270,7 +270,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "\n");
     }
 
-    if (unit->test_runner && unit->uses_assert) {
+    if ((unit->test_runner || unit->tests) && unit->uses_assert) {
         cw_put(sb, "static void clux_assert(bool cond, struct clux_str text) {\n");
         cw_put(sb, "    if (cond) return;\n");
         cw_put(sb, "    printf(\"assert failed: %.*s\\n\", (int)text.len,"
@@ -336,6 +336,20 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     }
 
     if (unit->test_runner) {
+        /* 跨模块用例：先为不在本单元的用例函数声明 extern（多文件测试时
+           用例来自各个模块的编译单元）。 */
+        for (size_t i = 0; i < unit->test_case_count; i++) {
+            const char *sym = unit->test_cases[i].symbol;
+            if (!sym) continue;
+            bool local = false;
+            for (cir_function_t *f = fns; f; f = f->next) {
+                if (f->name && strcmp(f->name, sym) == 0) {
+                    local = true;
+                    break;
+                }
+            }
+            if (!local) cw_printf(sb, "extern void %s(void *env);\n", sym);
+        }
         cw_put(sb, "int main(int argc, char **argv) {\n");
         cw_put(sb, "    if (argc < 2) return 2;\n");
         cw_put(sb, "    int idx = 0;\n");
@@ -344,10 +358,11 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "        idx = idx * 10 + (*p - '0');\n");
         cw_put(sb, "    }\n");
         cw_put(sb, "    switch (idx) {\n");
-        for (size_t i = 0; i < unit->test_count; i++)
-            cw_printf(sb, "    case %zu: %sfn___clux_test_%zu(NULL);"
-                          " return 0;\n",
-                      i, unit->sym_prefix ? unit->sym_prefix : "clux_", i);
+        for (size_t i = 0; i < unit->test_case_count; i++) {
+            const char *sym = unit->test_cases[i].symbol;
+            if (!sym) continue;
+            cw_printf(sb, "    case %zu: %s(NULL); return 0;\n", i, sym);
+        }
         cw_put(sb, "    default: return 3;\n");
         cw_put(sb, "    }\n");
         cw_put(sb, "}\n");

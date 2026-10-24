@@ -287,8 +287,17 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     strslice_t cname0 = STRSLICE_EMPTY;
     if (call->callee && call->callee->kind == AST_IDENT)
         cname0 = ((ast_ident_t *)call->callee)->name;
-    else if (call->callee && call->callee->kind == AST_FUNC_REF)
-        cname0 = ((ast_func_ref_t *)call->callee)->name;
+    else if (call->callee && call->callee->kind == AST_FUNC_REF) {
+        ast_func_ref_t *ref0 = (ast_func_ref_t *)call->callee;
+        cname0 = ref0->name;
+        /* sema 改写的 FUNC_REF（内建/实例化调用）只有 fid：按 id 取名字，
+           这样 `assert` 等内建仍能命中下面的特判。 */
+        if (!cname0.ptr && ref0->fid) {
+            sema_func_t *sf = sema_func_by_id(lc->sema, ref0->fid);
+            if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
+                cname0 = ((ast_func_def_t *)sf->def)->name;
+        }
+    }
     /* M6 FFI：extern cfunc 调用 → 直接调用真实 C 符号；data(s) → 取首元素指针；
        cfunc_ptr(f) → 生成 C trampoline。 */
     if (call->is_ffi_call) return lower_ffi_call(lc, call);
@@ -318,7 +327,8 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     }
     /* test 上下文的 `assert(cond, text)`：sema 已把它改写为 (bool, str) 调用，
        这里映射到运行器生成的 clux_assert（失败即退出该用例子进程）。 */
-    if (lc->unit->test_runner && strslice_eq(cname0, STRSLICE_LIT("assert"))) {
+    if ((lc->unit->test_runner || lc->unit->tests) &&
+        strslice_eq(cname0, STRSLICE_LIT("assert"))) {
         lc->unit->uses_assert = true;
         cir_expr_t *expr = cir_expr_call(lc->arena, "clux_assert", NULL);
         if (!expr) return NULL;

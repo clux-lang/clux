@@ -61,6 +61,11 @@ typedef struct cbackend_program {
     const char *entry_obj;   /* 入口目标文件（NULL = 镜像推导） */
     bool        object_only; /* 只编译到对象（不链接） */
     bool        emit_c_only; /* 只生成 C/头文件 */
+    /* 测试模式：test 块改写成 `__clux_test_N` 函数，入口模块生成 runner
+       main（跨模块合并用例表）；不要求 main。 */
+    bool        tests;
+    char     ***out_test_names; /* tests：返回 malloc 的用例显示名数组 */
+    size_t     *out_test_count;
 } cbackend_program_t;
 
 int cbackend_build_program(const char *src_path, const char *out_path,

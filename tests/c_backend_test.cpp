@@ -2073,6 +2073,42 @@ TEST(CBackend, BuildImportGenericReturnType) {
   fs::remove_all(proj, ec);
 }
 
+/* `clux test --backend=c` 与 build 同路径：import 的依赖模块也收集 test 块，
+ * 入口模块生成跨模块 runner（test 块 → `__clux_test_N`，不经 main 进入）。 */
+TEST(CBackend, TestRunnerAcrossModules) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "test_modules";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("lib.cx",
+        "export func add(a: i32, b: i32): i32 { return a + b; }\n"
+        "test \"lib.add\" { assert(add(1, 2) == 3); }\n"
+        "test \"lib.more\" { assert(add(2, 2) == 4); }\n");
+  write("main.cx",
+        "import m from \"./lib\";\n"
+        "test \"main.one\" { assert(m::add(20, 22) == 42); }\n"
+        "func main(): i32 { return 0; }\n");
+  write("main_fail.cx",
+        "import m from \"./lib\";\n"
+        "test \"main.ok\" { assert(m::add(20, 22) == 42); }\n"
+        "test \"main.fail\" { assert(m::add(1, 1) == 3); }\n"
+        "func main(): i32 { return 0; }\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(run_cli({"test", "main.cx", "--backend=c"}), 0);
+  EXPECT_EQ(run_cli({"test", "main_fail.cx", "--backend=c"}), 1);
+  fs::current_path(saved);
+  fs::remove_all(proj, ec);
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =

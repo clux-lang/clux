@@ -1,6 +1,7 @@
 #include "cbackend/c_backend.h"
 
 #include "cbackend/c_lower.h"
+#include "cbackend/c_lower_internal.h" /* module_tag_for_path */
 #include "cbackend/c_opt.h"
 #include "cbackend/c_writer.h"
 #include "core/allocator.h"
@@ -415,25 +416,29 @@ static bool be_ensure_parent(const char *file) {
     return be_ensure_dir(buf);
 }
 
-/* 单个模块：lower → 写 .c/.h →（非 emit-c）编译对象。失败返回 NULL。 */
-static cir_unit_t *build_one_module(allocator_t *alloc, arena_t *arena,
-                                    module_t *mod, bool allow_no_main,
-                                    const char *c_path, const char *obj_path,
-                                    bool emit_c_only,
-                                    const cbackend_toolchain_t *tc) {
+/* 单个模块：lower（测试模式下用例表随后由调用方决定是否合并）。 */
+static cir_unit_t *lower_one_module(arena_t *arena, module_t *mod,
+                                    bool tests, bool allow_no_main) {
+    cir_unit_t *u = cbackend_lower(arena, mod->sema,
+                                   (ast_program_t *)mod->src_ast,
+                                   mod->canonical, tests, allow_no_main);
+    if (!u) return NULL;
+    cbackend_optimize(u);
+    return u;
+}
+
+/* 写 .c/.h →（非 emit-c）编译对象。 */
+static int write_one_module(allocator_t *alloc, cir_unit_t *u,
+                            const char *c_path, const char *obj_path,
+                            bool emit_c_only, const cbackend_toolchain_t *tc) {
     if (!be_ensure_parent(c_path) ||
         (!emit_c_only && !be_ensure_parent(obj_path))) {
         fprintf(stderr, "build: cannot create output directory for '%s'\n",
                 c_path);
-        return NULL;
+        return 1;
     }
-    cir_unit_t *u = cbackend_lower(arena, mod->sema,
-                                   (ast_program_t *)mod->src_ast,
-                                   mod->canonical, false, allow_no_main);
-    if (!u) return NULL;
-    cbackend_optimize(u);
     char *h_path = derive_h_path(c_path);
-    if (!h_path) return NULL;
+    if (!h_path) return 1;
     int rc = 0;
     if (cir_write_pair(u, c_path, h_path, alloc) != 0) {
         fprintf(stderr, "build: cannot write C source '%s' / header '%s'\n",
@@ -444,7 +449,7 @@ static cir_unit_t *build_one_module(allocator_t *alloc, arena_t *arena,
         else remove(c_path);
     }
     free(h_path);
-    return rc == 0 ? u : NULL;
+    return rc;
 }
 
 int cbackend_build_program(const char *src_path, const char *out_path,
@@ -453,6 +458,7 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     if (!src_path) return 1;
     bool emit_c_only = pgm && pgm->emit_c_only;
     bool object_only = pgm && pgm->object_only;
+    bool tests = pgm && pgm->tests;
     if (!emit_c_only && !object_only && !out_path) return 1;
 
     allocator_t *alloc = create_allocator(malloc, free);
@@ -476,10 +482,17 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     const char *links[128];
     size_t nlinks = 0;
     module_t *main_mod = NULL;
+    /* 测试用例合并表：必须在任何 `goto cleanup` 之前初始化（跨 goto 的
+       局部变量不会执行初始化）。 */
+    cir_test_case_t *all_cases = NULL;
+    size_t ncases = 0, cases_cap = 0;
     if (!entry || !path_stack) {
         fprintf(stderr, "build: out of memory\n");
         goto cleanup;
     }
+    /* 测试模式必须在编译**之前**置位：driver 在模块准备阶段把 test 块
+       改写成 `__clux_test_N` 并记录 `mod->test_cases`。 */
+    if (tests) vm->test_mode = true;
     main_mod = compile_module_prepare(vm, alloc, diag, arena, entry, path_stack);
     if (!main_mod) {
         if (diag_has_error(diag)) diag_print_all(diag);
@@ -495,6 +508,8 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         goto cleanup;
     }
     const char *build_dir = (pgm && pgm->build_dir) ? pgm->build_dir : "build";
+    /* 测试模式：driver 把 test 块改写成各模块的 `__clux_test_N` 函数并
+       记录 `mod->test_cases`；入口模块的 C 单元生成跨模块 runner。 */
     for (size_t i = 0; i < nmods; i++) {
         module_t *mod = (module_t *)vec_get(vm->module_order, i);
         if (!mod || !mod->sema || !mod->src_ast) continue;
@@ -524,12 +539,68 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         }
         owned[nowned++] = c_path;
         owned[nowned++] = obj_path;
-        bool require_main = is_main && !emit_c_only && !object_only;
-        cir_unit_t *u = build_one_module(alloc, arena, mod, !require_main,
-                                         c_path, obj_path, emit_c_only, tc);
+        bool require_main = is_main && !emit_c_only && !object_only && !tests;
+        cir_unit_t *u = lower_one_module(arena, mod, tests, !require_main);
         if (!u) {
             if (diag_has_error(diag)) diag_print_all(diag);
             goto cleanup;
+        }
+        if (tests) {
+            /* 依赖模块只出测试函数（不带 runner）；用例合并到入口单元。 */
+            if (!is_main) u->test_runner = false;
+            char tag[16];
+            module_tag_for_path(mod->canonical, tag, sizeof tag);
+            size_t tcn = mod->test_cases ? vec_len(mod->test_cases) : 0;
+            if (tcn > 0) {
+                size_t need = ncases + tcn;
+                if (need > cases_cap) {
+                    size_t ncap = need * 2 + 4;
+                    cir_test_case_t *grown = (cir_test_case_t *)realloc(
+                        all_cases, ncap * sizeof(*all_cases));
+                    if (!grown) {
+                        fprintf(stderr, "build: out of memory\n");
+                        goto cleanup;
+                    }
+                    all_cases = grown;
+                    cases_cap = ncap;
+                }
+                for (size_t k = 0; k < tcn; k++) {
+                    module_test_case_t *mtc =
+                        (module_test_case_t *)vec_get(mod->test_cases, k);
+                    if (!mtc) continue;
+                    char sym[512];
+                    snprintf(sym, sizeof sym, "clux_%s_fn_%s", tag,
+                             mtc->func_name ? mtc->func_name : "");
+                    all_cases[ncases].symbol =
+                        be_concat2(sym, "");
+                    all_cases[ncases].display = mtc->display_name
+                                                    ? be_concat2(mtc->display_name, "")
+                                                    : be_concat2("test", "");
+                    if (!all_cases[ncases].symbol ||
+                        !all_cases[ncases].display) {
+                        fprintf(stderr, "build: out of memory\n");
+                        goto cleanup;
+                    }
+                    ncases++;
+                }
+            }
+            if (is_main) {
+                u->test_runner = true;
+                u->test_cases = all_cases;
+                u->test_case_count = ncases;
+                if (pgm && pgm->out_test_names) {
+                    char **names = (char **)calloc(ncases ? ncases : 1,
+                                                   sizeof(*names));
+                    if (names) {
+                        for (size_t k = 0; k < ncases; k++)
+                            names[k] = all_cases[k].display
+                                           ? be_concat2(all_cases[k].display, "")
+                                           : NULL;
+                        *pgm->out_test_names = names;
+                        if (pgm->out_test_count) *pgm->out_test_count = ncases;
+                    }
+                }
+            }
         }
         if (require_main) {
             bool has_entry = false;
@@ -541,6 +612,11 @@ int cbackend_build_program(const char *src_path, const char *out_path,
                 goto cleanup;
             }
         }
+        /* 写 .c/.h → 编译对象（测试模式的 runner 表已在上面确定）。 */
+        if (write_one_module(alloc, u, c_path, obj_path, emit_c_only, tc) != 0) {
+            if (diag_has_error(diag)) diag_print_all(diag);
+            goto cleanup;
+        }
         /* 合并模块声明的链接参数（extern lib），去重。 */
         for (cir_link_arg_t *l = u->link_args; l && nlinks < 128; l = l->next) {
             bool dup = false;
@@ -551,6 +627,10 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         if (!emit_c_only) objs[nobjs++] = obj_path;
     }
     if (!emit_c_only && !object_only) {
+        if (tests && ncases == 0) {
+            fprintf(stderr, "test: no test blocks found in '%s'\n", src_path);
+            goto cleanup;
+        }
         cir_link_arg_t *merged = NULL, *tail = NULL;
         for (size_t i = 0; i < nlinks; i++) {
             cir_link_arg_t *n =
@@ -573,6 +653,14 @@ int cbackend_build_program(const char *src_path, const char *out_path,
 
 cleanup:
     if (objs) free(objs);
+    if (all_cases) {
+        for (size_t i = 0; i < ncases; i++) {
+            free((void *)all_cases[i].symbol);
+            free((void *)all_cases[i].display);
+        }
+        free(all_cases);
+        all_cases = NULL;
+    }
     if (owned) {
         for (size_t i = 0; i < nowned; i++) free(owned[i]);
         free(owned);
@@ -926,16 +1014,15 @@ int cbackend_generate_c(const char *src_path, const char *c_path) {
 int cbackend_build_tests(const char *src_path, const char *out_path,
                          char ***names, size_t *count) {
     if (!src_path || !out_path) return 1;
-    char *c_path = derive_c_path(out_path);
-    if (!c_path) {
-        fprintf(stderr, "test: out of memory\n");
-        return 1;
-    }
-    cbackend_opts_t opts = {
-        .compile = true, .tests = true, .out_names = names, .out_count = count};
-    int rc = cbackend_run_impl(src_path, out_path, c_path, &opts);
-    free(c_path);
-    return rc;
+    /* 与 build 同路径：入口 + import 依赖各自生成编译单元，入口单元生成
+       跨模块用例分派的 runner main（不从 main 进入）。 */
+    cbackend_program_t pgm = {
+        .build_dir = "build",
+        .tests = true,
+        .out_test_names = names,
+        .out_test_count = count,
+    };
+    return cbackend_build_program(src_path, out_path, &pgm, NULL);
 }
 
 void cbackend_free_test_names(char **names, size_t count) {

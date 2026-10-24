@@ -222,6 +222,12 @@ typedef struct cir_global {
     struct cir_global *next;
 } cir_global_t;
 
+/** 测试运行器的一个用例：显示名 + 生成的 C 函数符号。 */
+typedef struct cir_test_case {
+    const char *display; /* "Suite.Name"（测试运行器主单元用） */
+    const char *symbol;  /* `<sym_prefix>fn___clux_test_N` */
+} cir_test_case_t;
+
 typedef struct cir_unit {
     arena_t     *arena;
     const char  *source_path;
@@ -257,9 +263,15 @@ typedef struct cir_unit {
     bool             uses_opt_unwrap;
     bool             uses_bitfield;
     /* 测试运行器：writer 生成 `int main(int argc, char **argv)` 按用例下标
-       分派；`test_count` 是 test 块个数。 */
+       分派；`test_count` 是 test 块个数。
+       `tests` 表示本单元处于测试模式（生成 assert 辅助函数、test 函数非
+       static）；`test_runner` 表示本单元负责生成 runner main——多文件测试
+       时只有入口模块的单元带 runner，用例表跨模块合并。 */
     bool             test_runner;
+    bool             tests;
     size_t           test_count;
+    cir_test_case_t *test_cases;
+    size_t           test_case_count;
     bool             uses_assert;
     bool             uses_mem_eq;
     /* extern cfunc 返回 str：需要 clux_str_from_c(char*) 包装。 */

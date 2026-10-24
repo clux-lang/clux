@@ -311,14 +311,22 @@ clux build hello.cx
     `CBackend.BuildGenericStructInstanceMethods` /
     `BuildGenericMethodInsideGenericStruct` /
     `BuildNestedGenericAndRvalueReceiver`。
-- test 运行器：`clux test <file.cx> --backend=c`
-  - 顶层 `test "Suite.Name" { ... }` 改写成无参 void 函数；
-  - 生成 `int main(int argc, char **argv)`：`argv[1]` = 用例下标，执行单个
-    用例后退出（0 = 通过）；
+- test 运行器：`clux test <file.cx> --backend=c`（**与 build 同路径**）
+  - 与构建共用模块流水线：`vm->test_mode` 下 driver 把每个模块（入口 +
+    import 依赖）的顶层 `test "Suite.Name" { ... }` 改写成无参 void 函数
+    `__clux_test_N` 并记录 `mod->test_cases`；测试函数在所有模块里都是
+    non-static（跨编译单元可见）；
+  - 每个模块照常生成自己的 `.c/.h/.obj`（不生成 main）；**入口模块**的
+    C 单元生成 runner：用例表跨模块合并（依赖在前、入口在后），为不在本
+    单元的用例函数声明 `extern void <sym>(void *env);`，`main(argc, argv)`
+    按 `argv[1]` 下标分派（0 = 通过）；
   - CLI 以子进程逐个运行用例，panic/assert 只影响当前用例；
-  - `assert(cond)` 映射为生成的 `clux_assert`（失败打印 `assert failed: ...`
-    并以非 0 退出）；
-  - 输出与 VM 运行器同款 gtest 风格汇总。
+  - `assert(cond)` 映射为各测试单元生成的 `clux_assert`（`unit->tests` 时
+    生成，失败打印 `assert failed: ...` 并以非 0 退出）；
+  - 输出与 VM 运行器同款 gtest 风格汇总；没有 test 块时报
+    `test: no test blocks found`；
+  - 回归测试：`CBackend.TestRunnerAcrossModules`（依赖 + 入口 3 个用例
+    全过；含失败 assert 的变体返回 1）。
 - `clux build` 选项与两阶段构建：
   - 流水线：`.cx → .c →（host cc -c）→ 目标文件 → 链接 → 可执行文件`；
   - **构建目录镜像**（类 cmake 的 `build/`，默认 `./build`）：
@@ -418,9 +426,7 @@ clux build hello.cx
   - 回归测试：`BuildImportMultiFile`、`BuildImportChainAndDiamond`、
     `BuildImportReexport`、`BuildImportCrossModuleGeneric`、
     `BuildImportCrossModuleMethod`、`BuildImportGenericReturnType`、
-    `RejectsCircularImport`；
-  - 尚未覆盖：`clux test --backend=c` 的 import（测试运行器仍是单文件前端
-    路径）。
+    `TestRunnerAcrossModules`、`RejectsCircularImport`。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI
