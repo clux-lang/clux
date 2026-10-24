@@ -41,6 +41,9 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_INT:
         wf(sb, "%lld", (long long)e->int_value);
         break;
+    case CIR_EXPR_FLOAT:
+        wf(sb, "(double)%.17g", e->float_value);
+        break;
     case CIR_EXPR_BOOL:
         w(sb, e->bool_value ? "true" : "false");
         break;

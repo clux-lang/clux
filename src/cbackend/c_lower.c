@@ -13,6 +13,7 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_expr_stmt.h"
 #include "parser/ast_fill.h"
+#include "parser/ast_float_lit.h"
 #include "parser/ast_for.h"
 #include "parser/ast_for_index.h"
 #include "parser/ast_dowhile.h"
@@ -120,6 +121,8 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
     if (t == vm->type_u32) return cir_type_new(lc->arena, CIR_TYPE_I32, "uint32_t");
     if (t == vm->type_usize) return cir_type_new(lc->arena, CIR_TYPE_USIZE, "size_t");
     if (t == vm->type_bool) return cir_type_new(lc->arena, CIR_TYPE_BOOL, "bool");
+    if (t == vm->type_f32) return cir_type_new(lc->arena, CIR_TYPE_F32, "float");
+    if (t == vm->type_f64) return cir_type_new(lc->arena, CIR_TYPE_F64, "double");
     if (t == vm->type_void) return cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
     if (t == vm->type_u8) return cir_type_new(lc->arena, CIR_TYPE_I32, "uint8_t");
     if (t == vm->type_i8) return cir_type_new(lc->arena, CIR_TYPE_I32, "int8_t");
@@ -325,6 +328,8 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     switch (e->kind) {
     case AST_INT_LIT:
         return cir_expr_int(lc->arena, (int64_t)((ast_int_lit_t *)e)->value);
+    case AST_FLOAT_LIT:
+        return cir_expr_float(lc->arena, ((ast_float_lit_t *)e)->value);
     case AST_BOOL_LIT:
         return cir_expr_bool(lc->arena, ((ast_bool_lit_t *)e)->value);
     case AST_CHAR_LIT:
@@ -666,6 +671,11 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_BOOL_LIT:
         return vm->type_bool;
+    case AST_FLOAT_LIT: {
+        ast_float_lit_t *f = (ast_float_lit_t *)e;
+        if (strslice_eq(f->type, STRSLICE_LIT("f32"))) return vm->type_f32;
+        return vm->type_f64;
+    }
     case AST_STRING_LIT:
         return vm->type_str;
     case AST_CHAR_LIT:

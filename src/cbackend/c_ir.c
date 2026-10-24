@@ -78,6 +78,15 @@ cir_expr_t *cir_expr_int(arena_t *arena, int64_t value) {
     return e;
 }
 
+cir_expr_t *cir_expr_float(arena_t *arena, double value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_FLOAT;
+    e->float_value = value;
+    return e;
+}
+
 cir_expr_t *cir_expr_bool(arena_t *arena, bool value) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));

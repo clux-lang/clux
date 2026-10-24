@@ -387,7 +387,7 @@ TEST(CBackend, BuildUnionOwnAndOptionalField) {
 
 TEST(CBackend, BuildCUnion) {
   const std::string src = write_temp_file(
-      "cunion U { i: i32; n: i32; }\n"
+      "cunion U { i: i32; n: i32; f: f32; }\n"
       "func main(): i32 {\n"
       "  var u = .U{ .i = 5 };\n"
       "  if (u.i != 5) { return 1; }\n"
@@ -395,6 +395,8 @@ TEST(CBackend, BuildCUnion) {
       "  if (u.i != 7) { return 2; }\n"
       "  var v: U = u;\n"
       "  if (v.i != 7) { return 3; }\n"
+      "  var w = .U{ .f = 1.5f32 };\n"
+      "  if (w.f != 1.5f32) { return 4; }\n"
       "  return 0;\n"
       "}\n",
       "cbackend_cunion");

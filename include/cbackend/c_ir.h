@@ -23,6 +23,8 @@ typedef enum {
     CIR_TYPE_OPTION,
     CIR_TYPE_UNION,
     CIR_TYPE_CUNION,
+    CIR_TYPE_F32,
+    CIR_TYPE_F64,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -70,6 +72,7 @@ typedef enum {
     CIR_EXPR_UNION_MEMBER,
     CIR_EXPR_UNION_TAG,
     CIR_EXPR_CUNION_CONSTRUCT,
+    CIR_EXPR_FLOAT,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -81,6 +84,7 @@ typedef struct cir_init {
 typedef struct cir_expr {
     cir_expr_kind_t kind;
     int64_t         int_value;
+    double          float_value;
     bool            bool_value;
     const char     *text;
     size_t          text_len;
@@ -186,6 +190,7 @@ cir_field_t   *cir_field_new(arena_t *arena, const char *name,
 void           cir_type_add_field(cir_type_t *t, cir_field_t *f);
 void           cir_unit_add_type(cir_unit_t *u, cir_type_t *t);
 cir_expr_t    *cir_expr_int(arena_t *arena, int64_t value);
+cir_expr_t    *cir_expr_float(arena_t *arena, double value);
 cir_expr_t    *cir_expr_bool(arena_t *arena, bool value);
 cir_expr_t    *cir_expr_ident(arena_t *arena, const char *name);
 cir_expr_t    *cir_expr_unary(arena_t *arena, const char *op, cir_expr_t *e);
