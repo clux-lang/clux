@@ -29,6 +29,14 @@ clux AST（sema 之后、已单态化）
 
 ### C IR 约束
 
+- **生成 C 不引入任何标准库头文件**：clux 产物不与 C 源码兼容编译，只按
+  ABI 与动态库交互。`.h` 自带基础类型/宏（`__INT32_TYPE__` / `__SIZE_TYPE__`
+  / `_Bool` / `NULL` / `clux_offsetof`），`.c` 自带运行期符号原型
+  （malloc/calloc/realloc/free/memcpy/memset/memcmp/strlen/strncmp/abort/
+  printf/fflush）。用户 `extern cfunc` 若与这些名字相同，其原型**跳过**
+  （复用生成代码自带的原型），因此 `extern cfunc libc::printf` 等不再冲突；
+- 失败跳转使用 clang/gcc `__builtin_setjmp/__builtin_longjmp`（5 指针
+  buffer），不依赖 `<setjmp.h>`；
 - C IR 只描述 C 级构造；
 - 函数统一使用 env-first ABI；
 - writer 不负责类型、名字、清理或求值顺序决策；
