@@ -2109,6 +2109,31 @@ TEST(CBackend, TestRunnerAcrossModules) {
   fs::remove_all(proj, ec);
 }
 
+/* 硬崩溃（abort/panic）不能 longjmp：runner 崩溃后 CLI 回退到逐用例隔离，
+ * 崩溃只影响当前用例，后续用例仍然执行。 */
+TEST(CBackend, TestRunnerCrashFallback) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "test_crash";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  std::FILE *fp = std::fopen((proj / "crash.cx").string().c_str(), "wb");
+  ASSERT_NE(fp, nullptr);
+  std::fputs("test \"c.ok\" { assert(1 == 1); }\n"
+             "test \"c.crash\" { var o: ?i32 = nil; var v = o.!; "
+             "assert(v == 0); }\n"
+             "test \"c.after\" { assert(2 == 2); }\n",
+             fp);
+  std::fclose(fp);
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int rc = run_cli({"test", "crash.cx", "--backend=c"});
+  fs::current_path(saved);
+  EXPECT_EQ(rc, 1);
+  fs::remove_all(proj, ec);
+}
+
 /* `--emit-c` 与 `--emit-obj` 互斥。 */
 TEST(CBackend, RejectsConflictingEmitModes) {
   const std::string src =

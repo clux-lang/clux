@@ -47,6 +47,25 @@ static size_t suite_prefix_len(const char *name) {
     return dot ? (size_t)(dot - name) : (name ? strlen(name) : 0);
 }
 
+/* 进程内 run 模式：一次运行全部用例（断言失败 longjmp，进程继续）。返回
+ * 0 = 全过、1 = 有失败、其它 = runner 崩溃（回退到逐用例隔离）。 */
+static int run_all_in_process(const char *exe, const char *log_path) {
+    char cmd[4096];
+    /* Windows：首 token 带引号时 `cmd /c` 会把首尾引号剥掉，必须整体用
+       括号包住（与测试里 std::system 的写法一致）。 */
+    snprintf(cmd, sizeof cmd, "(\"%s\" > \"%s\" 2>&1)", exe, log_path);
+    int code = run_process(cmd);
+    FILE *fp = fopen(log_path, "r");
+    if (fp) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, fp)) > 0)
+            fwrite(buf, 1, n, stdout);
+        fclose(fp);
+    }
+    return code;
+}
+
 static int run_tests_c(const char *src) {
     char *exe = runner_output_path(src);
     if (!exe) {
@@ -60,6 +79,24 @@ static int run_tests_c(const char *src) {
         free(exe);
         return rc;
     }
+
+    char log_path[4096];
+    snprintf(log_path, sizeof log_path, "%s.log", exe);
+    int code = run_all_in_process(exe, log_path);
+    remove(log_path);
+    if (code == 0 || code == 1) {
+        /* 正常结束：输出（含 gtest 风格汇总）已由 runner 打印。 */
+        if (!getenv("CLUX_KEEP_TEST_EXE")) remove(exe);
+        cbackend_free_test_names(names, count);
+        free(exe);
+        return code;
+    }
+
+    /* runner 崩溃（panic/abort/段错误）：回退到逐用例子进程隔离，保证
+     * 崩溃只影响当前用例，其余用例仍然执行。 */
+    printf("(test runner crashed with exit %d; falling back to per-case "
+           "isolation)\n", code);
+    fflush(stdout);
 
     char suite_names[256][128];
     size_t suites = 0;

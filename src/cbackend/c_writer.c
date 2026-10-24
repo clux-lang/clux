@@ -196,9 +196,31 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "#include <string.h>\n");
     }
     if (unit->test_runner || unit->tests) {
-        /* 测试运行器：assert 失败打印 + 用例下标解析需要 stdio/stdlib。 */
+        /* 测试运行器：assert 失败打印 + 用例下标解析/计时需要 stdio/stdlib；
+           失败用 setjmp/longjmp 回到 runner（**不退出进程**），崩溃（panic /
+           abort）仍由外层进程隔离兜底。 */
         cw_put(sb, "#include <stdio.h>\n");
         cw_put(sb, "#include <stdlib.h>\n");
+        cw_put(sb, "#include <setjmp.h>\n");
+        cw_put(sb, "#include <string.h>\n");
+        cw_put(sb, "#include <time.h>\n");
+    }
+    if (unit->test_runner || unit->tests) {
+        /* 断言运行时用 `struct clux_str` 传消息：测试单元无条件给出定义
+           （include guard 与类型发射器共享，重复定义安全）。必须先于
+           `extern void clux_assert(..., struct clux_str);`。 */
+        cw_put(sb, "#ifndef CLUX_STR_STRUCT_DEFINED\n");
+        cw_put(sb, "#define CLUX_STR_STRUCT_DEFINED\n");
+        cw_put(sb, "struct clux_str { const char *data; size_t len; };\n");
+        cw_put(sb, "#endif\n");
+    }
+    if (unit->test_runner) {
+        /* 跨模块共享的失败跳转点（各模块的 clux_assert 都 longjmp 到这里）。 */
+        cw_put(sb, "jmp_buf clux_test_fail;\n");
+    } else if (unit->tests) {
+        cw_put(sb, "extern jmp_buf clux_test_fail;\n");
+        cw_put(sb,
+               "extern void clux_assert(bool cond, struct clux_str text);\n");
     }
     if (unit->uses_alloc) {
         cw_put(sb, "static void *clux_new(size_t n, const void *src) {\n");
@@ -270,13 +292,15 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "\n");
     }
 
-    if ((unit->test_runner || unit->tests) && unit->uses_assert) {
-        cw_put(sb, "static void clux_assert(bool cond, struct clux_str text) {\n");
+    if (unit->test_runner && unit->uses_assert) {
+        /* 断言失败：打印信息后 longjmp 回 runner 的 setjmp 点——该用例判为
+           FAILED，**进程继续跑后面的用例**。 */
+        cw_put(sb, "void clux_assert(bool cond, struct clux_str text) {\n");
         cw_put(sb, "    if (cond) return;\n");
         cw_put(sb, "    printf(\"assert failed: %.*s\\n\", (int)text.len,"
                    " text.data ? text.data : \"\");\n");
         cw_put(sb, "    fflush(stdout);\n");
-        cw_put(sb, "    exit(1);\n");
+        cw_put(sb, "    longjmp(clux_test_fail, 1);\n");
         cw_put(sb, "}\n\n");
     }
 
@@ -350,21 +374,85 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
             }
             if (!local) cw_printf(sb, "extern void %s(void *env);\n", sym);
         }
-        cw_put(sb, "int main(int argc, char **argv) {\n");
-        cw_put(sb, "    if (argc < 2) return 2;\n");
-        cw_put(sb, "    int idx = 0;\n");
-        cw_put(sb, "    for (const char *p = argv[1]; *p; p++) {\n");
-        cw_put(sb, "        if (*p < '0' || *p > '9') return 2;\n");
-        cw_put(sb, "        idx = idx * 10 + (*p - '0');\n");
-        cw_put(sb, "    }\n");
-        cw_put(sb, "    switch (idx) {\n");
+        /* 用例表：显示名 + 函数指针（跨模块 run 模式用）。 */
+        cw_put(sb, "static void clux_no_test(void *env) { (void)env; }\n");
+        cw_printf(sb, "static const char *const clux_test_names[%zu] = {\n",
+                  unit->test_case_count);
+        for (size_t i = 0; i < unit->test_case_count; i++) {
+            cw_put(sb, "    \"");
+            cw_write_c_string(sb, unit->test_cases[i].display
+                                      ? unit->test_cases[i].display : "");
+            cw_put(sb, "\",\n");
+        }
+        cw_put(sb, "};\n");
+        cw_printf(sb, "static void (*const clux_test_fns[%zu])(void *) = {\n",
+                  unit->test_case_count);
         for (size_t i = 0; i < unit->test_case_count; i++) {
             const char *sym = unit->test_cases[i].symbol;
-            if (!sym) continue;
-            cw_printf(sb, "    case %zu: %s(NULL); return 0;\n", i, sym);
+            cw_printf(sb, "    %s,\n", sym ? sym : "clux_no_test");
         }
-        cw_put(sb, "    default: return 3;\n");
+        cw_put(sb, "};\n");
+        cw_put(sb, "int main(int argc, char **argv) {\n");
+        cw_put(sb, "    if (argc >= 2 && argv[1][0] >= '0' && argv[1][0] <= "
+                   "'9') {\n");
+        cw_put(sb, "        int idx = 0;\n");
+        cw_put(sb, "        for (const char *p = argv[1]; *p; p++) {\n");
+        cw_put(sb, "            if (*p < '0' || *p > '9') return 2;\n");
+        cw_put(sb, "            idx = idx * 10 + (*p - '0');\n");
+        cw_put(sb, "        }\n");
+        cw_put(sb, "        if (idx < 0 || (size_t)idx >= "
+                   "sizeof clux_test_fns / sizeof clux_test_fns[0]) "
+                   "return 3;\n");
+        cw_put(sb, "        clux_test_fns[idx](NULL);\n");
+        cw_put(sb, "        return 0;\n");
         cw_put(sb, "    }\n");
+        /* 无参数：进程内依次跑全部用例；断言失败 longjmp 回来继续下一条。 */
+        cw_put(sb, "    size_t total = sizeof clux_test_fns / sizeof "
+                   "clux_test_fns[0];\n");
+        cw_put(sb, "    size_t failed = 0, passed = 0, suites = 0;\n");
+        cw_put(sb, "    for (size_t i = 0; i < total; i++) {\n");
+        cw_put(sb, "        size_t n = 0;\n");
+        cw_put(sb, "        while (clux_test_names[i][n] && "
+                   "clux_test_names[i][n] != '.') n++;\n");
+        cw_put(sb, "        bool seen = false;\n");
+        cw_put(sb, "        for (size_t k = 0; k < i; k++) {\n");
+        cw_put(sb, "            size_t m = 0;\n");
+        cw_put(sb, "            while (clux_test_names[k][m] && "
+                   "clux_test_names[k][m] != '.') m++;\n");
+        cw_put(sb, "            if (m == n && strncmp(clux_test_names[k], "
+                   "clux_test_names[i], n) == 0) { seen = true; break; }\n");
+        cw_put(sb, "        }\n");
+        cw_put(sb, "        if (!seen) suites++;\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    printf(\"[==========] Running %zu tests from %zu test "
+                   "suites.\\n\", total, suites);\n");
+        cw_put(sb, "    for (size_t i = 0; i < total; i++) {\n");
+        cw_put(sb, "        const char *name = clux_test_names[i];\n");
+        cw_put(sb, "        printf(\"[ RUN      ] %s\\n\", name);\n");
+        cw_put(sb, "        fflush(stdout);\n");
+        cw_put(sb, "        clock_t t0 = clock();\n");
+        cw_put(sb, "        if (setjmp(clux_test_fail) == 0) {\n");
+        cw_put(sb, "            clux_test_fns[i](NULL);\n");
+        cw_put(sb, "            double ms = (double)(clock() - t0) * 1000.0 / "
+                   "(double)CLOCKS_PER_SEC;\n");
+        cw_put(sb, "            printf(\"[       OK ] %s (%.0f ms)\\n\", name, "
+                   "ms);\n");
+        cw_put(sb, "            passed++;\n");
+        cw_put(sb, "        } else {\n");
+        cw_put(sb, "            double ms = (double)(clock() - t0) * 1000.0 / "
+                   "(double)CLOCKS_PER_SEC;\n");
+        cw_put(sb, "            printf(\"[  FAILED  ] %s (%.0f ms)\\n\", name, "
+                   "ms);\n");
+        cw_put(sb, "            failed++;\n");
+        cw_put(sb, "        }\n");
+        cw_put(sb, "        fflush(stdout);\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "    printf(\"[==========] %zu tests from %zu test suites "
+                   "ran.\\n\", total, suites);\n");
+        cw_put(sb, "    printf(\"[  PASSED  ] %zu tests.\\n\", passed);\n");
+        cw_put(sb, "    if (failed) printf(\"[  FAILED  ] %zu tests.\\n\", "
+                   "failed);\n");
+        cw_put(sb, "    return failed ? 1 : 0;\n");
         cw_put(sb, "}\n");
     } else {
         for (cir_function_t *f = fns; f; f = f->next) {

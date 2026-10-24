@@ -318,13 +318,17 @@ clux build hello.cx
     non-static（跨编译单元可见）；
   - 每个模块照常生成自己的 `.c/.h/.obj`（不生成 main）；**入口模块**的
     C 单元生成 runner：用例表跨模块合并（依赖在前、入口在后），为不在本
-    单元的用例函数声明 `extern void <sym>(void *env);`，`main(argc, argv)`
-    按 `argv[1]` 下标分派（0 = 通过）；
-  - CLI 以子进程逐个运行用例，panic/assert 只影响当前用例；
-  - `assert(cond)` 映射为各测试单元生成的 `clux_assert`（`unit->tests` 时
-    生成，失败打印 `assert failed: ...` 并以非 0 退出）；
-  - 输出与 VM 运行器同款 gtest 风格汇总；没有 test 块时报
-    `test: no test blocks found`；
+    单元的用例函数声明 `extern void <sym>(void *env);`；
+  - **失败不退出进程**：断言失败走 `setjmp/longjmp`（runner 每个用例
+    `setjmp(clux_test_fail)`，跨模块共享的 `clux_assert` 打印
+    `assert failed: ...` 后 `longjmp` 回来），该用例判 FAILED、**继续跑
+    后面的用例**，最后汇总并返回 1；
+  - 单用例模式（`exe <index>`）保留，供调试/隔离；
+  - 硬崩溃（panic → `abort()`、段错误等）无法安全 longjmp：runner 崩溃时
+    CLI 丢弃其部分输出，自动**回退到逐用例子进程隔离**，崩溃只影响当前
+    用例，其余用例照常执行；
+  - 输出与 VM 运行器同款 gtest 风格汇总（runner 自己打印，包含耗时）；
+    没有 test 块时报 `test: no test blocks found`；
   - 回归测试：`CBackend.TestRunnerAcrossModules`（依赖 + 入口 3 个用例
     全过；含失败 assert 的变体返回 1）。
 - `clux build` 选项与两阶段构建：
