@@ -117,6 +117,22 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
                      "the parameter as 'ref *T' to borrow)", i + 1, pn);
             return value_make_error(vm, msg);
         }
+        /* **反向规则**：fatal（将亡）实参必须被 own 形参接管。传给 ref /
+           非 own 形参时没有任何位置接住这块资源——临时值（new / 构造 /
+           clone / fatal 返回值）随调用结束无人释放 → 泄漏（实测 4 字节）。
+           想借用就先绑到 own 变量，再把变量传给 ref 形参。 */
+        if (i < sig->param_count && sig->params[i] &&
+            value_type_ownership(args[i]) == OWN_FATAL &&
+            type_ownership_of(sig->params[i]) != OWN_OWN) {
+            char pn[64];
+            sig_type_name(sig->params[i], pn, sizeof pn);
+            snprintf(msg, sizeof msg,
+                     "argument %zu: a dying value (FATAL) must be caught by an "
+                     "'own' position; parameter of type %s does not take "
+                     "ownership (bind it to an own variable, or pass it to an "
+                     "own parameter)", i + 1, pn);
+            return value_make_error(vm, msg);
+        }
         if (i < sig->param_count && sig->params[i] &&
             !type_eq(value_type(args[i]), sig->params[i])) {
             value_t *casted = value_implicit_cast(vm, args[i], sig->params[i]);

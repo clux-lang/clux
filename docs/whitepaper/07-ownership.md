@@ -64,6 +64,21 @@ clone(x)
 
 `fatal` 值必须被绑定到 `own` 槽位、传给接收 `own` 的参数、或作为返回值转交。
 
+把将亡值传给 `ref` 或非 `own` 形参是编译错误：调用结束没有任何位置接住这块
+资源（临时值本来由调用者负责销毁）→ 泄漏。想借用就先把它绑到 `own` 变量：
+
+```clux
+struct Box { p: own *i32; }
+
+func peek(b: ref *Box): i32 { return b.p.*; }   // 借用
+func take(b: own Box): i32 { return b.p.*; }    // 接管
+
+var b: own Box = .Box{ .p = new i32{7} };
+peek(b.&);                                      // 借用变量
+take(.Box{ .p = new i32{8} });                  // fatal → own 形参：合法
+peek(.Box{ .p = new i32{9} });                  // 编译错误：fatal → ref 形参
+```
+
 ## 7.5 share / weak
 
 ```clux

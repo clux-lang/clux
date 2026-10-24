@@ -139,7 +139,80 @@ TEST(OwnSlotCopy, AllowsInferredCloneOfOwnSlotField) {
       "own_copy_clone_inferred");
 }
 
-/* 合法写法 3：遍历 own 链表用 `ref` 视图（读 `q.n` 只做 nil 判定 / 解包）。 */TEST(OwnSlotCopy, AllowsRefTraversalOfOwnList) {
+/* ============================================================================
+ * fatal 实参的对称规则：fatal（将亡）值必须由 **own 形参**接管。
+ *
+ * 传给 ref / 非 own 形参时没有任何位置接住资源——临时值（new / 构造 /
+ * clone / fatal 返回值）随调用结束无人释放 → 泄漏（实测 4 字节）。
+ * 校验点在 `func_shadow_call`（实参 → 形参转换的唯一入口）。
+ * ========================================================================== */
+
+TEST(OwnSlotCopy, RejectsFatalArgToRefParam) {
+  clux_expect_reject(
+      "struct P { x: i32; }\n"
+      "func show(p: ref *P): i32 { return p.x; }\n"
+      "func main(): i32 { return show(new P{ .x = 1 }); }\n",
+      "must be caught by an 'own' position", "fatal_arg_ref");
+}
+
+TEST(OwnSlotCopy, RejectsFatalArgToNestedOwnParam) {
+  clux_expect_reject(
+      "struct Node { v: i32; n: ?own *Node; }\n"
+      "func take(n: ?own *Node): i32 { return 0; }\n"
+      "func main(): i32 {\n"
+      "  return take(.?own *Node{ new Node{ .v = 1, .n = nil } });\n"
+      "}\n",
+      "must be caught by an 'own' position", "fatal_arg_nested_own");
+}
+
+TEST(OwnSlotCopy, RejectsFatalArgToByValueOwnSlotParam) {
+  clux_expect_reject(
+      "struct Box { p: own *i32; }\n"
+      "func take(b: Box): i32 { return 0; }\n"
+      "func main(): i32 { return take(.Box{ .p = new i32{1} }); }\n",
+      "must be caught by an 'own' position", "fatal_arg_by_value");
+}
+
+TEST(OwnSlotCopy, RejectsMovedValueToRefParam) {
+  clux_expect_reject(
+      "struct P { x: i32; }\n"
+      "func show(p: ref *P): i32 { return p.x; }\n"
+      "func main(): i32 {\n"
+      "  var a: own *P = new P{ .x = 1 };\n"
+      "  return show(move(a));\n"
+      "}\n",
+      "must be caught by an 'own' position", "fatal_arg_move_ref");
+}
+
+/* 合法：own 形参接管 fatal 构造，调用方不再持有（无泄漏）。 */
+TEST(OwnSlotCopy, AllowsFatalArgToOwnParam) {
+  clux_expect_ok(
+      "struct Box { p: own *i32; }\n"
+      "func take(b: own Box): i32 { return b.p.*; }\n"
+      "func main(): i32 {\n"
+      "  if (take(.Box{ .p = new i32{7} }) != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "fatal_arg_own");
+}
+
+/* 合法：own 变量可以借出（`b.&` / 方法调用），所有权仍在变量。 */
+TEST(OwnSlotCopy, AllowsBorrowOfOwnAggregate) {
+  clux_expect_ok(
+      "struct Box {\n"
+      "  p: own *i32;\n"
+      "  func get(self: ref *Box): i32 { return self.p.*; }\n"
+      "}\n"
+      "func peek(b: ref *Box): i32 { return b.p.*; }\n"
+      "func main(): i32 {\n"
+      "  var b: own Box = .Box{ .p = new i32{7} };\n"
+      "  if (b.get() != 7) { return 1; }\n"
+      "  if (peek(b.&) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "fatal_arg_borrow");
+}
+TEST(OwnSlotCopy, AllowsRefTraversalOfOwnList) {
   clux_expect_ok(
       "struct List[T] {\n"
       "  v: T;\n"
