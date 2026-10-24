@@ -169,9 +169,14 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
         cw_put(sb, "continue;\n");
         break;
     case CIR_STMT_FREE:
-        cw_put(sb, "clux_free(");
-        cw_write_expr(sb, s->expr);
-        cw_put(sb, ");\n");
+        if (s->expr && s->expr->kind == CIR_EXPR_CLOSURE_RELEASE) {
+            cw_write_expr(sb, s->expr);
+            cw_put(sb, ";\n");
+        } else {
+            cw_put(sb, "clux_free(");
+            cw_write_expr(sb, s->expr);
+            cw_put(sb, ");\n");
+        }
         break;
     default:
         break;

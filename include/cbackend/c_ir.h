@@ -78,6 +78,7 @@ typedef enum {
     CIR_EXPR_FUNC_OBJ,
     CIR_EXPR_FUNC_CALL,
     CIR_EXPR_CLOSURE,
+    CIR_EXPR_CLOSURE_RELEASE,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -247,6 +248,7 @@ cir_expr_t    *cir_expr_func_call(arena_t *arena, cir_expr_t *callee,
                                   cir_expr_t *args);
 cir_expr_t    *cir_expr_closure(arena_t *arena, cir_type_t *type,
                                 const char *fn_name, cir_expr_t *env);
+cir_expr_t    *cir_expr_closure_release(arena_t *arena, cir_expr_t *object);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

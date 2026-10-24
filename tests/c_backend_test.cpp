@@ -479,6 +479,25 @@ TEST(CBackend, BuildStaticMethod) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildOwnCaptureClosure) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{5};\n"
+      "  var f: own func(i32) -> i32 =\n"
+      "      move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
+      "  return f(1);\n"
+      "}\n",
+      "cbackend_m5_own_closure");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 6);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

@@ -369,6 +369,8 @@ cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE)
                 ex = cir_expr_slice_data(lc->arena, ex);
+            else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC)
+                ex = cir_expr_closure_release(lc->arena, ex);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
             st->expr = ex;

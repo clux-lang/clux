@@ -264,6 +264,10 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_FUNC_DEF:
         return lower_func_literal(lc, (ast_func_def_t *)e);
+    case AST_MOVE:
+        return lower_expr(lc, ((ast_move_t *)e)->operand);
+    case AST_TAKE:
+        return lower_expr(lc, ((ast_take_t *)e)->operand);
     case AST_SLICE:
         return lower_slice(lc, (ast_slice_t *)e);
     case AST_MAKE:

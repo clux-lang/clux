@@ -176,6 +176,9 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (n->kind != AST_FUNC_DEF) continue;
         ast_func_def_t *fn = (ast_func_def_t *)n;
         if (strslice_eq(fn->name, STRSLICE_LIT("main"))) continue;
+        if (fn->name.ptr && fn->name.len >= 7 &&
+            memcmp(fn->name.ptr, "__clone", 7) == 0)
+            continue; /* sema 生成的 clone helper：C 后端不消费 */
         if (fn->generic.count > 0 || fn->is_cfunc || fn->is_extern_cfunc)
             continue;
         cir_function_t *cf = lower_function(&lc, fn, false);

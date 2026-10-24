@@ -170,6 +170,23 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     }
     cir_expr_t *env_new = cir_expr_new(lc->arena, env, NULL);
     env_new->closure_env = true;
+    if (fn->env_dispose_fid) {
+        sema_func_t *sf = sema_func_by_id(lc->sema, fn->env_dispose_fid);
+        if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+            ast_func_def_t *df = (ast_func_def_t *)sf->def;
+            env_new->op = mangle(lc->arena, "clux_fn_", df->name);
+        }
+    }
+    if (!env_new->op && fn->capture_type_id) {
+        for (sema_destroy_fn_t *d = lc->sema->destroy_fns; d; d = d->next) {
+            if (d->type && d->type->id == fn->capture_type_id && d->fn &&
+                d->fn->kind == AST_FUNC_DEF) {
+                ast_func_def_t *df = (ast_func_def_t *)d->fn;
+                env_new->op = mangle(lc->arena, "clux_fn_", df->name);
+                break;
+            }
+        }
+    }
     lc->unit->uses_closure_cleanup = true;
     /* inits 取反（构造顺序） */
     for (cir_init_t *it = inits; it;) {

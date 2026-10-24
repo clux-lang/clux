@@ -58,22 +58,36 @@ int cir_write_file(const cir_unit_t *unit, const char *path,
         cw_put(sb, "}\n");
         if (unit->uses_closure_cleanup) {
             cw_put(sb, "struct clux_closure_node { void *env; "
+                       "void (*dispose)(void *, void *); "
                        "struct clux_closure_node *next; };\n");
             cw_put(sb, "static struct clux_closure_node *clux_closures;\n");
             cw_put(sb, "static void *clux_closure_new(size_t n, "
-                       "const void *src) {\n");
+                       "const void *src, void (*dispose)(void *, void *)) {\n");
             cw_put(sb, "    void *p = clux_new(n, src);\n");
             cw_put(sb, "    struct clux_closure_node *node = "
                        "malloc(sizeof(*node));\n");
             cw_put(sb, "    if (!node) abort();\n");
-            cw_put(sb, "    node->env = p; node->next = clux_closures;\n");
-            cw_put(sb, "    clux_closures = node;\n");
+            cw_put(sb, "    node->env = p; node->dispose = dispose;\n");
+            cw_put(sb, "    node->next = clux_closures; clux_closures = node;\n");
             cw_put(sb, "    return p;\n");
+            cw_put(sb, "}\n");
+            cw_put(sb, "static void clux_closure_release(void *env) {\n");
+            cw_put(sb, "    struct clux_closure_node **pp = &clux_closures;\n");
+            cw_put(sb, "    while (*pp) {\n");
+            cw_put(sb, "        struct clux_closure_node *n = *pp;\n");
+            cw_put(sb, "        if (n->env == env) {\n");
+            cw_put(sb, "            *pp = n->next;\n");
+            cw_put(sb, "            if (n->dispose) n->dispose(NULL, n->env);\n");
+            cw_put(sb, "            free(n->env); free(n); return;\n");
+            cw_put(sb, "        }\n");
+            cw_put(sb, "        pp = &n->next;\n");
+            cw_put(sb, "    }\n");
             cw_put(sb, "}\n");
             cw_put(sb, "static void clux_closure_cleanup_all(void) {\n");
             cw_put(sb, "    while (clux_closures) {\n");
             cw_put(sb, "        struct clux_closure_node *n = clux_closures;\n");
             cw_put(sb, "        clux_closures = n->next;\n");
+            cw_put(sb, "        if (n->dispose) n->dispose(NULL, n->env);\n");
             cw_put(sb, "        free(n->env); free(n);\n");
             cw_put(sb, "    }\n");
             cw_put(sb, "}\n");

@@ -36,6 +36,10 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return func_type_of_def(lc, func_def_of_ref(lc, (ast_func_ref_t *)e));
     case AST_FUNC_DEF:
         return func_type_of_def(lc, (ast_func_def_t *)e);
+    case AST_MOVE:
+        return infer_expr_type(lc, ((ast_move_t *)e)->operand);
+    case AST_TAKE:
+        return infer_expr_type(lc, ((ast_take_t *)e)->operand);
     case AST_DEREF: {
         const type_t *pt = infer_expr_type(lc, ((ast_deref_t *)e)->operand);
         return pt && type_kind_of(pt) == TYPE_KIND_PTR ? ptr_type_base(pt) : NULL;

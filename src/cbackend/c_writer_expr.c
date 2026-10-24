@@ -257,6 +257,11 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_write_expr(sb, e->lhs);
         cw_put(sb, " }");
         break;
+    case CIR_EXPR_CLOSURE_RELEASE:
+        cw_put(sb, "clux_closure_release((");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ").env)");
+        break;
     case CIR_EXPR_NEW:
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
@@ -284,6 +289,15 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
             cw_put(sb, "}");
         } else {
             cw_put(sb, "NULL");
+        }
+        if (e->closure_env) {
+            cw_put(sb, ", ");
+            if (e->op) {
+                cw_put(sb, "(void (*)(void *, void *))");
+                cw_put(sb, e->op);
+            } else {
+                cw_put(sb, "NULL");
+            }
         }
         cw_put(sb, ")");
         break;
