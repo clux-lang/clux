@@ -288,6 +288,39 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
+        /* extern var 写：C 符号是普通全局变量（`td_i32 = v;`）；str 目标
+           需要把 clux_str 取值成 char*（`.data`）。 */
+        if (a->target && a->target->kind == AST_SCOPE_REF &&
+            ((ast_scope_ref_t *)a->target)->is_ffi_var) {
+            bool is_str = false;
+            const char *cname = lower_ffi_var_target(
+                lc, (ast_scope_ref_t *)a->target, &is_str);
+            if (!cname) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+            if (!st) return NULL;
+            st->lhs = cir_expr_ident(lc->arena, cname);
+            st->op = op;
+            cir_expr_t *value = lower_expr(lc, a->value);
+            if (!st->lhs || !value) {
+                *ok = false;
+                return NULL;
+            }
+            if (is_str) {
+                if (strcmp(op, "=") != 0) {
+                    diag_error(lc->sema->diag, sema_loc(lc->sema, s),
+                               "c backend: extern `str` variable does not "
+                               "support compound assignment");
+                    *ok = false;
+                    return NULL;
+                }
+                value = cir_expr_member(lc->arena, value, "data");
+            }
+            st->expr = value;
+            return st;
+        }
         if (a->target && a->target->kind == AST_MEMBER &&
             ((ast_member_t *)a->target)->is_bitfield) {
             /* bitfield 字段不是 C 左值：按位读改写（CIR_EXPR_BITFIELD_SET）。 */

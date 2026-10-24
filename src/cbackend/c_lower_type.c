@@ -61,6 +61,19 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         const type_t *u = enum_type_underlying(t);
         return u ? map_type(lc, u) : NULL;
     }
+    /* `cfunc(...)`：C 函数指针（typedef 由 FFI 层按签名生成/去重）。 */
+    if (type_kind_of(t) == TYPE_KIND_CFUNC) {
+        cir_type_t *cached = cir_type_find(lc->unit, t, CIR_TYPE_PTR);
+        if (cached) return cached;
+        bool ok = true;
+        const char *tag = ffi_c_func_pointer_type(lc, t, &ok);
+        if (!ok || !tag) return NULL;
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_PTR, tag);
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        return ct;
+    }
     /* `opaque`：C 里是 `void *`（FFI 指针/回调实参、`extern cfunc` 的裸指针
        都用它；`data(s)` / `a.&` 也产生它）。 */
     if (t == vm->type_opaque) {

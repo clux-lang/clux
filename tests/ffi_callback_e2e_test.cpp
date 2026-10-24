@@ -204,6 +204,14 @@ const char *kSystemLib =
     "libc.so.6";
 #endif
 
+/* 测试动态库（tests/ffi_testdata.c 编出；与 ffi_struct_test 同一目标）。 */
+const char *kTestDataLib =
+#if defined(_WIN32)
+    "clux_ffi_testdata.dll";
+#else
+    "libclux_ffi_testdata.so";
+#endif
+
 }  // namespace
 
 class FfiCallbackE2E : public ::testing::Test {
@@ -440,4 +448,33 @@ TEST_F(FfiCallbackE2E, PureCluxProgramSortsWithCQsortCallback) {
   ASSERT_FALSE(value_is_error(unit.vm, r));
   EXPECT_EQ((int64_t)read_sint(r), 0)
       << "clux 自检返回值（1=未排序 2=首尾错 3=回调没被调用）";
+}
+
+/* extern cfunc 返回 **C 函数指针**（`...: cfunc(i32,i32)->i32`）：
+ * clux 侧拿到的是带 cfunc 类型的裸指针，可以直接再传给另一个 C 函数。 */
+TEST_F(FfiCallbackE2E, ExternCfuncReturnsCFunctionPointer) {
+  std::string src =
+      std::string("extern lib td from \"") + kTestDataLib +
+      "\";\n"
+      "extern cfunc td::clux_get_binop(which: i32): cfunc(i32, i32) -> i32;\n"
+      "extern cfunc td::clux_apply_binop(op: cfunc(i32, i32) -> i32, a: i32,\n"
+      "                                   b: i32): i32;\n"
+      "cfunc neg(a: i32, b: i32): i32 { return 0 - a; }\n"
+      "func main(): i32 {\n"
+      "  var add: cfunc(i32, i32) -> i32 = td::clux_get_binop(0);\n"
+      "  var sub: cfunc(i32, i32) -> i32 = td::clux_get_binop(1);\n"
+      "  if (td::clux_apply_binop(add, 20, 22) != 42) { return 1; }\n"
+      "  if (td::clux_apply_binop(sub, 50, 8) != 42) { return 2; }\n"
+      "  if (td::clux_apply_binop(cfunc_ptr(neg), 5, 0) != -5) { return 3; }\n"
+      "  if (td::clux_apply_binop(td::clux_get_binop(1), 50, 8) != 42)\n"
+      "    { return 4; }\n"
+      "  return 0;\n"
+      "}\n";
+  ASSERT_TRUE(unit.compile(src, "cfunc_ret"));
+  value_t *main_fn = unit.lookup("main");
+  ASSERT_NE(main_fn, nullptr);
+  value_t *r = value_call(unit.vm, main_fn, nullptr, 0);
+  ASSERT_NE(r, nullptr);
+  ASSERT_FALSE(value_is_error(unit.vm, r));
+  EXPECT_EQ((int64_t)read_sint(r), 0);
 }

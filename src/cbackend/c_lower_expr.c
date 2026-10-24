@@ -452,9 +452,11 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CHAR_LIT:
         return cir_expr_int(lc->arena, ((ast_char_lit_t *)e)->value);
     case AST_SCOPE_REF: {
+        ast_scope_ref_t *sr = (ast_scope_ref_t *)e;
+        /* extern var 读取：`td::td_i32` → 库里的数据符号（str 包成 clux_str）。 */
+        if (sr->is_ffi_var) return lower_ffi_var_read(lc, sr);
         /* 枚举 variant `Color::Red`：sema 折叠后 type_expr 是 AST_TYPE_REF，
            `value` 是底层整数值。enum 在 C 侧就是底层整数 → 直接出字面量。 */
-        ast_scope_ref_t *sr = (ast_scope_ref_t *)e;
         const type_t *t = NULL;
         if (sr->type_expr && sr->type_expr->kind == AST_TYPE_REF)
             t = resolve_type_expr(lc->sema, sr->type_expr);
@@ -884,6 +886,29 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             ((ast_member_t *)a->target)->is_bitfield)
             return lower_bitfield_assign(lc, (ast_member_t *)a->target, op,
                                          a->value);
+        /* extern var 写：C 符号是普通全局变量；str 目标取 `.data`。 */
+        if (a->target && a->target->kind == AST_SCOPE_REF &&
+            ((ast_scope_ref_t *)a->target)->is_ffi_var) {
+            bool is_str = false;
+            const char *cname = lower_ffi_var_target(
+                lc, (ast_scope_ref_t *)a->target, &is_str);
+            if (!cname) return NULL;
+            cir_expr_t *lhs = cir_expr_ident(lc->arena, cname);
+            cir_expr_t *value = lower_expr(lc, a->value);
+            if (!lhs || !value) return NULL;
+            if (is_str) {
+                if (strcmp(op, "=") != 0) {
+                    diag_error(lc->sema->diag,
+                               sema_loc(lc->sema, (ast_node_t *)e),
+                               "c backend: extern `str` variable does not "
+                               "support compound assignment");
+                    lc->failed = true;
+                    return NULL;
+                }
+                value = cir_expr_member(lc->arena, value, "data");
+            }
+            return cir_expr_assign(lc->arena, lhs, op, value);
+        }
         cir_expr_t *target = lower_expr(lc, a->target);
         cir_expr_t *value = lower_expr(lc, a->value);
         return target && op && value

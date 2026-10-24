@@ -239,7 +239,8 @@ clux build hello.cx
 - bitfield；
 - metadata 全局常量；
 - test 运行器；
-- FFI（`extern lib` 链接参数 + `extern cfunc` 声明/调用/回调）；
+- FFI（`extern lib` 链接参数 + `extern cfunc` 声明/调用/回调/返回值 +
+  `extern var` 数据符号读写）；
 - sema 单态化后的具体函数覆盖；
 - 与 VM 差分测试；
 - 构建产物导出（`--emit-c`）。
@@ -331,10 +332,21 @@ clux build hello.cx
   - `data(s)` → `(s).data`（`is_data_call`），与 `len(s)` 组成 C 的
     `(T*, n)` 对；
   - 变参：`...` 固定参数之后的实参按 C 默认实参提升（host cc 完成）；
-  - `cfunc_ptr(f)`：为**无捕获**的命名 clux 函数生成 C trampoline
-    （`static <ret> clux_cb_<f>(...) { return clux_fn_<f>(NULL, ...); }`），
-    `cfunc(...)` 参数/返回类型生成 `clux_cfn_<n>` typedef；带捕获的闭包
-    没有 C 等价物 → 明确拒绝；
+  - `cfunc_ptr(f)`：只有 **`cfunc` 定义**（C ABI 函数，无 env）才能取 C
+    函数指针——生成本后端 trampoline
+    （`static <ret> clux_cb_<f>(...) { return clux_fn_<f>(NULL, ...); }`）；
+    `cfunc(...)` 参数/返回类型生成 `clux_cfn_<n>` typedef；普通 `func` /
+    闭包没有 C 等价物 → 明确拒绝（闭包不能作为 C 函数，语言语义如此）；
+  - `cfunc(...)` 类型本身可作变量/参数/返回值（C 侧就是函数指针变量）：
+    `var cb: cfunc(i32,i32) -> i32 = ...`、`extern cfunc ...: cfunc(...)`
+    （返回 C 函数指针，sema 侧走 `BCODE_FFI_RET_TYPED`，VM 与 C 后端一致）；
+  - `extern var <lib>::<name>: T;`：库导出的**数据符号**（C 侧是
+    `extern <C 类型> <符号>;`，Windows 下带 `__declspec(dllimport)`，因为
+    数据导入没有 thunk）：
+    - 读 `lib::var`、写 `lib::var = v`（含复合赋值）；
+    - 支持整数/浮点/bool/opaque/enum/struct/cunion/str：enum 按底层整数，
+      struct/cunion 要求布局与 C 一致（含 `str` 字段的聚合拒绝），
+      `str` 读成 `clux_str`（`strlen`）、写取 `.data`；
   - `extern lib <alias> from "<name>"`：**不生成 C 代码**，只影响 host cc
     命令行：
     - `"*"` → 不链接（符号来自当前进程，如 CRT）；
@@ -358,7 +370,6 @@ clux build hello.cx
 - 测试运行器每个用例独立进程，全局变量在用例之间**不共享**（VM 运行器
   共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
 - `new` bitfield（sema 目前直接拒绝）；
-- `extern var`（动态库导出的数据符号）与 `extern cfunc` 返回函数指针；
 - 依赖 FFI / `import` 的 examples（`import` 仍属第一版明确不做，见下）；
 - 全量 `examples/` 与 VM 的差分校准（M7）。
 
@@ -373,7 +384,8 @@ clux build hello.cx
 
 - `clux.mod`；
 - import；
-- `extern var`（动态库数据符号；`extern lib` / `extern cfunc` 已在 M6 支持）；
+- `extern lib` / `extern cfunc` / `extern var` 已在 M6 支持（链接参数、原型、
+  数据符号读写、cfunc 返回值/回调）；
 - 标准库；
 - 跨文件链接；
 - C 编译器参数透传。

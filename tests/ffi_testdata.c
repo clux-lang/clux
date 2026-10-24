@@ -157,3 +157,23 @@ CLUX_TESTDATA_EXPORT void clux_fill_i32(int32_t *p, int32_t n, int32_t v) {
 CLUX_TESTDATA_EXPORT int32_t clux_str_first_byte(const char *s) {
     return s ? (int32_t)(unsigned char)s[0] : -1;
 }
+
+/* ---- C 函数指针作为**返回值**（`extern cfunc ...: cfunc(i32,i32)->i32`）----
+ * clux 侧拿到的就是裸函数指针，可以直接再传给另一个 C 函数（或其 clux
+ * `cfunc_ptr` 产物）。 */
+typedef int32_t (*clux_binop)(int32_t, int32_t);
+
+static int32_t td_binop_add(int32_t a, int32_t b) { return a + b; }
+static int32_t td_binop_sub(int32_t a, int32_t b) { return a - b; }
+
+CLUX_TESTDATA_EXPORT clux_binop clux_get_binop(int32_t which) {
+    return which == 0 ? td_binop_add : td_binop_sub;
+}
+
+CLUX_TESTDATA_EXPORT int32_t clux_apply_binop(clux_binop op, int32_t a,
+                                              int32_t b) {
+    return op ? op(a, b) : -1;
+}
+
+/* char* 全局（clux 侧 `extern var ...: str;`）：读成 clux_str，写取 .data */
+CLUX_TESTDATA_EXPORT const char *td_str = "hello from testdata";

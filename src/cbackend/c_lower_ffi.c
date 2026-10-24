@@ -167,6 +167,12 @@ static const char *ffi_cfunc_typedef(lower_ctx_t *lc, const type_t *t,
     return d->tag;
 }
 
+/* map_type 侧入口：`cfunc(...)` 的 C 函数指针 typedef 名。 */
+const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t,
+                                    bool *ok) {
+    return ffi_cfunc_typedef(lc, t, ok);
+}
+
 static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw, bool *ok) {
     const type_t *t = type_strip_quals(t_raw); /* 剥 const/volatile/所有权 */
     vm_t *vm = lc->sema->vm;
@@ -394,11 +400,100 @@ static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
         cir_unit_add_extern_symbol(lc->unit, cname);
 }
 
+/* extern var：库导出的**数据符号**（C 侧就是一个 `extern` 全局变量）。
+ * 支持的类型与 VM 的 ffi_data_kind_of/typed 数据符号一致：整数/浮点/bool/
+ * str/opaque/enum/struct/cunion；数组/切片/option 等由 sema 拒绝。
+ * `str` 比较特殊：C 符号是 `char*`，读要包成 clux_str、写要取 `.data`。 */
+static void collect_extern_var(lower_ctx_t *lc, ast_var_def_t *evd) {
+    const type_t *vt = evd->resolved_type;
+    if (!vt && evd->type_expr)
+        vt = sema_resolve_type_slot(lc->sema, &evd->type_expr);
+    if (!vt) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)evd),
+                   "c backend: extern var '%.*s': type could not be resolved",
+                   (int)evd->name.len, evd->name.ptr);
+        lc->failed = true;
+        return;
+    }
+    const type_t *core = type_strip_quals(vt);
+    bool is_str = core == lc->sema->vm->type_str;
+    bool ok = true;
+    lc->ffi_error = NULL;
+    const char *ctype = ffi_c_type(lc, vt, &ok);
+    if (!ok || !ctype) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)evd),
+                   "c backend: extern var '%.*s': type cannot cross the C ABI: "
+                   "%s",
+                   (int)evd->name.len, evd->name.ptr,
+                   lc->ffi_error ? lc->ffi_error : "unsupported type");
+        lc->failed = true;
+        return;
+    }
+    const char *cname = slice_str(lc, evd->name);
+    if (!cname) {
+        lc->failed = true;
+        return;
+    }
+    string_t *sb = string_new(lc->sema->vm->alloc);
+    if (!sb) {
+        lc->failed = true;
+        return;
+    }
+    string_append_cstr(sb, "extern ");
+#ifdef _WIN32
+    /* Windows 的**数据**导入必须 dllimport：否则链接器找 `td_i32` 而不是
+       导入库里的 `__imp_td_i32`（函数有 thunk，数据没有）。 */
+    string_append_cstr(sb, "__declspec(dllimport) ");
+#endif
+    string_append_cstr(sb, ctype);
+    string_append_cstr(sb, " ");
+    string_append_cstr(sb, cname);
+    string_append_cstr(sb, ";");
+    const char *text = copy_arena(lc->arena, string_cstr(sb));
+    string_free(&sb);
+    if (!text) {
+        lc->failed = true;
+        return;
+    }
+    cir_unit_add_extern_decl(lc->unit, text);
+
+    lower_extern_var_t *ev = (lower_extern_var_t *)arena_calloc(
+        lc->arena, 1, sizeof(*ev), ALIGNOF(max_align_t));
+    if (!ev) {
+        lc->failed = true;
+        return;
+    }
+    ev->lib = evd->lib_name;
+    ev->name = evd->name;
+    ev->def = evd;
+    ev->type = vt;
+    ev->cname = cname;
+    ev->is_str = is_str;
+    ev->next = lc->extern_vars;
+    lc->extern_vars = ev;
+}
+
+static lower_extern_var_t *find_extern_var(lower_ctx_t *lc, strslice_t lib,
+                                           strslice_t name) {
+    for (lower_extern_var_t *v = lc->extern_vars; v; v = v->next) {
+        if (v->lib.len == lib.len && v->name.len == name.len &&
+            memcmp(v->lib.ptr, lib.ptr, lib.len) == 0 &&
+            memcmp(v->name.ptr, name.ptr, name.len) == 0)
+            return v;
+    }
+    return NULL;
+}
+
 void lower_extern_decls(lower_ctx_t *lc, ast_program_t *prog) {
     if (!lc || !prog) return;
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind == AST_EXTERN_LIB) {
             collect_extern_lib(lc, (const ast_extern_lib_t *)n);
+            continue;
+        }
+        if (n->kind == AST_VAR_DEF && ((ast_var_def_t *)n)->is_extern_var) {
+            collect_extern_var(lc, (ast_var_def_t *)n);
+            if (lc->failed) return;
             continue;
         }
         if (n->kind != AST_FUNC_DEF) continue;
@@ -426,6 +521,76 @@ void lower_extern_decls(lower_ctx_t *lc, ast_program_t *prog) {
         if (after > before && lc->unit->extern_decls_last)
             e->proto = lc->unit->extern_decls_last->code;
     }
+}
+
+const type_t *ffi_extern_var_type(lower_ctx_t *lc, ast_scope_ref_t *sr) {
+    if (!sr || !sr->type_expr || sr->type_expr->kind != AST_IDENT) return NULL;
+    strslice_t lib = ((ast_ident_t *)sr->type_expr)->name;
+    lower_extern_var_t *ev = find_extern_var(lc, lib, sr->variant);
+    return ev ? ev->type : NULL;
+}
+
+cir_expr_t *lower_ffi_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr) {
+    if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
+                   "c backend: extern var: invalid library alias");
+        lc->failed = true;
+        return NULL;
+    }
+    strslice_t lib = ((ast_ident_t *)sr->type_expr)->name;
+    lower_extern_var_t *ev = find_extern_var(lc, lib, sr->variant);
+    if (!ev) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
+                   "c backend: internal: extern var '%.*s::%.*s' not registered",
+                   (int)lib.len, lib.ptr, (int)sr->variant.len,
+                   sr->variant.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    cir_type_t *ct = map_type(lc, ev->type);
+    if (!ct) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
+                   "c backend: extern var '%.*s': unsupported type",
+                   (int)sr->variant.len, sr->variant.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_t *id = cir_expr_ident(lc->arena, ev->cname);
+    if (!id) return NULL;
+    if (!ev->is_str) {
+        id->type = ct;
+        return id;
+    }
+    /* C 符号是 char* → 读成 clux_str（len = strlen）。 */
+    lc->unit->uses_str_from_c = true;
+    cir_expr_t *wrap = cir_expr_call(lc->arena, "clux_str_from_c", NULL);
+    if (!wrap) return NULL;
+    wrap->type = ct;
+    cir_expr_append_arg(wrap, id);
+    return wrap;
+}
+
+const char *lower_ffi_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr,
+                                 bool *is_str) {
+    if (is_str) *is_str = false;
+    if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
+                   "c backend: extern var: invalid library alias");
+        lc->failed = true;
+        return NULL;
+    }
+    strslice_t lib = ((ast_ident_t *)sr->type_expr)->name;
+    lower_extern_var_t *ev = find_extern_var(lc, lib, sr->variant);
+    if (!ev) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
+                   "c backend: internal: extern var '%.*s::%.*s' not registered",
+                   (int)lib.len, lib.ptr, (int)sr->variant.len,
+                   sr->variant.ptr);
+        lc->failed = true;
+        return NULL;
+    }
+    if (is_str) *is_str = ev->is_str;
+    return ev->cname;
 }
 
 /* ============================ 调用点 lowering ============================ */
@@ -490,13 +655,6 @@ cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call) {
 
     const type_t *rt = extern_return_type(lc, e->def);
     const type_t *rtc = type_strip_quals(rt);
-    if (rtc && type_kind_of(rtc) == TYPE_KIND_CFUNC) {
-        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
-                   "c backend: extern cfunc returning a function pointer is "
-                   "not supported yet");
-        lc->failed = true;
-        return NULL;
-    }
     cir_type_t *ct = map_type(lc, rt);
     if (!ct) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
@@ -554,17 +712,26 @@ static lower_cb_wrapper_t *cb_wrapper_find(lower_ctx_t *lc,
     return NULL;
 }
 
-/* 为无捕获 clux 函数生成 C trampoline：
+/* 为 `cfunc` 定义生成 C trampoline：
  *     static <ret> clux_cb_<f>(<C 参数...>) { [return] clux_fn_<f>(NULL, ...); }
+ * 只有 `cfunc` 是 C ABI 函数（无 env）：`func` / 闭包没有 C 等价物，不能作为
+ * C 函数指针（语言语义如此，这里也明确拒绝而不是生成错误代码）。
  * str 参数/返回值在边界上转换（C char* ⇄ clux_str）。 */
 static const char *emit_cb_wrapper(lower_ctx_t *lc, ast_func_def_t *fn) {
     lower_cb_wrapper_t *hit = cb_wrapper_find(lc, fn);
     if (hit) return hit->name;
+    if (!fn->is_cfunc) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
+                   "c backend: cfunc_ptr requires a `cfunc` definition: only "
+                   "C-ABI functions can become C function pointers (plain "
+                   "`func`/closures have no C representation)");
+        lc->failed = true;
+        return NULL;
+    }
     if (fn->captures || fn->capture_type_id != 0) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
                    "c backend: cfunc_ptr: callback '%.*s' captures variables; "
-                   "a C function pointer has no environment (use a "
-                   "non-capturing function)",
+                   "a C function pointer has no environment",
                    (int)fn->name.len, fn->name.ptr);
         lc->failed = true;
         return NULL;

@@ -1266,6 +1266,85 @@ TEST(CBackend, BuildEnumExternCfunc) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* extern var：库导出的数据符号（读/写全部标量 + struct/enum/str）。 */
+TEST(CBackend, BuildExternVar) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  std::string lib = ffi_testdata_link_path();
+  for (char &c : lib)
+    if (c == '\\') c = '/';
+  const std::string src = write_temp_file(
+      "struct Point { x: i32; y: i32; }\n"
+      "enum Color: i32 { Red = 1, Green = 2 }\n"
+      "extern lib td from \"" + lib + "\";\n"
+      "extern var td::td_i32: i32;\n"
+      "extern var td::td_u64: u64;\n"
+      "extern var td::td_bool: bool;\n"
+      "extern var td::td_f64: f64;\n"
+      "extern var td::td_point: Point;\n"
+      "extern var td::td_color: Color;\n"
+      "extern var td::td_str: str;\n"
+      "func main(): i32 {\n"
+      "  if (td::td_i32 != -123456) { return 1; }\n"
+      "  td::td_i32 = 42;\n"
+      "  if (td::td_i32 != 42) { return 2; }\n"
+      "  if (td::td_u64 != 18000000000000000000u64) { return 3; }\n"
+      "  if (td::td_bool != true) { return 4; }\n"
+      "  if (td::td_f64 != 2.5) { return 5; }\n"
+      "  if (td::td_point.x != 3 || td::td_point.y != 4) { return 6; }\n"
+      "  if (td::td_color != Color::Green) { return 7; }\n"
+      "  if (len(td::td_str) != 19usize) { return 8; }\n"
+      "  td::td_str = \"abc\";\n"
+      "  if (len(td::td_str) != 3usize) { return 9; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_var");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  copy_ffi_runtime(exe.parent_path());
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* extern cfunc 返回 C 函数指针：拿到 cfunc 值后再传给别的 C 函数。 */
+TEST(CBackend, BuildExternCfuncReturnsCallback) {
+  if (!std::filesystem::exists(ffi_testdata_link_path()) ||
+      !std::filesystem::exists(ffi_testdata_runtime()))
+    GTEST_SKIP() << "clux_ffi_testdata library not built";
+  std::string lib = ffi_testdata_link_path();
+  for (char &c : lib)
+    if (c == '\\') c = '/';
+  const std::string src = write_temp_file(
+      "extern lib td from \"" + lib + "\";\n"
+      "extern cfunc td::clux_get_binop(which: i32): cfunc(i32, i32) -> i32;\n"
+      "extern cfunc td::clux_apply_binop(op: cfunc(i32, i32) -> i32, a: i32,\n"
+      "                                   b: i32): i32;\n"
+      "cfunc neg(a: i32, b: i32): i32 { return 0 - a; }\n"
+      "func main(): i32 {\n"
+      "  var add: cfunc(i32, i32) -> i32 = td::clux_get_binop(0);\n"
+      "  var sub: cfunc(i32, i32) -> i32 = td::clux_get_binop(1);\n"
+      "  if (td::clux_apply_binop(add, 20, 22) != 42) { return 1; }\n"
+      "  if (td::clux_apply_binop(sub, 50, 8) != 42) { return 2; }\n"
+      "  if (td::clux_apply_binop(cfunc_ptr(neg), 5, 0) != -5) { return 3; }\n"
+      "  if (td::clux_apply_binop(td::clux_get_binop(1), 50, 8) != 42)\n"
+      "    { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_ffi_cretr");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  copy_ffi_runtime(exe.parent_path());
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
 TEST(CBackend, RejectsCopyOfOwnSlotField) {
   /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
      两个后端一致。 */

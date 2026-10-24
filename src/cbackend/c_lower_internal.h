@@ -114,6 +114,17 @@ typedef struct lower_cb_wrapper {
     struct lower_cb_wrapper *next;
 } lower_cb_wrapper_t;
 
+/* extern var（`extern var <lib>::<name>: T;`）：库里的**数据符号**。 */
+typedef struct lower_extern_var {
+    strslice_t lib;
+    strslice_t name;
+    ast_var_def_t *def;
+    const type_t *type;   /* 已解析的 clux 类型（C 侧按 ffi_c_type 渲染） */
+    const char *cname;    /* 真实 C 符号名（未 mangling） */
+    bool is_str;          /* C 符号是 char*，读写要做 str 包装/取值 */
+    struct lower_extern_var *next;
+} lower_extern_var_t;
+
 typedef struct lower_ctx {
     arena_t *arena;
     sema_t  *sema;
@@ -124,6 +135,7 @@ typedef struct lower_ctx {
     lower_capture_t *captures;
     lower_method_t *methods;
     lower_extern_fn_t *externs;
+    lower_extern_var_t *extern_vars;
     lower_cfn_typedef_t *cfn_typedefs;
     lower_cb_wrapper_t *cb_wrappers;
     const char *ffi_error; /* 最近一次 FFI 类型渲染的具体失败原因（可为 NULL） */
@@ -189,5 +201,13 @@ cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call);
 cir_expr_t *lower_data_call(lower_ctx_t *lc, ast_call_t *call);
 cir_expr_t *lower_cfunc_ptr(lower_ctx_t *lc, ast_call_t *call);
 bool call_is_cfunc_ptr(const ast_call_t *c);
+/* `cfunc(...)` → C 函数指针 typedef 名（map_type 用；同 intern 类型复用）。 */
+const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t, bool *ok);
+/* extern var 的读取（`is_str` 时包装成 clux_str）与赋值目标（raw 左值）。 */
+cir_expr_t *lower_ffi_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr);
+const char *lower_ffi_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr,
+                                 bool *is_str);
+/* extern var 的 clux 类型（infer_expr_type 用；未登记返回 NULL）。 */
+const type_t *ffi_extern_var_type(lower_ctx_t *lc, ast_scope_ref_t *sr);
 
 #endif

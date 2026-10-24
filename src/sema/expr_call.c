@@ -1312,6 +1312,10 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             else if (rt && (type_kind_of(rt) == TYPE_KIND_STRUCT ||
                             type_kind_of(rt) == TYPE_KIND_CUNION ||
                             type_kind_of(rt) == TYPE_KIND_ENUM ||
+                            /* C 函数指针返回值（`... : cfunc(i32)->i32`）：
+                               与指针同宽，但类型身份要保留（裸指针字节构造
+                               cfunc 值）→ 同样走"按类型值返回"。 */
+                            type_kind_of(rt) == TYPE_KIND_CFUNC ||
                             type_is_ptr(rt_core))) {
               /* 程序自定义类型 / 带类型的指针：宽度与布局必须查类型表 →
                 "按类型值返回"。compiler 会在 EXTERN_CALL 之前压一个类型值
