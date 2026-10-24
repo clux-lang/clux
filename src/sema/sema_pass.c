@@ -778,6 +778,28 @@ size_t sema_speculative_round(sema_t *sema, ast_program_t *prog) {
   return after > before ? after - before : 0;
 }
 
+void pass_comptime_vars(sema_t *sema, ast_program_t *prog, bool speculative) {
+  ast_node_t **prev = &prog->funcs;
+  for (ast_node_t *f = prog->funcs; f;) {
+    ast_node_t *next = f->next;
+    if (f->kind == AST_VAR_DEF) {
+      ast_var_def_t *vd = (ast_var_def_t *)f;
+      if (!vd->is_extern_var && vd->is_comptime) {
+        sema_symbol_t *csym =
+            sema_scope_find_local(sema->global_scope, vd->name);
+        if (!csym || !csym->ct_valid)
+          sema_eval_comptime_var(sema, vd, sema->global_scope);
+        if (speculative) prev = &f->next;
+        else             *prev = next;
+        f = next;
+        continue;
+      }
+    }
+    prev = &f->next;
+    f = next;
+  }
+}
+
 void pass_globals(sema_t *sema, ast_program_t *prog, bool speculative) {
   ast_node_t **prev = &prog->funcs;
   for (ast_node_t *f = prog->funcs; f;) {

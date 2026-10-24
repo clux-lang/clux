@@ -439,8 +439,14 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   pass2_types(sema, /*speculative=*/false);         /* 函数签名 */
   /* M7 §31b：implements 校验（方法签名已解析、member_scope 已建立）。 */
   sema_check_implements_pass(sema, prog);
-  pass_globals(sema, prog, /*speculative=*/false);  /* comptime var + 全局变量 */
+  /* 全局实体的顺序（M6）：
+     1) 全局 comptime var：装饰器实参可以引用它们；
+     2) 类型/字段/方法 metadata 登记 + 类型装饰器：必须在普通全局变量之前，
+        全局常量初始化器里的 get_metadata/get_field_metadata 才能查到条目；
+     3) 普通全局变量：init 折叠为常量（可见 1、2 的产物）。 */
+  pass_comptime_vars(sema, prog, /*speculative=*/false);
   sema_metadata_apply_all(sema, prog);
+  pass_globals(sema, prog, /*speculative=*/false);  /* 全局变量 */
 
   /* Pass 3a：作用域树构建 + 控制流分析（符号注册、break/continue 位置检查、
      不可达语句、非 void 函数返回路径完整性）。快速失败：3a 有错误则
