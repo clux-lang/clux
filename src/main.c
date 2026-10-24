@@ -37,20 +37,27 @@ static const cmd_t g_cmds[] = {
     {
         .name = "build",
         .usage = "clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]] "
-                 "[--output=PATH] [--cc=PATH] [--cflag=FLAG]... "
-                 "[--ldflag=FLAG]... [-I DIR]... [-L DIR]... [-l LIB]... "
-                 "[-D KEY=VALUE]...",
+                 "[--build-dir=DIR] [--output=PATH] [--cc=PATH] "
+                 "[--cflag=FLAG]... [--ldflag=FLAG]... [-I DIR]... "
+                 "[-L DIR]... [-l LIB]... [-D KEY=VALUE]...",
         .help =
             "Compile clux source into a native executable.\n"
             "\n"
-            "  clux build <file.cx>              build an executable next to src\n"
+            "  clux build <file.cx>              build into the mirrored build dir\n"
             "  clux build <file.cx> --emit-c     write C source only (no cc call)\n"
             "  clux build <file.cx> --emit-c=P   write C source to P\n"
             "  clux build <file.cx> --emit-obj[=P]  compile to an object only\n"
             "  clux build <file.cx> --output=P   executable path P\n"
             "\n"
             "Pipeline: .cx -> .c -> (cc -c) -> object -> link -> executable.\n"
-            "The object is kept next to the executable (<exe>.obj / <exe>.o).\n"
+            "Like cmake, outputs mirror the source tree under the build dir\n"
+            "(default ./build):  ./cmd/main.cx -> ./build/cmd/main.c,\n"
+            "./build/cmd/main.obj (or .o) and ./build/cmd/main.exe (or\n"
+            "./build/cmd/main). Sources already inside the build dir keep\n"
+            "their relative location there. --build-dir=DIR (or -B DIR)\n"
+            "overrides the build directory; --output=P still overrides the\n"
+            "executable path only.\n"
+            "\n"
             "The host C compiler is $CC (clang on Windows, cc elsewhere) unless\n"
             "--cc is given.\n"
             "\n"

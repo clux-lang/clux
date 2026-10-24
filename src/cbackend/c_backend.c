@@ -351,7 +351,8 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
                              const cbackend_opts_t *opts) {
     if (!src_path || !c_path || !opts) return 1;
     bool compile = opts->compile;
-    if (compile && !out_path) return 1;
+    if (compile && !opts->object_only && !out_path) return 1;
+    if (opts->object_only && !opts->obj_path) return 1;
 
     allocator_t *alloc = create_allocator(malloc, free);
     if (!alloc) return 1;
@@ -482,8 +483,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
             if (!obj) {
                 derived_obj = derive_obj_path(out_path);
                 obj = derived_obj;
-            }
-            bool ok = false;
+            }            bool ok = false;
             if (!obj) {
                 fprintf(stderr, "build: out of memory (object path)\n");
             } else if (compile_object(alloc, c_path, obj, opts->tc) == 0) {
@@ -533,18 +533,37 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
     return rc;
 }
 
-int cbackend_build_file_ex(const char *src_path, const char *out_path,
-                           const cbackend_toolchain_t *tc) {
-    if (!src_path || !out_path) return 1;
-    char *c_path = derive_c_path(out_path);
-    if (!c_path) {
-        fprintf(stderr, "build: out of memory\n");
+int cbackend_build_ex(const char *src_path, const char *out_path,
+                      const char *c_path, const char *obj_path,
+                      const cbackend_toolchain_t *tc) {
+    if (!src_path) return 1;
+    if (!out_path && !obj_path) {
+        fprintf(stderr, "build: internal: neither output nor object path\n");
         return 1;
     }
-    cbackend_opts_t opts = {.compile = true, .tc = tc};
+    char *owned_c = NULL;
+    if (!c_path) {
+        owned_c = derive_c_path(out_path ? out_path : obj_path);
+        if (!owned_c) {
+            fprintf(stderr, "build: out of memory\n");
+            return 1;
+        }
+        c_path = owned_c;
+    }
+    cbackend_opts_t opts = {
+        .compile = true,
+        .object_only = out_path == NULL,
+        .obj_path = obj_path,
+        .tc = tc,
+    };
     int rc = cbackend_run_impl(src_path, out_path, c_path, &opts);
-    free(c_path);
+    free(owned_c);
     return rc;
+}
+
+int cbackend_build_file_ex(const char *src_path, const char *out_path,
+                           const cbackend_toolchain_t *tc) {
+    return cbackend_build_ex(src_path, out_path, NULL, NULL, tc);
 }
 
 int cbackend_build_file(const char *src_path, const char *out_path) {
@@ -553,17 +572,7 @@ int cbackend_build_file(const char *src_path, const char *out_path) {
 
 int cbackend_emit_object(const char *src_path, const char *obj_path,
                          const cbackend_toolchain_t *tc) {
-    if (!src_path || !obj_path) return 1;
-    char *c_path = derive_c_path(obj_path);
-    if (!c_path) {
-        fprintf(stderr, "build: out of memory\n");
-        return 1;
-    }
-    cbackend_opts_t opts = {
-        .compile = true, .object_only = true, .obj_path = obj_path, .tc = tc};
-    int rc = cbackend_run_impl(src_path, obj_path, c_path, &opts);
-    free(c_path);
-    return rc;
+    return cbackend_build_ex(src_path, NULL, NULL, obj_path, tc);
 }
 
 int cbackend_generate_c(const char *src_path, const char *c_path) {

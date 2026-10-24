@@ -34,6 +34,16 @@ typedef struct cbackend_toolchain {
 int cbackend_build_file_ex(const char *src_path, const char *out_path,
                            const cbackend_toolchain_t *tc);
 
+/**
+ * 通用构建入口（路径由调用方给全，便于把中间产物放到构建目录的镜像位置）：
+ *   - `out_path != NULL`：链接成该可执行文件；
+ *   - `out_path == NULL`：只编译到目标文件（`obj_path` 必填）；
+ *   - `c_path`/`obj_path` 为 NULL 时按 `<out>.clux.c` / `<out>.o|.obj` 推导。
+ */
+int cbackend_build_ex(const char *src_path, const char *out_path,
+                      const char *c_path, const char *obj_path,
+                      const cbackend_toolchain_t *tc);
+
 /** 只编译到目标文件（不链接）：cx → c → o。 */
 int cbackend_emit_object(const char *src_path, const char *obj_path,
                          const cbackend_toolchain_t *tc);

@@ -321,10 +321,15 @@ clux build hello.cx
   - 输出与 VM 运行器同款 gtest 风格汇总。
 - `clux build` 选项与两阶段构建：
   - 流水线：`.cx → .c →（host cc -c）→ 目标文件 → 链接 → 可执行文件`；
-    目标文件保留在产物旁（`<exe>.obj` / `<exe>.o`），可被多文件构建复用；
-  - `--emit-c[=PATH]`：只生成 C 源，不调用 host cc；
-  - `--emit-obj[=PATH]`：只编译到目标文件（不链接；对象可被 host cc 独立链接）；
-  - `--output=PATH`：指定可执行文件路径；
+  - **构建目录镜像**（类 cmake 的 `build/`，默认 `./build`）：
+    `./cmd/main.cx` → `./build/cmd/main.c`、`./build/cmd/main.obj`（或
+    `.o`）、`./build/cmd/main.exe`（或 `./build/cmd/main`）；源文件已经在
+    构建目录内时按构建目录内的相对位置镜像（不会出现 `build/build/...`）；
+    `--build-dir=DIR` / `-B DIR` 可改构建目录（支持绝对路径，逐级自动建目录）；
+  - `--emit-c[=PATH]`：只生成 C 源（默认落在镜像位置 `build/<rel>.c`）；
+  - `--emit-obj[=PATH]`：只编译到目标文件（默认 `build/<rel>.obj|.o`；
+    对象可被 host cc 独立链接，供多文件构建复用）；
+  - `--output=PATH`：只覆盖可执行文件路径（中间产物仍走镜像目录）；
   - 工具链参数（全部逐条透传，与代码声明的 `extern lib` 链接参数合并）：
     - `--cc=PATH`：C 编译器（缺省 `$CC`，再回退平台默认）；
     - `--cflag=FLAG` / `--ldflag=FLAG`：编译/链接附加参数（可重复）；
@@ -334,7 +339,8 @@ clux build hello.cx
     - `-l LIB` / `--link-lib=LIB`：链接库（链接阶段，排在代码声明的链接
       参数之后）；
     - `-D KEY=VALUE`：编译期键表（`extern lib ... assert(...)` 用）；
-  - 编译失败保留 C 源并打印完整命令；链接失败保留 C 源与目标文件。
+  - 编译成功删中间 `.c`、保留目标文件；链接失败保留 `.c` 与目标文件；
+    编译失败删半成品目标文件、保留 `.c`。
 - M6 FFI：extern lib / extern cfunc（`include/cbackend/c_ir.h` +
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI

@@ -1355,7 +1355,8 @@ std::string host_cc_name() {
 #endif
 }
 
-/* 默认构建保留目标文件（多文件构建可复用）：<exe>.obj / <exe>.o。 */
+/* 默认构建保留目标文件（多文件构建可复用）：`<mirror base>.obj / .o`
+ * （源文件在构建目录内时即 `<src 去扩展名>.obj`）。 */
 TEST(CBackend, BuildKeepsObjectFile) {
   const std::string src =
       write_temp_file("func main(): i32 { return 9; }\n", "cbackend_obj");
@@ -1365,14 +1366,63 @@ TEST(CBackend, BuildKeepsObjectFile) {
   std::filesystem::remove(exe, ec);
   EXPECT_EQ(run_build(src, exe.string(), nullptr), 0);
   ASSERT_TRUE(std::filesystem::exists(exe));
+  std::filesystem::path base(src);
+  base.replace_extension();
 #ifdef _WIN32
-  std::filesystem::path obj = exe.string() + ".obj";
+  std::filesystem::path obj = base.string() + ".obj";
 #else
-  std::filesystem::path obj = exe.string() + ".o";
+  std::filesystem::path obj = base.string() + ".o";
 #endif
   EXPECT_TRUE(std::filesystem::exists(obj));
   EXPECT_EQ(run_exe(exe.string()), 9);
   std::filesystem::remove(obj, ec);
+}
+
+/* 构建目录镜像（类似 cmake build/）：`cmd/main.cx` → `build/cmd/main.c/.obj/.exe`。 */
+TEST(CBackend, BuildMirrorsSourceTree) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "mirror_proj";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj / "cmd", ec);
+  fs::create_directories(proj / "src" / "app", ec);
+  {
+    std::FILE *fp = std::fopen((proj / "cmd" / "main.cx").string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs("func main(): i32 { return 5; }\n", fp);
+    std::fclose(fp);
+  }
+  {
+    std::FILE *fp =
+        std::fopen((proj / "src" / "app" / "tool.cx").string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs("func main(): i32 { return 0; }\n", fp);
+    std::fclose(fp);
+  }
+
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(run_cli({"build", "cmd/main.cx"}), 0);
+  EXPECT_EQ(run_cli({"build", "src/app/tool.cx", "--emit-c"}), 0);
+  EXPECT_EQ(run_cli({"build", "cmd/main.cx", "-B", "out"}), 0);
+  fs::current_path(saved);
+
+#ifdef _WIN32
+  fs::path exe = proj / "build" / "cmd" / "main.exe";
+  fs::path obj = proj / "build" / "cmd" / "main.obj";
+#else
+  fs::path exe = proj / "build" / "cmd" / "main";
+  fs::path obj = proj / "build" / "cmd" / "main.o";
+#endif
+  EXPECT_TRUE(fs::exists(exe)) << exe.string();
+  EXPECT_TRUE(fs::exists(obj)) << obj.string();
+  EXPECT_TRUE(fs::exists(proj / "build" / "src" / "app" / "tool.c"));
+  EXPECT_FALSE(fs::exists(proj / "build" / "cmd" / "main.c"));
+  EXPECT_EQ(run_exe(exe.string()), 5);
+  EXPECT_TRUE(fs::exists(proj / "out" / "cmd" / "main.exe") ||
+              fs::exists(proj / "out" / "cmd" / "main"));
+  fs::remove_all(proj, ec);
 }
 
 /* `--emit-obj`：只编译到目标文件；该对象能被 host cc 独立链接成可执行文件。 */
