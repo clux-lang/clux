@@ -169,6 +169,7 @@ typedef struct cir_unit {
     cir_type_t      *types;
     bool             uses_alloc;
     bool             uses_str_cmp;
+    bool             uses_opt_unwrap;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);

@@ -406,7 +406,9 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_UNWRAP: {
         ast_unwrap_t *uw = (ast_unwrap_t *)e;
         cir_expr_t *obj = lower_expr(lc, uw->operand);
-        return obj ? cir_expr_unwrap(lc->arena, obj) : NULL;
+        if (!obj) return NULL;
+        lc->unit->uses_opt_unwrap = true;
+        return cir_expr_unwrap(lc->arena, obj);
     }
     case AST_NIL:
         diag_error(lc->sema->diag, sema_loc(lc->sema, e),
