@@ -22,6 +22,7 @@ typedef enum {
     CIR_TYPE_STR,
     CIR_TYPE_OPTION,
     CIR_TYPE_UNION,
+    CIR_TYPE_CUNION,
 } cir_type_kind_t;
 
 typedef struct cir_type cir_type_t;
@@ -68,6 +69,7 @@ typedef enum {
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
     CIR_EXPR_UNION_TAG,
+    CIR_EXPR_CUNION_CONSTRUCT,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -222,6 +224,8 @@ cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
 cir_expr_t    *cir_expr_union_member(arena_t *arena, cir_expr_t *object,
                                      const char *field);
 cir_expr_t    *cir_expr_union_tag(arena_t *arena, cir_expr_t *object);
+cir_expr_t    *cir_expr_cunion_construct(arena_t *arena, cir_type_t *type,
+                                         const char *field, cir_expr_t *value);
 cir_init_t    *cir_init_new(arena_t *arena, const char *name,
                             cir_expr_t *value);
 void           cir_expr_add_init(cir_expr_t *construct, cir_init_t *init);

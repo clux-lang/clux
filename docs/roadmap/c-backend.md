@@ -189,6 +189,7 @@ clux build hello.cx
 - `?T` 构造 / `nil` / `!= nil` / `.!` / 隐式 some 包装；
 - optional 字段读写；
 - union own payload 清理；
+- cunion 构造 / 成员读写 / 按值赋值；
 - `len(s)`；
 - `make(T, N, ...)`；
 - `s[low:high]`；
@@ -199,7 +200,7 @@ clux build hello.cx
 尚未覆盖：
 
 - `str` 拼接 / 格式化 / FFI C ABI 兼容；
-- cunion；
+- cunion 的 FFI 布局/生命周期细节；
 - 泛型实例的完整覆盖；
 - 异常路径 / 全部跨作用域路径的清理验证。
 

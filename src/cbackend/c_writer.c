@@ -253,6 +253,15 @@ static void write_expr(string_t *sb, const cir_expr_t *e) {
         write_expr(sb, e->lhs);
         w(sb, ").tag");
         break;
+    case CIR_EXPR_CUNION_CONSTRUCT:
+        w(sb, "(");
+        w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
+        w(sb, "){ .u.");
+        w(sb, e->text ? e->text : "clux_m_member");
+        w(sb, " = ");
+        write_expr(sb, e->lhs);
+        w(sb, " }");
+        break;
     case CIR_EXPR_NEW:
         w(sb, "(");
         w(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
@@ -323,7 +332,8 @@ static void write_type_defs(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next)
         if (t->kind == CIR_TYPE_STRUCT || t->kind == CIR_TYPE_ARRAY ||
             t->kind == CIR_TYPE_SLICE || t->kind == CIR_TYPE_STR ||
-            t->kind == CIR_TYPE_OPTION || t->kind == CIR_TYPE_UNION)
+            t->kind == CIR_TYPE_OPTION || t->kind == CIR_TYPE_UNION ||
+            t->kind == CIR_TYPE_CUNION)
             wf(sb, "struct %s;\n", t->c_name + 7);
     w(sb, "\n");
 }
@@ -339,7 +349,8 @@ static void emit_type(string_t *sb, cir_type_t *t) {
                  f->type->kind == CIR_TYPE_ARRAY ||
                  f->type->kind == CIR_TYPE_SLICE ||
                  f->type->kind == CIR_TYPE_OPTION ||
-                 f->type->kind == CIR_TYPE_UNION))
+                 f->type->kind == CIR_TYPE_UNION ||
+                 f->type->kind == CIR_TYPE_CUNION))
                 emit_type(sb, f->type);
         }
         wf(sb, "%s {\n", t->c_name);
@@ -390,10 +401,30 @@ static void emit_type(string_t *sb, cir_type_t *t) {
                             f->type->kind == CIR_TYPE_ARRAY ||
                             f->type->kind == CIR_TYPE_SLICE ||
                             f->type->kind == CIR_TYPE_OPTION ||
-                            f->type->kind == CIR_TYPE_UNION))
+                            f->type->kind == CIR_TYPE_UNION ||
+                            f->type->kind == CIR_TYPE_CUNION))
                 emit_type(sb, f->type);
         wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_union");
         w(sb, "    uint32_t tag;\n");
+        w(sb, "    union {\n");
+        for (cir_field_t *f = t->fields; f; f = f->next)
+            wf(sb, "        %s %s;\n",
+               f->type && f->type->c_name ? f->type->c_name : "int32_t",
+               f->name ? f->name : "member");
+        w(sb, "    } u;\n");
+        w(sb, "};\n\n");
+        t->emitted = true;
+        break;
+    case CIR_TYPE_CUNION:
+        for (cir_field_t *f = t->fields; f; f = f->next)
+            if (f->type && (f->type->kind == CIR_TYPE_STRUCT ||
+                            f->type->kind == CIR_TYPE_ARRAY ||
+                            f->type->kind == CIR_TYPE_SLICE ||
+                            f->type->kind == CIR_TYPE_OPTION ||
+                            f->type->kind == CIR_TYPE_UNION ||
+                            f->type->kind == CIR_TYPE_CUNION))
+                emit_type(sb, f->type);
+        wf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_cunion");
         w(sb, "    union {\n");
         for (cir_field_t *f = t->fields; f; f = f->next)
             wf(sb, "        %s %s;\n",

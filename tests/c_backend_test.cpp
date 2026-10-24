@@ -385,6 +385,29 @@ TEST(CBackend, BuildUnionOwnAndOptionalField) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
+TEST(CBackend, BuildCUnion) {
+  const std::string src = write_temp_file(
+      "cunion U { i: i32; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var u = .U{ .i = 5 };\n"
+      "  if (u.i != 5) { return 1; }\n"
+      "  u.i = 7;\n"
+      "  if (u.i != 7) { return 2; }\n"
+      "  var v: U = u;\n"
+      "  if (v.i != 7) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_cunion");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
 TEST(CBackend, RejectsMainWithParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32): i32 { return x; }\n", "cbackend_param");

@@ -41,6 +41,7 @@
 #include "parser/lexer.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
+#include "vm/type_cunion.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
@@ -220,6 +221,32 @@ static cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cir_unit_add_type(lc->unit, ct);
         ct->elem = map_type(lc, type_option_inner(t));
         return ct->elem ? ct : NULL;
+    }
+    if (t->kind == TYPE_KIND_CUNION) {
+        cached = cir_type_find(lc->unit, t, CIR_TYPE_CUNION);
+        if (cached) return cached;
+        char name[128];
+        snprintf(name, sizeof name, "struct clux_cu_%u", t->id);
+        cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_CUNION,
+                                      copy_arena(lc->arena, name));
+        if (!ct) return NULL;
+        ct->src = t;
+        cir_unit_add_type(lc->unit, ct);
+        const cunion_type_t *ut = (const cunion_type_t *)t;
+        for (size_t i = 0; i < ut->member_count; i++) {
+            const cunion_member_t *m = &ut->members[i];
+            if (!m->type) continue;
+            cir_type_t *mt = map_type(lc, m->type);
+            if (!mt) return NULL;
+            char fn[256];
+            snprintf(fn, sizeof fn, "clux_m_%.*s", (int)m->name.len,
+                     m->name.ptr ? m->name.ptr : "");
+            cir_field_t *f = cir_field_new(lc->arena,
+                                           copy_arena(lc->arena, fn), mt);
+            if (!f) return NULL;
+            cir_type_add_field(ct, f);
+        }
+        return ct;
     }
     if (t->kind == TYPE_KIND_UNION) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_UNION);
@@ -443,6 +470,23 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             return cir_expr_union_member(lc->arena, obj,
                                          copy_arena(lc->arena, fb));
         }
+        if (ot && type_kind_of(ot) == TYPE_KIND_CUNION) {
+            int mi = cunion_type_find_member(ot, m->field);
+            const cunion_member_t *mem =
+                mi >= 0 ? cunion_type_member(ot, (size_t)mi) : NULL;
+            if (!mem) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: unknown cunion member '%.*s'",
+                           (int)m->field.len, m->field.ptr);
+                lc->failed = true;
+                return NULL;
+            }
+            char fb[256];
+            snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            return cir_expr_union_member(lc->arena, obj,
+                                         copy_arena(lc->arena, fb));
+        }
         char fname[256];
         snprintf(fname, sizeof fname, "clux_f_%.*s", (int)m->field.len,
                  m->field.ptr ? m->field.ptr : "");
@@ -484,6 +528,26 @@ static cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                 return cir_expr_option(lc->arena, ct, false, NULL);
             cir_expr_t *val = lower_expr(lc, fv);
             return val ? cir_expr_option(lc->arena, ct, true, val) : NULL;
+        }
+        if (t && type_kind_of(t) == TYPE_KIND_CUNION) {
+            cir_type_t *ct = map_type(lc, t);
+            const cunion_member_t *mem = cunion_type_member(t, c->member_tag);
+            if (!ct || !mem) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: invalid cunion constructor");
+                lc->failed = true;
+                return NULL;
+            }
+            ast_node_t *fv = c->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            cir_expr_t *val = lower_expr(lc, fv);
+            if (!val) return NULL;
+            char fb[256];
+            snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            return cir_expr_cunion_construct(lc->arena, ct,
+                                             copy_arena(lc->arena, fb), val);
         }
         if (t && type_kind_of(t) == TYPE_KIND_UNION) {
             cir_type_t *ct = map_type(lc, t);
@@ -645,6 +709,12 @@ static const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
             const union_member_t *mem =
                 mi >= 0 ? union_type_member(ot, (size_t)mi) : NULL;
             return mem ? mem->payload_type : NULL;
+        }
+        if (type_kind_of(ot) == TYPE_KIND_CUNION) {
+            int mi = cunion_type_find_member(ot, m->field);
+            const cunion_member_t *mem =
+                mi >= 0 ? cunion_type_member(ot, (size_t)mi) : NULL;
+            return mem ? mem->type : NULL;
         }
         return NULL;
     }

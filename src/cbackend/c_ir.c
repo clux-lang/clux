@@ -332,6 +332,19 @@ cir_expr_t *cir_expr_union_tag(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
+cir_expr_t *cir_expr_cunion_construct(arena_t *arena, cir_type_t *type,
+                                      const char *field,
+                                      cir_expr_t *value) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_CUNION_CONSTRUCT;
+    e->type = type;
+    e->text = field;
+    e->lhs = value;
+    return e;
+}
+
 void cir_expr_append_arg(cir_expr_t *call, cir_expr_t *arg) {
     if (!call || !arg) return;
     arg->next = NULL;
