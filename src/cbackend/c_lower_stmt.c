@@ -691,11 +691,95 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
-        /* `_ = expr`（discard 赋值）：目标不是真实变量，只求值表达式。 */
+        /* `_ = expr`（discard 赋值）：目标不是真实变量，只求值表达式。
+           若表达式是 own/fatal 的指针/切片/闭包，丢弃时必须释放——
+           否则 `_ = new T{...}` / `_ = move(p)` 会泄漏。 */
         if (a->target && a->target->kind == AST_IDENT &&
             ((ast_ident_t *)a->target)->name.len == 1 &&
             ((ast_ident_t *)a->target)->name.ptr &&
             ((ast_ident_t *)a->target)->name.ptr[0] == '_') {
+            /* discard_mode 2：sema 已把销毁序列放进 prelude（`__disc_N`
+               临时变量 + destroy），语句本身不需要再做任何事，否则会
+               重复求值右值（多分配一次 → 泄漏）。 */
+            if (a->discard_mode == 2) return NULL;
+            const type_t *vt = infer_expr_type(lc, a->value);
+            const type_t *vs = vt ? type_strip_quals(vt) : NULL;
+            ownership_t vo = vt ? type_ownership_of(vt) : OWN_NONE;
+            if (vs && (a->discard_mode == 3 || vo == OWN_OWN ||
+                       vo == OWN_FATAL)) {
+                if (type_kind_of(vs) == TYPE_KIND_PTR ||
+                    type_kind_of(vs) == TYPE_KIND_SLICE) {
+                    cir_expr_t *ex = lower_expr(lc, a->value);
+                    if (!ex) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    if (type_kind_of(vs) == TYPE_KIND_SLICE)
+                        ex = cir_expr_slice_data(lc->arena, ex);
+                    cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+                    if (!st) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    lc->unit->uses_alloc = true;
+                    st->expr = ex;
+                    return st;
+                }
+                if (type_kind_of(vs) == TYPE_KIND_FUNC &&
+                    func_type_capture_count(vs) > 0) {
+                    cir_expr_t *ex = lower_expr(lc, a->value);
+                    if (!ex) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    cir_stmt_t *head = NULL, *tail = NULL;
+                    if (!emit_closure_free(lc, ex, vs, &head, &tail)) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    return head;
+                }
+                if (type_has_own_slots(vs)) {
+                    uint32_t dfid = 0;
+                    strslice_t dn = STRSLICE_EMPTY;
+                    if (sema_find_destroy_fn(lc->sema, vs, &dfid, &dn)) {
+                        const char *cname =
+                            module_symbol(lc->arena, lc->unit, "fn_", dn);
+                        cir_expr_t *ex = lower_expr(lc, a->value);
+                        if (!cname || !ex) {
+                            *ok = false;
+                            return NULL;
+                        }
+                        cir_stmt_t *blk =
+                            cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+                        cir_stmt_t *tv =
+                            cir_stmt_new(lc->arena, CIR_STMT_VAR);
+                        if (!blk || !tv) {
+                            *ok = false;
+                            return NULL;
+                        }
+                        char nb[48];
+                        snprintf(nb, sizeof nb, "clux_disc_%u",
+                                 lc->assign_seq++);
+                        tv->name = copy_arena(lc->arena, nb);
+                        tv->expr = ex;
+                        cir_stmt_append(blk, tv);
+                        cir_expr_t *call =
+                            cir_expr_call(lc->arena, cname, NULL);
+                        cir_expr_append_arg(call,
+                                            cir_expr_ident(lc->arena, "NULL"));
+                        cir_expr_append_arg(
+                            call, cir_expr_unary(lc->arena, "&",
+                                                 cir_expr_ident(lc->arena,
+                                                                tv->name)));
+                        cir_stmt_t *ds =
+                            cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+                        ds->expr = call;
+                        cir_stmt_append(blk, ds);
+                        return blk;
+                    }
+                }
+            }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
             if (!st) {
                 *ok = false;
@@ -800,8 +884,15 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
            类型生成的 `__destroy_<T>` 补上。 */
         ast_node_t *destroy_chain = a->destroy;
         cir_stmt_t *synth_destroy = NULL;
+        bool gen_uninit = false;
+        if (a->target && a->target->kind == AST_IDENT) {
+            strslice_t tn = ((ast_ident_t *)a->target)->name;
+            if (tn.ptr && tn.len >= 7 && memcmp(tn.ptr, "__disc_", 7) == 0)
+                gen_uninit = true; /* sema 生成的未初始化临时变量 */
+        }
         const type_t *tts = tt ? type_strip_quals(tt) : NULL;
-        if (!destroy_chain && tts && st->lhs && type_has_own_slots(tts) &&
+        if (!destroy_chain && !gen_uninit && tts && st->lhs &&
+            type_has_own_slots(tts) &&
             (type_kind_of(tts) == TYPE_KIND_STRUCT ||
              type_kind_of(tts) == TYPE_KIND_OPTION ||
              type_kind_of(tts) == TYPE_KIND_UNION ||
