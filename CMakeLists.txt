@@ -219,10 +219,8 @@ add_library(clux_cmd STATIC
     src/cmd/package.c
     src/cmd/build.c
     src/cmd/run.c
-    src/cmd/bc.c
     src/cmd/test.c
     src/cmd/version.c
-    src/cmd/eval.c
 )
 target_include_directories(clux_cmd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(clux_cmd PUBLIC clux_core clux_driver clux_ctfe clux_module clux_cbackend ICU::uc icu_data_init)

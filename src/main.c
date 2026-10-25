@@ -2,10 +2,8 @@
 #include "cmd/format.h"
 #include "cmd/build.h"
 #include "cmd/run.h"
-#include "cmd/bc.h"
 #include "cmd/test.h"
 #include "cmd/version.h"
-#include "cmd/eval.h"
 #include "icu_data.h"
 #include <locale.h>
 
@@ -113,39 +111,23 @@ static const cmd_t g_cmds[] = {
             "              builtin keys: OS_TYPE (WIN64/WIN32/LINUX/MACOS/BSD),\n"
             "              OS_ARCH (X64/X86/ARM64/ARM).\n"
             "\n"
-            "The input kind is decided by CONTENT, not by extension:\n"
-            "  - starts with the CXBC binary header -> run as bytecode\n"
-            "  - otherwise                           -> compile as clux source",
+            "Compiles with the C backend (host gcc/clang) into the build\n"
+            "directory, then runs the produced executable. Use\n"
+            "`clux build <file> --emit-c[=PATH]` to inspect generated C.",
         .handler = cmd_run,
     },
     {
-        .name = "bc",
-        .usage = "clux bc <emit|asm|disasm> <file> [-o PATH] [-D KEY=VALUE]...",
-        .help =
-            "Bytecode tools (non-mainline; debug / distribution).\n"
-            "\n"
-            "  emit    <file.cx>   compile source into .cxb binary bytecode\n"
-            "  asm     <file.cxs>  assemble text assembly into .cxb binary\n"
-            "  disasm  <file.cxb>  disassemble binary bytecode into .cxs text\n"
-            "\n"
-            "PATH omitted => same name as input with the new extension.\n"
-            "\n"
-            "emit also accepts -D KEY=VALUE (repeatable): build-time defines\n"
-            "used by `extern lib ... assert(...)` (see `clux run --help`).",
-        .handler = cmd_bc,
-    },
-    {
         .name = "test",
-        .usage = "clux test [<file.cx>] [--backend=vm|c]",
+        .usage = "clux test [<file.cx>] [--backend=vm]",
         .help =
             "Run tests.\n"
             "\n"
             "  clux test <file.cx>  run test blocks in one source file\n"
             "  clux test            run all .cx test blocks in the clux.mod package\n"
             "\n"
-            "  --backend=vm   run tests in the VM backend (default)\n"
-            "  --backend=c    build a C test runner and run each test in its\n"
-            "                 own subprocess (single <file.cx> only)\n"
+            "  --backend=c    (default) build a C test runner and run each test\n"
+            "                 in its own subprocess\n"
+            "  --backend=vm   transitional fallback to the old VM runner\n"
             "\n"
             "Test blocks are ignored by `build` / `run`. Results are printed in\n"
             "a gtest-like format; exits nonzero if any test fails.",
@@ -156,12 +138,6 @@ static const cmd_t g_cmds[] = {
         .usage = "clux version",
         .help = "Print version information.",
         .handler = cmd_version,
-    },
-    {
-        .name = "eval",
-        .usage = "clux eval <expr>",
-        .help = "Evaluate an expression at compile time (CTFE).",
-        .handler = cmd_eval,
     },
 };
 

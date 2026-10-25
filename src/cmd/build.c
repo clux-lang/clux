@@ -220,11 +220,16 @@ static void strlist_push(strlist_t *l, const char *s) {
     l->items[l->count++] = s;
 }
 
-int cmd_build(const cmd_args_t *args) {
+/* 构建实现：`src_override` 非 NULL 时忽略位置参数里的源文件（供 run 复用）；
+   `out_exe` 非 NULL 时返回实际可执行文件路径（malloc，调用方 free）；
+   `quiet` 抑制 "built ..." 输出。 */
+static int build_impl(const cmd_args_t *args, const char *src_override,
+                      char **out_exe, bool quiet) {
     if (!args) {
         fputs(USAGE, stderr);
         return 1;
     }
+    if (out_exe) *out_exe = NULL;
 
     /* 位置参数里可能是 `-D/-I/-L/-l/-B`（短选项 + 空格值），也可能是粘写形式
        `-Ibuild`；`--长选项` 由 cmd_args_parse 收进 opts。 */
@@ -237,7 +242,7 @@ int cmd_build(const cmd_args_t *args) {
         return 1;
     }
 
-    const char *src = NULL;
+    const char *src = src_override;
     const char *compiler = NULL;
     const char *build_dir = NULL;
     for (size_t i = 0; i < args->posc; i++) {
@@ -270,7 +275,7 @@ int cmd_build(const cmd_args_t *args) {
             continue;
         }
         if (a[0] == '-') continue; /* 其它选项（--emit-c/--output=...） */
-        if (!src) src = a;
+        if (!src_override && !src) src = a;
     }
 
     /* `--长选项`：可重复参数逐个收集（cmd_args_get 只返回第一个）。 */
@@ -433,7 +438,10 @@ int cmd_build(const cmd_args_t *args) {
     cbackend_program_t pgm = {
         .build_dir = build_dir, .entry_c = def_c, .entry_obj = def_obj};
     rc = cbackend_build_program(src, exe, &pgm, &tc);
-    if (rc == 0) printf("built %s\n", exe);
+    if (rc == 0) {
+        if (out_exe) *out_exe = strdup(exe);
+        if (!quiet) printf("built %s\n", exe);
+    }
     free(exe);
 
 done:
@@ -457,4 +465,13 @@ fail:
     free(libs.items);
     free(defs.items);
     return 1;
+}
+
+int cmd_build(const cmd_args_t *args) {
+    return build_impl(args, NULL, NULL, false);
+}
+
+int cmd_build_for_run(const cmd_args_t *args, const char *src,
+                      char **out_exe) {
+    return build_impl(args, src, out_exe, true);
 }

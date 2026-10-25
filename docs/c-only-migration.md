@@ -125,7 +125,21 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
   耗时、链接 libffi 情况。
 - 验收：`-DCLUX_ENABLE_VM=OFF` 能配置（可暂不构建完整测试）。
 
-### Phase 1：CLI 默认 C 后端（VM 仍可回退）
+### Phase 1：CLI 默认 C 后端（已完成）
+
+- `clux run` 改为 C 后端：复用 `build` 的参数解析（`-D/-I/-L/-l/--cc/--cflag/
+  --build-dir/--output`），构建后 `_spawnv`（Windows）/`fork+exec`（POSIX）
+  运行，退出码 = main 返回值；`.cxb/.cxs` 输入明确报错。
+- `clux test` 默认 C 后端（`cbackend_build_tests`，单文件与项目入口都支持
+  import），`--backend=vm` 仅作过渡回退。
+- `clux eval`、`clux bc` **已删除**（源码/头文件/命令注册/CMake 条目）。
+- 调试 C：`clux build <file> --emit-c[=P]` / `--emit-obj` / `--build-dir`
+  保持；`clux run --emit-c` 明确提示改用 build（run 需要可执行文件）。
+- 验收：`clux run` 跑通 hello/closure/decorator/decorator_param；`clux test`
+  默认 C 通过；`bc`/`eval` 报 unknown command；CBackendDiff/Reflect 中依赖
+  CLI run 的用例通过。
+
+### Phase 1 原始计划（参考）
 
 - `clux run` 改为 C 后端：`cbackend_build_program` + 临时 build dir + 运行；
   `--emit-c[=P]` / `--keep-c` / `--build-dir` / `--cc` 透传。
