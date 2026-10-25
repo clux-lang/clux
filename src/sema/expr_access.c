@@ -72,8 +72,8 @@
 #include "vm/type_slice.h"
 #include "vm/type_opaque.h"
 #include "vm/module.h"
-#include "vm/ffi_lib.h" /* M6 FFI：ffi_data_kind_of（extern var 的类型码） */
-#include "vm/bcode.h"   /* M6 FFI：BCODE_FFI_RET_*（extern cfunc 的返回类型码） */
+#include "core/ffi_abi.h" /* M6 FFI：ffi_data_kind_of（extern var 的类型码） */
+#include "core/ffi_abi.h"   /* M6 FFI：BCODE_FFI_RET_*（extern cfunc 的返回类型码） */
 #include "core/strmap.h"
 
 #include <stdio.h>

@@ -53,7 +53,7 @@
 #include "parser/ast_reexport.h"
 #include "parser/ast_extern_lib.h"
 #include "vm/module.h"
-#include "vm/ffi_lib.h"   /* M6 FFI：§2 C ABI 类型校验 */
+#include "core/ffi_abi.h"   /* M6 FFI：§2 C ABI 类型校验 */
 #include <string.h>
 #include <stdio.h>
 

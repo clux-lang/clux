@@ -1,4 +1,5 @@
 #include "vm/ffi_lib.h"
+#include "core/ffi_abi.h"
 #include "vm/module.h"
 #include "vm/vm.h"     /* vm_t 内建类型单例（数据符号的类型码编解码） */
 #include "vm/bcode.h"  /* BCODE_FFI_DATA_*（EXTERN_LOAD/STORE 的类型码） */
@@ -558,176 +559,12 @@ bool ffi_call_f64(void *sym, size_t argc, const double *args, double *out,
     return true;
 }
 
-/* ---- §2 C ABI 类型约束（m6-design §2.1/§2.2）----
- *
- * `extern cfunc` 的参数/返回类型必须是 C 可表达的类型；clux 专有的类型（option、
- * tag union、切片、元组、闭包、类型值）没有 C 对应，必须**在编译期拒绝**而不是
- * 猜着传参。返回 NULL 表示"可用于 C ABI"，否则返回人类可读的拒绝原因。
- *
- * 允许：整数/浮点/bool/str/opaque/enum/struct/cunion/指针（fatal·ref）
- *       + void（仅作返回类型；作为参数由调用方另行判断）。
- * 拒绝：option、tag union、切片（胖指针）、元组、闭包（函数类型）、类型值、
- *       模块/错误/中断等引擎内部类型。
- *
- * `own` 是**该位置的所有权**，由调用方传入（见 ffi_c_abi_reject_reason_own）：
- * 所有权已从类型层迁移到值/符号层，`type_t` 不携带 ownership，所以 own 的
- * 判定必须由调用方从类型槽位解析后传入，不能靠类型本身。
- */
-const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
-    if (!t) return "missing type";
-    /* 所有权现在记在类型上：`ref *T` 的有效类型是 `*T`、所有权是 REF。
-       结构/ABI 判定一律看裸类型；所有权从类型读（调用方给的 own 与之取并）。 */
-    if (type_ownership_of(t) != OWN_NONE) {
-        if (own == OWN_NONE) own = type_ownership_of(t);
-        t = type_strip_ownership(t);
-    }
-    /* 所有权修饰在 C ABI 里是**契约**，不是表示层：
-         - **参数** `own *T` / `own opaque`：**合法**——C 接管这个指针
-           （例如 `free(p)`），clux 侧交出所有权。C 侧看到的始终是裸指针，
-           所有权只是 clux 侧的值状态。
-         - **返回** `own`：非法（在 check_extern_cfunc 处单独拒绝）——把所有权
-           交给调用方要用 `fatal T`，与用户函数返回类型的规则一致。
-         - `own []T`：**非法**——切片是胖指针，C 侧根本没有这个表示。
-         - `own T`（聚合按值）：非法——按值传聚合时字段所有权无法在 C 侧表达。
-       ref/fatal 指针本来就按指针宽度放行。 */
-    /* `own` 能修饰的 C ABI 类型：指针、opaque、以及**有 C 按值表示**的聚合
-       （struct / cunion —— 字段还需递归可表示，见 ffi_c_abi_check_aggregate）。
-       数组**不在此列**：C 里数组形参退化为指针、且没有数组返回值，所以它根本没有
-       "按值表示"（要传数组请声明指针 + `data(a)`）。切片（胖指针）、元组、
-       tag union、option、func、type value 同样没有 C 表示 → 拒绝。 */
-    if (own == OWN_OWN && t->kind != TYPE_KIND_PTR &&
-        t->kind != TYPE_KIND_OPAQUE && t->kind != TYPE_KIND_STRUCT &&
-        t->kind != TYPE_KIND_CUNION)
-        return "the type is owned (own T) and cannot cross the C ABI: own can "
-               "qualify pointers ('own *T' / 'own opaque') and aggregates with a "
-               "C by-value representation (struct / cunion); arrays decay to "
-               "pointers in C (use 'ref *T' + data(a)), and slices/tuples/tag "
-               "unions/options have no C representation";
-    if (t->kind == TYPE_KIND_ARRAY)
-        return "array has no by-value C representation: arrays decay to pointers "
-               "in C (and C cannot return arrays) — declare the parameter as "
-               "'ref *T' / 'ref opaque' and pass data(a) / a.& instead";
-    switch (t->kind) {
-    case TYPE_KIND_INT:
-    case TYPE_KIND_FLOAT:
-    case TYPE_KIND_BOOL:
-    case TYPE_KIND_STR:
-    case TYPE_KIND_OPAQUE:
-    case TYPE_KIND_ENUM:
-    case TYPE_KIND_STRUCT:
-    case TYPE_KIND_CUNION:
-    case TYPE_KIND_VOID: /* 仅作返回类型；参数位置的检查由调用方负责 */
-    case TYPE_KIND_PTR:
-        /* 指针一律指针宽度（own/ref/fatal 只影响 clux 侧所有权契约） */
-        return NULL;
-    case TYPE_KIND_CFUNC:
-        /* C 函数指针（`cfunc(i32) -> i32`）：C 侧就是裸函数指针，指针宽，无
-           env/捕获——这正是它区别于 TYPE_KIND_FUNC（clux 函数值，带 env）的
-           地方。FFI 边界**只**允许这个类型。 */
-        return NULL;
-    case TYPE_KIND_OPTION:
-        return "option has no C representation";
-    case TYPE_KIND_UNION:
-        return "tag union has no C representation (use cunion for C unions)";
-    case TYPE_KIND_SLICE:
-        return "slice is a fat pointer (not C ABI)";
-    case TYPE_KIND_TUPLE:
-        return "tuple has no C representation";
-    case TYPE_KIND_FUNC:
-        return "closures/functions cannot cross the C ABI";
-    case TYPE_KIND_TYPE:
-        return "type values cannot cross the C ABI";
-    case TYPE_KIND_CONST:
-    case TYPE_KIND_VOLATILE:
-        return "const/volatile wrapper cannot cross the C ABI";
-    default:
-        return "type is not C ABI compatible";
-    }
-}
-
-/* 聚合类型的**递归** C ABI 校验（声明处用）：
- * struct / cunion 的字段本身必须能跨 C ABI（标量、枚举、嵌套 struct/cunion、
- * 指针、opaque……）。失败时把 libffi 描述符构造给出的具体原因（含字段类型名）
- * 写进 err —— 比在调用点才暴露 "parameter N: ..." 更早、更准。
- * 非聚合类型直接通过（由 ffi_c_abi_reject_reason_own 管）。 */
-bool ffi_c_abi_check_aggregate(const type_t *t, const struct vm_t *vm, char *err,
-                               size_t ecap) {
-    t = type_strip_ownership(t);
-    if (!t) return true;
-    if (t->kind != TYPE_KIND_STRUCT && t->kind != TYPE_KIND_CUNION) return true;
-    bool owned = false;
-    const void *desc = ffi_type_for(t, vm, &owned, err, ecap);
-    if (!desc) return false;
-    if (owned) ffi_type_release(desc);
-    return true;
-}
-
-/* 便捷包装：不关心所有权（运行期编组路径）时用。 */
-const char *ffi_c_abi_reject_reason(const type_t *t) {
-    return ffi_c_abi_reject_reason_own(t, OWN_NONE);
-}
-
 /* ---- M6 FFI：数据符号（extern var）的类型 ↔ 宽度/类别码 ----
  *
  * 两张表成对（编码 / 解码）放在一起：EXTERN_LOAD 用解码、sema 校验用编码，
  * 任何一侧新增类型都能立刻看出另一侧是否跟上。`bool` 有自己的码（宽度 1，
  * 但类型必须还原成 `bool`——复用 U8 会让 `flag != true` 报类型不匹配）；
  * 指针类型（opaque）用 PTR = 指针宽度。 */
-bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind) {
-    if (!t || !vm || !out_kind) return false;
-    t = type_strip_ownership(t);
-    const vm_t *v = (const vm_t *)vm;
-    if (t == v->type_i8)  { *out_kind = BCODE_FFI_DATA_I8;  return true; }
-    if (t == v->type_i16) { *out_kind = BCODE_FFI_DATA_I16; return true; }
-    if (t == v->type_i32) { *out_kind = BCODE_FFI_DATA_I32; return true; }
-    if (t == v->type_i64) { *out_kind = BCODE_FFI_DATA_I64; return true; }
-    if (t == v->type_u8)  { *out_kind = BCODE_FFI_DATA_U8;  return true; }
-    if (t == v->type_u16) { *out_kind = BCODE_FFI_DATA_U16; return true; }
-    if (t == v->type_u32) { *out_kind = BCODE_FFI_DATA_U32; return true; }
-    if (t == v->type_u64) { *out_kind = BCODE_FFI_DATA_U64; return true; }
-    /* usize（C 的 size_t）是独立类型：自己的码，宽度按运行平台 */
-    if (t == v->type_usize) { *out_kind = BCODE_FFI_DATA_USIZE; return true; }
-    if (t == v->type_f32) { *out_kind = BCODE_FFI_DATA_F32; return true; }
-    if (t == v->type_f64) { *out_kind = BCODE_FFI_DATA_F64; return true; }
-    if (t == v->type_bool) { *out_kind = BCODE_FFI_DATA_BOOL; return true; }
-    if (t == v->type_opaque) { *out_kind = BCODE_FFI_DATA_PTR; return true; }
-    /* `str` 在 C 里就是 `char *`：库里的 char* 全局可以按 str 读/写
-       （value->data 存的就是那个指针，与 C 同构） */
-    if (t == v->type_str) { *out_kind = BCODE_FFI_DATA_STR; return true; }
-    return false;
-}
-
-const type_t *ffi_data_type_of(const struct vm_t *vm, uint32_t kind,
-                               size_t *out_size) {
-    if (!vm) return NULL;
-    const vm_t *v = (const vm_t *)vm;
-    switch (kind) {
-    case BCODE_FFI_DATA_I8:  if (out_size) *out_size = 1; return v->type_i8;
-    case BCODE_FFI_DATA_I16: if (out_size) *out_size = 2; return v->type_i16;
-    case BCODE_FFI_DATA_I32: if (out_size) *out_size = 4; return v->type_i32;
-    case BCODE_FFI_DATA_I64: if (out_size) *out_size = 8; return v->type_i64;
-    case BCODE_FFI_DATA_U8:  if (out_size) *out_size = 1; return v->type_u8;
-    case BCODE_FFI_DATA_U16: if (out_size) *out_size = 2; return v->type_u16;
-    case BCODE_FFI_DATA_U32: if (out_size) *out_size = 4; return v->type_u32;
-    case BCODE_FFI_DATA_U64: if (out_size) *out_size = 8; return v->type_u64;
-    case BCODE_FFI_DATA_USIZE:
-        if (out_size) *out_size = sizeof(void *);
-        return v->type_usize;
-    case BCODE_FFI_DATA_F32: if (out_size) *out_size = 4; return v->type_f32;
-    case BCODE_FFI_DATA_F64: if (out_size) *out_size = 8; return v->type_f64;
-    case BCODE_FFI_DATA_BOOL:
-        if (out_size) *out_size = 1;
-        return v->type_bool;
-    case BCODE_FFI_DATA_PTR:
-        if (out_size) *out_size = sizeof(void *);
-        return v->type_opaque;
-    case BCODE_FFI_DATA_STR:
-        if (out_size) *out_size = sizeof(char *);
-        return v->type_str;
-    default: return NULL;
-    }
-}
-
 /* 码 → libffi 描述符：clux 标量与 C 的 1:1 映射（`bool` 就是 1 字节 _Bool）。
  * 与上面的编/解码表同源，新增类型时三处一起看。 */
 const void *ffi_data_ffi_type(uint32_t kind) {
@@ -755,20 +592,6 @@ const void *ffi_data_ffi_type(uint32_t kind) {
     (void)kind;
     return NULL;
 #endif
-}
-
-/* 该类型作数据符号时是否**必须**把类型随指令落盘（宽度/布局要查类型表）。 */
-bool ffi_data_kind_needs_type(const type_t *t) {
-    t = type_strip_ownership(t);
-    if (!t) return false;
-    switch (t->kind) {
-    case TYPE_KIND_STRUCT:
-    case TYPE_KIND_CUNION:
-    case TYPE_KIND_ENUM:
-        return true;
-    default:
-        return false;
-    }
 }
 
 #if defined(CLUX_HAVE_LIBFFI)

@@ -98,7 +98,7 @@
 #include "parser/ast_deref.h"
 #include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
-#include "vm/ffi_lib.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
+#include "core/ffi_abi.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
 #include "parser/ast_free.h"     /* AST_FREE：sema 生成的 own 变量释放语句 */
 #include <stdio.h>
 #include <string.h>

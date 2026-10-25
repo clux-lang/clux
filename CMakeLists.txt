@@ -56,7 +56,7 @@ clux_target_warnings(clux)
 # ---------------------------------------------------------------------------
 # Core library (allocator + runtime support)
 # ---------------------------------------------------------------------------
-add_library(clux_core STATIC src/core/allocator.c src/core/arena.c src/core/panic.c src/core/vec.c src/core/rbtree.c src/core/omap.c src/core/strmap.c src/core/stream.c src/core/string.c src/core/json.c src/core/ffi_cond.c)
+add_library(clux_core STATIC src/core/allocator.c src/core/arena.c src/core/panic.c src/core/vec.c src/core/rbtree.c src/core/omap.c src/core/strmap.c src/core/stream.c src/core/string.c src/core/json.c src/core/ffi_cond.c src/core/ffi_abi.c)
 target_include_directories(clux_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(clux_core PUBLIC ICU::uc ICU::i18n)
 clux_target_warnings(clux_core)
