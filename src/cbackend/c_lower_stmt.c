@@ -794,8 +794,40 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         }
         /* 赋值点旧值销毁（sema 生成的 `a->destroy`）：compiler 在"右值求值
            之后、写入之前"逐条执行。C 里先把右值存进临时变量，再销毁旧值，
-           最后赋值；否则 `p = new ...` 会先释放再求值，语义错。 */
-        if (a->destroy && st->lhs && st->expr) {
+           最后赋值；否则 `p = new ...` 会先释放再求值，语义错。
+           聚合（struct/option/union/tuple/array）的旧值销毁在 VM 由
+           compound_assign_transfer 完成，sema 不再生成 destroy 链；C 里用
+           类型生成的 `__destroy_<T>` 补上。 */
+        ast_node_t *destroy_chain = a->destroy;
+        cir_stmt_t *synth_destroy = NULL;
+        const type_t *tts = tt ? type_strip_quals(tt) : NULL;
+        if (!destroy_chain && tts && st->lhs && type_has_own_slots(tts) &&
+            (type_kind_of(tts) == TYPE_KIND_STRUCT ||
+             type_kind_of(tts) == TYPE_KIND_OPTION ||
+             type_kind_of(tts) == TYPE_KIND_UNION ||
+             type_kind_of(tts) == TYPE_KIND_TUPLE ||
+             type_kind_of(tts) == TYPE_KIND_ARRAY)) {
+            uint32_t dfid = 0;
+            strslice_t dn = STRSLICE_EMPTY;
+            if (sema_find_destroy_fn(lc->sema, tts, &dfid, &dn)) {
+                const char *cname =
+                    module_symbol(lc->arena, lc->unit, "fn_", dn);
+                if (cname) {
+                    cir_expr_t *call =
+                        cir_expr_call(lc->arena, cname, NULL);
+                    if (call) {
+                        cir_expr_append_arg(call,
+                                            cir_expr_ident(lc->arena, "NULL"));
+                        cir_expr_append_arg(
+                            call, cir_expr_unary(lc->arena, "&", st->lhs));
+                        synth_destroy =
+                            cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+                        if (synth_destroy) synth_destroy->expr = call;
+                    }
+                }
+            }
+        }
+        if ((destroy_chain || synth_destroy) && st->lhs && st->expr) {
             cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
             if (!blk) {
                 *ok = false;
@@ -811,19 +843,23 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             tv->name = copy_arena(lc->arena, nb);
             tv->expr = st->expr;
             cir_stmt_append(blk, tv);
-            for (ast_node_t *d = a->destroy; d; d = d->next) {
-                bool okd = true;
-                cir_stmt_t *ds = lower_stmt(lc, d, &okd);
-                if (!okd) {
-                    *ok = false;
-                    return NULL;
+            if (destroy_chain) {
+                for (ast_node_t *d = destroy_chain; d; d = d->next) {
+                    bool okd = true;
+                    cir_stmt_t *ds = lower_stmt(lc, d, &okd);
+                    if (!okd) {
+                        *ok = false;
+                        return NULL;
+                    }
+                    for (cir_stmt_t *it = ds; it;) {
+                        cir_stmt_t *nx = it->next;
+                        it->next = NULL;
+                        cir_stmt_append(blk, it);
+                        it = nx;
+                    }
                 }
-                for (cir_stmt_t *it = ds; it;) {
-                    cir_stmt_t *nx = it->next;
-                    it->next = NULL;
-                    cir_stmt_append(blk, it);
-                    it = nx;
-                }
+            } else {
+                cir_stmt_append(blk, synth_destroy);
             }
             st->expr = cir_expr_ident(lc->arena, tv->name);
             cir_stmt_append(blk, st);
