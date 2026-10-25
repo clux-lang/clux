@@ -459,6 +459,19 @@ value_t *ex_move(sema_t *sema, ast_node_t **node,
         const ast_member_t *cm = (const ast_member_t *)n->operand;
         const type_t *ct = static_lvalue_type(sema, scope, cm->object);
         if (ct && type_kind_of(ct) == TYPE_KIND_CUNION) cunion_member_move = true;
+        /* tag union 的直接变量成员、且 payload 含 own 资源：同样需要
+           运行期真转移（槽位清零），否则整体重赋值会 double free。
+           嵌套成员 / ref payload 仍走原有拒绝规则。 */
+        if (ct && type_kind_of(ct) == TYPE_KIND_UNION &&
+            cm->object->kind == AST_IDENT) {
+          int mi = union_type_find_member(ct, cm->field);
+          const union_member_t *mem =
+              mi >= 0 ? union_type_member(ct, (size_t)mi) : NULL;
+          if (mem && mem->payload_type &&
+              (type_ownership_of(mem->payload_type) == OWN_OWN ||
+               type_has_own_slots(type_strip_ownership(mem->payload_type))))
+            cunion_member_move = true;
+        }
       }
 
       /* cunion 成员 move 的**运行期真转移**：把操作数包成 AST_TAKE_SLOT ——

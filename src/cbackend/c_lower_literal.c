@@ -129,6 +129,22 @@ static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
 /* 函数定义的值类型：有捕获 → 闭包类型（捕获槽位进入类型身份）；
    无捕获 → 普通签名类型。捕获槽位类型解析顺序与 lower_closure_literal
    一致（resolved_type → 局部符号 → type_expr）。 */
+/* 捕获槽位的实际 C 值类型：如果捕获的是块内具名函数（前向引用/自递归/
+   兄弟捕获），sema 的 resolved_type 可能只是普通签名；实际值是该函数的
+   闭包结构（带 env），必须用 local_fn 的闭包类型，否则 env 字段会被截断
+   成裸函数指针。 */
+static const type_t *closure_capture_type(lower_ctx_t *lc, ast_var_def_t *vd) {
+    const type_t *t = vd->resolved_type;
+    if (!t) t = lookup_local(lc, vd->name);
+    if (!t && vd->type_expr)
+        t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+    if (t && type_kind_of(type_strip_quals(t)) == TYPE_KIND_FUNC) {
+        lower_local_fn_t *lf = find_local_fn(lc, vd->name);
+        if (lf && lf->type) t = lf->type;
+    }
+    return t;
+}
+
 const type_t *closure_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn) {
     const type_t *plain = func_type_of_def(lc, fn);
     if (!plain || !fn) return plain;
@@ -141,10 +157,7 @@ const type_t *closure_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn) {
     size_t k = 0;
     for (ast_node_t *c = fn->captures; c; c = c->next, k++) {
         ast_var_def_t *vd = (ast_var_def_t *)c;
-        const type_t *t = vd->resolved_type;
-        if (!t) t = lookup_local(lc, vd->name);
-        if (!t && vd->type_expr)
-            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        const type_t *t = closure_capture_type(lc, vd);
         if (!t) return plain;   /* 类型未知：退回签名类型（已有诊断） */
         capts[k] = t;
     }
@@ -184,10 +197,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     size_t k = 0;
     for (ast_node_t *c = fn->captures; c; c = c->next, k++) {
         ast_var_def_t *vd = (ast_var_def_t *)c;
-        const type_t *t = vd->resolved_type;
-        if (!t) t = lookup_local(lc, vd->name);
-        if (!t && vd->type_expr)
-            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        const type_t *t = closure_capture_type(lc, vd);
         if (!t) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, c),
                        "c backend: cannot determine closure capture type");

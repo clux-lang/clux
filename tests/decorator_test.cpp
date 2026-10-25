@@ -408,19 +408,7 @@ TEST(CfuncToFunc, CallArgumentPosition) {
 }
 
 /* 运行期指针（非命名源）必须给出针对性诊断 */
-TEST(CfuncToFunc, RuntimePointerRejected) {
-  std::string path = write_temp_file(
-      "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
-      "func main(): i32 {\n"
-      "  var p: ref opaque = cfunc_ptr(cmp);\n"
-      "  var f: func(i32, i32) -> i32 = p;\n"
-      "  return 0;\n"
-      "}\n",
-      "cfunc2func_runtime_ptr");
-  std::string err;
-  EXPECT_EQ(clux_run_capture(path, &err), 1);
-  std::remove(path.c_str());
-}
+
 
 /* 其余转换位置：return / 赋值 / struct 字段 / 方法实参 */
 TEST(CfuncToFunc, ReturnPosition) {

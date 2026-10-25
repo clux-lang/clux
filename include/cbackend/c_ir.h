@@ -30,6 +30,7 @@ typedef enum {
 
 typedef struct cir_type cir_type_t;
 typedef struct cir_expr cir_expr_t;
+struct cir_stmt;
 
 typedef struct cir_field {
     const char *name;
@@ -88,6 +89,7 @@ typedef enum {
     CIR_EXPR_UNWRAP,
     CIR_EXPR_TAKE,      /* take_opt(x)：取 payload 并把 x 置 nil（仅左值） */
     CIR_EXPR_TAKE_SLOT, /* cunion 成员 move：取槽位值并清零槽位 */
+    CIR_EXPR_TRY,       /* 表达式位置的 try：setup; if (!ok) tail; value */
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
     CIR_EXPR_UNION_AT,   /* 带 tag 校验的 union 成员访问（左值） */
@@ -144,6 +146,8 @@ typedef struct cir_expr {
     struct cir_expr *rhs;
     struct cir_expr *high;
     struct cir_expr *args;
+    struct cir_stmt *setup_stmt; /* CIR_EXPR_TRY：前置语句 */
+    struct cir_stmt *tail_stmt;  /* CIR_EXPR_TRY：失败分支（return/panic） */
     cir_init_t      *inits;
     struct cir_expr *next;
 } cir_expr_t;
@@ -354,6 +358,10 @@ cir_expr_t    *cir_expr_unwrap(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_take(arena_t *arena, cir_expr_t *object);
 /** cunion 成员 move：拷贝槽位值并把槽位清零（操作数是左值）。 */
 cir_expr_t    *cir_expr_take_slot(arena_t *arena, cir_expr_t *object);
+/** 表达式位置的 try：setup 语句 + `if (!ok) tail` + 成功值。 */
+cir_expr_t    *cir_expr_try(arena_t *arena, cir_expr_t *ok,
+                            cir_expr_t *value, struct cir_stmt *setup,
+                            struct cir_stmt *tail);
 cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
                                         size_t tag, const char *field,
                                         cir_expr_t *value);

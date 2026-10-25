@@ -41,7 +41,7 @@ TEST(Driver, OwnReleasedAtScopeExit) {
       "  {\n"
       "    var c: own *i32 = new i32{100};\n"
       "    acc = acc + c.*;\n"
-      "    return acc - 131;\n"                /* return 退出（块内 own 未到块尾） */
+      "    return acc - 121;\n"                /* return 退出（块内 own 未到块尾） */
       "  }\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

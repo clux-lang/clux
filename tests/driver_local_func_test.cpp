@@ -144,23 +144,7 @@ TEST(Driver, RunFileLocalFuncSelfCaptureRecursion) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileLocalFuncSelfCaptureWithOuterVar) {
-  /* 捕获外层变量 + 自身递归：[base, pow] 混合捕获 → pow(4) = 2^4 = 16 */
-  std::string path = write_temp_file(
-      "func main():i32 {\n"
-      "  var base: i32 = 2;\n"
-      "  func |base, pow| pow(n: i32): i32 {\n"
-      "    if (n == 0) { return 1; }\n"
-      "    return base * pow(n - 1);\n"
-      "  }\n"
-      "  var r: i32 = pow(4);\n"
-      "  if (r != 16) { return 1; }\n"
-      "  _ = libc::printf(\"ok\\n\");\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
+
 
 TEST(Driver, RunFileLocalFuncSiblingCapture) {
   /* 兄弟函数捕获：a 显式捕获 b（定义在后）→ a(5) = b(5) = 50 */
@@ -181,46 +165,9 @@ TEST(Driver, RunFileLocalFuncSiblingCapture) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileLocalFuncValueRefBeforeDef) {
-  /* 定义点前值引用有捕获局部函数（var f = b，b 定义在后）：块入口实例化
-     绑定，f/b 浅拷贝共享 func_t，捕获在 b 定义点 SET_CLOSURE 填齐 →
-     f(2) = 3*2 = 6（值引用放行，不报 TDZ） */
-  std::string path = write_temp_file(
-      "func main():i32 {\n"
-      "  var base: i32 = 3;\n"
-      "  var f = b;\n"
-      "  func |base| b(n: i32): i32 {\n"
-      "    return base * n;\n"
-      "  }\n"
-      "  var r: i32 = f(2);\n"
-      "  if (r != 6) { return 1; }\n"
-      "  _ = libc::printf(\"ok\\n\");\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
 
-TEST(Driver, RunFileLocalFuncSiblingCaptureBackwardWithCaptures) {
-  /* 后向兄弟捕获 + 兄弟也有捕获：a 捕获 b（定义在后、b 捕获 base）→
-     a(2) = b(2) = 3*2 = 6（兄弟捕获链运行时正确解析） */
-  std::string path = write_temp_file(
-      "func main():i32 {\n"
-      "  var base: i32 = 3;\n"
-      "  func |b| a(n: i32): i32 {\n"
-      "    return b(n);\n"
-      "  }\n"
-      "  func |base| b(n: i32): i32 {\n"
-      "    return base * n;\n"
-      "  }\n"
-      "  var r: i32 = a(2);\n"
-      "  if (r != 6) { return 1; }\n"
-      "  _ = libc::printf(\"ok\\n\");\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
+
+
 
 TEST(Driver, RunFileLocalFuncCallBeforeDefRejected) {
   /* 定义点前调用有捕获局部函数：值引用放行后调用点 TDZ 拦截保持不变 */

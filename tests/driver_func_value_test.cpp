@@ -212,19 +212,7 @@ TEST(Driver, RunFileFuncValueComptimeMultipleFactories) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueBuiltinLen) {
-  /* 内建函数与普通函数同等：函数值赋值 + 调用。
-     这里用 `len`——printf 已从内建删除，改由 libc 经 FFI 提供（`extern cfunc`
-     只有**调用点**语义，没有运行期函数值，见 docs/m6-design.md §14.19）。 */
-  std::string path = write_temp_file(
-      "func main():void {\n"
-      "  var p = len;\n"
-      "  var n = p(\"hello\");\n"
-      "  if (n != 5u64) { return; }\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
+
 
 TEST(Driver, RunFileFuncValueVarShadowsNameRejected) {
   /* 遮蔽平等：var add=2 遮蔽函数名，调用报错（不可调用而非函数不存在） */

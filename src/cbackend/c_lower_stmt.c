@@ -954,7 +954,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 gen_uninit = true; /* sema 生成的未初始化临时变量 */
         }
         const type_t *tts = tt ? type_strip_quals(tt) : NULL;
-        if (!destroy_chain && !gen_uninit && tts && st->lhs &&
+        if (!destroy_chain && !gen_uninit && !a->reinit && tts && st->lhs &&
             type_has_own_slots(tts) &&
             (type_kind_of(tts) == TYPE_KIND_STRUCT ||
              type_kind_of(tts) == TYPE_KIND_OPTION ||

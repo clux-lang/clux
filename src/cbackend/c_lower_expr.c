@@ -1286,6 +1286,30 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         lc->unit->uses_opt_unwrap = true;
         return cir_expr_unwrap(lc->arena, obj);
     }
+    case AST_TRY: {
+        ast_try_t *tr = (ast_try_t *)e;
+        cir_stmt_t *setup = NULL;
+        if (tr->setup) {
+            bool okd = true;
+            setup = lower_stmt(lc, tr->setup, &okd);
+            if (!okd) {
+                lc->failed = true;
+                return NULL;
+            }
+        }
+        cir_expr_t *okc = lower_expr(lc, tr->ok_call);
+        cir_expr_t *val = lower_expr(lc, tr->value_call);
+        cir_stmt_t *tail = NULL;
+        if (tr->tail_stmt) {
+            bool okd = true;
+            tail = lower_stmt(lc, tr->tail_stmt, &okd);
+            if (!okd) {
+                lc->failed = true;
+                return NULL;
+            }
+        }
+        return cir_expr_try(lc->arena, okc, val, setup, tail);
+    }
     case AST_NIL:
         diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                    "c backend: nil requires an optional target type "

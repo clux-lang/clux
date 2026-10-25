@@ -740,6 +740,20 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       /* value_assign 校验 init 可赋给声明类型（单一校验点） */
       if (!init_bad && sym->type) {
+        /* 运行期 opaque 指针不能变成函数值：只有 `cfunc_ptr(<命名 cfunc>)`
+           这类编译期已知的 C 函数指针才能包装。 */
+        const type_t *dt = type_strip_quals(sym->type);
+        const type_t *it0 = value_type(init);
+        const type_t *its = it0 ? type_strip_quals(it0) : NULL;
+        if (dt && its && type_kind_of(dt) == TYPE_KIND_FUNC &&
+            type_kind_of(its) == TYPE_KIND_OPAQUE) {
+          diag_error(sema->diag, sema_loc(sema, vd->init),
+                     "cannot convert a runtime `opaque` pointer to a function "
+                     "value: only `cfunc_ptr(<named cfunc>)` is convertible");
+          init_bad = true;
+        }
+      }
+      if (!init_bad && sym->type) {
         /* **RC 创建通道**（§12.1）：`var s: share *T = new ...` / `= move(p)`
            ——fatal/own 的普通 `*T` 改写成 `__make_share(...)`，类型变 share *T。 */
         (void)rc_adapt_share_init(sema, sym->type, &vd->init, &init);
