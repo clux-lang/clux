@@ -29,12 +29,18 @@ clux AST（sema 之后、已单态化）
 
 ### C IR 约束
 
-- **生成 C 不引入任何标准库头文件**：clux 产物不与 C 源码兼容编译，只按
-  ABI 与动态库交互。`.h` 自带基础类型/宏（`__INT32_TYPE__` / `__SIZE_TYPE__`
-  / `_Bool` / `NULL` / `clux_offsetof`），`.c` 自带运行期符号原型
-  （malloc/calloc/realloc/free/memcpy/memset/memcmp/strlen/strncmp/abort/
-  printf/fflush）。用户 `extern cfunc` 若与这些名字相同，其原型**跳过**
-  （复用生成代码自带的原型），因此 `extern cfunc libc::printf` 等不再冲突；
+- **标准库策略：正常引用标准头**。`.h` 引入 `<stdint.h> <stddef.h>
+  <stdbool.h>`；`.c` 按实际用到的运行期设施分别引入 `<stdlib.h>`
+  （calloc/free/abort/_Exit）、`<string.h>`（memcpy/memcmp/strlen）、
+  `<stdio.h>`（printf/fflush，测试运行器与 panic/越界诊断）。**clux 的
+  FFI 声明必须与 C 标准库原型一致**：`printf` 要声明为 `i32` 返回并在
+  语句处 `_ =` 丢弃；`qsort` 用 `usize` 与 `cfunc(ref *const opaque, ...)`
+  （`const` 在 FFI C 类型里保留，映射为 `const void *`）；`memcmp` 的
+  指针参数同样是 `ref *const opaque`。声明不一致时由 C 编译器直接报
+  `conflicting types`，应按标准库修正 clux 声明，而不是让后端绕过；
+- FFI 的 `str`：**参数位置**映射 `const char *`，**返回值位置**映射
+  `char *`（与 libc 的 `getenv`/`strdup` 等原型一致；返回后仍用
+  `clux_str_from_c` 包成 clux `str`）；
 - 失败跳转使用 clang/gcc `__builtin_setjmp/__builtin_longjmp`（5 指针
   buffer），不依赖 `<setjmp.h>`；
 - C IR 只描述 C 级构造；

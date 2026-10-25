@@ -15,7 +15,7 @@
 //     只能访问参数与全局函数
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 comptime func make_inc(): func(i32) -> i32 {
     return func(x: i32): i32 {
         return x + 1;
@@ -38,13 +38,13 @@ comptime func quad(a: i32): i32 {
 
 func main(): i32 {
     var inc = make_inc();
-    libc::printf("inc(41) = %d\n", inc(41)); // 42
+    _ = libc::printf("inc(41) = %d\n", inc(41)); // 42
 
     var t = make_twice();
-    libc::printf("twice(21) = %d\n", t(21)); // 42
+    _ = libc::printf("twice(21) = %d\n", t(21)); // 42
 
     var q = quad(3);
-    libc::printf("quad(3) = %d\n", q); // 12
+    _ = libc::printf("quad(3) = %d\n", q); // 12
 
     return 0;
 }

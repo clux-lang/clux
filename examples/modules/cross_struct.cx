@@ -5,7 +5,7 @@
 
 import shapes from "./lib/shapes";
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 func main(): i32 {
     // 静态方法调用：xxx::Test::create(42)
@@ -20,6 +20,6 @@ func main(): i32 {
         return 2;
     }
 
-    libc::printf("cross_struct ok: %d\n", t.get());
+    _ = libc::printf("cross_struct ok: %d\n", t.get());
     return 0;
 }

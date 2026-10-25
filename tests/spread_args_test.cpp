@@ -84,7 +84,7 @@ TEST(SpreadArgs, ExternVariadicCall) {
                      "extern func libc::printf(format: str, ...): void;\n"
                      "func main(): i32 {\n"
                      "  var arr = .[2]i32{ 3, 4 };\n"
-                     "  libc::printf(\"%d+%d\\n\", ...arr);\n"
+                     "  _ = libc::printf(\"%d+%d\\n\", ...arr);\n"
                      "  return 0;\n"
                      "}\n"),
                  "spread_ffi");

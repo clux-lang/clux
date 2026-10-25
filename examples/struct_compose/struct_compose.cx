@@ -24,7 +24,7 @@
 //     一律报错——见测试套件里的覆盖用例）。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 struct Base {
     id: i32;
@@ -170,6 +170,6 @@ func main(): i32 {
         return 19;
     } // 显式 Base:: 仍取 Base 的实现
 
-    libc::printf("struct_compose ok: t.id=%d t.extra=%d Test::count=%d sizeof(Test)=%d c=%d,%d,%d mid=%d,%d Override::count=%d Base::count=%d o.getId=%d\n", t.id, t.extra as i32, Test::count, sizeof(Test) as i32, c.a, c.b, c.c, mid.x, mid.id, Override::count, Base::count, o.getId());
+    _ = libc::printf("struct_compose ok: t.id=%d t.extra=%d Test::count=%d sizeof(Test)=%d c=%d,%d,%d mid=%d,%d Override::count=%d Base::count=%d o.getId=%d\n", t.id, t.extra as i32, Test::count, sizeof(Test) as i32, c.a, c.b, c.c, mid.x, mid.id, Override::count, Base::count, o.getId());
     return 0;
 }

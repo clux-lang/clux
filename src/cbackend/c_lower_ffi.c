@@ -176,7 +176,11 @@ const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t,
     return ffi_cfunc_typedef(lc, t, ok);
 }
 
-static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw, bool *ok) {
+static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw,
+                              bool *ok);
+
+static const char *ffi_c_type_core(lower_ctx_t *lc, const type_t *t_raw,
+                                   bool *ok) {
     const type_t *t = type_strip_quals(t_raw); /* 剥 const/volatile/所有权 */
     vm_t *vm = lc->sema->vm;
     if (!t || t == vm->type_void) return "void";
@@ -199,7 +203,10 @@ static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw, bool *ok) {
         const type_t *base = ptr_type_base(t);
         const char *bc = ffi_c_type(lc, base, ok);
         if (!*ok || !bc) return NULL;
-        return cat_str(lc, bc, strcmp(bc, "void *") == 0 ? "" : " *");
+        return cat_str(lc, bc,
+                   (strcmp(bc, "void *") == 0 ||
+                    strcmp(bc, "const void *") == 0)
+                       ? "" : " *");
     }
     case TYPE_KIND_STRUCT:
     case TYPE_KIND_CUNION: {
@@ -228,6 +235,17 @@ static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw, bool *ok) {
         *ok = false;
         return NULL;
     }
+}
+
+/* const 保留：标准库原型如 `int (*)(const void *, const void *)`
+   需要 clux 侧 `ref const opaque` 才能与之一致。 */
+static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw,
+                              bool *ok) {
+    bool cq = t_raw && type_is_const(t_raw);
+    const char *r = ffi_c_type_core(lc, t_raw, ok);
+    if (!cq || !r || strcmp(r, "void") == 0) return r;
+    if (strncmp(r, "const ", 6) == 0) return r;
+    return cat_str(lc, "const ", r);
 }
 
 /* ===================== extern lib / extern cfunc 收集 ===================== */
@@ -295,18 +313,6 @@ static const type_t *extern_return_type(lower_ctx_t *lc,
 }
 
 static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
-    /* 生成代码自带运行期 ABI 原型（malloc/free/printf/...）：同名 extern
-       cfunc 不再重复声明，否则与自带原型冲突（clux 的 C 产物不与 C 源码
-       兼容编译，只按 ABI 走动态库）。 */
-    static const char *const runtime_abi[] = {
-        "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
-        "strlen", "abort", "printf", "fflush", NULL};
-    for (size_t i = 0; runtime_abi[i]; i++) {
-        strslice_t rn = strslice_from_cstr(runtime_abi[i]);
-        if (rn.len == fn->name.len &&
-            memcmp(rn.ptr, fn->name.ptr, rn.len) == 0)
-            return;
-    }
     bool ok = true;
     size_t nparams = 0;
     for (ast_node_t *p = fn->params; p; p = p->next) nparams++;
@@ -322,6 +328,10 @@ static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
     const type_t *rt = extern_return_type(lc, fn);
     lc->ffi_error = NULL;
     const char *cret = ffi_c_type(lc, rt, &ok);
+    /* 返回值位置的 `str` 对应 C 的 `char *`（参数位置仍是
+       `const char *`）：与 libc 的 getenv/strdup 等原型一致。 */
+    if (rt && type_strip_quals(rt) == lc->sema->vm->type_str)
+        cret = "char *";
     if (!ok || !cret) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)fn),
                    "c backend: extern cfunc '%.*s' return type cannot cross "

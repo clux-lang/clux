@@ -1,5 +1,5 @@
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 struct Box {
     v: i32;

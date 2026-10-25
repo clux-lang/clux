@@ -158,7 +158,7 @@ TEST(Foreach, ArraySumVarForm) {
       "  foreach (var x of a) {\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"%d\\n\", sum);\n"
+      "  _ = libc::printf(\"%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "150\n");
@@ -171,7 +171,7 @@ TEST(Foreach, AssignmentFormUsesExistingVariable) {
       "  var a = .[3]i32{ 7, 8, 9 };\n"
       "  var cur = 0;\n"
       "  foreach (cur of a) {\n"
-      "    libc::printf(\"cur=%d\\n\", cur);\n"
+      "    _ = libc::printf(\"cur=%d\\n\", cur);\n"
       "  }\n"
       "  return 0;\n"
       "}\n",
@@ -186,7 +186,7 @@ TEST(Foreach, EmptyArrayRunsZeroTimes) {
       "  foreach (var x of a) {\n"
       "    n = n + 1;\n"
       "  }\n"
-      "  libc::printf(\"n=%d\\n\", n);\n"
+      "  _ = libc::printf(\"n=%d\\n\", n);\n"
       "  return 0;\n"
       "}\n",
       "n=0\n");
@@ -209,7 +209,7 @@ TEST(Foreach, ContinueStillAdvancesIndex) {
       "    n = n + 1;\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"n=%d sum=%d\\n\", n, sum);\n"
+      "  _ = libc::printf(\"n=%d sum=%d\\n\", n, sum);\n"
       "  return 0;\n"
       "}\n",
       "n=4 sum=120\n");
@@ -224,7 +224,7 @@ TEST(Foreach, BreakStopsIteration) {
       "    if (x > 3) { break; }\n"
       "    last = x;\n"
       "  }\n"
-      "  libc::printf(\"last=%d\\n\", last);\n"
+      "  _ = libc::printf(\"last=%d\\n\", last);\n"
       "  return 0;\n"
       "}\n",
       "last=3\n");
@@ -240,7 +240,7 @@ TEST(Foreach, ReturnInsideLoop) {
       "}\n"
       "func main(): i32 {\n"
       "  var a = .[4]i32{ 1, 200, 3, 400 };\n"
-      "  libc::printf(\"%d\\n\", first_big(a));\n"
+      "  _ = libc::printf(\"%d\\n\", first_big(a));\n"
       "  return 0;\n"
       "}\n",
       "200\n");
@@ -264,7 +264,7 @@ TEST(Foreach, IterableEvaluatedExactlyOnce) {
       "  foreach (var x of make_arr()) {\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"calls=%d sum=%d\\n\", CALLS, sum);\n"
+      "  _ = libc::printf(\"calls=%d sum=%d\\n\", CALLS, sum);\n"
       "  return 0;\n"
       "}\n",
       "calls=1 sum=18\n");
@@ -279,7 +279,7 @@ TEST(Foreach, SliceExpressionIterable) {
       "  foreach (var x of a[1:4]) {\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"sum=%d\\n\", sum);\n"
+      "  _ = libc::printf(\"sum=%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "sum=9\n");
@@ -296,7 +296,7 @@ TEST(Foreach, StructFieldArrayIsSnapshot) {
       "    r.cells[1] = 9;\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"sum=%d\\n\", sum);\n"
+      "  _ = libc::printf(\"sum=%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "sum=3\n");
@@ -316,7 +316,7 @@ TEST(Foreach, OwnSliceLocalIteratesWithoutMoving) {
       "  foreach (var x of s) {\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
+      "  _ = libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
       "  return 0;\n"
       "}\n",
       "sum=60 len=3\n");
@@ -333,7 +333,7 @@ TEST(Foreach, OwnSliceParameterIterates) {
       "}\n"
       "func main(): i32 {\n"
       "  var s: own []i32 = make(i32, 4, 1, 2, 3, 4);\n"
-      "  libc::printf(\"%d\\n\", sum_own(move(s)));\n"
+      "  _ = libc::printf(\"%d\\n\", sum_own(move(s)));\n"
       "  return 0;\n"
       "}\n",
       "10\n");
@@ -348,7 +348,7 @@ TEST(Foreach, RefSliceIterates) {
       "  foreach (var x of r) {\n"
       "    sum = sum + x;\n"
       "  }\n"
-      "  libc::printf(\"sum=%d\\n\", sum);\n"
+      "  _ = libc::printf(\"sum=%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "sum=26\n");
@@ -365,7 +365,7 @@ TEST(Foreach, OwnSliceOfOwnPointersLendsElements) {
       "  foreach (var p: ref *i32 of s) {\n"
       "    sum = sum + p.*;\n"
       "  }\n"
-      "  libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
+      "  _ = libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
       "  return 0;\n"
       "}\n",
       "sum=66 len=3\n");
@@ -385,7 +385,7 @@ TEST(Foreach, NestedForeach) {
       "      sum = sum + cell;\n"
       "    }\n"
       "  }\n"
-      "  libc::printf(\"sum=%d\\n\", sum);\n"
+      "  _ = libc::printf(\"sum=%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "sum=10\n");
@@ -402,7 +402,7 @@ TEST(Foreach, ShadowedElementNameInNestedLoop) {
       "      sum = sum + x;\n"
       "    }\n"
       "  }\n"
-      "  libc::printf(\"sum=%d\\n\", sum);\n"
+      "  _ = libc::printf(\"sum=%d\\n\", sum);\n"
       "  return 0;\n"
       "}\n",
       "sum=60\n");
@@ -414,7 +414,7 @@ TEST(Foreach, ElementVariableDiesWithIteration) {
       "func main(): i32 {\n"
       "  var a = .[2]i32{ 1, 2 };\n"
       "  foreach (var x of a) { }\n"
-      "  libc::printf(\"%d\\n\", x);\n"
+      "  _ = libc::printf(\"%d\\n\", x);\n"
       "  return 0;\n"
       "}\n",
       "foreach_scope");
@@ -441,7 +441,7 @@ TEST(Foreach, InsideClosureBody) {
       "    }\n"
       "    return acc;\n"
       "  };\n"
-      "  libc::printf(\"%d\\n\", f());\n"
+      "  _ = libc::printf(\"%d\\n\", f());\n"
       "  return 0;\n"
       "}\n",
       "6\n");
@@ -453,8 +453,8 @@ TEST(Foreach, WithDeferPerIteration) {
       "func main(): i32 {\n"
       "  var a = .[2]i32{ 1, 2 };\n"
       "  foreach (var x of a) {\n"
-      "    defer |x| { libc::printf(\"defer%d\\n\", x); }\n"
-      "    libc::printf(\"body%d\\n\", x);\n"
+      "    defer |x| { _ = libc::printf(\"defer%d\\n\", x); }\n"
+      "    _ = libc::printf(\"body%d\\n\", x);\n"
       "  }\n"
       "  return 0;\n"
       "}\n",
@@ -468,9 +468,9 @@ TEST(Foreach, InsideComptimeIfBranch) {
       "func main(): i32 {\n"
       "  var a = .[2]i32{ 3, 4 };\n"
       "  comptime if (N == 2) {\n"
-      "    foreach (var x of a) { libc::printf(\"taken%d\\n\", x); }\n"
+      "    foreach (var x of a) { _ = libc::printf(\"taken%d\\n\", x); }\n"
       "  } else {\n"
-      "    foreach (var x of a) { libc::printf(\"dropped%d\\n\", x); }\n"
+      "    foreach (var x of a) { _ = libc::printf(\"dropped%d\\n\", x); }\n"
       "  }\n"
       "  return 0;\n"
       "}\n",
@@ -489,7 +489,7 @@ TEST(Foreach, InsideLocalFunction) {
       "    return acc;\n"
       "  }\n"
       "  var a = .[3]i32{ 4, 5, 6 };\n"
-      "  libc::printf(\"%d\\n\", total(a));\n"
+      "  _ = libc::printf(\"%d\\n\", total(a));\n"
       "  return 0;\n"
       "}\n",
       "15\n");
@@ -508,7 +508,7 @@ TEST(Foreach, InsideComptimeFunc) {
       "}\n"
       "comptime var TOTAL = sum_arr();\n"
       "func main(): i32 {\n"
-      "  libc::printf(\"%d\\n\", TOTAL);\n"
+      "  _ = libc::printf(\"%d\\n\", TOTAL);\n"
       "  return 0;\n"
       "}\n",
       "10\n");

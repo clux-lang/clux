@@ -19,7 +19,7 @@
 //     全局变量，或捕获 ref 通过指针改内存（本示例两种都用到）。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 var seq: i32 = 0; // 拼接用的全局序列（defer 体内可写全局）
 var own_field: i32 = 0; // defer 里读 own 堆块的结果
@@ -122,6 +122,6 @@ func main(): i32 {
         return 4;
     }
 
-    libc::printf("defer ok: lifo=%d capture=%d nested=%d loop=%d own=%d slice=%d\n", lifo, capture, nested, loop, own_field, slice_sum);
+    _ = libc::printf("defer ok: lifo=%d capture=%d nested=%d loop=%d own=%d slice=%d\n", lifo, capture, nested, loop, own_field, slice_sum);
     return 0;
 }

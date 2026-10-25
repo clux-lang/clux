@@ -82,7 +82,7 @@ TEST(DriverImport, ImportExportedFunc) {
       "import math from \"" + mod + "\";\n"
       "func main(): void {\n"
       "  var x = math::add(3, 4);\n"
-      "  libc::printf(\"%d\\n\", x);\n"
+      "  _ = libc::printf(\"%d\\n\", x);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
@@ -95,7 +95,7 @@ TEST(DriverImport, ImportExportedVar) {
       "import math from \"" + mod + "\";\n"
       "func main(): void {\n"
       "  var p = math::PI;\n"
-      "  libc::printf(\"%d\\n\", p);\n"
+      "  _ = libc::printf(\"%d\\n\", p);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
@@ -111,7 +111,7 @@ TEST(DriverImport, ImportMixedExports) {
       "func main(): void {\n"
       "  var x = math::add(3, 4);\n"
       "  var p = math::PI;\n"
-      "  libc::printf(\"%d %d\\n\", x, p);\n"
+      "  _ = libc::printf(\"%d %d\\n\", x, p);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
@@ -131,7 +131,7 @@ TEST(DriverImport, ImportComptimeFoldedExports) {
       "func main(): void {\n"
       "  var x = ct::COMPUTED;\n"
       "  var h = ct::HELPED;\n"
-      "  libc::printf(\"%d %d\\n\", x, h);\n"
+      "  _ = libc::printf(\"%d %d\\n\", x, h);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
@@ -148,7 +148,7 @@ TEST(DriverImport, RelativePathResolvedAgainstImporterDir) {
   ASSERT_EQ(mod, "./math");
   std::string main_path = c.entry("main",
       "import math from \"./math\";\n"
-      "func main(): void { libc::printf(\"%d\\n\", math::add(20, 22)); }\n");
+      "func main(): void { _ = libc::printf(\"%d\\n\", math::add(20, 22)); }\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -159,7 +159,7 @@ TEST(DriverImport, ExtensionAppendedWhenOmitted) {
   std::string main_path = c.entry("main",
       "import m1 from \"./math\";\n"
       "import m2 from \"./math.cx\";\n"
-      "func main(): void { libc::printf(\"%d %d\\n\", m1::V, m2::V); }\n");
+      "func main(): void { _ = libc::printf(\"%d %d\\n\", m1::V, m2::V); }\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -168,7 +168,7 @@ TEST(DriverImport, ParentRelativePath) {
   ImportCase c("parent");
   std::string sub_entry = c.write_sub("sub", "inner",
       "import math from \"../math\";\n"
-      "func main(): void { libc::printf(\"%d\\n\", math::add(1, 2)); }\n");
+      "func main(): void { _ = libc::printf(\"%d\\n\", math::add(1, 2)); }\n");
   c.write("math", "export func add(a: i32, b: i32): i32 { return a + b; }\n");
   EXPECT_EQ(driver_run_file(sub_entry.c_str()), 0);
 }
@@ -182,7 +182,7 @@ TEST(DriverImport, PathNormalizationCollapsesDotSegments) {
   std::string main_path = c.entry("main",
       "import a from \"./math\";\n"
       "import b from \"./sub/../math\";\n"
-      "func main(): void { libc::printf(\"%d %d\\n\", a::V, b::V); }\n");
+      "func main(): void { _ = libc::printf(\"%d %d\\n\", a::V, b::V); }\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -196,7 +196,7 @@ TEST(DriverImport, ReexportForwardsDependencyExports) {
   c.write("api", "export * from \"./math\";\n");
   std::string main_path = c.entry("main",
       "import api from \"./api\";\n"
-      "func main(): void { libc::printf(\"%d %d\\n\", api::add(20, 22), api::PI); }\n");
+      "func main(): void { _ = libc::printf(\"%d %d\\n\", api::add(20, 22), api::PI); }\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -208,7 +208,7 @@ TEST(DriverImport, ReexportChainForwardsThroughTwoLevels) {
   c.write("a", "export * from \"./b\";\n");
   std::string main_path = c.entry("main",
       "import a from \"./a\";\n"
-      "func main(): void { libc::printf(\"%d\\n\", a::deep()); }\n");
+      "func main(): void { _ = libc::printf(\"%d\\n\", a::deep()); }\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -221,7 +221,7 @@ TEST(DriverImport, ReexportConflictIsRejected) {
       "export * from \"./math\";\n");
   std::string main_path = c.entry("main",
       "import api from \"./api\";\n"
-      "func main(): void { libc::printf(\"%d\\n\", api::V); }\n");
+      "func main(): void { _ = libc::printf(\"%d\\n\", api::V); }\n");
   EXPECT_NE(driver_run_file(main_path.c_str()), 0);
 }
 
@@ -260,7 +260,7 @@ TEST(DriverImport, CircularDependencyRejected) {
       "export var VB: i32 = 2;\n");
   std::string main_path = c.entry("main",
       "import a from \"./a\";\n"
-      "func main(): void { libc::printf(\"%d\\n\", a::VA); }\n");
+      "func main(): void { _ = libc::printf(\"%d\\n\", a::VA); }\n");
   EXPECT_NE(driver_run_file(main_path.c_str()), 0);
 }
 

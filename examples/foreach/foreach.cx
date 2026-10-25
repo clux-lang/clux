@@ -12,7 +12,7 @@
 // 展开形状、两种迭代器形态与理由见 include/desugar/desugar.h。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 var CALLS = 0;
 
@@ -36,7 +36,7 @@ func main(): i32 {
     foreach (var x of a) {
         sum = sum + x;
     }
-    libc::printf("1) sum = %d\n", sum);
+    _ = libc::printf("1) sum = %d\n", sum);
 
     // ---- 2. 不带 `var`：写回已定义变量 ----
     var cur = 0;
@@ -44,7 +44,7 @@ func main(): i32 {
         if (cur > 20) {
             break;
         }
-        libc::printf("2) cur = %d\n", cur);
+        _ = libc::printf("2) cur = %d\n", cur);
     }
 
     // ---- 3. continue：步进不会被跳过（展开成 for，不是 while）----
@@ -55,7 +55,7 @@ func main(): i32 {
         }
         odd = odd + x;
     }
-    libc::printf("3) odd = %d\n", odd);
+    _ = libc::printf("3) odd = %d\n", odd);
 
     // ---- 4. 显式类型 / 借用元素：own 元素以 ref *T 借出 ----
     var ptrs: own [] own *i32 = make(own *i32, 3, new i32{ 1 }, new i32{ 2 },
@@ -64,18 +64,18 @@ func main(): i32 {
     foreach (var p: ref *i32 of ptrs) {
         deref = deref + p.*;
     }
-    libc::printf("4) deref = %d, len = %d\n", deref, len(ptrs));
+    _ = libc::printf("4) deref = %d, len = %d\n", deref, len(ptrs));
 
     // ---- 5. 非标识符迭代器：先求值到临时变量（只调用一次）----
     var once = 0;
     foreach (var v of make_row(5)) {
         once = once + v;
     }
-    libc::printf("5) once = %d, calls = %d\n", once, CALLS);
+    _ = libc::printf("5) once = %d, calls = %d\n", once, CALLS);
 
     // ---- 6. own 容器（裸标识符迭代器 → 不复制，循环后仍可用）----
     var s: own []i32 = make(i32, 3, 7, 8, 9);
-    libc::printf("6) sum_own = %d\n", sum_own(move(s)));
+    _ = libc::printf("6) sum_own = %d\n", sum_own(move(s)));
 
     // ---- 7. 切片表达式 + 嵌套 foreach ----
     var m = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };
@@ -85,10 +85,10 @@ func main(): i32 {
             total = total + cell;
         }
     }
-    libc::printf("7) total = %d\n", total);
+    _ = libc::printf("7) total = %d\n", total);
 
     // ---- 8. return：在循环里提前返回 ----
-    libc::printf("8) first_big = %d\n", first_big(a));
+    _ = libc::printf("8) first_big = %d\n", first_big(a));
 
     return 0;
 }

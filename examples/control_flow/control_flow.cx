@@ -1,6 +1,6 @@
 // control_flow.cx — M1 样例：if/else、while、do-while、for、break、continue、return
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func main(): i32 {
     var sum: i32 = 0;
     var i: i32 = 0;
@@ -31,9 +31,9 @@ func main(): i32 {
     }
     // if / else 分支
     if (sum > 100) {
-        libc::printf("big\n");
+        _ = libc::printf("big\n");
     } else {
-        libc::printf("small\n");
+        _ = libc::printf("small\n");
     }
 
     return 0;

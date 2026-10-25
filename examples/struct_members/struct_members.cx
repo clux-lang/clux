@@ -23,7 +23,7 @@
 //     但反向（去 const）不允许，所以只读方法里写 `self.field = v` 会被拒绝。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void; // M6 起 printf 由 libc 提供
+extern cfunc libc::printf(format: str, ...): i32; // M6 起 printf 由 libc 提供
 
 struct Counter {
     value: i32;
@@ -101,6 +101,6 @@ func main(): i32 {
         return 12;
     } // total(4) >= limit(3)
 
-    libc::printf("Counter::total = %d, a = %d, b = %d, full = %d\n", Counter::total, a.get(), b.get(), a.isFull() as i32);
+    _ = libc::printf("Counter::total = %d, a = %d, b = %d, full = %d\n", Counter::total, a.get(), b.get(), a.isFull() as i32);
     return 0;
 }

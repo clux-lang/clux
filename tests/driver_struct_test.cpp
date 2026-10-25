@@ -26,7 +26,7 @@ TEST(Driver, RunFileStructDeclAndVarPasses) {
       "struct Point { x: i32; y: i32; }\n"
       "func main():i32 {\n"
       "  var p: Point = undefined;\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -39,7 +39,7 @@ TEST(Driver, RunFileStructLocalDefPasses) {
       "func main():i32 {\n"
       "  struct Point { x: i32; y: i32; }\n"
       "  var p: Point = undefined;\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -53,7 +53,7 @@ TEST(Driver, RunFileStructNestedFieldTypePasses) {
       "struct Outer { i: Inner; b: i64; }\n"
       "func main():i32 {\n"
       "  var o: Outer = undefined;\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

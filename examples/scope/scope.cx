@@ -7,7 +7,7 @@
 //   - 局部 type 前向引用：定义在后、使用在前合法（提升机制）
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 type T = i32; // 全局 type
 
 func main(): i32 {
@@ -16,24 +16,24 @@ func main(): i32 {
      {
         // ---- 局部变量遮蔽外层 ----
         var g: i32 = 2;
-        libc::printf("inner g = %d\n", g);
+        _ = libc::printf("inner g = %d\n", g);
 
         // ---- 局部 type 遮蔽全局 type（提升遮蔽，块内全范围生效）----
         type T = i64;
         var t: T = 5; // t 是 i64（局部 T），非全局 i32
-        libc::printf("t = %d\n", t as i32);
+        _ = libc::printf("t = %d\n", t as i32);
     }
 
     // 出块：恢复外层变量与全局 type
-    libc::printf("outer g = %d\n", g);
+    _ = libc::printf("outer g = %d\n", g);
     var x: T = 7; // 全局 T（i32）
-    libc::printf("x = %d\n", x);
+    _ = libc::printf("x = %d\n", x);
 
     // ---- 前向引用 + 嵌套块 ----
      {
         var y: Inner = 9; // 使用在前
         type Inner = i32; // 定义在后（提升）
-        libc::printf("y = %d\n", y);
+        _ = libc::printf("y = %d\n", y);
     }
     // var z: Inner = 1; // 出块不可见（反注释可验证编译错误）
 

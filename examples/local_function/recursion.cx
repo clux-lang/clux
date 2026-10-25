@@ -13,7 +13,7 @@
 //     "local function cannot reference sibling or self"
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func main(): i32 {
     // ---- 自递归：阶乘（捕获自身）----
     func |fact| fact(n: i32): i32 {
@@ -54,7 +54,7 @@ func main(): i32 {
     }
     var d5 = is_done(5); // 5 > 0 → is_go(4) → is_done(4) → ... → 1
 
-    libc::printf("fact(5)=%d even(10)=%d odd(7)=%d even(11)=%d done(5)=%d\n", f5, e10, o7, e11, d5);
+    _ = libc::printf("fact(5)=%d even(10)=%d odd(7)=%d even(11)=%d done(5)=%d\n", f5, e10, o7, e11, d5);
 
     return 0;
 }

@@ -20,7 +20,7 @@
 // 再显式 `as ref *i32` 解引用取值 —— 与 C 里写 `*(const int*)a` 等价。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 // C 运行库：三平台各一条，只有当前平台的那条在编译期存活
 extern lib crt from "msvcrt" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
@@ -29,8 +29,8 @@ extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
 //                          int (*cmp)(const void *, const void *));
-extern cfunc crt::qsort(base: ref opaque, n: u64, size: u64,
-                        cmp: cfunc(ref opaque, ref opaque) -> i32): void;
+extern cfunc crt::qsort(base: ref opaque, n: usize, size: usize,
+                        cmp: cfunc(ref *const opaque, ref *const opaque) -> i32): void;
 
 // 回调次数：由 C 侧触发的 clux 函数体修改**模块全局变量**（可写），
 // 用来证明"确实是 C 库在调用我们"。
@@ -38,7 +38,7 @@ var CALLS: i32 = 0;
 
 // C ABI 函数（可被 C 调用）：三值比较，等价于 C 的
 //   int cmp(const void *a, const void *b) { int x = *(int*)a, y = *(int*)b; ... }
-cfunc cmp(a: ref opaque, b: ref opaque): i32 {
+cfunc cmp(a: ref *const opaque, b: ref *const opaque): i32 {
     CALLS = CALLS + 1;
     var x: i32 = (a as ref *i32).*;
     var y: i32 = (b as ref *i32).*;
@@ -55,13 +55,13 @@ func main(): i32 {
     var arr = .[5]i32{ 4, 2, 5, 1, 3 };
     // 注意：%v（旧内建 printf 的"打印任意值"扩展）已随内建一起删除——
     // 原生 printf 只认 C 的转换符，聚合值请逐个成员打印（或自己写格式化函数）。
-    libc::printf("before: %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
+    _ = libc::printf("before: %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
 
     // 数组地址（ref 指针 → opaque 隐式转换）+ C 函数指针 → libc qsort
     crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp));
 
-    libc::printf("after:  %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
-    libc::printf("qsort called the clux comparator %d times\n", CALLS);
+    _ = libc::printf("after:  %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
+    _ = libc::printf("qsort called the clux comparator %d times\n", CALLS);
 
     // 自检：已升序、首尾正确、回调确实被调用过
     if (arr[0] > arr[1]) {

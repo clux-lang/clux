@@ -12,7 +12,7 @@
 //   循环依赖  编译期检测并报错（依赖链打印）。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 import math from "./lib/math";
 import api from "./lib/api";
 
@@ -43,6 +43,6 @@ func main(): i32 {
         return 6;
     }
 
-    libc::printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
+    _ = libc::printf("modules ok: %d %d\n", math::add(20, 22), api::add(40, 2));
     return 0;
 }

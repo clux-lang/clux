@@ -1,6 +1,6 @@
 // hello.cx — M1 样例：字符串字面量、函数定义、printf 调用、void 返回类型
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func main(): void {
-    libc::printf("hello, clux\n");
+    _ = libc::printf("hello, clux\n");
 }

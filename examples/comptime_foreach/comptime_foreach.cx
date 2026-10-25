@@ -17,25 +17,25 @@
 //   - 切片（长度运行期才知道）被拒绝——请用 [N]T 或元组。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 func main(): i32 {
     // ① 数组：逐元素展开（x 是运行时元素值，索引是编译期常量）
     var arr = .[3]i32{ 10, 20, 30 };
     comptime foreach (var x of arr) {
-        libc::printf("arr = %d\n", x);
+        _ = libc::printf("arr = %d\n", x);
     }
 
     // ② 已定义变量形态：每轮 x = arr[i]
     var y: i32 = 0;
     comptime foreach (y of arr) {
-        libc::printf("y = %d\n", y);
+        _ = libc::printf("y = %d\n", y);
     }
 
     // ③ 元组：元素类型各不相同，每份副本按元素类型检查
     var t = .<i32, f64, i32>{ 1, 2.5, 3 };
     comptime foreach (var e of t) {
-        libc::printf("elem width = %d\n", sizeof(typeof(e)) as i32);
+        _ = libc::printf("elem width = %d\n", sizeof(typeof(e)) as i32);
     }
 
     // ④ 嵌套：外层 2 次 × 内层 2 次 = 4 份
@@ -43,14 +43,14 @@ func main(): i32 {
     var b = .[2]i32{ 10, 20 };
     comptime foreach (var p of a) {
         comptime foreach (var q of b) {
-            libc::printf("%d+%d=%d\n", p, q, p + q);
+            _ = libc::printf("%d+%d=%d\n", p, q, p + q);
         }
     }
 
     // ⑤ comptime var 容器：元素是编译期常量
     comptime var NAMES = .[2]i32{ 5, 6 };
     comptime foreach (var n of NAMES) {
-        libc::printf("names = %d\n", n);
+        _ = libc::printf("names = %d\n", n);
     }
     return 0;
 }

@@ -15,7 +15,7 @@
 // 函数（常量闭包）。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 func double(x: i32): i32 { return x * 2; }
 
@@ -53,13 +53,13 @@ struct Point {
 }
 
 func main(): i32 {
-    libc::printf("v = %d\n", v);                 // 42
-    libc::printf("dbl(5) = %d\n", dbl(5));       // 110
-    libc::printf("combo(1) = %d\n", combo(1));   // 70
+    _ = libc::printf("v = %d\n", v);                 // 42
+    _ = libc::printf("dbl(5) = %d\n", dbl(5));       // 110
+    _ = libc::printf("combo(1) = %d\n", combo(1));   // 70
 
     var p = .Point{ .x = 7 };
-    libc::printf("p.get() = %d\n", p.get());     // 107
-    libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
+    _ = libc::printf("p.get() = %d\n", p.get());     // 107
+    _ = libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
 
     if (v != 42 || dbl(5) != 110 || combo(1) != 70 || p.get() != 107 ||
         p.plain() != 8) {

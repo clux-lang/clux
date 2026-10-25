@@ -14,7 +14,7 @@
 //           写 → INDEX_SET（隐式转换 + 深拷贝回写）
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func main(): i32 {
     // 具名构造：.T{...} 按元素序布值
     var t: <i32, i32> = .<i32, i32>{ 1, 2 };
@@ -57,7 +57,7 @@ func main(): i32 {
         return 1;
     }
 
-    libc::printf("tuple ok\n");
+    _ = libc::printf("tuple ok\n");
     return 0;
 }
 

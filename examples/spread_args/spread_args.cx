@@ -22,7 +22,7 @@
 //   - 空数组展开出 0 个实参/字段。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 struct Point {
     x: i32;
@@ -46,47 +46,47 @@ func main(): i32 {
     // ---- 一、函数调用 ----
     // ① 数组展开（中间位置）：sum4(1, 2, 3, 4) = 10
     var arr = .[2]i32{ 2, 3 };
-    libc::printf("sum4(1, ...arr, 4) = %d\n", sum4(1, ...arr, 4));
+    _ = libc::printf("sum4(1, ...arr, 4) = %d\n", sum4(1, ...arr, 4));
 
     // ② 元组展开（前置）：sum3(10, 20, 5) = 35
     var tup = .<i32, i32>{ 10, 20 };
-    libc::printf("sum3(...tup, 5) = %d\n", sum3(...tup, 5));
+    _ = libc::printf("sum3(...tup, 5) = %d\n", sum3(...tup, 5));
 
     // ③ 成员访问作操作数：sum2(7, 8) = 15
     var box = .Box{ .pair = .[2]i32{ 7, 8 } };
-    libc::printf("sum2(...box.pair) = %d\n", sum2(...box.pair));
+    _ = libc::printf("sum2(...box.pair) = %d\n", sum2(...box.pair));
 
     // ④ 空数组：0 个实参 → sum2(1, 2) = 3
     var empty = .[0]i32{};
-    libc::printf("sum2(1, 2, ...empty) = %d\n", sum2(1, 2, ...empty));
+    _ = libc::printf("sum2(1, 2, ...empty) = %d\n", sum2(1, 2, ...empty));
 
     // ⑤ 与 C 变参混用：printf("%d+%d\n", 3, 4)
     var nums = .[2]i32{ 3, 4 };
-    libc::printf("printf: %d+%d\n", ...nums);
+    _ = libc::printf("printf: %d+%d\n", ...nums);
 
     // ---- 二、构造器 ----
     var p = .Point{ .x = 3, .y = 4 };
 
     // ⑥ struct 按字段 kv 展开
     var q = .Point{ ...p };
-    libc::printf("q = (%d, %d)\n", q.x, q.y);
+    _ = libc::printf("q = (%d, %d)\n", q.x, q.y);
 
     // ⑦ new + 展开
     var r = new Point{ ...p };
-    libc::printf("r = (%d, %d)\n", r.*.x, r.*.y);
+    _ = libc::printf("r = (%d, %d)\n", r.*.x, r.*.y);
 
     // ⑧ 异构 struct 按字段名兼容
     var pr = .Pair{ ...p };
-    libc::printf("pr = (%d, %d)\n", pr.x, pr.y);
+    _ = libc::printf("pr = (%d, %d)\n", pr.x, pr.y);
 
     // ⑨ 展开 + 显式字段：同名字段后写的覆盖先写的 → (10, 4)
     var s = .Point{ ...p, .x = 10 };
-    libc::printf("s = (%d, %d)\n", s.x, s.y);
+    _ = libc::printf("s = (%d, %d)\n", s.x, s.y);
 
     // ⑩ 数组/元组构造按位置展开
     var arr2 = .[2]i32{ ...arr };
     var tup2 = .<i32, i32>{ ...tup };
-    libc::printf("arr2 = (%d, %d), tup2 = (%d, %d)\n", arr2[0], arr2[1],
+    _ = libc::printf("arr2 = (%d, %d), tup2 = (%d, %d)\n", arr2[0], arr2[1],
                  tup2[0], tup2[1]);
 
     if (sum4(1, ...arr, 4) != 10) { return 1; }

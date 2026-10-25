@@ -111,7 +111,7 @@ TEST(Driver, RunFileAnnotatedWideVarKeepsDeclaredType) {
       "  var x:i64 = 7;\n"
       "  x = 9 as i64;\n"
       "  x = x + 5;\n"
-      "  libc::printf(\"%d\\n\", x as i32);\n"
+      "  _ = libc::printf(\"%d\\n\", x as i32);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -126,7 +126,7 @@ TEST(Driver, RunFileAnnotatedWideVarInferenceMatchesDeclared) {
       "  var x:i64 = 7;\n"
       "  var t = x;\n"
       "  t = 9 as i64;\n"
-      "  libc::printf(\"%d\\n\", t as i32);\n"
+      "  _ = libc::printf(\"%d\\n\", t as i32);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -154,7 +154,7 @@ TEST(Driver, AsmBinRoundTripStable) {
 
   {
     FILE *fp = fopen(src.c_str(), "wb");
-    const char *code = "func main():void { libc::printf(\"ok\\n\"); }\n";
+    const char *code = "func main():void { _ = libc::printf(\"ok\\n\"); }\n";
     { const std::string src_ = clux_with_printf_prelude(code); fwrite(src_.data(), 1, src_.size(), fp); }
     fclose(fp);
   }

@@ -3,7 +3,7 @@
 
 // 内建类型别名：type MyInt = i64
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 type MyInt = i64;
 
 // 复合类型别名：type Pair = [2]i32（sema 折叠为登记类型引用）
@@ -28,14 +28,14 @@ func apply(f: add_fn_t, x: i32, y: i32): i32 {
 func main(): void {
     // var 显式类型标注走 type value
     var m: MyInt = 42;
-    libc::printf("MyInt = %d\n", m as i32);
+    _ = libc::printf("MyInt = %d\n", m as i32);
 
     var p: Pair = .[2]i32{ 10, 20 };
     var q: PairAlias = .[2]i32{ 30, 40 };
-    libc::printf("Pair = %d %d\n", p[0], p[1]);
+    _ = libc::printf("Pair = %d %d\n", p[0], p[1]);
 
     var s = add_pair(p, q);
-    libc::printf("sum  = %d %d\n", s[0], s[1]);
+    _ = libc::printf("sum  = %d %d\n", s[0], s[1]);
 
     // 函数签名类型的变量（函数作为值未实现，暂以 undefined 占位）
     var fn: add_fn_t = undefined;
@@ -44,6 +44,6 @@ func main(): void {
      {
         type Local = i32;
         var x: Local = 7;
-        libc::printf("Local = %d\n", x);
+        _ = libc::printf("Local = %d\n", x);
     }
 }

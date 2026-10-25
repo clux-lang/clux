@@ -24,9 +24,9 @@
 
 extern lib libc from "*";
 
-extern cfunc libc::printf(format: str, ...): void;
-extern cfunc libc::memcmp(a: ref opaque, b: ref opaque, n: usize): i32;
-extern cfunc libc::strlen(s: ref opaque): usize;
+extern cfunc libc::printf(format: str, ...): i32;
+extern cfunc libc::memcmp(a: ref *const opaque, b: ref *const opaque, n: usize): i32;
+extern cfunc libc::strlen(s: str): usize;
 
 // clux 侧遍历：拿序列（不是指针）
 func sum(a: ref []i32): i32 {
@@ -71,7 +71,7 @@ func main(): i32 {
 
     // ④ str：data(g) 就是 C 的 const char*
     var g: str = "hello";
-    if (libc::strlen(data(g)) != 5u64) {
+    if (libc::strlen(g) != 5u64) {
         return 6;
     }
 
@@ -79,14 +79,14 @@ func main(): i32 {
     var a = .[4]i32{ 7, 7, 7, 7 };
     var b = .[4]i32{ 7, 7, 7, 7 };
     var n: usize = sizeof(i32) * 4u64;
-    if (libc::memcmp(data(a), data(b), n) != 0) {
+    if (libc::memcmp(data(a) as ref *const opaque, data(b) as ref *const opaque, n) != 0) {
         return 7;
     }
     b[3] = 8;
-    if (libc::memcmp(data(a), data(b), n) == 0) {
+    if (libc::memcmp(data(a) as ref *const opaque, data(b) as ref *const opaque, n) == 0) {
         return 8;
     }
 
-    libc::printf("data/len: slice=%d part=%d first=%d strlen=%llu\n", sum(s), sum(part), first(data(arr)), libc::strlen(data(g)));
+    _ = libc::printf("data/len: slice=%d part=%d first=%d strlen=%llu\n", sum(s), sum(part), first(data(arr)), libc::strlen(g));
     return 0;
 }

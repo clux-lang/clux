@@ -125,9 +125,9 @@ TEST(Driver, RunFileEmptyOptionalFuncArrayFillsNil) {
       "  var e1:?func()->i32 = fns[1];\n"
       "  var e2:?func()->i32 = fns[2];\n"
       "  if (e0 == nil && e1 == nil && e2 == nil) {\n"
-      "    libc::printf(\"all nil\\n\");\n"
+      "    _ = libc::printf(\"all nil\\n\");\n"
       "  } else {\n"
-      "    libc::printf(\"not nil\\n\");\n"
+      "    _ = libc::printf(\"not nil\\n\");\n"
       "  }\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

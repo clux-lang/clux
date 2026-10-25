@@ -15,7 +15,7 @@
 
 // 全局 struct：字段显式类型
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 struct Point {
     x: i32;
     y: i32;
@@ -93,6 +93,6 @@ func main(): i32 {
         return 1;
     }
 
-    libc::printf("struct ok\n");
+    _ = libc::printf("struct ok\n");
     return 0;
 }

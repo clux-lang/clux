@@ -20,7 +20,7 @@
 // （未在捕获列表中声明的变量不属于闭包）。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func make_adder(): func(i32) -> i32 {
     var base = 10;
     // 捕获外层局部变量 base（clone 10）
@@ -32,7 +32,7 @@ func make_adder(): func(i32) -> i32 {
 func main(): i32 {
     // ---- 工厂：返回捕获外层变量的闭包 ----
     var f = make_adder();
-    libc::printf("f(5) = %d\n", f(5)); // 15
+    _ = libc::printf("f(5) = %d\n", f(5)); // 15
 
     // ---- clone 语义：外层修改不影响闭包 ----
     var base = 10;
@@ -40,7 +40,7 @@ func main(): i32 {
         return base + x;
     };
     base = 1000;
-    libc::printf("clone = %d\n", g(5)); // 15（捕获时 clone 的 10）
+    _ = libc::printf("clone = %d\n", g(5)); // 15（捕获时 clone 的 10）
 
     // ---- 括号捕获：临时构造捕获值 ----
     var a = 5;
@@ -49,14 +49,14 @@ func main(): i32 {
     var h = func |a, (b: i32 = c + d)| add3(x: i32): i32 {
         return a + b + x;
     };
-    libc::printf("paren = %d\n", h(1)); // 5 + 107 + 1 = 113
+    _ = libc::printf("paren = %d\n", h(1)); // 5 + 107 + 1 = 113
 
     // ---- 语句级局部函数带捕获（提升 + 定义点绑定）----
     var x = 42;
     func |x| local(v: i32): i32 {
         return x + v;
     }
-    libc::printf("local = %d\n", local(1)); // 43
+    _ = libc::printf("local = %d\n", local(1)); // 43
 
     // ---- 循环内重建闭包：每次迭代捕获当前 i 的 clone ----
     var total = 0;
@@ -66,7 +66,7 @@ func main(): i32 {
         };
         total = total + iter(10);
     }
-    libc::printf("loop = %d\n", total); // 0 + 10 + 20 = 30
+    _ = libc::printf("loop = %d\n", total); // 0 + 10 + 20 = 30
 
     return 0;
 }

@@ -14,7 +14,7 @@
 //   - comptime 局部函数：调用点编译期折叠，零运行时指令
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func global_add(a: i32, b: i32): i32 {
     return a + b;
 }
@@ -45,7 +45,7 @@ func main(): i32 {
     }
     var t = twice(5);
 
-    libc::printf("caller=%d scale=%d wrapped=%d twice=%d\n", r, s, w, t);
+    _ = libc::printf("caller=%d scale=%d wrapped=%d twice=%d\n", r, s, w, t);
 
     // ---- 捕获外层局部变量：闭包语义（未声明捕获 → 编译期拒绝，反注释验证）----
     // func bad(x: i32): i32 { return x + base; }

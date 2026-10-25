@@ -2,7 +2,7 @@
 // 这是行注释：从 // 到行尾被忽略
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 /* 这是块注释：
    可以跨越多行 */
 
@@ -13,6 +13,6 @@ extern cfunc libc::printf(format: str, ...): void;
 func main(): i32 {
     /* 函数体中的块注释 */
     var x: i32 = 1; // 行尾注释
-    libc::printf("%d\n", x);
+    _ = libc::printf("%d\n", x);
     return 0;
 }

@@ -31,7 +31,7 @@ TEST(Driver, RunFileFuncValueAssignAndCall) {
       "func main():void {\n"
       "  var f = add;\n"
       "  var val = f(3, 4);\n"
-      "  libc::printf(\"%d\\n\", val);\n"
+      "  _ = libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -48,7 +48,7 @@ TEST(Driver, RunFileFuncValueAsArgument) {
       "}\n"
       "func main():void {\n"
       "  var r = apply(add, 10, 20);\n"
-      "  libc::printf(\"%d\\n\", r);\n"
+      "  _ = libc::printf(\"%d\\n\", r);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -65,7 +65,7 @@ TEST(Driver, RunFileFuncValueAsReturn) {
       "}\n"
       "func main():void {\n"
       "  var f = get_add();\n"
-      "  libc::printf(\"%d\\n\", f(5, 6));\n"
+      "  _ = libc::printf(\"%d\\n\", f(5, 6));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -84,7 +84,7 @@ TEST(Driver, RunFileFuncValueExplicitTypeAndReassign) {
       "  var f: func(i32,i32)->i32 = add;\n"
       "  var g = sub;\n"
       "  f = g;\n"
-      "  libc::printf(\"%d\\n\", f(20, 8));\n"
+      "  _ = libc::printf(\"%d\\n\", f(20, 8));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -102,7 +102,7 @@ TEST(Driver, RunFileFuncValueComptimeFold) {
       "func main():void {\n"
       "  var add_fn = get_add();\n"
       "  var val = add_fn(1,2);\n"
-      "  libc::printf(\"%d\\n\", val);\n"
+      "  _ = libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -117,7 +117,7 @@ TEST(Driver, RunFileFuncValueComptimeReturnsLiteral) {
       "}\n"
       "func main():void {\n"
       "  var f = get_f();\n"
-      "  libc::printf(\"%d\\n\", f(41));\n"
+      "  _ = libc::printf(\"%d\\n\", f(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -133,7 +133,7 @@ TEST(Driver, RunFileFuncValueComptimeReturnsLocalFunc) {
       "}\n"
       "func main():void {\n"
       "  var f = get_f();\n"
-      "  libc::printf(\"%d\\n\", f(41));\n"
+      "  _ = libc::printf(\"%d\\n\", f(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -157,7 +157,7 @@ TEST(Driver, RunFileFuncValueCallExpressionCallee) {
       "  var b = get_add()(19, 23);\n"
       "  var c = mk_fn()(21);\n"
       "  var d = func(x:i32):i32 { return x + 1; }(41);\n"
-      "  libc::printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
+      "  _ = libc::printf(\"%d %d %d %d\\n\", a, b, c, d);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -187,7 +187,7 @@ TEST(Driver, RunFileFuncValueComptimeNestedCalls) {
       "comptime var Q = quad(3);\n"
       "func main():void {\n"
       "  var x = Q;\n"
-      "  libc::printf(\"%d\\n\", x);\n"
+      "  _ = libc::printf(\"%d\\n\", x);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -206,7 +206,7 @@ TEST(Driver, RunFileFuncValueComptimeMultipleFactories) {
       "func main():void {\n"
       "  var f = make_plus();\n"
       "  var g = make_mul();\n"
-      "  libc::printf(\"%d %d\\n\", f(20, 22), g(6, 7));\n"
+      "  _ = libc::printf(\"%d %d\\n\", f(20, 22), g(6, 7));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -263,7 +263,7 @@ TEST(Driver, RunFileFuncLiteralBasic) {
       "func main():void {\n"
       "  var f = func(x: i32): i32 { return x + 1; };\n"
       "  var val = f(41);\n"
-      "  libc::printf(\"%d\\n\", val);\n"
+      "  _ = libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -275,7 +275,7 @@ TEST(Driver, RunFileFuncLiteralNamed) {
       "func main():void {\n"
       "  var f = func inc(x: i32): i32 { return x * 2; };\n"
       "  var val = f(21);\n"
-      "  libc::printf(\"%d\\n\", val);\n"
+      "  _ = libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -287,7 +287,7 @@ TEST(Driver, RunFileFuncLiteralMultiParam) {
       "func main():void {\n"
       "  var f: func(i32,i32)->i32 = func(a: i32, b: i32): i32 { return a * b; };\n"
       "  var val = f(6, 7);\n"
-      "  libc::printf(\"%d\\n\", val);\n"
+      "  _ = libc::printf(\"%d\\n\", val);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -301,7 +301,7 @@ TEST(Driver, RunFileFuncLiteralAsArgument) {
       "}\n"
       "func main():void {\n"
       "  var r = apply(func(a: i32, b: i32): i32 { return a + b; }, 10, 20);\n"
-      "  libc::printf(\"%d\\n\", r);\n"
+      "  _ = libc::printf(\"%d\\n\", r);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -315,7 +315,7 @@ TEST(Driver, RunFileFuncLiteralNested) {
       "    var inner = func(x: i32): i32 { return x + 100; };\n"
       "    return inner(n + 1);\n"
       "  };\n"
-      "  libc::printf(\"%d\\n\", outer(1));\n"
+      "  _ = libc::printf(\"%d\\n\", outer(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -329,7 +329,7 @@ TEST(Driver, RunFileFuncLiteralLocalFuncInBody) {
       "    func triple(x: i32): i32 { return x * 3; }\n"
       "    return triple(n);\n"
       "  };\n"
-      "  libc::printf(\"%d\\n\", f(14));\n"
+      "  _ = libc::printf(\"%d\\n\", f(14));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -357,7 +357,7 @@ TEST(Driver, RunFileFuncValueInNewAggregateField) {
       "struct Node { cell: i32; cb: func(i32)->i32; }\n"
       "func main():void {\n"
       "  var a = new Node{ .cell = 5, .cb = func(x: i32): i32 { return x * 2; } };\n"
-      "  libc::printf(\"%d %d\\n\", a.cb(21), a.cell);\n"
+      "  _ = libc::printf(\"%d %d\\n\", a.cb(21), a.cell);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -370,7 +370,7 @@ TEST(Driver, RunFileFuncValueInNewAggregateFieldGlobalFn) {
       "func bump(x: i32): i32 { return x + 1; }\n"
       "func main():void {\n"
       "  var a = new Node{ .cb = bump };\n"
-      "  libc::printf(\"%d\\n\", a.cb(41));\n"
+      "  _ = libc::printf(\"%d\\n\", a.cb(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -387,7 +387,7 @@ TEST(Driver, RunFileFuncValueNestedNewInsideLiteralBody) {
       "    var inner = new Node{ .cell = 1, .cb = func(y: i32): i32 { return y + 100; } };\n"
       "    return inner.cb(x) + depth;\n"
       "  } };\n"
-      "  libc::printf(\"%d\\n\", outer.cb(1));\n"
+      "  _ = libc::printf(\"%d\\n\", outer.cb(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -400,7 +400,7 @@ TEST(Driver, RunFileFuncValueInMakeInitializers) {
       "  var fns: own []func(i32)->i32 = make(func(i32)->i32, 2,\n"
       "      func(x: i32): i32 { return x + 10; },\n"
       "      func(x: i32): i32 { return x + 20; });\n"
-      "  libc::printf(\"%d %d\\n\", fns[0](1), fns[1](1));\n"
+      "  _ = libc::printf(\"%d %d\\n\", fns[0](1), fns[1](1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -423,7 +423,7 @@ TEST(Driver, RunFileFuncValueInNewAggregateFieldWithForeach) {
       "    return s;\n"
       "  } };\n"
       "  var f = h.cb;\n"
-      "  libc::printf(\"%d\\n\", f());\n"
+      "  _ = libc::printf(\"%d\\n\", f());\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -440,7 +440,7 @@ TEST(Driver, RunFileLoopClosuresIndependentInstances) {
       "  for(var i = 0;i<3;i+=1) {\n"
       "    fns[i] = func|(val = items[i])|():i32 { return val; };\n"
       "  }\n"
-      "  libc::printf(\"%d %d %d\\n\", fns[0](), fns[1](), fns[2]());\n"
+      "  _ = libc::printf(\"%d %d %d\\n\", fns[0](), fns[1](), fns[2]());\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

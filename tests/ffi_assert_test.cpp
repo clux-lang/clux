@@ -310,7 +310,7 @@ TEST_F(FfiAssertTest, InactiveDeclarationIsPruned) {
       "extern lib crt from \"libSystem.B.dylib\" assert(OS_TYPE == \"MACOS\");\n"
       "extern func crt::strlen(s: str): usize;\n"
       "func main(): i32 {\n"
-      "  libc::printf(\"len=%d\\n\", crt::strlen(\"hello\") as i32);\n"
+      "  _ = libc::printf(\"len=%d\\n\", crt::strlen(\"hello\") as i32);\n"
       "  return 0;\n"
       "}\n";
   clux_expect_ok(src, "assert_prune");

@@ -11,7 +11,7 @@
 //   - 变量遮蔽函数名：var add = ...; 后 add 是变量，函数名不可见
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func add(a: i32, b: i32): i32 {
     return a + b;
 }
@@ -34,20 +34,20 @@ func main(): i32 {
     // 函数名赋值给变量：类型推断为函数签名类型
     var f = add;
     var v = f(3, 4); // 经变量调用
-    libc::printf("f(3,4) = %d\n", v);
+    _ = libc::printf("f(3,4) = %d\n", v);
 
     // 函数值传参
-    libc::printf("apply(add,10,20) = %d\n", apply(add, 10, 20));
-    libc::printf("apply(sub,10,20) = %d\n", apply(sub, 10, 20));
+    _ = libc::printf("apply(add,10,20) = %d\n", apply(add, 10, 20));
+    _ = libc::printf("apply(sub,10,20) = %d\n", apply(sub, 10, 20));
 
     // 函数值作返回值，再经变量调用
     var g = get_add();
-    libc::printf("g(1,2) = %d\n", g(1, 2));
+    _ = libc::printf("g(1,2) = %d\n", g(1, 2));
 
     // 显式类型标注 + 重新赋值另一同签名函数
     var h: func(i32, i32) -> i32 = add;
     h = sub;
-    libc::printf("h(5,3) = %d\n", h(5, 3));
+    _ = libc::printf("h(5,3) = %d\n", h(5, 3));
 
     return 0;
 }

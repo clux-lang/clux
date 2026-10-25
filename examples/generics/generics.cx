@@ -1,7 +1,7 @@
 // generics.cx — M7 泛型：函数单态化 / 类型实例 / 方法 / 推导 / 递归 /
 //               comptime 值参数 / 参数包 / extends 约束 / interface / 泛型方法
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 func id[T](x: T): T { return x; }
 func first[T, U](a: T, b: U): T { return a; }
@@ -43,6 +43,6 @@ func main(): void {
     var r: ref *i32 = v.&;
     var pv = read_ptr(r);
     var vp = value_pack[7u64, 8u64]();
-    libc::printf("%d %.1f %d %d %d %d %llu %d %d %llu\n", a, b, c, box.get(),
+    _ = libc::printf("%d %.1f %d %d %d %d %llu %d %d %llu\n", a, b, c, box.get(),
                  mapped.get(), m.data[2], f(5), n, pv, vp);
 }

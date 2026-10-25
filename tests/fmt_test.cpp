@@ -132,7 +132,7 @@ TEST(Fmt, Idempotent) {
         "}\n"
         "for(var j:i32=0;j<5;j=j+1){if(j==3){continue;}\n"
         "sum=sum+j;}\n"
-        "if(sum>100){libc::printf(\"big\\n\");}else{libc::printf(\"small\\n\");}\n"
+        "if(sum>100){_ = libc::printf(\"big\\n\");}else{_ = libc::printf(\"small\\n\");}\n"
         "return sum;\n"
         "}\n";
     std::string once = fmt(src);
@@ -176,10 +176,10 @@ TEST(Fmt, ControlKeywordSpaceBeforeParen) {
               "}\n");
 
     /* 函数调用：名与 `(` 紧贴，参数列表内外无多余空格 */
-    std::string call = fmt("func main():void{libc::printf(\"hi\\n\");}\n");
+    std::string call = fmt("func main():void{_ = libc::printf(\"hi\\n\");}\n");
     EXPECT_EQ(call,
               "func main(): void {\n"
-              "    libc::printf(\"hi\\n\");\n"
+              "    _ = libc::printf(\"hi\\n\");\n"
               "}\n");
 }
 
@@ -282,7 +282,7 @@ TEST(Fmt, UnaryPrefixOperatorNoTrailingSpace) {
         "var notb:bool=!yes;\n"
         "y=-(a+b);\n"
         "if(-x>0){return;}\n"
-        "libc::printf(!ok);\n"
+        "_ = libc::printf(!ok);\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
@@ -293,7 +293,7 @@ TEST(Fmt, UnaryPrefixOperatorNoTrailingSpace) {
               "    if (-x > 0) {\n"
               "        return;\n"
               "    }\n"
-              "    libc::printf(!ok);\n"
+              "    _ = libc::printf(!ok);\n"
               "}\n");
 
     /* 幂等性 */
@@ -753,7 +753,7 @@ TEST(FmtRegression, IdempotentAcrossDeclKinds) {
         "func main(): void {\n"
         "    var u: U = .U{ .a = 1.5f32 };\n"
         "    if (u is a != true) { }\n"
-        "    libc::printf(\"%d\\n\", PI + K);\n"
+        "    _ = libc::printf(\"%d\\n\", PI + K);\n"
         "}\n";
     std::string once = fmt(src);
     std::string twice = fmt(once.c_str());

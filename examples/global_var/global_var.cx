@@ -1,6 +1,6 @@
 // global_var.cx — 全局变量：运行时实体（可读可写），init 编译期折叠为字面量或函数
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 var g: i32 = 42; // 显式类型 + 字面量
 var s: str = "hello"; // 字符串全局变量
 var f = add; // init 折叠为函数引用
@@ -15,8 +15,8 @@ func setg(v: i32): i32 {
 }
 
 func main(): i32 {
-    libc::printf("before: g = %d, s = %s, add(3,4) = %d\n", g, s, f(3, 4));
+    _ = libc::printf("before: g = %d, s = %s, add(3,4) = %d\n", g, s, f(3, 4));
     _ = setg(100);
-    libc::printf("after: g = %d\n", g);
+    _ = libc::printf("after: g = %d\n", g);
     return 0;
 }

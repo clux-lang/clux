@@ -16,7 +16,7 @@
 
 // ---- 别名链（sema 按依赖序求值，运行时统一收进提升区两遍构造）----
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 type Elem = i64; // 基础元素类型
 type Pair = [2]Elem; // 数组类型：依赖 Elem
 type PairAlias = Pair; // 别名链：引用 Pair
@@ -38,25 +38,25 @@ type ConstPair = [2]const i32;
 func main(): i32 {
     // 别名链类型直接用于变量标注
     var pa: PairAlias = .[2]i64{ 10, 20 };
-    libc::printf("sum = %d\n", sum_pair(pa) as i32);
+    _ = libc::printf("sum = %d\n", sum_pair(pa) as i32);
 
     // 限定符类型变量（typedef 类型引用 + 值初始化）
     var ce: ConstElem = 7;
     var cve: ConstVolatileElem = 5;
-    libc::printf("ce = %d cve = %d\n", ce, cve);
+    _ = libc::printf("ce = %d cve = %d\n", ce, cve);
 
     // const 值可复制到非 const 变量
     var plain: i32 = ce;
-    libc::printf("plain = %d\n", plain);
+    _ = libc::printf("plain = %d\n", plain);
 
     // 限定符数组：元素类型带 volatile/const，构造时字面量身份转换
     var vp: VolatilePair = .[2]volatile i32{ 1, 2 };
     vp[0] = vp[0] + 5; // volatile 不影响赋值，读写合法
-    libc::printf("vp = %d %d\n", vp[0], vp[1]);
+    _ = libc::printf("vp = %d %d\n", vp[0], vp[1]);
 
     var cp: ConstPair = .[2]const i32{ 7, 8 };
     // cp[0] = 9;             // const 元素不可赋值（反注释可验证编译错误）
-    libc::printf("cp = %d %d\n", cp[0], cp[1]);
+    _ = libc::printf("cp = %d %d\n", cp[0], cp[1]);
 
     return 0;
 }

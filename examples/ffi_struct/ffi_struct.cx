@@ -18,7 +18,7 @@ struct DivT {
 } // 对应 C 的 div_t（字段名/顺序/宽度都一致）
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 extern cfunc libc::div(num: i32, den: i32): DivT; // 按值返回结构体
 extern cfunc libc::getenv(name: str): str; // 按值返回 char*（clux 侧就是 str）
@@ -48,6 +48,6 @@ func main(): i32 {
         return 4;
     }
 
-    libc::printf("div(17,5) = { %d, %d }, div(-17,5) = { %d, %d }, PATH len = %u\n", d.quot, d.rem, neg.quot, neg.rem, len(path));
+    _ = libc::printf("div(17,5) = { %d, %d }, div(-17,5) = { %d, %d }, PATH len = %u\n", d.quot, d.rem, neg.quot, neg.rem, len(path));
     return 0;
 }

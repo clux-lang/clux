@@ -216,7 +216,7 @@ TEST(Driver, RunFileEnumDeclAndComparePasses) {
       "enum Color:i32 { Red = 1, Green = 2, Blue = 3 }\n"
       "func main():i32 {\n"
       "  var c: Color = Color::Red;\n"
-      "  if (c == Color::Red) { libc::printf(\"ok\\n\"); return 0; }\n"
+      "  if (c == Color::Red) { _ = libc::printf(\"ok\\n\"); return 0; }\n"
       "  return 1;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -230,7 +230,7 @@ TEST(Driver, RunFileEnumTwoStepCastPasses) {
       "func main():i32 {\n"
       "  var c: Color = Color::Red;\n"
       "  var v: i8 = c as i32 as i8;\n"
-      "  if (v == 1) { libc::printf(\"ok\\n\"); return 0; }\n"
+      "  if (v == 1) { _ = libc::printf(\"ok\\n\"); return 0; }\n"
       "  return 1;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -245,7 +245,7 @@ TEST(Driver, RunFileEnumMultiVariantCompare) {
       "  var c: Color = Color::Green;\n"
       "  if (c == Color::Red) { return 1; }\n"
       "  if (c != Color::Green) { return 2; }\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -258,7 +258,7 @@ TEST(Driver, RunFileEnumGlobalVarInit) {
       "enum Color:i32 { Red = 1, Green = 2 }\n"
       "var g: Color = Color::Green;\n"
       "func main():i32 {\n"
-      "  if (g == Color::Green) { libc::printf(\"ok\\n\"); return 0; }\n"
+      "  if (g == Color::Green) { _ = libc::printf(\"ok\\n\"); return 0; }\n"
       "  return 1;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -333,7 +333,7 @@ TEST(Driver, RunFileEnumLocalDefInFunc) {
       "  if (v != 1) { return 2; }\n"
       "  var tag: i32 = (c == Color::Blue) ? 100 : 200;\n"
       "  if (tag != 200) { return 3; }\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -354,7 +354,7 @@ TEST(Driver, RunFileEnumLocalNestedBlocksShadow) {
       "  var g: A = A::X;\n"
       "  total += g as i32;\n"
       "  if (total != 21) { return 1; }\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -368,7 +368,7 @@ TEST(Driver, RunFileEnumLocalForwardRef) {
       "  var c: Color = Color::Red;\n"
       "  enum Color:i32 { Red = 1, Green = 2 }\n"
       "  if (c != Color::Red) { return 1; }\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -384,7 +384,7 @@ TEST(Driver, RunFileEnumLocalInLoopBody) {
       "    var e: E = E::B;\n"
       "    if (e != E::B) { return 1; }\n"
       "  }\n"
-      "  libc::printf(\"ok\\n\");\n"
+      "  _ = libc::printf(\"ok\\n\");\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

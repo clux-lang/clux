@@ -16,7 +16,7 @@
 // 只允许**顶层**：全局 var / 全局 func / struct 成员；局部声明上的装饰器报错。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 
 // ---- 值装饰器：i32 -> i32 ----
 comptime func twice(n: i32): i32 { return n * 2; }
@@ -51,12 +51,12 @@ struct Point {
 }
 
 func main(): i32 {
-    libc::printf("a = %d\n", a);             // 42
-    libc::printf("b = %d\n", b);             // 8
-    libc::printf("dbl(5) = %d\n", dbl(5));   // 110
+    _ = libc::printf("a = %d\n", a);             // 42
+    _ = libc::printf("b = %d\n", b);             // 8
+    _ = libc::printf("dbl(5) = %d\n", dbl(5));   // 110
     var p = .Point{ .x = 7 };
-    libc::printf("p.get() = %d\n", p.get());     // 107（7 + 100）
-    libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
+    _ = libc::printf("p.get() = %d\n", p.get());     // 107（7 + 100）
+    _ = libc::printf("p.plain() = %d\n", p.plain()); // 8（未装饰）
 
     if (a != 42 || b != 8 || dbl(5) != 110 || p.get() != 107 || p.plain() != 8) {
         return 1;

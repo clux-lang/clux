@@ -22,7 +22,7 @@
 // 经 FFI（libffi 精确类型：定参 + C 变参提升）调用。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void; // 返回值用不到，声明为 void
+extern cfunc libc::printf(format: str, ...): i32; // 返回值用不到，声明为 void
 
 extern cfunc libc::abs(x: i32): i32; // 与 extern func 等价
 extern cfunc libc::strlen(s: str): u64;
@@ -42,6 +42,6 @@ func main(): i32 {
         return 3;
     }
 
-    libc::printf("abs(-7)=%d strlen(\"%s\")=%u\n", libc::abs(-7), s, n);
+    _ = libc::printf("abs(-7)=%d strlen(\"%s\")=%u\n", libc::abs(-7), s, n);
     return 0;
 }

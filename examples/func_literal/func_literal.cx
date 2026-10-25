@@ -20,7 +20,7 @@
 //   求值点即时构造的匿名函数对象（无作用域绑定），引用点零构造。
 
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func apply(f: func(i32, i32) -> i32, x: i32, y: i32): i32 {
     return f(x, y);
 }
@@ -30,25 +30,25 @@ func main(): i32 {
     var inc = func(x: i32): i32 {
         return x + 1;
     };
-    libc::printf("inc(41) = %d\n", inc(41)); // 42
+    _ = libc::printf("inc(41) = %d\n", inc(41)); // 42
 
     // 具名字面量：名字仅作显示名，不绑定作用域
     var dbl = func twice(x: i32): i32 {
         return x * 2;
     };
-    libc::printf("dbl(21) = %d\n", dbl(21)); // 42
+    _ = libc::printf("dbl(21) = %d\n", dbl(21)); // 42
 
     // 显式 func 类型槽位 + 多参数
     var mul: func(i32, i32) -> i32 = func(a: i32, b: i32): i32 {
         return a * b;
     };
-    libc::printf("mul(6,7) = %d\n", mul(6, 7)); // 42
+    _ = libc::printf("mul(6,7) = %d\n", mul(6, 7)); // 42
 
     // 字面量直接作实参（高阶调用）
     var s = apply(func(a: i32, b: i32): i32 {
         return a + b;
     }, 10, 20);
-    libc::printf("apply(literal,10,20) = %d\n", s); // 30
+    _ = libc::printf("apply(literal,10,20) = %d\n", s); // 30
 
     // 字面量 body 内定义局部函数并调用
     var triple = func(n: i32): i32 {
@@ -57,7 +57,7 @@ func main(): i32 {
         }
         return t(n);
     };
-    libc::printf("triple(14) = %d\n", triple(14)); // 42
+    _ = libc::printf("triple(14) = %d\n", triple(14)); // 42
 
     // 未声明捕获即访问外层局部变量：编译期拒绝（捕获需显式闭包列表，
     // 见 examples/closure/closure.cx；取消注释体验诊断）

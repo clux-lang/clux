@@ -1,6 +1,6 @@
 // fibonacci.cx — M1 样例：递归函数（组合函数定义、控制流、调用）的端到端用例
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 func fib(n: i32): i32 {
     if (n < 2) {
         return n;
@@ -11,6 +11,6 @@ func fib(n: i32): i32 {
 func main(): i32 {
     var n: i32 = 10;
     var r: i32 = fib(n);
-    libc::printf("fib(%d) = %d\n", n, r);
+    _ = libc::printf("fib(%d) = %d\n", n, r);
     return 0;
 }

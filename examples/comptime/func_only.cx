@@ -1,9 +1,9 @@
 extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): void;
+extern cfunc libc::printf(format: str, ...): i32;
 comptime func add(a: i32, b: i32): i32 {
     return a + b;
 }
 
 func main(): void {
-    libc::printf("%d\n", add(1, 2));
+    _ = libc::printf("%d\n", add(1, 2));
 }

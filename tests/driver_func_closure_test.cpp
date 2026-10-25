@@ -32,7 +32,7 @@ TEST(Driver, RunFileClosureBasicLiteral) {
       "}\n"
       "func main():void {\n"
       "  var f = make_adder();\n"
-      "  libc::printf(\"%d\\n\", f(5));\n"
+      "  _ = libc::printf(\"%d\\n\", f(5));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -45,7 +45,7 @@ TEST(Driver, RunFileClosureCloneSemantics) {
       "  var base = 10;\n"
       "  var f = func |base| add(x: i32): i32 { return base + x; };\n"
       "  base = 1000;\n"
-      "  libc::printf(\"%d\\n\", f(5));\n"
+      "  _ = libc::printf(\"%d\\n\", f(5));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -60,7 +60,7 @@ TEST(Driver, RunFileClosureParenCapture) {
       "  var c = 100;\n"
       "  var d = 7;\n"
       "  var f = func |a, (b: i32 = c + d)| add(x: i32): i32 { return a + b + x; };\n"
-      "  libc::printf(\"%d\\n\", f(1));\n"
+      "  _ = libc::printf(\"%d\\n\", f(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -72,7 +72,7 @@ TEST(Driver, RunFileClosureLocalFunc) {
       "func main():void {\n"
       "  var x = 42;\n"
       "  func |x| f(v: i32): i32 { return x + v; }\n"
-      "  libc::printf(\"%d\\n\", f(1));\n"
+      "  _ = libc::printf(\"%d\\n\", f(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -83,7 +83,7 @@ TEST(Driver, RunFileClosureTdzCompileTimeRejected) {
      不静默到运行期（捕获槽 undefined 占位参与运算报 "operator +"） */
   std::string path = write_temp_file(
       "func main():i32 {\n"
-      "  libc::printf(\"%d\\n\", f(1));\n"
+      "  _ = libc::printf(\"%d\\n\", f(1));\n"
       "  var x = 42;\n"
       "  func |x| f(v: i32): i32 { return x + v; }\n"
       "  return 0;\n"
@@ -98,7 +98,7 @@ TEST(Driver, RunFileClosureTdzAfterDefinitionOk) {
       "func main():void {\n"
       "  var x = 42;\n"
       "  func |x| f(v: i32): i32 { return x + v; }\n"
-      "  libc::printf(\"%d\\n\", f(1));\n"
+      "  _ = libc::printf(\"%d\\n\", f(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -108,9 +108,9 @@ TEST(Driver, RunFileClosureNoCaptureForwardRefOk) {
   /* 无捕获局部函数定义点前调用：hoist 只绑定地址，无捕获槽 → 合法 */
   std::string path = write_temp_file(
       "func main():void {\n"
-      "  libc::printf(\"%d\\n\", g(1));\n"
+      "  _ = libc::printf(\"%d\\n\", g(1));\n"
       "  func g(v: i32): i32 { return v + 1; }\n"
-      "  libc::printf(\"%d\\n\", g(1));\n"
+      "  _ = libc::printf(\"%d\\n\", g(1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -142,7 +142,7 @@ TEST(Driver, RunFileClosureLocalBlockScopedVars) {
       "    }\n"
       "    return acc;\n"
       "  };\n"
-      "  libc::printf(\"%d\\n\", f());\n"
+      "  _ = libc::printf(\"%d\\n\", f());\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -172,7 +172,7 @@ TEST(Driver, RunFileClosureLoopRebind) {
       "    var f = func |i| mul(n: i32): i32 { return i * n; };\n"
       "    total = total + f(10);\n"
       "  }\n"
-      "  libc::printf(\"%d\\n\", total);\n"
+      "  _ = libc::printf(\"%d\\n\", total);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -219,7 +219,7 @@ TEST(Driver, RunFileGlobalVarRead) {
   std::string path = write_temp_file(
       "var g: i32 = 42;\n"
       "func main():i32 {\n"
-      "  libc::printf(\"%d\\n\", g);\n"
+      "  _ = libc::printf(\"%d\\n\", g);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -233,9 +233,9 @@ TEST(Driver, RunFileGlobalVarMutateAcrossFuncs) {
       "var s: str = \"hello\";\n"
       "func setg(v: i32):i32 { g = v; return 0; }\n"
       "func main():i32 {\n"
-      "  libc::printf(\"%d %s\\n\", g, s);\n"
+      "  _ = libc::printf(\"%d %s\\n\", g, s);\n"
       "  _ = setg(100);\n"
-      "  libc::printf(\"%d\\n\", g);\n"
+      "  _ = libc::printf(\"%d\\n\", g);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -248,7 +248,7 @@ TEST(Driver, RunFileGlobalVarFuncRefInit) {
       "func add(a:i32, b:i32):i32 { return a + b; }\n"
       "var f = add;\n"
       "func main():i32 {\n"
-      "  libc::printf(\"%d\\n\", f(3, 4));\n"
+      "  _ = libc::printf(\"%d\\n\", f(3, 4));\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -260,7 +260,7 @@ TEST(Driver, RunFileGlobalVarExprInit) {
   std::string path = write_temp_file(
       "var x = (1 + 2) * 3 - 4;\n"
       "func main():i32 {\n"
-      "  libc::printf(\"%d\\n\", x);\n"
+      "  _ = libc::printf(\"%d\\n\", x);\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

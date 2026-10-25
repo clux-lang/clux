@@ -107,8 +107,8 @@ TEST(Decorator, PlainFunctionWorksIfFoldable) {
 TEST(Decorator, NonFoldableDecoratorIsRejected) {
   const std::string src =
       "extern lib libc from \"*\";\n"
-      "extern cfunc libc::printf(format: str, ...): void;\n"
-      "func loud(n: i32): i32 { libc::printf(\"%d\\n\", n); return n; }\n"
+      "extern cfunc libc::printf(format: str, ...): i32;\n"
+      "func loud(n: i32): i32 { _ = libc::printf(\"%d\\n\", n); return n; }\n"
       "[[loud]] var a = 1;\n"
       "func main(): i32 { return 0; }\n";
   std::string path = write_temp_file(src, "decor_nonfold");
@@ -311,7 +311,7 @@ TEST(Decorator, ParameterizedMethodDecorator) {
 TEST(CfuncScope, LocalCfuncDefinitionRejected) {
   const std::string src =
       "extern lib libc from \"*\";\n"
-      "extern cfunc libc::printf(format: str, ...): void;\n"
+      "extern cfunc libc::printf(format: str, ...): i32;\n"
       "func main(): i32 {\n"
       "  cfunc cmp(a: ref opaque, b: ref opaque): i32 { return 0; }\n"
       "  return 0;\n"
