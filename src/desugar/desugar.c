@@ -703,7 +703,8 @@ static bool ds_is_metadata_decorator(const ast_node_t *d) {
    而是编译期标记，交由 sema 处理。 */
 static ast_node_t *ds_take_metadata(ast_node_t *decs, ast_node_t **out_meta) {
   ast_node_t *head = NULL, *tail = NULL;
-  for (ast_node_t *d = decs; d; d = d->next) {
+  for (ast_node_t *d = decs, *nx; d; d = nx) {
+    nx = d->next;   /* 先取后继：下面会把 d->next 置 NULL（截断链） */
     if (ds_is_metadata_decorator(d)) {
       d->next = NULL;
       if (*out_meta) {
@@ -725,7 +726,8 @@ static ast_node_t *ds_take_metadata(ast_node_t *decs, ast_node_t **out_meta) {
 
 static ast_node_t *ds_take_noreturn(ast_node_t *decs, bool *flag) {
   ast_node_t *head = NULL, *tail = NULL;
-  for (ast_node_t *d = decs; d; d = d->next) {
+  for (ast_node_t *d = decs, *nx; d; d = nx) {
+    nx = d->next;   /* 先取后继（见 ds_take_metadata） */
     if (d->kind == AST_IDENT) {
       strslice_t n = ((ast_ident_t *)d)->name;
       if ((n.len == 8 && memcmp(n.ptr, "noreturn", 8) == 0) ||

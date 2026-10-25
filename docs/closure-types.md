@@ -254,7 +254,21 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   move/clone/嵌套/容器）无泄漏。实例本身仍挂在 `vm->functions`，随 VM 销毁
   统一回收（未做按值回收）。
 
-### 阶段 C（C 侧补充）：嵌套闭包捕获
+### 装饰器链修复（本次，顺带）
+
+- `ds_take_metadata` / `ds_take_noreturn` 的过滤循环先把 `d->next = NULL` 再让
+  `for` 的递增读 `d->next` → 链在第一个非 metadata 装饰器处被截断：**多个函数
+  装饰器只保留一个**（值装饰器不走这两个过滤器，所以 `[[a]] [[b]] var` 正常）。
+  改为先保存 `nx = d->next`。
+- 修复后 `[[add100]] [[add100]] f` / 参数化链 `[[scale(10)]] [[add(5)]] f` 真正
+  按源码序嵌套；`Decorator.ParameterizedDecoratorChain` 迁移为泛型装饰器
+  （`comptime func add[F](n: i32, f: F): func |n: i32, f: F| ...`）并真正验证
+  `combo(1) == 70`（VM 通过）。
+- 注：这条路径的 **C 后端**仍会在全局初始化器上报 sig struct 不兼容（comptime
+  折叠出的嵌套闭包字面量复用了内层/模板的 `capture_type_id`）；单层装饰器
+  C 正常。
+
+### 阶段 C（C 侧补充）：嵌套闭包捕获与聚合捕获
 
 - `capture_clone_kind` 新增 FUNC 分支（own 闭包捕获 → kind 3）：闭包的静态
   clone 辅助函数会递归调用**嵌套闭包类型**的 `<sig>__cl`，深拷贝内层 env。
@@ -292,14 +306,13 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
    （clone_block FUNC 分支）。
 2. **comptime 折叠结果的类型仍是签名类型**：`sema_ct_encode` 的 FUNC 分支只
    记录 `fn->type`（普通签名），折叠出的闭包常量的 sema 类型因此是
-   `func(...)`；`var f = comptime_closure()`、装饰器展开、泛型实参推断都会
-   退化成无捕获 func。**装饰器链**（`[[scale(10)]] [[add(5)]] f`）因此会丢掉
-   内层装饰（`examples/decorator_param` 不再演示嵌套链；测试
-   `Decorator.ParameterizedDecoratorChain` 只回归编译/释放，未断言结果）。
-   修复方向：让折叠常量携带闭包类型（`type_func_closure`），并让运行期闭包值
-   的类型身份与之一致——但后者会牵动 `func_instantiate`/`value_assign`/
-   `implicit_cast`（本次试过：直接改运行期值类型会让 `ClosureValueOwn`
-   整组失败，已回退），需要成组改造。
+   `func(...)`。装饰器链本身已在 desugar 修好（VM 验证 70），但 **C 后端**在
+   全局初始化器上仍会把嵌套闭包字面量按内层/模板的 `capture_type_id`
+   （sig struct）落类型，导致 `[[scale(10)]] [[add(5)]] f` 的 C 构建报
+   incompatible struct。修复方向：让折叠常量携带闭包类型
+   （`type_func_closure`），并让 `sema_ct_lit` 重建的嵌套字面量拥有各自的
+   `capture_type_id`（而不是共享 `*lit = *orig` 里的旧值）；需成组调整
+   `func_instantiate`/`value_assign`/`implicit_cast` 的运行期类型身份。
 3. **闭包捕获聚合的 clone**：C 的 `emit_closure_free` 对 FUNC（递归）、
    own 指针/切片、含 own 槽位的聚合（`__destroy_<T>`）已覆盖；clone 侧对
    聚合捕获走生成的 `__clone_<T>`（kind 0），也已覆盖。剩余：捕获槽为

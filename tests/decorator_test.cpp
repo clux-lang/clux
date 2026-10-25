@@ -269,10 +269,10 @@ TEST(Decorator, ParameterizedFunctionDecorator) {
 /* 带参数装饰器的链：`[[scale(10)]] [[add(5)]] f` ⇒ scale(10, add(5, f)) */
 TEST(Decorator, ParameterizedDecoratorChain) {
   clux_expect_ok(
-      "comptime func add(n: i32, f: func(i32) -> i32): func |n: i32, f: func(i32) -> i32| (i32) -> i32 {\n"
+      "comptime func add[F](n: i32, f: F): func |n: i32, f: F| (i32) -> i32 {\n"
       "  return func |n, f| w(x: i32): i32 { return f(x) + n; };\n"
       "}\n"
-      "comptime func scale(k: i32, f: func(i32) -> i32): func |k: i32, f: func(i32) -> i32| (i32) -> i32 {\n"
+      "comptime func scale[F](k: i32, f: F): func |k: i32, f: F| (i32) -> i32 {\n"
       "  return func |k, f| s(x: i32): i32 { return f(x) * k; };\n"
       "}\n"
       "func double(x: i32): i32 { return x * 2; }\n"
