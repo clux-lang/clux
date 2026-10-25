@@ -694,6 +694,11 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     if (!init_bad && vd->init && vd->init->kind != AST_FUNC_DEF &&
         vd->init->kind != AST_MOVE && vd->init->kind != AST_TAKE) {
       bool already_dc = false;
+      /* 只有**左值拷贝**才需要深拷贝；调用/构造/new/make 产物是新实例。 */
+      bool from_lvalue =
+          vd->init->kind == AST_IDENT || vd->init->kind == AST_MEMBER ||
+          vd->init->kind == AST_INDEX || vd->init->kind == AST_DEREF ||
+          vd->init->kind == AST_UNWRAP;
       if (vd->init->kind == AST_CALL) {
         ast_node_t *cal = ((ast_call_t *)vd->init)->callee;
         if (cal && cal->kind == AST_IDENT) {
@@ -705,7 +710,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       const type_t *it0 = value_type(init);
       const type_t *is = it0 ? type_strip_quals(it0) : NULL;
       bool needs_copy = false;
-      if (is && !type_has_own_slots(is)) {
+      if (from_lvalue && is && !type_has_own_slots(is)) {
         if (type_kind_of(is) == TYPE_KIND_FUNC)
           needs_copy = func_type_capture_count(is) > 0;
         else

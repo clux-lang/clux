@@ -302,6 +302,15 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - 新 gtest：`CBackend.BuildExportClosureABI`（a 模块导出 `mk(base) ->
   func |b: i32| (i32) -> i32` 与 `call(f, x)`，main 模块 import 后调用，
   C 构建/运行 exit 0）。
+- `CBackend.BuildExportClosureAcrossModules` 覆盖更多形态：
+  - 跨模块**泛型** `mk[T](v: T): func |v: T| () -> T`，main 用 `ma::mk[i32](42)`；
+  - 闭包捕获模块内 struct（`func |b: Box| () -> i32`，Box 来自导出模块）；
+  - `fatal func |p: own *i32| ...` 返回 own 闭包，所有权跨模块转移、调用方
+    作用域释放一次。
+  C 与 VM 均通过。
+- 值拷贝优化：`__deep_clone` 只对**左值来源**（ident/member/index/deref/unwrap）
+  插入；调用/构造/new/make 产物是新实例，不再多克隆一层（否则跨模块调用
+  返回的闭包会被再克隆，C 侧生成的 `__deep_clone` 调用无定义）。
 - 清理：删除已无生成点的 `CIR_EXPR_CLOSURE_RELEASE` / `clux_func_release`
   no-op 宏（值里不再有 clone/dispose 函数指针，普通函数值的 FREE 是 no-op）。
 
@@ -342,10 +351,11 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
    与 `clux_func_release` 已删除；`capture_clone_kind` 与 sema
    `clone_needs_deep` 的规则仍重复（后续可共享），VM 侧 `env_*_fid` 仍是
    clone/free 的运行期入口（保留）。
-5. 文档/ABI 收尾：导出函数的闭包参数/返回已验证（`BuildExportClosureABI`）；
+5. 文档/ABI 收尾：导出函数的闭包参数/返回已验证（`BuildExportClosureABI` /
+   `BuildExportClosureAcrossModules`，含跨模块泛型与 fatal own 闭包）；
    剩余：`cfunc_ptr` 与闭包类型的交互（带捕获闭包无 C 等价物，已有拒绝用例）、
-   跨模块**泛型函数**返回闭包的 ABI、导出函数的闭包值在 C 侧调用者里的
-   生命周期约定。
+   导出闭包值在**纯 C 调用方**里的生命周期约定（当前按值结构体，调用方负责
+   传递/释放约定需要文档化）。
 
 ## 关键代码位置（继续实施时）
 

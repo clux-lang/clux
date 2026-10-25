@@ -2363,6 +2363,60 @@ TEST(CBackend, BuildExportClosureABI) {
   fs::remove_all(proj, ec);
 }
 
+/* 跨模块导出闭包的更多形态：泛型捕获、模块内 struct 捕获、`fatal` 返回的
+   own 闭包（所有权跨模块转移，调用方作用域释放一次）。 */
+TEST(CBackend, BuildExportClosureAcrossModules) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "exp_closure_abi2";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("a.cx",
+        "export struct Box { v: i32; }\n"
+        "export func mk[T](v: T): func |v: T| () -> T {\n"
+        "  return func |v| (): T { return v; };\n"
+        "}\n"
+        "export func make_box(v: i32): func |b: Box| () -> i32 {\n"
+        "  var b = .Box{ .v = v };\n"
+        "  return func |(b: Box = b)| (): i32 { return b.v; };\n"
+        "}\n"
+        "export func make_own(): fatal func |p: own *i32| () -> i32 {\n"
+        "  var p: own *i32 = new i32{ 7 };\n"
+        "  return move(func |(p = move(p))| (): i32 { return p.*; });\n"
+        "}\n");
+  write("main.cx",
+        "import ma from \"./a\";\n"
+        "func main(): i32 {\n"
+        "  var f: func |v: i32| () -> i32 = ma::mk[i32](42);\n"
+        "  if (f() != 42) { return 1; }\n"
+        "  var g: func |b: ma::Box| () -> i32 = ma::make_box(9);\n"
+        "  if (g() != 9) { return 2; }\n"
+        "  var h: own func |p: own *i32| () -> i32 = ma::make_own();\n"
+        "  if (h() != 7) { return 3; }\n"
+        "  return 0;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int build_rc = run_cli({"build", "main.cx"});
+  fs::current_path(saved);
+  EXPECT_EQ(build_rc, 0);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
 /* 捕获"含 own 槽位的聚合"（Box 内 own *i32）：闭包销毁必须按类型递归
    （`__destroy_Box(ref *Box)`），不能把结构体值当指针 clux_free。 */
 TEST(CBackend, BuildClosureAggregateCaptureFree) {

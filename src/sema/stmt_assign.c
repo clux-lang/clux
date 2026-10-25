@@ -582,8 +582,12 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       }
     }
 
-    /* 闭包值拷贝 = 深拷贝 env（与 var 初始化同规则；move 是转移，不克隆）。 */
-    if (as->value && as->value->kind != AST_MOVE) {
+    /* 闭包值拷贝 = 深拷贝 env（与 var 初始化同规则；move 是转移、调用/构造
+       产物是新实例，都不克隆）。 */
+    if (as->value && as->value->kind != AST_MOVE &&
+        (as->value->kind == AST_IDENT || as->value->kind == AST_MEMBER ||
+         as->value->kind == AST_INDEX || as->value->kind == AST_DEREF ||
+         as->value->kind == AST_UNWRAP)) {
       const type_t *rt = value_type(rhs);
       const type_t *rs = rt ? type_strip_quals(rt) : NULL;
       bool needs_copy = false;
