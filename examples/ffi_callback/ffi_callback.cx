@@ -23,7 +23,7 @@ extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): i32;
 
 // C 运行库：三平台各一条，只有当前平台的那条在编译期存活
-extern lib crt from "msvcrt" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
+extern lib crt from "*" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
 extern lib crt from "libc.so.6" assert(OS_TYPE == "LINUX");
 extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
 
