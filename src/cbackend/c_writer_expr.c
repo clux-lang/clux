@@ -104,44 +104,37 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         }
         break;
     case CIR_EXPR_SLICE: {
-        cw_put(sb, "(");
-        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-        cw_put(sb, "){ .data = (");
-        cw_put(sb, e->type && e->type->elem && e->type->elem->c_name
-                   ? e->type->elem->c_name
-                   : "int32_t");
-        cw_put(sb, " *)");
+        /* 运行时边界检查：low >= 0 && low <= high <= len；越界 abort。
+           源只求值一次（statement expression）。 */
+        const char *st = e->type && e->type->c_name ? e->type->c_name : "int32_t";
+        const char *et = e->type && e->type->elem && e->type->elem->c_name
+                             ? e->type->elem->c_name
+                             : "int32_t";
+        bool arr = e->src_type && e->src_type->kind == CIR_TYPE_ARRAY;
+        cw_put(sb, "({ __auto_type clux_sl = (");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ".data + (");
+        cw_put(sb, "); int64_t clux_lo = (");
         if (e->rhs) cw_write_expr(sb, e->rhs);
         else cw_put(sb, "0");
-        cw_put(sb, "), .len = (");
+        cw_put(sb, "); int64_t clux_hi = (");
         if (e->high) {
             cw_write_expr(sb, e->high);
-            cw_put(sb, " - (");
-            if (e->rhs) cw_write_expr(sb, e->rhs);
-            else cw_put(sb, "0");
-            cw_put(sb, "))");
-        } else if (e->src_type && (e->src_type->kind == CIR_TYPE_SLICE ||
-                                   e->src_type->kind == CIR_TYPE_STR)) {
-            /* `s[low:]`：长度沿用既有 len，只减 low（`.len = (` 由
-               `).len` 收口，不能再多一个 `)`）。 */
-            cw_write_expr(sb, e->lhs);
-            cw_put(sb, ").len - (");
-            if (e->rhs) cw_write_expr(sb, e->rhs);
-            else cw_put(sb, "0");
-            cw_put(sb, ")");
+        } else if (arr) {
+            cw_put(sb, "(int64_t)(sizeof(clux_sl.data) / sizeof(clux_sl.data[0]))");
         } else {
-            cw_put(sb, "sizeof((");
-            cw_write_expr(sb, e->lhs);
-            cw_put(sb, ").data) / sizeof((");
-            cw_write_expr(sb, e->lhs);
-            cw_put(sb, ").data[0])) - (");
-            if (e->rhs) cw_write_expr(sb, e->rhs);
-            else cw_put(sb, "0");
-            cw_put(sb, ")");
+            cw_put(sb, "(int64_t)clux_sl.len");
         }
-        cw_put(sb, " }");
+        cw_put(sb, "); clux_slice_range((void *)clux_sl.data, (uint64_t)(");
+        if (arr)
+            cw_put(sb, "sizeof(clux_sl.data) / sizeof(clux_sl.data[0])");
+        else
+            cw_put(sb, "clux_sl.len");
+        cw_put(sb, "), clux_lo, clux_hi, \"slice\"); (");
+        cw_put(sb, st);
+        cw_put(sb, "){ .data = (");
+        cw_put(sb, et);
+        cw_put(sb, " *)clux_sl.data + clux_lo, .len = (uint64_t)(clux_hi - "
+                   "clux_lo) }; })");
         break;
     }
     case CIR_EXPR_MAKE: {

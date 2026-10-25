@@ -335,6 +335,17 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "    }\n");
         cw_put(sb, "    return (char *)h.data + (size_t)idx * elem;\n");
         cw_put(sb, "}\n");
+        cw_put(sb, "static void clux_slice_range(const void *data, uint64_t len, "
+                   "int64_t low, int64_t high, const char *what) {\n");
+        cw_put(sb, "    (void)data;\n");
+        cw_put(sb, "    if (low < 0 || high < low || (uint64_t)high > len) {\n");
+        cw_put(sb, "        printf(\"run: %s slice [%lld:%lld] out of bounds "
+                   "(len=%llu)\\n\", what, (long long)low, (long long)high, "
+                   "(unsigned long long)len);\n");
+        cw_put(sb, "        fflush(NULL);\n");
+        cw_put(sb, "        abort();\n");
+        cw_put(sb, "    }\n");
+        cw_put(sb, "}\n");
     }
     if (unit->uses_union_check) {
         cw_put(sb,

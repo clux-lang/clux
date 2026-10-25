@@ -73,6 +73,7 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl) {
     if (!obj || !ct || !otc) return NULL;
     cir_expr_t *e = cir_expr_slice(lc->arena, ct, obj, lo, hi);
     if (e) e->src_type = otc;
+    lc->unit->uses_slice_check = true;
     return e;
 }
 
