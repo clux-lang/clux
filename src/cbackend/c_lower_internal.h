@@ -234,6 +234,9 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call);
 const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e);
 bool call_is_len(const ast_call_t *c);
 cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
+/** 按目标类型 lower 一个值：匿名构造类型槽修正 + 布局兼容 bitcast。 */
+cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
+                               ast_node_t *expr);
 cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);

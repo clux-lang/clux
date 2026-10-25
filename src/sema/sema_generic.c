@@ -1171,6 +1171,10 @@ static const type_t *instantiate_func_impl(
         return NULL;
     }
     ast_func_def_t *fn = (ast_func_def_t *)parsed;
+    /* 解析克隆不会复制装饰器链；模板上的装饰器仍要**每个实例**展开一次
+       （fn->decorators 在本函数内被消费，def 的链保持不变）。 */
+    if (!fn->decorators && ((const ast_func_def_t *)def)->decorators)
+        fn->decorators = ((const ast_func_def_t *)def)->decorators;
     bool def_noreturn = ((const ast_func_def_t *)def)->is_noreturn;
 
     /* 装饰器在**每个实例**上展开：源函数保留实例体，实例名变成包装函数。

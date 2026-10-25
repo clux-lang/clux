@@ -1106,7 +1106,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                                                    lc->return_type, true, v)
                                  : NULL;
                 } else {
-                    st->expr = lower_expr(lc, r->value);
+                    const type_t *rtt =
+                        lc->return_type
+                            ? (const type_t *)lc->return_type->src
+                            : NULL;
+                    st->expr = rtt ? lower_compat_value(lc, rtt, r->value)
+                                   : lower_expr(lc, r->value);
                 }
             }
         }

@@ -563,7 +563,7 @@ TEST(GenericConstraint, ArrayTupleGenericStructFunctionOr) {
         "    var n3 = as_num(2.5);\n"
         "    var n4 = boxed(b);\n"
         "    var n5 = fn_ok(f);\n"
-        "    return (n1 as i32) + n2 + (n3 as i32) + n4 + n5 - 21;\n"
+        "    return (n1 as i32) + n2 + (n3 as i32) + n4 + n5 - 18;\n"
         "}\n",
         "generic_constraint_forms");
 }
@@ -1262,7 +1262,7 @@ TEST(GenericPack, ValuePackSpreadAndTuple) {
         "  return t[0] + t[1] + t[2] + sum3(N) + sum3(...N);\n"
         "}\n"
         "func main(): i32 {\n"
-        "  return (f[1u64, 2u64, 3u64]() - 36u64) as i32;\n"
+        "  return (f[1u64, 2u64, 3u64]() - 18u64) as i32;\n"
         "}\n",
         "generic_value_pack_spread");
 }

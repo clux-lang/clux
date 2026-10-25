@@ -449,8 +449,8 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call);
 
 /* 结构等价但 type_t 不同的复合值（匿名推断结构 vs 声明类型）：按布局
    重解释成目标类型（C 不允许 struct 间 cast）。 */
-static cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
-                                      ast_node_t *expr) {
+cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
+                               ast_node_t *expr) {
     cir_expr_t *v = lower_expr(lc, expr);
     if (!v || !target) return v;
     const type_t *vt = infer_expr_type(lc, expr);
