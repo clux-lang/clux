@@ -35,7 +35,7 @@ static const cmd_t g_cmds[] = {
     {
         .name = "build",
         .usage = "clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]] "
-                 "[--build-dir=DIR] [--output=PATH] [--cc=PATH] "
+                 "[--keep-c] [--build-dir=DIR] [--output=PATH] [--cc=PATH] "
                  "[--cflag=FLAG]... [--ldflag=FLAG]... [-I DIR]... "
                  "[-L DIR]... [-l LIB]... [-D KEY=VALUE]...",
         .help =
@@ -45,6 +45,7 @@ static const cmd_t g_cmds[] = {
             "  clux build <file.cx> --emit-c     write C source only (no cc call)\n"
             "  clux build <file.cx> --emit-c=P   write C source to P\n"
             "  clux build <file.cx> --emit-obj[=P]  compile to an object only\n"
+            "  clux build <file.cx> --keep-c    keep generated C after compiling\n"
             "  clux build <file.cx> --output=P   executable path P\n"
             "\n"
             "Pipeline: .cx -> .c/.h -> (cc -c) -> object -> link -> executable.\n"

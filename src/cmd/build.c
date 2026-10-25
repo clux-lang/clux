@@ -18,7 +18,7 @@
 
 static const char *USAGE =
     "usage: clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]]\n"
-    "                   [--build-dir=DIR] [--output=PATH]\n"
+    "                   [--keep-c] [--build-dir=DIR] [--output=PATH]\n"
     "                   [--cc=PATH] [--cflag=FLAG]... [--ldflag=FLAG]...\n"
     "                   [-I DIR]... [--include=DIR]...\n"
     "                   [-L DIR]... [--lib-path=DIR]...\n"
@@ -314,6 +314,7 @@ static int build_impl(const cmd_args_t *args, const char *src_override,
 
     const bool emit_c = cmd_args_has(args, "emit-c");
     const bool emit_obj = cmd_args_has(args, "emit-obj");
+    const bool keep_c = cmd_args_has(args, "keep-c");
     if (emit_c && emit_obj) {
         fprintf(stderr, "build: --emit-c and --emit-obj are mutually "
                         "exclusive\n");
@@ -436,7 +437,8 @@ static int build_impl(const cmd_args_t *args, const char *src_override,
         goto done;
     }
     cbackend_program_t pgm = {
-        .build_dir = build_dir, .entry_c = def_c, .entry_obj = def_obj};
+        .build_dir = build_dir, .entry_c = def_c, .entry_obj = def_obj,
+        .keep_c = keep_c};
     rc = cbackend_build_program(src, exe, &pgm, &tc);
     if (rc == 0) {
         if (out_exe) *out_exe = strdup(exe);

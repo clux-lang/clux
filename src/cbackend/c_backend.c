@@ -459,7 +459,8 @@ static cir_unit_t *lower_one_module(arena_t *arena, module_t *mod,
 /* 写 .c/.h →（非 emit-c）编译对象。 */
 static int write_one_module(allocator_t *alloc, cir_unit_t *u,
                             const char *c_path, const char *obj_path,
-                            bool emit_c_only, const cbackend_toolchain_t *tc) {
+                            bool emit_c_only, bool keep_c,
+                            const cbackend_toolchain_t *tc) {
     if (!be_ensure_parent(c_path) ||
         (!emit_c_only && !be_ensure_parent(obj_path))) {
         fprintf(stderr, "build: cannot create output directory for '%s'\n",
@@ -475,7 +476,7 @@ static int write_one_module(allocator_t *alloc, cir_unit_t *u,
         rc = 1;
     } else if (!emit_c_only) {
         if (compile_object(alloc, c_path, obj_path, tc) != 0) rc = 1;
-        else remove(c_path);
+        else if (!keep_c) remove(c_path);
     }
     free(h_path);
     return rc;
@@ -488,6 +489,7 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     bool emit_c_only = pgm && pgm->emit_c_only;
     bool object_only = pgm && pgm->object_only;
     bool tests = pgm && pgm->tests;
+    bool keep_c = pgm && pgm->keep_c;
     if (!emit_c_only && !object_only && !out_path) return 1;
 
     allocator_t *alloc = create_allocator(malloc, free);
@@ -669,7 +671,8 @@ int cbackend_build_program(const char *src_path, const char *out_path,
             }
         }
         /* 写 .c/.h → 编译对象（测试模式的 runner 表已在上面确定）。 */
-        if (write_one_module(alloc, u, c_path, obj_path, emit_c_only, tc) != 0) {
+        if (write_one_module(alloc, u, c_path, obj_path, emit_c_only, keep_c,
+                             tc) != 0) {
             if (diag_has_error(diag)) diag_print_all(diag);
             goto cleanup;
         }
@@ -1075,13 +1078,14 @@ int cbackend_generate_c(const char *src_path, const char *c_path) {
 }
 
 int cbackend_build_tests(const char *src_path, const char *out_path,
-                         char ***names, size_t *count) {
+                         char ***names, size_t *count, bool keep_c) {
     if (!src_path || !out_path) return 1;
     /* 与 build 同路径：入口 + import 依赖各自生成编译单元，入口单元生成
        跨模块用例分派的 runner main（不从 main 进入）。 */
     cbackend_program_t pgm = {
         .build_dir = "build",
         .tests = true,
+        .keep_c = keep_c,
         .out_test_names = names,
         .out_test_count = count,
     };

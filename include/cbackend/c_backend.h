@@ -61,6 +61,7 @@ typedef struct cbackend_program {
     const char *entry_obj;   /* 入口目标文件（NULL = 镜像推导） */
     bool        object_only; /* 只编译到对象（不链接） */
     bool        emit_c_only; /* 只生成 C/头文件 */
+    bool        keep_c;      /* 编译后保留生成的 .c（调试） */
     /* 测试模式：test 块改写成 `__clux_test_N` 函数，入口模块生成 runner
        main（跨模块合并用例表）；不要求 main。 */
     bool        tests;
@@ -86,7 +87,7 @@ int cbackend_generate_c(const char *src_path, const char *c_path);
  * cbackend_free_test_names 释放）；没有 test 块时报错返回 1。
  */
 int cbackend_build_tests(const char *src_path, const char *out_path,
-                         char ***names, size_t *count);
+                         char ***names, size_t *count, bool keep_c);
 void cbackend_free_test_names(char **names, size_t count);
 
 #ifdef __cplusplus
