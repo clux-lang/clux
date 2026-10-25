@@ -704,8 +704,14 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       const type_t *it0 = value_type(init);
       const type_t *is = it0 ? type_strip_quals(it0) : NULL;
-      if (!already_dc && is && type_kind_of(is) == TYPE_KIND_FUNC &&
-          func_type_capture_count(is) > 0 && !type_has_own_slots(is)) {
+      bool needs_copy = false;
+      if (is && !type_has_own_slots(is)) {
+        if (type_kind_of(is) == TYPE_KIND_FUNC)
+          needs_copy = func_type_capture_count(is) > 0;
+        else
+          needs_copy = type_has_closure_slots(is);
+      }
+      if (!already_dc && needs_copy) {
         ast_node_t *dc = sema_gen_deep_clone(sema, vd->init);
         if (dc) vd->init = dc;
       }

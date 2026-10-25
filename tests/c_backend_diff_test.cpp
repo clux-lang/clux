@@ -264,8 +264,28 @@ TEST(CBackendDiff, ClosureCopyIsValueSemantic) {
   expect_diff(c);
 }
 
-TEST(CBackendDiff, Bitfields) {
+/* 聚合内部闭包字段：struct 拷贝/赋值在 C（内联 env 字节拷贝）与 VM
+ * （__deep_clone 深拷贝闭包槽位）都必须独立。 */
+TEST(CBackendDiff, StructClosureCopyIsValueSemantic) {
   static const DiffCase c = {
+      "diff_struct_closure_copy",
+      "struct Holder { f: func |n: i32| () -> i32; }\n"
+      "func main(): i32 {\n"
+      "  var f = func |(n: i32 = 0)| (): i32 { n = n + 1; return n; };\n"
+      "  var h = .Holder{ .f = f };\n"
+      "  var h2 = h;\n"
+      "  if (h.f() != 1) { return 1; }\n"
+      "  if (h2.f() != 1) { return 2; }\n"
+      "  if (h.f() != 2) { return 3; }\n"
+      "  if (h2.f() != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      0,
+  };
+  expect_diff(c);
+}
+
+TEST(CBackendDiff, Bitfields) {  static const DiffCase c = {
       "diff_bitfield",
       "bitfield Flags: u8 { a: 3; b: 5; }\n"
       "bitfield Big: u8 { p: 4; q: 8; r: 5; }\n"

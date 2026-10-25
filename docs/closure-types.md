@@ -259,6 +259,13 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   由 sema 插入生成的 `__deep_clone`，env 深拷贝、两份独立（字面量/move 不
   插入）。C 与 VM 行为一致（差分用例 `CBackendDiff.ClosureCopyIsValueSemantic`、
   `ClosureValueOwn.CaptureMutation*`）。
+- **聚合内部的闭包槽位**同样按值语义：sema 对"含闭包槽位且无 own 槽位"的
+  struct/tuple/array/option/union/slice 拷贝也插入 `__deep_clone`；VM 的
+  `ptr_clone_block` 用 `type_has_func_slots`（运行期闭包字段的类型可能已折叠成
+  签名类型）进入聚合，再按运行期 `func_t->capture_type` 深拷贝闭包槽位。
+  C 侧 struct/数组赋值本身就是内联 env 的字节拷贝，`__deep_clone` 降级为
+  恒等（无需额外代码）。用例：`ClosureValueOwn.StructClosureFieldCopyIsIndependent`、
+  `ArrayClosureElementCopyIsIndependent`、`CBackendDiff.StructClosureCopyIsValueSemantic`。
 
 ### 装饰器链修复（本次，顺带）
 
@@ -313,14 +320,13 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 
 ## 未完成
 
-1. **阶段 C（VM 值生命周期）**：env 已内联进**函数实例分配**，变量/赋值的闭包
-   拷贝已按值语义深拷贝 env（见上），但值 data 仍是 `func_t*`，实例统一挂在
-   `vm->functions` 直到 VM 销毁（不做按值回收）。剩余：
-   - 聚合内部移动的闭包副本（`.[2]F{ f, f }` / struct 字段拷贝）仍共享实例；
-   - 真正的按值生命周期需要值 data 内联捕获块，或实例引用计数 +
-     `value_dispose` 回收；后者牵动 `func_assign`/`value_clone`（move 是运行期
-     字节拷贝，不能无条件深拷贝）。改动面：`include/vm/function.h`、
-     `src/vm/type_func.c`、`exec_stack.c`、`exec_memory.c`、`type_ptr.c`。
+1. **阶段 C（VM 值生命周期）**：env 已内联进**函数实例分配**，变量/赋值/
+   聚合内部的闭包槽位拷贝都已按值语义深拷贝 env（见上），但值 data 仍是
+   `func_t*`，实例统一挂在 `vm->functions` 直到 VM 销毁（不做按值回收）。
+   真正的按值生命周期需要值 data 内联捕获块，或实例引用计数 +
+   `value_dispose` 回收；后者牵动 `func_assign`/`value_clone`（move 是运行期
+   字节拷贝，不能无条件深拷贝）。改动面：`include/vm/function.h`、
+   `src/vm/type_func.c`、`exec_stack.c`、`exec_memory.c`、`type_ptr.c`。
 2. **运行期闭包值的类型身份仍是签名类型**：sema 的闭包常量/变量是闭包类型
    （捕获进入身份），但 `func_instantiate` 产出的运行期 value type 仍是普通
    `func_type_t`（sig 与闭包类型共享布局；`capture_type` 挂在函数对象上）。

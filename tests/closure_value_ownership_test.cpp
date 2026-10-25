@@ -234,3 +234,38 @@ TEST(ClosureValueOwn, CaptureMutationAssignmentCopyIsIndependent) {
       "}\n",
       "cv_mutate_assign");
 }
+
+/* 聚合内部闭包字段的值语义：struct 拷贝/赋值不得共享闭包 env。 */
+TEST(ClosureValueOwn, StructClosureFieldCopyIsIndependent) {
+  clux_expect_ok(
+      "struct Holder { f: func |n: i32| () -> i32; }\n"
+      "func main(): i32 {\n"
+      "  var f = func |(n: i32 = 0)| (): i32 { n = n + 1; return n; };\n"
+      "  var h = .Holder{ .f = f };\n"
+      "  var h2 = h;\n"
+      "  if (h.f() != 1) { return 1; }\n"
+      "  if (h2.f() != 1) { return 2; }\n"
+      "  if (h.f() != 2) { return 3; }\n"
+      "  if (h2.f() != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cv_struct_field_copy");
+}
+
+/* 数组元素里的闭包同样按值语义拷贝。 */
+TEST(ClosureValueOwn, ArrayClosureElementCopyIsIndependent) {
+  clux_expect_ok(
+      "type F = func |n: i32| () -> i32;\n"
+      "func main(): i32 {\n"
+      "  var a = .[2]F{\n"
+      "    func |(n: i32 = 0)| (): i32 { n = n + 1; return n; },\n"
+      "    func |(n: i32 = 10)| (): i32 { n = n + 1; return n; } };\n"
+      "  var b = a;\n"
+      "  if (a[0]() != 1) { return 1; }\n"
+      "  if (b[0]() != 1) { return 2; }\n"
+      "  if (a[0]() != 2) { return 3; }\n"
+      "  if (b[0]() != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cv_array_elem_copy");
+}

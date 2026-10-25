@@ -586,8 +586,14 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     if (as->value && as->value->kind != AST_MOVE) {
       const type_t *rt = value_type(rhs);
       const type_t *rs = rt ? type_strip_quals(rt) : NULL;
-      if (rs && type_kind_of(rs) == TYPE_KIND_FUNC &&
-          func_type_capture_count(rs) > 0 && !type_has_own_slots(rs)) {
+      bool needs_copy = false;
+      if (rs && !type_has_own_slots(rs)) {
+        if (type_kind_of(rs) == TYPE_KIND_FUNC)
+          needs_copy = func_type_capture_count(rs) > 0;
+        else
+          needs_copy = type_has_closure_slots(rs);
+      }
+      if (needs_copy) {
         ast_node_t *dc = sema_gen_deep_clone(sema, as->value);
         if (dc) as->value = dc;
       }

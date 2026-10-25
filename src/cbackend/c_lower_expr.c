@@ -584,7 +584,8 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (strslice_eq(cname0, STRSLICE_LIT("__deep_clone")) && call->args &&
         !call->args->next) {
         const type_t *ft = infer_expr_type(lc, call->args);
-        if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC) {
+        const type_t *fs = ft ? type_strip_quals(ft) : NULL;
+        if (fs && type_kind_of(fs) == TYPE_KIND_FUNC) {
             cir_expr_t *obj = lower_expr(lc, call->args);
             if (!obj) return NULL;
             cir_expr_t *cl = cir_expr_func_clone(lc->arena, obj);
@@ -595,6 +596,11 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             if (helper) cl->text = helper;
             return cl;
         }
+        /* 含闭包槽位的聚合值拷贝：C 的 struct/数组赋值**按值**复制内联
+           env，本身就是深拷贝；无需额外代码（sema 只在"无 own 槽位"的
+           聚合上插入 __deep_clone）。 */
+        if (fs && type_has_closure_slots(fs))
+            return lower_expr(lc, call->args);
     }
     if (call->callee && call->callee->kind == AST_SCOPE_REF) {
         ast_scope_ref_t *sr = (ast_scope_ref_t *)call->callee;

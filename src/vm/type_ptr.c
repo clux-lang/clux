@@ -632,7 +632,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
            独立）——浅拷贝会让两个切片共享同一堆块，作用域退出各 FREE 一次
            → 双释放（实测 0xC0000005）。元素内容是否递归深拷贝由**元素槽位
            所有权**决定：own 元素/含 own 槽位的元素要克隆，ref 元素只拷贝
-           借用指针（借用目标不归本值所有）。 */
+           借用指针（借用目标不归本值所有）；含捕获闭包元素按值语义深拷贝。 */
         size_t total = (size_t)ss->len * et->size;
         if (total == 0) {
             memcpy(dst, src, type->size);
@@ -643,7 +643,8 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         if (!new_heap) panic("vm: out of memory cloning slice block");
         const uint8_t *sp = (const uint8_t *)ss->ptr;
         uint8_t *dp = (uint8_t *)new_heap;
-        bool deep = slot_needs_visit(et, slice_type_elem_ownership(type));
+        bool deep = slot_needs_visit(et, slice_type_elem_ownership(type)) ||
+                    type_has_func_slots(et);
         for (uint64_t i = 0; i < ss->len; i++, sp += et->size, dp += et->size) {
             if (!deep) {
                 memcpy(dp, sp, et->size);
@@ -664,7 +665,10 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         const struct_type_t *st = (const struct_type_t *)type;
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
-            if (!f->type || !slot_needs_visit(f->type, type_ownership_of(f->type))) continue;
+            if (!f->type ||
+                (!slot_needs_visit(f->type, type_ownership_of(f->type)) &&
+                 !type_has_func_slots(f->type)))
+                continue;
             void *sub = ptr_clone_block(vm, f->type,
                                         (const uint8_t *)src + f->offset);
             memcpy((uint8_t *)dst + f->offset, sub, f->type->size);
@@ -677,7 +681,10 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         const tuple_type_t *tt = (const tuple_type_t *)type;
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
-            if (!e->type || !slot_needs_visit(e->type, type_ownership_of(e->type))) continue;
+            if (!e->type ||
+                (!slot_needs_visit(e->type, type_ownership_of(e->type)) &&
+                 !type_has_func_slots(e->type)))
+                continue;
             void *sub = ptr_clone_block(vm, e->type,
                                         (const uint8_t *)src + e->offset);
             memcpy((uint8_t *)dst + e->offset, sub, e->type->size);
@@ -694,7 +701,10 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         if (tag >= ut->member_count) break;   /* 非法 tag：保持 memcpy 结果 */
         const union_member_t *m = &ut->members[tag];
         const type_t *pt = m->payload_type;
-        if (!pt || !slot_needs_visit(pt, type_ownership_of(pt))) break;
+        if (!pt ||
+            (!slot_needs_visit(pt, type_ownership_of(pt)) &&
+             !type_has_func_slots(pt)))
+            break;
         size_t poff = union_type_payload_offset(type);
         void *sub = ptr_clone_block(vm, pt, (const uint8_t *)src + poff);
         memcpy((uint8_t *)dst + poff, sub, pt->size);
@@ -706,7 +716,8 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
         if (!option_ok(src)) break;
         const type_t *inner = type_option_inner(type);
         if (!inner ||
-            !slot_needs_visit(inner, type_option_inner_ownership(type)))
+            (!slot_needs_visit(inner, type_option_inner_ownership(type)) &&
+             !type_has_func_slots(inner)))
             break;
         size_t voff = option_value_offset(type);
         void *sub = ptr_clone_block(vm, inner, (const uint8_t *)src + voff);
@@ -729,7 +740,8 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
     case TYPE_KIND_ARRAY: {
         const array_type_t *at = (const array_type_t *)type;
         const type_t *et = at->elem_type;
-        if (!et || !slot_needs_visit(et, type_ownership_of(et))) {
+        if (!et || (!slot_needs_visit(et, type_ownership_of(et)) &&
+                    !type_has_func_slots(et))) {
             memcpy(dst, src, type->size);
             break;
         }

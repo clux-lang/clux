@@ -362,6 +362,89 @@ bool type_has_own_slots(const type_t *t) {
     }
 }
 
+/* 聚合内部是否含**带捕获的闭包槽位**（值拷贝必须深拷贝这些槽位的 env）。
+   只看按值嵌套的槽位；指针/切片元素算（切片元素按值存储在缓冲区里）。
+   cunion 不参与（与 type_has_own_slots 同规则）。 */
+bool type_has_closure_slots(const type_t *t) {
+    t = type_strip_ownership(t);
+    if (!t) return false;
+    switch (t->kind) {
+    case TYPE_KIND_FUNC:
+        return func_type_capture_count(t) > 0;
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        for (size_t i = 0; i < st->field_count; i++)
+            if (type_has_closure_slots(st->fields[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        for (size_t i = 0; i < tt->elem_count; i++)
+            if (type_has_closure_slots(tt->elems[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_UNION: {
+        const union_type_t *ut = (const union_type_t *)t;
+        for (size_t i = 0; i < ut->member_count; i++)
+            if (type_has_closure_slots(ut->members[i].payload_type)) return true;
+        return false;
+    }
+    case TYPE_KIND_OPTION:
+        return type_has_closure_slots(type_option_inner(t));
+    case TYPE_KIND_ARRAY:
+        return type_has_closure_slots(array_type_elem(t));
+    case TYPE_KIND_SLICE:
+        return type_has_closure_slots(slice_type_elem(t));
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE:
+        return type_has_closure_slots(type_qualifier_sub(t));
+    default:
+        return false;
+    }
+}
+
+/* 聚合内部是否含 **FUNC 槽位**（按值嵌套递归；不论有没有捕获）。
+   运行期闭包值/字段的类型身份可能已被折叠成普通签名类型（捕获信息只挂在
+   func_t->capture_type 上），因此 ptr_clone_block 需要按"含 FUNC 槽位"
+   进入聚合再逐个槽位看运行期实例。 */
+bool type_has_func_slots(const type_t *t) {
+    t = type_strip_ownership(t);
+    if (!t) return false;
+    switch (t->kind) {
+    case TYPE_KIND_FUNC:
+        return true;
+    case TYPE_KIND_STRUCT: {
+        const struct_type_t *st = (const struct_type_t *)t;
+        for (size_t i = 0; i < st->field_count; i++)
+            if (type_has_func_slots(st->fields[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_TUPLE: {
+        const tuple_type_t *tt = (const tuple_type_t *)t;
+        for (size_t i = 0; i < tt->elem_count; i++)
+            if (type_has_func_slots(tt->elems[i].type)) return true;
+        return false;
+    }
+    case TYPE_KIND_UNION: {
+        const union_type_t *ut = (const union_type_t *)t;
+        for (size_t i = 0; i < ut->member_count; i++)
+            if (type_has_func_slots(ut->members[i].payload_type)) return true;
+        return false;
+    }
+    case TYPE_KIND_OPTION:
+        return type_has_func_slots(type_option_inner(t));
+    case TYPE_KIND_ARRAY:
+        return type_has_func_slots(array_type_elem(t));
+    case TYPE_KIND_SLICE:
+        return type_has_func_slots(slice_type_elem(t));
+    case TYPE_KIND_CONST:
+    case TYPE_KIND_VOLATILE:
+        return type_has_func_slots(type_qualifier_sub(t));
+    default:
+        return false;
+    }
+}
+
 bool type_contains_ptr_or_slice(const type_t *t) {
     t = type_strip_ownership(t);
     if (!t) return false;

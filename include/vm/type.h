@@ -617,6 +617,15 @@ bool type_contains_ptr_or_slice(const type_t *t);
  */
 bool type_has_own_slots(const type_t *t);
 
+/** 聚合内部是否含**带捕获的闭包槽位**（按值嵌套递归；FUNC 自身 = 有捕获）。
+ *  闭包值拷贝必须深拷贝这些槽位的 env（值语义），即使槽位所有权是 NONE。 */
+bool type_has_closure_slots(const type_t *t);
+
+/** 聚合内部是否含 **FUNC 槽位**（按值嵌套递归；不论有无捕获）。运行期
+ *  闭包字段的类型身份可能已折叠成签名类型，ptr_clone_block 用本判定进入
+ *  聚合、再按运行期 func_t->capture_type 决定是否深拷贝 env。 */
+bool type_has_func_slots(const type_t *t);
+
 /** 判定类型是否**含 share/weak 槽位**（递归：struct 字段 / tuple 元素 /
  *  union 成员 / array 元素 / slice 元素 / option inner）。
  *  RC 指针是真实类型而不是所有权，所以"普通变量"也可能需要递减计数——
