@@ -165,18 +165,27 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 仍失败的 C 后端能力缺口（按套件归类，需逐项补齐或按新白皮书重设计）：
 
-- `ShareWeak`：`__make_share` 等共享/弱引用内建没有 C 定义。
-- `ErrorHandling`、`CunionMove`：`__make_share`/cunion 直接成员/
-  泛型可选参数实例化在 C 后端缺失。
+- `ShareWeak`：share/weak 的 RC 运行时（`__make_share` 等）没有 C 实现。
+- `ErrorHandling`（3 个）：`try` 出现在任意表达式位置（函数实参/二元表达式）
+  时 C 后端无法把早退控制流抬到语句层；语句位置的 try 已支持。
 - `ClosureValueOwn`（部分）：`own func` 字段（VM 用运行期 env 表达）没有
   C 等价表示。
-- `CloneFn`：option 嵌套 struct 的 clone C 初始化器类型不匹配。
-- `OwnAggregate`：对右值 struct 取地址的 C lowering 错误。
 - `DeferTest`/`StructCompose`/`StructMembers`/`StructRecursive`/`StructUpcast`/
-  `ConstConvert`/`DataBuiltin`/`Usize` 等：依赖 `td_i32` + `ffi_lib_sym` 的
-  VM dlopen 测试夹具，C 可执行链接/加载 DLL 实例不一致；这些用例需按
-  白皮书用 C ABI 夹具重设计。
-- `Driver`：部分用例仍按 VM 运行期诊断文本/行为断言，需迁移到 C 运行器。
+  `ConstConvert`/`DataBuiltin` 等：依赖 `td_i32` + `ffi_lib_sym` 的 VM dlopen
+  测试夹具，C 可执行链接/加载 DLL 实例不一致；这些用例需按白皮书用 C ABI
+  夹具重设计。
+- `Driver`（10 个）：块内具名函数/局部函数值、fill/make 中函数值等 C
+  lowering 缺口；其余 265 个 Driver 用例已通过。
+- `Reflect`、`CfuncToFunc`、`Generic*`、`FlatClone`/`DeepOwn` 等：逐项 C
+  lowering/内建缺口。
+
+已在本轮修复：
+
+- `CunionMove` 9/9（AST_TAKE_SLOT → CIR_EXPR_TAKE_SLOT）。
+- `CloneFn` 9/9（option 字段的 clone 结果不再二次包 some）。
+- `OwnAggregate` 17/17（赋值旧值销毁 + optional 破坏序列取址）。
+- `BasicConstruct`、`Foreach` 全部通过（printf 原型 + `.str{}`）。
+- `ErrorHandling` 13/16（take_opt 降为单次求值 statement expression）。
 
 ### Phase 2 原始计划
 
