@@ -353,20 +353,25 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 - `clux`、`clux_test` 构建通过；`clux run` hello/closure/decorator/
   decorator_param 通过；`clux test <file>` 通过。
-- `CBackend + CBackendDiff`：95 passed（其余为已知环境性 FFI callback/death-test
+- `CBackend + CBackendDiff`：96 passed（其余为已知环境性 FFI callback/death-test
   失败）。
-- 全量逐套件：127 个套件，失败 10 个（见下），其余全绿。
+- 全量逐套件：127 个套件，失败 9 个（见下），其余全绿。
 
 **仍失败的套件（按优先级）**
 
 - `ShareWeak`（9）：C 后端没有 share/weak RC 运行时（`__make_share` 等）。
-- `Driver`（6）、`DriverImport`（8）、`DriverM4`（2）：局部函数值、
-  `cfunc_ptr`、运行期诊断/越界行为等 C lowering 缺口。
+- `CfuncToFunc`（5）：C 侧 `cfunc_ptr` 函数值/回调路径。
+- `Driver`（5）：局部函数值前向引用/自捕获（VM 的 func_t 共享语义）与
+  内建 `len` 作为函数值。
 - `ErrorHandling`（3）：任意表达式位置的 `try`。
 - `UnionMemberMove`（2）：tag union 成员 move 后整体重赋值的槽位清零。
 - `GenericPack`（1）、`GenericConstraint`（1）、`Decorator`（1）：
   泛型值包展开/约束/装饰器实例化的零散缺口。
-- `CBackend`（11）：FFI callback SEH、death-test 环境（非逻辑失败）。
+- `CBackend`（12）：FFI callback SEH、death-test 环境（非逻辑失败）。
+
+已在本轮修复：export-only 模块全局变量不发射、跨模块泛型方法 owner 前缀、
+reexport 冲突诊断、tuple↔array 兼容赋值、slice 运行期边界检查
+（DriverImport 22/22、DriverM4 2/2、Driver 仅剩 5）。
 
 这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
 重设计对应测试）。目标在本轮保持 active。
