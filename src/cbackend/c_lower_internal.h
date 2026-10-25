@@ -306,6 +306,10 @@ lower_method_t *lower_cross_module_method(lower_ctx_t *lc, uint32_t type_id,
 /* 在导入方 `.c` 里声明一个外部函数原型（`extern <ret> f(void *env, ...);`）。 */
 void lower_import_func_extern(lower_ctx_t *lc, const char *cname,
                               const type_t *ft, bool env_first);
+/** 方法实例定义在导入模块时返回其 owner 前缀符号（并生成 extern 声明）；
+ *  同模块/无 owner 返回 NULL。 */
+const char *lower_method_owner_cname(lower_ctx_t *lc, ast_func_def_t *def,
+                                     const type_t *ft);
 /* `cfunc(...)` → C 函数指针 typedef 名（map_type 用；同 intern 类型复用）。 */
 const char *ffi_c_func_pointer_type(lower_ctx_t *lc, const type_t *t, bool *ok);
 /* extern var 的读取（`is_str` 时包装成 clux_str）与赋值目标（raw 左值）。 */

@@ -512,7 +512,7 @@ static struct module_t *driver_resolve_import(void *user, sema_t *sema,
 /* 阶段 1 导出符号表：name → sema_symbol_t*（借用）。跨模块 sema 解析在
    依赖模块尚未 finalize 时使用。`export *` 递归并入依赖模块的表。 */
 static strmap_t *build_sema_exports(vm_t *vm, allocator_t *alloc, sema_t *sema,
-                                    ast_node_t *ast) {
+                                    ast_node_t *ast, diag_buf_t *diag) {
     if (!vm || !alloc || !sema || !ast || ast->kind != AST_PROGRAM) return NULL;
     strmap_t *map = strmap_new(alloc, /*owns_value=*/false);
     if (!map) return NULL;
@@ -545,9 +545,17 @@ static strmap_t *build_sema_exports(vm_t *vm, allocator_t *alloc, sema_t *sema,
         for (size_t i = 0; i < kn; i++) {
             const char *key = (const char *)vec_get((vec_t *)keys, i);
             if (!key) continue;
-            if (strmap_get(map, key)) continue;
             sema_symbol_t *sym =
                 (sema_symbol_t *)strmap_get(dep->sema_exports, key);
+            sema_symbol_t *old = (sema_symbol_t *)strmap_get(map, key);
+            if (old && old != sym) {
+                if (diag)
+                    diag_error(diag, (location_t){0},
+                               "export conflict: symbol '%s' already exported",
+                               key);
+                continue;
+            }
+            if (old == sym) continue;
             if (sym) strmap_insert(map, alloc, key, sym);
         }
     }
@@ -787,7 +795,7 @@ static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
     }
 
     /* 阶段 1 导出符号：供尚未 finalize 的依赖模块被跨模块 sema 解析。 */
-    mod->sema_exports = build_sema_exports(vm, alloc, sema, ast);
+    mod->sema_exports = build_sema_exports(vm, alloc, sema, ast, diag);
     mod->sema = sema;
     mod->sema_global = scope_tree;
     mod->prepared = true;

@@ -443,7 +443,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     if (unit->types)
         cw_emit_types_with_prefix(sb, unit->types, "struct clux_env_");
 
-    if (fns) {
+    if (fns || globals) {
         cw_put(sb, "/* ---- function declarations ---- */\n");
         for (cir_function_t *f = fns; f; f = f->next)
             cw_write_function_decl(sb, f);

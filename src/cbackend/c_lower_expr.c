@@ -459,6 +459,14 @@ static cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
     const type_t *vs = type_strip_quals(vt);
     if (tt == vs) return v;
     type_kind_t kt = type_kind_of(tt), kv = type_kind_of(vs);
+    /* 布局兼容的 tuple ↔ array 赋值（sema 允许）：C 里是两个 struct，
+       按位重解释。 */
+    if ((kt == TYPE_KIND_ARRAY && kv == TYPE_KIND_TUPLE) ||
+        (kt == TYPE_KIND_TUPLE && kv == TYPE_KIND_ARRAY)) {
+        cir_type_t *ct = map_type(lc, tt);
+        cir_type_t *st = map_type(lc, vs);
+        return ct && st ? cir_expr_bitcast(lc->arena, ct, st, v) : v;
+    }
     if (kt != kv) return v;
     /* 嵌入继承：派生类型指针隐式上转为基类型指针（C 里显式 cast）。 */
     if (kt == TYPE_KIND_PTR) {
@@ -681,10 +689,17 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             return NULL;
         }
         {
-            cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
-            cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
             const type_t *ftsig =
                 m->def ? func_type_of_def(lc, m->def) : owner_t;
+            const char *mcname = m->cname;
+            if (m->def) {
+                const char *ownc =
+                    lower_method_owner_cname(lc, m->def, ftsig);
+                if (lc->failed) return NULL;
+                if (ownc) mcname = ownc;
+            }
+            cir_expr_t *out = cir_expr_call(lc->arena, mcname, NULL);
+            cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
             size_t ai = 0;
             for (ast_node_t *a = call->args; a; a = a->next, ai++) {
                 const type_t *pt =
@@ -759,7 +774,14 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
                 if (sct) recv = cir_expr_cast(lc->arena, sct, recv);
             }
         }
-        cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
+        const char *mcname = m->cname;
+        if (m->def) {
+            const type_t *mft = func_type_of_def(lc, m->def);
+            const char *ownc = lower_method_owner_cname(lc, m->def, mft);
+            if (lc->failed) return NULL;
+            if (ownc) mcname = ownc;
+        }
+        cir_expr_t *out = cir_expr_call(lc->arena, mcname, NULL);
         cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
         cir_expr_append_arg(out, recv);
         for (ast_node_t *a = call->args; a; a = a->next) {

@@ -304,6 +304,27 @@ sema_func_t *lower_find_func_module(lower_ctx_t *lc, uint32_t fid,
     return NULL;
 }
 
+/* 方法实例若实际定义在导入模块（sema 把实例方法挂在 owner 模块），调用点
+   必须用 owner 的符号前缀，而不是当前单元前缀。 */
+const char *lower_method_owner_cname(lower_ctx_t *lc, ast_func_def_t *def,
+                                     const type_t *ft) {
+    if (!lc || !def || !ft) return NULL;
+    module_t *owner = (module_t *)def->owner_module;
+    if (!owner) return NULL;
+    char pb[64];
+    const char *prefix = dep_prefix(lc, owner, pb, sizeof pb);
+    if (!prefix || (lc->unit->sym_prefix &&
+                    strcmp(prefix, lc->unit->sym_prefix) == 0))
+        return NULL;
+    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    if (!cname) {
+        lc->failed = true;
+        return NULL;
+    }
+    lower_import_func_extern(lc, cname, ft, /*env_first=*/true);
+    return lc->failed ? NULL : cname;
+}
+
 /* 跨模块结构体方法调用：方法函数体在定义模块的编译单元里（方法名由 sema
  * 生成为 `__method_<typeId>_<name>`，天然唯一），这里按定义模块的符号生成
  * extern 声明并补一个 `lower_method_t`，调用点沿用普通方法调用 lowering
