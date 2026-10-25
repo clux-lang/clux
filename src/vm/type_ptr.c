@@ -920,11 +920,27 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
 
 static value_t *ptr_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
+    if (!target) return value_make_error(vm, "ptr: cast target is not a type");
+
+    const type_t *src_t = value_type(v);
+    const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
 
     /* 同类型身份拷贝 */
-    if (value_type(v) == target) {
-        const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
+    if (src_t == target) return ptr_make_value(vm, target, pv->ptr);
+
+    /* C 显式转换 `as`：任意指针 → 任意指针（允许改 const/指向类型；
+       与 C 的 `(T*)p` 同语义）。opaque 的 data 就是裸指针，可双向转换。 */
+    if (type_is_ptr(target) && type_is_ptr(src_t))
         return ptr_make_value(vm, target, pv->ptr);
+    if (type_is_ptr(target) && src_t == vm->type_opaque) {
+        void *raw = NULL;
+        memcpy(&raw, value_data(v), sizeof raw);
+        return ptr_make_value(vm, target, raw);
+    }
+    if (target == vm->type_opaque && type_is_ptr(src_t)) {
+        int64_t raw = (int64_t)(intptr_t)pv->ptr;
+        return value_make(vm, target,
+                          value_alloc_data_copy(vm->alloc, target, &raw));
     }
 
     return value_make_error(vm, "ptr: unsupported explicit cast for pointer");

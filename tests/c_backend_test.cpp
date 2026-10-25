@@ -2197,3 +2197,35 @@ TEST(CBackend, RejectsMainWithParameters) {
   std::string err;
   EXPECT_EQ(run_build(src, exe.string(), &err), 1);
 }
+
+/* comptime 折叠出的函数值（匿名字面量 / 局部函数）：函数体 AST 由 sema
+   登记，C 后端按需物化成 static 函数并构造函数对象。 */
+TEST(CBackend, BuildComptimeFunctionValues) {
+  const std::string src = write_temp_file(
+      "comptime func make_inc(): func(i32) -> i32 {\n"
+      "  return func(x: i32): i32 { return x + 1; };\n"
+      "}\n"
+      "comptime func make_twice(): func(i32) -> i32 {\n"
+      "  func t(x: i32): i32 { return x * 2; }\n"
+      "  return t;\n"
+      "}\n"
+      "comptime func double_(a: i32): i32 { return a * 2; }\n"
+      "comptime func quad(a: i32): i32 { return double_(double_(a)); }\n"
+      "func main(): i32 {\n"
+      "  var inc = make_inc();\n"
+      "  if (inc(41) != 42) { return 1; }\n"
+      "  var t = make_twice();\n"
+      "  if (t(21) != 42) { return 2; }\n"
+      "  if (quad(3) != 12) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_comptime_fn_values");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
