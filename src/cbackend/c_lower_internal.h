@@ -105,6 +105,7 @@ typedef struct lower_capture {
     strslice_t name;
     const char *expr;
     const type_t *type;
+    size_t index; /* 闭包 env 位置字段序 */
     struct lower_capture *next;
 } lower_capture_t;
 

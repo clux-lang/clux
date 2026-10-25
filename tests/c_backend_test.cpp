@@ -2269,3 +2269,24 @@ TEST(CBackend, RejectsClosureErasureToPlainFunc) {
   EXPECT_EQ(run_build(src, exe.string(), nullptr), 1);
   EXPECT_FALSE(std::filesystem::exists(exe));
 }
+
+/* 闭包 env 内联 + own 捕获：值里没有 env 堆块，FREE 按字段释放。 */
+TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
+  const std::string src = write_temp_file(
+      "type F = func |p: own *i32| (i32) -> i32;\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{ 5 };\n"
+      "  var g: own F = move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
+      "  if (g(4) != 9) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_closure_inline_env");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}

@@ -1117,7 +1117,28 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             strslice_eq(m->field, STRSLICE_LIT("env")))
             return cir_expr_ident(
                 lc->arena,
-                lc->ctx_env_name ? lc->ctx_env_name : "clux_v___ctx_env");
+                lc->ctx_env_name ? lc->ctx_env_name
+                                 : "(*clux_v___ctx_env)");
+        /* `__ctx.env.<cap>`：闭包 env 用位置字段 clux_f_<声明序>；
+           defer 的捕获块仍用 clux_f_<名字>。 */
+        if (!lc->ctx_env_name && m->object && m->object->kind == AST_MEMBER) {
+            ast_member_t *om = (ast_member_t *)m->object;
+            if (om->object && om->object->kind == AST_IDENT &&
+                strslice_eq(((ast_ident_t *)om->object)->name,
+                            STRSLICE_LIT("__ctx")) &&
+                strslice_eq(om->field, STRSLICE_LIT("env"))) {
+                for (lower_capture_t *c = lc->captures; c; c = c->next) {
+                    if (c->name.len == m->field.len &&
+                        memcmp(c->name.ptr, m->field.ptr, c->name.len) == 0) {
+                        char eb[256];
+                        snprintf(eb, sizeof eb, "(*clux_v___ctx_env).clux_f_%zu",
+                                 c->index);
+                        return cir_expr_ident(lc->arena,
+                                              copy_arena(lc->arena, eb));
+                    }
+                }
+            }
+        }
         cir_expr_t *obj = lower_expr(lc, m->object);
         if (!obj) return NULL;
         const type_t *ot = infer_expr_type(lc, m->object);

@@ -20,9 +20,10 @@ void cw_write_signature_def(string_t *sb, const cir_signature_t *sig) {
         cw_put(sb, sig->params[i] ? sig->params[i]->c_name : "void");
     }
     cw_put(sb, ");\n");
-    cw_put(sb, "    void *env;\n");
-    cw_put(sb, "    void *(*env_clone)(void *);\n");
-    cw_put(sb, "    void (*env_dispose)(void *, void *);\n");
+    if (sig->env_type && sig->env_type->c_name)
+        cw_printf(sb, "    %s env;\n", sig->env_type->c_name);
+    else
+        cw_put(sb, "    void *env;\n");
     cw_put(sb, "};\n\n");
 }
 
@@ -38,7 +39,7 @@ void cw_write_function_decl(string_t *sb, const cir_function_t *fn) {
 
 void cw_write_function_object(string_t *sb, const cir_function_t *fn) {
     if (!fn->object || !fn->sig || !fn->object_used) return;
-    cw_printf(sb, "static const struct %s %s = { %s, NULL, NULL, NULL };\n",
+    cw_printf(sb, "static const struct %s %s = { %s, { 0 } };\n",
               fn->sig->tag, fn->object, fn->name);
 }
 
@@ -196,7 +197,7 @@ void cw_write_function_def(string_t *sb, const cir_function_t *fn) {
     cw_put(sb, ") {\n");
     cw_put(sb, "    (void)env;\n");
     if (fn->closure_env && fn->closure_env->c_name)
-        cw_printf(sb, "    %s clux_v___ctx_env = *(%s *)env;\n",
+        cw_printf(sb, "    %s *clux_v___ctx_env = (%s *)env;\n",
            fn->closure_env->c_name, fn->closure_env->c_name);
     bool needs_cleanup = fn->cleanup != NULL;
     if (needs_cleanup && fn->sig->ret &&

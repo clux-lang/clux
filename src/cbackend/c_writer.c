@@ -231,10 +231,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "    return p;\n");
         cw_put(sb, "}\n");
         cw_put(sb, "#define clux_free free\n");
-        cw_put(sb, "#define clux_func_release(f) do { "
-                   "if ((f).env) { if ((f).env_dispose) "
-                   "(f).env_dispose(NULL, (f).env); free((f).env); } } "
-                   "while (0)\n");
+        cw_put(sb, "#define clux_func_release(f) ((void)(f))\n");
     }
     if (unit->uses_opt_unwrap) {
         cw_put(sb, "static void clux_panic_none(void) { abort(); }\n");

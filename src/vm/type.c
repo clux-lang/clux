@@ -340,6 +340,17 @@ bool type_has_own_slots(const type_t *t) {
             if (type_ownership_of(at->elem_type) == OWN_OWN) return true;
             return type_has_own_slots(at->elem_type);
         }
+        case TYPE_KIND_FUNC: {
+            const func_type_t *ft = (const func_type_t *)t;
+            for (size_t i = 0; i < ft->capture_count; i++) {
+                const type_t *ct = ft->capture_types[i];
+                if (!ct) continue;
+                ownership_t oq = type_ownership_of(ct);
+                if (oq == OWN_OWN || oq == OWN_FATAL) return true;
+                if (type_has_own_slots(ct)) return true;
+            }
+            return false;
+        }
         case TYPE_KIND_SLICE: {
             const slice_type_t *st = (const slice_type_t *)t;
             if (type_ownership_of(st->elem_type) == OWN_OWN) return true;

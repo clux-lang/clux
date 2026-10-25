@@ -182,6 +182,7 @@ typedef struct cir_param {
 typedef struct cir_signature {
     const char  *tag;       /* struct clux_fn_i32_void */
     cir_type_t  *ret;
+    cir_type_t  *env_type; /* 闭包 env 结构体（内联字段）；普通函数用空 env */
     size_t       param_count;
     cir_type_t **params;
     bool         in_header; /* 导出类型/签名引用 → 定义进模块头文件 */

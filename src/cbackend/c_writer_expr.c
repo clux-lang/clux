@@ -293,7 +293,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_FUNC_CALL:
         cw_put(sb, "(");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").fn((");
+        cw_put(sb, ").fn((void *)&(");
         cw_write_expr(sb, e->lhs);
         cw_put(sb, ").env");
         for (const cir_expr_t *a = e->args; a; a = a->next) {
@@ -309,35 +309,14 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, e->text ? e->text : "<null>");
         cw_put(sb, ", .env = ");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ", .env_clone = ");
-        cw_put(sb, e->text2 ? e->text2 : "NULL");
-        cw_put(sb, ", .env_dispose = ");
-        if (e->op) {
-            cw_put(sb, "(void (*)(void *, void *))");
-            cw_put(sb, e->op);
-        } else {
-            cw_put(sb, "NULL");
-        }
         cw_put(sb, " }");
         break;
     case CIR_EXPR_FUNC_CLONE:
-        cw_put(sb, "((");
+        /* 闭包值内联 env 后按类型静态 clone；暂以浅拷贝占位（own 捕获的
+           深拷贝在 env_clone 生成后接入）。 */
+        cw_put(sb, "(");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env ? (");
-        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-        cw_put(sb, "){ .fn = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").fn, .env = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env_clone((");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env), .env_clone = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env_clone, .env_dispose = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env_dispose } : (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "))");
+        cw_put(sb, ")");
         break;
     case CIR_EXPR_CLOSURE_RELEASE:
         cw_put(sb, "clux_func_release(");

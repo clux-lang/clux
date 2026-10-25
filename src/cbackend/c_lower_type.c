@@ -23,16 +23,56 @@ static bool same_sig(const cir_signature_t *s, cir_type_t *ret, size_t pc,
     return true;
 }
 
-cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret,
-                                      size_t pc, cir_type_t **pt) {
+cir_signature_t *signature_for_env(lower_ctx_t *lc, cir_type_t *ret,
+                                       size_t pc, cir_type_t **pt,
+                                       cir_type_t *env_type) {
     for (cir_signature_t *s = lc->unit->signatures; s; s = s->next)
-        if (same_sig(s, ret, pc, pt)) return s;
+        if (same_sig(s, ret, pc, pt) && s->env_type == env_type) return s;
     char tag[64];
     snprintf(tag, sizeof tag, "%ssig_%u", type_prefix(lc), lc->sig_seq++);
     cir_signature_t *s = cir_signature_new(
         lc->arena, copy_arena(lc->arena, tag), ret, pc, pt);
-    if (s) cir_unit_add_signature(lc->unit, s);
+    if (s) {
+        s->env_type = env_type;
+        cir_unit_add_signature(lc->unit, s);
+    }
     return s;
+}
+
+static const char *module_empty_env_name(lower_ctx_t *lc);
+
+static cir_type_t *empty_env_type(lower_ctx_t *lc) {
+    static cir_type_t *cached = NULL;
+    static lower_ctx_t *cached_lc = NULL;
+    if (cached && cached_lc == lc) return cached;
+    cir_type_t *et = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
+                                  module_empty_env_name(lc));
+    if (!et) return NULL;
+    cir_field_t *f = cir_field_new(
+        lc->arena, "clux_unused",
+        cir_type_new(lc->arena, CIR_TYPE_I32, "char"));
+    if (!f) return NULL;
+    cir_type_add_field(et, f);
+    cir_unit_add_type(lc->unit, et);
+    cached = et;
+    cached_lc = lc;
+    return et;
+}
+
+cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret, size_t pc,
+                               cir_type_t **pt) {
+    return signature_for_env(lc, ret, pc, pt, empty_env_type(lc));
+}
+
+static const char *module_empty_env_name(lower_ctx_t *lc) {
+    static const char *cached = NULL;
+    static lower_ctx_t *cached_lc = NULL;
+    if (cached && cached_lc == lc) return cached;
+    char b[96];
+    snprintf(b, sizeof b, "struct %sempty_env", type_prefix(lc));
+    cached = copy_arena(lc->arena, b);
+    cached_lc = lc;
+    return cached;
 }
 
 cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
@@ -251,7 +291,33 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         }
         cir_type_t *ret = map_type(lc, func_type_return(t));
         if (!ret) return NULL;
-        cir_signature_t *sig = signature_for(lc, ret, pc, pt);
+        /* env 内联：闭包类型按捕获槽位建 env struct（位置字段 clux_f_0..N），
+           普通函数共用一个空 env struct（统一结构形状）。 */
+        cir_type_t *env_type = NULL;
+        size_t nc = func_type_capture_count(t);
+        if (nc > 0) {
+            char en[128];
+            snprintf(en, sizeof en, "struct %senv_%u", type_prefix(lc), t->id);
+            env_type = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
+                                    copy_arena(lc->arena, en));
+            if (!env_type) return NULL;
+            cir_unit_add_type(lc->unit, env_type);
+            for (size_t ci = 0; ci < nc; ci++) {
+                const type_t *capt = func_type_capture_type(t, ci);
+                cir_type_t *cct = capt ? map_type(lc, capt) : NULL;
+                if (!cct) return NULL;
+                char fn[64];
+                snprintf(fn, sizeof fn, "clux_f_%zu", ci);
+                cir_field_t *f = cir_field_new(lc->arena,
+                                               copy_arena(lc->arena, fn), cct);
+                if (!f) return NULL;
+                cir_type_add_field(env_type, f);
+            }
+        } else {
+            env_type = empty_env_type(lc);
+            if (!env_type) return NULL;
+        }
+        cir_signature_t *sig = signature_for_env(lc, ret, pc, pt, env_type);
         if (!sig) return NULL;
         char fname[256];
         snprintf(fname, sizeof fname, "struct %s", sig->tag);

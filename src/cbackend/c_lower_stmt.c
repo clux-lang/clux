@@ -1,4 +1,5 @@
 #include "cbackend/c_lower_internal.h"
+#include "vm/type_func.h"
 
 #include "parser/ast_type_ref.h"
 
@@ -1077,11 +1078,40 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 *ok = false;
                 return head;
             }
-            if (ot && type_kind_of(ot) == TYPE_KIND_SLICE)
+            if (ot && type_kind_of(ot) == TYPE_KIND_SLICE) {
                 ex = cir_expr_slice_data(lc->arena, ex);
-            else if ((ot && type_kind_of(ot) == TYPE_KIND_FUNC) ||
-                     (ex && ex->kind == CIR_EXPR_FUNC_OBJ))
-                ex = cir_expr_closure_release(lc->arena, ex);
+            } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC &&
+                       func_type_capture_count(type_strip_quals(ot)) > 0) {
+                /* 闭包值 env 内联：对含 own/fatal 的捕获槽位按字段释放
+                   （env_clone/env_dispose 是静态类型辅助，不存于值里）。 */
+                const type_t *ft = type_strip_quals(ot);
+                size_t ncap = func_type_capture_count(ft);
+                for (size_t ci = 0; ci < ncap; ci++) {
+                    const type_t *capt = func_type_capture_type(ft, ci);
+                    if (!capt) continue;
+                    ownership_t oq = type_ownership_of(capt);
+                    if (oq != OWN_OWN && oq != OWN_FATAL) continue;
+                    cir_expr_t *envm =
+                        cir_expr_member(lc->arena, ex, "env");
+                    char fb[64];
+                    snprintf(fb, sizeof fb, "clux_f_%zu", ci);
+                    cir_expr_t *field =
+                        envm ? cir_expr_member(lc->arena, envm,
+                                               copy_arena(lc->arena, fb))
+                             : NULL;
+                    if (!field) return head;
+                    cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+                    if (!st) return head;
+                    st->expr = field;
+                    if (tail) tail->next = st;
+                    else head = st;
+                    tail = st;
+                }
+                continue;
+            } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC) {
+                /* 普通函数值无 env（空 env 结构），FREE 为 no-op。 */
+                continue;
+            }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
             st->expr = ex;
