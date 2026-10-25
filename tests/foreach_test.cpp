@@ -130,20 +130,6 @@ void expect_output(const std::string &src, const std::string &expected,
                            << err;
 }
 
-/** 负例：编译期拒绝（CLI 退出码 1），stderr 含 needle。 */
-[[maybe_unused]] void expect_reject(const std::string &src, const char *needle,
-                   const std::string &tag = "foreach_bad") {
-  const std::string path = write_temp_file(src, tag);
-  ASSERT_FALSE(path.empty());
-  std::string out, err;
-  const int rc = run_cli(path, &out, &err);
-  EXPECT_EQ(rc, 1) << src << "\n--- stderr ---\n" << err;
-  if (needle)
-    EXPECT_NE(err.find(needle), std::string::npos)
-        << "expected diagnostic containing '" << needle << "'\n--- stderr ---\n"
-        << err << "\n--- src ---\n" << src;
-}
-
 } // namespace
 
 /* ================================================================ */

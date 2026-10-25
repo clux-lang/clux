@@ -258,9 +258,7 @@ TEST_F(PackageTest, FindNoMod) {
 
     char *found_dir = nullptr;
     package_desc_t desc;
-    pkg_result_t r = package_find(alloc, arena, deep.string().c_str(),
-                                  &found_dir, &desc);
-    (void)r;
+    package_find(alloc, arena, deep.string().c_str(), &found_dir, &desc);
     /* 可能会在上级目录找到（如果上级有 clux.mod），但通常不会 */
     /* 只验证不崩溃 */
     if (found_dir) allocator_free(alloc, (void **)&found_dir);

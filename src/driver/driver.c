@@ -178,29 +178,6 @@ static int driver_lex_into(allocator_t *alloc,
 
 /* ---- Stage ② + ③ + ④: lex → parse → sema ---- */
 
-/* main 的返回值 → 进程退出码（`clux run` 与 C 后端可执行文件对齐）。
- * 只有整数返回类型参与；void / 非整数返回 0。 */
-static int __attribute__((unused)) main_exit_code(vm_t *vm, value_t *v) {
-    if (!v || value_is_error(vm, v)) return 0;
-    const type_t *t = value_type(v);
-    if (!t) return 0;
-    t = type_strip_quals(t);
-    if (type_kind_of(t) != TYPE_KIND_INT) return 0;
-    if (!value_data(v) || t->size == 0 || t->size > 8) return 0;
-    uint64_t raw = 0;
-    memcpy(&raw, value_data(v), t->size);
-    bool is_signed = t->name.len > 0 && t->name.ptr && t->name.ptr[0] == 'i';
-    if (is_signed) {
-        switch (t->size) {
-        case 1: return (int)(int8_t)raw;
-        case 2: return (int)(int16_t)raw;
-        case 4: return (int)(int32_t)raw;
-        default: return (int)(int64_t)raw;
-        }
-    }
-    return (int)raw;
-}
-
 /* 运行一个已构建的可执行文件，返回其进程退出码（spawn 失败返回 -1）。 */
 static int driver_spawn_wait(const char *exe) {
 #ifdef _WIN32
@@ -294,85 +271,6 @@ typedef struct {
     diag_buf_t    *diag;
     module_t      *module;   /* 借用：已注册进 vm->modules（vm 拥有） */
 } driver_compiled_t;
-
-static void driver_compiled_dispose(driver_compiled_t *r) {
-    if (!r) return;
-    if (r->diag)       diag_buf_destroy(&r->diag);
-    if (r->vm)         vm_destroy(&r->vm);
-    if (r->arena)      arena_destroy(r->alloc, &r->arena);
-    if (r->alloc)      delete_allocator(&r->alloc);
-    memset(r, 0, sizeof *r);
-}
-
-/* 复用 run 管线 Stage ①-⑤（加载→词法→语法→语义→编译），不执行。
- * 成功返回 0 并填满 *out（bc 与所有句柄有效）；失败返回非 0 且 *out 全 NULL
- * （诊断已打印）。调用方负责在反汇编后 driver_compiled_dispose。 */
-static int __attribute__((unused))
-driver_compile_to_bytecode(const char *path, driver_compiled_t *out) {
-    memset(out, 0, sizeof *out);
-
-    allocator_t *alloc = create_allocator(malloc, free);
-    if (!alloc) {
-        fprintf(stderr, "build: out of memory\n");
-        return 1;
-    }
-    out->alloc = alloc;
-
-    arena_t *arena = arena_new_default(alloc);
-    if (!arena) {
-        fprintf(stderr, "build: out of memory\n");
-        driver_compiled_dispose(out);
-        return 1;
-    }
-    out->arena = arena;
-
-    diag_buf_t *diag = diag_buf_new(alloc);
-    if (!diag) {
-        driver_compiled_dispose(out);
-        return 1;
-    }
-    out->diag = diag;
-
-    vm_t *vm = vm_new(alloc);
-    if (!vm) {
-        driver_compiled_dispose(out);
-        return 1;
-    }
-    out->vm = vm;
-
-    vec_t *path_stack = vec_new(alloc, /*owns_element=*/false);
-    if (!path_stack) {
-        driver_compiled_dispose(out);
-        return 1;
-    }
-
-    /* 入口路径词法规范化（与 run 同一套规则，见 module/module_path.h）：
-       使 vm->modules 的 key 稳定一致、import 相对解析基准可靠。 */
-    char *entry_path = module_path_normalize(alloc, path);
-    if (!entry_path) {
-        fprintf(stderr, "build: out of memory\n");
-        driver_compiled_dispose(out);
-        return 1;
-    }
-
-    /* **与 run 共用同一核心**：lex→parse→sema→compile→运行时注册段执行 →
-       module_t（注册进 vm->modules）。因此模块导入、循环依赖检测、路径
-       规范化、模块缓存对 build -asm/-bin 同样生效。 */
-    module_t *mod = compile_module(vm, alloc, diag, arena, entry_path, path_stack);
-    /* 入口路径与路径栈由调用方拥有/释放（与 driver_run_file 同一约定：
-       module 已复制 canonical 作为 vm->modules 的 key）。本项目分配器在
-       delete_allocator 时把存活分配报为泄漏，故必须显式释放。 */
-    allocator_free(alloc, (void **)&entry_path);
-    vec_free(alloc, &path_stack);
-
-    if (!mod) {
-        diag_print_all(diag); /* compile_module 不打印；最外层入口统一打印 */
-        driver_compiled_dispose(out);
-        return 1;
-    }
-    out->module = mod;
-    return 0;
-}
 
 /* ================================================================
  * M5 模块系统：compile_module 统一入口

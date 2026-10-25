@@ -21,23 +21,11 @@ static int cmp_int(const void *a, const void *b) {
   return (ia > ib) - (ia < ib);
 }
 
-[[maybe_unused]] static int cmp_cstr(const void *a, const void *b) {
-  return strcmp((const char *)a, (const char *)b);
-}
-
 /* ---- int_box class ---- */
 
 typedef struct {
   int value;
 } int_box_t;
-
-[[maybe_unused]] static class_t int_box_class = {
-    .name = "int_box",
-    .size = sizeof(int_box_t),
-    .move_fn = default_move,
-    .clone_fn = default_clone,
-    .dispose_fn = NULL,
-};
 
 /* ---- str_box class ---- */
 
