@@ -2291,6 +2291,33 @@ TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* 嵌套闭包捕获：外层闭包 own 捕获一个 own 闭包；clone(outer) 必须递归
+   深拷贝内层 env（生成两层 `<sig>__cl`），两者独立调用、各释放一次。 */
+TEST(CBackend, BuildNestedClosureCaptureClone) {
+  const std::string src = write_temp_file(
+      "type Inner = func |p: own *i32| () -> i32;\n"
+      "type Outer = func |f: own Inner| () -> i32;\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{ 7 };\n"
+      "  var inner: own Inner = move(func |(p = move(p))| (): i32 { return p.*; });\n"
+      "  var outer: own Outer = move(func |(f: own Inner = move(inner))| (): i32 {\n"
+      "      return f(); });\n"
+      "  var copy: own Outer = clone(outer);\n"
+      "  if (outer() != 7) { return 1; }\n"
+      "  if (copy() != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_nested_closure_clone");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
 /* 闭包放进含 own 的聚合字段并被深拷贝：clone(Holder) 触发闭包 env 的
    静态深拷贝（`<sig>__cl`），源与副本的 own 捕获必须各自独立、各释放一次。 */
 TEST(CBackend, BuildClosureInStructClone) {

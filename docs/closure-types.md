@@ -1,7 +1,8 @@
 # 闭包类型设计（closure types）
 
 状态：设计定稿（实现分阶段进行）。C 后端已完成"捕获内联 + 静态 clone/dispose"；
-VM 仍用"每实例堆 env + 生成的 env vtable"（值语义/释放已正确，尚未内联）。
+VM 已把 env 内联进函数实例分配（单次分配），但值 data 仍是函数对象指针、
+实例随 VM 统一回收（未按值回收）。
 
 ## 1. 核心决策
 
@@ -238,6 +239,32 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - 推断型 `var` 的 sema 类型写回 `resolved_type`（`shadow_var_def`），后端不再
   用 `func_type_of_def` 重新推断（否则闭包字面量与变量类型是两个 sig struct）。
 
+### 阶段 C（VM，部分）：env 内联进函数实例（本次）
+
+- `func_instantiate_raw`：闭包实例改为**一次分配** `sizeof(bcode_function_t) +
+  env_size`，env 指向结构体尾部对齐后的内联块；函数对象新增 `env_inline` 标记。
+- 所有 env 释放点（`exec_memory.c` 的 FREE、`type_ptr.c` 的递归销毁、
+  `func_destroy`）在 `env_inline` 时只清槽位、不单独 `allocator_free(env)`
+  （随实例分配块一起回收）。
+- `func_clone`（vtable）仍是**指针共享**：`move(f)` 在运行期就是字节拷贝，
+  无条件深拷贝会让被移走的源实例无人释放（实测 own 捕获 move 进聚合后泄漏
+  4 字节）。显式 `clone(f)` 由 sema 折叠成 `__deep_clone` → `ptr_clone_block`
+  的 FUNC 分支（新建实例 + env vtable 深克隆）。
+- 结果：VM 闭包不再为 env 单独 malloc；`ClosureValueOwn` 全组（含 own 捕获
+  move/clone/嵌套/容器）无泄漏。实例本身仍挂在 `vm->functions`，随 VM 销毁
+  统一回收（未做按值回收）。
+
+### 阶段 C（C 侧补充）：嵌套闭包捕获
+
+- `capture_clone_kind` 新增 FUNC 分支（own 闭包捕获 → kind 3）：闭包的静态
+  clone 辅助函数会递归调用**嵌套闭包类型**的 `<sig>__cl`，深拷贝内层 env。
+- `lower_stmt` 的 FREE 改为递归 `emit_closure_free`：嵌套闭包捕获下钻到内层
+  捕获槽，不再对闭包结构体值调用 `clux_free`。
+- raw helper 改为**追加**（`cir_unit_add_raw_append`）：被调用的嵌套 clone
+  helper 先于调用者发射（原来的 prepend 顺序会先引用后定义）。
+- 新 gtest：`CBackend.BuildNestedClosureCaptureClone`（own 闭包捕获 own 闭包
+  + clone，两层 env 独立释放）。
+
 ## 当前状态 / 已知红
 
 - 设计上 **不擦除**：`func(...)`（无捕获）与闭包类型是不同类型，赋值/传参必须
@@ -253,11 +280,12 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 
 ## 未完成
 
-1. **阶段 C（VM 内联值表示）**：VM 的捕获 env 仍是 `func_t->env` 指向的堆块
-   （每实例一次分配，`vm->functions` 统一回收）；值拷贝闭包时共享 `func_t`
-   指针。当前 VM 的闭包用例（含 own 捕获 move/clone/泛型调用）验证**无泄漏**，
-   但"env 内联进值 + 按类型静态 clone/dispose"尚未落地。改动面：
-   `include/vm/function.h`、`src/vm/type_func.c`、`exec_stack.c`
+1. **阶段 C（VM 值表示）**：env 已内联进**函数实例分配**，但值 data 仍是
+   `func_t*`（不是设计稿的 `{ fnptr; caps... }`），实例统一挂在 `vm->functions`
+   直到 VM 销毁。要做真正的按值生命周期，需要：值 data 内联捕获块、或给实例
+   加引用计数/`owns_self` 并在 `value_dispose`/FREE 回收；后者牵动
+   `func_assign`/`value_clone`（move 是运行期字节拷贝，不能无条件深拷贝）。
+   改动面：`include/vm/function.h`、`src/vm/type_func.c`、`exec_stack.c`
    （MAKE_FUNCTION/SET_CLOSURE）、`exec_memory.c`（FREE）、`type_ptr.c`
    （clone_block FUNC 分支）。
 2. **comptime 折叠结果的类型仍是签名类型**：`sema_ct_encode` 的 FUNC 分支只
@@ -270,8 +298,9 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
    的类型身份与之一致——但后者会牵动 `func_instantiate`/`value_assign`/
    `implicit_cast`（本次试过：直接改运行期值类型会让 `ClosureValueOwn`
    整组失败，已回退），需要成组改造。
-3. **嵌套闭包捕获的 C 静态 clone**：`capture_clone_kind` 对捕获槽是闭包
-   （FUNC）时暂返回"不展开"（浅拷贝）；需要按嵌套闭包类型递归生成/组合 helper。
+3. **闭包捕获聚合的 FREE**：C 的 `emit_closure_free` 对 FUNC（递归）与
+   own 指针/切片已覆盖；捕获槽是"含 own 字段的 struct/tuple/array"且槽位
+   所有权为 NONE 时仍未按类型生成销毁（沿用旧行为，只处理 own/fatal 槽位）。
 4. **清理旧表示**：C 后端已不把 clone/dispose 指针放进值（`clux_func_release`
    为 no-op，`env_*_fid` 仅供 VM）；`capture_clone_kind` 与 sema
    `clone_needs_deep` 的规则重复，后续可共享；删除过渡期死代码。
@@ -305,8 +334,12 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   `src/cbackend/c_lower_infer.c`（函数字面量推断为闭包类型）、
   `src/cbackend/c_lower_util.c`（`decl_value_type`：变量落 C 类型修正）。
 - 测试：`tests/c_backend_test.cpp` 末尾闭包用例（含
-  `BuildClosureInStructClone`）、`tests/closure_value_ownership_test.cpp`
-  （`OwnCaptureCloneAndGenericCall`）。
+  `BuildClosureInStructClone`、`BuildNestedClosureCaptureClone`）、
+  `tests/closure_value_ownership_test.cpp`（`OwnCaptureCloneAndGenericCall`）。
+- VM 内联 env：`include/vm/function.h`（`env_inline`）、
+  `src/vm/bcode_function.c`（`func_instantiate_raw` 单次分配）、
+  `src/vm/exec_memory.c` / `src/vm/type_ptr.c` / `src/vm/function.c`
+  （释放点跳过内联块）。
 
 ## 构建/运行备忘
 

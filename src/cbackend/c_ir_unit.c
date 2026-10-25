@@ -88,6 +88,21 @@ void cir_unit_add_raw(cir_unit_t *u, const char *code) {
     u->raw_helpers = r;
 }
 
+void cir_unit_add_raw_append(cir_unit_t *u, const char *code) {
+    if (!u || !code || !u->arena) return;
+    cir_raw_t *r = (cir_raw_t *)arena_calloc(u->arena, 1, sizeof(*r),
+                                             ALIGNOF(max_align_t));
+    if (!r) return;
+    r->code = code;
+    if (!u->raw_helpers) {
+        u->raw_helpers = r;
+        return;
+    }
+    cir_raw_t *t = u->raw_helpers;
+    while (t->next) t = t->next;
+    t->next = r;
+}
+
 void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code) {
     if (!u || !code || !u->arena) return;
     cir_raw_t *r = (cir_raw_t *)arena_calloc(u->arena, 1, sizeof(*r),

@@ -121,8 +121,10 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
        再释放块本体。 */
     if (fn->env) {
         /* env 块的**内嵌 own 槽位**由 sema 生成的 FREE 负责；这里只兜底释放
-           env 块本体（函数对象销毁时其 data 已不可达）。 */
-        allocator_free(alloc, &fn->env);
+           env 块本体（函数对象销毁时其 data 已不可达）。内联 env 属于函数
+           对象分配块，随下面的 allocator_free(pfn) 一起释放。 */
+        if (!fn->env_inline) allocator_free(alloc, &fn->env);
+        else fn->env = NULL;
     }
     /* 签名信息归 vm 类型池所有，func_t 不释放 sig_type */
     allocator_free(alloc, (void **)pfn);

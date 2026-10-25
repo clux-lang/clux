@@ -234,6 +234,47 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok);
 /* 语句 lowering 入口：先 prelude、再语句主体、最后 postlude。
  * sema 把 `.?'/`.!' 之类的错误处理语法糖展开成挂在语句上的
  * prelude/postlude（临时变量 + if 分支），compiler 也是这么消费的。 */
+/* 闭包值 `ex` 的销毁（内联 env）：按捕获槽位声明序递归释放 own 资源。
+ * 嵌套闭包捕获（`func |f: own Inner|`）按同样规则下钻——不能用 clux_free
+ * 释放一个闭包结构体值。 */
+static bool emit_closure_free(lower_ctx_t *lc, cir_expr_t *ex,
+                              const type_t *ft, cir_stmt_t **head,
+                              cir_stmt_t **tail) {
+    size_t ncap = func_type_capture_count(ft);
+    for (size_t ci = 0; ci < ncap; ci++) {
+        const type_t *capt = func_type_capture_type(ft, ci);
+        if (!capt) continue;
+        cir_expr_t *envm = cir_expr_member(lc->arena, ex, "env");
+        char fb[64];
+        snprintf(fb, sizeof fb, "clux_f_%zu", ci);
+        cir_expr_t *field =
+            envm ? cir_expr_member(lc->arena, envm,
+                                   copy_arena(lc->arena, fb))
+                 : NULL;
+        if (!field) return false;
+        const type_t *cs = type_strip_quals(capt);
+        if (cs && type_kind_of(cs) == TYPE_KIND_FUNC) {
+            ownership_t oq = type_ownership_of(capt);
+            if (oq == OWN_OWN && func_type_is_closure(cs)) {
+                if (!emit_closure_free(lc, field, cs, head, tail)) return false;
+            }
+            continue; /* 普通函数值 / 借用闭包：无 env 资源 */
+        }
+        ownership_t oq = type_ownership_of(capt);
+        if (oq != OWN_OWN && oq != OWN_FATAL) continue;
+        cir_expr_t *target = field;
+        if (cs && type_kind_of(cs) == TYPE_KIND_SLICE)
+            target = cir_expr_slice_data(lc->arena, field);
+        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+        if (!st) return false;
+        st->expr = target;
+        if (*tail) (*tail)->next = st;
+        else *head = st;
+        *tail = st;
+    }
+    return true;
+}
+
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     if (!s || lc->failed) return NULL;
     bool noop = s->kind == AST_ASSIGN && ((ast_assign_t *)s)->sugar_noop;
@@ -1083,30 +1124,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 ex = cir_expr_slice_data(lc->arena, ex);
             } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC &&
                        func_type_capture_count(type_strip_quals(ot)) > 0) {
-                /* 闭包值 env 内联：对含 own/fatal 的捕获槽位按字段释放
-                   （env_clone/env_dispose 是静态类型辅助，不存于值里）。 */
-                const type_t *ft = type_strip_quals(ot);
-                size_t ncap = func_type_capture_count(ft);
-                for (size_t ci = 0; ci < ncap; ci++) {
-                    const type_t *capt = func_type_capture_type(ft, ci);
-                    if (!capt) continue;
-                    ownership_t oq = type_ownership_of(capt);
-                    if (oq != OWN_OWN && oq != OWN_FATAL) continue;
-                    cir_expr_t *envm =
-                        cir_expr_member(lc->arena, ex, "env");
-                    char fb[64];
-                    snprintf(fb, sizeof fb, "clux_f_%zu", ci);
-                    cir_expr_t *field =
-                        envm ? cir_expr_member(lc->arena, envm,
-                                               copy_arena(lc->arena, fb))
-                             : NULL;
-                    if (!field) return head;
-                    cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-                    if (!st) return head;
-                    st->expr = field;
-                    if (tail) tail->next = st;
-                    else head = st;
-                    tail = st;
+                /* 闭包值 env 内联：按捕获槽位递归释放 own 资源（嵌套闭包
+                   捕获下钻；env_clone/env_dispose 是静态类型辅助，不在值里）。 */
+                if (!emit_closure_free(lc, ex, type_strip_quals(ot), &head,
+                                       &tail)) {
+                    *ok = false;
+                    return head;
                 }
                 continue;
             } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC) {

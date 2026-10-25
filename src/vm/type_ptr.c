@@ -207,7 +207,8 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
                     (void)value_call(vm, fv, args, 1);
                 }
             }
-            allocator_free(vm->alloc, &fn->env);
+            if (!fn->env_inline) allocator_free(vm->alloc, &fn->env);
+            else fn->env = NULL;
             return;
         }
         if (!fn->capture_type || !fn->env) return;
@@ -218,7 +219,8 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
             ptr_free_slot_value(vm, f->type, type_ownership_of(f->type),
                                 (uint8_t *)fn->env + f->offset);
         }
-        allocator_free(vm->alloc, &fn->env);
+        if (!fn->env_inline) allocator_free(vm->alloc, &fn->env);
+        else fn->env = NULL;
         return;
     }
     case TYPE_KIND_PTR: {

@@ -410,6 +410,8 @@ void cir_unit_add_global(cir_unit_t *u, cir_global_t *g);
 /** C 文件作用域可用的常量初始化表达式（无调用/无分配）。 */
 bool cir_expr_is_constant(const cir_expr_t *e);
 void cir_unit_add_raw(cir_unit_t *u, const char *code);
+/** 追加到 raw helper 链尾（依赖顺序：被调用者先发射）。 */
+void cir_unit_add_raw_append(cir_unit_t *u, const char *code);
 /** extern cfunc 的 C 函数指针 typedef / extern 原型（按添加顺序输出）。 */
 void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code);
 void cir_unit_add_extern_decl(cir_unit_t *u, const char *code);

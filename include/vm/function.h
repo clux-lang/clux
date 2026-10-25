@@ -64,6 +64,12 @@ struct func_t {
        全部按 capture_type 的槽位规则进行（与结构体完全同构）。无捕获 = NULL。 */
     void           *env;
 
+    /* true = env 指向**函数对象分配块内部**的内联捕获块（`func_instantiate_raw`
+       把 `sizeof(bcode_function_t) + env_size` 一次分配，env = 块尾）：随函数
+       对象一起释放，FREE/销毁路径不得再 `allocator_free(env)`。
+       false = env 是独立堆块（hoist 基底对象的兜底分配）或 NULL。 */
+    bool            env_inline;
+
     /* 闭包 env 的**生成函数** id（"闭包 = 捕获聚合结构体 + vtable"）：
        - env_dispose_fid：`__destroy_<env>(dv: ref *Env)` —— 释放 env 的 own 捕获；
        - env_clone_fid  ：`__clone_<env>(dv: ref *Env): fatal Env` —— 深拷贝 env。

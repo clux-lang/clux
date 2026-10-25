@@ -8,6 +8,8 @@
 #include "core/vec.h"
 
 #include <string.h>
+#include <stdint.h>
+#include <stdalign.h>
 
 static class_t g_bcode_function_class = {
     .name       = "clux.vm.bcode_function",
@@ -56,10 +58,20 @@ value_t *bcode_function_new(vm_t *vm, const type_t *sig_type,
    拷贝）由 func_destroy 随基底释放，新实例共享 strslice 指针不释放。 */
 func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     if (!vm || !base || !base->type) return NULL;
-    bcode_function_t *fn = (bcode_function_t *)allocator_new(
-        vm->alloc, &g_bcode_function_class, 1);
+    /* 捕获块**内联**在函数实例分配里（一次分配）：env 指向结构体尾部对齐
+       后的块。VM 的闭包实例不再为 env 单独 malloc —— 值表示与 C 后端一致
+       （`struct { fn; env }`），FREE 只清槽位、随实例一起回收。 */
+    size_t env_off = sizeof(bcode_function_t);
+    size_t env_size = base->capture_type ? base->capture_type->base.size : 0;
+    if (env_size > 0) {
+        size_t align = alignof(max_align_t);
+        env_off = (env_off + align - 1) & ~(align - 1);
+    }
+    size_t total = env_off + env_size;
+    bcode_function_t *fn = (bcode_function_t *)allocator_new_ex(
+        vm->alloc, "bcode_function", total, NULL, NULL, NULL, 1);
     if (!fn) panic("vm: out of memory instantiating bcode_function");
-    memset(fn, 0, sizeof(bcode_function_t));
+    /* allocator_new_ex 已清零 total 字节 */
     fn->base.cfunc       = base->cfunc;
     fn->base.root_scope  = base->root_scope;
     fn->base.type        = base->type;
@@ -69,13 +81,9 @@ func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     fn->base.env_dispose_fid = base->env_dispose_fid;
     fn->base.env_clone_fid   = base->env_clone_fid;
     fn->base.ct_literal      = base->ct_literal;
-    if (base->capture_type && base->capture_type->base.size > 0) {
-        void *env = allocator_new_ex(vm->alloc, "closure_env",
-                                     base->capture_type->base.size, NULL, NULL, NULL,
-                                     1);
-        if (!env) panic("vm: out of memory allocating closure env");
-        memset(env, 0, base->capture_type->base.size);
-        fn->base.env = env;
+    if (env_size > 0) {
+        fn->base.env = (uint8_t *)fn + env_off;
+        fn->base.env_inline = true;
     } /* 捕获聚合类型 */
     fn->base.closure_scope     = scope_new(vm->alloc, NULL);
     fn->base.owns_closure_scope = true;

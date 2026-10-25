@@ -235,7 +235,8 @@ value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
                     (void)value_call(vm, fv, args, 1);
                 }
             }
-            allocator_free(vm->alloc, &fn->env);
+            if (!fn->env_inline) allocator_free(vm->alloc, &fn->env);
+            else fn->env = NULL;
             return NULL;
         }
         if (fn && fn->capture_type && fn->env) {
@@ -246,7 +247,8 @@ value_t *op_free(vm_t *vm, bytecode_t *bc, size_t *pc) {
                 ptr_free_slot_value(vm, f->type, type_ownership_of(f->type),
                                     (uint8_t *)fn->env + f->offset);
             }
-            allocator_free(vm->alloc, &fn->env);
+            if (!fn->env_inline) allocator_free(vm->alloc, &fn->env);
+            else fn->env = NULL;
         }
         return NULL;
     }

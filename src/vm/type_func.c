@@ -27,7 +27,11 @@ static void func_dispose(vm_t *vm, value_t *v) {
 /* ---- clone ---- */
 
 static value_t *func_clone(vm_t *vm, value_t *v) {
-    /* 函数值不可变，浅拷贝指针即可 */
+    /* 函数值按**指针**clone（共享函数对象/实例）。
+       显式 `clone(f)` 的深拷贝由 sema 折叠为 `__deep_clone` → ptr_clone_block
+       的 FUNC 分支（新建实例 + env vtable 克隆）；不能在这里无条件深拷贝：
+       `move(f)` 在运行期就是字节拷贝（所有权纯编译期），深拷贝会让被移走的
+       源实例无人释放（实测 own 捕获 move 进聚合后泄漏 4 字节）。 */
     const func_t *fn = *(const func_t **)value_data(v);
     void *data = value_alloc_data_copy(vm->alloc, value_type(v), &fn);
     return value_make(vm, value_type(v), data);
