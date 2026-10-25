@@ -1334,7 +1334,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         const char *vn = module_symbol(lc->arena, lc->unit, "v_", fi->var);
         if (!vn) return NULL;
         char srcbuf[512];
-        snprintf(srcbuf, sizeof srcbuf, deref ? "(%s)" : "%s", raw);
+        snprintf(srcbuf, sizeof srcbuf, deref ? "(*%s)" : "%s", raw);
         const char *an = copy_arena(lc->arena, srcbuf);
         const type_t *stype =
             base && base->kind == AST_IDENT

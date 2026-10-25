@@ -310,18 +310,41 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_FUNC_OBJ:
         cw_put(sb, e->text ? e->text : "<null>");
         break;
-    case CIR_EXPR_FUNC_CALL:
-        /* 闭包调用：callee 只求值一次（避免带副作用的表达式被求值两遍，
-           也避免对 option unwrap 这类右值取 &env）。 */
-        cw_put(sb, "({ __auto_type clux_c = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "); clux_c.fn((void *)&clux_c.env");
-        for (const cir_expr_t *a = e->args; a; a = a->next) {
-            cw_put(sb, ", ");
-            cw_write_expr(sb, a);
+    case CIR_EXPR_FUNC_CALL: {
+        /* 闭包调用：左值 callee 用指针（捕获槽写回原位，语义与 VM 的
+           shared env 一致）；右值 callee 复制到临时值再调用。callee 只
+           求值一次。 */
+        const cir_expr_t *cal = e->lhs;
+        bool lv = cal &&
+                  (cal->kind == CIR_EXPR_IDENT || cal->kind == CIR_EXPR_MEMBER ||
+                   cal->kind == CIR_EXPR_INDEX ||
+                   cal->kind == CIR_EXPR_UNION_MEMBER ||
+                   cal->kind == CIR_EXPR_UNION_AT ||
+                   cal->kind == CIR_EXPR_SLICE_AT ||
+                   cal->kind == CIR_EXPR_TEMP_LVALUE ||
+                   (cal->kind == CIR_EXPR_UNARY && cal->op &&
+                    strcmp(cal->op, "*") == 0));
+        if (lv) {
+            cw_put(sb, "({ __auto_type *clux_c = &(");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, "); clux_c->fn((void *)&clux_c->env");
+            for (const cir_expr_t *a = e->args; a; a = a->next) {
+                cw_put(sb, ", ");
+                cw_write_expr(sb, a);
+            }
+            cw_put(sb, "); })");
+        } else {
+            cw_put(sb, "({ __auto_type clux_c = (");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, "); clux_c.fn((void *)&clux_c.env");
+            for (const cir_expr_t *a = e->args; a; a = a->next) {
+                cw_put(sb, ", ");
+                cw_write_expr(sb, a);
+            }
+            cw_put(sb, "); })");
         }
-        cw_put(sb, "); })");
         break;
+    }
     case CIR_EXPR_CLOSURE:
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
