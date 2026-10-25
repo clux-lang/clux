@@ -17,6 +17,13 @@
 #include <unistd.h>
 #endif
 
+static char *dup_cstr(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *p = (char *)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
 /* ===========================================================================
  * CLI 包上下文辅助实现
  * =========================================================================== */
@@ -29,7 +36,7 @@ static char *get_cwd(void) {
 #else
     if (!getcwd(buf, sizeof(buf))) return NULL;
 #endif
-    return strdup(buf);
+    return dup_cstr(buf);
 }
 
 /* 拼接路径（dir/file），返回 malloc 分配的字符串 */
@@ -159,7 +166,7 @@ int cmd_resolve_entry(const char *subdir, char **out_path, char **out_root) {
 
     /* 成功 */
     *out_path = entry_path;
-    if (out_root) *out_root = strdup(pkg_dir);
+    if (out_root) *out_root = dup_cstr(pkg_dir);
 
     arena_destroy(alloc, &arena);
     if (pkg_dir) allocator_free(alloc, (void **)&pkg_dir);

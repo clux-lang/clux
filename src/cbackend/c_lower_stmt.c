@@ -1326,8 +1326,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_FOR_INDEX: {
         ast_for_index_t *fi = (ast_for_index_t *)s;
-        const ast_node_t *src = fi->source;
-        const ast_node_t *base = src;
+        ast_node_t *src = fi->source;
+        ast_node_t *base = src;
         bool deref = false;
         if (src && src->kind == AST_DEREF) {
             deref = true;

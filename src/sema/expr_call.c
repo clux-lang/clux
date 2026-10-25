@@ -664,6 +664,7 @@ static bool try_explicit_generic_static_method_call(sema_t *sema,
                                                     ast_call_t *call,
                                                     sema_scope_t *scope,
                                                     value_t **out) {
+  (void)node;
   if (!call->callee || call->callee->kind != AST_INDEX) return false;
   ast_index_t *ix = (ast_index_t *)call->callee;
   if (!ix->object || ix->object->kind != AST_SCOPE_REF) return false;

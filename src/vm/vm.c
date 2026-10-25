@@ -299,7 +299,7 @@ void vm_destroy(vm_t **pvm) {
             if (ft->sig.params) allocator_free(vm->alloc, (void **)&ft->sig.params);
             if (ft->capture_types)
                 allocator_free(vm->alloc, (void **)&ft->capture_types);
-                if (ft->base.name.ptr) {
+            if (ft->base.name.ptr) {
                 char *np = (char *)ft->base.name.ptr;
                 allocator_free(vm->alloc, (void **)&np);
             }

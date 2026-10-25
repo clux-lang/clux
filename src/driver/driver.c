@@ -180,7 +180,7 @@ static int driver_lex_into(allocator_t *alloc,
 
 /* main 的返回值 → 进程退出码（`clux run` 与 C 后端可执行文件对齐）。
  * 只有整数返回类型参与；void / 非整数返回 0。 */
-static int main_exit_code(vm_t *vm, value_t *v) {
+static int __attribute__((unused)) main_exit_code(vm_t *vm, value_t *v) {
     if (!v || value_is_error(vm, v)) return 0;
     const type_t *t = value_type(v);
     if (!t) return 0;
@@ -307,7 +307,8 @@ static void driver_compiled_dispose(driver_compiled_t *r) {
 /* 复用 run 管线 Stage ①-⑤（加载→词法→语法→语义→编译），不执行。
  * 成功返回 0 并填满 *out（bc 与所有句柄有效）；失败返回非 0 且 *out 全 NULL
  * （诊断已打印）。调用方负责在反汇编后 driver_compiled_dispose。 */
-static int driver_compile_to_bytecode(const char *path, driver_compiled_t *out) {
+static int __attribute__((unused))
+driver_compile_to_bytecode(const char *path, driver_compiled_t *out) {
     memset(out, 0, sizeof *out);
 
     allocator_t *alloc = create_allocator(malloc, free);
@@ -778,7 +779,6 @@ static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
 
     bool sema_ok = sema_analyze(sema, ast);
     sema_scope_t *scope_tree = sema->global_scope;
-    vec_t *sema_types = sema->types;
 
     if (!sema_ok) {
         sema_destroy(&sema);

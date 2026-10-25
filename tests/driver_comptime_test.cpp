@@ -5,8 +5,9 @@
 
 extern "C" {
 #include "driver/driver.h"
-#include "test_common.h"
 }
+
+#include "test_common.h"
 
 namespace {
 

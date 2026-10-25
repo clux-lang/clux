@@ -13,6 +13,7 @@
 /* 读取文件全部内容到 arena 分配的缓冲区 */
 static char *read_file(allocator_t *alloc, arena_t *arena,
                        const char *path, size_t *out_len) {
+    (void)alloc;
     FILE *fp = fopen(path, "rb");
     if (!fp) return NULL;
 

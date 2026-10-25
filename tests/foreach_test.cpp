@@ -131,7 +131,7 @@ void expect_output(const std::string &src, const std::string &expected,
 }
 
 /** 负例：编译期拒绝（CLI 退出码 1），stderr 含 needle。 */
-void expect_reject(const std::string &src, const char *needle,
+[[maybe_unused]] void expect_reject(const std::string &src, const char *needle,
                    const std::string &tag = "foreach_bad") {
   const std::string path = write_temp_file(src, tag);
   ASSERT_FALSE(path.empty());

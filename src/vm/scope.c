@@ -142,6 +142,7 @@ void scope_register_defer(vm_t *vm, scope_t *scope, value_t *fn) {
 }
 
 void scope_register_cleanup(vm_t *vm, scope_t *scope, strslice_t name) {
+    (void)vm;
     if (!scope || !scope->cleanup_names || !name.ptr) return;
     char *copy = (char *)allocator_new_ex(scope->alloc, "scope.cleanup",
                                           name.len + 1, NULL, NULL, NULL, 1);

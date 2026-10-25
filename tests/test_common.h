@@ -9,9 +9,7 @@
 #include <gtest/gtest.h>
 #include <string>
 
-extern "C" {
 #include "driver/driver.h"
-}
 
 #ifdef _WIN32
 #include <io.h>
