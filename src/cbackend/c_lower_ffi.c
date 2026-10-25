@@ -264,7 +264,24 @@ static bool has_lib_suffix(const char *s) {
 static void collect_extern_lib(lower_ctx_t *lc, const ast_extern_lib_t *el) {
     const char *name = slice_str(lc, el->name);
     if (!name || name[0] == '\0') return;
-    /* "*" = 当前进程自身（已加载的模块）：无需链接。 */
+    /* 标准 C 运行库/系统库：默认链接已包含，额外 -l 可能干扰（如 Windows
+       上 -lmsvcrt 与 UCRT 默认库冲突导致 printf 未解析）。 */
+    static const char *const crt_names[] = {
+        "msvcrt", "msvcrtd", "ucrt", "ucrtbase", "libcmt", "libucrt",
+        "vcruntime", "libc", "libc.so", "libc.so.6", "libm", "libSystem",
+        "System", "libSystem.B.dylib", NULL};
+    for (size_t ci = 0; crt_names[ci]; ci++) {
+        const char *a = name, *b = crt_names[ci];
+        bool same = true;
+        for (;; a++, b++) {
+            char ca = *a, cb = *b;
+            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+            if (ca != cb) { same = false; break; }
+            if (!ca) break;
+        }
+        if (same) return;
+    }
     if (strcmp(name, "*") == 0) return;
     const char *arg = NULL;
     bool path_like = strchr(name, '/') || strchr(name, '\\') ||
