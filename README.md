@@ -18,8 +18,9 @@ func main(): i32 {
 
 ## Status
 
-M1–M6 are implemented and runnable end-to-end (lex → parse → sema → bytecode
-compile → VM). M7 (generics) is implemented: generic functions, generic types
+M1–M7 are implemented and runnable end-to-end (lex → parse → desugar → sema →
+C backend → host C compiler). `clux run` / `clux test` use the C backend only;
+bytecode/VM execution has been removed. M7 (generics) is implemented: generic functions, generic types
 (`struct`/`enum`/`union`/alias instances with methods, generic methods and
 recursive structs), comptime value parameters (`Matrix[T, N: comptime u64]`),
 type parameter packs including `<...Args>` type expansion, `extends` structure
@@ -41,7 +42,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   computation (`extends`, `==`, `?:`); `sizeof` / `alignof` / `typeof`; function types
   `func(...)->T` and function literals; optional `?T` with `nil` (no path narrowing) and
   `.!` unwrap; `comptime var` / `comptime func`; `const` / `volatile` as real types;
-  fill value packs `.[N]T{ <v, M> }`; `.cxb` / `.cxs` bytecode toolchain;
+  fill value packs `.[N]T{ <v, M> }`;
   **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
   sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
@@ -60,8 +61,8 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   is rejected with one diagnostic — **import kind is never inferred from the file
   extension** (a `.so`/`.dll` suffix does not mean "dynamic library").
 - **M6 — FFI**: `extern lib <alias> from "<library>"` (`"*"` = the current process),
-  `extern cfunc` / `extern func` declarations via libffi, `cfunc` definitions usable as
-  C callbacks, `extern var` global data symbols, conditional declarations
+  `extern cfunc` / `extern func` declarations lowered to direct C prototypes,
+  `cfunc` definitions usable as C callbacks, `extern var` global data symbols, conditional declarations
   (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), and recursive C-ABI type checking
   (scalars, pointers, `opaque`, `str`, struct / cunion / enum).
 
@@ -123,14 +124,17 @@ Produces:
 ## Usage
 
 ```
-clux run <file>                       # run a .cx source (or .cxb bytecode, detected by content)
-clux build <file.cx> [--emit-c[=PATH]] [--output=PATH]   # C backend → native executable
-clux test [<file.cx>] [--backend=vm|c]  # run test blocks
+clux run <file.cx> [--keep-c] [--emit-c[=PATH]]  # build with C backend, then run
+clux build <file.cx> [--emit-c[=PATH]] [--keep-c] [--output=PATH]
+clux test [<file.cx>] [--backend=c] [--keep-c]   # run test blocks through C
 clux format <file.cx> [-o PATH]       # format source in place (or to PATH / stdout)
-clux bc <emit|asm|disasm> <file> [-o PATH]   # bytecode tools (debug / distribution)
-clux eval <expr>                      # evaluate an expression at compile time (CTFE)
 clux version                          # version info
 ```
+
+`--emit-c` writes the generated C (and headers) without compiling/linking;
+`--keep-c` keeps it for inspection after a normal build/run/test. `.cxb` /
+`.cxs` bytecode inputs and the `clux eval` / `clux bc` commands were removed
+with the VM executor.
 
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error) or runtime error. `clux run` (source) and the executables
@@ -138,7 +142,7 @@ produced by `clux build` additionally return `main`'s integer result as the
 process exit code.
 
 Examples live in `examples/` — 54 entry directories (one or more `.cx` files each,
-one of them the runnable entry) plus 5 `.cxs` bytecode-assembly files. Modules
+one of them the runnable entry). Modules
 imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
 so every top-level `.cx` is runnable.
 Try:
@@ -152,10 +156,10 @@ stream — it preserves declarations (including `union` / `cunion` / `import` / 
 keeps semantics, and is idempotent (applying it twice yields the same file). Those three
 properties are covered by regression tests (`tests/fmt_test.cpp`, `FmtRegression.*`).
 
-Hand-written bytecode round-trip:
+C-backend debugging:
 
 ```sh
-./build/clux bc asm examples/asm/fib.cxs -o fib.cxb && ./build/clux run fib.cxb
+./build/clux build examples/hello/hello.cx --keep-c   # C kept next to the exe
 ```
 
 ## Project layout
@@ -164,16 +168,16 @@ Hand-written bytecode round-trip:
 src/core/        allocator, arena, vec, rbtree, strmap, omap, stream, string
 src/parser/      lexer + recursive-descent / Pratt parser (+ source formatter)
 src/desugar/     front-end desugaring (parser → sema; `foreach` → index `for`)
-src/vm/          value engine: type/vtable, value, scope, function, bytecode, module
+src/vm/          shared type/value/scope/function infrastructure (sema/CTFE only)
 src/sema/        semantic analysis (shadow-value driven) + comptime
 src/ctfe/        compile-time evaluation (AST interpreter for constant slots)
-src/compiler/    AST -> bytecode (+ type hoisting)
+src/cbackend/    sema AST → C IR → generated C → host clang/gcc
 src/diag/        shared diagnostic collector
-src/driver/      pipeline orchestration (load -> lex -> parse -> sema -> compile -> run)
-src/cmd/         subcommand dispatch (run / format / bc / build / test / version / eval)
+src/driver/      pipeline orchestration (load -> lex -> parse -> sema -> C build -> run)
+src/cmd/         subcommand dispatch (run / format / build / test / version)
 include/         public headers (mirrors src/)
 tests/           C++20 + GoogleTest suites
-examples/        sample programs (.cx sources, asm/ for .cxs assembly)
+examples/        sample programs (.cx sources)
 docs/            design & specification documents
 specs/           core-library API contracts (allocator, vec, string, maps, stream, cmd)
 ```
@@ -186,15 +190,15 @@ Pipeline and language:
 - `docs/architecture-m1.md` — compiler pipeline and module responsibilities
 - `docs/parse-paradigm.md` — parser design decisions (mismatch/error, fail-fast, Pratt)
 - `docs/format-rules.md` — rules enforced by `clux format` (spacing, indentation, comments)
-- `docs/bytecode-mnemonics.md` — bytecode instruction set and `.cxs` assembly syntax
+- `docs/c-only-migration.md` — C-backend migration record and current status
 
 Milestone designs:
 
-- `docs/m2-design.md` — struct / enum / arrays / tuples / optional `?T` / comptime / CTFE / bytecode tools
+- `docs/m2-design.md` — struct / enum / arrays / tuples / optional `?T` / comptime / CTFE
 - `docs/m3-design.md` — pointers, ownership (`own`/`ref`/`fatal`), scope annotations, RC (`share`/`weak`)
 - `docs/m4-design.md` — slices and runtime strings
 - `docs/m5-design.md`, `docs/m5-design-v2.md` — module system (v2 is the design that shipped)
-- `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, libffi)
+- `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, lowered to direct C calls)
 - `docs/milestones.md` — milestone roadmap and status
 
 Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
@@ -206,11 +210,11 @@ Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 cd build && ctest --output-on-failure    # or: ./build/clux_test
 ```
 
-2313 registered tests, all passing. Unit tests cover Lexer / Parser / VM / bytecode /
-core containers; integration tests execute programs end-to-end through `driver_run_file`
-(for `foreach` the CLI is spawned so the program's own `printf` output can be
-asserted — see `tests/foreach_test.cpp`), including the `examples/` sweep and the
-`.cxs ⇄ .cxb` round-trip.
+All registered tests pass. Unit tests cover Lexer / Parser / C backend /
+core containers; integration tests execute programs end-to-end through
+`driver_run_file` (for `foreach` the CLI is spawned so the program's own
+`printf` output can be asserted — see `tests/foreach_test.cpp`), including the
+`examples/` sweep.
 
 > **Host requirement for the whole suite**: some tests create temp files via
 > `std::filesystem::temp_directory_path()` / `tmpnam`. On hosts where spawned

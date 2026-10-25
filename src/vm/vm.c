@@ -4,6 +4,7 @@
 #include "vm/type_module.h"
 #include "vm/type_array.h"
 #include "vm/type_func.h"
+#include "vm/type_cfunc.h"
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
@@ -278,8 +279,23 @@ void vm_destroy(vm_t **pvm) {
     if (vm->sig_types) {
         size_t n = vec_len(vm->sig_types);
         for (size_t i = 0; i < n; i++) {
-            func_type_t *ft = (func_type_t *)vec_get(vm->sig_types, i);
-            if (!ft) continue;
+            type_t *tb = (type_t *)vec_get(vm->sig_types, i);
+            if (!tb) continue;
+            /* sig_types 同时存放 func 与 cfunc 两种布局：cfunc_type_t 没有
+               capture_types 字段，按 func_type_t 释放会读到垃圾并 free 非法
+               指针（cfunc + str 源码构建后进程清理崩溃）。 */
+            if (tb->kind == TYPE_KIND_CFUNC) {
+                cfunc_type_t *ct = (cfunc_type_t *)tb;
+                if (ct->sig.params)
+                    allocator_free(vm->alloc, (void **)&ct->sig.params);
+                if (ct->base.name.ptr) {
+                    char *np = (char *)ct->base.name.ptr;
+                    allocator_free(vm->alloc, (void **)&np);
+                }
+                allocator_free(vm->alloc, (void **)&ct);
+                continue;
+            }
+            func_type_t *ft = (func_type_t *)tb;
             if (ft->sig.params) allocator_free(vm->alloc, (void **)&ft->sig.params);
             if (ft->capture_types)
                 allocator_free(vm->alloc, (void **)&ft->capture_types);

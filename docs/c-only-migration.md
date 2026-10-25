@@ -134,7 +134,7 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
   import），`--backend=vm` 仅作过渡回退。
 - `clux eval`、`clux bc` **已删除**（源码/头文件/命令注册/CMake 条目）。
 - 调试 C：`clux build <file> --emit-c[=P]` / `--emit-obj` / `--build-dir`
-  保持；`clux run --emit-c` 明确提示改用 build（run 需要可执行文件）。
+  保持；`clux run --emit-c` / `clux test --emit-c` 只生成 C、不运行（`--keep-c` 保留 C）。
 - 验收：`clux run` 跑通 hello/closure/decorator/decorator_param；`clux test`
   默认 C 通过；`bc`/`eval` 报 unknown command；CBackendDiff/Reflect 中依赖
   CLI run 的用例通过。
@@ -349,27 +349,24 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
   `FFI::ffi` / `CLUX_HAVE_LIBFFI` / libdl；`llvm-objdump -p build/clux.exe`
   的导入表无 libffi。
 
-**验证**
+**验证（最终）**
 
 - `clux`、`clux_test` 构建通过；`clux run` hello/closure/decorator/
-  decorator_param 通过；`clux test <file>` 通过。
-- `CBackend + CBackendDiff`：97 passed；`CBackend` 套件里仅剩 death-test /
-  多进程 test-runner 崩溃回退相关的环境性失败（单独运行均通过）。
-- 全量逐套件：127 个套件，失败 2 个（`CBackend` 环境项、`Reflect` 编译器
-  进程崩溃）；其余全绿。
+  decorator_param 通过；`clux test <file>` 通过；`run --emit-c` 生成 C 后不
+  运行（`--keep-c` 保留 C）。
+- `CBackend + CBackendDiff`：全部通过（`CBackend` 套件内部会打印预期失败的
+  子测试 runner 输出，但套件退出码为 0）。
+- 全量逐套件：**127 个套件全部 exit=0**，普通回归通过。
 
-**仍失败的套件**
+**最后一处根因修复：cfunc 类型清理**
 
-- `Reflect`（9，环境/编译器进程崩溃）：源码含 `type C = cfunc(...)` 加任意
-  字符串/局部值时，`clux build --emit-c` 在写完 C 之后、进程退出阶段于
-  MSVCP/ucrt 清理路径崩溃（0xC0000005）；生成的 C 手工用 clang 编译完全
-  正常。C 后端语义与反射代码生成正确，问题在编译器宿主进程清理，单独
-  用 driver 路径即可复现。
-- `CBackend`（11，环境性）：death-test 与多进程 test-runner 在 Windows 上
-  返回 `0xC0000374/0xC0000409`，触发 gtest 回退后连带 callback 用例；
-  单用例运行通过。
+`type C = cfunc(...)` 加任意函数体时，`clux build` 在写完 C 后崩溃。根因在
+`vm_destroy`：`vm->sig_types` 同时存放 `func_type_t` 与 `cfunc_type_t`，旧代码
+一律按 `func_type_t` 释放，读 cfunc 布局不存在的 `capture_types` 字段并 free
+垃圾指针。现按 `TYPE_KIND_CFUNC` 单独释放 `sig.params/name/对象`；`Reflect`
+18/18 全绿，`clux build` 不再崩溃。
 
-**本轮完成：share/weak RC 运行时**
+**share/weak RC 运行时（本轮完成）**
 
 - C 后端生成 RC 控制块（64 字节头 + payload，`p.*` 语义不变）：
   `clux_rc_new/retain/release`、weak retain/release、RC upgrade。
@@ -381,11 +378,6 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 - `ShareWeak` 12/12 全绿（含弱计数、最后 share 释放后 get 为 nil、
   payload own 资源递归释放）。
 
-这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
-重设计对应测试）。目标在本轮保持 active。
-
-这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
-重设计对应测试）。目标在本轮保持 active。
 
 ```powershell
 # 只生成 C（不调用 cc）

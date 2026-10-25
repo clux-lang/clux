@@ -82,22 +82,9 @@ struct func_t {
     const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;
     strslice_t      name;
-    bool            owns_closure_scope; /* true：closure_scope 由函数对象创建（bcode_function），
-                                           随 vm->functions 释放；false：调用方传入（不拥有） */
+    bool            owns_closure_scope; /* true：closure_scope 由函数对象创建，随
+                                           vm->functions 释放；false：调用方传入 */
     bool            owns_name;          /* true：name 为 SET_FUNC_NAME 堆拷贝，func_destroy 释放 */
-
-    /* ---- M6 FFI Phase 5：该函数作为 **C 回调** 的闭包（惰性创建）----
-     * `cfunc_ptr(f)`（内建）首次要求 C 函数指针时创建 libffi 闭包：
-     *   ffi_closure      —— libffi 闭包句柄（clux_ffi_closure_destroy 释放）
-     *   ffi_closure_ctx  —— handler 上下文（本 allocator 分配）
-     *   ffi_closure_code —— trampoline 地址（可当 C 函数指针用的那个值）
-     * 三者归**函数对象**所有，随 vm->functions 一起销毁——与 closure_scope 同一
-     * 生命周期模型（函数对象是 VM 生命周期对象，不归任何作用域）。因此重复调用
-     * `cfunc_ptr(f)` 复用同一 trampoline，不重复泄漏可执行内存。
-     * 全 NULL = 尚未请求过 C 函数指针（普通函数恒为 NULL）。 */
-    void           *ffi_closure;
-    void           *ffi_closure_ctx;
-    void           *ffi_closure_code;
 
     /* ---- 编译期：该函数字面量对应的 AST 节点（`ast_func_def_t*`）----
      * CTFE 求值字面量时填入，供**常量闭包折叠**取回参数/函数体（此时

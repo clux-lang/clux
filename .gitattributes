@@ -28,8 +28,6 @@
 *.zip  binary
 *.gz   binary
 *.tar  binary
-*.cxb  binary
 
 # ---- submodule（各自仓库有自己的约定）----
 third_party/gtest/**   -text
-third_party/libffi/**  -text

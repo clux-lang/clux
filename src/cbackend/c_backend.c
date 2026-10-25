@@ -1078,7 +1078,8 @@ int cbackend_generate_c(const char *src_path, const char *c_path) {
 }
 
 int cbackend_build_tests(const char *src_path, const char *out_path,
-                         char ***names, size_t *count, bool keep_c) {
+                         char ***names, size_t *count, bool keep_c,
+                         bool emit_c) {
     if (!src_path || !out_path) return 1;
     /* 与 build 同路径：入口 + import 依赖各自生成编译单元，入口单元生成
        跨模块用例分派的 runner main（不从 main 进入）。 */
@@ -1086,6 +1087,7 @@ int cbackend_build_tests(const char *src_path, const char *out_path,
         .build_dir = "build",
         .tests = true,
         .keep_c = keep_c,
+        .emit_c_only = emit_c,
         .out_test_names = names,
         .out_test_count = count,
     };

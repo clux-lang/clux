@@ -21,11 +21,12 @@
  *   clux run <file.cx>        编译（C 后端）并执行
  *
  * 构建产物的位置与 `clux build` 一致（默认 build/ 镜像目录），便于调试时
- * 直接检查生成的 exe；`--emit-c` 是 build 专用选项（只生成 C 不链接），
- * run 下报错提示改用 `clux build --emit-c`。 */
+ * 直接检查生成的 exe；`--emit-c` 只生成 C 不链接、不运行（调试用），
+ * `--keep-c` 保留生成的 C。 */
 
 static const char *USAGE =
-    "usage: clux run [subpkg|<file.cx>] [-D KEY=VALUE]...\n";
+    "usage: clux run [subpkg|<file.cx>] [-D KEY=VALUE]... "
+    "[--keep-c] [--emit-c[=PATH]]\n";
 
 static int run_executable(const char *exe) {
 #ifdef _WIN32
@@ -85,15 +86,11 @@ static int build_and_run(const cmd_args_t *args, const char *path) {
                 "pass a .cx source file\n");
         return 1;
     }
-    if (cmd_args_has(args, "emit-c")) {
-        fprintf(stderr,
-                "run: --emit-c only generates C without linking; use "
-                "`clux build <file> --emit-c` for inspection\n");
-        return 1;
-    }
+    const bool emit_c = cmd_args_has(args, "emit-c");
     char *exe = NULL;
     int rc = cmd_build_for_run(args, path, &exe);
     if (rc != 0) return rc;
+    if (emit_c) return 0; /* 只生成 C，不链接/不运行 */
     if (!exe) {
         fprintf(stderr, "run: build did not produce an executable\n");
         return 1;

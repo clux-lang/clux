@@ -66,7 +66,7 @@ static int run_all_in_process(const char *exe, const char *log_path) {
     return code;
 }
 
-static int run_tests_c(const char *src, bool keep_c) {
+static int run_tests_c(const char *src, bool keep_c, bool emit_c) {
     char *exe = runner_output_path(src);
     if (!exe) {
         fprintf(stderr, "test: out of memory\n");
@@ -74,10 +74,15 @@ static int run_tests_c(const char *src, bool keep_c) {
     }
     char **names = NULL;
     size_t count = 0;
-    int rc = cbackend_build_tests(src, exe, &names, &count, keep_c);
+    int rc = cbackend_build_tests(src, exe, &names, &count, keep_c, emit_c);
     if (rc != 0) {
         free(exe);
         return rc;
+    }
+    if (emit_c) {
+        cbackend_free_test_names(names, count);
+        free(exe);
+        return 0;
     }
 
     char log_path[4096];
@@ -175,12 +180,13 @@ int cmd_test(const cmd_args_t *args) {
 
     const char *path = args->posc > 0 ? args->posargs[0] : NULL;
     const bool keep_c = cmd_args_has(args, "keep-c");
-    if (path) return run_tests_c(path, keep_c);
+    const bool emit_c = cmd_args_has(args, "emit-c");
+    if (path) return run_tests_c(path, keep_c, emit_c);
     /* 项目模式：从 clux.mod 解析入口，C 后端会自行处理 import 依赖。 */
     char *entry = NULL;
     int rc = cmd_resolve_entry(NULL, &entry, NULL);
     if (rc != 0) return rc;
-    rc = run_tests_c(entry, keep_c);
+    rc = run_tests_c(entry, keep_c, emit_c);
     free(entry);
     return rc;
 }

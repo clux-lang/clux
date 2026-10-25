@@ -2,6 +2,3 @@
 	path = third_party/gtest
 	url = https://github.com/google/googletest.git
 	branch = release-1.15.2
-[submodule "third_party/libffi"]
-	path = third_party/libffi
-	url = https://github.com/libffi/libffi

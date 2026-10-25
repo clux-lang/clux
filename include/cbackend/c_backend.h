@@ -87,7 +87,8 @@ int cbackend_generate_c(const char *src_path, const char *c_path);
  * cbackend_free_test_names 释放）；没有 test 块时报错返回 1。
  */
 int cbackend_build_tests(const char *src_path, const char *out_path,
-                         char ***names, size_t *count, bool keep_c);
+                         char ***names, size_t *count, bool keep_c,
+                         bool emit_c);
 void cbackend_free_test_names(char **names, size_t count);
 
 #ifdef __cplusplus
