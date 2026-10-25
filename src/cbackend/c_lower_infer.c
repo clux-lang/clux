@@ -1,4 +1,5 @@
 #include "cbackend/c_lower_internal.h"
+#include "sema/struct_compose.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -170,16 +171,24 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         }
         if (c->callee && c->callee->kind == AST_SCOPE_REF) {
             ast_scope_ref_t *sr = (ast_scope_ref_t *)c->callee;
+            const type_t *owner_t = lower_scope_ref_owner_type(lc, sr);
             uint32_t owner = c->member_type_id;
-            if (!owner && sr->type_expr) {
-                const type_t *t =
-                    sema_resolve_type_slot(lc->sema, &sr->type_expr);
-                if (t) {
-                    const sema_type_t *st = sema_type_find(lc->sema, t);
-                    if (st) owner = st->id;
-                }
+            if (!owner && owner_t) {
+                const sema_type_t *st = sema_type_find(lc->sema, owner_t);
+                if (st) owner = st->id;
             }
             lower_method_t *meth = find_method(lc, owner, sr->variant);
+            if (!meth && owner_t) {
+                const struct_type_t *fo = NULL;
+                sema_symbol_t *ms = sema_struct_find_member(
+                    lc->sema, owner_t, sr->variant, c->callee, &fo);
+                if (ms && ms->type &&
+                    type_kind_of(type_strip_quals(ms->type)) ==
+                        TYPE_KIND_FUNC) {
+                    const type_t *rt2 = func_type_return(ms->type);
+                    if (rt2) return rt2;
+                }
+            }
             if (meth && meth->def->return_expr)
                 return sema_resolve_type_slot(lc->sema,
                                               &meth->def->return_expr);

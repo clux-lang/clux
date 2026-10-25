@@ -34,6 +34,23 @@ const char *mangle(arena_t *arena, const char *prefix, strslice_t name) {
 /* 模块符号名：`<sym_prefix><kind><name>`，例如 `clux_a61b_fn_main`。
  * 所有模块内函数/全局/函数对象/回调 trampoline 都用它，避免多编译单元
  * 链接时同名冲突（非导出符号同时是 static）。 */
+/* 解析 `Type::method(...)` / `mod::Type::method(...)` 的 owner 类型。
+   先走类型槽位；跨模块 `mod::Type` 用模块导出表兜底。 */
+const type_t *lower_scope_ref_owner_type(lower_ctx_t *lc, ast_scope_ref_t *sr) {
+    if (!lc || !sr || !sr->type_expr) return NULL;
+    const type_t *t = sema_resolve_type_slot(lc->sema, &sr->type_expr);
+    if (t) return t;
+    if (sr->type_expr->kind != AST_SCOPE_REF) return NULL;
+    ast_scope_ref_t *inner = (ast_scope_ref_t *)sr->type_expr;
+    if (!inner->type_expr || inner->type_expr->kind != AST_IDENT) return NULL;
+    sema_symbol_t *ms = sema_lookup(
+        lc->sema->global_scope, ((ast_ident_t *)inner->type_expr)->name);
+    if (!ms || ms->kind != SEMA_SYM_MODULE || !ms->module) return NULL;
+    sema_symbol_t *ts = sema_module_export_symbol(ms->module, inner->variant);
+    if (ts && ts->kind == SEMA_SYM_TYPE) return ts->type;
+    return NULL;
+}
+
 const char *module_symbol(arena_t *arena, const cir_unit_t *unit,
                           const char *kind, strslice_t name) {
     const char *prefix = unit && unit->sym_prefix ? unit->sym_prefix : "clux_";

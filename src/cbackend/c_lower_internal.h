@@ -55,6 +55,7 @@
 #include "parser/ast_while.h"
 #include "parser/lexer.h"
 #include "sema/sema_generic.h"
+#include "sema/sema_cross.h"
 #include "vm/module.h"
 #include "vm/type.h"
 #include "vm/type_array.h"
@@ -217,6 +218,9 @@ cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 /** 按名查找块内局部函数（调用点/函数值引用用）。 */
+const type_t *lower_scope_ref_owner_type(lower_ctx_t *lc,
+                                        ast_scope_ref_t *sr);
+
 lower_local_fn_t *find_local_fn(lower_ctx_t *lc, strslice_t name);
 lower_local_fn_t *find_local_fn_fid(lower_ctx_t *lc, uint32_t fid);
 /* bitfield：逻辑字段按位读写（storage 是 struct 的隐藏数组字段）。 */
