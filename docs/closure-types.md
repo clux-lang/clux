@@ -134,3 +134,132 @@ func main(): i32 {
 
 C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 闭包 env）、
 `own` 捕获在作用域结束时释放一次。
+
+---
+
+# 实施进度（交接文档）
+
+更新时间：2026-10-25，HEAD `a216acd`（阶段 B 完成）。
+
+## 已完成
+
+### 阶段 A：类型携带闭包（提交 `d25140f`）
+
+- `func_type_t` 增加 `capture_types[] / capture_count`；`type_func_closure(vm, params,
+  n, ret, variadic, capture_types, n)` 按 (签名, 捕获类型序列) intern；类型名形如
+  `func |i32| func(i32): i32`；访问器：
+  `func_type_is_closure / func_type_capture_count / func_type_capture_type`。
+- parser/AST：`func |a: i32, b: own *i32| (i32, i32) -> i32` 类型表达式
+  （`ast_func_type_t.captures`，捕获项必须 `name: Type`，不能带初始值）；
+  `type F = ...` 别名路径（CTFE `AST_FUNC_TYPE`）同样支持。
+- sema：闭包字面量/局部函数值类型 = 闭包类型；不擦除（闭包类型 ≠ 普通
+  `func(...)`）；泛型 mangle 纳入捕获类型；`sema_check_func_literal` 在
+  `capture_type_id` 字段处构造闭包类型并作为字面量值类型返回。
+  - 运行期函数对象仍用普通签名 id（`fn->sig_id` 不改），避免 VM/C 运行期类型
+    未构造的问题；闭包类型目前是 **sema 类型身份**。
+- 新 gtest：
+  - `CBackend.BuildClosureTypeAnnotationAndGenericCall`
+  - `CBackend.RejectsClosureErasureToPlainFunc`
+
+### 阶段 B：C 后端内联 env（提交 `a216acd`）
+
+- `cir_signature_t` 增加 `env_type`；`signature_for_env(lc, ret, pc, pt, env_type)`
+  按 (签名, env 类型) 去重；普通函数的 env 是共享 `struct clux_<tag>_empty_env
+  { char clux_unused; }`（统一结构形状，调用点无需分支）。
+- `map_type(TYPE_KIND_FUNC)`：
+  - 普通函数：`struct sig_N { ret (*fn)(void *env, ...); struct empty_env env; }`；
+  - 闭包：env 结构 `struct clux_<tag>_env_<typeid>`，字段按捕获序
+    `clux_f_0..N-1`；签名 struct 为 `{ fn; struct env_N env; }`。
+- writer：
+  - 签名定义输出 env 字段；函数对象 `{ fn, { 0 } }`；
+  - `CIR_EXPR_CLOSURE` → `{ .fn = impl, .env = (struct env_N){...} }`（无
+    `clux_new`，无 clone/dispose 指针字段）；
+  - `CIR_EXPR_FUNC_CALL` → `(callee).fn((void *)&(callee).env, args)`；
+  - 函数体：`struct env_N *clux_v___ctx_env = (struct env_N *)env;`；
+  - `__ctx.env.<cap>` 降级为 `(*clux_v___ctx_env).clux_f_<声明序>`。
+- `lower_closure_literal` 重写：捕获类型数组 → `type_func_closure` → `map_type`
+  → 内联 env 构造；删除堆 env/clone 包装；body 捕获走位置索引
+  （`lower_capture_t.index`）。
+- `FREE`：
+  - 闭包：对 own/fatal 捕获槽位逐字段 `clux_free((f).env.clux_f_i)`；
+  - 普通函数：no-op；`clux_func_release` 宏改为 no-op。
+- `type_has_own_slots` 增加 FUNC 分支（捕获递归判断），闭包含 own 时为
+  move-only。
+- 新 gtest：`CBackend.BuildClosureOwnCaptureInlineEnv`（own 捕获 + `move(...)`，
+  C 构建/运行 exit 0，生成 C 中 own 字段在返回路径释放）。
+
+## 当前状态 / 已知红
+
+- 设计上 **不擦除**：存量约 350 个"用 `func(...)` 承载捕获闭包"的用例/示例
+  现在会报
+  `cannot initialize ... of type func(...) with func |...| func(...)`
+  —— 这是预期结果，等阶段 D 统一迁移（泛型 `apply[F]` 或显式闭包类型）。
+  因此**不要用全量 gtest 绿作为当前验收标准**；以新增闭包用例 +
+  普通非闭包回归为准。
+- 新增用例目前通过（filter 运行）：
+  `CBackend.BuildClosureTypeAnnotationAndGenericCall`、
+  `CBackend.RejectsClosureErasureToPlainFunc`、
+  `CBackend.BuildClosureOwnCaptureInlineEnv`。
+- 普通 C 程序回归正常（例如 `examples/arithmetic`）。
+
+## 未完成
+
+1. **静态 clone**：C `CIR_EXPR_FUNC_CLONE` 目前是浅拷贝占位；含 own 捕获的
+   `clone(f)` 需要按 env 布局生成 `clux_env_clone_<typeid>`（深拷贝 own 字段），
+   `FREE/赋值` 使用点静态调用，值里仍不放函数指针。
+2. **阶段 C（VM）**：VM 目前 env 仍是堆块（`func_t->env`），并且
+   `own` 捕获 + `move` 会报 allocator 泄漏；需要把 env 内联进 func 实例/值，
+   按类型静态分派 clone/dispose，补 VM 差分测试。
+3. **阶段 D（迁移/清理）**：把存量 `func(...)` 承载捕获闭包的 tests/examples
+   改为泛型/闭包类型；删除过渡加宽/旧 env 表示；清理不再使用的
+   `clux_env_clone_*` 包装代码、旧 `env_clone/env_dispose` 结构字段引用。
+4. 文档/ABI 收尾：导出 C ABI 的闭包约定、跨模块闭包类型、`cfunc_ptr` 与
+   闭包类型的交互。
+
+## 关键代码位置（继续实施时）
+
+- 类型：`include/vm/type_func.h`、`src/vm/type_func.c`（`type_func_closure`、
+  `func_type_seal` 里的 `func_caps_eq`、名称生成）。
+- 解析/AST：`include/parser/ast_func_type.h`、
+  `src/parser/parse_func_def.c`（`parse_capture_item`/`parse_capture_list`、
+  `func |...|` 类型分支、`stop_at_pipe`）、`src/parser/parse_expr.c`。
+- sema：`src/sema/sema_type.c`（`AST_FUNC_TYPE` 分支）、
+  `src/sema/stmt_build_func.c`（`sema_check_func_literal` 末尾闭包类型）、
+  `src/ctfe/ctfe_expr.c`（类型别名路径的 `AST_FUNC_TYPE`）、
+  `src/sema/sema_generic.c`（mangle 捕获）。
+- C 后端：`include/cbackend/c_ir.h`（`cir_signature_t.env_type`）、
+  `src/cbackend/c_lower_type.c`（`signature_for_env`/`empty_env_type`/
+  `map_type` FUNC 分支）、`src/cbackend/c_lower_literal.c`
+  （`lower_closure_literal`）、`src/cbackend/c_lower_expr.c`
+  （`__ctx.env` 位置捕获）、`src/cbackend/c_lower_stmt.c`（`FREE` 闭包字段）、
+  `src/cbackend/c_writer_stmt.c`（签名 env 字段、函数体 env 指针）、
+  `src/cbackend/c_writer_expr.c`（CLOSURE/FUNC_CALL/FUNC_CLONE）。
+- 测试：`tests/c_backend_test.cpp` 末尾三个新用例。
+
+## 构建/运行备忘
+
+```powershell
+cmake --build build
+# 若 link 报 clux.exe permission denied：先杀掉残留 clux/clux_test 进程再构建
+# 全新 build 目录：cmake -S . -B build 会重新生成
+# build/third_party/icu/icu_data_gen.c（clean 后必须 reconfigure 生成）
+
+# 新增闭包用例
+.\build\clux_test.exe --gtest_filter="CBackend.BuildClosureType*:CBackend.RejectsClosureErasure*:CBackend.BuildClosureOwnCaptureInlineEnv"
+```
+
+## 验收目标（阶段 C/D 完成后）
+
+```clux
+type F = func |a: i32| (i32) -> i32;
+func apply[G](f: G, x: i32): i32 { return f(x); }
+var f: F = func |a| (x: i32): i32 { return x + a; };
+apply[F](f, 4) == 7
+
+type O = func |p: own *i32| (i32) -> i32;
+var g: own O = move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });
+g(4) == 9
+```
+
+C 生成代码：闭包值 `{ fn; env struct }`、无 env 堆分配、无
+`env_clone/env_dispose` 函数指针；own 捕获在作用域结束释放一次；VM 同样无泄漏。
