@@ -373,6 +373,30 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             return lout;
         }
     }
+    /* 本地函数引用（sema 改写为 FUNC_REF，可能没有名字）：按 fid 查映射。 */
+    if (call->callee && call->callee->kind == AST_FUNC_REF) {
+        ast_func_ref_t *rf = (ast_func_ref_t *)call->callee;
+        lower_local_fn_t *lf = rf->fid ? find_local_fn_fid(lc, rf->fid) : NULL;
+        if (lf) {
+            cir_expr_t *lout = NULL;
+            if (lf->is_closure && lf->var_name) {
+                cir_expr_t *callee = cir_expr_ident(lc->arena, lf->var_name);
+                lout = callee ? cir_expr_func_call(lc->arena, callee, NULL) : NULL;
+            } else {
+                lout = cir_expr_call(lc->arena, lf->cname, NULL);
+                if (lout)
+                    cir_expr_append_arg(lout,
+                                        cir_expr_ident(lc->arena, "NULL"));
+            }
+            if (!lout) return NULL;
+            for (ast_node_t *a = call->args; a; a = a->next) {
+                cir_expr_t *arg = lower_call_arg(lc, a);
+                if (!arg) return NULL;
+                cir_expr_append_arg(lout, arg);
+            }
+            return lout;
+        }
+    }
     if (call->callee && call->callee->kind == AST_FUNC_REF) {
         ast_func_ref_t *ref = (ast_func_ref_t *)call->callee;
         module_t *owner = NULL;
@@ -532,6 +556,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         }
     }
     if (!name.ptr) {
+
         /* 典型缺口：跨模块泛型调用 `mod::f[i32](...)`（实例由 sema 追加到
            定义模块的 prog，调用点形态是 AST_INDEX/泛型引用）。 */
         if (call->callee && call->callee->kind == AST_INDEX) {

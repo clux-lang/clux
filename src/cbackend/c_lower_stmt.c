@@ -26,6 +26,12 @@ static lower_defer_t *find_defer_entry(lower_ctx_t *lc, strslice_t name) {
     return NULL;
 }
 
+lower_local_fn_t *find_local_fn_fid(lower_ctx_t *lc, uint32_t fid) {
+    for (lower_local_fn_t *f = lc->local_fns; f; f = f->next)
+        if (f->fid && f->fid == fid) return f;
+    return NULL;
+}
+
 lower_local_fn_t *find_local_fn(lower_ctx_t *lc, strslice_t name) {
     for (lower_local_fn_t *f = lc->local_fns; f; f = f->next)
         if (f->name.len == name.len &&
@@ -369,6 +375,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 value_cap = true;
         }
         if (value_cap) {
+            strslice_t orig_name = fn->name;
             cir_expr_t *cl = lower_closure_literal(lc, fn);
             if (!cl) {
                 *ok = false;
@@ -380,12 +387,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 *ok = false;
                 return NULL;
             }
-            lower_local_fn_t *lfe = find_local_fn(lc, fn->name);
+            lower_local_fn_t *lfe = find_local_fn(lc, orig_name);
             const char *vn = (lfe && lfe->is_closure && lfe->var_name)
                                  ? lfe->var_name
                                  : module_symbol(lc->arena, lc->unit,
-                                                 "fnval_", fn->name);
-            register_local_as(lc, fn->name, ft, vn);
+                                                 "fnval_", orig_name);
+            register_local_as(lc, orig_name, ft, vn);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
             if (!st) return NULL;
             st->type = ct;
@@ -408,6 +415,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         lf->cname = cname;
         lf->obj = obj;
         lf->type = ftype;
+        lf->fid = fn->fid;
         lower_local_fn_t *save_fns = lc->local_fns;
         lf->next = lc->local_fns;
         lc->local_fns = lf;
@@ -1112,6 +1120,7 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
         lf->cname = cname;
         lf->obj = obj;
         lf->type = ftype;
+        lf->fid = fn->fid;
         if (value_cap) {
             lf->is_closure = true;
             lf->var_name = module_symbol(lc->arena, lc->unit, "fnval_",

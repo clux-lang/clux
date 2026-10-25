@@ -83,6 +83,7 @@ typedef struct lower_local_fn {
     const char *obj;   /* 函数对象结构名 */
     const char *var_name; /* 闭包值局部变量名（is_closure 时） */
     bool is_closure;      /* 有值捕获：调用走闭包值 */
+    uint32_t fid;         /* sema 函数 id（本地函数引用按 fid 解析） */
     const type_t *type;
     struct lower_local_fn *next;
 } lower_local_fn_t;
@@ -217,6 +218,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 /** 按名查找块内局部函数（调用点/函数值引用用）。 */
 lower_local_fn_t *find_local_fn(lower_ctx_t *lc, strslice_t name);
+lower_local_fn_t *find_local_fn_fid(lower_ctx_t *lc, uint32_t fid);
 /* bitfield：逻辑字段按位读写（storage 是 struct 的隐藏数组字段）。 */
 const type_t *bitfield_value_type(lower_ctx_t *lc, uint32_t type_id);
 const ast_struct_def_t *bitfield_def_of(lower_ctx_t *lc, const type_t *t);

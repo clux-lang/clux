@@ -116,6 +116,7 @@ static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
         if (c->name.len == name.len &&
             memcmp(c->name.ptr, name.ptr, name.len) == 0)
             return c->expr;
+    { const char *ln = lookup_local_cname(lc, name); if (ln) return ln; }
     return module_symbol(lc->arena, lc->unit, "v_", name);
 }
 
@@ -162,8 +163,15 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
                                        copy_arena(lc->arena, fb), ct);
         if (!f) return NULL;
         cir_type_add_field(env, f);
-        const char *val = capture_or_var(lc, vd->name);
-        cir_expr_t *ve = cir_expr_ident(lc->arena, val);
+        /* 带初始化表达式的捕获：在定义点求值；纯 id 捕获取外层变量/捕获。 */
+        cir_expr_t *ve = NULL;
+        if (vd->init && vd->init->kind != AST_UNDEF) {
+            ve = lower_expr(lc, vd->init);
+        } else {
+            const char *val = capture_or_var(lc, vd->name);
+            ve = val ? cir_expr_ident(lc->arena, val) : NULL;
+        }
+        if (!ve) return NULL;
         cir_init_t *init = cir_init_new(lc->arena, f->name, ve);
         if (!init) return NULL;
         init->next = inits;
