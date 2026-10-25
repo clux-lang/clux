@@ -256,6 +256,9 @@ typedef struct cir_unit {
        会复用，会拿到别的模块的 env 类型）。 */
     cir_type_t      *empty_env;
     cir_raw_t       *raw_helpers;
+    /* 本单元是否是入口单元（main/测试 runner 所在）：泄漏检测运行时
+       （clux_rt_state）由入口单元**定义**，其余模块只 extern 引用。 */
+    bool             owns_runtime;
     /* extern cfunc：C 函数指针 typedef（先）与 extern 原型（后），保持添加顺序。 */
     cir_raw_t       *extern_typedefs;
     cir_raw_t       *extern_typedefs_last;

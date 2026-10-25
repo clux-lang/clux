@@ -269,6 +269,7 @@ static bool emit_closure_free(lower_ctx_t *lc, cir_expr_t *ex,
                 target = cir_expr_slice_data(lc->arena, field);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return false;
+            lc->unit->uses_alloc = true;
             st->expr = target;
             if (*tail) (*tail)->next = st;
             else *head = st;
@@ -1133,7 +1134,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_FREE: {
         ast_free_t *f = (ast_free_t *)s;
-        lc->unit->uses_alloc = true;
         cir_stmt_t *head = NULL, *tail = NULL;
         for (ast_node_t *op = f->operand; op; op = op->next) {
             /* `FREE __defer_N`：defer 体已被内联，捕获结构体是栈上局部，
@@ -1165,6 +1165,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
+            lc->unit->uses_alloc = true;
             st->expr = ex;
             if (tail) tail->next = st;
             else head = st;

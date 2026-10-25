@@ -42,6 +42,27 @@ std::string cli_path() {
 
 std::string q(const std::string &s) { return "\"" + s + "\""; }
 
+/* 运行可执行文件并捕获 stdout+stderr（用于泄漏检测断言）。 */
+std::string run_capture(const std::string &exe) {
+  std::string cmd = q(exe) + " 2>&1";
+#ifdef _WIN32
+  FILE *p = _popen(cmd.c_str(), "rb");
+#else
+  FILE *p = popen(cmd.c_str(), "r");
+#endif
+  if (!p) return "<popen-failed>";
+  std::string out;
+  char buf[4096];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
+#ifdef _WIN32
+  _pclose(p);
+#else
+  pclose(p);
+#endif
+  return out;
+}
+
 /* 从生成的 C 文本里找出模块前缀 `clux_<4 位十六进制>_`。 */
 std::string module_prefix_in(const std::string &text) {
   for (size_t pos = 0; (pos = text.find("clux_", pos)) != std::string::npos;
@@ -2361,6 +2382,42 @@ TEST(CBackend, BuildExportClosureABI) {
   ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
   EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
   fs::remove_all(proj, ec);
+}
+
+/* 泄漏检测全局分配器：`_ = new T{...}` 丢弃将亡值 → 进程退出打印
+   `memory leak detected:`；正常 move/FREE 不打印。 */
+TEST(CBackend, LeakDetectorReportsAndCleanProgramSilent) {
+  auto build_and_capture = [](const std::string &body,
+                              const char *tag) -> std::string {
+    const std::string src = write_temp_file(body, tag);
+    EXPECT_FALSE(src.empty());
+    std::filesystem::path exe = default_exe(src);
+    std::error_code ec;
+    std::filesystem::remove(exe, ec);
+    std::string err;
+    EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+    if (!std::filesystem::exists(exe)) return "<no-exe>";
+    std::string cap = (std::filesystem::path(clux_test_temp_dir()) /
+                       (std::string(tag) + ".stderr.txt"))
+                          .string();
+    (void)cap;
+    return run_capture(std::filesystem::absolute(exe).string());
+  };
+  const std::string leak =
+      build_and_capture("func main(): i32 {\n"
+                        "  _ = new i32{ 5 };\n"
+                        "  return 0;\n"
+                        "}\n",
+                        "cbackend_leak_yes");
+  EXPECT_NE(leak.find("memory leak detected:"), std::string::npos) << leak;
+  const std::string clean =
+      build_and_capture("func main(): i32 {\n"
+                        "  var p: own *i32 = new i32{ 5 };\n"
+                        "  _ = move(p);\n"
+                        "  return 0;\n"
+                        "}\n",
+                        "cbackend_leak_no");
+  EXPECT_EQ(clean.find("memory leak detected:"), std::string::npos) << clean;
 }
 
 /* 跨模块导出闭包的更多形态：泛型捕获、模块内 struct 捕获、`fatal` 返回的

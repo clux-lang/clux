@@ -482,6 +482,9 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     const char *links[128];
     size_t nlinks = 0;
     module_t *main_mod = NULL;
+    /* 两遍 lowering 的暂存（入口运行时的 any_alloc 需要先看所有模块）。 */
+    cir_unit_t **units = NULL;
+    module_t **mods = NULL;
     /* 测试用例合并表：必须在任何 `goto cleanup` 之前初始化（跨 goto 的
        局部变量不会执行初始化）。 */
     cir_test_case_t *all_cases = NULL;
@@ -510,10 +513,39 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     const char *build_dir = (pgm && pgm->build_dir) ? pgm->build_dir : "build";
     /* 测试模式：driver 把 test 块改写成各模块的 `__clux_test_N` 函数并
        记录 `mod->test_cases`；入口模块的 C 单元生成跨模块 runner。 */
+
+    /* 第一遍：lower 所有模块，统计是否有堆分配。入口单元只有在**整个程序
+       有分配**时才提供泄漏检测运行时（否则不引入 stdlib 等头，避免与用户
+       FFI 声明（如 `div`）冲突）。 */
+    units = (cir_unit_t **)calloc(nmods ? nmods : 1, sizeof(*units));
+    mods = (module_t **)calloc(nmods ? nmods : 1, sizeof(*mods));
+    if (!units || !mods) {
+        fprintf(stderr, "build: out of memory\n");
+        goto cleanup;
+    }
+    bool any_alloc = false;
     for (size_t i = 0; i < nmods; i++) {
         module_t *mod = (module_t *)vec_get(vm->module_order, i);
         if (!mod || !mod->sema || !mod->src_ast) continue;
         bool is_main = (mod == main_mod);
+        bool require_main = is_main && !emit_c_only && !object_only && !tests;
+        cir_unit_t *u = lower_one_module(arena, mod, tests, !require_main);
+        if (!u) {
+            if (diag_has_error(diag)) diag_print_all(diag);
+            goto cleanup;
+        }
+        units[i] = u;
+        mods[i] = mod;
+        if (u->uses_alloc) any_alloc = true;
+    }
+
+    /* 第二遍：路径 / 用例表 / 写文件 / 编译。 */
+    for (size_t i = 0; i < nmods; i++) {
+        module_t *mod = mods[i];
+        cir_unit_t *u = units[i];
+        if (!u || !mod) continue;
+        bool is_main = (mod == main_mod);
+        u->owns_runtime = is_main && any_alloc;
         char *base = be_mirror_base(mod->canonical, build_dir);
         if (!base) {
             fprintf(stderr, "build: out of memory\n");
@@ -540,11 +572,6 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         owned[nowned++] = c_path;
         owned[nowned++] = obj_path;
         bool require_main = is_main && !emit_c_only && !object_only && !tests;
-        cir_unit_t *u = lower_one_module(arena, mod, tests, !require_main);
-        if (!u) {
-            if (diag_has_error(diag)) diag_print_all(diag);
-            goto cleanup;
-        }
         if (tests) {
             /* 依赖模块只出测试函数（不带 runner）；用例合并到入口单元。 */
             if (!is_main) u->test_runner = false;
@@ -626,6 +653,10 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         }
         if (!emit_c_only) objs[nobjs++] = obj_path;
     }
+    free(units);
+    units = NULL;
+    free(mods);
+    mods = NULL;
     if (!emit_c_only && !object_only) {
         if (tests && ncases == 0) {
             fprintf(stderr, "test: no test blocks found in '%s'\n", src_path);
@@ -652,6 +683,8 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     rc = 0;
 
 cleanup:
+    if (units) free(units);
+    if (mods) free(mods);
     if (objs) free(objs);
     if (all_cases) {
         for (size_t i = 0; i < ncases; i++) {
@@ -887,6 +920,7 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
                     bool allow_no_main = !compile || opts->object_only;
                     unit = cbackend_lower(arena, sema, (ast_program_t *)ast,
                                           src_path, opts->tests, allow_no_main);
+                    if (unit) unit->owns_runtime = unit->uses_alloc;
                 }
             }
         }

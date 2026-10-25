@@ -248,15 +248,29 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 ---
 
-## 7. 待确认问题
+## 7. 已确认决策（2026-10-25）
 
-1. `clux eval` 与 `clux bc` 是否允许**直接删除**（无兼容保留）？
-2. 纯 VM/bcode 测试是**删除**还是移植为 C 后端等价用例？哪些覆盖必须保留？
-3. "无内存泄漏"断言：接受在生成 C 中加**调试分配器**（推荐），还是删除这些
-   断言？
-4. 宿主编译器支持范围：只承诺 clang/gcc（生成 C 使用 `$` 扩展），还是也要
-   兼容 MSVC（需要改 C 标识符 mangling）？
-5. `.cxb` 字节码文件格式是否保留读取（例如作为分发格式），还是完全移除？
+1. `clux eval` 与 `clux bc` **直接删除**（不保留兼容层）。
+2. 纯 VM/bcode 测试**直接删除**；用例后续依据白皮书重新设计实现。
+3. 泄漏检测：长期做成产品级侵入式性能工具（后续规划）；**当前阶段只实现
+   一个泄漏检测全局分配器**——在生成 C 的 `main` 中创建/销毁，
+   `clux_new`/`clux_free` 统一走该分配器（见下）。
+4. 宿主编译器只承诺 **gcc/clang**（生成 C 使用 `$` 标识符等扩展）；Windows
+   用 clang-cl 的 MSVC 兼容模式也不在本项目关心范围，不做 MSVC 兼容。
+5. `.cxb` 字节码格式**完全删除**（含读取/反汇编/执行）。
+
+### 已实现的泄漏检测全局分配器（Phase 2 前置）
+
+- 生成 C 中增加共享运行时：`clux_rt_state`（入口单元定义，依赖模块 extern），
+  `clux_rt_alloc/free/init/shutdown`；`clux_new`/`clux_make`/`clux_free`
+  全部走它。
+- `main` 进入时 `clux_rt_init()`、退出时 `clux_rt_shutdown()`；退出时若有
+  未释放块，向 stderr 打印 `memory leak detected: ...`（保留原 VM allocator
+  的诊断文本，便于测试断言）。
+- 入口单元的运行时仅在"整个程序存在堆分配"时发射（两遍 lowering 统计），
+  避免无分配程序被迫包含 `<stdlib.h>` 与用户 FFI 声明（如 `div`）冲突。
+- 已加 gtest：`CBackend.LeakDetectorReportsAndCleanProgramSilent`；跨模块
+  分配/释放/泄漏上报用 `build/tmp/rt_proj` 手工验证。
 
 ---
 
