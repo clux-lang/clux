@@ -323,5 +323,6 @@ ast_func_def_t *func_def_of_ref(lower_ctx_t *lc, ast_func_ref_t *ref) {
     sema_func_t *sf = sema_func_by_id(lc->sema, ref->fid);
     if (sf && sf->def && sf->def->kind == AST_FUNC_DEF)
         return (ast_func_def_t *)sf->def;
-    return NULL;
+    /* CTFE 折叠产生的函数字面量：函数体 AST 登记在 sema 侧。 */
+    return sema_ct_func_lit_by_fid(lc->sema, ref->fid);
 }

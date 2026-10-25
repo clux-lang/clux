@@ -392,6 +392,9 @@ ast_node_t *sema_ct_lit(sema_t *sema, const ast_node_t *origin,
         ast_func_ref_new(arena, origin->tok_begin, origin->tok_end);
     if (!ref) return NULL;
     ((ast_func_ref_t *)ref)->fid = ct->func_id;
+    /* 纯函数引用常量：把函数体 AST 登记到 sema 侧，后端（C）即使没有
+       VM 函数绑定也能按 fid 物化函数对象。 */
+    sema_ct_register_func_lit(sema, ct->func_id, ct->lit_ast);
     return ref;
   }
   if (type_kind_of(t) == TYPE_KIND_ENUM) {

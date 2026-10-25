@@ -410,6 +410,23 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     }
     if (call->callee && call->callee->kind == AST_FUNC_REF) {
         ast_func_ref_t *ref = (ast_func_ref_t *)call->callee;
+        if ((!ref->name.ptr || ref->name.len == 0) && ref->fid) {
+            ast_func_def_t *fd = func_def_of_ref(lc, ref);
+            if (fd && fd->base.parent && fd->base.parent->kind != AST_PROGRAM) {
+                cir_expr_t *callee = lower_func_literal(lc, fd);
+                if (callee) {
+                    cir_expr_t *out =
+                        cir_expr_func_call(lc->arena, callee, NULL);
+                    if (!out) return NULL;
+                    for (ast_node_t *a = call->args; a; a = a->next) {
+                        cir_expr_t *arg = lower_call_arg(lc, a);
+                        if (!arg) return NULL;
+                        cir_expr_append_arg(out, arg);
+                    }
+                    return out;
+                }
+            }
+        }
         module_t *owner = NULL;
         sema_func_t *sf = ref->fid ? sema_func_by_id(lc->sema, ref->fid) : NULL;
         if (sf) {
@@ -1069,6 +1086,10 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_FUNC_REF: {
         ast_func_ref_t *ref = (ast_func_ref_t *)e;
         ast_func_def_t *fd = func_def_of_ref(lc, ref);
+        /* CTFE 折叠出的匿名函数值（无名字）：按函数字面量物化。 */
+        if (fd && (!ref->name.ptr || ref->name.len == 0) &&
+            fd->base.parent && fd->base.parent->kind != AST_PROGRAM)
+            return lower_func_literal(lc, fd);
         strslice_t name = ref->name;
         if ((!name.ptr || name.len == 0) && fd) name = fd->name;
         if (!name.ptr) return NULL;

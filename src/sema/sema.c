@@ -72,6 +72,7 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->global_scope = NULL;
   sema->funcs = vec_new(vm->alloc, false); /* 元素手动释放（sema_func_t 无 dispose） */
   sema->closures = vec_new(vm->alloc, false);
+  sema->ct_func_lits = vec_new(vm->alloc, false);
   sema->types = vm->sema_types_global; /* 全 VM 共享类型登记表 */
   sema->fn.return_type = NULL;
   sema->fn.local_func_base = NULL;
@@ -118,6 +119,7 @@ void sema_destroy(sema_t **sema) {
     vec_free(alloc, &(*sema)->funcs);
   }
   if ((*sema)->closures) vec_free(alloc, &(*sema)->closures);
+  if ((*sema)->ct_func_lits) vec_free(alloc, &(*sema)->ct_func_lits);
   {
     sema_impl_t *im = (*sema)->impls;
     while (im) {
@@ -181,6 +183,29 @@ uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn) {
 
 /* 按函数 id 查 sema 函数对象（线性扫描，函数数量少）。函数定义 AST 托管在
    sema->funcs，sema/ctfe 经此按 id 查询（折叠产物按 fid 取签名构造引用）。 */
+ast_func_def_t *sema_ct_func_lit_by_fid(sema_t *sema, uint32_t fid) {
+  if (!sema || !sema->ct_func_lits) return NULL;
+  size_t n = vec_len(sema->ct_func_lits);
+  for (size_t i = 0; i < n; i++) {
+    sema_ct_func_lit_t *e = (sema_ct_func_lit_t *)vec_get(sema->ct_func_lits, i);
+    if (e && e->fid == fid) return e->def;
+  }
+  return NULL;
+}
+
+/* CTFE 折叠函数值时常量：登记函数体 AST，供后端按 fid 物化。 */
+void sema_ct_register_func_lit(sema_t *sema, uint32_t fid,
+                                 const struct ast_node *lit) {
+  if (!sema || !sema->ct_func_lits || !lit || lit->kind != AST_FUNC_DEF) return;
+  if (sema_ct_func_lit_by_fid(sema, fid)) return;
+  sema_ct_func_lit_t *e = (sema_ct_func_lit_t *)arena_calloc(
+      sema->arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+  if (!e) return;
+  e->fid = fid;
+  e->def = (ast_func_def_t *)lit;
+  vec_push(sema->ct_func_lits, sema->vm->alloc, e);
+}
+
 sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
   if (!sema || !sema->funcs) return NULL;
   size_t n = vec_len(sema->funcs);

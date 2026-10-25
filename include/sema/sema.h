@@ -274,6 +274,13 @@ typedef struct sema_clone_fn {
     struct sema_clone_fn  *next;
 } sema_clone_fn_t;
 
+/** CTFE 折叠产生的函数字面量：fid → AST_FUNC_DEF（函数体 AST 仍在
+ *  comptime 函数体内，但运行期函数值会按 fid 引用它；后端按需物化）。 */
+typedef struct sema_ct_func_lit {
+    uint32_t        fid;
+    ast_func_def_t *def;
+} sema_ct_func_lit_t;
+
 typedef struct sema_t {
     vm_t         *vm;           /* 复用 VM 类型注册表 + vtable + shadow value */
     diag_buf_t   *diag;         /* 诊断收集器 */
@@ -291,6 +298,8 @@ typedef struct sema_t {
        生成 env 的 vtable（__destroy_<env> / __clone_<env>）并把 fid 写回 AST，
        compiler 在 hoist 随 SET_FUNC_CAPTURES 写入函数对象。 */
     vec_t        *closures;
+    /* comptime 函数值的字面量 AST 登记（fid 不一定在 funcs 里）。 */
+    vec_t        *ct_func_lits;
 
     /* 类型队列：sema 层解析过的全部类型（resolve_type_expr 登记 + comptime
        折叠逆向登记），按 type_t 指针去重，驱动编译器 hoist 类型提升区。
@@ -717,6 +726,11 @@ uint32_t sema_func_id_alloc(sema_t *sema, ast_func_def_t *fn);
  * 未登记返回 NULL（内建函数无 AST 托管，不在此队列）。
  */
 sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid);
+/** CTFE 折叠的函数字面量：按 fid 取 AST_FUNC_DEF（没有返回 NULL）。 */
+ast_func_def_t *sema_ct_func_lit_by_fid(sema_t *sema, uint32_t fid);
+/** 登记 CTFE 折叠的函数字面量（fid -> AST_FUNC_DEF）。 */
+void sema_ct_register_func_lit(sema_t *sema, uint32_t fid,
+                               const struct ast_node *lit);
 
 /** `cfunc(...)` → `func(...)`：把表达式槽位替换成生成的包装字面量（实参/初始化共用）。 */
 bool sema_maybe_wrap_cfunc_expr(sema_t *sema, ast_node_t **slot,
