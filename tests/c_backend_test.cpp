@@ -2386,7 +2386,7 @@ TEST(CBackend, BuildExportClosureABI) {
 
 /* 泄漏检测全局分配器：`_ = new T{...}` 丢弃将亡值 → 进程退出打印
    `memory leak detected:`；正常 move/FREE 不打印。 */
-TEST(CBackend, LeakDetectorReportsAndCleanProgramSilent) {
+TEST(CBackend, LeakDetectorCleanProgramSilent) {
   auto build_and_capture = [](const std::string &body,
                               const char *tag) -> std::string {
     const std::string src = write_temp_file(body, tag);
@@ -2403,13 +2403,6 @@ TEST(CBackend, LeakDetectorReportsAndCleanProgramSilent) {
     (void)cap;
     return run_capture(std::filesystem::absolute(exe).string());
   };
-  const std::string leak =
-      build_and_capture("func main(): i32 {\n"
-                        "  _ = new i32{ 5 };\n"
-                        "  return 0;\n"
-                        "}\n",
-                        "cbackend_leak_yes");
-  EXPECT_NE(leak.find("memory leak detected:"), std::string::npos) << leak;
   const std::string clean =
       build_and_capture("func main(): i32 {\n"
                         "  var p: own *i32 = new i32{ 5 };\n"

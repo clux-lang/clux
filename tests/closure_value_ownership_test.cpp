@@ -41,7 +41,7 @@ TEST(ClosureValueOwn, ExplicitDestroy) {
 
 TEST(ClosureValueOwn, MoveIntoStructField) {
   clux_expect_ok(
-      "struct Holder { f: own func()->i32; n: i32 }\n"
+      "struct Holder { f: func |q: own *i32| () -> i32; n: i32 }\n"
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
@@ -54,7 +54,7 @@ TEST(ClosureValueOwn, MoveIntoStructField) {
 
 TEST(ClosureValueOwn, StructWithClosureFieldClone) {
   clux_expect_ok(
-      "struct Holder { f: own func()->i32; n: i32 }\n"
+      "struct Holder { f: func |q: own *i32| () -> i32; n: i32 }\n"
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
@@ -69,7 +69,7 @@ TEST(ClosureValueOwn, StructWithClosureFieldClone) {
 
 TEST(ClosureValueOwn, StructWithClosureFieldReassign) {
   clux_expect_ok(
-      "struct Holder { f: own func()->i32; n: i32 }\n"
+      "struct Holder { f: func |q: own *i32| () -> i32; n: i32 }\n"
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
@@ -116,8 +116,9 @@ TEST(ClosureValueOwn, ArrayOfOwnClosuresDestroy) {
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
-      "  var a: own [2]own func()->i32 = .[2]own func()->i32{ move(cl),\n"
-      "      clone(func |(q: i32 = 1)| get(): i32 { return q; }) };\n"
+      "  var p2: own *i32 = new i32{1};\n"
+      "  var a: own [2]own func |q: own *i32| () -> i32 = .[2]own func |q: own *i32| () -> i32{ move(cl),\n"
+      "      clone(func |(q: own *i32 = move(p2))| get(): i32 { return q.*; }) };\n"
       "  if (a[0]() != 7) { return 1; }\n"
       "  return 0;\n"
       "}\n",
@@ -172,7 +173,7 @@ TEST(ClosureValueOwn, ClosureCapturingClosure) {
       "  var p: own *i32 = new i32{7};\n"
       "  var inner = clone(func |(q: own *i32 = move(p))| get(): i32 {"
       " return q.*; });\n"
-      "  var outer = clone(func |(f: own func()->i32 = move(inner))| call(): i32 {"
+      "  var outer = clone(func |(f: own func |q: own *i32| () -> i32 = move(inner))| call(): i32 {"
       " return f(); });\n"
       "  if (outer() != 7) { return 1; }\n"
       "  return 0;\n"

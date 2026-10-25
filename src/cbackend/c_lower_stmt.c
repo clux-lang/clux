@@ -303,6 +303,65 @@ static bool emit_closure_free(lower_ctx_t *lc, cir_expr_t *ex,
     return true;
 }
 
+/* defer 捕获结构体是栈上局部；defer 体执行完后必须按槽位释放 own 捕获
+   （否则 `defer |(q: own *i32 = move(p))| {}` 泄漏）。 */
+static void defer_env_free(lower_ctx_t *lc, lower_defer_t *de,
+                           ast_func_def_t *closure, cir_stmt_t **head,
+                           cir_stmt_t **tail) {
+    if (!de || !de->env_name || !closure) return;
+    for (ast_node_t *c = closure->captures; c; c = c->next) {
+        ast_var_def_t *vd = (ast_var_def_t *)c;
+        const type_t *ct = vd->resolved_type;
+        if (!ct) ct = lookup_local(lc, vd->name);
+        if (!ct && vd->type_expr)
+            ct = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (!ct) continue;
+        const type_t *cs = type_strip_quals(ct);
+        ownership_t oq = type_ownership_of(ct);
+        char fb[256];
+        snprintf(fb, sizeof fb, "clux_f_%.*s", (int)vd->name.len,
+                 vd->name.ptr ? vd->name.ptr : "");
+        cir_expr_t *field =
+            cir_expr_member(lc->arena,
+                            cir_expr_ident(lc->arena, de->env_name),
+                            copy_arena(lc->arena, fb));
+        if (!field) continue;
+        if (cs && (type_kind_of(cs) == TYPE_KIND_PTR ||
+                   type_kind_of(cs) == TYPE_KIND_SLICE) &&
+            (oq == OWN_OWN || oq == OWN_FATAL)) {
+            cir_expr_t *target = field;
+            if (type_kind_of(cs) == TYPE_KIND_SLICE)
+                target = cir_expr_slice_data(lc->arena, field);
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+            if (!st) return;
+            lc->unit->uses_alloc = true;
+            st->expr = target;
+            append_stmt_chain(head, tail, st);
+            continue;
+        }
+        if (cs && type_kind_of(cs) == TYPE_KIND_FUNC &&
+            func_type_is_closure(cs) && oq == OWN_OWN) {
+            (void)emit_closure_free(lc, field, cs, head, tail);
+            continue;
+        }
+        if (cs && type_has_own_slots(cs)) {
+            uint32_t dfid = 0;
+            strslice_t dn = STRSLICE_EMPTY;
+            if (!sema_find_destroy_fn(lc->sema, cs, &dfid, &dn)) continue;
+            const char *cname = module_symbol(lc->arena, lc->unit, "fn_", dn);
+            if (!cname) continue;
+            cir_expr_t *call = cir_expr_call(lc->arena, cname, NULL);
+            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
+            cir_expr_append_arg(call, cir_expr_unary(lc->arena, "&", field));
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st) return;
+            st->expr = call;
+            append_stmt_chain(head, tail, st);
+        }
+    }
+}
+
+
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     if (!s || lc->failed) return NULL;
     bool noop = s->kind == AST_ASSIGN && ((ast_assign_t *)s)->sugar_noop;
@@ -336,6 +395,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             if (!d) return NULL;
             d->name = fn->name;
             d->body = fn->body;
+            d->def = fn;
             d->next = lc->defers;
             lc->defers = d;
             /* 捕获结构体：defer 体内的 `__ctx.env.<cap>` 指向这里声明的
@@ -1307,8 +1367,23 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             /* `FREE __defer_N`：defer 体已被内联，捕获结构体是栈上局部，
                没有堆环境可释放。 */
             if (op->kind == AST_IDENT &&
-                is_defer_name(((ast_ident_t *)op)->name))
+                is_defer_name(((ast_ident_t *)op)->name)) {
+                /* `FREE __defer_N`：defer 体已执行完，释放栈上捕获结构体
+                   里的 own 槽位（结构体本身随函数返回）。 */
+                lower_defer_t *de =
+                    find_defer_entry(lc, ((ast_ident_t *)op)->name);
+                if (de && de->env_name && de->def) {
+                    defer_env_free(lc, de, de->def, &head, &tail);
+                }
                 continue;
+            }
+            /* 块内具名函数（含自捕获递归）：C 里是静态函数对象，没有堆
+               env；sema 按闭包类型生成的 FREE 不应释放静态对象。 */
+            if (op->kind == AST_IDENT) {
+                lower_local_fn_t *lf =
+                    find_local_fn(lc, ((ast_ident_t *)op)->name);
+                if (lf && !lf->var_name) continue;
+            }
             const type_t *ot = infer_expr_type(lc, op);
             cir_expr_t *ex = lower_expr(lc, op);
             if (!ex) {

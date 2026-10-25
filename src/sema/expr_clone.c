@@ -301,8 +301,20 @@ static bool clone_needs_deep(const type_t *t, ownership_t slot_own,
       return top_level || slot_own == OWN_OWN;
     case TYPE_KIND_FUNC:
       /* 闭包 = 捕获聚合结构体：own 槽位（含 own 捕获）必须深拷贝 env；
-         ref/none 槽位是借用/共享引用 → 普通拷贝。 */
-      return top_level || slot_own == OWN_OWN;
+         ref/none 槽位是借用/共享引用 → 普通拷贝。字段未标 own、但捕获里
+         含 own 资源时同样是"拥有 env"，必须深拷贝。 */
+      if (top_level || slot_own == OWN_OWN) return true;
+      {
+        size_t nc = func_type_capture_count(s);
+        for (size_t i = 0; i < nc; i++) {
+          const type_t *ct = func_type_capture_type(s, i);
+          if (!ct) continue;
+          if (type_ownership_of(ct) == OWN_OWN ||
+              type_has_own_slots(type_strip_ownership(ct)))
+            return true;
+        }
+      }
+      return false;
     default:
       return type_has_own_slots(t);
   }

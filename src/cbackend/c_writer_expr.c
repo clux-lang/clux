@@ -311,16 +311,16 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, e->text ? e->text : "<null>");
         break;
     case CIR_EXPR_FUNC_CALL:
-        cw_put(sb, "(");
+        /* 闭包调用：callee 只求值一次（避免带副作用的表达式被求值两遍，
+           也避免对 option unwrap 这类右值取 &env）。 */
+        cw_put(sb, "({ __auto_type clux_c = (");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").fn((void *)&(");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").env");
+        cw_put(sb, "); clux_c.fn((void *)&clux_c.env");
         for (const cir_expr_t *a = e->args; a; a = a->next) {
             cw_put(sb, ", ");
             cw_write_expr(sb, a);
         }
-        cw_put(sb, ")");
+        cw_put(sb, "); })");
         break;
     case CIR_EXPR_CLOSURE:
         cw_put(sb, "(");

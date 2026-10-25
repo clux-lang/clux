@@ -1517,6 +1517,24 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         bool positional = (t && type_kind_of(t) != TYPE_KIND_STRUCT);
         size_t fi = 0;
         for (ast_node_t *f = c->fields; f; f = f->next, fi++) {
+            if (f->kind == AST_FILL) {
+                /* `.[N]T{<v, N>}`：值包展开成 N 个相同元素。count 已由
+                   sema 求成编译期整数；非整数则按 0 处理（诊断在 sema）。 */
+                ast_fill_t *fl = (ast_fill_t *)f;
+                uint64_t reps = 0;
+                if (fl->count && fl->count->kind == AST_INT_LIT)
+                    reps = ((ast_int_lit_t *)fl->count)->value;
+                for (uint64_t r = 0; r < reps; r++) {
+                    const type_t *ft = ctor_field_type(t, f, fi + r);
+                    cir_expr_t *ve = lower_ctor_value(lc, ft, fl->value);
+                    if (!ve) return NULL;
+                    cir_init_t *init = cir_init_new(lc->arena, NULL, ve);
+                    if (!init) return NULL;
+                    cir_expr_add_init(out, init);
+                }
+                if (reps > 0) fi += (size_t)reps - 1;
+                continue;
+            }
             const char *fname = NULL;
             ast_node_t *val = f;
             if (f->kind == AST_CONSTRUCT_FIELD) {
@@ -1552,6 +1570,71 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         lc->unit->uses_alloc = true;
         cir_expr_t *out = cir_expr_new(lc->arena, ct, NULL);
         if (!out) return NULL;
+        const type_t *tn = t ? type_strip_quals(t) : NULL;
+        if (tn && type_kind_of(tn) == TYPE_KIND_UNION) {
+            const union_member_t *mem = union_type_member(tn, n->member_tag);
+            ast_node_t *fv = n->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            cir_expr_t *v = fv ? lower_expr(lc, fv) : NULL;
+            if (!mem || !v) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: invalid union 'new'");
+                lc->failed = true;
+                return NULL;
+            }
+            char fb[256];
+            snprintf(fb, sizeof fb, "u.clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            cir_init_t *it = cir_init_new(lc->arena, copy_arena(lc->arena, "tag"),
+                                          cir_expr_int(lc->arena, mem->tag));
+            cir_init_t *iv = cir_init_new(lc->arena,
+                                          copy_arena(lc->arena, fb), v);
+            if (!it || !iv) return NULL;
+            cir_expr_add_init(out, it);
+            cir_expr_add_init(out, iv);
+            return out;
+        }
+        if (tn && type_kind_of(tn) == TYPE_KIND_CUNION) {
+            const cunion_member_t *mem = cunion_type_member(tn, n->member_tag);
+            ast_node_t *fv = n->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            cir_expr_t *v = fv ? lower_expr(lc, fv) : NULL;
+            if (!mem || !v) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: invalid cunion 'new'");
+                lc->failed = true;
+                return NULL;
+            }
+            char fb[256];
+            snprintf(fb, sizeof fb, "clux_m_%.*s", (int)mem->name.len,
+                     mem->name.ptr ? mem->name.ptr : "");
+            cir_init_t *iv = cir_init_new(lc->arena,
+                                          copy_arena(lc->arena, fb), v);
+            if (!iv) return NULL;
+            cir_expr_add_init(out, iv);
+            return out;
+        }
+        if (tn && type_kind_of(tn) == TYPE_KIND_OPTION) {
+            /* `new ?T{ nil }` / `new ?T{ v }`：clux_new 已清零（nil 即
+               ok=false）；some 需要显式初始化 ok + value。 */
+            ast_node_t *fv = n->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            if (!fv || fv->kind == AST_NIL) return out;
+            cir_expr_t *v = lower_expr(lc, fv);
+            if (!v) return NULL;
+            cir_init_t *iok = cir_init_new(lc->arena,
+                                           copy_arena(lc->arena, "ok"),
+                                           cir_expr_int(lc->arena, 1));
+            cir_init_t *iv = cir_init_new(lc->arena,
+                                          copy_arena(lc->arena, "value"), v);
+            if (!iok || !iv) return NULL;
+            cir_expr_add_init(out, iok);
+            cir_expr_add_init(out, iv);
+            return out;
+        }
         bool positional = (t && type_kind_of(t) != TYPE_KIND_STRUCT);
         size_t fi = 0;
         for (ast_node_t *f = n->fields; f; f = f->next, fi++) {

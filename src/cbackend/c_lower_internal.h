@@ -76,6 +76,7 @@ typedef struct lower_defer {
     strslice_t name;
     ast_node_t *body;
     const char *env_name; /* 内联 defer 体时 `__ctx.env` 绑定的捕获结构体局部 */
+    ast_func_def_t *def; /* defer 闭包定义（捕获槽位类型来源） */
     struct lower_defer *next;
 } lower_defer_t;
 
