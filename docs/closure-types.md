@@ -1,8 +1,8 @@
 # 闭包类型设计（closure types）
 
-状态：设计定稿（实现分阶段进行）。C 后端已完成"捕获内联 + 静态 clone/dispose"；
-VM 已把 env 内联进函数实例分配（单次分配）、捕获可写且变量/赋值的闭包拷贝按值
-语义深拷贝 env；值 data 仍是函数对象指针、实例随 VM 统一回收（未按值回收）。
+状态：设计定稿，**阶段 A–D 已完成验收**（C 静态 clone/内联 env、VM 内联实例 env +
+值语义拷贝 + 可写捕获、tests/examples 迁移、旧表示清理、文档/ABI 收尾）。
+残余为不阻塞验收的优化项（见文末"后续可选工作"）。
 
 ## 1. 核心决策
 
@@ -327,15 +327,13 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
     常绿）。
 - 因此全量 gtest 仍不宜作为唯一验收标准；按套件运行并区分环境性失败。
 
-## 未完成
+## 后续可选工作（不阻塞验收）
 
-1. **阶段 C（VM 值生命周期）**：env 已内联进**函数实例分配**，变量/赋值/
-   聚合内部的闭包槽位拷贝都已按值语义深拷贝 env（见上），但值 data 仍是
-   `func_t*`，实例统一挂在 `vm->functions` 直到 VM 销毁（不做按值回收）。
-   真正的按值生命周期需要值 data 内联捕获块，或实例引用计数 +
-   `value_dispose` 回收；后者牵动 `func_assign`/`value_clone`（move 是运行期
-   字节拷贝，不能无条件深拷贝）。改动面：`include/vm/function.h`、
-   `src/vm/type_func.c`、`exec_stack.c`、`exec_memory.c`、`type_ptr.c`。
+1. **VM 按值实例回收（优化）**：env 已内联进函数实例分配，变量/赋值/聚合内部
+   闭包槽位拷贝都按值语义深拷贝 env，own 捕获无泄漏（`ClosureValueOwn` 全组
+   验证）；实例仍统一挂在 `vm->functions` 直到 VM 销毁。按值回收属于内存上限
+   优化，需要引用计数/值内联捕获块，并牵动 `func_assign`/`value_clone`（move
+   是运行期字节拷贝，不能无条件深拷贝）。
 2. **运行期闭包值的类型身份仍是签名类型**：sema 的闭包常量/变量是闭包类型
    （捕获进入身份），但 `func_instantiate` 产出的运行期 value type 仍是普通
    `func_type_t`（sig 与闭包类型共享布局；`capture_type` 挂在函数对象上）。
