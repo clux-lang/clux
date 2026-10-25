@@ -137,6 +137,20 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
      所有权已经是类型的一部分：两侧都先剥到裸类型再比身份，于是
      `own *T` / `fatal *T` 与 `*T` 在 C ABI 表示上等价；`ref *T` 也按裸指针
      表示处理（C 侧看不到借用语义）。 */
+  /* 指针形参：C 允许把 `T*` 传给 `const T*`（加 const 是隐式转换）。
+     基类型按去掉 const/volatile 后比较；`opaque`（void*）可传给任意
+     const 指针，这样 `memcmp(data(x), ...)` 这类零拷贝调用合法。 */
+  if (type_is_ptr(pt)) {
+    const type_t *pb = ffi_strip_quals(ptr_type_base(pt));
+    /* `T *` → `const void *`（C 隐式转换）：基类型是 opaque 时接受任何指针。 */
+    if (pb == sema->vm->type_opaque) return true;
+    if (at == sema->vm->type_opaque) return true;
+    if (type_is_ptr(at)) {
+      const type_t *ab = ffi_strip_quals(ptr_type_base(at));
+      if (ffi_arg_acceptable(sema, pb, ab)) return true;
+    }
+    return false;
+  }
   return type_strip_ownership(pt) == type_strip_ownership(at);
 }
 

@@ -38,7 +38,7 @@ clux AST（sema 之后、已单态化）
   （`const` 在 FFI C 类型里保留，映射为 `const void *`）；`memcmp` 的
   指针参数同样是 `ref *const opaque`。声明不一致时由 C 编译器直接报
   `conflicting types`，应按标准库修正 clux 声明，而不是让后端绕过；
-- FFI 的 `str`：**参数位置**映射 `const char *`，**返回值位置**映射
+- FFI 实参转换按 C 规则放宽：`T *` 可传给 `const T *` / `const void *`\n  （`memcmp(data(a), ...)` 等零拷贝调用合法；形参是 `*const opaque` 时\n  接受任何指针）；\n- FFI 的 `str`：**参数位置**映射 `const char *`，**返回值位置**映射
   `char *`（与 libc 的 `getenv`/`strdup` 等原型一致；返回后仍用
   `clux_str_from_c` 包成 clux `str`）；
 - 失败跳转使用 clang/gcc `__builtin_setjmp/__builtin_longjmp`（5 指针
