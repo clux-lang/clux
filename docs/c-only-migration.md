@@ -353,9 +353,9 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 - `clux`、`clux_test` 构建通过；`clux run` hello/closure/decorator/
   decorator_param 通过；`clux test <file>` 通过。
-- `CBackend + CBackendDiff`：95 passed（其余为已知环境性 FFI callback/death-test
+- `CBackend + CBackendDiff`：96 passed（其余为已知环境性 FFI callback/death-test
   失败）。
-- 全量逐套件：127 个套件，失败 21 个（见下），其余全绿。
+- 全量逐套件：127 个套件，失败 19 个（见下），其余全绿。
 
 **仍失败的套件（按优先级）**
 
@@ -365,11 +365,11 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
   局部函数值、`cfunc_ptr`、运行期诊断/越界行为等 C lowering 缺口。
 - `GenericType`（2）、`GenericValueParam`（1）、`GenericPack`（4）、
   `GenericConstraint`（1）：泛型实例化/option 包装的 C lowering。
-- `OwnSlotCopy`（2）、`ExplicitDestroy`（3）、`UnionMemberMove`（2）、
-  `TagUnionOwn`（1）：union/option own 槽位的 C 表示与销毁。
+- `OwnSlotCopy`（2）、`UnionMemberMove`（2）、`TagUnionOwn`（1）：
+  union/option own 槽位的 C 表示与销毁。
 - `ErrorHandling`（3）：任意表达式位置的 `try`。
-- `ComptimeIf`（1）、`Decorator`（1）、`SpreadArgs`（1）、`NilCompareExpr`（1）、
-  `DeepOwn`（1）：零散 C lowering/测试夹具有待逐项处理。
+- `ComptimeIf`（1）、`Decorator`（1）、`NilCompareExpr`（1）、`DeepOwn`（1）：
+  零散 C lowering/测试夹具有待逐项处理。
 - `CBackend`（11）：FFI callback SEH、death-test 环境（非逻辑失败）。
 
 这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
