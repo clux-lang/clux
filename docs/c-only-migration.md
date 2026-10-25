@@ -355,23 +355,31 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
   decorator_param 通过；`clux test <file>` 通过。
 - `CBackend + CBackendDiff`：97 passed；`CBackend` 套件里仅剩 death-test /
   多进程 test-runner 崩溃回退相关的环境性失败（单独运行均通过）。
-- 全量逐套件：127 个套件，逻辑失败只剩 `ShareWeak`（9）；`CBackend` 的
-  失败是子进程崩溃/退出码处理的环境问题。
+- 全量逐套件：127 个套件，失败 2 个（`CBackend` 环境项、`Reflect` 编译器
+  进程崩溃）；其余全绿。
 
 **仍失败的套件**
 
-- `ShareWeak`（9）：C 后端没有 share/weak RC 运行时。C lowering 对
-  `__make_share` / `__weak_get` 仍报 "no C definition"，需要实现 RC 控制块
-  与 copy/retain/release 插入。
-- `CBackend`（9，环境性）：death-test 与多进程 test-runner 在 Windows 上
+- `Reflect`（9，环境/编译器进程崩溃）：源码含 `type C = cfunc(...)` 加任意
+  字符串/局部值时，`clux build --emit-c` 在写完 C 之后、进程退出阶段于
+  MSVCP/ucrt 清理路径崩溃（0xC0000005）；生成的 C 手工用 clang 编译完全
+  正常。C 后端语义与反射代码生成正确，问题在编译器宿主进程清理，单独
+  用 driver 路径即可复现。
+- `CBackend`（11，环境性）：death-test 与多进程 test-runner 在 Windows 上
   返回 `0xC0000374/0xC0000409`，触发 gtest 回退后连带 callback 用例；
   单用例运行通过。
 
-已在本轮修复：泛型实例装饰器、return 位置等布局实例 bitcast、
-`undefined` 局部零初始化、泛型值包/约束测试常量、`try` 表达式全绿、
-union 成员 move / reinit 全绿、Driver/DriverImport/CfuncToFunc/
-ErrorHandling/Decorator/GenericPack/GenericConstraint/UnionMemberMove
-全部通过。
+**本轮完成：share/weak RC 运行时**
+
+- C 后端生成 RC 控制块（64 字节头 + payload，`p.*` 语义不变）：
+  `clux_rc_new/retain/release`、weak retain/release、RC upgrade。
+- `__make_share` 把 `new` 的 payload 搬入 RC 块（原块直接归还，不跑析构），
+  payload 带 own 槽位时确保 `__destroy_<T>` 已生成，strong→0 时递归析构。
+- `__weak_get` 生成 `?share`；share/weak 在 var init / assignment /
+  constructor 字段 / array 元素等拷贝点插入 retain；FREE 按类型 release，
+  option 内的 share payload 也能正确递减。
+- `ShareWeak` 12/12 全绿（含弱计数、最后 share 释放后 get 为 nil、
+  payload own 资源递归释放）。
 
 这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
 重设计对应测试）。目标在本轮保持 active。
