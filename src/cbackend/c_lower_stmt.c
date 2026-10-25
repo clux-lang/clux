@@ -1301,21 +1301,45 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             deref = true;
             base = ((ast_deref_t *)src)->operand;
         }
-        if (!base || base->kind != AST_IDENT) {
+        cir_stmt_t *srcvar = NULL;
+        const char *raw = NULL;
+        if (base && base->kind == AST_IDENT) {
+            raw = module_symbol(lc->arena, lc->unit, "v_",
+                                ((ast_ident_t *)base)->name);
+        } else {
+            /* foreach 的源可以是成员/解引用等任意左值：先取地址到局部
+               指针（只求值一次），循环长度/元素都通过 `(*p)` 访问。 */
+            cir_expr_t *mexpr = lower_expr(lc, src);
+            if (!mexpr) {
+                *ok = false;
+                return NULL;
+            }
+            char pn[48];
+            snprintf(pn, sizeof pn, "clux_src_%u", lc->assign_seq++);
+            const char *pname = copy_arena(lc->arena, pn);
+            srcvar = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (!srcvar) return NULL;
+            srcvar->name = pname;
+            srcvar->expr = cir_expr_unary(lc->arena, "&", mexpr);
+            char rb[80];
+            snprintf(rb, sizeof rb, "(*%s)", pname);
+            raw = copy_arena(lc->arena, rb);
+        }
+        if (!raw) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, s),
-                       "c backend: generated index loop source must be an array variable (%s)",
-                       src ? ast_kind_name(src->kind) : "-");
+                       "c backend: generated index loop source is unsupported");
             *ok = false;
             return NULL;
         }
         const char *vn = module_symbol(lc->arena, lc->unit, "v_", fi->var);
-        const char *raw = module_symbol(lc->arena, lc->unit, "v_",
-                                 ((ast_ident_t *)base)->name);
-        if (!vn || !raw) return NULL;
+        if (!vn) return NULL;
         char srcbuf[512];
-        snprintf(srcbuf, sizeof srcbuf, deref ? "(*%s)" : "%s", raw);
+        snprintf(srcbuf, sizeof srcbuf, deref ? "(%s)" : "%s", raw);
         const char *an = copy_arena(lc->arena, srcbuf);
-        const type_t *stype = lookup_local(lc, ((ast_ident_t *)base)->name);
+        const type_t *stype =
+            base && base->kind == AST_IDENT
+                ? lookup_local(lc, ((ast_ident_t *)base)->name)
+                : infer_expr_type(lc, src);
         if (stype && deref && type_kind_of(type_strip_quals(stype)) == TYPE_KIND_PTR)
             stype = ptr_type_base(stype);
         bool slice_src = stype && type_kind_of(type_strip_quals(stype)) == TYPE_KIND_SLICE;
@@ -1342,6 +1366,13 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             cir_expr_binary(lc->arena, "+", cir_expr_ident(lc->arena, vn),
                             cir_expr_int(lc->arena, 1)));
         st->body = lower_block(lc, fi->body, ok);
+        if (srcvar) {
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) return NULL;
+            blk->body = srcvar;
+            srcvar->next = st;
+            return blk;
+        }
         return st;
     }
     case AST_DEFER: {

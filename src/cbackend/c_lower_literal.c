@@ -31,6 +31,11 @@ cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call) {
         return NULL;
     }
     cir_expr_t *obj = lower_expr(lc, arg);
+    if (type_kind_of(type_strip_quals(ot)) == TYPE_KIND_TUPLE) {
+        /* 元组长度是编译期常量，C 里没有 `.data/len` 字段。 */
+        return cir_expr_int(lc->arena,
+                            (int64_t)tuple_type_elem_count(type_strip_quals(ot)));
+    }
     cir_type_t *ct = map_type(lc, ot);
     return obj && ct ? cir_expr_len(lc->arena, obj, ct) : NULL;
 }

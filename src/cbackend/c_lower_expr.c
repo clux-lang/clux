@@ -309,6 +309,25 @@ static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
             return v ? cir_expr_option(lc->arena, cot, true, v) : NULL;
         }
     }
+    /* 嵌套匿名构造：`.{ .value = .{...} }` 的内层构造常被 sema 推断成
+       另一个等布局的结构实例；把内层构造的类型槽临时指向字段类型，避免
+       C 里两个不同 struct 类型不兼容。 */
+    if (st && type_kind_of(st) == TYPE_KIND_STRUCT &&
+        val->kind == AST_CONSTRUCT) {
+        ast_construct_t *cc = (ast_construct_t *)val;
+        const type_t *own = cc->type ? sema_resolve_type_slot(lc->sema, &cc->type)
+                                     : NULL;
+        if (type_strip_quals(st) != (own ? type_strip_quals(own) : NULL)) {
+            ast_node_t *ref = sema_gen_type_ref(lc->sema, type_strip_quals(st));
+            if (ref) {
+                ast_node_t *saved = cc->type;
+                cc->type = ref;
+                cir_expr_t *out = lower_expr(lc, val);
+                cc->type = saved;
+                return out;
+            }
+        }
+    }
     return lower_expr(lc, val);
 }
 

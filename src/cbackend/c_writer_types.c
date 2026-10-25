@@ -61,7 +61,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
         t->emitted = true;
         for (cir_field_t *f = t->fields; f; f = f->next) {
             if (f->type &&
-               (f->type->kind == CIR_TYPE_STRUCT ||
+               (f->type->kind == CIR_TYPE_STRUCT || f->type->kind == CIR_TYPE_STR ||
                  f->type->kind == CIR_TYPE_ARRAY ||
                  f->type->kind == CIR_TYPE_SLICE ||
                  f->type->kind == CIR_TYPE_OPTION ||
@@ -120,7 +120,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
         break;
     case CIR_TYPE_UNION:
         for (cir_field_t *f = t->fields; f; f = f->next)
-            if (f->type && (f->type->kind == CIR_TYPE_STRUCT ||
+            if (f->type && (f->type->kind == CIR_TYPE_STRUCT || f->type->kind == CIR_TYPE_STR ||
                             f->type->kind == CIR_TYPE_ARRAY ||
                             f->type->kind == CIR_TYPE_SLICE ||
                             f->type->kind == CIR_TYPE_OPTION ||
@@ -141,7 +141,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
         break;
     case CIR_TYPE_CUNION:
         for (cir_field_t *f = t->fields; f; f = f->next)
-            if (f->type && (f->type->kind == CIR_TYPE_STRUCT ||
+            if (f->type && (f->type->kind == CIR_TYPE_STRUCT || f->type->kind == CIR_TYPE_STR ||
                             f->type->kind == CIR_TYPE_ARRAY ||
                             f->type->kind == CIR_TYPE_SLICE ||
                             f->type->kind == CIR_TYPE_OPTION ||
