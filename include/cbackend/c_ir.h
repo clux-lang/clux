@@ -86,6 +86,7 @@ typedef enum {
     CIR_EXPR_OPTION,
     CIR_EXPR_OPT_IS_SOME,
     CIR_EXPR_UNWRAP,
+    CIR_EXPR_TAKE,      /* take_opt(x)：取 payload 并把 x 置 nil（仅左值） */
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
     CIR_EXPR_UNION_AT,   /* 带 tag 校验的 union 成员访问（左值） */
@@ -348,6 +349,8 @@ cir_expr_t    *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,
 cir_expr_t    *cir_expr_opt_is_some(arena_t *arena, cir_expr_t *object,
                                     bool want_some);
 cir_expr_t    *cir_expr_unwrap(arena_t *arena, cir_expr_t *object);
+/** take_opt(x)：取 optional payload 并把 x 置 nil；x 必须是左值。 */
+cir_expr_t    *cir_expr_take(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
                                         size_t tag, const char *field,
                                         cir_expr_t *value);

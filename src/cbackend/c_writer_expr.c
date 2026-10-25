@@ -214,6 +214,17 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_write_expr(sb, e->lhs);
         cw_put(sb, ").value))");
         break;
+    case CIR_EXPR_TAKE:
+        /* GNU statement expression：只求值一次左值，取 payload 后置 nil。 */
+        cw_put(sb, "({ __typeof__(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ") *clux_take_p = &(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, "); __typeof__(*clux_take_p) clux_take_v = *clux_take_p; ");
+        cw_put(sb, "*clux_take_p = (__typeof__(*clux_take_p)){0}; ");
+        cw_put(sb, "clux_take_v.ok ? clux_take_v.value : "
+                   "(clux_panic_none(), clux_take_v.value); })");
+        break;
     case CIR_EXPR_UNION_CONSTRUCT:
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");

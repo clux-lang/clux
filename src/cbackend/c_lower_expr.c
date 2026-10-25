@@ -446,7 +446,26 @@ static cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
     return cir_expr_bitcast(lc->arena, ct, st, v);
 }
 
+/* take_opt(x)：sema 标记 is_take_call，运行期取 payload 并把 x 置 nil。
+   C 侧用 GNU statement expression 保证 x 只求值一次；x 必须是左值。 */
+static cir_expr_t *lower_take_opt(lower_ctx_t *lc, ast_call_t *call) {
+    ast_node_t *arg = call->args;
+    if (arg && arg->kind == AST_CONSTRUCT_FIELD)
+        arg = ((ast_construct_field_t *)arg)->value;
+    if (!arg) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                   "c backend: take_opt requires an argument");
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_t *obj = lower_expr(lc, arg);
+    if (!obj) return NULL;
+    lc->unit->uses_opt_unwrap = true;
+    return cir_expr_take(lc->arena, obj);
+}
+
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
+    if (call->is_take_call) return lower_take_opt(lc, call);
     strslice_t cname0 = STRSLICE_EMPTY;
     if (call->callee && call->callee->kind == AST_IDENT)
         cname0 = ((ast_ident_t *)call->callee)->name;
