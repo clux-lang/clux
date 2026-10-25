@@ -222,6 +222,7 @@ typedef struct cir_global {
     cir_type_t  *type;
     cir_expr_t  *init;
     bool         is_exported; /* `export var`：非 static，头文件 extern */
+    bool         needs_init;  /* init 含运行期调用：main 入口前赋值 */
     struct cir_global *next;
 } cir_global_t;
 
@@ -397,6 +398,8 @@ cir_function_t  *cir_function_new(arena_t *arena, const char *name,
 void cir_unit_add_signature(cir_unit_t *u, cir_signature_t *sig);
 void cir_unit_add_function(cir_unit_t *u, cir_function_t *fn);
 void cir_unit_add_global(cir_unit_t *u, cir_global_t *g);
+/** C 文件作用域可用的常量初始化表达式（无调用/无分配）。 */
+bool cir_expr_is_constant(const cir_expr_t *e);
 void cir_unit_add_raw(cir_unit_t *u, const char *code);
 /** extern cfunc 的 C 函数指针 typedef / extern 原型（按添加顺序输出）。 */
 void cir_unit_add_extern_typedef(cir_unit_t *u, const char *code);

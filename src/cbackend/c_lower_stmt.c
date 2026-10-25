@@ -393,6 +393,14 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                                  : module_symbol(lc->arena, lc->unit,
                                                  "fnval_", orig_name);
             register_local_as(lc, orig_name, ft, vn);
+            if (lfe && lfe->predeclared) {
+                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+                if (!st) return NULL;
+                st->lhs = cir_expr_ident(lc->arena, vn);
+                st->op = "=";
+                st->expr = cl;
+                return st;
+            }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
             if (!st) return NULL;
             st->type = ct;
@@ -1092,6 +1100,7 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
        依赖这一点回退）。 */
     lower_local_t *save_locals = lc->locals;
     lower_local_fn_t *save_fns = lc->local_fns;
+    cir_stmt_t *decl_head = NULL, *decl_tail = NULL;
     /* 预登记块内**无值捕获**的具名函数：调用点可能出现在定义之前（自递归/
        后向兄弟），先建 名字→静态 C 函数 映射。值捕获的走闭包值路径，不在
        预登记范围内。 */
@@ -1125,11 +1134,26 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
             lf->is_closure = true;
             lf->var_name = module_symbol(lc->arena, lc->unit, "fnval_",
                                          fn->name);
+            /* 互递归/前向引用：闭包值局部在块入口先声明，定义点赋值。 */
+            cir_type_t *fct = map_type(lc, ftype);
+            cir_stmt_t *decl = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (fct && decl) {
+                decl->type = fct;
+                decl->name = lf->var_name;
+                lf->predeclared = true;
+                if (decl_tail) decl_tail->next = decl;
+                else decl_head = decl;
+                decl_tail = decl;
+            }
         }
         lf->next = lc->local_fns;
         lc->local_fns = lf;
     }
     cir_stmt_t *result = lower_block_scoped(lc, block, ok);
+    if (decl_head) {
+        if (decl_tail) decl_tail->next = result;
+        result = decl_head;
+    }
     lc->locals = save_locals;
     lc->local_fns = save_fns;
     return result;

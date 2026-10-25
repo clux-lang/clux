@@ -384,6 +384,7 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         g->is_exported = ((ast_node_t *)vd)->is_exported;
         if (vd->init && vd->init->kind != AST_UNDEF)
             g->init = lower_expr(&lc, vd->init);
+        g->needs_init = g->init && !cir_expr_is_constant(g->init);
         cir_unit_add_global(u, g);
     }
 

@@ -422,6 +422,30 @@ cir_expr_t *cir_expr_cast(arena_t *arena, cir_type_t *type,
     return e;
 }
 
+bool cir_expr_is_constant(const cir_expr_t *e) {
+    if (!e) return true;
+    switch (e->kind) {
+    case CIR_EXPR_INT:
+    case CIR_EXPR_FLOAT:
+    case CIR_EXPR_BOOL:
+    case CIR_EXPR_STRING:
+    case CIR_EXPR_FUNC_OBJ:
+        return true;
+    case CIR_EXPR_CAST:
+    case CIR_EXPR_BITCAST:
+    case CIR_EXPR_UNARY:
+    case CIR_EXPR_MEMBER:
+        return cir_expr_is_constant(e->lhs);
+    case CIR_EXPR_CONSTRUCT: {
+        for (const cir_init_t *it = e->inits; it; it = it->next)
+            if (!cir_expr_is_constant(it->value)) return false;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 cir_expr_t *cir_expr_bitcast(arena_t *arena, cir_type_t *type,
                              cir_type_t *src_type, cir_expr_t *value) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(

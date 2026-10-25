@@ -80,6 +80,23 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return NULL;
     }
     case AST_MEMBER: {
+        /* `__ctx.env.<cap>`：捕获字段的类型来自闭包捕获表。 */
+        {
+            ast_member_t *cm = (ast_member_t *)e;
+            if (cm->object && cm->object->kind == AST_MEMBER) {
+                ast_member_t *om = (ast_member_t *)cm->object;
+                if (om->object && om->object->kind == AST_IDENT &&
+                    strslice_eq(((ast_ident_t *)om->object)->name,
+                                STRSLICE_LIT("__ctx")) &&
+                    strslice_eq(om->field, STRSLICE_LIT("env"))) {
+                    for (lower_capture_t *c = lc->captures; c; c = c->next)
+                        if (c->name.len == cm->field.len &&
+                            memcmp(c->name.ptr, cm->field.ptr,
+                                   c->name.len) == 0)
+                            return c->type;
+                }
+            }
+        }
         ast_member_t *m = (ast_member_t *)e;
         if (m->is_bitfield) return bitfield_value_type(lc, m->bit_value_type_id);
         const type_t *ot = infer_expr_type(lc, m->object);

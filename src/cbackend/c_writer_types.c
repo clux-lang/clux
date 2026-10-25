@@ -166,6 +166,24 @@ void cw_emit_all_types(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next) cw_emit_type(sb, t);
 }
 
+/* 延迟发射：名字以 prefix 开头的类型（如闭包 env 结构体，字段引用函数签名
+   struct，必须在签名定义之后）。 */
+void cw_emit_all_types_except(string_t *sb, cir_type_t *types,
+                              const char *prefix) {
+    for (cir_type_t *t = types; t; t = t->next)
+        if (!(prefix && t->c_name && strncmp(t->c_name, prefix,
+                                             strlen(prefix)) == 0))
+            cw_emit_type(sb, t);
+}
+
+void cw_emit_types_with_prefix(string_t *sb, cir_type_t *types,
+                               const char *prefix) {
+    for (cir_type_t *t = types; t; t = t->next)
+        if (prefix && t->c_name &&
+            strncmp(t->c_name, prefix, strlen(prefix)) == 0)
+            cw_emit_type(sb, t);
+}
+
 void cw_emit_header_types(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next)
         if (t->in_header) cw_emit_type(sb, t);

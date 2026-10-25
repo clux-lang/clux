@@ -594,6 +594,80 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         }
     }
     if (!name.ptr) {
+        /* `__ctx.env.<fn>`（自递归/兄弟引用）：直接映射到块内局部函数。 */
+        if (call->callee && call->callee->kind == AST_MEMBER) {
+            ast_member_t *cm = (ast_member_t *)call->callee;
+            if (cm->object && cm->object->kind == AST_MEMBER) {
+                ast_member_t *om = (ast_member_t *)cm->object;
+                if (om->object && om->object->kind == AST_IDENT &&
+                    strslice_eq(((ast_ident_t *)om->object)->name,
+                                STRSLICE_LIT("__ctx")) &&
+                    strslice_eq(om->field, STRSLICE_LIT("env"))) {
+                    /* 自递归：直接调用自身 static 函数，env 传自己的 env。 */
+                    if (lc->cur_fn_cname && lc->cur_self_name.len ==
+                                                 cm->field.len &&
+                        memcmp(lc->cur_self_name.ptr, cm->field.ptr,
+                               cm->field.len) == 0) {
+                        cir_expr_t *lout =
+                            cir_expr_call(lc->arena, lc->cur_fn_cname, NULL);
+                        if (!lout) return NULL;
+                        cir_expr_append_arg(
+                            lout, cir_expr_ident(
+                                      lc->arena,
+                                      lc->cur_env_param ? lc->cur_env_param
+                                                        : "env"));
+                        for (ast_node_t *a = call->args; a; a = a->next) {
+                            cir_expr_t *arg = lower_call_arg(lc, a);
+                            if (!arg) return NULL;
+                            cir_expr_append_arg(lout, arg);
+                        }
+                        return lout;
+                    }
+                    lower_local_fn_t *lf = find_local_fn(lc, cm->field);
+                    if (lf && !lf->is_closure) {
+                        cir_expr_t *lout = NULL;
+                        if (lf->is_closure && lf->var_name) {
+                            cir_expr_t *callee =
+                                cir_expr_ident(lc->arena, lf->var_name);
+                            lout = callee
+                                       ? cir_expr_func_call(lc->arena, callee,
+                                                            NULL)
+                                       : NULL;
+                        } else {
+                            lout = cir_expr_call(lc->arena, lf->cname, NULL);
+                            if (lout)
+                                cir_expr_append_arg(
+                                    lout, cir_expr_ident(lc->arena, "NULL"));
+                        }
+                        if (!lout) return NULL;
+                        for (ast_node_t *a = call->args; a; a = a->next) {
+                            cir_expr_t *arg = lower_call_arg(lc, a);
+                            if (!arg) return NULL;
+                            cir_expr_append_arg(lout, arg);
+                        }
+                        return lout;
+                    }
+                }
+            }
+        }
+        /* 兜底：callee 是任意函数值表达式（成员链/装饰器包装体等）。 */
+        if (call->callee) {
+            const type_t *fct = infer_expr_type(lc, call->callee);
+            if (fct &&
+                type_kind_of(type_strip_quals(fct)) == TYPE_KIND_FUNC) {
+                cir_expr_t *callee = lower_expr(lc, call->callee);
+                if (!callee) return NULL;
+                cir_expr_t *out =
+                    cir_expr_func_call(lc->arena, callee, NULL);
+                if (!out) return NULL;
+                for (ast_node_t *a = call->args; a; a = a->next) {
+                    cir_expr_t *arg = lower_call_arg(lc, a);
+                    if (!arg) return NULL;
+                    cir_expr_append_arg(out, arg);
+                }
+                return out;
+            }
+        }
 
         /* 典型缺口：跨模块泛型调用 `mod::f[i32](...)`（实例由 sema 追加到
            定义模块的 prog，调用点形态是 AST_INDEX/泛型引用）。 */
@@ -687,6 +761,7 @@ static void ensure_static_attr_global(lower_ctx_t *lc, const char *cname,
         return;
     }
     if (init_expr) g->init = lower_expr(lc, init_expr);
+    g->needs_init = g->init && !cir_expr_is_constant(g->init);
     g->is_exported = false;
     cir_unit_add_global(lc->unit, g);
 }

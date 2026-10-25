@@ -124,6 +124,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lower_local_t *save_locals = lc->locals;
     lower_local_fn_t *save_local_fns = lc->local_fns;
     lower_capture_t *save_caps = lc->captures;
+    strslice_t orig = fn->name;
     unsigned seq = lc->fnlit_seq++;
     char nb[64];
     snprintf(nb, sizeof nb, "__closure_%u", seq);
@@ -138,7 +139,6 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     cir_type_t *env = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
                                    copy_arena(lc->arena, envtag));
     if (!env) return NULL;
-    cir_unit_add_type(lc->unit, env);
     lc->unit->uses_alloc = true;
 
     cir_init_t *inits = NULL;
@@ -168,8 +168,17 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         if (vd->init && vd->init->kind != AST_UNDEF) {
             ve = lower_expr(lc, vd->init);
         } else {
-            const char *val = capture_or_var(lc, vd->name);
-            ve = val ? cir_expr_ident(lc->arena, val) : NULL;
+            lower_local_fn_t *clf = find_local_fn(lc, vd->name);
+            if (clf && clf->is_closure && clf->var_name) {
+                ve = cir_expr_ident(lc->arena, clf->var_name);
+            } else if (clf) {
+                cir_type_t *fct = map_type(lc, clf->type);
+                ve = fct ? cir_expr_func_obj(lc->arena, clf->obj, fct)
+                         : NULL;
+            } else {
+                const char *val = capture_or_var(lc, vd->name);
+                ve = val ? cir_expr_ident(lc->arena, val) : NULL;
+            }
         }
         if (!ve) return NULL;
         cir_init_t *init = cir_init_new(lc->arena, f->name, ve);
@@ -252,6 +261,9 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         it = next;
     }
 
+    /* 捕获字段类型（如 cfunc 签名 struct）先入 unit，保证定义顺序。 */
+    cir_unit_add_type(lc->unit, env);
+
     lower_capture_t *caps = NULL;
     for (ast_node_t *c = fn->captures; c; c = c->next) {
         ast_var_def_t *vd = (ast_var_def_t *)c;
@@ -259,6 +271,13 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
             lc->arena, 1, sizeof(*cp), ALIGNOF(max_align_t));
         if (!cp) return NULL;
         cp->name = vd->name;
+        cp->type = vd->resolved_type;
+        if (!cp->type && vd->type_expr)
+            cp->type = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (!cp->type) {
+            lower_local_fn_t *lf = find_local_fn(lc, vd->name);
+            if (lf) cp->type = lf->type;
+        }
         char eb[512];
         snprintf(eb, sizeof eb, "((%s *)env)->clux_f_%.*s", envtag,
                  (int)vd->name.len, vd->name.ptr ? vd->name.ptr : "");
@@ -267,9 +286,15 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
         caps = cp;
     }
 
+    strslice_t save_self = lc->cur_self_name;
+    const char *save_fc = lc->cur_fn_cname;
+    const char *save_ep = lc->cur_env_param;
+    lc->cur_self_name = orig;
+    lc->cur_fn_cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
+    lc->cur_env_param = "env";
+
     lc->locals = NULL;
     lc->local_decls = NULL;
-    lc->local_fns = NULL;
     lc->captures = caps;
     lc->defers = NULL;
     lc->cleanup = NULL;
@@ -280,6 +305,9 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lc->locals = save_locals;
     lc->local_fns = save_local_fns;
     lc->captures = save_caps;
+    lc->cur_self_name = save_self;
+    lc->cur_fn_cname = save_fc;
+    lc->cur_env_param = save_ep;
     lc->return_type = save_ret;
     lc->ret_seq = save_ret_seq;
     if (!cf) return NULL;

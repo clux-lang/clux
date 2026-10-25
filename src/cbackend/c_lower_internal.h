@@ -85,6 +85,7 @@ typedef struct lower_local_fn {
     const char *var_name; /* 闭包值局部变量名（is_closure 时） */
     bool is_closure;      /* 有值捕获：调用走闭包值 */
     uint32_t fid;         /* sema 函数 id（本地函数引用按 fid 解析） */
+    bool predeclared;     /* 闭包值局部已在块入口前向声明 */
     const type_t *type;
     struct lower_local_fn *next;
 } lower_local_fn_t;
@@ -99,6 +100,7 @@ typedef struct lower_local {
 typedef struct lower_capture {
     strslice_t name;
     const char *expr;
+    const type_t *type;
     struct lower_capture *next;
 } lower_capture_t;
 
@@ -155,6 +157,10 @@ typedef struct lower_ctx {
     sema_t  *sema;
     cir_unit_t *unit;
     lower_defer_t *defers;
+    /* 当前正在 lowering 的函数：闭包自递归直接调用自身 static 函数。 */
+    strslice_t cur_self_name;
+    const char *cur_fn_cname;
+    const char *cur_env_param;
     /* 局部具名函数（块内 `func`）：名字 → 静态 C 函数/函数对象。 */
     lower_local_fn_t *local_fns;
     /* 正在内联的 defer 体的捕获结构体局部名（`__ctx.env` → 它）。 */
