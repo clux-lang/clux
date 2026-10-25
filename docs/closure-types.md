@@ -263,7 +263,9 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - raw helper 改为**追加**（`cir_unit_add_raw_append`）：被调用的嵌套 clone
   helper 先于调用者发射（原来的 prepend 顺序会先引用后定义）。
 - 新 gtest：`CBackend.BuildNestedClosureCaptureClone`（own 闭包捕获 own 闭包
-  + clone，两层 env 独立释放）。
+  + clone，两层 env 独立释放）、`CBackend.BuildClosureAggregateCaptureFree`
+  （捕获"含 own 槽位的聚合"时 FREE 走生成的 `__destroy_<T>(ref *T)`，不再对
+  结构体值 `clux_free`）。
 
 ## 当前状态 / 已知红
 
@@ -298,9 +300,10 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
    的类型身份与之一致——但后者会牵动 `func_instantiate`/`value_assign`/
    `implicit_cast`（本次试过：直接改运行期值类型会让 `ClosureValueOwn`
    整组失败，已回退），需要成组改造。
-3. **闭包捕获聚合的 FREE**：C 的 `emit_closure_free` 对 FUNC（递归）与
-   own 指针/切片已覆盖；捕获槽是"含 own 字段的 struct/tuple/array"且槽位
-   所有权为 NONE 时仍未按类型生成销毁（沿用旧行为，只处理 own/fatal 槽位）。
+3. **闭包捕获聚合的 clone**：C 的 `emit_closure_free` 对 FUNC（递归）、
+   own 指针/切片、含 own 槽位的聚合（`__destroy_<T>`）已覆盖；clone 侧对
+   聚合捕获走生成的 `__clone_<T>`（kind 0），也已覆盖。剩余：捕获槽为
+   cunion / share 指针时的销毁语义（沿用旧行为，未按 RC 计数）。
 4. **清理旧表示**：C 后端已不把 clone/dispose 指针放进值（`clux_func_release`
    为 no-op，`env_*_fid` 仅供 VM）；`capture_clone_kind` 与 sema
    `clone_needs_deep` 的规则重复，后续可共享；删除过渡期死代码。

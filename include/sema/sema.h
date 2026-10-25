@@ -526,6 +526,12 @@ bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
 bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
                          uint32_t *dispose_fid, uint32_t *clone_fid);
 
+/** 只**查找**已生成的销毁函数（不生成）：含 own 槽位的复合类型 →
+ *  `__destroy_<n>(dv: ref *T)` 的 fid/名字。后端在 FREE 位置按类型静态
+ *  调用（如 C 闭包捕获的聚合字段）。 */
+bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
+                          strslice_t *name);
+
 /** 把 Pass 3b 期间按需生成的 clone 函数追加到程序函数链尾部（sema_analyze 收尾）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program);
 

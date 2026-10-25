@@ -340,6 +340,21 @@ bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
   return true;
 }
 
+bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
+                          strslice_t *name) {
+  if (fid) *fid = 0;
+  if (name) *name = STRSLICE_EMPTY;
+  if (!sema || !t) return false;
+  const type_t *s = type_strip_quals(t);
+  if (!s) return false;
+  sema_destroy_fn_t *reg = destroy_fn_find(sema, s);
+  if (!reg) return false;
+  const ast_func_def_t *fd = (const ast_func_def_t *)reg->fn;
+  if (fid) *fid = fd ? fd->fid : 0;
+  if (name) *name = reg->name;
+  return true;
+}
+
 /* 收尾：把生成的销毁函数追加到程序函数链尾部（sema_analyze 调用）。 */
 void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return;

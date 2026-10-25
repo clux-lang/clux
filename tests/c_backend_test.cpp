@@ -2318,6 +2318,29 @@ TEST(CBackend, BuildNestedClosureCaptureClone) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* 捕获"含 own 槽位的聚合"（Box 内 own *i32）：闭包销毁必须按类型递归
+   （`__destroy_Box(ref *Box)`），不能把结构体值当指针 clux_free。 */
+TEST(CBackend, BuildClosureAggregateCaptureFree) {
+  const std::string src = write_temp_file(
+      "struct Box { p: own *i32; }\n"
+      "type F = func |b: own Box| () -> i32;\n"
+      "func main(): i32 {\n"
+      "  var b = .Box{ .p = new i32{ 7 } };\n"
+      "  var f: own F = move(func |(bx: own Box = move(b))| (): i32 { return bx.p.*; });\n"
+      "  if (f() != 7) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_closure_aggregate_capture");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
 /* 闭包放进含 own 的聚合字段并被深拷贝：clone(Holder) 触发闭包 env 的
    静态深拷贝（`<sig>__cl`），源与副本的 own 捕获必须各自独立、各释放一次。 */
 TEST(CBackend, BuildClosureInStructClone) {

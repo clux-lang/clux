@@ -261,16 +261,43 @@ static bool emit_closure_free(lower_ctx_t *lc, cir_expr_t *ex,
             continue; /* 普通函数值 / 借用闭包：无 env 资源 */
         }
         ownership_t oq = type_ownership_of(capt);
+        if (cs && (type_kind_of(cs) == TYPE_KIND_PTR ||
+                   type_kind_of(cs) == TYPE_KIND_SLICE)) {
+            if (oq != OWN_OWN && oq != OWN_FATAL) continue;
+            cir_expr_t *target = field;
+            if (type_kind_of(cs) == TYPE_KIND_SLICE)
+                target = cir_expr_slice_data(lc->arena, field);
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
+            if (!st) return false;
+            st->expr = target;
+            if (*tail) (*tail)->next = st;
+            else *head = st;
+            *tail = st;
+            continue;
+        }
+        /* 含 own 槽位的聚合捕获：按类型生成的 `__destroy_<T>(ref *T)` 递归
+           销毁（不能对结构体值 clux_free）。 */
+        if (cs && type_has_own_slots(cs)) {
+            uint32_t dfid = 0;
+            strslice_t dn = STRSLICE_EMPTY;
+            if (!sema_find_destroy_fn(lc->sema, cs, &dfid, &dn)) continue;
+            const char *cname = module_symbol(lc->arena, lc->unit, "fn_", dn);
+            if (!cname) continue;
+            cir_expr_t *addr = cir_expr_unary(lc->arena, "&", field);
+            cir_expr_t *call = cir_expr_call(lc->arena, cname, NULL);
+            if (!addr || !call) return false;
+            /* 生成函数的 C 形态是 `void f(void *env, T *dv)`。 */
+            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
+            cir_expr_append_arg(call, addr);
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st) return false;
+            st->expr = call;
+            if (*tail) (*tail)->next = st;
+            else *head = st;
+            *tail = st;
+            continue;
+        }
         if (oq != OWN_OWN && oq != OWN_FATAL) continue;
-        cir_expr_t *target = field;
-        if (cs && type_kind_of(cs) == TYPE_KIND_SLICE)
-            target = cir_expr_slice_data(lc->arena, field);
-        cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-        if (!st) return false;
-        st->expr = target;
-        if (*tail) (*tail)->next = st;
-        else *head = st;
-        *tail = st;
     }
     return true;
 }
