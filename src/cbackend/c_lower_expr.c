@@ -291,6 +291,31 @@ bool c_lower_is_clone_call(const ast_node_t *val) {
 
 /* 构造器字段值：字段类型是 `?T` 时按 nil / 隐式 some 包装（与变量初始化、
    赋值、return 同一规则）。 */
+/* share/weak 是 RC 值：C 的普通赋值/拷贝不会自动加计数。这里在拷贝点
+   插入 retain（创建 `__make_share` / 升级 `__weak_get` 已经是新引用，跳过）。 */
+cir_expr_t *lower_rc_copy(lower_ctx_t *lc, const type_t *target,
+                          cir_expr_t *v, ast_node_t *expr) {
+    if (!target || !v) return v;
+    const type_t *t = type_strip_quals(target);
+    bool sh = type_is_share(t), wk = type_is_weak(t);
+    if (!sh && !wk) return v;
+    if (expr && expr->kind == AST_CALL) {
+        ast_call_t *c = (ast_call_t *)expr;
+        if (c->callee && c->callee->kind == AST_IDENT) {
+            strslice_t n = ((ast_ident_t *)c->callee)->name;
+            if (strslice_eq(n, STRSLICE_LIT("__make_share")) ||
+                strslice_eq(n, STRSLICE_LIT("__weak_get")))
+                return v;
+        }
+    }
+    cir_expr_t *call = cir_expr_call(
+        lc->arena, sh ? "clux_rc_retain" : "clux_rc_weak_retain", NULL);
+    if (!call) return v;
+    cir_expr_append_arg(call, v);
+    lc->unit->uses_rc = true;
+    return call;
+}
+
 static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
                                     ast_node_t *val) {
     if (!val) return NULL;
@@ -324,11 +349,11 @@ static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
                 cc->type = ref;
                 cir_expr_t *out = lower_expr(lc, val);
                 cc->type = saved;
-                return out;
+                return lower_rc_copy(lc, st, out, val);
             }
         }
     }
-    return lower_expr(lc, val);
+    return lower_rc_copy(lc, st, lower_expr(lc, val), val);
 }
 
 /* 构造器字段的静态类型。
@@ -508,6 +533,53 @@ static cir_expr_t *lower_take_opt(lower_ctx_t *lc, ast_call_t *call) {
     return cir_expr_take(lc->arena, obj);
 }
 
+static cir_expr_t *lower_rc_make(lower_ctx_t *lc, ast_call_t *call) {
+    if (!call->args || call->args->next) return NULL;
+    ast_node_t *arg = call->args;
+    const type_t *at = infer_expr_type(lc, arg);
+    const type_t *base =
+        at ? ptr_type_base(type_strip_quals(at)) : NULL;
+    if (!base && arg->kind == AST_NEW) {
+        ast_new_t *nn = (ast_new_t *)arg;
+        const type_t *et = nn->type
+                               ? sema_resolve_type_slot(lc->sema, &nn->type)
+                               : NULL;
+        base = et ? type_strip_quals(et) : NULL;
+    }
+    if (!base) return NULL;
+    cir_expr_t *src = lower_expr(lc, arg);
+    cir_type_t *pt = map_type(lc, base);
+    if (!src || !pt) return NULL;
+    const char *destroy = NULL;
+    if (type_has_own_slots(type_strip_quals(base))) {
+        uint32_t dfid = 0;
+        strslice_t dn = STRSLICE_EMPTY;
+        if (sema_find_destroy_fn(lc->sema, type_strip_quals(base), &dfid,
+                                 &dn))
+            destroy = module_symbol(lc->arena, lc->unit, "fn_", dn);
+    }
+    lc->unit->uses_rc = true;
+    lc->unit->uses_alloc = true;
+    return cir_expr_rc_make(lc->arena, pt, destroy, src);
+}
+
+static cir_expr_t *lower_rc_weak_get(lower_ctx_t *lc, ast_call_t *call) {
+    if (!call->args || call->args->next) return NULL;
+    const type_t *wt = infer_expr_type(lc, call->args);
+    if (!wt) return NULL;
+    const type_t *base = ptr_type_base(type_strip_quals(wt));
+    if (!base) return NULL;
+    const type_t *share = type_ptr_intern_rc(lc->sema->vm, base, 1);
+    const type_t *ot = share ? type_option_intern(lc->sema->vm, share) : NULL;
+    if (!ot) return NULL;
+    cir_expr_t *w = lower_expr(lc, call->args);
+    cir_type_t *oct = map_type(lc, ot);
+    cir_type_t *sct = map_type(lc, share);
+    if (!w || !oct || !sct) return NULL;
+    lc->unit->uses_rc = true;
+    return cir_expr_rc_weak_get(lc->arena, oct, sct, w);
+}
+
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (call->is_take_call) return lower_take_opt(lc, call);
     strslice_t cname0 = STRSLICE_EMPTY;
@@ -524,6 +596,10 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
                 cname0 = ((ast_func_def_t *)sf->def)->name;
         }
     }
+    if (strslice_eq(cname0, STRSLICE_LIT("__make_share")))
+        return lower_rc_make(lc, call);
+    if (strslice_eq(cname0, STRSLICE_LIT("__weak_get")))
+        return lower_rc_weak_get(lc, call);
     /* M6 FFI：extern cfunc 调用 → 直接调用真实 C 符号；data(s) → 取首元素指针；
        cfunc_ptr(f) → 生成 C trampoline。 */
     if (call->is_ffi_call) return lower_ffi_call(lc, call);
@@ -1191,13 +1267,18 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             (token_is(b->op, "==") || token_is(b->op, "!="))) {
             ast_node_t *other = b->lhs->kind == AST_NIL ? b->rhs : b->lhs;
             const type_t *ot = infer_expr_type(lc, other);
-            if (!ot || type_kind_of(type_strip_quals(ot)) != TYPE_KIND_OPTION) {
+            cir_expr_t *obj = lower_expr(lc, other);
+            bool opt = ot && type_kind_of(type_strip_quals(ot)) ==
+                                TYPE_KIND_OPTION;
+            if (!opt && obj && obj->type && obj->type->kind == CIR_TYPE_OPTION)
+                opt = true;
+            if (!opt && obj && obj->kind == CIR_EXPR_RC_WEAK_GET) opt = true;
+            if (!opt) {
                 diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                            "c backend: nil comparison requires optional operand");
                 lc->failed = true;
                 return NULL;
             }
-            cir_expr_t *obj = lower_expr(lc, other);
             return obj ? cir_expr_opt_is_some(lc->arena, obj,
                                               token_is(b->op, "!="))
                        : NULL;

@@ -863,6 +863,12 @@ bool rc_adapt_share_init(sema_t *sema, const type_t *target,
                          ast_node_t **pvalue, value_t **pv) {
   if (!sema || !target || !type_is_share(target) || !pvalue || !pv) return false;
   const type_t *base = ptr_type_base(target);
+  if (base && type_has_own_slots(type_strip_quals(base))) {
+    /* share *T 的 RC 块析构需要 T 的销毁函数：在 sema 阶段就确保生成，
+       否则 C 后端只能看到 `__destroy_<T>` 缺失。 */
+    strslice_t dname = STRSLICE_EMPTY;
+    (void)sema_ensure_destroy_fn(sema, type_strip_quals(base), &dname);
+  }
   value_t *v = *pv;
   if (!base || !v || value_is_error(sema->vm, v) || value_is_type(v, TYPE_KIND_VOID))
     return false;

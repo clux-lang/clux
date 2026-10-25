@@ -355,6 +355,17 @@ bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
   return true;
 }
 
+bool sema_ensure_destroy_fn(sema_t *sema, const type_t *t, strslice_t *name) {
+    if (!sema || !t) return false;
+    const type_t *s = type_strip_quals(t);
+    if (!s) return false;
+    if (!destroy_fn_find(sema, s)) {
+        /* 生成并登记（函数体在 sema_attach_destroy_fns 收尾时追加到 prog）。 */
+        if (!destroy_fn_callee(sema, s)) return false;
+    }
+    return sema_find_destroy_fn(sema, s, NULL, name);
+}
+
 /* 收尾：把生成的销毁函数追加到程序函数链尾部（sema_analyze 调用）。 */
 void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return;
@@ -716,7 +727,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       ownership_t inner_own = type_ownership_of(ot->inner);
       const type_t *is = type_strip_quals(inner);
       bool leaf = is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE);
-      if (leaf && inner_own != OWN_OWN) return true;
+      if (leaf && inner_own != OWN_OWN && !type_is_rc_ptr(is)) return true;
 
       ast_node_t *unwrap = ast_unwrap_new(sema->arena, 0, 0);
       if (!unwrap) return false;

@@ -684,7 +684,11 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                        (!it || type_kind_of(type_strip_quals(it)) != TYPE_KIND_OPTION) &&
                        !c_lower_is_clone_call(vd->init)) {
                 cir_expr_t *v = lower_expr(lc, vd->init);
-                st->expr = v ? cir_expr_option(lc->arena, ct, true, v) : NULL;
+                if (v && v->type && v->type->kind == CIR_TYPE_OPTION)
+                    st->expr = v; /* 已是 optional（如 weak.get()） */
+                else
+                    st->expr = v ? cir_expr_option(lc->arena, ct, true, v)
+                                 : NULL;
             } else {
                 /* 匿名构造（`var b: Box[U] = .{ ... }`）：sema 推断出的
                    interned 结构与声明类型布局相同但 type_t 不同 → C 里是
@@ -711,7 +715,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                         }
                     }
                 }
-                st->expr = lower_compat_value(lc, t, vd->init);
+                st->expr = lower_rc_copy(
+                    lc, t, lower_compat_value(lc, t, vd->init), vd->init);
                 if (patched_ctor) ((ast_construct_t *)vd->init)->type =
                     saved_ctor_type;
             }
@@ -937,7 +942,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 st->expr = lower_expr(lc, a->value);
             }
         } else {
-            st->expr = lower_compat_value(lc, tt, a->value);
+            st->expr = lower_rc_copy(
+                lc, tt, lower_compat_value(lc, tt, a->value), a->value);
         }
         /* 赋值点旧值销毁（sema 生成的 `a->destroy`）：compiler 在"右值求值
            之后、写入之前"逐条执行。C 里先把右值存进临时变量，再销毁旧值，
@@ -1106,12 +1112,33 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                                                    lc->return_type, true, v)
                                  : NULL;
                 } else {
-                    const type_t *rtt =
-                        lc->return_type
-                            ? (const type_t *)lc->return_type->src
-                            : NULL;
-                    st->expr = rtt ? lower_compat_value(lc, rtt, r->value)
-                                   : lower_expr(lc, r->value);
+                    /* 泛型返回值里的匿名/实例构造：把构造类型槽临时指向声明的
+                       返回类型，避免 C 里两个等布局 struct 不兼容。 */
+                    ast_node_t *saved = NULL;
+                    bool patched = false;
+                    const type_t *rtt = lc->return_sema_type;
+                    if (rtt && r->value->kind == AST_CONSTRUCT &&
+                        type_kind_of(type_strip_quals(rtt)) ==
+                            TYPE_KIND_STRUCT) {
+                        ast_construct_t *cc = (ast_construct_t *)r->value;
+                        const type_t *own =
+                            cc->type ? sema_resolve_type_slot(
+                                           lc->sema, &cc->type)
+                                     : NULL;
+                        if (type_strip_quals(rtt) !=
+                            (own ? type_strip_quals(own) : NULL)) {
+                            ast_node_t *ref = sema_gen_type_ref(
+                                lc->sema, type_strip_quals(rtt));
+                            if (ref) {
+                                saved = cc->type;
+                                cc->type = ref;
+                                patched = true;
+                            }
+                        }
+                    }
+                    st->expr = lower_expr(lc, r->value);
+                    if (patched)
+                        ((ast_construct_t *)r->value)->type = saved;
                 }
             }
         }
@@ -1425,6 +1452,34 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             if (!ex) {
                 *ok = false;
                 return head;
+            }
+            if (ot && type_is_share(type_strip_quals(ot))) {
+                cir_expr_t *call = cir_expr_call(lc->arena, "clux_rc_release",
+                                                 NULL);
+                if (!call) return head;
+                cir_expr_append_arg(call, ex);
+                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+                if (!st) return head;
+                st->expr = call;
+                lc->unit->uses_rc = true;
+                if (tail) tail->next = st;
+                else head = st;
+                tail = st;
+                continue;
+            }
+            if (ot && type_is_weak(type_strip_quals(ot))) {
+                cir_expr_t *call = cir_expr_call(
+                    lc->arena, "clux_rc_weak_release", NULL);
+                if (!call) return head;
+                cir_expr_append_arg(call, ex);
+                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+                if (!st) return head;
+                st->expr = call;
+                lc->unit->uses_rc = true;
+                if (tail) tail->next = st;
+                else head = st;
+                tail = st;
+                continue;
             }
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE) {
                 ex = cir_expr_slice_data(lc->arena, ex);

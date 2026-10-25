@@ -535,6 +535,8 @@ bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
  *  调用（如 C 闭包捕获的聚合字段）。 */
 bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
                           strslice_t *name);
+/** 确保类型 t 的销毁函数已生成/登记（没有则创建），返回其名字。 */
+bool sema_ensure_destroy_fn(sema_t *sema, const type_t *t, strslice_t *name);
 
 /** 把 Pass 3b 期间按需生成的 clone 函数追加到程序函数链尾部（sema_analyze 收尾）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program);

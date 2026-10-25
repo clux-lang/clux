@@ -258,6 +258,30 @@ cir_expr_t *cir_expr_take_slot(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
+cir_expr_t *cir_expr_rc_make(arena_t *arena, cir_type_t *payload,
+                             const char *destroy, cir_expr_t *src) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_RC_MAKE;
+    e->type = payload;
+    e->text = destroy;
+    e->lhs = src;
+    return e;
+}
+
+cir_expr_t *cir_expr_rc_weak_get(arena_t *arena, cir_type_t *option,
+                                 cir_type_t *share, cir_expr_t *weak) {
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(
+        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_RC_WEAK_GET;
+    e->type = option;
+    e->elem = share;
+    e->lhs = weak;
+    return e;
+}
+
 cir_expr_t *cir_expr_try(arena_t *arena, cir_expr_t *ok, cir_expr_t *value,
                          struct cir_stmt *setup, struct cir_stmt *tail) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(

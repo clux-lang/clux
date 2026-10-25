@@ -567,7 +567,7 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         }
         units[i] = u;
         mods[i] = mod;
-        if (u->uses_alloc) any_alloc = true;
+        if (u->uses_alloc || u->uses_rc) any_alloc = true;
     }
 
     /* 第二遍：路径 / 用例表 / 写文件 / 编译。 */

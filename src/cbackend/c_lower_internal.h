@@ -193,6 +193,7 @@ typedef struct lower_ctx {
     const char *ffi_error; /* 最近一次 FFI 类型渲染的具体失败原因（可为 NULL） */
     cir_stmt_t *cleanup;
     cir_type_t *return_type;
+    const type_t *return_sema_type; /* 对应的 sema 类型（return 兼容转换） */
     unsigned    ret_seq;
     unsigned    sig_seq;
     unsigned    fnlit_seq;
@@ -237,6 +238,9 @@ cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
 /** 按目标类型 lower 一个值：匿名构造类型槽修正 + 布局兼容 bitcast。 */
 cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
                                ast_node_t *expr);
+/** share/weak 拷贝点插入 retain；创建/升级表达式跳过。 */
+cir_expr_t *lower_rc_copy(lower_ctx_t *lc, const type_t *target,
+                          cir_expr_t *v, ast_node_t *expr);
 cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
