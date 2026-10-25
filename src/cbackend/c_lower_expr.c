@@ -274,6 +274,21 @@ cir_expr_t *lower_bitfield_assign(lower_ctx_t *lc, ast_member_t *m,
                                  val, ct);
 }
 
+/* 生成/内建的 clone 调用（`__clone_N` / `__deep_clone`）：它们返回的是
+   **整个值**（option 字段也返回 option），调用方不应再包一层 some。 */
+bool c_lower_is_clone_call(const ast_node_t *val) {
+    if (!val || val->kind != AST_CALL) return false;
+    ast_node_t *cal = ((const ast_call_t *)val)->callee;
+    strslice_t cn = STRSLICE_EMPTY;
+    if (cal && cal->kind == AST_IDENT)
+        cn = ((ast_ident_t *)cal)->name;
+    else if (cal && cal->kind == AST_FUNC_REF)
+        cn = ((ast_func_ref_t *)cal)->name;
+    if (!cn.ptr) return false;
+    if (cn.len == 12 && memcmp(cn.ptr, "__deep_clone", 12) == 0) return true;
+    return cn.len >= 7 && memcmp(cn.ptr, "__clone", 7) == 0;
+}
+
 /* 构造器字段值：字段类型是 `?T` 时按 nil / 隐式 some 包装（与变量初始化、
    赋值、return 同一规则）。 */
 static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
@@ -287,24 +302,7 @@ static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
         if (val->kind == AST_NIL)
             return cir_expr_option(lc->arena, cot, false, NULL);
         const type_t *vt = infer_expr_type(lc, val);
-        /* 生成的 clone 函数返回的是**整个 optional**（`__clone_N(?T)` /
-           `__deep_clone(x)`），不能再包一层 some；sema 里它的结果类型可能
-           被推断成 inner，按调用名识别。 */
-        bool clone_call = false;
-        if (val->kind == AST_CALL) {
-            ast_node_t *cal = ((ast_call_t *)val)->callee;
-            strslice_t cn = STRSLICE_EMPTY;
-            if (cal && cal->kind == AST_IDENT)
-                cn = ((ast_ident_t *)cal)->name;
-            else if (cal && cal->kind == AST_FUNC_REF)
-                cn = ((ast_func_ref_t *)cal)->name;
-            if (cn.ptr) {
-                if (cn.len == 12 && memcmp(cn.ptr, "__deep_clone", 12) == 0)
-                    clone_call = true;
-                else if (cn.len >= 7 && memcmp(cn.ptr, "__clone", 7) == 0)
-                    clone_call = true;
-            }
-        }
+        bool clone_call = c_lower_is_clone_call(val);
         if (clone_call) return lower_expr(lc, val);
         if (!vt || type_kind_of(type_strip_quals(vt)) != TYPE_KIND_OPTION) {
             cir_expr_t *v = lower_expr(lc, val);

@@ -621,7 +621,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 type_kind_of(type_strip_quals(t)) == TYPE_KIND_OPTION) {
                 st->expr = cir_expr_option(lc->arena, ct, false, NULL);
             } else if (t && type_kind_of(type_strip_quals(t)) == TYPE_KIND_OPTION &&
-                       (!it || type_kind_of(type_strip_quals(it)) != TYPE_KIND_OPTION)) {
+                       (!it || type_kind_of(type_strip_quals(it)) != TYPE_KIND_OPTION) &&
+                       !c_lower_is_clone_call(vd->init)) {
                 cir_expr_t *v = lower_expr(lc, vd->init);
                 st->expr = v ? cir_expr_option(lc->arena, ct, true, v) : NULL;
             } else {
@@ -866,7 +867,9 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             st->expr = cir_expr_option(lc->arena, ot, false, NULL);
         } else if (tt && type_kind_of(type_strip_quals(tt)) == TYPE_KIND_OPTION) {
             const type_t *vt = infer_expr_type(lc, a->value);
-            if (!vt || type_kind_of(type_strip_quals(vt)) != TYPE_KIND_OPTION) {
+            if (c_lower_is_clone_call(a->value)) {
+                st->expr = lower_expr(lc, a->value);
+            } else if (!vt || type_kind_of(type_strip_quals(vt)) != TYPE_KIND_OPTION) {
                 cir_type_t *ot = map_type(lc, tt);
                 cir_expr_t *v = lower_expr(lc, a->value);
                 st->expr = v ? cir_expr_option(lc->arena, ot, true, v) : NULL;
@@ -1036,7 +1039,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             else {
                 const type_t *vt = infer_expr_type(lc, r->value);
                 if (rt && (!vt || type_kind_of(type_strip_quals(vt)) !=
-                                     TYPE_KIND_OPTION)) {
+                                     TYPE_KIND_OPTION) &&
+                    !c_lower_is_clone_call(r->value)) {
                     cir_expr_t *v = lower_expr(lc, r->value);
                     st->expr = v ? cir_expr_option(lc->arena,
                                                    lc->return_type, true, v)

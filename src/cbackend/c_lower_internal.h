@@ -215,6 +215,8 @@ const type_t *strip(sema_t *sema, const type_t *t);
  *  改用闭包类型（否则内联 env 被截断）。 */
 const type_t *decl_value_type(lower_ctx_t *lc, const type_t *decl,
                               ast_node_t *init);
+/** 是否生成/内建的 clone 调用（返回值已是完整值，勿再包 option）。 */
+bool c_lower_is_clone_call(const ast_node_t *val);
 
 /* types / signatures */
 cir_type_t *map_type(lower_ctx_t *lc, const type_t *t);
