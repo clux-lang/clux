@@ -792,6 +792,43 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         } else {
             st->expr = lower_compat_value(lc, tt, a->value);
         }
+        /* 赋值点旧值销毁（sema 生成的 `a->destroy`）：compiler 在"右值求值
+           之后、写入之前"逐条执行。C 里先把右值存进临时变量，再销毁旧值，
+           最后赋值；否则 `p = new ...` 会先释放再求值，语义错。 */
+        if (a->destroy && st->lhs && st->expr) {
+            cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+            if (!blk) {
+                *ok = false;
+                return NULL;
+            }
+            cir_stmt_t *tv = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (!tv) {
+                *ok = false;
+                return NULL;
+            }
+            char nb[48];
+            snprintf(nb, sizeof nb, "clux_av_%u", lc->assign_seq++);
+            tv->name = copy_arena(lc->arena, nb);
+            tv->expr = st->expr;
+            cir_stmt_append(blk, tv);
+            for (ast_node_t *d = a->destroy; d; d = d->next) {
+                bool okd = true;
+                cir_stmt_t *ds = lower_stmt(lc, d, &okd);
+                if (!okd) {
+                    *ok = false;
+                    return NULL;
+                }
+                for (cir_stmt_t *it = ds; it;) {
+                    cir_stmt_t *nx = it->next;
+                    it->next = NULL;
+                    cir_stmt_append(blk, it);
+                    it = nx;
+                }
+            }
+            st->expr = cir_expr_ident(lc->arena, tv->name);
+            cir_stmt_append(blk, st);
+            return blk;
+        }
         return st;
     }
     case AST_EXPR_STMT: {

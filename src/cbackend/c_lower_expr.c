@@ -287,6 +287,25 @@ static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
         if (val->kind == AST_NIL)
             return cir_expr_option(lc->arena, cot, false, NULL);
         const type_t *vt = infer_expr_type(lc, val);
+        /* 生成的 clone 函数返回的是**整个 optional**（`__clone_N(?T)` /
+           `__deep_clone(x)`），不能再包一层 some；sema 里它的结果类型可能
+           被推断成 inner，按调用名识别。 */
+        bool clone_call = false;
+        if (val->kind == AST_CALL) {
+            ast_node_t *cal = ((ast_call_t *)val)->callee;
+            strslice_t cn = STRSLICE_EMPTY;
+            if (cal && cal->kind == AST_IDENT)
+                cn = ((ast_ident_t *)cal)->name;
+            else if (cal && cal->kind == AST_FUNC_REF)
+                cn = ((ast_func_ref_t *)cal)->name;
+            if (cn.ptr) {
+                if (cn.len == 12 && memcmp(cn.ptr, "__deep_clone", 12) == 0)
+                    clone_call = true;
+                else if (cn.len >= 7 && memcmp(cn.ptr, "__clone", 7) == 0)
+                    clone_call = true;
+            }
+        }
+        if (clone_call) return lower_expr(lc, val);
         if (!vt || type_kind_of(type_strip_quals(vt)) != TYPE_KIND_OPTION) {
             cir_expr_t *v = lower_expr(lc, val);
             return v ? cir_expr_option(lc->arena, cot, true, v) : NULL;
@@ -1255,6 +1274,11 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         return lower_expr(lc, ((ast_move_t *)e)->operand);
     case AST_TAKE:
         return lower_expr(lc, ((ast_take_t *)e)->operand);
+    case AST_TAKE_SLOT: {
+        ast_take_slot_t *ts = (ast_take_slot_t *)e;
+        cir_expr_t *obj = lower_expr(lc, ts->operand);
+        return obj ? cir_expr_take_slot(lc->arena, obj) : NULL;
+    }
     case AST_SLICE:
         return lower_slice(lc, (ast_slice_t *)e);
     case AST_MAKE:
@@ -1408,6 +1432,15 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     }
     case AST_ADDR: {
         ast_addr_t *a = (ast_addr_t *)e;
+        /* `&(opt.!)`（sema 生成的 destroy 序列）：unwrap 在 C 里是条件表达式，
+           取地址会得到右值；这里直接取 optional 的 `.value` 字段地址。 */
+        if (a->operand && a->operand->kind == AST_UNWRAP) {
+            ast_unwrap_t *uw = (ast_unwrap_t *)a->operand;
+            cir_expr_t *obj = lower_expr(lc, uw->operand);
+            cir_expr_t *val =
+                obj ? cir_expr_member(lc->arena, obj, "value") : NULL;
+            return val ? cir_expr_unary(lc->arena, "&", val) : NULL;
+        }
         cir_expr_t *v = lower_expr(lc, a->operand);
         return v ? cir_expr_unary(lc->arena, "&", v) : NULL;
     }

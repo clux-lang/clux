@@ -69,7 +69,7 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
     cw_write_indent(sb, indent);
     switch (s->kind) {
     case CIR_STMT_VAR:
-        cw_printf(sb, "%s %s", s->type && s->type->c_name ? s->type->c_name : "int32_t",
+        cw_printf(sb, "%s %s", s->type && s->type->c_name ? s->type->c_name : "__auto_type",
            s->name ? s->name : "clux_v_tmp");
         if (s->expr) {
             cw_put(sb, " = ");

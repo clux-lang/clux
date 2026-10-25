@@ -45,6 +45,7 @@
 #include "parser/ast_struct_def.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_take.h"
+#include "parser/ast_take_slot.h"
 #include "parser/ast_ternary.h"
 #include "parser/ast_try.h"
 #include "parser/ast_type_def.h"
@@ -196,6 +197,7 @@ typedef struct lower_ctx {
     unsigned    fnlit_seq;
     unsigned    switch_seq;
     unsigned    ffi_seq;
+    unsigned    assign_seq; /* 赋值旧值销毁的临时变量编号 */
     bool        failed;
 } lower_ctx_t;
 
