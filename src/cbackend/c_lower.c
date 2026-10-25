@@ -252,11 +252,44 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         return NULL;
     }
     size_t param_count = 0;
+    const type_t *mp0 = NULL, *mp1 = NULL;
     if (main_fn) {
-        for (ast_node_t *p = main_fn->params; p; p = p->next) param_count++;
-        if (param_count != 0) {
+        for (ast_node_t *p = main_fn->params; p; p = p->next) {
+            ast_var_def_t *vd = (ast_var_def_t *)p;
+            const type_t *pt = vd->resolved_type;
+            if (!pt && vd->type_expr)
+                pt = sema_resolve_type_slot(sema, &vd->type_expr);
+            if (param_count == 0) mp0 = pt;
+            else if (param_count == 1) mp1 = pt;
+            param_count++;
+        }
+        /* main 的 argv 参数统一暴露为 `ref []str`（argv[0] 是程序名）。 */
+        bool ok_sig = false;
+        if (param_count == 0) {
+            ok_sig = true;
+        } else if (param_count == 1) {
+            const type_t *p0 = mp0 ? type_strip_quals(mp0) : NULL;
+            if (p0 && type_kind_of(p0) == TYPE_KIND_INT &&
+                p0 == sema->vm->type_i32)
+                ok_sig = true; /* main(argc: i32) */
+            else if (p0 && type_kind_of(p0) == TYPE_KIND_SLICE) {
+                const type_t *el =
+                    type_strip_quals(slice_type_elem(p0));
+                ok_sig = el && el == sema->vm->type_str; /* main(argv) */
+            }
+        } else if (param_count == 2) {
+            const type_t *p0 = mp0 ? type_strip_quals(mp0) : NULL;
+            const type_t *p1 = mp1 ? type_strip_quals(mp1) : NULL;
+            if (p0 == sema->vm->type_i32 && p1 &&
+                type_kind_of(p1) == TYPE_KIND_SLICE) {
+                const type_t *el = type_strip_quals(slice_type_elem(p1));
+                ok_sig = el && el == sema->vm->type_str; /* main(argc, argv) */
+            }
+        }
+        if (!ok_sig) {
             diag_error(sema->diag, sema_loc(sema, (ast_node_t *)main_fn),
-                       "c backend: 'main' must not take parameters");
+                       "c backend: 'main' parameters must be (), (argc: i32), "
+                       "(argv: ref []str), or (argc: i32, argv: ref []str)");
             return NULL;
         }
         if (main_fn->return_expr) {

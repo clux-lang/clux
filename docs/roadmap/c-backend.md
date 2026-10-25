@@ -557,3 +557,19 @@ src/cbackend/
   c_writer_expr.c   表达式输出
   c_writer_stmt.c   语句 / 函数输出
 ```
+
+## main 入口参数与返回值
+
+生成 C 的入口统一为 `int main(int argc, char **argv)`。clux 侧允许的签名：
+
+```clux
+func main(): i32
+func main(): void
+func main(argc: i32): i32
+func main(argv: ref []str): i32
+func main(argc: i32, argv: ref []str): i32
+```
+
+- `argv` 是临时构造的 `ref []str`：`argv[0]` 为程序名，之后为命令行参数；生命周期仅限 main 调用期间。
+- 返回值仍映射为进程退出码；`void` 映射为 0。
+- 其他参数形态在编译期报错。

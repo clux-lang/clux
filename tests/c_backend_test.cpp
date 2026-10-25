@@ -128,6 +128,19 @@ int run_exe(const std::string &exe) {
 #endif
 }
 
+int run_exe_args(const std::string &exe, const std::string &args) {
+  std::string cmd = q(exe) + " " + args;
+#ifdef _WIN32
+  cmd = "(" + cmd + ")";
+#endif
+  int status = std::system(cmd.c_str());
+#ifdef _WIN32
+  return status;
+#else
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+#endif
+}
+
 } // namespace
 
 TEST(CBackend, BuildMainReturnZero) {
@@ -168,6 +181,41 @@ TEST(CBackend, BuildMainVoid) {
   EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
   ASSERT_TRUE(std::filesystem::exists(exe));
   EXPECT_EQ(run_exe(exe.string()), 0);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildMainArgvSlice) {
+  const std::string src = write_temp_file(
+      "func main(argv: ref []str): i32 {\n"
+      "  if (len(argv) != 3usize) { return 10; }\n"
+      "  if (argv[1] != \"hello\") { return 11; }\n"
+      "  if (argv[2] != \"world\") { return 12; }\n"
+      "  return 42;\n"
+      "}\n",
+      "cbackend_main_argv");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe_args(exe.string(), "hello world"), 42);
+  std::filesystem::remove(exe);
+  std::filesystem::remove(exe.string() + ".clux.c");
+}
+
+TEST(CBackend, BuildMainArgcAndArgv) {
+  const std::string src = write_temp_file(
+      "func main(argc: i32, argv: ref []str): i32 {\n"
+      "  return argc * 10 + (len(argv) as i32);\n"
+      "}\n",
+      "cbackend_main_argc_argv");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe_args(exe.string(), "a b"), 33);
   std::filesystem::remove(exe);
   std::filesystem::remove(exe.string() + ".clux.c");
 }
@@ -615,7 +663,7 @@ TEST(CBackend, EmitCToExplicitPath) {
             0);
   ASSERT_TRUE(std::filesystem::exists(out)) << out.string();
   const std::string text = slurp(out.string());
-  EXPECT_NE(text.find("int main(void)"), std::string::npos);
+  EXPECT_NE(text.find("int main(int argc, char **argv)"), std::string::npos);
   std::filesystem::remove(out);
 }
 
@@ -2209,9 +2257,9 @@ TEST(CBackend, RejectsCopyOfOwnSlotField) {
   EXPECT_FALSE(std::filesystem::exists(exe));
 }
 
-TEST(CBackend, RejectsMainWithParameters) {
+TEST(CBackend, RejectsInvalidMainParameters) {
   const std::string src = write_temp_file(
-      "func main(x: i32): i32 { return x; }\n", "cbackend_param");
+      "func main(x: i32, y: i32): i32 { return x; }\n", "cbackend_param");
   ASSERT_FALSE(src.empty());
   std::filesystem::path exe(src);
   exe = default_exe(src);

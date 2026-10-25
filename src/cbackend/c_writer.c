@@ -659,21 +659,50 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     } else {
         for (cir_function_t *f = fns; f; f = f->next) {
             if (!f->is_entry) continue;
-            cw_put(sb, "int main(void) {\n");
+            size_t np = f->sig ? f->sig->param_count : 0;
+            const cir_type_t *p0 = np > 0 ? f->sig->params[0] : NULL;
+            const cir_type_t *p1 = np > 1 ? f->sig->params[1] : NULL;
+            bool one_slice =
+                np == 1 && p0 && p0->kind == CIR_TYPE_SLICE && p0->elem &&
+                p0->elem->kind == CIR_TYPE_STR;
+            bool one_argc = np == 1 && p0 && p0->kind == CIR_TYPE_I32;
+            bool two = np == 2 && p0 && p0->kind == CIR_TYPE_I32 && p1 &&
+                       p1->kind == CIR_TYPE_SLICE && p1->elem &&
+                       p1->elem->kind == CIR_TYPE_STR;
+            bool has_slice = one_slice || two;
+            const cir_type_t *slice_t = two ? p1 : (one_slice ? p0 : NULL);
+            cw_put(sb, "int main(int argc, char **argv) {\n");
             if (alloc_rt) cw_put(sb, "    clux_rt_init();\n");
             if (has_deferred)
                 cw_put(sb, "    clux_init_globals();\n");
-            if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID) {
-                cw_printf(sb, "    int clux_rc = (int)%s(NULL);\n", f->name);
-                if (alloc_rt)
-                    cw_put(sb, "    clux_rt_shutdown();\n");
-                cw_put(sb, "    return clux_rc;\n");
-            } else {
-                cw_printf(sb, "    %s(NULL);\n", f->name);
-                if (alloc_rt)
-                    cw_put(sb, "    clux_rt_shutdown();\n");
-                cw_put(sb, "    return 0;\n");
+            cw_put(sb, "    (void)argc;\n    (void)argv;\n");
+            if (has_slice) {
+                cw_put(sb, "    struct clux_str clux_argv_buf[argc > 0 ? "
+                           "(size_t)argc : 1];\n");
+                cw_put(sb, "    for (int clux_i = 0; clux_i < argc; "
+                           "clux_i++) {\n");
+                cw_put(sb, "        size_t clux_n = 0;\n");
+                cw_put(sb, "        while (argv[clux_i][clux_n]) clux_n++;\n");
+                cw_put(sb, "        clux_argv_buf[clux_i] = (struct clux_str){ "
+                           "(const char *)argv[clux_i], clux_n };\n");
+                cw_put(sb, "    }\n");
             }
+            if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID)
+                cw_printf(sb, "    int clux_rc = (int)%s(NULL", f->name);
+            else
+                cw_printf(sb, "    %s(NULL", f->name);
+            if (one_argc || two) cw_put(sb, ", (int32_t)argc");
+            if (has_slice && slice_t && slice_t->c_name)
+                cw_printf(sb,
+                          ", (%s){ .data = clux_argv_buf, .len = "
+                          "(uint64_t)argc }",
+                          slice_t->c_name);
+            cw_put(sb, ");\n");
+            if (alloc_rt) cw_put(sb, "    clux_rt_shutdown();\n");
+            if (f->sig && f->sig->ret && f->sig->ret->kind != CIR_TYPE_VOID)
+                cw_put(sb, "    return clux_rc;\n");
+            else
+                cw_put(sb, "    return 0;\n");
             cw_put(sb, "}\n");
         }
     }
