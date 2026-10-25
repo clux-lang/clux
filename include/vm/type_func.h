@@ -40,6 +40,12 @@ extern const vtable_t VTABLE_FUNC;
 typedef struct func_type_t {
     type_t      base;
     func_sig_t  sig;
+    /* 闭包类型（`func |a: T, b: U| (params) -> R`）：捕获槽位类型（按声明序）。
+       NULL / 0 = 普通函数类型（无捕获）。捕获列表参与类型身份（去重 intern）；
+       捕获名不参与身份（同名布局不同类型的名字不改变可赋值性），名字由使用点
+       （字面量/注解 AST）自带。 */
+    const type_t **capture_types;
+    size_t        capture_count;
     /* sealed 已提升到基类 type_t（见 type.h）；密封后不可再修改 sig */
 } func_type_t;
 
@@ -74,6 +80,36 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t);
 const type_t *type_func_sig(vm_t *vm, const type_t *const *params,
                             size_t param_count, const type_t *return_type,
                             bool is_variadic);
+
+/** 闭包类型快捷构造：签名 + 捕获槽位类型（按声明序）去重 intern。 */
+const type_t *type_func_closure(vm_t *vm, const type_t *const *params,
+                                size_t param_count, const type_t *return_type,
+                                bool is_variadic,
+                                const type_t *const *capture_types,
+                                size_t capture_count);
+
+/** 是否闭包类型（携带捕获列表）。 */
+static inline bool func_type_is_closure(const type_t *t) {
+    t = type_strip_ownership(t);
+    return t && t->kind == TYPE_KIND_FUNC &&
+           ((const func_type_t *)t)->capture_count > 0;
+}
+
+/** 闭包捕获槽位数（非闭包返回 0）。 */
+static inline size_t func_type_capture_count(const type_t *t) {
+    t = type_strip_ownership(t);
+    return (t && t->kind == TYPE_KIND_FUNC)
+               ? ((const func_type_t *)t)->capture_count
+               : 0;
+}
+
+/** 第 i 个捕获槽位类型（越界/非闭包返回 NULL）。 */
+static inline const type_t *func_type_capture_type(const type_t *t, size_t i) {
+    t = type_strip_ownership(t);
+    if (!t || t->kind != TYPE_KIND_FUNC) return NULL;
+    const func_type_t *ft = (const func_type_t *)t;
+    return (i < ft->capture_count) ? ft->capture_types[i] : NULL;
+}
 
 /** 取 func type 的返回类型（非 func type 返回 NULL） */
 static inline const type_t *func_type_return(const type_t *t) {

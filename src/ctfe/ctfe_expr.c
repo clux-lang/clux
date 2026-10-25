@@ -894,12 +894,32 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             ret = value_as(rt, const type_t *);
         }
         /* `cfunc(...)` = C 函数指针类型（无 env）；与 func(...) 互不兼容。 */
-        const type_t *sig =
-            n->is_c_abi
-                ? type_cfunc_sig(vm, np > 0 ? params_arr : NULL, np, ret,
-                                 /*is_variadic=*/false)
-                : type_func_sig(vm, np > 0 ? params_arr : NULL, np, ret,
+        const type_t *sig = NULL;
+        if (n->is_c_abi) {
+            if (n->captures)
+                return ctfe_err(ctx, "ctfe: cfunc type cannot have captures");
+            sig = type_cfunc_sig(vm, np > 0 ? params_arr : NULL, np, ret,
+                                 /*is_variadic=*/false);
+        } else if (n->captures) {
+            size_t nc = ctfe_count_siblings(n->captures);
+            const type_t *caps_arr[nc > 0 ? nc : 1];
+            size_t ci = 0;
+            for (ast_node_t *c = n->captures; c; c = c->next, ci++) {
+                ast_var_def_t *cv = (ast_var_def_t *)c;
+                if (!cv->type_expr)
+                    return ctfe_err(ctx, "ctfe: closure capture needs a type");
+                value_t *ctv = ctfe_eval(ctx, cv->type_expr);
+                if (value_is_error(vm, ctv)) return ctv;
+                if (!value_is_type(ctv, TYPE_KIND_TYPE))
+                    return ctfe_err(ctx, "ctfe: closure capture must be a type");
+                caps_arr[ci] = value_as(ctv, const type_t *);
+            }
+            sig = type_func_closure(vm, np > 0 ? params_arr : NULL, np, ret,
+                                    /*is_variadic=*/false, caps_arr, nc);
+        } else {
+            sig = type_func_sig(vm, np > 0 ? params_arr : NULL, np, ret,
                                 /*is_variadic=*/false);
+        }
         if (!sig)
             return ctfe_err(ctx, "ctfe: failed to construct function signature type");
         return type_as_value(vm, sig);

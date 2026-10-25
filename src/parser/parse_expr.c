@@ -1535,6 +1535,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             syn = synthesize_shift_token(p); /* 探测，不消费 */
             if (syn) op_tok = syn;
         }
+        if (p->stop_at_pipe > 0 && check_symbol(p, "|")) break;
         int lp, rp;
         if (!infix_binding(op_tok, &lp, &rp)) break;
         if (lp < min_prec) break;

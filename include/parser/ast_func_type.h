@@ -21,6 +21,9 @@ typedef struct {
     ast_node_t *params;        /* 参数类型表达式兄弟链（head） */
     ast_node_t *params_last;   /* 参数类型表达式兄弟链（tail） */
     ast_node_t *return_type;   /* 返回类型表达式；NULL = void */
+    /* 闭包类型捕获列表（AST_VAR_DEF 兄弟链，每项 `name: Type`；
+       NULL = 普通函数类型）。 */
+    ast_node_t *captures;
     /* true = `cfunc(...)`：**C 函数指针**类型（无 env，仅用于 FFI 边界）；
        false = `func(...)`：clux 函数值类型（带 env）。两者**互不兼容**。 */
     bool        is_c_abi;

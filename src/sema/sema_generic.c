@@ -145,6 +145,15 @@ void sema_generic_mangle_type(string_t *out, const type_t *t) {
         return;
     }
     case TYPE_KIND_FUNC: {
+        size_t nc = func_type_capture_count(t);
+        if (nc > 0) {
+            mangle_append_cstr(out, "clos(");
+            for (size_t ci = 0; ci < nc; ci++) {
+                if (ci > 0) mangle_append_cstr(out, ",");
+                sema_generic_mangle_type(out, func_type_capture_type(t, ci));
+            }
+            mangle_append_cstr(out, ")");
+        }
         mangle_append_cstr(out, "func(");
         size_t n = func_type_param_count(t);
         for (size_t i = 0; i < n; i++) {

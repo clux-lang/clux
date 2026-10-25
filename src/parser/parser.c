@@ -51,7 +51,8 @@ parser_t *parser_create(allocator_t *alloc, arena_t *arena, vec_t *tokens) {
     p->tokens    = tokens;
     p->pos       = 0;
     p->has_error = false;
-    p->recover_partial = false;   /* 默认关闭：不影响 driver/测试既有行为 */
+    p->recover_partial = false;
+    p->stop_at_pipe = 0;   /* 默认关闭：不影响 driver/测试既有行为 */
     p->diag      = NULL;
     return p;
 }

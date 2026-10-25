@@ -2229,3 +2229,43 @@ TEST(CBackend, BuildComptimeFunctionValues) {
   ASSERT_TRUE(std::filesystem::exists(exe));
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
+
+/* 闭包类型（捕获槽位进入类型身份）+ 泛型可调用对象。 */
+TEST(CBackend, BuildClosureTypeAnnotationAndGenericCall) {
+  const std::string src = write_temp_file(
+      "type F = func |a: i32| (i32) -> i32;\n"
+      "func apply[G](f: G, x: i32): i32 { return f(x); }\n"
+      "func main(): i32 {\n"
+      "  var a: i32 = 3;\n"
+      "  var f: F = func |a| (x: i32): i32 { return x + a; };\n"
+      "  if (f(4) != 7) { return 1; }\n"
+      "  if (apply[F](f, 4) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_closure_type");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* 不擦除：带捕获闭包不能当作普通 func(...) 使用。 */
+TEST(CBackend, RejectsClosureErasureToPlainFunc) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  var a: i32 = 3;\n"
+      "  var g: func(i32) -> i32 = func |a| (x: i32): i32 { return x + a; };\n"
+      "  return g(4);\n"
+      "}\n",
+      "cbackend_closure_erase");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  EXPECT_EQ(run_build(src, exe.string(), nullptr), 1);
+  EXPECT_FALSE(std::filesystem::exists(exe));
+}

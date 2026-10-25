@@ -24,6 +24,7 @@ typedef struct {
                                      parse_program 遇错 break 而非返回 AST_ERROR，
                                      已解析的顶层节点仍挂到 PROGRAM，tok_end 停在错误处 */
     diag_buf_t  *diag;        /* 共享诊断缓冲区；NULL 时错误不记录（如单测） */
+    int          stop_at_pipe; /* >0：表达式解析在顶层 '|' 处停止（闭包类型捕获用） */
 } parser_t;
 
 /**

@@ -474,5 +474,30 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
   /* 销毁临时作用域树（含 body 局部函数 fscope） */
   sema_scope_destroy(&fscope);
 
-  return sig;
+  /* 闭包类型：捕获槽位类型（按声明序）携带进函数值类型，而不是擦除成普通
+     func(...)。捕获名不参与类型身份；`capture_type_id` 的字段顺序即声明序。 */
+  const type_t *lit_ty = sig;
+  if (fn->capture_type_id != 0) {
+    const sema_type_t *cst = sema_type_by_id(sema, fn->capture_type_id);
+    if (cst && cst->type) {
+      size_t nc = struct_type_field_count(cst->type);
+      const type_t *caps[nc > 0 ? nc : 1];
+      for (size_t ci = 0; ci < nc; ci++) {
+        const struct_field_t *f = struct_type_field(cst->type, ci);
+        caps[ci] = f ? f->type : NULL;
+      }
+      size_t np = func_type_param_count(sig);
+      const type_t *ps[np > 0 ? np : 1];
+      for (size_t pi = 0; pi < np; pi++) ps[pi] = func_type_param(sig, pi);
+      const type_t *cty =
+          type_func_closure(sema->vm, np > 0 ? ps : NULL, np,
+                            func_type_return(sig), false, caps, nc);
+      if (cty) {
+        const sema_type_t *st2 = sema_type_register(sema, cty);
+        if (st2) fn->sig_id = st2->id;
+        lit_ty = cty;
+      }
+    }
+  }
+  return lit_ty;
 }

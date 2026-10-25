@@ -194,8 +194,28 @@ static ast_node_t *parse_capture_item(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
+    /* 类型注解形态：`name: Type`（闭包类型捕获槽位；函数字面量的无初始值
+       类型捕获也可用，语义由 sema 决定）。 */
+    ast_node_t *type_expr = NULL;
+    if (check_symbol(p, ":")) {
+        advance(p);
+        skip_trivia(p);
+        p->stop_at_pipe++;
+        type_expr = parse_expr_prec(p, 1);
+        p->stop_at_pipe--;
+        if (!type_expr || type_expr->kind == AST_ERROR) {
+            if (!type_expr) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "expected type after ':' in capture");
+            }
+            return type_expr;
+        }
+        skip_trivia(p);
+    }
+
     ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
     ((ast_var_def_t *)node)->name = name;
+    ((ast_var_def_t *)node)->type_expr = type_expr;
     return node;
 }
 
@@ -412,9 +432,25 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
                                  "signature is not a clux type)");
         }
         /* 捕获列表不属于函数类型（签名擦除闭包，类型无捕获概念） */
-        if (captures) {
-            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "function type cannot have a capture list");
+        /* 闭包类型：`func |a: T, b: U| (params) -> R`。捕获槽位必须带类型
+           （类型里没有初始值/推断的位置）。 */
+        for (ast_node_t *c = captures; c; c = c->next) {
+            if (c->kind != AST_VAR_DEF) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "closure type captures must be "
+                                     "name: type declarations");
+            }
+            ast_var_def_t *cv = (ast_var_def_t *)c;
+            if (!cv->type_expr) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "closure type capture must have a type "
+                                     "(write `name: Type`)");
+            }
+            if (cv->init && cv->init->kind != AST_UNDEF) {
+                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                     "closure type capture cannot have an "
+                                     "initializer");
+            }
         }
         /* 作用域标注不属于函数类型（标注约束闭包捕获，类型无捕获） */
         if (scope_annot_count > 0) {
@@ -442,6 +478,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         ((ast_func_type_t *)node)->params      = params;
         ((ast_func_type_t *)node)->params_last = params_last;
         ((ast_func_type_t *)node)->return_type = return_type;
+        ((ast_func_type_t *)node)->captures    = captures;
         return node;
     }
 

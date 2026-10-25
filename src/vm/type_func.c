@@ -562,6 +562,15 @@ void func_type_set_variadic(vm_t *vm, const type_t *t, bool variadic) {
     ft->sig.is_variadic = variadic;
 }
 
+/* 闭包类型身份：签名相同 + 捕获槽位类型（按序、指针身份）相同。 */
+static bool func_caps_eq(const func_type_t *a, const func_type_t *b) {
+    if (!a || !b) return false;
+    if (a->capture_count != b->capture_count) return false;
+    if (a->capture_count == 0) return true;
+    return memcmp(a->capture_types, b->capture_types,
+                  a->capture_count * sizeof(type_t *)) == 0;
+}
+
 const type_t *func_type_seal(vm_t *vm, const type_t *t) {
     if (!vm || !t || t->kind != TYPE_KIND_FUNC) return NULL;
     if (type_is_sealed(t)) return t;  /* 已密封直接返回（幂等） */
@@ -582,7 +591,8 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
            "variable 'cmp' used before initialization"。 */
         if (other && other != ft && type_is_sealed(&other->base) &&
             other->base.kind == TYPE_KIND_FUNC &&
-            func_sig_eq(&other->sig, &ft->sig)) {
+            func_sig_eq(&other->sig, &ft->sig) &&
+            func_caps_eq(other, ft)) {
             /* 本开放类型与已有 sealed 类型重复：复用 other。
              * 操作数栈中引用本开放类型 ft 的 type value 由 value_seal 负责
              * 重定向到 other（避免悬空）；此处仅手工回收 ft。 */
@@ -591,6 +601,8 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
                 allocator_free(vm->alloc, (void **)&np);
             }
             if (ft->sig.params) allocator_free(vm->alloc, (void **)&ft->sig.params);
+            if (ft->capture_types)
+                allocator_free(vm->alloc, (void **)&ft->capture_types);
             allocator_free(vm->alloc, (void **)&ft);
             return &other->base;
         }
@@ -600,6 +612,31 @@ const type_t *func_type_seal(vm_t *vm, const type_t *t) {
     char *name = func_sig_name(vm->alloc, ft->sig.params, ft->sig.param_count,
                                ft->sig.return_type, ft->sig.is_variadic);
     if (!name) panic("vm: out of memory allocating function signature name");
+    if (ft->capture_count > 0) {
+        /* 闭包类型名：`func |T1, T2| (params): ret`（捕获名不在类型里）。 */
+        string_t *cn = string_new(vm->alloc);
+        if (!cn) panic("vm: out of memory building closure type name");
+        string_append_cstr(cn, "func |");
+        for (size_t ci = 0; ci < ft->capture_count; ci++) {
+            if (ci > 0) string_append_cstr(cn, ", ");
+            const type_t *ct = ft->capture_types[ci];
+            if (ct && ct->name.ptr)
+                string_append_bytes(cn, ct->name.ptr, ct->name.len);
+            else
+                string_append_cstr(cn, "?");
+        }
+        string_append_cstr(cn, "| ");
+        string_append_cstr(cn, name);
+        allocator_free(vm->alloc, (void **)&name);
+        name = (char *)allocator_new_ex(vm->alloc, "char", sizeof(char), NULL,
+                                        NULL, NULL, string_len(cn) + 1);
+        if (name) {
+            memcpy(name, string_data(cn), string_len(cn));
+            name[string_len(cn)] = '\0';
+        }
+        string_free(&cn);
+        if (!name) panic("vm: out of memory allocating closure type name");
+    }
     ft->base.name = (strslice_t){ name, strlen(name) };
     ft->base.sealed = true;
     vec_push(vm->sig_types, vm->alloc, ft);  /* 密封后入池（去重 intern） */
@@ -625,5 +662,37 @@ const type_t *type_func_sig(vm_t *vm, const type_t *const *params,
     }
     ft->sig.return_type = return_type;
     ft->sig.is_variadic = is_variadic;
+    return func_type_seal(vm, &ft->base);
+}
+
+const type_t *type_func_closure(vm_t *vm, const type_t *const *params,
+                                size_t param_count, const type_t *return_type,
+                                bool is_variadic,
+                                const type_t *const *capture_types,
+                                size_t capture_count) {
+    if (!vm) return NULL;
+    if (capture_count == 0)
+        return type_func_sig(vm, params, param_count, return_type, is_variadic);
+    func_type_t *ft = func_type_create_open(vm);
+    if (param_count > 0 && params) {
+        const type_t **pcopy = (const type_t **)allocator_new_ex(
+            vm->alloc, "type_t*", sizeof(type_t *), NULL, NULL, NULL,
+            param_count);
+        if (!pcopy) panic("vm: out of memory allocating function signature");
+        memcpy(pcopy, params, param_count * sizeof(type_t *));
+        ft->sig.params = pcopy;
+        ft->sig.param_count = param_count;
+    }
+    ft->sig.return_type = return_type;
+    ft->sig.is_variadic = is_variadic;
+    if (capture_types && capture_count > 0) {
+        const type_t **ccopy = (const type_t **)allocator_new_ex(
+            vm->alloc, "type_t*", sizeof(type_t *), NULL, NULL, NULL,
+            capture_count);
+        if (!ccopy) panic("vm: out of memory allocating closure captures");
+        memcpy(ccopy, capture_types, capture_count * sizeof(type_t *));
+        ft->capture_types = ccopy;
+        ft->capture_count = capture_count;
+    }
     return func_type_seal(vm, &ft->base);
 }

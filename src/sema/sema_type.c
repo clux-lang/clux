@@ -544,9 +544,35 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       if (ft->return_type && !rt) return NULL;
       /* `cfunc(...)` = **C 函数指针**（无 env）：独立类型，与 func(...) 互不
          兼容（用户要求"不互通"）。只在 FFI 边界出现。 */
-      if (ft->is_c_abi)
+      if (ft->is_c_abi) {
+        if (ft->captures) {
+          diag_error(sema->diag, sema_loc(sema, type_expr),
+                     "cfunc type cannot have a capture list (the C ABI has "
+                     "no closures)");
+          return NULL;
+        }
         return type_cfunc_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
                               /*is_variadic=*/false);
+      }
+      if (ft->captures) {
+        size_t nc = sema_count_siblings(ft->captures);
+        const type_t *caps[nc > 0 ? nc : 1];
+        size_t k = 0;
+        for (ast_node_t *c = ft->captures; c; c = c->next, k++) {
+          ast_var_def_t *cv = (ast_var_def_t *)c;
+          const type_t *ct = cv->type_expr
+                                 ? resolve_type_expr(sema, cv->type_expr)
+                                 : NULL;
+          if (!ct) {
+            diag_error(sema->diag, sema_loc(sema, c),
+                       "cannot resolve closure capture type");
+            return NULL;
+          }
+          caps[k] = ct;
+        }
+        return type_func_closure(sema->vm, n > 0 ? params_arr : NULL, n, rt,
+                                 /*is_variadic=*/false, caps, nc);
+      }
       return type_func_sig(sema->vm, n > 0 ? params_arr : NULL, n, rt,
                            /*is_variadic=*/false);
     }
