@@ -23,6 +23,7 @@
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
 #include "vm/type_struct.h"
+#include "vm/type_func.h"
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_tuple.h"
@@ -203,6 +204,22 @@ bool sema_ct_encode(sema_t *sema, value_t *v, sema_ct_const_t *out) {
         }
         out->captures = caps;
         out->capture_count = count;
+        /* 常量类型 = **闭包类型**（捕获槽位类型进入类型身份）。若只用运行期
+           签名类型，嵌套捕获（外层闭包捕获内层闭包）在 sema_ct_lit 重建
+           type_expr 时会退化成普通 func，C 后端按捕获类型重算 env 布局就会
+           丢掉内层 env（装饰器链 C 构建失败）。 */
+        size_t np = func_type_param_count(t);
+        const type_t *params[np > 0 ? np : 1];
+        for (size_t i = 0; i < np; i++) params[i] = func_type_param(t, i);
+        const type_t *caps_types[count];
+        for (size_t i = 0; i < count; i++) {
+          const struct_field_t *f = struct_type_field(ct, i);
+          caps_types[i] = f ? f->type : NULL;
+        }
+        const type_t *cty = type_func_closure(
+            vm, np > 0 ? params : NULL, np, func_type_return(t),
+            func_type_is_variadic(t), caps_types, count);
+        if (cty) out->type = cty;
       }
     }
     return true;

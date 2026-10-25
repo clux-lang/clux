@@ -96,7 +96,6 @@ typedef enum {
     CIR_EXPR_FUNC_OBJ,
     CIR_EXPR_FUNC_CALL,
     CIR_EXPR_CLOSURE,
-    CIR_EXPR_CLOSURE_RELEASE,
     CIR_EXPR_FUNC_CLONE,
     CIR_EXPR_BITFIELD_GET,
     CIR_EXPR_BITFIELD_SET,
@@ -368,7 +367,6 @@ cir_expr_t    *cir_expr_func_call(arena_t *arena, cir_expr_t *callee,
                                   cir_expr_t *args);
 cir_expr_t    *cir_expr_closure(arena_t *arena, cir_type_t *type,
                                 const char *fn_name, cir_expr_t *env);
-cir_expr_t    *cir_expr_closure_release(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_func_clone(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_bitfield_get(arena_t *arena, cir_expr_t *object,
                                      size_t offset, size_t width,

@@ -232,10 +232,10 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   泛型调用，VM 侧结束时 allocator 无泄漏。
 - examples 迁移：`examples/closure`、`examples/decorator`、
   `examples/decorator_param` 改成闭包类型返回（C 与 VM 均运行 exit 0）。
-- 因 comptime 折叠结果的 sema 类型仍是**签名类型**（见"未完成"2），装饰器
-  展开出的变量在 sema 里被推断为 `func(...)`，而初始化器是带 env 的闭包字面量。
-  C 后端在变量落 C 时按初始化器恢复闭包类型（`decl_value_type`），否则内联
-  env 被截断成空 env（实测 "incompatible struct type" / 捕获丢失）。
+- comptime 折叠出的闭包常量现在带**闭包类型**（`sema_ct_encode`）；C 后端仍保留
+  `decl_value_type` 兜底：声明类型是普通 `func(...)` 而初始化器是带 env 闭包时，
+  按初始化器恢复闭包类型，否则内联 env 被截断（历史注释路径，仍用于显式
+  `func(...)` 注解 + 闭包字面量的迁移过渡）。
 - 推断型 `var` 的 sema 类型写回 `resolved_type`（`shadow_var_def`），后端不再
   用 `func_type_of_def` 重新推断（否则闭包字面量与变量类型是两个 sig struct）。
 
@@ -264,12 +264,13 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   按源码序嵌套；`Decorator.ParameterizedDecoratorChain` 迁移为泛型装饰器
   （`comptime func add[F](n: i32, f: F): func |n: i32, f: F| ...`）并真正验证
   `combo(1) == 70`（VM 通过）。
-- 注：这条路径的 **C 后端**仍会在全局初始化器上报 sig struct 不兼容（comptime
-  折叠出的嵌套闭包字面量复用了内层/模板的 `capture_type_id`）；单层装饰器
-  C 正常。
+- 注：C 后端的全局初始化器问题也已修复——`sema_ct_encode` 的 FUNC 分支现在把
+  常量类型记为**闭包类型**（捕获槽位类型进入身份），`sema_ct_lit` 重建嵌套捕获
+  的 `type_expr` 时得到的是内层闭包类型，C 后端按捕获类型重算 env 布局不再
+  退化成内层/模板的 sig struct。`examples/decorator_param` 重新演示装饰器链
+  （`combo(1)=70`，C + VM 均通过）。
 
 ### 阶段 C（C 侧补充）：嵌套闭包捕获与聚合捕获
-
 - `capture_clone_kind` 新增 FUNC 分支（own 闭包捕获 → kind 3）：闭包的静态
   clone 辅助函数会递归调用**嵌套闭包类型**的 `<sig>__cl`，深拷贝内层 env。
 - `lower_stmt` 的 FREE 改为递归 `emit_closure_free`：嵌套闭包捕获下钻到内层
@@ -280,6 +281,16 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
   + clone，两层 env 独立释放）、`CBackend.BuildClosureAggregateCaptureFree`
   （捕获"含 own 槽位的聚合"时 FREE 走生成的 `__destroy_<T>(ref *T)`，不再对
   结构体值 `clux_free`）。
+
+### 导出 C ABI 的闭包约定（本次）
+
+- `export func` 的参数/返回可以是闭包类型：签名 struct 与内联 env struct
+  （含捕获槽位类型）都进模块头文件；跨模块 import 调用按 extern 原型传值。
+- 新 gtest：`CBackend.BuildExportClosureABI`（a 模块导出 `mk(base) ->
+  func |b: i32| (i32) -> i32` 与 `call(f, x)`，main 模块 import 后调用，
+  C 构建/运行 exit 0）。
+- 清理：删除已无生成点的 `CIR_EXPR_CLOSURE_RELEASE` / `clux_func_release`
+  no-op 宏（值里不再有 clone/dispose 函数指针，普通函数值的 FREE 是 no-op）。
 
 ## 当前状态 / 已知红
 
@@ -304,25 +315,25 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
    改动面：`include/vm/function.h`、`src/vm/type_func.c`、`exec_stack.c`
    （MAKE_FUNCTION/SET_CLOSURE）、`exec_memory.c`（FREE）、`type_ptr.c`
    （clone_block FUNC 分支）。
-2. **comptime 折叠结果的类型仍是签名类型**：`sema_ct_encode` 的 FUNC 分支只
-   记录 `fn->type`（普通签名），折叠出的闭包常量的 sema 类型因此是
-   `func(...)`。装饰器链本身已在 desugar 修好（VM 验证 70），但 **C 后端**在
-   全局初始化器上仍会把嵌套闭包字面量按内层/模板的 `capture_type_id`
-   （sig struct）落类型，导致 `[[scale(10)]] [[add(5)]] f` 的 C 构建报
-   incompatible struct。修复方向：让折叠常量携带闭包类型
-   （`type_func_closure`），并让 `sema_ct_lit` 重建的嵌套字面量拥有各自的
-   `capture_type_id`（而不是共享 `*lit = *orig` 里的旧值）；需成组调整
-   `func_instantiate`/`value_assign`/`implicit_cast` 的运行期类型身份。
+2. **运行期闭包值的类型身份仍是签名类型**：sema 的闭包常量/变量是闭包类型
+   （捕获进入身份），但 `func_instantiate` 产出的运行期 value type 仍是普通
+   `func_type_t`（sig 与闭包类型共享布局；`capture_type` 挂在函数对象上）。
+   目前 inline env + 静态分派工作正常；若要让运行期类型反射、跨模块 ABI、
+   `cfunc_ptr` 看到完整闭包类型，需要把 value type 也切到闭包类型——试过直接
+   改会让 `ClosureValueOwn` 整组失败（move/赋值路径共享同一实例），需要与
+   值生命周期改造一起做。
 3. **闭包捕获聚合的 clone**：C 的 `emit_closure_free` 对 FUNC（递归）、
    own 指针/切片、含 own 槽位的聚合（`__destroy_<T>`）已覆盖；clone 侧对
    聚合捕获走生成的 `__clone_<T>`（kind 0），也已覆盖。剩余：捕获槽为
    cunion / share 指针时的销毁语义（沿用旧行为，未按 RC 计数）。
-4. **清理旧表示**：C 后端已不把 clone/dispose 指针放进值（`clux_func_release`
-   为 no-op，`env_*_fid` 仅供 VM）；`capture_clone_kind` 与 sema
-   `clone_needs_deep` 的规则重复，后续可共享；删除过渡期死代码。
-5. 文档/ABI 收尾：导出 C ABI 的闭包约定（签名 struct/env 已能进头文件，但
-   `export func` 带闭包参数/返回尚未验证）、跨模块闭包类型、`cfunc_ptr` 与
-   闭包类型的交互。
+4. **清理旧表示**：C 后端值里已无 clone/dispose 指针，`CIR_EXPR_CLOSURE_RELEASE`
+   与 `clux_func_release` 已删除；`capture_clone_kind` 与 sema
+   `clone_needs_deep` 的规则仍重复（后续可共享），VM 侧 `env_*_fid` 仍是
+   clone/free 的运行期入口（保留）。
+5. 文档/ABI 收尾：导出函数的闭包参数/返回已验证（`BuildExportClosureABI`）；
+   剩余：`cfunc_ptr` 与闭包类型的交互（带捕获闭包无 C 等价物，已有拒绝用例）、
+   跨模块**泛型函数**返回闭包的 ABI、导出函数的闭包值在 C 侧调用者里的
+   生命周期约定。
 
 ## 关键代码位置（继续实施时）
 

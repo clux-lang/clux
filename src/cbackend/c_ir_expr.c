@@ -349,15 +349,6 @@ cir_expr_t *cir_expr_closure(arena_t *arena, cir_type_t *type,
     return e;
 }
 
-cir_expr_t *cir_expr_closure_release(arena_t *arena, cir_expr_t *object) {
-    cir_expr_t *e = (cir_expr_t *)arena_calloc(
-        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
-    if (!e) return NULL;
-    e->kind = CIR_EXPR_CLOSURE_RELEASE;
-    e->lhs = object;
-    return e;
-}
-
 cir_expr_t *cir_expr_func_clone(arena_t *arena, cir_expr_t *object) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(
         arena, 1, sizeof(*e), ALIGNOF(max_align_t));

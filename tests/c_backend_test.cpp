@@ -2318,6 +2318,51 @@ TEST(CBackend, BuildNestedClosureCaptureClone) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* 导出的 C ABI 函数带**闭包类型**参数/返回：跨模块 import 时签名 struct 与
+   内联 env struct 必须都进头文件（含捕获槽位类型），调用点按 extern 原型
+   传值。覆盖"导出闭包约定"的第一种形态。 */
+TEST(CBackend, BuildExportClosureABI) {
+  namespace fs = std::filesystem;
+  fs::path proj = fs::path(clux_test_temp_dir()) / "exp_closure_abi";
+  std::error_code ec;
+  fs::remove_all(proj, ec);
+  fs::create_directories(proj, ec);
+  auto write = [&](const char *name, const char *text) {
+    std::FILE *fp = std::fopen((proj / name).string().c_str(), "wb");
+    ASSERT_NE(fp, nullptr);
+    std::fputs(text, fp);
+    std::fclose(fp);
+  };
+  write("a.cx",
+        "export func mk(base: i32): func |b: i32| (i32) -> i32 {\n"
+        "  return func |base| add(x: i32): i32 { return base + x; };\n"
+        "}\n"
+        "export func call(f: func |b: i32| (i32) -> i32, x: i32): i32 {\n"
+        "  return f(x);\n"
+        "}\n");
+  write("main.cx",
+        "import a from \"./a\";\n"
+        "func main(): i32 {\n"
+        "  var f: func |b: i32| (i32) -> i32 = a::mk(3);\n"
+        "  if (a::call(f, 4) != 7) { return 1; }\n"
+        "  return 0;\n"
+        "}\n");
+  fs::path saved = fs::current_path();
+  fs::current_path(proj, ec);
+  ASSERT_FALSE(ec);
+  const int build_rc = run_cli({"build", "main.cx"});
+  fs::current_path(saved);
+  EXPECT_EQ(build_rc, 0);
+#ifdef _WIN32
+  const char *exe_name = "main.exe";
+#else
+  const char *exe_name = "main";
+#endif
+  ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
+  EXPECT_EQ(run_exe((proj / "build" / exe_name).string()), 0);
+  fs::remove_all(proj, ec);
+}
+
 /* 捕获"含 own 槽位的聚合"（Box 内 own *i32）：闭包销毁必须按类型递归
    （`__destroy_Box(ref *Box)`），不能把结构体值当指针 clux_free。 */
 TEST(CBackend, BuildClosureAggregateCaptureFree) {
