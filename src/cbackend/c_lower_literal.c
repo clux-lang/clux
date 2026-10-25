@@ -136,6 +136,7 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
 
     char envtag[64];
     snprintf(envtag, sizeof envtag, "struct clux_env_%u", seq);
+    lc->last_closure_env_tag = copy_arena(lc->arena, envtag);
     cir_type_t *env = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
                                    copy_arena(lc->arena, envtag));
     if (!env) return NULL;

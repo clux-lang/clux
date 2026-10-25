@@ -377,6 +377,10 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (value_cap) {
             strslice_t orig_name = fn->name;
             cir_expr_t *cl = lower_closure_literal(lc, fn);
+            if (cl) {
+                lower_local_fn_t *fe = find_local_fn(lc, orig_name);
+                if (fe) fe->env_tag = lc->last_closure_env_tag;
+            }
             if (!cl) {
                 *ok = false;
                 return NULL;
@@ -399,6 +403,45 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 st->lhs = cir_expr_ident(lc->arena, vn);
                 st->op = "=";
                 st->expr = cl;
+                /* 互递归 fixup：先把自身登记为 defined，再补写 env 中的函数
+                   引用字段（captures 里函数值在定义点可能尚未初始化）。 */
+                lfe->defined = true;
+                cir_stmt_t *tail = st;
+                for (lower_local_fn_t *other = lc->local_fns; other;
+                     other = other->next) {
+                    if (!other->is_closure || !other->var_name) continue;
+                    if (!other->defined) continue;
+                    bool wants = false;
+                    for (size_t ci = 0; ci < other->cap_ref_count; ci++) {
+                        strslice_t cn = other->cap_refs[ci];
+                        if (cn.len == orig_name.len &&
+                            memcmp(cn.ptr, orig_name.ptr, cn.len) == 0) {
+                            wants = true;
+                            break;
+                        }
+                    }
+                    if (!wants) continue;
+                    char fb[256];
+                    snprintf(fb, sizeof fb, "clux_f_%.*s", (int)orig_name.len,
+                             orig_name.ptr ? orig_name.ptr : "");
+                    char eb[512];
+                    snprintf(eb, sizeof eb,
+                             "((%s *)(%s.env))->%s",
+                             other->env_tag ? other->env_tag
+                                            : "struct clux_env_0",
+                             other->var_name, fb);
+                    cir_expr_t *field =
+                        cir_expr_ident(lc->arena, copy_arena(lc->arena, eb));
+                    cir_expr_t *val = cir_expr_ident(lc->arena, vn);
+                    if (!field || !val) break;
+                    cir_stmt_t *fix = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+                    if (!fix) break;
+                    fix->lhs = field;
+                    fix->op = "=";
+                    fix->expr = val;
+                    tail->next = fix;
+                    tail = fix;
+                }
                 return st;
             }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_VAR);
@@ -1036,7 +1079,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE)
                 ex = cir_expr_slice_data(lc->arena, ex);
-            else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC)
+            else if ((ot && type_kind_of(ot) == TYPE_KIND_FUNC) ||
+                     (ex && ex->kind == CIR_EXPR_FUNC_OBJ))
                 ex = cir_expr_closure_release(lc->arena, ex);
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
             if (!st) return head;
@@ -1148,6 +1192,29 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
         }
         lf->next = lc->local_fns;
         lc->local_fns = lf;
+    }
+    /* 第二轮：登记闭包值局部捕获到的本地函数名（用于定义点 fixup）。 */
+    for (ast_node_t *s2 = ((ast_block_t *)block)->stmts; s2; s2 = s2->next) {
+        if (s2->kind != AST_FUNC_DEF) continue;
+        ast_func_def_t *fn2 = (ast_func_def_t *)s2;
+        lower_local_fn_t *lf2 = find_local_fn(lc, fn2->name);
+        if (!lf2 || !lf2->is_closure) continue;
+        size_t ncap = 0;
+        for (ast_node_t *c = fn2->captures; c; c = c->next) {
+            ast_var_def_t *cd = (ast_var_def_t *)c;
+            if (cd->init && cd->init->kind != AST_UNDEF) continue;
+            if (find_local_fn(lc, cd->name)) ncap++;
+        }
+        if (!ncap) continue;
+        lf2->cap_refs = (strslice_t *)arena_calloc(
+            lc->arena, ncap, sizeof(strslice_t), ALIGNOF(max_align_t));
+        if (!lf2->cap_refs) continue;
+        for (ast_node_t *c = fn2->captures; c; c = c->next) {
+            ast_var_def_t *cd = (ast_var_def_t *)c;
+            if (cd->init && cd->init->kind != AST_UNDEF) continue;
+            if (!find_local_fn(lc, cd->name)) continue;
+            lf2->cap_refs[lf2->cap_ref_count++] = cd->name;
+        }
     }
     cir_stmt_t *result = lower_block_scoped(lc, block, ok);
     if (decl_head) {

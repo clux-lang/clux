@@ -86,6 +86,10 @@ typedef struct lower_local_fn {
     bool is_closure;      /* 有值捕获：调用走闭包值 */
     uint32_t fid;         /* sema 函数 id（本地函数引用按 fid 解析） */
     bool predeclared;     /* 闭包值局部已在块入口前向声明 */
+    bool defined;         /* 闭包值已赋值（可被兄弟 env fixup 引用） */
+    const char *env_tag;  /* 闭包 env 结构体名（如 struct clux_env_0） */
+    strslice_t *cap_refs; /* 捕获的本地函数名（函数引用捕获） */
+    size_t cap_ref_count;
     const type_t *type;
     struct lower_local_fn *next;
 } lower_local_fn_t;
@@ -161,6 +165,7 @@ typedef struct lower_ctx {
     strslice_t cur_self_name;
     const char *cur_fn_cname;
     const char *cur_env_param;
+    const char *last_closure_env_tag;
     /* 局部具名函数（块内 `func`）：名字 → 静态 C 函数/函数对象。 */
     lower_local_fn_t *local_fns;
     /* 正在内联的 defer 体的捕获结构体局部名（`__ctx.env` → 它）。 */
