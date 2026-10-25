@@ -90,8 +90,9 @@ struct clux_<tag>_cl_<id> {
    （函数指针由编译期生成，同 C 后端）。
 6. **C 后端**：
    - 闭包类型 → 上述 C struct（字段顺序固定）；调用 `f.fn(&f.env, ...)`；
-   - 闭包字面量构造：`{ .fn = impl, .env = { .clux_f_a = a, ... },
-     .env_dispose = _, .env_clone = _ }`，不再 `clux_new`；
+   - 闭包字面量构造：`{ .fn = impl, .env = { .clux_f_a = a, ... } }`；
+     clone/dispose 由使用点按类型**静态调用** `clux_env_clone_<id>` /
+     `clux_env_dispose_<id>`（值里不存函数指针），不再 `clux_new`；
    - 函数体：`struct env *clux_v___ctx_env = (struct env *)env;`，捕获访问
      走 `->`；
    - `FREE` / 赋值 / 返回按内联聚合处理：own 字段释放、clone 调 `env_clone`；
