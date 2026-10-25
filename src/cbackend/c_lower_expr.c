@@ -302,6 +302,17 @@ static cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
     if (tt == vs) return v;
     type_kind_t kt = type_kind_of(tt), kv = type_kind_of(vs);
     if (kt != kv) return v;
+    /* 嵌入继承：派生类型指针隐式上转为基类型指针（C 里显式 cast）。 */
+    if (kt == TYPE_KIND_PTR) {
+        const type_t *pb = type_strip_quals(ptr_type_base(tt));
+        const type_t *vb = type_strip_quals(ptr_type_base(vs));
+        if (pb && vb && pb != vb) {
+            cir_type_t *ct = map_type(lc, tt);
+            cir_type_t *st = map_type(lc, vs);
+            if (ct && st) return cir_expr_cast(lc->arena, ct, v);
+        }
+        return v;
+    }
     if (kt != TYPE_KIND_STRUCT && kt != TYPE_KIND_TUPLE &&
         kt != TYPE_KIND_CUNION)
         return v;
@@ -517,6 +528,27 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             }
             recv = cir_expr_unary(lc->arena, "&", recv);
         }
+        /* 嵌入继承：接收者隐式上转（派生 * -> 基 *），C 侧显式 cast。 */
+        {
+            const type_t *mt =
+                m->def ? func_type_of_def(lc, m->def) : NULL;
+            if (!mt && call->member_type_id) {
+                const sema_type_t *stt =
+                    sema_type_by_id(lc->sema, call->member_type_id);
+                if (stt && stt->type) {
+                    const struct_type_t *fo = NULL;
+                    sema_symbol_t *ms = sema_struct_find_member(
+                        lc->sema, stt->type, mem->field, call->callee,
+                        &fo);
+                    if (ms && ms->type) mt = ms->type;
+                }
+            }
+            const type_t *self_t = mt ? func_type_param(mt, 0) : NULL;
+            if (self_t) {
+                cir_type_t *sct = map_type(lc, self_t);
+                if (sct) recv = cir_expr_cast(lc->arena, sct, recv);
+            }
+        }
         cir_expr_t *out = cir_expr_call(lc->arena, m->cname, NULL);
         cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
         cir_expr_append_arg(out, recv);
@@ -577,12 +609,127 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (!expr) return NULL;
     /* env-first ABI：直接调用传 NULL。 */
     cir_expr_append_arg(expr, cir_expr_ident(lc->arena, "NULL"));
-    for (ast_node_t *a = call->args; a; a = a->next) {
-        cir_expr_t *arg = lower_call_arg(lc, a);
+    /* 形参类型已知时按布局兼容做结构化转换（匿名 struct → 声明类型）。 */
+    const type_t *ftsig = NULL;
+    {
+        const type_t *ft = infer_expr_type(lc, call->callee);
+        if (ft && type_kind_of(type_strip_quals(ft)) == TYPE_KIND_FUNC)
+            ftsig = type_strip_quals(ft);
+        else if (call->callee && call->callee->kind == AST_IDENT) {
+            sema_symbol_t *sym = sema_lookup(
+                lc->sema->global_scope, ((ast_ident_t *)call->callee)->name);
+            if (sym && sym->type &&
+                type_kind_of(type_strip_quals(sym->type)) == TYPE_KIND_FUNC)
+                ftsig = type_strip_quals(sym->type);
+        } else if (call->callee &&
+                   call->callee->kind == AST_FUNC_REF) {
+            ast_func_ref_t *rf = (ast_func_ref_t *)call->callee;
+            sema_func_t *sf =
+                rf->fid ? sema_func_by_id(lc->sema, rf->fid) : NULL;
+            if (sf && sf->def) {
+                const type_t *ft = func_type_of_def(
+                    lc, (ast_func_def_t *)sf->def);
+                if (ft && type_kind_of(type_strip_quals(ft)) ==
+                              TYPE_KIND_FUNC)
+                    ftsig = type_strip_quals(ft);
+            }
+            if (!ftsig && call->member_type_id && rf->name.ptr) {
+                const sema_type_t *stt =
+                    sema_type_by_id(lc->sema, call->member_type_id);
+                if (stt && stt->type) {
+                    const struct_type_t *fo = NULL;
+                    sema_symbol_t *ms = sema_struct_find_member(
+                        lc->sema, stt->type, rf->name, call->callee, &fo);
+                    if (ms && ms->type &&
+                        type_kind_of(type_strip_quals(ms->type)) ==
+                            TYPE_KIND_FUNC)
+                        ftsig = type_strip_quals(ms->type);
+                }
+            }
+        }
+    }
+    size_t ai = 0;
+    for (ast_node_t *a = call->args; a; a = a->next, ai++) {
+        const type_t *pt =
+            (ftsig && ai < func_type_param_count(ftsig)) ?
+                func_type_param(ftsig, ai) : NULL;
+        cir_expr_t *arg = pt ? lower_compat_value(lc, pt, a)
+                            : lower_call_arg(lc, a);
         if (!arg) return NULL;
         cir_expr_append_arg(expr, arg);
     }
     return expr;
+}
+
+static cir_expr_t *static_attr_init_expr(lower_ctx_t *lc, const type_t *t,
+                                         const value_t *av) {
+    if (!t || !av || !value_data(av)) return NULL;
+    const type_t *vt = type_strip_quals(t);
+    switch (type_kind_of(vt)) {
+    case TYPE_KIND_BOOL: {
+        uint8_t b = 0;
+        memcpy(&b, value_data(av), sizeof b);
+        return cir_expr_bool(lc->arena, b != 0);
+    }
+    case TYPE_KIND_INT: {
+        size_t sz = vt->size ? vt->size : 4;
+        uint64_t u = 0;
+        if (sz > 8) return NULL;
+        memcpy(&u, value_data(av), sz);
+        int64_t v64 = 0;
+        switch (sz) {
+        case 1: v64 = (int8_t)u; break;
+        case 2: v64 = (int16_t)u; break;
+        case 4: v64 = (int32_t)u; break;
+        default: memcpy(&v64, &u, sizeof v64); break;
+        }
+        return cir_expr_int(lc->arena, v64);
+    }
+    case TYPE_KIND_FLOAT: {
+        double d = 0;
+        size_t sz = vt->size ? vt->size : 8;
+        if (sz == 4) {
+            float f = 0;
+            memcpy(&f, value_data(av), sizeof f);
+            d = f;
+        } else {
+            memcpy(&d, value_data(av), sizeof d);
+        }
+        return cir_expr_float(lc->arena, d);
+    }
+    case TYPE_KIND_STR: {
+        const char *sp = NULL;
+        memcpy(&sp, value_data(av), sizeof sp);
+        if (!sp) return NULL;
+        return cir_expr_string(lc->arena, sp, strlen(sp));
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* 结构体静态属性在 sema/VM 里存于类型的 attributes 表；C 侧落成模块级
+   static 全局（首次引用时生成定义，按 C 名去重）。 */
+static void ensure_static_attr_global(lower_ctx_t *lc, const char *cname,
+                                      const type_t *attr_t,
+                                      const value_t *av) {
+    if (!lc || !cname) return;
+    for (cir_global_t *g = lc->unit->globals; g; g = g->next)
+        if (g->name && strcmp(g->name, cname) == 0) return;
+    cir_global_t *g = (cir_global_t *)arena_calloc(
+        lc->arena, 1, sizeof(*g), ALIGNOF(max_align_t));
+    if (!g) return;
+    g->name = cname;
+    g->type = attr_t ? map_type(lc, attr_t) : NULL;
+    if (!g->type) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, NULL),
+                   "c backend: cannot map static attribute type");
+        lc->failed = true;
+        return;
+    }
+    g->init = static_attr_init_expr(lc, attr_t, av);
+    g->is_exported = false;
+    cir_unit_add_global(lc->unit, g);
 }
 
 cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
@@ -619,6 +766,72 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             if (!cast) return NULL;
             cast->type = ct;
             return cast;
+        }
+        /* 结构体静态属性 `Counter::total`：parse 已把它改名成模块级全局
+           `Counter::total` 并追加进声明表；引用按同一（净化后的）C 名。 */
+        if (sr->is_struct_attr || (sr->type_expr &&
+                                   sr->type_expr->kind == AST_TYPE_REF)) {
+            const type_t *owner_t = t;
+            if (!owner_t && sr->struct_attr_type_id) {
+                const sema_type_t *stt =
+                    sema_type_by_id(lc->sema, sr->struct_attr_type_id);
+                if (stt) owner_t = stt->type;
+            }
+            if (owner_t && type_kind_of(owner_t) == TYPE_KIND_STRUCT) {
+                char fb[512];
+                int fn = snprintf(fb, sizeof fb, "%.*s::%.*s",
+                                  (int)owner_t->name.len,
+                                  owner_t->name.ptr ? owner_t->name.ptr : "",
+                                  (int)sr->variant.len,
+                                  sr->variant.ptr ? sr->variant.ptr : "");
+                if (fn > 0 && (size_t)fn < sizeof fb) {
+                    strslice_t full = {.ptr = copy_arena(lc->arena, fb),
+                                       .len = (size_t)fn};
+                    const char *cn = module_symbol(
+                        lc->arena, lc->unit, "v_", full);
+                    if (cn) {
+                        const struct_type_t *stp =
+                            (const struct_type_t *)owner_t;
+                        char kb[256];
+                        size_t kn = sr->variant.len < sizeof(kb) - 1
+                                        ? sr->variant.len : sizeof(kb) - 1;
+                        if (sr->variant.ptr && kn)
+                            memcpy(kb, sr->variant.ptr, kn);
+                        kb[kn] = '\0';
+                        const value_t *av =
+                            stp->attributes ? (const value_t *)strmap_get(
+                                                  stp->attributes, kb)
+                                            : NULL;
+                        const type_t *at =
+                            av ? value_type(av) : NULL;
+                        if (!at) {
+                            const struct_type_t *found_owner = NULL;
+                            sema_symbol_t *ms = sema_struct_find_member(
+                                lc->sema, owner_t, sr->variant, e,
+                                &found_owner);
+                            if (ms) {
+                                at = ms->type;
+                                if (!av && found_owner &&
+                                    found_owner->attributes)
+                                    av = (const value_t *)strmap_get(
+                                        found_owner->attributes, kb);
+                            }
+                        }
+                        if (!at) {
+                            sema_symbol_t *ts = sema_lookup(
+                                lc->sema->global_scope, owner_t->name);
+                            if (ts && ts->kind == SEMA_SYM_TYPE &&
+                                ts->member_scope) {
+                                sema_symbol_t *ms = sema_scope_find_local(
+                                    ts->member_scope, sr->variant);
+                                if (ms) at = ms->type;
+                            }
+                        }
+                        ensure_static_attr_global(lc, cn, at, av);
+                        return cir_expr_ident(lc->arena, cn);
+                    }
+                }
+            }
         }
         diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                    "c backend: unsupported `::` reference '%.*s' (only enum "

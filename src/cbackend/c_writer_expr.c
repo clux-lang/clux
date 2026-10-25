@@ -423,14 +423,14 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
     case CIR_EXPR_BITCAST:
         /* 布局兼容的复合值重解释（C 不允许 struct 之间的 cast）：把值放
            进源类型的复合字面量，再按目标类型取址读出左值。 */
-        cw_put(sb, "(*((");
+        cw_put(sb, "(*(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-        cw_put(sb, " *)&(");
+        cw_put(sb, " *)&(((");
         cw_put(sb, e->src_type && e->src_type->c_name ? e->src_type->c_name
                                                       : "int32_t");
-        cw_put(sb, "){ ");
+        cw_put(sb, "[]){ ");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, " }))");
+        cw_put(sb, " })[0]))");
         break;
     case CIR_EXPR_TERNARY:
         cw_put(sb, "((");
