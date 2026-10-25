@@ -130,7 +130,8 @@ int driver_load_source(allocator_t *alloc,
 static int driver_lex_into(allocator_t *alloc,
                            const char *path,
                            vec_t **out_pool,
-                           lexer_t **out_lexer) {
+                           lexer_t **out_lexer,
+                           diag_buf_t *diag) {
   const char *data = NULL;
   size_t len = 0;
   if (driver_load_source(alloc, path, &data, &len) != 0) return -1;
@@ -160,11 +161,19 @@ static int driver_lex_into(allocator_t *alloc,
     if (kind == TOKEN_TYPE_ERROR) {
       const location_t *loc = token_get_location(t);
       const char *msg = token_get_error_message(t);
-      fprintf(stderr, "%s:%zu:%zu: error: %s\n",
-              path,
-              loc ? loc->begin.line : 0,
-              loc ? loc->begin.column : 0,
-              msg ? msg : "unrecognized input");
+      if (diag && loc) {
+        /* 编译路径：进共享诊断缓冲区，由流水线出口统一打印一次
+           （带源码片段）；不要再直接 fprintf，否则会出现两条输出。 */
+        diag_error(diag, *loc, "%s",
+                   msg ? msg : "unrecognized input");
+      } else {
+        /* 无 diag 的调用方（formatter / 独立 lex 测试）保留直接输出。 */
+        fprintf(stderr, "%s:%zu:%zu: error: %s\n",
+                path,
+                loc ? loc->begin.line : 0,
+                loc ? loc->begin.column : 0,
+                msg ? msg : "unrecognized input");
+      }
       lexer_close(&lexer);
       vec_free(alloc, &pool);
       return -2;
@@ -239,7 +248,7 @@ int driver_run_file(const char *path) { return driver_run_file_exit(path, NULL);
 
 int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool) {
   lexer_t *lexer = NULL;
-  if (driver_lex_into(alloc, path, out_pool, &lexer) != 0) return -1;
+  if (driver_lex_into(alloc, path, out_pool, &lexer, NULL) != 0) return -1;
   /* Closing the lexer frees the source buffer; token kinds/locations stay
    * valid but token text slices become dangling. Consumers needing the
    * text should keep the lexer alive (see driver_run_file). */
@@ -579,9 +588,9 @@ static module_t *compile_module_impl(vm_t *vm, allocator_t *alloc,
     /* 4. lex → parse */
     vec_t *pool = NULL;
     lexer_t *lexer = NULL;
-    int lex_result = driver_lex_into(alloc, canonical, &pool, &lexer);
+    int lex_result = driver_lex_into(alloc, canonical, &pool, &lexer, diag);
     if (lex_result == -2) {
-        /* 词法错误已输出到 stderr */
+        /* 词法错误已记录到诊断缓冲区（driver_lex_into 的 diag 参数）。 */
         if (lexer) lexer_close(&lexer);
         if (pool) vec_free(alloc, &pool);
         return NULL;

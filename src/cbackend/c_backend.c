@@ -529,8 +529,10 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     if (tests) vm->test_mode = true;
     main_mod = compile_module_prepare(vm, alloc, diag, arena, entry, path_stack);
     if (!main_mod) {
-        if (diag_has_error(diag)) diag_print_all(diag);
-        else fprintf(stderr, "build: cannot compile '%s'\n", src_path);
+        /* 诊断统一在 cleanup 打印一次；这里只在没有诊断时补通用提示，
+           避免同一批错误被打印两遍。 */
+        if (!diag_has_error(diag))
+            fprintf(stderr, "build: cannot compile '%s'\n", src_path);
         goto cleanup;
     }
     size_t nmods = vm->module_order ? vec_len(vm->module_order) : 0;
@@ -562,7 +564,7 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         bool require_main = is_main && !emit_c_only && !object_only && !tests;
         cir_unit_t *u = lower_one_module(arena, mod, tests, !require_main);
         if (!u) {
-            if (diag_has_error(diag)) diag_print_all(diag);
+            /* 诊断留给 cleanup 统一打印。 */
             goto cleanup;
         }
         units[i] = u;
@@ -673,7 +675,7 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         /* 写 .c/.h → 编译对象（测试模式的 runner 表已在上面确定）。 */
         if (write_one_module(alloc, u, c_path, obj_path, emit_c_only, keep_c,
                              tc) != 0) {
-            if (diag_has_error(diag)) diag_print_all(diag);
+            /* 诊断留给 cleanup 统一打印。 */
             goto cleanup;
         }
         /* 合并模块声明的链接参数（extern lib），去重。 */

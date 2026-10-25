@@ -1213,6 +1213,41 @@ TEST(CBackend, RejectsShareWeakAcrossCAbi) {
       "share/weak pointer cannot cross the C ABI", "ffi_share_cfunc_def");
 }
 
+/* 诊断只打印一次：失败点不能自己 diag_print_all，必须统一交给 cleanup
+   （否则同一批 sema 错误会原样打印两遍）。 */
+TEST(CBackend, DiagnosticsPrintedOnce) {
+  const std::string src = write_temp_file(
+      "func main(): i32 { var x: i32 = \"s\"; return 0; }\n",
+      "cbackend_diag_once");
+  ASSERT_FALSE(src.empty());
+  std::string err;
+  const int rc = clux_run_capture(src, &err);
+  EXPECT_EQ(rc, 1) << err;
+  const std::string needle =
+      "cannot initialize variable 'x' of type i32 with str";
+  const size_t first = err.find(needle);
+  ASSERT_NE(first, std::string::npos) << err;
+  EXPECT_EQ(err.find(needle, first + needle.size()), std::string::npos)
+      << "diagnostic printed more than once:\n" << err;
+}
+
+/* 词法错误同样只打印一次：driver_lex_into 有 diag 时写缓冲区，不再直接
+   fprintf（否则会和 cleanup 的统一打印重复）。 */
+TEST(CBackend, LexicalErrorPrintedOnce) {
+  const std::string src = write_temp_file(
+      "func main(): i32 { var s = \"abc; return 0; }\n",
+      "cbackend_lex_once");
+  ASSERT_FALSE(src.empty());
+  std::string err;
+  const int rc = clux_run_capture(src, &err);
+  EXPECT_EQ(rc, 1) << err;
+  const std::string needle = "unterminated string literal";
+  const size_t first = err.find(needle);
+  ASSERT_NE(first, std::string::npos) << err;
+  EXPECT_EQ(err.find(needle, first + needle.size()), std::string::npos)
+      << "lexical diagnostic printed more than once:\n" << err;
+}
+
 /* 真实动态库：struct 按值、`data()` 传数组指针、变参（struct …）、
  * `str` 返回值（strlen 求 len）。 */
 TEST(CBackend, BuildExternCfuncTestdata) {

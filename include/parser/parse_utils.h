@@ -85,9 +85,6 @@ ast_node_t *parse_reserved_ident_error(parser_t *p, const token_t *tok,
  */
 ast_node_t *parse_decorator_prefixes(parser_t *p);
 
-/** 报告语法错误（不改变游标），置 has_error。 */
-void parse_error(parser_t *p, const char *fmt, ...);
-
 /* ---- Token → strslice 便捷 ---- */
 
 /** 取 token 的零拷贝文本切片。 */

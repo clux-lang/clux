@@ -319,7 +319,7 @@ char *fmt_format_source(allocator_t *alloc, const char *src, size_t len,
         return NULL;
     }
     /* 语法错误时，不输出部分 AST（会静默丢弃错误后的代码段），
-       改为返回原始源码不变。错误已由 parse_error 打印到 stderr。 */
+       改为返回原始源码不变。 */
     if (parser->has_error) {
         parser_destroy(&parser);
         arena_destroy(alloc, &arena);

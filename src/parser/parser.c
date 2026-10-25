@@ -76,11 +76,19 @@ static bool has_lexical_errors(parser_t *p) {
         if (token_get_kind(t) == TOKEN_TYPE_ERROR) {
             const location_t *loc = token_get_location(t);
             const char *msg = token_get_error_message(t);
-            fprintf(stderr, "%s:%zu:%zu: error: %s\n",
-                    loc ? loc->filename : "<unknown>",
-                    loc ? loc->begin.line : 0,
-                    loc ? loc->begin.column : 0,
-                    msg ? msg : "lexical error");
+            if (p->diag && loc) {
+                /* 有诊断缓冲区：与语法错误走同一条出口，避免直接打印
+                   与 driver 的统一打印重复。 */
+                diag_error(p->diag, *loc, "%s",
+                           msg ? msg : "lexical error");
+            } else {
+                /* 独立解析（无 diag，如部分单测）：保留直接输出。 */
+                fprintf(stderr, "%s:%zu:%zu: error: %s\n",
+                        loc ? loc->filename : "<unknown>",
+                        loc ? loc->begin.line : 0,
+                        loc ? loc->begin.column : 0,
+                        msg ? msg : "lexical error");
+            }
             p->has_error = true;
             return true;
         }

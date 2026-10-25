@@ -4,9 +4,7 @@
 #include "parser/ast_scope_annot.h"
 #include "parser/parse_expr.h"
 
-#include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
 /* ---- 游标操作 ---- */
@@ -125,7 +123,9 @@ bool expect_keyword(parser_t *p, const char *kw) {
         advance(p);
         return true;
     }
-    parse_error(p, "expected keyword '%s'", kw);
+    /* 不在这里打印：所有调用点都会用 ast_error_new 报出更具体的消息，
+       并进入共享诊断缓冲区由 driver 统一打印。直接打印同一处错误会在
+       输出里出现两条诊断（一条 fallback、一条 AST 错误）。 */
     return false;
 }
 
@@ -134,7 +134,8 @@ bool expect_symbol(parser_t *p, const char *sym) {
         advance(p);
         return true;
     }
-    parse_error(p, "expected '%s'", sym);
+    /* 同 expect_keyword：由调用点负责报错，避免 direct print + AST_ERROR
+       双份诊断。 */
     return false;
 }
 
@@ -163,24 +164,8 @@ ast_node_t *parse_reserved_ident_error(parser_t *p, const token_t *tok,
 
 /* ---- 诊断 ---- */
 
-void parse_error(parser_t *p, const char *fmt, ...) {
-    if (!p) return;
-
-    const token_t *t = cur_token(p);
-    const location_t *loc = token_get_location(t);
-
-    fprintf(stderr, "%s:%zu:%zu: error: ",
-            loc ? loc->filename : "<unknown>",
-            loc ? loc->begin.line : 0,
-            loc ? loc->begin.column : 0);
-
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-
-    fputc('\n', stderr);
-}
+/* 解析器不再直接往 stderr 打印：所有语法错误都由 ast_error_new 记入共享
+   诊断缓冲区，由 driver 在流水线出口统一打印一次（带源码片段）。 */
 
 /* ---- Token → strslice 便捷 ---- */
 
@@ -301,7 +286,7 @@ strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
     skip_trivia(p);
 
     if (check_symbol(p, ">")) {
-        parse_error(p, "scope annotation cannot be empty");
+        /* 具体诊断由调用方报（invalid scope annotation ...）。 */
         return NULL;
     }
 
@@ -313,7 +298,6 @@ strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
         if (!check_kind(p, TOKEN_TYPE_IDENTIFIER) &&
             !(check_symbol(p, "*") && count == 0)) {
             /* '*' 仅在首元素合法（'<*>' = global；'<*,a>' 可化简等价 '<a>'） */
-            parse_error(p, "expected scope name in annotation");
             return NULL;
         }
         count++;
@@ -325,7 +309,6 @@ strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
             continue;
         }
         if (check_symbol(p, ">")) break;
-        parse_error(p, "expected ',' or '>' in scope annotation");
         return NULL;
     }
     p->pos = save;
@@ -345,7 +328,7 @@ strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
     }
 
     if (!expect_symbol(p, ">")) {
-        parse_error(p, "expected '>' after scope annotation");
+        /* 具体诊断由调用方报。 */
         return NULL;
     }
     skip_trivia(p);
