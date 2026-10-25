@@ -223,6 +223,35 @@ static int link_exe(allocator_t *alloc, const char *const *objs,
     for (const cir_link_arg_t *l = code_links; l; l = l->next) {
         if (!l->arg || !l->arg[0]) continue;
         string_append_char(cmd, ' ');
+#ifdef _WIN32
+        /* Windows：`extern lib foo from "foo.dll"` 直接让链接器吃 .dll 会
+           失败；改用同名导入库 `foo.lib`（clang/lld-link 只接受 .lib）。 */
+        size_t alen = strlen(l->arg);
+        if (alen > 4 && _stricmp(l->arg + alen - 4, ".dll") == 0) {
+            bool has_dir = strchr(l->arg, '/') != NULL ||
+                           strchr(l->arg, '\\') != NULL;
+            if (!has_dir) {
+                /* 裸文件名：`-l<name>`（去 .dll 后缀）才走 -L 搜索路径。 */
+                char *name = (char *)malloc(alen - 3);
+                if (name) {
+                    memcpy(name, l->arg, alen - 4);
+                    name[alen - 4] = '\0';
+                    string_append_cstr(cmd, " -l");
+                    cmd_append_quoted(cmd, name);
+                    free(name);
+                    continue;
+                }
+            }
+            char *lib = (char *)malloc(alen + 1);
+            if (lib) {
+                memcpy(lib, l->arg, alen + 1);
+                memcpy(lib + alen - 4, ".lib", 4);
+                cmd_append_quoted(cmd, lib);
+                free(lib);
+                continue;
+            }
+        }
+#endif
         cmd_append_quoted(cmd, l->arg);
     }
     if (tc) {

@@ -148,7 +148,37 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 - 验收：examples 全部 `clux run` 通过；`clux test --backend=c` 通过；
   `--emit-c` 在 run/test 下产出可检查的 C；VM 回退仍可用。
 
-### Phase 2：测试运行器切换与泄漏检测
+### Phase 2：测试运行器切换与泄漏检测（进行中）
+
+已切换：
+
+- `driver_run_file*` 改为 C 后端编译 + 子进程执行；`clux_run_capture` 仍通过
+  fd 重定向捕获编译诊断与生成 C 的泄漏报告。
+- 已删除纯 VM/bcode/exec/asm/value_dump 测试文件（12 个），
+  `ffi_lib_test`（直接测 dlopen/libffi API）一并删除。
+- 生成 C 的泄漏检测全局分配器已实现（见 §7）。
+- 测试 prelude 的 `printf` 改为 `extern cfunc ...: i32`，与 `<stdio.h>` 的
+  `int printf` 兼容；`.str{"..."}` 构造在 C 后端直接取内部值（不再套一层
+  struct 初始化器）。
+- Windows 链接：`extern lib ... from "foo.dll"` 自动改链导入库
+  `-lfoo`（裸名）或同名 `.lib`（带路径），避免 lld-link 不接受 `.dll`。
+
+仍失败的 C 后端能力缺口（按套件归类，需逐项补齐或按新白皮书重设计）：
+
+- `ShareWeak`：`__make_share` 等共享/弱引用内建没有 C 定义。
+- `ErrorHandling`、`CunionMove`：`__make_share`/cunion 直接成员/
+  泛型可选参数实例化在 C 后端缺失。
+- `ClosureValueOwn`（部分）：`own func` 字段（VM 用运行期 env 表达）没有
+  C 等价表示。
+- `CloneFn`：option 嵌套 struct 的 clone C 初始化器类型不匹配。
+- `OwnAggregate`：对右值 struct 取地址的 C lowering 错误。
+- `DeferTest`/`StructCompose`/`StructMembers`/`StructRecursive`/`StructUpcast`/
+  `ConstConvert`/`DataBuiltin`/`Usize` 等：依赖 `td_i32` + `ffi_lib_sym` 的
+  VM dlopen 测试夹具，C 可执行链接/加载 DLL 实例不一致；这些用例需按
+  白皮书用 C ABI 夹具重设计。
+- `Driver`：部分用例仍按 VM 运行期诊断文本/行为断言，需迁移到 C 运行器。
+
+### Phase 2 原始计划
 
 这是最大的一步：约 430 处进程内 VM 调用。
 

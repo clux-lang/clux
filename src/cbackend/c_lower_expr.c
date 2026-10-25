@@ -1413,8 +1413,15 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             cir_expr_t *val = lower_expr(lc, fv);
             return val ? cir_expr_option(lc->arena, ct, true, val) : NULL;
         }
-        if (t && type_kind_of(t) == TYPE_KIND_CUNION) {
-            cir_type_t *ct = map_type(lc, t);
+        if (t && type_kind_of(t) == TYPE_KIND_STR) {
+            /* `.str{"hi"}`：str 在 C 里已经是 struct clux_str，单字段构造
+               直接取内部值，不能再包一层结构体初始化器。 */
+            ast_node_t *fv = c->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            return fv ? lower_expr(lc, fv) : NULL;
+        }
+        if (t && type_kind_of(t) == TYPE_KIND_CUNION) {            cir_type_t *ct = map_type(lc, t);
             const cunion_member_t *mem = cunion_type_member(t, c->member_tag);
             if (!ct || !mem) {
                 diag_error(lc->sema->diag, sema_loc(lc->sema, e),

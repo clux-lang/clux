@@ -45,11 +45,19 @@
 #include "vm/type_error.h"
 #include "vm/module.h"
 #include "vm/ffi_lib.h"   /* M6 FFI：extern lib 的动态库加载 */
+#include "cbackend/c_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* ---- Internal: byte buffer class (for file-backed source buffers) ---- */
 
@@ -193,9 +201,66 @@ static int main_exit_code(vm_t *vm, value_t *v) {
     return (int)raw;
 }
 
+/* 运行一个已构建的可执行文件，返回其进程退出码（spawn 失败返回 -1）。 */
+static int driver_spawn_wait(const char *exe) {
+#ifdef _WIN32
+    const char *argv[] = {exe, NULL};
+    intptr_t rc = _spawnv(_P_WAIT, exe, argv);
+    return rc < 0 ? -1 : (int)rc;
+#else
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl(exe, exe, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (!WIFEXITED(status)) return 1;
+    return WEXITSTATUS(status);
+#endif
+}
+
+/* 测试/驱动入口：C 后端编译 + 运行生成的可执行文件。
+ *
+ * 旧实现用进程内 VM；迁移到 C-only 后统一走 C 后端。编译期诊断仍由
+ * cbackend 打印到 stderr（测试的 clux_run_capture 会捕获）；运行期的
+ * `memory leak detected:` 由生成 C 的全局分配器在 main 退出时打印。 */
+int driver_run_file_exit(const char *path, int *exit_code) {
+    if (exit_code) *exit_code = 0;
+    if (!path) {
+        fprintf(stderr, "run: no input file\n");
+        return 1;
+    }
+#ifdef _WIN32
+    const char *suffix = ".run.exe";
+#else
+    const char *suffix = ".run";
+#endif
+    char *exe = (char *)malloc(strlen(path) + strlen(suffix) + 1);
+    if (!exe) {
+        fprintf(stderr, "run: out of memory\n");
+        return 1;
+    }
+    sprintf(exe, "%s%s", path, suffix);
+    cbackend_program_t pgm = {.build_dir = "build/tmp/test"};
+    int rc = cbackend_build_program(path, exe, &pgm, NULL);
+    if (rc == 0) {
+        int code = driver_spawn_wait(exe);
+        if (code < 0) {
+            fprintf(stderr, "run: cannot execute '%s'\n", exe);
+            rc = 1;
+        } else if (exit_code) {
+            *exit_code = code;
+        }
+    }
+    free(exe);
+    return rc;
+}
+
 int driver_run_file(const char *path) { return driver_run_file_exit(path, NULL); }
 
-int driver_run_file_exit(const char *path, int *exit_code) {
+static int driver_run_file_vm_exit(const char *path, int *exit_code) {
     if (exit_code) *exit_code = 0;
     if (!path) {
     fprintf(stderr, "run: no input file\n");
