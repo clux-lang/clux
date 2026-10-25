@@ -1,6 +1,6 @@
 #include "vm/type_ptr.h"
 #include "vm/type_ownership.h"
-#include "vm/bcode_function.h"
+#include "vm/function.h"
 #include "vm/type.h"
 #include "vm/type_opaque.h"
 #include "vm/type_option.h"

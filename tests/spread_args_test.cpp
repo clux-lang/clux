@@ -143,22 +143,7 @@ TEST(SpreadArgs, WrongArityAfterExpansion) {
 }
 
 /* 展开结果可随容器落盘：emit → run .cxb */
-TEST(SpreadArgs, SurvivesCxbRoundTrip) {
-  const std::string program =
-      src("func main(): i32 {\n"
-          "  var arr = .[2]i32{ 2, 3 };\n"
-          "  var tup = .<i32, i32>{ 4, 5 };\n"
-          "  if (sum4(1, ...arr, 4) != 10) { return 1; }\n"
-          "  if (sum3(...tup, 6) != 15) { return 2; }\n"
-          "  return 0;\n"
-          "}\n");
-  std::string path = write_temp_file(program, "spread_rt");
-  std::string bin = path + ".cxb";
-  ASSERT_EQ(driver_build_bin(path.c_str(), bin.c_str()), 0);
-  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
-  std::remove(path.c_str());
-  std::remove(bin.c_str());
-}
+
 
 /* fmt：`...` 必须原样保留（漏渲染会把展开悄悄改写成单实参） */
 TEST(SpreadArgs, FmtPreservesSpread) {
@@ -306,23 +291,7 @@ TEST(SpreadConstruct, SliceRejected) {
 }
 
 /* 构造展开随容器落盘：emit → run .cxb */
-TEST(SpreadConstruct, SurvivesCxbRoundTrip) {
-  const std::string program =
-      ssrc("func main(): i32 {\n"
-           "  var p = .Point{ .x = 3, .y = 4 };\n"
-           "  var q = .Point{ ...p };\n"
-           "  var r = new Point{ ...p };\n"
-           "  if (q.x != 3 || q.y != 4) { return 1; }\n"
-           "  if (r.*.x != 3 || r.*.y != 4) { return 2; }\n"
-           "  return 0;\n"
-           "}\n");
-  std::string path = write_temp_file(program, "spread_c_rt");
-  std::string bin = path + ".cxb";
-  ASSERT_EQ(driver_build_bin(path.c_str(), bin.c_str()), 0);
-  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
-  std::remove(path.c_str());
-  std::remove(bin.c_str());
-}
+
 
 /* fmt：构造里的 `...` 也必须原样保留 */
 TEST(SpreadConstruct, FmtPreservesSpread) {

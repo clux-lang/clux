@@ -18,49 +18,49 @@ extern "C" {
 
 struct vm_t;
 
-/* ---- extern var（数据符号）的类型码：与旧 BCODE_FFI_DATA_* 数值保持一致 ---- */
-#define BCODE_FFI_DATA_I8    0u
-#define BCODE_FFI_DATA_I16   1u
-#define BCODE_FFI_DATA_I32   2u
-#define BCODE_FFI_DATA_I64   3u
-#define BCODE_FFI_DATA_U8    4u
-#define BCODE_FFI_DATA_U16   5u
-#define BCODE_FFI_DATA_U32   6u
-#define BCODE_FFI_DATA_U64   7u
-#define BCODE_FFI_DATA_F32   8u
-#define BCODE_FFI_DATA_F64   9u
-#define BCODE_FFI_DATA_PTR   10u
-#define BCODE_FFI_DATA_BOOL  11u
-#define BCODE_FFI_DATA_STR   12u
-#define BCODE_FFI_DATA_TYPED 13u
-#define BCODE_FFI_DATA_USIZE 14u
+/* ---- extern var（数据符号）的类型码：与旧 CLUX_FFI_DATA_* 数值保持一致 ---- */
+#define CLUX_FFI_DATA_I8    0u
+#define CLUX_FFI_DATA_I16   1u
+#define CLUX_FFI_DATA_I32   2u
+#define CLUX_FFI_DATA_I64   3u
+#define CLUX_FFI_DATA_U8    4u
+#define CLUX_FFI_DATA_U16   5u
+#define CLUX_FFI_DATA_U32   6u
+#define CLUX_FFI_DATA_U64   7u
+#define CLUX_FFI_DATA_F32   8u
+#define CLUX_FFI_DATA_F64   9u
+#define CLUX_FFI_DATA_PTR   10u
+#define CLUX_FFI_DATA_BOOL  11u
+#define CLUX_FFI_DATA_STR   12u
+#define CLUX_FFI_DATA_TYPED 13u
+#define CLUX_FFI_DATA_USIZE 14u
 
 /* ---- extern cfunc 的返回类型码（调用点指令的返回槽编码） ---- */
-#define BCODE_FFI_RET_VOID  0u
-#define BCODE_FFI_RET_I32   1u
-#define BCODE_FFI_RET_I64   2u
-#define BCODE_FFI_RET_PTR   3u
-#define BCODE_FFI_RET_F64   4u
-#define BCODE_FFI_RET_U32   5u
-#define BCODE_FFI_RET_U64   6u
-#define BCODE_FFI_RET_I8    7u
-#define BCODE_FFI_RET_I16   8u
-#define BCODE_FFI_RET_U8    9u
-#define BCODE_FFI_RET_U16   10u
-#define BCODE_FFI_RET_BOOL  11u
-#define BCODE_FFI_RET_F32   12u
-#define BCODE_FFI_RET_STR   13u
-#define BCODE_FFI_RET_TYPED 14u
-#define BCODE_FFI_RET_USIZE 15u
+#define CLUX_FFI_RET_VOID  0u
+#define CLUX_FFI_RET_I32   1u
+#define CLUX_FFI_RET_I64   2u
+#define CLUX_FFI_RET_PTR   3u
+#define CLUX_FFI_RET_F64   4u
+#define CLUX_FFI_RET_U32   5u
+#define CLUX_FFI_RET_U64   6u
+#define CLUX_FFI_RET_I8    7u
+#define CLUX_FFI_RET_I16   8u
+#define CLUX_FFI_RET_U8    9u
+#define CLUX_FFI_RET_U16   10u
+#define CLUX_FFI_RET_BOOL  11u
+#define CLUX_FFI_RET_F32   12u
+#define CLUX_FFI_RET_STR   13u
+#define CLUX_FFI_RET_TYPED 14u
+#define CLUX_FFI_RET_USIZE 15u
 
-#define BCODE_FFI_RET_KIND_MASK 0xFFu
-#define BCODE_FFI_RET_PACK(kind, variadic, nfixed)                     \
-    (((uint32_t)(kind) & BCODE_FFI_RET_KIND_MASK) |                    \
+#define CLUX_FFI_RET_KIND_MASK 0xFFu
+#define CLUX_FFI_RET_PACK(kind, variadic, nfixed)                     \
+    (((uint32_t)(kind) & CLUX_FFI_RET_KIND_MASK) |                    \
      ((uint32_t)((variadic) ? 1u : 0u) << 8) |                         \
      (((uint32_t)(nfixed) & 0xFFFFu) << 16))
-#define BCODE_FFI_RET_UNPACK_KIND(v) ((uint32_t)(v) & BCODE_FFI_RET_KIND_MASK)
-#define BCODE_FFI_RET_UNPACK_VARIADIC(v) (((uint32_t)(v) >> 8) & 1u)
-#define BCODE_FFI_RET_UNPACK_NFIXED(v) (((uint32_t)(v) >> 16) & 0xFFFFu)
+#define CLUX_FFI_RET_UNPACK_KIND(v) ((uint32_t)(v) & CLUX_FFI_RET_KIND_MASK)
+#define CLUX_FFI_RET_UNPACK_VARIADIC(v) (((uint32_t)(v) >> 8) & 1u)
+#define CLUX_FFI_RET_UNPACK_NFIXED(v) (((uint32_t)(v) >> 16) & 0xFFFFu)
 
 /* §2 C ABI 类型约束：NULL = 可跨 C ABI；否则为人类可读拒绝原因。 */
 const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own);

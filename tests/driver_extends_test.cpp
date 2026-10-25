@@ -37,35 +37,7 @@ TEST(Driver, RunFileExtendsCompileTimeFold) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileExtendsFoldToBoolConst) {
-  /* 折叠验证：反汇编 .cxs 中 extends 表达式应全部为 PUSH_BOOL 常量，
-     不残留任何运行时类型计算指令。 */
-  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_ext_fold";
-  std::filesystem::create_directories(dir);
-  std::string src = (dir / "prog.cx").string();
-  std::string cxs = (dir / "prog.cxs").string();
 
-  {
-    FILE *fp = fopen(src.c_str(), "wb");
-    const char *code = "func main():i32 {\n"
-                       "  var a = i32 extends i32;\n"
-                       "  var b = i32 extends i64;\n"
-                       "  if (a && !b) { return 1; }\n"
-                       "  return 0;\n"
-                       "}\n";
-    fwrite(code, 1, std::strlen(code), fp);
-    fclose(fp);
-  }
-
-  ASSERT_EQ(driver_build_asm(src.c_str(), cxs.c_str()), 0);
-  std::string text = slurp(cxs);
-  ASSERT_FALSE(text.empty());
-  EXPECT_NE(text.find("PUSH_BOOL"), std::string::npos);
-  /* extends 无字节码助记符（纯编译期），折叠后也不得出现 LOAD_TYPE 拉取 */
-  EXPECT_EQ(text.find("EXTENDS"), std::string::npos);
-
-  std::filesystem::remove_all(dir);
-}
 
 TEST(Driver, RunFileExtendsNonTypeRejected) {
   /* 非类型操作数：sema 阶段 ctfe 求值失败（value_extends → "extends: type

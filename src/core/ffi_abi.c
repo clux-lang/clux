@@ -124,20 +124,20 @@ bool ffi_data_kind_of(const type_t *t, const struct vm_t *vm, uint32_t *out_kind
     if (!t || !vm || !out_kind) return false;
     t = type_strip_ownership(t);
     const vm_t *v = (const vm_t *)vm;
-    if (t == v->type_i8)  { *out_kind = BCODE_FFI_DATA_I8;  return true; }
-    if (t == v->type_i16) { *out_kind = BCODE_FFI_DATA_I16; return true; }
-    if (t == v->type_i32) { *out_kind = BCODE_FFI_DATA_I32; return true; }
-    if (t == v->type_i64) { *out_kind = BCODE_FFI_DATA_I64; return true; }
-    if (t == v->type_u8)  { *out_kind = BCODE_FFI_DATA_U8;  return true; }
-    if (t == v->type_u16) { *out_kind = BCODE_FFI_DATA_U16; return true; }
-    if (t == v->type_u32) { *out_kind = BCODE_FFI_DATA_U32; return true; }
-    if (t == v->type_u64) { *out_kind = BCODE_FFI_DATA_U64; return true; }
-    if (t == v->type_usize) { *out_kind = BCODE_FFI_DATA_USIZE; return true; }
-    if (t == v->type_f32) { *out_kind = BCODE_FFI_DATA_F32; return true; }
-    if (t == v->type_f64) { *out_kind = BCODE_FFI_DATA_F64; return true; }
-    if (t == v->type_bool) { *out_kind = BCODE_FFI_DATA_BOOL; return true; }
-    if (t == v->type_opaque) { *out_kind = BCODE_FFI_DATA_PTR; return true; }
-    if (t == v->type_str) { *out_kind = BCODE_FFI_DATA_STR; return true; }
+    if (t == v->type_i8)  { *out_kind = CLUX_FFI_DATA_I8;  return true; }
+    if (t == v->type_i16) { *out_kind = CLUX_FFI_DATA_I16; return true; }
+    if (t == v->type_i32) { *out_kind = CLUX_FFI_DATA_I32; return true; }
+    if (t == v->type_i64) { *out_kind = CLUX_FFI_DATA_I64; return true; }
+    if (t == v->type_u8)  { *out_kind = CLUX_FFI_DATA_U8;  return true; }
+    if (t == v->type_u16) { *out_kind = CLUX_FFI_DATA_U16; return true; }
+    if (t == v->type_u32) { *out_kind = CLUX_FFI_DATA_U32; return true; }
+    if (t == v->type_u64) { *out_kind = CLUX_FFI_DATA_U64; return true; }
+    if (t == v->type_usize) { *out_kind = CLUX_FFI_DATA_USIZE; return true; }
+    if (t == v->type_f32) { *out_kind = CLUX_FFI_DATA_F32; return true; }
+    if (t == v->type_f64) { *out_kind = CLUX_FFI_DATA_F64; return true; }
+    if (t == v->type_bool) { *out_kind = CLUX_FFI_DATA_BOOL; return true; }
+    if (t == v->type_opaque) { *out_kind = CLUX_FFI_DATA_PTR; return true; }
+    if (t == v->type_str) { *out_kind = CLUX_FFI_DATA_STR; return true; }
     return false;
 }
 
@@ -146,26 +146,26 @@ const type_t *ffi_data_type_of(const struct vm_t *vm, uint32_t kind,
     if (!vm) return NULL;
     const vm_t *v = (const vm_t *)vm;
     switch (kind) {
-    case BCODE_FFI_DATA_I8:  if (out_size) *out_size = 1; return v->type_i8;
-    case BCODE_FFI_DATA_I16: if (out_size) *out_size = 2; return v->type_i16;
-    case BCODE_FFI_DATA_I32: if (out_size) *out_size = 4; return v->type_i32;
-    case BCODE_FFI_DATA_I64: if (out_size) *out_size = 8; return v->type_i64;
-    case BCODE_FFI_DATA_U8:  if (out_size) *out_size = 1; return v->type_u8;
-    case BCODE_FFI_DATA_U16: if (out_size) *out_size = 2; return v->type_u16;
-    case BCODE_FFI_DATA_U32: if (out_size) *out_size = 4; return v->type_u32;
-    case BCODE_FFI_DATA_U64: if (out_size) *out_size = 8; return v->type_u64;
-    case BCODE_FFI_DATA_USIZE:
+    case CLUX_FFI_DATA_I8:  if (out_size) *out_size = 1; return v->type_i8;
+    case CLUX_FFI_DATA_I16: if (out_size) *out_size = 2; return v->type_i16;
+    case CLUX_FFI_DATA_I32: if (out_size) *out_size = 4; return v->type_i32;
+    case CLUX_FFI_DATA_I64: if (out_size) *out_size = 8; return v->type_i64;
+    case CLUX_FFI_DATA_U8:  if (out_size) *out_size = 1; return v->type_u8;
+    case CLUX_FFI_DATA_U16: if (out_size) *out_size = 2; return v->type_u16;
+    case CLUX_FFI_DATA_U32: if (out_size) *out_size = 4; return v->type_u32;
+    case CLUX_FFI_DATA_U64: if (out_size) *out_size = 8; return v->type_u64;
+    case CLUX_FFI_DATA_USIZE:
         if (out_size) *out_size = sizeof(void *);
         return v->type_usize;
-    case BCODE_FFI_DATA_F32: if (out_size) *out_size = 4; return v->type_f32;
-    case BCODE_FFI_DATA_F64: if (out_size) *out_size = 8; return v->type_f64;
-    case BCODE_FFI_DATA_BOOL:
+    case CLUX_FFI_DATA_F32: if (out_size) *out_size = 4; return v->type_f32;
+    case CLUX_FFI_DATA_F64: if (out_size) *out_size = 8; return v->type_f64;
+    case CLUX_FFI_DATA_BOOL:
         if (out_size) *out_size = 1;
         return v->type_bool;
-    case BCODE_FFI_DATA_PTR:
+    case CLUX_FFI_DATA_PTR:
         if (out_size) *out_size = sizeof(void *);
         return v->type_opaque;
-    case BCODE_FFI_DATA_STR:
+    case CLUX_FFI_DATA_STR:
         if (out_size) *out_size = sizeof(char *);
         return v->type_str;
     default:

@@ -73,7 +73,7 @@
 #include "vm/type_opaque.h"
 #include "vm/module.h"
 #include "core/ffi_abi.h" /* M6 FFI：ffi_data_kind_of（extern var 的类型码） */
-#include "core/ffi_abi.h"   /* M6 FFI：BCODE_FFI_RET_*（extern cfunc 的返回类型码） */
+#include "core/ffi_abi.h"   /* M6 FFI：CLUX_FFI_RET_*（extern cfunc 的返回类型码） */
 #include "core/strmap.h"
 
 #include <stdio.h>
@@ -1047,7 +1047,7 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
             } else if (ffi_data_kind_needs_type(ds->type)) {
               /* struct/cunion/enum：宽度/布局要查类型表 → compiler 在读之前压
                  一个类型值（类型表达式取自 extern var 的声明，符号的 ast 有）。 */
-              kind = BCODE_FFI_DATA_TYPED;
+              kind = CLUX_FFI_DATA_TYPED;
               ast_var_def_t *evd =
                   (ds->ast && ds->ast->kind == AST_VAR_DEF)
                       ? (ast_var_def_t *)ds->ast

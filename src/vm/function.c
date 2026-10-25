@@ -1,11 +1,15 @@
 #include "vm/function.h"
 #include "vm/type_ptr.h"
+#include "vm/type_struct.h"
 #include "vm/vm.h"
 #include "vm/value.h"
-#include "vm/ffi_lib.h"   /* M6 Phase 5：函数对象持有的 C 回调闭包 */
+#include "vm/scope.h"
+#include "vm/type_ownership.h"
+#include "core/arena.h"
 #include "core/panic.h"
 #include "core/vec.h"
 
+#include <stddef.h>
 #include <string.h>
 
 static class_t g_func_class = {
@@ -104,18 +108,6 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
         allocator_free(alloc, (void **)&np);
         fn->name = (strslice_t){ NULL, 0 };
     }
-    /* M6 FFI Phase 5：`cfunc_ptr(f)` 惰性创建的 C 回调闭包随函数对象释放。
-       libffi 的 trampoline 不在本 allocator 记账内，**必须**显式销毁，否则
-       静默泄漏可执行内存（见 docs/m6-design.md §14.14）。ctx 由本 allocator
-       分配，同样在此释放。 */
-    if (fn->ffi_closure) {
-        clux_ffi_closure_destroy(alloc, fn->ffi_closure);
-        fn->ffi_closure = NULL;
-    }
-    if (fn->ffi_closure_ctx) {
-        allocator_free(alloc, &fn->ffi_closure_ctx);
-    }
-    fn->ffi_closure_code = NULL;
     /* 闭包 env 块（捕获结构体实例）：先按 capture_type 的槽位所有权清理残留
        （sema 生成的 `FREE f.<cap>` 已把 own 捕获槽置 NULL，这里只兜底），
        再释放块本体。 */
@@ -135,4 +127,60 @@ value_t *func_value_ref(vm_t *vm, func_t *fn) {
     void *data = value_alloc_data_copy(vm->alloc, fn->type, &fn);
     if (!data) return NULL;
     return value_make(vm, fn->type, data);
+}
+
+/* ---- 闭包实例（C-only：CTFE 物化 comptime 闭包仍需） --------------------
+ *
+ * 旧实现依赖 bcode_function_t（执行器）；执行器移除后，clux 值只保存
+ * func_t*，env 内联在 func_t 分配块尾部，与 C 后端 `{fn; env}` 表示一致。
+ * 运行期不再执行 env，但 sema/CTFE 的捕获槽读写、clone/free 仍按 capture_type
+ * 的字段偏移工作。 */
+func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
+    if (!vm || !base || !base->type) return NULL;
+    size_t off = sizeof(func_t);
+    size_t env_size = base->capture_type ? base->capture_type->base.size : 0;
+    if (env_size > 0) {
+        size_t align = ALIGNOF(max_align_t);
+        off = (off + align - 1) & ~(align - 1);
+    }
+    size_t total = off + env_size;
+    func_t *fn = (func_t *)allocator_new_ex(vm->alloc, "func_instance", total,
+                                            NULL, NULL, NULL, 1);
+    if (!fn) panic("vm: out of memory instantiating closure");
+    memset(fn, 0, total);
+    fn->cfunc = base->cfunc;
+    fn->root_scope = base->root_scope;
+    fn->type = base->type;
+    fn->id = base->id;
+    fn->name = base->name;
+    fn->capture_type = base->capture_type;
+    fn->env_dispose_fid = base->env_dispose_fid;
+    fn->env_clone_fid = base->env_clone_fid;
+    fn->ct_literal = base->ct_literal;
+    if (env_size > 0) {
+        fn->env = (uint8_t *)fn + off;
+        fn->env_inline = true;
+    }
+    fn->closure_scope = scope_new(vm->alloc, NULL);
+    fn->owns_closure_scope = true;
+    if (vm->functions) vec_push(vm->functions, vm->alloc, fn);
+    return fn;
+}
+
+/* SET_CLOSURE：把捕获值 clone/转换后写入实例 env 的字段槽（旧 exec 逻辑）。 */
+const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
+                               value_t *val) {
+    if (!fn || !fn->capture_type || !fn->env)
+        return "closure has no captures";
+    const type_t *ct = &fn->capture_type->base;
+    int fi = struct_type_find_field(ct, name);
+    if (fi < 0) return "no such closure capture";
+    const struct_field_t *f = struct_type_field(ct, (size_t)fi);
+    if (!f || !f->type) return "closure capture type missing";
+    value_t *casted = value_implicit_cast(vm, val, f->type);
+    if (value_is_error(vm, casted)) return "closure capture type mismatch";
+    void *dst = (uint8_t *)fn->env + f->offset;
+    ptr_free_slot_value(vm, f->type, type_ownership_of(f->type), dst);
+    if (f->type->size) memcpy(dst, value_data(casted), f->type->size);
+    return NULL;
 }

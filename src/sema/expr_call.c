@@ -76,7 +76,7 @@
 #include "vm/type_opaque.h"
 #include "vm/module.h"
 #include "core/ffi_abi.h" /* M6 FFI：ffi_data_kind_of（extern var 的类型码） */
-#include "core/ffi_abi.h"   /* M6 FFI：BCODE_FFI_RET_*（extern cfunc 的返回类型码） */
+#include "core/ffi_abi.h"   /* M6 FFI：CLUX_FFI_RET_*（extern cfunc 的返回类型码） */
 #include "core/strmap.h"
 
 #include <stdio.h>
@@ -1302,27 +1302,27 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             /* 所有权修饰（`fatal opaque` / `fatal *T`）不是 C 表示的一部分：
                返回码按**裸类型**映射，值仍带修饰类型（所有权交回调用方）。 */
             const type_t *rt_core = type_strip_ownership(rt);
-            /* 返回类型码：**精确到类型**（vm/bcode.h 的 BCODE_FFI_RET_*）。
+            /* 返回类型码：**精确到类型**（vm/bcode.h 的 CLUX_FFI_RET_*）。
                clux 标量与 C 是 1:1 的，调用层用 libffi 的精确描述符，因此返回值
                的类型必须与源码声明完全一致（旧编码把 u64 返回造成 i64，使用点会
                在比较/赋值时撞上隐式转换）。 */
-            uint32_t rk = BCODE_FFI_RET_VOID;
-            if (!rt || rt_core == sema->vm->type_void) rk = BCODE_FFI_RET_VOID;
-            else if (rt_core == sema->vm->type_i8) rk = BCODE_FFI_RET_I8;
-            else if (rt_core == sema->vm->type_i16) rk = BCODE_FFI_RET_I16;
-            else if (rt_core == sema->vm->type_i32) rk = BCODE_FFI_RET_I32;
-            else if (rt_core == sema->vm->type_i64) rk = BCODE_FFI_RET_I64;
-            else if (rt_core == sema->vm->type_u8) rk = BCODE_FFI_RET_U8;
-            else if (rt_core == sema->vm->type_u16) rk = BCODE_FFI_RET_U16;
-            else if (rt_core == sema->vm->type_u32) rk = BCODE_FFI_RET_U32;
-            else if (rt_core == sema->vm->type_u64) rk = BCODE_FFI_RET_U64;
+            uint32_t rk = CLUX_FFI_RET_VOID;
+            if (!rt || rt_core == sema->vm->type_void) rk = CLUX_FFI_RET_VOID;
+            else if (rt_core == sema->vm->type_i8) rk = CLUX_FFI_RET_I8;
+            else if (rt_core == sema->vm->type_i16) rk = CLUX_FFI_RET_I16;
+            else if (rt_core == sema->vm->type_i32) rk = CLUX_FFI_RET_I32;
+            else if (rt_core == sema->vm->type_i64) rk = CLUX_FFI_RET_I64;
+            else if (rt_core == sema->vm->type_u8) rk = CLUX_FFI_RET_U8;
+            else if (rt_core == sema->vm->type_u16) rk = CLUX_FFI_RET_U16;
+            else if (rt_core == sema->vm->type_u32) rk = CLUX_FFI_RET_U32;
+            else if (rt_core == sema->vm->type_u64) rk = CLUX_FFI_RET_U64;
             /* usize（独立类型，C 的 size_t）：自己的返回码，宽度随平台 */
-            else if (rt_core == vm_type_usize(sema->vm)) rk = BCODE_FFI_RET_USIZE;
-            else if (rt_core == sema->vm->type_bool) rk = BCODE_FFI_RET_BOOL;
-            else if (rt_core == sema->vm->type_f32) rk = BCODE_FFI_RET_F32;
-            else if (rt_core == sema->vm->type_f64) rk = BCODE_FFI_RET_F64;
-            else if (rt_core == sema->vm->type_opaque) rk = BCODE_FFI_RET_PTR;
-            else if (rt_core == sema->vm->type_str) rk = BCODE_FFI_RET_STR;
+            else if (rt_core == vm_type_usize(sema->vm)) rk = CLUX_FFI_RET_USIZE;
+            else if (rt_core == sema->vm->type_bool) rk = CLUX_FFI_RET_BOOL;
+            else if (rt_core == sema->vm->type_f32) rk = CLUX_FFI_RET_F32;
+            else if (rt_core == sema->vm->type_f64) rk = CLUX_FFI_RET_F64;
+            else if (rt_core == sema->vm->type_opaque) rk = CLUX_FFI_RET_PTR;
+            else if (rt_core == sema->vm->type_str) rk = CLUX_FFI_RET_STR;
             else if (rt && (type_kind_of(rt) == TYPE_KIND_STRUCT ||
                             type_kind_of(rt) == TYPE_KIND_CUNION ||
                             type_kind_of(rt) == TYPE_KIND_ENUM ||
@@ -1334,7 +1334,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
               /* 程序自定义类型 / 带类型的指针：宽度与布局必须查类型表 →
                 "按类型值返回"。compiler 会在 EXTERN_CALL 之前压一个类型值
                 （类型表达式取自 extern cfunc 的声明，sema 已挂在符号的 ast 上）。 */
-              rk = BCODE_FFI_RET_TYPED;
+              rk = CLUX_FFI_RET_TYPED;
               ast_func_def_t *efd =
                   (fs->ast && fs->ast->kind == AST_FUNC_DEF)
                       ? (ast_func_def_t *)fs->ast
@@ -1352,7 +1352,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                变参调用必须知道"前几个是固定参数"，运行期才能按 C 的约定铺寄存器/
                栈并对变参部分施加默认实参提升。 */
             call->ffi_ret_kind =
-                BCODE_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
+                CLUX_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
 
             /* 实参校验（此前**完全没做**）：数量 + 每个实参能否共用形参的 C 类型
                描述符（判据见 ffi_arg_acceptable）。变参的额外实参按 C 的默认实参

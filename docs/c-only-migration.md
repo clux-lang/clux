@@ -329,6 +329,52 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 ## 8. 参考：现有可用的 C 调试能力
 
+## 9. 执行记录（2026-10-25）
+
+**已完成：VM 执行器 / compiler / bcode / libffi 删除**
+
+- 删除 `src/compiler/`、`src/vm/exec*.c`、`bcode*.c`、`bcode_function.c`、
+  `builtin_{assert,panic,mock}.c`、`ffi_{lib,cfunc}.c`、`value_dump.c` 及
+  对应头文件；`clux_compiler` CMake target 移除。
+- `driver` 只保留 source 加载、词法、C 运行（`driver_run_file`）与
+  `compile_module_prepare`（C 后端前端）；字节码 run/build/asm/bin/探测 API
+  与实现删除，测试中的 bytecode/FFI-VM 用例删除。
+- `clux test` 只保留 C 后端（`--backend=vm`/`--vm` 报错）；`clux run` 只接受
+  `.cx`，`.cxb/.cxs` 明确拒绝。
+- 闭包实例/捕获写入的共享实现移入 `vm/function.c`（C-only 的 CTFE 仍需要
+  `func_instantiate_raw` / `func_closure_store`），`value_move` 移入 `value.c`。
+- C ABI 类型分类抽到 `core/ffi_abi.c`；sema 不再依赖 `vm/bcode.h` /
+  `vm/ffi_lib.h`。
+- 删除 `third_party/libffi-port` 与 `third_party/libffi`，CMake 不再有
+  `FFI::ffi` / `CLUX_HAVE_LIBFFI` / libdl；`llvm-objdump -p build/clux.exe`
+  的导入表无 libffi。
+
+**验证**
+
+- `clux`、`clux_test` 构建通过；`clux run` hello/closure/decorator/
+  decorator_param 通过；`clux test <file>` 通过。
+- `CBackend + CBackendDiff`：95 passed（其余为已知环境性 FFI callback/death-test
+  失败）。
+- 全量逐套件：127 个套件，失败 21 个（见下），其余全绿。
+
+**仍失败的套件（按优先级）**
+
+- `ShareWeak`（9）：C 后端没有 share/weak RC 运行时（`__make_share` 等）。
+- `ClosureValueOwn`（8）部分：`own func` 字段没有 C 等价表示。
+- `CfuncToFunc`（5）、`Driver`（10）、`DriverImport`（8）、`DriverM4`（2）：
+  局部函数值、`cfunc_ptr`、运行期诊断/越界行为等 C lowering 缺口。
+- `GenericType`（2）、`GenericValueParam`（1）、`GenericPack`（4）、
+  `GenericConstraint`（1）：泛型实例化/option 包装的 C lowering。
+- `OwnSlotCopy`（2）、`ExplicitDestroy`（3）、`UnionMemberMove`（2）、
+  `TagUnionOwn`（1）：union/option own 槽位的 C 表示与销毁。
+- `ErrorHandling`（3）：任意表达式位置的 `try`。
+- `ComptimeIf`（1）、`Decorator`（1）、`SpreadArgs`（1）、`NilCompareExpr`（1）、
+  `DeepOwn`（1）：零散 C lowering/测试夹具有待逐项处理。
+- `CBackend`（11）：FFI callback SEH、death-test 环境（非逻辑失败）。
+
+这些是 C 后端语言覆盖缺口，不是 VM 依赖；按项目要求继续逐项补齐（或按白皮书
+重设计对应测试）。目标在本轮保持 active。
+
 ```powershell
 # 只生成 C（不调用 cc）
 clux build file.cx --emit-c

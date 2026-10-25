@@ -639,3 +639,15 @@ value_t *value_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     }
     return value_make_error(vm, "type does not support explicit cast");
 }
+
+/* 所有权转移 = 纯 memcpy；堆释放由 sema 生成的 FREE 负责。 */
+value_t *value_move(vm_t *vm, value_t *v) {
+    if (!v) return v;
+    if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
+    const type_t *t = value_type(v);
+    if (!t || !value_data(v)) return v;
+    void *data = value_alloc_data(vm->alloc, t);
+    if (!data) return value_make_error(vm, "out of memory moving value");
+    memcpy(data, value_data(v), t->size);
+    return value_make(vm, t, data);
+}

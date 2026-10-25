@@ -208,41 +208,7 @@ TEST(Driver, RunFileParamShadowsCaptureReturnsZero) {
  * 分配器在 delete_allocator 时自检，这里捕获 stderr 断言没有泄漏报告。
  * ================================================================ */
 
-TEST(Driver, CompileErrorPathDoesNotLeakSemaScopeTree) {
-  /* sema 错误（str → i32 类型不匹配）→ driver_build_bin 走失败路径 */
-  std::string src =
-      write_temp_file("func main(): i32 { var x: i32 = \"s\"; return 0; }\n");
-  std::string out = src + ".cxb";
 
-  std::string tmp_path_s = clux_test_temp_dir() + "/clux_sema.txt";
-  const char *tmp_path = tmp_path_s.c_str();
-  std::filesystem::create_directories(clux_test_temp_dir());
-  FILE *redirected = freopen(tmp_path, "w", stderr);
-  ASSERT_NE(redirected, nullptr);
-
-  int rc = driver_build_bin(src.c_str(), out.c_str());
-
-  fflush(stderr);
-  freopen("CON", "w", stderr); /* Windows：恢复 stderr（同 allocator_test 做法） */
-
-  EXPECT_NE(rc, 0); /* 编译必须失败 */
-
-  FILE *rf = fopen(tmp_path, "r");
-  ASSERT_NE(rf, nullptr);
-  std::string captured;
-  char buf[1024];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof buf, rf)) > 0) captured.append(buf, n);
-  fclose(rf);
-
-  std::remove(tmp_path);
-  std::remove(src.c_str());
-  std::remove(out.c_str());
-
-  EXPECT_EQ(captured.find("memory leak detected"), std::string::npos)
-      << "编译失败路径泄漏了分配：\n"
-      << captured;
-}
 
 TEST(Driver, RunFileTypeExpressionsInTypePositionPass) {
   /* 回归：类型表达式在**类型位置**求值为类型值（类型即表达式）。此前部分节点

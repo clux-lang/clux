@@ -24,83 +24,14 @@ namespace {
    再定义函数，函数体最后），槽位发 LOAD_TYPE <id> 引用。
    driver_build_asm 产出的 .cxs 文本应可见
    DEFINE_TYPE / SEAL / PUSH_ARRAY / DEFINE_BOUND / LOAD_TYPE 指令。 */
-TEST(Driver, BuildAsmHoistSectionPresent) {
-  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_hoist";
-  std::filesystem::create_directories(dir);
-  std::string src = (dir / "prog.cx").string();
-  std::string cxs = (dir / "prog.cxs").string();
 
-  {
-    FILE *fp = fopen(src.c_str(), "wb");
-    const char *code =
-        "func main():i32 {\n"
-        "  var a = .[3]i32 { 1, 2, 3 };\n"
-        "  var s = a[0] + a[1] + a[2];\n"
-        "  return s;\n"
-        "}\n";
-    fwrite(code, 1, std::strlen(code), fp);
-    fclose(fp);
-  }
-
-  ASSERT_EQ(driver_build_asm(src.c_str(), cxs.c_str()), 0);
-  std::string text = slurp(cxs);
-  ASSERT_FALSE(text.empty());
-
-  /* hoist 区：两遍扫描——pass 1 数组 PUSH_ARRAY→DEFINE_TYPE 声明登记 +
-     pass 2 数组 LOAD_TYPE→DEFINE_BOUND→SEAL 定义封闭 */
-  EXPECT_NE(text.find("DEFINE_TYPE"), std::string::npos);
-  EXPECT_NE(text.find("SEAL"), std::string::npos);
-  EXPECT_NE(text.find("PUSH_ARRAY"), std::string::npos);
-  EXPECT_NE(text.find("DEFINE_BOUND"), std::string::npos);
-  /* 槽位引用：函数体 LOAD_TYPE <id> 查表构造数组 */
-  EXPECT_NE(text.find("LOAD_TYPE"), std::string::npos);
-
-  std::filesystem::remove_all(dir);
-}
 
 /* 顶层 type def 名字绑定插在 hoist 两遍之间（类型定义自动提升）：
    pass 1 声明（PUSH_ARRAY→DEFINE_TYPE <id> 登记开放对象）→ typedef 绑定
    （LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "name"）→ pass 2 定义
    （LOAD_TYPE <id>→DEFINE_BOUND→SEAL）。断言 .cxs 文本中 DEFINE "Pair"
    出现在 SEAL（pass 2 收尾）之前。 */
-TEST(Driver, BuildAsmTypeDefBindingBetweenHoistPasses) {
-  std::filesystem::path dir = std::filesystem::path(clux_test_temp_dir()) / "clux_typedef_hoist";
-  std::filesystem::create_directories(dir);
-  std::string src = (dir / "prog.cx").string();
-  std::string cxs = (dir / "prog.cxs").string();
 
-  {
-    FILE *fp = fopen(src.c_str(), "wb");
-    const char *code =
-        "type Pair = [2]i32;\n"
-        "func main():i32 {\n"
-        "  var p:Pair = .[2]i32{10, 20};\n"
-        "  return p[0];\n"
-        "}\n";
-    fwrite(code, 1, std::strlen(code), fp);
-    fclose(fp);
-  }
-
-  ASSERT_EQ(driver_build_asm(src.c_str(), cxs.c_str()), 0);
-  std::string text = slurp(cxs);
-  ASSERT_FALSE(text.empty());
-
-  /* typedef 绑定 DEFINE "Pair" 在 hoist 区内：位于 pass 1 的 DEFINE_TYPE 与
-     pass 2 的 SEAL 之间（类型定义自动提升） */
-  size_t pos_decl = text.find("DEFINE_TYPE");
-  size_t pos_bind = text.find("DEFINE \"Pair\"");
-  size_t pos_seal = text.find("SEAL");
-  ASSERT_NE(pos_decl, std::string::npos);
-  ASSERT_NE(pos_bind, std::string::npos);
-  ASSERT_NE(pos_seal, std::string::npos);
-  EXPECT_LT(pos_decl, pos_bind) << "typedef 绑定应晚于 pass 1 声明";
-  EXPECT_LT(pos_bind, pos_seal) << "typedef 绑定应早于 pass 2 定义收尾 SEAL";
-
-  /* 绑定序列：LOAD_TYPE <id>; PUSH_UNDEFINED; DEFINE "Pair" */
-  EXPECT_NE(text.find("PUSH_UNDEFINED"), std::string::npos);
-
-  std::filesystem::remove_all(dir);
-}
 
 /* 限定符数组组合：数组类型表达式 [N]T 的 T 是任意类型表达式，元素类型带
    const/volatile 天然支持。构造时字面量经"加限定符身份转换"（i32 →

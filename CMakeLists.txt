@@ -30,25 +30,8 @@ endfunction()
 
 add_subdirectory(third_party/icu)
 
-# M6 FFI：libffi（Windows x64 + clang 的 CMake 端口；见 third_party/libffi-port）
-if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
-  add_subdirectory(third_party/libffi-port)
-endif()
-# M6 FFI：POSIX 用**系统 libffi**（Ubuntu: libffi-dev 提供 -lffi 与 ffi.h）。
-# 统一成同一个 FFI::ffi 目标，下游（clux_vm / 测试）不必区分来源：Windows 走
-# third_party 端口，Linux/macOS 走系统库，两者都带 CLUX_HAVE_LIBFFI=1。
-if(NOT TARGET FFI::ffi AND UNIX)
-  find_library(CLUX_LIBFFI_LIBRARY NAMES ffi libffi)
-  if(CLUX_LIBFFI_LIBRARY)
-    add_library(FFI::ffi INTERFACE IMPORTED)
-    set_target_properties(FFI::ffi PROPERTIES
-      INTERFACE_LINK_LIBRARIES "${CLUX_LIBFFI_LIBRARY}"
-      INTERFACE_COMPILE_DEFINITIONS "CLUX_HAVE_LIBFFI=1")
-    message(STATUS "FFI: using system libffi: ${CLUX_LIBFFI_LIBRARY}")
-  else()
-    message(STATUS "FFI: system libffi not found (typed FFI calls disabled)")
-  endif()
-endif()
+# libffi 已移除：C 后端直接生成 C 原型/调用，运行期不再需要动态 FFI。
+
 
 add_executable(clux src/main.c)
 clux_target_warnings(clux)
@@ -82,14 +65,6 @@ file(GLOB CLUX_VM_SOURCES CONFIGURE_DEPENDS
 add_library(clux_vm STATIC ${CLUX_VM_SOURCES})
 target_include_directories(clux_vm PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(clux_vm PUBLIC clux_core clux_parser clux_module ICU::uc ICU::i18n)
-# M6 FFI：libffi（third_party/libffi-port；win64.S 经预处理剥 cfi_*）
-if(TARGET FFI::ffi)
-  target_link_libraries(clux_vm PUBLIC FFI::ffi)
-endif()
-# M6 FFI：POSIX 下 dlopen/dlsym/dlclose 在 libdl（Windows 无需）
-if(UNIX)
-  target_link_libraries(clux_vm PUBLIC ${CMAKE_DL_LIBS})
-endif()
 clux_target_warnings(clux_vm)
 
 # ---------------------------------------------------------------------------
@@ -134,20 +109,9 @@ if(CLUX_DIAG_SOURCES)
 endif()
 
 # ---------------------------------------------------------------------------
-# Compiler library (AST -> bytecode)
-#
-# Materializes as soon as the first *.c file lands in src/compiler/, so the
-# target only exists once the compile stage is actually implemented.
+# Compiler library removed: clux only lowers sema AST to C now.
 # ---------------------------------------------------------------------------
-file(GLOB CLUX_COMPILER_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/compiler/*.c")
-if(CLUX_COMPILER_SOURCES)
-  add_library(clux_compiler STATIC ${CLUX_COMPILER_SOURCES})
-  target_include_directories(clux_compiler PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_link_libraries(clux_compiler PUBLIC clux_core clux_parser clux_vm clux_sema clux_diag ICU::uc ICU::i18n)
-  clux_target_warnings(clux_compiler)
-  list(APPEND CLUX_STAGE_LIBS clux_compiler)
-endif()
+
 
 # ---------------------------------------------------------------------------
 # Module library (neutral module-path utilities)
@@ -190,7 +154,7 @@ file(GLOB CLUX_DRIVER_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/driver/*.c")
 add_library(clux_driver STATIC ${CLUX_DRIVER_SOURCES})
 target_include_directories(clux_driver PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_desugar clux_diag clux_compiler clux_module ICU::uc ICU::i18n)
+target_link_libraries(clux_driver PUBLIC clux_core clux_parser clux_vm clux_sema clux_desugar clux_diag clux_module ICU::uc ICU::i18n)
 clux_target_warnings(clux_driver)
 
 # ---------------------------------------------------------------------------
@@ -279,10 +243,5 @@ if(BUILD_TESTS)
   gtest_discover_tests(clux_test)
 endif()
 
-# M6：libffi 原生类型化调用层已可用（端口用 ml64 汇编 MASM/Intel 变体，见
-# third_party/libffi-port/CMakeLists.txt），打开 gated 测试以验证 ffi_call 路径。
-# TODO(M6)：ffi_call_typed 的 libffi 分支启用后，取消下面一行注释即可打开 gated 测试；
-# 目前 LibffiCallsFloatFunctionSqrt/Pow 仍失败（该分支当时因汇编不可用而被禁用）。
-if(TARGET FFI::ffi)
-  add_compile_definitions(CLUX_FFI_TYPED_CALLS=1)
-endif()
+# libffi/third_party port removed with the VM executor.
+

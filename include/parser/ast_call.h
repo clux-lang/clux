@@ -17,10 +17,10 @@ typedef struct {
      * callee 是 `<库>::<名>`（AST_SCOPE_REF）时，sema 的 `::` 分支解析出该
      * extern cfunc 的签名，把**返回类型码与变参信息**打包进这里（避免 type_t*
      * 跨层传递）：
-     *   bits 0..7   = BCODE_FFI_RET_*（返回类型码）
+     *   bits 0..7   = CLUX_FFI_RET_*（返回类型码）
      *   bit  8      = 变参（C 的 `...`）
      *   bits 16..31 = 固定参数个数
-     * 编解码宏见 `vm/bcode.h` 的 BCODE_FFI_RET_PACK/UNPACK；compiler 把它原样
+     * 编解码宏见 `vm/bcode.h` 的 CLUX_FFI_RET_PACK/UNPACK；compiler 把它原样
      * 写成 `BCODE_EXTERN_CALL` 的第三个操作数。
      * `is_ffi_call` 由 sema 置位；compiler 据此改发 `BCODE_EXTERN_CALL`（见
      * docs/m6-design.md §14.7 步骤 ③/§14.19），不再走 CALLEE + CALL。 */
@@ -29,7 +29,7 @@ typedef struct {
     /* 返回类型是**程序自定义类型**（struct/cunion/enum…）时，sema 在这里挂上
      * 声明的返回类型**表达式**；compiler 发 EXTERN_CALL 之前先
      * `compile_type_expr(ffi_ret_type_expr)` 压一个**类型值**（与 CONSTRUCT 同一
-     * 机制），运行期据此读返回内存并造值（ret_kind = BCODE_FFI_RET_TYPED）。 */
+     * 机制），运行期据此读返回内存并造值（ret_kind = CLUX_FFI_RET_TYPED）。 */
     ast_node_t *ffi_ret_type_expr;
     /* `data(s)` —— 从序列取首元素指针（C ABI 适配）。它不是运行时函数调用：
      * 内置 cfunc 的实参会被 clone 进被调作用域，函数形态只能拿到副本地址

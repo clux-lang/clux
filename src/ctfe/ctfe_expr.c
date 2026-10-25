@@ -44,8 +44,7 @@
 #include "parser/lexer.h"
 #include "parser/parse_utils.h"
 #include "sema/symbol.h"
-#include "vm/bcode_function.h"  /* func_instantiate_raw：常量闭包实例化 */
-#include "vm/function.h"
+#include "vm/function.h"  /* func_instantiate_raw：常量闭包实例化 */
 #include "vm/type.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"

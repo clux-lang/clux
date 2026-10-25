@@ -32,13 +32,13 @@ typedef struct {
      * 与 ast_call_t.is_ffi_call/ffi_ret_kind 同一契约：sema 在 :: 分支识别出
      * "别名是 extern lib 且限定名符号是 extern var"时置这两个字段，compiler
      * 据此发 `EXTERN_LOAD`（读取）/ `EXTERN_STORE`（赋值目标），**不再**走枚举
-     * variant 路径。ffi_var_kind 是 BCODE_FFI_DATA_* 宽度/类别码（见 vm/bcode.h）。
+     * variant 路径。ffi_var_kind 是 CLUX_FFI_DATA_* 宽度/类别码（见 vm/bcode.h）。
      * 置位时 type_expr 保持 AST_IDENT（sema 不把它折叠成类型）。 */
     bool        is_ffi_var;
     uint32_t    ffi_var_kind;
     /* 数据符号的类型是程序自定义类型（struct/cunion/enum）时，sema 在这里挂上
      * 声明的**类型表达式**；compiler 在读/写之前先 `compile_type_expr` 压一个
-     * 类型值（ffi_var_kind = BCODE_FFI_DATA_TYPED），运行期按该类型的 size 读写。 */
+     * 类型值（ffi_var_kind = CLUX_FFI_DATA_TYPED），运行期按该类型的 size 读写。 */
     ast_node_t *ffi_var_type_expr;
 
     /* ---- struct 静态属性（attribute）引用 ----

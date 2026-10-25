@@ -8,12 +8,14 @@ extern "C" {
 #include "vm/value.h"
 #include "vm/scope.h"
 #include "vm/function.h"
-#include "vm/bcode.h"
 #include "vm/str_pool.h"
 #include "vm/module.h"
 #include "core/allocator.h"
 #include "core/vec.h"
 #include "core/strmap.h"
+
+/* VM 执行器已移除；module/func 结构里保留的 `bytecode_t*` 字段仅作兼容。 */
+typedef struct bytecode_t bytecode_t;
 
 /**
  * vm_t: 虚拟机上下文
@@ -173,7 +175,7 @@ typedef struct vm_t {
  *     同宽同符号 = 表示完全相同，无信息损失，因此按 C 的 size_t 习惯仍可
  *     直接混用；变宽时按现有宽度规则（拓宽隐式、缩窄显式）；
  *   - FFI 里声明 `usize` 即 C 的 `size_t`，有自己的描述符码
- *     （`BCODE_FFI_DATA_USIZE` / `BCODE_FFI_RET_USIZE`）；
+ *     （`CLUX_FFI_DATA_USIZE` / `CLUX_FFI_RET_USIZE`）；
  *   - 大小/长度类内建（`len`/`sizeof`/`alignof`/`[N]` 下标/for_index 循环变量）
  *     一律用它，代码才真正可移植（u64 在 32 位平台上宽度是错的）。
  * 名字注册见 `vm_register_builtin_types`（vm.c），类型实体见 `vm_init_builtins`

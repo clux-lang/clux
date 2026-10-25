@@ -160,50 +160,26 @@ static int run_tests_c(const char *src) {
 int cmd_test(const cmd_args_t *args) {
     if (!args) return 1;
 
-    /* 默认 C 后端；`--backend=vm` 仅保留为过渡回退（VM 执行器将删除）。 */
+    /* C 后端唯一：`--backend=c` 兼容旧脚本；`--vm`/`--backend=vm` 已移除。 */
     const char *backend = cmd_args_get(args, "backend");
-    bool want_vm = cmd_args_has(args, "vm") ||
-                   (backend && strcmp(backend, "vm") == 0);
-    bool want_c = cmd_args_has(args, "c") ||
-                  (backend && strcmp(backend, "c") == 0);
-    if (backend && strcmp(backend, "c") != 0 && strcmp(backend, "vm") != 0) {
-        fprintf(stderr, "test: unknown backend '%s' (expected c)\n", backend);
+    if (backend && strcmp(backend, "c") != 0) {
+        fprintf(stderr,
+                "test: backend '%s' is no longer available (C backend only)\n",
+                backend);
         return 1;
     }
-    if (want_vm && want_c) {
-        fprintf(stderr, "test: --backend=vm and --backend=c are mutually "
-                        "exclusive\n");
+    if (cmd_args_has(args, "vm")) {
+        fprintf(stderr, "test: --vm is no longer available (C backend only)\n");
         return 1;
     }
-    (void)want_c;
 
     const char *path = args->posc > 0 ? args->posargs[0] : NULL;
-    if (!want_vm) {
-        if (path) return run_tests_c(path);
-        /* 项目模式：从 clux.mod 解析入口，C 后端会自行处理 import 依赖。 */
-        char *entry = NULL;
-        int rc = cmd_resolve_entry(NULL, &entry, NULL);
-        if (rc != 0) return rc;
-        rc = run_tests_c(entry);
-        free(entry);
-        return rc;
-    }
-
-    if (path) return driver_test_file(path);
-
+    if (path) return run_tests_c(path);
+    /* 项目模式：从 clux.mod 解析入口，C 后端会自行处理 import 依赖。 */
     char *entry = NULL;
-    char *root = NULL;
-    int rc = cmd_resolve_entry(NULL, &entry, &root);
+    int rc = cmd_resolve_entry(NULL, &entry, NULL);
     if (rc != 0) return rc;
+    rc = run_tests_c(entry);
     free(entry);
-
-    char **sources = NULL;
-    size_t count = 0;
-    rc = cmd_collect_sources(root, &sources, &count);
-    free(root);
-    if (rc != 0) return rc;
-    rc = driver_test_sources((const char *const *)sources, count);
-    for (size_t i = 0; i < count; i++) free(sources[i]);
-    free(sources);
     return rc;
 }

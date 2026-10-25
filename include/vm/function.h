@@ -106,6 +106,9 @@ struct func_t {
     const void     *ct_literal;
 };
 
+func_t *func_instantiate_raw(vm_t *vm, func_t *base);
+value_t *func_instantiate(vm_t *vm, func_t *base);
+
 /**
  * 闭包捕获写入：按 `capture_type` 槽位先销毁旧值（own 槽位释放），
  * 再 implicit_cast + memcpy 写入 `env` 块。

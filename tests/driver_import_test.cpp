@@ -451,48 +451,9 @@ TEST(DriverImport, CrossModuleGenericUsesDefinitionImportAndPrivate) {
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 }
 
-TEST(DriverImport, CrossModuleGenericGlobalsCxb) {
-  ImportCase c("generic_owner_cxb");
-  std::string mod = c.write("glib",
-      "export var base: i32 = 100;\n"
-      "export func add_base[T](x: T): i32 { return base + x as i32; }\n");
-  std::string main_path = c.entry("main",
-      "import gl from \"" + mod + "\";\n"
-      "func main(): i32 { return gl::add_base[i32](1) - 101; }\n");
-  auto bin = (c.dir() / "prog.cxb").string();
-  ASSERT_EQ(driver_build_bin(main_path.c_str(), bin.c_str()), 0);
-  std::remove(main_path.c_str());
-  std::remove((c.dir() / "glib.cx").string().c_str());
-  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
-}
 
-TEST(DriverImport, CrossModuleInterfaceImplementsAndConstraint) {
-  ImportCase c("cross_interface");
-  std::string mod = c.write("iface",
-      "export interface IW[T] {\n"
-      "  var fd: i32;\n"
-      "  func w(self: ref *T);\n"
-      "}\n");
-  std::string main_path = c.entry("main",
-      "import iface from \"" + mod + "\";\n"
-      "func use_cross[T extends iface::IW[T]](x: T): i32 { return x.fd; }\n"
-      "struct S implements iface::IW[S] {\n"
-      "  fd: i32;\n"
-      "  func w(self: ref *S): void {}\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var s: S = .S{ .fd = 7 };\n"
-      "  s.w();\n"
-      "  return use_cross[S](s) - 7;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
 
-  auto bin = (c.dir() / "prog.cxb").string();
-  ASSERT_EQ(driver_build_bin(main_path.c_str(), bin.c_str()), 0);
-  std::remove(main_path.c_str());
-  std::remove((c.dir() / "iface.cx").string().c_str());
-  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
-}
+
 
 TEST(DriverImport, CrossModuleGenericMethodExplicitTypeArgs) {
   ImportCase c("generic_method_explicit");

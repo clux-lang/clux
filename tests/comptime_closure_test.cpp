@@ -105,32 +105,7 @@ TEST(ComptimeClosure, ReturnsClosureWithMultipleCaptures) {
 }
 
 /* 闭包常量随容器落盘：emit → run .cxb，以及 .cxb → .cxs → .cxb 往返。 */
-TEST(ComptimeClosure, SurvivesCxbRoundTrip) {
-  const std::string src = with_prelude(
-      "comptime func add100(f: func(i32) -> i32):\n"
-      "    func |f: func(i32) -> i32| (i32) -> i32 {\n"
-      "  return func |f| wrap(x: i32): i32 { return f(x) + 100; };\n"
-      "}\n"
-      "var b = add100(double);\n"
-      "func main(): i32 { return b(5) == 110 ? 0 : 1; }\n");
-  std::string path = write_temp_file(src, "cc_rt");
-  std::string bin = path + ".cxb";
-  std::string asm_path = path + ".cxs";
-  std::string bin2 = path + ".2.cxb";
-  ASSERT_EQ(driver_build_bin(path.c_str(), bin.c_str()), 0);
-  EXPECT_EQ(driver_run_bin(bin.c_str()), 0);
-  ASSERT_EQ(driver_bin_to_asm(bin.c_str(), asm_path.c_str()), 0);
-  /* 反汇编里能看到闭包构造（MAKE_FUNCTION + SET_CLOSURE） */
-  const std::string text = slurp(asm_path);
-  EXPECT_NE(text.find("MAKE_FUNCTION"), std::string::npos) << text;
-  EXPECT_NE(text.find("SET_CLOSURE"), std::string::npos) << text;
-  ASSERT_EQ(driver_asm_to_bin(asm_path.c_str(), bin2.c_str()), 0);
-  EXPECT_EQ(driver_run_bin(bin2.c_str()), 0);
-  std::remove(path.c_str());
-  std::remove(bin.c_str());
-  std::remove(asm_path.c_str());
-  std::remove(bin2.c_str());
-}
+
 
 /* comptime 闭包捕获**运行期变量**必须报错（不能静默产出坏闭包）。 */
 TEST(ComptimeClosure, RejectsCapturingRuntimeVariable) {
