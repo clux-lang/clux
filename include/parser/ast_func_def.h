@@ -106,12 +106,9 @@ ast_node_t *parse_func_param_decl(parser_t *p);
  *  token 是开界符号 `|`。成功后游标停在闭界 `|` 之后。 */
 ast_node_t *parse_capture_list(parser_t *p);
 
-/** M6 FFI：extern cfunc 声明（无体，dlsym 解析）。 */
+/** M6 FFI：extern cfunc 声明（无体，dlsym 解析）。只有 `cfunc` 能出现在
+ *  `extern` 后面；clux `func` 不是 C ABI（`extern func` 由 parser 明确拒绝）。 */
 ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb);
-
-/** M6 FFI：同上，但消费的关键字由 `kw` 给出（`"cfunc"` 规范写法 /
- *  `"func"` 等价习惯写法）。两者产生完全相同的 AST。 */
-ast_node_t *parse_extern_cfunc_kw(parser_t *p, uint32_t tb, const char *kw);
 
 /** 内部：带预解析名/库的扩展入口（extern cfunc 复用 func 的签名解析）。 */
 ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,

@@ -172,5 +172,15 @@ var f = func '<user> |u| run(): '<user> void { ... };
 
 ## 7.11 与 C ABI
 
-`own` 指针不能作为 C ABI 参数直接传递；跨 C 边界时使用裸指针、`ref` 或
-显式 `cfunc` 约定。C 函数不参与 clux 的所有权清理。
+所有权修饰可以出现在 C ABI 签名里，但它们**只是 clux 侧的契约**，不改变二进制
+表示：
+
+- `own *T` / `own opaque` / `own Agg`：所有权转移给 C 侧，C 侧负责释放（`own Agg`
+  表示按值聚合里的 own 槽位由被调方释放）；**调用点必须用 `move(...)` 或
+  `clone(...)`**，不能直接传普通左值。
+- `ref *T`：借用，C 侧不得释放或保存；调用方保证活到调用结束。
+- 返回位置用 `fatal T` 把所有权交回调用方（返回位置不允许写 `own`）。
+- `share *T` / `weak *T` 不能跨 C ABI：它们指向 RC 块内的 payload，C 侧无法
+  retain/release。需要传递时改用 `ref *T` / `fatal *T` 或 `opaque` 句柄。
+- `str` 在 C ABI 里是 `const char *`（借用视图，C 侧不释放）；含 `str` 字段的
+  聚合不能按值跨 C ABI。

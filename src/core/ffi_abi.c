@@ -4,6 +4,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_cunion.h"
 #include "vm/type_ownership.h"
+#include "vm/type_ptr.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,15 @@ const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own) {
         if (own == OWN_NONE) own = type_ownership_of(t);
         t = type_strip_ownership(t);
     }
+    /* share/weak 指针指向 RC 块内的 payload（控制块在 payload 之前）：C 侧只看
+       得到一个裸指针，既不能 retain 也不能 release，传过去就会在 clux 侧计数
+       归零后悬空。因此任何 C ABI 边界（参数/返回/extern var/聚合字段）都拒绝。
+       `own` 不豁免：RC 块由 clux 运行时管理，`own` 只是转移释放义务，C 没有
+       对应的 `clux_rc_release`。 */
+    if (type_is_rc_ptr(t))
+        return "share/weak pointer cannot cross the C ABI: C cannot retain or "
+               "release the reference-counted block (pass `ref *T` / `fatal *T` "
+               "or an `opaque` handle instead)";
     if (own == OWN_OWN && t->kind != TYPE_KIND_PTR &&
         t->kind != TYPE_KIND_OPAQUE && t->kind != TYPE_KIND_STRUCT &&
         t->kind != TYPE_KIND_CUNION)

@@ -200,17 +200,24 @@ ast_node_t *parse_program(parser_t *p) {
             } else if (check_keyword(p, "cfunc")) {
                 func = parse_extern_cfunc(p, xtb);
             } else if (check_keyword(p, "func")) {
-                /* M6 FFI：`extern func <库>::<名>(...): T;` —— 与 `extern cfunc`
-                   完全等价（限定名已表明它来自外部库）。规范写法是 `extern cfunc`
-                   （显式标注 C ABI），fmt 统一渲染成它。 */
-                func = parse_extern_cfunc_kw(p, xtb, "func");
+                /* `extern func` 不是 C ABI 声明：clux `func` 使用 env-first 的
+                   clux 调用约定（可带捕获、可泛型），不能作为 C ABI。这里明确
+                   报错并指向 `extern cfunc`，而不是静默当成 `extern cfunc` 的
+                   别名——那会让"clux 函数"与"C 函数"在语法上不可区分。 */
+                advance(p); /* 让错误跨度覆盖 `func` */
+                func = ast_error_new(
+                    p->diag, p->tokens, p->arena, xtb, p->pos,
+                    "`extern func` is not a C ABI declaration: clux `func` "
+                    "values use the env-first clux convention and cannot be "
+                    "used as C ABI; write `extern cfunc <lib>::<name>(...): T;` "
+                    "for a C function");
             } else if (check_keyword(p, "var")) {
                 /* M6 FFI：extern var <库>::<名>: T;（动态库导出的数据符号） */
                 func = parse_extern_var(p, xtb);
             } else {
                 func = ast_error_new(p->diag, p->tokens, p->arena, xtb, p->pos,
                                      "expected 'lib' after 'extern' "
-                                     "(M6: extern lib / extern cfunc / extern func / "
+                                     "(M6: extern lib / extern cfunc / "
                                      "extern var)");
             }        } else if (check_keyword(p, "export")) {
             /* M5: export <decl> — 前缀修饰，标记全局定义进入模块导出表。

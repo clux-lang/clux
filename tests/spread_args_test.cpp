@@ -81,7 +81,7 @@ TEST(SpreadArgs, EmptyArrayExpandsToNothing) {
 /* FFI 变参 + 展开：printf("%d+%d", ...arr) */
 TEST(SpreadArgs, ExternVariadicCall) {
   clux_expect_ok(src("extern lib libc from \"*\";\n"
-                     "extern func libc::printf(format: str, ...): i32;\n"
+                     "extern cfunc libc::printf(format: str, ...): i32;\n"
                      "func main(): i32 {\n"
                      "  var arr = .[2]i32{ 3, 4 };\n"
                      "  _ = libc::printf(\"%d+%d\\n\", ...arr);\n"

@@ -17,14 +17,14 @@
 // 注意：键**不是变量**，程序里看不见它们，只能在 assert 里用。
 
 extern lib libc from "*";
-extern func libc::printf(format: str, ...): i32;
+extern cfunc libc::printf(format: str, ...): i32;
 
 // C 运行库：三平台各写一条，只有一个 OS_TYPE 条件成立；
 // 其余两条在编译期就被整条裁剪，不会互相冲突（别名都叫 crt）。
 extern lib crt from "*" assert(OS_TYPE == "WIN64" || OS_TYPE == "WIN32");
 extern lib crt from "libc.so.6" assert(OS_TYPE == "LINUX");
 extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
-extern func crt::strlen(s: str): usize;
+extern cfunc crt::strlen(s: str): usize;
 
 func main(): i32 {
     var n: usize = crt::strlen("hello");

@@ -638,17 +638,12 @@ ast_node_t *parse_func_like(parser_t *p, ast_kind_t expected_kind,
  * 无函数体：符号在运行期由 dlsym/GetProcAddress 从库句柄解析（Phase 3/4）。
  * `...` 允许（C 可变参数）；捕获列表非法（C 无闭包）。
  * `<lib>` 是 `extern lib <lib> from "..."` 声明的别名；库名 `"*"` 表示
- * **当前进程自身**（已链接进来的符号，见 ffi_lib.c）。 */
+ * **当前进程自身**（已链接进来的符号，见 ffi_lib.c）。
+ *
+ * 只有 `cfunc` 能出现在 `extern` 后面：clux `func` 是 env-first 调用约定，
+ * 不能作为 C ABI（`extern func` 在 parser.c 里明确报错）。 */
 ast_node_t *parse_extern_cfunc(parser_t *p, uint32_t tb) {
-    return parse_extern_cfunc_kw(p, tb, "cfunc");
-}
-
-/** 与 parse_extern_cfunc 同构，只是消费的关键字不同（`extern cfunc` / `extern func`）。
- * 两种拼写产生**完全相同**的 AST（`is_extern_cfunc = true`）——`cfunc` 是规范写法
- * （显式标注 C ABI），`extern func <库>::<名>` 是等价的习惯写法（限定名已表明它来自
- * 外部库）；`fmt` 统一渲染为 `extern cfunc`。 */
-ast_node_t *parse_extern_cfunc_kw(parser_t *p, uint32_t tb, const char *kw) {
-    if (!expect_keyword(p, kw)) {
+    if (!expect_keyword(p, "cfunc")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected 'cfunc' after 'extern'");
     }

@@ -1121,6 +1121,98 @@ TEST(CBackend, BuildExternCfuncFromProcess) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
+/* extern cfunc 的 `own` 形参必须接收 move/clone 产生的将亡值：否则实参仍由
+   调用方持有，而被调方按 own 契约释放 → double free。malloc/free 是最小的
+   真实 C 符号组合（`fatal opaque` 返回值 → `own opaque` 变量）。 */
+TEST(CBackend, BuildExternCfuncOwnParamRequiresMove) {
+  clux_expect_ok(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
+      "extern cfunc libc::free(p: own opaque): void;\n"
+      "func main(): i32 {\n"
+      "  var p: own opaque = libc::malloc(8usize);\n"
+      "  libc::free(move(p));\n"
+      "  return 0;\n"
+      "}\n",
+      "ffi_own_move");
+}
+
+TEST(CBackend, RejectsExternCfuncOwnParamWithoutMove) {
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
+      "extern cfunc libc::free(p: own opaque): void;\n"
+      "func main(): i32 {\n"
+      "  var p: own opaque = libc::malloc(8usize);\n"
+      "  libc::free(p);\n"
+      "  return 0;\n"
+      "}\n",
+      "cannot copy a value holding owned resources", "ffi_own_no_move");
+}
+
+/* `own Agg`（含 own 字段的按值聚合）是合法 C ABI 形态：move 把聚合整体交给
+   被调方，被调方按字段释放；调用方不得再释放。 */
+TEST(CBackend, BuildCfuncOwnAggregateParam) {
+  clux_expect_ok(
+      "struct Box { p: own *i32; n: i32; }\n"
+      "cfunc take(b: own Box): i32 { return b.n; }\n"
+      "func main(): i32 {\n"
+      "  var b: own Box = .Box{ .p = new i32{ 7 }, .n = 1 };\n"
+      "  if (take(move(b)) != 1) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ffi_own_agg");
+}
+
+TEST(CBackend, RejectsExternCfuncOwnAggregateWithoutMove) {
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "struct Box { p: own *i32; n: i32; }\n"
+      "extern cfunc libc::take_box(b: own Box): i32;\n"
+      "func main(): i32 {\n"
+      "  var b: own Box = .Box{ .p = new i32{ 7 }, .n = 1 };\n"
+      "  _ = libc::take_box(b);\n"
+      "  return 0;\n"
+      "}\n",
+      "cannot copy a value holding owned resources", "ffi_own_agg_no_move");
+}
+
+/* share/weak 是 RC 块内的 payload 指针：C 侧无法 retain/release，任何 C ABI
+   位置（参数/返回/聚合字段/extern var/cfunc 定义）都必须拒绝。 */
+TEST(CBackend, RejectsShareWeakAcrossCAbi) {
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::take_share(p: share *i32): void;\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_share_param");
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "extern cfunc libc::give_weak(): weak *i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_weak_ret");
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "struct Holder { s: share *i32; n: i32; }\n"
+      "extern cfunc libc::take_holder(h: Holder): void;\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_share_agg");
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "extern var libc::GLOBAL_SHARE: share *i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_share_var");
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "struct Holder { s: share *i32; n: i32; }\n"
+      "extern var libc::GLOBAL_HOLDER: Holder;\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_share_var_agg");
+  clux_expect_reject(
+      "cfunc bad(p: share *i32): void { }\n"
+      "func main(): i32 { return 0; }\n",
+      "share/weak pointer cannot cross the C ABI", "ffi_share_cfunc_def");
+}
+
 /* 真实动态库：struct 按值、`data()` 传数组指针、变参（struct …）、
  * `str` 返回值（strlen 求 len）。 */
 TEST(CBackend, BuildExternCfuncTestdata) {

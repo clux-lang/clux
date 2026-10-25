@@ -282,6 +282,12 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
   if (report) {
     const char *why =
         ffi_c_abi_reject_reason_own(vt, type_ownership_of(vt));
+    /* 数据符号同样按 C ABI 布局暴露：聚合字段里的 share/weak（以及其他无 C
+       表示的字段类型）必须在声明处拒绝，不能等到 lowering。 */
+    char agg_err[256] = {0};
+    if (!why && !ffi_c_abi_check_aggregate(vt, sema->vm, agg_err,
+                                           sizeof agg_err))
+      why = agg_err[0] ? agg_err : "aggregate field cannot cross the C ABI";
     uint32_t kind = 0;
     if (!why && type_kind_of(vt) == TYPE_KIND_VOID) why = "void is not a value type";
     if (!why && !ffi_data_kind_of(vt, sema->vm, &kind) &&
@@ -298,12 +304,60 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
   return true;
 }
 
+/* cfunc 定义（有体）同样是 C ABI 函数：extern 声明的类型约束在这里同样成立。
+   不做符号注册（pass1_names 已注册），只做声明处校验——否则 `cfunc f(p:
+   share *T)` 这种签名在没有 export / cfunc_ptr 使用时不会被任何路径检查到。
+   注意：`own` 形参是合法的（C 侧负责释放），`own` 返回仍应写成 `fatal`。 */
+static void check_cfunc_definition_abi(sema_t *sema, ast_func_def_t *fn) {
+  for (ast_node_t *p = fn->params; p; p = p->next) {
+    ast_var_def_t *pvd = (ast_var_def_t *)p;
+    const type_t *pt = pvd->resolved_type;
+    if (!pt && pvd->type_expr) pt = sema_resolve_type_slot(sema, &pvd->type_expr);
+    if (!pt) return; /* 类型尚未激活：交给其他诊断，避免级联 */
+    const char *why = ffi_c_abi_reject_reason_own(pt, type_ownership_of(pt));
+    char agg_err[256] = {0};
+    if (!why && !ffi_c_abi_check_aggregate(pt, sema->vm, agg_err,
+                                           sizeof agg_err))
+      why = agg_err[0] ? agg_err : "aggregate field cannot cross the C ABI";
+    if (!why && type_kind_of(pt) == TYPE_KIND_VOID)
+      why = "void is not a valid parameter type";
+    if (why)
+      diag_error(sema->diag, sema_loc(sema, p),
+                 "cfunc %.*s: parameter '%.*s': %s",
+                 (int)fn->name.len, fn->name.ptr,
+                 (int)pvd->name.len, pvd->name.ptr, why);
+  }
+  const type_t *rt = sema->vm->type_void;
+  if (!fn->return_expr) return;
+  rt = sema_resolve_type_slot(sema, &fn->return_expr);
+  if (!rt) return;
+  ownership_t rown = type_ownership_of(rt);
+  if (rown == OWN_OWN) {
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+               "cfunc %.*s: return type cannot be 'own': use 'fatal T' to hand "
+               "ownership to the caller (own is for parameters passed to C)",
+               (int)fn->name.len, fn->name.ptr);
+    return;
+  }
+  const char *rwhy = ffi_c_abi_reject_reason_own(rt, rown);
+  char agg_rerr[256] = {0};
+  if (!rwhy && !ffi_c_abi_check_aggregate(rt, sema->vm, agg_rerr,
+                                          sizeof agg_rerr))
+    rwhy = agg_rerr[0] ? agg_rerr : "aggregate field cannot cross the C ABI";
+  if (rwhy)
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
+               "cfunc %.*s: return type: %s",
+               (int)fn->name.len, fn->name.ptr, rwhy);
+}
+
 /* pass1c：程序类型激活之后统一校验 extern 签名（并把 pass1_names 未能登记的
    ——签名里含程序自定义类型的——补登记）。 */
 void pass1c_extern_abi(sema_t *sema, ast_program_t *prog) {
   for (ast_node_t *f = prog->funcs; f; f = f->next) {
     if (f->kind == AST_FUNC_DEF && ((ast_func_def_t *)f)->is_extern_cfunc)
       (void)check_extern_cfunc(sema, (ast_func_def_t *)f, /*report=*/true);
+    else if (f->kind == AST_FUNC_DEF && ((ast_func_def_t *)f)->is_cfunc)
+      check_cfunc_definition_abi(sema, (ast_func_def_t *)f);
     else if (f->kind == AST_VAR_DEF && ((ast_var_def_t *)f)->is_extern_var)
       (void)check_extern_var(sema, (ast_var_def_t *)f, /*report=*/true);
   }

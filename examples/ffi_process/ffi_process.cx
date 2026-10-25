@@ -12,8 +12,8 @@
 // 数据符号（`extern var`）的读写见 `examples/ffi_extern_var`
 // （那个示例用的是 Windows CRT 的 `_fmode`／`_osplatform`／`_pgmptr`，故仅 Windows 可跑）。
 //
-// `extern func libc::abs(...)` 与 `extern cfunc libc::abs(...)` 等价（限定名已经表明它
-// 来自外部库）；`cfunc` 是规范写法（显式标注 C ABI），`clux format` 会统一渲染成它。
+// C 函数必须写成 `extern cfunc libc::abs(...)`：`extern func` 会被明确拒绝，
+// 因为 clux `func` 是 env-first 的 clux 调用约定，不是 C ABI。
 //
 // 别名用 `libc` 而不是 `c`：`::` 左侧先按作用域解析，**局部变量会遮蔽库别名**
 // （`var c: Color = ...;` 之后 `c::printf` 会被当成对变量 c 的成员访问）。
@@ -24,7 +24,7 @@
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): i32; // 返回值用不到，声明为 void
 
-extern cfunc libc::abs(x: i32): i32; // 与 extern func 等价
+extern cfunc libc::abs(x: i32): i32;
 extern cfunc libc::strlen(s: str): u64;
 
 func main(): i32 {

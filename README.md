@@ -61,7 +61,8 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   is rejected with one diagnostic — **import kind is never inferred from the file
   extension** (a `.so`/`.dll` suffix does not mean "dynamic library").
 - **M6 — FFI**: `extern lib <alias> from "<library>"` (`"*"` = the current process),
-  `extern cfunc` / `extern func` declarations lowered to direct C prototypes,
+  `extern cfunc` declarations lowered to direct C prototypes (`extern func` is
+  rejected — clux `func` is not C ABI),
   `cfunc` definitions usable as C callbacks, `extern var` global data symbols, conditional declarations
   (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), and recursive C-ABI type checking
   (scalars, pointers, `opaque`, `str`, struct / cunion / enum).

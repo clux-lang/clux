@@ -1384,6 +1384,35 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                              "cannot cross the C ABI", qual, ai + 1);
                 continue;
               }
+              /* 所有权契约：`own` 形参（包括 `own Agg` 这种按值聚合）必须接收
+                 将亡值（move/clone 的结果），否则实参仍由调用方持有，而被调方
+                 按 own 契约释放 → double free。反向规则同理：fatal 实参必须被
+                 own 形参接住，否则没有位置释放 → 泄漏。规则与普通调用的
+                 `func_shadow_call`（src/vm/type_func.c）保持一致；差异只在于
+                 FFI 调用不走 value_call，必须在这里显式补上。 */
+              ownership_t pown = type_ownership_of(pt);
+              ownership_t aown = value_type_ownership(av);
+              if (pown == OWN_OWN && aown != OWN_FATAL) {
+                char pn[64];
+                sema_type_name(pt, pn, sizeof pn);
+                diag_error(sema->diag, sema_loc(sema, a),
+                           "extern call %s: argument %zu: cannot copy a value "
+                           "holding owned resources into parameter of type %s "
+                           "(use move() or clone(), or declare the parameter as "
+                           "'ref *T' to borrow)", qual, ai + 1, pn);
+                continue;
+              }
+              if (aown == OWN_FATAL && pown != OWN_OWN) {
+                char pn[64];
+                sema_type_name(pt, pn, sizeof pn);
+                diag_error(sema->diag, sema_loc(sema, a),
+                           "extern call %s: argument %zu: a dying value (FATAL) "
+                           "must be caught by an 'own' position; parameter of "
+                           "type %s does not take ownership (bind it to an own "
+                           "variable, or pass it to an own parameter)",
+                           qual, ai + 1, pn);
+                continue;
+              }
               if (!ffi_arg_acceptable(sema, pt, at))
                 diag_error(sema->diag, sema_loc(sema, a),
                            "extern call %s: argument %zu: cannot pass this value "

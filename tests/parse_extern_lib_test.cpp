@@ -191,3 +191,14 @@ TEST_F(ParseExternLibTest, NonIdentifierAliasRejected) {
     EXPECT_TRUE(diag_has_error(diag_));
     EXPECT_TRUE(diag_contains("alias"));
 }
+
+/* `extern func` 不是 C ABI：clux `func` 是 env-first 调用约定，只有 `cfunc`
+   能作为外部 C 函数声明。必须明确报错并指向 `extern cfunc`。 */
+TEST_F(ParseExternLibTest, ExternFuncRejectedAsNotCApi) {
+    parse(
+        "extern func libc::printf(format: str, ...): i32;\n"
+        "func main(): i32 { return 0; }\n");
+    EXPECT_TRUE(diag_has_error(diag_));
+    EXPECT_TRUE(diag_contains("not a C ABI"));
+    EXPECT_TRUE(diag_contains("extern cfunc"));
+}

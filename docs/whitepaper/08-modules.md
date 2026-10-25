@@ -115,7 +115,9 @@ extern lib crt from "c";
 extern cfunc crt::puts(s: *const u8): i32;
 ```
 
-`extern cfunc` 的函数没有函数体，由运行时动态解析符号。
+`extern cfunc` 的函数没有函数体，由运行时动态解析符号。只有 `cfunc` 能出现在
+`extern` 后面；`extern func ...;` 会被明确拒绝，因为 clux `func` 是 env-first
+调用约定，不是 C ABI。
 
 ## 8.10 外部变量
 

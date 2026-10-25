@@ -449,8 +449,8 @@ clux build hello.cx
   `src/cbackend/c_lower_ffi.c`）：
   - `extern cfunc <lib>::<fn>(params): ret;`：生成 `extern` 原型（C ABI
     类型：整数/浮点/bool/str/opaque/struct/cunion/指针/cfunc；enum 按底层
-    整数渲染），调用点直接调用真实 C 符号；`extern func <lib>::<fn>` 是
-    同一 AST；
+    整数渲染），调用点直接调用真实 C 符号；`extern func` 明确报错——clux
+    `func` 是 env-first 调用约定，不能作为 C ABI；
   - `str` 的 C ABI 表示是 `const char *`（与 VM 的 str = char* 一致）：
     实参取 `(v).data`，返回值用 `clux_str_from_c(p)`（`strlen` 求 len）；
   - `data(s)` → `(s).data`（`is_data_call`），与 `len(s)` 组成 C 的

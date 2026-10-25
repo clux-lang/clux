@@ -255,11 +255,9 @@ extern lib crt from "msvcrt";
 extern cfunc crt::puts(s: *const u8): i32;
 ```
 
-等价写法：
-
-```clux
-extern func crt::puts(s: *const u8): i32;
-```
+只有 `cfunc` 能作为外部 C 函数声明：clux `func` 使用 env-first 的 clux
+调用约定，不能作为 C ABI，因此 `extern func ...;` 会被明确拒绝（它不再
+是 `extern cfunc` 的等价写法）。
 
 外部数据符号：
 

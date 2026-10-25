@@ -50,8 +50,7 @@ inline std::filesystem::path clux_test_path() {
 inline std::string clux_with_printf_prelude(const std::string &body) {
   if (body.find("libc::printf(") == std::string::npos) return body;
   /* 幂等：已声明则原样返回（有些测试文件在调用处又显式加了一次）。 */
-  if (body.find("extern func libc::printf(") != std::string::npos ||
-      body.find("extern cfunc libc::printf(") != std::string::npos)
+  if (body.find("extern cfunc libc::printf(") != std::string::npos)
     return body;
   /* printf 的 C ABI 返回 int；声明成 cfunc/i32 才能与 <stdio.h> 的
      `int printf(const char*, ...)` 兼容（声明成 void 会让生成的 extern
