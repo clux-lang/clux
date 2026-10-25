@@ -513,6 +513,12 @@ static ast_node_t *gen_deep_clone_call(sema_t *sema, ast_node_t *access) {
   return call;
 }
 
+/* 公共入口：生成 `__deep_clone(v)`（闭包值拷贝/运行期深拷贝）。
+   用于 sema 在"闭包值拷贝 = 深拷贝 env"处插入（字面量不需要）。 */
+ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value) {
+  return gen_deep_clone_call(sema, value);
+}
+
 /* **调用入口**（销毁点/槽位/`clone()` 共用）：需要深拷贝时发 CALL 到生成的
  * clone 函数，否则返回 access（普通拷贝）。 */
 static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,

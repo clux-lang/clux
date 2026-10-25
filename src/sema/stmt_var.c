@@ -1,6 +1,7 @@
 #include "sema/sema.h"
 #include "vm/type_ownership.h"
 #include <stdio.h>
+#include <string.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_assign.h"
@@ -686,6 +687,29 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     }
     /* 错误恢复产物（init 已诊断）不提升确定性 */
     sym->flow_init = !init_bad;
+
+    /* 闭包值**拷贝** = 深拷贝捕获 env（值语义）：非 own 捕获的闭包可 copy，
+       但两个变量不能共享同一个 env（闭包体可修改捕获）。字面量本身是新建
+       实例，不需要再克隆。 */
+    if (!init_bad && vd->init && vd->init->kind != AST_FUNC_DEF &&
+        vd->init->kind != AST_MOVE && vd->init->kind != AST_TAKE) {
+      bool already_dc = false;
+      if (vd->init->kind == AST_CALL) {
+        ast_node_t *cal = ((ast_call_t *)vd->init)->callee;
+        if (cal && cal->kind == AST_IDENT) {
+          strslice_t cn = ((ast_ident_t *)cal)->name;
+          already_dc = (cn.len == 12 && cn.ptr &&
+                        memcmp(cn.ptr, "__deep_clone", 12) == 0);
+        }
+      }
+      const type_t *it0 = value_type(init);
+      const type_t *is = it0 ? type_strip_quals(it0) : NULL;
+      if (!already_dc && is && type_kind_of(is) == TYPE_KIND_FUNC &&
+          func_type_capture_count(is) > 0 && !type_has_own_slots(is)) {
+        ast_node_t *dc = sema_gen_deep_clone(sema, vd->init);
+        if (dc) vd->init = dc;
+      }
+    }
 
     if (vd->type_expr) {
       /* 显式类型：3a 槽位解析可能失败（引用同块后续局部 type/被 var 遮蔽，

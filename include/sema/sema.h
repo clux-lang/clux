@@ -523,6 +523,10 @@ uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t);
 bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
                         uint32_t *fid, strslice_t *name);
 
+/** 生成 `__deep_clone(<value>)` 调用节点（闭包值拷贝 = 深拷贝 env 的
+ *  运行期兜底；供 sema 在变量初始化/赋值处插入）。 */
+ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value);
+
 bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
                          uint32_t *dispose_fid, uint32_t *clone_fid);
 

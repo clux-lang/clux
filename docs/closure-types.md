@@ -1,8 +1,8 @@
 # 闭包类型设计（closure types）
 
 状态：设计定稿（实现分阶段进行）。C 后端已完成"捕获内联 + 静态 clone/dispose"；
-VM 已把 env 内联进函数实例分配（单次分配），但值 data 仍是函数对象指针、
-实例随 VM 统一回收（未按值回收）。
+VM 已把 env 内联进函数实例分配（单次分配）、捕获可写且变量/赋值的闭包拷贝按值
+语义深拷贝 env；值 data 仍是函数对象指针、实例随 VM 统一回收（未按值回收）。
 
 ## 1. 核心决策
 
@@ -253,6 +253,12 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - 结果：VM 闭包不再为 env 单独 malloc；`ClosureValueOwn` 全组（含 own 捕获
   move/clone/嵌套/容器）无泄漏。实例本身仍挂在 `vm->functions`，随 VM 销毁
   统一回收（未做按值回收）。
+- **捕获可写 + 值语义拷贝**：捕获赋值在 sema 里与读取同构改写为
+  `__ctx.env.<cap> = ...`（VM 走 FIELD_SET 闭包分支写回实例 env，C 走
+  `(*ctx_env).clux_f_i`）；非 own 捕获闭包的**拷贝**（`var g = f`、`g = f`）
+  由 sema 插入生成的 `__deep_clone`，env 深拷贝、两份独立（字面量/move 不
+  插入）。C 与 VM 行为一致（差分用例 `CBackendDiff.ClosureCopyIsValueSemantic`、
+  `ClosureValueOwn.CaptureMutation*`）。
 
 ### 装饰器链修复（本次，顺带）
 
@@ -307,14 +313,14 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 
 ## 未完成
 
-1. **阶段 C（VM 值表示）**：env 已内联进**函数实例分配**，但值 data 仍是
-   `func_t*`（不是设计稿的 `{ fnptr; caps... }`），实例统一挂在 `vm->functions`
-   直到 VM 销毁。要做真正的按值生命周期，需要：值 data 内联捕获块、或给实例
-   加引用计数/`owns_self` 并在 `value_dispose`/FREE 回收；后者牵动
-   `func_assign`/`value_clone`（move 是运行期字节拷贝，不能无条件深拷贝）。
-   改动面：`include/vm/function.h`、`src/vm/type_func.c`、`exec_stack.c`
-   （MAKE_FUNCTION/SET_CLOSURE）、`exec_memory.c`（FREE）、`type_ptr.c`
-   （clone_block FUNC 分支）。
+1. **阶段 C（VM 值生命周期）**：env 已内联进**函数实例分配**，变量/赋值的闭包
+   拷贝已按值语义深拷贝 env（见上），但值 data 仍是 `func_t*`，实例统一挂在
+   `vm->functions` 直到 VM 销毁（不做按值回收）。剩余：
+   - 聚合内部移动的闭包副本（`.[2]F{ f, f }` / struct 字段拷贝）仍共享实例；
+   - 真正的按值生命周期需要值 data 内联捕获块，或实例引用计数 +
+     `value_dispose` 回收；后者牵动 `func_assign`/`value_clone`（move 是运行期
+     字节拷贝，不能无条件深拷贝）。改动面：`include/vm/function.h`、
+     `src/vm/type_func.c`、`exec_stack.c`、`exec_memory.c`、`type_ptr.c`。
 2. **运行期闭包值的类型身份仍是签名类型**：sema 的闭包常量/变量是闭包类型
    （捕获进入身份），但 `func_instantiate` 产出的运行期 value type 仍是普通
    `func_type_t`（sig 与闭包类型共享布局；`capture_type` 挂在函数对象上）。

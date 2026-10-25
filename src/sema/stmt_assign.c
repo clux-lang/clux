@@ -291,6 +291,36 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
   }
   strslice_t name = ((ast_ident_t *)as->target)->name;
 
+  /* 闭包捕获赋值：与捕获**读取**同构，改写为 `__ctx.env.<cap> = ...`。
+     捕获槽在运行期是闭包实例 env 的字段（VM FIELD_SET 的闭包分支 / C 的
+     `(*ctx_env).clux_f_i`），按成员赋值路径做类型/所有权校验。 */
+  {
+    sema_symbol_t *cs = sema_lookup(scope, name);
+    if (cs && cs->kind == SEMA_SYM_VAR && cs->is_capture && sema->fn.def &&
+        sema->fn.def->capture_type_id != 0) {
+      uint32_t tb = as->target->tok_begin, te = as->target->tok_end;
+      ast_node_t *ctx = ast_ident_new(sema->arena, tb, te);
+      ast_node_t *env = ast_member_new(sema->arena, tb, te);
+      ast_node_t *cap = ast_member_new(sema->arena, tb, te);
+      if (!ctx || !env || !cap) {
+        sema_expr(sema, &as->value, scope);
+        return;
+      }
+      ctx->is_generated = true;
+      env->is_generated = true;
+      cap->is_generated = true;
+      ((ast_ident_t *)ctx)->name = strslice_from_bytes("__ctx", 5);
+      ((ast_member_t *)env)->object = ctx;
+      ((ast_member_t *)env)->field = strslice_from_bytes("env", 3);
+      ((ast_member_t *)cap)->object = env;
+      ((ast_member_t *)cap)->field = name;
+      cap->next = as->target->next;
+      as->target = cap;
+      shadow_assign_member(sema, as, scope);
+      return;
+    }
+  }
+
   /* ===== 显式销毁 / 丢弃：`_ = expr`（m3-design §3.3）=====
      sema 在**当前位置**生成销毁序列（与作用域退出同一套扁平槽位展开），把
      "提前释放"编成显式 FREE 序列——与 `move` 一起构成"显式销毁"：
@@ -549,6 +579,17 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
           if (gen_destroy(sema, sym->type, old, &dhead, &dtail))
             as->destroy = dhead;
         }
+      }
+    }
+
+    /* 闭包值拷贝 = 深拷贝 env（与 var 初始化同规则；move 是转移，不克隆）。 */
+    if (as->value && as->value->kind != AST_MOVE) {
+      const type_t *rt = value_type(rhs);
+      const type_t *rs = rt ? type_strip_quals(rt) : NULL;
+      if (rs && type_kind_of(rs) == TYPE_KIND_FUNC &&
+          func_type_capture_count(rs) > 0 && !type_has_own_slots(rs)) {
+        ast_node_t *dc = sema_gen_deep_clone(sema, as->value);
+        if (dc) as->value = dc;
       }
     }
 

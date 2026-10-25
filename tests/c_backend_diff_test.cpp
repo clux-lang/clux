@@ -227,8 +227,7 @@ TEST(CBackendDiff, OptionUnionAndCUnion) {
   expect_diff(c);
 }
 
-TEST(CBackendDiff, FunctionValuesClosuresAndMethods) {
-  static const DiffCase c = {
+TEST(CBackendDiff, FunctionValuesClosuresAndMethods) {  static const DiffCase c = {
       "diff_closure",
       "struct Point {\n"
       "  x: i32;\n"
@@ -243,6 +242,24 @@ TEST(CBackendDiff, FunctionValuesClosuresAndMethods) {
       "  return p.plus(apply[func |a: i32| (i32) -> i32](cap, 3));\n"
       "}\n",
       9,
+  };
+  expect_diff(c);
+}
+
+/* 捕获可写 + 闭包拷贝的值语义：`var g = f` 必须深拷贝 env（VM 与 C 一致）。 */
+TEST(CBackendDiff, ClosureCopyIsValueSemantic) {
+  static const DiffCase c = {
+      "diff_closure_copy",
+      "func main(): i32 {\n"
+      "  var f = func |(n: i32 = 0)| (): i32 { n = n + 1; return n; };\n"
+      "  if (f() != 1) { return 1; }\n"
+      "  var g = f;\n"
+      "  if (g() != 2) { return 2; }\n"
+      "  if (f() != 2) { return 3; }\n"
+      "  if (g() != 3) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      0,
   };
   expect_diff(c);
 }

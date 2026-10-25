@@ -199,3 +199,38 @@ TEST(ClosureValueOwn, OwnCaptureCloneAndGenericCall) {
       "}\n",
       "cv_own_clone_generic");
 }
+
+/* ==================== 捕获可写 + 值语义拷贝 ==================== */
+
+/* 捕获槽在闭包体内可写（读写都走 __ctx.env）；拷贝闭包必须深拷贝 env：
+ * 修改副本不影响源（C 与 VM 一致）。 */
+TEST(ClosureValueOwn, CaptureMutationAndCopyIsIndependent) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var f = func |(n: i32 = 0)| (): i32 { n = n + 1; return n; };\n"
+      "  if (f() != 1) { return 1; }\n"
+      "  if (f() != 2) { return 2; }\n"
+      "  var g = f;\n"
+      "  if (g() != 3) { return 3; }\n"
+      "  if (f() != 3) { return 4; }\n"
+      "  if (g() != 4) { return 5; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cv_mutate_copy");
+}
+
+/* 赋值同样是值语义：`g = f` 之后两者 env 独立。 */
+TEST(ClosureValueOwn, CaptureMutationAssignmentCopyIsIndependent) {
+  clux_expect_ok(
+      "func main(): i32 {\n"
+      "  var f = func |(n: i32 = 0)| (): i32 { n = n + 1; return n; };\n"
+      "  var g = func |(m: i32 = 100)| (): i32 { m = m + 1; return m; };\n"
+      "  g = f;\n"
+      "  if (f() != 1) { return 1; }\n"
+      "  if (g() != 1) { return 2; }\n"
+      "  if (f() != 2) { return 3; }\n"
+      "  if (g() != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cv_mutate_assign");
+}
