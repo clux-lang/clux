@@ -96,6 +96,9 @@ func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
 value_t *func_instantiate(vm_t *vm, func_t *base) {
     func_t *fn = func_instantiate_raw(vm, base);
     if (!fn) return NULL;
+    /* 运行期值类型仍用**签名类型**（func_type_t，sig 与闭包类型共享布局）：
+       闭包类型是 sema 的类型身份，运行期不需要它来读写 env（capture_type
+       已经挂在函数对象上）。 */
     void *data = value_alloc_data_copy(vm->alloc, base->type, &fn);
     return value_make(vm, base->type, data);
 }

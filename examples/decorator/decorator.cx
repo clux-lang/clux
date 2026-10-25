@@ -22,13 +22,14 @@ extern cfunc libc::printf(format: str, ...): i32;
 comptime func twice(n: i32): i32 { return n * 2; }
 comptime func plus1(n: i32): i32 { return n + 1; }
 
-// ---- 函数装饰器：包一层（返回闭包） ----
-comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {
+// ---- 函数装饰器：包一层（返回闭包；捕获 f 进入闭包类型） ----
+comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i32 {
     return func |f| w(x: i32): i32 { return f(x) + 100; };
 }
 
 // ---- 方法装饰器：接收者作为第一个参数，返回"包一层"的新方法 ----
-comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {
+comptime func add100m(f: func(ref *Point) -> i32):
+        func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {
     return func |f| w(self: ref *Point): i32 { return f(self) + 100; };
 }
 

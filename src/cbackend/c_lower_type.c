@@ -39,12 +39,14 @@ cir_signature_t *signature_for_env(lower_ctx_t *lc, cir_type_t *ret,
     return s;
 }
 
-static const char *module_empty_env_name(lower_ctx_t *lc);
+static const char *module_empty_env_name(lower_ctx_t *lc) {
+    char b[96];
+    snprintf(b, sizeof b, "struct %sempty_env", type_prefix(lc));
+    return copy_arena(lc->arena, b);
+}
 
 static cir_type_t *empty_env_type(lower_ctx_t *lc) {
-    static cir_type_t *cached = NULL;
-    static lower_ctx_t *cached_lc = NULL;
-    if (cached && cached_lc == lc) return cached;
+    if (lc->unit->empty_env) return lc->unit->empty_env;
     cir_type_t *et = cir_type_new(lc->arena, CIR_TYPE_STRUCT,
                                   module_empty_env_name(lc));
     if (!et) return NULL;
@@ -54,25 +56,13 @@ static cir_type_t *empty_env_type(lower_ctx_t *lc) {
     if (!f) return NULL;
     cir_type_add_field(et, f);
     cir_unit_add_type(lc->unit, et);
-    cached = et;
-    cached_lc = lc;
+    lc->unit->empty_env = et;
     return et;
 }
 
 cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret, size_t pc,
                                cir_type_t **pt) {
     return signature_for_env(lc, ret, pc, pt, empty_env_type(lc));
-}
-
-static const char *module_empty_env_name(lower_ctx_t *lc) {
-    static const char *cached = NULL;
-    static lower_ctx_t *cached_lc = NULL;
-    if (cached && cached_lc == lc) return cached;
-    char b[96];
-    snprintf(b, sizeof b, "struct %sempty_env", type_prefix(lc));
-    cached = copy_arena(lc->arena, b);
-    cached_lc = lc;
-    return cached;
 }
 
 cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {

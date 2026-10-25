@@ -469,6 +469,23 @@ uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t) {
   return ((const ast_func_ref_t *)callee)->fid;
 }
 
+bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
+                        uint32_t *fid, strslice_t *name) {
+  if (fid) *fid = 0;
+  if (name) *name = STRSLICE_EMPTY;
+  if (!sema || !t) return false;
+  const type_t *k = type_strip_quals(t);
+  if (!k) return false;
+  for (sema_clone_fn_t *f = sema->clone_fns; f; f = f->next) {
+    if (f->kind != kind || f->type != k) continue;
+    const ast_func_def_t *fd = (const ast_func_def_t *)f->fn;
+    if (fid) *fid = fd ? fd->fid : 0;
+    if (name) *name = f->name;
+    return true;
+  }
+  return false;
+}
+
 /* 收尾：把生成的 clone 函数追加到程序函数链尾部（sema_analyze 调用）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return;
@@ -480,6 +497,20 @@ void sema_attach_clone_fns(sema_t *sema, ast_node_t *program) {
     else prog->funcs = f->fn;
     prog->funcs_last = f->fn;
   }
+}
+
+/* `__deep_clone(v)` 调用节点：运行期对象图深拷贝（闭包 env 的唯一入口）。 */
+static ast_node_t *gen_deep_clone_call(sema_t *sema, ast_node_t *access) {
+  if (!sema || !access) return NULL;
+  ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
+  ast_node_t *call = ast_call_new(sema->arena, 0, 0);
+  if (!callee || !call) return NULL;
+  ((ast_ident_t *)callee)->name = strslice_from_bytes("__deep_clone", 12);
+  callee->is_generated = true;
+  ((ast_call_t *)call)->callee = callee;
+  ((ast_call_t *)call)->args = access;
+  call->is_generated = true;
+  return call;
 }
 
 /* **调用入口**（销毁点/槽位/`clone()` 共用）：需要深拷贝时发 CALL 到生成的
@@ -506,15 +537,7 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
   case TYPE_KIND_FUNC: {
     /* 闭包值的深拷贝：env 的捕获聚合类型只有运行期才知道 → 调用运行期的
        `__deep_clone(v)`（对象图克隆，闭包分支会新建实例并克隆 env）。 */
-    ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
-    ast_node_t *call = ast_call_new(sema->arena, 0, 0);
-    if (!callee || !call) return NULL;
-    ((ast_ident_t *)callee)->name = strslice_from_bytes("__deep_clone", 12);
-    callee->is_generated = true;
-    ((ast_call_t *)call)->callee = callee;
-    ((ast_call_t *)call)->args = access;
-    call->is_generated = true;
-    return call;
+    return gen_deep_clone_call(sema, access);
   }
   case TYPE_KIND_OPTION:
   case TYPE_KIND_UNION:
@@ -724,6 +747,11 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
       ast_node_t *e = gen_clone_union(sema, scope, t, access, false);
       return e ? e : NULL;
     }
+    case TYPE_KIND_FUNC:
+      /* 闭包 = 捕获聚合结构体：深拷贝必须按运行期 capture_type 克隆 env
+         （静态类型表达不了时走运行期 `__deep_clone`；C 后端按闭包类型生成
+         静态 env clone）。 */
+      return gen_deep_clone_call(sema, access);
     case TYPE_KIND_STRUCT:
     case TYPE_KIND_TUPLE:
     case TYPE_KIND_ARRAY: {

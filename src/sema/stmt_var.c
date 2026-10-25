@@ -874,6 +874,12 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         vt = sema->vm->type_void;
       }
       sym->type = vt;
+      /* 推断类型写回 AST：后端（C 降级/编译器）需要与 sema 完全相同的类型
+         实例。闭包字面量的值类型是**闭包类型**（捕获槽位进入类型身份），
+         若后端改用函数签名推断（func_type_of_def）会得到普通 func 类型，
+         与字面量构造出的闭包 sig struct 不兼容（实测 C 编译报 incompatible
+         struct type）。 */
+      if (vt) vd->resolved_type = vt;
       var_value = value_make_shadow(sema->vm, vt);
       value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
     }

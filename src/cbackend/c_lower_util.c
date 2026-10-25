@@ -150,3 +150,25 @@ const type_t *strip(sema_t *sema, const type_t *t) {
     (void)sema;
     return t ? type_strip_quals(t) : NULL;
 }
+
+const type_t *decl_value_type(lower_ctx_t *lc, const type_t *decl,
+                              ast_node_t *init) {
+    const type_t *it = init ? infer_expr_type(lc, init) : NULL;
+    if (!decl) return it;
+    if (!it) return decl;
+    const type_t *d = type_strip_quals(decl);
+    const type_t *i = type_strip_quals(it);
+    if (d && i && type_kind_of(d) == TYPE_KIND_FUNC &&
+        type_kind_of(i) == TYPE_KIND_FUNC && !func_type_is_closure(d) &&
+        func_type_is_closure(i)) {
+        /* 声明/推断类型是普通 func，但初始化器是带捕获闭包：sema 的
+           comptime 折叠/装饰器展开目前会把结果类型退化成签名类型
+           （func(...)）。C 侧必须按**闭包类型**落变量，否则 env 被截断
+           （值里 sig struct 不兼容）。 */
+        ownership_t o = type_ownership_of(decl);
+        if (o == OWN_NONE) return it;
+        const type_t *wrapped = type_ownership_apply(lc->sema->vm, o, it);
+        return wrapped ? wrapped : it;
+    }
+    return decl;
+}

@@ -234,12 +234,13 @@ TEST(CBackendDiff, FunctionValuesClosuresAndMethods) {
       "  x: i32;\n"
       "  func plus(self: ref *Point, y: i32): i32 { return self.x + y; }\n"
       "}\n"
-      "func apply(f: func(i32) -> i32, x: i32): i32 { return f(x); }\n"
+      "func apply[F](f: F, x: i32): i32 { return f(x); }\n"
       "func main(): i32 {\n"
       "  var p = .Point{ .x = 4 };\n"
       "  var a = 2;\n"
-      "  var cap: func(i32) -> i32 = func |a| (x: i32): i32 { return x + a; };\n"
-      "  return p.plus(apply(cap, 3));\n"
+      "  var cap: func |a: i32| (i32) -> i32 =\n"
+      "      func |a| (x: i32): i32 { return x + a; };\n"
+      "  return p.plus(apply[func |a: i32| (i32) -> i32](cap, 3));\n"
       "}\n",
       9,
   };

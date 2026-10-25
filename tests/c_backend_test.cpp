@@ -453,7 +453,7 @@ TEST(CBackend, BuildFunctionValuesAndClosure) {
       "  var lit: func(i32) -> i32 = func(x: i32): i32 { return x + 2; };\n"
       "  if (lit(3) != 5) { return 3; }\n"
       "  var a = 2;\n"
-      "  var cap: func(i32) -> i32 = func |a| (x: i32): i32 { return x + a; };\n"
+      "  var cap: func |a: i32| (i32) -> i32 = func |a| (x: i32): i32 { return x + a; };\n"
       "  return cap(3);\n"
       "}\n",
       "cbackend_m5_func");
@@ -515,7 +515,7 @@ TEST(CBackend, BuildOwnCaptureClosure) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{5};\n"
-      "  var f: own func(i32) -> i32 =\n"
+      "  var f: own func |p: own *i32| (i32) -> i32 =\n"
       "      move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
       "  return f(1);\n"
       "}\n",
@@ -534,9 +534,9 @@ TEST(CBackend, BuildCloneCaptureClosure) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{5};\n"
-      "  var f: own func(i32) -> i32 =\n"
+      "  var f: own func |p: own *i32| (i32) -> i32 =\n"
       "      move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
-      "  var g: own func(i32) -> i32 = clone(f);\n"
+      "  var g: own func |p: own *i32| (i32) -> i32 = clone(f);\n"
       "  return g(1);\n"
       "}\n",
       "cbackend_m5_clone_closure");
@@ -2281,6 +2281,32 @@ TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
       "  return 0;\n"
       "}\n",
       "cbackend_closure_inline_env");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* 闭包放进含 own 的聚合字段并被深拷贝：clone(Holder) 触发闭包 env 的
+   静态深拷贝（`<sig>__cl`），源与副本的 own 捕获必须各自独立、各释放一次。 */
+TEST(CBackend, BuildClosureInStructClone) {
+  const std::string src = write_temp_file(
+      "type F = func |p: own *i32| (i32) -> i32;\n"
+      "struct Holder { cb: own F; n: i32; }\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{ 5 };\n"
+      "  var h: own Holder = .Holder{ .cb = move(func |(p = move(p))| (x: i32): i32 {\n"
+      "      return p.* + x; }), .n = 1 };\n"
+      "  var h2: own Holder = clone(h);\n"
+      "  if (h.cb(1) != 6) { return 1; }\n"
+      "  if (h2.cb(2) != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_closure_struct_clone");
   ASSERT_FALSE(src.empty());
   std::filesystem::path exe = default_exe(src);
   std::error_code ec;

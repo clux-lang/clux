@@ -88,7 +88,8 @@ TEST(ClosureValueOwn, OptionAndSliceOfOwnClosures) {
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
-      "  var o: own ?own func()->i32 = .?own func()->i32{ move(cl) };\n"
+      "  var o: own ?own func |q: own *i32| () -> i32 =\n"
+      "      .?own func |q: own *i32| () -> i32{ move(cl) };\n"
       "  if (o.!() != 7) { return 1; }\n"
       "  return 0;\n"
       "}\n",
@@ -100,8 +101,9 @@ TEST(ClosureValueOwn, SliceOfOwnClosuresClone) {
       "func main(): i32 {\n"
       "  var p: own *i32 = new i32{7};\n"
       "  var cl = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
-      "  var s: own []own func()->i32 = make(own func()->i32, 1, move(cl));\n"
-      "  var c: own []own func()->i32 = clone(s);\n"
+      "  var s: own []own func |q: own *i32| () -> i32 =\n"
+      "      make(own func |q: own *i32| () -> i32, 1, move(cl));\n"
+      "  var c: own []own func |q: own *i32| () -> i32 = clone(s);\n"
       "  if (c[0]() != 7) { return 1; }\n"
       "  if (s[0]() != 7) { return 2; }\n"
       "  return 0;\n"
@@ -176,4 +178,24 @@ TEST(ClosureValueOwn, ClosureCapturingClosure) {
       "  return 0;\n"
       "}\n",
       "cv_nested");
+}
+
+/* ==================== 闭包类型注解 + 泛型 + own 捕获 clone ==================== */
+
+/* 闭包类型作为一等类型：own 捕获的闭包 move 进变量、clone 出独立 env、
+ * 通过泛型形参调用；VM 侧结束时 allocator 必须无泄漏（env 释放一次）。 */
+TEST(ClosureValueOwn, OwnCaptureCloneAndGenericCall) {
+  clux_expect_ok(
+      "type F = func |p: own *i32| (i32) -> i32;\n"
+      "func apply[G](f: G, x: i32): i32 { return f(x); }\n"
+      "func main(): i32 {\n"
+      "  var p: own *i32 = new i32{5};\n"
+      "  var f: own F = move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
+      "  var g: own F = clone(f);\n"
+      "  if (f(1) != 6) { return 1; }\n"
+      "  if (g(2) != 7) { return 2; }\n"
+      "  if (apply[F](f, 3) != 8) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cv_own_clone_generic");
 }

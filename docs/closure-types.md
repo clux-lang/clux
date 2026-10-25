@@ -1,6 +1,7 @@
 # 闭包类型设计（closure types）
 
-状态：设计定稿（实现分阶段进行；当前代码仍是"类型擦除 + 堆 env"的旧表示）。
+状态：设计定稿（实现分阶段进行）。C 后端已完成"捕获内联 + 静态 clone/dispose"；
+VM 仍用"每实例堆 env + 生成的 env vtable"（值语义/释放已正确，尚未内联）。
 
 ## 1. 核心决策
 
@@ -125,8 +126,8 @@ func main(): i32 {
     if (apply[func |base: i32| (i32) -> i32](f, 4) != 7) { return 1; }
 
     var p: own *i32 = new i32{ 5 };
-    var g: func |p: own *i32| (i32) -> i32 =
-        func |p| (x: i32): i32 { return p.* + x; };
+    var g: own func |p: own *i32| (i32) -> i32 =
+        move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });
     if (apply[func |p: own *i32| (i32) -> i32](g, 4) != 9) { return 2; }
     return 0;
 }
@@ -139,7 +140,8 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 
 # 实施进度（交接文档）
 
-更新时间：2026-10-25，HEAD `a216acd`（阶段 B 完成）。
+更新时间：2026-10-25，基于 HEAD `3712386`（阶段 B + 文档），工作区含本次未提交改动
+（C 静态 clone、跨模块 env 类型修复、阶段 D 迁移）。
 
 ## 已完成
 
@@ -188,32 +190,93 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - 新 gtest：`CBackend.BuildClosureOwnCaptureInlineEnv`（own 捕获 + `move(...)`，
   C 构建/运行 exit 0，生成 C 中 own 字段在返回路径释放）。
 
+### 阶段 C（C 侧 clone）与跨模块修复（本次）
+
+- sema：`gen_clone_expr_impl` 缺 `TYPE_KIND_FUNC` 分支——`var g = clone(f)` 在
+  "扁平化 clone"路径退化成**浅拷贝**（两个闭包共享 env，随后双重释放）。抽出
+  `gen_deep_clone_call`，`gen_clone_expr` 与 `gen_clone_expr_impl` 共用。
+- sema 新增 `sema_find_clone_fn`：只**查找**已生成的 clone 函数（kind + 类型 →
+  fid/名字），供 lowering 阶段引用（此时再生成不会进入程序函数链）。
+- C 后端 `CIR_EXPR_FUNC_CLONE`：闭包类型含 own 捕获时生成并缓存静态辅助函数
+  `static struct <sig> <sig>__cl(struct <sig>)`，逐捕获槽调用生成的
+  `__cloneptr_*` / `__cloneslice_*` / `__clone_*`；表达式为 `helper(value)`
+  （单次求值）。无 own 捕获仍是浅拷贝。`FREE` 不再依赖释放指针。
+- CIR 类型发射：函数值作为聚合字段（`struct Holder { cb: F; }`）时按依赖先发
+  签名 struct（`cw_emit_type` 新增 FUNC 分支），避免 "field has incomplete
+  type"；已被头文件/前面发射过的签名用 `emitted` 去重。
+- 跨模块：签名 struct 的 env 字段类型（`empty_env` / 闭包 env）现在递归进头文件
+  （`cw_mark_header_type` 增加 `sig->env_type`），修复 import 构建的
+  "incomplete type `struct clux_xxxx_empty_env`"；`empty_env_type` 原来用函数级
+  static `cached_lc` 缓存，多模块 lowering 时 `lower_ctx` 栈地址复用会拿到**别的
+  模块**的 env 类型，改为按 `cir_unit_t` 缓存。
+- 新 gtest：`CBackend.BuildClosureInStructClone`（`clone(Holder{ cb: own F })`，
+  源/副本各自独立调用 + 各释放一次）；`BuildCloneCaptureClosure`、
+  `BuildOwnCaptureClosure`、`BuildFunctionValuesAndClosure` 迁移为闭包类型后通过。
+
+### 阶段 D（迁移）：存量擦除用例
+
+- `CBackend` / `CBackendDiff` / `ClosureValueOwn` / `ComptimeClosure` /
+  `Decorator` / `Driver` 中"用 `func(...)` 承载捕获闭包"的用例已改成闭包类型 +
+  泛型调用：
+  - `var f: func(i32) -> i32 = func |a| ...` →
+    `var f: func |a: i32| (i32) -> i32 = ...`（或 `type F = ...`）；
+  - 高阶函数 `func apply(f: func(i32)->i32, ...)` → `func apply[F](f: F, ...)`，
+    调用点 `apply[func |a: i32| (i32) -> i32](f, 4)`；
+  - 聚合字段/数组/可选/slice 写完整闭包类型（如
+    `own ?own func |q: own *i32| () -> i32`）。
+- 下列套件当前通过：`CBackend` 的闭包/import 用例、`CBackendDiff`、
+  `ClosureValueOwn`、`ComptimeClosure`、`Decorator`（21 个）、`Driver` 的
+  closure/func-value 用例。
+- `ClosureValueOwn.OwnCaptureCloneAndGenericCall`（新增）：own 捕获 + `clone` +
+  泛型调用，VM 侧结束时 allocator 无泄漏。
+- examples 迁移：`examples/closure`、`examples/decorator`、
+  `examples/decorator_param` 改成闭包类型返回（C 与 VM 均运行 exit 0）。
+- 因 comptime 折叠结果的 sema 类型仍是**签名类型**（见"未完成"2），装饰器
+  展开出的变量在 sema 里被推断为 `func(...)`，而初始化器是带 env 的闭包字面量。
+  C 后端在变量落 C 时按初始化器恢复闭包类型（`decl_value_type`），否则内联
+  env 被截断成空 env（实测 "incompatible struct type" / 捕获丢失）。
+- 推断型 `var` 的 sema 类型写回 `resolved_type`（`shadow_var_def`），后端不再
+  用 `func_type_of_def` 重新推断（否则闭包字面量与变量类型是两个 sig struct）。
+
 ## 当前状态 / 已知红
 
-- 设计上 **不擦除**：存量约 350 个"用 `func(...)` 承载捕获闭包"的用例/示例
-  现在会报
-  `cannot initialize ... of type func(...) with func |...| func(...)`
-  —— 这是预期结果，等阶段 D 统一迁移（泛型 `apply[F]` 或显式闭包类型）。
-  因此**不要用全量 gtest 绿作为当前验收标准**；以新增闭包用例 +
-  普通非闭包回归为准。
-- 新增用例目前通过（filter 运行）：
-  `CBackend.BuildClosureTypeAnnotationAndGenericCall`、
-  `CBackend.RejectsClosureErasureToPlainFunc`、
-  `CBackend.BuildClosureOwnCaptureInlineEnv`。
-- 普通 C 程序回归正常（例如 `examples/arithmetic`）。
+- 设计上 **不擦除**：`func(...)`（无捕获）与闭包类型是不同类型，赋值/传参必须
+  用泛型或闭包类型注解。存量闭包用例已按此迁移（见上）。
+- 全量 gtest 的剩余失败以**环境问题**为主，与闭包无关：
+  - `FfiStructTest` / `FfiCallbackE2E` / `DriverM6`：本机 SEH 0xc0000005
+    （libffi 调用路径）；
+  - `MemoryBudget` / `TestSyntax` / `VmLifecycle` 等：gtest death test 无法在
+    `%TEMP%` 建临时文件（error 5），进程 exit 3；
+  - `CBackend` 个别用例经 `std::system()` 拉起子进程时偶发 0xC0000005（重跑
+    常绿）。
+- 因此全量 gtest 仍不宜作为唯一验收标准；按套件运行并区分环境性失败。
 
 ## 未完成
 
-1. **静态 clone**：C `CIR_EXPR_FUNC_CLONE` 目前是浅拷贝占位；含 own 捕获的
-   `clone(f)` 需要按 env 布局生成 `clux_env_clone_<typeid>`（深拷贝 own 字段），
-   `FREE/赋值` 使用点静态调用，值里仍不放函数指针。
-2. **阶段 C（VM）**：VM 目前 env 仍是堆块（`func_t->env`），并且
-   `own` 捕获 + `move` 会报 allocator 泄漏；需要把 env 内联进 func 实例/值，
-   按类型静态分派 clone/dispose，补 VM 差分测试。
-3. **阶段 D（迁移/清理）**：把存量 `func(...)` 承载捕获闭包的 tests/examples
-   改为泛型/闭包类型；删除过渡加宽/旧 env 表示；清理不再使用的
-   `clux_env_clone_*` 包装代码、旧 `env_clone/env_dispose` 结构字段引用。
-4. 文档/ABI 收尾：导出 C ABI 的闭包约定、跨模块闭包类型、`cfunc_ptr` 与
+1. **阶段 C（VM 内联值表示）**：VM 的捕获 env 仍是 `func_t->env` 指向的堆块
+   （每实例一次分配，`vm->functions` 统一回收）；值拷贝闭包时共享 `func_t`
+   指针。当前 VM 的闭包用例（含 own 捕获 move/clone/泛型调用）验证**无泄漏**，
+   但"env 内联进值 + 按类型静态 clone/dispose"尚未落地。改动面：
+   `include/vm/function.h`、`src/vm/type_func.c`、`exec_stack.c`
+   （MAKE_FUNCTION/SET_CLOSURE）、`exec_memory.c`（FREE）、`type_ptr.c`
+   （clone_block FUNC 分支）。
+2. **comptime 折叠结果的类型仍是签名类型**：`sema_ct_encode` 的 FUNC 分支只
+   记录 `fn->type`（普通签名），折叠出的闭包常量的 sema 类型因此是
+   `func(...)`；`var f = comptime_closure()`、装饰器展开、泛型实参推断都会
+   退化成无捕获 func。**装饰器链**（`[[scale(10)]] [[add(5)]] f`）因此会丢掉
+   内层装饰（`examples/decorator_param` 不再演示嵌套链；测试
+   `Decorator.ParameterizedDecoratorChain` 只回归编译/释放，未断言结果）。
+   修复方向：让折叠常量携带闭包类型（`type_func_closure`），并让运行期闭包值
+   的类型身份与之一致——但后者会牵动 `func_instantiate`/`value_assign`/
+   `implicit_cast`（本次试过：直接改运行期值类型会让 `ClosureValueOwn`
+   整组失败，已回退），需要成组改造。
+3. **嵌套闭包捕获的 C 静态 clone**：`capture_clone_kind` 对捕获槽是闭包
+   （FUNC）时暂返回"不展开"（浅拷贝）；需要按嵌套闭包类型递归生成/组合 helper。
+4. **清理旧表示**：C 后端已不把 clone/dispose 指针放进值（`clux_func_release`
+   为 no-op，`env_*_fid` 仅供 VM）；`capture_clone_kind` 与 sema
+   `clone_needs_deep` 的规则重复，后续可共享；删除过渡期死代码。
+5. 文档/ABI 收尾：导出 C ABI 的闭包约定（签名 struct/env 已能进头文件，但
+   `export func` 带闭包参数/返回尚未验证）、跨模块闭包类型、`cfunc_ptr` 与
    闭包类型的交互。
 
 ## 关键代码位置（继续实施时）
@@ -226,15 +289,24 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
 - sema：`src/sema/sema_type.c`（`AST_FUNC_TYPE` 分支）、
   `src/sema/stmt_build_func.c`（`sema_check_func_literal` 末尾闭包类型）、
   `src/ctfe/ctfe_expr.c`（类型别名路径的 `AST_FUNC_TYPE`）、
-  `src/sema/sema_generic.c`（mangle 捕获）。
-- C 后端：`include/cbackend/c_ir.h`（`cir_signature_t.env_type`）、
+  `src/sema/sema_generic.c`（mangle 捕获）、
+  `src/sema/expr_clone.c`（`gen_deep_clone_call`、`sema_find_clone_fn`、
+  `clone_needs_deep`）。
+- C 后端：`include/cbackend/c_ir.h`（`cir_signature_t.env_type`、
+  `cir_type_t.closure_clone`、`cir_unit_t.empty_env`）、
   `src/cbackend/c_lower_type.c`（`signature_for_env`/`empty_env_type`/
   `map_type` FUNC 分支）、`src/cbackend/c_lower_literal.c`
   （`lower_closure_literal`）、`src/cbackend/c_lower_expr.c`
-  （`__ctx.env` 位置捕获）、`src/cbackend/c_lower_stmt.c`（`FREE` 闭包字段）、
+  （`__ctx.env` 位置捕获、`closure_clone_helper`、`__deep_clone` lowering）、
+  `src/cbackend/c_lower_stmt.c`（`FREE` 闭包字段）、
   `src/cbackend/c_writer_stmt.c`（签名 env 字段、函数体 env 指针）、
-  `src/cbackend/c_writer_expr.c`（CLOSURE/FUNC_CALL/FUNC_CLONE）。
-- 测试：`tests/c_backend_test.cpp` 末尾三个新用例。
+  `src/cbackend/c_writer_expr.c`（CLOSURE/FUNC_CALL/FUNC_CLONE）、
+  `src/cbackend/c_writer_types.c`（类型依赖顺序 / 头文件 env 类型）、
+  `src/cbackend/c_lower_infer.c`（函数字面量推断为闭包类型）、
+  `src/cbackend/c_lower_util.c`（`decl_value_type`：变量落 C 类型修正）。
+- 测试：`tests/c_backend_test.cpp` 末尾闭包用例（含
+  `BuildClosureInStructClone`）、`tests/closure_value_ownership_test.cpp`
+  （`OwnCaptureCloneAndGenericCall`）。
 
 ## 构建/运行备忘
 
@@ -244,8 +316,9 @@ cmake --build build
 # 全新 build 目录：cmake -S . -B build 会重新生成
 # build/third_party/icu/icu_data_gen.c（clean 后必须 reconfigure 生成）
 
-# 新增闭包用例
-.\build\clux_test.exe --gtest_filter="CBackend.BuildClosureType*:CBackend.RejectsClosureErasure*:CBackend.BuildClosureOwnCaptureInlineEnv"
+# 新增/迁移后的闭包用例（按套件，比全量 gtest 可靠）
+.\build\clux_test.exe --gtest_filter="CBackend.BuildClosure*:CBackend.BuildOwnCapture*:CBackend.BuildCloneCapture*:CBackend.BuildFunctionValuesAndClosure"
+.\build\clux_test.exe --gtest_filter="ClosureValueOwn.*:ComptimeClosure.*:Decorator.*:CBackendDiff.*"
 ```
 
 ## 验收目标（阶段 C/D 完成后）

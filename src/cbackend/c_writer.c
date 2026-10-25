@@ -376,7 +376,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
             cw_put(sb, "\n");
             cw_put(sb, "/* ---- function signature definitions ---- */\n");
             for (cir_signature_t *s = sigs; s; s = s->next)
-                if (!s->in_header) cw_write_signature_def(sb, s);
+                if (!s->in_header && !s->emitted) cw_write_signature_def(sb, s);
         }
     }
 

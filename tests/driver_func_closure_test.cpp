@@ -26,7 +26,7 @@ TEST(Driver, RunFileClosureBasicLiteral) {
   /* 字面量纯 id 捕获：func |base| add(x) 捕获外层 base（clone），
      定义点绑定 → f(5) → 10 + 5 = 15 */
   std::string path = write_temp_file(
-      "func make_adder():func(i32)->i32 {\n"
+      "func make_adder(): func |base: i32| (i32) -> i32 {\n"
       "  var base = 10;\n"
       "  return func |base| add(x: i32): i32 { return base + x; };\n"
       "}\n"

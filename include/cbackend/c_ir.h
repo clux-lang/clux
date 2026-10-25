@@ -53,6 +53,9 @@ typedef struct cir_type {
     bool            is_bitfield;
     size_t          bit_word_bits;
     bool            needs_bf_make; /* 需要按类型生成 clux_bf_make_* 辅助函数 */
+    /* 闭包类型：深拷贝整个闭包值的 C 辅助函数名（`<sig> <name>(<sig>)`）。
+       仅当捕获槽位含 own 资源时生成；NULL = 浅拷贝即可。 */
+    const char     *closure_clone;
     struct cir_type *next;
 } cir_type_t;
 
@@ -248,6 +251,11 @@ typedef struct cir_unit {
     cir_global_t    *globals;
     cir_type_t      *types;
     cir_type_ref_t  *header_types; /* 必须进头文件的类型（签名类型，递归展开） */
+    /* 本单元共用的"无捕获函数 env"结构体（`struct clux_<tag>_empty_env`）。
+       所有普通函数签名的 env 字段都用它：形状统一，调用点无需分支。
+       **按单元缓存**（不能用函数级 static：多模块 lowering 的 lower_ctx 栈地址
+       会复用，会拿到别的模块的 env 类型）。 */
+    cir_type_t      *empty_env;
     cir_raw_t       *raw_helpers;
     /* extern cfunc：C 函数指针 typedef（先）与 extern 原型（后），保持添加顺序。 */
     cir_raw_t       *extern_typedefs;

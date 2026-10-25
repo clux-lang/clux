@@ -1,8 +1,6 @@
 #include "cbackend/c_writer_internal.h"
 
-/* 把类型标记为"进头文件"，并递归展开它按值/按指针依赖的类型：
- * struct/cunion/union 的字段、array/option/slice 的元素、ptr 的基类型、
- * func 签名的参数/返回。递归在指针处收敛（递归 struct 靠指针打断）。 */
+/* 鎶婄被鍨嬫爣璁颁负"杩涘ご鏂囦欢"锛屽苟閫掑綊灞曞紑瀹冩寜鍊?鎸夋寚閽堜緷璧栫殑绫诲瀷锛? * struct/cunion/union 鐨勫瓧娈点€乤rray/option/slice 鐨勫厓绱犮€乸tr 鐨勫熀绫诲瀷銆? * func 绛惧悕鐨勫弬鏁?杩斿洖銆傞€掑綊鍦ㄦ寚閽堝鏀舵暃锛堥€掑綊 struct 闈犳寚閽堟墦鏂級銆?*/
 void cw_mark_header_type(cir_type_t *t) {
     if (!t) return;
     switch (t->kind) {
@@ -32,6 +30,8 @@ void cw_mark_header_type(cir_type_t *t) {
             cw_mark_header_type(t->sig->ret);
             for (size_t i = 0; i < t->sig->param_count; i++)
                 cw_mark_header_type(t->sig->params[i]);
+            /* 闂寘绛惧悕鐨?env 缁撴瀯浣擄紙鍐呰仈鎹曡幏鍧楋級鎸夊€煎祵杩涚鍚?struct锛?               璺ㄦā鍧楀鍑?瀵煎叆鏃跺繀椤诲湪澶存枃浠堕噷涔熸湁瀹氫箟銆?*/
+            cw_mark_header_type(t->sig->env_type);
         }
         return;
     case CIR_TYPE_STR:
@@ -66,6 +66,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
                  f->type->kind == CIR_TYPE_SLICE ||
                  f->type->kind == CIR_TYPE_OPTION ||
                  f->type->kind == CIR_TYPE_UNION ||
+                 f->type->kind == CIR_TYPE_FUNC ||
                  f->type->kind == CIR_TYPE_CUNION))
                 cw_emit_type(sb, f->type);
         }
@@ -97,8 +98,8 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
         break;
     case CIR_TYPE_STR:
         if (t->emitted) return;
-        /* `struct clux_str` 是跨模块共享的表示：用 include guard 防止多个
-           模块头文件同时定义时的重复定义。 */
+        /* `struct clux_str` 鏄法妯″潡鍏变韩鐨勮〃绀猴細鐢?include guard 闃叉澶氫釜
+           妯″潡澶存枃浠跺悓鏃跺畾涔夋椂鐨勯噸澶嶅畾涔夈€?*/
         cw_put(sb, "#ifndef CLUX_STR_STRUCT_DEFINED\n");
         cw_put(sb, "#define CLUX_STR_STRUCT_DEFINED\n");
         cw_printf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_str");
@@ -124,6 +125,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
                             f->type->kind == CIR_TYPE_SLICE ||
                             f->type->kind == CIR_TYPE_OPTION ||
                             f->type->kind == CIR_TYPE_UNION ||
+                            f->type->kind == CIR_TYPE_FUNC ||
                             f->type->kind == CIR_TYPE_CUNION))
                 cw_emit_type(sb, f->type);
         cw_printf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_union");
@@ -144,6 +146,7 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
                             f->type->kind == CIR_TYPE_SLICE ||
                             f->type->kind == CIR_TYPE_OPTION ||
                             f->type->kind == CIR_TYPE_UNION ||
+                            f->type->kind == CIR_TYPE_FUNC ||
                             f->type->kind == CIR_TYPE_CUNION))
                 cw_emit_type(sb, f->type);
         cw_printf(sb, "%s {\n", t->c_name ? t->c_name : "struct clux_cunion");
@@ -156,6 +159,20 @@ void cw_emit_type(string_t *sb, cir_type_t *t) {
         cw_put(sb, "};\n\n");
         t->emitted = true;
         break;
+    case CIR_TYPE_FUNC:
+        /* 鍑芥暟鍊肩被鍨嬫寜鍊煎嚭鐜板湪鑱氬悎瀛楁閲岋紙`struct Holder { cb: F; }`锛夋椂锛?           绛惧悕 struct 蹇呴』鍏堜簬璇ヨ仛鍚堝畾涔夈€傞€掑綊鍙戝皠鍙傛暟/杩斿洖/env锛屽啀杈撳嚭
+           绛惧悕瀹氫箟锛涘凡鍦ㄥご鏂囦欢/鍓嶉潰鍙戝皠杩囩殑璺宠繃銆?*/
+        if (t->emitted) return;
+        t->emitted = true;
+        if (t->sig && !t->sig->emitted) {
+            cw_emit_type(sb, t->sig->ret);
+            for (size_t i = 0; i < t->sig->param_count; i++)
+                cw_emit_type(sb, t->sig->params[i]);
+            cw_emit_type(sb, t->sig->env_type);
+            t->sig->emitted = true;
+            cw_write_signature_def(sb, t->sig);
+        }
+        break;
     default:
         t->emitted = true;
         break;
@@ -166,8 +183,8 @@ void cw_emit_all_types(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next) cw_emit_type(sb, t);
 }
 
-/* 延迟发射：名字以 prefix 开头的类型（如闭包 env 结构体，字段引用函数签名
-   struct，必须在签名定义之后）。 */
+/* 寤惰繜鍙戝皠锛氬悕瀛椾互 prefix 寮€澶寸殑绫诲瀷锛堝闂寘 env 缁撴瀯浣擄紝瀛楁寮曠敤鍑芥暟绛惧悕
+   struct锛屽繀椤诲湪绛惧悕瀹氫箟涔嬪悗锛夈€?*/
 void cw_emit_all_types_except(string_t *sb, cir_type_t *types,
                               const char *prefix) {
     for (cir_type_t *t = types; t; t = t->next)
@@ -189,8 +206,7 @@ void cw_emit_header_types(string_t *sb, cir_type_t *types) {
         if (t->in_header) cw_emit_type(sb, t);
 }
 
-/* 头文件里的函数签名（函数值类型 `struct <sig>` 的实体）：
- * 先递归参数/返回里的嵌套函数签名，再输出自身（依赖先）。 */
+/* 澶存枃浠堕噷鐨勫嚱鏁扮鍚嶏紙鍑芥暟鍊肩被鍨?`struct <sig>` 鐨勫疄浣擄級锛? * 鍏堥€掑綊鍙傛暟/杩斿洖閲岀殑宓屽鍑芥暟绛惧悕锛屽啀杈撳嚭鑷韩锛堜緷璧栧厛锛夈€?*/
 static void emit_header_sig(string_t *sb, cir_signature_t *s) {
     if (!s || s->emitted) return;
     s->emitted = true;
@@ -207,10 +223,9 @@ void cw_emit_header_signatures(string_t *sb, cir_signature_t *sigs) {
         if (s->in_header) emit_header_sig(sb, s);
 }
 
-/* 每个被构造过的 bitfield 类型生成一个按值返回的构造函数：
+/* 姣忎釜琚瀯閫犺繃鐨?bitfield 绫诲瀷鐢熸垚涓€涓寜鍊艰繑鍥炵殑鏋勯€犲嚱鏁帮細
  *   clux_bf_make_<type>(items, n)
- * 值以 `struct clux_bf_item { off, width, value }` 数组传入，按位写入后返回。
- * 只读路径不需要它（clux_bf_get 是通用的）。 */
+ * 鍊间互 `struct clux_bf_item { off, width, value }` 鏁扮粍浼犲叆锛屾寜浣嶅啓鍏ュ悗杩斿洖銆? * 鍙璺緞涓嶉渶瑕佸畠锛坈lux_bf_get 鏄€氱敤鐨勶級銆?*/
 void cw_emit_bf_helpers(string_t *sb, cir_type_t *types) {
     for (cir_type_t *t = types; t; t = t->next) {
         if (t->kind != CIR_TYPE_STRUCT || !t->is_bitfield || !t->needs_bf_make)

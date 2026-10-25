@@ -516,6 +516,13 @@ void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program);
  *  形态：0 值克隆（dv: ref *T）、1 指针克隆（dv: ref *U）、2 切片克隆。 */
 uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t);
 
+/** 只**查找**已生成的 clone 函数（不生成）。返回 false = 没有。
+ *  `*fid` = 函数 id；`*name` = 生成函数名（`__clone_<n>` 等，后端据此算 C 符号）。
+ *  后端在 lowering 阶段（sema_attach_clone_fns 之后）按类型引用 clone 函数时使用
+ *  ——此时再生成不会进入程序函数链。 */
+bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
+                        uint32_t *fid, strslice_t *name);
+
 bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
                          uint32_t *dispose_fid, uint32_t *clone_fid);
 

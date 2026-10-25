@@ -120,6 +120,37 @@ static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {
     return module_symbol(lc->arena, lc->unit, "v_", name);
 }
 
+/* 函数定义的值类型：有捕获 → 闭包类型（捕获槽位进入类型身份）；
+   无捕获 → 普通签名类型。捕获槽位类型解析顺序与 lower_closure_literal
+   一致（resolved_type → 局部符号 → type_expr）。 */
+const type_t *closure_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn) {
+    const type_t *plain = func_type_of_def(lc, fn);
+    if (!plain || !fn) return plain;
+    size_t nc = 0;
+    for (ast_node_t *c = fn->captures; c; c = c->next) nc++;
+    if (nc == 0) return plain;
+    const type_t **capts = (const type_t **)arena_calloc(
+        lc->arena, nc, sizeof(*capts), ALIGNOF(max_align_t));
+    if (!capts) return plain;
+    size_t k = 0;
+    for (ast_node_t *c = fn->captures; c; c = c->next, k++) {
+        ast_var_def_t *vd = (ast_var_def_t *)c;
+        const type_t *t = vd->resolved_type;
+        if (!t) t = lookup_local(lc, vd->name);
+        if (!t && vd->type_expr)
+            t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
+        if (!t) return plain;   /* 类型未知：退回签名类型（已有诊断） */
+        capts[k] = t;
+    }
+    size_t np = func_type_param_count(plain);
+    const type_t *params[np > 0 ? np : 1];
+    for (size_t i = 0; i < np; i++) params[i] = func_type_param(plain, i);
+    const type_t *cty = type_func_closure(
+        lc->sema->vm, np > 0 ? params : NULL, np,
+        func_type_return(plain), func_type_is_variadic(plain), capts, nc);
+    return cty ? cty : plain;
+}
+
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lower_local_t *save_locals = lc->locals;
     lower_local_fn_t *save_local_fns = lc->local_fns;

@@ -380,11 +380,11 @@ TEST(Driver, RunFileFuncValueNestedNewInsideLiteralBody) {
   /* 更深一层：字面量 body 里再 `new` 一个带函数值字段的聚合，并调用它。
      两层嵌套都要求对应的 fid 被预扫描收集。 */
   std::string path = write_temp_file(
-      "struct Node { cell: i32; cb: func(i32)->i32; }\n"
+      "struct Node { cell: i32; cb: func |depth: i32| (i32)->i32; }\n"
       "func main():void {\n"
       "  var depth = 4;\n"
       "  var outer = new Node{ .cell = depth, .cb = func |depth| (x: i32): i32 {\n"
-      "    var inner = new Node{ .cell = 1, .cb = func(y: i32): i32 { return y + 100; } };\n"
+      "    var inner = new Node{ .cell = 1, .cb = func |(k: i32 = 100)| (y: i32): i32 { return y + k; } };\n"
       "    return inner.cb(x) + depth;\n"
       "  } };\n"
       "  _ = libc::printf(\"%d\\n\", outer.cb(1));\n"
@@ -412,7 +412,7 @@ TEST(Driver, RunFileFuncValueInNewAggregateFieldWithForeach) {
      `exec: unknown function id`）；(b) 前脱糖在闭包体内把 foreach 展开成
      索引 for（闭包体内的块变量还依赖 sema 的"自身子树"判定）。 */
   std::string path = write_temp_file(
-      "struct Holder { cb: func()->i32; }\n"
+      "struct Holder { cb: func |a: [3]i32| ()->i32; }\n"
       "func main():void {\n"
       "  var a = .[3]i32{ 3, 4, 5 };\n"
       "  var h = new Holder{ .cb = func |a| (): i32 {\n"
@@ -435,7 +435,7 @@ TEST(Driver, RunFileLoopClosuresIndependentInstances) {
      若共享同一函数对象则全部捕获最后一次迭代值 → "2 2 2"。 */
   std::string path = write_temp_file(
       "func main():void {\n"
-      "  var fns = .[3](func()->i32){ func():i32 { return -1; }, func():i32 { return -1; }, func():i32 { return -1; } };\n"
+      "  var fns = .[3](func |val: i32| ()->i32){ func |(v: i32 = -1)| ():i32 { return v; }, func |(v: i32 = -1)| ():i32 { return v; }, func |(v: i32 = -1)| ():i32 { return v; } };\n"
       "  var items = .[3]i32 {0,1,2};\n"
       "  for(var i = 0;i<3;i+=1) {\n"
       "    fns[i] = func|(val = items[i])|():i32 { return val; };\n"

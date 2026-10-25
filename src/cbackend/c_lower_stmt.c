@@ -454,7 +454,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         }
         const char *cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
         const char *obj = module_symbol(lc->arena, lc->unit, "obj_", fn->name);
-        const type_t *ftype = func_type_of_def(lc, fn);
+        const type_t *ftype = closure_type_of_def(lc, fn);
         if (!cname || !obj || !ftype) {
             lc->failed = true;
             *ok = false;
@@ -501,6 +501,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!t && vd->type_expr) t = sema_resolve_type_slot(lc->sema, &vd->type_expr);
         if (!t || type_kind_of(t) == TYPE_KIND_VOID)
             t = infer_expr_type(lc, vd->init);
+        t = decl_value_type(lc, t, vd->init);
         if (t) register_local(lc, vd->name, t);
         cir_type_t *ct = map_type(lc, t);
         if (!ct) {
@@ -1194,7 +1195,7 @@ cir_stmt_t *lower_block(lower_ctx_t *lc, ast_node_t *block, bool *ok) {    if (!
         }
         const char *cname = module_symbol(lc->arena, lc->unit, "fn_", fn->name);
         const char *obj = module_symbol(lc->arena, lc->unit, "obj_", fn->name);
-        const type_t *ftype = func_type_of_def(lc, fn);
+        const type_t *ftype = closure_type_of_def(lc, fn);
         if (!cname || !obj || !ftype) continue;
         lower_local_fn_t *lf = (lower_local_fn_t *)arena_calloc(
             lc->arena, 1, sizeof(*lf), ALIGNOF(max_align_t));

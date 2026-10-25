@@ -209,6 +209,10 @@ const char *module_symbol(arena_t *arena, const cir_unit_t *unit,
 void module_tag_for_path(const char *src, char *out, size_t cap);
 const char *token_text(arena_t *arena, const token_t *tok);
 const type_t *strip(sema_t *sema, const type_t *t);
+/** 变量落 C 的实际值类型：声明类型为普通 func 而初始化器是带捕获闭包时，
+ *  改用闭包类型（否则内联 env 被截断）。 */
+const type_t *decl_value_type(lower_ctx_t *lc, const type_t *decl,
+                              ast_node_t *init);
 
 /* types / signatures */
 cir_type_t *map_type(lower_ctx_t *lc, const type_t *t);
@@ -228,6 +232,8 @@ cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
 cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
+/** 函数定义的值类型：有捕获 → 闭包类型，无捕获 → 普通签名类型。 */
+const type_t *closure_type_of_def(lower_ctx_t *lc, ast_func_def_t *fn);
 cir_expr_t *lower_func_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 /** 按名查找块内局部函数（调用点/函数值引用用）。 */
 const type_t *lower_scope_ref_owner_type(lower_ctx_t *lc,

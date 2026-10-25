@@ -312,11 +312,17 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, " }");
         break;
     case CIR_EXPR_FUNC_CLONE:
-        /* 闭包值内联 env 后按类型静态 clone；暂以浅拷贝占位（own 捕获的
-           深拷贝在 env_clone 生成后接入）。 */
-        cw_put(sb, "(");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ")");
+        /* 含 own 捕获：静态 clone 辅助函数（env 逐字段深拷贝）；否则浅拷贝。 */
+        if (e->text) {
+            cw_put(sb, e->text);
+            cw_put(sb, "(");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ")");
+        } else {
+            cw_put(sb, "(");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, ")");
+        }
         break;
     case CIR_EXPR_CLOSURE_RELEASE:
         cw_put(sb, "clux_func_release(");

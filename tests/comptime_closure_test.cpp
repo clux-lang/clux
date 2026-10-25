@@ -65,7 +65,7 @@ TEST(ComptimeClosure, ReturnsInnerFunction) {
 /* 返回**捕获常量**的闭包：捕获值物化为常量，运行期构造真实闭包。 */
 TEST(ComptimeClosure, ReturnsClosureCapturingConstant) {
   clux_expect_ok(with_prelude(
-                     "comptime func make_add(n: i32): func(i32) -> i32 {\n"
+                     "comptime func make_add(n: i32): func |n: i32| (i32) -> i32 {\n"
                      "  return func |n| addn(x: i32): i32 { return x + n; };\n"
                      "}\n"
                      "var add10 = make_add(10);\n"
@@ -77,7 +77,8 @@ TEST(ComptimeClosure, ReturnsClosureCapturingConstant) {
 TEST(ComptimeClosure, ReturnsClosureCapturingFunctionValue) {
   clux_expect_ok(
       with_prelude(
-          "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+          "comptime func add100(f: func(i32) -> i32):\n"
+          "    func |f: func(i32) -> i32| (i32) -> i32 {\n"
           "  return func |f| wrap(x: i32): i32 { return f(x) + 100; };\n"
           "}\n"
           "var b = add100(double);\n"
@@ -95,7 +96,7 @@ TEST(ComptimeClosure, ReturnsClosureWithMultipleCaptures) {
   clux_expect_ok(
       with_prelude(
           "comptime func sp(f: func(i32) -> i32, k: i32, c: i32): "
-          "func(i32) -> i32 {\n"
+          "func |f: func(i32) -> i32, k: i32, c: i32| (i32) -> i32 {\n"
           "  return func |f, k, c| w(x: i32): i32 { return f(x) * k + c; };\n"
           "}\n"
           "var s = sp(triple, 10, 1);\n"
@@ -106,7 +107,8 @@ TEST(ComptimeClosure, ReturnsClosureWithMultipleCaptures) {
 /* 闭包常量随容器落盘：emit → run .cxb，以及 .cxb → .cxs → .cxb 往返。 */
 TEST(ComptimeClosure, SurvivesCxbRoundTrip) {
   const std::string src = with_prelude(
-      "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func add100(f: func(i32) -> i32):\n"
+      "    func |f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |f| wrap(x: i32): i32 { return f(x) + 100; };\n"
       "}\n"
       "var b = add100(double);\n"
@@ -151,13 +153,14 @@ TEST(ComptimeClosure, RejectsCapturingRuntimeVariable) {
 TEST(ComptimeClosure, DecoratedFunctionRemainsFirstClass) {
   clux_expect_ok(
       with_prelude(
-          "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+          "comptime func add100(f: func(i32) -> i32):\n"
+          "    func |f: func(i32) -> i32| (i32) -> i32 {\n"
           "  return func |f| wrap(x: i32): i32 { return f(x) + 100; };\n"
           "}\n"
-          "var b = add100(double);\n"
-          "func apply(f: func(i32) -> i32, x: i32): i32 { return f(x); }\n"
+          "var b: func |f: func(i32) -> i32| (i32) -> i32 = add100(double);\n"
+          "func apply[F](f: F, x: i32): i32 { return f(x); }\n"
           "func main(): i32 {\n"
-          "  if (apply(b, 5) != 110) { return 1; }\n"
+          "  if (apply[func |f: func(i32) -> i32| (i32) -> i32](b, 5) != 110) { return 1; }\n"
           "  var g = b;\n"
           "  if (g(1) != 102) { return 2; }\n"
           "  return 0;\n"

@@ -48,7 +48,11 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     case AST_FUNC_REF:
         return func_type_of_def(lc, func_def_of_ref(lc, (ast_func_ref_t *)e));
     case AST_FUNC_DEF:
-        return func_type_of_def(lc, (ast_func_def_t *)e);
+        /* 函数字面量/局部函数的值类型：有捕获 → 闭包类型（与
+           lower_closure_literal 构造的 C 签名 struct 一致）。用
+           func_type_of_def 会得到普通签名类型，把闭包字面量赋给推断变量时
+           两个 sig struct 不兼容。 */
+        return closure_type_of_def(lc, (ast_func_def_t *)e);
     case AST_MOVE:
         return infer_expr_type(lc, ((ast_move_t *)e)->operand);
     case AST_TAKE:

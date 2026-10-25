@@ -369,6 +369,7 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
             t = sema_resolve_type_slot(sema, &vd->type_expr);
         if (!t || type_kind_of(t) == TYPE_KIND_VOID)
             t = infer_expr_type(&lc, vd->init);
+        t = decl_value_type(&lc, t, vd->init);
         if (t) register_global(&lc, vd->name, t);
         cir_type_t *ct = map_type(&lc, t);
         if (!ct) {

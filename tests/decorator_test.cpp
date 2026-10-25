@@ -35,7 +35,7 @@ namespace {
 const char *kDecorators =
     "comptime func twice(n: i32): i32 { return n * 2; }\n"
     "comptime func plus1(n: i32): i32 { return n + 1; }\n"
-    "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+    "comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i32 {\n"
     "  return func |f| w(x: i32): i32 { return f(x) + 100; };\n"
     "}\n"
     "func double(x: i32): i32 { return x * 2; }\n";
@@ -212,7 +212,7 @@ TEST(Decorator, MethodDecoratorMayReturnRefClosure) {
       "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
       "  func plain(self: ref *Point): i32 { return self.x + 1; }\n"
       "}\n"
-      "comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {\n"
+      "comptime func add100m(f: func(ref *Point) -> i32): func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {\n"
       "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
       "}\n"
       "func main(): i32 {\n"
@@ -229,7 +229,7 @@ TEST(Decorator, MethodDecoratorMayReturnRefClosure) {
 TEST(Decorator, MixedDecoratorsInOneProgram) {
   clux_expect_ok(
       "comptime func twice(n: i32): i32 { return n * 2; }\n"
-      "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |f| w(x: i32): i32 { return f(x) + 100; };\n"
       "}\n"
       "func double(x: i32): i32 { return x * 2; }\n"
@@ -239,7 +239,7 @@ TEST(Decorator, MixedDecoratorsInOneProgram) {
       "  x: i32;\n"
       "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
       "}\n"
-      "comptime func add100m(f: func(ref *Point) -> i32): func(ref *Point) -> i32 {\n"
+      "comptime func add100m(f: func(ref *Point) -> i32): func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {\n"
       "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
       "}\n"
       "func main(): i32 {\n"
@@ -257,7 +257,7 @@ TEST(Decorator, MixedDecoratorsInOneProgram) {
    comptime 函数再在编译期调用一次"。 */
 TEST(Decorator, ParameterizedFunctionDecorator) {
   clux_expect_ok(
-      "comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func add(n: i32, f: func(i32) -> i32): func |n: i32, f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |n, f| w(x: i32): i32 { return f(x) + n; };\n"
       "}\n"
       "func double(x: i32): i32 { return x * 2; }\n"
@@ -269,10 +269,10 @@ TEST(Decorator, ParameterizedFunctionDecorator) {
 /* 带参数装饰器的链：`[[scale(10)]] [[add(5)]] f` ⇒ scale(10, add(5, f)) */
 TEST(Decorator, ParameterizedDecoratorChain) {
   clux_expect_ok(
-      "comptime func add(n: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func add(n: i32, f: func(i32) -> i32): func |n: i32, f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |n, f| w(x: i32): i32 { return f(x) + n; };\n"
       "}\n"
-      "comptime func scale(k: i32, f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func scale(k: i32, f: func(i32) -> i32): func |k: i32, f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |k, f| s(x: i32): i32 { return f(x) * k; };\n"
       "}\n"
       "func double(x: i32): i32 { return x * 2; }\n"
@@ -294,7 +294,7 @@ TEST(Decorator, ParameterizedValueDecorator) {
 TEST(Decorator, ParameterizedMethodDecorator) {
   clux_expect_ok(
       "struct P { x: i32; [[addm(100)]] func get(self: ref *P): i32 { return self.x; } }\n"
-      "comptime func addm(n: i32, f: func(ref *P) -> i32): func(ref *P) -> i32 {\n"
+      "comptime func addm(n: i32, f: func(ref *P) -> i32): func |n: i32, f: func(ref *P) -> i32| (ref *P) -> i32 {\n"
       "  return func |n, f| w(self: ref *P): i32 { return f(self) + n; };\n"
       "}\n"
       "func main(): i32 {\n"
@@ -480,7 +480,7 @@ TEST(CfuncToFunc, MethodArgumentPosition) {
 /* 泛型函数装饰器：每个实例生成独立包装，装饰器按具体类型调用。 */
 TEST(Decorator, GenericFunctionPerInstance) {
   clux_expect_ok(
-      "comptime func add100(f: func(i32) -> i32): func(i32) -> i32 {\n"
+      "comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i32 {\n"
       "  return func |f| w(x: i32): i32 { return f(x) + 100; };\n"
       "}\n"
       "[[add100]] func g[T](x: T): T { return x; }\n"
@@ -507,7 +507,7 @@ TEST(Decorator, GenericStructMethodPerInstance) {
 /* 泛型 comptime 装饰器：装饰器自身也按 T 单态化，不限制被装饰函数。 */
 TEST(Decorator, GenericComptimeDecoratorPerInstance) {
   clux_expect_ok(
-      "comptime func wrap[T](f: func(T) -> T): func(T) -> T {\n"
+      "comptime func wrap[T](f: func(T) -> T): func |f: func(T) -> T| (T) -> T {\n"
       "  return func |f| w(x: T): T { return f(x); };\n"
       "}\n"
       "[[wrap]] func f[T](x: T): T { return x; }\n"
