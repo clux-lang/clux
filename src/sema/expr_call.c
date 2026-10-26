@@ -177,6 +177,121 @@ static bool ffi_vararg_acceptable(sema_t *sema, const type_t *at_raw) {
   }
 }
 
+/* 统一的 C ABI 调用处理：直接 `lib::fn` 与 port 导入的 `port::fn` 共用。
+ * `fs` 是 extern cfunc 的限定名符号（签名带真实所有权），`qual` 只用于诊断。
+ * 填充 ast_call_t 的 FFI 字段（返回码 + 实际 C 符号 + 解析后的签名），
+ * 逐个校验实参（类型 + own/fatal 契约），返回返回类型的 shadow。 */
+static value_t *ex_ffi_call(sema_t *sema, ast_call_t *call, sema_symbol_t *fs,
+                            const char *qual, sema_scope_t *scope) {
+  if (!sema || !call || !fs || !fs->type) {
+    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)call),
+               "extern call %s: missing extern cfunc signature",
+               qual ? qual : "<unknown>");
+    return val_void(sema);
+  }
+  const type_t *rt = func_type_return(fs->type);
+  ast_func_def_t *fs_def =
+      (fs->ast && fs->ast->kind == AST_FUNC_DEF)
+          ? (ast_func_def_t *)fs->ast
+          : NULL;
+  /* 所有权修饰（`fatal opaque` / `fatal *T`）不是 C 表示的一部分：
+     返回码按**裸类型**映射，值仍带修饰类型（所有权交回调用方）。 */
+  const type_t *rt_core = type_strip_ownership(rt);
+  uint32_t rk = CLUX_FFI_RET_VOID;
+  if (!rt || rt_core == sema->vm->type_void) rk = CLUX_FFI_RET_VOID;
+  else if (rt_core == sema->vm->type_i8) rk = CLUX_FFI_RET_I8;
+  else if (rt_core == sema->vm->type_i16) rk = CLUX_FFI_RET_I16;
+  else if (rt_core == sema->vm->type_i32) rk = CLUX_FFI_RET_I32;
+  else if (rt_core == sema->vm->type_i64) rk = CLUX_FFI_RET_I64;
+  else if (rt_core == sema->vm->type_u8) rk = CLUX_FFI_RET_U8;
+  else if (rt_core == sema->vm->type_u16) rk = CLUX_FFI_RET_U16;
+  else if (rt_core == sema->vm->type_u32) rk = CLUX_FFI_RET_U32;
+  else if (rt_core == sema->vm->type_u64) rk = CLUX_FFI_RET_U64;
+  else if (rt_core == vm_type_usize(sema->vm)) rk = CLUX_FFI_RET_USIZE;
+  else if (rt_core == sema->vm->type_bool) rk = CLUX_FFI_RET_BOOL;
+  else if (rt_core == sema->vm->type_f32) rk = CLUX_FFI_RET_F32;
+  else if (rt_core == sema->vm->type_f64) rk = CLUX_FFI_RET_F64;
+  else if (rt_core == sema->vm->type_opaque) rk = CLUX_FFI_RET_PTR;
+  else if (rt_core == sema->vm->type_str) rk = CLUX_FFI_RET_STR;
+  else if (rt && (type_kind_of(rt) == TYPE_KIND_STRUCT ||
+                  type_kind_of(rt) == TYPE_KIND_CUNION ||
+                  type_kind_of(rt) == TYPE_KIND_ENUM ||
+                  type_kind_of(rt) == TYPE_KIND_CFUNC ||
+                  type_is_ptr(rt_core))) {
+    rk = CLUX_FFI_RET_TYPED;
+    call->ffi_ret_type_expr = fs_def ? fs_def->return_expr : NULL;
+  } else {
+    diag_error(sema->diag, sema_loc(sema, &call->base),
+               "extern call %s: return type is not marshalable", qual);
+    return val_void(sema);
+  }
+  const func_sig_t *sig =
+      &((const func_type_t *)type_strip_ownership(fs->type))->sig;
+  call->is_ffi_call = true;
+  call->ffi_ret_kind =
+      CLUX_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
+  /* codegen 只需这两个字段：实际 C 符号名 + 已解析签名。直接 lib::fn 与
+     port 导入的 port::fn 因此走完全相同的 lowering。 */
+  call->ffi_sig = fs->type;
+  call->ffi_c_name = fs_def ? fs_def->name : (strslice_t){0};
+  call->ffi_callconv = fs_def ? fs_def->callconv : 0;
+
+  size_t nargs = 0;
+  for (ast_node_t *a = call->args; a; a = a->next) nargs++;
+  if (!sig->is_variadic && nargs > sig->param_count)
+    diag_error(sema->diag, sema_loc(sema, &call->base),
+               "extern call %s: expected %zu argument(s), got %zu", qual,
+               sig->param_count, nargs);
+
+  size_t ai = 0;
+  for (ast_node_t **slot = &call->args; *slot; slot = &(*slot)->next, ai++) {
+    value_t *av = sema_expr(sema, slot, scope);
+    if (!av || value_is_error(sema->vm, av) ||
+        value_is_type(av, TYPE_KIND_VOID))
+      continue;
+    ast_node_t *a = *slot;
+    const type_t *at = value_type(av);
+    const type_t *pt =
+        (ai < sig->param_count && sig->params) ? sig->params[ai] : NULL;
+    if (!pt) {
+      if (!ffi_vararg_acceptable(sema, at))
+        diag_error(sema->diag, sema_loc(sema, a),
+                   "extern call %s: variadic argument %zu: this type cannot "
+                   "cross the C ABI", qual, ai + 1);
+      continue;
+    }
+    /* own 形参必须接收将亡值（move/clone 的结果）；fatal 实参必须被 own
+       形参接住。规则与普通调用的 func_shadow_call 一致。 */
+    ownership_t pown = type_ownership_of(pt);
+    ownership_t aown = value_type_ownership(av);
+    if (pown == OWN_OWN && aown != OWN_FATAL) {
+      char pn[64];
+      sema_type_name(pt, pn, sizeof pn);
+      diag_error(sema->diag, sema_loc(sema, a),
+                 "extern call %s: argument %zu: cannot copy a value holding "
+                 "owned resources into parameter of type %s (use move() or "
+                 "clone(), or declare the parameter as 'ref *T' to borrow)",
+                 qual, ai + 1, pn);
+      continue;
+    }
+    if (aown == OWN_FATAL && pown != OWN_OWN) {
+      char pn[64];
+      sema_type_name(pt, pn, sizeof pn);
+      diag_error(sema->diag, sema_loc(sema, a),
+                 "extern call %s: argument %zu: a dying value (FATAL) must be "
+                 "caught by an 'own' position; parameter of type %s does not "
+                 "take ownership (bind it to an own variable, or pass it to an "
+                 "own parameter)", qual, ai + 1, pn);
+      continue;
+    }
+    if (!ffi_arg_acceptable(sema, pt, at))
+      diag_error(sema->diag, sema_loc(sema, a),
+                 "extern call %s: argument %zu: cannot pass this value as the "
+                 "declared parameter type", qual, ai + 1);
+  }
+  return value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
+}
+
 /* 从 `mod::Type` 形式的 AST_SCOPE_REF 解析被导入模块导出的 struct 类型。
  * type_expr 是 AST_IDENT（模块别名），variant 是类型名。
  * 直接从 module->exports 查 type value，取其指向的 type_t*。
@@ -1284,6 +1399,29 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         if (er->type_expr && er->type_expr->kind == AST_IDENT) {
           ast_ident_t *lib_id = (ast_ident_t *)er->type_expr;
           sema_symbol_t *lsym = sema_lookup(scope, lib_id->name);
+          /* port 导入：`port::fn` 的导出符号是 extern cfunc（其 ast 是
+             port 里的 extern 声明）。直接复用 ex_ffi_call，无需重新声明。 */
+          if (lsym && lsym->kind == SEMA_SYM_MODULE && lsym->module) {
+            sema_symbol_t *msym =
+                sema_module_export_symbol(lsym->module, er->variant);
+            if (msym && msym->kind == SEMA_SYM_FUNC && msym->ast &&
+                msym->ast->kind == AST_FUNC_DEF &&
+                ((ast_func_def_t *)msym->ast)->is_extern_cfunc) {
+              char qual[512];
+              int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
+                                (int)lib_id->name.len, lib_id->name.ptr,
+                                (int)er->variant.len, er->variant.ptr);
+              if (qn > 0 && (size_t)qn < sizeof(qual))
+                return ex_ffi_call(sema, call, msym, qual, scope);
+            }
+            if (msym && msym->kind == SEMA_SYM_EXTERN_VAR) {
+              diag_error(sema->diag, sema_loc(sema, &call->base),
+                         "'%.*s' is an extern var (data symbol); read it "
+                         "without call syntax",
+                         (int)er->variant.len, er->variant.ptr);
+              return val_void(sema);
+            }
+          }
           if (lsym && lsym->kind == SEMA_SYM_EXTERN_LIB) {
             char qual[512];
             int qn = snprintf(qual, sizeof(qual), "%.*s::%.*s",
@@ -1354,6 +1492,15 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                栈并对变参部分施加默认实参提升。 */
             call->ffi_ret_kind =
                 CLUX_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
+            call->ffi_sig = fs->type;
+            call->ffi_c_name =
+                (fs->ast && fs->ast->kind == AST_FUNC_DEF)
+                    ? ((ast_func_def_t *)fs->ast)->name
+                    : (strslice_t){0};
+            call->ffi_callconv =
+                (fs->ast && fs->ast->kind == AST_FUNC_DEF)
+                    ? ((ast_func_def_t *)fs->ast)->callconv
+                    : 0;
 
             /* 实参校验（此前**完全没做**）：数量 + 每个实参能否共用形参的 C 类型
                描述符（判据见 ffi_arg_acceptable）。变参的额外实参按 C 的默认实参

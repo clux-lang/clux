@@ -3,6 +3,7 @@
 #include "cmd/build.h"
 #include "cmd/run.h"
 #include "cmd/test.h"
+#include "cmd/install.h"
 #include "cmd/version.h"
 #include "icu_data.h"
 #include <locale.h>
@@ -133,6 +134,23 @@ static const cmd_t g_cmds[] = {
             "Test blocks are ignored by `build` / `run`. Results are printed in\n"
             "a gtest-like format; exits nonzero if any test fails.",
         .handler = cmd_test,
+    },
+    {
+        .name = "install",
+        .usage = "clux install [--allow-scripts] [--force]",
+        .help =
+            "Run postinstall hooks declared by clux.mod.\n"
+            "\n"
+            "  clux install                  list hooks and refuse to run them\n"
+            "  clux install --allow-scripts  execute hooks (deps first, then root)\n"
+            "  clux install --force          run even if the hook already succeeded\n"
+            "\n"
+            "Hooks are arbitrary package scripts and are never run by\n"
+            "`clux build`. They execute with cwd = package root and receive\n"
+            "CLUX_PKG_ROOT, CLUX_OS and CLUX_ARCH. A successful hook writes\n"
+            ".clux/postinstall.ok so it is not repeated until the command\n"
+            "changes; --force overrides that.",
+        .handler = cmd_install,
     },
     {
         .name = "version",

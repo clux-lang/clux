@@ -26,6 +26,13 @@ typedef struct {
      * docs/m6-design.md §14.7 步骤 ③/§14.19），不再走 CALLEE + CALL。 */
     bool        is_ffi_call;
     uint32_t    ffi_ret_kind;
+    /* 实际 C 符号名与解析后的签名（sema 填）。直接 `lib::fn` 与 port
+       导入的 `port::fn` 都走这条：codegen 不再需要按 callee 的 AST 形态
+       重新查 extern 表。
+       ffi_sig 是 `const type_t*`（parser 层用 void* 避免依赖 vm/type.h）。 */
+    strslice_t  ffi_c_name;
+    const void *ffi_sig;
+    uint8_t     ffi_callconv; /* clux_callconv_t（extern 声明的 [[stdcall]]） */
     /* 返回类型是**程序自定义类型**（struct/cunion/enum…）时，sema 在这里挂上
      * 声明的返回类型**表达式**；compiler 发 EXTERN_CALL 之前先
      * `compile_type_expr(ffi_ret_type_expr)` 压一个**类型值**（与 CONSTRUCT 同一

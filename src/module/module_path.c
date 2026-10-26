@@ -267,6 +267,10 @@ static char *find_pkg_root(allocator_t *alloc, const char *importer) {
     return NULL;
 }
 
+char *module_find_package_root(allocator_t *alloc, const char *importer) {
+    return find_pkg_root(alloc, importer);
+}
+
 char *module_resolve_import(allocator_t *alloc, strslice_t raw,
                             const char *importer_path,
                             module_import_kind_t *out_kind) {

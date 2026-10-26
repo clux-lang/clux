@@ -73,7 +73,194 @@ static void parse_dep_spec(strslice_t spec, pkg_dep_t *dep) {
     }
 }
 
+/* 解析 JSON 字符串数组；缺失 = 成功且 count=0，类型错误 = false。 */
+static bool parse_str_array(arena_t *arena, const json_value_t *v,
+                            const char ***out, size_t *out_count) {
+    *out = NULL;
+    *out_count = 0;
+    if (!v) return true;
+    if (v->kind != JSON_ARRAY) return false;
+    size_t n = v->u.arr.count;
+    if (n == 0) return true;
+    const char **arr = (const char **)arena_calloc(
+        arena, n, sizeof(const char *), ALIGNOF(max_align_t));
+    if (!arr) return false;
+    for (size_t i = 0; i < n; i++) {
+        const json_value_t *it = json_array_get(v, i);
+        if (!it || it->kind != JSON_STRING) return false;
+        arr[i] = it->u.str;
+    }
+    *out = arr;
+    *out_count = n;
+    return true;
+}
+
+static bool fill_native_spec(arena_t *arena, const json_value_t *obj,
+                             pkg_native_spec_t *out) {
+    if (!obj) return true;
+    if (obj->kind != JSON_OBJECT) return false;
+    return parse_str_array(arena, json_object_get(obj, "link"), &out->link,
+                           &out->link_count) &&
+           parse_str_array(arena, json_object_get(obj, "libdirs"),
+                           &out->libdirs, &out->libdir_count) &&
+           parse_str_array(arena, json_object_get(obj, "runtime"),
+                           &out->runtime, &out->runtime_count);
+}
+
+static bool fill_native(arena_t *arena, const json_value_t *jnat,
+                        pkg_native_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!jnat) return true; /* 没有 native 段 */
+    if (jnat->kind != JSON_OBJECT) return false;
+    out->present = true;
+    if (!fill_native_spec(arena, jnat, &out->base)) return false;
+
+    const json_value_t *jplats = json_object_get(jnat, "platforms");
+    if (!jplats) return true;
+    if (jplats->kind != JSON_OBJECT) return false;
+    size_t n = jplats->u.obj.count;
+    if (n == 0) return true;
+    pkg_native_platform_t *plats = (pkg_native_platform_t *)arena_calloc(
+        arena, n, sizeof(pkg_native_platform_t), ALIGNOF(max_align_t));
+    if (!plats) return false;
+    for (size_t i = 0; i < n; i++) {
+        strslice_t key = jplats->u.obj.members[i].key;
+        char *k = (char *)arena_alloc(arena, key.len + 1, ALIGNOF(char));
+        if (!k) return false;
+        memcpy(k, key.ptr, key.len);
+        k[key.len] = '\0';
+        plats[i].platform = k;
+        const json_value_t *pv = jplats->u.obj.members[i].val;
+        if (!pv || !fill_native_spec(arena, pv, &plats[i].spec)) return false;
+    }
+    out->platforms = plats;
+    out->platform_count = n;
+    return true;
+}
+
+const pkg_native_spec_t *pkg_native_effective(const pkg_native_t *native,
+                                              const char *os_type,
+                                              const char *os_arch,
+                                              pkg_native_spec_t *out) {
+    if (!native || !native->present || !out) return NULL;
+    *out = native->base;
+    const pkg_native_platform_t *best = NULL;
+    int best_score = -1;
+    char combo[128];
+    combo[0] = '\0';
+    if (os_type && os_arch)
+        snprintf(combo, sizeof combo, "%s-%s", os_type, os_arch);
+    for (size_t i = 0; i < native->platform_count; i++) {
+        const pkg_native_platform_t *p = &native->platforms[i];
+        if (!p->platform) continue;
+        int score = -1;
+        if (strcmp(p->platform, "*") == 0) score = 0;
+        else if (combo[0] && strcmp(p->platform, combo) == 0) score = 3;
+        else if (os_type && strcmp(p->platform, os_type) == 0) score = 2;
+        else if (os_arch && strcmp(p->platform, os_arch) == 0) score = 1;
+        if (score > best_score) {
+            best_score = score;
+            best = p;
+        }
+    }
+    if (best) {
+        const pkg_native_spec_t *s = &best->spec;
+        if (s->link_count) {
+            out->link = s->link;
+            out->link_count = s->link_count;
+        }
+        if (s->libdir_count) {
+            out->libdirs = s->libdirs;
+            out->libdir_count = s->libdir_count;
+        }
+        if (s->runtime_count) {
+            out->runtime = s->runtime;
+            out->runtime_count = s->runtime_count;
+        }
+    }
+    return out;
+}
+
+const char *pkg_postinstall_effective(const pkg_postinstall_t *postinstall,
+                                      const char *os_type,
+                                      const char *os_arch) {
+    if (!postinstall || !postinstall->present) return NULL;
+    const pkg_postinstall_platform_t *best = NULL;
+    int best_score = -1;
+    char combo[128];
+    combo[0] = '\0';
+    if (os_type && os_arch)
+        snprintf(combo, sizeof combo, "%s-%s", os_type, os_arch);
+    for (size_t i = 0; i < postinstall->platform_count; i++) {
+        const pkg_postinstall_platform_t *p = &postinstall->platforms[i];
+        if (!p->platform) continue;
+        int score = -1;
+        if (strcmp(p->platform, "*") == 0) score = 0;
+        else if (combo[0] && strcmp(p->platform, combo) == 0) score = 3;
+        else if (os_type && strcmp(p->platform, os_type) == 0) score = 2;
+        else if (os_arch && strcmp(p->platform, os_arch) == 0) score = 1;
+        if (score > best_score) {
+            best_score = score;
+            best = p;
+        }
+    }
+    if (best && best->command) return best->command;
+    return postinstall->command;
+}
+
 /* 从 JSON value 填充 package_desc_t */
+static bool fill_postinstall(arena_t *arena, const json_value_t *jp,
+                             pkg_postinstall_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!jp) return true;
+    if (jp->kind == JSON_STRING) {
+        out->present = true;
+        out->command = jp->u.str;
+        return true;
+    }
+    if (jp->kind != JSON_OBJECT) return false;
+
+    /* 兼容 `{ "script": "...", "WIN64": "...", ... }` 形式。 */
+    const json_value_t *js = json_object_get(jp, "script");
+    if (js) {
+        if (js->kind != JSON_STRING) return false;
+        out->command = js->u.str;
+    }
+    size_t n = jp->u.obj.count;
+    size_t nplat = 0;
+    for (size_t i = 0; i < n; i++) {
+        strslice_t key = jp->u.obj.members[i].key;
+        if (key.len == 6 && memcmp(key.ptr, "script", 6) == 0) continue;
+        nplat++;
+    }
+    if (nplat == 0) {
+        out->present = out->command != NULL;
+        return true;
+    }
+    pkg_postinstall_platform_t *plats =
+        (pkg_postinstall_platform_t *)arena_calloc(
+            arena, nplat, sizeof(*plats), ALIGNOF(max_align_t));
+    if (!plats) return false;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        strslice_t key = jp->u.obj.members[i].key;
+        if (key.len == 6 && memcmp(key.ptr, "script", 6) == 0) continue;
+        char *pk = (char *)arena_alloc(arena, key.len + 1, ALIGNOF(char));
+        if (!pk) return false;
+        memcpy(pk, key.ptr, key.len);
+        pk[key.len] = '\0';
+        const json_value_t *pv = jp->u.obj.members[i].val;
+        if (!pv || pv->kind != JSON_STRING) return false;
+        plats[k].platform = pk;
+        plats[k].command = pv->u.str;
+        k++;
+    }
+    out->present = true;
+    out->platforms = plats;
+    out->platform_count = nplat;
+    return true;
+}
+
 static pkg_result_t fill_from_json(allocator_t *alloc, arena_t *arena,
                                    const json_value_t *root,
                                    const char *dir,
@@ -161,6 +348,15 @@ static pkg_result_t fill_from_json(allocator_t *alloc, arena_t *arena,
         out->dep_count = 0;
     }
 
+    /* native（可选） */
+    if (!fill_native(arena, json_object_get(root, "native"), &out->native))
+        return PKG_ERR_SCHEMA;
+
+    /* postinstall（可选） */
+    if (!fill_postinstall(arena, json_object_get(root, "postinstall"),
+                          &out->postinstall))
+        return PKG_ERR_SCHEMA;
+
     /* 包根目录 */
     strncpy(out->root_dir, dir, sizeof(out->root_dir) - 1);
     out->root_dir[sizeof(out->root_dir) - 1] = '\0';
@@ -245,7 +441,12 @@ pkg_result_t package_find(allocator_t *alloc, arena_t *arena,
             dir[dlen] = '\0';
             *out_dir = dir;
 
-            return package_load(alloc, arena, dir, out_desc);
+            pkg_result_t pr = package_load(alloc, arena, dir, out_desc);
+            if (pr != PKG_OK) {
+                *out_dir = NULL;
+                allocator_free(alloc, (void **)&dir);
+            }
+            return pr;
         }
 
         /* 向上一级：找最后一个路径分隔符 */

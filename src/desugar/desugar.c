@@ -744,6 +744,43 @@ static ast_node_t *ds_take_noreturn(ast_node_t *decs, bool *flag) {
   return head;
 }
 
+/* `[[stdcall]]` / `[[winapi]]` / `[[cdecl]]`：C ABI 调用约定标记。
+ * 只有 cfunc / extern cfunc 合法；普通 func 由调用方报错。
+ * 与 noreturn 一样是内建标记，不参与普通装饰器（wrapper）展开。 */
+static ast_node_t *ds_take_callconv(desugar_t *ds, ast_node_t *decs,
+                                    uint8_t *cc, bool *seen,
+                                    ast_node_t *at) {
+  ast_node_t *head = NULL, *tail = NULL;
+  bool stdcall = false, cdecl = false;
+  for (ast_node_t *d = decs, *nx; d; d = nx) {
+    nx = d->next;
+    if (d->kind == AST_IDENT) {
+      strslice_t n = ((ast_ident_t *)d)->name;
+      if (strslice_eq(n, STRSLICE_LIT("stdcall")) ||
+          strslice_eq(n, STRSLICE_LIT("winapi"))) {
+        stdcall = true;
+        continue;
+      }
+      if (strslice_eq(n, STRSLICE_LIT("cdecl"))) {
+        cdecl = true;
+        continue;
+      }
+    }
+    d->next = NULL;
+    if (tail) tail->next = d;
+    else head = d;
+    tail = d;
+  }
+  if (stdcall && cdecl)
+    ds_error(ds, at,
+             "conflicting calling-convention decorators: [[stdcall]] vs "
+             "[[cdecl]]");
+  if (stdcall) *cc = CLUX_CC_STDCALL;
+  else if (cdecl) *cc = CLUX_CC_CDECL;
+  *seen = stdcall || cdecl;
+  return head;
+}
+
 /** 顶层函数装饰：源函数改名 + `var <名> = 装饰(<源>);` 紧随其后。 */
 static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
   ast_node_t *decs = fn->decorators;
@@ -785,6 +822,15 @@ static ast_node_t *ds_decorate_top_func(desugar_t *ds, ast_func_def_t *fn) {
 static ast_node_t *ds_decorate_method(desugar_t *ds, ast_func_def_t *m,
                                       ast_node_t **out_tail) {
   ast_node_t *decs = m->decorators;
+  if (!decs) return NULL;
+  bool cc_seen = false;
+  uint8_t cc = 0;
+  decs = ds_take_callconv(ds, decs, &cc, &cc_seen, (ast_node_t *)m);
+  m->decorators = decs;
+  if (cc_seen)
+    ds_error(ds, (ast_node_t *)m,
+             "calling-convention decorators only apply to 'cfunc' / "
+             "'extern cfunc' (methods use the clux convention)");
   if (!decs) return NULL;
   decs = ds_take_metadata(decs, &m->metadata_decorators);
   m->decorators = decs;
@@ -847,10 +893,32 @@ static void ds_expand_decorators(desugar_t *ds, ast_program_t *prog) {
     if (n->kind == AST_VAR_DEF) {
       ds_decorate_var(ds, (ast_var_def_t *)n);
     } else if (n->kind == AST_FUNC_DEF) {
-      ast_node_t *var = ds_decorate_top_func(ds, (ast_func_def_t *)n);
-      if (var) {
-        var->next = n->next;
-        n->next = var;
+      ast_func_def_t *fn = (ast_func_def_t *)n;
+      bool cc_seen = false;
+      fn->decorators = ds_take_callconv(ds, fn->decorators, &fn->callconv,
+                                        &cc_seen, n);
+      if (fn->is_cfunc || fn->is_extern_cfunc) {
+        /* C ABI 函数：只接受调用约定 / noreturn 标记，不做 wrapper 展开
+           （包装成 clux var 会改变 C ABI 入口的语义）。 */
+        bool nr = false;
+        fn->decorators = ds_take_noreturn(fn->decorators, &nr);
+        if (nr) fn->is_noreturn = true;
+        if (fn->decorators) {
+          ds_error(ds, n,
+                   "cfunc only supports [[cdecl]] / [[stdcall]] / "
+                   "[[noreturn]] decorators");
+          fn->decorators = NULL;
+        }
+      } else {
+        if (cc_seen)
+          ds_error(ds, n,
+                   "calling-convention decorators only apply to 'cfunc' / "
+                   "'extern cfunc'");
+        ast_node_t *var = ds_decorate_top_func(ds, fn);
+        if (var) {
+          var->next = n->next;
+          n->next = var;
+        }
       }
     } else if (n->kind == AST_STRUCT_DEF) {
       ast_struct_def_t *st = (ast_struct_def_t *)n;

@@ -119,6 +119,11 @@ extern cfunc crt::puts(s: *const u8): i32;
 `extern` 后面；`extern func ...;` 会被明确拒绝，因为 clux `func` 是 env-first
 调用约定，不是 C ABI。
 
+`export extern cfunc <lib>::<name>(...): T;` / `export extern var <lib>::<name>: T;`
+把 C 声明放进当前模块的导出表，导入方以 `<module>::<name>` 使用。这样一组
+纯声明可以构成 **port 包**，描述第三方 C 库；链接信息由包自己的 `clux.mod`
+`native` 段提供（见 `docs/port-packages.md`）。
+
 ## 8.10 外部变量
 
 ```clux

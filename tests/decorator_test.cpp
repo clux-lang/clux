@@ -130,9 +130,52 @@ TEST(Decorator, OnlyVarAndFuncCanBeDecorated) {
   std::remove(path.c_str());
 }
 
+/* `[[stdcall]]` 只作用于 C ABI 函数：extern cfunc 原型带调用约定。 */
+TEST(Decorator, StdcallOnExternCfunc) {
+  clux_expect_ok(
+      "extern lib libc from \"*\";\n"
+      "[[stdcall]] extern cfunc libc::abs(x: i32): i32;\n"
+      "func main(): i32 { return libc::abs(0 - 7) == 7 ? 0 : 1; }\n",
+      "decor_stdcall");
+}
+
+/* `[[stdcall]]` 也可以标 cfunc 定义（C ABI 包装/回调）。x64 上 stdcall 与默认
+ * 约定相同，但生成的 C 原型/包装必须带 CLUX_STDCALL。 */
+TEST(Decorator, StdcallOnCfuncDefinition) {
+  clux_expect_ok(
+      "[[stdcall]] cfunc add(a: i32, b: i32): i32 { return a + b; }\n"
+      "func main(): i32 { return add(20, 22) - 42; }\n",
+      "decor_stdcall_def");
+}
+
+/* 普通 clux func 是 env-first，不能标 C 调用约定。 */
+TEST(Decorator, CallingConventionOnPlainFuncRejected) {
+  clux_expect_reject(
+      "[[stdcall]] func f(x: i32): i32 { return x; }\n"
+      "func main(): i32 { return f(1); }\n",
+      "calling-convention decorators only apply", "decor_cc_plain");
+}
+
+/* 方法没有 C ABI 形态，不能标调用约定。 */
+TEST(Decorator, CallingConventionOnMethodRejected) {
+  clux_expect_reject(
+      "struct S { x: i32; [[stdcall]] func m(self: ref *S): i32 { return "
+      "self.x; } }\n"
+      "func main(): i32 { return 0; }\n",
+      "calling-convention decorators only apply", "decor_cc_method");
+}
+
+/* 同一函数不能同时声明 stdcall 和 cdecl。 */
+TEST(Decorator, ConflictingCallingConventionsRejected) {
+  clux_expect_reject(
+      "extern lib libc from \"*\";\n"
+      "[[stdcall]] [[cdecl]] extern cfunc libc::abs(x: i32): i32;\n"
+      "func main(): i32 { return 0; }\n",
+      "conflicting calling-convention", "decor_cc_conflict");
+}
+
 /* 缺少 `]]`：语法错误（不能把半截装饰器当成普通声明） */
-TEST(Decorator, UnterminatedDecoratorIsSyntaxError) {
-  const std::string src =
+TEST(Decorator, UnterminatedDecoratorIsSyntaxError) {  const std::string src =
       "comptime func twice(n: i32): i32 { return n * 2; }\n"
       "[[twice] var a = 1;\n"
       "func main(): i32 { return 0; }\n";

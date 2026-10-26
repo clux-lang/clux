@@ -116,6 +116,20 @@ static const char *guard_name(const cir_unit_t *unit, char *buf, size_t cap) {
     return buf;
 }
 
+/* C ABI 调用约定：`[[stdcall]]` 在生成的 C 里用 CLUX_STDCALL 展开。
+ * Windows x64 没有 stdcall 区分（MS x64 只有一种约定）；x86 才生效。 */
+static void cw_put_callconv_macro(string_t *sb) {
+    cw_put(sb, "#ifndef CLUX_STDCALL\n"
+               "# if defined(_WIN32)\n"
+               "#  define CLUX_STDCALL __stdcall\n"
+               "# elif defined(__i386__) && defined(__GNUC__)\n"
+               "#  define CLUX_STDCALL __attribute__((stdcall))\n"
+               "# else\n"
+               "#  define CLUX_STDCALL\n"
+               "# endif\n"
+               "#endif\n\n");
+}
+
 /* 头文件：导出类型（拓扑序）+ 导出函数/cfunc/全局变量声明。 */
 static void write_header(string_t *sb, const cir_unit_t *unit,
                          cir_function_t *fns, cir_signature_t *sigs,
@@ -128,6 +142,7 @@ static void write_header(string_t *sb, const cir_unit_t *unit,
     cw_put(sb, "#include <stdint.h>\n");
     cw_put(sb, "#include <stddef.h>\n");
     cw_put(sb, "#include <stdbool.h>\n\n");
+    cw_put_callconv_macro(sb);
 
     if (unit->extern_typedefs) {
         cw_put(sb, "/* ---- C ABI function pointer types ---- */\n");
@@ -200,6 +215,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         unit->uses_union_check || unit->uses_panic || unit->test_runner ||
         unit->tests || alloc_rt)
         cw_put(sb, "#include <stdio.h>\n");
+    cw_put_callconv_macro(sb);
     if (unit->test_runner || unit->tests) {
         /* 断言运行时用 `struct clux_str` 传消息：测试单元无条件给出定义
            （include guard 与类型发射器共享，重复定义安全）。必须先于

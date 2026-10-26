@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/comptime.h"
 #include "sema/reflect.h"
 #include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -1091,8 +1092,40 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
                          ? value_make_shadow(sema->vm, msym->type)
                          : val_void(sema);
             }
+            /* port 的宏等价常量：`export comptime var` 在 import 方引用点
+               直接折叠成字面量（不产生运行期全局）。 */
+            if (msym->kind == SEMA_SYM_VAR && msym->is_comptime &&
+                msym->ct_valid) {
+              ast_node_t *lit = sema_ct_lit(sema, *node, &msym->ct);
+              if (lit) {
+                lit->next = (*node)->next;
+                *node = lit;
+                return value_make_shadow(sema->vm, msym->ct.type);
+              }
+            }
             if (msym->kind == SEMA_SYM_VAR && msym->type)
               return value_make_shadow(sema->vm, msym->type);
+            /* port 导入的 extern var：`port::global` 直接映射到 C 数据符号。
+               标记 is_ffi_var，codegen 走 EXTERN_LOAD/STORE 的同一路径。 */
+            if (msym->kind == SEMA_SYM_EXTERN_VAR && msym->type) {
+              uint32_t kind = 0;
+              ast_var_def_t *evd =
+                  (msym->ast && msym->ast->kind == AST_VAR_DEF)
+                      ? (ast_var_def_t *)msym->ast
+                      : NULL;
+              if (ffi_data_kind_of(msym->type, sema->vm, &kind)) {
+                /* 标量/指针/str：宽度由类型码表达 */
+              } else if (ffi_data_kind_needs_type(msym->type)) {
+                kind = CLUX_FFI_DATA_TYPED;
+              } else {
+                return val_void(sema);
+              }
+              n->is_ffi_var = true;
+              n->ffi_var_kind = kind;
+              n->ffi_c_name = evd ? evd->name : n->variant;
+              n->ffi_var_type = msym->type;
+              return value_make_shadow(sema->vm, msym->type);
+            }
           }
           /* 模块成员访问：从 module->exports 查 variant 名 */
           char buf[256];

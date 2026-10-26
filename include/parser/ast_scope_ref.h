@@ -36,6 +36,11 @@ typedef struct {
      * 置位时 type_expr 保持 AST_IDENT（sema 不把它折叠成类型）。 */
     bool        is_ffi_var;
     uint32_t    ffi_var_kind;
+    /* 实际 C 符号名与解析后的变量类型（sema 填；port 导入的 `port::name`
+       也走这里，codegen 不再按 callee 的 AST 形态查 extern 表）。
+       ffi_var_type 是 `const type_t*`（parser 层用 void* 避免依赖 vm/type.h）。 */
+    strslice_t  ffi_c_name;
+    const void *ffi_var_type;
     /* 数据符号的类型是程序自定义类型（struct/cunion/enum）时，sema 在这里挂上
      * 声明的**类型表达式**；compiler 在读/写之前先 `compile_type_expr` 压一个
      * 类型值（ffi_var_kind = CLUX_FFI_DATA_TYPED），运行期按该类型的 size 读写。 */

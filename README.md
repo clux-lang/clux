@@ -57,15 +57,23 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   `alias::member` access, **relative path resolution against the importing file's
   directory** (`./`, `../`, `\`→`/` normalization, `.`/`..` collapsing, implicit `.cx`),
   **proxy re-export** (`export * from "./mod"`) with conflict detection, module-scoped
-  globals, and circular-dependency detection. Imports must be relative: any other path
-  is rejected with one diagnostic — **import kind is never inferred from the file
+  globals, and circular-dependency detection. Imports are either relative source
+  modules (`./`, `../`) or package names resolved from `deps/<pkg>/` (whose
+  `clux.mod` supplies the entry); **import kind is never inferred from the file
   extension** (a `.so`/`.dll` suffix does not mean "dynamic library").
 - **M6 — FFI**: `extern lib <alias> from "<library>"` (`"*"` = the current process),
   `extern cfunc` declarations lowered to direct C prototypes (`extern func` is
   rejected — clux `func` is not C ABI),
   `cfunc` definitions usable as C callbacks, `extern var` global data symbols, conditional declarations
-  (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), and recursive C-ABI type checking
-  (scalars, pointers, `opaque`, `str`, struct / cunion / enum).
+  (`assert(OS_TYPE == "WIN64" ...)`, `-D KEY=VALUE`), `[[stdcall]]` / `[[cdecl]]`
+  calling-convention decorators on C ABI functions, and recursive C-ABI type checking
+  (scalars, pointers, `opaque`, `str`, struct / cunion / enum). Port packages can
+  `export extern cfunc/var`, so a pure-declaration `port.cx` is importable as a
+  normal module (`port::fn` / `port::global`); `clux.mod`'s `native` section
+  supplies `link` / `libdirs` / `runtime` for already-built C libraries
+  (clux does not compile C sources or read C headers). `clux install
+  --allow-scripts` runs opt-in `postinstall` hooks that may download/build
+  those libs — see `docs/port-packages.md`.
 
 **Not yet implemented**
 
@@ -128,9 +136,16 @@ Produces:
 clux run <file.cx> [--keep-c] [--emit-c[=PATH]]  # build with C backend, then run
 clux build <file.cx> [--emit-c[=PATH]] [--keep-c] [--output=PATH]
 clux test [<file.cx>] [--backend=c] [--keep-c]   # run test blocks through C
+clux install [--allow-scripts] [--force]  # run clux.mod postinstall hooks
 clux format <file.cx> [-o PATH]       # format source in place (or to PATH / stdout)
 clux version                          # version info
 ```
+
+`clux install` never runs package scripts implicitly: without
+`--allow-scripts` it only lists them. Hooks run with cwd = package root and
+receive `CLUX_PKG_ROOT` / `CLUX_OS` / `CLUX_ARCH` / `CLUX_TARGET`; a
+successful hook writes `.clux/postinstall.ok` so it is cached until the command
+changes (`--force` reruns it).
 
 `--emit-c` writes the generated C (and headers) without compiling/linking;
 `--keep-c` keeps it for inspection after a normal build/run/test. `.cxb` /
@@ -200,6 +215,8 @@ Milestone designs:
 - `docs/m4-design.md` — slices and runtime strings
 - `docs/m5-design.md`, `docs/m5-design-v2.md` — module system (v2 is the design that shipped)
 - `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, lowered to direct C calls)
+- `docs/port-packages.md` — port packages (`export extern`) and `clux.mod`'s
+  `native` section (`link` / `libdirs` / `runtime`, platform overrides)
 - `docs/milestones.md` — milestone roadmap and status
 
 Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,

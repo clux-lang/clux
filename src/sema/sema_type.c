@@ -94,6 +94,26 @@ bool sema_eval_array_bound(sema_t *sema, ast_node_t **bound,
     return true;
   }
 
+  /* `port::CONST`：先走 sema_expr，把跨模块 comptime 常量折叠成字面量
+     （CTFE 不解析模块成员）。sema_expr 已报错时不要再让 CTFE 报第二条。 */
+  if (b->kind == AST_SCOPE_REF) {
+    size_t before = sema->diag ? diag_count(sema->diag) : 0;
+    sema_expr(sema, bound, sema->global_scope);
+    if (sema->diag && diag_count(sema->diag) > before) return false;
+    b = *bound;
+    if (b->kind == AST_INT_LIT) {
+      ast_int_lit_t *il = (ast_int_lit_t *)b;
+      if (il->value > (uint64_t)SIZE_MAX) {
+        diag_error(sema->diag, sema_loc(sema, b),
+                   "array length %llu too large",
+                   (unsigned long long)il->value);
+        return false;
+      }
+      *len = (size_t)il->value;
+      return true;
+    }
+  }
+
   /* 复杂表达式：ctfe 编译期求值（shadow 值不可用，须真实常量） */
   vm_t *vm = sema->vm;
   ctfe_ctx_t ctx;

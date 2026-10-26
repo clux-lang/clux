@@ -858,9 +858,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             return st;
         }
-        /* 跨模块全局变量写：`math::PI = v`（C 符号是导出方模块前缀的全局）。 */
+        /* 跨模块全局变量写：`math::PI = v`（C 符号是导出方模块前缀的全局）。
+           注意先排除 port 导入的 extern var（is_ffi_var）：它走下面的
+           C 数据符号路径，不是模块前缀全局。 */
         if (a->target && a->target->kind == AST_SCOPE_REF &&
-            is_import_scope_ref(lc, (ast_scope_ref_t *)a->target)) {
+            is_import_scope_ref(lc, (ast_scope_ref_t *)a->target) &&
+            !((ast_scope_ref_t *)a->target)->is_ffi_var) {
             const char *cname = lower_import_var_target(
                 lc, (ast_scope_ref_t *)a->target);
             if (!cname) {

@@ -6,6 +6,7 @@
 #include "cbackend/c_writer.h"
 #include "core/allocator.h"
 #include "core/arena.h"
+#include "core/ffi_cond.h"
 #include "core/stream.h"
 #include "core/string.h"
 #include "core/vec.h"
@@ -13,6 +14,7 @@
 #include "diag/diagnostic.h"
 #include "driver/compile_module.h"
 #include "module/module_path.h"
+#include "module/package.h"
 #include "parser/ast_program.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_test.h"
@@ -29,6 +31,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <sys/stat.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -128,7 +131,107 @@ static void path_dirname(const char *path, char *buf, size_t cap) {
     buf[n] = '\0';
 }
 
-/* 在命令行末尾追加一个选项/路径：含空格时整体加引号，否则原样。 */
+/* ---- native 段（clux.mod）：路径/链接参数/运行时文件 ---- */
+
+static bool native_is_absolute(const char *p) {
+    if (!p || !*p) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p[1] == ':' && (p[2] == '/' || p[2] == '\\');
+}
+
+static bool native_lib_like(const char *p) {
+    static const char *const exts[] = {".a",  ".lib", ".so", ".dll",
+                                       ".dylib", ".tbd", ".o", ".obj", NULL};
+    size_t n = p ? strlen(p) : 0;
+    for (size_t i = 0; exts[i]; i++) {
+        size_t e = strlen(exts[i]);
+        if (n >= e && strcmp(p + n - e, exts[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* 把 native 段里的相对路径按**包根目录**展开；绝对路径原样返回。 */
+static const char *native_join(arena_t *arena, const char *root,
+                               const char *rel) {
+    if (!rel || !*rel) return rel;
+    if (!root || !*root || native_is_absolute(rel)) return rel;
+    size_t n = strlen(root) + 1 + strlen(rel) + 1;
+    char *p = (char *)arena_alloc(arena, n, 1);
+    if (!p) return NULL;
+    snprintf(p, n, "%s/%s", root, rel);
+    return p;
+}
+
+/* native.link 条目 → 链接器参数：`-x` 原样；路径/库文件 → 包根展开；
+ * 其它 → `-l<name>`。 */
+static const char *native_link_arg(arena_t *arena, const char *root,
+                                   const char *entry) {
+    if (!entry || !*entry) return NULL;
+    if (entry[0] == '-') return entry;
+    if (strchr(entry, '/') || strchr(entry, '\\') || native_lib_like(entry))
+        return native_join(arena, root, entry);
+    size_t n = strlen(entry) + 3;
+    char *p = (char *)arena_alloc(arena, n, 1);
+    if (!p) return NULL;
+    snprintf(p, n, "-l%s", entry);
+    return p;
+}
+
+static void add_unique_link(const char **links, size_t *count, const char *arg) {
+    if (!arg || !*arg || !count || *count >= 128) return;
+    for (size_t i = 0; i < *count; i++)
+        if (links[i] && strcmp(links[i], arg) == 0) return;
+    links[(*count)++] = arg;
+}
+
+/* 把 native.runtime 文件复制到可执行文件旁（Windows DLL / POSIX .so）。
+ * 返回 0 成功；失败打印诊断并返回 1。 */
+static int copy_runtime_file(const char *src, const char *dst_dir) {
+    if (!src || !*src) return 0;
+    const char *base = src;
+    for (const char *p = src; *p; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    if (!*base) return 0;
+    char dst[4096];
+    snprintf(dst, sizeof dst, "%s/%s", dst_dir, base);
+#ifdef _WIN32
+    if (!CopyFileA(src, dst, FALSE)) {
+        fprintf(stderr, "build: cannot copy native runtime '%s' -> '%s' "
+                        "(error %lu)\n",
+                src, dst, (unsigned long)GetLastError());
+        return 1;
+    }
+    return 0;
+#else
+    FILE *in = fopen(src, "rb");
+    if (!in) {
+        fprintf(stderr, "build: cannot open native runtime '%s'\n", src);
+        return 1;
+    }
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fprintf(stderr, "build: cannot create native runtime '%s'\n", dst);
+        fclose(in);
+        return 1;
+    }
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = 1;
+            break;
+        }
+    }
+    if (ferror(in)) rc = 1;
+    fclose(in);
+    fclose(out);
+    if (rc) fprintf(stderr, "build: failed copying native runtime '%s'\n", src);
+    return rc;
+#endif
+}
+
+
 static void cmd_append_arg(string_t *sb, const char *s) {
     if (!s || !*s) return;
     string_append_char(sb, ' ');
@@ -512,6 +615,12 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     size_t nobjs = 0, nowned = 0, cap = 0;
     const char *links[128];
     size_t nlinks = 0;
+    /* clux.mod native.runtime：链接成功后复制到可执行文件旁 */
+    const char *native_runtime[128];
+    size_t nnative_runtime = 0;
+    /* 已处理的包根（多个模块属于同一包时，native 只处理一次）。 */
+    char *native_roots[128];
+    size_t nnative_roots = 0;
     module_t *main_mod = NULL;
     /* 两遍 lowering 的暂存（入口运行时的 any_alloc 需要先看所有模块）。 */
     cir_unit_t **units = NULL;
@@ -687,6 +796,74 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         }
         if (!emit_c_only) objs[nobjs++] = obj_path;
     }
+
+    /* ---- native 段：从所有模块所属包的 clux.mod 收集链接/运行时 ----
+     * 源码依赖 + 平台包：port 包可以只带声明和 vendored 静态库，用户无需
+     * 先在系统上安装。链接参数按模块/包顺序追加，重复项去重。 */
+    if (!emit_c_only && !object_only) {
+        ffi_defines_add_builtins();
+        const char *os = ffi_defines_get("OS_TYPE");
+        const char *arch = ffi_defines_get("OS_ARCH");
+        size_t mn = vm->module_order ? vec_len(vm->module_order) : 0;
+        for (size_t i = 0; i < mn; i++) {
+            module_t *m = (module_t *)vec_get(vm->module_order, i);
+            if (!m || !m->canonical) continue;
+            char *root = module_find_package_root(alloc, m->canonical);
+            if (!root) continue;
+            bool root_seen = false;
+            for (size_t r = 0; r < nnative_roots; r++)
+                if (strcmp(native_roots[r], root) == 0) {
+                    root_seen = true;
+                    break;
+                }
+            if (root_seen) {
+                allocator_free(alloc, (void **)&root);
+                continue;
+            }
+            if (nnative_roots >= 128) {
+                allocator_free(alloc, (void **)&root);
+                continue;
+            }
+            native_roots[nnative_roots++] = root;
+            package_desc_t pd;
+            if (package_load(alloc, arena, root, &pd) == PKG_OK &&
+                pd.native.present) {
+                pkg_native_spec_t spec;
+                if (pkg_native_effective(&pd.native, os, arch, &spec)) {
+                    for (size_t k = 0; k < spec.libdir_count && nlinks < 128;
+                         k++) {
+                        const char *dir =
+                            native_join(arena, root, spec.libdirs[k]);
+                        if (!dir) continue;
+                        size_t n = strlen(dir) + 3;
+                        char *arg = (char *)arena_alloc(arena, n, 1);
+                        if (!arg) continue;
+                        snprintf(arg, n, "-L%s", dir);
+                        add_unique_link(links, &nlinks, arg);
+                    }
+                    for (size_t k = 0; k < spec.link_count && nlinks < 128;
+                         k++) {
+                        const char *arg =
+                            native_link_arg(arena, root, spec.link[k]);
+                        add_unique_link(links, &nlinks, arg);
+                    }
+                    for (size_t k = 0; k < spec.runtime_count; k++) {
+                        const char *rt =
+                            native_join(arena, root, spec.runtime[k]);
+                        if (!rt) continue;
+                        bool dup = false;
+                        for (size_t j = 0; j < nnative_runtime; j++)
+                            if (strcmp(native_runtime[j], rt) == 0) {
+                                dup = true;
+                                break;
+                            }
+                        if (!dup && nnative_runtime < 128)
+                            native_runtime[nnative_runtime++] = rt;
+                    }
+                }
+            }
+        }
+    }
     free(units);
     units = NULL;
     free(mods);
@@ -713,6 +890,14 @@ int cbackend_build_program(const char *src_path, const char *out_path,
             merged = next;
         }
         if (lrc != 0) goto cleanup;
+        if (nnative_runtime > 0) {
+            char outdir[4096];
+            path_dirname(out_path, outdir, sizeof outdir);
+            for (size_t i = 0; i < nnative_runtime; i++) {
+                if (copy_runtime_file(native_runtime[i], outdir) != 0)
+                    goto cleanup;
+            }
+        }
     }
     rc = 0;
 
@@ -732,6 +917,8 @@ cleanup:
         for (size_t i = 0; i < nowned; i++) free(owned[i]);
         free(owned);
     }
+    for (size_t i = 0; i < nnative_roots; i++)
+        allocator_free(alloc, (void **)&native_roots[i]);
     if (path_stack) vec_free(alloc, &path_stack);
     if (entry) allocator_free(alloc, (void **)&entry);
     if (diag_has_error(diag)) diag_print_all(diag);

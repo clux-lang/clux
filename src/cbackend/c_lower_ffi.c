@@ -257,6 +257,116 @@ static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw,
     return cat_str(lc, "const ", r);
 }
 
+/* 为 port 导入的 C 符号在**当前编译单元**补一个 extern 原型。
+ * 直接 `lib::fn` 的声明由 lower_extern_decls 生成；port 的声明在另一个
+ * 编译单元，导入方必须自己声明，否则 host cc 会报隐式声明/链接自检失败。 */
+static void ensure_ffi_fn_proto(lower_ctx_t *lc, const char *cname,
+                                const func_sig_t *sig, uint8_t callconv) {
+    if (!lc || !cname || !sig) return;
+    if (cir_unit_has_extern_symbol(lc->unit, cname)) return;
+    vm_t *vm = lc->sema->vm;
+    bool ok = true;
+    lc->ffi_error = NULL;
+    const type_t *rt = sig->return_type ? sig->return_type : vm->type_void;
+    const char *cret = ffi_c_type(lc, rt, &ok);
+    if (rt && type_strip_quals(rt) == vm->type_str) cret = "char *";
+    if (!ok || !cret) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, NULL),
+                   "c backend: cannot declare C symbol '%s': %s", cname,
+                   lc->ffi_error ? lc->ffi_error : "unsupported return type");
+        lc->failed = true;
+        return;
+    }
+    const char **pt = NULL;
+    if (sig->param_count) {
+        pt = (const char **)arena_calloc(lc->arena, sig->param_count,
+                                         sizeof(*pt), ALIGNOF(max_align_t));
+        if (!pt) {
+            lc->failed = true;
+            return;
+        }
+        for (size_t i = 0; i < sig->param_count; i++) {
+            lc->ffi_error = NULL;
+            pt[i] = ffi_c_type(lc, sig->params[i], &ok);
+            if (!ok || !pt[i]) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, NULL),
+                           "c backend: cannot declare C symbol '%s' parameter "
+                           "%zu: %s", cname, i + 1,
+                           lc->ffi_error ? lc->ffi_error : "unsupported type");
+                lc->failed = true;
+                return;
+            }
+        }
+    }
+    string_t *sb = string_new(vm->alloc);
+    if (!sb) {
+        lc->failed = true;
+        return;
+    }
+    string_append_cstr(sb, "extern ");
+    string_append_cstr(sb, cret);
+    string_append_cstr(sb, " ");
+    if (callconv == CLUX_CC_STDCALL)
+        string_append_cstr(sb, "CLUX_STDCALL ");
+    string_append_cstr(sb, cname);
+    string_append_cstr(sb, "(");
+    if (sig->param_count == 0) {
+        string_append_cstr(sb, "void");
+    } else {
+        for (size_t i = 0; i < sig->param_count; i++) {
+            if (i) string_append_cstr(sb, ", ");
+            string_append_cstr(sb, pt[i]);
+        }
+        if (sig->is_variadic) string_append_cstr(sb, ", ...");
+    }
+    string_append_cstr(sb, ");");
+    const char *text = copy_arena(lc->arena, string_cstr(sb));
+    string_free(&sb);
+    if (!text) {
+        lc->failed = true;
+        return;
+    }
+    cir_unit_add_extern_decl(lc->unit, text);
+    cir_unit_add_extern_symbol(lc->unit, cname);
+}
+
+static void ensure_ffi_var_proto(lower_ctx_t *lc, const char *cname,
+                                 const type_t *vt) {
+    if (!lc || !cname || !vt) return;
+    if (cir_unit_has_extern_symbol(lc->unit, cname)) return;
+    bool ok = true;
+    lc->ffi_error = NULL;
+    const char *ctype = ffi_c_type(lc, vt, &ok);
+    if (!ok || !ctype) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, NULL),
+                   "c backend: cannot declare C data symbol '%s': %s", cname,
+                   lc->ffi_error ? lc->ffi_error : "unsupported type");
+        lc->failed = true;
+        return;
+    }
+    string_t *sb = string_new(lc->sema->vm->alloc);
+    if (!sb) {
+        lc->failed = true;
+        return;
+    }
+    /* port 模型推荐 `extern lib ... from "*"` + native 链接：数据符号是
+       普通 extern；DLL 数据导入（dllimport）仍由模块内直接 `extern var`
+       路径处理。 */
+    string_append_cstr(sb, "extern ");
+    string_append_cstr(sb, ctype);
+    string_append_cstr(sb, " ");
+    string_append_cstr(sb, cname);
+    string_append_cstr(sb, ";");
+    const char *text = copy_arena(lc->arena, string_cstr(sb));
+    string_free(&sb);
+    if (!text) {
+        lc->failed = true;
+        return;
+    }
+    cir_unit_add_extern_decl(lc->unit, text);
+    cir_unit_add_extern_symbol(lc->unit, cname);
+}
+
 /* ===================== extern lib / extern cfunc 收集 ===================== */
 
 static bool has_lib_suffix(const char *s) {
@@ -271,6 +381,16 @@ static bool has_lib_suffix(const char *s) {
 }
 
 static void collect_extern_lib(lower_ctx_t *lc, const ast_extern_lib_t *el) {
+    /* 记录别名 → 源码库名：extern var 的 Windows dllimport 判定要知道
+       `from "*"`（进程内/静态链接）还是显式 DLL。 */
+    lower_extern_lib_t *rec = (lower_extern_lib_t *)arena_calloc(
+        lc->arena, 1, sizeof(*rec), ALIGNOF(max_align_t));
+    if (rec) {
+        rec->alias = el->alias;
+        rec->source = el->name;
+        rec->next = lc->extern_libs;
+        lc->extern_libs = rec;
+    }
     const char *name = slice_str(lc, el->name);
     if (!name || name[0] == '\0') return;
     if (strcmp(name, "*") == 0) return;
@@ -318,6 +438,11 @@ static const type_t *extern_return_type(lower_ctx_t *lc,
                                         ast_func_def_t *def) {
     if (!def->return_expr) return lc->sema->vm->type_void;
     return sema_resolve_type_slot(lc->sema, &def->return_expr);
+}
+
+/* C ABI 调用约定前缀：只有 `[[stdcall]]` 需要显式标注（默认 cdecl）。 */
+static const char *callconv_c_prefix(const ast_func_def_t *fn) {
+    return (fn && fn->callconv == CLUX_CC_STDCALL) ? "CLUX_STDCALL " : "";
 }
 
 static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
@@ -396,6 +521,7 @@ static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
     string_append_cstr(sb, "extern ");
     string_append_cstr(sb, cret);
     string_append_cstr(sb, " ");
+    string_append_cstr(sb, callconv_c_prefix(fn));
     string_append_cstr(sb, cname);
     string_append_cstr(sb, "(");
     if (nparams == 0) string_append_cstr(sb, "void");
@@ -431,6 +557,16 @@ static void emit_extern_prototype(lower_ctx_t *lc, ast_func_def_t *fn) {
     cir_unit_add_extern_decl(lc->unit, text);
     if (!cir_unit_has_extern_symbol(lc->unit, cname))
         cir_unit_add_extern_symbol(lc->unit, cname);
+}
+
+/* `extern lib <alias> from "*"`：符号由当前进程/最终链接提供（静态库或
+ * 已在进程里的符号），数据符号是普通 extern；否则按 DLL 数据导入处理。 */
+static bool extern_lib_is_process(lower_ctx_t *lc, strslice_t alias) {
+    for (lower_extern_lib_t *l = lc->extern_libs; l; l = l->next) {
+        if (strslice_eq(l->alias, alias))
+            return strslice_eq(l->source, STRSLICE_LIT("*"));
+    }
+    return false;
 }
 
 /* extern var：库导出的**数据符号**（C 侧就是一个 `extern` 全局变量）。
@@ -475,8 +611,11 @@ static void collect_extern_var(lower_ctx_t *lc, ast_var_def_t *evd) {
     string_append_cstr(sb, "extern ");
 #ifdef _WIN32
     /* Windows 的**数据**导入必须 dllimport：否则链接器找 `td_i32` 而不是
-       导入库里的 `__imp_td_i32`（函数有 thunk，数据没有）。 */
-    string_append_cstr(sb, "__declspec(dllimport) ");
+       导入库里的 `__imp_td_i32`（函数有 thunk，数据没有）。
+       `from "*"` = 符号由当前进程/最终链接提供（port + native 静态库），
+       此时是普通 extern；DLL 数据符号仍用显式库名。 */
+    if (!extern_lib_is_process(lc, evd->lib_name))
+        string_append_cstr(sb, "__declspec(dllimport) ");
 #endif
     string_append_cstr(sb, ctype);
     string_append_cstr(sb, " ");
@@ -489,6 +628,10 @@ static void collect_extern_var(lower_ctx_t *lc, ast_var_def_t *evd) {
         return;
     }
     cir_unit_add_extern_decl(lc->unit, text);
+    /* 数据符号也登记为"由外部定义"：port 导入方的 ensure_ffi_var_proto
+       据此避免重复声明（dllimport 与普通 extern 不能并存）。 */
+    if (!cir_unit_has_extern_symbol(lc->unit, cname))
+        cir_unit_add_extern_symbol(lc->unit, cname);
 
     lower_extern_var_t *ev = (lower_extern_var_t *)arena_calloc(
         lc->arena, 1, sizeof(*ev), ALIGNOF(max_align_t));
@@ -519,11 +662,14 @@ static lower_extern_var_t *find_extern_var(lower_ctx_t *lc, strslice_t lib,
 
 void lower_extern_decls(lower_ctx_t *lc, ast_program_t *prog) {
     if (!lc || !prog) return;
+    /* 先收集所有 extern lib：extern var 的 dllimport 判定依赖别名→库名
+       （`"*"` = 进程内/静态链接），不能依赖声明顺序。 */
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
-        if (n->kind == AST_EXTERN_LIB) {
+        if (n->kind == AST_EXTERN_LIB)
             collect_extern_lib(lc, (const ast_extern_lib_t *)n);
-            continue;
-        }
+    }
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind == AST_EXTERN_LIB) continue;
         if (n->kind == AST_VAR_DEF && ((ast_var_def_t *)n)->is_extern_var) {
             collect_extern_var(lc, (ast_var_def_t *)n);
             if (lc->failed) return;
@@ -557,13 +703,55 @@ void lower_extern_decls(lower_ctx_t *lc, ast_program_t *prog) {
 }
 
 const type_t *ffi_extern_var_type(lower_ctx_t *lc, ast_scope_ref_t *sr) {
-    if (!sr || !sr->type_expr || sr->type_expr->kind != AST_IDENT) return NULL;
+    if (!sr) return NULL;
+    if (sr->ffi_var_type) return (const type_t *)sr->ffi_var_type;
+    if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) return NULL;
     strslice_t lib = ((ast_ident_t *)sr->type_expr)->name;
     lower_extern_var_t *ev = find_extern_var(lc, lib, sr->variant);
     return ev ? ev->type : NULL;
 }
 
+/* sema 已解析的 extern var（直接 lib::var 或 port 导入的 port::var）：
+ * 实际 C 符号名 + 变量类型。 */
+static bool ffi_var_resolved(lower_ctx_t *lc, ast_scope_ref_t *sr,
+                             const type_t **out_type, const char **out_cname,
+                             bool *out_is_str) {
+    if (!sr || !sr->ffi_c_name.len || !sr->ffi_var_type) return false;
+    const char *cname = slice_str(lc, sr->ffi_c_name);
+    if (!cname) return false;
+    const type_t *t = (const type_t *)sr->ffi_var_type;
+    if (out_type) *out_type = t;
+    if (out_cname) *out_cname = cname;
+    if (out_is_str)
+        *out_is_str = type_strip_quals(t) == lc->sema->vm->type_str;
+    return true;
+}
+
 cir_expr_t *lower_ffi_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr) {
+    const type_t *rt = NULL;
+    const char *rc = NULL;
+    bool rstr = false;
+    if (ffi_var_resolved(lc, sr, &rt, &rc, &rstr)) {
+        ensure_ffi_var_proto(lc, rc, rt);
+        if (lc->failed) return NULL;
+        cir_type_t *ct = map_type(lc, rt);
+        if (!ct) {
+            lc->failed = true;
+            return NULL;
+        }
+        cir_expr_t *id = cir_expr_ident(lc->arena, rc);
+        if (!id) return NULL;
+        if (!rstr) {
+            id->type = ct;
+            return id;
+        }
+        lc->unit->uses_str_from_c = true;
+        cir_expr_t *wrap = cir_expr_call(lc->arena, "clux_str_from_c", NULL);
+        if (!wrap) return NULL;
+        wrap->type = ct;
+        cir_expr_append_arg(wrap, id);
+        return wrap;
+    }
     if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
                    "c backend: extern var: invalid library alias");
@@ -606,6 +794,15 @@ cir_expr_t *lower_ffi_var_read(lower_ctx_t *lc, ast_scope_ref_t *sr) {
 const char *lower_ffi_var_target(lower_ctx_t *lc, ast_scope_ref_t *sr,
                                  bool *is_str) {
     if (is_str) *is_str = false;
+    const type_t *rt = NULL;
+    const char *rc = NULL;
+    bool rstr = false;
+    if (ffi_var_resolved(lc, sr, &rt, &rc, &rstr)) {
+        ensure_ffi_var_proto(lc, rc, rt);
+        if (lc->failed) return NULL;
+        if (is_str) *is_str = rstr;
+        return rc;
+    }
     if (!sr->type_expr || sr->type_expr->kind != AST_IDENT) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)sr),
                    "c backend: extern var: invalid library alias");
@@ -638,7 +835,69 @@ static cir_expr_t *adapt_ffi_arg(lower_ctx_t *lc, cir_expr_t *v,
     return v;
 }
 
+/* 已解析的 C ABI 调用：sema 把 `func_sig_t` + 实际 C 符号名填进 ast_call_t。
+ * 直接 `lib::fn` 与 port 导入的 `port::fn` 都走这里，不需要在 codegen 里
+ * 重新查本单元的 extern 表（port 的声明在另一个编译单元）。 */
+static cir_expr_t *lower_ffi_call_resolved(lower_ctx_t *lc, ast_call_t *call,
+                                           const func_sig_t *sig,
+                                           strslice_t cname_slice) {
+    const char *cname = slice_str(lc, cname_slice);
+    if (!cname) {
+        lc->failed = true;
+        return NULL;
+    }
+    ensure_ffi_fn_proto(lc, cname, sig, call->ffi_callconv);
+    if (lc->failed) return NULL;
+    cir_expr_t *out = cir_expr_call(lc->arena, cname, NULL);
+    if (!out) {
+        lc->failed = true;
+        return NULL;
+    }
+    size_t nfixed = sig ? sig->param_count : 0;
+    size_t i = 0;
+    for (ast_node_t *a = call->args; a; a = a->next, i++) {
+        cir_expr_t *v = lower_expr(lc, a);
+        if (!v) return NULL;
+        const type_t *want = (sig && i < nfixed) ? sig->params[i]
+                                                 : infer_expr_type(lc, a);
+        v = adapt_ffi_arg(lc, v, want);
+        if (!v) return NULL;
+        cir_expr_append_arg(out, v);
+    }
+
+    const type_t *rt = sig ? sig->return_type : lc->sema->vm->type_void;
+    const type_t *rtc = type_strip_quals(rt);
+    cir_type_t *ct = map_type(lc, rt);
+    if (!ct) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                   "c backend: extern cfunc return type is not supported");
+        lc->failed = true;
+        return NULL;
+    }
+    out->type = ct;
+    if (rtc && rtc == lc->sema->vm->type_str) {
+        lc->unit->uses_str_from_c = true;
+        cir_expr_t *wrap = cir_expr_call(lc->arena, "clux_str_from_c", NULL);
+        if (!wrap) {
+            lc->failed = true;
+            return NULL;
+        }
+        wrap->type = ct;
+        cir_expr_append_arg(wrap, out);
+        return wrap;
+    }
+    return out;
+}
+
 cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call) {
+    /* sema 已解析签名 + 实际 C 符号：直接走统一路径（port 导入必须有它）。 */
+    const type_t *fsig = (const type_t *)call->ffi_sig;
+    if (call->ffi_c_name.len && fsig &&
+        type_kind_of(type_strip_ownership(fsig)) == TYPE_KIND_FUNC) {
+        const func_sig_t *sig =
+            &((const func_type_t *)type_strip_ownership(fsig))->sig;
+        return lower_ffi_call_resolved(lc, call, sig, call->ffi_c_name);
+    }
     if (!call->callee || call->callee->kind != AST_SCOPE_REF) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
                    "c backend: extern call: callee is not `<lib>::<name>`");
@@ -827,6 +1086,7 @@ static const char *build_cfunc_wrapper(lower_ctx_t *lc, ast_func_def_t *fn,
     if (is_static) string_append_cstr(sb, "static ");
     string_append_cstr(sb, cret);
     string_append_cstr(sb, " ");
+    string_append_cstr(sb, callconv_c_prefix(fn));
     string_append_cstr(sb, wname);
     string_append_cstr(sb, "(");
     if (nparams == 0) string_append_cstr(sb, "void");
@@ -899,6 +1159,7 @@ static void emit_cfunc_prototype_into(lower_ctx_t *lc, ast_func_def_t *fn,
     string_append_cstr(sb, "extern ");
     string_append_cstr(sb, cret);
     string_append_cstr(sb, " ");
+    string_append_cstr(sb, callconv_c_prefix(fn));
     string_append_cstr(sb, wname);
     string_append_cstr(sb, "(");
     if (nparams == 0) string_append_cstr(sb, "void");

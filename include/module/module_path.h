@@ -73,6 +73,13 @@ char *module_resolve_import(allocator_t *alloc, strslice_t raw,
                             const char *importer_path,
                             module_import_kind_t *out_kind);
 
+/**
+ * 从模块路径向上查找所属包根目录（含 clux.mod 的目录）。
+ * 返回 alloc 分配、NUL 结尾的路径；找不到返回 NULL。
+ * 供构建器收集该模块包的 native 段（链接/运行时文件）。
+ */
+char *module_find_package_root(allocator_t *alloc, const char *importer);
+
 #ifdef __cplusplus
 }
 #endif

@@ -184,6 +184,7 @@ add_library(clux_cmd STATIC
     src/cmd/build.c
     src/cmd/run.c
     src/cmd/test.c
+    src/cmd/install.c
     src/cmd/version.c
 )
 target_include_directories(clux_cmd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

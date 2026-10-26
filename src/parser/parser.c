@@ -250,6 +250,50 @@ ast_node_t *parse_program(parser_t *p) {
                 /* `export cfunc`：C ABI 函数（无 env）也可导出，
                    头文件里是 extern 函数声明。 */
                 func = parse_cfunc_def(p);
+            } else if (check_keyword(p, "extern")) {
+                /* `export extern cfunc/var`：把 FFI 声明放进模块导出表，
+                   让 import 方以 `port::fn` / `port::global` 复用——
+                   port 包（纯声明描述 C 库）靠这条语法成立。 */
+                uint32_t xtb = p->pos;
+                advance(p);
+                skip_trivia(p);
+                if (check_keyword(p, "cfunc")) {
+                    func = parse_extern_cfunc(p, xtb);
+                } else if (check_keyword(p, "var")) {
+                    func = parse_extern_var(p, xtb);
+                } else if (check_keyword(p, "func")) {
+                    advance(p);
+                    func = ast_error_new(
+                        p->diag, p->tokens, p->arena, xtb, p->pos,
+                        "`extern func` is not a C ABI declaration: clux `func` "
+                        "values use the env-first clux convention and cannot be "
+                        "used as C ABI; write `extern cfunc <lib>::<name>(...): "
+                        "T;` for a C function");
+                } else {
+                    func = ast_error_new(
+                        p->diag, p->tokens, p->arena, xtb, p->pos,
+                        "expected 'cfunc' or 'var' after 'export extern'");
+                }
+            } else if (check_keyword(p, "comptime")) {
+                /* `export comptime var NAME: T = ...;`：port 里的宏等价常量。
+                   导出表按普通 var 名登记；import 方引用时由 sema 折叠成字面量。 */
+                uint32_t ctb = p->pos;
+                advance(p);
+                skip_trivia(p);
+                if (check_keyword(p, "var")) {
+                    func = parse_var_def(p);
+                    if (func && func->kind != AST_ERROR)
+                        ((ast_var_def_t *)func)->is_comptime = true;
+                } else if (check_keyword(p, "func")) {
+                    func = parse_func_def(p);
+                    if (func && func->kind != AST_ERROR)
+                        ((ast_func_def_t *)func)->is_comptime = true;
+                } else {
+                    func = ast_error_new(p->diag, p->tokens, p->arena, ctb,
+                                         p->pos,
+                                         "expected 'var' or 'func' after "
+                                         "'export comptime'");
+                }
             } else if (check_keyword(p, "var")) {
                 func = parse_var_def(p);
             } else if (check_keyword(p, "type")) {

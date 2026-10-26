@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/sema_cross.h"
 #include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
@@ -1217,6 +1218,12 @@ static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
     if (qn > 0 && (size_t)qn < sizeof(qual))
       ds = sema_lookup(sema->global_scope,
                        strslice_from_bytes(qual, (size_t)qn));
+    /* port 导入：`port::global = v` 的导出符号是 SEMA_SYM_EXTERN_VAR。 */
+    if (!ds && left && left->kind == SEMA_SYM_MODULE && left->module) {
+      sema_symbol_t *msym =
+          sema_module_export_symbol(left->module, n->variant);
+      if (msym && msym->kind == SEMA_SYM_EXTERN_VAR) ds = msym;
+    }
   }
   const type_t *ft = (ds && ds->kind == SEMA_SYM_EXTERN_VAR) ? ds->type : NULL;
   if (!ft) {
@@ -1263,6 +1270,11 @@ static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
   }
   n->is_ffi_var = true;
   n->ffi_var_kind = kind;
+  n->ffi_var_type = ft;
+  if (ds->ast && ds->ast->kind == AST_VAR_DEF)
+    n->ffi_c_name = ((ast_var_def_t *)ds->ast)->name;
+  else
+    n->ffi_c_name = n->variant;
 
   if (as->value->kind == AST_NIL) {
     diag_error(sema->diag, sema_loc(sema, as->value),

@@ -119,6 +119,14 @@ typedef struct lower_method {
     struct lower_method *next;
 } lower_method_t;
 
+/* extern lib 别名 → 源码里写的库名（`"*"` / 通用名 / 路径）。
+ * 数据符号的 Windows dllimport 判定需要知道 `"*"`（进程内链接）而非别名。 */
+typedef struct lower_extern_lib {
+    strslice_t alias;
+    strslice_t source;
+    struct lower_extern_lib *next;
+} lower_extern_lib_t;
+
 /* extern cfunc 声明（`<lib>::<name>`）：调用点据此取真实 C 符号名与签名。 */
 typedef struct lower_extern_fn {
     strslice_t lib;
@@ -183,6 +191,7 @@ typedef struct lower_ctx {
     lower_method_t *methods;
     lower_extern_fn_t *externs;
     lower_extern_var_t *extern_vars;
+    lower_extern_lib_t *extern_libs;
     lower_cfn_typedef_t *cfn_typedefs;
     lower_cb_wrapper_t *cb_wrappers;
     lower_import_decl_t *import_decls;

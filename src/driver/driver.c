@@ -297,8 +297,20 @@ static vec_t *collect_export_names(allocator_t *alloc, ast_node_t *program) {
         if (!n->is_exported) continue;
         strslice_t name = {0};
         switch (n->kind) {
-            case AST_FUNC_DEF:   name = ((ast_func_def_t *)n)->name;  break;
-            case AST_VAR_DEF:    name = ((ast_var_def_t *)n)->name;   break;
+            case AST_FUNC_DEF: {
+                ast_func_def_t *fd = (ast_func_def_t *)n;
+                /* extern 声明的本地符号是限定名 `<lib>::<name>`；这里跳过，
+                   由 build_sema_exports 单独按限定名登记。 */
+                if (fd->is_extern_cfunc) continue;
+                name = fd->name;
+                break;
+            }
+            case AST_VAR_DEF: {
+                ast_var_def_t *vd = (ast_var_def_t *)n;
+                if (vd->is_extern_var) continue;
+                name = vd->name;
+                break;
+            }
             case AST_TYPE_DEF:   name = ((ast_type_def_t *)n)->name;  break;
             case AST_ENUM_DEF:   name = ((ast_enum_def_t *)n)->name;  break;
             case AST_STRUCT_DEF: name = ((ast_struct_def_t *)n)->name; break;
@@ -437,7 +449,61 @@ static strmap_t *build_sema_exports(vm_t *vm, allocator_t *alloc, sema_t *sema,
         }
         vec_free(alloc, &names);
     }
+
+    /* `export comptime var`：pass_comptime_vars 会把定义从 AST 链摘除（不生成
+       运行期全局），collect_export_names 因此看不到它；符号仍在全局作用域，
+       这里按 is_exported + ct_valid 补登记。 */
+    if (sema->global_scope && sema->global_scope->symbols) {
+        const vec_t *keys = strmap_keys(sema->global_scope->symbols);
+        size_t kn = keys ? vec_len((vec_t *)keys) : 0;
+        for (size_t i = 0; i < kn; i++) {
+            const char *key = (const char *)vec_get((vec_t *)keys, i);
+            if (!key) continue;
+            sema_symbol_t *sym = sema_scope_find_local(
+                sema->global_scope, strslice_from_cstr(key));
+            if (!sym || sym->kind != SEMA_SYM_VAR || !sym->is_comptime ||
+                !sym->ct_valid || !sym->ast || !sym->ast->is_exported)
+                continue;
+            strmap_insert(map, alloc, key, sym);
+        }
+    }
+
+    /* `export extern cfunc/var`：声明在全局作用域里的符号是限定名
+       `<lib>::<name>`，对外的导出名是 `<name>`。port 包（纯 FFI 声明）
+       靠这条把 C 函数/数据符号暴露给 import 方。 */
     ast_program_t *prog = (ast_program_t *)ast;
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (!n->is_exported) continue;
+        char qual[512];
+        strslice_t ename = {0};
+        if (n->kind == AST_FUNC_DEF) {
+            ast_func_def_t *fd = (ast_func_def_t *)n;
+            if (!fd->is_extern_cfunc) continue;
+            int qn = snprintf(qual, sizeof qual, "%.*s::%.*s",
+                              (int)fd->lib_name.len, fd->lib_name.ptr,
+                              (int)fd->name.len, fd->name.ptr);
+            if (qn <= 0 || (size_t)qn >= sizeof qual) continue;
+            ename = fd->name;
+        } else if (n->kind == AST_VAR_DEF) {
+            ast_var_def_t *vd = (ast_var_def_t *)n;
+            if (!vd->is_extern_var) continue;
+            int qn = snprintf(qual, sizeof qual, "%.*s::%.*s",
+                              (int)vd->lib_name.len, vd->lib_name.ptr,
+                              (int)vd->name.len, vd->name.ptr);
+            if (qn <= 0 || (size_t)qn >= sizeof qual) continue;
+            ename = vd->name;
+        } else {
+            continue;
+        }
+        sema_symbol_t *sym = sema_scope_find_local(
+            sema->global_scope, strslice_from_bytes(qual, strlen(qual)));
+        if (!sym) continue;
+        char key[256];
+        if (ename.len >= sizeof key) continue;
+        memcpy(key, ename.ptr, ename.len);
+        key[ename.len] = '\0';
+        strmap_insert(map, alloc, key, sym);
+    }
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_REEXPORT) continue;
         ast_reexport_t *re = (ast_reexport_t *)n;

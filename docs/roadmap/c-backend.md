@@ -451,6 +451,11 @@ clux build hello.cx
     类型：整数/浮点/bool/str/opaque/struct/cunion/指针/cfunc；enum 按底层
     整数渲染），调用点直接调用真实 C 符号；`extern func` 明确报错——clux
     `func` 是 env-first 调用约定，不能作为 C ABI；
+  - port 包：`export extern cfunc/var` 把 FFI 声明放进模块导出表，import 方
+    以 `port::fn` / `port::global` 直接使用；`clux.mod` 的 `native` 段
+    （`link` / `libdirs` / `runtime` / `platforms`）由构建器收集，只链接
+    **已经编译好的**静态/动态库（不编译 C 源码、不读 C 头文件），并复制
+    运行时 DLL（详见 `docs/port-packages.md`）；
   - `str` 的 C ABI 表示是 `const char *`（与 VM 的 str = char* 一致）：
     实参取 `(v).data`，返回值用 `clux_str_from_c(p)`（`strlen` 求 len）；
   - `data(s)` → `(s).data`（`is_data_call`），与 `len(s)` 组成 C 的

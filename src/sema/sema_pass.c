@@ -394,7 +394,7 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
        "尚未求值的 comptime var" 与普通变量。 */
     if (f->kind == AST_VAR_DEF) {
       ast_var_def_t *vd = (ast_var_def_t *)f;
-      sema_symbol_t init = {.kind = SEMA_SYM_VAR,
+      sema_symbol_t init = {.kind = SEMA_SYM_VAR, .ast = f,
                             .is_comptime = vd->is_comptime};
       sema_symbol_t *sym =
           sema_scope_define(sema->global_scope, vd->name, &init);

@@ -8,6 +8,15 @@ extern "C" {
 #include "parser/ast_generic_param.h"
 #include "parser/ast_node.h"
 #include "parser/parser.h"
+#include <stdint.h>
+
+/* C ABI 调用约定（`[[stdcall]]` / `[[cdecl]]`）。只有 cfunc / extern cfunc
+ * 合法；clux `func` 是 env-first 约定，不能用这些标记。 */
+typedef enum {
+    CLUX_CC_DEFAULT = 0,
+    CLUX_CC_CDECL,
+    CLUX_CC_STDCALL,
+} clux_callconv_t;
 
 typedef struct {
     ast_node_t  base;
@@ -27,6 +36,7 @@ typedef struct {
     ast_node_t *body;        /* AST_BLOCK */
     bool        is_comptime; /* comptime func：调用点编译期求值折叠为常量，不注册到运行时 */
     bool        is_noreturn; /* `[[noreturn]]`：调用点永不正常返回（TDZ 终止分支） */
+    uint8_t     callconv;    /* clux_callconv_t：`[[stdcall]]` / `[[cdecl]]`（仅 cfunc） */
     /* ---- M6 FFI ---- */
     bool        is_cfunc;        /* cfunc 定义（有体，C ABI，可被 C 侧 dlsym 调用） */
     bool        is_extern_cfunc; /* extern cfunc 声明（无体，运行期 dlsym 查找） */

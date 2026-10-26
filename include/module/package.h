@@ -49,6 +49,47 @@ typedef enum {
     PKG_ENTRY_MULTI,    /* entry 是 Record<string, string> */
 } pkg_entry_kind_t;
 
+/* ---- 原生依赖（native 段） ---- */
+
+/* 一个平台适用的 C 链接参数。字符串都借用 JSON arena，NUL 终止。
+ * 只描述**已编译好的**静态/动态库；clux 不编译 C 源码、不处理头文件/宏。 */
+typedef struct {
+    const char **link;      /* `-l<name>` 或显式库文件 */
+    size_t       link_count;
+    const char **libdirs;   /* -L */
+    size_t       libdir_count;
+    const char **runtime;   /* 需要复制到可执行文件旁的 DLL/so */
+    size_t       runtime_count;
+} pkg_native_spec_t;
+
+typedef struct {
+    const char *platform;   /* "WIN64" / "LINUX" / "WIN64-X64" / "*" */
+    pkg_native_spec_t spec;
+} pkg_native_platform_t;
+
+typedef struct {
+    bool present;           /* clux.mod 是否有 native 段 */
+    pkg_native_spec_t base;
+    pkg_native_platform_t *platforms;
+    size_t platform_count;
+} pkg_native_t;
+
+/* ---- 安装钩子（postinstall） ---- */
+
+/* 一个平台适用的安装命令（在包根执行；由 `clux install --allow-scripts`
+ * 显式触发，`clux build` 不会自动执行）。 */
+typedef struct {
+    const char *platform;   /* "WIN64" / "LINUX" / "WIN64-X64" / "*" */
+    const char *command;    /* shell 命令或脚本路径 */
+} pkg_postinstall_platform_t;
+
+typedef struct {
+    bool present;
+    const char *command;    /* 基础命令（string 形式） */
+    pkg_postinstall_platform_t *platforms;
+    size_t platform_count;
+} pkg_postinstall_t;
+
 /* ---- 包描述符 ---- */
 
 typedef struct {
@@ -64,6 +105,9 @@ typedef struct {
     } entry;
     pkg_dep_t      *deps;        /* 依赖数组（可为 NULL） */
     size_t           dep_count;
+
+    pkg_native_t     native;     /* 可选 native 段 */
+    pkg_postinstall_t postinstall; /* 可选 postinstall 钩子 */
 
     /* 元信息 */
     char            root_dir[1024]; /* 包根目录绝对/相对路径（NUL 终止） */
@@ -106,6 +150,25 @@ pkg_result_t package_load(allocator_t *alloc, arena_t *arena,
 pkg_result_t package_find(allocator_t *alloc, arena_t *arena,
                           const char *start,
                           char **out_dir, package_desc_t *out_desc);
+
+/**
+ * 计算指定平台的有效 native 参数：base + 最具体的 platforms 条目覆盖。
+ * 平台键按 "OS_TYPE-OS_ARCH" → "OS_TYPE" → "OS_ARCH" → "*" 的顺序匹配；
+ * 平台条目里非空的数组覆盖 base 的对应数组。
+ * 返回 NULL 表示没有 native 段；否则返回 out（内容有效）。
+ */
+const pkg_native_spec_t *pkg_native_effective(const pkg_native_t *native,
+                                              const char *os_type,
+                                              const char *os_arch,
+                                              pkg_native_spec_t *out);
+
+/**
+ * 计算指定平台的有效 postinstall 命令（base 或最具体的 platforms 条目）。
+ * 返回 NULL 表示没有可执行命令。
+ */
+const char *pkg_postinstall_effective(const pkg_postinstall_t *postinstall,
+                                      const char *os_type,
+                                      const char *os_arch);
 
 /**
  * 获取错误码的可读名称（诊断用）。

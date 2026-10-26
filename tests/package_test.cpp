@@ -266,4 +266,114 @@ TEST_F(PackageTest, FindNoMod) {
     std::filesystem::remove_all(deep);
 }
 
+TEST_F(PackageTest, LoadNativeSectionAndPlatformOverride) {
+    std::string dir = make_pkg_dir(R"({
+        "name": "zlib",
+        "version": "1.3.1",
+        "entry": "port.cx",
+        "native": {
+            "link": ["z"],
+            "libdirs": ["vendor/lib"],
+            "runtime": ["vendor/bin/zlib1.dll"],
+            "platforms": {
+                "WIN64": {
+                    "link": ["zlibstatic"],
+                    "runtime": ["vendor/win64/zlib1.dll"]
+                }
+            }
+        }
+    })");
+
+    package_desc_t desc;
+    ASSERT_EQ(package_load(alloc, arena, dir.c_str(), &desc), PKG_OK);
+    ASSERT_TRUE(desc.native.present);
+    ASSERT_EQ(desc.native.base.link_count, 1u);
+    EXPECT_STREQ(desc.native.base.link[0], "z");
+    ASSERT_EQ(desc.native.platform_count, 1u);
+
+    pkg_native_spec_t spec;
+    ASSERT_NE(pkg_native_effective(&desc.native, "WIN64", "X64", &spec), nullptr);
+    ASSERT_EQ(spec.link_count, 1u);
+    EXPECT_STREQ(spec.link[0], "zlibstatic");
+    ASSERT_EQ(spec.runtime_count, 1u);
+    EXPECT_STREQ(spec.runtime[0], "vendor/win64/zlib1.dll");
+    /* libdirs 未在平台项覆盖 → 继承 base */
+    ASSERT_EQ(spec.libdir_count, 1u);
+    EXPECT_STREQ(spec.libdirs[0], "vendor/lib");
+
+    ASSERT_NE(pkg_native_effective(&desc.native, "LINUX", "X64", &spec), nullptr);
+    ASSERT_EQ(spec.link_count, 1u);
+    EXPECT_STREQ(spec.link[0], "z");
+
+    cleanup_dir(dir);
+}
+
+TEST_F(PackageTest, LoadPostinstallString) {
+    std::string dir = make_pkg_dir(R"({
+        "name": "strhook",
+        "version": "1.0.0",
+        "entry": "main.cx",
+        "postinstall": "sh scripts/build.sh"
+    })");
+
+    package_desc_t desc;
+    ASSERT_EQ(package_load(alloc, arena, dir.c_str(), &desc), PKG_OK);
+    ASSERT_TRUE(desc.postinstall.present);
+    EXPECT_STREQ(pkg_postinstall_effective(&desc.postinstall, "LINUX", "X64"),
+                 "sh scripts/build.sh");
+
+    cleanup_dir(dir);
+}
+
+TEST_F(PackageTest, LoadPostinstallAndPlatformOverride) {
+    std::string dir = make_pkg_dir(R"({
+        "name": "withhook",
+        "version": "1.0.0",
+        "entry": "main.cx",
+        "postinstall": {
+            "script": "scripts/base.sh",
+            "WIN64": "scripts/build.ps1",
+            "LINUX": "scripts/build.sh"
+        }
+    })");
+
+    package_desc_t desc;
+    ASSERT_EQ(package_load(alloc, arena, dir.c_str(), &desc), PKG_OK);
+    ASSERT_TRUE(desc.postinstall.present);
+    EXPECT_STREQ(pkg_postinstall_effective(&desc.postinstall, "WIN64", "X64"),
+                 "scripts/build.ps1");
+    EXPECT_STREQ(pkg_postinstall_effective(&desc.postinstall, "LINUX", "X64"),
+                 "scripts/build.sh");
+    EXPECT_STREQ(pkg_postinstall_effective(&desc.postinstall, "MACOS", "ARM64"),
+                 "scripts/base.sh");
+
+    cleanup_dir(dir);
+}
+
+TEST_F(PackageTest, RejectsMalformedPostinstall) {
+    std::string dir = make_pkg_dir(R"({
+        "name": "badhook",
+        "version": "1.0.0",
+        "entry": "main.cx",
+        "postinstall": 42
+    })");
+
+    package_desc_t desc;
+    EXPECT_EQ(package_load(alloc, arena, dir.c_str(), &desc), PKG_ERR_SCHEMA);
+    cleanup_dir(dir);
+}
+
+TEST_F(PackageTest, RejectsMalformedNativeSection) {
+    std::string dir = make_pkg_dir(R"({
+        "name": "badnative",
+        "version": "1.0.0",
+        "entry": "main.cx",
+        "native": { "link": "z" }
+    })");
+
+    package_desc_t desc;
+    EXPECT_EQ(package_load(alloc, arena, dir.c_str(), &desc), PKG_ERR_SCHEMA);
+    cleanup_dir(dir);
+}
+
 } // namespace
