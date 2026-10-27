@@ -2,6 +2,7 @@
 #include "cmd/cmd.h"
 #include "cmd/path.h"
 #include "cbackend/c_backend.h"
+#include "module/lockfile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,7 @@ static char *dup_cstr(const char *s) {
 static const char *USAGE =
     "usage: clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]]\n"
     "                   [--keep-c] [--build-dir=DIR] [--output=PATH]\n"
-    "                   [--cc=PATH] [--cflag=FLAG]... [--ldflag=FLAG]...\n"
+    "                   [--locked] [--cc=PATH] [--cflag=FLAG]... [--ldflag=FLAG]...\n"
     "                   [-I DIR]... [--include=DIR]...\n"
     "                   [-L DIR]... [--lib-path=DIR]...\n"
     "                   [-l LIB]... [--link-lib=LIB]...\n"
@@ -317,6 +318,13 @@ static int build_impl(const cmd_args_t *args, const char *src_override,
     }
     if (defs.count) {
         if (cmd_apply_defines(defs.items, defs.count) != 0) goto fail;
+    }
+    if (cmd_args_has(args, "locked")) {
+        char err[1024];
+        if (!clux_lock_verify_for_source(src, err, sizeof err)) {
+            fprintf(stderr, "build: %s\n", err);
+            goto fail;
+        }
     }
 
     const bool emit_c = cmd_args_has(args, "emit-c");

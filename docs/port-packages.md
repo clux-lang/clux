@@ -1,8 +1,9 @@
 # Port 包与 C 第三方依赖
 
-> 状态：Phase 1 已实现（`export extern` + `clux.mod` 的 `link` / `libdirs` /
-> `runtime` / `platforms`）。clux **不编译 C 源码、不读取 C 头文件、不处理 C
-> 宏**；C 库必须先在外部编译成静态库/动态库，port 只描述其 ABI。
+> 状态：`export extern` + `clux.mod` 的 `link` / `libdirs` / `runtime` /
+> `platforms`、`clux install` 的 `postinstall` 钩子与 `clux.lock` 已实现。
+> clux **不编译 C 源码、不读取 C 头文件、不处理 C 宏**；C 库必须先在外部
+> 编译成静态库/动态库，port 只描述其 ABI。
 
 ## 1. 两层模型
 
@@ -176,14 +177,52 @@ C 库必须先由外部构建系统（CMake/autotools/手工）编译好；`buil
 clux install                  # 只列出 hook，不执行
 clux install --allow-scripts  # 先依赖、后当前包，执行 hook
 clux install --force          # 忽略缓存重跑
+clux install --locked         # 只校验 clux.lock，不执行/不重写
 ```
 
 - 脚本是**任意代码**，`clux build` / `run` / `test` 不会自动执行。
 - cwd = 包根；注入 `CLUX_PKG_ROOT` / `CLUX_OS` / `CLUX_ARCH` / `CLUX_TARGET`。
-- 成功后写 `.clux/postinstall.ok`（命令 hash）；命令变化或 `--force` 时重跑。
+- 成功后写 `.clux/postinstall.ok`（命令 + 推导脚本的 hash）；命令/脚本变化或
+  `--force` 时重跑。
 - 脚本负责固定下载源（commit/tag + checksum）、调用 CMake/autotools 等；
   产出的库由 `native.link` 指向。
-- 目前还没有 lockfile 记录脚本/下载/产物 hash；正式发布前应补上。
+
+### clux.lock
+
+`clux install` 成功后会生成 `<包根>/clux.lock`，记录：
+
+```json
+{
+  "version": 1,
+  "target": "LINUX-X64",
+  "packages": [
+    {
+      "name": "zlib",
+      "version": "1.3.1",
+      "path": "deps/zlib",
+      "mod_sha256": "...",
+      "postinstall": {
+        "command": "sh scripts/build.sh",
+        "command_sha256": "...",
+        "script": "scripts/build.sh",
+        "script_sha256": "..."
+      },
+      "artifacts": {
+        "vendor/lib/libz.a": "..."
+      }
+    }
+  ]
+}
+```
+
+- 每个包的 `clux.mod`、postinstall 命令/可推导脚本、`native.link` /
+  `native.runtime` 中**路径形式**的产物都会记录 SHA-256。
+- `clux install --locked` 只校验，不运行 hook、不重写 lockfile。
+- `clux build --locked` 在编译前校验；包图、`clux.mod`、脚本或产物变化都会
+  报错并提示重新 `clux install`。
+- `native.link` 里的裸库名（如 `"z"` → `-lz`）是系统库，不参与产物 hash。
+- lockfile 不记录下载 URL/commit；脚本必须自己固定版本并校验 checksum。
+- 还没有依赖自动下载/解析（`deps/` 仍需存在）；lockfile 只描述当前包图。
 
 ## 8. 已知限制
 
@@ -195,4 +234,4 @@ clux install --force          # 忽略缓存重跑
 - `__stdcall` / `#pragma pack` / C bitfield 不能仅靠 `extern cfunc` 表达；
   `__stdcall` 用 `[[stdcall]]` 装饰器（见下），其余需要 C 侧 wrapper。
 - C++ 库要求 `extern "C"` wrapper；v1 不承诺 C++ ABI。
-- lockfile / 依赖自动下载尚未实现。
+- 依赖自动下载/解析尚未实现；`clux.lock` 只记录当前 `deps/` 图与产物 hash。

@@ -134,9 +134,9 @@ Produces:
 
 ```
 clux run <file.cx> [--keep-c] [--emit-c[=PATH]]  # build with C backend, then run
-clux build <file.cx> [--emit-c[=PATH]] [--keep-c] [--output=PATH]
+clux build <file.cx> [--emit-c[=PATH]] [--keep-c] [--output=PATH] [--locked]
 clux test [<file.cx>] [--backend=c] [--keep-c]   # run test blocks through C
-clux install [--allow-scripts] [--force]  # run clux.mod postinstall hooks
+clux install [--allow-scripts] [--force] [--locked]  # run postinstall hooks
 clux format <file.cx> [-o PATH]       # format source in place (or to PATH / stdout)
 clux version                          # version info
 ```
@@ -145,7 +145,10 @@ clux version                          # version info
 `--allow-scripts` it only lists them. Hooks run with cwd = package root and
 receive `CLUX_PKG_ROOT` / `CLUX_OS` / `CLUX_ARCH` / `CLUX_TARGET`; a
 successful hook writes `.clux/postinstall.ok` so it is cached until the command
-changes (`--force` reruns it).
+or its inferred script changes (`--force` reruns it). After hooks it writes
+`clux.lock` with each package's `clux.mod` hash, postinstall command/script
+hashes and native artifact hashes. `clux build --locked` / `clux install
+--locked` verify that lockfile before proceeding.
 
 `--emit-c` writes the generated C (and headers) without compiling/linking;
 `--keep-c` keeps it for inspection after a normal build/run/test. `.cxb` /

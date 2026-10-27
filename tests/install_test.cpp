@@ -46,6 +46,12 @@ void write_file(const std::filesystem::path &path, const std::string &text) {
   ofs << text;
 }
 
+std::string read_file(const std::filesystem::path &path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
+                     std::istreambuf_iterator<char>());
+}
+
 class ScopedCwd {
 public:
   explicit ScopedCwd(const std::filesystem::path &p) {
@@ -105,9 +111,11 @@ TEST(Install, PostinstallRequiresAllowScriptsAndCaches) {
              "    \"LINUX\": \"sh scripts/dep.sh\",\n"
              "    \"MACOS\": \"sh scripts/dep.sh\"\n"
 #endif
-             "  }\n"
+             "  },\n"
+             "  \"native\": { \"link\": [\"vendor/lib/libdep.a\"] }\n"
              "}\n");
   write_file(root / "deps" / "dep" / "dep.cx", "func dep(): i32 { return 1; }\n");
+  write_file(root / "deps" / "dep" / "vendor" / "lib" / "libdep.a", "dep-archive\n");
 #ifdef _WIN32
   write_file(root / "deps" / "dep" / "scripts" / "dep.bat",
              "@echo off\n"
@@ -146,6 +154,30 @@ TEST(Install, PostinstallRequiresAllowScriptsAndCaches) {
       EXPECT_NE(text.find("/"), std::string::npos) << text;
     }
 
+    ASSERT_TRUE(fs::exists(root / "clux.lock"));
+    std::string lock = read_file(root / "clux.lock");
+    EXPECT_NE(lock.find("libdep.a"), std::string::npos) << lock;
+    EXPECT_NE(lock.find("script_sha256"), std::string::npos) << lock;
+    ASSERT_EQ(run_cli(cli, {"install", "--locked"}), 0);
+
+    /* native 产物 hash 变化必须被 --locked 发现。 */
+    write_file(root / "deps" / "dep" / "vendor" / "lib" / "libdep.a",
+               "tampered\n");
+    EXPECT_NE(run_cli(cli, {"install", "--locked"}), 0);
+    write_file(root / "deps" / "dep" / "vendor" / "lib" / "libdep.a",
+               "dep-archive\n");
+    ASSERT_EQ(run_cli(cli, {"install", "--locked"}), 0);
+
+    std::string mod = read_file(root / "clux.mod");
+    std::string changed = mod;
+    size_t vpos = changed.find("\"0.1.0\"");
+    ASSERT_NE(vpos, std::string::npos);
+    changed.replace(vpos, 7, "\"0.1.1\"");
+    write_file(root / "clux.mod", changed);
+    EXPECT_NE(run_cli(cli, {"install", "--locked"}), 0);
+    write_file(root / "clux.mod", mod);
+    ASSERT_EQ(run_cli(cli, {"install", "--locked"}), 0);
+
     /* 已成功的 hook 不应重复执行：删掉产物后再次 install，产物不会被重建。 */
     fs::remove(root / "marker.txt", ec);
     ASSERT_EQ(run_cli(cli, {"install", "--allow-scripts"}), 0);
@@ -154,7 +186,50 @@ TEST(Install, PostinstallRequiresAllowScriptsAndCaches) {
     /* --force 强制重跑。 */
     ASSERT_EQ(run_cli(cli, {"install", "--allow-scripts", "--force"}), 0);
     EXPECT_TRUE(fs::exists(root / "marker.txt"));
+
+    /* 脚本内容变化必须使 marker 失效并重跑。 */
+#ifdef _WIN32
+    fs::path post = root / "scripts" / "post.bat";
+#else
+    fs::path post = root / "scripts" / "post.sh";
+#endif
+    write_file(post, read_file(post) + "\n");
+    fs::remove(root / "marker.txt", ec);
+    ASSERT_EQ(run_cli(cli, {"install", "--allow-scripts"}), 0);
+    EXPECT_TRUE(fs::exists(root / "marker.txt"));
   }
 
+  std::filesystem::remove_all(root, ec);
+}
+
+TEST(Install, BuildLockedVerifiesManifest) {
+  namespace fs = std::filesystem;
+  static int seq = 100;
+  fs::path root = fs::absolute(fs::path(clux_test_temp_dir()) /
+                               ("lock_build_" + std::to_string(seq++)));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root, ec);
+  write_file(root / "clux.mod",
+             "{\n"
+             "  \"name\": \"lockbuild\",\n"
+             "  \"version\": \"0.1.0\",\n"
+             "  \"entry\": \"main.cx\"\n"
+             "}\n");
+  write_file(root / "main.cx", "func main(): i32 { return 0; }\n");
+
+  const std::string cli = cli_abs();
+  {
+    ScopedCwd cwd(root);
+    ASSERT_EQ(run_cli(cli, {"install", "--allow-scripts"}), 0);
+    ASSERT_TRUE(fs::exists(root / "clux.lock"));
+    ASSERT_EQ(run_cli(cli, {"build", "main.cx", "--locked"}), 0);
+
+    std::string mod = read_file(root / "clux.mod");
+    write_file(root / "clux.mod", mod + "\n");
+    EXPECT_NE(run_cli(cli, {"build", "main.cx", "--locked"}), 0);
+    write_file(root / "clux.mod", mod);
+    EXPECT_EQ(run_cli(cli, {"build", "main.cx", "--locked"}), 0);
+  }
   std::filesystem::remove_all(root, ec);
 }

@@ -3,6 +3,8 @@
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/ffi_cond.h"
+#include "core/sha256.h"
+#include "module/lockfile.h"
 #include "module/package.h"
 
 #include <stdint.h>
@@ -25,12 +27,13 @@
 #define INSTALL_MAX_DEPTH 8
 
 static const char *USAGE =
-    "usage: clux install [--allow-scripts] [--force]\n"
+    "usage: clux install [--allow-scripts] [--force] [--locked]\n"
     "\n"
-    "Run `postinstall` hooks declared by clux.mod:\n"
+    "Run `postinstall` hooks declared by clux.mod and write clux.lock:\n"
     "  clux install                  list hooks and refuse to run them\n"
     "  clux install --allow-scripts  execute hooks (deps first, then root)\n"
-    "  clux install --force          run even if the hook already succeeded\n";
+    "  clux install --force          run even if the hook already succeeded\n"
+    "  clux install --locked         verify clux.lock; do not run or write\n";
 
 static char *dup_cstr(const char *s) {
     size_t n = strlen(s) + 1;
@@ -159,15 +162,6 @@ static bool list_subdirs(const char *dir, dir_list_t *out) {
 
 /* ---- marker / hash ---- */
 
-static uint64_t fnv1a64(const char *s) {
-    uint64_t h = 1469598103934665603ULL;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        h ^= (uint64_t)*p;
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 static char *marker_path(const char *root) {
     return join_path(root, ".clux/postinstall.ok");
 }
@@ -276,9 +270,15 @@ static int run_one(const char *root, const package_desc_t *desc, bool allow,
         return 1;
     }
 
-    char hashbuf[32];
-    snprintf(hashbuf, sizeof hashbuf, "%016llx",
-             (unsigned long long)fnv1a64(cmd));
+    char hashbuf[65];
+    char spath[4096];
+    char shash[65];
+    bool has_script =
+        clux_lock_postinstall_script(root, cmd, spath, sizeof spath, shash,
+                                     sizeof shash);
+    char combo[8192];
+    snprintf(combo, sizeof combo, "%s\n%s", cmd, has_script ? shash : "");
+    clux_sha256_hex(combo, strlen(combo), hashbuf);
     char *marker = marker_path(root);
     bool cached = false;
     if (!force && marker) {
@@ -358,6 +358,7 @@ int cmd_install(const cmd_args_t *args) {
 
     bool allow = cmd_args_has(args, "allow-scripts");
     bool force = cmd_args_has(args, "force");
+    bool locked = cmd_args_has(args, "locked");
 
     allocator_t *alloc = create_allocator(malloc, free);
     if (!alloc) {
@@ -397,14 +398,34 @@ int cmd_install(const cmd_args_t *args) {
     const char *os = ffi_defines_get("OS_TYPE");
     const char *arch = ffi_defines_get("OS_ARCH");
 
+    char err[1024];
+    int rc = 1;
+    if (locked) {
+        if (!clux_lock_verify(alloc, arena, root, err, sizeof err)) {
+            fprintf(stderr, "error: %s\n", err);
+            goto done;
+        }
+        printf("install: clux.lock is up to date\n");
+        rc = 0;
+        goto done;
+    }
+
     install_stats_t st = {0};
     install_tree(alloc, arena, root, 0, allow, force, os, arch, &st);
 
-    if (!st.failed && st.found == 0)
-        printf("install: no postinstall scripts\n");
+    if (!st.failed) {
+        if (st.found == 0) printf("install: no postinstall scripts\n");
+        if (!clux_lock_write(alloc, arena, root, err, sizeof err)) {
+            fprintf(stderr, "error: %s\n", err);
+            goto done;
+        }
+        printf("wrote %s/clux.lock\n", root);
+        rc = 0;
+    }
 
+done:
     allocator_free(alloc, (void **)&root);
     arena_destroy(alloc, &arena);
     delete_allocator(&alloc);
-    return st.failed ? 1 : 0;
+    return rc;
 }

@@ -36,8 +36,8 @@ static const cmd_t g_cmds[] = {
     {
         .name = "build",
         .usage = "clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]] "
-                 "[--keep-c] [--build-dir=DIR] [--output=PATH] [--cc=PATH] "
-                 "[--cflag=FLAG]... [--ldflag=FLAG]... [-I DIR]... "
+                 "[--keep-c] [--build-dir=DIR] [--output=PATH] [--locked] "
+                 "[--cc=PATH] [--cflag=FLAG]... [--ldflag=FLAG]... [-I DIR]... "
                  "[-L DIR]... [-l LIB]... [-D KEY=VALUE]...",
         .help =
             "Compile clux source into a native executable.\n"
@@ -48,6 +48,7 @@ static const cmd_t g_cmds[] = {
             "  clux build <file.cx> --emit-obj[=P]  compile to an object only\n"
             "  clux build <file.cx> --keep-c    keep generated C after compiling\n"
             "  clux build <file.cx> --output=P   executable path P\n"
+            "  clux build <file.cx> --locked     verify clux.lock first\n"
             "\n"
             "Pipeline: .cx -> .c/.h -> (cc -c) -> object -> link -> executable.\n"
             "Like cmake, outputs mirror the source tree under the build dir\n"
@@ -74,6 +75,10 @@ static const cmd_t g_cmds[] = {
             "\n"
             "The host C compiler is $CC (clang on Windows, cc elsewhere) unless\n"
             "--cc is given.\n"
+            "\n"
+            "--locked verifies clux.lock (package clux.mod hashes, postinstall\n"
+            "commands/scripts and native artifact hashes) before building; run\n"
+            "`clux install` if it is stale.\n"
             "\n"
             "Toolchain options (passed through to the host compiler):\n"
             "  --cc=PATH            C compiler\n"
@@ -137,19 +142,21 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "install",
-        .usage = "clux install [--allow-scripts] [--force]",
+        .usage = "clux install [--allow-scripts] [--force] [--locked]",
         .help =
             "Run postinstall hooks declared by clux.mod.\n"
             "\n"
             "  clux install                  list hooks and refuse to run them\n"
             "  clux install --allow-scripts  execute hooks (deps first, then root)\n"
             "  clux install --force          run even if the hook already succeeded\n"
+            "  clux install --locked         verify clux.lock; do not run or write\n"
             "\n"
             "Hooks are arbitrary package scripts and are never run by\n"
             "`clux build`. They execute with cwd = package root and receive\n"
-            "CLUX_PKG_ROOT, CLUX_OS and CLUX_ARCH. A successful hook writes\n"
-            ".clux/postinstall.ok so it is not repeated until the command\n"
-            "changes; --force overrides that.",
+            "CLUX_PKG_ROOT, CLUX_OS, CLUX_ARCH and CLUX_TARGET. A successful\n"
+            "hook writes .clux/postinstall.ok so it is not repeated until the\n"
+            "command changes; --force overrides that. After hooks, clux writes\n"
+            "clux.lock with clux.mod/postinstall/artifact hashes.",
         .handler = cmd_install,
     },
     {
