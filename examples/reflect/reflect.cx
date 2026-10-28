@@ -10,8 +10,7 @@
 //   T.<key> 可链式：T.field_type(0).name
 //   类型值不能存变量 → 绑定反射出的类型用 `type Alias = T.field_type(0);`
 //
-// 所有权（own/ref/fatal）**不在反射里**：它是类型的一部分（参与 intern），
-// 释放序列由编译器从类型生成，反射再暴露一遍是冗余的。
+// 所有权不在反射里：运行时所有权由标准库类型/分配器负责，反射只描述类型形状。
 
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): i32;
@@ -27,8 +26,8 @@ struct Runner {
     var speed: i32 = 0;
     var tag: i64 = 0;
 
-    func run(self: ref *Runner, a: i32): i64 { return 1i64; }
-    func stop(self: ref *Runner): void { }
+    func run(self: *Runner, a: i32): i64 { return 1i64; }
+    func stop(self: *Runner): void { }
 }
 
 type A3 = [3]i32;

@@ -104,6 +104,15 @@ strslice_t token_strslice(const token_t *t);
 ast_node_t *parse_scope_annotated_type(parser_t *p);
 
 /**
+ * 解析一个裸指针/切片/可选类型原子（raw pointer 模式）。
+ *
+ * 与 parse_scope_annotated_type 的区别：只吃类型原子，不消费 `extends` /
+ * 三元 / 二元运算符。用于 `[N]T` 的 T、struct 字段、make/new 元素类型、
+ * 泛型实参等位置，避免 `[2]i32 extends ...` 把 `extends` 吃进元素类型。
+ */
+ast_node_t *parse_raw_type_atom(parser_t *p);
+
+/**
  * 解析作用域标注集合 '<a,b,c>'（不包裹被标注类型）。
  * '< 已由调用点确认（lexer 合成 "'<" 复合 SYMBOL token），消费该复合
  * token 后循环解析标识符（'*' 记 global），直到 '>'。

@@ -2,6 +2,9 @@
 #include "core/panic.h"
 #include "parser/ast_error.h"
 #include "parser/ast_scope_annot.h"
+#include "parser/ast_ptr.h"
+#include "parser/ast_option.h"
+#include "parser/ast_slice_type.h"
 #include "parser/parse_expr.h"
 
 #include <stdint.h>
@@ -338,6 +341,65 @@ strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count) {
 }
 
 ast_node_t *parse_scope_annotated_type(parser_t *p) {
+    /* raw-pointer 迁移期：裸 `*T` / `[]T` 类型（旧语法要求 own/ref/fatal
+       前缀；迁移后直接用裸指针）。 */
+    if (true && check_symbol(p, "*")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *base = parse_scope_annotated_type(p);
+        if (!base || base->kind == AST_ERROR) {
+            return base ? base
+                        : ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                        p->pos,
+                                        "expected type after '*'");
+        }
+        ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
+        if (!node) return NULL;
+        ((ast_ptr_t *)node)->ownership = NULL;
+        ((ast_ptr_t *)node)->base_type = base;
+        return node;
+    }
+    if (true && check_symbol(p, "[")) {
+        uint32_t save = p->pos;
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (check_symbol(p, "]")) {
+            advance(p);
+            skip_trivia(p);
+            ast_node_t *elem = parse_scope_annotated_type(p);
+            if (!elem || elem->kind == AST_ERROR) {
+                return elem ? elem
+                            : ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                            p->pos,
+                                            "expected type after '[]'");
+            }
+            ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
+            if (!node) return NULL;
+            ((ast_slice_type_t *)node)->ownership = NULL;
+            ((ast_slice_type_t *)node)->elem_type = elem;
+            return node;
+        }
+        p->pos = save;
+    }
+
+    if (true && check_symbol(p, "?")) {
+        uint32_t save = p->pos;
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (check_symbol(p, "*") || check_symbol(p, "[")) {
+            ast_node_t *sub = parse_scope_annotated_type(p);
+            if (!sub || sub->kind == AST_ERROR) return sub;
+            ast_node_t *node = ast_option_new(p->arena, tb, p->pos);
+            if (!node) return NULL;
+            ((ast_option_t *)node)->sub = sub;
+            return node;
+        }
+        p->pos = save;
+    }
+
     /* lexer 把前导 `'<` 合成单符号 token（lexer.c:581，'< 紧跟 = 作用域
        标注前缀，非字符字面量）；此处匹配复合 token "'<"，非单 "'"。 */
     if (!check_symbol(p, "'<")) {
@@ -371,4 +433,60 @@ ast_node_t *parse_scope_annotated_type(parser_t *p) {
     ((ast_scope_annot_t *)node)->count = count;
     ((ast_scope_annot_t *)node)->sub   = sub;
     return node;
+}
+
+ast_node_t *parse_raw_type_atom(parser_t *p) {
+    if (!p) return NULL;
+
+
+    if (check_symbol(p, "?")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *sub = parse_raw_type_atom(p);
+        if (!sub || sub->kind == AST_ERROR) return sub;
+        ast_node_t *node = ast_option_new(p->arena, tb, p->pos);
+        if (!node) return NULL;
+        ((ast_option_t *)node)->sub = sub;
+        return node;
+    }
+    if (check_symbol(p, "*")) {
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        ast_node_t *base = parse_raw_type_atom(p);
+        if (!base || base->kind == AST_ERROR) {
+            return base ? base
+                        : ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                        p->pos, "expected type after '*'");
+        }
+        ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
+        if (!node) return NULL;
+        ((ast_ptr_t *)node)->ownership = NULL;
+        ((ast_ptr_t *)node)->base_type = base;
+        return node;
+    }
+    if (check_symbol(p, "[")) {
+        uint32_t save = p->pos;
+        uint32_t tb = p->pos;
+        advance(p);
+        skip_trivia(p);
+        if (check_symbol(p, "]")) {
+            advance(p);
+            skip_trivia(p);
+            ast_node_t *elem = parse_raw_type_atom(p);
+            if (!elem || elem->kind == AST_ERROR) {
+                return elem ? elem
+                            : ast_error_new(p->diag, p->tokens, p->arena, tb,
+                                            p->pos, "expected type after '[]'");
+            }
+            ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
+            if (!node) return NULL;
+            ((ast_slice_type_t *)node)->ownership = NULL;
+            ((ast_slice_type_t *)node)->elem_type = elem;
+            return node;
+        }
+        p->pos = save;
+    }
+    return parse_expr_prec(p, 22);
 }

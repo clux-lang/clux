@@ -216,7 +216,7 @@ TEST(Driver, RunFileTypeExpressionsInTypePositionPass) {
      误导性诊断失败。 */
   std::string path = write_temp_file(
       "type TF = func(i32)->i32;\n"
-      "type TP = own *i32;\n"
+      "type TP = *i32;\n"
       "type TA = [2]i32;\n"
       "func main(): i32 {\n"
       "  var f: TF = undefined;\n"
@@ -237,7 +237,6 @@ TEST(Driver, RunFileTypeExpressionInVarInitRejected) {
       "var t = <i32, i32>;",
       "var f = func(i32)->i32;",
       "var o = ?i32;",
-      "var p = own *i32;",
   };
   for (const char *decl : cases) {
     std::string src = std::string("func main(): i32 {\n  ") + decl +

@@ -17,7 +17,7 @@
 //      （不是 opaque）：签名即文档，类型检查也能挡住传错函数。
 //
 // 比较函数拿到的是元素**地址**（C 的 `const void *`），因此参数声明为 `opaque`
-// 再显式 `as ref *i32` 解引用取值 —— 与 C 里写 `*(const int*)a` 等价。
+// 再显式 `as *i32` 解引用取值 —— 与 C 里写 `*(const int*)a` 等价。
 
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): i32;
@@ -29,8 +29,8 @@ extern lib crt from "libSystem.B.dylib" assert(OS_TYPE == "MACOS");
 
 // C 标准库排序：void qsort(void *base, size_t n, size_t size,
 //                          int (*cmp)(const void *, const void *));
-extern cfunc crt::qsort(base: ref opaque, n: usize, size: usize,
-                        cmp: cfunc(ref *const opaque, ref *const opaque) -> i32): void;
+extern cfunc crt::qsort(base: opaque, n: usize, size: usize,
+                        cmp: cfunc(*const opaque, *const opaque) -> i32): void;
 
 // 回调次数：由 C 侧触发的 clux 函数体修改**模块全局变量**（可写），
 // 用来证明"确实是 C 库在调用我们"。
@@ -38,10 +38,10 @@ var CALLS: i32 = 0;
 
 // C ABI 函数（可被 C 调用）：三值比较，等价于 C 的
 //   int cmp(const void *a, const void *b) { int x = *(int*)a, y = *(int*)b; ... }
-cfunc cmp(a: ref *const opaque, b: ref *const opaque): i32 {
+cfunc cmp(a: *const opaque, b: *const opaque): i32 {
     CALLS = CALLS + 1;
-    var x: i32 = (a as ref *i32).*;
-    var y: i32 = (b as ref *i32).*;
+    var x: i32 = (a as *i32).*;
+    var y: i32 = (b as *i32).*;
     if (x < y) {
         return -1;
     }
@@ -57,7 +57,7 @@ func main(): i32 {
     // 原生 printf 只认 C 的转换符，聚合值请逐个成员打印（或自己写格式化函数）。
     _ = libc::printf("before: %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
 
-    // 数组地址（ref 指针 → opaque 隐式转换）+ C 函数指针 → libc qsort
+    // 数组地址（裸指针 → opaque 隐式转换）+ C 函数指针 → libc qsort
     crt::qsort(arr.&, 5, 4, cfunc_ptr(cmp));
 
     _ = libc::printf("after:  %d %d %d %d %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);

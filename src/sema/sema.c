@@ -321,41 +321,19 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
-  /* 预注册 RC 内置函数（share/weak 是真实类型，源码不写这些名字）：
-       - __make_share(p)：fatal/own *T → share *T（§12.1 创建通道）
-       - __weak_get(w)  ：weak *T → ?share *T（§12.4 原子升级，`.get()` 语法糖） */
+  /* free(p) 释放指针/切片。 */
   {
-    const type_t *vsig = type_func_sig(sema->vm, NULL, 0,
-                                       sema->vm->type_opaque,
+    const type_t *fsig = type_func_sig(sema->vm, NULL, 0,
+                                       sema->vm->type_void,
                                        /*is_variadic=*/true);
-    if (vsig) {
-      const char *names[2] = {"__make_share", "__weak_get"};
-      sema_builtin_op_t ops[2] = {SEMA_BUILTIN_MAKE_SHARE,
-                                  SEMA_BUILTIN_WEAK_GET};
-      for (int k = 0; k < 2; k++) {
-        uint32_t fid = 0;
-        if (sema->vm->functions) {
-          size_t nf = vec_len(sema->vm->functions);
-          for (size_t i = 0; i < nf; i++) {
-            func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-            if (bf && bf->name.ptr &&
-                bf->name.len == strlen(names[k]) &&
-                memcmp(bf->name.ptr, names[k], bf->name.len) == 0) {
-              fid = bf->id;
-              break;
-            }
-          }
-        }
-        sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = vsig,
-                              .is_active = true, .fid = fid,
-                              .builtin_op = ops[k]};
-        sema_scope_define(sema->global_scope,
-                          strslice_from_bytes((char *)names[k],
-                                              strlen(names[k])),
-                          &init);
-      }
+    if (fsig) {
+      sema_symbol_t finit = {.kind = SEMA_SYM_FUNC, .type = fsig,
+                             .is_active = true, .fid = 0,
+                             .builtin_op = SEMA_BUILTIN_FREE};
+      sema_scope_define(sema->global_scope, STRSLICE_LIT("free"), &finit);
     }
   }
+
 
   /* 预注册 __deep_clone 内置函数（运行期对象图深拷贝）：静态类型表达不了
      克隆语义的形态（闭包值 / cunion 被指向值 / 无 prelude 的切片）在 sema

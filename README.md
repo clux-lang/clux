@@ -220,6 +220,8 @@ Milestone designs:
 - `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, lowered to direct C calls)
 - `docs/port-packages.md` — port packages (`export extern`) and `clux.mod`'s
   `native` section (`link` / `libdirs` / `runtime`, platform overrides)
+- `docs/runtime-ownership.md` — runtime-ownership plan: raw pointers,
+  `__init__`/`__assign__`/`__dispose__`, allocators and UAF policies
 - `docs/milestones.md` — milestone roadmap and status
 
 Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,

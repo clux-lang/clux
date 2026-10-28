@@ -32,7 +32,7 @@ const char *kPrelude =
     "struct Holder { arr: [2]i32; }\n"
     "struct P {\n"
     "  x: i32;\n"
-    "  func add(self: ref *P, a: i32, b: i32): i32 { return self.x + a + b; }\n"
+    "  func add(self: *P, a: i32, b: i32): i32 { return self.x + a + b; }\n"
     "}\n"
     "func sum2(a: i32, b: i32): i32 { return a + b; }\n"
     "func sum3(a: i32, b: i32, c: i32): i32 { return a + b + c; }\n"
@@ -190,6 +190,7 @@ TEST(SpreadConstruct, NewWithSpread) {
   clux_expect_ok(ssrc("func main(): i32 {\n"
                       "  var p = .Point{ .x = 5, .y = 6 };\n"
                       "  var r = new Point{ ...p };\n"
+                      "  defer |r| { free(r); }\n"
                       "  if (r.*.x != 5 || r.*.y != 6) { return 1; }\n"
                       "  return 0;\n"
                       "}\n"),

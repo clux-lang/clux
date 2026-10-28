@@ -3805,7 +3805,7 @@ TEST_F(SemaTest, TypeExpressionsInTypePosition) {
      * 失败。 */
     EXPECT_TRUE(analyze(
         "type TF = func(i32)->i32;"
-        "type TP = own *i32;"
+        "type TP = *i32;"
         "type TA = [2]i32;"
         "func main(): void {"
         "  var f: TF = undefined;"
@@ -3870,9 +3870,9 @@ TEST_F(SemaTest, GenericInstancesAreMaterializedBeforeBackends) {
     ASSERT_TRUE(analyze(
         "struct Box[T] {\n"
         "  v: T;\n"
-        "  func get(self: ref *Box[T]): T { return self.v; }\n"
+        "  func get(self: *Box[T]): T { return self.v; }\n"
         "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
-        "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+        "  func map[U](self: *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
         "}\n"
         "func inc(x: i32): i32 { return x + 1; }\n"
         "func id[T](x: T): T { return x; }\n"

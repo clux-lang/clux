@@ -4,19 +4,18 @@
 //
 //   - 捕获列表 `|...|` 与闭包（func |...|）**同一套**解析与语义：纯 id 捕获 =
 //     clone 外层变量的**值**（登记之后改外层变量不影响 defer 体）；括号
-//     VALUE DECL = 定义点在外层求值构造临时捕获值；捕获 ref/opaque 须带作用域
+//     VALUE DECL = 定义点在外层求值构造临时捕获值；捕获裸指针/opaque 须带作用域
 //     标注 '<...>（与闭包同规则）；空捕获列表可省略，也可写 `defer ||` / `defer | |`
 //     （三者 AST 相同，fmt 统一渲染为省略形态）。
 //   - 语义：在当前作用域创建一个**无参 void 闭包值**，并把它压进该作用域的
-//     defer 栈；作用域退出（pop_scope）时在**内存释放（own/fatal dispose、
-//     scope 销毁）之前**把栈**逆序**（LIFO）弹出来逐个调用。
+//     defer 栈；作用域退出（pop_scope）时按 LIFO 执行；资源由显式 free 负责。
 //   - 执行时机：落到块尾 / return（含所有被弹出作用域）/ break / continue 都
 //     经 pop_scope，因此 defer 一定执行；顺序 = 内层作用域先于外层、同层后进先出。
 //   - 块体就是**函数体**：非 void 的表达式语句须显式 `_ = expr` 丢弃；`return`
 //     只从该 defer 块体返回（它返回 void，不能带值）；`break`/`continue` 不能
 //     跨出 defer（那是另一个函数体）。
 //   - 捕获是值语义 → defer 体内**不能直接改写外层局部变量**；要观察结果请写
-//     全局变量，或捕获 ref 通过指针改内存（本示例两种都用到）。
+//     全局变量，或捕获裸指针通过指针改内存（本示例两种都用到）。
 
 extern lib libc from "*";
 extern cfunc libc::printf(format: str, ...): i32;
@@ -95,17 +94,18 @@ func main(): i32 {
     }
     var loop: i32 = seq; // 10, 21, 32 → 102132
 
-    // ---- 5. 与资源（own）释放的顺序：defer 在 dispose **之前**跑，
-    //         因此 defer 体内通过 ref 捕获读得到 own 堆块 / own 切片的内容 ----
+    // ---- 5. defer 与显式 free 的顺序：LIFO → 读取先于释放 ----
      {
-        var p: own *Box = new Box{ .v = 41, .w = 42 };
-        // 捕获 ref 须带作用域标注（'<*> = 不逃出全局作用域），与闭包同规则
-        defer '<*> |(q: ref *Box = p.*.&)| {
+        var p: *Box = new Box{ .v = 41, .w = 42 };
+        var buf: []i32 = make(i32, 3, 10, 20, 30);
+
+        // 先登记 free，再登记读取；退出时后登记的读取先执行。
+        defer |(q: *Box = p)| { free(q); }
+        defer |(s: []i32 = buf)| { free(s); }
+        defer |(q: *Box = p)| {
             own_field = q.w + 1;
         }
-
-        var buf: own []i32 = make(i32, 3, 10, 20, 30);
-        defer '<*> |(s: ref []i32 = buf[:])| {
+        defer |(s: []i32 = buf)| {
             slice_sum = s[0] + s[1] + s[2];
         }
 
@@ -113,8 +113,7 @@ func main(): i32 {
             return 2;
         }
     }
-    // 同一 pop_scope 内逆序执行（切片 defer 先跑、Box defer 后跑），
-    // 两者都在 own 堆块/own 切片的 dispose 之前。
+    // 执行顺序：slice 读 → Box 读 → free slice → free Box
     if (own_field != 43) {
         return 3;
     }

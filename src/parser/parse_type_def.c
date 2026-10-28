@@ -38,7 +38,9 @@ ast_node_t *parse_type_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
-    ast_node_t *expr = parse_expr(p);
+    bool raw_type = true && check_symbol(p, "*");
+    ast_node_t *expr = raw_type ? parse_raw_type_atom(p)
+                                : parse_expr(p);
     if (!expr || expr->kind == AST_ERROR) {
         if (!expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos,

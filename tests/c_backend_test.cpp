@@ -1,5 +1,6 @@
 #include "test_common.h"
 
+
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -187,7 +188,7 @@ TEST(CBackend, BuildMainVoid) {
 
 TEST(CBackend, BuildMainArgvSlice) {
   const std::string src = write_temp_file(
-      "func main(argv: ref []str): i32 {\n"
+      "func main(argv: []str): i32 {\n"
       "  if (len(argv) != 3usize) { return 10; }\n"
       "  if (argv[1] != \"hello\") { return 11; }\n"
       "  if (argv[2] != \"world\") { return 12; }\n"
@@ -206,7 +207,7 @@ TEST(CBackend, BuildMainArgvSlice) {
 
 TEST(CBackend, BuildMainArgcAndArgv) {
   const std::string src = write_temp_file(
-      "func main(argc: i32, argv: ref []str): i32 {\n"
+      "func main(argc: i32, argv: []str): i32 {\n"
       "  return argc * 10 + (len(argv) as i32);\n"
       "}\n",
       "cbackend_main_argc_argv");
@@ -279,7 +280,7 @@ TEST(CBackend, BuildStructArrayPointer) {
       "  var p: Point = .Point{ .x = 2, .y = 3 };\n"
       "  if (p.x != 2 || p.y != 3) { return 1; }\n"
       "  p.x = 5;\n"
-      "  var r: ref *Point = p.&;\n"
+      "  var r: *Point = p.&;\n"
       "  r.y = 7;\n"
       "  if (sum(p) != 12) { return 2; }\n"
       "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
@@ -330,7 +331,7 @@ TEST(CBackend, BuildDeferAndOwn) {
       "func main(): i32 {\n"
       "  if (f() != 0) { return 1; }\n"
       "  if (g != 21) { return 2; }\n"
-      "  var p: own *Point = new Point{ .x = 4, .y = 5 };\n"
+      "  var p: *Point = new Point{ .x = 4, .y = 5 };\n"
       "  if (p.x != 4) { return 3; }\n"
       "  return p.y;\n"
       "}\n",
@@ -347,11 +348,11 @@ TEST(CBackend, BuildDeferAndOwn) {
 
 TEST(CBackend, BuildOwnCompositeAndArray) {
   const std::string src = write_temp_file(
-      "struct Box { p: own *i32; }\n"
+      "struct Box { p: *i32; }\n"
       "func main(): i32 {\n"
-      "  var b: own *Box = new Box{ .p = new i32{7} };\n"
+      "  var b: *Box = new Box{ .p = new i32{7} };\n"
       "  if (b.p.* != 7) { return 1; }\n"
-      "  var a: own [2]own *i32 = .[2]own *i32{ new i32{1}, new i32{2} };\n"
+      "  var a: [2]*i32 = .[2]*i32{ new i32{1}, new i32{2} };\n"
       "  if (a[0].* != 1) { return 2; }\n"
       "  if (a[1].* != 2) { return 3; }\n"
       "  return 0;\n"
@@ -370,10 +371,10 @@ TEST(CBackend, BuildOwnCompositeAndArray) {
 TEST(CBackend, BuildSliceMakeAndSlice) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: own []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
       "  if (len(s) != 3usize) { return 1; }\n"
       "  if (s[1] != 2) { return 2; }\n"
-      "  var t: ref []i32 = s[1:3];\n"
+      "  var t: []i32 = s[1:3];\n"
       "  return t[0] + t[1];\n"
       "}\n",
       "cbackend_slice");
@@ -390,7 +391,7 @@ TEST(CBackend, BuildSliceMakeAndSlice) {
 TEST(CBackend, BuildOwnSlice) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: own []own *i32 = make(own *i32, 2, new i32{5}, new i32{6});\n"
+      "  var s: []*i32 = make(*i32, 2, new i32{5}, new i32{6});\n"
       "  if (len(s) != 2usize) { return 1; }\n"
       "  return s[0].* + s[1].*;\n"
       "}\n",
@@ -413,7 +414,7 @@ TEST(CBackend, BuildStringLiteralAndSlice) {
       "  if (a != b) { return 1; }\n"
       "  if (a == \"abd\") { return 2; }\n"
       "  if (len(a) != 3usize) { return 3; }\n"
-      "  var t: ref []const u8 = a[1:3];\n"
+      "  var t: []const u8 = a[1:3];\n"
       "  if (len(t) != 2usize) { return 4; }\n"
       "  if (t[0] != 'b') { return 5; }\n"
       "  return 0;\n"
@@ -463,7 +464,7 @@ TEST(CBackend, BuildOptionalAndUnion) {
 TEST(CBackend, BuildUnionOwnAndOptionalField) {
   const std::string src = write_temp_file(
       "struct R { v: ?i32; }\n"
-      "union U { p: own *i32; n: i32; }\n"
+      "union U { p: *i32; n: i32; }\n"
       "func main(): i32 {\n"
       "  var r = .R{ .v = .?i32{7} };\n"
       "  if (r.v == nil) { return 1; }\n"
@@ -540,8 +541,8 @@ TEST(CBackend, BuildMethods) {
   const std::string src = write_temp_file(
       "struct Point {\n"
       "  x: i32;\n"
-      "  func get(self: ref *Point): i32 { return self.x; }\n"
-      "  func plus(self: ref *Point, y: i32): i32 { return self.x + y; }\n"
+      "  func get(self: *Point): i32 { return self.x; }\n"
+      "  func plus(self: *Point, y: i32): i32 { return self.x + y; }\n"
       "}\n"
       "func main(): i32 {\n"
       "  var p = .Point{ .x = 4 };\n"
@@ -583,9 +584,9 @@ TEST(CBackend, BuildStaticMethod) {
 TEST(CBackend, BuildOwnCaptureClosure) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{5};\n"
-      "  var f: own func |p: own *i32| (i32) -> i32 =\n"
-      "      move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
+      "  var p: *i32 = new i32{5};\n"
+      "  var f: func |p: *i32| (i32) -> i32 =\n"
+      "      (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
       "  return f(1);\n"
       "}\n",
       "cbackend_m5_own_closure");
@@ -602,10 +603,10 @@ TEST(CBackend, BuildOwnCaptureClosure) {
 TEST(CBackend, BuildCloneCaptureClosure) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{5};\n"
-      "  var f: own func |p: own *i32| (i32) -> i32 =\n"
-      "      move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
-      "  var g: own func |p: own *i32| (i32) -> i32 = clone(f);\n"
+      "  var p: *i32 = new i32{5};\n"
+      "  var f: func |p: *i32| (i32) -> i32 =\n"
+      "      (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
+      "  var g: func |p: *i32| (i32) -> i32 = (f);\n"
       "  return g(1);\n"
       "}\n",
       "cbackend_m5_clone_closure");
@@ -746,7 +747,7 @@ TEST(CBackend, BuildBitfieldU64AndPointerAccess) {
       "func main(): i32 {\n"
       "  var x: B = .B{ .a = 0x123456789Au64, .b = 0xABCDEFu64 };\n"
       "  if (x.a != 0x123456789Au64 || x.b != 0xABCDEFu64) { return 1; }\n"
-      "  var p: ref *B = x.&;\n"
+      "  var p: *B = x.&;\n"
       "  p.a = 0xFFFFFFFFFFu64;\n"
       "  if (x.a != 0xFFFFFFFFFFu64) { return 2; }\n"
       "  return 0;\n"
@@ -780,7 +781,7 @@ TEST(CBackend, BuildBitfieldInStructArrayAndLoopUpdate) {
       "  if (a[1].b != 3u8) { return 5; }\n"
       "  for (var i = 0; i < 3; i += 1) { a[1].a += 1u8; }\n"
       "  if (a[1].a != 3u8) { return 6; }\n"
-      "  var p: ref *S = s.&;\n"
+      "  var p: *S = s.&;\n"
       "  p.f.b = 33u8;\n"
       "  if (s.f.b != 33u8) { return 7; }\n"
       "  return 0;\n"
@@ -826,7 +827,7 @@ TEST(CBackend, BuildMetadataMembers) {
       "  [[metadata(\"unit\", \"px\")]]\n"
       "  x: i32;\n"
       "  [[metadata(\"role\", \"handler\")]]\n"
-      "  func run(self: ref *User): i32 { return 1; }\n"
+      "  func run(self: *User): i32 { return 1; }\n"
       "}\n"
       "func main(): i32 {\n"
       "  var n: str = get_metadata[User](\"name\");\n"
@@ -944,9 +945,9 @@ TEST(CBackend, BuildResultSugarAndGenericStructInstance) {
       "  good: bool;\n"
       "  val: ?T;\n"
       "  err: ?E;\n"
-      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
-      "  func value(self: ref *const Result[T, E]): T { return self.val.!; }\n"
-      "  func error(self: ref *const Result[T, E]): E { return self.err.!; }\n"
+      "  func ok(self: *const Result[T, E]): bool { return self.good; }\n"
+      "  func value(self: *const Result[T, E]): T { return self.val.!; }\n"
+      "  func error(self: *const Result[T, E]): E { return self.err.!; }\n"
       "  func of_value(v: T): Result[T, E] {\n"
       "    return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };\n"
       "  }\n"
@@ -988,14 +989,14 @@ TEST(CBackend, BuildGenericStructInstanceMethods) {
   const std::string src = write_temp_file(
       "struct Box[T] {\n"
       "  v: T;\n"
-      "  func get(self: ref *Box[T]): T { return self.v; }\n"
+      "  func get(self: *Box[T]): T { return self.v; }\n"
       "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
-      "  func echo(self: ref *Box[T]): T { var t: T = self.v; return t; }\n"
-      "  func arr(self: ref *Box[T]): [2]T {\n"
+      "  func echo(self: *Box[T]): T { var t: T = self.v; return t; }\n"
+      "  func arr(self: *Box[T]): [2]T {\n"
       "    var a: [2]T = .[2]T{ self.v, self.v };\n"
       "    return a;\n"
       "  }\n"
-      "  func copy_of(self: ref *Box[T]): Box[T] { return Box[T]::mk(self.v); }\n"
+      "  func copy_of(self: *Box[T]): Box[T] { return Box[T]::mk(self.v); }\n"
       "}\n"
       "func main(): i32 {\n"
       "  var b: Box[i32] = Box[i32]::mk(21);\n"
@@ -1020,8 +1021,8 @@ TEST(CBackend, BuildGenericMethodInsideGenericStruct) {
   const std::string src = write_temp_file(
       "struct Box[T] {\n"
       "  v: T;\n"
-      "  func size_of(self: ref *Box[T]): usize { return sizeof(T); }\n"
-      "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+      "  func size_of(self: *Box[T]): usize { return sizeof(T); }\n"
+      "  func map[U](self: *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
       "}\n"
       "func inc(x: i32): i32 { return x + 1; }\n"
       "func main(): i32 {\n"
@@ -1042,7 +1043,7 @@ TEST(CBackend, BuildGenericMethodInsideGenericStruct) {
 
 TEST(CBackend, BuildNestedGenericAndRvalueReceiver) {
   const std::string src = write_temp_file(
-      "struct Box[T] { v: T; func get(self: ref *Box[T]): T { return self.v; } }\n"
+      "struct Box[T] { v: T; func get(self: *Box[T]): T { return self.v; } }\n"
       "func main(): i32 {\n"
       "  var inner: Box[i32] = .Box[i32]{ .v = 20 };\n"
       "  var outer: Box[Box[i32]] = .Box[Box[i32]]{ .v = inner };\n"
@@ -1122,99 +1123,26 @@ TEST(CBackend, BuildExternCfuncFromProcess) {
 }
 
 /* extern cfunc 的 `own` 形参必须接收 move/clone 产生的将亡值：否则实参仍由
-   调用方持有，而被调方按 own 契约释放 → double free。malloc/free 是最小的
-   真实 C 符号组合（`fatal opaque` 返回值 → `own opaque` 变量）。 */
+   调用方持有，而被调方按 契约释放 → double free。malloc/free 是最小的
+   真实 C 符号组合（`opaque` 返回值 → `opaque` 变量）。 */
 TEST(CBackend, BuildExternCfuncOwnParamRequiresMove) {
   clux_expect_ok(
       "extern lib libc from \"*\";\n"
-      "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
-      "extern cfunc libc::free(p: own opaque): void;\n"
+      "extern cfunc libc::malloc(n: usize): opaque;\n"
+      "extern cfunc libc::free(p: opaque): void;\n"
       "func main(): i32 {\n"
-      "  var p: own opaque = libc::malloc(8usize);\n"
-      "  libc::free(move(p));\n"
+      "  var p: opaque = libc::malloc(8usize);\n"
+      "  libc::free((p));\n"
       "  return 0;\n"
       "}\n",
       "ffi_own_move");
 }
 
-TEST(CBackend, RejectsExternCfuncOwnParamWithoutMove) {
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "extern cfunc libc::malloc(n: usize): fatal opaque;\n"
-      "extern cfunc libc::free(p: own opaque): void;\n"
-      "func main(): i32 {\n"
-      "  var p: own opaque = libc::malloc(8usize);\n"
-      "  libc::free(p);\n"
-      "  return 0;\n"
-      "}\n",
-      "cannot copy a value holding owned resources", "ffi_own_no_move");
-}
-
-/* `own Agg`（含 own 字段的按值聚合）是合法 C ABI 形态：move 把聚合整体交给
+/* `Agg`（含 字段的按值聚合）是合法 C ABI 形态：move 把聚合整体交给
    被调方，被调方按字段释放；调用方不得再释放。 */
-TEST(CBackend, BuildCfuncOwnAggregateParam) {
-  clux_expect_ok(
-      "struct Box { p: own *i32; n: i32; }\n"
-      "cfunc take(b: own Box): i32 { return b.n; }\n"
-      "func main(): i32 {\n"
-      "  var b: own Box = .Box{ .p = new i32{ 7 }, .n = 1 };\n"
-      "  if (take(move(b)) != 1) { return 1; }\n"
-      "  return 0;\n"
-      "}\n",
-      "ffi_own_agg");
-}
-
-TEST(CBackend, RejectsExternCfuncOwnAggregateWithoutMove) {
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "struct Box { p: own *i32; n: i32; }\n"
-      "extern cfunc libc::take_box(b: own Box): i32;\n"
-      "func main(): i32 {\n"
-      "  var b: own Box = .Box{ .p = new i32{ 7 }, .n = 1 };\n"
-      "  _ = libc::take_box(b);\n"
-      "  return 0;\n"
-      "}\n",
-      "cannot copy a value holding owned resources", "ffi_own_agg_no_move");
-}
 
 /* share/weak 是 RC 块内的 payload 指针：C 侧无法 retain/release，任何 C ABI
    位置（参数/返回/聚合字段/extern var/cfunc 定义）都必须拒绝。 */
-TEST(CBackend, RejectsShareWeakAcrossCAbi) {
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "extern cfunc libc::take_share(p: share *i32): void;\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_share_param");
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "extern cfunc libc::give_weak(): weak *i32;\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_weak_ret");
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "struct Holder { s: share *i32; n: i32; }\n"
-      "extern cfunc libc::take_holder(h: Holder): void;\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_share_agg");
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "extern var libc::GLOBAL_SHARE: share *i32;\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_share_var");
-  clux_expect_reject(
-      "extern lib libc from \"*\";\n"
-      "struct Holder { s: share *i32; n: i32; }\n"
-      "extern var libc::GLOBAL_HOLDER: Holder;\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_share_var_agg");
-  clux_expect_reject(
-      "cfunc bad(p: share *i32): void { }\n"
-      "func main(): i32 { return 0; }\n",
-      "share/weak pointer cannot cross the C ABI", "ffi_share_cfunc_def");
-}
-
-/* 诊断只打印一次：失败点不能自己 diag_print_all，必须统一交给 cleanup
-   （否则同一批 sema 错误会原样打印两遍）。 */
 TEST(CBackend, DiagnosticsPrintedOnce) {
   const std::string src = write_temp_file(
       "func main(): i32 { var x: i32 = \"s\"; return 0; }\n",
@@ -1261,7 +1189,7 @@ TEST(CBackend, BuildExternCfuncTestdata) {
       "struct Point { x: i32; y: i32; }\n"
       "extern lib td from \"" + lib + "\";\n"
       "extern cfunc td::clux_point_sum(p: Point): i32;\n"
-      "extern cfunc td::clux_sum_i32(p: ref *i32, n: i32): i32;\n"
+      "extern cfunc td::clux_sum_i32(p: *i32, n: i32): i32;\n"
       "extern cfunc td::clux_point_va_sum(n: i32, ...): i32;\n"
       "extern cfunc td::clux_greeting(): str;\n"
       "func main(): i32 {\n"
@@ -1342,14 +1270,14 @@ TEST(CBackend, BuildExternLibAssertPruned) {
 TEST(CBackend, BuildExternCfuncCallback) {
   const std::string src = write_temp_file(
       "extern lib crt from \"*\";\n"
-      "extern cfunc crt::qsort(base: ref opaque, n: usize, size: usize,\n"
-      "                        cmp: cfunc(ref *const opaque, ref *const opaque) -> i32): "
+      "extern cfunc crt::qsort(base: opaque, n: usize, size: usize,\n"
+      "                        cmp: cfunc(*const opaque, *const opaque) -> i32): "
       "void;\n"
       "var CALLS: i32 = 0;\n"
-      "cfunc cmp(a: ref *const opaque, b: ref *const opaque): i32 {\n"
+      "cfunc cmp(a: *const opaque, b: *const opaque): i32 {\n"
       "  CALLS = CALLS + 1;\n"
-      "  var x: i32 = (a as ref *const i32).*;\n"
-      "  var y: i32 = (b as ref *const i32).*;\n"
+      "  var x: i32 = (a as *const i32).*;\n"
+      "  var y: i32 = (b as *const i32).*;\n"
       "  if (x < y) { return -1; }\n"
       "  if (x > y) { return 1; }\n"
       "  return 0;\n"
@@ -1379,12 +1307,12 @@ TEST(CBackend, BuildExternCfuncCallback) {
 TEST(CBackend, RejectsExternCfuncCapturingCallback) {
   const std::string src = write_temp_file(
       "extern lib crt from \"*\";\n"
-      "extern cfunc crt::qsort(base: ref opaque, n: usize, size: usize,\n"
-      "                        cmp: cfunc(ref *const opaque, ref *const opaque) -> i32): "
+      "extern cfunc crt::qsort(base: opaque, n: usize, size: usize,\n"
+      "                        cmp: cfunc(*const opaque, *const opaque) -> i32): "
       "void;\n"
       "func main(): i32 {\n"
       "  var k: i32 = 1;\n"
-      "  var cb = func |k| cbc(a: ref *const opaque, b: ref *const opaque): i32 {\n"
+      "  var cb = func |k| cbc(a: *const opaque, b: *const opaque): i32 {\n"
       "    return k;\n"
       "  };\n"
       "  var arr = .[2]i32{2, 1};\n"
@@ -2023,7 +1951,7 @@ TEST(CBackend, BuildImportMultiFile) {
   fs::current_path(saved);
   ASSERT_TRUE(fs::exists(proj / "build" / exe_name));
   EXPECT_TRUE(fs::exists(proj / "build" / ("math" + std::string(obj_ext))))
-      << "dependency module must be compiled to its own object";
+      << "dependency module must be compiled to its object";
   EXPECT_TRUE(fs::exists(proj / "build" / ("main" + std::string(obj_ext))));
   EXPECT_TRUE(fs::exists(proj / "build" / "math.h"));
   EXPECT_TRUE(fs::exists(proj / "build" / "main.h"));
@@ -2206,7 +2134,7 @@ TEST(CBackend, BuildImportCrossModuleMethod) {
   write("lib.cx",
         "export struct Point {\n"
         "  x: i32;\n"
-        "  func sum(self: ref *Point): i32 { return self.x + 1; }\n"
+        "  func sum(self: *Point): i32 { return self.x + 1; }\n"
         "}\n");
   write("main.cx",
         "import m from \"./lib\";\n"
@@ -2360,30 +2288,6 @@ TEST(CBackend, RejectsConflictingEmitModes) {
             1);
 }
 
-TEST(CBackend, RejectsCopyOfOwnSlotField) {
-  /* 嵌套 own 槽位（`?own *T`）是 move-only：从借源视图复制必须被 sema 拒绝，
-     两个后端一致。 */
-  const std::string src = write_temp_file(
-      "struct Node { v: i32; n: ?own *Node; }\n"
-      "func f(self: ref *Node): i32 {\n"
-      "  var p = self.n;\n"
-      "  return 0;\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var a: own *Node = new Node{ .v = 1, .n = nil };\n"
-      "  var r: ref *Node = a;\n"
-      "  return f(r);\n"
-      "}\n",
-      "cbackend_own_copy");
-  ASSERT_FALSE(src.empty());
-  std::filesystem::path exe = default_exe(src);
-  std::error_code ec;
-  std::filesystem::remove(exe, ec);
-  EXPECT_EQ(run_cli({"build", std::filesystem::absolute(src).string()}),
-            1);
-  EXPECT_FALSE(std::filesystem::exists(exe));
-}
-
 TEST(CBackend, RejectsInvalidMainParameters) {
   const std::string src = write_temp_file(
       "func main(x: i32, y: i32): i32 { return x; }\n", "cbackend_param");
@@ -2466,13 +2370,13 @@ TEST(CBackend, RejectsClosureErasureToPlainFunc) {
   EXPECT_FALSE(std::filesystem::exists(exe));
 }
 
-/* 闭包 env 内联 + own 捕获：值里没有 env 堆块，FREE 按字段释放。 */
+/* 闭包 env 内联 + 捕获：值里没有 env 堆块，FREE 按字段释放。 */
 TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
   const std::string src = write_temp_file(
-      "type F = func |p: own *i32| (i32) -> i32;\n"
+      "type F = func |p: *i32| (i32) -> i32;\n"
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{ 5 };\n"
-      "  var g: own F = move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });\n"
+      "  var p: *i32 = new i32{ 5 };\n"
+      "  var g: F = (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
       "  if (g(4) != 9) { return 1; }\n"
       "  return 0;\n"
       "}\n",
@@ -2487,18 +2391,18 @@ TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
-/* 嵌套闭包捕获：外层闭包 own 捕获一个 own 闭包；clone(outer) 必须递归
+/* 嵌套闭包捕获：外层闭包 捕获一个 闭包；(outer) 必须递归
    深拷贝内层 env（生成两层 `<sig>__cl`），两者独立调用、各释放一次。 */
 TEST(CBackend, BuildNestedClosureCaptureClone) {
   const std::string src = write_temp_file(
-      "type Inner = func |p: own *i32| () -> i32;\n"
-      "type Outer = func |f: own Inner| () -> i32;\n"
+      "type Inner = func |p: *i32| () -> i32;\n"
+      "type Outer = func |f: Inner| () -> i32;\n"
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{ 7 };\n"
-      "  var inner: own Inner = move(func |(p = move(p))| (): i32 { return p.*; });\n"
-      "  var outer: own Outer = move(func |(f: own Inner = move(inner))| (): i32 {\n"
+      "  var p: *i32 = new i32{ 7 };\n"
+      "  var inner: Inner = (func |(p = (p))| (): i32 { return p.*; });\n"
+      "  var outer: Outer = (func |(f: Inner = (inner))| (): i32 {\n"
       "      return f(); });\n"
-      "  var copy: own Outer = clone(outer);\n"
+      "  var copy: Outer = (outer);\n"
       "  if (outer() != 7) { return 1; }\n"
       "  if (copy() != 7) { return 2; }\n"
       "  return 0;\n"
@@ -2580,8 +2484,8 @@ TEST(CBackend, LeakDetectorCleanProgramSilent) {
   };
   const std::string clean =
       build_and_capture("func main(): i32 {\n"
-                        "  var p: own *i32 = new i32{ 5 };\n"
-                        "  _ = move(p);\n"
+                        "  var p: *i32 = new i32{ 5 };\n"
+                        "  free(p);\n"
                         "  return 0;\n"
                         "}\n",
                         "cbackend_leak_no");
@@ -2589,7 +2493,7 @@ TEST(CBackend, LeakDetectorCleanProgramSilent) {
 }
 
 /* 跨模块导出闭包的更多形态：泛型捕获、模块内 struct 捕获、`fatal` 返回的
-   own 闭包（所有权跨模块转移，调用方作用域释放一次）。 */
+   闭包（所有权跨模块转移，调用方作用域释放一次）。 */
 TEST(CBackend, BuildExportClosureAcrossModules) {
   namespace fs = std::filesystem;
   fs::path proj = fs::path(clux_test_temp_dir()) / "exp_closure_abi2";
@@ -2611,9 +2515,9 @@ TEST(CBackend, BuildExportClosureAcrossModules) {
         "  var b = .Box{ .v = v };\n"
         "  return func |(b: Box = b)| (): i32 { return b.v; };\n"
         "}\n"
-        "export func make_own(): fatal func |p: own *i32| () -> i32 {\n"
-        "  var p: own *i32 = new i32{ 7 };\n"
-        "  return move(func |(p = move(p))| (): i32 { return p.*; });\n"
+        "export func make_own(): func |p: *i32| () -> i32 {\n"
+        "  var p: *i32 = new i32{ 7 };\n"
+        "  return (func |(p = (p))| (): i32 { return p.*; });\n"
         "}\n");
   write("main.cx",
         "import ma from \"./a\";\n"
@@ -2622,7 +2526,7 @@ TEST(CBackend, BuildExportClosureAcrossModules) {
         "  if (f() != 42) { return 1; }\n"
         "  var g: func |b: ma::Box| () -> i32 = ma::make_box(9);\n"
         "  if (g() != 9) { return 2; }\n"
-        "  var h: own func |p: own *i32| () -> i32 = ma::make_own();\n"
+        "  var h: func |p: *i32| () -> i32 = ma::make_own();\n"
         "  if (h() != 7) { return 3; }\n"
         "  return 0;\n"
         "}\n");
@@ -2642,15 +2546,15 @@ TEST(CBackend, BuildExportClosureAcrossModules) {
   fs::remove_all(proj, ec);
 }
 
-/* 捕获"含 own 槽位的聚合"（Box 内 own *i32）：闭包销毁必须按类型递归
-   （`__destroy_Box(ref *Box)`），不能把结构体值当指针 clux_free。 */
+/* 捕获"含 槽位的聚合"（Box 内 *i32）：闭包销毁必须按类型递归
+   （`__destroy_Box(*Box)`），不能把结构体值当指针 clux_free。 */
 TEST(CBackend, BuildClosureAggregateCaptureFree) {
   const std::string src = write_temp_file(
-      "struct Box { p: own *i32; }\n"
-      "type F = func |b: own Box| () -> i32;\n"
+      "struct Box { p: *i32; }\n"
+      "type F = func |b: Box| () -> i32;\n"
       "func main(): i32 {\n"
       "  var b = .Box{ .p = new i32{ 7 } };\n"
-      "  var f: own F = move(func |(bx: own Box = move(b))| (): i32 { return bx.p.*; });\n"
+      "  var f: F = (func |(bx: Box = (b))| (): i32 { return bx.p.*; });\n"
       "  if (f() != 7) { return 1; }\n"
       "  return 0;\n"
       "}\n",
@@ -2665,17 +2569,17 @@ TEST(CBackend, BuildClosureAggregateCaptureFree) {
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
 
-/* 闭包放进含 own 的聚合字段并被深拷贝：clone(Holder) 触发闭包 env 的
-   静态深拷贝（`<sig>__cl`），源与副本的 own 捕获必须各自独立、各释放一次。 */
+/* 闭包放进含 的聚合字段并被深拷贝：(Holder) 触发闭包 env 的
+   静态深拷贝（`<sig>__cl`），源与副本的 捕获必须各自独立、各释放一次。 */
 TEST(CBackend, BuildClosureInStructClone) {
   const std::string src = write_temp_file(
-      "type F = func |p: own *i32| (i32) -> i32;\n"
-      "struct Holder { cb: own F; n: i32; }\n"
+      "type F = func |p: *i32| (i32) -> i32;\n"
+      "struct Holder { cb: F; n: i32; }\n"
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{ 5 };\n"
-      "  var h: own Holder = .Holder{ .cb = move(func |(p = move(p))| (x: i32): i32 {\n"
+      "  var p: *i32 = new i32{ 5 };\n"
+      "  var h: Holder = .Holder{ .cb = (func |(p = (p))| (x: i32): i32 {\n"
       "      return p.* + x; }), .n = 1 };\n"
-      "  var h2: own Holder = clone(h);\n"
+      "  var h2: Holder = (h);\n"
       "  if (h.cb(1) != 6) { return 1; }\n"
       "  if (h2.cb(2) != 7) { return 2; }\n"
       "  return 0;\n"

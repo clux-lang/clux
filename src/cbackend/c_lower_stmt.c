@@ -27,6 +27,7 @@ static lower_defer_t *find_defer_entry(lower_ctx_t *lc, strslice_t name) {
     return NULL;
 }
 
+
 lower_local_fn_t *find_local_fn_fid(lower_ctx_t *lc, uint32_t fid) {
     for (lower_local_fn_t *f = lc->local_fns; f; f = f->next)
         if (f->fid && f->fid == fid) return f;
@@ -1032,6 +1033,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_EXPR_STMT: {
         ast_expr_stmt_t *es = (ast_expr_stmt_t *)s;
+        if (es->expr && es->expr->kind == AST_FREE)
+            return lower_stmt(lc, es->expr, ok);
         if (es->expr && es->expr->kind == AST_CALL) {
             ast_call_t *call = (ast_call_t *)es->expr;
             strslice_t name = STRSLICE_EMPTY;
@@ -1450,7 +1453,8 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                     find_local_fn(lc, ((ast_ident_t *)op)->name);
                 if (lf && !lf->var_name) continue;
             }
-            const type_t *ot = infer_expr_type(lc, op);
+            const type_t *ot =
+                f->type ? f->type : infer_expr_type(lc, op);
             cir_expr_t *ex = lower_expr(lc, op);
             if (!ex) {
                 *ok = false;

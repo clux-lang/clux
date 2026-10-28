@@ -579,14 +579,8 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
          fatal→own 转移）。所有权纯编译期：fatal 是值层 ownership 状态。 */
       const type_t *ptr = type_ptr_intern(sema->vm, t);
       if (!ptr) return val_void(sema);
-      /* `new T{...}` 的类型是 **fatal *T**（将亡值，必须被 own 位置接收）——
-         所有权是类型修饰，不再只记在值状态上。 */
-      const type_t *pt = type_ownership_apply(sema->vm, OWN_FATAL, ptr);
-      if (!pt) return val_void(sema);
-      sema_type_register(sema, pt);
-      value_t *r = value_make_shadow(sema->vm, pt);
-      value_set_type_ownership(sema->vm, r, OWN_FATAL);
-      return r;
+      sema_type_register(sema, ptr);
+      return value_make_shadow(sema->vm, ptr);
 }
 
 /* AST_MAKE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -703,12 +697,6 @@ value_t *ex_make(sema_t *sema, ast_node_t **node,
          元素槽位所有权进类型（`make(own *i32, …)` 的元素按 own 释放）。 */
       const type_t *slice_base = type_slice_intern(sema->vm, et);
       if (!slice_base) return val_void(sema);
-      /* `make(T, N, ...)` 产新堆块：类型是 **fatal []T**（同 new）。 */
-      const type_t *slice_t =
-          type_ownership_apply(sema->vm, OWN_FATAL, slice_base);
-      if (!slice_t) return val_void(sema);
-      sema_type_register(sema, slice_t);
-      value_t *r = value_make_shadow(sema->vm, slice_t);
-      value_set_type_ownership(sema->vm, r, OWN_FATAL);
-      return r;
+      sema_type_register(sema, slice_base);
+      return value_make_shadow(sema->vm, slice_base);
 }

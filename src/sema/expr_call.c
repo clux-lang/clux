@@ -1036,44 +1036,6 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
        * 指针 → 原样），sema 不再改写 AST。 */
       if (call->callee && call->callee->kind == AST_MEMBER) {
         ast_member_t *mem = (ast_member_t *)call->callee;
-        /* **`.get()` 语法糖**（§12.4）：`weak *T` 的升级入口。不是全局函数
-           （避免与业务函数重名），只在 weak 指针上按成员调用解析。sema 把它
-           改写成对内置 `__weak_get` 的调用，返回 `?share *T`。 */
-        {
-          const type_t *wot = NULL;
-          if (mem->field.len == 3 && memcmp(mem->field.ptr, "get", 3) == 0 &&
-              mem->object && mem->object->kind == AST_IDENT) {
-            sema_symbol_t *os =
-                sema_lookup(scope, ((ast_ident_t *)mem->object)->name);
-            if (os && os->type) wot = os->type;
-          }
-          if (wot && type_is_weak(wot)) {
-            ast_node_t *callee = ast_ident_new(sema->arena, 0, 0);
-            ast_node_t *ncall = ast_call_new(sema->arena, 0, 0);
-            if (!callee || !ncall) return val_void(sema);
-            ((ast_ident_t *)callee)->name =
-                strslice_from_bytes("__weak_get", 10);
-            callee->is_generated = true;
-            ((ast_call_t *)ncall)->callee = callee;
-            ((ast_call_t *)ncall)->args = mem->object;
-            mem->object = NULL;
-            ncall->is_generated = true;
-            ast_node_t *orig_next = (*node)->next;
-            *node = ncall;
-            (*node)->next = orig_next;
-            /* 类型：?share *T（与 __weak_get 一致） */
-            const type_t *base = ptr_type_base(wot);
-            const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
-            if (!st) return val_void(sema);
-            sema_type_register(sema, st);
-            const type_t *opt = type_option_intern(sema->vm, st);
-            if (!opt) return val_void(sema);
-            sema_type_register(sema, opt);
-            value_t *sv = value_make_shadow(sema->vm, opt);
-            value_set_type_ownership(sema->vm, sv, OWN_NONE);
-            return sv;
-          }
-        }
         const type_t *ot = NULL;
         if (mem->object && mem->object->kind == AST_IDENT) {
           sema_symbol_t *os =
@@ -1626,6 +1588,13 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
          "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
 
+      /* free(p) 只允许作为语句；表达式位置没有可用值。 */
+      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_FREE) {
+        diag_error(sema->diag, sema_loc(sema, &call->base),
+                   "free() must be used as a statement");
+        return val_void(sema);
+      }
+
       /* take(x)：运行时移出 optional payload 并置 nil。
          - ?T（普通）        -> T
          - ?own T / 含 own 槽位 -> fatal T（strip own 后加 fatal） */
@@ -1705,45 +1674,6 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          的实参是副本，取不到调用方的存储身份，见 ast_call.h / vm/bcode.h）。 */
       /* __deep_clone(v)：运行期对象图深拷贝（闭包 env / cunion 兜底）。
          返回**同类型 fatal**（将亡值）：消费者按所有权规则接管。 */
-      /* __make_share(p)：fatal/own `*T` → `share *T`（RC 创建通道）。 */
-      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_MAKE_SHARE) {
-        value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
-        if (!arg || is_poison(sema, arg)) return val_void(sema);
-        const type_t *at = value_type(arg);
-        const type_t *base = at ? ptr_type_base(at) : NULL;
-        if (!base || type_is_rc_ptr(at)) {
-          diag_error(sema->diag, sema_loc(sema, call->callee),
-                     "share creation needs a plain `own *T` / fatal `*T` source");
-          return val_void(sema);
-        }
-        const type_t *st = type_ptr_intern_rc(sema->vm, base, 1);
-        if (!st) return val_void(sema);
-        sema_type_register(sema, st);
-        value_t *sv = value_make_shadow(sema->vm, st);
-        value_set_type_ownership(sema->vm, sv, OWN_NONE); /* share 是普通可拷贝值 */
-        return sv;
-      }
-      /* __weak_get(w)：`weak *T` → `?share *T`（原子升级；死对象得 nil）。 */
-      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_WEAK_GET) {
-        value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;
-        if (!arg || is_poison(sema, arg)) return val_void(sema);
-        const type_t *at = value_type(arg);
-        if (!type_is_weak(at)) {
-          diag_error(sema->diag, sema_loc(sema, call->callee),
-                     ".get() is only available on `weak *T` values");
-          return val_void(sema);
-        }
-        const type_t *base = ptr_type_base(at);
-        const type_t *st = base ? type_ptr_intern_rc(sema->vm, base, 1) : NULL;
-        if (!st) return val_void(sema);
-        sema_type_register(sema, st);
-        const type_t *opt = type_option_intern(sema->vm, st);
-        if (!opt) return val_void(sema);
-        sema_type_register(sema, opt);
-        value_t *sv = value_make_shadow(sema->vm, opt);
-        value_set_type_ownership(sema->vm, sv, OWN_NONE);
-        return sv;
-      }
 
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_DEEP_CLONE) {
         value_t *arg = call->args ? sema_expr(sema, &call->args, scope) : NULL;

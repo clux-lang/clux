@@ -194,7 +194,7 @@ TEST(Fmt, ForeachKeepsAllHeaderForms) {
         "e=e+x;\n"
         "}\n"
         "foreach(e of a){}\n"
-        "foreach(var p:ref *i32 of a){}\n"
+        "foreach(var p:*i32 of a){}\n"
         "}\n";
     std::string out = fmt(src);
     EXPECT_EQ(out,
@@ -205,7 +205,7 @@ TEST(Fmt, ForeachKeepsAllHeaderForms) {
               "        e = e + x;\n"
               "    }\n"
               "    foreach (e of a) {}\n"
-              "    foreach (var p: ref *i32 of a) {}\n"
+              "    foreach (var p: *i32 of a) {}\n"
               "}\n");
     /* 幂等：再格式化一次不变（format 的核心不变量之一） */
     EXPECT_EQ(fmt(out.c_str()), out);
@@ -775,39 +775,39 @@ TEST(FmtRegression, IdempotentAcrossDeclKinds) {
  * M3 语法渲染（此前**静默丢弃**：这些 AST kind 在 render_expr 里没有
  * case，落到 `default: break` → `clux format` 直接把表达式/类型吃掉，
  * 属数据损坏）。覆盖：后缀取址 `.&`、后缀解引用 `.*`、所有权指针类型
- * `own|ref|fatal *T`、`new T{...}`、`move/clone(...)`、作用域标注 `'<a,b> T`。
- * 关键点：后缀操作数里优先级更低者必须保住括号——`(a as ref *i32).*`
- * 若渲染成 `a as ref *i32.*` 会被重解析成 `a as ref *(i32.*)`。
+ * `own|ref|*T`、`new T{...}`、`move/(...)`、作用域标注 `'<a,b> T`。
+ * 关键点：后缀操作数里优先级更低者必须保住括号——`(a as *i32).*`
+ * 若渲染成 `a as *i32.*` 会被重解析成 `a as *(i32.*)`。
  * ================================================================ */
 
 TEST(FmtRegression, PostfixAddrAndDerefAreRendered) {
     std::string out = fmt(
         "func main():void{\n"
-        "var r:ref *i32=p.&;\n"
+        "var r:*i32=p.&;\n"
         "var x:i32=r.*;\n"
-        "var y:i32=(a as ref *i32).*;\n"
+        "var y:i32=(a as *i32).*;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var r: ref *i32 = p.&;\n"
+              "    var r: *i32 = p.&;\n"
               "    var x: i32 = r.*;\n"
-              "    var y: i32 = (a as ref *i32).*;\n"
+              "    var y: i32 = (a as *i32).*;\n"
               "}\n");
 }
 
 TEST(FmtRegression, PtrTypeNewMoveAndScopeAnnotAreRendered) {
     std::string out = fmt(
         "func main():void{\n"
-        "var p:own *i32=new i32{7};\n"
+        "var p:*i32=new i32{7};\n"
         "var q:Cell=new Cell{.v=1};\n"
-        "var m:i32=move(p).*;\n"
+        "var m:i32=p.*;\n"
         "var t:'<a,b> i32=1;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var p: own *i32 = new i32{ 7 };\n"
+              "    var p: *i32 = new i32{ 7 };\n"
               "    var q: Cell = new Cell{ .v = 1 };\n"
-              "    var m: i32 = move(p).*;\n"
+              "    var m: i32 = p.*;\n"
               "    var t: '<a,b> i32 = 1;\n"
               "}\n");
 }
@@ -817,10 +817,10 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
     const char *src =
         "struct Cell { v: i32; }\n"
         "func main(): i32 {\n"
-        "    var p: own *i32 = new i32{7};\n"
-        "    var r: ref *i32 = p.&;\n"
-        "    var x: i32 = (r as ref *i32).*;\n"
-        "    var c: Cell = .{ .v = (move(p)).* };\n"
+        "    var p: *i32 = new i32{7};\n"
+        "    var r: *i32 = p.&;\n"
+        "    var x: i32 = (r as *i32).*;\n"
+        "    var c: Cell = .{ .v = p.* };\n"
         "    var g: '<*> i32 = 1;\n"
         "    return c.v + x + g;\n"
         "}\n";
@@ -829,12 +829,10 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
     std::string thrice = fmt(twice.c_str());
     EXPECT_EQ(once, twice);
     EXPECT_EQ(twice, thrice);
-    EXPECT_NE(once.find("own *i32"), std::string::npos);
-    EXPECT_NE(once.find("ref *i32"), std::string::npos);
+    EXPECT_NE(once.find("*i32"), std::string::npos);
     EXPECT_NE(once.find("new i32{ 7 }"), std::string::npos);
     EXPECT_NE(once.find("p.&"), std::string::npos);
     EXPECT_NE(once.find(".*"), std::string::npos);
-    EXPECT_NE(once.find("move(p)"), std::string::npos);
     EXPECT_NE(once.find("'<*> i32"), std::string::npos);
 }
 
@@ -842,14 +840,14 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
    `!`——fmt 必须把前导点补回。曾直接输出 op 文本，把 `x.!` 渲染成 `x!`，
    格式化产物无法重新解析（`expected ';'`），且幂等在第二遍失败。 */
 TEST(Fmt, UnwrapKeepsLeadingDot) {
-    std::string out = fmt("func f(x:?ref *const i32):i32{return x.!.*;}\n");
+    std::string out = fmt("func f(x:?*const i32):i32{return x.!.*;}\n");
     EXPECT_NE(out.find("x.!"), std::string::npos) << out;
     EXPECT_EQ(out.find("x!."), std::string::npos) << out;
 
     /* 幂等 + 成员/解包混合形态 */
     std::string src =
-        "struct Node { v: i32; next: ?ref *const Node; }\n"
-        "func f(n: ref *const Node): i32 { return n.next.!.v; }\n";
+        "struct Node { v: i32; next: ?*const Node; }\n"
+        "func f(n: *const Node): i32 { return n.next.!.v; }\n";
     std::string once = fmt(src.c_str());
     std::string twice = fmt(once.c_str());
     EXPECT_EQ(once, twice);
@@ -865,7 +863,7 @@ TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
     std::string out = fmt(
         "func main():i32{\n"
         "var a:i32=1;var b:i32=2;\n"
-        "defer '<*> |(r: ref *i32 = a.&), b| {\n"
+        "defer '<*> |(r: *i32 = a.&), b| {\n"
         "var c:i32=a+b;\n"
         "}\n"
         "defer || {}\n"
@@ -876,7 +874,7 @@ TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
               "func main(): i32 {\n"
               "    var a: i32 = 1;\n"
               "    var b: i32 = 2;\n"
-              "    defer '<*> |(r: ref *i32 = a.&), b| {\n"
+              "    defer '<*> |(r: *i32 = a.&), b| {\n"
               "        var c: i32 = a + b;\n"
               "    }\n"
               "    defer {}\n"
@@ -916,20 +914,20 @@ TEST(Fmt, DeferEmptyCapturesNormalized) {
 }
 
 /* 闭包作用域标注 `func '<a,b> |...|`：曾**完全没有渲染分支**（fn->
- * scope_annot_names 是 AST 之外的独立字段），格式化后标注消失 → 捕获 ref 的
+ * scope_annot_names 是 AST 之外的独立字段），格式化后标注消失 → 捕获 的
  * 闭包产物不再能编译（静默数据损坏）。命名函数与函数字面量都要回显。 */
 TEST(Fmt, ClosureScopeAnnotationPreserved) {
     std::string out = fmt(
         "func main():i32{\n"
         "var a:i32=1;\n"
-        "var f=func '<*> |(r: ref *i32 = a.&)| ():i32{return r.*;};\n"
+        "var f=func '<*> |(r: *i32 = a.&)| ():i32{return r.*;};\n"
         "var g=func '<*> |a| add(x:i32):i32{return a+x;};\n"
         "return 0;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
               "    var a: i32 = 1;\n"
-              "    var f = func '<*> |(r: ref *i32 = a.&)|(): i32 {\n"
+              "    var f = func '<*> |(r: *i32 = a.&)|(): i32 {\n"
               "        return r.*;\n"
               "    };\n"
               "    var g = func '<*> |a| add(x: i32): i32 {\n"

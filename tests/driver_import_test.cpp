@@ -356,8 +356,8 @@ TEST(DriverImport, CrossModuleGenericMethod) {
   std::string mod = c.write("glib",
       "export struct Box[T] {\n"
       "  value: T;\n"
-      "  func get(self: ref *const Box[T]): T { return self.value; }\n"
-      "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+      "  func get(self: *const Box[T]): T { return self.value; }\n"
+      "  func map_into[U](self: *const Box[T], f: func(T) -> U): Box[U] {\n"
       "    var b: Box[U] = .{ .value = f(self.value) };\n"
       "    return b;\n"
       "  }\n"
@@ -375,9 +375,9 @@ TEST(DriverImport, CrossModuleGenericMethod) {
 TEST(DriverImport, CrossModuleGenericSameNameIsolated) {
   ImportCase c("generic_dup");
   std::string m1 = c.write("l1",
-      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value; } }\n");
+      "export struct Box[T] { value: T; func get(self: *const Box[T]): T { return self.value; } }\n");
   std::string m2 = c.write("l2",
-      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value + 100; } }\n");
+      "export struct Box[T] { value: T; func get(self: *const Box[T]): T { return self.value + 100; } }\n");
   std::string main_path = c.entry("main",
       "import l1 from \"" + m1 + "\";\n"
       "import l2 from \"" + m2 + "\";\n"
@@ -392,7 +392,7 @@ TEST(DriverImport, CrossModuleGenericSameNameIsolated) {
 TEST(DriverImport, CrossModuleGenericReexport) {
   ImportCase c("generic_reexport");
   std::string lib = c.write("glib",
-      "export struct Box[T] { value: T; func get(self: ref *const Box[T]): T { return self.value; } }\n");
+      "export struct Box[T] { value: T; func get(self: *const Box[T]): T { return self.value; } }\n");
   std::string api = c.write("gapi",
       "export * from \"" + lib + "\";\n");
   std::string main_path = c.entry("main",
@@ -415,7 +415,7 @@ TEST(DriverImport, CrossModuleGenericUsesDefinitionGlobals) {
       "export func add_base[T](x: T): i32 { return base + x as i32; }\n"
       "export struct Counter[T] {\n"
       "  value: T;\n"
-      "  func bump(self: ref *Counter[T]): i32 { base = base + 1; return base; }\n"
+      "  func bump(self: *Counter[T]): i32 { base = base + 1; return base; }\n"
       "}\n");
   std::string main_path = c.entry("main",
       "import gl from \"" + mod + "\";\n"
@@ -460,11 +460,11 @@ TEST(DriverImport, CrossModuleGenericMethodExplicitTypeArgs) {
   std::string mod = c.write("gbox",
       "export struct Box[T] {\n"
       "  value: T;\n"
-      "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+      "  func map_into[U](self: *const Box[T], f: func(T) -> U): Box[U] {\n"
       "    var b: Box[U] = .{ .value = f(self.value) };\n"
       "    return b;\n"
       "  }\n"
-      "  func get(self: ref *const Box[T]): T { return self.value; }\n"
+      "  func get(self: *const Box[T]): T { return self.value; }\n"
       "}\n");
   std::string main_path = c.entry("main",
       "import gb from \"" + mod + "\";\n"

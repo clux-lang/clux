@@ -372,274 +372,13 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       return sv;
 }
 
-/* AST_MOVE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_move(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* 所有权原语 move(x) / clone(x)（m3-design §7）：操作数求值 → 返回
-         操作数类型的 shadow。move 转移所有权（原对象进 TDZ，Step A 静默），
-         clone 深拷贝。指针操作数（own/ref/fatal）返回 fatal 所有权修饰类型
-         （将亡值，§3.3——运行期 MOVE/CLONE 指令产物即 fatal 类型）；
-         非指针原样返回操作数类型。 */
+      /* move/clone 已移除；保留节点处理以防旧 AST（直接求值）。 */
       ast_move_t *n = (ast_move_t *)*node;
-      value_t *operand = sema_expr(sema, &n->operand, scope);
-      if (is_poison(sema, operand))
-        return val_void(sema);
-      const type_t *ot = value_type(operand);
-      const type_t *fatal = sema_fatal_variant_of(sema, ot);
-      if (!fatal) return val_void(sema);
-      bool is_clone = n->op && token_is(n->op, "clone");
-      /* 所有权纯编译期：fatal 是值层状态，不再有独立 fatal 类型变体。
-         move/clone 产生将亡值：**指针/切片**整体转移；**含 own 槽位的聚合**
-         也携带资源（其 own 字段），同样产 FATAL。标量无资源 → fatal 折叠为
-         自身，故不在此列。
-         判据读 type 对象（`type_has_own_slots`），与销毁序列生成器同一权威。 */
-      /* FUNC（闭包）同样产 FATAL：闭包 = 捕获聚合结构体，可能携带 own 捕获
-         （运行期才知道），因此按"携带资源"处理——`move(cl)` 可赋给 own 槽位/
-         变量，`_ = move(cl)` 即显式销毁。 */
-      bool produces_fatal = ot && (type_kind_of(ot) == TYPE_KIND_PTR ||
-                                   type_kind_of(ot) == TYPE_KIND_SLICE ||
-                                   type_kind_of(ot) == TYPE_KIND_FUNC ||
-                                   type_has_own_slots(ot));
-
-      /* ---- union / cunion 成员 move 豁免（2026-10）----
-         union / cunion 的成员与整体**共享同一块内存布局**（cunion 全 offset 0；
-         tag union 的 payload 共用 payload 区）——"局部 = 整体"。move 成员就是把
-         整体交出去：整体进 TDZ 既没有"per-field TDZ 无法记录"的问题，也是
-         **cunion 指针成员的唯一释放途径**（`_ = move(c.p)`）。
-
-         约束（只对**直接变量根**成立，见下）：
-           - 根必须是 `ast_member.object` 直接是变量标识符（`u.a`）——经指针
-             （`p.a`，sema 已改写为 `p.*.a`）或嵌套结构（`s.u.a`）时，整体 TDZ 会
-             跳过其他 own 槽位/堆块的销毁 → 泄漏，故不豁免（保持"字段不可 move"）；
-           - tag union：member 槽位所有权必须是 **OWN**（ref payload 是借用，不能
-             转移）；cunion：成员类型含资源（指针/切片/含 own 槽位聚合）即可
-             （cunion 不参与所有权运算，槽位所有权恒 NONE）；
-           - 根变量有**存活借用**时拒绝（与整体 move 同一 R3 规则）。 */
-      sema_symbol_t *union_root = NULL;
-      strslice_t union_root_name = STRSLICE_EMPTY;
-      if (!is_clone && n->operand->kind == AST_MEMBER) {
-        ast_member_t *m = (ast_member_t *)n->operand;
-        if (m->object && m->object->kind == AST_IDENT) {
-          sema_symbol_t *s =
-              sema_lookup(scope, ((ast_ident_t *)m->object)->name);
-          const type_t *bt =
-              s && s->kind == SEMA_SYM_VAR && s->type
-                  ? type_strip_quals(s->type)
-                  : NULL;
-          if (bt && type_kind_of(bt) == TYPE_KIND_UNION) {
-            int mi = union_type_find_member(bt, m->field);
-            const union_member_t *mm =
-                mi >= 0 ? union_type_member(bt, (size_t)mi) : NULL;
-            if (mm && mm->payload_type &&
-                type_ownership_of(mm->payload_type) == OWN_OWN) {
-              union_root = s;
-              union_root_name = ((ast_ident_t *)m->object)->name;
-            }
-          }
-          /* cunion 成员 move **不再**登记 union_root（2026-10）：cunion 是
-             不安全类型（无 tag、成员共享 offset 0、不参与所有权运算），它的成员
-             move 走"用户自负"路径——不受访问路径限制、**不进 TDZ**、运行期
-             真转移（TAKE_SLOT 把槽位置零）。见下方 cunion_member_move 的处理。 */
-        }
-      }
-
-      /* ---- cunion 成员 move：**放宽为不受限、不进 TDZ**（2026-10）----
-         cunion 是**不安全类型**：无 tag、成员共享 offset 0、不参与所有权运算，
-         编译器不保证重复释放/错误释放能被发现。因此对它的成员 move 采用
-         "用户自负"语义：
-           - 任意访问路径都允许：`_ = move(c.p)` / `_ = move(s.c.p)` /
-             `_ = move(p.c.p)`（嵌套、经指针均可）——这是 cunion 指针成员在
-             这些形态下**唯一的释放途径**；
-           - **不进入 TDZ**：整体仍可读 / 可再次 move（重复释放由用户负责；
-             FREE 后槽位指针被置 NULL，重复 FREE 是 no-op）；
-           - 跳过"来源必须拥有该值"检查（cunion 槽位没有所有权记录）。
-         tag union 仍是严格语义（直接变量根 → 整体 TDZ），不受影响。 */
-      bool cunion_member_move = false;
-      if (!is_clone && n->operand && n->operand->kind == AST_MEMBER) {
-        const ast_member_t *cm = (const ast_member_t *)n->operand;
-        const type_t *ct = static_lvalue_type(sema, scope, cm->object);
-        if (ct && type_kind_of(ct) == TYPE_KIND_CUNION) cunion_member_move = true;
-        /* tag union 的直接变量成员、且 payload 含 own 资源：同样需要
-           运行期真转移（槽位清零），否则整体重赋值会 double free。
-           嵌套成员 / ref payload 仍走原有拒绝规则。 */
-        if (ct && type_kind_of(ct) == TYPE_KIND_UNION &&
-            cm->object->kind == AST_IDENT) {
-          int mi = union_type_find_member(ct, cm->field);
-          const union_member_t *mem =
-              mi >= 0 ? union_type_member(ct, (size_t)mi) : NULL;
-          if (mem && mem->payload_type &&
-              (type_ownership_of(mem->payload_type) == OWN_OWN ||
-               type_has_own_slots(type_strip_ownership(mem->payload_type))))
-            cunion_member_move = true;
-        }
-      }
-
-      /* cunion 成员 move 的**运行期真转移**：把操作数包成 AST_TAKE_SLOT ——
-         读取槽位值后把槽位 memset 为 0。于是：
-           - `_ = move(c.p)` 之后槽位是 NULL → 重复 move 是 no-op（不会二次释放）；
-           - `var q = move(c.p)` 之后 cunion 里不残留悬垂指针。
-         语义上仍是"用户自负"（cunion 无 tag、不参与所有权运算，编译器不保证
-         重复/错误释放）。 */
-      if (cunion_member_move) {
-        ast_node_t *slot = ast_take_slot_new(sema->arena, (*node)->tok_begin,
-                                             (*node)->tok_end);
-        if (slot) {
-          ((ast_take_slot_t *)slot)->operand = n->operand;
-          slot->next = (*node)->next;
-          *node = slot;
-        }
-      }
-
-      /* ---- 约束 1：**字段/元素级 move 一律禁止**（只能整体 move）----
-         TDZ 是**符号级**的（`sema_symbol_t.moved`，只跟踪变量名），字段没有
-         "局部 TDZ"：`move(s.p)` 把值/资源从字段里掏走，却没有任何地方记录
-         `s.p` 已失效 —— 于是同一字段可以重复 move、被读成陈旧值或悬垂指针。
-
-         判据**不能**依赖"是否产生 fatal 变体"：标量（i32 等）没有资源，其 fatal
-         变体折叠为自身，`produces_fatal` 为假 —— 用 fatal 当门槛会把
-         `move(p.x)`（标量字段）整条漏掉（实测放行）。所以这里独立判断
-         "操作数是不是字段/元素访问"。
-
-         **union / cunion 成员豁免**（见上）：布局局部 = 整体，整体进 TDZ。
-         `clone` 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone && !union_root && !cunion_member_move &&
-          (n->operand->kind == AST_MEMBER || n->operand->kind == AST_INDEX)) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot move a struct/aggregate field or element "
-                   "(fields have no per-field TDZ, so a moved-out field cannot be "
-                   "tracked or refilled; move the whole value instead — "
-                   "`move(s)` — or use clone() to copy the field)");
-        return value_make_shadow(sema->vm, fatal);
-      }
-
-      /* ---- 约束 0：**move 的来源必须拥有该值** ----
-         own / fatal 才能转移所有权；ref/借用（`x.&`、字段/元素读、ref 变量、
-         ref 返回、解引用读到的被指向内容）都不拥有堆块——move 它只会把借用
-         当所有权，销毁时 free 借用源（实测 0xC0000005）。
-         clone 不受限：拷贝不改变源的绑定状态。 */
-      if (!is_clone && !union_root && !cunion_member_move && produces_fatal &&
-          value_type_ownership(operand) != OWN_OWN &&
-          value_type_ownership(operand) != OWN_FATAL) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot move a borrowed value: move transfers ownership, but "
-                   "a ref/borrow does not own the block (use clone() to copy)");
-        return value_make_shadow(sema->vm, fatal);
-      }
-
-      if (!is_clone && n->operand->kind == AST_IDENT) {
-        sema_symbol_t *src =
-            sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
-
-        /* 注：闭包值（TYPE_KIND_FUNC）**可以 move**（2026-10 起）——闭包 =
-           捕获聚合结构体（env 块），move 是合法的所有权转移：源进 TDZ、
-           目标接管 env（own 捕获随之转移）；`_ = move(cl)` 即显式销毁闭包
-           （FREE 按 capture_type 聚合释放 env 的 own 捕获 + env 块）。它捕获槽
-           仍然不可 move（见下方约束 3：捕获槽被每次调用共享，不能留在 TDZ）。 */
-
-        /* ---- 约束 3：**闭包捕获不可 move**（含捕获里的结构体）----
-           捕获符号定义在闭包的捕获作用域上，而闭包每次调用共享同一份捕获
-           作用域：move 把捕获槽标进 TDZ 后无法恢复，第二次调用就读到已转移的
-           槽位。所以闭包内的捕获值（`own *T` 或含 own 的聚合）只能 clone/借用，
-           不能 move。 */
-        if (src && src->kind == SEMA_SYM_VAR && src->is_capture &&
-            (sema_sym_ownership(src) == OWN_OWN ||
-             type_kind_of(src->type) == TYPE_KIND_FUNC)) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "cannot move closure capture '%.*s': the capture slot is "
-                     "shared by every call of the closure and cannot be left in "
-                     "a moved (TDZ) state (use clone(), or capture by "
-                     "`(x = move(y))` and clone inside)",
-                     (int)((ast_ident_t *)n->operand)->name.len,
-                     ((ast_ident_t *)n->operand)->name.ptr);
-          return value_make_shadow(sema->vm, fatal);
-        }
-      }
-
-      if (!is_clone && (produces_fatal || sema_value_is_fatal(operand)) &&
-          n->operand->kind == AST_IDENT) {
-        sema_symbol_t *src =
-            sema_lookup(scope, ((ast_ident_t *)n->operand)->name);
-        if (src && src->kind == SEMA_SYM_VAR && src->type &&
-            sema_sym_ownership(src) == OWN_OWN) {
-          /* `own *T`（含 own 切片同规则）：move 后源不再持有资源 →
-             标记 moved，后续读取报 "used after move"。
-             判据是**符号层 ownership**——所有权已从类型层迁移到值/符号层。 */
-          if (src->borrow_count > 0) {
-            diag_error(
-                sema->diag, sema_loc(sema, *node),
-                "cannot move '%.*s': %d live borrow(s) still "
-                "reference it (borrows must end before move)",
-                (int)((ast_ident_t *)n->operand)->name.len,
-                ((ast_ident_t *)n->operand)->name.ptr, src->borrow_count);
-          } else {
-            src->moved = true;
-          }
-        } else if (src && src->kind == SEMA_SYM_VAR &&
-                   sema_sym_is_fatal(src)) {
-          sema_mark_fatal_consumed(src);
-        }
-      }
-      /* **扁平化 clone**（2026-10）：把 `clone(x)` 在编译期展开成显式的
-         「申请 + 赋值」序列（构造 / NEW / CLONE / 循环），运行期不再按类型
-         递归（见 sema_gen_clone 的说明）。生成失败（无语句上下文等）时保留
-         原 AST_MOVE 节点 → compiler 退化为运行期 CLONE 指令。
-         语义返回值不变：仍是 fatal 阴影（所有权判定与消费规则完全一致）。 */
-      if (is_clone) {
-        /* `clone(<func 字面量>)`：字面量在定义点**本来就产出全新实例**（新的
-           函数对象 + 新的 env 块），再深拷贝一份既浪费，又会让那个中间实例的
-           捕获（own 堆块）随临时值丢弃而泄漏。直接当作转移：把字面量节点提到
-           调用点（所有权照常交给消费者）。 */
-        if (n->operand && n->operand->kind == AST_FUNC_DEF) {
-          ast_node_t *lit = n->operand;
-          lit->next = (*node)->next;
-          *node = lit;
-        } else {
-          ast_node_t *gen = sema_gen_clone(sema, scope, ot, n->operand);
-          if (gen) {
-            *node = gen;
-          } else {
-            /* 静态无法表达深拷贝的形态：闭包值（env 的捕获聚合类型只有运行期
-               才知道）、cunion 被指向值、无语句上下文的切片 clone
-               → 改写为运行期 `__deep_clone(v)`（对象图克隆，同 ptr_clone_block）。
-               这样 CLONE 指令可以彻底移除——深拷贝统一由生成函数或该内置函数承担。 */
-            ast_node_t *callee = ast_ident_new(sema->arena, (*node)->tok_begin,
-                                               (*node)->tok_end);
-            ast_node_t *call = ast_call_new(sema->arena, (*node)->tok_begin,
-                                            (*node)->tok_end);
-            if (callee && call) {
-              ((ast_ident_t *)callee)->name =
-                  strslice_from_bytes("__deep_clone", 12);
-              callee->is_generated = true;
-              ((ast_call_t *)call)->callee = callee;
-              ((ast_call_t *)call)->args = n->operand;
-              call->is_generated = true;
-              call->next = (*node)->next;
-              *node = call;
-            }
-          }
-        }
-      }
-      /* union / cunion 成员 move：**整体进 TDZ**（"局部 = 整体"）。
-         作用域退出不再销毁整体——payload 已移出，由接管方销毁；不标 TDZ 会让
-         销毁序列（tag union 的 own payload）二次 FREE 同一块。 */
-      if (!is_clone && union_root) {
-        if (union_root->borrow_count > 0) {
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "cannot move a member of '%.*s': %d live borrow(s) still "
-                     "reference it (borrows must end before move)",
-                     (int)union_root_name.len, union_root_name.ptr,
-                     union_root->borrow_count);
-        } else if (produces_fatal) {
-          union_root->moved = true;
-          if (sema_sym_is_fatal(union_root))
-            sema_mark_fatal_consumed(union_root);
-        }
-      }
-
-      value_t *r = value_make_shadow(sema->vm, fatal);
-      value_set_type_ownership(sema->vm, r, OWN_FATAL);
-      return r;
+      return sema_expr(sema, &n->operand, scope);
 }
+
 
 /* AST_INT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_int_lit(sema_t *sema, ast_node_t **node,
@@ -933,14 +672,6 @@ value_t *ex_deref(sema_t *sema, ast_node_t **node,
       if (is_poison(sema, operand))
         return val_void(sema);
       const type_t *ot = value_type(operand);
-      /* **weak *T 不能直接解引用**（§12.4）：弱引用不保证对象存活，必须先
-         `.get()` 升级成 `?share *T`（死对象得 nil），访问路径因此天然无竞态。 */
-      if (type_is_weak(ot)) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot dereference a 'weak *T': a weak reference may already "
-                   "be dead (use `w.get()` to upgrade it to `?share *T`)");
-        return val_void(sema);
-      }
       const type_t *base = ptr_type_base(ot);
       if (!base) {
         char tn[64];
@@ -972,13 +703,8 @@ value_t *ex_addr(sema_t *sema, ast_node_t **node,
       }
       const type_t *ptr = type_ptr_intern(sema->vm, t);
       if (!ptr) return val_void(sema);
-      /* `x.&` 的类型是 **ref *T**（借用，不是 own）。 */
-      const type_t *pt = type_ownership_apply(sema->vm, OWN_REF, ptr);
-      if (!pt) return val_void(sema);
-      sema_type_register(sema, pt);
-      value_t *r = value_make_shadow(sema->vm, pt);
-      value_set_type_ownership(sema->vm, r, OWN_REF);
-      return r;
+      sema_type_register(sema, ptr);
+      return value_make_shadow(sema->vm, ptr);
 }
 
 /* AST_FUNC_DEF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
@@ -992,21 +718,6 @@ value_t *ex_func_def(sema_t *sema, ast_node_t **node,
       const type_t *sig = sema_check_func_literal(sema, fn, scope);
       if (!sig) return val_void(sema);
       value_t *fv = value_make_shadow(sema->vm, sig);
-      /* **捕获了 own 的闭包，它自己就是 OWN**（所有权模型里唯一的 own 产生式）。
-         为什么不经 FATAL：函数是"定义 + 绑定名字"，定义本身已经把
-         `fatal → move → own` 折叠掉了。因此它只能被 `own` 位置接收，
-         写 `var f = <closure>` 会因"OWN 不能赋给 NONE 位置"被拒，
-         必须显式 `var f = move(<closure>)`。
-         捕获槽的所有权由 resolve_func_captures 回写进 AST 节点（cv->ownership）。 */
-      if (fn->captures) {
-        for (ast_node_t *c = fn->captures; c; c = c->next) {
-          if (type_ownership_of(((ast_var_def_t *)c)->resolved_type) ==
-              OWN_OWN) {
-            value_set_type_ownership(sema->vm, fv, OWN_OWN);
-            break;
-          }
-        }
-      }
       return fv;
 }
 

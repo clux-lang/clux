@@ -78,7 +78,6 @@ static const char *const g_keywords[] = {
     "sizeof",  "str",    "struct",  "switch", "true",    "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",
     "union",   "usize",  "var",     "void",    "volatile", "while",
-    "share",   "weak",   /* RC 系（§12，2026-10 重新引入） */
     "foreach", "of",     /* 前脱糖语法糖（-> 索引 for 循环，见 src/desugar/） */
     "interface", "implements", /* M7 §31：编译期接口 / struct 实现声明 */
 };

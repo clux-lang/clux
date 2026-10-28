@@ -168,7 +168,7 @@ TEST(CBackendDiff, StructArrayPointer) {
       "func main(): i32 {\n"
       "  var p: Point = .Point{ .x = 2, .y = 3 };\n"
       "  p.x = 5;\n"
-      "  var r: ref *Point = p.&;\n"
+      "  var r: *Point = p.&;\n"
       "  r.y = 7;\n"
       "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
       "  a[1] += 4;\n"
@@ -182,11 +182,11 @@ TEST(CBackendDiff, StructArrayPointer) {
 TEST(CBackendDiff, OwnershipAndSlices) {
   static const DiffCase c = {
       "diff_own",
-      "struct Box { p: own *i32; }\n"
+      "struct Box { p: *i32; }\n"
       "func main(): i32 {\n"
-      "  var b: own *Box = new Box{ .p = new i32{7} };\n"
-      "  var s: own []i32 = make(i32, 3, 1, 2, 3);\n"
-      "  var t: ref []i32 = s[1:3];\n"
+      "  var b: *Box = new Box{ .p = new i32{7} };\n"
+      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  var t: []i32 = s[1:3];\n"
       "  return b.p.* + t[0] + t[1];\n"
       "}\n",
       12,
@@ -200,7 +200,7 @@ TEST(CBackendDiff, StringsAndLength) {
       "func main(): i32 {\n"
       "  var a: str = \"abcdef\";\n"
       "  if (a != \"abcdef\") { return 50; }\n"
-      "  var t: ref []const u8 = a[1:4];\n"
+      "  var t: []const u8 = a[1:4];\n"
       "  if (len(a) != 6usize || len(t) != 3usize) { return 51; }\n"
       "  return (t[0] as i32) - 96 + (t[2] as i32) - 96;\n"
       "}\n",
@@ -231,7 +231,7 @@ TEST(CBackendDiff, FunctionValuesClosuresAndMethods) {  static const DiffCase c 
       "diff_closure",
       "struct Point {\n"
       "  x: i32;\n"
-      "  func plus(self: ref *Point, y: i32): i32 { return self.x + y; }\n"
+      "  func plus(self: *Point, y: i32): i32 { return self.x + y; }\n"
       "}\n"
       "func apply[F](f: F, x: i32): i32 { return f(x); }\n"
       "func main(): i32 {\n"
@@ -404,9 +404,9 @@ TEST(CBackendDiff, ResultSugarAndOptionalFields) {
       "  good: bool;\n"
       "  val: ?T;\n"
       "  err: ?E;\n"
-      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
-      "  func value(self: ref *const Result[T, E]): T { return self.val.!; }\n"
-      "  func error(self: ref *const Result[T, E]): E { return self.err.!; }\n"
+      "  func ok(self: *const Result[T, E]): bool { return self.good; }\n"
+      "  func value(self: *const Result[T, E]): T { return self.val.!; }\n"
+      "  func error(self: *const Result[T, E]): E { return self.err.!; }\n"
       "  func of_value(v: T): Result[T, E] {\n"
       "    return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };\n"
       "  }\n"
@@ -439,9 +439,9 @@ TEST(CBackendDiff, GenericStructInstanceMethods) {
       "diff_generic_methods",
       "struct Box[T] {\n"
       "  v: T;\n"
-      "  func get(self: ref *Box[T]): T { return self.v; }\n"
+      "  func get(self: *Box[T]): T { return self.v; }\n"
       "  func mk(x: T): Box[T] { return .Box[T]{ .v = x }; }\n"
-      "  func map[U](self: ref *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
+      "  func map[U](self: *Box[T], f: func(T) -> U): U { return f(self.v); }\n"
       "}\n"
       "func inc(x: i32): i32 { return x + 1; }\n"
       "func main(): i32 {\n"

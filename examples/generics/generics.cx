@@ -12,13 +12,13 @@ func fact[T](x: T): T {
 
 interface IBox[T, Self] {
     var value: T;
-    func get(self: ref *const Self): T;
+    func get(self: *const Self): T;
 }
 
 struct Box[T] implements IBox[T, Box[T]] {
     value: T;
-    func get(self: ref *const Box[T]): T { return self.value; }
-    func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {
+    func get(self: *const Box[T]): T { return self.value; }
+    func map_into[U](self: *const Box[T], f: func(T) -> U): Box[U] {
         var b: Box[U] = .{ .value = f(self.value) };
         return b;
     }
@@ -27,7 +27,7 @@ struct Box[T] implements IBox[T, Box[T]] {
 struct Matrix[T, N: comptime u64] { data: [N]T; }
 
 func pack_size[...Args](tag: str, args: ...Args): u64 { return len(args); }
-func read_ptr[T extends ?*?](p: T): i32 { return p.*; }
+func read_ptr[T extends *?](p: T): i32 { return p.*; }
 func value_pack[...N: comptime u64](): u64 { return N[0] + len(N); }
 
 func main(): void {
@@ -40,7 +40,7 @@ func main(): void {
     var f: func(i32) -> i32 = fact[i32];
     var n = pack_size[i32, str]("pack", 1, "x");
     var v: i32 = 5;
-    var r: ref *i32 = v.&;
+    var r: *i32 = v.&;
     var pv = read_ptr(r);
     var vp = value_pack[7u64, 8u64]();
     _ = libc::printf("%d %.1f %d %d %d %d %llu %d %d %llu\n", a, b, c, box.get(),

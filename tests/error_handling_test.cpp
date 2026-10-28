@@ -21,10 +21,10 @@ static const char *kResult =
     "  okf: bool;\n"
     "  v: i32;\n"
     "  e: i32;\n"
-    "  func ok(self: ref *const R): bool { return self.okf; }\n"
-    "  func value(self: ref *const R): i32 { return self.v; }\n"
-    "  func error(self: ref *const R): i32 { return self.e; }\n"
-    "  func panic(self: ref *const R): str { return \"result error\"; }\n"
+    "  func ok(self: *const R): bool { return self.okf; }\n"
+    "  func value(self: *const R): i32 { return self.v; }\n"
+    "  func error(self: *const R): i32 { return self.e; }\n"
+    "  func panic(self: *const R): str { return \"result error\"; }\n"
     "  func of_error(e: i32): R {\n"
     "    return .R{ .okf = false, .v = 0, .e = e };\n"
     "  }\n"
@@ -91,25 +91,6 @@ TEST(ErrorHandling, PanicBranchDoesNotInhibitTdz) {
       "error_panic_tdz");
 }
 
-TEST(ErrorHandling, OwnErrorValueIsRejected) {
-  clux_expect_reject(
-      "struct R {\n"
-      "  okf: bool;\n"
-      "  func ok(self: ref *const R): bool { return self.okf; }\n"
-      "  func value(self: ref *const R): i32 { return 1; }\n"
-      "  func error(self: ref *const R): fatal *i32 {\n"
-      "    return new i32{ .i32{1} };\n"
-      "  }\n"
-      "  func of_error(e: fatal *i32): R {\n"
-      "    return .R{ .okf = false };\n"
-      "  }\n"
-      "};\n"
-      "func test(r: R): R { var b = r.?; return .R{ .okf = true }; }\n"
-      "func main(): i32 { return 0; }\n",
-      "error value from 'error()' must be copyable",
-      "error_own_error");
-}
-
 TEST(ErrorHandling, NoreturnDecoratorUserFunction) {
   clux_expect_ok(
       "[[noreturn]] func fail(): void { panic(\"custom fail\"); }\n"
@@ -140,10 +121,10 @@ TEST(ErrorHandling, GenericResultStruct) {
       "  good: bool;\n"
       "  val: ?T;\n"
       "  err: ?E;\n"
-      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
-      "  func value(self: ref *const Result[T, E]): T { return self.val.!; }\n"
-      "  func error(self: ref *const Result[T, E]): E { return self.err.!; }\n"
-      "  func panic(self: ref *const Result[T, E]): str { return \"Result error\"; }\n"
+      "  func ok(self: *const Result[T, E]): bool { return self.good; }\n"
+      "  func value(self: *const Result[T, E]): T { return self.val.!; }\n"
+      "  func error(self: *const Result[T, E]): E { return self.err.!; }\n"
+      "  func panic(self: *const Result[T, E]): str { return \"Result error\"; }\n"
       "  func of_value(v: T): Result[T, E] {\n"
       "    return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };\n"
       "  }\n"
@@ -200,29 +181,6 @@ TEST(ErrorHandling, TakePlainOptional) {
       "take_plain");
 }
 
-TEST(ErrorHandling, TakeOwnOptional) {
-  clux_expect_ok(
-      "func main(): i32 {\n"
-      "  var o: own ?own *i32 = .?own *i32{ new i32{ .i32{7} } };\n"
-      "  var p: own *i32 = take_opt(o);\n"
-      "  if (o != nil) { return 1; }\n"
-      "  return p.* - 7;\n"
-      "}\n",
-      "take_own");
-}
-
-TEST(ErrorHandling, TakeOptionalField) {
-  clux_expect_ok(
-      "struct Node { next: ?own *i32; }\n"
-      "func main(): i32 {\n"
-      "  var n: own Node = .Node{ .next = .?own *i32{ new i32{ .i32{9} } } };\n"
-      "  var p: own *i32 = take_opt(n.next);\n"
-      "  if (n.next != nil) { return 1; }\n"
-      "  return p.* - 9;\n"
-      "}\n",
-      "take_field");
-}
-
 TEST(ErrorHandling, TryAsExpression) {
   clux_expect_ok(
       std::string(kResult) +
@@ -267,102 +225,4 @@ TEST(ErrorHandling, TryExpressionInLoop) {
           "  return a.value() - 7;\n"
           "}\n",
       "try_expression_loop");
-}
-
-TEST(ErrorHandling, ConditionalOwnedResultSignature) {
-  clux_expect_ok(
-      "struct Result[T, E] {\n"
-      "  good: bool;\n"
-      "  val: ?T;\n"
-      "  err: ?E;\n"
-      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
-      "  func value(self: ref *Result[T, E]): (T.ownership == \"own\" ? fatal T : T) {\n"
-      "    comptime if (T extends own *?) {\n"
-      "      return take_opt(self.val);\n"
-      "    } else {\n"
-      "      return self.val.!;\n"
-      "    }\n"
-      "  }\n"
-      "  func of_value(v: T): (T.ownership == \"own\" ? fatal Result[T, E] : Result[T, E]) {\n"
-      "    return move(.Result[T, E]{ .good = true, .val = .?T{ move(v) }, .err = nil });\n"
-      "  }\n"
-      "}\n"
-      "func get(x: i32): (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-      "  return Result[own *i32, str]::of_value(new i32{ .i32{x} });\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var r: own Result[own *i32, str] = get(7);\n"
-      "  var p: own *i32 = r.value();\n"
-      "  if (r.val != nil) { return 1; }\n"
-      "  return p.* - 7;\n"
-      "}\n",
-      "conditional_owned_result");
-}
-
-TEST(ErrorHandling, OwnedResultTry) {
-  const char *pre =
-      "struct Result[T, E] {\n"
-      "  good: bool;\n"
-      "  val: ?T;\n"
-      "  err: ?E;\n"
-      "  func ok(self: ref *const Result[T, E]): bool { return self.good; }\n"
-      "  func value(self: ref *Result[T, E]): (T.ownership == \"own\" ? fatal T : T) {\n"
-      "    comptime if (T.ownership == \"own\") {\n"
-      "      return take_opt(self.val);\n"
-      "    } else {\n"
-      "      return self.val.!;\n"
-      "    }\n"
-      "  }\n"
-      "  func error(self: ref *const Result[T, E]): E { return self.err.!; }\n"
-      "  func of_value(v: T): (T.ownership == \"own\" ? fatal Result[T, E] : Result[T, E]) {\n"
-      "    return .Result[T, E]{ .good = true, .val = .?T{ move(v) }, .err = nil };\n"
-      "  }\n"
-      "  func of_error(e: E): (T.ownership == \"own\" ? fatal Result[T, E] : Result[T, E]) {\n"
-      "    return .Result[T, E]{ .good = false, .val = nil, .err = .?E{ e } };\n"
-      "  }\n"
-      "}\n"
-      "func get(x: i32): (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-      "  if (x < 0) { return Result[own *i32, str]::of_error(\"neg\"); }\n"
-      "  return Result[own *i32, str]::of_value(new i32{ .i32{x} });\n"
-      "}\n";
-  clux_expect_ok(
-      std::string(pre) +
-          "func extract(r: own Result[own *i32, str]):\n"
-          "    (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-          "  var p: own *i32 = r.?;\n"
-          "  return Result[own *i32, str]::of_value(move(p));\n"
-          "}\n"
-          "func assign(r: own Result[own *i32, str]):\n"
-          "    (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-          "  var p: own *i32 = undefined;\n"
-          "  p = r.?;\n"
-          "  return Result[own *i32, str]::of_value(move(p));\n"
-          "}\n"
-          "func from_call(x: i32):\n"
-          "    (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-          "  var p: own *i32 = get(x).?;\n"
-          "  return Result[own *i32, str]::of_value(move(p));\n"
-          "}\n"
-          "func expr(r: own Result[own *i32, str]):\n"
-          "    (own *i32 extends own *? ? fatal Result[own *i32, str] : Result[own *i32, str]) {\n"
-          "  return Result[own *i32, str]::of_value(r.?);\n"
-          "}\n"
-          "func main(): i32 {\n"
-          "  var a: own Result[own *i32, str] = extract(get(7));\n"
-          "  var pa: own *i32 = a.value();\n"
-          "  if (pa.* != 7) { return 1; }\n"
-          "  var b: own Result[own *i32, str] = assign(get(8));\n"
-          "  var pb: own *i32 = b.value();\n"
-          "  if (pb.* != 8) { return 2; }\n"
-          "  var c: own Result[own *i32, str] = assign(get(-1));\n"
-          "  if (c.ok() || c.error() != \"neg\") { return 3; }\n"
-          "  var e: own Result[own *i32, str] = from_call(10);\n"
-          "  var pe: own *i32 = e.value();\n"
-          "  if (pe.* != 10) { return 5; }\n"
-          "  var d: own Result[own *i32, str] = expr(get(9));\n"
-          "  var pd: own *i32 = d.value();\n"
-          "  if (pd.* != 9) { return 4; }\n"
-          "  return 0;\n"
-          "}\n",
-      "owned_result_try");
 }

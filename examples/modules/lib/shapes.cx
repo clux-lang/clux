@@ -3,11 +3,11 @@
 export struct Test {
     x: i32;
 
-    func get(self: ref *const Test): i32 {
+    func get(self: *const Test): i32 {
         return self.x;
     }
 
-    func set(self: ref *Test, v: i32): void {
+    func set(self: *Test, v: i32): void {
         self.x = v;
     }
 

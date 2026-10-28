@@ -386,8 +386,11 @@ ast_node_t *parse_primary(parser_t *p) {
         }
         skip_trivia(p);
 
-        /* base_type 用 parse_unary：支持 const/volatile 修饰、嵌套 [M][N]T */
-        ast_node_t *base_type = parse_unary(p);
+        /* base_type 用 parse_unary：支持 const/volatile 修饰、嵌套 [M][N]T。
+           raw 模式还要接受裸 *T / []T。 */
+        ast_node_t *base_type = true
+                                    ? parse_raw_type_atom(p)
+                                    : parse_unary(p);
         if (!base_type || base_type->kind == AST_ERROR) {
             if (!base_type) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -459,29 +462,12 @@ ast_node_t *parse_primary(parser_t *p) {
         const token_t *op_tok = cur_token(p);
         advance(p);
         skip_trivia(p);
-        if (!expect_symbol(p, "(")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                 "expected '(' after ownership primitive");
-        }
-        skip_trivia(p);
-        ast_node_t *operand = parse_expr(p);
-        if (!operand || operand->kind == AST_ERROR) {
-            if (!operand) {
-                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                     "expected expression after '(' in ownership primitive");
-            }
-            return operand;
-        }
-        skip_trivia(p);
-        if (!expect_symbol(p, ")")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                 "expected ')' after ownership primitive operand");
-        }
-        ast_node_t *node = ast_move_new(p->arena, mb, p->pos);
-        if (!node) return NULL;
-        ((ast_move_t *)node)->op      = (token_t *)op_tok;
-        ((ast_move_t *)node)->operand = operand;
-        return node;
+        p->has_error = true;
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, mb, p->pos,
+            "'%.*s' was removed with compile-time ownership; raw pointer "
+            "values are copied directly",
+            (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
     }
 
     /* make 编译期宏函数：make(T, N, init...)（m4-design §2）。
@@ -500,7 +486,9 @@ ast_node_t *parse_primary(parser_t *p) {
         skip_trivia(p);
 
         /* 第一个参数：元素类型 T */
-        ast_node_t *elem_type = parse_expr(p);
+        ast_node_t *elem_type = true
+                                    ? parse_raw_type_atom(p)
+                                    : parse_expr(p);
         if (!elem_type || elem_type->kind == AST_ERROR) {
             if (!elem_type) {
                 return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
@@ -628,7 +616,9 @@ ast_node_t *parse_type_with_index(parser_t *p) {
 
         ast_node_t *indices = NULL, *indices_last = NULL;
         if (!check_symbol(p, "]")) {
-            ast_node_t *first = parse_expr(p);
+            ast_node_t *first = true
+                                    ? parse_raw_type_atom(p)
+                                    : parse_expr(p);
             if (!first || first->kind == AST_ERROR) {
                 if (!first)
                     return ast_error_new(p->diag, p->tokens, p->arena, tb,
@@ -642,7 +632,9 @@ ast_node_t *parse_type_with_index(parser_t *p) {
             while (check_symbol(p, ",")) {
                 advance(p);
                 skip_trivia(p);
-                ast_node_t *next = parse_expr(p);
+                ast_node_t *next = true
+                                       ? parse_raw_type_atom(p)
+                                       : parse_expr(p);
                 if (!next || next->kind == AST_ERROR) {
                     if (!next)
                         return ast_error_new(p->diag, p->tokens, p->arena, tb,
@@ -683,8 +675,17 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_keyword(p, "own"))       op_tok = cur_token(p);
     else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
     else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
-    else if (check_keyword(p, "share"))     op_tok = cur_token(p);
-    else if (check_keyword(p, "weak"))      op_tok = cur_token(p);
+
+    /* 编译期所有权修饰符已移除：只保留裸 *T / []T。 */
+    if (op_tok && (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
+                   token_is(op_tok, "fatal"))) {
+        p->has_error = true;
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos + 1,
+            "ownership modifier '%.*s' was removed; write '*T' / '[]T' "
+            "without an ownership prefix",
+            (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
+    }
 
     /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
@@ -783,7 +784,9 @@ ast_node_t *parse_unary(parser_t *p) {
         ast_node_t *type = NULL;
         /* 匿名构造：'new' 后直接 '{' → type=NULL，目标类型由 sema 依上下文推断 */
         if (!check_symbol(p, "{")) {
-            type = parse_type_with_index(p);
+            type = true
+                       ? parse_raw_type_atom(p)
+                       : parse_type_with_index(p);
             if (!type || type->kind == AST_ERROR) {
                 if (!type) {
                     return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
@@ -857,7 +860,9 @@ ast_node_t *parse_unary(parser_t *p) {
         /* 匿名构造：'.' 后直接 '{' → type=NULL，目标类型由 sema 依上下文
          * 推断（var 声明/赋值/嵌套字段）。否则照旧解析具名类型。 */
         if (!check_symbol(p, "{")) {
-            type = parse_type_with_index(p);   /* 类型：i32 / [N]T / const i32 / Vec[i32] */
+            type = true
+                       ? parse_raw_type_atom(p)
+                       : parse_type_with_index(p);   /* 类型：i32 / [N]T / const i32 / Vec[i32] */
             if (!type || type->kind == AST_ERROR) {
                 if (!type) {
                     return ast_error_new(p->diag, p->tokens, p->arena, dot_pos, p->pos,
@@ -917,103 +922,10 @@ ast_node_t *parse_unary(parser_t *p) {
         return node;
     }
 
-    /* 修饰词已被 advance 消费（本分支只处理 own/ref/fatal 三种），
-       游标现停在修饰词之后。 */
+
+    /* 普通一元运算符：消费前缀后解析操作数。 */
     advance(p);
     skip_trivia(p);
-
-    /* 指针类型 own/ref/fatal *T / 切片类型 own/ref/fatal []T
-       （m4-design §1）：'*' 是指针语法，'[]' 是切片语法，必须紧跟 ownership
-       修饰（own i32 不合法）。
-       消费 '*' 或 '[]' 后再解析被指向/元素类型 T。 */
-    if (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
-        token_is(op_tok, "fatal") || token_is(op_tok, "share") ||
-        token_is(op_tok, "weak")) {
-        /* 切片路径：own []T / ref []T / fatal []T */
-        if (check_symbol(p, "[")) {
-            /* 保存位置以便回退到 '[' 前做错误诊断 */
-            uint32_t bracket_pos = p->pos;
-            advance(p);
-            skip_trivia(p);
-            if (check_symbol(p, "]")) {
-                advance(p);
-                skip_trivia(p);
-                ast_node_t *elem_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
-                if (!elem_type || elem_type->kind == AST_ERROR) {
-                    if (!elem_type) {
-                        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                             "expected type after '[]' in slice type");
-                    }
-                    return elem_type;
-                }
-                ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
-                if (!node) return NULL;
-                ((ast_slice_type_t *)node)->ownership = (token_t *)op_tok;
-                ((ast_slice_type_t *)node)->elem_type = elem_type;
-                return node;
-            }
-            /* '[' 后不是 ']'——不是切片语法，回退让其他分支处理 */
-            p->pos = bracket_pos;
-        }
-
-        if (!check_symbol(p, "*")) {
-            /* `*` / `[]` 都没有 → **所有权限定的非指针类型**（`fatal T` / `own T`）。
-               节点统一为 AST_OWNED_TYPE（带 ownership token）。
-
-               按所有权模型（docs/ownership-refactor.md §0）：所有权是**值状态**，
-               不是类型的修饰，所以**语法层不policing"哪个类型能被哪个修饰词限定"**
-               ——`own i32` 也可以写出来；它是否**可用**由流动规则决定（`own` 位置
-               需要将亡值，而 `i32` 没有 FATAL 产生式 → 永远无法初始化，自然淘汰）。
-               这同时为将来的 `own T`（T 为含 own 字段的聚合）留出通路。
-
-               `ref T`（T 非指针）仍在此拒绝：借用需要一个**可借出的值**，
-               而当前没有"非指针值的借用"这一产生式（借用走 `ref *T` /
-               `ref []T` / `x.&`）。 */
-            /* `opaque` 是**指针**（`void *` 语义）：三种所有权修饰都合法
-               （`own opaque` / `ref opaque` / `fatal opaque`）。 */
-            bool opaque_base = check_keyword(p, "opaque");
-            if (!opaque_base && !token_is(op_tok, "fatal") &&
-                !token_is(op_tok, "own") && !token_is(op_tok, "share") &&
-                !token_is(op_tok, "weak")) {
-                return ast_error_new(
-                    p->diag, p->tokens, p->arena, tb, p->pos,
-                    "only 'fatal' / 'own' can qualify a non-pointer type "
-                    "(write 'own *T' / 'ref *T' / 'own []T' for pointers and "
-                    "slices, 'fatal T' for a dying compound value, or 'own T' "
-                    "to take ownership of one)");
-            }
-            ast_node_t *ot_base = parse_expr_prec(p, PREFIX_RIGHT_PREC);
-            if (!ot_base || ot_base->kind == AST_ERROR) {
-                if (!ot_base) {
-                    return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                         "expected type after the ownership "
-                                         "qualifier");
-                }
-                return ot_base;
-            }
-            ast_node_t *onode = ast_owned_type_new(p->arena, tb, p->pos);
-            if (!onode) return NULL;
-            ((ast_owned_type_t *)onode)->ownership = (token_t *)op_tok;
-            ((ast_owned_type_t *)onode)->base_type = ot_base;
-            return onode;
-        }
-        advance(p);   /* 消费 '*'（check_symbol 不消费，见上方分支） */
-        skip_trivia(p);
-        ast_node_t *base_type = parse_expr_prec(p, PREFIX_RIGHT_PREC);
-        if (!base_type || base_type->kind == AST_ERROR) {
-            if (!base_type) {
-                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                     "expected type after '*' in pointer type");
-            }
-            return base_type;
-        }
-        ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
-        if (!node) return NULL;
-        ((ast_ptr_t *)node)->ownership = (token_t *)op_tok;
-        ((ast_ptr_t *)node)->base_type = base_type;
-        return node;
-    }
-
     ast_node_t *operand = parse_expr_prec(p, PREFIX_RIGHT_PREC);
     if (!operand || operand->kind == AST_ERROR) {
         if (!operand) {
@@ -1561,10 +1473,53 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
            `extends` 的 RHS 是 PATTERN（可含 `?` 通配），不是普通表达式；
            它仍作为普通二元表达式参与外层优先级/短路/三元组合，由
            sema/CTFE 折叠为 bool。 */
-        ast_node_t *rhs =
-            token_is(op_tok, "extends")
-                ? parse_pattern(p)
-                : parse_expr_prec(p, rp);
+        ast_node_t *rhs;
+        if (token_is(op_tok, "extends")) {
+            rhs = parse_pattern(p);
+        } else if (token_is(op_tok, "as") ) {
+            /* raw cast RHS：只解析类型原子（高优先级，避免把 `as f64 + b`
+               的 `+ b` 吃进类型表达式）。 */
+            uint32_t tb = p->pos;
+            if (check_symbol(p, "*")) {
+                advance(p);
+                skip_trivia(p);
+                ast_node_t *base = parse_expr_prec(p, 22);
+                if (!base || base->kind == AST_ERROR) {
+                    rhs = base;
+                } else {
+                    rhs = ast_ptr_new(p->arena, tb, p->pos);
+                    if (rhs) {
+                        ((ast_ptr_t *)rhs)->ownership = NULL;
+                        ((ast_ptr_t *)rhs)->base_type = base;
+                    }
+                }
+            } else if (check_symbol(p, "[")) {
+                uint32_t save = p->pos;
+                advance(p);
+                skip_trivia(p);
+                if (check_symbol(p, "]")) {
+                    advance(p);
+                    skip_trivia(p);
+                    ast_node_t *elem = parse_expr_prec(p, 22);
+                    if (!elem || elem->kind == AST_ERROR) {
+                        rhs = elem;
+                    } else {
+                        rhs = ast_slice_type_new(p->arena, tb, p->pos);
+                        if (rhs) {
+                            ((ast_slice_type_t *)rhs)->ownership = NULL;
+                            ((ast_slice_type_t *)rhs)->elem_type = elem;
+                        }
+                    }
+                } else {
+                    p->pos = save;
+                    rhs = parse_expr_prec(p, 22);
+                }
+            } else {
+                rhs = parse_expr_prec(p, 22);
+            }
+        } else {
+            rhs = parse_expr_prec(p, rp);
+        }
         if (!rhs || rhs->kind == AST_ERROR) {
             if (!rhs) {
                 return ast_error_new(p->diag, p->tokens, p->arena, op_pos, p->pos,

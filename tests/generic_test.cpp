@@ -276,23 +276,6 @@ TEST(GenericRun, FunctionValueAndRecursion) {
         "generic_value");
 }
 
-TEST(GenericRun, OwnershipInferenceIsAsymmetric) {
-    clux_expect_ok(
-        "func peek[T](p: ref *T): T { return p.*; }\n"
-        "func take[T](p: own *T): T { return p.*; }\n"
-        "func main(): i32 {\n"
-        "    var v: i32 = 9;\n"
-        "    var r: ref *i32 = v.&;\n"
-        "    var a = peek(r);\n"
-        "    var o: own *i32 = new i32{ 11 };\n"
-        "    var b = take(move(o));\n"
-        "    var o2: own *i32 = new i32{ 3 };\n"
-        "    var c = peek(o2);\n"
-        "    return a + b + c - 23;\n"
-        "}\n",
-        "generic_ownership");
-}
-
 TEST(GenericRun, DefaultTypeArgument) {
     clux_expect_ok(
         "func size_of[T = i32](): u64 { return sizeof(T); }\n"
@@ -306,7 +289,7 @@ TEST(GenericRun, DefaultTypeArgument) {
 
 TEST(GenericRun, ForeachInGenericBody) {
     clux_expect_ok(
-        "func count[T](xs: ref []T): u64 {\n"
+        "func count[T](xs: []T): u64 {\n"
         "    var n: u64 = 0u64;\n"
         "    foreach (var x of xs) { n = n + 1u64; }\n"
         "    return n;\n"
@@ -326,8 +309,8 @@ TEST(GenericType, StructFieldsMethodsAndStaticMethod) {
         "struct Box[T] {\n"
         "    value: T;\n"
         "    func create(v: T): Box[T] { var b: Box[T] = .{ .value = v }; return b; }\n"
-        "    func get(self: ref *const Box[T]): T { return self.value; }\n"
-        "    func set(self: ref *Box[T], v: T): void { self.value = v; }\n"
+        "    func get(self: *const Box[T]): T { return self.value; }\n"
+        "    func set(self: *Box[T], v: T): void { self.value = v; }\n"
         "}\n"
         "func main(): i32 {\n"
         "    var a: Box[i32] = .Box[i32]{ .value = 1 };\n"
@@ -367,11 +350,11 @@ TEST(GenericType, UnionAndEnumInstances) {
 TEST(GenericType, NestedAndRecursiveInstances) {
     clux_expect_ok(
         "struct Box[T] { value: T; }\n"
-        "struct Node[T] { value: T; next: ?ref *const Node[T]; }\n"
+        "struct Node[T] { value: T; next: ?*const Node[T]; }\n"
         "func main(): i32 {\n"
         "    var b: Box[Box[i32]] = .{ .value = .{ .value = 4 } };\n"
         "    var n: Node[i32] = .{ .value = 3, "
-        ".next = .?ref *const Node[i32]{ nil } };\n"
+        ".next = .?*const Node[i32]{ nil } };\n"
         "    return b.value.value + n.value - 7;\n"
         "}\n",
         "generic_nested_recursive");
@@ -381,10 +364,10 @@ TEST(GenericType, StaticAttributePerInstance) {
     clux_expect_ok(
         "struct Counter[T] {\n"
         "    var n: i32 = 0;\n"
-        "    func bump(self: ref *Counter[T]): void {\n"
+        "    func bump(self: *Counter[T]): void {\n"
         "        Counter[T]::n = Counter[T]::n + 1;\n"
         "    }\n"
-        "    func value(self: ref *const Counter[T]): i32 {\n"
+        "    func value(self: *const Counter[T]): i32 {\n"
         "        return Counter[T]::n;\n"
         "    }\n"
         "}\n"
@@ -402,29 +385,13 @@ TEST(GenericType, InferenceThroughGenericStructParameter) {
         "struct Box[T] { value: T; }\n"
         "func wrap[T](v: T): Box[T] { return .Box[T]{ .value = v }; }\n"
         "func unwrap[T](b: Box[T]): T { return b.value; }\n"
-        "func read[T](b: ref *Box[T]): T { return b.value; }\n"
+        "func read[T](b: *Box[T]): T { return b.value; }\n"
         "func main(): i32 {\n"
         "    var b = wrap(5);\n"
         "    var v = unwrap(b) + read(b.&);\n"
         "    return v - 10;\n"
         "}\n",
         "generic_struct_infer");
-}
-
-TEST(GenericType, OwnFieldAndNestedByValue) {
-    clux_expect_ok(
-        "struct Box[T] { v: T; }\n"
-        "struct Holder[T] { b: Box[T]; }\n"
-        "struct Own[T] {\n"
-        "    p: own *T;\n"
-        "    func get(self: ref *const Own[T]): T { return self.p.*; }\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "    var h: Holder[i32] = .{ .b = .{ .v = 2 } };\n"
-        "    var o: own Own[i32] = .Own[i32]{ .p = new i32{ 8 } };\n"
-        "    return h.b.v + o.get() - 10;\n"
-        "}\n",
-        "generic_own_field");
 }
 
 /* ---- P5：comptime 值参数 ---- */
@@ -530,21 +497,6 @@ TEST(GenericPack, EmptyPackAndTupleAggregation) {
 
 /* ---- P6a：extends 结构约束 ---- */
 
-TEST(GenericConstraint, PointerOwnershipWildcards) {
-    clux_expect_ok(
-        "func read_ptr[T extends ?*?](p: T): i32 { return p.*; }\n"
-        "func read_own[T extends own *?](p: T): i32 { return p.*; }\n"
-        "func main(): i32 {\n"
-        "    var v: i32 = 5;\n"
-        "    var r: ref *i32 = v.&;\n"
-        "    var x = read_ptr(r);\n"
-        "    var o: own *i32 = new i32{ 7 };\n"
-        "    var y = read_own[own *i32](move(o));\n"
-        "    return x + y - 12;\n"
-        "}\n",
-        "generic_constraint_ptr");
-}
-
 TEST(GenericConstraint, ArrayTupleGenericStructFunctionOr) {
     clux_expect_ok(
         "struct Box[T] { value: T; }\n"
@@ -590,7 +542,7 @@ TEST(GenericConstraint, StructFieldsAndConstQualifier) {
 TEST(GenericConstraint, ConstraintFmtIdempotent) {
     const char *src =
         "func f[T extends ?*? | [?]i32](x: T): void {}\n"
-        "func g[T extends own *? & const ?](x: T): void {}\n"
+        "func g[T extends *? & const ?](x: T): void {}\n"
         "struct Box[T] { v: T; }\n"
         "func h[T extends Box[?] | <i32, ?>, U extends []?](x: T, y: U): void {}\n";
     std::string once = fmt_source(src);
@@ -604,15 +556,15 @@ TEST(Interface, DeclareImplementAndConstrain) {
     clux_expect_ok(
         "interface IWriter[T] {\n"
         "    var fd: i32;\n"
-        "    func write(self: ref *T, data: ref []u8);\n"
+        "    func write(self: *T, data: []u8);\n"
         "}\n"
         "struct Writer implements IWriter[Writer] {\n"
         "    fd: i32;\n"
-        "    func write(self: ref *Writer, data: ref []u8): void {\n"
+        "    func write(self: *Writer, data: []u8): void {\n"
         "        self.fd = self.fd + 1;\n"
         "    }\n"
         "}\n"
-        "func serialize[T extends IWriter[T]](w: ref *T): i32 { return w.fd; }\n"
+        "func serialize[T extends IWriter[T]](w: *T): i32 { return w.fd; }\n"
         "func main(): i32 {\n"
         "    var w: Writer = .{ .fd = 3 };\n"
         "    var d: [2]u8 = .[2]u8{ 65 as u8, 66 as u8 };\n"
@@ -626,16 +578,16 @@ TEST(Interface, GenericStructImplementsAndConstraint) {
     clux_expect_ok(
         "interface IWriter[T] {\n"
         "    var fd: i32;\n"
-        "    func write(self: ref *T, data: ref []u8);\n"
+        "    func write(self: *T, data: []u8);\n"
         "}\n"
         "struct Wrapper[T] implements IWriter[Wrapper[T]] {\n"
         "    fd: i32;\n"
         "    value: T;\n"
-        "    func write(self: ref *Wrapper[T], data: ref []u8): void {\n"
+        "    func write(self: *Wrapper[T], data: []u8): void {\n"
         "        self.fd = self.fd + 1;\n"
         "    }\n"
         "}\n"
-        "func fd_of[T extends IWriter[T]](w: ref *T): i32 { return w.fd; }\n"
+        "func fd_of[T extends IWriter[T]](w: *T): i32 { return w.fd; }\n"
         "func main(): i32 {\n"
         "    var w: Wrapper[i32] = .{ .fd = 10, .value = 1 };\n"
         "    var d: [1]u8 = .[1]u8{ 65 as u8 };\n"
@@ -647,13 +599,13 @@ TEST(Interface, GenericStructImplementsAndConstraint) {
 
 TEST(Interface, MultipleInterfacesWithAmpersand) {
     clux_expect_ok(
-        "interface IW[T] { func w(self: ref *T); }\n"
-        "interface IR[T] { func r(self: ref *T): i32; }\n"
+        "interface IW[T] { func w(self: *T); }\n"
+        "interface IR[T] { func r(self: *T): i32; }\n"
         "struct S implements IW[S] & IR[S] {\n"
-        "    func w(self: ref *S): void {}\n"
-        "    func r(self: ref *S): i32 { return 4; }\n"
+        "    func w(self: *S): void {}\n"
+        "    func r(self: *S): i32 { return 4; }\n"
         "}\n"
-        "func both[T extends IW[T] & IR[T]](s: ref *T): i32 {\n"
+        "func both[T extends IW[T] & IR[T]](s: *T): i32 {\n"
         "    s.w();\n"
         "    return s.r();\n"
         "}\n"
@@ -666,10 +618,10 @@ TEST(Interface, MultipleInterfacesWithAmpersand) {
 
 TEST(Interface, AmpersandFmtIdempotent) {
     const char *src =
-        "interface IW[T]{func w(self:ref *T);}\n"
-        "interface IR[T]{func r(self:ref *T):i32;}\n"
-        "struct S implements IW[S]&IR[S]{func w(self:ref *S):void{}"
-        "func r(self:ref *S):i32{return 4;}}\n";
+        "interface IW[T]{func w(self:*T);}\n"
+        "interface IR[T]{func r(self:*T):i32;}\n"
+        "struct S implements IW[S]&IR[S]{func w(self:*S):void{}"
+        "func r(self:*S):i32{return 4;}}\n";
     std::string once = fmt_source(src);
     EXPECT_NE(once.find("implements IW[S] & IR[S] {"), std::string::npos)
         << once;
@@ -678,7 +630,7 @@ TEST(Interface, AmpersandFmtIdempotent) {
 
 TEST(Interface, MemberCopyArgsFmtIdempotent) {
     const char *src =
-        "interface IW[T]{func w(self:ref *T);}\n"
+        "interface IW[T]{func w(self:*T);}\n"
         "interface IRW[T]{...IW[T];}\n";
     std::string once = fmt_source(src);
     EXPECT_NE(once.find("...IW[T];"), std::string::npos) << once;
@@ -687,12 +639,12 @@ TEST(Interface, MemberCopyArgsFmtIdempotent) {
 
 TEST(Interface, FmtIdempotent) {
     const char *src =
-        "interface I[T]{var fd:i32;func w(self:ref *T,data:ref []u8);}\n"
-        "struct S implements I[S]{fd:i32;func w(self:ref *S,data:ref []u8):void{}}\n";
+        "interface I[T]{var fd:i32;func w(self:*T,data:[]u8);}\n"
+        "struct S implements I[S]{fd:i32;func w(self:*S,data:[]u8):void{}}\n";
     std::string once = fmt_source(src);
     EXPECT_NE(once.find("interface I[T] {"), std::string::npos) << once;
     EXPECT_NE(once.find("struct S implements I[S] {"), std::string::npos) << once;
-    EXPECT_NE(once.find("func w(self: ref *S, data: ref []u8): void {}"),
+    EXPECT_NE(once.find("func w(self: *S, data: []u8): void {}"),
               std::string::npos)
         << once;
     EXPECT_EQ(fmt_source(once.c_str()), once);
@@ -701,10 +653,10 @@ TEST(Interface, FmtIdempotent) {
 TEST(Interface, MemberCopyFromBase) {
     clux_expect_ok(
         "interface IBase { var fd: i32; }\n"
-        "interface IW[T] { ...IBase; func w(self: ref *T); }\n"
+        "interface IW[T] { ...IBase; func w(self: *T); }\n"
         "struct W implements IW[W] {\n"
         "    fd: i32;\n"
-        "    func w(self: ref *W): void {}\n"
+        "    func w(self: *W): void {}\n"
         "}\n"
         "func main(): i32 {\n"
         "    var w: W = .{ .fd = 1 };\n"
@@ -716,14 +668,14 @@ TEST(Interface, MemberCopyFromBase) {
 
 TEST(Interface, GenericMemberCopyWithArgs) {
     clux_expect_ok(
-        "interface IW[T] { func w(self: ref *T); }\n"
-        "interface IR[T] { func r(self: ref *T): i32; }\n"
+        "interface IW[T] { func w(self: *T); }\n"
+        "interface IR[T] { func r(self: *T): i32; }\n"
         "interface IRW[T] { ...IW[T]; ...IR[T]; }\n"
         "struct S implements IRW[S] {\n"
-        "    func w(self: ref *S): void {}\n"
-        "    func r(self: ref *S): i32 { return 4; }\n"
+        "    func w(self: *S): void {}\n"
+        "    func r(self: *S): i32 { return 4; }\n"
         "}\n"
-        "func use[T extends IRW[T]](s: ref *T): i32 {\n"
+        "func use[T extends IRW[T]](s: *T): i32 {\n"
         "    s.w();\n"
         "    return s.r();\n"
         "}\n"
@@ -740,8 +692,8 @@ TEST(GenericMethod, MapIntoOnGenericStruct) {
     clux_expect_ok(
         "struct Box[T] {\n"
         "    value: T;\n"
-        "    func get(self: ref *const Box[T]): T { return self.value; }\n"
-        "    func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+        "    func get(self: *const Box[T]): T { return self.value; }\n"
+        "    func map_into[U](self: *const Box[T], f: func(T) -> U): Box[U] {\n"
         "        var b: Box[U] = .{ .value = f(self.value) };\n"
         "        return b;\n"
         "    }\n"
@@ -759,7 +711,7 @@ TEST(GenericMethod, NonGenericStructAndFunctionLiteral) {
     clux_expect_ok(
         "struct IntBox {\n"
         "    value: i32;\n"
-        "    func convert[U](self: ref *IntBox, f: func(i32) -> U): U {\n"
+        "    func convert[U](self: *IntBox, f: func(i32) -> U): U {\n"
         "        return f(self.value);\n"
         "    }\n"
         "}\n"
@@ -938,7 +890,8 @@ TEST(GenericReject, LocalGenericLiteralRejected) {
 
 TEST(GenericReject, InstantiationDepthLimit) {
     clux_expect_reject(
-        "func rec[T](): void { rec[own *T](); }\n"
+        "struct Box[T] { v: T; }\n"
+        "func rec[T](): void { rec[Box[T]](); }\n"
         "func main(): i32 { rec[i32](); return 0; }\n",
         "generic instantiation depth exceeds limit", "generic_depth");
 }
@@ -1007,7 +960,7 @@ TEST(GenericReject, ConstraintStructExtraField) {
 
 TEST(InterfaceReject, MissingMethod) {
     clux_expect_reject(
-        "interface IW[T] { var fd: i32; func w(self: ref *T); }\n"
+        "interface IW[T] { var fd: i32; func w(self: *T); }\n"
         "struct Bad implements IW[Bad] { fd: i32; }\n"
         "func main(): i32 { return 0; }\n",
         "missing method 'w'", "interface_missing_method");
@@ -1015,9 +968,9 @@ TEST(InterfaceReject, MissingMethod) {
 
 TEST(InterfaceReject, SignatureMismatch) {
     clux_expect_reject(
-        "interface IW[T] { func w(self: ref *T, x: i32); }\n"
+        "interface IW[T] { func w(self: *T, x: i32); }\n"
         "struct Bad implements IW[Bad] {\n"
-        "    func w(self: ref *Bad): void {}\n"
+        "    func w(self: *Bad): void {}\n"
         "}\n"
         "func main(): i32 { return 0; }\n",
         "does not match the interface signature", "interface_bad_sig");
@@ -1025,7 +978,7 @@ TEST(InterfaceReject, SignatureMismatch) {
 
 TEST(InterfaceReject, InterfaceIsNotAType) {
     clux_expect_reject(
-        "interface IW[T] { func w(self: ref *T); }\n"
+        "interface IW[T] { func w(self: *T); }\n"
         "func main(): i32 { var x: IW[i32] = undefined; return 0; }\n",
         "is an interface (a compile-time constraint), not a type",
         "interface_as_type");
@@ -1035,17 +988,17 @@ TEST(InterfaceReject, ConstraintRequiresImplementedInterface) {
     clux_expect_reject(
         "interface IW[T] { var fd: i32; }\n"
         "struct Plain { fd: i32; }\n"
-        "func f[T extends IW[T]](w: ref *T): i32 { return w.fd; }\n"
+        "func f[T extends IW[T]](w: *T): i32 { return w.fd; }\n"
         "func main(): i32 { var p: Plain = .{ .fd = 1 }; return f(p.&); }\n",
         "does not satisfy the constraint", "interface_not_implemented");
 }
 
 TEST(InterfaceReject, MemberCopyIsNotInheritance) {
     clux_expect_reject(
-        "interface IW[T] { func w(self: ref *T); }\n"
+        "interface IW[T] { func w(self: *T); }\n"
         "interface IRW[T] { ...IW[T]; }\n"
-        "struct S implements IRW[S] { func w(self: ref *S): void {} }\n"
-        "func g[T extends IW[T]](s: ref *T): i32 { s.w(); return 1; }\n"
+        "struct S implements IRW[S] { func w(self: *S): void {} }\n"
+        "func g[T extends IW[T]](s: *T): i32 { s.w(); return 1; }\n"
         "func main(): i32 { var s: S = .{}; return g(s.&); }\n",
         "does not satisfy the constraint", "interface_copy_not_inherit");
 }
@@ -1053,7 +1006,7 @@ TEST(InterfaceReject, MemberCopyIsNotInheritance) {
 TEST(GenericReject, MethodTypeParameterNotDeducible) {
     clux_expect_reject(
         "struct S {\n"
-        "    func f[U](self: ref *S): i32 { return 1; }\n"
+        "    func f[U](self: *S): i32 { return 1; }\n"
         "}\n"
         "func main(): i32 {\n"
         "    var s: S = .{};\n"
@@ -1088,11 +1041,11 @@ TEST(GenericMethod, ExplicitTypeArguments) {
     clux_expect_ok(
         "struct Box[T] {\n"
         "  value: T;\n"
-        "  func map_into[U](self: ref *const Box[T], f: func(T) -> U): Box[U] {\n"
+        "  func map_into[U](self: *const Box[T], f: func(T) -> U): Box[U] {\n"
         "    var b: Box[U] = .{ .value = f(self.value) };\n"
         "    return b;\n"
         "  }\n"
-        "  func get(self: ref *const Box[T]): T { return self.value; }\n"
+        "  func get(self: *const Box[T]): T { return self.value; }\n"
         "}\n"
         "func inc(v: i32): i32 { return v + 1; }\n"
         "func main(): i32 {\n"
@@ -1112,22 +1065,6 @@ TEST(GenericMethod, StaticExplicitTypeArguments) {
         "generic_static_method_explicit");
 }
 
-TEST(GenericPack, OwnElementMoveAndForward) {
-    clux_expect_ok(
-        "func first[...Args](args: ...Args): i32 {\n"
-        "  var p: own *i32 = move(args[0]);\n"
-        "  return p.*;\n"
-        "}\n"
-        "func forward[...Args](args: ...Args): i32 {\n"
-        "  return first(...args);\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "  var x: own *i32 = new i32{ .i32{7} };\n"
-        "  return forward[own *i32](move(x)) - 7;\n"
-        "}\n",
-        "generic_pack_own_forward");
-}
-
 TEST(GenericReject, BareParameterPackName) {
     clux_expect_reject(
         "func f[...Args](args: ...Args): <...Args> { return args; }\n"
@@ -1135,123 +1072,14 @@ TEST(GenericReject, BareParameterPackName) {
         "has no runtime value", "generic_pack_bare_args");
 }
 
-TEST(GenericPack, OwnElementTupleReturn) {
-    clux_expect_ok(
-        "func pack[...Args](args: ...Args): fatal <...Args> { return move(.{ ...args }); }\n"
-        "func main(): i32 {\n"
-        "  var x: own *i32 = new i32{ .i32{7} };\n"
-        "  var t = pack[own *i32](move(x));\n"
-        "  return t[0].* - 7;\n"
-        "}\n",
-        "generic_pack_own_tuple_return");
-}
-
-TEST(GenericReject, OwnPackReturnMustBeFatal) {
-    clux_expect_reject(
-        "func pack[...Args](args: ...Args): <...Args> { return .{ ...args }; }\n"
-        "func main(): i32 {\n"
-        "  var x: own *i32 = new i32{ .i32{7} };\n"
-        "  var t = pack[own *i32](move(x));\n"
-        "  return t[0].* - 7;\n"
-        "}\n",
-        "contains own slots", "generic_pack_own_return_fatal");
-}
-
-TEST(GenericPack, OwnPackConstructReturnAutoMove) {
-    clux_expect_ok(
-        "func pack[...Args](args: ...Args): fatal <...Args> { return .{ ...args }; }\n"
-        "func main(): i32 {\n"
-        "  var x: own *i32 = new i32{ .i32{7} };\n"
-        "  var t = pack[own *i32](move(x));\n"
-        "  return t[0].* - 7;\n"
-        "}\n",
-        "generic_pack_construct_return_auto_move");
-}
-
-TEST(GenericPack, NestedOwnAggregate) {
-    clux_expect_ok(
-        "struct Inner { p: own *i32; }\n"
-        "struct Outer { inner: Inner; }\n"
-        "func pack[...Args](args: ...Args): fatal <...Args> {\n"
-        "  return move(.{ ...args });\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "  var v: own Outer = .Outer{ .inner = .Inner{ .p = new i32{ .i32{7} } } };\n"
-        "  var t = pack[Outer](move(v));\n"
-        "  return t[0].inner.p.* - 7;\n"
-        "}\n",
-        "generic_pack_nested_own");
-}
-
-TEST(GenericPack, InferredOwnFromFatal) {
-    clux_expect_ok(
-        "func first[...Args](args: ...Args): i32 {\n"
-        "  var p: own *i32 = move(args[0]);\n"
-        "  return p.*;\n"
-        "}\n"
-        "func deref[T](x: T): i32 { return x.*; }\n"
-        "func main(): i32 {\n"
-        "  var a: own *i32 = new i32{ .i32{7} };\n"
-        "  var b: own *i32 = new i32{ .i32{8} };\n"
-        "  return first(move(a)) + deref(move(b)) - 15;\n"
-        "}\n",
-        "generic_pack_infer_own");
-}
-
-TEST(GenericReject, OwnArgumentMustUseMove) {
-    clux_expect_reject(
-        "func first[...Args](args: ...Args): i32 { return 0; }\n"
-        "func main(): i32 {\n"
-        "  var a: own *i32 = new i32{ .i32{7} };\n"
-        "  return first(a);\n"
-        "}\n",
-        "cannot copy a value holding owned resources", "generic_pack_own_arg");
-}
-
-TEST(ComptimeIf, GenericPatternSpecialization) {
-    clux_expect_ok(
-        "func Test[T](arg: T): void {\n"
-        "  comptime if (T extends own *?) {\n"
-        "    var a = move(arg);\n"
-        "  } else {\n"
-        "    var a = arg;\n"
-        "  }\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "  var p: own *i32 = new i32{ .i32{7} };\n"
-        "  Test(move(p));\n"
-        "  Test(5);\n"
-        "  return 0;\n"
-        "}\n",
-        "generic_comptime_pattern_specialize");
-}
-
 TEST(ComptimeIf, GenericPatternSpecializationFmt) {
     const char *src =
         "func Test[T](arg: T): void {\n"
-        "  comptime if (T extends own *?) { var a = move(arg); } else { var a = arg; }\n"
+        "  comptime if (T extends *?) { var a = (arg); } else { var a = arg; }\n"
         "}\n";
     std::string once = fmt_source(src);
-    EXPECT_NE(once.find("extends own *?"), std::string::npos) << once;
+    EXPECT_NE(once.find("extends *?"), std::string::npos) << once;
     EXPECT_EQ(fmt_source(once.c_str()), once);
-}
-
-TEST(ComptimeIf, GenericPatternMixedExpression) {
-    clux_expect_ok(
-        "func Test[T, N: comptime u64](arg: T): void {\n"
-        "  comptime if (T extends own *? && N == (1 as u64)) {\n"
-        "    var a = move(arg);\n"
-        "  } else {\n"
-        "    var a = arg;\n"
-        "  }\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "  var p: own *i32 = new i32{ .i32{7} };\n"
-        "  Test[own *i32, 1](move(p));\n"
-        "  Test[i32, 2](5);\n"
-        "  return 0;\n"
-        "}\n",
-        "generic_comptime_pattern_mixed");
 }
 
 TEST(GenericPack, ValuePackSpreadAndTuple) {
@@ -1269,9 +1097,9 @@ TEST(GenericPack, ValuePackSpreadAndTuple) {
 
 TEST(GenericType, RecursiveUnion) {
     clux_expect_ok(
-        "union U[T] { A: T; B: own *U[T]; }\n"
+        "union U[T] { A: T; B: *U[T]; }\n"
         "func main(): i32 {\n"
-        "  var u: own U[i32] = .U[i32]{ .A = 7 };\n"
+        "  var u: U[i32] = .U[i32]{ .A = 7 };\n"
         "  return u.A - 7;\n"
         "}\n",
         "generic_recursive_union");
@@ -1279,10 +1107,10 @@ TEST(GenericType, RecursiveUnion) {
 
 TEST(GenericType, MutuallyRecursiveUnion) {
     clux_expect_ok(
-        "union A[T] { x: T; b: own *B[T]; }\n"
-        "union B[T] { y: T; a: own *A[T]; }\n"
+        "union A[T] { x: T; b: *B[T]; }\n"
+        "union B[T] { y: T; a: *A[T]; }\n"
         "func main(): i32 {\n"
-        "  var a: own A[i32] = .A[i32]{ .x = 7 };\n"
+        "  var a: A[i32] = .A[i32]{ .x = 7 };\n"
         "  return a.x - 7;\n"
         "}\n",
         "generic_mutual_recursive_union");
@@ -1300,47 +1128,8 @@ TEST(GenericType, EnumGenericBaseType) {
 
 TEST(GenericReject, RecursiveAliasStillUnsupported) {
     clux_expect_reject(
-        "type Rec[T] = own *Rec[T];\n"
+        "type Rec[T] = *Rec[T];\n"
         "func main(): i32 { var x: Rec[i32] = undefined; return 0; }\n",
         "recursive generic type 'Rec' is not supported yet",
         "generic_recursive_alias");
-}
-
-TEST(GenericType, ConditionalOwnershipAlias) {
-    clux_expect_ok(
-        "type Out[T] = T extends own *? ? fatal T : T;\n"
-        "func f[T](x: T): Out[T] { return move(x); }\n"
-        "func main(): i32 {\n"
-        "  var p: own *i32 = new i32{ .i32{7} };\n"
-        "  var q: own *i32 = f[own *i32](move(p));\n"
-        "  var n: i32 = f[i32](5);\n"
-        "  return q.* + n - 12;\n"
-        "}\n",
-        "generic_conditional_own_alias");
-}
-
-TEST(GenericType, ParenthesizedConditionalReturn) {
-    clux_expect_ok(
-        "func f[T](x: T): (T extends own *? ? fatal T : T) { return move(x); }\n"
-        "func main(): i32 {\n"
-        "  var p: own *i32 = new i32{ .i32{7} };\n"
-        "  var q: own *i32 = f[own *i32](move(p));\n"
-        "  var n: i32 = f[i32](5);\n"
-        "  return q.* + n - 12;\n"
-        "}\n",
-        "generic_paren_conditional");
-}
-
-TEST(GenericType, ReflectionConditionalReturn) {
-    clux_expect_ok(
-        "func f[T](x: T): (T.ownership == \"own\" ? fatal T : T) {\n"
-        "  return move(x);\n"
-        "}\n"
-        "func main(): i32 {\n"
-        "  var p: own *i32 = new i32{ .i32{7} };\n"
-        "  var q: own *i32 = f[own *i32](move(p));\n"
-        "  var n: i32 = f[i32](5);\n"
-        "  return q.* + n - 12;\n"
-        "}\n",
-        "generic_reflect_conditional");
 }

@@ -58,10 +58,9 @@ typedef enum {
   SEMA_BUILTIN_DATA,      /* data(s) -> ref *T（取首元素指针，C ABI 适配；专用指令） */
   SEMA_BUILTIN_CFUNC_PTR, /* cfunc_ptr(f) -> opaque（clux 函数 → C 函数指针） */
   SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v) -> 同类型 fatal（对象图深拷贝兜底） */
-  SEMA_BUILTIN_MAKE_SHARE, /* __make_share(p) -> share *T（RC 创建通道） */
-  SEMA_BUILTIN_WEAK_GET,   /* __weak_get(w) -> ?share *T（.get() 升级） */
   SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
   SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T / fatal T（移出 optional payload） */
+  SEMA_BUILTIN_FREE,       /* free(p)（raw-pointer 迁移期：释放指针/切片） */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */

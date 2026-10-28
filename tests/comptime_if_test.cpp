@@ -106,16 +106,6 @@ TEST(ComptimeIf, BreakBelongsToEnclosingLoop) {
                  "cif_break");
 }
 
-TEST(ComptimeIf, DefersInBranchBelongToEnclosingBlock) {
-  /* defer 是**后脱糖**（sema 内、裁剪之后）：分支存活时它的语句已成为外层块的
-     语句，defer 因此注册到外层块（函数退出时执行）——允许。 */
-  clux_expect_ok(prog("  comptime if (true) {\n"
-                      "    var p: own *i32 = new i32{7};\n"
-                      "    defer |(q: own *i32 = move(p))| { }\n"
-                      "  }\n"),
-                 "cif_defer");
-}
-
 TEST(ComptimeIf, NestedFuncInsideBranchIsAllowed) {
   /* 嵌套函数体是独立作用域：其中的 comptime var 合法 */
   clux_expect_ok(prog("  comptime if (true) {\n"

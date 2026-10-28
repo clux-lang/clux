@@ -352,7 +352,7 @@ void expect_elem_binding(ast_node_t *for_node, const char *elem_name,
 
 /**
  * 裸标识符迭代器（`foreach (var e of v)`）：不需要临时变量——语句链上直接
- * 是 for。own 容器因此可遍历（`var __arr = v` 会被 sema 拒为 move-only 拷贝）。
+ * 是 for。容器因此可遍历（`var __arr = v` 会被 sema 拒为 move-only 拷贝）。
  */
 TEST_F(DesugarTest, IdentIterableExpandsToBareFor) {
   ast_node_t *prog = analyze(
@@ -427,12 +427,12 @@ TEST_F(DesugarTest, AssignmentFormBindsExistingVariable) {
   expect_elem_binding(f, "e", /*is_decl=*/false, "v", "__idx_0");
 }
 
-/* 显式类型标注原样搬运到元素声明上（own 元素遍历必需 `: ref *T`）。 */
+/* 显式类型标注原样搬运到元素声明上（元素遍历必需 `: *T`）。 */
 TEST_F(DesugarTest, ExplicitElementTypeIsPreserved) {
   ast_node_t *prog = analyze(
       "func main(): void {\n"
       "  var v = .[2]i32{ 1, 2 };\n"
-      "  foreach (var e: ref *i32 of v) { }\n"
+      "  foreach (var e: *i32 of v) { }\n"
       "}\n");
   ASSERT_NE(prog, nullptr);
 
@@ -517,7 +517,7 @@ TEST_F(DesugarTest, ForeachInClosureInsideNewAndMakeExpands) {
       "    foreach (var e of v) { }\n"
       "    return 0;\n"
       "  } };\n"
-      "  var s: own []func()->i32 = make(func()->i32, 1, func |v| (): i32 {\n"
+      "  var s: []func()->i32 = make(func()->i32, 1, func |v| (): i32 {\n"
       "    foreach (var e of v) { }\n"
       "    return 0;\n"
       "  });\n"
@@ -586,7 +586,7 @@ TEST_F(DesugarTest, NoForeachRemainsAfterDesugar) {
       "  foreach (var a of v) { s = s + a; }\n"
       "  foreach (b of v) { s = s + b; }\n"
       "  foreach (var c of v[0:2]) { s = s + c; }\n"
-      "  foreach (var d: ref *i32 of v) { s = s + d.*; }\n"
+      "  foreach (var d: *i32 of v) { s = s + d.*; }\n"
       "  var f = func |v| (): i32 {\n"
       "    foreach (var e of v) { return e; }\n"
       "    return 0;\n"

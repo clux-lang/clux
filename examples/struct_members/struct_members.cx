@@ -3,7 +3,7 @@
 // 结构体体内除了字段，还可以声明：
 //
 //     var  total = 0;                              // 静态属性
-//     func bump(self: ref *Counter): i32 { ... }   // 方法
+//     func bump(self: *Counter): i32 { ... }   // 方法
 //
 // 二者**本质都是模块级全局声明**（变量 / 函数），只是以 `<结构体名>::<成员名>`
 // 的命名空间方式访问——编译流水线在 parse 之后把它们改名成 `Counter::total` /
@@ -18,8 +18,8 @@
 //
 // 两点说明：
 //   - `self` **不是关键字**，只是第一个参数的名字。接收者按**位置**传递：
-//     第一个参数就是接收者（类型通常写 `ref *T` 或 `ref *const T`）。
-//   - 只读方法把接收者写成 `ref *const T`；`ref *T` 会**自动**加 const 传进去，
+//     第一个参数就是接收者（类型通常写 `*T` 或 `*const T`）。
+//   - 只读方法把接收者写成 `*const T`；`*T` 会**自动**加 const 传进去，
 //     但反向（去 const）不允许，所以只读方法里写 `self.field = v` 会被拒绝。
 
 extern lib libc from "*";
@@ -30,20 +30,20 @@ struct Counter {
     var total: i32 = 0; // 静态属性：跨实例共享
     var limit: i32 = 3;
 
-    // 方法：读 + 写（接收者是非 const 的 ref）
-    func bump(self: ref *Counter): i32 {
+    // 方法：读 + 写（接收者是非 const 的裸指针）
+    func bump(self: *Counter): i32 {
         self.value += 1;
         Counter::total += 1;
         return self.value;
     }
 
     // 方法：只读（接收者可加 const）
-    func get(self: ref *const Counter): i32 {
+    func get(self: *const Counter): i32 {
         return self.value;
     }
 
     // 方法：读静态属性
-    func isFull(self: ref *const Counter): bool {
+    func isFull(self: *const Counter): bool {
         _ = self;
         return Counter::total >= Counter::limit;
     }
@@ -80,7 +80,7 @@ func main(): i32 {
     }
 
     // 指针接收者：p.bump() ≡ typeof(p.*)::bump(p)
-    var p: ref *Counter = a.&;
+    var p: *Counter = a.&;
     if (p.bump() != 12) {
         return 8;
     }

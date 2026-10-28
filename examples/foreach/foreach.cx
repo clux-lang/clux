@@ -4,7 +4,7 @@
 //
 //   - `var a`：每轮**新声明**元素变量（类型可推断，或 `: T` 显式指定）
 //   - 不带 `var`：每轮写回**已定义**变量
-//   - 迭代器是**裸标识符**时不复制（own 容器 move-only，直接可遍历）；
+//   - 迭代器是**裸标识符**时不复制（裸切片/指针直接可遍历）；
 //     其他表达式（调用、切片、成员访问…）先求值到临时变量 → **只求值一次**
 //   - 展开成 `for`（步进在 update 段）→ `continue` 不会跳过步进
 //   - break / continue / return / defer / 嵌套 foreach 都按源码直觉工作
@@ -21,7 +21,7 @@ func make_row(n: i32): [3]i32 {
     return .[3]i32{ n, n * 2, n * 3 };
 }
 
-func sum_own(s: own []i32): i32 {
+func sum_slice(s: []i32): i32 {
     var acc = 0;
     foreach (var v of s) {
         acc = acc + v;
@@ -57,14 +57,18 @@ func main(): i32 {
     }
     _ = libc::printf("3) odd = %d\n", odd);
 
-    // ---- 4. 显式类型 / 借用元素：own 元素以 ref *T 借出 ----
-    var ptrs: own [] own *i32 = make(own *i32, 3, new i32{ 1 }, new i32{ 2 },
+    // ---- 4. 显式类型 / 裸指针元素 ----
+    var ptrs: []*i32 = make(*i32, 3, new i32{ 1 }, new i32{ 2 },
                                      new i32{ 3 });
     var deref = 0;
-    foreach (var p: ref *i32 of ptrs) {
+    foreach (var p: *i32 of ptrs) {
         deref = deref + p.*;
     }
     _ = libc::printf("4) deref = %d, len = %d\n", deref, len(ptrs));
+    foreach (var p of ptrs) {
+        free(p);
+    }
+    free(ptrs);
 
     // ---- 5. 非标识符迭代器：先求值到临时变量（只调用一次）----
     var once = 0;
@@ -73,9 +77,10 @@ func main(): i32 {
     }
     _ = libc::printf("5) once = %d, calls = %d\n", once, CALLS);
 
-    // ---- 6. own 容器（裸标识符迭代器 → 不复制，循环后仍可用）----
-    var s: own []i32 = make(i32, 3, 7, 8, 9);
-    _ = libc::printf("6) sum_own = %d\n", sum_own(move(s)));
+    // ---- 6. 裸切片（裸标识符迭代器 → 不复制，循环后仍可用）----
+    var s: []i32 = make(i32, 3, 7, 8, 9);
+    _ = libc::printf("6) sum_slice = %d\n", sum_slice(s));
+    free(s);
 
     // ---- 7. 切片表达式 + 嵌套 foreach ----
     var m = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };

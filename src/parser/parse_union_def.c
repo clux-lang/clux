@@ -82,7 +82,9 @@ ast_node_t *parse_union_def(parser_t *p) {
         advance(p);
         skip_trivia(p);
 
-        ast_node_t *ftype = parse_expr(p);
+        ast_node_t *ftype = true
+                                ? parse_raw_type_atom(p)
+                                : parse_expr(p);
         if (!ftype || ftype->kind == AST_ERROR) {
             if (!ftype) {
                 return ast_error_new(p->diag, p->tokens, p->arena, p->pos, p->pos,

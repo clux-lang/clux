@@ -28,9 +28,9 @@ comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i
 }
 
 // ---- 方法装饰器：接收者作为第一个参数，返回"包一层"的新方法 ----
-comptime func add100m(f: func(ref *Point) -> i32):
-        func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {
-    return func |f| w(self: ref *Point): i32 { return f(self) + 100; };
+comptime func add100m(f: func(*Point) -> i32):
+        func |f: func(*Point) -> i32| (*Point) -> i32 {
+    return func |f| w(self: *Point): i32 { return f(self) + 100; };
 }
 
 func double(x: i32): i32 { return x * 2; }
@@ -47,8 +47,8 @@ func double(x: i32): i32 { return x * 2; }
 // 4) 方法装饰：get 变成"包装方法"，实际调用的是装饰后的闭包
 struct Point {
     x: i32;
-    [[add100m]] func get(self: ref *Point): i32 { return self.x; }
-    func plain(self: ref *Point): i32 { return self.x + 1; }
+    [[add100m]] func get(self: *Point): i32 { return self.x; }
+    func plain(self: *Point): i32 { return self.x + 1; }
 }
 
 func main(): i32 {

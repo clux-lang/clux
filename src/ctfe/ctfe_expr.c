@@ -53,32 +53,9 @@
 #include "vm/type_func.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
-#include "vm/type_ownership.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/value.h"
-
-/* 类型表达式里的所有权修饰 token → ownership_t。 */
-static ownership_t ctfe_token_ownership(const token_t *tok) {
-    if (!tok) return OWN_NONE;
-    strslice_t own = token_strslice(tok);
-    if (own.len == 3 && own.ptr && memcmp(own.ptr, "own", 3) == 0)
-        return OWN_OWN;
-    if (own.len == 3 && own.ptr && memcmp(own.ptr, "ref", 3) == 0)
-        return OWN_REF;
-    if (own.len == 5 && own.ptr && memcmp(own.ptr, "fatal", 5) == 0)
-        return OWN_FATAL;
-    return OWN_NONE;
-}
-
-/* 在类型外包装所有权修饰（布局不变），返回 type value。 */
-static value_t *ctfe_owned_type_value(ctfe_ctx_t *ctx, const type_t *t,
-                                      ownership_t own) {
-    const type_t *w = type_ownership_apply(ctx->vm, own, t);
-    if (!w) return ctfe_err(ctx, "ctfe: failed to construct ownership type");
-    return type_as_value(ctx->vm, w);
-}
-
 
 /* ===========================================================================
  * 表达式求值
@@ -831,46 +808,33 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         return type_as_value(vm, at);
     }
     case AST_OWNED_TYPE: {
-        /* `fatal T` / `own T` / `ref T`：所有权是类型修饰，求值为包装类型。 */
         ast_owned_type_t *ot = (ast_owned_type_t *)node;
         value_t *bv = ctfe_eval(ctx, ot->base_type);
         if (value_is_error(vm, bv)) return bv;
         if (!value_is_type(bv, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: owned type base must be a type");
-        return ctfe_owned_type_value(ctx, value_as(bv, const type_t *),
-                                     ctfe_token_ownership(ot->ownership));
+        return type_as_value(vm, value_as(bv, const type_t *));
     }
     case AST_PTR: {
-        /* 指针类型表达式 *T（所有权纯编译期——类型不区分 own/ref/fatal，
-           只有一种指针类型 *T）：递归求值被指向类型 T → type_ptr_intern
-           → 返回 type value。与 AST_ARRAY 同构。 */
         ast_ptr_t *n = (ast_ptr_t *)node;
         value_t *bt = ctfe_eval(ctx, n->base_type);
         if (value_is_error(vm, bt)) return bt;
         if (!value_is_type(bt, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: pointer base must be a type");
-        const type_t *base = value_as(bt, const type_t *);
-        ownership_t oq = ctfe_token_ownership(n->ownership);
-        if (oq == OWN_NONE)
-            return ctfe_err(ctx, "ctfe: unsupported pointer ownership");
-        const type_t *pt = type_ptr_intern(vm, base);
+        const type_t *pt = type_ptr_intern(vm, value_as(bt, const type_t *));
         if (!pt) return ctfe_err(ctx, "ctfe: failed to construct pointer type");
-        return ctfe_owned_type_value(ctx, pt, oq);
+        return type_as_value(vm, pt);
     }
     case AST_SLICE_TYPE: {
-        /* []T 切片类型表达式：所有权是类型修饰。 */
         ast_slice_type_t *n = (ast_slice_type_t *)node;
         value_t *ev = ctfe_eval(ctx, n->elem_type);
         if (value_is_error(vm, ev)) return ev;
         if (!value_is_type(ev, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: slice element must be a type");
-        const type_t *elem = value_as(ev, const type_t *);
-        ownership_t oq = ctfe_token_ownership(n->ownership);
-        if (oq == OWN_NONE)
-            return ctfe_err(ctx, "ctfe: unsupported slice ownership");
-        const type_t *st = type_slice_intern(vm, elem);
+        const type_t *st =
+            type_slice_intern(vm, value_as(ev, const type_t *));
         if (!st) return ctfe_err(ctx, "ctfe: failed to construct slice type");
-        return ctfe_owned_type_value(ctx, st, oq);
+        return type_as_value(vm, st);
     }
     case AST_FUNC_TYPE: {
         ast_func_type_t *n = (ast_func_type_t *)node;

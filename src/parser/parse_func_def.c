@@ -113,6 +113,7 @@ static ast_node_t *parse_func_param_item(parser_t *p) {
             return parse_param(p);
         }
     }
+    return parse_scope_annotated_type(p);
     return parse_unary(p);
 }
 
@@ -146,7 +147,9 @@ static ast_node_t *parse_capture_item(parser_t *p) {
         if (check_symbol(p, ":")) {
             advance(p);
             skip_trivia(p);
-            type_expr = parse_expr_prec(p, 1);
+            type_expr = true
+                            ? parse_raw_type_atom(p)
+                            : parse_expr_prec(p, 1);
             if (!type_expr || type_expr->kind == AST_ERROR) {
                 if (!type_expr) {
                     return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -201,7 +204,9 @@ static ast_node_t *parse_capture_item(parser_t *p) {
         advance(p);
         skip_trivia(p);
         p->stop_at_pipe++;
-        type_expr = parse_expr_prec(p, 1);
+        type_expr = true
+                        ? parse_raw_type_atom(p)
+                        : parse_expr_prec(p, 1);
         p->stop_at_pipe--;
         if (!type_expr || type_expr->kind == AST_ERROR) {
             if (!type_expr) {

@@ -15,8 +15,8 @@ TEST(ReflectMembers, Methods) {
       "struct Runner {\n"
       "  var speed: i32 = 0;\n"
       "  var tag: i64 = 0;\n"
-      "  func run(self: ref *Runner, a: i32): i64 { return 1i64; }\n"
-      "  func stop(self: ref *Runner): void { }\n"
+      "  func run(self: *Runner, a: i32): i64 { return 1i64; }\n"
+      "  func stop(self: *Runner): void { }\n"
       "}\n"
       "func main(): i32 {\n"
       "  if (Runner.method_count != 2usize) { return 1; }\n"
@@ -35,9 +35,9 @@ TEST(ReflectMembers, Methods) {
 TEST(ReflectMembers, MethodNamesSorted) {
   clux_expect_ok(
       "struct R {\n"
-      "  func zeta(self: ref *R): void { }\n"
-      "  func alpha(self: ref *R): void { }\n"
-      "  func mid(self: ref *R): void { }\n"
+      "  func zeta(self: *R): void { }\n"
+      "  func alpha(self: *R): void { }\n"
+      "  func mid(self: *R): void { }\n"
       "}\n"
       "func main(): i32 {\n"
       "  if (R.method_count != 3usize) { return 1; }\n"
@@ -55,7 +55,7 @@ TEST(ReflectMembers, Attributes) {
       "struct Cfg {\n"
       "  var zeta: i64 = 0;\n"
       "  var alpha: i32 = 0;\n"
-      "  func f(self: ref *Cfg): void { }\n"
+      "  func f(self: *Cfg): void { }\n"
       "}\n"
       "func main(): i32 {\n"
       "  if (Cfg.attribute_count != 2usize) { return 1; }\n"
@@ -72,7 +72,7 @@ TEST(ReflectMembers, Attributes) {
 TEST(ReflectMembers, InheritedMethod) {
   clux_expect_ok(
       "struct Base {\n"
-      "  func base_run(self: ref *Base, a: i32): i32 { return a; }\n"
+      "  func base_run(self: *Base, a: i32): i32 { return a; }\n"
       "}\n"
       "struct Derived { ...Base; var extra: i32 = 0; }\n"
       "func main(): i32 {\n"
@@ -86,7 +86,7 @@ TEST(ReflectMembers, InheritedMethod) {
 /* 未知方法名 */
 TEST(ReflectMembers, UnknownMethodRejected) {
   std::string path = write_temp_file(
-      "struct R { func f(self: ref *R): void { } }\n"
+      "struct R { func f(self: *R): void { } }\n"
       "func main(): i32 { var t = R.method_type(\"nope\"); return 0; }\n",
       "reflect_unknown_method");
   std::string err;
@@ -110,7 +110,7 @@ TEST(ReflectMembers, AttributeIsNotMethod) {
 /* 索引越界 / 没有成员 */
 TEST(ReflectMembers, MemberIndexErrors) {
   std::string p1 = write_temp_file(
-      "struct R { func f(self: ref *R): void { } }\n"
+      "struct R { func f(self: *R): void { } }\n"
       "func main(): i32 { var s = R.method_name(3); return 0; }\n",
       "reflect_member_oor");
   std::string err1;

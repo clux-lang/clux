@@ -15,10 +15,10 @@ struct Result[T, E] {
     val: ?T;
     err: ?E;
 
-    func ok(self: ref *const Result[T, E]): bool { return self.good; }
-    func value(self: ref *const Result[T, E]): T { return self.val.!; }
-    func error(self: ref *const Result[T, E]): E { return self.err.!; }
-    func panic(self: ref *const Result[T, E]): str { return "Result error"; }
+    func ok(self: *const Result[T, E]): bool { return self.good; }
+    func value(self: *const Result[T, E]): T { return self.val.!; }
+    func error(self: *const Result[T, E]): E { return self.err.!; }
+    func panic(self: *const Result[T, E]): str { return "Result error"; }
 
     func of_value(v: T): Result[T, E] {
         return .Result[T, E]{ .good = true, .val = .?T{ v }, .err = nil };

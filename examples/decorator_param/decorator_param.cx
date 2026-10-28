@@ -33,8 +33,8 @@ comptime func scale[F](k: i32, f: F): func |k: i32, f: F| (i32) -> i32 {
 comptime func plus(n: i32, v: i32): i32 { return v + n; }
 
 // 方法装饰器：接收者（self）是源方法的第一个参数，同样放在最后
-comptime func addm[F](n: i32, f: F): func |n: i32, f: F| (ref *Point) -> i32 {
-    return func |n, f| w(self: ref *Point): i32 { return f(self) + n; };
+comptime func addm[F](n: i32, f: F): func |n: i32, f: F| (*Point) -> i32 {
+    return func |n, f| w(self: *Point): i32 { return f(self) + n; };
 }
 
 // 1) 参数化值装饰器：[[plus(1)]] var v = 41; ⇒ plus(1, 41)
@@ -50,8 +50,8 @@ comptime func addm[F](n: i32, f: F): func |n: i32, f: F| (ref *Point) -> i32 {
 // 4) 参数化方法装饰器：p.get() = 7 + 100 = 107
 struct Point {
     x: i32;
-    [[addm(100)]] func get(self: ref *Point): i32 { return self.x; }
-    func plain(self: ref *Point): i32 { return self.x + 1; }
+    [[addm(100)]] func get(self: *Point): i32 { return self.x; }
+    func plain(self: *Point): i32 { return self.x + 1; }
 }
 
 func main(): i32 {

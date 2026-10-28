@@ -6,9 +6,9 @@
  *   [[ann]] var a = 123;      ⇒  var a = ann(123);
  *   [[ann]] func f(...) {…}   ⇒  func __decor_N_f(...) {…}
  *                                var f = ann(__decor_N_f);
- *   struct S { [[ann]] func m(self: ref *S, …) {…} }
+ *   struct S { [[ann]] func m(self: *S, …) {…} }
  *                             ⇒  struct S { func m(…) { return __decorval_N_m(self, …); } }
- *                                func __decorsrc_N_m(self: ref *S, …) {…}
+ *                                func __decorsrc_N_m(self: *S, …) {…}
  *                                var __decorval_N_m = ann(__decorsrc_N_m);
  *
  * 装饰器必须是 **comptime 函数**（展开结果是全局变量的编译期常量初始化器）。
@@ -78,10 +78,10 @@ TEST(Decorator, StructMethodIsWrapped) {
       std::string(kDecorators) +
           "struct Wrap {\n"
           "  x: i32;\n"
-          "  [[idm]] func get(self: ref *Wrap): i32 { return self.x; }\n"
-          "  func plain(self: ref *Wrap): i32 { return self.x + 1; }\n"
+          "  [[idm]] func get(self: *Wrap): i32 { return self.x; }\n"
+          "  func plain(self: *Wrap): i32 { return self.x + 1; }\n"
           "}\n"
-          "comptime func idm(f: func(ref *Wrap) -> i32): func(ref *Wrap) -> i32 {\n"
+          "comptime func idm(f: func(*Wrap) -> i32): func(*Wrap) -> i32 {\n"
           "  return f;\n"
           "}\n"
           "func main(): i32 {\n"
@@ -159,7 +159,7 @@ TEST(Decorator, CallingConventionOnPlainFuncRejected) {
 /* 方法没有 C ABI 形态，不能标调用约定。 */
 TEST(Decorator, CallingConventionOnMethodRejected) {
   clux_expect_reject(
-      "struct S { x: i32; [[stdcall]] func m(self: ref *S): i32 { return "
+      "struct S { x: i32; [[stdcall]] func m(self: *S): i32 { return "
       "self.x; } }\n"
       "func main(): i32 { return 0; }\n",
       "calling-convention decorators only apply", "decor_cc_method");
@@ -244,7 +244,7 @@ TEST(Decorator, SingleBracketExpressionsStillWork) {
       "decor_single_bracket");
 }
 
-/* 方法装饰器可以返回**带 ref 参数的闭包**（"包一层"的真装饰器）：
+/* 方法装饰器可以返回**带 参数的闭包**（"包一层"的真装饰器）：
    `p.get()` → 装饰后的闭包 → 捕获的源函数。这条覆盖了此前两个缺陷：
    ① 捕获读取改写后的 `__ctx.env.<cap>` 在重复 walk 时报 undefined variable；
    ② 具名字面量在重复折叠时报 duplicate variable definition。 */
@@ -252,11 +252,11 @@ TEST(Decorator, MethodDecoratorMayReturnRefClosure) {
   clux_expect_ok(
       "struct Point {\n"
       "  x: i32;\n"
-      "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
-      "  func plain(self: ref *Point): i32 { return self.x + 1; }\n"
+      "  [[add100m]] func get(self: *Point): i32 { return self.x; }\n"
+      "  func plain(self: *Point): i32 { return self.x + 1; }\n"
       "}\n"
-      "comptime func add100m(f: func(ref *Point) -> i32): func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {\n"
-      "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
+      "comptime func add100m(f: func(*Point) -> i32): func |f: func(*Point) -> i32| (*Point) -> i32 {\n"
+      "  return func |f| w(self: *Point): i32 { return f(self) + 100; };\n"
       "}\n"
       "func main(): i32 {\n"
       "  var p = .Point{ .x = 7 };\n"
@@ -280,10 +280,10 @@ TEST(Decorator, MixedDecoratorsInOneProgram) {
       "[[add100]] func dbl(x: i32): i32 { return double(x); }\n"
       "struct Point {\n"
       "  x: i32;\n"
-      "  [[add100m]] func get(self: ref *Point): i32 { return self.x; }\n"
+      "  [[add100m]] func get(self: *Point): i32 { return self.x; }\n"
       "}\n"
-      "comptime func add100m(f: func(ref *Point) -> i32): func |f: func(ref *Point) -> i32| (ref *Point) -> i32 {\n"
-      "  return func |f| w(self: ref *Point): i32 { return f(self) + 100; };\n"
+      "comptime func add100m(f: func(*Point) -> i32): func |f: func(*Point) -> i32| (*Point) -> i32 {\n"
+      "  return func |f| w(self: *Point): i32 { return f(self) + 100; };\n"
       "}\n"
       "func main(): i32 {\n"
       "  var p = .Point{ .x = 7 };\n"
@@ -336,9 +336,9 @@ TEST(Decorator, ParameterizedValueDecorator) {
 /* 带参数的方法装饰器：源方法（接收者为首参）作为最后一个实参 */
 TEST(Decorator, ParameterizedMethodDecorator) {
   clux_expect_ok(
-      "struct P { x: i32; [[addm(100)]] func get(self: ref *P): i32 { return self.x; } }\n"
-      "comptime func addm(n: i32, f: func(ref *P) -> i32): func |n: i32, f: func(ref *P) -> i32| (ref *P) -> i32 {\n"
-      "  return func |n, f| w(self: ref *P): i32 { return f(self) + n; };\n"
+      "struct P { x: i32; [[addm(100)]] func get(self: *P): i32 { return self.x; } }\n"
+      "comptime func addm(n: i32, f: func(*P) -> i32): func |n: i32, f: func(*P) -> i32| (*P) -> i32 {\n"
+      "  return func |n, f| w(self: *P): i32 { return f(self) + n; };\n"
       "}\n"
       "func main(): i32 {\n"
       "  var p = .P{ .x = 7 };\n"
@@ -356,7 +356,7 @@ TEST(CfuncScope, LocalCfuncDefinitionRejected) {
       "extern lib libc from \"*\";\n"
       "extern cfunc libc::printf(format: str, ...): i32;\n"
       "func main(): i32 {\n"
-      "  cfunc cmp(a: ref opaque, b: ref opaque): i32 { return 0; }\n"
+      "  cfunc cmp(a: opaque, b: opaque): i32 { return 0; }\n"
       "  return 0;\n"
       "}\n";
   std::string path = write_temp_file(src, "local_cfunc");
@@ -396,47 +396,9 @@ TEST(CfuncToFunc, NamedCfuncPtrConverts) {
       "cfunc2func_basic");
 }
 
-TEST(CfuncToFunc, RefParamPassedThrough) {
-  clux_expect_ok(
-      "struct Box { v: i32; }\n"
-      "cfunc peek(a: ref *Box): i32 { return a.*.v; }\n"
-      "func main(): i32 {\n"
-      "  var b = new Box{ .v = 42 };\n"
-      "  var f: func(ref *Box) -> i32 = cfunc_ptr(peek);\n"
-      "  if (f(b.*.&) != 42) { return 1; }\n"
-      "  return 0;\n"
-      "}\n",
-      "cfunc2func_ref");
-}
-
-TEST(CfuncToFunc, OwnParamMovedIntoWrapper) {
-  clux_expect_ok(
-      "struct Box { v: i32; }\n"
-      "cfunc take(a: own *Box): i32 { return a.*.v; }\n"
-      "func main(): i32 {\n"
-      "  var b = new Box{ .v = 43 };\n"
-      "  var g: func(own *Box) -> i32 = cfunc_ptr(take);\n"
-      "  if (g(move(b)) != 43) { return 1; }\n"
-      "  return 0;\n"
-      "}\n",
-      "cfunc2func_own");
-}
-
-/* 手写等价的字面量（own 形参 + move 传参）也必须工作：字面量参数符号要
+/* 手写等价的字面量（形参 + move 传参）也必须工作：字面量参数符号要
    is_active，否则 sema_lookup 找不到参数，误报 "cannot move a borrowed
    value" */
-TEST(CfuncToFunc, LiteralOwnParamMove) {
-  clux_expect_ok(
-      "struct Box { v: i32; }\n"
-      "cfunc take(a: own *Box): i32 { return a.*.v; }\n"
-      "func main(): i32 {\n"
-      "  var f = func (a: own *Box): i32 { return take(move(a)); };\n"
-      "  var b = new Box{ .v = 44 };\n"
-      "  if (f(move(b)) != 44) { return 1; }\n"
-      "  return 0;\n"
-      "}\n",
-      "cfunc2func_literal");
-}
 
 /* 调用实参位置同样自动转换（`apply(cfunc_ptr(cmp))`） */
 TEST(CfuncToFunc, CallArgumentPosition) {
@@ -496,7 +458,7 @@ TEST(CfuncToFunc, MethodArgumentPosition) {
       "cfunc cmp(a: i32, b: i32): i32 { return a - b; }\n"
       "struct Calc {\n"
       "  base: i32;\n"
-      "  func run(self: ref *Calc, f: func(i32, i32) -> i32): i32 {\n"
+      "  func run(self: *Calc, f: func(i32, i32) -> i32): i32 {\n"
       "    return f(self.base, 1);\n"
       "  }\n"
       "}\n"
@@ -521,12 +483,12 @@ TEST(Decorator, GenericFunctionPerInstance) {
 
 TEST(Decorator, GenericStructMethodPerInstance) {
   clux_expect_ok(
-      "comptime func idm(f: func(ref *Box[i32]) -> i32): func(ref *Box[i32]) -> i32 {\n"
+      "comptime func idm(f: func(*Box[i32]) -> i32): func(*Box[i32]) -> i32 {\n"
       "  return f;\n"
       "}\n"
       "struct Box[T] {\n"
       "  v: T;\n"
-      "  [[idm]] func get(self: ref *Box[T]): i32 { return 7; }\n"
+      "  [[idm]] func get(self: *Box[T]): i32 { return 7; }\n"
       "}\n"
       "func main(): i32 {\n"
       "  var b: Box[i32] = .{ .v = 1 };\n"

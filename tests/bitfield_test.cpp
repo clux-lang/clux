@@ -44,7 +44,7 @@ TEST(Bitfield, U64AndPointerAccess) {
       "func main(): i32 {\n"
       "  var x: B = .B{ .a = 0x123456789Au64, .b = 0xABCDEFu64 };\n"
       "  if (x.a != 0x123456789Au64 || x.b != 0xABCDEFu64) { return 1; }\n"
-      "  var p: ref *B = x.&;\n"
+      "  var p: *B = x.&;\n"
       "  p.a = 0xFFFFFFFFFFu64;\n"
       "  if (x.a != 0xFFFFFFFFFFu64) { return 2; }\n"
       "  return 0;\n"

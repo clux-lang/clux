@@ -39,6 +39,9 @@ typedef struct {
        该边退化为运行期递归（`FREE_RECURSIVE`：按槽位所有权递归释放被指向值
        的 own 槽位，再释放块本体）。普通类型保持逐槽位静态展开（flat）。 */
     bool         recursive;
+    /* sema/raw 模式可填：显式释放表达式的类型（切片→取 data，指针→直接）。
+       旧所有权路径不填，C 后端回退到 infer_expr_type。 */
+    const struct type_t *type;
 } ast_free_t;
 
 static inline ast_node_t *ast_free_new(arena_t *arena, ast_node_t *operand) {

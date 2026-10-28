@@ -754,25 +754,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         }
       }
       if (!init_bad && sym->type) {
-        /* **RC 创建通道**（§12.1）：`var s: share *T = new ...` / `= move(p)`
-           ——fatal/own 的普通 `*T` 改写成 `__make_share(...)`，类型变 share *T。 */
-        (void)rc_adapt_share_init(sema, sym->type, &vd->init, &init);
-        /* share 创建只接受 fatal/own 源（§12.1 创建通道）：ref/借用不行——
-           RC 需要接管一块独占的堆内存，借用目标可能还有别的所有者。 */
-        if (type_is_share(sym->type) && init && !init_bad &&
-            !value_is_error(sema->vm, init)) {
-          const type_t *it = value_type(init);
-          if (it && type_kind_of(it) == TYPE_KIND_PTR && !type_is_rc_ptr(it) &&
-              value_type_ownership(init) != OWN_OWN &&
-              !sema_value_is_fatal(init)) {
-            diag_error(sema->diag, sema_loc(sema, vd->init),
-                       "cannot create '%.*s' of type %s from a borrowed value: "
-                       "share creation needs an owning source (an `own` value or "
-                       "a dying value from new/move/clone)",
-                       (int)vd->name.len, vd->name.ptr,
-                       type_is_share(sym->type) ? "share *T" : "a share pointer");
-          }
-        }
         /* R1（own 不可 copy，§3.1）：own *T 声明只能由 fatal 将亡值
            （move/clone/new/make 产物或函数返回值）初始化——直接赋 own/ref
            变量 = copy → 编译错误。 */

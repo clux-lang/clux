@@ -62,16 +62,6 @@ TEST(BasicConstruct, StrValue) {
                  "bct_str");
 }
 
-TEST(BasicConstruct, OwnNoneAndCopyable) {
-  /* 结果是普通值（OWN_NONE）：可自由拷贝、可作为 own 指针的构造值。 */
-  clux_expect_ok(prog("  var a = .i32{5};\n"
-                      "  var b = a;\n"
-                      "  if (b != 5) { return 1; }\n"
-                      "  var p: own *i32 = new i32{ .i32{9} };\n"
-                      "  if (p.* != 9) { return 2; }\n"),
-                 "bct_copy");
-}
-
 TEST(BasicConstruct, InsideAggregate) {
   clux_expect_ok("struct S { a: i32; b: f64 }\n"
                  "func main(): i32 {\n"

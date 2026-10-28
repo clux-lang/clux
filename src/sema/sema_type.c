@@ -419,18 +419,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
          统一为 AST_IDENT（类型即表达式），查类型表。 */
       ast_ident_t *id = (ast_ident_t *)type_expr;
       const type_t *t = type_lookup(sema->vm, id->name);
-      /* **裸 `opaque` 不合法**：opaque 是 `void *` 语义的**指针**，和 `*T` 一样
-         必须带所有权修饰（`own opaque` / `ref opaque` / `fatal opaque`）。
-         只在"所有权修饰符的 base 位置"（AST_PTR / AST_OWNED_TYPE 的 base）放行。
-         注意：折叠后的 AST_TYPE_REF（name = "opaque"）走上面的 TYPE_REF 分支，
-         不会误报——那里只可能是已经通过校验的 `ref opaque` 之类。 */
-      if (t && t == sema->vm->type_opaque && sema->opaque_base_ctx == 0) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "bare 'opaque' is not allowed: opaque is a pointer type "
-                   "(`void *`), so it needs an ownership qualifier — use "
-                   "'own opaque' / 'ref opaque' / 'fatal opaque'");
-        return NULL;
-      }
       if (!t) {
         sema_symbol_t *gs =
             sema_scope_find_local(sema->global_scope, id->name);
@@ -631,71 +619,30 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return NULL;
     }
     case AST_PTR: {
-      /* 指针类型（m3-design §3）：own *T / ref *T / fatal *T。所有权是**类型
-         修饰**（docs/ownership-as-type.md）：`own *T` / `ref *T` / `fatal *T`
-         是三个独立类型，裸 `*T` 是它们共同的结构底层。
-         递归解析被指向类型 T（可为任意类型表达式，含嵌套指针）。 */
+      /* 裸 *T；所有权与内建 RC 修饰符都已移除。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      strslice_t own = token_strslice(ptr->ownership);
-      uint8_t rc = 0;
-      ownership_t oq = OWN_NONE;
-      if (own.len == 5 && memcmp(own.ptr, "share", 5) == 0)
-        rc = 1;
-      else if (own.len == 4 && memcmp(own.ptr, "weak", 4) == 0)
-        rc = 2;
-      else if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0)
-        oq = OWN_OWN;
-      else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0)
-        oq = OWN_REF;
-      else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)
-        oq = OWN_FATAL;
-      else {
+      if (ptr->ownership) {
         diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "unsupported pointer ownership");
+                   "ownership/RC modifiers were removed; use '*T'");
         return NULL;
       }
       sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       sema->opaque_base_ctx--;
       if (!base) return NULL;
-      /* RC 系（share/weak）是真实类型；own/ref/fatal 是类型修饰。 */
-      const type_t *pt = rc ? type_ptr_intern_rc(sema->vm, base, rc)
-                            : type_ptr_intern(sema->vm, base);
-      if (!pt) return NULL;
-      return type_ownership_apply(sema->vm, oq, pt);
+      return type_ptr_intern(sema->vm, base);
     }
     case AST_SLICE_TYPE: {
-      /* 切片类型（m4-design §1/§10）：own []T / ref []T / fatal []T。
-         裸 []T（ownership=NULL）不合法——parser 在 parse_primary 层暂存
-         为 ownership=NULL 的 AST_SLICE_TYPE，此处校验拒绝。 */
+      /* 裸 []T。 */
       ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
-      if (!sl->ownership) {
+      if (sl->ownership) {
         diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "bare '[]T' is not allowed; use 'own []T' / 'ref []T' / "
-                   "'fatal []T'");
+                   "ownership modifiers were removed; use '[]T'");
         return NULL;
       }
-      strslice_t own = token_strslice(sl->ownership);
-      ownership_t oq = OWN_NONE;
-      if (own.len == 3 && memcmp(own.ptr, "own", 3) == 0)
-        oq = OWN_OWN;
-      else if (own.len == 3 && memcmp(own.ptr, "ref", 3) == 0)
-        oq = OWN_REF;
-      else if (own.len == 5 && memcmp(own.ptr, "fatal", 5) == 0)
-        oq = OWN_FATAL;
-      else {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "unsupported slice ownership '%.*s' (use own/ref/fatal)",
-                   (int)own.len, own.ptr);
-        return NULL;
-      }
-      /* 元素槽位所有权（`own []own *T` 的元素是 own 叶子；销毁序列
-         `for i in 0..len` 据此决定是否 FREE `s[i]`）。类型已携带它。 */
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
-      const type_t *sl_t = type_slice_intern(sema->vm, elem);
-      if (!sl_t) return NULL;
-      return type_ownership_apply(sema->vm, oq, sl_t);
+      return type_slice_intern(sema->vm, elem);
     }
     case AST_SCOPE_ANNOT: {
       /* 作用域标注（m3-design §5）：'<a,b,c> type。标注不是类型的一部分，
@@ -704,19 +651,8 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
       return resolve_type_expr(sema, sa->sub);
     }
-    case AST_OWNED_TYPE: {
-      /* `fatal T` / `own T` / `ref T`：所有权限定的**非指针**类型。
-         所有权是类型修饰（docs/ownership-as-type.md），解析结果为
-         `own T` / `ref T` / `fatal T` 这个独立类型（布局与 T 相同）。
-         是否**可用**仍由流动规则决定（`own` 位置需要 FATAL 产生式）。 */
-      ast_owned_type_t *ot = (ast_owned_type_t *)type_expr;
-      ownership_t oq = ownership_token_own(ot->ownership);
-      sema->opaque_base_ctx++;
-      const type_t *base = resolve_type_expr(sema, ot->base_type);
-      sema->opaque_base_ctx--;
-      if (!base) return NULL;
-      return type_ownership_apply(sema->vm, oq, base);
-    }
+    case AST_OWNED_TYPE:
+      return resolve_type_expr(sema, ((ast_owned_type_t *)type_expr)->base_type);
     case AST_PACK_TYPE: {
       ast_pack_type_t *pk = (ast_pack_type_t *)type_expr;
       diag_error(sema->diag, sema_loc(sema, type_expr),

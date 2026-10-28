@@ -76,7 +76,7 @@ TEST(Reflect, PtrTargetAndRc) {
       "struct P { x: i32; }\n"
       "func main(): i32 {\n"
       "  var v: P = .P{ .x = 1 };\n"
-      "  var r: ref *P = v.&;\n"
+      "  var r: *P = v.&;\n"
       "  if (typeof(r).kind != \"ptr\") { return 1; }\n"
       "  if (typeof(r).target_type.name != \"P\") { return 2; }\n"
       "  if (typeof(r).rc != \"plain\") { return 3; }\n"

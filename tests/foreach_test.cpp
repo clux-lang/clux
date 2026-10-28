@@ -7,7 +7,7 @@
  * 本文件验证**运行结果**，特别是不容易在 AST 层看出来的语义点：
  *   - `continue` 必须仍然步进（展开成 while + 体尾自增会死循环）；
  *   - 迭代器表达式只求值一次（形态不是裸标识符时先落临时变量）；
- *   - own 容器（move-only）能直接遍历（裸标识符形态不复制迭代器）；
+ *   - 容器（move-only）能直接遍历（裸标识符形态不复制迭代器）；
  *   - 闭包 / defer / comptime func 体内的 foreach 同样正确。
  *
  * **为什么用子进程跑 `clux run` 而不是进程内 `driver_run_file`**：
@@ -257,7 +257,7 @@ TEST(Foreach, IterableEvaluatedExactlyOnce) {
 }
 
 TEST(Foreach, SliceExpressionIterable) {
-  /* 切片表达式（非标识符）→ 临时变量；切片本身是 ref []T，不涉及所有权 */
+  /* 切片表达式（非标识符）→ 临时变量；切片本身是 []T，不涉及所有权 */
   expect_output(
       "func main(): i32 {\n"
       "  var a = .[5]i32{ 1, 2, 3, 4, 5 };\n"
@@ -289,47 +289,14 @@ TEST(Foreach, StructFieldArrayIsSnapshot) {
 }
 
 /* ================================================================ */
-/* own / ref 容器                                                    */
+/* / 容器                                                    */
 /* ================================================================ */
-
-TEST(Foreach, OwnSliceLocalIteratesWithoutMoving) {
-  /* own []T 是 move-only：展开若写成 `var __arr = s` 会被拒（sema 要求
-     move()/clone()）。裸标识符迭代器因此**不复制**——循环结束后 s 仍可用。 */
-  expect_output(
-      "func main(): i32 {\n"
-      "  var s: own []i32 = make(i32, 3, 10, 20, 30);\n"
-      "  var sum = 0;\n"
-      "  foreach (var x of s) {\n"
-      "    sum = sum + x;\n"
-      "  }\n"
-      "  _ = libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
-      "  return 0;\n"
-      "}\n",
-      "sum=60 len=3\n");
-}
-
-TEST(Foreach, OwnSliceParameterIterates) {
-  expect_output(
-      "func sum_own(s: own []i32): i32 {\n"
-      "  var acc = 0;\n"
-      "  foreach (var x of s) {\n"
-      "    acc = acc + x;\n"
-      "  }\n"
-      "  return acc;\n"
-      "}\n"
-      "func main(): i32 {\n"
-      "  var s: own []i32 = make(i32, 4, 1, 2, 3, 4);\n"
-      "  _ = libc::printf(\"%d\\n\", sum_own(move(s)));\n"
-      "  return 0;\n"
-      "}\n",
-      "10\n");
-}
 
 TEST(Foreach, RefSliceIterates) {
   expect_output(
       "func main(): i32 {\n"
       "  var a = .[4]i32{ 5, 6, 7, 8 };\n"
-      "  var r: ref []i32 = a[:];\n"
+      "  var r: []i32 = a[:];\n"
       "  var sum = 0;\n"
       "  foreach (var x of r) {\n"
       "    sum = sum + x;\n"
@@ -338,23 +305,6 @@ TEST(Foreach, RefSliceIterates) {
       "  return 0;\n"
       "}\n",
       "sum=26\n");
-}
-
-TEST(Foreach, OwnSliceOfOwnPointersLendsElements) {
-  /* own 元素的容器：`own [] own *i32`（元素带 own 的切片）。元素以
-     `ref *i32` **借出**——只读借用，不搬走元素所有权，循环后容器仍可用。 */
-  expect_output(
-      "func main(): i32 {\n"
-      "  var s: own [] own *i32 = make(own *i32, 3, new i32{ 11 },\n"
-      "                               new i32{ 22 }, new i32{ 33 });\n"
-      "  var sum = 0;\n"
-      "  foreach (var p: ref *i32 of s) {\n"
-      "    sum = sum + p.*;\n"
-      "  }\n"
-      "  _ = libc::printf(\"sum=%d len=%d\\n\", sum, len(s));\n"
-      "  return 0;\n"
-      "}\n",
-      "sum=66 len=3\n");
 }
 
 /* ================================================================ */

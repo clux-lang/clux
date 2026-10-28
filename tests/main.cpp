@@ -1,7 +1,7 @@
 // clux unit-test entry point.
 //
 // This file hosts the GoogleTest runner. Individual test suites live in their
-// own *.cpp files under tests/ and are globbed into the clux_test target by
+// *.cpp files under tests/ and are globbed into the clux_test target by
 // CMake (see the root CMakeLists.txt). Nothing project-specific needs to be
 // linked here yet; add libraries to target_link_libraries(clux_test ...) as
 // the code under src/ and include/ grows.
@@ -33,5 +33,5 @@ int main(int argc, char **argv) {
 }
 
 // Placeholder smoke test so the suite is non-empty and CTest discovery succeeds.
-// Real test suites belong in their own tests/*.cpp files.
+// Real test suites belong in their tests/*.cpp files.
 TEST(Sanity, Smoke) { EXPECT_EQ(1 + 1, 2); }

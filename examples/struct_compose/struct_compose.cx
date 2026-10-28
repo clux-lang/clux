@@ -2,7 +2,7 @@
 //
 // 结构体体内可以写 `...Base;`，表示把 Base 的字段**嵌进**本结构体：
 //
-//     struct Base { id: i32; func getId(self: ref *const Base): i32 {...} }
+//     struct Base { id: i32; func getId(self: *const Base): i32 {...} }
 //     struct Test { ...Base; extra: i64; }
 //
 // 语义要点：
@@ -30,11 +30,11 @@ struct Base {
     id: i32;
     var count: i32 = 0;
 
-    func getId(self: ref *const Base): i32 {
+    func getId(self: *const Base): i32 {
         return self.id;
     }
 
-    func bump(self: ref *Base): i32 {
+    func bump(self: *Base): i32 {
         self.id += 1;
         return self.id;
     }
@@ -76,12 +76,12 @@ struct Plain {
 struct Override {
     ...Base;
     var count: i32 = 7;
-    func getId(self: ref *const Override): i32 {
+    func getId(self: *const Override): i32 {
         return 100 + self.id;
     }
 }
 
-func takeA(v: ref *const A): i32 {
+func takeA(v: *const A): i32 {
     return v.a;
 }
 
@@ -103,14 +103,14 @@ func main(): i32 {
         return 4;
     }
 
-    // 向上转换：ref *Test → ref *const Base（前缀兼容）
-    var b: ref *const Base = t.&;
+    // 向上转换：*Test → *const Base（前缀兼容）
+    var b: *const Base = t.&;
     if (b.getId() != 7) {
         return 5;
     }
 
     // 同一块存储：通过基指针写，派生对象看到
-    var m: ref *Base = t.&;
+    var m: *Base = t.&;
     if (m.bump() != 8) {
         return 6;
     }

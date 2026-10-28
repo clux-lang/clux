@@ -107,31 +107,3 @@ TEST(ReservedIdent, SingleUnderscorePrefixAllowed) {
                  "}\n",
                  "ri_ok_prefix");
 }
-
-TEST(ReservedIdent, DiscardStillWorks) {
-  clux_expect_ok("func main(): i32 {\n"
-                 "  var p: own *i32 = new i32{7};\n"
-                 "  _ = move(p);\n"
-                 "  _ = 1 + 2;\n"
-                 "  return 0;\n"
-                 "}\n",
-                 "ri_discard_ok");
-}
-
-TEST(ReservedIdent, InternalNamesStillWork) {
-  /* 编译器生成名（__destroy_* / __clone_* / __ctx / __deep_clone）不受影响：
-     闭包捕获读取 + clone + 销毁都要用到它们。 */
-  clux_expect_ok(
-      "struct Box { p: own *i32; n: i32 }\n"
-      "func main(): i32 {\n"
-      "  var b: own Box = .Box{ .p = new i32{7}, .n = 1 };\n"
-      "  var c: own Box = clone(b);\n"
-      "  var p: own *i32 = new i32{9};\n"
-      "  var f = clone(func |(q: own *i32 = move(p))| get(): i32 { return q.*; });\n"
-      "  var g = clone(f);\n"
-      "  if (c.p.* != 7) { return 1; }\n"
-      "  if (g() != 9) { return 2; }\n"
-      "  return 0;\n"
-      "}\n",
-      "ri_internal_ok");
-}

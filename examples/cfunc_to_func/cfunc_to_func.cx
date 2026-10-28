@@ -9,10 +9,7 @@
 //           return cmp(__cfp0, __cfp1);
 //       };
 //
-// 所有权（cfunc 形参上的修饰就是 C 侧契约）：
-//   - `own`：C 函数内部会释放 → 包装体自动 `move(p)` 把所有权交给 C
-//     （`func aaa(a0: own *i32): i32 { return bbb(move(a0)); }`）；
-//   - `ref`：C 内部不释放（借用）→ 包装体直接传引用，clux 侧继续持有。
+// 指针参数是裸指针；C 侧是否释放由调用方/文档约定，不再有 own/ref 修饰。
 //
 // 限制：只有**命名 cfunc**（必然在顶层）能转——包装体按名字调用它，不需要把
 // 运行期指针捕获进闭包。运行期函数指针（变量里的 cfunc 值、FFI 返回的函数指针）
@@ -28,11 +25,11 @@ struct Box {
 // 纯标量 cfunc
 cfunc cmp(a: i32, b: i32): i32 { return a - b; }
 
-// ref 形参：C 内部不释放
-cfunc peek(a: ref *Box): i32 { return a.*.v; }
+// 裸指针形参：C 内部只读
+cfunc peek(a: *Box): i32 { return a.*.v; }
 
-// own 形参：C 内部释放（这里只读，真实 C 函数会 free）
-cfunc take(a: own *Box): i32 { return a.*.v; }
+// 裸指针形参：这里也只读；真实 C 函数若接管所有权，由调用方决定是否 free
+cfunc take(a: *Box): i32 { return a.*.v; }
 
 func apply(f: func(i32, i32) -> i32): i32 { return f(10, 20); }
 
@@ -44,18 +41,20 @@ func main(): i32 {
     // ② 也能传给高阶函数
     _ = libc::printf("apply(cfunc_ptr(cmp)) = %d\n", apply(cfunc_ptr(cmp)));
 
-    // ③ ref 形参：借用传递
+    // ③ 裸指针参数：直接传递
     var b = new Box{ .v = 42 };
-    var g: func(ref *Box) -> i32 = cfunc_ptr(peek);
-    _ = libc::printf("g(&b) = %d\n", g(b.*.&));
+    defer |b| { free(b); }
+    var g: func(*Box) -> i32 = cfunc_ptr(peek);
+    _ = libc::printf("g(b) = %d\n", g(b));
 
-    // ④ own 形参：包装体 move 交给 C
+    // ④ 裸指针参数：传递后由调用方决定是否 free
     var c = new Box{ .v = 43 };
-    var h: func(own *Box) -> i32 = cfunc_ptr(take);
-    _ = libc::printf("h(move(c)) = %d\n", h(move(c)));
+    defer |c| { free(c); }
+    var h: func(*Box) -> i32 = cfunc_ptr(take);
+    _ = libc::printf("h(c) = %d\n", h(c));
 
     if (f(5, 3) != 2) { return 1; }
     if (apply(cfunc_ptr(cmp)) != -10) { return 2; }
-    if (g(b.*.&) != 42) { return 3; }
+    if (g(b) != 42) { return 3; }
     return 0;
 }

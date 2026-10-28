@@ -265,7 +265,7 @@ TEST_F(StrmapTest, OwnsValueClone) {
   strmap_t *clone = (strmap_t *)allocator_clone(g_alloc, (void **)&m);
   ASSERT_NE(clone, nullptr);
 
-  /* Clone has its own copy of the value */
+  /* Clone has its copy of the value */
   box_t *clone_val = (box_t *)strmap_get(clone, "key");
   ASSERT_NE(clone_val, nullptr);
   EXPECT_NE(clone_val, b);     /* different pointer */

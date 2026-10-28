@@ -243,6 +243,34 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       break;
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
+      /* raw-pointer 迁移期：free(p); 直接生成 AST_FREE（指针/切片释放）。 */
+      if (es->expr && es->expr->kind == AST_CALL) {
+        ast_call_t *cl = (ast_call_t *)es->expr;
+        if (cl->callee && cl->callee->kind == AST_IDENT) {
+          strslice_t fn = ((ast_ident_t *)cl->callee)->name;
+          sema_symbol_t *fs = sema_lookup(scope, fn);
+          if (fs && fs->builtin_op == SEMA_BUILTIN_FREE) {
+            if (!cl->args || cl->args->next) {
+              diag_error(sema->diag, sema_loc(sema, es->expr),
+                         "free: expects exactly 1 pointer or slice argument");
+              break;
+            }
+            ast_node_t *arg = cl->args;
+            value_t *av = sema_expr(sema, &arg, scope);
+            const type_t *at = av ? value_type(av) : NULL;
+            if (!at || (type_kind_of(at) != TYPE_KIND_PTR &&
+                        type_kind_of(at) != TYPE_KIND_SLICE)) {
+              diag_error(sema->diag, sema_loc(sema, arg),
+                         "free: argument must be a pointer or slice");
+              break;
+            }
+            arg->next = NULL;
+            es->expr = ast_free_new(sema->arena, arg);
+            if (es->expr) ((ast_free_t *)es->expr)->type = at;
+            break;
+          }
+        }
+      }
       bool noreturn = false;
       if (es->expr && es->expr->kind == AST_CALL) {
         ast_call_t *cl = (ast_call_t *)es->expr;

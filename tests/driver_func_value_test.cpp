@@ -385,7 +385,7 @@ TEST(Driver, RunFileFuncValueInMakeInitializers) {
   /* `make(T, N, init…)` 的初始化值里的函数字面量同样要被预扫描收集 */
   std::string path = write_temp_file(
       "func main():void {\n"
-      "  var fns: own []func(i32)->i32 = make(func(i32)->i32, 2,\n"
+      "  var fns: []func(i32)->i32 = make(func(i32)->i32, 2,\n"
       "      func(x: i32): i32 { return x + 10; },\n"
       "      func(x: i32): i32 { return x + 20; });\n"
       "  _ = libc::printf(\"%d %d\\n\", fns[0](1), fns[1](1));\n"
