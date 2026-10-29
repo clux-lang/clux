@@ -664,66 +664,6 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
            将来恢复含指针的聚合时，判据应改为"聚合的 ref 槽位表"（扁平槽位模型，
            见 docs/ownership-refactor.md §2.5），而不是恢复类型层递归谓词。
            顶层 ref 的重绑定检查见下面的 R3 分支。 */
-        /* R3 重绑定切换借源：ref/opaque 变量 r = c; 换借目标（旧来源集合
-           释放、新来源集合登记，与定义点同一收集器——含函数返回值按标注
-           继承多来源）。 */
-        if (sym->type &&
-            (sema_sym_ownership(sym) == OWN_REF ||
-             type_kind_of(sym->type) == TYPE_KIND_OPAQUE)) {
-          sema_symbol_t *srcs[16];
-          size_t nsrc = borrow_collect(sema, as->value, scope, srcs, 16);
-          if (nsrc == 0 && sym->annot_names) {
-            for (size_t i = 0; i < sym->annot_count; i++) {
-              sema_symbol_t *a = sema_lookup(scope, sym->annot_names[i]);
-              if (a && a->kind == SEMA_SYM_VAR)
-                nsrc = borrow_collect_add(srcs, nsrc, 16, a);
-            }
-          }
-          /* §5 重绑定逃逸校验（m3-design §5"重绑定时校验是否逃逸"）：
-             r 的标注集合（定义时记录）须涵盖**每个**新借源的定义作用域——
-             任一来源存活超出标注上限即逃逸。annot_count=0 = 定义时无标注，
-             重绑定同样跳过。 */
-          if (sym->annot_count > 0) {
-            for (size_t k = 0; k < nsrc; k++) {
-              sema_symbol_t *src = srcs[k];
-              if (!src || !src->own_scope) continue;
-              for (size_t i = 0; i < sym->annot_count; i++) {
-                sema_scope_t *anchor =
-                    annot_anchor_scope(sema, sym->annot_names[i], scope);
-                if (!anchor) {
-                  diag_error(sema->diag, sema_loc(sema, as->value),
-                             "scope annotation '%.*s' does not name a "
-                             "parameter, global or local variable",
-                             (int)sym->annot_names[i].len,
-                             sym->annot_names[i].ptr);
-                  continue;
-                }
-                if (!sema_scope_within(src->own_scope, anchor)) {
-                  diag_error(sema->diag, sema_loc(sema, as->value),
-                             "rebinding ref variable '%.*s' escapes scope "
-                             "annotation '%.*s' (new source's scope is not "
-                             "nested within the annotated scope)",
-                             (int)name.len, name.ptr,
-                             (int)sym->annot_names[i].len,
-                             sym->annot_names[i].ptr);
-                }
-              }
-            }
-          }
-          borrow_srcs_set(sema, sym, srcs, nsrc);
-        }
-
-        /* 聚合（含 ref 槽位）**整体赋值**：换值 = 换借源集合（旧集合释放，
-           新集合从右值构造/拷贝里收集）。ref/opaque 变量走上一条 R3 分支。 */
-        if (sym->type &&
-            !(sema_sym_ownership(sym) == OWN_REF ||
-              type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
-            type_has_ref_slots(sym->type)) {
-          sema_symbol_t *csrcs[16];
-          size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE,
-                                           as->value, scope, csrcs, 16, 0);
-          borrow_srcs_set(sema, sym, csrcs, cn);
-        }
       }
     }
     return;
@@ -888,13 +828,6 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
   if (!et) return;
 
   /* 元素是 ref 槽位（或含 ref 槽位）：`s[i] = b.p` 把 b 登记为载体的借源。 */
-  if (et_own == OWN_REF || type_has_ref_slots(et)) {
-    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
-    sema_symbol_t *csrcs[16];
-    size_t cn = borrow_collect_value(sema, et, et_own, as->value, scope,
-                                     csrcs, 16, 0);
-    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
-  }
 
   /* **赋值点旧值销毁**：`a[i] = v` 是纯覆盖（INDEX_SET 只 memcpy），
      旧元素里的 own 堆块必须先释放。own 叶子 / 含 own 槽位的复合元素
@@ -1088,16 +1021,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       value_is_type(rhs, TYPE_KIND_VOID))
     return;
 
-  /* 字段是 ref 槽位（或含 ref 槽位）：`s2.q = b.p` 把 b 登记为 s2 的借源
-     ——s2 里存着指向 b 拥有堆块的 ref，b 被 move 后该 ref 悬垂。 */
-  if (!rhs_nil && ft &&
-      (slot_own == OWN_REF || type_has_ref_slots(ft))) {
-    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
-    sema_symbol_t *csrcs[16];
-    size_t cn = borrow_collect_value(sema, ft, slot_own, as->value, scope,
-                                     csrcs, 16, 0);
-    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
-  }
 
   if (rhs_nil) {
     if (!ft || type_kind_of(ft) != TYPE_KIND_OPTION) {
@@ -1378,13 +1301,6 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
 
   /* 字段是 ref 槽位（或含 ref 槽位）：`s2.q = b.p` 把 b 登记为 s2 的借源
      ——s2 里存着指向 b 拥有堆块的 ref，b 被 move 后该 ref 悬垂。 */
-  if (!rhs_nil && ft && type_has_ref_slots(ft)) {
-    sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
-    sema_symbol_t *csrcs[16];
-    size_t cn = borrow_collect_value(sema, ft, OWN_NONE, as->value, scope,
-                                     csrcs, 16, 0);
-    if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
-  }
 
   if (rhs_nil) {
     if (!ft || type_kind_of(ft) != TYPE_KIND_OPTION) {
@@ -1415,14 +1331,6 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
-    /* 被指向值含 ref 槽位：`p.* = .S{ .q = b.p }` 把 b 登记为 p 的借源。 */
-    if (ft && type_has_ref_slots(ft)) {
-      sema_symbol_t *carrier = borrow_root_symbol(sema, as->target, scope);
-      sema_symbol_t *csrcs[16];
-      size_t cn = borrow_collect_value(sema, ft, OWN_NONE, as->value, scope,
-                                       csrcs, 16, 0);
-      if (carrier && cn) borrow_carry_merge(sema, carrier, csrcs, cn);
-    }
     /* **赋值点旧值销毁**：`p.* = v` 是纯覆盖（PTR_SET 只 memcpy），
        旧被指向值里的 own 槽位必须先释放。只对 **own 指针**生成——
        经 ref 指针写别人拥有的内容时不能替对方释放（借用方不拥有）。 */

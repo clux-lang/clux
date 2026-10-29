@@ -133,14 +133,6 @@ typedef struct sema_ct_capture {
  * 摘除（不进入运行时），引用点在 sema_expr 折叠为字面量 AST 节点。
  * comptime func 调用点在 sema_expr 折叠，函数本身不注册到运行时。
  */
-/* 借源节点（见 sema_symbol_t::borrow_srcs）：每个节点记一个借源符号。
-   登记时借源 borrow_count++；借用载体作用域退出 / 换绑时 --。
-   节点由 sema arena 分配（随 sema 生命周期）。 */
-typedef struct borrow_src_node {
-  struct _sema_symbol_t *sym;
-  struct borrow_src_node *next;
-} borrow_src_node_t;
-
 struct _sema_symbol_t {
   sema_symbol_kind_t kind; /* 符号种类（SYM_VAR/SYM_FUNC/SYM_TYPE） */
   const type_t *type; /* 已解析类型；NULL = 待推断（shadow VM 阶段填充）。
@@ -167,20 +159,6 @@ struct _sema_symbol_t {
                          调用共享，move 进去的 TDZ 无法恢复，第二次调用读到已转移
                          的槽位。由 resolve_func_captures 在解析捕获时置位
                          （那里的符号可能没有 own_scope，所以不能靠作用域反查）。 */
-  int  borrow_count;  /* 活跃借用计数（R3，m3-design §7）：指向本变量的 ref
-                         借用数。>0 时禁止 move（防借用悬空）。仅变量符号
-                         有意义。 */
-  /* R3 借用来源（m3-design §7/§5，2026-10 多源）：本变量（ref *T / opaque）
-     是借用载体，`borrow_srcs` 记录它借自**哪些**符号。定义/重绑定时登记
-     （每个借源 borrow_count++），所在作用域退出时递减。
-     **为什么是集合**：编译期只能保守判定（停机问题）——例如
-         func fn(a: ref *T, b: ref *T): '<a,b> ref *T
-     返回值可能来自 a 也可能是 b，无法精确 → 返回值**同时继承** a 与 b 的
-     来源；调用点按返回标注把形参名映射到实参，逐个登记。
-     opaque 变量（var q: opaque = p）同样登记并继承 p 的来源（链式借用）。
-     节点为 arena 链表，仅变量符号有意义。 */
-  borrow_src_node_t *borrow_srcs;
-  size_t            borrow_src_count;
   /* 已废弃（2026-10 闭包 = 捕获聚合结构体重构）：闭包销毁改为单个 `FREE f`，
      VM 按 `capture_type` 的槽位所有权释放 env 里的 own 捕获——不再需要在
      sema 里枚举捕获表（那也无法覆盖 `var f = clone(g)` 这种非字面量初始化）。

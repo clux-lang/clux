@@ -467,7 +467,7 @@ bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields,
       ast_node_t *head = NULL, *tail = NULL;
       for (size_t i = 0; i < gi->pack_count; i++) {
         ast_node_t *e = sema_generic_pack_arg_expr(
-            sema, gi, i, /*move_own=*/true, f->tok_begin, f->tok_end);
+            sema, gi, i, f->tok_begin, f->tok_end);
         if (!e) return false;
         e->next = NULL;
         if (tail) tail->next = e;

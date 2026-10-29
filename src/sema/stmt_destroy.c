@@ -590,68 +590,10 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
          FUNC 专用分支（同样生成单个 FREE，不会重复）。 */
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
-    case TYPE_KIND_PTR: {
-      /* 被指向值的 own 槽位**先**释放（`v.f` 会自动解引用到堆块内容），
-         再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。
-         **必须显式解引用**：用户写的 `p.f` 由 sema_expr 就地改写成
-         `p.*.f`（AST_MEMBER 的指针自动解引用），但本生成器不过 sema_expr，
-         直接写 `p.f` 编译出来就是 `PUSH p; FIELD_GET "f"` —— VM 的
-         FIELD_GET / IS_TAG 只接受 struct/union/cunion **值**，拿到指针
-         会报 "field get expects a struct..."（实测）。包一层 AST_DEREF
-         后与用户写法逐字节一致（编译器发 PTR_GET）。
-         这一层对**嵌套指针**也必不可少：`own *own *T` 的被指向值本身是
-         一个 own 指针，销毁它 = 释放 `p.*` 指向的堆块（FREE p.*），再
-         FREE p；缺了解引用就会把同一个 `p` FREE 两次（实测：双层 FREE、
-         内层堆块泄漏）。 */
-      const type_t *base = ptr_type_base(t);
-      if (base) {
-        const type_t *bs = type_strip_quals(base);
-        if (bs && (type_kind_of(bs) == TYPE_KIND_PTR || type_kind_of(bs) == TYPE_KIND_SLICE)) {
-          /* 被指向值本身是叶子（`own *own *T` / `own *[]T`）：地址就是它自身，
-             交给 impl 释放（`FREE access.*`；切片还带元素循环）。 */
-          ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
-          if (!deref) return false;
-          ((ast_deref_t *)deref)->operand = access;
-          if (!gen_destroy_impl(sema, bs, deref, head, tail)) return false;
-        } else if (type_needs_destroy_fn(bs)) {
-          /* 被指向值含 own 槽位：**调用它的销毁函数**（地址 = 指针值本身；
-             自引用类型即递归调用自身）。 */
-          if (!gen_destroy_fn_call(sema, bs, access, head, tail,
-                                   /*by_address=*/false))
-            return false;
-        }
-      }
-      destroy_append(head, tail, ast_free_new(sema->arena, access));
+    case TYPE_KIND_PTR:
+    case TYPE_KIND_SLICE:
+      /* 裸指针/切片由用户显式 free，不做自动销毁。 */
       return true;
-    }
-    case TYPE_KIND_SLICE: {
-      /* []T：先逐元素销毁（元素槽位 own 才释放，运行期长度 → for 循环），
-         再 FREE 整个切片堆块（顺序不能反：先 FREE 就找不到元素了）。 */
-      char name_buf[64];
-      strslice_t var_name = STRSLICE_EMPTY;
-      if (!make_loop_var_name(sema, name_buf, sizeof name_buf, &var_name))
-        return false;
-      ast_node_t *bh = NULL, *bt = NULL;
-      if (!gen_destroy_elems(sema, slice_type_elem(t),
-                             type_ownership_of(slice_type_elem(t)), access, var_name,
-                             &bh, &bt))
-        return false;
-      if (bh) {
-        ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
-        if (!blk) return false;
-        ((ast_block_t *)blk)->stmts = bh;
-        blk->is_generated = true;
-
-        ast_node_t *loop = ast_for_index_new(sema->arena, 0, 0);
-        if (!loop) return false;
-        ((ast_for_index_t *)loop)->var    = var_name;
-        ((ast_for_index_t *)loop)->source = access;
-        ((ast_for_index_t *)loop)->body   = blk;
-        destroy_append(head, tail, loop);
-      }
-      destroy_append(head, tail, ast_free_new(sema->arena, access));
-      return true;
-    }
     case TYPE_KIND_STRUCT:
       return gen_destroy_struct(sema, (const struct_type_t *)t, access, head,
                                 tail);
@@ -751,6 +693,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
 
 ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
   if (!scope || !scope->symbols) return NULL;
+  if (sema->fn.walking_comptime) return NULL;
   const vec_t *keys = strmap_keys(scope->symbols);
   if (!keys) return NULL;
   size_t n = vec_len(keys);
@@ -800,7 +743,9 @@ ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
        不能生成销毁（否则 PUSH 一个尚未 DEFINE 的名字 → undefined variable）。 */
     if (!sym->declared) continue;
     /* own 变量必销毁；**含 share/weak 槽位的普通变量**也要销毁（递减计数）。 */
-    if (sema_sym_ownership(sym) != OWN_OWN) continue;
+    if (sema_sym_ownership(sym) != OWN_OWN &&
+        type_kind_of(sym->type) != TYPE_KIND_FUNC)
+      continue;
     /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
        目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
        将来复杂类型在此按类型展开（optional→判断 / 数组→循环 / tuple→

@@ -164,8 +164,7 @@ ast_node_t *sema_generic_value_pack_tuple_type_expr(
  *  自动包 `move(...)`（供展开 / 裸 args 元组构造使用）。 */
 ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,
                                        const sema_generic_instance_t *inst,
-                                       size_t index, bool move_own,
-                                       uint32_t tb, uint32_t te);
+                                       size_t index, uint32_t tb, uint32_t te);
 
 /** 构造 `<...Args>{ __pack_arg_... }` 表达式（裸 args 的显式 tuple 值）。 */
 ast_node_t *sema_generic_pack_tuple_expr(sema_t *sema,

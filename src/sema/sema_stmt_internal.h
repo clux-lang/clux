@@ -37,12 +37,6 @@ typedef struct flow_snap {
 } flow_snap_t;
 
 sema_scope_t *annot_anchor_scope(sema_t *sema, strslice_t name, sema_scope_t *scope);
-void borrow_carry_merge(sema_t *sema, sema_symbol_t *carrier, sema_symbol_t **srcs, size_t n);
-size_t borrow_collect(sema_t *sema, ast_node_t *e, sema_scope_t *scope, sema_symbol_t **out, size_t cap);
-size_t borrow_collect_add(sema_symbol_t **out, size_t n, size_t cap, sema_symbol_t *s);
-size_t borrow_collect_value(sema_t *sema, const type_t *t, ownership_t slot_own, ast_node_t *e, sema_scope_t *scope, sema_symbol_t **out, size_t cap, size_t n);
-sema_symbol_t *borrow_root_symbol(sema_t *sema, ast_node_t *e, sema_scope_t *scope);
-void borrow_srcs_set(sema_t *sema, sema_symbol_t *var, sema_symbol_t **srcs, size_t n);
 
 /* `a.?` / struct `a.!` 语法糖的分析结果（stmt_try.c）。 */
 typedef struct sema_try_info {
@@ -78,7 +72,6 @@ bool gen_destroy_slot(sema_t *sema, const type_t *slot_type, ownership_t slot_ow
 ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope);
 void name_to_cstr(strslice_t s, char *buf, size_t cap);
 void shadow_assign(sema_t *sema, ast_assign_t *as, sema_scope_t *scope);
-void shadow_borrow_register(sema_t *sema, sema_symbol_t *sym, ast_node_t *init, sema_scope_t *scope);
 void shadow_var_def(sema_t *sema, ast_var_def_t *vd, sema_scope_t *scope);
 bool type_has_ref_slots(const type_t *t);
 block_result_t walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope, size_t *idx);

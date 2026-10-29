@@ -158,20 +158,6 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
       /* 直接 return 一个含 own 槽位的构造临时：自动包一层 move，把
          构造产物从 OWN 转为 FATAL 交给调用方（C 后端等价于直接返回
          临时对象的字节）。 */
-      if (rt->value && rt->value->kind == AST_CONSTRUCT &&
-          type_has_own_slots(value_type(v))) {
-        ast_move_t *mv = (ast_move_t *)ast_move_new(
-            sema->arena, rt->value->tok_begin, rt->value->tok_end);
-        if (!mv) return r;
-        mv->operand = rt->value;
-        mv->base.is_generated = true;
-        rt->value = &mv->base;
-        const type_t *ft = sema_fatal_variant_of(
-            sema, type_strip_ownership(value_type(v)));
-        if (!ft) return r;
-        v = value_make_shadow(sema->vm, ft);
-        v_bad = false;
-      }
     }
     if (!v_bad) {
       if (!sema->fn.return_type) {

@@ -596,7 +596,7 @@ static value_t *type_pack_index_try(sema_t *sema, ast_node_t **node,
   }
   const sema_generic_arg_t *a = &gi->args[gi->pack_offset + raw];
   ast_node_t *id = sema_generic_pack_arg_expr(
-      sema, gi, (size_t)raw, /*move_own=*/false, (*node)->tok_begin,
+      sema, gi, (size_t)raw, (*node)->tok_begin,
       (*node)->tok_end);
   if (!id) return val_void(sema);
   id->next = (*node)->next;

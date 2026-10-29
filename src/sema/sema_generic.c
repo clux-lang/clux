@@ -432,35 +432,16 @@ static ast_node_t *generic_decorated_forward_body(
 
 /* 参数包元素是否需要显式 move 才能离开形参：own/fatal 修饰，或内部有
    own 槽位（fatal 是值状态，类型层可能只体现为 own/own slots）。 */
-static bool pack_elem_needs_move(const type_t *t) {
-    if (!t) return false;
-    ownership_t o = type_ownership_of(t);
-    if (o == OWN_OWN || o == OWN_FATAL) return true;
-    return type_has_own_slots(type_strip_quals(t));
-}
-
 ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,
                                        const sema_generic_instance_t *inst,
-                                       size_t index, bool move_own,
-                                       uint32_t tb, uint32_t te) {
+                                       size_t index, uint32_t tb, uint32_t te) {
     if (!sema || !inst || index >= inst->pack_count) return NULL;
-    const sema_generic_arg_t *a = &inst->args[inst->pack_offset + index];
     char nm[64];
     snprintf(nm, sizeof nm, "__pack_arg_%llu", (unsigned long long)index);
     ast_node_t *id = ast_ident_new(sema->arena, tb, te);
     if (!id) return NULL;
     ((ast_ident_t *)id)->name = arena_copy(sema->arena, nm, strlen(nm));
     id->is_generated = true;
-    if (move_own && pack_elem_needs_move(a->type)) {
-        location_t loc = {0};
-        ast_node_t *mv = ast_move_new(sema->arena, tb, te);
-        if (!mv) return NULL;
-        ((ast_move_t *)mv)->op =
-            (token_t *)arena_token_symbol(sema->arena, "move", &loc);
-        ((ast_move_t *)mv)->operand = id;
-        mv->is_generated = true;
-        return mv;
-    }
     return id;
 }
 
@@ -481,8 +462,7 @@ ast_node_t *sema_generic_pack_tuple_expr(sema_t *sema,
     ((ast_construct_t *)ctor)->type = tuple_ty;
     ast_node_t *head = NULL, *last = NULL;
     for (size_t i = 0; i < inst->pack_count; i++) {
-        ast_node_t *e = sema_generic_pack_arg_expr(sema, inst, i,
-                                                   /*move_own=*/true, tb, te);
+        ast_node_t *e = sema_generic_pack_arg_expr(sema, inst, i, tb, te);
         if (!e) return NULL;
         e->next = NULL;
         if (!head) head = e;

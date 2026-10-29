@@ -429,17 +429,6 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
     if (!a) return NULL;
     ((ast_ident_t *)a)->name = synth_name(sema, nb);
     a->is_generated = true;
-    if (tgt_own == OWN_OWN) {
-      /* own 形参：C 内部会释放 → 必须 move 交出所有权。 */
-      location_t loc = sema_loc(sema, origin);
-      ast_node_t *mvn = ast_move_new(sema->arena, tb, te);
-      if (!mvn) return NULL;
-      ((ast_move_t *)mvn)->op =
-          (token_t *)arena_token_symbol(sema->arena, "move", &loc);
-      ((ast_move_t *)mvn)->operand = a;
-      a = mvn;
-      a->is_generated = true;
-    }
     if (args_last) args_last->next = a; else args = a;
     args_last = a;
   }
@@ -920,33 +909,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
      ——防级联。 */
   if (sym->type) check_var_annot(sema, vd, scope, sym->type, sym);
 
-  /* 注：原先这里还有"含 ref 字段的聚合变量记录 init 借源集合"的一步
-     （`borrow_collect`），供赋值时校验"新值存活不超出承诺上限"。
-     复合类型禁止携带指针/切片时代该形态不存在，整条借源集合机制
-     （`borrow_set` / `borrow_collect` / …）随之删除。
-     聚合恢复携带 own 槽位后（2026-10），**从聚合 own 槽位借出**的借源由
-     `shadow_borrow_register` 里的 `borrow_source_from_owned_path` 补上：
-     沿访问路径（MEMBER/INDEX/DEREF/UNWRAP/ADDR）判定借出的目标是否归根变量
-     所有（own 字段/元素/inner/payload、own 指针的被指向内容、含 own 槽位的
-     存储），是则把**根变量**登记为借源（单源 `borrow_src`）——
-     move(根变量) 因此被 R3 拒绝。ref 字段/标量字段/借用指针穿透不登记。 */
-
-  /* R3 借用登记（m3-design §7）：ref *T / opaque 变量绑定借源（显式类型
-     分支与推断分支统一——推断出 ref 同样登记；opaque 恒显式）。 */
-  shadow_borrow_register(sema, sym, vd->init, scope);
-
-  /* 聚合 ref 槽位的**借源载体**：构造 = 逐字段赋值的语法糖
-     （var s = .S{ .q = b.p } ≡ s.q = b.p），因此把构造/拷贝里 ref 值的来源
-     合并到该变量；scope 退出时统一释放（sema_scope_release_borrows）。 */
-  if (sym && sym->type && vd->init &&
-      !(sema_sym_ownership(sym) == OWN_REF ||
-        type_kind_of(sym->type) == TYPE_KIND_OPAQUE) &&
-      type_has_ref_slots(sym->type)) {
-    sema_symbol_t *csrcs[16];
-    size_t cn = borrow_collect_value(sema, sym->type, OWN_NONE, vd->init,
-                                     scope, csrcs, 16, 0);
-    if (cn) borrow_carry_merge(sema, sym, csrcs, cn);
-  }
 
   /* 定义 shadow value 到当前 VM scope（与 sema scope 树同构；名字取自 ast）。
      定义完成 → 符号激活（sema_lookup 跳过未激活符号，自引用解析到外层） */

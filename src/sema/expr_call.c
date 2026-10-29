@@ -455,7 +455,7 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
       ast_node_t *head = NULL, *tail = NULL;
       for (size_t i = 0; i < gi->pack_count; i++) {
         ast_node_t *e = sema_generic_pack_arg_expr(
-            sema, gi, i, /*move_own=*/true, a->tok_begin, a->tok_end);
+            sema, gi, i, a->tok_begin, a->tok_end);
         if (!e) return false;
         e->next = NULL;
         if (tail) tail->next = e;
