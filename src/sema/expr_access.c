@@ -107,7 +107,6 @@ static bool reflect_may_be_type(ast_node_t *n) {
   case AST_OPTION:
   case AST_PTR:
   case AST_SLICE_TYPE:
-  case AST_OWNED_TYPE:
   case AST_CONST:
   case AST_VOLATILE:
     return true;

@@ -25,7 +25,6 @@
 #include "parser/ast_string_lit.h"
 #include "parser/ast_move.h"
 #include "parser/ast_option.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_program.h"
 #include "parser/ast_pack_type.h"
 #include "parser/ast_ptr.h"
@@ -90,18 +89,6 @@ void sema_generic_mangle_type(string_t *out, const type_t *t) {
         return;
     }
     switch (t->kind) {
-    case TYPE_KIND_OWN:
-        mangle_append_cstr(out, "own ");
-        sema_generic_mangle_type(out, ((const ownership_type_t *)t)->sub);
-        return;
-    case TYPE_KIND_REF:
-        mangle_append_cstr(out, "ref ");
-        sema_generic_mangle_type(out, ((const ownership_type_t *)t)->sub);
-        return;
-    case TYPE_KIND_FATAL:
-        mangle_append_cstr(out, "fatal ");
-        sema_generic_mangle_type(out, ((const ownership_type_t *)t)->sub);
-        return;
     case TYPE_KIND_CONST:
         mangle_append_cstr(out, "const ");
         sema_generic_mangle_type(out, ((const const_type_t *)t)->sub);
@@ -2580,12 +2567,6 @@ static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
         infer_pattern(sema, b, s->elem_type, slice_type_elem(actual), site);
         return;
     }
-    if (pat->kind == AST_OWNED_TYPE) {
-        ast_owned_type_t *o = (ast_owned_type_t *)pat;
-        pat_own = infer_token_ownership(o->ownership);
-        if (!infer_ownership_accepts(pat_own, type_ownership_of(actual))) return;
-        infer_pattern(sema, b, o->base_type, type_strip_ownership(actual), site);
-    }
 }
 
 /* 推断实参类型：fatal 是调用表达式的值状态；形参只接收 own/ref。
@@ -2633,7 +2614,6 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
     case AST_PTR:
     case AST_SLICE_TYPE:
-    case AST_OWNED_TYPE:
         infer_ownership_wrapped(sema, b, pat, actual, site);
         return;
     case AST_ARRAY: {

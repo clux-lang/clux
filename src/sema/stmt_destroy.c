@@ -44,7 +44,6 @@
 #include "parser/ast_walk.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_if.h"

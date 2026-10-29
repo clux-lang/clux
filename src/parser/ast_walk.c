@@ -23,7 +23,6 @@
 #include "parser/ast_clone.h"
 #include "parser/ast_take.h"
 #include "parser/ast_take_slot.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_slice.h"
@@ -72,9 +71,6 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_take_t *)node)->operand, visit, user);
     case AST_TAKE_SLOT:
       return ast_walk_preorder(((ast_take_slot_t *)node)->operand, visit, user);
-    case AST_OWNED_TYPE:
-      return ast_walk_preorder(((ast_owned_type_t *)node)->base_type, visit,
-                               user);
     case AST_SLICE_TYPE:
       return ast_walk_preorder(((ast_slice_type_t *)node)->elem_type, visit,
                                user);

@@ -34,7 +34,6 @@
 #include "parser/ast_alignof.h"
 #include "parser/ast_typeof.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"

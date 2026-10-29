@@ -62,7 +62,6 @@
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"

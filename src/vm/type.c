@@ -137,10 +137,6 @@ const type_t *type_qualifier_sub(const type_t *t) {
         return ((const const_type_t *)t)->sub;
     if (t->kind == TYPE_KIND_VOLATILE)
         return ((const volatile_type_t *)t)->sub;
-    /* 所有权修饰（own/ref/fatal）也是限定，剥链统一处理 */
-    if (t->kind == TYPE_KIND_OWN || t->kind == TYPE_KIND_REF ||
-        t->kind == TYPE_KIND_FATAL)
-        return type_ownership_sub(t);
     return NULL;
 }
 
@@ -157,9 +153,8 @@ void type_sync_derived_layout(vm_t *vm, const type_t *sub) {
         for (size_t r = 0; r < nroots; r++) {
             const type_t *root = roots[r];
             /* const / volatile：布局 = sub 的布局 */
-            vec_t *pools[3] = {vm->const_types, vm->volatile_types,
-                               vm->ownership_types};
-            for (size_t p = 0; p < 3; p++) {
+            vec_t *pools[2] = {vm->const_types, vm->volatile_types};
+            for (size_t p = 0; p < 2; p++) {
                 vec_t *pool = pools[p];
                 if (!pool) continue;
                 size_t n = vec_len(pool);
@@ -214,13 +209,6 @@ void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub) {
         case TYPE_KIND_VOLATILE:
             ((volatile_type_t *)t)->sub = sub;
             break;
-        /* 所有权修饰（own/ref/fatal）：也是限定，SET_TYPE 设 sub；SEAL 时按
-           "运行期剥离"直接返回 sub（所有权零运行期行为）。 */
-        case TYPE_KIND_OWN:
-        case TYPE_KIND_REF:
-        case TYPE_KIND_FATAL:
-            ((ownership_type_t *)t)->sub = sub;
-            break;
         default:
             break; /* 非限定类型静默忽略 */
     }
@@ -252,84 +240,10 @@ char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
 /* ---- 递归指针/切片判定（见 type.h）---- */
 
 bool type_has_own_slots(const type_t *t) {
-    t = type_strip_ownership(t);
-    if (!t) return false;
-    switch (t->kind) {
-        case TYPE_KIND_STRUCT: {
-            const struct_type_t *st = (const struct_type_t *)t;
-            for (size_t i = 0; i < st->field_count; i++) {
-                /* 编译期：槽位类型携带所有权；运行期：类型已剥离，回退到
-                   hoist 写入的槽位字段。 */
-                if (type_ownership_of(st->fields[i].type) == OWN_OWN)
-                    return true;
-                if (type_has_own_slots(st->fields[i].type)) return true;
-            }
-            return false;
-        }
-        case TYPE_KIND_TUPLE: {
-            const tuple_type_t *tt = (const tuple_type_t *)t;
-            for (size_t i = 0; i < tt->elem_count; i++) {
-                if (type_ownership_of(tt->elems[i].type) == OWN_OWN)
-                    return true;
-                if (type_has_own_slots(tt->elems[i].type)) return true;
-            }
-            return false;
-        }
-        case TYPE_KIND_UNION: {
-            const union_type_t *ut = (const union_type_t *)t;
-            for (size_t i = 0; i < ut->member_count; i++) {
-                if (type_ownership_of(ut->members[i].payload_type) == OWN_OWN)
-                    return true;
-                if (type_has_own_slots(ut->members[i].payload_type)) return true;
-            }
-            return false;
-        }
-        case TYPE_KIND_CUNION:
-            /* **cunion 不参与所有权运算**（2026-10 定）：无 tag，运行期无法
-               判定哪个 member 活跃，销毁序列不为它生成 FREE。因此这里恒为
-               false——含 cunion 的聚合不会被判定为"含 own 槽位"，构造不产
-               FATAL、变量不必写 own；cunion 内部的指针成员生命周期由开发者
-               自负（与 C union 语义一致）。成员槽位所有权在 sema 侧恒记
-               OWN_NONE（见 comptime.c cunion 解析）。 */
-            return false;
-        case TYPE_KIND_OPTION: {
-            const option_type_t *ot = (const option_type_t *)t;
-            if (type_ownership_of(ot->inner) == OWN_OWN) return true;
-            return type_has_own_slots(ot->inner);
-        }
-        case TYPE_KIND_CONST:
-        case TYPE_KIND_VOLATILE:
-            return type_has_own_slots(type_qualifier_sub(t));
-        case TYPE_KIND_ARRAY: {
-            const array_type_t *at = (const array_type_t *)t;
-            if (type_ownership_of(at->elem_type) == OWN_OWN) return true;
-            return type_has_own_slots(at->elem_type);
-        }
-        case TYPE_KIND_FUNC: {
-            const func_type_t *ft = (const func_type_t *)t;
-            for (size_t i = 0; i < ft->capture_count; i++) {
-                const type_t *ct = ft->capture_types[i];
-                if (!ct) continue;
-                ownership_t oq = type_ownership_of(ct);
-                if (oq == OWN_OWN || oq == OWN_FATAL) return true;
-                if (type_has_own_slots(ct)) return true;
-            }
-            return false;
-        }
-        case TYPE_KIND_SLICE: {
-            const slice_type_t *st = (const slice_type_t *)t;
-            if (type_ownership_of(st->elem_type) == OWN_OWN) return true;
-            return type_has_own_slots(st->elem_type);
-        }
-        default:
-            /* ptr 是叶子：其 own 性由所在**槽位**的 ownership 记录 */
-            return false;
-    }
+    (void)t;
+    return false;
 }
 
-/* 聚合内部是否含**带捕获的闭包槽位**（值拷贝必须深拷贝这些槽位的 env）。
-   只看按值嵌套的槽位；指针/切片元素算（切片元素按值存储在缓冲区里）。
-   cunion 不参与（与 type_has_own_slots 同规则）。 */
 bool type_has_closure_slots(const type_t *t) {
     t = type_strip_ownership(t);
     if (!t) return false;

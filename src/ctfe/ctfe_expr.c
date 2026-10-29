@@ -32,7 +32,6 @@
 #include "parser/ast_int_lit.h"
 #include "parser/ast_new.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_string_lit.h"
@@ -806,14 +805,6 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return ctfe_err(ctx, "ctfe: array length too large");
         const type_t *at = type_array_intern(vm, elem, (size_t)raw);
         return type_as_value(vm, at);
-    }
-    case AST_OWNED_TYPE: {
-        ast_owned_type_t *ot = (ast_owned_type_t *)node;
-        value_t *bv = ctfe_eval(ctx, ot->base_type);
-        if (value_is_error(vm, bv)) return bv;
-        if (!value_is_type(bv, TYPE_KIND_TYPE))
-            return ctfe_err(ctx, "ctfe: owned type base must be a type");
-        return type_as_value(vm, value_as(bv, const type_t *));
     }
     case AST_PTR: {
         ast_ptr_t *n = (ast_ptr_t *)node;

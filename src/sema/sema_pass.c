@@ -30,7 +30,6 @@
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_type_def.h"

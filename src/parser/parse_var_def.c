@@ -3,7 +3,6 @@
 #include "parser/parse_utils.h"
 #include "parser/ast_error.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include <string.h>   /* memcmp */

@@ -93,9 +93,6 @@ const char *sema_reflect_kind_name(const type_t *T) {
   case TYPE_KIND_OPAQUE: return "opaque";
   case TYPE_KIND_MODULE: return "module";
   case TYPE_KIND_CFUNC: return "cfunc";
-  case TYPE_KIND_OWN: return "own";
-  case TYPE_KIND_REF: return "ref";
-  case TYPE_KIND_FATAL: return "fatal";
   default: return "unknown";
   }
 }
@@ -432,9 +429,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   if (lookup_common(T, key, out, err, ecap)) return true;
 
   /* const/volatile：`unqualified` 剥限定；其余 key **自动穿透**到被限定类型 */
-  if (type_kind_of(T) == TYPE_KIND_CONST || type_kind_of(T) == TYPE_KIND_VOLATILE ||
-      T->kind == TYPE_KIND_OWN || T->kind == TYPE_KIND_REF ||
-      T->kind == TYPE_KIND_FATAL) {
+  if (type_kind_of(T) == TYPE_KIND_CONST || type_kind_of(T) == TYPE_KIND_VOLATILE) {
     const type_t *sub = type_qualifier_sub(T);
     if (key_is(key, "unqualified")) {
       if (!sub) {

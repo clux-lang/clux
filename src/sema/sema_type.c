@@ -34,7 +34,6 @@
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_owned_type.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_scope_annot.h"
 #include "parser/ast_type_def.h"
@@ -196,10 +195,7 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
       break;
     }
     case TYPE_KIND_CONST:
-    case TYPE_KIND_VOLATILE:
-    case TYPE_KIND_OWN:
-    case TYPE_KIND_REF:
-    case TYPE_KIND_FATAL: {
+    case TYPE_KIND_VOLATILE: {
       const type_t *sub = type_qualifier_sub(t);
       if (sub) sema_type_register(sema, sub);
       break;
@@ -396,18 +392,6 @@ const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id) {
  * =========================================================================== */
 
 /* 所有权修饰 token → ownership_t（仅类型解析内部使用）。 */
-static ownership_t ownership_token_own(const token_t *tok) {
-  if (!tok) return OWN_NONE;
-  strslice_t own = token_strslice(tok);
-  if (own.len == 3 && own.ptr && memcmp(own.ptr, "own", 3) == 0)
-    return OWN_OWN;
-  if (own.len == 3 && own.ptr && memcmp(own.ptr, "ref", 3) == 0)
-    return OWN_REF;
-  if (own.len == 5 && own.ptr && memcmp(own.ptr, "fatal", 5) == 0)
-    return OWN_FATAL;
-  return OWN_NONE;
-}
-
 /* 纯求值（不登记、不替换槽位）：switch 分派类型表达式节点 → 类型单例。
  * 由 resolve_type_expr（登记）与递归 sub 解析共用。 */
 static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
@@ -651,8 +635,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
       return resolve_type_expr(sema, sa->sub);
     }
-    case AST_OWNED_TYPE:
-      return resolve_type_expr(sema, ((ast_owned_type_t *)type_expr)->base_type);
     case AST_PACK_TYPE: {
       ast_pack_type_t *pk = (ast_pack_type_t *)type_expr;
       diag_error(sema->diag, sema_loc(sema, type_expr),
