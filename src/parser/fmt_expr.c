@@ -598,12 +598,6 @@ void render_expr(fmt_t *f, ast_node_t *node) {
         }
         case AST_SLICE_TYPE: {
             ast_slice_type_t *st = (ast_slice_type_t *)node;
-            if (st->ownership) {
-                size_t olen = 0;
-                const char *ot = token_get_text(st->ownership, &olen);
-                sb_put(&f->sb, ot, olen);
-                sb_ch(&f->sb, ' ');
-            }
             sb_str(&f->sb, "[]");
             render_expr(f, st->elem_type);
             break;
@@ -636,12 +630,6 @@ void render_expr(fmt_t *f, ast_node_t *node) {
            会被整个吃掉）。 */
         case AST_PTR: {
             ast_ptr_t *pt = (ast_ptr_t *)node;
-            if (pt->ownership) {
-                size_t olen = 0;
-                const char *ot = token_get_text(pt->ownership, &olen);
-                sb_put(&f->sb, ot, olen);
-                sb_ch(&f->sb, ' ');
-            }
             sb_ch(&f->sb, '*');
             render_expr(f, pt->base_type);
             break;

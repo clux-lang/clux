@@ -356,7 +356,6 @@ ast_node_t *parse_scope_annotated_type(parser_t *p) {
         }
         ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
         if (!node) return NULL;
-        ((ast_ptr_t *)node)->ownership = NULL;
         ((ast_ptr_t *)node)->base_type = base;
         return node;
     }
@@ -377,7 +376,6 @@ ast_node_t *parse_scope_annotated_type(parser_t *p) {
             }
             ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
             if (!node) return NULL;
-            ((ast_slice_type_t *)node)->ownership = NULL;
             ((ast_slice_type_t *)node)->elem_type = elem;
             return node;
         }
@@ -462,7 +460,6 @@ ast_node_t *parse_raw_type_atom(parser_t *p) {
         }
         ast_node_t *node = ast_ptr_new(p->arena, tb, p->pos);
         if (!node) return NULL;
-        ((ast_ptr_t *)node)->ownership = NULL;
         ((ast_ptr_t *)node)->base_type = base;
         return node;
     }
@@ -482,7 +479,6 @@ ast_node_t *parse_raw_type_atom(parser_t *p) {
             }
             ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
             if (!node) return NULL;
-            ((ast_slice_type_t *)node)->ownership = NULL;
             ((ast_slice_type_t *)node)->elem_type = elem;
             return node;
         }

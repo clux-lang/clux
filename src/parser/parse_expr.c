@@ -364,7 +364,6 @@ ast_node_t *parse_primary(parser_t *p) {
                parse_unary 的 own/ref/fatal 分支会包装并设 ownership token。
                sema 层校验 ownership≠NULL（裸 []T 不合法）。 */
             ast_node_t *node = ast_slice_type_new(p->arena, tb, p->pos);
-            ((ast_slice_type_t *)node)->ownership = NULL;
             ((ast_slice_type_t *)node)->elem_type = elem_type;
             return node;
         }
@@ -1487,7 +1486,6 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
                 } else {
                     rhs = ast_ptr_new(p->arena, tb, p->pos);
                     if (rhs) {
-                        ((ast_ptr_t *)rhs)->ownership = NULL;
                         ((ast_ptr_t *)rhs)->base_type = base;
                     }
                 }
@@ -1504,7 +1502,6 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
                     } else {
                         rhs = ast_slice_type_new(p->arena, tb, p->pos);
                         if (rhs) {
-                            ((ast_slice_type_t *)rhs)->ownership = NULL;
                             ((ast_slice_type_t *)rhs)->elem_type = elem;
                         }
                     }

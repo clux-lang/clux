@@ -605,11 +605,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_PTR: {
       /* 裸 *T；所有权与内建 RC 修饰符都已移除。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      if (ptr->ownership) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "ownership/RC modifiers were removed; use '*T'");
-        return NULL;
-      }
       sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
       sema->opaque_base_ctx--;
@@ -619,11 +614,6 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_SLICE_TYPE: {
       /* 裸 []T。 */
       ast_slice_type_t *sl = (ast_slice_type_t *)type_expr;
-      if (sl->ownership) {
-        diag_error(sema->diag, sema_loc(sema, type_expr),
-                   "ownership modifiers were removed; use '[]T'");
-        return NULL;
-      }
       const type_t *elem = resolve_type_expr(sema, sl->elem_type);
       if (!elem) return NULL;
       return type_slice_intern(sema->vm, elem);
