@@ -626,10 +626,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
       return true;
     }
     if (key_is(key, "rc")) {
-      const char *rc = "plain";
-      if (type_is_share(T)) rc = "share";
-      else if (type_is_weak(T)) rc = "weak";
-      rv_str(out, strslice_from_bytes(rc, strlen(rc)));
+      rv_str(out, STRSLICE_LIT("plain"));
       return true;
     }
   }

@@ -460,7 +460,7 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
       /* 叶子：只有 own 槽位才释放。**必须递归进被指向值**（PTR/SLICE 分支会
          展开被指向聚合的 own 槽位 / 切片元素），否则 `struct Outer { b: own
          *Box }` 只 FREE 掉 Box 块，Box.p 泄漏（实测 leak）。 */
-      if (type_ownership_of(f->type) != OWN_OWN && !type_is_rc_ptr(ft)) continue;
+      if (type_ownership_of(f->type) != OWN_OWN) continue;
       ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
       if (!mem) return false;
       ((ast_member_t *)mem)->object = access;
@@ -541,9 +541,6 @@ bool gen_destroy_slot(sema_t *sema, const type_t *slot_type,
                              ast_node_t **head, ast_node_t **tail) {
   if (!slot_type || !access) return true;
   const type_t *s = type_strip_quals(slot_type);
-  /* **share/weak 槽位总是释放一次**（真实类型，不是所有权）：无论槽位标注
-     什么，它都持有一份 RC 引用；释放 = 递减计数。 */
-  if (s && type_is_rc_ptr(s)) return gen_destroy(sema, slot_type, access, head, tail);
   if (s && (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE)) {
     if (slot_own != OWN_OWN) return true;   /* ref/fatal 槽位不释放 */
   }
@@ -562,8 +559,7 @@ static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
   if (!elem_type) return true;
   const type_t *es = type_strip_quals(elem_type);
   bool leaf = es && (type_kind_of(es) == TYPE_KIND_PTR || type_kind_of(es) == TYPE_KIND_SLICE);
-  if (leaf && slot_own != OWN_OWN && !type_is_rc_ptr(es)) return true;
-  /* ^ share/weak 元素是真实类型：每个元素都持有一份 RC 引用，必须逐个递减 */
+  if (leaf && slot_own != OWN_OWN) return true;
 
   /* 元素访问：<access>[<var>] */
   ast_node_t *idx = ast_ident_new(sema->arena, 0, 0);
@@ -596,14 +592,6 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       destroy_append(head, tail, ast_free_new(sema->arena, access));
       return true;
     case TYPE_KIND_PTR: {
-      if (type_is_rc_ptr(t)) {
-        /* **share/weak 是真实类型**（不是所有权）：销毁 = 递减计数。
-           `FREE access` → VM 的 op_free 按类型分派到 RC 的 dispose（计数 -1），
-           计数归零才由 RC 块自己析构 payload。这里**不得**深入被指向值，
-           也不得直接释放堆块（否则 weak 观察者会悬空、计数失效）。 */
-        destroy_append(head, tail, ast_free_new(sema->arena, access));
-        return true;
-      }
       /* 被指向值的 own 槽位**先**释放（`v.f` 会自动解引用到堆块内容），
          再释放堆块自身。顺序不能反：先 FREE v 会让 `v.f` 无从访问。
          **必须显式解引用**：用户写的 `p.f` 由 sema_expr 就地改写成
@@ -727,7 +715,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       ownership_t inner_own = type_ownership_of(ot->inner);
       const type_t *is = type_strip_quals(inner);
       bool leaf = is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE);
-      if (leaf && inner_own != OWN_OWN && !type_is_rc_ptr(is)) return true;
+      if (leaf && inner_own != OWN_OWN) return true;
 
       ast_node_t *unwrap = ast_unwrap_new(sema->arena, 0, 0);
       if (!unwrap) return false;
@@ -803,24 +791,6 @@ ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     }
     if (sym->kind != SEMA_SYM_VAR) continue;
     if (!sym->type) continue;
-    /* **share/weak 变量总是要释放一次**（它们持有一次 RC 引用，且是
-       普通可拷贝值 → 符号层 ownership 为 NONE）。判据看**类型**。 */
-    if (type_is_rc_ptr(sym->type)) {
-      if (sym->moved || sym->is_comptime) continue;
-      size_t rl = strlen(name);
-      char *rb = (char *)arena_calloc(sema->arena, rl + 1, 1,
-                                      ALIGNOF(max_align_t));
-      if (!rb) continue;
-      memcpy(rb, name, rl);
-      ast_node_t *rid = ast_ident_new(sema->arena, 0, 0);
-      if (!rid) continue;
-      ((ast_ident_t *)rid)->name = strslice_from_bytes(rb, rl);
-      ast_node_t *rf = ast_free_new(sema->arena, rid);
-      if (!rf) continue;
-      if (!head) head = tail = rf;
-      else { tail->next = rf; tail = rf; }
-      continue;
-    }
     /* 仅 **own** 变量需要显式释放。判据用符号层的 `sema_sym_ownership(sym)`
        （所有权已从类型层迁移到值/符号层——类型不携带 ownership，
        所以**不能**用类型层的谓词判断）。
@@ -831,7 +801,7 @@ ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
        不能生成销毁（否则 PUSH 一个尚未 DEFINE 的名字 → undefined variable）。 */
     if (!sym->declared) continue;
     /* own 变量必销毁；**含 share/weak 槽位的普通变量**也要销毁（递减计数）。 */
-    if (sema_sym_ownership(sym) != OWN_OWN && !type_has_rc_slots(sym->type)) continue;
+    if (sema_sym_ownership(sym) != OWN_OWN) continue;
     /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
        目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
        将来复杂类型在此按类型展开（optional→判断 / 数组→循环 / tuple→

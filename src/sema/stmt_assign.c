@@ -560,11 +560,10 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
        move 过的变量（moved）已交出堆块，不再释放；未初始化（flow_init=false）
        也没有旧值。 */
     if (sym && sym->type && sym->flow_init && !sym->moved &&
-        (type_has_rc_slots(sym->type) || sema_sym_ownership(sym) == OWN_OWN) &&
+        sema_sym_ownership(sym) == OWN_OWN &&
         (type_kind_of(sym->type) == TYPE_KIND_PTR ||
          type_kind_of(sym->type) == TYPE_KIND_SLICE ||
-         type_kind_of(sym->type) == TYPE_KIND_FUNC ||
-         type_has_rc_slots(sym->type))) {
+         type_kind_of(sym->type) == TYPE_KIND_FUNC)) {
       /* FUNC：闭包 = 捕获聚合结构体。`func_assign` 只是 memcpy（不释放旧
          env）→ 旧闭包的 own 捕获必须在这里 `FREE f` 掉（VM 按 capture_type
          聚合释放）。own 闭包是 move-only，唯一持有者，安全。 */

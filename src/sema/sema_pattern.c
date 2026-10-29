@@ -57,26 +57,21 @@ static bool match_own(ast_pat_own_t own, const type_t *t, bool is_slice) {
         if (core_kind != TYPE_KIND_PTR) return false;
     }
     ownership_t o = type_ownership_of(t);
-    const type_t *core = type_strip_ownership(t);
-    uint8_t rc = (!is_slice && core && core->kind == TYPE_KIND_PTR)
-                     ? ((const ptr_type_t *)core)->rc
-                     : 0;
     switch (own) {
     case PAT_OWN_ANY:
         /* 任意非 RC 所有权指针：own / ref / fatal（§27 用户补充） */
-        return rc == 0 && (o == OWN_OWN || o == OWN_REF || o == OWN_FATAL);
+        return o == OWN_OWN || o == OWN_REF || o == OWN_FATAL;
     case PAT_OWN_NONE:
-        return rc == 0 && o == OWN_NONE;
+        return o == OWN_NONE;
     case PAT_OWN_OWN:
-        return rc == 0 && o == OWN_OWN;
+        return o == OWN_OWN;
     case PAT_OWN_REF:
-        return rc == 0 && o == OWN_REF;
+        return o == OWN_REF;
     case PAT_OWN_FATAL:
-        return rc == 0 && o == OWN_FATAL;
+        return o == OWN_FATAL;
     case PAT_OWN_SHARE:
-        return !is_slice && rc == 1;
     case PAT_OWN_WEAK:
-        return !is_slice && rc == 2;
+        return false;
     }
     return false;
 }

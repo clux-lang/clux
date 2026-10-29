@@ -218,32 +218,6 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, "clux_take_v.ok ? clux_take_v.value : "
                    "(clux_panic_none(), clux_take_v.value); })");
         break;
-    case CIR_EXPR_RC_MAKE: {
-        cw_put(sb, "({ __auto_type clux_rc_src = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "); (void *)clux_rc_new((void *)clux_rc_src, "
-                   "sizeof(*clux_rc_src), ");
-        if (e->text) {
-            cw_put(sb, "(clux_rc_destroy_fn)");
-            cw_put(sb, e->text);
-        } else
-            cw_put(sb, "NULL");
-        cw_put(sb, "); })");
-        break;
-    }
-    case CIR_EXPR_RC_WEAK_GET: {
-        const char *ot = e->type && e->type->c_name ? e->type->c_name : "int32_t";
-        const char *st = e->elem && e->elem->c_name ? e->elem->c_name
-                                                    : "void *";
-        cw_put(sb, "({ __auto_type clux_w = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "); void *clux_up = clux_rc_upgrade((void *)clux_w); (");
-        cw_put(sb, ot);
-        cw_put(sb, "){ .ok = clux_up != NULL, .value = (");
-        cw_put(sb, st);
-        cw_put(sb, ")clux_up }; })");
-        break;
-    }
     case CIR_EXPR_TRY:
         cw_put(sb, "({ ");
         if (e->setup_stmt) cw_write_stmt(sb, e->setup_stmt, 0);

@@ -492,9 +492,6 @@ void *value_own_copy_into(vm_t *vm, void *dst, const value_t *src,
     uint8_t *p = (uint8_t *)dst;
     if (!dst || !src || !ft || !value_data(src)) return p;
     memcpy(p, value_data(src), ft->size);
-    /* RC 系（share/weak）是**真实类型**：拷贝进新槽位 = 引用计数 +1。
-       （own 指针是转移语义，源会被清空，不在此列。） */
-    ptr_rc_inc_recursive(vm, ft, p);
     return p;
 }
 

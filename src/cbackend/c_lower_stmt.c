@@ -716,8 +716,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                         }
                     }
                 }
-                st->expr = lower_rc_copy(
-                    lc, t, lower_compat_value(lc, t, vd->init), vd->init);
+                st->expr = lower_compat_value(lc, t, vd->init);
                 if (patched_ctor) ((ast_construct_t *)vd->init)->type =
                     saved_ctor_type;
             }
@@ -946,8 +945,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 st->expr = lower_expr(lc, a->value);
             }
         } else {
-            st->expr = lower_rc_copy(
-                lc, tt, lower_compat_value(lc, tt, a->value), a->value);
+            st->expr = lower_compat_value(lc, tt, a->value);
         }
         /* 赋值点旧值销毁（sema 生成的 `a->destroy`）：compiler 在"右值求值
            之后、写入之前"逐条执行。C 里先把右值存进临时变量，再销毁旧值，
@@ -1459,34 +1457,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             if (!ex) {
                 *ok = false;
                 return head;
-            }
-            if (ot && type_is_share(type_strip_quals(ot))) {
-                cir_expr_t *call = cir_expr_call(lc->arena, "clux_rc_release",
-                                                 NULL);
-                if (!call) return head;
-                cir_expr_append_arg(call, ex);
-                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-                if (!st) return head;
-                st->expr = call;
-                lc->unit->uses_rc = true;
-                if (tail) tail->next = st;
-                else head = st;
-                tail = st;
-                continue;
-            }
-            if (ot && type_is_weak(type_strip_quals(ot))) {
-                cir_expr_t *call = cir_expr_call(
-                    lc->arena, "clux_rc_weak_release", NULL);
-                if (!call) return head;
-                cir_expr_append_arg(call, ex);
-                cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-                if (!st) return head;
-                st->expr = call;
-                lc->unit->uses_rc = true;
-                if (tail) tail->next = st;
-                else head = st;
-                tail = st;
-                continue;
             }
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE) {
                 ex = cir_expr_slice_data(lc->arena, ex);

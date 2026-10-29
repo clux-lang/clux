@@ -184,15 +184,6 @@ static const char *ffi_c_type_core(lower_ctx_t *lc, const type_t *t_raw,
     const type_t *t = type_strip_quals(t_raw); /* 剥 const/volatile/所有权 */
     vm_t *vm = lc->sema->vm;
     if (!t || t == vm->type_void) return "void";
-    /* share/weak 是 RC 块内的 payload 指针：C 没有 retain/release，不能跨 C
-       ABI（sema 已在声明处拒绝，这里是 lowering 侧的最后一道保险，覆盖
-       export cfunc / cfunc_ptr / cfunc(...) 签名等路径）。 */
-    if (type_is_rc_ptr(t)) {
-        lc->ffi_error = "share/weak pointer cannot cross the C ABI: C cannot "
-                        "retain or release the reference-counted block";
-        *ok = false;
-        return NULL;
-    }
     if (t == vm->type_i8) return "int8_t";
     if (t == vm->type_i16) return "int16_t";
     if (t == vm->type_i32) return "int32_t";

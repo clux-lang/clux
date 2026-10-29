@@ -115,10 +115,7 @@ void sema_generic_mangle_type(string_t *out, const type_t *t) {
         sema_generic_mangle_type(out, type_option_inner(t));
         return;
     case TYPE_KIND_PTR: {
-        const ptr_type_t *p = (const ptr_type_t *)t;
-        if (p->rc == 1) mangle_append_cstr(out, "share *");
-        else if (p->rc == 2) mangle_append_cstr(out, "weak *");
-        else mangle_append_cstr(out, "*");
+        mangle_append_cstr(out, "*");
         sema_generic_mangle_type(out, ptr_type_base(t));
         return;
     }
@@ -2567,18 +2564,9 @@ static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
     ast_node_t *base = NULL;
     if (pat->kind == AST_PTR) {
         ast_ptr_t *p = (ast_ptr_t *)pat;
-        pat_own = infer_token_ownership(p->ownership);
-        if (p->ownership && token_is(p->ownership, "share")) {
-            if (!type_is_share(actual)) return;
-        } else if (p->ownership && token_is(p->ownership, "weak")) {
-            if (!type_is_weak(actual)) return;
-        } else {
-            const type_t *core = type_strip_ownership(actual);
-            if (!core || core->kind != TYPE_KIND_PTR) return;
-            if (((const ptr_type_t *)core)->rc != 0) return; /* RC 必须显式 */
-            if (!infer_ownership_accepts(pat_own, type_ownership_of(actual)))
-                return;
-        }
+        if (p->ownership) return; /* 所有权模式已移除 */
+        const type_t *core = type_strip_ownership(actual);
+        if (!core || core->kind != TYPE_KIND_PTR) return;
         base = p->base_type;
         infer_pattern(sema, b, base, ptr_type_base(actual), site);
         return;

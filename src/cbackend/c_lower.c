@@ -175,8 +175,7 @@ static bool call_target_known(const cir_unit_t *u, const char *name) {
         /* 运行期 ABI（自带原型，见 writer 的 runtime prelude） */
         "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
         "strlen", "abort", "printf", "fflush", "strncmp", "clux_panic",
-        "_Exit", "clux_rc_new", "clux_rc_retain", "clux_rc_release",
-        "clux_rc_weak_retain", "clux_rc_weak_release", "clux_rc_upgrade", NULL};
+        "_Exit", NULL};
     if (!name) return true;
     for (size_t i = 0; helpers[i]; i++)
         if (strcmp(name, helpers[i]) == 0) return true;

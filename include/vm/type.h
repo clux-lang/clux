@@ -152,34 +152,14 @@ typedef struct enum_variant_t {
 } enum_variant_t;
 
 /**
- * ptr_type_t: 指针类型（type_t 的扩展，m3-design §3/§12）
+ * ptr_type_t: 指针类型（type_t 的扩展）
  *
  * 持 base_type 指针指向被指向类型 T。C 内存映射：指针值 = 裸指针
- * （size = sizeof(void*)，align = 指针宽）。单所有权系（own/ref/fatal）
- * 无 RC 控制块——运行期零成本，逃逸检查全编译期。RC 系（share/weak）
- * 的 ptr 指向 RC 控制块（内嵌 atomic 计数 + payload，§12）。
- *
- * 五种所有权修饰：own *T（独占，作用域退出自动销毁）、ref *T（借用，
- * 无所有权）、fatal *T（临时，表达式结束未被 own 接收 = 编译错误）、
- * share *T（RC 强引用，copy = 计数+1）、weak *T（RC 弱引用，从 share
- * 派生，经 upgrade 升级为 share）。所有权由 类型所有权修饰 字段编码
- * （ownership_t），同一 base_type 的五种指针是五个独立 intern 实例
- * （ownership 区分所有权）。
- *
- * 指针类型的 size/align 恒定（指针宽），密封不依赖 base_type 布局——
- * hoist 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 base，不递归），
- * 与 func 签名同族。
+ * （size = sizeof(void*)，align = 指针宽）。运行期无所有权/RC 标志。
  */
 typedef struct ptr_type_t {
     type_t       base;
     const type_t *base_type;  /* 被指向类型 T（引用，不拥有） */
-    /* 引用计数形态（m3-design §12 重新引入）：
-       0 = 普通指针（own/ref/fatal —— 所有权纯编译期，运行期裸指针）
-       1 = **share *T**（强引用计数，copy 即 +1，drop 即 -1）
-       2 = **weak *T**（弱引用计数，`.get()` 原子升级为 ?share *T）
-       RC 形态是**类型层属性**（vtable 分派随类型走），因此 struct 字段 /
-       数组元素 / 闭包捕获里的 share/weak 都自动获得计数语义。 */
-    uint8_t       rc;
 } ptr_type_t;
 
 /**
@@ -630,7 +610,6 @@ bool type_has_func_slots(const type_t *t);
  *  union 成员 / array 元素 / slice 元素 / option inner）。
  *  RC 指针是真实类型而不是所有权，所以"普通变量"也可能需要递减计数——
  *  销毁生成据此把它算作"需要销毁的值"。 */
-bool type_has_rc_slots(const type_t *t);
 
 /* 注：所有权现在**就是类型修饰**（docs/ownership-as-type.md）。判定入口：
  *   - 类型层：`type_ownership_of(t)`（穿透 const/volatile），

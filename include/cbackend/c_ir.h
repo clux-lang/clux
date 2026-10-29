@@ -90,8 +90,6 @@ typedef enum {
     CIR_EXPR_TAKE,      /* take_opt(x)：取 payload 并把 x 置 nil（仅左值） */
     CIR_EXPR_TAKE_SLOT, /* cunion 成员 move：取槽位值并清零槽位 */
     CIR_EXPR_TRY,       /* 表达式位置的 try：setup; if (!ok) tail; value */
-    CIR_EXPR_RC_MAKE,   /* __make_share(p)：建 RC 块并把 payload 搬进去 */
-    CIR_EXPR_RC_WEAK_GET, /* __weak_get(w)：weak -> ?share */
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
     CIR_EXPR_UNION_AT,   /* 带 tag 校验的 union 成员访问（左值） */
@@ -305,7 +303,6 @@ typedef struct cir_unit {
     bool             uses_slice_check;
     bool             uses_union_check;
     bool             uses_panic; /* panic(msg)：打印后 _Exit(1)（与 VM 一致） */
-    bool             uses_rc;    /* share/weak RC 运行时 */
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
@@ -365,10 +362,6 @@ cir_expr_t    *cir_expr_take_slot(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_try(arena_t *arena, cir_expr_t *ok,
                             cir_expr_t *value, struct cir_stmt *setup,
                             struct cir_stmt *tail);
-cir_expr_t    *cir_expr_rc_make(arena_t *arena, cir_type_t *payload,
-                                const char *destroy, cir_expr_t *src);
-cir_expr_t    *cir_expr_rc_weak_get(arena_t *arena, cir_type_t *option,
-                                    cir_type_t *share, cir_expr_t *weak);
 cir_expr_t    *cir_expr_union_construct(arena_t *arena, cir_type_t *type,
                                         size_t tag, const char *field,
                                         cir_expr_t *value);
