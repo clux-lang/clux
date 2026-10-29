@@ -22,7 +22,6 @@
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
-#include "parser/ast_move.h"
 #include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
@@ -371,14 +370,6 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       value_set_type_ownership(sema->vm, sv, sym ? sema_sym_ownership(sym) : OWN_NONE);
       return sv;
 }
-
-value_t *ex_move(sema_t *sema, ast_node_t **node,
-                              sema_scope_t *scope) {
-      /* move/clone 已移除；保留节点处理以防旧 AST（直接求值）。 */
-      ast_move_t *n = (ast_move_t *)*node;
-      return sema_expr(sema, &n->operand, scope);
-}
-
 
 /* AST_INT_LIT 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_int_lit(sema_t *sema, ast_node_t **node,

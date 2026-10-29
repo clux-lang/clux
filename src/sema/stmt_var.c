@@ -27,7 +27,6 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_for_index.h"
-#include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"
@@ -77,7 +76,6 @@
 #include "parser/ast_dowhile.h"
 #include "parser/ast_walk.h"
 #include "parser/lexer.h"
-#include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */
@@ -306,7 +304,6 @@ static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
    捕获槽的所有权由 resolve_func_captures 回写进 `ast_var_def_t::ownership`。 */
 static const ast_func_def_t *own_closure_of(ast_node_t *e) {
   if (!e) return NULL;
-  if (e->kind == AST_MOVE) return own_closure_of(((ast_move_t *)e)->operand);
   if (e->kind != AST_FUNC_DEF) return NULL;
   ast_func_def_t *fd = (ast_func_def_t *)e;
   for (ast_node_t *c = fd->captures; c; c = c->next)

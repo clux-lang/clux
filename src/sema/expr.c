@@ -22,7 +22,6 @@
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
-#include "parser/ast_move.h"
 #include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
@@ -292,8 +291,6 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return ex_deref(sema, node, scope);
     case AST_ADDR:
       return ex_addr(sema, node, scope);
-    case AST_MOVE:
-      return ex_move(sema, node, scope);
     case AST_CONSTRUCT:
       return ex_construct(sema, node, scope);
     case AST_FUNC_DEF:

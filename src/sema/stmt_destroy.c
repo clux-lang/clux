@@ -26,7 +26,6 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_opt_is_some.h"
 #include "parser/ast_for_index.h"
-#include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"
@@ -76,7 +75,6 @@
 #include "parser/ast_dowhile.h"
 #include "parser/ast_walk.h"
 #include "parser/lexer.h"
-#include "parser/ast_move.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */

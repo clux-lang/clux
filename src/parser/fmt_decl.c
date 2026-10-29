@@ -65,7 +65,6 @@
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_move.h"
 #include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"

@@ -37,7 +37,6 @@
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_move.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"

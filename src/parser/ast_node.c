@@ -85,7 +85,6 @@ static const char *g_kind_names[] = {
     [AST_NEW]        = "new",
     [AST_ADDR]       = "addr",
     [AST_DEREF]      = "deref",
-    [AST_MOVE]       = "move",
     [AST_SCOPE_ANNOT] = "scope_annot",
     [AST_SLICE_TYPE]  = "slice_type",
     [AST_SLICE]       = "slice",

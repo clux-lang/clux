@@ -15,7 +15,6 @@
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
 #include "parser/ast_make.h"
-#include "parser/ast_move.h"
 #include "parser/ast_new.h"
 #include "parser/ast_option.h"
 #include "parser/ast_is_tag.h"
@@ -158,8 +157,6 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_addr_t *)node)->operand, visit, user);
     case AST_DEREF:
       return ast_walk_preorder(((ast_deref_t *)node)->operand, visit, user);
-    case AST_MOVE:
-      return ast_walk_preorder(((ast_move_t *)node)->operand, visit, user);
     case AST_SCOPE_REF:
       return ast_walk_preorder(((ast_scope_ref_t *)node)->type_expr, visit,
                                user);

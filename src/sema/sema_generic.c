@@ -23,7 +23,6 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_string_lit.h"
-#include "parser/ast_move.h"
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_pack_type.h"

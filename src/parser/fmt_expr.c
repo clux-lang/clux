@@ -65,7 +65,6 @@
 #include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_move.h"
 #include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"
@@ -541,17 +540,6 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             ast_deref_t *dr = (ast_deref_t *)node;
             render_expr_paren(f, dr->operand, node, false, 26);
             sb_str(&f->sb, ".*");
-            break;
-        }
-        case AST_MOVE: {
-            /* move(x) / clone(x)：op token 决定是哪一个 */
-            ast_move_t *mv = (ast_move_t *)node;
-            size_t olen = 0;
-            const char *op = token_get_text(mv->op, &olen);
-            sb_put(&f->sb, op, olen);
-            sb_ch(&f->sb, '(');
-            render_expr(f, mv->operand);
-            sb_ch(&f->sb, ')');
             break;
         }
         case AST_CONSTRUCT: {

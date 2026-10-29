@@ -53,8 +53,6 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
            func_type_of_def 会得到普通签名类型，把闭包字面量赋给推断变量时
            两个 sig struct 不兼容。 */
         return closure_type_of_def(lc, (ast_func_def_t *)e);
-    case AST_MOVE:
-        return infer_expr_type(lc, ((ast_move_t *)e)->operand);
     case AST_TAKE:
         return infer_expr_type(lc, ((ast_take_t *)e)->operand);
     case AST_DEREF: {
