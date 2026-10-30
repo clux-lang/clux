@@ -23,10 +23,23 @@ std::string q(const std::string &s) { return "\"" + s + "\""; }
 std::string cli_abs() {
   namespace fs = std::filesystem;
 #ifdef _WIN32
-  return fs::absolute("build/clux.exe").string();
+  const char *name = "clux.exe";
 #else
-  return fs::absolute("build/clux").string();
+  const char *name = "clux";
 #endif
+  std::error_code ec;
+  const fs::path cwd = fs::current_path(ec);
+  /* 测试可从仓库根或 build/ 目录启动：按常见位置查找同一次构建的 CLI，
+     而不是写死 "build/<name>"（从 build/ 启动时会变成 build/build/...）。 */
+  const fs::path candidates[] = {
+      cwd / name,
+      cwd / "build" / name,
+      cwd.parent_path() / "build" / name,
+  };
+  for (const fs::path &p : candidates) {
+    if (!p.empty() && fs::exists(p, ec)) return fs::absolute(p, ec).string();
+  }
+  return fs::absolute(fs::path("build") / name, ec).string();
 }
 
 int run_cli(const std::string &cli, const std::vector<std::string> &args) {
