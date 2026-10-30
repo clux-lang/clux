@@ -781,8 +781,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_EXPR_STMT: {
         ast_expr_stmt_t *es = (ast_expr_stmt_t *)s;
-        if (es->expr && es->expr->kind == AST_FREE)
-            return lower_stmt(lc, es->expr, ok);
         if (es->expr && es->expr->kind == AST_CALL) {
             ast_call_t *call = (ast_call_t *)es->expr;
             strslice_t name = STRSLICE_EMPTY;
@@ -1093,47 +1091,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         blk->next = lc->cleanup;
         lc->cleanup = blk;
         return NULL; /* defer 不产生当前位置语句 */
-    }
-    case AST_FREE: {
-        ast_free_t *f = (ast_free_t *)s;
-        cir_stmt_t *head = NULL, *tail = NULL;
-        for (ast_node_t *op = f->operand; op; op = op->next) {
-            /* `FREE __defer_N`：defer 体已被内联，捕获结构体是栈上局部，
-               没有堆环境可释放。 */
-            if (op->kind == AST_IDENT &&
-                is_defer_name(((ast_ident_t *)op)->name)) {
-                continue;
-            }
-            /* 块内具名函数（含自捕获递归）：C 里是静态函数对象，没有堆
-               env；sema 按闭包类型生成的 FREE 不应释放静态对象。 */
-            if (op->kind == AST_IDENT) {
-                lower_local_fn_t *lf =
-                    find_local_fn(lc, ((ast_ident_t *)op)->name);
-                if (lf && !lf->var_name) continue;
-            }
-            const type_t *ot =
-                f->type ? f->type : infer_expr_type(lc, op);
-            cir_expr_t *ex = lower_expr(lc, op);
-            if (!ex) {
-                *ok = false;
-                return head;
-            }
-            if (ot && type_kind_of(ot) == TYPE_KIND_SLICE) {
-                ex = cir_expr_slice_data(lc->arena, ex);
-            } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC) {
-                /* 闭包值 env 内联（栈上结构体），普通函数值无 env：
-                   FREE 为 no-op。 */
-                continue;
-            }
-            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-            if (!st) return head;
-            lc->unit->uses_alloc = true;
-            st->expr = ex;
-            if (tail) tail->next = st;
-            else head = st;
-            tail = st;
-        }
-        return head;
     }
     case AST_EMPTY_STMT:
         return NULL;

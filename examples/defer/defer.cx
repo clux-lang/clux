@@ -94,14 +94,13 @@ func main(): i32 {
     }
     var loop: i32 = seq; // 10, 21, 32 → 102132
 
-    // ---- 5. defer 与显式 free 的顺序：LIFO → 读取先于释放 ----
+    // ---- 5. 多个 defer 的 LIFO 顺序与捕获 ----
      {
-        var p: *Box = new Box{ .v = 41, .w = 42 };
-        var buf: []i32 = make(i32, 3, 10, 20, 30);
+        var bv = .Box{ .v = 41, .w = 42 };
+        var p: *Box = bv.&;
+        var arr = .[3]i32{ 10, 20, 30 };
+        var buf: []i32 = make(arr[0].&, 3);
 
-        // 先登记 free，再登记读取；退出时后登记的读取先执行。
-        defer |(q: *Box = p)| { free(q); }
-        defer |(s: []i32 = buf)| { free(s); }
         defer |(q: *Box = p)| {
             own_field = q.w + 1;
         }
@@ -112,8 +111,8 @@ func main(): i32 {
         if (p.v != 41 || buf[0] != 10) {
             return 2;
         }
-    }
-    // 执行顺序：slice 读 → Box 读 → free slice → free Box
+     }
+    // 执行顺序：后登记的 slice 读 → 先登记的 Box 读
     if (own_field != 43) {
         return 3;
     }

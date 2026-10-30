@@ -184,8 +184,11 @@ TEST(CBackendDiff, OwnershipAndSlices) {
       "diff_own",
       "struct Box { p: *i32; }\n"
       "func main(): i32 {\n"
-      "  var b: *Box = new Box{ .p = new i32{7} };\n"
-      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  var v: i32 = 7;\n"
+      "  var bv: Box = .Box{ .p = v.& };\n"
+      "  var b: *Box = bv.&;\n"
+      "  var a: [3]i32 = .[3]i32{1, 2, 3};\n"
+      "  var s: []i32 = make(a[0].&, 3);\n"
       "  var t: []i32 = s[1:3];\n"
       "  return b.p.* + t[0] + t[1];\n"
       "}\n",

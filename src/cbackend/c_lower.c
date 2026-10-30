@@ -169,9 +169,10 @@ static bool unit_has_function(const cir_unit_t *u, const char *name) {
 
 static bool call_target_known(const cir_unit_t *u, const char *name) {
     static const char *const helpers[] = {
-        "clux_new",   "clux_make",       "clux_str_eq", "clux_bf_get",
-        "clux_bf_set", "clux_assert",    "clux_panic_none",
-        "clux_str_from_c", "clux_index_check", "clux_slice_check",
+        "clux_bf_get", "clux_bf_set", "clux_bf_load", "clux_bf_store",
+        "clux_bf_mask", "clux_assert", "clux_panic_none", "clux_str_eq",
+        "clux_str_from_c", "clux_slice_at", "clux_slice_range",
+        "clux_union_at", "clux_union_at_lvalue", "clux_index_check",
         /* 运行期 ABI（自带原型，见 writer 的 runtime prelude） */
         "malloc", "calloc", "realloc", "free", "memcpy", "memset", "memcmp",
         "strlen", "abort", "printf", "fflush", "strncmp", "clux_panic",

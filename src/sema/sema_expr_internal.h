@@ -24,7 +24,6 @@ value_t *ex_int_lit(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_make(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_member(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_move(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
-value_t *ex_new(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_scope_ref(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 value_t *ex_slice(sema_t *sema, ast_node_t **node, sema_scope_t *scope);

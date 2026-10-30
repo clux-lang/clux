@@ -119,19 +119,19 @@ typedef enum {
     AST_TYPEOF,          /* typeof(expr) → type value */
 
     /* --- M3 指针（m3-design §3/§8）---
-     * `*T` 裸指针、new 堆分配、后置取址 x.& / 解引用 r.*、作用域标注。 */
+     * `*T` 裸指针、后置取址 x.& / 解引用 r.*、作用域标注。
+     * 堆分配/释放不属于语言：调用 libc::malloc/free。 */
     AST_PTR,             /* *T 指针类型（类型即表达式） */
-    AST_NEW,             /* new T{...} 堆分配构造 → *T */
     AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
     AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */
     AST_SCOPE_ANNOT,     /* '<a,b,c> type 作用域标注（' 前导，位置信息非类型） */
 
     /* --- M4 切片（m4-design §1/§2/§4）---
-     * 切片类型 `[]T`（胖指针 {ptr,len}）、make 宏函数创建、
+     * 切片类型 `[]T`（胖指针 {ptr,len}）、make(pointer,len) 视图构造、
      * s[a:b] 切片表达式（产 []T）。 */
     AST_SLICE_TYPE,      /* []T 切片类型（类型即表达式） */
     AST_SLICE,           /* expr[low:high] 切片表达式 → []T */
-    AST_MAKE,            /* make(T, N, init...) 编译期宏函数 → []T */
+    AST_MAKE,            /* make(pointer, len) 切片视图 → []T（不分配） */
 
     /* --- M5 模块系统 --- */
     AST_IMPORT,          /* import <alias> from "<path>"; — 导入模块为命名空间 */
@@ -140,8 +140,6 @@ typedef enum {
     AST_EXPORT,          /* export <decl> — 标记全局定义进入模块导出表（前缀修饰） */
 
     /* --- sema 生成的内部节点（不出现在用户源码中）--- */
-    AST_FREE,            /* `FREE <expr>`：释放 expr 所指的堆块（显式 free /
-                            闭包 env 的作用域退出清理）。 */
     AST_TAKE,
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */

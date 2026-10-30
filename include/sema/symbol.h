@@ -60,7 +60,6 @@ typedef enum {
   SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v)：闭包 env 深拷贝 */
   SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
   SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T（移出 optional payload） */
-  SEMA_BUILTIN_FREE,       /* free(p)：释放指针/切片堆块 */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */

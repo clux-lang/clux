@@ -46,14 +46,15 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
   sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
-- **M3 — pointers**: raw `*T` (no ownership tracking), `new T{...}` heap allocation,
-  postfix `.&` / `.*`, `opaque` (≈ `void*`), closure capture rules. Compile-time
-  ownership (`own` / `ref` / `fatal`, `move` / `clone`) and the built-in RC family
-  (`share` / `weak`, `upgrade`) have been removed; the compiler only checks raw
-  pointers, and heap cleanup is explicit (`free` / `defer`). See
-  `docs/runtime-ownership.md`.
-- **M4 — slices and strings**: `[]T` fat pointers, `make(T, N, init...)`, `len`,
-  `s[a:b]` slicing, `str` slicing to `[] const u8`, bounds checks.
+- **M3 — pointers**: raw `*T` (C-like lifetime), postfix `.&` / `.*`, `opaque`
+  (≈ `void*`), closure capture rules. There is **no built-in allocation or
+  deallocation**: `new` / `free` were removed — call `libc::malloc` / `libc::free`
+  through FFI and initialize/free fields explicitly. Compile-time ownership
+  (`own` / `ref` / `fatal`, `move` / `clone`) and the RC family were also removed.
+  See `docs/runtime-ownership.md`.
+- **M4 — slices and strings**: `[]T` fat pointers, `make(pointer, len)` (a
+  non-allocating slice view), `len`, `s[a:b]` slicing, `str` slicing to
+  `[] const u8`, bounds checks.
 - **M5 — modules**: `export` on global declarations, `import alias from "./mod"` with
   `alias::member` access, **relative path resolution against the importing file's
   directory** (`./`, `../`, `\`→`/` normalization, `.`/`..` collapsing, implicit `.cx`),

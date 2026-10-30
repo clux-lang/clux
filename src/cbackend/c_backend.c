@@ -622,7 +622,6 @@ int cbackend_build_program(const char *src_path, const char *out_path,
     char *native_roots[128];
     size_t nnative_roots = 0;
     module_t *main_mod = NULL;
-    /* 两遍 lowering 的暂存（入口运行时的 any_alloc 需要先看所有模块）。 */
     cir_unit_t **units = NULL;
     module_t **mods = NULL;
     /* 测试用例合并表：必须在任何 `goto cleanup` 之前初始化（跨 goto 的
@@ -665,7 +664,6 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         fprintf(stderr, "build: out of memory\n");
         goto cleanup;
     }
-    bool any_alloc = false;
     for (size_t i = 0; i < nmods; i++) {
         module_t *mod = (module_t *)vec_get(vm->module_order, i);
         if (!mod || !mod->sema || !mod->src_ast) continue;
@@ -678,7 +676,6 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         }
         units[i] = u;
         mods[i] = mod;
-        if (u->uses_alloc) any_alloc = true;
     }
 
     /* 第二遍：路径 / 用例表 / 写文件 / 编译。 */
@@ -687,7 +684,6 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         cir_unit_t *u = units[i];
         if (!u || !mod) continue;
         bool is_main = (mod == main_mod);
-        u->owns_runtime = is_main && any_alloc;
         char *base = be_mirror_base(mod->canonical, build_dir);
         if (!base) {
             fprintf(stderr, "build: out of memory\n");
@@ -1141,7 +1137,6 @@ static int cbackend_run_impl(const char *src_path, const char *out_path,
                     bool allow_no_main = !compile || opts->object_only;
                     unit = cbackend_lower(arena, sema, (ast_program_t *)ast,
                                           src_path, opts->tests, allow_no_main);
-                    if (unit) unit->owns_runtime = unit->uses_alloc;
                 }
             }
         }

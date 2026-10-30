@@ -67,13 +67,9 @@ bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
 ast_node_t *sema_try_make_if(sema_t *sema, const sema_try_info_t *info,
                              ast_node_t *target, ast_node_t *operand,
                              uint32_t tb, uint32_t te);
-ast_node_t *collect_free_stmts(sema_t *sema, sema_scope_t *from_scope, const sema_scope_t *stop_scope);
-const sema_scope_t *find_func_stop_sema(sema_scope_t *scope);
-const sema_scope_t *find_loop_stop_sema(sema_scope_t *scope);
 flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope);
 void flow_release(flow_snap_t *snap);
 void flow_restore(const flow_snap_t *snap);
-ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope);
 void name_to_cstr(strslice_t s, char *buf, size_t cap);
 void shadow_assign(sema_t *sema, ast_assign_t *as, sema_scope_t *scope);
 void shadow_var_def(sema_t *sema, ast_var_def_t *vd, sema_scope_t *scope);

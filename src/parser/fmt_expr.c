@@ -62,7 +62,6 @@
 #include "parser/ast_slice.h"
 #include "parser/ast_make.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_scope_annot.h"
@@ -615,13 +614,9 @@ void render_expr(fmt_t *f, ast_node_t *node) {
         case AST_MAKE: {
             ast_make_t *m = (ast_make_t *)node;
             sb_str(&f->sb, "make(");
-            render_expr(f, m->elem_type);
+            render_expr(f, m->pointer);
             sb_str(&f->sb, ", ");
             render_expr(f, m->length);
-            for (ast_node_t *it = m->inits; it; it = it->next) {
-                sb_str(&f->sb, ", ");
-                render_expr(f, it);
-            }
             sb_ch(&f->sb, ')');
             break;
         }
@@ -632,20 +627,6 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             ast_ptr_t *pt = (ast_ptr_t *)node;
             sb_ch(&f->sb, '*');
             render_expr(f, pt->base_type);
-            break;
-        }
-        case AST_NEW: {
-            /* new T{...}：type 为 NULL 即匿名构造（new { .x = 1 }） */
-            ast_new_t *nw = (ast_new_t *)node;
-            sb_str(&f->sb, "new ");
-            if (nw->type) render_expr(f, nw->type);
-            uint32_t open_tok = find_punct_token(f, node->tok_begin,
-                                                 node->tok_end, "{");
-            uint32_t close_tok = find_punct_token(f, open_tok + 1,
-                                                  node->tok_end, "}");
-            sb_ch(&f->sb, '{');
-            render_construct_fields(f, nw->fields, open_tok, close_tok);
-            sb_ch(&f->sb, '}');
             break;
         }
         case AST_SCOPE_ANNOT: {

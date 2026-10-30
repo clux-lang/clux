@@ -11,9 +11,12 @@ func read_box(p: *Box): Box { return p.*; }
 func read_box_field(p: *Box): i32 { return p.*.v; }
 
 func main(): i32 {
-    var p1 = new i32{ 42 };
-    var b1 = new Box{ .v = 43 };
-    var b2 = new Box{ .v = 44 };
+    var x: i32 = 42;
+    var p1 = x.&;
+    var b1v = .Box{ .v = 43 };
+    var b1 = b1v.&;
+    var b2v = .Box{ .v = 44 };
+    var b2 = b2v.&;
 
     var rc: i32 = 0;
     if (read_i32(p1) != 42) { rc = 1; }
@@ -21,8 +24,5 @@ func main(): i32 {
     if (r.v != 43) { rc = 2; }
     if (read_box_field(b2) != 44) { rc = 3; }
 
-    free(p1);
-    free(b1);
-    free(b2);
     return rc;
 }

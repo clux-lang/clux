@@ -30,7 +30,6 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
-#include "parser/ast_new.h"
 #include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_slice_type.h"

@@ -335,44 +335,37 @@ TEST(Driver, RunFileFuncLiteralCaptureRejected) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueInNewAggregateField) {
-  /* 回归：`new T{ .cb = func… }` —— 函数值作为 **new 构造**的聚合字段。
-     此前编译器 fid 预扫描的表达式分支没有 AST_NEW（字段链从未被下钻）→
-     字面量没进 funcs_all → hoist 注册区不构造基底对象 → 定义点
-     `MAKE_FUNCTION <fid>` 查不到 → 运行期 `exec: unknown function id`。
-     值构造 `.T{ … }` 一直正常，所以缺陷只在 new 上暴露。 */
+TEST(Driver, RunFileFuncValueInAggregateField) {
+  /* 函数值作为**聚合值**字段：字面量 + 调用 */
   std::string path = write_temp_file(
       "struct Node { cell: i32; cb: func(i32)->i32; }\n"
       "func main():void {\n"
-      "  var a = new Node{ .cell = 5, .cb = func(x: i32): i32 { return x * 2; } };\n"
+      "  var a = .Node{ .cell = 5, .cb = func(x: i32): i32 { return x * 2; } };\n"
       "  _ = libc::printf(\"%d %d\\n\", a.cb(21), a.cell);\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueInNewAggregateFieldGlobalFn) {
-  /* 对照：`new` 字段里放**全局函数值**（不经字面量）同样要能调用 */
+TEST(Driver, RunFileFuncValueInAggregateFieldGlobalFn) {
   std::string path = write_temp_file(
       "struct Node { cb: func(i32)->i32; }\n"
       "func bump(x: i32): i32 { return x + 1; }\n"
       "func main():void {\n"
-      "  var a = new Node{ .cb = bump };\n"
+      "  var a = .Node{ .cb = bump };\n"
       "  _ = libc::printf(\"%d\\n\", a.cb(41));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueNestedNewInsideLiteralBody) {
-  /* 更深一层：字面量 body 里再 `new` 一个带函数值字段的聚合，并调用它。
-     两层嵌套都要求对应的 fid 被预扫描收集。 */
+TEST(Driver, RunFileFuncValueNestedInsideLiteralBody) {
   std::string path = write_temp_file(
       "struct Node { cell: i32; cb: func |depth: i32| (i32)->i32; }\n"
       "func main():void {\n"
       "  var depth = 4;\n"
-      "  var outer = new Node{ .cell = depth, .cb = func |depth| (x: i32): i32 {\n"
-      "    var inner = new Node{ .cell = 1, .cb = func |(k: i32 = 100)| (y: i32): i32 { return y + k; } };\n"
+      "  var outer = .Node{ .cell = depth, .cb = func |depth| (x: i32): i32 {\n"
+      "    var inner = .Node{ .cell = 1, .cb = func |(k: i32 = 100)| (y: i32): i32 { return y + k; } };\n"
       "    return inner.cb(x) + depth;\n"
       "  } };\n"
       "  _ = libc::printf(\"%d\\n\", outer.cb(1));\n"
@@ -381,29 +374,26 @@ TEST(Driver, RunFileFuncValueNestedNewInsideLiteralBody) {
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueInMakeInitializers) {
-  /* `make(T, N, init…)` 的初始化值里的函数字面量同样要被预扫描收集 */
+TEST(Driver, RunFileFuncValueInArraySlice) {
   std::string path = write_temp_file(
+      "type F = func(i32)->i32;\n"
       "func main():void {\n"
-      "  var fns: []func(i32)->i32 = make(func(i32)->i32, 2,\n"
-      "      func(x: i32): i32 { return x + 10; },\n"
-      "      func(x: i32): i32 { return x + 20; });\n"
+      "  var f0: F = func(x: i32): i32 { return x + 10; };\n"
+      "  var f1: F = func(x: i32): i32 { return x + 20; };\n"
+      "  var arr: [2]F = .[2]F{ f0, f1 };\n"
+      "  var fns: []F = make(arr[0].&, 2);\n"
       "  _ = libc::printf(\"%d %d\\n\", fns[0](1), fns[1](1));\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
 
-TEST(Driver, RunFileFuncValueInNewAggregateFieldWithForeach) {
-  /* 组合回归：函数值存在 `new` 构造的聚合字段里，闭包体内跑 **foreach**。
-     要求两件事同时正确：(a) fid 预扫描下钻 AST_NEW 字段链（否则
-     `exec: unknown function id`）；(b) 前脱糖在闭包体内把 foreach 展开成
-     索引 for（闭包体内的块变量还依赖 sema 的"自身子树"判定）。 */
+TEST(Driver, RunFileFuncValueInAggregateFieldWithForeach) {
   std::string path = write_temp_file(
       "struct Holder { cb: func |a: [3]i32| ()->i32; }\n"
       "func main():void {\n"
       "  var a = .[3]i32{ 3, 4, 5 };\n"
-      "  var h = new Holder{ .cb = func |a| (): i32 {\n"
+      "  var h = .Holder{ .cb = func |a| (): i32 {\n"
       "    var s = 0;\n"
       "    foreach (var e of a) {\n"
       "      s = s + e;\n"

@@ -34,7 +34,6 @@
 #include "parser/ast_alignof.h"
 #include "parser/ast_typeof.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_new.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_slice_type.h"
@@ -467,11 +466,7 @@ ast_node_t *parse_primary(parser_t *p) {
             (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
     }
 
-    /* make 编译期宏函数：make(T, N, init...)（m4-design §2）。
-     * T 是元素类型表达式，N 是长度表达式，init... 是初始值列表（可含
-     * <v,M> fill 值包）。返回 fatal []T。clux 无默认零值，init 必须覆盖
-     * 全部元素（sema 层校验）。make 是宏函数——类型不可运行期作为参数，
-     * sema 层编译期替换为堆分配 + 逐元素布值。 */
+    /* make 切片视图构造：make(pointer, len) → []T。不分配内存。 */
     if (check_keyword(p, "make")) {
         uint32_t mb = p->pos;
         advance(p);
@@ -481,67 +476,37 @@ ast_node_t *parse_primary(parser_t *p) {
                                  "expected '(' after 'make'");
         }
         skip_trivia(p);
-
-        /* 第一个参数：元素类型 T */
-        ast_node_t *elem_type = true
-                                    ? parse_raw_type_atom(p)
-                                    : parse_expr(p);
-        if (!elem_type || elem_type->kind == AST_ERROR) {
-            if (!elem_type) {
-                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                     "expected type expression after 'make('");
-            }
-            return elem_type;
+        ast_node_t *pointer = parse_expr(p);
+        if (!pointer || pointer->kind == AST_ERROR) {
+            if (!pointer)
+                return ast_error_new(p->diag, p->tokens, p->arena, mb,
+                                     p->pos,
+                                     "expected pointer expression in 'make'");
+            return pointer;
         }
         skip_trivia(p);
-
         if (!expect_symbol(p, ",")) {
             return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                 "expected ',' after element type in 'make'");
+                                 "expected ',' after pointer in 'make'");
         }
         skip_trivia(p);
-
-        /* 第二个参数：长度 N */
         ast_node_t *length = parse_expr(p);
         if (!length || length->kind == AST_ERROR) {
-            if (!length) {
-                return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
+            if (!length)
+                return ast_error_new(p->diag, p->tokens, p->arena, mb,
+                                     p->pos,
                                      "expected length expression in 'make'");
-            }
             return length;
         }
         skip_trivia(p);
-
-        /* 后续参数：初始值列表 init...（可空——sema 层校验是否覆盖全部元素）。
-           init 支持 <v,N> fill 值包语法（同数组构造），与普通表达式位置的
-           <...>（tuple）区分——make init 上下文遇 '<' 一律按 fill 解析。 */
-        ast_node_t *inits = NULL, *inits_last = NULL;
-        while (check_symbol(p, ",")) {
-            advance(p);
-            skip_trivia(p);
-            ast_node_t *init = parse_construct_field(p);
-            if (!init || init->kind == AST_ERROR) {
-                if (!init) {
-                    return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
-                                         "expected expression after ',' in 'make'");
-                }
-                return init;
-            }
-            ast_append(&inits, &inits_last, NULL, init);
-            skip_trivia(p);
-        }
-
         if (!expect_symbol(p, ")")) {
             return ast_error_new(p->diag, p->tokens, p->arena, mb, p->pos,
                                  "expected ')' after 'make' arguments");
         }
-
         ast_node_t *node = ast_make_new(p->arena, mb, p->pos);
         if (!node) return NULL;
-        ((ast_make_t *)node)->elem_type  = elem_type;
-        ((ast_make_t *)node)->length     = length;
-        ((ast_make_t *)node)->inits      = inits;
-        ((ast_make_t *)node)->inits_last = inits_last;
+        ((ast_make_t *)node)->pointer = pointer;
+        ((ast_make_t *)node)->length  = length;
         return node;
     }
 
@@ -771,75 +736,14 @@ ast_node_t *parse_unary(parser_t *p) {
         return node;
     }
 
-    /* new 表达式：new T{...}（m3-design §8.1）—— .T{...} 的堆分配形态，
-       返回 own *T。字段解析与 AST_CONSTRUCT 同构（含 <v,N> 值包）。 */
+    /* `new` 已移除：堆分配交给用户 FFI（libc::malloc 等）。 */
     if (check_keyword(p, "new")) {
-        uint32_t nb = tb;
+        uint32_t nb = p->pos;
         advance(p);
-        skip_trivia(p);
-
-        ast_node_t *type = NULL;
-        /* 匿名构造：'new' 后直接 '{' → type=NULL，目标类型由 sema 依上下文推断 */
-        if (!check_symbol(p, "{")) {
-            type = true
-                       ? parse_raw_type_atom(p)
-                       : parse_type_with_index(p);
-            if (!type || type->kind == AST_ERROR) {
-                if (!type) {
-                    return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                                         "expected type after 'new'");
-                }
-                return type;
-            }
-            skip_trivia(p);
-            if (!check_symbol(p, "{")) {
-                return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                                     "expected '{' after type in new expression");
-            }
-        }
-        advance(p);
-        skip_trivia(p);
-
-        ast_node_t *fields = NULL, *fields_last = NULL;
-        if (!check_symbol(p, "}")) {
-            ast_node_t *f = parse_construct_field(p);
-            if (!f || f->kind == AST_ERROR) {
-                if (!f) {
-                    return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                                         "expected expression in new construct");
-                }
-                return f;
-            }
-            ast_append(&fields, &fields_last, NULL, f);
-            skip_trivia(p);
-            while (check_symbol(p, ",")) {
-                advance(p);
-                skip_trivia(p);
-                /* 尾随逗号：',' 后直接 '}' → 允许结束 */
-                if (check_symbol(p, "}")) break;
-                f = parse_construct_field(p);
-                if (!f || f->kind == AST_ERROR) {
-                    if (!f) {
-                        return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                                             "expected expression after ',' in new construct");
-                    }
-                    return f;
-                }
-                ast_append(&fields, &fields_last, NULL, f);
-                skip_trivia(p);
-            }
-        }
-        if (!expect_symbol(p, "}")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                                 "expected '}' after new fields");
-        }
-
-        ast_node_t *node = ast_new_new(p->arena, nb, p->pos);
-        if (!node) return NULL;
-        ((ast_new_t *)node)->type        = type;
-        ((ast_new_t *)node)->fields      = fields;
-        ((ast_new_t *)node)->fields_last = fields_last;
-        return node;
+        return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
+                             "'new' was removed: clux has no built-in heap "
+                             "allocation; allocate via libc::malloc and "
+                             "initialize the fields explicitly");
     }
 
     if (!op_tok) return parse_primary(p);

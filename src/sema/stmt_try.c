@@ -117,8 +117,6 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
     if (!retn) return false;
     ((ast_return_t *)retn)->value = ocall;
     retn->is_generated = true;
-    /* 错误返回路径同样要释放当前作用域已拥有的局部资源。 */
-    retn->defers = collect_free_stmts(sema, scope, find_func_stop_sema(scope));
     out->tail_stmt = retn;
     return true;
 }

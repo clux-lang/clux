@@ -78,43 +78,22 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl) {
 }
 
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk) {
-    const type_t *et = sema_resolve_type_slot(lc->sema, &mk->elem_type);
-    if (!et) {
+    const type_t *pt = infer_expr_type(lc, mk->pointer);
+    pt = pt ? type_strip_quals(pt) : NULL;
+    if (!pt || type_kind_of(pt) != TYPE_KIND_PTR) {
         diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)mk),
-                   "c backend: cannot resolve make() element type");
+                   "c backend: make() requires a pointer first argument");
         lc->failed = true;
         return NULL;
     }
+    const type_t *et = ptr_type_base(pt);
     const type_t *st = type_slice_intern(lc->sema->vm, et);
     cir_type_t *sct = map_type(lc, st);
     cir_type_t *ect = map_type(lc, et);
+    cir_expr_t *ptr = lower_expr(lc, mk->pointer);
     cir_expr_t *len = lower_expr(lc, mk->length);
-    if (!sct || !ect || !len) return NULL;
-    lc->unit->uses_alloc = true;
-    cir_expr_t *out = cir_expr_make(lc->arena, sct, ect, len, NULL);
-    if (!out) return NULL;
-    for (ast_node_t *it = mk->inits; it; it = it->next) {
-        if (it->kind == AST_FILL) {
-            ast_fill_t *fill = (ast_fill_t *)it;
-            if (fill->count->kind != AST_INT_LIT) {
-                diag_error(lc->sema->diag, sema_loc(lc->sema, it),
-                           "c backend: make() fill count must be constant");
-                lc->failed = true;
-                return NULL;
-            }
-            uint64_t n = ((ast_int_lit_t *)fill->count)->value;
-            for (uint64_t i = 0; i < n; i++) {
-                cir_expr_t *v = lower_expr(lc, fill->value);
-                if (!v) return NULL;
-                cir_expr_add_init(out, cir_init_new(lc->arena, NULL, v));
-            }
-        } else {
-            cir_expr_t *v = lower_expr(lc, it);
-            if (!v) return NULL;
-            cir_expr_add_init(out, cir_init_new(lc->arena, NULL, v));
-        }
-    }
-    return out;
+    if (!sct || !ect || !ptr || !len) return NULL;
+    return cir_expr_make(lc->arena, sct, ect, ptr, len);
 }
 
 static const char *capture_or_var(lower_ctx_t *lc, strslice_t name) {

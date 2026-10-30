@@ -41,15 +41,15 @@ func main(): i32 {
     // ② 也能传给高阶函数
     _ = libc::printf("apply(cfunc_ptr(cmp)) = %d\n", apply(cfunc_ptr(cmp)));
 
-    // ③ 裸指针参数：直接传递
-    var b = new Box{ .v = 42 };
-    defer |b| { free(b); }
+    // ③ 裸指针参数：直接传递（栈上值 + 取址；生命周期由作用域决定）
+    var bv = .Box{ .v = 42 };
+    var b = bv.&;
     var g: func(*Box) -> i32 = cfunc_ptr(peek);
     _ = libc::printf("g(b) = %d\n", g(b));
 
-    // ④ 裸指针参数：传递后由调用方决定是否 free
-    var c = new Box{ .v = 43 };
-    defer |c| { free(c); }
+    // ④ 裸指针参数：C 侧只读，调用方无须释放
+    var cv = .Box{ .v = 43 };
+    var c = cv.&;
     var h: func(*Box) -> i32 = cfunc_ptr(take);
     _ = libc::printf("h(c) = %d\n", h(c));
 

@@ -186,15 +186,14 @@ TEST(SpreadConstruct, StructByName) {
 }
 
 /* new + 展开（堆分配路径走同一份展开） */
-TEST(SpreadConstruct, NewWithSpread) {
+TEST(SpreadConstruct, ValueWithSpread) {
   clux_expect_ok(ssrc("func main(): i32 {\n"
                       "  var p = .Point{ .x = 5, .y = 6 };\n"
-                      "  var r = new Point{ ...p };\n"
-                      "  defer |r| { free(r); }\n"
-                      "  if (r.*.x != 5 || r.*.y != 6) { return 1; }\n"
+                      "  var r = .Point{ ...p };\n"
+                      "  if (r.x != 5 || r.y != 6) { return 1; }\n"
                       "  return 0;\n"
                       "}\n"),
-                 "spread_c_new");
+                 "spread_c_value");
 }
 
 /* 异构 struct 按**字段名**展开（结构兼容即可，不要求同一类型） */
@@ -300,7 +299,6 @@ TEST(SpreadConstruct, FmtPreservesSpread) {
                      "func main(): i32 {\n"
                      "    var p = .Point{ .x = 1, .y = 2 };\n"
                      "    var q = .Point{ ...p };\n"
-                     "    var r = new Point{ ...p };\n"
                      "    return 0;\n"
                      "}\n";
   allocator_t *a = create_allocator(malloc, free);
@@ -310,5 +308,4 @@ TEST(SpreadConstruct, FmtPreservesSpread) {
   allocator_free(a, (void **)&out);
   delete_allocator(&a);
   EXPECT_NE(once.find(".Point{ ...p }"), std::string::npos) << once;
-  EXPECT_NE(once.find("new Point{ ...p }"), std::string::npos) << once;
 }

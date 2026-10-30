@@ -25,7 +25,6 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
@@ -73,9 +72,7 @@
 #include "parser/lexer.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -92,7 +89,6 @@
 #include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
 #include "core/ffi_abi.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
-#include "parser/ast_free.h"     /* AST_FREE：sema 生成的 own 变量释放语句 */
 #include <stdio.h>
 #include <string.h>
 
@@ -103,16 +99,6 @@
  * children：build 阶段子作用域按出现顺序 add_child，walk 必须逐层
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
-
-/* ---- Step B 所有权检查辅助（m3-design §3/§7） ---- */
-
-/* R1/R2 判定：赋值 rhs 是否是 own 指针的合法初始化源。
-   own *T 变量只允许两种初始化来源：
-   - new 表达式（AST_NEW）：新堆块直接产 own *T（§8.1）
-   - fatal 接管源（move/clone 产物或 fatal 参数，§3.3）
-   ref 派生（own → ref 隐式转换）是借用（ref 总借用），不能赋回 own。
-   own → own 直接赋值 = copy → 编译错误。
-   非 static：AST_NEW/AST_CONSTRUCT 字段校验（sema/expr.c）共用。 */
 
 #include "sema_stmt_internal.h"
 
@@ -207,22 +193,8 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       r = walk_return(sema, (ast_return_t *)stmt, scope);
       break;
     case AST_BREAK:
-    case AST_CONTINUE: {
-      /* 为 break/continue 路径沿 scope 链收集 own 变量的 FREE 语句，
-         追加到 defers 链末尾（与 return 同机制）。 */
-      const sema_scope_t *stop = find_loop_stop_sema(scope);
-      ast_node_t *free_stmts = collect_free_stmts(sema, scope, stop);
-      if (free_stmts) {
-        if (stmt->defers) {
-          ast_node_t *tail = stmt->defers;
-          while (tail->next) tail = tail->next;
-          tail->next = free_stmts;
-        } else {
-          stmt->defers = free_stmts;
-        }
-      }
+    case AST_CONTINUE:
       break;
-    }
     case AST_FUNC_DEF:
       /* 局部函数定义：入口提升已处理签名，主循环（walk_block）已跳过并
          消费 fscope 子作用域。防御分支（非块上下文直接调用时零操作）。
@@ -230,39 +202,8 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       break;
     /* AST_DEFER 已在 Pass 3a desugar_defers 中改写为 AST_FUNC_DEF +
        退出点 call（AST_EXPR_STMT），到达此处时已不存在 AST_DEFER。 */
-    case AST_FREE:
-      /* sema 生成的 own 变量释放语句：纯运行期指令，sema 无需类型检查。 */
-      break;
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
-      /* raw-pointer 迁移期：free(p); 直接生成 AST_FREE（指针/切片释放）。 */
-      if (es->expr && es->expr->kind == AST_CALL) {
-        ast_call_t *cl = (ast_call_t *)es->expr;
-        if (cl->callee && cl->callee->kind == AST_IDENT) {
-          strslice_t fn = ((ast_ident_t *)cl->callee)->name;
-          sema_symbol_t *fs = sema_lookup(scope, fn);
-          if (fs && fs->builtin_op == SEMA_BUILTIN_FREE) {
-            if (!cl->args || cl->args->next) {
-              diag_error(sema->diag, sema_loc(sema, es->expr),
-                         "free: expects exactly 1 pointer or slice argument");
-              break;
-            }
-            ast_node_t *arg = cl->args;
-            value_t *av = sema_expr(sema, &arg, scope);
-            const type_t *at = av ? value_type(av) : NULL;
-            if (!at || (type_kind_of(at) != TYPE_KIND_PTR &&
-                        type_kind_of(at) != TYPE_KIND_SLICE)) {
-              diag_error(sema->diag, sema_loc(sema, arg),
-                         "free: argument must be a pointer or slice");
-              break;
-            }
-            arg->next = NULL;
-            es->expr = ast_free_new(sema->arena, arg);
-            if (es->expr) ((ast_free_t *)es->expr)->type = at;
-            break;
-          }
-        }
-      }
       bool noreturn = false;
       if (es->expr && es->expr->kind == AST_CALL) {
         ast_call_t *cl = (ast_call_t *)es->expr;
@@ -576,25 +517,6 @@ block_result_t walk_block(sema_t *sema, ast_node_t *block,
     }
     prev = &s->next;
     s = s->next;
-  }
-  /* 为本 scope 的 own 变量生成 FREE <name> 语句，追加到块尾语句链末尾。
-     仅在块正常退出（非 definitely_returns）时追加——return/break/continue
-     路径的 FREE 由 walk_return/walk_break/walk_continue 沿 scope 链收集
-     并挂载到退出点节点的 defers 字段。 */
-  if (!r.definitely_returns) {
-    ast_node_t *free_stmts = make_free_stmts(sema, scope);
-    if (free_stmts) {
-      if (!b->stmts) {
-        b->stmts = free_stmts;
-      } else {
-        ast_node_t *tail = b->stmts;
-        while (tail->next) tail = tail->next;
-        tail->next = free_stmts;
-      }
-      /* walk 生成的 FREE 语句（类型检查：AST_FREE 在 walk_stmt 中无操作） */
-      for (ast_node_t *f = free_stmts; f; f = f->next)
-        walk_stmt(sema, f, scope, idx);
-    }
   }
   /* 3a/3b 对位自检（见 check_scope_consumed 说明）。不可达尾部不校验：
      3a 按结构建树，3b 已提前 break——属预期差异。 */

@@ -21,7 +21,6 @@
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
-#include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_slice_type.h"
@@ -238,8 +237,6 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       return ex_type_ref(sema, node, scope);
     case AST_SCOPE_REF:
       return ex_scope_ref(sema, node, scope);
-    case AST_NEW:
-      return ex_new(sema, node, scope);
     case AST_MAKE:
       return ex_make(sema, node, scope);
     case AST_DEREF:

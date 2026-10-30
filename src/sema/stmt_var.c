@@ -26,7 +26,6 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
@@ -74,9 +73,7 @@
 #include "parser/lexer.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -93,7 +90,6 @@
 #include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
 #include "core/ffi_abi.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
-#include "parser/ast_free.h"     /* AST_FREE：sema 生成的 own 变量释放语句 */
 #include <stdio.h>
 #include <string.h>
 
@@ -481,7 +477,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     if (!init_bad && vd->init && vd->init->kind != AST_FUNC_DEF &&
         vd->init->kind != AST_TAKE) {
       bool already_dc = false;
-      /* 只有**左值拷贝**才需要深拷贝；调用/构造/new/make 产物是新实例。 */
+      /* 只有**左值拷贝**才需要深拷贝；调用/构造产物是新实例。 */
       bool from_lvalue =
           vd->init->kind == AST_IDENT || vd->init->kind == AST_MEMBER ||
           vd->init->kind == AST_INDEX || vd->init->kind == AST_DEREF ||

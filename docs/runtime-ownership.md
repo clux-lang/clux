@@ -1,5 +1,7 @@
 # 运行时所有权（runtime ownership）
 
+> **状态（2026-10）**：§1–§13 记录所有权系统的演进过程（其中的 `new`/`free`/旧 `make(T,N,...)` 属于当时状态）；内建分配/销毁与旧 `make` 已在 **§14** 移除。
+
 > 状态：**当前只保留 C 裸指针**。编译期所有权语法 `own/ref/fatal` 和
 > `move/clone` 已移除并直接报错；编译器内部残留的所有权机制（ownership_t、
 > 符号/槽位所有权、fatal 变体、销毁函数生成、C 后端 own 释放分支）也已在
@@ -284,5 +286,26 @@ Phase 2 开始实现 `__init__` / `__assign__` / `__dispose__`。
 CTFE 执行、C 后端 lowering、fmt 与 VM 的 defer 注册/异常展开调用全部保留，
 defer 相关用例（含 `Foreach`/`Desugar`/`Fmt`）保持通过。
 
-回归：全量测试 **1631** 个用例（2 个 `Install.*` 环境相关失败为既有问题，
-与所有权无关），行为与阶段 1 一致。
+回归（阶段 3b 当时）：全量 1631 个用例，2 个 `Install.*` 环境相关失败为既有问题。
+
+## 14. 阶段 4：移除内建分配/销毁（2026-10）
+
+指针生命周期完全照搬 C，语言不再提供任何分配/释放原语：
+
+- **删除 `new T{...}`**：`AST_NEW`、parser 分支、sema `ex_new`、C 后端/CIR 的
+  `CIR_EXPR_NEW` 全部移除；源码里写 `new` 会得到明确的“已移除”诊断。
+  堆分配改用 FFI：`extern lib libc from "*"; extern cfunc libc::malloc(size: usize): opaque;`
+  然后 `libc::malloc(n) as *T`，字段逐个初始化。
+- **删除 `free(p)` 内建**：`AST_FREE`、`SEMA_BUILTIN_FREE`、C 后端 `CIR_STMT_FREE`
+  与 `clux_free` 一并移除；释放改用 `libc::free(p as opaque)`，切片先
+  `data(s)` 取出指针再 `libc::free(...)`（不再支持 `free(slice)`）。
+- **删除泄漏检测分配器**：`clux_rt_*` / `clux_new` / `clux_make` /
+  `uses_alloc` / `owns_runtime` 全部移除，生成代码不再包含任何隐式分配。
+- **`make` 改为非分配视图**：`make(pointer: *T, len: usize): []T`，只把已有
+  指针 + 长度包成切片胖指针；`make(T, N, init...)`、fill 展开与自动释放不再存在。
+- **闭包 env** 仍是内联值（无独立堆块），因此无需隐式释放；捕获的裸指针按
+  “借用/所有权转移”约定由用户负责（借用由来源释放，转移由接收方释放）。
+
+回归：删除 new/free/make 相关用例后全量为 **1620** 个用例，**1618 通过**；
+仅两个 `Install.*` 环境相关失败为既有问题。`defer` 语义未受影响，示例与测试
+改用 `libc::malloc/free` + 数组/切片视图。

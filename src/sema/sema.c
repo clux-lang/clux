@@ -315,20 +315,6 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     }
   }
 
-  /* free(p) 释放指针/切片。 */
-  {
-    const type_t *fsig = type_func_sig(sema->vm, NULL, 0,
-                                       sema->vm->type_void,
-                                       /*is_variadic=*/true);
-    if (fsig) {
-      sema_symbol_t finit = {.kind = SEMA_SYM_FUNC, .type = fsig,
-                             .is_active = true, .fid = 0,
-                             .builtin_op = SEMA_BUILTIN_FREE};
-      sema_scope_define(sema->global_scope, STRSLICE_LIT("free"), &finit);
-    }
-  }
-
-
   /* 预注册 __deep_clone 内置函数（运行期对象图深拷贝）：静态类型表达不了
      克隆语义的形态（闭包值 / cunion 被指向值 / 无 prelude 的切片）在 sema
      里改写为对它的调用，因此 CLONE 指令可以彻底移除。变参签名，调用点按实参

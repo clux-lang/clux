@@ -6,18 +6,15 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* make 编译期宏函数（m4-design §2）：make(T, N, init...) → []T。
- * T 是元素类型表达式（编译期替换，不作为运行期参数），N 是长度表达式
- * （可运行期值），init... 是初始值列表（支持 <v,M> fill 值包，同数组
- * 构造语法）。clux 无默认零值，必须给出所有元素的初始值。
+/* make 切片视图构造：make(pointer, len) → []T。
  *
- * sema 层将 make 替换为：分配 len*elem_size 堆块 + 逐元素布值 → []T。 */
+ * pointer 是 *T 表达式（通常来自 libc::malloc 或数组元素取址），len 是
+ * usize 长度。**不分配任何内存**——只是把已有的指针 + 长度包成切片胖指针；
+ * 缓冲区的生命周期完全由调用方负责（与 C 一致）。 */
 typedef struct {
     ast_node_t  base;
-    ast_node_t *elem_type;  /* 元素类型表达式 T */
-    ast_node_t *length;     /* 长度表达式 N */
-    ast_node_t *inits;      /* 初始值兄弟链（init...，可含 AST_FILL） */
-    ast_node_t *inits_last;
+    ast_node_t *pointer;    /* *T 指针表达式 */
+    ast_node_t *length;     /* 长度表达式 */
 } ast_make_t;
 
 static inline ast_node_t *ast_make_new(arena_t *arena,

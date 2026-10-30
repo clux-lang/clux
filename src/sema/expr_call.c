@@ -23,7 +23,6 @@
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
-#include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_slice_type.h"
@@ -1521,12 +1520,6 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
          名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
          "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
 
-      /* free(p) 只允许作为语句；表达式位置没有可用值。 */
-      if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_FREE) {
-        diag_error(sema->diag, sema_loc(sema, &call->base),
-                   "free() must be used as a statement");
-        return val_void(sema);
-      }
       /* take(x)：运行时移出 optional payload 并置 nil，结果类型 T。 */
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_TAKE) {
         if (argc != 1 || !arg_shadows[0]) {

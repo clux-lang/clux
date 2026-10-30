@@ -26,7 +26,6 @@
 #include "parser/ast_unwrap.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_index.h"
@@ -74,9 +73,7 @@
 #include "parser/lexer.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_move_t（借源收集剥 move/clone） */
 #include "parser/ast_addr.h"
-#include "parser/ast_new.h"   /* ast_addr_t（x.& 的借源是取址目标） */
 #include "parser/ast_walk.h"
 #include "sema/sema_generic.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
@@ -93,7 +90,6 @@
 #include "parser/ast_scope_ref.h" /* M6 FFI：extern var 赋值目标的 AST 标志 */
 #include "parser/ast_walk.h"
 #include "core/ffi_abi.h"          /* M6 FFI：ffi_data_kind_of（数据符号类型码） */
-#include "parser/ast_free.h"     /* AST_FREE：sema 生成的 own 变量释放语句 */
 #include <stdio.h>
 #include <string.h>
 
@@ -104,16 +100,6 @@
  * children：build 阶段子作用域按出现顺序 add_child，walk 必须逐层
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
-
-/* ---- Step B 所有权检查辅助（m3-design §3/§7） ---- */
-
-/* R1/R2 判定：赋值 rhs 是否是 own 指针的合法初始化源。
-   own *T 变量只允许两种初始化来源：
-   - new 表达式（AST_NEW）：新堆块直接产 own *T（§8.1）
-   - fatal 接管源（move/clone 产物或 fatal 参数，§3.3）
-   ref 派生（own → ref 隐式转换）是借用（ref 总借用），不能赋回 own。
-   own → own 直接赋值 = copy → 编译错误。
-   非 static：AST_NEW/AST_CONSTRUCT 字段校验（sema/expr.c）共用。 */
 
 #include "sema_stmt_internal.h"
 

@@ -58,17 +58,16 @@ func main(): i32 {
     _ = libc::printf("3) odd = %d\n", odd);
 
     // ---- 4. 显式类型 / 裸指针元素 ----
-    var ptrs: []*i32 = make(*i32, 3, new i32{ 1 }, new i32{ 2 },
-                                     new i32{ 3 });
+    var v1 = 1;
+    var v2 = 2;
+    var v3 = 3;
+    var parr = .[3]*i32{ v1.&, v2.&, v3.& };
+    var ptrs: []*i32 = make(parr[0].&, 3);
     var deref = 0;
     foreach (var p: *i32 of ptrs) {
         deref = deref + p.*;
     }
     _ = libc::printf("4) deref = %d, len = %d\n", deref, len(ptrs));
-    foreach (var p of ptrs) {
-        free(p);
-    }
-    free(ptrs);
 
     // ---- 5. 非标识符迭代器：先求值到临时变量（只调用一次）----
     var once = 0;
@@ -78,9 +77,9 @@ func main(): i32 {
     _ = libc::printf("5) once = %d, calls = %d\n", once, CALLS);
 
     // ---- 6. 裸切片（裸标识符迭代器 → 不复制，循环后仍可用）----
-    var s: []i32 = make(i32, 3, 7, 8, 9);
+    var sarr = .[3]i32{ 7, 8, 9 };
+    var s: []i32 = make(sarr[0].&, 3);
     _ = libc::printf("6) sum_slice = %d\n", sum_slice(s));
-    free(s);
 
     // ---- 7. 切片表达式 + 嵌套 foreach ----
     var m = .[2][2]i32{ .[2]i32{ 1, 2 }, .[2]i32{ 3, 4 } };

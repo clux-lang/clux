@@ -1,5 +1,7 @@
 # C 后端路线
 
+> **状态（2026-10）**：路线图条目保留作历史记录；`new`/`free` 与内建分配运行时（`clux_new`/`clux_make`/`clux_free`）已删除，`make` 改为 `make(pointer, len)` 视图。
+
 > 本页是工程路线，不是语言规范。语言语义以 `docs/whitepaper/` 为准。
 
 ## 目标

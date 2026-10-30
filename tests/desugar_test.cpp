@@ -505,26 +505,26 @@ TEST_F(DesugarTest, ForeachInsideClosureBodyExpands) {  ast_node_t *prog = analy
   expect_elem_binding(inner, "e", true, "v", "__idx_0");
 }
 
-/* 闭包藏在 `new T{ … }` / `make(T, N, …)` 的字段/实参里：
+/* 闭包藏在聚合构造 / 数组字面量的字段里：
    ast_walk 必须下钻 AST_NEW / AST_MAKE / AST_SLICE 的子表达式，否则函数字面量
    里的 foreach 漏展开（这两类节点一度漏在 ast_visit_children 之外）。 */
-TEST_F(DesugarTest, ForeachInClosureInsideNewAndMakeExpands) {
+TEST_F(DesugarTest, ForeachInClosureInsideAggregateAndArrayExpands) {
   ast_node_t *prog = analyze(
       "struct Box { maker: func()->i32; }\n"
       "func main(): void {\n"
       "  var v = .[2]i32{ 1, 2 };\n"
-      "  var b = new Box{ .maker = func |v| (): i32 {\n"
+      "  var b = .Box{ .maker = func |v| (): i32 {\n"
       "    foreach (var e of v) { }\n"
       "    return 0;\n"
       "  } };\n"
-      "  var s: []func()->i32 = make(func()->i32, 1, func |v| (): i32 {\n"
+      "  var arr: [1]func()->i32 = .[1]func()->i32{ func |v| (): i32 {\n"
       "    foreach (var e of v) { }\n"
       "    return 0;\n"
-      "  });\n"
+      "  } };\n"
       "}\n");
   ASSERT_NE(prog, nullptr);
   EXPECT_FALSE(scan_has_foreach(prog))
-      << "new / make 内的函数字面量没有被下钻（walker 覆盖面缺口）";
+      << "聚合构造 / 数组里的函数字面量没有被下钻（walker 覆盖面缺口）";
 }
 
 /* defer 闭包体里的 foreach：同样要展开（defer 的闭包是 AST_FUNC_DEF）。 */

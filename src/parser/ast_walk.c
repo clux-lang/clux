@@ -15,7 +15,6 @@
 #include "parser/ast_index.h"
 #include "parser/ast_member.h"
 #include "parser/ast_make.h"
-#include "parser/ast_new.h"
 #include "parser/ast_option.h"
 #include "parser/ast_take.h"
 #include "parser/ast_ptr.h"
@@ -121,16 +120,10 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
        `a[lo:hi]` 里的函数字面量因此遍历不到（前脱糖漏下钻 → 闭包里的 foreach
        不展开）。type_rhs_uses_var / probe_type_slot 的谓词只关心类型表达式，
        补全不影响它们；补全是纯增量。 */
-    case AST_NEW: { /* new T{ fields }（type 可 NULL = 匿名构造） */
-      ast_new_t *n = (ast_new_t *)node;
-      return ast_walk_preorder(n->type, visit, user) &&
-             visit_chain(n->fields, visit, user);
-    }
-    case AST_MAKE: { /* make(T, N, inits...) */
+    case AST_MAKE: { /* make(pointer, len) */
       ast_make_t *n = (ast_make_t *)node;
-      return ast_walk_preorder(n->elem_type, visit, user) &&
-             ast_walk_preorder(n->length, visit, user) &&
-             visit_chain(n->inits, visit, user);
+      return ast_walk_preorder(n->pointer, visit, user) &&
+             ast_walk_preorder(n->length, visit, user);
     }
     case AST_SLICE: { /* expr[low:high]（low/high 可 NULL） */
       ast_slice_t *n = (ast_slice_t *)node;

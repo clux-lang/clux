@@ -23,7 +23,6 @@
 #include "parser/ast_int_lit.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_member.h"
-#include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_slice_type.h"
@@ -372,7 +371,6 @@ static value_t *construct_result(sema_t *sema, const type_t *t) {
  *
  *   .Point{ ...s }        ⇒ .Point{ .x = s.x, .y = s.y, … }   （struct：字段 kv）
  *   .[3]i32{ ...arr }     ⇒ .[3]i32{ arr[0], arr[1], arr[2] }（array/tuple：位置）
- *   new Point{ ...s }     ⇒ 同上（AST_NEW 内部的构造同样走这里）
  *
  * 目标类型决定形态：struct 目标 ⇒ 操作数必须是 struct（按操作数字段表展开）；
  * array/tuple 目标 ⇒ 操作数必须是同长度的数组/元组（按操作数元素个数展开，

@@ -775,7 +775,7 @@ TEST(FmtRegression, IdempotentAcrossDeclKinds) {
  * M3 语法渲染（此前**静默丢弃**：这些 AST kind 在 render_expr 里没有
  * case，落到 `default: break` → `clux format` 直接把表达式/类型吃掉，
  * 属数据损坏）。覆盖：后缀取址 `.&`、后缀解引用 `.*`、所有权指针类型
- * `own|ref|*T`、`new T{...}`、`move/(...)`、作用域标注 `'<a,b> T`。
+ * `*T`、`make(p, n)`、作用域标注 `'<a,b> T`。
  * 关键点：后缀操作数里优先级更低者必须保住括号——`(a as *i32).*`
  * 若渲染成 `a as *i32.*` 会被重解析成 `a as *(i32.*)`。
  * ================================================================ */
@@ -795,34 +795,32 @@ TEST(FmtRegression, PostfixAddrAndDerefAreRendered) {
               "}\n");
 }
 
-TEST(FmtRegression, PtrTypeNewMoveAndScopeAnnotAreRendered) {
+TEST(FmtRegression, PtrTypeMakeAndScopeAnnotAreRendered) {
     std::string out = fmt(
         "func main():void{\n"
-        "var p:*i32=new i32{7};\n"
-        "var q:Cell=new Cell{.v=1};\n"
-        "var m:i32=p.*;\n"
+        "var x:i32=1;\n"
+        "var p:*i32=x.&;\n"
         "var t:'<a,b> i32=1;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
-              "    var p: *i32 = new i32{ 7 };\n"
-              "    var q: Cell = new Cell{ .v = 1 };\n"
-              "    var m: i32 = p.*;\n"
+              "    var x: i32 = 1;\n"
+              "    var p: *i32 = x.&;\n"
               "    var t: '<a,b> i32 = 1;\n"
               "}\n");
 }
 
-/* 幂等 + 不丢代码：同一段 M3 语法三遍格式化必须一致，且关键片段仍在。 */
-TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
+/* 幂等 + 不丢代码：同一段语法三遍格式化必须一致，且关键片段仍在。 */
+TEST(FmtRegression, MakeAndPtrSyntaxIsIdempotentAndNotDropped) {
     const char *src =
         "struct Cell { v: i32; }\n"
         "func main(): i32 {\n"
-        "    var p: *i32 = new i32{7};\n"
-        "    var r: *i32 = p.&;\n"
-        "    var x: i32 = (r as *i32).*;\n"
+        "    var x: i32 = 7;\n"
+        "    var p: *i32 = x.&;\n"
+        "    var s: []i32 = make(p, 2);\n"
         "    var c: Cell = .{ .v = p.* };\n"
         "    var g: '<*> i32 = 1;\n"
-        "    return c.v + x + g;\n"
+        "    return c.v + s[0] + g;\n"
         "}\n";
     std::string once = fmt(src);
     std::string twice = fmt(once.c_str());
@@ -830,8 +828,8 @@ TEST(FmtRegression, M3SyntaxIsIdempotentAndNotDropped) {
     EXPECT_EQ(once, twice);
     EXPECT_EQ(twice, thrice);
     EXPECT_NE(once.find("*i32"), std::string::npos);
-    EXPECT_NE(once.find("new i32{ 7 }"), std::string::npos);
-    EXPECT_NE(once.find("p.&"), std::string::npos);
+    EXPECT_NE(once.find("make(p, 2)"), std::string::npos);
+    EXPECT_NE(once.find("x.&"), std::string::npos);
     EXPECT_NE(once.find(".*"), std::string::npos);
     EXPECT_NE(once.find("'<*> i32"), std::string::npos);
 }

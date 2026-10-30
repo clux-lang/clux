@@ -23,7 +23,8 @@ TEST(DriverM4, MakeAndIndexSlice) {
   /* make 构造 []T + 下标读（m4-design §2） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 10, 20, 30);\n"
+      "  var a: [3]i32 = .[3]i32{10, 20, 30};\n"
+      "  var s: []i32 = make(a[0].&, 3);\n"
       "  if (s[0] != 10) { return 1; }\n"
       "  if (s[1] != 20) { return 2; }\n"
       "  if (s[2] != 30) { return 3; }\n"
@@ -37,7 +38,8 @@ TEST(DriverM4, MakeAndIndexWriteSlice) {
   /* 下标写：s[i] = v 经 INDEX_SET 写回切片元素 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  var a: [3]i32 = .[3]i32{1, 2, 3};\n"
+      "  var s: []i32 = make(a[0].&, 3);\n"
       "  s[0] = 100;\n"
       "  s[1] = 200;\n"
       "  s[2] = 300;\n"
@@ -54,7 +56,8 @@ TEST(DriverM4, LenSlice) {
   /* len(s) 返回切片元素个数（u64） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 5, 1, 2, 3, 4, 5);\n"
+      "  var a: [5]i32 = .[5]i32{1, 2, 3, 4, 5};\n"
+      "  var s: []i32 = make(a[0].&, 5);\n"
       "  var n: u64 = len(s);\n"
       "  if (n != 5u64) { return 1; }\n"
       "  return 0;\n"
@@ -168,37 +171,6 @@ TEST(DriverM4, SliceViewModifiesOriginal) {
   std::remove(path.c_str());
 }
 
-TEST(DriverM4, MakeWithFillInit) {
-  /* make + <v,N> fill 展开：make(i32, 4, <7, 4>) → [7,7,7,7] */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 4, <7, 4>);\n"
-      "  if (s[0] != 7) { return 1; }\n"
-      "  if (s[1] != 7) { return 2; }\n"
-      "  if (s[2] != 7) { return 3; }\n"
-      "  if (s[3] != 7) { return 4; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(DriverM4, MakeMixedFillAndSingle) {
-  /* make 混合 fill + 单值：make(i32, 5, <1, 2>, 3, <4, 2>) → [1,1,3,4,4] */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 5, <1, 2>, 3, <4, 2>);\n"
-      "  if (s[0] != 1) { return 1; }\n"
-      "  if (s[1] != 1) { return 2; }\n"
-      "  if (s[2] != 3) { return 3; }\n"
-      "  if (s[3] != 4) { return 4; }\n"
-      "  if (s[4] != 4) { return 5; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 TEST(DriverM4, SliceAsFunctionParam) {
   /* 切片作函数参数（[]T 借用传递） */
   std::string path = write_temp_file(
@@ -226,7 +198,8 @@ TEST(DriverM4, MakeSliceSumLoop) {
   /* make 构造 + while 遍历求和（端到端） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 5, 1, 2, 3, 4, 5);\n"
+      "  var a: [5]i32 = .[5]i32{1, 2, 3, 4, 5};\n"
+      "  var s: []i32 = make(a[0].&, 5);\n"
       "  var total: i32 = 0;\n"
       "  var i: u64 = 0u64;\n"
       "  while (i < len(s)) {\n"
@@ -241,10 +214,11 @@ TEST(DriverM4, MakeSliceSumLoop) {
 }
 
 TEST(DriverM4, SliceZeroLength) {
-  /* 空切片 make(i32, 0) → len=0，不下标访问 */
+  /* 空切片 make(p, 0) → len=0，不下标访问 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 0);\n"
+      "  var a: [1]i32 = .[1]i32{1};\n"
+      "  var s: []i32 = make(a[0].&, 0);\n"
       "  if (len(s) != 0u64) { return 1; }\n"
       "  return 0;\n"
       "}\n");
@@ -404,7 +378,8 @@ TEST(DriverM4, OwnSliceAsFunctionParam) {
       "  return s[0];\n"
       "}\n"
       "func main(): i32 {\n"
-      "  var r: i32 = first(make(i32, 3, 42, 99, 7));\n"
+      "  var a: [3]i32 = .[3]i32{42, 99, 7};\n"
+      "  var r: i32 = first(a[:]);\n"
       "  if (r != 42) { return 1; }\n"
       "  return 0;\n"
       "}\n");
@@ -414,42 +389,12 @@ TEST(DriverM4, OwnSliceAsFunctionParam) {
 
 /* ---- §3.4 所有权流转：move / clone ---- */
 
-TEST(DriverM4, MoveSlice) {
-  /* §3.4 ([]T) → []T：转移所有权，源置空 */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 10, 20, 30);\n"
-      "  var m: []i32 = (s);\n"
-      "  if (m[0] != 10) { return 1; }\n"
-      "  if (m[2] != 30) { return 2; }\n"
-      "  if (len(m) != 3u64) { return 3; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
-TEST(DriverM4, CloneSlice) {
-  /* §3.4 ([]T) → []T：深拷贝，各独立堆块互不影响 */
-  std::string path = write_temp_file(
-      "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
-      "  var c: []i32 = (s);\n"
-      "  c[0] = 99;\n"
-      "  if (s[0] != 1) { return 1; }   /* 原切片不受影响 */\n"
-      "  if (c[0] != 99) { return 2; }  /* 克隆独立修改 */\n"
-      "  if (len(c) != 3u64) { return 3; }\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_EQ(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 TEST(DriverM4, ImplicitBorrowOwnToRef) {
   /* §3.4 隐式借用 []T → []T：赋值不转移所有权 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 5, 10, 15);\n"
+      "  var a: [3]i32 = .[3]i32{5, 10, 15};\n"
+      "  var s: []i32 = make(a[0].&, 3);\n"
       "  var r: []i32 = s;  /* 隐式借用 */\n"
       "  if (r[0] != 5) { return 1; }\n"
       "  if (len(r) != 3u64) { return 2; }\n"
@@ -530,17 +475,6 @@ TEST(DriverM4, ClosureCaptureRefSlice) {
 
 /* ---- §9.4 禁止全局 []T ---- */
 
-TEST(DriverM4, GlobalOwnSliceRejected) {
-  /* §9.4 禁止全局 []T → 编译错误 */
-  std::string path = write_temp_file(
-      "var g: []i32 = make(i32, 2, 1, 2);\n"
-      "func main(): i32 {\n"
-      "  return 0;\n"
-      "}\n");
-  EXPECT_NE(driver_run_file(path.c_str()), 0);
-  std::remove(path.c_str());
-}
-
 /* ---- §10.3 const 修饰 ---- */
 
 TEST(DriverM4, ConstSliceElementReadOnly) {
@@ -562,7 +496,8 @@ TEST(DriverM4, LenFatalSlice) {
   /* §11.2 len 对 []T 也可用（make 产 直接传 len） */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
-      "  var n: u64 = len(make(i32, 4, 1, 2, 3, 4));\n"
+      "  var a: [4]i32 = .[4]i32{1, 2, 3, 4};\n"
+      "  var n: u64 = len(make(a[0].&, 4));\n"
       "  if (n != 4u64) { return 1; }\n"
       "  return 0;\n"
       "}\n");
@@ -578,7 +513,8 @@ TEST(DriverM4, MakeElementsFoldComptimeVar) {
   std::string path = write_temp_file(
       "comptime var N = 5;\n"
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 2, N, N + 1);\n"
+      "  var a: [2]i32 = .[2]i32{ N, N + 1 };\n"
+      "  var s: []i32 = make(a[0].&, 2);\n"
       "  if (s[0] != 5) { return 1; }\n"
       "  if (s[1] != 6) { return 2; }\n"
       "  return 0;\n"

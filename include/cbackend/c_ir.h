@@ -75,7 +75,6 @@ typedef enum {
     CIR_EXPR_MEMBER,
     CIR_EXPR_INDEX,
     CIR_EXPR_CONSTRUCT,
-    CIR_EXPR_NEW,
     CIR_EXPR_SLICE,
     CIR_EXPR_LEN,
     CIR_EXPR_MAKE,
@@ -160,7 +159,6 @@ typedef enum {
     CIR_STMT_BLOCK,
     CIR_STMT_BREAK,
     CIR_STMT_CONTINUE,
-    CIR_STMT_FREE,
 } cir_stmt_kind_t;
 
 typedef struct cir_stmt {
@@ -258,9 +256,6 @@ typedef struct cir_unit {
        会复用，会拿到别的模块的 env 类型）。 */
     cir_type_t      *empty_env;
     cir_raw_t       *raw_helpers;
-    /* 本单元是否是入口单元（main/测试 runner 所在）：泄漏检测运行时
-       （clux_rt_state）由入口单元**定义**，其余模块只 extern 引用。 */
-    bool             owns_runtime;
     /* extern cfunc：C 函数指针 typedef（先）与 extern 原型（后），保持添加顺序。 */
     cir_raw_t       *extern_typedefs;
     cir_raw_t       *extern_typedefs_last;
@@ -275,7 +270,6 @@ typedef struct cir_unit {
     /* extern cfunc 的 C 符号名（自检：这些调用由外部库定义，不在本单元）。 */
     const char     **extern_symbols;
     size_t           extern_symbol_count;
-    bool             uses_alloc;
     bool             uses_str_cmp;
     bool             uses_opt_unwrap;
     bool             uses_bitfield;
@@ -333,16 +327,14 @@ cir_expr_t    *cir_expr_index(arena_t *arena, cir_expr_t *object,
                               cir_expr_t *index, bool array_data);
 cir_expr_t    *cir_expr_construct(arena_t *arena, cir_type_t *type,
                                   cir_init_t *inits);
-cir_expr_t    *cir_expr_new(arena_t *arena, cir_type_t *type,
-                            cir_init_t *inits);
 cir_expr_t    *cir_expr_slice(arena_t *arena, cir_type_t *type,
                               cir_expr_t *object, cir_expr_t *low,
                               cir_expr_t *high);
 cir_expr_t    *cir_expr_len(arena_t *arena, cir_expr_t *object,
                             cir_type_t *object_type);
 cir_expr_t    *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
-                             cir_type_t *elem_type, cir_expr_t *length,
-                             cir_init_t *inits);
+                             cir_type_t *elem_type, cir_expr_t *pointer,
+                             cir_expr_t *length);
 cir_expr_t    *cir_expr_slice_data(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_string(arena_t *arena, const char *data, size_t len);
 cir_expr_t    *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,

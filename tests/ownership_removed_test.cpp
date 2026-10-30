@@ -10,7 +10,8 @@
 TEST(OwnershipRemoved, ModifiersRejected) {
   clux_expect_reject(
       "func main(): i32 {\n"
-      "  var p: own *i32 = new i32{ 7 };\n"
+      "  var x: i32 = 7;\n"
+      "  var p: own *i32 = x.&;\n"
       "  return p.*;\n"
       "}\n",
       "was removed", "own_modifier_removed");
@@ -19,7 +20,8 @@ TEST(OwnershipRemoved, ModifiersRejected) {
 TEST(OwnershipRemoved, MoveCloneRejected) {
   clux_expect_reject(
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{ 7 };\n"
+      "  var x: i32 = 7;\n"
+      "  var p: *i32 = x.&;\n"
       "  var q: *i32 = move(p);\n"
       "  return q.*;\n"
       "}\n",

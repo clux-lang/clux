@@ -140,8 +140,10 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         return NULL;    }
     case AST_MAKE: {
         ast_make_t *m = (ast_make_t *)e;
-        const type_t *et = sema_resolve_type_slot(lc->sema, &m->elem_type);
-        return et ? type_slice_intern(vm, et) : NULL;
+        const type_t *pt = infer_expr_type(lc, m->pointer);
+        pt = pt ? type_strip_quals(pt) : NULL;
+        if (!pt || type_kind_of(pt) != TYPE_KIND_PTR) return NULL;
+        return type_slice_intern(vm, ptr_type_base(pt));
     }
     case AST_CONSTRUCT: {
         ast_construct_t *c = (ast_construct_t *)e;

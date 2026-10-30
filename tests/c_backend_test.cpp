@@ -319,7 +319,7 @@ TEST(CBackend, ArrayDoesNotDecay) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
-TEST(CBackend, BuildDeferAndOwn) {
+TEST(CBackend, BuildDeferAndPointerField) {
   const std::string src = write_temp_file(
       "struct Point { x: i32; y: i32; }\n"
       "var g: i32 = 0;\n"
@@ -331,7 +331,8 @@ TEST(CBackend, BuildDeferAndOwn) {
       "func main(): i32 {\n"
       "  if (f() != 0) { return 1; }\n"
       "  if (g != 21) { return 2; }\n"
-      "  var p: *Point = new Point{ .x = 4, .y = 5 };\n"
+      "  var pt: Point = .Point{ .x = 4, .y = 5 };\n"
+      "  var p: *Point = pt.&;\n"
       "  if (p.x != 4) { return 3; }\n"
       "  return p.y;\n"
       "}\n",
@@ -346,13 +347,17 @@ TEST(CBackend, BuildDeferAndOwn) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
-TEST(CBackend, BuildOwnCompositeAndArray) {
+TEST(CBackend, BuildPointerCompositeAndArray) {
   const std::string src = write_temp_file(
       "struct Box { p: *i32; }\n"
       "func main(): i32 {\n"
-      "  var b: *Box = new Box{ .p = new i32{7} };\n"
+      "  var v7: i32 = 7;\n"
+      "  var bv: Box = .Box{ .p = v7.& };\n"
+      "  var b: *Box = bv.&;\n"
       "  if (b.p.* != 7) { return 1; }\n"
-      "  var a: [2]*i32 = .[2]*i32{ new i32{1}, new i32{2} };\n"
+      "  var x1: i32 = 1;\n"
+      "  var x2: i32 = 2;\n"
+      "  var a: [2]*i32 = .[2]*i32{ x1.&, x2.& };\n"
       "  if (a[0].* != 1) { return 2; }\n"
       "  if (a[1].* != 2) { return 3; }\n"
       "  return 0;\n"
@@ -371,7 +376,8 @@ TEST(CBackend, BuildOwnCompositeAndArray) {
 TEST(CBackend, BuildSliceMakeAndSlice) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []i32 = make(i32, 3, 1, 2, 3);\n"
+      "  var a: [3]i32 = .[3]i32{1, 2, 3};\n"
+      "  var s: []i32 = make(a[0].&, 3);\n"
       "  if (len(s) != 3usize) { return 1; }\n"
       "  if (s[1] != 2) { return 2; }\n"
       "  var t: []i32 = s[1:3];\n"
@@ -388,10 +394,13 @@ TEST(CBackend, BuildSliceMakeAndSlice) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
-TEST(CBackend, BuildOwnSlice) {
+TEST(CBackend, BuildPointerSlice) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var s: []*i32 = make(*i32, 2, new i32{5}, new i32{6});\n"
+      "  var v5: i32 = 5;\n"
+      "  var v6: i32 = 6;\n"
+      "  var a: [2]*i32 = .[2]*i32{ v5.&, v6.& };\n"
+      "  var s: []*i32 = make(a[0].&, 2);\n"
       "  if (len(s) != 2usize) { return 1; }\n"
       "  return s[0].* + s[1].*;\n"
       "}\n",
@@ -471,7 +480,8 @@ TEST(CBackend, BuildUnionOwnAndOptionalField) {
       "  if (r.v.! != 7) { return 2; }\n"
       "  r.v = nil;\n"
       "  if (r.v != nil) { return 3; }\n"
-      "  var u = .U{ .p = new i32{5} };\n"
+      "  var v5: i32 = 5;\n"
+      "  var u = .U{ .p = v5.& };\n"
       "  if (u is p != true) { return 4; }\n"
       "  if (u.p.* != 5) { return 5; }\n"
       "  return 0;\n"
@@ -581,10 +591,11 @@ TEST(CBackend, BuildStaticMethod) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
-TEST(CBackend, BuildOwnCaptureClosure) {
+TEST(CBackend, BuildPointerCaptureClosure) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{5};\n"
+      "  var x: i32 = 5;\n"
+      "  var p: *i32 = x.&;\n"
       "  var f: func |p: *i32| (i32) -> i32 =\n"
       "      (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
       "  return f(1);\n"
@@ -600,10 +611,11 @@ TEST(CBackend, BuildOwnCaptureClosure) {
   std::filesystem::remove(exe.string() + ".clux.c");
 }
 
-TEST(CBackend, BuildCloneCaptureClosure) {
+TEST(CBackend, BuildCaptureClosureCopy) {
   const std::string src = write_temp_file(
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{5};\n"
+      "  var x: i32 = 5;\n"
+      "  var p: *i32 = x.&;\n"
       "  var f: func |p: *i32| (i32) -> i32 =\n"
       "      (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
       "  var g: func |p: *i32| (i32) -> i32 = (f);\n"
@@ -2371,11 +2383,12 @@ TEST(CBackend, RejectsClosureErasureToPlainFunc) {
 }
 
 /* 闭包 env 内联 + 捕获：值里没有 env 堆块，FREE 按字段释放。 */
-TEST(CBackend, BuildClosureOwnCaptureInlineEnv) {
+TEST(CBackend, BuildClosureCaptureInlineEnv) {
   const std::string src = write_temp_file(
       "type F = func |p: *i32| (i32) -> i32;\n"
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{ 5 };\n"
+      "  var v: i32 = 5;\n"
+      "  var p: *i32 = v.&;\n"
       "  var g: F = (func |(p = (p))| (x: i32): i32 { return p.* + x; });\n"
       "  if (g(4) != 9) { return 1; }\n"
       "  return 0;\n"
@@ -2398,7 +2411,8 @@ TEST(CBackend, BuildNestedClosureCaptureClone) {
       "type Inner = func |p: *i32| () -> i32;\n"
       "type Outer = func |f: Inner| () -> i32;\n"
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{ 7 };\n"
+      "  var v: i32 = 7;\n"
+      "  var p: *i32 = v.&;\n"
       "  var inner: Inner = (func |(p = (p))| (): i32 { return p.*; });\n"
       "  var outer: Outer = (func |(f: Inner = (inner))| (): i32 {\n"
       "      return f(); });\n"
@@ -2463,35 +2477,6 @@ TEST(CBackend, BuildExportClosureABI) {
   fs::remove_all(proj, ec);
 }
 
-/* 泄漏检测全局分配器：`_ = new T{...}` 丢弃将亡值 → 进程退出打印
-   `memory leak detected:`；正常 move/FREE 不打印。 */
-TEST(CBackend, LeakDetectorCleanProgramSilent) {
-  auto build_and_capture = [](const std::string &body,
-                              const char *tag) -> std::string {
-    const std::string src = write_temp_file(body, tag);
-    EXPECT_FALSE(src.empty());
-    std::filesystem::path exe = default_exe(src);
-    std::error_code ec;
-    std::filesystem::remove(exe, ec);
-    std::string err;
-    EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
-    if (!std::filesystem::exists(exe)) return "<no-exe>";
-    std::string cap = (std::filesystem::path(clux_test_temp_dir()) /
-                       (std::string(tag) + ".stderr.txt"))
-                          .string();
-    (void)cap;
-    return run_capture(std::filesystem::absolute(exe).string());
-  };
-  const std::string clean =
-      build_and_capture("func main(): i32 {\n"
-                        "  var p: *i32 = new i32{ 5 };\n"
-                        "  free(p);\n"
-                        "  return 0;\n"
-                        "}\n",
-                        "cbackend_leak_no");
-  EXPECT_EQ(clean.find("memory leak detected:"), std::string::npos) << clean;
-}
-
 /* 跨模块导出闭包的更多形态：泛型捕获、模块内 struct 捕获、`fatal` 返回的
    闭包（所有权跨模块转移，调用方作用域释放一次）。 */
 TEST(CBackend, BuildExportClosureAcrossModules) {
@@ -2508,6 +2493,7 @@ TEST(CBackend, BuildExportClosureAcrossModules) {
   };
   write("a.cx",
         "export struct Box { v: i32; }\n"
+        "var g_own: i32 = 7;\n"
         "export func mk[T](v: T): func |v: T| () -> T {\n"
         "  return func |v| (): T { return v; };\n"
         "}\n"
@@ -2516,7 +2502,7 @@ TEST(CBackend, BuildExportClosureAcrossModules) {
         "  return func |(b: Box = b)| (): i32 { return b.v; };\n"
         "}\n"
         "export func make_own(): func |p: *i32| () -> i32 {\n"
-        "  var p: *i32 = new i32{ 7 };\n"
+        "  var p: *i32 = g_own.&;\n"
         "  return (func |(p = (p))| (): i32 { return p.*; });\n"
         "}\n");
   write("main.cx",
@@ -2553,7 +2539,8 @@ TEST(CBackend, BuildClosureAggregateCaptureFree) {
       "struct Box { p: *i32; }\n"
       "type F = func |b: Box| () -> i32;\n"
       "func main(): i32 {\n"
-      "  var b = .Box{ .p = new i32{ 7 } };\n"
+      "  var v: i32 = 7;\n"
+      "  var b = .Box{ .p = v.& };\n"
       "  var f: F = (func |(bx: Box = (b))| (): i32 { return bx.p.*; });\n"
       "  if (f() != 7) { return 1; }\n"
       "  return 0;\n"
@@ -2576,7 +2563,8 @@ TEST(CBackend, BuildClosureInStructClone) {
       "type F = func |p: *i32| (i32) -> i32;\n"
       "struct Holder { cb: F; n: i32; }\n"
       "func main(): i32 {\n"
-      "  var p: *i32 = new i32{ 5 };\n"
+      "  var v: i32 = 5;\n"
+      "  var p: *i32 = v.&;\n"
       "  var h: Holder = .Holder{ .cb = (func |(p = (p))| (x: i32): i32 {\n"
       "      return p.* + x; }), .n = 1 };\n"
       "  var h2: Holder = (h);\n"

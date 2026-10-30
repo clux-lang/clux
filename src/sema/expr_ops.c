@@ -21,7 +21,6 @@
 #include "parser/ast_spread.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_member.h"
-#include "parser/ast_new.h"
 #include "parser/ast_deref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_slice_type.h"
@@ -338,6 +337,13 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       }
       value_t *v = scope_lookup(sema->vm->current_scope, n->name);
       if (!v) {
+        if (n->name.len == 4 && n->name.ptr &&
+            memcmp(n->name.ptr, "free", 4) == 0) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "'free' was removed: clux has no built-in deallocation; "
+                     "call libc::free(...) (for a slice, pass data(s))");
+          return val_void(sema);
+        }
         diag_error(sema->diag, sema_loc(sema, *node),
                    "undefined variable '%.*s'", (int)n->name.len, n->name.ptr);
         return val_void(sema);

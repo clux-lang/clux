@@ -157,12 +157,18 @@ var u = .User{ ...base, .age = 2 };
 ## 5.11 堆分配与动态数组
 
 ```clux
-var p: own *User = new User{ .name = "a" };
-var xs: fatal []i32 = make(i32, 10, <0, 10>);
+// 堆分配由用户通过 FFI 完成（clux 不再提供 new/free）：
+extern lib libc from "*";
+extern cfunc libc::malloc(size: usize): opaque;
+var raw: opaque = libc::malloc(16);
+var p: *User = raw as *User;
+
+// make 只把“已有指针 + 长度”包成切片视图，不分配：
+var xs: []i32 = make(buf, len);
 ```
 
-- `new T{...}` 分配一个 `T`，结果是 `own *T`。
-- `make(T, N, init...)` 分配长度为 `N` 的数组，结果是 `fatal []T`。
+- `new T{...}` / `free(p)` 已随内建分配/销毁逻辑一并移除：指针生命周期照搬 C。
+- `make(pointer, len)` 构造指针 + 长度的切片视图，缓冲区由调用方管理与释放。
 
 ## 5.12 指针与解引用
 

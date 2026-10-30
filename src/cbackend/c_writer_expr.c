@@ -138,34 +138,16 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         break;
     }
     case CIR_EXPR_MAKE: {
+        /* make(pointer, len)：纯切片视图，不分配。 */
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
         cw_put(sb, "){ .data = (");
         cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
-        cw_put(sb, " *)clux_make(sizeof(");
-        cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
-        cw_put(sb, "), ");
+        cw_put(sb, " *)(");
         cw_write_expr(sb, e->lhs);
-        if (e->inits) {
-            cw_put(sb, ", (");
-            cw_put(sb, e->elem && e->elem->c_name ? e->elem->c_name : "int32_t");
-            cw_put(sb, "[]){");
-            bool first = true;
-            for (const cir_init_t *i = e->inits; i; i = i->next) {
-                if (!first) cw_put(sb, ", ");
-                cw_write_expr(sb, i->value);
-                first = false;
-            }
-            cw_put(sb, "}, ");
-            size_t cnt = 0;
-            for (const cir_init_t *i = e->inits; i; i = i->next) cnt++;
-            cw_printf(sb, "%zu", cnt);
-        } else {
-            cw_put(sb, ", NULL, 0");
-        }
-        cw_put(sb, "), .len = ");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, " }");
+        cw_put(sb, "), .len = (uint64_t)(");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, ") }");
         break;
     }
     case CIR_EXPR_SLICE_DATA:
@@ -353,35 +335,6 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         /* 闭包值按值拷贝（env 内联在值里，C 的 struct 赋值即复制）。 */
         cw_put(sb, "(");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ")");
-        break;
-    case CIR_EXPR_NEW:
-        cw_put(sb, "(");
-        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-        cw_put(sb, " *)clux_new(sizeof(");
-        cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-        cw_put(sb, "), ");
-        if (e->inits) {
-            cw_put(sb, "&(");
-            cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
-            cw_put(sb, "){");
-            if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, ".data = {");
-            bool first = true;
-            for (const cir_init_t *i = e->inits; i; i = i->next) {
-                if (!first) cw_put(sb, ", ");
-                if (i->name) {
-                    cw_put(sb, ".");
-                    cw_put(sb, i->name);
-                    cw_put(sb, " = ");
-                }
-                cw_write_expr(sb, i->value);
-                first = false;
-            }
-            if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, "}");
-            cw_put(sb, "}");
-        } else {
-            cw_put(sb, "NULL");
-        }
         cw_put(sb, ")");
         break;
     case CIR_EXPR_BITFIELD_GET:
