@@ -144,36 +144,7 @@ typedef enum {
                             退出点按类型生成 expr（简单指针 = 变量引用 → PUSH
                             <name>），compiler 编译 expr 后发 BCODE_FREE
                             （只消费栈顶）。compiler 不知道类型结构。 */
-    AST_IS_TAG,          /* `<object> is <member>` 的**直接形态**（sema 生成）：
-                            object 求值得 union 值，tag 是编译期已知的 member
-                            编号（uint32）→ compiler 直接发 `IS_TAG <tag>`。
-                            为什么不复用 AST_BINARY："is" 的 op 是 `token_t*`，
-                            而 sema 无法合成词法 token。仅用于 sema 生成的
-                            销毁序列（own tag union 的条件 FREE），不出现在
-                            用户源码中。 */
-
-    AST_OPT_IS_SOME,     /* `<object> != nil` 的**直接形态**（sema 生成）：
-                            object 求值得 ?T，compiler 发 `OPT_IS_NONE [+ NOT]`。
-                            为什么不复用 AST_BINARY："!=" 的 op 是 `token_t*`，
-                            sema 无法合成词法 token。仅用于 own ?T 的销毁序列
-                            （`if (v != nil) { <inner 销毁序列> }`）。 */
-    AST_FOR_INDEX,       /* `for (i = 0; i < len(src); i = i + 1)` 的**直接形态**
-                            （sema 生成）：计数器名 + 容器表达式 + body。
-                            为什么不拼 AST_FOR + AST_BINARY：`<` / `+` 的 op 是
-                            token_t*，sema 无法合成。仅用于逐元素销毁序列
-                            （own []T / [N]T 元素含 own 槽位）。 */
-
-    AST_CLONE,           /* 叶子深拷贝的直接形态（sema 生成）：operand → CLONE
-                            （申请新块 + 拷贝字节）。只用于不含 own 槽位的类型；
-                            复合类型的逐槽位展开由 sema 生成构造/NEW/循环 AST。
-                            "clone" 的 op 是 token_t*，sema 无法合成。 */
     AST_TAKE,
-    AST_TAKE_SLOT,       /* 把值从**内存槽位**取出并置零（cunion 成员 move）：
-                            operand 是槽位左值访问 → TAKE_SLOT（拷贝值 + memset
-                            槽位）。cunion 不安全：这样 move 才是真转移。 */            /* 把值移出变量的直接形态（sema 生成，语义 = move）：
-                            operand → MOVE。用于扁平化 clone 的切片路径把临时
-                            变量里的深拷贝结果移出（临时变量不再
-                            FREE）。"move" 的 op 同样是 token_t*。 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */
 } ast_kind_t;

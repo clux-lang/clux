@@ -16,24 +16,12 @@ extern "C" {
  * 与类型表达式共享大部分语法外形，但有三个专用通配符：
  *   ?        任意单类型（含 void）
  *   <?>      任意元数元组
- *   ?*?      任意**非 RC**所有权指针（own/ref/fatal）；RC 必须显式
- *            share *? / weak *?
+ *   ?*?      任意指针
  *
  * 节点种类（AST_PAT_*）：
  *   WILD / OR / AND / PTR / SLICE / ARRAY / TUPLE / NAME / FUNC / QUAL
  * 全部只在泛型参数表的 `extends` 右侧出现，sema 匹配器消费。
  * ========================================================================= */
-
-/* 指针/切片的“所有权位置”模式。 */
-typedef enum {
-    PAT_OWN_NONE = 0, /* 裸 *（无所有权修饰） */
-    PAT_OWN_ANY,      /* ?（own/ref/fatal 任一；不含 RC） */
-    PAT_OWN_OWN,
-    PAT_OWN_REF,
-    PAT_OWN_FATAL,
-    PAT_OWN_SHARE,    /* share *?（RC 必须显式） */
-    PAT_OWN_WEAK,     /* weak *? */
-} ast_pat_own_t;
 
 typedef struct {
     ast_node_t base; /* kind = AST_PAT_WILD */
@@ -47,13 +35,12 @@ typedef struct {
 
 typedef struct {
     ast_node_t   base; /* kind = AST_PAT_PTR */
-    ast_pat_own_t own;
+    bool         wildcard; /* `?*<pat>` 写法（渲染保留 `?*`，与 `*<pat>` 区分） */
     ast_node_t  *base_type; /* 被指向类型的 PATTERN */
 } ast_pat_ptr_t;
 
 typedef struct {
     ast_node_t   base; /* kind = AST_PAT_SLICE */
-    ast_pat_own_t own;
     ast_node_t  *elem_type; /* 元素类型的 PATTERN */
 } ast_pat_slice_t;
 

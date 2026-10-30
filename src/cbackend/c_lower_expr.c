@@ -1145,20 +1145,6 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CALL:
         if (call_is_len((ast_call_t *)e)) return lower_len(lc, (ast_call_t *)e);
         return lower_call(lc, (ast_call_t *)e);
-    case AST_IS_TAG: {
-        ast_is_tag_t *it = (ast_is_tag_t *)e;
-        cir_expr_t *obj = lower_expr(lc, it->object);
-        if (!obj) return NULL;
-        return cir_expr_binary(lc->arena, "==",
-                               cir_expr_union_tag(lc->arena, obj),
-                               cir_expr_int(lc->arena, it->tag));
-    }
-    case AST_OPT_IS_SOME: {
-        ast_opt_is_some_t *os = (ast_opt_is_some_t *)e;
-        cir_expr_t *obj = lower_expr(lc, os->object);
-        return obj ? cir_expr_opt_is_some(lc->arena, obj, os->want_some)
-                   : NULL;
-    }
     case AST_UNWRAP: {
         ast_unwrap_t *uw = (ast_unwrap_t *)e;
         cir_expr_t *obj = lower_expr(lc, uw->operand);
@@ -1215,11 +1201,6 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
         return lower_func_literal(lc, (ast_func_def_t *)e);
     case AST_TAKE:
         return lower_expr(lc, ((ast_take_t *)e)->operand);
-    case AST_TAKE_SLOT: {
-        ast_take_slot_t *ts = (ast_take_slot_t *)e;
-        cir_expr_t *obj = lower_expr(lc, ts->operand);
-        return obj ? cir_expr_take_slot(lc->arena, obj) : NULL;
-    }
     case AST_SLICE:
         return lower_slice(lc, (ast_slice_t *)e);
     case AST_MAKE:

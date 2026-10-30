@@ -229,15 +229,6 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_write_expr(sb, e->rhs);
         cw_put(sb, "); })");
         break;
-    case CIR_EXPR_TAKE_SLOT:
-        cw_put(sb, "({ __typeof__(");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ") *clux_slot_p = &(");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "); __typeof__(*clux_slot_p) clux_slot_v = *clux_slot_p; ");
-        cw_put(sb, "__builtin_memset(clux_slot_p, 0, sizeof *clux_slot_p); ");
-        cw_put(sb, "clux_slot_v; })");
-        break;
     case CIR_EXPR_UNION_CONSTRUCT:
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");

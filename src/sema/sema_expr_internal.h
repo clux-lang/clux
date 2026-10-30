@@ -42,7 +42,6 @@ void op_text(const token_t *op, char *buf, size_t cap);
 void op_type_name(value_t *v, char *buf, size_t cap);
 bool reflect_member_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope, value_t **out);
 const type_t *resolve_cross_module_struct(sema_t *sema, ast_scope_ref_t *er, sema_scope_t *scope);
-ast_node_t *sema_gen_clone(sema_t *sema, sema_scope_t *scope, const type_t *t, ast_node_t *access);
 value_t *val_void(sema_t *sema);
 
 /* 守卫：被污染的值（错误已报告）→ 直接返回 void shadow。 */

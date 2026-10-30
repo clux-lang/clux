@@ -12,10 +12,10 @@ extern "C" {
  * `assign` 槽位）。
  *
  * 语义（与 `own *T` 的 ptr_assign 对齐，且是**唯一**正确形态）：
- *   1. **释放左值旧值**拥有的堆块（`ptr_free_owned_recursive`）——不释放就是
+ *   1. **释放左值旧值**拥有的堆块（`ptr_free_recursive`）——不释放就是
  *      泄漏（整块 memcpy 覆盖会丢掉旧字段的裸指针，再也找不到那些块）；
  *   2. 整块 memcpy（`dst->data` 是全平凡字节块，字段即裸字节）；
- *   3. **清空源**的 own/fatal 指针（`ptr_clear_owned_recursive`）——所有权随
+ *   3. **清空源**的 own/fatal 指针（`ptr_clear_recursive`）——所有权随
  *      memcpy 转移进 dst，源不再持有。不清空则源（临时值或具名变量）与 dst
  *      共享同一堆块 → 两侧析构各释放一次 = **double-free**（实测 access
  *      violation）。

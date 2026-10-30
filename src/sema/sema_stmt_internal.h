@@ -2,6 +2,14 @@
 #define _H_CLUX_SEMA_STMT_INTERNAL_
 /* 内部头：stmt.c 拆分后的跨文件声明（sema 私有，不属于公共 API）。 */
 #include "sema/sema.h"
+#include "parser/ast_assign.h"
+#include "parser/ast_dowhile.h"
+#include "parser/ast_for.h"
+#include "parser/ast_if.h"
+#include "parser/ast_return.h"
+#include "parser/ast_switch.h"
+#include "parser/ast_var_def.h"
+#include "parser/ast_while.h"
 #include "vm/type_struct.h"
 
 #ifdef __cplusplus
@@ -60,18 +68,15 @@ ast_node_t *sema_try_make_if(sema_t *sema, const sema_try_info_t *info,
                              ast_node_t *target, ast_node_t *operand,
                              uint32_t tb, uint32_t te);
 ast_node_t *collect_free_stmts(sema_t *sema, sema_scope_t *from_scope, const sema_scope_t *stop_scope);
-strslice_t discard_name(sema_t *sema, const char *s);
 const sema_scope_t *find_func_stop_sema(sema_scope_t *scope);
 const sema_scope_t *find_loop_stop_sema(sema_scope_t *scope);
 flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope);
 void flow_release(flow_snap_t *snap);
 void flow_restore(const flow_snap_t *snap);
-bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
 ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope);
 void name_to_cstr(strslice_t s, char *buf, size_t cap);
 void shadow_assign(sema_t *sema, ast_assign_t *as, sema_scope_t *scope);
 void shadow_var_def(sema_t *sema, ast_var_def_t *vd, sema_scope_t *scope);
-bool type_has_ref_slots(const type_t *t);
 block_result_t walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope, size_t *idx);
 block_result_t walk_dowhile(sema_t *sema, ast_dowhile_t *dw, sema_scope_t *scope, size_t *idx);
 block_result_t walk_for(sema_t *sema, ast_for_t *fr, sema_scope_t *scope, size_t *idx);

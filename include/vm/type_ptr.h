@@ -55,10 +55,10 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 /** 目标类型是否含需递归扫描的 own 字段。 */
 bool ptr_type_needs_scan(const type_t *t);
 
-void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
+void ptr_free_recursive(vm_t *vm, const type_t *t, void *data);
 
 /** 递归清空 data 块内 own/fatal 指针的 ptr（不释放）。 */
-void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data);
+void ptr_clear_recursive(vm_t *vm, const type_t *t, void *data);
 
 /** 深拷贝 type 类型的数据块。 */
 void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src);

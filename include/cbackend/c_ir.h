@@ -88,7 +88,6 @@ typedef enum {
     CIR_EXPR_OPT_IS_SOME,
     CIR_EXPR_UNWRAP,
     CIR_EXPR_TAKE,      /* take_opt(x)：取 payload 并把 x 置 nil（仅左值） */
-    CIR_EXPR_TAKE_SLOT, /* cunion 成员 move：取槽位值并清零槽位 */
     CIR_EXPR_TRY,       /* 表达式位置的 try：setup; if (!ok) tail; value */
     CIR_EXPR_UNION_CONSTRUCT,
     CIR_EXPR_UNION_MEMBER,
@@ -357,7 +356,6 @@ cir_expr_t    *cir_expr_unwrap(arena_t *arena, cir_expr_t *object);
 /** take_opt(x)：取 optional payload 并把 x 置 nil；x 必须是左值。 */
 cir_expr_t    *cir_expr_take(arena_t *arena, cir_expr_t *object);
 /** cunion 成员 move：拷贝槽位值并把槽位清零（操作数是左值）。 */
-cir_expr_t    *cir_expr_take_slot(arena_t *arena, cir_expr_t *object);
 /** 表达式位置的 try：setup 语句 + `if (!ok) tail` + 成功值。 */
 cir_expr_t    *cir_expr_try(arena_t *arena, cir_expr_t *ok,
                             cir_expr_t *value, struct cir_stmt *setup,

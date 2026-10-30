@@ -31,8 +31,7 @@ typedef struct scope_t {
     strmap_t       *vars;      /* name -> value_t* 借用映射（不拥有 value） */
     vec_t          *owned;     /* value_t* 所有 value（scope 拥有生命周期） */
     vec_t          *children;  /* scope_t* 子作用域（不拥有，子自行管理生命周期） */
-    vec_t          *defers;    /* 测试模式注册的 defer 闭包（error 展开时调用） */
-    vec_t          *cleanup_names; /* 测试模式注册的 own 变量名（error 展开时 FREE） */
+    vec_t          *defers;    /* 测试模式注册的 defer 闭包（error 展开时 LIFO 调用） */
     allocator_t    *alloc;     /* 借用 vm 的 allocator */
 } scope_t;
 
@@ -66,17 +65,6 @@ value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v);
 
 
 /**
- * **仅测试用**（src 已无调用者）：从 scope 的 owned 列表移除 v（不释放）。
- * 正常代码中 value 的生命周期完全由 scope 管理——不存在"脱离作用域"的
- * value（VM 所有权模型，2026-10 重构）。
- * 原用途：
- * 供 op_define/op_store 接管 fresh 临时值（new/construct/move/clone 产物）
- * 后调用——temp 已随 memcpy/绑定转移给目标，从 owned 移除防作用域退出
- * 双释放。v 不在 owned 列表时静默 no-op。
- */
-void scope_untrack(vm_t *vm, scope_t *scope, value_t *v);
-
-/**
  * 定义或替换变量（define-or-replace）：与 scope_define 不同，已有同名变量
  * 时先销毁旧值（从 owned 移除 + dispose + free）再 clone 新值绑定。
  * 用于闭包捕获槽位：函数提升区先以 undefined 占位（DEFINE 时无真实值），
@@ -92,9 +80,6 @@ value_t *scope_lookup(const scope_t *scope, strslice_t name);
 
 /** 测试模式：注册 defer 闭包；error 展开时 LIFO 调用。 */
 void scope_register_defer(vm_t *vm, scope_t *scope, value_t *fn);
-
-/** 测试模式：注册 own 变量名；error 展开时按类型递归 FREE。 */
-void scope_register_cleanup(vm_t *vm, scope_t *scope, strslice_t name);
 
 /** 获取当前作用域的父作用域 */
 static inline scope_t *scope_parent(const scope_t *scope) {

@@ -153,9 +153,6 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
         const type_t *tt = infer_expr_type(lc, t->then_branch);
         return tt ? tt : infer_expr_type(lc, t->else_branch);
     }
-    case AST_IS_TAG:
-    case AST_OPT_IS_SOME:
-        return vm->type_bool;
     case AST_UNWRAP: {
         const type_t *ot = infer_expr_type(lc, ((ast_unwrap_t *)e)->operand);
         return ot ? type_option_inner(ot) : NULL;

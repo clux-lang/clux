@@ -17,11 +17,7 @@
 #include "parser/ast_make.h"
 #include "parser/ast_new.h"
 #include "parser/ast_option.h"
-#include "parser/ast_is_tag.h"
-#include "parser/ast_opt_is_some.h"
-#include "parser/ast_clone.h"
 #include "parser/ast_take.h"
-#include "parser/ast_take_slot.h"
 #include "parser/ast_ptr.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_slice.h"
@@ -59,17 +55,8 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_volatile_t *)node)->sub, visit, user);
     case AST_PTR:
       return ast_walk_preorder(((ast_ptr_t *)node)->base_type, visit, user);
-    case AST_IS_TAG:
-      return ast_walk_preorder(((ast_is_tag_t *)node)->object, visit, user);
-    case AST_OPT_IS_SOME:
-      return ast_walk_preorder(((ast_opt_is_some_t *)node)->object, visit,
-                               user);
-    case AST_CLONE:
-      return ast_walk_preorder(((ast_clone_t *)node)->operand, visit, user);
     case AST_TAKE:
       return ast_walk_preorder(((ast_take_t *)node)->operand, visit, user);
-    case AST_TAKE_SLOT:
-      return ast_walk_preorder(((ast_take_slot_t *)node)->operand, visit, user);
     case AST_SLICE_TYPE:
       return ast_walk_preorder(((ast_slice_type_t *)node)->elem_type, visit,
                                user);

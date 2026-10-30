@@ -39,7 +39,7 @@ void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len) {
     if (!slice_type_needs_scan(elem)) return;
     uint8_t *p = (uint8_t *)ptr;
     for (uint64_t i = 0; i < len; i++, p += elem->size)
-        ptr_clear_owned_recursive(vm, elem, p);
+        ptr_clear_recursive(vm, elem, p);
 }
 
 /* ---- 索引读取辅助 ---- */

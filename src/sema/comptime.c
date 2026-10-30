@@ -1222,14 +1222,7 @@ bool sema_eval_union_def(sema_t *sema, ast_union_def_t *ud, sema_scope_t *scope)
       ok = false;
       continue;
     }
-    /* tag union 的 member **可以携带指针/切片**（2026-10 放开）。
-       曾经禁止是因为放开后运行期栈溢出（0xC00000FD）；根因是 sema 在
-       Pass 3b 重新 walk 自己生成的销毁语句（`if (v is m) { FREE v.m }`）：
-       AST_IF 会去消费 3a 没建的作用域、AST_IS_TAG 不是用户表达式。
-       修复：生成节点用 `ast_node_t::is_generated` 标记、walk_stmt 跳过
-       （见 stmt.c）。销毁序列本身由 gen_destroy_union 按 type 对象的
-       槽位所有权生成（`if (v is m) { <payload 销毁序列> }`），
-       member 的槽位所有权在解析期缓存（sf->ownership），并参与 intern。 */
+    /* tag union 的 member 可以携带指针/切片。 */
     members[i].payload_type = ft;
     /* 槽位所有权（类型描述的一部分；union 的销毁序列按 tag 生成 if） */
   }

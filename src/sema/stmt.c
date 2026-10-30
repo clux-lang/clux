@@ -23,8 +23,6 @@
 #include "parser/ast_walk.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_unwrap.h"
-#include "parser/ast_opt_is_some.h"
-#include "parser/ast_for_index.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"
@@ -45,7 +43,6 @@
 #include "parser/ast_slice_type.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_if.h"
-#include "parser/ast_is_tag.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_return.h"
 #include "parser/ast_walk.h"
@@ -188,7 +185,6 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
       vm_push_scope(sema->vm); /* VM scope 与 sema scope 树同构 */
       size_t sub = 0;
       r = walk_block(sema, stmt, child ? child : scope, &sub);
-      sema_scope_release_borrows(child); /* R3：块内借用的 ref 载体随块消亡 */
       vm_pop_scope(sema->vm);
       break;
     }
@@ -699,10 +695,7 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      walk_block 的 block_result_t 仅用于跳过不可达语句的类型检查 */
   size_t child_idx = 0;
   (void)walk_block(sema, fn->body, sf->param_scope, &child_idx);
-
-  sema_scope_release_borrows(sf->param_scope); /* R3：参数层借用载体消亡 */
   vm_pop_scope(sema->vm);
-  sema_scope_release_borrows(sf->scope);       /* R3：捕获层借用载体消亡 */
   vm_pop_scope(sema->vm);
 
   /* 返回路径完整性分析已在 Pass 3a（建树阶段）完成。整体恢复进入函数 walk

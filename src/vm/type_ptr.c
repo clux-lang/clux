@@ -16,7 +16,7 @@
 #include <stdalign.h>
 
 /* ---- 前向声明：slice_clear_elems 在 type_slice.c 中定义，切片元素级递归
-   清空由 ptr_clear_owned_recursive 的 SLICE 分支调用。 ---- */
+   清空由 ptr_clear_recursive 的 SLICE 分支调用。 ---- */
 void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
 
 /* ===========================================================================
@@ -90,7 +90,7 @@ bool ptr_type_needs_scan(const type_t *t) {
     }
 }
 
-void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
+void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     /* 递归销毁看去限定后的裸类型。 */
     t = type_strip_quals(t);
@@ -113,7 +113,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
            调用方（FREE 指令）保证只对拥有堆块的变量调用。 */
         const type_t *base = ptr_type_base(t);
         if (base && ptr_type_needs_scan(base))
-            ptr_free_owned_recursive(vm, base, pv->ptr);
+            ptr_free_recursive(vm, base, pv->ptr);
         void *heap = pv->ptr;
         pv->ptr = NULL;
         allocator_free(vm->alloc, &heap);
@@ -134,7 +134,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     case TYPE_KIND_VOLATILE: {
         const type_t *sub = type_qualifier_sub(t);
         if (sub && ptr_type_needs_scan(sub))
-            ptr_free_owned_recursive(vm, sub, data);
+            ptr_free_recursive(vm, sub, data);
         return;
     }
     default:
@@ -148,7 +148,7 @@ void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data) {
    （**不释放**——指针值已随 memcpy 复制进接管方堆块）。
    供 op_new/op_construct 在成员值 memcpy 进目标块后调用，清空源对象图内
    所有指针，防作用域退出时与接管方双释放。 */
-void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
+void ptr_clear_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR: {
@@ -180,7 +180,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         for (size_t i = 0; i < st->field_count; i++) {
             const struct_field_t *f = &st->fields[i];
             if (f->type && ptr_type_needs_scan(f->type))
-                ptr_clear_owned_recursive(vm, f->type, p + f->offset);
+                ptr_clear_recursive(vm, f->type, p + f->offset);
         }
         return;
     }
@@ -190,7 +190,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         for (size_t i = 0; i < tt->elem_count; i++) {
             const tuple_elem_t *e = &tt->elems[i];
             if (e->type && ptr_type_needs_scan(e->type))
-                ptr_clear_owned_recursive(vm, e->type, p + e->offset);
+                ptr_clear_recursive(vm, e->type, p + e->offset);
         }
         return;
     }
@@ -201,7 +201,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (tag >= ut->member_count) return;
         const type_t *pt = ut->members[tag].payload_type;
         if (pt && ptr_type_needs_scan(pt))
-            ptr_clear_owned_recursive(vm, pt,
+            ptr_clear_recursive(vm, pt,
                                       (uint8_t *)data + union_type_payload_offset(t));
         return;
     }
@@ -209,7 +209,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (!option_ok(data)) return;
         const type_t *inner = type_option_inner(t);
         if (inner && ptr_type_needs_scan(inner))
-            ptr_clear_owned_recursive(vm, inner,
+            ptr_clear_recursive(vm, inner,
                                       (uint8_t *)data + option_value_offset(t));
         return;
     }
@@ -217,7 +217,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
     case TYPE_KIND_VOLATILE: {
         const type_t *sub = type_qualifier_sub(t);
         if (sub && ptr_type_needs_scan(sub))
-            ptr_clear_owned_recursive(vm, sub, data);
+            ptr_clear_recursive(vm, sub, data);
         return;
     }
     case TYPE_KIND_ARRAY: {
@@ -226,7 +226,7 @@ void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data) {
         if (!et || !ptr_type_needs_scan(et)) return;
         uint8_t *p = (uint8_t *)data;
         for (size_t i = 0; i < at->length; i++, p += et->size)
-            ptr_clear_owned_recursive(vm, et, p);
+            ptr_clear_recursive(vm, et, p);
         return;
     }
     default:

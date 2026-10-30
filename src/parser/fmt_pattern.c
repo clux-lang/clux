@@ -24,18 +24,6 @@ static void render_pat_list(fmt_t *f, ast_node_t *head) {
     }
 }
 
-static const char *pat_own_prefix(ast_pat_own_t own) {
-    switch (own) {
-    case PAT_OWN_ANY:   return "?";
-    case PAT_OWN_OWN:   return "own";
-    case PAT_OWN_REF:   return "ref";
-    case PAT_OWN_FATAL: return "fatal";
-    case PAT_OWN_SHARE: return "share";
-    case PAT_OWN_WEAK:  return "weak";
-    default:            return NULL;
-    }
-}
-
 static void render_pat_atom(fmt_t *f, ast_node_t *n) {
     if (!n) return;
     switch (n->kind) {
@@ -54,15 +42,8 @@ static void render_pat_atom(fmt_t *f, ast_node_t *n) {
     }
     case AST_PAT_PTR: {
         ast_pat_ptr_t *p = (ast_pat_ptr_t *)n;
-        const char *pre = pat_own_prefix(p->own);
-        if (p->own == PAT_OWN_ANY) {
-            sb_str(&f->sb, "?*"); /* 规范写法 `?*?`（无空格） */
-        } else if (pre) {
-            sb_str(&f->sb, pre);
-            sb_str(&f->sb, " *");
-        } else {
-            sb_ch(&f->sb, '*');
-        }
+        if (p->wildcard) sb_str(&f->sb, "?*");
+        else sb_ch(&f->sb, '*');
         if (pat_needs_parens(p->base_type)) {
             sb_ch(&f->sb, '(');
             render_pat_atom(f, p->base_type);
@@ -74,11 +55,6 @@ static void render_pat_atom(fmt_t *f, ast_node_t *n) {
     }
     case AST_PAT_SLICE: {
         ast_pat_slice_t *s = (ast_pat_slice_t *)n;
-        const char *pre = pat_own_prefix(s->own);
-        if (pre) {
-            sb_str(&f->sb, pre);
-            sb_ch(&f->sb, ' ');
-        }
         sb_str(&f->sb, "[]");
         if (pat_needs_parens(s->elem_type)) {
             sb_ch(&f->sb, '(');

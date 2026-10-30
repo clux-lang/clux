@@ -180,20 +180,6 @@ typedef struct module_t *(*sema_import_resolver_t)(void *user,
                                                    ast_node_t *import_node,
                                                    strslice_t raw);
 
-/* 生成的 clone 函数（sema_clone_fn_t）：与销毁函数同构（运行时递归是合理的，
- * 扁平化属于未来优化）。三种形态，按 kind 区分：
- *   kind 0 `__clone_<n>(dv: ref *T): fatal T`        —— 值克隆（T 为复合值类型）
- *   kind 1 `__cloneptr_<n>(dv: ref *U): fatal *U`    —— 指针克隆（分配新块 + 克隆被指向值）
- *   kind 2 `__cloneslice_<n>(dv: ref []T): fatal []T`—— 切片克隆（循环逐元素 clone）
- * type 是去限定后的 key（kind 0 = T；kind 1 = 被指向类型 U；kind 2 = 切片类型 []T）。 */
-typedef struct sema_clone_fn {
-    const type_t          *type;
-    uint8_t                kind;
-    ast_node_t            *fn;    /* AST_FUNC_DEF（sema_attach_clone_fns 追加到 prog） */
-    strslice_t             name;
-    struct sema_clone_fn  *next;
-} sema_clone_fn_t;
-
 /** CTFE 折叠产生的函数字面量：fid → AST_FUNC_DEF（函数体 AST 仍在
  *  comptime 函数体内，但运行期函数值会按 fid 引用它；后端按需物化）。 */
 typedef struct sema_ct_func_lit {
@@ -244,20 +230,8 @@ typedef struct sema_t {
 
     /* 扁平化 clone 的临时变量/循环变量计数器：__cl_N / __cl_i_N，N 从 0 起
        单调递增（块内唯一）。 */
-    uint32_t      clone_seq;
     /* 错误处理语法糖左值临时变量计数器：__try_N。 */
     uint32_t      try_seq;
-
-    /* ---- 生成的 clone 函数（2026-10，与销毁函数同构）----
-       clone() 调用点只发 `CALL __clone*_<n>(...)`；函数体内部按槽位展开，嵌套
-       复合/指针/切片槽位再调用对应函数 —— 自引用类型（链表/树）由函数自身
-       递归，天然终止（不再需要运行期 CLONE 兜底，扁平化留给未来优化）。
-       `clone_fns` 按 (kind, key type) 去重；生成的函数在 sema_analyze 收尾
-       统一追加到 prog->funcs。 */
-    sema_clone_fn_t *clone_fns;
-    uint32_t         clone_fn_seq;
-
-
 
     /* **类型展开环检测**（自引用类型：链表/树）。销毁序列（gen_destroy）与
        扁平化 clone（gen_clone_expr）都按类型对象递归展开；一旦展开路径上
@@ -398,24 +372,6 @@ void sema_set_import_resolver(sema_t *sema, sema_import_resolver_t resolve,
  */
 bool sema_analyze(sema_t *sema, ast_node_t *program);
 
-/** 取/生成类型 t 的 clone 函数（三种形态之一），返回其 fid（0 = 失败）。
- *  形态：0 值克隆（dv: ref *T）、1 指针克隆（dv: ref *U）、2 切片克隆。 */
-uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t);
-
-/** 只**查找**已生成的 clone 函数（不生成）。返回 false = 没有。
- *  `*fid` = 函数 id；`*name` = 生成函数名（`__clone_<n>` 等，后端据此算 C 符号）。
- *  后端在 lowering 阶段（sema_attach_clone_fns 之后）按类型引用 clone 函数时使用
- *  ——此时再生成不会进入程序函数链。 */
-bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
-                        uint32_t *fid, strslice_t *name);
-
-/** 生成 `__deep_clone(<value>)` 调用节点（闭包值拷贝 = 深拷贝 env 的
- *  运行期兜底；供 sema 在变量初始化/赋值处插入）。 */
-ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value);
-
-/** 把 Pass 3b 期间按需生成的 clone 函数追加到程序函数链尾部（sema_analyze 收尾）。 */
-void sema_attach_clone_fns(sema_t *sema, ast_node_t *program);
-
 
 
 /**
@@ -489,23 +445,17 @@ location_t sema_loc(sema_t *sema, ast_node_t *node);
 /** 打印类型名到 stdout（内部调试/诊断用）。 */
 void sema_type_name(const type_t *t, char *buf, size_t cap);
 
+/** 生成 `__deep_clone(<value>)` 调用节点（闭包值拷贝 = 深拷贝 env；
+ *  供 sema 在变量初始化/赋值处插入）。 */
+ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value);
+
 /**
  * 生成**类型引用表达式**（AST_TYPE_REF）：已登记类型取 sema 登记名
  * （`__type_N`）；内建标量（未登记）取规范名，compiler 的 AST_TYPE_REF 分支
- * 用 `type_lookup` 兜底。用于 sema 生成的构造 / NEW / 临时变量声明（扁平化
- * clone、显式销毁）。返回 NULL = 分配失败。
+ * 用 `type_lookup` 兜底。用于 sema 生成的构造 / NEW / 临时变量声明。
+ * 返回 NULL = 分配失败。
  */
 ast_node_t *sema_gen_type_ref(sema_t *sema, const type_t *t);
-
-/**
- * 把**生成语句链**追加到当前语句的 prelude（compiler 在语句主体之前、
- * 同一作用域编译）。返回 false = 不在语句上下文（如 comptime 折叠）或分配
- * 失败——调用方应回退（运行期指令 / DISPOSE）。
- *
- * 用途：扁平化 clone 的切片路径（临时变量 + make + 循环）与显式销毁
- * `_ = move(x)` 的销毁序列。
- */
-bool sema_append_prelude(sema_t *sema, ast_node_t *stmts);
 
 /**
  * Pass 3a 作用域树构建（stmt_build.c 实现）：遍历 sema->funcs 队列，对每个函数
@@ -552,13 +502,6 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope);
 /** 检查操作数必须为 bool；error/void shadow（错误恢复产物）静默通过。 */
 void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
                      const char *what);
-
-/**
- * R3 借用释放（m3-design §7）：作用域退出时遍历本作用域符号，递减
- * borrow_src 的 borrow_count 并清空 borrow_src。stmt.c 各 vm_pop_scope
- * 前调用（借用载体随作用域消亡，源符号恢复可 move）。
- */
-void sema_scope_release_borrows(sema_scope_t *scope);
 
 
 /**

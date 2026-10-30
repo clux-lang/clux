@@ -28,12 +28,10 @@ scope_t *scope_new(allocator_t *alloc, scope_t *parent) {
     s->owned    = vec_new(alloc, /*owns_element=*/false);
     s->children = vec_new(alloc, /*owns_element=*/false);
     s->defers   = vec_new(alloc, /*owns_element=*/false);
-    s->cleanup_names = vec_new(alloc, /*owns_element=*/false);
     if (!s->vars)     panic("vm: out of memory allocating scope vars");
     if (!s->owned)    panic("vm: out of memory allocating scope owned");
     if (!s->children) panic("vm: out of memory allocating scope children");
     if (!s->defers)   panic("vm: out of memory allocating scope defers");
-    if (!s->cleanup_names) panic("vm: out of memory allocating scope cleanup names");
 
     /* 注册到父作用域的 children */
     if (parent && parent->children) {
@@ -80,17 +78,9 @@ void scope_destroy(vm_t *vm, scope_t **pscope) {
     /* 2. strmap_free 仅释放 key 副本（owns_value=false，不释放 value_t*） */
     strmap_free(scope->alloc, &scope->vars);
 
-    /* 3. 释放 children 向量（不拥有元素，仅释放向量结构） */
+    /* 3. 释放 children / defer 向量（不拥有元素，仅释放向量结构） */
     vec_free(scope->alloc, &scope->children);
     vec_free(scope->alloc, &scope->defers);
-    if (scope->cleanup_names) {
-        size_t cn = vec_len(scope->cleanup_names);
-        for (size_t i = 0; i < cn; i++) {
-            char *nm = (char *)vec_get(scope->cleanup_names, i);
-            if (nm) allocator_free(scope->alloc, (void **)&nm);
-        }
-        vec_free(scope->alloc, &scope->cleanup_names);
-    }
 
     /* 4. 释放 scope 结构体 */
     allocator_free(scope->alloc, (void **)pscope);
@@ -117,21 +107,7 @@ void scope_destroy_subtree(vm_t *vm, scope_t **pscope) {
         vec_free(scope->alloc, &scope->defers);
     }
 
-    /* 3. 测试模式：异常展开时 FREE 已注册的 own 变量。正常路径的 FREE
-       已由 compiler 在退出点执行；此处按变量名查当前 scope。 */
-    if (scope->cleanup_names) {
-        size_t cn = vec_len(scope->cleanup_names);
-        for (size_t i = cn; i > 0; i--) {
-            const char *nm = (const char *)vec_get(scope->cleanup_names, i - 1);
-            if (!nm) continue;
-            value_t *v = scope_lookup(scope, strslice_from_cstr(nm));
-            if (!v || value_is_borrowed(v) || !value_data(v)) continue;
-            const type_t *t = type_strip_quals(value_type(v));
-            if (t) ptr_free_owned_recursive(vm, t, value_data(v));
-        }
-    }
-
-    /* 4. 销毁自身（从父作用域的 children 中移除 + dispose vars + free） */
+    /* 3. 销毁自身（从父作用域的 children 中移除 + dispose vars + free） */
     scope_destroy(vm, pscope);
 }
 
@@ -139,17 +115,6 @@ void scope_register_defer(vm_t *vm, scope_t *scope, value_t *fn) {
     (void)vm;
     if (!scope || !fn || !scope->defers) return;
     vec_push(scope->defers, scope->alloc, fn);
-}
-
-void scope_register_cleanup(vm_t *vm, scope_t *scope, strslice_t name) {
-    (void)vm;
-    if (!scope || !scope->cleanup_names || !name.ptr) return;
-    char *copy = (char *)allocator_new_ex(scope->alloc, "scope.cleanup",
-                                          name.len + 1, NULL, NULL, NULL, 1);
-    if (!copy) return;
-    memcpy(copy, name.ptr, name.len);
-    copy[name.len] = '\0';
-    vec_push(scope->cleanup_names, scope->alloc, copy);
 }
 
 void scope_track(vm_t *vm, scope_t *scope, value_t *v) {
@@ -196,28 +161,6 @@ value_t *scope_define(vm_t *vm, scope_t *scope, const char *name, value_t *v) {
 
     strmap_insert(scope->vars, vm->alloc, name, stored);
     return stored;
-}
-
-/* 所有权接管定义（m3-design §7 含 own 复合类型不可 copy，须 move/clone）：
-   v 是 fresh 临时值（new/construct/move/clone 产物，auto-track 在
-   vm->current_scope 的 owned 列表）——DEFINE 直接接管：绑定 v 本体到变量名，
-   跳过 value_clone 浅拷贝（浅拷贝会让变量与 temp 共享内嵌 own 堆块，作用域
-   退出双释放）。v **保持**在 owned 列表——变量生命周期 = 作用域生命周期，
-   scope_destroy 遍历 owned 统一销毁（递归释放堆块 + 释放 data/value 壳），
-   与 scope_define 的 clone 产物同生命周期路径。曾误从 owned 移除导致接管值
-   的 value/data/堆块全部泄漏。R4 专用：调用方（op_define）已保证 v 非借用
-   引用。 */
-
-void scope_untrack(vm_t *vm, scope_t *scope, value_t *v) {
-    (void)vm;
-    if (!scope || !v || !scope->owned) return;
-    size_t n = vec_len(scope->owned);
-    for (size_t i = 0; i < n; i++) {
-        if (vec_get(scope->owned, i) == v) {
-            vec_swap_remove(scope->owned, i);
-            break;
-        }
-    }
 }
 
 /* 从 owned 列表中移除并销毁 value（scope_set 替换旧值用） */

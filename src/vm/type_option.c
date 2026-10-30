@@ -3,8 +3,6 @@
 #include "vm/type_array.h"
 #include "vm/value.h"
 #include "vm/value_compound_assign.h" /* compound_assign_transfer（赋值共享实现） */
-#include "vm/value_owncopy.h"         /* value_own_copy_into */
-#include "vm/value_deepcopy.h"        /* value_alloc_data_own（转换期深拷贝） */
 #include "vm/vm.h"
 #include "core/panic.h"
 
@@ -35,10 +33,10 @@ static value_t *option_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
         return value_make_shadow(vm, value_type(v));
     const type_t *t = value_type(v);
-    /* **持有资源则对象图克隆**（value_alloc_data_own）：隐式拷贝路径也会承载
+    /* **持有资源则对象图克隆**（value_alloc_data_copy）：隐式拷贝路径也会承载
        含 own 内层的 option（闭包捕获、scope_define 的借用 materialize），浅拷贝
        会让副本与源共享内嵌堆块 → 双释放。 */
-    void *data = value_alloc_data_own(vm, t, value_data(v));
+    void *data = value_alloc_data_copy(vm->alloc, t, value_data(v));
     return value_make(vm, t, data);
 }
 
@@ -79,7 +77,7 @@ static value_t *option_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
     /* ?T → ?U 当 T == U：同一 inner 的身份拷贝 */
     if (target && target->kind == TYPE_KIND_OPTION &&
         type_option_inner(target) == type_option_inner(value_type(v))) {
-        void *data = value_alloc_data_own(vm, target, value_data(v));
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);
     }
     return value_make_error(vm, "?: unsupported implicit cast for optional");
@@ -268,10 +266,10 @@ value_t *value_lift_option(vm_t *vm, value_t *v, const type_t *target) {
 
     void *data = value_alloc_data(vm->alloc, target);
     *(bool *)data = true;   /* ok tag */
-    /* 持有资源的内层值深拷贝（见 vm/value_owncopy.h）：option 的 value 字段
-       必须独立持有，否则与源临时值共享内嵌堆块 → 双释放。 */
-    value_own_copy_into(vm, (uint8_t *)data + option_value_offset(target),
-                        src, inner);
+    /* value 字段按 inner 类型逐字节拷贝。 */
+    if (inner && inner->size && value_data(src))
+        memcpy((uint8_t *)data + option_value_offset(target), value_data(src),
+               inner->size);
     if (tmp && tmp != v) value_dispose(vm, tmp);
     return value_make(vm, target, data);
 }

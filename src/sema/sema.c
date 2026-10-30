@@ -477,9 +477,6 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     sema_walk_function(sema, sf);
   }
 
-  if (!diag_has_error(sema->diag)) {
-    sema_attach_clone_fns(sema, program);
-  }
 
   return !diag_has_error(sema->diag);
 }

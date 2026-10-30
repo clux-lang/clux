@@ -7,7 +7,6 @@
 #include "vm/type_union.h"
 #include "vm/value.h"
 #include "vm/value_compound_assign.h" /* compound_assign_transfer（赋值共享实现） */
-#include "vm/value_deepcopy.h"        /* value_alloc_data_own（转换期深拷贝） */
 #include "vm/vm.h"
 #include "vm/scope.h"
 #include "core/vec.h"
@@ -337,11 +336,11 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
 
     /* 借用/普通数组的 type 均为数组类型；借用 v 的 data 指向块内偏移，
        按其类型深拷贝该块即 materialize（独立 ownership=OWN_OWN 拷贝）。
-       **持有资源则对象图克隆**（value_alloc_data_own）：隐式拷贝路径同样承载
+       **持有资源则对象图克隆**（value_alloc_data_copy）：隐式拷贝路径同样承载
        含 own 元素的数组（闭包捕获、scope_define 的借用 materialize），浅拷贝
        会让副本与源共享内嵌堆块 → 双释放。 */
     const type_t *t = value_type(v);
-    void *block = value_alloc_data_own(vm, t, value_data(v));
+    void *block = value_alloc_data_copy(vm->alloc, t, value_data(v));
     return value_make(vm, t, block);
 }
 
@@ -370,14 +369,14 @@ static value_t *array_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     /* 同 array 实例（身份拷贝；持有资源时对象图克隆，防与源共享内嵌 own） */
     if (target->kind == TYPE_KIND_ARRAY && target == src) {
         if (value_is_shadow(v)) return value_make_shadow(vm, target);
-        void *data = value_alloc_data_own(vm, target, value_data(v));
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);
     }
     /* 布局兼容的 array↔tuple 互转（双向） */
     if (tuple_array_layout_compatible(vm, target, src) ||
         tuple_array_layout_compatible(vm, src, target)) {
         if (value_is_shadow(v)) return value_make_shadow(vm, target);
-        void *data = value_alloc_data_own(vm, target, value_data(v));
+        void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
         return value_make(vm, target, data);
     }
     return value_make_error(vm, "array: implicit cast only within layout-compatible "
@@ -438,7 +437,7 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
            Cell 元素内部 own *i32 字段，不止直接 own/fatal 指针元素）。
            防作用域退出时源与 block 双释放；堆块归外层递归销毁；ref
            借用不受影响。 */
-        ptr_clear_owned_recursive(vm, elem_type, value_data(e));
+        ptr_clear_recursive(vm, elem_type, value_data(e));
     }
     return value_make(vm, at, block);
 }

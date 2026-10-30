@@ -25,16 +25,6 @@
 
 static ast_node_t *parse_pattern_atom(parser_t *p);
 
-static ast_pat_own_t pat_ownership_of_token(const token_t *tok) {
-    if (!tok) return PAT_OWN_NONE;
-    if (token_is(tok, "own")) return PAT_OWN_OWN;
-    if (token_is(tok, "ref")) return PAT_OWN_REF;
-    if (token_is(tok, "fatal")) return PAT_OWN_FATAL;
-    if (token_is(tok, "share")) return PAT_OWN_SHARE;
-    if (token_is(tok, "weak")) return PAT_OWN_WEAK;
-    return PAT_OWN_NONE;
-}
-
 static bool is_pattern_name_token(const token_t *t) {
     token_kind_t k = token_get_kind(t);
     return k == TOKEN_TYPE_IDENTIFIER || k == TOKEN_TYPE_KEYWORD;
@@ -204,7 +194,7 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
         return inner;
     }
 
-    /* '?' 单类型通配，或 '?*<pat>' 任意非 RC 所有权指针 */
+    /* '?' 单类型通配，或 '?*<pat>' 指针模式 */
     if (check_symbol(p, "?")) {
         advance(p);
         skip_trivia(p);
@@ -221,14 +211,14 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
             }
             ast_node_t *n = ast_pat_ptr_new(p->arena, tb, p->pos);
             if (!n) return NULL;
-            ((ast_pat_ptr_t *)n)->own = PAT_OWN_ANY;
+            ((ast_pat_ptr_t *)n)->wildcard = true;
             ((ast_pat_ptr_t *)n)->base_type = base;
             return n;
         }
         return ast_pat_wild_new(p->arena, tb, p->pos);
     }
 
-    /* 裸 '*<pat>'（无所有权修饰的指针） */
+    /* 裸 '*<pat>' */
     if (check_symbol(p, "*")) {
         advance(p);
         skip_trivia(p);
@@ -241,62 +231,21 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
         }
         ast_node_t *n = ast_pat_ptr_new(p->arena, tb, p->pos);
         if (!n) return NULL;
-        ((ast_pat_ptr_t *)n)->own = PAT_OWN_NONE;
         ((ast_pat_ptr_t *)n)->base_type = base;
         return n;
     }
 
-    /* 所有权前缀：own/ref/fatal/share/weak */
+    /* 所有权前缀已从语言移除：own/ref/fatal 与 RC 的 share/weak 一律报错。 */
     if (check_keyword(p, "own") || check_keyword(p, "ref") ||
         check_keyword(p, "fatal") || check_keyword(p, "share") ||
         check_keyword(p, "weak")) {
-        const token_t *own_tok = cur_token(p);
-        ast_pat_own_t own = pat_ownership_of_token(own_tok);
-        advance(p);
-        skip_trivia(p);
-        if (check_symbol(p, "[")) {
-            advance(p);
-            skip_trivia(p);
-            if (!check_symbol(p, "]")) {
-                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                     "only '[]' is allowed after an ownership "
-                                     "qualifier in a slice pattern");
-            }
-            advance(p);
-            skip_trivia(p);
-            ast_node_t *elem = parse_pattern_atom(p);
-            if (!elem || elem->kind == AST_ERROR) {
-                if (!elem)
-                    return ast_error_new(p->diag, p->tokens, p->arena, tb,
-                                         p->pos,
-                                         "expected element pattern after '[]'");
-                return elem;
-            }
-            ast_node_t *n = ast_pat_slice_new(p->arena, tb, p->pos);
-            if (!n) return NULL;
-            ((ast_pat_slice_t *)n)->own = own;
-            ((ast_pat_slice_t *)n)->elem_type = elem;
-            return n;
-        }
-        if (!check_symbol(p, "*")) {
-            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "expected '*' or '[]' after ownership qualifier "
-                                 "in 'extends' pattern");
-        }
-        advance(p);
-        skip_trivia(p);
-        ast_node_t *base = parse_pattern_atom(p);
-        if (!base || base->kind == AST_ERROR) {
-            if (!base)
-                return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                     "expected pointee pattern after '*'");
-            return base;
-        }
-        ast_node_t *n = ast_pat_ptr_new(p->arena, tb, p->pos);
-        if (!n) return NULL;
-        ((ast_pat_ptr_t *)n)->own = own;
-        ((ast_pat_ptr_t *)n)->base_type = base;
-        return n;
+        const token_t *bad = cur_token(p);
+        p->has_error = true;
+        return ast_error_new(
+            p->diag, p->tokens, p->arena, tb, p->pos + 1,
+            "'%.*s' was removed with compile-time ownership; write '*T' / "
+            "'[]T' without an ownership prefix",
+            (int)token_strslice(bad).len, token_strslice(bad).ptr);
     }
 
     /* 裸切片 []<pat> */
@@ -316,7 +265,6 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
             }
             ast_node_t *n = ast_pat_slice_new(p->arena, tb, p->pos);
             if (!n) return NULL;
-            ((ast_pat_slice_t *)n)->own = PAT_OWN_NONE;
             ((ast_pat_slice_t *)n)->elem_type = elem;
             return n;
         }

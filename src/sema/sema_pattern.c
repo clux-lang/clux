@@ -48,28 +48,6 @@ static const type_t *pattern_name_type(sema_t *sema, strslice_t name) {    if (!
     return NULL;
 }
 
-static bool match_own(ast_pat_own_t own, const type_t *t, bool is_slice) {
-    type_kind_t core_kind = type_kind_of(t); /* 穿透 const/volatile */
-    if (is_slice) {
-        if (core_kind != TYPE_KIND_SLICE) return false;
-    } else {
-        if (core_kind != TYPE_KIND_PTR) return false;
-    }
-    /* 所有权修饰已从语言移除：指针/切片只有裸类型一种形态。 */
-    switch (own) {
-    case PAT_OWN_ANY:
-    case PAT_OWN_NONE:
-        return true;
-    case PAT_OWN_OWN:
-    case PAT_OWN_REF:
-    case PAT_OWN_FATAL:
-    case PAT_OWN_SHARE:
-    case PAT_OWN_WEAK:
-        return false;
-    }
-    return false;
-}
-
 static bool match_name(sema_t *sema, ast_pat_name_t *pn, const type_t *t);
 
 static bool match_tuple(sema_t *sema, ast_pat_tuple_t *tp, const type_t *t) {
@@ -215,16 +193,12 @@ bool sema_pattern_match(sema_t *sema, ast_node_t *pat, const type_t *t) {
     case AST_PAT_AND:
         return sema_pattern_match(sema, ((ast_pat_logic_t *)pat)->lhs, t) &&
                sema_pattern_match(sema, ((ast_pat_logic_t *)pat)->rhs, t);
-    case AST_PAT_PTR: {
-        ast_pat_ptr_t *p = (ast_pat_ptr_t *)pat;
-        if (!match_own(p->own, t, false)) return false;
-        return sema_pattern_match(sema, p->base_type, ptr_type_base(t));
-    }
-    case AST_PAT_SLICE: {
-        ast_pat_slice_t *s = (ast_pat_slice_t *)pat;
-        if (!match_own(s->own, t, true)) return false;
-        return sema_pattern_match(sema, s->elem_type, slice_type_elem(t));
-    }
+    case AST_PAT_PTR:
+        return sema_pattern_match(sema, ((ast_pat_ptr_t *)pat)->base_type,
+                                  ptr_type_base(t));
+    case AST_PAT_SLICE:
+        return sema_pattern_match(sema, ((ast_pat_slice_t *)pat)->elem_type,
+                                  slice_type_elem(t));
     case AST_PAT_ARRAY: {
         ast_pat_array_t *a = (ast_pat_array_t *)pat;
         const type_t *core = t;

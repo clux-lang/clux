@@ -66,9 +66,6 @@ void name_to_cstr(strslice_t s, char *buf, size_t cap) {
 
 
 
-/* 借用跟踪已移除；保留空实现给旧调用点。 */
-void sema_scope_release_borrows(sema_scope_t *scope) { (void)scope; }
-
 bool sema_scope_within(const sema_scope_t *a, const sema_scope_t *b) {
   for (const sema_scope_t *s = a; s; s = s->parent)
     if (s == b) return true;

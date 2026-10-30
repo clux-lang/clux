@@ -249,15 +249,6 @@ cir_expr_t *cir_expr_take(arena_t *arena, cir_expr_t *object) {
     return e;
 }
 
-cir_expr_t *cir_expr_take_slot(arena_t *arena, cir_expr_t *object) {
-    cir_expr_t *e = (cir_expr_t *)arena_calloc(
-        arena, 1, sizeof(*e), ALIGNOF(max_align_t));
-    if (!e) return NULL;
-    e->kind = CIR_EXPR_TAKE_SLOT;
-    e->lhs = object;
-    return e;
-}
-
 cir_expr_t *cir_expr_try(arena_t *arena, cir_expr_t *ok, cir_expr_t *value,
                          struct cir_stmt *setup, struct cir_stmt *tail) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(

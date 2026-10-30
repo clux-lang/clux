@@ -23,8 +23,6 @@
 #include "parser/ast_walk.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_unwrap.h"
-#include "parser/ast_opt_is_some.h"
-#include "parser/ast_for_index.h"
 #include "parser/ast_func_ref.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_new.h"
@@ -45,7 +43,6 @@
 #include "parser/ast_slice_type.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_if.h"
-#include "parser/ast_is_tag.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_return.h"
 #include "parser/ast_walk.h"
@@ -196,7 +193,6 @@ block_result_t walk_while(sema_t *sema, ast_while_t *wl,
   vm_push_scope(sema->vm); /* 循环体块：VM scope 与 sema scope 树同构 */
   size_t sub = 0;
   walk_block(sema, wl->body, body_scope ? body_scope : scope, &sub);
-  sema_scope_release_borrows(body_scope); /* R3：体内借用的 ref 载体随作用域消亡 */
   vm_pop_scope(sema->vm);
 
   flow_restore(&snap);
@@ -214,7 +210,6 @@ block_result_t walk_dowhile(sema_t *sema, ast_dowhile_t *dw,
   vm_push_scope(sema->vm); /* 循环体块：VM scope 与 sema scope 树同构 */
   size_t sub = 0;
   walk_block(sema, dw->body, body_scope ? body_scope : scope, &sub);
-  sema_scope_release_borrows(body_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   value_t *cond = sema_expr(sema, &dw->cond, scope);
@@ -264,7 +259,6 @@ block_result_t walk_for(sema_t *sema, ast_for_t *fr,
   vm_push_scope(sema->vm); /* 循环体块 */
   size_t sub = 0;
   walk_block(sema, fr->body, body_scope ? body_scope : fs, &sub);
-  sema_scope_release_borrows(body_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   /* update 与 init 同形：可放赋值语句（j = j + 1）或表达式。
@@ -281,8 +275,6 @@ block_result_t walk_for(sema_t *sema, ast_for_t *fr,
 
   flow_restore(&snap); /* 丢弃体内确定性提升（保守） */
   flow_release(&snap);
-
-  sema_scope_release_borrows(for_scope); /* R3：for 作用域（init 变量）退出 */
   vm_pop_scope(sema->vm); /* 退出 for 作用域 */
   return (block_result_t){0};
 }
@@ -307,7 +299,6 @@ block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   vm_push_scope(sema->vm); /* then 块 */
   size_t sub = 0;
   tr = walk_block(sema, it->then_body, then_scope ? then_scope : scope, &sub);
-  sema_scope_release_borrows(then_scope); /* R3 */
   vm_pop_scope(sema->vm);
 
   /* 记录 then 后状态（flow），恢复分支前 */
@@ -327,7 +318,6 @@ block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
       size_t sub2 = 0;
       er = walk_block(sema, it->else_body, else_scope ? else_scope : scope,
                       &sub2);
-      sema_scope_release_borrows(else_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
   }
@@ -376,7 +366,6 @@ block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
       vm_push_scope(sema->vm);
       size_t sub = 0;
       walk_block(sema, sc->body, case_scope ? case_scope : scope, &sub);
-      sema_scope_release_borrows(case_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
     if (sw->default_body) {
@@ -384,7 +373,6 @@ block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
       vm_push_scope(sema->vm);
       size_t sub = 0;
       walk_block(sema, sw->default_body, def_scope ? def_scope : scope, &sub);
-      sema_scope_release_borrows(def_scope); /* R3 */
       vm_pop_scope(sema->vm);
     }
     return r;
@@ -428,7 +416,6 @@ block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
     size_t sub = 0;
     block_result_t br = walk_block(sema, sc->body, case_scope ? case_scope : scope,
                                    &sub);
-    sema_scope_release_borrows(case_scope); /* R3 */
     vm_pop_scope(sema->vm);
     if (!br.definitely_returns) all_return = false;
     for (size_t i = 0; i < snap.n; i++) {
@@ -445,7 +432,6 @@ block_result_t walk_switch(sema_t *sema, ast_switch_t *sw,
     size_t sub = 0;
     block_result_t dr = walk_block(sema, sw->default_body,
                                    def_scope ? def_scope : scope, &sub);
-    sema_scope_release_borrows(def_scope); /* R3 */
     vm_pop_scope(sema->vm);
     if (!dr.definitely_returns) all_return = false;
     for (size_t i = 0; i < snap.n; i++) {
