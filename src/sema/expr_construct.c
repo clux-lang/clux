@@ -1,7 +1,6 @@
 #include "sema/sema.h"
 #include "sema/sema_generic.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -395,17 +394,12 @@ const type_t *option_field_type_normalized(sema_t *sema, const type_t *ft) {
 bool option_inner_type_ok(const type_t *inner, const type_t *ft) {
   if (!inner || !ft) return false;
   if (ft == inner) return true;
-  return type_strip_ownership(ft) == type_strip_ownership(inner);
+  return ft == inner;
 }
 
 /* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
-/* 构造结果值的状态（所有权模型 §0.3）：
-   字段含 own 槽位的 CONSTRUCT 产 **FATAL**（将亡值）——聚合必须由 `own` 位置
-   接收。判定依据是 type 对象上的槽位所有权（装饰器会改类型，AST 不可信）。 */
 static value_t *construct_result(sema_t *sema, const type_t *t) {
-  value_t *v = value_make_shadow(sema->vm, t);
-  if (v && type_has_own_slots(t)) value_set_type_ownership(sema->vm, v, OWN_FATAL);
-  return v;
+  return value_make_shadow(sema->vm, t);
 }
 
 /* ===========================================================================
@@ -905,10 +899,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
             } else if (ft != t) {
-              char what[96];
-              snprintf(what, sizeof what, "optional inner");
-              sema_check_slot_flow(sema, type_ownership_of(type_option_inner(t)), inner,
-                                   f, fv, what);
+              /* 可赋值性由下面的 value_assign 检查。 */
             }
           }
         }
@@ -1019,12 +1010,6 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
-            char what[96];
-            snprintf(what, sizeof what, "struct field '%.*s'",
-                     (int)st->fields[i].name.len, st->fields[i].name.ptr);
-            if (!sema_check_slot_flow(sema, type_ownership_of(st->fields[i].type), ft, value,
-                                      fv, what))
-              continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -1116,11 +1101,6 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && et) {
-            char what[96];
-            snprintf(what, sizeof what, "tuple element %zu", i);
-            if (!sema_check_slot_flow(sema, type_ownership_of(tt->elems[i].type), et, value,
-                                      fv, what))
-              continue;
             value_t *dst = value_make_shadow(sema->vm, et);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -1214,13 +1194,6 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
                        tn);
           }
         } else {
-          char what[96];
-          snprintf(what, sizeof what, "union field '%.*s'",
-                   (int)cf->name.len, cf->name.ptr);
-          if (!sema_check_slot_flow(sema, type_ownership_of(m->payload_type),
-                                 m->payload_type, value,
-                                    fv, what))
-            return val_void(sema);
           /* 可赋值性校验（safe_cast：同类型身份通过；结构兼容隐式转换；
              不兼容报错） */
           value_t *dst = value_make_shadow(sema->vm, m->payload_type);
@@ -1460,13 +1433,6 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
         if (fv && !value_is_error(sema->vm, fv) &&
             !value_is_type(fv, TYPE_KIND_VOID) && et) {
-          char what[96];
-          snprintf(what, sizeof what, "array element %zu", idx);
-          if (!sema_check_slot_flow(sema, type_ownership_of(array_type_elem(t)), et, f,
-                                    fv, what)) {
-            idx += 1;
-            continue;
-          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];

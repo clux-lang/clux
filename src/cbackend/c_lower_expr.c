@@ -42,127 +42,6 @@ static cir_expr_t *lower_call_arg(lower_ctx_t *lc, ast_node_t *a) {
     return lower_expr(lc, a);
 }
 
-/* ================= 闭包值深拷贝（静态 env clone） ================= */
-
-/* 捕获槽位需不需要深拷贝、以及用哪种生成的 clone 函数：
- *   0 = 值克隆 `__clone_<n>(ref *T)`；1 = 指针克隆 `__cloneptr_<n>(ref *U)`；
- *   2 = 切片克隆 `__cloneslice_<n>(ref []T)`；3 = 嵌套闭包值（递归生成
- *   该闭包类型的 `__cl` 辅助函数）；255 = 普通拷贝（无 own 资源）。
- * 与 sema 的 clone_needs_deep（非顶层槽位）保持一致。 */
-static uint8_t capture_clone_kind(const type_t *t) {
-    if (!t) return 255;
-    const type_t *s = type_strip_quals(t);
-    if (!s) return 255;
-    ownership_t own = type_ownership_of(t);
-    switch (s->kind) {
-    case TYPE_KIND_PTR:
-        return own == OWN_OWN ? 1 : 255;
-    case TYPE_KIND_SLICE:
-        return own == OWN_OWN ? 2 : 255;
-    case TYPE_KIND_FUNC:
-        /* own 闭包捕获：递归用嵌套闭包类型的静态 clone（env 深拷贝）。 */
-        return own == OWN_OWN ? 3 : 255;
-    default:
-        return type_has_own_slots(t) ? 0 : 255;
-    }
-}
-
-static const char *closure_clone_helper(lower_ctx_t *lc, const type_t *ft,
-                                        cir_type_t *ct);
-
-static const char *clone_fn_cname(lower_ctx_t *lc, strslice_t name) {
-    if (!name.ptr || name.len == 0) return NULL;
-    return module_symbol(lc->arena, lc->unit, "fn_", name);
-}
-
-/* 为含 own 捕获的闭包类型生成（并缓存）一个 static C 辅助函数：
- *
- *   static <sig> <helper>(<sig> clux_s) {
- *       <sig> clux_o = clux_s;
- *       clux_o.env.clux_f_i = __clone*(NULL, ...);
- *       return clux_o;
- *   }
- *
- * 值里没有 clone/dispose 函数指针：调用点已知闭包类型，直接静态调用。 */
-static const char *closure_clone_helper(lower_ctx_t *lc, const type_t *ft,
-                                        cir_type_t *ct) {
-    if (!ct || !ct->sig || !ct->sig->env_type || !ct->sig->env_type->c_name)
-        return NULL;
-    if (ct->closure_clone) return ct->closure_clone;
-    const type_t *cf = type_strip_quals(ft);
-    if (!cf || !func_type_is_closure(cf)) return NULL;
-    size_t nc = func_type_capture_count(cf);
-    const char *cns[nc > 0 ? nc : 1];
-    uint8_t kinds[nc > 0 ? nc : 1];
-    bool any = false;
-    for (size_t i = 0; i < nc; i++) {
-        cns[i] = NULL;
-        kinds[i] = 255;
-        const type_t *t = func_type_capture_type(cf, i);
-        uint8_t kind = capture_clone_kind(t);
-        if (kind > 3) continue;
-        const type_t *s = type_strip_quals(t);
-        if (kind == 3) {
-            if (!s || s == cf) continue;   /* 自捕获：不能按值递归 */
-            cir_type_t *nct = map_type(lc, t);
-            const char *nh = closure_clone_helper(lc, t, nct);
-            if (!nh) continue;
-            cns[i] = nh;
-            kinds[i] = 3;
-            any = true;
-            continue;
-        }
-        const type_t *key = kind == 1 ? ptr_type_base(s) : s;
-        if (!key) continue;
-        strslice_t cn = STRSLICE_EMPTY;
-        if (!sema_find_clone_fn(lc->sema, kind, key, NULL, &cn)) continue;
-        cns[i] = clone_fn_cname(lc, cn);
-        kinds[i] = kind;
-        if (cns[i]) any = true;
-    }
-    if (!any) return NULL;
-
-    const char *sigtag = ct->sig->tag;
-    char helper[192];
-    snprintf(helper, sizeof helper, "%s__cl", sigtag);
-    string_t *s = string_new(lc->sema->vm->alloc);
-    if (!s) return NULL;
-    char line[512];
-    snprintf(line, sizeof line, "static struct %s %s(struct %s clux_s) {\n",
-             sigtag, helper, sigtag);
-    string_append_cstr(s, line);
-    snprintf(line, sizeof line, "    struct %s clux_o = clux_s;\n", sigtag);
-    string_append_cstr(s, line);
-    for (size_t i = 0; i < nc; i++) {
-        if (!cns[i]) continue;
-        uint8_t kind = kinds[i];
-        if (kind == 1 || kind == 2) {
-            snprintf(line, sizeof line,
-                     "    clux_o.env.clux_f_%zu = %s(NULL, "
-                     "clux_o.env.clux_f_%zu);\n",
-                     i, cns[i], i);
-        } else if (kind == 3) {
-            /* 嵌套闭包：按值调用它的静态 clone 辅助函数。 */
-            snprintf(line, sizeof line,
-                     "    clux_o.env.clux_f_%zu = %s(clux_o.env.clux_f_%zu);\n",
-                     i, cns[i], i);
-        } else {
-            snprintf(line, sizeof line,
-                     "    clux_o.env.clux_f_%zu = %s(NULL, "
-                     "&clux_o.env.clux_f_%zu);\n",
-                     i, cns[i], i);
-        }
-        string_append_cstr(s, line);
-    }
-    string_append_cstr(s, "    return clux_o;\n}\n\n");
-    const char *code = copy_arena(lc->arena, string_data(s));
-    string_free(&s);
-    if (!code) return NULL;
-    cir_unit_add_raw_append(lc->unit, code);
-    ct->closure_clone = copy_arena(lc->arena, helper);
-    return ct->closure_clone;
-}
-
 /* ============================ bitfield ============================ */
 
 static uint64_t bf_mask(size_t width) {
@@ -654,9 +533,6 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             cir_expr_t *cl = cir_expr_func_clone(lc->arena, obj);
             if (!cl) return NULL;
             cl->type = map_type(lc, ft);
-            /* 含 own 捕获：按闭包类型静态深拷贝 env（不再浅拷贝指针）。 */
-            const char *helper = closure_clone_helper(lc, ft, cl->type);
-            if (helper) cl->text = helper;
             return cl;
         }
         /* 含闭包槽位的聚合值拷贝：C 的 struct/数组赋值**按值**复制内联

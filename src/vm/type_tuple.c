@@ -183,10 +183,6 @@ bool tuple_array_layout_compatible(vm_t *vm, const type_t *t,
 
 static value_t *tuple_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (!target) return value_make_error(vm, "tuple: missing cast target");
-    /* fatal 变体 → 同布局的非 fatal 元组：接管转换（见 value_take_fatal_into） */
-    value_t *taken = value_take_fatal_into(vm, v, target,
-                                           tuple_type_compatible);
-    if (taken) return taken;
     const type_t *src = value_type(v);
     /* 同 tuple 实例（身份拷贝；持有资源时对象图克隆，防与源共享内嵌 own） */
     if (target->kind == TYPE_KIND_TUPLE && target == src) {

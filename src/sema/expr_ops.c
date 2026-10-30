@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -88,8 +87,6 @@
 
 
 #include "sema_expr_internal.h"
-
-static const type_t *static_lvalue_type(sema_t *sema, sema_scope_t *scope, ast_node_t *e);
 
 /* 函数自身符号归属检查（捕获检查用）：sym 是**函数自身子树**里的符号 → true。
    false = 外层局部（需捕获）或非函数自身符号。
@@ -293,9 +290,8 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
           cap->next = (*node)->next;
           *node = cap;
           /* 不求值生成链（__ctx 是 VM 调用帧的隐藏局部，sema 作用域里不需要
-             它）：直接按捕获槽类型/所有权产出 shadow。 */
+             它）：直接按捕获槽类型产出 shadow。 */
           value_t *csv = value_make_shadow(sema->vm, sym->type);
-          value_set_type_ownership(sema->vm, csv, sema_sym_ownership(sym));
           return csv;
         }
       }
@@ -303,13 +299,6 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       if (sym && !sym->flow_init) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "variable '%.*s' used before initialization",
-                   (int)n->name.len, n->name.ptr);
-        return val_void(sema);
-      }
-      if (sym && sym->moved) {
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "variable '%.*s' used after move (ownership was "
-                   "transferred)",
                    (int)n->name.len, n->name.ptr);
         return val_void(sema);
       }
@@ -367,7 +356,6 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
          解包由显式 .! assert 承担，见 docs m2-design §12.5） */
       value_t *sv = value_make_shadow(sema->vm, value_type(v));
-      value_set_type_ownership(sema->vm, sv, sym ? sema_sym_ownership(sym) : OWN_NONE);
       return sv;
 }
 
@@ -568,10 +556,7 @@ value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
           tt->value_call = info.value_call;
           tt->tail_stmt = info.tail_stmt;
           tt->panic_mode = uw->op && token_is(uw->op, "!");
-          tt->materialize =
-              !(type_ownership_of(info.value_type) == OWN_OWN ||
-                type_ownership_of(info.value_type) == OWN_FATAL ||
-                type_has_own_slots(info.value_type));
+          tt->materialize = true;
           tr->is_generated = true;
           tr->next = (*node)->next;
           *node = tr;
@@ -784,72 +769,3 @@ value_t *ex_ternary(sema_t *sema, ast_node_t **node,
       return tval; /* shadow，类型 = 两分支共同类型 */
 }
 
-/* 左值路径的**静态类型**（不重复求值；供 move 的"容器类型"判定）：
-   ident → 符号类型；member → 字段/member 类型（指针自动解引用一层）；
-   deref → 被指向类型；index → 元素类型；unwrap → inner。失败返回 NULL。 */
-static const type_t *static_lvalue_type(sema_t *sema, sema_scope_t *scope,
-                                        ast_node_t *e) {
-  if (!e) return NULL;
-  switch (e->kind) {
-  case AST_IDENT: {
-    sema_symbol_t *s = sema_lookup(scope, ((const ast_ident_t *)e)->name);
-    return s && s->type ? type_strip_quals(s->type) : NULL;
-  }
-  case AST_MEMBER: {
-    const ast_member_t *m = (const ast_member_t *)e;
-    const type_t *ot = static_lvalue_type(sema, scope, m->object);
-    if (!ot) return NULL;
-    const type_t *base = type_strip_quals(ptr_type_base(ot));
-    const type_t *ct = base ? base : ot;   /* 指针上的成员访问自动解引用 */
-    if (!ct) return NULL;
-    if (type_kind_of(ct) == TYPE_KIND_STRUCT) {
-      int i = struct_type_find_field(ct, m->field);
-      if (i < 0) return NULL;
-      const struct_field_t *f = struct_type_field(ct, (size_t)i);
-      return f ? type_strip_quals(f->type) : NULL;
-    }
-    if (type_kind_of(ct) == TYPE_KIND_UNION) {
-      int i = union_type_find_member(ct, m->field);
-      if (i < 0) return NULL;
-      const union_member_t *mm = union_type_member(ct, (size_t)i);
-      return mm ? type_strip_quals(mm->payload_type) : NULL;
-    }
-    if (type_kind_of(ct) == TYPE_KIND_CUNION) {
-      int i = cunion_type_find_member(ct, m->field);
-      if (i < 0) return NULL;
-      const cunion_member_t *cm = cunion_type_member(ct, (size_t)i);
-      return cm ? type_strip_quals(cm->type) : NULL;
-    }
-    return NULL;
-  }
-  case AST_DEREF: {
-    const type_t *pt =
-        static_lvalue_type(sema, scope, ((const ast_deref_t *)e)->operand);
-    return pt ? type_strip_quals(ptr_type_base(pt)) : NULL;
-  }
-  case AST_INDEX: {
-    const ast_index_t *ix = (const ast_index_t *)e;
-    const type_t *ot = static_lvalue_type(sema, scope, ix->object);
-    if (!ot) return NULL;
-    if (type_kind_of(ot) == TYPE_KIND_ARRAY)
-      return type_strip_quals(array_type_elem(ot));
-    if (type_kind_of(ot) == TYPE_KIND_SLICE)
-      return type_strip_quals(slice_type_elem(ot));
-    if (type_kind_of(ot) == TYPE_KIND_PTR) {
-      const type_t *b = type_strip_quals(ptr_type_base(ot));
-      if (b && type_kind_of(b) == TYPE_KIND_ARRAY)
-        return type_strip_quals(array_type_elem(b));
-      if (b && type_kind_of(b) == TYPE_KIND_SLICE)
-        return type_strip_quals(slice_type_elem(b));
-    }
-    return NULL;
-  }
-  case AST_UNWRAP: {
-    const type_t *ot =
-        static_lvalue_type(sema, scope, ((const ast_unwrap_t *)e)->operand);
-    return ot ? type_strip_quals(type_option_inner(ot)) : NULL;
-  }
-  default:
-    return NULL;
-  }
-}

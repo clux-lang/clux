@@ -46,13 +46,14 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
   sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
-- **M3 — pointers and ownership**: single-ownership `own *T` / `ref *T` / `fatal *T`
-  with explicit scope annotations (`'<a>`), `move` / `clone`, `new T{...}`, postfix
-  `.&` / `.*`, `opaque` (≈ `void*`), closure capture rules; RC family `share *T` /
-  `weak *T` with atomic control blocks and the `upgrade` builtin.
-- **M4 — slices and strings**: `own []T` / `ref []T` / `fatal []T` fat pointers,
-  `make(T, N, init...)`, `len`, `s[a:b]` slicing (`[N]T → ref []T` is explicit),
-  `str` slicing to `ref [] const u8`, bounds checks.
+- **M3 — pointers**: raw `*T` (no ownership tracking), `new T{...}` heap allocation,
+  postfix `.&` / `.*`, `opaque` (≈ `void*`), closure capture rules. Compile-time
+  ownership (`own` / `ref` / `fatal`, `move` / `clone`) and the built-in RC family
+  (`share` / `weak`, `upgrade`) have been removed; the compiler only checks raw
+  pointers, and heap cleanup is explicit (`free` / `defer`). See
+  `docs/runtime-ownership.md`.
+- **M4 — slices and strings**: `[]T` fat pointers, `make(T, N, init...)`, `len`,
+  `s[a:b]` slicing, `str` slicing to `[] const u8`, bounds checks.
 - **M5 — modules**: `export` on global declarations, `import alias from "./mod"` with
   `alias::member` access, **relative path resolution against the importing file's
   directory** (`./`, `../`, `\`→`/` normalization, `.`/`..` collapsing, implicit `.cx`),
@@ -214,7 +215,7 @@ Pipeline and language:
 Milestone designs:
 
 - `docs/m2-design.md` — struct / enum / arrays / tuples / optional `?T` / comptime / CTFE
-- `docs/m3-design.md` — pointers, ownership (`own`/`ref`/`fatal`), scope annotations, RC (`share`/`weak`)
+- `docs/m3-design.md` — pointers (historical: compile-time ownership removed)
 - `docs/m4-design.md` — slices and runtime strings
 - `docs/m5-design.md`, `docs/m5-design-v2.md` — module system (v2 is the design that shipped)
 - `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, lowered to direct C calls)

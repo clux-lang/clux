@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -172,45 +171,6 @@ value_t *val_void(sema_t *sema) {
 bool is_poison(sema_t *sema, const value_t *v) {
   if (!v) return true;
   return value_is_error(sema->vm, v) || value_is_type(v, TYPE_KIND_VOID);
-}
-
-/* 槽位接收规则（§0.4/§0.5，与 own 变量定义/形参同一张表）——聚合构造、
-   `new` 的字段/成员/元素初始化、字段赋值共用（声明见 sema.h）：
-   - **own 槽位**只接受将亡值（FATAL）：new / move / clone / 构造产物 /
-     fatal 返回值。直接放 own/ref 变量 = copy → 内外两个位置各释放一次
-     （实测 0xC0000005），或把 ref 借用目标当自己的一样 free 掉。
-   - **非 own 槽位**不得用 copy 收下 OWN 聚合（type_has_own_slots）——
-     own 是 move-only，复制会让两个聚合共享内嵌 own 堆块。
-   复合槽位接 FATAL 是**转移**（op_construct 只 memcpy，源临时值不再持有），
-   这是嵌套构造 `.S{ .b = .B{...} }` 的合法形态。 */
-bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
-                          const type_t *slot_type, ast_node_t *value,
-                          value_t *fv, const char *what) {
-  if (!fv || value_is_error(sema->vm, fv) ||
-      value_is_type(fv, TYPE_KIND_VOID))
-    return true; /* 错误恢复产物，已诊断 */
-  if (slot_own == OWN_OWN) {
-    if (sema_value_is_fatal(fv)) return true;
-    char fn[64];
-    sema_type_name(value_type(fv), fn, sizeof fn);
-    diag_error(sema->diag, sema_loc(sema, value),
-               "cannot initialize %s with %s: an own slot must take over a "
-               "dying value (FATAL), produced by new / move / clone (or a "
-               "fatal-returning call)",
-               what, fn);
-    return false;
-  }
-  if (slot_own == OWN_NONE && slot_type && type_has_own_slots(slot_type) &&
-      !sema_value_is_fatal(fv) && sema_value_holds_own(fv)) {
-    char tn[64];
-    sema_type_name(slot_type, tn, sizeof tn);
-    diag_error(sema->diag, sema_loc(sema, value),
-               "cannot initialize %s by copying a value of type %s that holds "
-               "owned resources: own is move-only (use move() or clone())",
-               what, tn);
-    return false;
-  }
-  return true;
 }
 
 value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {

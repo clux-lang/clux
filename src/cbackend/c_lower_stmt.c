@@ -235,134 +235,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok);
 /* 语句 lowering 入口：先 prelude、再语句主体、最后 postlude。
  * sema 把 `.?'/`.!' 之类的错误处理语法糖展开成挂在语句上的
  * prelude/postlude（临时变量 + if 分支），compiler 也是这么消费的。 */
-/* 闭包值 `ex` 的销毁（内联 env）：按捕获槽位声明序递归释放 own 资源。
- * 嵌套闭包捕获（`func |f: own Inner|`）按同样规则下钻——不能用 clux_free
- * 释放一个闭包结构体值。 */
-static bool emit_closure_free(lower_ctx_t *lc, cir_expr_t *ex,
-                              const type_t *ft, cir_stmt_t **head,
-                              cir_stmt_t **tail) {
-    size_t ncap = func_type_capture_count(ft);
-    for (size_t ci = 0; ci < ncap; ci++) {
-        const type_t *capt = func_type_capture_type(ft, ci);
-        if (!capt) continue;
-        cir_expr_t *envm = cir_expr_member(lc->arena, ex, "env");
-        char fb[64];
-        snprintf(fb, sizeof fb, "clux_f_%zu", ci);
-        cir_expr_t *field =
-            envm ? cir_expr_member(lc->arena, envm,
-                                   copy_arena(lc->arena, fb))
-                 : NULL;
-        if (!field) return false;
-        const type_t *cs = type_strip_quals(capt);
-        if (cs && type_kind_of(cs) == TYPE_KIND_FUNC) {
-            ownership_t oq = type_ownership_of(capt);
-            if (oq == OWN_OWN && func_type_is_closure(cs)) {
-                if (!emit_closure_free(lc, field, cs, head, tail)) return false;
-            }
-            continue; /* 普通函数值 / 借用闭包：无 env 资源 */
-        }
-        ownership_t oq = type_ownership_of(capt);
-        if (cs && (type_kind_of(cs) == TYPE_KIND_PTR ||
-                   type_kind_of(cs) == TYPE_KIND_SLICE)) {
-            if (oq != OWN_OWN && oq != OWN_FATAL) continue;
-            cir_expr_t *target = field;
-            if (type_kind_of(cs) == TYPE_KIND_SLICE)
-                target = cir_expr_slice_data(lc->arena, field);
-            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-            if (!st) return false;
-            lc->unit->uses_alloc = true;
-            st->expr = target;
-            if (*tail) (*tail)->next = st;
-            else *head = st;
-            *tail = st;
-            continue;
-        }
-        /* 含 own 槽位的聚合捕获：按类型生成的 `__destroy_<T>(ref *T)` 递归
-           销毁（不能对结构体值 clux_free）。 */
-        if (cs && type_has_own_slots(cs)) {
-            uint32_t dfid = 0;
-            strslice_t dn = STRSLICE_EMPTY;
-            if (!sema_find_destroy_fn(lc->sema, cs, &dfid, &dn)) continue;
-            const char *cname = module_symbol(lc->arena, lc->unit, "fn_", dn);
-            if (!cname) continue;
-            cir_expr_t *addr = cir_expr_unary(lc->arena, "&", field);
-            cir_expr_t *call = cir_expr_call(lc->arena, cname, NULL);
-            if (!addr || !call) return false;
-            /* 生成函数的 C 形态是 `void f(void *env, T *dv)`。 */
-            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
-            cir_expr_append_arg(call, addr);
-            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-            if (!st) return false;
-            st->expr = call;
-            if (*tail) (*tail)->next = st;
-            else *head = st;
-            *tail = st;
-            continue;
-        }
-        if (oq != OWN_OWN && oq != OWN_FATAL) continue;
-    }
-    return true;
-}
-
-/* defer 捕获结构体是栈上局部；defer 体执行完后必须按槽位释放 own 捕获
-   （否则 `defer |(q: own *i32 = move(p))| {}` 泄漏）。 */
-static void defer_env_free(lower_ctx_t *lc, lower_defer_t *de,
-                           ast_func_def_t *closure, cir_stmt_t **head,
-                           cir_stmt_t **tail) {
-    if (!de || !de->env_name || !closure) return;
-    for (ast_node_t *c = closure->captures; c; c = c->next) {
-        ast_var_def_t *vd = (ast_var_def_t *)c;
-        const type_t *ct = vd->resolved_type;
-        if (!ct) ct = lookup_local(lc, vd->name);
-        if (!ct && vd->type_expr)
-            ct = sema_resolve_type_slot(lc->sema, &vd->type_expr);
-        if (!ct) continue;
-        const type_t *cs = type_strip_quals(ct);
-        ownership_t oq = type_ownership_of(ct);
-        char fb[256];
-        snprintf(fb, sizeof fb, "clux_f_%.*s", (int)vd->name.len,
-                 vd->name.ptr ? vd->name.ptr : "");
-        cir_expr_t *field =
-            cir_expr_member(lc->arena,
-                            cir_expr_ident(lc->arena, de->env_name),
-                            copy_arena(lc->arena, fb));
-        if (!field) continue;
-        if (cs && (type_kind_of(cs) == TYPE_KIND_PTR ||
-                   type_kind_of(cs) == TYPE_KIND_SLICE) &&
-            (oq == OWN_OWN || oq == OWN_FATAL)) {
-            cir_expr_t *target = field;
-            if (type_kind_of(cs) == TYPE_KIND_SLICE)
-                target = cir_expr_slice_data(lc->arena, field);
-            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-            if (!st) return;
-            lc->unit->uses_alloc = true;
-            st->expr = target;
-            append_stmt_chain(head, tail, st);
-            continue;
-        }
-        if (cs && type_kind_of(cs) == TYPE_KIND_FUNC &&
-            func_type_is_closure(cs) && oq == OWN_OWN) {
-            (void)emit_closure_free(lc, field, cs, head, tail);
-            continue;
-        }
-        if (cs && type_has_own_slots(cs)) {
-            uint32_t dfid = 0;
-            strslice_t dn = STRSLICE_EMPTY;
-            if (!sema_find_destroy_fn(lc->sema, cs, &dfid, &dn)) continue;
-            const char *cname = module_symbol(lc->arena, lc->unit, "fn_", dn);
-            if (!cname) continue;
-            cir_expr_t *call = cir_expr_call(lc->arena, cname, NULL);
-            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
-            cir_expr_append_arg(call, cir_expr_unary(lc->arena, "&", field));
-            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-            if (!st) return;
-            st->expr = call;
-            append_stmt_chain(head, tail, st);
-        }
-    }
-}
-
-
 cir_stmt_t *lower_stmt(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     if (!s || lc->failed) return NULL;
     bool noop = s->kind == AST_ASSIGN && ((ast_assign_t *)s)->sugar_noop;
@@ -757,9 +629,7 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             return blk;
         }
         const char *op = a->op ? token_text(lc->arena, a->op) : "=";
-        /* `_ = expr`（discard 赋值）：目标不是真实变量，只求值表达式。
-           若表达式是 own/fatal 的指针/切片/闭包，丢弃时必须释放——
-           否则 `_ = new T{...}` / `_ = move(p)` 会泄漏。 */
+        /* `_ = expr`（discard 赋值）：目标不是真实变量，只求值表达式。 */
         if (a->target && a->target->kind == AST_IDENT &&
             ((ast_ident_t *)a->target)->name.len == 1 &&
             ((ast_ident_t *)a->target)->name.ptr &&
@@ -768,84 +638,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                临时变量 + destroy），语句本身不需要再做任何事，否则会
                重复求值右值（多分配一次 → 泄漏）。 */
             if (a->discard_mode == 2) return NULL;
-            const type_t *vt = infer_expr_type(lc, a->value);
-            const type_t *vs = vt ? type_strip_quals(vt) : NULL;
-            ownership_t vo = vt ? type_ownership_of(vt) : OWN_NONE;
-            if (vs && (a->discard_mode == 3 || vo == OWN_OWN ||
-                       vo == OWN_FATAL)) {
-                if (type_kind_of(vs) == TYPE_KIND_PTR ||
-                    type_kind_of(vs) == TYPE_KIND_SLICE) {
-                    cir_expr_t *ex = lower_expr(lc, a->value);
-                    if (!ex) {
-                        *ok = false;
-                        return NULL;
-                    }
-                    if (type_kind_of(vs) == TYPE_KIND_SLICE)
-                        ex = cir_expr_slice_data(lc->arena, ex);
-                    cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);
-                    if (!st) {
-                        *ok = false;
-                        return NULL;
-                    }
-                    lc->unit->uses_alloc = true;
-                    st->expr = ex;
-                    return st;
-                }
-                if (type_kind_of(vs) == TYPE_KIND_FUNC &&
-                    func_type_capture_count(vs) > 0) {
-                    cir_expr_t *ex = lower_expr(lc, a->value);
-                    if (!ex) {
-                        *ok = false;
-                        return NULL;
-                    }
-                    cir_stmt_t *head = NULL, *tail = NULL;
-                    if (!emit_closure_free(lc, ex, vs, &head, &tail)) {
-                        *ok = false;
-                        return NULL;
-                    }
-                    return head;
-                }
-                if (type_has_own_slots(vs)) {
-                    uint32_t dfid = 0;
-                    strslice_t dn = STRSLICE_EMPTY;
-                    if (sema_find_destroy_fn(lc->sema, vs, &dfid, &dn)) {
-                        const char *cname =
-                            module_symbol(lc->arena, lc->unit, "fn_", dn);
-                        cir_expr_t *ex = lower_expr(lc, a->value);
-                        if (!cname || !ex) {
-                            *ok = false;
-                            return NULL;
-                        }
-                        cir_stmt_t *blk =
-                            cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
-                        cir_stmt_t *tv =
-                            cir_stmt_new(lc->arena, CIR_STMT_VAR);
-                        if (!blk || !tv) {
-                            *ok = false;
-                            return NULL;
-                        }
-                        char nb[48];
-                        snprintf(nb, sizeof nb, "clux_disc_%u",
-                                 lc->assign_seq++);
-                        tv->name = copy_arena(lc->arena, nb);
-                        tv->expr = ex;
-                        cir_stmt_append(blk, tv);
-                        cir_expr_t *call =
-                            cir_expr_call(lc->arena, cname, NULL);
-                        cir_expr_append_arg(call,
-                                            cir_expr_ident(lc->arena, "NULL"));
-                        cir_expr_append_arg(
-                            call, cir_expr_unary(lc->arena, "&",
-                                                 cir_expr_ident(lc->arena,
-                                                                tv->name)));
-                        cir_stmt_t *ds =
-                            cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-                        ds->expr = call;
-                        cir_stmt_append(blk, ds);
-                        return blk;
-                    }
-                }
-            }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
             if (!st) {
                 *ok = false;
@@ -949,47 +741,9 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         }
         /* 赋值点旧值销毁（sema 生成的 `a->destroy`）：compiler 在"右值求值
            之后、写入之前"逐条执行。C 里先把右值存进临时变量，再销毁旧值，
-           最后赋值；否则 `p = new ...` 会先释放再求值，语义错。
-           聚合（struct/option/union/tuple/array）的旧值销毁在 VM 由
-           compound_assign_transfer 完成，sema 不再生成 destroy 链；C 里用
-           类型生成的 `__destroy_<T>` 补上。 */
+           最后赋值；否则 `p = new ...` 会先释放再求值，语义错。 */
         ast_node_t *destroy_chain = a->destroy;
-        cir_stmt_t *synth_destroy = NULL;
-        bool gen_uninit = false;
-        if (a->target && a->target->kind == AST_IDENT) {
-            strslice_t tn = ((ast_ident_t *)a->target)->name;
-            if (tn.ptr && tn.len >= 7 && memcmp(tn.ptr, "__disc_", 7) == 0)
-                gen_uninit = true; /* sema 生成的未初始化临时变量 */
-        }
-        const type_t *tts = tt ? type_strip_quals(tt) : NULL;
-        if (!destroy_chain && !gen_uninit && !a->reinit && tts && st->lhs &&
-            type_has_own_slots(tts) &&
-            (type_kind_of(tts) == TYPE_KIND_STRUCT ||
-             type_kind_of(tts) == TYPE_KIND_OPTION ||
-             type_kind_of(tts) == TYPE_KIND_UNION ||
-             type_kind_of(tts) == TYPE_KIND_TUPLE ||
-             type_kind_of(tts) == TYPE_KIND_ARRAY)) {
-            uint32_t dfid = 0;
-            strslice_t dn = STRSLICE_EMPTY;
-            if (sema_find_destroy_fn(lc->sema, tts, &dfid, &dn)) {
-                const char *cname =
-                    module_symbol(lc->arena, lc->unit, "fn_", dn);
-                if (cname) {
-                    cir_expr_t *call =
-                        cir_expr_call(lc->arena, cname, NULL);
-                    if (call) {
-                        cir_expr_append_arg(call,
-                                            cir_expr_ident(lc->arena, "NULL"));
-                        cir_expr_append_arg(
-                            call, cir_expr_unary(lc->arena, "&", st->lhs));
-                        synth_destroy =
-                            cir_stmt_new(lc->arena, CIR_STMT_EXPR);
-                        if (synth_destroy) synth_destroy->expr = call;
-                    }
-                }
-            }
-        }
-        if ((destroy_chain || synth_destroy) && st->lhs && st->expr) {
+        if (destroy_chain && st->lhs && st->expr) {
             cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
             if (!blk) {
                 *ok = false;
@@ -1005,23 +759,19 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             tv->name = copy_arena(lc->arena, nb);
             tv->expr = st->expr;
             cir_stmt_append(blk, tv);
-            if (destroy_chain) {
-                for (ast_node_t *d = destroy_chain; d; d = d->next) {
-                    bool okd = true;
-                    cir_stmt_t *ds = lower_stmt(lc, d, &okd);
-                    if (!okd) {
-                        *ok = false;
-                        return NULL;
-                    }
-                    for (cir_stmt_t *it = ds; it;) {
-                        cir_stmt_t *nx = it->next;
-                        it->next = NULL;
-                        cir_stmt_append(blk, it);
-                        it = nx;
-                    }
+            for (ast_node_t *d = destroy_chain; d; d = d->next) {
+                bool okd = true;
+                cir_stmt_t *ds = lower_stmt(lc, d, &okd);
+                if (!okd) {
+                    *ok = false;
+                    return NULL;
                 }
-            } else {
-                cir_stmt_append(blk, synth_destroy);
+                for (cir_stmt_t *it = ds; it;) {
+                    cir_stmt_t *nx = it->next;
+                    it->next = NULL;
+                    cir_stmt_append(blk, it);
+                    it = nx;
+                }
             }
             st->expr = cir_expr_ident(lc->arena, tv->name);
             cir_stmt_append(blk, st);
@@ -1435,13 +1185,6 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                没有堆环境可释放。 */
             if (op->kind == AST_IDENT &&
                 is_defer_name(((ast_ident_t *)op)->name)) {
-                /* `FREE __defer_N`：defer 体已执行完，释放栈上捕获结构体
-                   里的 own 槽位（结构体本身随函数返回）。 */
-                lower_defer_t *de =
-                    find_defer_entry(lc, ((ast_ident_t *)op)->name);
-                if (de && de->env_name && de->def) {
-                    defer_env_free(lc, de, de->def, &head, &tail);
-                }
                 continue;
             }
             /* 块内具名函数（含自捕获递归）：C 里是静态函数对象，没有堆
@@ -1460,18 +1203,9 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
             }
             if (ot && type_kind_of(ot) == TYPE_KIND_SLICE) {
                 ex = cir_expr_slice_data(lc->arena, ex);
-            } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC &&
-                       func_type_capture_count(type_strip_quals(ot)) > 0) {
-                /* 闭包值 env 内联：按捕获槽位递归释放 own 资源（嵌套闭包
-                   捕获下钻；env_clone/env_dispose 是静态类型辅助，不在值里）。 */
-                if (!emit_closure_free(lc, ex, type_strip_quals(ot), &head,
-                                       &tail)) {
-                    *ok = false;
-                    return head;
-                }
-                continue;
             } else if (ot && type_kind_of(ot) == TYPE_KIND_FUNC) {
-                /* 普通函数值无 env（空 env 结构），FREE 为 no-op。 */
+                /* 闭包值 env 内联（栈上结构体），普通函数值无 env：
+                   FREE 为 no-op。 */
                 continue;
             }
             cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_FREE);

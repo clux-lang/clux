@@ -8,13 +8,10 @@ extern "C" {
 #include "parser/lexer.h"
 #include <stdbool.h>
 
-/* 指针所有权修饰（m3-design §3）：own *T / ref *T / fatal *T。
- * 指针必须带所有权修饰（无裸指针）。ownership 为修饰关键字 token
- * （"own" / "ref" / "fatal"），base 为被指向类型表达式。
- * 嵌套递归表达递归指针（own *own *T 等，静默阶段语法合法）。 */
+/* 指针类型：`*T`（裸指针）。base_type 为被指向类型表达式。
+ * 嵌套递归表达递归指针（`**T` 等）。 */
 typedef struct {
     ast_node_t  base;
-    token_t    *ownership;  /* 所有权修饰关键字 token（own/ref/fatal） */
     ast_node_t *base_type;  /* 被指向类型表达式 T */
 } ast_ptr_t;
 

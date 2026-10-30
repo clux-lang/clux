@@ -6,7 +6,6 @@
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
-#include "vm/type_ownership.h"
 #include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -175,8 +174,7 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
       ptypes[pn++] = NULL;
       continue;
     }
-    ownership_t pown = type_ownership_of(pt);
-    const char *why = ffi_c_abi_reject_reason_own(pt, pown);
+    const char *why = ffi_c_abi_reject_reason(pt);
     /* 聚合（struct/cunion）要**递归**检查字段：字段本身必须能跨 C ABI。
        用 libffi 描述符构造做校验，失败原因（含字段类型名）直接报在声明处。 */
     char agg_err[256] = {0};
@@ -195,34 +193,21 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
     ptypes[pn++] = pt;
   }
   const type_t *rt = sema->vm->type_void;
-  ownership_t ret_own = OWN_NONE;
   if (efd->return_expr) {
     rt = sema_resolve_type_slot(sema, &efd->return_expr);
-    ret_own = type_ownership_of(rt);
     if (!rt) {
       resolved = false;
     } else if (report) {
-      /* **返回位置不接受 own**：把所有权交给调用方要用 `fatal`（与用户函数
-         返回类型的规则一致）。`own` 只用于参数（把所有权交给 C）。 */
-      if (ret_own == OWN_OWN) {
+      const char *rwhy = ffi_c_abi_reject_reason(rt);
+      char agg_rerr[256] = {0};
+      if (!rwhy && !ffi_c_abi_check_aggregate(rt, sema->vm, agg_rerr,
+                                              sizeof agg_rerr))
+        rwhy = agg_rerr[0] ? agg_rerr : "aggregate field cannot cross the C ABI";
+      if (rwhy) {
         diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
-                   "extern cfunc %.*s::%.*s: return type cannot be 'own': use "
-                   "'fatal T' to hand ownership to the caller (own is for "
-                   "parameters passed to C)",
+                   "extern cfunc %.*s::%.*s: return type: %s",
                    (int)efd->lib_name.len, efd->lib_name.ptr,
-                   (int)efd->name.len, efd->name.ptr);
-      } else {
-        const char *rwhy = ffi_c_abi_reject_reason_own(rt, ret_own);
-        char agg_rerr[256] = {0};
-        if (!rwhy && !ffi_c_abi_check_aggregate(rt, sema->vm, agg_rerr,
-                                                sizeof agg_rerr))
-          rwhy = agg_rerr[0] ? agg_rerr : "aggregate field cannot cross the C ABI";
-        if (rwhy) {
-          diag_error(sema->diag, sema_loc(sema, (ast_node_t *)efd),
-                     "extern cfunc %.*s::%.*s: return type: %s",
-                     (int)efd->lib_name.len, efd->lib_name.ptr,
-                     (int)efd->name.len, efd->name.ptr, rwhy);
-        }
+                   (int)efd->name.len, efd->name.ptr, rwhy);
       }
     }
   }
@@ -231,9 +216,6 @@ static bool check_extern_cfunc(sema_t *sema, ast_func_def_t *efd, bool report) {
   /* 注册限定名函数符号 "<lib>::<name>"（`::` 分支据此解析）。
      **不分配 fid**：无函数体、不进运行时函数队列。 */
   if (qn <= 0 || (size_t)qn >= sizeof(qual)) return resolved;
-  /* **签名携带真实 ownership**（不是硬编码 OWN_NONE）——它是折叠后唯一还能
-     读到所有权的地方，pass1c 的 pass1c_extern_abi 复审依赖它（否则 AST 已折叠
-     成 AST_TYPE_REF，ownership token 丢失，`own *T` 会漏过 C ABI 约束）。 */
   const type_t *sig =
       type_func_sig(sema->vm, ptypes, pn,
                     rt ? rt : sema->vm->type_void, efd->is_variadic);
@@ -279,8 +261,7 @@ static bool check_extern_var(sema_t *sema, ast_var_def_t *evd, bool report) {
     return false;
   }
   if (report) {
-    const char *why =
-        ffi_c_abi_reject_reason_own(vt, type_ownership_of(vt));
+    const char *why = ffi_c_abi_reject_reason(vt);
     /* 数据符号同样按 C ABI 布局暴露：聚合字段里的 share/weak（以及其他无 C
        表示的字段类型）必须在声明处拒绝，不能等到 lowering。 */
     char agg_err[256] = {0};
@@ -313,7 +294,7 @@ static void check_cfunc_definition_abi(sema_t *sema, ast_func_def_t *fn) {
     const type_t *pt = pvd->resolved_type;
     if (!pt && pvd->type_expr) pt = sema_resolve_type_slot(sema, &pvd->type_expr);
     if (!pt) return; /* 类型尚未激活：交给其他诊断，避免级联 */
-    const char *why = ffi_c_abi_reject_reason_own(pt, type_ownership_of(pt));
+    const char *why = ffi_c_abi_reject_reason(pt);
     char agg_err[256] = {0};
     if (!why && !ffi_c_abi_check_aggregate(pt, sema->vm, agg_err,
                                            sizeof agg_err))
@@ -330,15 +311,7 @@ static void check_cfunc_definition_abi(sema_t *sema, ast_func_def_t *fn) {
   if (!fn->return_expr) return;
   rt = sema_resolve_type_slot(sema, &fn->return_expr);
   if (!rt) return;
-  ownership_t rown = type_ownership_of(rt);
-  if (rown == OWN_OWN) {
-    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
-               "cfunc %.*s: return type cannot be 'own': use 'fatal T' to hand "
-               "ownership to the caller (own is for parameters passed to C)",
-               (int)fn->name.len, fn->name.ptr);
-    return;
-  }
-  const char *rwhy = ffi_c_abi_reject_reason_own(rt, rown);
+  const char *rwhy = ffi_c_abi_reject_reason(rt);
   char agg_rerr[256] = {0};
   if (!rwhy && !ffi_c_abi_check_aggregate(rt, sema->vm, agg_rerr,
                                           sizeof agg_rerr))
@@ -645,10 +618,6 @@ void pass2_types(sema_t *sema, bool speculative) {
     if (!sym) continue;
     if (sym->ast && sym->ast != f) continue; /* 理论上不可达：队列只含有效函数 */
 
-    /* 注意：**不能**在函数入口用 "签名已解析" 短路——§5 返回 ref 标注校验
-       （sema_check_ret_ref_annot）每次都要跑：试跑轮里它写进临时缓冲被丢弃，
-       正式轮必须补报。槽位解析本身幂等（首次解析后槽位已折叠为 AST_TYPE_REF）。 */
-
     /* 参数/返回类型槽位解析。**未解析成功则不建签名**（留待下一轮试跑或
        最终正式报错）——否则会用 NULL 参数构造出半有效的签名并把它标记为
        已完成，后续轮次不再重试。
@@ -689,12 +658,6 @@ void pass2_types(sema_t *sema, bool speculative) {
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
       continue; /* 保持未就绪，等下一轮（符号 type 仍为 NULL） */
     }
-    /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。
-       未标注 → 编译错误（调用点无法确定返回值存活上限）。
-       **每次都要跑**：签名可能已在试跑轮解析完毕（下面会跳过重建），但试跑轮
-       的诊断进了临时缓冲被丢弃——正式轮必须补报；试跑轮里也只是做检查、
-       不产生状态。 */
-    sema_check_ret_ref_annot(sema, fn, rt);
     if (sym->type) { /* 签名已就绪（试跑轮已解析）：无需重建 */
       if (params) allocator_free(sema->vm->alloc, (void **)&params);
       continue;

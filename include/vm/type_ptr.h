@@ -30,7 +30,6 @@ const type_t *type_ptr_intern(vm_t *vm, const type_t *base);
 
 /** 取指针类型的被指向类型 T（非指针返回 NULL） */
 static inline const type_t *ptr_type_base(const type_t *t) {
-    t = type_strip_ownership(t);
     return type_is_ptr(t) ? ((const ptr_type_t *)t)->base_type : NULL;
 }
 
@@ -57,13 +56,6 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 bool ptr_type_needs_scan(const type_t *t);
 
 void ptr_free_owned_recursive(vm_t *vm, const type_t *t, void *data);
-
-/** 按槽位所有权销毁一个槽位里的旧值。 */
-void ptr_free_slot_value(vm_t *vm, const type_t *slot_type, ownership_t own,
-                         void *data);
-
-/** 只释放这一个指针/切片的堆块，不递归。 */
-void ptr_free_block_only(vm_t *vm, const type_t *t, void *data);
 
 /** 递归清空 data 块内 own/fatal 指针的 ptr（不释放）。 */
 void ptr_clear_owned_recursive(vm_t *vm, const type_t *t, void *data);

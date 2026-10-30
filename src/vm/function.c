@@ -4,7 +4,6 @@
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/scope.h"
-#include "vm/type_ownership.h"
 #include "core/arena.h"
 #include "core/panic.h"
 #include "core/vec.h"
@@ -154,8 +153,6 @@ func_t *func_instantiate_raw(vm_t *vm, func_t *base) {
     fn->id = base->id;
     fn->name = base->name;
     fn->capture_type = base->capture_type;
-    fn->env_dispose_fid = base->env_dispose_fid;
-    fn->env_clone_fid = base->env_clone_fid;
     fn->ct_literal = base->ct_literal;
     if (env_size > 0) {
         fn->env = (uint8_t *)fn + off;
@@ -180,7 +177,6 @@ const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
     value_t *casted = value_implicit_cast(vm, val, f->type);
     if (value_is_error(vm, casted)) return "closure capture type mismatch";
     void *dst = (uint8_t *)fn->env + f->offset;
-    ptr_free_slot_value(vm, f->type, type_ownership_of(f->type), dst);
     if (f->type->size) memcpy(dst, value_data(casted), f->type->size);
     return NULL;
 }

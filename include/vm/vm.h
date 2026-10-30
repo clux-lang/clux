@@ -102,9 +102,7 @@ typedef struct vm_t {
     uint32_t type_id_next; /* 程序类型 id 分配计数器（type_id_alloc 维护） */
 
     /* 注：原 `fatal_bases`（fatal 变体 → base 的派生关系登记表）已随所有权重构
-       删除——fatal 不再是独立的类型变体，而是 value/symbol 层的 ownership 状态，
-       所以"变体身份折回"这个问题整体不存在了（fatal 就是类型修饰）。
-       详见 docs/ownership-refactor.md。 */
+       删除——编译期所有权（own/ref/fatal）已从语言移除，fatal 不是独立类型变体。 */
 
     /* ---- 函数对象池（func_t / bcode_function_t*，vm 统一持有生命周期） ---- */
     /* 所有函数值共享同一 func_t*（clone 浅拷贝指针），因此 func_t 不能由

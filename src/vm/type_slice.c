@@ -1,5 +1,4 @@
 #include "vm/type_slice.h"
-#include "vm/type_ownership.h"
 #include "vm/type_ptr.h"
 #include "vm/type_array.h"
 #include "vm/vm.h"
@@ -27,21 +26,11 @@
 
 /* 切片元素类型是否需要递归扫描（内嵌 own/share/weak 字段） */
 bool slice_type_needs_scan(const type_t *t);
-void slice_free_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
 void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
 
 bool slice_type_needs_scan(const type_t *t) {
     /* 委托 ptr_type_needs_scan——同一套递归扫描判定 */
     return ptr_type_needs_scan(t);
-}
-
-/* 释放切片元素的内嵌 own 字段（不释放堆块本身——调用方负责） */
-void slice_free_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len) {
-    if (!vm || !elem || !ptr || len == 0) return;
-    if (!slice_type_needs_scan(elem)) return;
-    uint8_t *p = (uint8_t *)ptr;
-    for (uint64_t i = 0; i < len; i++, p += elem->size)
-        ptr_free_owned_recursive(vm, elem, p);
 }
 
 /* 清空切片元素的内嵌 own 指针（不释放——接管辅助） */

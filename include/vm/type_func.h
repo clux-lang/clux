@@ -90,14 +90,12 @@ const type_t *type_func_closure(vm_t *vm, const type_t *const *params,
 
 /** 是否闭包类型（携带捕获列表）。 */
 static inline bool func_type_is_closure(const type_t *t) {
-    t = type_strip_ownership(t);
     return t && t->kind == TYPE_KIND_FUNC &&
            ((const func_type_t *)t)->capture_count > 0;
 }
 
 /** 闭包捕获槽位数（非闭包返回 0）。 */
 static inline size_t func_type_capture_count(const type_t *t) {
-    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_FUNC)
                ? ((const func_type_t *)t)->capture_count
                : 0;
@@ -105,7 +103,6 @@ static inline size_t func_type_capture_count(const type_t *t) {
 
 /** 第 i 个捕获槽位类型（越界/非闭包返回 NULL）。 */
 static inline const type_t *func_type_capture_type(const type_t *t, size_t i) {
-    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_FUNC) return NULL;
     const func_type_t *ft = (const func_type_t *)t;
     return (i < ft->capture_count) ? ft->capture_types[i] : NULL;
@@ -113,7 +110,6 @@ static inline const type_t *func_type_capture_type(const type_t *t, size_t i) {
 
 /** 取 func type 的返回类型（非 func type 返回 NULL） */
 static inline const type_t *func_type_return(const type_t *t) {
-    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_FUNC)
                ? ((const func_type_t *)t)->sig.return_type
                : NULL;
@@ -121,7 +117,6 @@ static inline const type_t *func_type_return(const type_t *t) {
 
 /** 取 func type 的参数个数（非 func type 返回 0） */
 static inline size_t func_type_param_count(const type_t *t) {
-    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_FUNC)
                ? ((const func_type_t *)t)->sig.param_count
                : 0;
@@ -129,7 +124,6 @@ static inline size_t func_type_param_count(const type_t *t) {
 
 /** 取 func type 第 i 个参数类型（越界 / 非 func type 返回 NULL） */
 static inline const type_t *func_type_param(const type_t *t, size_t i) {
-    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_FUNC) return NULL;
     const func_type_t *ft = (const func_type_t *)t;
     return (i < ft->sig.param_count) ? ft->sig.params[i] : NULL;
@@ -137,7 +131,6 @@ static inline const type_t *func_type_param(const type_t *t, size_t i) {
 
 /** func type 是否可变参数（非 func type 返回 false） */
 static inline bool func_type_is_variadic(const type_t *t) {
-    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_FUNC)
                ? ((const func_type_t *)t)->sig.is_variadic
                : false;
@@ -145,7 +138,6 @@ static inline bool func_type_is_variadic(const type_t *t) {
 
 /** func type 是否已密封（非 func type 返回 false；sealed 定义在基类 type_t） */
 static inline bool func_type_is_sealed(const type_t *t) {
-    t = type_strip_ownership(t);
     return type_is_sealed(t);
 }
 

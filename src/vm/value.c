@@ -1,5 +1,4 @@
 #include "vm/value.h"
-#include "vm/type_ownership.h"
 #include "vm/vm.h"
 #include "vm/type_error.h"
 #include "vm/type_interrupt.h"
@@ -95,16 +94,6 @@ const scope_frame_t *value_frame(const value_t *v) {
 
 scope_t *value_scope(const value_t *v) {
     return (v && v->frame) ? scope_from_frame(v->frame) : NULL;
-}
-
-ownership_t value_type_ownership(const value_t *v) {
-    return v ? type_ownership_of(v->type) : OWN_NONE;
-}
-
-void value_set_type_ownership(vm_t *vm, value_t *v, ownership_t own) {
-    if (!v || !v->type) return;
-    const type_t *core = type_strip_ownership(v->type);
-    v->type = type_ownership_apply(vm, own, core);
 }
 
 bool value_is_void(const value_t *v) {
@@ -437,24 +426,6 @@ void value_dispose(vm_t *vm, value_t *v) {
     }
 }
 
-/* fatal 变体 → 同布局非 fatal 类型的接管转换（见 value.h） */
-value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
-                               bool (*cfg)(vm_t *, const type_t *,
-                                           const type_t *)) {
-    if (!vm || !v || !target || !cfg) return NULL;
-    const type_t *src = v->type;
-    if (!src || value_type_ownership(v) != OWN_FATAL) return NULL;
-    if (src->kind != target->kind) return NULL;   /* 只认同 kind 的 fatal 变体 */
-    if (src->size != target->size) return NULL;   /* 布局必须一致才能重贴标签 */
-    if (!cfg(vm, target, src)) return NULL;       /* 各类型的布局兼容判定 */
-    if (value_is_shadow(v)) return value_make_shadow(vm, target);
-    void *data = value_alloc_data_copy(vm->alloc, target, v->data);
-    /* 源清空其 own/fatal 指针：所有权随构造转移给新值（防双释放）。
-       源的 data 块仍由作用域在退出时释放（裸字节块，无副作用）。 */
-    ptr_clear_owned_recursive(vm, (type_t *)src, v->data);
-    return value_make(vm, target, data);
-}
-
 /* 隐式转换/身份拷贝的 data 分配：持有资源才对象图克隆（见 vm/value_deepcopy.h）。
    所有权纯编译期——复合类型字段禁止携带指针/切片，只有指针/切片类型持有资源，
    但指针/切片的深拷贝由 CLONE 指令（ptr_clone_block）负责，不走此路径。
@@ -464,31 +435,12 @@ void *value_alloc_data_own(vm_t *vm, const type_t *t, const void *src_data) {
     return value_alloc_data_copy(vm->alloc, t, src_data);
 }
 
-/* 同布局重贴标签：把 v 的字节按 target 解释（**转移**语义）。见
-   vm/value_deepcopy.h 的 value_relabel_into。 */
-value_t *value_relabel_into(vm_t *vm, value_t *v, const type_t *target) {
-    if (!vm || !v || !target || !value_type(v)) return NULL;
-    const type_t *src_t = value_type(v);
-    if (src_t == target) return v;
-    /* 只对"逐字节同布局"成立（同 kind 且同大小），否则拒绝——把字节按错误布局
-       解释会读出垃圾。 */
-    if (src_t->kind != target->kind || src_t->size != target->size) return NULL;
-    if (value_is_shadow(v)) {
-        v->type = target;
-        return v;
-    }
-    /* **就地**换 type_t：源已经是转移产物（value_move 刚分配好的独立块），
-       直接改类型标记即可。此处**不能**再分配一份 data 再 memcpy——那会留下
-       一块没人释放的旧块（实测 leak 报告），而且多一次无谓的 O(size) 拷贝。 */
-    v->type = target;
-    return v;
-}
-
 /* 聚合块写入：持有资源的字段深拷贝（见 vm/value_owncopy.h）。
    所有权纯编译期——复合类型字段禁止携带指针/切片，ft 永远不含 own 资源，
    直接 memcpy 即可。保留 ptr_clone_block 路径供未来扩展。 */
 void *value_own_copy_into(vm_t *vm, void *dst, const value_t *src,
                           const type_t *ft) {
+    (void)vm;
     uint8_t *p = (uint8_t *)dst;
     if (!dst || !src || !ft || !value_data(src)) return p;
     memcpy(p, value_data(src), ft->size);
@@ -557,43 +509,10 @@ value_t *value_implicit_qualify(vm_t *vm, value_t *v, const type_t *target) {
     return value_make(vm, target, data);
 }
 
-/* 所有权修饰之间的隐式转换（布局相同，纯重贴标签）：
- *   fatal T → own T   接管将亡值（"消费"）
- *   fatal T → ref T   以借用视图消费（调用方立即失去所有权）
- *   own T   → ref T   借出（源仍拥有）
- *   own/fatal T → T   只读视图（旧模型的等价落点）
- * 反向（ref → own 等）不允许：那会凭空产生所有权。
- * 运行期类型已经剥离所有权，所以本分支只在编译期 shadow 路径生效。 */
-static bool ownership_cast_ok(ownership_t from, ownership_t to) {
-    if (from == to) return true;
-    if (from == OWN_FATAL)
-        return to == OWN_OWN || to == OWN_REF || to == OWN_NONE;
-    if (from == OWN_OWN) return to == OWN_REF || to == OWN_NONE;
-    if (from == OWN_REF) return to == OWN_NONE;
-    /* 裸类型 → 所有权修饰：运行期构造/写入带修饰槽位时必须允许（所有权是
-       编译期契约，sema 已校验来源；这里只做同布局重贴标签）。 */
-    if (from == OWN_NONE) return true;
-    return false;
-}
-
 value_t *value_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (value_is_error(vm, v)) return v;
     if (!v || !v->type) {
         return value_make_error(vm, "cannot implicitly cast void");
-    }
-    if (v->type != target) {
-        ownership_t from = type_ownership_of(v->type);
-        ownership_t to = type_ownership_of(target);
-        /* 裸类型相同（布局等价）且所有权方向允许：纯重贴标签。
-           即使两侧都是 OWN（例如槽位类型与表达式类型来自不同 intern 实例），
-           也直接落到目标类型——所有权是编译期契约，运行期只认布局。 */
-        if (type_strip_ownership(v->type) == type_strip_ownership(target) &&
-            ownership_cast_ok(from, to)) {
-            if (value_is_shadow(v)) return value_make_shadow(vm, target);
-            /* 运行期：两者裸类型相同，重贴标签即可（所有权是编译期概念）。 */
-            v->type = target;
-            return v;
-        }
     }
     if (v->type == target) {
         /* 类型相同：把值 materialize 到当前作用域。**必须用
@@ -637,14 +556,3 @@ value_t *value_explicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     return value_make_error(vm, "type does not support explicit cast");
 }
 
-/* 所有权转移 = 纯 memcpy；堆释放由 sema 生成的 FREE 负责。 */
-value_t *value_move(vm_t *vm, value_t *v) {
-    if (!v) return v;
-    if (value_is_shadow(v)) return value_make_shadow(vm, value_type(v));
-    const type_t *t = value_type(v);
-    if (!t || !value_data(v)) return v;
-    void *data = value_alloc_data(vm->alloc, t);
-    if (!data) return value_make_error(vm, "out of memory moving value");
-    memcpy(data, value_data(v), t->size);
-    return value_make(vm, t, data);
-}

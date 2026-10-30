@@ -6,7 +6,6 @@
 #include "core/arena.h"
 #include "core/vec.h"
 #include "vm/type.h"
-#include "vm/type_ownership.h"
 #include "vm/type_array.h"
 #include "vm/type_cfunc.h"
 #include "vm/type_cunion.h"
@@ -97,16 +96,6 @@ const char *sema_reflect_kind_name(const type_t *T) {
   }
 }
 
-const char *sema_reflect_ownership_name(ownership_t own) {
-  switch (own) {
-  case OWN_OWN: return "own";
-  case OWN_REF: return "ref";
-  case OWN_FATAL: return "fatal";
-  case OWN_NONE:
-  default: return "none";
-  }
-}
-
 static bool key_is(strslice_t k, const char *lit) {
   size_t n = strlen(lit);
   return k.len == n && k.ptr && memcmp(k.ptr, lit, n) == 0;
@@ -129,7 +118,7 @@ static bool key_has_index(strslice_t key) {
 bool sema_reflect_is_key(strslice_t key) {
   static const char *kAll[] = {
       "name",           "size",             "align",
-      "kind",           "ownership",        "field_count",
+      "kind",           "field_count",
       "field_name",
       "field_type",     "field_offset",     "embed_count",
       "embed_type",     "method_count",     "method_name",
@@ -244,11 +233,6 @@ static bool lookup_common(const type_t *T, strslice_t key, sema_rv_t *out,
   }
   if (key_is(key, "align")) {
     rv_usize(out, (uint64_t)T->align);
-    return true;
-  }
-  if (key_is(key, "ownership")) {
-    const char *own = sema_reflect_ownership_name(type_ownership_of(T));
-    rv_str(out, strslice_from_bytes(own, strlen(own)));
     return true;
   }
   if (key_is(key, "kind")) {
@@ -567,7 +551,7 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
   /* ---- func / cfunc ---- */
   if (type_kind_of(T) == TYPE_KIND_FUNC || type_kind_of(T) == TYPE_KIND_CFUNC) {
     const func_sig_t *sig =
-        type_kind_of(T) == TYPE_KIND_FUNC ? &((const func_type_t *)type_strip_ownership(T))->sig
+        type_kind_of(T) == TYPE_KIND_FUNC ? &((const func_type_t *)T)->sig
                                   : cfunc_type_sig(T);
     if (sig) {
       if (key_is(key, "param_count")) {

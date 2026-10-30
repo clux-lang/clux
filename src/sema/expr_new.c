@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -207,15 +206,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
-            /* own 槽位接收规则（§0.4）：own 字段只接 FATAL；非 own 复合
-               字段也不得用 copy 收下 OWN 聚合（否则内外两个聚合各释放一次
-               内嵌堆块）。`new own *i32{p}` 必须写 `new own *i32{move(p)}`。 */
-            char what[96];
-            snprintf(what, sizeof what, "struct field '%.*s'",
-                     (int)st->fields[i].name.len, st->fields[i].name.ptr);
-            if (!sema_check_slot_flow(sema, type_ownership_of(st->fields[i].type), ft, value,
-                                      fv, what))
-              continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -287,11 +277,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && et) {
-            char what[96];
-            snprintf(what, sizeof what, "tuple element %zu", i);
-            if (!sema_check_slot_flow(sema, type_ownership_of(tt->elems[i].type), et, value,
-                                      fv, what))
-              continue;
             value_t *dst = value_make_shadow(sema->vm, et);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -358,13 +343,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
           }
           if (fv && !value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID) && et) {
-            char what[96];
-            snprintf(what, sizeof what, "array element %zu", idx);
-            if (!sema_check_slot_flow(sema, type_ownership_of(array_type_elem(t)), et,
-                                      f, fv, what)) {
-              idx += 1;
-              continue;
-            }
             value_t *dst = value_make_shadow(sema->vm, et);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
@@ -406,12 +384,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
-            } else if (ft != t) {
-              /* inner 槽位接收规则（?own *T 只接 FATAL 等） */
-              char what[96];
-              snprintf(what, sizeof what, "optional inner");
-              sema_check_slot_flow(sema, type_ownership_of(type_option_inner(t)), inner,
-                                   f, fv, what);
             }
           }
         }
@@ -436,7 +408,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
         }
         ast_construct_field_t *cf = (ast_construct_field_t *)f;
         const type_t *mt = NULL;
-        ownership_t slot_own = OWN_NONE;
         if (type_kind_of(t) == TYPE_KIND_UNION) {
           const int mi = union_type_find_member(t, cf->name);
           if (mi < 0) {
@@ -454,7 +425,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
           const union_member_t *m = union_type_member(t, (size_t)mi);
           if (m && m->payload_type) {
             mt = m->payload_type;
-            slot_own = type_ownership_of(m->payload_type);
           }
         } else {
           const int mi = cunion_type_find_member(t, cf->name);
@@ -470,9 +440,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
           const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
           if (m && m->type) {
             mt = m->type;
-            /* cunion 不参与所有权运算（无 tag，运行期无法判定活跃成员）：
-               成员槽位一律按 NONE 处理（与既有语义一致）。 */
-            slot_own = OWN_NONE;
           }
         }
         if (!mt) return val_void(sema);
@@ -497,12 +464,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
                        type_kind_of(t) == TYPE_KIND_UNION ? "union" : "cunion", tn);
           }
         } else {
-          char what[96];
-          snprintf(what, sizeof what, "%s field '%.*s'",
-                   type_kind_of(t) == TYPE_KIND_UNION ? "union" : "cunion",
-                   (int)cf->name.len, cf->name.ptr);
-          if (!sema_check_slot_flow(sema, slot_own, mt, value, fv, what))
-            return val_void(sema);
           value_t *dst = value_make_shadow(sema->vm, mt);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -544,23 +505,6 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
           diag_error(sema->diag, sema_loc(sema, f),
                      "new: cannot initialize scalar with nil");
         } else if (fv && t) {
-          /* R1（own 不可 copy，§3.1）：new 被指向类型是 own 指针时，值
-             必须是 fatal 将亡值（move/clone 产物或函数返回值）。直接传
-             own/ref 变量 = 隐式 copy → 新堆块与外变量两个 own 指向同一
-             堆块 → double free（new own *i32{p} 必须写
-             new own *i32{move(p)}）。 */
-          /* 所有权迁移：t 是 new 的目标类型（无对应 symbol/value），
-             type_is_own(t) 恒为 false；fatal 判据改走值层。整体条件恒假，
-             保留结构以待目标类型 ownership 落地。 */
-          if (false && !sema_value_is_fatal(fv)) {
-            char fn[64];
-            sema_type_name(value_type(fv), fn, sizeof fn);
-            diag_error(sema->diag, sema_loc(sema, f),
-                       "new: cannot copy %s into own pointer target (use "
-                       "move() or clone())",
-                       fn);
-            return val_void(sema);
-          }
           value_t *dst = value_make_shadow(sema->vm, t);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -592,10 +536,9 @@ value_t *ex_make(sema_t *sema, ast_node_t **node,
          sema 校验 init 数量 + 逐元素可赋值性，运行期 MAKE 指令分配 + 布值。 */
       ast_make_t *n = (ast_make_t *)*node;
 
-      /* 解析元素类型 T（所有权已编码在类型上） */
+      /* 解析元素类型 T */
       const type_t *et = sema_resolve_type_slot(sema, &n->elem_type);
       if (!et) return val_void(sema);
-      ownership_t elem_own = type_ownership_of(et);
 
       /* 求值长度 N（shadow 求值，运行期可变） */
       value_t *lenv = sema_expr(sema, &n->length, scope);
@@ -624,13 +567,6 @@ value_t *ex_make(sema_t *sema, ast_node_t **node,
           value_t *fv = sema_expr(sema, &((ast_fill_t *)it)->value, scope);
           if (is_poison(sema, fv))
             return val_void(sema);
-          if (!sema_check_slot_flow(sema, elem_own, et,
-                                    ((ast_fill_t *)it)->value, fv,
-                                    "make element")) {
-            total += cnt;
-            link = &it->next;
-            continue;
-          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];
@@ -645,12 +581,6 @@ value_t *ex_make(sema_t *sema, ast_node_t **node,
           it = *link; /* 折叠可能替换节点：刷新游标，后续 it->next 才有效 */
           if (is_poison(sema, fv))
             return val_void(sema);
-          if (!sema_check_slot_flow(sema, elem_own, et, it, fv,
-                                    "make element")) {
-            total += 1;
-            link = &it->next;
-            continue;
-          }
           value_t *dst = value_make_shadow(sema->vm, et);
           if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
             char tn[64], fn[64];

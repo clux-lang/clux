@@ -82,8 +82,6 @@ ast_node_t *parse_var_def(parser_t *p) {
     ast_node_t *node = ast_var_def_new(p->arena, tb, p->pos);
     ((ast_var_def_t *)node)->name      = name;
     ((ast_var_def_t *)node)->type_expr = type_expr;
-    /* 所有权必须在类型槽位折叠前缓存（折叠后 ownership token 丢失）——
-       extern 声明（extern cfunc/var）到 Pass 1c 复审 ABI 时还要用它。 */
     ((ast_var_def_t *)node)->init      = init;
     return node;
 }

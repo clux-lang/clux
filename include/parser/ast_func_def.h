@@ -51,18 +51,6 @@ typedef struct {
        `SET_FUNC_CAPTURES <id>`。 */
     uint32_t       capture_type_id;
 
-    /* 闭包 env 的**生成函数** id（"闭包 = 捕获聚合结构体 + vtable"）：
-       - env_dispose_fid：`__destroy_<env>(dv: ref *Env)` —— 按 capture_type 的
-         槽位所有权释放 env 里的 own 捕获（VM 在闭包销毁时调用）；
-       - env_clone_fid  ：`__clone_<env>(dv: ref *Env): fatal Env` —— 深拷贝
-         env（VM 在闭包 clone 时调用，结果拷贝进新实例的 env 块）。
-       0 = 无捕获（无 env）。这两个函数由 sema 在收尾阶段按需生成（与普通复合
-       类型的销毁/clone 函数同一套生成器），compiler 在 hoist 随
-       `SET_FUNC_CAPTURES` 一起写入函数对象——于是 clone/free 不再需要运行期
-       类型内省（也就不再需要 `__deep_clone`）。 */
-    uint32_t       env_dispose_fid;
-    uint32_t       env_clone_fid;      /* 签名类型 id（sema 3b 填充，compiler LOAD_TYPE <sig_id> 用；
-                                全局函数经 sema_type_register 分配，局部函数提升时解析分配） */
     uint32_t    fid;         /* 函数 id（compiler 预扫描分配，LOAD_FUNCTION <fid> 用；
                                 hoist 函数注册区构造时 BIND_FUNC <fid> 携带） */
 

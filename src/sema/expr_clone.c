@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -80,7 +79,7 @@
 #include "sema_expr_internal.h"
 
 static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope, const type_t *t, ast_node_t *access);
-static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope, const type_t *t, ast_node_t *access, ownership_t slot_own, bool top_level);
+static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope, const type_t *t, ast_node_t *access, bool top_level);
 static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope, const type_t *t, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
 
 
@@ -287,35 +286,19 @@ static ast_node_t *clone_construct(sema_t *sema, const type_t *t,
   return n;
 }
 
-/* 该**槽位/值**是否需要深拷贝（申请新块）——与销毁序列的槽位规则一致：
-   叶子（ptr/slice）看槽位所有权（顶层 clone 恒深拷贝，与旧 CLONE 语义一致）；
-   复合看是否含 own 槽位。 */
-static bool clone_needs_deep(const type_t *t, ownership_t slot_own,
-                             bool top_level) {
+/* 该值是否需要深拷贝（申请新块）：指针/切片/闭包在**顶层** clone 时恒深拷贝；
+   复合值没有独立堆块（复合类型禁止携带指针/切片），只做普通拷贝。 */
+static bool clone_needs_deep(const type_t *t, bool top_level) {
   if (!t) return false;
   const type_t *s = type_strip_quals(t);
   switch (s->kind) {
     case TYPE_KIND_PTR:
     case TYPE_KIND_SLICE:
-      return top_level || slot_own == OWN_OWN;
+      return top_level;
     case TYPE_KIND_FUNC:
-      /* 闭包 = 捕获聚合结构体：own 槽位（含 own 捕获）必须深拷贝 env；
-         ref/none 槽位是借用/共享引用 → 普通拷贝。字段未标 own、但捕获里
-         含 own 资源时同样是"拥有 env"，必须深拷贝。 */
-      if (top_level || slot_own == OWN_OWN) return true;
-      {
-        size_t nc = func_type_capture_count(s);
-        for (size_t i = 0; i < nc; i++) {
-          const type_t *ct = func_type_capture_type(s, i);
-          if (!ct) continue;
-          if (type_ownership_of(ct) == OWN_OWN ||
-              type_has_own_slots(type_strip_ownership(ct)))
-            return true;
-        }
-      }
-      return false;
+      return top_level;
     default:
-      return type_has_own_slots(t);
+      return false;
   }
 }
 
@@ -374,11 +357,9 @@ static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
   const type_t *pt0 = (kind == 2) ? k : type_ptr_intern(sema->vm, k);
   if (!pt0) return NULL;
   /* 形参是借用（ref）、返回是将亡值（fatal）：所有权写进类型。 */
-  const type_t *pt = type_ownership_apply(sema->vm, OWN_REF, pt0);
-  if (!pt) return NULL;
+  const type_t *pt = pt0;
   const type_t *ret0 = (kind == 0) ? k : pt0;
-  const type_t *ret = type_ownership_apply(sema->vm, OWN_FATAL, ret0);
-  if (!ret) return NULL;
+  const type_t *ret = ret0;
 
   ast_func_def_t *fn = (ast_func_def_t *)arena_calloc(
       sema->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
@@ -432,12 +413,11 @@ static ast_node_t *clone_fn_callee(sema_t *sema, uint8_t kind,
   if (kind == 0) {
     ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
     if (deref) ((ast_deref_t *)deref)->operand = vid;
-    expr = deref ? gen_clone_expr_impl(sema, sema->global_scope, k, deref,
-                                       OWN_OWN, true)
+    expr = deref ? gen_clone_expr_impl(sema, sema->global_scope, k, deref, true)
                  : NULL;
   } else if (kind == 1) {
     /* 形参就是 *U 指针值；impl 的 PTR 分支按 `new U{…}` 生成 */
-    expr = gen_clone_expr_impl(sema, sema->global_scope, pt, vid, OWN_OWN, true);
+    expr = gen_clone_expr_impl(sema, sema->global_scope, pt, vid, true);
   } else {
     expr = gen_clone_slice(sema, sema->global_scope, k, vid);
   }
@@ -534,12 +514,12 @@ ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value) {
  * clone 函数，否则返回 access（普通拷贝）。 */
 static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
                                   const type_t *t, ast_node_t *access,
-                                  ownership_t slot_own, bool top_level) {
+                                  bool top_level) {
   (void)scope;
   if (!t || !access) return NULL;
   const type_t *s = type_strip_quals(t);
   if (!s) return NULL;
-  if (!clone_needs_deep(s, slot_own, top_level)) return access;
+  if (!clone_needs_deep(s, top_level)) return access;
   switch (s->kind) {
   case TYPE_KIND_PTR: {
     const type_t *base = ptr_type_base(s);
@@ -558,16 +538,10 @@ static ast_node_t *gen_clone_expr(sema_t *sema, sema_scope_t *scope,
   }
   case TYPE_KIND_OPTION:
   case TYPE_KIND_UNION:
-    /* 联合/可空的 tag 判定只能在运行期 → 值克隆函数体内用三元表达式处理 */
-    if (type_has_own_slots(s))
-      return gen_clone_call(sema, 0, s, access, /*by_address=*/true);
-    return access;
   case TYPE_KIND_STRUCT:
   case TYPE_KIND_TUPLE:
   case TYPE_KIND_ARRAY:
-    if (type_has_own_slots(s))
-      return gen_clone_call(sema, 0, s, access, /*by_address=*/true);
-    return access;
+    return access;   /* 无独立堆块：普通拷贝 */
   default:
     return access;   /* 标量 / cunion 等：普通拷贝 */
   }
@@ -580,7 +554,6 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   if (!sema->cur_stmt) return NULL; /* 无语句上下文：交给运行期 __deep_clone 兜底 */
 
   const type_t *elem = slice_type_elem(t);
-  ownership_t eown = type_ownership_of(slice_type_elem(t));
   uint32_t n = sema->clone_seq++;
   char nbuf[64], ibuf[64];
   snprintf(nbuf, sizeof nbuf, "__cl_%u", n);
@@ -589,13 +562,12 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   strslice_t iname = clone_cstr(sema, ibuf);
   if (!vname.ptr || !iname.ptr) return NULL;
 
-  /* 临时变量符号：own（结果被 TAKE 移出）+ moved=true（块退出不生成 FREE） */
+  /* 临时变量符号：结果被 TAKE 移出 */
   sema_symbol_t sym;
   memset(&sym, 0, sizeof sym);
   sym.kind       = SEMA_SYM_VAR;
   sym.type       = t;
   sym.flow_init  = true;
-  sym.moved      = true;
   sym.is_active  = true;
   sym.own_scope  = scope;
   if (!sema_scope_define(scope, vname, &sym))
@@ -621,7 +593,7 @@ static ast_node_t *gen_clone_slice(sema_t *sema, sema_scope_t *scope,
   ast_node_t *elem_access = clone_index(sema, access,
                                         clone_ident(sema, iname));
   ast_node_t *elem_clone = elem_access
-      ? gen_clone_expr(sema, scope, elem, elem_access, eown, false)
+      ? gen_clone_expr(sema, scope, elem, elem_access, false)
       : NULL;
   ast_node_t *lhs = clone_index(sema, clone_ident(sema, vname),
                                 clone_ident(sema, iname));
@@ -662,10 +634,9 @@ static ast_node_t *gen_clone_option(sema_t *sema, sema_scope_t *scope,
                                     bool as_new) {
   const option_type_t *ot = (const option_type_t *)t;
   const type_t *inner = ot->inner;
-  ownership_t iown = type_ownership_of(ot->inner);
   ast_node_t *unwrap = clone_unwrap(sema, access);
   ast_node_t *some_val = unwrap
-      ? gen_clone_expr(sema, scope, inner, unwrap, iown, false)
+      ? gen_clone_expr(sema, scope, inner, unwrap, false)
       : NULL;
   ast_node_t *some = clone_construct(sema, t, some_val, 0, as_new);
   ast_node_t *nil = ast_nil_new(sema->arena, 0, 0);
@@ -687,8 +658,7 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
     if (!m->payload_type) continue;
     ast_node_t *mv = clone_member(sema, access, m->name);
     ast_node_t *payload = mv
-        ? gen_clone_expr(sema, scope, m->payload_type, mv,
-                             type_ownership_of(m->payload_type), false)
+        ? gen_clone_expr(sema, scope, m->payload_type, mv, false)
         : NULL;
     ast_node_t *field = payload ? clone_field(sema, m->name, payload) : NULL;
     ast_node_t *branch = field
@@ -710,10 +680,10 @@ static ast_node_t *gen_clone_union(sema_t *sema, sema_scope_t *scope,
    深拷贝判定为假时返回 access 本身（普通拷贝：借用/字节拷贝）。 */
 static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
                                        const type_t *t, ast_node_t *access,
-                                       ownership_t slot_own, bool top_level) {
+                                       bool top_level) {
   if (!t || !access) return NULL;
   const type_t *s = type_strip_quals(t);
-  if (!clone_needs_deep(s, slot_own, top_level)) return access;
+  if (!clone_needs_deep(s, top_level)) return access;
 
   switch (s->kind) {
     case TYPE_KIND_PTR: {
@@ -731,8 +701,7 @@ static ast_node_t *gen_clone_expr_impl(sema_t *sema, sema_scope_t *scope,
                      : gen_clone_union(sema, scope, base, deref, true);
         }
         case TYPE_KIND_SLICE: {
-          ast_node_t *inner = gen_clone_expr(sema, scope, base, deref,
-                                             OWN_OWN, true);
+          ast_node_t *inner = gen_clone_expr(sema, scope, base, deref, true);
           return inner ? clone_construct(sema, base, inner, 0, true) : NULL;
         }
         case TYPE_KIND_STRUCT:
@@ -797,8 +766,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
       const struct_field_t *f = &st->fields[i];
       if (!f->type || !f->name.ptr) continue;
       ast_node_t *mem = clone_member(sema, access, f->name);
-      ast_node_t *e = mem ? gen_clone_expr(sema, scope, f->type, mem,
-                                           type_ownership_of(f->type), false)
+      ast_node_t *e = mem ? gen_clone_expr(sema, scope, f->type, mem, false)
                           : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }
@@ -814,8 +782,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
       if (!el->type) continue;
       ast_node_t *ix = clone_int_lit(sema, (uint64_t)i);
       ast_node_t *e = ix ? gen_clone_expr(sema, scope, el->type,
-                                          clone_index(sema, access, ix),
-                                          type_ownership_of(el->type), false)
+                                          clone_index(sema, access, ix), false)
                          : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }
@@ -831,8 +798,7 @@ static bool gen_clone_slots(sema_t *sema, sema_scope_t *scope,
     for (size_t i = 0; i < len; i++) {
       ast_node_t *ix = clone_int_lit(sema, (uint64_t)i);
       ast_node_t *e = ix ? gen_clone_expr(sema, scope, at->elem_type,
-                                          clone_index(sema, access, ix),
-                                          type_ownership_of(at->elem_type), false)
+                                          clone_index(sema, access, ix), false)
                          : NULL;
       if (!e) return false;
       if (!*head) { *head = *tail = e; }
@@ -851,5 +817,5 @@ ast_node_t *sema_gen_clone(sema_t *sema, sema_scope_t *scope,
                                   const type_t *t, ast_node_t *access) {
   if (!t || !access) return NULL;
   if (type_strip_quals(t)->kind == TYPE_KIND_FUNC) return NULL;
-  return gen_clone_expr(sema, scope, t, access, OWN_OWN, true);
+  return gen_clone_expr(sema, scope, t, access, true);
 }

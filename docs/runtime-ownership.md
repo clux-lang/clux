@@ -1,7 +1,9 @@
 # 运行时所有权（runtime ownership）
 
 > 状态：**当前只保留 C 裸指针**。编译期所有权语法 `own/ref/fatal` 和
-> `move/clone` 已移除并直接报错；魔法方法、`[[no_copy]]`/`[[auto_dispose]]`、
+> `move/clone` 已移除并直接报错；编译器内部残留的所有权机制（ownership_t、
+> 符号/槽位所有权、fatal 变体、销毁函数生成、C 后端 own 释放分支）也已在
+> 阶段 3 全部删除（见 §12）。魔法方法、`[[no_copy]]`/`[[auto_dispose]]`、
 > `Own/Fatal/allocator` 全部**延后设计**，当前工作树里没有实现。
 > 旧实现冻结在 `archive/compile-time-ownership` / tag `archive-ownership-09d31e4`。
 
@@ -218,8 +220,8 @@ Phase 1 先迁移 examples，再逐组改测试；每组保持全量测试绿。
   Interface、Generic、Fmt、ShareWeak 中的旧语义断言。
 - 全量：**1631/1631**（raw-only，share/weak 已移除）。
 - 所有可运行 examples 在 raw 模式下通过。
-- 当前 `own` / `ref` / `fatal` 仍作为**已弃用的 no-op 前缀**被解析，方便迁移；
-  后续清理阶段再删除关键字和旧 sema/C 后端代码。
+- `own` / `ref` / `fatal` 关键字保留为**已移除语法**：解析到即报错并提示改成
+  `*T` / `[]T`。
 
 Phase 2 开始实现 `__init__` / `__assign__` / `__dispose__`。
 
@@ -233,3 +235,29 @@ Phase 2 开始实现 `__init__` / `__assign__` / `__dispose__`。
 - 字段/容器 drop glue、跨函数 move、`Ref` 逃逸检查。
 
 重新实现前应先决定语义放在 sema/IR 还是后端；当前不应在 C 后端继续堆叠。
+
+## 12. 阶段 3：编译器内所有权死代码清理（2026-10）
+
+阶段 1 只切断了语法；阶段 3 把编译器内部仍然残留的"所有权基础设施"全部删除，
+使编译器只剩裸指针语义：
+
+- 删除 `vm/ownership.h` / `vm/type_ownership.h`：`ownership_t`、
+  `type_ownership_of/apply/strip` 等恒等空壳；
+- 槽位层：`struct_field_t` / slice / tuple / union / option / array 不再有
+  ownership 字段，`type_has_own_slots`、`type_owns_resource`、
+  `type_name_with_ownership` 一并删除；
+- 符号/值层：`sema_symbol_t::ownership`（派生入口 `sema_sym_ownership` /
+  `sema_sym_is_fatal`）、`value_type_ownership` / `value_set_type_ownership`、
+  `sema_value_is_fatal` / `sema_value_holds_own`、fatal 变体
+  （`sema_fatal_variant_of`）与 `value_take_fatal_into` 全部移除；
+- sema 分支：变量定义/赋值/聚合构造/`new`/`make`/调用/闭包捕获/`try` 中的
+  own/fatal 接收规则、`sema_check_slot_flow`、fatal 参数消费检查、ref 返回
+  标注检查、销毁函数生成（`__destroy_<T>` / env vtable fid）删除；
+- C 后端：`c_lower_stmt` 的 own 释放条件、闭包/defer 捕获槽释放、
+  `__destroy_<T>` 合成、`capture_clone_kind` 深拷贝判定删除；`FREE` 仍负责
+  闭包 env / 显式 free；
+- 解析层：AST 指针/切片节点的 `ownership` token 字段与 `AST_OWN_*` 编码、
+  未再生成的 `AST_MOVE` 节点删除。
+
+回归：全量测试 **1631** 个用例（2 个 `Install.*` 环境相关失败为既有问题，
+与所有权无关），行为与阶段 1 一致。

@@ -21,14 +21,14 @@ struct sema_t; /* sema_reflect_eval 用（避免与 sema.h 循环包含） */
  *   - 注入面是 **type value 的成员**（`T.name` / `T.field_count` / `T.field_type(0)`）；
  *   - 求值在 sema（折叠成常量），运行期零指令；
  *   - 值域：str / usize / type / bool；
- *   - kind 与 ownership 都返回**编译期字符串**（自描述）。
+ *   - kind 返回**编译期字符串**（自描述）。
  *
  * 本文件只做"类型 + key + 可选索引 → 值描述"，不碰 AST：sema 与 CTFE 共用这
  * 一份实现（避免两套下钻逻辑漂移）。
  * =========================================================================== */
 
 typedef enum {
-  SEMA_RV_STR = 0, /* str（名字 / kind / ownership） */
+  SEMA_RV_STR = 0, /* str（名字 / kind） */
   SEMA_RV_USIZE,   /* usize（计数 / 偏移 / 大小 / 对齐 / tag） */
   SEMA_RV_I64,     /* i64（enum 变体值） */
   SEMA_RV_BOOL,    /* bool（is_variadic / is_c_abi） */
@@ -90,9 +90,6 @@ bool sema_reflect_lookup(const type_t *T, strslice_t key,
 
 /** 类型 kind 的字符串名（"struct" / "int" …）；未知返回 "unknown"。 */
 const char *sema_reflect_kind_name(const type_t *T);
-
-/** 所有权槽位的字符串名（"own" / "ref" / "fatal" / "none"）。 */
-const char *sema_reflect_ownership_name(ownership_t own);
 
 #ifdef __cplusplus
 }

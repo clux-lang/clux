@@ -1,6 +1,5 @@
 #include "sema/comptime.h"
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include "core/panic.h"
 #include "vm/type_ptr.h"
 #include "vm/type_struct.h"

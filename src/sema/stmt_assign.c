@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/sema_cross.h"
-#include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -158,8 +157,6 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
                    "error-handling sugar target is not declared");
         return;
       }
-      ownership_t to = type_ownership_of(ts->type);
-      (void)to;
       value_t *dst = value_make_shadow(sema->vm, ts->type);
       value_t *src = value_make_shadow(sema->vm, info.value_type);
       if (value_is_error(sema->vm, value_assign(sema->vm, dst, src))) {
@@ -319,16 +316,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     }
   }
 
-  /* ===== 显式销毁 / 丢弃：`_ = expr`（m3-design §3.3）=====
-     sema 在**当前位置**生成销毁序列（与作用域退出同一套扁平槽位展开），把
-     "提前释放"编成显式 FREE 序列——与 `move` 一起构成"显式销毁"：
-         `_ = move(x)`        —— 销毁整个变量 x（x 标 moved，退出不再释放）
-         `_ = new T{...}`     —— 丢弃将亡值（临时变量 + 销毁）
-         `_ = clone(x)`       —— 同上（源不受影响）
-         `_ = <借用/无资源>`  —— 只求值 + POP（**不得 DISPOSE**：借用不拥有）
-     `as->discard_mode` 告诉 compiler 走哪条路径（见 ast_assign.h）。
-     拒绝：`_ = x`（own/fatal 变量**不 move**）——own 不可 copy；
-           `move(ref)` —— 借用不拥有堆块（ex_move 约束 0）。 */
+  /* `_ = expr`：丢弃右值，只求值 + POP（不保留结果）。 */
   if (strslice_eq(name, STRSLICE_LIT("_"))) {
     if (!as->op || !token_is(as->op, "=")) {
       diag_error(sema->diag, sema_loc(sema, &as->base),
@@ -421,50 +409,16 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
 
     if (rhs_bad) return; /* 错误恢复产物跳过，已有诊断 */
 
-    /* **赋值点旧值销毁**（A 方案 §2.3 表 "旧块摘挂"）：`p = new i32{2}` 这类
-       覆盖自有堆块的位置，旧块必须先释放（否则再也找不到 → 泄漏）。
-       由 sema 生成销毁序列挂在 as->destroy，compiler 在「右值求值之后、
-       STORE 之前」逐条编译（右值可能读旧值，顺序不能反）。
-
-       只对 **ptr / slice** 生成：聚合（struct/tuple/union/array/option）的
-       `value_assign` 走 compound_assign_transfer，运行期已按槽位所有权
-       释放旧值——这里再生成会双释放。指针/切片的 assign 是纯 memcpy
-       （设计如此：释放权归 sema），所以旧值只能由这里释放。
-       move 过的变量（moved）已交出堆块，不再释放；未初始化（flow_init=false）
-       也没有旧值。 */
-    if (sym && sym->type && sym->flow_init && !sym->moved &&
-        sema_sym_ownership(sym) == OWN_OWN &&
-        (type_kind_of(sym->type) == TYPE_KIND_PTR ||
-         type_kind_of(sym->type) == TYPE_KIND_SLICE ||
-         type_kind_of(sym->type) == TYPE_KIND_FUNC)) {
-      /* FUNC：闭包 = 捕获聚合结构体。`func_assign` 只是 memcpy（不释放旧
-         env）→ 旧闭包的 own 捕获必须在这里 `FREE f` 掉（VM 按 capture_type
-         聚合释放）。own 闭包是 move-only，唯一持有者，安全。 */
-      size_t nlen = name.len;
-      char *nbuf = (char *)arena_calloc(sema->arena, nlen + 1, 1,
-                                        ALIGNOF(max_align_t));
-      if (nbuf) {
-        memcpy(nbuf, name.ptr, nlen);
-        ast_node_t *old = ast_ident_new(sema->arena, 0, 0);
-        if (old) {
-          ((ast_ident_t *)old)->name = strslice_from_bytes(nbuf, nlen);
-          ast_node_t *dhead = NULL, *dtail = NULL;
-          if (gen_destroy(sema, sym->type, old, &dhead, &dtail))
-            as->destroy = dhead;
-        }
-      }
-    }
-
     /* 闭包值拷贝 = 深拷贝 env（与 var 初始化同规则；move 是转移、调用/构造
        产物是新实例，都不克隆）。 */
-    if (as->value && as->value->kind != AST_MOVE &&
+    if (as->value &&
         (as->value->kind == AST_IDENT || as->value->kind == AST_MEMBER ||
          as->value->kind == AST_INDEX || as->value->kind == AST_DEREF ||
          as->value->kind == AST_UNWRAP)) {
       const type_t *rt = value_type(rhs);
       const type_t *rs = rt ? type_strip_quals(rt) : NULL;
       bool needs_copy = false;
-      if (rs && !type_has_own_slots(rs)) {
+      if (rs) {
         if (type_kind_of(rs) == TYPE_KIND_FUNC)
           needs_copy = func_type_capture_count(rs) > 0;
         else
@@ -476,12 +430,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       }
     }
 
-    /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true
-       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。
-       R1（own 不可 copy，§3.1）：own *T 变量被赋值 = copy → 编译错误
-       （own 唯一所有权只能 move/clone 转移，不能按值复制）。
-       R2 恢复：赋值成功 → moved 标记清除（move 后重新赋值 = 重新获得
-       所有权，变量恢复可用）。 */
+    /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true\n       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。 */
     value_t *r = value_assign(sema->vm, lhs, rhs);
     if (value_is_error(sema->vm, r)) {
       char tn[64], rn[64];
@@ -491,46 +440,8 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
                  "cannot assign %s to variable '%.*s' of type %s", rn,
                  (int)name.len, name.ptr, tn);
     } else {
-      const type_t *lt = value_type(lhs);
-      if (lt && value_type_ownership(lhs) == OWN_OWN &&
-          !sema_value_is_fatal(rhs)) {
-        char rn[64];
-        sema_type_name(value_type(rhs), rn, sizeof(rn));
-        diag_error(sema->diag, sema_loc(sema, as->value),
-                   "cannot copy %s into own pointer '%.*s' (own is "
-                   "move-only; use move() or clone())",
-                   rn, (int)name.len, name.ptr);
-        return;
-      }
-      /* 注 2：share/weak 引用计数共享已移除。
-         注 3：原先这里还有一条"含 own 字段的复合类型赋值须 move/clone"的守卫
-         （所有权扩散）。复合类型字段现已禁止携带指针/切片，该形态不存在；
-         own 指针本身的 copy 拦截由上方分支负责（判据是**值/符号层 ownership**，
-         不是类型层——所有权已从类型剥离）。 */
-      /* 嵌套 own 槽位（`?own *T` / 含 own 字段的聚合）的赋值目标：同样只
-         能由将亡值接管。否则 compound_assign_transfer 会释放左值旧块，并把
-         右值（可能是**借源视图**，如 `p = q.n`）的 own 指针清空——借源被
-         悄悄改成 nil，旧块与借源所有者重复释放（实测 access violation）。 */
-      if (lt && sym && sema_sym_ownership(sym) != OWN_OWN &&
-          type_has_own_slots(lt) && !sema_value_is_fatal(rhs) &&
-          sema_value_holds_own(rhs)) {
-        char tn[64], rn[64];
-        sema_type_name(lt, tn, sizeof(tn));
-        sema_type_name(value_type(rhs), rn, sizeof(rn));
-        diag_error(sema->diag, sema_loc(sema, as->value),
-                   "cannot copy a value of type %s into variable '%.*s' of "
-                   "type %s: own is move-only (use move() or clone())",
-                   rn, (int)name.len, name.ptr, tn);
-        return;
-      }
       if (sym) {
         sym->flow_init = true;
-        /* R2 恢复：赋值成功 → moved 清除。**之前**是 moved 的变量，旧内容所有权
-           已随 move 转移（内存里是陈旧字节）——重新赋值必须走 STORE_REINIT
-           （只 memcpy，不释放旧值），否则运行期 compound_assign_transfer 会按
-           旧字节二次释放 own 槽位（实测 0xC0000005）。 */
-        if (sym->moved) as->reinit = true;
-        sym->moved = false;
         /* 注：这里原先还有一条"含 ref 字段的聚合类型赋值作用域检查"
            （判据 `type_contains_ref`）。所有权从类型层迁移到值/符号层后该谓词
            失效，且复合类型已禁止携带指针/切片，含 ref 字段的聚合不存在——整段
@@ -683,34 +594,16 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
      校验越界；此处直接按 0 号元素类型校验可赋值性——元素类型同构，
      任意位置校验等价） */
   const type_t *et;
-  ownership_t et_own = OWN_NONE;
   if (type_kind_of(bt) == TYPE_KIND_TUPLE) {
     et = tuple_type_elem(bt, 0) ? tuple_type_elem(bt, 0)->type : NULL;
-    /* 元素槽位所有权按编译期下标取（越界已被 sema_expr 拒绝） */
-    if (ix->indices && ix->indices->kind == AST_INT_LIT) {
-      uint64_t k = ((ast_int_lit_t *)ix->indices)->value;
-      const tuple_elem_t *te = tuple_type_elem(bt, (size_t)k);
-      if (te) et_own = type_ownership_of(te->type);
-    }
   } else if (type_is_slice(bt)) {
     et = slice_type_elem(bt);
-    et_own = type_ownership_of(slice_type_elem(bt));
   } else {
     et = array_type_elem(bt);
-    et_own = type_ownership_of(array_type_elem(bt));
   }
   if (!et) return;
 
   /* 元素是 ref 槽位（或含 ref 槽位）：`s[i] = b.p` 把 b 登记为载体的借源。 */
-
-  /* **赋值点旧值销毁**：`a[i] = v` 是纯覆盖（INDEX_SET 只 memcpy），
-     旧元素里的 own 堆块必须先释放。own 叶子 / 含 own 槽位的复合元素
-     都要展开（ref 元素跳过）。 */
-  {
-    ast_node_t *dh = NULL, *dt = NULL;
-    if (gen_destroy_slot(sema, et, et_own, as->target, &dh, &dt))
-      as->destroy = dh;
-  }
 
   value_t *dst = value_make_shadow(sema->vm, et);
   if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
@@ -786,7 +679,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
      字段名全局唯一——sema 已校验，命中即得字段类型） */
   int idx = -1;
   const type_t *ft = NULL;
-  ownership_t slot_own = OWN_NONE;
   if (!bad) {
     if (type_kind_of(bt) == TYPE_KIND_STRUCT) {
       const struct_type_t *bst = (const struct_type_t *)bt;
@@ -812,7 +704,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
             m->bit_value_type_id = bsd->bitfield_underlying_type_id;
             m->bit_storage_type_id = bsd->bitfield_storage_type_id;
             ft = utype;
-            slot_own = OWN_NONE;
             found = true;
             break;
           }
@@ -833,7 +724,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true;
         } else {
           ft = struct_type_field(bt, (size_t)idx)->type;
-          slot_own = type_ownership_of(struct_type_field(bt, (size_t)idx)->type);
         }
       }
     } else if (type_kind_of(bt) == TYPE_KIND_UNION) {
@@ -851,7 +741,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 payload 必存在 */
         } else {
           ft = mem->payload_type;
-          slot_own = type_ownership_of(mem->payload_type);
         }
       }
     } else {
@@ -869,7 +758,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
           bad = true; /* 防御：字段已命中则 member 类型必存在 */
         } else {
           ft = mem->type;
-          slot_own = OWN_NONE;   /* cunion 不参与所有权运算 */
         }
       }
     }
@@ -926,13 +814,6 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
-    /* own 槽位接收规则（§0.4）：字段/成员位置也是槽位——own 槽位只接
-       FATAL，非 own 复合槽位不得 copy OWN 聚合（与构造/`new` 同一张表）。 */
-    char what[96];
-    snprintf(what, sizeof what, "field '%.*s'", (int)m->field.len,
-             m->field.ptr);
-    if (!sema_check_slot_flow(sema, slot_own, ft, as->value, rhs, what))
-      return;
     /* 简单赋值：value_assign 校验字段类型可赋值性 */
     value_t *dst = value_make_shadow(sema->vm, ft);
     if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
@@ -1205,13 +1086,6 @@ static void shadow_assign_deref(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
-    /* **赋值点旧值销毁**：`p.* = v` 是纯覆盖（PTR_SET 只 memcpy），
-       旧被指向值里的 own 槽位必须先释放。只对 **own 指针**生成——
-       经 ref 指针写别人拥有的内容时不能替对方释放（借用方不拥有）。 */
-    if (value_type_ownership(base) == OWN_OWN && ft) {
-      ast_node_t *dh = NULL, *dt = NULL;
-      if (gen_destroy(sema, ft, as->target, &dh, &dt)) as->destroy = dh;
-    }
     /* 简单赋值：value_assign 校验被指向类型可赋值性 */
     value_t *dst = value_make_shadow(sema->vm, ft);
     if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {

@@ -1,5 +1,4 @@
 #include "vm/type.h"
-#include "vm/type_ownership.h"
 #include "vm/vm.h"
 #include "vm/value.h"
 #include "vm/function.h"
@@ -214,38 +213,9 @@ void type_qual_set_sub(vm_t *vm, const type_t *t, const type_t *sub) {
     }
 }
 
-/* "fatal " + base 名（见 type.h）。前缀只此一份实现，五种复合类型共用。
- * 长度取自 strslice_t（不用 strlen：名可能含内嵌字节）。 */
-char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
-                               ownership_t ownership, const char *fallback) {
-    if (!alloc) return NULL;
-    const char *prefix = (ownership == OWN_FATAL) ? "fatal " : "";
-    size_t plen = (ownership == OWN_FATAL) ? 6u : 0u;
-    const char *bn = (base && base->name.ptr) ? base->name.ptr : fallback;
-    size_t blen = 0;
-    if (base && base->name.ptr) {
-        blen = base->name.len;
-    } else if (bn) {
-        while (bn[blen]) blen++;
-    }
-    char *buf = (char *)allocator_new_ex(alloc, "char", sizeof(char), NULL, NULL,
-                                        NULL, plen + blen + 1);
-    if (!buf) return NULL;
-    if (plen) memcpy(buf, prefix, plen);
-    if (blen) memcpy(buf + plen, bn, blen);
-    buf[plen + blen] = '\0';
-    return buf;
-}
-
 /* ---- 递归指针/切片判定（见 type.h）---- */
 
-bool type_has_own_slots(const type_t *t) {
-    (void)t;
-    return false;
-}
-
 bool type_has_closure_slots(const type_t *t) {
-    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_FUNC:
@@ -287,7 +257,6 @@ bool type_has_closure_slots(const type_t *t) {
    func_t->capture_type 上），因此 ptr_clone_block 需要按"含 FUNC 槽位"
    进入聚合再逐个槽位看运行期实例。 */
 bool type_has_func_slots(const type_t *t) {
-    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_FUNC:
@@ -325,7 +294,6 @@ bool type_has_func_slots(const type_t *t) {
 }
 
 bool type_contains_ptr_or_slice(const type_t *t) {
-    t = type_strip_ownership(t);
     if (!t) return false;
     if (type_is_ptr_or_slice(t)) return true;
     switch (t->kind) {
@@ -375,14 +343,7 @@ bool type_contains_ptr_or_slice(const type_t *t) {
  * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段），
  * 且**复合类型已禁止携带指针/切片**，类型层没有可判定的对象。
  *
- * 判定入口现为：
- *   - 符号层：`sema_symbol_t::ownership`
- *   - 值层：  `value_type_ownership(v)`
- *   - 签名层：参数/返回类型本身（`func_sig_t.params[i]` / `return_type`）
- *   - C ABI： `ffi_c_abi_reject_reason_own(t, own)`（所有权由调用方传入）
- *
- * 完整模型见 docs/ownership-refactor.md §0（值状态的流动检查）。
- */
+ * 完整模型见 docs/runtime-ownership.md。 */
 
 /* ---- type_promote ---- */
 

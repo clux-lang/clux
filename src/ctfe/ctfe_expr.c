@@ -199,8 +199,6 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
             }
             if (!bad) {
                 fn->capture_type = (const struct_type_t *)ct;
-                fn->env_dispose_fid = n->env_dispose_fid;
-                fn->env_clone_fid = n->env_clone_fid;
                 func_t *inst = func_instantiate_raw(vm, fn);
                 if (!inst) bad = ctfe_err(ctx, "ctfe: out of memory creating closure instance");
                 for (size_t i = 0; !bad && i < nc; i++) {

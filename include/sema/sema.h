@@ -1,7 +1,6 @@
 #ifndef _H_CLUX_SEMA_SEMA_
 #define _H_CLUX_SEMA_SEMA_
 #include "core/allocator.h"
-#include "vm/type_ownership.h"
 #include "core/arena.h"
 #include "core/strslice.h"
 #include "core/vec.h"
@@ -157,73 +156,6 @@ typedef struct sema_expr_ctx_t {
     size_t        anon_ct_depth;
 } sema_expr_ctx_t;
 
-/* ---- §4/R1 fatal 消费点：**唯一判据入口** ----
- *
- * fatal 值（`fatal *T` / `fatal []T`）是"必须被消费"的所有权载体，合法消费点
- * 只有两个：**move(x)**（AST_MOVE）与 **return x**（walk_return）。三处判定
- * （move 标记、return 标记、函数结束的未消费检查）统一走本组接口，判据只此
- * 一处定义——此前分散在三段代码里各写一遍 `PTR_FATAL || SLICE_FATAL`，其中
- * 一处漏了切片分支，导致 `return p`（p 为 fatal 切片参数）被误报未消费。
- *
- * 所有权纯编译期——fatal 判据从 symbol.ownership 读取，不再从 类型所有权修饰。 */
-/** 符号的所有权：直接由符号类型派生（所有权是类型修饰，符号不再存副本）。 */
-static inline ownership_t sema_sym_ownership(const sema_symbol_t *sym) {
-  return (sym && sym->type) ? type_ownership_of(sym->type) : OWN_NONE;
-}
-
-static inline bool sema_sym_is_fatal(const sema_symbol_t *sym) {
-  return sema_sym_ownership(sym) == OWN_FATAL;
-}
-/* 兼容旧调用：从 value 的 ownership 判 fatal */
-static inline bool sema_value_is_fatal(const value_t *v) {
-  return v && value_type_ownership(v) == OWN_FATAL;
-}
-
-/**
- * 值是否**携带 own 资源**：顶层 own/fatal，或类型含 own 槽位（`?own *T`、
- * 含 own 字段的聚合、own 元素数组/切片…）。
- *
- * own 是 move-only：非 fatal（将亡）的这类值**不能复制到新的存储位置**——
- * 复制会让两个位置共享同一批堆块（各自析构 = double-free），或者把借源
- * 视图（字段读/解引用读）里的所有权指针清空（借源被悄悄改成 nil）。
- * `ref` 借用视图本身不拥有资源，可以复制。
- */
-static inline bool sema_value_holds_own(const value_t *v) {
-  if (!v) return false;
-  const type_t *t = value_type(v);
-  if (!t) return false;
-  ownership_t o = value_type_ownership(v);
-  if (o == OWN_FATAL || o == OWN_OWN) return true;
-  if (o == OWN_REF) return false;
-  return type_has_own_slots(t);
-}
-static inline void sema_mark_fatal_consumed(sema_symbol_t *sym) {
-  if (sym) sym->moved = true;
-}
-static inline bool sema_fatal_consumed(const sema_symbol_t *sym) {
-  return sym && sym->moved;
-}
-
-/* 所有权由**类型**携带：类型表达式解析（sema_resolve_inner）直接产出
- * `own T` / `ref T` / `fatal T` 包装类型。语义分析需要所有权时一律用
- * `type_ownership_of(已解析类型)`，不再从 AST token 反查。 */
-
-/* ---- 复合类型的 own 资源判定：**已删除**（2026-10 所有权重构） ----
- *
- * 原先有 `sema_type_contains_owned_resource`（递归）与
- * `sema_type_contains_own_resource`（仅 own）两个类型层谓词，用于
- * "含 own 字段的复合类型不可隐式拷贝"的判定与 fatal 变体构造。
- *
- * 二者随重构失效并已删除，原因有二：
- *   1. **所有权已从类型层迁移到值/符号层**——`type_t` 不再携带 ownership，
- *      类型层无从判定 own（原实现退化为恒返回 false 的空壳）；
- *   2. **复合类型已禁止携带指针/切片**——"含 own 字段的复合类型"这一形态
- *      当前不存在，递归判定没有作用对象。
- *
- * 现在的判据入口是**符号/值层**：`sema_symbol_t::ownership`（声明处所有权）与
- * `value_type_ownership()`（类型层所有权）。将来恢复含指针的复合类型时，应按
- * **扁平槽位表**（类型 → own 槽位偏移）重新设计，而不是恢复这两个递归谓词。
- */
 struct sema_t; /* 前向声明：import 回调签名与 fn 上下文配对接口用 */
 struct sema_generic_instance;
 
@@ -247,17 +179,6 @@ typedef struct module_t *(*sema_import_resolver_t)(void *user,
                                                    struct sema_t *sema,
                                                    ast_node_t *import_node,
                                                    strslice_t raw);
-
-/* 生成的销毁函数（sema_destroy_fn_t）：每个**含 own 槽位的复合类型**一个
- * `__destroy_<n>(dv: ref *T)`，函数体销毁 T 值的 own 槽位（不释放值自身）。
- * 销毁点只发 `CALL __destroy_<n>(&value)`；自引用类型（链表/树）由函数自身
- * 递归调用，天然终止。type 是去限定后的类型对象（intern 后唯一）。 */
-typedef struct sema_destroy_fn {
-    const type_t          *type;
-    ast_node_t            *fn;    /* AST_FUNC_DEF（sema_attach_destroy_fns 追加到 prog） */
-    strslice_t             name;
-    struct sema_destroy_fn *next;
-} sema_destroy_fn_t;
 
 /* 生成的 clone 函数（sema_clone_fn_t）：与销毁函数同构（运行时递归是合理的，
  * 扁平化属于未来优化）。三种形态，按 kind 区分：
@@ -292,11 +213,6 @@ typedef struct sema_t {
        在 Pass 3 解析中追加，队列驱动、可增长）。sema 拥有元素生命周期。 */
     vec_t        *funcs;        /* sema_func_t* */
 
-    /* **含捕获的函数**（闭包字面量 / 局部函数 / defer）：元素是 ast_func_def_t*。
-       resolve_func_captures 建好 env 结构体后登记；sema_analyze 收尾时为每个条目
-       生成 env 的 vtable（__destroy_<env> / __clone_<env>）并把 fid 写回 AST，
-       compiler 在 hoist 随 SET_FUNC_CAPTURES 写入函数对象。 */
-    vec_t        *closures;
     /* comptime 函数值的字面量 AST 登记（fid 不一定在 funcs 里）。 */
     vec_t        *ct_func_lits;
 
@@ -331,18 +247,6 @@ typedef struct sema_t {
     uint32_t      clone_seq;
     /* 错误处理语法糖左值临时变量计数器：__try_N。 */
     uint32_t      try_seq;
-
-    /* ---- 生成的销毁函数（2026-10，方案 B：所有复合类型统一走函数调用）----
-       每个含 own 槽位的复合类型生成一次 `__destroy_<n>(dv: ref *T)`：
-         - 销毁点（作用域退出/return/break/continue/赋值点/显式销毁）只发
-           `CALL __destroy_<n>(&value)`，不再内联展开整棵槽位树；
-         - 函数体内部：叶子槽位 FREE、复合槽位 CALL（自引用类型 = 递归调用自身）；
-         - C 后端可逐函数翻译（函数体是平铺的 FREE/CALL/循环）。
-       `destroy_fns` 是注册表（按类型对象指针去重）；`destroy_fn_seq` 是命名计数；
-       生成的函数在 sema_analyze 结束时统一追加到 prog->funcs（compiler 预扫描
-       会为它们构造函数对象 + 全局名字绑定）。 */
-    sema_destroy_fn_t *destroy_fns;
-    uint32_t           destroy_fn_seq;
 
     /* ---- 生成的 clone 函数（2026-10，与销毁函数同构）----
        clone() 调用点只发 `CALL __clone*_<n>(...)`；函数体内部按槽位展开，嵌套
@@ -427,13 +331,6 @@ typedef struct sema_t {
     } pattern_env;
 } sema_t;
 
-/** move(x) / clone(x) 的产物类型（将亡值变体，AST_MOVE 处理器用）：
- *  - 指针 own/ref → fatal *T；切片 own/ref → fatal []T；
- *  - 含 own 资源的复合类型（struct/tuple/array/option/union）→ 其 fatal 变体；
- *  - 其余（标量 / 平凡 struct / ref 切片）→ 原样返回 t（无资源可转移）。
- *  已是 fatal 的 t 原样返回（幂等）。返回 NULL = 内部构造失败。 */
-const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *t);
-
 /* ---- 函数 walk 上下文的配对进入/离开 ----
  *
  * `sema_walk_function` 可被嵌套调用（`sema_check_func_literal` 在外层 walk 中
@@ -501,16 +398,6 @@ void sema_set_import_resolver(sema_t *sema, sema_import_resolver_t resolve,
  */
 bool sema_analyze(sema_t *sema, ast_node_t *program);
 
-/** 把 Pass 3b 期间按需生成的销毁函数追加到程序函数链尾部（sema_analyze 收尾调用）。
- *  compiler 预扫描据此为它们构造函数对象（LOAD_TYPE sig_id + PUSH_FUNCTION +
- *  BIND_FUNC）并在全局作用域绑定名字（LOAD_FUNCTION + DEFINE）。 */
-void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program);
-
-/** 为闭包 env 类型生成/取得两个 vtable 函数（见 ast_func_def_t 的
- *  env_dispose_fid / env_clone_fid）：
- *   - `__destroy_<env>(dv: ref *Env)`（复用销毁函数生成器）→ *dispose_fid
- *   - `__clone_<env>(dv: ref *Env): fatal Env`（复用 clone 函数生成器）→ *clone_fid
- * 返回 false = 生成失败（类型不可销毁/克隆，例如 env 含 cunion 指针）。 */
 /** 取/生成类型 t 的 clone 函数（三种形态之一），返回其 fid（0 = 失败）。
  *  形态：0 值克隆（dv: ref *T）、1 指针克隆（dv: ref *U）、2 切片克隆。 */
 uint32_t sema_gen_clone_fn_fid(sema_t *sema, uint8_t kind, const type_t *t);
@@ -525,17 +412,6 @@ bool sema_find_clone_fn(sema_t *sema, uint8_t kind, const type_t *t,
 /** 生成 `__deep_clone(<value>)` 调用节点（闭包值拷贝 = 深拷贝 env 的
  *  运行期兜底；供 sema 在变量初始化/赋值处插入）。 */
 ast_node_t *sema_gen_deep_clone(sema_t *sema, ast_node_t *value);
-
-bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
-                         uint32_t *dispose_fid, uint32_t *clone_fid);
-
-/** 只**查找**已生成的销毁函数（不生成）：含 own 槽位的复合类型 →
- *  `__destroy_<n>(dv: ref *T)` 的 fid/名字。后端在 FREE 位置按类型静态
- *  调用（如 C 闭包捕获的聚合字段）。 */
-bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
-                          strslice_t *name);
-/** 确保类型 t 的销毁函数已生成/登记（没有则创建），返回其名字。 */
-bool sema_ensure_destroy_fn(sema_t *sema, const type_t *t, strslice_t *name);
 
 /** 把 Pass 3b 期间按需生成的 clone 函数追加到程序函数链尾部（sema_analyze 收尾）。 */
 void sema_attach_clone_fns(sema_t *sema, ast_node_t *program);
@@ -678,44 +554,12 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
                      const char *what);
 
 /**
- * 槽位接收规则（§0.4/§0.5，与 own 变量定义/形参同一张表）——聚合构造、
- * `new` 字段/成员/元素初始化、字段赋值共用（expr.c 实现）：
- *   - own 槽位只接受将亡值（FATAL：new / move / clone / 构造产物 /
- *     fatal 返回值）；
- *   - 非 own 复合槽位不得用 copy 收下 OWN 聚合（own 是 move-only）。
- * 返回 true = 通过；false = 已发出诊断。`what` 是槽位的人类可读名
- * （如 "union field 'p'"），用于拼诊断。
- */
-/** RC 创建通道（§12.1）：`share *T` 目标 + fatal/own `*T` 源 → 改写成
- *  `__make_share` 调用并返回 share 类型 shadow（见 expr.c 实现）。 */
-bool sema_check_slot_flow(sema_t *sema, ownership_t slot_own,
-                          const type_t *slot_type, ast_node_t *value,
-                          value_t *fv, const char *what);
-
-/**
  * R3 借用释放（m3-design §7）：作用域退出时遍历本作用域符号，递减
  * borrow_src 的 borrow_count 并清空 borrow_src。stmt.c 各 vm_pop_scope
  * 前调用（借用载体随作用域消亡，源符号恢复可 move）。
  */
 void sema_scope_release_borrows(sema_scope_t *scope);
 
-/**
- * 作用域标注读取（m3-design §5）：type_expr 最外层是 AST_SCOPE_ANNOT 时
- * 返回其标注集合（names 指向 arena 数组，count = 个数；'<*>' = 单元素
- * "*"，global）；否则 *names=NULL, *count=0。标注节点保留在 AST（sema_
- * resolve_type_slot 折叠 sub 但保留外层标注节点），任何消费点可随时读取。
- * 嵌套标注 '<a> '<b> T：只读最外层（消费层按序收敛——内层标注属内层类型）。
- */
-void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count);
-
-/**
- * §5 强制规则（m3-design §5）：函数返回 ref *T 时返回类型必须标注作用域
- * （'<p> ref *T，集合 = 参数名 ∪ {*}）——未标注无法确定返回值存活上限，
- * 调用点无法检查逃逸。fn->return_expr 已折叠（标注节点保留），rt 是折叠
- * 出的返回类型。返回 true = 通过（非 ref 返回 / 无返回类型 / 已标注）。
- */
-bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt);
 
 /**
  * 作用域嵌套比较（m3-design §5）：a 沿 parent 链可达 b（或 a == b）→

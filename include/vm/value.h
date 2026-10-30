@@ -19,9 +19,8 @@ extern "C" {
  * 创建的 value 会自动 track 到 vm->current_scope。
  *
  * 每个 value 持有指向所属作用域 frame 的指针（借用 &scope->frame，见
- * scope_frame.h）：value_scope() 可还原所属 scope，供所有权分析判定
- * 作用域逃逸。untracked 构造（value_alloc_shell）无 vm 上下文，
- * frame 为 NULL（引擎内部对象不属用户作用域）。
+ * scope_frame.h）：value_scope() 可还原所属 scope。untracked 构造
+ * （value_alloc_shell）无 vm 上下文，frame 为 NULL（引擎内部对象不属用户作用域）。
  *
  * 外部代码通过 value_type() / value_data() 访问内部字段，
  * 不直接访问 struct value_t 成员。
@@ -41,21 +40,6 @@ const scope_frame_t *value_frame(const value_t *v);
 
 /** 从 value 还原所属 vm scope（container_of 反推；frame 为 NULL 时返回 NULL） */
 scope_t *value_scope(const value_t *v);
-
-/**
- * 值的**静态类型**携带的所有权（编译期语义）。
- *
- * 所有权是类型修饰，值上不再有独立状态：`own *T` / `fatal T` 等由 value->type
- * 决定。运行期类型已在编译期剥离（type_strip_ownership），因此运行期值恒为
- * OWN_NONE——销毁/借用决策全部由编译期生成的序列承担。
- */
-ownership_t value_type_ownership(const value_t *v);
-
-/**
- * 把值的类型改写为**带指定所有权修饰**的版本（同布局，纯重贴标签；仅 sema）。
- * `own == OWN_NONE` 时剥掉所有权修饰。
- */
-void value_set_type_ownership(vm_t *vm, value_t *v, ownership_t own);
 
 /** 便捷数据访问宏 */
 #define value_as(v, T) (*((T *)(value_data(v))))
@@ -214,46 +198,9 @@ value_t *value_length(vm_t *vm, value_t *self);
 void value_dispose(vm_t *vm, value_t *v);
 
 /**
- * fatal 变体 → 同布局的非 fatal 类型的**接管转换**（`fatal T → T`，含加限定的
- * `fatal T → const T`）：memcpy 顶层后**清空源**的 own/fatal 指针（`ptr_clear_
- * owned_recursive`），所有权随构造转移给新值。不适用（返回 NULL）时调用方走各自
- * 的常规路径：
- *   - 源不是 fatal、或目标也是 fatal；
- *   - 目标不是"同 kind + 同 size + 布局兼容"（array↔tuple 的布局兼容互转由各
- *     自的 vtable 处理，本函数只认同 kind 的 fatal 变体，`cand->kind != target->kind`
- *     即拒）。
- *
- * 为什么必需：fatal T 与 T 布局逐字节相同，而各复合类型原有的 implicit_cast 都是
- * **整块 memcpy** —— 副本会与源**共享内嵌 own 堆块**，两个值各自递归销毁同一堆块
- * = 双释放（实测 access violation）。`cfg->fatal_cast` 指向本类型的布局兼容判定
- * （struct：struct_type_compatible / tuple：tuple_type_compatible / array：同一
- * elem+len / union：union 成员表一致）。
- *
- * shadow 输入返回目标 shadow（semantics 阶段不产生副作用）。
+ * 深拷贝 value 并自动注册到 vm->current_scope（scope 管理生命周期）
  */
-value_t *value_take_fatal_into(vm_t *vm, value_t *v, const type_t *target,
-                               bool (*cfg)(vm_t *, const type_t *,
-                                           const type_t *));
-
-/** 深拷贝 value 并自动注册到 vm->current_scope（scope 管理生命周期） */
 value_t *value_clone(vm_t *vm, value_t *v);
-
-/**
- * 所有权**转移**（m3-design §7）：把 v 的资源无损交给调用方，返回接管方持有
- * 的新值（**fatal 变体**类型），并清空 v 内部的 own/fatal 指针使其不再持有
- * 任何资源（作用域退出时不会与接管方双释放）。
- *
- * 与 value_clone 的分工：
- *   - value_clone = 复制（源保持有效且独立），用于 `clone(x)` 与"读变量的值
- *     到新变量"这类需要保留源的场合；
- *   - value_move  = 转移（源被掏空），用于 `move(x)` 与**跨函数边界的所有权
- *     转移**（fatal 参数接收、fatal 返回值接收）——那里类型与目标完全一致，
- *     框架会走 clone 路径，必须显式改走转移，否则含 own 字段的复合值会被
- *     深拷贝一份（白分配），且调用方仍持有原件（语义上不是 move）。
- *
- * shadow → 同类型 shadow（不产生副作用）。
- */
-value_t *value_move(vm_t *vm, value_t *v);
 
 /** 原地赋值：将 src 的数据写入 dst（类型必须匹配），返回 dst 或 error */
 value_t *value_assign(vm_t *vm, value_t *dst, value_t *src);

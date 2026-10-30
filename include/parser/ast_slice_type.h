@@ -8,13 +8,9 @@ extern "C" {
 #include "parser/lexer.h"
 #include <stdbool.h>
 
-/* 切片类型修饰（m4-design §1/§10）：own/ref/fatal []T。
- * 切片必须带所有权修饰（裸 []T 不合法），与指针对齐。ownership 为修饰
- * 关键字 token（"own" / "ref" / "fatal"），elem_type 为元素类型表达式 T。
- * 不存在 share/weak 切片（RC 系不适用于切片）。 */
+/* 切片类型：`[]T`。elem_type 为元素类型表达式 T。 */
 typedef struct {
     ast_node_t  base;
-    token_t    *ownership;  /* 所有权修饰关键字 token（own/ref/fatal） */
     ast_node_t *elem_type;  /* 元素类型表达式 T */
 } ast_slice_type_t;
 

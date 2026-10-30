@@ -36,7 +36,6 @@ typedef struct flow_snap {
   size_t           n;
 } flow_snap_t;
 
-sema_scope_t *annot_anchor_scope(sema_t *sema, strslice_t name, sema_scope_t *scope);
 
 /* `a.?` / struct `a.!` 语法糖的分析结果（stmt_try.c）。 */
 typedef struct sema_try_info {
@@ -68,7 +67,6 @@ flow_snap_t flow_capture(sema_t *sema, sema_scope_t *scope);
 void flow_release(flow_snap_t *snap);
 void flow_restore(const flow_snap_t *snap);
 bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
-bool gen_destroy_slot(sema_t *sema, const type_t *slot_type, ownership_t slot_own, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
 ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope);
 void name_to_cstr(strslice_t s, char *buf, size_t cap);
 void shadow_assign(sema_t *sema, ast_assign_t *as, sema_scope_t *scope);

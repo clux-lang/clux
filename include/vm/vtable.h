@@ -5,7 +5,6 @@ extern "C" {
 #endif
 
 #include "core/strslice.h"
-#include "vm/ownership.h"  /* ownership_t：type_set_ownership 槽位用 */
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -103,9 +102,7 @@ extern const vtable_t VTABLE_UNION;
 
 /* ---- M3 指针与 opaque 类型 vtable（type_ptr.c / type_opaque.c） ---- */
 
-extern const vtable_t VTABLE_PTR_OWN;
-extern const vtable_t VTABLE_PTR_REF;
-extern const vtable_t VTABLE_PTR_FATAL;
+extern const vtable_t VTABLE_PTR;
 extern const vtable_t VTABLE_OPAQUE;
 
 #ifdef __cplusplus

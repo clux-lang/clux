@@ -1,5 +1,4 @@
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include <stdio.h>
 #include <string.h>
 #include "parser/ast_array.h"
@@ -109,142 +108,7 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
-/* ---- Step B 所有权检查辅助（m3-design §3/§7） ---- */
-
-/* R1/R2 判定：赋值 rhs 是否是 own 指针的合法初始化源。
-   own *T 变量只允许两种初始化来源：
-   - new 表达式（AST_NEW）：新堆块直接产 own *T（§8.1）
-   - fatal 接管源（move/clone 产物或 fatal 参数，§3.3）
-   ref 派生（own → ref 隐式转换）是借用（ref 总借用），不能赋回 own。
-   own → own 直接赋值 = copy → 编译错误。
-   非 static：AST_NEW/AST_CONSTRUCT 字段校验（sema/expr.c）共用。 */
-
 #include "sema_stmt_internal.h"
-
-/* 标注锚点解析（m3-design §5 检查算法）：标注名字 → 锚点作用域。
-   - "*"   → global（global 作用域，恒放行：全局值存活到程序结束）
-   - 参数名 → 参数层作用域（参数整个函数体期间存活，恒放行）
-   - 局部变量名 → 该符号定义所在作用域（own_scope，3b 定义点记录）
-   未解析（非参数/全局/局部变量名）返回 NULL（错误由调用方报）。 */
-sema_scope_t *annot_anchor_scope(sema_t *sema, strslice_t name,
-                                        sema_scope_t *scope) {
-  if (name.len == 1 && name.ptr[0] == '*') return sema->global_scope;
-
-  /* 参数判定：遍历当前函数真实参数列表（参数符号在 param_scope 直系，但
-     函数体顶层变量也注册在 param_scope，sema_scope_find_local 无法区分）。 */
-  if (sema->fn.def) {
-    for (ast_node_t *p = sema->fn.def->params; p; p = p->next) {
-      ast_var_def_t *pvd = (ast_var_def_t *)p;
-      if (pvd->name.len == name.len &&
-          memcmp(pvd->name.ptr, name.ptr, name.len) == 0)
-        return sema->fn.local_func_param_scope;
-    }
-  }
-
-  /* 局部变量：沿 scope 链解析符号，取其定义作用域（own_scope 3b 记录；
-     未走到定义点的符号 own_scope 为 NULL → 锚点解析失败，调用方报错）。 */
-  sema_symbol_t *sym = sema_lookup(scope, name);
-  if (sym && sym->kind == SEMA_SYM_VAR) return sym->own_scope;
-  return NULL;
-}
-
-/* §5 逃逸比较（m3-design §5 检查算法：ref 的作用域 ≤ own 的作用域）：
-   持有 ref 的变量（own_scope = 变量定义作用域，即 ref 的推断存活）须被
-   标注集合的 min 锚点涵盖。**AND 语义**：'<a,b,c> = 存活不超过 min(a,b,c)，
-   每个锚点都必须涵盖 ref 定义作用域（任一不涵盖 → 逃逸 → 悬垂）。参数/
-   全局锚点恒成立（scope_within 天然处理：函数体内所有块 ⊆ 参数层，所有
-   作用域 ⊆ global 根）。 */
-static void check_annot_escape(sema_t *sema, ast_node_t *at, sema_scope_t *own_scope,
-                               strslice_t *names, size_t count) {
-  if (count == 0) return;
-  for (size_t i = 0; i < count; i++) {
-    sema_scope_t *anchor = annot_anchor_scope(sema, names[i], own_scope);
-    if (!anchor) {
-      diag_error(sema->diag, sema_loc(sema, at),
-                 "scope annotation '%.*s' does not name a parameter, global "
-                 "or local variable",
-                 (int)names[i].len, names[i].ptr);
-      continue;
-    }
-    if (!sema_scope_within(own_scope, anchor)) {
-      diag_error(sema->diag, sema_loc(sema, at),
-                 "variable escapes scope annotation '%.*s' (its scope is not "
-                 "nested within the annotated scope)",
-                 (int)names[i].len, names[i].ptr);
-    }
-  }
-}
-
-/* §5 逃逸检查统一入口（shadow_var_def 调用）：声明类型含 ref 指针（顶层
-   ref *T 或含 ref 字段的 struct/tuple/union）时做逃逸比较。
-   - 显式标注（顶层 AST_SCOPE_ANNOT）→ 锚点集合 = 标注名字（'<p> ref *T
-     借自 p；'<*> = global）
-   - 未标注 → 按定义作用域推断（§5"推断：ref 变量未显式标注时推断为
-     当前定义作用域"）→ 锚点 = 借源对象：init 直读变量（var r: ref *i32
-     = p）取该符号定义作用域；init 非直读（x.&、函数调用返回、new 产物）
-     无静态可判借源 → 跳过（ref 存活 = 当前作用域，逃逸点由 §6/调用点
-     检查兜底）。
-   - §5 强制规则 B：含 ref 字段的聚合类型（struct/tuple/union/cunion 等
-     非顶层 ref）变量定义**必须标注**——聚合内 ref 字段借源无法从 init
-     静态推断（构造器可能多源），强制用户显式声明。顶层 ref *T 仍走推断
-     语义（单源可判）。 */
-static void check_var_annot(sema_t *sema, ast_var_def_t *vd,
-                            sema_scope_t *scope, const type_t *vt,
-                            sema_symbol_t *sym) {
-  /* 只有**顶层 ref**（sema_sym_ownership(sym) == OWN_REF）需要标注检查与 annot 记录
-     ——重绑定逃逸校验依赖 annot_count > 0。
-     注：含 ref 字段的聚合类型已不支持（复合类型禁止携带指针/切片），
-     所以不再有类型层的 `type_contains_ref` 判据。 */
-  if (!vt || !(sym && sema_sym_ownership(sym) == OWN_REF))
-    return;
-
-  strslice_t *names = NULL;
-  size_t count = 0;
-  sema_annot_peek(vd->type_expr, &names, &count);
-  if (count == 0) {
-    /* §5 强制规则 B：含 ref 字段的聚合类型（非顶层 ref）必须标注。
-       顶层 ref *T 走推断语义（不强制）。 */
-    if (!sym || sema_sym_ownership(sym) != OWN_REF) {
-      char tn[64];
-      sema_type_name(vt, tn, sizeof(tn));
-      diag_error(sema->diag, sema_loc(sema, vd->type_expr ? vd->type_expr
-                                                           : (ast_node_t *)vd),
-                 "variable of type '%s' contains ref fields and must declare a "
-                 "scope annotation (e.g. '<a> %s)",
-                 tn, tn);
-      return;
-    }
-    if (!vd->init) return;
-    if (vd->init->kind == AST_IDENT) {
-      /* 推断：init 直读变量（var r: ref *i32 = p）→ 锚点 = 借源变量 */
-      names = &((ast_ident_t *)vd->init)->name;
-      count = 1;
-    } else if (vd->init->kind == AST_MEMBER) {
-      /* §5 字段访问继承（m3-design §5"var p = s.aaa; 中 p 继承 s 的
-         作用域绑定"）：init 是 s.a（object 直读变量 s）→ 继承 s 的
-         标注集合（p 借自 s 的字段，p 存活 ≤ s 存活）。s 无标注（推断
-         或未含 ref）→ 跳过（s 自身无约束可继承）。 */
-      ast_member_t *m = (ast_member_t *)vd->init;
-      if (!m->object || m->object->kind != AST_IDENT) return;
-      sema_symbol_t *obj_sym =
-          sema_lookup(scope, ((ast_ident_t *)m->object)->name);
-      if (!obj_sym || obj_sym->annot_count == 0) return;
-      names = obj_sym->annot_names;
-      count = obj_sym->annot_count;
-    } else {
-      return;
-    }
-  }
-  /* 记录标注集合到符号（重绑定逃逸校验用）。显式标注 names 指向
-     ast_scope_annot_t->names（arena 管理）；推断分支 names 指向
-     ast_ident_t->name（arena 管理）——均随 AST 存活，重绑定时可安全读取。 */
-  if (sym) {
-    sym->annot_names = names;
-    sym->annot_count = count;
-  }
-  check_annot_escape(sema, vd->type_expr ? vd->type_expr : vd->init,
-                     scope, names, count);
-}
 
 /* 显式类型槽位兜底重解析：3a 槽位解析可能失败（引用同块后续局部 type /
    被 type_shadowed_by_local_def 判"待绑定局部遮蔽"推迟）→ 此处定义点兜底。
@@ -277,50 +141,10 @@ static bool var_type_slot_reparse(sema_t *sema, ast_var_def_t *vd,
   return false;
 }
 
-/* 从 fatal 类型剥离 OWN_FATAL：
- * - 复合类型（struct/tuple/array/option/union）→ OWN_NONE（fatal T → T）
- * - 指针/切片 → OWN_OWN（fatal *T → own *T，fatal []T → own []T）
- *   fatal 是将亡值，只能赋值给 own（move/clone/new 产物），所以自动推断
- *   为 own 而非要求显式标注。
- * 返回 NULL = 非 fatal 类型或无法处理。 */
-static const type_t *strip_fatal(sema_t *sema, const type_t *t) {
-  if (!sema || !t) return t;
-  if (type_ownership_of(t) != OWN_FATAL) return t;
-  const type_t *core = type_strip_ownership(t);
-  if (!core) return NULL;
-  /* fatal 指针/切片/闭包/含 own 槽位的聚合：变量接管为 own；
-     标量/无 own 槽位的复合类型：fatal 无意义，落回裸类型。 */
-  bool resource = type_is_ptr(core) || type_is_slice(core) ||
-                  type_kind_of(core) == TYPE_KIND_FUNC ||
-                  type_has_own_slots(core);
-  return resource ? type_ownership_apply(sema->vm, OWN_OWN, core) : core;
-}
-
-/* 该表达式是否"含 own 捕获的闭包"（穿透 move/clone）。
-   所有权模型：闭包 = 捕获结构体 + 函数实现，捕获了 own 的闭包**本身即 OWN**
-   （唯一的 own 产生式——函数定义把 fatal→move→own 折叠了）。
-   因此 `var f = <closure>` 被拒（OWN 不能给 NONE 位置），必须
-   `var f = move(<closure>)`：move 产 FATAL → 变量推断为 own 绑定。
-   捕获槽的所有权由 resolve_func_captures 回写进 `ast_var_def_t::ownership`。 */
-static const ast_func_def_t *own_closure_of(ast_node_t *e) {
-  if (!e) return NULL;
-  if (e->kind != AST_FUNC_DEF) return NULL;
-  ast_func_def_t *fd = (ast_func_def_t *)e;
-  for (ast_node_t *c = fd->captures; c; c = c->next)
-    if (type_ownership_of(((ast_var_def_t *)c)->resolved_type) == OWN_OWN)
-      return fd;
-  return NULL;
-}
-
 /* ===========================================================================
  * `cfunc(...)` → `func(...)` 隐式转换
  *
- * 语义（用户定）：cfunc 形参上的所有权就是**C 侧所有权契约**——
- *   - `own`：C 函数内部会释放 → 包装体必须 `move(p)` 交出去（否则 clux 与 C
- *     各释放一次 = double free）；
- *   - `ref`：C 内部不释放 → 直接传引用；clux 侧继续持有并回收。
- * 外层 func 的类型**由 cfunc 声明生成**，因此两侧签名（含所有权）必然一致，
- * 不需要处理不匹配组合。
+ * 外层 func 的类型**由 cfunc 声明生成**，两侧签名必然一致。
  *
  * 生成的包装是**无捕获**的函数字面量：它按**名字**调用那个 cfunc，所以不需要
  * 把运行期函数指针捕获进闭包（也就不需要"调用指针"的新指令）。运行期指针
@@ -377,7 +201,7 @@ static strslice_t synth_name(sema_t *sema, const char *s) {
 static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
                                      const type_t *target,
                                      ast_node_t *origin) {
-  const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(target))->sig;
+  const func_sig_t *sig = &((const func_type_t *)target)->sig;
   size_t nparams = sema_count_siblings(src->params);
   if (sig->param_count != nparams) {
     diag_error(sema->diag, sema_loc(sema, origin),
@@ -395,13 +219,10 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
     ast_var_def_t *svd = (ast_var_def_t *)sp;
     const type_t *src_pt = sema_resolve_type_slot(sema, &svd->type_expr);
     const type_t *tgt_pt = func_type_param(target, i);
-    /* 所有权现在编码在类型上（AST 折叠后也能读回）。 */
-    ownership_t src_own = type_ownership_of(src_pt);
-    ownership_t tgt_own = type_ownership_of(tgt_pt);
-    if (!src_pt || !tgt_pt || src_pt != tgt_pt || src_own != tgt_own) {
+    if (!src_pt || !tgt_pt || src_pt != tgt_pt) {
       diag_error(sema->diag, sema_loc(sema, origin),
                  "cannot convert cfunc(...) to func(...): parameter %zu of the "
-                 "cfunc has a different type or ownership",
+                 "cfunc has a different type",
                  i + 1);
       return NULL;
     }
@@ -433,12 +254,9 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
   const type_t *tgt_ret = func_type_return(target);
   const type_t *src_ret =
       src->return_expr ? sema_resolve_type_slot(sema, &src->return_expr) : NULL;
-  ownership_t src_ret_own = type_ownership_of(src_ret);
-  if (tgt_ret != src_ret ||
-      src_ret_own != type_ownership_of(tgt_ret)) {
+  if (tgt_ret != src_ret) {
     diag_error(sema->diag, sema_loc(sema, origin),
-               "cannot convert cfunc(...) to func(...): return type or "
-               "ownership differs");
+               "cannot convert cfunc(...) to func(...): return type differs");
     return NULL;
   }
 
@@ -475,7 +293,7 @@ static ast_node_t *gen_cfunc_wrapper(sema_t *sema, ast_func_def_t *src,
   fd->return_expr = tgt_ret ? sema_ct_type_ref(sema, tgt_ret, origin) : NULL;
   fd->body = blk;
   /* **不要**标记 is_generated：sema 会跳过 generated 语句/节点的 walk，
-     参数符号就不会注册，函数体里的 `move(__cfp0)` 解析不到符号。 */
+     参数符号就不会注册，函数体里的参数引用解析不到符号。 */
   return lit;
 }
 
@@ -534,19 +352,12 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sema_try_info_t info;
     if (sema_try_probe(sema, vd->init, scope, &info)) {
       const type_t *vt = info.value_type;
-      ownership_t vo = type_ownership_of(vt);
       if (!vt) {
         diag_error(sema->diag, sema_loc(sema, vd->init),
                    "error-handling sugar has no value type");
         return;
       }
-      /* own/fatal 结果：变量声明为 own 核心类型，赋值时接受 fatal 源。 */
       const type_t *decl = vt;
-      if (vo == OWN_OWN || vo == OWN_FATAL || type_has_own_slots(vt)) {
-        decl = type_ownership_apply(sema->vm, OWN_OWN,
-                                    type_strip_ownership(vt));
-        if (!decl) return;
-      }
       uint32_t tb = vd->init->tok_begin, te = vd->init->tok_end;
       vd->init = ast_undef_new(sema->arena, tb, te);
       vd->type_expr = sema_gen_type_ref(sema, decl);
@@ -575,10 +386,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
   /* Pass 3b 已走到定义点：此后收集销毁/借源时才包含该变量（提前 return 的
      路径不会销毁后面才声明的变量）。 */
   sym->declared = true;
-  if (sema->vm->test_mode && !vd->is_comptime && sym->type &&
-      (sema_sym_ownership(sym) == OWN_OWN ||
-       type_has_own_slots(type_strip_ownership(sym->type))))
-    vd->free_on_error = true;
 
   /* comptime var：编译期求值 + 符号表编码（sema_eval_comptime_var）。
      定义点不进入 VM scope——调用方（walk_block）负责从语句链摘除；
@@ -616,7 +423,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = false;
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
   } else if (vd->init && vd->init->kind == AST_NIL) {
     /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
        nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
@@ -641,7 +447,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     sym->flow_init = true; /* nil 是确定值（已初始化） */
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-    value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
   } else {
     /* 已初始化：先求值 init（定义尚未入 VM scope → 自引用解析到外层同名变量）。
        匿名构造注入：显式声明类型已知 → push anon_ct，使 init 的 .{...}
@@ -677,7 +482,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
        但两个变量不能共享同一个 env（闭包体可修改捕获）。字面量本身是新建
        实例，不需要再克隆。 */
     if (!init_bad && vd->init && vd->init->kind != AST_FUNC_DEF &&
-        vd->init->kind != AST_MOVE && vd->init->kind != AST_TAKE) {
+        vd->init->kind != AST_TAKE) {
       bool already_dc = false;
       /* 只有**左值拷贝**才需要深拷贝；调用/构造/new/make 产物是新实例。 */
       bool from_lvalue =
@@ -695,7 +500,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       const type_t *it0 = value_type(init);
       const type_t *is = it0 ? type_strip_quals(it0) : NULL;
       bool needs_copy = false;
-      if (from_lvalue && is && !type_has_own_slots(is)) {
+      if (from_lvalue && is) {
         if (type_kind_of(is) == TYPE_KIND_FUNC)
           needs_copy = func_type_capture_count(is) > 0;
         else
@@ -712,17 +517,6 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
          当时未绑定 vm scope）→ 此处兜底重解析（局部 type 已在定义点求值
          绑定）；仍失败补报诊断（见 var_type_slot_reparse）。 */
       var_type_slot_reparse(sema, vd, scope);
-      /* R1（fatal 禁止命名，§3.3）：fatal *T 只能作为 move/clone 表达式的
-         临时值流，不能存进变量（fatal = 将亡值，必须直接接管）。函数参数
-         是唯一例外（§4，sema 参数路径不经过此分支）。 */
-      if (sym->type && sema_sym_is_fatal(sym)) {
-        diag_error(sema->diag, sema_loc(sema, vd->type_expr),
-                   "cannot declare variable '%.*s' of fatal pointer type "
-                   "(fatal is a temporary; receive it as own or pass to a "
-                   "function)",
-                   (int)vd->name.len, vd->name.ptr);
-        sym->flow_init = false;
-      }
       /* value_assign 校验 init 可赋给声明类型（单一校验点） */
       if (!init_bad && sym->type) {
         /* 运行期 opaque 指针不能变成函数值：只有 `cfunc_ptr(<命名 cfunc>)`
@@ -739,155 +533,23 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         }
       }
       if (!init_bad && sym->type) {
-        /* R1（own 不可 copy，§3.1）：own *T 声明只能由 fatal 将亡值
-           （move/clone/new/make 产物或函数返回值）初始化——直接赋 own/ref
-           变量 = copy → 编译错误。 */
-        if (sema_sym_ownership(sym) == OWN_OWN && !sema_value_is_fatal(init)) {
-          char itn[64];
-          sema_type_name(value_type(init), itn, sizeof(itn));
-          /* 措辞不用"pointer"：所有权已与类型解耦，`own` 是**位置对值的
-             状态要求**（需要将亡值/FATAL），任何类型都可能出现在这里。
-             `own i32` 正是经由这条规则被淘汰——i32 没有 FATAL 产生式。 */
-          diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize own value '%.*s' with %s: an 'own' "
-                     "binding must take over a dying value (FATAL), produced by "
-                     "new / move / clone (or a fatal-returning call)",
-                     (int)vd->name.len, vd->name.ptr, itn);
-          sym->flow_init = false; /* copy 失败 = 未初始化 */
-        } else if (sema_sym_ownership(sym) != OWN_OWN &&
-                   sema_value_is_fatal(init)) {
-          /* **反向规则**（§0.4）：FATAL 必须被 own 位置接住。非 own 位置
-             接收将亡值 = 值消失而内部 own 槽位无人释放 → 静默泄漏；更糟
-             时源与目标同名不同状态（双释放）。聚合（含 own 槽位的
-             struct/union/tuple）的 CONSTRUCT 就产 FATAL，因此
-             `var b: Box = .Box{ .p = new i32{1} }` 必须写成
-             `var b: own Box = …`（或 move() 进已有 own 变量）。 */
+        value_t *dst = value_make_shadow(sema->vm, sym->type);
+        if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
           char tn[64], itn[64];
           sema_type_name(sym->type, tn, sizeof(tn));
           sema_type_name(value_type(init), itn, sizeof(itn));
           diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize '%.*s' of type %s with the dying value "
-                     "(FATAL) of type %s: a value holding owned resources must "
-                     "be caught by an 'own' position (declare it `own %s`, or "
-                     "use move()/clone() and store the result there)",
-                     (int)vd->name.len, vd->name.ptr, tn, itn, tn);
-          sym->flow_init = false;
-        } else if (sema_sym_ownership(sym) == OWN_NONE && sym->type &&
-                   type_has_own_slots(sym->type) &&
-                   !sema_value_is_fatal(init) && sema_value_holds_own(init)) {
-          /* 非 own 位置的 copy：读 own **聚合**变量/字段/解引用得到携带
-             own 资源的值，复制会让两个位置共享同一批内嵌堆块 → 双释放；
-             借源视图还会在 compound_assign_transfer 里被清空（悬垂）。
-             own 是 move-only。判据覆盖 `?own *T` 这类**嵌套** own 槽位
-             （顶层 ownership 为 NONE，但 type_has_own_slots 为真）。 */
-          char tn[64];
-          sema_type_name(sym->type, tn, sizeof(tn));
-          diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot initialize '%.*s' of type %s by copying a value "
-                     "that holds owned resources: own is move-only (use move() "
-                     "or clone(), or declare the target `own %s`)",
-                     (int)vd->name.len, vd->name.ptr, tn, tn);
-          sym->flow_init = false;
-        } else {
-          value_t *dst = value_make_shadow(sema->vm, sym->type);
-          if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
-            char tn[64], itn[64];
-            sema_type_name(sym->type, tn, sizeof(tn));
-            sema_type_name(value_type(init), itn, sizeof(itn));
-            diag_error(sema->diag, sema_loc(sema, vd->init),
-                       "cannot initialize variable '%.*s' of type %s with %s",
-                       (int)vd->name.len, vd->name.ptr, tn, itn);
-          }
+                     "cannot initialize variable '%.*s' of type %s with %s",
+                     (int)vd->name.len, vd->name.ptr, tn, itn);
         }
       }
       var_value =
           value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
-      value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
-    } else {
+      } else {
       /* 推断类型：init 类型即变量类型。
          R1（own 不可 copy，§3.1）：var p = q; 且 init 是 own *T 且非
          fatal 接管 → copy → 编译错误（own 唯一所有权只能 move/clone）。 */
       const type_t *vt = init_bad ? sema->vm->type_void : value_type(init);
-      /* R1（fatal 禁止命名，§3.3）：fatal 是临时值，不能直接命名。
-         - fatal 复合类型（fatal Test）：自动剥离为 T（OWN_NONE）——复合类型
-           的 own 字段所有权由字段自身的 ownership 编码，fatal 仅标记将亡值，
-           变量接管后类型为 T。
-         - fatal 指针/切片（fatal *T / fatal []T）：自动升级为 own *T / own []T
-           ——fatal 是将亡值，只能赋值给 own（move/clone/new 产物），自动推断
-           为 own 而非要求显式标注。 */
-      if (vt && sema_value_is_fatal(init)) {
-        const type_t *stripped = strip_fatal(sema, vt);
-        if (stripped) {
-          vt = stripped;
-          /* fatal 指针/切片剥离为 own（变量接管将亡值 → own 所有权）；
-             **fatal 复合类型同理**：变量接管后就是内部 own 槽位的所有者，
-             否则作用域退出时没有任何 free 序列 → 静默泄漏（实测
-             `var u = .U{ .p = new i32{1} }` 的 4 字节堆块从未释放）。
-             类型仍是 T（所有权不进类型），只是符号层记 OWN_OWN，
-             让 make_free_stmts 按 type 对象展开销毁序列。 */
-          /* 含 own 捕获的闭包：move 产 FATAL → 变量接管为 own 绑定，
-             并记住捕获链供 FREE 展开（逐捕获槽释放）。 */
-          if (type_kind_of(vt) == TYPE_KIND_FUNC) {
-            /* 闭包 = 捕获聚合结构体：**含 own 捕获**的闭包是 own（move-only），
-               销毁 = `FREE f`（VM 按 capture_type 释放 env 里的 own 捕获）。 */
-            const ast_func_def_t *oc = own_closure_of(vd->init);
-            if (oc) {
-              /* 闭包含 own 捕获：strip_fatal 已把类型升为 own func(...)。 */
-            } else if (sema_value_is_fatal(init) ||
-                       value_type_ownership(init) == OWN_OWN) {
-              /* 非字面量初始化（clone(g) / move(g)）：结果依赖运行期 capture_type
-                 → 保守按 own 处理（strip_fatal 已升级类型）。 */
-            }
-          } else if (type_has_own_slots(vt)) {
-            /* 聚合（含 own 槽位的 struct/tuple/union/array）接管：
-               变量成为内部 own 槽位的所有者（strip_fatal 已升级类型）。 */
-          }
-          /* 将推断出的类型写回 type_expr（AST_TYPE_REF），让 compiler 发
-             LOAD_TYPE <id> 而非 PUSH_UNDEFINED。运行时 op_define 走显式
-             类型路径：value_implicit_cast(fatal init → own/none 接管），
-             避免变量持有 fatal 类型在 scope 退出时不释放 → 内存泄漏。
-             函数参数不走此路径（参数有显式 fatal 类型标注，合法保留）。
-
-             注意：`strip_fatal` 合成的 `own ?own *T` 这类**所有权包装**类型
-             可能还没登记过（用户没写过这个类型表达式）→ sema_type_find 返回
-             NULL，此前就不生成 type_expr，运行期变量拿到的是源值类型
-             （`var p = clone(q.n); p == nil` 报 "opt is none requires an
-             optional value"）。这里补登记后再生成类型引用。 */
-          const sema_type_t *st = sema_type_find(sema, vt);
-          if (!st) st = sema_type_register(sema, vt);
-          if (st && st->name.ptr) {
-            ast_node_t *ref = ast_type_ref_new(sema->arena,
-                                               vd->init->tok_begin,
-                                               vd->init->tok_end);
-            if (ref) {
-              ((ast_type_ref_t *)ref)->name = st->name;
-              vd->type_expr = ref;
-            }
-          }
-        } else {
-          /* strip_fatal 返回 NULL 意味着遇到不支持的 fatal 类型（理论上
-             不会发生——所有 fatal 变体都覆盖了），保守报错。 */
-          diag_error(sema->diag, sema_loc(sema, vd->init),
-                     "cannot infer fatal type for variable '%.*s'",
-                     (int)vd->name.len, vd->name.ptr);
-          sym->flow_init = false;
-          vt = sema->vm->type_void;
-        }
-      } else if (vt && !sema_value_is_fatal(init) &&
-                 sema_value_holds_own(init)) {
-        /* R1（own 不可 copy，§3.1）：var p = q; 且 rhs 携带 own 资源
-           （顶层 own，或 `?own *T` / 含 own 槽位的聚合）→ copy → 编译错误。
-           顶层判据之外还要覆盖**嵌套** own 槽位：字段读 `var p = self.n`
-           拿到的是借源视图，复制后两头都以为自己拥有同一块堆 → 双释放。 */
-        char itn[64];
-        sema_type_name(vt, itn, sizeof(itn));
-        diag_error(sema->diag, sema_loc(sema, vd->init),
-                   "cannot initialize variable '%.*s' with %s "
-                   "(own is move-only; use move() or clone())",
-                   (int)vd->name.len, vd->name.ptr, itn);
-        sym->flow_init = false; /* copy 失败 = 未初始化 */
-        vt = sema->vm->type_void;
-      }
       sym->type = vt;
       /* 推断类型写回 AST：后端（C 降级/编译器）需要与 sema 完全相同的类型
          实例。闭包字面量的值类型是**闭包类型**（捕获槽位进入类型身份），
@@ -896,16 +558,13 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
          struct type）。 */
       if (vt) vd->resolved_type = vt;
       var_value = value_make_shadow(sema->vm, vt);
-      value_set_type_ownership(sema->vm, var_value, sema_sym_ownership(sym));
-    }
+      }
   }
 
   /* §5 逃逸检查（m3-design §5）：声明类型含 ref 指针（顶层 ref *T 或含
      ref 字段的 struct/tuple/union）时定义必须带作用域标注；带标注则做
      逃逸比较（ref 存活 ≤ 锚点存活）。类型未就绪（解析失败已诊断）跳过
      ——防级联。 */
-  if (sym->type) check_var_annot(sema, vd, scope, sym->type, sym);
-
 
   /* 定义 shadow value 到当前 VM scope（与 sema scope 树同构；名字取自 ast）。
      定义完成 → 符号激活（sema_lookup 跳过未激活符号，自引用解析到外层） */

@@ -122,17 +122,8 @@ static value_t *union_ne(vm_t *vm, value_t *a, value_t *b) {
 
 /* ---- 类型转换：仅同 union 实例（身份拷贝） ---- */
 
-/* fatal 变体的布局兼容判定（供 value_take_fatal_into 回调）：成员表逐位一致
-   （名 + tag + payload 类型）⟹ 布局一致。与 union_same 同判据。 */
-static bool union_members_same(vm_t *vm, const type_t *a, const type_t *b);
-
 static value_t *union_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (!target) return value_make_error(vm, "union: implicit cast only within same union");
-    /* fatal 变体 → 同布局的非 fatal union：接管转换（见 value_take_fatal_into）。
-       union 的兼容判定就是成员表一致（与 union_same 同义，但只取"类型层"——
-       本处两个类型必然同 kind、同 size，成员表一致 ⟹ 布局一致）。 */
-    value_t *taken = value_take_fatal_into(vm, v, target, union_members_same);
-    if (taken) return taken;
     if (target != value_type(v))
         return value_make_error(vm, "union: implicit cast only within same union");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
@@ -310,21 +301,6 @@ static bool union_same(const union_type_t *a, const union_type_t *b) {
     return true;
 }
 
-/* 回调包装（value_take_fatal_into 的签名）：只看成员表，不看 ownership——
-   fatal 变体与 base 的 ownership 必然不同，正是"接管转换"要跨过的那一步。 */
-static bool union_members_same(vm_t *vm, const type_t *a, const type_t *b) {
-    (void)vm;
-    if (!a || !b || a->kind != TYPE_KIND_UNION || b->kind != TYPE_KIND_UNION)
-        return false;
-    const union_type_t *ua = (const union_type_t *)a;
-    const union_type_t *ub = (const union_type_t *)b;
-    if (ua->member_count != ub->member_count) return false;
-    for (size_t i = 0; i < ua->member_count; i++) {
-        if (!union_member_same(&ua->members[i], &ub->members[i])) return false;
-    }
-    return true;
-}
-
 /* C 对齐规则向上取整 */
 static size_t union_align_up(size_t v, size_t a) {
     if (a <= 1) return v;
@@ -438,7 +414,6 @@ const type_t *type_union_intern(vm_t *vm, const union_member_t *members,
  * =========================================================================== */
 
 int union_type_find_member(const type_t *t, strslice_t name) {
-    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_UNION) return -1;
     const union_type_t *ut = (const union_type_t *)t;
     for (size_t i = 0; i < ut->member_count; i++) {

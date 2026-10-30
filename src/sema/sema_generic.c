@@ -40,7 +40,6 @@
 #include "vm/type_error.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
-#include "vm/type_ownership.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "sema/metadata.h"
@@ -533,15 +532,8 @@ static bool materialize_pack_params(sema_t *sema, ast_func_def_t *fn,
         ast_var_def_t *vd = (ast_var_def_t *)pv;
         vd->name = arena_copy(sema->arena, nm, strlen(nm));
         const sema_generic_arg_t *a = &inst->args[inst->pack_offset + i];
-        /* 元素是含 own 槽位但未标 own 的聚合：隐藏形参必须用 `own T`
-           接收，否则形参只是借用视图，body 里 `move(__pack_arg_i)` 会报
-           "cannot move a borrowed value"，也无法负责释放。 */
         const type_t *ptype = a->type;
-        if (ptype && type_ownership_of(ptype) == OWN_NONE &&
-            type_has_own_slots(type_strip_quals(ptype)))
-            ptype = type_ownership_apply(sema->vm, OWN_OWN,
-                                         type_strip_quals(ptype));
-        vd->type_expr = sema_gen_type_ref(sema, ptype ? ptype : a->type);
+        vd->type_expr = sema_gen_type_ref(sema, ptype);
         if (!vd->type_expr) return false;
         pv->is_generated = true;
         pv->next = NULL;
@@ -596,9 +588,6 @@ static const type_t *resolve_instance_sig(sema_t *sema, ast_func_def_t *fn) {
         if (ptypes) allocator_free(sema->vm->alloc, (void **)&ptypes);
         return NULL;
     }
-
-    sema_check_ret_ref_annot(sema, fn, rt);
-
     const type_t *sig = type_func_sig(sema->vm, ptypes, n, rt, false);
     const sema_type_t *st = sig ? sema_type_register(sema, sig) : NULL;
     if (st) fn->sig_id = st->id;
@@ -1191,8 +1180,6 @@ static const type_t *instantiate_func_impl(
     fn->fid = 0;
     fn->sig_id = 0;
     fn->capture_type_id = 0;
-    fn->env_dispose_fid = 0;
-    fn->env_clone_fid = 0;
     fn->name = iname;
     fn->base.is_generated = true;
     fn->owner_module = owner_module;
@@ -2424,29 +2411,6 @@ static int infer_param_index(const ast_func_def_t *def, strslice_t name) {
     return -1;
 }
 
-static ownership_t infer_token_ownership(const token_t *tok) {
-    if (!tok) return OWN_NONE;
-    if (token_is(tok, "own")) return OWN_OWN;
-    if (token_is(tok, "ref")) return OWN_REF;
-    if (token_is(tok, "fatal")) return OWN_FATAL;
-    return OWN_NONE;
-}
-
-/* 形参侧所有权 pat 是否接受实参侧所有权 act（不对称：fatal→own→ref）。 */
-static bool infer_ownership_accepts(ownership_t pat, ownership_t act) {
-    switch (pat) {
-    case OWN_NONE:
-        return act == OWN_NONE;
-    case OWN_FATAL:
-        return act == OWN_FATAL;
-    case OWN_OWN:
-        return act == OWN_OWN || act == OWN_FATAL;
-    case OWN_REF:
-        return act == OWN_REF || act == OWN_OWN || act == OWN_FATAL;
-    }
-    return false;
-}
-
 static void infer_bind(sema_t *sema, infer_t *b, size_t idx,
                        const type_t *actual, const ast_node_t *site);
 
@@ -2525,13 +2489,10 @@ static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
                                     const type_t *actual,
                                     const ast_node_t *site) {
     if (!pat || !actual || !b || b->failed) return;
-    /* 形参侧所有权修饰：own/ref/fatal T（非指针）与 own/ref/fatal *T 同构。 */
-    ownership_t pat_own = OWN_NONE;
     ast_node_t *base = NULL;
     if (pat->kind == AST_PTR) {
         ast_ptr_t *p = (ast_ptr_t *)pat;
-        if (p->ownership) return; /* 所有权模式已移除 */
-        const type_t *core = type_strip_ownership(actual);
+        const type_t *core = actual;
         if (!core || core->kind != TYPE_KIND_PTR) return;
         base = p->base_type;
         infer_pattern(sema, b, base, ptr_type_base(actual), site);
@@ -2539,29 +2500,16 @@ static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
     if (pat->kind == AST_SLICE_TYPE) {
         ast_slice_type_t *s = (ast_slice_type_t *)pat;
-        pat_own = infer_token_ownership(s->ownership);
-        const type_t *core = type_strip_ownership(actual);
+        const type_t *core = actual;
         if (!core || core->kind != TYPE_KIND_SLICE) return;
-        if (!infer_ownership_accepts(pat_own, type_ownership_of(actual))) return;
         infer_pattern(sema, b, s->elem_type, slice_type_elem(actual), site);
         return;
     }
 }
 
-/* 推断实参类型：fatal 是调用表达式的值状态；形参只接收 own/ref。
-   因此 `f(move(x))` 把 fatal *T 推断为 `own *T`，而不是 fatal 形参。 */
-static const type_t *infer_param_actual(sema_t *sema, const type_t *actual) {
-    if (!actual || type_ownership_of(actual) != OWN_FATAL) return actual;
-    const type_t *core = type_strip_ownership(actual);
-    if (!core) return actual;
-    const type_t *own = type_ownership_apply(sema->vm, OWN_OWN, core);
-    return own ? own : actual;
-}
-
 static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
                           const type_t *actual, const ast_node_t *site) {
     if (!pat || !actual || !b || b->failed) return;
-    actual = infer_param_actual(sema, actual);
     switch (pat->kind) {
     case AST_IDENT: {
         strslice_t nm = ((ast_ident_t *)pat)->name;
@@ -2597,7 +2545,7 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
         return;
     case AST_ARRAY: {
         ast_array_t *a = (ast_array_t *)pat;
-        const type_t *core = type_strip_ownership(actual);
+        const type_t *core = actual;
         if (!core || core->kind != TYPE_KIND_ARRAY) return;
         uint64_t alen = (uint64_t)array_type_len(actual);
         if (a->length && a->length->kind == AST_IDENT) {
@@ -2618,7 +2566,7 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
     case AST_TUPLE: {
         ast_tuple_t *t = (ast_tuple_t *)pat;
-        const type_t *core = type_strip_ownership(actual);
+        const type_t *core = actual;
         if (!core || core->kind != TYPE_KIND_TUPLE) return;
         size_t np = sema_count_siblings(t->elem_types);
         if (np != tuple_type_elem_count(actual)) return;
@@ -2631,7 +2579,7 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
     case AST_FUNC_TYPE: {
         ast_func_type_t *f = (ast_func_type_t *)pat;
-        const type_t *core = type_strip_ownership(actual);
+        const type_t *core = actual;
         if (!core || (core->kind != TYPE_KIND_FUNC &&
                       core->kind != TYPE_KIND_CFUNC))
             return;
@@ -2795,7 +2743,7 @@ static const type_t *instantiate_inferred_impl(
         const type_t *at =
             (av && !value_is_error(sema->vm, av) &&
              !value_is_type(av, TYPE_KIND_VOID))
-                ? infer_param_actual(sema, value_type(av))
+                ? value_type(av)
                 : NULL;
         if (!at) return NULL;
         if (k < exp_pack) {

@@ -7,7 +7,6 @@
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
-#include "vm/type_ownership.h"
 #include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -70,7 +69,6 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->arena = arena;
   sema->global_scope = NULL;
   sema->funcs = vec_new(vm->alloc, false); /* 元素手动释放（sema_func_t 无 dispose） */
-  sema->closures = vec_new(vm->alloc, false);
   sema->ct_func_lits = vec_new(vm->alloc, false);
   sema->types = vm->sema_types_global; /* 全 VM 共享类型登记表 */
   sema->fn.return_type = NULL;
@@ -117,7 +115,6 @@ void sema_destroy(sema_t **sema) {
     }
     vec_free(alloc, &(*sema)->funcs);
   }
-  if ((*sema)->closures) vec_free(alloc, &(*sema)->closures);
   if ((*sema)->ct_func_lits) vec_free(alloc, &(*sema)->ct_func_lits);
   {
     sema_impl_t *im = (*sema)->impls;
@@ -480,29 +477,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     sema_walk_function(sema, sf);
   }
 
-  /* Pass 3b 期间按需生成的销毁函数（每个含 own 槽位的复合类型一个）：统一追加到
-     程序函数链尾部 —— compiler 预扫描为它们构造函数对象 + 全局名字绑定，
-     销毁点发的 `CALL __destroy_<n>` 才能解析到。 */
-  /* 闭包 env 的 vtable：为每个含捕获的函数生成 `__destroy_<env>`（释放 env 的
-     own 捕获）与 `__clone_<env>`（深拷贝 env），把 fid 记到 AST 上——compiler
-     在 hoist 随 `SET_FUNC_CAPTURES` 一起写进函数对象，于是闭包的 clone/free
-     走**编译期生成的函数**，不需要运行期类型内省（也不必用 __deep_clone）。 */
-  if (!diag_has_error(sema->diag) && sema->closures) {
-    size_t ncl = vec_len(sema->closures);
-    for (size_t i = 0; i < ncl; i++) {
-      ast_func_def_t *fd = (ast_func_def_t *)vec_get(sema->closures, i);
-      if (!fd || fd->capture_type_id == 0) continue;
-      const sema_type_t *ct = sema_type_by_id(sema, fd->capture_type_id);
-      if (!ct || !ct->type) continue;
-      uint32_t dfid = 0, cfid = 0;
-      if (sema_gen_env_vtable(sema, ct->type, &dfid, &cfid)) {
-        fd->env_dispose_fid = dfid;
-        fd->env_clone_fid = cfid;
-      }
-    }
-  }
   if (!diag_has_error(sema->diag)) {
-    sema_attach_destroy_fns(sema, program);
     sema_attach_clone_fns(sema, program);
   }
 

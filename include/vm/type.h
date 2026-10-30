@@ -5,8 +5,6 @@ extern "C" {
 #endif
 
 #include "vm/vtable.h"
-#include "vm/ownership.h"    /* ownership_t（vtable_t 的 type_set_ownership 槽位也要） */
-#include "core/allocator.h"  /* allocator_t：type_name_with_ownership 的参数 */
 #include "core/strslice.h"
 #include "core/strmap.h"     /* strmap_t：struct_type_t 的 attributes */
 #include "core/vec.h"        /* vec_t：struct_type_t 的 methods */
@@ -23,8 +21,6 @@ typedef struct scope_t scope_t;
  *
  * 鸭子类型判断的基础：复合/修饰类型按 kind 而非实例指针分类。
  * 粗粒度（INT/FLOAT 覆盖全部宽度变体），细粒度差异由 name/size 承载。
- * 所有权修饰（own/ref/fatal/share/weak）不再编码在 kind 中——改为
- * 类型所有权修饰 正交字段（见 ownership_t）。
  */
 typedef enum type_kind_t {
     TYPE_KIND_VOID     = 0,
@@ -46,9 +42,9 @@ typedef enum type_kind_t {
     TYPE_KIND_ENUM,
     TYPE_KIND_UNION,     /* tag union：tag 整数前缀 + member payload 联合体 */
     TYPE_KIND_CUNION,
-    /* ---- 指针与切片（所有权由 类型所有权修饰 正交修饰） ---- */
-    TYPE_KIND_PTR,       /* *T：指针（own/ref/fatal/share/weak 由 ownership 区分） */
-    TYPE_KIND_SLICE,     /* []T：切片胖指针（own/ref/fatal 由 ownership 区分） */
+    /* ---- 指针与切片 ---- */
+    TYPE_KIND_PTR,       /* *T：裸指针（编译器不追踪所有权） */
+    TYPE_KIND_SLICE,     /* []T：切片胖指针（编译器不追踪所有权） */
     TYPE_KIND_OPAQUE,    /* opaque：不透明指针（任何指针可隐式转，反向显式 as） */
     TYPE_KIND_MODULE,    /* 模块命名空间值（M5，data=module_t*，不可实例化/赋值/传递） */
 TYPE_KIND_CFUNC,     /* cfunc(P…) -> R：**C 函数指针**（无 env，size=指针）。
@@ -68,7 +64,7 @@ TYPE_KIND_CFUNC,     /* cfunc(P…) -> R：**C 函数指针**（无 env，size=�
 typedef struct func_sig_t {
     const type_t **params;      /* array[param_count]; 元素可为 NULL = 无类型约束 */
     size_t         param_count;
-    const type_t  *return_type; /* NULL = void；所有权编码在参数/返回类型上 */
+    const type_t  *return_type; /* NULL = void */
     bool           is_variadic;
 } func_sig_t;
 
@@ -126,9 +122,6 @@ typedef struct volatile_type_t {
 typedef struct option_type_t {
     type_t       base;
     const type_t *inner;  /* 被 optional 包裹的类型 T（引用，不拥有） */
-    /* 该 **inner 槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
-       `?own *T` 的 own 必须记在类型描述上——销毁序列 `if (v != nil)` 要据此
-       决定是否 FREE `v.!`；参与去重 intern。 */
 } option_type_t;
 
 /**
@@ -161,9 +154,7 @@ typedef struct ptr_type_t {
 /**
  * slice_type_t: 切片类型（type_t 的扩展，m4-design §1/§10）
  *
- * 与指针同构——胖指针 { ptr, len: u64 }。三种所有权修饰（own/ref/fatal）
- * 由 类型所有权修饰 字段编码（ownership_t），同一 elem_type 的三种切片
- * 是三个独立 intern 实例。不存在 share/weak 切片。
+ * 与指针同构——胖指针 { ptr, len: u64 }。只有一种切片类型（没有所有权修饰）。
  *
  * size = sizeof(slice_value_t) = 2 * sizeof(void*)（16 字节/64 位平台）
  * align = sizeof(void*)。密封不依赖 elem_type 布局——hoist 中属引用依赖
@@ -172,9 +163,6 @@ typedef struct ptr_type_t {
 typedef struct slice_type_t {
     type_t       base;
     const type_t *elem_type;  /* 元素类型 T（引用，不拥有） */
-    /* 该 **元素槽位** 的所有权（合法性说明同 struct_field_t::ownership）。
-       `own []own *T` 的元素才是 own 叶子；销毁序列 `for i in 0..len` 要据此
-       决定是否 FREE `s[i]`。参与去重 intern。 */
 } slice_type_t;
 
 typedef struct enum_type_t {
@@ -202,12 +190,6 @@ typedef struct struct_field_t {
     strslice_t     name;   /* 字段名（seal 时拷贝，vm 拥有） */
     size_t         offset; /* 字段在 data 块中的字节偏移（seal 时布局计算） */
     const type_t  *type;   /* 字段类型（引用，不拥有；须已密封） */
-    /* 该**字段槽位**的所有权（own / ref / fatal / none）。
-       这是**合法的类型描述**：类型描述的是"结构里有几个可挂载所有权的槽位"，
-       而不是"这个值是不是 own"（后者是值状态，禁止记在 type_t 上）。
-       装饰器会改造类型，所以销毁序列必须从 type 对象反推——定义 AST 描述的是
-       装饰器之前的形态、构造式只覆盖被写入的字段，两者都不可信。
-       **参与 intern 去重**：own 槽位与 ref 槽位是不同类型（销毁语义不同）。 */
 } struct_field_t;
 
 typedef struct struct_type_t {
@@ -286,7 +268,6 @@ typedef struct struct_type_t {
 typedef struct tuple_elem_t {
     size_t        offset; /* 元素在 data 块中的字节偏移（seal 时布局计算） */
     const type_t *type;   /* 元素类型（引用，不拥有；须已密封） */
-    /* 该**元素槽位**的所有权（合法性说明同 struct_field_t::ownership） */
 } tuple_elem_t;
 
 typedef struct tuple_type_t {
@@ -324,7 +305,6 @@ typedef struct union_member_t {
     const type_t   *payload_type; /* member payload 类型（seal 时引用，归
                                      type 池；不可为 NULL——所有 member
                                      都有类型） */
-    /* 该 **payload 槽位** 的所有权（合法性说明同 struct_field_t::ownership） */
 } union_member_t;
 
 typedef struct union_type_t {
@@ -366,10 +346,6 @@ typedef struct cunion_type_t {
     size_t           member_count;
 } cunion_type_t;
 
-static inline const type_t *type_strip_ownership(const type_t *t) {
-    return t;
-}
-
 /** 结构化判定用的 kind。 */
 static inline type_kind_t type_kind_of(const type_t *t) {
     return t ? t->kind : TYPE_KIND_VOID;
@@ -383,12 +359,6 @@ static inline bool type_is_ptr(const type_t *t) {
 /** 类型是否为切片（TYPE_KIND_SLICE；穿透 own/ref/fatal 修饰）。 */
 static inline bool type_is_slice(const type_t *t) {
     return type_kind_of(t) == TYPE_KIND_SLICE;
-}
-
-/** 已废弃：同上。 */
-static inline bool type_owns_resource(const type_t *t) {
-    (void)t;
-    return false;
 }
 
 /** 判断类型是否为 optional 修饰类型（type_kind 分类） */
@@ -494,17 +464,8 @@ static inline bool type_has_quals(const type_t *t) {
  */
 bool type_has_const(const type_t *t);
 
-
-
-/** 构造"<ownership 前缀> + base 名"的类型显示名（堆分配，vm 拥有）。
- *  ownership == OWN_FATAL 时前缀为 "fatal "，否则原样拷贝 base 名。
- *  base 名为空（ptr==NULL）时用 fallback（可为 NULL → 空名）。用于 fatal
- *  复合类型变体的规范显示名（`fatal Box` / `fatal <i32, i32>` …）。失败返回 NULL。 */
-char *type_name_with_ownership(allocator_t *alloc, const type_t *base,
-                               ownership_t ownership, const char *fallback);
-
 /**
- * 类型是否为指针或切片（TYPE_KIND_PTR / TYPE_KIND_SLICE，任意所有权修饰）。
+ * 类型是否为指针或切片（TYPE_KIND_PTR / TYPE_KIND_SLICE）。
  * 用于"复合类型字段不得携带指针/切片"的检查——恢复到只有普通指针的场景：
  * 指针和切片只能出现在变量声明/参数/返回值等顶层位置，不能嵌进 struct/tuple/
  * array/union/option 的字段或元素。
@@ -523,54 +484,14 @@ static inline bool type_is_ptr_or_slice(const type_t *t) {
  */
 bool type_contains_ptr_or_slice(const type_t *t);
 
-/**
- * 该类型**是否含 own 槽位**（递归，从 type 对象判定）。
- *
- * 用于所有权模型的 CONSTRUCT 规则：字段含 own 的构造产 **FATAL** 将亡值
- * （聚合必须由 `own` 位置接收）。
- *
- * 判定依据是 `struct_field_t::ownership` 等**槽位所有权**——它记在 type 对象上
- * （装饰器会改类型，所以定义 AST 与构造式都不可信），不是 `类型所有权修饰`。
- * 叶子（ptr / slice）本身不算"含 own 槽位"：它们的 own 性由所在**槽位**记录。
- */
-bool type_has_own_slots(const type_t *t);
-
 /** 聚合内部是否含**带捕获的闭包槽位**（按值嵌套递归；FUNC 自身 = 有捕获）。
- *  闭包值拷贝必须深拷贝这些槽位的 env（值语义），即使槽位所有权是 NONE。 */
+ *  闭包值拷贝必须深拷贝这些槽位的 env（值语义）。 */
 bool type_has_closure_slots(const type_t *t);
 
 /** 聚合内部是否含 **FUNC 槽位**（按值嵌套递归；不论有无捕获）。运行期
  *  闭包字段的类型身份可能已折叠成签名类型，ptr_clone_block 用本判定进入
  *  聚合、再按运行期 func_t->capture_type 决定是否深拷贝 env。 */
 bool type_has_func_slots(const type_t *t);
-
-/** 判定类型是否**含 share/weak 槽位**（递归：struct 字段 / tuple 元素 /
- *  union 成员 / array 元素 / slice 元素 / option inner）。
- *  RC 指针是真实类型而不是所有权，所以"普通变量"也可能需要递减计数——
- *  销毁生成据此把它算作"需要销毁的值"。 */
-
-/* 注：所有权现在**就是类型修饰**（docs/ownership-as-type.md）。判定入口：
- *   - 类型层：`type_ownership_of(t)`（穿透 const/volatile），
- *             `type_is_own/ref/fatal(t)`（看最外层修饰）
- *   - 符号层：`sema_sym_ownership(sym)`（由 sym->type 派生，符号不存副本）
- *   - 槽位层：槽位类型本身（`struct_field_t::type` 等）；`ownership` 字段只是
- *             hoist 产出的运行期镜像，不是编译期判定的依据
- *   - 签名层：参数/返回类型本身（签名不另存 ownership 数组）
- */
-
-/* fatal 变体现在是类型修饰 `fatal T`，由 sema 的 `sema_fatal_variant_of`
- * 构造；VM 层不再需要 `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳。 */
-
-
-/* 注：fatal 是类型修饰 `fatal T`，没有"独立变体身份"需要登记或折回；
- * `type_fatal_variant_of` / `type_fatal_base_of` 恒等壳已删除。
- *
- * 注：原 `type_contains_ref`（类型层递归判 ref）也已删除。ref 的判定入口：
- *   - 类型层：`type_ownership_of(t) == OWN_REF`
- *   - 符号层：`sema_sym_ownership(sym) == OWN_REF`
- *   - 值层：  `value_type_ownership(v) == OWN_REF`（类型派生）
- *   - 签名层：参数/返回类型本身
- */
 
 /** const 类型 intern（按 sub 指针去重，vm 拥有生命周期） */
 const type_t *type_const_intern(vm_t *vm, const type_t *sub);

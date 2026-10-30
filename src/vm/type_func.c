@@ -1,7 +1,5 @@
 #include "vm/type_func.h"
-#include "vm/type_ownership.h"
 #include "vm/value.h"
-#include "vm/value_deepcopy.h" /* value_relabel_into（fatal 形参重贴标签） */
 #include "vm/function.h"
 #include "vm/vm.h"
 #include "vm/scope.h"
@@ -75,7 +73,7 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
     if (!ct || ct->vtable != &VTABLE_FUNC || ct == vm->type_func) {
         return value_make_error(vm, "func call: function has no signature");
     }
-    const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(ct))->sig;
+    const func_sig_t *sig = &((const func_type_t *)ct)->sig;
     /* 192：最长的诊断（"argument N: cannot copy a value holding owned resources
        into parameter of type <类型名> (use move() or clone(), or declare the
        parameter as 'ref *T' to borrow)"）在类型名较长时约 150 字符。 */
@@ -98,45 +96,6 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
         if (value_is_error(vm, args[i]) ||
             value_type(args[i]) == vm->type_void)
             continue;
-        /* R1（§7 唯一所有权不可隐式拷贝）：形参声明 own 资源时，实参必须是
-           **将亡值（fatal）**——否则实参是普通左值/值，传进被调用方会后与
-           调用方**共享**内嵌 own 堆块，被调用方作用域退出时释放 → 调用方拿到
-           悬垂指针（实测 access violation）。调用点必须显式 move()/clone() 让
-           实参成为 fatal 将亡值；只想借用就写成 `ref *T` 形参。
-           **必须在 type_eq 之前判**：`func read(b: Box)` 用 `read(a)`（a 也是 Box）
-           时两侧类型完全相同，早前"仅类型不等时才检查"的写法会静默放行 ——
-           这正是本缺陷（复合类型跨函数边界）的入口之一。
-           本函数是"实参 → 形参"转换的**唯一**判定点：运行期 func_vcall 与 sema
-           的 shadow 调用都经过这里，因此规则只此一处。
-           形参所有权编码在参数类型上（type_ownership_of），
-           实参 fatal 由 value_type_ownership 读取。 */
-        if (i < sig->param_count && sig->params[i] &&
-            type_ownership_of(sig->params[i]) == OWN_OWN &&
-            value_type_ownership(args[i]) != OWN_FATAL) {
-            char pn[64];
-            sig_type_name(sig->params[i], pn, sizeof pn);
-            snprintf(msg, sizeof msg,
-                     "argument %zu: cannot copy a value holding owned resources "
-                     "into parameter of type %s (use move() or clone(), or declare "
-                     "the parameter as 'ref *T' to borrow)", i + 1, pn);
-            return value_make_error(vm, msg);
-        }
-        /* **反向规则**：fatal（将亡）实参必须被 own 形参接管。传给 ref /
-           非 own 形参时没有任何位置接住这块资源——临时值（new / 构造 /
-           clone / fatal 返回值）随调用结束无人释放 → 泄漏（实测 4 字节）。
-           想借用就先绑到 own 变量，再把变量传给 ref 形参。 */
-        if (i < sig->param_count && sig->params[i] &&
-            value_type_ownership(args[i]) == OWN_FATAL &&
-            type_ownership_of(sig->params[i]) != OWN_OWN) {
-            char pn[64];
-            sig_type_name(sig->params[i], pn, sizeof pn);
-            snprintf(msg, sizeof msg,
-                     "argument %zu: a dying value (FATAL) must be caught by an "
-                     "'own' position; parameter of type %s does not take "
-                     "ownership (bind it to an own variable, or pass it to an "
-                     "own parameter)", i + 1, pn);
-            return value_make_error(vm, msg);
-        }
         if (i < sig->param_count && sig->params[i] &&
             !type_eq(value_type(args[i]), sig->params[i])) {
             value_t *casted = value_implicit_cast(vm, args[i], sig->params[i]);
@@ -154,12 +113,6 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
 
     value_t *ret = value_make_shadow(
         vm, sig->return_type ? sig->return_type : vm->type_void);
-    /* 返回含 own 槽位的聚合 = 将亡值：调用点若直接 `var t = f()`，sema 需要
-       按 FATAL 接管（自动推断为 own 并生成销毁序列），否则返回值原临时
-       无人释放（4 字节堆块泄漏）。 */
-    if (ret && !value_is_error(vm, ret) && sig->return_type &&
-        type_has_own_slots(sig->return_type))
-        value_set_type_ownership(vm, ret, OWN_FATAL);
     return ret;
 }
 
@@ -184,7 +137,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
        func 基类（vm->type_func，无签名）→ sig=NULL 跳过校验 */
     const type_t *st = (ct && ct->vtable == &VTABLE_FUNC && ct != vm->type_func)
                            ? ct : NULL;
-    const func_sig_t *sig = st ? &((const func_type_t *)type_strip_ownership(st))->sig : NULL;
+    const func_sig_t *sig = st ? &((const func_type_t *)st)->sig : NULL;
 
     /* 参数数量检查：非 variadic 函数拒绝多余实参 */
     if (sig && !sig->is_variadic && argc > sig->param_count) {
@@ -226,69 +179,8 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     bool is_error = false;
 
     for (size_t i = 0; i < argc; i++) {
-        /* fatal 形参（`fatal *T` / `fatal []T`）：
-           所有权**转移**进被调用方，不是拷贝。判定用"**实参持有资源（own）**
-           且 形参声明为 fatal 且形参类型是指针/切片"——不要求实参的运行期类型
-           本身是 fatal：构造表达式/`move()` 的产物在**语义**上是将亡值，但运行期
-           保持 base 类型（所有权纯编译期，运行期不为同一逻辑类型维护两个实例）。
-           下方 else 分支对同类型走 value_clone —— 对含 own 字段的复合类型那是一次
-           **多余的深拷贝**（白分配一整套对象图），而且调用方实参仍持有原件，
-           "转移"就名不副实。这里显式走 value_move：接管资源 + 清空源。
-           形参所有权编码在参数类型上（type_ownership_of），
-           实参所有权由 value_type_ownership 读取。 */
         if (sig && sig->params && i < sig->param_count && sig->params[i] &&
-            type_ownership_of(sig->params[i]) == OWN_FATAL &&
-            (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
-            value_type_ownership(args[i]) == OWN_OWN) {
-            value_t *moved = value_move(vm, args[i]);
-            if (value_is_error(vm, moved)) {
-                is_error = true;
-                ret = moved;
-                break;
-            }
-            /* 形参声明为 fatal：转移产物必须**是**该 fatal 类型（否则下方
-               "同类型"分支会把它当普通值，而 DEFINE 绑参时按声明的 fatal 类型做
-               普通→fatal 的转换，那不是合法转换）。base 与 fatal 变体逐字节同
-               布局，按形参类型**重贴标签**即可（资源已在 move 内完成转移）。
-               不用 value_implicit_cast：那条路径按各族 vtable 分派，对
-               array/union 等"同布局不同身份"的形态会落到拒绝分支。 */
-            if (value_type(moved) != sig->params[i]) {
-                value_t *relabeled = value_relabel_into(vm, moved, sig->params[i]);
-                if (relabeled) moved = relabeled;
-            }
-            local_args[i] = moved;
-            continue;
-        }
-        /* own 形参（`own *T` / `own []T`）：所有权**真正转移**进被调方。
-           形参就是临时变量——被调方拥有它，作用域退出时由 sema 生成的 FREE
-           释放；调用方已 move（TDZ），不会再释放。
-           为什么不能走下面的 implicit_cast 分支：`move()` 是纯编译期（不发
-           指令），实参到达这里是调用方槽位的**借用视图**（OWN_REF）。浅拷贝
-           指针后 ownership 仍是 REF，被调方的 FREE 成了 no-op，而调用方已经
-           move → 堆块永久泄漏（实测 `func f(a: own *i32) { ... }` 每次调用
-           漏 4 字节）。这里复制值本体（指针/切片描述符，8~16 字节，不深入
-           对象图）并把 ownership 置为 OWN_OWN。 */
-        if (sig && sig->params && i < sig->param_count && sig->params[i] &&
-            type_ownership_of(sig->params[i]) == OWN_OWN &&
-            (type_is_ptr(sig->params[i]) || type_is_slice(sig->params[i])) &&
-            value_type_ownership(args[i]) == OWN_REF) {
-            value_t *owned = value_clone(vm, args[i]);
-            if (!owned || value_is_error(vm, owned)) {
-                is_error = true;
-                ret = owned ? owned
-                            : value_make_error(vm, "func call: out of memory "
-                                                   "while binding own parameter");
-                break;
-            }
-            if (value_type(owned) != sig->params[i]) {
-                value_t *relabeled = value_relabel_into(vm, owned, sig->params[i]);
-                if (relabeled) owned = relabeled;
-            }
-            local_args[i] = owned;
-            continue;
-        }
-        if (sig && sig->params && i < sig->param_count && sig->params[i]
-            && value_type(args[i]) != sig->params[i]) {
+            value_type(args[i]) != sig->params[i]) {
             /* safe_cast: implicit_cast（auto-tracked），失败返回 error */
             value_t *casted = value_implicit_cast(vm, args[i], sig->params[i]);
             if (value_is_error(vm, casted)) {
@@ -311,24 +203,7 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
                 is_error = true;
                 ret = result;  /* error 借用 callee scope */
             } else if (sig && sig->return_type && !sig->is_variadic &&
-                       value_type(result) != sig->return_type &&
-                       /* 声明返回类型是 **fatal 且带资源** 时，这里**不** cast——
-                          交给下方第 7 步做"转移 + 重贴标签"。原因：base→fatal 不是
-                          一个合法的隐式转换方向（各族的 implicit_cast 只认
-                          fatal→base 的接管），在此 cast 会直接失败：
-                          `fatal [2]I` 返回 `[2]I` 时实测报
-                          "array: implicit cast only within layout-compatible
-                          array/tuple"。第 7 步的 value_move + value_relabel_into
-                          才是这条路径的正解（struct/指针族此前偶然靠 base→fatal
-                          的布局兜底通过，array/union 则暴露了问题）。 */
-                       /* 声明返回类型是 **fatal 且带资源** 时，这里**不** cast——
-                          交给下方第 7 步做"转移 + 重贴标签"。原因：base→fatal 不是
-                          一个合法的隐式转换方向（各族的 implicit_cast 只认
-                          fatal→base 的接管），在此 cast 会直接失败。
-                          所有权编码在返回类型上。 */
-                       !(type_ownership_of(sig->return_type) == OWN_FATAL &&
-                         (type_is_ptr(sig->return_type) ||
-                          type_is_slice(sig->return_type)))) {
+                       value_type(result) != sig->return_type) {
                 /* safe_cast 返回值到声明的返回类型（auto-tracked 到 callee scope）。
                    variadic 内建函数（如 upgrade）使用类型擦除签名，返回类型
                    由 cfunc 按实参动态构造——跳过 cast，直接借用 cfunc 结果。 */
@@ -344,38 +219,12 @@ static value_t *func_vcall(vm_t *vm, value_t *callee, value_t **args, size_t arg
     }
 
     /* 7. 返回值/error 交回调用方作用域 */
-    /* 临时切换 current_scope 到 caller，新值自动 track 到 caller 的 owned。
-       fatal 返回类型（返回值携带所有权出函数）：**转移**而不是拷贝——被调用方
-       局部（`return move(b)` 的 b）在下方第 8 步随作用域销毁，拷贝会白复制一整套
-       对象图；转移把资源直接交给调用方，被调用方局部已 ptr=NULL，安全。
-       其余类型照旧 clone（借用视图 materialize 成独立副本）。 */
+    /* 临时切换 current_scope 到 caller，新值自动 track 到 caller 的 owned；
+       返回值 clone（借用视图 materialize 成独立副本）。 */
     scope_t *callee_current = vm->current_scope;
     vm->current_scope = caller_scope;
     if (ret && value_type(ret)) {
-        if (sig && sig->return_type &&
-            type_ownership_of(sig->return_type) == OWN_FATAL &&
-            (type_is_ptr(sig->return_type) ||
-             type_is_slice(sig->return_type) ||
-             type_has_own_slots(sig->return_type)) &&
-            value_type_ownership(ret) == OWN_OWN) {
-            /* 声明返回值带资源：**转移**（与形参接收同款）。产物是 base 类型，
-               按声明的 fatal 返回类型重贴标签后再交回调用方。 */
-            ret = value_move(vm, ret);
-            if (!value_is_error(vm, ret) && value_type(ret) != sig->return_type) {
-                value_t *relabeled = value_relabel_into(vm, ret, sig->return_type);
-                if (relabeled) ret = relabeled;
-            }
-        } else if (sig && sig->return_type &&
-                   type_has_own_slots(sig->return_type)) {
-            /* 返回含 own 槽位的聚合：必须**转移**而不是 clone——clone 会
-               深拷贝元素，但 callee 的返回值临时本身无人释放（4 字节堆块
-               泄漏）。转移后按 FATAL 交回调用方，由变量/上下文接管。 */
-            ret = value_move(vm, ret);
-            if (ret && !value_is_error(vm, ret))
-                value_set_type_ownership(vm, ret, OWN_FATAL);
-        } else {
-            ret = value_clone(vm, ret);
-        }
+        ret = value_clone(vm, ret);
     }
 
     /* 8. 平衡作用域栈：销毁 callee 作用域子树 */

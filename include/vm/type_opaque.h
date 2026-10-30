@@ -25,7 +25,6 @@ extern const vtable_t VTABLE_OPAQUE;
  *   - type_equal/type_extends：单例身份比较（opaque 是独立类型）。
  */
 static inline bool type_is_opaque(const type_t *t) {
-    t = type_strip_ownership(t);
     return t && t->kind == TYPE_KIND_OPAQUE;
 }
 

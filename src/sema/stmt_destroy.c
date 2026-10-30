@@ -1,5 +1,4 @@
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -120,7 +119,6 @@
 
 #include "sema_stmt_internal.h"
 
-static ast_node_t *destroy_fn_callee_node(sema_t *sema, const sema_destroy_fn_t *reg);
 bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
 static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access, ast_node_t **head, ast_node_t **tail);
 
@@ -144,17 +142,11 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access, 
  *
  * 为什么不读 AST：装饰器会改造类型，所以"定义 AST"描述的是装饰器之前的形态、
  * 构造式只覆盖被写入的字段——两者都可能与最终类型不符。type 对象在装饰器之后
- * 仍是权威（槽位所有权记在 struct_field_t::ownership 上，见 type.h）。
+ * 仍是权威。
  *
- * 判定规则（关键：区分"叶子"与"复合"）：
- *   - **叶子**（ptr / slice）：有独立分配，**仅当该槽位 ownership == OWN**
- *     才生成 FREE。ref / fatal 槽位是借用/将亡值，不归本值所有 → 不释放。
- *   - **复合**（struct / tuple / …）：值本身没有独立分配，其内部 own 槽位
- *     在结构上属于外层值 → **无条件递归**（与字段自身的 ownership 无关）。
- *
- * 这样 `struct Holder { r: ref *i32; p: own *i32 }` 的销毁序列只含 `FREE v.p`
- * ——`r` 根本不会进序列，此前"运行期递归释放所有指针字段"导致的
- * 0xC0000005（把 ref 指向的栈地址也 free 了）从根上消失。
+ * 规则：**闭包槽位**（func 值，含结构体/元组/数组里的字段）生成 `FREE` 释放
+ * env；指针/切片由用户显式 `free`，不自动销毁；复合值本身没有独立分配，其内部
+ * 的闭包槽位在结构上属于外层值 → 递归展开。
  * =========================================================================== */
 
 /* 把 n 追加到 (head, tail) 单链尾部。 */
@@ -170,222 +162,6 @@ static void destroy_append(ast_node_t **head, ast_node_t **tail,
   }
 }
 
-static bool type_needs_destroy_fn(const type_t *t) {
-  if (!t) return false;
-  const type_t *s = type_strip_quals(t);
-  if (!s) return false;
-  if (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE) return false;
-  return type_has_own_slots(s);
-}
-
-/* 注册表查找：类型对象指针（intern 后唯一）→ 已生成的销毁函数。 */
-static sema_destroy_fn_t *destroy_fn_find(sema_t *sema, const type_t *t) {
-  for (sema_destroy_fn_t *f = sema->destroy_fns; f; f = f->next)
-    if (f->type == t) return f;
-  return NULL;
-}
-
-/* 取（必要时**生成**）类型 t 的销毁函数，返回调用用的 callee（AST_FUNC_REF）。
- *
- * 生成过程（一次）：分配 `__destroy_<n>` 名字 + fid；构造 AST_FUNC_DEF：
- *   - 形参 `dv: ref *T`（类型是 intern 的 `*T`，所有权在槽位上 = REF）；
- *   - 签名 `void(ref *T)` 登记进 sema->types（compiler hoist 用 sig_id）；
- *   - body = 销毁 T 的 own 槽位（access = `dv.*`），**先登记再生成 body**，
- *     自引用类型在此终止递归（生成 body 时再次请求自己 → 命中注册表 → CALL）。
- * 函数本身在 sema_analyze 收尾统一追加到 prog->funcs（compiler 预扫描 +
- * 全局名字绑定），因此销毁点只发 `PUSH __destroy_<n>` + `CALL 1`。 */
-static ast_node_t *destroy_fn_callee(sema_t *sema, const type_t *t) {
-  const type_t *s = type_strip_quals(t);
-  if (!s) return NULL;
-  sema_destroy_fn_t *reg = destroy_fn_find(sema, s);
-  if (reg) return destroy_fn_callee_node(sema, reg);
-
-  char nb[32];
-  int nl = snprintf(nb, sizeof(nb), "__destroy_%u", sema->destroy_fn_seq++);
-  if (nl <= 0 || (size_t)nl >= sizeof(nb)) return NULL;
-  char *name_buf = (char *)arena_calloc(sema->arena, (size_t)nl + 1, 1,
-                                        ALIGNOF(max_align_t));
-  if (!name_buf) return NULL;
-  memcpy(name_buf, nb, (size_t)nl);
-  strslice_t name = strslice_from_bytes(name_buf, (size_t)nl);
-
-  ast_func_def_t *fn = (ast_func_def_t *)arena_calloc(
-      sema->arena, 1, sizeof(ast_func_def_t), ALIGNOF(max_align_t));
-  if (!fn) return NULL;
-  fn->base.kind = AST_FUNC_DEF;
-  fn->base.is_generated = true;
-  fn->name = name;
-  sema_func_id_alloc(sema, fn);
-  if (fn->fid == 0) return NULL;
-
-  /* 形参 dv: ref *T —— 类型 = intern 的 `*T`；槽位所有权 = REF（不拥有） */
-  const type_t *pt0 = type_ptr_intern(sema->vm, s);
-  if (!pt0) return NULL;
-  /* 形参是借用：`ref *T`（所有权进类型）。 */
-  const type_t *pt = type_ownership_apply(sema->vm, OWN_REF, pt0);
-  if (!pt) return NULL;
-  ast_node_t *pnode = ast_var_def_new(sema->arena, 0, 0);
-  ast_node_t *ptexpr = sema_gen_type_ref(sema, pt); /* 登记 *T + AST_TYPE_REF */
-  if (!pnode || !ptexpr) return NULL;
-  ((ast_var_def_t *)pnode)->name = strslice_from_bytes("dv", 2);
-  ((ast_var_def_t *)pnode)->type_expr = ptexpr;
-  fn->params = pnode;
-
-  /* 签名 void(ref *T)：登记进 sema->types（hoist 两遍扫描构造），记 sig_id */
-  const type_t *sigparams[1] = {pt};
-  const type_t *sig = type_func_sig(sema->vm, sigparams, 1,
-                                    sema->vm->type_void, false);
-  if (!sig) return NULL;
-  const sema_type_t *st = sema_type_register(sema, sig);
-  if (st) fn->sig_id = st->id;
-
-  ast_node_t *blk = ast_block_new(sema->arena, 0, 0);
-  if (!blk) return NULL;
-  blk->is_generated = true;
-  fn->body = blk;
-
-  /* **先登记再生成 body**：自引用类型（Node/Tree）生成 body 时会再次请求
-     自己的销毁函数 → 命中注册表 → 直接发 CALL，递归终止。 */
-  sema_destroy_fn_t *wrap = (sema_destroy_fn_t *)arena_calloc(
-      sema->arena, 1, sizeof(sema_destroy_fn_t), ALIGNOF(max_align_t));
-  if (!wrap) return NULL;
-  wrap->type = s;
-  wrap->fn = (ast_node_t *)fn;
-  wrap->name = name;
-  wrap->next = sema->destroy_fns;
-  sema->destroy_fns = wrap;
-
-  /* body：销毁 T 的 own 槽位（access = `dv.*`；T 自身不释放） */
-  ast_node_t *vid = ast_ident_new(sema->arena, 0, 0);
-  ast_node_t *deref = ast_deref_new(sema->arena, 0, 0);
-  if (!vid || !deref) return NULL;
-  ((ast_ident_t *)vid)->name = strslice_from_bytes("dv", 2);
-  ((ast_deref_t *)deref)->operand = vid;
-  ast_node_t *bh = NULL, *bt = NULL;
-  if (!gen_destroy_impl(sema, s, deref, &bh, &bt)) return NULL;
-  ((ast_block_t *)blk)->stmts = bh;
-
-  return destroy_fn_callee_node(sema, wrap);
-}
-
-/* 生成"调用类型 t 的销毁函数"语句：`CALL __destroy_<n>(<arg>)`。
- * by_address = true → 实参是 `&access`（**值**的存储地址）；
- * by_address = false → 实参就是 access 本身（它已经是**指向 T 的指针**，
- * 例如 `own *T` 槽位/变量的值）。 */
-static bool gen_destroy_fn_call(sema_t *sema, const type_t *t,
-                                ast_node_t *access, ast_node_t **head,
-                                ast_node_t **tail, bool by_address) {
-  if (!t || !access) return true;
-  ast_node_t *callee = destroy_fn_callee(sema, t);
-  if (!callee) return false;
-  ast_node_t *arg = access;
-  if (by_address) {
-    arg = ast_addr_new(sema->arena, 0, 0);
-    if (!arg) return false;
-    ((ast_addr_t *)arg)->operand = access;   /* &value（ADDR 指令） */
-  }
-  ast_node_t *call = ast_call_new(sema->arena, 0, 0);
-  ast_node_t *stmt = ast_expr_stmt_new(sema->arena, 0, 0);
-  if (!call || !stmt) return false;
-  ((ast_call_t *)call)->callee = callee;
-  ((ast_call_t *)call)->args = arg;
-  call->is_generated = true;
-  ((ast_expr_stmt_t *)stmt)->expr = call;   /* 表达式语句：结果 POP */
-  stmt->is_generated = true;
-  destroy_append(head, tail, stmt);
-  return true;
-}
-
-/* 闭包 env 的 vtable 生成（见 ast_func_def_t::env_dispose_fid / env_clone_fid）：
-   直接复用"生成的销毁函数 / clone 函数"两个生成器 —— env 是普通 struct 类型，
-   所以正是 `__destroy_<env>(dv: ref *Env)` 与 `__clone_<env>(dv: ref *Env):
-   fatal Env`。生成的函数在 sema_analyze 收尾统一追加到 prog->funcs。 */
-bool sema_gen_env_vtable(sema_t *sema, const type_t *env_type,
-                         uint32_t *dispose_fid, uint32_t *clone_fid) {
-  if (dispose_fid) *dispose_fid = 0;
-  if (clone_fid) *clone_fid = 0;
-  const type_t *env = env_type ? type_strip_quals(env_type) : NULL;
-  if (!sema || !env || type_kind_of(env) != TYPE_KIND_STRUCT) return false;
-
-  /* 销毁：只有含 own 槽位的 env 才需要 dispose。 */
-  if (type_has_own_slots(env)) {
-    ast_node_t *callee = destroy_fn_callee(sema, env);
-    if (!callee) return false;
-    if (dispose_fid) *dispose_fid = ((const ast_func_ref_t *)callee)->fid;
-  }
-  /* clone：含 own 槽位（或指针/切片槽位）才需要深拷贝 env。 */
-  {
-    bool need = type_has_own_slots(env);
-    if (!need) {
-      /* env 里可能有 own 指针/切片槽位但 type_has_own_slots 已覆盖；这里只在
-         明确含资源时生成（否则 clone = 字节拷贝，不需要函数）。 */
-      for (size_t i = 0; i < ((const struct_type_t *)env)->field_count && !need;
-           i++) {
-        const struct_field_t *f = &((const struct_type_t *)env)->fields[i];
-        const type_t *ft = f ? type_strip_quals(f->type) : NULL;
-        if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE) &&
-            type_ownership_of(f->type) == OWN_OWN)
-          need = true;
-      }
-    }
-    if (need) {
-      uint32_t cf = sema_gen_clone_fn_fid(sema, 0 /*value*/, env);
-      if (!cf) return false;
-      if (clone_fid) *clone_fid = cf;
-    }
-  }
-  return true;
-}
-
-bool sema_find_destroy_fn(sema_t *sema, const type_t *t, uint32_t *fid,
-                          strslice_t *name) {
-  if (fid) *fid = 0;
-  if (name) *name = STRSLICE_EMPTY;
-  if (!sema || !t) return false;
-  const type_t *s = type_strip_quals(t);
-  if (!s) return false;
-  sema_destroy_fn_t *reg = destroy_fn_find(sema, s);
-  if (!reg) return false;
-  const ast_func_def_t *fd = (const ast_func_def_t *)reg->fn;
-  if (fid) *fid = fd ? fd->fid : 0;
-  if (name) *name = reg->name;
-  return true;
-}
-
-bool sema_ensure_destroy_fn(sema_t *sema, const type_t *t, strslice_t *name) {
-    if (!sema || !t) return false;
-    const type_t *s = type_strip_quals(t);
-    if (!s) return false;
-    if (!destroy_fn_find(sema, s)) {
-        /* 生成并登记（函数体在 sema_attach_destroy_fns 收尾时追加到 prog）。 */
-        if (!destroy_fn_callee(sema, s)) return false;
-    }
-    return sema_find_destroy_fn(sema, s, NULL, name);
-}
-
-/* 收尾：把生成的销毁函数追加到程序函数链尾部（sema_analyze 调用）。 */
-void sema_attach_destroy_fns(sema_t *sema, ast_node_t *program) {
-  if (!sema || !program || program->kind != AST_PROGRAM) return;
-  ast_program_t *prog = (ast_program_t *)program;
-  for (sema_destroy_fn_t *f = sema->destroy_fns; f; f = f->next) {
-    if (!f->fn) continue;
-    f->fn->next = NULL;   /* 链表尾：避免把注册表顺序带进函数链 */
-    if (prog->funcs_last) prog->funcs_last->next = f->fn;
-    else prog->funcs = f->fn;
-    prog->funcs_last = f->fn;
-  }
-}
-
-/* 销毁函数的 callee 节点（每个调用点一个新 AST_FUNC_REF，节点不能共享）。 */
-static ast_node_t *destroy_fn_callee_node(sema_t *sema,
-                                          const sema_destroy_fn_t *reg) {
-  ast_node_t *callee = ast_func_ref_new(sema->arena, 0, 0);
-  if (!callee) return NULL;
-  ((ast_func_ref_t *)callee)->fid = ((const ast_func_def_t *)reg->fn)->fid;
-  ((ast_func_ref_t *)callee)->name = reg->name;
-  return callee;
-}
-
 /* tag union：按 member 逐个生成 `if (v is m) { <payload 的销毁序列> }`。
    判 tag 用 AST_IS_TAG（sema 生成的直接形态——`is` 的 op 是 token_t*，
    sema 无法合成，故该节点直接携带 tag 编号）。 */
@@ -397,8 +173,7 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
     if (!m->payload_type || !m->name.ptr) continue;
     const type_t *pt = type_strip_quals(m->payload_type);
     bool leaf = pt && (type_kind_of(pt) == TYPE_KIND_PTR || type_kind_of(pt) == TYPE_KIND_SLICE);
-    if (leaf && type_ownership_of(m->payload_type) != OWN_OWN)
-      continue;   /* ref/fatal 槽位不释放 */
+    if (leaf) continue;   /* 指针/切片由用户显式 free */
 
     /* then 体：该 member 的销毁序列 */
     ast_node_t *field = ast_member_new(sema->arena, 0, 0);
@@ -431,17 +206,13 @@ static bool gen_destroy_union(sema_t *sema, const union_type_t *ut,
   return true;
 }
 
-/* 销毁一个**值**（`access` 所指、类型 t）：
-   - 含 own 槽位的复合类型 → `CALL __destroy_<t>(&access)`（方案 B：函数调用）；
-   - 叶子 / 无 own 槽位的类型 → 内联（own 指针/切片 FREE；指针还先调用被指向
-     值的销毁函数）。 */
+/* 销毁一个**值**（`access` 所指、类型 t）：按类型内联展开（闭包槽位 FREE；
+   指针/切片由用户显式 free，不自动销毁）。 */
 bool gen_destroy(sema_t *sema, const type_t *t, ast_node_t *access,
                         ast_node_t **head, ast_node_t **tail) {
   if (!t || !access) return true;
   const type_t *s = type_strip_quals(t);
   if (!s) return true;
-  if (type_needs_destroy_fn(s))
-    return gen_destroy_fn_call(sema, s, access, head, tail, /*by_address=*/true);
   return gen_destroy_impl(sema, t, access, head, tail);
 }
 
@@ -454,15 +225,7 @@ static bool gen_destroy_struct(sema_t *sema, const struct_type_t *st,
     if (!f->type || !f->name.ptr) continue;
     const type_t *ft = type_strip_quals(f->type);
     if (ft && (type_kind_of(ft) == TYPE_KIND_PTR || type_kind_of(ft) == TYPE_KIND_SLICE)) {
-      /* 叶子：只有 own 槽位才释放。**必须递归进被指向值**（PTR/SLICE 分支会
-         展开被指向聚合的 own 槽位 / 切片元素），否则 `struct Outer { b: own
-         *Box }` 只 FREE 掉 Box 块，Box.p 泄漏（实测 leak）。 */
-      if (type_ownership_of(f->type) != OWN_OWN) continue;
-      ast_node_t *mem = ast_member_new(sema->arena, 0, 0);
-      if (!mem) return false;
-      ((ast_member_t *)mem)->object = access;
-      ((ast_member_t *)mem)->field  = f->name; /* vm 拥有，生命周期长于 AST */
-      if (!gen_destroy(sema, ft, mem, head, tail)) return false;
+      /* 指针/切片由用户显式 free；字段直接跳过。 */
       continue;
     }
     /* 复合字段：递归（无论字段自身 ownership——其 own 槽位归外层值） */
@@ -531,32 +294,19 @@ static bool make_loop_var_name(sema_t *sema, char *buf, size_t cap,
   return true;
 }
 
-/* 单个**槽位**的销毁：叶子（ptr/slice）只在 own 槽位释放；复合无条件递归
-   （其内部 own 槽位归外层值）。与 struct/tuple/union member 的判定同一规则。 */
-bool gen_destroy_slot(sema_t *sema, const type_t *slot_type,
-                             ownership_t slot_own, ast_node_t *access,
-                             ast_node_t **head, ast_node_t **tail) {
-  if (!slot_type || !access) return true;
-  const type_t *s = type_strip_quals(slot_type);
-  if (s && (type_kind_of(s) == TYPE_KIND_PTR || type_kind_of(s) == TYPE_KIND_SLICE)) {
-    if (slot_own != OWN_OWN) return true;   /* ref/fatal 槽位不释放 */
-  }
-  return gen_destroy(sema, slot_type, access, head, tail);
-}
-
 /* 为**元素类型**（array / slice）生成逐元素销毁循环体：
    `for <var> in 0..len(src) { <body> }` 的 body（引用 <var> 访问当前元素）。
-   `slot_own` 是元素槽位所有权（[N]own *T 的 own / ref / none）。
-   元素无 own 槽位时不生成任何语句（body_head=NULL，调用方跳过整个循环）。 */
+   指针/切片元素由用户显式 free；元素无销毁语句时 body_head=NULL，调用方跳过
+   整个循环。 */
 static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
-                              ownership_t slot_own, ast_node_t *access,
+                              ast_node_t *access,
                               strslice_t var_name, ast_node_t **body_head,
                               ast_node_t **body_tail) {
   *body_head = *body_tail = NULL;
   if (!elem_type) return true;
   const type_t *es = type_strip_quals(elem_type);
-  bool leaf = es && (type_kind_of(es) == TYPE_KIND_PTR || type_kind_of(es) == TYPE_KIND_SLICE);
-  if (leaf && slot_own != OWN_OWN) return true;
+  if (es && (type_kind_of(es) == TYPE_KIND_PTR || type_kind_of(es) == TYPE_KIND_SLICE))
+    return true;
 
   /* 元素访问：<access>[<var>] */
   ast_node_t *idx = ast_ident_new(sema->arena, 0, 0);
@@ -566,9 +316,9 @@ static bool gen_destroy_elems(sema_t *sema, const type_t *elem_type,
   if (!elem) return false;
 
   ast_node_t *bh = NULL, *bt = NULL;
-  if (!gen_destroy_slot(sema, elem_type, slot_own, elem, &bh, &bt))
+  if (!gen_destroy(sema, elem_type, elem, &bh, &bt))
     return false;
-  if (!bh) return true;   /* 元素没有 own 槽位 → 无需循环 */
+  if (!bh) return true;   /* 元素没有可销毁槽位 → 无需循环 */
   *body_head = bh;
   *body_tail = bt;
   return true;
@@ -599,18 +349,21 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       return gen_destroy_union(sema, (const union_type_t *)t, access, head,
                                tail);
     case TYPE_KIND_TUPLE: {
-      /* <T1,T2,…>：逐元素展开（元素槽位 own 才释放；复合递归）。
+      /* <T1,T2,…>：逐元素展开（复合元素递归；指针/切片跳过）。
          元素访问 = `access[i]`（INDEX_GET；i 是编译期字面量）。 */
       const tuple_type_t *tt = (const tuple_type_t *)t;
       for (size_t i = 0; i < tt->elem_count; i++) {
         const type_t *et = tt->elems[i].type;
         if (!et) continue;
+        const type_t *es = type_strip_quals(et);
+        if (es && (type_kind_of(es) == TYPE_KIND_PTR ||
+                   type_kind_of(es) == TYPE_KIND_SLICE))
+          continue;
         ast_node_t *idxv = make_int_lit_i64(sema, (uint64_t)i);
         if (!idxv) return false;
         ast_node_t *elem = make_index_access(sema, access, idxv);
         if (!elem) return false;
-        if (!gen_destroy_slot(sema, et, type_ownership_of(tt->elems[i].type), elem, head,
-                              tail))
+        if (!gen_destroy(sema, et, elem, head, tail))
           return false;
       }
       return true;
@@ -624,8 +377,7 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
       if (!make_loop_var_name(sema, name_buf, sizeof name_buf, &var_name))
         return false;
       ast_node_t *bh = NULL, *bt = NULL;
-      if (!gen_destroy_elems(sema, at->elem_type,
-                            type_ownership_of(at->elem_type), access,
+      if (!gen_destroy_elems(sema, at->elem_type, access,
                              var_name, &bh, &bt))
         return false;
       if (bh) {
@@ -645,23 +397,22 @@ static bool gen_destroy_impl(sema_t *sema, const type_t *t, ast_node_t *access,
     }
     case TYPE_KIND_OPTION: {
       /* ?T：`if (v != nil) { <T 的销毁序列，作用于 v.! > }`。
-         inner 槽位 own 才释放（ref 跳过）；复合 inner 递归。
+         指针/切片 inner 由用户显式 free；复合 inner 递归。
          判空用 AST_OPT_IS_SOME（直接形态：compiler 发 OPT_IS_NONE + NOT），
          取值用 AST_UNWRAP（编译器发 UNWRAP，借用引用 value 字段）。 */
       const option_type_t *ot = (const option_type_t *)t;
       const type_t *inner = ot->inner;
       if (!inner) return true;
-      ownership_t inner_own = type_ownership_of(ot->inner);
       const type_t *is = type_strip_quals(inner);
-      bool leaf = is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE);
-      if (leaf && inner_own != OWN_OWN) return true;
+      if (is && (type_kind_of(is) == TYPE_KIND_PTR || type_kind_of(is) == TYPE_KIND_SLICE))
+        return true;
 
       ast_node_t *unwrap = ast_unwrap_new(sema->arena, 0, 0);
       if (!unwrap) return false;
       ((ast_unwrap_t *)unwrap)->operand = access;
 
       ast_node_t *bh = NULL, *bt = NULL;
-      if (!gen_destroy_slot(sema, inner, inner_own, unwrap, &bh, &bt))
+      if (!gen_destroy(sema, inner, unwrap, &bh, &bt))
         return false;
       if (!bh) return true;
 
@@ -731,24 +482,14 @@ ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     }
     if (sym->kind != SEMA_SYM_VAR) continue;
     if (!sym->type) continue;
-    /* 仅 **own** 变量需要显式释放。判据用符号层的 `sema_sym_ownership(sym)`
-       （所有权已从类型层迁移到值/符号层——类型不携带 ownership，
-       所以**不能**用类型层的谓词判断）。
-       moved 变量已被转移（TDZ），不需要释放。
-       comptime 变量不进入运行时，不需要释放。 */
-    if (sym->moved || sym->is_comptime) continue;
+    if (sym->is_comptime) continue;
     /* 定义点尚未走到（提前 return/break 的路径）→ 该变量在运行时还不存在，
        不能生成销毁（否则 PUSH 一个尚未 DEFINE 的名字 → undefined variable）。 */
     if (!sym->declared) continue;
-    /* own 变量必销毁；**含 share/weak 槽位的普通变量**也要销毁（递减计数）。 */
-    if (sema_sym_ownership(sym) != OWN_OWN &&
-        type_kind_of(sym->type) != TYPE_KIND_FUNC)
-      continue;
-    /* 语义是 `FREE <expr>`：由 sema 生成"释放什么"的表达式。
-       目前只有简单指针 → 操作数就是变量引用（AST_IDENT，编译为 PUSH <name>）。
-       将来复杂类型在此按类型展开（optional→判断 / 数组→循环 / tuple→
-       get_index / struct→get_field），生成的仍是 AST_FREE + 对应 expr，
-       compiler 不需要知道类型结构。 */
+    /* 只有**闭包（func 值）**需要释放 env；指针/切片由用户显式 free，
+       复合值不持有独立堆块。 */
+    if (type_kind_of(sym->type) != TYPE_KIND_FUNC) continue;
+
     /* arena 持久化变量名（strslice → NUL 终止字符串；AST_IDENT 引用它） */
     size_t nlen = strlen(name);
     char *name_buf = (char *)arena_calloc(
@@ -756,42 +497,16 @@ ast_node_t *make_free_stmts(sema_t *sema, sema_scope_t *scope) {
     memcpy(name_buf, name, nlen);
     strslice_t name_slice = strslice_from_bytes(name_buf, nlen);
 
-    ast_node_t *ident = ast_ident_new(sema->arena, 0, 0);
-    if (!ident) continue;
-    ((ast_ident_t *)ident)->name = name_slice;
-
-    /* ---- 含 own 捕获的闭包：按捕获槽**逐个展开**释放 ----
-       闭包 = 捕获结构体 + 函数实现，捕获槽就是它的字段。**捕获槽类型来自
-       type 对象**（cv->resolved_type，sema 在捕获解析时写入），交给同一个
-       销毁序列生成器展开：
-       - `own *T` 捕获 → `FREE f.<cap>`（外加被指向值的 own 槽位）；
-       - 含 own 槽位的聚合捕获（struct/union/…）→ 逐槽位 `FREE f.<cap>.x`
-         （tag union 还会带 `if (f.<cap> is m)` 条件）——旧实现只发
-         `FREE f.<cap>`，对聚合是空操作，捕获块内嵌的堆块全部泄漏
-         （实测：`move` 捕获含 own 指针的 struct → 4 字节泄漏）。
-       ref 捕获是借用，不释放。 */
     /* ---- 闭包（func 值）：**单个 FREE** ----
-       闭包 = 捕获聚合结构体（env 块）。VM 的 FREE 分支按 capture_type 的槽位
-       所有权释放 env 里的 own 捕获，再释放 env 块本体 —— 与结构体销毁同构。
-       因此 sema 不再需要枚举捕获槽（旧实现按字面量捕获表生成 `FREE f.<cap>`，
-       对 `var f = clone(g)` 这种非字面量初始化无法枚举，会漏释放）。 */
-    if (type_strip_quals(sym->type)->kind == TYPE_KIND_FUNC) {
-      ast_node_t *obj = ast_ident_new(sema->arena, 0, 0);
-      if (obj) {
-        ((ast_ident_t *)obj)->name = name_slice;
-        ast_node_t *fs = ast_free_new(sema->arena, obj);
-        if (fs) {
-          if (!head) head = tail = fs;
-          else { tail->next = fs; tail = fs; }
-        }
-      }
-      continue;
-    }
-
-    /* ---- 一般形态：交给销毁序列生成器（按 type 对象递归展开）----
-       叶子（ptr/slice）→ `FREE v`；struct → 逐 own 槽位 `FREE v.f`。
-       生成器已按 type 对象判定哪些槽位是 own，故 `ref` 槽位不会进序列。 */
-    if (!gen_destroy(sema, sym->type, ident, &head, &tail)) continue;
+       闭包 = 捕获聚合结构体（env 块）。VM 的 FREE 分支按 capture_type 释放
+       env 块本体。 */
+    ast_node_t *obj = ast_ident_new(sema->arena, 0, 0);
+    if (!obj) continue;
+    ((ast_ident_t *)obj)->name = name_slice;
+    ast_node_t *fs = ast_free_new(sema->arena, obj);
+    if (!fs) continue;
+    if (!head) head = tail = fs;
+    else { tail->next = fs; tail = fs; }
   }
   return head;
 }

@@ -118,22 +118,20 @@ typedef enum {
     AST_ALIGNOF,         /* alignof(T) / alignof(expr) → u64 */
     AST_TYPEOF,          /* typeof(expr) → type value */
 
-    /* --- M3 指针与所有权（m3-design §3/§7/§8）---
-     * own/ref/fatal *T 指针类型修饰（无裸指针）、new 堆分配、后置取址
-     * x.& / 解引用 r.*、move/clone 所有权原语、作用域标注 '<a,b,c>。 */
-    AST_PTR,             /* own/ref/fatal *T 指针类型修饰（类型即表达式） */
-    AST_NEW,             /* new T{...} 堆分配构造 → own *T */
+    /* --- M3 指针（m3-design §3/§8）---
+     * `*T` 裸指针、new 堆分配、后置取址 x.& / 解引用 r.*、作用域标注。 */
+    AST_PTR,             /* *T 指针类型（类型即表达式） */
+    AST_NEW,             /* new T{...} 堆分配构造 → *T */
     AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
     AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */
-    AST_MOVE,            /* move(x) / clone(x) 所有权原语（op token 区分） */
     AST_SCOPE_ANNOT,     /* '<a,b,c> type 作用域标注（' 前导，位置信息非类型） */
 
     /* --- M4 切片（m4-design §1/§2/§4）---
-     * 切片类型 own/ref/fatal []T（胖指针 {ptr,len}）、make 宏函数创建、
-     * s[a:b] 切片表达式（恒产 ref []T）。 */
-    AST_SLICE_TYPE,      /* own/ref/fatal []T 切片类型修饰（类型即表达式） */
-    AST_SLICE,           /* expr[low:high] 切片表达式 → ref []T */
-    AST_MAKE,            /* make(T, N, init...) 编译期宏函数 → fatal []T */
+     * 切片类型 `[]T`（胖指针 {ptr,len}）、make 宏函数创建、
+     * s[a:b] 切片表达式（产 []T）。 */
+    AST_SLICE_TYPE,      /* []T 切片类型（类型即表达式） */
+    AST_SLICE,           /* expr[low:high] 切片表达式 → []T */
+    AST_MAKE,            /* make(T, N, init...) 编译期宏函数 → []T */
 
     /* --- M5 模块系统 --- */
     AST_IMPORT,          /* import <alias> from "<path>"; — 导入模块为命名空间 */
@@ -174,7 +172,7 @@ typedef enum {
                             operand 是槽位左值访问 → TAKE_SLOT（拷贝值 + memset
                             槽位）。cunion 不安全：这样 move 才是真转移。 */            /* 把值移出变量的直接形态（sema 生成，语义 = move）：
                             operand → MOVE。用于扁平化 clone 的切片路径把临时
-                            变量里的深拷贝结果移出（临时变量已标 moved，不再
+                            变量里的深拷贝结果移出（临时变量不再
                             FREE）。"move" 的 op 同样是 token_t*。 */
 
     AST_KIND_COUNT,      /* 哨兵值，用于数组索引 */

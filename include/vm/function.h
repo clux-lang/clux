@@ -70,14 +70,6 @@ struct func_t {
        false = env 是独立堆块（hoist 基底对象的兜底分配）或 NULL。 */
     bool            env_inline;
 
-    /* 闭包 env 的**生成函数** id（"闭包 = 捕获聚合结构体 + vtable"）：
-       - env_dispose_fid：`__destroy_<env>(dv: ref *Env)` —— 释放 env 的 own 捕获；
-       - env_clone_fid  ：`__clone_<env>(dv: ref *Env): fatal Env` —— 深拷贝 env。
-       0 = 无（无捕获 / env 无资源）。clone/free 时**间接调用**它们（而不是按
-       capture_type 运行期内省），与 C 后端 `struct { callee, env, dispose, clone }`
-       一一对应。 */
-    uint32_t        env_dispose_fid;
-    uint32_t        env_clone_fid;
     scope_t        *root_scope;
     const type_t   *type;        /* 签名类型（func_type_t，归 vm 类型池所有，不释放） */
     uint32_t        id;

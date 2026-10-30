@@ -7,7 +7,6 @@
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
-#include "vm/type_ownership.h"
 #include "vm/type_opaque.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
@@ -261,32 +260,6 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
  * 将来恢复含指针的复合类型时，按**扁平槽位表**重新设计，不恢复这两个谓词。
  * =========================================================================== */
 
-
-/* move(x) / clone(x) 的**产物类型**（将亡值变体，m3-design §3.3/§7）。
- *
- * 规则（与运行期 MOVE/CLONE 指令压栈的类型必须一致）：
- *   - ot 已是 fatal → ot（幂等：move(fatal 参数) 继续传下去）
- *   - 指针 own/ref  → fatal *T（fatal 指针已是 fatal，走上一分支）
- *   - 切片 own/ref  → fatal []T
- *   - 含 own 资源的复合类型（struct/tuple/array/option/union）→ fatal T
- *   - 其余（标量 / 平凡 struct / ref 切片）→ ot 原样（无资源可转移）
- *
- * 返回 NULL = 无法构造（类型槽位内部错误），调用方转 val_void。 */
-const type_t *sema_fatal_variant_of(sema_t *sema, const type_t *ot) {
-  if (!sema || !ot) return NULL;
-  /* 所有权是类型修饰：fatal 变体 = 在**裸类型**外面套 `fatal`。
-     `fatal T` 幂等；标量/无资源的类型 move 后仍是原类型。 */
-  if (type_ownership_of(ot) == OWN_FATAL) return ot;
-  const type_t *core = type_strip_ownership(ot);
-  if (!core) return NULL;
-  bool resource = type_is_ptr(core) || type_is_slice(core) ||
-                  type_kind_of(core) == TYPE_KIND_FUNC ||
-                  type_has_own_slots(core);
-  if (!resource) return ot;
-  const type_t *fatal = type_ownership_apply(sema->vm, OWN_FATAL, core);
-  if (fatal) sema_type_register(sema, fatal);
-  return fatal;
-}
 
 const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
   if (!sema || !t || !sema->types) return NULL;
@@ -766,74 +739,8 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
  * LOAD_TYPE <id> 直接加载真实 type_t（别名透明，m2-design 关键决策——
  * 复合类型组装用 value->data 而非名字），消除运行时作用域查找。
  *
- * M3 作用域标注（m3-design §5）：标注不是类型的一部分，是绑定在 value 上
- * 的位置信息——AST_SCOPE_ANNOT 节点**保留在槽位**（只折叠 sub 为
- * AST_TYPE_REF），标注集合（names/count）在折叠后仍可从节点读取。sema 的
- * §5/§6 检查与 compiler 的 compile_type_expr（AST_SCOPE_ANNOT 穿透分支）
- * 均从保留节点消费标注。 */
-void sema_annot_peek(ast_node_t *type_expr, strslice_t **names, size_t *count) {
-  if (names) *names = NULL;
-  if (count) *count = 0;
-  if (type_expr && type_expr->kind == AST_SCOPE_ANNOT) {
-    ast_scope_annot_t *sa = (ast_scope_annot_t *)type_expr;
-    if (names) *names = sa->names;
-    if (count) *count = sa->count;
-  }
-}
-
-/* §5 强制规则：**返回值是 ref 必标注作用域**。
-   `fn->return_expr` 已折叠（标注节点保留，sema_annot_peek 可读）。未标注 → 编译错误
-   ——调用点无法确定返回值的存活上限，借用会逃逸。
-
-   判据是**返回位的 ownership**（`return_ownership`，须在 `sema_resolve_type_slot`
-   折叠 AST 之前从 token 提取）：`ref` 位置未标注即报错。
-   注：`'<a> ref *T` 是**ref 产生式**（§0.3）——调用点拿到 REF 状态的值，
-   只能流向 `ref` 位置，不可 move。 */
-bool sema_check_ret_ref_annot(sema_t *sema, ast_func_def_t *fn,
-                              const type_t *rt) {
-  if (!rt || !fn->return_expr) return true;
-  ownership_t return_ownership = type_ownership_of(rt);
-  /* **返回位只允许 `ref` / `fatal` / `none`**（所有权模型 §0.4）：
-     `own` 不能作返回标注——调用点拿到的是"调用表达式"的值，
-     若返回位是 `own`，该值状态是 OWN，而 OWN 只能流向 `ref` 位置
-     （既不能给 own、也不能给 NONE），等于把一个无处安放的状态交给调用方。
-     要交所有权请标 `fatal`（调用点即可用 own 位置接收）。 */
-  if (return_ownership == OWN_OWN) {
-    char tn[64];
-    sema_type_name(rt, tn, sizeof(tn));
-    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
-               "function '%.*s' cannot return 'own %s': a return type can only "
-               "be ref, fatal or none (use 'fatal %s' to hand ownership to the "
-               "caller, or 'ref *%s' to lend it)",
-               (int)fn->name.len, fn->name.ptr, tn, tn, tn);
-    return false;
-  }
-  /* 含 own 槽位的聚合（如 `<own *T>`）按值返回必须显式 fatal：调用点
-     拿到的是将亡值，裸类型会让调用方无法接管，返回临时也无人释放。 */
-  if (return_ownership == OWN_NONE && type_has_own_slots(rt)) {
-    char tn[64];
-    sema_type_name(rt, tn, sizeof(tn));
-    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
-               "function '%.*s' cannot return %s by value: its type contains "
-               "own slots; declare the return type as 'fatal %s' so the caller "
-               "takes ownership",
-               (int)fn->name.len, fn->name.ptr, tn, tn);
-    return false;
-  }
-  if (return_ownership != OWN_REF) return true;
-  strslice_t *names = NULL;
-  size_t count = 0;
-  sema_annot_peek(fn->return_expr, &names, &count);
-  if (count == 0) {
-    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
-               "function '%.*s' returns a ref but does not declare its "
-               "scope (annotate the return type, e.g. '<p> ref *T)",
-               (int)fn->name.len, fn->name.ptr);
-    return false;
-  }
-  return true;
-}
-
+ * 作用域标注节点（AST_SCOPE_ANNOT）保留在槽位外层（只折叠 sub 为
+ * AST_TYPE_REF），compiler 的 compile_type_expr 会穿透该节点。 */
 const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!sema || !slot || !*slot) return NULL;
   ast_node_t *old = *slot;

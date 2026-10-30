@@ -1,6 +1,5 @@
 #include "sema/comptime.h"
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include "core/panic.h"
 #include "vm/type_ptr.h"
 #include "vm/type_struct.h"
@@ -78,56 +77,19 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           cs->type = sema_resolve_type_slot(sema, &cv->type_expr);
         }
         if (!init_bad && cs->type) {
-          /* 捕获槽是**具名位置**（与 var 定义同一张表，§0.4）：
-             - 非 own 捕获槽收 FATAL = 值消失而内部 own 槽位无人释放
-               → 静默泄漏（实测 `|(bb: T = move(a))|` 的堆块从未释放）。
-               必须写 `|(bb: own T = move(a))|`。
-             - 非 own 捕获槽 copy OWN 聚合 → 两处共享内嵌堆块 → 双释放。 */
-          char what[96];
-          snprintf(what, sizeof what, "capture '%.*s'", (int)cv->name.len,
-                   cv->name.ptr);
-          if (sema_sym_ownership(cs) != OWN_OWN && sema_value_is_fatal(init)) {
+          value_t *dst = value_make_shadow(sema->vm, cs->type);
+          if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
             char tn[64], itn[64];
             sema_type_name(cs->type, tn, sizeof(tn));
             sema_type_name(value_type(init), itn, sizeof(itn));
             diag_error(sema->diag, sema_loc(sema, cv->init),
-                       "cannot initialize %s of type %s with the dying value "
-                       "(FATAL) of type %s: a capture holding owned resources "
-                       "must be an own capture (declare it `own %s`)",
-                       what, tn, itn, tn);
-          } else if (sema_sym_ownership(cs) == OWN_NONE &&
-                     value_type_ownership(init) == OWN_OWN &&
-                     type_has_own_slots(cs->type)) {
-            char tn[64];
-            sema_type_name(cs->type, tn, sizeof(tn));
-            diag_error(sema->diag, sema_loc(sema, cv->init),
-                       "cannot initialize %s of type %s by copying an own "
-                       "value: own is move-only (use move() or clone())",
-                       what, tn);
-          } else {
-            value_t *dst = value_make_shadow(sema->vm, cs->type);
-            if (value_is_error(sema->vm, value_assign(sema->vm, dst, init))) {
-              char tn[64], itn[64];
-              sema_type_name(cs->type, tn, sizeof(tn));
-              sema_type_name(value_type(init), itn, sizeof(itn));
-              diag_error(sema->diag, sema_loc(sema, cv->init),
-                         "cannot initialize capture '%.*s' of type %s with %s",
-                         (int)cv->name.len, cv->name.ptr, tn, itn);
-            }
+                       "cannot initialize capture '%.*s' of type %s with %s",
+                       (int)cv->name.len, cv->name.ptr, tn, itn);
           }
         }
       } else {
-        /* 推断类型：init 类型即捕获类型。
-           §9.2 fatal 接管为 own：move(p)/clone(p) 产 fatal *T，闭包内
-           无 fatal 变量——fatal 自动转 own *T（闭包成为所有权持有者）。 */
-        const type_t *it = init_bad ? sema->vm->type_void : value_type(init);
-        if (!init_bad && sema_value_is_fatal(init)) {
-          /* 捕获接管了将亡值 → 该捕获槽**持有所有权**（OWN），类型升为 own T。
-             这决定了闭包本身的产出状态：捕获了 own 的闭包即 OWN。 */
-          it = type_ownership_apply(sema->vm, OWN_OWN,
-                                    type_strip_ownership(it));
-        }
-        cs->type = it;
+        /* 推断类型：init 类型即捕获类型。 */
+        cs->type = init_bad ? sema->vm->type_void : value_type(init);
       }
     } else {
       /* 纯 id 捕获：外层符号（定义点 block scope 沿链查找） */
@@ -155,21 +117,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         continue;
       }
       cs->type = outer_sym->type; /* 捕获 clone 值，类型即外层变量类型 */
-      /* cs->type 已等于 outer_sym->type（所有权随之携带） */
-      /* §9.1 own 裸捕获禁止：纯 id 捕获 own *T = copy（own 禁止 copy，
-         §3.1）→ 必须显式 move()/clone()。fatal 同理（裸捕获 fatal 变量
-         = copy 将亡值，须 move/clone 接管）。 */
-      if (outer_sym->type &&
-          (sema_sym_ownership(outer_sym) == OWN_OWN ||
-           sema_sym_is_fatal(outer_sym))) {
-        diag_error(sema->diag, sema_loc(sema, c),
-                   "cannot capture own/fatal pointer '%.*s' by value "
-                   "(use move() or clone(), e.g. |(%.*s = move(%.*s))|)",
-                   (int)cv->name.len, cv->name.ptr,
-                   (int)cv->name.len, cv->name.ptr,
-                   (int)cv->name.len, cv->name.ptr);
-        continue;
-      }
+      /* cs->type 已等于 outer_sym->type */
     }
     cs->flow_init = true; /* 捕获即初始化（闭包持有 clone 值） */
     cs->is_active = true; /* 函数体 walk 时可见（sema_lookup 激活过滤） */
@@ -186,13 +134,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     ast_var_def_t *cv = (ast_var_def_t *)c;
     sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
     if (!cs || !cs->type) continue;
-    /* 旧语义：只有**显式声明为 ref** 的捕获（或纯 id 捕获外层 ref 变量、
-       或 opaque）才强制作用域标注；从 init 推断出的 ref（`|(r = x.&)|`）
-       不在此列。声明侧修饰直接从解析后的捕获类型读。 */
-    ownership_t declared = type_ownership_of(cv->resolved_type);
-    if (!cv->type_expr && cv->init) declared = OWN_NONE;
-    if (declared == OWN_REF ||
-        type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
+    if (type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
       has_ref_capture = true;
       break;
     }
@@ -272,8 +214,6 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
           const sema_type_t *st = sema_type_register(sema, cap);
           if (st) {
             fn->capture_type_id = st->id;
-            /* 登记：sema_analyze 收尾为它生成 env 的 vtable（dispose/clone）。 */
-            if (sema->closures) vec_push(sema->closures, sema->vm->alloc, fn);
           }
         }
       }
@@ -398,8 +338,6 @@ const type_t *sema_check_func_literal(sema_t *sema, ast_func_def_t *fn,
                  "unknown return type in function literal");
     }
   }
-  /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
-  sema_check_ret_ref_annot(sema, fn, rt);
   if (rt && type_kind_of(rt) != TYPE_KIND_VOID && !r.definitely_returns) {
     char nb[128];
     if (fn->name.len)

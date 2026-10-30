@@ -12,8 +12,7 @@ extern "C" {
  *
  * 用于扁平化 clone 的切片路径：sema 先在当前语句的 prelude 里定义临时变量
  * 并填好深拷贝结果，表达式结果 = `AST_TAKE(AST_IDENT(tmp))`——把临时变量的
- * 值移出（compiler 发 `MOVE`），临时变量在 sema 侧已标 `moved`，块退出时
- * 不再生成 FREE。
+ * 值移出（compiler 发 `MOVE`）。
  *
  * 为什么不复用 AST_MOVE：`move` 的 op 是 `token_t*`，sema 无法合成
  * （与 AST_CLONE 同一原因）。

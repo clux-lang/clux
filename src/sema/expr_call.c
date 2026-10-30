@@ -1,6 +1,5 @@
 #include "sema/sema.h"
 #include "sema/reflect.h"
-#include "vm/type_ownership.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
 #include "parser/ast_array.h"
@@ -150,7 +149,7 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
     }
     return false;
   }
-  return type_strip_ownership(pt) == type_strip_ownership(at);
+  return pt == at;
 }
 
 /* M6 FFI：变参（`...`）位置的额外实参是否可搬运。整数族/浮点/指针/str 都可以
@@ -195,7 +194,7 @@ static value_t *ex_ffi_call(sema_t *sema, ast_call_t *call, sema_symbol_t *fs,
           : NULL;
   /* 所有权修饰（`fatal opaque` / `fatal *T`）不是 C 表示的一部分：
      返回码按**裸类型**映射，值仍带修饰类型（所有权交回调用方）。 */
-  const type_t *rt_core = type_strip_ownership(rt);
+  const type_t *rt_core = rt;
   uint32_t rk = CLUX_FFI_RET_VOID;
   if (!rt || rt_core == sema->vm->type_void) rk = CLUX_FFI_RET_VOID;
   else if (rt_core == sema->vm->type_i8) rk = CLUX_FFI_RET_I8;
@@ -225,7 +224,7 @@ static value_t *ex_ffi_call(sema_t *sema, ast_call_t *call, sema_symbol_t *fs,
     return val_void(sema);
   }
   const func_sig_t *sig =
-      &((const func_type_t *)type_strip_ownership(fs->type))->sig;
+      &((const func_type_t *)fs->type)->sig;
   call->is_ffi_call = true;
   call->ffi_ret_kind =
       CLUX_FFI_RET_PACK(rk, sig->is_variadic, sig->param_count);
@@ -257,30 +256,6 @@ static value_t *ex_ffi_call(sema_t *sema, ast_call_t *call, sema_symbol_t *fs,
         diag_error(sema->diag, sema_loc(sema, a),
                    "extern call %s: variadic argument %zu: this type cannot "
                    "cross the C ABI", qual, ai + 1);
-      continue;
-    }
-    /* own 形参必须接收将亡值（move/clone 的结果）；fatal 实参必须被 own
-       形参接住。规则与普通调用的 func_shadow_call 一致。 */
-    ownership_t pown = type_ownership_of(pt);
-    ownership_t aown = value_type_ownership(av);
-    if (pown == OWN_OWN && aown != OWN_FATAL) {
-      char pn[64];
-      sema_type_name(pt, pn, sizeof pn);
-      diag_error(sema->diag, sema_loc(sema, a),
-                 "extern call %s: argument %zu: cannot copy a value holding "
-                 "owned resources into parameter of type %s (use move() or "
-                 "clone(), or declare the parameter as 'ref *T' to borrow)",
-                 qual, ai + 1, pn);
-      continue;
-    }
-    if (aown == OWN_FATAL && pown != OWN_OWN) {
-      char pn[64];
-      sema_type_name(pt, pn, sizeof pn);
-      diag_error(sema->diag, sema_loc(sema, a),
-                 "extern call %s: argument %zu: a dying value (FATAL) must be "
-                 "caught by an 'own' position; parameter of type %s does not "
-                 "take ownership (bind it to an own variable, or pass it to an "
-                 "own parameter)", qual, ai + 1, pn);
       continue;
     }
     if (!ffi_arg_acceptable(sema, pt, at))
@@ -651,7 +626,7 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
     ((ast_addr_t *)addr)->operand = mem->object;
     addr->is_generated = true;
     const type_t *pt = type_ptr_intern(sema->vm, type_strip_quals(rvt));
-    const type_t *rt = pt ? type_ownership_apply(sema->vm, OWN_REF, pt) : NULL;
+    const type_t *rt = pt;
     if (!rt) return val_void(sema);
     sema_type_register(sema, rt);
     recv_expr = addr;
@@ -1318,7 +1293,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           }
         }
         if (!sig_type) return val_void(sema);
-        const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(sig_type))->sig;
+        const func_sig_t *sig = &((const func_type_t *)sig_type)->sig;
         /* 实参校验（参数数量 + 隐式转换），与 value_call 的 shadow 校验同构。
            实例方法：第一个参数是 self（接收者），实参从 args 开始对齐 self
            之后的形参。静态方法：无 self，实参从 args 开始对齐全部形参。 */
@@ -1401,7 +1376,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             const type_t *rt = func_type_return(fs->type);
             /* 所有权修饰（`fatal opaque` / `fatal *T`）不是 C 表示的一部分：
                返回码按**裸类型**映射，值仍带修饰类型（所有权交回调用方）。 */
-            const type_t *rt_core = type_strip_ownership(rt);
+            const type_t *rt_core = rt;
             /* 返回类型码：**精确到类型**（vm/bcode.h 的 CLUX_FFI_RET_*）。
                clux 标量与 C 是 1:1 的，调用层用 libffi 的精确描述符，因此返回值
                的类型必须与源码声明完全一致（旧编码把 u64 返回造成 i64，使用点会
@@ -1446,7 +1421,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                          qual);
               return val_void(sema);
             }
-            const func_sig_t *sig = &((const func_type_t *)type_strip_ownership(fs->type))->sig;
+            const func_sig_t *sig = &((const func_type_t *)fs->type)->sig;
             call->is_ffi_call = true;
             /* 返回类型码 + 变参信息打包（编解码见 vm/bcode.h）。
                变参调用必须知道"前几个是固定参数"，运行期才能按 C 的约定铺寄存器/
@@ -1490,35 +1465,6 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                   diag_error(sema->diag, sema_loc(sema, a),
                              "extern call %s: variadic argument %zu: this type "
                              "cannot cross the C ABI", qual, ai + 1);
-                continue;
-              }
-              /* 所有权契约：`own` 形参（包括 `own Agg` 这种按值聚合）必须接收
-                 将亡值（move/clone 的结果），否则实参仍由调用方持有，而被调方
-                 按 own 契约释放 → double free。反向规则同理：fatal 实参必须被
-                 own 形参接住，否则没有位置释放 → 泄漏。规则与普通调用的
-                 `func_shadow_call`（src/vm/type_func.c）保持一致；差异只在于
-                 FFI 调用不走 value_call，必须在这里显式补上。 */
-              ownership_t pown = type_ownership_of(pt);
-              ownership_t aown = value_type_ownership(av);
-              if (pown == OWN_OWN && aown != OWN_FATAL) {
-                char pn[64];
-                sema_type_name(pt, pn, sizeof pn);
-                diag_error(sema->diag, sema_loc(sema, a),
-                           "extern call %s: argument %zu: cannot copy a value "
-                           "holding owned resources into parameter of type %s "
-                           "(use move() or clone(), or declare the parameter as "
-                           "'ref *T' to borrow)", qual, ai + 1, pn);
-                continue;
-              }
-              if (aown == OWN_FATAL && pown != OWN_OWN) {
-                char pn[64];
-                sema_type_name(pt, pn, sizeof pn);
-                diag_error(sema->diag, sema_loc(sema, a),
-                           "extern call %s: argument %zu: a dying value (FATAL) "
-                           "must be caught by an 'own' position; parameter of "
-                           "type %s does not take ownership (bind it to an own "
-                           "variable, or pass it to an own parameter)",
-                           qual, ai + 1, pn);
                 continue;
               }
               if (!ffi_arg_acceptable(sema, pt, at))
@@ -1611,13 +1557,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         }
         const type_t *inner = type_option_inner(ot);
         if (!inner) return val_void(sema);
-        const type_t *core = type_strip_ownership(inner);
         const type_t *res = inner;
-        if (type_ownership_of(inner) == OWN_OWN ||
-            type_has_own_slots(core)) {
-          res = sema_fatal_variant_of(sema, core);
-          if (!res) return val_void(sema);
-        }
         call->is_take_call = true;
         return value_make_shadow(sema->vm, res);
       }
@@ -1679,7 +1619,6 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         if (!arg || is_poison(sema, arg) || value_is_type(arg, TYPE_KIND_VOID))
           return val_void(sema);
         value_t *sv = value_make_shadow(sema->vm, value_type(arg));
-        value_set_type_ownership(sema->vm, sv, OWN_FATAL);
         return sv;
       }
 
@@ -1690,7 +1629,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           return val_void(sema);
         }
         /* 结构/布局视图：`own []T` / `ref []T` 与 `[]T` 同构。 */
-        const type_t *at = type_strip_ownership(value_type(arg_shadows[0]));
+        const type_t *at = value_type(arg_shadows[0]);
         const type_t *elem = NULL;
         switch (at ? at->kind : TYPE_KIND_VOID) {
         case TYPE_KIND_SLICE:
@@ -1712,15 +1651,14 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      "data: argument must be array/slice/str, got %s", tn);
           return val_void(sema);
         }
-        /* `data(x)` 是借用：返回 **ref *T**（指向调用方存储，不拥有）。 */
+        /* `data(x)` 是借用：返回 `*T`（指向调用方存储）。 */
         const type_t *rp0 = type_ptr_intern(sema->vm, elem);
         if (!rp0) return val_void(sema);
-        const type_t *rp = type_ownership_apply(sema->vm, OWN_REF, rp0);
+        const type_t *rp = rp0;
         if (!rp) return val_void(sema);
         sema_type_register(sema, rp);
         call->is_data_call = true;
         value_t *sv = value_make_shadow(sema->vm, rp);
-        value_set_type_ownership(sema->vm, sv, OWN_REF);
         return sv;
       }
 

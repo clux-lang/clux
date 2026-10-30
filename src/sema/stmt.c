@@ -1,5 +1,4 @@
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -400,7 +399,6 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
     }
   }
   /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
-  sema_check_ret_ref_annot(sema, fn, rt);
   const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
   /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */
   sema_symbol_t *sym = sema_lookup(scope, fn->name);
@@ -638,19 +636,6 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
       fn->return_expr ? sema_resolve_type_slot(sema, &fn->return_expr) : NULL;
   sema->fn.def = fn;
 
-  /* R1（返回类型约束，m3-design §4）：参数/返回值只能 ref 或 fatal，不能
-     own——own 是单所有权，跨函数传 own 会破坏唯一所有权（调用方已销毁 /
-     返回值无法显式接管）。返回 own *T / own []T 应改写为返回 fatal *T /
-     fatal []T（调用点 `var p: own *T = f()` 经 fatal→own 接管）。 */
-  if (sema->fn.return_type &&
-      type_ownership_of(sema->fn.return_type) == OWN_OWN) {
-    diag_error(sema->diag, sema_loc(sema, fn->return_expr),
-               "function cannot return own pointer/slice (return fatal *T / "
-               "fatal []T instead; the caller takes ownership via "
-               "var p: own *T = f())");
-    sema->fn.return_type = NULL; /* 防级联：后续 return 不再按 own 校验 */
-  }
-
   /* 函数级 VM scope（与作用域树同构）：捕获层（父）定义捕获 shadow value，
      参数层（子，遮蔽捕获）定义参数 shadow value——进入函数体即可读（名字
      取自 ast）。与运行时 func_vcall 结构一致：closure_scope（捕获）→
@@ -673,25 +658,6 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
     if (ps) {
       ps->flow_init = true; /* 参数由调用方传入，确定已初始化 */
       ps->is_active = true; /* 参数进入函数体立即可见 */
-      /* **参数位只允许 `own` / `ref` / none**（所有权模型 §0.5）。
-         - `own` 形参：调用点必须以将亡值（FATAL）传入（`f(move(p))`）。
-           接收后**形参的值状态是 OWN**，由函数负责释放（或 move 出去、
-           或随 `fatal` 返回位离开）——不会与调用方分裂所有权，因为调用点的
-           源已被 move 进 TDZ。
-         - `fatal` **不能作形参**：`fatal` 描述的是"函数调用表达式"的值
-           （见 §0.3），不是形参的接收能力。传所有权请写 `own`。 */
-      if (ps->type && sema_sym_ownership(ps) == OWN_FATAL) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                   "function parameter '%.*s' cannot be 'fatal': fatal describes "
-                   "the value of a *call expression*, not a parameter. Use "
-                   "'own' to take ownership (call with `f(move(x))`) or 'ref' "
-                   "to borrow",
-                   (int)vd->name.len, vd->name.ptr);
-      }
-      /* 注：§5 强制规则（参数类型**含 ref 字段**必标注）现无对象——含 ref 字段
-         的聚合类型暂不支持（复合类型禁止携带指针/切片）。**顶层 `ref *T` /
-         `ref []T` 是"借用"本身的声明形式**，不在强制标注之列
-         （其存活由调用点单源推断承担）。 */
     }
     value_t *pv = value_make_shadow(sema->vm,
                                     ps && ps->type ? ps->type
@@ -719,8 +685,6 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
       memset(&ctxsym, 0, sizeof ctxsym);
       ctxsym.kind       = SEMA_SYM_VAR;
       ctxsym.type       = sig_type;
-      ctxsym.type = type_ownership_apply(sema->vm, OWN_REF,
-                                     type_strip_ownership(ctxsym.type));
       ctxsym.flow_init  = true;
       ctxsym.is_active  = true;
       ctxsym.own_scope  = sf->param_scope;
@@ -735,20 +699,6 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      walk_block 的 block_result_t 仅用于跳过不可达语句的类型检查 */
   size_t child_idx = 0;
   (void)walk_block(sema, fn->body, sf->param_scope, &child_idx);
-
-  /* R1（fatal 参数消费，m3-design §4）：fatal 参数必须被消费——move 接管
-     （AST_MOVE 标记 moved）或 return 出去（walk_return 标记 moved）。
-     未消费（函数结束时 fatal 仍"存活"）→ 所有权悬空 → 编译错误。 */
-  for (ast_node_t *p = fn->params; p; p = p->next) {
-    ast_var_def_t *vd = (ast_var_def_t *)p;
-    sema_symbol_t *ps = sema_scope_find_local(sf->param_scope, vd->name);
-    if (ps && sema_sym_is_fatal(ps) && !sema_fatal_consumed(ps)) {
-      diag_error(sema->diag, sema_loc(sema, (ast_node_t *)vd),
-                 "fatal parameter '%.*s' is not consumed (take ownership "
-                 "with move() or return it)",
-                 (int)vd->name.len, vd->name.ptr);
-    }
-  }
 
   sema_scope_release_borrows(sf->param_scope); /* R3：参数层借用载体消亡 */
   vm_pop_scope(sema->vm);

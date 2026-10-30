@@ -63,7 +63,6 @@ struct vm_t;
 #define CLUX_FFI_RET_UNPACK_NFIXED(v) (((uint32_t)(v) >> 16) & 0xFFFFu)
 
 /* §2 C ABI 类型约束：NULL = 可跨 C ABI；否则为人类可读拒绝原因。 */
-const char *ffi_c_abi_reject_reason_own(const type_t *t, ownership_t own);
 const char *ffi_c_abi_reject_reason(const type_t *t);
 bool ffi_c_abi_check_aggregate(const type_t *t, const struct vm_t *vm, char *err,
                                size_t ecap);

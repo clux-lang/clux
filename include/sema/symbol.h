@@ -151,9 +151,6 @@ struct _sema_symbol_t {
                          （make_free_stmts）只包含已声明的变量——否则提前 return
                          的路径会销毁**后面才声明**的变量（字节码 PUSH 一个尚未
                          DEFINE 的名字 → 运行期 "undefined variable"）。 */
-  bool moved;         /* 所有权转移状态（Step B，m3-design §7）：move(x) 后源
-                         变量失去所有权，进入 TDZ——读取报 "used after move"。
-                         重新赋值（=）恢复可用。仅变量符号有意义。 */
   bool is_capture;    /* 本符号是**闭包捕获**（`func |caps|` 的捕获槽，含括号捕获
                          的参数槽）。捕获值**不可 move**：捕获作用域由闭包的所有
                          调用共享，move 进去的 TDZ 无法恢复，第二次调用读到已转移
@@ -180,10 +177,7 @@ struct _sema_symbol_t {
      指针/切片而不可达，整条机制（borrow_collect / borrow_set_add /
      borrow_src_anchor_scope）一并移除。顶层 ref 的单源借源仍由下面的
      `borrow_src` 表达，不受影响。
-     将来恢复含指针的聚合时，按扁平槽位表（docs/ownership-refactor.md §2.5）
-     重新设计多源借源。 */
-  /* 所有权**不单独存**：直接由 `type` 携带（own T / ref T / fatal T）。
-     读取入口：`sema_sym_ownership(sym)` / `sema_sym_is_fatal(sym)`。 */
+     将来恢复含指针的聚合时，按扁平槽位表重新设计多源借源。 */
 
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——

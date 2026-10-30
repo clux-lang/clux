@@ -52,7 +52,6 @@ static const char *cat_str(lower_ctx_t *lc, const char *a, const char *b) {
 /* 聚合里是否含 `str` 字段：本后端 str = {char*, len}（16 字节），C ABI 的
  * str 是 8 字节指针——按值传聚合会布局不一致，必须拒绝。 */
 static bool aggregate_has_str(const type_t *t) {
-    t = type_strip_ownership(t);
     if (!t) return false;
     switch (t->kind) {
     case TYPE_KIND_STR:
@@ -884,9 +883,9 @@ cir_expr_t *lower_ffi_call(lower_ctx_t *lc, ast_call_t *call) {
     /* sema 已解析签名 + 实际 C 符号：直接走统一路径（port 导入必须有它）。 */
     const type_t *fsig = (const type_t *)call->ffi_sig;
     if (call->ffi_c_name.len && fsig &&
-        type_kind_of(type_strip_ownership(fsig)) == TYPE_KIND_FUNC) {
+        type_kind_of(fsig) == TYPE_KIND_FUNC) {
         const func_sig_t *sig =
-            &((const func_type_t *)type_strip_ownership(fsig))->sig;
+            &((const func_type_t *)fsig)->sig;
         return lower_ffi_call_resolved(lc, call, sig, call->ffi_c_name);
     }
     if (!call->callee || call->callee->kind != AST_SCOPE_REF) {

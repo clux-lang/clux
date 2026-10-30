@@ -364,21 +364,8 @@ static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
 
 /* ---- 类型转换：array↔tuple 布局兼容互转（m2-design §3）+ 同 array 身份 ---- */
 
-/* fatal 变体的布局兼容判定（供 value_take_fatal_into 回调）：
-   同 kind（都是数组）且元素类型相同 ⟹ 长度与 size 相同（fatal 变体按同一
-   elem+len 构造），故只需比元素类型。 */
-static bool array_fatal_layout_ok(vm_t *vm, const type_t *target,
-                                  const type_t *src) {
-    (void)vm;
-    return array_type_elem(target) == array_type_elem(src);
-}
-
 static value_t *array_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (!target) return value_make_error(vm, "array: missing cast target");
-    /* fatal 变体 → 同布局的非 fatal 数组：接管转换（见 value_take_fatal_into） */
-    value_t *taken = value_take_fatal_into(vm, v, target,
-                                           array_fatal_layout_ok);
-    if (taken) return taken;
     const type_t *src = value_type(v);
     /* 同 array 实例（身份拷贝；持有资源时对象图克隆，防与源共享内嵌 own） */
     if (target->kind == TYPE_KIND_ARRAY && target == src) {

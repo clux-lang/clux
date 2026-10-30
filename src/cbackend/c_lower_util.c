@@ -165,10 +165,7 @@ const type_t *decl_value_type(lower_ctx_t *lc, const type_t *decl,
            comptime 折叠/装饰器展开目前会把结果类型退化成签名类型
            （func(...)）。C 侧必须按**闭包类型**落变量，否则 env 被截断
            （值里 sig struct 不兼容）。 */
-        ownership_t o = type_ownership_of(decl);
-        if (o == OWN_NONE) return it;
-        const type_t *wrapped = type_ownership_apply(lc->sema->vm, o, it);
-        return wrapped ? wrapped : it;
+        return it;
     }
     return decl;
 }

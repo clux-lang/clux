@@ -20,7 +20,6 @@ typedef struct {
     ast_node_t *type_expr;   /* 类型表达式（NULL = 推断；AST_IDENT/AST_CONST/AST_VOLATILE） */
     ast_node_t *init;        /* 初始化表达式（必须存在；AST_UNDEF = 未初始化声明） */
     bool        is_comptime; /* comptime var：右值必须编译期可计算，引用点折叠为常量 */
-    bool        free_on_error; /* test 模式：own 变量在异常展开时需 FREE */
 
     /* sema 写入：该变量/捕获槽解析后的**实际类型**（可为 NULL）。
      * 目前唯一消费者是闭包捕获槽的销毁序列（stmt.c make_free_stmts）——
@@ -57,25 +56,6 @@ static inline ast_node_t *ast_var_def_new(arena_t *arena,
 
 /** 解析变量定义 var name[:type] = init; 初始化必须存在。 */
 ast_node_t *parse_var_def(parser_t *p);
-
-/* ---- 所有权编码（与 vm 的 ownership_t 数值一致，避免 parser 依赖 vm 头）---- */
-enum {
-    AST_OWN_NONE  = 0,
-    AST_OWN_OWN   = 1,
-    AST_OWN_REF   = 2,
-    AST_OWN_FATAL = 3,
-};
-
-/**
- * 从类型表达式提取顶层所有权编码（`own *T` / `ref []T` …）。
- *
- * **必须在类型槽位折叠前调用**（`sema_resolve_type_slot` 会把 AST_PTR /
- * AST_SLICE_TYPE 折叠成 AST_TYPE_REF，丢失 ownership token）。所以本函数由
- * **解析器**在构造变量定义/参数时调用，把结果缓存进 `ast_var_def_t::ownership`。
- *
- * 实现见 `src/parser/parse_var_def.c`（那里包含 token/类型节点头）。
- */
-
 
 /** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。
  * M6 FFI：声明动态库导出的全局数据符号；无初始化器，符号由 dlsym 在运行期解析。

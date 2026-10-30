@@ -1,5 +1,4 @@
 #include "sema/sema.h"
-#include "vm/type_ownership.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -122,26 +121,6 @@
 
 /* ---- 语句：控制流 ---- */
 
-/* 捕获读取被改写为 `__ctx.env.<cap>`（捕获聚合结构体）后的**同构识别**：
-   返回捕获名。返回 ref 的 §6/§9 检查（来源必须是参数/捕获/全局、标注不得
-   更宽）按名字做静态分析，必须能看穿这个改写。 */
-static bool capture_access_name(ast_node_t *e, strslice_t *out) {
-  if (!e || e->kind != AST_MEMBER) return false;
-  ast_member_t *cap = (ast_member_t *)e;
-  if (!cap->object || cap->object->kind != AST_MEMBER) return false;
-  ast_member_t *env = (ast_member_t *)cap->object;
-  if (!env->object || env->object->kind != AST_IDENT) return false;
-  if (env->field.len != 3 || !env->field.ptr ||
-      memcmp(env->field.ptr, "env", 3) != 0)
-    return false;
-  ast_ident_t *ctx = (ast_ident_t *)env->object;
-  if (ctx->name.len != 5 || !ctx->name.ptr ||
-      memcmp(ctx->name.ptr, "__ctx", 5) != 0)
-    return false;
-  *out = cap->field;
-  return true;
-}
-
 block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                   sema_scope_t *scope) {
   block_result_t r = {.definitely_returns = true};
@@ -170,103 +149,10 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
           sema_type_name(value_type(v), rn, sizeof(rn));
           diag_error(sema->diag, sema_loc(sema, rt->value),
                      "cannot return %s from function returning %s", rn, tn);
-        } else if (sema->fn.return_type &&
-                   type_ownership_of(sema->fn.return_type) == OWN_REF &&
-                   (rt->value->kind == AST_IDENT ||
-                    capture_access_name(rt->value, &(strslice_t){0}))) {
-          /* R3（返回 ref 来源，m3-design §6）：返回值 ref 的（标注）作用域
-             必然来自参数或全局——本地 own 变量/临时借用不能作为返回值 ref
-             来源（返回后栈上值销毁，借用悬垂）。检查：return 的值是
-             标识符时，须是 ref/fatal 参数（fatal 返回继续传递所有权）或
-             全局 ref。非标识符表达式（x.& 取栈值地址等）一律拒绝。 */
-          strslice_t rname = ((ast_ident_t *)rt->value)->name;
-          if (rt->value->kind != AST_IDENT)
-            capture_access_name(rt->value, &rname);
-          sema_symbol_t *rs = sema_lookup(scope, rname);
-          if (rs && rs->kind == SEMA_SYM_VAR && rs->type &&
-              sema_sym_ownership(rs) == OWN_REF) {
-            /* §6 返回 ref 来源：必须是参数或全局。参数层符号
-               （sema_lookup 沿 scope 链第一个命中）或全局符号放行；
-               本地 own 的 ref 变量/外层局部借用 → 悬垂 → 拒绝。 */
-            sema_symbol_t *g = sema_lookup(sema->global_scope, rname);
-            /* 参数判定：遍历真实参数列表（body 顶层变量也注册在
-               param_scope，sema_scope_find_local 无法区分） */
-            bool is_param = false;
-            for (ast_node_t *p = sema->fn.def ? sema->fn.def->params : NULL;
-                 p && !is_param; p = p->next) {
-              ast_var_def_t *pvd = (ast_var_def_t *)p;
-              is_param = pvd->name.len == rname.len &&
-                         memcmp(pvd->name.ptr, rname.ptr, pvd->name.len) == 0;
-            }
-            bool is_global = g == rs;
-            /* §9 闭包捕获视同特殊参数：返回 ref 可来自捕获变量
-               （调用闭包时闭包对象必然存活，捕获的 ref 有效） */
-            bool is_capture = false;
-            if (sema->fn.def && sema->fn.def->captures) {
-              for (ast_node_t *c = sema->fn.def->captures; c; c = c->next) {
-                ast_var_def_t *cv = (ast_var_def_t *)c;
-                if (cv->name.len == rname.len &&
-                    memcmp(cv->name.ptr, rname.ptr, rname.len) == 0) {
-                  is_capture = true;
-                  break;
-                }
-              }
-            }
-            if (!is_param && !is_global && !is_capture) {
-              diag_error(sema->diag, sema_loc(sema, rt->value),
-                         "cannot return ref borrowed from local "
-                         "'%.*s' (returned ref must come from a parameter, "
-                         "capture or global)",
-                         (int)rname.len, rname.ptr);
-            }
-            /* §9 闭包返回捕获 ref 的标注关系检查：返回值标注的每个锚点
-               须嵌套于闭包标注的每个锚点（返回值存活 ≤ 闭包存活 ≤ 锚点）。
-               返回值来自捕获 → 返回值存活受闭包存活约束；返回值标注不得
-               比闭包标注更宽（否则调用方以为返回值活到 y，实际活不过 x）。 */
-            if (is_capture && sema->fn.def &&
-                sema->fn.def->scope_annot_count > 0) {
-              strslice_t *ret_names = NULL;
-              size_t ret_count = 0;
-              sema_annot_peek(sema->fn.def->return_expr,
-                              &ret_names, &ret_count);
-              for (size_t i = 0; i < ret_count; i++) {
-                sema_scope_t *ret_anchor =
-                    annot_anchor_scope(sema, ret_names[i], scope);
-                if (!ret_anchor) continue; /* 未知锚点由他处报 */
-                for (size_t j = 0; j < sema->fn.def->scope_annot_count;
-                     j++) {
-                  sema_scope_t *clo_anchor = annot_anchor_scope(
-                      sema, sema->fn.def->scope_annot_names[j], scope);
-                  if (!clo_anchor) continue;
-                  if (!sema_scope_within(ret_anchor, clo_anchor)) {
-                    diag_error(sema->diag, sema_loc(sema, rt->value),
-                               "returned ref annotation '%.*s' escapes "
-                               "closure annotation '%.*s' (return scope must "
-                               "be nested within closure scope)",
-                               (int)ret_names[i].len, ret_names[i].ptr,
-                               (int)sema->fn.def->scope_annot_names[j].len,
-                               sema->fn.def->scope_annot_names[j].ptr);
-                  }
-                }
-              }
-            }
-          }
         }
       }
     }
 
-    /* R1（fatal 参数消费，§4）：`return p;`（p 为 fatal 指针**或切片**参数）
-       = 所有权继续传递给调用方 → 标记已消费，函数结束的"未消费"检查放行。
-       **与返回类型无关**：这段标记原先写在 `: ref *T` 的分支内部，fatal 指针/
-       切片返回根本走不到，于是 `func id(p: fatal []i32): fatal []i32 { return p; }`
-       被误报"未消费"（诊断文本自己写的是 "move() or return it"）。
-       判据与 sema_walk_function 末尾的检查（PTR_FATAL || SLICE_FATAL）一致。 */
-    if (rt->value && rt->value->kind == AST_IDENT) {
-      sema_symbol_t *rs = sema_lookup(scope, ((ast_ident_t *)rt->value)->name);
-      if (rs && rs->kind == SEMA_SYM_VAR && sema_sym_is_fatal(rs)) {
-        sema_mark_fatal_consumed(rs);
-      }
-    }
   } else {
     if (sema->fn.return_type &&
         type_kind_of(sema->fn.return_type) != TYPE_KIND_VOID) {

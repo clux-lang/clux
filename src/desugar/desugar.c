@@ -862,8 +862,6 @@ static ast_node_t *ds_decorate_method(desugar_t *ds, ast_func_def_t *m,
   src->fid = 0;
   src->sig_id = 0;
   src->capture_type_id = 0;
-  src->env_dispose_fid = 0;
-  src->env_clone_fid = 0;
   src->is_comptime = false;
 
   /* 2) 成员变成包装方法：`return __decorval(self, ...);` */

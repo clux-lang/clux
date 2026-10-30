@@ -6,7 +6,6 @@ extern "C" {
 #endif
 
 #include "vm/type.h"
-#include "vm/type_ownership.h"
 #include "vm/value.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -47,13 +46,7 @@ const type_t *type_slice_intern(vm_t *vm, const type_t *elem);
 
 /** 取切片类型的元素类型 T（非切片返回 NULL） */
 static inline const type_t *slice_type_elem(const type_t *t) {
-    t = type_strip_ownership(t);
     return type_is_slice(t) ? ((const slice_type_t *)t)->elem_type : NULL;
-}
-
-/** 取切片类型元素槽位的所有权（非切片返回 OWN_NONE） */
-static inline ownership_t slice_type_elem_ownership(const type_t *t) {
-  return type_kind_of(t) == TYPE_KIND_SLICE ? type_ownership_of(slice_type_elem(t)) : OWN_NONE;
 }
 
 /* ================================================================ */

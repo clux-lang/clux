@@ -9,7 +9,6 @@
 #include "vm/type_enum.h"
 #include "vm/type_func.h"
 #include "vm/type_option.h"
-#include "vm/type_ownership.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "vm/type_struct.h"
@@ -50,25 +49,20 @@ static const type_t *pattern_name_type(sema_t *sema, strslice_t name) {    if (!
 }
 
 static bool match_own(ast_pat_own_t own, const type_t *t, bool is_slice) {
-    type_kind_t core_kind = type_kind_of(t); /* 穿透所有权 */
+    type_kind_t core_kind = type_kind_of(t); /* 穿透 const/volatile */
     if (is_slice) {
         if (core_kind != TYPE_KIND_SLICE) return false;
     } else {
         if (core_kind != TYPE_KIND_PTR) return false;
     }
-    ownership_t o = type_ownership_of(t);
+    /* 所有权修饰已从语言移除：指针/切片只有裸类型一种形态。 */
     switch (own) {
     case PAT_OWN_ANY:
-        /* 任意非 RC 所有权指针：own / ref / fatal（§27 用户补充） */
-        return o == OWN_OWN || o == OWN_REF || o == OWN_FATAL;
     case PAT_OWN_NONE:
-        return o == OWN_NONE;
+        return true;
     case PAT_OWN_OWN:
-        return o == OWN_OWN;
     case PAT_OWN_REF:
-        return o == OWN_REF;
     case PAT_OWN_FATAL:
-        return o == OWN_FATAL;
     case PAT_OWN_SHARE:
     case PAT_OWN_WEAK:
         return false;
@@ -79,7 +73,7 @@ static bool match_own(ast_pat_own_t own, const type_t *t, bool is_slice) {
 static bool match_name(sema_t *sema, ast_pat_name_t *pn, const type_t *t);
 
 static bool match_tuple(sema_t *sema, ast_pat_tuple_t *tp, const type_t *t) {
-    const type_t *core = type_strip_ownership(t);
+    const type_t *core = t;
     if (!core || core->kind != TYPE_KIND_TUPLE) return false;
     size_t n = tuple_type_elem_count(core);
     if (tp->any_arity) return true;
@@ -95,7 +89,7 @@ static bool match_tuple(sema_t *sema, ast_pat_tuple_t *tp, const type_t *t) {
 }
 
 static bool match_func(sema_t *sema, ast_pat_func_t *fp, const type_t *t) {
-    const type_t *core = type_strip_ownership(t);
+    const type_t *core = t;
     if (!core) return false;
     if (core->kind != TYPE_KIND_FUNC && core->kind != TYPE_KIND_CFUNC)
         return false;
@@ -233,7 +227,7 @@ bool sema_pattern_match(sema_t *sema, ast_node_t *pat, const type_t *t) {
     }
     case AST_PAT_ARRAY: {
         ast_pat_array_t *a = (ast_pat_array_t *)pat;
-        const type_t *core = type_strip_ownership(t);
+        const type_t *core = t;
         if (!core || core->kind != TYPE_KIND_ARRAY) return false;
         if (a->length) {
             if (a->length->kind != AST_INT_LIT) return false;

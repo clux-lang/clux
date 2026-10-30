@@ -18,7 +18,6 @@
 #include "parser/ast_for.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
-#include "vm/type_ownership.h"
 
 #include "sema_stmt_internal.h"
 #include "sema_expr_internal.h"
@@ -85,17 +84,9 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
     if (!out->error_call) return false;
     value_t *ev = sema_expr(sema, &out->error_call, scope);
     if (is_poison(sema, ev) || !value_type(ev)) return false;
-    const type_t *et = value_type(ev);
-    ownership_t eo = type_ownership_of(et);
-    if (eo == OWN_OWN || eo == OWN_FATAL || type_has_own_slots(et)) {
-        diag_error(sema->diag, sema_loc(sema, out->error_call),
-                   "error value from 'error()' must be copyable; own/fatal "
-                   "errors are not supported by 'a.?'");
-        return false;
-    }
 
     const type_t *ret = sema->fn.return_type;
-    const type_t *ret_core = type_strip_ownership(ret);
+    const type_t *ret_core = ret;
     if (!ret_core || type_kind_of(ret_core) != TYPE_KIND_STRUCT) {
         diag_error(sema->diag, sema_loc(sema, operand),
                    "'a.?' requires the current function to return a struct "
@@ -132,12 +123,6 @@ bool sema_try_analyze(sema_t *sema, ast_node_t *operand, sema_scope_t *scope,
     return true;
 }
 
-static bool try_place_expr(const ast_node_t *n) {
-    return n && (n->kind == AST_IDENT || n->kind == AST_MEMBER ||
-                 n->kind == AST_INDEX || n->kind == AST_DEREF ||
-                 n->kind == AST_SCOPE_REF);
-}
-
 bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
                     sema_try_info_t *out) {
     if (!sema || !unwrap || unwrap->kind != AST_UNWRAP || !out) return false;
@@ -148,20 +133,6 @@ bool sema_try_probe(sema_t *sema, ast_node_t *unwrap, sema_scope_t *scope,
         type_kind_of(value_type(ov)) != TYPE_KIND_STRUCT)
         return false;
     const type_t *ot = value_type(ov);
-    bool owning = type_ownership_of(ot) == OWN_OWN ||
-                  type_ownership_of(ot) == OWN_FATAL ||
-                  type_has_own_slots(ot);
-
-    /* own result 的 place 左值：直接对它 take，不复制临时。
-       （value() 会 take_opt(self.val)，消费槽位。） */
-    if (owning && try_place_expr(u->operand)) {
-        bool panic_mode = u->op && token_is(u->op, "!");
-        if (!sema_try_analyze(sema, u->operand, scope, panic_mode, out))
-            return false;
-        out->setup = NULL;
-        return true;
-    }
-
     /* 左值表达式只求值一次：var __try_N: R = <operand>; */
     char nb[64], cn[64];
     uint32_t seq = sema->try_seq++;

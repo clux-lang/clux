@@ -148,12 +148,6 @@ static value_t *struct_ne(vm_t *vm, value_t *a, value_t *b) {
 /* ---- 类型转换：结构兼容（鸭子类型）即可转换 ---- */
 
 static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
-    /* fatal 变体 → 同布局的非 fatal 类型（`T` / `const T`）：**接管转换**（memcpy
-       顶层 + 清空源的 own/fatal 指针），不是普通整块拷贝。理由见
-       value_take_fatal_into（共享内嵌 own 堆块 → 双释放，实测 access violation）。 */
-    value_t *taken = value_take_fatal_into(vm, v, target,
-                                           struct_type_compatible);
-    if (taken) return taken;
     /* T → const T / volatile T（可嵌套）：**只加限定**的隐式转换（C 语义：
        限定符只能加不能去）——同一份数据的视图，身份拷贝即可。sema 允许该转换
        （构造、参数传递、TDZ 初始化三处都合法），运行期必须落地；不加这一支就会
@@ -689,7 +683,6 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
  * =========================================================================== */
 
 int struct_type_find_field(const type_t *t, strslice_t name) {
-    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_STRUCT) return -1;
     const struct_type_t *st = (const struct_type_t *)t;
     for (size_t i = 0; i < st->field_count; i++) {

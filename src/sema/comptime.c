@@ -27,7 +27,6 @@
 #include "vm/type_union.h"
 #include "vm/type_cunion.h"
 #include "vm/type_tuple.h"
-#include "vm/type_ownership.h"
 #include "vm/type_option.h"
 #include "vm/type_error.h"
 #include "vm/type_type.h"

@@ -41,7 +41,6 @@ typedef struct value_t value_t;
 
 /** 取 cunion 类型的 member 数量（非 cunion 返回 0） */
 static inline size_t cunion_type_member_count(const type_t *t) {
-    t = type_strip_ownership(t);
     return (t && t->kind == TYPE_KIND_CUNION)
                ? ((const cunion_type_t *)t)->member_count
                : 0;
@@ -49,7 +48,6 @@ static inline size_t cunion_type_member_count(const type_t *t) {
 
 /** 取第 i 个 member（越界/非 cunion 返回 NULL） */
 static inline const cunion_member_t *cunion_type_member(const type_t *t, size_t i) {
-    t = type_strip_ownership(t);
     if (!t || t->kind != TYPE_KIND_CUNION) return NULL;
     const cunion_type_t *ct = (const cunion_type_t *)t;
     return (i < ct->member_count) ? &ct->members[i] : NULL;

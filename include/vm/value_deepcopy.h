@@ -20,17 +20,6 @@ extern "C" {
  */
 void *value_alloc_data_own(vm_t *vm, const type_t *t, const void *src_data);
 
-/**
- * 同布局**重贴标签**（转移语义）：把 `v` 的字节按 `target` 解释，并清空源对象图
- * 里的 own/fatal 指针（不释放——所有权已随字节转移）。
- *
- * 用途：转移点（函数调用的 fatal 形参接收、fatal 返回值交回）产出的值带 **base**
- * 类型，而声明侧要的是 **fatal 变体**。两者逐字节同布局，只需换 `type_t`。
- *
- * 只对同 kind 且同 size 成立时执行；否则返回 NULL，调用方须自行给出诊断。
- */
-value_t *value_relabel_into(vm_t *vm, value_t *v, const type_t *target);
-
 #ifdef __cplusplus
 }
 #endif
