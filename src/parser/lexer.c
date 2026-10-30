@@ -73,7 +73,7 @@ static const char *const g_keywords[] = {
     "enum",    "export", "extends", "extern", "f32",     "f64",      "false",
     "fatal",
     "for",     "from",   "func",   "i16",     "i32",     "i64",      "i8",
-    "if",      "import", "is",     "len",     "lib",     "make",    "move",    "new",
+    "if",      "import", "is",     "len",     "lib",     "make",    "move",
     "nil",     "own",    "opaque",  "ref",    "return",
     "sizeof",  "str",    "struct",  "switch", "true",    "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",

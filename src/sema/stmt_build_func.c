@@ -184,7 +184,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
   }
   /* 捕获聚合类型（§7.1.10 "闭包 = 捕获结构体"）：把捕获槽表登记成一个 struct
      类型（name / 类型 / **槽位所有权**），VM 层据此把闭包当聚合值处理 ——
-     clone 深拷贝捕获、free 按槽位所有权释放、字段读写按槽位类型。
+     clone 复制捕获、字段读写按槽位类型。
      编译器在 hoist 注册函数对象后发 `SET_FUNC_CAPTURES <id>`（fn->capture_type_id）。 */
   {
     size_t nc = 0;

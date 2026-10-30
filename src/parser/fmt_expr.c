@@ -620,7 +620,7 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             sb_ch(&f->sb, ')');
             break;
         }
-        /* M3 类型/分配族：own|ref|fatal *T、new T{...}、'<a,b> T。
+        /* 指针类型 *T、作用域标注 '<a,b> T。
            同样此前**无渲染分支 → 静默丢弃**（`var p: ref *i32 = ...` 的类型
            会被整个吃掉）。 */
         case AST_PTR: {

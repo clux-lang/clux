@@ -232,7 +232,7 @@ typedef struct sema_t {
     /* **类型展开环检测**（自引用类型：链表/树）。销毁序列（gen_destroy）与
        扁平化 clone（gen_clone_expr）都按类型对象递归展开；一旦展开路径上
        再次遇到同一类型（只能经指针形成），静态展开无法穷尽 —— 该边退化为
-       运行期原语（`FREE_RECURSIVE` / `CLONE`），其余部分保持逐槽位展开。
+       运行期原语，其余部分保持逐槽位展开。
        destroy_path/clone_path 是展开路径栈（各 32 层上限，超出按环处理）。 */
     const type_t *destroy_path[32];
     uint32_t      destroy_depth;

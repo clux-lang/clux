@@ -47,11 +47,10 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so
   sema / compiler / CTFE never see it (`tests/desugar_test.cpp`, `tests/foreach_test.cpp`).
 - **M3 — pointers**: raw `*T` (C-like lifetime), postfix `.&` / `.*`, `opaque`
-  (≈ `void*`), closure capture rules. There is **no built-in allocation or
-  deallocation**: `new` / `free` were removed — call `libc::malloc` / `libc::free`
-  through FFI and initialize/free fields explicitly. Compile-time ownership
-  (`own` / `ref` / `fatal`, `move` / `clone`) and the RC family were also removed.
-  See `docs/runtime-ownership.md`.
+  (≈ `void*`), closure capture rules. Heap allocation is **not** a language
+  feature: call `libc::malloc` / `libc::free` through FFI and initialize/free
+  fields explicitly. Compile-time ownership was removed; the compiler only
+  checks raw pointers. See `docs/runtime-ownership.md`.
 - **M4 — slices and strings**: `[]T` fat pointers, `make(pointer, len)` (a
   non-allocating slice view), `len`, `s[a:b]` slicing, `str` slicing to
   `[] const u8`, bounds checks.

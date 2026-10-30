@@ -139,7 +139,7 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
                                      sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
   /* **sema 生成的销毁语句不再回走**（`is_generated`，见 gen_destroy_* /
-     ast_free_new）：销毁序列的类型判定已由 type 对象完成，回走没有新信息；
+     生成节点）：销毁序列的类型判定已由 type 对象完成，回走没有新信息；
      而回走复合生成形态会造成两类错误：
      - `AST_IF`/`AST_BLOCK` 会到 3a 建的 scope 树里消费子作用域，但生成
        节点没有对应作用域 → "scope tree desync"；

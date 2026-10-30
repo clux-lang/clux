@@ -66,16 +66,6 @@ void *value_alloc_data_copy(allocator_t *alloc, const type_t *type, const void *
     return data;
 }
 
-/* 按字节数分配原始内存（NEW 指令用）：清零 + value_data 类（与值数据块同
-   生命周期规则；FREE / 作用域回收都用 allocator_free 按指针释放）。 */
-void *value_alloc_raw(allocator_t *alloc, size_t size) {
-    if (!alloc || size == 0) return NULL;
-    void *data = allocator_new(alloc, &g_value_data_class, size);
-    if (!data) panic("vm: out of memory allocating raw block");
-    memset(data, 0, size);
-    return data;
-}
-
 /* ---- 访问器 ---- */
 
 const type_t *value_type(const value_t *v) {

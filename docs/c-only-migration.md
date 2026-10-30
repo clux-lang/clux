@@ -373,7 +373,7 @@ src/cmd          build/run/test/format/version（bc/eval 删除或隐藏）
 
 - C 后端生成 RC 控制块（64 字节头 + payload，`p.*` 语义不变）：
   `clux_rc_new/retain/release`、weak retain/release、RC upgrade。
-- `__make_share` 把 `new` 的 payload 搬入 RC 块（原块直接归还，不跑析构），
+- `__make_share` 把堆块 payload 搬入 RC 块（原块直接归还，不跑析构），
   payload 带 own 槽位时确保 `__destroy_<T>` 已生成，strong→0 时递归析构。
 - `__weak_get` 生成 `?share`；share/weak 在 var init / assignment /
   constructor 字段 / array 元素等拷贝点插入 retain；FREE 按类型 release，

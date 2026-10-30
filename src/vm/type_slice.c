@@ -18,7 +18,7 @@
  *
  * 切片 = 胖指针 { void *ptr; uint64_t len; }，与指针对齐但多一个 len 字段。
  * 裸切片：运行期零标志，clone/dispose/cast 不按所有权分派，堆释放由
- * 显式 free / 生成的 FREE 负责。
+ * 显式 `libc::free` 负责。
  * =========================================================================== */
 
 /* ---- 内部工具 ---- */
@@ -78,14 +78,14 @@ static value_t *slice_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    /* 所有权纯编译期——assign 不释放旧堆块（由 sema 在赋值点生成 FREE）。 */
+    /* assign 不释放旧堆块（由用户通过 libc::free 负责）。 */
     const type_t *dt = value_type(dst);
     memcpy(value_data(dst), value_data(src), dt->size);
     return dst;
 }
 
 static void slice_dispose(vm_t *vm, value_t *v) {
-    /* 所有权纯编译期——dispose 不释放堆块（由 FREE 指令负责）。 */
+    /* dispose 不释放堆块（由用户通过 libc::free 负责）。 */
     (void)vm; (void)v;
 }
 

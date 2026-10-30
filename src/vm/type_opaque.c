@@ -16,7 +16,7 @@
  *
  * 运算行为：
  *   - clone/assign：指针值平凡拷贝（裸指针数据）。
- *   - dispose：no-op（Step A 静默——new 堆块暂不释放）。
+ *   - dispose：no-op（堆块不自动释放）。
  *   - eq/ne：指针值字节比较（与指针 vtable 同款）。
  *   - implicit_cast：任意指针 → opaque（身份拷贝，由指针 vtable 提供——
  *     本 vtable 的 implicit_cast 只处理同类型身份拷贝）。
@@ -46,7 +46,7 @@ static value_t *opaque_assign(vm_t *vm, value_t *dst, value_t *src) {
 }
 
 static void opaque_dispose(vm_t *vm, value_t *v) {
-    /* Step A 静默：new 堆块暂不释放。裸指针数据无额外资源。 */
+    /* 堆块不自动释放；裸指针数据无额外资源。 */
     (void)vm; (void)v;
 }
 

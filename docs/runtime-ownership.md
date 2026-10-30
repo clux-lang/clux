@@ -1,6 +1,6 @@
 # 运行时所有权（runtime ownership）
 
-> **状态（2026-10）**：§1–§13 记录所有权系统的演进过程（其中的 `new`/`free`/旧 `make(T,N,...)` 属于当时状态）；内建分配/销毁与旧 `make` 已在 **§14** 移除。
+> **状态（2026-10）**：§1–§13 记录所有权系统的演进过程；当前指针与内存模型见 **§14**。
 
 > 状态：**当前只保留 C 裸指针**。编译期所有权语法 `own/ref/fatal` 和
 > `move/clone` 已移除并直接报错；编译器内部残留的所有权机制（ownership_t、
@@ -33,7 +33,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 冻结旧实现、清点迁移面、写本文档 | 完成 |
-| 1a | raw-pointer 迁移开关：`own/ref/fatal` 退化为裸类型、`new/make` 返回裸指针、`free` 语句 | 完成 |
+| 1a | raw-pointer 迁移开关：`own/ref/fatal` 退化为裸类型 | 完成 |
 | 1b | examples 迁移为裸指针 | 完成 |
 | 1c | tests 迁移/删除旧所有权测试，切换默认 | 完成（raw 已是默认） |
 | 2 | `__init__` / `__assign__` / `__dispose__` 魔法方法 | 延后 |
@@ -42,8 +42,8 @@
 
 当前语言契约：
 
-- `*T` / `[]T` 是唯一指针/切片写法；`new` 返回 `*T`，`make` 返回 `[]T`；
-- `free(p)` 是语句级 builtin，释放指针或切片 data；
+- `*T` / `[]T` 是唯一指针/切片写法；
+- 分配/释放由用户通过 FFI（`libc::malloc` / `libc::free`）负责，`make(pointer, len)` 构造切片视图；
 - `own` / `ref` / `fatal` / `move` / `clone` 直接报错，不再作为 no-op 接受；
 - `share` / `weak` 的内建 RC 也已移除；需要 RC 时由标准库类型实现；
 - 不生成 `__init__` / `__assign__` / `__dispose__` 调用，不识别
@@ -196,8 +196,7 @@ interface Allocator {
 
 - `own *T` / `ref *T` / `fatal *T` → `*T`
 - `own Agg` → `Agg`
-- `new T` → `*T`；`make` → `[]T`
-- 调用方用 `defer { free(p); }` 显式清理
+- 指针/切片的分配与释放由 FFI/标准库负责；`make(pointer, len)` 构造视图
 - `move` / `clone` 不再是编译器原语；由普通函数/库提供
 - 方法接收者 `ref *T` → `*T`
 - 移除作用域标注、借用期检查、聚合拥有判定、C ABI 所有权契约
@@ -252,7 +251,7 @@ Phase 2 开始实现 `__init__` / `__assign__` / `__dispose__`。
   `sema_sym_is_fatal`）、`value_type_ownership` / `value_set_type_ownership`、
   `sema_value_is_fatal` / `sema_value_holds_own`、fatal 变体
   （`sema_fatal_variant_of`）与 `value_take_fatal_into` 全部移除；
-- sema 分支：变量定义/赋值/聚合构造/`new`/`make`/调用/闭包捕获/`try` 中的
+- sema 分支：变量定义/赋值/聚合构造/调用/闭包捕获/`try` 中的
   own/fatal 接收规则、`sema_check_slot_flow`、fatal 参数消费检查、ref 返回
   标注检查、销毁函数生成（`__destroy_<T>` / env vtable fid）删除；
 - C 后端：`c_lower_stmt` 的 own 释放条件、闭包/defer 捕获槽释放、
@@ -288,24 +287,16 @@ defer 相关用例（含 `Foreach`/`Desugar`/`Fmt`）保持通过。
 
 回归（阶段 3b 当时）：全量 1631 个用例，2 个 `Install.*` 环境相关失败为既有问题。
 
-## 14. 阶段 4：移除内建分配/销毁（2026-10）
+## 14. 指针与内存（当前模型）
 
-指针生命周期完全照搬 C，语言不再提供任何分配/释放原语：
+指针生命周期完全照搬 C：编译器不插入任何分配/释放，也不预设销毁逻辑。
 
-- **删除 `new T{...}`**：`AST_NEW`、parser 分支、sema `ex_new`、C 后端/CIR 的
-  `CIR_EXPR_NEW` 全部移除；源码里写 `new` 会得到明确的“已移除”诊断。
-  堆分配改用 FFI：`extern lib libc from "*"; extern cfunc libc::malloc(size: usize): opaque;`
-  然后 `libc::malloc(n) as *T`，字段逐个初始化。
-- **删除 `free(p)` 内建**：`AST_FREE`、`SEMA_BUILTIN_FREE`、C 后端 `CIR_STMT_FREE`
-  与 `clux_free` 一并移除；释放改用 `libc::free(p as opaque)`，切片先
-  `data(s)` 取出指针再 `libc::free(...)`（不再支持 `free(slice)`）。
-- **删除泄漏检测分配器**：`clux_rt_*` / `clux_new` / `clux_make` /
-  `uses_alloc` / `owns_runtime` 全部移除，生成代码不再包含任何隐式分配。
-- **`make` 改为非分配视图**：`make(pointer: *T, len: usize): []T`，只把已有
-  指针 + 长度包成切片胖指针；`make(T, N, init...)`、fill 展开与自动释放不再存在。
-- **闭包 env** 仍是内联值（无独立堆块），因此无需隐式释放；捕获的裸指针按
-  “借用/所有权转移”约定由用户负责（借用由来源释放，转移由接收方释放）。
+- 分配：通过 FFI 调用 `libc::malloc`，`opaque` → `as *T`，字段逐个初始化；
+- 释放：`libc::free(p as opaque)`；切片先 `data(s)` 取指针再释放；
+- `make(pointer: *T, len: usize): []T` 只构造切片视图，不分配内存；
+- 闭包 env 是内联值（无独立堆块），捕获的裸指针按“借用/所有权转移”约定
+  由用户负责（借用由来源释放，转移由接收方释放）；
+- `defer` 只负责调用时机，不附带任何自动释放。
 
-回归：删除 new/free/make 相关用例后全量为 **1620** 个用例，**1618 通过**；
-仅两个 `Install.*` 环境相关失败为既有问题。`defer` 语义未受影响，示例与测试
-改用 `libc::malloc/free` + 数组/切片视图。
+回归：全量 **1620** 个用例，**1618 通过**；仅两个 `Install.*` 环境相关失败为
+既有问题。示例与测试使用 `libc::malloc/free` + 数组/切片视图。

@@ -26,12 +26,11 @@ void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
  * ptr_value_t { void *ptr; }（见 type_ptr.h）。
  *
  * 裸指针：编译器不追踪所有权，只有一种指针类型 *T。运行期零标志：
- * clone/dispose/cast 不按所有权分派，堆释放由显式 `free` / 生成的 FREE
- * 语句负责。
+ * clone/dispose/cast 不按所有权分派，堆释放由显式 `libc::free` 负责。
  *
  * 生命周期（运行期简化）：
  *   - clone：复制指针值（浅拷贝）
- *   - dispose：no-op（堆释放由 FREE 指令负责）
+ *   - dispose：no-op（堆释放由用户负责）
  *   - eq/ne：比较 ptr 字段
  *   - implicit_cast：身份拷贝 / 指针向上转换 / → opaque 隐式
  *   - explicit_cast：opaque → 任意指针（as，§8.4）
@@ -110,7 +109,7 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
         if (!pv->ptr) return;
         /* 指针：ptr≠NULL → 先递归销毁堆块内容（T 含指针字段时内嵌堆块
            一并释放），再释放本堆块，置 ptr=NULL 防双释放。
-           调用方（FREE 指令）保证只对拥有堆块的变量调用。 */
+           调用方负责只在拥有堆块时调用。 */
         const type_t *base = ptr_type_base(t);
         if (base && ptr_type_needs_scan(base))
             ptr_free_recursive(vm, base, pv->ptr);
@@ -146,18 +145,17 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
 
 /* 转移清空（接管辅助）：递归把 data 块内所有指针置 ptr=NULL
    （**不释放**——指针值已随 memcpy 复制进接管方堆块）。
-   供 op_new/op_construct 在成员值 memcpy 进目标块后调用，清空源对象图内
-   所有指针，防作用域退出时与接管方双释放。 */
+   供构造/接管路径在成员值复制进目标块后调用，清空源对象图内所有指针，
+   避免源与接管方重复释放。 */
 void ptr_clear_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     switch (t->kind) {
     case TYPE_KIND_PTR: {
         /* **只清指针，绝不进被指向值**（2026-10 修正）。
-           堆块现在归接管方；被指向值内部的指针也归**该堆块**（接管方持有），
-           与源无关。旧实现递归进 pointee 清内层指针，会**改写共享堆块**——
-           `new Mid{ .i = move(inner) }` 之后 `mid.i.p` 变成 NULL（实测：
-           三层链构造后读 p 报 null deref）。源侧防双释放只需要把指针置
-           NULL：源不再引用该块，销毁时跳过。 */
+           堆块归接管方；被指向值内部的指针也归**该堆块**（接管方持有），
+           与源无关。递归进 pointee 清内层指针会**改写共享堆块**——三层链
+           构造后内层指针被置空（实测 null deref）。源侧防双释放只需要把
+           指针置 NULL：源不再引用该块，销毁时跳过。 */
         ptr_value_t *pv = (ptr_value_t *)data;
         pv->ptr = NULL;
         return;
@@ -307,7 +305,7 @@ void *ptr_clone_block(vm_t *vm, const type_t *type, const void *src) {
             break;
         }
         /* 切片**总是**深拷贝缓冲区（clone 必须
-           独立）——浅拷贝会让两个切片共享同一堆块，作用域退出各 FREE 一次
+           独立）——浅拷贝会让两个切片共享同一堆块，两侧重复释放一次
            → 双释放（实测 0xC0000005）。元素内容是否递归深拷贝由**元素槽位
            元素是否递归深拷贝由元素类型决定：含闭包槽位的元素要克隆，其余只拷贝
            借用指针（借用目标不归本值所有）；含捕获闭包元素按值语义深拷贝。 */
@@ -451,14 +449,14 @@ static value_t *ptr_assign(vm_t *vm, value_t *dst, value_t *src) {
         src = casted;
     }
     if (value_is_shadow(dst) || value_is_shadow(src)) return dst;
-    /* assign 不释放旧堆块（由显式 free / 生成的 FREE 负责）。 */
+    /* assign 不释放旧堆块（由显式 libc::free 负责）。 */
     const type_t *dt = value_type(dst);
     memcpy(value_data(dst), value_data(src), dt->size);
     return dst;
 }
 
 static void ptr_dispose(vm_t *vm, value_t *v) {
-    /* dispose 不释放堆块（由 FREE 指令负责）。 */
+    /* dispose 不释放堆块（由用户通过 libc::free 负责）。 */
     (void)vm; (void)v;
 }
 

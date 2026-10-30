@@ -128,7 +128,8 @@ func main(): i32 {
         func |base| (x: i32): i32 { return base + x; };
     if (apply[func |base: i32| (i32) -> i32](f, 4) != 7) { return 1; }
 
-    var p: own *i32 = new i32{ 5 };
+    var x: i32 = 5;
+    var p: own *i32 = x.&;
     var g: own func |p: own *i32| (i32) -> i32 =
         move(func |(p = move(p))| (x: i32): i32 { return p.* + x; });
     if (apply[func |p: own *i32| (i32) -> i32](g, 4) != 9) { return 2; }
@@ -311,7 +312,7 @@ C 与 VM 都必须：无泄漏、无环境堆分配（C 代码中无 `clux_new` 
     作用域释放一次。
   C 与 VM 均通过。
 - 值拷贝优化：`__deep_clone` 只对**左值来源**（ident/member/index/deref/unwrap）
-  插入；调用/构造/new/make 产物是新实例，不再多克隆一层（否则跨模块调用
+  插入；调用/构造产物是新实例，不再多克隆一层（否则跨模块调用
   返回的闭包会被再克隆，C 侧生成的 `__deep_clone` 调用无定义）。
 - 清理：删除已无生成点的 `CIR_EXPR_CLOSURE_RELEASE` / `clux_func_release`
   no-op 宏（值里不再有 clone/dispose 函数指针，普通函数值的 FREE 是 no-op）。

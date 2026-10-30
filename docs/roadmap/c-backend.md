@@ -1,6 +1,6 @@
 # C 后端路线
 
-> **状态（2026-10）**：路线图条目保留作历史记录；`new`/`free` 与内建分配运行时（`clux_new`/`clux_make`/`clux_free`）已删除，`make` 改为 `make(pointer, len)` 视图。
+> **状态（2026-10）**：路线图条目保留作历史记录；当前指针与内存模型见 `docs/runtime-ownership.md` §14。
 
 > 本页是工程路线，不是语言规范。语言语义以 `docs/whitepaper/` 为准。
 
@@ -168,7 +168,7 @@ clux build hello.cx
 
 - 嵌套复杂布局/联合体/enum；
 - slice / str；
-- 堆分配 `new` / `make`；
+- 堆分配与切片；
 - 数组/结构体的所有权 cleanup（M4）。
 
 验收：struct/数组/指针程序退出码与 VM 后端一致。
@@ -193,7 +193,7 @@ clux build hello.cx
 
 当前支持：
 
-- `var p: own *Point = new Point{ ... };`；
+- 堆对象 `*Point` 的构造；
 - `own *T`、`own *own *T`；
 - struct 的 own 字段；
 - `[N]own *T` 的逐元素 free；
@@ -207,11 +207,11 @@ clux build hello.cx
 - union own payload 清理；
 - cunion 构造 / 成员读写 / 按值赋值；
 - `len(s)`；
-- `make(T, N, ...)`；
+- 切片数组构造；
 - `s[low:high]`；
 - slice 堆块 free；
 - 由 sema 生成的 `__destroy_*` 函数；
-- `new T{...}` 使用 `clux_new`（calloc + memcpy）。
+- 堆对象构造使用统一分配辅助函数（calloc + memcpy）。
 
 尚未覆盖：
 
@@ -504,7 +504,7 @@ clux build hello.cx
 - 测试运行器的 `mock` / `unmock`（`clux test --backend=c` 暂不支持）；
 - 测试运行器每个用例独立进程，全局变量在用例之间**不共享**（VM 运行器
   共享同一进程；依赖跨用例全局状态的测试需要显式重置）；
-- `new` bitfield（sema 目前直接拒绝）；
+- 堆上 bitfield 构造（sema 目前直接拒绝）；
 - 依赖 FFI / `import` 的 examples（`import` 仍属第一版明确不做，见下）；
 - 全量 `examples/` 与 VM 的差分校准（M7）。
 

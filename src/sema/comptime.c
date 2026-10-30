@@ -1258,7 +1258,7 @@ bool sema_eval_cunion_def(sema_t *sema, ast_cunion_def_t *cd, sema_scope_t *scop
     /* 槽位所有权读**解析期缓存**（推测轮折叠后 token 已丢失）。
        **cunion 不参与所有权运算**：无论成员类型写了什么 own/ref 修饰，
        cunion 无 tag，运行期无法判定哪个
-       member 活跃，销毁序列不为它生成 FREE，构造也不要求"own 槽位收
+       member 活跃，编译器不为它生成清理代码，构造也不要求"own 槽位收
        FATAL"。指针/切片的生命周期由开发者自负（与 C union 语义一致）。 */
     members[i].type = ft;
   }

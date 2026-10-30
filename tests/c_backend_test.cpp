@@ -43,26 +43,6 @@ std::string cli_path() {
 
 std::string q(const std::string &s) { return "\"" + s + "\""; }
 
-/* 运行可执行文件并捕获 stdout+stderr（用于泄漏检测断言）。 */
-std::string run_capture(const std::string &exe) {
-  std::string cmd = q(exe) + " 2>&1";
-#ifdef _WIN32
-  FILE *p = _popen(cmd.c_str(), "rb");
-#else
-  FILE *p = popen(cmd.c_str(), "r");
-#endif
-  if (!p) return "<popen-failed>";
-  std::string out;
-  char buf[4096];
-  size_t n;
-  while ((n = std::fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
-#ifdef _WIN32
-  _pclose(p);
-#else
-  pclose(p);
-#endif
-  return out;
-}
 
 /* 从生成的 C 文本里找出模块前缀 `clux_<4 位十六进制>_`。 */
 std::string module_prefix_in(const std::string &text) {

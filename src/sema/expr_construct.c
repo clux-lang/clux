@@ -221,9 +221,6 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
       }
     }
     fields[i].type = ft;
-    /* 匿名构造的字段槽位所有权：字段值若是将亡值（new/move/clone/
-       含 own 字段的构造），该槽位即接管所有权 → OWN；否则 NONE。
-       ref 槽位在匿名构造里由 type_expr 一侧决定，此处无显式标注 → NONE。 */
   }
 
   /* 第三遍：构造匿名 struct 类型 + 登记 sema_type（hoist 提升区） */
@@ -663,7 +660,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
           slot = &f->next;
         }
       }
-      /* `...operand` 展开先于一切字段处理（具名/匿名、new/普通构造共用）。
+      /* `...operand` 展开先于一切字段处理（具名/匿名构造共用）。
          目标类型：具名构造解析类型位；匿名构造取 anon_ct 栈顶（可能没有）。 */
       {
         const type_t *ct_target = NULL;

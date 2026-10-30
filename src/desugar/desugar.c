@@ -474,7 +474,6 @@ static void ds_walk_stmt(desugar_t *ds, ast_node_t *stmt) {
       ast_assign_t *n = (ast_assign_t *)stmt;
       ds_walk_expr(ds, n->target);
       ds_walk_expr(ds, n->value);
-      ds_walk_stmt(ds, n->destroy); /* sema 之后才可能非空，防御性覆盖 */
       break;
     }
     case AST_RETURN:

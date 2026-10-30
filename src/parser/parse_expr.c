@@ -536,7 +536,7 @@ ast_node_t *parse_primary(parser_t *p) {
 /* 类型表达式 + 可选的泛型实参后缀：`Vec[i32]`。
  *
  * 常规类型标注走 parse_expr_prec（后缀解析已含 `[`），但 `.T{...}` 与
- * `new T{...}` 的类型位用 parse_unary（只到原子），拿不到 `Vec[i32]`。
+ * 类型位用 parse_unary（只到原子），拿不到 `Vec[i32]`。
  * 这里在 parse_unary 结果上补一层"仅类型实参"的下标解析（不支持切片——
  * 类型实参位置出现切片本就是语法错误）。 */
 ast_node_t *parse_type_with_index(parser_t *p) {
@@ -734,16 +734,6 @@ ast_node_t *parse_unary(parser_t *p) {
         if (!node) return NULL;
         ((ast_typeof_t *)node)->operand = operand;
         return node;
-    }
-
-    /* `new` 已移除：堆分配交给用户 FFI（libc::malloc 等）。 */
-    if (check_keyword(p, "new")) {
-        uint32_t nb = p->pos;
-        advance(p);
-        return ast_error_new(p->diag, p->tokens, p->arena, nb, p->pos,
-                             "'new' was removed: clux has no built-in heap "
-                             "allocation; allocate via libc::malloc and "
-                             "initialize the fields explicitly");
     }
 
     if (!op_tok) return parse_primary(p);

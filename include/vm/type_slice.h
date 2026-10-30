@@ -54,7 +54,7 @@ static inline const type_t *slice_type_elem(const type_t *t) {
 
 /**
  * 切片值（data 块布局）：胖指针 { ptr, len }。
- *   - ptr：元素序列首地址（堆块由创建者/显式 free 管理）
+ *   - ptr：元素序列首地址（堆块由创建者/显式 libc::free 管理）
  *   - len：元素数量（u64）
  *
  * size = sizeof(slice_value_t) = 2 * sizeof(void*)，type_slice_seal 设定。

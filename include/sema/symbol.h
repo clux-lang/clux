@@ -147,7 +147,7 @@ struct _sema_symbol_t {
   bool is_noreturn;   /* `[[noreturn]]` 函数：调用表达式永不正常返回 */
   bool declared;      /* Pass 3b 是否已走到**定义点**（局部变量：3a 预注册全部块内
                          变量，但 3b 按源序逐个处理定义）。销毁收集
-                         （make_free_stmts）只包含已声明的变量——否则提前 return
+                         只包含已声明的变量——否则提前 return
                          的路径会销毁**后面才声明**的变量（字节码 PUSH 一个尚未
                          DEFINE 的名字 → 运行期 "undefined variable"）。 */
   bool is_capture;    /* 本符号是**闭包捕获**（`func |caps|` 的捕获槽，含括号捕获

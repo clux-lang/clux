@@ -42,7 +42,7 @@ comptime const    continue  cunion    default   defer     do
 else     enum     export    extends   extern    f32       f64
 false    fatal    for       foreach   from      func      i8
 i16      i32      i64       if        implements import   interface
-is       len      lib       make      move      new       nil
+is       len      lib       make      move      nil
 of       opaque   own       ref       return    share     sizeof
 str      struct   switch    true      type      typeof    u8
 u16      u32      u64       union     undefined usize     var

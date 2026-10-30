@@ -22,8 +22,8 @@ typedef struct {
     bool        is_comptime; /* comptime var：右值必须编译期可计算，引用点折叠为常量 */
 
     /* sema 写入：该变量/捕获槽解析后的**实际类型**（可为 NULL）。
-     * 用于闭包捕获槽的 FREE 判定（stmt_destroy make_free_stmts）——捕获槽
-     * 类型不在 AST 里（推断捕获无 type_expr），需要 type 对象判断是否为闭包值。 */
+     * 用于闭包捕获槽的类型判定——捕获槽类型不在 AST 里（推断捕获无
+     * type_expr），需要 type 对象判断是否为闭包值。 */
     const struct type_t *resolved_type;
 
 

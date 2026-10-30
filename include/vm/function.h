@@ -54,7 +54,7 @@ struct func_t {
 
     /* 闭包的**捕获聚合类型**（struct；NULL = 无捕获/非闭包）。由
        `SET_FUNC_CAPTURES <type_id>` 在 hoist 注册函数对象时写入，实例化时
-       复制。VM 层据此把闭包当聚合值处理：clone 深拷贝捕获、free 按槽位
+       复制。VM 层据此把闭包当聚合值处理：clone 复制捕获、字段读写按槽位
        所有权释放、字段读写按槽位类型。 */
     const struct struct_type_t *capture_type;
 
@@ -66,7 +66,7 @@ struct func_t {
 
     /* true = env 指向**函数对象分配块内部**的内联捕获块（`func_instantiate_raw`
        把 `sizeof(bcode_function_t) + env_size` 一次分配，env = 块尾）：随函数
-       对象一起释放，FREE/销毁路径不得再 `allocator_free(env)`。
+       对象一起释放，销毁路径不得再 `allocator_free(env)`。
        false = env 是独立堆块（hoist 基底对象的兜底分配）或 NULL。 */
     bool            env_inline;
 

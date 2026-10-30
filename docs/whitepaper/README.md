@@ -47,7 +47,7 @@ clux 是一门静态类型、编译期可计算、显式所有权、无 GC 的�
 | [04 语句](04-statements.md) | 变量、赋值、控制流、defer、块 |
 | [05 表达式](05-expressions.md) | 运算符、调用、构造、类型运算、所有权操作 |
 | [06 泛型](06-generics.md) | 类型参数、值参数、参数包、约束、实例化 |
-| [07 所有权](07-ownership.md) | own/ref/fatal/share/weak、move/clone/free、清理 |
+| [07 所有权](07-ownership.md) | own/ref/fatal/share/weak、move/clone、清理 |
 | [08 模块](08-modules.md) | import/export/reexport、包、extern |
 | [09 元信息](09-metadata.md) | `[[metadata]]`、类型装饰器、读取 API |
 | [10 位域](10-bitfields.md) | bitfield 布局与访问 |
