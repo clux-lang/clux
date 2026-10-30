@@ -40,8 +40,8 @@
 
 /* ---- 生命周期：clone / assign / dispose ---- */
 
-/* 结构体字段禁止携带指针/切片（sema 保证），因此结构体永远不含 own 资源——
-   clone/dispose 全部走平凡 memcpy 路径，无需字段级递归释放/深拷贝。 */
+/* 结构体按整块 memcpy 复制：字段中的指针/切片由开发者显式管理，
+   编译器不做字段级深拷贝。 */
 
 static value_t *struct_clone(vm_t *vm, value_t *v) {
     if (value_is_shadow(v))
@@ -74,8 +74,7 @@ static value_t *struct_assign(vm_t *vm, value_t *dst, value_t *src) {
 }
 
 static void struct_dispose(vm_t *vm, value_t *v) {
-    /* 结构体字段禁止携带指针/切片——无 own 堆块需递归释放。
-       data 块本身由 value_dispose 统一释放。 */
+    /* 无字段级自动释放；data 块本身由 value_dispose 统一释放。 */
     (void)vm; (void)v;
 }
 
@@ -161,8 +160,7 @@ static value_t *struct_implicit_cast(vm_t *vm, value_t *v, const type_t *target)
     if (!target || !struct_type_compatible(vm, target, value_type(v)))
         return value_make_error(vm, "struct: implicit cast only within same struct");
     if (value_is_shadow(v)) return value_make_shadow(vm, target);
-    /* 结构体字段禁止携带指针/切片——平凡 memcpy 即可（无内嵌 own 堆块
-       需深拷贝/清空）。 */
+    /* 平凡 memcpy（字段中的指针按原样复制）。 */
     void *data = value_alloc_data_copy(vm->alloc, target, value_data(v));
     return value_make(vm, target, data);
 }
@@ -668,8 +666,7 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
 }
 
 /* 带指定 ownership 的 struct intern：复制 base 的字段表 + 嵌入表，密封为
- * 新的 struct_type_t（与 base 同布局）。所有权已迁移到值层，类型层恒为
- * OWN_NONE；保留 ownership 参数仅为兼容既有调用方签名，不再写入类型。
+ * 新的 struct_type_t（与 base 同布局）。
  *
  * **布局与 base 完全相同**（size/align/字段偏移逐字相同）。
  *

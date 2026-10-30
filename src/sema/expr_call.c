@@ -114,11 +114,6 @@ static bool ffi_arg_acceptable(sema_t *sema, const type_t *pt_raw,
            /* C 函数指针（cfunc(...)）在 C 里就是裸指针：老声明把它写成
               `opaque`（如 `cb: opaque`）时仍要能接受 `cfunc_ptr(f)`。 */
            type_kind_of(at) == TYPE_KIND_CFUNC ||
-           /* 所有权迁移：at 是形参/实参类型（无对应 value），at->ownership
-              恒为 OWN_NONE——切片不再经 ownership 放行进 opaque，只靠
-              type_is_ptr/type_is_slice 的 kind 判定。保留 false 分支待
-              值层 ownership 接入 FFI 实参匹配。 */
-           (type_is_slice(at) && false) ||
            type_kind_of(at) == TYPE_KIND_STR;
   if (pt == sema->vm->type_str) return at == sema->vm->type_str;
   /* C 函数指针形参（`cfunc(...)`）：接受同型 cfunc、`opaque` 与各种指针
@@ -409,9 +404,7 @@ static bool sema_expand_spread_args(sema_t *sema, ast_call_t *call,
         *slot = a->next;
       }
       continue;
-    }
-    /* `...args`（类型参数包）：编译期展开为隐藏形参；含 own 槽位的元素
-       自动 move 交出所有权。 */
+    }    /* `...args`（类型参数包）：编译期展开为隐藏形参（按值传递）。 */
     if (op && op->kind == AST_IDENT &&
         sema_generic_pack_is_param(sema,
                                   ((ast_ident_t *)op)->name)) {
@@ -1534,10 +1527,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                    "free() must be used as a statement");
         return val_void(sema);
       }
-
-      /* take(x)：运行时移出 optional payload 并置 nil。
-         - ?T（普通）        -> T
-         - ?own T / 含 own 槽位 -> fatal T（strip own 后加 fatal） */
+      /* take(x)：运行时移出 optional payload 并置 nil，结果类型 T。 */
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_TAKE) {
         if (argc != 1 || !arg_shadows[0]) {
           diag_error(sema->diag, sema_loc(sema, &call->base),

@@ -134,7 +134,7 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
           没有 env 的话编码出来的常量只有 func_id，运行期调用会报
           "closure has no captures"。
        —— 捕获类型此时由**捕获值的类型**就地合成（sema 的 Pass 3b 尚未跑到字面量，
-          n->capture_type_id 还是 0）；稍后 sema 按同样字段（名/类型/OWN_NONE）
+          n->capture_type_id 还是 0）；稍后 sema 按同样字段（名/类型）
           重算会**去重**到同一个 struct 类型。捕获名两端一致，SET_CLOSURE 的
           字段偏移因此不会错位。
        —— 捕获值必须是编译期常量（编码阶段 sema_ct_encode 递归校验）；

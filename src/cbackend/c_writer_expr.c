@@ -350,17 +350,10 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, " }");
         break;
     case CIR_EXPR_FUNC_CLONE:
-        /* 含 own 捕获：静态 clone 辅助函数（env 逐字段深拷贝）；否则浅拷贝。 */
-        if (e->text) {
-            cw_put(sb, e->text);
-            cw_put(sb, "(");
-            cw_write_expr(sb, e->lhs);
-            cw_put(sb, ")");
-        } else {
-            cw_put(sb, "(");
-            cw_write_expr(sb, e->lhs);
-            cw_put(sb, ")");
-        }
+        /* 闭包值按值拷贝（env 内联在值里，C 的 struct 赋值即复制）。 */
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->lhs);
+        cw_put(sb, ")");
         break;
     case CIR_EXPR_NEW:
         cw_put(sb, "(");

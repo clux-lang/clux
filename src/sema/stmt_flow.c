@@ -129,11 +129,6 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     bool v_bad = value_is_error(sema->vm, v) ||
                  value_is_type(v, TYPE_KIND_VOID);
     if (!v_bad) {
-      /* 直接 return 一个含 own 槽位的构造临时：自动包一层 move，把
-         构造产物从 OWN 转为 FATAL 交给调用方（C 后端等价于直接返回
-         临时对象的字节）。 */
-    }
-    if (!v_bad) {
       if (!sema->fn.return_type) {
         diag_error(sema->diag, sema_loc(sema, rt->value),
                    "void function cannot return a value");

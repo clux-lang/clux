@@ -303,9 +303,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       }
     }
   }
-
-  /* take(x)：optional payload 移出（?T -> T；?own T -> fatal T）。纯 sema/
-     compiler 指令，不注册 VM 函数。 */
+  /* take(x)：optional payload 移出（?T -> T）。纯 sema/compiler 指令。 */
   {
     const type_t *tsig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_opaque, true);

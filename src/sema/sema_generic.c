@@ -428,8 +428,7 @@ static ast_node_t *generic_decorated_forward_body(
     return blk;
 }
 
-/* 参数包元素是否需要显式 move 才能离开形参：own/fatal 修饰，或内部有
-   own 槽位（fatal 是值状态，类型层可能只体现为 own/own slots）。 */
+/* 参数包元素表达式（隐藏形参名）。 */
 ast_node_t *sema_generic_pack_arg_expr(sema_t *sema,
                                        const sema_generic_instance_t *inst,
                                        size_t index, uint32_t tb, uint32_t te) {
@@ -1825,7 +1824,7 @@ static const type_t *build_union_instance(sema_t *sema, ast_union_def_t *ud,
 
 static const type_t *build_alias_instance(sema_t *sema, ast_type_def_t *td,
                                           sema_generic_instance_t *inst) {
-    /* 先走 CTFE：泛型别名 RHS 里可能出现 `T extends PATTERN ? fatal T : T`
+    /* 先走 CTFE：泛型别名 RHS 里可能出现 `T extends PATTERN ? A : B`
        这类类型计算，只有 CTFE 能折叠（resolve_type_expr 只认静态构造）。 */
     ctfe_ctx_t ctx;
     memset(&ctx, 0, sizeof ctx);
@@ -2485,7 +2484,7 @@ static void infer_bind(sema_t *sema, infer_t *b, size_t idx,
 static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
                           const type_t *actual, const ast_node_t *site);
 
-static void infer_ownership_wrapped(sema_t *sema, infer_t *b, ast_node_t *pat,
+static void infer_pattern_ptr_slice(sema_t *sema, infer_t *b, ast_node_t *pat,
                                     const type_t *actual,
                                     const ast_node_t *site) {
     if (!pat || !actual || !b || b->failed) return;
@@ -2541,7 +2540,7 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
     }
     case AST_PTR:
     case AST_SLICE_TYPE:
-        infer_ownership_wrapped(sema, b, pat, actual, site);
+        infer_pattern_ptr_slice(sema, b, pat, actual, site);
         return;
     case AST_ARRAY: {
         ast_array_t *a = (ast_array_t *)pat;

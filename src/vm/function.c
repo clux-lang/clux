@@ -107,13 +107,9 @@ void func_destroy(allocator_t *alloc, func_t **pfn) {
         allocator_free(alloc, (void **)&np);
         fn->name = (strslice_t){ NULL, 0 };
     }
-    /* 闭包 env 块（捕获结构体实例）：先按 capture_type 的槽位所有权清理残留
-       （sema 生成的 `FREE f.<cap>` 已把 own 捕获槽置 NULL，这里只兜底），
-       再释放块本体。 */
+    /* 闭包 env 块（捕获结构体实例）：释放块本体。 */
     if (fn->env) {
-        /* env 块的**内嵌 own 槽位**由 sema 生成的 FREE 负责；这里只兜底释放
-           env 块本体（函数对象销毁时其 data 已不可达）。内联 env 属于函数
-           对象分配块，随下面的 allocator_free(pfn) 一起释放。 */
+        /* 非内联 env 是独立堆块；内联 env 属于函数对象分配块，随\n           allocator_free(pfn) 一起释放。 */
         if (!fn->env_inline) allocator_free(alloc, &fn->env);
         else fn->env = NULL;
     }

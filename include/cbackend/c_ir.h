@@ -54,9 +54,6 @@ typedef struct cir_type {
     bool            is_bitfield;
     size_t          bit_word_bits;
     bool            needs_bf_make; /* 需要按类型生成 clux_bf_make_* 辅助函数 */
-    /* 闭包类型：深拷贝整个闭包值的 C 辅助函数名（`<sig> <name>(<sig>)`）。
-       仅当捕获槽位含 own 资源时生成；NULL = 浅拷贝即可。 */
-    const char     *closure_clone;
     struct cir_type *next;
 } cir_type_t;
 

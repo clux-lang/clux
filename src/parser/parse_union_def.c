@@ -1,5 +1,5 @@
 #include "parser/ast_union_def.h"
-#include "parser/ast_var_def.h"  /* ast_type_expr_ownership_code */
+#include "parser/ast_var_def.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_struct_def.h"

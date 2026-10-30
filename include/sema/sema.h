@@ -135,7 +135,7 @@ struct module_t;              /* vm/module.h；跨模块实例归属 */
  * - loop_depth: 循环嵌套深度（0 = 不在循环中），break/continue 位置检查用
  */
 typedef struct sema_fn_ctx_t {
-    const type_t   *return_type; /* 返回所有权编码在这个类型里 */
+    const type_t   *return_type; /* 当前函数的返回类型（NULL = void） */
     ast_func_def_t *def;
     bool            walking_comptime;
     sema_scope_t   *local_func_base;
@@ -212,10 +212,6 @@ typedef struct sema_t {
        调用点 callee 标志、循环深度）。字段语义见 sema_fn_ctx_t 文档。 */
     sema_fn_ctx_t fn;
 
-  /* >0 表示"当前正在解析所有权修饰符（own/ref/fatal）的 base 类型"：
-     AST_PTR / AST_OWNED_TYPE 的 base 位置允许 `opaque`；裸 `opaque` 是
-     指针缺少所有权修饰（opaque 是 `void *` 语义），必须报错。 */
-  size_t        opaque_base_ctx;
   /* comptime foreach 展开的临时变量序号（__cfcN）。 */
   uint32_t      foreach_seq;
 

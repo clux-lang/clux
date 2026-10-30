@@ -372,7 +372,7 @@ value_t *ex_new(sema_t *sema, ast_node_t **node,
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
-            const type_t *ft = option_field_type_normalized(sema, value_type(fv));
+            const type_t *ft = value_type(fv);
             if (ft != t && !option_inner_type_ok(inner, ft)) {
               char tn[64], fn[64];
               sema_type_name(t, tn, sizeof tn);

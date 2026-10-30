@@ -573,12 +573,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                     type_kind_of(type_strip_quals(t)) == TYPE_KIND_STRUCT) {
                     ast_construct_t *cc = (ast_construct_t *)vd->init;
                     const type_t *decl = t;
-                    const type_t *own = cc->type
+                    const type_t *ctor_type = cc->type
                                             ? sema_resolve_type_slot(
                                                   lc->sema, &cc->type)
                                             : NULL;
                     if (type_strip_quals(decl) !=
-                        (own ? type_strip_quals(own) : NULL)) {
+                        (ctor_type ? type_strip_quals(ctor_type) : NULL)) {
                         ast_node_t *ref =
                             sema_gen_type_ref(lc->sema, type_strip_quals(t));
                         if (ref) {
@@ -875,12 +875,12 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                         type_kind_of(type_strip_quals(rtt)) ==
                             TYPE_KIND_STRUCT) {
                         ast_construct_t *cc = (ast_construct_t *)r->value;
-                        const type_t *own =
+                        const type_t *ctor_type =
                             cc->type ? sema_resolve_type_slot(
                                            lc->sema, &cc->type)
                                      : NULL;
                         if (type_strip_quals(rtt) !=
-                            (own ? type_strip_quals(own) : NULL)) {
+                            (ctor_type ? type_strip_quals(ctor_type) : NULL)) {
                             ast_node_t *ref = sema_gen_type_ref(
                                 lc->sema, type_strip_quals(rtt));
                             if (ref) {

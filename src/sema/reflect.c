@@ -143,7 +143,7 @@ bool sema_reflect_needs_index(const type_t *T, strslice_t key) {
     const type_t *sub = type_qualifier_sub(T);
     return sub ? sema_reflect_needs_index(sub, key) : key_has_index(key);
   }
-  /* 数组 / 切片的 elem_type、elem_ownership **不带索引**（元素类型唯一定义）；
+  /* 数组 / 切片的 elem_type **不带索引**（元素类型唯一定义）；
      元组的同名 key 按索引取第 i 个元素类型。 */
   if (type_kind_of(T) == TYPE_KIND_ARRAY || type_is_slice(T)) {
     if (key_is(key, "elem_type")) return false;
@@ -202,7 +202,7 @@ static const char *kind_keys(const type_t *T) {
     return "name, size, align, kind, param_count, param_type(i), "
            "return_type, is_variadic, is_c_abi";
   case TYPE_KIND_ARRAY:
-    return "name, size, align, kind, elem_type, elem_ownership, len";
+    return "name, size, align, kind, elem_type, len";
   case TYPE_KIND_SLICE:
     return "name, size, align, kind, elem_type";
   case TYPE_KIND_PTR:

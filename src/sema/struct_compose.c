@@ -442,11 +442,8 @@ sema_compose_result_t sema_struct_compose_def(sema_t *sema, ast_struct_def_t *sd
           break;
         }
       }
-      /* 注：原先这里禁止"结构体字段携带指针/切片"。该限制现已**放开**——
-         所有权与类型解耦后，字段的 own/ref 由 `struct_field_t::ownership`
-         记录（类型描述的一部分），销毁序列由 sema 按 type 对象生成：
-         只有 own 槽位进销毁序列，ref 槽位不进。因此 ref 字段不再有
-         "被误当作 own 释放"的风险。 */
+      /* 结构体字段可以携带指针/切片：编译器不追踪所有权，字段指向的堆块
+         由开发者显式释放。 */
       ftype[i] = ft;
       fname[i] = sf->name;
     }

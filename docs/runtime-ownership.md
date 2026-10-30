@@ -257,7 +257,32 @@ Phase 2 开始实现 `__init__` / `__assign__` / `__dispose__`。
   `__destroy_<T>` 合成、`capture_clone_kind` 深拷贝判定删除；`FREE` 仍负责
   闭包 env / 显式 free；
 - 解析层：AST 指针/切片节点的 `ownership` token 字段与 `AST_OWN_*` 编码、
-  未再生成的 `AST_MOVE` 节点删除。
+  未再生成的 `AST_MOVE` 节点删除；`extends` pattern 里的
+  `own/ref/fatal/share/weak` 前缀改为与类型语法一致的"已移除"诊断。
+
+## 13. 阶段 3b：内部生成器与死节点清理（2026-10）
+
+阶段 3 之后，编译器里只剩"没有任何产生路径"的生成器与直接形态节点，本阶段
+一并删除：
+
+- **生成的 clone 函数**整条子系统（`__clone_*` / `__cloneptr_*` /
+  `__cloneslice_*`、`sema_clone_fn_t` 注册表、`sema_gen_clone*` /
+  `sema_find_clone_fn` / `sema_attach_clone_fns`）：`clone()` 已从语言移除，
+  仅保留运行期 `__deep_clone` 用于闭包值拷贝；
+- **死直接形态 AST 节点**：`AST_CLONE`、`AST_TAKE_SLOT`、`AST_IS_TAG`、
+  `AST_OPT_IS_SOME`、`AST_FOR_INDEX` 及其 C 后端 / CIR lowering、walker 与
+  名字表；用户 `is` 与 `nil` 比较继续走既有的 `AST_BINARY` lowering；
+- `stmt_destroy.c` 收缩为"闭包 env 的 FREE 生成"（`gen_destroy` / 销毁函数
+  注册表 / `gen_destroy_slot` 等全部删除）；
+- 槽位级所有权谓词的最后残留（`type_contains_ptr_or_slice`、comptime 的
+  `type_contains_own` 全局 own 检查）删除；
+- VM 侧未使用 API（`scope_untrack`、test-mode cleanup names、
+  `value_alloc_data_own` / `value_own_copy_into` 包装）删除，`ptr_free_owned_*`
+  等所有权命名改为中性名（`ptr_free_recursive` / `ptr_clear_recursive`）。
+
+注意：**`defer` 是正常语法，不在清理范围内**——解析、`desugar_defers` 展开、
+CTFE 执行、C 后端 lowering、fmt 与 VM 的 defer 注册/异常展开调用全部保留，
+defer 相关用例（含 `Foreach`/`Desugar`/`Fmt`）保持通过。
 
 回归：全量测试 **1631** 个用例（2 个 `Install.*` 环境相关失败为既有问题，
 与所有权无关），行为与阶段 1 一致。

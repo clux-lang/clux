@@ -63,8 +63,8 @@ typedef struct vm_t {
     /* ---- optional 修饰类型池（按 inner 去重 intern，vm 拥有生命周期） ---- */
     vec_t *option_types;   /* option_type_t*，元素为 optional 修饰类型 */
 
-    /* ---- 指针类型池（按 base_type + 所有权 kind 去重 intern，vm 拥有生命周期） ---- */
-    vec_t *ptr_types;      /* ptr_type_t*，元素为 own/ref/fatal 指针类型 */
+    /* ---- 指针类型池（按 base_type 去重 intern，vm 拥有生命周期） ---- */
+    vec_t *ptr_types;      /* ptr_type_t*，元素为指针类型 */
 
     /* ---- 数组类型池（按 elem_type + length 去重 intern，vm 拥有生命周期） ---- */
     vec_t *array_types;    /* array_type_t*，元素为数组类型 */
@@ -84,8 +84,8 @@ typedef struct vm_t {
     /* ---- C 语义 union 类型池（按 member 表内容去重 intern，vm 拥有生命周期） ---- */
     vec_t *cunion_types;   /* cunion_type_t*，元素为 C 语义 union 类型 */
 
-    /* ---- 切片类型池（按 elem_type + 所有权 kind 去重 intern，vm 拥有生命周期） ---- */
-    vec_t *slice_types;    /* slice_type_t*，元素为 own/ref/fatal 切片类型 */
+    /* ---- 切片类型池（按 elem_type 去重 intern，vm 拥有生命周期） ---- */
+    vec_t *slice_types;    /* slice_type_t*，元素为切片类型 */
 
     /* ---- 类型 id 表（id → type_t*，LOAD_TYPE <id> 查表压栈） ---- */
     /* 内建类型固定 id 0..14（vm_init_builtins 登记）；**程序类型 id 由本 VM

@@ -25,11 +25,8 @@ static void func_dispose(vm_t *vm, value_t *v) {
 /* ---- clone ---- */
 
 static value_t *func_clone(vm_t *vm, value_t *v) {
-    /* 函数值按**指针**clone（共享函数对象/实例）。
-       显式 `clone(f)` 的深拷贝由 sema 折叠为 `__deep_clone` → ptr_clone_block
-       的 FUNC 分支（新建实例 + env vtable 克隆）；不能在这里无条件深拷贝：
-       `move(f)` 在运行期就是字节拷贝（所有权纯编译期），深拷贝会让被移走的
-       源实例无人释放（实测 own 捕获 move 进聚合后泄漏 4 字节）。 */
+    /* 函数值按**指针** clone（共享函数对象/实例）：闭包值复制不在运行期
+       无条件深拷贝 env，来源与目标共享实例即可。 */
     const func_t *fn = *(const func_t **)value_data(v);
     void *data = value_alloc_data_copy(vm->alloc, value_type(v), &fn);
     return value_make(vm, value_type(v), data);
@@ -74,9 +71,7 @@ static value_t *func_shadow_call(vm_t *vm, const type_t *ct,
         return value_make_error(vm, "func call: function has no signature");
     }
     const func_sig_t *sig = &((const func_type_t *)ct)->sig;
-    /* 192：最长的诊断（"argument N: cannot copy a value holding owned resources
-       into parameter of type <类型名> (use move() or clone(), or declare the
-       parameter as 'ref *T' to borrow)"）在类型名较长时约 150 字符。 */
+    /* 诊断缓冲：容纳 "argument N: cannot convert <类型名> to <类型名>"。 */
     char msg[192];
 
     /* 参数数量校验（非 variadic 必须精确匹配；variadic 至少 param_count） */
@@ -304,15 +299,7 @@ const vtable_t VTABLE_FUNC = {
 /* func type 构造（与 array type 统一：push 入池 + 压栈 + 分步 set + seal） */
 /* ================================================================ */
 
-/* 比较两签名是否等价（按 params/return_type/is_variadic 指针比较去重） */
-/* 签名相等：类型之外的**所有权**也必须一致。
- *
- * 为什么必须比较 ownership：函数类型在结内去重（intern），签名是函数值的
- * **类型身份**。`func(a: ref *T)` 与 `func(a: own *T)` 的形参类型相同（所有权
- * 是编译期属性、不进类型），若去重时忽略 ownership，两者会共享同一个签名实例，
- * 随后 pass 3a 从签名读回的 ownership 就是"先建成的那一个"——实测：先出现
- * `ref *T` 形参函数后，`own *T` 形参函数会被当成 ref → 形参不生成 FREE →
- * 每次调用泄漏一个堆块（`leak_split.cx` 形态）。返回类型的所有权同理。 */
+/* 签名相等：形参类型、返回类型、variadic 三者逐位一致。 */
 static bool func_sig_eq(const func_sig_t *a, const func_sig_t *b) {
     if (!a || !b) return false;
     if (a->param_count != b->param_count) return false;

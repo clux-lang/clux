@@ -351,12 +351,12 @@ static inline type_kind_t type_kind_of(const type_t *t) {
     return t ? t->kind : TYPE_KIND_VOID;
 }
 
-/** 类型是否为指针（TYPE_KIND_PTR；穿透 own/ref/fatal 修饰）。 */
+/** 类型是否为指针（TYPE_KIND_PTR）。 */
 static inline bool type_is_ptr(const type_t *t) {
     return type_kind_of(t) == TYPE_KIND_PTR;
 }
 
-/** 类型是否为切片（TYPE_KIND_SLICE；穿透 own/ref/fatal 修饰）。 */
+/** 类型是否为切片（TYPE_KIND_SLICE）。 */
 static inline bool type_is_slice(const type_t *t) {
     return type_kind_of(t) == TYPE_KIND_SLICE;
 }
@@ -466,23 +466,12 @@ bool type_has_const(const type_t *t);
 
 /**
  * 类型是否为指针或切片（TYPE_KIND_PTR / TYPE_KIND_SLICE）。
- * 用于"复合类型字段不得携带指针/切片"的检查——恢复到只有普通指针的场景：
- * 指针和切片只能出现在变量声明/参数/返回值等顶层位置，不能嵌进 struct/tuple/
- * array/union/option 的字段或元素。
+ * 用于递归扫描判定（ptr_type_needs_scan）。
  */
 static inline bool type_is_ptr_or_slice(const type_t *t) {
     type_kind_t k = type_kind_of(t);
     return k == TYPE_KIND_PTR || k == TYPE_KIND_SLICE;
 }
-
-/**
- * 类型是否（**递归**）含指针或切片——顶层是指针/切片，或 struct/tuple/union/
- * cunion 的任一字段/元素/member、option 内层、数组元素含指针或切片。
- *
- * 用于"复合类型字段不得携带指针/切片"的编译期检查：struct/tuple/array/union/
- * option 的每个字段/元素类型如果递归含指针或切片，sema 报编译错误。
- */
-bool type_contains_ptr_or_slice(const type_t *t);
 
 /** 聚合内部是否含**带捕获的闭包槽位**（按值嵌套递归；FUNC 自身 = 有捕获）。
  *  闭包值拷贝必须深拷贝这些槽位的 env（值语义）。 */

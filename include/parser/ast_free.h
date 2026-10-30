@@ -1,5 +1,6 @@
 #ifndef _H_CLUX_PARSER_AST_FREE_
 #define _H_CLUX_PARSER_AST_FREE_
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,38 +10,21 @@ extern "C" {
 #include "core/arena.h"
 
 /**
- * AST_FREE：**释放表达式所指的堆块**——语义上是 `FREE <expr>`。
+ * AST_FREE：**释放表达式所指的堆块**（`free(expr)`；作用域退出时释放闭包
+ * env 也走同一节点）。
  *
- * 分两层，注意区分：
- * - **语义层**：`FREE <expr>`，`expr` 求值得到要释放的指针/值。
- * - **字节码层**：`FREE` 指令无操作数，只消费**栈顶**。
- *   所以 compiler 先编译 `expr` 压栈，再发 `BCODE_FREE`。
+ * C 后端对每个操作数生成一次 `clux_free(...)`（切片先取 data），运行期不做
+ * 类型递归。
  *
- * 目前只有简单指针，sema 生成的 `expr` 就是变量引用（`AST_IDENT` →
- * `BCODE_PUSH <name>`），于是字节码是 `PUSH <name>` + `FREE`。
- * **将来复杂类型**由 sema 按类型展开（optional→判断 / 数组·切片→循环 /
- * tuple→get_index / struct→get_field），生成的仍是本节点 + 对应 expr
- * ——**compiler 不需要知道任何类型结构**。
- *
- * 为什么不在 compiler 里按名字拼 PUSH：那会把"释放什么"的构造逻辑锁在
- * compiler 层，未来按类型展开时无法复用，且与其它类型的释放形式冲突。
- *
- * `operand` 是操作数表达式**兄弟链**的链首（与 `ast_node_t::defers` 同款
- * 约定），用于组合式释放（如"释放这个结构体里的一批 own 槽位"）。
- * 单个释放时它就是一条链。
- *
- * 不出现在用户源码中——由 sema 在作用域退出点（块尾 / return /
- * break / continue）自动生成。调用方保证只对 **own** 目标生成。
+ * `operand` 是操作数表达式**兄弟链**的链首，用于组合式释放（一次释放多个
+ * 槽位）。不出现在用户源码中——由 sema 在作用域退出点（块尾 / return /
+ * break / continue）为闭包变量生成；指针/切片的显式 `free(p)` 内建也产本节点。
  */
 typedef struct {
     ast_node_t  base;
     ast_node_t *operand;  /* 操作数表达式兄弟链链首（释放它所指的块） */
-    /* **递归释放**：自引用类型（链表/树）的类型展开在编译期无法穷尽——
-       该边退化为运行期递归（`FREE_RECURSIVE`：按槽位所有权递归释放被指向值
-       的 own 槽位，再释放块本体）。普通类型保持逐槽位静态展开（flat）。 */
-    bool         recursive;
-    /* sema/raw 模式可填：显式释放表达式的类型（切片→取 data，指针→直接）。
-       旧所有权路径不填，C 后端回退到 infer_expr_type。 */
+    /* sema 可填：显式释放表达式的类型（切片→取 data，指针→直接）。
+       未填时 C 后端回退到 infer_expr_type。 */
     const struct type_t *type;
 } ast_free_t;
 

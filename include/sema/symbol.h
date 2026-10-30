@@ -57,10 +57,10 @@ typedef enum {
   SEMA_BUILTIN_LEN,       /* len(s) -> usize（序列元信息） */
   SEMA_BUILTIN_DATA,      /* data(s) -> ref *T（取首元素指针，C ABI 适配；专用指令） */
   SEMA_BUILTIN_CFUNC_PTR, /* cfunc_ptr(f) -> opaque（clux 函数 → C 函数指针） */
-  SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v) -> 同类型 fatal（对象图深拷贝兜底） */
+  SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v)：闭包 env 深拷贝 */
   SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
-  SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T / fatal T（移出 optional payload） */
-  SEMA_BUILTIN_FREE,       /* free(p)（raw-pointer 迁移期：释放指针/切片） */
+  SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T（移出 optional payload） */
+  SEMA_BUILTIN_FREE,       /* free(p)：释放指针/切片堆块 */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */
@@ -152,32 +152,11 @@ struct _sema_symbol_t {
                          的路径会销毁**后面才声明**的变量（字节码 PUSH 一个尚未
                          DEFINE 的名字 → 运行期 "undefined variable"）。 */
   bool is_capture;    /* 本符号是**闭包捕获**（`func |caps|` 的捕获槽，含括号捕获
-                         的参数槽）。捕获值**不可 move**：捕获作用域由闭包的所有
-                         调用共享，move 进去的 TDZ 无法恢复，第二次调用读到已转移
-                         的槽位。由 resolve_func_captures 在解析捕获时置位
+                         的参数槽）。由 resolve_func_captures 在解析捕获时置位
                          （那里的符号可能没有 own_scope，所以不能靠作用域反查）。 */
-  /* 已废弃（2026-10 闭包 = 捕获聚合结构体重构）：闭包销毁改为单个 `FREE f`，
-     VM 按 `capture_type` 的槽位所有权释放 env 里的 own 捕获——不再需要在
-     sema 里枚举捕获表（那也无法覆盖 `var f = clone(g)` 这种非字面量初始化）。
-     字段保留占位，待后续清理；新代码不要读写它。 */
-  ast_node_t *closure_captures;
-  /* 定义所在作用域（§5 逃逸检查锚点解析用）：变量定义时记录所在 sema
-     作用域。作用域标注 '<p> ref *T 中的 p 解析为符号后，其 own_scope 即
-     锚点作用域——与持有 ref 的变量的定义作用域做嵌套比较（ref 存活 ≤
-     锚点存活，防悬垂）。仅变量符号有意义。 */
+  /* 定义所在作用域：变量定义时记录所在 sema 作用域。用于捕获/局部函数的
+     "引用点是否在函数自身子树内"判定（expr_ops 的函数自身符号检查）。 */
   sema_scope_t *own_scope;
-  /* §5 作用域标注集合（重绑定逃逸校验用）：显式标注（'<p> ref *T）时
-     记录 names/count；未标注的顶层 ref 推断为定义作用域（annot_count=0，
-     重绑定时按 own_scope 作锚点）。重绑定 r = q 时用新借源 q 的 own_scope
-     对此集合做逃逸比较。仅变量符号有意义。 */
-  strslice_t *annot_names;
-  size_t      annot_count;
-  /* 注：原 `borrow_set[]` / `borrow_set_count`（§5 聚合类型的多源借源集合）
-     已删除——它服务的"含 ref 字段的聚合赋值作用域检查"随复合类型禁止携带
-     指针/切片而不可达，整条机制（borrow_collect / borrow_set_add /
-     borrow_src_anchor_scope）一并移除。顶层 ref 的单源借源仍由下面的
-     `borrow_src` 表达，不受影响。
-     将来恢复含指针的聚合时，按扁平槽位表重新设计多源借源。 */
 
   /* ---- 路径窄化已移除（2026-09-20）：.? / .! 解包方案取代 flow 窄化记录。
      符号级窄化状态（narrow 字段）与 narrow_collect/walk_if 窄化应用已删除——

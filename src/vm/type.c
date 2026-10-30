@@ -293,57 +293,7 @@ bool type_has_func_slots(const type_t *t) {
     }
 }
 
-bool type_contains_ptr_or_slice(const type_t *t) {
-    if (!t) return false;
-    if (type_is_ptr_or_slice(t)) return true;
-    switch (t->kind) {
-        case TYPE_KIND_STRUCT: {
-            const struct_type_t *st = (const struct_type_t *)t;
-            for (size_t i = 0; i < st->field_count; i++)
-                if (type_contains_ptr_or_slice(st->fields[i].type)) return true;
-            return false;
-        }
-        case TYPE_KIND_TUPLE: {
-            const tuple_type_t *tt = (const tuple_type_t *)t;
-            for (size_t i = 0; i < tt->elem_count; i++)
-                if (type_contains_ptr_or_slice(tt->elems[i].type)) return true;
-            return false;
-        }
-        case TYPE_KIND_UNION: {
-            const union_type_t *ut = (const union_type_t *)t;
-            for (size_t i = 0; i < ut->member_count; i++)
-                if (type_contains_ptr_or_slice(ut->members[i].payload_type))
-                    return true;
-            return false;
-        }
-        case TYPE_KIND_CUNION: {
-            const cunion_type_t *ct = (const cunion_type_t *)t;
-            for (size_t i = 0; i < ct->member_count; i++)
-                if (type_contains_ptr_or_slice(ct->members[i].type)) return true;
-            return false;
-        }
-        case TYPE_KIND_OPTION:
-            return type_contains_ptr_or_slice(
-                ((const option_type_t *)t)->inner);
-        case TYPE_KIND_CONST:
-        case TYPE_KIND_VOLATILE:
-            return type_contains_ptr_or_slice(type_qualifier_sub(t));
-        case TYPE_KIND_ARRAY:
-            return type_contains_ptr_or_slice(
-                ((const array_type_t *)t)->elem_type);
-        default:
-            return false;
-    }
-}
-
-/* ---- 类型层所有权谓词：**已全部删除**（2026-10 所有权重构） ----
- *
- * 原先的 `type_owns_resources` / `type_fatal_carries_resource` /
- * `type_contains_ref` / `type_directly_owns` 都在类型层判定 own/fatal/ref，
- * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段），
- * 且**复合类型已禁止携带指针/切片**，类型层没有可判定的对象。
- *
- * 完整模型见 docs/runtime-ownership.md。 */
+/* ---- 类型层所有权谓词：**已全部删除**（2026-10 所有权重构） ----\n *\n * 原先的 `type_owns_resources` / `type_fatal_carries_resource` /\n * `type_contains_ref` / `type_directly_owns` 都在类型层判定 own/fatal/ref，\n * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段）。\n *\n * 完整模型见 docs/runtime-ownership.md。 */
 
 /* ---- type_promote ---- */
 

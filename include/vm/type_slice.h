@@ -11,7 +11,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 
-/** 切片类型 vtable（所有权纯编译期，类型不区分 own/ref/fatal） */
+/** 切片类型 vtable */
 extern const vtable_t VTABLE_SLICE;
 
 /* ================================================================ */
@@ -24,20 +24,19 @@ extern const vtable_t VTABLE_SLICE;
  *   - type_slice_push 分配空 slice_type（elem_type=NULL，不入池）+ 压其 type
  *     value，返回该 type（外部只持有 type_t*）。
  *   - type_slice_set_elem 设元素类型 T（SET_TYPE 运行期用）；密封后静默忽略。
- *   - type_slice_seal 按 (elem_type, kind) 去重 intern，标记 sealed。
+ *   - type_slice_seal 按 elem_type 去重 intern，标记 sealed。
  *
  * 切片类型的 size/align 恒定（2*指针宽），密封不依赖 elem_type 布局——hoist
  * 中属引用依赖（emit_ref_type，LOAD_TYPE 拉回 elem，不递归），与 ptr 同族。
  */
 
-/** PUSH_SLICE：分配开放 slice_type（elem_type=NULL，不入池）+ 压其 type value。
- *  所有权纯编译期——类型不区分 own/ref/fatal，只有一种切片类型 []T。 */
+/** PUSH_SLICE：分配开放 slice_type（elem_type=NULL，不入池）+ 压其 type value。 */
 const type_t *type_slice_push(vm_t *vm);
 
 /** SET_TYPE 运行期用：设元素类型 T（密封后静默忽略） */
 void type_slice_set_elem(vm_t *vm, const type_t *t, const type_t *elem);
 
-/** SEAL：按 (elem_type, 元素所有权) 去重 intern + 置 sealed。返回该 const type */
+/** SEAL：按 elem_type 去重 intern + 置 sealed。返回该 const type */
 const type_t *type_slice_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_slice_push + set_elem + seal）：sema 解析 []T 用。
@@ -54,14 +53,9 @@ static inline const type_t *slice_type_elem(const type_t *t) {
 /* ================================================================ */
 
 /**
- * 切片值（data 块布局）。三种切片的 value data 统一为胖指针：
- *   - ptr：指向元素序列首地址（own 堆分配 / ref 借用 / fatal 将亡值）
+ * 切片值（data 块布局）：胖指针 { ptr, len }。
+ *   - ptr：元素序列首地址（堆块由创建者/显式 free 管理）
  *   - len：元素数量（u64）
- *
- * 所有权由 类型所有权修饰 区分（运行期零标志，同 M3 §13.2）：
- *   own []T   → 总拥有堆块，dispose 释放（make 产物接管后）
- *   ref []T   → 总借用，dispose 跳过（指向他人堆块 / 数组内联内存）
- *   fatal []T → ptr≠NULL 时拥有（将亡值），转移后 ptr=NULL（接管方拥有）
  *
  * size = sizeof(slice_value_t) = 2 * sizeof(void*)，type_slice_seal 设定。
  */

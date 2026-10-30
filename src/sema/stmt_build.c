@@ -202,9 +202,7 @@ static void build_func_tree(sema_t *sema, sema_func_t *sf,
   sf->param_scope = pscope;
 
   /* 注册参数（已解析类型，运行时值在 Pass 3b 进入函数时定义到 VM scope）。
-     所有权从函数签名类型的 param_ownerships 数组读取——pass2_types 在
-     build_func_tree 之前已建好签名（含 ownership），AST 节点此时已折叠为
-     AST_TYPE_REF，无法再从 token 提取。 */
+     类型由 param 的 type_expr 解析；此时 AST 已折叠为 AST_TYPE_REF。 */
   size_t param_idx = 0;
   for (ast_node_t *p = fn->params; p; p = p->next, param_idx++) {
     ast_var_def_t *vd = (ast_var_def_t *)p;

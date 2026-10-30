@@ -45,7 +45,7 @@ typedef struct {
 } sema_rv_t;
 
 /* key 是否带一个索引实参（`field_type(0)`）——**按类型判定**：数组/切片的
-   `elem_type`/`elem_ownership` 不带索引，元组的同名 key 带索引。 */
+   `elem_type` 不带索引，元组的同名 key 带索引。 */
 bool sema_reflect_needs_index(const type_t *T, strslice_t key);
 
 /** key 是否是反射成员名（带/不带索引都算）。链式表达式识别用。 */

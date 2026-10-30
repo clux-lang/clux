@@ -76,8 +76,8 @@ void cw_write_stmt(string_t *sb, const cir_stmt_t *s, int indent) {
             cw_write_expr(sb, s->expr);
         } else if (s->type && s->type->c_name &&
                    strcmp(s->type->c_name, "__auto_type") != 0) {
-            /* `var p: own *T = undefined;` 之后可能从分支里赋值，而清理
-               序列仍会 FREE p：未初始化局部必须清零，避免 free 垃圾指针。 */
+            /* `var p: *T = undefined;` 之后可能从分支里赋值：未初始化局部
+               必须清零，避免 free 垃圾指针。 */
             cw_put(sb, " = {0}");
         }
         cw_put(sb, ";\n");

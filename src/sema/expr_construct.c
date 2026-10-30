@@ -357,39 +357,9 @@ static const type_t *infer_anon_tuple(sema_t *sema, ast_construct_t *n,
   return t;
 }
 
-/** 取 fatal 变体的 base 类型：`fatal T` → T；非 fatal 输入原样返回。
- * 所有权是类型修饰后，option 内层比较只需要看裸类型（见
- * `option_inner_type_ok`），这个入口保留给调用点的语义命名。 */
-static const type_t *expr_strip_fatal(sema_t *sema, const type_t *t) {
-  /* 所有权迁移到值/symbol 层后，fatal 不再是类型层概念——type_is_fatal(t)
-     恒为 false，本函数退化为恒等返回 t。保留签名以减少调用方改动。 */
-  (void)sema;
-  return t;
-}
-
-/**
- * option 构造字段的类型归一：把 **fatal 变体折回 base**（fatal T → T）。
- *
- * `?T` 构造器（`.?T{...}` / `new ?T{...}`）的字段语义是"内层提升为 some"，
- * 而内层类型是**非 fatal** 的 `T`：`fatal` 只标记"将亡值"，option 的 value 槽位
- * 不是将亡值位。但字段表达式往往是 move/clone 产物（标成 `fatal T`），
- * 于是 `ft != inner`
- * 误报 "cannot initialize optional ?I with fatal I"。
- *
- * 归一后比较：`fatal I` 与 `I` 逐字节同布局，接受它既正确也不会破坏所有权
- * （运行期 `value_lift_option` 按 inner 转移/深拷贝）。
- * 非 fatal 输入原样返回（绝大多数情况是空转）。
- */
-const type_t *option_field_type_normalized(sema_t *sema, const type_t *ft) {
-  return expr_strip_fatal(sema, ft);
-}
-
-/* `?inner` 构造字段的类型判定：fatal T 与 own T / T 布局相同，可送入 inner
-   槽位（真正的所有权接收规则由 sema_check_slot_flow 判定，不在这里重复）。 */
+/* `?inner` 构造字段的类型判定：字段类型必须就是 inner。 */
 bool option_inner_type_ok(const type_t *inner, const type_t *ft) {
-  if (!inner || !ft) return false;
-  if (ft == inner) return true;
-  return ft == inner;
+  return inner && ft && ft == inner;
 }
 
 /* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
@@ -884,7 +854,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
           if (!value_is_error(sema->vm, fv) &&
               !value_is_type(fv, TYPE_KIND_VOID)) {
             const type_t *inner = type_option_inner(t);
-            const type_t *ft = option_field_type_normalized(sema, value_type(fv));
+            const type_t *ft = value_type(fv);
             if (ft != t && !option_inner_type_ok(inner, ft)) {
               char tn[64], fn[64];
               sema_type_name(t, tn, sizeof tn);
@@ -893,8 +863,6 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
               sema_type_name(value_type(fv), fn, sizeof fn);
               diag_error(sema->diag, sema_loc(sema, f),
                          "cannot initialize optional %s with %s", tn, fn);
-            } else if (ft != t) {
-              /* 可赋值性由下面的 value_assign 检查。 */
             }
           }
         }
@@ -1304,7 +1272,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
          `.f64{1.5}` / `.str{"hi"}` —— 单值构造。
            - 恰好 1 个字段（位置值，不写字段名）；
            - 值可与目标类型不同（按隐式转换，如 `.i64{7}` / `.f64{1}`）；
-           - 结果是该类型的**普通值**（OWN_NONE，可拷贝）——与字面量同构，
+           - 结果是该类型的**普通值**（可拷贝）——与字面量同构，
              只是把类型显式写出来。`var a = .i32{123};` ≡ `var a: i32 = 123;`。 */
       if (t && (type_kind_of(t) == TYPE_KIND_INT || type_kind_of(t) == TYPE_KIND_FLOAT ||
                 type_kind_of(t) == TYPE_KIND_BOOL || type_kind_of(t) == TYPE_KIND_STR)) {

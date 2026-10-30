@@ -6,13 +6,12 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* make 编译期宏函数（m4-design §2）：make(T, N, init...) → fatal []T。
+/* make 编译期宏函数（m4-design §2）：make(T, N, init...) → []T。
  * T 是元素类型表达式（编译期替换，不作为运行期参数），N 是长度表达式
  * （可运行期值），init... 是初始值列表（支持 <v,M> fill 值包，同数组
  * 构造语法）。clux 无默认零值，必须给出所有元素的初始值。
  *
- * sema 层将 make 替换为：分配 len*elem_size 堆块 + 逐元素布值 → fatal []T。
- * 返回 fatal []T（将亡值，须被 own 接管）。 */
+ * sema 层将 make 替换为：分配 len*elem_size 堆块 + 逐元素布值 → []T。 */
 typedef struct {
     ast_node_t  base;
     ast_node_t *elem_type;  /* 元素类型表达式 T */

@@ -379,14 +379,12 @@ void type_tuple_add_elem(vm_t *vm, const type_t *t, const type_t *etype) {
 
     ne[n].offset = 0;  /* 布局在 seal 时统一计算 */
     ne[n].type   = etype;
-    /* 开放构造路径（PUSH_TUPLE/SEAL）没有槽位所有权信息 → OWN_NONE；
-       数组元素表由 sema 直接 intern，不走这里。 */
+    /* 开放构造路径（PUSH_TUPLE/SEAL）的元素表由这里维护。 */
     tt->elems = ne;
     tt->elem_count = n + 1;
 }
 
-/* 按（元素类型 + 顺序）判断两元组是否等价（去重 intern 用）。所有权已
-   迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
+/* 按（元素类型 + 顺序）判断两元组是否等价（去重 intern 用）。 */
 static bool tuple_same(const tuple_type_t *a, const tuple_type_t *b) {
     if (a->elem_count != b->elem_count) return false;
     for (size_t i = 0; i < a->elem_count; i++) {

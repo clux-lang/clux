@@ -35,14 +35,14 @@
  *   - 嵌套数组元素：递归的连续子块（N * sizeof(子元素) 字节）
  *   - 字符串元素：string_t* 指针（深拷贝时复制 string_t 本体）
  *
- * 借用引用（ownership=OWN_REF）的 data 直接指向块内偏移（业务内存）：
+ * 借用引用的 data 直接指向块内偏移（业务内存）：
  *   arr[i]  →  data = arr.data + i * elem_type->size，type = elem_type
  *   m[1][0] →  内层借用 data = m.data + 1*sizeof([..]T)，再偏移 0
  * 读写直达业务内存，与 C 的 &arr[i] 语义一致（M2 设计 §2）。
  *
  * 生命周期（用户确认）：借用值只匿名存活于表达式链；绑定变量 / 返回值 /
  * 赋值（DEFINE / STORE / RET / clone）时经 value_clone materialize 成独立
- * 深拷贝（ownership=OWN_OWN），故无悬垂引用。借用值 dispose 跳过（data 指向父值
+ * 深拷贝，故无悬垂引用。借用值 dispose 跳过（data 指向父值
  * 内部，value_dispose 已处理）。块在构造后固定（M2 数组边界编译期常量，
  * 无运行时增长），借用存续期间父块不变，安全。
  */
@@ -169,9 +169,8 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->array_types) vm->array_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* 去重 intern（按 elem_type + length + 元素槽位所有权）：命中已有 sealed
-       类型则复用并手工回收本开放类型。`[N]own *T` 与 `[N]ref *T` 是不同类型
-       （销毁语义不同），所有权必须进键。 */
+    /* 去重 intern（按 elem_type + length）：命中已有 sealed 类型则复用
+       并手工回收本开放类型。 */
     size_t n = vec_len(vm->array_types);
     for (size_t i = 0; i < n; i++) {
         const array_type_t *other = (const array_type_t *)vec_get(vm->array_types, i);
@@ -211,7 +210,7 @@ const type_t *array_type_seal(vm_t *vm, const type_t *t) {
 
 const type_t *type_array_intern(vm_t *vm, const type_t *elem_type, size_t count) {
     /* 一次性快捷：alloc（不压栈）+ set_elem + set_count + seal。
-     * 元素槽位所有权已编码在 elem_type 上（`[N]own *T` 的 elem 即 `own *T`）。 */
+     * 类型名由 elem_type 决定。 */
     array_type_t *at = array_type_create_open(vm);
     const type_t *t = &at->base;
     array_type_set_elem(vm, t, elem_type);
@@ -335,7 +334,7 @@ static value_t *array_clone(vm_t *vm, value_t *v) {
         return value_make_shadow(vm, value_type(v));
 
     /* 借用/普通数组的 type 均为数组类型；借用 v 的 data 指向块内偏移，
-       按其类型深拷贝该块即 materialize（独立 ownership=OWN_OWN 拷贝）。
+       按其类型深拷贝该块即 materialize（独立拷贝）。
        **持有资源则对象图克隆**（value_alloc_data_copy）：隐式拷贝路径同样承载
        含 own 元素的数组（闭包捕获、scope_define 的借用 materialize），浅拷贝
        会让副本与源共享内嵌堆块 → 双释放。 */

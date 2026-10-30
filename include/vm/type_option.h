@@ -32,8 +32,7 @@ extern const vtable_t VTABLE_OPTION;
  * 内存布局（密封时计算）：
  *   value 字段偏移 voff = align_up(sizeof(bool), inner->align)
  *   size = voff + inner->size；align = max(1, inner->align)
- * SOME 态窄化退化的运行时真相 = 借用引用 data 指向 value 字段（与 OWN_REF
- * 借用字段同构，零拷贝）。
+ * SOME 态窄化退化的运行时真相 = 借用引用 data 指向 value 字段（零拷贝）。
  */
 typedef struct option_type_t option_type_t;  /* 定义见 vm/type.h */
 
@@ -43,7 +42,7 @@ const type_t *type_option_push(vm_t *vm);
 /** SET_TYPE 运行期用：设被包裹类型 T（密封后静默忽略） */
 void type_option_set_inner(vm_t *vm, const type_t *t, const type_t *inner);
 
-/** SEAL：按 (inner + inner 所有权) 去重 intern + 计算 C 布局 + 置 sealed。 */
+/** SEAL：按 inner 去重 intern + 计算 C 布局 + 置 sealed。 */
 const type_t *type_option_seal(vm_t *vm, const type_t *t);
 
 /** 一次性快捷（type_option_push + set_inner + seal）：sema 解析 ?T 用。

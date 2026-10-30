@@ -17,14 +17,13 @@
  * 切片类型（m4-design §1/§10）
  *
  * 切片 = 胖指针 { void *ptr; uint64_t len; }，与指针对齐但多一个 len 字段。
- * 所有权纯编译期——类型不区分 own/ref/fatal，只有一种切片类型 []T。
- * 运行期零标志：clone/dispose/cast 不按所有权分派，堆释放由 sema 生成
- * FREE 指令负责。
+ * 裸切片：运行期零标志，clone/dispose/cast 不按所有权分派，堆释放由
+ * 显式 free / 生成的 FREE 负责。
  * =========================================================================== */
 
 /* ---- 内部工具 ---- */
 
-/* 切片元素类型是否需要递归扫描（内嵌 own/share/weak 字段） */
+/* 切片元素类型是否需要递归扫描（元素内含指针/切片槽位） */
 bool slice_type_needs_scan(const type_t *t);
 void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
 
@@ -33,7 +32,7 @@ bool slice_type_needs_scan(const type_t *t) {
     return ptr_type_needs_scan(t);
 }
 
-/* 清空切片元素的内嵌 own 指针（不释放——接管辅助） */
+/* 清空切片元素内的指针字段（不释放——接管辅助） */
 void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len) {
     if (!vm || !elem || !ptr || len == 0) return;
     if (!slice_type_needs_scan(elem)) return;
@@ -205,8 +204,7 @@ static value_t *slice_implicit_cast(vm_t *vm, value_t *v, const type_t *target) 
     const type_t *src = value_type(v);
     const slice_value_t *sv = (const slice_value_t *)value_data(v);
 
-    /* 所有权纯编译期——类型不区分 own/ref/fatal，同 elem 即同类型。
-       ownership 降级/接管由 sema 在编译期控制。 */
+    /* 同 elem 即同类型（类型不区分所有权）。 */
     if (src == target ||
         (target && slice_type_elem(src) == slice_type_elem(target))) {
         return slice_make_value(vm, target, sv->ptr, sv->len);
@@ -320,7 +318,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 
     if (!vm->slice_types) vm->slice_types = vec_new(vm->alloc, /*owns_element=*/false);
 
-    /* dedup intern by (elem_type + 元素槽位所有权) */
+    /* dedup intern by elem_type */
     size_t n = vec_len(vm->slice_types);
     for (size_t i = 0; i < n; i++) {
         const slice_type_t *other = (const slice_type_t *)vec_get(vm->slice_types, i);
@@ -348,7 +346,7 @@ const type_t *type_slice_seal(vm_t *vm, const type_t *t) {
 }
 
 const type_t *type_slice_intern(vm_t *vm, const type_t *elem) {
-    /* 元素槽位所有权已编码在 elem 类型上（`[]own *T` 的 elem 即 `own *T`）。 */
+    /* 类型名由 elem 决定。 */
     if (!vm || !elem) return NULL;
     slice_type_t *st = slice_type_create_open(vm);
     st->elem_type = elem;

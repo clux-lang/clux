@@ -439,13 +439,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     } else {
       if (sym) {
         sym->flow_init = true;
-        /* 注：这里原先还有一条"含 ref 字段的聚合类型赋值作用域检查"
-           （判据 `type_contains_ref`）。所有权从类型层迁移到值/符号层后该谓词
-           失效，且复合类型已禁止携带指针/切片，含 ref 字段的聚合不存在——整段
-           检查恒不可达，已删除。
-           将来恢复含指针的聚合时，判据应改为"聚合的 ref 槽位表"（扁平槽位模型，
-           见 docs/ownership-refactor.md §2.5），而不是恢复类型层递归谓词。
-           顶层 ref 的重绑定检查见下面的 R3 分支。 */
+        /* 借用期/所有权检查已随编译期所有权一并移除。 */
       }
     }
     return;

@@ -120,8 +120,8 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     case TYPE_KIND_SLICE: {
-        /* []T：释放堆块，置 ptr=NULL 防双释放。元素内部无独立堆块
-           （复合类型禁止携带指针/切片）。 */
+        /* []T：只释放这一个缓冲区，置 ptr=NULL 防双释放；元素内容
+           （含元素内的指针）由开发者管理。 */
         slice_value_t *sv = (slice_value_t *)data;
         if (!sv->ptr) return;
         void *heap = sv->ptr;
@@ -138,8 +138,8 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
         return;
     }
     default:
-        /* 标量/字符串/复合类型/cunion/opaque 等：无可释放的独立堆块
-           （复合类型禁止携带指针/切片；cunion 无 tag，由开发者自负）。 */
+        /* 标量/字符串/复合类型/cunion/opaque 等：不自动递归释放字段中的
+           指针（cunion 无 tag，尤其无法判定活跃成员）。 */
         return;
     }
 }

@@ -180,7 +180,7 @@ static const char *ffi_c_type(lower_ctx_t *lc, const type_t *t_raw,
 
 static const char *ffi_c_type_core(lower_ctx_t *lc, const type_t *t_raw,
                                    bool *ok) {
-    const type_t *t = type_strip_quals(t_raw); /* 剥 const/volatile/所有权 */
+    const type_t *t = type_strip_quals(t_raw); /* 剥 const/volatile */
     vm_t *vm = lc->sema->vm;
     if (!t || t == vm->type_void) return "void";
     if (t == vm->type_i8) return "int8_t";

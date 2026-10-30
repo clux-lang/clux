@@ -102,16 +102,15 @@ value_t *value_make_shadow(vm_t *vm, const type_t *type);
 bool value_is_shadow(const value_t *v);
 
 /** 构造借用引用：data 指向父值（数组/struct）内部元素槽位（value_t**），
- * 只置运行期"视图"位（不拥有 data 块），不是所有权状态。借用值只匿名存活于
- * 表达式链；绑定/返回时经 value_clone materialize 成独立副本。 */
+ * 只置运行期"视图"位（不拥有 data 块）。借用值只匿名存活于表达式链；
+ * 绑定/返回时经 value_clone materialize 成独立副本。 */
 value_t *value_make_borrowed(vm_t *vm, const type_t *type, void *slot);
 
 /** 判断 value 是否为借用引用（非 shadow 且不拥有 data）。
  *
  * 这也是**唯一的"采用 vs 拷贝"判据**：变量读取（op_push）压入借用视图，
  * 因此 `scope_define` 见到非借用值就只可能是表达式刚创建的临时值 → 零拷贝
- * 采用；见到借用视图（或属于其他作用域的值）→ materialize 成独立深拷贝。
- * 不再需要"该值是否已绑定到名字"的附加标记（2026-10 所有权重构删除）。 */
+ * 采用；见到借用视图（或属于其他作用域的值）→ materialize 成独立深拷贝。 */
 bool value_is_borrowed(const value_t *v);
 
 /* ---- error 构造 ---- */

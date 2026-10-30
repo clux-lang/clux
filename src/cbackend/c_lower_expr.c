@@ -194,9 +194,9 @@ static cir_expr_t *lower_ctor_value(lower_ctx_t *lc, const type_t *field_type,
     if (st && type_kind_of(st) == TYPE_KIND_STRUCT &&
         val->kind == AST_CONSTRUCT) {
         ast_construct_t *cc = (ast_construct_t *)val;
-        const type_t *own = cc->type ? sema_resolve_type_slot(lc->sema, &cc->type)
+        const type_t *ctor_type = cc->type ? sema_resolve_type_slot(lc->sema, &cc->type)
                                      : NULL;
-        if (type_strip_quals(st) != (own ? type_strip_quals(own) : NULL)) {
+        if (type_strip_quals(st) != (ctor_type ? type_strip_quals(ctor_type) : NULL)) {
             ast_node_t *ref = sema_gen_type_ref(lc->sema, type_strip_quals(st));
             if (ref) {
                 ast_node_t *saved = cc->type;
@@ -536,8 +536,7 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
             return cl;
         }
         /* 含闭包槽位的聚合值拷贝：C 的 struct/数组赋值**按值**复制内联
-           env，本身就是深拷贝；无需额外代码（sema 只在"无 own 槽位"的
-           聚合上插入 __deep_clone）。 */
+           env，本身就是深拷贝；无需额外代码。 */
         if (fs && type_has_closure_slots(fs))
             return lower_expr(lc, call->args);
     }

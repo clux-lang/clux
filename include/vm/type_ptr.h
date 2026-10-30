@@ -52,12 +52,12 @@ value_t *ptr_make_value(vm_t *vm, const type_t *pt, void *target);
 
 /* ---- 递归销毁/复制（闭包 env、复合值）---- */
 
-/** 目标类型是否含需递归扫描的 own 字段。 */
+/** 目标类型是否（递归）含指针/切片槽位。 */
 bool ptr_type_needs_scan(const type_t *t);
 
 void ptr_free_recursive(vm_t *vm, const type_t *t, void *data);
 
-/** 递归清空 data 块内 own/fatal 指针的 ptr（不释放）。 */
+/** 递归清空 data 块内指针的 ptr 字段（不释放堆块）。 */
 void ptr_clear_recursive(vm_t *vm, const type_t *t, void *data);
 
 /** 深拷贝 type 类型的数据块。 */

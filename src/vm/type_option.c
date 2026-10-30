@@ -186,7 +186,7 @@ const type_t *type_option_seal(vm_t *vm, const type_t *t) {
     if (!vm->option_types) vm->option_types = vec_new(vm->alloc, /*owns_element=*/false);
 
     /* 去重 intern（按 inner 指针）：命中已有 sealed 类型则复用并手工回收
-       本开放类型。所有权已迁移到值层，类型层恒为 OWN_NONE，不再参与比较。 */
+       本开放类型。 */
     size_t n = vec_len(vm->option_types);
     for (size_t i = 0; i < n; i++) {
         const option_type_t *other = (const option_type_t *)vec_get(vm->option_types, i);

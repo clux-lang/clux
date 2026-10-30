@@ -109,8 +109,7 @@ const type_t *sema_generic_instantiate_func(sema_t *sema,
  *
  * explicit_args 是显式写出的类型实参（`f[i32, ...]` 的前 explicit_count 个，
  * 可为 NULL/0）；arg_shadows 是**已求值**的实参（调用方保证只求值一次）。
- * 剩余类型参数按形参类型表达式与实参类型做结构化匹配（含所有权不对称：
- * fatal 可匹配 own，own/fatal 可匹配 ref），最后用默认值补齐。
+ * 剩余类型参数按形参类型表达式与实参类型做结构化匹配，最后用默认值补齐。
  *
  * 成功返回实例签名，*out 写入实例；失败返回 NULL（诊断已记录）。
  */

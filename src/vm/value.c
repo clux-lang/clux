@@ -409,7 +409,7 @@ void value_dispose(vm_t *vm, value_t *v) {
     if (v->type) {
         /* shadow 值无 data，跳过 dispose 和 data 释放 */
         if (!v->is_shadow) {
-            /* 借用引用（OWN_REF）：data 指向父值内部，不拥有，跳过 dispose 与释放 */
+            /* 借用引用：data 指向父值内部，不拥有，跳过 dispose 与释放 */
             if (!v->borrowed) {
                 if (v->type->vtable && v->type->vtable->dispose) {
                     v->type->vtable->dispose(vm, v);

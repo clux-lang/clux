@@ -621,9 +621,7 @@ void pass2_types(sema_t *sema, bool speculative) {
     /* 参数/返回类型槽位解析。**未解析成功则不建签名**（留待下一轮试跑或
        最终正式报错）——否则会用 NULL 参数构造出半有效的签名并把它标记为
        已完成，后续轮次不再重试。
-       ownership 时序：speculative 轮会折叠 AST（AST_PTR→AST_TYPE_REF），
-       正式轮再从 AST 提取会得到 OWN_NONE。若签名已建（sym->type 非空），
-       从签名的 param_ownerships/return_ownership 读取；否则从原始 AST 提取。 */
+       （槽位解析幂等：首次解析后槽位已折叠为 AST_TYPE_REF。） */
     bool unresolved = false;
     size_t nparams = sema_count_siblings(fn->params);
     const type_t **params = NULL;

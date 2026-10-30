@@ -8,7 +8,7 @@ extern "C" {
 #include "parser/parser.h"
 
 /* new 表达式（m3-design §8.1）：new T{...} —— .T{...} 的堆分配形态，
- * 返回 own *T。type 为类型表达式（NULL = 匿名构造，sema 依上下文推断），
+ * 返回 *T。type 为类型表达式（NULL = 匿名构造，sema 依上下文推断），
  * fields 为构造字段值表达式兄弟链（与 AST_CONSTRUCT 同构）。 */
 typedef struct {
     ast_node_t  base;

@@ -45,9 +45,8 @@ typedef struct {
     uint32_t    sig_id;
 
     /* 闭包**捕获聚合类型** id（0 = 无捕获）：捕获槽表登记成一个 struct 类型
-       （fields = 捕获名 + 类型 + 槽位所有权），VM 层据此把闭包当作聚合值处
-       理——clone 深拷贝捕获、free 按槽位所有权释放、字段读写走同一套规则
-       （§7.1.10 "闭包 = 捕获结构体"）。编译器在 hoist 注册函数对象后发
+       （fields = 捕获名 + 类型），VM 层据此把闭包当作聚合值处理——值拷贝
+       复制内联 env、字段读写走同一套规则。编译器在 hoist 注册函数对象后发
        `SET_FUNC_CAPTURES <id>`。 */
     uint32_t       capture_type_id;
 

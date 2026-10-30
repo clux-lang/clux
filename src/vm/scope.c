@@ -62,9 +62,8 @@ void scope_destroy(vm_t *vm, scope_t **pscope) {
     scope_remove_from_parent(scope);
 
     /* 1. 释放所有 owned value 的 value_t 结构体与 data 块。
-       **own 堆资源已由 sema 生成的 FREE <name> 指令在作用域退出点显式释放**，
-       scope_destroy 不再递归释放堆资源——只释放 value_t 壳与 data 块本身。
-       借用引用（OWN_REF）的 data 指向父值内部，跳过 data 释放。 */
+       堆资源由显式 free / sema 生成的 FREE 负责；scope_destroy 只释放
+       value_t 壳与 data 块本身。借用引用的 data 指向父值内部，跳过 data 释放。 */
     size_t owned_n = vec_len(scope->owned);
     for (size_t i = 0; i < owned_n; i++) {
         value_t *v = (value_t *)vec_get(scope->owned, i);

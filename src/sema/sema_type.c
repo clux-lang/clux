@@ -248,17 +248,7 @@ static void sema_type_register_deps(sema_t *sema, const type_t *t) {
   }
 }
 
-/* ===========================================================================
- * 复合类型的 own 资源判定：**已删除**（2026-10 所有权重构）
- *
- * 原先的 `sema_type_contains_owned_resource` / `sema_type_contains_own_resource`
- * 是类型层递归谓词，随重构失效（类型层不再携带 ownership；且复合类型已禁止
- * 携带指针/切片，"含 own 字段的复合类型"这一形态当前不存在），已无调用方，
- * 故连同 `type_directly_owns` 空壳一并删除。
- *
- * 判据入口现为**符号/值层**：`sema_symbol_t::ownership` 与 `value_type_ownership()`。
- * 将来恢复含指针的复合类型时，按**扁平槽位表**重新设计，不恢复这两个谓词。
- * =========================================================================== */
+/* 复合类型的 own 资源判定已随编译期所有权一并删除。 */
 
 
 const sema_type_t *sema_type_register(sema_t *sema, const type_t *t) {
@@ -364,7 +354,6 @@ const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id) {
  * 类型表达式求值
  * =========================================================================== */
 
-/* 所有权修饰 token → ownership_t（仅类型解析内部使用）。 */
 /* 纯求值（不登记、不替换槽位）：switch 分派类型表达式节点 → 类型单例。
  * 由 resolve_type_expr（登记）与递归 sub 解析共用。 */
 static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
@@ -410,23 +399,17 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
       return resolve_type_expr(sema, ((ast_volatile_t *)type_expr)->sub);
     }
     case AST_OPTION: {
-      /* ?T optional 类型修饰：递归解析内层 T → 按 (inner + inner 槽位所有权)
-         去重 intern。与 const/volatile 同族（类型即表达式，嵌套递归）。
-         内层可以是指针/切片/含 own 槽位的聚合——`?own *T` 的 own 记在类型
-         描述上（销毁序列 `if (v != nil)` 据此决定是否 FREE `v.!`）。
-         所有权必须在 resolve **之前**取（折叠会丢 ownership token）。 */
+      /* ?T optional 类型修饰：递归解析内层 T → 按 inner 去重 intern。
+         与 const/volatile 同族（类型即表达式，嵌套递归）。 */
       ast_option_t *op = (ast_option_t *)type_expr;
       const type_t *sub = resolve_type_expr(sema, op->sub);
       if (!sub) return NULL;
-      /* 所有权已编码在 inner 类型上（`?own *T` 的 inner 就是 `own *T`）。 */
       return type_option_intern(sema->vm, sub);
     }
     case AST_ARRAY: {
       /* [N]T 数组类型：递归解析基础类型 + 编译期求值边界 N →
-         按 (elem_type, length, 元素槽位所有权) 去重 intern。边界槽位支持嵌套
-         数组（[2][3]i32 = 元素类型是 [3]i32）。
-         元素可以是指针/切片/含 own 槽位的聚合——`[N]own *T` 的 own 记在类型
-         描述上（销毁序列 `for i in 0..N` 据此决定是否 FREE `a[i]`）。 */
+         按 (elem_type, length) 去重 intern。边界槽位支持嵌套数组
+         （[2][3]i32 = 元素类型是 [3]i32）。 */
       ast_array_t *arr = (ast_array_t *)type_expr;
       const type_t *base = resolve_type_expr(sema, arr->base_type);
       if (!base) return NULL;
@@ -578,9 +561,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_PTR: {
       /* 裸 *T；所有权与内建 RC 修饰符都已移除。 */
       ast_ptr_t *ptr = (ast_ptr_t *)type_expr;
-      sema->opaque_base_ctx++;
       const type_t *base = resolve_type_expr(sema, ptr->base_type);
-      sema->opaque_base_ctx--;
       if (!base) return NULL;
       return type_ptr_intern(sema->vm, base);
     }
@@ -702,8 +683,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
           return es->type;
         }
       }
-      /* 类型表达式里的编译期计算（`(T extends own *? ? fatal T : T)` 等）：
-         交给 CTFE 真实求值，结果必须是 type value。 */
+      /* 类型表达式里的编译期计算：交给 CTFE 真实求值，结果必须是 type value。 */
       ctfe_ctx_t ctx;
       memset(&ctx, 0, sizeof ctx);
       ctx.vm = sema->vm;

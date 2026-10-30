@@ -14,9 +14,7 @@ extern "C" {
  *
  *   foreach (a of b) { … }                    // a 为**已定义**变量：每轮 a = b[i]
  *   foreach (var a of b) { … }                // 新声明，类型由元素类型推断
- *   foreach (var a: ref *i32 of b) { … }      // 新声明 + 显式类型（own 元素的
- *                                             //   容器用 `own [] own *i32` 这类，
- *                                             //   元素以 ref *T 借出）
+ *   foreach (var a: *i32 of b) { … }          // 新声明 + 显式类型（元素以指针借出）
  *
  * 本节点只存在于 parser → **前脱糖** 之间：`desugar_program` 把它展开成普通的
  * 索引 `for` 循环（见 include/desugar/desugar.h），sema / compiler / CTFE

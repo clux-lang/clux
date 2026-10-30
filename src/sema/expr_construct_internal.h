@@ -8,7 +8,6 @@ extern "C" {
 #endif
 
 
-const type_t *option_field_type_normalized(sema_t *sema, const type_t *ft);
 bool option_inner_type_ok(const type_t *inner, const type_t *ft);
 bool sema_expand_construct_spread(sema_t *sema, ast_node_t **fields, ast_node_t **fields_last, sema_scope_t *scope, const type_t *target);
 

@@ -18,10 +18,6 @@ extern const vtable_t VTABLE_ARRAY;
 value_t *value_make_array(vm_t *vm, const type_t *elem_type,
                           value_t **elems, size_t count);
 
-/** 带**元素槽位所有权**的数组值构造：构造出的数组类型与 (elem, count,
- *  elem_own) 去重一致（`[N]own *T` 的元素按 own 销毁）。 */
-
-
 /* ================================================================ */
 /* 数组类型（array_type_t，继承 type_t）                              */
 /* ================================================================ */
@@ -54,9 +50,6 @@ typedef struct array_type_t {
     const type_t *elem_type;  /* 元素类型（引用，不拥有）；由 set_elem 设定 */
     size_t        length;     /* 编译期元素数量；SIZE_MAX = 动态/未定长切片 */
     bool          formed;     /* 是否已定长成形（set_elem + set_count 后为真） */
-    /* 该 **元素槽位** 的所有权（合法性说明同 struct_field_t::ownership）：
-       `[N]own *T` 的元素是 own 叶子；销毁序列 `for i in 0..N` 要据此决定是否
-       FREE `a[i]`。参与去重 intern（own 元素与 ref 元素是不同类型）。 */
     /* sealed 已提升到基类 type_t（见 type.h）；密封后不可再修改 elem/length */
     size_t        layout_size;  /* 密封后：元素总字节数 = elem_type->size*length */
     size_t        layout_align; /* 密封后：对齐 = elem_type->align */
@@ -75,8 +68,6 @@ const type_t *array_type_push(vm_t *vm);
 /** 设置元素（基本）类型（对应字节码 load <elem>）；在 set_count / seal 前调用。
  *  t 须为 array_type_push 返回的开放数组类型，重复调用 / sealed 后静默忽略。 */
 void array_type_set_elem(vm_t *vm, const type_t *t, const type_t *elem_type);
-
-/** SET_FIELD_OWNERSHIP 运行期用（array 分支）：设元素槽位的所有权（seal 前）。 */
 
 /** 设置元素数量（对应字节码 define_bound N），标记 formed；仅一次有效，
  *  重复调用 / sealed 后静默忽略。t 须为 array_type_push 返回的开放数组类型。 */
