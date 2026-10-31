@@ -164,7 +164,7 @@ semantic error) or runtime error. `clux run` (source) and the executables
 produced by `clux build` additionally return `main`'s integer result as the
 process exit code.
 
-Examples live in `examples/` — 54 entry directories (one or more `.cx` files each,
+Examples live in `examples/` — 50 entry directories (one or more `.cx` files each,
 one of them the runnable entry). Modules
 imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
 so every top-level `.cx` is runnable.
