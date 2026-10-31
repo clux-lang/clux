@@ -26,7 +26,6 @@ User
 Box[i32]
 ?i32
 *User
-ref *User
 []u8
 [4]i32
 <i32, str>
@@ -39,51 +38,38 @@ volatile u32
 类型表达式可以嵌套：
 
 ```clux
-?ref *Box[i32]
+?*Box[i32]
 [4]?u8
-func(ref *User) -> ?str
+func(*User) -> ?str
 ```
 
-## 2.3 类型修饰与所有权
+## 2.3 类型修饰
 
-所有权是类型的一部分，不是单独的变量属性。
-
-```text
-own T      拥有 T
-ref T      借用 T
-fatal T    必须被消费的 T
-share T    引用计数共享
-weak T     弱引用
-```
-
-指针和切片使用相同修饰：
+类型上只有 `const` / `volatile` 两种修饰：
 
 ```clux
-own *File
-ref *const User
-fatal []u8
-share *Node
-weak *Node
-[]u8
-ref []const u8
+const i32
+volatile u32
+*const u8
+[]volatile u32
 ```
 
-所有权规则的完整语义见[所有权](07-ownership.md)。
+指针和切片是**裸指针/视图**，没有所有权修饰。内存的生命周期与 C 一致，
+由程序通过 FFI/库函数自行管理。
 
 ## 2.4 指针、切片、数组
 
 ```clux
 *T         裸指针
-own *T     拥有指针
-ref *T     借用指针
 []T        切片
 [N]T       长度 N 的数组
 ```
 
 - `N` 是编译期整数表达式。
 - 数组是值类型，长度属于类型。
-- 切片是“指针 + 长度”的视图，不拥有元素。
+- 切片是“指针 + 长度”的视图，不拥有元素；缓冲区由调用方管理。
 - 指针和切片指向的元素类型可以是 `const`。
+- 指针可指向栈、堆或 FFI 内存，编译器不插入释放逻辑。
 
 ## 2.5 可选类型
 
@@ -134,7 +120,7 @@ cfunc(i32) -> i32
 
 ```clux
 type UserId = u64;
-type Handler = func(ref *Request) -> i32;
+type Handler = func(*Request) -> i32;
 type Buffer[T] = []T;
 ```
 

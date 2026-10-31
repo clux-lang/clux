@@ -107,10 +107,10 @@ foreach (var item of items) {
 
 - 迭代对象必须是数组、切片、元组或可索引序列。
 - `var` 可省略；省略时只读。
-- 迭代变量可以带类型和所有权标注。
+- 迭代变量可以带显式类型标注。
 
 ```clux
-foreach (var item: ref *Item of items) { ... }
+foreach (var item: Item of items) { ... }
 ```
 
 ## 4.10 break / continue

@@ -25,7 +25,7 @@ bytecode/VM execution has been removed. M7 (generics) is implemented: generic fu
 recursive structs), comptime value parameters (`Matrix[T, N: comptime u64]`),
 type parameter packs including `<...Args>` type expansion, `extends` structure
 constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
-`implements` have landed. See `docs/milestones.md`.
+`implements` have landed. See `docs/whitepaper/README.md`.
 
 **Language features available today**
 
@@ -54,7 +54,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   (≈ `void*`), closure capture rules. Heap allocation is **not** a language
   feature: call `libc::malloc` / `libc::free` through FFI and initialize/free
   fields explicitly. Compile-time ownership was removed; the compiler only
-  checks raw pointers. See `docs/runtime-ownership.md`.
+  checks raw pointers. See `docs/whitepaper/02-types.md`.
 - **M4 — slices and strings**: `[]T` fat pointers, `make(pointer, len)` (a
   non-allocating slice view), `len`, `s[a:b]` slicing, `str` slicing to
   `[] const u8`, bounds checks.
@@ -99,12 +99,12 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   `mod::id[i32](...)`, generic methods, generic re-exports), interface
   composition with `&`, and comptime value parameter packs (`...N: comptime
   u64` with `N[i]` / `len(N)`). Remaining M7 gaps are tracked in
-  `docs/m7-implementation-plan.md`.
+  `docs/whitepaper/06-generics.md`.
 - `clux build` (single-file C backend): generates C and invokes the host C
   compiler (`--emit-c[=PATH]` writes the C only). See
-  `docs/roadmap/c-backend.md`.
-- `clux test`: runs `test "Suite.Name" { ... }` blocks (VM backend by default;
-  `--backend=c` builds a C test runner, one subprocess per test).
+  `docs/whitepaper/12-tooling.md`.
+- `clux test`: runs `test "Suite.Name" { ... }` blocks on the C backend,
+  one subprocess per test.
 - Error handling (M8) and a standard library (M9).
 
 ## Build
@@ -208,26 +208,16 @@ specs/           core-library API contracts (allocator, vec, string, maps, strea
 
 ## Documentation
 
-Pipeline and language:
+Language specification (normative):
 
-- `docs/language-spec-m1.md` — the M1 language reference (lexical, types, grammar, semantics)
-- `docs/architecture-m1.md` — compiler pipeline and module responsibilities
-- `docs/parse-paradigm.md` — parser design decisions (mismatch/error, fail-fast, Pratt)
-- `docs/format-rules.md` — rules enforced by `clux format` (spacing, indentation, comments)
-- `docs/c-only-migration.md` — C-backend migration record and current status
-
-Milestone designs:
-
-- `docs/m2-design.md` — struct / enum / arrays / tuples / optional `?T` / comptime / CTFE
-- `docs/m3-design.md` — pointers (historical: compile-time ownership removed)
-- `docs/m4-design.md` — slices and runtime strings
-- `docs/m5-design.md`, `docs/m5-design-v2.md` — module system (v2 is the design that shipped)
-- `docs/m6-design.md` — FFI (`cfunc` / `extern cfunc`, lowered to direct C calls)
+- `docs/README.md` — documentation index and conventions
+- `docs/whitepaper/` — lexical structure, types, declarations, statements,
+  expressions, generics, modules/FFI, metadata, bitfields, testing, tooling
 - `docs/port-packages.md` — port packages (`export extern`) and `clux.mod`'s
   `native` section (`link` / `libdirs` / `runtime`, platform overrides)
-- `docs/runtime-ownership.md` — runtime-ownership plan: raw pointers,
-  `__init__`/`__assign__`/`__dispose__`, allocators and UAF policies
-- `docs/milestones.md` — milestone roadmap and status
+
+Historical design notes and implementation records live in `docs-backup/` and are
+not part of the language specification.
 
 Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
 `specs/strmap.md`, `specs/omap.md`, `specs/rbtree.md`, `specs/stream.md`, `specs/cmd.md`.

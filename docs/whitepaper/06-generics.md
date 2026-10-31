@@ -51,7 +51,7 @@ func first[...Args](args: ...Args): void { }
 ## 6.5 约束
 
 ```clux
-func write[W extends IWriter[W]](w: ref *W): void { ... }
+func write[W extends IWriter[W]](w: *W): void { ... }
 ```
 
 `extends` 后是类型模式或接口约束；约束在实例化时检查。
@@ -81,7 +81,7 @@ var x = pair(1, 2);
 struct Box[T] {
     value: T;
 
-    func map[U](self: ref *Box[T], f: func(T) -> U): Box[U] {
+    func map[U](self: *Box[T], f: func(T) -> U): Box[U] {
         return .Box[U]{ .value = f(self.value) };
     }
 }
@@ -94,11 +94,11 @@ var s = b.map[str](func(x: i32): str { return "x"; });
 
 ```clux
 interface IWriter[W] {
-    func write(self: ref *W, data: ref []u8): void;
+    func write(self: *W, data: []u8): void;
 }
 
 struct File implements IWriter[File] {
-    func write(self: ref *File, data: ref []u8): void { ... }
+    func write(self: *File, data: []u8): void { ... }
 }
 ```
 

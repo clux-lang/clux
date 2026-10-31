@@ -34,7 +34,8 @@ clux test path/to/file.cx
 clux test
 ```
 
-有 `clux.mod` 时，遍历包内 `.cx` 源文件并执行所有 test，跳过 `deps/`。
+有 `clux.mod` 时从清单解析入口模块，编译入口及其 import 依赖中的 test 块。
+测试只使用 C 后端（`--backend=c` 仅用于兼容旧脚本）。
 
 ## 11.3 assert
 
@@ -42,45 +43,11 @@ clux test
 assert(x == 4);
 ```
 
-- assert 只允许在测试上下文使用。
+- `assert` 只在测试模式可见；普通构建中使用会得到未定义符号诊断。
 - 失败时终止当前 test，继续执行下一个 test。
 - 失败信息包含表达式源码。
-- 失败按“当前 test 提前返回”处理：执行 defer 和 own 清理。
+- 失败按“当前 test 提前返回”处理：继续执行 defer。
 
-## 11.4 mock 自由函数
-
-```clux
-mock("target", target, func(x: i32): i32 { return 7; });
-unmock("target");
-```
-
-- `mock` 替换全局函数绑定。
-- replacement 的签名必须与目标兼容。
-- `unmock` 恢复原函数。
-- 每个 test 结束自动执行 `unmock_all`。
-
-## 11.5 mock 方法
-
-```clux
-mock_method(Type, "method", replacement);
-unmock_method(Type, "method");
-```
-
-- 方法 mock 是类型级的：该类型的所有实例都使用替换实现。
-- replacement 的第一个参数是接收者。
-- 泛型实例使用 `typeof(instance)` 作为类型值：
-
-```clux
-mock_method(typeof(box), "get", func(self: ref *Box[i32]): i32 {
-    return 8;
-});
-```
-
-## 11.6 测试输出
+## 11.4 测试输出
 
 结果按 suite/name 输出，并给出总数、通过数、失败数；有失败时退出码非零。
-
-## 11.7 测试上下文
-
-`assert`、`mock` / `unmock`、`mock_method` / `unmock_method` 只在 test
-运行时可用；从 test 调用的辅助函数共享同一测试上下文。

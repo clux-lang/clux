@@ -67,7 +67,7 @@ var f = func |(offset: i32 = 10)| add(x: i32): i32 {
 - 闭包作用域标注写在 `func` 后、捕获列表前：
 
 ```clux
-var f = func '<owner> |r| get(): '<owner> ref *i32 { return r; };
+var f = func '<owner> |r| get(): '<owner> *i32 { return r; };
 ```
 
 - 泛型函数：
@@ -82,7 +82,7 @@ func id[T](x: T): T { return x; }
 struct Counter {
     value: i32;
 
-    func add(self: ref *Counter, n: i32): void {
+    func add(self: *Counter, n: i32): void {
         self.value += n;
     }
 }
@@ -128,7 +128,7 @@ struct User {
 
     var count: i32 = 0;
 
-    func rename(self: ref *User, name: str): void {
+    func rename(self: *User, name: str): void {
         self.name = name;
     }
 }
@@ -208,11 +208,11 @@ bitfield Flags: u32 {
 
 ```clux
 interface IWriter[W] {
-    func write(self: ref *W, data: ref []u8): void;
+    func write(self: *W, data: []u8): void;
 }
 
 struct File implements IWriter[File] {
-    func write(self: ref *File, data: ref []u8): void { ... }
+    func write(self: *File, data: []u8): void { ... }
 }
 ```
 

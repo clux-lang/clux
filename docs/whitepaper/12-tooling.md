@@ -11,19 +11,19 @@
 
 ```sh
 clux run [<file.cx> | <subpkg>]
-clux build <file.cx>
+clux build <file.cx> [options]
 clux test [<file.cx>]
-clux format [<file.cx>]
+clux format [<file.cx> | -o PATH]
+clux install [--allow-scripts] [--force] [--locked]
 clux version
-clux eval <expr>
 ```
 
-- `clux run` 执行程序；有 `clux.mod` 时可以从入口查找。
-- `clux build` 生成目标平台可执行文件。
-- `clux test` 执行测试。
+- `clux run` 执行程序；有 `clux.mod` 时从入口查找。
+- `clux build` 生成目标平台可执行文件；`--emit-c` / `--emit-obj` 只生成中间产物。
+- `clux test` 执行测试（仅 C 后端）。
 - `clux format` 格式化源码。
-- `clux eval` 在编译期求值表达式。
-- `clux bc` 是字节码调试/分发工具，不属于语言主路径。
+- `clux install` 安装依赖并执行 `postinstall`（见 port 包文档）。
+- `clux version` 输出编译器版本。
 
 ## 12.3 格式化目标
 
@@ -54,7 +54,7 @@ clux eval <expr>
 
 ```clux
 foo()
-Vec[i32]::new()
+Vec[i32]::create()
 ```
 
 - 控制流关键字与 `(` 之间有一个空格：

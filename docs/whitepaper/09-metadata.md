@@ -24,7 +24,7 @@ struct User {
     x: i32;
 
     [[metadata("role", "handler")]]
-    func run(self: ref *User): void { ... }
+    func run(self: *User): void { ... }
 }
 ```
 

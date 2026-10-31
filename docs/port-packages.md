@@ -57,15 +57,15 @@ deps/zlib/
 extern lib zlib from "*";
 
 export struct z_stream {
-    next_in: ref *const u8;
+    next_in: *const u8;
     avail_in: u32;
-    next_out: ref *u8;
+    next_out: *u8;
     avail_out: u32;
 }
 
 export extern cfunc zlib::zlibVersion(): str;
-export extern cfunc zlib::compress(dest: ref *u8, dest_len: ref *usize,
-                                   source: ref *const u8, source_len: usize): i32;
+export extern cfunc zlib::compress(dest: *u8, dest_len: *usize,
+                                   source: *const u8, source_len: usize): i32;
 export extern var zlib::zlib_errno: i32;
 
 export comptime var Z_OK: const i32 = 0;
@@ -89,8 +89,7 @@ func main(): i32 {
 - `export extern cfunc <lib>::<name>(...): T;`：把 C 函数声明放进模块导出表；
   导入方以 `<port>::<name>(...)` 调用，codegen 直接调用真实 C 符号。
 - `export extern var <lib>::<name>: T;`：数据符号；导入方可读可写。
-- 显式 `own` / `ref` / `fatal` 仍是 clux 侧契约：`own` 实参必须 `move`/`clone`，
-  `share`/`weak` 被拒绝。
+- 指针参数是裸指针：生命周期与所有权由 C ABI 与调用方约定，clux 不做检查。
 - 调用约定：`[[cdecl]]` / `[[stdcall]]`（`[[winapi]]` 等价于 stdcall）只允许
   修饰 `cfunc` 定义或 `extern cfunc` 声明；生成 C 用 `CLUX_STDCALL` 宏
   （Windows x64 无区分，x86 才生效）。`cfunc(...)` 函数指针类型暂不支持
@@ -130,8 +129,8 @@ C 宏没有 ABI，clux 也不读 C 头文件。port 必须**手工**把宏写成
   `const T`，或省略类型让编译器推断；纯编译期，import 方引用点折叠）。
 - 函数宏/类型相关宏：在 port 里写等价的 `export comptime func`，或直接把
   逻辑内联到调用点；clux 不展开 C 宏。
-- 条件宏：在 port 里写多个 `assert(OS_TYPE == ...)` 的声明/常量，或让
-  `native.platforms` 选择不同常量。
+- 条件宏：让 `native.platforms` 选择不同常量，或在 `comptime func` 中用
+  `static_assert` / 编译期条件处理平台差异。
 - 不要把 `#define`、`#include`、C 头文件带进 clux 构建。
 
 ## 6. C 库的构建不属于 clux
