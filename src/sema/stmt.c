@@ -27,6 +27,8 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_undef.h"
 #include "parser/ast_var_def.h"
+#include "parser/ast_static_assert.h"
+#include "parser/ast_string_lit.h"
 #include "parser/ast_index.h"
 #include "parser/ast_walk.h"
 #include "parser/ast_member.h"
@@ -75,6 +77,8 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
+#include "ctfe/ctfe.h"
+#include "vm/type_error.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "vm/type_array.h"
 #include "vm/type_func.h"
@@ -134,6 +138,39 @@ typedef struct {
   size_t            prior_n;
   const strslice_t *hit;
 } uses_var_probe_t;
+
+/* static_assert 条件求值：CTFE 折叠成 bool。失败时已诊断，返回 false。 */
+static bool static_assert_eval(sema_t *sema, sema_scope_t *scope,
+                               ast_node_t *cond, bool *out) {
+  ctfe_ctx_t ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.vm = sema->vm;
+  ctx.sema = sema;
+  ctx.sema_scope = scope;
+  ctx.budget = 100000;
+  ctx.max_depth = 128;
+  value_t *r = ctfe_eval(&ctx, cond);
+  if (!r || value_is_error(sema->vm, r)) {
+    const char *msg = NULL;
+    if (r) {
+      error_data_t *ed = (error_data_t *)value_data(r);
+      msg = ed && ed->message ? ed->message : NULL;
+    }
+    diag_error(sema->diag, sema_loc(sema, cond),
+               "'static_assert' condition is not a compile-time constant%s%s",
+               msg ? ": " : "", msg ? msg : "");
+    return false;
+  }
+  if (value_type(r) != sema->vm->type_bool) {
+    char tn[64];
+    sema_type_name(value_type(r), tn, sizeof tn);
+    diag_error(sema->diag, sema_loc(sema, cond),
+               "'static_assert' condition must be bool (got %s)", tn);
+    return false;
+  }
+  *out = *(const bool *)value_data(r);
+  return true;
+}
 
 static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
                                      sema_scope_t *scope, size_t *idx) {
@@ -242,6 +279,27 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
                  "internal: 'foreach' reached semantic analysis unexpanded "
                  "(front-end desugaring bug)");
       break;
+    case AST_STATIC_ASSERT: {
+      /* 标准编译期断言语句：cond 用 CTFE 求值，必须 bool；false → 编译失败
+         （消息取字符串字面量文本）；true → 无操作、不生成运行期代码。
+         comptime func 体内留给 CTFE 在执行时检查（条件可能依赖参数）。 */
+      ast_static_assert_t *sa = (ast_static_assert_t *)stmt;
+      if (sema->fn.walking_comptime) break;
+      bool ok = false;
+      if (!static_assert_eval(sema, scope, sa->cond, &ok)) break;
+      if (!ok) {
+        strslice_t msg = STRSLICE_EMPTY;
+        if (sa->msg && sa->msg->kind == AST_STRING_LIT)
+          msg = ((ast_string_lit_t *)sa->msg)->text;
+        if (msg.ptr && msg.len > 0)
+          diag_error(sema->diag, sema_loc(sema, stmt),
+                     "static_assert failed: \"%.*s\"", (int)msg.len, msg.ptr);
+        else
+          diag_error(sema->diag, sema_loc(sema, stmt),
+                     "static_assert failed");
+      }
+      break;
+    }
     default:
       break;
   }

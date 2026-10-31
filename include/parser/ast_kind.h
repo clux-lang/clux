@@ -43,6 +43,9 @@ typedef enum {
                             裁剪**（sema Pass 3a 把存活分支拼接进外层块；丢弃
                             分支只做语法检查；大括号不是作用域）。sema 之后
                             不再出现在语句链中。 */
+    AST_STATIC_ASSERT,   /* static_assert(cond, msg);：**编译期断言**。只允许
+                            出现在 comptime if 的未选中分支（随剪枝消失）；
+                            存活代码里一旦遇到就编译报错。 */
     AST_FOREACH,         /* foreach ([var] name [: T] of iterable) { body }：
                             **for-each 语法糖的输入形态**——只存在于 parser 与
                             前脱糖之间；`desugar_program` 用合成 token 把它展开成

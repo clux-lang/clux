@@ -20,6 +20,7 @@
 #include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_comptime_if.h"
+#include "parser/ast_static_assert.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
@@ -491,6 +492,15 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
             sb_str(&f->sb, "...");
             sb_put(&f->sb, emb->name.ptr, emb->name.len);
             sb_ch(&f->sb, ';');
+            break;
+        }
+        case AST_STATIC_ASSERT: {
+            ast_static_assert_t *sa = (ast_static_assert_t *)node;
+            sb_str(&f->sb, "static_assert(");
+            render_expr(f, sa->cond);
+            sb_str(&f->sb, ", ");
+            render_expr(f, sa->msg);
+            sb_str(&f->sb, ");");
             break;
         }
         case AST_COMPTIME_IF: {

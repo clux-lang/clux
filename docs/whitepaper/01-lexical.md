@@ -44,9 +44,9 @@ false    fatal    for       foreach   from      func      i8
 i16      i32      i64       if        implements import   interface
 is       len      lib       make      move      nil
 of       opaque   own       ref       return    share     sizeof
-str      struct   switch    true      type      typeof    u8
-u16      u32      u64       union     undefined usize     var
-void     volatile weak      while
+static_assert    str       struct    switch    true      type
+typeof   u8       u16       u32       u64       union     undefined
+usize    var      void      volatile  weak      while
 ```
 
 `test` 不是全局关键字。只有顶层出现 `test "名称" { ... }` 时才按测试块解析；

@@ -42,6 +42,10 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   computation (`extends`, `==`, `?:`); `sizeof` / `alignof` / `typeof`; function types
   `func(...)->T` and function literals; optional `?T` with `nil` (no path narrowing) and
   `.!` unwrap; `comptime var` / `comptime func`; `const` / `volatile` as real types;
+  **`static_assert(cond, "msg")`** — standard compile-time assertion statement:
+  the condition is folded by CTFE and a false/non-constant condition fails the
+  build; assertions in pruned `comptime if` branches are not checked (useful for
+  generic guards like `static_assert(T != i32, "...")`);
   fill value packs `.[N]T{ <v, M> }`;
   **`foreach`** — for-each sugar over arrays/slices, expanded by the front-end
   desugaring layer (`src/desugar/`) into an index `for` loop before sema, so

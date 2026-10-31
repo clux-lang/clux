@@ -1054,6 +1054,9 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         lc->cleanup = blk;
         return NULL; /* defer 不产生当前位置语句 */
     }
+    case AST_STATIC_ASSERT:
+        /* 编译期断言：sema 已校验；true 时无任何运行期代码。 */
+        return NULL;
     case AST_EMPTY_STMT:
         return NULL;
     /* 声明级节点（局部 typedef/struct/enum/union 定义、import/export 等）：

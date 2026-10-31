@@ -1,4 +1,6 @@
 #include "ctfe/ctfe.h"
+
+#include <stdio.h>
 #include "sema/sema.h"
 
 #include "core/string.h"
@@ -12,6 +14,8 @@
 #include "parser/ast_if.h"
 #include "parser/ast_return.h"
 #include "parser/ast_switch.h"
+#include "parser/ast_string_lit.h"
+#include "parser/ast_static_assert.h"
 #include "parser/ast_var_def.h"
 #include "parser/ast_while.h"
 #include "parser/ast_dowhile.h"
@@ -307,6 +311,28 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     case AST_EXPR_STMT: {
         ast_expr_stmt_t *n = (ast_expr_stmt_t *)stmt;
         return ctfe_eval(ctx, n->expr);
+    }
+    case AST_STATIC_ASSERT: {
+        ast_static_assert_t *sa = (ast_static_assert_t *)stmt;
+        value_t *c = ctfe_eval(ctx, sa->cond);
+        if (value_is_error(vm, c)) return c;
+        if (value_type(c) != vm->type_bool)
+            return value_make_error(vm, "static_assert condition must be bool");
+        if (!*(const bool *)value_data(c)) {
+            char buf[256];
+            const char *msg = NULL;
+            if (sa->msg && sa->msg->kind == AST_STRING_LIT) {
+                strslice_t s = ((ast_string_lit_t *)sa->msg)->text;
+                if (s.ptr && s.len > 0) { msg = s.ptr; }
+                if (msg) {
+                    snprintf(buf, sizeof buf, "static_assert failed: \"%.*s\"",
+                             (int)s.len, s.ptr);
+                    return value_make_error(vm, buf);
+                }
+            }
+            return value_make_error(vm, "static_assert failed");
+        }
+        return value_make_undefined(vm);
     }
     case AST_EMPTY_STMT:
         return value_make_undefined(vm); /* ; 空语句：无操作 */

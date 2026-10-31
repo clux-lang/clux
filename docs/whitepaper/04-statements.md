@@ -180,3 +180,25 @@ comptime foreach (var x of [1, 2, 3]) {
 
 - `comptime if` 在编译期选择分支；未选分支不参与运行期代码。
 - `comptime foreach` 在编译期展开；序列长度和元素必须是编译期已知值。
+
+## 4.16 编译期断言
+
+```clux
+static_assert(sizeof(i64) == 8 as u64, "expected 64-bit i64");
+```
+
+- `static_assert` 是标准语句，可出现在任何语句位置。
+- 条件在编译期求值（CTFE），必须是 `bool`：
+  - `true` → 无操作，不生成运行期代码；
+  - `false` → 编译失败，诊断带上 `msg` 的字符串字面量文本。
+- 条件不是编译期常量、或不是 `bool` → 编译失败。
+- 位于 `comptime if` 未选中分支里的 `static_assert` 不参与语义检查（随剪枝
+  消失），可用于泛型/平台条件断言，例如禁止 `T == i32`：
+
+```clux
+func f[T](x: T): void {
+    comptime if (T == i32) {
+        static_assert(false, "f: T must not be i32");
+    }
+}
+```

@@ -15,6 +15,7 @@
 #include "parser/ast_func_def.h"
 #include "parser/ast_block.h"
 #include "parser/ast_foreach.h"
+#include "parser/ast_static_assert.h"
 #include "parser/ast_defer.h"
 #include "parser/ast_if.h"
 #include "parser/ast_switch.h"
@@ -66,6 +67,7 @@ ast_node_t *parse_stmt(parser_t *p) {
             "closure environment, so a local one has no meaning); declare it "
             "globally and use `cfunc_ptr(name)` when passing it to C");
     }
+    if (check_keyword(p, "static_assert")) return parse_static_assert(p);
     if (check_keyword(p, "comptime")) return parse_comptime_stmt(p);
     /* foreach：for-each 语法糖（前脱糖展开成索引 for 循环） */
     if (check_keyword(p, "foreach")) return parse_foreach(p);
@@ -95,6 +97,56 @@ ast_node_t *parse_stmt(parser_t *p) {
     if (check_symbol(p, "{"))   return parse_block(p);
     /* 最后尝试表达式语句（赋值已是表达式的一种） */
     return parse_assign_or_expr_stmt(p);
+}
+
+/* ================================================================ */
+/* parse_static_assert: static_assert(cond, "msg");                    */
+/* ================================================================ */
+
+ast_node_t *parse_static_assert(parser_t *p) {
+    uint32_t tb = p->pos;
+    advance(p); /* static_assert */
+    skip_trivia(p);
+    if (!expect_symbol(p, "(")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected '(' after 'static_assert'");
+    }
+    skip_trivia(p);
+    ast_node_t *cond = parse_expr(p);
+    if (!cond || cond->kind == AST_ERROR) {
+        if (!cond)
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected condition in 'static_assert'");
+        return cond;
+    }
+    skip_trivia(p);
+    if (!expect_symbol(p, ",")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ',' between condition and message in "
+                             "'static_assert'");
+    }
+    skip_trivia(p);
+    ast_node_t *msg = parse_expr(p);
+    if (!msg || msg->kind == AST_ERROR) {
+        if (!msg)
+            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                                 "expected message in 'static_assert'");
+        return msg;
+    }
+    skip_trivia(p);
+    if (!expect_symbol(p, ")")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ')' after 'static_assert' arguments");
+    }
+    if (!expect_symbol(p, ";")) {
+        return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
+                             "expected ';' after 'static_assert'");
+    }
+    ast_node_t *node = ast_static_assert_new(p->arena, tb, p->pos);
+    if (!node) return NULL;
+    ((ast_static_assert_t *)node)->cond = cond;
+    ((ast_static_assert_t *)node)->msg = msg;
+    return node;
 }
 
 /* ================================================================ */

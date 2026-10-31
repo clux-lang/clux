@@ -30,6 +30,7 @@ static const char *g_kind_names[] = {
     [AST_ASSIGN]     = "assign",
     [AST_IF]         = "if",
     [AST_COMPTIME_IF] = "comptime_if",
+    [AST_STATIC_ASSERT] = "static_assert",
     [AST_FOREACH]    = "foreach",
     [AST_SWITCH]     = "switch",
     [AST_SWITCH_CASE] = "switch_case",

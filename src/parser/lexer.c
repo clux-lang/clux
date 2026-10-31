@@ -75,7 +75,7 @@ static const char *const g_keywords[] = {
     "for",     "from",   "func",   "i16",     "i32",     "i64",      "i8",
     "if",      "import", "is",     "len",     "lib",     "make",    "move",
     "nil",     "own",    "opaque",  "ref",    "return",
-    "sizeof",  "str",    "struct",  "switch", "true",    "type",
+    "sizeof",  "static_assert", "str", "struct", "switch", "true", "type",
     "typeof",  "u16",    "u32",     "u64",    "u8",      "undefined",
     "union",   "usize",  "var",     "void",    "volatile", "while",
     "foreach", "of",     /* 前脱糖语法糖（-> 索引 for 循环，见 src/desugar/） */

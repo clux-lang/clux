@@ -1,4 +1,5 @@
 #include "parser/ast_walk.h"
+#include "parser/ast_static_assert.h"
 
 #include "parser/ast_addr.h"
 #include "parser/ast_alignof.h"
@@ -56,6 +57,11 @@ bool ast_visit_children(ast_node_t *node, ast_visit_fn visit, void *user) {
       return ast_walk_preorder(((ast_ptr_t *)node)->base_type, visit, user);
     case AST_TAKE:
       return ast_walk_preorder(((ast_take_t *)node)->operand, visit, user);
+    case AST_STATIC_ASSERT: {
+      ast_static_assert_t *n = (ast_static_assert_t *)node;
+      return ast_walk_preorder(n->cond, visit, user) &&
+             ast_walk_preorder(n->msg, visit, user);
+    }
     case AST_SLICE_TYPE:
       return ast_walk_preorder(((ast_slice_type_t *)node)->elem_type, visit,
                                user);

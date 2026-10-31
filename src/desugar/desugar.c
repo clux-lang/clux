@@ -11,6 +11,7 @@
 #include "parser/ast_block.h"
 #include "parser/ast_call.h"
 #include "parser/ast_comptime_if.h"
+#include "parser/ast_static_assert.h"
 #include "parser/ast_defer.h"
 #include "parser/ast_dowhile.h"
 #include "parser/ast_expr_stmt.h"
@@ -432,6 +433,12 @@ static void ds_walk_stmt(desugar_t *ds, ast_node_t *stmt) {
       ds_walk_expr(ds, n->cond);
       ds_walk_stmt(ds, n->then_body);
       ds_walk_stmt(ds, n->else_body); /* AST_BLOCK / else-if 的 AST_IF */
+      break;
+    }
+    case AST_STATIC_ASSERT: {
+      ast_static_assert_t *n = (ast_static_assert_t *)stmt;
+      ds_walk_expr(ds, n->cond);
+      ds_walk_expr(ds, n->msg);
       break;
     }
     case AST_COMPTIME_IF: {
