@@ -293,7 +293,11 @@ bool type_has_func_slots(const type_t *t) {
     }
 }
 
-/* ---- 类型层所有权谓词：**已全部删除**（2026-10 所有权重构） ----\n *\n * 原先的 `type_owns_resources` / `type_fatal_carries_resource` /\n * `type_contains_ref` / `type_directly_owns` 都在类型层判定 own/fatal/ref，\n * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段）。\n *\n * 完整模型见 docs/runtime-ownership.md。 */
+/* ---- 类型层所有权谓词：**已全部删除**（2026-10 所有权重构） ----
+ *
+ * 原先的 `type_owns_resources` / `type_fatal_carries_resource` /
+ * `type_contains_ref` / `type_directly_owns` 都在类型层判定 own/fatal/ref，
+ * 随重构全部失效并删除：**所有权不再由类型携带**（`type_t` 无 ownership 字段）。 */
 
 /* ---- type_promote ---- */
 
