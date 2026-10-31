@@ -19,8 +19,8 @@ func main(): i32 {
 ## Status
 
 M1–M7 are implemented and runnable end-to-end (lex → parse → desugar → sema →
-C backend → host C compiler). `clux run` / `clux test` use the C backend only;
-bytecode/VM execution has been removed. M7 (generics) is implemented: generic functions, generic types
+C backend → host C compiler). `clux run` / `clux test` use the C backend.
+M7 (generics) is implemented: generic functions, generic types
 (`struct`/`enum`/`union`/alias instances with methods, generic methods and
 recursive structs), comptime value parameters (`Matrix[T, N: comptime u64]`),
 type parameter packs including `<...Args>` type expansion, `extends` structure
@@ -156,9 +156,8 @@ hashes and native artifact hashes. `clux build --locked` / `clux install
 --locked` verify that lockfile before proceeding.
 
 `--emit-c` writes the generated C (and headers) without compiling/linking;
-`--keep-c` keeps it for inspection after a normal build/run/test. `.cxb` /
-`.cxs` bytecode inputs and the `clux eval` / `clux bc` commands were removed
-with the VM executor.
+`--keep-c` keeps it for inspection after a normal build/run/test. Only `.cx`
+source files are accepted.
 
 Exit codes: `0` success, `1` compile error (unreadable file, lexical / syntax /
 semantic error) or runtime error. `clux run` (source) and the executables
