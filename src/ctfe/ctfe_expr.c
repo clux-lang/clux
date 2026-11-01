@@ -64,6 +64,7 @@
 #include "vm/type_slice.h"
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
+#include "vm/ctfe_mem.h"
 #include "vm/value.h"
 
 /* ===========================================================================
@@ -1249,6 +1250,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
            INDEX_GET 语义一致）。indices 由 sema 保证单索引。 */
         value_t *self = ctfe_eval(ctx, n->object);
         if (value_is_error(vm, self)) return self;
+        /* 逃逸指针诊断：容器基址可能已随所属作用域释放（数组切片逃逸 /
+           指针解引用）——vtable 直接按 slice_value_t.ptr 读元素，先校验。 */
+        const type_t *ot = value_type(self);
+        ot = ot ? type_strip_quals(ot) : NULL;
+        if (ot && type_is_slice(ot)) {
+            const char *uaf = ctfe_mem_check(slice_view(self).ptr);
+            if (uaf) return ctfe_err(ctx, uaf);
+        } else if (ot && type_is_ptr(ot)) {
+            const char *uaf = ctfe_mem_check(ptr_value_target(self));
+            if (uaf) return ctfe_err(ctx, uaf);
+        }
         value_t *index = ctfe_eval(ctx, n->indices);
         if (value_is_error(vm, index)) return index;
         return value_get_index(vm, self, index);

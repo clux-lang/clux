@@ -86,3 +86,76 @@ CTFE 错误目前是无位置信息的字符串（经 error value 传播）。�
 
 > 2026-10-22 复核：所有权升级（P0–P3f）后 CTFE 仍无需联动改动；A/B/C/E 仍未做，
 > D 已由 `m7-design.md` 定稿。
+
+---
+
+## 5. 逃逸指针的 use-after-free 诊断（2026-11）
+
+### 5.1 问题
+
+CTFE 的解释模型是"真实 data 块 + 真实指针"（`vm/value.h`），所以编译期代码可以
+把存储地址带出它的生命周期：
+
+```clux
+comptime func f(): i32 {
+  var p: *i32 = undefined;
+  { var x: i32 = 5; p = x.&; }   /* x 的数据块在块退出时被释放 */
+  return p.*;                     /* 编译器进程内的 use-after-free */
+}
+```
+
+修复前这里读到的是**已释放的堆内存**（实测折叠出一个垃圾常量，偶发崩溃）——
+是编译器自身的内存错误，而不是"用户的程序错了"。
+
+### 5.2 为什么不给指针编码
+
+最直接的想法是让 `value->data` 存放句柄（tagged pointer / 全局表索引）。否掉的原因：
+
+- 区分"句柄 vs 真实指针"不能靠最低位奇偶——**借用视图的 data 是指向父块内部的
+  中间地址，完全可能是奇数**；引擎内部指针同理。
+- 句柄一旦引入，`value_t` 的所有读者（`value_data` 之外还有 `scope`/`clone`/
+  `ptr_free_recursive`/闭包 env 等直接读 `->data` 的位置）都要改，回归面太大。
+
+### 5.3 实现：归属登记表（`vm/ctfe_mem.{h,c}`）
+
+不做指针编码，改为登记**归属**：
+
+| 步骤 | 调用点 | 作用 |
+| --- | --- | --- |
+| 取地址 | `ctfe_addr_of` / `data()` / 切片基址 | `ctfe_mem_note_addr(addr, owner)`：addr 记到存储块 owner 名下，owner 标 alive |
+| 释放块 | `value_dispose`（data 块 free 之前） | `ctfe_mem_on_free(base)`：该块标 dead |
+| 解引用 | `p.*` / `p.f` / `a[i]`（切片/指针）/ `*T` 方法接收者 | `ctfe_mem_check(target)`：命中 dead 块 → 诊断 |
+
+- 两张按地址精确查找的哈希表（块表 base→alive、归属表 addr→base），O(1)，
+  只在"被取过地址"的块上工作，普通值路径零开销。
+- 块**不延迟释放**，所以不会累积内存；地址被后续分配复用时，重新取址会把块
+  重新标 alive（只可能漏报，不会误报）。
+- 登记表在 `vm_destroy` 里 `ctfe_mem_reset()`：一个编译一个 vm，避免跨编译的
+  地址复用造成误判。
+- 登记上限 200 万项（约 32MB），超过后停用登记——只降低诊断精度，不影响语义。
+
+诊断形态（`build/tmp/uaf1.cx` 之类程序）：
+
+```
+error: ... ctfe: use-after-free: dereferencing 0x..., whose storage block 0x...
+has already been released (the pointer escaped the lifetime of its owner)
+```
+
+### 5.4 覆盖范围与已知缺口
+
+已覆盖：块内局部变量取址后逃逸、函数返回局部变量地址、局部数组切片逃逸、
+`data(局部数组)` 逃逸、`*T` 接收者指向已释放对象。
+
+未覆盖（**漏报**，非误报）：指针算术（`p + 1`）后再解引用、把地址塞进别处
+再取出（地址值本身仍会被查到，前提是同一地址值），以及完全没有被 CTFE
+"取过地址"的内存。
+
+### 5.5 不变式（改动 CTFE 取值路径时遵守）
+
+1. 任何**从指针值得到存储地址**的位置都必须先 `ctfe_mem_check`。
+2. 任何**产出指针值**的位置都必须 `ctfe_mem_note_addr`（并带上真实块基址）。
+3. `ctfe_lval_t.owner` 承载块基址，字段/下标/解包/解引用都要传递它——
+   owner 丢了只会降低诊断精度，但不要传成"中间地址"，否则会把块身份记错。
+4. `value_dispose` 是 data 块的唯一释放点，`ctfe_mem_on_free` 必须在那里
+   （其它 `allocator_free` 都是引擎内部对象，不承载用户可见地址）。
+

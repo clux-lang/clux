@@ -28,6 +28,7 @@
 #include "vm/type_struct.h"
 #include "vm/type_tuple.h"
 #include "vm/type_union.h"
+#include "vm/ctfe_mem.h"
 #include "vm/value.h"
 
 /* ===========================================================================
@@ -201,15 +202,28 @@ value_t *ctfe_is_member(ctfe_ctx_t *ctx, ast_binary_t *b) {
 /* ------------------------------------------------------------- 左值定位 */
 
 typedef struct {
-    void         *addr; /* 存储地址（编译期值的 data 块内部） */
-    const type_t *type; /* 该位置的静态类型 */
+    void         *addr;  /* 存储地址（编译期值的 data 块内部） */
+    const type_t *type;  /* 该位置的静态类型 */
+    void         *owner; /* 所属存储块基址（逃逸指针归属登记；NULL = 未知） */
 } ctfe_lval_t;
+
+/* 归属登记用的块基址：未显式携带时退回当前地址（保守：以该位置为块身份）。 */
+static void *lv_owner(const ctfe_lval_t *lv) {
+    return lv->owner ? lv->owner : lv->addr;
+}
+
+/* 解引用前校验目标地址：逃逸到已释放存储块的指针 → 诊断（NULL = 通过）。
+   每个"从指针值得到存储地址"的位置都必须调用。 */
+static const char *uaf_check(void *target) {
+    return ctfe_mem_check(target);
+}
 
 /* 在 base(type t @ addr) 上定位成员 `name`：struct 字段 / union 成员（tag
  * 校验）/ cunion 成员；指针类型先自动解引用一层（与运行期 `p.field` 一致）。
  * 返回 0 = 错误（*err 已置），1 = 成功。 */
 static int ctfe_field_slot(ctfe_ctx_t *ctx, const type_t *t, void *addr,
-                           strslice_t name, ctfe_lval_t *out, value_t **err) {
+                           void *owner, strslice_t name, ctfe_lval_t *out,
+                           value_t **err) {
     if (!t || !addr) {
         *err = ctfe_err(ctx, "ctfe: cannot access member of an empty value");
         return 0;
@@ -222,8 +236,15 @@ static int ctfe_field_slot(ctfe_ctx_t *ctx, const type_t *t, void *addr,
                              (int)name.len, name.ptr);
             return 0;
         }
+        const char *uaf = uaf_check(target);
+        if (uaf) {
+            *err = ctfe_err(ctx, uaf);
+            return 0;
+        }
         t = type_strip_quals(ptr_type_base(t));
         addr = target;
+        owner = ctfe_mem_owner_of(target);
+        if (!owner) owner = target;
     }
     if (!t) {
         *err = ctfe_err(ctx, "ctfe: pointer has no pointee type");
@@ -244,6 +265,7 @@ static int ctfe_field_slot(ctfe_ctx_t *ctx, const type_t *t, void *addr,
         }
         out->type = f->type;
         out->addr = (uint8_t *)addr + f->offset;
+        out->owner = owner ? owner : addr;
         return 1;
     }
     if (type_kind_of(t) == TYPE_KIND_UNION) {
@@ -270,6 +292,7 @@ static int ctfe_field_slot(ctfe_ctx_t *ctx, const type_t *t, void *addr,
         }
         out->type = m->payload_type;
         out->addr = (uint8_t *)addr + union_type_payload_offset(t);
+        out->owner = owner ? owner : addr;
         return 1;
     }
     if (type_kind_of(t) == TYPE_KIND_CUNION) {
@@ -287,6 +310,7 @@ static int ctfe_field_slot(ctfe_ctx_t *ctx, const type_t *t, void *addr,
         }
         out->type = m->type;
         out->addr = addr; /* 所有成员共享 offset 0 */
+        out->owner = owner ? owner : addr;
         return 1;
     }
     *err = ctfe_errf(ctx, "ctfe: cannot access member '%.*s' of value of type %s",
@@ -317,6 +341,7 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
         }
         out->addr = value_data(v);
         out->type = value_type(v);
+        out->owner = value_data(v);
         return out->addr && out->type ? 1 : 0;
     }
     case AST_MEMBER: {
@@ -329,7 +354,8 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
             return -1;
         }
         if (rc == 0) return 0; /* 接收者是右值：由调用方按值读取 */
-        if (!ctfe_field_slot(ctx, base.type, base.addr, m->field, out, err))
+        if (!ctfe_field_slot(ctx, base.type, base.addr, lv_owner(&base), m->field,
+                             out, err))
             return -1;
         return 1;
     }
@@ -365,6 +391,7 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
             }
             out->type = et;
             out->addr = (uint8_t *)base.addr + (size_t)idx * et->size;
+            out->owner = lv_owner(&base);
             return 1;
         }
         if (type_kind_of(t) == TYPE_KIND_TUPLE) {
@@ -380,6 +407,7 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
             }
             out->type = te->type;
             out->addr = (uint8_t *)base.addr + te->offset;
+            out->owner = lv_owner(&base);
             return 1;
         }
         if (type_is_slice(t)) {
@@ -395,8 +423,15 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
                 *err = ctfe_err(ctx, "ctfe: null slice");
                 return -1;
             }
+            const char *uaf = uaf_check(ptr);
+            if (uaf) {
+                *err = ctfe_err(ctx, uaf);
+                return -1;
+            }
             out->type = et;
             out->addr = (uint8_t *)ptr + (size_t)idx * et->size;
+            out->owner = ctfe_mem_owner_of(ptr);
+            if (!out->owner) out->owner = ptr;
             return 1;
         }
         return 0;
@@ -418,8 +453,15 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
             *err = ctfe_err(ctx, "ctfe: null pointer dereference");
             return -1;
         }
+        const char *uaf = uaf_check(target);
+        if (uaf) {
+            *err = ctfe_err(ctx, uaf);
+            return -1;
+        }
         out->type = ptr_type_base(pt);
         out->addr = target;
+        out->owner = ctfe_mem_owner_of(target);
+        if (!out->owner) out->owner = target;
         return 1;
     }
     case AST_UNWRAP: {
@@ -443,6 +485,7 @@ static int ctfe_lval(ctfe_ctx_t *ctx, ast_node_t *e, ctfe_lval_t *out,
         }
         out->type = type_option_inner(t);
         out->addr = option_value(base.addr, t);
+        out->owner = lv_owner(&base);
         return 1;
     }
     default:
@@ -465,8 +508,8 @@ value_t *ctfe_member_get(ctfe_ctx_t *ctx, ast_member_t *m) {
         if (value_is_shadow(ov))
             return ctfe_err(ctx, "ctfe: receiver is not a compile-time value");
         value_t *ferr = NULL;
-        if (!ctfe_field_slot(ctx, value_type(ov), value_data(ov), m->field, &lv,
-                             &ferr))
+        if (!ctfe_field_slot(ctx, value_type(ov), value_data(ov), value_data(ov),
+                             m->field, &lv, &ferr))
             return ferr;
     }
     return ctfe_load(ctx, lv.type, lv.addr);
@@ -541,6 +584,8 @@ value_t *ctfe_deref(ctfe_ctx_t *ctx, ast_node_t *operand) {
         return ctfe_err(ctx, "ctfe: dereference requires a pointer");
     void *target = ptr_value_target(pv);
     if (!target) return ctfe_err(ctx, "ctfe: null pointer dereference");
+    const char *uaf = uaf_check(target);
+    if (uaf) return ctfe_err(ctx, uaf);
     return ctfe_load(ctx, ptr_type_base(pt), target);
 }
 
@@ -569,11 +614,16 @@ value_t *ctfe_addr_of(ctfe_ctx_t *ctx, ast_node_t *addr_node) {
         const type_t *pt = type_ptr_intern(vm, t);
         if (!pt) return ctfe_err(ctx, "ctfe: cannot intern pointer type");
         if (ctx->sema) sema_type_register(ctx->sema, pt);
+        /* 物化副本的地址同样可能逃逸：登记归属（副本随作用域销毁后失效）。 */
+        ctfe_mem_note_addr(value_data(copy), value_data(copy));
         return ptr_make_value(vm, pt, value_data(copy));
     }
     const type_t *pt = type_ptr_intern(vm, lv.type);
     if (!pt) return ctfe_err(ctx, "ctfe: cannot intern pointer type");
     if (ctx->sema) sema_type_register(ctx->sema, pt);
+    /* 登记取址结果的归属存储块：块被 value_dispose 释放后，任何仍指向
+       该地址的指针再被解引用都会被诊断（逃逸指针 use-after-free）。 */
+    ctfe_mem_note_addr(lv.addr, lv_owner(&lv));
     return ptr_make_value(vm, pt, lv.addr);
 }
 
@@ -589,15 +639,19 @@ value_t *ctfe_slice_expr(ctfe_ctx_t *ctx, ast_slice_t *sl) {
 
     const type_t *elem = NULL;
     void *base = NULL;
+    void *owner = NULL; /* 切片基址的归属存储块（str 字面量不参与登记） */
     uint64_t n = 0;
     if (type_kind_of(t) == TYPE_KIND_ARRAY) {
         elem = array_type_elem(t);
         base = value_data(obj);
+        owner = base;
         n = (uint64_t)array_type_len(t);
     } else if (type_is_slice(t)) {
         slice_value_t sv = slice_view(obj);
         elem = slice_type_elem(t);
         base = sv.ptr;
+        owner = ctfe_mem_owner_of(sv.ptr);
+        if (!owner) owner = sv.ptr;
         n = sv.len;
     } else if (type_kind_of(t) == TYPE_KIND_STR) {
         const char *s = *(const char *const *)value_data(obj);
@@ -629,8 +683,13 @@ value_t *ctfe_slice_expr(ctfe_ctx_t *ctx, ast_slice_t *sl) {
                          (long long)lo, (long long)hi, (unsigned long long)n);
     const type_t *st = type_slice_intern(vm, elem);
     if (!st) return ctfe_err(ctx, "ctfe: cannot intern slice type");
-    return slice_make_value(vm, st, (uint8_t *)base + (size_t)lo * elem->size,
-                            (uint64_t)(hi - lo));
+    void *slice_base = (uint8_t *)base + (size_t)lo * elem->size;
+    if (lo < hi && owner) {
+        const char *uaf = uaf_check(slice_base);
+        if (uaf) return ctfe_err(ctx, uaf);
+        ctfe_mem_note_addr(slice_base, owner);
+    }
+    return slice_make_value(vm, st, slice_base, (uint64_t)(hi - lo));
 }
 
 value_t *ctfe_make_slice(ctfe_ctx_t *ctx, ast_make_t *mk) {
@@ -649,7 +708,14 @@ value_t *ctfe_make_slice(ctfe_ctx_t *ctx, ast_make_t *mk) {
         return ctfe_err(ctx, "ctfe: make() length must be a non-negative integer");
     const type_t *st = type_slice_intern(vm, elem);
     if (!st) return ctfe_err(ctx, "ctfe: cannot intern slice type");
-    return slice_make_value(vm, st, ptr_value_target(pv), (uint64_t)len);
+    void *base = ptr_value_target(pv);
+    if (base) {
+        const char *uaf = uaf_check(base);
+        if (uaf) return ctfe_err(ctx, uaf);
+        void *owner = ctfe_mem_owner_of(base);
+        ctfe_mem_note_addr(base, owner ? owner : base);
+    }
+    return slice_make_value(vm, st, base, (uint64_t)len);
 }
 
 /* --------------------------------------------------------------- 静态方法 */
@@ -738,6 +804,11 @@ value_t *ctfe_builtin_data(ctfe_ctx_t *ctx, ast_node_t *arg) {
     const type_t *pt = type_ptr_intern(vm, elem);
     if (!pt) return ctfe_err(ctx, "ctfe: cannot intern pointer type");
     if (ctx->sema) sema_type_register(ctx->sema, pt);
+    /* str 的字符缓冲不归 value data 块管理（字符串池/独立分配），不登记。 */
+    if (ptr && type_kind_of(t) != TYPE_KIND_STR) {
+        void *owner = ctfe_mem_owner_of(ptr);
+        ctfe_mem_note_addr(ptr, owner ? owner : value_data(v));
+    }
     return ptr_make_value(vm, pt, ptr);
 }
 
@@ -852,6 +923,8 @@ value_t *ctfe_method_call(ctfe_ctx_t *ctx, ast_call_t *call) {
         /* 接收者已经是指针：`*T` self 要的是**被指向对象**的地址（pointee），
            不能把指针变量自己的槽位地址传进去（那会变成 **T）。 */
         self_addr = ptr_value_target(recv);
+        const char *uaf = uaf_check(self_addr);
+        if (uaf) return ctfe_err(ctx, uaf);
         st = type_strip_quals(ptr_type_base(st));
     }
     if (!st || type_kind_of(st) != TYPE_KIND_STRUCT) return NULL;

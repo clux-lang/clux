@@ -15,6 +15,7 @@
 #include "vm/value.h"
 #include "vm/function.h"
 #include "vm/scope.h"
+#include "vm/ctfe_mem.h"
 #include "core/panic.h"
 #include "core/vec.h"
 
@@ -470,6 +471,10 @@ void vm_destroy(vm_t **pvm) {
 
     /* 类型 id 表：元素归各类型池，仅释放向量结构 */
     vec_free(vm->alloc, &vm->types_by_id);
+
+    /* CTFE 逃逸指针归属登记表：按 vm 生命周期重置（所有作用域已销毁，
+       登记项不再有意义；跨编译残留会因地址复用造成误判）。 */
+    ctfe_mem_reset();
 
     allocator_free(vm->alloc, (void **)pvm);
 }

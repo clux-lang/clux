@@ -624,3 +624,87 @@ TEST(DriverComptime, SliceOutOfBoundsRejected) {
       "func main(): i32 { return f(); }\n",
       "out of bounds", "ct_slice_oob");
 }
+
+/* ---- 逃逸指针：use-after-free 必须被诊断，而不是读到已释放内存 ---- */
+
+TEST(DriverComptime, EscapedPointerAfterScopeExitRejected) {
+  /* 内层块的局部变量地址逃逸到外层变量：块退出后 data 块已释放，
+     `p.*` 不能读到垃圾值（编译器进程内的 use-after-free）。 */
+  clux_expect_reject(
+      "comptime func f(): i32 {\n"
+      "  var p: *i32 = undefined;\n"
+      "  {\n"
+      "    var x: i32 = 5;\n"
+      "    p = x.&;\n"
+      "  }\n"
+      "  return p.*;\n"
+      "}\n"
+      "func main(): i32 { return f(); }\n",
+      "use-after-free", "ct_uaf_scope");
+}
+
+TEST(DriverComptime, EscapedPointerFromReturnedLocalRejected) {
+  /* 返回局部变量地址：callee 作用域 pop 后存储块释放，调用方解引用即 UAF。 */
+  clux_expect_reject(
+      "comptime func g(): *i32 {\n"
+      "  var x: i32 = 7;\n"
+      "  return x.&;\n"
+      "}\n"
+      "comptime func f(): i32 {\n"
+      "  var p: *i32 = g();\n"
+      "  return p.*;\n"
+      "}\n"
+      "func main(): i32 { return f(); }\n",
+      "use-after-free", "ct_uaf_return");
+}
+
+TEST(DriverComptime, EscapedSliceFromReturnedLocalRejected) {
+  /* 数组切片的基址指向局部数组（视图不复制）：数组释放后 s[0] 是 UAF。 */
+  clux_expect_reject(
+      "comptime func gs(): []i32 {\n"
+      "  var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
+      "  return a[0:3];\n"
+      "}\n"
+      "comptime func fs(): i32 {\n"
+      "  var s: []i32 = gs();\n"
+      "  return s[0];\n"
+      "}\n"
+      "func main(): i32 { return fs(); }\n",
+      "use-after-free", "ct_uaf_slice");
+}
+
+TEST(DriverComptime, DataPointerOfReturnedLocalArrayRejected) {
+  /* data(arr) 返回首元素指针，随局部数组一起失效。 */
+  clux_expect_reject(
+      "comptime func gd(): *i32 {\n"
+      "  var a: [2]i32 = .[2]i32{ 9, 8 };\n"
+      "  return data(a);\n"
+      "}\n"
+      "comptime func fd(): i32 {\n"
+      "  var p: *i32 = gd();\n"
+      "  return p.*;\n"
+      "}\n"
+      "func main(): i32 { return fd(); }\n",
+      "use-after-free", "ct_uaf_data");
+}
+
+TEST(DriverComptime, PointerIntoOuterStorageSurvivesInnerScope) {
+  /* 正例：取外层变量 / 结构体字段的地址，内层作用域退出不影响它 ——
+     逃逸诊断只针对**块已释放**的情况，不能误伤普通取址。 */
+  clux_expect_program_ok(
+      "struct S { a: i32; b: i32; }\n"
+      "comptime func ok_field(): i32 {\n"
+      "  var s: S = .S{ .a = 3, .b = 4 };\n"
+      "  var p: *i32 = s.b.&;\n"
+      "  { var y: i32 = 1; y = y + 1; }\n"
+      "  return p.* - 4;\n"
+      "}\n"
+      "comptime func ok_outer(): i32 {\n"
+      "  var x: i32 = 5;\n"
+      "  var p: *i32 = x.&;\n"
+      "  { var y: i32 = 1; y = y + 1; }\n"
+      "  return p.* - 5;\n"
+      "}\n"
+      "func main(): i32 { return ok_field() + ok_outer(); }\n",
+      "ct_uaf_ok");
+}

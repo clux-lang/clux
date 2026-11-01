@@ -5,6 +5,7 @@
 #include "vm/type_option.h"
 #include "vm/type_ptr.h"   /* ptr_clear_recursive（fatal 接管转换用） */
 #include "vm/value_compound_assign.h" /* compound_assign_transfer */
+#include "vm/ctfe_mem.h"              /* ctfe_mem_on_free（逃逸指针诊断） */
 #include "vm/str_pool.h"
 #include "core/panic.h"
 
@@ -404,8 +405,10 @@ void value_dispose(vm_t *vm, value_t *v) {
                 if (v->type->vtable && v->type->vtable->dispose) {
                     v->type->vtable->dispose(vm, v);
                 }
-                /* 释放 data 块 */
+                /* 释放 data 块。先通知 CTFE 归属登记（逃逸指针诊断：
+                   该块从此 dead，任何仍指向它的指针再解引用都会报错）。 */
                 if (v->data) {
+                    ctfe_mem_on_free(v->data);
                     allocator_free(vm->alloc, (void **)&v->data);
                 }
             }
