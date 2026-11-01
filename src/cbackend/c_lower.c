@@ -435,19 +435,21 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         cir_unit_add_global(u, g);
     }
 
+    /* ---- struct 方法：先**预登记**，再 lower 方法体 ----
+       方法调用与返回类型推断都依赖 find_method 表；如果边 lower 方法体边登记，
+       "先调用、后声明"的方法（`func a() { self.b(); } func b() {...}`）在 lowercase
+       a 时查不到 b，会退化成自由函数调用（`<prefix>fn_b` → 链接错误），也会让
+       optional 赋值把已是 ?T 的调用结果再包一层。C 函数名是确定性的
+       （`<prefix>fn___method_<typeId>_<name>`），所以可以先算出来登记。 */
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_STRUCT_DEF) continue;
         ast_struct_def_t *sd = (ast_struct_def_t *)n;
-        /* 模板 struct 不是实例，不生成代码（与 VM compiler 的
-           `generic.count > 0` 跳过一致）。sema 会把每个用到的类型实例重新
-           解析成**具体** struct（名字含 `$`，generic.count == 0）并追加到
-           prog->funcs，实例方法就在其中。 */
+        /* 模板 struct 不是实例，不生成代码（sem a 会把用到的实例具化成
+           generic.count == 0 的具体 struct 追加到 prog->funcs）。 */
         if (sd->generic.count > 0) continue;
         for (ast_node_t *mem = sd->members; mem; mem = mem->next) {
             if (mem->kind != AST_FUNC_DEF) continue;
             ast_func_def_t *m = (ast_func_def_t *)mem;
-            /* 泛型方法模板（`func map[U]`）：调用点由 sema 实例化，模板不生成
-               代码。 */
             if (m->generic.count > 0 || m->is_comptime) continue;
             strslice_t orig = m->name;
             char mb[256];
@@ -458,18 +460,30 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
             if (!cname) return NULL;
             memcpy(cname, mb, mn + 1);
             m->name = strslice_from_bytes(cname, mn);
-            cir_function_t *cf = lower_function(&lc, m, false);
-            if (!cf || lc.failed) return NULL;
-            cir_unit_add_function(u, cf);
             lower_method_t *lm = (lower_method_t *)arena_calloc(
                 arena, 1, sizeof(*lm), ALIGNOF(max_align_t));
             if (!lm) return NULL;
             lm->name = orig;
             lm->owner_id = sd->type_id;
             lm->def = m;
-            lm->cname = cf->name;
+            lm->cname = module_symbol(arena, u, "fn_", m->name);
             lm->next = lc.methods;
             lc.methods = lm;
+        }
+    }
+
+    /* ---- struct 方法体：按成员声明顺序 lower ---- */
+    for (ast_node_t *n = prog->funcs; n; n = n->next) {
+        if (n->kind != AST_STRUCT_DEF) continue;
+        ast_struct_def_t *sd = (ast_struct_def_t *)n;
+        if (sd->generic.count > 0) continue;
+        for (ast_node_t *mem = sd->members; mem; mem = mem->next) {
+            if (mem->kind != AST_FUNC_DEF) continue;
+            ast_func_def_t *m = (ast_func_def_t *)mem;
+            if (m->generic.count > 0 || m->is_comptime) continue;
+            cir_function_t *cf = lower_function(&lc, m, false);
+            if (!cf || lc.failed) return NULL;
+            cir_unit_add_function(u, cf);
         }
     }
 

@@ -2778,3 +2778,47 @@ TEST(CBackend, MockCrossModuleFreeFunctionAndMethod) {
                      "--backend=c"}),
             0);
 }
+/* C 后端先登记所有 struct 方法、再 lower 方法体：方法调用与返回类型推断不能
+   依赖"方法声明在调用点之前"。否则 `set_it` 调后面声明的 `give` 会退化成
+   自由函数调用（链接错误），optional 字段赋值还会把已是 `?T` 的结果再包一层。 */
+TEST(CBackend, MethodDeclaredAfterCaller) {
+  const std::string src = write_temp_file(
+      "struct S {\n"
+      "  o: ?i32;\n"
+      "  func set_it(self: *S): void { self.o = self.give(); }\n"
+      "  func give(self: *S): ?i32 { return 7; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{ .o = nil };\n"
+      "  s.set_it();\n"
+      "  if (s.o == nil) { return 1; }\n"
+      "  return s.o.! - 7;\n"
+      "}\n",
+      "cb_method_order");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+/* 同一问题的另一种形态：optional 字段 = 返回 `?T` 的方法调用（方法后声明），
+   不能生成 `opt{ .ok = true, .value = <opt> }` 这种双重包装。 */
+TEST(CBackend, OptionalFieldFromLaterMethod) {
+  const std::string src = write_temp_file(
+      "struct S {\n"
+      "  o: ?i32;\n"
+      "  func fill(self: *S): void { self.o = self.pick(3); }\n"
+      "  func pick(self: *S, n: i32): ?i32 { return n; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{ .o = nil };\n"
+      "  s.fill();\n"
+      "  if (s.o == nil) { return 1; }\n"
+      "  return s.o.! - 3;\n"
+      "}\n",
+      "cb_opt_later_method");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
