@@ -203,3 +203,32 @@ test "types.sizeofTypeExpressions" {
     assert(sizeof([3]i32) == 12usize);
     assert(alignof(*i64) == alignof(usize));
 }
+
+test "types.optionalValueConstruction" {
+    // ?T 直接接受 T 值与 nil（所有初始化位置），不需要写 .?T{...}
+    var a: ?i32 = 123;
+    var b: ?i32 = nil;
+    assert(a.! == 123);
+    assert(b == nil);
+    assert(take_opt_i32(7) == 7);
+    assert(take_opt_i32(nil) == -1);
+    var s: OptHolder = .OptHolder{ .o = 5 };
+    assert(s.o.! == 5);
+    var f: ?i32 = give_opt(9);
+    assert(f.! == 9);
+}
+
+struct OptHolder {
+    o: ?i32;
+}
+
+func take_opt_i32(o: ?i32): i32 {
+    if (o == nil) {
+        return -1;
+    }
+    return o.!;
+}
+
+func give_opt(v: i32): ?i32 {
+    return v;
+}

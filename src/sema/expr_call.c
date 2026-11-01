@@ -800,6 +800,37 @@ static bool try_explicit_generic_static_method_call(sema_t *sema,
 }
 
 
+/* 形参是 `?P`、实参是 P 的隐式转换：把它显式包成 `.?P{ arg }`。
+   语义上一直允许（value_call 做隐式转换），但 C 后端只在变量 / 字段 / 返回
+   位置生成 optional 包装；调用实参若仍保持隐式，生成的 C 会把裸值直接传给
+   optional 形参（passing 'int' to parameter of incompatible type
+   'struct clux_..._opt_..'）。`nil` 实参自带目标类型，不在这里处理。 */
+static void wrap_optional_arg(sema_t *sema, ast_node_t **slot,
+                              const type_t *pt) {
+  if (!sema || !slot || !*slot || !pt) return;
+  const type_t *p = type_strip_quals(pt);
+  if (!p || type_kind_of(p) != TYPE_KIND_OPTION) return;
+  ast_node_t *arg = *slot;
+  const type_t *inner = type_option_inner(p);
+  if (!inner) return;
+  ast_node_t *tref = sema_ct_type_ref(sema, inner, arg);
+  if (!tref) return;
+  ast_node_t *opt = ast_option_new(sema->arena, arg->tok_begin, arg->tok_end);
+  if (!opt) return;
+  ((ast_option_t *)opt)->sub = tref;
+  ast_node_t *ctor = ast_construct_new(sema->arena, arg->tok_begin,
+                                       arg->tok_end);
+  if (!ctor) return;
+  ast_node_t *next = arg->next;
+  arg->next = NULL;
+  ((ast_construct_t *)ctor)->type = opt;
+  ((ast_construct_t *)ctor)->fields = arg;
+  ((ast_construct_t *)ctor)->fields_last = arg;
+  ctor->is_generated = true;
+  ctor->next = next;
+  *slot = ctor;
+}
+
 value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
 
@@ -1626,6 +1657,8 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       size_t i = 0;
       for (; *link; link = &(*link)->next, i++) {
         const type_t *pt = fnt ? func_type_param(fnt, i) : NULL;
+        /* (nil)：nil 自带目标类型 → 先包成 .?P{nil} 再求值。 */
+        if (pt && (*link)->kind == AST_NIL) wrap_optional_arg(sema, link, pt);
         bool ct_pushed = sema_anon_push(sema, pt);
         arg_shadows[i] = sema_expr(sema, link, scope);
         sema_anon_pop(sema, ct_pushed);
@@ -1636,7 +1669,24 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           bool conv = false;
           value_t *nv = sema_magic_init_convert(
               sema, link, value_type(arg_shadows[i]), pt, scope, &conv);
-          if (conv) arg_shadows[i] = nv ? nv : val_void(sema);
+          if (conv) {
+            arg_shadows[i] = nv ? nv : val_void(sema);
+          } else if (arg_shadows[i] &&
+                     !value_is_error(sema->vm, arg_shadows[i])) {
+            /* `?P` 形参 + P 实参：显式包成 `.?P{arg}`，让 C 后端生成包装。 */
+            const type_t *p = type_strip_quals(pt);
+            const type_t *at = value_type(arg_shadows[i]);
+            const type_t *inner = (p && type_kind_of(p) == TYPE_KIND_OPTION)
+                                      ? type_option_inner(p)
+                                      : NULL;
+            if (inner && at && type_strip_quals(at) != p) {
+              value_t *probe = value_make_shadow(sema->vm, at);
+              if (probe &&
+                  !value_is_error(sema->vm,
+                                  value_implicit_cast(sema->vm, probe, inner)))
+                wrap_optional_arg(sema, link, pt);
+            }
+          }
         }
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
