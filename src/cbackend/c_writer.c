@@ -211,8 +211,12 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "#include <string.h>\n");
     if (unit->uses_index_check || unit->uses_slice_check ||
         unit->uses_union_check || unit->uses_panic || unit->test_runner ||
-        unit->tests)
+        unit->tests) {
         cw_put(sb, "#include <stdio.h>\n");
+    }
+    /* 测试运行器的断言失败跳转（setjmp/longjmp）。 */
+    if (unit->test_runner || unit->tests)
+        cw_put(sb, "#include <setjmp.h>\n");
     cw_put_callconv_macro(sb);
     if (unit->test_runner || unit->tests) {
         /* 断言运行时用 `struct clux_str` 传消息：测试单元无条件给出定义
@@ -225,9 +229,9 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     }
     if (unit->test_runner) {
         /* 跨模块共享的失败跳转点（各模块的 clux_assert 都 longjmp 到这里）。 */
-        cw_put(sb, "void *clux_test_fail[5];\n");
+        cw_put(sb, "jmp_buf clux_test_fail;\n");
     } else if (unit->tests) {
-        cw_put(sb, "extern void *clux_test_fail[5];\n");
+        cw_put(sb, "extern jmp_buf clux_test_fail;\n");
         cw_put(sb,
                "extern void clux_assert(bool cond, struct clux_str text);\n");
     }
@@ -370,7 +374,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "    printf(\"assert failed: %.*s\\n\", (int)text.len,"
                    " text.data ? text.data : \"\");\n");
         cw_put(sb, "    fflush(NULL);\n");
-        cw_put(sb, "    __builtin_longjmp(clux_test_fail, 1);\n");
+        cw_put(sb, "    longjmp(clux_test_fail, 1);\n");
         cw_put(sb, "}\n\n");
     }
 
@@ -516,7 +520,8 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         /* 无参数：进程内依次跑全部用例；断言失败 longjmp 回来继续下一条。 */
         cw_put(sb, "    size_t total = sizeof clux_test_fns / sizeof "
                    "clux_test_fns[0];\n");
-        cw_put(sb, "    size_t failed = 0, passed = 0, suites = 0;\n");
+        cw_put(sb, "    volatile size_t failed = 0, passed = 0;\n");
+        cw_put(sb, "    size_t suites = 0;\n");
         cw_put(sb, "    for (size_t i = 0; i < total; i++) {\n");
         cw_put(sb, "        size_t n = 0;\n");
         cw_put(sb, "        while (clux_test_names[i][n] && "
@@ -533,12 +538,12 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "    }\n");
         cw_put(sb, "    printf(\"[==========] Running %zu tests from %zu test "
                    "suites.\\n\", total, suites);\n");
-        cw_put(sb, "    for (size_t i = 0; i < total; i++) {\n");
+        cw_put(sb, "    for (volatile size_t i = 0; i < total; i++) {\n");
         cw_put(sb, "        const char *name = clux_test_names[i];\n");
         cw_put(sb, "        printf(\"[ RUN      ] %s\\n\", name);\n");
         cw_put(sb, "        fflush(NULL);\n");
         if (unit->tests) cw_put(sb, "        clux_mock_reset_all();\n");
-        cw_put(sb, "        if (__builtin_setjmp(clux_test_fail) == 0) {\n");
+        cw_put(sb, "        if (setjmp(clux_test_fail) == 0) {\n");
         cw_put(sb, "            clux_test_fns[i](NULL);\n");
         cw_put(sb, "            printf(\"[       OK ] %s\\n\", name);\n");
         cw_put(sb, "            passed++;\n");
