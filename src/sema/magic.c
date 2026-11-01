@@ -38,6 +38,8 @@ static const sema_magic_entry_t k_magic[] = {
     {"__gt__", SEMA_MAGIC_GT, 2, true, false, false, true, false, false},
     {"__ge__", SEMA_MAGIC_GE, 2, true, false, false, true, false, false},
     {"__index__", SEMA_MAGIC_INDEX, 2, false, false, true, false, false, false},
+    /* a[lo:hi]：两个边界实参总会被提供（缺省下界 = 0，缺省上界 = len(a)）。 */
+    {"__slice__", SEMA_MAGIC_SLICE, 3, false, false, false, false, false, false},
     {"__len__", SEMA_MAGIC_LEN, 1, false, true, false, false, false, false},
     {"__deref__", SEMA_MAGIC_DEREF, 1, false, false, true, false, false, false},
     {"__dispose__", SEMA_MAGIC_DISPOSE, 1, false, false, false, false, true, false},

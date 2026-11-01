@@ -53,6 +53,7 @@ typedef enum {
     SEMA_MAGIC_GT,    /* a > b  */
     SEMA_MAGIC_GE,    /* a >= b */
     SEMA_MAGIC_INDEX, /* a[i]   */
+    SEMA_MAGIC_SLICE, /* a[lo:hi] */
     SEMA_MAGIC_LEN,   /* len(a) */
     SEMA_MAGIC_DEREF, /* a.x / a.* 的成员回退 */
     SEMA_MAGIC_DISPOSE, /* `using a = ...;` 的作用域退出调用（不是析构） */

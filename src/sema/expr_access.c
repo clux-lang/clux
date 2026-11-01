@@ -886,6 +886,81 @@ value_t *ex_slice(sema_t *sema, ast_node_t **node,
       const type_t *bt = value_type(base);
       if (!bt) return val_void(sema);
 
+      /* 魔法切片：`a[lo:hi]` ⇒ `a.__slice__(lo, hi)`（值返回，不额外解引用）。
+         两个边界实参**总是**有值：缺省下界补 `0`，缺省上界补 `len(a)`
+         （因此省略上界要求该类型实现 `__len__`）。
+         边界形参必须是 `usize`（与原生切片一致）；整数字面量边界会自动带上
+         `usize` 后缀，所以 `x[1:3]` 不需要写成 `x[1usize:3usize]`。 */
+      {
+        const type_t *btc = type_strip_quals(bt);
+        sema_symbol_t *sm = NULL;
+        if (btc && type_kind_of(btc) == TYPE_KIND_STRUCT)
+          sm = sema_magic_member(sema, btc, "__slice__");
+        if (sm) {
+          uint32_t tb = (*node)->tok_begin, te = (*node)->tok_end;
+          const type_t *ft = sm->type ? type_strip_quals(sm->type) : NULL;
+          const type_t *p_lo = NULL, *p_hi = NULL;
+          if (ft && type_kind_of(ft) == TYPE_KIND_FUNC &&
+              func_type_param_count(ft) == 3) {
+            p_lo = func_type_param(ft, 1);
+            p_hi = func_type_param(ft, 2);
+          }
+          if (!p_lo || !p_hi ||
+              type_strip_quals(p_lo) != vm_type_usize(sema->vm) ||
+              type_strip_quals(p_hi) != vm_type_usize(sema->vm)) {
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "magic method '__slice__' must take two 'usize' bound "
+                       "parameters: __slice__(self, lo: usize, hi: usize)");
+            return val_void(sema);
+          }
+          if (!n->high && !sema_magic_member(sema, btc, "__len__")) {
+            char tn[64];
+            sema_type_name(btc, tn, sizeof(tn));
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "slice with an omitted upper bound requires '%s::__len__' "
+                       "(the upper bound is passed as len(a))",
+                       tn);
+            return val_void(sema);
+          }
+          /* 整数字面量边界：补 usize 后缀（字面量适配 usize 形参）。 */
+          const strslice_t usize_name = STRSLICE_LIT("usize");
+          if (n->low && n->low->kind == AST_INT_LIT &&
+              ((ast_int_lit_t *)n->low)->type.len == 0)
+            ((ast_int_lit_t *)n->low)->type = usize_name;
+          if (n->high && n->high->kind == AST_INT_LIT &&
+              ((ast_int_lit_t *)n->high)->type.len == 0)
+            ((ast_int_lit_t *)n->high)->type = usize_name;
+          ast_node_t *lo = n->low;
+          if (!lo) {
+            lo = ast_int_lit_new(sema->arena, tb, te);
+            if (!lo) return val_void(sema);
+            ((ast_int_lit_t *)lo)->value = 0;
+            ((ast_int_lit_t *)lo)->type = usize_name;
+            lo->is_generated = true;
+          }
+          ast_node_t *hi = n->high;
+          if (!hi) {
+            ast_ident_t *lid = (ast_ident_t *)ast_ident_new(sema->arena, tb, te);
+            ast_node_t *lcall = ast_call_new(sema->arena, tb, te);
+            if (!lid || !lcall) return val_void(sema);
+            lid->name = strslice_from_cstr("len");
+            ((ast_call_t *)lcall)->callee = &lid->base;
+            ((ast_call_t *)lcall)->args = n->object;
+            ((ast_call_t *)lcall)->args_last = n->object;
+            lcall->is_generated = true;
+            hi = lcall;
+          }
+          lo->next = hi;
+          hi->next = NULL;
+          ast_node_t *call = sema_magic_make_call(
+              sema, n->object, "__slice__", lo, tb, te);
+          if (!call) return val_void(sema);
+          call->next = (*node)->next;
+          *node = call;
+          return sema_expr(sema, node, scope);
+        }
+      }
+
       /* 确定元素类型 + 基类合法性 */
       const type_t *et = NULL;
       if (type_kind_of(bt) == TYPE_KIND_ARRAY) {

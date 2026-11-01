@@ -888,3 +888,60 @@ TEST(Magic, ValueReceiverFailsAtCallSite) {
       "}\n",
       "cannot bind to the 'self' parameter", "magic_value_self");
 }
+
+/* `a[lo:hi]` 派发到 __slice__：两个边界实参总是有值（缺省下界 = 0，
+   缺省上界 = len(a)），所以省略上界要求实现 __len__。 */
+TEST(Magic, SliceDispatchAndDefaults) {
+  clux_expect_program_ok(
+      "struct Win {\n"
+      "  data: [4]i32;\n"
+      "  func __len__(self: *Win): usize { return 4usize; }\n"
+      "  func __slice__(self: *Win, lo: usize, hi: usize): []i32 {\n"
+      "    return self.data[lo:hi];\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var w: Win = .Win{ .data = .[4]i32{ 1, 2, 3, 4 } };\n"
+      "  var a: []i32 = w[:];\n"
+      "  if (len(a) != 4usize || a[0] != 1 || a[3] != 4) { return 1; }\n"
+      "  var m: []i32 = w[1:3];\n"
+      "  if (len(m) != 2usize || m[0] != 2 || m[1] != 3) { return 2; }\n"
+      "  var t: []i32 = w[2:];\n"
+      "  if (len(t) != 2usize || t[0] != 3) { return 3; }\n"
+      "  var h: []i32 = w[:2];\n"
+      "  if (len(h) != 2usize || h[1] != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n", "magic_slice_dispatch");
+}
+
+/* 省略上界但没有 __len__：无法补出 hi，明确诊断。 */
+TEST(Magic, SliceOmittedUpperBoundNeedsLen) {
+  clux_expect_reject(
+      "struct W2 {\n"
+      "  data: [2]i32;\n"
+      "  func __slice__(self: *W2, lo: usize, hi: usize): []i32 {\n"
+      "    return self.data[lo:hi];\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var w: W2 = .W2{ .data = .[2]i32{ 1, 2 } };\n"
+      "  var s: []i32 = w[0:];\n"
+      "  return len(s) as i32;\n"
+      "}\n", "omitted upper bound", "magic_slice_needs_len");
+}
+
+/* 边界形参必须是 usize：否则缺省值（0 / len(a)）无法按声明类型给出。 */
+TEST(Magic, SliceBoundsMustBeUsize) {
+  clux_expect_reject(
+      "struct W3 {\n"
+      "  data: [2]i32;\n"
+      "  func __slice__(self: *W3, lo: i32, hi: i32): []i32 {\n"
+      "    return self.data[0:2];\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var w: W3 = .W3{ .data = .[2]i32{ 1, 2 } };\n"
+      "  var s: []i32 = w[0:2];\n"
+      "  return 0;\n"
+      "}\n", "must take two 'usize' bound parameters", "magic_slice_bounds");
+}

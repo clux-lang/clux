@@ -220,6 +220,7 @@ a.b(args)  ⇒  typeof(a)::b(a,    args)     // a 已经是指针
 | `a == b` / `a != b` | `__eq__` | `(self: *const T, rhs: *const R) -> bool`；`!=` 自动取反 |
 | `a < b` `<=` `>` `>=` | `__lt__` `__le__` `__gt__` `__ge__` | `(self: *const T, rhs: *const R) -> bool`，各自独立不互相推导 |
 | `a[i]` | `__index__` | `(self: *const T, i: I) -> R`；`R` 必须可解引用（`*U` / `*const U` / 带 `__deref__`） |
+| `a[lo:hi]` | `__slice__` | `(self: *const T, lo: usize, hi: usize) -> S`；两个边界总是有实参 |
 | `len(a)` | `__len__` | `(self: *const T) -> usize` |
 | `a.x` / `a.m()` / `a.*` 的回退 | `__deref__` | `(self: *const T) -> R`；`R` 必须可解引用 |
 | `using a = e;` 的作用域退出 | `__dispose__` | `(self: *T) -> void`（宽松约定，不是析构；见 §4.12.1） |
@@ -239,6 +240,12 @@ a.b(args)  ⇒  typeof(a)::b(a,    args)     // a 已经是指针
 - `a[i]` 等价于 `(typeof(a)::__index__(a.&, i)).*`：`__index__` 返回指向
   元素的指针，读/写/复合赋值都作用于该指针目标；返回 `*const U` 即只读。
   越界检查由 `__index__` 自己决定（可直接 `panic`）。
+- `a[lo:hi]` 等价于 `typeof(a)::__slice__(a.&, lo, hi)`，结果**不再**额外解引用
+  （`__slice__` 直接返回值，通常是 `[]T`）。两个边界实参一定有值：省略下界
+  时为 `0`，省略上界时为 `len(a)`，所以**省略上界要求该类型实现 `__len__`**，
+  否则报错。两个边界形参的类型必须是 `usize`（与原生切片一致）；源码里写的
+  整数字面量边界会自动补上 `usize` 后缀，`x[1:3]` 无需写成 `x[1usize:3usize]`，
+  非字面量边界若是别的整数类型需显式 `as usize`。
 - `__deref__` 是 `.` 成员访问（读/写/调用）与 `.*` 的回退：直接成员永远
   优先；链上每个类型都必须能给出指针或另一个 `__deref__`；环或超深报错
   （深度默认 8：`--magic-deref-depth=N`（0..31）优先，环境变量
