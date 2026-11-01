@@ -42,7 +42,7 @@ clux 是一门静态类型、编译期可计算、无 GC 的系统级语言。
 |---|---|
 | [01 词法](01-lexical.md) | 字符、注释、字面量、关键字、符号 |
 | [02 类型](02-types.md) | 基础类型、复合类型、类型修饰、类型表达式 |
-| [03 声明](03-declarations.md) | 函数、变量、struct/union/enum/bitfield/interface、模块声明 |
+| [03 声明](03-declarations.md) | 函数、变量、struct/union/enum/bitfield/interface、模块声明；§3.15 魔法方法 |
 | [04 语句](04-statements.md) | 变量、赋值、控制流、defer、块 |
 | [05 表达式](05-expressions.md) | 运算符、调用、构造、类型运算、指针操作 |
 | [06 泛型](06-generics.md) | 类型参数、值参数、参数包、约束、实例化 |

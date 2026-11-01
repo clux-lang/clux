@@ -17,6 +17,7 @@
 | `01-lexical.cx` | 1 词法与字面量 |
 | `02-types.cx` | 2 类型 |
 | `03-declarations.cx` | 3 声明 |
+| `03-magic.cx` | 3.15 魔法方法（`__add__` … `__slice__` / `__init__`） |
 | `04-statements.cx` | 4 语句 |
 | `05-expressions.cx` | 5 表达式 |
 | `06-generics.cx` | 6 泛型与接口 |
