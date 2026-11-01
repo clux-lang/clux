@@ -1030,3 +1030,21 @@ TEST(Magic, MoveAndCloneAreOrdinaryIdentifiers) {
       "}\n",
       "move_and_clone_identifiers");
 }
+/* 泛型实例化之后本身就是一个类型值：sizeof / alignof 必须接受
+   `sizeof(Cell[i32])`、`sizeof(Matrix[i32, 3])`，以及泛型函数体内的
+   `sizeof(Cell[T])`。 */
+TEST(Magic, SizeofGenericInstance) {
+  clux_expect_program_ok(
+      "struct Cell[T] { value: ?*T; }\n"
+      "struct Matrix[T, N: comptime u64] { data: [N]T; }\n"
+      "func cell_size[T](): usize { return sizeof(Cell[T]); }\n"
+      "func main(): i32 {\n"
+      "  if (sizeof(Matrix[i8, 3]) != sizeof([3]i8)) { return 1; }\n"
+      "  if (sizeof(Matrix[i64, 3]) != sizeof([3]i64)) { return 2; }\n"
+      "  if (alignof(Matrix[i64, 3]) != alignof(i64)) { return 3; }\n"
+      "  if (sizeof(Cell[i32]) == 0usize) { return 4; }\n"
+      "  if (cell_size[i64]() != sizeof(Cell[i64])) { return 5; }\n"
+      "  return 0;\n"
+      "}\n",
+      "sizeof_generic_instance");
+}

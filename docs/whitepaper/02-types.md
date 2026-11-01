@@ -161,6 +161,9 @@ typeof(expr)
 
 - `sizeof` / `alignof` 产生 `usize` 编译期值。
 - `typeof` 产生 `expr` 的类型值。
+- `sizeof` / `alignof` 的操作数可以是任意**类型表达式**，包括泛型实例：
+  `sizeof(Cell[i32])`、`sizeof(Matrix[i32, 3])`，以及泛型函数体内的
+  `sizeof(Cell[T])`（实例化之后它就是一个类型值）。
 
 ## 2.12 布局
 

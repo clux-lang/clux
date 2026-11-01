@@ -737,17 +737,52 @@ value_t *ex_index(sema_t *sema, ast_node_t **node,
         }
       }
 
+      /* M7 泛型类型取实例：`Cell[i32]`（类型值，不是下标）。泛型类型名本身不在
+         作用域里作为值存在，所以必须在求值 object 之前识别出来——实例化之后就是
+         一个 type value（`sizeof(Cell[i32])`、`var t = Cell[i32];`）。 */
+      if (n->object &&
+          (n->object->kind == AST_IDENT || n->object->kind == AST_SCOPE_REF)) {
+        sema_symbol_t *gs = NULL;
+        if (n->object->kind == AST_IDENT) {
+          strslice_t nm = ((ast_ident_t *)n->object)->name;
+          /* 先按作用域找**激活**的符号（变量遮蔽优先）；泛型类型符号要等实例化
+             才激活，sema_lookup 看不到，回退到 global_scope 的登记表。 */
+          gs = sema_lookup(scope, nm);
+          if (!gs) gs = sema_scope_find_local(sema->global_scope, nm);
+        } else {
+          gs = sema_cross_generic_symbol(sema, n->object);
+        }
+        if (gs && gs->is_generic && gs->kind != SEMA_SYM_FUNC) {
+          const type_t *it = resolve_type_expr(sema, *node);
+          if (!it) return val_void(sema);
+          sema_type_register(sema, it);
+          ast_node_t *ref = sema_ct_type_ref(sema, it, *node);
+          if (ref) {
+            ref->next = (*node)->next;
+            *node = ref;
+          }
+          return type_as_value(sema->vm, it);
+        }
+      }
+
       value_t *base = sema_expr(sema, &n->object, scope);
       if (is_poison(sema, base))
         return val_void(sema);
 
       const type_t *bt = value_type(base);
       if (bt && type_kind_of(bt) == TYPE_KIND_TYPE) {
-        /* 泛型实例化占位：<type>[<expr,...> 与下标语法重叠，延后到 sema
-           才可区分，M2 泛型未实现前明确占位。 */
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "generic instantiation is not implemented (index on a type value)");
-        return val_void(sema);
+        /* `Type[args]` 在**表达式**位置也是类型表达式：泛型实例化之后本身就是
+           一个 type value（`sizeof(Cell[i32])`、`var t = Cell[i32];`）。
+           复用类型位置的求值器，实例化 + 登记后返回该类型值。 */
+        const type_t *it = resolve_type_expr(sema, *node);
+        if (!it) return val_void(sema);
+        sema_type_register(sema, it);
+        ast_node_t *ref = sema_ct_type_ref(sema, it, *node);
+        if (ref) {
+          ref->next = (*node)->next;
+          *node = ref;
+        }
+        return type_as_value(sema->vm, it);
       }
       /* 魔法下标：`a[i]` ⇒ `(typeof(a)::__index__(a.&, i)).*`（结果必须可解
          引用；`.*` 会继续穿透 `__deref__`）。 */

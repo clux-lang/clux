@@ -133,3 +133,17 @@ test "generics.interfaceBound" {
     var p: P = .P{ .v = 33 };
     assert(show(p.&) == 33);
 }
+
+/* ---- 泛型实例就是类型值：sizeof / alignof 直接接受 ---- */
+
+func box_size[T](): usize {
+    return sizeof(Box[T]);
+}
+
+test "generics.sizeofInstance" {
+    assert(sizeof(Box[i32]) > 0usize);
+    assert(sizeof(Matrix[i8, 3]) == sizeof([3]i8));
+    assert(sizeof(Matrix[i64, 3]) == sizeof([3]i64));
+    assert(alignof(Matrix[i64, 3]) == alignof(i64));
+    assert(box_size[i64]() == sizeof(Box[i64]));
+}
