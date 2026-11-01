@@ -164,6 +164,9 @@ typeof(expr)
 - `sizeof` / `alignof` 的操作数可以是任意**类型表达式**，包括泛型实例：
   `sizeof(Cell[i32])`、`sizeof(Matrix[i32, 3])`，以及泛型函数体内的
   `sizeof(Cell[T])`（实例化之后它就是一个类型值）。
+- 类型前缀形态同样合法：`sizeof(*T)`、`sizeof(**T)`、`sizeof([]T)`、
+  `sizeof([N]T)`、`sizeof(?T)`、`sizeof(*const T)`、`sizeof(const T)`。
+  （指针/切片/数组/optional 的宽度与对齐按目标平台，见 §2.12。）
 
 ## 2.12 布局
 

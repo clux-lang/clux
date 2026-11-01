@@ -634,7 +634,11 @@ ast_node_t *parse_unary(parser_t *p) {
                                  "expected '(' after 'sizeof'");
         }
         skip_trivia(p);
-        ast_node_t *operand = parse_expr(p);
+        /* `*T` 不是合法的表达式前缀（前缀 `*` 只存在于类型位置），
+           `sizeof(*i32)` / `sizeof(*Counter)` 必须走类型前缀解析；
+           其余形态（`[N]T`、`[]T`、`?T`、普通表达式）仍走 parse_expr。 */
+        ast_node_t *operand =
+            check_symbol(p, "*") ? parse_type_prefix(p) : parse_expr(p);
         if (!operand || operand->kind == AST_ERROR) {
             if (!operand) {
                 return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,
@@ -661,7 +665,9 @@ ast_node_t *parse_unary(parser_t *p) {
                                  "expected '(' after 'alignof'");
         }
         skip_trivia(p);
-        ast_node_t *operand = parse_expr(p);
+        /* 同 sizeof：`alignof(*T)` 里 `*` 是类型前缀，不是表达式。 */
+        ast_node_t *operand =
+            check_symbol(p, "*") ? parse_type_prefix(p) : parse_expr(p);
         if (!operand || operand->kind == AST_ERROR) {
             if (!operand) {
                 return ast_error_new(p->diag, p->tokens, p->arena, kb, p->pos,

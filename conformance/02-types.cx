@@ -191,3 +191,15 @@ test "types.void" {
 func noop(): i32 {
     return 5;
 }
+
+test "types.sizeofTypeExpressions" {
+    // sizeof / alignof 接受任意类型表达式；`*T` 前缀只有类型位置才有
+    assert(sizeof(*i32) == sizeof(usize));
+    assert(sizeof(**i32) == sizeof(*i32));
+    assert(sizeof(*[]i32) == sizeof(usize));
+    assert(sizeof(*?i32) == sizeof(usize));
+    assert(sizeof(*const i32) == sizeof(*i32));
+    assert(sizeof([]i32) == 2usize * sizeof(usize));
+    assert(sizeof([3]i32) == 12usize);
+    assert(alignof(*i64) == alignof(usize));
+}

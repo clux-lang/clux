@@ -117,3 +117,25 @@ TEST(Driver, RunFileSignedUnsignedExplicitSuffixPasses) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* sizeof / alignof 的操作数是**类型表达式**：`*T` 前缀不是合法的表达式前缀，
+   解析时必须走类型前缀路径（`sizeof(*i32)`、`sizeof(**i32)`、`sizeof(*[]T)`、
+   `sizeof(*?T)`、`sizeof(*const T)`）。 */
+TEST(Driver, RunFileSizeofPointerTypeExpression) {
+  std::string path = write_temp_file(
+      "struct Counter { n: i32; }\n"
+      "func main(): i32 {\n"
+      "  if (sizeof(*i32) != sizeof(usize)) { return 1; }\n"
+      "  if (sizeof(**i32) != sizeof(*i32)) { return 2; }\n"
+      "  if (sizeof(*[]i32) != sizeof(usize)) { return 3; }\n"
+      "  if (sizeof(*?i32) != sizeof(usize)) { return 4; }\n"
+      "  if (sizeof(*const i32) != sizeof(*i32)) { return 5; }\n"
+      "  if (sizeof(*Counter) != sizeof(usize)) { return 6; }\n"
+      "  if (alignof(*i64) != alignof(usize)) { return 7; }\n"
+      "  if (sizeof([]i32) != 2u64 * sizeof(usize)) { return 8; }\n"
+      "  if (sizeof([3]i32) != 12u64) { return 9; }\n"
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
