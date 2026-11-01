@@ -459,7 +459,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
 
   /* 魔法方法：**前导操作数**是 struct 且定义了对应方法时，把 `a op b` 展开成
      `typeof(a)::__name__(a.&, b)`（与 `a.b()` 同一套糖，见
-     docs-backup/magic-methods-design.md）。内建类型优先：*T / ?T / [N]T 都有
+     docs/whitepaper/03-declarations.md）。内建类型优先：*T / ?T / [N]T 都有
      自己的内建语义，不参与魔法派发。 */
   {
     const type_t *lt = value_type(lhs);

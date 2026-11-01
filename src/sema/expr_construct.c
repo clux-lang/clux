@@ -742,7 +742,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
       /* `__init__`：有初始化器的 struct 不再支持普通构造（具名字段 / 按序
          字段赋值）；`.T{arg1, arg2, ...}` 等价于"零初始化 + T::__init__(args)"。
-         见 docs-backup/magic-methods-design.md §4.5。 */
+         见 docs/whitepaper/03-declarations.md §4.5。 */
       if (sema_magic_has_init(sema, t)) {
         for (ast_node_t *f = n->fields; f; f = f->next) {
           if (f->kind == AST_CONSTRUCT_FIELD) {

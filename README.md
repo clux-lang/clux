@@ -201,8 +201,7 @@ src/cmd/         subcommand dispatch (run / format / build / test / version)
 include/         public headers (mirrors src/)
 tests/           C++20 + GoogleTest suites
 examples/        sample programs (.cx sources)
-docs/            design & specification documents
-specs/           core-library API contracts (allocator, vec, string, maps, stream, cmd)
+docs/            whitepaper (normative language spec)
 ```
 
 ## Documentation
@@ -214,12 +213,6 @@ Language specification (normative):
   expressions, generics, modules/FFI, metadata, bitfields, testing, tooling
 - `docs/port-packages.md` — port packages (`export extern`) and `clux.mod`'s
   `native` section (`link` / `libdirs` / `runtime`, platform overrides)
-
-Historical design notes and implementation records live in `docs-backup/` and are
-not part of the language specification.
-
-Core library contracts: `specs/allocator.md`, `specs/vec.md`, `specs/string.md`,
-`specs/strmap.md`, `specs/omap.md`, `specs/rbtree.md`, `specs/stream.md`, `specs/cmd.md`.
 
 ## Testing
 
@@ -258,10 +251,11 @@ All source and documentation files are **UTF-8 without BOM**. (The exception is
 
 Historical note: some editors on Chinese-locale Windows save as GBK, and `.cpp`
 files had crept in with a UTF-8 BOM. Both make Chinese comments render as mojibake
-in other tools. To check (and catch such files landing in a pull request):
+in other tools. A quick check (any output = offenders):
 
-```sh
-python tools/check_encoding.py          # exit 0 = clean, 1 = reports offenders
+```powershell
+Get-ChildItem -Recurse -Include *.c,*.h,*.cpp,*.md -Exclude third_party |
+  Where-Object { (Get-Content $_.FullName -AsByteStream -TotalCount 3) -join ',' -eq '239,187,191' }
 ```
 
 If you see mojibake when reading files in a terminal, check the terminal's codepage

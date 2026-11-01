@@ -15,7 +15,7 @@ extern "C" {
 
 /* 魔法方法（magic methods）：结构体上的保留方法名，编译器把"该类型上的
  * 原生语法位置"改写为普通实例方法调用。设计见
- * docs-backup/magic-methods-design.md。
+ * docs/whitepaper/03-declarations.md。
  *
  * 命名空间：`__` 前缀在源码层保留（parser 的 reserved-ident 规则），仅
  * struct 成员方法位置放行；其余位置（变量/参数/类型名/全局函数）照旧拒绝。

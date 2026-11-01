@@ -138,7 +138,7 @@ bool sema_magic_check_method(sema_t *sema, const type_t *owner, ast_node_t *def,
        检查。 */
 
     /* 接收者形态不在这里判断：方法就是类型命名空间里的函数，`a.m()` 是
-       `typeof(a)::m(a.&)` 的语法糖（见 docs-backup/magic-methods-design.md）。
+       `typeof(a)::m(a.&)` 的语法糖（见 docs/whitepaper/03-declarations.md）。
        `self` 若是值形参，调用点把 `a.&`（*T）传给值形参时会由普通隐式转换
        规则自然拒绝；`self` 指向基类（嵌入继承转发）也是合法的。这里只校验
        魔法方法自身的契约（名字/参数个数/返回类型）。 */
