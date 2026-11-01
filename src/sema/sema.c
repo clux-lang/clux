@@ -313,12 +313,27 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *msig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_void, true);
     if (msig) {
-      const char *names[] = {"mock", "unmock", "mock_method", "unmock_method"};
-      for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        sema_symbol_t minit = {.kind = SEMA_SYM_FUNC, .type = msig,
-                               .is_active = true};
-        sema_scope_define(sema->global_scope, strslice_from_cstr(names[i]),
-                          &minit);
+      /* 测试 mock 内建：名字必须是字符串字面量（编译期解析目标），实参个数 /
+         目标存在性 / replacement 签名一致性都在 `sema_mock_check_call` 里校验
+         （见 sema/mock.c），这里只注册成 variadic void 让调用点通过基本检查。 */
+      struct {
+        const char *name;
+        sema_builtin_op_t op;
+      } test_builtins[] = {
+          {"mock", SEMA_BUILTIN_MOCK},
+          {"unmock", SEMA_BUILTIN_UNMOCK},
+          {"mock_method", SEMA_BUILTIN_MOCK_METHOD},
+          {"unmock_method", SEMA_BUILTIN_UNMOCK_METHOD},
+      };
+      for (size_t i = 0; i < sizeof(test_builtins) / sizeof(test_builtins[0]);
+           i++) {
+        sema_symbol_t minit = {.kind = SEMA_SYM_FUNC,
+                               .type = msig,
+                               .is_active = true,
+                               .fid = FUNC_ID_NONE,
+                               .builtin_op = test_builtins[i].op};
+        sema_scope_define(sema->global_scope,
+                          strslice_from_cstr(test_builtins[i].name), &minit);
       }
     }
   }

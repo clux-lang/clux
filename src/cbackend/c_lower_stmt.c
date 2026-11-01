@@ -232,6 +232,171 @@ static void append_stmt_chain(cir_stmt_t **head, cir_stmt_t **tail,
 
 static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok);
 
+/* ---- 测试 mock 语句：mock / unmock / mock_method / unmock_method -----------
+ *
+ * sema 已在编译期解析目标（call->mock_op / mock_fn_name / mock_owner_module），
+ * 这里只生成"装槽 / 清槽"的 C 代码。槽是目标函数所在模块的
+ * `void *<prefix>mock_<fn 名>[2]`（[0]=replacement 函数指针，[1]=它的 env）。
+ *
+ * replacement 的值存进本调用点专属的 **static** 存储：mock 安装的是
+ * `{fn, env}` 两半，env 的地址必须活到 unmock / 用例结束，栈上临时变量会悬垂。 */
+static cir_stmt_t *lower_mock_stmt(lower_ctx_t *lc, ast_call_t *call, bool *ok) {
+    if (!lc || !call || call->mock_op == CLUX_MOCK_NONE) return NULL;
+    /* 方法符号由 C 后端按 `__method_<ownerTypeId>_<name>` 编码（与结构体方法
+       的 lowering 一致）；自由函数直接用 sema 名。 */
+    char mname_buf[256];
+    strslice_t fname = call->mock_fn_name;
+    if (call->mock_op == CLUX_MOCK_METHOD ||
+        call->mock_op == CLUX_UNMOCK_METHOD) {
+        snprintf(mname_buf, sizeof mname_buf, "__method_%u_%.*s",
+                 call->mock_type_id, (int)fname.len,
+                 fname.ptr ? fname.ptr : "");
+        fname = strslice_from_cstr(mname_buf);
+    }
+    module_t *owner = (module_t *)call->mock_owner_module;
+    const char *slot;
+    if (!owner || owner == lc->sema->current_module) {
+        slot = module_symbol(lc->arena, lc->unit, "mock_", fname);
+    } else {
+        char pbuf[64];
+        const char *prefix = lower_dep_prefix(lc, owner, pbuf, sizeof pbuf);
+        slot = lower_import_sym(lc->arena, prefix, "mock_", fname);
+        /* 目标在别的编译单元：本单元 extern 声明它的槽（重复声明合法）。 */
+        if (slot) {
+            char *decl = (char *)arena_calloc(lc->arena, 512, 1,
+                                              ALIGNOF(max_align_t));
+            if (decl) {
+                snprintf(decl, 512, "extern void *%s[2];\n", slot);
+                cir_unit_add_raw_append(lc->unit, decl);
+            }
+        }
+    }
+    if (!slot) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                   "c backend: cannot resolve the mock slot for '%.*s'",
+                   (int)call->mock_fn_name.len, call->mock_fn_name.ptr);
+        lc->failed = true;
+        *ok = false;
+        return NULL;
+    }
+
+    cir_stmt_t *blk = cir_stmt_new(lc->arena, CIR_STMT_BLOCK);
+    if (!blk) {
+        *ok = false;
+        return NULL;
+    }
+    cir_stmt_t **tail = &blk->body;
+
+    if (call->mock_op == CLUX_MOCK_FREE ||
+        call->mock_op == CLUX_MOCK_METHOD) {
+        ast_node_t *repl = call->args;
+        size_t skip = call->mock_op == CLUX_MOCK_FREE ? 1 : 2;
+        while (repl && skip > 0) {
+            repl = repl->next;
+            skip--;
+        }
+        if (!repl) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)call),
+                       "c backend: mock is missing its replacement argument");
+            lc->failed = true;
+            *ok = false;
+            return NULL;
+        }
+        const type_t *rt = infer_expr_type(lc, repl);
+        const type_t *rst = rt ? type_strip_quals(rt) : NULL;
+        cir_type_t *ct = rst ? map_type(lc, rst) : NULL;
+        if (!ct || !ct->c_name) {
+            diag_error(lc->sema->diag, sema_loc(lc->sema, repl),
+                       "c backend: cannot type the mock replacement");
+            lc->failed = true;
+            *ok = false;
+            return NULL;
+        }
+        char storage[192];
+        snprintf(storage, sizeof storage, "%smockrepl_%u",
+                 lc->unit->sym_prefix ? lc->unit->sym_prefix : "clux_",
+                 lc->mock_seq++);
+        size_t dlen = strlen(ct->c_name) + strlen(storage) + 24;
+        char *decl = (char *)arena_calloc(lc->arena, dlen, 1,
+                                          ALIGNOF(max_align_t));
+        if (!decl) {
+            *ok = false;
+            return NULL;
+        }
+        snprintf(decl, dlen, "static %s %s;\n", ct->c_name, storage);
+        cir_unit_add_raw_append(lc->unit, decl);
+
+        /* 1) storage = replacement */
+        cir_stmt_t *s1 = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+        if (!s1) {
+            *ok = false;
+            return NULL;
+        }
+        s1->lhs = cir_expr_ident(lc->arena, copy_arena(lc->arena, storage));
+        s1->op = "=";
+        s1->expr = lower_expr(lc, repl);
+        if (!s1->expr) {
+            *ok = false;
+            return NULL;
+        }
+        *tail = s1;
+        tail = &s1->next;
+
+        /* 2) slot[0] = (void *)(storage.fn) */
+        char e0[512];
+        snprintf(e0, sizeof e0, "(void *)(%s.fn)", storage);
+        cir_stmt_t *s2 = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+        if (!s2) {
+            *ok = false;
+            return NULL;
+        }
+        {
+            char l0[256];
+            snprintf(l0, sizeof l0, "%s[0]", slot);
+            s2->lhs = cir_expr_ident(lc->arena, copy_arena(lc->arena, l0));
+        }
+        s2->op = "=";
+        s2->expr = cir_expr_ident(lc->arena, copy_arena(lc->arena, e0));
+        *tail = s2;
+        tail = &s2->next;
+
+        /* 3) slot[1] = (void *)&(storage.env) */
+        char e1[512];
+        snprintf(e1, sizeof e1, "(void *)&(%s.env)", storage);
+        cir_stmt_t *s3 = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+        if (!s3) {
+            *ok = false;
+            return NULL;
+        }
+        {
+            char l1[256];
+            snprintf(l1, sizeof l1, "%s[1]", slot);
+            s3->lhs = cir_expr_ident(lc->arena, copy_arena(lc->arena, l1));
+        }
+        s3->op = "=";
+        s3->expr = cir_expr_ident(lc->arena, copy_arena(lc->arena, e1));
+        *tail = s3;
+        tail = &s3->next;
+    } else {
+        /* unmock：清空槽（[0] == NULL 即“未安装”）。 */
+        for (int i = 0; i < 2; i++) {
+            cir_stmt_t *st = cir_stmt_new(lc->arena, CIR_STMT_ASSIGN);
+            if (!st) {
+                *ok = false;
+                return NULL;
+            }
+            char lb[256];
+            snprintf(lb, sizeof lb, "%s[%d]", slot, i);
+            st->lhs = cir_expr_ident(lc->arena, copy_arena(lc->arena, lb));
+            st->op = "=";
+            st->expr = cir_expr_ident(lc->arena, "(void *)0");
+            *tail = st;
+            tail = &st->next;
+        }
+    }
+    return blk;
+}
+
 /* 语句 lowering 入口：先 prelude、再语句主体、最后 postlude。
  * sema 把 `.?'/`.!' 之类的错误处理语法糖展开成挂在语句上的
  * prelude/postlude（临时变量 + if 分支），compiler 也是这么消费的。 */
@@ -758,6 +923,13 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
     }
     case AST_EXPR_STMT: {
         ast_expr_stmt_t *es = (ast_expr_stmt_t *)s;
+        /* 测试 mock 调用：安装/清除函数槽（不是普通调用）。 */
+        if (es->expr && es->expr->kind == AST_CALL &&
+            ((ast_call_t *)es->expr)->mock_op != CLUX_MOCK_NONE) {
+            cir_stmt_t *st = lower_mock_stmt(lc, (ast_call_t *)es->expr, ok);
+            if (!*ok) return NULL;
+            return st;
+        }
         if (es->expr && es->expr->kind == AST_CALL) {
             ast_call_t *call = (ast_call_t *)es->expr;
             strslice_t name = STRSLICE_EMPTY;

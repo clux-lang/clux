@@ -49,6 +49,7 @@
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
 #include "sema/magic.h"
+#include "sema/mock.h"
 #include "sema/metadata.h"
 #include "sema/sema_cross.h"
 #include "sema/sema_generic.h"
@@ -1643,6 +1644,19 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       /* 语言级内建的类型特判（**按符号上的 builtin_op 标记**，不按 callee
          名字/AST 形态/fid）：callee 求值后 AST_IDENT 已被折叠成 FUNC_REF，
          "按名字 + AST_IDENT 匹配"的老写法因此从未生效（见 symbol.h 的说明）。 */
+
+      /* test 构建的 mock 内建：目标在**编译期**解析（名字必须字面量），
+         校验通过后把目标写进 call，C 后端据此生成函数槽的安装/恢复。 */
+      if (callee_sym &&
+          (callee_sym->builtin_op == SEMA_BUILTIN_MOCK ||
+           callee_sym->builtin_op == SEMA_BUILTIN_UNMOCK ||
+           callee_sym->builtin_op == SEMA_BUILTIN_MOCK_METHOD ||
+           callee_sym->builtin_op == SEMA_BUILTIN_UNMOCK_METHOD)) {
+        if (!sema_mock_check_call(sema, call, callee_sym->builtin_op,
+                                  arg_shadows, argc))
+          return val_void(sema);
+        return value_make_shadow(sema->vm, sema->vm->type_void);
+      }
 
       /* take(x)：运行时移出 optional payload 并置 nil，结果类型 T。 */
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_TAKE) {

@@ -2618,3 +2618,163 @@ TEST(CBackend, DiscardStatementCastsToVoid) {
   std::filesystem::remove(c_path, ec);
   std::filesystem::remove(h_path, ec);
 }
+/* ================================================================
+ * 测试 mock（`mock` / `unmock` / `mock_method` / `unmock_method`）
+ *
+ * 只在 `clux test` 构建里可用：目标名必须是字符串字面量（编译期解析），
+ * replacement 必须与目标同签名，C 后端给每个函数生成一个可写槽，
+ * 函数入口按槽派发。每个用例开始前 runner 清空所有槽。
+ * ================================================================ */
+
+TEST(CBackend, MockFreeFunctionAndUnmock) {
+  const std::string src = write_temp_file(
+      "func target(x: i32): i32 { return x + 1; }\n"
+      "func fake(x: i32): i32 { return 7; }\n"
+      "test \"Mock.Free\" {\n"
+      "  assert(target(1) == 2);\n"
+      "  mock(\"target\", fake);\n"
+      "  assert(target(1) == 7);\n"
+      "  unmock(\"target\");\n"
+      "  assert(target(1) == 2);\n"
+      "}\n",
+      "cb_mock_free");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockRecursiveFunction) {
+  const std::string src = write_temp_file(
+      "func fact(n: i32): i32 { return n <= 1 ? 1 : n * fact(n - 1); }\n"
+      "func fake_fact(n: i32): i32 { return 42; }\n"
+      "test \"Mock.Recursion\" {\n"
+      "  assert(fact(5) == 120);\n"
+      "  mock(\"fact\", fake_fact);\n"
+      "  assert(fact(5) == 42);\n"
+      "  unmock(\"fact\");\n"
+      "  assert(fact(5) == 120);\n"
+      "}\n",
+      "cb_mock_recursion");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockInstanceAndStaticMethod) {
+  const std::string src = write_temp_file(
+      "struct S {\n"
+      "  v: i32;\n"
+      "  func get(self: *S): i32 { return self.v; }\n"
+      "  func create(n: i32): S { return .S{ .v = n }; }\n"
+      "}\n"
+      "func fake_get(self: *S): i32 { return 99; }\n"
+      "func fake_make(n: i32): S { return .S{ .v = n + 100 }; }\n"
+      "test \"Mock.Method\" {\n"
+      "  var s: S = .S{ .v = 1 };\n"
+      "  assert(s.get() == 1);\n"
+      "  mock_method(S, \"get\", fake_get);\n"
+      "  assert(s.get() == 99);\n"
+      "  unmock_method(S, \"get\");\n"
+      "  assert(s.get() == 1);\n"
+      "  assert(S::create(1).v == 1);\n"
+      "  mock_method(S, \"create\", fake_make);\n"
+      "  assert(S::create(1).v == 101);\n"
+      "  unmock_method(S, \"create\");\n"
+      "  assert(S::create(1).v == 1);\n"
+      "}\n",
+      "cb_mock_method");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockAutoResetBetweenTestCases) {
+  /* 用例故意不 unmock：下一个用例开始前 runner 必须清空所有槽。 */
+  const std::string src = write_temp_file(
+      "func target(x: i32): i32 { return x + 1; }\n"
+      "func fake(x: i32): i32 { return 100; }\n"
+      "test \"Mock.Leak\" {\n"
+      "  mock(\"target\", fake);\n"
+      "  assert(target(1) == 100);\n"
+      "}\n"
+      "test \"Mock.LeakCheck\" {\n"
+      "  assert(target(1) == 2);\n"
+      "}\n",
+      "cb_mock_autoreset");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockRejectsUnknownTarget) {
+  const std::string src = write_temp_file(
+      "test \"Mock.Bad\" {\n  mock(\"nope\", nope);\n}\n", "cb_mock_unknown");
+  ASSERT_FALSE(src.empty());
+  EXPECT_NE(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockRejectsSignatureMismatch) {
+  const std::string src = write_temp_file(
+      "func target(x: i32): i32 { return x; }\n"
+      "func fake(x: i64): i64 { return x; }\n"
+      "test \"Mock.Bad\" {\n  mock(\"target\", fake);\n}\n",
+      "cb_mock_sigmismatch");
+  ASSERT_FALSE(src.empty());
+  EXPECT_NE(run_cli({"test", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+TEST(CBackend, MockRequiresTestBuild) {
+  /* 普通 build 里 mock 不存在（只在 test 模式注册）。 */
+  const std::string src = write_temp_file(
+      "func target(x: i32): i32 { return x; }\n"
+      "func main(): i32 { mock(\"target\", target); return 0; }\n",
+      "cb_mock_nontest");
+  ASSERT_FALSE(src.empty());
+  EXPECT_NE(run_cli({"build", std::filesystem::absolute(src).string()}),
+            0);
+}
+
+TEST(CBackend, MockCrossModuleFreeFunctionAndMethod) {
+  const std::string lib = write_temp_file(
+      "export func helper(x: i32): i32 { return x * 2; }\n"
+      "export struct P {\n"
+      "  v: i32;\n"
+      "  func get(self: *P): i32 { return self.v; }\n"
+      "}\n",
+      "cb_mock_xm_lib");
+  ASSERT_FALSE(lib.empty());
+  const std::string stem =
+      std::filesystem::path(lib).stem().string();
+  const std::string app = write_temp_file(
+      "import m from \"./" + stem + "\";\n" +
+          "func fake_helper(x: i32): i32 { return 555; }\n"
+          "func fake_get(self: *m::P): i32 { return 777; }\n"
+          "test \"Mock.XmFree\" {\n"
+          "  assert(m::helper(2) == 4);\n"
+          "  mock(\"m::helper\", fake_helper);\n"
+          "  assert(m::helper(2) == 555);\n"
+          "  unmock(\"m::helper\");\n"
+          "  assert(m::helper(2) == 4);\n"
+          "}\n"
+          "test \"Mock.XmMethod\" {\n"
+          "  var p: m::P = .m::P{ .v = 3 };\n"
+          "  assert(p.get() == 3);\n"
+          "  mock_method(m::P, \"get\", fake_get);\n"
+          "  assert(p.get() == 777);\n"
+          "  unmock_method(m::P, \"get\");\n"
+          "  assert(p.get() == 3);\n"
+          "}\n",
+      "cb_mock_xm_app");
+  ASSERT_FALSE(app.empty());
+  EXPECT_EQ(run_cli({"test", std::filesystem::absolute(app).string(),
+                     "--backend=c"}),
+            0);
+}

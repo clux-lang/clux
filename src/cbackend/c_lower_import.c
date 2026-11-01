@@ -58,7 +58,7 @@ static module_t *symbol_owner_module(lower_ctx_t *lc, sema_symbol_t *es,
 }
 
 
-static const char *dep_prefix(lower_ctx_t *lc, module_t *dep, char *buf,
+const char *lower_dep_prefix(lower_ctx_t *lc, module_t *dep, char *buf,
                               size_t cap) {
     char tag[16];
     module_tag_for_path(dep->canonical ? dep->canonical : "", tag, sizeof tag);
@@ -67,7 +67,7 @@ static const char *dep_prefix(lower_ctx_t *lc, module_t *dep, char *buf,
     return buf;
 }
 
-static const char *import_sym(arena_t *arena, const char *prefix,
+const char *lower_import_sym(arena_t *arena, const char *prefix,
                               const char *kind, strslice_t name) {
     return module_symbol(arena, &(cir_unit_t){.sym_prefix = prefix}, kind, name);
 }
@@ -174,8 +174,8 @@ cir_expr_t *lower_import_call(lower_ctx_t *lc, ast_call_t *call,
     bool is_cfunc = def && def->is_cfunc;
     module_t *owner = symbol_owner_module(lc, es, dep);
     char pbuf[64];
-    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
-    const char *cname = import_sym(lc->arena, prefix, is_cfunc ? "" : "fn_",
+    const char *prefix = lower_dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = lower_import_sym(lc->arena, prefix, is_cfunc ? "" : "fn_",
                                    sr->variant);
     if (!cname) {
         lc->failed = true;
@@ -234,8 +234,8 @@ static const char *import_var_symbol(lower_ctx_t *lc, ast_scope_ref_t *sr,
     }
     char pbuf[64];
     module_t *owner = symbol_owner_module(lc, es, dep);
-    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
-    const char *cname = import_sym(lc->arena, prefix, "v_", sr->variant);
+    const char *prefix = lower_dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = lower_import_sym(lc->arena, prefix, "v_", sr->variant);
     if (!cname) {
         lc->failed = true;
         return NULL;
@@ -312,11 +312,11 @@ const char *lower_method_owner_cname(lower_ctx_t *lc, ast_func_def_t *def,
     module_t *owner = (module_t *)def->owner_module;
     if (!owner) return NULL;
     char pb[64];
-    const char *prefix = dep_prefix(lc, owner, pb, sizeof pb);
+    const char *prefix = lower_dep_prefix(lc, owner, pb, sizeof pb);
     if (!prefix || (lc->unit->sym_prefix &&
                     strcmp(prefix, lc->unit->sym_prefix) == 0))
         return NULL;
-    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    const char *cname = lower_import_sym(lc->arena, prefix, "fn_", def->name);
     if (!cname) {
         lc->failed = true;
         return NULL;
@@ -347,8 +347,8 @@ lower_method_t *lower_cross_module_method(lower_ctx_t *lc, uint32_t type_id,
     const type_t *ft = ms->type;
     if (!ft || type_kind_of(type_strip_quals(ft)) != TYPE_KIND_FUNC) return NULL;
     char pbuf[64];
-    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
-    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    const char *prefix = lower_dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = lower_import_sym(lc->arena, prefix, "fn_", def->name);
     if (!cname) {
         lc->failed = true;
         return NULL;
@@ -381,8 +381,8 @@ cir_expr_t *lower_cross_module_func_call(lower_ctx_t *lc, ast_call_t *call,
         return NULL;
     }
     char pbuf[64];
-    const char *prefix = dep_prefix(lc, owner, pbuf, sizeof pbuf);
-    const char *cname = import_sym(lc->arena, prefix, "fn_", def->name);
+    const char *prefix = lower_dep_prefix(lc, owner, pbuf, sizeof pbuf);
+    const char *cname = lower_import_sym(lc->arena, prefix, "fn_", def->name);
     if (!cname) {
         lc->failed = true;
         return NULL;

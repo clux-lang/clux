@@ -8,6 +8,15 @@ extern "C" {
 #include "parser/ast_node.h"
 #include <stdint.h>
 
+/** 测试 mock 调用种类（ast_call_t.mock_op）。 */
+typedef enum {
+    CLUX_MOCK_NONE = 0,
+    CLUX_MOCK_FREE,     /* mock("name", repl) */
+    CLUX_UNMOCK_FREE,   /* unmock("name") */
+    CLUX_MOCK_METHOD,   /* mock_method(T, "m", repl) */
+    CLUX_UNMOCK_METHOD, /* unmock_method(T, "m") */
+} clux_mock_op_t;
+
 typedef struct {
     ast_node_t  base;
     ast_node_t *callee;      /* 被调表达式（可以是任意 expr，如 a.b） */
@@ -56,6 +65,15 @@ typedef struct {
      * receiver 编译压栈，然后发 MEMBER_CALL。 */
     bool        is_member_call;
     uint32_t    member_type_id; /* 方法所在的 struct 类型的 type_id（sema 登记） */
+
+    /* ---- 测试 mock（`mock` / `unmock` / `mock_method` / `unmock_method`）----
+     * sema 在测试构建里解析目标函数并填这三项；C 后端据此生成/引用函数槽
+     * `<module_prefix>mock_<fn_name>[2]`（[0]=replacement fn，[1]=它的 env）。
+     * 目标不可在运行期按字符串查表：名字必须是**字符串字面量**（编译期解析）。 */
+    uint8_t     mock_op;          /* clux_mock_op_t：0=非 mock 调用 */
+    strslice_t  mock_fn_name;     /* 目标函数名（方法为裸方法名，靠 mock_type_id 编码） */
+    const void *mock_owner_module; /* 目标函数定义所在 module_t*（跨模块槽 / 恢复） */
+    uint32_t    mock_type_id;     /* 方法 mock：**方法定义所在** struct 的 type_id */
 } ast_call_t;
 
 static inline ast_node_t *ast_call_new(arena_t *arena,

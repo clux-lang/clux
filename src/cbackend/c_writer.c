@@ -480,6 +480,23 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
             cw_printf(sb, "    %s,\n", sym ? sym : "clux_no_test");
         }
         cw_put(sb, "};\n");
+        /* mock 复位：每个用例开始前清空所有模块的 mock 槽（用例之间不串味；
+           断言失败 longjmp 出来的用例同样不会把 mock 漏给下一条）。*/
+        if (unit->tests) {
+            for (size_t i = 0; i < unit->mock_reset_count; i++) {
+                if (!unit->mock_reset_syms[i]) continue;
+                cw_printf(sb, "extern void %s(void);\n",
+                          unit->mock_reset_syms[i]);
+            }
+            cw_put(sb, "static void clux_mock_reset_all(void) {\n");
+            if (unit->sym_prefix)
+                cw_printf(sb, "    %smock_reset();\n", unit->sym_prefix);
+            for (size_t i = 0; i < unit->mock_reset_count; i++) {
+                if (!unit->mock_reset_syms[i]) continue;
+                cw_printf(sb, "    %s();\n", unit->mock_reset_syms[i]);
+            }
+            cw_put(sb, "}\n");
+        }
         cw_put(sb, "int main(int argc, char **argv) {\n");
         if (has_deferred)
             cw_put(sb, "    clux_init_globals();\n");
@@ -520,6 +537,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         cw_put(sb, "        const char *name = clux_test_names[i];\n");
         cw_put(sb, "        printf(\"[ RUN      ] %s\\n\", name);\n");
         cw_put(sb, "        fflush(NULL);\n");
+        if (unit->tests) cw_put(sb, "        clux_mock_reset_all();\n");
         cw_put(sb, "        if (__builtin_setjmp(clux_test_fail) == 0) {\n");
         cw_put(sb, "            clux_test_fns[i](NULL);\n");
         cw_put(sb, "            printf(\"[       OK ] %s\\n\", name);\n");

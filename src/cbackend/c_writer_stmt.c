@@ -190,6 +190,30 @@ void cw_write_function_def(string_t *sb, const cir_function_t *fn) {
               fn->sig->ret ? fn->sig->ret->c_name : "void", fn->name);
     cw_write_params(sb, fn->sig, true, fn);
     cw_put(sb, ") {\n");
+    /* 测试构建的 mock 派发：槽非空 → 转调 replacement（同签名，env-first）。
+       放在函数体最前面，在 `(void)env;` 之前——replacement 需要真正的 env。 */
+    if (fn->mock_slot) {
+        bool vret = !fn->sig->ret || fn->sig->ret->kind == CIR_TYPE_VOID;
+        cw_put(sb, "    if (");
+        cw_put(sb, fn->mock_slot);
+        cw_put(sb, "[0]) {\n        ");
+        if (!vret) cw_put(sb, "return ");
+        cw_printf(sb, "((%s (*)(void *",
+                  fn->sig->ret ? fn->sig->ret->c_name : "void");
+        for (size_t i = 0; i < fn->sig->param_count; i++) {
+            cw_put(sb, ", ");
+            cw_put(sb, fn->sig->params[i] ? fn->sig->params[i]->c_name : "void");
+        }
+        cw_printf(sb, "))%s[0])(%s[1]", fn->mock_slot, fn->mock_slot);
+        for (size_t i = 0; i < fn->param_count; i++)
+            if (fn->params[i].name) {
+                cw_put(sb, ", ");
+                cw_put(sb, fn->params[i].name);
+            }
+        cw_put(sb, ");\n");
+        if (vret) cw_put(sb, "        return;\n");
+        cw_put(sb, "    }\n");
+    }
     cw_put(sb, "    (void)env;\n");
     if (fn->closure_env && fn->closure_env->c_name)
         cw_printf(sb, "    %s *clux_v___ctx_env = (%s *)env;\n",

@@ -212,6 +212,10 @@ typedef struct cir_function {
     bool         object_used; /* 函数对象被作为值引用 */
     bool         is_exported; /* `export func/cfunc`：头文件声明 */
     bool         is_public;   /* 不加 static（导出函数或跨模块可见的泛型实例） */
+    /* 测试构建的 mock 槽（NULL = 不可 mock）：`<prefix>mock_<名字>[2]`，
+       [0] = replacement 函数指针，[1] = 它的 env。writer 在函数入口生成
+       "槽非空则转调 replacement" 的派发。 */
+    const char  *mock_slot;
     struct cir_function *next;
 } cir_function_t;
 
@@ -305,6 +309,11 @@ typedef struct cir_unit {
     bool             uses_slice_check;
     bool             uses_union_check;
     bool             uses_panic; /* panic(msg)：打印后 _Exit(1)（与 VM 一致） */
+    /* ---- 测试 mock（test 构建）----
+       `mock_reset_syms`：**其它**模块的 mock 复位函数（runner 在每个用例
+       边界依次调用，保证用例之间不串味）。本模块自己的复位函数直接按名调用。 */
+    const char     **mock_reset_syms;
+    size_t           mock_reset_count;
 } cir_unit_t;
 
 cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);

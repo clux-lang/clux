@@ -463,6 +463,9 @@ void pass1_names(sema_t *sema, ast_program_t *prog) {
     }
 
     ast_func_def_t *fn = (ast_func_def_t *)f;
+    /* 定义所在模块：测试 mock 的槽符号按**定义模块**的 C 前缀生成，
+       跨模块 mock 需要它（此前只有测试函数/泛型实例填了这个字段）。 */
+    if (!fn->owner_module) fn->owner_module = sema->current_module;
     sema_symbol_t init = {.kind = SEMA_SYM_FUNC}; /* 函数定义顺序自由：Pass 1 全部注册，无遮罩问题 */
     sema_symbol_t *sym = sema_scope_define(sema->global_scope, fn->name, &init);
     if (!sym) {
@@ -544,6 +547,8 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
     for (ast_node_t *m = sd->members; m; m = m->next) {
       if (m->kind == AST_FUNC_DEF) {
         ast_func_def_t *fn = (ast_func_def_t *)m;
+        /* 方法定义所在模块（mock_method 的槽按此模块的 C 前缀生成）。 */
+        if (!fn->owner_module) fn->owner_module = sema->current_module;
         /* M7 P4b：泛型方法只登记符号（is_generic），调用点实例化。
            魔法方法允许泛型（泛型 + comptime if 承担重载表达）。 */
         if (fn->generic.count > 0) {

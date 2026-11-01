@@ -490,6 +490,64 @@ cir_unit_t *cbackend_lower(arena_t *arena, sema_t *sema, ast_program_t *prog,
         if (!cm || lc.failed) return NULL;
         cir_unit_add_function(u, cm);
     }
+
+    /* ---- 测试构建：函数 mock 槽 ---------------------------------------------
+       每个可 mock 的函数一个 `void *<prefix>mock_<名字>[2]`（[0]=replacement
+       函数指针，[1]=它的 env 指针）。**非 static**：被 mock 的函数可能定义在
+       本模块、由别的编译单元的 test 块 mock（跨模块目标）。
+       writer 在函数入口按 `f->mock_slot` 生成"槽非空则转调 replacement"的派发；
+       `<prefix>mock_reset()` 由 runner 在每个用例边界调用。 */
+    if (u->tests) {
+        /* 跳过 test 函数本身与 entry（没人会 mock 它们）。 */
+        size_t nmock = 0;
+        size_t plen = u->sym_prefix ? strlen(u->sym_prefix) : 0;
+        for (cir_function_t *f = u->functions; f; f = f->next)
+            if (f != cm && f->name &&
+                strncmp(f->name, u->sym_prefix ? u->sym_prefix : "", plen) == 0 &&
+                strncmp(f->name + plen, "fn_", 3) == 0 &&
+                !strstr(f->name, "_fn___clux_test_"))
+                nmock++;
+        const char **slots = (const char **)arena_calloc(
+            arena, (nmock ? nmock : 1) * sizeof(*slots), 1, ALIGNOF(max_align_t));
+        if (!slots) return NULL;
+        size_t nslot = 0;
+        size_t need = 256;
+        for (cir_function_t *f = u->functions; f; f = f->next) {
+            if (f == cm || !f->name) continue;
+            if (strncmp(f->name, u->sym_prefix ? u->sym_prefix : "", plen) != 0)
+                continue;
+            if (strncmp(f->name + plen, "fn_", 3) != 0) continue;
+            if (strstr(f->name, "_fn___clux_test_")) continue;
+            strslice_t suffix = strslice_from_cstr(f->name + plen + 3);
+            const char *slot = module_symbol(arena, u, "mock_", suffix);
+            if (!slot) continue;
+            f->mock_slot = slot;
+            slots[nslot++] = slot;
+            need += 4 * strlen(slot) + 128;
+        }
+        need += plen + 128;
+        char *txt = (char *)arena_calloc(arena, need, 1, ALIGNOF(max_align_t));
+        if (!txt) return NULL;
+        size_t off = 0;
+        int w = snprintf(txt, need, "/* ---- mock slots (test build) ---- */\n");
+        if (w > 0) off = (size_t)w;
+        for (size_t i = 0; i < nslot; i++) {
+            w = snprintf(txt + off, need - off, "void *%s[2];\n", slots[i]);
+            if (w > 0) off += (size_t)w;
+        }
+        w = snprintf(txt + off, need - off, "void %smock_reset(void) {\n",
+                     u->sym_prefix ? u->sym_prefix : "clux_");
+        if (w > 0) off += (size_t)w;
+        for (size_t i = 0; i < nslot; i++) {
+            w = snprintf(txt + off, need - off,
+                         "    %s[0] = (void *)0;\n    %s[1] = (void *)0;\n",
+                         slots[i], slots[i]);
+            if (w > 0) off += (size_t)w;
+        }
+        snprintf(txt + off, need - off, "}\n");
+        cir_unit_add_raw_append(u, txt);
+    }
+
     /* `export cfunc`：生成 C ABI 包装（内部函数保持 env-first/static）。 */
     for (ast_node_t *n = prog->funcs; n; n = n->next) {
         if (n->kind != AST_FUNC_DEF || !n->is_exported) continue;

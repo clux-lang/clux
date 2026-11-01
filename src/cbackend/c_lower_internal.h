@@ -202,6 +202,7 @@ typedef struct lower_ctx {
     unsigned    switch_seq;
     unsigned    ffi_seq;
     unsigned    assign_seq; /* 赋值旧值销毁的临时变量编号 */
+    unsigned    mock_seq;   /* 测试 mock replacement 静态存储编号 */
     bool        failed;
 } lower_ctx_t;
 
@@ -235,6 +236,15 @@ lower_method_t *find_method(lower_ctx_t *lc, uint32_t owner_id,
 cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e);
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call);
 const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e);
+
+/* ---- 跨模块符号（c_lower_import.c）----
+   `lower_dep_prefix`：某个被依赖模块的 C 符号前缀 `clux_<tag>_`；
+   `lower_import_sym` 在前缀上拼一个符号名（kind 为 "fn_"/"v_"/"mock_" 等）。
+   测试 mock 用它定位“目标函数所在模块”的 mock 槽。 */
+const char *lower_dep_prefix(lower_ctx_t *lc, module_t *dep, char *buf,
+                             size_t cap);
+const char *lower_import_sym(arena_t *arena, const char *prefix,
+                             const char *kind, strslice_t name);
 bool call_is_len(const ast_call_t *c);
 cir_expr_t *lower_len(lower_ctx_t *lc, ast_call_t *call);
 /** 按目标类型 lower 一个值：匿名构造类型槽修正 + 布局兼容 bitcast。 */

@@ -678,6 +678,33 @@ int cbackend_build_program(const char *src_path, const char *out_path,
         mods[i] = mod;
     }
 
+    /* 测试构建：收集所有**依赖模块**的 mock 复位函数名，挂到入口单元上。
+       必须在第二遍之前完成——入口单元的 .c 可能在其它模块之前写出，届时
+       runner 的 extern 声明与 per-case 复位调用已经生成。 */
+    if (tests) {
+        const char **syms = (const char **)arena_calloc(
+            arena, (nmods ? nmods : 1) * sizeof(*syms), 1, ALIGNOF(max_align_t));
+        size_t nsyms = 0;
+        if (syms) {
+            for (size_t i = 0; i < nmods; i++) {
+                module_t *mod = mods[i];
+                if (!mod || mod == main_mod) continue;
+                char tag[16];
+                module_tag_for_path(mod->canonical, tag, sizeof tag);
+                char *name = (char *)arena_calloc(arena, 64, 1,
+                                                  ALIGNOF(max_align_t));
+                if (!name) continue;
+                snprintf(name, 64, "clux_%s_mock_reset", tag);
+                syms[nsyms++] = name;
+            }
+            for (size_t i = 0; i < nmods; i++)
+                if (units[i] && mods[i] == main_mod) {
+                    units[i]->mock_reset_syms = syms;
+                    units[i]->mock_reset_count = nsyms;
+                }
+        }
+    }
+
     /* 第二遍：路径 / 用例表 / 写文件 / 编译。 */
     for (size_t i = 0; i < nmods; i++) {
         module_t *mod = mods[i];

@@ -60,6 +60,11 @@ typedef enum {
   SEMA_BUILTIN_DEEP_CLONE, /* __deep_clone(v)：闭包 env 深拷贝 */
   SEMA_BUILTIN_PANIC,      /* panic(msg: str) -> void（stderr + abort；noreturn） */
   SEMA_BUILTIN_TAKE,       /* take(x: ?T) -> T（移出 optional payload） */
+  /* ---- 测试 mock（只在 test 构建可见；C 后端生成函数槽）---- */
+  SEMA_BUILTIN_MOCK,         /* mock("name", repl)：替换自由函数实现 */
+  SEMA_BUILTIN_UNMOCK,       /* unmock("name")：恢复自由函数 */
+  SEMA_BUILTIN_MOCK_METHOD,  /* mock_method(T, "m", repl)：类型级替换方法 */
+  SEMA_BUILTIN_UNMOCK_METHOD /* unmock_method(T, "m")：恢复方法 */
 } sema_builtin_op_t;
 
 /* ---- 符号 ---- */

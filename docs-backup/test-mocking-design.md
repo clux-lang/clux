@@ -7,7 +7,8 @@
 > unmock("mock_fn");
 > ```
 >
-> 状态：VM 阶段已实现（2026-10-23）；C 后端方案见第 9 节。
+> 状态：**C 后端已实现**（2026-11，见第 11 节）。第 3–8 节是 VM 阶段的方案，
+> 字节码 VM 移除后失效，仅作历史记录；第 9 节是 C 后端的可行性分析。
 
 ---
 
@@ -446,3 +447,38 @@ release 不需要 mock 时全部走直接调用。
 
 限制是 **实例级 mock** 需要额外的 side table；类型级方法 mock
 已经能覆盖主要测试场景，建议先做类型级。
+
+---
+
+## 11. C 后端实现记录（2026-11，已落地）
+
+最终实现与第 9.2 节的"调用点间接"不同：**不改调用点，改被调函数入口**。
+因为所有 clux 函数本来就统一成 env-first ABI
+（`ret fn(void *env, params...)`），所以只要在函数体最前面加一段派发即可：
+
+```c
+/* test 构建里为每个可 mock 的函数生成一个槽（非 static，跨模块可见） */
+void *clux_<tag>_mock_<fn 名>[2];   /* [0]=replacement fn, [1]=它的 env */
+
+static int32_t clux_<tag>_fn_target(void *env, int32_t x) {
+    if (clux_<tag>_mock_target[0])                  /* 新增：入口派发 */
+        return ((int32_t (*)(void *, int32_t))clux_<tag>_mock_target[0])
+                   (clux_<tag>_mock_target[1], x);
+    ...原实现...
+}
+```
+
+- **调用点零改动**；槽与派发只在测试构建（`u->tests`）生成，release 无开销。
+- `mock(...)` = 把 replacement 的 `{fn, env}` 写入槽；replacement 值存进调用点专属
+  的 `static` 存储，保证 env 活到 unmock / 用例结束。
+- `unmock(...)` = 清槽。运行器在每个用例开始前调用各模块的
+  `<prefix>mock_reset()`，用例之间不串味。
+- 因为派发在函数体内，**mock 前取出的函数别名也受影响**（比 VM 方案更符合直觉）。
+- 方法符号是 `__method_<ownerTypeId>_<name>`（与结构体方法 lowering 一致），
+  owner 类型通过 `sema_struct_find_member(..., &owner)` 取得，所以泛型实例
+  （`Box[i32]`）各自有独立的槽；继承时按**方法定义所在**类型取槽。
+- 目标名必须是字符串字面量：sema 在编译期解析（`"mod::fn"` 走
+  `sema_module_export_symbol`），名字笔误是编译错误。
+- 签名一致性由 sema 的 `type_equal` 比较目标 func 类型与 replacement 类型。
+- 不可 mock：`extern cfunc`（C/FFI）、泛型函数模板（按实例类型 mock）、
+  per-instance 方法（仍然是类型级）。
