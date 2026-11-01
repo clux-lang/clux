@@ -372,6 +372,22 @@ bool option_inner_type_ok(const type_t *inner, const type_t *ft) {
 }
 
 /* AST_CONSTRUCT 处理器（自 sema_expr 拆出；纯搬移，逻辑与拆分前逐字一致） */
+/* 初始化表达式是否是**已有值的位置**（变量 / 成员 / 下标 / 解引用 / 解包）。 */
+static bool sema_ctor_place_expr(ast_node_t *n) {
+  if (!n) return false;
+  switch (n->kind) {
+    case AST_IDENT:
+    case AST_MEMBER:
+    case AST_INDEX:
+    case AST_DEREF:
+    case AST_UNWRAP:
+    case AST_SCOPE_REF:
+      return true;
+    default:
+      return false;
+  }
+}
+
 static value_t *construct_result(sema_t *sema, const type_t *t) {
   return value_make_shadow(sema->vm, t);
 }
@@ -749,7 +765,62 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
       /* `__init__`：有初始化器的 struct 不再支持普通构造（具名字段 / 按序
          字段赋值）；`.T{arg1, arg2, ...}` 等价于"零初始化 + T::__init__(args)"。
          见 docs/whitepaper/03-declarations.md §3.5.1。 */
+      if (n->copy_init) {
+        /* 同类型初始化（`__init_copy__`）：固定签名 `(self: *T, src: *T)`，
+           源必须是可寻址的位置（C 后端取它的地址）。 */
+        const type_t *core = type_strip_quals(t);
+        sema_symbol_t *mc = sema_magic_member(sema, core, "__init_copy__");
+        if (!mc || !mc->type ||
+            type_kind_of(type_strip_quals(mc->type)) != TYPE_KIND_FUNC ||
+            func_type_param_count(mc->type) != 2) {
+          char tn[64];
+          sema_type_name(core, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "%s: '__init_copy__' must be declared as "
+                     "'func __init_copy__(self: *%s, src: *%s): void'",
+                     tn, tn, tn);
+          return val_void(sema);
+        }
+        const type_t *want = func_type_param(mc->type, 1);
+        ast_node_t *src = n->fields;
+        if (src && src->kind == AST_CONSTRUCT_FIELD)
+          src = ((ast_construct_field_t *)src)->value;
+        if (!src || !sema_ctor_place_expr(src)) {
+          char tn[64];
+          sema_type_name(core, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "%s: '__init_copy__' initialization needs an addressable "
+                     "value", tn);
+          return val_void(sema);
+        }
+        value_t *sv = sema_expr(sema, &n->fields, scope);
+        if (is_poison(sema, sv)) return val_void(sema);
+        if (want) {
+          /* 形参是 `*T`、实参是类型 T 的位置：C 后端取地址后正好匹配。 */
+          const type_t *swn = type_strip_quals(want);
+          const type_t *svt = value_type(sv);
+          svt = svt ? type_strip_quals(svt) : svt;
+          bool by_addr = false;
+          if (swn && type_is_ptr(swn) && svt) {
+            const type_t *base = type_strip_quals(ptr_type_base(swn));
+            if (base && svt == base) by_addr = true;
+          }
+          if (by_addr) return construct_result(sema, t);
+          value_t *casted = value_implicit_cast(sema->vm, sv, want);
+          if (!casted || value_is_error(sema->vm, casted)) {
+            char tn[64], pn[64], an[64];
+            sema_type_name(core, tn, sizeof tn);
+            sema_type_name(want, pn, sizeof pn);
+            sema_type_name(value_type(sv), an, sizeof an);
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "%s::__init_copy__ expects %s, got %s", tn, pn, an);
+            return val_void(sema);
+          }
+        }
+        return construct_result(sema, t);
+      }
       if (sema_magic_has_init(sema, t)) {
+        const type_t *core = type_strip_quals(t);
         for (ast_node_t *f = n->fields; f; f = f->next) {
           if (f->kind == AST_CONSTRUCT_FIELD) {
             char tn[64];
@@ -761,13 +832,80 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
             return val_void(sema);
           }
         }
-        ast_node_t *call = sema_magic_init_call(
-            sema, type_strip_quals(t), n->fields, n->base.tok_begin,
-            n->base.tok_end);
-        if (!call) return val_void(sema);
-        call->next = (*node)->next;
-        *node = call;
-        return sema_expr(sema, node, scope);
+        /* 实参逐个求值（只求值一次），再按构造器签名校验：泛型构造用实参
+           shadow 推断实例化（`sema_generic_instantiate_inferred`），非泛型直接
+           用声明签名。校验通过后**保留构造节点**并打 init_checked 标记——C 后端
+           就地降级成 `({ T _t = (T){0}; T_init(&_t, args); _t; })`，不再生成
+           `__clux_init_<id>` 助手（助手无法承载泛型 `__init__`：通用实例化器
+           会重新解析源码 token，生成的函数没有 token）。 */
+        size_t nargs = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next) nargs++;
+        value_t **shadows = NULL;
+        if (nargs) {
+          shadows = (value_t **)arena_calloc(sema->arena, nargs,
+                                             sizeof(*shadows),
+                                             ALIGNOF(max_align_t));
+          if (!shadows) return val_void(sema);
+        }
+        size_t fi2 = 0;
+        for (ast_node_t **link = &n->fields; *link;
+             link = &(*link)->next, fi2++) {
+          shadows[fi2] = sema_expr(sema, link, scope);
+          if (is_poison(sema, shadows[fi2])) return val_void(sema);
+        }
+        sema_symbol_t *ms = sema_magic_member(sema, core, "__init__");
+        if (!ms) return val_void(sema);
+        const type_t *sig = NULL;
+        if (ms->is_generic) {
+          /* 泛型 `__init__[U]` 的构造还差最后一步：实例化要走
+             `sema_generic_instantiate_method_inferred`（绑定 struct 实例 + 方法
+             类型参数），并让构造节点直接 CALL 到实例 fid。先明确拒绝，避免产生
+             半个实例。同类型移动请用 `__init_copy__`。 */
+          char tn[64];
+          sema_type_name(core, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "%s::__init__ is generic: generic construction is not "
+                     "supported yet; declare a non-generic '__init__' (e.g. "
+                     "taking '*T') and use '__init_copy__' for same-type moves",
+                     tn);
+          return val_void(sema);
+        } else {
+          sig = ms->type;
+        }
+        if (!sig || type_kind_of(type_strip_quals(sig)) != TYPE_KIND_FUNC) {
+          char tn[64];
+          sema_type_name(core, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "type %s: '__init__' has no usable signature", tn);
+          return val_void(sema);
+        }
+        size_t np = func_type_param_count(sig);
+        if (np != nargs + 1) {
+          char tn[64];
+          sema_type_name(core, tn, sizeof tn);
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "%s::__init__ expects %zu arguments, got %zu", tn,
+                     np ? np - 1 : 0, nargs);
+          return val_void(sema);
+        }
+        size_t ai = 0;
+        for (ast_node_t *f = n->fields; f; f = f->next, ai++) {
+          const type_t *pt = func_type_param(sig, ai + 1);
+          if (!pt) return val_void(sema);
+          value_t *casted = value_implicit_cast(sema->vm, shadows[ai], pt);
+          if (!casted || value_is_error(sema->vm, casted)) {
+            char pn[64], an[64], tn[64];
+            sema_type_name(core, tn, sizeof tn);
+            sema_type_name(pt, pn, sizeof pn);
+            sema_type_name(value_type(shadows[ai]), an, sizeof an);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "%s::__init__ argument %zu: cannot convert %s to %s", tn,
+                       ai + 1, an, pn);
+            return val_void(sema);
+          }
+        }
+        n->init_checked = true;
+        return construct_result(sema, t);
       }
 
       /* ?T 构造器（二值单槽位）：字段数强制 == 1，

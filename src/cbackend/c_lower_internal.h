@@ -203,6 +203,7 @@ typedef struct lower_ctx {
     unsigned    ffi_seq;
     unsigned    assign_seq; /* 赋值旧值销毁的临时变量编号 */
     unsigned    mock_seq;   /* 测试 mock replacement 静态存储编号 */
+    unsigned    ctor_seq;   /* 就地构造的临时变量名序号 */
     bool        failed;
 } lower_ctx_t;
 

@@ -1112,10 +1112,89 @@ TEST(Magic, InitFromPlacePassesAddress) {
       "func main(): i32 {\n"
       "  var v: i32 = 7;\n"
       "  var f: Fatal[i32] = .Fatal[i32]{ v.& };\n"
-      "  var o: Own[i32] = f;\n"
+      "  var o: Own[i32] = .Own[i32]{ f.& };\n"
       "  if (f.ptr != nil) { return 1; }\n"
       "  if (o.ptr == nil || o.ptr.!.* != 7) { return 2; }\n"
       "  return 0;\n"
       "}\n",
       "init_place_address");
+}
+/* 同类型初始化（var / 实参 / 返回值 / 构造）走 `__init_copy__`：形参是 `*T`，
+   构造里可以移走源对象，所以"参数传递 = 构造"不会自递归。 */
+TEST(Magic, InitCopyMovesAtAllPositions) {
+  clux_expect_program_ok(
+      "struct Box[T] {\n"
+      "  ptr: ?*T;\n"
+      "  func __init__(self: *Box[T], p: *T): void { self.ptr = p; }\n"
+      "  func __init_copy__(self: *Box[T], o: *Box[T]): void {\n"
+      "    self.ptr = o.take();\n"
+      "  }\n"
+      "  func take(self: *Box[T]): ?*T {\n"
+      "    var p: ?*T = self.ptr;\n"
+      "    self.ptr = nil;\n"
+      "    return p;\n"
+      "  }\n"
+      "  func __assign__(self: *Box[T], o: *Box[T]): void {\n"
+      "    self.ptr = o.ptr;\n"
+      "    o.ptr = nil;\n"
+      "  }\n"
+      "}\n"
+      "func take_val(b: Box[i32]): i32 {\n"
+      "  if (b.ptr == nil) { return -1; }\n"
+      "  return b.ptr.!.*;\n"
+      "}\n"
+      "var g_val: i32 = 9;\n"
+      "func give(): Box[i32] {\n"
+      "  return .Box[i32]{ g_val.& };\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var v1: i32 = 7;\n"
+      "  var a: Box[i32] = .Box[i32]{ v1.& };\n"
+      "  var b: Box[i32] = a;              // var 初始化\n"
+      "  if (a.ptr != nil) { return 1; }\n"
+      "  if (b.ptr == nil || b.ptr.!.* != 7) { return 2; }\n"
+      "  if (take_val(b) != 7) { return 3; }  // 实参\n"
+      "  var c: Box[i32] = give();            // 返回值\n"
+      "  if (c.ptr == nil || c.ptr.!.* != 9) { return 4; }\n"
+      "  var d: Box[i32] = .Box[i32]{ v1.& };\n"
+      "  d = c;                                // 赋值 → __assign__\n"
+      "  if (c.ptr != nil) { return 5; }\n"
+      "  if (d.ptr == nil || d.ptr.!.* != 9) { return 6; }\n"
+      "  return 0;\n"
+      "}\n",
+      "init_copy_positions");
+}
+
+/* 没有 `__init_copy__` 时，同类型初始化仍然拒绝（不可拷贝的 move-only 类型）。 */
+TEST(Magic, SameTypeInitNeedsInitCopy) {
+  clux_expect_reject(
+      "struct F { ptr: ?*i32; func __init__(self: *F, p: *i32): void { self.ptr = p; } }\n"
+      "func main(): i32 {\n"
+      "  var v: i32 = 1;\n"
+      "  var a: F = .F{ v.& };\n"
+      "  var b: F = a;\n"
+      "  return 0;\n"
+      "}\n",
+      "cannot initialize", "init_copy_missing");
+}
+
+/* `__init__` 不能拿自身类型当参数：那会在"参数传递 = 构造"上无限递归
+   （以前是编译器栈溢出）。同类型初始化请用 `__init_copy__`。 */
+TEST(Magic, InitRejectsSelfTypedParameter) {
+  clux_expect_reject(
+      "struct F { v: i32; func __init__(self: *F, o: F): void { self.v = o.v; } }\n"
+      "func main(): i32 {\n"
+      "  var a: F = .F{ 1 };\n"
+      "  var b: F = a;\n"
+      "  return b.v;\n"
+      "}\n",
+      "cannot take the type itself", "init_self_param");
+}
+
+/* `__init_copy__` 的签名被固定为 `(self: *T, src: *T) -> void`。 */
+TEST(Magic, InitCopySignatureChecked) {
+  clux_expect_reject(
+      "struct F { v: i32; func __init_copy__(self: *F, o: F): void { self.v = o.v; } }\n"
+      "func main(): i32 { return 0; }\n",
+      "must take its right-hand operand by pointer", "init_copy_sig");
 }

@@ -107,6 +107,9 @@ typedef enum {
     /* 把右值表达式物化成可寻址的临时左值（C 复合字面量数组）：
        `(((T[]){ v })[0])`。用于「右值接收者 + ref *T 形参」的方法调用。 */
     CIR_EXPR_TEMP_LVALUE,
+    /* 语句表达式：`({ <setup_stmt 链>; <rhs>; })`。用于构造就地
+       降级（零初始化 + 调用 __init__ + 取值），不再生成助手函数。 */
+    CIR_EXPR_COMPOUND,
 } cir_expr_kind_t;
 
 typedef struct cir_init {
@@ -365,6 +368,9 @@ cir_expr_t    *cir_expr_make(arena_t *arena, cir_type_t *slice_type,
                              cir_expr_t *length);
 cir_expr_t    *cir_expr_slice_data(arena_t *arena, cir_expr_t *object);
 cir_expr_t    *cir_expr_string(arena_t *arena, const char *data, size_t len);
+/* 语句表达式 ({ setup...; result; })（构造就地降级用）。 */
+cir_expr_t    *cir_expr_compound(arena_t *arena, cir_stmt_t *setup,
+                              cir_expr_t *result);
 cir_expr_t    *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,
                                cir_expr_t *value);
 cir_expr_t    *cir_expr_opt_is_some(arena_t *arena, cir_expr_t *object,

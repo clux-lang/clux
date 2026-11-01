@@ -191,6 +191,10 @@ value_t *ctfe_slice_expr(ctfe_ctx_t *ctx, ast_slice_t *sl);
 value_t *ctfe_make_slice(ctfe_ctx_t *ctx, ast_make_t *mk);
 
 /** 实例方法调用 `recv.m(args)`。返回 NULL = 不是方法调用（调用方回退）。 */
+/* `__init__` 构造（init_checked）：零值 + 调 __init__（编译期求值）。 */
+value_t *ctfe_construct_init(ctfe_ctx_t *ctx, const struct ast_node *n,
+                             const struct type_t *t);
+
 value_t *ctfe_method_call(ctfe_ctx_t *ctx, ast_call_t *call);
 
 /** 静态方法调用 `Type::method(args)`。返回 NULL = 不是静态方法

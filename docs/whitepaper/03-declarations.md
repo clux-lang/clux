@@ -378,6 +378,7 @@ test "Suite.Name" {
 | `using a = e;` 的作用域退出 | `__dispose__` | `(self: *T) -> void`（宽松约定，不是析构；见 §4.12.1） |
 | `a = b;`（赋值） | `__assign__` | `(self: *T, rhs: *const R) -> void`；**初始化**（`var` / 实参 / 返回值 / 字段）不派发，见 `__init__` |
 | `.T{args}`（构造） | `__init__` | `(self: *T, ...任意参数...) -> void`；有它时禁用具名构造，`.T{args}` = 零初始化 + init。**只有恰好一个非 `self` 形参时**，所有初始化位置（`var a: T = x`、实参、返回值、字段初始化）都改写成 `.T{x}`；源表达式是**已有值的位置**（变量 / 成员 / 下标 / 解引用 / 解包）时也走构造，因此从 `T` 值初始化会因形参不匹配而报错——这就是 move-only 类型禁止 copy 的手段 |
+| 同类型初始化（`var b: T = a;` / 实参 / 返回值 / 字段） | `__init_copy__` | `(self: *T, src: *T) -> void`；固定签名，形参是**指针**，所以"参数传递 = 构造"不会自递归。初始化位置把源作为**地址**传入（与 `__assign__` 的 rhs 对齐），构造里可以置空源对象 ⇒ move。没有它时同类型初始化按"不可 copy"拒绝 |
 
 ### 3.15.3 运算符
 
@@ -445,10 +446,15 @@ var mid: []i32 = w[1:3];   // ⇒ w.__slice__(1, 3)
   优先于该内建。
 - `__assign__` 只在**赋值语句**上派发：`target = value` ⇒
   `target.__assign__(value.&)`；初始化（`var`、参数、构造字段、返回值）不派发。
-- 初始化转换在构造形参是**指针** `*P`、而源表达式是类型 P 的**位置**（变量 /
-  成员 / 下标 / 解引用 / 解包）时，传的是源的**地址**（与 `__assign__` 的 rhs
-  对齐）：`var b: T = a;` ⇒ `__init__(&a)`。构造因此能看到并置空调用方对象，
-  这是 move-only 类型"移动初始化"的实现方式（`var o: Own[T] = f;`）。
+- 同类型初始化（`var b: T = a;`、实参、返回值、字段）走专门的
+  `__init_copy__`，固定签名 `(self: *T, src: *T) -> void`，源按**地址**传入：
+  `var b: T = a;` ⇒ 零初始化 + `b.__init_copy__(&a)`。形参是指针，所以"参数
+  传递 = 构造"不会无限递归；构造里可以置空源对象 ⇒ 这是 move-only 类型
+  （`Fatal` / `Own`）实现**移动初始化**的方式。没有 `__init_copy__` 时，同类型
+  初始化按"不可 copy"拒绝。
+- `__init__` **不允许**把类型自身当形参（`func __init__(self: *T, o: T)`）：构造
+  `T` 需要先有 `T`，而参数传递本身又是构造 → 编译期无限递归。编译器直接拒绝
+  这种声明，并提示改用 `__init_copy__`。
 - `__init__` 让 `.T{args}` 成为"零初始化 + `__init__(args)`"；此时禁用具名
   （`.T{ .field = ... }`）构造。`__init__` 只有一个非 `self` 参数时，该类型还
   支持从该参数**隐式构造**：`var t: T = 5;`、实参、返回值、字段初始化都会插入
@@ -462,13 +468,17 @@ var mid: []i32 = w[1:3];   // ⇒ w.__slice__(1, 3)
   struct Fatal[T] {
       ptr: ?*T;
       func __init__(self: *Fatal[T], p: *T): void { self.ptr = p; }
+      func __init_copy__(self: *Fatal[T], other: *Fatal[T]): void {
+          self.ptr = other.take();  // 初始化 = move
+      }
       func __assign__(self: *Fatal[T], other: *Fatal[T]): void {
           self.ptr = other.ptr;
           other.ptr = nil;          // 赋值 = move
       }
   }
-  // var a: Fatal[T] = b;   // 错误：Fatal 不能从 Fatal 初始化（不可 copy）
-  // a = b;                 // 合法：__assign__ 把 b 置 nil（move）
+  var a: Fatal[T] = b;   // 合法：__init_copy__ 把 b 置 nil（move）
+  a = b;                 // 合法：__assign__ 把 b 置 nil（move）
+  // 没有 __init_copy__ 时：var a: Fatal[T] = b; 报"不可 copy"
   ```
 
 ### 3.15.6 限制与诊断
@@ -480,3 +490,7 @@ var mid: []i32 = w[1:3];   // ⇒ w.__slice__(1, 3)
 - 内建类型与内建语义优先；想用魔法方法就必须先包成结构体。
 - 指针 / `?T` / 数组 / 切片接收者不自动解引用派发：`p + q`（都是 `*T`）不会
   找 `__add__`。
+- 泛型 `__init__`（`func __init__[U](self: *T, src: U)`）目前只支持**声明与
+  显式实例化**，走 `.T{args}` 的构造暂不支持：编译器会明确报错，而不是生成
+  半个实例。需要"一个构造器同时接受 `*T` / `T`"时，用非泛型 `__init__(p: *T)`
+  （裸指针）+ `__init_copy__`（同类型 move）即可覆盖。

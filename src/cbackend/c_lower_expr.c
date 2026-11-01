@@ -1500,6 +1500,105 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CONSTRUCT: {
         ast_construct_t *c = (ast_construct_t *)e;
         if (c->is_bitfield) return lower_bitfield_construct(lc, c);
+        if (c->copy_init) {
+            /* 同类型初始化：
+                 ({ T _t = (T){0}; _t.__init_copy__(&src); _t; }) */
+            cir_type_t *ct = c->type ? map_type(lc, sema_resolve_type_slot(lc->sema, &c->type)) : NULL;
+            if (!ct) return NULL;
+            const type_t *cty = sema_resolve_type_slot(lc->sema, &c->type);
+            const sema_type_t *st =
+                cty ? sema_type_find(lc->sema, type_strip_quals(cty)) : NULL;
+            lower_method_t *m =
+                st ? find_method(lc, st->id, STRSLICE_LIT("__init_copy__"))
+                   : NULL;
+            if (!m) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: method '__init_copy__' has no materialized "
+                           "instance");
+                lc->failed = true;
+                return NULL;
+            }
+            char nb[64];
+            snprintf(nb, sizeof nb, "clux_ctor%u", lc->ctor_seq++);
+            const char *tname = copy_arena(lc->arena, nb);
+            if (!tname) return NULL;
+            cir_stmt_t *decl = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (!decl) return NULL;
+            decl->name = tname;
+            decl->type = ct;
+            decl->expr = cir_expr_construct(lc->arena, ct, NULL);
+            if (!decl->expr) return NULL;
+            ast_node_t *fv = c->fields;
+            if (fv && fv->kind == AST_CONSTRUCT_FIELD)
+                fv = ((ast_construct_field_t *)fv)->value;
+            cir_expr_t *val = lower_expr(lc, fv);
+            if (!val) return NULL;
+            cir_expr_t *call = cir_expr_call(lc->arena, m->cname, NULL);
+            if (!call) return NULL;
+            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
+            cir_expr_append_arg(
+                call, cir_expr_unary(lc->arena, "&",
+                                    cir_expr_ident(lc->arena, tname)));
+            cir_expr_append_arg(call,
+                                cir_expr_unary(lc->arena, "&", val));
+            cir_stmt_t *st_expr = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st_expr) return NULL;
+            st_expr->expr = call;
+            decl->next = st_expr;
+            return cir_expr_compound(lc->arena, decl,
+                                     cir_expr_ident(lc->arena, tname));
+        }
+        if (c->init_checked) {
+            /* 就地构造（sema 已按 `__init__` 签名校验过实参）：
+                 ({ T _t = (T){0}; T_init(&_t, args...); _t; })
+               不再经 `__clux_init_<id>` 助手——泛型 `__init__` 也能用。 */
+            const type_t *cty =
+                c->type ? sema_resolve_type_slot(lc->sema, &c->type) : NULL;
+            if (!cty) return NULL;
+            cir_type_t *ct = map_type(lc, cty);
+            if (!ct) return NULL;
+            const sema_type_t *st =
+                sema_type_find(lc->sema, type_strip_quals(cty));
+            lower_method_t *m =
+                st ? find_method(lc, st->id, STRSLICE_LIT("__init__")) : NULL;
+            if (!m) {
+                diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+                           "c backend: method '__init__' has no materialized "
+                           "instance for this construction");
+                lc->failed = true;
+                return NULL;
+            }
+            char nb[64];
+            snprintf(nb, sizeof nb, "clux_ctor%u", lc->ctor_seq++);
+            const char *tname = copy_arena(lc->arena, nb);
+            if (!tname) return NULL;
+            cir_stmt_t *decl = cir_stmt_new(lc->arena, CIR_STMT_VAR);
+            if (!decl) return NULL;
+            decl->name = tname;
+            decl->type = ct;
+            decl->expr = cir_expr_construct(lc->arena, ct, NULL);
+            if (!decl->expr) return NULL;
+            cir_expr_t *call = cir_expr_call(lc->arena, m->cname, NULL);
+            if (!call) return NULL;
+            cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
+            cir_expr_append_arg(
+                call, cir_expr_unary(lc->arena, "&",
+                                    cir_expr_ident(lc->arena, tname)));
+            for (ast_node_t *f = c->fields; f; f = f->next) {
+                ast_node_t *fv = f;
+                if (fv->kind == AST_CONSTRUCT_FIELD)
+                    fv = ((ast_construct_field_t *)fv)->value;
+                cir_expr_t *a = lower_expr(lc, fv);
+                if (!a) return NULL;
+                cir_expr_append_arg(call, a);
+            }
+            cir_stmt_t *st_expr = cir_stmt_new(lc->arena, CIR_STMT_EXPR);
+            if (!st_expr) return NULL;
+            st_expr->expr = call;
+            decl->next = st_expr;
+            return cir_expr_compound(lc->arena, decl,
+                                     cir_expr_ident(lc->arena, tname));
+        }
         if (!c->type) {
             diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                        "c backend: anonymous construction requires a type");

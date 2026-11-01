@@ -22,6 +22,11 @@ typedef struct {
     uint32_t    member_tag;    /* union 构造：sema 定位的 member 下标（tag 值），
                                   compiler 发 tag 哨兵 + CONSTRUCT 2 用；其他
                                   类型构造未用（0） */
+    /* sema 已按 `__init__` 签名校验过实参，且要求 C 后端把这次构造
+       就地降级为"零初始化 + __init__ + 取值"（不生成助手函数）。 */
+    bool        init_checked;
+    /* 同类型初始化：`({ T _t = (T){0}; _t.__init_copy__(&src); _t; })`。 */
+    bool        copy_init;
     bool        is_bitfield;
     uint32_t    bit_word_bits;
     uint32_t    bit_field_count;

@@ -1,4 +1,5 @@
 #include "sema/magic.h"
+#include "sema/comptime.h"
 #include "parser/ast_addr.h"
 #include "vm/type_ptr.h"
 #include "diag/diagnostic.h"
@@ -21,36 +22,17 @@
 #include <string.h>
 
 /* ===========================================================================
- * `__init__` 构造（§4.5）
+ * `__init__` / `__init_copy__` 初始化转换（§3.15.5）
  *
- * 有 `__init__` 的 struct 不再支持普通构造（具名字段 / 按序字段赋值），
- * `.T{arg1, arg2, ...}` 理解为：
+ * 构造**不再生成** `__clux_init_<id>` 助手函数：sema 保留构造节点并打
+ * `init_checked` / `copy_init` 标记，C 后端就地降级成语句表达式
  *
- *     var t: T = <zero>;          // 全部字段清零
- *     t.__init__(arg1, arg2, ...);
- *     // 值 = t
+ *     ({ T _t = (T){0}; T_init(&_t, args); _t; })          // .T{args}
+ *     ({ T _t = (T){0}; _t.__init_copy__(&src); _t; })     // 同类型初始化
  *
- * 实现：为每个类型惰性生成一个普通函数
- *
- *     __clux_init_<id>(p1: A1, ..., pN: AN) -> T
- *
- * 构造点改写成对它的一次普通调用（参数求值顺序自然保持）。生成函数体里
- * 的 `t.__init__(...)` 是普通成员调用，走常规实例化/改写。
+ * 这样泛型 `__init__` 也是普通方法调用，不必让"生成的泛型函数"走实例化器
+ * （实例化器会重新解析源码 token，生成的函数没有 token）。
  * =========================================================================== */
-
-typedef struct {
-    const type_t *type;
-    uint32_t      fid;
-} mini_entry_t;
-
-static mini_entry_t *mini_find(sema_t *s, const type_t *t) {
-    size_t n = s->magic_init_cache ? vec_len((vec_t *)s->magic_init_cache) : 0;
-    for (size_t i = 0; i < n; i++) {
-        mini_entry_t *e = (mini_entry_t *)vec_get((vec_t *)s->magic_init_cache, i);
-        if (e && e->type == t) return e;
-    }
-    return NULL;
-}
 
 /* 该类型是否有 `__init__`（struct + 成员方法）。 */
 bool sema_magic_has_init(sema_t *sema, const type_t *t) {
@@ -59,193 +41,6 @@ bool sema_magic_has_init(sema_t *sema, const type_t *t) {
     if (!core || type_kind_of(core) != TYPE_KIND_STRUCT) return false;
     return sema_magic_member(sema, core, "__init__") != NULL;
 }
-
-static ast_node_t *mini_ident(sema_t *s, const char *name) {
-    ast_node_t *n = ast_ident_new(s->arena, 0, 0);
-    if (!n || !name) return NULL;
-    size_t len = strlen(name);
-    char *buf = (char *)arena_alloc(s->arena, len, 1);
-    if (!buf) return NULL;
-    memcpy(buf, name, len);
-    ((ast_ident_t *)n)->name = strslice_from_bytes(buf, len);
-    n->is_generated = true;
-    return n;
-}
-
-/* 生成（或取缓存）`__clux_init_<id>` 的 fid；0 = 失败/不适用。 */
-static uint32_t mini_generate(sema_t *s, const type_t *t) {
-    vm_t *vm = s->vm;
-    mini_entry_t *cached = mini_find(s, t);
-    if (cached) return cached->fid;
-
-    sema_symbol_t *ms = sema_magic_member(s, t, "__init__");
-    if (!ms || !ms->type || type_kind_of(ms->type) != TYPE_KIND_FUNC) return 0;
-    if (ms->is_generic) return 0; /* 泛型 __init__ 暂不支持 */
-
-    size_t np = func_type_param_count(ms->type);
-    if (np < 1) return 0;
-    size_t nargs = np - 1;
-
-    const sema_type_t *st = sema_type_register(s, t);
-    if (!st) return 0;
-    char name_buf[64];
-    snprintf(name_buf, sizeof name_buf, "__clux_init_%u", st->id);
-    size_t nlen = strlen(name_buf);
-    char *name = (char *)arena_alloc(s->arena, nlen, 1);
-    if (!name) return 0;
-    memcpy(name, name_buf, nlen);
-
-    /* 形参：`__init__` 的参数（跳过 self），名字 v1..vN。 */
-    ast_node_t *params = NULL, *params_last = NULL;
-    const type_t *param_types[64];
-    if (nargs > 64) return 0;
-    for (size_t i = 0; i < nargs; i++) {
-        const type_t *pt = func_type_param(ms->type, i + 1);
-        if (!pt) return 0;
-        char pn[32];
-        snprintf(pn, sizeof pn, "v%zu", i + 1);
-        /* 形参名必须 arena 持久化（strslice 指向栈缓冲会悬空）。 */
-        size_t plen = strlen(pn);
-        char *pbuf = (char *)arena_alloc(s->arena, plen, 1);
-        if (!pbuf) return 0;
-        memcpy(pbuf, pn, plen);
-        ast_node_t *vd = ast_var_def_new(s->arena, 0, 0);
-        if (!vd) return 0;
-        ast_var_def_t *p = (ast_var_def_t *)vd;
-        p->name = strslice_from_bytes(pbuf, plen);
-        p->type_expr = sema_gen_type_ref(s, pt);
-        if (!p->type_expr) return 0;
-        param_types[i] = pt;
-        if (params_last) params_last->next = vd;
-        else params = vd;
-        params_last = vd;
-    }
-
-    /* 体：
-         var t: T = <zero>;      （zero_init）
-         t.__init__(v1, ..., vN);
-         return t; */
-    ast_node_t *tdef = ast_var_def_new(s->arena, 0, 0);
-    if (!tdef) return 0;
-    ast_var_def_t *tv = (ast_var_def_t *)tdef;
-    tv->name = strslice_from_cstr("t");
-    tv->type_expr = sema_gen_type_ref(s, t);
-    tv->zero_init = true;
-    if (!tv->type_expr) return 0;
-
-    ast_node_t *tref = mini_ident(s, "t");
-    ast_node_t *member = ast_member_new(s->arena, 0, 0);
-    if (!tref || !member) return 0;
-    ((ast_member_t *)member)->object = tref;
-    ((ast_member_t *)member)->field = STRSLICE_LIT("__init__");
-    ast_node_t *call = ast_call_new(s->arena, 0, 0);
-    if (!call) return 0;
-    ast_node_t *args = NULL, *args_last = NULL;
-    for (size_t i = 0; i < nargs; i++) {
-        char pn[32];
-        snprintf(pn, sizeof pn, "v%zu", i + 1);
-        ast_node_t *a = mini_ident(s, pn);
-        if (!a) return 0;
-        if (args_last) args_last->next = a;
-        else args = a;
-        args_last = a;
-    }
-    ((ast_call_t *)call)->callee = member;
-    ((ast_call_t *)call)->args = args;
-    ((ast_call_t *)call)->args_last = args_last;
-
-    ast_node_t *stmt = ast_expr_stmt_new(s->arena, 0, 0);
-    if (!stmt) return 0;
-    ((ast_expr_stmt_t *)stmt)->expr = call;
-
-    ast_node_t *ret = ast_return_new(s->arena, 0, 0);
-    if (!ret) return 0;
-    ((ast_return_t *)ret)->value = mini_ident(s, "t");
-
-    tdef->next = stmt;
-    stmt->next = ret;
-
-    ast_node_t *body = ast_block_new(s->arena, 0, 0);
-    if (!body) return 0;
-    ((ast_block_t *)body)->stmts = tdef;
-    ((ast_block_t *)body)->stmts_last = ret;
-
-    ast_node_t *def = ast_func_def_new(s->arena, 0, 0);
-    if (!def) return 0;
-    ast_func_def_t *fn = (ast_func_def_t *)def;
-    fn->name = strslice_from_bytes(name, nlen);
-    fn->params = params;
-    fn->params_last = params_last;
-    fn->return_expr = sema_gen_type_ref(s, t);
-    fn->body = body;
-    fn->base.is_generated = true;
-
-    sema_func_t *sf = (sema_func_t *)allocator_new_ex(
-        vm->alloc, "sema_func_t", sizeof(sema_func_t), NULL, NULL, NULL, 1);
-    if (!sf) return 0;
-    memset(sf, 0, sizeof(*sf));
-    sf->def = def;
-    sf->def_scope = s->global_scope;
-    sf->is_local = false;
-    sf->is_walked = false;
-    sema_func_id_alloc(s, fn);
-    uint32_t fid = fn->fid;
-    if (fid == 0) return 0;
-    vec_push(s->funcs, vm->alloc, sf);
-    if (s->prog && s->prog->kind == AST_PROGRAM) {
-        ast_program_t *prog = (ast_program_t *)s->prog;
-        ast_append(&prog->funcs, &prog->funcs_last, NULL, def);
-    }
-    sema_build_func_scope(s, sf);
-
-    const type_t *sig =
-        type_func_sig(vm, param_types, nargs, t, false);
-    if (!sig) return 0;
-    const sema_type_t *sig_st = sema_type_register(s, sig);
-    if (!sig_st) return 0;
-    fn->sig_id = sig_st->id;
-    sema_symbol_t sym = {.kind = SEMA_SYM_FUNC,
-                         .ast = def,
-                         .fid = fid,
-                         .type = sig,
-                         .is_active = true};
-    sema_scope_define(s->global_scope, fn->name, &sym);
-
-    mini_entry_t *e = (mini_entry_t *)allocator_new_ex(
-        vm->alloc, "mini_entry_t", sizeof(mini_entry_t), NULL, NULL, NULL, 1);
-    if (!e) return fid;
-    memset(e, 0, sizeof(*e));
-    e->type = t;
-    e->fid = fid;
-    vec_push((vec_t *)s->magic_init_cache, vm->alloc, e);
-    return fid;
-}
-
-ast_node_t *sema_magic_init_call(sema_t *s, const type_t *t, ast_node_t *args,
-                                 uint32_t tok_begin, uint32_t tok_end) {
-    if (!s || !t) return NULL;
-    uint32_t fid = mini_generate(s, t);
-    if (!fid) return NULL;
-    const sema_type_t *st = sema_type_find(s, t);
-    if (!st) return NULL;
-    char name_buf[64];
-    snprintf(name_buf, sizeof name_buf, "__clux_init_%u", st->id);
-    ast_node_t *callee = mini_ident(s, name_buf);
-    if (!callee) return NULL;
-    ast_node_t *call = ast_call_new(s->arena, tok_begin, tok_end);
-    if (!call) return NULL;
-    ((ast_call_t *)call)->callee = callee;
-    ((ast_call_t *)call)->args = args;
-    ast_node_t *last = args;
-    while (last && last->next) last = last->next;
-    ((ast_call_t *)call)->args_last = last;
-    return call;
-}
-
-/* 单参 `__init__` 的隐式构造：目标类型 T 恰好一个初始化参数 P，源表达式
-   类型（src_t）不是 T 且可隐式赋给 P 时，把 *slot 改写成
-   `__clux_init_T(<原表达式>)`。返回新的 shadow（*converted = true）；
-   不适用时返回 NULL/*converted = false。 */
 
 /* 初始化表达式是否是**已存在值的位置**（变量 / 成员 / 下标 / 解引用 / 解包）。
    只有这种"把一个已有值复制进目标"的形态才受单参 __init__ 拦截：
@@ -273,58 +68,71 @@ value_t *sema_magic_init_convert(sema_t *sema, ast_node_t **slot,
     const type_t *core = type_strip_quals(target_t);
     if (!core || type_kind_of(core) != TYPE_KIND_STRUCT) return NULL;
     sema_symbol_t *ms = sema_magic_member(sema, core, "__init__");
-    if (!ms || !ms->type || type_kind_of(ms->type) != TYPE_KIND_FUNC) return NULL;
-    if (ms->is_generic) return NULL;
-    if (func_type_param_count(ms->type) != 2) return NULL; /* 恰好 self + 1 */
-    const type_t *src = src_t ? type_strip_quals(src_t) : NULL;
-    /* 同类型但**不是**已有值的位置（显式构造 / 函数调用返回新值）：直接放入
-       目标变量，不再构造一次；反之（`var b = a`）要继续走 __init__ 检查，
-       这正是 move-only 类型禁止 copy 的位置。 */
-    if (src && src == core && !init_expr_is_place(*slot)) return NULL;
-    const type_t *pt = func_type_param(ms->type, 1);
-    if (!pt) return NULL;
+    sema_symbol_t *mc = sema_magic_member(sema, core, "__init_copy__");
+    if (!ms && !mc) return NULL;
+    const type_t *src0 = src_t ? type_strip_quals(src_t) : NULL;
 
-    /* 构造形参是指针 `*P`、源是类型 P 的位置表达式：传**地址**（与
-       `__assign__` 的 rhs 对齐）。这样 `var b: T = a;` 进构造后能看到并置空
-       调用方对象——move-only 类型的"移动初始化"就靠它。 */
-    {
-      const type_t *ptc = type_strip_quals(pt);
-      if (ptc && type_is_ptr(ptc) && src && init_expr_is_place(*slot)) {
-        const type_t *base = type_strip_quals(ptr_type_base(ptc));
-        if (base && src == base) {
-          ast_node_t *arg0 = *slot;
-          ast_node_t *addr =
-              ast_addr_new(sema->arena, arg0->tok_begin, arg0->tok_end);
-          if (addr) {
-            ((ast_addr_t *)addr)->operand = arg0;
-            addr->is_generated = true;
-            addr->next = arg0->next;
-            *slot = addr;
-            src = ptc;
-          }
-        }
+    /* 同类型初始化（`var b: T = a;`、实参、返回值、字段）一律走 `__init_copy__`
+       ——它是固定签名 `(self: *T, src: *T)` 的移动/拷贝构造钩子，形参是指针，
+       所以"参数传递 = 构造"不会自递归。没有这个钩子时，同类型初始化仍按"不
+       可拷贝"拒绝。 */
+    if (src0 && src0 == core && init_expr_is_place(*slot)) {
+      if (!mc) {
+        if (!ms) return NULL; /* 既无 __init__ 也无 __init_copy__：普通复制 */
+        /* 落下去，由 __init__ 的形参检查报"不可从自身初始化"。 */
+      } else {
+        ast_node_t *ctor = ast_construct_new(sema->arena, (*slot)->tok_begin,
+                                             (*slot)->tok_end);
+        if (!ctor) return NULL;
+        ast_node_t *tref = sema_ct_type_ref(sema, core, *slot);
+        if (!tref) return NULL;
+        ast_node_t *arg = *slot;
+        arg->next = NULL;
+        ((ast_construct_t *)ctor)->type = tref;
+        ((ast_construct_t *)ctor)->fields = arg;
+        ((ast_construct_t *)ctor)->fields_last = arg;
+        ((ast_construct_t *)ctor)->copy_init = true;
+        ctor->next = (*slot)->next;
+        *slot = ctor;
+        value_t *cv = sema_expr(sema, slot, scope);
+        if (converted) *converted = true;
+        return cv;
       }
     }
-    value_t *probe = value_make_shadow(sema->vm, src ? src : sema->vm->type_void);
-    if (!probe) return NULL;
-    if (value_is_error(sema->vm, value_implicit_cast(sema->vm, probe, pt))) {
+
+    if (!ms) return NULL;
+    const bool generic_ctor = ms->is_generic;
+    if (!generic_ctor) {
+      if (!ms->type || type_kind_of(ms->type) != TYPE_KIND_FUNC) return NULL;
+      if (func_type_param_count(ms->type) != 2) return NULL; /* self + 1 */
+    }
+    const type_t *src = src_t ? type_strip_quals(src_t) : NULL;
+    /* 新值（构造 / 函数调用返回）：直接放入目标，不再构造一次。 */
+    if (src && src == core && !init_expr_is_place(*slot)) return NULL;
+
+    /* 预检：非泛型构造可以直接比对形参；泛型构造的形参类型由实参推断，交给
+       构造路径（`sema_generic_instantiate_inferred`）校验。 */
+    if (!generic_ctor) {
+      const type_t *pt = func_type_param(ms->type, 1);
+      if (!pt) return NULL;
+      value_t *probe =
+          value_make_shadow(sema->vm, src ? src : sema->vm->type_void);
+      if (!probe) return NULL;
+      if (value_is_error(sema->vm, value_implicit_cast(sema->vm, probe, pt))) {
         /* 目标类型有单参 __init__：**所有**初始化位置（var / 实参 / 返回值 /
            字段）都走构造，源表达式必须能转换成构造的第二个形参。源类型与
-           目标类型相同时也不退化成值拷贝——这正是 move-only 类型（Own /
-           Fatal 之类）靠在参数上拒绝自身类型来禁止 copy 的方式。 */
+           目标类型相同时也不退化成值拷贝——这正是 move-only 类型靠在参数上
+           拒绝自身类型来禁止 copy 的方式。 */
         char tn[64], pn[64], sn[64];
         sema_type_name(core, tn, sizeof tn);
         sema_type_name(pt, pn, sizeof pn);
         if (src) sema_type_name(src, sn, sizeof sn);
         else snprintf(sn, sizeof sn, "void");
         location_t loc = sema_loc(sema, *slot);
-        /* 合成节点（多遍 walk 里被改写的中间形态）不重复报：只对用户源码
-           位置诊断一次。 */
         if ((*slot)->is_generated || loc.begin.line == 0) {
             if (converted) *converted = true;
             return value_make_error(sema->vm, "bad __init__ argument");
         }
-        /* sema 会把同一段函数体走多遍：同一位置的同类诊断只报一次。 */
         bool dup = false;
         const diagnostic_t *items = diag_items(sema->diag);
         size_t nitems = diag_count(sema->diag);
@@ -342,15 +150,25 @@ value_t *sema_magic_init_convert(sema_t *sema, ast_node_t **slot,
                      tn, sn, tn, pn);
         if (converted) *converted = true;
         return value_make_error(sema->vm, "bad __init__ argument");
+      }
     }
 
-    /* `.T{ x }` 的展开：调用生成的构造函数（参数是原表达式节点）。 */
+    /* 改写成等价的 `.T{ <原表达式> }`：sema 的构造路径会求值 / 校验实参，
+       C 后端把它就地降级成
+           ({ T _t = (T){0}; T_init(&_t, arg); _t; })
+       不再生成 `__clux_init_<id>` 助手（泛型 `__init__` 因此也能用）。 */
+    ast_node_t *ctor = ast_construct_new(sema->arena, (*slot)->tok_begin,
+                                         (*slot)->tok_end);
+    if (!ctor) return NULL;
+    ast_node_t *tref = sema_ct_type_ref(sema, core, *slot);
+    if (!tref) return NULL;
     ast_node_t *arg = *slot;
-    ast_node_t *call = sema_magic_init_call(sema, core, arg, arg->tok_begin,
-                                            arg->tok_end);
-    if (!call) return NULL;
-    call->next = (*slot)->next;
-    *slot = call;
+    arg->next = NULL;
+    ((ast_construct_t *)ctor)->type = tref;
+    ((ast_construct_t *)ctor)->fields = arg;
+    ((ast_construct_t *)ctor)->fields_last = arg;
+    ctor->next = (*slot)->next;
+    *slot = ctor;
     value_t *v = sema_expr(sema, slot, scope);
     if (converted) *converted = true;
     return v;

@@ -901,6 +901,51 @@ value_t *ctfe_try_expr(ctfe_ctx_t *ctx, ast_try_t *tr) {
 
 /* --------------------------------------------------------------- 方法调用 */
 
+/* `__init__` 构造：分配零值 → 取地址做 self → 求值实参 → 调 ctor → 取值。 */
+value_t *ctfe_construct_init(ctfe_ctx_t *ctx, const ast_node_t *n,
+                             const type_t *t) {
+    vm_t *vm = ctx->vm;
+    sema_t *sema = ctx->sema;
+    if (!vm || !sema || !t) return NULL;
+    ast_construct_t *c = (ast_construct_t *)n;
+    sema_symbol_t *ms = sema_magic_member(sema, t, "__init__");
+    if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->ast)
+        return ctfe_err(ctx, "ctfe: '__init__' is not available at compile time");
+    ast_func_def_t *def = (ast_func_def_t *)ms->ast;
+    if (def->generic.count > 0)
+        return ctfe_errf(ctx,
+                         "ctfe: generic '__init__' is not supported in "
+                         "compile-time code");
+    /* 零值存到被跟踪的临时值里（`ctfe_load` 会拷贝进 GC 管理的存储），再把它的
+       地址作为 `self` 交给 ctor——与"右值接收者"实例方法调用同一套做法。 */
+    size_t size = t->size ? t->size : 1;
+    unsigned char zero_buf[size];
+    memset(zero_buf, 0, size);
+    value_t *tmp = ctfe_load(ctx, t, zero_buf);
+    if (!tmp || value_is_error(vm, tmp)) return tmp;
+    void *addr = value_data(tmp);
+    const type_t *self_t = type_ptr_intern(vm, t);
+    if (!self_t) return ctfe_err(ctx, "ctfe: out of memory making self type");
+    size_t nargs = ctfe_count_siblings(c->fields);
+    size_t argc = nargs + 1;
+    value_t *argv[argc];
+    argv[0] = ptr_make_value(vm, self_t, addr);
+    if (!argv[0]) return ctfe_err(ctx, "ctfe: out of memory making receiver");
+    size_t i = 1;
+    for (ast_node_t *f = c->fields; f; f = f->next, i++) {
+        ast_node_t *vn = f;
+        if (vn->kind == AST_CONSTRUCT_FIELD)
+            vn = ((ast_construct_field_t *)vn)->value;
+        argv[i] = ctfe_eval(ctx, vn);
+        if (!argv[i] || value_is_error(vm, argv[i]))
+            return argv[i] ? argv[i]
+                           : ctfe_err(ctx, "ctfe: constructor argument failed");
+    }
+    value_t *rc = ctfe_call_ast_fn_vals(ctx, def, argv, argc);
+    if (!rc || value_is_error(vm, rc)) return rc;
+    return ctfe_load(ctx, t, addr);
+}
+
 value_t *ctfe_method_call(ctfe_ctx_t *ctx, ast_call_t *call) {
     vm_t *vm = ctx->vm;
     if (!ctx->sema || !call || !call->callee || call->callee->kind != AST_MEMBER)

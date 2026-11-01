@@ -197,6 +197,20 @@ cir_expr_t *cir_expr_string(arena_t *arena, const char *data, size_t len) {
     return e;
 }
 
+/* 语句表达式：`({ setup...; result; })`。 */
+cir_expr_t *cir_expr_compound(arena_t *arena, cir_stmt_t *setup,
+                              cir_expr_t *result) {
+    if (!arena || !result) return NULL;
+    cir_expr_t *e = (cir_expr_t *)arena_calloc(arena, 1, sizeof(*e),
+                                               ALIGNOF(max_align_t));
+    if (!e) return NULL;
+    e->kind = CIR_EXPR_COMPOUND;
+    e->type = result->type;
+    e->setup_stmt = setup;
+    e->rhs = result;
+    return e;
+}
+
 cir_expr_t *cir_expr_option(arena_t *arena, cir_type_t *type, bool some,
                             cir_expr_t *value) {
     cir_expr_t *e = (cir_expr_t *)arena_calloc(

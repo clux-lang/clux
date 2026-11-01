@@ -58,6 +58,7 @@ typedef enum {
     SEMA_MAGIC_DEREF, /* a.x / a.* 的成员回退 */
     SEMA_MAGIC_DISPOSE, /* `using a = ...;` 的作用域退出调用（不是析构） */
     SEMA_MAGIC_ASSIGN,  /* a = b（赋值；初始化不派发） */
+    SEMA_MAGIC_INIT_COPY, /* 同类型初始化：var a: T = b;（形参 *T） */
     SEMA_MAGIC_INIT,    /* .T{args} 构造（零初始化 + __init__） */
 } sema_magic_t;
 
@@ -152,11 +153,6 @@ bool sema_magic_eq_desugarable(sema_t *sema, const struct type_t *t);
 /** 类型是否有 `__init__`（构造语义改写用）。 */
 bool sema_magic_has_init(sema_t *sema, const struct type_t *t);
 
-/** `.T{args}` 构造改写：生成/复用 `__clux_init_<id>(args) -> T` 并返回调用节点
- *  （调用者负责 `sema_expr` 类型检查/改写）。NULL = 不适用。 */
-ast_node_t *sema_magic_init_call(sema_t *sema, const struct type_t *t,
-                                 ast_node_t *args, uint32_t tok_begin,
-                                 uint32_t tok_end);
 
 /** 单参 `__init__` 的隐式构造（`var a: T = x` / 实参 / 返回值 / 字段初始化）：
  *  目标 T 恰好一个初始化参数、src 不是 T 且可赋给该参数时，把 *slot 改写成

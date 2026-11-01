@@ -45,6 +45,10 @@ static const sema_magic_entry_t k_magic[] = {
     {"__dispose__", SEMA_MAGIC_DISPOSE, 1, false, false, false, false, true, false},
     {"__assign__", SEMA_MAGIC_ASSIGN, 2, false, false, false, true, true, false},
     {"__init__", SEMA_MAGIC_INIT, 0, false, false, false, false, true, true},
+    /* 同类型初始化：固定签名 (self: *T, src: *T) -> void。形参是指针，
+       "参数传递 = 构造"不会自递归；构造里可以移走源对象。 */
+    {"__init_copy__", SEMA_MAGIC_INIT_COPY, 2, false, false, false, true,
+     true, false},
 };
 
 #define MAGIC_COUNT (sizeof(k_magic) / sizeof(k_magic[0]))
@@ -204,6 +208,34 @@ bool sema_magic_check_method(sema_t *sema, const type_t *owner, ast_node_t *def,
                    "'__deref__' (got '%s')",
                    me->name, tn);
         return true;
+    }
+    /* `__init_copy__`：固定签名 `(self: *T, src: *T) -> void`。 */
+    if (me->id == SEMA_MAGIC_INIT_COPY) {
+        const type_t *owner_c = type_strip_quals(owner);
+        const type_t *rt =
+            (nparams > 1 && params[1]) ? type_strip_quals(params[1]) : NULL;
+        if (!rt || !type_is_ptr(rt) ||
+            type_strip_quals(ptr_type_base(rt)) != owner_c) {
+            diag_error(sema->diag, sema_loc(sema, def),
+                       "'__init_copy__' must take exactly one argument of type "
+                       "'*T' (a pointer to the type itself) and return void");
+            return true;
+        }
+    }
+    /* `__init__` 不能拿自身类型当参数：构造 T 需要参数是 T，而参数传递本身又是
+       一次构造 → 无限递归（编译期栈溢出）。同类型移动/拷贝请用 __init_copy__。 */
+    if (me->id == SEMA_MAGIC_INIT && params && nparams > 1) {
+        const type_t *owner_c = type_strip_quals(owner);
+        for (size_t i = 1; i < nparams; i++) {
+            const type_t *pt = params[i] ? type_strip_quals(params[i]) : NULL;
+            if (pt && pt == owner_c) {
+                diag_error(sema->diag, sema_loc(sema, def),
+                           "'__init__' cannot take the type itself as a "
+                           "parameter: constructing T from T would recurse; use "
+                           "'__init_copy__' for same-type initialization");
+                return true;
+            }
+        }
     }
     if (me->ret_void && ret && type_kind_of(ret) != TYPE_KIND_VOID) {
         char tn[64];

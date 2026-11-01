@@ -1065,6 +1065,12 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(ty, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: construct type must be a type");
         const type_t *t = value_as(ty, const type_t *);
+        /* `__init__` 构造（init_checked）：零值 + 调 `__init__`，编译期同样走
+           ctor，而不是按字段表构造。 */
+        if (n->init_checked) {
+            value_t *v = ctfe_construct_init(ctx, node, t);
+            return v;
+        }
         /* tag union 构造：恰好 1 个具名 member（sema 保留 AST_CONSTRUCT_FIELD，
            字段名 = member 名）——写 tag + payload。 */
         if (type_kind_of(t) == TYPE_KIND_UNION) {

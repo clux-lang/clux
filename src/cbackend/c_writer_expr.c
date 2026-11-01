@@ -219,6 +219,14 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, "clux_take_v.ok ? clux_take_v.value : "
                    "(clux_panic_none(), clux_take_v.value); })");
         break;
+    case CIR_EXPR_COMPOUND:
+        cw_put(sb, "({ ");
+        for (cir_stmt_t *st = e->setup_stmt; st; st = st->next)
+            cw_write_stmt(sb, st, 0);
+        cw_put(sb, "(");
+        cw_write_expr(sb, e->rhs);
+        cw_put(sb, "); })");
+        break;
     case CIR_EXPR_TRY:
         cw_put(sb, "({ ");
         if (e->setup_stmt) cw_write_stmt(sb, e->setup_stmt, 0);

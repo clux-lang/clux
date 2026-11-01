@@ -326,32 +326,66 @@ test "magic.disposeStatement" {
     assert(Tracked::disposed == before + 2);
 }
 
-/* ---- move 初始化：形参是 *P、源是 P 的位置 → 传地址 ---- */
+/* ---- 同类型初始化走 __init_copy__：var / 实参 / 返回值都是 move ---- */
 
-struct MoveSrc[T] {
+struct Mover[T] {
     ptr: ?*T;
-    func __init__(self: *MoveSrc[T], p: *T): void {
+
+    /* 裸指针构造 */
+    func __init__(self: *Mover[T], p: *T): void {
         self.ptr = p;
     }
-    func take(self: *MoveSrc[T]): ?*T {
+
+    /* 同类型初始化 = move（参数传递、返回值、var 初始化、构造都走这里） */
+    func __init_copy__(self: *Mover[T], o: *Mover[T]): void {
+        self.ptr = o.take();
+    }
+
+    func take(self: *Mover[T]): ?*T {
         var p: ?*T = self.ptr;
         self.ptr = nil;
         return p;
     }
-}
 
-struct MoveDst[T] {
-    ptr: ?*T;
-    func __init__(self: *MoveDst[T], s: *MoveSrc[T]): void {
-        self.ptr = s.take();
+    func __assign__(self: *Mover[T], o: *Mover[T]): void {
+        self.ptr = o.ptr;
+        o.ptr = nil;
     }
 }
 
-test "magic.moveInit" {
+var mover_val: i32 = 42;
+
+func mover_give(): Mover[i32] {
+    return .Mover[i32]{ mover_val.& };
+}
+
+func mover_take(m: Mover[i32]): i32 {
+    if (m.ptr == nil) {
+        return -1;
+    }
+    return m.ptr.!.*;
+}
+
+test "magic.initCopy" {
     var v: i32 = 7;
-    var src: MoveSrc[i32] = .MoveSrc[i32]{ v.& };
-    var dst: MoveDst[i32] = src; // 传 &src → 取走指针并置空
-    assert(src.ptr == nil);
-    assert(dst.ptr != nil);
-    assert(dst.ptr.!.* == 7);
+    var a: Mover[i32] = .Mover[i32]{ v.& };
+
+    // var 初始化
+    var b: Mover[i32] = a;
+    assert(a.ptr == nil);
+    assert(b.ptr.!.* == 7);
+
+    // 实参传递
+    assert(mover_take(b) == 7);
+    assert(b.ptr == nil);
+
+    // 返回值
+    var c: Mover[i32] = mover_give();
+    assert(c.ptr.!.* == 42);
+
+    // 赋值 → __assign__
+    var d: Mover[i32] = .Mover[i32]{ v.& };
+    d = c;
+    assert(c.ptr == nil);
+    assert(d.ptr.!.* == 42);
 }
