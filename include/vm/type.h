@@ -94,7 +94,7 @@ typedef struct type_t {
  *
  * 真实类型（const i32 != i32），持 sub 指针指向被修饰的底层类型。
  * 由 vm 类型池 intern（type_const_intern / type_volatile_intern），vm
- * 拥有生命周期。运算行为（vtable）代理到 sub（解包语义，见 m2-design §10）：
+ * 拥有生命周期。运算行为（vtable）代理到 sub（解包语义）：
  * volatile(const(i32)) 组合时 volatile 外层、const 内层（固定顺序）。
  */
 typedef struct const_type_t {
@@ -108,7 +108,7 @@ typedef struct volatile_type_t {
 } volatile_type_t;
 
 /**
- * option_type_t: optional 类型（type_t 的扩展，?T，见 m2-design §9/§12.1）
+ * option_type_t: optional 类型（type_t 的扩展，?T）
  *
  * 持 inner 指针指向被 optional 包裹的类型 T。C 内存映射：
  *   struct Optional_T { bool ok; T value; }（value 偏移 align_up(1, alignof(T))）。
@@ -125,14 +125,14 @@ typedef struct option_type_t {
 } option_type_t;
 
 /**
- * enum_type_t / enum_variant_t: 枚举类型（type_t 的扩展，见 m2-design §3）
+ * enum_type_t / enum_variant_t: 枚举类型（type_t 的扩展）
  *
  * 枚举是"有特殊类型的全局变量"：每个 variant 是编译期常量，类型为枚举自身。
  * 底层类型 underlying 必须为整型（TYPE_KIND_INT）；enum value 的 data 按
  * underlying->size 宽度存储整数值（MAKE_ENUM 构造时截断）。
  *
  * variant 表由 vm 拥有（SEAL 时深拷贝；去重 intern 命中已有类型时手工回收）。
- * 严格类型分离（m2-design §5）：enum 与底层互不隐式转换，显式 cast 仅允许
+ * 严格类型分离：enum 与底层互不隐式转换，显式 cast 仅允许
  * enum → 声明底层类型（c as i8 报错，须 c as i32 as i8 两次 cast）。
  */
 typedef struct enum_variant_t {
@@ -152,7 +152,7 @@ typedef struct ptr_type_t {
 } ptr_type_t;
 
 /**
- * slice_type_t: 切片类型（type_t 的扩展，m4-design §1/§10）
+ * slice_type_t: 切片类型（type_t 的扩展）
  *
  * 与指针同构——胖指针 { ptr, len: u64 }。只有一种切片类型（没有所有权修饰）。
  *
@@ -173,7 +173,7 @@ typedef struct enum_type_t {
 } enum_type_t;
 
 /**
- * struct_field_t / struct_type_t: 结构体类型（type_t 的扩展，见 m2-design §2）
+ * struct_field_t / struct_type_t: 结构体类型（type_t 的扩展）
  *
  * 结构体是具名字段的复合类型：字段表 field_t { name, offset, type } 按声明序
  * 存储，offset 在类型 intern 时按 C 对齐规则一次性布局：
@@ -251,7 +251,7 @@ typedef struct struct_type_t {
 } struct_type_t;
 
 /**
- * tuple_elem_t / tuple_type_t: 元组类型（type_t 的扩展，见 m2-design §3）
+ * tuple_elem_t / tuple_type_t: 元组类型（type_t 的扩展）
  *
  * 元组是匿名字成员的复合类型：元素表 tuple_elem_t { offset, type } 按声明序
  * 存储（无名字，按位置访问），offset 在类型 intern 时按 C 对齐规则一次性布局
@@ -277,8 +277,7 @@ typedef struct tuple_type_t {
 } tuple_type_t;
 
 /**
- * union_member_t / union_type_t: tag union 类型（type_t 的扩展，见
- * m2-design §tag union）
+ * union_member_t / union_type_t: tag union 类型（type_t 的扩展）
  *
  * tag union 与 struct 同构语法：`union Name { field: type; ... }`——字段
  * 直接平铺，每个字段即一个 member（member 名 = tag 名，member 类型 = payload

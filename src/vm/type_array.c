@@ -360,7 +360,7 @@ static value_t *array_assign(vm_t *vm, value_t *dst, value_t *src) {
     return compound_assign_transfer(vm, dst, src);
 }
 
-/* ---- 类型转换：array↔tuple 布局兼容互转（m2-design §3）+ 同 array 身份 ---- */
+/* ---- 类型转换：array↔tuple 布局兼容互转+ 同 array 身份 ---- */
 
 static value_t *array_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     if (!target) return value_make_error(vm, "array: missing cast target");

@@ -81,7 +81,7 @@ typedef struct sema_func_t {
  *   vm/type.h 的 type_id_alloc 说明），任何需要"数组下标"的地方（如 hoist 区
  *   的 done 三态表）都必须用 index，不能用 id - TYPE_ID_PROGRAM_BASE 推算。
  *
- * 与 funcs 同构（m2-design §comptime"类型提升"）：sema 把解析过的每个
+ * 与 funcs 同构（"类型提升"）：sema 把解析过的每个
  * 类型登记到此队列，compiler 据此生成 hoist 类型提升区（**两遍扫描**：
  * pass 1 声明所有类型 PUSH_XXXX → DEFINE_TYPE <id> 登记、pass 2 定义所有
  * 类型 LOAD_TYPE 拉回 → 设字段 → SEAL 封闭）并在类型槽位发 LOAD_TYPE
@@ -397,7 +397,7 @@ void sema_destroy(sema_t **sema);
 
 /**
  * 类型表达式求值唯一入口：ast_node_t* → const type_t*
- * (type is expression, m2-design 关键架构决策 6)
+ * (type is expression)
  *
  * 类型槽位 = 普通表达式（type is expression）：AST_IDENT 命名类型
  * （type_lookup 沿作用域链查 type value）、AST_CONST/AST_VOLATILE 修饰
@@ -515,7 +515,7 @@ void sema_check_bool(sema_t *sema, ast_node_t *node, value_t *v,
 
 
 /**
- * 作用域嵌套比较（m3-design §5）：a 沿 parent 链可达 b（或 a == b）→
+ * 作用域嵌套比较：a 沿 parent 链可达 b（或 a == b）→
  * a 嵌套于 b。b 为 NULL 恒 true（保守放行）。用于 §5/§9 逃逸检查。
  */
 bool sema_scope_within(const sema_scope_t *a, const sema_scope_t *b);

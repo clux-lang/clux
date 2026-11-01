@@ -18,7 +18,7 @@ namespace {
 
 } // namespace
 
-/* ---- sizeof / alignof / typeof（m2-design §8，完全编译期）---- */
+/* ---- sizeof / alignof / typeof（完全编译期） ---- */
 
 TEST(Driver, RunFileSizeofAlignofTypeofPasses) {
   /* 端到端：三个运算符全部编译期折叠（反汇编零指令残留由 bcode 层测试

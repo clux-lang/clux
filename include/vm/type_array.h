@@ -43,7 +43,7 @@ value_t *value_make_array(vm_t *vm, const type_t *elem_type,
  *   layout_align = base.align = elem_type->align
  * 借用引用 arr[i] 的 data = arr.data + i * elem_type->size（业务内存）。
  * length==SIZE_MAX（动态）无静态布局，size=0。
- * 按结构等价判定类型兼容（见 m2-design §11）。
+ * 按结构等价判定类型兼容。
  */
 typedef struct array_type_t {
     type_t       base;

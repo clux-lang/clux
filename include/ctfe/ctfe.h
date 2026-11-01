@@ -36,7 +36,7 @@ typedef struct _sema_scope_t sema_scope_t;
  * 平行，仅在编译期常量槽位按需调用（数组边界 N、type 别名计算、
  * sizeof/alignof/typeof、enum 值）。eval 命令亦复用本模块做端到端求值。
  *
- * 严格限制（设计定稿，docs/m2-design.md §8）：
+ * 严格限制（设计定稿）：
  *   - 同步递归 AST 解释器，不允许暂停恢复
  *   - 必须编译期求值：遇运行期依赖（scope 查不到的标识符等）→ error
  *   - 禁止 FFI：只解释 AST_FUNC_DEF（clux 函数）；非 AST 实体不在可调范围

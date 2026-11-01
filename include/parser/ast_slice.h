@@ -6,7 +6,7 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* 切片表达式（m4-design §4）：expr[low:high]。
+/* 切片表达式：expr[low:high]。
  * 适用于数组/切片/str，恒产 ref []T（借用胖指针）。
  * low/high 均可省略（arr[:] 全范围；arr[:n] 前缀；arr[n:] 后缀），
  * 省略时对应字段为 NULL（sema 层解释为 0 / len）。

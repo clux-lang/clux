@@ -17,10 +17,10 @@ namespace {
 
 } // namespace
 
-/* ---- M4 切片与字符串（m4-design §1/§2/§4） ---- */
+/* ---- M4 切片与字符串 ---- */
 
 TEST(DriverM4, MakeAndIndexSlice) {
-  /* make 构造 []T + 下标读（m4-design §2） */
+  /* make 构造 []T + 下标读 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var a: [3]i32 = .[3]i32{10, 20, 30};\n"

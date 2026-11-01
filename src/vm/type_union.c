@@ -276,7 +276,7 @@ void type_union_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype) 
 
 /* 按 (member 表内容) 判断两 union 是否等价（去重 intern 用）：
    member 名 + 顺序一致，payload 类型指针一致，**且槽位所有权一致**。
-   所有权是类型描述的一部分（docs/ownership-refactor.md §0.8）：漏掉它会让
+   所有权是类型描述的一部分：漏掉它会让
    `union A { p: own *i32 }` 与 `union B { p: ref *i32 }`（成员名/payload
    相同）被 intern 成同一个类型——后定义者继承前者的槽位所有权，销毁序列
    就会错（实测：B 的 ref 成员被当成 own，构造直接报 "own slot" 或运行期

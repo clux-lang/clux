@@ -6,7 +6,7 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* typeof(expr)：表达式 → type value（编译期实体，m2-design §8）。
+/* typeof(expr)：表达式 → type value（编译期实体）。
  * 操作数只做 shadow 求值，sema 求值后折叠为 AST_TYPE_REF（compiler
  * 发 LOAD_TYPE <id> 加载真实类型值，零感知）。 */
 typedef struct {

@@ -329,7 +329,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     shadow_assign_member(sema, as, scope);
     return;
   }
-  /* 左值：解引用赋值 r.* = v（m3-design §8.2 解引用 SET 严格分离） */
+  /* 左值：解引用赋值 r.* = v（解引用 SET 严格分离） */
   if (as->target->kind == AST_DEREF) {
     shadow_assign_deref(sema, as, scope);
     return;
@@ -527,7 +527,7 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     }
 
     if (rhs_nil) {
-      /* nil 赋值（docs m2-design §12.5/12.6）：a = nil → STORE_NIL <name>
+      /* nil 赋值：a = nil → STORE_NIL <name>
          （运行期只置 ok=false，不释放 value 字段）。左值必须 ?T 类型。 */
       const type_t *lt = value_type(lhs);
       if (!lt || type_kind_of(lt) != TYPE_KIND_OPTION) {
@@ -1276,7 +1276,7 @@ static void shadow_assign_extern_var(sema_t *sema, ast_assign_t *as,
   }
 }
 
-/* ---- 解引用左值赋值（r.* = v，m3-design §8.2 解引用 SET 严格分离）----
+/* ---- 解引用左值赋值（r.* = v，解引用 SET 严格分离） ----
  * 目标求值（指针操作数须为 own/ref/fatal 指针 → 取被指向类型 T 为字段
  * 类型；非指针已在诊断中报错）、const 检查（被指向类型含 const → 不可
  * 写）、右值求值（匿名构造注入 T）、value_assign 校验可赋值给 T。运行期

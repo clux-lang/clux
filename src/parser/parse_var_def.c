@@ -38,7 +38,7 @@ static ast_node_t *parse_var_like(parser_t *p, const char *kw, bool is_using) {
     /* 可选类型标注：:type（类型即表达式，普通表达式解析）。
        用 min_prec=1 限定：不消费赋值（ASSIGN_LEFT_PREC=0）与逗号/右括号。
        parse_type_prefix 额外处理前导作用域标注 '<a,b,c>
-       （m3-design §5：标注前导紧跟 ':' 之后，绑定在变量上）。 */
+       （标注前导紧跟 ':' 之后，绑定在变量上）。 */
     ast_node_t *type_expr = NULL;
     if (check_symbol(p, ":")) {
         advance(p);

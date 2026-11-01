@@ -45,7 +45,7 @@ static bool tuple_read_index(vm_t *vm, value_t *index, size_t *out) {
  * 裸字节块，字符串归 vm 字符串池），整块 memcpy / 无需释放。
  *
  * 严格类型：implicit_cast / explicit_cast 支持 Tuple↔Array 布局兼容互转
- * （m2-design §3：元组 ↔ 数组匿名互转，布局兼容时）与同 tuple 实例（身份
+ * （元组 ↔ 数组匿名互转，布局兼容时）与同 tuple 实例（身份
  * 拷贝）；eq/ne 同实例按元素递归比较；type_equal / type_extends 按元素表
  * 逐位比较（tuple_type_compatible）。
  * =========================================================================== */
@@ -152,7 +152,7 @@ static value_t *tuple_ne(vm_t *vm, value_t *a, value_t *b) {
     return value_make(vm, vm->type_bool, data);
 }
 
-/* ---- 类型转换：Tuple↔Array 布局兼容互转（m2-design §3） + 同 tuple 身份 ---- */
+/* ---- 类型转换：Tuple↔Array 布局兼容互转 + 同 tuple 身份 ---- */
 
 /* 布局兼容判断：Tuple ↔ Array（元素逐个 type_equal + 数量一致 ⟹ size/align
    由元素表唯一决定相同）。非 tuple/array 组合返回 false。 */
@@ -393,7 +393,7 @@ static bool tuple_same(const tuple_type_t *a, const tuple_type_t *b) {
     return true;
 }
 
-/* 元组兼容（鸭子类型，m2-design §3）：元素类型（type_equal，嵌套复合类型
+/* 元组兼容（鸭子类型）：元素类型（type_equal，嵌套复合类型
  * 递归）+ 元素顺序完全一致即兼容。布局（offset/size/align）由元素表唯一
  * 决定（C 对齐规则），元素兼容 ⟹ size/align 相同——无需单独比较。 */
 bool tuple_type_compatible(vm_t *vm, const type_t *a, const type_t *b) {

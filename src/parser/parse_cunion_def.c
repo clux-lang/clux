@@ -34,7 +34,7 @@ ast_node_t *parse_cunion_def(parser_t *p) {
     advance(p);
     skip_trivia(p);
 
-    /* cunion 不参与泛型体系（m7-design §29.6：仅 FFI/optional/tag union
+    /* cunion 不参与泛型体系（仅 FFI/optional/tag union
        使用，与 cfunc 同属 FFI 边界）。 */
     if (check_symbol(p, "[")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

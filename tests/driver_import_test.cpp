@@ -213,7 +213,7 @@ TEST(DriverImport, ReexportChainForwardsThroughTwoLevels) {
 }
 
 TEST(DriverImport, ReexportConflictIsRejected) {
-  /* 代理导出与本模块已有导出同名 → 编译错误（符号冲突，m5-design §1.3） */
+  /* 代理导出与本模块已有导出同名 → 编译错误（符号冲突） */
   ImportCase c("conflict");
   c.write("math", "export var V: i32 = 1;\n");
   c.write("api",

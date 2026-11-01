@@ -11,7 +11,7 @@
  * const 修饰类型
  *
  * const_type_t 继承 type_t 持 sub 指针。运算行为代理到 sub（解包语义，
- * m2-design §10）：所有 vtable 槽位把操作数的 type 临时替换为 sub，调用
+ *）：所有 vtable 槽位把操作数的 type 临时替换为 sub，调用
  * sub->vtable 对应槽位后恢复——base 槽位依赖 value_type() 指针比较判定
  * 类型，不能直接复用函数指针。const 赋值检查（不可变）是 sema 层职责
  * （flow_init 驱动的 TDZ 豁免），vm 层不拦截。

@@ -48,7 +48,7 @@
 
 #include "sema_build_internal.h"
 
-/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符，m2-design §8）：
+/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符）：
  * 这些运算符是 SEMA→CTFE 桥梁——操作数按 shadow 语义取类型，依赖 Pass 3b
  * 的 shadow 状态（局部变量定义点后才进 VM scope）。3a 求值会因变量未就绪
  * 失败 → 与"待绑定局部 type 遮蔽"同机制推迟到 3b 定义点兜底
@@ -146,7 +146,7 @@ static bool type_slot_has(const ast_node_t *type_expr, unsigned want) {
   return (p.found & want) != 0;
 }
 
-/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符，m2-design §8）：
+/* 类型槽位是否含 sizeof/alignof/typeof（编译期运算符）：
  * 这些运算符是 SEMA→CTFE 桥梁——操作数按 shadow 语义取类型，依赖 Pass 3b
  * 的 shadow 状态（局部变量定义点后才进 VM scope）。3a 求值会因变量未就绪
  * 失败 → 与"待绑定局部 type 遮蔽"同机制推迟到 3b 定义点兜底

@@ -66,14 +66,14 @@ const type_t *type_tuple_intern(vm_t *vm, const tuple_elem_t *elems,
 
 
 /**
- * 元组兼容判断（鸭子类型，m2-design §3）：两 tuple 类型元素类型（type_equal，
+ * 元组兼容判断（鸭子类型）：两 tuple 类型元素类型（type_equal，
  * 支持嵌套复合）+ 元素顺序完全一致即兼容——布局（offset/size/align）由元素
  * 表唯一决定，元素兼容 ⟹ 布局相同。非 tuple 输入返回 false。
  */
 bool tuple_type_compatible(vm_t *vm, const type_t *a, const type_t *b);
 
 /**
- * Tuple↔Array 布局兼容判断（双向，m2-design §3 元组↔数组匿名互转）：
+ * Tuple↔Array 布局兼容判断（双向，元组↔数组匿名互转）：
  * 元素逐个 type_equal + 数量一致 ⟹ size/align 由元素表唯一决定相同。
  * 非 tuple/array 组合返回 false。array 侧 implicit_cast / assign 复用。
  */

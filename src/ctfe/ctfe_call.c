@@ -264,7 +264,7 @@ cleanup:
    - 内建 C 函数（printf/upgrade 等，cfunc != NULL）→ 求值实参 → value_call
    - **程序函数引用**（sema 把函数名折叠成 AST_FUNC_REF 后的产物，cfunc == NULL）
      → value_call 会在 func_vcall 里报 "func call: invalid function"，必须按
-     AST 解释执行（m2-design §9 决策点 2：非 comptime 函数在常量槽位被尝试
+     AST 解释执行（决策点 2：非 comptime 函数在常量槽位被尝试
      编译期求值）。 */
 value_t *ctfe_call_value(ctfe_ctx_t *ctx, value_t *callee,
                          ast_node_t *args) {

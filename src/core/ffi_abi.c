@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- §2 C ABI 类型约束（m6-design §2.1/§2.2）----
+/* ---- §2 C ABI 类型约束 ----
  *
  * `extern cfunc` 的参数/返回类型必须是 C 可表达的类型；clux 专有的类型（option、
  * tag union、切片、元组、闭包、类型值）没有 C 对应，必须在编译期拒绝。

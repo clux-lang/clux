@@ -14,7 +14,7 @@
  * 的 data 是底层宽度的整数值块（size = underlying->size，align =
  * underlying->align），MAKE_ENUM 构造时按底层宽度截断。
  *
- * 严格类型分离（m2-design §3/§5）：
+ * 严格类型分离：
  *   - implicit_cast 仅同 enum 实例（v->type == target）身份拷贝；
  *     enum → 底层或反之 → error（无隐式转换）。
  *   - explicit_cast 仅 enum → 声明底层类型（按底层宽度截断拷贝）；

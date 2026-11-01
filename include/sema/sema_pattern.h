@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 /**
- * M7 `extends` PATTERN 匹配（docs/m7-design.md §27–§29）：
+ * M7 `extends` PATTERN 匹配：
  * 把具体类型 t 与 PATTERN 树递归对位。只判断，不绑定/不捕获。
  * 失败返回 false（调用方负责诊断；本函数不产诊断）。
  */

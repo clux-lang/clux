@@ -246,7 +246,7 @@ static value_t *ctfe_eval_func_def(ctfe_ctx_t *ctx, ast_func_def_t *n) {
     return fv;
 }
 
-/* 编译期运算符（sizeof/alignof/typeof，m2-design §8）的操作数类型提取：
+/* 编译期运算符（sizeof/alignof/typeof）的操作数类型提取：
  * "操作数按类型（shadow 语义）求值，结果产生真实常量"——操作数只取类型，
  * 不要求真实执行。三路解析：
  *   1. 常规 ctfe 求值成功：
@@ -488,7 +488,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     case AST_SIZEOF:
     case AST_ALIGNOF:
     case AST_TYPEOF: {
-        /* 编译期运算符（m2-design §8）：操作数按类型（shadow 语义）求值，
+        /* 编译期运算符：操作数按类型（shadow 语义）求值，
            结果产生真实常量——sizeof/alignof → u64 立即值（ctfe_make_int），
            typeof → type value。数组边界 [sizeof(a)]i32 经 ctfe_operand_type
            从运行期 shadow 值取类型，产出真实常量喂给边界槽位。 */

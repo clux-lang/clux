@@ -80,7 +80,7 @@
 /* ===========================================================================
  * 反射注入（`T.<key>` / `T.<key>(i)`）—— sema 折叠为常量
  *
- * 设计见 docs/reflect-builtin-design.md：
+ * 设计要点：
  *   - 接收者必须是 **type value**（类型名 / typeof(x) / 类型别名 / 反射链式结果）；
  *   - 值域 str / usize / type / bool（kind 与 ownership 都是 str，自描述）；
  *   - 折叠成字面量/类型引用，运行期零指令。
@@ -875,7 +875,7 @@ value_t *ex_index(sema_t *sema, ast_node_t **node,
 /* AST_SLICE 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_slice(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* 切片表达式 s[low:high]（m4-design §4）：适用于数组/切片/str，
+      /* 切片表达式 s[low:high]：适用于数组/切片/str，
          恒产 ref []T（借用胖指针）。low/high 可省略（NULL = 0/len）。
          arr[:] 是显式数组转切片的唯一路径（[N]T → ref []T 不自动）。 */
       ast_slice_t *n = (ast_slice_t *)*node;
@@ -893,7 +893,7 @@ value_t *ex_slice(sema_t *sema, ast_node_t **node,
       } else if (type_is_slice(bt)) {
         et = slice_type_elem(bt);
       } else if (type_kind_of(bt) == TYPE_KIND_STR) {
-        /* str → ref [] const u8（元素不可写，m4-design §4/§8） */
+        /* str → ref [] const u8（元素不可写） */
         et = type_const_intern(sema->vm, sema->vm->type_u8);
       } else {
         char tn[64];

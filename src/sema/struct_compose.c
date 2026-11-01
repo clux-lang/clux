@@ -950,7 +950,7 @@ size_t sema_struct_compose_pass(sema_t *sema, ast_program_t *prog,
 /* ===========================================================================
  * 成员名字查找（含嵌入继承 + 新 struct 的 attribute 覆盖）
  *
- * 规则（**确定性**，见 docs/language-spec-m1 §结构体嵌入 与 docs/m6-design §14.23）：
+ * 规则（**确定性**，见与）：
  *   1. 先 `Test::name` 自己 —— **命中即返回**：新 struct 自己声明的 attribute
  *      （字段之外的 `var` 静态属性 / `func` 方法）**静默覆盖**继承来的同名
  *      attribute，不报歧义、不报重复。覆盖后两者**互相独立**（`Test::count` 与

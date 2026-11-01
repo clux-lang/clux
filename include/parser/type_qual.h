@@ -9,7 +9,7 @@ extern "C" {
  *
  * 解析 `[const|volatile]* <type>` 类型标注的结果。位可组合：
  *   TYPE_QUAL_CONST | TYPE_QUAL_VOLATILE = const volatile T
- * 组合语义（m2-design §10）：固定顺序 volatile(const(T))——
+ * 组合语义：固定顺序 volatile(const(T))——
  * volatile 外层、const 内层。
  */
 typedef enum {

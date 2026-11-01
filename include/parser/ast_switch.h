@@ -8,7 +8,7 @@ extern "C" {
 #include "parser/parser.h"
 
 /**
- * switch 语句（docs m2-design §4：if 语法糖，语义内联在 sema/compiler）。
+ * switch 语句（if 语法糖，语义内联在 sema/compiler）。
  *
  * 语法：switch(cond) { (a, b)->{...} (c)->{...} default->{...} }
  *   - 条件带括号，可以是运行时表达式（不限制常量）

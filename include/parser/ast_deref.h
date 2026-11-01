@@ -7,7 +7,7 @@ extern "C" {
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 
-/* 后置解引用取值（m3-design §8.2）：r.* —— 由指针得值（GET）。
+/* 后置解引用取值：r.* —— 由指针得值（GET）。
  * 解引用 GET/SET 严格分离：r.* = v 的解引用写（SET）由 AST_ASSIGN
  * 的 target 形态承载（sema/compiler 识别 AST_DEREF target）。 */
 typedef struct {

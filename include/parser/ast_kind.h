@@ -91,7 +91,7 @@ typedef enum {
 
     AST_ERROR,           /* 解析错误恢复节点（记录错误位置，占位） */
 
-    /* --- 类型修饰（类型即表达式，M2 关键架构决策 6）---
+    /* --- 类型修饰（类型即表达式）---
      * const/volatile 是真实类型 kind（有 vtable 代理），以嵌套节点表达
      * 递归修饰：const i32 → AST_CONST(AST_IDENT("i32"))；
      * volatile const i32 → AST_VOLATILE(AST_CONST(...))。
@@ -113,7 +113,7 @@ typedef enum {
                             临时绑定 + ok/value + early return/panic */
     AST_TEST,            /* 顶层 test "Suite.Name" { ... }（仅测试模式使用） */
 
-    /* --- 编译期运算符（SEMA→CTFE 桥梁，m2-design §8）---
+    /* --- 编译期运算符（SEMA→CTFE 桥梁） ---
      * sizeof/alignof/typeof 是前缀运算符：操作数只做 shadow 求值（仅取
      * 类型，不真实执行），运算符自身产出真实编译期常量（sizeof/alignof →
      * u64，typeof → type value）。sema 求值后折叠为字面量节点写回。 */
@@ -121,14 +121,14 @@ typedef enum {
     AST_ALIGNOF,         /* alignof(T) / alignof(expr) → u64 */
     AST_TYPEOF,          /* typeof(expr) → type value */
 
-    /* --- M3 指针（m3-design §3/§8）---
+    /* --- M3 指针 ---
      * `*T` 裸指针、后置取址 x.& / 解引用 r.*、作用域标注。
      * 堆分配/释放不属于语言：调用 libc::malloc/free。 */
     AST_PTR,             /* *T 指针类型（类型即表达式） */
     AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
     AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */
 
-    /* --- M4 切片（m4-design §1/§2/§4）---
+    /* --- M4 切片 ---
      * 切片类型 `[]T`（胖指针 {ptr,len}）、make(pointer,len) 视图构造、
      * s[a:b] 切片表达式（产 []T）。 */
     AST_SLICE_TYPE,      /* []T 切片类型（类型即表达式） */

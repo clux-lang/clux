@@ -77,7 +77,7 @@ static void mangle_append_uint(string_t *s, unsigned long long v) {
     if (n > 0) string_append_bytes(s, buf, (size_t)n);
 }
 
-/* 类型实参的规范 mangling 编码。规则见 docs/m7-design.md §17：
+/* 类型实参的规范 mangling 编码。规则：
  *   i32 / *i32 / [3]i32 / Vec$i32 / <i32,str> / func(i32)->f64 ...
  * 所有权修饰与指针 rc 都要编码（`own *i32` 与 `*i32` 是不同类型）。 */
 void sema_generic_mangle_type(string_t *out, const type_t *t) {

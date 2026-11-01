@@ -6,7 +6,7 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* sizeof(T) / sizeof(expr)：类型或表达式 → u64 编译期常量（m2-design §8）。
+/* sizeof(T) / sizeof(expr)：类型或表达式 → u64 编译期常量。
  * 操作数只做 shadow 求值（仅取类型），不真实执行——运算符自身是
  * SEMA→CTFE 桥梁，sema 求值后折叠为 AST_INT_LIT(u64)。 */
 typedef struct {

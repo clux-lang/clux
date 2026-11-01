@@ -38,7 +38,7 @@ void slice_clear_elems(vm_t *vm, const type_t *elem, void *ptr, uint64_t len);
  * =========================================================================== */
 
 /* ===========================================================================
- * 递归销毁（m3-design §3.1/§13）：沿字段递归释放指针/切片堆块。
+ * 递归销毁：沿字段递归释放指针/切片堆块。
  *
  * 纯静态分派（type + 裸 data 块，不依赖 value_t 包装）——供 scope_destroy
  * 在 value_dispose 前扫描 owned 值调用。
@@ -563,7 +563,7 @@ static value_t *ptr_implicit_cast(vm_t *vm, value_t *v, const type_t *target) {
     const ptr_value_t *pv = (const ptr_value_t *)value_data(v);
 
 
-    /* 任意指针 → opaque 隐式（m3-design §8.4）：身份拷贝指针目标地址。 */
+    /* 任意指针 → opaque 隐式：身份拷贝指针目标地址。 */
     if (is_opaque_type(target)) {
         void *data = value_alloc_data_copy(vm->alloc, target, &pv->ptr);
         return value_make(vm, target, data);

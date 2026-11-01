@@ -231,7 +231,7 @@ void type_cunion_set_member_type(vm_t *vm, const type_t *t, const type_t *ftype)
 
 /* 按 (member 表内容) 判断两 cunion 是否等价（去重 intern 用）：
    member 名 + 顺序一致，类型指针一致，**且槽位所有权一致**（所有权是
-   类型描述的一部分，见 docs/ownership-refactor.md §0.8；struct/tuple/union
+   类型描述的一部分；struct/tuple/union
    的去重键都含 ownership）。 */
 static bool cunion_member_same(const cunion_member_t *a, const cunion_member_t *b) {
     if (a->name.len != b->name.len) return false;

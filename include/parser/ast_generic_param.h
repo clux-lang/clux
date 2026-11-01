@@ -15,7 +15,7 @@ extern "C" {
  *     func f[T, U = i32, N: comptime u64, ...Args](...)
  *
  * 每个参数是一个 AST_GENERIC_PARAM 节点，同一声明的参数挂在兄弟链上。
- * 参数形态（设计 m7-design §1/§2/§3/§30.1）：
+ * 参数形态（设计）：
  *   - 普通类型参数：T
  *   - 带默认值：T = i32（默认值表达式在定义点编译期求值）
  *   - comptime 值参数：N: comptime u64（type_expr 是值类型，可带默认值）

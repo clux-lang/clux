@@ -66,10 +66,10 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr);
 
 /* 编译期求值数组边界 N（[N]T 的长度槽位）。
  *
- * N 是编译期常量表达式（m2-design §6）：字面量直接读值；复杂表达式
+ * N 是编译期常量表达式：字面量直接读值；复杂表达式
  * （[2+3]i32 / [sizeof(a)]i32 / comptime var 引用）走 ctfe 真实求值
  * 成功后把非字面量边界折叠为 AST_INT_LIT 写回
- * （m2-design §comptime"常量折叠写回 AST"）——编译器消费类型槽位时
+ * （"常量折叠写回 AST"）——编译器消费类型槽位时
  * 直接读立即数，无需再次编译期求值。
  *
  * 失败返回 false（诊断已记录），len 不写入。
@@ -536,7 +536,7 @@ static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
     case AST_SIZEOF:
     case AST_ALIGNOF:
     case AST_TYPEOF: {
-      /* 编译期运算符（m2-design §8，SEMA→CTFE 桥梁）：类型槽位中的
+      /* 编译期运算符（SEMA→CTFE 桥梁）：类型槽位中的
          sizeof/alignof/typeof 由 ctfe 求值（操作数按 shadow 语义只取类型）。
          typeof → 类型本身；sizeof/alignof → 无法作为类型槽位（结果是 u64
          值，非类型），报错。 */
@@ -708,7 +708,7 @@ const type_t *resolve_type_expr(sema_t *sema, ast_node_t *type_expr) {
  * 程序类型名字 = 登记名（"__type_N"）；内建类型不登记（sema_type_register
  * 跳过）→ 名字 = 内建规范名（如 "i32"），编译器经 type_lookup 兜底 →
  * LOAD_TYPE <内建 id>。统一折叠为 AST_TYPE_REF：类型槽位一律走
- * LOAD_TYPE <id> 直接加载真实 type_t（别名透明，m2-design 关键决策——
+ * LOAD_TYPE <id> 直接加载真实 type_t（别名透明，关键决策——
  * 复合类型组装用 value->data 而非名字），消除运行时作用域查找。 */
 const type_t *sema_resolve_type_slot(sema_t *sema, ast_node_t **slot) {
   if (!sema || !slot || !*slot) return NULL;

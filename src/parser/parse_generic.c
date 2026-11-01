@@ -10,7 +10,7 @@
  *
  *     func f[T, U = i32, N: comptime u64, ...Args](...)
  *
- * 规则（docs/m7-design.md §1/§2/§3/§30.1）：
+ * 规则：
  *   - 参数包 `...Args` 必须最后，且每个声明最多一个；
  *   - comptime 值参数必须显式写 `N: comptime <type>`；
  *   - 默认值从右向左省略（本层只记录，顺序规则在 sema 检查）；

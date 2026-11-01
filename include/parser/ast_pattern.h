@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* M7 `extends` 结构约束 PATTERN（docs/m7-design.md §27–§29）。
+/* M7 `extends` 结构约束 PATTERN。
  *
  * 与类型表达式共享大部分语法外形，但有三个专用通配符：
  *   ?        任意单类型（含 void）

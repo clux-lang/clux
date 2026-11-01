@@ -425,7 +425,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
     var_value =
         value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
   } else if (vd->init && vd->init->kind == AST_NIL) {
-    /* ?T 声明初始化 none（docs m2-design §12.1）：var x:?T = nil。
+    /* ?T 声明初始化 none：var x:?T = nil。
        nil 非 value（无类型可推断），要求显式 ?T 类型标注；声明类型须
        optional。编译为 STORE_NIL（compiler 发码），运行期置 ok=false。
        确定性 = 已初始化（nil 是确定的值）。 */
@@ -570,7 +570,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
   }
 
-  /* §5 逃逸检查（m3-design §5）：声明类型含 ref 指针（顶层 ref *T 或含
+  /* §5 逃逸检查：声明类型含 ref 指针（顶层 ref *T 或含
      ref 字段的 struct/tuple/union）时定义必须带作用域标注；带标注则做
      逃逸比较（ref 存活 ≤ 锚点存活）。类型未就绪（解析失败已诊断）跳过
      ——防级联。 */

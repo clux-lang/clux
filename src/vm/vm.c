@@ -195,9 +195,9 @@ vm_t *vm_new(allocator_t *alloc) {
     /* M6：printf **不再是内建**——它是 libc 的函数，由 clux 源码经 FFI 声明后
        调用（`extern lib c from "*";` + `extern cfunc c::printf(format: str, ...): i32;`），
        走 BCODE_EXTERN_CALL → libffi（定参/变参都精确）。此前那个"魔改版"自带
-       格式解析与 `%v` 扩展，已整体删除（见 docs/m6-design.md §14.19）。 */
+       格式解析与 `%v` 扩展，已整体删除。 */
 
-    /* len 内置函数（m4-design §5/§11.3：len(array/slice/str) -> usize） */
+    /* len 内置函数（len(array/slice/str) -> usize） */
     vm_register_len(vm);
     vm_register_deep_clone(vm);
 

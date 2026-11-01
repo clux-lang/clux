@@ -1704,7 +1704,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);
         /* 魔法 len：struct 且定义了 `__len__` → `len(a)` ⇒
-           `typeof(a)::__len__(a.&)`（内建序列优先，见 §4）。 */
+           `typeof(a)::__len__(a.&)`（内建序列优先）。 */
         {
           const type_t *atc = at ? type_strip_quals(at) : NULL;
           if (atc && type_kind_of(atc) == TYPE_KIND_STRUCT &&

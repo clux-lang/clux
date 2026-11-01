@@ -23,7 +23,7 @@ int run_src(const std::string &src) {
 } // namespace
 
 /* ================================================================
- * comptime var：编译期常量，引用点折叠为常量（m2-design §7/§10）
+ * comptime var：编译期常量，引用点折叠为常量
  *
  * 关键契约：comptime var 是编译期常量，**任何常量位置**都能用，且**支持所有
  * 类型**。常量位置（数组边界/type 别名 rhs/签名槽位/make 长度/枚举值…）由
@@ -199,7 +199,7 @@ TEST(DriverComptime, ComptimeFuncCallResultUsedInConstantSlots) {
 }
 
 TEST(DriverComptime, NonComptimeFunctionCallInConstantSlot) {
-  /* m2-design §9 决策点 2：**非 comptime 函数**在常量槽位也被尝试编译期求值
+  /* 决策点 2：**非 comptime 函数**在常量槽位也被尝试编译期求值
      （失败才报错）。顺序无关同样适用：函数定义在引用之后也能求值。 */
   EXPECT_EQ(run_src(
       "comptime var N = len3();\n"

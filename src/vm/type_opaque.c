@@ -6,7 +6,7 @@
 #include <string.h>
 
 /* ===========================================================================
- * opaque 类型（≈ C 的 void*，m3-design §8.4）
+ * opaque 类型（≈ C 的 void*）
  *
  * opaque 是内建单例类型（vm->type_opaque，id 17），无开放构造阶段——与
  * error/interrupt 同族：vm_init_builtins 创建即 sealed，无 type_seal 槽位

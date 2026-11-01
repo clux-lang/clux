@@ -78,7 +78,7 @@
 
 #include "expr_construct_internal.h"
 
-/* 匿名构造 .{...} 字段求值 + 匿名 struct 类型推断（m2-design §2）：
+/* 匿名构造 .{...} 字段求值 + 匿名 struct 类型推断：
  * 1. 第一遍：按目标 struct 字段表收集字段值节点（具名字段按名匹配、匿名
  *    字段按序顺延）——乱序具名字段（.y=2,.x=1）在此重排为表序。
  * 2. 第二遍：逐字段求值（注入 anon_ct=目标字段类型，嵌套匿名构造/嵌套
@@ -244,7 +244,7 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
   return t;
 }
 
-/* 匿名构造 .{...} 的匿名 tuple 类型推断（m2-design §3，按序推断）：
+/* 匿名构造 .{...} 的匿名 tuple 类型推断（按序推断）：
  * 元组元素匿名（无名字），字段链只能是值表达式（AST_CONSTRUCT_FIELD 具名
  * 字段与 AST_FILL 值包在元组构造中非法）——字段数量必须 == 目标元素数量，
  * 逐字段按位置匹配目标元素类型：
@@ -680,7 +680,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
           return val_void(sema);
       }
       if (!n->type) {
-        /* 匿名构造 .{...}（m2-design §2）：字段即全部类型信息。目标 struct
+        /* 匿名构造 .{...}：字段即全部类型信息。目标 struct
            时按目标字段表驱动推断（infer_anon_struct：按名匹配 + 按目标字段
            类型 safe_cast 校验 + 表序重排 + intern 匿名类型），与目标同构时
            intern 去重为同一实例（天然零转换），否则结构兼容经
@@ -742,7 +742,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
 
       /* `__init__`：有初始化器的 struct 不再支持普通构造（具名字段 / 按序
          字段赋值）；`.T{arg1, arg2, ...}` 等价于"零初始化 + T::__init__(args)"。
-         见 docs/whitepaper/03-declarations.md §4.5。 */
+         见 docs/whitepaper/03-declarations.md §3.5.1。 */
       if (sema_magic_has_init(sema, t)) {
         for (ast_node_t *f = n->fields; f; f = f->next) {
           if (f->kind == AST_CONSTRUCT_FIELD) {
@@ -764,7 +764,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
         return sema_expr(sema, node, scope);
       }
 
-      /* ?T 构造器（二值单槽位，docs m2-design §12.2）：字段数强制 == 1，
+      /* ?T 构造器（二值单槽位）：字段数强制 == 1，
          字段类型 ∈ {nil, T}。nil 字段 → 运行期 PUSH_OPT_NONE；T 字段 →
          隐式提升 D1。字段类型显式校验（不走 value_assign——option_assign
          的 shadow 短路会绕过类型检查，须在此处直接比较 inner）。 */
@@ -896,7 +896,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
       }
 
       if (type_kind_of(t) == TYPE_KIND_STRUCT) {
-        /* struct 构造（具名/匿名，docs m2-design §2）：字段数必须 == 类型
+        /* struct 构造（具名/匿名）：字段数必须 == 类型
            字段数（完全显式）。具名字段 .name = value（AST_CONSTRUCT_FIELD）
            按名匹配；匿名字段（值表达式）按声明序匹配（鸭子构造，链序即
            字段序）。每个字段 value_assign 校验可赋值给字段类型。嵌套匿名
@@ -1028,7 +1028,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
       }
 
       if (type_kind_of(t) == TYPE_KIND_TUPLE) {
-        /* tuple 构造（具名/匿名，docs m2-design §3）：元素数必须 == 类型
+        /* tuple 构造（具名/匿名）：元素数必须 == 类型
            元素数（完全显式）。元组元素匿名 → 字段链只能是值表达式（具名
            字段/值包非法），按声明序匹配元素类型（鸭子构造，链序即元素序）。
            每个元素 value_assign 校验可赋值给元素类型。嵌套匿名构造注入：
@@ -1117,7 +1117,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
       }
 
       if (type_kind_of(t) == TYPE_KIND_UNION) {
-        /* union 构造（.Value{.i = 42}，struct 同构单字段，docs m2-design
+        /* union 构造（.Value{.i = 42}，struct 同构单字段，
            §tag union）：强制恰好 1 个具名字段（AST_CONSTRUCT_FIELD，字段名
            = member 名）。member 定位按名（union_type_find_member），值按
            member 的 payload_type value_assign 校验。sema 把 member 下标写回
@@ -1364,7 +1364,7 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
         return val_void(sema);
       }
 
-      /* 数组构造（完全显式，docs m2-design §12.4）：总元素数 =
+      /* 数组构造（完全显式）：总元素数 =
          Σfill counts + 显式字段数，必须 == 数组长度（无自动 0 填充、
          无运行时裁剪）。fill 的 N 编译期常量（sema_eval_array_bound
          求值 + 折叠为 AST_INT_LIT，编译器读立即数）。 */

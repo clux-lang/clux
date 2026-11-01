@@ -32,7 +32,7 @@ typedef struct {
      * 编解码宏见 `vm/bcode.h` 的 CLUX_FFI_RET_PACK/UNPACK；compiler 把它原样
      * 写成 `BCODE_EXTERN_CALL` 的第三个操作数。
      * `is_ffi_call` 由 sema 置位；compiler 据此改发 `BCODE_EXTERN_CALL`（见
-     * docs/m6-design.md §14.7 步骤 ③/§14.19），不再走 CALLEE + CALL。 */
+     * 步骤 ③/§14.19），不再走 CALLEE + CALL。 */
     bool        is_ffi_call;
     uint32_t    ffi_ret_kind;
     /* 实际 C 符号名与解析后的签名（sema 填）。直接 `lib::fn` 与 port

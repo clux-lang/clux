@@ -17,7 +17,7 @@ struct sema_t; /* sema_reflect_eval 用（避免与 sema.h 循环包含） */
 /* ===========================================================================
  * 反射元数据（`T.<key>` 注入）—— builtin 取值核心
  *
- * 设计见 docs/reflect-builtin-design.md：
+ * 设计要点：
  *   - 注入面是 **type value 的成员**（`T.name` / `T.field_count` / `T.field_type(0)`）；
  *   - 求值在 sema（折叠成常量），运行期零指令；
  *   - 值域：str / usize / type / bool；

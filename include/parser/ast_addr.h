@@ -7,7 +7,7 @@ extern "C" {
 #include "parser/ast_node.h"
 #include "parser/parser.h"
 
-/* 后置取地址（m3-design §8.2）：x.& —— 由值得指针。
+/* 后置取地址：x.& —— 由值得指针。
  * 与字段访问 '.' 同一位置族（parse_postfix 的 '.' 分派）。 */
 typedef struct {
     ast_node_t  base;

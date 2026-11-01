@@ -394,7 +394,6 @@ static void resolve_local_func_sig(sema_t *sema, ast_func_def_t *fn,
                  "unknown return type");
     }
   }
-  /* §5 强制规则（m3-design §5）：返回 ref 必标注（集合 = 参数名 ∪ {*}）。 */
   const type_t *sig = type_func_sig(sema->vm, params, nparams, rt, false);
   /* 符号 type 填充（调用点/引用点签名校验 + AST_FUNC_REF 改写用） */
   sema_symbol_t *sym = sema_lookup(scope, fn->name);

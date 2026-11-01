@@ -11,7 +11,7 @@
  * volatile 修饰类型
  *
  * volatile_type_t 继承 type_t 持 sub 指针。运算行为代理到 sub（解包语义，
- * m2-design §10）：所有 vtable 槽位把操作数的 type 临时替换为 sub，调用
+ *）：所有 vtable 槽位把操作数的 type 临时替换为 sub，调用
  * sub->vtable 对应槽位后恢复。volatile 是存取语义提示（禁止优化器重排/
  * 合并读写），不改变类型身份：volatile i32 != i32，但兼容性（extends）
  * 与 sub 一致（代理递归）。

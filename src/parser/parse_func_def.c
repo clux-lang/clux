@@ -47,7 +47,7 @@ static ast_node_t *parse_param(parser_t *p) {
 
     /* 类型标注：:type（必须，类型即表达式，普通表达式解析）。
        min_prec=1 限定：不消费逗号/右括号（调用者处理）。
-       parse_type_prefix 额外处理前导作用域标注（m3-design §5）。 */
+       parse_type_prefix 额外处理前导作用域标注。 */
     if (!expect_symbol(p, ":")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ':' and type after parameter name");

@@ -502,7 +502,7 @@ TEST_F(SemaTest, SelfReferenceUndefined) {
 }
 
 /* ================================================================ */
-/* optional（?T，docs m2-design §12）                               */
+/* optional（?T） */
 /* ================================================================ */
 
 TEST_F(SemaTest, OptionalVarInitNil) {
@@ -1155,7 +1155,7 @@ TEST_F(SemaTest, ComptimeVarExprFold) {
 }
 
 /* ================================================================ */
-/* sizeof / alignof / typeof（m2-design §8，SEMA→CTFE 桥梁）         */
+/* sizeof / alignof / typeof（SEMA→CTFE 桥梁） */
 /* ================================================================ */
 
 TEST_F(SemaTest, SizeofTypeFold) {
@@ -2467,7 +2467,7 @@ TEST_F(SemaTest, FuncValueParamShadowsFunctionName) {
 
 TEST_F(SemaTest, FuncValueBuiltinLen) {
     /* 内建函数与普通函数同等看待：函数值赋值 + 调用。
-       用 `len`——printf 已从内建删除（改由 libc 经 FFI 提供，见 §14.19）。 */
+       用 `len`——printf 已从内建删除（改由 libc 经 FFI 提供）。 */
     EXPECT_TRUE(analyze(
         "func main(): void { var p = len; var n = p(\"abc\"); }"));
     EXPECT_FALSE(diag_has_error(diag_));
@@ -2823,7 +2823,7 @@ TEST_F(SemaTest, LocalFuncNoCaptureSelfRefStillRejected) {
     expect_message(0, "local function cannot reference sibling or self");
 }
 
-/* ---- switch 语句（docs m2-design §4：if 语法糖） ---- */
+/* ---- switch 语句（if 语法糖） ---- */
 
 TEST_F(SemaTest, SwitchBasicValid) {
     /* 基本 switch：cond 为运行期 i32 变量，模式列表匹配 → 合法 */
@@ -3098,7 +3098,7 @@ TEST_F(SemaTest, EnumVariantNonIntValueError) {
 
 TEST_F(SemaTest, EnumVariantNonConstError) {
     /* variant 值必须编译期整型常量。**可解释的普通函数调用是允许的**
-       （m2-design §9 决策点 2：非 comptime 函数在常量槽位被尝试编译期求值，
+       （决策点 2：非 comptime 函数在常量槽位被尝试编译期求值，
        失败才报错）——真正非法的是求值依赖运行期实体：这里 `id(g)` 的实参 g
        是运行期全局变量（CTFE 里只有 shadow value，取不到真实数据）。 */
     EXPECT_FALSE(analyze(
@@ -3573,7 +3573,7 @@ TEST_F(SemaTest, StructAssignWholeValuePasses) {
         "}"));
 }
 
-/* ---- 结构兼容赋值（鸭子类型，m2-design §2）：布局+字段完全相等可赋值 ---- */
+/* ---- 结构兼容赋值（鸭子类型）：布局+字段完全相等可赋值 ---- */
 
 TEST_F(SemaTest, StructAssignLayoutCompatiblePasses) {
     /* 两个具名 struct 字段名+类型+顺序一致 → 结构兼容，双向赋值合法 */

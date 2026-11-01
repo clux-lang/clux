@@ -5,7 +5,7 @@
 
 /* ================================================================
  * 反射注入：union / cunion / tuple / option / ptr / const-volatile
- * （`T.<key>`，sema 折叠为常量；设计见 docs/reflect-builtin-design.md）
+ * （`T.<key>`，sema 折叠为常量；设计）
  * ================================================================ */
 
 /* union（tag union）：member 名 / payload 类型 / tag 编号 */

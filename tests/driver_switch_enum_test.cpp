@@ -18,7 +18,7 @@ namespace {
 
 } // namespace
 
-/* ---- switch 语句端到端（docs m2-design §4：if 语法糖） ---- */
+/* ---- switch 语句端到端（if 语法糖） ---- */
 
 TEST(Driver, RunFileSwitchMatchReturnsCase) {
   /* 基本匹配：命中 case 分支执行并返回 */

@@ -267,7 +267,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       sema_scope_new(sema->vm->alloc, SEMA_SCOPE_GLOBAL, NULL);
   if (!sema->global_scope) return false;
 
-  /* 预注册 len 内置函数（m4-design §5/§11.3：len(s) -> usize，即 C 的 size_t）。
+  /* 预注册 len 内置函数（len(s) -> usize，即 C 的 size_t）。
      与 VM 侧 vm_register_len 对应。len 接受任意可长度的值（数组/切片/str），
      注册为 variadic（0 固定参数）——sema 调用点特判从实参类型校验可长性
      并产出 usize 返回类型（C 的 size_t：随架构变化）。fid 从 vm->functions 按名查询。 */

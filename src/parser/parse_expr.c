@@ -334,7 +334,7 @@ ast_node_t *parse_primary(parser_t *p) {
         return inner;
     }
 
-    /* 数组类型 [N]T / 切片类型 []T（m4-design §1）。
+    /* 数组类型 [N]T / 切片类型 []T。
      * 仅当 '[' 出现在原子位置时（无 lhs）解析为类型，后缀 '[' 仍归 AST_INDEX。
      * ']' 后紧跟基础/元素类型 T（parse_unary 递归处理嵌套）。
      * 空 '[]' → 切片类型（须带所有权修饰，裸 []T 不合法——sema 层校验）；
@@ -450,7 +450,7 @@ ast_node_t *parse_primary(parser_t *p) {
         return node;
     }
 
-    /* move/clone 所有权原语：move(x) / clone(x)（m3-design §7）。
+    /* move/clone 所有权原语：move(x) / clone(x)。
        必须是括号形态（move x / clone x 无括号不合法），与 sizeof 同族。
        返回 fatal：move 转移所有权（原对象 TDZ），clone 深拷贝。 */
     if (check_keyword(p, "move") || check_keyword(p, "clone")) {
@@ -649,7 +649,7 @@ ast_node_t *parse_unary(parser_t *p) {
             (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
     }
 
-    /* sizeof/alignof/typeof：编译期运算符（m2-design §8，SEMA→CTFE 桥梁）。
+    /* sizeof/alignof/typeof：编译期运算符（SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一
        sizeof(...) / alignof(...) / typeof(...) 圆括号形态（与 C 同形）。
        '（' 缺失/不匹配 → 语法错误（parse_primary 无法回落——关键字不是
@@ -1001,7 +1001,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 continue;
             }
 
-            /* 后置取地址：x.&（m3-design §8.2，由值得指针） */
+            /* 后置取地址：x.&（由值得指针） */
             if (check_symbol(p, "&")) {
                 advance(p);
                 ast_node_t *node = ast_addr_new(p->arena, tb, p->pos);
@@ -1011,7 +1011,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
                 continue;
             }
 
-            /* 后置解引用取值：r.*（m3-design §8.2，指针得值 GET）。
+            /* 后置解引用取值：r.*（指针得值 GET）。
                解引用写（SET）由 AST_ASSIGN 的 target 形态承载。 */
             if (check_symbol(p, "*")) {
                 advance(p);
@@ -1037,7 +1037,7 @@ static ast_node_t *parse_postfix(parser_t *p, ast_node_t *lhs) {
             continue;
         }
 
-        /* 下标 / 泛型索引：[expr, ...] / 切片：[low:high]（m4-design §4）。
+        /* 下标 / 泛型索引：[expr, ...] / 切片：[low:high]。
          * 切片用 ':' 区分：[a:b] / [:b] / [a:] / [:] 均为切片（AST_SLICE），
          * 逗号分隔的多索引仍为 AST_INDEX。 */
         if (check_symbol(p, "[")) {
@@ -1278,7 +1278,7 @@ ast_node_t *parse_expr_prec(parser_t *p, int min_prec) {
             uint32_t op_pos = p->pos;
 
             /* 左值必须是标识符、下标（a[i] = v）、成员访问（p.x = v）、
-             * 解引用（r.* = v，m3-design §8.2 解引用 SET）或限定名
+             * 解引用（r.* = v，解引用 SET）或限定名
              * （`<库>::<数据符号>` = v，M6 FFI 的 extern var）。
              * 下标/泛型索引（AST_INDEX）与泛型实例化语法重叠，parser 不区分——
              * sema 层做最终校验（数组下标赋值 / 泛型占位诊断）。

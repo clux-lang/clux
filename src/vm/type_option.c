@@ -16,7 +16,7 @@
  * value 字段偏移 voff = align_up(sizeof(bool), alignof(T)) = max(1, inner->align)
  * size = voff + inner->size；align = max(1, inner->align)（密封时计算）。
  *
- * 运算行为（m2-design §9/§12.1）：
+ * 运算行为：
  *   - eq/ne 无分派：?T 只能与 nil 比较，tag 比较由编译器发专用指令
  *     （比较 ok tag 的 bool），vtable eq/ne 返回错误。
  *   - clone/assign/dispose：data 全平凡（ok tag + value 字段为裸字节块，

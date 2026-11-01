@@ -1,7 +1,7 @@
 // reflect.cx — 编译期反射：`T.<key>`（类型值成员注入）
 //
 // 元数据在 sema 阶段折叠成常量（与 sizeof/typeof 同族），运行期零开销、零存储。
-// 设计见 docs/reflect-builtin-design.md。
+// 设计。
 //
 //   T.name / T.size / T.align / T.kind        通用（kind 是编译期字符串）
 //   T.field_count / T.field_name(i) / ...     struct / union / cunion / tuple / enum / func

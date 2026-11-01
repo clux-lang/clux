@@ -593,7 +593,7 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
         }
         case AST_FOREACH: {
             /* foreach ([var] name [: T] of iterable) { … }——语法糖的**源码形态**
-               必须完整回显（fmt 不走脱糖，见 docs/architecture-m1.md §1.x；
+               必须完整回显（fmt 不走脱糖；
                漏渲染会让格式化产物丢掉整个循环体 = 静默数据损坏）。 */
             ast_foreach_t *fe = (ast_foreach_t *)node;
             sb_str(&f->sb, "foreach (");

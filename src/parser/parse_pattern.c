@@ -9,7 +9,7 @@
 #include <string.h>
 
 /* ===========================================================================
- * M7 `extends` PATTERN 解析（docs/m7-design.md §27–§29）
+ * M7 `extends` PATTERN 解析
  *
  *   pattern   := or
  *   or        := and ('|' and)*

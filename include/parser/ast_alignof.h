@@ -6,7 +6,7 @@ extern "C" {
 
 #include "parser/ast_node.h"
 
-/* alignof(T) / alignof(expr)：类型或表达式 → u64 编译期常量（m2-design §8）。
+/* alignof(T) / alignof(expr)：类型或表达式 → u64 编译期常量。
  * 与 sizeof 同构：操作数只做 shadow 求值，sema 求值后折叠为 AST_INT_LIT(u64)。 */
 typedef struct {
     ast_node_t   base;

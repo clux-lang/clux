@@ -315,8 +315,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     return result;
   }
 
-  /* is：tag union tag 判定（<expr> is <member>，docs m2-design §tag
-     union）。lhs shadow 求值（必须 union 类型）；rhs 是 member 名表达式
+  /* is：tag union tag 判定（<expr> is <member>，tag union）。lhs shadow 求值（必须 union 类型）；rhs 是 member 名表达式
      （AST_IDENT）→ 编译期查 member → 折叠 rhs 为 AST_INT_LIT（member 的
      tag 整数值，compiler 发 IS_TAG 立即数，零感知 union 类型）。member
      名 = 字段名（struct 同构平铺字段），直接按名查 member
@@ -420,7 +419,7 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
     return value_make_shadow(sema->vm, sema->vm->type_bool);
   }
 
-  /* nil 比较（docs m2-design §12.5）：x==nil / nil==x / x!=nil / nil!=x
+  /* nil 比较：x==nil / nil==x / x!=nil / nil!=x
      四种判定形式是 ?T 唯一合法比较（?T == ?T 直接比较报错，须先窄化）。
      nil 不是 value：不进入 vtable eq 分派，sema 直接识别符号形态 →
      返回 bool shadow。x 非 ?T 与 nil 比较 → 编译错误（str/func 无空值）。 */

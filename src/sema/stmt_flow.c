@@ -266,7 +266,7 @@ block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
      meet（AND）：两分支都 flow_init 才 true。保守策略：非全部分支赋值
      （如 if(c){a=1;}else{}）→ 合并后仍 UNKNOWN，读取编译错误。
      optional 解包不在此做 flow 记录：if (x != nil) 分支内的 x 仍是 ?T，
-     解包由显式 x.!（assert）承担（docs m2-design §12.5）。 */
+     解包由显式 x.!（assert）承担。 */
   flow_snap_t snap = flow_capture(sema, scope);
 
   block_result_t tr = {0};
@@ -317,7 +317,7 @@ block_result_t walk_if(sema_t *sema, ast_if_t *it, sema_scope_t *scope,
   return r;
 }
 
-/* ---- switch 语句（docs m2-design §4：if 语法糖，语义内联） ----
+/* ---- switch 语句（if 语法糖，语义内联） ----
  *
  * cond shadow 求值一次（C 局部持有，不注册临时符号——desugar 的
  * `var __switch_N` 是编译期实现细节，用户代码不可见）。每分支每模式

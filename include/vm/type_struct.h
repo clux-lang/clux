@@ -150,7 +150,7 @@ const type_t *type_struct_intern(vm_t *vm, const struct_field_t *fields,
 
 
 /**
- * 结构兼容判断（鸭子类型，m2-design §2）：两 struct 类型字段名 + 字段类型
+ * 结构兼容判断（鸭子类型）：两 struct 类型字段名 + 字段类型
  * （type_equal，支持嵌套复合）+ 字段顺序完全一致即兼容——布局（offset/size/
  * align）由字段表唯一决定，字段兼容 ⟹ 布局相同。
  *

@@ -350,7 +350,7 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
         return v;
 
       /* ?T 变量读取：始终按 ?T 类型返回 shadow（无窄化退化——optional
-         解包由显式 .! assert 承担，见 docs m2-design §12.5） */
+         解包由显式 .! assert 承担） */
       value_t *sv = value_make_shadow(sema->vm, value_type(v));
       return sv;
 }
@@ -427,7 +427,7 @@ value_t *ex_volatile(sema_t *sema, ast_node_t **node,
 /* AST_SIZEOF / AST_ALIGNOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* 编译期运算符（m2-design §8）：操作数 shadow 求值只取类型（不真实
+      /* 编译期运算符：操作数 shadow 求值只取类型（不真实
          执行），结果恒 u64。sizeof = 类型宽度，alignof = 类型对齐。
          折叠为 AST_INT_LIT(u64) 写回（保留兄弟链）——编译器零感知消费
          立即数；返回 shadow u64。 */
@@ -471,7 +471,7 @@ value_t *ex_sizeof_alignof(sema_t *sema, ast_node_t **node,
 /* AST_TYPEOF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_typeof(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* typeof(expr) → type value（m2-design §8）：操作数 shadow 求值只取
+      /* typeof(expr) → type value：操作数 shadow 求值只取
          类型，结果即该类型。折叠为 AST_TYPE_REF（sema_ct_type_ref 登记到
          types 表，编译器 LOAD_TYPE <id> 零感知）；返回真实 type value
          （编译期实体，data 恒为 type_t*）。 */
@@ -602,7 +602,7 @@ value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
 value_t *ex_slice_type(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
   (void)scope; /* 本处理器不使用词法作用域 */
-      /* 切片类型表达式 own/ref/fatal []T（类型即表达式，m4-design §1）：
+      /* 切片类型表达式 own/ref/fatal []T（类型即表达式）：
          解析为真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），
          返回真实 type value。与 AST_ARRAY 同构。 */
       const type_t *t = sema_resolve_type_slot(sema, node);
@@ -627,8 +627,7 @@ value_t *ex_array(sema_t *sema, ast_node_t **node,
 value_t *ex_type_expr(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
   (void)scope; /* 本处理器不使用词法作用域 */
-      /* 其余**类型表达式**出现在表达式位置（类型即表达式，m2-design 关键
-         架构决策 6）：元组 `<T1,T2>` / 签名 `func(T)->R` / 可选 `?T` /
+      /* 其余**类型表达式**出现在表达式位置（类型即表达式）：元组 `<T1,T2>` / 签名 `func(T)->R` / 可选 `?T` /
          指针 `own *T` 都应求值为类型值，与上方 AST_ARRAY 完全同构——解析为
          真实类型并就地替换为 AST_TYPE_REF（编译器发 LOAD_TYPE），返回
          type value 供 type 定义 / as 右值 / sizeof / 嵌套类型构造消费。
@@ -655,7 +654,7 @@ value_t *ex_type_ref(sema_t *sema, ast_node_t **node,
 /* AST_DEREF 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_deref(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* 后置解引用取值 r.*（m3-design §8.2）：由指针得值。操作数必须是
+      /* 后置解引用取值 r.*：由指针得值。操作数必须是
          指针类型（own/ref/fatal）→ 返回被指向类型 T 的 shadow（运行期
          PTR_GET 指令取 T 值副本）。 */
       ast_deref_t *n = (ast_deref_t *)*node;
@@ -719,7 +718,7 @@ static bool expr_is_addressable(const ast_node_t *e) {
 
 value_t *ex_addr(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
+      /* 后置取地址 x.&：由值得指针。返回 ref *T 类型的
          shadow——x.& 指向栈上值（或他人堆块）是借用，ref 总借用（type kind
          区分，运行期零标志 §13.2），销毁 no-op。
          返回 ref（而非 own）与值层语义一致（Step B 借用存活检查的基座）。 */

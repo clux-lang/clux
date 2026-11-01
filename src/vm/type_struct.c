@@ -334,7 +334,7 @@ void type_struct_add_field(vm_t *vm, const type_t *t, strslice_t name,
    供 bytecode hoist 把 sema 的槽位所有权带进运行期构造的类型对象。 */
 
 /* 按 (字段名 + 类型 + 顺序 + **槽位所有权**) 判断两结构体是否等价
- * （去重 intern 用）。所有权是类型描述的一部分（docs/ownership-refactor.md
+ * （去重 intern 用）。所有权是类型描述的一部分（
  * §0.8），漏掉它会让 `struct A { p: own *i32 }` 与 `struct B { p: ref *i32 }`
  * 被 intern 成同一个类型，销毁序列随之出错。 */
 static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
@@ -351,7 +351,7 @@ static bool struct_same(const struct_type_t *a, const struct_type_t *b) {
     return true;
 }
 
-/* 结构兼容（鸭子类型，m2-design §2）：字段名 + 字段类型（type_equal，嵌套
+/* 结构兼容（鸭子类型）：字段名 + 字段类型（type_equal，嵌套
  * 复合类型递归）+ 字段顺序完全一致即兼容。布局（offset/size/align）由字段
  * 表唯一决定（C 对齐规则），字段兼容 ⟹ size/align 相同——无需单独比较。
  * 匿名构造 .{...} 推断的匿名类型与目标类型也走此判断。 */

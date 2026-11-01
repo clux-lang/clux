@@ -32,7 +32,7 @@
 
 /* 与变量同机制：内建类型值注册在 global scope，自定义类型（M2 type 定义）
    注册到定义点当前作用域。scope_lookup 沿 current→root→global 链查找；
-   变量遮蔽类型时命中非 type value → NULL（遮蔽语义，见 m2-design 决策 6）。 */
+   变量遮蔽类型时命中非 type value → NULL（遮蔽语义）。 */
 const type_t *type_lookup(const vm_t *vm, strslice_t name) {
     if (!vm) return NULL;
     value_t *v = scope_lookup(vm->current_scope, name);
@@ -436,7 +436,7 @@ void vm_init_builtins(vm_t *vm) {
                                  sizeof(interrupt_data_t), alignof(interrupt_data_t),
                                  TYPE_KIND_INTERRUPT, true, 16 };
 
-    /* opaque（≈ C void*，m3-design §8.4）：指针值 = 裸指针。内建单例，
+    /* opaque（≈ C void*）：指针值 = 裸指针。内建单例，
        无开放构造阶段（与 error/interrupt 同族，type_seal 槽位 NULL）。 */
     g_type_opaque = (type_t){ &VTABLE_OPAQUE, STRSLICE_LIT(S_OPAQUE),
                               sizeof(void *), alignof(void *),

@@ -481,7 +481,7 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
         }
         cw_put(sb, "};\n");
         /* mock 复位：每个用例开始前清空所有模块的 mock 槽（用例之间不串味；
-           断言失败 longjmp 出来的用例同样不会把 mock 漏给下一条）。*/
+           断言失败 longjmp 出来的用例同样不会把 mock 漏给下一条）。 */
         if (unit->tests) {
             for (size_t i = 0; i < unit->mock_reset_count; i++) {
                 if (!unit->mock_reset_syms[i]) continue;
