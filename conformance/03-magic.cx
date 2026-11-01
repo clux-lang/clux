@@ -297,3 +297,61 @@ test "magic.eqInsideAggregate" {
     };
     assert(a != c); // k 不同
 }
+
+/* ---- dispose(x)：按类型决定是否调用 __dispose__ ---- */
+
+struct Tracked {
+    n: i32;
+    var disposed: i32 = 0;
+    func __dispose__(self: *Tracked): void {
+        Tracked::disposed = Tracked::disposed + 1;
+    }
+}
+
+struct Untracked {
+    v: i32;
+}
+
+test "magic.disposeStatement" {
+    var before: i32 = Tracked::disposed;
+    var t: Tracked = .Tracked{ .n = 1 };
+    dispose(t.&); // 有 __dispose__ → 调用
+    assert(Tracked::disposed == before + 1);
+    var u: Untracked = .Untracked{ .v = 2 };
+    dispose(u.&); // 没有 → 静默
+    dispose(u); // 值接收者也一样静默
+    assert(Tracked::disposed == before + 1);
+    var t2: Tracked = .Tracked{ .n = 3 };
+    dispose(t2); // 值接收者 + 有 __dispose__ → 调用
+    assert(Tracked::disposed == before + 2);
+}
+
+/* ---- move 初始化：形参是 *P、源是 P 的位置 → 传地址 ---- */
+
+struct MoveSrc[T] {
+    ptr: ?*T;
+    func __init__(self: *MoveSrc[T], p: *T): void {
+        self.ptr = p;
+    }
+    func take(self: *MoveSrc[T]): ?*T {
+        var p: ?*T = self.ptr;
+        self.ptr = nil;
+        return p;
+    }
+}
+
+struct MoveDst[T] {
+    ptr: ?*T;
+    func __init__(self: *MoveDst[T], s: *MoveSrc[T]): void {
+        self.ptr = s.take();
+    }
+}
+
+test "magic.moveInit" {
+    var v: i32 = 7;
+    var src: MoveSrc[i32] = .MoveSrc[i32]{ v.& };
+    var dst: MoveDst[i32] = src; // 传 &src → 取走指针并置空
+    assert(src.ptr == nil);
+    assert(dst.ptr != nil);
+    assert(dst.ptr.!.* == 7);
+}

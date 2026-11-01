@@ -1048,3 +1048,74 @@ TEST(Magic, SizeofGenericInstance) {
       "}\n",
       "sizeof_generic_instance");
 }
+/* `dispose(x)` 语句：x（或 *x 指向的类型）实现 __dispose__ 时调用它，
+   没有时编译期静默丢弃（容器 / Own 里的条件析构）。 */
+TEST(Magic, DisposeStatementDispatchesOnType) {
+  clux_expect_program_ok(
+      "var disposed: i32 = 0;\n"
+      "struct Res { n: i32; func __dispose__(self: *Res): void { disposed = disposed + 1; } }\n"
+      "struct Plain { v: i32; }\n"
+      "func main(): i32 {\n"
+      "  var r: Res = .Res{ .n = 1 };\n"
+      "  dispose(r.&);\n"
+      "  if (disposed != 1) { return 1; }\n"
+      "  var p: Plain = .Plain{ .v = 2 };\n"
+      "  dispose(p.&);\n"
+      "  dispose(p);\n"
+      "  if (disposed != 1) { return 2; }\n"
+      "  var r2: Res = .Res{ .n = 3 };\n"
+      "  dispose(r2);\n"
+      "  if (disposed != 2) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "dispose_dispatch");
+}
+
+/* 泛型容器里 `dispose(self.item)` 按**实例化后的元素类型**决定是否调用。 */
+TEST(Magic, DisposeInGenericContainer) {
+  clux_expect_program_ok(
+      "var disposed: i32 = 0;\n"
+      "struct Res { n: i32; func __dispose__(self: *Res): void { disposed = disposed + 1; } }\n"
+      "struct Plain { v: i32; }\n"
+      "struct Box[T] {\n"
+      "  item: T;\n"
+      "  func drop(self: *Box[T]): void { dispose(self.item); }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var r: Res = .Res{ .n = 1 };\n"
+      "  var b: Box[Res] = .Box[Res]{ .item = r };\n"
+      "  b.drop();\n"
+      "  if (disposed != 1) { return 1; }\n"
+      "  var p: Plain = .Plain{ .v = 2 };\n"
+      "  var b2: Box[Plain] = .Box[Plain]{ .item = p };\n"
+      "  b2.drop();\n"
+      "  if (disposed != 1) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "dispose_generic");
+}
+
+/* 构造形参是指针 `*P`、源是 P 的位置表达式：初始化传地址（与 __assign__ 对齐），
+   构造里能置空调用方对象 → `var o: Own[T] = f;` 就是移动。 */
+TEST(Magic, InitFromPlacePassesAddress) {
+  clux_expect_program_ok(
+      "struct Fatal[T] {\n"
+      "  ptr: ?*T;\n"
+      "  func __init__(self: *Fatal[T], p: *T): void { self.ptr = p; }\n"
+      "  func take(self: *Fatal[T]): ?*T { var p: ?*T = self.ptr; self.ptr = nil; return p; }\n"
+      "  func __assign__(self: *Fatal[T], o: *Fatal[T]): void { self.ptr = o.ptr; o.ptr = nil; }\n"
+      "}\n"
+      "struct Own[T] {\n"
+      "  ptr: ?*T;\n"
+      "  func __init__(self: *Own[T], f: *Fatal[T]): void { self.ptr = f.take(); }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var v: i32 = 7;\n"
+      "  var f: Fatal[i32] = .Fatal[i32]{ v.& };\n"
+      "  var o: Own[i32] = f;\n"
+      "  if (f.ptr != nil) { return 1; }\n"
+      "  if (o.ptr == nil || o.ptr.!.* != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "init_place_address");
+}

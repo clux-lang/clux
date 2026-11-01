@@ -492,6 +492,13 @@ static cir_expr_t *lower_take_opt(lower_ctx_t *lc, ast_call_t *call) {
 
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
     if (call->is_take_call) return lower_take_opt(lc, call);
+    /* `dispose(x)` 且 x 的类型没有 __dispose__：实参求值后转 void（静默） */
+    if (call->dispose_noop) {
+        cir_expr_t *v = lower_expr(lc, call->args);
+        cir_type_t *vt = cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
+        if (!v || !vt) return NULL;
+        return cir_expr_cast(lc->arena, vt, v);
+    }
     strslice_t cname0 = STRSLICE_EMPTY;
     if (call->callee && call->callee->kind == AST_IDENT)
         cname0 = ((ast_ident_t *)call->callee)->name;

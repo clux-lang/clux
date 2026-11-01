@@ -70,6 +70,9 @@ typedef struct {
      * sema 在测试构建里解析目标函数并填这三项；C 后端据此生成/引用函数槽
      * `<module_prefix>mock_<fn_name>[2]`（[0]=replacement fn，[1]=它的 env）。
      * 目标不可在运行期按字符串查表：名字必须是**字符串字面量**（编译期解析）。 */
+    /* `dispose(x);` 语句：x 的类型没有 __dispose__ 时编译期静默丢弃，
+       C 后端把实参求值后转 void（不产生调用）。 */
+    bool        dispose_noop;
     uint8_t     mock_op;          /* clux_mock_op_t：0=非 mock 调用 */
     strslice_t  mock_fn_name;     /* 目标函数名（方法为裸方法名，靠 mock_type_id 编码） */
     const void *mock_owner_module; /* 目标函数定义所在 module_t*（跨模块槽 / 恢复） */

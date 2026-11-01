@@ -1,4 +1,5 @@
 #include "sema/sema.h"
+#include "sema/magic.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -243,6 +244,59 @@ static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
     case AST_EXPR_STMT: {
       ast_expr_stmt_t *es = (ast_expr_stmt_t *)stmt;
       bool noreturn = false;
+      /* `dispose(x);`：x（或 *x 指向的类型）实现 __dispose__ 时调用它，否则
+         编译期静默丢弃——容器与 Own 里常见的"按元素类型决定是否析构"。
+         用户自己定义的 dispose 函数优先（下面按名字查不到符号才走内建）。 */
+      if (es->expr && es->expr->kind == AST_CALL) {
+        ast_call_t *dc = (ast_call_t *)es->expr;
+        if (dc->callee && dc->callee->kind == AST_IDENT) {
+          strslice_t dn = ((ast_ident_t *)dc->callee)->name;
+          bool named_dispose = dn.ptr && dn.len == 7 &&
+                               memcmp(dn.ptr, "dispose", 7) == 0;
+          if (named_dispose && !sema_lookup(scope, dn) &&
+              !sema_scope_find_local(sema->global_scope, dn)) {
+            if (!dc->args || dc->args->next) {
+              diag_error(sema->diag, sema_loc(sema, stmt),
+                         "dispose() takes exactly one argument");
+              break;
+            }
+            value_t *dv = sema_expr(sema, &dc->args, scope);
+            if (value_is_error(sema->vm, dv)) break;
+            const type_t *dt = value_type(dv);
+            const type_t *dtc = dt ? type_strip_quals(dt) : NULL;
+            const type_t *owner = NULL;
+            ast_node_t *recv = dc->args;
+            if (dtc && type_is_ptr(dtc)) {
+              owner = type_strip_quals(ptr_type_base(dtc));
+            } else {
+              owner = dtc;
+              /* 值接收者：取地址后调用（与 `x.&` 同形） */
+              ast_node_t *addr = ast_addr_new(sema->arena, dc->args->tok_begin,
+                                              dc->args->tok_end);
+              if (!addr) break;
+              ((ast_addr_t *)addr)->operand = dc->args;
+              addr->next = dc->args->next;
+              addr->is_generated = true;
+              recv = addr;
+            }
+            if (owner && type_kind_of(owner) == TYPE_KIND_STRUCT &&
+                sema_magic_member(sema, owner, "__dispose__")) {
+              ast_node_t *call = sema_magic_make_call(
+                  sema, recv, "__dispose__", NULL, stmt->tok_begin,
+                  stmt->tok_end);
+              if (!call) break;
+              call->next = NULL;
+              es->expr = call;
+              value_t *vv = sema_expr(sema, &es->expr, scope);
+              (void)vv;
+            } else {
+              /* 没有 __dispose__：静默丢弃（C 后端只对实参求值后转 void） */
+              dc->dispose_noop = true;
+            }
+            break;
+          }
+        }
+      }
       if (es->expr && es->expr->kind == AST_CALL) {
         ast_call_t *cl = (ast_call_t *)es->expr;
         ast_node_t *callee = cl->callee;

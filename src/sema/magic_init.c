@@ -1,4 +1,6 @@
 #include "sema/magic.h"
+#include "parser/ast_addr.h"
+#include "vm/type_ptr.h"
 #include "diag/diagnostic.h"
 
 #include "parser/ast_block.h"
@@ -281,6 +283,28 @@ value_t *sema_magic_init_convert(sema_t *sema, ast_node_t **slot,
     if (src && src == core && !init_expr_is_place(*slot)) return NULL;
     const type_t *pt = func_type_param(ms->type, 1);
     if (!pt) return NULL;
+
+    /* 构造形参是指针 `*P`、源是类型 P 的位置表达式：传**地址**（与
+       `__assign__` 的 rhs 对齐）。这样 `var b: T = a;` 进构造后能看到并置空
+       调用方对象——move-only 类型的"移动初始化"就靠它。 */
+    {
+      const type_t *ptc = type_strip_quals(pt);
+      if (ptc && type_is_ptr(ptc) && src && init_expr_is_place(*slot)) {
+        const type_t *base = type_strip_quals(ptr_type_base(ptc));
+        if (base && src == base) {
+          ast_node_t *arg0 = *slot;
+          ast_node_t *addr =
+              ast_addr_new(sema->arena, arg0->tok_begin, arg0->tok_end);
+          if (addr) {
+            ((ast_addr_t *)addr)->operand = arg0;
+            addr->is_generated = true;
+            addr->next = arg0->next;
+            *slot = addr;
+            src = ptc;
+          }
+        }
+      }
+    }
     value_t *probe = value_make_shadow(sema->vm, src ? src : sema->vm->type_void);
     if (!probe) return NULL;
     if (value_is_error(sema->vm, value_implicit_cast(sema->vm, probe, pt))) {
