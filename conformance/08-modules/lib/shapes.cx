@@ -10,7 +10,10 @@ export struct Point {
 }
 
 export func scale(p: Point, k: i32): Point {
-    return .Point{ .x = p.x * k, .y = p.y * k };
+    return .Point{
+        .x = p.x * k,
+        .y = p.y * k
+    };
 }
 
 export type Pair = [2]i32;

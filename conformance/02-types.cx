@@ -53,7 +53,7 @@ test "types.str" {
     var empty: str = "";
     assert(len(s) == 5usize);
     assert(len(empty) == 0usize);
-    var bytes: [] const u8 = s[:];
+    var bytes: []const u8 = s[:];
     assert(bytes[0] == 'h');
     assert(bytes[4] == 'o');
 }
@@ -102,7 +102,7 @@ test "types.pointer" {
     assert(p.* == 7);
     p.* = 8;
     assert(v == 8);
-    var q: * const i32 = v.&;
+    var q: *const i32 = v.&;
     assert(q.* == 8);
 }
 
@@ -130,13 +130,19 @@ test "types.tuple" {
     assert(u[0] + u[1] == 7);
 }
 
-struct Point { x: i32; y: i64; }
-enum Color: i32 { Red = 1, Green = 2 }
+struct Point {
+    x: i32;
+    y: i64;
+}
+enum Color: i32 {Red = 1, Green = 2}
 union Shape { radius: f32; side: i32 }
 cunion Bits { i: i32; f: f32 }
 
 test "types.aggregates" {
-    var p: Point = .Point{ .x = 1, .y = 2 };
+    var p: Point = .Point{
+        .x = 1,
+        .y = 2
+    };
     assert(p.x == 1);
     assert(p.y == 2i64);
     var c: Color = Color::Green;

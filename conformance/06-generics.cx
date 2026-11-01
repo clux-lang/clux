@@ -1,9 +1,12 @@
 // 06-generics.cx — 泛型与接口（白皮书第 6 章）
 
 /* ---- 泛型函数：显式实参与推导 ---- */
-
-func id[T](x: T): T { return x; }
-func first[T](a: T, b: T): T { return a; }
+func id[T](x: T): T {
+    return x;
+}
+func first[T](a: T, b: T): T {
+    return a;
+}
 
 test "generics.function" {
     var a: i32 = id[i32](42);
@@ -23,7 +26,9 @@ test "generics.function" {
 struct Box[T] {
     value: T;
 
-    func get(self: *Box[T]): T { return self.value; }
+    func get(self: *Box[T]): T {
+        return self.value;
+    }
 
     func map_into[U](self: *Box[T], f: func(T) -> U): Box[U] {
         var out: Box[U] = .Box[U]{ .value = f(self.value) };
@@ -34,17 +39,23 @@ struct Box[T] {
 test "generics.struct" {
     var b: Box[i32] = .Box[i32]{ .value = 9 };
     assert(b.get() == 9);
-    var m: Box[str] = b.map_into(func(x: i32): str { return "n"; });
+    var m: Box[str] = b.map_into(func(x: i32): str {
+        return "n";
+    });
     assert(m.get() == "n");
 }
 
 /* ---- 约束：extends ---- */
 
-func read_int[T extends *i32](p: T): i32 { return p.*; }
+func read_int[T extends *i32](p: T): i32 {
+    return p.*;
+}
 
 struct Cell implements Sized[Cell] {
     n: i32;
-    func size_of(self: *Cell): usize { return sizeof(Cell); }
+    func size_of(self: *Cell): usize {
+        return sizeof(Cell);
+    }
 }
 
 interface Sized[T] {
@@ -92,7 +103,9 @@ test "generics.recursion" {
 
 /* ---- 值参数包：...Args 的计数 ---- */
 
-func pack_count[...Args](tag: str, args: ...Args): u64 { return len(args); }
+func pack_count[...Args](tag: str, args: ...Args): u64 {
+    return len(args);
+}
 
 test "generics.valuePack" {
     var n: u64 = pack_count[i32, str]("t", 1, "x");
@@ -107,10 +120,14 @@ interface Printer[T] {
 
 struct P implements Printer[P] {
     v: i32;
-    func print_it(self: *P): i32 { return self.v; }
+    func print_it(self: *P): i32 {
+        return self.v;
+    }
 }
 
-func show[T extends Printer[T]](p: *T): i32 { return p.print_it(); }
+func show[T extends Printer[T]](p: *T): i32 {
+    return p.print_it();
+}
 
 test "generics.interfaceBound" {
     var p: P = .P{ .v = 33 };

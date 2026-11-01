@@ -22,10 +22,10 @@ func reset_trace(): void {
 
 test "statements.block.scope" {
     var x: i32 = 1;
-    {
+     {
         var x: i32 = 2;
         assert(x == 2);
-        {
+         {
             var x: i32 = 3;
             assert(x == 3);
         }
@@ -38,9 +38,19 @@ test "statements.block.scope" {
 
 test "statements.if" {
     var r: i32 = 0;
-    if (true) { r = 1; } else { r = 2; }
+    if (true) {
+        r = 1;
+    } else {
+        r = 2;
+    }
     assert(r == 1);
-    if (false) { r = 3; } else if (true) { r = 4; } else { r = 5; }
+    if (false) {
+        r = 3;
+    } else if (true) {
+        r = 4;
+    } else {
+        r = 5;
+    }
     assert(r == 4);
 }
 
@@ -49,17 +59,20 @@ test "statements.if" {
 test "statements.switch" {
     var out: i32 = 0;
     var v: i32 = 2;
-    switch (v) {
-        (1) -> { out = 10; }
-        (2, 3) -> { out = 20; }
-        default -> { out = 30; }
-    }
+    switch (v) {(1) ->  {
+        out = 10;
+    } (2, 3) ->  {
+        out = 20;
+    } default ->  {
+        out = 30;
+    }}
     assert(out == 20);
     v = 9;
-    switch (v) {
-        (1) -> { out = 1; }
-        default -> { out = 99; }
-    }
+    switch (v) {(1) ->  {
+        out = 1;
+    } default ->  {
+        out = 99;
+    }}
     assert(out == 99);
 }
 
@@ -99,7 +112,9 @@ test "statements.foreach" {
 
     var s: []i32 = a[1:3];
     var ssum: i32 = 0;
-    foreach (var v of s) { ssum = ssum + v; }
+    foreach (var v of s) {
+        ssum = ssum + v;
+    }
     assert(ssum == 5);
 }
 
@@ -110,8 +125,12 @@ test "statements.breakContinue" {
     var sum: i32 = 0;
     while (true) {
         i = i + 1;
-        if (i > 10) { break; }
-        if (i % 2 == 0) { continue; }
+        if (i > 10) {
+            break;
+        }
+        if (i % 2 == 0) {
+            continue;
+        }
         sum = sum + i;
     }
     assert(sum == 25); // 1+3+5+7+9
@@ -119,8 +138,12 @@ test "statements.breakContinue" {
     var j: i32 = 0;
     var hits: i32 = 0;
     for (var k: i32 = 0; k < 5; k = k + 1) {
-        if (k == 2) { continue; }
-        if (k == 4) { break; }
+        if (k == 2) {
+            continue;
+        }
+        if (k == 4) {
+            break;
+        }
         hits = hits + 1;
     }
     assert(hits == 3);
@@ -129,8 +152,12 @@ test "statements.breakContinue" {
 /* ---- return ---- */
 
 func early(x: i32): i32 {
-    if (x < 0) { return -1; }
-    if (x == 0) { return 0; }
+    if (x < 0) {
+        return -1;
+    }
+    if (x == 0) {
+        return 0;
+    }
     return 1;
 }
 
@@ -144,9 +171,13 @@ test "statements.return" {
 
 test "statements.defer.lifo" {
     reset_trace();
-    {
-        defer { push(1); }
-        defer { push(2); }
+     {
+        defer {
+            push(1);
+        }
+        defer {
+            push(2);
+        }
         push(0);
     }
     assert(trace_len == 3);
@@ -158,8 +189,10 @@ test "statements.defer.lifo" {
 test "statements.defer.capture" {
     reset_trace();
     var captured: i32 = 42;
-    {
-        defer |captured| { push(captured); }
+     {
+        defer |captured| {
+            push(captured);
+        }
         captured = 0; // 值捕获：defer 看到的是登记时的值
         push(7);
     }
@@ -176,7 +209,9 @@ test "statements.defer.onReturn" {
 }
 
 func with_defer(x: i32): i32 {
-    defer { push(99); }
+    defer {
+        push(99);
+    }
     return x;
 }
 
@@ -185,15 +220,19 @@ func with_defer(x: i32): i32 {
 struct Guard {
     var disposed: i32 = 0;
     id: i32;
-    func __dispose__(self: *Guard): void { Guard::disposed = Guard::disposed + 1; }
+    func __dispose__(self: *Guard): void {
+        Guard::disposed = Guard::disposed + 1;
+    }
 }
 
 test "statements.using" {
     reset_trace();
     var before: i32 = Guard::disposed;
-    {
+     {
         using g = .Guard{ .id = 1 };
-        defer { push(1); }
+        defer {
+            push(1);
+        }
         push(0);
     }
     assert(Guard::disposed == before + 1);
@@ -226,7 +265,7 @@ test "statements.comptimeIf" {
 test "statements.comptimeForeach" {
     var seq: [3]i32 = .[3]i32{ 1, 2, 3 };
     var sum: i32 = 0;
-    comptime foreach (var e of seq) {
+    foreach (var e of seq) {
         sum = sum + e;
     }
     assert(sum == 6);
@@ -236,7 +275,6 @@ test "statements.comptimeForeach" {
 
 test "statements.empty" {
     ;
-    var a: i32 = 1
-    ;
+    var a: i32 = 1;
     assert(a == 1);
 }

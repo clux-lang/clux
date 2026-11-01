@@ -2,15 +2,23 @@
 //
 // 本文件自身就是一个 test 集合：`clux test conformance/11-testing.cx`。
 
-func target(x: i32): i32 { return x + 1; }
-func fake(x: i32): i32 { return 7; }
+func target(x: i32): i32 {
+    return x + 1;
+}
+func fake(x: i32): i32 {
+    return 7;
+}
 
 struct S {
     v: i32;
-    func get(self: *S): i32 { return self.v; }
+    func get(self: *S): i32 {
+        return self.v;
+    }
 }
 
-func fake_get(self: *S): i32 { return 99; }
+func fake_get(self: *S): i32 {
+    return 99;
+}
 
 test "testing.assert" {
     assert(1 + 1 == 2);

@@ -7,6 +7,7 @@ test "lexical.comments" {
     // 行注释到行尾
     /* 块注释
        可以跨行 */
+
     var a: i32 = 1; // 尾随注释
     assert(a == 1);
 }
@@ -87,8 +88,8 @@ test "lexical.string.escapes" {
     var plain: str = "clux";
     var esc: str = "a\tb\nc\\d\"e";
     var hex: str = "\x41\x42";
-    var es: [] const u8 = esc[:];
-    var hs: [] const u8 = hex[:];
+    var es: []const u8 = esc[:];
+    var hs: []const u8 = hex[:];
     assert(len(plain) == 4usize);
     assert(len(esc) == 9usize);
     assert(es[1] == '\t');
@@ -115,8 +116,10 @@ test "lexical.keywordsAreWords" {
 
 test "lexical.sourceStructure" {
     // 声明之间不需要分隔符；语句以 ';' 或块结束。
-    var a: i32 = 1
-    ; var b: i32 = 2;
-    if (a < b) { a = b; }
+    var a: i32 = 1;
+    var b: i32 = 2;
+    if (a < b) {
+        a = b;
+    }
     assert(a == 2);
 }

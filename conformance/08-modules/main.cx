@@ -5,12 +5,18 @@
 import shapes from "./lib/shapes";
 
 test "modules.exportedType" {
-    var p: shapes::Point = .shapes::Point{ .x = 3, .y = 4 };
+    var p: shapes::Point = .shapes::Point{
+        .x = 3,
+        .y = 4
+    };
     assert(p.norm2() == 25);
 }
 
 test "modules.exportedFunc" {
-    var p: shapes::Point = .shapes::Point{ .x = 1, .y = 2 };
+    var p: shapes::Point = .shapes::Point{
+        .x = 1,
+        .y = 2
+    };
     var q: shapes::Point = shapes::scale(p, 3);
     assert(q.x == 3);
     assert(q.y == 6);
@@ -32,6 +38,9 @@ test "modules.localCodeSeesImport" {
 }
 
 func helper_via_import(): i32 {
-    var p: shapes::Point = .shapes::Point{ .x = 3, .y = 4 };
+    var p: shapes::Point = .shapes::Point{
+        .x = 3,
+        .y = 4
+    };
     return p.norm2();
 }

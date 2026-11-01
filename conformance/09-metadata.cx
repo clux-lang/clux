@@ -1,30 +1,41 @@
 // 09-metadata.cx — 装饰器与元信息（白皮书第 9 章）
 
 /* ---- 装饰器：编译期函数调用 `[[expr]]` ---- */
-
-comptime func twice(n: i32): i32 { return n * 2; }
+comptime func twice(n: i32): i32 {
+    return n * 2;
+}
 
 [[twice]] var decorated_var: i32 = 21;
 
-comptime func plus1(v: i32): i32 { return v + 1; }
-
-/* 函数装饰器：接收源函数值，返回包装后的函数值 */
-comptime func add100(f: func(i32) -> i32):
-        func |f: func(i32) -> i32| (i32) -> i32 {
-    return func |f| w(x: i32): i32 { return f(x) + 100; };
+comptime func plus1(v: i32): i32 {
+    return v + 1;
 }
 
-[[add100]] func raw(x: i32): i32 { return x; }
+/* 函数装饰器：接收源函数值，返回包装后的函数值 */
+comptime func add100(f: func(i32) -> i32): func |f: func(i32) -> i32| (i32) -> i32 {
+    return func |f| w(x: i32): i32 {
+        return f(x) + 100;
+    };
+}
 
-comptime func add100m(f: func(*Decorated) -> i32):
-        func |f: func(*Decorated) -> i32| (*Decorated) -> i32 {
-    return func |f| w(self: *Decorated): i32 { return f(self) + 100; };
+[[add100]] func raw(x: i32): i32 {
+    return x;
+}
+
+comptime func add100m(f: func(*Decorated) -> i32): func |f: func(*Decorated) -> i32| (*Decorated) -> i32 {
+    return func |f| w(self: *Decorated): i32 {
+        return f(self) + 100;
+    };
 }
 
 struct Decorated {
     x: i32;
-    [[add100m]] func get(self: *Decorated): i32 { return self.x; }
-    func plain(self: *Decorated): i32 { return self.x + 1; }
+    [[add100m]] func get(self: *Decorated): i32 {
+        return self.x;
+    }
+    func plain(self: *Decorated): i32 {
+        return self.x + 1;
+    }
 }
 
 test "metadata.decoratorValue" {
@@ -47,13 +58,17 @@ struct Meta {
     a: i32;
     b: str;
 
-    func m(self: *Meta): i32 { return self.a; }
-    func n(self: *Meta): i32 { return self.a + 1; }
+    func m(self: *Meta): i32 {
+        return self.a;
+    }
+    func n(self: *Meta): i32 {
+        return self.a + 1;
+    }
 
     var static_prop: i32 = 5;
 }
 
-enum Kind: i32 { A = 1, B = 2, C = 3 }
+enum Kind: i32 {A = 1, B = 2, C = 3}
 
 test "metadata.reflect.type" {
     assert(Meta.name == "Meta");

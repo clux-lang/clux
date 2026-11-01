@@ -19,35 +19,45 @@ test "expressions.precedence" {
     assert(10 - 2 - 3 == 5); // 左结合
     assert(2 * 3 % 4 == 2);
     assert(1 << 2 + 1 == 8); // 移位低于加法？按规范：1 先加 2 再左移 1 位
-    assert((1 + 2) << 1 == 6);
-    assert((1 | (2 & 3)) == 3); // & 高于 |
+    assert(1 + 2 << 1 == 6);
+    assert((1 | 2 & 3) == 3); // & 高于 |
     assert(!false && true);
 }
 
 test "expressions.arithmetic" {
-    assert(7 / 2 == 3);   // 整数除法截断
+    assert(7 / 2 == 3); // 整数除法截断
     assert(7 % 3 == 1);
     assert(-7 / 2 == -3);
     assert(-7 % 2 == -1);
     assert(1.5f64 + 2.5f64 == 4.0f64);
     assert(3.0f64 / 2.0f64 == 1.5f64);
     var a: i32 = 5;
-    a += 3; assert(a == 8);
-    a -= 1; assert(a == 7);
-    a *= 2; assert(a == 14);
-    a /= 2; assert(a == 7);
-    a %= 4; assert(a == 3);
-    a = a << 2; assert(a == 12);
-    a = a >> 1; assert(a == 6);
-    a = a | 1; assert(a == 7);
-    a = a & 6; assert(a == 6);
-    a = a ^ 3; assert(a == 5);
+    a += 3;
+    assert(a == 8);
+    a -= 1;
+    assert(a == 7);
+    a *= 2;
+    assert(a == 14);
+    a /= 2;
+    assert(a == 7);
+    a %= 4;
+    assert(a == 3);
+    a = a << 2;
+    assert(a == 12);
+    a = a >> 1;
+    assert(a == 6);
+    a = a | 1;
+    assert(a == 7);
+    a = a & 6;
+    assert(a == 6);
+    a = a ^ 3;
+    assert(a == 5);
 }
 
 test "expressions.comparison" {
     assert(1 < 2 && 2 <= 2 && 3 > 2 && 2 >= 2);
     assert(1 != 2 && 2 == 2);
-    assert((1u32 < 2u32) == true);
+    assert(1u32 < 2u32 == true);
     assert("ab" == "ab");
     assert("ab" != "ac");
 }
@@ -72,7 +82,7 @@ test "expressions.ternary" {
     assert(b == 20);
     // 惰性：未选分支不求值
     calls = 0;
-    var c: i32 = true ? 1 : (bump() ? 2 : 3);
+    var c: i32 = true ? 1 : bump() ? 2 : 3;
     assert(c == 1);
     assert(calls == 0);
 }
@@ -91,7 +101,7 @@ test "expressions.casts" {
     var a: i32 = 300;
     assert(a as u8 == 44u8); // 截断
     var b: f64 = 2.9;
-    assert(b as i32 == 2);   // 向零截断
+    assert(b as i32 == 2); // 向零截断
     var c: i32 = -1;
     assert(c as u32 > 0u32);
     var d: bool = 1 == 1;
@@ -99,7 +109,10 @@ test "expressions.casts" {
 }
 
 test "expressions.construct" {
-    var p: Point = .Point{ .x = 1, .y = 2 };
+    var p: Point = .Point{
+        .x = 1,
+        .y = 2
+    };
     assert(p.x == 1);
     var q: Point = p;
     q.x = 9;
@@ -109,19 +122,30 @@ test "expressions.construct" {
     var a: [3]i32 = .[3]i32{ 5, 6, 7 };
     assert(a[1] == 6);
     // 匿名 struct 字面量交给形参类型
-    assert(sum_point(.{ .x = 2, .y = 3 }) == 5);
+    assert(sum_point(.{
+        .x = 2,
+        .y = 3
+    }) == 5);
 }
 
-struct Point { x: i32; y: i32 }
+struct Point {
+    x: i32;
+    y: i32;
+}
 
-func sum_point(p: Point): i32 { return p.x + p.y; }
+func sum_point(p: Point): i32 {
+    return p.x + p.y;
+}
 
 test "expressions.memberAndIndex" {
     var a: [3]i32 = .[3]i32{ 1, 2, 3 };
     a[0] = 10;
     assert(a[0] == 10);
     assert(a[1] == 2);
-    var p: Point = .Point{ .x = 1, .y = 2 };
+    var p: Point = .Point{
+        .x = 1,
+        .y = 2
+    };
     p.y = 20;
     assert(p.y == 20);
     var t: <i32, i32> = .{ 1, 2 };
@@ -180,11 +204,15 @@ test "expressions.isUnionTag" {
 
 union Shape { radius: f32; side: i32 }
 
-func plain(x: i32): i32 { return x + 1; }
+func plain(x: i32): i32 {
+    return x + 1;
+}
 
 test "expressions.closureCapture" {
     var base: i32 = 10;
-    var add = func |base| (x: i32): i32 { return base + x; };
+    var add = func |base|(x: i32): i32 {
+        return base + x;
+    };
     assert(add(5) == 15);
     base = 0; // 值捕获：闭包仍看到 10
     assert(add(5) == 15);
@@ -194,4 +222,6 @@ test "expressions.closureCapture" {
     assert(apply(plain, 2) == 3);
 }
 
-func apply(f: func(i32) -> i32, x: i32): i32 { return f(x); }
+func apply(f: func(i32) -> i32, x: i32): i32 {
+    return f(x);
+}

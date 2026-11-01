@@ -20,7 +20,10 @@ test "bitfields.layout" {
 }
 
 test "bitfields.constructAndRead" {
-    var f: Flags = .Flags{ .a = 1u32, .b = 2u32 };
+    var f: Flags = .Flags{
+        .a = 1u32,
+        .b = 2u32
+    };
     assert(f.a == 1u32);
     assert(f.b == 2u32);
     // 缺省字段补零
@@ -46,7 +49,11 @@ test "bitfields.writeAndTruncate" {
 }
 
 test "bitfields.crossWord" {
-    var w: Wide = .Wide{ .x = 1u8, .y = 2u8, .z = 3u8 };
+    var w: Wide = .Wide{
+        .x = 1u8,
+        .y = 2u8,
+        .z = 3u8
+    };
     assert(w.x == 1u8);
     assert(w.y == 2u8);
     assert(w.z == 3u8);
@@ -67,7 +74,10 @@ test "bitfields.pointerReceiver" {
 }
 
 test "bitfields.valueCopy" {
-    var a: Flags = .Flags{ .a = 2u32, .b = 3u32 };
+    var a: Flags = .Flags{
+        .a = 2u32,
+        .b = 3u32
+    };
     var b: Flags = a;
     b.a = 5u32;
     assert(a.a == 2u32); // 值语义：拷贝独立

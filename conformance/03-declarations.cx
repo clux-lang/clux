@@ -1,9 +1,10 @@
 // 03-declarations.cx — 声明（白皮书第 3 章）
 
 /* ---- 函数 ---- */
-
-func add(a: i32, b: i32): i32 { return a + b; }
-func no_ret(x: i32): void { }
+func add(a: i32, b: i32): i32 {
+    return a + b;
+}
+func no_ret(x: i32): void {}
 
 test "declarations.func" {
     assert(add(2, 3) == 5);
@@ -22,10 +23,14 @@ struct Counter {
         self.value = self.value + by;
         Counter::total = Counter::total + 1;
     }
-    func get(self: *Counter): i32 { return self.value; }
+    func get(self: *Counter): i32 {
+        return self.value;
+    }
 
     // 魔法方法：具名构造被禁用，`.Counter{ start }` = 零初始化 + __init__
-    func __init__(self: *Counter, start: i32): void { self.value = start; }
+    func __init__(self: *Counter, start: i32): void {
+        self.value = start;
+    }
 }
 
 test "declarations.struct" {
@@ -51,11 +56,13 @@ test "declarations.typeAlias" {
     assert(f(5) == 7);
 }
 
-func add2(x: i32): i32 { return x + 2; }
+func add2(x: i32): i32 {
+    return x + 2;
+}
 
 /* ---- enum：底层类型与变体值 ---- */
 
-enum Color: i32 { Red = 1, Green = 2, Blue = 7 }
+enum Color: i32 {Red = 1, Green = 2, Blue = 7}
 
 test "declarations.enum" {
     var c: Color = Color::Blue;
@@ -72,7 +79,10 @@ struct Vec2 {
     y: i32;
 
     func __add__(self: *Vec2, rhs: *Vec2): Vec2 {
-        return .Vec2{ .x = self.x + rhs.x, .y = self.y + rhs.y };
+        return .Vec2{
+            .x = self.x + rhs.x,
+            .y = self.y + rhs.y
+        };
     }
     func __eq__(self: *Vec2, rhs: *Vec2): bool {
         return self.x == rhs.x && self.y == rhs.y;
@@ -80,12 +90,20 @@ struct Vec2 {
     func __index__(self: *Vec2, i: i32): *i32 {
         return i == 0 ? self.x.& : self.y.&;
     }
-    func __len__(self: *Vec2): usize { return 2usize; }
+    func __len__(self: *Vec2): usize {
+        return 2usize;
+    }
 }
 
 test "declarations.magicOperators" {
-    var a: Vec2 = .Vec2{ .x = 1, .y = 2 };
-    var b: Vec2 = .Vec2{ .x = 10, .y = 20 };
+    var a: Vec2 = .Vec2{
+        .x = 1,
+        .y = 2
+    };
+    var b: Vec2 = .Vec2{
+        .x = 10,
+        .y = 20
+    };
     var s: Vec2 = a + b;
     assert(s.x == 11 && s.y == 22);
     assert(a == a);
@@ -103,7 +121,9 @@ interface Sized[T] {
 
 struct Box implements Sized[Box] {
     n: i32;
-    func size_of(self: *Box): usize { return sizeof(Box); }
+    func size_of(self: *Box): usize {
+        return sizeof(Box);
+    }
 }
 
 test "declarations.interface" {
@@ -115,13 +135,15 @@ test "declarations.interface" {
 
 struct Guard {
     id: i32;
-    func __dispose__(self: *Guard): void { Guard::disposed = Guard::disposed + 1; }
+    func __dispose__(self: *Guard): void {
+        Guard::disposed = Guard::disposed + 1;
+    }
     var disposed: i32 = 0;
 }
 
 test "declarations.using" {
     var before: i32 = Guard::disposed;
-    {
+     {
         using g = .Guard{ .id = 1 };
         assert(g.id == 1);
     }
@@ -132,7 +154,9 @@ test "declarations.using" {
 
 comptime var LIMIT = 3;
 
-comptime func triple(n: i32): i32 { return n * 3; }
+comptime func triple(n: i32): i32 {
+    return n * 3;
+}
 
 test "declarations.comptime" {
     assert(LIMIT == 3);
@@ -148,4 +172,6 @@ test "declarations.orderIndependent" {
     assert(later(1) == 2);
 }
 
-func later(x: i32): i32 { return x + 1; }
+func later(x: i32): i32 {
+    return x + 1;
+}
