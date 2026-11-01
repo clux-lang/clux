@@ -857,18 +857,25 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
         if (!ms) return val_void(sema);
         const type_t *sig = NULL;
         if (ms->is_generic) {
-          /* 泛型 `__init__[U]` 的构造还差最后一步：实例化要走
-             `sema_generic_instantiate_method_inferred`（绑定 struct 实例 + 方法
-             类型参数），并让构造节点直接 CALL 到实例 fid。先明确拒绝，避免产生
-             半个实例。同类型移动请用 `__init_copy__`。 */
-          char tn[64];
-          sema_type_name(core, tn, sizeof tn);
-          diag_error(sema->diag, sema_loc(sema, *node),
-                     "%s::__init__ is generic: generic construction is not "
-                     "supported yet; declare a non-generic '__init__' (e.g. "
-                     "taking '*T') and use '__init_copy__' for same-type moves",
-                     tn);
-          return val_void(sema);
+          /* 泛型 `__init__[U]`：按"调用点实参表"（`[接收者, args...]`）推断并
+             实例化方法（`sema_generic_instantiate_method_inferred` 同时绑定
+             struct 实例的类型参数与方法自身的类型参数），构造节点记下实例 fid，
+             C 后端直接 CALL 到该实例。 */
+          const sema_generic_instance_t *owner =
+              sema_generic_find_type_instance(sema, core);
+          const sema_generic_instance_t *inst = NULL;
+          value_t **sh = (value_t **)arena_calloc(sema->arena, nargs + 1,
+                                                  sizeof(*sh),
+                                                  ALIGNOF(max_align_t));
+          if (!sh) return val_void(sema);
+          const type_t *self_t = type_ptr_intern(sema->vm, core);
+          sh[0] = self_t ? value_make_shadow(sema->vm, self_t) : NULL;
+          if (!sh[0]) return val_void(sema);
+          for (size_t k = 0; k < nargs; k++) sh[k + 1] = shadows[k];
+          sig = sema_generic_instantiate_method_inferred(
+              sema, ms, owner, core->name, sh, nargs + 1, *node, &inst);
+          if (!sig || !inst) return val_void(sema);
+          n->init_fid = inst->fid;
         } else {
           sig = ms->type;
         }

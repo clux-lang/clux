@@ -389,3 +389,24 @@ test "magic.initCopy" {
     assert(c.ptr == nil);
     assert(d.ptr.!.* == 42);
 }
+
+/* ---- 泛型 __init__[U]：按实参推断实例化 ---- */
+
+struct PtrHold[T] {
+    ptr: ?*T;
+
+    func __init__[U](self: *PtrHold[T], src: U): void {
+        comptime if (U extends *T) {
+            self.ptr = src;
+        } else {
+            self.ptr = nil;
+        }
+    }
+}
+
+test "magic.initGeneric" {
+    var v: i32 = 11;
+    var h: PtrHold[i32] = .PtrHold[i32]{ v.& }; // U = *i32
+    assert(h.ptr != nil);
+    assert(h.ptr.!.* == 11);
+}

@@ -1557,11 +1557,24 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             if (!cty) return NULL;
             cir_type_t *ct = map_type(lc, cty);
             if (!ct) return NULL;
-            const sema_type_t *st =
-                sema_type_find(lc->sema, type_strip_quals(cty));
-            lower_method_t *m =
-                st ? find_method(lc, st->id, STRSLICE_LIT("__init__")) : NULL;
-            if (!m) {
+            /* 泛型 `__init__` 的构造记了实例 fid，直接用它算 C 名；
+               非泛型走方法表（名字 = `fn___method_<id>___init__`）。 */
+            const char *cname = NULL;
+            if (c->init_fid) {
+                sema_func_t *sf = sema_func_by_id(lc->sema, c->init_fid);
+                if (sf && sf->def && sf->def->kind == AST_FUNC_DEF) {
+                    ast_func_def_t *fd = (ast_func_def_t *)sf->def;
+                    cname = module_symbol(lc->arena, lc->unit, "fn_", fd->name);
+                }
+            } else {
+                const sema_type_t *st =
+                    sema_type_find(lc->sema, type_strip_quals(cty));
+                lower_method_t *m =
+                    st ? find_method(lc, st->id, STRSLICE_LIT("__init__"))
+                       : NULL;
+                if (m) cname = m->cname;
+            }
+            if (!cname) {
                 diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                            "c backend: method '__init__' has no materialized "
                            "instance for this construction");
@@ -1578,7 +1591,7 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             decl->type = ct;
             decl->expr = cir_expr_construct(lc->arena, ct, NULL);
             if (!decl->expr) return NULL;
-            cir_expr_t *call = cir_expr_call(lc->arena, m->cname, NULL);
+            cir_expr_t *call = cir_expr_call(lc->arena, cname, NULL);
             if (!call) return NULL;
             cir_expr_append_arg(call, cir_expr_ident(lc->arena, "NULL"));
             cir_expr_append_arg(

@@ -27,6 +27,8 @@ typedef struct {
     bool        init_checked;
     /* 同类型初始化：`({ T _t = (T){0}; _t.__init_copy__(&src); _t; })`。 */
     bool        copy_init;
+    /* 泛型 `__init__` 的实例 fid（0 = 非泛型，按名字查方法表）。 */
+    uint32_t    init_fid;
     bool        is_bitfield;
     uint32_t    bit_word_bits;
     uint32_t    bit_field_count;

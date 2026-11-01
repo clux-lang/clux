@@ -1198,3 +1198,50 @@ TEST(Magic, InitCopySignatureChecked) {
       "func main(): i32 { return 0; }\n",
       "must take its right-hand operand by pointer", "init_copy_sig");
 }
+
+/* 泛型 `__init__[U]`：`.T{args}` 按实参推断并实例化方法（同时绑定 struct 实例
+   的类型参数与方法自身的 U），构造节点直接 CALL 到实例。 */
+TEST(Magic, InitGenericConstructor) {
+  clux_expect_program_ok(
+      "struct PtrHolder[T] {\n"
+      "  ptr: ?*T;\n"
+      "  func __init__[U](self: *PtrHolder[T], src: U): void {\n"
+      "    comptime if (U extends *T) {\n"
+      "      self.ptr = src;\n"
+      "    } else {\n"
+      "      self.ptr = nil;\n"
+      "    }\n"
+      "  }\n"
+      "}\n"
+      "struct Pair[A, B] {\n"
+      "  a: A;\n"
+      "  b: B;\n"
+      "  func __init__[U](self: *Pair[A, B], x: U, y: B): void {\n"
+      "    self.b = y;\n"
+      "    comptime if (U extends A) { self.a = x; } else { self.a = y as A; }\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var v: i32 = 7;\n"
+      "  var h: PtrHolder[i32] = .PtrHolder[i32]{ v.& };\n"
+      "  if (h.ptr == nil || h.ptr.!.* != 7) { return 1; }\n"
+      "  var p: Pair[i32, i32] = .Pair[i32, i32]{ 3, 4 };\n"
+      "  if (p.a != 3 || p.b != 4) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "init_generic_ctor");
+}
+
+/* 泛型 `__init__` 的实参个数/类型不匹配时，构造点会报普通调用诊断。 */
+TEST(Magic, InitGenericConstructorArityChecked) {
+  clux_expect_reject(
+      "struct H[T] {\n"
+      "  v: T;\n"
+      "  func __init__[U](self: *H[T], a: U, b: U): void { self.v = a as T; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var h: H[i32] = .H[i32]{ 1 };\n"
+      "  return 0;\n"
+      "}\n",
+      "expects", "init_generic_arity");
+}
