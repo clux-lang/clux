@@ -225,11 +225,14 @@ test "magic.init" {
 test "magic.assignNotOnInit" {
     var c: Counter = .Counter{ 1 };
     var before: i32 = Counter::assigns;
-    var d: Counter = c; // 初始化：不派发 __assign__
-    assert(d.n == 1);
+    // 初始化走 __init__（不是 __assign__）。从同类型值初始化会因 __init__ 的
+    // 形参不匹配而被拒绝——这正是 move-only 类型禁止 copy 的位置（§3.15）。
+    var d: Counter = 2;
+    assert(d.n == 2);
     assert(Counter::assigns == before);
     d = c; // 赋值：派发 __assign__
     assert(Counter::assigns == before + 1);
+    assert(d.n == 1);
 }
 
 test "magic.dispose" {

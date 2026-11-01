@@ -450,22 +450,6 @@ ast_node_t *parse_primary(parser_t *p) {
         return node;
     }
 
-    /* move/clone 所有权原语：move(x) / clone(x)。
-       必须是括号形态（move x / clone x 无括号不合法），与 sizeof 同族。
-       返回 fatal：move 转移所有权（原对象 TDZ），clone 深拷贝。 */
-    if (check_keyword(p, "move") || check_keyword(p, "clone")) {
-        uint32_t mb = p->pos;
-        const token_t *op_tok = cur_token(p);
-        advance(p);
-        skip_trivia(p);
-        p->has_error = true;
-        return ast_error_new(
-            p->diag, p->tokens, p->arena, mb, p->pos,
-            "'%.*s' was removed with compile-time ownership; raw pointer "
-            "values are copied directly",
-            (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
-    }
-
     /* make 切片视图构造：make(pointer, len) → []T。不分配内存。 */
     if (check_keyword(p, "make")) {
         uint32_t mb = p->pos;
@@ -634,20 +618,7 @@ ast_node_t *parse_unary(parser_t *p) {
     else if (check_symbol(p, "?")) op_tok = cur_token(p);
     else if (check_keyword(p, "const"))     op_tok = cur_token(p);
     else if (check_keyword(p, "volatile"))  op_tok = cur_token(p);
-    else if (check_keyword(p, "own"))       op_tok = cur_token(p);
-    else if (check_keyword(p, "ref"))       op_tok = cur_token(p);
-    else if (check_keyword(p, "fatal"))     op_tok = cur_token(p);
 
-    /* 编译期所有权修饰符已移除：只保留裸 *T / []T。 */
-    if (op_tok && (token_is(op_tok, "own") || token_is(op_tok, "ref") ||
-                   token_is(op_tok, "fatal"))) {
-        p->has_error = true;
-        return ast_error_new(
-            p->diag, p->tokens, p->arena, tb, p->pos + 1,
-            "ownership modifier '%.*s' was removed; write '*T' / '[]T' "
-            "without an ownership prefix",
-            (int)token_strslice(op_tok).len, token_strslice(op_tok).ptr);
-    }
 
     /* sizeof/alignof/typeof：编译期运算符（SEMA→CTFE 桥梁）。
        sizeof/alignof 参数可为类型或表达式；typeof 参数为表达式。统一

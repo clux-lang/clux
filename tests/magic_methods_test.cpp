@@ -945,3 +945,88 @@ TEST(Magic, SliceBoundsMustBeUsize) {
       "  return 0;\n"
       "}\n", "must take two 'usize' bound parameters", "magic_slice_bounds");
 }
+/* 单参 __init__ 让类型在**所有**初始化位置都走构造：`var b: W = a;` 不再是
+   值拷贝，而是 `W a` → 形参不匹配 → 编译错误。这正是 move-only 类型
+   （Own/Fatal）禁止 copy 的机制。 */
+TEST(Magic, InitFromSameTypeRejected) {
+  clux_expect_reject(
+      "struct W {\n"
+      "  v: i32;\n"
+      "  func __init__(self: *W, n: i32): void { self.v = n; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: W = 1;\n"
+      "  var b: W = a;\n"
+      "  return b.v;\n"
+      "}\n",
+      "initialization always goes through __init__", "magic_init_copy_var");
+}
+
+TEST(Magic, InitFromSameTypeAsArgumentRejected) {
+  clux_expect_reject(
+      "struct W {\n"
+      "  v: i32;\n"
+      "  func __init__(self: *W, n: i32): void { self.v = n; }\n"
+      "}\n"
+      "func take(w: W): i32 { return w.v; }\n"
+      "func main(): i32 {\n"
+      "  var a: W = 1;\n"
+      "  return take(a);\n"
+      "}\n",
+      "initialization always goes through __init__", "magic_init_copy_arg");
+}
+
+TEST(Magic, InitFromSameTypeAsReturnRejected) {
+  clux_expect_reject(
+      "struct W {\n"
+      "  v: i32;\n"
+      "  func __init__(self: *W, n: i32): void { self.v = n; }\n"
+      "}\n"
+      "func pass(a: W): W { return a; }\n"
+      "func main(): i32 {\n"
+      "  var a: W = 1;\n"
+      "  return pass(a).v;\n"
+      "}\n",
+      "initialization always goes through __init__", "magic_init_copy_ret");
+}
+
+/* 构造函数结果（`.W{...}` / 函数返回的新值）不是"已有值位置"，初始化直接放入，
+   不受拦截。 */
+TEST(Magic, InitFromConstructStillWorks) {
+  clux_expect_program_ok(
+      "struct W {\n"
+      "  v: i32;\n"
+      "  func __init__(self: *W, n: i32): void { self.v = n; }\n"
+      "}\n"
+      "func make_w(n: i32): W { return .W{ n }; }\n"
+      "func main(): i32 {\n"
+      "  var a: W = .W{ 3 };\n"
+      "  var b: W = make_w(4);\n"
+      "  return (a.v + b.v) - 7;\n"
+      "}\n",
+      "magic_init_construct_ok");
+}
+
+/* 编译期所有权移除后，move / clone 不再是关键字：可作为普通标识符与方法名。 */
+TEST(Magic, MoveAndCloneAreOrdinaryIdentifiers) {
+  clux_expect_program_ok(
+      "struct H { p: ?*i32; }\n"
+      "struct Holder {\n"
+      "  h: H;\n"
+      "  func move(self: *Holder): H {\n"
+      "    var out: H = self.h;\n"
+      "    self.h.p = nil;\n"
+      "    return out;\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var move: i32 = 1;      // 变量名\n"
+      "  var clone: i32 = 2;     // 变量名\n"
+      "  var v: i32 = 3;\n"
+      "  var b: Holder = .Holder{ .h = .H{ .p = v.& } };\n"
+      "  var h: H = b.move();    // 方法名\n"
+      "  if (h.p == nil) { return 1; }\n"
+      "  return (move + clone) - 3;\n"
+      "}\n",
+      "move_and_clone_identifiers");
+}

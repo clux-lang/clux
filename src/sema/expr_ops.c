@@ -96,6 +96,21 @@
    local 't'`）——这是 foreach 展开（生成 `for (var __idx_N …)`）在闭包里
    报错的根因。符号的 own_scope 由 3b 定义点写入，引用点必然在其后（TDZ），
    因此此刻可用。 */
+
+/* 编译期所有权移除后留下的拼写（own/ref/fatal 类型前缀、move/clone 原语）。
+   它们不再是关键字；仅在未定义引用时给出针对性的"已移除"诊断。 */
+static bool sema_ownership_residue_name(strslice_t n) {
+  if (!n.ptr) return false;
+  if (n.len == 3 && (memcmp(n.ptr, "own", 3) == 0 ||
+                     memcmp(n.ptr, "ref", 3) == 0))
+    return true;
+  if (n.len == 4 && memcmp(n.ptr, "move", 4) == 0) return true;
+  if (n.len == 5 && (memcmp(n.ptr, "fatal", 5) == 0 ||
+                     memcmp(n.ptr, "clone", 5) == 0))
+    return true;
+  return false;
+}
+
 static bool func_own_symbol(sema_t *sema, strslice_t name,
                             sema_symbol_t *sym) {
   if (!sema->fn.local_func_base) return false;
@@ -339,6 +354,16 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
       }
       value_t *v = scope_lookup(sema->vm->current_scope, n->name);
       if (!v) {
+        /* 编译期所有权机制的残留拼写：这些名字已不再是关键字（可以作为普通
+           标识符使用），只有在**未定义**被引用时提示它属于已移除的机制。 */
+        if (sema_ownership_residue_name(n->name)) {
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "'%.*s' was removed with compile-time ownership; raw "
+                     "pointer values are copied directly (write '*T' / '[]T' "
+                     "without a prefix)",
+                     (int)n->name.len, n->name.ptr);
+          return val_void(sema);
+        }
         diag_error(sema->diag, sema_loc(sema, *node),
                    "undefined variable '%.*s'", (int)n->name.len, n->name.ptr);
         return val_void(sema);

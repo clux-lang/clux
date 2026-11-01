@@ -235,18 +235,6 @@ static ast_node_t *parse_pattern_atom(parser_t *p) {
         return n;
     }
 
-    /* 所有权前缀已从语言移除：own/ref/fatal 与 RC 的 share/weak 一律报错。 */
-    if (check_keyword(p, "own") || check_keyword(p, "ref") ||
-        check_keyword(p, "fatal") || check_keyword(p, "share") ||
-        check_keyword(p, "weak")) {
-        const token_t *bad = cur_token(p);
-        p->has_error = true;
-        return ast_error_new(
-            p->diag, p->tokens, p->arena, tb, p->pos + 1,
-            "'%.*s' was removed with compile-time ownership; write '*T' / "
-            "'[]T' without an ownership prefix",
-            (int)token_strslice(bad).len, token_strslice(bad).ptr);
-    }
 
     /* 裸切片 []<pat> */
     if (check_symbol(p, "[")) {

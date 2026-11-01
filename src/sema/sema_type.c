@@ -358,6 +358,30 @@ const sema_type_t *sema_type_by_id(sema_t *sema, uint32_t id) {
 static const type_t *sema_resolve_inner(sema_t *sema, ast_node_t *type_expr) {
   if (!sema || !type_expr) return NULL;
 
+  /* 编译期所有权机制已移除：`own *T` / `ref []T` / `fatal *T` 这几个前缀
+     现在只是普通标识符，落到类型位置时给出针对性的"已移除"诊断，而不是
+     笼统的 "unsupported type expression"。 */
+  {
+    strslice_t bad = STRSLICE_EMPTY;
+    ast_node_t *head = type_expr;
+    while (head && head->kind == AST_BINARY)
+      head = ((ast_binary_t *)head)->lhs;
+    if (head && head->kind == AST_IDENT) {
+      strslice_t nm = ((ast_ident_t *)head)->name;
+      if ((nm.len == 3 && (memcmp(nm.ptr, "own", 3) == 0 ||
+                           memcmp(nm.ptr, "ref", 3) == 0)) ||
+          (nm.len == 5 && memcmp(nm.ptr, "fatal", 5) == 0))
+        bad = nm;
+    }
+    if (bad.ptr) {
+      diag_error(sema->diag, sema_loc(sema, type_expr),
+                 "'%.*s' was removed with compile-time ownership; write '*T' / "
+                 "'[]T' without a prefix",
+                 (int)bad.len, bad.ptr);
+      return NULL;
+    }
+  }
+
   switch (type_expr->kind) {
     case AST_IDENT: {
       /* 类型名引用：i32/bool 等关键字类型名与用户类型名（IDENTIFIER）

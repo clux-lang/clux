@@ -215,6 +215,12 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
       value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv), ft,
                                              scope, &conv);
       if (conv) fv = nv;
+      /* __init__ 实参不匹配已在 sema_magic_init_convert 诊断过：不要再报
+         "cannot initialize struct field"，也不要强行 value_assign。 */
+      if (conv && fv && value_is_error(sema->vm, fv)) {
+        fields[i].type = ft;
+        continue;
+      }
       value_t *dst = value_make_shadow(sema->vm, ft);
       if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
         char tn[64], fn[64];
@@ -1004,6 +1010,8 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
             value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv),
                                                    ft, scope, &conv);
             if (conv) fv = nv;
+            /* __init__ 实参不匹配已在 sema_magic_init_convert 诊断：跳过第二次报错 */
+            if (conv && fv && value_is_error(sema->vm, fv)) continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];

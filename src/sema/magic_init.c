@@ -1,4 +1,5 @@
 #include "sema/magic.h"
+#include "diag/diagnostic.h"
 
 #include "parser/ast_block.h"
 #include "parser/ast_call.h"
@@ -243,6 +244,25 @@ ast_node_t *sema_magic_init_call(sema_t *s, const type_t *t, ast_node_t *args,
    类型（src_t）不是 T 且可隐式赋给 P 时，把 *slot 改写成
    `__clux_init_T(<原表达式>)`。返回新的 shadow（*converted = true）；
    不适用时返回 NULL/*converted = false。 */
+
+/* 初始化表达式是否是**已存在值的位置**（变量 / 成员 / 下标 / 解引用 / 解包）。
+   只有这种"把一个已有值复制进目标"的形态才受单参 __init__ 拦截：
+   构造（`.T{...}`）与函数调用返回的是新值，初始化就是把它放进去。 */
+static bool init_expr_is_place(ast_node_t *n) {
+  if (!n) return false;
+  switch (n->kind) {
+    case AST_IDENT:
+    case AST_MEMBER:
+    case AST_INDEX:
+    case AST_DEREF:
+    case AST_UNWRAP:
+    case AST_SCOPE_REF:
+      return true;
+    default:
+      return false;
+  }
+}
+
 value_t *sema_magic_init_convert(sema_t *sema, ast_node_t **slot,
                                  const type_t *src_t, const type_t *target_t,
                                  sema_scope_t *scope, bool *converted) {
@@ -255,13 +275,50 @@ value_t *sema_magic_init_convert(sema_t *sema, ast_node_t **slot,
     if (ms->is_generic) return NULL;
     if (func_type_param_count(ms->type) != 2) return NULL; /* 恰好 self + 1 */
     const type_t *src = src_t ? type_strip_quals(src_t) : NULL;
-    if (src && src == core) return NULL; /* 已经是 T：普通复制 */
+    /* 同类型但**不是**已有值的位置（显式构造 / 函数调用返回新值）：直接放入
+       目标变量，不再构造一次；反之（`var b = a`）要继续走 __init__ 检查，
+       这正是 move-only 类型禁止 copy 的位置。 */
+    if (src && src == core && !init_expr_is_place(*slot)) return NULL;
     const type_t *pt = func_type_param(ms->type, 1);
     if (!pt) return NULL;
     value_t *probe = value_make_shadow(sema->vm, src ? src : sema->vm->type_void);
     if (!probe) return NULL;
-    if (value_is_error(sema->vm, value_implicit_cast(sema->vm, probe, pt)))
-        return NULL;
+    if (value_is_error(sema->vm, value_implicit_cast(sema->vm, probe, pt))) {
+        /* 目标类型有单参 __init__：**所有**初始化位置（var / 实参 / 返回值 /
+           字段）都走构造，源表达式必须能转换成构造的第二个形参。源类型与
+           目标类型相同时也不退化成值拷贝——这正是 move-only 类型（Own /
+           Fatal 之类）靠在参数上拒绝自身类型来禁止 copy 的方式。 */
+        char tn[64], pn[64], sn[64];
+        sema_type_name(core, tn, sizeof tn);
+        sema_type_name(pt, pn, sizeof pn);
+        if (src) sema_type_name(src, sn, sizeof sn);
+        else snprintf(sn, sizeof sn, "void");
+        location_t loc = sema_loc(sema, *slot);
+        /* 合成节点（多遍 walk 里被改写的中间形态）不重复报：只对用户源码
+           位置诊断一次。 */
+        if ((*slot)->is_generated || loc.begin.line == 0) {
+            if (converted) *converted = true;
+            return value_make_error(sema->vm, "bad __init__ argument");
+        }
+        /* sema 会把同一段函数体走多遍：同一位置的同类诊断只报一次。 */
+        bool dup = false;
+        const diagnostic_t *items = diag_items(sema->diag);
+        size_t nitems = diag_count(sema->diag);
+        for (size_t i = 0; i < nitems; i++)
+          if (items[i].message && items[i].loc.begin.line == loc.begin.line &&
+              items[i].loc.begin.column == loc.begin.column &&
+              strncmp(items[i].message, "cannot initialize ", 19) == 0) {
+            dup = true;
+            break;
+          }
+        if (!dup)
+          diag_error(sema->diag, loc,
+                     "cannot initialize %s with %s: %s::__init__ expects %s "
+                     "(initialization always goes through __init__)",
+                     tn, sn, tn, pn);
+        if (converted) *converted = true;
+        return value_make_error(sema->vm, "bad __init__ argument");
+    }
 
     /* `.T{ x }` 的展开：调用生成的构造函数（参数是原表达式节点）。 */
     ast_node_t *arg = *slot;

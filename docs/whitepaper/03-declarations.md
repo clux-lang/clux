@@ -376,8 +376,8 @@ test "Suite.Name" {
 | `len(a)` | `__len__` | `(self: *const T) -> usize` |
 | `a.x` / `a.m()` / `a.*` 的回退 | `__deref__` | `(self: *const T) -> R`；`R` 必须可解引用 |
 | `using a = e;` 的作用域退出 | `__dispose__` | `(self: *T) -> void`（宽松约定，不是析构；见 §4.12.1） |
-| `a = b;`（赋值） | `__assign__` | `(self: *T, rhs: *const R) -> void`；初始化（`var`/参数/构造/返回值）不派发 |
-| `.T{args}`（构造） | `__init__` | `(self: *T, ...任意参数...) -> void`；有它时禁用具名构造，`.T{args}` = 零初始化 + init；单参数时隐式构造用于 var 初始化/实参/返回值/字段初始化 |
+| `a = b;`（赋值） | `__assign__` | `(self: *T, rhs: *const R) -> void`；**初始化**（`var` / 实参 / 返回值 / 字段）不派发，见 `__init__` |
+| `.T{args}`（构造） | `__init__` | `(self: *T, ...任意参数...) -> void`；有它时禁用具名构造，`.T{args}` = 零初始化 + init。**只有恰好一个非 `self` 形参时**，所有初始化位置（`var a: T = x`、实参、返回值、字段初始化）都改写成 `.T{x}`；源表达式是**已有值的位置**（变量 / 成员 / 下标 / 解引用 / 解包）时也走构造，因此从 `T` 值初始化会因形参不匹配而报错——这就是 move-only 类型禁止 copy 的手段 |
 
 ### 3.15.3 运算符
 
@@ -444,6 +444,23 @@ var mid: []i32 = w[1:3];   // ⇒ w.__slice__(1, 3)
   （`.T{ .field = ... }`）构造。`__init__` 只有一个非 `self` 参数时，该类型还
   支持从该参数**隐式构造**：`var t: T = 5;`、实参、返回值、字段初始化都会插入
   构造调用。
+- 初始化**总是**走 `__init__`（而不是值拷贝）：源表达式是已有值的位置（变量 /
+  成员 / 下标 / 解引用 / 解包）时同样插入构造，所以 `var b: T = a;`（`a: T`）会
+  因为 `a` 不能转换成 `__init__` 的形参而报错。构造表达式（`.T{...}`）与函数
+  调用返回的新值不受影响，直接放入目标。**move-only 类型**就建立在这条规则上：
+
+  ```clux
+  struct Fatal[T] {
+      ptr: ?*T;
+      func __init__(self: *Fatal[T], p: *T): void { self.ptr = p; }
+      func __assign__(self: *Fatal[T], other: *Fatal[T]): void {
+          self.ptr = other.ptr;
+          other.ptr = nil;          // 赋值 = move
+      }
+  }
+  // var a: Fatal[T] = b;   // 错误：Fatal 不能从 Fatal 初始化（不可 copy）
+  // a = b;                 // 合法：__assign__ 把 b 置 nil（move）
+  ```
 
 ### 3.15.6 限制与诊断
 

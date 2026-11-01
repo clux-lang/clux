@@ -539,7 +539,10 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
         value_t *nv = sema_magic_init_convert(sema, &vd->init,
                                                value_type(init), sym->type,
                                                scope, &conv);
-        if (conv) { if (nv) init = nv; else init_bad = true; }
+        if (conv) {
+          if (nv && !value_is_error(sema->vm, nv)) init = nv;
+          else init_bad = true; /* __init__ 实参不匹配：已在魔法构造处诊断 */
+        }
       }
       if (!init_bad && sym->type) {
         value_t *dst = value_make_shadow(sema->vm, sym->type);

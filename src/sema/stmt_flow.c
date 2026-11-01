@@ -123,7 +123,7 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                              sema->fn.return_type, scope,
                                              &conv);
       if (conv) {
-        if (nv) v = nv;
+        if (nv && !value_is_error(sema->vm, nv)) v = nv;
         else v_bad = true;
       }
     }
