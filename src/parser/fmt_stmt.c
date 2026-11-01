@@ -136,7 +136,9 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
                 break;
             }
             if (v->is_comptime) sb_str(&f->sb, "comptime ");
-            sb_str(&f->sb, "var ");
+            /* `using` 与 `var` 同形，但语义不同（作用域退出时调用 __dispose__）：
+               fmt 只解析不脱糖，必须把关键字原样留在源码里。 */
+            sb_str(&f->sb, v->is_using ? "using " : "var ");
             sb_put(&f->sb, v->name.ptr, v->name.len);
             if (v->type_expr) {
                 sb_str(&f->sb, ": ");
@@ -300,8 +302,10 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
                 break;
             }
 
-            /* 字段 + 嵌入按**合并序列**（嵌入的 field_index 决定插入位次）。
-             * members 追加到末尾。统一收集到 all_items 数组，一次遍历多行渲染。 */
+            /* 字段 + 嵌入按**合并序列**（嵌入的 field_index 决定插入位次），
+             * 再把 members（静态属性 / 方法）按**源码位置**归并进去——成员在
+             * 源码里可以写在字段之间（`var total: i32 = 0;` 常放在最前面），
+             * 统一追加到末尾会打乱顺序并把成员前的注释留在原地。 */
             size_t nfs = 0;
             for (ast_node_t *fn = s->fields; fn; fn = fn->next) nfs++;
 
@@ -321,8 +325,19 @@ void render_stmt(fmt_t *f, ast_node_t *node) {
                     if (fn && nall < cap) all_items[nall++] = fn;
                 }
             }
-            for (ast_node_t *m = s->members; m && nall < cap; m = m->next)
-                all_items[nall++] = m;
+            for (ast_node_t *m = s->members; m && nall < cap; m = m->next) {
+                /* 归并：插到第一个 tok_begin 更大的项之前 */
+                size_t at = nall;
+                for (size_t k = 0; k < nall; k++) {
+                    if (all_items[k]->tok_begin > m->tok_begin) {
+                        at = k;
+                        break;
+                    }
+                }
+                for (size_t k = nall; k > at; k--) all_items[k] = all_items[k - 1];
+                all_items[at] = m;
+                nall++;
+            }
 
             f->indent++;
             uint32_t prev_end = node->tok_begin + 1;  /* '{' 之后 */
@@ -771,8 +786,8 @@ void render_captures(fmt_t *f, ast_node_t *captures) {
     for (ast_node_t *c = captures; c; c = c->next) {
         if (!first) sb_str(&f->sb, ", ");
         ast_var_def_t *v = (ast_var_def_t *)c;
-        if (v->type_expr || v->init) {
-            /* 括号 VALUE DECL：(name[:type] = init) */
+        if (v->init) {
+            /* 闭包**值**字面量的捕获项：(name[:type] = init)，捕获的是值 */
             sb_ch(&f->sb, '(');
             sb_put(&f->sb, v->name.ptr, v->name.len);
             if (v->type_expr) {
@@ -783,7 +798,12 @@ void render_captures(fmt_t *f, ast_node_t *captures) {
             render_expr(f, v->init);
             sb_ch(&f->sb, ')');
         } else {
+            /* 闭包**类型**的捕获项：`name[: Type]`（有类型无初始化器） */
             sb_put(&f->sb, v->name.ptr, v->name.len);
+            if (v->type_expr) {
+                sb_str(&f->sb, ": ");
+                render_expr(f, v->type_expr);
+            }
         }
         first = false;
     }

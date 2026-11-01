@@ -169,6 +169,11 @@ static void emit_comment(fmt_t *f, size_t i, const token_t *t, bool inline_,
     if (token_get_kind(t) == TOKEN_TYPE_COMMENT) {
         sb_ch(&f->sb, '\n');
         f->at_line_start = true;
+    } else if (!inline_) {
+        /* 独立行的块注释同样以换行结束：否则下一条声明会被粘在块注释的结束
+           标记后面（同一个 token 里紧接 func），格式化结果也不稳定。 */
+        sb_ch(&f->sb, '\n');
+        f->at_line_start = true;
     }
 }
 

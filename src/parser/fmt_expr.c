@@ -416,7 +416,14 @@ void render_expr(fmt_t *f, ast_node_t *node) {
         }
         case AST_FUNC_TYPE: {
             ast_func_type_t *ft = (ast_func_type_t *)node;
-            sb_str(&f->sb, "func");
+            sb_str(&f->sb, ft->is_c_abi ? "cfunc" : "func");
+            /* 闭包类型的捕获列表 `|a: T, b: U|` 是类型的一部分：丢掉它会把
+               `func |f| (i32) -> i32` 退化成普通函数类型（语义改变）。 */
+            if (ft->captures) {
+                sb_ch(&f->sb, ' ');
+                render_captures(f, ft->captures);
+                sb_ch(&f->sb, ' ');
+            }
             sb_ch(&f->sb, '(');
             render_comma_list(f, ft->params);
             sb_ch(&f->sb, ')');
@@ -490,7 +497,18 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             ast_call_t *c = (ast_call_t *)node;
             render_expr(f, c->callee);
             sb_ch(&f->sb, '(');
-            render_comma_list(f, c->args);
+            /* `assert(cond)` 在 parser 里折叠成 `assert(cond, <条件源码>)`：
+               尾部那个合成字符串不是用户写的实参，回显时跳过（否则会印出
+               条件里的运算符 token，如 `assert(a == b, ==)`）。 */
+            bool first = true;
+            for (ast_node_t *a = c->args; a; a = a->next) {
+                if (c->callee->kind == AST_IDENT && a->kind == AST_STRING_LIT &&
+                    ((ast_string_lit_t *)a)->synthesized && !a->next)
+                    break;
+                if (!first) sb_str(&f->sb, ", ");
+                render_expr(f, a);
+                first = false;
+            }
             sb_ch(&f->sb, ')');
             break;
         }

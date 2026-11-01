@@ -1209,6 +1209,7 @@ static void rewrite_assert_call(parser_t *p, ast_call_t *call) {
                                          arg->tok_end);
     if (!lit) return;
     ((ast_string_lit_t *)lit)->text = strslice_from_bytes(buf, n);
+    ((ast_string_lit_t *)lit)->synthesized = true;
     lit->next = NULL;
     arg->next = lit;
     call->args_last = lit;

@@ -11,6 +11,9 @@ extern "C" {
 typedef struct {
     ast_node_t  base;
     strslice_t  text;        /* escape 展开后的文本，arena 分配 */
+    /* parser 合成的诊断文本（目前只有 `assert(cond)` 折叠出的条件源码）：
+       源码回显时必须跳过——它的 tok_begin 指向条件里的运算符而不是字符串。 */
+    bool        synthesized;
 } ast_string_lit_t;
 
 static inline ast_node_t *ast_string_lit_new(arena_t *arena,

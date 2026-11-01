@@ -958,3 +958,84 @@ TEST(Fmt, UsizeSuffixPreserved) {
     EXPECT_EQ(out.find("123u64"), std::string::npos) << out;
     EXPECT_EQ(out, fmt(out.c_str()));
 }
+/* assert 的诊断文本是 parser 合成的实参（= 条件的源码文本，tok_begin 指向条件里
+   的运算符）。fmt 必须把它当作不存在：否则会回显成 `assert(a == b, ==)`。
+   用户自己写的两参形式（带自定义消息）必须原样保留。 */
+TEST(Fmt, AssertDoesNotPrintSynthesizedMessage) {
+    std::string out = fmt(
+        "func f(a:i32,b:i32):bool{return a==b;}\n"
+        "func main():void{\n"
+        "assert(1+1==2);\n"
+        "assert(true);\n"
+        "assert(1 < 2 && 3 > 2);\n"
+        "assert(1+1==2, \"custom\");\n"
+        "static_assert(sizeof(i32)==4usize,\"i32\");\n"
+        "}\n");
+    EXPECT_EQ(out,
+              "func f(a: i32, b: i32): bool {\n"
+              "    return a == b;\n"
+              "}\n"
+              "func main(): void {\n"
+              "    assert(1 + 1 == 2);\n"
+              "    assert(true);\n"
+              "    assert(1 < 2 && 3 > 2);\n"
+              "    assert(1 + 1 == 2, \"custom\");\n"
+              "    static_assert(sizeof(i32) == 4usize, \"i32\");\n"
+              "}\n");
+    /* 幂等 */
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
+/* 结构体成员在源码里可以写在字段之间（静态属性常放最前面）。fmt 必须保持
+   源码顺序，并保留成员上的尾随注释——统一把 members 追加到末尾会打乱顺序、
+   把注释留在原地。 */
+TEST(Fmt, StructMemberOrderAndCommentKept) {
+    std::string out = fmt(
+        "struct S{\n"
+        "var total:i32=0; // 类型级计数\n"
+        "value:i32;\n"
+        "func get(self:*S):i32{return self.value;}\n"
+        "}\n");
+    EXPECT_NE(out.find("var total: i32 = 0; // 类型级计数"),
+              std::string::npos);
+    EXPECT_LT(out.find("var total"), out.find("value:"));
+    EXPECT_LT(out.find("value:"), out.find("func get"));
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
+
+/* `using` 与 `var` 同形但不是 `var`：fmt 只解析不脱糖，必须留住关键字
+   （写成 var 会悄悄丢掉作用域退出时的 __dispose__ 调用）。 */
+TEST(Fmt, UsingKeywordKept) {
+    std::string out = fmt(
+        "func main():void{\n"
+        "{\n"
+        "using g = .Guard{ .id = 1 };\n"
+        "}\n"
+        "}\n");
+    EXPECT_NE(out.find("using g = .Guard{ .id = 1 };"), std::string::npos);
+    EXPECT_EQ(out.find("var g"), std::string::npos);
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
+
+/* 闭包类型的捕获列表 `|name: Type|` 是类型的一部分：丢掉它会把
+   `func |f| (i32) -> i32` 退化成普通函数类型（语义改变）。 */
+TEST(Fmt, ClosureTypeCapturesKept) {
+    std::string out = fmt(
+        "func wrap(f:func(i32)->i32):func |f: func(i32) -> i32| (i32) -> i32{\n"
+        "return func |f| w(x:i32):i32{return f(x)+1;};\n"
+        "}\n");
+    EXPECT_NE(out.find("func |f: func(i32) -> i32| (i32) -> i32"),
+              std::string::npos);
+    EXPECT_NE(out.find("func |f| w(x: i32): i32"), std::string::npos);
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
+
+/* C 函数指针类型 `cfunc(...)` 与 clux 函数值类型 `func(...)` 互不兼容，
+   fmt 必须按 is_c_abi 回显关键字。 */
+TEST(Fmt, CFuncTypeKeywordKept) {
+    std::string out = fmt(
+        "type Cb = cfunc(i32) -> void;\n"
+        "type Fn = func(i32) -> void;\n");
+    EXPECT_NE(out.find("cfunc(i32) -> void"), std::string::npos);
+    EXPECT_NE(out.find("func(i32) -> void"), std::string::npos);
+    EXPECT_EQ(fmt(out.c_str()), out);
+}
