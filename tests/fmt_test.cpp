@@ -1039,3 +1039,22 @@ TEST(Fmt, CFuncTypeKeywordKept) {
     EXPECT_NE(out.find("func(i32) -> void"), std::string::npos);
     EXPECT_EQ(fmt(out.c_str()), out);
 }
+/* 后缀族（调用 / 成员 / 下标）的接收者是低优先级表达式时必须保括号：
+   `(a + b).v` 掉括号会变成 `a + b.v`（语义改变）。 */
+TEST(Fmt, PostfixReceiverKeepsParens) {
+    std::string out = fmt(
+        "struct P { v: i32; }\n"
+        "func f(): i32 { return 0; }\n"
+        "func main(): i32 {\n"
+        "var a: P = .P{ .v = 1 };\n"
+        "var b: P = .P{ .v = 2 };\n"
+        "var x: i32 = (a.v + b.v).v;\n"
+        "var y: i32 = (a.v > 0 ? a : b).v;\n"
+        "var z: i32 = (a.v > 0 ? f : f)();\n"
+        "return x + y + z;\n"
+        "}\n");
+    EXPECT_NE(out.find("(a.v + b.v).v"), std::string::npos);
+    EXPECT_NE(out.find("(a.v > 0 ? a : b).v"), std::string::npos);
+    EXPECT_NE(out.find("(a.v > 0 ? f : f)()"), std::string::npos);
+    EXPECT_EQ(fmt(out.c_str()), out);
+}

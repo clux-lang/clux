@@ -495,7 +495,9 @@ void render_expr(fmt_t *f, ast_node_t *node) {
         }
         case AST_CALL: {
             ast_call_t *c = (ast_call_t *)node;
-            render_expr(f, c->callee);
+            /* 调用是后缀族（绑定力 26）：接收者优先级更低时必须加括号，
+               否则 `(a + b).m()` 会退化成 `a + b.m()`（语义改变）。 */
+            render_expr_paren(f, c->callee, node, /*child_on_rhs=*/false, 26);
             sb_ch(&f->sb, '(');
             /* `assert(cond)` 在 parser 里折叠成 `assert(cond, <条件源码>)`：
                尾部那个合成字符串不是用户写的实参，回显时跳过（否则会印出
@@ -514,14 +516,15 @@ void render_expr(fmt_t *f, ast_node_t *node) {
         }
         case AST_MEMBER: {
             ast_member_t *m = (ast_member_t *)node;
-            render_expr(f, m->object);
+            /* 后缀族（26）：`(a + b).v` 的对象必须保留括号 */
+            render_expr_paren(f, m->object, node, /*child_on_rhs=*/false, 26);
             sb_ch(&f->sb, '.');
             sb_put(&f->sb, m->field.ptr, m->field.len);
             break;
         }
         case AST_INDEX: {
             ast_index_t *ix = (ast_index_t *)node;
-            render_expr(f, ix->object);
+            render_expr_paren(f, ix->object, node, /*child_on_rhs=*/false, 26);
             sb_ch(&f->sb, '[');
             render_comma_list(f, ix->indices);
             sb_ch(&f->sb, ']');
