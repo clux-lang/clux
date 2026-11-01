@@ -79,7 +79,7 @@ static ast_node_t *ctfe_reparse_type(sema_t *sema, uint32_t tok_begin) {
   parser_t *p = parser_create(sema->vm->alloc, sema->arena, sema->tokens);
   if (!p) return NULL;
   p->pos = tok_begin;
-  ast_node_t *te = parse_scope_annotated_type(p);
+  ast_node_t *te = parse_type_prefix(p);
   if (te && te->kind == AST_ERROR) te = NULL;
   parser_destroy(&p);
   return te;

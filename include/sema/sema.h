@@ -8,7 +8,6 @@
 #include "parser/ast_node.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_scope_annot.h"
 #include "parser/ast_slice_type.h"
 #include "parser/parse_utils.h"
 #include "parser/type_qual.h"

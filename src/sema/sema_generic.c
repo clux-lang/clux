@@ -27,7 +27,6 @@
 #include "parser/ast_program.h"
 #include "parser/ast_pack_type.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_scope_annot.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_tuple.h"
 #include "parser/ast_var_def.h"
@@ -1156,8 +1155,6 @@ static const type_t *instantiate_func_impl(
         src->base.is_exported = false;
         src->name = decor_src_name;
         src->captures = fn->captures;
-        src->scope_annot_names = fn->scope_annot_names;
-        src->scope_annot_count = fn->scope_annot_count;
         src->params = fn->params;
         src->params_last = fn->params_last;
         src->return_expr = fn->return_expr;
@@ -2536,9 +2533,6 @@ static void infer_pattern(sema_t *sema, infer_t *b, ast_node_t *pat,
         (void)resolve_type_expr(sema, pat);
         return;
     }
-    case AST_SCOPE_ANNOT:
-        infer_pattern(sema, b, ((ast_scope_annot_t *)pat)->sub, actual, site);
-        return;
     case AST_CONST:
         infer_pattern(sema, b, ((ast_const_t *)pat)->sub,
                       type_strip_quals(actual), site);

@@ -63,7 +63,6 @@
 #include "parser/ast_ptr.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/vec.h"

@@ -47,7 +47,7 @@ static ast_node_t *parse_param(parser_t *p) {
 
     /* 类型标注：:type（必须，类型即表达式，普通表达式解析）。
        min_prec=1 限定：不消费逗号/右括号（调用者处理）。
-       parse_scope_annotated_type 额外处理前导作用域标注（m3-design §5）。 */
+       parse_type_prefix 额外处理前导作用域标注（m3-design §5）。 */
     if (!expect_symbol(p, ":")) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
                              "expected ':' and type after parameter name");
@@ -83,7 +83,7 @@ static ast_node_t *parse_param(parser_t *p) {
         return node;
     }
 
-    ast_node_t *type_expr = parse_scope_annotated_type(p);
+    ast_node_t *type_expr = parse_type_prefix(p);
     if (!type_expr || type_expr->kind == AST_ERROR) {
         if (!type_expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -113,7 +113,7 @@ static ast_node_t *parse_func_param_item(parser_t *p) {
             return parse_param(p);
         }
     }
-    return parse_scope_annotated_type(p);
+    return parse_type_prefix(p);
     return parse_unary(p);
 }
 
@@ -281,21 +281,6 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     }
     skip_trivia(p);
 
-    /* 闭包作用域标注（m3-design §9）：func '<x> |...| —— 标注在 func 后、
-       | 前。捕获 ref/opaque 时强制标注（视同 struct ref 字段）。'< 是
-       lexer 合成的复合 SYMBOL token（仅在有捕获列表时有意义）。 */
-    strslice_t *scope_annot_names = NULL;
-    size_t scope_annot_count = 0;
-    if (check_symbol(p, "'<")) {
-        advance(p); /* 消费 '< */
-        skip_trivia(p);
-        scope_annot_names = parse_scope_annotation(p, &scope_annot_count);
-        if (!scope_annot_names) {
-            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "invalid scope annotation on closure");
-        }
-    }
-
     /* 捕获列表：func |a,(b:i32 = c+d)| name(...) —— 紧跟 func 之后。
        仅函数定义/字面量（AST_FUNC_DEF）允许；函数类型（'->' 分支）拒绝，
        在 '->' 分支处检查。空列表 || 合法（返回 NULL = 无捕获）。 */
@@ -459,11 +444,6 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
                                      "initializer");
             }
         }
-        /* 作用域标注不属于函数类型（标注约束闭包捕获，类型无捕获） */
-        if (scope_annot_count > 0) {
-            return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                                 "function type cannot have a scope annotation");
-        }
         /* 参数必须是纯类型表达式（无具名） */
         for (ast_node_t *pr = params; pr; pr = pr->next) {
             if (pr->kind == AST_VAR_DEF) {
@@ -473,7 +453,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         }
         advance(p);
         skip_trivia(p);
-        ast_node_t *return_type = parse_scope_annotated_type(p);
+        ast_node_t *return_type = parse_type_prefix(p);
         if (!return_type || return_type->kind == AST_ERROR) {
             if (!return_type) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -510,7 +490,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         }
         skip_trivia(p);
 
-        ast_node_t *return_expr = parse_scope_annotated_type(p);
+        ast_node_t *return_expr = parse_type_prefix(p);
         if (!return_expr || return_expr->kind == AST_ERROR) {
             if (!return_expr) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -540,8 +520,6 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
         ast_func_def_t *fn = (ast_func_def_t *)node;
         fn->name        = name; /* 可为空（匿名）或为显示名（不绑作用域） */
         fn->captures    = captures;
-        fn->scope_annot_names = scope_annot_names;
-        fn->scope_annot_count = scope_annot_count;
         fn->params      = params;
         fn->params_last = params_last;
         fn->return_expr = return_expr;
@@ -571,7 +549,7 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     }
     skip_trivia(p);
 
-    ast_node_t *return_expr = parse_scope_annotated_type(p);
+    ast_node_t *return_expr = parse_type_prefix(p);
     if (!return_expr || return_expr->kind == AST_ERROR) {
         if (!return_expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -601,8 +579,6 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     ast_func_def_t *fn = (ast_func_def_t *)node;
     fn->name        = name;
     fn->captures    = captures;
-    fn->scope_annot_names = scope_annot_names;
-    fn->scope_annot_count = scope_annot_count;
     fn->params      = params;
     fn->params_last = params_last;
     fn->return_expr = return_expr;
@@ -726,7 +702,7 @@ ast_node_t *parse_extern_var(parser_t *p, uint32_t tb) {
                              "expected ':' and type in extern var declaration");
     }
     skip_trivia(p);
-    ast_node_t *type_expr = parse_scope_annotated_type(p);
+    ast_node_t *type_expr = parse_type_prefix(p);
     if (!type_expr || type_expr->kind == AST_ERROR) {
         if (!type_expr) {
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

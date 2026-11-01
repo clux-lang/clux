@@ -127,7 +127,6 @@ typedef enum {
     AST_PTR,             /* *T 指针类型（类型即表达式） */
     AST_ADDR,            /* 后置取地址 x.&（由值得指针） */
     AST_DEREF,           /* 后置解引用取值 r.*（指针得值，GET） */
-    AST_SCOPE_ANNOT,     /* '<a,b,c> type 作用域标注（' 前导，位置信息非类型） */
 
     /* --- M4 切片（m4-design §1/§2/§4）---
      * 切片类型 `[]T`（胖指针 {ptr,len}）、make(pointer,len) 视图构造、

@@ -20,7 +20,7 @@ extern "C" {
  *
  * 实现口径：**复用闭包节点**（ast_func_def_t）而不是另造一套捕获/函数体
  * 表示——
- *   - closure->captures / scope_annot_names / body 就是闭包那套字段
+ *   - closure->captures / body 就是闭包那套字段
  *     （捕获可见性、'<a,b> 作用域标注、生命周期规则逐字沿用）；
  *   - closure->params 为 NULL（无参）、closure->return_expr 为 NULL
  *     （void，与"省略 :void"一致）；body 是 AST_BLOCK。

@@ -227,13 +227,16 @@ comptime if (LIMIT > 0) {
     ...
 }
 
-comptime foreach (var x of [1, 2, 3]) {
+var seq: [3]i32 = .[3]i32{1, 2, 3};
+comptime foreach (var x of seq) {
     ...
 }
 ```
 
 - `comptime if` 在编译期选择分支；未选分支不参与运行期代码。
 - `comptime foreach` 在编译期展开；序列长度和元素必须是编译期已知值。
+  序列必须是**已有的编译期值**（局部/全局变量、参数等）：clux 没有数组字面量，
+  所以不能直接写 `comptime foreach (var x of [1, 2, 3])`，先绑定到变量再迭代。
 
 ## 4.16 编译期断言
 

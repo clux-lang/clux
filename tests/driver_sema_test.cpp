@@ -324,8 +324,7 @@ TEST(Driver, RunFileMethodCallArgLiteralWideningAccepted) {
       "method_arg_widen");
 }
 
-TEST(Driver, RunFileMethodCallArgDuckStructAccepted) {
-  /* 结构兼容的不同具名 struct 可以传给形参（与赋值/普通调用同一规则）：
+TEST(Driver, RunFileMethodCallArgDuckStructAccepted) {  /* 结构兼容的不同具名 struct 可以传给形参（与赋值/普通调用同一规则）：
      sema 放行 + 后端按形参类型重解释（此前会在 C 侧撞 incompatible type）。 */
   clux_expect_program_ok(
       "struct A { x: i32; }\n"
@@ -340,4 +339,43 @@ TEST(Driver, RunFileMethodCallArgDuckStructAccepted) {
       "  return 0;\n"
       "}\n",
       "method_arg_duck");
+}
+
+TEST(Driver, RunFileStaticPropertyAssignRejected) {
+  /* `self.total = ...`（total 是静态属性）必须给出诊断——此前**无限递归**
+     （`__deref__` 回退原地重写同一目标）→ 编译器栈溢出。 */
+  clux_expect_reject(
+      "struct C {\n"
+      "  var total: i32 = 0;\n"
+      "  value: i32;\n"
+      "  func bump(self: *C): void { self.total = self.total + 1; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c: C = .C{ .value = 1 };\n"
+      "  c.bump();\n"
+      "  return 0;\n"
+      "}\n",
+      "static properties are assigned as `T::total`", "static_prop_assign");
+}
+
+TEST(Driver, RunFileStaticPropertyReadRejected) {
+  clux_expect_reject(
+      "struct C {\n"
+      "  var total: i32 = 0;\n"
+      "  func read(self: *C): i32 { return self.total; }\n"
+      "}\n"
+      "func main(): i32 { var c: C = .C{}; return c.read(); }\n",
+      "static properties are accessed as `T::total`", "static_prop_read");
+}
+
+TEST(Driver, ScopeAnnotationSyntaxRemovedRejected) {
+  /* 作用域标注 `'<a,b> T` 已随编译期所有权体系删除：必须给出明确迁移提示，
+     而不是"字符字面量只能有一个字符"。 */
+  clux_expect_reject(
+      "func f(p: i32): i32 {\n"
+      "  var t: '<a> i32 = p;\n"
+      "  return t;\n"
+      "}\n"
+      "func main(): i32 { return f(1) - 1; }\n",
+      "scope annotations", "scope_annot_removed");
 }

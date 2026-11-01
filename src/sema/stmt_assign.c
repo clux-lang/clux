@@ -925,43 +925,71 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       } else {
         idx = struct_type_find_field(bt, m->field);
         if (idx < 0) {
-          /* `__deref__` 回退：直接字段不存在 ⇒ 目标改为
-             `(a.__deref__()).field`，重走字段赋值（写穿要求链最终落在
-             指针上，值返回会由 lvalue 检查拒绝）。 */
-          {
-            char mbuf[256];
-            size_t ml = m->field.len < sizeof mbuf - 1 ? m->field.len
-                                                       : sizeof mbuf - 1;
-            memcpy(mbuf, m->field.ptr, ml);
-            mbuf[ml] = '\0';
-            ast_node_t *new_recv = NULL;
-            int drc = sema_magic_deref_rewrite(
-                sema, &new_recv, bt, m->object, mbuf, as->target->tok_begin,
-                as->target->tok_end);
-            if (drc < 0) {
-              sema_expr(sema, &as->value, scope);
-              return;
-            }
-            if (drc > 0) {
-              ast_node_t *m2 = ast_member_new(sema->arena,
-                                              as->target->tok_begin,
-                                              as->target->tok_end);
-              if (!m2) {
+          /* 不是字段，但可能是**其它成员**（`var` 静态属性 / `func` 方法）：
+             与读取路径（expr_access.c）一致地给出针对性诊断。这类成员**不能**
+             当左值，落到下面的 `__deref__` 回退会原地重写出同一个目标
+             （`sema_magic_deref_rewrite` 见到成员存在就报告"展开完成"），
+             于是无限递归 → 栈溢出。 */
+          strslice_t *mem =
+              sema_struct_member_lookup(sema, bt, m->field, as->target);
+          if (mem) {
+            sema_symbol_t *msym = sema_lookup(sema->global_scope, *mem);
+            bool is_func = msym && msym->kind == SEMA_SYM_FUNC;
+            diag_error(
+                sema->diag, sema_loc(sema, &as->base),
+                is_func ? "'%.*s' is a method of struct '%.*s', not a field "
+                          "(call it as `t.%.*s(...)`; a method cannot be "
+                          "assigned)"
+                        : "'%.*s' is a member of struct '%.*s', not a field "
+                          "(static properties are assigned as `T::%.*s`)",
+                (int)m->field.len, m->field.ptr, (int)bt->name.len,
+                bt->name.ptr, (int)m->field.len, m->field.ptr);
+            bad = true;
+          } else if (as->target->is_generated) {
+            /* 防御：已经因 `__deref__` 重写过一次，不再重写（只可能原地打转）。 */
+            diag_error(sema->diag, sema_loc(sema, &as->base),
+                       "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
+                       bt->name.ptr, (int)m->field.len, m->field.ptr);
+            bad = true;
+          } else {
+            /* `__deref__` 回退：直接字段不存在 ⇒ 目标改为
+               `(a.__deref__()).field`，重走字段赋值（写穿要求链最终落在
+               指针上，值返回会由 lvalue 检查拒绝）。 */
+            {
+              char mbuf[256];
+              size_t ml = m->field.len < sizeof mbuf - 1 ? m->field.len
+                                                         : sizeof mbuf - 1;
+              memcpy(mbuf, m->field.ptr, ml);
+              mbuf[ml] = '\0';
+              ast_node_t *new_recv = NULL;
+              int drc = sema_magic_deref_rewrite(
+                  sema, &new_recv, bt, m->object, mbuf, as->target->tok_begin,
+                  as->target->tok_end);
+              if (drc < 0) {
                 sema_expr(sema, &as->value, scope);
                 return;
               }
-              ((ast_member_t *)m2)->object = new_recv;
-              ((ast_member_t *)m2)->field = m->field;
-              m2->is_generated = true;
-              as->target = m2;
-              shadow_assign_member(sema, as, scope);
-              return;
+              if (drc > 0) {
+                ast_node_t *m2 = ast_member_new(sema->arena,
+                                                as->target->tok_begin,
+                                                as->target->tok_end);
+                if (!m2) {
+                  sema_expr(sema, &as->value, scope);
+                  return;
+                }
+                ((ast_member_t *)m2)->object = new_recv;
+                ((ast_member_t *)m2)->field = m->field;
+                m2->is_generated = true;
+                as->target = m2;
+                shadow_assign_member(sema, as, scope);
+                return;
+              }
             }
+            diag_error(sema->diag, sema_loc(sema, &as->base),
+                       "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
+                       bt->name.ptr, (int)m->field.len, m->field.ptr);
+            bad = true;
           }
-          diag_error(sema->diag, sema_loc(sema, &as->base),
-                     "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
-                     bt->name.ptr, (int)m->field.len, m->field.ptr);
-          bad = true;
         } else {
           ft = struct_type_field(bt, (size_t)idx)->type;
         }

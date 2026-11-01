@@ -89,7 +89,7 @@ ast_node_t *parse_generic_params(parser_t *p, ast_generic_params_t *out) {
             advance(p);
             skip_trivia(p);
 
-            type_expr = parse_scope_annotated_type(p);
+            type_expr = parse_type_prefix(p);
             if (!type_expr || type_expr->kind == AST_ERROR) {
                 if (!type_expr) {
                     return ast_error_new(p->diag, p->tokens, p->arena, pb,

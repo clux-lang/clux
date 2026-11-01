@@ -64,7 +64,6 @@
 #include "parser/ast_ptr.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/vec.h"
@@ -620,25 +619,13 @@ void render_expr(fmt_t *f, ast_node_t *node) {
             sb_ch(&f->sb, ')');
             break;
         }
-        /* 指针类型 *T、作用域标注 '<a,b> T。
+        /* 指针类型 *T 等原子类型。
            同样此前**无渲染分支 → 静默丢弃**（`var p: ref *i32 = ...` 的类型
            会被整个吃掉）。 */
         case AST_PTR: {
             ast_ptr_t *pt = (ast_ptr_t *)node;
             sb_ch(&f->sb, '*');
             render_expr(f, pt->base_type);
-            break;
-        }
-        case AST_SCOPE_ANNOT: {
-            /* '<a,b> T（'*' 记 global，仅首元素合法） */
-            ast_scope_annot_t *sa = (ast_scope_annot_t *)node;
-            sb_str(&f->sb, "'<");
-            for (size_t i = 0; i < sa->count; i++) {
-                if (i > 0) sb_ch(&f->sb, ',');
-                sb_put(&f->sb, sa->names[i].ptr, sa->names[i].len);
-            }
-            sb_str(&f->sb, "> ");
-            render_expr(f, sa->sub);
             break;
         }
         default: {

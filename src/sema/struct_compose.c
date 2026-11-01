@@ -10,7 +10,6 @@
 #include "parser/ast_option.h"
 #include "parser/ast_program.h"
 #include "parser/ast_ptr.h"
-#include "parser/ast_scope_annot.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_struct_embed.h"
@@ -238,9 +237,6 @@ static bool slot_blocked_by_unsealed(sema_t *sema, ast_node_t *slot,
         if (slot_blocked_by_unsealed(sema, et, false, true, out)) return true;
       return false;
     }
-    case AST_SCOPE_ANNOT:
-      return slot_blocked_by_unsealed(sema, ((const ast_scope_annot_t *)slot)->sub,
-                                      behind_ind, wrapped, out);
     default:
       return false; /* sizeof/typeof/内建标量：交给正常解析路径 */
   }
@@ -289,8 +285,6 @@ static bool slot_names_type_symbol(sema_t *sema, const ast_node_t *slot) {
     nm = ((const ast_ident_t *)slot)->name;
   } else if (slot->kind == AST_TYPE_REF) {
     nm = ((const ast_type_ref_t *)slot)->name;
-  } else if (slot->kind == AST_SCOPE_ANNOT) {
-    return slot_names_type_symbol(sema, ((const ast_scope_annot_t *)slot)->sub);
   } else {
     return false;
   }

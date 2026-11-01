@@ -64,7 +64,6 @@
 #include "parser/ast_ptr.h"
 #include "parser/ast_addr.h"
 #include "parser/ast_deref.h"
-#include "parser/ast_scope_annot.h"
 #include "core/allocator.h"
 #include "core/arena.h"
 #include "core/vec.h"
@@ -142,11 +141,7 @@ void render_func_def(fmt_t *f, ast_node_t *node) {
         sb_put(&f->sb, fn->lib_name.ptr, fn->lib_name.len);
         sb_str(&f->sb, "::");
     }
-    if (fn->scope_annot_count > 0) {
-        render_scope_annot_names(f, fn->scope_annot_names,
-                                 fn->scope_annot_count);
-        sb_ch(&f->sb, ' ');
-    }
+
     if (fn->captures) {
         render_captures(f, fn->captures);
         sb_ch(&f->sb, ' ');
@@ -174,18 +169,13 @@ void render_func_def(fmt_t *f, ast_node_t *node) {
     }
 }
 
-/* 函数字面量（表达式位置）：func ['<a>] [|caps|] [name](params): type { body }
+/* 函数字面量（表达式位置）：func [|caps|] [name](params): type { body }
  * name 可选（无 name = 匿名）；有 name 时仅作显示名（不绑定符号），
- * 格式化须保留以维持源码语义；作用域标注同样必须保留（见
- * render_scope_annot_names 的说明）。 */
+ * 格式化须保留以维持源码语义。 */
 void render_func_literal(fmt_t *f, ast_node_t *node) {
     ast_func_def_t *fn = (ast_func_def_t *)node;
     sb_str(&f->sb, "func");
-    if (fn->scope_annot_count > 0) {
-        sb_ch(&f->sb, ' ');
-        render_scope_annot_names(f, fn->scope_annot_names,
-                                 fn->scope_annot_count);
-    }
+
     if (fn->captures) {
         sb_ch(&f->sb, ' ');
         render_captures(f, fn->captures);

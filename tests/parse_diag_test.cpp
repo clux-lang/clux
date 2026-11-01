@@ -111,9 +111,6 @@ TEST(ParseDiag, EverySyntaxErrorReportsExactlyOnce) {
       {"var_initializer",
        "func main(): i32 { var x: i32 1; return 0; }\n",
        "expected '=' and initializer in var definition"},
-      {"scope_annotation",
-       "func f(p: '< i32): i32 { return 0; }\n",
-       "invalid scope annotation"},
       {"extern_func",
        "extern lib libc from \"*\";\n"
        "extern func libc::printf(format: str, ...): i32;\n"

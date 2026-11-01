@@ -1,6 +1,5 @@
 #include "parser/ast_foreach.h"
 #include "parser/ast_block.h"
-#include "parser/ast_scope_annot.h"
 #include "parser/parse_expr.h"
 #include "parser/parse_utils.h"
 #include "parser/ast_error.h"
@@ -58,7 +57,7 @@ ast_node_t *parse_foreach(parser_t *p) {
                                  "a type annotation requires 'var' in 'foreach' "
                                  "(write `foreach (var a: T of b)`)");
         }
-        type_expr = parse_scope_annotated_type(p);
+        type_expr = parse_type_prefix(p);
         if (!type_expr || type_expr->kind == AST_ERROR) {
             if (!type_expr) {
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

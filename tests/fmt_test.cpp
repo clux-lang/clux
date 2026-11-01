@@ -774,8 +774,8 @@ TEST(FmtRegression, IdempotentAcrossDeclKinds) {
 /* ================================================================
  * M3 语法渲染（此前**静默丢弃**：这些 AST kind 在 render_expr 里没有
  * case，落到 `default: break` → `clux format` 直接把表达式/类型吃掉，
- * 属数据损坏）。覆盖：后缀取址 `.&`、后缀解引用 `.*`、所有权指针类型
- * `*T`、`make(p, n)`、作用域标注 `'<a,b> T`。
+ * 属数据损坏）。覆盖：后缀取址 `.&`、后缀解引用 `.*`、裸指针类型
+ * `*T`、`make(p, n)`。
  * 关键点：后缀操作数里优先级更低者必须保住括号——`(a as *i32).*`
  * 若渲染成 `a as *i32.*` 会被重解析成 `a as *(i32.*)`。
  * ================================================================ */
@@ -795,18 +795,18 @@ TEST(FmtRegression, PostfixAddrAndDerefAreRendered) {
               "}\n");
 }
 
-TEST(FmtRegression, PtrTypeMakeAndScopeAnnotAreRendered) {
+TEST(FmtRegression, PtrTypeAndMakeAreRendered) {
     std::string out = fmt(
         "func main():void{\n"
         "var x:i32=1;\n"
         "var p:*i32=x.&;\n"
-        "var t:'<a,b> i32=1;\n"
+        "var t:i32=1;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): void {\n"
               "    var x: i32 = 1;\n"
               "    var p: *i32 = x.&;\n"
-              "    var t: '<a,b> i32 = 1;\n"
+              "    var t: i32 = 1;\n"
               "}\n");
 }
 
@@ -819,8 +819,7 @@ TEST(FmtRegression, MakeAndPtrSyntaxIsIdempotentAndNotDropped) {
         "    var p: *i32 = x.&;\n"
         "    var s: []i32 = make(p, 2);\n"
         "    var c: Cell = .{ .v = p.* };\n"
-        "    var g: '<*> i32 = 1;\n"
-        "    return c.v + s[0] + g;\n"
+        "    return c.v + s[0];\n"
         "}\n";
     std::string once = fmt(src);
     std::string twice = fmt(once.c_str());
@@ -831,7 +830,6 @@ TEST(FmtRegression, MakeAndPtrSyntaxIsIdempotentAndNotDropped) {
     EXPECT_NE(once.find("make(p, 2)"), std::string::npos);
     EXPECT_NE(once.find("x.&"), std::string::npos);
     EXPECT_NE(once.find(".*"), std::string::npos);
-    EXPECT_NE(once.find("'<*> i32"), std::string::npos);
 }
 
 /* 后缀解包 `a.!`：parser 按"`.` 后看单字符 symbol"识别，AST 里的 op token 只是
@@ -852,16 +850,16 @@ TEST(Fmt, UnwrapKeepsLeadingDot) {
     EXPECT_NE(once.find("n.next.!.v"), std::string::npos) << once;
 }
 
-/* defer 语句：`defer ['<a>] [|caps|] { body }`。
+/* defer 语句：`defer [|caps|] { body }`。
  * fmt 曾经对未识别的语句 kind 落到 `default: render_expr(...); ';'`——defer 若
  * 缺分支会被**静默吃掉**（AST_DEFER 不是表达式，render_expr 无渲染 → 整条语句
- * 消失 + 凭空多一个分号），属数据损坏。本测试锁定：捕获列表与作用域标注完整
- * 回显、`defer {}` 紧凑、`defer ||` 归一为省略形态、幂等。 */
-TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
+ * 消失 + 凭空多一个分号），属数据损坏。本测试锁定：捕获列表完整回显、
+ * `defer {}` 紧凑、`defer ||` 归一为省略形态、幂等。 */
+TEST(Fmt, DeferStmtRendersCaptures) {
     std::string out = fmt(
         "func main():i32{\n"
         "var a:i32=1;var b:i32=2;\n"
-        "defer '<*> |(r: *i32 = a.&), b| {\n"
+        "defer |(r: *i32 = a.&), b| {\n"
         "var c:i32=a+b;\n"
         "}\n"
         "defer || {}\n"
@@ -872,7 +870,7 @@ TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
               "func main(): i32 {\n"
               "    var a: i32 = 1;\n"
               "    var b: i32 = 2;\n"
-              "    defer '<*> |(r: *i32 = a.&), b| {\n"
+              "    defer |(r: *i32 = a.&), b| {\n"
               "        var c: i32 = a + b;\n"
               "    }\n"
               "    defer {}\n"
@@ -887,7 +885,7 @@ TEST(Fmt, DeferStmtRendersCapturesAndAnnotation) {
     std::string twice = fmt(out.c_str());
     std::string thrice = fmt(twice.c_str());
     EXPECT_EQ(twice, thrice);
-    EXPECT_NE(out.find("defer '<*>"), std::string::npos) << out;
+    EXPECT_NE(out.find("defer |(r: *i32 = a.&), b|"), std::string::npos) << out;
     EXPECT_EQ(out.find("defer||"), std::string::npos) << out;
 }
 
@@ -911,39 +909,37 @@ TEST(Fmt, DeferEmptyCapturesNormalized) {
     EXPECT_EQ(out, fmt(out.c_str()));
 }
 
-/* 闭包作用域标注 `func '<a,b> |...|`：曾**完全没有渲染分支**（fn->
- * scope_annot_names 是 AST 之外的独立字段），格式化后标注消失 → 捕获 的
- * 闭包产物不再能编译（静默数据损坏）。命名函数与函数字面量都要回显。 */
-TEST(Fmt, ClosureScopeAnnotationPreserved) {
+/* 闭包捕获列表 `func |...|`：命名函数与函数字面量都要完整回显捕获列表。 */
+TEST(Fmt, ClosureCaptureListPreserved) {
     std::string out = fmt(
         "func main():i32{\n"
         "var a:i32=1;\n"
-        "var f=func '<*> |(r: *i32 = a.&)| ():i32{return r.*;};\n"
-        "var g=func '<*> |a| add(x:i32):i32{return a+x;};\n"
+        "var f=func |(r: *i32 = a.&)| ():i32{return r.*;};\n"
+        "var g=func |a| add(x:i32):i32{return a+x;};\n"
         "return 0;\n"
         "}\n");
     EXPECT_EQ(out,
               "func main(): i32 {\n"
               "    var a: i32 = 1;\n"
-              "    var f = func '<*> |(r: *i32 = a.&)|(): i32 {\n"
+              "    var f = func |(r: *i32 = a.&)|(): i32 {\n"
               "        return r.*;\n"
               "    };\n"
-              "    var g = func '<*> |a| add(x: i32): i32 {\n"
+              "    var g = func |a| add(x: i32): i32 {\n"
               "        return a + x;\n"
               "    };\n"
               "    return 0;\n"
               "}\n");
     EXPECT_EQ(out, fmt(out.c_str()));
-    EXPECT_NE(out.find("'<*>"), std::string::npos) << out;
+    EXPECT_NE(out.find("|(r: *i32 = a.&)|"), std::string::npos) << out;
 
-    /* 局部函数语句（func '<x> |c| name(...): T { ... }）同样保留标注 */
+    /* 局部函数语句（func |c| name(...): T { ... }）同样保留捕获列表 */
     std::string out2 = fmt(
         "func main():i32{\n"
         "var a:i32=1;\n"
-        "func '<*> |a| local(v: i32): i32 { return a + v; }\n"
+        "func |a| local(v: i32): i32 { return a + v; }\n"
         "return local(1);\n"
         "}\n");
-    EXPECT_NE(out2.find("func '<*> |a| local(v: i32): i32"), std::string::npos)
+    EXPECT_NE(out2.find("func |a| local(v: i32): i32"), std::string::npos)
         << out2;
     EXPECT_EQ(out2, fmt(out2.c_str()));
 }

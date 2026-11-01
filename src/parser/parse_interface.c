@@ -67,7 +67,7 @@ static ast_node_t *parse_iface_func(parser_t *p, uint32_t tb) {
     if (check_symbol(p, ":")) {
         advance(p);
         skip_trivia(p);
-        ret = parse_scope_annotated_type(p);
+        ret = parse_type_prefix(p);
         if (!ret || ret->kind == AST_ERROR) {
             if (!ret)
                 return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
@@ -108,7 +108,7 @@ static ast_node_t *parse_iface_var(parser_t *p, uint32_t tb) {
                              "interface attribute requires an explicit type");
     }
     skip_trivia(p);
-    ast_node_t *type = parse_scope_annotated_type(p);
+    ast_node_t *type = parse_type_prefix(p);
     if (!type || type->kind == AST_ERROR) {
         if (!type)
             return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,

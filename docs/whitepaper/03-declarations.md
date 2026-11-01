@@ -56,18 +56,12 @@ func <name> [<generic-params>] ( <params> ) : <return-type> { <block> }
 var f = func(x: i32): i32 { return x + 1; };
 ```
 
-- 带捕获的闭包：
+- 带捕获的闭包（`|...|` 是捕获列表）：
 
 ```clux
 var f = func |(offset: i32 = 10)| add(x: i32): i32 {
     return x + offset;
 };
-```
-
-- 闭包作用域标注写在 `func` 后、捕获列表前：
-
-```clux
-var f = func '<owner> |r| get(): '<owner> *i32 { return r; };
 ```
 
 - 泛型函数：

@@ -432,12 +432,12 @@ TEST(DriverM4, SliceOutOfBoundsLowGTHigh) {
   std::remove(path.c_str());
 }
 
-/* ---- §9.1 作用域标注 ---- */
+/* ---- §9.1 切片返回 ---- */
 
-TEST(DriverM4, ScopeAnnotationSliceReturn) {
-  /* §9.1 作用域标注：返回 []T 标注 '<a，借用来源是参数 a */
+TEST(DriverM4, SliceReturn) {
+  /* 返回 []T：切片是视图，指向调用方数组的存储 */
   std::string path = write_temp_file(
-      "func sub(a: []i32): '<a> []i32 {\n"
+      "func sub(a: []i32): []i32 {\n"
       "  return a[0:2];\n"
       "}\n"
       "func main(): i32 {\n"
@@ -457,12 +457,12 @@ TEST(DriverM4, ScopeAnnotationSliceReturn) {
 /* ---- §9.3 闭包捕获切片 ---- */
 
 TEST(DriverM4, ClosureCaptureRefSlice) {
-  /* §9.3 闭包捕获 []T：须标注 '<s>，闭包内可读 */
+  /* §9.3 闭包捕获 []T：闭包内可读 */
   std::string path = write_temp_file(
       "func main(): i32 {\n"
       "  var arr: [3]i32 = .[3]i32{7, 8, 9};\n"
       "  var s: []i32 = arr[:];\n"
-      "  var f = func '<s> |s| sum(arg: []i32): i32 {\n"
+      "  var f = func |s| sum(arg: []i32): i32 {\n"
       "    return arg[0] + arg[1] + arg[2];\n"
       "  };\n"
       "  var r: i32 = f(s);\n"

@@ -48,7 +48,6 @@ void render_pattern(fmt_t *f, ast_node_t *pat);
 void render_node(fmt_t *f, ast_node_t *node);
 void render_param(fmt_t *f, ast_node_t *n);
 void render_program(fmt_t *f, ast_node_t *node);
-void render_scope_annot_names(fmt_t *f, const strslice_t *names, size_t count);
 void render_semi_list(fmt_t *f, ast_node_t *head);
 void render_stmt(fmt_t *f, ast_node_t *node);
 void sb_ch(sb_t *sb, char c);

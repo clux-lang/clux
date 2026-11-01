@@ -650,7 +650,15 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
                 *ok = false;
                 return NULL;
             }
-            st->expr = lower_expr(lc, a->value);
+            cir_expr_t *dv = lower_expr(lc, a->value);
+            if (!dv) {
+                *ok = false;
+                return NULL;
+            }
+            /* 丢弃表达式的值：显式转 void（生成 `((void)(expr))`），否则产物
+               是裸表达式语句 → clang 报 `-Wunused-value`。 */
+            cir_type_t *dvt = cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
+            st->expr = dvt ? cir_expr_cast(lc->arena, dvt, dv) : dv;
             if (!st->expr) {
                 *ok = false;
                 return NULL;

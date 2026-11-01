@@ -158,6 +158,13 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lower_local_t *save_locals = lc->locals;
     lower_local_fn_t *save_local_fns = lc->local_fns;
     lower_capture_t *save_caps = lc->captures;
+    /* 闭包体是**独立函数**：登记表必须换新，但不能把外层函数的 defer 登记
+       丢掉——restore 时要用。此前只保存了 locals/local_fns/captures，
+       `lc->defers` / `lc->cleanup` 被置 NULL 后没有恢复，于是"函数里有闭包
+       字面量 + defer"时，退出点的 `__defer_N()` 找不到 body，被降成一次
+       普通调用 → C 侧 `clux_..._fn___defer_0` 没有定义。 */
+    lower_defer_t *save_defers = lc->defers;
+    cir_stmt_t *save_cleanup = lc->cleanup;
     strslice_t orig = fn->name;
     unsigned seq = lc->fnlit_seq++;
     char nb[64];
@@ -283,6 +290,8 @@ cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn) {
     lc->locals = save_locals;
     lc->local_fns = save_local_fns;
     lc->captures = save_caps;
+    lc->defers = save_defers;
+    lc->cleanup = save_cleanup;
     lc->cur_self_name = save_self;
     lc->cur_fn_cname = save_fc;
     lc->cur_env_param = save_ep;

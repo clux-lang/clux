@@ -2562,3 +2562,59 @@ TEST(CBackend, BuildClosureInStructClone) {
   ASSERT_TRUE(std::filesystem::exists(exe));
   EXPECT_EQ(run_exe(exe.string()), 0);
 }
+
+/* 闭包字面量与 defer 在**同一函数**内：闭包 lowering 是独立函数，必须
+   保存/恢复外层函数的 defer 登记表，否则退出点的 `__defer_N()` 找不到
+   body，被降成普通调用 → `clux_..._fn___defer_0` 没有 C 定义。 */
+TEST(CBackend, DeferAndClosureLiteralInSameFunction) {
+  const std::string src = write_temp_file(
+      "func main(): i32 {\n"
+      "  defer {\n"
+      "    _ = 1;\n"
+      "  }\n"
+      "  var base: i32 = 2;\n"
+      "  var adder = func |base| add(x: i32): i32 {\n"
+      "    return base + x;\n"
+      "  };\n"
+      "  if (adder(3) != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_defer_and_closure");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path exe = default_exe(src);
+  std::error_code ec;
+  std::filesystem::remove(exe, ec);
+  std::string err;
+  EXPECT_EQ(run_build(src, exe.string(), &err), 0) << err;
+  ASSERT_TRUE(std::filesystem::exists(exe));
+  EXPECT_EQ(run_exe(exe.string()), 0);
+}
+
+/* `_ = expr` 必须显式转 void（`((void)(expr))`）：裸表达式语句会触发
+   clang 的 `-Wunused-value`。 */
+TEST(CBackend, DiscardStatementCastsToVoid) {
+  const std::string src = write_temp_file(
+      "func f(): i32 { return 3; }\n"
+      "func main(): i32 {\n"
+      "  _ = f();\n"
+      "  return 0;\n"
+      "}\n",
+      "cbackend_discard_void");
+  ASSERT_FALSE(src.empty());
+  std::filesystem::path c_path(src);
+  c_path.replace_extension(".c");
+  std::filesystem::path h_path(src);
+  h_path.replace_extension(".h");
+  std::error_code ec;
+  std::filesystem::remove(c_path, ec);
+  std::filesystem::remove(h_path, ec);
+  EXPECT_EQ(run_cli({"build", std::filesystem::absolute(src).string(),
+                     "--emit-c"}),
+            0);
+  ASSERT_TRUE(std::filesystem::exists(c_path)) << c_path.string();
+  const std::string text = slurp(c_path.string());
+  EXPECT_NE(text.find("((void)("), std::string::npos)
+      << "discard statement should be cast to void";
+  std::filesystem::remove(c_path, ec);
+  std::filesystem::remove(h_path, ec);
+}

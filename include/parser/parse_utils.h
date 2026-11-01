@@ -93,33 +93,20 @@ strslice_t token_strslice(const token_t *t);
 /* ---- 类型标注解析 ---- */
 
 /**
- * 解析类型标注（类型即表达式），并处理前导作用域标注。
- * 作用域标注：'<a,b,c> type（' 前导，lexer 仅在 ' 后紧跟 '<' 时产出
- * ' SYMBOL token，故 check_symbol(p, "'") 即标注起点；否则字符字面量
- * 是 CHARACTER token，天然区分）。
- * 命中标注 → 解析 '<a,b,c>' 集合并包裹被标注类型（递归处理嵌套标注）；
- * 未命中 → 直接 parse_expr_prec(p, 1)（不消费赋值/逗号/右括号）。
- * 用于 var 定义/参数/返回类型的类型标注处（m3-design §5）。
+ * 解析类型标注（类型即表达式），处理前导 `*` / `[]` / `?` 前缀。
+ * 未命中前缀 → 直接 parse_expr_prec(p, 1)（不消费赋值/逗号/右括号）。
+ * 用于 var 定义/参数/返回类型的类型标注处。
  */
-ast_node_t *parse_scope_annotated_type(parser_t *p);
+ast_node_t *parse_type_prefix(parser_t *p);
 
 /**
  * 解析一个裸指针/切片/可选类型原子（raw pointer 模式）。
  *
- * 与 parse_scope_annotated_type 的区别：只吃类型原子，不消费 `extends` /
+ * 与 parse_type_prefix 的区别：只吃类型原子，不消费 `extends` /
  * 三元 / 二元运算符。用于 `[N]T` 的 T、struct 字段、make 元素类型、
  * 泛型实参等位置，避免 `[2]i32 extends ...` 把 `extends` 吃进元素类型。
  */
 ast_node_t *parse_raw_type_atom(parser_t *p);
-
-/**
- * 解析作用域标注集合 '<a,b,c>'（不包裹被标注类型）。
- * '< 已由调用点确认（lexer 合成 "'<" 复合 SYMBOL token），消费该复合
- * token 后循环解析标识符（'*' 记 global），直到 '>'。
- * 返回 names 数组（arena 分配）与 count；失败返回 NULL（诊断已报）。
- * 用于闭包捕获列表前的作用域标注（func '<x> |...|，m3-design §9）。
- */
-strslice_t *parse_scope_annotation(parser_t *p, size_t *out_count);
 
 /* ---- 字面量解析工具 ---- */
 

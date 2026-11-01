@@ -125,63 +125,6 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
     cv->resolved_type = cs->type;
   }
 
-  /* §9.3 ref/opaque 捕获强制标注（m3-design §9）：闭包是隐式 struct，
-     捕获 ref/opaque 视同 struct ref 字段——闭包整体必须带作用域标注
-     func '<x> |...|（同 §5 强制规则 B）。无标注 → 编译错误。
-     有标注 → 逃逸检查：闭包定义作用域须嵌套于标注锚点作用域。 */
-  bool has_ref_capture = false;
-  for (ast_node_t *c = fn->captures; c; c = c->next) {
-    ast_var_def_t *cv = (ast_var_def_t *)c;
-    sema_symbol_t *cs = sema_scope_find_local(fscope, cv->name);
-    if (!cs || !cs->type) continue;
-    if (type_kind_of(cs->type) == TYPE_KIND_OPAQUE) {
-      has_ref_capture = true;
-      break;
-    }
-  }
-  if (has_ref_capture && fn->scope_annot_count == 0) {
-    diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
-               "closure capturing ref/opaque must declare a scope annotation "
-               "(e.g. func '<x> |...| or defer '<x> |...|)");
-  }
-  /* §9.3 逃逸检查：有标注时，闭包定义作用域（outer）须嵌套于每个锚点。
-     复用 stmt.c 的 annot_anchor_scope / scope_within——但它们是 static，
-     此处内联简化版本：标注名解析为符号 own_scope，比较 outer ⊆ anchor。 */
-  if (has_ref_capture && fn->scope_annot_count > 0) {
-    for (size_t i = 0; i < fn->scope_annot_count; i++) {
-      strslice_t nm = fn->scope_annot_names[i];
-      sema_scope_t *anchor = NULL;
-      if (nm.len == 1 && nm.ptr[0] == '*') {
-        anchor = sema->global_scope;
-      } else if (sema->fn.def) {
-        for (ast_node_t *p = sema->fn.def->params; p; p = p->next) {
-          ast_var_def_t *pvd = (ast_var_def_t *)p;
-          if (pvd->name.len == nm.len &&
-              memcmp(pvd->name.ptr, nm.ptr, nm.len) == 0) {
-            anchor = sema->fn.local_func_param_scope;
-            break;
-          }
-        }
-      }
-      if (!anchor) {
-        sema_symbol_t *sym = sema_lookup(outer, nm);
-        if (sym && sym->kind == SEMA_SYM_VAR) anchor = sym->own_scope;
-      }
-      if (!anchor) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
-                   "scope annotation '%.*s' does not name a parameter, "
-                   "global or local variable",
-                   (int)nm.len, nm.ptr);
-        continue;
-      }
-      if (!sema_scope_within(outer, anchor)) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)fn),
-                   "closure escapes scope annotation '%.*s' (its scope is "
-                   "not nested within the annotated scope)",
-                   (int)nm.len, nm.ptr);
-      }
-    }
-  }
   /* 捕获聚合类型（§7.1.10 "闭包 = 捕获结构体"）：把捕获槽表登记成一个 struct
      类型（name / 类型 / **槽位所有权**），VM 层据此把闭包当聚合值处理 ——
      clone 复制捕获、字段读写按槽位类型。
