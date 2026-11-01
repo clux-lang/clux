@@ -18,6 +18,9 @@
 #include "parser/ast_extern_lib.h"
 #include "parser/ast_for.h"
 #include "parser/ast_struct_def.h"
+#include "parser/ast_test.h"
+#include "parser/ast_union_def.h"
+#include "parser/ast_cunion_def.h"
 #include "parser/ast_foreach.h"
 #include "parser/ast_func_def.h"
 #include "parser/ast_if.h"
@@ -973,8 +976,21 @@ void desugar_program(desugar_t *ds, ast_program_t *prog) {
       case AST_VAR_DEF: /* 全局 var / comptime var：初始化式里可能有闭包 */
         ds_walk_var_def(ds, (ast_var_def_t *)n);
         break;
+      case AST_TEST:
+        /* `test "名称" { ... }` 有语句体：测试模式会把它变成普通函数，
+           体里的 `foreach` / 闭包同样需要前脱糖（否则 sema 见到 AST_FOREACH）。 */
+        ds_walk_stmt(ds, ((ast_test_t *)n)->body);
+        break;
+      case AST_STRUCT_DEF:
+      case AST_UNION_DEF:
+      case AST_CUNION_DEF: {
+        /* 聚合体成员方法（`func m(self: ...) { ... }`）也是函数体：同样要脱糖。 */
+        for (ast_node_t *m = ((ast_struct_def_t *)n)->members; m; m = m->next)
+          if (m->kind == AST_FUNC_DEF) ds_walk_func(ds, (ast_func_def_t *)m);
+        break;
+      }
       default:
-        /* import / reexport / struct / enum / type 定义等：无语句体。 */
+        /* import / reexport / enum / type 定义等：无语句体。 */
         break;
     }
   }
