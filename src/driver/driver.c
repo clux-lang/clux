@@ -29,6 +29,7 @@
 #include "parser/ast_block.h"
 #include "parser/ast_extern_lib.h"
 #include "diag/diagnostic.h"
+#include "sema/magic.h"
 #include "sema/sema.h"
 #include "sema/sema_generic.h"
 #include "sema/symbol.h"
@@ -212,6 +213,10 @@ static int driver_spawn_wait(const char *exe) {
  * 旧实现用进程内 VM；迁移到 C-only 后统一走 C 后端。编译期诊断仍由
  * cbackend 打印到 stderr（测试的 clux_run_capture 会捕获）；运行期的
  * `memory leak detected:` 由生成 C 的全局分配器在 main 退出时打印。 */
+void driver_set_magic_deref_depth(int depth) {
+    sema_magic_set_deref_depth_override(depth);
+}
+
 int driver_run_file_exit(const char *path, int *exit_code) {
     if (exit_code) *exit_code = 0;
     if (!path) {
@@ -234,7 +239,12 @@ int driver_run_file_exit(const char *path, int *exit_code) {
     if (rc == 0) {
         int code = driver_spawn_wait(exe);
         if (code < 0) {
-            fprintf(stderr, "run: cannot execute '%s'\n", exe);
+            /* 无法启动 **或** 异常终止（越界 abort / panic / 访问违例）：
+               Windows 下 `_spawnv` 对两种情况都可能返回 -1（异常码按有符号
+               int 返回时也是负数），这里不区分——两者都**不是运行成功**。 */
+            fprintf(stderr, "run: program failed to run to completion ('%s')\n",
+                    exe);
+            if (exit_code) *exit_code = 1;
             rc = 1;
         } else if (exit_code) {
             *exit_code = code;
@@ -244,7 +254,17 @@ int driver_run_file_exit(const char *path, int *exit_code) {
     return rc;
 }
 
-int driver_run_file(const char *path) { return driver_run_file_exit(path, NULL); }
+int driver_run_file(const char *path) {
+  /* 编译 + 运行，**返回程序 main 的返回值**（0 = 运行成功）。
+     编译错误 / 无法启动 / 异常终止 → 1。
+
+     旧实现直接转发"编译结果"（成功恒为 0），于是测试里的
+     `if (...) { return N; }` 断言全部失效——程序返回非 0 也照样"通过"。
+     需要同时拿到编译状态与退出码的调用方用 driver_run_file_exit。 */
+  int code = 0;
+  if (driver_run_file_exit(path, &code) != 0) return 1;
+  return code;
+}
 
 int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool) {
   lexer_t *lexer = NULL;

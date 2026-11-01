@@ -40,6 +40,15 @@ typedef struct {
     /* `[[<expr>]]` 装饰器链（表达式兄弟链，源码序；NULL = 无）。
        **只被前脱糖消费**：[[d1]] [[d2]] var a = v 展开为 a = d1(d2(v))。 */
     ast_node_t *decorators;
+
+    /* `using a = e;`：前脱糖改写成 `var a = e;` + 作用域退出时的
+       `defer |pa = a.&| { pa.__dispose__(); }`（配合魔法方法 `__dispose__`，
+       宽松约定：不是析构，只是作用域退出时调用）。 */
+    bool        is_using;
+
+    /* 编译器生成的"零初始化"声明（`__init__` 构造用）：`var t: T = <zero>;`。
+       内存清零、确定为已初始化（flow_init=true）；不需要 init 表达式。 */
+    bool        zero_init;
 } ast_var_def_t;
 
 static inline ast_node_t *ast_var_def_new(arena_t *arena,
@@ -55,6 +64,10 @@ static inline ast_node_t *ast_var_def_new(arena_t *arena,
 
 /** 解析变量定义 var name[:type] = init; 初始化必须存在。 */
 ast_node_t *parse_var_def(parser_t *p);
+
+/** 解析 `using a = expr;` / `using a: T = expr;`（与 `var` 同形，只是多一个
+ *  is_using 标记；前脱糖把它改写成 var + 作用域退出时的 `__dispose__` 调用）。 */
+ast_node_t *parse_using(parser_t *p);
 
 /** 解析 `extern var <lib>::<name>: <T>;`（调用方已消费 `extern`）。
  * M6 FFI：声明动态库导出的全局数据符号；无初始化器，符号由 dlsym 在运行期解析。

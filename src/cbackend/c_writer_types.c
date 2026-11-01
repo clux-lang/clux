@@ -244,3 +244,125 @@ void cw_emit_bf_helpers(string_t *sb, cir_type_t *types) {
         cw_put(sb, "}\n\n");
     }
 }
+
+/* ==========================================================================
+ * struct / tag union 判等辅助函数（`==` / `!=`）
+ *
+ * sema 允许复合值比较（VTABLE_STRUCT.eq / VTABLE_UNION.eq：按字段/成员递归），
+ * 但 C 不能对 struct 用 `==`。这里为每个被比较的类型生成一个
+ *     static bool clux_eq_<c_name>(const void *pa, const void *pb)
+ * 按**字段**递归比较（不是整块 memcmp：字段间 padding 无定义，整块比较会读出
+ * 垃圾；str 必须比内容而不是 data 指针）。array 逐元素、option 先比 tag 再比
+ * 载荷、tag union 先比 tag 再比当前成员的载荷；其余类型（标量 / 指针 / 函数值 /
+ * cunion / slice / 位域 struct）按字节比较——与 sema/CTFE 的字段判等语义一致。
+ *
+ * 依赖登记是后序的（lowering 侧先登记字段/成员/元素类型），所以顺序发射即可
+ * 保证"先定义后使用"；仍然先发一遍原型，避免任何顺序假设。
+ * ========================================================================== */
+
+/* 输出 `a<acc_a>` 与 `b<acc_b>` 的判等表达式。 */
+static void eq_emit_cmp(string_t *sb, const cir_type_t *t, const char *acc_a,
+                        const char *acc_b) {
+    const char *tn = cir_type_cname_tail(t);
+    if (t && tn) {
+        switch (t->kind) {
+        case CIR_TYPE_STR:
+            cw_printf(sb, "clux_str_eq(a%s, b%s)", acc_a, acc_b);
+            return;
+        case CIR_TYPE_ARRAY:
+        case CIR_TYPE_OPTION:
+        case CIR_TYPE_UNION:
+            cw_printf(sb, "clux_eq_%s(&(a%s), &(b%s))", tn, acc_a, acc_b);
+            return;
+        case CIR_TYPE_STRUCT:
+            if (!t->is_bitfield) {
+                cw_printf(sb, "clux_eq_%s(&(a%s), &(b%s))", tn, acc_a, acc_b);
+                return;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    cw_printf(sb, "memcmp(&(a%s), &(b%s), sizeof(a%s)) == 0", acc_a, acc_b,
+              acc_a);
+}
+
+static void eq_emit_body(string_t *sb, const cir_unit_t *unit,
+                         const cir_type_t *t) {
+    (void)unit;
+    const char *tn = cir_type_cname_tail(t);
+    if (!tn) return;
+    cw_printf(sb, "static bool clux_eq_%s(const void *pa, const void *pb) {\n",
+              tn);
+    cw_printf(sb, "    const %s *a = (const %s *)pa;\n", t->c_name, t->c_name);
+    cw_printf(sb, "    const %s *b = (const %s *)pb;\n", t->c_name, t->c_name);
+    switch (t->kind) {
+    case CIR_TYPE_STRUCT: {
+        if (!t->fields) {
+            cw_put(sb, "    (void)a;\n    (void)b;\n    return true;\n");
+            break;
+        }
+        bool first = true;
+        for (const cir_field_t *f = t->fields; f; f = f->next) {
+            char acc[512]; /* `->clux_f_<标识符>`：足够容纳现实字段名 */
+            snprintf(acc, sizeof acc, "->%s", f->name ? f->name : "field");
+            if (first) {
+                cw_put(sb, "    return ");
+                first = false;
+            } else {
+                cw_put(sb, "\n        && ");
+            }
+            eq_emit_cmp(sb, f->type, acc, acc);
+        }
+        cw_put(sb, ";\n");
+        break;
+    }
+    case CIR_TYPE_ARRAY:
+        cw_printf(sb, "    for (size_t i = 0; i < %zu; i++)\n", t->array_len);
+        cw_put(sb, "        if (!(");
+        eq_emit_cmp(sb, t->elem, "->data[i]", "->data[i]");
+        cw_put(sb, ")) return false;\n    return true;\n");
+        break;
+    case CIR_TYPE_OPTION:
+        cw_put(sb, "    if (a->ok != b->ok) return false;\n");
+        cw_put(sb, "    if (!a->ok) return true;\n    return ");
+        eq_emit_cmp(sb, t->elem, "->value", "->value");
+        cw_put(sb, ";\n");
+        break;
+    case CIR_TYPE_UNION: {
+        /* tag union：先比 tag，再按该 tag 的成员比较载荷（与 VM 的 union_eq
+           一致；tag 非法时只比 tag 本身）。 */
+        cw_put(sb, "    if (a->tag != b->tag) return false;\n");
+        cw_put(sb, "    switch (a->tag) {\n");
+        for (const cir_field_t *f = t->fields; f; f = f->next) {
+            char acc[512];
+            snprintf(acc, sizeof acc, "->u.%s", f->name ? f->name : "member");
+            cw_printf(sb, "    case %zu: return ", f->tag);
+            eq_emit_cmp(sb, f->type, acc, acc);
+            cw_put(sb, ";\n");
+        }
+        cw_put(sb, "    default: return true;\n    }\n");
+        break;
+    }
+    default:
+        cw_put(sb, "    (void)a;\n    (void)b;\n    return false;\n");
+        break;
+    }
+    cw_put(sb, "}\n\n");
+}
+
+void cw_emit_eq_helpers(string_t *sb, const cir_unit_t *unit) {
+    if (!unit || !unit->eq_helpers) return;
+    cw_put(sb, "/* ---- struct equality helpers ---- */\n");
+    for (const cir_type_ref_t *r = unit->eq_helpers; r; r = r->next) {
+        const char *tn = cir_type_cname_tail(r->type);
+        if (!tn) continue;
+        cw_printf(sb,
+                  "static bool clux_eq_%s(const void *pa, const void *pb);\n",
+                  tn);
+    }
+    cw_put(sb, "\n");
+    for (const cir_type_ref_t *r = unit->eq_helpers; r; r = r->next)
+        if (r->type) eq_emit_body(sb, unit, r->type);
+}

@@ -48,6 +48,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/metadata.h"
 #include "sema/sema_cross.h"
 #include "sema/sema_generic.h"
@@ -595,7 +596,8 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
   ast_func_def_t *mfn = (ast_func_def_t *)ms->ast;
   if (!mfn || mfn->generic.count == 0) return val_void(sema);
 
-  /* self 形参是否指针（用于值接收者 → .& 转换）。 */
+  /* self 形参是否指针：只用于本函数里的临时&/shadow 构造；接收者传参规则
+     统一为"值接收者取地址"（见下），值形参由调用点隐式转换自然拒绝。 */
   ast_var_def_t *self_vd =
       (mfn->params && mfn->params->kind == AST_VAR_DEF)
           ? (ast_var_def_t *)mfn->params
@@ -606,7 +608,10 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
 
   ast_node_t *recv_expr = mem->object;
   value_t *recv_shadow = rv;
-  if (self_ptr && rvt && !ptr_type_base(rvt)) {
+  bool recv_is_ptr = rvt && type_kind_of(type_strip_quals(rvt)) == TYPE_KIND_PTR;
+  if (!recv_is_ptr && rvt) {
+    /* 实例调用的接收者一律按指针传递：`a.m()` ⇒ 传 `a.&`。self 若是值形参，
+       后续实参校验会以普通隐式转换规则拒绝 `*T → T`。 */
     ast_node_t *addr = ast_addr_new(sema->arena, mem->object->tok_begin,
                                     mem->object->tok_end);
     if (!addr) return val_void(sema);
@@ -619,6 +624,7 @@ static value_t *ex_generic_method_call(sema_t *sema, ast_node_t **node,
     recv_expr = addr;
     recv_shadow = value_make_shadow(sema->vm, rt);
   }
+  (void)self_ptr;
 
   size_t argc = sema_count_siblings(call->args);
   value_t **shadows = (value_t **)allocator_new_ex(
@@ -795,6 +801,7 @@ static bool try_explicit_generic_static_method_call(sema_t *sema,
 
 value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
+
       /* 实参展开 `...b` 先于一切实参处理（方法调用 / FFI / 普通调用共用同一条
          实参链）。失败时诊断已记录。 */
       if (!sema_expand_spread_args(sema, call, scope)) return val_void(sema);
@@ -995,17 +1002,31 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
        * `self` **不是关键字**——它只是普通参数名，第一个参数按位置就是接收者。
        * 实例方法的接收者传递由 VM 的 op_member_call 完成（值 → 取地址 ref *T，
        * 指针 → 原样），sema 不再改写 AST。 */
+      /* 接收者类型：本块已对接收者求值一次（ident 走符号表，其余走 sema_expr），
+         缓存下来供后面的接收者可赋值性校验用——**不重复求值**（避免重复诊断/
+         重复改写）。 */
+      const type_t *recv_t = NULL;
       if (call->callee && call->callee->kind == AST_MEMBER) {
         ast_member_t *mem = (ast_member_t *)call->callee;
         const type_t *ot = NULL;
         if (mem->object && mem->object->kind == AST_IDENT) {
           sema_symbol_t *os =
               sema_lookup(scope, ((ast_ident_t *)mem->object)->name);
-          if (os && os->type) ot = os->type;
+          /* 捕获读取必须先走 ex_ident 改写（`__ctx.env.<cap>`）——直接取
+             符号类型会绕过改写，闭包/defer 体内 `cap.method()` 会漏改写。 */
+          bool is_cap = os && os->kind == SEMA_SYM_VAR && os->is_capture &&
+                        sema->fn.def && sema->fn.def->capture_type_id != 0;
+          if (is_cap) {
+            value_t *ov = sema_expr(sema, &mem->object, scope);
+            if (ov && !value_is_error(sema->vm, ov)) ot = value_type(ov);
+          } else if (os && os->type) {
+            ot = os->type;
+          }
         } else {
           value_t *ov = sema_expr(sema, &mem->object, scope);
           if (ov && !value_is_error(sema->vm, ov)) ot = value_type(ov);
         }
+        recv_t = ot;
         const bool by_ptr = ot && ptr_type_base(ot) != NULL;
         const type_t *st = type_strip_quals(by_ptr ? ptr_type_base(ot) : ot);
         if (st && type_kind_of(st) == TYPE_KIND_STRUCT && st->name.len) {
@@ -1013,6 +1034,30 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           const struct_type_t *owner = NULL;
           sema_symbol_t *ms = sema_struct_find_member(sema, st, mem->field,
                                                       call->callee, &owner);
+          /* 直接成员不存在 → `__deref__` 回退：`a.m(args)` 展开为
+             `(a.__deref__()).m(args)`（下一层继续按普通方法解析）。 */
+          if (!ms && struct_type_find_field(st, mem->field) < 0) {
+            char mbuf[256];
+            size_t ml = mem->field.len < sizeof mbuf - 1 ? mem->field.len
+                                                         : sizeof mbuf - 1;
+            memcpy(mbuf, mem->field.ptr, ml);
+            mbuf[ml] = '\0';
+            ast_node_t *new_recv = NULL;
+            int drc = sema_magic_deref_rewrite(
+                sema, &new_recv, st, mem->object, mbuf, (*node)->tok_begin,
+                (*node)->tok_end);
+            if (drc < 0) return val_void(sema);
+            if (drc > 0) {
+              ast_node_t *m2 = ast_member_new(sema->arena, (*node)->tok_begin,
+                                              (*node)->tok_end);
+              if (!m2) return val_void(sema);
+              ((ast_member_t *)m2)->object = new_recv;
+              ((ast_member_t *)m2)->field = mem->field;
+              m2->is_generated = true;
+              call->callee = m2;
+              return sema_expr(sema, node, scope);
+            }
+          }
           /* 以名字命中、但不是函数（自己的 var 成员 / 继承来的静态属性）：
              明确说清"它是变量，不是方法"，而不是落到下面的字段诊断。 */
           if (ms && ms->kind != SEMA_SYM_FUNC) {
@@ -1285,6 +1330,52 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
            实例方法：第一个参数是 self（接收者），实参从 args 开始对齐 self
            之后的形参。静态方法：无 self，实参从 args 开始对齐全部形参。 */
         bool is_instance = (call->callee->kind == AST_MEMBER);
+        /* 接收者可赋值性（实例方法）：此前完全没校验——`*const T` / `const T`
+           接收者调用 `self: *T` 方法时，C 后端按 self 类型直接 cast，**静默丢掉
+           const**（C 编译器只给 warning）。规则与实参一致（implicit_cast）：
+             值接收者 → 先按后端语义取地址 `*T`（保留 const/volatile）再比较；
+             指针接收者 → 直接比较。因此加限定（`*T` → `*const T`）与结构向上
+             转换放行，去限定/去 volatile 拒绝。
+           反向（self 是值形参、接收者是指针）也拒绝：后端会把指针原样传进值
+           形参，那是 C 类型错误。 */
+        if (is_instance && recv_t) {
+          const type_t *self_pt = func_type_param(sig_type, 0);
+          if (self_pt) {
+            const bool self_ptr =
+                type_kind_of(type_strip_quals(self_pt)) == TYPE_KIND_PTR;
+            const bool recv_ptr =
+                type_kind_of(type_strip_quals(recv_t)) == TYPE_KIND_PTR;
+            /* 实例调用的接收者一律按指针传递：`a.m()` ⇒ 传 `a.&`（a 是结构体
+               值时）；`self` 若是值形参，`*T → T` 的隐式转换在这里自然失败，
+               不需要在声明处加"接收者必须指针"的特判。 */
+            const type_t *probe = recv_t;
+            if (!recv_ptr) {
+              probe = type_ptr_intern(sema->vm, recv_t);
+              if (probe) sema_type_register(sema, probe);
+            }
+            if (probe) {
+              value_t *casted = value_implicit_cast(
+                  sema->vm, value_make_shadow(sema->vm, probe), self_pt);
+              if (value_is_error(sema->vm, casted)) {
+                char rn[64], pn[64];
+                sema_type_name(recv_t, rn, sizeof rn);
+                sema_type_name(self_pt, pn, sizeof pn);
+                if (!self_ptr)
+                  diag_error(sema->diag, sema_loc(sema, call->callee),
+                             "method '%.*s': receiver of type %s cannot bind "
+                             "to the 'self' parameter of type %s "
+                             "(declare 'self' as a pointer: '*%s')",
+                             (int)mname.len, mname.ptr, rn, pn, rn);
+                else
+                  diag_error(sema->diag, sema_loc(sema, call->callee),
+                             "method '%.*s': receiver of type %s cannot bind "
+                             "to the 'self' parameter of type %s "
+                             "(const/volatile cannot be dropped)",
+                             (int)mname.len, mname.ptr, rn, pn);
+              }
+            }
+          }
+        }
         size_t nargs = sema_count_siblings(call->args);
         size_t expected = sig->param_count - (is_instance ? 1 : 0);
         if (!sig->is_variadic && nargs != expected) {
@@ -1293,7 +1384,12 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                      (int)mname.len, mname.ptr, expected, nargs);
           return val_void(sema);
         }
-        /* 逐实参求值（shadow）——匿名构造注入形参类型 */
+        /* 逐实参求值（shadow）——匿名构造注入形参类型；同时做**可赋值性
+           校验**（与普通调用的 func_shadow_call 同一判据：类型不同 → 尝试
+           隐式转换，失败即为用户错误）。此前这里只求 shadow 不校验，形参
+           类型错误会一路漏到 C 后端，以 clang 的 "passing ... to parameter of
+           incompatible type" 暴露——那是 C 类型错误，不是 clux 诊断，且用户
+           看不到形参名与实参下标。 */
         size_t ai = 0;
         for (ast_node_t **slot = &call->args; *slot;
              slot = &(*slot)->next, ai++) {
@@ -1303,8 +1399,27 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           if (pt && type_kind_of(pt) == TYPE_KIND_FUNC)
             sema_maybe_wrap_cfunc_expr(sema, slot, pt, scope);
           bool ct_pushed = sema_anon_push(sema, pt);
-          sema_expr(sema, slot, scope);
+          value_t *av = sema_expr(sema, slot, scope);
           sema_anon_pop(sema, ct_pushed);
+          /* 错误/void 恢复产物跳过，避免级联二次诊断（与 func_shadow_call
+             一致）。 */
+          if (!pt || !av || value_is_error(sema->vm, av) ||
+              value_is_type(av, TYPE_KIND_VOID))
+            continue;
+          const type_t *at = value_type(av);
+          if (!at || at == pt) continue;
+          /* 类型不同：尝试隐式转换（字面量拓宽 / 结构兼容 struct / 加限定
+             符 / T→?T 等都在 implicit_cast 里判定）。失败 → clux 诊断。
+             实参下标按**方法签名**计（实例方法的 1 = self 之后的第一个实参；
+             `T::f(...)` 限定调用从 1 开始对齐全部形参，含接收者）。 */
+          if (value_is_error(sema->vm, value_implicit_cast(sema->vm, av, pt))) {
+            char an[64], pn[64];
+            op_type_name(av, an, sizeof an);
+            sema_type_name(pt, pn, sizeof pn);
+            diag_error(sema->diag, sema_loc(sema, *slot),
+                       "method '%.*s': argument %zu: cannot convert %s to %s",
+                       (int)mname.len, mname.ptr, ai + 1, an, pn);
+          }
         }
         const type_t *rt = func_type_return(sig_type);
         value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
@@ -1513,6 +1628,15 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         bool ct_pushed = sema_anon_push(sema, pt);
         arg_shadows[i] = sema_expr(sema, link, scope);
         sema_anon_pop(sema, ct_pushed);
+        /* 单参 `__init__` 的隐式构造：实参类型是 T（有单参初始化）而表达式
+           是初始化参数类型时，等价于 `.T{x}`。 */
+        if (pt && arg_shadows[i] &&
+            !value_is_error(sema->vm, arg_shadows[i])) {
+          bool conv = false;
+          value_t *nv = sema_magic_init_convert(
+              sema, link, value_type(arg_shadows[i]), pt, scope, &conv);
+          if (conv) arg_shadows[i] = nv ? nv : val_void(sema);
+        }
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
 
@@ -1565,6 +1689,21 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       if (callee_sym && callee_sym->builtin_op == SEMA_BUILTIN_LEN && argc == 1 &&
           arg_shadows[0]) {
         const type_t *at = value_type(arg_shadows[0]);
+        /* 魔法 len：struct 且定义了 `__len__` → `len(a)` ⇒
+           `typeof(a)::__len__(a.&)`（内建序列优先，见 §4）。 */
+        {
+          const type_t *atc = at ? type_strip_quals(at) : NULL;
+          if (atc && type_kind_of(atc) == TYPE_KIND_STRUCT &&
+              sema_magic_member(sema, atc, "__len__")) {
+            ast_node_t *call2 = sema_magic_make_call(
+                sema, call->args, "__len__", NULL, (*node)->tok_begin,
+                (*node)->tok_end);
+            if (!call2) return val_void(sema);
+            call2->next = (*node)->next;
+            *node = call2;
+            return sema_expr(sema, node, scope);
+          }
+        }
         if (at && type_kind_of(at) != TYPE_KIND_ARRAY &&
             !type_is_slice(at) &&
             type_kind_of(at) != TYPE_KIND_STR &&

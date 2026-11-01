@@ -1,5 +1,6 @@
 #include "ctfe/ctfe.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include "sema/reflect.h"
 #include "sema/sema.h"
 
@@ -11,7 +12,12 @@
 #include "core/strslice.h"
 #include "parser/ast_array.h"
 #include "parser/ast_alignof.h"
+#include "parser/ast_addr.h"
 #include "parser/ast_binary.h"
+#include "parser/ast_deref.h"
+#include "parser/ast_make.h"
+#include "parser/ast_slice.h"
+#include "parser/ast_unwrap.h"
 #include "parser/ast_pattern.h"
 #include "sema/sema_pattern.h"
 #include "parser/ast_bool_lit.h"
@@ -20,6 +26,7 @@
 #include "parser/ast_char_lit.h"
 #include "parser/ast_const.h"
 #include "parser/ast_construct.h"
+#include "parser/ast_construct_field.h"
 #include "parser/ast_scope_ref.h"
 #include "parser/ast_volatile.h"
 #include "parser/ast_float_lit.h"
@@ -31,6 +38,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
 #include "parser/ast_ptr.h"
+#include "parser/ast_option.h"
 #include "parser/ast_sizeof.h"
 #include "parser/ast_slice_type.h"
 #include "parser/ast_string_lit.h"
@@ -48,7 +56,10 @@
 #include "vm/type_enum.h"
 #include "vm/type_error.h"
 #include "vm/type_cfunc.h"
+#include "vm/type_cunion.h"
 #include "vm/type_func.h"
+#include "vm/type_option.h"
+#include "vm/type_union.h"
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "vm/type_struct.h"
@@ -318,6 +329,54 @@ static const type_t *ctfe_operand_type(ctfe_ctx_t *ctx, ast_node_t *opnd) {
     return NULL;
 }
 
+/* 反射接收者判定：只有**求值为类型值**的接收者才走元数据折叠。用户 struct
+   字段可以叫 name/size/... 等反射键名，那种情况是普通字段访问。 */
+static bool ctfe_may_be_type_expr(const ast_node_t *n) {
+    if (!n) return false;
+    switch (n->kind) {
+    case AST_IDENT:
+    case AST_TYPE_REF:
+    case AST_TYPEOF:
+    case AST_ARRAY:
+    case AST_TUPLE:
+    case AST_FUNC_TYPE:
+    case AST_OPTION:
+    case AST_PTR:
+    case AST_SLICE_TYPE:
+    case AST_CONST:
+    case AST_VOLATILE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ctfe_receiver_is_type(ctfe_ctx_t *ctx, ast_node_t *obj) {
+    if (!ctfe_may_be_type_expr(obj)) return false;
+    value_t *v = ctfe_eval(ctx, obj);
+    return !value_is_error(ctx->vm, v) && value_is_type(v, TYPE_KIND_TYPE);
+}
+
+/* callee 命中的**内建**符号（builtin_op != NONE）。callee 可能是 AST_IDENT
+   （未折叠）或 AST_FUNC_REF（sema 折叠后仍保留源名字）——两者都按名字查
+   sema 符号；用户同名函数/变量不是 builtin_op，不会被误判。 */
+static sema_symbol_t *ctfe_callee_builtin(ctfe_ctx_t *ctx,
+                                          const ast_node_t *callee) {
+    if (!ctx->sema || !ctx->sema->global_scope || !callee) return NULL;
+    strslice_t nm = STRSLICE_EMPTY;
+    if (callee->kind == AST_IDENT)
+        nm = ((const ast_ident_t *)callee)->name;
+    else if (callee->kind == AST_FUNC_REF)
+        nm = ((const ast_func_ref_t *)callee)->name;
+    if (!nm.ptr || nm.len == 0) return NULL;
+    sema_symbol_t *sym =
+        ctx->sema_scope ? sema_lookup(ctx->sema_scope, nm) : NULL;
+    if (!sym) sym = sema_lookup(ctx->sema->global_scope, nm);
+    if (!sym || sym->kind != SEMA_SYM_FUNC || sym->builtin_op == SEMA_BUILTIN_NONE)
+        return NULL;
+    return sym;
+}
+
 value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     vm_t *vm = ctx->vm;
     if (!node) return ctfe_err(ctx, "ctfe: null expression node");
@@ -375,6 +434,19 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                                 (int)n->name.len, n->name.ptr);
                 }
                 ast_func_def_t *fd = (ast_func_def_t *)sym->ast;
+                /* 无运行期函数对象的内建（fid = FUNC_ID_NONE，ast == NULL）：
+                   不能构造函数引用（也不能按 fid 回落——0 是 len）。 */
+                if (!fd || sym->fid == FUNC_ID_NONE) {
+                    if (sym->builtin_op != SEMA_BUILTIN_NONE)
+                        return ctfe_errf(ctx,
+                                         "ctfe: builtin '%.*s' has no "
+                                         "compile-time value",
+                                         (int)n->name.len, n->name.ptr);
+                    return ctfe_errf(ctx,
+                                     "ctfe: function '%.*s' has no compile-time "
+                                     "definition",
+                                     (int)n->name.len, n->name.ptr);
+                }
                 /* 引用对象携带 sema 分配的 fid（折叠编码 LOAD_FUNCTION
                    <fid> 的依据，与函数是否有 name 无关） */
                 func_t *fn = func_new_program_ref(vm, sym->type, fd->name,
@@ -434,6 +506,13 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
     }
     case AST_BINARY: {
         ast_binary_t *n = (ast_binary_t *)node;
+        /* nil 比较：`x == nil` / `nil != x` 等——nil 不是值，不能走普通二元
+           求值（与 sema 的判定同构：只支持 optional 与 nil 比较）。 */
+        if ((token_is(n->op, "==") || token_is(n->op, "!=")) &&
+            (n->lhs->kind == AST_NIL || n->rhs->kind == AST_NIL))
+            return ctfe_nil_compare(ctx, n, n->lhs->kind == AST_NIL);
+        /* `x is Member`：tag union 的 member 判定（编译期折叠为 bool 常量）。 */
+        if (token_is(n->op, "is")) return ctfe_is_member(ctx, n);
         /* 短路 && / ||：惰性求值，不走 vtable 二元分派 */
         if (token_is(n->op, "&&") || token_is(n->op, "||")) {
             bool is_and = token_is(n->op, "&&");
@@ -545,24 +624,67 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
        反射必须在这里也能用（与 sema 的折叠共用 sema_reflect_lookup）。 */
     case AST_MEMBER: {
         ast_member_t *m = (ast_member_t *)node;
-        /* 非反射成员：CTFE 不支持普通成员访问，报同款错误（原 default 文案）。 */
-        if (!sema_reflect_is_key(m->field))
-            return ctfe_err(ctx, "ctfe: unsupported expression node");
-        value_t *tv = ctfe_eval(ctx, m->object);
-        if (value_is_error(vm, tv)) return tv;
-        if (!value_is_type(tv, TYPE_KIND_TYPE))
-            return ctfe_err(ctx, "ctfe: reflection receiver is not a type");
-        const type_t *T = value_as(tv, const type_t *);
-        sema_rv_t rv;
-        char rerr[512] = {0};
-        if (!sema_reflect_eval(ctx->sema, T, m->field, NULL, &rv, rerr,
-                               sizeof rerr))
-            return ctfe_err(ctx, rerr);
-        value_t *out = sema_reflect_value(vm, &rv);
-        return out ? out : ctfe_err(ctx, "ctfe: reflection produced no value");
+        /* 反射键（`T.field_type` 等）：接收者必须是**类型值**才走元数据折叠；
+           否则是普通字段访问（用户 struct 可以有名为 name/size 的字段）。 */
+        if (sema_reflect_is_key(m->field) &&
+            ctfe_receiver_is_type(ctx, m->object)) {
+            value_t *tv = ctfe_eval(ctx, m->object);
+            if (value_is_error(vm, tv)) return tv;
+            if (!value_is_type(tv, TYPE_KIND_TYPE))
+                return ctfe_err(ctx, "ctfe: reflection receiver is not a type");
+            const type_t *T = value_as(tv, const type_t *);
+            sema_rv_t rv;
+            char rerr[512] = {0};
+            if (!sema_reflect_eval(ctx->sema, T, m->field, NULL, &rv, rerr,
+                                   sizeof rerr))
+                return ctfe_err(ctx, rerr);
+            value_t *out = sema_reflect_value(vm, &rv);
+            return out ? out : ctfe_err(ctx, "ctfe: reflection produced no value");
+        }
+        /* 普通字段访问：struct / tag union / cunion（指针自动解引用）。 */
+        return ctfe_member_get(ctx, m);
     }
+    case AST_UNWRAP:
+        return ctfe_unwrap_opt(ctx, (ast_unwrap_t *)node);
+    case AST_DEREF:
+        return ctfe_deref(ctx, ((ast_deref_t *)node)->operand);
+    case AST_ADDR:
+        return ctfe_addr_of(ctx, node);
+    case AST_SLICE:
+        return ctfe_slice_expr(ctx, (ast_slice_t *)node);
+    case AST_MAKE:
+        return ctfe_make_slice(ctx, (ast_make_t *)node);
+    case AST_TRY:
+        return ctfe_try_expr(ctx, (ast_try_t *)node);
 
     case AST_CALL: {
+        /* 内建函数（data/take_opt/panic/cfunc_ptr）：没有 VM 函数对象，
+           按**符号的 builtin_op** 判定（callee 可能已被 sema 折叠成
+           FUNC_REF，名字仍保留）；data/take 另有 sema 调用标志兜底。 */
+        {
+            ast_call_t *bc = (ast_call_t *)node;
+            sema_symbol_t *bs = ctfe_callee_builtin(ctx, bc->callee);
+            if (bs) {
+                switch (bs->builtin_op) {
+                case SEMA_BUILTIN_DATA:
+                    return ctfe_builtin_data(ctx, bc->args);
+                case SEMA_BUILTIN_TAKE:
+                    return ctfe_builtin_take(ctx, bc->args);
+                case SEMA_BUILTIN_PANIC:
+                    return ctfe_builtin_panic(ctx, bc->args);
+                case SEMA_BUILTIN_CFUNC_PTR:
+                    return ctfe_err(
+                        ctx,
+                        "ctfe: cfunc_ptr() is not available in compile-time "
+                        "code (a C function pointer has no compile-time "
+                        "representation)");
+                default:
+                    break;
+                }
+            }
+            if (bc->is_data_call) return ctfe_builtin_data(ctx, bc->args);
+            if (bc->is_take_call) return ctfe_builtin_take(ctx, bc->args);
+        }
         /* 编译期 get_metadata / get_field_metadata / get_method_metadata：
            直接读元信息表并折叠为常量。 */
         {
@@ -769,6 +891,25 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             return ctfe_errf(ctx, "ctfe: undefined function '%.*s' (not compile-time)",
                         (int)id->name.len, id->name.ptr);
         }
+        /* 2b. 实例方法调用 `recv.m(args)`：接收者必须只求值一次，且 `*T`
+           self 需要接收者的**存储地址**——不能把 callee 当普通函数值求值。
+           方法名与反射键同名（name/size/...）时，只有接收者是类型值才是反射
+           调用；否则按方法处理。 */
+        if (n->callee && n->callee->kind == AST_MEMBER) {
+            ast_member_t *mm = (ast_member_t *)n->callee;
+            bool reflect = sema_reflect_is_key(mm->field) &&
+                           ctfe_receiver_is_type(ctx, mm->object);
+            if (!reflect) {
+                value_t *mr = ctfe_method_call(ctx, n);
+                if (mr) return mr; /* NULL = 不是方法调用 → 回退 */
+            }
+        }
+        /* 2c. 静态方法调用 `Type::method(args)`（无 self）。枚举 variant 引用
+           `Color::Red` 不是调用，会回退到通用 callee 求值。 */
+        if (n->callee && n->callee->kind == AST_SCOPE_REF) {
+            value_t *sr = ctfe_static_call(ctx, n);
+            if (sr) return sr;
+        }
         /* 3. 一般 callee：求值 → value_call */
         value_t *callee = ctfe_eval(ctx, n->callee);
         if (value_is_error(vm, callee)) return callee;
@@ -812,6 +953,17 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         const type_t *pt = type_ptr_intern(vm, value_as(bt, const type_t *));
         if (!pt) return ctfe_err(ctx, "ctfe: failed to construct pointer type");
         return type_as_value(vm, pt);
+    }
+    case AST_OPTION: {
+        /* `?T` 类型表达式（`.?T{v}` 构造 / 类型别名 rhs）。 */
+        ast_option_t *n = (ast_option_t *)node;
+        value_t *iv = ctfe_eval(ctx, n->sub);
+        if (value_is_error(vm, iv)) return iv;
+        if (!value_is_type(iv, TYPE_KIND_TYPE))
+            return ctfe_err(ctx, "ctfe: optional inner must be a type");
+        const type_t *ot = type_option_intern(vm, value_as(iv, const type_t *));
+        if (!ot) return ctfe_err(ctx, "ctfe: failed to construct optional type");
+        return type_as_value(vm, ot);
     }
     case AST_SLICE_TYPE: {
         ast_slice_type_t *n = (ast_slice_type_t *)node;
@@ -903,10 +1055,71 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         if (!value_is_type(ty, TYPE_KIND_TYPE))
             return ctfe_err(ctx, "ctfe: construct type must be a type");
         const type_t *t = value_as(ty, const type_t *);
+        /* tag union 构造：恰好 1 个具名 member（sema 保留 AST_CONSTRUCT_FIELD，
+           字段名 = member 名）——写 tag + payload。 */
+        if (type_kind_of(t) == TYPE_KIND_UNION) {
+            if (!n->fields || n->fields->next)
+                return ctfe_err(ctx, "ctfe: union construct expects exactly 1 member");
+            ast_construct_field_t *cf = (ast_construct_field_t *)n->fields;
+            if (!cf->name.ptr)
+                return ctfe_err(ctx, "ctfe: union member must be named");
+            int mi = union_type_find_member(t, cf->name);
+            if (mi < 0)
+                return ctfe_errf(ctx, "ctfe: union has no member '%.*s'",
+                                 (int)cf->name.len, cf->name.ptr);
+            const union_member_t *m = union_type_member(t, (size_t)mi);
+            if (!m || !m->payload_type)
+                return ctfe_err(ctx, "ctfe: union member has no payload type");
+            value_t *mv = ctfe_eval_as(ctx, cf->value, m->payload_type);
+            if (value_is_error(vm, mv)) return mv;
+            void *data = value_alloc_data(vm->alloc, t);
+            if (!data) return ctfe_err(ctx, "ctfe: out of memory constructing union");
+            memset(data, 0, t->size);
+            union_store_tag_raw(data, union_type_tag_size(t), (uint64_t)m->tag);
+            memcpy((uint8_t *)data + union_type_payload_offset(t),
+                   value_data(mv), m->payload_type->size);
+            return value_make(vm, t, data);
+        }
+        /* cunion 构造：恰好 1 个具名 member，所有成员共享 offset 0。 */
+        if (type_kind_of(t) == TYPE_KIND_CUNION) {
+            if (!n->fields || n->fields->next)
+                return ctfe_err(ctx, "ctfe: cunion construct expects exactly 1 member");
+            ast_construct_field_t *cf = (ast_construct_field_t *)n->fields;
+            if (!cf->name.ptr)
+                return ctfe_err(ctx, "ctfe: cunion member must be named");
+            int mi = cunion_type_find_member(t, cf->name);
+            if (mi < 0)
+                return ctfe_errf(ctx, "ctfe: cunion has no member '%.*s'",
+                                 (int)cf->name.len, cf->name.ptr);
+            const cunion_member_t *m = cunion_type_member(t, (size_t)mi);
+            if (!m || !m->type)
+                return ctfe_err(ctx, "ctfe: cunion member has no type");
+            value_t *mv = ctfe_eval_as(ctx, cf->value, m->type);
+            if (value_is_error(vm, mv)) return mv;
+            void *data = value_alloc_data(vm->alloc, t);
+            if (!data) return ctfe_err(ctx, "ctfe: out of memory constructing cunion");
+            memset(data, 0, t->size);
+            memcpy(data, value_data(mv), m->type->size);
+            return value_make(vm, t, data);
+        }
+        /* optional 构造 `.?T{v}`：单值 → some（内层类型转换），`nil` → none。 */
+        if (type_kind_of(t) == TYPE_KIND_OPTION) {
+            if (!n->fields || n->fields->next)
+                return ctfe_err(ctx, "ctfe: optional construct expects one value");
+            const type_t *inner = type_option_inner(t);
+            if (!inner) return ctfe_err(ctx, "ctfe: optional type has no inner type");
+            value_t *v = ctfe_eval_as(ctx, n->fields, inner);
+            if (value_is_error(vm, v)) return v;
+            return value_lift_option(vm, v, t);
+        }
         if (type_kind_of(t) == TYPE_KIND_STRUCT || type_kind_of(t) == TYPE_KIND_TUPLE) {
             /* struct / tuple 构造（comptime var 支持所有类型）：字段按类型表序
-               求值 → 编译期构造聚合值。具名字段链已由 sema 重排为表序
-               （sema_expr 的 struct 分支"值节点直链"），此处按链序位置化即可。 */
+               求值 → 编译期构造聚合值。
+               两种 AST 形态都要接受（取决于求值阶段）：
+                 - sema Pass 3b 之后：字段已重排为表序的**值节点直链**（位置化）；
+                 - pass_globals（全局 comptime var）等早期阶段：仍是
+                   AST_CONSTRUCT_FIELD（带名字，源码序）→ 按名字定位槽位。
+               字段值按**字段类型**求值：nil → none、T → ?T 提升、结构兼容转换。 */
             size_t nf = ctfe_count_siblings(n->fields);
             size_t expect = (type_kind_of(t) == TYPE_KIND_STRUCT)
                                 ? struct_type_field_count(t)
@@ -915,10 +1128,34 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
                 return ctfe_errf(ctx, "ctfe: construct: expected %zu fields, got %zu",
                                  expect, nf);
             value_t *fields[nf > 0 ? nf : 1];
+            for (size_t k = 0; k < nf; k++) fields[k] = NULL;
             size_t i = 0;
             for (ast_node_t *f = n->fields; f; f = f->next, i++) {
-                fields[i] = ctfe_eval(ctx, f);
-                if (value_is_error(vm, fields[i])) return fields[i];
+                ast_node_t *valnode = f;
+                strslice_t fname = STRSLICE_EMPTY;
+                if (f->kind == AST_CONSTRUCT_FIELD) {
+                    ast_construct_field_t *cf = (ast_construct_field_t *)f;
+                    valnode = cf->value;
+                    fname = cf->name;
+                }
+                size_t slot = i;
+                if (fname.ptr && type_kind_of(t) == TYPE_KIND_STRUCT) {
+                    int fi = struct_type_find_field(t, fname);
+                    if (fi < 0)
+                        return ctfe_errf(ctx, "ctfe: struct has no field '%.*s'",
+                                         (int)fname.len, fname.ptr);
+                    slot = (size_t)fi;
+                }
+                const type_t *ft = NULL;
+                if (type_kind_of(t) == TYPE_KIND_STRUCT) {
+                    const struct_field_t *sf = struct_type_field(t, slot);
+                    ft = sf ? sf->type : NULL;
+                } else {
+                    const tuple_elem_t *te = tuple_type_elem(t, slot);
+                    ft = te ? te->type : NULL;
+                }
+                fields[slot] = ctfe_eval_as(ctx, valnode, ft);
+                if (value_is_error(vm, fields[slot])) return fields[slot];
             }
             value_t *agg = ctfe_make_aggregate(vm, t, fields, nf);
             if (!agg) return ctfe_err(ctx, "ctfe: out of memory constructing aggregate");
@@ -963,16 +1200,14 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             if (f->kind == AST_FILL) {
                 /* 值包展开：v 求值一次，count 份同类型值 */
                 ast_fill_t *fl = (ast_fill_t *)f;
-                value_t *fv = ctfe_eval(ctx, fl->value);
-                if (value_is_error(vm, fv)) return fv;
                 size_t cnt = (size_t)((ast_int_lit_t *)fl->count)->value;
                 for (size_t k = 0; k < cnt; k++) {
-                    value_t *copy = value_clone(vm, fv);
+                    value_t *copy = ctfe_eval_as(ctx, fl->value, et);
                     if (value_is_error(vm, copy)) return copy;
                     elems[i++] = copy;
                 }
             } else {
-                elems[i] = ctfe_eval(ctx, f);
+                elems[i] = ctfe_eval_as(ctx, f, et);
                 if (value_is_error(vm, elems[i])) return elems[i];
                 i++;
             }
@@ -1032,6 +1267,13 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
            sig_id 反查签名类型 → 构造引用对象。内建函数 / CTFE 已构造的
            字面量引用（注册进 vm->functions）按 fid 直接复用现有对象。 */
         ast_func_ref_t *n = (ast_func_ref_t *)node;
+        /* 无运行期函数对象的内建（data/take_opt/panic/cfunc_ptr）：fid 是
+           FUNC_ID_NONE 哨兵——绝不能按 fid 解析（0 是真实内建 len）。 */
+        if (n->fid == FUNC_ID_NONE)
+            return ctfe_errf(ctx,
+                             "ctfe: builtin '%.*s' has no compile-time value",
+                             (int)n->name.len,
+                             n->name.ptr ? n->name.ptr : "?");
         if (!ctx->sema || !ctx->sema->global_scope)
             return ctfe_err(ctx, "ctfe: function reference requires sema context");
         sema_func_t *sf = sema_func_by_id(ctx->sema, n->fid);
@@ -1094,6 +1336,7 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
         return value_make(vm, t, data);
     }
     default:
-        return ctfe_err(ctx, "ctfe: unsupported expression node");
+        return ctfe_errf(ctx, "ctfe: unsupported expression node '%s'",
+                         ast_kind_name(node->kind));
     }
 }

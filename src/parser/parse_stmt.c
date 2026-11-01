@@ -72,6 +72,8 @@ ast_node_t *parse_stmt(parser_t *p) {
     /* foreach：for-each 语法糖（前脱糖展开成索引 for 循环） */
     if (check_keyword(p, "foreach")) return parse_foreach(p);
     if (check_keyword(p, "var"))    return parse_var_def(p);
+    /* using：`var` + 作用域退出时 `__dispose__()`（前脱糖展开） */
+    if (check_keyword(p, "using"))  return parse_using(p);
     if (check_keyword(p, "func"))   return parse_func_def(p);
     if (check_keyword(p, "type"))   return parse_type_def(p);
     if (check_keyword(p, "enum"))   return parse_enum_def(p);

@@ -101,12 +101,20 @@ value_t *func_instantiate(vm_t *vm, func_t *base);
 const char *func_closure_store(vm_t *vm, func_t *fn, strslice_t name,
                                value_t *val);
 
-/* ---- 函数 id 分段（function.c / compile_func.c 共用） ---- */
+/* ---- 函数 id 分段（function.c / sema.c 共用） ---- */
 /* 内建函数固定 id 0..(FUNC_ID_BUILTIN_COUNT-1)（vm 自动分配：func_new 内
-   部从 0 起递增，printf=0）；程序函数 id 由编译器分配，从 FUNC_ID_PROGRAM_BASE
-   起（预留扩展空隙，见 vm.h 注释）。 */
+   部从 0 起递增，len=0 / __deep_clone=1）；程序函数 id 由编译器分配，从
+   FUNC_ID_PROGRAM_BASE 起（预留扩展空隙，见 vm.h 注释）。 */
 #define FUNC_ID_BUILTIN_COUNT 2u
 #define FUNC_ID_PROGRAM_BASE  64u
+
+/* "没有运行期函数对象"的哨兵 id。
+ *
+ * 用于**只有 sema/编译器语义、没有 func_t 实体**的内建：`data` /
+ * `take_opt` / `cfunc_ptr` / `panic`（由编译后端按 builtin_op 特判降级）。
+ * 这些符号的 fid **不能留 0**——0 是真实内建 id（len），任何按 fid 解析
+ * 函数对象的路径（CTFE 的 FUNC_REF 求值等）都会静默调用到 len。 */
+#define FUNC_ID_NONE 0xFFFFFFFFu
 
 /* ---- 函数 id 表（id → func_t*，索引即 id） ---- */
 

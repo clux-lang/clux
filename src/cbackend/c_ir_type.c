@@ -20,6 +20,12 @@ cir_type_t *cir_type_find(const cir_unit_t *u, const void *src,
     return NULL;
 }
 
+const char *cir_type_cname_tail(const cir_type_t *t) {
+    if (!t || !t->c_name) return NULL;
+    if (strncmp(t->c_name, "struct ", 7) == 0) return t->c_name + 7;
+    return t->c_name;
+}
+
 cir_field_t *cir_field_new(arena_t *arena, const char *name,
                            cir_type_t *type) {
     cir_field_t *f = (cir_field_t *)arena_calloc(

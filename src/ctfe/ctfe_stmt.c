@@ -35,39 +35,26 @@
 static value_t *ctfe_assign(ctfe_ctx_t *ctx, ast_assign_t *n) {
     vm_t *vm = ctx->vm;
 
-    /* 下标左值赋值：a[i] = v / a[i] op= v。与运行期语义一致（求值序
-       object → index → value；= → value_set_index；复合赋值 →
-       value_get_index 取旧值 → 运算 → value_set_index 写回）。indices
-       由 sema 保证单索引（与运行期 compile_assign_index 同约定）。 */
-    if (n->target->kind == AST_INDEX) {
-        ast_index_t *ix = (ast_index_t *)n->target;
-        value_t *self = ctfe_eval(ctx, ix->object);
-        if (value_is_error(vm, self)) return self;
-        value_t *index = ctfe_eval(ctx, ix->indices);
-        if (value_is_error(vm, index)) return index;
-        value_t *src = ctfe_eval(ctx, n->value);
-        if (value_is_error(vm, src)) return src;
-        if (token_is(n->op, "="))
-            return value_set_index(vm, self, index, src);
-        value_t *old = value_get_index(vm, self, index);
-        if (value_is_error(vm, old)) return old;
-        value_t *r = NULL;
-        if (token_is(n->op, "+="))      r = value_add(vm, old, src);
-        else if (token_is(n->op, "-=")) r = value_sub(vm, old, src);
-        else if (token_is(n->op, "*=")) r = value_mul(vm, old, src);
-        else if (token_is(n->op, "/=")) r = value_div(vm, old, src);
-        else if (token_is(n->op, "%=")) r = value_mod(vm, old, src);
-        else return ctfe_err(ctx, "ctfe: unsupported assignment operator");
-        if (value_is_error(vm, r)) return r;
-        return value_set_index(vm, self, index, r);
-    }
+    /* 复合值左值（成员 / 解引用 / 解包）：按类型布局寻址后读写。
+       `a[i] op= v` 同一条路径（数组 / 元组 / 切片 / 指针下标）。 */
+    if (n->target->kind == AST_MEMBER || n->target->kind == AST_DEREF ||
+        n->target->kind == AST_UNWRAP)
+        return ctfe_assign_lvalue(ctx, n);
+    if (n->target->kind == AST_INDEX) return ctfe_index_assign(ctx, n);
 
     if (n->target->kind != AST_IDENT)
         return ctfe_err(ctx, "ctfe: invalid assignment target");
+    /* 丢弃标记 `_ = expr`：求值后丢弃（不是变量赋值）。 */
+    if (((ast_ident_t *)n->target)->name.len == 1 &&
+        ((ast_ident_t *)n->target)->name.ptr[0] == '_') {
+        value_t *v = ctfe_eval(ctx, n->value);
+        return value_is_error(vm, v) ? v : value_make_undefined(vm);
+    }
     value_t *dst = scope_lookup(vm->current_scope,
                                 ((ast_ident_t *)n->target)->name);
     if (!dst) return ctfe_err(ctx, "ctfe: assignment to undefined variable");
-    value_t *src = ctfe_eval(ctx, n->value);
+    /* 右值按目标类型求值：`o = nil` → none；T → ?T 提升；隐式转换。 */
+    value_t *src = ctfe_eval_as(ctx, n->value, value_type(dst));
     if (value_is_error(vm, src)) return src;
     if (token_is(n->op, "=")) return value_assign(vm, dst, src);
     /* 复合赋值：+= -= *= /= %= */
@@ -82,10 +69,42 @@ static value_t *ctfe_assign(ctfe_ctx_t *ctx, ast_assign_t *n) {
     return value_assign(vm, dst, r);
 }
 
+static value_t *ctfe_eval_stmt_core(ctfe_ctx_t *ctx, ast_node_t *stmt);
+
+/* 语句入口：先 prelude、再语句主体（`sugar_noop` 跳过）、最后 postlude。
+ * sema 把 `.?' / `.!' 之类的错误处理语法糖展开成挂在语句上的
+ * prelude/postlude（临时变量 + if 分支）——与 C 后端 lower_stmt 同序消费。
+ * 控制流（try 失败路径的 return）一旦发生：立即停止，不再执行主体/后置。 */
 value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     vm_t *vm = ctx->vm;
     if (!ctx || !vm) return NULL;
     if (!stmt) return value_make_undefined(vm);
+
+    if (stmt->prelude) {
+        for (ast_node_t *p = stmt->prelude; p; p = p->next) {
+            value_t *r = ctfe_eval_stmt(ctx, p);
+            if (value_is_error(vm, r)) return r;
+            if (ctx->ctrl != CTFE_CTRL_NONE) return value_make_undefined(vm);
+        }
+    }
+    bool noop = stmt->kind == AST_ASSIGN && ((ast_assign_t *)stmt)->sugar_noop;
+    if (!noop) {
+        value_t *r = ctfe_eval_stmt_core(ctx, stmt);
+        if (value_is_error(vm, r)) return r;
+        if (ctx->ctrl != CTFE_CTRL_NONE) return value_make_undefined(vm);
+    }
+    if (stmt->postlude) {
+        for (ast_node_t *p = stmt->postlude; p; p = p->next) {
+            value_t *r = ctfe_eval_stmt(ctx, p);
+            if (value_is_error(vm, r)) return r;
+            if (ctx->ctrl != CTFE_CTRL_NONE) return value_make_undefined(vm);
+        }
+    }
+    return value_make_undefined(vm);
+}
+
+static value_t *ctfe_eval_stmt_core(ctfe_ctx_t *ctx, ast_node_t *stmt) {
+    vm_t *vm = ctx->vm;
     if (ctx->budget == 0)
         return ctfe_err(ctx, "ctfe: evaluation budget exceeded (possible loop)");
     ctx->budget--;
@@ -96,11 +115,9 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
         vm_push_scope(vm);
         for (ast_node_t *s = b->stmts; s; s = s->next) {
             value_t *r = ctfe_eval_stmt(ctx, s);
-            if (value_is_error(vm, r)) {
-                r = ctfe_hoist_error(ctx, r);
-                vm_pop_scope(vm);
-                return r;
-            }
+            /* 控制流优先于错误：`.?' 的失败路径在表达式内部执行了 `return`
+               （tail_stmt），其后同一语句里的表达式求值可能产生哨兵错误——
+               此时以 ctrl 为准，错误是"已跳转"的副产物。 */
             if (ctx->ctrl != CTFE_CTRL_NONE) {
                 /* 退出点节点上挂载的 defer calls（desugar_defers 设到
                    defers 字段）仍需执行——先跑 defer 再退出块。
@@ -123,6 +140,11 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
                 ctx->ret_value = saved_ret;
                 break;
             }
+            if (value_is_error(vm, r)) {
+                r = ctfe_hoist_error(ctx, r);
+                vm_pop_scope(vm);
+                return r;
+            }
         }
         /* 块 pop 前：RETURN 值上移，防止 pop 销毁（嵌套块逐层上移） */
         ctfe_hoist_return(ctx);
@@ -131,24 +153,32 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     }
     case AST_VAR_DEF: {
         ast_var_def_t *vd = (ast_var_def_t *)stmt;
-        value_t *init = NULL;
-        if (vd->init && vd->init->kind == AST_UNDEF) {
-            /* 声明占位：分配声明类型零值。类型表达式按普通表达式 ctfe
-               求值 → type value（data=type_t*），遮蔽感知与变量同机制。 */
+        /* 声明类型（带类型上下文求值：`var o: ?i32 = nil`）。解析失败
+           （泛型参数等）时退回无上下文求值。 */
+        const type_t *dt = NULL;
+        if (vd->type_expr) {
             value_t *tv = ctfe_eval(ctx, vd->type_expr);
-            if (value_is_error(vm, tv)) return tv;
-            if (!value_is_type(tv, TYPE_KIND_TYPE))
-                return ctfe_err(ctx, "ctfe: undefined variable type");
-            const type_t *t = value_as(tv, const type_t *);
-            void *data = value_alloc_data(vm->alloc, t);
-            init = value_make(vm, t, data);
+            if (!value_is_error(vm, tv) && value_is_type(tv, TYPE_KIND_TYPE))
+                dt = value_as(tv, const type_t *);
+        }
+        value_t *init = NULL;
+        if (vd->zero_init) {
+            /* 编译器生成的零初始化声明（`__init__` 构造的临时对象）。 */
+            if (!dt) return ctfe_err(ctx, "ctfe: zero-init variable has no type");
+            void *data = value_alloc_data(vm->alloc, dt);
+            init = value_make(vm, dt, data);
+        } else if (vd->init && vd->init->kind == AST_UNDEF) {
+            /* 声明占位：分配声明类型零值。 */
+            if (!dt) return ctfe_err(ctx, "ctfe: undefined variable type");
+            void *data = value_alloc_data(vm->alloc, dt);
+            init = value_make(vm, dt, data);
         } else {
-            init = ctfe_eval(ctx, vd->init);
+            init = ctfe_eval_as(ctx, vd->init, dt);
             if (value_is_error(vm, init)) return init;
         }
         char nb[128];
         const char *name = ctfe_slice_to_cstr(vd->name, nb, sizeof nb);
-        value_t *stored = scope_define(vm, vm->current_scope, name, init);
+        value_t *stored = ctfe_define_value(ctx, vm->current_scope, name, init);
         if (value_is_error(vm, stored)) return stored;
         return value_make_undefined(vm);
     }
@@ -296,7 +326,9 @@ value_t *ctfe_eval_stmt(ctfe_ctx_t *ctx, ast_node_t *stmt) {
     }
     case AST_RETURN: {
         ast_return_t *n = (ast_return_t *)stmt;
-        ctx->ret_value = n->value ? ctfe_eval(ctx, n->value)
+        /* return 值按**声明返回类型**求值：`return nil` / T → ?T 等需要类型
+           上下文（ctx->ret_type 由 ctfe_call_ast_fn_vals 设置）。 */
+        ctx->ret_value = n->value ? ctfe_eval_as(ctx, n->value, ctx->ret_type)
                                   : value_make_undefined(vm);
         if (value_is_error(vm, ctx->ret_value)) return ctx->ret_value;
         ctx->ctrl = CTFE_CTRL_RETURN;

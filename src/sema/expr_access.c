@@ -1,5 +1,6 @@
 #include "sema/sema.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/reflect.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "core/string.h"
@@ -467,8 +468,15 @@ value_t *ex_member(sema_t *sema, ast_node_t **node,
       if (type_kind_of(ot) != TYPE_KIND_STRUCT) {
         char tn[64];
         sema_type_name(ot, tn, sizeof(tn));
-        diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot access field of value of type %s", tn);
+        if (((ast_member_t *)*node)->field.len == 11 &&
+            memcmp(((ast_member_t *)*node)->field.ptr, "__dispose__", 11) == 0)
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "type %s has no '__dispose__' method: `using` requires a "
+                     "struct declaring `func __dispose__(self: *%s)`",
+                     tn, tn);
+        else
+          diag_error(sema->diag, sema_loc(sema, *node),
+                     "cannot access field of value of type %s", tn);
         return val_void(sema);
       }
       if (type_kind_of(ot) == TYPE_KIND_STRUCT) {
@@ -524,6 +532,31 @@ value_t *ex_member(sema_t *sema, ast_node_t **node,
                      ot->name.ptr, (int)n->field.len, n->field.ptr,
                      (int)n->field.len, n->field.ptr);
           return val_void(sema);
+        }
+        /* `__deref__` 回退：直接成员不存在 ⇒ `a.x` 展开为
+           `(a.__deref__()).x`（字段/方法都在下一层继续正常解析）。 */
+        {
+          char mbuf[256];
+          size_t ml = n->field.len < sizeof mbuf - 1 ? n->field.len
+                                                     : sizeof mbuf - 1;
+          memcpy(mbuf, n->field.ptr, ml);
+          mbuf[ml] = '\0';
+          ast_node_t *new_recv = NULL;
+          int drc = sema_magic_deref_rewrite(
+              sema, &new_recv, ot, n->object, mbuf, (*node)->tok_begin,
+              (*node)->tok_end);
+          if (drc < 0) return val_void(sema);
+          if (drc > 0) {
+            ast_node_t *m2 = ast_member_new(sema->arena, (*node)->tok_begin,
+                                            (*node)->tok_end);
+            if (!m2) return val_void(sema);
+            ((ast_member_t *)m2)->object = new_recv;
+            ((ast_member_t *)m2)->field = n->field;
+            m2->is_generated = true;
+            m2->next = (*node)->next;
+            *node = m2;
+            return sema_expr(sema, node, scope);
+          }
         }
         diag_error(sema->diag, sema_loc(sema, *node),
                    "struct '%.*s' has no field '%.*s'",
@@ -715,6 +748,45 @@ value_t *ex_index(sema_t *sema, ast_node_t **node,
         diag_error(sema->diag, sema_loc(sema, *node),
                    "generic instantiation is not implemented (index on a type value)");
         return val_void(sema);
+      }
+      /* 魔法下标：`a[i]` ⇒ `(typeof(a)::__index__(a.&, i)).*`（结果必须可解
+         引用；`.*` 会继续穿透 `__deref__`）。 */
+      {
+        const type_t *btc = bt ? type_strip_quals(bt) : NULL;
+        if (btc && type_kind_of(btc) == TYPE_KIND_STRUCT &&
+            sema_magic_member(sema, btc, "__index__")) {
+          if (sema_count_siblings(n->indices) != 1) {
+            diag_error(sema->diag, sema_loc(sema, *node),
+                       "index operator expects exactly 1 index, got %zu",
+                       sema_count_siblings(n->indices));
+            return val_void(sema);
+          }
+          ast_node_t *call = sema_magic_make_call(
+              sema, n->object, "__index__", n->indices, (*node)->tok_begin,
+              (*node)->tok_end);
+          if (!call) return val_void(sema);
+          ast_node_t *deref = ast_deref_new(sema->arena, (*node)->tok_begin,
+                                            (*node)->tok_end);
+          if (!deref) return val_void(sema);
+          ((ast_deref_t *)deref)->operand = call;
+          deref->is_generated = true;
+          deref->next = (*node)->next;
+          *node = deref;
+          return sema_expr(sema, node, scope);
+        }
+      }
+      if (!bt || (type_kind_of(bt) != TYPE_KIND_ARRAY && type_kind_of(bt) != TYPE_KIND_TUPLE &&
+                  !type_is_slice(bt))) {
+        /* 只读下标：`const [N]T` / `const []T` 读取合法（写入由赋值 const
+           规则拒绝）——生成的判等函数体 `(a.*)[i]` 依赖这一点。 */
+        const type_t *bt_core = bt ? type_strip_quals(bt) : NULL;
+        if (bt_core && bt_core != bt) {
+          if (type_kind_of(bt_core) == TYPE_KIND_ARRAY ||
+              type_kind_of(bt_core) == TYPE_KIND_TUPLE ||
+              type_is_slice(bt_core)) {
+            bt = bt_core;
+          }
+        }
       }
       if (!bt || (type_kind_of(bt) != TYPE_KIND_ARRAY && type_kind_of(bt) != TYPE_KIND_TUPLE &&
                   !type_is_slice(bt))) {

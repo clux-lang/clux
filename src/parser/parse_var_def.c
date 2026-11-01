@@ -16,17 +16,17 @@
  * 三种类型节点的完整定义。
  */
 
-ast_node_t *parse_var_def(parser_t *p) {
+static ast_node_t *parse_var_like(parser_t *p, const char *kw, bool is_using) {
     uint32_t tb = p->pos;
 
-    if (!check_keyword(p, "var")) return NULL;
+    if (!check_keyword(p, kw)) return NULL;
     advance(p);
     skip_trivia(p);
 
     /* 变量名：标识符 */
     if (!check_kind(p, TOKEN_TYPE_IDENTIFIER)) {
         return ast_error_new(p->diag, p->tokens, p->arena, tb, p->pos,
-                             "expected variable name after 'var'");
+                             "expected variable name after keyword");
     }
     {
         ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "variable name");
@@ -83,5 +83,14 @@ ast_node_t *parse_var_def(parser_t *p) {
     ((ast_var_def_t *)node)->name      = name;
     ((ast_var_def_t *)node)->type_expr = type_expr;
     ((ast_var_def_t *)node)->init      = init;
+    ((ast_var_def_t *)node)->is_using  = is_using;
     return node;
+}
+
+ast_node_t *parse_var_def(parser_t *p) {
+    return parse_var_like(p, "var", false);
+}
+
+ast_node_t *parse_using(parser_t *p) {
+    return parse_var_like(p, "using", true);
 }

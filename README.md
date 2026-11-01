@@ -233,6 +233,11 @@ core containers; integration tests execute programs end-to-end through
 `printf` output can be asserted — see `tests/foreach_test.cpp`), including the
 `examples/` sweep.
 
+`driver_run_file` **编译并运行**，返回程序 `main` 的返回值（编译错误 / 无法启动 /
+异常终止记 1）——所以用例里的 `if (...) { return N; }` 断言是真实生效的。
+需要把"编译是否成功"与"程序返回值"分开断言的用例用 `driver_run_file_exit`，
+只关心运行成功的用 `clux_expect_program_ok`（见 `tests/test_common.h`）。
+
 > **Host requirement for the whole suite**: some tests create temp files via
 > `std::filesystem::temp_directory_path()` / `tmpnam`. On hosts where spawned
 > processes are denied writes to the `%TEMP%` root (the `fopen` fails with

@@ -72,7 +72,12 @@ cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl) {
     cir_type_t *otc = map_type(lc, ot);
     if (!obj || !ct || !otc) return NULL;
     cir_expr_t *e = cir_expr_slice(lc->arena, ct, obj, lo, hi);
-    if (e) e->src_type = otc;
+    if (e) {
+        e->src_type = otc;
+        /* 左值源：视图必须指向源对象自己的存储（见 c_ir.h 的 lvalue_base）。
+           右值源（调用结果 / 字面量）仍复制到临时量，那是唯一可行的做法。 */
+        e->lvalue_base = c_lower_is_lvalue(sl->object);
+    }
     lc->unit->uses_slice_check = true;
     return e;
 }

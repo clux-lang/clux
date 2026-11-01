@@ -93,6 +93,24 @@ bool ctfe_read_bool(vm_t *vm, value_t *v) {
     return *(bool *)value_data(v);
 }
 
+/* 定义局部变量（总是 materialize 成目标作用域自己的副本）。
+   见 ctfe.h 的说明：CTFE 的标识符求值返回存储本体，直接 scope_define 会走
+   "本作用域非借用值零拷贝采用"快路径，导致 `var b = a` 别名。 */
+value_t *ctfe_define_value(ctfe_ctx_t *ctx, scope_t *scope, const char *name,
+                           value_t *v) {
+    vm_t *vm = ctx->vm;
+    if (!vm || !scope || !name)
+        return ctfe_err(ctx, "ctfe: invalid variable definition");
+    if (!v) return ctfe_err(ctx, "ctfe: missing initializer");
+    if (value_is_error(vm, v)) return v;
+    scope_t *saved = vm->current_scope;
+    vm->current_scope = scope;
+    value_t *copy = value_clone(vm, v);
+    vm->current_scope = saved;
+    if (value_is_error(vm, copy)) return copy;
+    return scope_define(vm, scope, name, copy);
+}
+
 /* ===========================================================================
  * 作用域上移工具
  * =========================================================================== */

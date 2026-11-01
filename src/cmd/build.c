@@ -2,6 +2,7 @@
 #include "cmd/cmd.h"
 #include "cmd/path.h"
 #include "cbackend/c_backend.h"
+#include "driver/driver.h"
 #include "module/lockfile.h"
 
 #include <stdio.h>
@@ -296,7 +297,8 @@ static int build_impl(const cmd_args_t *args, const char *src_override,
                            strcmp(o->key, "include") == 0 ||
                            strcmp(o->key, "lib-path") == 0 ||
                            strcmp(o->key, "link-lib") == 0 ||
-                           strcmp(o->key, "build-dir") == 0;
+                           strcmp(o->key, "build-dir") == 0 ||
+                           strcmp(o->key, "magic-deref-depth") == 0;
         if (needs_value && (!o->value || !*o->value)) {
             fprintf(stderr, "build: option '--%s' requires a value\n", o->key);
             goto fail;
@@ -310,6 +312,18 @@ static int build_impl(const cmd_args_t *args, const char *src_override,
             strlist_push(&libdirs, o->value);
         else if (strcmp(o->key, "link-lib") == 0) strlist_push(&libs, o->value);
         else if (strcmp(o->key, "build-dir") == 0) build_dir = o->value;
+        else if (strcmp(o->key, "magic-deref-depth") == 0) {
+            char *end = NULL;
+            long v = strtol(o->value, &end, 10);
+            if (!end || *end != '\0' || v < 0 || v > 31) {
+                fprintf(stderr,
+                        "build: --magic-deref-depth expects an integer in 0..31 "
+                        "(got '%s')\n",
+                        o->value);
+                goto fail;
+            }
+            driver_set_magic_deref_depth((int)v);
+        }
     }
 
     if (!src) {

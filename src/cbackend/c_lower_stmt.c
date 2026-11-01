@@ -516,7 +516,14 @@ static cir_stmt_t *lower_stmt_core(lower_ctx_t *lc, ast_node_t *s, bool *ok) {
         if (!st) return NULL;
         st->type = ct;
         st->name = lookup_local_cname(lc, vd->name);
-        if (vd->init && vd->init->kind == AST_TRY) {
+        if (vd->zero_init) {
+            /* 编译器生成的零初始化声明：`T t = (T){0};` */
+            st->expr = cir_expr_construct(lc->arena, ct, NULL);
+            if (!st->expr) {
+                *ok = false;
+                return NULL;
+            }
+        } else if (vd->init && vd->init->kind == AST_TRY) {
             /* `var v = expr.?;`：先声明 v，再把 try 展开成
                `{ setup; if (!ok) { tail } v = value; }`。 */
             ast_try_t *tr = (ast_try_t *)vd->init;

@@ -24,6 +24,8 @@
 #include "parser/ast_ident.h"
 #include "parser/ast_index.h"
 #include "parser/ast_int_lit.h"
+#include "parser/ast_addr.h"
+#include "parser/ast_member.h"
 #include "parser/ast_return.h"
 #include "parser/ast_switch.h"
 #include "parser/ast_var_def.h"

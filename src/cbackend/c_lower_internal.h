@@ -244,6 +244,8 @@ cir_expr_t *lower_compat_value(lower_ctx_t *lc, const type_t *target,
 cir_expr_t *lower_rc_copy(lower_ctx_t *lc, const type_t *target,
                           cir_expr_t *v, ast_node_t *expr);
 cir_expr_t *lower_slice(lower_ctx_t *lc, ast_slice_t *sl);
+/** AST 表达式在生成的 C 里是否是可寻址左值（切片/判等/方法接收者共用）。 */
+bool c_lower_is_lvalue(const ast_node_t *e);
 cir_expr_t *lower_make(lower_ctx_t *lc, ast_make_t *mk);
 cir_expr_t *lower_closure_literal(lower_ctx_t *lc, ast_func_def_t *fn);
 /** 函数定义的值类型：有捕获 → 闭包类型，无捕获 → 普通签名类型。 */

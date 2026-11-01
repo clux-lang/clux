@@ -41,6 +41,7 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "parser/ast_import.h"
 #include "parser/ast_reexport.h"
 #include "parser/ast_extern_lib.h"
@@ -544,7 +545,8 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
     for (ast_node_t *m = sd->members; m; m = m->next) {
       if (m->kind == AST_FUNC_DEF) {
         ast_func_def_t *fn = (ast_func_def_t *)m;
-        /* M7 P4b：泛型方法只登记符号（is_generic），调用点实例化。 */
+        /* M7 P4b：泛型方法只登记符号（is_generic），调用点实例化。
+           魔法方法允许泛型（泛型 + comptime if 承担重载表达）。 */
         if (fn->generic.count > 0) {
           sema_symbol_t ginit = {.kind = SEMA_SYM_FUNC,
                                  .ast = m,
@@ -581,6 +583,7 @@ void pass1d_struct_members(sema_t *sema, ast_program_t *prog) {
         sf->scope = NULL;
         sf->param_scope = NULL;
         sf->def_scope = mscope; /* struct 方法符号在 member_scope 中 */
+        sf->owner = sym->type;  /* 接收者校验 / 魔法方法约定 */
         sf->is_walked = false;
         sema_func_id_alloc(sema, fn);
         msym->fid = fn->fid;

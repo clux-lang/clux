@@ -20,6 +20,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_foreach.h"
 #include "parser/ast_ident.h"
+#include "parser/ast_member.h"
 #include "parser/ast_if.h"
 #include "ctfe/ctfe.h"
 #include "parser/ast_comptime_if.h"
@@ -91,6 +92,32 @@ static ast_node_t *make_defer_call(sema_t *sema, const char *fn_name,
   return stmt;
 }
 
+/* 构造 `a.__dispose__()` 语句（`using a = ...;` 的作用域退出调用）。
+   与 `__defer_N()` 一样是生成节点（tok 0），退出点执行、不参与不可达检查。
+   变量 `a` 在退出点仍在作用域内（同一块/外层块），因此无需闭包捕获。 */
+static ast_node_t *make_using_call(sema_t *sema, strslice_t var_name) {
+  arena_t *a = sema->arena;
+  ast_node_t *ident = ast_ident_new(a, 0, 0);
+  if (!ident) return NULL;
+  ((ast_ident_t *)ident)->name = var_name;
+
+  ast_node_t *member = ast_member_new(a, 0, 0);
+  if (!member) return NULL;
+  ((ast_member_t *)member)->object = ident;
+  ((ast_member_t *)member)->field = STRSLICE_LIT("__dispose__");
+
+  ast_node_t *call = ast_call_new(a, 0, 0);
+  if (!call) return NULL;
+  ((ast_call_t *)call)->callee = member;
+  ((ast_call_t *)call)->args = NULL;
+  ((ast_call_t *)call)->args_last = NULL;
+
+  ast_node_t *stmt = ast_expr_stmt_new(a, 0, 0);
+  if (!stmt) return NULL;
+  ((ast_expr_stmt_t *)stmt)->expr = call;
+  return stmt;
+}
+
 /* 沿 scope parent 链收集 defers 并构造逆序 call 语句链。
    stop_scope 不含（defers 在 stop_scope 之前各层）。
    返回 call 语句链首（已按执行顺序排列），*out_last 设为链尾。
@@ -107,12 +134,21 @@ static ast_node_t *collect_defer_calls(sema_t *sema, sema_scope_t *from_scope,
   ast_node_t *head = NULL;
   ast_node_t *tail = NULL;
   for (size_t i = 0; i < n; i++) {
-    ast_func_def_t *fn = (ast_func_def_t *)calls[i];
-    /* 名字是 arena NUL 终止字符串（设名时已分配） */
-    char fname[64];
-    snprintf(fname, sizeof(fname), "%.*s", (int)fn->name.len, fn->name.ptr);
-    ast_node_t *call = make_defer_call(sema, fname, fn->base.tok_begin,
-                                       fn->base.tok_end);
+    ast_node_t *entry = calls[i];
+    ast_node_t *call = NULL;
+    if (entry && entry->kind == AST_VAR_DEF) {
+      /* `using a = ...;` 的登记（marker = 变量定义节点）：退出点直接调
+         `a.__dispose__()`，不需要闭包捕获。 */
+      ast_var_def_t *vd = (ast_var_def_t *)entry;
+      call = make_using_call(sema, vd->name);
+    } else {
+      ast_func_def_t *fn = (ast_func_def_t *)entry;
+      /* 名字是 arena NUL 终止字符串（设名时已分配） */
+      char fname[64];
+      snprintf(fname, sizeof(fname), "%.*s", (int)fn->name.len, fn->name.ptr);
+      call = make_defer_call(sema, fname, fn->base.tok_begin, fn->base.tok_end);
+    }
+    if (!call) continue;
     if (!head) { head = call; tail = call; }
     else { tail->next = call; tail = call; }
   }
@@ -335,6 +371,25 @@ void desugar_defers(sema_t *sema, ast_block_t *block,
   ast_node_t *defer_calls_tail = NULL;
 
   for (ast_node_t *s = block->stmts; s; s = s->next) {
+    /* `using a = e;`：登记该变量到作用域退出链（与 defer 同一 LIFO 序列），
+       退出点执行 `a.__dispose__()`。 */
+    if (s->kind == AST_VAR_DEF && ((ast_var_def_t *)s)->is_using) {
+      ast_var_def_t *vd = (ast_var_def_t *)s;
+      vd->is_using = false;
+      sema_scope_add_defer(scope, s); /* marker：收集时按 AST_VAR_DEF 分支处理 */
+      ast_node_t *call = make_using_call(sema, vd->name);
+      if (call) {
+        if (!defer_calls_head) {
+          defer_calls_head = call;
+          defer_calls_tail = call;
+        } else {
+          call->next = defer_calls_head;
+          defer_calls_head = call;
+        }
+      }
+      prev = s;
+      continue;
+    }
     if (s->kind == AST_DEFER) {
       ast_defer_t *d = (ast_defer_t *)s;
       ast_func_def_t *fn = d->closure;

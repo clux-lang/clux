@@ -46,6 +46,8 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
+#include "parser/lexer.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
@@ -454,6 +456,85 @@ static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
   if (value_is_error(sema->vm, lhs) || value_is_error(sema->vm, rhs) ||
       value_is_type(lhs, TYPE_KIND_VOID) || value_is_type(rhs, TYPE_KIND_VOID))
     return val_void(sema);
+
+  /* 魔法方法：**前导操作数**是 struct 且定义了对应方法时，把 `a op b` 展开成
+     `typeof(a)::__name__(a.&, b)`（与 `a.b()` 同一套糖，见
+     docs-backup/magic-methods-design.md）。内建类型优先：*T / ?T / [N]T 都有
+     自己的内建语义，不参与魔法派发。 */
+  {
+    const type_t *lt = value_type(lhs);
+    const type_t *ltc = lt ? type_strip_quals(lt) : NULL;
+    if (ltc) {
+      const char *mname = sema_magic_binop_name(b->op);
+      if (type_kind_of(ltc) == TYPE_KIND_STRUCT && mname &&
+          sema_magic_member(sema, ltc, mname)) {
+        /* ① lhs 结构体定义了对应魔法方法（含泛型）→ 展开成方法调用。 */
+        ast_node_t *rhs_arg = b->rhs;
+        if (rhs_arg) {
+          ast_node_t *addr = ast_addr_new(sema->arena, rhs_arg->tok_begin,
+                                          rhs_arg->tok_end);
+          if (!addr) return val_void(sema);
+          ((ast_addr_t *)addr)->operand = rhs_arg;
+          addr->is_generated = true;
+          rhs_arg = addr;
+        }
+        ast_node_t *call = sema_magic_make_call(
+            sema, b->lhs, mname, rhs_arg, b->base.tok_begin, b->base.tok_end);
+        if (!call) return val_void(sema);
+        ast_node_t *repl = call;
+        if (token_is(b->op, "!=")) {
+          /* a != b ⇒ !(a.__eq__(b))：没有 __ne__。 */
+          location_t loc = sema_loc(sema, (ast_node_t *)b);
+          ast_node_t *un = ast_unary_new(sema->arena, b->base.tok_begin,
+                                         b->base.tok_end);
+          const token_t *not_op =
+              arena_token_symbol(sema->arena, "!", &loc);
+          if (!un || !not_op) return val_void(sema);
+          ((ast_unary_t *)un)->op = not_op;
+          ((ast_unary_t *)un)->operand = call;
+          un->is_generated = true;
+          repl = un;
+        }
+        repl->next = (*node)->next;
+        *node = repl;
+        return sema_expr(sema, node, scope);
+      }
+      /* ② 其余聚合 `==` / `!=` → 展开成生成的 `__clux_eq_<T>(a.&, b.&)`。
+         optional / array 只允许在**编译器生成**的代码里出现（用户写
+         `?T == ?T` / `[N]T == [N]T` 仍按原规则拒绝）。 */
+      if ((token_is(b->op, "==") || token_is(b->op, "!=")) &&
+          !(lt && type_is_ptr(lt))) {
+        bool gen_only = type_kind_of(ltc) == TYPE_KIND_OPTION ||
+                        type_kind_of(ltc) == TYPE_KIND_ARRAY;
+        bool ok = (type_kind_of(ltc) == TYPE_KIND_STRUCT &&
+                   !((const struct_type_t *)ltc)->bitfield_ast) ||
+                  type_kind_of(ltc) == TYPE_KIND_UNION ||
+                  (gen_only && (*node)->is_generated);
+        if (ok) {
+          ast_node_t *call = sema_magic_eq_call(
+              sema, ltc, b->lhs, b->rhs, b->base.tok_begin, b->base.tok_end);
+          if (call) {
+            ast_node_t *repl = call;
+            if (token_is(b->op, "!=")) {
+              location_t loc = sema_loc(sema, (ast_node_t *)b);
+              ast_node_t *un = ast_unary_new(sema->arena, b->base.tok_begin,
+                                             b->base.tok_end);
+              const token_t *not_op =
+                  arena_token_symbol(sema->arena, "!", &loc);
+              if (!un || !not_op) return val_void(sema);
+              ((ast_unary_t *)un)->op = not_op;
+              ((ast_unary_t *)un)->operand = call;
+              un->is_generated = true;
+              repl = un;
+            }
+            repl->next = (*node)->next;
+            *node = repl;
+            return sema_expr(sema, node, scope);
+          }
+        }
+      }
+    }
+  }
   value_t *(*op)(vm_t *, value_t *, value_t *) = binop_of(b->op);
   if (!op) {
     char ob[16];

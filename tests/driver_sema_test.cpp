@@ -48,7 +48,7 @@ TEST(Driver, RunFileBareBlockReturnsZero) {
 TEST(Driver, RunFileEmptyBareBlockReturnsZero) {
   /* 空裸块语句也应完整通过流水线 */
   std::string path =
-      write_temp_file("func main():i32 { var x = 1; { } return x; }\n");
+      write_temp_file("func main():i32 { var x = 1; { } if (x != 1) { return 1; } return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -110,8 +110,8 @@ TEST(Driver, RunFileUnwrapAssertEndToEndPasses) {
       "    if (t != \"world\") { return 1; }\n"
       "  } else { return 2; }\n"
       "  var n:?i32 = 40;\n"
-      "  if (n != nil) { var v:i32 = n.!; return v + 2; }\n"
-      "  return 3;\n"
+      "  if (n != nil) { var v:i32 = n.!; if (v != 40) { return 3; } } else { return 4; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -178,7 +178,8 @@ TEST(Driver, RunFileEmptyStatementsReturnsZero) {
       "func main():i32 {\n"
       "  ;\n"
       "  var x:i32 = 1; ;\n"
-      "  return add(x, 2);\n"
+      "  if (add(x, 2) != 3) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -191,7 +192,8 @@ TEST(Driver, RunFileParamShadowsCaptureReturnsZero) {
       "func main():i32 {\n"
       "  var x:i32 = 100;\n"
       "  var f = func |x| (x:i32):i32 { return x; };\n"
-      "  return f(7);\n"
+      "  if (f(7) != 7) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -224,7 +226,10 @@ TEST(Driver, RunFileTypeExpressionsInTypePositionPass) {
       "  var a: TA = .[2]i32{ 3, 4 };\n"
       "  var t: <i32, i32> = .<i32, i32>{ 1, 2 };\n"
       "  var o: ?i32 = nil;\n"
-      "  return a[0] + t[0];\n"
+      "  if (a[0] != 3 || a[1] != 4) { return 1; }\n"
+      "  if (t[0] != 1 || t[1] != 2) { return 2; }\n"
+      "  if (o != nil) { return 3; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -249,4 +254,90 @@ TEST(Driver, RunFileTypeExpressionInVarInitRejected) {
         << decl << "\n--- stderr ---\n" << err;
     std::remove(path.c_str());
   }
+}
+
+/* ================================================================
+ * 方法调用实参校验（sema）
+ *
+ * 回归背景：成员调用分支只对实参求 shadow、**不做可赋值性校验**，形参类型错误
+ * 会一路漏到 C 后端，以 clang 的 "passing ... to parameter of incompatible type"
+ * 暴露——那是 C 类型错误，不是 clux 诊断，也不指出实参下标。现在与普通函数调用
+ * 用同一判据（implicit_cast）：失败即 clux 诊断，成功则由后端做布局兼容转换。
+ * ================================================================ */
+
+TEST(Driver, RunFileMethodCallArgTypeMismatchRejected) {
+  clux_expect_reject(
+      "struct V { x: i32; func add(self: *V, o: i32): i32 { return self.x + o; } }\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{ .x = 1 };\n"
+      "  var n = a.add(\"bad\");\n"
+      "  return n;\n"
+      "}\n",
+      "method 'add': argument 1: cannot convert str to i32", "method_arg_bad");
+}
+
+TEST(Driver, RunFileStaticMethodCallArgTypeMismatchRejected) {
+  clux_expect_reject(
+      "struct V { func add(self: *V, o: i32): i32 { return o; } }\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{};\n"
+      "  var n = V::add(a.&, \"bad\");\n"
+      "  return n;\n"
+      "}\n",
+      "cannot convert str to i32", "static_method_arg_bad");
+}
+
+TEST(Driver, RunFileMethodCallArgCountMismatchRejected) {
+  clux_expect_reject(
+      "struct V { func add(self: *V, o: i32): i32 { return o; } }\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{};\n"
+      "  var n = a.add(1, 2);\n"
+      "  return n;\n"
+      "}\n",
+      "method 'add': expected 1 argument(s), got 2", "method_arg_count");
+}
+
+TEST(Driver, RunFileMethodCallArgNarrowLiteralRejected) {
+  /* 与普通函数调用一致：窄化（i32 字面量 → i8 形参）不是隐式转换。 */
+  clux_expect_reject(
+      "struct V { func m(self: *V, x: i8): i32 { return x as i32; } }\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{};\n"
+      "  return a.m(1);\n"
+      "}\n",
+      "cannot convert i32 to i8", "method_arg_narrow");
+}
+
+TEST(Driver, RunFileMethodCallArgLiteralWideningAccepted) {
+  /* 拓宽（i32 字面量 → i64 形参）是隐式转换，两处都必须放行。 */
+  clux_expect_program_ok(
+      "struct V { func m(self: *V, x: i64): i64 { return x; } }\n"
+      "func f(x: i64): i64 { return x; }\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{};\n"
+      "  var p = a.m(1);\n"
+      "  var q = f(1);\n"
+      "  if (p != q) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "method_arg_widen");
+}
+
+TEST(Driver, RunFileMethodCallArgDuckStructAccepted) {
+  /* 结构兼容的不同具名 struct 可以传给形参（与赋值/普通调用同一规则）：
+     sema 放行 + 后端按形参类型重解释（此前会在 C 侧撞 incompatible type）。 */
+  clux_expect_program_ok(
+      "struct A { x: i32; }\n"
+      "struct B { x: i32; }\n"
+      "struct S { func m(self: *S, o: B): i32 { return o.x; } }\n"
+      "func f(o: B): i32 { return o.x; }\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{};\n"
+      "  var a: A = .A{ .x = 9 };\n"
+      "  if (s.m(a) != 9) { return 1; }\n"
+      "  if (f(a) != 9) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "method_arg_duck");
 }

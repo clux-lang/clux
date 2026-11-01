@@ -38,6 +38,9 @@ static bool ast_is_lvalue(const ast_node_t *e) {
     }
 }
 
+/* 对其它 lowering 文件（c_lower_literal.c 的切片）暴露同一判据。 */
+bool c_lower_is_lvalue(const ast_node_t *e) { return ast_is_lvalue(e); }
+
 static cir_expr_t *lower_call_arg(lower_ctx_t *lc, ast_node_t *a) {
     return lower_expr(lc, a);
 }
@@ -323,6 +326,106 @@ static cir_expr_t *lower_bitfield_construct(lower_ctx_t *lc,
 }
 
 /* ========================== end bitfield ========================== */
+
+/* ========================== struct / union 判等 ========================== */
+
+/* 判等辅助函数名（writer 侧同名生成）：`clux_eq_<c_name 去掉 struct 前缀>`。 */
+static const char *eq_helper_cname(lower_ctx_t *lc, const cir_type_t *ct) {
+    const char *tail = cir_type_cname_tail(ct);
+    if (!tail) return NULL;
+    size_t n = strlen(tail);
+    char *buf = (char *)arena_alloc(lc->arena, n + 9, 1);
+    if (!buf) return NULL;
+    snprintf(buf, n + 9, "clux_eq_%s", tail);
+    return buf;
+}
+
+/* 登记判等所需的辅助函数：struct 字段 / union 成员 / array 元素 / option 载荷
+   递归展开。**先登记依赖、后登记自己**（后序），writer 顺序发射定义即可保证
+   依赖已定义。bitfield struct 与其余类型按字节比较，不需要辅助函数。 */
+static void eq_register(lower_ctx_t *lc, cir_type_t *ct) {
+    if (!lc || !ct) return;
+    switch (ct->kind) {
+    case CIR_TYPE_STRUCT:
+        if (ct->is_bitfield) return;
+        break;
+    case CIR_TYPE_UNION:
+    case CIR_TYPE_ARRAY:
+    case CIR_TYPE_OPTION:
+        break;
+    default:
+        return;
+    }
+    for (cir_type_ref_t *it = lc->unit->eq_helpers; it; it = it->next)
+        if (it->type == ct) return;
+    if (ct->kind == CIR_TYPE_STRUCT || ct->kind == CIR_TYPE_UNION) {
+        for (cir_field_t *f = ct->fields; f; f = f->next) {
+            /* str 成员/字段 → 辅助函数体用 clux_str_eq（writer 只在
+               uses_str_cmp 时发射它）。 */
+            if (f->type && f->type->kind == CIR_TYPE_STR)
+                lc->unit->uses_str_cmp = true;
+            eq_register(lc, f->type);
+        }
+    } else {
+        if (ct->elem && ct->elem->kind == CIR_TYPE_STR)
+            lc->unit->uses_str_cmp = true;
+        eq_register(lc, ct->elem);
+    }
+    cir_unit_add_eq_helper(lc->unit, ct);
+}
+
+/* `lhs == rhs`（/`!=`）→ 生成的按字段判等函数调用。struct 与 tag union 都走
+   这条（sema 允许两者比较；C 不能直接 `==` 复合值）。 */
+static cir_expr_t *lower_aggregate_eq(lower_ctx_t *lc, ast_binary_t *b,
+                                      ast_node_t *lhs_ast,
+                                      ast_node_t *rhs_ast) {
+    const type_t *lt = infer_expr_type(lc, lhs_ast);
+    if (!lt) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)b),
+                   "c backend: cannot infer equality operand type");
+        lc->failed = true;
+        return NULL;
+    }
+    const type_t *st = type_strip_quals(lt);
+    cir_type_t *ct = map_type(lc, st);
+    if (!ct) {
+        diag_error(lc->sema->diag, sema_loc(lc->sema, (ast_node_t *)b),
+                   "c backend: cannot materialize equality type");
+        lc->failed = true;
+        return NULL;
+    }
+    cir_expr_t *l = lower_compat_value(lc, st, lhs_ast);
+    cir_expr_t *r = lower_compat_value(lc, st, rhs_ast);
+    if (!l || !r) return NULL;
+    /* 右值（调用结果 / 构造）不能取地址：先物化成临时左值。 */
+    if (!ast_is_lvalue(lhs_ast))
+        l = cir_expr_temp_lvalue(lc->arena, ct, l);
+    if (!ast_is_lvalue(rhs_ast))
+        r = cir_expr_temp_lvalue(lc->arena, ct, r);
+    if (!l || !r) return NULL;
+    cir_expr_t *eq = NULL;
+    if (ct->is_bitfield) {
+        /* 位域类型没有成员级语义：整块按字节比较。 */
+        lc->unit->uses_mem_eq = true;
+        eq = cir_expr_mem_eq(lc->arena, ct, l, r);
+    } else {
+        eq_register(lc, ct);
+        const char *hname = eq_helper_cname(lc, ct);
+        if (!hname) return NULL;
+        eq = cir_expr_call(lc->arena, hname, NULL);
+        if (!eq) return NULL;
+        cir_expr_append_arg(eq,
+                            cir_expr_unary(lc->arena, "&", l));
+        cir_expr_append_arg(eq,
+                            cir_expr_unary(lc->arena, "&", r));
+        /* 辅助函数体里用 memcmp（标量/指针/函数值等叶子）。 */
+        lc->unit->uses_mem_eq = true;
+    }
+    if (!eq) return NULL;
+    return token_is(b->op, "!=") ? cir_expr_unary(lc->arena, "!", eq) : eq;
+}
+
+/* ========================== end struct 判等 ========================== */
 
 cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call);
 
@@ -610,17 +713,11 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         cir_expr_t *recv = lower_expr(lc, mem->object);
         if (!recv) return NULL;
         const type_t *rt = infer_expr_type(lc, mem->object);
-        const type_t *self_t = NULL;
-        ast_var_def_t *self_vd = (ast_var_def_t *)m->def->params;
-        if (self_vd) {
-            self_t = self_vd->resolved_type;
-            if (!self_t && self_vd->type_expr)
-                self_t = sema_resolve_type_slot(lc->sema, &self_vd->type_expr);
-        }
-        if (self_t && type_kind_of(type_strip_quals(self_t)) == TYPE_KIND_PTR &&
-            (!rt || type_kind_of(type_strip_quals(rt)) != TYPE_KIND_PTR)) {
-            /* ref *T 形参：右值接收者（如 `f().m()`）先物化成临时左值，
-               否则 `&(call())` 在 C 里非法。 */
+        /* 实例调用的接收者一律按指针传参（语言基本设计）：`a.m()` ⇒ `&a`。
+           self 若是值形参，sema 的接收者可赋值性校验已按 `*T → T` 拒绝，这里
+           不会出现值形参的合法调用。右值接收者（`f().m()`）先物化临时左值，
+           否则 `&(call())` 在 C 里非法。 */
+        if (!rt || type_kind_of(type_strip_quals(rt)) != TYPE_KIND_PTR) {
             if (!ast_is_lvalue(mem->object)) {
                 cir_type_t *rct = rt ? map_type(lc, rt) : NULL;
                 if (!rct) return NULL;
@@ -659,8 +756,17 @@ cir_expr_t *lower_call(lower_ctx_t *lc, ast_call_t *call) {
         cir_expr_t *out = cir_expr_call(lc->arena, mcname, NULL);
         cir_expr_append_arg(out, cir_expr_ident(lc->arena, "NULL"));
         cir_expr_append_arg(out, recv);
-        for (ast_node_t *a = call->args; a; a = a->next) {
-            cir_expr_t *arg = lower_call_arg(lc, a);
+        /* 实参按**形参类型**做布局兼容转换（匿名 struct → 声明类型、tuple ↔
+           array 等）：与普通函数调用同一处理（见下方 `.c` 兜底分支）。此前
+           直接用 lower_call_arg，sema 允许的鸭子类型实参（struct A 传给字段
+           一致的 struct B 形参）会在 C 侧变成 "passing ... to parameter of
+           incompatible type"。实例方法的实参从形参 1（跳过 self）对齐。 */
+        const type_t *msig = m->def ? func_type_of_def(lc, m->def) : NULL;
+        size_t ai = 0;
+        for (ast_node_t *a = call->args; a; a = a->next, ai++) {
+            const type_t *pt = msig ? func_type_param(msig, ai + 1) : NULL;
+            cir_expr_t *arg = pt ? lower_compat_value(lc, pt, a)
+                                 : lower_call_arg(lc, a);
             if (!arg) return NULL;
             cir_expr_append_arg(out, arg);
         }
@@ -1121,6 +1227,14 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             if (!eq) return NULL;
             return neg ? cir_expr_unary(lc->arena, "!", eq) : eq;
         }
+        /* struct / tag union 判等：C 不能直接 `==` 两个复合值（此前会把
+           `a == b` 原样发给宿主编译器 → "invalid operands to binary
+           expression"）。改走按字段生成的判等辅助函数（语义与 sema/VM 的
+           struct_eq / union_eq 一致）。 */
+        if (lt && rt && (token_is(b->op, "==") || token_is(b->op, "!=")) &&
+            (type_kind_of(type_strip_quals(lt)) == TYPE_KIND_STRUCT ||
+             type_kind_of(type_strip_quals(lt)) == TYPE_KIND_UNION))
+            return lower_aggregate_eq(lc, b, b->lhs, b->rhs);
         if (lt && rt && type_strip_quals(lt)->kind == TYPE_KIND_STR &&
             type_strip_quals(rt)->kind == TYPE_KIND_STR &&
             (token_is(b->op, "==") || token_is(b->op, "!="))) {
@@ -1363,7 +1477,18 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
             return val ? cir_expr_unary(lc->arena, "&", val) : NULL;
         }
         cir_expr_t *v = lower_expr(lc, a->operand);
-        return v ? cir_expr_unary(lc->arena, "&", v) : NULL;
+        if (!v) return NULL;
+        /* 右值物化：仅用于**编译器生成的取址**（魔法方法派发的 `b.&`）——
+           物化成 C99 复合字面量 `&(T){v}`（`(T[]){v}[0]`，对 struct 也成立），
+           不需要临时变量。用户写的 `x.&` 在 sema 已要求可寻址。 */
+        if (a->base.is_generated && a->operand &&
+            !ast_is_lvalue(a->operand)) {
+            const type_t *ot = infer_expr_type(lc, a->operand);
+            cir_type_t *ct = ot ? map_type(lc, ot) : NULL;
+            if (!ct) return NULL;
+            v = cir_expr_temp_lvalue(lc->arena, ct, v);
+        }
+        return cir_expr_unary(lc->arena, "&", v);
     }
     case AST_CONSTRUCT: {
         ast_construct_t *c = (ast_construct_t *)e;

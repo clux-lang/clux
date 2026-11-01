@@ -55,6 +55,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/sema_generic.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
@@ -266,6 +267,7 @@ value_t *ex_ident(sema_t *sema, ast_node_t **node,
          __ctx 是调用帧绑定的隐藏局部（被调用的 func 值），`.env` 是 env 块的
          借用 struct 值（VM FIELD_GET 的闭包分支），`.cap` 就是普通结构体字段
          ——运行时不再有"按名查 closure_scope"的隐式捕获读取。 */
+
       if (sym && sym->kind == SEMA_SYM_VAR && sym->is_capture &&
           sema->fn.def && sema->fn.def->capture_type_id != 0) {
         uint32_t tb = (*node)->tok_begin, te = (*node)->tok_end;
@@ -498,6 +500,23 @@ value_t *ex_unary(sema_t *sema, ast_node_t **node,
       /* 错误恢复产物静默通过，避免级联二次诊断 */
       if (is_poison(sema, operand))
         return val_void(sema);
+      /* 魔法方法：操作数是 struct 且有对应方法 → `-a` ⇒ `typeof(a)::__neg__(a.&)`。 */
+      {
+        const type_t *ot = value_type(operand);
+        const type_t *otc = ot ? type_strip_quals(ot) : NULL;
+        if (otc && type_kind_of(otc) == TYPE_KIND_STRUCT) {
+          const char *mname = sema_magic_unop_name(n->op);
+          if (mname && sema_magic_member(sema, otc, mname)) {
+            ast_node_t *call = sema_magic_make_call(
+                sema, n->operand, mname, NULL, (*node)->tok_begin,
+                (*node)->tok_end);
+            if (!call) return val_void(sema);
+            call->next = (*node)->next;
+            *node = call;
+            return sema_expr(sema, node, scope);
+          }
+        }
+      }
       value_t *result = NULL;
       if (token_is(n->op, "-")) {
         result = value_neg(sema->vm, operand);
@@ -527,10 +546,11 @@ value_t *ex_unary(sema_t *sema, ast_node_t **node,
 /* AST_UNWRAP 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
 value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
-      /* optional 解包：.!（assert）/ .?（try）。
-         .! 要求操作数是 ?T：none 时运行期 panic（用户范式先判空再解包：
-         if (x != nil) { var v = x.!; ... }）。返回 inner 类型 shadow。
-         .? 仅词法预留（try），语义未实现 → 编译期报错。 */
+      /* optional 解包：`.!`（assert/panic）。
+         **optional 不支持 `.'?'**（try）——`.'?'` 只用于 result-like 结构体
+         （`ok()` / `value()` / `error()`）；optional 用 `.!` 解包，
+         需要分支时自己写 `if (x == nil)`。`.!` 要求操作数是 ?T：none 时
+         运行期 panic。返回 inner 类型 shadow。 */
       ast_unwrap_t *uw = (ast_unwrap_t *)*node;
       value_t *operand = sema_expr(sema, &uw->operand, scope);
       if (is_poison(sema, operand))
@@ -571,7 +591,8 @@ value_t *ex_unwrap(sema_t *sema, ast_node_t **node,
       }
       if (uw->op && token_is(uw->op, "?")) {
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "operator '.?' (try) is not implemented yet");
+                   "operator '.?' is only supported on result-like structs "
+                   "(ok()/value()/error()); optionals use '.!' to unwrap");
         return val_void(sema);
       }
       return value_make_shadow(sema->vm, type_option_inner(ot));
@@ -644,10 +665,30 @@ value_t *ex_deref(sema_t *sema, ast_node_t **node,
       const type_t *ot = value_type(operand);
       const type_t *base = ptr_type_base(ot);
       if (!base) {
+        /* 魔法解引用：`a.*` 且 a 是带 `__deref__` 的结构体 ⇒ 沿链展开到
+           指针再解引用（环/深度受限）。 */
+        {
+          ast_node_t *new_recv = NULL;
+          int drc = sema_magic_deref_star_rewrite(
+              sema, &new_recv, ot, n->operand, (*node)->tok_begin,
+              (*node)->tok_end);
+          if (drc < 0) return val_void(sema);
+          if (drc > 0) {
+            ast_node_t *deref = ast_deref_new(sema->arena, (*node)->tok_begin,
+                                              (*node)->tok_end);
+            if (!deref) return val_void(sema);
+            ((ast_deref_t *)deref)->operand = new_recv;
+            deref->is_generated = true;
+            deref->next = (*node)->next;
+            *node = deref;
+            return sema_expr(sema, node, scope);
+          }
+        }
         char tn[64];
         op_type_name(operand, tn, sizeof(tn));
         diag_error(sema->diag, sema_loc(sema, *node),
-                   "cannot dereference a value of type %s (expected a pointer)",
+                   "cannot dereference a value of type %s (expected a pointer "
+                   "or a type with '__deref__')",
                    tn);
         return val_void(sema);
       }
@@ -655,6 +696,27 @@ value_t *ex_deref(sema_t *sema, ast_node_t **node,
 }
 
 /* AST_ADDR 处理器（自 sema_expr 拆出；纯搬移，逻辑逐字一致） */
+/* 用户写 `x.&` 的可寻址性判定：变量 / 跨模块变量 / 字段 / 下标 / 解引用。
+   编译器生成的取址（魔法方法派发的 `b.&`）不走这里——右值物化由后端用
+   复合字面量 `&(T){v}` 完成。 */
+static bool expr_is_addressable(const ast_node_t *e) {
+  if (!e) return false;
+  switch (e->kind) {
+  case AST_IDENT:
+  case AST_SCOPE_REF:
+  case AST_DEREF:
+  case AST_INDEX:
+    return true;
+  case AST_MEMBER: {
+    const ast_member_t *m = (const ast_member_t *)e;
+    if (m->is_bitfield) return false;
+    return expr_is_addressable(m->object);
+  }
+  default:
+    return false;
+  }
+}
+
 value_t *ex_addr(sema_t *sema, ast_node_t **node,
                               sema_scope_t *scope) {
       /* 后置取地址 x.&（m3-design §8.2）：由值得指针。返回 ref *T 类型的
@@ -669,6 +731,14 @@ value_t *ex_addr(sema_t *sema, ast_node_t **node,
       if (!t || type_kind_of(t) == TYPE_KIND_VOID || type_kind_of(t) == TYPE_KIND_ERROR) {
         diag_error(sema->diag, sema_loc(sema, *node),
                    "cannot take address of value of unknown type");
+        return val_void(sema);
+      }
+      /* 用户写的取址要求可寻址；右值（字面量/调用结果/构造表达式）只能由
+         编译器在魔法方法派发处物化，用户代码写 `(5).&` 仍是错误。 */
+      if (!(*node)->is_generated && !expr_is_addressable(n->operand)) {
+        diag_error(sema->diag, sema_loc(sema, *node),
+                   "cannot take the address of a temporary value (expected a "
+                   "variable, field, index or dereference)");
         return val_void(sema);
       }
       const type_t *ptr = type_ptr_intern(sema->vm, t);

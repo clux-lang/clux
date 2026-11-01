@@ -422,11 +422,13 @@ TEST(DriverImport, CrossModuleGenericUsesDefinitionGlobals) {
       "var base: i32 = 5;\n"
       "func main(): i32 {\n"
       "  var a = gl::add_base[i32](1);\n"
-      "  if (a != 101) { return 1; }\n"
+      "  if (a != 101) { return 1; }\n"          /* 100 + 1，不改 base */
+      "  if (gl::base != 100) { return 2; }\n"
       "  var c: gl::Counter[i32] = .{ .value = 1 };\n"
       "  var b = c.bump();\n"
-      "  if (b != 102) { return 2; }\n"
-      "  if (gl::base != 102) { return 3; }\n"
+      "  if (b != 101) { return 3; }\n"          /* base 100 → 101 */
+      "  if (gl::base != 101) { return 4; }\n"   /* 定义模块的全局被改写 */
+      "  if (base != 5) { return 5; }\n"         /* 调用方的同名全局不受影响 */
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
@@ -474,4 +476,25 @@ TEST(DriverImport, CrossModuleGenericMethodExplicitTypeArgs) {
       "  return c.get() - 6;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(main_path.c_str()), 0);
+}
+
+/* 跨模块 struct 判等：被比较的类型定义在导入模块里，`clux_eq_*` 辅助函数在
+   使用侧生成（C 侧按类型的 CIR 名派生，导入类型的 C 名来自被导入模块）。 */
+TEST(DriverImport, CrossModuleStructEquality) {
+  ImportCase c("struct_eq");
+  std::string mod = c.write("vals",
+      "export struct V { x: i32; s: str; }\n"
+      "export func mk(x: i32, s: str): V { return .V{ .x = x, .s = s }; }\n");
+  std::string main_path = c.entry("main",
+      "import vals from \"" + mod + "\";\n"
+      "func main(): i32 {\n"
+      "  var a: vals::V = vals::mk(1, \"hi\");\n"
+      "  var b: vals::V = vals::mk(1, \"hi\");\n"
+      "  var c: vals::V = vals::mk(2, \"hi\");\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  if (a != b) { return 2; }\n"
+      "  if (a == c) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(main_path);
 }

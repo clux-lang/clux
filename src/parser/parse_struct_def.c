@@ -157,7 +157,11 @@ ast_node_t *parse_struct_def(parser_t *p) {
             continue;
         }
         if (check_keyword(p, "func")) {
+            /* 成员方法：放行 `__` 前缀名（魔法方法），sema 校验名字/签名。 */
+            bool saved_allow = p->allow_magic_name;
+            p->allow_magic_name = true;
             ast_node_t *mf = parse_func_def(p);
+            p->allow_magic_name = saved_allow;
             if (!mf || mf->kind == AST_ERROR) return mf;
             if (member_decorators) ((ast_func_def_t *)mf)->decorators = member_decorators;
             ast_append(&members, &members_last, NULL, mf);

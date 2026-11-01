@@ -80,6 +80,7 @@ static const char *const g_keywords[] = {
     "union",   "usize",  "var",     "void",    "volatile", "while",
     "foreach", "of",     /* 前脱糖语法糖（-> 索引 for 循环，见 src/desugar/） */
     "interface", "implements", /* M7 §31：编译期接口 / struct 实现声明 */
+    "using",                  /* using a = e; → var + 作用域退出 __dispose__ */
 };
 
 /* ---- Internal: character classes ---- */

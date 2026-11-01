@@ -41,6 +41,23 @@ void cir_unit_add_header_type(cir_unit_t *u, cir_type_t *t) {
     u->header_types = r;
 }
 
+/* struct 判等辅助函数登记：按类型指针去重，保持登记顺序（lowering 侧先登记
+   依赖、后登记使用者，writer 顺序发射即可保证先定义后使用）。 */
+void cir_unit_add_eq_helper(cir_unit_t *u, cir_type_t *t) {
+    if (!u || !t || !u->arena) return;
+    for (cir_type_ref_t *it = u->eq_helpers; it; it = it->next)
+        if (it->type == t) return;
+    cir_type_ref_t *r = (cir_type_ref_t *)arena_calloc(
+        u->arena, 1, sizeof(*r), ALIGNOF(max_align_t));
+    if (!r) return;
+    r->type = t;
+    if (u->eq_helpers_last) u->eq_helpers_last->next = r;
+    else u->eq_helpers = r;
+    u->eq_helpers_last = r;
+}
+
+
+
 void cir_unit_add_include(cir_unit_t *u, arena_t *arena, const char *include) {
     if (!u || !include) return;
     size_t n = u->include_count + 1;

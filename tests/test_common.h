@@ -139,8 +139,14 @@ inline std::string slurp(const std::string &path) {
  * 销毁序列漏一条就留一个未释放堆块，而退出码仍是 0——只看 rc 会漏掉。
  *
  * 返回 driver 的退出码；*err 收全部 stderr（可为 nullptr）。
+ *
+ * 注意：`driver_run_file` 只返回**编译**结果（0 = 编译通过），不返回程序的
+ * 退出码；需要断言程序运行行为时必须用 `driver_run_file_exit`（见
+ * `clux_run_capture_exit` / `clux_expect_program_ok`）。
  */
-inline int clux_run_capture(const std::string &path, std::string *err) {
+inline int clux_run_capture_exit(const std::string &path, std::string *err,
+                                 int *exit_code) {
+  if (exit_code) *exit_code = -1;
   fflush(stderr);
   const std::string cap = clux_test_temp_dir() + "/clux_capture_stderr.txt";
 #ifdef _WIN32
@@ -151,7 +157,7 @@ inline int clux_run_capture(const std::string &path, std::string *err) {
   }
   const int saved = _dup(2);
   _dup2(_fileno(tmp), 2);
-  const int rc = driver_run_file(path.c_str());
+  const int rc = driver_run_file_exit(path.c_str(), exit_code);
   fflush(stderr);
   _dup2(saved, 2);
   _close(saved);
@@ -164,7 +170,7 @@ inline int clux_run_capture(const std::string &path, std::string *err) {
   }
   const int saved = dup(2);
   dup2(fileno(tmp), 2);
-  const int rc = driver_run_file(path.c_str());
+  const int rc = driver_run_file_exit(path.c_str(), exit_code);
   fflush(stderr);
   dup2(saved, 2);
   close(saved);
@@ -172,6 +178,11 @@ inline int clux_run_capture(const std::string &path, std::string *err) {
 #endif
   if (err) *err = slurp(cap);
   return rc;
+}
+
+/** 同上，但不关心程序退出码（只要编译结果）。 */
+inline int clux_run_capture(const std::string &path, std::string *err) {
+  return clux_run_capture_exit(path, err, nullptr);
 }
 
 /** 正例：退出码 0，且 stderr 里没有 `memory leak`。 */
@@ -183,6 +194,34 @@ inline void clux_expect_ok(const std::string &src,
   EXPECT_EQ(rc, 0) << src << "\n--- stderr ---\n" << err;
   EXPECT_EQ(err.find("memory leak"), std::string::npos)
       << "destruction sequence leaked:\n" << err << "\n--- src ---\n" << src;
+}
+
+/**
+ * 正例（**运行**语义）：编译通过，且程序自身 `main` 返回 0、stderr 无泄漏。
+ *
+ * 与 `clux_expect_ok` 的区别：后者只看编译结果（`driver_run_file` 不返回程序
+ * 退出码），所以程序里的 `return 1;` 断言**不会**让它失败。凡是要验证运行时
+ * 行为（切片别名、判等结果、圆整/越界……）的用例都应使用本函数。
+ */
+inline void clux_expect_program_ok(const std::string &src,
+                                   const std::string &tag = "clux_prog") {
+  const std::string path = write_temp_file(src, tag);
+  std::string err;
+  int code = -1;
+  const int rc = clux_run_capture_exit(path, &err, &code);
+  EXPECT_EQ(rc, 0) << src << "\n--- stderr ---\n" << err;
+  EXPECT_EQ(code, 0) << "program returned " << code << "\n--- src ---\n" << src
+                     << "\n--- stderr ---\n"
+                     << err;
+  EXPECT_EQ(err.find("memory leak"), std::string::npos)
+      << "destruction sequence leaked:\n" << err << "\n--- src ---\n" << src;
+}
+
+/** 已有源码文件的正例（运行语义）：编译通过且 `main` 返回 0。 */
+inline void clux_expect_program_file_ok(const std::string &path) {
+  int code = -1;
+  EXPECT_EQ(driver_run_file_exit(path.c_str(), &code), 0) << path;
+  EXPECT_EQ(code, 0) << "program returned " << code << " (" << path << ")";
 }
 
 /** 负例：编译期拒绝（driver 返回 1），且诊断包含 needle。 */

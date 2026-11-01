@@ -16,6 +16,24 @@
  * 函数），求值实参 → value_call。
  * =========================================================================== */
 
+/* 生成函数（`__clux_eq_<T>` 等）由 sema 在 walk 期间创建：CTFE 若在 walk 队列
+   处理它之前就解释调用（comptime 折叠可能发生在生成它的那次 walk 里），body
+   里的复合 `==` 还没展开成调用。解释前先确保它已被 walk（幂等）。 */
+static void ctfe_ensure_walked(ctfe_ctx_t *ctx, ast_func_def_t *fn) {
+    if (!ctx || !ctx->sema || !fn) return;
+    sema_t *sema = ctx->sema;
+    size_t n = sema->funcs ? vec_len(sema->funcs) : 0;
+    for (size_t i = 0; i < n; i++) {
+        sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
+        if (!sf || sf->def != (ast_node_t *)fn) continue;
+        if (sf->is_walked) return;
+        if (!sf->scope) sema_build_func_scope(sema, sf);
+        sema_walk_function(sema, sf);
+        sf->is_walked = true;
+        return;
+    }
+}
+
 /* 解释 AST_FUNC_DEF：绑定实参到临时局部作用域 → 解释函数体 → 返回 clone 到
    调用方 scope 的返回值（无显式 return → void）。
    带捕获的函数（闭包/defer 改写产物 __defer_N）：在 caller 与 callee 之间
@@ -25,6 +43,23 @@
 value_t *ctfe_call_ast_fn(ctfe_ctx_t *ctx, ast_func_def_t *fn,
                           ast_node_t *args) {
     vm_t *vm = ctx->vm;
+    ctfe_ensure_walked(ctx, fn);
+    size_t argc = ctfe_count_siblings(args);
+    value_t *av[argc > 0 ? argc : 1];
+    size_t i = 0;
+    for (ast_node_t *a = args; a; a = a->next, i++) {
+        av[i] = ctfe_eval(ctx, a);
+        if (value_is_error(vm, av[i])) return av[i];
+    }
+    return ctfe_call_ast_fn_vals(ctx, fn, av, argc);
+}
+
+/* 同 ctfe_call_ast_fn，但实参**已经求值**（方法调用：接收者不能重求 AST）。
+   实参在调用方 scope 中产生，绑定到 callee 时 scope_define 会 clone。 */
+value_t *ctfe_call_ast_fn_vals(ctfe_ctx_t *ctx, ast_func_def_t *fn,
+                               value_t *const *args, size_t argc) {
+    vm_t *vm = ctx->vm;
+    ctfe_ensure_walked(ctx, fn);
     scope_t *caller_scope = vm->current_scope;
 
     /* 0. 闭包捕获：有 captures 时建独立 closure scope（parent=global_scope，
@@ -108,24 +143,36 @@ value_t *ctfe_call_ast_fn(ctfe_ctx_t *ctx, ast_func_def_t *fn,
     }
     scope_t *callee_scope = vm->current_scope;
 
-    /* 2. 绑定参数：实参链与参数声明链逐对对应。
+    /* 2. 绑定参数：已求值实参数组与参数声明链逐对对应。
+       实参按形参类型做隐式转换（字面量拓宽 / 结构兼容 / T→?T 等）——与运行期
+       传参一致；类型解析失败（泛型参数等）时保持原值。
        错误路径统一走 cleanup 标签（同时销毁 callee + closure scope）。
        有 closure scope 时 ctfe_hoist_error 只上移到 closure scope（pop 时
        销毁），因此错误路径须直接 clone 到 caller_scope——用 hoist_to_caller
        绕过中间 scope。 */
     value_t *ret = NULL;
-    ast_node_t *a = args;
-    for (ast_node_t *p = fn->params; p; p = p->next) {
-        if (!a) {
+    size_t ai = 0;
+    for (ast_node_t *p = fn->params; p; p = p->next, ai++) {
+        if (ai >= argc) {
             ret = ctfe_err(ctx, "ctfe: function call: too few arguments");
             goto cleanup;
         }
-        value_t *av = ctfe_eval(ctx, a);
+        value_t *av = args[ai];
         if (value_is_error(vm, av)) {
             ret = av;
             goto cleanup;
         }
         ast_var_def_t *vd = (ast_var_def_t *)p;
+        if (vd->type_expr) {
+            value_t *tv = ctfe_eval(ctx, vd->type_expr);
+            if (!value_is_error(vm, tv) && value_is_type(tv, TYPE_KIND_TYPE)) {
+                const type_t *pt = value_as(tv, const type_t *);
+                if (pt && value_type(av) && value_type(av) != pt) {
+                    value_t *casted = value_implicit_cast(vm, av, pt);
+                    if (!value_is_error(vm, casted)) av = casted;
+                }
+            }
+        }
         char nb[128];
         const char *name = ctfe_slice_to_cstr(vd->name, nb, sizeof nb);
         value_t *stored = scope_define(vm, vm->current_scope, name, av);
@@ -133,20 +180,39 @@ value_t *ctfe_call_ast_fn(ctfe_ctx_t *ctx, ast_func_def_t *fn,
             ret = stored;
             goto cleanup;
         }
-        a = a->next;
     }
-    if (a) {
+    if (ai < argc) {
         ret = ctfe_err(ctx, "ctfe: function call: too many arguments");
         goto cleanup;
     }
 
-    /* 3. 解释函数体（body 为 AST_BLOCK，内部自带块作用域） */
-    ctx->ctrl = CTFE_CTRL_NONE;
-    ctx->ret_value = NULL;
-    value_t *stmt_r = ctfe_eval_stmt(ctx, fn->body);
-    if (value_is_error(vm, stmt_r)) {
-        ret = stmt_r;
-        goto cleanup;
+    /* 3. 解释函数体（body 为 AST_BLOCK，内部自带块作用域）。
+       return 值的类型上下文：函数声明的返回类型（`return nil` / T→?T 需要），
+       在进入 callee scope 后解析（类型表达式可能引用参数/局部类型）。 */
+    {
+        const type_t *saved_ret_type = ctx->ret_type;
+        if (fn->return_expr) {
+            /* 在 caller scope 里解析（不依赖参数值；失败则保持 NULL） */
+            vm->current_scope = caller_scope;
+            value_t *tv = ctfe_eval(ctx, fn->return_expr);
+            vm->current_scope = callee_scope;
+            if (!value_is_error(vm, tv) && value_is_type(tv, TYPE_KIND_TYPE))
+                ctx->ret_type = value_as(tv, const type_t *);
+            else
+                ctx->ret_type = NULL;
+        } else {
+            ctx->ret_type = NULL;
+        }
+        ctx->ctrl = CTFE_CTRL_NONE;
+        ctx->ret_value = NULL;
+        value_t *stmt_r = ctfe_eval_stmt(ctx, fn->body);
+        ctx->ret_type = saved_ret_type;
+        /* 控制流优先：`.?' 失败路径在函数体内产生 `return`，其后的表达式
+           求值可能留下哨兵错误——以 ctrl == RETURN 为准。 */
+        if (value_is_error(vm, stmt_r) && ctx->ctrl != CTFE_CTRL_RETURN) {
+            ret = stmt_r;
+            goto cleanup;
+        }
     }
 
     /* 4. 取返回值并 clone 到调用方 scope（必须在 pop 之前：ret_value 归

@@ -393,6 +393,9 @@ static void write_c(string_t *sb, const cir_unit_t *unit, const char *c_path,
     if (unit->types)
         cw_emit_types_with_prefix(sb, unit->types, "struct clux_env_");
 
+    /* struct 判等辅助函数：依赖上面的类型定义与 `clux_str_eq`。 */
+    cw_emit_eq_helpers(sb, unit);
+
     if (fns || globals) {
         cw_put(sb, "/* ---- function declarations ---- */\n");
         for (cir_function_t *f = fns; f; f = f->next)

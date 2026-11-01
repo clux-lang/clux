@@ -26,6 +26,8 @@ void cw_emit_types_with_prefix(string_t *sb, cir_type_t *types,
 void cw_emit_header_types(string_t *sb, cir_type_t *types);
 void cw_emit_header_signatures(string_t *sb, cir_signature_t *sigs);
 void cw_emit_bf_helpers(string_t *sb, cir_type_t *types);
+/* struct `==` / `!=` 的按字段判等辅助函数（原型 + 定义）。 */
+void cw_emit_eq_helpers(string_t *sb, const cir_unit_t *unit);
 
 void cw_write_params(string_t *sb, const cir_signature_t *sig, bool with_names,
                      const cir_function_t *fn);

@@ -42,7 +42,8 @@ TEST(Driver, RunFileQualifiedElementArray) {
       "  var vp:[2]volatile i32 = .[2]volatile i32{1, 2};\n"
       "  vp[0] = vp[0] + 5;\n"
       "  var cp:[2]const i32 = .[2]const i32{7, 8};\n"
-      "  return vp[0] + vp[1] + cp[0] + cp[1];\n"
+      "  if (vp[0] != 6 || vp[1] != 2 || cp[0] != 7 || cp[1] != 8) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -62,7 +63,9 @@ TEST(Driver, RunFileTypeDefAutoHoist) {
       "  var s = sum_pair(pa);\n"
       "  var vp:VolatilePair = .[2]volatile i32{1, 2};\n"
       "  vp[0] = vp[0] + 5;\n"
-      "  return (s as i32) + vp[0] + vp[1];\n"
+      "  if (s != 30) { return 1; }\n"
+      "  if (vp[0] != 6 || vp[1] != 2) { return 2; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -82,7 +85,8 @@ TEST(Driver, RunFileComptimeFoldArraySum) {
       "}\n"
       "func main():i32 {\n"
       "  var a = make_arr();\n"
-      "  return a[0] + a[1] + a[2];\n"
+      "  if (a[0] != 4 || a[1] != 5 || a[2] != 6) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -96,7 +100,8 @@ TEST(Driver, RunFileQualifierTypesViaHoist) {
       "func main():i32 {\n"
       "  var a:const i32 = 7;\n"
       "  var b:volatile i32 = 3;\n"
-      "  return a + b;\n"
+      "  if (a != 7 || b != 3) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

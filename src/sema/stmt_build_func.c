@@ -210,6 +210,7 @@ void resolve_func_captures(sema_t *sema, ast_func_def_t *fn,
         }
         const type_t *cap = type_struct_intern(sema->vm, fields, k);
         allocator_free(sema->vm->alloc, (void **)&fields);
+
         if (cap) {
           const sema_type_t *st = sema_type_register(sema, cap);
           if (st) {

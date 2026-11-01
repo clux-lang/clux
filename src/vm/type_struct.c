@@ -121,6 +121,8 @@ static value_t *struct_eq(vm_t *vm, value_t *a, value_t *b) {
         return value_make_shadow(vm, vm->type_bool);
 
     const type_t *t = value_type(a);
+    /* 判等在 sema 阶段已经展开成函数调用（`__clux_eq_<T>` / `T::__eq__`），
+       走到这里的 struct 值比较只剩内建逐字段语义。 */
     size_t n = struct_type_field_count(t);
     bool r = true;
     for (size_t i = 0; i < n && r; i++) {

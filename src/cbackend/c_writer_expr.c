@@ -72,6 +72,7 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         cw_put(sb, "(");
         cw_put(sb, e->type && e->type->c_name ? e->type->c_name : "int32_t");
         cw_put(sb, "){");
+        /* 无初始化项 = 零初始化（`{}` 在 C 里把所有成员清零；空聚合也合法）。 */
         if (e->type && e->type->kind == CIR_TYPE_ARRAY) cw_put(sb, ".data = {");
         {
             bool first = true;
@@ -105,36 +106,54 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         break;
     case CIR_EXPR_SLICE: {
         /* 运行时边界检查：low >= 0 && low <= high <= len；越界 abort。
-           源只求值一次（statement expression）。 */
+           源只求值一次（statement expression）。
+           **左值源**（`buf[0:2]` / `s.arr[lo:hi]` / `view[a:b]`）取 `&(源)`：视图
+           指向源对象自己的存储——写切片必须写回原数组，且同一对象的相同切片
+           下层指针必须相等。此前一律复制进 `clux_sl`，切片因此指向一个副本
+           （写切片改不到原数组，两个相同切片的 data 也不相等）。
+           右值源（调用结果 / 字面量）没有稳定存储，仍复制到临时量。 */
         const char *st = e->type && e->type->c_name ? e->type->c_name : "int32_t";
         const char *et = e->type && e->type->elem && e->type->elem->c_name
                              ? e->type->elem->c_name
                              : "int32_t";
         bool arr = e->src_type && e->src_type->kind == CIR_TYPE_ARRAY;
-        cw_put(sb, "({ __auto_type clux_sl = (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, "); int64_t clux_lo = (");
+        /* 左值源用指针访问（`clux_sp->data`），右值源用值访问（`clux_sl.data`）。 */
+        const char *base = e->lvalue_base ? "clux_sp" : "clux_sl";
+        const char *acc = e->lvalue_base ? "->" : ".";
+        cw_put(sb, "({ ");
+        if (e->lvalue_base) {
+            cw_put(sb, "__auto_type clux_sp = &(");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, "); ");
+        } else {
+            cw_put(sb, "__auto_type clux_sl = (");
+            cw_write_expr(sb, e->lhs);
+            cw_put(sb, "); ");
+        }
+        cw_put(sb, "int64_t clux_lo = (");
         if (e->rhs) cw_write_expr(sb, e->rhs);
         else cw_put(sb, "0");
         cw_put(sb, "); int64_t clux_hi = (");
         if (e->high) {
             cw_write_expr(sb, e->high);
         } else if (arr) {
-            cw_put(sb, "(int64_t)(sizeof(clux_sl.data) / sizeof(clux_sl.data[0]))");
+            cw_printf(sb,
+                      "(int64_t)(sizeof(%s%sdata) / sizeof(%s%sdata[0]))", base,
+                      acc, base, acc);
         } else {
-            cw_put(sb, "(int64_t)clux_sl.len");
+            cw_printf(sb, "(int64_t)%s%slen", base, acc);
         }
-        cw_put(sb, "); clux_slice_range((void *)clux_sl.data, (uint64_t)(");
+        cw_printf(sb, "); clux_slice_range((void *)%s%sdata, (uint64_t)(", base,
+                  acc);
         if (arr)
-            cw_put(sb, "sizeof(clux_sl.data) / sizeof(clux_sl.data[0])");
+            cw_printf(sb, "sizeof(%s%sdata) / sizeof(%s%sdata[0])", base, acc,
+                      base, acc);
         else
-            cw_put(sb, "clux_sl.len");
-        cw_put(sb, "), clux_lo, clux_hi, \"slice\"); (");
-        cw_put(sb, st);
-        cw_put(sb, "){ .data = (");
-        cw_put(sb, et);
-        cw_put(sb, " *)clux_sl.data + clux_lo, .len = (uint64_t)(clux_hi - "
-                   "clux_lo) }; })");
+            cw_printf(sb, "%s%slen", base, acc);
+        cw_printf(sb,
+                  "), clux_lo, clux_hi, \"slice\"); (%s){ .data = (%s *)%s%sdata "
+                  "+ clux_lo, .len = (uint64_t)(clux_hi - clux_lo) }; })",
+                  st, et, base, acc);
         break;
     }
     case CIR_EXPR_MAKE: {

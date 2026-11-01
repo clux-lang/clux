@@ -167,6 +167,16 @@ static bool unit_has_function(const cir_unit_t *u, const char *name) {
     return false;
 }
 
+/* 生成的 struct 判等辅助函数（`clux_eq_<类型名后缀>`）在本单元内有定义。 */
+static bool unit_has_eq_helper(const cir_unit_t *u, const char *name) {
+    if (!name || strncmp(name, "clux_eq_", 8) != 0) return false;
+    for (const cir_type_ref_t *r = u->eq_helpers; r; r = r->next) {
+        const char *tail = cir_type_cname_tail(r->type);
+        if (tail && strcmp(name + 8, tail) == 0) return true;
+    }
+    return false;
+}
+
 static bool call_target_known(const cir_unit_t *u, const char *name) {
     static const char *const helpers[] = {
         "clux_bf_get", "clux_bf_set", "clux_bf_load", "clux_bf_store",
@@ -181,6 +191,7 @@ static bool call_target_known(const cir_unit_t *u, const char *name) {
     for (size_t i = 0; helpers[i]; i++)
         if (strcmp(name, helpers[i]) == 0) return true;
     if (strncmp(name, "clux_bf_make_", 13) == 0) return true;
+    if (unit_has_eq_helper(u, name)) return true;
     /* extern cfunc：符号由外部库定义（原型已在本单元里声明）。 */
     if (cir_unit_has_extern_symbol(u, name)) return true;
     return unit_has_function(u, name);

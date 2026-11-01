@@ -576,13 +576,13 @@ TEST_F(SemaTest, UnwrapAssertOnNonOptionalErrors) {
 }
 
 TEST_F(SemaTest, UnwrapTryNotImplementedErrors) {
-    /* .? try 仅词法预留，语义未实现 → 编译错误 */
+    /* optional 不支持 .?：.? 只用于 result-like 结构体，optional 用 .! */
     EXPECT_FALSE(analyze(
         "func main(): void {"
         "  var x:?i32 = 5;"
         "  var y = x.?;"
         "}"));
-    expect_message(0, "operator '.?' (try) is not implemented yet");
+    expect_message(0, "operator '.?' is only supported on result-like structs");
 }
 
 TEST_F(SemaTest, UnwrapTryOnNonOptionalErrors) {

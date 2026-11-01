@@ -51,26 +51,34 @@ int driver_load_source(allocator_t *alloc,
 int driver_lex_file(allocator_t *alloc, const char *path, vec_t **out_pool);
 
 /**
- * 流水线顶层入口：加载 → 词法分析 → 语法分析 → 语义分析 → 输出 AST。
+ * 流水线顶层入口：编译（加载 → 词法 → 语法 → 语义 → C 后端）**并运行**。
  *
- * 词法错误直接快速失败（返回 1）。词法通过后进入语法分析；
- * 语法错误时输出诊断到 stderr（返回 1）。语法通过后进入语义分析；
- * 语义错误时输出诊断到 stderr（返回 1，不输出 AST）。
+ * 返回：**程序 `main` 的返回值**（void / 非整数 main 记 0）——
+ *   0  —— 编译并运行成功（main 返回 0）
+ *   N  —— 编译成功但 main 返回 N
+ *   1  —— 编译错误（文件无法打开 / 词法 / 语法 / 语义 / C 后端），或
+ *          程序无法启动 / 异常终止
  *
- * 返回进程退出码：
- *   0  —— 成功（无词法/语法/语义错误、文件可读）
- *   1  —— 编译错误（文件无法打开 / 词法错误 / 语法错误 / 语义错误）
+ * 注意：这是测试用来断言**运行时行为**的入口。只关心"能否编译"的用例应当
+ * 区分编译错误与运行结果时，用 `driver_run_file_exit`（它把编译状态与 main
+ * 返回值分开返回）。
  */
 int driver_run_file(const char *path);
 
 /**
- * 同 `driver_run_file`，但把 main 的整数返回值经 `*exit_code` 带回
- * （void / 非整数 main 记为 0）。`clux run` 用它把退出码传回进程，
- * 与 `clux build` 生成的可执行文件保持一致（差分测试依赖这一点）。
- *
- * 返回：0 成功（此时 *exit_code 有效）；1 编译/运行错误。
+ * 同 `driver_run_file`，但把编译状态与 main 的整数返回值**分开**返回：
+ * 返回 0 = 编译成功且在 `*exit_code` 里给出 main 的返回值（void / 非整数
+ * main 记 0）；返回 1 = 编译/启动/运行错误（此时 *exit_code 无意义）。
+ * `clux run` 用它把退出码传回进程。
  */
 int driver_run_file_exit(const char *path, int *exit_code);
+
+/**
+ * 编译选项：魔法方法 `__deref__` 的展开深度（`--magic-deref-depth=N`）。
+ * 进程级生效（在调用任何 driver_* 之前设置）；depth < 0 表示清除覆盖，
+ * 回落到环境变量 `CLUX_MAGIC_DEREF_DEPTH` / 默认常量。0 = 禁用展开。
+ */
+void driver_set_magic_deref_depth(int depth);
 
 
 #ifdef __cplusplus

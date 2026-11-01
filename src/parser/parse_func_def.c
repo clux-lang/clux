@@ -320,7 +320,9 @@ ast_node_t *parse_func_like_ex(parser_t *p, ast_kind_t expected_kind,
     strslice_t name = pre_name.len > 0 ? pre_name : STRSLICE_EMPTY;
     if (pre_name.len == 0 &&
         check_kind(p, TOKEN_TYPE_IDENTIFIER) && !check_symbol(p, "(")) {
-        {
+        /* struct 成员方法位置放行 `__` 前缀（魔法方法）；名字是否合法由
+           sema 的魔法表校验（未知魔法名报错）。其它位置保持保留字拒绝。 */
+        if (!p->allow_magic_name) {
             ast_node_t *rerr = parse_reserved_ident_error(p, cur_token(p), "function name");
             if (rerr) return rerr;
         }

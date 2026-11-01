@@ -316,15 +316,16 @@ TEST(Driver, RunFileCUnionConstructSharedMemoryPasses) {
       "func main(): i32 {\n"
       "  var u = .U{.i = 42};\n"
       "  if (u.i != 42)          { return 1; }\n"
-      "  if (u.f != 0.0f32)      { return 2; }\n"
       "  u.f = 1.5f32;\n"
-      "  if (u.f != 1.5f32)      { return 3; }\n"
+      "  if (u.f != 1.5f32)      { return 2; }\n"
+      "  if (u.i == 42)          { return 3; }\n"   /* 共享 offset 0：i 被 f 的位型覆盖 */
       "  u.i = 7;\n"
       "  if (u.i != 7)           { return 4; }\n"
       "  u.b = true;\n"
       "  if (u.b != true)        { return 5; }\n"
+      "  if (u.i == 7)           { return 6; }\n"   /* b 写在 offset 0，i 随之变化 */
       "  var u2: U = u;\n"
-      "  if (u2.i != 7)          { return 6; }\n"
+      "  if (u2.b != true)       { return 7; }\n"   /* 同类型赋值保留字节 */
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -424,5 +425,67 @@ TEST(Driver, RunFileUnionFieldComptimeVarFolds) {
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+/* ---- tag union 值相等（`==` / `!=`）----
+ *
+ * sema 一直允许 union 值比较（VTABLE_UNION.eq：比 tag，同 tag 再比该成员的载荷），
+ * 但 C 后端此前把 `a == b` 原样发给宿主编译器 → clang 报
+ * "invalid operands to binary expression"。现在与 struct 判等共用生成辅助函数：
+ * 先比 tag，再按当前成员递归比较载荷。 */
+
+TEST(Driver, RunFileUnionEqualitySameAndDifferentTag) {
+  std::string path = write_temp_file(
+      "union U { i: i32; j: i64; }\n"
+      "func main(): i32 {\n"
+      "  var a: U = .U{ .i = 7 };\n"
+      "  var b: U = .U{ .i = 7 };\n"
+      "  var c: U = .U{ .i = 8 };\n"
+      "  var d: U = .U{ .j = 7 };\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  if (a != b) { return 2; }\n"
+      "  if (a == c) { return 3; }\n"   /* 同 tag、载荷不同 */
+      "  if (a == d) { return 4; }\n"   /* tag 不同 */
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionEqualityAggregatePayloads) {
+  /* 载荷是 struct / str：必须递归比较（str 比内容）。 */
+  std::string path = write_temp_file(
+      "struct P { x: i32; s: str; }\n"
+      "union U { p: P; name: str; }\n"
+      "func main(): i32 {\n"
+      "  var a: U = .U{ .p = .P{ .x = 1, .s = \"a\" } };\n"
+      "  var b: U = .U{ .p = .P{ .x = 1, .s = \"a\" } };\n"
+      "  var c: U = .U{ .p = .P{ .x = 1, .s = \"b\" } };\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  if (a == c) { return 2; }\n"
+      "  var n1: U = .U{ .name = \"clux\" };\n"
+      "  var n2: U = .U{ .name = \"clux\" };\n"
+      "  var n3: U = .U{ .name = \"cluX\" };\n"
+      "  if (!(n1 == n2)) { return 3; }\n"
+      "  if (n1 == n3) { return 4; }\n"
+      "  if (!(n1 != n3)) { return 5; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileUnionEqualityRvalueOperands) {
+  std::string path = write_temp_file(
+      "union U { i: i32; }\n"
+      "func mk(v: i32): U { return .U{ .i = v }; }\n"
+      "func main(): i32 {\n"
+      "  if (!(mk(3) == mk(3))) { return 1; }\n"
+      "  if (mk(3) == mk(4)) { return 2; }\n"
+      "  if (!(mk(3) != mk(4))) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
   std::remove(path.c_str());
 }

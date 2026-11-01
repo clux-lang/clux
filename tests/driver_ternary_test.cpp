@@ -29,7 +29,8 @@ TEST(Driver, RunFileTernaryRuntime) {
       "  var b:i32 = 7;\n"
       "  var r:i32 = (a > b) ? a : b;\n"
       "  if ((a < b) ? true : false) { r = r + 1; }\n"
-      "  return r;\n"
+      "  if (r != 8) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -46,7 +47,8 @@ TEST(Driver, RunFileTernaryNestedAndMixed) {
       "  var r:i32 = (x == 0) ? x : (y == 1) ? y : (z == 2) ? z : w;\n"
       "  if (r != 0) { return 9; }\n"
       "  var s:i32 = (x != 0) ? x : (y == 1) ? y : (z == 2) ? z : w;\n"
-      "  return s;\n"
+      "  if (s != 1) { return 8; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -74,7 +76,8 @@ TEST(Driver, RunFileTernaryCompileTimeFold) {
       "func main():i32 {\n"
       "  comptime var a = (1 < 2) ? 5 : 9;\n"
       "  comptime var b = (3 > 4) ? 11 : 13;\n"
-      "  return a + b;\n"
+      "  if (a != 5 || b != 13) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -109,7 +112,8 @@ TEST(Driver, RunFileTypeDefGlobal) {
       "func main():i32 {\n"
       "  var x:MyInt = 42;\n"
       "  var y = x + 1;\n"
-      "  return y as i32;\n"
+      "  if (y != 43i64) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -123,7 +127,8 @@ TEST(Driver, RunFileTypeDefCompositeAndAlias) {
       "func first(p:Pair):i32 { return p[0]; }\n"
       "func main():i32 {\n"
       "  var p:Alias = .[2]i32{10, 20};\n"
-      "  return first(p);\n"
+      "  if (first(p) != 10) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -140,7 +145,8 @@ TEST(Driver, RunFileTypeDefLocal) {
       "    var y:Inner = 9;\n"
       "    x = x + (y as i32);\n"
       "  }\n"
-      "  return x;\n"
+      "  if (x != 16) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -158,7 +164,8 @@ TEST(Driver, RunFileTypeDefLocalHoisted) {
       "    type Inner = i64;\n"
       "    x = x + (y as i32);\n"
       "  }\n"
-      "  return x;\n"
+      "  if (x != 16) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -177,7 +184,8 @@ TEST(Driver, RunFileTypeDefLocalHoistedLoop) {
       "    sum = sum + v;\n"
       "    i = i + 1;\n"
       "  }\n"
-      "  return sum;\n"
+      "  if (sum != 6) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

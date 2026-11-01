@@ -326,3 +326,136 @@ TEST(Driver, RunFileAggregateAssignChain) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- struct 值相等（`==` / `!=`）----
+ *
+ * sema 一直允许 struct 值比较（VTABLE_STRUCT.eq 按字段递归），但 C 后端此前把
+ * `a == b` 原样发给宿主编译器 → clang 报 "invalid operands to binary expression"。
+ * 现在 C 后端为被比较的类型生成 `clux_eq_<类型>` 辅助函数（按字段递归；str 比
+ * 内容、array 逐元素、option 先比 tag；其余类型按字节），下面覆盖各字段形态。 */
+
+TEST(Driver, RunFileStructEqualityScalarFields) {
+  std::string path = write_temp_file(
+      "struct P { x: i32; y: i64; }\n"
+      "func main():i32 {\n"
+      "  var a: P = .P{ .x = 1, .y = 2 };\n"
+      "  var b: P = .P{ .x = 1, .y = 2 };\n"
+      "  var c: P = .P{ .x = 1, .y = 3 };\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  if (a != b) { return 2; }\n"
+      "  if (a == c) { return 3; }\n"
+      "  if (!(a != c)) { return 4; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityStrFieldUsesContent) {
+  /* str 字段必须比内容而不是 data 指针（同一内容经不同构造路径也要相等）。 */
+  std::string path = write_temp_file(
+      "struct S { name: str; n: i32; }\n"
+      "func mk(name: str): S { return .S{ .name = name, .n = 1 }; }\n"
+      "func main():i32 {\n"
+      "  var a: S = mk(\"clux\");\n"
+      "  var b: S = mk(\"clux\");\n"
+      "  var c: S = mk(\"clux!\") ;\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  if (a == c) { return 2; }\n"
+      "  if (!(a != c)) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityNestedAndArrayFields) {
+  std::string path = write_temp_file(
+      "struct Inner { a: i32; b: i64; }\n"
+      "struct Outer { inner: Inner; xs: [3]i32; }\n"
+      "func main():i32 {\n"
+      "  var a: Outer = .Outer{ .inner = .Inner{ .a = 1, .b = 2 },\n"
+      "                         .xs = .[3]i32{ 4, 5, 6 } };\n"
+      "  var b: Outer = a;\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  var c: Outer = a;\n"
+      "  c.inner.b = 3;\n"     /* 嵌套 struct 字段差异 */
+      "  if (a == c) { return 2; }\n"
+      "  var d: Outer = a;\n"
+      "  d.xs[2] = 7;\n"       /* 数组字段差异 */
+      "  if (a == d) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityOptionalAndEmptyFields) {
+  std::string path = write_temp_file(
+      "struct Empty { }\n"
+      "struct O { v: ?i32; }\n"
+      "func main():i32 {\n"
+      "  var e1: Empty = .Empty{};\n"
+      "  var e2: Empty = .Empty{};\n"
+      "  if (!(e1 == e2)) { return 1; }\n"
+      "  var a: O = .O{ .v = 7 };\n"
+      "  var b: O = .O{ .v = 7 };\n"
+      "  var none: O = .O{ .v = nil };\n"
+      "  if (!(a == b)) { return 2; }\n"
+      "  if (a == none) { return 3; }\n"   /* tag 不同 */
+      "  var c: O = .O{ .v = 8 };\n"
+      "  if (a == c) { return 4; }\n"      /* 载荷不同 */
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityRvalueOperands) {
+  /* 右值操作数（调用结果）不能取地址：后端先物化成临时左值。 */
+  std::string path = write_temp_file(
+      "struct P { x: i32; }\n"
+      "func mk(x: i32): P { return .P{ .x = x }; }\n"
+      "func main():i32 {\n"
+      "  if (!(mk(1) == mk(1))) { return 1; }\n"
+      "  if (mk(1) == mk(2)) { return 2; }\n"
+      "  if (!(mk(1) != mk(2))) { return 3; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityDuckCompatibleTypes) {
+  /* 结构兼容（字段名+类型+顺序一致）的不同具名 struct：sema 允许比较，
+     后端按左值类型重解释后逐字段比较。 */
+  std::string path = write_temp_file(
+      "struct A { x: i32; s: str; }\n"
+      "struct B { x: i32; s: str; }\n"
+      "func main():i32 {\n"
+      "  var a: A = .A{ .x = 1, .s = \"q\" };\n"
+      "  var b: B = .B{ .x = 1, .s = \"q\" };\n"
+      "  if (!(a == b)) { return 1; }\n"
+      "  var c: B = .B{ .x = 2, .s = \"q\" };\n"
+      "  if (a == c) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileStructEqualityBitfieldType) {
+  /* bitfield 类型没有成员级判等语义：整块按字节比较（不走字段辅助函数）。 */
+  std::string path = write_temp_file(
+      "bitfield Flags: u32 { a: 3; b: 5; }\n"
+      "func main():i32 {\n"
+      "  var f1: Flags = .Flags{ .a = 3, .b = 9 };\n"
+      "  var f2: Flags = .Flags{ .a = 3, .b = 9 };\n"
+      "  var f3: Flags = .Flags{ .a = 3, .b = 8 };\n"
+      "  if (!(f1 == f2)) { return 1; }\n"
+      "  if (f1 == f3) { return 2; }\n"
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
+  std::remove(path.c_str());
+}

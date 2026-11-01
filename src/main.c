@@ -38,7 +38,8 @@ static const cmd_t g_cmds[] = {
         .usage = "clux build <file.cx> [--emit-c[=PATH]] [--emit-obj[=PATH]] "
                  "[--keep-c] [--build-dir=DIR] [--output=PATH] [--locked] "
                  "[--cc=PATH] [--cflag=FLAG]... [--ldflag=FLAG]... [-I DIR]... "
-                 "[-L DIR]... [-l LIB]... [-D KEY=VALUE]...",
+                 "[-L DIR]... [-l LIB]... [-D KEY=VALUE]... "
+                 "[--magic-deref-depth=N]",
         .help =
             "Compile clux source into a native executable.\n"
             "\n"
@@ -89,6 +90,11 @@ static const cmd_t g_cmds[] = {
             "  -l LIB, --link-lib=LIB     link library (repeatable)\n"
             "  -D KEY=VALUE         build-time define (repeatable)\n"
             "\n"
+            "Compiler options:\n"
+            "  --magic-deref-depth=N   max `__deref__` expansion depth (0..31;\n"
+            "                          default 8, 0 disables; env\n"
+            "                          CLUX_MAGIC_DEREF_DEPTH is the fallback)\n"
+            "\n"
             "  extern lib <alias> from \"<name>\":\n"
             "    \"*\" -> no link flag (symbols from the current process)\n"
             "    generic name -> -l<name> (searched in the output dir and its\n"
@@ -101,7 +107,8 @@ static const cmd_t g_cmds[] = {
     },
     {
         .name = "run",
-        .usage = "clux run [subpkg|<file>] [-D KEY=VALUE]...",
+        .usage = "clux run [subpkg|<file>] [-D KEY=VALUE]... "
+                 "[--magic-deref-depth=N]",
         .help =
             "Run a clux program.\n"
             "\n"
@@ -117,6 +124,9 @@ static const cmd_t g_cmds[] = {
             "              visible only inside `extern lib ... assert(...)`;\n"
             "              builtin keys: OS_TYPE (WIN64/WIN32/LINUX/MACOS/BSD),\n"
             "              OS_ARCH (X64/X86/ARM64/ARM).\n"
+            "\n"
+            "--magic-deref-depth=N  max `__deref__` expansion depth (default 8;\n"
+            "              0 disables; env CLUX_MAGIC_DEREF_DEPTH is the fallback).\n"
             "\n"
             "Compiles with the C backend (host gcc/clang) into the build\n"
             "directory, then runs the produced executable. Use\n"
@@ -186,6 +196,7 @@ static void setup_utf8_locale(void) {
     setlocale(LC_ALL, "");
   }
 #endif
+    
 }
 
 /* ---- main ---- */

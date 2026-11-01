@@ -175,6 +175,7 @@ static bool static_assert_eval(sema_t *sema, sema_scope_t *scope,
 static block_result_t walk_stmt_impl(sema_t *sema, ast_node_t *stmt,
                                      sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
+
   /* **sema 生成的销毁语句不再回走**（`is_generated`，见 gen_destroy_* /
      生成节点）：销毁序列的类型判定已由 type 对象完成，回走没有新信息；
      而回走复合生成形态会造成两类错误：
@@ -450,6 +451,7 @@ block_result_t walk_block(sema_t *sema, ast_node_t *block,
                                  sema_scope_t *scope, size_t *idx) {
   block_result_t r = {0};
   ast_block_t *b = (ast_block_t *)block;
+
   /* 提升：局部 type 定义与局部函数定义在块入口按声明序绑定——名字整个
      块内可见（无 TDZ，前向引用安全，同块局部函数互相调用）。type rhs 求值
      仍按声明序（类型引用依赖前序类型，与全局 pass1b 一致）；求值会折叠
@@ -566,7 +568,13 @@ block_result_t walk_block(sema_t *sema, ast_node_t *block,
          仍需 walk（类型检查）——它们不在语句链中，是节点附载的。 */
       for (ast_node_t *d = s->defers; d; d = d->next)
         walk_stmt(sema, d, scope, idx);
-      break; /* 后续语句不可达，不再检查 */
+      /* 块尾的清理调用（defer / `using` 的 `__dispose__`）在"确定返回"之后
+         仍在语句链里（tok_begin==0 的生成节点）：它们不在执行路径上，但
+         C 后端会 lowering 整条链——必须完成改写（成员调用 → 普通调用）与
+         类型检查，否则后端会看到未改写的成员 callee。 */
+      for (ast_node_t *t = s->next; t; t = t->next)
+        if (t->tok_begin == 0) walk_stmt(sema, t, scope, idx);
+      break; /* 后续用户语句不可达，不再检查 */
     }
     if (s->kind == AST_VAR_DEF && ((ast_var_def_t *)s)->is_comptime) {
       *prev = s->next; /* 摘除定义点 */
@@ -587,6 +595,8 @@ block_result_t walk_block(sema_t *sema, ast_node_t *block,
 
 void sema_walk_function(sema_t *sema, sema_func_t *sf) {
   ast_func_def_t *fn = (ast_func_def_t *)sf->def;
+
+
   if (!sf->scope) return; /* 建树失败（结构错误已诊断），不进入 shadow run */
 
   /* 进入函数 walk：**整体保存**当前函数上下文并整体恢复（含 return_type /

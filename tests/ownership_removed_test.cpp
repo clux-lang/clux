@@ -37,11 +37,13 @@ TEST(OwnershipRemoved, ShareWeakAreNotKeywords) {
 }
 
 TEST(OwnershipRemoved, MagicNamesReserved) {
+  /* `__` 前缀仍是保留命名空间：struct 成员位置允许魔法名，但表外名字
+     依旧拒绝（`__dispose__` 已是合法魔法方法，用一个表外名验证）。 */
   clux_expect_reject(
       "struct R {\n"
       "  v: i32;\n"
-      "  func __dispose__(self: *R): void { }\n"
+      "  func __nope__(self: *R): void { }\n"
       "}\n"
       "func main(): i32 { return 0; }\n",
-      "reserved", "magic_reserved");
+      "unknown magic method", "magic_reserved");
 }

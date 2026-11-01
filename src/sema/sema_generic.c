@@ -43,6 +43,7 @@
 #include "vm/type_ptr.h"
 #include "vm/type_slice.h"
 #include "sema/metadata.h"
+#include "sema/magic.h"
 #include "sema/comptime.h"
 #include "sema/struct_compose.h"
 #include "vm/type_struct.h"
@@ -1110,6 +1111,9 @@ static const type_t *instantiate_func_impl(
     if (!rp) panic("sema: out of memory reparsing generic definition");
     rp->pos = def->base.tok_begin;
     rp->diag = sema->diag;
+    /* 魔法方法（`__eq__` / `__add__` ...）允许泛型：实例重解析时同样要放行
+       `__` 前缀名（模板在声明点已经通过 parser 的 magic 放行校验）。 */
+    rp->allow_magic_name = true;
     ast_node_t *parsed = parse_func_def(rp);
     parser_destroy(&rp);
     if (!parsed || parsed->kind != AST_FUNC_DEF) {
@@ -1574,7 +1578,7 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
                 take_noreturn_marker(fn->decorators, &noreturn_marker);
             if (noreturn_marker) fn->is_noreturn = true;
             if (fn->generic.count > 0) {
-                /* P4b：泛型方法只登记符号，调用点实例化。 */
+                /* P4b：泛型方法只登记符号，调用点实例化（魔法方法同样允许）。 */
                 sema_symbol_t ginit = {.kind = SEMA_SYM_FUNC,
                                        .ast = m,
                                        .is_generic = true,
@@ -1644,11 +1648,22 @@ static void instantiate_struct_members(sema_t *sema, ast_struct_def_t *sd,
             memset(sf, 0, sizeof(*sf));
             sf->def = m;
             sf->def_scope = mscope;
+            sf->owner = sym->type; /* 接收者校验 / 魔法方法约定 */
             sf->generic_inst = inst; /* Pass 3b walk 前重绑类型参数 */
             sema_func_id_alloc(sema, fn);
             msym->fid = fn->fid;
             const type_t *sig = resolve_instance_sig(sema, fn);
             if (sig) msym->type = sig;
+            /* 方法声明校验：接收者必须是指针；魔法方法名/签名规则。 */
+            if (sig) {
+                size_t np = func_type_param_count(sig);
+                const type_t *params[np > 0 ? np : 1];
+                for (size_t k = 0; k < np; k++)
+                    params[k] = func_type_param(sig, k);
+                sema_magic_check_method(sema, sym->type, m,
+                                        np > 0 ? params : NULL, np,
+                                        func_type_return(sig));
+            }
             vec_push(sema->funcs, sema->vm->alloc, sf);
             sema_build_func_scope(sema, sf);
             if (member_src && sig) {

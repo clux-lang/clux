@@ -20,6 +20,38 @@ namespace {
 
 /* ---- Stage ①+②+③: run entry point ---- */
 
+TEST(Driver, RunFileReturnsMainExitCode) {
+  /* driver_run_file 的契约：**编译并运行**，返回 main 的返回值。
+     回归背景：它曾只转发"编译结果"（成功恒 0），导致测试里
+     `if (...) { return N; }` 断言全部失效——程序算错也照样"通过"。 */
+  std::string path = write_temp_file("func main():i32 { return 7; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 7);
+  std::remove(path.c_str());
+
+  std::string one = write_temp_file("func main():i32 { return 1; }\n");
+  EXPECT_EQ(driver_run_file(one.c_str()), 1);
+  std::remove(one.c_str());
+}
+
+TEST(Driver, RunFileVoidMainReturnsZero) {
+  std::string path = write_temp_file("func main(): void { var x = 1; }\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, RunFileAbnormalTerminationIsNotSuccess) {
+  /* 异常终止（越界 abort / panic）不得被当成"运行成功"。 */
+  std::string path = write_temp_file(
+      "func main():i32 {\n"
+      "  var a: [2]i32 = .[2]i32{1, 2};\n"
+      "  var i: i32 = 5;\n"
+      "  if (a[i] == 0) { return 0; }\n"   /* 运行期越界 → abort */
+      "  return 0;\n"
+      "}\n");
+  EXPECT_NE(driver_run_file(path.c_str()), 0);
+  std::remove(path.c_str());
+}
+
 TEST(Driver, RunFileValidReturnsZero) {
   /* 合法程序：词法 + 语法 + 语义全通过。main 无返回类型（void），
      函数体不含 return 值，sema 无诊断。 */
@@ -80,7 +112,8 @@ TEST(Driver, RunFileIndexGetPasses) {
       "  var y = m[1][0];\n"
       "  var i = 1;\n"
       "  var z = a[i];\n"
-      "  return x + y + z;\n"
+      "  if (x != 40 || y != 3 || z != 20) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -97,7 +130,9 @@ TEST(Driver, RunFileIndexSetPasses) {
       "  var i = 1;\n"
       "  a[i] -= 2;\n"
       "  var s = a[0] + a[1] + a[2];\n"
-      "  return s;\n"
+      "  if (a[0] != 20 || a[1] != 97 || a[2] != 31) { return 1; }\n"
+      "  if (s != 148) { return 2; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -109,7 +144,8 @@ TEST(Driver, RunFileFillZeroPads) {
   std::string path = write_temp_file(
       "func main():i32 {\n"
       "  var a = .[3]i32 { <0,2>, 10 };\n"
-      "  return a[0] + a[1] + a[2];\n"
+      "  if (a[0] != 0 || a[1] != 0 || a[2] != 10) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -143,8 +179,10 @@ TEST(Driver, RunFilePartialFillOptionalFuncArray) {
       "  var e1:?func()->i32 = fns[1];\n"
       "  if (e1 != nil) { return 1; }\n"
       "  var e0:?func()->i32 = fns[0];\n"
-      "  if (e0 != nil) { var f0 = e0.!; return f0(); }\n"
-      "  return 2;\n"
+      "  if (e0 == nil) { return 2; }\n"
+      "  var f0 = e0.!;\n"
+      "  if (f0() != 7) { return 3; }\n"
+      "  return 0;\n"
       "}\n"
       "func f():i32 { return 7; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
@@ -205,7 +243,8 @@ TEST(Driver, RunFileMultidimIndexSetPasses) {
       "  var j = 1;\n"
       "  m[i][j] = 8;\n"
       "  var s = m[0][0] + m[0][1] + m[1][0] + m[1][1];\n"
-      "  return s;\n"
+      "  if (s != 28) { return 1; }\n"   /* 1 + 12 + 7 + 8 */
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -220,7 +259,9 @@ TEST(Driver, RunFileMultidimBorrowIsIndependentOnBind) {
       "  var row = m[1];\n"
       "  row[0] = 100;\n"
       "  var s = m[1][0] + m[1][1];\n"
-      "  return s;\n"   /* m[1] 仍是 3,4 → 7 */
+      "  if (s != 7) { return 1; }\n"   /* m[1] 仍是 3,4 → 7 */
+      "  if (row[0] != 100) { return 2; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());

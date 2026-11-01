@@ -522,3 +522,95 @@ TEST(DriverM4, MakeElementsFoldComptimeVar) {
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
+
+/* ---- 切片别名：视图必须指向源对象自己的存储 ----
+ *
+ * 回归背景：切片 lowering 曾一律把源复制进语句表达式里的临时量
+ * （`__auto_type clux_sl = (buf)`），再取它的 `.data`。于是
+ *   - 对同一数组的两个相同切片，下层指针**不相等**（各自指向自己的副本）；
+ *   - 经切片写入改的是副本，原数组不变（"视图"语义被破坏）。
+ * 现在左值源（标识符 / 字段 / 下标 / 解引用）改为 `&(源)` 直接取地址；只有
+ * 右值源（调用结果 / 字面量）才复制到临时量。 */
+
+TEST(DriverM4, DataPointerFeedsMakeAndTake) {
+  /* `data(x)` 返回 `*T`（按实参类型精化），可直接喂给 `make(ptr, len)`；
+     `take_opt` 的返回类型按实参 `?T` 精化为 `T`。C 后端此前靠函数签名反推
+     这两个内建的类型，而它们没有 VM 函数对象（fid = 0）→ 类型推断失败。 */
+  clux_expect_program_ok(
+      "func main(): i32 {\n"
+      "  var a: [4]i32 = .[4]i32{ 1, 2, 3, 4 };\n"
+      "  var s: []i32 = make(data(a), 2);\n"
+      "  if (len(s) != 2 as u64) { return 1; }\n"
+      "  if (s[1] != 2) { return 2; }\n"
+      "  s[1] = 20;\n"
+      "  if (a[1] != 20) { return 3; }\n"
+      "  var o: ?i32 = 7;\n"
+      "  var v = take_opt(o);\n"
+      "  if (o != nil) { return 4; }\n"
+      "  if (v != 7) { return 5; }\n"
+      "  return 0;\n"
+      "}\n",
+      "data_make_take");
+}
+
+TEST(DriverM4, SliceOfArraySharesStorage) {
+  clux_expect_program_ok(
+      "func main(): i32 {\n"
+      "  var arr: [4]i32 = .[4]i32{1, 2, 3, 4};\n"
+      "  var s1: []i32 = arr[0:2];\n"
+      "  var s2: []i32 = arr[0:2];\n"
+      "  if (data(s1) != data(s2)) { return 1; }\n"   /* 同一底层指针 */
+      "  s1[0] = 42;\n"
+      "  if (arr[0] != 42) { return 2; }\n"          /* 写回原数组 */
+      "  if (s2[0] != 42) { return 3; }\n"           /* 另一视图可见 */
+      "  arr[1] = 43;\n"
+      "  if (s1[1] != 43) { return 4; }\n"           /* 反向可见 */
+      "  return 0;\n"
+      "}\n",
+      "slice_alias_array");
+}
+
+TEST(DriverM4, SliceOfSliceSharesStorage) {
+  clux_expect_program_ok(
+      "func main(): i32 {\n"
+      "  var arr: [4]i32 = .[4]i32{1, 2, 3, 4};\n"
+      "  var s: []i32 = arr[0:3];\n"
+      "  var t: []i32 = s[1:3];\n"
+      "  var u: []i32 = s[1:3];\n"
+      "  if (data(t) != data(u)) { return 1; }\n"    /* 同起点 → 同一底层指针 */
+      "  t[0] = 22;\n"
+      "  if (arr[1] != 22) { return 2; }\n"          /* 写到底层数组 */
+      "  if (s[1] != 22) { return 3; }\n"
+      "  if (u[0] != 22) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "slice_alias_slice");
+}
+
+TEST(DriverM4, SliceOfStructFieldSharesStorage) {
+  clux_expect_program_ok(
+      "struct Holder { arr: [4]i32; }\n"
+      "func main(): i32 {\n"
+      "  var h: Holder = .Holder{ .arr = .[4]i32{10, 20, 30, 40} };\n"
+      "  var s: []i32 = h.arr[1:3];\n"
+      "  s[0] = 21;\n"
+      "  if (h.arr[1] != 21) { return 1; }\n"        /* 写回字段存储 */
+      "  if (data(h.arr[0:2]) != data(h.arr[0:2])) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "slice_alias_field");
+}
+
+TEST(DriverM4, SliceOfRvalueArrayStillWorks) {
+  /* 右值源没有稳定存储：仍复制到临时量，但长度/元素读取必须正确。 */
+  clux_expect_program_ok(
+      "func mk(): [4]i32 { return .[4]i32{7, 8, 9, 10}; }\n"
+      "func main(): i32 {\n"
+      "  var t: []i32 = mk()[1:3];\n"
+      "  if (len(t) != 2u64) { return 1; }\n"
+      "  if (t[0] != 8) { return 2; }\n"
+      "  if (t[1] != 9) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "slice_rvalue_base");
+}

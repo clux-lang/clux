@@ -179,6 +179,27 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CALL: {
         ast_call_t *c = (ast_call_t *)e;
         if (call_is_len(c)) return vm->type_usize;
+        /* 内建 data()/take_opt()：返回类型按**实参类型**精化（与 sema 的
+           builtin_op 分支一致）。这两个调用没有 VM 函数对象（callee 的 fid
+           是 0），不能靠签名反推。 */
+        if (c->is_data_call && c->args) {
+            const type_t *at = infer_expr_type(lc, c->args);
+            at = at ? type_strip_quals(at) : NULL;
+            const type_t *elem = NULL;
+            if (at && type_kind_of(at) == TYPE_KIND_ARRAY)
+                elem = array_type_elem(at);
+            else if (at && type_is_slice(at))
+                elem = slice_type_elem(at);
+            else if (at && type_kind_of(at) == TYPE_KIND_STR)
+                elem = vm->type_u8;
+            if (elem) return type_ptr_intern(vm, elem);
+        }
+        if (c->is_take_call && c->args) {
+            const type_t *at = infer_expr_type(lc, c->args);
+            at = at ? type_strip_quals(at) : NULL;
+            if (at && type_kind_of(at) == TYPE_KIND_OPTION)
+                return type_option_inner(at);
+        }
         if (c->callee && c->callee->kind == AST_MEMBER) {
             ast_member_t *m = (ast_member_t *)c->callee;
             lower_method_t *meth =

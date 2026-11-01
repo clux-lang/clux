@@ -76,6 +76,7 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "vm/type_array.h"
 #include "vm/type_func.h"
@@ -401,7 +402,14 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
   sym->own_scope = scope;
 
   value_t *var_value;
-  if (vd->init && vd->init->kind == AST_UNDEF) {
+  if (vd->zero_init) {
+    /* 编译器生成的零初始化声明（`__init__` 构造的临时对象）：
+       `var t: T = <zero>;`——内存清零，确定为已初始化。 */
+    if (vd->type_expr) var_type_slot_reparse(sema, vd, scope);
+    sym->flow_init = true;
+    var_value =
+        value_make_shadow(sema->vm, sym->type ? sym->type : sema->vm->type_void);
+  } else if (vd->init && vd->init->kind == AST_UNDEF) {
     /* 未初始化声明：var x:T = undefined。要求显式类型（undefined 无类型
        可推断）。flow_init=false（确定性赋值分析 UNKNOWN，TDZ），读取
        编译错误，只可赋值退出。 */
@@ -524,6 +532,14 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
                      "value: only `cfunc_ptr(<named cfunc>)` is convertible");
           init_bad = true;
         }
+      }
+      if (!init_bad && sym->type) {
+        /* 单参 `__init__` 的隐式构造：`var a: T = x;` ⇒ __clux_init_T(x) */
+        bool conv = false;
+        value_t *nv = sema_magic_init_convert(sema, &vd->init,
+                                               value_type(init), sym->type,
+                                               scope, &conv);
+        if (conv) { if (nv) init = nv; else init_bad = true; }
       }
       if (!init_bad && sym->type) {
         value_t *dst = value_make_shadow(sema->vm, sym->type);

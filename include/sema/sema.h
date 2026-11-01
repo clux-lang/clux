@@ -67,6 +67,8 @@ typedef struct sema_func_t {
     struct sema_generic_instance *generic_inst; /* M7：本函数是泛型实例时，
                                        指向实例记录（Pass 3b walk 前据此重绑
                                        类型参数；NULL = 普通函数） */
+    const struct type_t *owner; /* struct 方法：所属结构体类型（接收者校验 +
+                                  魔法方法约定的依据）；NULL = 普通函数 */
 } sema_func_t;
 
 /**
@@ -247,6 +249,19 @@ typedef struct sema_t {
 
     /* **表达式求值上下文**：匿名构造目标类型栈（见 sema_expr_ctx_t）。 */
     sema_expr_ctx_t ex;
+
+    /* 魔法方法 `__deref__` 的展开配置与路径栈（环/深度检测）：
+       max_depth 默认 SEMA_MAGIC_DEREF_MAX_DEPTH_DEFAULT，可经 CLI
+       --magic-deref-depth / 环境变量 CLUX_MAGIC_DEREF_DEPTH 覆盖；
+       depth/path 是当前展开栈。 */
+    uint32_t     magic_deref_max_depth;
+    uint32_t     magic_deref_depth;
+    const type_t *magic_deref_path[32];
+
+    /* 聚合判等生成函数缓存（`type_t* → __clux_eq_<id>` 的 fid）。 */
+    vec_t       *magic_eq_cache;
+    /* `__init__` 构造生成函数缓存（`type_t* → __clux_init_<id>` 的 fid）。 */
+    vec_t       *magic_init_cache;
 
     /* import 解析/编译回调（驱动层注入，见 sema_import_resolver_t）。
        未注入（NULL）时 import 语句报"当前编译模式不支持 import"——

@@ -45,7 +45,7 @@ i64      if       implements import   interface is        len
 lib      make     nil       of        opaque    return    sizeof
 static_assert    str       struct    switch    true      type
 typeof   u8       u16       u32       u64       undefined union
-usize    var      void      volatile  while
+usize    var      void      volatile  while     using
 ```
 
 `test` 不是全局关键字。只有顶层出现 `test "名称" { ... }` 时才按测试块解析；

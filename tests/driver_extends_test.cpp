@@ -30,7 +30,7 @@ TEST(Driver, RunFileExtendsCompileTimeFold) {
       "  var c = [2]i32 extends [2]i32;\n"
       "  var d = [2]i32 extends [3]i32;\n"
       "  var e = const i32 extends i32;\n"
-      "  if (a && !b && c && !d && e) { return 1; }\n"
+      "  if (!(a && !b && c && !d && e)) { return 1; }\n"
       "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);

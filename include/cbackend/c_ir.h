@@ -64,6 +64,7 @@ typedef struct cir_type_ref {
     struct cir_type_ref *next;
 } cir_type_ref_t;
 
+
 typedef enum {
     CIR_EXPR_INT = 0,
     CIR_EXPR_IDENT,
@@ -131,6 +132,11 @@ typedef struct cir_expr {
     cir_type_t     *src_type;
     struct cir_signature *sig;
     bool            array_data; /* index through wrapper .data */
+    /* CIR_EXPR_SLICE：源是**左值**（标识符 / 字段 / 下标 / 解引用）。此时视图
+       必须指向源对象自己的存储（`&(expr)` 只求值一次），不能复制到临时量——
+       否则切片与原数组不共享内存：写切片改的是副本，两个相同切片的下层指针
+       也不相等。右值源（调用结果 / 字面量）仍走临时副本。 */
+    bool            lvalue_base;
     bool            closure_env; /* allocate via closure registry */
     size_t          tag;
     /* bitfield 读/写/构造：位偏移、宽度、底层字位宽 */
@@ -250,6 +256,12 @@ typedef struct cir_unit {
     cir_global_t    *globals;
     cir_type_t      *types;
     cir_type_ref_t  *header_types; /* 必须进头文件的类型（签名类型，递归展开） */
+    /* struct `==` / `!=` 的按字段比较辅助函数（sema 允许 struct 值比较，C 不能
+       直接对 struct 用 `==`）。按 CIR 类型去重、递归登记字段/元素类型；元素为
+       struct/array/option 时由辅助函数递归调用。writer 先发原型再发定义。 */
+    cir_type_ref_t  *eq_helpers;
+    cir_type_ref_t  *eq_helpers_last;
+
     /* 本单元共用的"无捕获函数 env"结构体（`struct clux_<tag>_empty_env`）。
        所有普通函数签名的 env 字段都用它：形状统一，调用点无需分支。
        **按单元缓存**（不能用函数级 static：多模块 lowering 的 lower_ctx 栈地址
@@ -300,12 +312,19 @@ cir_unit_t    *cir_unit_new(arena_t *arena, const char *source_path);
 void           cir_unit_set_module(cir_unit_t *u, const char *tag);
 /** 登记"必须进头文件"的类型（导出声明签名里的类型）。 */
 void           cir_unit_add_header_type(cir_unit_t *u, cir_type_t *t);
+/** 登记一个 struct 判等辅助函数（按类型去重；保持登记顺序）。 */
+void           cir_unit_add_eq_helper(cir_unit_t *u, cir_type_t *t);
+
+
 void           cir_unit_add_include(cir_unit_t *u, arena_t *arena,
                                     const char *include);
 cir_type_t    *cir_type_new(arena_t *arena, cir_type_kind_t kind,
                             const char *c_name);
 cir_type_t    *cir_type_find(const cir_unit_t *u, const void *src,
                              cir_type_kind_t kind);
+/** 类型 C 名的短形式（去掉 `struct ` 前缀）：判等辅助函数名
+ *  `clux_eq_<tail>` 的唯一来源。无 c_name → NULL。 */
+const char    *cir_type_cname_tail(const cir_type_t *t);
 cir_field_t   *cir_field_new(arena_t *arena, const char *name,
                              cir_type_t *type);
 void           cir_type_add_field(cir_type_t *t, cir_field_t *f);

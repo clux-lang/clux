@@ -238,7 +238,8 @@ TEST(Driver, RunFileTypeDefLocalHoistedExprRef) {
       "func main():i32 {\n"
       "  var x: Local = 7;\n"
       "  type Local = i32;\n"
-      "  return x;\n"
+      "  if (x != 7) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
@@ -290,7 +291,8 @@ TEST(Driver, RunFileTypeDefTypeValueRejectedInVarInit) {
       "func main():i32 {\n"
       "  type Alias = T;\n"
       "  var v: Alias = 7;\n"
-      "  return v;\n"
+      "  if (v != 7) { return 1; }\n"
+      "  return 0;\n"
       "}\n");
   EXPECT_EQ(driver_run_file(ok.c_str()), 0);
   std::remove(ok.c_str());

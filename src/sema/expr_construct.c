@@ -48,6 +48,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
 #include "vm/type_enum.h"
@@ -208,6 +209,12 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
       }
     } else if (fv && !value_is_error(sema->vm, fv) &&
                !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+      /* 单参 `__init__` 的隐式构造：字段类型 T 有单参初始化时
+         `.S{ .f = x }` 等价于 `.S{ .f = .T{x} }`。 */
+      bool conv = false;
+      value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv), ft,
+                                             scope, &conv);
+      if (conv) fv = nv;
       value_t *dst = value_make_shadow(sema->vm, ft);
       if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
         char tn[64], fn[64];
@@ -733,6 +740,30 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
         if (!t) return val_void(sema);
       }
 
+      /* `__init__`：有初始化器的 struct 不再支持普通构造（具名字段 / 按序
+         字段赋值）；`.T{arg1, arg2, ...}` 等价于"零初始化 + T::__init__(args)"。
+         见 docs-backup/magic-methods-design.md §4.5。 */
+      if (sema_magic_has_init(sema, t)) {
+        for (ast_node_t *f = n->fields; f; f = f->next) {
+          if (f->kind == AST_CONSTRUCT_FIELD) {
+            char tn[64];
+            sema_type_name(t, tn, sizeof tn);
+            diag_error(sema->diag, sema_loc(sema, f),
+                       "type %s defines '__init__': named-field construction is "
+                       "disabled; construct with .%s{arg1, arg2, ...}",
+                       tn, tn);
+            return val_void(sema);
+          }
+        }
+        ast_node_t *call = sema_magic_init_call(
+            sema, type_strip_quals(t), n->fields, n->base.tok_begin,
+            n->base.tok_end);
+        if (!call) return val_void(sema);
+        call->next = (*node)->next;
+        *node = call;
+        return sema_expr(sema, node, scope);
+      }
+
       /* ?T 构造器（二值单槽位，docs m2-design §12.2）：字段数强制 == 1，
          字段类型 ∈ {nil, T}。nil 字段 → 运行期 PUSH_OPT_NONE；T 字段 →
          隐式提升 D1。字段类型显式校验（不走 value_assign——option_assign
@@ -968,6 +999,11 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
             }
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
+            /* 字段类型 T 有单参 `__init__`：`.S{ .f = x }` ⇒ `.S{ .f = .T{x} }` */
+            bool conv = false;
+            value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv),
+                                                   ft, scope, &conv);
+            if (conv) fv = nv;
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];

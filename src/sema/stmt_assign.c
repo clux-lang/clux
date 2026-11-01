@@ -1,5 +1,6 @@
 #include "sema/sema.h"
 #include "sema/sema_cross.h"
+#include "sema/magic.h"
 #include <stdio.h>
 #include "parser/ast_array.h"
 #include "parser/ast_walk.h"
@@ -121,6 +122,148 @@ static value_t *(*compound_binop(const token_t *op))(vm_t *, value_t *,
   return NULL;
 }
 
+/* 赋值目标的**类型探测**（只读，不做 AST 改写/求值）：
+   IDENT → 符号类型；MEMBER → 字段/成员类型；DEREF → 指针基类型；
+   INDEX → 数组/切片/元组元素类型（`__index__` 时取返回指针的基类型）。
+   其它形态返回 NULL（不派发）。 */
+static const type_t *assign_target_type(sema_t *sema, ast_node_t *target,
+                                        sema_scope_t *scope) {
+  if (!sema || !target) return NULL;
+  switch (target->kind) {
+  case AST_IDENT: {
+    sema_symbol_t *s = sema_lookup(scope, ((ast_ident_t *)target)->name);
+    return s ? s->type : NULL;
+  }
+  case AST_MEMBER: {
+    ast_member_t *m = (ast_member_t *)target;
+    const type_t *ot = assign_target_type(sema, m->object, scope);
+    ot = ot ? type_strip_quals(ot) : NULL;
+    if (ot && type_is_ptr(ot)) ot = type_strip_quals(ptr_type_base(ot));
+    if (!ot) return NULL;
+    if (type_kind_of(ot) == TYPE_KIND_STRUCT) {
+      int fi = struct_type_find_field(ot, m->field);
+      const struct_field_t *f = fi >= 0 ? struct_type_field(ot, (size_t)fi) : NULL;
+      if (f) return f->type;
+      return NULL;
+    }
+    if (type_kind_of(ot) == TYPE_KIND_UNION) {
+      int mi = union_type_find_member(ot, m->field);
+      const union_member_t *um = mi >= 0 ? union_type_member(ot, (size_t)mi) : NULL;
+      if (um) return um->payload_type;
+    }
+    return NULL;
+  }
+  case AST_DEREF: {
+    const type_t *pt = assign_target_type(
+        sema, ((ast_deref_t *)target)->operand, scope);
+    pt = pt ? type_strip_quals(pt) : NULL;
+    return (pt && type_is_ptr(pt)) ? type_strip_quals(ptr_type_base(pt)) : NULL;
+  }
+  case AST_INDEX: {
+    ast_index_t *ix = (ast_index_t *)target;
+    const type_t *bt = assign_target_type(sema, ix->object, scope);
+    bt = bt ? type_strip_quals(bt) : NULL;
+    if (!bt) return NULL;
+    if (type_kind_of(bt) == TYPE_KIND_ARRAY)
+      return type_strip_quals(array_type_elem(bt));
+    if (type_is_slice(bt)) return type_strip_quals(slice_type_elem(bt));
+    if (type_kind_of(bt) == TYPE_KIND_TUPLE) {
+      /* 元组下标需常量索引：只在字面量索引时可探测。 */
+      ast_node_t *idx = ix->indices;
+      if (idx && idx->kind == AST_INT_LIT) {
+        uint64_t i = ((ast_int_lit_t *)idx)->value;
+        size_t n = tuple_type_elem_count(bt);
+        if (i < n) {
+          const tuple_elem_t *te = tuple_type_elem(bt, (size_t)i);
+          if (te) return type_strip_quals(te->type);
+        }
+      }
+      return NULL;
+    }
+    if (type_kind_of(bt) == TYPE_KIND_STRUCT) {
+      sema_symbol_t *ms = sema_magic_member(sema, bt, "__index__");
+      if (ms && ms->type && type_kind_of(ms->type) == TYPE_KIND_FUNC) {
+        const type_t *ret = func_type_return(ms->type);
+        ret = ret ? type_strip_quals(ret) : NULL;
+        if (ret && type_is_ptr(ret))
+          return type_strip_quals(ptr_type_base(ret));
+      }
+    }
+    return NULL;
+  }
+  default:
+    return NULL;
+  }
+}
+
+/* `target = value` 且目标类型定义了 `__assign__`：
+   ⇒ target.__assign__(&value)（普通方法调用，返回 void）。
+   返回 true = 已改写（调用者直接返回）；false = 不适用，走正常赋值。
+   **初始化不经过这里**（`var` / 参数 / 字段构造 / 返回值都是 value_assign），
+   所以 `var a = b` 从不派发。 */
+static bool try_magic_assign(sema_t *sema, ast_assign_t *as,
+                             const type_t *target_t, sema_scope_t *scope) {
+  const type_t *core = target_t ? type_strip_quals(target_t) : NULL;
+  if (!core || type_kind_of(core) != TYPE_KIND_STRUCT) return false;
+  if (!sema_magic_member(sema, core, "__assign__")) return false;
+  if (!as->value || as->value->kind == AST_NIL ||
+      as->value->kind == AST_UNWRAP)
+    return false;
+
+  ast_node_t *addr = ast_addr_new(sema->arena, as->value->tok_begin,
+                                  as->value->tok_end);
+  if (!addr) return false;
+  ((ast_addr_t *)addr)->operand = as->value;
+  addr->is_generated = true;
+
+  ast_node_t *call = sema_magic_make_call(sema, as->target, "__assign__", addr,
+                                          as->base.tok_begin, as->base.tok_end);
+  if (!call) return false;
+  /* 先做正常调用检查/改写（成员调用 → 普通函数调用），再挂到 prelude。 */
+  value_t *v = sema_expr(sema, &call, scope);
+  if (value_is_error(sema->vm, v)) return true;
+
+  ast_node_t *stmt = ast_expr_stmt_new(sema->arena, 0, 0);
+  if (!stmt) return true;
+  ((ast_expr_stmt_t *)stmt)->expr = call;
+  as->base.prelude = stmt;
+  as->sugar_noop = true;
+  return true;
+}
+
+/* `a = b.?` 的 then 分支同样是一次赋值：目标类型有 `__assign__` 时把
+   `a = b.value()` 改写成 `a.__assign__(&b.value())`（否则保持普通赋值）。 */
+static void try_branch_magic_assign(sema_t *sema, ast_node_t *iff,
+                                    const type_t *target_t,
+                                    sema_scope_t *scope) {
+  const type_t *core = target_t ? type_strip_quals(target_t) : NULL;
+  if (!core || type_kind_of(core) != TYPE_KIND_STRUCT) return;
+  if (!sema_magic_member(sema, core, "__assign__")) return;
+  if (!iff || iff->kind != AST_IF) return;
+  ast_node_t *thenb = ((ast_if_t *)iff)->then_body;
+  if (!thenb || thenb->kind != AST_BLOCK) return;
+  ast_node_t *node = ((ast_block_t *)thenb)->stmts;
+  if (!node || node->kind != AST_ASSIGN) return;
+  ast_assign_t *as = (ast_assign_t *)node;
+  if (!as->value || as->value->kind == AST_NIL) return;
+
+  ast_node_t *addr = ast_addr_new(sema->arena, as->value->tok_begin,
+                                  as->value->tok_end);
+  if (!addr) return;
+  ((ast_addr_t *)addr)->operand = as->value;
+  addr->is_generated = true;
+  ast_node_t *call = sema_magic_make_call(sema, as->target, "__assign__", addr,
+                                          node->tok_begin, node->tok_end);
+  if (!call) return;
+  value_t *v = sema_expr(sema, &call, scope);
+  if (value_is_error(sema->vm, v)) return;
+  ast_node_t *stmt = ast_expr_stmt_new(sema->arena, 0, 0);
+  if (!stmt) return;
+  ((ast_expr_stmt_t *)stmt)->expr = call;
+  ((ast_block_t *)thenb)->stmts = stmt;
+  ((ast_block_t *)thenb)->stmts_last = stmt;
+}
+
 void shadow_assign(sema_t *sema, ast_assign_t *as,
                           sema_scope_t *scope) {
   /* `b = a.?` / `b = a.!`（a 为 result struct）：展开为
@@ -154,6 +297,9 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       ast_node_t *iff = sema_try_make_if(sema, &info, as->target, NULL, tb,
                                          te);
       if (iff) {
+        /* then 分支的 `a = b.value()` 仍是赋值：目标类型有 `__assign__`
+           时同样派发（与普通赋值一致）。 */
+        try_branch_magic_assign(sema, iff, ts->type, scope);
         if (info.setup) {
           info.setup->next = iff;
           as->base.prelude = info.setup;
@@ -165,6 +311,13 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
       }
       return;
     }
+  }
+  /* `a = b`（简单赋值）且目标类型定义了 `__assign__`：改写成
+     `a.__assign__(b.&)`。**初始化不经过赋值语句**（var/参数/字段构造/
+     返回值都是 value_assign），因此 `var a = b` 永不派发。 */
+  if (as->op && token_is(as->op, "=")) {
+    const type_t *tt = assign_target_type(sema, as->target, scope);
+    if (try_magic_assign(sema, as, tt, scope)) return;
   }
   /* 左值：下标表达式 a[i] = v（sema 校验下标合法） */
   if (as->target->kind == AST_INDEX) {
@@ -450,7 +603,52 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     return;
   }
 
-  /* 复合赋值 x op= rhs → x = x op rhs（shadow 走 vtable 类型协商） */
+  /* 复合赋值 x op= rhs → x = x op rhs（shadow 走 vtable 类型协商）
+     魔法类型：目标（或 op 的结果类型）是定义 `__add__` / `__assign__` 的
+     struct 时，改写成 `x = x op rhs` 后重新走赋值路径——`__add__` 与
+     `__assign__` 因此各自按普通方法调用派发。 */
+  {
+    size_t clen = 0;
+    const char *ctext = as->op ? token_get_text(as->op, &clen) : NULL;
+    char base[8] = {0};
+    if (ctext && clen >= 2 && clen < sizeof base &&
+        ctext[clen - 1] == '=') {
+      memcpy(base, ctext, clen - 1); /* `+=` → `+` */
+      const type_t *tt = assign_target_type(sema, as->target, scope);
+      const type_t *core = tt ? type_strip_quals(tt) : NULL;
+      bool magic = false;
+      if (core && type_kind_of(core) == TYPE_KIND_STRUCT) {
+        char mbuf[32];
+        snprintf(mbuf, sizeof mbuf, "__%s__", base);
+        /* 基运算符名 → 魔法名（`+` → `__add__` 等）由表查；这里只判断
+           目标类型上是否有 `__assign__` 或对应运算魔法方法。 */
+        location_t loc;
+        memset(&loc, 0, sizeof loc);
+        const token_t *btok = arena_token_symbol(sema->arena, base, &loc);
+        const char *mname = btok ? sema_magic_binop_name(btok) : NULL;
+        magic = sema_magic_member(sema, core, "__assign__") != NULL ||
+                (mname && sema_magic_member(sema, core, mname) != NULL);
+      }
+      if (magic) {
+        location_t loc;
+        memset(&loc, 0, sizeof loc);
+        const token_t *btok = arena_token_symbol(sema->arena, base, &loc);
+        const token_t *eqtok = arena_token_symbol(sema->arena, "=", &loc);
+        ast_node_t *bin = ast_binary_new(sema->arena, as->base.tok_begin,
+                                         as->base.tok_end);
+        if (btok && eqtok && bin) {
+          ((ast_binary_t *)bin)->op = btok;
+          ((ast_binary_t *)bin)->lhs = as->target;
+          ((ast_binary_t *)bin)->rhs = as->value;
+          bin->is_generated = true;
+          as->value = bin;
+          as->op = eqtok;
+          shadow_assign(sema, as, scope);
+          return;
+        }
+      }
+    }
+  }
   value_t *(*op)(vm_t *, value_t *, value_t *) = compound_binop(as->op);
   if (!op) {
     char ob[16];
@@ -499,6 +697,38 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
 static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
                                 sema_scope_t *scope) {
   ast_index_t *ix = (ast_index_t *)as->target;
+
+  /* 魔法下标赋值：struct 且定义 `__index__` → 目标改写为
+     `*(typeof(a)::__index__(a.&, i))`，再走普通解引用赋值（可写性由
+     `__index__` 返回 `*U` / `*const U` 决定）。 */
+  {
+    value_t *b0 = sema_expr(sema, &ix->object, scope);
+    if (!value_is_error(sema->vm, b0) && !value_is_type(b0, TYPE_KIND_VOID)) {
+      const type_t *bt0 = value_type(b0);
+      bt0 = bt0 ? type_strip_quals(bt0) : NULL;
+      if (bt0 && type_kind_of(bt0) == TYPE_KIND_STRUCT &&
+          sema_magic_member(sema, bt0, "__index__")) {
+        if (sema_count_siblings(ix->indices) != 1) {
+          diag_error(sema->diag, sema_loc(sema, &as->base),
+                     "index operator expects exactly 1 index, got %zu",
+                     sema_count_siblings(ix->indices));
+          return;
+        }
+        ast_node_t *call = sema_magic_make_call(
+            sema, ix->object, "__index__", ix->indices,
+            as->target->tok_begin, as->target->tok_end);
+        if (!call) return;
+        ast_node_t *deref = ast_deref_new(sema->arena, as->target->tok_begin,
+                                          as->target->tok_end);
+        if (!deref) return;
+        ((ast_deref_t *)deref)->operand = call;
+        deref->is_generated = true;
+        as->target = deref;
+        shadow_assign_deref(sema, as, scope);
+        return;
+      }
+    }
+  }
 
   /* base 求值 + 可下标校验（多维 m[i][j] = v：ix->object 是 AST_INDEX，
      sema_expr 递归走右值下标分支返回元素类型，此处对最外层索引校验；
@@ -695,6 +925,39 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
       } else {
         idx = struct_type_find_field(bt, m->field);
         if (idx < 0) {
+          /* `__deref__` 回退：直接字段不存在 ⇒ 目标改为
+             `(a.__deref__()).field`，重走字段赋值（写穿要求链最终落在
+             指针上，值返回会由 lvalue 检查拒绝）。 */
+          {
+            char mbuf[256];
+            size_t ml = m->field.len < sizeof mbuf - 1 ? m->field.len
+                                                       : sizeof mbuf - 1;
+            memcpy(mbuf, m->field.ptr, ml);
+            mbuf[ml] = '\0';
+            ast_node_t *new_recv = NULL;
+            int drc = sema_magic_deref_rewrite(
+                sema, &new_recv, bt, m->object, mbuf, as->target->tok_begin,
+                as->target->tok_end);
+            if (drc < 0) {
+              sema_expr(sema, &as->value, scope);
+              return;
+            }
+            if (drc > 0) {
+              ast_node_t *m2 = ast_member_new(sema->arena,
+                                              as->target->tok_begin,
+                                              as->target->tok_end);
+              if (!m2) {
+                sema_expr(sema, &as->value, scope);
+                return;
+              }
+              ((ast_member_t *)m2)->object = new_recv;
+              ((ast_member_t *)m2)->field = m->field;
+              m2->is_generated = true;
+              as->target = m2;
+              shadow_assign_member(sema, as, scope);
+              return;
+            }
+          }
           diag_error(sema->diag, sema_loc(sema, &as->base),
                      "struct '%.*s' has no field '%.*s'", (int)bt->name.len,
                      bt->name.ptr, (int)m->field.len, m->field.ptr);

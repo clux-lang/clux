@@ -75,6 +75,7 @@
 #include "parser/ast_addr.h"
 #include "parser/ast_walk.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/struct_compose.h" /* 嵌入继承的成员名字查找 */
 #include "vm/type_array.h"
 #include "vm/type_func.h"
@@ -114,6 +115,18 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     value_t *v = sema_expr(sema, &rt->value, scope);
     bool v_bad = value_is_error(sema->vm, v) ||
                  value_is_type(v, TYPE_KIND_VOID);
+    /* 单参 `__init__` 的隐式构造：`return x;` 在返回类型 T 有单参初始化时
+       等价于 `return .T{x};`。 */
+    if (!v_bad && sema->fn.return_type) {
+      bool conv = false;
+      value_t *nv = sema_magic_init_convert(sema, &rt->value, value_type(v),
+                                             sema->fn.return_type, scope,
+                                             &conv);
+      if (conv) {
+        if (nv) v = nv;
+        else v_bad = true;
+      }
+    }
     if (!v_bad) {
       if (!sema->fn.return_type) {
         diag_error(sema->diag, sema_loc(sema, rt->value),

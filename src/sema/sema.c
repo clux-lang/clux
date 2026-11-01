@@ -41,6 +41,7 @@
 #include "parser/parse_utils.h"
 #include "parser/lexer.h"
 #include "sema/comptime.h"
+#include "sema/magic.h"
 #include "sema/sema_generic.h"
 #include "sema/sema_interface.h"
 #include "parser/ast_import.h"
@@ -50,6 +51,7 @@
 #include "core/ffi_abi.h"   /* M6 FFI：§2 C ABI 类型校验 */
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "sema_internal.h"
 
@@ -88,6 +90,11 @@ sema_t *sema_create(vm_t *vm, diag_buf_t *diag, vec_t *tokens,
   sema->pattern_env.names = NULL;
   sema->pattern_env.types = NULL;
   sema->pattern_env.count = 0;
+  /* 魔法方法 `__deref__` 展开深度：CLI > 环境变量 > 默认常量（0 = 禁用）。 */
+  sema->magic_deref_max_depth = sema_magic_deref_depth_resolve();
+  sema->magic_deref_depth = 0;
+  sema->magic_eq_cache = vec_new(vm->alloc, false);
+  sema->magic_init_cache = vec_new(vm->alloc, false);
   /* import 回调默认未注入：单文件/测试场景下 import 语句报「当前编译模式不支持」 */
   sema->imports.resolve = NULL;
   sema->imports.user = NULL;
@@ -116,6 +123,22 @@ void sema_destroy(sema_t **sema) {
     vec_free(alloc, &(*sema)->funcs);
   }
   if ((*sema)->ct_func_lits) vec_free(alloc, &(*sema)->ct_func_lits);
+  if ((*sema)->magic_eq_cache) {
+    size_t n = vec_len((*sema)->magic_eq_cache);
+    for (size_t i = 0; i < n; i++) {
+      void *e = vec_get((*sema)->magic_eq_cache, i);
+      if (e) allocator_free(alloc, (void **)&e);
+    }
+    vec_free(alloc, &(*sema)->magic_eq_cache);
+  }
+  if ((*sema)->magic_init_cache) {
+    size_t n = vec_len((*sema)->magic_init_cache);
+    for (size_t i = 0; i < n; i++) {
+      void *e = vec_get((*sema)->magic_init_cache, i);
+      if (e) allocator_free(alloc, (void **)&e);
+    }
+    vec_free(alloc, &(*sema)->magic_init_cache);
+  }
   {
     sema_impl_t *im = (*sema)->impls;
     while (im) {
@@ -217,6 +240,25 @@ sema_func_t *sema_func_by_id(sema_t *sema, uint32_t fid) {
  * 三遍编排
  * =========================================================================== */
 
+/* 按名字在 vm->functions 里找内建函数的 id。
+ *
+ * **没有对应函数对象时返回 FUNC_ID_NONE，不能返回 0**：0 是真实内建 id
+ * （len）。历史缺陷：符号 fid 回落 0 后，任何按 fid 解析函数对象的路径
+ * （CTFE 的 FUNC_REF 求值）都会静默调用到 len——`cfunc_ptr(f)` 报
+ * "len: argument is not a sequence"、`panic("x")` 变成 `len("x")`。 */
+static uint32_t builtin_func_fid(vm_t *vm, const char *name) {
+  if (!vm || !vm->functions || !name) return FUNC_ID_NONE;
+  size_t n = strlen(name);
+  size_t count = vec_len(vm->functions);
+  for (size_t i = 0; i < count; i++) {
+    func_t *bf = (func_t *)vec_get(vm->functions, i);
+    if (bf && bf->name.ptr && bf->name.len == n &&
+        memcmp(bf->name.ptr, name, n) == 0)
+      return bf->id;
+  }
+  return FUNC_ID_NONE;
+}
+
 bool sema_analyze(sema_t *sema, ast_node_t *program) {
   if (!sema || !program || program->kind != AST_PROGRAM) return false;
   ast_program_t *prog = (ast_program_t *)program;
@@ -233,18 +275,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   {
     const type_t *lsig = type_func_sig(sema->vm, NULL, 0, vm_type_usize(sema->vm),
                                        /*is_variadic=*/true);
-    uint32_t lfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 3 &&
-            memcmp(bf->name.ptr, "len", 3) == 0) {
-          lfid = bf->id;
-          break;
-        }
-      }
-    }
+    uint32_t lfid = builtin_func_fid(sema->vm, "len");
     if (lsig) {
       sema_symbol_t linit = {.kind = SEMA_SYM_FUNC, .type = lsig,
                              .is_active = true, .fid = lfid,
@@ -259,18 +290,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *pparams[1] = {sema->vm->type_str};
     const type_t *psig = type_func_sig(sema->vm, pparams, 1,
                                        sema->vm->type_void, false);
-    uint32_t pfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 5 &&
-            memcmp(bf->name.ptr, "panic", 5) == 0) {
-          pfid = bf->id;
-          break;
-        }
-      }
-    }
+    uint32_t pfid = builtin_func_fid(sema->vm, "panic");
     if (psig) {
       sema_symbol_t pinit = {.kind = SEMA_SYM_FUNC, .type = psig,
                              .is_active = true, .fid = pfid,
@@ -309,7 +329,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
                                        sema->vm->type_opaque, true);
     if (tsig) {
       sema_symbol_t tinit = {.kind = SEMA_SYM_FUNC, .type = tsig,
-                             .is_active = true, .fid = 0,
+                             .is_active = true, .fid = FUNC_ID_NONE,
                              .builtin_op = SEMA_BUILTIN_TAKE};
       sema_scope_define(sema->global_scope, STRSLICE_LIT("take_opt"), &tinit);
     }
@@ -323,18 +343,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *dsig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_opaque,
                                        /*is_variadic=*/true);
-    uint32_t dfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 12 &&
-            memcmp(bf->name.ptr, "__deep_clone", 12) == 0) {
-          dfid = bf->id;
-          break;
-        }
-      }
-    }
+    uint32_t dfid = builtin_func_fid(sema->vm, "__deep_clone");
     if (dsig) {
       sema_symbol_t init = {.kind = SEMA_SYM_FUNC, .type = dsig,
                             .is_active = true, .fid = dfid,
@@ -354,18 +363,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
                              ? type_func_sig(sema->vm, NULL, 0, ref_opaque,
                                              /*is_variadic=*/true)
                              : NULL;
-    uint32_t dfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 4 &&
-            memcmp(bf->name.ptr, "data", 4) == 0) {
-          dfid = bf->id;
-          break;
-        }
-      }
-    }
+    uint32_t dfid = builtin_func_fid(sema->vm, "data");
     if (dsig) {
       sema_symbol_t dinit = {.kind = SEMA_SYM_FUNC, .type = dsig,
                              .is_active = true, .fid = dfid,
@@ -382,18 +380,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
     const type_t *csig = type_func_sig(sema->vm, NULL, 0,
                                        sema->vm->type_opaque,
                                        /*is_variadic=*/true);
-    uint32_t cfid = 0;
-    if (sema->vm->functions) {
-      size_t nf = vec_len(sema->vm->functions);
-      for (size_t i = 0; i < nf; i++) {
-        func_t *bf = (func_t *)vec_get(sema->vm->functions, i);
-        if (bf && bf->name.len == 10 &&
-            memcmp(bf->name.ptr, "cfunc_ptr", 10) == 0) {
-          cfid = bf->id;
-          break;
-        }
-      }
-    }
+    uint32_t cfid = builtin_func_fid(sema->vm, "cfunc_ptr");
     if (csig) {
       sema_symbol_t cinit = {.kind = SEMA_SYM_FUNC, .type = csig,
                              .is_active = true, .fid = cfid,
@@ -431,6 +418,11 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
   sema_metadata_apply_all(sema, prog);
   pass_globals(sema, prog, /*speculative=*/false);  /* 全局变量 */
 
+  /* Pass 2c：方法声明校验（接收者必须是指针；魔法方法名/签名规则）。
+     必须早于 3a：非法声明不应进入作用域树/控制流分析产生级联诊断。 */
+  sema_validate_methods(sema, prog);
+  if (diag_has_error(sema->diag)) return false;
+
   /* Pass 3a：作用域树构建 + 控制流分析（符号注册、break/continue 位置检查、
      不可达语句、非 void 函数返回路径完整性）。快速失败：3a 有错误则
      不进入 3b——控制流/结构错误已使作用域树不可信，继续 shadow run
@@ -452,6 +444,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
        访问悬空作用域。 */
     if (sf->is_literal_owned) continue;
     if (sf->is_walked) continue; /* M7：实例在实例化时已同步 walk */
+
     if (sf->generic_inst) {
       /* M7 泛型实例：重绑类型参数后 walk（队列迭代，不递归进实例化栈）。 */
       sema_generic_walk_instance(sema, sf);
@@ -459,6 +452,7 @@ bool sema_analyze(sema_t *sema, ast_node_t *program) {
       continue;
     }
     sema_walk_function(sema, sf);
+    sf->is_walked = true; /* CTFE 的 ensure_walked 依赖该标记防二次 walk */
   }
 
 

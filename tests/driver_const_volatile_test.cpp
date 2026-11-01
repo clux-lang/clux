@@ -24,7 +24,9 @@ TEST(Driver, ConstTdzFirstAssignAllowed) {
   /* const 变量 TDZ 首次赋值 = 初始化，豁免合法：
      var a:const i32 = undefined; a = 123; */
   std::string path = write_temp_file(
-      "func main():i32 { var a:const i32 = undefined; a = 123; return a; }\n");
+      "func main():i32 { var a:const i32 = undefined; a = 123;\n"
+      "  if (a != 123) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -56,7 +58,9 @@ TEST(Driver, ConstCompoundAssignRejected) {
 TEST(Driver, ConstReadAndArithmeticAllowed) {
   /* const 变量只读 + 参与运算合法 */
   std::string path = write_temp_file(
-      "func main():i32 { var a:const i32 = 5; var b:i32 = a * 2; return b; }\n");
+      "func main():i32 { var a:const i32 = 5; var b:i32 = a * 2;\n"
+      "  if (b != 10) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -64,7 +68,9 @@ TEST(Driver, ConstReadAndArithmeticAllowed) {
 TEST(Driver, VolatileVarNormalOps) {
   /* volatile 变量读写/运算/赋值全合法（代理子类型） */
   std::string path = write_temp_file(
-      "func main():i32 { var a:volatile i32 = 1; a = a + 1; return a; }\n");
+      "func main():i32 { var a:volatile i32 = 1; a = a + 1;\n"
+      "  if (a != 2) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -73,7 +79,9 @@ TEST(Driver, ConstVolatileCombined) {
   /* const volatile i32（固定组合顺序 volatile(const(i32))）：
      首次赋值豁免，之后禁止 */
   std::string path = write_temp_file(
-      "func main():i32 { var a:const volatile i32 = undefined; a = 7; return a; }\n");
+      "func main():i32 { var a:const volatile i32 = undefined; a = 7;\n"
+      "  if (a != 7) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -88,7 +96,9 @@ TEST(Driver, ConstVolatileReassignRejected) {
 TEST(Driver, VolatileCompoundAssignAllowed) {
   /* volatile 不影响赋值（非 const），复合赋值合法 */
   std::string path = write_temp_file(
-      "func main():i32 { var a:volatile i32 = 1; a += 2; return a; }\n");
+      "func main():i32 { var a:volatile i32 = 1; a += 2;\n"
+      "  if (a != 3) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -96,7 +106,9 @@ TEST(Driver, VolatileCompoundAssignAllowed) {
 TEST(Driver, ConstValueCopyToNonConst) {
   /* const 值可复制到非 const 变量（const T extends T 复制语义） */
   std::string path = write_temp_file(
-      "func main():i32 { var a:const i32 = 10; var b:i32 = a; return b; }\n");
+      "func main():i32 { var a:const i32 = 10; var b:i32 = a;\n"
+      "  if (b != 10) { return 1; }\n"
+      "  return 0; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 0);
   std::remove(path.c_str());
 }
@@ -139,6 +151,85 @@ TEST(Driver, RunFileAnnotatedWideVarNarrowLiteralRejected) {
   std::string path = write_temp_file(
       "func main(): void { var x:i8 = 300; }\n");
   EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+/* ---- 方法接收者的 const/volatile 规则 ----
+ *
+ * 接收者按**第一个形参**（self）参与隐式转换：值接收者先按后端语义取地址
+ * `*T`（保留 const/volatile）再比较。因此加限定合法、**去限定必须拒绝**。
+ * 此前接收者完全不校验，C 后端按 self 类型直接 cast → 静默丢掉 const
+ * （C 编译器只给 warning，程序照常运行并改写 const 对象）。 */
+
+TEST(Driver, MethodReceiverConstPointerToMutableRejected) {
+  std::string path = write_temp_file(
+      "struct V {\n"
+      "  x: i32;\n"
+      "  func set(self: *V, v: i32): void { self.x = v; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{ .x = 1 };\n"
+      "  var p: *const V = a.&;\n"
+      "  p.set(5);\n"          /* *const V → *V：丢 const */
+      "  return a.x - 1;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, MethodReceiverConstValueToMutableRejected) {
+  std::string path = write_temp_file(
+      "struct V {\n"
+      "  x: i32;\n"
+      "  func set(self: *V, v: i32): void { self.x = v; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var c: const V = .V{ .x = 2 };\n"
+      "  c.set(7);\n"          /* const V 取地址得 *const V → *V：丢 const */
+      "  return 0;\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, MethodReceiverPointerToValueParamRejected) {
+  /* 指针接收者 + 值 self 形参：后端会把指针原样传进值形参（C 类型错误），
+     sema 明确拒绝并给出写法建议。 */
+  std::string path = write_temp_file(
+      "struct V {\n"
+      "  x: i32;\n"
+      "  func val(self: V): i32 { return self.x; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{ .x = 5 };\n"
+      "  var p: *V = a.&;\n"
+      "  return p.val();\n"
+      "}\n");
+  EXPECT_EQ(driver_run_file(path.c_str()), 1);
+  std::remove(path.c_str());
+}
+
+TEST(Driver, MethodReceiverConstRulesAccepted) {
+  /* 允许的形态：值→*V（取地址）、*V→*V、*const V→*const V、
+     const V→*const V（加限定）。值接收者（self: V）按语言基本设计被拒绝。 */
+  std::string path = write_temp_file(
+      "struct V {\n"
+      "  x: i32;\n"
+      "  func set(self: *V, v: i32): void { self.x = v; }\n"
+      "  func get(self: *const V): i32 { return self.x; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var a: V = .V{ .x = 1 };\n"
+      "  a.set(2);\n"                   /* 值 → *V */
+      "  var p: *V = a.&;\n"
+      "  p.set(3);\n"                   /* *V → *V */
+      "  var cp: *const V = a.&;\n"
+      "  if (cp.get() != 3) { return 1; }\n"   /* *const V → *const V */
+      "  var c: const V = .V{ .x = 9 };\n"
+      "  if (c.get() != 9) { return 2; }\n"    /* const V → *const V */
+      "  return 0;\n"
+      "}\n");
+  clux_expect_program_file_ok(path);
   std::remove(path.c_str());
 }
 
