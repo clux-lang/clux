@@ -1,7 +1,0 @@
-extern lib libc from "*";
-extern cfunc libc::printf(format: str, ...): i32;
-comptime var A: const i32 = 42;
-
-func main(): void {
-    _ = libc::printf("%d\n", A);
-}

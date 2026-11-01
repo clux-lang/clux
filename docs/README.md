@@ -20,6 +20,10 @@
 
 另有 [port 包](port-packages.md)（`export extern` 与 `clux.mod` 的 `native` 段）。
 
+语言一致性用例集在仓库根目录 `conformance/`：每个 `.cx` 对应一章，用语言自身的
+`test` 块自声明该章的规范要求（见 `conformance/README.md`）。它是规范的**可执行
+对照**，本身不是规范正文。
+
 ## 规范用词
 
 - **必须**：语言或工具强制要求；违反即诊断或拒绝。

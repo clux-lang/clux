@@ -1,0 +1,197 @@
+// 05-expressions.cx — 表达式（白皮书第 5 章）
+
+/* 短路求值的副作用计数 */
+var calls: i32 = 0;
+
+func bump(): bool {
+    calls = calls + 1;
+    return true;
+}
+
+func bump_false(): bool {
+    calls = calls + 1;
+    return false;
+}
+
+test "expressions.precedence" {
+    assert(1 + 2 * 3 == 7);
+    assert((1 + 2) * 3 == 9);
+    assert(10 - 2 - 3 == 5); // 左结合
+    assert(2 * 3 % 4 == 2);
+    assert(1 << 2 + 1 == 8); // 移位低于加法？按规范：1 先加 2 再左移 1 位
+    assert((1 + 2) << 1 == 6);
+    assert((1 | (2 & 3)) == 3); // & 高于 |
+    assert(!false && true);
+}
+
+test "expressions.arithmetic" {
+    assert(7 / 2 == 3);   // 整数除法截断
+    assert(7 % 3 == 1);
+    assert(-7 / 2 == -3);
+    assert(-7 % 2 == -1);
+    assert(1.5f64 + 2.5f64 == 4.0f64);
+    assert(3.0f64 / 2.0f64 == 1.5f64);
+    var a: i32 = 5;
+    a += 3; assert(a == 8);
+    a -= 1; assert(a == 7);
+    a *= 2; assert(a == 14);
+    a /= 2; assert(a == 7);
+    a %= 4; assert(a == 3);
+    a = a << 2; assert(a == 12);
+    a = a >> 1; assert(a == 6);
+    a = a | 1; assert(a == 7);
+    a = a & 6; assert(a == 6);
+    a = a ^ 3; assert(a == 5);
+}
+
+test "expressions.comparison" {
+    assert(1 < 2 && 2 <= 2 && 3 > 2 && 2 >= 2);
+    assert(1 != 2 && 2 == 2);
+    assert((1u32 < 2u32) == true);
+    assert("ab" == "ab");
+    assert("ab" != "ac");
+}
+
+test "expressions.logicalShortCircuit" {
+    calls = 0;
+    var t: bool = true || bump();
+    assert(t);
+    assert(calls == 0); // 左真短路
+    var f: bool = false && bump();
+    assert(!f);
+    assert(calls == 0); // 左假短路
+    var both: bool = bump() && bump_false();
+    assert(!both);
+    assert(calls == 2);
+}
+
+test "expressions.ternary" {
+    var a: i32 = 1 < 2 ? 10 : 20;
+    assert(a == 10);
+    var b: i32 = 1 > 2 ? 10 : 20;
+    assert(b == 20);
+    // 惰性：未选分支不求值
+    calls = 0;
+    var c: i32 = true ? 1 : (bump() ? 2 : 3);
+    assert(c == 1);
+    assert(calls == 0);
+}
+
+test "expressions.bitwise" {
+    assert((0xF0 & 0x0F) == 0);
+    assert((0xF0 | 0x0F) == 0xFF);
+    assert((0xFF ^ 0x0F) == 0xF0);
+    assert(~0 == -1);
+    assert(1 << 4 == 16);
+    assert(256 >> 4 == 16);
+    assert(!true == false);
+}
+
+test "expressions.casts" {
+    var a: i32 = 300;
+    assert(a as u8 == 44u8); // 截断
+    var b: f64 = 2.9;
+    assert(b as i32 == 2);   // 向零截断
+    var c: i32 = -1;
+    assert(c as u32 > 0u32);
+    var d: bool = 1 == 1;
+    assert(d as i32 == 1);
+}
+
+test "expressions.construct" {
+    var p: Point = .Point{ .x = 1, .y = 2 };
+    assert(p.x == 1);
+    var q: Point = p;
+    q.x = 9;
+    assert(p.x == 1);
+    var t: <i32, i32> = .{ 3, 4 };
+    assert(t[0] == 3);
+    var a: [3]i32 = .[3]i32{ 5, 6, 7 };
+    assert(a[1] == 6);
+    // 匿名 struct 字面量交给形参类型
+    assert(sum_point(.{ .x = 2, .y = 3 }) == 5);
+}
+
+struct Point { x: i32; y: i32 }
+
+func sum_point(p: Point): i32 { return p.x + p.y; }
+
+test "expressions.memberAndIndex" {
+    var a: [3]i32 = .[3]i32{ 1, 2, 3 };
+    a[0] = 10;
+    assert(a[0] == 10);
+    assert(a[1] == 2);
+    var p: Point = .Point{ .x = 1, .y = 2 };
+    p.y = 20;
+    assert(p.y == 20);
+    var t: <i32, i32> = .{ 1, 2 };
+    t[1] = 5;
+    assert(t[1] == 5);
+}
+
+test "expressions.slices" {
+    var a: [4]i32 = .[4]i32{ 10, 20, 30, 40 };
+    var all: []i32 = a[:];
+    var mid: []i32 = a[1:3];
+    assert(len(all) == 4usize);
+    assert(len(mid) == 2usize);
+    assert(mid[0] == 20);
+    var tail: []i32 = a[2:];
+    assert(len(tail) == 2usize);
+    assert(tail[0] == 30);
+    var copied: []i32 = make(data(a), 3);
+    assert(len(copied) == 3usize);
+    assert(copied[2] == 30);
+}
+
+test "expressions.addrAndDeref" {
+    var v: i32 = 7;
+    var p: *i32 = v.&;
+    assert(p.* == 7);
+    p.* = p.* + 1;
+    assert(v == 8);
+    var s: str = "ab";
+    assert(len(s) == 2usize);
+    var d: *u8 = data(s);
+    assert(d.* == 'a');
+}
+
+test "expressions.optional" {
+    var o: ?i32 = 5;
+    assert(o != nil);
+    assert(o.! == 5);
+    var n: ?i32 = nil;
+    assert(n == nil);
+    assert(!(n != nil));
+    if (n == nil) {
+        n = 1;
+    }
+    assert(n.! == 1);
+}
+
+test "expressions.isUnionTag" {
+    var s: Shape = .Shape{ .radius = 1.5f32 };
+    assert(s is radius);
+    assert(!(s is side));
+    s = .Shape{ .side = 2 };
+    assert(s is side);
+    assert(!(s is radius));
+}
+
+union Shape { radius: f32; side: i32 }
+
+func plain(x: i32): i32 { return x + 1; }
+
+test "expressions.closureCapture" {
+    var base: i32 = 10;
+    var add = func |base| (x: i32): i32 { return base + x; };
+    assert(add(5) == 15);
+    base = 0; // 值捕获：闭包仍看到 10
+    assert(add(5) == 15);
+    // 无捕获的函数值类型就是普通 func 类型：可赋值、可传参
+    var f: func(i32) -> i32 = plain;
+    assert(f(1) == 2);
+    assert(apply(plain, 2) == 3);
+}
+
+func apply(f: func(i32) -> i32, x: i32): i32 { return f(x); }

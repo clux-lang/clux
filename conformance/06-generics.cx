@@ -1,0 +1,118 @@
+// 06-generics.cx — 泛型与接口（白皮书第 6 章）
+
+/* ---- 泛型函数：显式实参与推导 ---- */
+
+func id[T](x: T): T { return x; }
+func first[T](a: T, b: T): T { return a; }
+
+test "generics.function" {
+    var a: i32 = id[i32](42);
+    assert(a == 42);
+    var b: f64 = id(2.5);
+    assert(b == 2.5f64);
+    var c: str = id("x");
+    assert(c == "x");
+    var d: i32 = first(7, 9);
+    assert(d == 7);
+    var e: str = first("l", "r");
+    assert(e == "l");
+}
+
+/* ---- 泛型 struct + 方法 ---- */
+
+struct Box[T] {
+    value: T;
+
+    func get(self: *Box[T]): T { return self.value; }
+
+    func map_into[U](self: *Box[T], f: func(T) -> U): Box[U] {
+        var out: Box[U] = .Box[U]{ .value = f(self.value) };
+        return out;
+    }
+}
+
+test "generics.struct" {
+    var b: Box[i32] = .Box[i32]{ .value = 9 };
+    assert(b.get() == 9);
+    var m: Box[str] = b.map_into(func(x: i32): str { return "n"; });
+    assert(m.get() == "n");
+}
+
+/* ---- 约束：extends ---- */
+
+func read_int[T extends *i32](p: T): i32 { return p.*; }
+
+struct Cell implements Sized[Cell] {
+    n: i32;
+    func size_of(self: *Cell): usize { return sizeof(Cell); }
+}
+
+interface Sized[T] {
+    func size_of(self: *T): usize;
+}
+
+test "generics.constraint" {
+    var v: i32 = 5;
+    assert(read_int(v.&) == 5);
+    var c: Cell = .Cell{ .n = 1 };
+    assert(c.size_of() == sizeof(Cell));
+}
+
+/* ---- comptime 值参数（类型级常量） ---- */
+
+struct Matrix[T, N: comptime u64] {
+    data: [N]T;
+}
+
+test "generics.comptimeParam" {
+    var m: Matrix[i32, 3] = .Matrix[i32, 3]{ .data = .[3]i32{ 1, 2, 3 } };
+    assert(len(m.data) == 3usize);
+    assert(m.data[2] == 3);
+    var f: Matrix[f64, 2] = .Matrix[f64, 2]{ .data = .[2]f64{ 1.5f64, 2.5f64 } };
+    assert(f.data[1] == 2.5f64);
+}
+
+/* ---- 递归泛型实例 ---- */
+
+func fact[T](n: T): T {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+test "generics.recursion" {
+    var a: i32 = fact(5);
+    assert(a == 120);
+    var b: i64 = fact(10i64);
+    assert(b == 3628800i64);
+    var f: func(i32) -> i32 = fact[i32];
+    assert(f(4) == 24);
+}
+
+/* ---- 值参数包：...Args 的计数 ---- */
+
+func pack_count[...Args](tag: str, args: ...Args): u64 { return len(args); }
+
+test "generics.valuePack" {
+    var n: u64 = pack_count[i32, str]("t", 1, "x");
+    assert(n == 2u64);
+}
+
+/* ---- 泛型接口约束在编译期检查（实现缺失即编译错误），这里验证正向形态 ---- */
+
+interface Printer[T] {
+    func print_it(self: *T): i32;
+}
+
+struct P implements Printer[P] {
+    v: i32;
+    func print_it(self: *P): i32 { return self.v; }
+}
+
+func show[T extends Printer[T]](p: *T): i32 { return p.print_it(); }
+
+test "generics.interfaceBound" {
+    var p: P = .P{ .v = 33 };
+    assert(show(p.&) == 33);
+}

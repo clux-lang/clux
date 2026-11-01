@@ -1,0 +1,86 @@
+// 09-metadata.cx — 装饰器与元信息（白皮书第 9 章）
+
+/* ---- 装饰器：编译期函数调用 `[[expr]]` ---- */
+
+comptime func twice(n: i32): i32 { return n * 2; }
+
+[[twice]] var decorated_var: i32 = 21;
+
+comptime func plus1(v: i32): i32 { return v + 1; }
+
+/* 函数装饰器：接收源函数值，返回包装后的函数值 */
+comptime func add100(f: func(i32) -> i32):
+        func |f: func(i32) -> i32| (i32) -> i32 {
+    return func |f| w(x: i32): i32 { return f(x) + 100; };
+}
+
+[[add100]] func raw(x: i32): i32 { return x; }
+
+comptime func add100m(f: func(*Decorated) -> i32):
+        func |f: func(*Decorated) -> i32| (*Decorated) -> i32 {
+    return func |f| w(self: *Decorated): i32 { return f(self) + 100; };
+}
+
+struct Decorated {
+    x: i32;
+    [[add100m]] func get(self: *Decorated): i32 { return self.x; }
+    func plain(self: *Decorated): i32 { return self.x + 1; }
+}
+
+test "metadata.decoratorValue" {
+    assert(decorated_var == 42);
+}
+
+test "metadata.decoratorFunction" {
+    assert(raw(5) == 105);
+}
+
+test "metadata.decoratorMethod" {
+    var d: Decorated = .Decorated{ .x = 7 };
+    assert(d.get() == 107);
+    assert(d.plain() == 8);
+}
+
+/* ---- 反射：类型值成员的编译期折叠 ---- */
+
+struct Meta {
+    a: i32;
+    b: str;
+
+    func m(self: *Meta): i32 { return self.a; }
+    func n(self: *Meta): i32 { return self.a + 1; }
+
+    var static_prop: i32 = 5;
+}
+
+enum Kind: i32 { A = 1, B = 2, C = 3 }
+
+test "metadata.reflect.type" {
+    assert(Meta.name == "Meta");
+    assert(Meta.kind == "struct");
+    assert(Meta.size == sizeof(Meta));
+    assert(Meta.align == alignof(Meta));
+}
+
+test "metadata.reflect.fields" {
+    assert(Meta.field_count == 2usize);
+    assert(Meta.field_name(0) == "a");
+    assert(Meta.field_name(1) == "b");
+    assert(Meta.field_type(0).name == "i32");
+    assert(Meta.field_type(1).name == "str");
+}
+
+test "metadata.reflect.methodsAndAttrs" {
+    assert(Meta.method_count == 2usize);
+    assert(len(Meta.method_type("m").name) > 0usize);
+    assert(Meta.attribute_count == 1usize);
+    assert(Meta.attribute_type(0).name == "i32");
+}
+
+test "metadata.reflect.enum" {
+    assert(Kind.name == "Kind");
+    assert(Kind.kind == "enum");
+    assert(Kind.variant_count == 3usize);
+    assert(Kind.variant_name(0) == "A");
+    assert(Kind.variant_value(2) == 3i64);
+}

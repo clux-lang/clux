@@ -164,14 +164,15 @@ semantic error) or runtime error. `clux run` (source) and the executables
 produced by `clux build` additionally return `main`'s integer result as the
 process exit code.
 
-Examples live in `examples/` — 50 entry directories (one or more `.cx` files each,
-one of them the runnable entry). Modules
-imported by an example live in a subdirectory of it (e.g. `examples/modules/lib/`),
-so every top-level `.cx` is runnable.
-Try:
+Language conformance lives in `conformance/` — one `.cx` file per whitepaper
+chapter, each declaring the spec requirements for that chapter with the
+language's own `test` / `assert` blocks. The cases are implementation-neutral
+(no C runtime, no test framework of this project), so they double as the
+reference suite for a future self-hosted compiler:
 
 ```sh
-./build/clux run examples/hello/hello.cx
+./build/clux test conformance/02-types.cx
+./build/clux test conformance/08-modules/main.cx   # entries with dependencies
 ```
 
 `clux format` rewrites only whitespace / indentation / comment placement from the token
@@ -182,7 +183,7 @@ properties are covered by regression tests (`tests/fmt_test.cpp`, `FmtRegression
 C-backend debugging:
 
 ```sh
-./build/clux build examples/hello/hello.cx --keep-c   # C kept next to the exe
+./build/clux build conformance/02-types.cx --keep-c   # C kept next to the exe
 ```
 
 ## Project layout
@@ -200,7 +201,7 @@ src/driver/      pipeline orchestration (load -> lex -> parse -> sema -> C build
 src/cmd/         subcommand dispatch (run / format / build / test / version)
 include/         public headers (mirrors src/)
 tests/           C++20 + GoogleTest suites
-examples/        sample programs (.cx sources)
+conformance/     language conformance suite (.cx, features self-declared with test blocks)
 docs/            whitepaper (normative language spec)
 ```
 
@@ -224,7 +225,8 @@ All registered tests pass. Unit tests cover Lexer / Parser / C backend /
 core containers; integration tests execute programs end-to-end through
 `driver_run_file` (for `foreach` the CLI is spawned so the program's own
 `printf` output can be asserted — see `tests/foreach_test.cpp`), including the
-`examples/` sweep.
+`conformance/` suite (its `test` blocks run through `clux test`, see
+`tests/conformance_test.cpp`).
 
 `driver_run_file` **编译并运行**，返回程序 `main` 的返回值（编译错误 / 无法启动 /
 异常终止记 1）——所以用例里的 `if (...) { return N; }` 断言是真实生效的。

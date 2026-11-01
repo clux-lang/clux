@@ -1,0 +1,54 @@
+// 11-testing.cx — 测试与 mock（白皮书第 11 章）
+//
+// 本文件自身就是一个 test 集合：`clux test conformance/11-testing.cx`。
+
+func target(x: i32): i32 { return x + 1; }
+func fake(x: i32): i32 { return 7; }
+
+struct S {
+    v: i32;
+    func get(self: *S): i32 { return self.v; }
+}
+
+func fake_get(self: *S): i32 { return 99; }
+
+test "testing.assert" {
+    assert(1 + 1 == 2);
+    assert(true);
+    var a: i32 = 3;
+    assert(a > 0 && a < 10);
+}
+
+test "testing.mock.free" {
+    assert(target(1) == 2);
+    mock("target", fake);
+    assert(target(1) == 7);
+    unmock("target");
+    assert(target(1) == 2);
+}
+
+test "testing.mock.method" {
+    var s: S = .S{ .v = 1 };
+    assert(s.get() == 1);
+    mock_method(S, "get", fake_get);
+    assert(s.get() == 99);
+    unmock_method(S, "get");
+    assert(s.get() == 1);
+}
+
+test "testing.mock.autoReset" {
+    /* 故意不 unmock：runner 在下一个用例开始前清空所有 mock 槽。 */
+    mock("target", fake);
+    assert(target(1) == 7);
+}
+
+test "testing.mock.autoResetCheck" {
+    assert(target(1) == 2);
+}
+
+test "testing.testIsolation" {
+    /* 用例之间不共享局部状态；全局状态由用例自己重置。 */
+    var local: i32 = 1;
+    local = local + 1;
+    assert(local == 2);
+}

@@ -1,0 +1,75 @@
+// 10-bitfields.cx — 位域（白皮书第 10 章）
+
+bitfield Flags: u32 {
+    a: 3;
+    b: 5;
+}
+
+bitfield Wide: u8 {
+    x: 4;
+    y: 8;
+    z: 5;
+}
+
+test "bitfields.layout" {
+    // a 占 bit 0..3、b 占 bit 3..8 → 总共 8 位，存 1 个 u32
+    assert(sizeof(Flags) == 4usize);
+    // 4+8+5 = 17 位 → ceil(17/8) = 3 字节
+    assert(sizeof(Wide) == 3usize);
+    assert(alignof(Flags) == 4usize);
+}
+
+test "bitfields.constructAndRead" {
+    var f: Flags = .Flags{ .a = 1u32, .b = 2u32 };
+    assert(f.a == 1u32);
+    assert(f.b == 2u32);
+    // 缺省字段补零
+    var z: Flags = .Flags{ .a = 5u32 };
+    assert(z.b == 0u32);
+    // 空构造：全零
+    var e: Flags = .Flags{};
+    assert(e.a == 0u32);
+    assert(e.b == 0u32);
+}
+
+test "bitfields.writeAndTruncate" {
+    var f: Flags = .Flags{};
+    f.a = 7u32;
+    assert(f.a == 7u32);
+    // a 宽 3 位：写入 9 截断为 1
+    f.a = 9u32;
+    assert(f.a == 1u32);
+    f.b = 31u32;
+    assert(f.b == 31u32);
+    f.b += 1u32;
+    assert(f.b == 0u32); // 5 位回绕
+}
+
+test "bitfields.crossWord" {
+    var w: Wide = .Wide{ .x = 1u8, .y = 2u8, .z = 3u8 };
+    assert(w.x == 1u8);
+    assert(w.y == 2u8);
+    assert(w.z == 3u8);
+    w.z = 31u8;
+    assert(w.z == 31u8);
+    w.y = 255u8;
+    assert(w.y == 255u8);
+    assert(w.x == 1u8); // 互不干扰
+}
+
+test "bitfields.pointerReceiver" {
+    var f: Flags = .Flags{ .a = 1u32 };
+    var p: *Flags = f.&;
+    p.a = 4u32;
+    assert(f.a == 4u32);
+    p.b = 3u32;
+    assert(f.b == 3u32);
+}
+
+test "bitfields.valueCopy" {
+    var a: Flags = .Flags{ .a = 2u32, .b = 3u32 };
+    var b: Flags = a;
+    b.a = 5u32;
+    assert(a.a == 2u32); // 值语义：拷贝独立
+    assert(b.a == 5u32);
+}

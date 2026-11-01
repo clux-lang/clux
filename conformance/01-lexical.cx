@@ -1,0 +1,122 @@
+// 01-lexical.cx — 词法与字面量（白皮书第 1 章）
+//
+// 一致性用例：每个 test 块自声明一条规范要求，`clux test <file>` 逐条执行。
+// 只用语言自身的 test/assert，不依赖任何实现细节或 C 运行时。
+
+test "lexical.comments" {
+    // 行注释到行尾
+    /* 块注释
+       可以跨行 */
+    var a: i32 = 1; // 尾随注释
+    assert(a == 1);
+}
+
+test "lexical.identifiers" {
+    var café: i32 = 1;
+    var 你好: i32 = 2;
+    var _under_score123: i32 = 3;
+    assert(café + 你好 + _under_score123 == 6);
+}
+
+test "lexical.integer.decimal" {
+    assert(0 == 0);
+    assert(123 == 123);
+    assert(1i8 == 1i8);
+    assert(2i16 == 2i16);
+    assert(3i32 == 3i32);
+    assert(4i64 == 4i64);
+    assert(5u8 == 5u8);
+    assert(6u16 == 6u16);
+    assert(7u32 == 7u32);
+    assert(8u64 == 8u64);
+    assert(9usize == 9usize);
+}
+
+test "lexical.integer.radix" {
+    assert(0xFF == 255);
+    assert(0o755 == 493);
+    assert(0b1010 == 10);
+    assert(0xFFu8 == 255u8);
+    assert(0b1010u16 == 10u16);
+    assert(0o17i32 == 15i32);
+}
+
+test "lexical.integer.suffixTypes" {
+    assert(typeof(1i8).name == "i8");
+    assert(typeof(1u8).name == "u8");
+    assert(typeof(1i32).name == "i32");
+    assert(typeof(1u64).name == "u64");
+    assert(typeof(1usize).name == "usize");
+    assert(sizeof(1i8) == 1usize);
+    assert(sizeof(1i16) == 2usize);
+    assert(sizeof(1i64) == 8usize);
+}
+
+test "lexical.float" {
+    assert(0.0 == 0.0f64);
+    assert(2.5 == 2.5f64);
+    assert(1.5f32 == 1.5f32);
+    assert(3.5f64 == 3.5f64);
+    assert(1e3 == 1000.0f64);
+    assert(1.5e-2 == 0.015f64);
+    assert(typeof(1.5f32).name == "f32");
+    assert(typeof(1.5).name == "f64");
+}
+
+test "lexical.bool" {
+    assert(true == true);
+    assert(false == false);
+    assert(true != false);
+}
+
+test "lexical.char" {
+    var a: u8 = 'a';
+    var nl: u8 = '\n';
+    var backslash: u8 = '\\';
+    var quote: u8 = '\'';
+    var hex: u8 = '\x41';
+    assert(a == 97u8);
+    assert(nl == 10u8);
+    assert(backslash == 92u8);
+    assert(quote == 39u8);
+    assert(hex == 65u8);
+    assert(typeof('z').name == "u8");
+}
+
+test "lexical.string.escapes" {
+    var plain: str = "clux";
+    var esc: str = "a\tb\nc\\d\"e";
+    var hex: str = "\x41\x42";
+    var es: [] const u8 = esc[:];
+    var hs: [] const u8 = hex[:];
+    assert(len(plain) == 4usize);
+    assert(len(esc) == 9usize);
+    assert(es[1] == '\t');
+    assert(es[3] == '\n');
+    assert(hs[0] == 65u8);
+    assert(hs[1] == 66u8);
+}
+
+test "lexical.nilAndUndefined" {
+    var o: ?i32 = nil;
+    assert(o == nil);
+    var u: i32 = undefined;
+    u = 5;
+    assert(u == 5);
+}
+
+test "lexical.keywordsAreWords" {
+    // 关键字不能做标识符，但可以做字段名之外的普通文本内容；
+    // 这里只验证相关字面量拼写不产生歧义。
+    var a: i32 = 0;
+    a = a + 1;
+    assert(a == 1);
+}
+
+test "lexical.sourceStructure" {
+    // 声明之间不需要分隔符；语句以 ';' 或块结束。
+    var a: i32 = 1
+    ; var b: i32 = 2;
+    if (a < b) { a = b; }
+    assert(a == 2);
+}

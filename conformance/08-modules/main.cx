@@ -1,0 +1,37 @@
+// 08-modules/main.cx — 模块与导入（白皮书第 8 章）
+//
+// 入口文件：依赖 `lib/shapes.cx`（`clux test conformance/08-modules/main.cx`）。
+
+import shapes from "./lib/shapes";
+
+test "modules.exportedType" {
+    var p: shapes::Point = .shapes::Point{ .x = 3, .y = 4 };
+    assert(p.norm2() == 25);
+}
+
+test "modules.exportedFunc" {
+    var p: shapes::Point = .shapes::Point{ .x = 1, .y = 2 };
+    var q: shapes::Point = shapes::scale(p, 3);
+    assert(q.x == 3);
+    assert(q.y == 6);
+}
+
+test "modules.exportedVar" {
+    assert(shapes::version == 1);
+}
+
+test "modules.exportedTypeAlias" {
+    var t: shapes::Pair = .[2]i32{ 1, 2 };
+    assert(t[0] == 1);
+    assert(t[1] == 2);
+}
+
+test "modules.localCodeSeesImport" {
+    var n: i32 = helper_via_import();
+    assert(n == 25);
+}
+
+func helper_via_import(): i32 {
+    var p: shapes::Point = .shapes::Point{ .x = 3, .y = 4 };
+    return p.norm2();
+}

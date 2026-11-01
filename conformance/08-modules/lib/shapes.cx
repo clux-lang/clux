@@ -1,0 +1,18 @@
+// 08-modules/lib/shapes.cx — 被 main.cx 导入的依赖模块
+
+export struct Point {
+    x: i32;
+    y: i32;
+
+    func norm2(self: *Point): i32 {
+        return self.x * self.x + self.y * self.y;
+    }
+}
+
+export func scale(p: Point, k: i32): Point {
+    return .Point{ .x = p.x * k, .y = p.y * k };
+}
+
+export type Pair = [2]i32;
+
+export var version: i32 = 1;
