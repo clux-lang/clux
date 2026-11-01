@@ -122,14 +122,20 @@ comptime func f(): i32 {
 
 | 步骤 | 调用点 | 作用 |
 | --- | --- | --- |
-| 取地址 | `ctfe_addr_of` / `data()` / 切片基址 | `ctfe_mem_note_addr(addr, owner)`：addr 记到存储块 owner 名下，owner 标 alive |
+| 分配块 | `value_alloc_data` / `value_alloc_data_copy` | `ctfe_mem_on_alloc(base)`：块标 alive（**权威**存活状态） |
+| 取地址 | `ctfe_addr_of` / `data()` / 切片基址 / `make(ptr,len)` | `ctfe_mem_note_addr(addr, owner)`：addr 记到存储块 owner 名下（**不改**存活状态） |
 | 释放块 | `value_dispose`（data 块 free 之前） | `ctfe_mem_on_free(base)`：该块标 dead |
-| 解引用 | `p.*` / `p.f` / `a[i]`（切片/指针）/ `*T` 方法接收者 | `ctfe_mem_check(target)`：命中 dead 块 → 诊断 |
+| 解引用 | `p.*` / `p.f` / `a[i]`（切片/指针）/ `*T` 方法接收者 / 再切片 | `ctfe_mem_check(target)`：命中 dead 块 → 诊断 |
 
-- 两张按地址精确查找的哈希表（块表 base→alive、归属表 addr→base），O(1)，
-  只在"被取过地址"的块上工作，普通值路径零开销。
-- 块**不延迟释放**，所以不会累积内存；地址被后续分配复用时，重新取址会把块
-  重新标 alive（只可能漏报，不会误报）。
+- 两张按地址精确查找的哈希表（块表 base→alive、归属表 addr→base），O(1)。
+- **存活状态只来自分配/释放钩子**，归属登记不参与。这条分工是必须的：
+  - 让登记"复活"块 → 漏报。实测 `data(逃逸切片)` / `逃逸切片再切片` 会在
+    登记时把已释放块重新标 alive，随后解引用照旧读到垃圾值。
+  - 让登记"不得复活"、又没有分配钩子 → 误报。allocator 复用地址时，新块
+    没人重新标 alive，旧登记项会让它还留在 dead 状态。
+  - 两者同时满足只有一种做法：分配即 alive、dispose 即 dead，登记只记归属。
+- 块**不延迟释放**，所以不会累积内存；地址复用时由分配钩子重新标 alive
+  （只可能漏报，不会误报）。
 - 登记表在 `vm_destroy` 里 `ctfe_mem_reset()`：一个编译一个 vm，避免跨编译的
   地址复用造成误判。
 - 登记上限 200 万项（约 32MB），超过后停用登记——只降低诊断精度，不影响语义。
@@ -141,21 +147,35 @@ error: ... ctfe: use-after-free: dereferencing 0x..., whose storage block 0x...
 has already been released (the pointer escaped the lifetime of its owner)
 ```
 
-### 5.4 覆盖范围与已知缺口
+### 5.4 覆盖范围
 
 已覆盖：块内局部变量取址后逃逸、函数返回局部变量地址、局部数组切片逃逸、
-`data(局部数组)` 逃逸、`*T` 接收者指向已释放对象。
+`data(局部数组)` 逃逸、`data(逃逸切片)`、`make(ptr, len)` 逃逸、逃逸切片再切片
+（`s[lo:hi]` 的基址是内部地址，查的是原基址所在块）、`*T` 接收者指向已释放对象。
 
-未覆盖（**漏报**，非误报）：指针算术（`p + 1`）后再解引用、把地址塞进别处
-再取出（地址值本身仍会被查到，前提是同一地址值），以及完全没有被 CTFE
-"取过地址"的内存。
+没有"指针算术后再解引用"这个缺口——**clux 不提供指针算术，也不提供指针下标**：
+
+```clux
+var p: *i32 = data(a);
+var q: *i32 = p + 1;   // error: cannot apply '+' to *i32 and i32
+var r: i32   = p[1];   // error: cannot index value of type *i32
+```
+
+指针只能整体传递（赋值/实参/返回/字段/optional 载荷），地址值不变，归属登记因此
+一直有效；要按元素访问必须先 `make(p, len)` 或 `a[lo:hi]` 得到切片，而切片基址
+一律登记并在解引用前校验。
+
+仍然**漏报**的情形：地址从未经过 CTFE 取址的存储（`str` 的字符缓冲、引擎内部
+分配），它们不归 `value_dispose` 管理，也不会在编译期被释放。
 
 ### 5.5 不变式（改动 CTFE 取值路径时遵守）
 
 1. 任何**从指针值得到存储地址**的位置都必须先 `ctfe_mem_check`。
-2. 任何**产出指针值**的位置都必须 `ctfe_mem_note_addr`（并带上真实块基址）。
-3. `ctfe_lval_t.owner` 承载块基址，字段/下标/解包/解引用都要传递它——
+2. 任何**产出指针值/切片值**的位置都必须 `ctfe_mem_note_addr`（并带上真实块基址）。
+3. 任何**新 data 块**都必须经过 `value_alloc_data*`（存活状态由它登记）；
+   否则地址复用时会把活块判成 dead → 误报。
+4. `ctfe_lval_t.owner` 承载块基址，字段/下标/解包/解引用都要传递它——
    owner 丢了只会降低诊断精度，但不要传成"中间地址"，否则会把块身份记错。
-4. `value_dispose` 是 data 块的唯一释放点，`ctfe_mem_on_free` 必须在那里
+5. `value_dispose` 是 data 块的唯一释放点，`ctfe_mem_on_free` 必须在那里
    （其它 `allocator_free` 都是引擎内部对象，不承载用户可见地址）。
 

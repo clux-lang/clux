@@ -56,6 +56,7 @@ void *value_alloc_data(allocator_t *alloc, const type_t *type) {
     void *data = allocator_new(alloc, &g_value_data_class, type->size);
     if (!data) panic("vm: out of memory allocating value data");
     memset(data, 0, type->size);
+    ctfe_mem_on_alloc(data); /* 登记为 alive（CTFE 逃逸指针诊断的权威状态） */
     return data;
 }
 
@@ -64,6 +65,7 @@ void *value_alloc_data_copy(allocator_t *alloc, const type_t *type, const void *
     void *data = allocator_new(alloc, &g_value_data_class, type->size);
     if (!data) panic("vm: out of memory allocating value data");
     memcpy(data, src, type->size);
+    ctfe_mem_on_alloc(data);
     return data;
 }
 

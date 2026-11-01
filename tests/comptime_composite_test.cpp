@@ -688,6 +688,66 @@ TEST(DriverComptime, DataPointerOfReturnedLocalArrayRejected) {
       "use-after-free", "ct_uaf_data");
 }
 
+TEST(DriverComptime, DataPointerOfEscapedSliceRejected) {
+  /* 逃逸切片再取 data()：归属继承自切片基址，块已释放 → 仍必须诊断
+     （归属登记不得把已释放块"复活"）。 */
+  clux_expect_reject(
+      "comptime func f(): i32 {\n"
+      "  var s: []i32 = undefined;\n"
+      "  {\n"
+      "    var a: [3]i32 = .[3]i32{ 10, 20, 30 };\n"
+      "    s = make(data(a), 3);\n"
+      "  }\n"
+      "  var d: *i32 = data(s);\n"
+      "  return d.*;\n"
+      "}\n"
+      "func main(): i32 { return f(); }\n",
+      "use-after-free", "ct_uaf_data_slice");
+}
+
+TEST(DriverComptime, ResliceOfEscapedSliceRejected) {
+  /* 逃逸切片再切片：新基址是内部地址（基址 + lo），必须查原基址所在块。 */
+  clux_expect_reject(
+      "comptime func f(): i32 {\n"
+      "  var s: []i32 = undefined;\n"
+      "  {\n"
+      "    var a: [3]i32 = .[3]i32{ 10, 20, 30 };\n"
+      "    s = make(data(a), 3);\n"
+      "  }\n"
+      "  var t: []i32 = s[1:3];\n"
+      "  return t[0];\n"
+      "}\n"
+      "func main(): i32 { return f(); }\n",
+      "use-after-free", "ct_uaf_reslice");
+}
+
+TEST(DriverComptime, PointerAndSliceChurnInsideComptime) {
+  /* 正例（地址复用回归）：循环里反复 取址/解引用、建切片/再切片。局部值
+     每轮分配-释放，allocator 会复用同一批地址——存活状态必须以**分配/
+     释放**为准，登记不得因地址复用留下 dead 标记（否则误报）。 */
+  clux_expect_program_ok(
+      "comptime func one(k: i32): i32 {\n"
+      "  var x: i32 = k;\n"
+      "  var p: *i32 = x.&;\n"
+      "  return p.* + 1;\n"
+      "}\n"
+      "comptime func churn(): i32 {\n"
+      "  var total: i32 = 0;\n"
+      "  var i: i32 = 0;\n"
+      "  while (i < 100) {\n"
+      "    total = total + one(i);\n"
+      "    var a: [3]i32 = .[3]i32{ 1, 2, 3 };\n"
+      "    var s: []i32 = a[0:3];\n"
+      "    var t: []i32 = s[1:3];\n"
+      "    total = total + t[0] + make(data(a), 3)[2];\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return total - 5550;\n"
+      "}\n"
+      "func main(): i32 { return churn(); }\n",
+      "ct_uaf_churn");
+}
+
 TEST(DriverComptime, PointerIntoOuterStorageSurvivesInnerScope) {
   /* 正例：取外层变量 / 结构体字段的地址，内层作用域退出不影响它 ——
      逃逸诊断只针对**块已释放**的情况，不能误伤普通取址。 */

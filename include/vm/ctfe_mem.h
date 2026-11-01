@@ -28,8 +28,19 @@ extern "C" {
  */
 
 /** 登记 addr 归属存储块 owner（owner 为空时以 addr 自身为块基址）。
- *  addr/owner 为 NULL 或达到登记上限时静默忽略。 */
+ *
+ *  **只记录归属，不改存活状态**：块的 alive 由 ctfe_mem_on_alloc /
+ *  ctfe_mem_on_free 权威决定（分配即 alive、dispose 即 dead）。owner 尚未
+ *  登记过时按 alive 登记（未知来源的存储只能当作活的）。
+ *  addr 为 NULL 或达到登记上限时静默忽略。 */
 void ctfe_mem_note_addr(void *addr, void *owner);
+
+/** 存储块分配：标 alive（`value_alloc_data*` 在返回 data 前调用）。
+ *
+ *  必须与释放钩子配对，否则"归属登记不得复活已释放块"会导致**误报**：
+ *  allocator 复用地址时，新块若不重新标 alive，旧登记项会让它还留在 dead
+ *  状态。地址复用时只可能漏报，不可能误报——这个不变式由本钩子保证。 */
+void ctfe_mem_on_alloc(void *base);
 
 /** 查询 addr 已登记的所属存储块基址；未登记返回 NULL。 */
 void *ctfe_mem_owner_of(const void *addr);

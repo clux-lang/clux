@@ -650,6 +650,10 @@ value_t *ctfe_slice_expr(ctfe_ctx_t *ctx, ast_slice_t *sl) {
         slice_value_t sv = slice_view(obj);
         elem = slice_type_elem(t);
         base = sv.ptr;
+        /* 再切片是基于**已有切片**的视图：先校验它的基址块还活着
+           （`lo > 0` 时新基址是内部地址，精确命中查不到，必须查原基址）。 */
+        const char *uaf = uaf_check(sv.ptr);
+        if (uaf) return ctfe_err(ctx, uaf);
         owner = ctfe_mem_owner_of(sv.ptr);
         if (!owner) owner = sv.ptr;
         n = sv.len;
@@ -687,6 +691,8 @@ value_t *ctfe_slice_expr(ctfe_ctx_t *ctx, ast_slice_t *sl) {
     if (lo < hi && owner) {
         const char *uaf = uaf_check(slice_base);
         if (uaf) return ctfe_err(ctx, uaf);
+        /* 数组：owner 就是数组值自己的 data 块；切片：owner 继承自更早的
+           取址。存活状态由分配/释放钩子维护，这里只记录归属。 */
         ctfe_mem_note_addr(slice_base, owner);
     }
     return slice_make_value(vm, st, slice_base, (uint64_t)(hi - lo));
@@ -712,8 +718,8 @@ value_t *ctfe_make_slice(ctfe_ctx_t *ctx, ast_make_t *mk) {
     if (base) {
         const char *uaf = uaf_check(base);
         if (uaf) return ctfe_err(ctx, uaf);
-        void *owner = ctfe_mem_owner_of(base);
-        ctfe_mem_note_addr(base, owner ? owner : base);
+        /* 归属来自指针（可能继承自更早的取址）；存活由分配/释放钩子判定。 */
+        ctfe_mem_note_addr(base, ctfe_mem_owner_of(base));
     }
     return slice_make_value(vm, st, base, (uint64_t)len);
 }
@@ -806,8 +812,9 @@ value_t *ctfe_builtin_data(ctfe_ctx_t *ctx, ast_node_t *arg) {
     if (ctx->sema) sema_type_register(ctx->sema, pt);
     /* str 的字符缓冲不归 value data 块管理（字符串池/独立分配），不登记。 */
     if (ptr && type_kind_of(t) != TYPE_KIND_STR) {
-        void *owner = ctfe_mem_owner_of(ptr);
-        ctfe_mem_note_addr(ptr, owner ? owner : value_data(v));
+        /* 切片取 data：归属继承自切片基址；数组取 data：ptr 就是数组值自己的
+           data 块。存活状态由分配/释放钩子维护。 */
+        ctfe_mem_note_addr(ptr, ctfe_mem_owner_of(ptr));
     }
     return ptr_make_value(vm, pt, ptr);
 }

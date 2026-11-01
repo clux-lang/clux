@@ -186,9 +186,15 @@ static void prov_intern(void *addr, void *owner) {
 
 void ctfe_mem_note_addr(void *addr, void *owner) {
     if (!addr || g_disabled) return;
-    int bi = blk_intern(owner ? owner : addr);
-    if (bi < 0) return;
-    prov_intern(addr, g_blk[bi].base);
+    const void *blk = owner ? owner : addr;
+    /* 归属只记录，不改存活状态；未知块按 alive 登记（无证据说明它已释放）。 */
+    if (blk_find(blk) < 0 && blk_intern((void *)blk) < 0) return;
+    prov_intern(addr, (void *)blk);
+}
+
+void ctfe_mem_on_alloc(void *base) {
+    if (!base || g_disabled) return;
+    (void)blk_intern(base); /* 新建块（含地址复用）一律标 alive */
 }
 
 void *ctfe_mem_owner_of(const void *addr) {
