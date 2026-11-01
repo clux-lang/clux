@@ -862,7 +862,16 @@ value_t *ctfe_eval_inner(ctfe_ctx_t *ctx, ast_node_t *node) {
             if (fnv && !value_is_shadow(fnv) && value_type(fnv) &&
                 value_type(fnv)->vtable && value_type(fnv)->vtable->call) {
                 func_t *bf = *(func_t **)value_data(fnv);
+                /* 内建 cfunc：直接 value_call。 */
                 if (bf && bf->cfunc) return ctfe_call_value(ctx, fnv, n->args);
+                /* 程序函数的引用对象：有有效 fid 时同样走 value 调用路径
+                   （ctfe_call_value 内部按 fid 解释执行）——这正是
+                   "函数值作为参数/局部变量传入后调用"的情形（例如泛型
+                   `map(f)`），不能因为名字同时出现在 sema 符号表里就绕过
+                   作用域里的真实值（那会解析到同名的全局函数）。 */
+                if (bf && bf->id && ctx->sema &&
+                    sema_func_by_id(ctx->sema, bf->id))
+                    return ctfe_call_value(ctx, fnv, n->args);
             }
             /* 2. sema 符号表：SYM_FUNC（clux 函数）→ 解释调用。
                先查当前词法作用域（局部 comptime 函数/变量的符号所在块，

@@ -530,6 +530,58 @@ TEST(DriverComptime, CfuncPtrInsideComptimeRejected) {
       "cfunc_ptr() is not available in compile-time code", "ct_cfunc_ptr");
 }
 
+TEST(DriverComptime, GenericFunctionInsideComptime) {
+  /* CTFE 复用 sema 的实例化 walk：泛型函数在 comptime 调用时实例体里的
+     `sizeof(T)` / `var x: T` 必须按已绑定的类型参数解释。 */
+  clux_expect_program_ok(
+      "func sz[T](): usize { return sizeof(T); }\n"
+      "func mk[T](v: T): T { var x: T = v; return x; }\n"
+      "comptime func f(): i32 {\n"
+      "  if (sz[i32]() != 4usize) { return 1; }\n"
+      "  return mk[i32](7);\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (f() != 7) { return 2; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ct_generic_fn");
+}
+
+TEST(DriverComptime, GenericMethodWithFunctionValueArgument) {
+  /* CTFE 复用函数值调用路径：泛型方法拿到的函数值参数（`map(f)`）
+     在 comptime 里也能调用。 */
+  clux_expect_program_ok(
+      "struct Box[T] {\n"
+      "  v: T;\n"
+      "  func map[U](self: *Box[T], g: func(T) -> U): U { return g(self.v); }\n"
+      "}\n"
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "comptime func f(): i32 {\n"
+      "  var b: Box[i32] = .Box[i32]{ .v = 5 };\n"
+      "  return b.map[i32](inc);\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (f() != 6) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ct_generic_method_fn");
+}
+
+TEST(DriverComptime, FunctionValueLocalCalledInsideComptime) {
+  /* 局部变量里存的函数值在 comptime 里调用（不再要求"名字必须是函数"）。 */
+  clux_expect_program_ok(
+      "func inc(x: i32): i32 { return x + 1; }\n"
+      "comptime func f(): i32 {\n"
+      "  var g: func(i32) -> i32 = inc;\n"
+      "  return g(4);\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (f() != 5) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "ct_func_value_local");
+}
+
 TEST(DriverComptime, StaticMethodInsideComptime) {
   clux_expect_program_ok(
       "struct P {\n"

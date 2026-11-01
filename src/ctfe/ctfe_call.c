@@ -1,5 +1,6 @@
 #include "ctfe/ctfe.h"
 #include "sema/sema.h"
+#include "sema/sema_generic.h"
 
 #include "core/string.h"
 #include "core/strslice.h"
@@ -18,7 +19,10 @@
 
 /* 生成函数（`__clux_eq_<T>` 等）由 sema 在 walk 期间创建：CTFE 若在 walk 队列
    处理它之前就解释调用（comptime 折叠可能发生在生成它的那次 walk 里），body
-   里的复合 `==` 还没展开成调用。解释前先确保它已被 walk（幂等）。 */
+   里的复合 `==` 还没展开成调用。解释前先确保它已被 walk（幂等）。
+   **泛型实例**必须复用 sema 的实例化 walk（`sema_generic_walk_instance`：
+   重绑类型参数 + 定义模块上下文），否则实例体里的 `sizeof(T)` / `T` 之类
+   会在未绑定类型参数的作用域里 walk。 */
 static void ctfe_ensure_walked(ctfe_ctx_t *ctx, ast_func_def_t *fn) {
     if (!ctx || !ctx->sema || !fn) return;
     sema_t *sema = ctx->sema;
@@ -27,6 +31,12 @@ static void ctfe_ensure_walked(ctfe_ctx_t *ctx, ast_func_def_t *fn) {
         sema_func_t *sf = (sema_func_t *)vec_get(sema->funcs, i);
         if (!sf || sf->def != (ast_node_t *)fn) continue;
         if (sf->is_walked) return;
+        if (sf->generic_inst) {
+            /* 泛型实例：复用实例化 walk（类型参数绑定/定义模块/标记
+               is_walked 都在里面完成）。 */
+            sema_generic_walk_instance(sema, sf);
+            return;
+        }
         if (!sf->scope) sema_build_func_scope(sema, sf);
         sema_walk_function(sema, sf);
         sf->is_walked = true;
