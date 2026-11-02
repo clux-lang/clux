@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
+static const type_t *infer_expr_type_core(lower_ctx_t *lc, ast_node_t *e) {
     if (!e) return NULL;
     vm_t *vm = lc->sema->vm;
     switch (e->kind) {
@@ -268,5 +268,19 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     default:
         return NULL;
     }
+}
+
+/* 公开入口：先走后端已有的推断（它对泛型实例 / 成员调用最准确），
+   推断不出来时用 **sema 记录的表达式类型** 兜底——这正是"未知类型 → 把 ?T
+   再包一层"那类 bug 的根源。 */
+const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
+  const type_t *t = infer_expr_type_core(lc, e);
+  if (t) return t;
+  /* 只在**调用节点**上用 sema 记录的类型兜底：这是后端最缺信息、也最容易
+     退化成"未知类型 → 把 ?T 再包一层"的地方。其它节点先保持后端原有推断
+     （类型对象身份尚未完全唯一化，过早扩大使用会引出 slice/optional 等
+     等价但不同身份的 C 类型）。 */
+  if (e && e->kind == AST_CALL) return e->resolved_type;
+  return NULL;
 }
 

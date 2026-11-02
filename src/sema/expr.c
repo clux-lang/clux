@@ -169,7 +169,8 @@ bool is_poison(sema_t *sema, const value_t *v) {
   return value_is_error(sema->vm, v) || value_is_type(v, TYPE_KIND_VOID);
 }
 
-value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
+static value_t *sema_expr_impl(sema_t *sema, ast_node_t **node,
+                              sema_scope_t *scope) {
   if (!node || !*node) return val_void(sema);
   switch ((*node)->kind) {
     case AST_INT_LIT:
@@ -278,6 +279,18 @@ value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                  ast_kind_name((*node)->kind));
       return val_void(sema);
   }
+}
+
+/* 公开入口：求值 + 记录表达式类型（后端 infer_expr_type 只查这个字段）。
+   sema 可能把 *node 改写成新节点（魔法调用 / 隐式构造 / 隐式转换），
+   因此类型写在**改写后的**节点上。 */
+value_t *sema_expr(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
+  value_t *v = sema_expr_impl(sema, node, scope);
+  if (sema && node && *node && v && !value_is_error(sema->vm, v)) {
+    const type_t *t = value_type(v);
+    if (t) (*node)->resolved_type = t;
+  }
+  return v;
 }
 
 static value_t *shadow_binary(sema_t *sema, ast_node_t **node,
