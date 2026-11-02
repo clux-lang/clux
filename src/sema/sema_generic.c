@@ -905,11 +905,28 @@ static bool check_generic_constraints(sema_t *sema,
         if (!sema_pattern_match(sema, gp->constraint, args[i].type)) {
             char tn[96];
             sema_type_name(args[i].type, tn, sizeof tn);
-            diag_error(sema->diag, at,
-                       "type argument '%s' does not satisfy the constraint on "
-                       "'%.*s' (declared with 'extends' in the generic "
-                       "parameter list)",
-                       tn, (int)gp->name.len, gp->name.ptr);
+            /* 接口约束失败时把"缺哪个方法/属性"带出来（E1.2 结构匹配的诊断）。 */
+            strslice_t miss = STRSLICE_EMPTY;
+            bool miss_attr = false;
+            if (sema_interface_shape_check_pat(sema, gp->constraint, args[i].type,
+                                               &miss, &miss_attr) ||
+                (miss.ptr && miss.len)) {
+                if (miss.ptr && miss.len)
+                    diag_error(sema->diag, at,
+                               "type argument '%s' does not satisfy the "
+                               "constraint on '%.*s': %s '%.*s' is missing or "
+                               "does not match the required signature "
+                               "(interface is a structural constraint)",
+                               tn, (int)gp->name.len, gp->name.ptr,
+                               miss_attr ? "attribute" : "method",
+                               (int)miss.len, miss.ptr);
+            } else {
+                diag_error(sema->diag, at,
+                           "type argument '%s' does not satisfy the constraint "
+                           "on '%.*s' (declared with 'extends' in the generic "
+                           "parameter list)",
+                           tn, (int)gp->name.len, gp->name.ptr);
+            }
             ok = false;
             break;
         }

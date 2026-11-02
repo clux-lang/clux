@@ -147,3 +147,28 @@ test "generics.sizeofInstance" {
     assert(alignof(Matrix[i64, 3]) == alignof(i64));
     assert(box_size[i64]() == sizeof(Box[i64]));
 }
+
+/* ---- 接口约束是**结构**的：提供成员即可，无需 implements（§6.5） ---- */
+
+interface Writer2[T] {
+    func put(self: *T, byte: u8): void;
+}
+
+/* 没有 `implements Writer2[...]`，但 put 的签名匹配 */
+struct Sink2 {
+    n: i32;
+
+    func put(self: *Sink2, byte: u8): void {
+        self.n = self.n + byte as i32;
+    }
+}
+
+func poke[T extends Writer2[T]](w: *T): void {
+    w.put(3 as u8);
+}
+
+test "generics.structuralInterface" {
+    var s: Sink2 = .Sink2{ .n = 0 };
+    poke(s.&);
+    assert(s.n == 3);
+}

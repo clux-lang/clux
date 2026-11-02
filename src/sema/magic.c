@@ -44,6 +44,8 @@ static const sema_magic_entry_t k_magic[] = {
     {"__deref__", SEMA_MAGIC_DEREF, 1, false, false, true, false, false, false},
     {"__dispose__", SEMA_MAGIC_DISPOSE, 1, false, false, false, false, true, false},
     {"__assign__", SEMA_MAGIC_ASSIGN, 2, false, false, false, true, true, false},
+    /* 可调用对象：`x(args)` ⇒ `x.__call__(args)`。形参/返回由实现者定。 */
+    {"__call__", SEMA_MAGIC_CALL, 0, false, false, false, false, false, true},
     {"__init__", SEMA_MAGIC_INIT, 0, false, false, false, false, true, true},
     /* 同类型初始化：固定签名 (self: *T, src: *T) -> void。形参是指针，
        "参数传递 = 构造"不会自递归；构造里可以移走源对象。 */

@@ -6,6 +6,7 @@
 #include "parser/ast_index.h"
 #include "parser/ast_interface_def.h"
 #include "parser/ast_scope_ref.h"
+#include "parser/ast_pattern.h"
 #include "parser/ast_struct_def.h"
 #include "parser/ast_struct_embed.h"
 #include "parser/ast_var_def.h"
@@ -189,21 +190,51 @@ static bool check_one_interface(sema_t *sema, const type_t *st,
                                 ast_node_t *iface_expr, const ast_node_t *site,
                                 unsigned depth, bool record);
 
-static bool check_one_interface(sema_t *sema, const type_t *st,
-                                ast_node_t *iface_expr, const ast_node_t *site,
-                                unsigned depth, bool record) {
+/* 模式实参 -> 具体类型：已绑定的模式名（`T`）/ 具体类型名 / 类型表达式。 */
+static const type_t *iface_pattern_arg_type(sema_t *sema, ast_node_t *a) {
+    if (!sema || !a) return NULL;
+    if (a->kind == AST_PAT_NAME) {
+        ast_pat_name_t *q = (ast_pat_name_t *)a;
+        if (q->args) return NULL; /* `Foo[U]` 形态暂不支持（回退名义检查） */
+        if (sema->pattern_env.names && sema->pattern_env.types) {
+            for (size_t i = sema->pattern_env.count; i > 0; i--) {
+                if (strslice_eq(sema->pattern_env.names[i - 1], q->name))
+                    return sema->pattern_env.types[i - 1];
+            }
+        }
+        sema_symbol_t *s = sema_scope_find_local(sema->global_scope, q->name);
+        if (s && s->kind == SEMA_SYM_TYPE && s->type) return s->type;
+        if (s && s->kind == SEMA_SYM_INTERFACE) return NULL;
+        return NULL;
+    }
+    return resolve_type_expr(sema, a);
+}
+
+/* 结构匹配核心：st 是否提供接口（已解析）要求的全部成员。
+   silent=true 不报诊断，只记录第一个缺失成员。 */
+static bool check_iface_members(sema_t *sema, const type_t *st,
+                                sema_symbol_t *iface_sym,
+                                const type_t *const *args, size_t arg_count,
+                                ast_node_t *site, unsigned depth, bool silent,
+                                bool record, strslice_t *out_missing,
+                                bool *out_attr) {
     if (depth > 32) {
-        diag_error(sema->diag, sema_loc(sema, (ast_node_t *)site),
-                   "interface member copy chain is too deep (cycle?)");
+        if (!silent)
+            diag_error(sema->diag, sema_loc(sema, site),
+                       "interface member copy chain is too deep (cycle?)");
         return false;
     }
     iface_ref_t ref;
-    if (!iface_resolve(sema, iface_expr, &ref)) return false;
+    memset(&ref, 0, sizeof(ref));
+    ref.def = iface_sym->ast;
+    ref.sym = iface_sym;
+    ref.args = args;
+    ref.arg_count = arg_count;
+    if (!ref.def) return false;
 
     push_iface_bindings(sema, &ref);
 
-    /* 閲嶆柊瑙ｆ瀽鎺ュ彛瀹氫箟锛氭垚鍛樼被鍨嬫Ы浣嶄細鍦ㄨВ鏋愪腑鎶樺彔锛岀粷涓嶈兘姹℃煋鍘?AST
-       锛堝悓涓€ interface 鍙兘琚涓?struct 瀹炵幇锛夈€?*/
+    /* 跨模块接口：用定义模块的 token pool 重新解析接口定义 AST。 */
     vec_t *saved_tokens = sema->tokens;
     if (ref.sym->module && ref.sym->module->src_tokens)
         sema->tokens = (vec_t *)ref.sym->module->src_tokens;
@@ -215,17 +246,18 @@ static bool check_one_interface(sema_t *sema, const type_t *st,
     parser_destroy(&rp);
     sema->tokens = saved_tokens;
     if (!parsed || parsed->kind != AST_INTERFACE_DEF) {
-        diag_error(sema->diag, sema_loc(sema, iface_expr),
-                   "internal: failed to materialize interface");
+        if (!silent)
+            diag_error(sema->diag, site ? sema_loc(sema, site) : (location_t){0},
+                       "internal: failed to materialize interface");
         vm_pop_scope(sema->vm);
         return false;
     }
     ast_interface_def_t *idef = (ast_interface_def_t *)parsed;
+    const ast_interface_def_t *orig = (const ast_interface_def_t *)ref.def;
 
     bool ok = true;
 
-    /* `...Base;` 成员复制：Base 的成员也是本接口要求的一部分。只支持
-       非泛型接口的复制（泛型嵌入需显式实参语法，留待 P6c）。 */
+    /* `...Base;`：Base 的成员也是本接口要求的一部分。 */
     for (ast_node_t *e = idef->embeds; e; e = e->next) {
         ast_struct_embed_t *emb = (ast_struct_embed_t *)e;
         ast_node_t *base_expr = emb->type_expr;
@@ -234,65 +266,72 @@ static bool check_one_interface(sema_t *sema, const type_t *st,
             if (!base_expr) { ok = false; continue; }
             ((ast_ident_t *)base_expr)->name = emb->name;
         }
-        if (!check_one_interface(sema, st, base_expr, site, depth + 1,
-                                 /*record=*/false))
+        iface_ref_t bref;
+        if (!iface_resolve(sema, base_expr, &bref)) { ok = false; continue; }
+        if (!check_iface_members(sema, st, bref.sym, bref.args, bref.arg_count,
+                                 site, depth + 1, silent, false, NULL, NULL))
             ok = false;
     }
+
     for (ast_node_t *m = idef->members; m; m = m->next) {
         if (m->kind == AST_VAR_DEF) {
             ast_var_def_t *vd = (ast_var_def_t *)m;
             const type_t *want = sema_resolve_type_slot(sema, &vd->type_expr);
-            if (!want) {
-                ok = false;
-                continue;
-            }
+            if (!want) { ok = false; continue; }
             int fi = struct_type_find_field(st, vd->name);
             if (fi < 0) {
-                diag_error(sema->diag, sema_loc(sema, (ast_node_t *)site),
-                           "struct '%.*s' does not implement interface '%.*s': "
-                           "missing attribute '%.*s'",
-                           (int)st->name.len, st->name.ptr,
-                           (int)((ast_interface_def_t *)ref.def)->name.len,
-                           ((ast_interface_def_t *)ref.def)->name.ptr,
-                           (int)vd->name.len, vd->name.ptr);
+                if (!silent)
+                    diag_error(sema->diag, sema_loc(sema, site),
+                               "struct '%.*s' does not implement interface "
+                               "'%.*s': missing attribute '%.*s'",
+                               (int)st->name.len, st->name.ptr,
+                               (int)orig->name.len, orig->name.ptr,
+                               (int)vd->name.len, vd->name.ptr);
+                if (ok && out_missing) *out_missing = vd->name;
+                if (ok && out_attr) *out_attr = true;
                 ok = false;
                 continue;
             }
             const struct_field_t *f = struct_type_field(st, (size_t)fi);
             if (!f || !type_equal(sema->vm, f->type, want)) {
-                diag_error(sema->diag, sema_loc(sema, (ast_node_t *)site),
-                           "struct '%.*s': attribute '%.*s' does not match the "
-                           "interface signature",
-                           (int)st->name.len, st->name.ptr,
-                           (int)vd->name.len, vd->name.ptr);
+                if (!silent)
+                    diag_error(sema->diag, sema_loc(sema, site),
+                               "struct '%.*s': attribute '%.*s' does not match "
+                               "the interface signature",
+                               (int)st->name.len, st->name.ptr,
+                               (int)vd->name.len, vd->name.ptr);
+                if (ok && out_missing) *out_missing = vd->name;
+                if (ok && out_attr) *out_attr = true;
                 ok = false;
             }
         } else if (m->kind == AST_FUNC_DEF) {
             ast_func_def_t *fn = (ast_func_def_t *)m;
             const type_t *want = iface_member_sig(sema, fn);
-            if (!want) {
-                ok = false;
-                continue;
-            }
-            sema_symbol_t *ms = sema_struct_find_member(sema, st, fn->name,
-                                                        NULL, NULL);
+            if (!want) { ok = false; continue; }
+            sema_symbol_t *ms =
+                sema_struct_find_member(sema, st, fn->name, NULL, NULL);
             if (!ms || ms->kind != SEMA_SYM_FUNC || !ms->type) {
-                diag_error(sema->diag, sema_loc(sema, (ast_node_t *)site),
-                           "struct '%.*s' does not implement interface '%.*s': "
-                           "missing method '%.*s'",
-                           (int)st->name.len, st->name.ptr,
-                           (int)((ast_interface_def_t *)ref.def)->name.len,
-                           ((ast_interface_def_t *)ref.def)->name.ptr,
-                           (int)fn->name.len, fn->name.ptr);
+                if (!silent)
+                    diag_error(sema->diag, sema_loc(sema, site),
+                               "struct '%.*s' does not implement interface "
+                               "'%.*s': missing method '%.*s'",
+                               (int)st->name.len, st->name.ptr,
+                               (int)orig->name.len, orig->name.ptr,
+                               (int)fn->name.len, fn->name.ptr);
+                if (ok && out_missing) *out_missing = fn->name;
+                if (ok && out_attr) *out_attr = false;
                 ok = false;
                 continue;
             }
             if (!type_equal(sema->vm, ms->type, want)) {
-                diag_error(sema->diag, sema_loc(sema, (ast_node_t *)site),
-                           "struct '%.*s': method '%.*s' does not match the "
-                           "interface signature",
-                           (int)st->name.len, st->name.ptr,
-                           (int)fn->name.len, fn->name.ptr);
+                if (!silent)
+                    diag_error(sema->diag, sema_loc(sema, site),
+                               "struct '%.*s': method '%.*s' does not match the "
+                               "interface signature",
+                               (int)st->name.len, st->name.ptr,
+                               (int)fn->name.len, fn->name.ptr);
+                if (ok && out_missing) *out_missing = fn->name;
+                if (ok && out_attr) *out_attr = false;
                 ok = false;
             }
         }
@@ -301,6 +340,80 @@ static bool check_one_interface(sema_t *sema, const type_t *st,
     vm_pop_scope(sema->vm);
     if (ok && record) add_impl(sema, st, ref.def, ref.args, ref.arg_count);
     return ok;
+}
+
+static bool check_one_interface(sema_t *sema, const type_t *st,
+                                ast_node_t *iface_expr, const ast_node_t *site,
+                                unsigned depth, bool record) {
+    iface_ref_t ref;
+    if (!iface_resolve(sema, iface_expr, &ref)) return false;
+    return check_iface_members(sema, st, ref.sym, ref.args, ref.arg_count,
+                               (ast_node_t *)site, depth, /*silent=*/false,
+                               record, NULL, NULL);
+}
+
+bool sema_interface_shape_check(sema_t *sema, sema_symbol_t *iface_sym,
+                                const type_t *const *args, size_t arg_count,
+                                const type_t *st, strslice_t *out_missing,
+                                bool *out_attr) {
+    if (out_missing) *out_missing = STRSLICE_EMPTY;
+    if (out_attr) *out_attr = false;
+    if (!sema || !iface_sym || !st) return false;
+    return check_iface_members(sema, st, iface_sym, args, arg_count, NULL, 0,
+                               /*silent=*/true, /*record=*/false, out_missing,
+                               out_attr);
+}
+
+bool sema_interface_constraint_args(sema_t *sema, ast_node_t *pat,
+                                    sema_symbol_t **out_sym,
+                                    const type_t ***out_args,
+                                    size_t *out_count) {
+    if (out_sym) *out_sym = NULL;
+    if (out_args) *out_args = NULL;
+    if (out_count) *out_count = 0;
+    if (!sema || !pat || pat->kind != AST_PAT_NAME) return false;
+    ast_pat_name_t *pn = (ast_pat_name_t *)pat;
+    sema_symbol_t *sym = NULL;
+    if (pn->qualifier.ptr) {
+        sema_symbol_t *modsym =
+            sema_scope_find_local(sema->global_scope, pn->qualifier);
+        if (modsym && modsym->kind == SEMA_SYM_MODULE && modsym->module)
+            sym = sema_module_export_symbol(modsym->module, pn->name);
+    } else {
+        sym = sema_scope_find_local(sema->global_scope, pn->name);
+    }
+    if (!sym || sym->kind != SEMA_SYM_INTERFACE || !sym->ast) return false;
+    const ast_interface_def_t *idef = (const ast_interface_def_t *)sym->ast;
+    size_t want = idef->generic.count;
+    size_t have = sema_count_siblings(pn->args);
+    if (want != have) return false;
+    const type_t **args = NULL;
+    if (want > 0) {
+        args = (const type_t **)arena_alloc(
+            sema->arena, want * sizeof(*args), ALIGNOF(max_align_t));
+        if (!args) return false;
+        size_t i = 0;
+        for (ast_node_t *a = pn->args; a; a = a->next, i++) {
+            const type_t *tv = iface_pattern_arg_type(sema, a);
+            if (!tv) return false;
+            args[i] = tv;
+        }
+    }
+    if (out_sym) *out_sym = sym;
+    if (out_args) *out_args = args;
+    if (out_count) *out_count = want;
+    return true;
+}
+
+bool sema_interface_shape_check_pat(sema_t *sema, ast_node_t *pat,
+                                    const type_t *st, strslice_t *out_missing,
+                                    bool *out_attr) {
+    sema_symbol_t *sym = NULL;
+    const type_t **args = NULL;
+    size_t n = 0;
+    if (!sema_interface_constraint_args(sema, pat, &sym, &args, &n)) return false;
+    return sema_interface_shape_check(sema, sym, args, n, st, out_missing,
+                                      out_attr);
 }
 
 bool sema_check_struct_implements(sema_t *sema, const type_t *struct_type,

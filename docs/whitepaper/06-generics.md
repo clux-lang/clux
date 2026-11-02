@@ -54,7 +54,7 @@ func first[...Args](args: ...Args): void { }
 func write[W extends IWriter[W]](w: *W): void { ... }
 ```
 
-`extends` 后是类型模式或接口约束；约束在实例化时检查。
+`extends` 后是类型模式或接口约束；约束在实例化时检查。接口约束按**结构**判定：实参类型提供接口要求的全部成员（名字 + 签名）即为满足，无需 `implements` 声明；不满足时报出第一个缺失或签名不符的成员。
 
 ## 6.6 显式实例化
 

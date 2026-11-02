@@ -410,3 +410,36 @@ test "magic.initGeneric" {
     assert(h.ptr != nil);
     assert(h.ptr.!.* == 11);
 }
+
+/* ---- __call__：struct 可被调用 ---- */
+
+struct Adder {
+    base: i32;
+
+    func __call__(self: *Adder, x: i32): i32 {
+        return self.base + x;
+    }
+}
+
+struct Ticker {
+    n: i32;
+
+    func __call__(self: *Ticker): void {
+        self.n = self.n + 1;
+    }
+}
+
+func apply_adder(a: Adder, v: i32): i32 {
+    return a(v);
+}
+
+test "magic.call" {
+    var a: Adder = .Adder{ .base = 40 };
+    assert(a(2) == 42);
+    assert(apply_adder(a, 1) == 41);
+
+    var t: Ticker = .Ticker{ .n = 0 };
+    t();
+    t();
+    assert(t.n == 2);
+}

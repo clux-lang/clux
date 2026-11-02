@@ -1245,3 +1245,28 @@ TEST(Magic, InitGenericConstructorArityChecked) {
       "}\n",
       "expects", "init_generic_arity");
 }
+
+/* `__call__`：struct 可被调用，`x(args)` ⇒ `x.__call__(args)`。 */
+TEST(Magic, CallableStruct) {
+  clux_expect_program_ok(
+      "struct Adder {\n"
+      "  base: i32;\n"
+      "  func __call__(self: *Adder, x: i32): i32 { return self.base + x; }\n"
+      "}\n"
+      "struct Ticker {\n"
+      "  n: i32;\n"
+      "  func __call__(self: *Ticker): void { self.n = self.n + 1; }\n"
+      "}\n"
+      "func apply(a: Adder, v: i32): i32 { return a(v); }\n"
+      "func main(): i32 {\n"
+      "  var a: Adder = .Adder{ .base = 40 };\n"
+      "  if (a(2) != 42) { return 1; }\n"
+      "  if (apply(a, 1) != 41) { return 2; }\n"
+      "  var t: Ticker = .Ticker{ .n = 0 };\n"
+      "  t();\n"
+      "  t();\n"
+      "  if (t.n != 2) { return 3; }\n"
+      "  return 0;\n"
+      "}\n",
+      "magic_call");
+}

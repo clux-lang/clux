@@ -1,4 +1,5 @@
 #include "sema/sema_pattern.h"
+#include "sema/sema_interface.h"
 
 #include "parser/ast_int_lit.h"
 #include "parser/ast_pattern.h"
@@ -134,6 +135,11 @@ static bool match_interface(sema_t *sema, ast_pat_name_t *pn,
         }
         if (ok) return true;
     }
+    /* E1.2：没有（或没有匹配的）`implements` 记录时，按接口要求的成员**形状**
+       现场检查——interface 描述的是"T 有哪些方法"，不是必须显式声明
+       `implements I[...]`。 */
+    if (sema_interface_shape_check_pat(sema, (ast_node_t *)pn, core, NULL, NULL))
+        return true;
     return false;
 }
 

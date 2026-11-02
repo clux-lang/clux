@@ -58,6 +58,7 @@ typedef enum {
     SEMA_MAGIC_DEREF, /* a.x / a.* 的成员回退 */
     SEMA_MAGIC_DISPOSE, /* `using a = ...;` 的作用域退出调用（不是析构） */
     SEMA_MAGIC_ASSIGN,  /* a = b（赋值；初始化不派发） */
+    SEMA_MAGIC_CALL,     /* x(args) ⇒ x.__call__(args) */
     SEMA_MAGIC_INIT_COPY, /* 同类型初始化：var a: T = b;（形参 *T） */
     SEMA_MAGIC_INIT,    /* .T{args} 构造（零初始化 + __init__） */
 } sema_magic_t;

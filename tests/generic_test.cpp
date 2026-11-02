@@ -984,23 +984,26 @@ TEST(InterfaceReject, InterfaceIsNotAType) {
         "interface_as_type");
 }
 
-TEST(InterfaceReject, ConstraintRequiresImplementedInterface) {
+/* E1.2：接口约束是**结构**的——成员齐全即可，无需 implements；
+   形状不符（这里是字段类型不对）仍然拒绝，并点名成员。 */
+TEST(InterfaceReject, ConstraintRequiresMatchingShape) {
     clux_expect_reject(
         "interface IW[T] { var fd: i32; }\n"
-        "struct Plain { fd: i32; }\n"
-        "func f[T extends IW[T]](w: *T): i32 { return w.fd; }\n"
-        "func main(): i32 { var p: Plain = .{ .fd = 1 }; return f(p.&); }\n",
-        "does not satisfy the constraint", "interface_not_implemented");
+        "struct Plain { fd: i64; }\n"
+        "func f[T extends IW[T]](w: *T): i32 { return w.fd as i32; }\n"
+        "func main(): i32 { var p: Plain = .{ .fd = 1i64 }; return f(p.&); }\n",
+        "does not satisfy the constraint", "interface_shape_mismatch");
 }
 
-TEST(InterfaceReject, MemberCopyIsNotInheritance) {
+/* 接口成员复制（`...Base;`）仍然把 Base 的成员算作要求：显式 implements 时
+   缺成员依旧报错（E1.2 只改变"约束是否满足"的口径，不放松 implements 校验）。 */
+TEST(InterfaceReject, MemberCopyStillRequiresMembers) {
     clux_expect_reject(
         "interface IW[T] { func w(self: *T); }\n"
         "interface IRW[T] { ...IW[T]; }\n"
-        "struct S implements IRW[S] { func w(self: *S): void {} }\n"
-        "func g[T extends IW[T]](s: *T): i32 { s.w(); return 1; }\n"
-        "func main(): i32 { var s: S = .{}; return g(s.&); }\n",
-        "does not satisfy the constraint", "interface_copy_not_inherit");
+        "struct S implements IRW[S] { }\n"
+        "func main(): i32 { var s: S = .{}; return 0; }\n",
+        "missing method 'w'", "interface_copy_missing");
 }
 
 TEST(GenericReject, MethodTypeParameterNotDeducible) {
@@ -1132,4 +1135,65 @@ TEST(GenericReject, RecursiveAliasStillUnsupported) {
         "func main(): i32 { var x: Rec[i32] = undefined; return 0; }\n",
         "recursive generic type 'Rec' is not supported yet",
         "generic_recursive_alias");
+}
+/* E1.2 结构约束：类型只要提供接口要求的成员（名字 + 签名），无需写 implements。 */
+TEST(Generic, StructuralInterfaceSatisfied) {
+    clux_expect_program_ok(
+        "interface IWriter[W] {\n"
+        "  func write(self: *W, data: []u8): void;\n"
+        "}\n"
+        "struct Sink {\n"
+        "  n: i32;\n"
+        "  func write(self: *Sink, data: []u8): void { self.n = self.n + data[0] as i32; }\n"
+        "}\n"
+        "func use[T extends IWriter[T]](w: *T): void {\n"
+        "  var b: [1]u8 = .[1]u8{ 65 as u8 };\n"
+        "  w.write(b[0:1]);\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var s: Sink = .Sink{ .n = 0 };\n"
+        "  use(s.&);\n"
+        "  if (s.n != 65) { return 1; }\n"
+        "  return 0;\n"
+        "}\n",
+        "iface_structural_ok");
+}
+
+/* 结构约束不满足：点名缺失/签名不符的成员。 */
+TEST(Generic, StructuralInterfaceMismatchRejected) {
+    clux_expect_reject(
+        "interface IWriter[W] {\n"
+        "  func write(self: *W, data: []u8): void;\n"
+        "}\n"
+        "struct Bad {\n"
+        "  n: i32;\n"
+        "  func write(self: *Bad, data: i32): void { self.n = data; }\n"
+        "}\n"
+        "func use[T extends IWriter[T]](w: *T): void { }\n"
+        "func main(): i32 {\n"
+        "  var b: Bad = .Bad{ .n = 0 };\n"
+        "  use(b.&);\n"
+        "  return 0;\n"
+        "}\n",
+        "is missing or does not match the required signature",
+        "iface_structural_bad");
+}
+
+/* 显式 implements 仍然有效（可选断言）。 */
+TEST(Generic, ExplicitImplementsStillChecked) {
+    clux_expect_program_ok(
+        "interface IWriter[W] {\n"
+        "  func write(self: *W, data: []u8): void;\n"
+        "}\n"
+        "struct F implements IWriter[F] {\n"
+        "  n: i32;\n"
+        "  func write(self: *F, data: []u8): void { self.n = 1; }\n"
+        "}\n"
+        "func main(): i32 {\n"
+        "  var f: F = .F{ .n = 0 };\n"
+        "  var b: [1]u8 = .[1]u8{ 1 as u8 };\n"
+        "  f.write(b[0:1]);\n"
+        "  return f.n - 1;\n"
+        "}\n",
+        "iface_explicit_implements");
 }

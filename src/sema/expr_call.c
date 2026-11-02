@@ -1639,6 +1639,21 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
           return val_void(sema);
         const type_t *ctype = value_type(callee);
         if (!ctype || type_kind_of(ctype) != TYPE_KIND_FUNC) {
+          /* 可调用对象（§3.15.2）：`x(args)` 且 x 的类型有 `__call__` ⇒
+             `x.__call__(args)`，走普通实例方法调用。 */
+          const type_t *cc = ctype ? type_strip_quals(ctype) : NULL;
+          if (cc && type_kind_of(cc) == TYPE_KIND_STRUCT &&
+              sema_magic_member(sema, cc, "__call__")) {
+            ast_node_t *recv = call->callee;
+            ast_node_t *mem = ast_member_new(sema->arena, recv->tok_begin,
+                                             recv->tok_end);
+            if (!mem) return val_void(sema);
+            ((ast_member_t *)mem)->object = recv;
+            ((ast_member_t *)mem)->field = STRSLICE_LIT("__call__");
+            mem->is_generated = true;
+            call->callee = mem;
+            return sema_expr(sema, node, scope);
+          }
           char tn[64];
           op_type_name(callee, tn, sizeof(tn));
           diag_error(sema->diag, sema_loc(sema, &call->base),
