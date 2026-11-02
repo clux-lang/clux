@@ -102,6 +102,7 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
+#include "sema/coerce.h"
 #include "sema_stmt_internal.h"
 
 /* 显式类型槽位兜底重解析：3a 槽位解析可能失败（引用同块后续局部 type /
@@ -535,14 +536,9 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       if (!init_bad && sym->type) {
         /* 单参 `__init__` 的隐式构造：`var a: T = x;` ⇒ __clux_init_T(x) */
-        bool conv = false;
-        value_t *nv = sema_magic_init_convert(sema, &vd->init,
-                                               value_type(init), sym->type,
-                                               scope, &conv);
-        if (conv) {
-          if (nv && !value_is_error(sema->vm, nv)) init = nv;
-          else init_bad = true; /* __init__ 实参不匹配：已在魔法构造处诊断 */
-        }
+        value_t *nv = sema_coerce(sema, &vd->init, init, sym->type, scope);
+        if (!nv || value_is_error(sema->vm, nv)) init_bad = true;
+        else init = nv;
       }
       if (!init_bad && sym->type) {
         value_t *dst = value_make_shadow(sema->vm, sym->type);
