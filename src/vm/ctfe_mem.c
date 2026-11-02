@@ -194,7 +194,12 @@ void ctfe_mem_note_addr(void *addr, void *owner) {
 
 void ctfe_mem_on_alloc(void *base) {
     if (!base || g_disabled) return;
-    (void)blk_intern(base); /* 新建块（含地址复用）一律标 alive */
+    /* 地址复用：同一 base 可能对应**上一次**已释放的块。分配时必须显式把
+       块状态置回 alive，否则会残留 dead → 误报 use-after-free（全量运行时
+       顺序相关的 flake 就是这么来的）。 */
+    int bi = blk_find(base);
+    if (bi < 0) bi = blk_intern(base);
+    if (bi >= 0) g_blk[bi].alive = true;
 }
 
 void *ctfe_mem_owner_of(const void *addr) {
