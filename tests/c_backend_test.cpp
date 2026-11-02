@@ -2822,3 +2822,26 @@ TEST(CBackend, OptionalFieldFromLaterMethod) {
                      "--backend=c"}),
             0);
 }
+/* 通过**函数值字段**调用并直接 return：被调值是 func 类型，返回类型必须由
+   func 类型给出，否则 return 会把已经是 `?T` 的调用结果再包一层 some。 */
+TEST(CBackend, OptionalReturnFromFuncValueCall) {
+  const std::string src = write_temp_file(
+      "struct Pick {\n"
+      "  f: func(i32) -> ?i32;\n"
+      "}\n"
+      "func some(x: i32): ?i32 { return x; }\n"
+      "func call_it(p: Pick, v: i32): ?i32 {\n"
+      "  return (p.f)(v);\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var p: Pick = .Pick{ .f = some };\n"
+      "  var r: ?i32 = call_it(p, 5);\n"
+      "  if (r == nil) { return 1; }\n"
+      "  return r.! - 5;\n"
+      "}\n",
+      "cb_funcvalue_optional");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}

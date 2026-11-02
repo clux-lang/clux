@@ -179,6 +179,15 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
     case AST_CALL: {
         ast_call_t *c = (ast_call_t *)e;
         if (call_is_len(c)) return vm->type_usize;
+        /* 调用**函数值**（函数类型的 struct 字段 / 局部函数值）：被调值的 func
+           类型直接给出返回类型。没有这一条时，返回 `?T` 的调用会被当作"未知
+           类型"，调用方（return / 赋值）就会把已经是 `?T` 的值再包一层。 */
+        if (!c->is_member_call) {
+            const type_t *ct = infer_expr_type(lc, c->callee);
+            ct = ct ? type_strip_quals(ct) : NULL;
+            if (ct && type_kind_of(ct) == TYPE_KIND_FUNC)
+                return func_type_return(ct);
+        }
         /* 内建 data()/take_opt()：返回类型按**实参类型**精化（与 sema 的
            builtin_op 分支一致）。这两个调用没有 VM 函数对象（callee 的 fid
            是 0），不能靠签名反推。 */
