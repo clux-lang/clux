@@ -52,7 +52,8 @@ static value_t *insert_cast(sema_t *sema, ast_node_t **slot, const type_t *want,
 }
 
 value_t *sema_coerce(sema_t *sema, ast_node_t **slot, value_t *v,
-                     const type_t *want, sema_scope_t *scope) {
+                     const type_t *want, sema_scope_t *scope,
+                     bool allow_init) {
     if (!sema || !slot || !*slot || !v || !want) return v;
     if (value_is_error(sema->vm, v)) return v;
     const type_t *w = type_strip_quals(want);
@@ -63,7 +64,7 @@ value_t *sema_coerce(sema_t *sema, ast_node_t **slot, value_t *v,
         /* 同类型通常无需转换；但带 `__init__` / `__init_copy__` 的 struct
            仍要走初始化派发（同类型"位置"要按 move-only 规则检查/移动）。 */
         bool magic_init = false;
-        if (type_kind_of(w) == TYPE_KIND_STRUCT) {
+        if (allow_init && type_kind_of(w) == TYPE_KIND_STRUCT) {
             magic_init = sema_magic_member(sema, w, "__init__") ||
                          sema_magic_member(sema, w, "__init_copy__");
         }
@@ -101,6 +102,7 @@ value_t *sema_coerce(sema_t *sema, ast_node_t **slot, value_t *v,
     }
 
     /* 3) 单参 `__init__` 的隐式构造（`.T{v}` / `__init_copy__`）。 */
+    if (!allow_init) return v;
     {
         bool converted = false;
         value_t *nv =

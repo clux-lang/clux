@@ -17,14 +17,16 @@ extern "C" {
  *
  *   1. `want = ?P`、 值不是 `?P`        → 包装成 `.?P{v}`（`nil` 同理）；
  *   2. `want` 与值是不同结构体的指针      → 插入显式 `as`（派生 → 基类）；
- *   3. `want` 是带单参 `__init__` 的 struct → 走初始化派发（`.T{v}`）；
+ *   3. `want` 是带单参 `__init__` 的 struct 且 allow_init → 走初始化派发（`.T{v}`）；
+ *      （赋值语句传 allow_init=false：赋值不派发初始化）
  *   4. 其它：不改写，原样返回（标量隐式转换由 C 负责）。
  *
  * 失败（转换不合法）返回 NULL，且**不**产生诊断——文案与位置由调用方决定。
  * 调用方必须把 `*slot` 重新求值（或用返回的 shadow）后继续。
  */
 value_t *sema_coerce(sema_t *sema, ast_node_t **slot, value_t *v,
-                     const type_t *want, sema_scope_t *scope);
+                     const type_t *want, sema_scope_t *scope,
+                     bool allow_init);
 
 #ifdef __cplusplus
 }

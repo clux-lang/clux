@@ -129,7 +129,7 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     if (!v_bad && sema->fn.return_type) {
       /* 返回值转换走唯一入口（optional 包装 / 派生→基类 cast / __init__ 派发）。 */
       value_t *nv =
-          sema_coerce(sema, &rt->value, v, sema->fn.return_type, scope);
+          sema_coerce(sema, &rt->value, v, sema->fn.return_type, scope, true);
       if (!nv) v_bad = true;
       else if (value_is_error(sema->vm, nv)) v_bad = true;
       else v = nv;

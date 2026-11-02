@@ -1495,7 +1495,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             continue;
           }
           /* 转换合法 → 落成 AST（optional 包装 / 派生→基类 cast / __init__ 派发）。 */
-          (void)sema_coerce(sema, slot, av, pt, scope);
+          (void)sema_coerce(sema, slot, av, pt, scope, true);
         }
         const type_t *rt = func_type_return(sig_type);
         value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);
@@ -1723,7 +1723,7 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
         sema_anon_pop(sema, ct_pushed);
         /* 实参转换的唯一入口：optional 包装 / 派生→基类 cast / __init__ 派发。 */
         if (pt && !is_poison(sema, arg_shadows[i])) {
-          value_t *nv = sema_coerce(sema, link, arg_shadows[i], pt, scope);
+          value_t *nv = sema_coerce(sema, link, arg_shadows[i], pt, scope, true);
           if (!nv)
             arg_shadows[i] = val_void(sema); /* 转换失败：让调用点报错 */
           else if (value_is_error(sema->vm, nv))

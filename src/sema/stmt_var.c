@@ -536,7 +536,7 @@ void shadow_var_def(sema_t *sema, ast_var_def_t *vd,
       }
       if (!init_bad && sym->type) {
         /* 单参 `__init__` 的隐式构造：`var a: T = x;` ⇒ __clux_init_T(x) */
-        value_t *nv = sema_coerce(sema, &vd->init, init, sym->type, scope);
+        value_t *nv = sema_coerce(sema, &vd->init, init, sym->type, scope, true);
         if (!nv || value_is_error(sema->vm, nv)) init_bad = true;
         else init = nv;
       }
