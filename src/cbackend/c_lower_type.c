@@ -65,6 +65,24 @@ cir_signature_t *signature_for(lower_ctx_t *lc, cir_type_t *ret, size_t pc,
     return signature_for_env(lc, ret, pc, pt, empty_env_type(lc));
 }
 
+/* 复合 C 类型的**结构去重**：sema 里等价的类型可能有两个不同对象
+   （`?T` / `[]T` / `[N]T` / `*T`），如果各自生成一个 C 类型，就会出现
+   "语义相同、C 名字不同" 的类型不匹配。这里按 (kind, elem 的 C 名, 数组长度)
+   复用已有 cir 类型。 */
+static cir_type_t *find_structural_type(lower_ctx_t *lc, cir_type_kind_t kind,
+                                        const cir_type_t *elem,
+                                        size_t array_len) {
+  if (!lc || !lc->unit) return NULL;
+  const char *want = (elem && elem->c_name) ? elem->c_name : "";
+  for (cir_type_t *it = lc->unit->types; it; it = it->next) {
+    if (it->kind != kind) continue;
+    if (kind == CIR_TYPE_ARRAY && it->array_len != array_len) continue;
+    const char *have = (it->elem && it->elem->c_name) ? it->elem->c_name : "";
+    if (strcmp(want, have) == 0) return it;
+  }
+  return NULL;
+}
+
 cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
     t = strip(lc->sema, t);
     if (!t) return cir_type_new(lc->arena, CIR_TYPE_VOID, "void");
@@ -186,6 +204,11 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_ARRAY);
         if (cached) return cached;
         const array_type_t *at = (const array_type_t *)t;
+        cir_type_t *et0 = map_type(lc, at->elem_type);
+        if (!et0) return NULL;
+        cir_type_t *dup = find_structural_type(lc, CIR_TYPE_ARRAY, et0,
+                                               at->length);
+        if (dup) return dup;
         char name[128];
         snprintf(name, sizeof name, "struct %sa_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_ARRAY,
@@ -194,8 +217,8 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         ct->src = t;
         ct->array_len = at->length;
         cir_unit_add_type(lc->unit, ct);
-        ct->elem = map_type(lc, at->elem_type);
-        return ct->elem ? ct : NULL;
+        ct->elem = et0;
+        return ct;
     }
     if (t->kind == TYPE_KIND_PTR) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_PTR);
@@ -203,6 +226,8 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         const type_t *elem = ptr_type_base(t);
         cir_type_t *et = map_type(lc, elem);
         if (!et) return NULL;
+        cir_type_t *dup = find_structural_type(lc, CIR_TYPE_PTR, et, 0);
+        if (dup) return dup;
         char name[512];
         snprintf(name, sizeof name, "%s *", et->c_name);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_PTR,
@@ -216,6 +241,10 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
     if (t->kind == TYPE_KIND_SLICE) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_SLICE);
         if (cached) return cached;
+        cir_type_t *se = map_type(lc, slice_type_elem(t));
+        if (!se) return NULL;
+        cir_type_t *dup = find_structural_type(lc, CIR_TYPE_SLICE, se, 0);
+        if (dup) return dup;
         char name[128];
         snprintf(name, sizeof name, "struct %ssl_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_SLICE,
@@ -223,12 +252,16 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         if (!ct) return NULL;
         ct->src = t;
         cir_unit_add_type(lc->unit, ct);
-        ct->elem = map_type(lc, slice_type_elem(t));
-        return ct->elem ? ct : NULL;
+        ct->elem = se;
+        return ct;
     }
     if (t->kind == TYPE_KIND_OPTION) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_OPTION);
         if (cached) return cached;
+        cir_type_t *oe = map_type(lc, type_option_inner(t));
+        if (!oe) return NULL;
+        cir_type_t *dup = find_structural_type(lc, CIR_TYPE_OPTION, oe, 0);
+        if (dup) return dup;
         char name[128];
         snprintf(name, sizeof name, "struct %sopt_%u", type_prefix(lc), t->id);
         cir_type_t *ct = cir_type_new(lc->arena, CIR_TYPE_OPTION,
@@ -236,8 +269,8 @@ cir_type_t *map_type(lower_ctx_t *lc, const type_t *t) {
         if (!ct) return NULL;
         ct->src = t;
         cir_unit_add_type(lc->unit, ct);
-        ct->elem = map_type(lc, type_option_inner(t));
-        return ct->elem ? ct : NULL;
+        ct->elem = oe;
+        return ct;
     }
     if (t->kind == TYPE_KIND_CUNION) {
         cached = cir_type_find(lc->unit, t, CIR_TYPE_CUNION);
