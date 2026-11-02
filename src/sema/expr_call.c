@@ -1492,7 +1492,10 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
             diag_error(sema->diag, sema_loc(sema, *slot),
                        "method '%.*s': argument %zu: cannot convert %s to %s",
                        (int)mname.len, mname.ptr, ai + 1, an, pn);
+            continue;
           }
+          /* 转换合法 → 落成 AST（optional 包装 / 派生→基类 cast / __init__ 派发）。 */
+          (void)sema_coerce(sema, slot, av, pt, scope);
         }
         const type_t *rt = func_type_return(sig_type);
         value_t *sv = value_make_shadow(sema->vm, rt ? rt : sema->vm->type_void);

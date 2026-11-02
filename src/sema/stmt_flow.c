@@ -102,6 +102,7 @@
  * =========================================================================== */
 
 #include "parser/ast_option.h"
+#include "sema/coerce.h"
 #include "sema_stmt_internal.h"
 
 /* ---- 语句：控制流 ---- */
@@ -126,14 +127,12 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
     /* 单参 `__init__` 的隐式构造：`return x;` 在返回类型 T 有单参初始化时
        等价于 `return .T{x};`。 */
     if (!v_bad && sema->fn.return_type) {
-      bool conv = false;
-      value_t *nv = sema_magic_init_convert(sema, &rt->value, value_type(v),
-                                             sema->fn.return_type, scope,
-                                             &conv);
-      if (conv) {
-        if (nv && !value_is_error(sema->vm, nv)) v = nv;
-        else v_bad = true;
-      }
+      /* 返回值转换走唯一入口（optional 包装 / 派生→基类 cast / __init__ 派发）。 */
+      value_t *nv =
+          sema_coerce(sema, &rt->value, v, sema->fn.return_type, scope);
+      if (!nv) v_bad = true;
+      else if (value_is_error(sema->vm, nv)) v_bad = true;
+      else v = nv;
     }
     if (!v_bad) {
       if (!sema->fn.return_type) {
