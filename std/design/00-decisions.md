@@ -18,6 +18,9 @@
 | D-E0b | 由 D-E0 推论：**不新增** `__fmt__` / `__hash__` / `__iter__` 魔法方法 | [推论] |
 | D-E1 | interface 约束改为**结构匹配**（提供成员即满足，`implements` 变可选断言） | [需求] |
 | D-G2 | 结构匹配已实现（`sema_interface_shape_check`，含缺失成员诊断） | [实现] |
+| D-E2 | 协议方法名用**长名**（可读性优先）：`equals` / `compare` / `format` / `hash` / `next` / `write` | [需求] |
+| D-B7 | 分配器**不用 vtable**：显式持有函数指针（+ 状态指针 `ctx`） | [需求] |
+| D-C5 | 容器内嵌 `Allocator` 字段可以接受（每容器 +16~24 字节） | [需求] |
 
 ---
 
@@ -59,14 +62,31 @@
 # B 内存模型
 
 ## D-B1 分配器显式传递 —— 已定
+
+形态（D-B7）：
+
+```clux
+struct Allocator {
+    ctx: opaque,                                             // 状态指针（libc 填 nil）
+    alloc: func(ctx: opaque, size: usize, align: usize) -> opaque,  // 0 = 失败
+    free:  func(ctx: opaque, ptr: opaque) -> void,           // free(nil) = no-op
+}
+```
+
+**不用 vtable**：只有两个函数指针 + 一个状态指针，没有按类型查表的间接层。
+`ctx` 是必要的——Arena/统计分配器有状态，纯函数指针无法携带；libc 分配器把 `ctx` 设为 `nil`。
+`alloc` 带 `align`（Arena/SIMD 需要），`free` 不带 size/align（需要记账的分配器在块头存元数据）。
+详细设计见 [`01-mem.md`](01-mem.md)。
 - `Allocator` 是**值类型**：`struct Allocator { vtable: *AllocatorVTable; data: opaque; }`（可拷贝）。
 - 所有会分配的 API 都要求传入：`Vec[i32].new(alloc)`、`String.new(alloc)`、`Map[K,V].new(alloc)`。
 - 容器把 `Allocator` **存成字段**（自身不拥有分配器，分配器生命周期由调用方保证）。
 - 不提供"默认堆分配器"的隐式回退；需要堆就显式写 `std::mem.heap()`（返回一个 `Allocator` 值），由调用方决定是否复用它。
 
-## D-B2 OOM —— 暂定
-`Allocator` 有两套函数指针：`alloc`（失败 panic，走 `std::rt.panic`）与 `try_alloc`（返回 `?[]u8`）。
-容器方法用 `alloc`；需要处理的场景显式用 `try_*` 变体。理由：不把 OOM 塞进每个返回类型。
+## D-B2 OOM —— 已定（机制/策略分离）
+- 分配器 `alloc` **只做机制**：失败返回 `0`，不 panic。
+- 容器默认构造/增长：拿到 `0` → `std::rt.panic("out of memory")`。
+- 容器 `try_*` 变体（`try_push` / `try_new`）：返回 `?T`，不 panic。
+理由：分配器不该替调用方决定错误策略；同时不让每个容器 API 的返回类型都被 OOM 绑架。
 
 ## D-B3 视图 vs 拥有 —— 已定（沿用语言现状）
 `str` / `[]T` 是借用视图；`String` / `Vec[T]` 显式拥有。只提供 `as_str()`/`as_slice()` 显式降级，不做隐式转换。
@@ -131,14 +151,23 @@
 
 **协议清单（建议，待你确认方法名）**
 
-| 协议（std 模块） | 方法 | 用途 |
+| 协议（std 模块） | 方法（**长名**） | 用途 |
 |---|---|---|
-| `std::cmp::Eq` | `func eq(self: *Self, other: *Self) -> bool` | 断言、查表 |
-| `std::cmp::Ordered` | `func cmp(self: *Self, other: *Self) -> Ordering` | `Map`、排序、诊断排序 |
+| `std::cmp::Eq` | `func equals(self: *Self, other: *Self) -> bool` | 断言、查表 |
+| `std::cmp::Ordered` | `func compare(self: *Self, other: *Self) -> Ordering` | `Map`、排序、诊断排序 |
 | `std::hash::Hash` | `func hash(self: *Self) -> u64` | 仅当将来做哈希容器时用 |
-| `std::fmt::Display` | `func fmt(self: *Self, w: *fmt.Writer) -> void` | 诊断/生成代码/日志 |
+| `std::fmt::Display` | `func format(self: *Self, w: *fmt.Writer) -> void` | 诊断/生成代码/日志 |
 | `std::iter::Iterator` | `func next(self: *Self) -> ?Item` | 惰性适配器（后续） |
 | `std::io::Sink` | `func write(self: *Self, data: []u8) -> void` | `fmt.Writer` 的下游 |
+
+`Ordering` 是 `tag union Ordering { Less, Equal, Greater }`（`std::cmp`）。
+**协议方法名与魔法方法名无关**：语言级魔法仍是 `__eq__` / `__lt__`（语法位置），
+协议是普通方法（`equals` / `compare`），两者互不自动派生——需要协议的类型显式实现长名方法。
+
+**只有两种机制（重要）**：
+1. **编译期协议**（interface + 长方法名）：用于「类型能做什么」，泛型约束 + 单态化，零运行期开销；
+2. **运行期能力值**（`{ctx, fn...}` 结构体）：用于「依赖注入」——`Allocator`、`fmt.Writer`（sink）、
+   将来的时钟/随机源。没有 vtable、没有虚分派表。
 
 **分界（重要）**：魔法方法只用于**语法位置**（运算符、下标、切片、构造、赋值、析构、调用）。
 "能做什么事"（相等、排序、打印、哈希、迭代）一律用协议（普通方法）。两条规则合起来：
@@ -188,11 +217,9 @@
 
 # H 待你拍板
 
-1. **D-E1**：interface 结构匹配（E1.2）还是保持名义（E1.1）？
-2. **D-C2**：`Map` 用有序映射（我暂定）还是必须做哈希映射（那就需要 `Hash` 协议 + 确定性迭代方案）？
-3. **D-B2**：OOM 用"默认 panic + `try_*`"还是所有 API 返回 `?T`？
-4. 协议方法名是否按 E 表（`eq` / `cmp` / `fmt` / `hash` / `next` / `write`）？还是你想要 `equals` / `compare` / `format` 这类长名？
-5. `__call__` 是否**现在就实现**（含白皮书 §3.15.2 与 conformance 用例），还是与 D-G2 一起做一批？
+1. **D-C2**：`Map` 用有序映射（我暂定）还是必须做哈希映射（那就需要 `Hash` 协议 + 确定性迭代方案）？
+2. **D-B1 的 `ctx`**：`Allocator` 是否带状态指针 `ctx`（我推荐带，见 `01-mem.md`）？还是坚持纯两个函数指针（那 Arena 只能做成全局静态）？
+3. `Arena` 的 `chunk` 默认值（64 KiB）与是否需要 `Counting` 分配器（测试用）。
 
 ---
 
