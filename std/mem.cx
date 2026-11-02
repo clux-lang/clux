@@ -14,19 +14,20 @@ extern cfunc libc::free(p: opaque): void;
 /* ------------------------------------------------------------------ */
 
 export struct Allocator {
-    _alloc: func(*Allocator, usize, usize) -> ?*u8;
-    _free: func(*Allocator, *u8) -> void;
+    _alloc: func(*Allocator, usize, usize) -> ?opaque;
+    _free: func(*Allocator, opaque) -> void;
 
     /* 分配 size 字节、按 align 对齐；size == 0 或失败返回 nil。 */
-    func alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+    func alloc(self: *Allocator, size: usize, align: usize): ?opaque {
         if (size == 0usize) {
-            return .?*u8{ nil };
+            var none: ?opaque = nil;
+            return none;
         }
         return self._alloc(self, size, align);
     }
 
     /* 释放；ptr 必须来自同一分配器。 */
-    func free(self: *Allocator, ptr: *u8): void {
+    func free(self: *Allocator, ptr: opaque): void {
         self._free(self, ptr);
     }
 }
@@ -53,15 +54,16 @@ export func align_up(n: usize, align: usize): usize {
 export struct HeapAllocator {
     ...Allocator;
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
         var raw: opaque = libc::malloc(size);
         if (raw as usize == 0usize) {
-            return .?*u8{ nil };
+            var none: ?opaque = nil;
+            return none;
         }
         return raw as *u8;
     }
 
-    func do_free(self: *Allocator, ptr: *u8): void {
+    func do_free(self: *Allocator, ptr: opaque): void {
         libc::free(ptr as opaque);
     }
 
@@ -77,11 +79,12 @@ export struct HeapAllocator {
 export struct NullAllocator {
     ...Allocator;
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
-        return .?*u8{ nil };
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
+        var none: ?opaque = nil;
+        return none;
     }
 
-    func do_free(self: *Allocator, ptr: *u8): void {}
+    func do_free(self: *Allocator, ptr: opaque): void {}
 
     func new(): NullAllocator {
         return .NullAllocator{
@@ -129,37 +132,39 @@ export struct Arena {
         if (want < need) {
             want = need;
         }
-        var hp: ?*u8 = self.backing.alloc(sizeof(ArenaChunk), alignof(ArenaChunk));
+        var hp: ?opaque = self.backing.alloc(sizeof(ArenaChunk), alignof(ArenaChunk));
         if (hp == nil) {
             return false;
         }
-        var bp: ?*u8 = self.backing.alloc(want, 16usize);
+        var bp: ?opaque = self.backing.alloc(want, 16usize);
         if (bp == nil) {
             self.backing.free(hp.!);
             return false;
         }
         var ch: *ArenaChunk = hp.! as *ArenaChunk;
-        ch.payload = bp.!;
+        ch.payload = bp.! as *u8;
         ch.size = want;
         ch.next = self.head;
         self.head = ch;
-        self.cur = bp;
+        self.cur = bp.! as *u8;
         self.cur_size = want;
         self.used = 0usize;
         return true;
     }
 
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
         var a: *Arena = self as *Arena;
         if (a.cur == nil) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                return .?*u8{ nil };
+                var none: ?opaque = nil;
+                return none;
             }
         }
         var off: usize = align_up(a.used, align);
         if (off + size > a.cur_size) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                return .?*u8{ nil };
+                var none: ?opaque = nil;
+                return none;
             }
             off = 0usize;
         }
@@ -169,7 +174,7 @@ export struct Arena {
         return view[off].&;
     }
 
-    func do_free(self: *Allocator, ptr: *u8): void {
+    func do_free(self: *Allocator, ptr: opaque): void {
     /* 整块释放：单次 free 是 no-op。 */
 }
 
@@ -177,8 +182,8 @@ export struct Arena {
         var c: ?*ArenaChunk = self.head;
         while (c != nil) {
             var nxt: ?*ArenaChunk = c.!.next;
-            self.backing.free(c.!.payload);
-            self.backing.free(c.! as *u8);
+            self.backing.free(c.!.payload as opaque);
+            self.backing.free(c.! as opaque);
             c = nxt;
         }
         self.head = nil;
@@ -198,9 +203,9 @@ export struct Arena {
 
 test "mem.heapAllocFree" {
     var h: HeapAllocator = HeapAllocator::new();
-    var p: ?*u8 = h.alloc(32usize, 8usize);
+    var p: ?opaque = h.alloc(32usize, 8usize);
     assert(p != nil);
-    var b: []u8 = make(p.!, 32usize);
+    var b: []u8 = make(p.! as *u8, 32usize);
     b[0] = 7 as u8;
     assert(b[0] == 7 as u8);
     h.free(p.!);
@@ -208,13 +213,13 @@ test "mem.heapAllocFree" {
 
 test "mem.zeroSize" {
     var h: HeapAllocator = HeapAllocator::new();
-    var p: ?*u8 = h.alloc(0usize, 8usize);
+    var p: ?opaque = h.alloc(0usize, 8usize);
     assert(p == nil);
 }
 
 test "mem.nullAllocatorFails" {
     var n: NullAllocator = NullAllocator::new();
-    var p: ?*u8 = n.alloc(16usize, 8usize);
+    var p: ?opaque = n.alloc(16usize, 8usize);
     assert(p == nil);
 }
 
@@ -230,21 +235,21 @@ test "mem.arenaBump" {
     var h: HeapAllocator = HeapAllocator::new();
     var ar: Arena = Arena::new(h.& as *Allocator, 256usize);
 
-    var p1: ?*u8 = ar.alloc(16usize, 8usize);
-    var p2: ?*u8 = ar.alloc(16usize, 8usize);
+    var p1: ?opaque = ar.alloc(16usize, 8usize);
+    var p2: ?opaque = ar.alloc(16usize, 8usize);
     assert(p1 != nil);
     assert(p2 != nil);
     assert(p1.! != p2.!);
 
-    var b1: []u8 = make(p1.!, 16usize);
-    var b2: []u8 = make(p2.!, 16usize);
+    var b1: []u8 = make(p1.! as *u8, 16usize);
+    var b2: []u8 = make(p2.! as *u8, 16usize);
     b1[0] = 1 as u8;
     b2[0] = 2 as u8;
     assert(b1[0] == 1 as u8);
     assert(b2[0] == 2 as u8);
 
     ar.reset();
-    var p3: ?*u8 = ar.alloc(16usize, 8usize);
+    var p3: ?opaque = ar.alloc(16usize, 8usize);
     assert(p3 != nil);
     ar.__dispose__();
 }
@@ -254,9 +259,9 @@ test "mem.arenaGrow" {
     var ar: Arena = Arena::new(h.& as *Allocator, 64usize);
     var i: usize = 0usize;
     while (i < 40usize) {
-        var p: ?*u8 = ar.alloc(32usize, 8usize);
+        var p: ?opaque = ar.alloc(32usize, 8usize);
         assert(p != nil);
-        var bv: []u8 = make(p.!, 32usize);
+        var bv: []u8 = make(p.! as *u8, 32usize);
         bv[0] = i as u8;
         assert(bv[0] == i as u8);
         i = i + 1usize;

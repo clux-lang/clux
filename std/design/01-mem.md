@@ -21,14 +21,14 @@
 ```clux
 /* 分配器是**基类**：`self` 就是上下文，不另设 ctx 字段。 */
 export struct Allocator {
-    _alloc: func(*Allocator, usize, usize) -> ?*u8;
-    _free: func(*Allocator, *u8) -> void;
+    _alloc: func(*Allocator, usize, usize) -> ?opaque;
+    _free: func(*Allocator, opaque) -> void;
 
-    func alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
-        if (size == 0usize) { return .?*u8{nil}; }
+    func alloc(self: *Allocator, size: usize, align: usize): ?opaque {
+        if (size == 0usize) { return .?opaque{nil}; }
         return self._alloc(self, size, align);
     }
-    func free(self: *Allocator, ptr: *u8): void {
+    func free(self: *Allocator, ptr: opaque): void {
         self._free(self, ptr);
     }
 }
@@ -40,8 +40,8 @@ export struct Allocator {
 ```clux
 export struct HeapAllocator {
     ...Allocator;
-    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 { ... }
-    func do_free(self: *Allocator, ptr: *u8): void { ... }
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque { ... }
+    func do_free(self: *Allocator, ptr: opaque): void { ... }
     func new(): HeapAllocator {
         return .HeapAllocator{
             ._alloc = HeapAllocator::do_alloc,
@@ -50,6 +50,8 @@ export struct HeapAllocator {
     }
 }
 ```
+
+**无类型内存用 `opaque` / `?opaque`**（不是 `*u8`）：分配器不解释字节，调用方按需 `as *T`；`?opaque` 在字段 / 返回值 / `nil` 比较 / `.!` 解包上均可用。
 
 **为什么没有 vtable 结构**：只有两个函数指针字段，没有"按类型查表"的分派层；
 调用 `a.alloc(s, n)` 不过是 `self._alloc(self, s, n)`。
