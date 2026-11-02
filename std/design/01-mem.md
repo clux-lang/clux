@@ -16,27 +16,54 @@
    （容器默认 panic，`try_*` 变体返回 `?T`）。
 4. **确定性**：分配地址不得进入任何可观察输出（诊断、生成的 C、golden）。
 
-## 3. 数据结构
+## 3. 数据结构（模式 A：基类 + 显式函数指针）
 
 ```clux
-/* 分配器是**值**：可拷贝、可比较"是否同一分配器"（比较 ctx + alloc 指针）。 */
-struct Allocator {
-    /* 状态指针：无状态分配器（libc）填 nil；Arena 填自身地址。 */
-    ctx: opaque,
-    /* 分配 size 字节、按 align 对齐；失败返回 0（nil）。align 必须是 2 的幂。 */
-    alloc: func(ctx: opaque, size: usize, align: usize) -> opaque,
-    /* 释放 alloc 返回的指针；free(nil) 必须是 no-op。 */
-    free: func(ctx: opaque, ptr: opaque) -> void,
+/* 分配器是**基类**：`self` 就是上下文，不另设 ctx 字段。 */
+export struct Allocator {
+    _alloc: func(*Allocator, usize, usize) -> ?*u8;
+    _free: func(*Allocator, *u8) -> void;
+
+    func alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+        if (size == 0usize) { return .?*u8{nil}; }
+        return self._alloc(self, size, align);
+    }
+    func free(self: *Allocator, ptr: *u8): void {
+        self._free(self, ptr);
+    }
 }
 ```
 
-**为什么必须有 `ctx`**：Arena / bump / 统计分配器都有状态，纯函数指针无法携带；
-`ctx` 把它们统一进同一个 `Allocator` 值（libc 分配器把 `ctx` 设为 `nil`）。这不是 vtable：
-只有两个函数指针，没有"按类型查表"的分派。
+具体分配器继承 `Allocator`，构造时填两个函数指针，实现里 `self as *具体类型`
+取回自己的状态：
 
-**为什么 `alloc` 带 `align`**：Arena 与 SIMD 场景需要按 `alignof(T)` 对齐；libc 实现可忽略
-（malloc 已满足最大对齐）。**为什么 `free` 不带 size/align**：需要记账的分配器可在块头存元数据；
-不带 size/align 让调用点更简单，也让 Arena 的 `free` 天然 no-op。
+```clux
+export struct HeapAllocator {
+    ...Allocator;
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 { ... }
+    func do_free(self: *Allocator, ptr: *u8): void { ... }
+    func new(): HeapAllocator {
+        return .HeapAllocator{
+            ._alloc = HeapAllocator::do_alloc,
+            ._free  = HeapAllocator::do_free,
+        };
+    }
+}
+```
+
+**为什么没有 vtable 结构**：只有两个函数指针字段，没有"按类型查表"的分派层；
+调用 `a.alloc(s, n)` 不过是 `self._alloc(self, s, n)`。
+
+**为什么不要 ctx**：`self` 本身就是上下文。带状态分配器（Arena/统计分配器）把状态
+放在自己的字段里，实现里 `self as *Arena` 取回；无状态分配器（libc）不看 `self`。
+
+**代价（必须遵守）**：
+1. `self as *具体类型` 是**未检查** downcast —— 实现函数与类型必须配对，只能由该类型
+   的 `new()` 填写，不能手工拼装。
+2. 分配器必须是**长生命周期**对象：`Arena::new(backing: *Allocator, ...)` 存的是基类
+   指针，backing 必须活得比 arena 久。
+3. 构造时若忘记填 `_alloc`/`_free`，调用即空指针崩溃 —— 因此**只用**各类型的
+   `new()` 构造，字段不对外暴露初始化路径（约定，靠 review 与测试保证）。
 
 ## 4. 公开 API
 

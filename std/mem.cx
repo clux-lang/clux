@@ -1,9 +1,8 @@
 /* std/mem.cx — 分配器与 Arena（见 std/design/01-mem.md）
  *
- * 设计要点：
- *  - 分配器是**值**：`{ ctx, alloc, free }`，显式函数指针 + 状态指针，没有 vtable。
- *  - 机制/策略分离：`alloc` 失败返回 nil，不 panic；容器负责 panic 或返回 ?T。
- *  - 没有隐式全局分配器：要堆就显式 `mem.heap()`，或用 `Arena`。
+ * 模式（A）：`Allocator` 是**基类**，用显式函数指针字段实现分派；
+ * `self` 就是上下文，不再单独携带 ctx。具体分配器继承 `Allocator`，
+ * 在实现里 `self as *具体类型` 取回自身状态，构造时填好两个函数指针。
  */
 
 extern lib libc from "*";
@@ -11,20 +10,29 @@ extern cfunc libc::malloc(n: usize): opaque;
 extern cfunc libc::free(p: opaque): void;
 
 /* ------------------------------------------------------------------ */
-/* Allocator                                                           */
+/* Allocator（基类）                                                    */
 /* ------------------------------------------------------------------ */
 
 export struct Allocator {
-    /* 状态指针（可空）：libc 分配器为 nil，Arena 为自身地址。 */
-    ctx: ?*u8;
-    /* 分配 size 字节、按 align 对齐；失败返回 nil。align 必须是 2 的幂。 */
-    alloc: func(?*u8, usize, usize) -> ?*u8;
-    /* 释放；调用方保证 ptr 来自同一个分配器且非 nil。 */
-    free: func(?*u8, *u8) -> void;
+    _alloc: func(*Allocator, usize, usize) -> ?*u8;
+    _free: func(*Allocator, *u8) -> void;
+
+    /* 分配 size 字节、按 align 对齐；size == 0 或失败返回 nil。 */
+    func alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+        if (size == 0usize) {
+            return .?*u8{ nil };
+        }
+        return self._alloc(self, size, align);
+    }
+
+    /* 释放；ptr 必须来自同一分配器。 */
+    func free(self: *Allocator, ptr: *u8): void {
+        self._free(self, ptr);
+    }
 }
 
 /* ------------------------------------------------------------------ */
-/* 基础工具                                                            */
+/* 工具                                                                */
 /* ------------------------------------------------------------------ */
 
 export func align_up(n: usize, align: usize): usize {
@@ -38,59 +46,53 @@ export func align_up(n: usize, align: usize): usize {
     return n + (align - rem);
 }
 
-/* 分配：转发到分配器；失败 = nil。 */
-export func alloc_bytes(a: Allocator, size: usize, align: usize): ?*u8 {
-    if (size == 0usize) {
+/* ------------------------------------------------------------------ */
+/* 堆分配器（libc malloc/free 的封装）                                  */
+/* ------------------------------------------------------------------ */
+
+export struct HeapAllocator {
+    ...Allocator;
+
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+        var raw: opaque = libc::malloc(size);
+        if (raw as usize == 0usize) {
+            return .?*u8{ nil };
+        }
+        return raw as *u8;
+    }
+
+    func do_free(self: *Allocator, ptr: *u8): void {
+        libc::free(ptr as opaque);
+    }
+
+    func new(): HeapAllocator {
+        return .HeapAllocator{
+            ._alloc = HeapAllocator::do_alloc,
+            ._free = HeapAllocator::do_free
+        };
+    }
+}
+
+/* 禁用分配：任何分配都失败（测试"不该分配"的场景）。 */
+export struct NullAllocator {
+    ...Allocator;
+
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
         return .?*u8{ nil };
     }
-    return a.alloc(a.ctx, size, align);
-}
 
-export func free_bytes(a: Allocator, ptr: *u8): void {
-    a.free(a.ctx, ptr);
-}
+    func do_free(self: *Allocator, ptr: *u8): void {}
 
-/* ------------------------------------------------------------------ */
-/* 堆分配器（libc malloc/free 的一层封装）                              */
-/* ------------------------------------------------------------------ */
-
-func libc_alloc(ctx: ?*u8, size: usize, align: usize): ?*u8 {
-    var raw: opaque = libc::malloc(size);
-    if (raw as usize == 0usize) {
-        return .?*u8{ nil };
+    func new(): NullAllocator {
+        return .NullAllocator{
+            ._alloc = NullAllocator::do_alloc,
+            ._free = NullAllocator::do_free
+        };
     }
-    return raw as *u8;
-}
-
-func libc_free(ctx: ?*u8, ptr: *u8): void {
-    libc::free(ptr as opaque);
-}
-
-export func heap(): Allocator {
-    return .Allocator{
-        .ctx = nil,
-        .alloc = libc_alloc,
-        .free = libc_free
-    };
-}
-
-/* 禁用分配：任何分配都失败（测试/诊断"不该分配"的场景）。 */
-func none_alloc(ctx: ?*u8, size: usize, align: usize): ?*u8 {
-    return .?*u8{ nil };
-}
-
-func none_free(ctx: ?*u8, ptr: *u8): void {}
-
-export func null_allocator(): Allocator {
-    return .Allocator{
-        .ctx = nil,
-        .alloc = none_alloc,
-        .free = none_free
-    };
 }
 
 /* ------------------------------------------------------------------ */
-/* Arena                                                               */
+/* Arena：向 backing 按块申请，整块释放                                  */
 /* ------------------------------------------------------------------ */
 
 struct ArenaChunk {
@@ -100,16 +102,19 @@ struct ArenaChunk {
 }
 
 export struct Arena {
-    backing: Allocator;
+    ...Allocator;
+    backing: *Allocator;
     chunk: usize;
     head: ?*ArenaChunk;
     cur: ?*u8;
     cur_size: usize;
     used: usize;
 
-    /* 静态方法：`Arena::new(backing, chunk)`。 */
-    func new(backing: Allocator, chunk: usize): Arena {
+    /* `backing` 必须活得比 arena 久（通常是一个长生命周期的分配器）。 */
+    func new(backing: *Allocator, chunk: usize): Arena {
         return .Arena{
+            ._alloc = Arena::do_alloc,
+            ._free = Arena::do_free,
             .backing = backing,
             .chunk = chunk,
             .head = nil,
@@ -119,21 +124,61 @@ export struct Arena {
         };
     }
 
-    /* 返回 ctx 指向自身的分配器（整块释放）。 */
-    func allocator(self: *Arena): Allocator {
-        return .Allocator{
-            .ctx = self as *u8,
-            .alloc = arena_alloc,
-            .free = arena_free
-        };
+    func new_chunk(self: *Arena, need: usize): bool {
+        var want: usize = self.chunk;
+        if (want < need) {
+            want = need;
+        }
+        var hp: ?*u8 = self.backing.alloc(sizeof(ArenaChunk), alignof(ArenaChunk));
+        if (hp == nil) {
+            return false;
+        }
+        var bp: ?*u8 = self.backing.alloc(want, 16usize);
+        if (bp == nil) {
+            self.backing.free(hp.!);
+            return false;
+        }
+        var ch: *ArenaChunk = hp.! as *ArenaChunk;
+        ch.payload = bp.!;
+        ch.size = want;
+        ch.next = self.head;
+        self.head = ch;
+        self.cur = bp;
+        self.cur_size = want;
+        self.used = 0usize;
+        return true;
     }
+
+    func do_alloc(self: *Allocator, size: usize, align: usize): ?*u8 {
+        var a: *Arena = self as *Arena;
+        if (a.cur == nil) {
+            if (!a.new_chunk(align_up(size, 16usize))) {
+                return .?*u8{ nil };
+            }
+        }
+        var off: usize = align_up(a.used, align);
+        if (off + size > a.cur_size) {
+            if (!a.new_chunk(align_up(size, 16usize))) {
+                return .?*u8{ nil };
+            }
+            off = 0usize;
+        }
+        a.used = off + size;
+        var base: *u8 = a.cur.!;
+        var view: []u8 = make(base, a.cur_size);
+        return view[off].&;
+    }
+
+    func do_free(self: *Allocator, ptr: *u8): void {
+    /* 整块释放：单次 free 是 no-op。 */
+}
 
     func reset(self: *Arena): void {
         var c: ?*ArenaChunk = self.head;
         while (c != nil) {
             var nxt: ?*ArenaChunk = c.!.next;
-            free_bytes(self.backing, c.!.payload);
-            free_bytes(self.backing, c.! as *u8);
+            self.backing.free(c.!.payload);
+            self.backing.free(c.! as *u8);
             c = nxt;
         }
         self.head = nil;
@@ -147,83 +192,29 @@ export struct Arena {
     }
 }
 
-/* ---- Arena 内部函数（模块私有） ---- */
-
-func arena_new_chunk(a: *Arena, need: usize): bool {
-    var want: usize = a.chunk;
-    if (want < need) {
-        want = need;
-    }
-    var hp: ?*u8 = alloc_bytes(a.backing, sizeof(ArenaChunk), alignof(ArenaChunk));
-    if (hp == nil) {
-        return false;
-    }
-    var bp: ?*u8 = alloc_bytes(a.backing, want, 16usize);
-    if (bp == nil) {
-        free_bytes(a.backing, hp.!);
-        return false;
-    }
-    var ch: *ArenaChunk = hp.! as *ArenaChunk;
-    ch.payload = bp.!;
-    ch.size = want;
-    ch.next = a.head;
-    a.head = ch;
-    a.cur = bp;
-    a.cur_size = want;
-    a.used = 0usize;
-    return true;
-}
-
-func arena_alloc(ctx: ?*u8, size: usize, align: usize): ?*u8 {
-    if (ctx == nil) {
-        return .?*u8{ nil };
-    }
-    var a: *Arena = ctx.! as *Arena;
-    if (a.cur == nil) {
-        if (!arena_new_chunk(a, align_up(size, 16usize))) {
-            return .?*u8{ nil };
-        }
-    }
-    var off: usize = align_up(a.used, align);
-    if (off + size > a.cur_size) {
-        if (!arena_new_chunk(a, align_up(size, 16usize))) {
-            return .?*u8{ nil };
-        }
-        off = 0usize;
-    }
-    a.used = off + size;
-    var base: *u8 = a.cur.!;
-    var view: []u8 = make(base, a.cur_size);
-    return view[off].&;
-}
-
-func arena_free(ctx: ?*u8, ptr: *u8): void {
-/* 整块释放：单次 free 是 no-op。 */
-}
-
 /* ------------------------------------------------------------------ */
 /* 测试                                                                */
 /* ------------------------------------------------------------------ */
 
 test "mem.heapAllocFree" {
-    var a: Allocator = heap();
-    var p: ?*u8 = alloc_bytes(a, 32usize, 8usize);
+    var h: HeapAllocator = HeapAllocator::new();
+    var p: ?*u8 = h.alloc(32usize, 8usize);
     assert(p != nil);
     var b: []u8 = make(p.!, 32usize);
     b[0] = 7 as u8;
     assert(b[0] == 7 as u8);
-    free_bytes(a, p.!);
+    h.free(p.!);
 }
 
 test "mem.zeroSize" {
-    var a: Allocator = heap();
-    var p: ?*u8 = alloc_bytes(a, 0usize, 8usize);
+    var h: HeapAllocator = HeapAllocator::new();
+    var p: ?*u8 = h.alloc(0usize, 8usize);
     assert(p == nil);
 }
 
 test "mem.nullAllocatorFails" {
-    var a: Allocator = null_allocator();
-    var p: ?*u8 = alloc_bytes(a, 16usize, 8usize);
+    var n: NullAllocator = NullAllocator::new();
+    var p: ?*u8 = n.alloc(16usize, 8usize);
     assert(p == nil);
 }
 
@@ -236,12 +227,11 @@ test "mem.alignUp" {
 }
 
 test "mem.arenaBump" {
-    var backing: Allocator = heap();
-    var ar: Arena = Arena::new(backing, 256usize);
-    var al: Allocator = ar.allocator();
+    var h: HeapAllocator = HeapAllocator::new();
+    var ar: Arena = Arena::new(h.& as *Allocator, 256usize);
 
-    var p1: ?*u8 = alloc_bytes(al, 16usize, 8usize);
-    var p2: ?*u8 = alloc_bytes(al, 16usize, 8usize);
+    var p1: ?*u8 = ar.alloc(16usize, 8usize);
+    var p2: ?*u8 = ar.alloc(16usize, 8usize);
     assert(p1 != nil);
     assert(p2 != nil);
     assert(p1.! != p2.!);
@@ -254,18 +244,17 @@ test "mem.arenaBump" {
     assert(b2[0] == 2 as u8);
 
     ar.reset();
-    var p3: ?*u8 = alloc_bytes(al, 16usize, 8usize);
+    var p3: ?*u8 = ar.alloc(16usize, 8usize);
     assert(p3 != nil);
     ar.__dispose__();
 }
 
 test "mem.arenaGrow" {
-    var backing: Allocator = heap();
-    var ar: Arena = Arena::new(backing, 64usize);
-    var al: Allocator = ar.allocator();
+    var h: HeapAllocator = HeapAllocator::new();
+    var ar: Arena = Arena::new(h.& as *Allocator, 64usize);
     var i: usize = 0usize;
     while (i < 40usize) {
-        var p: ?*u8 = alloc_bytes(al, 32usize, 8usize);
+        var p: ?*u8 = ar.alloc(32usize, 8usize);
         assert(p != nil);
         var bv: []u8 = make(p.!, 32usize);
         bv[0] = i as u8;
