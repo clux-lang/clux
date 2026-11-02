@@ -2942,3 +2942,26 @@ TEST(CBackend, EmbeddedFuncFieldDispatch) {
                      "--backend=c"}),
             0);
 }
+
+/* `return nil;` 直接可用（?T 位置接受 nil，不必写 `var none: ?T = nil`）。 */
+TEST(CBackend, OptionalReturnNil) {
+  const std::string src = write_temp_file(
+      "func none_opt(): ?i32 { return nil; }\n"
+      "func none_ptr(): ?opaque { return nil; }\n"
+      "func some_opt(v: i32): ?i32 {\n"
+      "  if (v < 0) { return nil; }\n"
+      "  return v;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  if (none_opt() != nil) { return 1; }\n"
+      "  if (none_ptr() != nil) { return 2; }\n"
+      "  if (some_opt(-2) != nil) { return 3; }\n"
+      "  if (some_opt(5).! != 5) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cb_optional_return_nil");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}

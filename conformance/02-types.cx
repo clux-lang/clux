@@ -232,3 +232,22 @@ func take_opt_i32(o: ?i32): i32 {
 func give_opt(v: i32): ?i32 {
     return v;
 }
+
+/* ---- ?T 位置直接接受 nil（含 return） ---- */
+
+func optional_none(): ?i32 {
+    return nil;
+}
+
+func optional_some(v: i32): ?i32 {
+    if (v < 0) {
+        return nil;
+    }
+    return v;
+}
+
+test "types.optionalReturnNil" {
+    assert(optional_none() == nil);
+    assert(optional_some(-1) == nil);
+    assert(optional_some(3).! == 3);
+}

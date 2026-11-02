@@ -101,6 +101,7 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
+#include "parser/ast_option.h"
 #include "sema_stmt_internal.h"
 
 /* ---- 语句：控制流 ---- */
@@ -109,6 +110,13 @@ block_result_t walk_return(sema_t *sema, ast_return_t *rt,
                                   sema_scope_t *scope) {
   block_result_t r = {.definitely_returns = true};
   if (rt->value) {
+    /* `return nil;`：可选返回类型直接视为 none。**不改写 AST**——C 后端在
+       return 位置已经按声明的返回类型生成 `ok = false`，改写反而会引入
+       第二个等价的 `?T` 类型对象。 */
+    if (rt->value->kind == AST_NIL && sema->fn.return_type) {
+      const type_t *rtn = type_strip_quals(sema->fn.return_type);
+      if (rtn && type_kind_of(rtn) == TYPE_KIND_OPTION) return r;
+    }
     /* `return cfunc_ptr(<命名 cfunc>)` 在返回类型是 func 时自动生成包装。 */
     if (sema->fn.return_type && type_kind_of(sema->fn.return_type) == TYPE_KIND_FUNC)
       sema_maybe_wrap_cfunc_expr(sema, &rt->value, sema->fn.return_type, scope);

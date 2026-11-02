@@ -20,8 +20,7 @@ export struct Allocator {
     /* 分配 size 字节、按 align 对齐；size == 0 或失败返回 nil。 */
     func alloc(self: *Allocator, size: usize, align: usize): ?opaque {
         if (size == 0usize) {
-            var none: ?opaque = nil;
-            return none;
+            return nil;
         }
         return self._alloc(self, size, align);
     }
@@ -57,8 +56,7 @@ export struct HeapAllocator {
     func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
         var raw: opaque = libc::malloc(size);
         if (raw as usize == 0usize) {
-            var none: ?opaque = nil;
-            return none;
+            return nil;
         }
         return raw as *u8;
     }
@@ -80,8 +78,7 @@ export struct NullAllocator {
     ...Allocator;
 
     func do_alloc(self: *Allocator, size: usize, align: usize): ?opaque {
-        var none: ?opaque = nil;
-        return none;
+        return nil;
     }
 
     func do_free(self: *Allocator, ptr: opaque): void {}
@@ -156,15 +153,13 @@ export struct Arena {
         var a: *Arena = self as *Arena;
         if (a.cur == nil) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                var none: ?opaque = nil;
-                return none;
+                return nil;
             }
         }
         var off: usize = align_up(a.used, align);
         if (off + size > a.cur_size) {
             if (!a.new_chunk(align_up(size, 16usize))) {
-                var none: ?opaque = nil;
-                return none;
+                return nil;
             }
             off = 0usize;
         }
