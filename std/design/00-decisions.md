@@ -26,6 +26,8 @@
 | D-B5a | `Arena.chunk` 默认 **64 KiB** | [需求] |
 | D-C6 | `Map.get` / `Vec.at` 返回**借用指针**（`?*V` / `*T`），修改后失效 | [需求] |
 | D-C7 | `Vec`/`Map` 初始容量 **8**、增长**翻倍** | [需求] |
+| D-E3 | `fmt.Writer` = `{ ctx: opaque, write: func(ctx, []u8) -> void }` 能力值（与 `Allocator` 同构） | [需求] |
+| D-C8 | **暂不引入** `std::iter`：`foreach` 已支持切片与实现 `__len__`/`__index__` 的类型 | [需求] |
 
 ---
 
@@ -228,9 +230,9 @@ struct Allocator {
 
 # H 待你拍板
 
-1. `04-fmt` 的 `Writer` 形状：`{ ctx: opaque, write: func(ctx, data: []u8) -> void }`（与 `Allocator` 同构），确认后连 `Display` 一起定稿。
-2. `std::iter`（惰性迭代器）是否在 S2 之前引入；我倾向不引入（容器走 `foreach` + `entries()` 快照）。
-3. `Counting` 分配器（测试用）放在 `std::mem` 还是测试构建专用模块。
+1. `Counting` 分配器（测试用）放在 `std::mem` 还是测试构建专用模块。
+2. `diag` 的 `message` 用 `String`（拥有）还是 `str` + arena（我暂定 `String`）。
+3. 目录遍历（`io.read_dir`）是否在 S3 前提供（模块发现用；我暂定 S3 先用显式文件列表）。
 
 ---
 

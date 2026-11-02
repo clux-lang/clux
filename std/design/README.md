@@ -12,11 +12,29 @@
 
 | 编号 | 文档 | 覆盖模块 | 状态 |
 |---|---|---|---|
-| 00 | overview | 依赖图 + 最小 API 面总表 | 待写 |
-| 01 | mem | `std::mem` | 待写 |
-| 02 | str-string | `std::str`、`std::string` | 待写 |
-| 03 | vec | `std::vec` | 待写 |
-| 04 | fmt | `std::fmt` | 待写 |
-| 05 | io-sys | `std::io`、`std::sys` | 待写 |
-| 06 | map | `std::map` | 待写 |
-| 07 | args-diag-test | `std::args`、`std::diag`、`std::test` | 待写 |
+| 00 | [decisions](00-decisions.md) | 决策台账（Idea 收集 + 已定/待定） | v0.1 持续更新 |
+| 01 | [mem](01-mem.md) | `std::mem`（`Allocator` + `Arena`） | v0.1 |
+| 02 | [str-string](02-str-string.md) | `std::str`、`std::string` | v0.1 |
+| 03 | [vec](03-vec.md) | `std::vec` | v0.1 |
+| 04 | [fmt](04-fmt.md) | `std::fmt`（`Writer` + `Display`） | v0.1 |
+| 05 | [io-sys](05-io-sys.md) | `std::io`、`std::sys` | v0.1 |
+| 06 | [map](06-map.md) | `std::map`（有序，可换 HashMap） | v0.1 |
+| 07 | [args-diag-test](07-args-diag-test.md) | `std::args`、`std::diag`、`std::test` | v0.1 |
+
+## 依赖方向（只允许向下）
+
+```
+args / diag / test
+        │
+      fmt ──→ string ──→ str
+        │        │
+        │        ▼
+        └────→ vec ──→ mem
+        │
+        io ──→ sys（唯一 extern 边界）
+        │
+      map ──→ cmp(协议) + mem
+```
+
+- `str` 是语言内建视图，不是模块；`std::str` 只是自由函数集合。
+- `sys` 只能被 `io`（以及 `mem.heap` 的实现）调用；其它模块不得 `extern`。
