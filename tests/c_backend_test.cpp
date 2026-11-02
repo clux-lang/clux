@@ -2845,3 +2845,49 @@ TEST(CBackend, OptionalReturnFromFuncValueCall) {
                      "--backend=c"}),
             0);
 }
+
+/* enum variant 列表允许尾随逗号（与 struct 字段 / 构造字段一致）；以前会报
+   "expected variant name in enum definition"。 */
+TEST(CBackend, EnumTrailingComma) {
+  const std::string src = write_temp_file(
+      "enum Ordering: u8 {\n"
+      "  Less = 0u8,\n"
+      "  Equal = 1u8,\n"
+      "  Greater = 2u8,\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var o: Ordering = Ordering::Equal;\n"
+      "  if (o != Ordering::Equal) { return 1; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cb_enum_trailing_comma");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+/* 嵌入继承：派生类型上调用基类方法时，`member_type_id` 必须指向**方法定义
+   所在类型**（基类），否则 backend 找不到方法、返回类型推断失败，`?T` 的
+   调用结果会被再包一层 some。 */
+TEST(CBackend, InheritedMethodReturnTypeInferred) {
+  const std::string src = write_temp_file(
+      "struct Base {\n"
+      "  func pick(self: *Base): ?i32 { return 7; }\n"
+      "}\n"
+      "struct Derived {\n"
+      "  ...Base;\n"
+      "  n: i32;\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var d: Derived = .Derived{ .n = 0 };\n"
+      "  var r: ?i32 = d.pick();\n"
+      "  if (r == nil) { return 1; }\n"
+      "  return r.! - 7;\n"
+      "}\n",
+      "cb_inherited_method_infer");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}

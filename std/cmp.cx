@@ -1,0 +1,101 @@
+/* std/cmp.cx — 比较协议与 Ordering（见 std/design/00-decisions.md D-E2）
+ *
+ * 协议是**结构约束**：类型只要提供对应方法（名字 + 签名）即满足，
+ * 不要求写 `implements`（E1.2）。协议方法名用长名，避免与魔法方法混淆。
+ */
+
+export enum Ordering: u8 {Less = 0u8, Equal = 1u8, Greater = 2u8}
+
+/* `equals`：相等。 */
+export interface Equals[Self] {
+    func equals(self: *Self, other: *Self): bool;
+}
+
+/* `compare`：全序比较。`compare` 相等即视为同一个键（Map 依赖这一点）。 */
+export interface Ordered[Self] {
+    func compare(self: *Self, other: *Self): Ordering;
+}
+
+export func is_less(o: Ordering): bool {
+    return o == Ordering::Less;
+}
+
+export func is_equal(o: Ordering): bool {
+    return o == Ordering::Equal;
+}
+
+export func is_greater(o: Ordering): bool {
+    return o == Ordering::Greater;
+}
+
+export func reverse(o: Ordering): Ordering {
+    if (o == Ordering::Less) {
+        return Ordering::Greater;
+    }
+    if (o == Ordering::Greater) {
+        return Ordering::Less;
+    }
+    return Ordering::Equal;
+}
+
+/* ------------------------------------------------------------------ */
+/* 测试                                                                */
+/* ------------------------------------------------------------------ */
+
+struct Version {
+    major: i32;
+    minor: i32;
+
+    /* 只提供 compare，不写 implements（结构约束）。 */
+    func compare(self: *Version, other: *Version): Ordering {
+        if (self.major < other.major) {
+            return Ordering::Less;
+        }
+        if (self.major > other.major) {
+            return Ordering::Greater;
+        }
+        if (self.minor < other.minor) {
+            return Ordering::Less;
+        }
+        if (self.minor > other.minor) {
+            return Ordering::Greater;
+        }
+        return Ordering::Equal;
+    }
+
+    func equals(self: *Version, other: *Version): bool {
+        return self.compare(other) == Ordering::Equal;
+    }
+}
+
+func ordering_of[T extends Ordered[T]](a: *T, b: *T): Ordering {
+    return a.compare(b);
+}
+
+func same[T extends Equals[T]](a: *T, b: *T): bool {
+    return a.equals(b);
+}
+
+test "cmp.ordering" {
+    assert(is_less(Ordering::Less));
+    assert(is_equal(Ordering::Equal));
+    assert(is_greater(Ordering::Greater));
+    assert(reverse(Ordering::Less) == Ordering::Greater);
+    assert(reverse(Ordering::Equal) == Ordering::Equal);
+}
+
+test "cmp.structuralProtocol" {
+    var a: Version = .Version{
+        .major = 1,
+        .minor = 2
+    };
+    var b: Version = .Version{
+        .major = 1,
+        .minor = 3
+    };
+    assert(ordering_of(a.&, b.&) == Ordering::Less);
+    assert(ordering_of(b.&, a.&) == Ordering::Greater);
+    assert(ordering_of(a.&, a.&) == Ordering::Equal);
+    assert(same(a.&, a.&));
+    assert(!same(a.&, b.&));
+}

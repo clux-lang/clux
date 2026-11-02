@@ -109,10 +109,11 @@ ast_node_t *parse_enum_def(parser_t *p) {
         ((ast_enum_variant_t *)vn)->value = val;
         ast_append(&variants, &variants_last, NULL, vn);
 
-        /* 逗号分隔，} 结束 */
+        /* 逗号分隔，} 结束；允许尾随逗号（与 struct 字段 / 构造字段一致） */
         if (check_symbol(p, ",")) {
             advance(p);
             skip_trivia(p);
+            if (check_symbol(p, "}")) break;
             continue;
         }
         break;

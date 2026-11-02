@@ -60,7 +60,3 @@ test "testing.testIsolation" {
     local = local + 1;
     assert(local == 2);
 }
-
-struct Allocator {
-    alloc:func(self:*Allocator,size:usize,align:usize):opaque;
-}

@@ -1104,8 +1104,12 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
                                           NULL, scope, NULL);
           }
           if (ms && ms->kind == SEMA_SYM_FUNC) {
-            /* 标记为 member_call：compiler 发 MEMBER_CALL，不改写 AST */
-            const sema_type_t *reg = sema_type_find(sema, st);
+            /* 标记为 member_call：compiler 发 MEMBER_CALL，不改写 AST。
+               `member_type_id` 记**方法定义所在类型**（继承/嵌入时是基类型），
+               否则 backend 的 find_method / 返回类型推断会在派生类型上找不到
+               该方法（会退化成"未知返回类型"，进而把 ?T 再包一层）。 */
+            const type_t *owner_t = owner ? (const type_t *)owner : st;
+            const sema_type_t *reg = sema_type_find(sema, owner_t);
             if (reg) {
               call->is_member_call = true;
               call->member_type_id = reg->id;
