@@ -23,6 +23,9 @@
 | D-C5 | 容器内嵌 `Allocator` 字段可以接受（每容器 +16~24 字节） | [需求] |
 | D-B8 | `Allocator` 带 `ctx`：实际分配器 = 对 std 方法的封装 + 上下文，**已确认** | [需求] |
 | D-C2 | `Map` 当前用**有序映射**；API 按"换 HashMap 零调用点改动"的契约写 | [需求] |
+| D-B5a | `Arena.chunk` 默认 **64 KiB** | [需求] |
+| D-C6 | `Map.get` / `Vec.at` 返回**借用指针**（`?*V` / `*T`），修改后失效 | [需求] |
+| D-C7 | `Vec`/`Map` 初始容量 **8**、增长**翻倍** | [需求] |
 
 ---
 
@@ -99,7 +102,7 @@ struct Allocator {
 
 ## D-B5 arena —— 暂定
 `std::mem.Arena` 内置（`alloc(size, align) -> []u8`、`reset()`、`__dispose__`），作为 `Allocator` 的一个实现，不设默认。
-用途：编译器各阶段的批量存储。
+用途：编译器各阶段的批量存储。`chunk` 默认 **64 KiB**（D-B5a）。
 
 ## D-B6 全局可变状态 —— 已定
 `std` 内部零全局可变状态（`sys` errno 镜像、`test` 计数器为文档化例外）。
@@ -225,10 +228,9 @@ struct Allocator {
 
 # H 待你拍板
 
-1. `Arena` 的 `chunk` 默认值（64 KiB）与是否需要 `Counting` 分配器（测试用）。
-2. `Map.get` 返回 `?*V`（借用、修改后失效）还是 `?V`（要求 V 可拷贝）；我暂定借用。
-3. `Map` 条目数组的初始容量（8）与增长策略（翻倍）是否接受。
-4. 剩余模块设计顺序：`02-str-string` → `03-vec` → `04-fmt`（含 `Writer` 能力值）→ `05-io-sys` → `07-args-diag-test`。
+1. `04-fmt` 的 `Writer` 形状：`{ ctx: opaque, write: func(ctx, data: []u8) -> void }`（与 `Allocator` 同构），确认后连 `Display` 一起定稿。
+2. `std::iter`（惰性迭代器）是否在 S2 之前引入；我倾向不引入（容器走 `foreach` + `entries()` 快照）。
+3. `Counting` 分配器（测试用）放在 `std::mem` 还是测试构建专用模块。
 
 ---
 
