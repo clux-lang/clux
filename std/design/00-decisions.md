@@ -21,6 +21,8 @@
 | D-E2 | 协议方法名用**长名**（可读性优先）：`equals` / `compare` / `format` / `hash` / `next` / `write` | [需求] |
 | D-B7 | 分配器**不用 vtable**：显式持有函数指针（+ 状态指针 `ctx`） | [需求] |
 | D-C5 | 容器内嵌 `Allocator` 字段可以接受（每容器 +16~24 字节） | [需求] |
+| D-B8 | `Allocator` 带 `ctx`：实际分配器 = 对 std 方法的封装 + 上下文，**已确认** | [需求] |
+| D-C2 | `Map` 当前用**有序映射**；API 按"换 HashMap 零调用点改动"的契约写 | [需求] |
 
 ---
 
@@ -109,10 +111,16 @@ struct Allocator {
 ## D-C1 第一批 —— 暂定
 `Vec[T]`、`String`、`Map[K,V]`。S0/S1 再补 `Arena`（已在 B5）。
 
-## D-C2 映射实现 —— 暂定（有序）
-`Map[K,V]` = 有序映射（平衡树或有序数组），要求 `K` 满足 `std::cmp::Ordered[K]` 协议。
-理由：确定性（D-F1）+ 无需新增语言协议（`__hash__` 已被 D-E0b 排除）。
-键相等用 `Ordered.cmp`（`cmp == Equal` 视为同键），不单独要求 `Eq`。
+## D-C2 映射实现 —— 已定：当前有序，将来可换 HashMap（成本已控制）
+- 现在：有序数组 + 二分查找；`K extends std::cmp::Ordered[K]`（`compare` 返回 `Ordering`）。
+- 将来换 HashMap：只追加 `K extends Hash[K]`（多实现一个 `hash`），`Map` 内部换桶结构，
+  **API、调用点、golden 都不改**。
+- 控制成本的三条契约（详见 [`06-map.md`](06-map.md)）：
+  1. `Map` **不透明**（不暴露节点/树概念），遍历只能走 `entries()`；
+  2. `entries()` 契约固定为"按 key 全序"（HashMap 实现负责排序或维护有序索引）；
+  3. **不提供**树专属 API（`first_key`/`range`）；这类需求将来作为独立扩展 API。
+- 可选加速路径（不现在做）：`comptime if (K extends Hash[K])` 在 `Map` 内部按实例选实现，
+  两种实现共用一个类型名；API 契约已按这个前提写好。
 
 ## D-C3 迭代 —— 已定（沿用语言现状）
 - `foreach` 走语言的"可索引序列"内建路径：容器实现 `__len__` / `__index__` 魔法方法（这两个属于**语言内建**，不是 std 协议）。
@@ -217,9 +225,10 @@ struct Allocator {
 
 # H 待你拍板
 
-1. **D-C2**：`Map` 用有序映射（我暂定）还是必须做哈希映射（那就需要 `Hash` 协议 + 确定性迭代方案）？
-2. **D-B1 的 `ctx`**：`Allocator` 是否带状态指针 `ctx`（我推荐带，见 `01-mem.md`）？还是坚持纯两个函数指针（那 Arena 只能做成全局静态）？
-3. `Arena` 的 `chunk` 默认值（64 KiB）与是否需要 `Counting` 分配器（测试用）。
+1. `Arena` 的 `chunk` 默认值（64 KiB）与是否需要 `Counting` 分配器（测试用）。
+2. `Map.get` 返回 `?*V`（借用、修改后失效）还是 `?V`（要求 V 可拷贝）；我暂定借用。
+3. `Map` 条目数组的初始容量（8）与增长策略（翻倍）是否接受。
+4. 剩余模块设计顺序：`02-str-string` → `03-vec` → `04-fmt`（含 `Writer` 能力值）→ `05-io-sys` → `07-args-diag-test`。
 
 ---
 
