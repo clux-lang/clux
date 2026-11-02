@@ -2891,3 +2891,54 @@ TEST(CBackend, InheritedMethodReturnTypeInferred) {
                      "--backend=c"}),
             0);
 }
+
+/* 方法引用作为**函数值**（`S::m` 赋给 func 字段并调用）：必须物化成函数对象
+   `obj___method_<id>_<name>`；以前会生成一个未初始化的全局（fn = NULL）→ 崩。 */
+TEST(CBackend, MethodReferenceAsFuncValue) {
+  const std::string src = write_temp_file(
+      "struct S {\n"
+      "  f: func(*S, i32) -> i32;\n"
+      "  n: i32;\n"
+      "  func m(self: *S, x: i32): i32 { return self.n + x; }\n"
+      "  func setup(self: *S): void { self.f = S::m; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{ .f = S::m, .n = 1 };\n"
+      "  s.setup();\n"
+      "  var r: i32 = (s.f)(s.&, 41);\n"
+      "  return r - 42;\n"
+      "}\n",
+      "cb_method_ref_value");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}
+
+/* 基类嵌入 + 函数指针字段（手写 vtable）：派生类型设置基类字段，经基类方法调用。 */
+TEST(CBackend, EmbeddedFuncFieldDispatch) {
+  const std::string src = write_temp_file(
+      "struct Base {\n"
+      "  f: func(*Base, i32) -> i32;\n"
+      "  func call_it(self: *Base, x: i32): i32 { return self.f(self, x); }\n"
+      "}\n"
+      "struct Derived {\n"
+      "  ...Base;\n"
+      "  n: i32;\n"
+      "  func impl(self: *Base, x: i32): i32 {\n"
+      "    var me: *Derived = self as *Derived;\n"
+      "    return me.n + x;\n"
+      "  }\n"
+      "  func setup(self: *Derived): void { self.f = Derived::impl; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var d: Derived = .Derived{ .n = 1, .f = Derived::impl };\n"
+      "  d.setup();\n"
+      "  return d.call_it(41) - 42;\n"
+      "}\n",
+      "cb_embedded_dispatch");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}

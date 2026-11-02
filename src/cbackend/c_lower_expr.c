@@ -1044,6 +1044,27 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                         if (mm) at = mm->type;
                     }
                 }
+                /* `S::method` 作函数值引用：物化成**函数对象**
+                   （`obj___method_<typeId>_<name>`），不能当静态属性全局。 */
+                if (ms && ms->kind == SEMA_SYM_FUNC && ms->type &&
+                    type_kind_of(type_strip_quals(ms->type)) == TYPE_KIND_FUNC) {
+                    const sema_type_t *ost = sema_type_find(lc->sema, decl_t);
+                    if (ost && ost->id) {
+                        char mb[256];
+                        int mn = snprintf(mb, sizeof mb, "__method_%u_%.*s",
+                                          ost->id, (int)sr->variant.len,
+                                          sr->variant.ptr ? sr->variant.ptr : "");
+                        if (mn > 0 && (size_t)mn < sizeof mb) {
+                            const char *cp = copy_arena(lc->arena, mb);
+                            strslice_t full = {.ptr = cp, .len = (size_t)mn};
+                            const char *obj = module_symbol(
+                                lc->arena, lc->unit, "obj_", full);
+                            cir_type_t *ct = map_type(lc, ms->type);
+                            if (obj && ct)
+                                return cir_expr_func_obj(lc->arena, obj, ct);
+                        }
+                    }
+                }
                 ast_node_t *init_expr = NULL;
                 if (ms && ms->ast && ms->ast->kind == AST_VAR_DEF)
                     init_expr = ((ast_var_def_t *)ms->ast)->init;
