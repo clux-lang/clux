@@ -49,6 +49,7 @@
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
 #include "sema/magic.h"
+#include "sema/coerce.h"
 #include "sema/mock.h"
 #include "sema/metadata.h"
 #include "sema/sema_cross.h"
@@ -1712,39 +1713,21 @@ value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       size_t i = 0;
       for (; *link; link = &(*link)->next, i++) {
         const type_t *pt = fnt ? func_type_param(fnt, i) : NULL;
-        /* (nil)：nil 自带目标类型 → 先包成 .?P{nil} 再求值。 */
+        /* nil 立字面量需要目标类型：先包成 `.?P{nil}` 再求值。 */
         if (pt && (*link)->kind == AST_NIL) wrap_optional_arg(sema, link, pt);
         bool ct_pushed = sema_anon_push(sema, pt);
         arg_shadows[i] = sema_expr(sema, link, scope);
         sema_anon_pop(sema, ct_pushed);
-        /* 单参 `__init__` 的隐式构造：实参类型是 T（有单参初始化）而表达式
-           是初始化参数类型时，等价于 `.T{x}`。 */
-        if (pt && arg_shadows[i] &&
-            !value_is_error(sema->vm, arg_shadows[i])) {
-          bool conv = false;
-          value_t *nv = sema_magic_init_convert(
-              sema, link, value_type(arg_shadows[i]), pt, scope, &conv);
-          if (conv) {
-            arg_shadows[i] = nv ? nv : val_void(sema);
-          } else if (arg_shadows[i] &&
-                     !value_is_error(sema->vm, arg_shadows[i])) {
-            /* `?P` 形参 + P 实参：显式包成 `.?P{arg}`，让 C 后端生成包装。 */
-            const type_t *p = type_strip_quals(pt);
-            const type_t *at = value_type(arg_shadows[i]);
-            const type_t *inner = (p && type_kind_of(p) == TYPE_KIND_OPTION)
-                                      ? type_option_inner(p)
-                                      : NULL;
-            if (inner && at && type_strip_quals(at) != p) {
-              value_t *probe = value_make_shadow(sema->vm, at);
-              if (probe &&
-                  !value_is_error(sema->vm,
-                                  value_implicit_cast(sema->vm, probe, inner)))
-                wrap_optional_arg(sema, link, pt);
-            }
-          }
+        /* 实参转换的唯一入口：optional 包装 / 派生→基类 cast / __init__ 派发。 */
+        if (pt && !is_poison(sema, arg_shadows[i])) {
+          value_t *nv = sema_coerce(sema, link, arg_shadows[i], pt, scope);
+          if (!nv)
+            arg_shadows[i] = val_void(sema); /* 转换失败：让调用点报错 */
+          else if (value_is_error(sema->vm, nv))
+            arg_shadows[i] = nv;
+          else
+            arg_shadows[i] = nv;
         }
-        /* 指针的隐式转换（派生 → 基类）：补显式 cast，C 后端才能通过。 */
-        if (pt) cast_arg_to(sema, link, arg_shadows[i], pt);
       }
       value_t *result = value_call(sema->vm, callee, arg_shadows, argc);
 
