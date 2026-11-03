@@ -36,6 +36,9 @@ aux_source_directory(src/parser PARSER_SOURCE)
 add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE})
 clux_target_warnings(clux)
 
+# ICU 库编译时禁用了版本后缀重命名 (U_DISABLE_VERSION_SUFFIX=1)，
+# 消费方必须同步定义，否则头文件将 u_isIDStart 重命名为 u_isIDStart_74 导致链接失败。
+target_compile_definitions(clux PRIVATE U_DISABLE_VERSION_SUFFIX=1)
 
 target_link_libraries(clux PRIVATE
     ICU::data
@@ -65,7 +68,8 @@ if(BUILD_TESTS)
   add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE} ${PARSER_SOURCE})
   target_include_directories(clux_test PRIVATE include)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
-  target_link_libraries(clux_test PRIVATE icu_data_init ICU::data GTest::gtest)
+  target_compile_definitions(clux_test PRIVATE U_DISABLE_VERSION_SUFFIX=1)
+  target_link_libraries(clux_test PRIVATE icu_data_init ICU::data ICU::uc GTest::gtest)
   clux_target_warnings(clux_test)
   # 少数端到端用例要断言程序**自己打印的输出**（tests/foreach_test.cpp）：clux 的
   # `libc::printf` 由 FFI 解析到系统 CRT，与测试进程自身 CRT 不是同一实例，进程内

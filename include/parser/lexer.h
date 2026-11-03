@@ -26,6 +26,24 @@ typedef struct _token_t token_t;
 token_t *lexer_read_character(allocator_t *allocator,
                               position_t *position,
                               const char *filename);
+token_t *lexer_read_string(allocator_t *allocator,
+                           position_t *position,
+                           const char *filename);
+token_t *lexer_read_identifier(allocator_t *allocator,
+                               position_t *position,
+                               const char *filename);
+token_t *lexer_read_whitespace(allocator_t *allocator,
+                               position_t *position,
+                               const char *filename);
+token_t *lexer_read_comment(allocator_t *allocator,
+                            position_t *position,
+                            const char *filename);
+token_t *lexer_read_multiline_comment(allocator_t *allocator,
+                                      position_t *position,
+                                      const char *filename);
+token_t *lexer_read_numeric(allocator_t *allocator,
+                            position_t *position,
+                            const char *filename);
 #ifdef __cplusplus
 }
 #endif
