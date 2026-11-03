@@ -30,10 +30,9 @@ endfunction()
 
 add_subdirectory(third_party/icu)
 
-# libffi 已移除：C 后端直接生成 C 原型/调用，运行期不再需要动态 FFI。
+aux_source_directory(src/core CORE_SOURCE)
 
-
-add_executable(clux src/main.c)
+add_executable(clux src/main.c ${CORE_SOURCE})
 clux_target_warnings(clux)
 
 
@@ -41,6 +40,8 @@ target_link_libraries(clux PRIVATE
     ICU::data
     ICU::io
 )
+
+target_include_directories(clux PRIVATE include)
 
 # ---------------------------------------------------------------------------
 # Unit tests (GoogleTest, introduced as a git submodule at third_party/gtest)
@@ -60,7 +61,8 @@ if(BUILD_TESTS)
   # (CONFIGURE_DEPENDS re-runs globbing on each configure when the filesystem changes).
   file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
-  add_executable(clux_test ${TEST_SOURCES})
+  add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE})
+  target_include_directories(clux_test PRIVATE include)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   target_link_libraries(clux_test PRIVATE icu_data_init ICU::data GTest::gtest)
   clux_target_warnings(clux_test)
