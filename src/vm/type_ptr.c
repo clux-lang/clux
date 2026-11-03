@@ -1,3 +1,4 @@
+#include "vm/ctfe_mem.h"
 #include "vm/type_ptr.h"
 #include "vm/function.h"
 #include "vm/type.h"
@@ -89,6 +90,19 @@ bool ptr_type_needs_scan(const type_t *t) {
     }
 }
 
+/* CTFE 存储模型：编译期求值没有"真实栈"，所有存储都由编译器管理，
+   因此释放一律走**隔离释放**（本编译内地址不复用 → 地址即对象身份，
+   逃逸指针诊断确定性成立）。隔离表满/停用时才真正归还分配器。 */
+static void ctfe_free_block(vm_t *vm, void **p) {
+    if (!vm || !p || !*p) return;
+    ctfe_mem_set_allocator(vm->alloc);
+    if (ctfe_mem_quarantine(*p)) {
+        *p = NULL;
+        return;
+    }
+    allocator_free(vm->alloc, p);
+}
+
 void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
     if (!vm || !t || !data) return;
     /* 递归销毁看去限定后的裸类型。 */
@@ -115,7 +129,7 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
             ptr_free_recursive(vm, base, pv->ptr);
         void *heap = pv->ptr;
         pv->ptr = NULL;
-        allocator_free(vm->alloc, &heap);
+        ctfe_free_block(vm, &heap);
         return;
     }
     case TYPE_KIND_SLICE: {
@@ -126,7 +140,7 @@ void ptr_free_recursive(vm_t *vm, const type_t *t, void *data) {
         void *heap = sv->ptr;
         sv->ptr = NULL;
         sv->len = 0;
-        allocator_free(vm->alloc, &heap);
+        ctfe_free_block(vm, &heap);
         return;
     }
     case TYPE_KIND_CONST:

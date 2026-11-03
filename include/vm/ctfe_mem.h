@@ -4,6 +4,7 @@
 extern "C" {
 #endif
 
+#include "core/allocator.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -24,7 +25,8 @@ extern "C" {
  *      返回诊断文本；否则 NULL（未登记 = 无法判定，放行）。
  *
  * 只登记"被取过地址"的块，因此普通值路径零开销；表按地址精确查找，O(1)。
- * 地址被后续分配复用时只会漏报不会误报（活块会重新标 alive）。
+ * 配合**隔离释放**（value_dispose 不立即 free，编译结束统一释放），
+ * 同一编译内地址不会复用 → 地址即对象身份，诊断确定性成立。
  */
 
 /** 登记 addr 归属存储块 owner（owner 为空时以 addr 自身为块基址）。
@@ -40,7 +42,20 @@ void ctfe_mem_note_addr(void *addr, void *owner);
  *  必须与释放钩子配对，否则"归属登记不得复活已释放块"会导致**误报**：
  *  allocator 复用地址时，新块若不重新标 alive，旧登记项会让它还留在 dead
  *  状态。地址复用时只可能漏报，不可能误报——这个不变式由本钩子保证。 */
-void ctfe_mem_on_alloc(void *base);
+void ctfe_mem_on_alloc(void *base, size_t size);
+
+/**
+ * 隔离释放：编译期求值时**不**把 value data 还给分配器，而是延后到本次
+ * 编译结束（`ctfe_mem_reset`）统一释放。
+ *
+ * 这样同一编译内**地址不会复用**，地址即对象身份 —— 逃逸指针诊断因此
+ * 确定性成立（不会因为地址被新对象复用而漏报，也不会因为旧归属残留而
+ * 误报）。返回 true 表示已接管（调用方不要再 free）。
+ */
+bool ctfe_mem_quarantine(void *data);
+
+/** 记录本次编译的分配器（隔离释放表用它统一 free）。 */
+void ctfe_mem_set_allocator(allocator_t *alloc);
 
 /** 查询 addr 已登记的所属存储块基址；未登记返回 NULL。 */
 void *ctfe_mem_owner_of(const void *addr);

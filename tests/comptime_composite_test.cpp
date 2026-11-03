@@ -768,3 +768,33 @@ TEST(DriverComptime, PointerIntoOuterStorageSurvivesInnerScope) {
       "func main(): i32 { return ok_field() + ok_outer(); }\n",
       "ct_uaf_ok");
 }
+
+TEST(DriverComptime, EscapedPointerDetectedAfterChurn) {
+  /* 回归（旧 flake）：先 churn 一遍让分配器把同一批地址反复分配/释放，再让
+     指针逃出块作用域——必须**稳定**报 use-after-free。
+
+     旧实现的漏报来自"地址复用"：释放的块被新对象复用后，归属表看到 alive
+     就放行。现在 CTFE 存储一律隔离释放（地址不复用），地址即对象身份。 */
+  clux_expect_reject(
+      "comptime func churn(): i32 {\n"
+      "  var i: i32 = 0;\n"
+      "  var total: i32 = 0;\n"
+      "  while (i < 20) {\n"
+      "    var a: [4]i32 = .[4]i32{ 1, 2, 3, 4 };\n"
+      "    total = total + a[0];\n"
+      "    i = i + 1;\n"
+      "  }\n"
+      "  return total;\n"
+      "}\n"
+      "comptime func leak(): i32 {\n"
+      "  var s: []i32 = undefined;\n"
+      "  {\n"
+      "    var a: [3]i32 = .[3]i32{ 7, 8, 9 };\n"
+      "    s = make(data(a), 3);\n"
+      "  }\n"
+      "  var d: *i32 = data(s);\n"
+      "  return d.*;\n"
+      "}\n"
+      "func main(): i32 { return churn() + leak(); }\n",
+      "use-after-free", "ct_uaf_after_churn");
+}

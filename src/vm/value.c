@@ -56,7 +56,7 @@ void *value_alloc_data(allocator_t *alloc, const type_t *type) {
     void *data = allocator_new(alloc, &g_value_data_class, type->size);
     if (!data) panic("vm: out of memory allocating value data");
     memset(data, 0, type->size);
-    ctfe_mem_on_alloc(data); /* 登记为 alive（CTFE 逃逸指针诊断的权威状态） */
+    ctfe_mem_on_alloc(data, type->size); /* 登记为 alive（CTFE 逃逸指针诊断的权威状态） */
     return data;
 }
 
@@ -65,7 +65,7 @@ void *value_alloc_data_copy(allocator_t *alloc, const type_t *type, const void *
     void *data = allocator_new(alloc, &g_value_data_class, type->size);
     if (!data) panic("vm: out of memory allocating value data");
     memcpy(data, src, type->size);
-    ctfe_mem_on_alloc(data);
+    ctfe_mem_on_alloc(data, type->size);
     return data;
 }
 
@@ -411,7 +411,10 @@ void value_dispose(vm_t *vm, value_t *v) {
                    该块从此 dead，任何仍指向它的指针再解引用都会报错）。 */
                 if (v->data) {
                     ctfe_mem_on_free(v->data);
-                    allocator_free(vm->alloc, (void **)&v->data);
+        /* 编译期求值：隔离释放（本编译内地址不复用，逃逸诊断才确定性）。 */
+        ctfe_mem_set_allocator(vm->alloc);
+        if (!ctfe_mem_quarantine(v->data))
+          allocator_free(vm->alloc, (void **)&v->data);
                 }
             }
         }
