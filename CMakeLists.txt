@@ -31,8 +31,9 @@ endfunction()
 add_subdirectory(third_party/icu)
 
 aux_source_directory(src/core CORE_SOURCE)
+aux_source_directory(src/parser PARSER_SOURCE)
 
-add_executable(clux src/main.c ${CORE_SOURCE})
+add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE})
 clux_target_warnings(clux)
 
 
@@ -61,7 +62,7 @@ if(BUILD_TESTS)
   # (CONFIGURE_DEPENDS re-runs globbing on each configure when the filesystem changes).
   file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
-  add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE})
+  add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE} ${PARSER_SOURCE})
   target_include_directories(clux_test PRIVATE include)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
   target_link_libraries(clux_test PRIVATE icu_data_init ICU::data GTest::gtest)
