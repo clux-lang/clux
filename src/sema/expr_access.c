@@ -1073,6 +1073,21 @@ value_t *ex_scope_ref(sema_t *sema, ast_node_t **node,
         ast_scope_ref_t *inner_er = (ast_scope_ref_t *)n->type_expr;
         const type_t *st = resolve_cross_module_struct(sema, inner_er, scope);
         if (!st) {
+          /* `mod::Enum::Variant`：跨模块枚举 variant（与本地 `Enum::Variant`
+             同一条折叠路径）。 */
+          const type_t *et = resolve_cross_module_type(sema, inner_er, scope);
+          if (et && type_kind_of(et) == TYPE_KIND_ENUM) {
+            int vi = enum_type_find_variant(et, n->variant);
+            if (vi < 0) {
+              diag_error(sema->diag, sema_loc(sema, *node),
+                         "enum '%.*s' has no variant '%.*s'",
+                         (int)et->name.len, et->name.ptr,
+                         (int)n->variant.len, n->variant.ptr);
+              return val_void(sema);
+            }
+            n->value = enum_type_variant(et, (size_t)vi)->value;
+            return value_make_shadow(sema->vm, et);
+          }
           diag_error(sema->diag, sema_loc(sema, *node),
                      "'%.*s::%.*s' is not a struct type",
                      (int)inner_er->variant.len, inner_er->variant.ptr,

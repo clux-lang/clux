@@ -1109,7 +1109,22 @@ cir_expr_t *lower_expr(lower_ctx_t *lc, ast_node_t *e) {
                 }
             }
         }
-        diag_error(lc->sema->diag, sema_loc(lc->sema, e),
+            /* 跨模块枚举 variant（`mod::Enum::Variant`）：sema 已折叠出 `value`，
+       `resolved_type` 是枚举类型 → 与本地 variant 同一条路径（底层整数 + cast）。 */
+    if (e->resolved_type &&
+        type_kind_of(type_strip_quals(e->resolved_type)) == TYPE_KIND_ENUM) {
+      const type_t *et = type_strip_quals(e->resolved_type);
+      cir_type_t *ct = map_type(lc, et);
+      cir_expr_t *lit = ct ? cir_expr_int(lc->arena, sr->value) : NULL;
+      cir_expr_t *cast =
+          lit ? cir_expr_cast(lc->arena, ct, lit) : NULL;
+      if (cast) {
+        cast->type = ct;
+        return cast;
+      }
+      return NULL;
+    }
+diag_error(lc->sema->diag, sema_loc(lc->sema, e),
                    "c backend: unsupported `::` reference '%.*s' (only enum "
                    "variants are supported; struct static attributes are not "
                    "implemented yet)",

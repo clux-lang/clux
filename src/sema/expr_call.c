@@ -262,20 +262,18 @@ static value_t *ex_ffi_call(sema_t *sema, ast_call_t *call, sema_symbol_t *fs,
  * type_expr 是 AST_IDENT（模块别名），variant 是类型名。
  * 直接从 module->exports 查 type value，取其指向的 type_t*。
  * 非 struct / 未找到返回 NULL。 */
-const type_t *resolve_cross_module_struct(sema_t *sema,
-                                                  ast_scope_ref_t *er,
-                                                  sema_scope_t *scope) {
+/* 跨模块**类型**解析：`mod::Type` → 该模块导出的类型（struct / enum / …）。
+   阶段 1 查 sema 符号（依赖模块可能尚未 finalize），阶段 2 查运行时 exports。 */
+const type_t *resolve_cross_module_type(sema_t *sema, ast_scope_ref_t *er,
+                                        sema_scope_t *scope) {
   if (!er || !er->type_expr || er->type_expr->kind != AST_IDENT) return NULL;
   ast_ident_t *id = (ast_ident_t *)er->type_expr;
   sema_symbol_t *sym = sema_lookup(scope, id->name);
   if (!sym || sym->kind != SEMA_SYM_MODULE || !sym->module) return NULL;
   module_t *mod = sym->module;
   if (!mod) return NULL;
-  /* 阶段 1：依赖模块可能尚未 finalize（无 runtime exports），先查 sema 符号。 */
   sema_symbol_t *ms = sema_module_export_symbol(mod, er->variant);
-  if (ms && ms->kind == SEMA_SYM_TYPE && ms->type &&
-      type_kind_of(ms->type) == TYPE_KIND_STRUCT)
-    return ms->type;
+  if (ms && ms->kind == SEMA_SYM_TYPE && ms->type) return ms->type;
   if (!mod->exports) return NULL;
   char buf[256];
   if (er->variant.len >= sizeof(buf)) return NULL;
@@ -283,7 +281,13 @@ const type_t *resolve_cross_module_struct(sema_t *sema,
   buf[er->variant.len] = '\0';
   value_t *member = (value_t *)strmap_get(mod->exports, buf);
   if (!member || value_type(member) != sema->vm->type_type) return NULL;
-  const type_t *t = value_as(member, const type_t *);
+  return value_as(member, const type_t *);
+}
+
+const type_t *resolve_cross_module_struct(sema_t *sema,
+                                                  ast_scope_ref_t *er,
+                                                  sema_scope_t *scope) {
+  const type_t *t = resolve_cross_module_type(sema, er, scope);
   if (!t || type_kind_of(t) != TYPE_KIND_STRUCT) return NULL;
   return t;
 }

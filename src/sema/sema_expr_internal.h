@@ -40,6 +40,7 @@ bool is_poison(sema_t *sema, const value_t *v);
 void op_text(const token_t *op, char *buf, size_t cap);
 void op_type_name(value_t *v, char *buf, size_t cap);
 bool reflect_member_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope, value_t **out);
+const type_t *resolve_cross_module_type(sema_t *sema, ast_scope_ref_t *er, sema_scope_t *scope);
 const type_t *resolve_cross_module_struct(sema_t *sema, ast_scope_ref_t *er, sema_scope_t *scope);
 value_t *val_void(sema_t *sema);
 

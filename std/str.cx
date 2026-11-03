@@ -1,0 +1,299 @@
+/* std/str.cx — `str` 上的自由函数（不分配；见 std/design/02-str-string.md §4）
+ *
+ * `str` 是语言内建的字节视图 `{ ptr, len }`，这里不重新定义它，只提供
+ * 只读查询：任何函数都不分配内存，也不改变输入。
+ * 决定论：所有比较/查找都以**字节**为序（ASCII 规则），不看 locale。
+ *
+ * 命名/类型说明：
+ *  - `len` 是内建（关键字形式），所以模块函数叫 `length`；
+ *  - `str[lo:hi]` 的结果是 `[]const u8`（§5.9），所以视图函数返回
+ *    `[]const u8`（`slice_bytes` / `trim_bytes`）；需要 `str` 视图的位置先
+ *    返回索引（`trim_start_index` / `trim_end_index`），等语言补上
+ *    `[]const u8 -> str` 的转换再换成 `str`。
+ */
+
+import cmp from "./cmp";
+
+/* ---- 基本属性 ---- */
+
+export func length(s: str): usize {
+    return len(s);
+}
+
+export func is_empty(s: str): bool {
+    return len(s) == 0usize;
+}
+
+/* 越界返回 nil（不 panic）。 */
+export func byte_at(s: str, i: usize): ?u8 {
+    if (i >= len(s)) {
+        return nil;
+    }
+    var p: *u8 = data(s);
+    var b: []u8 = make(p, len(s));
+    return b[i];
+}
+
+/* 字节视图切片（`str[lo:hi]` → `[]const u8`）；越界 panic。 */
+export func slice_bytes(s: str, lo: usize, hi: usize): []const u8 {
+    assert(lo <= hi);
+    assert(hi <= len(s));
+    return s[lo:hi];
+}
+
+/* ---- 比较 ---- */
+
+export func equals(a: str, b: str): bool {
+    if (len(a) != len(b)) {
+        return false;
+    }
+    var pa: *u8 = data(a);
+    var pb: *u8 = data(b);
+    var va: []u8 = make(pa, len(a));
+    var vb: []u8 = make(pb, len(b));
+    var i: usize = 0usize;
+    while (i < len(a)) {
+        if (va[i] != vb[i]) {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+/* 字节字典序（确定性；与 `cmp.Ordering` 对齐）。 */
+export func compare(a: str, b: str): cmp::Ordering {
+    var pa: *u8 = data(a);
+    var pb: *u8 = data(b);
+    var va: []u8 = make(pa, len(a));
+    var vb: []u8 = make(pb, len(b));
+    var n: usize = len(a);
+    if (len(b) < n) {
+        n = len(b);
+    }
+    var i: usize = 0usize;
+    while (i < n) {
+        var ca: u8 = va[i];
+        var cb: u8 = vb[i];
+        if (ca < cb) {
+            return cmp::Ordering::Less;
+        }
+        if (ca > cb) {
+            return cmp::Ordering::Greater;
+        }
+        i = i + 1usize;
+    }
+    if (len(a) < len(b)) {
+        return cmp::Ordering::Less;
+    }
+    if (len(a) > len(b)) {
+        return cmp::Ordering::Greater;
+    }
+    return cmp::Ordering::Equal;
+}
+
+/* ASCII 大小写无关的相等（非 ASCII 字节按原样比较）。 */
+export func equals_ascii_ignore_case(a: str, b: str): bool {
+    if (len(a) != len(b)) {
+        return false;
+    }
+    var pa: *u8 = data(a);
+    var pb: *u8 = data(b);
+    var va: []u8 = make(pa, len(a));
+    var vb: []u8 = make(pb, len(b));
+    var i: usize = 0usize;
+    while (i < len(a)) {
+        var ca: u8 = va[i];
+        var cb: u8 = vb[i];
+        if (ca >= 65 as u8 && ca <= 90 as u8) {
+            ca = (ca + 32 as u8) as u8;
+        }
+        if (cb >= 65 as u8 && cb <= 90 as u8) {
+            cb = (cb + 32 as u8) as u8;
+        }
+        if (ca != cb) {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+/* ---- 前后缀 ---- */
+
+export func starts_with(s: str, prefix: str): bool {
+    if (len(prefix) > len(s)) {
+        return false;
+    }
+    var ps: *u8 = data(s);
+    var pp: *u8 = data(prefix);
+    var vs: []u8 = make(ps, len(s));
+    var vp: []u8 = make(pp, len(prefix));
+    var i: usize = 0usize;
+    while (i < len(prefix)) {
+        if (vs[i] != vp[i]) {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+export func ends_with(s: str, suffix: str): bool {
+    if (len(suffix) > len(s)) {
+        return false;
+    }
+    var start: usize = len(s) - len(suffix);
+    var ps: *u8 = data(s);
+    var pf: *u8 = data(suffix);
+    var vs: []u8 = make(ps, len(s));
+    var vf: []u8 = make(pf, len(suffix));
+    var i: usize = 0usize;
+    while (i < len(suffix)) {
+        if (vs[start + i] != vf[i]) {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+/* ---- 查找 ---- */
+
+export func find_byte(s: str, b: u8): ?usize {
+    var p: *u8 = data(s);
+    var v: []u8 = make(p, len(s));
+    var i: usize = 0usize;
+    while (i < len(s)) {
+        if (v[i] == b) {
+            return i;
+        }
+        i = i + 1usize;
+    }
+    return nil;
+}
+
+/* 朴素子串搜索 O(n*m)；空 needle 命中 0。 */
+export func find(s: str, needle: str): ?usize {
+    if (len(needle) == 0usize) {
+        return 0usize;
+    }
+    if (len(needle) > len(s)) {
+        return nil;
+    }
+    var p: *u8 = data(s);
+    var q: *u8 = data(needle);
+    var vs: []u8 = make(p, len(s));
+    var vn: []u8 = make(q, len(needle));
+    var last: usize = len(s) - len(needle);
+    var i: usize = 0usize;
+    while (i <= last) {
+        var j: usize = 0usize;
+        var hit: bool = true;
+        while (j < len(needle)) {
+            if (vs[i + j] != vn[j]) {
+                hit = false;
+                break;
+            }
+            j = j + 1usize;
+        }
+        if (hit) {
+            return i;
+        }
+        i = i + 1usize;
+    }
+    return nil;
+}
+
+/* ---- 裁剪 ASCII 空白 ---- */
+
+func is_space(b: u8): bool {
+    return b == 32 as u8 || b == 9 as u8 || b == 10 as u8 || b == 13 as u8;
+}
+
+export func trim_start_index(s: str): usize {
+    var p: *u8 = data(s);
+    var v: []u8 = make(p, len(s));
+    var i: usize = 0usize;
+    while (i < len(s) && is_space(v[i])) {
+        i = i + 1usize;
+    }
+    return i;
+}
+
+export func trim_end_index(s: str): usize {
+    var p: *u8 = data(s);
+    var v: []u8 = make(p, len(s));
+    var end: usize = len(s);
+    while (end > 0usize && is_space(v[end - 1usize])) {
+        end = end - 1usize;
+    }
+    return end;
+}
+
+/* 裁剪后的字节视图（`[]const u8`）。 */
+export func trim_bytes(s: str): []const u8 {
+    return slice_bytes(s, trim_start_index(s), trim_end_index(s));
+}
+
+/* ---- 测试 ---- */
+
+test "str.basic" {
+    var s: str = "hello";
+    assert(length(s) == 5usize);
+    assert(!is_empty(s));
+    assert(is_empty(""));
+    assert(byte_at(s, 1usize).! == 101 as u8);
+    assert(byte_at(s, 99usize) == nil);
+}
+
+test "str.compare" {
+    assert(equals("abc", "abc"));
+    assert(!equals("abc", "abd"));
+    assert(!equals("abc", "ab"));
+    assert(compare("abc", "abd") == cmp::Ordering::Less);
+    assert(compare("abd", "abc") == cmp::Ordering::Greater);
+    assert(compare("abc", "abc") == cmp::Ordering::Equal);
+    assert(compare("ab", "abc") == cmp::Ordering::Less);
+    assert(compare("abc", "ab") == cmp::Ordering::Greater);
+}
+
+test "str.prefix" {
+    assert(starts_with("hello", "he"));
+    assert(!starts_with("hello", "hello!"));
+    assert(ends_with("hello", "lo"));
+    assert(!ends_with("hello", "hello!"));
+}
+
+test "str.find" {
+    assert(find_byte("abc", 98 as u8).! == 1usize);
+    assert(find_byte("abc", 122 as u8) == nil);
+    assert(find("hello world", "o w").! == 4usize);
+    assert(find("hello", "").! == 0usize);
+    assert(find("hello", "xyz") == nil);
+}
+
+test "str.trim" {
+    assert(trim_start_index("  hi  ") == 2usize);
+    assert(trim_end_index("  hi  ") == 4usize);
+    assert(trim_start_index("   ") == 3usize);
+    assert(trim_end_index("   ") == 0usize);
+    var t: []const u8 = trim_bytes("  hi\t");
+    assert(len(t) == 2usize);
+    assert(t[0] == 104 as u8);
+    assert(t[1] == 105 as u8);
+}
+
+test "str.slice" {
+    var a: []const u8 = slice_bytes("hello", 1usize, 3usize);
+    assert(len(a) == 2usize);
+    assert(a[0] == 101 as u8);
+    assert(a[1] == 108 as u8);
+    assert(len(slice_bytes("hello", 0usize, 0usize)) == 0usize);
+}
+
+test "str.ignoreCase" {
+    assert(equals_ascii_ignore_case("HeLLo", "hello"));
+    assert(!equals_ascii_ignore_case("hello", "hell"));
+    assert(equals_ascii_ignore_case("", ""));
+}
