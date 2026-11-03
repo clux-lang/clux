@@ -20,3 +20,7 @@ test_all.txt
 
 # Transient commit-message files
 .git-commit-msg.tmp
+
+# C backend artifacts emitted next to std sources by `clux test std/*.cx`
+std/*.h
+std/*.c
