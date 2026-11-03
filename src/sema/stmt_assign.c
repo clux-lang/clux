@@ -820,6 +820,10 @@ static void shadow_assign_index(sema_t *sema, ast_assign_t *as,
 
   /* 元素是 ref 槽位（或含 ref 槽位）：`s[i] = b.p` 把 b 登记为载体的借源。 */
 
+  {
+    value_t *nv = sema_coerce(sema, &as->value, rhs, et, scope, false);
+    if (nv) rhs = nv;
+  }
   value_t *dst = value_make_shadow(sema->vm, et);
   if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
     char tn[64], rn[64];
@@ -1090,7 +1094,12 @@ static void shadow_assign_member(sema_t *sema, ast_assign_t *as,
   }
 
   if (token_is(as->op, "=")) {
-    /* 简单赋值：value_assign 校验字段类型可赋值性 */
+    /* 简单赋值：先走唯一转换入口（optional 包装 / 派生→基类 cast；
+       赋值不派发 __init__），再 value_assign 校验。 */
+    {
+      value_t *nv = sema_coerce(sema, &as->value, rhs, ft, scope, false);
+      if (nv) rhs = nv;
+    }
     value_t *dst = value_make_shadow(sema->vm, ft);
     if (value_is_error(sema->vm, value_assign(sema->vm, dst, rhs))) {
       char tn[64], rn[64];

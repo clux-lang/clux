@@ -48,6 +48,7 @@
 #include "parser/lexer.h"
 #include "ctfe/ctfe.h"
 #include "sema/comptime.h"
+#include "sema/coerce.h"
 #include "sema/magic.h"
 #include "vm/function.h"
 #include "vm/type_array.h"
@@ -209,15 +210,13 @@ static const type_t *infer_anon_struct(sema_t *sema, ast_construct_t *n,
       }
     } else if (fv && !value_is_error(sema->vm, fv) &&
                !value_is_type(fv, TYPE_KIND_VOID) && ft) {
-      /* 单参 `__init__` 的隐式构造：字段类型 T 有单参初始化时
-         `.S{ .f = x }` 等价于 `.S{ .f = .T{x} }`。 */
-      bool conv = false;
-      value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv), ft,
-                                             scope, &conv);
-      if (conv) fv = nv;
-      /* __init__ 实参不匹配已在 sema_magic_init_convert 诊断过：不要再报
+      /* 字段初始化走唯一转换入口（optional 包装 / 派生→基类 cast /
+         单参 `__init__` 隐式构造：`.S{ .f = x }` 等价于 `.S{ .f = .T{x} }`）。 */
+      value_t *nv = sema_coerce(sema, &slot[i], fv, ft, scope, true);
+      if (nv) fv = nv;
+      /* 转换失败已在 coerce 内部（魔法构造处）诊断过：不要再报
          "cannot initialize struct field"，也不要强行 value_assign。 */
-      if (conv && fv && value_is_error(sema->vm, fv)) {
+      if (fv && value_is_error(sema->vm, fv)) {
         fields[i].type = ft;
         continue;
       }
