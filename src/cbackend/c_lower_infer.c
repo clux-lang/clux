@@ -280,20 +280,19 @@ const type_t *infer_expr_type(lower_ctx_t *lc, ast_node_t *e) {
      退化成"未知类型 → 把 ?T 再包一层"的地方。其它节点先保持后端原有推断
      （类型对象身份尚未完全唯一化，过早扩大使用会引出 slice/optional 等
      等价但不同身份的 C 类型）。 */
-  /* 只对**后端推断最弱**的节点用 sema 记录的类型兜底。`make` / 字面量切片
-     等节点由后端自己算得更准（sema 侧可能用未登记的等价类型对象）。 */
+  /* 兜底：sema 记录的表达式类型。少数节点由后端按**结构**算得更准
+     （`make` 的切片、显式构造、函数值/闭包字面量），这些不覆盖。 */
   if (e) {
     switch (e->kind) {
-      case AST_CALL:
-      case AST_MEMBER:
-      case AST_INDEX:
-      case AST_DEREF:
-      case AST_UNWRAP:
-      case AST_IDENT:
-      case AST_SCOPE_REF:
-        if (e->resolved_type) return e->resolved_type;
+      case AST_MAKE:
+      case AST_SLICE:
+      case AST_CONSTRUCT:
+      case AST_FUNC_DEF:
+      case AST_FUNC_REF:
+      case AST_NIL:
         break;
       default:
+        if (e->resolved_type) return e->resolved_type;
         break;
     }
   }
