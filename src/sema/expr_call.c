@@ -833,41 +833,6 @@ static void wrap_optional_arg(sema_t *sema, ast_node_t **slot,
 }
 
 
-/* 隐式**指针**转换（派生→基类等）在 C 后端需要显式 cast：sema 接受转换，但
-   后端不会自动插 cast（C 里 `*Derived` 与 `*Base` 是不同结构体指针）。这里把
-   实参改写为显式 `as` 节点，后端按既有 `as` 规则生成 cast，语义不变。 */
-static void cast_arg_to(sema_t *sema, ast_node_t **slot, value_t *shadow,
-                        const type_t *pt) {
-  if (!sema || !slot || !*slot || !pt || !shadow) return;
-  if (value_is_error(sema->vm, shadow)) return;
-  const type_t *p = type_strip_quals(pt);
-  const type_t *at = value_type(shadow);
-  at = at ? type_strip_quals(at) : NULL;
-  if (!p || !at || p == at) return;
-  if (!type_is_ptr(p) || !type_is_ptr(at)) return;
-  /* 只处理"结构体指针 → 另一个结构体指针"的隐式兼容转换（派生/基类）。 */
-  const type_t *pb = type_strip_quals(ptr_type_base(p));
-  const type_t *ab = type_strip_quals(ptr_type_base(at));
-  if (!pb || !ab || pb == ab) return;
-  if (type_kind_of(pb) != TYPE_KIND_STRUCT ||
-      type_kind_of(ab) != TYPE_KIND_STRUCT)
-    return;
-  const token_t *tok = arena_token_symbol(sema->arena, "as", NULL);
-  if (!tok) return;
-  ast_node_t *arg = *slot;
-  ast_node_t *tref = sema_gen_type_ref(sema, p);
-  if (!tref) return;
-  ast_node_t *bin = ast_binary_new(sema->arena, arg->tok_begin, arg->tok_end);
-  if (!bin) return;
-  ((ast_binary_t *)bin)->op = tok;
-  ((ast_binary_t *)bin)->lhs = arg;
-  ((ast_binary_t *)bin)->rhs = tref;
-  bin->is_generated = true;
-  bin->next = arg->next;
-  arg->next = NULL;
-  *slot = bin;
-}
-
 value_t *ex_call(sema_t *sema, ast_node_t **node, sema_scope_t *scope) {
       ast_call_t *call = (ast_call_t *)*node;
 

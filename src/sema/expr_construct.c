@@ -1150,12 +1150,11 @@ value_t *ex_construct(sema_t *sema, ast_node_t **node,
           } else if (fv && !value_is_error(sema->vm, fv) &&
                      !value_is_type(fv, TYPE_KIND_VOID) && ft) {
             /* 字段类型 T 有单参 `__init__`：`.S{ .f = x }` ⇒ `.S{ .f = .T{x} }` */
-            bool conv = false;
-            value_t *nv = sema_magic_init_convert(sema, &slot[i], value_type(fv),
-                                                   ft, scope, &conv);
-            if (conv) fv = nv;
-            /* __init__ 实参不匹配已在 sema_magic_init_convert 诊断：跳过第二次报错 */
-            if (conv && fv && value_is_error(sema->vm, fv)) continue;
+            /* field init: single coercion entry (optional wrap / derived->base cast /
+               single-arg __init__) */
+            value_t *nv = sema_coerce(sema, &slot[i], fv, ft, scope, true);
+            if (nv) fv = nv;
+            if (fv && value_is_error(sema->vm, fv)) continue;
             value_t *dst = value_make_shadow(sema->vm, ft);
             if (value_is_error(sema->vm, value_assign(sema->vm, dst, fv))) {
               char tn[64], fn[64];
