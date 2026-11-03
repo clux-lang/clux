@@ -1,0 +1,306 @@
+/* std/vec.cx — `Vec[T]`：拥有型动态数组（见 std/design/03-vec.md）
+ *
+ * 设计要点：
+ *  - **显式分配器**：`alloc: *mem::Allocator`（不内嵌副本——Arena 这类带状态的
+ *    分配器靠 `self` 找回自身，复制基类会破坏 downcast）；
+ *  - **move-only**：`__init_copy__` 移动（源清空），`__dispose__` 释放缓冲；
+ *  - 元素按值连续存放；`at` / `get` / `as_slice` 返回**借用**视图，下一次
+ *    `push` / `reserve` / `clear` / `__dispose__` 之后失效；
+ *  - 确定性：越界 panic（含索引与长度）、分配失败 panic("out of memory")。
+ *
+ * 空 vec 的 `as_slice()` 不分配：用 `alloc` 指针经 `opaque` 转成占位 `*T`
+ * （len == 0，永不解引用）。
+ */
+
+import mem from "./mem";
+
+export struct Vec[T] {
+    alloc: *mem::Allocator;
+    ptr: ?*T;
+    count: usize;
+    cap: usize;
+
+    /* ---- 构造 ---- */
+
+    func new(alloc: *mem::Allocator): Vec[T] {
+        return .Vec[T]{
+            .alloc = alloc,
+            .ptr = nil,
+            .count = 0usize,
+            .cap = 0usize
+        };
+    }
+
+    func with_capacity(alloc: *mem::Allocator, n: usize): Vec[T] {
+        var v: Vec[T] = .Vec[T]{
+            .alloc = alloc,
+            .ptr = nil,
+            .count = 0usize,
+            .cap = 0usize
+        };
+        if (n > 0usize) {
+            v.reserve(n);
+        }
+        return v;
+    }
+
+    /* ---- 查询 ---- */
+
+    func length(self: *Vec[T]): usize {
+        return self.count;
+    }
+
+    func is_empty(self: *Vec[T]): bool {
+        return self.count == 0usize;
+    }
+
+    func capacity(self: *Vec[T]): usize {
+        return self.cap;
+    }
+
+    /* ---- 视图（借用；下一次修改前有效） ---- */
+
+    func as_slice(self: *Vec[T]): []T {
+        if (self.count == 0usize || self.ptr == nil) {
+            /* 长度 0 的占位视图：不解引用，所以指针值无关紧要。 */
+            var p: *T = self.alloc as opaque as *T;
+            return make(p, 0usize);
+        }
+        return make(self.ptr.!, self.count);
+    }
+
+    func as_ptr(self: *Vec[T]): *T {
+        var s: []T = self.as_slice();
+        return data(s);
+    }
+
+    /* 越界 panic。 */
+    func at(self: *Vec[T], i: usize): *T {
+        if (i >= self.count) {
+            panic("Vec.at: index out of bounds");
+        }
+        var s: []T = self.as_slice();
+        return s[i].&;
+    }
+
+    /* 越界返回 nil。 */
+    func get(self: *Vec[T], i: usize): ?*T {
+        if (i >= self.count) {
+            return nil;
+        }
+        var s: []T = self.as_slice();
+        return s[i].&;
+    }
+
+    /* ---- 容量 ---- */
+
+    /* 保证还能再放 extra 个元素；只增不减。 */
+    func reserve(self: *Vec[T], extra: usize): void {
+        var need: usize = self.count + extra;
+        if (need <= self.cap) {
+            return;
+        }
+        var want: usize = self.cap;
+        if (want < 8usize) {
+            want = 8usize;
+        }
+        while (want < need) {
+            want = want * 2usize;
+        }
+        var raw: ?opaque = self.alloc.alloc(sizeof(T) * want, alignof(T));
+        if (raw == nil) {
+            panic("out of memory");
+        }
+        var np: *T = raw.! as *T;
+        var dst: []T = make(np, want);
+        if (self.ptr != nil) {
+            var src: []T = make(self.ptr.!, self.count);
+            var i: usize = 0usize;
+            while (i < self.count) {
+                dst[i] = src[i];
+                i = i + 1usize;
+            }
+            self.alloc.free(self.ptr.! as opaque);
+        }
+        self.ptr = np;
+        self.cap = want;
+    }
+
+    /* ---- 修改 ---- */
+
+    func push(self: *Vec[T], value: T): void {
+        if (self.count == self.cap) {
+            self.reserve(1usize);
+        }
+        var dst: []T = make(self.ptr.!, self.cap);
+        dst[self.count] = value;
+        self.count = self.count + 1usize;
+    }
+
+    /* 弹出尾元素；空 → nil。 */
+    func pop(self: *Vec[T]): ?T {
+        if (self.count == 0usize) {
+            return nil;
+        }
+        var src: []T = make(self.ptr.!, self.count);
+        var out: T = src[self.count - 1usize];
+        self.count = self.count - 1usize;
+        return out;
+    }
+
+    /* 清空（元素析构由调用方负责；纯值类型无需处理）。 */
+    func clear(self: *Vec[T]): void {
+        self.count = 0usize;
+    }
+
+    func truncate(self: *Vec[T], n: usize): void {
+        if (n < self.count) {
+            self.count = n;
+        }
+    }
+
+    func swap(self: *Vec[T], a: usize, b: usize): void {
+        if (a >= self.count || b >= self.count) {
+            panic("Vec.swap: index out of bounds");
+        }
+        var s: []T = self.as_slice();
+        var tmp: T = s[a];
+        s[a] = s[b];
+        s[b] = tmp;
+    }
+
+    /* ---- 生命周期 ---- */
+
+    /* 移动：源清空（ptr 置 nil），不会 double free。 */
+    func __init_copy__(self: *Vec[T], other: *Vec[T]): void {
+        self.alloc = other.alloc;
+        self.ptr = other.ptr;
+        self.count = other.count;
+        self.cap = other.cap;
+        other.ptr = nil;
+        other.count = 0usize;
+        other.cap = 0usize;
+    }
+
+    func __dispose__(self: *Vec[T]): void {
+        if (self.ptr != nil) {
+            self.alloc.free(self.ptr.! as opaque);
+            self.ptr = nil;
+        }
+        self.count = 0usize;
+        self.cap = 0usize;
+    }
+
+    /* 深拷贝：逐元素复制（显式传分配器）。 */
+    func clone(self: *Vec[T], alloc: *mem::Allocator): Vec[T] {
+        var out: Vec[T] = Vec[T]::with_capacity(alloc, self.count);
+        var src: []T = self.as_slice();
+        var i: usize = 0usize;
+        while (i < self.count) {
+            out.push(src[i]);
+            i = i + 1usize;
+        }
+        return out;
+    }
+
+    /* ---- foreach / 下标（语言内置路径） ---- */
+
+    func __len__(self: *Vec[T]): usize {
+        return self.count;
+    }
+
+    func __index__(self: *Vec[T], i: usize): *T {
+        return self.at(i);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 测试                                                                */
+/* ------------------------------------------------------------------ */
+
+test "vec.pushPop" {
+    var h: mem::HeapAllocator = mem::HeapAllocator::new();
+    var v: Vec[i32] = Vec[i32]::new(h.&);
+    assert(v.length() == 0usize);
+    assert(v.is_empty());
+
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    assert(v.length() == 3usize);
+    assert(!v.is_empty());
+    assert(v.capacity() >= 3usize);
+
+    assert(v.at(0usize).* == 10);
+    assert(v.at(2usize).* == 30);
+    assert(v.get(3usize) == nil);
+
+    assert(v.pop().! == 30);
+    assert(v.length() == 2usize);
+    assert(v.pop().! == 20);
+    assert(v.pop().! == 10);
+    assert(v.pop() == nil);
+}
+
+test "vec.growth" {
+    var h: mem::HeapAllocator = mem::HeapAllocator::new();
+    var v: Vec[i32] = Vec[i32]::new(h.&);
+    var i: i32 = 0;
+    while (i < 100) {
+        v.push(i);
+        i = i + 1;
+    }
+    assert(v.length() == 100usize);
+    var s: []i32 = v.as_slice();
+    assert(len(s) == 100usize);
+    var j: usize = 0usize;
+    while (j < 100usize) {
+        assert(s[j] == j as i32);
+        j = j + 1usize;
+    }
+    v.clear();
+    assert(v.length() == 0usize);
+    assert(len(v.as_slice()) == 0usize);
+}
+
+test "vec.withCapacityAndReserve" {
+    var h: mem::HeapAllocator = mem::HeapAllocator::new();
+    var v: Vec[u8] = Vec[u8]::with_capacity(h.&, 16usize);
+    assert(v.capacity() >= 16usize);
+    assert(v.length() == 0usize);
+    var before: usize = v.capacity();
+    v.reserve(4usize);
+    assert(v.capacity() == before);
+    v.push(7 as u8);
+    assert(v.at(0usize).* == 7 as u8);
+}
+
+test "vec.cloneAndSwap" {
+    var h: mem::HeapAllocator = mem::HeapAllocator::new();
+    var v: Vec[i32] = Vec[i32]::new(h.&);
+    v.push(1);
+    v.push(2);
+    v.push(3);
+    var c: Vec[i32] = v.clone(h.&);
+    assert(c.length() == 3usize);
+    assert(c.at(0usize).* == 1);
+    c.swap(0usize, 2usize);
+    assert(c.at(0usize).* == 3);
+    assert(c.at(2usize).* == 1);
+    /* 原 vec 未被 clone 影响 */
+    assert(v.at(0usize).* == 1);
+}
+
+test "vec.moveOnly" {
+    var h: mem::HeapAllocator = mem::HeapAllocator::new();
+    var a: Vec[i32] = Vec[i32]::new(h.&);
+    a.push(42);
+     {
+        var b: Vec[i32] = a;
+        assert(b.length() == 1usize);
+        assert(b.at(0usize).* == 42);
+        /* b 在这里析构，释放缓冲；a 已空，不会 double free。 */
+    }
+    assert(a.length() == 0usize);
+    assert(a.capacity() == 0usize);
+}

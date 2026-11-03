@@ -2965,3 +2965,25 @@ TEST(CBackend, OptionalReturnNil) {
                      "--backend=c"}),
             0);
 }
+
+/* `x.!` 必须只求值一次操作数（旧实现把 lhs 展开成三份：`pop().!` 会调用三次）。 */
+TEST(CBackend, UnwrapEvaluatesOperandOnce) {
+  const std::string src = write_temp_file(
+      "struct S {\n"
+      "  n: i32;\n"
+      "  func next(self: *S): ?i32 { self.n = self.n + 1; return self.n; }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var s: S = .S{ .n = 0 };\n"
+      "  if (s.next().! != 1) { return 1; }\n"
+      "  if (s.n != 1) { return 2; }\n"
+      "  if (s.next().! != 2) { return 3; }\n"
+      "  if (s.n != 2) { return 4; }\n"
+      "  return 0;\n"
+      "}\n",
+      "cb_unwrap_once");
+  ASSERT_FALSE(src.empty());
+  EXPECT_EQ(run_cli({"run", std::filesystem::absolute(src).string(),
+                     "--backend=c"}),
+            0);
+}

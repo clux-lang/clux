@@ -15,9 +15,9 @@
 namespace std::vec
 
 struct Vec[T] {
-    alloc: mem.Allocator,
+    alloc: *mem::Allocator,
     ptr: *T,      /* 容量 cap 的连续存储；cap == 0 时为 nil */
-    len: usize,
+    count: usize,
     cap: usize,
 }
 ```
@@ -29,6 +29,24 @@ struct Vec[T] {
   对 move-only 元素，容器内部用 `__init_copy__` 语义搬运——实现层直接按字节搬移并视为已移出）。
 - `Vec[T]` 是 **move-only**：`__init_copy__` 移动（源清空）、`__dispose__` 释放缓冲 + 元素析构
   （对每个元素调用 `dispose(elem)`，无 `__dispose__` 的类型静默）；`clone()` 深拷贝。
+
+## 2.1 实现落点（v0.1 已实现）
+
+- **分配器是 `*mem::Allocator` 指针**，不是内嵌副本：`Arena` 这类带状态的分配器靠
+  `self` 找回自身（`self as *Arena`），复制基类会破坏 downcast；指针的生存期由
+  调用方保证（`Vec` 不拥有分配器）。
+- 字段名 `len` 改为 **`count`**：`len` 是语言内建（`len(x)` / `str.length` 同理），
+  不能作字段/函数名。
+- `Vec[T]::new(alloc)` **不分配**（`count == cap == 0`）；`as_slice()` 对空 vec 返回
+  长度 0 的视图（用 `alloc` 指针经 `opaque` 转成占位 `*T`，永不解引用），
+  因此空 vec 的 `as_slice()` 无需分配也安全。
+- 已实现：`new` / `with_capacity` / `length` / `is_empty` / `capacity` /
+  `as_slice` / `as_ptr` / `at` / `get` / `reserve` / `push` / `pop` / `clear` /
+  `truncate` / `swap` / `__init_copy__`（移动）/ `__dispose__` / `clone` /
+  `__len__` / `__index__`。
+- **未实现（后续）**：`from_slice` / `insert` / `remove`；元素级析构（当前
+  `__dispose__` 只释放缓冲，`Vec[String]` 这类需要逐元素 `dispose` 的容器要等
+  `insert/remove` 一起补上）。
 
 ## 3. 公开 API
 

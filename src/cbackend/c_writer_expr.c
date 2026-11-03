@@ -200,13 +200,12 @@ void cw_write_expr(string_t *sb, const cir_expr_t *e) {
         if (!e->bool_value) cw_put(sb, ")");
         break;
     case CIR_EXPR_UNWRAP:
-        cw_put(sb, "((");
+        /* `x.!`：操作数必须**只求值一次**（副作用：方法调用会自增/弹出、
+           自减计数……）。之前把 lhs 写三次，`v.pop().!` 会调用 pop 三次。 */
+        cw_put(sb, "({ __auto_type clux_unwrap_v = (");
         cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").ok ? (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").value : (clux_panic_none(), (");
-        cw_write_expr(sb, e->lhs);
-        cw_put(sb, ").value))");
+        cw_put(sb, "); clux_unwrap_v.ok ? clux_unwrap_v.value : "
+                   "(clux_panic_none(), clux_unwrap_v.value); })");
         break;
     case CIR_EXPR_TAKE:
         /* GNU statement expression：只求值一次左值，取 payload 后置 nil。 */

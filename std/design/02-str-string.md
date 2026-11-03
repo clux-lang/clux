@@ -23,10 +23,8 @@
 namespace std::string
 
 struct String {
-    alloc: mem.Allocator,
-    ptr: *u8,      /* 容量 cap 的字节缓冲；cap == 0 时为 nil */
-    len: usize,    /* 有效字节数（不含结尾 0） */
-    cap: usize,    /* 已分配字节数 */
+    ...std::vec.Vec[u8];   /* 缓冲 + 分配器 + count/cap 全部复用 Vec[u8] */
+    /* String 自己的东西（未来：UTF-8 缓存、标志位……）放这里 */
 }
 ```
 
@@ -35,6 +33,17 @@ struct String {
 - 编码：按 UTF-8 **字节**处理，**不做**有效性校验（与语言 `str` 一致）；大小写/排序只做 ASCII 规则。
 - `String` 是 **move-only**：`__init_copy__`（移动，源清空）、`__dispose__`（释放缓冲）；
   `clone()` 显式深拷贝（要求传分配器）。
+
+## 2.1 复用决定（实现落点）
+
+`String` **不重新实现缓冲管理**：它继承 `std::vec.Vec[u8]`
+（`...std::vec.Vec[u8];`），因此 `alloc` / `ptr` / `count` / `cap`、
+增长策略、`reserve` / `push` / `__init_copy__`（移动）/ `__dispose__`
+全部复用同一份实现。`String` 只补文本语义（`as_str` / `push_str` /
+`push_char` / UTF-8 相关）。
+
+`Vec[u8]` 的元素是字节，`__dispose__` 只释放缓冲、不需要逐元素析构，
+正好匹配 `String` 的语义（这是先做 `Vec` 再做 `String` 的原因）。
 
 ## 3. `String` 公开 API
 
