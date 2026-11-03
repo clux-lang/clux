@@ -105,6 +105,7 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
+#include "sema/init_tdz.h"
 #include "sema_stmt_internal.h"
 
 block_result_t walk_block(sema_t *sema, ast_node_t *block, sema_scope_t *scope, size_t *idx);
@@ -738,6 +739,16 @@ void sema_walk_function(sema_t *sema, sema_func_t *sf) {
      walk_block 的 block_result_t 仅用于跳过不可达语句的类型检查 */
   size_t child_idx = 0;
   (void)walk_block(sema, fn->body, sf->param_scope, &child_idx);
+
+  /* 魔法初始化方法：self 的字段在赋值前不是有效的 T（整体分配 + 置零）。
+     检查"字段 TDZ"与"return 前所有字段已赋值"。 */
+  if (sf->owner && type_kind_of(type_strip_quals(sf->owner)) == TYPE_KIND_STRUCT) {
+    strslice_t nm = fn->name;
+    bool is_init = (nm.len == 8 && memcmp(nm.ptr, "__init__", 8) == 0);
+    bool is_copy = (nm.len == 13 && memcmp(nm.ptr, "__init_copy__", 13) == 0);
+    if (is_init || is_copy)
+      sema_check_init_body(sema, sf->owner, fn);
+  }
   vm_pop_scope(sema->vm);
   vm_pop_scope(sema->vm);
 

@@ -731,8 +731,9 @@ TEST(Magic, AssignTrySugarDispatches) {
 }
 
 TEST(Magic, InitConstructsThroughInit) {
-  /* 有 `__init__` 的 struct：`.T{arg1, arg2}` = 零初始化 + `__init__(args)`；
-     字段未赋值的位置保持全 0（不是未定义）。 */
+  /* 有 `__init__` 的 struct：`.T{arg1, arg2}` = 零初始化 + `__init__(args)`。
+     `self` 的字段在赋值前**不是有效的 T**，所以 `__init__` 必须在返回前给
+     所有字段赋值（见 InitMustAssignAllFields）。 */
   clux_expect_program_ok(
       "struct V {\n"
       "  x: i32;\n"
@@ -741,15 +742,57 @@ TEST(Magic, InitConstructsThroughInit) {
       "  func __init__(self: *V, a: i32, b: i32): void {\n"
       "    self.x = a * 10;\n"
       "    self.y = b;\n"
+      "    self.z = 0;\n"
       "  }\n"
       "}\n"
       "func main(): i32 {\n"
       "  var v: V = .V{ 3, 4 };\n"
       "  if (v.x != 30 || v.y != 4) { return 1; }\n"
-      "  if (v.z != 0) { return 2; }\n"          /* 未赋值字段 = 0 */
+      "  if (v.z != 0) { return 2; }\n"
       "  return 0;\n"
       "}\n",
       "magic_init_construct");
+}
+
+/* 字段 TDZ：`__init__` / `__init_copy__` 必须在返回前给所有字段赋值。 */
+TEST(Magic, InitMustAssignAllFields) {
+  clux_expect_reject(
+      "struct V { x: i32; y: i32;\n"
+      "  func __init__(self: *V, a: i32): void { self.x = a; }\n"
+      "}\n"
+      "func main(): i32 { var v: V = .V{ 1 }; return v.x; }\n",
+      "must assign field 'y' before returning", "magic_init_missing_field");
+}
+
+/* 字段 TDZ：首次赋值前读取该字段 → 拒绝。 */
+TEST(Magic, InitRejectsReadBeforeAssign) {
+  clux_expect_reject(
+      "struct V { x: i32;\n"
+      "  func __init__(self: *V): void {\n"
+      "    var t: i32 = self.x;\n"
+      "    self.x = t;\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 { var v: V = .V{}; return v.x; }\n",
+      "is used before it is assigned", "magic_init_read_before");
+}
+
+/* 整体赋值 `self.* = v` 视为所有字段已初始化。 */
+TEST(Magic, InitWholeAssignCounts) {
+  clux_expect_program_ok(
+      "struct V { x: i32; y: i32;\n"
+      "  func __init_copy__(self: *V, other: *V): void { self.* = other.*; }\n"
+      "  func __init__(self: *V, a: i32, b: i32): void {\n"
+      "    self.x = a;\n"
+      "    self.y = b;\n"
+      "  }\n"
+      "}\n"
+      "func main(): i32 {\n"
+      "  var v: V = .V{ 1, 2 };\n"
+      "  var w: V = v;\n"
+      "  return w.x - 1;\n"
+      "}\n",
+      "magic_init_whole");
 }
 
 TEST(Magic, InitDisablesNamedConstruction) {
