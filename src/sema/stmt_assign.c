@@ -102,6 +102,7 @@
  * 独立取用（共享索引会在嵌套时污染外层，导致后续作用域错位）。
  * =========================================================================== */
 
+#include "sema/coerce.h"
 #include "sema_stmt_internal.h"
 
 static void shadow_assign_index(sema_t *sema, ast_assign_t *as, sema_scope_t *scope);
@@ -567,6 +568,13 @@ void shadow_assign(sema_t *sema, ast_assign_t *as,
     }
 
     /* 简单赋值：value_assign 校验；赋值成功 → 数据流 flow_init=true\n       （TDZ 退出由确定性赋值分析承担，VM 值层不感知）。 */
+    /* 赋值右值的唯一转换入口（optional 包装 / 派生→基类 cast；赋**不**派发
+       `__init__`，所以 allow_init = false）。 */
+    {
+      value_t *nv = sema_coerce(sema, &as->value, rhs, value_type(lhs), scope,
+                                false);
+      if (nv) rhs = nv;
+    }
     value_t *r = value_assign(sema->vm, lhs, rhs);
     if (value_is_error(sema->vm, r)) {
       char tn[64], rn[64];
