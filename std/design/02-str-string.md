@@ -74,6 +74,17 @@ func (s: *String) clone(self: *String, alloc: mem.Allocator) -> String
 **借用失效规则**（写进文档 + 测试）：`as_str`/`as_bytes`/`byte_at` 返回的视图/指针，
 在下一次 `push_*`/`reserve`/`clear`/`__dispose__` 之后失效。
 
+## 3.5 实现漂移记录（`str[lo:hi]` 的结果类型）
+
+规范与实际实现：`str[lo:hi]` 的结果是 **`[]const u8`**（见 `05-expressions.md`
+§5.9 与 `DriverM4.Str*` 用例），不是 `str`。因此 `std::str` 的视图函数当前返回
+`[]const u8`（`slice_bytes` / `trim_bytes`），只用索引的地方返回 `usize`
+（`trim_start_index` / `trim_end_index`）。
+
+**待补（语言层）**：`[]const u8 -> str` 的显式转换（或 `str_from(ptr, len)` 内建）
+一旦落地，`slice_bytes` / `trim_bytes` 就改回返回 `str`，API 与 §4 设计一致。
+在此之前不要在 std 里手工拼 `str`（没有构造路径，且 `.str{}` 只接受已有 `str`）。
+
 ## 4. `std::str` 自由函数（不分配优先）
 
 ```clux
