@@ -16,7 +16,8 @@ vec_t *create_vec(allocator_t *allocator, bool own) {
   self->allocator = allocator;
   self->capacity = CLUX_VEC_MIN_CAPACITY;
   self->size = 0;
-  self->data = allocator_alloc(allocator, sizeof(void *) * CLUX_VEC_MIN_CAPACITY);
+  self->data =
+      allocator_alloc(allocator, sizeof(void *) * CLUX_VEC_MIN_CAPACITY);
   self->own = own;
   return self;
 }

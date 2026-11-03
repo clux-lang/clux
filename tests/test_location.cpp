@@ -21,7 +21,7 @@ static location_t make_loc(const char *src, size_t begin_off, size_t end_off) {
 TEST(LocationTest, GetExtractsSubstring) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = 42;";
-  location_t loc = make_loc(src, 0, 3);  // "let"
+  location_t loc = make_loc(src, 0, 3); // "let"
   char *s = location_get(&loc, a);
   EXPECT_STREQ(s, "let");
   allocator_free(a, (void **)&s);
@@ -41,7 +41,7 @@ TEST(LocationTest, GetFullSource) {
 TEST(LocationTest, GetEmptyRange) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "abc";
-  location_t loc = make_loc(src, 1, 1);  // 空区间
+  location_t loc = make_loc(src, 1, 1); // 空区间
   char *s = location_get(&loc, a);
   EXPECT_STREQ(s, "");
   allocator_free(a, (void **)&s);
@@ -51,7 +51,7 @@ TEST(LocationTest, GetEmptyRange) {
 TEST(LocationTest, GetSingleChar) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "x + y";
-  location_t loc = make_loc(src, 2, 3);  // "+"
+  location_t loc = make_loc(src, 2, 3); // "+"
   char *s = location_get(&loc, a);
   EXPECT_STREQ(s, "+");
   allocator_free(a, (void **)&s);
@@ -61,7 +61,7 @@ TEST(LocationTest, GetSingleChar) {
 TEST(LocationTest, GetMidSlice) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "foo bar baz";
-  location_t loc = make_loc(src, 4, 7);  // "bar"
+  location_t loc = make_loc(src, 4, 7); // "bar"
   char *s = location_get(&loc, a);
   EXPECT_STREQ(s, "bar");
   allocator_free(a, (void **)&s);
@@ -70,7 +70,7 @@ TEST(LocationTest, GetMidSlice) {
 
 TEST(LocationTest, IsMatchesExactString) {
   const char *src = "fn main()";
-  location_t loc = make_loc(src, 0, 2);  // "fn"
+  location_t loc = make_loc(src, 0, 2); // "fn"
   EXPECT_TRUE(location_is(&loc, "fn"));
 }
 

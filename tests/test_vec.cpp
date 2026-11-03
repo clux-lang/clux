@@ -131,7 +131,7 @@ TEST(VecTest, SetSamePointerNoop) {
   allocator_t *a = create_allocator(malloc, free);
   vec_t *v = create_vec(a, false);
   vec_push(v, (void *)1);
-  vec_set(v, 0, (void *)1);  // 不应释放
+  vec_set(v, 0, (void *)1); // 不应释放
   EXPECT_EQ(vec_get(v, 0), (void *)1);
   delete_vec(&v);
   delete_allocator(&a);
@@ -165,7 +165,8 @@ TEST(VecTest, OwnModeSetFreesOld) {
 TEST(VecTest, ReserveDoesNotShrinkSize) {
   allocator_t *a = create_allocator(malloc, free);
   vec_t *v = create_vec(a, false);
-  for (int i = 0; i < 10; i++) vec_push(v, (void *)(intptr_t)(i + 1));
+  for (int i = 0; i < 10; i++)
+    vec_push(v, (void *)(intptr_t)(i + 1));
   EXPECT_EQ(vec_get_size(v), 10u);
   vec_reserve(v, 5);
   EXPECT_EQ(vec_get_size(v), 10u);
@@ -188,7 +189,8 @@ TEST(VecTest, ResizeGrowZeroFills) {
   vec_t *v = create_vec(a, false);
   vec_resize(v, 5);
   EXPECT_EQ(vec_get_size(v), 5u);
-  for (size_t i = 0; i < 5; i++) EXPECT_EQ(vec_get(v, i), nullptr);
+  for (size_t i = 0; i < 5; i++)
+    EXPECT_EQ(vec_get(v, i), nullptr);
   delete_vec(&v);
   delete_allocator(&a);
 }

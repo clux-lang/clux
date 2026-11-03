@@ -8,8 +8,10 @@ struct _error_t {
   location_t loc;
   allocator_t *allocator;
 };
-error_t *
-create_error(allocator_t *allocator, const location_t *loc, const char *fmt, ...) {
+error_t *create_error(allocator_t *allocator,
+                      const location_t *loc,
+                      const char *fmt,
+                      ...) {
   va_list args;
   va_start(args, fmt);
   size_t len = vsnprintf(NULL, 0, fmt, args);

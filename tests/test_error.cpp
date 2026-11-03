@@ -55,8 +55,8 @@ TEST(ErrorTest, CreateWithLongMessage) {
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
   // 构造长消息验证 vsnprintf 两遍调用正确
-  error_t *err = create_error(a, &loc, "error: %s failed at %s:%u",
-                              "parse", "file.clux", 42u);
+  error_t *err = create_error(
+      a, &loc, "error: %s failed at %s:%u", "parse", "file.clux", 42u);
   EXPECT_STREQ(error_get_message(err), "error: parse failed at file.clux:42");
   delete_error(&err);
   delete_allocator(&a);
