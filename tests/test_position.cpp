@@ -5,7 +5,6 @@
 
 static position_t make_pos(const char *src) {
   position_t p;
-  p.filename = "test.clux";
   p.offset = src;
   p.line = 1;
   p.column = 1;

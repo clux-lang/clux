@@ -28,11 +28,9 @@ static void reset_counts(void) {
 static location_t make_loc(const char *src, size_t begin_off, size_t end_off) {
   location_t loc;
   loc.filename = "test.clux";
-  loc.begin.filename = "test.clux";
   loc.begin.offset = src + begin_off;
   loc.begin.line = 1;
   loc.begin.column = (uint32_t)(begin_off + 1);
-  loc.end.filename = "test.clux";
   loc.end.offset = src + end_off;
   loc.end.line = 1;
   loc.end.column = (uint32_t)(end_off + 1);

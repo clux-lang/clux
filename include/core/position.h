@@ -6,7 +6,6 @@
 extern "C" {
 #endif
 struct _position_t {
-  const char *filename;
   const char *offset;
   uint32_t column;
   uint32_t line;

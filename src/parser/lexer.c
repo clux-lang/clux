@@ -6,6 +6,11 @@
 #include <unicode/utf8.h>
 #include <unicode/uchar.h>
 
+struct _token_t {
+  token_kind_t kind;
+  location_t loc;
+  allocator_t *allocator;
+};
 /* 从 position 读取一个 UTF-8 码点但不推进 position，返回码点或 -1（EOF/非法）。 */
 static UChar32 peek_codepoint(const position_t *pos) {
   if (*pos->offset == '\0') return -1;
@@ -80,56 +85,75 @@ static UChar32 parse_escape(position_t *pos) {
   return result;
 }
 
+token_t *
+create_token(allocator_t *allocator, token_kind_t kind, location_t loc) {
+  token_t *self = allocator_alloc(allocator, sizeof(struct _token_t));
+  self->kind = kind;
+  self->loc = loc;
+  self->allocator = allocator;
+  return self;
+}
+void delete_token(token_t **token) {
+  if (!token || !*token) {
+    return;
+  }
+  token_t *self = *token;
+  allocator_free(self->allocator, (void **)token);
+}
+token_kind_t token_get_kind(token_t *self) { return self->kind; }
+const location_t *token_get_location(token_t *self) { return &self->loc; }
+
 token_t *lexer_read_character(allocator_t *allocator,
                               position_t *position,
                               const char *filename) {
   if (*position->offset != '\'') {
     return NULL;
   }
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
+  token_kind_t kind = CLUX_TOKEN_CHARACTER;
   position_next(&current); /* 越过开头的 '\'' */
 
   /* 解析字符内容：普通 UTF-8 字符或转义序列 */
   if (*current.offset == '\\') {
     position_next(&current); /* 越过反斜杠 */
     if (parse_escape(&current) < 0) {
-      goto onerror;
+      kind = CLUX_TOKEN_ERROR;
+      goto done;
     }
   } else if (*current.offset == '\'') {
     /* 空字符字面量 '' 非法 */
-    goto onerror;
+    kind = CLUX_TOKEN_ERROR;
+    goto done;
   } else if (*current.offset == '\0') {
     /* 未闭合 */
-    goto onerror;
+    kind = CLUX_TOKEN_ERROR;
+    goto done;
   } else {
     /* 普通UTF-8字符，步进一个码点 */
     if (!position_next(&current)) {
-      goto onerror;
+      kind = CLUX_TOKEN_ERROR;
+      goto done;
     }
   }
 
   /* 期望闭合的 '\'' */
   if (*current.offset != '\'') {
-    goto onerror;
+    kind = CLUX_TOKEN_ERROR;
+    goto done;
   }
   position_next(&current); /* 越过闭合 '\'' */
 
-  token->kind = CLUX_TOKEN_CHARACTER;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+done: {
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, kind, loc);
   *position = current;
   return token;
-
-onerror:
-  token->kind = CLUX_TOKEN_ERROR;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
-  *position = current;
-  return token;
+}
 }
 
 /* ---- string ----
@@ -139,36 +163,41 @@ token_t *lexer_read_string(allocator_t *allocator,
                            position_t *position,
                            const char *filename) {
   if (*position->offset != '"') return NULL;
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
+  token_kind_t kind = CLUX_TOKEN_STRING;
   position_next(&current); /* 越过开头的 '"' */
 
   while (1) {
     char c = *current.offset;
-    if (c == '\0') goto onerror; /* 未闭合 */
-    if (c == '"') break;         /* 闭合 */
+    if (c == '\0') {
+      kind = CLUX_TOKEN_ERROR; /* 未闭合 */
+      break;
+    }
+    if (c == '"') {
+      position_next(&current); /* 越过闭合 '"' */
+      break;
+    }
     if (c == '\\') {
       position_next(&current); /* 越过反斜杠 */
-      if (parse_escape(&current) < 0) goto onerror;
+      if (parse_escape(&current) < 0) {
+        kind = CLUX_TOKEN_ERROR;
+        break;
+      }
     } else {
-      if (!position_next(&current)) goto onerror;
+      if (!position_next(&current)) {
+        kind = CLUX_TOKEN_ERROR;
+        break;
+      }
     }
   }
-  position_next(&current); /* 越过闭合 '"' */
 
-  token->kind = CLUX_TOKEN_STRING;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
-  *position = current;
-  return token;
-
-onerror:
-  token->kind = CLUX_TOKEN_ERROR;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, kind, loc);
   *position = current;
   return token;
 }
@@ -192,7 +221,6 @@ token_t *lexer_read_identifier(allocator_t *allocator,
   UChar32 c = peek_codepoint(position);
   /* u_isIDStart 遵循 UAX#31 不含下划线，C 语言传统允许 _ 开头 */
   if (c < 0 || !(c == '_' || u_isIDStart(c))) return NULL;
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
   position_next(&current); /* 消费首字符 */
@@ -202,16 +230,19 @@ token_t *lexer_read_identifier(allocator_t *allocator,
     if (c < 0 || !u_isIDPart(c)) break;
     position_next(&current);
   }
-  token->kind = CLUX_TOKEN_IDENTIFIER;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_kind_t kind = CLUX_TOKEN_IDENTIFIER;
   for (size_t idx = 0; keywords[idx] != NULL; idx++) {
-    if (location_is(&token->loc, keywords[idx])) {
-      token->kind = CLUX_TOKEN_KEYWORD;
+    if (location_is(&loc, keywords[idx])) {
+      kind = CLUX_TOKEN_KEYWORD;
       break;
     }
   }
+  token_t *token = create_token(allocator, kind, loc);
   *position = current;
   return token;
 }
@@ -223,7 +254,6 @@ token_t *lexer_read_whitespace(allocator_t *allocator,
                                const char *filename) {
   UChar32 c = peek_codepoint(position);
   if (c < 0 || !u_isWhitespace(c)) return NULL;
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
 
@@ -233,10 +263,12 @@ token_t *lexer_read_whitespace(allocator_t *allocator,
     position_next(&current);
   }
 
-  token->kind = CLUX_TOKEN_WHITESPACE;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, CLUX_TOKEN_WHITESPACE, loc);
   *position = current;
   return token;
 }
@@ -248,7 +280,6 @@ token_t *lexer_read_comment(allocator_t *allocator,
                             position_t *position,
                             const char *filename) {
   if (position->offset[0] != '/' || position->offset[1] != '/') return NULL;
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
   position_next(&current); /* 第一个 '/' */
@@ -259,10 +290,12 @@ token_t *lexer_read_comment(allocator_t *allocator,
   }
   /* 不消费换行，留给下一个 token */
 
-  token->kind = CLUX_TOKEN_COMMENT;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, CLUX_TOKEN_COMMENT, loc);
   *position = current;
   return token;
 }
@@ -274,14 +307,17 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
                                       position_t *position,
                                       const char *filename) {
   if (position->offset[0] != '/' || position->offset[1] != '*') return NULL;
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
+  token_kind_t kind = CLUX_TOKEN_MULTILINE_COMMENT;
   position_next(&current); /* '/' */
   position_next(&current); /* '*' */
 
   while (1) {
-    if (*current.offset == '\0') goto onerror; /* 未闭合 */
+    if (*current.offset == '\0') {
+      kind = CLUX_TOKEN_ERROR; /* 未闭合 */
+      break;
+    }
     if (current.offset[0] == '*' && current.offset[1] == '/') {
       position_next(&current); /* '*' */
       position_next(&current); /* '/' */
@@ -290,18 +326,12 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
     position_next(&current);
   }
 
-  token->kind = CLUX_TOKEN_MULTILINE_COMMENT;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
-  *position = current;
-  return token;
-
-onerror:
-  token->kind = CLUX_TOKEN_ERROR;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, kind, loc);
   *position = current;
   return token;
 }
@@ -323,9 +353,9 @@ token_t *lexer_read_numeric(allocator_t *allocator,
   if (c0 == '.' && !(position->offset[1] >= '0' && position->offset[1] <= '9'))
     return NULL;
 
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
   position_t begin = *position;
   position_t current = *position;
+  token_kind_t kind = CLUX_TOKEN_NUMERIC;
 
   if (c0 == '0' && (position->offset[1] == 'x' || position->offset[1] == 'X')) {
     /* 十六进制 */
@@ -342,7 +372,7 @@ token_t *lexer_read_numeric(allocator_t *allocator,
         break;
       }
     }
-    if (digits == 0) goto onerror; /* 0x 后无数字 */
+    if (digits == 0) kind = CLUX_TOKEN_ERROR; /* 0x 后无数字 */
   } else if (c0 == '0' && position->offset[1] >= '0' &&
              position->offset[1] <= '7') {
     /* 八进制 */
@@ -380,18 +410,12 @@ token_t *lexer_read_numeric(allocator_t *allocator,
     }
   }
 
-  token->kind = CLUX_TOKEN_NUMERIC;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
-  *position = current;
-  return token;
-
-onerror:
-  token->kind = CLUX_TOKEN_ERROR;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, kind, loc);
   *position = current;
   return token;
 }
@@ -421,11 +445,12 @@ token_t *lexer_read_symbol(allocator_t *allocator,
   if (symbols[idx] == NULL) {
     return NULL;
   }
-  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
-  token->kind = CLUX_TOKEN_SYMBOL;
-  token->loc.filename = filename;
-  token->loc.begin = begin;
-  token->loc.end = current;
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, CLUX_TOKEN_SYMBOL, loc);
   *position = current;
   return token;
 }
