@@ -302,3 +302,106 @@ TEST(ParserTest, NoLeakWithLexerError) {
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);
 }
+
+/* ---- parser_skip_trivia ---- */
+
+TEST(ParserTest, SkipTriviaSkipsWhitespace) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "   x");
+  parser_skip_trivia(p);
+  token_t *tok = parser_peek_token(p);
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_IDENTIFIER);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "x"));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaSkipsSingleLineComment) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "// note\nx");
+  parser_skip_trivia(p);
+  token_t *tok = parser_peek_token(p);
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "x"));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaSkipsMultilineComment) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "/* a\nb */x");
+  parser_skip_trivia(p);
+  token_t *tok = parser_peek_token(p);
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "x"));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaSkipsMixedTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", " \t// c\n /* m */  \nx");
+  parser_skip_trivia(p);
+  token_t *tok = parser_peek_token(p);
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "x"));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaStopsAtNonTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  x  y");
+  parser_skip_trivia(p);
+  EXPECT_EQ(parser_get_position(p), 1u); /* 只跳过第一个空白 */
+  parser_next(p);
+  parser_skip_trivia(p);
+  token_t *tok = parser_peek_token(p);
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "y"));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaOnOnlyTriviaReachesEnd) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  // c\n /* m */ ");
+  parser_skip_trivia(p);
+  EXPECT_EQ(parser_peek_token(p), nullptr);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaOnEmptyStreamIsNoop) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "");
+  parser_skip_trivia(p);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  EXPECT_EQ(parser_peek_token(p), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaAtEndIsNoop) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "x");
+  parser_next(p);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  parser_skip_trivia(p);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, SkipTriviaDoesNotSkipTokens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "x");
+  parser_skip_trivia(p);
+  /* 有效 token 不被跳过 */
+  EXPECT_EQ(parser_get_position(p), 0u);
+  EXPECT_NE(parser_peek_token(p), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}

@@ -112,6 +112,18 @@ token_t *parser_peek_token(parser_t *self) {
   }
   return vec_get(self->tokens, self->position);
 }
+void parser_skip_trivia(parser_t *self) {
+  size_t size = vec_get_size(self->tokens);
+  while (self->position < size) {
+    token_t *token = vec_get(self->tokens, self->position);
+    token_kind_t kind = token_get_kind(token);
+    if (kind != CLUX_TOKEN_WHITESPACE && kind != CLUX_TOKEN_COMMENT &&
+        kind != CLUX_TOKEN_MULTILINE_COMMENT) {
+      break;
+    }
+    self->position++;
+  }
+}
 size_t parser_get_position(parser_t *self) { return self->position; }
 bool parser_set_position(parser_t *self, size_t size) {
   if (size > vec_get_size(self->tokens)) {

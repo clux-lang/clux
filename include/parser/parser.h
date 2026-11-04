@@ -16,6 +16,8 @@ vec_t *parser_get_tokens(parser_t *self);
 vec_t *parser_get_error(parser_t *self);
 void parser_next(parser_t *self);
 token_t *parser_peek_token(parser_t *self);
+/* 跳过连续的空白与注释（单行/多行），停在第一个有效 token 上。 */
+void parser_skip_trivia(parser_t *self);
 size_t parser_get_position(parser_t *self);
 bool parser_set_position(parser_t *self, size_t size);
 void parser_push_error(parser_t *self, clux_error_t *error);
