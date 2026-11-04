@@ -37,13 +37,24 @@ static location_t make_loc(const char *src, size_t begin_off, size_t end_off) {
   return loc;
 }
 
+/* 构造带 parent/location 的节点（create_node 只接收 kind）。 */
+static node_t *make_node(allocator_t *a,
+                         node_kind_t kind,
+                         node_t *parent,
+                         const location_t *loc) {
+  node_t *node = create_node(a, kind);
+  node_set_parent(node, parent);
+  node_set_location(node, loc);
+  return node;
+}
+
 /* ---- 基本生命周期 ---- */
 
 TEST(NodeTest, CreateAndDelete) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "1";
   location_t loc = make_loc(src, 0, 1);
-  node_t *n = create_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, loc);
+  node_t *n = make_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, &loc);
   ASSERT_NE(n, nullptr);
   EXPECT_EQ(node_get_kind(n), CLUX_NODE_LITERAL_NUMERIC);
   EXPECT_EQ(node_get_parent(n), nullptr);
@@ -77,7 +88,7 @@ TEST(NodeTest, GetKind) {
       CLUX_NODE_LITERAL_IDENTIFIER,
   };
   for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-    node_t *n = create_node(a, kinds[i], NULL, loc);
+    node_t *n = make_node(a, kinds[i], NULL, &loc);
     EXPECT_EQ(node_get_kind(n), kinds[i]);
     delete_node(&n);
   }
@@ -88,7 +99,7 @@ TEST(NodeTest, GetLocation) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = 42;";
   location_t loc = make_loc(src, 8, 10); /* "42" */
-  node_t *n = create_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, loc);
+  node_t *n = make_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, &loc);
   const location_t *got = node_get_location(n);
   ASSERT_NE(got, nullptr);
   EXPECT_EQ(got->begin.offset, src + 8);
@@ -104,8 +115,8 @@ TEST(NodeTest, GetParent) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
-  node_t *child = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, loc);
+  node_t *parent = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *child = make_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, &loc);
   EXPECT_EQ(node_get_parent(child), parent);
   EXPECT_EQ(node_get_parent(parent), nullptr);
   /* 先删子再删父，避免父的 children 持有已删子指针 */
@@ -120,7 +131,7 @@ TEST(NodeTest, ChildrenInitiallyEmpty) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *n = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
+  node_t *n = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
   vec_t *children = node_get_children(n);
   ASSERT_NE(children, nullptr);
   EXPECT_EQ(vec_get_size(children), 0u);
@@ -132,8 +143,8 @@ TEST(NodeTest, AddChildViaChildrenVec) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
-  node_t *child = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, loc);
+  node_t *parent = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *child = make_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, &loc);
   vec_push(node_get_children(parent), child);
   EXPECT_EQ(vec_get_size(node_get_children(parent)), 1u);
   EXPECT_EQ(vec_get(node_get_children(parent), 0), child);
@@ -145,10 +156,10 @@ TEST(NodeTest, MultipleChildren) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "abc";
   location_t loc = make_loc(src, 0, 1);
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
-  node_t *c1 = create_node(a, CLUX_NODE_LITERAL_NUMERIC, parent, loc);
-  node_t *c2 = create_node(a, CLUX_NODE_LITERAL_STRING, parent, loc);
-  node_t *c3 = create_node(a, CLUX_NODE_LITERAL_BOOLEAN, parent, loc);
+  node_t *parent = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *c1 = make_node(a, CLUX_NODE_LITERAL_NUMERIC, parent, &loc);
+  node_t *c2 = make_node(a, CLUX_NODE_LITERAL_STRING, parent, &loc);
+  node_t *c3 = make_node(a, CLUX_NODE_LITERAL_BOOLEAN, parent, &loc);
   vec_push(node_get_children(parent), c1);
   vec_push(node_get_children(parent), c2);
   vec_push(node_get_children(parent), c3);
@@ -167,7 +178,7 @@ TEST(NodeTest, NoLeakSingleNode) {
   allocator_t *a = create_allocator(counting_alloc, counting_free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *n = create_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, loc);
+  node_t *n = make_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, &loc);
   delete_node(&n);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);
@@ -178,8 +189,8 @@ TEST(NodeTest, NoLeakParentWithChild) {
   allocator_t *a = create_allocator(counting_alloc, counting_free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
-  node_t *child = create_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, loc);
+  node_t *parent = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *child = make_node(a, CLUX_NODE_LITERAL_IDENTIFIER, parent, &loc);
   vec_push(node_get_children(parent), child);
   delete_node(&parent);
   delete_allocator(&a);
@@ -192,9 +203,9 @@ TEST(NodeTest, NoLeakDeepNested) {
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
   /* root -> mid -> leaf */
-  node_t *root = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
-  node_t *mid = create_node(a, CLUX_NODE_STATEMENT_EXPRESSION, root, loc);
-  node_t *leaf = create_node(a, CLUX_NODE_LITERAL_NUMERIC, mid, loc);
+  node_t *root = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *mid = make_node(a, CLUX_NODE_STATEMENT_EXPRESSION, root, &loc);
+  node_t *leaf = make_node(a, CLUX_NODE_LITERAL_NUMERIC, mid, &loc);
   vec_push(node_get_children(root), mid);
   vec_push(node_get_children(mid), leaf);
   delete_node(&root);
@@ -207,15 +218,83 @@ TEST(NodeTest, NoLeakWideTree) {
   allocator_t *a = create_allocator(counting_alloc, counting_free);
   const char *src = "x";
   location_t loc = make_loc(src, 0, 1);
-  node_t *root = create_node(a, CLUX_NODE_PROGRAM, NULL, loc);
+  node_t *root = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
   for (int i = 0; i < 10; i++) {
-    node_t *child = create_node(a, CLUX_NODE_LITERAL_NUMERIC, root, loc);
+    node_t *child = make_node(a, CLUX_NODE_LITERAL_NUMERIC, root, &loc);
     /* 每个子节点再挂一个孙节点 */
-    node_t *grandchild = create_node(a, CLUX_NODE_LITERAL_STRING, child, loc);
+    node_t *grandchild = make_node(a, CLUX_NODE_LITERAL_STRING, child, &loc);
     vec_push(node_get_children(child), grandchild);
     vec_push(node_get_children(root), child);
   }
   delete_node(&root);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);
+}
+
+/* ---- setter API ---- */
+
+TEST(NodeTest, SetParent) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "x";
+  location_t loc = make_loc(src, 0, 1);
+  node_t *parent = make_node(a, CLUX_NODE_PROGRAM, NULL, &loc);
+  node_t *child = make_node(a, CLUX_NODE_LITERAL_NUMERIC, NULL, &loc);
+  EXPECT_EQ(node_get_parent(child), nullptr);
+  node_set_parent(child, parent);
+  EXPECT_EQ(node_get_parent(child), parent);
+  /* 可以改回 NULL */
+  node_set_parent(child, NULL);
+  EXPECT_EQ(node_get_parent(child), nullptr);
+  delete_node(&child);
+  delete_node(&parent);
+  delete_allocator(&a);
+}
+
+TEST(NodeTest, SetLocation) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "abcdef";
+  node_t *n = create_node(a, CLUX_NODE_LITERAL_NUMERIC);
+  /* 新建节点 location 清零 */
+  EXPECT_EQ(node_get_location(n)->begin.offset, nullptr);
+  EXPECT_EQ(node_get_location(n)->end.offset, nullptr);
+  location_t loc = make_loc(src, 1, 4);
+  node_set_location(n, &loc);
+  EXPECT_EQ(node_get_location(n)->begin.offset, src + 1);
+  EXPECT_EQ(node_get_location(n)->end.offset, src + 4);
+  EXPECT_EQ(node_get_location(n)->begin.column, 2u);
+  EXPECT_STREQ(node_get_location(n)->filename, "test.clux");
+  /* 可以覆盖 */
+  location_t loc2 = make_loc(src, 0, 6);
+  node_set_location(n, &loc2);
+  EXPECT_EQ(node_get_location(n)->begin.offset, src);
+  EXPECT_EQ(node_get_location(n)->end.offset, src + 6);
+  delete_node(&n);
+  delete_allocator(&a);
+}
+
+TEST(NodeTest, CreateNodeDefaults) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *n = create_node(a, CLUX_NODE_PROGRAM);
+  ASSERT_NE(n, nullptr);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_PROGRAM);
+  EXPECT_EQ(node_get_parent(n), nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(n)), 0u);
+  delete_node(&n);
+  delete_allocator(&a);
+}
+
+TEST(NodeTest, NewSymbolKind) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *n = create_node(a, CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_SYMBOL);
+  delete_node(&n);
+  delete_allocator(&a);
+}
+
+TEST(NodeTest, NewAssignKind) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *n = create_node(a, CLUX_NODE_EXPRESSION_ASSIGN);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPRESSION_ASSIGN);
+  delete_node(&n);
+  delete_allocator(&a);
 }

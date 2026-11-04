@@ -330,7 +330,8 @@ TEST(LiteralNumericTest, AttachesParent) {
       .begin = {.offset = src, .line = 1, .column = 1},
       .end = {.offset = src, .line = 1, .column = 1},
   };
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, ploc);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_set_location(parent, &ploc);
   node_t *node = parser_read_literal_numeric(a, p, parent);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_parent(node), parent);
@@ -495,7 +496,8 @@ TEST(LiteralNilTest, AttachesParent) {
       .begin = {.offset = "nil", .line = 1, .column = 1},
       .end = {.offset = "nil", .line = 1, .column = 1},
   };
-  node_t *parent = create_node(a, CLUX_NODE_PROGRAM, NULL, ploc);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_set_location(parent, &ploc);
   node_t *node = parser_read_literal_nil(a, p, parent);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_parent(node), parent);
@@ -511,6 +513,118 @@ TEST(LiteralNilTest, NilIsKeywordToken) {
   token_t *tok = parser_peek_token(p);
   ASSERT_NE(tok, nullptr);
   EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parser_read_literal 聚合入口 ---- */
+
+TEST(LiteralDispatchTest, DispatchesNil) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "nil");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NIL);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesUndefined) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "undefined");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_UNDEFINED);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesBoolean) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "true");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_BOOLEAN);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesCharacter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "'a'");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_CHARACTER);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesString) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "\"s\"");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_STRING);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "foo");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, DispatchesNumeric) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "42i32");
+  node_t *node = parser_read_literal(a, p, NULL);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(parser_get_position(p), 2u); /* 数字 + 后缀 */
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, ReturnsNullOnNonLiteral) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "var");
+  EXPECT_EQ(parser_read_literal(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "");
+  EXPECT_EQ(parser_read_literal(a, p, NULL), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralDispatchTest, AttachesParent) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "42";
+  parser_t *p = create_parser(a, "test.clux", src);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_t *node = parser_read_literal(a, p, parent);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_parent(node), parent);
+  delete_node(&node);
+  delete_node(&parent);
   delete_parser(&p);
   delete_allocator(&a);
 }

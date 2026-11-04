@@ -2,6 +2,7 @@
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include <string.h>
 struct _node_t {
   allocator_t *allocator;
   node_kind_t kind;
@@ -9,15 +10,12 @@ struct _node_t {
   vec_t *children;
   location_t loc;
 };
-node_t *create_node(allocator_t *allocator,
-                    node_kind_t kind,
-                    node_t *parent,
-                    location_t loc) {
+node_t *create_node(allocator_t *allocator, node_kind_t kind) {
   node_t *self = allocator_alloc(allocator, sizeof(struct _node_t));
+  memset(&self->loc, 0, sizeof(location_t));
   self->allocator = allocator;
   self->kind = kind;
-  self->loc = loc;
-  self->parent = parent;
+  self->parent = NULL;
   self->children = create_vec(allocator);
   return self;
 }
@@ -42,3 +40,7 @@ node_kind_t node_get_kind(node_t *self) { return self->kind; }
 vec_t *node_get_children(node_t *self) { return self->children; }
 const location_t *node_get_location(node_t *self) { return &self->loc; }
 node_t *node_get_parent(node_t *self) { return self->parent; }
+void node_set_parent(node_t *self, node_t *parent) { self->parent = parent; }
+void node_set_location(node_t *self, const location_t *loc) {
+  self->loc = *loc;
+}

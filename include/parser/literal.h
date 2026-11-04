@@ -33,6 +33,8 @@ node_t *parser_read_literal_boolean(allocator_t *allocator,
 node_t *parser_read_literal_identifier(allocator_t *allocator,
                                        parser_t *parser,
                                        node_t *parent);
+node_t *
+parser_read_literal(allocator_t *allocator, parser_t *parser, node_t *parent);
 #ifdef __cplusplus
 }
 #endif

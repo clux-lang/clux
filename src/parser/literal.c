@@ -16,7 +16,10 @@ static node_t *read_simple(allocator_t *allocator,
   }
   location_t loc = *token_get_location(token);
   parser_next(parser);
-  return create_node(allocator, node_kind, parent, loc);
+  node_t *node = create_node(allocator, node_kind);
+  node_set_parent(node, parent);
+  node_set_location(node, &loc);
+  return node;
 }
 
 /* 匹配当前 token 为指定 kind 且文本等于 src。 */
@@ -32,7 +35,10 @@ static node_t *read_simple_text(allocator_t *allocator,
   }
   location_t loc = *token_get_location(token);
   parser_next(parser);
-  return create_node(allocator, node_kind, parent, loc);
+  node_t *node = create_node(allocator, node_kind);
+  node_set_parent(node, parent);
+  node_set_location(node, &loc);
+  return node;
 }
 
 node_t *parser_read_literal_nil(allocator_t *allocator,
@@ -146,5 +152,42 @@ node_t *parser_read_literal_numeric(allocator_t *allocator,
     loc.end = token_get_location(suffix)->end;
     parser_next(parser);
   }
-  return create_node(allocator, CLUX_NODE_LITERAL_NUMERIC, parent, loc);
+  node_t *node = create_node(allocator, CLUX_NODE_LITERAL_NUMERIC);
+  node_set_parent(node, parent);
+  node_set_location(node, &loc);
+  return node;
+}
+
+node_t *
+parser_read_literal(allocator_t *allocator, parser_t *parser, node_t *parent) {
+  node_t *node = NULL;
+  node = parser_read_literal_nil(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_undefined(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_boolean(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_character(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_string(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_identifier(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_numeric(allocator, parser, parent);
+  if (node) {
+    return node;
+  }
+  return NULL;
 }
