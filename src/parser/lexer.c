@@ -1,6 +1,8 @@
 #include "parser/lexer.h"
 #include "core/allocator.h"
+#include "core/location.h"
 #include "core/position.h"
+#include <string.h>
 #include <unicode/utf8.h>
 #include <unicode/uchar.h>
 
@@ -171,6 +173,16 @@ onerror:
   return token;
 }
 
+static const char *keywords[] = {
+    "var",    "func",    "import", "export",   "if",        "else",
+    "for",    "foreach", "while",  "do",       "break",     "continue",
+    "return", "using",   "const",  "volatile", "bool",      "i8",
+    "i16",    "i32",     "i64",    "u8",       "u16",       "u32",
+    "u64",    "isize",   "usize",  "f32",      "f64",       "str",
+    "struct", "union",   "cunion", "enum",     "undefined", "none",
+    NULL,
+};
+
 /* ---- identifier ----
    ID_Start 开头，后跟零或多个 ID_Continue 字符（Unicode 属性）。
    非标识符开头返回 NULL。 */
@@ -190,11 +202,16 @@ token_t *lexer_read_identifier(allocator_t *allocator,
     if (c < 0 || !u_isIDPart(c)) break;
     position_next(&current);
   }
-
   token->kind = CLUX_TOKEN_IDENTIFIER;
   token->loc.filename = filename;
   token->loc.begin = begin;
   token->loc.end = current;
+  for (size_t idx = 0; keywords[idx] != NULL; idx++) {
+    if (location_is(&token->loc, keywords[idx])) {
+      token->kind = CLUX_TOKEN_KEYWORD;
+      break;
+    }
+  }
   *position = current;
   return token;
 }
@@ -372,6 +389,40 @@ token_t *lexer_read_numeric(allocator_t *allocator,
 
 onerror:
   token->kind = CLUX_TOKEN_ERROR;
+  token->loc.filename = filename;
+  token->loc.begin = begin;
+  token->loc.end = current;
+  *position = current;
+  return token;
+}
+
+static const char *symbols[] = {
+    "...", "||=", "&&=", ">>=", "<<=", "==", "!=", ">=", "<=", ">>",
+    "<<",  "&&",  "||",  ".?",  ".!",  "+=", "-=", "/=", "*=", "%=",
+    "&=",  "|=",  "~=",  "^=",  "->",  "[[", "]]", "+",  "-",  "*",
+    "/",   "%",   "&",   "|",   "!",   "=",  "(",  ")",  "[",  "]",
+    "{",   "}",   "~",   "^",   ".",   ",",  "?",  ":",  ";",  NULL};
+
+token_t *lexer_read_symbol(allocator_t *allocator,
+                           position_t *position,
+                           const char *filename) {
+  position_t begin = *position;
+  position_t current = *position;
+  size_t idx = 0;
+  for (; symbols[idx] != NULL; idx++) {
+    const char *symbol = symbols[idx];
+    size_t len = strlen(symbol);
+    if (strncmp(symbol, current.offset, len) == 0) {
+      current.offset += len;
+      current.column += len;
+      break;
+    }
+  }
+  if (symbols[idx] == NULL) {
+    return NULL;
+  }
+  token_t *token = allocator_alloc(allocator, sizeof(struct _token_t));
+  token->kind = CLUX_TOKEN_SYMBOL;
   token->loc.filename = filename;
   token->loc.begin = begin;
   token->loc.end = current;

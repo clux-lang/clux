@@ -2,6 +2,7 @@
 #define _H_PARSER_LEXER_
 #include "core/allocator.h"
 #include "core/location.h"
+#include "core/position.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +45,9 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
 token_t *lexer_read_numeric(allocator_t *allocator,
                             position_t *position,
                             const char *filename);
+token_t *lexer_read_symbol(allocator_t *allocator,
+                           position_t *position,
+                           const char *filename);
 #ifdef __cplusplus
 }
 #endif
