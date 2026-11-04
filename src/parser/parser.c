@@ -53,6 +53,18 @@ parser_t *create_parser(allocator_t *allocator,
     if (!token) {
       break;
     }
+    if (token_get_kind(token) == CLUX_TOKEN_ERROR) {
+      /* lexer 只在两种情况下产出 ERROR：非法 UTF-8、缺失闭合引号。
+         根据起始字符区分，报出更具体的消息。 */
+      const location_t *loc = token_get_location(token);
+      char first = *loc->begin.offset;
+      const char *message = (first == '"' || first == '\'')
+                                ? "unterminated string or character literal"
+                                : "invalid UTF-8 sequence";
+      vec_push(errors, create_error(allocator, loc, "%s", message));
+      delete_token(&token);
+      break;
+    }
     vec_push(tokens, token);
   }
   if (*position.offset != '\0') {

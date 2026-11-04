@@ -165,13 +165,15 @@ TEST(LexerCharacterTest, NotACharacterReturnsNull) {
   delete_allocator(&a);
 }
 
-TEST(LexerCharacterTest, EmptyCharLiteralIsError) {
+/* 空字符字面量属于内容错误：lexer 只产出 CHARACTER，由 parser 报错 */
+TEST(LexerCharacterTest, EmptyCharLiteralIsCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "''";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_character(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_CHARACTER);
+  EXPECT_EQ(p.offset, src + 2);
   delete_token(&tok);
   delete_allocator(&a);
 }
@@ -198,24 +200,27 @@ TEST(LexerCharacterTest, UnclosedAtEOF) {
   delete_allocator(&a);
 }
 
-TEST(LexerCharacterTest, InvalidEscapeIsError) {
+/* 无效转义属于内容错误：lexer 只产出 CHARACTER，由 parser 报错 */
+TEST(LexerCharacterTest, InvalidEscapeIsCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "'\\z'";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_character(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_CHARACTER);
+  EXPECT_EQ(p.offset, src + 4);
   delete_token(&tok);
   delete_allocator(&a);
 }
 
-TEST(LexerCharacterTest, HexEscapeNoDigitsIsError) {
+/* \x 后无十六进制位属于内容错误：lexer 只产出 CHARACTER */
+TEST(LexerCharacterTest, HexEscapeNoDigitsIsCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "'\\x'";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_character(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_CHARACTER);
   delete_token(&tok);
   delete_allocator(&a);
 }
@@ -321,4 +326,42 @@ TEST(TokenTest, NoLeakOnDelete) {
   delete_token(&tok);
   delete_allocator(&a);
   SUCCEED();
+}
+
+/* ---- CLUX_TOKEN_ERROR 仅用于：非法 UTF-8 / 缺失闭合引号 ---- */
+
+TEST(LexerCharacterTest, IllegalUtf8IsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* 孤立续字节 0x80 是非法 UTF-8 */
+  const char *src = "'\x80'";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_character(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+/* 多码点字符属于内容错误：lexer 只产出 CHARACTER，由 parser 报错 */
+TEST(LexerCharacterTest, MultiCodepointCharIsCharacter) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "'ab'";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_character(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_CHARACTER);
+  EXPECT_EQ(p.offset, src + 4);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerStringTest, IllegalUtf8InStringIsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "\"\x80\"";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_string(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  delete_token(&tok);
+  delete_allocator(&a);
 }

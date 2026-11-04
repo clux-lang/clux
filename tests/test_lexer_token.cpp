@@ -116,13 +116,15 @@ TEST(LexerStringTest, UnclosedStringWithEscapeIsError) {
   delete_allocator(&a);
 }
 
-TEST(LexerStringTest, InvalidEscapeInStringIsError) {
+/* 无效转义属于内容错误：lexer 只产出 STRING，由 parser 报错 */
+TEST(LexerStringTest, InvalidEscapeInStringIsString) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "\"\\z\"";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_string(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_STRING);
+  EXPECT_EQ(p.offset, src + 4);
   delete_token(&tok);
   delete_allocator(&a);
 }
@@ -537,13 +539,15 @@ TEST(LexerNumericTest, HexMixedCase) {
   delete_allocator(&a);
 }
 
-TEST(LexerNumericTest, HexNoDigitsIsError) {
+/* 0x 后无数字属于内容错误：lexer 只产出 NUMERIC，由 parser 报错 */
+TEST(LexerNumericTest, HexNoDigitsIsNumeric) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "0x ";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_numeric(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 2);
   delete_token(&tok);
   delete_allocator(&a);
 }
@@ -769,7 +773,9 @@ TEST(LexerNumericCoverageTest, HexZeroDigitsAtEOF) {
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_numeric(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_ERROR);
+  /* 内容错误留给 parser，lexer 仍产出 NUMERIC */
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 2);
   delete_token(&tok);
   delete_allocator(&a);
 }

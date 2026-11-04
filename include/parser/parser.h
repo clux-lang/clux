@@ -2,7 +2,6 @@
 #define _H_PARSER_PARSER_
 #include "core/allocator.h"
 #include "core/error.h"
-#include "core/location.h"
 #include "core/vec.h"
 #include "parser/lexer.h"
 #include <stdbool.h>

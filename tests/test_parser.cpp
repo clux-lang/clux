@@ -117,13 +117,40 @@ TEST(ParserTest, ErrorLocationPointsAtBadCharacter) {
   delete_allocator(&a);
 }
 
-TEST(ParserTest, LexerErrorTokenStopsScanning) {
+TEST(ParserTest, UnterminatedStringRecordsError) {
   allocator_t *a = create_allocator(malloc, free);
-  /* 未闭合字符串产生 CLUX_TOKEN_ERROR token，被 push 后扫描继续到 EOF */
+  /* 未闭合字符串 → lexer 产出 ERROR → parser 转成 error 并停止扫描 */
   parser_t *p = create_parser(a, "test.clux", "\"unclosed");
-  vec_t *tokens = parser_get_tokens(p);
-  ASSERT_EQ(vec_get_size(tokens), 1u);
-  EXPECT_EQ(token_get_kind((token_t *)vec_get(tokens, 0)), CLUX_TOKEN_ERROR);
+  EXPECT_EQ(vec_get_size(parser_get_tokens(p)), 0u);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err),
+               "unterminated string or character literal");
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, UnterminatedCharacterRecordsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "'a");
+  EXPECT_EQ(vec_get_size(parser_get_tokens(p)), 0u);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err),
+               "unterminated string or character literal");
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, InvalidUtf8RecordsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* 孤立续字节 0x80 是非法 UTF-8，不属于任何 reader 的起始字符 */
+  parser_t *p = create_parser(a, "test.clux", "\x80");
+  EXPECT_EQ(vec_get_size(parser_get_tokens(p)), 0u);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
   delete_parser(&p);
   delete_allocator(&a);
 }

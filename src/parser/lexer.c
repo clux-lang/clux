@@ -21,68 +21,31 @@ static UChar32 peek_codepoint(const position_t *pos) {
   return c;
 }
 
-/* 解析转义序列，返回码点值（>=0）或 -1 表示非法转义。
-   advance 推进 position 越过转义序列（不含起始反斜杠，调用方已消费）。 */
-static UChar32 parse_escape(position_t *pos) {
-  /* *pos->offset 是反斜杠后的第一个字符 */
-  char c = *pos->offset;
-  UChar32 result;
-  switch (c) {
-  case 'n':
-    result = '\n';
-    position_next(pos);
-    break;
-  case 't':
-    result = '\t';
-    position_next(pos);
-    break;
-  case 'r':
-    result = '\r';
-    position_next(pos);
-    break;
-  case '0':
-    result = '\0';
-    position_next(pos);
-    break;
-  case '\\':
-    result = '\\';
-    position_next(pos);
-    break;
-  case '\'':
-    result = '\'';
-    position_next(pos);
-    break;
-  case '"':
-    result = '"';
-    position_next(pos);
-    break;
-  case 'x': {
-    /* \xHH: 最多两个十六进制位 */
-    position_next(pos); /* 越过 'x' */
-    result = 0;
-    int digits = 0;
-    while (digits < 2) {
-      char h = *pos->offset;
-      int v;
-      if (h >= '0' && h <= '9')
-        v = h - '0';
-      else if (h >= 'a' && h <= 'f')
-        v = h - 'a' + 10;
-      else if (h >= 'A' && h <= 'F')
-        v = h - 'A' + 10;
-      else
-        break;
-      result = (result << 4) | v;
-      position_next(pos);
-      digits++;
+/* 扫描到闭合引号（含），成功返回 true 并推进 current 越过闭合引号。
+   失败返回 false，current 停在失败处。失败条件仅两种：
+     - 遇到非法 UTF-8 码点
+     - 未闭合（EOF 前没找到闭合引号）
+   转义序列只做"跳过被转义字符"处理，不做语义校验——无效转义、
+   空/多码点字符等内容错误留给 parser 报。 */
+static bool scan_quoted(position_t *current, char quote) {
+  while (1) {
+    if (*current->offset == '\0') return false; /* 未闭合 */
+    UChar32 c = peek_codepoint(current);
+    if (c < 0) return false; /* 非法 UTF-8 */
+    if (c == quote) {
+      position_next(current); /* 闭合引号 */
+      return true;
     }
-    if (digits == 0) return -1;
-    break;
+    if (c == '\\') {
+      position_next(current); /* 反斜杠 */
+      if (*current->offset == '\0') return false;
+      UChar32 escaped = peek_codepoint(current);
+      if (escaped < 0) return false;
+      position_next(current); /* 被转义字符，内容不校验 */
+      continue;
+    }
+    position_next(current);
   }
-  default:
-    return -1;
-  }
-  return result;
 }
 
 token_t *
@@ -111,40 +74,13 @@ token_t *lexer_read_character(allocator_t *allocator,
   }
   position_t begin = *position;
   position_t current = *position;
-  token_kind_t kind = CLUX_TOKEN_CHARACTER;
   position_next(&current); /* 越过开头的 '\'' */
 
-  /* 解析字符内容：普通 UTF-8 字符或转义序列 */
-  if (*current.offset == '\\') {
-    position_next(&current); /* 越过反斜杠 */
-    if (parse_escape(&current) < 0) {
-      kind = CLUX_TOKEN_ERROR;
-      goto done;
-    }
-  } else if (*current.offset == '\'') {
-    /* 空字符字面量 '' 非法 */
-    kind = CLUX_TOKEN_ERROR;
-    goto done;
-  } else if (*current.offset == '\0') {
-    /* 未闭合 */
-    kind = CLUX_TOKEN_ERROR;
-    goto done;
-  } else {
-    /* 普通UTF-8字符，步进一个码点 */
-    if (!position_next(&current)) {
-      kind = CLUX_TOKEN_ERROR;
-      goto done;
-    }
-  }
+  /* 只检测非法 UTF-8 与缺失闭合引号；空字符、多字符、无效转义
+     等内容问题留给 parser 报。 */
+  token_kind_t kind =
+      scan_quoted(&current, '\'') ? CLUX_TOKEN_CHARACTER : CLUX_TOKEN_ERROR;
 
-  /* 期望闭合的 '\'' */
-  if (*current.offset != '\'') {
-    kind = CLUX_TOKEN_ERROR;
-    goto done;
-  }
-  position_next(&current); /* 越过闭合 '\'' */
-
-done: {
   location_t loc = {
       .filename = filename,
       .begin = begin,
@@ -154,43 +90,20 @@ done: {
   *position = current;
   return token;
 }
-}
 
 /* ---- string ----
-   "..." — 支持转义序列（复用 parse_escape），空串 "" 合法。
-   未闭合或非法转义返回 CLUX_TOKEN_ERROR。 */
+   "..." — 空串 "" 合法。只检测非法 UTF-8 与缺失闭合引号；
+   无效转义等内容问题留给 parser 报。 */
 token_t *lexer_read_string(allocator_t *allocator,
                            position_t *position,
                            const char *filename) {
   if (*position->offset != '"') return NULL;
   position_t begin = *position;
   position_t current = *position;
-  token_kind_t kind = CLUX_TOKEN_STRING;
   position_next(&current); /* 越过开头的 '"' */
 
-  while (1) {
-    char c = *current.offset;
-    if (c == '\0') {
-      kind = CLUX_TOKEN_ERROR; /* 未闭合 */
-      break;
-    }
-    if (c == '"') {
-      position_next(&current); /* 越过闭合 '"' */
-      break;
-    }
-    if (c == '\\') {
-      position_next(&current); /* 越过反斜杠 */
-      if (parse_escape(&current) < 0) {
-        kind = CLUX_TOKEN_ERROR;
-        break;
-      }
-    } else {
-      if (!position_next(&current)) {
-        kind = CLUX_TOKEN_ERROR;
-        break;
-      }
-    }
-  }
+  token_kind_t kind =
+      scan_quoted(&current, '"') ? CLUX_TOKEN_STRING : CLUX_TOKEN_ERROR;
 
   location_t loc = {
       .filename = filename,
@@ -209,7 +122,7 @@ static const char *keywords[] = {
     "i16",    "i32",     "i64",    "u8",       "u16",       "u32",
     "u64",    "isize",   "usize",  "f32",      "f64",       "str",
     "struct", "union",   "cunion", "enum",     "undefined", "none",
-    NULL,
+    "nil",    NULL,
 };
 
 /* ---- identifier ----
@@ -338,12 +251,12 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
 
 /* ---- numeric ----
    C 风格数字字面量：
-     十六进制: 0x[0-9a-fA-F]+
+     十六进制: 0x[0-9a-fA-F]*
      八进制:   0[0-7]*
      十进制:   [0-9]+
      浮点:     [0-9]+.[0-9]*([eE][+-]?[0-9]+)?
               .[0-9]+([eE][+-]?[0-9]+)?
-   非数字开头返回 NULL。 */
+   非数字开头返回 NULL。内容合法性（如 0x 后无数字）由 parser 校验。 */
 token_t *lexer_read_numeric(allocator_t *allocator,
                             position_t *position,
                             const char *filename) {
@@ -355,24 +268,20 @@ token_t *lexer_read_numeric(allocator_t *allocator,
 
   position_t begin = *position;
   position_t current = *position;
-  token_kind_t kind = CLUX_TOKEN_NUMERIC;
 
   if (c0 == '0' && (position->offset[1] == 'x' || position->offset[1] == 'X')) {
-    /* 十六进制 */
+    /* 十六进制。0x 后无数字属于内容错误，留给 parser 报。 */
     position_next(&current); /* '0' */
     position_next(&current); /* 'x'/'X' */
-    int digits = 0;
     while (1) {
       char h = *current.offset;
       if ((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') ||
           (h >= 'A' && h <= 'F')) {
         position_next(&current);
-        digits++;
       } else {
         break;
       }
     }
-    if (digits == 0) kind = CLUX_TOKEN_ERROR; /* 0x 后无数字 */
   } else if (c0 == '0' && position->offset[1] >= '0' &&
              position->offset[1] <= '7') {
     /* 八进制 */
@@ -415,7 +324,7 @@ token_t *lexer_read_numeric(allocator_t *allocator,
       .begin = begin,
       .end = current,
   };
-  token_t *token = create_token(allocator, kind, loc);
+  token_t *token = create_token(allocator, CLUX_TOKEN_NUMERIC, loc);
   *position = current;
   return token;
 }
