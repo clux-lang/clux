@@ -33,8 +33,38 @@ add_subdirectory(third_party/icu)
 aux_source_directory(src/core CORE_SOURCE)
 aux_source_directory(src/parser PARSER_SOURCE)
 
+# ---------------------------------------------------------------------------
+# Code coverage (opt-in)
+#
+#   cmake -B build-cov -DCLUX_COVERAGE=ON
+#   cmake --build build-cov --target clux_test
+#   ./build-cov/clux_test.exe
+#   llvm-profdata merge -sparse *.profraw -o cov.profdata
+#   llvm-cov report ./build-cov/clux_test.exe -instr-profile=cov.profdata \
+#       --ignore-filename-regex='(third_party|tests|_deps)'
+#
+# Only the project's own sources are instrumented; third_party (ICU, gtest)
+# is excluded so the report focuses on code we own.
+# ---------------------------------------------------------------------------
+option(CLUX_COVERAGE "Enable LLVM source-based coverage instrumentation" OFF)
+
+function(clux_enable_coverage target)
+  if(NOT CLUX_COVERAGE)
+    return()
+  endif()
+  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(WARNING "CLUX_COVERAGE requires clang; ignored for ${target}")
+    return()
+  endif()
+  target_compile_options(${target} PRIVATE
+    -fprofile-instr-generate
+    -fcoverage-mapping)
+  target_link_options(${target} PRIVATE -fprofile-instr-generate)
+endfunction()
+
 add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE})
 clux_target_warnings(clux)
+clux_enable_coverage(clux)
 
 # ICU 库编译时禁用了版本后缀重命名 (U_DISABLE_VERSION_SUFFIX=1)，
 # 消费方必须同步定义，否则头文件将 u_isIDStart 重命名为 u_isIDStart_74 导致链接失败。
@@ -71,6 +101,7 @@ if(BUILD_TESTS)
   target_compile_definitions(clux_test PRIVATE U_DISABLE_VERSION_SUFFIX=1)
   target_link_libraries(clux_test PRIVATE icu_data_init ICU::data ICU::uc GTest::gtest)
   clux_target_warnings(clux_test)
+  clux_enable_coverage(clux_test)
   # 少数端到端用例要断言程序**自己打印的输出**（tests/foreach_test.cpp）：clux 的
   # `libc::printf` 由 FFI 解析到系统 CRT，与测试进程自身 CRT 不是同一实例，进程内
   # fd 重定向抓不到 → 改为子进程跑 CLI（`<同目录>/clux.exe run …`）。因此 CLI 必须

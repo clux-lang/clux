@@ -22,7 +22,7 @@ TEST(ErrorTest, CreateAndGetMessage) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
-  error_t *err = create_error(a, &loc, "syntax error at line %u", 1u);
+  clux_error_t *err = create_error(a, &loc, "syntax error at line %u", 1u);
   EXPECT_NE(err, nullptr);
   EXPECT_STREQ(error_get_message(err), "syntax error at line 1");
   delete_error(&err);
@@ -34,7 +34,7 @@ TEST(ErrorTest, CreateWithPlainMessage) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
-  error_t *err = create_error(a, &loc, "unexpected token");
+  clux_error_t *err = create_error(a, &loc, "unexpected token");
   EXPECT_STREQ(error_get_message(err), "unexpected token");
   delete_error(&err);
   delete_allocator(&a);
@@ -44,7 +44,7 @@ TEST(ErrorTest, CreateWithEmptyMessage) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
-  error_t *err = create_error(a, &loc, "");
+  clux_error_t *err = create_error(a, &loc, "");
   EXPECT_STREQ(error_get_message(err), "");
   delete_error(&err);
   delete_allocator(&a);
@@ -55,7 +55,7 @@ TEST(ErrorTest, CreateWithLongMessage) {
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
   // 构造长消息验证 vsnprintf 两遍调用正确
-  error_t *err = create_error(
+  clux_error_t *err = create_error(
       a, &loc, "error: %s failed at %s:%u", "parse", "file.clux", 42u);
   EXPECT_STREQ(error_get_message(err), "error: parse failed at file.clux:42");
   delete_error(&err);
@@ -66,7 +66,7 @@ TEST(ErrorTest, GetLocationReturnsBorrowedPointer) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "let x = ;";
   location_t loc = make_loc(src, 0, 3);
-  error_t *err = create_error(a, &loc, "err");
+  clux_error_t *err = create_error(a, &loc, "err");
   const location_t *got = error_get_location(err);
   ASSERT_NE(got, nullptr);
   EXPECT_EQ(got->begin.offset, src);
@@ -80,7 +80,7 @@ TEST(ErrorTest, GetLocationReturnsBorrowedPointer) {
 }
 
 TEST(ErrorTest, DeleteNullIsNoop) {
-  error_t *err = nullptr;
+  clux_error_t *err = nullptr;
   delete_error(&err);
   EXPECT_EQ(err, nullptr);
   delete_error(nullptr);
@@ -91,8 +91,8 @@ TEST(ErrorTest, CreateMultipleErrors) {
   const char *src = "let x = ;";
   location_t loc1 = make_loc(src, 0, 3);
   location_t loc2 = make_loc(src, 4, 5);
-  error_t *e1 = create_error(a, &loc1, "first error");
-  error_t *e2 = create_error(a, &loc2, "second error %d", 2);
+  clux_error_t *e1 = create_error(a, &loc1, "first error");
+  clux_error_t *e2 = create_error(a, &loc2, "second error %d", 2);
   EXPECT_STREQ(error_get_message(e1), "first error");
   EXPECT_STREQ(error_get_message(e2), "second error 2");
   delete_error(&e1);

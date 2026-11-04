@@ -135,6 +135,41 @@ Produces:
 > changes, rebuild before trusting `build/clux` or test results, or you will be
 > running a stale binary against newer sources.
 
+## Coverage
+
+Source-based coverage uses LLVM's instrumentation (`-fprofile-instr-generate
+-fcoverage-mapping`). It is opt-in via `-DCLUX_COVERAGE=ON` and only instruments
+project sources — `third_party/` (ICU, GoogleTest) and `tests/` are excluded
+from the report.
+
+```sh
+# Windows: add the LLVM bin directory to PATH or set LLVM_BIN
+LLVM_BIN="/d/Program Files/clang+llvm-22.1.3-x86_64-pc-windows-msvc/bin" \
+  ./scripts/coverage.sh
+
+# Report only (reuse an existing build-cov/)
+./scripts/coverage.sh --report
+```
+
+Manual equivalent:
+
+```sh
+cmake -B build-cov -DCLUX_COVERAGE=ON
+cmake --build build-cov --target clux_test
+cd build-cov && LLVM_PROFILE_FILE="cov-%p.profraw" ./clux_test
+llvm-profdata merge -sparse *.profraw -o cov.profdata
+llvm-cov report ./clux_test -instr-profile=cov.profdata \
+    --ignore-filename-regex='(third_party|tests|_deps)'
+```
+
+Known exemptions when reading the report:
+
+- `abort()` paths (e.g. allocator OOM) — the profiler is not flushed on abort,
+  so these lines always show as uncovered; behaviour is verified by
+  `EXPECT_DEATH` tests instead.
+- Branches expanded from ICU macros such as `U8_NEXT` inside `position_next`.
+- Dead branches already ruled out by an earlier guard.
+
 ## Usage
 
 ```

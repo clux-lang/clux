@@ -687,3 +687,111 @@ TEST(LexerNumericTest, NumericFollowedByCode) {
   allocator_free(a, (void **)&tok);
   delete_allocator(&a);
 }
+
+TEST(LexerStringTest, UnclosedAfterBackslashAtEOF) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "\"abc\\";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_string(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(tok->kind, CLUX_TOKEN_ERROR);
+  allocator_free(a, (void **)&tok);
+  delete_allocator(&a);
+}
+
+/* ---- 覆盖率补强：EOF 边界与短路分支 ---- */
+
+TEST(LexerIdentifierCoverageTest, EmptyInputReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}
+
+TEST(LexerWhitespaceCoverageTest, EmptyInputReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_whitespace(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}
+
+TEST(LexerWhitespaceCoverageTest, WhitespaceAtEOFStops) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "   ";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_whitespace(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(tok->kind, CLUX_TOKEN_WHITESPACE);
+  EXPECT_EQ(p.offset, src + 3);
+  allocator_free(a, (void **)&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerCommentCoverageTest, SingleSlashIsNotComment) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "/";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_comment(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}
+
+TEST(LexerMultilineCommentCoverageTest, SingleSlashIsNotComment) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "/";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_multiline_comment(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericCoverageTest, ZeroNotFollowedByOctalOrHex) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* "0" 单独，后面是 '8'（不是八进制/十六进制） */
+  const char *src = "08";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(tok->kind, CLUX_TOKEN_NUMERIC);
+  /* 0 走十进制分支，消费 "08" */
+  EXPECT_EQ(p.offset, src + 2);
+  allocator_free(a, (void **)&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericCoverageTest, FloatDotNoFraction) {
+  allocator_t *a = create_allocator(malloc, free);
+  /* "1." 小数部分为空 */
+  const char *src = "1.";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(tok->kind, CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 2);
+  allocator_free(a, (void **)&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericCoverageTest, HexZeroDigitsAtEOF) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "0x";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(tok->kind, CLUX_TOKEN_ERROR);
+  allocator_free(a, (void **)&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericCoverageTest, DotAtEOFReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = ".";
+  position_t p = make_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  EXPECT_EQ(tok, nullptr);
+  delete_allocator(&a);
+}

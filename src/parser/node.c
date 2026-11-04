@@ -18,7 +18,7 @@ node_t *create_node(allocator_t *allocator,
   self->kind = kind;
   self->loc = loc;
   self->parent = parent;
-  self->children = create_vec(allocator, false);
+  self->children = create_vec(allocator);
   return self;
 }
 void delete_node(node_t **node) {

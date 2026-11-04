@@ -111,3 +111,21 @@ TEST(PositionTest, NextMultiByteAfterNewline) {
   EXPECT_EQ(p.column, 2u);
   EXPECT_EQ(p.offset, src + 4);
 }
+
+TEST(PositionTest, NextIllegalUtf8AdvancesOneByte) {
+  /* 孤立续字节 0x80 是非法 UTF-8 起始，应回退为前进 1 字节 */
+  const char *src = "\x80x";
+  position_t p = make_pos(src);
+  EXPECT_TRUE(position_next(&p));
+  EXPECT_EQ(p.offset, src + 1);
+  EXPECT_EQ(p.column, 2u);
+  EXPECT_EQ(*p.offset, 'x');
+}
+
+TEST(PositionTest, NextTruncatedMultiByteAdvancesOneByte) {
+  /* 0xE4 是三字节序列的首字节，但后面没有续字节 */
+  const char *src = "\xE4";
+  position_t p = make_pos(src);
+  EXPECT_TRUE(position_next(&p));
+  EXPECT_EQ(p.offset, src + 1);
+}

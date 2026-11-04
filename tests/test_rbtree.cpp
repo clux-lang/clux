@@ -373,3 +373,102 @@ TEST(RbtreeTest, ForeachAfterEraseStillAscending) {
   delete_rbtree(&t);
   delete_allocator(&a);
 }
+
+/* ---- 覆盖率补强：删除路径的对称分支 ----
+   构造特定的树形以覆盖 delete_fixup 中 x 为右孩子的分支，
+   以及 erase 中 z 只有左孩子 / 后继不是直接右孩子的情形。 */
+
+TEST(RbtreeCoverageTest, EraseNodeWithOnlyLeftChild) {
+  allocator_t *a = create_allocator(malloc, free);
+  rbtree_t *t = create_rbtree(a, false);
+  int v1 = 1, v2 = 2;
+  /* 先插 20 再插 10：10 成为 20 的左孩子，20 无右孩子 */
+  rbtree_insert(t, 20, &v1);
+  rbtree_insert(t, 10, &v2);
+  /* 删除 20（只有左孩子）→ 走 z->right == nil 分支 */
+  EXPECT_EQ(rbtree_erase(t, 20), 1u);
+  EXPECT_EQ(rbtree_find(t, 20), nullptr);
+  EXPECT_EQ(rbtree_find(t, 10), &v2);
+  delete_rbtree(&t);
+  delete_allocator(&a);
+}
+
+TEST(RbtreeCoverageTest, EraseNodeWithSuccessorDeeperInRightSubtree) {
+  allocator_t *a = create_allocator(malloc, free);
+  rbtree_t *t = create_rbtree(a, false);
+  int vals[7];
+  for (int i = 0; i < 7; i++)
+    vals[i] = i;
+  /* 构造：根 20，左 10，右 30；30 的左 25，25 的左 22 */
+  rbtree_insert(t, 20, &vals[0]);
+  rbtree_insert(t, 10, &vals[1]);
+  rbtree_insert(t, 30, &vals[2]);
+  rbtree_insert(t, 25, &vals[3]);
+  rbtree_insert(t, 22, &vals[4]);
+  /* 删除 20：后继是 22（不是直接右孩子 30）→ 覆盖 y->parent != z 分支 */
+  EXPECT_EQ(rbtree_erase(t, 20), 4u);
+  EXPECT_EQ(rbtree_find(t, 20), nullptr);
+  EXPECT_EQ(rbtree_find(t, 22), &vals[4]);
+  EXPECT_EQ(rbtree_find(t, 30), &vals[2]);
+  delete_rbtree(&t);
+  delete_allocator(&a);
+}
+
+TEST(RbtreeCoverageTest, EraseTriggersRightSideFixup) {
+  allocator_t *a = create_allocator(malloc, free);
+  rbtree_t *t = create_rbtree(a, false);
+  static int vals[16];
+  for (int i = 0; i < 16; i++)
+    vals[i] = i;
+  /* 顺序插入 1..15 形成左倾树，删除最小值会触发 x 为右孩子的修复分支 */
+  for (int i = 1; i <= 15; i++) {
+    rbtree_insert(t, (uintptr_t)i, &vals[i]);
+  }
+  for (int i = 1; i <= 7; i++) {
+    rbtree_erase(t, (uintptr_t)i);
+  }
+  EXPECT_EQ(rbtree_get_size(t), 8u);
+  for (int i = 8; i <= 15; i++) {
+    EXPECT_EQ(rbtree_find(t, (uintptr_t)i), &vals[i]);
+  }
+  delete_rbtree(&t);
+  delete_allocator(&a);
+}
+
+TEST(RbtreeCoverageTest, EraseManyRandomOrders) {
+  allocator_t *a = create_allocator(malloc, free);
+  static int vals[128];
+  for (int i = 0; i < 128; i++)
+    vals[i] = i;
+  /* 多种插入/删除顺序，尽可能覆盖 delete_fixup 的所有对称分支 */
+  unsigned seeds[] = {1, 7, 13, 42, 99, 123, 777, 2024};
+  for (size_t s = 0; s < sizeof(seeds) / sizeof(seeds[0]); s++) {
+    rbtree_t *t = create_rbtree(a, false);
+    int order[128];
+    for (int i = 0; i < 128; i++)
+      order[i] = i;
+    srand(seeds[s]);
+    for (int i = 127; i > 0; i--) {
+      int j = rand() % (i + 1);
+      int tmp = order[i];
+      order[i] = order[j];
+      order[j] = tmp;
+    }
+    for (int i = 0; i < 128; i++) {
+      rbtree_insert(t, (uintptr_t)order[i], &vals[order[i]]);
+    }
+    /* 用另一个打乱顺序删除全部 */
+    for (int i = 127; i > 0; i--) {
+      int j = rand() % (i + 1);
+      int tmp = order[i];
+      order[i] = order[j];
+      order[j] = tmp;
+    }
+    for (int i = 0; i < 128; i++) {
+      EXPECT_NE(rbtree_erase(t, (uintptr_t)order[i]), (size_t)-1);
+    }
+    EXPECT_EQ(rbtree_get_size(t), 0u);
+    delete_rbtree(&t);
+  }
+  delete_allocator(&a);
+}
