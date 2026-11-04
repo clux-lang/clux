@@ -1,8 +1,8 @@
 #ifndef _H_PARSER_LITERAL_NIL_
 #define _H_PARSER_LITERAL_NIL_
 #include "core/allocator.h"
-#include "node.h"
-#include "parser.h"
+#include "parser/node.h"
+#include "parser/parser.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
