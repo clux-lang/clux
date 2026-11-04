@@ -365,3 +365,66 @@ TEST(LexerStringTest, IllegalUtf8InStringIsError) {
   delete_token(&tok);
   delete_allocator(&a);
 }
+
+/* ============================ token_is ============================ */
+
+TEST(TokenIsTest, MatchesKindAndText) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "nil";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_KEYWORD, "nil"));
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(TokenIsTest, RejectsWrongKind) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "nil";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "nil"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_STRING, "nil"));
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(TokenIsTest, RejectsWrongText) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "nil";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "none"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "ni"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "nilx"));
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(TokenIsTest, WorksOnSymbol) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "->";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_symbol(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_SYMBOL, "->"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_SYMBOL, "-"));
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(TokenIsTest, WorksOnString) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "\"hi\"";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_string(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  /* location 覆盖含引号的原文 */
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_STRING, "\"hi\""));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_STRING, "hi"));
+  delete_token(&tok);
+  delete_allocator(&a);
+}

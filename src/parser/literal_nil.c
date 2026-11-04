@@ -11,10 +11,9 @@ node_t *parser_read_literal_nil(allocator_t *allocator,
   if (!token) {
     return NULL;
   }
-  if (token_get_kind(token) == CLUX_TOKEN_KEYWORD &&
-      location_is(token_get_location(token), "nil")) {
+  if (token_is(token, CLUX_TOKEN_KEYWORD, "nil")) {
     location_t loc = *token_get_location(token);
-    parser_read_token(parser); /* 消费该 token，避免调用方重复匹配 */
+    parser_next(parser); /* 消费该 token，避免调用方重复匹配 */
     return create_node(allocator, CLUX_NODE_LITERAL_NIL, parent, loc);
   }
   return NULL;

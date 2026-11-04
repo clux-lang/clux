@@ -157,22 +157,40 @@ TEST(ParserTest, InvalidUtf8RecordsError) {
 
 /* ---- token 游标 ---- */
 
-TEST(ParserTest, ReadTokenAdvancesPosition) {
+TEST(ParserTest, NextAdvancesPosition) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a b");
   /* "a", " ", "b" → 3 tokens */
   EXPECT_EQ(parser_get_position(p), 0u);
-  token_t *t0 = parser_read_token(p);
-  ASSERT_NE(t0, nullptr);
+  parser_next(p);
   EXPECT_EQ(parser_get_position(p), 1u);
-  token_t *t1 = parser_read_token(p);
-  ASSERT_NE(t1, nullptr);
+  parser_next(p);
   EXPECT_EQ(parser_get_position(p), 2u);
-  token_t *t2 = parser_read_token(p);
-  ASSERT_NE(t2, nullptr);
+  parser_next(p);
   EXPECT_EQ(parser_get_position(p), 3u);
-  EXPECT_EQ(parser_read_token(p), nullptr);
-  EXPECT_EQ(parser_get_position(p), 3u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, NextAtEndIsNoop) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a");
+  parser_next(p);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  /* 已在末尾，再前进不越界 */
+  parser_next(p);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  parser_next(p);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ParserTest, NextOnEmptyTokenStreamIsNoop) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "");
+  parser_next(p);
+  EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -221,10 +239,11 @@ TEST(ParserTest, SetPositionOutOfRangeFails) {
 TEST(ParserTest, SetPositionBackwardsAllowsReread) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a b");
-  token_t *first = parser_read_token(p);
-  parser_read_token(p);
+  token_t *first = parser_peek_token(p);
+  parser_next(p);
+  parser_next(p);
   EXPECT_TRUE(parser_set_position(p, 0));
-  EXPECT_EQ(parser_read_token(p), first);
+  EXPECT_EQ(parser_peek_token(p), first);
   delete_parser(&p);
   delete_allocator(&a);
 }

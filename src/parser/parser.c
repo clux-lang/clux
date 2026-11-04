@@ -99,11 +99,12 @@ void delete_parser(parser_t **parser) {
 }
 vec_t *parser_get_tokens(parser_t *self) { return self->tokens; }
 vec_t *parser_get_error(parser_t *self) { return self->errors; }
-token_t *parser_read_token(parser_t *self) {
+
+void parser_next(parser_t *self) {
   if (self->position >= vec_get_size(self->tokens)) {
-    return NULL;
+    return;
   }
-  return vec_get(self->tokens, self->position++);
+  self->position++;
 }
 token_t *parser_peek_token(parser_t *self) {
   if (self->position >= vec_get_size(self->tokens)) {

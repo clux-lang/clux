@@ -25,6 +25,7 @@ create_token(allocator_t *allocator, token_kind_t kind, location_t loc);
 void delete_token(token_t **token);
 token_kind_t token_get_kind(token_t *self);
 const location_t *token_get_location(token_t *self);
+bool token_is(token_t *self, token_kind_t kind, const char *src);
 token_t *lexer_read_character(allocator_t *allocator,
                               position_t *position,
                               const char *filename);

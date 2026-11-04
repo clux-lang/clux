@@ -78,7 +78,7 @@ TEST(LiteralNilTest, LocationMatchesToken) {
   const char *src = "  nil";
   parser_t *p = create_parser(a, "test.clux", src);
   /* 跳过前导空白 */
-  parser_read_token(p);
+  parser_next(p);
   node_t *node = parser_read_literal_nil(a, p, NULL);
   ASSERT_NE(node, nullptr);
   const location_t *loc = node_get_location(node);

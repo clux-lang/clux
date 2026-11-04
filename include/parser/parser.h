@@ -14,7 +14,7 @@ create_parser(allocator_t *allocator, const char *filename, const char *source);
 void delete_parser(parser_t **parser);
 vec_t *parser_get_tokens(parser_t *self);
 vec_t *parser_get_error(parser_t *self);
-token_t *parser_read_token(parser_t *self);
+void parser_next(parser_t *self);
 token_t *parser_peek_token(parser_t *self);
 size_t parser_get_position(parser_t *self);
 bool parser_set_position(parser_t *self, size_t size);
