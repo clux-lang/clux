@@ -35,6 +35,17 @@ static node_t *read_simple_text(allocator_t *allocator,
   return create_node(allocator, node_kind, parent, loc);
 }
 
+node_t *parser_read_literal_nil(allocator_t *allocator,
+                                parser_t *parser,
+                                node_t *parent) {
+  return read_simple_text(allocator,
+                          parser,
+                          parent,
+                          CLUX_TOKEN_KEYWORD,
+                          "nil",
+                          CLUX_NODE_LITERAL_NIL);
+}
+
 node_t *parser_read_literal_undefined(allocator_t *allocator,
                                       parser_t *parser,
                                       node_t *parent) {
