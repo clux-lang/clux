@@ -33,8 +33,49 @@ static location_t expression_error_location(parser_t *parser,
   return loc;
 }
 
-node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
+node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser) {
   node_t *left = parser_read_literal(allocator, parser);
+  if (!left) {
+    return NULL;
+  }
+  size_t after_left = parser_get_position(parser);
+  parser_skip_trivia(parser);
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "&&")) {
+    /* 不是逻辑与：回退游标到左操作数之后，不吞掉后续 trivia。 */
+    parser_set_position(parser, after_left);
+    return left;
+  }
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
+  node_t *symbol = parser_read_symbol(allocator, parser);
+  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  size_t after_symbol = parser_get_position(parser);
+  node_set_location_span(
+      expr, node_get_location(left), node_get_location(symbol));
+  parser_skip_trivia(parser);
+  /* 递归右结合：a && b && c 解析为 a && (b && c)，与短路求值一致。 */
+  node_t *right = parser_read_expression_land(allocator, parser);
+  if (!right) {
+    /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
+       同时记录错误，由调用方决定是否中止。 */
+    /* 错误位置先取：此时游标仍停在坏 token 上（若已到流末尾则退化）。 */
+    location_t loc =
+        expression_error_location(parser, node_get_location(symbol));
+    parser_set_position(parser, after_symbol);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression after '&&'"));
+  } else {
+    node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, right);
+    node_set_location_span(
+        expr, node_get_location(left), node_get_location(right));
+  }
+  return expr;
+}
+node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expression_land(allocator, parser);
   if (!left) {
     return NULL;
   }

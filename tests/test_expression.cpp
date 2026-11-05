@@ -1347,3 +1347,407 @@ TEST(ExpressionLorTest, NoLeakOnLor) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 逻辑与表达式 ================= */
+
+static node_t *parse_land(allocator_t *a, parser_t **p, const char *src) {
+  *p = create_parser(a, "test.clux", src);
+  return parser_read_expression_land(a, *p);
+}
+
+TEST(ExpressionLandTest, SimpleLand) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b");
+  expect_binary(
+      expr, CLUX_NODE_LITERAL_IDENTIFIER, "&&", CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, BooleanOperands) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "true && false");
+  expect_binary(
+      expr, CLUX_NODE_LITERAL_BOOLEAN, "&&", CLUX_NODE_LITERAL_BOOLEAN);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 右结合：a && b && c  =>  a && (b && c)，与短路求值顺序一致。 */
+TEST(ExpressionLandTest, RightAssociativeChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b && c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+  expect_binary(
+      right, CLUX_NODE_LITERAL_IDENTIFIER, "&&", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, FourOperandChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b && c && d");
+  ASSERT_NE(expr, nullptr);
+  node_t *cur = expr;
+  int depth = 0;
+  while (cur && node_get_kind(cur) == CLUX_NODE_EXPRESSION_BINARY) {
+    depth++;
+    cur = node_get_child(cur, CLUX_EXPR_BINARY_RIGHT);
+  }
+  EXPECT_EQ(depth, 3);
+  EXPECT_EQ(node_get_kind(cur), CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, TriviaAroundOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a  /* c */  &&  b  // d\n ");
+  expect_binary(
+      expr, CLUX_NODE_LITERAL_IDENTIFIER, "&&", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, FallsBackToLeftWithoutOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, FallbackDoesNotConsumeTrailingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* '&' 是位与，不是逻辑与，不应被消费。 */
+TEST(ExpressionLandTest, FallsBackOnSingleAmpersand) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a & b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* '||' 不属于 && 层，应原样返回左操作数。 */
+TEST(ExpressionLandTest, FallsBackOnLogicalOr) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a || b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ReturnsNullOnNonLiteral) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_land(a, &p, "&&"), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_land(a, &p, ""), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(ExpressionLandTest, MissingRightReturnsPartialNodeAndError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a &&";
+  node_t *expr = parse_land(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression after '&&'");
+  EXPECT_STREQ(error_get_location(err)->filename, "test.clux");
+  /* EOF：错误位置退化为 '&&' 的终点 */
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 4);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, MissingRightErrorPointsAtBadToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a && )";
+  node_t *expr = parse_land(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 5);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ChainMissingRightReportsOnce) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b &&");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(right, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ValidLandProducesNoError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 优先级：&& 高于 || ---- */
+
+/* a || b && c  =>  a || (b && c) */
+TEST(ExpressionLandTest, LandBindsTighterThanLor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_lor(a, &p, "a || b && c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  /* 顶层运算符是 || */
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)2);
+  EXPECT_EQ(node_get_location(symbol)->begin.offset[0], '|');
+  /* 右操作数是 && 表达式 */
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *right_symbol = node_get_child(right, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(right_symbol, nullptr);
+  EXPECT_EQ(node_get_location(right_symbol)->begin.offset[0], '&');
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* a && b || c  =>  (a && b) || c */
+TEST(ExpressionLandTest, LandOnLeftOfLor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_lor(a, &p, "a && b || c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_location(symbol)->begin.offset[0], '|');
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *left_symbol = node_get_child(left, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(left_symbol, nullptr);
+  EXPECT_EQ(node_get_location(left_symbol)->begin.offset[0], '&');
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 混合链：a && b || c && d  =>  (a && b) || (c && d) */
+TEST(ExpressionLandTest, MixedChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_lor(a, &p, "a && b || c && d");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_location(symbol)->begin.offset[0], '|');
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 与其他表达式组合 ---- */
+
+TEST(ExpressionLandTest, LandAsTernaryCondition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a && b ? c : d");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *condition = node_get_child(expr, CLUX_EXPR_TERNARY_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, AssignWithLandValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "x = a && b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_ASSIGN);
+  node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(node_get_kind(value), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_land(a, &p, "a && b");
+  ASSERT_NE(expr, nullptr);
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(left, nullptr);
+  EXPECT_EQ(node_get_parent(left), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+TEST(ExpressionLandTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a && b";
+  node_t *expr = parse_land(a, &p, src);
+  expect_location_span(expr, src, "a && b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  a  &&  b  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_land(a, p);
+  expect_location_span(expr, "  a  &&  b  ", "a  &&  b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, ChainSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a && b && c";
+  node_t *expr = parse_land(a, &p, src);
+  expect_location_span(expr, src, "a && b && c");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "b && c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLandTest, SpanWhenRightMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a &&";
+  node_t *expr = parse_land(a, &p, src);
+  expect_location_span(expr, src, "a &&");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionLandTest, NoLeakOnLand) {
+  const char *sources[] = {"a && b",
+                           "a && b && c",
+                           "a && b || c",
+                           "a || b && c",
+                           "a && b || c && d",
+                           "x = a && b",
+                           "a && b ? c : d",
+                           "a &&",
+                           "a",
+                           "a & b",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
