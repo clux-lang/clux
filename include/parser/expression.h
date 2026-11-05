@@ -13,6 +13,8 @@ extern "C" {
 #define CLUX_EXPR_BINARY_RIGHT 2
 node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_expression_or(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_expression_xor(allocator_t *allocator, parser_t *parser);
 
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
