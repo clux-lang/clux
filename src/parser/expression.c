@@ -106,25 +106,50 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
   if (!operand) {
     return NULL;
   }
-  /* 后缀左结合：p.*.& 解析为 (p.*).&，循环累积。 */
+  /* 后缀左结合：p.*.& 解析为 (p.*).&，成员链 a.b.c 解析为 (a.b).c。 */
   for (;;) {
     size_t after_operand = parser_get_position(parser);
     parser_skip_trivia(parser);
     const char *op = peek_postfix_operator(parser);
-    if (!op) {
-      /* 不是后缀运算符：回退游标到操作数之后，不吞掉后续 trivia。 */
-      parser_set_position(parser, after_operand);
-      return operand;
+    if (op) {
+      node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+      node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+      node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
+      node_t *symbol = parser_read_symbol(allocator, parser);
+      node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+      /* RIGHT 保持 NULL：后缀形态复用二元节点，靠 RIGHT 缺失区分。 */
+      node_set_location_span(
+          expr, node_get_location(operand), node_get_location(symbol));
+      operand = expr;
+      continue;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
-    node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
-    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
-    node_t *symbol = parser_read_symbol(allocator, parser);
-    node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
-    /* RIGHT 保持 NULL：后缀形态复用二元节点，靠 RIGHT 缺失区分。 */
-    node_set_location_span(
-        expr, node_get_location(operand), node_get_location(symbol));
-    operand = expr;
+    /* 成员访问 obj.field：字段名恒为 identifier。
+       LEFT=接收者，SYMBOL='.'，RIGHT=字段名。 */
+    token_t *token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ".")) {
+      node_t *dot = parser_read_symbol(allocator, parser);
+      parser_skip_trivia(parser);
+      node_t *field = parser_read_literal_identifier(allocator, parser);
+      if (!field) {
+        /* 点号后不是 identifier：不是成员访问，回退到接收者之后。 */
+        delete_node(&dot);
+        parser_set_position(parser, after_operand);
+        return operand;
+      }
+      node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+      node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+      node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
+      node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, dot);
+      node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, field);
+      node_set_location_span(
+          expr, node_get_location(operand), node_get_location(field));
+      operand = expr;
+      continue;
+    }
+    /* 既不是后缀运算符也不是成员访问：回退游标到操作数之后，
+       不吞掉后续 trivia。 */
+    parser_set_position(parser, after_operand);
+    return operand;
   }
 }
 /* 前缀一元运算符表（白皮书 5.3 优先级 23）。 */
