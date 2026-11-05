@@ -47,6 +47,11 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
 #define CLUX_EXPR_SLICE_LO 1
 #define CLUX_EXPR_SLICE_HI 2
 
+/* rest 表达式 ...expr?，不在优先级链上。
+   有操作数时 children = [expr]（长度 1），孤立 `...` 时长度 0。 */
+#define CLUX_EXPR_REST_EXPR 0
+node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser);
+
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
 #define CLUX_EXPR_TERNARY_THEN 1

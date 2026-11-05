@@ -934,3 +934,29 @@ next:
 node_t *parser_read_expression(allocator_t *allocator, parser_t *parser) {
   return parser_read_expression_assign(allocator, parser);
 }
+
+/* rest 表达式 ...expr?，不在优先级链上，由构造/调用实参等位置显式调用。
+   孤立 `...` 合法（无子节点），用于展开全部剩余元素。 */
+node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "...")) {
+    return NULL;
+  }
+  location_t loc = *token_get_location(token);
+  parser_next(parser); /* '...' */
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_REST);
+  /* 操作数可选：后面没有表达式时保持 children 为空。 */
+  size_t after_rest = parser_get_position(parser);
+  parser_skip_trivia(parser);
+  node_t *operand = parser_read_expression(allocator, parser);
+  if (!operand) {
+    /* 孤立 `...`：游标回到 '...' 之后，不吞掉后续 trivia。 */
+    parser_set_position(parser, after_rest);
+    node_set_location(expr, &loc);
+    return expr;
+  }
+  node_resize_children(expr, 1);
+  node_set_child(expr, CLUX_EXPR_REST_EXPR, operand);
+  node_set_location_span(expr, &loc, node_get_location(operand));
+  return expr;
+}

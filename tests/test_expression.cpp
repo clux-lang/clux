@@ -3159,3 +3159,168 @@ TEST(ExpressionSubscriptTest, NoLeakOnSubscript) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= rest 表达式 =================
+   ...expr?，不在优先级链上；孤立 `...` 无子节点。 */
+
+static node_t *parse_rest(allocator_t *a, parser_t **p, const char *src) {
+  *p = create_parser(a, "test.clux", src);
+  return parser_read_expression_rest(a, *p);
+}
+
+TEST(ExpressionRestTest, BareRestHasNoChildren) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 0u);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionRestTest, RestWithOperand) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...args");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_REST);
+  ASSERT_EQ(vec_get_size(node_get_children(expr)), 1u);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_REST_EXPR);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_kind(operand), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 操作数可以是完整表达式。 */
+TEST(ExpressionRestTest, OperandCanBeExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...a.b");
+  ASSERT_NE(expr, nullptr);
+  ASSERT_EQ(vec_get_size(node_get_children(expr)), 1u);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_REST_EXPR);
+  EXPECT_EQ(node_get_kind(operand), CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 孤立 `...` 后跟 trivia：游标停在 '...' 之后，不吞掉 trivia。 */
+TEST(ExpressionRestTest, BareRestDoesNotConsumeTrailingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 0u);
+  /* token 序列：'...', whitespace */
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 孤立 `...` 后跟无法解析为表达式的 token：仍是无子节点的 rest。 */
+TEST(ExpressionRestTest, BareRestBeforeNonExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...,");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 0u);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 不是 '...' 开头时返回 NULL，游标不动。 */
+TEST(ExpressionRestTest, ReturnsNullWithoutRestToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_rest(a, &p, "a"), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionRestTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_rest(a, &p, ""), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+TEST(ExpressionRestTest, BareRestSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "...";
+  node_t *expr = parse_rest(a, &p, src);
+  expect_location_span(expr, src, "...");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionRestTest, RestWithOperandSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "...args";
+  node_t *expr = parse_rest(a, &p, src);
+  expect_location_span(expr, src, "...args");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionRestTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  ...  args  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_rest(a, p);
+  expect_location_span(expr, "  ...  args  ", "...  args");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionRestTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_rest(a, &p, "...args");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_REST_EXPR);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionRestTest, NoLeakOnRest) {
+  const char *sources[] = {
+      "...", "...args", "...a.b", "...   ", "...a + b", "a", "", nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression_rest(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

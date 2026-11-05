@@ -27,6 +27,8 @@ enum _node_kind_t {
   CLUX_NODE_EXPRESSION_SUBSCRIPT,
   /* 切片 base[lo?:hi?]，冒号使其在语法阶段即可区分。 */
   CLUX_NODE_EXPRESSION_SLICE,
+  /* rest 表达式 ...expr?，不在优先级链上；孤立 `...` 时无子节点。 */
+  CLUX_NODE_EXPRESSION_REST,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
