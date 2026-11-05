@@ -994,6 +994,10 @@ static const BinaryLevel kBinaryLevels[] = {
     {"And", parser_read_expression_and, "&", "^", true},
     {"Eq", parser_read_expression_equality, "==", "&", false},
     {"Ne", parser_read_expression_equality, "!=", "&", false},
+    {"Ge", parser_read_expression_relational, ">=", "==", false},
+    {"Le", parser_read_expression_relational, "<=", "==", false},
+    {"Gt", parser_read_expression_relational, ">", "==", false},
+    {"Lt", parser_read_expression_relational, "<", "==", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1408,6 +1412,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"OrXor", parser_read_expression_or, "|", "^"},
     {"XorAnd", parser_read_expression_xor, "^", "&"},
     {"AndEq", parser_read_expression_and, "&", "=="},
+    {"EqRel", parser_read_expression_equality, "==", "<"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1458,11 +1463,12 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f == g
-   =>  a || (b && (c | (d ^ (e & (f == g))))) */
+/* a || b && c | d ^ e & f == g < h
+   =>  a || (b && (c | (d ^ (e & (f == (g < h)))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a || b && c | d ^ e & f == g");
+  parser_t *p =
+      create_parser(a, "test.clux", "a || b && c | d ^ e & f == g < h");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1475,6 +1481,8 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(and_expr, "&");
   node_t *eq_expr = node_get_child(and_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(eq_expr, "==");
+  node_t *rel_expr = node_get_child(eq_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(rel_expr, "<");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -1491,6 +1499,35 @@ TEST(ExpressionPrecedenceTest, EqualityOperatorsShareLevel) {
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
+}
+
+/* 四个关系运算符同级，混用按左结合：(a < b) >= c */
+TEST(ExpressionPrecedenceTest, RelationalOperatorsShareLevel) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a < b >= c");
+  node_t *expr = parser_read_expression_relational(a, p);
+  expect_top_operator(expr, ">=");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "<");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 最长匹配：>= 不能被拆成 > 后跟 =，<< 也不能被拆成两个 <。 */
+TEST(ExpressionPrecedenceTest, LongestMatchWins) {
+  const char *sources[] = {">=", "<=", ">>", "<<", nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    token_t *token = parser_peek_token(p);
+    ASSERT_NE(token, nullptr) << "src=" << sources[i];
+    const location_t *loc = token_get_location(token);
+    EXPECT_EQ(loc->end.offset - loc->begin.offset, (ptrdiff_t)2)
+        << "src=" << sources[i];
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
 }
 
 /* 三元优先级低于 ||：条件可以是整个逻辑或表达式。 */

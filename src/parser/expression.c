@@ -33,9 +33,67 @@ static location_t expression_error_location(parser_t *parser,
   return loc;
 }
 
+/* 关系运算符表：同一优先级，按最长匹配顺序排列（>= 先于 >）。 */
+static const char *relational_operators[] = {">=", "<=", ">", "<", NULL};
+
+/* 若当前 token 是关系运算符则返回其文本，否则返回 NULL。 */
+static const char *peek_relational_operator(parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  for (size_t idx = 0; relational_operators[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_SYMBOL, relational_operators[idx])) {
+      return relational_operators[idx];
+    }
+  }
+  return NULL;
+}
+
+node_t *parser_read_expression_relational(allocator_t *allocator,
+                                          parser_t *parser) {
+  node_t *left = parser_read_literal(allocator, parser);
+  if (!left) {
+    return NULL;
+  }
+  /* 关系比较左结合（白皮书 5.3）：a < b < c 解析为 (a < b) < c。 */
+  for (;;) {
+    size_t after_left = parser_get_position(parser);
+    parser_skip_trivia(parser);
+    const char *op = peek_relational_operator(parser);
+    if (!op) {
+      /* 不是关系比较：回退游标到左操作数之后，不吞掉后续 trivia。 */
+      parser_set_position(parser, after_left);
+      return left;
+    }
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
+    node_t *symbol = parser_read_symbol(allocator, parser);
+    node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+    size_t after_symbol = parser_get_position(parser);
+    node_set_location_span(
+        expr, node_get_location(left), node_get_location(symbol));
+    parser_skip_trivia(parser);
+    node_t *right = parser_read_literal(allocator, parser);
+    if (!right) {
+      /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
+         同时记录错误，由调用方决定是否中止。 */
+      /* 错误位置先取：此时游标仍停在坏 token 上（若已到流末尾则退化）。 */
+      location_t loc =
+          expression_error_location(parser, node_get_location(symbol));
+      parser_set_position(parser, after_symbol);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected expression after '%s'", op));
+      return expr;
+    }
+    node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, right);
+    node_set_location_span(
+        expr, node_get_location(left), node_get_location(right));
+    left = expr;
+  }
+}
 node_t *parser_read_expression_equality(allocator_t *allocator,
                                         parser_t *parser) {
-  node_t *left = parser_read_literal(allocator, parser);
+  node_t *left = parser_read_expression_relational(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -65,7 +123,8 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
     node_set_location_span(
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
-    node_t *right = parser_read_literal(allocator, parser);
+    /* 右操作数走更高优先级层，保证 a == b < c 解析为 a == (b < c)。 */
+    node_t *right = parser_read_expression_relational(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
