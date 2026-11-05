@@ -415,13 +415,19 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
+   目前有构造与 literal 两个来源，后续陆续加入类型前缀、元组等同级运算符。 */
+node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
+  node_t *node = read_construct(allocator, parser);
+  if (node) {
+    return node;
+  }
+  return parser_read_literal(allocator, parser);
+}
+
 node_t *parser_read_expression_postfix(allocator_t *allocator,
                                        parser_t *parser) {
-  /* 构造表达式以 '.' 开头，与 literal 一样属于后缀链的起始操作数。 */
-  node_t *operand = read_construct(allocator, parser);
-  if (!operand) {
-    operand = parser_read_literal(allocator, parser);
-  }
+  node_t *operand = parser_read_expression_value(allocator, parser);
   if (!operand) {
     return NULL;
   }

@@ -4207,3 +4207,130 @@ TEST(ExpressionConstructTest, NoLeakOnConstruct) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 值表达式层 =================
+   与 literal 平级的构造统一从 parser_read_expression_value 进入。
+   目前内部只有 literal 一个代理，后续陆续加入同级的运算符。 */
+
+TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
+  struct Case {
+    const char *src;
+    node_kind_t kind;
+  };
+  const Case cases[] = {{"nil", CLUX_NODE_LITERAL_NIL},
+                        {"undefined", CLUX_NODE_LITERAL_UNDEFINED},
+                        {"true", CLUX_NODE_LITERAL_BOOLEAN},
+                        {"i32", CLUX_NODE_LITERAL_TYPE},
+                        {"'a'", CLUX_NODE_LITERAL_CHARACTER},
+                        {"\"s\"", CLUX_NODE_LITERAL_STRING},
+                        {"foo", CLUX_NODE_LITERAL_IDENTIFIER},
+                        {"42", CLUX_NODE_LITERAL_NUMERIC}};
+  for (const Case &c : cases) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", c.src);
+    node_t *expr = parser_read_expression_value(a, p);
+    ASSERT_NE(expr, nullptr) << "src=" << c.src;
+    EXPECT_EQ(node_get_kind(expr), c.kind) << "src=" << c.src;
+    EXPECT_EQ(parser_get_position(p), 1u) << "src=" << c.src;
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 构造与 literal 同级，同样从值层进入。 */
+TEST(ExpressionValueTest, DispatchesConstruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", ".T{1}");
+  node_t *expr = parser_read_expression_value(a, p);
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionValueTest, DispatchesAnonymousConstruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", ".{}");
+  node_t *expr = parser_read_expression_value(a, p);
+  expect_construct(expr, false, CLUX_NODE_LITERAL_IDENTIFIER, 0);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 值层不消费构造之后的后缀：.T{1}.field 的值层结果只是构造节点。 */
+TEST(ExpressionValueTest, DoesNotConsumeSuffixAfterConstruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", ".T{1}.field");
+  node_t *expr = parser_read_expression_value(a, p);
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  EXPECT_EQ(token_get_kind(parser_peek_token(p)), CLUX_TOKEN_SYMBOL);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionValueTest, ReturnsNullOnNonValue) {
+  const char *sources[] = {"var", ".", "!", nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    EXPECT_EQ(parser_read_expression_value(a, p), nullptr)
+        << "src=" << sources[i];
+    EXPECT_EQ(parser_get_position(p), 0u) << "src=" << sources[i];
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+TEST(ExpressionValueTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "");
+  EXPECT_EQ(parser_read_expression_value(a, p), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 值层不消费后缀：a.b 的值层结果只是裸标识符。 */
+TEST(ExpressionValueTest, DoesNotConsumeSuffix) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a.b");
+  node_t *expr = parser_read_expression_value(a, p);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionValueTest, NoLeakOnValue) {
+  const char *sources[] = {"nil",
+                           "undefined",
+                           "true",
+                           "i32",
+                           "'a'",
+                           "\"s\"",
+                           "foo",
+                           "42i64",
+                           ".T{1}",
+                           ".{}",
+                           ".T{...base, 2}",
+                           ".T{1}.field",
+                           ".T{",
+                           "var",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression_value(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
