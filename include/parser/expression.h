@@ -34,6 +34,19 @@ node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_expression_postfix(allocator_t *allocator,
                                        parser_t *parser);
 
+/* 下标/实例化节点：base[arg, ...]。
+   BASE 为被索引/被实例化的表达式，ARGS 起为逗号分隔的实参列表，
+   数量可变，因此 children 长度 = CLUX_EXPR_SUBSCRIPT_FIRST_ARG + 实参个数。
+   语法阶段无法区分下标与实例化，由 sema 按 BASE 的类型判定。 */
+#define CLUX_EXPR_SUBSCRIPT_BASE 0
+#define CLUX_EXPR_SUBSCRIPT_FIRST_ARG 1
+
+/* 切片节点：base[lo?:hi?]，LO/HI 可为 NULL（省略该端）。 */
+#define CLUX_EXPR_SLICE_CHILDREN_SIZE 3
+#define CLUX_EXPR_SLICE_BASE 0
+#define CLUX_EXPR_SLICE_LO 1
+#define CLUX_EXPR_SLICE_HI 2
+
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
 #define CLUX_EXPR_TERNARY_THEN 1

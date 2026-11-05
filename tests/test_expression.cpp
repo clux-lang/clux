@@ -2522,3 +2522,640 @@ TEST(ExpressionMemberTest, ChildrenParentIsNotAutoSet) {
   delete_parser(&p);
   delete_allocator(&a);
 }
+
+/* ================= 命名空间访问 =================
+   Type::member / module::name 与成员访问结构相同，只差分隔符。 */
+
+/* 断言命名空间访问节点的形状。 */
+static void
+expect_scope(node_t *expr, node_kind_t receiver_kind, const char *name_src) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+
+  node_t *receiver = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(receiver, nullptr);
+  EXPECT_EQ(node_get_kind(receiver), receiver_kind);
+
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            2);
+
+  node_t *name = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(name, nullptr);
+  EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(name)->end.offset -
+                node_get_location(name)->begin.offset,
+            (ptrdiff_t)strlen(name_src));
+  EXPECT_EQ(strncmp(node_get_location(name)->begin.offset,
+                    name_src,
+                    strlen(name_src)),
+            0);
+}
+
+TEST(ExpressionScopeTest, SimpleScopeAccess) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "Type::member");
+  expect_scope(expr, CLUX_NODE_LITERAL_IDENTIFIER, "member");
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 命名空间链左结合：a::b::c => (a::b)::c */
+TEST(ExpressionScopeTest, ScopeChainIsLeftAssociative) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::b::c");
+  ASSERT_NE(expr, nullptr);
+  expect_scope(expr, CLUX_NODE_EXPRESSION_BINARY, "c");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_scope(inner, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与成员访问混用：a::b.c => (a::b).c */
+TEST(ExpressionScopeTest, MixedWithMemberAccess) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::b.c");
+  ASSERT_NE(expr, nullptr);
+  expect_member(expr, CLUX_NODE_EXPRESSION_BINARY, "c");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_scope(inner, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* a.b::c => (a.b)::c */
+TEST(ExpressionScopeTest, MemberThenScope) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.b::c");
+  ASSERT_NE(expr, nullptr);
+  expect_scope(expr, CLUX_NODE_EXPRESSION_BINARY, "c");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_member(inner, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与后缀一元运算符混用：a::b.* => (a::b).* */
+TEST(ExpressionScopeTest, MixedWithPostfixOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::b.*");
+  ASSERT_NE(expr, nullptr);
+  expect_postfix(expr, ".*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *receiver = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_scope(receiver, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionScopeTest, TriviaAroundSeparator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a /* c */ :: /* d */ b");
+  expect_scope(expr, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 分隔符后不是 identifier 时不构成访问，游标回退。 */
+TEST(ExpressionScopeTest, FallsBackWhenSeparatorNotFollowedByIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  /* '::' 未被消费 */
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionScopeTest, KeywordIsNotAScopeName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::var");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 命名空间访问优先级高于所有二元层：a * b::c => a * (b::c) */
+TEST(ExpressionScopeTest, ScopeBindsTighterThanBinary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * b::c");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_scope(right, CLUX_NODE_LITERAL_IDENTIFIER, "c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+TEST(ExpressionScopeTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a::b";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a::b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionScopeTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  a  ::  b  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  a  ::  b  ", "a  ::  b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionScopeTest, ChainSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a::b::c";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a::b::c");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_location_span(inner, src, "a::b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionScopeTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a::b");
+  ASSERT_NE(expr, nullptr);
+  node_t *receiver = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(receiver, nullptr);
+  EXPECT_EQ(node_get_parent(receiver), nullptr);
+  node_t *name = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(name, nullptr);
+  EXPECT_EQ(node_get_parent(name), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionScopeTest, NoLeakOnScope) {
+  const char *sources[] = {"a::b",
+                           "a::b::c",
+                           "a::b.c",
+                           "a.b::c",
+                           "a::b.*",
+                           "a::1",
+                           "a::var",
+                           "a * b::c",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 下标 / 实例化 / 切片 =================
+   下标与实例化语法同形（base[expr, ...]），语法阶段统一为
+   CLUX_NODE_EXPRESSION_SUBSCRIPT；带冒号的切片为 CLUX_NODE_EXPRESSION_SLICE。 */
+
+/* 断言下标/实例化节点：BASE 为接收者，其后是实参列表。 */
+static void
+expect_subscript(node_t *expr, node_kind_t base_kind, size_t arg_count) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_SUBSCRIPT_FIRST_ARG + arg_count);
+  node_t *base = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_BASE);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(node_get_kind(base), base_kind);
+  for (size_t i = 0; i < arg_count; i++) {
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG + i), nullptr)
+        << "arg=" << i;
+  }
+}
+
+/* 断言切片节点：BASE 必存在，LO/HI 可为 NULL。 */
+static void
+expect_slice(node_t *expr, node_kind_t base_kind, bool has_lo, bool has_hi) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SLICE);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_SLICE_CHILDREN_SIZE);
+  node_t *base = node_get_child(expr, CLUX_EXPR_SLICE_BASE);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(node_get_kind(base), base_kind);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_SLICE_LO) != nullptr, has_lo);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_SLICE_HI) != nullptr, has_hi);
+}
+
+/* ---- 下标 / 实例化 ---- */
+
+TEST(ExpressionSubscriptTest, SingleArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[i]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  EXPECT_EQ(node_get_kind(arg), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, NumericIndex) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[0]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  EXPECT_EQ(node_get_kind(arg), CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 下标与实例化同形：多个逗号分隔实参。
+   注意实例化的类型实参（如 i32）是关键字，类型读取器尚未实现，
+   这里用 identifier 验证多实参形态。 */
+TEST(ExpressionSubscriptTest, MultipleArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "Vec[T, 4]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, ThreeArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "T[a, b, c]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 实参可以是任意表达式。 */
+TEST(ExpressionSubscriptTest, ExpressionArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[i + 1]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  EXPECT_EQ(node_get_kind(arg), CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 链式下标左结合：a[i][j] => (a[i])[j] */
+TEST(ExpressionSubscriptTest, ChainedSubscripts) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i][j]");
+  ASSERT_NE(expr, nullptr);
+  expect_subscript(expr, CLUX_NODE_EXPRESSION_SUBSCRIPT, 1);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_BASE);
+  expect_subscript(inner, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与成员访问混用：a.b[i] => (a.b)[i] */
+TEST(ExpressionSubscriptTest, MemberThenSubscript) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.b[i]");
+  ASSERT_NE(expr, nullptr);
+  expect_subscript(expr, CLUX_NODE_EXPRESSION_BINARY, 1);
+  node_t *base = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_BASE);
+  expect_member(base, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* a[i].b => (a[i]).b */
+TEST(ExpressionSubscriptTest, SubscriptThenMember) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i].b");
+  ASSERT_NE(expr, nullptr);
+  expect_member(expr, CLUX_NODE_EXPRESSION_SUBSCRIPT, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, TriviaInsideBrackets) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a [ /* c */ i /* d */ ]");
+  expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 切片 ---- */
+
+TEST(ExpressionSubscriptTest, SliceBothBounds) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[1:3]");
+  expect_slice(expr, CLUX_NODE_LITERAL_IDENTIFIER, true, true);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 省略下界：arr[:3] */
+TEST(ExpressionSubscriptTest, SliceOpenLower) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[:3]");
+  expect_slice(expr, CLUX_NODE_LITERAL_IDENTIFIER, false, true);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 省略上界：arr[1:] */
+TEST(ExpressionSubscriptTest, SliceOpenUpper) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[1:]");
+  expect_slice(expr, CLUX_NODE_LITERAL_IDENTIFIER, true, false);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 两端都省略：arr[:]（[N]T → []T 的唯一显式转换路径） */
+TEST(ExpressionSubscriptTest, SliceBothOpen) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[:]");
+  expect_slice(expr, CLUX_NODE_LITERAL_IDENTIFIER, false, false);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 边界可以是表达式。 */
+TEST(ExpressionSubscriptTest, SliceExpressionBounds) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "arr[i + 1:j * 2]");
+  expect_slice(expr, CLUX_NODE_LITERAL_IDENTIFIER, true, true);
+  node_t *lo = node_get_child(expr, CLUX_EXPR_SLICE_LO);
+  EXPECT_EQ(node_get_kind(lo), CLUX_NODE_EXPRESSION_BINARY);
+  node_t *hi = node_get_child(expr, CLUX_EXPR_SLICE_HI);
+  EXPECT_EQ(node_get_kind(hi), CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 切片链：a[1:][0] => (a[1:])[0] */
+TEST(ExpressionSubscriptTest, SliceThenSubscript) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[1:][0]");
+  ASSERT_NE(expr, nullptr);
+  expect_subscript(expr, CLUX_NODE_EXPRESSION_SLICE, 1);
+  node_t *base = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_BASE);
+  expect_slice(base, CLUX_NODE_LITERAL_IDENTIFIER, true, false);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺第一个实参：a[] */
+TEST(ExpressionSubscriptTest, EmptySubscriptReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[]");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  /* 只有 BASE，没有实参 */
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression in subscript");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 逗号后缺实参：a[i,] */
+TEST(ExpressionSubscriptTest, TrailingCommaReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i,]");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_SUBSCRIPT_FIRST_ARG + 1);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression after ','");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右方括号：a[i */
+TEST(ExpressionSubscriptTest, MissingCloseBracketReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected ']' to close subscript");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 切片缺右方括号：a[1:2 */
+TEST(ExpressionSubscriptTest, SliceMissingCloseBracketReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[1:2");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_SLICE);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected ']' to close slice");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, ValidSubscriptProducesNoError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i]");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 优先级 ---- */
+
+/* 下标优先级高于所有二元层：a * b[i] => a * (b[i]) */
+TEST(ExpressionSubscriptTest, SubscriptBindsTighterThanBinary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * b[i]");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_subscript(right, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 下标优先级高于前缀一元：-a[i] => -(a[i]) */
+TEST(ExpressionSubscriptTest, SubscriptBindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-a[i]");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+TEST(ExpressionSubscriptTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a[i]";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a[i]");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  a  [  i  ]  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  a  [  i  ]  ", "a  [  i  ]");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionSubscriptTest, SliceSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a[1:2]";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a[1:2]");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionSubscriptTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i]");
+  ASSERT_NE(expr, nullptr);
+  node_t *base = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_BASE);
+  ASSERT_NE(base, nullptr);
+  EXPECT_EQ(node_get_parent(base), nullptr);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  ASSERT_NE(arg, nullptr);
+  EXPECT_EQ(node_get_parent(arg), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionSubscriptTest, NoLeakOnSubscript) {
+  const char *sources[] = {
+      "a[i]",    "a[0]",   "a[i + 1]", "Vec[T, 4]",       "T[a, b, c]",
+      "a[i][j]", "a.b[i]", "a[i].b",   "a [ /* c */ i ]", "a[1:3]",
+      "a[:3]",   "a[1:]",  "a[:]",     "a[i + 1:j * 2]",  "a[1:][0]",
+      "a[]",     "a[i,]",  "a[i",      "a[1:2",           "a * b[i]",
+      "",        nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

@@ -23,6 +23,10 @@ enum _node_kind_t {
   CLUX_NODE_EXPRESSION_TERNARY,
   CLUX_NODE_EXPRESSION_BINARY,
   CLUX_NODE_EXPRESSION_UNARY,
+  /* 下标与实例化语法同形（base[expr, ...]），语法阶段无法区分，统一为此类型。 */
+  CLUX_NODE_EXPRESSION_SUBSCRIPT,
+  /* 切片 base[lo?:hi?]，冒号使其在语法阶段即可区分。 */
+  CLUX_NODE_EXPRESSION_SLICE,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

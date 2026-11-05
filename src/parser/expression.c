@@ -100,6 +100,102 @@ static const char *peek_postfix_operator(parser_t *parser) {
   return NULL;
 }
 
+/* 解析方括号后缀。调用前已确认当前 token 是 '['。
+   语法阶段无法区分下标与实例化（两者同形 base[expr, ...]），统一产出
+   CLUX_NODE_EXPRESSION_SUBSCRIPT；带冒号的切片产出 CLUX_NODE_EXPRESSION_SLICE。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+static node_t *
+read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
+  location_t open_loc = *token_get_location(parser_peek_token(parser));
+  parser_next(parser); /* '[' */
+  parser_skip_trivia(parser);
+
+  token_t *token = parser_peek_token(parser);
+  node_t *first = NULL;
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ":") &&
+      !token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+    first = parser_read_expression(allocator, parser);
+    parser_skip_trivia(parser);
+  }
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
+    /* 切片 base[lo?:hi?]，两端均可省略。 */
+    parser_next(parser); /* ':' */
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    node_t *hi = NULL;
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+      hi = parser_read_expression(allocator, parser);
+      parser_skip_trivia(parser);
+    }
+    location_t close_loc = open_loc;
+    token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+      close_loc = *token_get_location(token);
+      parser_next(parser);
+    } else {
+      location_t loc = expression_error_location(parser, &open_loc);
+      parser_push_error(
+          parser, create_error(allocator, &loc, "expected ']' to close slice"));
+    }
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_SLICE);
+    node_resize_children(expr, CLUX_EXPR_SLICE_CHILDREN_SIZE);
+    node_set_child(expr, CLUX_EXPR_SLICE_BASE, base);
+    node_set_child(expr, CLUX_EXPR_SLICE_LO, first);
+    node_set_child(expr, CLUX_EXPR_SLICE_HI, hi);
+    node_set_location_span(expr, node_get_location(base), &close_loc);
+    return expr;
+  }
+
+  /* 下标或实例化：base[expr, expr, ...]。 */
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  node_resize_children(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
+  node_set_child(expr, CLUX_EXPR_SUBSCRIPT_BASE, base);
+  const location_t *end_loc = node_get_location(base);
+  if (!first) {
+    /* a[] 或 a[ , ...]：缺第一个实参。 */
+    location_t loc = expression_error_location(parser, &open_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression in subscript"));
+  } else {
+    vec_push(node_get_children(expr), first);
+    end_loc = node_get_location(first);
+  }
+  for (;;) {
+    token = parser_peek_token(parser);
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      break;
+    }
+    parser_next(parser); /* ',' */
+    parser_skip_trivia(parser);
+    node_t *arg = parser_read_expression(allocator, parser);
+    if (!arg) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected expression after ','"));
+      break;
+    }
+    vec_push(node_get_children(expr), arg);
+    end_loc = node_get_location(arg);
+    parser_skip_trivia(parser);
+  }
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+  } else {
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ']' to close subscript"));
+  }
+  node_set_location_span(expr, node_get_location(base), end_loc);
+  return expr;
+}
+
 node_t *parser_read_expression_postfix(allocator_t *allocator,
                                        parser_t *parser) {
   node_t *operand = parser_read_literal(allocator, parser);
@@ -123,30 +219,38 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
       operand = expr;
       continue;
     }
-    /* 成员访问 obj.field：字段名恒为 identifier。
-       LEFT=接收者，SYMBOL='.'，RIGHT=字段名。 */
+    /* 成员访问 obj.field 与命名空间访问 Type::member 结构相同，
+       只差分隔符；字段/成员名恒为 identifier。
+       LEFT=接收者，SYMBOL=分隔符，RIGHT=名字。 */
     token_t *token = parser_peek_token(parser);
-    if (token_is(token, CLUX_TOKEN_SYMBOL, ".")) {
-      node_t *dot = parser_read_symbol(allocator, parser);
+    bool is_member = token_is(token, CLUX_TOKEN_SYMBOL, ".");
+    bool is_scope = token_is(token, CLUX_TOKEN_SYMBOL, "::");
+    if (is_member || is_scope) {
+      node_t *separator = parser_read_symbol(allocator, parser);
       parser_skip_trivia(parser);
-      node_t *field = parser_read_literal_identifier(allocator, parser);
-      if (!field) {
-        /* 点号后不是 identifier：不是成员访问，回退到接收者之后。 */
-        delete_node(&dot);
+      node_t *name = parser_read_literal_identifier(allocator, parser);
+      if (!name) {
+        /* 分隔符后不是 identifier：不构成访问，回退到接收者之后。 */
+        delete_node(&separator);
         parser_set_position(parser, after_operand);
         return operand;
       }
       node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
       node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
       node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
-      node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, dot);
-      node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, field);
+      node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, separator);
+      node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, name);
       node_set_location_span(
-          expr, node_get_location(operand), node_get_location(field));
+          expr, node_get_location(operand), node_get_location(name));
       operand = expr;
       continue;
     }
-    /* 既不是后缀运算符也不是成员访问：回退游标到操作数之后，
+    /* 方括号后缀：下标 / 实例化 / 切片。 */
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
+      operand = read_bracket_suffix(allocator, parser, operand);
+      continue;
+    }
+    /* 既不是后缀运算符也不是访问：回退游标到操作数之后，
        不吞掉后续 trivia。 */
     parser_set_position(parser, after_operand);
     return operand;
