@@ -415,10 +415,60 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 解析括号表达式 ( expr )。调用前当前 token 不一定是 '('；
+   不是 '(' 时返回 NULL 且游标不动。
+   括号内走顶层入口 parser_read_expression，因此赋值、三元等整条链都允许；
+   括号内是否为合法值由语义阶段判定，语法层不剥离。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+static node_t *read_group(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "(")) {
+    return NULL;
+  }
+  location_t open_loc = *token_get_location(token);
+  parser_next(parser); /* '(' */
+  parser_skip_trivia(parser);
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_GROUP);
+  node_resize_children(expr, 1);
+  node_set_location_span(expr, &open_loc, &open_loc);
+
+  node_t *inner = parser_read_expression(allocator, parser);
+  if (!inner) {
+    location_t loc = expression_error_location(parser, &open_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression in parentheses"));
+  } else {
+    node_set_child(expr, CLUX_EXPR_GROUP_EXPR, inner);
+    node_set_location_span(expr, &open_loc, node_get_location(inner));
+  }
+  parser_skip_trivia(parser);
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+    location_t close_loc = *token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(expr, &open_loc, &close_loc);
+  } else {
+    const location_t *end_loc = inner ? node_get_location(inner) : &open_loc;
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ')' to close parentheses"));
+  }
+  return expr;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
-   目前有构造与 literal 两个来源，后续陆续加入类型前缀、元组等同级运算符。 */
+   目前有构造、括号与 literal 三个来源，后续陆续加入类型前缀、元组等
+   同级运算符。 */
 node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_group(allocator, parser);
   if (node) {
     return node;
   }

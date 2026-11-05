@@ -4334,3 +4334,279 @@ TEST(ExpressionValueTest, NoLeakOnValue) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 括号表达式 =================
+   ( expr )：只有一个子节点，用于改变结合/优先级。
+   括号内走顶层入口，语法层不校验是否为合法值。 */
+
+static void expect_group(node_t *expr, node_kind_t inner_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_GROUP);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 1u);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_GROUP_EXPR);
+  ASSERT_NE(inner, nullptr);
+  EXPECT_EQ(node_get_kind(inner), inner_kind);
+}
+
+TEST(ExpressionGroupTest, WrapsIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a)");
+  expect_group(expr, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 括号内是整条表达式链，不只是值层。 */
+TEST(ExpressionGroupTest, WrapsBinaryExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a + b)");
+  expect_group(expr, CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语法层允许顶层入口作为子语句：赋值在括号内合法。 */
+TEST(ExpressionGroupTest, AllowsAssignmentInside) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(x = 1)");
+  expect_group(expr, CLUX_NODE_EXPRESSION_ASSIGN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, AllowsTernaryInside) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a ? b : c)");
+  expect_group(expr, CLUX_NODE_EXPRESSION_TERNARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套括号：(a) 的括号内还可以是括号。 */
+TEST(ExpressionGroupTest, NestedGroups) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "((a))");
+  expect_group(expr, CLUX_NODE_EXPRESSION_GROUP);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_GROUP_EXPR);
+  expect_group(inner, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 括号改变优先级：a * (b + c) 的右操作数是括号节点。 */
+TEST(ExpressionGroupTest, ChangesPrecedence) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * (b + c)");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_group(right, CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 括号是后缀链的起点：(a).b / (a)[i] / (a)(x) */
+TEST(ExpressionGroupTest, GroupThenMember) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a).b");
+  expect_member(expr, CLUX_NODE_EXPRESSION_GROUP, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, GroupThenSubscript) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a)[i]");
+  expect_subscript(expr, CLUX_NODE_EXPRESSION_GROUP, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, GroupThenCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a)(x)");
+  expect_call(expr, CLUX_NODE_EXPRESSION_GROUP, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 调用实参里的括号：f((a)) 的实参是括号节点。 */
+TEST(ExpressionGroupTest, GroupInsideCallArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f((a))");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  expect_group(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG),
+               CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 括号前后 trivia 不属于表达式区间。 */
+TEST(ExpressionGroupTest, TriviaInsideParens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "( /* c */ a /* d */ )");
+  expect_group(expr, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(ExpressionGroupTest, EmptyParensReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "()");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_GROUP);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_GROUP_EXPR), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in parentheses");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_GROUP);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' to close parentheses");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 空括号未闭合：( —— 缺表达式与缺右括号各报一次。 */
+TEST(ExpressionGroupTest, UnclosedEmptyParensReportsBothErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_GROUP);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 2u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in parentheses");
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 1)),
+               "expected ')' to close parentheses");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = '(' 起点 .. ')' 终点，不含前后 trivia。 */
+TEST(ExpressionGroupTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "(a + b)";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "(a + b)");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  (  a  )  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  (  a  )  ", "(  a  )");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionGroupTest, NestedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "((a))";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "((a))");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_GROUP_EXPR);
+  expect_location_span(inner, src, "(a)");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionGroupTest, ChildParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "(a)");
+  ASSERT_NE(expr, nullptr);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_GROUP_EXPR);
+  ASSERT_NE(inner, nullptr);
+  EXPECT_EQ(node_get_parent(inner), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionGroupTest, NoLeakOnGroup) {
+  const char *sources[] = {"(a)",
+                           "(a + b)",
+                           "(x = 1)",
+                           "(a ? b : c)",
+                           "((a))",
+                           "a * (b + c)",
+                           "(a).b",
+                           "(a)[i]",
+                           "(a)(x)",
+                           "f((a))",
+                           "( /* c */ a )",
+                           "()",
+                           "(a",
+                           "(",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

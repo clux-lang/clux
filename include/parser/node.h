@@ -37,6 +37,8 @@ enum _node_kind_t {
   /* 构造表达式 .type?{ elem, ... }；类型槽可为 NULL（匿名构造），
      元素一律是表达式或 rest 表达式。语法阶段不区分类型与普通表达式。 */
   CLUX_NODE_EXPRESSION_CONSTRUCT,
+  /* 括号表达式 ( expr )，只有一个子节点，用于改变结合/优先级。 */
+  CLUX_NODE_EXPRESSION_GROUP,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
