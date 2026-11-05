@@ -2901,13 +2901,14 @@ TEST(ExpressionSubscriptTest, NumericIndex) {
 }
 
 /* 下标与实例化同形：多个逗号分隔实参。
-   注意实例化的类型实参（如 i32）是关键字，类型读取器尚未实现，
-   这里用 identifier 验证多实参形态。 */
+   类型实参（如 i32）词法层是关键字，由 literal_type 读取。 */
 TEST(ExpressionSubscriptTest, MultipleArguments) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *expr = parse_postfix(a, &p, "Vec[T, 4]");
+  node_t *expr = parse_postfix(a, &p, "Vec[i32, 4]");
   expect_subscript(expr, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG)),
+            CLUX_NODE_LITERAL_TYPE);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -3225,7 +3226,7 @@ TEST(ExpressionSubscriptTest, ChildrenParentIsNotAutoSet) {
 
 TEST(ExpressionSubscriptTest, NoLeakOnSubscript) {
   const char *sources[] = {
-      "a[i]",    "a[0]",   "a[i + 1]", "Vec[T, 4]",       "T[a, b, c]",
+      "a[i]",    "a[0]",   "a[i + 1]", "Vec[i32, 4]",     "T[a, b, c]",
       "a[i][j]", "a.b[i]", "a[i].b",   "a [ /* c */ i ]", "a[1:3]",
       "a[:3]",   "a[1:]",  "a[:]",     "a[i + 1:j * 2]",  "a[1:][0]",
       "a[]",     "a[i,]",  "a[i",      "a[1:2",           "a * b[i]",
@@ -3901,6 +3902,18 @@ TEST(ExpressionConstructTest, TypeCanBeSubscript) {
   delete_allocator(&a);
 }
 
+/* 类型槽可以是内建类型名（literal_type）。 */
+TEST(ExpressionConstructTest, TypeCanBeBuiltinTypeName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".i32{5}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_TYPE, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* 类型槽不限于标识符：字面量在语法阶段同样合法。 */
 TEST(ExpressionConstructTest, TypeCanBeNumericLiteral) {
   allocator_t *a = create_allocator(malloc, free);
@@ -4164,6 +4177,7 @@ TEST(ExpressionConstructTest, NoLeakOnConstruct) {
                            ".mod.T{1}",
                            ".aaa(b){1}",
                            ".Box[T]{1}",
+                           ".i32{5}",
                            ".123{}",
                            ".T{...base, 2}",
                            ".T{...}",

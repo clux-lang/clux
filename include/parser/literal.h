@@ -18,6 +18,9 @@ node_t *parser_read_literal_character(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_literal_numeric(allocator_t *allocator, parser_t *parser);
 /* true / false（词法层识别为关键字）。 */
 node_t *parser_read_literal_boolean(allocator_t *allocator, parser_t *parser);
+/* 内建类型名：bool str void opaque i8..i64 u8..u64 f32 f64 isize usize。
+   语法阶段类型就是普通表达式，节点与 literal 同级。 */
+node_t *parser_read_literal_type(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_literal_identifier(allocator_t *allocator,
                                        parser_t *parser);
 node_t *parser_read_literal(allocator_t *allocator, parser_t *parser);

@@ -68,6 +68,8 @@ TEST(LexerKeywordTest, TypeKeywords) {
                        "f32",
                        "f64",
                        "str",
+                       "void",
+                       "opaque",
                        nullptr};
   for (int i = 0; kws[i] != nullptr; i++) {
     position_t p = lexer_test_pos(kws[i]);

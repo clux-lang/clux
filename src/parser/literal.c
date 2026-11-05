@@ -79,6 +79,44 @@ node_t *parser_read_literal_identifier(allocator_t *allocator,
       allocator, parser, CLUX_TOKEN_IDENTIFIER, CLUX_NODE_LITERAL_IDENTIFIER);
 }
 
+/* 内建类型名（白皮书 §2.1）。词法层把它们识别为关键字。 */
+static const char *type_names[] = {
+    "bool",
+    "str",
+    "void",
+    "opaque",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "f32",
+    "f64",
+    "isize",
+    "usize",
+    NULL,
+};
+
+node_t *parser_read_literal_type(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token || token_get_kind(token) != CLUX_TOKEN_KEYWORD) {
+    return NULL;
+  }
+  for (size_t idx = 0; type_names[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_KEYWORD, type_names[idx])) {
+      location_t loc = *token_get_location(token);
+      parser_next(parser);
+      node_t *node = create_node(allocator, CLUX_NODE_LITERAL_TYPE);
+      node_set_location(node, &loc);
+      return node;
+    }
+  }
+  return NULL;
+}
+
 /* 数字类型后缀（词法层识别为关键字）。 */
 static const char *numeric_suffixes[] = {
     "i8",
@@ -137,6 +175,10 @@ node_t *parser_read_literal(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_literal_boolean(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_literal_type(allocator, parser);
   if (node) {
     return node;
   }

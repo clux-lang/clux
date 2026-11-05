@@ -18,6 +18,9 @@ enum _node_kind_t {
   CLUX_NODE_LITERAL_NUMERIC,
   CLUX_NODE_LITERAL_BOOLEAN,
   CLUX_NODE_LITERAL_IDENTIFIER,
+  /* 内建类型名（i8..f64、isize/usize、bool/str/void/opaque）。
+     语法阶段与 literal 同级，就是普通表达式。 */
+  CLUX_NODE_LITERAL_TYPE,
 
   CLUX_NODE_EXPRESSION_ASSIGN,
   CLUX_NODE_EXPRESSION_TERNARY,
