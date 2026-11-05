@@ -233,11 +233,12 @@ TEST(ExpressionAssignTest, FallsBackToLiteralForPlainIdentifier) {
 TEST(ExpressionAssignTest, FallsBackWhenIdentifierNotFollowedByAssign) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  /* "a + b"：identifier 后是 '+'，不是赋值运算符 → 回退 */
-  node_t *expr = parse_expr(a, &p, "a + b");
+  /* "a , b"：identifier 后是 ','，不是赋值运算符 → 回退。
+     用 ',' 而非 '+' 等真实运算符，避免这条用例随运算符实现推进而失效。 */
+  node_t *expr = parse_expr(a, &p, "a , b");
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
-  /* 游标停在 identifier 之后，'+' 未被消费 */
+  /* 游标停在 identifier 之后，',' 未被消费 */
   EXPECT_EQ(parser_get_position(p), 1u);
   delete_node(&expr);
   delete_parser(&p);
@@ -1000,6 +1001,8 @@ static const BinaryLevel kBinaryLevels[] = {
     {"Lt", parser_read_expression_relational, "<", "==", false},
     {"Shl", parser_read_expression_shift, "<<", "<", false},
     {"Shr", parser_read_expression_shift, ">>", "<", false},
+    {"Add", parser_read_expression_additive, "+", "<<", false},
+    {"Sub", parser_read_expression_additive, "-", "<<", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1416,6 +1419,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"AndEq", parser_read_expression_and, "&", "=="},
     {"EqRel", parser_read_expression_equality, "==", "<"},
     {"RelShift", parser_read_expression_relational, "<", "<<"},
+    {"ShiftAdd", parser_read_expression_shift, "<<", "+"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1466,12 +1470,12 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f == g < h << i
-   =>  a || (b && (c | (d ^ (e & (f == (g < (h << i))))))) */
+/* a || b && c | d ^ e & f == g < h << i + j
+   =>  a || (b && (c | (d ^ (e & (f == (g < (h << (i + j)))))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p =
-      create_parser(a, "test.clux", "a || b && c | d ^ e & f == g < h << i");
+  parser_t *p = create_parser(
+      a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1488,6 +1492,21 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(rel_expr, "<");
   node_t *shift_expr = node_get_child(rel_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(shift_expr, "<<");
+  node_t *add_expr = node_get_child(shift_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(add_expr, "+");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* + 与 - 同级，混用按左结合：(a - b) + c */
+TEST(ExpressionPrecedenceTest, AdditiveOperatorsShareLevel) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a - b + c");
+  node_t *expr = parser_read_expression_additive(a, p);
+  expect_top_operator(expr, "+");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "-");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
