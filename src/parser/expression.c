@@ -494,9 +494,48 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 类型修饰前缀 const / volatile <postfix>（白皮书 §2.3）。
+   与指针前缀同构：操作数只取后缀层，因此 const *T 解析为 const (*T)，
+   而 const T * x 解析为 (const T) * x。复用一元节点形态：LEFT 为 NULL，
+   SYMBOL 存修饰关键字，RIGHT 存操作数。操作数与指针前缀一致只取后缀层，
+   因此 const a.b 解析为 const (a.b)；后缀层会回到值层，支持
+   const volatile T 这类叠加。 */
+static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "const") &&
+      !token_is(token, CLUX_TOKEN_KEYWORD, "volatile")) {
+    return NULL;
+  }
+  location_t keyword_loc = *token_get_location(token);
+  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(symbol, &keyword_loc);
+  parser_next(parser); /* const / volatile */
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_set_location_span(expr, &keyword_loc, &keyword_loc);
+
+  size_t after_keyword = parser_get_position(parser);
+  parser_skip_trivia(parser);
+  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  if (!operand) {
+    /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
+    location_t loc = expression_error_location(parser, &keyword_loc);
+    parser_set_position(parser, after_keyword);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression after qualifier"));
+    return expr;
+  }
+  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  node_set_location_span(expr, &keyword_loc, node_get_location(operand));
+  return expr;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
-   目前有构造、括号、指针类型与 literal 四个来源，后续陆续加入元组等
-   同级运算符。 */
+   目前有构造、括号、指针类型、类型修饰与 literal 五个来源，后续陆续
+   加入元组等同级运算符。 */
 node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -507,6 +546,10 @@ node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = read_pointer(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_qualifier(allocator, parser);
   if (node) {
     return node;
   }

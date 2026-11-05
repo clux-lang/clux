@@ -4845,3 +4845,267 @@ TEST(ExpressionPointerTest, NoLeakOnPointer) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 类型修饰前缀 =================
+   const / volatile <postfix>：复用一元节点形态，LEFT 为 NULL，
+   SYMBOL 存修饰关键字，RIGHT 存操作数。 */
+
+static void
+expect_qualifier(node_t *expr, const char *op, node_kind_t operand_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)strlen(op));
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_kind(operand), operand_kind);
+}
+
+TEST(ExpressionQualifierTest, ConstWrapsIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const T");
+  expect_qualifier(expr, "const", CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionQualifierTest, VolatileWrapsIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "volatile T");
+  expect_qualifier(expr, "volatile", CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionQualifierTest, WrapsBuiltinTypeName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const i32");
+  expect_qualifier(expr, "const", CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 操作数取后缀层：const a.b => const (a.b) */
+TEST(ExpressionQualifierTest, OperandTakesPostfixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const a.b");
+  expect_qualifier(expr, "const", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_member(operand, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与指针组合：const *T => const (*T) */
+TEST(ExpressionQualifierTest, WrapsPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const *T");
+  expect_qualifier(expr, "const", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(operand, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 指针套修饰：*const T => *(const T) */
+TEST(ExpressionQualifierTest, PointerWrapsQualifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*const T");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 叠加：const volatile T => const (volatile T) */
+TEST(ExpressionQualifierTest, StackedQualifiers) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const volatile T");
+  expect_qualifier(expr, "const", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_qualifier(operand, "volatile", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 修饰不吞乘法：const T * x => (const T) * x */
+TEST(ExpressionQualifierTest, DoesNotSwallowMultiplication) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "const T * x");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_qualifier(left, "const", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 修饰优先级高于前缀一元：-const T => -(const T) */
+TEST(ExpressionQualifierTest, BindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-const T");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 修饰可包裹括号：const (a + b) */
+TEST(ExpressionQualifierTest, WrapsGroup) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const (a + b)");
+  expect_qualifier(expr, "const", CLUX_NODE_EXPRESSION_GROUP);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺操作数：单独的 const —— 返回不完整节点并上报错误。 */
+TEST(ExpressionQualifierTest, MissingOperandReportsError) {
+  const char *ops[] = {"const", "volatile", nullptr};
+  for (size_t i = 0; ops[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *expr = parse_postfix(a, &p, ops[i]);
+    ASSERT_NE(expr, nullptr) << "op=" << ops[i];
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+    EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+    EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+    vec_t *errors = parser_get_error(p);
+    ASSERT_EQ(vec_get_size(errors), 1u) << "op=" << ops[i];
+    EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+                 "expected expression after qualifier");
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 缺操作数时游标回到关键字之后，不吞掉后续 trivia。 */
+TEST(ExpressionQualifierTest, MissingOperandDoesNotConsumeTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = 关键字起点 .. 操作数终点，不含前后 trivia。 */
+TEST(ExpressionQualifierTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "const a.b";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "const a.b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionQualifierTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  const   T  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  const   T  ", "const   T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionQualifierTest, StackedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "const volatile T";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "const volatile T");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "volatile T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionQualifierTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "const T");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionQualifierTest, NoLeakOnQualifier) {
+  const char *sources[] = {"const T",
+                           "volatile T",
+                           "const i32",
+                           "const a.b",
+                           "const *T",
+                           "*const T",
+                           "const volatile T",
+                           "const T * x",
+                           "-const T",
+                           "const (a + b)",
+                           "const",
+                           "volatile",
+                           "const   ",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
