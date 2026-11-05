@@ -7,6 +7,12 @@
 extern "C" {
 #endif
 
+#define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
+#define CLUX_EXPR_TERNARY_CONDITION 0
+#define CLUX_EXPR_TERNARY_THEN 1
+#define CLUX_EXPR_TERNARY_ELSE 2
+node_t *parser_read_expression_ternary(allocator_t *allocator,
+                                       parser_t *parser);
 #define CLUX_EXPR_ASSIGN_CHILDREN_SIZE 3
 #define CLUX_EXPR_ASSIGN_ID 0
 #define CLUX_EXPR_ASSIGN_SYMBOL 1

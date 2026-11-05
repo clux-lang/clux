@@ -20,6 +20,7 @@ enum _node_kind_t {
   CLUX_NODE_LITERAL_IDENTIFIER,
 
   CLUX_NODE_EXPRESSION_ASSIGN,
+  CLUX_NODE_EXPRESSION_TERNARY,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

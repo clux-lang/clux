@@ -389,3 +389,579 @@ TEST(ExpressionAssignTest, NoLeakOnAssign) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 三元表达式 ================= */
+
+static node_t *parse_ternary(allocator_t *a, parser_t **p, const char *src) {
+  *p = create_parser(a, "test.clux", src);
+  return parser_read_expression_ternary(a, *p);
+}
+
+/* 断言三元节点的三个子节点形状。 */
+static void expect_ternary(node_t *expr,
+                           node_kind_t condition_kind,
+                           node_kind_t then_kind,
+                           node_kind_t else_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_TERNARY_CHILDREN_SIZE);
+
+  node_t *condition = node_get_child(expr, CLUX_EXPR_TERNARY_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), condition_kind);
+
+  node_t *then = node_get_child(expr, CLUX_EXPR_TERNARY_THEN);
+  ASSERT_NE(then, nullptr);
+  EXPECT_EQ(node_get_kind(then), then_kind);
+
+  node_t *else_ = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  ASSERT_NE(else_, nullptr);
+  EXPECT_EQ(node_get_kind(else_), else_kind);
+}
+
+/* 子节点下标必须互不相同（防止宏复制粘贴错误）。 */
+TEST(ExpressionTernaryTest, ChildIndexesAreDistinct) {
+  EXPECT_NE(CLUX_EXPR_TERNARY_CONDITION, CLUX_EXPR_TERNARY_THEN);
+  EXPECT_NE(CLUX_EXPR_TERNARY_CONDITION, CLUX_EXPR_TERNARY_ELSE);
+  EXPECT_NE(CLUX_EXPR_TERNARY_THEN, CLUX_EXPR_TERNARY_ELSE);
+}
+
+TEST(ExpressionTernaryTest, SimpleTernary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b : c");
+  expect_ternary(expr,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, NumericBranches) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "1 ? 2 : 3");
+  expect_ternary(expr,
+                 CLUX_NODE_LITERAL_NUMERIC,
+                 CLUX_NODE_LITERAL_NUMERIC,
+                 CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, MixedLiteralKinds) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "true ? \"s\" : 'c'");
+  expect_ternary(expr,
+                 CLUX_NODE_LITERAL_BOOLEAN,
+                 CLUX_NODE_LITERAL_STRING,
+                 CLUX_NODE_LITERAL_CHARACTER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, NilAndUndefinedBranches) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "nil ? undefined : nil");
+  expect_ternary(expr,
+                 CLUX_NODE_LITERAL_NIL,
+                 CLUX_NODE_LITERAL_UNDEFINED,
+                 CLUX_NODE_LITERAL_NIL);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 三元是右结合：a ? b : (c ? d : e) */
+TEST(ExpressionTernaryTest, NestedInElseBranchIsRightAssociative) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b : c ? d : e");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *outer_else = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  ASSERT_NE(outer_else, nullptr);
+  EXPECT_EQ(node_get_kind(outer_else), CLUX_NODE_EXPRESSION_TERNARY);
+  expect_ternary(outer_else,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* then 分支同样是三元表达式：a ? (b ? c : d) : e */
+TEST(ExpressionTernaryTest, NestedInThenBranch) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b ? c : d : e");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *then = node_get_child(expr, CLUX_EXPR_TERNARY_THEN);
+  ASSERT_NE(then, nullptr);
+  EXPECT_EQ(node_get_kind(then), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *outer_else = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  ASSERT_NE(outer_else, nullptr);
+  EXPECT_EQ(node_get_kind(outer_else), CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, TriviaAroundOperators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a  /* c */  ?  b  // d\n :  c");
+  expect_ternary(expr,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 不是三元时原样返回条件，且游标停在条件之后（不吞掉后续 trivia）。 */
+TEST(ExpressionTernaryTest, FallsBackToConditionWithoutTernary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, FallbackDoesNotConsumeTrailingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  /* token 序列：identifier, whitespace */
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, FallbackWhenFollowedByNonQuestionSymbol) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a : b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  /* ':' 未被消费，游标停在条件之后 */
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, ReturnsNullOnNonLiteral) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_ternary(a, &p, "?"), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_ternary(a, &p, ""), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 与赋值组合 ---- */
+
+TEST(ExpressionTernaryTest, AssignWithTernaryValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "x = a ? b : c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_ASSIGN);
+  node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
+  expect_ternary(value,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
+                 CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, CompoundAssignWithTernaryValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "x += a ? 1 : 2");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_ASSIGN);
+  node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(node_get_kind(value), CLUX_NODE_EXPRESSION_TERNARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺 then 分支：返回不完整节点，THEN/ELSE 为 NULL，并上报错误。 */
+TEST(ExpressionTernaryTest, MissingThenReturnsPartialNodeAndError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ?";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_TERNARY_CONDITION), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_THEN), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression after '?'");
+  EXPECT_STREQ(error_get_location(err)->filename, "test.clux");
+  /* EOF：错误位置退化为 '?' 的终点 */
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 3);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 then 且后面跟着无法解析为 literal 的 token 时，错误位置指向该 token。 */
+TEST(ExpressionTernaryTest, MissingThenErrorPointsAtBadToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? : b";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_THEN), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 4);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 ':'：返回带 CONDITION/THEN 的不完整节点。 */
+TEST(ExpressionTernaryTest, MissingColonReturnsPartialNodeAndError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_TERNARY_THEN), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected ':' in ternary expression");
+  /* EOF：错误位置退化为 then 的终点 */
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 5);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, MissingColonErrorPointsAtBadToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b = c";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 6);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 else 分支。 */
+TEST(ExpressionTernaryTest, MissingElseReturnsPartialNodeAndError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b :";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_TERNARY_THEN), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression after ':'");
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 7);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, MissingElseErrorPointsAtBadToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b : ?";
+  node_t *expr = parse_ternary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 8);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套错误：内层缺 else 只报一条，外层照常完成。 */
+TEST(ExpressionTernaryTest, NestedErrorReportsOnce) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b : c ?");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *outer_else = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  ASSERT_NE(outer_else, nullptr);
+  EXPECT_EQ(node_get_kind(outer_else), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTernaryTest, ValidTernaryProducesNoError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b : c");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 子节点 parent 未自动挂载 ---- */
+
+TEST(ExpressionTernaryTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_ternary(a, &p, "a ? b : c");
+  ASSERT_NE(expr, nullptr);
+  node_t *condition = node_get_child(expr, CLUX_EXPR_TERNARY_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_parent(condition), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionTernaryTest, NoLeakOnTernary) {
+  const char *sources[] = {"a ? b : c",
+                           "1 ? 2 : 3",
+                           "a ? b : c ? d : e",
+                           "a ? b ? c : d : e",
+                           "a  ?  b  :  c",
+                           "x = a ? b : c",
+                           "a ?",
+                           "a ? b",
+                           "a ? b :",
+                           "a",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 表达式自身 location ================= */
+
+/* 表达式区间 = 首个子节点起点 .. 末个子节点终点，不含前后 trivia。
+   expected 为 src 中的子串，用 strstr 定位其偏移。 */
+static void
+expect_location_span(node_t *node, const char *src, const char *expected) {
+  const location_t *loc = node_get_location(node);
+  ASSERT_NE(loc, nullptr);
+  ASSERT_NE(loc->begin.offset, nullptr);
+  ASSERT_NE(loc->end.offset, nullptr);
+  const char *at = strstr(src, expected);
+  ASSERT_NE(at, nullptr) << "expected not found in src";
+  EXPECT_EQ(loc->begin.offset, at)
+      << "begin: got '" << loc->begin.offset << "'";
+  EXPECT_EQ(loc->end.offset, at + strlen(expected))
+      << "end: got '" << loc->end.offset << "'";
+  EXPECT_STREQ(loc->filename, "test.clux");
+}
+
+TEST(ExpressionLocationTest, AssignSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "x = 1";
+  node_t *expr = parse_expr(a, &p, src);
+  expect_location_span(expr, src, "x = 1");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, AssignSpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  x   =   1  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression(a, p);
+  expect_location_span(expr, "  x   =   1  ", "x   =   1");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, AssignSpanWithCommentBetweenTokens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "x /* c */ = /* d */ 1";
+  node_t *expr = parse_expr(a, &p, src);
+  expect_location_span(expr, src, "x /* c */ = /* d */ 1");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, AssignSpanWithTernaryValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "x = a ? b : c";
+  node_t *expr = parse_expr(a, &p, src);
+  expect_location_span(expr, src, "x = a ? b : c");
+  node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
+  expect_location_span(value, src, "a ? b : c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右值：区间退化为 id .. symbol。 */
+TEST(ExpressionLocationTest, AssignSpanWhenValueMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "x =";
+  node_t *expr = parse_expr(a, &p, src);
+  expect_location_span(expr, src, "x =");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, TernarySpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b : c";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, "a ? b : c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, TernarySpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  a  ?  b  :  c  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_ternary(a, p);
+  expect_location_span(expr, "  a  ?  b  :  c  ", "a  ?  b  :  c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, TernarySpanWithComments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a /* x */ ? /* y */ b // z\n : /* w */ c";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, src);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionLocationTest, NestedTernarySpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b : c ? d : e";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, "a ? b : c ? d : e");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  expect_location_span(inner, src, "c ? d : e");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 then：区间只覆盖条件。 */
+TEST(ExpressionLocationTest, TernarySpanWhenThenMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ?";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, "a");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 ':'：区间覆盖 条件 .. then。 */
+TEST(ExpressionLocationTest, TernarySpanWhenColonMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, "a ? b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺 else：区间覆盖 条件 .. then。 */
+TEST(ExpressionLocationTest, TernarySpanWhenElseMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a ? b :";
+  node_t *expr = parse_ternary(a, &p, src);
+  expect_location_span(expr, src, "a ? b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
