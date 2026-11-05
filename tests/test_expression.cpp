@@ -998,6 +998,8 @@ static const BinaryLevel kBinaryLevels[] = {
     {"Le", parser_read_expression_relational, "<=", "==", false},
     {"Gt", parser_read_expression_relational, ">", "==", false},
     {"Lt", parser_read_expression_relational, "<", "==", false},
+    {"Shl", parser_read_expression_shift, "<<", "<", false},
+    {"Shr", parser_read_expression_shift, ">>", "<", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1413,6 +1415,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"XorAnd", parser_read_expression_xor, "^", "&"},
     {"AndEq", parser_read_expression_and, "&", "=="},
     {"EqRel", parser_read_expression_equality, "==", "<"},
+    {"RelShift", parser_read_expression_relational, "<", "<<"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1463,12 +1466,12 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f == g < h
-   =>  a || (b && (c | (d ^ (e & (f == (g < h)))))) */
+/* a || b && c | d ^ e & f == g < h << i
+   =>  a || (b && (c | (d ^ (e & (f == (g < (h << i))))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p =
-      create_parser(a, "test.clux", "a || b && c | d ^ e & f == g < h");
+      create_parser(a, "test.clux", "a || b && c | d ^ e & f == g < h << i");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1483,6 +1486,21 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(eq_expr, "==");
   node_t *rel_expr = node_get_child(eq_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(rel_expr, "<");
+  node_t *shift_expr = node_get_child(rel_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(shift_expr, "<<");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* >> 与 << 同级，混用按左结合：(a << b) >> c */
+TEST(ExpressionPrecedenceTest, ShiftOperatorsShareLevel) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a << b >> c");
+  node_t *expr = parser_read_expression_shift(a, p);
+  expect_top_operator(expr, ">>");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "<<");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
