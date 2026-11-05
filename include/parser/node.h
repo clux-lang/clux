@@ -21,6 +21,8 @@ enum _node_kind_t {
 
   CLUX_NODE_EXPRESSION_ASSIGN,
   CLUX_NODE_EXPRESSION_TERNARY,
+  CLUX_NODE_EXPRESSION_BINARY,
+  CLUX_NODE_EXPRESSION_UNARY,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
