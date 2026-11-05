@@ -47,6 +47,13 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
 #define CLUX_EXPR_SLICE_LO 1
 #define CLUX_EXPR_SLICE_HI 2
 
+/* 函数调用节点：callee(arg, ...)。
+   CALLEE 为被调用表达式，其后为逗号分隔的实参列表，数量可变，
+   因此 children 长度 = CLUX_EXPR_CALL_FIRST_ARG + 实参个数。
+   实参可以是 rest 表达式（含孤立 `...`，由 sema 报错）。 */
+#define CLUX_EXPR_CALL_CALLEE 0
+#define CLUX_EXPR_CALL_FIRST_ARG 1
+
 /* rest 表达式 ...expr?，不在优先级链上。
    有操作数时 children = [expr]（长度 1），孤立 `...` 时长度 0。 */
 #define CLUX_EXPR_REST_EXPR 0

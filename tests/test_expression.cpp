@@ -3324,3 +3324,367 @@ TEST(ExpressionRestTest, NoLeakOnRest) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 函数调用 =================
+   callee(arg, ...)：CALLEE 存下标 0，实参从下标 1 起，数量可变。
+   每个实参都可以是 rest 表达式；孤立 `...` 语法合法，由 sema 报错。 */
+
+/* 断言调用节点：CALLEE 为被调用表达式，其后是实参列表。 */
+static void
+expect_call(node_t *expr, node_kind_t callee_kind, size_t arg_count) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CALL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CALL_FIRST_ARG + arg_count);
+  node_t *callee = node_get_child(expr, CLUX_EXPR_CALL_CALLEE);
+  ASSERT_NE(callee, nullptr);
+  EXPECT_EQ(node_get_kind(callee), callee_kind);
+  for (size_t i = 0; i < arg_count; i++) {
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + i), nullptr)
+        << "arg=" << i;
+  }
+}
+
+TEST(ExpressionCallTest, NoArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f()");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 0);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, SingleArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  EXPECT_EQ(node_get_kind(arg), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, MultipleArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a, b, c)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 实参可以是任意表达式。 */
+TEST(ExpressionCallTest, ExpressionArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a + 1, b * 2)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG)),
+            CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + 1)),
+            CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* rest 实参：f(...args) */
+TEST(ExpressionCallTest, RestArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(...args)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  ASSERT_EQ(node_get_kind(arg), CLUX_NODE_EXPRESSION_REST);
+  ASSERT_EQ(vec_get_size(node_get_children(arg)), 1u);
+  EXPECT_EQ(node_get_kind(node_get_child(arg, CLUX_EXPR_REST_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 每个实参都可能是 rest：a(b, ...c, d) */
+TEST(ExpressionCallTest, RestAmongArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a(b, ...c, d)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + 1)),
+            CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + 2)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 孤立 `...` 作为实参：语法合法，无子节点，语义阶段报错。 */
+TEST(ExpressionCallTest, BareRestArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(...)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  ASSERT_EQ(node_get_kind(arg), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(vec_get_size(node_get_children(arg)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, BareRestAmongArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a, ..., b)");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  node_t *rest = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + 1);
+  ASSERT_EQ(node_get_kind(rest), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(vec_get_size(node_get_children(rest)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套调用：f(g(x)) */
+TEST(ExpressionCallTest, NestedCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(g(x))");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  expect_call(inner, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 调用链左结合：f(a)(b) => (f(a))(b) */
+TEST(ExpressionCallTest, CallChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a)(b)");
+  expect_call(expr, CLUX_NODE_EXPRESSION_CALL, 1);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_CALL_CALLEE);
+  expect_call(inner, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, MemberCallee) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.b(c)");
+  expect_call(expr, CLUX_NODE_EXPRESSION_BINARY, 1);
+  node_t *callee = node_get_child(expr, CLUX_EXPR_CALL_CALLEE);
+  expect_member(callee, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, SubscriptCallee) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a[i](j)");
+  expect_call(expr, CLUX_NODE_EXPRESSION_SUBSCRIPT, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 调用后接成员：f(a).b => (f(a)).b */
+TEST(ExpressionCallTest, CallThenMember) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a).b");
+  expect_member(expr, CLUX_NODE_EXPRESSION_CALL, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, TriviaInsideParens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f ( /* c */ a /* d */ , b )");
+  expect_call(expr, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 逗号后缺实参：f(a,) */
+TEST(ExpressionCallTest, TrailingCommaReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a,)");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CALL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CALL_FIRST_ARG + 1);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected expression in call");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右括号：f(a */
+TEST(ExpressionCallTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CALL);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_STREQ(error_get_message(err), "expected ')' to close call");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 空实参列表未闭合：f( —— 缺实参与缺右括号各报一次。 */
+TEST(ExpressionCallTest, UnclosedEmptyCallReportsBothErrors) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CALL);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 2u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in call");
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 1)),
+               "expected ')' to close call");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 优先级 ---- */
+
+/* 调用优先级高于所有二元层：a * f(b) => a * (f(b)) */
+TEST(ExpressionCallTest, CallBindsTighterThanBinary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * f(b)");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_call(right, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 调用优先级高于前缀一元：-f(x) => -(f(x)) */
+TEST(ExpressionCallTest, CallBindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-f(x)");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_CALL);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 调用区间 = callee 起点 .. 右括号终点，不含前后 trivia。 */
+TEST(ExpressionCallTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "f(a, b)";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "f(a, b)");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  f  (  a  )  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  f  (  a  )  ", "f  (  a  )");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCallTest, EmptyCallSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "f()";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "f()");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionCallTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "f(a)");
+  ASSERT_NE(expr, nullptr);
+  node_t *callee = node_get_child(expr, CLUX_EXPR_CALL_CALLEE);
+  ASSERT_NE(callee, nullptr);
+  EXPECT_EQ(node_get_parent(callee), nullptr);
+  node_t *arg = node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  ASSERT_NE(arg, nullptr);
+  EXPECT_EQ(node_get_parent(arg), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionCallTest, NoLeakOnCall) {
+  const char *sources[] = {"f()",        "f(a)",
+                           "f(a, b, c)", "f(a + 1, b * 2)",
+                           "f(...args)", "a(b, ...c, d)",
+                           "f(...)",     "f(a, ..., b)",
+                           "f(g(x))",    "f(a)(b)",
+                           "a.b(c)",     "a[i](j)",
+                           "f(a).b",     "f ( /* c */ a , b )",
+                           "f(a,)",      "f(a",
+                           "f(",         "a * f(b)",
+                           "-f(x)",      "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

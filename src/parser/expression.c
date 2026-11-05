@@ -196,6 +196,64 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
   return expr;
 }
 
+/* 解析调用实参列表。调用前已确认当前 token 是 '('。
+   实参可以是 rest 表达式；`a(b, ...c, d)` 合法。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+static node_t *
+read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
+  parser_next(parser); /* '(' */
+  parser_skip_trivia(parser);
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_CALL);
+  node_resize_children(expr, CLUX_EXPR_CALL_FIRST_ARG);
+  node_set_child(expr, CLUX_EXPR_CALL_CALLEE, callee);
+  const location_t *end_loc = node_get_location(callee);
+
+  token_t *token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+    /* 无实参：f() */
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(expr, node_get_location(callee), end_loc);
+    return expr;
+  }
+
+  for (;;) {
+    /* 每个实参都可能是 rest 表达式。 */
+    node_t *arg = parser_read_expression_rest(allocator, parser);
+    if (!arg) {
+      arg = parser_read_expression(allocator, parser);
+    }
+    if (!arg) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser, create_error(allocator, &loc, "expected expression in call"));
+      break;
+    }
+    vec_push(node_get_children(expr), arg);
+    end_loc = node_get_location(arg);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      break;
+    }
+    parser_next(parser); /* ',' */
+    parser_skip_trivia(parser);
+  }
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+  } else {
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser, create_error(allocator, &loc, "expected ')' to close call"));
+  }
+  node_set_location_span(expr, node_get_location(callee), end_loc);
+  return expr;
+}
+
 node_t *parser_read_expression_postfix(allocator_t *allocator,
                                        parser_t *parser) {
   node_t *operand = parser_read_literal(allocator, parser);
@@ -248,6 +306,11 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
     /* 方括号后缀：下标 / 实例化 / 切片。 */
     if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
       operand = read_bracket_suffix(allocator, parser, operand);
+      continue;
+    }
+    /* 调用后缀：callee(args)。 */
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "(")) {
+      operand = read_call_suffix(allocator, parser, operand);
       continue;
     }
     /* 既不是后缀运算符也不是访问：回退游标到操作数之后，

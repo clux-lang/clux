@@ -29,6 +29,8 @@ enum _node_kind_t {
   CLUX_NODE_EXPRESSION_SLICE,
   /* rest 表达式 ...expr?，不在优先级链上；孤立 `...` 时无子节点。 */
   CLUX_NODE_EXPRESSION_REST,
+  /* 函数调用 callee(arg, ...)；实参可以是 rest 表达式。 */
+  CLUX_NODE_EXPRESSION_CALL,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
