@@ -31,6 +31,9 @@ enum _node_kind_t {
   CLUX_NODE_EXPRESSION_REST,
   /* 函数调用 callee(arg, ...)；实参可以是 rest 表达式。 */
   CLUX_NODE_EXPRESSION_CALL,
+  /* 构造表达式 .type?{ elem, ... }；类型槽可为 NULL（匿名构造），
+     元素一律是表达式或 rest 表达式。语法阶段不区分类型与普通表达式。 */
+  CLUX_NODE_EXPRESSION_CONSTRUCT,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

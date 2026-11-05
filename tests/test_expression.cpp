@@ -3688,3 +3688,425 @@ TEST(ExpressionCallTest, NoLeakOnCall) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 构造表达式 =================
+   .type?{ elem, ... }：TYPE 存下标 0（匿名构造为 NULL），元素从下标 1 起。
+   语法阶段类型就是普通表达式，按后缀层解析，与成员/调用/命名空间访问同级；
+   元素一律是表达式或 rest 表达式。 */
+
+/* 断言构造节点：type_kind 为 CLUX_NODE_SYMBOL 之外的任意节点类型；
+   has_type 为 false 时 TYPE 必须为 NULL。 */
+static void expect_construct(node_t *expr,
+                             bool has_type,
+                             node_kind_t type_kind,
+                             size_t elem_count) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CONSTRUCT);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CONSTRUCT_FIRST_ELEM + elem_count);
+  node_t *type = node_get_child(expr, CLUX_EXPR_CONSTRUCT_TYPE);
+  if (has_type) {
+    ASSERT_NE(type, nullptr);
+    EXPECT_EQ(node_get_kind(type), type_kind);
+  } else {
+    EXPECT_EQ(type, nullptr);
+  }
+  for (size_t i = 0; i < elem_count; i++) {
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + i), nullptr)
+        << "elem=" << i;
+  }
+}
+
+TEST(ExpressionConstructTest, EmptyNamed) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 0);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, EmptyAnonymous) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".{}");
+  expect_construct(expr, false, CLUX_NODE_LITERAL_IDENTIFIER, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, SingleElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM)),
+            CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, MultipleElements) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1, \"a\", true}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM)),
+            CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(
+      node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 1)),
+      CLUX_NODE_LITERAL_STRING);
+  EXPECT_EQ(
+      node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 2)),
+      CLUX_NODE_LITERAL_BOOLEAN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元素可以是任意表达式。 */
+TEST(ExpressionConstructTest, ExpressionElements) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{a + 1, f(b)}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM)),
+            CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(
+      node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 1)),
+      CLUX_NODE_EXPRESSION_CALL);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 类型槽是普通表达式：成员访问 / 调用 / 下标 / 命名空间访问均可。 */
+TEST(ExpressionConstructTest, TypeCanBeMemberAccess) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".mod.T{1}");
+  expect_construct(expr, true, CLUX_NODE_EXPRESSION_BINARY, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, TypeCanBeCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".aaa(b){1}");
+  expect_construct(expr, true, CLUX_NODE_EXPRESSION_CALL, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, TypeCanBeSubscript) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".Box[T]{1}");
+  expect_construct(expr, true, CLUX_NODE_EXPRESSION_SUBSCRIPT, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 类型槽不限于标识符：字面量在语法阶段同样合法。 */
+TEST(ExpressionConstructTest, TypeCanBeNumericLiteral) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".123{}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_NUMERIC, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* rest 元素：.T{...base, 2} */
+TEST(ExpressionConstructTest, RestElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{...base, 2}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  node_t *rest = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  ASSERT_EQ(node_get_kind(rest), CLUX_NODE_EXPRESSION_REST);
+  ASSERT_EQ(vec_get_size(node_get_children(rest)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 孤立 `...` 元素：语法合法、无子节点，语义阶段报错。 */
+TEST(ExpressionConstructTest, BareRestElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{...}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *rest = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  ASSERT_EQ(node_get_kind(rest), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(vec_get_size(node_get_children(rest)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套构造：.T{.U{1}} */
+TEST(ExpressionConstructTest, NestedConstruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{.U{1}}");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  expect_construct(inner, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 构造作为后缀链起点，可继续成员/下标/调用。 */
+TEST(ExpressionConstructTest, ConstructThenMember) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}.field");
+  expect_member(expr, CLUX_NODE_EXPRESSION_CONSTRUCT, "field");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, ConstructThenSubscript) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}[0]");
+  expect_subscript(expr, CLUX_NODE_EXPRESSION_CONSTRUCT, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, ConstructThenCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}(x)");
+  expect_call(expr, CLUX_NODE_EXPRESSION_CONSTRUCT, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, TriviaInsideBraces) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T { /* c */ 1 /* d */ , 2 }");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 回退：'.' 后既不是 '{' 也不是可构造表达式时不消费 '.' ---- */
+
+TEST(ExpressionConstructTest, FallsBackOnBareDot) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_postfix(a, &p, "."), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* `.a` 没有花括号：不是构造，游标回到 '.' 之前。 */
+TEST(ExpressionConstructTest, FallsBackWithoutBrace) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_postfix(a, &p, ".a"), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 元素缺失：.T{,} —— 缺元素与缺右花括号各报一次（与调用 f( 一致）。 */
+TEST(ExpressionConstructTest, MissingElementReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{,}");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CONSTRUCT);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 2u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in construct");
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 1)),
+               "expected '}' to close construct");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 逗号后缺元素：.T{1,} */
+TEST(ExpressionConstructTest, TrailingCommaReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1,}");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 1);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in construct");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右花括号：.T{1 */
+TEST(ExpressionConstructTest, MissingCloseBraceReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_CONSTRUCT);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close construct");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 优先级 ---- */
+
+/* 构造优先级高于所有二元层：a + .T{1} => a + (.T{1}) */
+TEST(ExpressionConstructTest, ConstructBindsTighterThanBinary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a + .T{1}");
+  node_t *expr = parser_read_expression_additive(a, p);
+  expect_top_operator(expr, "+");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_construct(right, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 构造优先级高于前缀一元：-.T{1} => -(.T{1}) */
+TEST(ExpressionConstructTest, ConstructBindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-.T{1}");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_CONSTRUCT);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 构造区间 = '.' 起点 .. 右花括号终点，不含前后 trivia。 */
+TEST(ExpressionConstructTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = ".T{1, 2}";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, ".T{1, 2}");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  .  T  {  1  }  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  .  T  {  1  }  ", ".  T  {  1  }");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, EmptyConstructSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = ".{}";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, ".{}");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionConstructTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}");
+  ASSERT_NE(expr, nullptr);
+  node_t *type = node_get_child(expr, CLUX_EXPR_CONSTRUCT_TYPE);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(node_get_parent(type), nullptr);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  ASSERT_NE(elem, nullptr);
+  EXPECT_EQ(node_get_parent(elem), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionConstructTest, NoLeakOnConstruct) {
+  const char *sources[] = {".{}",
+                           ".T{}",
+                           ".T{1}",
+                           ".T{1, \"a\", true}",
+                           ".T{a + 1, f(b)}",
+                           ".mod.T{1}",
+                           ".aaa(b){1}",
+                           ".Box[T]{1}",
+                           ".123{}",
+                           ".T{...base, 2}",
+                           ".T{...}",
+                           ".T{.U{1}}",
+                           ".T{1}.field",
+                           ".T{1}[0]",
+                           ".T{1}(x)",
+                           ".T { /* c */ 1 , 2 }",
+                           ".",
+                           ".a",
+                           ".T{,}",
+                           ".T{1,}",
+                           ".T{1",
+                           "a + .T{1}",
+                           "-.T{1}",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

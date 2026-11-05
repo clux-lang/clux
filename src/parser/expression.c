@@ -254,9 +254,104 @@ read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
   return expr;
 }
 
+/* 解析构造表达式 .type?{ elem, ... }。调用前当前 token 不一定是 '.'；
+   只有形如 `.` + 可选表达式 + `{` 时才构成构造，否则返回 NULL 且游标不动，
+   把 '.' 留给调用方（成员访问 / 后缀运算符）。
+   类型槽在语法阶段就是普通表达式，按后缀层解析（与成员、调用、命名空间
+   访问同级），因此 `.T{}`、`.aaa(b){}`、`.123{}` 同构。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
+  size_t start = parser_get_position(parser);
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ".")) {
+    return NULL;
+  }
+  location_t dot_loc = *token_get_location(token);
+  parser_next(parser); /* '.' */
+  parser_skip_trivia(parser);
+
+  node_t *type = NULL;
+  token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
+    type = parser_read_expression_postfix(allocator, parser);
+    if (!type) {
+      /* '.' 后既不是 '{' 也不是表达式：不构成构造。 */
+      parser_set_position(parser, start);
+      return NULL;
+    }
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
+      /* 有表达式但没有花括号：不是构造，回退到 '.' 之前。 */
+      delete_node(&type);
+      parser_set_position(parser, start);
+      return NULL;
+    }
+  }
+
+  const location_t *end_loc = type ? node_get_location(type) : &dot_loc;
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_CONSTRUCT);
+  node_resize_children(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  node_set_child(expr, CLUX_EXPR_CONSTRUCT_TYPE, type);
+  node_set_location_span(expr, &dot_loc, end_loc);
+
+  parser_next(parser); /* '{' */
+  parser_skip_trivia(parser);
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "}")) {
+    /* 空构造：.{ } */
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(expr, &dot_loc, end_loc);
+    return expr;
+  }
+
+  for (;;) {
+    /* 每个元素都可能是 rest 表达式。 */
+    node_t *elem = parser_read_expression_rest(allocator, parser);
+    if (!elem) {
+      elem = parser_read_expression(allocator, parser);
+    }
+    if (!elem) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected expression in construct"));
+      break;
+    }
+    vec_push(node_get_children(expr), elem);
+    end_loc = node_get_location(elem);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      break;
+    }
+    parser_next(parser); /* ',' */
+    parser_skip_trivia(parser);
+  }
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "}")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+  } else {
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected '}' to close construct"));
+  }
+  node_set_location_span(expr, &dot_loc, end_loc);
+  return expr;
+}
+
 node_t *parser_read_expression_postfix(allocator_t *allocator,
                                        parser_t *parser) {
-  node_t *operand = parser_read_literal(allocator, parser);
+  /* 构造表达式以 '.' 开头，与 literal 一样属于后缀链的起始操作数。 */
+  node_t *operand = read_construct(allocator, parser);
+  if (!operand) {
+    operand = parser_read_literal(allocator, parser);
+  }
   if (!operand) {
     return NULL;
   }

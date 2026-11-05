@@ -59,6 +59,13 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
 #define CLUX_EXPR_REST_EXPR 0
 node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser);
 
+/* 构造表达式 .type?{ elem, ... }。
+   TYPE 为被构造的类型表达式（匿名构造时为 NULL），其后为逗号分隔的元素，
+   数量可变，因此 children 长度 = CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 元素个数。
+   语法阶段类型就是普通表达式，按后缀层解析；元素可以是 rest 表达式。 */
+#define CLUX_EXPR_CONSTRUCT_TYPE 0
+#define CLUX_EXPR_CONSTRUCT_FIRST_ELEM 1
+
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
 #define CLUX_EXPR_TERNARY_THEN 1
