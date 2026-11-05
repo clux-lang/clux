@@ -978,6 +978,8 @@ struct BinaryLevel {
   const char *op;
   /* 来自其他层、本层不应消费的运算符。 */
   const char *other_op;
+  /* 链式结合性：位运算与逻辑运算右结合，相等比较左结合（白皮书 5.3）。 */
+  bool right_associative;
 };
 
 static void PrintTo(const BinaryLevel &level, std::ostream *os) {
@@ -985,11 +987,13 @@ static void PrintTo(const BinaryLevel &level, std::ostream *os) {
 }
 
 static const BinaryLevel kBinaryLevels[] = {
-    {"Lor", parser_read_expression_lor, "||", "?"},
-    {"Land", parser_read_expression_land, "&&", "||"},
-    {"Or", parser_read_expression_or, "|", "&&"},
-    {"Xor", parser_read_expression_xor, "^", "|"},
-    {"And", parser_read_expression_and, "&", "^"},
+    {"Lor", parser_read_expression_lor, "||", "?", true},
+    {"Land", parser_read_expression_land, "&&", "||", true},
+    {"Or", parser_read_expression_or, "|", "&&", true},
+    {"Xor", parser_read_expression_xor, "^", "|", true},
+    {"And", parser_read_expression_and, "&", "^", true},
+    {"Eq", parser_read_expression_equality, "==", "&", false},
+    {"Ne", parser_read_expression_equality, "!=", "&", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1060,24 +1064,40 @@ TEST_P(ExpressionBinaryTest, SimpleBinary) {
   delete_parser(&p);
 }
 
-TEST_P(ExpressionBinaryTest, RightAssociativeChain) {
+/* 链式结合性：右结合得 a op (b op c)，左结合得 (a op b) op c。
+   两种形态不等价，所以按层的实际结合性断言。 */
+TEST_P(ExpressionBinaryTest, ChainAssociativity) {
   parser_t *p;
   char src[48];
   snprintf(src, sizeof(src), "a %s b %s c", GetParam().op, GetParam().op);
   node_t *expr = parse(&p, src);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
-  /* a op (b op c)：左是裸标识符，右是嵌套二元节点 */
-  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
-  ASSERT_NE(left, nullptr);
-  EXPECT_EQ(node_get_kind(left), CLUX_NODE_LITERAL_IDENTIFIER);
-  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  ASSERT_NE(right, nullptr);
-  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
-  expect_binary(right,
-                GetParam().op,
-                CLUX_NODE_LITERAL_IDENTIFIER,
-                CLUX_NODE_LITERAL_IDENTIFIER);
+  if (GetParam().right_associative) {
+    /* 左是裸标识符，右是嵌套二元节点 */
+    node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(node_get_kind(left), CLUX_NODE_LITERAL_IDENTIFIER);
+    node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+    expect_binary(right,
+                  GetParam().op,
+                  CLUX_NODE_LITERAL_IDENTIFIER,
+                  CLUX_NODE_LITERAL_IDENTIFIER);
+  } else {
+    /* 左是嵌套二元节点，右是裸标识符 */
+    node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPRESSION_BINARY);
+    node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(node_get_kind(right), CLUX_NODE_LITERAL_IDENTIFIER);
+    expect_binary(left,
+                  GetParam().op,
+                  CLUX_NODE_LITERAL_IDENTIFIER,
+                  CLUX_NODE_LITERAL_IDENTIFIER);
+  }
   delete_node(&expr);
   delete_parser(&p);
 }
@@ -1119,17 +1139,39 @@ TEST_P(ExpressionBinaryTest, FallsBackOnOtherLevelOperator) {
   delete_parser(&p);
 }
 
-/* 复合赋值运算符（op + '='）是一个整 token，不应被拆成 op 后跟 '='。 */
-TEST_P(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
-  parser_t *p;
-  char src[32];
-  snprintf(src, sizeof(src), "a %s= b", GetParam().op);
-  node_t *expr = parse(&p, src);
-  ASSERT_NE(expr, nullptr);
-  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
-  EXPECT_EQ(parser_get_position(p), 1u);
-  delete_node(&expr);
-  delete_parser(&p);
+/* 复合赋值运算符是单个 token，任何二元层都不应把它拆成 op 后跟 '='。
+   这条对所有层都成立，所以不放进参数化表，统一跑一遍。 */
+TEST(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
+  const char *ops[] = {"||=",
+                       "&&=",
+                       "|=",
+                       "^=",
+                       "&=",
+                       "+=",
+                       "-=",
+                       "*=",
+                       "/=",
+                       "%=",
+                       "~=",
+                       "<<=",
+                       ">>=",
+                       nullptr};
+  for (size_t i = 0; ops[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    char src[32];
+    snprintf(src, sizeof(src), "a %s b", ops[i]);
+    parser_t *p = create_parser(a, "test.clux", src);
+    /* 从最高二元层进入：整条回退链都不应把复合赋值拆开。
+       注意不能用 parser_read_expression，那一层会把 `a ||= b` 当合法赋值。 */
+    node_t *expr = parser_read_expression_lor(a, p);
+    ASSERT_NE(expr, nullptr) << "op=" << ops[i];
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER)
+        << "op=" << ops[i];
+    EXPECT_EQ(parser_get_position(p), 1u) << "op=" << ops[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
 }
 
 TEST_P(ExpressionBinaryTest, ReturnsNullOnNonLiteral) {
@@ -1189,6 +1231,9 @@ TEST_P(ExpressionBinaryTest, MissingRightErrorPointsAtBadToken) {
   delete_parser(&p);
 }
 
+/* 链中途缺右操作数：只报一条错误。
+   右结合：外层是 a op (b op <缺>)，缺的是内层 RIGHT；
+   左结合：外层是 (a op b) op <缺>，缺的是外层 RIGHT。 */
 TEST_P(ExpressionBinaryTest, ChainMissingRightReportsOnce) {
   parser_t *p;
   char src[48];
@@ -1196,10 +1241,18 @@ TEST_P(ExpressionBinaryTest, ChainMissingRightReportsOnce) {
   node_t *expr = parse(&p, src);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
-  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  ASSERT_NE(right, nullptr);
-  EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
-  EXPECT_EQ(node_get_child(right, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  node_t *incomplete = expr;
+  if (GetParam().right_associative) {
+    node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+    ASSERT_NE(right, nullptr);
+    EXPECT_EQ(node_get_kind(right), CLUX_NODE_EXPRESSION_BINARY);
+    incomplete = right;
+  } else {
+    node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+    ASSERT_NE(left, nullptr);
+    EXPECT_EQ(node_get_kind(left), CLUX_NODE_EXPRESSION_BINARY);
+  }
+  EXPECT_EQ(node_get_child(incomplete, CLUX_EXPR_BINARY_RIGHT), nullptr);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
   delete_node(&expr);
   delete_parser(&p);
@@ -1263,16 +1316,24 @@ TEST_P(ExpressionBinaryTest, SpanWithoutSurroundingTrivia) {
   delete_parser(&p);
 }
 
+/* 链式区间：外层覆盖整条链，内层覆盖被嵌套的那一段。 */
 TEST_P(ExpressionBinaryTest, ChainSpan) {
   parser_t *p;
   char src[48];
   char inner[32];
   snprintf(src, sizeof(src), "a %s b %s c", GetParam().op, GetParam().op);
-  snprintf(inner, sizeof(inner), "b %s c", GetParam().op);
   node_t *expr = parse(&p, src);
   expect_location_span(expr, src, src);
-  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_location_span(right, src, inner);
+  /* 右结合内层是 b op c，左结合内层是 a op b。 */
+  node_t *nested =
+      node_get_child(expr,
+                     GetParam().right_associative ? CLUX_EXPR_BINARY_RIGHT
+                                                  : CLUX_EXPR_BINARY_LEFT);
+  snprintf(inner,
+           sizeof(inner),
+           GetParam().right_associative ? "b %s c" : "a %s b",
+           GetParam().op);
+  expect_location_span(nested, src, inner);
   delete_node(&expr);
   delete_parser(&p);
 }
@@ -1346,6 +1407,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"LandOr", parser_read_expression_land, "&&", "|"},
     {"OrXor", parser_read_expression_or, "|", "^"},
     {"XorAnd", parser_read_expression_xor, "^", "&"},
+    {"AndEq", parser_read_expression_and, "&", "=="},
 };
 
 class ExpressionPrecedencePairTest
@@ -1396,11 +1458,11 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f
-   =>  a || (b && (c | (d ^ (e & f)))) */
+/* a || b && c | d ^ e & f == g
+   =>  a || (b && (c | (d ^ (e & (f == g))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a || b && c | d ^ e & f");
+  parser_t *p = create_parser(a, "test.clux", "a || b && c | d ^ e & f == g");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1411,6 +1473,21 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(xor_expr, "^");
   node_t *and_expr = node_get_child(xor_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(and_expr, "&");
+  node_t *eq_expr = node_get_child(and_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(eq_expr, "==");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* == 与 != 同级，混用按左结合：(a == b) != c */
+TEST(ExpressionPrecedenceTest, EqualityOperatorsShareLevel) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a == b != c");
+  node_t *expr = parser_read_expression_equality(a, p);
+  expect_top_operator(expr, "!=");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "==");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
