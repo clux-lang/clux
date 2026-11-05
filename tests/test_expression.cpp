@@ -1190,12 +1190,13 @@ TEST(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
 }
 
 /* 单独的运算符 token 无法构成二元表达式。例外：+ 和 - 同时是一元前缀
-   运算符，单独出现会进入一元层并按“缺操作数”容错，返回 RIGHT 为 NULL
-   的不完整节点并上报错误。 */
+   运算符，* 同时是指针类型前缀，单独出现会进入对应前缀层并按“缺操作数”
+   容错，返回 RIGHT 为 NULL 的不完整节点并上报错误。 */
 TEST_P(ExpressionBinaryTest, ReturnsNullOnNonLiteral) {
   parser_t *p;
-  bool is_unary =
-      strcmp(GetParam().op, "+") == 0 || strcmp(GetParam().op, "-") == 0;
+  bool is_unary = strcmp(GetParam().op, "+") == 0 ||
+                  strcmp(GetParam().op, "-") == 0 ||
+                  strcmp(GetParam().op, "*") == 0;
   if (!is_unary) {
     EXPECT_EQ(parse(&p, GetParam().op), nullptr);
     EXPECT_EQ(parser_get_position(p), 0u);
@@ -4596,6 +4597,240 @@ TEST(ExpressionGroupTest, NoLeakOnGroup) {
                            "()",
                            "(a",
                            "(",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 指针类型前缀 =================
+   *<postfix>：复用一元节点形态，LEFT 为 NULL，SYMBOL 存 '*'，RIGHT 存操作数。
+   操作数只取后缀层，因此 *a.b 解析为 *(a.b)，*a * b 解析为 (*a) * b。 */
+
+TEST(ExpressionPointerTest, WrapsIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*a");
+  expect_unary(expr, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 操作数取后缀层：*a.b => *(a.b) */
+TEST(ExpressionPointerTest, OperandTakesPostfixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*a.b");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_member(operand, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 递归：**T 解析为 *(*T) */
+TEST(ExpressionPointerTest, NestedPointers) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "**T");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(inner, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 类型名作为操作数：*i32 */
+TEST(ExpressionPointerTest, WrapsBuiltinTypeName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*i32");
+  expect_unary(expr, "*", CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 操作数可以是括号表达式。 */
+TEST(ExpressionPointerTest, WrapsGroup) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*(a + b)");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_GROUP);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与乘法不冲突：*a * b => (*a) * b */
+TEST(ExpressionPointerTest, DoesNotSwallowMultiplication) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "*a * b");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_unary(left, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(node_get_kind(right), CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* a * *b：右操作数是指针前缀。 */
+TEST(ExpressionPointerTest, PointerAsRightOperand) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * *b");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(right, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 指针优先级高于前缀一元：-*a => -(*a) */
+TEST(ExpressionPointerTest, BindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-*a");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(operand, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 后缀链的起点：*a.b.c => *(a.b.c) */
+TEST(ExpressionPointerTest, OperandTakesWholeSuffixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*a.b.c");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_member(operand, CLUX_NODE_EXPRESSION_BINARY, "c");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺操作数：单独的 '*' —— 返回不完整节点并上报错误。 */
+TEST(ExpressionPointerTest, MissingOperandReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression after '*'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺操作数时游标回到 '*' 之后，不吞掉后续 trivia。 */
+TEST(ExpressionPointerTest, MissingOperandDoesNotConsumeTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = '*' 起点 .. 操作数终点，不含前后 trivia。 */
+TEST(ExpressionPointerTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "*a.b";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "*a.b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPointerTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  *  a  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  *  a  ", "*  a");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPointerTest, NestedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "**T";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "**T");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "*T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionPointerTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*a");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionPointerTest, NoLeakOnPointer) {
+  const char *sources[] = {"*a",
+                           "*a.b",
+                           "**T",
+                           "*i32",
+                           "*(a + b)",
+                           "*a * b",
+                           "a * *b",
+                           "-*a",
+                           "*a.b.c",
+                           "*",
+                           "*   ",
                            "",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
