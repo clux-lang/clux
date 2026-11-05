@@ -6,12 +6,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-node_t *parser_read_expression_assign(allocator_t *allocator,
-                                      parser_t *parser,
-                                      node_t *parent);
-node_t *parser_read_expression(allocator_t *allocator,
-                               parser_t *parser,
-                               node_t *parent);
+
+#define CLUX_EXPR_ASSIGN_CHILDREN_SIZE 3
+#define CLUX_EXPR_ASSIGN_ID 0
+#define CLUX_EXPR_ASSIGN_SYMBOL 1
+#define CLUX_EXPR_ASSIGN_VALUE 2
+node_t *parser_read_expression_assign(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_expression(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

@@ -7,7 +7,6 @@
 /* 匹配当前 token 为指定 kind，成功则消费并返回新节点，否则返回 NULL。 */
 static node_t *read_simple(allocator_t *allocator,
                            parser_t *parser,
-                           node_t *parent,
                            token_kind_t kind,
                            node_kind_t node_kind) {
   token_t *token = parser_peek_token(parser);
@@ -17,7 +16,6 @@ static node_t *read_simple(allocator_t *allocator,
   location_t loc = *token_get_location(token);
   parser_next(parser);
   node_t *node = create_node(allocator, node_kind);
-  node_set_parent(node, parent);
   node_set_location(node, &loc);
   return node;
 }
@@ -25,7 +23,6 @@ static node_t *read_simple(allocator_t *allocator,
 /* 匹配当前 token 为指定 kind 且文本等于 src。 */
 static node_t *read_simple_text(allocator_t *allocator,
                                 parser_t *parser,
-                                node_t *parent,
                                 token_kind_t kind,
                                 const char *src,
                                 node_kind_t node_kind) {
@@ -36,76 +33,50 @@ static node_t *read_simple_text(allocator_t *allocator,
   location_t loc = *token_get_location(token);
   parser_next(parser);
   node_t *node = create_node(allocator, node_kind);
-  node_set_parent(node, parent);
   node_set_location(node, &loc);
   return node;
 }
 
-node_t *parser_read_literal_nil(allocator_t *allocator,
-                                parser_t *parser,
-                                node_t *parent) {
-  return read_simple_text(allocator,
-                          parser,
-                          parent,
-                          CLUX_TOKEN_KEYWORD,
-                          "nil",
-                          CLUX_NODE_LITERAL_NIL);
+node_t *parser_read_literal_nil(allocator_t *allocator, parser_t *parser) {
+  return read_simple_text(
+      allocator, parser, CLUX_TOKEN_KEYWORD, "nil", CLUX_NODE_LITERAL_NIL);
 }
 
 node_t *parser_read_literal_undefined(allocator_t *allocator,
-                                      parser_t *parser,
-                                      node_t *parent) {
+                                      parser_t *parser) {
   return read_simple_text(allocator,
                           parser,
-                          parent,
                           CLUX_TOKEN_KEYWORD,
                           "undefined",
                           CLUX_NODE_LITERAL_UNDEFINED);
 }
 
-node_t *parser_read_literal_string(allocator_t *allocator,
-                                   parser_t *parser,
-                                   node_t *parent) {
+node_t *parser_read_literal_string(allocator_t *allocator, parser_t *parser) {
   return read_simple(
-      allocator, parser, parent, CLUX_TOKEN_STRING, CLUX_NODE_LITERAL_STRING);
+      allocator, parser, CLUX_TOKEN_STRING, CLUX_NODE_LITERAL_STRING);
 }
 
 node_t *parser_read_literal_character(allocator_t *allocator,
-                                      parser_t *parser,
-                                      node_t *parent) {
-  return read_simple(allocator,
-                     parser,
-                     parent,
-                     CLUX_TOKEN_CHARACTER,
-                     CLUX_NODE_LITERAL_CHARACTER);
+                                      parser_t *parser) {
+  return read_simple(
+      allocator, parser, CLUX_TOKEN_CHARACTER, CLUX_NODE_LITERAL_CHARACTER);
 }
 
-node_t *parser_read_literal_boolean(allocator_t *allocator,
-                                    parser_t *parser,
-                                    node_t *parent) {
-  node_t *node = read_simple_text(allocator,
-                                  parser,
-                                  parent,
-                                  CLUX_TOKEN_KEYWORD,
-                                  "true",
-                                  CLUX_NODE_LITERAL_BOOLEAN);
+node_t *parser_read_literal_boolean(allocator_t *allocator, parser_t *parser) {
+  node_t *node = read_simple_text(
+      allocator, parser, CLUX_TOKEN_KEYWORD, "true", CLUX_NODE_LITERAL_BOOLEAN);
   if (node) return node;
   return read_simple_text(allocator,
                           parser,
-                          parent,
                           CLUX_TOKEN_KEYWORD,
                           "false",
                           CLUX_NODE_LITERAL_BOOLEAN);
 }
 
 node_t *parser_read_literal_identifier(allocator_t *allocator,
-                                       parser_t *parser,
-                                       node_t *parent) {
-  return read_simple(allocator,
-                     parser,
-                     parent,
-                     CLUX_TOKEN_IDENTIFIER,
-                     CLUX_NODE_LITERAL_IDENTIFIER);
+                                       parser_t *parser) {
+  return read_simple(
+      allocator, parser, CLUX_TOKEN_IDENTIFIER, CLUX_NODE_LITERAL_IDENTIFIER);
 }
 
 /* 数字类型后缀（词法层识别为关键字）。 */
@@ -135,9 +106,7 @@ static bool is_numeric_suffix(token_t *token) {
   return false;
 }
 
-node_t *parser_read_literal_numeric(allocator_t *allocator,
-                                    parser_t *parser,
-                                    node_t *parent) {
+node_t *parser_read_literal_numeric(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   if (!token || token_get_kind(token) != CLUX_TOKEN_NUMERIC) {
     return NULL;
@@ -153,39 +122,37 @@ node_t *parser_read_literal_numeric(allocator_t *allocator,
     parser_next(parser);
   }
   node_t *node = create_node(allocator, CLUX_NODE_LITERAL_NUMERIC);
-  node_set_parent(node, parent);
   node_set_location(node, &loc);
   return node;
 }
 
-node_t *
-parser_read_literal(allocator_t *allocator, parser_t *parser, node_t *parent) {
+node_t *parser_read_literal(allocator_t *allocator, parser_t *parser) {
   node_t *node = NULL;
-  node = parser_read_literal_nil(allocator, parser, parent);
+  node = parser_read_literal_nil(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_undefined(allocator, parser, parent);
+  node = parser_read_literal_undefined(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_boolean(allocator, parser, parent);
+  node = parser_read_literal_boolean(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_character(allocator, parser, parent);
+  node = parser_read_literal_character(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_string(allocator, parser, parent);
+  node = parser_read_literal_string(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_identifier(allocator, parser, parent);
+  node = parser_read_literal_identifier(allocator, parser);
   if (node) {
     return node;
   }
-  node = parser_read_literal_numeric(allocator, parser, parent);
+  node = parser_read_literal_numeric(allocator, parser);
   if (node) {
     return node;
   }

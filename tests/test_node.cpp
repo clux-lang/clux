@@ -298,3 +298,80 @@ TEST(NodeTest, NewAssignKind) {
   delete_node(&n);
   delete_allocator(&a);
 }
+
+/* ---- parser_read_symbol ---- */
+
+TEST(NodeSymbolTest, ReadsSymbolToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "=");
+  node_t *node = parser_read_symbol(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(NodeSymbolTest, RejectsNonSymbol) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "abc");
+  EXPECT_EQ(parser_read_symbol(a, p), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(NodeSymbolTest, EmptyStreamReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "");
+  EXPECT_EQ(parser_read_symbol(a, p), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- children 索引 API ---- */
+
+TEST(NodeChildTest, ResizeAndSetChild) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_resize_children(parent, 3);
+  EXPECT_EQ(vec_get_size(node_get_children(parent)), 3u);
+  /* resize 后全部为 NULL */
+  EXPECT_EQ(node_get_child(parent, 0), nullptr);
+  EXPECT_EQ(node_get_child(parent, 2), nullptr);
+
+  node_t *c0 = create_node(a, CLUX_NODE_LITERAL_NUMERIC);
+  node_t *c2 = create_node(a, CLUX_NODE_LITERAL_STRING);
+  EXPECT_EQ(node_set_child(parent, 0, c0), nullptr);
+  EXPECT_EQ(node_set_child(parent, 2, c2), nullptr);
+  EXPECT_EQ(node_get_child(parent, 0), c0);
+  EXPECT_EQ(node_get_child(parent, 1), nullptr);
+  EXPECT_EQ(node_get_child(parent, 2), c2);
+  delete_node(&parent);
+  delete_allocator(&a);
+}
+
+TEST(NodeChildTest, SetChildReturnsReplaced) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  node_resize_children(parent, 1);
+  node_t *old = create_node(a, CLUX_NODE_LITERAL_NUMERIC);
+  node_t *fresh = create_node(a, CLUX_NODE_LITERAL_STRING);
+  node_set_child(parent, 0, old);
+  EXPECT_EQ(node_set_child(parent, 0, fresh), old);
+  EXPECT_EQ(node_get_child(parent, 0), fresh);
+  delete_node(&old);
+  delete_node(&parent);
+  delete_allocator(&a);
+}
+
+TEST(NodeChildTest, GetChildOutOfRangeReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
+  EXPECT_EQ(node_get_child(parent, 0), nullptr);
+  node_resize_children(parent, 1);
+  EXPECT_EQ(node_get_child(parent, 5), nullptr);
+  delete_node(&parent);
+  delete_allocator(&a);
+}

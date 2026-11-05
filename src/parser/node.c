@@ -2,6 +2,8 @@
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include "parser/lexer.h"
+#include "parser/parser.h"
 #include <string.h>
 struct _node_t {
   allocator_t *allocator;
@@ -43,4 +45,23 @@ node_t *node_get_parent(node_t *self) { return self->parent; }
 void node_set_parent(node_t *self, node_t *parent) { self->parent = parent; }
 void node_set_location(node_t *self, const location_t *loc) {
   self->loc = *loc;
+}
+void node_resize_children(node_t *self, size_t size) {
+  vec_resize(self->children, size);
+}
+node_t *node_set_child(node_t *self, size_t idx, node_t *child) {
+  return (node_t *)vec_set(self->children, idx, child);
+}
+node_t *node_get_child(node_t *self, size_t idx) {
+  return (node_t *)vec_get(self->children, idx);
+}
+node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token || token_get_kind(token) != CLUX_TOKEN_SYMBOL) {
+    return NULL;
+  }
+  parser_next(parser);
+  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(node, token_get_location(token));
+  return node;
 }

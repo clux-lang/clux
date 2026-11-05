@@ -3,6 +3,7 @@
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include "parser.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +31,10 @@ const location_t *node_get_location(node_t *self);
 node_t *node_get_parent(node_t *self);
 void node_set_parent(node_t *self, node_t *parent);
 void node_set_location(node_t *self, const location_t *loc);
+void node_resize_children(node_t *self, size_t size);
+node_t *node_set_child(node_t *self, size_t idx, node_t *child);
+node_t *node_get_child(node_t *self, size_t idx);
+node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

@@ -4,7 +4,6 @@
 #include "parser/node.h"
 #include "parser/parser.h"
 #include "core/allocator.h"
-#include "core/vec.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,7 +12,7 @@
 TEST(LiteralUndefinedTest, MatchesKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "undefined");
-  node_t *node = parser_read_literal_undefined(a, p, NULL);
+  node_t *node = parser_read_literal_undefined(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_UNDEFINED);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -25,7 +24,7 @@ TEST(LiteralUndefinedTest, MatchesKeyword) {
 TEST(LiteralUndefinedTest, RejectsOtherKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "none");
-  EXPECT_EQ(parser_read_literal_undefined(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_undefined(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -34,7 +33,7 @@ TEST(LiteralUndefinedTest, RejectsOtherKeyword) {
 TEST(LiteralUndefinedTest, RejectsIdentifierPrefix) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "undefinedx");
-  EXPECT_EQ(parser_read_literal_undefined(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_undefined(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -42,7 +41,7 @@ TEST(LiteralUndefinedTest, RejectsIdentifierPrefix) {
 TEST(LiteralUndefinedTest, EmptyStreamReturnsNull) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "");
-  EXPECT_EQ(parser_read_literal_undefined(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_undefined(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -52,7 +51,7 @@ TEST(LiteralUndefinedTest, EmptyStreamReturnsNull) {
 TEST(LiteralStringTest, MatchesString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"hi\"");
-  node_t *node = parser_read_literal_string(a, p, NULL);
+  node_t *node = parser_read_literal_string(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_STRING);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -64,7 +63,7 @@ TEST(LiteralStringTest, MatchesString) {
 TEST(LiteralStringTest, MatchesEmptyString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"\"");
-  node_t *node = parser_read_literal_string(a, p, NULL);
+  node_t *node = parser_read_literal_string(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_STRING);
   delete_node(&node);
@@ -75,7 +74,7 @@ TEST(LiteralStringTest, MatchesEmptyString) {
 TEST(LiteralStringTest, RejectsCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "'a'");
-  EXPECT_EQ(parser_read_literal_string(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_string(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -84,7 +83,7 @@ TEST(LiteralStringTest, RejectsCharacter) {
 TEST(LiteralStringTest, RejectsIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "x");
-  EXPECT_EQ(parser_read_literal_string(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_string(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -94,7 +93,7 @@ TEST(LiteralStringTest, RejectsIdentifier) {
 TEST(LiteralCharacterTest, MatchesCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "'a'");
-  node_t *node = parser_read_literal_character(a, p, NULL);
+  node_t *node = parser_read_literal_character(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_CHARACTER);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -106,7 +105,7 @@ TEST(LiteralCharacterTest, MatchesCharacter) {
 TEST(LiteralCharacterTest, MatchesEscapeCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "'\\n'");
-  node_t *node = parser_read_literal_character(a, p, NULL);
+  node_t *node = parser_read_literal_character(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_CHARACTER);
   delete_node(&node);
@@ -117,7 +116,7 @@ TEST(LiteralCharacterTest, MatchesEscapeCharacter) {
 TEST(LiteralCharacterTest, RejectsString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"a\"");
-  EXPECT_EQ(parser_read_literal_character(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_character(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -127,7 +126,7 @@ TEST(LiteralCharacterTest, RejectsString) {
 TEST(LiteralBooleanTest, MatchesTrue) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "true");
-  node_t *node = parser_read_literal_boolean(a, p, NULL);
+  node_t *node = parser_read_literal_boolean(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_BOOLEAN);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -139,7 +138,7 @@ TEST(LiteralBooleanTest, MatchesTrue) {
 TEST(LiteralBooleanTest, MatchesFalse) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "false");
-  node_t *node = parser_read_literal_boolean(a, p, NULL);
+  node_t *node = parser_read_literal_boolean(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_BOOLEAN);
   delete_node(&node);
@@ -150,7 +149,7 @@ TEST(LiteralBooleanTest, MatchesFalse) {
 TEST(LiteralBooleanTest, RejectsOtherIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "truely");
-  EXPECT_EQ(parser_read_literal_boolean(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_boolean(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -159,7 +158,7 @@ TEST(LiteralBooleanTest, RejectsOtherIdentifier) {
 TEST(LiteralBooleanTest, RejectsKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "nil");
-  EXPECT_EQ(parser_read_literal_boolean(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_boolean(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -169,7 +168,7 @@ TEST(LiteralBooleanTest, RejectsKeyword) {
 TEST(LiteralIdentifierTest, MatchesIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "foo");
-  node_t *node = parser_read_literal_identifier(a, p, NULL);
+  node_t *node = parser_read_literal_identifier(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -182,7 +181,7 @@ TEST(LiteralIdentifierTest, RejectsTrueKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "true");
   /* true 现在是关键字，不再是标识符 */
-  EXPECT_EQ(parser_read_literal_identifier(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_identifier(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -191,7 +190,7 @@ TEST(LiteralIdentifierTest, RejectsTrueKeyword) {
 TEST(LiteralIdentifierTest, RejectsKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "var");
-  EXPECT_EQ(parser_read_literal_identifier(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_identifier(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -199,7 +198,7 @@ TEST(LiteralIdentifierTest, RejectsKeyword) {
 TEST(LiteralIdentifierTest, RejectsNumeric) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "123");
-  EXPECT_EQ(parser_read_literal_identifier(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_identifier(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -208,7 +207,7 @@ TEST(LiteralIdentifierTest, RejectsNumeric) {
 
 static node_t *read_numeric(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_literal_numeric(a, *p, NULL);
+  return parser_read_literal_numeric(a, *p);
 }
 
 TEST(LiteralNumericTest, MatchesPlainInteger) {
@@ -299,7 +298,7 @@ TEST(LiteralNumericTest, NonNumericSuffixIsNotConsumed) {
 TEST(LiteralNumericTest, RejectsIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "abc");
-  EXPECT_EQ(parser_read_literal_numeric(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_numeric(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -308,7 +307,7 @@ TEST(LiteralNumericTest, RejectsIdentifier) {
 TEST(LiteralNumericTest, RejectsString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"1\"");
-  EXPECT_EQ(parser_read_literal_numeric(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_numeric(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -316,7 +315,7 @@ TEST(LiteralNumericTest, RejectsString) {
 TEST(LiteralNumericTest, EmptyStreamReturnsNull) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "");
-  EXPECT_EQ(parser_read_literal_numeric(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal_numeric(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -327,12 +326,13 @@ TEST(LiteralNumericTest, AttachesParent) {
   parser_t *p = create_parser(a, "test.clux", src);
   location_t ploc = {
       .filename = "test.clux",
-      .begin = {.offset = src, .line = 1, .column = 1},
-      .end = {.offset = src, .line = 1, .column = 1},
+      .begin = {.offset = src, .column = 1, .line = 1},
+      .end = {.offset = src, .column = 1, .line = 1},
   };
   node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
   node_set_location(parent, &ploc);
-  node_t *node = parser_read_literal_numeric(a, p, parent);
+  node_t *node = parser_read_literal_numeric(a, p);
+  node_set_parent(node, parent);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_parent(node), parent);
   delete_node(&node);
@@ -362,12 +362,12 @@ TEST(LiteralTest, NoLeakAcrossAllReaders) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *node = parser_read_literal_undefined(a, p, NULL);
-    if (!node) node = parser_read_literal_string(a, p, NULL);
-    if (!node) node = parser_read_literal_character(a, p, NULL);
-    if (!node) node = parser_read_literal_boolean(a, p, NULL);
-    if (!node) node = parser_read_literal_numeric(a, p, NULL);
-    if (!node) node = parser_read_literal_identifier(a, p, NULL);
+    node_t *node = parser_read_literal_undefined(a, p);
+    if (!node) node = parser_read_literal_string(a, p);
+    if (!node) node = parser_read_literal_character(a, p);
+    if (!node) node = parser_read_literal_boolean(a, p);
+    if (!node) node = parser_read_literal_numeric(a, p);
+    if (!node) node = parser_read_literal_identifier(a, p);
     EXPECT_NE(node, nullptr) << "src=" << sources[i];
     delete_node(&node);
     delete_parser(&p);
@@ -408,7 +408,7 @@ TEST(LiteralBooleanTest, TrueAndFalseAreKeywords) {
 TEST(LiteralNilTest, MatchesNilKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "nil");
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NIL);
   EXPECT_EQ(node_get_parent(node), nullptr);
@@ -421,11 +421,11 @@ TEST(LiteralNilTest, ConsumesToken) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "nil");
   EXPECT_EQ(parser_get_position(p), 0u);
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   ASSERT_NE(node, nullptr);
   /* 匹配成功后游标前进，重复调用不再匹配 */
   EXPECT_EQ(parser_get_position(p), 1u);
-  node_t *again = parser_read_literal_nil(a, p, NULL);
+  node_t *again = parser_read_literal_nil(a, p);
   EXPECT_EQ(again, nullptr);
   delete_node(&node);
   delete_parser(&p);
@@ -435,7 +435,7 @@ TEST(LiteralNilTest, ConsumesToken) {
 TEST(LiteralNilTest, RejectsOtherKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "none");
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   EXPECT_EQ(node, nullptr);
   /* 不匹配时不消费 token */
   EXPECT_EQ(parser_get_position(p), 0u);
@@ -446,7 +446,7 @@ TEST(LiteralNilTest, RejectsOtherKeyword) {
 TEST(LiteralNilTest, RejectsIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "nilx");
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   EXPECT_EQ(node, nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
@@ -456,7 +456,7 @@ TEST(LiteralNilTest, RejectsIdentifier) {
 TEST(LiteralNilTest, RejectsString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"nil\"");
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   EXPECT_EQ(node, nullptr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -465,7 +465,7 @@ TEST(LiteralNilTest, RejectsString) {
 TEST(LiteralNilTest, EmptyTokenStreamReturnsNull) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "");
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   EXPECT_EQ(node, nullptr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -477,7 +477,7 @@ TEST(LiteralNilTest, LocationMatchesToken) {
   parser_t *p = create_parser(a, "test.clux", src);
   /* 跳过前导空白 */
   parser_next(p);
-  node_t *node = parser_read_literal_nil(a, p, NULL);
+  node_t *node = parser_read_literal_nil(a, p);
   ASSERT_NE(node, nullptr);
   const location_t *loc = node_get_location(node);
   EXPECT_EQ(loc->begin.offset, src + 2);
@@ -493,12 +493,13 @@ TEST(LiteralNilTest, AttachesParent) {
   parser_t *p = create_parser(a, "test.clux", "nil");
   location_t ploc = {
       .filename = "test.clux",
-      .begin = {.offset = "nil", .line = 1, .column = 1},
-      .end = {.offset = "nil", .line = 1, .column = 1},
+      .begin = {.offset = "nil", .column = 1, .line = 1},
+      .end = {.offset = "nil", .column = 1, .line = 1},
   };
   node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
   node_set_location(parent, &ploc);
-  node_t *node = parser_read_literal_nil(a, p, parent);
+  node_t *node = parser_read_literal_nil(a, p);
+  node_set_parent(node, parent);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_parent(node), parent);
   delete_node(&node);
@@ -522,7 +523,7 @@ TEST(LiteralNilTest, NilIsKeywordToken) {
 TEST(LiteralDispatchTest, DispatchesNil) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "nil");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NIL);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -534,7 +535,7 @@ TEST(LiteralDispatchTest, DispatchesNil) {
 TEST(LiteralDispatchTest, DispatchesUndefined) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "undefined");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_UNDEFINED);
   delete_node(&node);
@@ -545,7 +546,7 @@ TEST(LiteralDispatchTest, DispatchesUndefined) {
 TEST(LiteralDispatchTest, DispatchesBoolean) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "true");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_BOOLEAN);
   delete_node(&node);
@@ -556,7 +557,7 @@ TEST(LiteralDispatchTest, DispatchesBoolean) {
 TEST(LiteralDispatchTest, DispatchesCharacter) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "'a'");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_CHARACTER);
   delete_node(&node);
@@ -567,7 +568,7 @@ TEST(LiteralDispatchTest, DispatchesCharacter) {
 TEST(LiteralDispatchTest, DispatchesString) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "\"s\"");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_STRING);
   delete_node(&node);
@@ -578,7 +579,7 @@ TEST(LiteralDispatchTest, DispatchesString) {
 TEST(LiteralDispatchTest, DispatchesIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "foo");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&node);
@@ -589,7 +590,7 @@ TEST(LiteralDispatchTest, DispatchesIdentifier) {
 TEST(LiteralDispatchTest, DispatchesNumeric) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "42i32");
-  node_t *node = parser_read_literal(a, p, NULL);
+  node_t *node = parser_read_literal(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NUMERIC);
   EXPECT_EQ(parser_get_position(p), 2u); /* 数字 + 后缀 */
@@ -601,7 +602,7 @@ TEST(LiteralDispatchTest, DispatchesNumeric) {
 TEST(LiteralDispatchTest, ReturnsNullOnNonLiteral) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "var");
-  EXPECT_EQ(parser_read_literal(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal(a, p), nullptr);
   EXPECT_EQ(parser_get_position(p), 0u);
   delete_parser(&p);
   delete_allocator(&a);
@@ -610,7 +611,7 @@ TEST(LiteralDispatchTest, ReturnsNullOnNonLiteral) {
 TEST(LiteralDispatchTest, ReturnsNullOnEmptyStream) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "");
-  EXPECT_EQ(parser_read_literal(a, p, NULL), nullptr);
+  EXPECT_EQ(parser_read_literal(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -620,7 +621,8 @@ TEST(LiteralDispatchTest, AttachesParent) {
   const char *src = "42";
   parser_t *p = create_parser(a, "test.clux", src);
   node_t *parent = create_node(a, CLUX_NODE_PROGRAM);
-  node_t *node = parser_read_literal(a, p, parent);
+  node_t *node = parser_read_literal(a, p);
+  node_set_parent(node, parent);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_parent(node), parent);
   delete_node(&node);

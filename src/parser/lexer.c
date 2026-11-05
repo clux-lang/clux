@@ -365,5 +365,5 @@ token_t *lexer_read_symbol(allocator_t *allocator,
 }
 
 bool token_is(token_t *self, token_kind_t kind, const char *src) {
-  return self->kind == kind && location_is(&self->loc, src);
+  return self && self->kind == kind && location_is(&self->loc, src);
 }
