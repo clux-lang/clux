@@ -989,6 +989,7 @@ static const BinaryLevel kBinaryLevels[] = {
     {"Land", parser_read_expression_land, "&&", "||"},
     {"Or", parser_read_expression_or, "|", "&&"},
     {"Xor", parser_read_expression_xor, "^", "|"},
+    {"And", parser_read_expression_and, "&", "^"},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1325,84 +1326,81 @@ INSTANTIATE_TEST_SUITE_P(AllLevels,
                          ::testing::ValuesIn(kBinaryLevels));
 
 /* ================= 跨层优先级 =================
-   优先级链：assign -> ternary -> lor -> land -> or -> literal */
+   优先级链：assign -> ternary -> lor -> land -> or -> xor -> and -> literal
+   相邻两层两两验证，新增一层只需在表里加一行。 */
 
-TEST(ExpressionPrecedenceTest, LandBindsTighterThanLor) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a || b && c");
-  node_t *expr = parser_read_expression_lor(a, p);
-  expect_top_operator(expr, "||");
+struct PrecedencePair {
+  const char *name;
+  /* 较低优先级层的读取函数。 */
+  binary_reader_t read_lower;
+  const char *lower_op;
+  const char *higher_op;
+};
+
+static void PrintTo(const PrecedencePair &pair, std::ostream *os) {
+  *os << pair.name;
+}
+
+static const PrecedencePair kPrecedencePairs[] = {
+    {"LorLand", parser_read_expression_lor, "||", "&&"},
+    {"LandOr", parser_read_expression_land, "&&", "|"},
+    {"OrXor", parser_read_expression_or, "|", "^"},
+    {"XorAnd", parser_read_expression_xor, "^", "&"},
+};
+
+class ExpressionPrecedencePairTest
+    : public ::testing::TestWithParam<PrecedencePair> {
+protected:
+  allocator_t *allocator_ = create_allocator(malloc, free);
+  ~ExpressionPrecedencePairTest() override { delete_allocator(&allocator_); }
+
+  node_t *parse(const char *src) {
+    parser_t *p = create_parser(allocator_, "test.clux", src);
+    node_t *expr = GetParam().read_lower(allocator_, p);
+    delete_parser(&p);
+    return expr;
+  }
+};
+
+/* a lower b higher c  =>  a lower (b higher c) */
+TEST_P(ExpressionPrecedencePairTest, HigherBindsTighter) {
+  char src[48];
+  snprintf(src,
+           sizeof(src),
+           "a %s b %s c",
+           GetParam().lower_op,
+           GetParam().higher_op);
+  node_t *expr = parse(src);
+  expect_top_operator(expr, GetParam().lower_op);
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_top_operator(right, "&&");
+  expect_top_operator(right, GetParam().higher_op);
   delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
 }
 
-TEST(ExpressionPrecedenceTest, LandOnLeftOfLor) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a && b || c");
-  node_t *expr = parser_read_expression_lor(a, p);
-  expect_top_operator(expr, "||");
+/* a higher b lower c  =>  (a higher b) lower c */
+TEST_P(ExpressionPrecedencePairTest, HigherOnLeft) {
+  char src[48];
+  snprintf(src,
+           sizeof(src),
+           "a %s b %s c",
+           GetParam().higher_op,
+           GetParam().lower_op);
+  node_t *expr = parse(src);
+  expect_top_operator(expr, GetParam().lower_op);
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
-  expect_top_operator(left, "&&");
+  expect_top_operator(left, GetParam().higher_op);
   delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
 }
 
-TEST(ExpressionPrecedenceTest, OrBindsTighterThanLand) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a && b | c");
-  node_t *expr = parser_read_expression_land(a, p);
-  expect_top_operator(expr, "&&");
-  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_top_operator(right, "|");
-  delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
+INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
+                         ExpressionPrecedencePairTest,
+                         ::testing::ValuesIn(kPrecedencePairs));
 
-TEST(ExpressionPrecedenceTest, OrOnLeftOfLand) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a | b && c");
-  node_t *expr = parser_read_expression_land(a, p);
-  expect_top_operator(expr, "&&");
-  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
-  expect_top_operator(left, "|");
-  delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(ExpressionPrecedenceTest, XorBindsTighterThanOr) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a | b ^ c");
-  node_t *expr = parser_read_expression_or(a, p);
-  expect_top_operator(expr, "|");
-  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
-  expect_top_operator(right, "^");
-  delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-TEST(ExpressionPrecedenceTest, XorOnLeftOfOr) {
-  allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a ^ b | c");
-  node_t *expr = parser_read_expression_or(a, p);
-  expect_top_operator(expr, "|");
-  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
-  expect_top_operator(left, "^");
-  delete_node(&expr);
-  delete_parser(&p);
-  delete_allocator(&a);
-}
-
-/* a || b && c | d ^ e  =>  a || (b && (c | (d ^ e))) */
+/* a || b && c | d ^ e & f
+   =>  a || (b && (c | (d ^ (e & f)))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
-  parser_t *p = create_parser(a, "test.clux", "a || b && c | d ^ e");
+  parser_t *p = create_parser(a, "test.clux", "a || b && c | d ^ e & f");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1411,6 +1409,8 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(or_expr, "|");
   node_t *xor_expr = node_get_child(or_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(xor_expr, "^");
+  node_t *and_expr = node_get_child(xor_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(and_expr, "&");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
