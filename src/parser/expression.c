@@ -47,18 +47,54 @@ static const char *peek_relational_operator(parser_t *parser) {
   return NULL;
 }
 
-/* 移位运算符表：同一优先级，>> 与 << 长度相同、无前缀冲突。 */
-static const char *shift_operators[] = {">>", "<<", NULL};
-
-/* 若当前 token 是移位运算符则返回其文本，否则返回 NULL。 */
-static const char *peek_shift_operator(parser_t *parser) {
-  token_t *token = parser_peek_token(parser);
-  for (size_t idx = 0; shift_operators[idx] != NULL; idx++) {
-    if (token_is(token, CLUX_TOKEN_SYMBOL, shift_operators[idx])) {
-      return shift_operators[idx];
-    }
+/* 取当前 token 之后第 offset 个 token（不移动游标），越界返回 NULL。 */
+static token_t *peek_token_at(parser_t *parser, size_t offset) {
+  size_t pos = parser_get_position(parser) + offset;
+  vec_t *tokens = parser_get_tokens(parser);
+  if (pos >= vec_get_size(tokens)) {
+    return NULL;
   }
-  return NULL;
+  return vec_get(tokens, pos);
+}
+
+/* 移位运算符 `<<` / `>>` 不在词法表中：它们与嵌套元组的尖括号冲突，
+   由 parser 在相邻字符位置组合。返回运算符文本，否则 NULL。 */
+static const char *peek_shift_operator(parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  if (!first || token_get_kind(first) != CLUX_TOKEN_SYMBOL) {
+    return NULL;
+  }
+  const location_t *first_loc = token_get_location(first);
+  const char *op;
+  if (location_is(first_loc, "<")) {
+    op = "<<";
+  } else if (location_is(first_loc, ">")) {
+    op = ">>";
+  } else {
+    return NULL;
+  }
+  /* 中间有空白/注释时第二个 token 是 trivia，不构成移位。
+     token 在源码中首尾相接，因此第二个 token 是符号即意味着两者相邻。 */
+  token_t *second = peek_token_at(parser, 1);
+  if (!second || token_get_kind(second) != CLUX_TOKEN_SYMBOL) {
+    return NULL;
+  }
+  if (!location_is(token_get_location(second), op[0] == '<' ? "<" : ">")) {
+    return NULL;
+  }
+  return op;
+}
+
+/* 消费相邻的两个字符 token，产出一个跨越二者的 SYMBOL 节点。 */
+static node_t *read_shift_symbol(allocator_t *allocator, parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  location_t loc = *token_get_location(first);
+  parser_next(parser); /* 第一个 '<' / '>' */
+  loc.end = token_get_location(parser_peek_token(parser))->end;
+  parser_next(parser); /* 第二个 */
+  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(node, &loc);
+  return node;
 }
 
 /* 加减运算符表：同一优先级。 */
@@ -86,8 +122,24 @@ static node_t *read_keyword_symbol(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 后缀一元运算符表（白皮书 5.3 优先级 25）。 */
-static const char *postfix_operators[] = {".&", ".*", ".!", ".?", NULL};
+/* 后缀一元运算符表（白皮书 5.3 优先级 25）。
+   `.?` 不在词法表中（与 optional 构造冲突），由 parser 组合 `.` + `?`。 */
+static const char *postfix_operators[] = {".&", ".*", ".!", NULL};
+
+/* 当前 token 是 '.' 且紧随其后（无空白/注释）的 token 是 '?' 时，
+   构成后缀 `.?`。 */
+static bool peek_try_operator(parser_t *parser) {
+  token_t *dot = parser_peek_token(parser);
+  if (!token_is(dot, CLUX_TOKEN_SYMBOL, ".")) {
+    return false;
+  }
+  token_t *question = peek_token_at(parser, 1);
+  if (!token_is(question, CLUX_TOKEN_SYMBOL, "?")) {
+    return false;
+  }
+  return token_get_location(question)->begin.offset ==
+         token_get_location(dot)->end.offset;
+}
 
 /* 若当前 token 是后缀一元运算符则返回其文本，否则返回 NULL。 */
 static const char *peek_postfix_operator(parser_t *parser) {
@@ -97,7 +149,25 @@ static const char *peek_postfix_operator(parser_t *parser) {
       return postfix_operators[idx];
     }
   }
+  if (peek_try_operator(parser)) {
+    return ".?";
+  }
   return NULL;
+}
+
+/* 消费当前后缀运算符，产出 SYMBOL 节点。`.*` / `.&` / `.!` 是单个 token；
+   `.?` 由 '.' 与 '?' 两个 token 组合，节点区间跨越二者。 */
+static node_t *read_postfix_symbol(allocator_t *allocator, parser_t *parser) {
+  if (!peek_try_operator(parser)) {
+    return parser_read_symbol(allocator, parser);
+  }
+  location_t loc = *token_get_location(parser_peek_token(parser));
+  parser_next(parser); /* '.' */
+  loc.end = token_get_location(parser_peek_token(parser))->end;
+  parser_next(parser); /* '?' */
+  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(node, &loc);
+  return node;
 }
 
 /* 解析方括号后缀。调用前已确认当前 token 是 '['。
@@ -364,7 +434,7 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
       node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
       node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
       node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
-      node_t *symbol = parser_read_symbol(allocator, parser);
+      node_t *symbol = read_postfix_symbol(allocator, parser);
       node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
       /* RIGHT 保持 NULL：后缀形态复用二元节点，靠 RIGHT 缺失区分。 */
       node_set_location_span(
@@ -644,7 +714,7 @@ node_t *parser_read_expression_shift(allocator_t *allocator, parser_t *parser) {
     node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
-    node_t *symbol = parser_read_symbol(allocator, parser);
+    node_t *symbol = read_shift_symbol(allocator, parser);
     node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
     size_t after_symbol = parser_get_position(parser);
     node_set_location_span(

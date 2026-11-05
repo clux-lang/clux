@@ -1609,6 +1609,45 @@ TEST(ExpressionPrecedenceTest, ShiftOperatorsShareLevel) {
   delete_allocator(&a);
 }
 
+/* `<<` / `>>` 由 parser 组合两个相邻的 `<` / `>` token。
+   中间有空白或注释时不构成移位：a < < b 仍是关系层的一部分。 */
+TEST(ExpressionPrecedenceTest, ShiftRequiresAdjacentTokens) {
+  const char *sources[] = {"a < < b",
+                           "a < /* c */ < b",
+                           /* 相邻但不是同一个字符：<+ / >+ 不构成移位 */
+                           "a <+ b",
+                           "a >+ b",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression_shift(a, p);
+    ASSERT_NE(expr, nullptr) << "src=" << sources[i];
+    /* 没有移位：移位层原样返回加法的结果（裸标识符）。 */
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER)
+        << "src=" << sources[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 组合出的移位运算符节点区间跨越两个字符。 */
+TEST(ExpressionPrecedenceTest, ShiftSymbolSpanCoversBothChars) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a << b");
+  node_t *expr = parser_read_expression_shift(a, p);
+  expect_top_operator(expr, "<<");
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  const location_t *loc = node_get_location(symbol);
+  EXPECT_EQ(loc->end.offset - loc->begin.offset, (ptrdiff_t)2);
+  EXPECT_EQ(strncmp(loc->begin.offset, "<<", 2), 0);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* == 与 != 同级，混用按左结合：(a == b) != c */
 TEST(ExpressionPrecedenceTest, EqualityOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
@@ -1635,9 +1674,10 @@ TEST(ExpressionPrecedenceTest, RelationalOperatorsShareLevel) {
   delete_allocator(&a);
 }
 
-/* 最长匹配：>= 不能被拆成 > 后跟 =，<< 也不能被拆成两个 <。 */
+/* 最长匹配：>= 不能被拆成 > 后跟 =。
+   `<<` / `>>` 不在词法表中，由 parser 组合，见 ShiftOperatorIsCombined。 */
 TEST(ExpressionPrecedenceTest, LongestMatchWins) {
-  const char *sources[] = {">=", "<=", ">>", "<<", nullptr};
+  const char *sources[] = {">=", "<=", nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
@@ -2068,6 +2108,49 @@ TEST(ExpressionPostfixTest, OperandCanBeNumeric) {
   parser_t *p;
   node_t *expr = parse_postfix(a, &p, "42.!");
   expect_postfix(expr, ".!", CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* `.?` 由 parser 组合 '.' 与 '?' 两个相邻 token，节点区间跨越二者。 */
+TEST(ExpressionPostfixTest, TryOperatorSymbolSpanCoversBothChars) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a.?";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_postfix(expr, ".?", CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  const location_t *loc = node_get_location(symbol);
+  EXPECT_EQ(loc->begin.offset, src + 1);
+  EXPECT_EQ(loc->end.offset, src + 3);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* '.' 与 '?' 之间有空白时不构成 `.?`：'.' 后不是 identifier，
+   成员访问回退，游标停在 '.' 之前。 */
+TEST(ExpressionPostfixTest, TryOperatorRequiresAdjacentTokens) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a. ?");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* `.?` 与构造不冲突：构造后的 `.?` 仍是后缀运算符。
+   注意 `.T{1}.?` 中第一个 '.' 属于构造，第二个 '.' 与 '?' 组合。 */
+TEST(ExpressionPostfixTest, TryOperatorAfterConstruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{1}.?");
+  expect_postfix(expr, ".?", CLUX_NODE_EXPRESSION_CONSTRUCT);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);

@@ -280,16 +280,18 @@ TEST(LexerSymbolTest, CompoundAssignments) {
   delete_allocator(&a);
 }
 
-TEST(LexerSymbolTest, ShiftOperators) {
+/* `<<` / `>>` 在词法层有歧义（与嵌套元组尖括号冲突），故意不合并：
+   词法只产出单个 `<` / `>`，由 parser 在相邻位置组合。 */
+TEST(LexerSymbolTest, ShiftOperatorsAreNotMerged) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *syms[] = {">>", "<<", nullptr};
+  const char *syms[] = {"<<", ">>", nullptr};
   for (int i = 0; syms[i] != nullptr; i++) {
     position_t p = lexer_test_pos(syms[i]);
     token_t *tok = lexer_read_symbol(a, &p, "test.clux");
     ASSERT_NE(tok, nullptr) << "sym=" << syms[i];
     EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_SYMBOL) << "sym=" << syms[i];
-    EXPECT_EQ(p.offset - syms[i], (ptrdiff_t)strlen(syms[i]))
-        << "sym=" << syms[i];
+    /* 只消费第一个字符 */
+    EXPECT_EQ(p.offset - syms[i], (ptrdiff_t)1) << "sym=" << syms[i];
     delete_token(&tok);
   }
   delete_allocator(&a);
@@ -308,9 +310,23 @@ TEST(LexerSymbolTest, LogicalOperators) {
   delete_allocator(&a);
 }
 
+/* `.?` 在词法层有歧义（与 optional 构造冲突），故意不合并：
+   词法只产出 '.'，由 parser 组合。 */
+TEST(LexerSymbolTest, TryOperatorIsNotMerged) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = ".?";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_symbol(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_SYMBOL);
+  EXPECT_EQ(p.offset, src + 1);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
 TEST(LexerSymbolTest, DotOperators) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *syms[] = {".?", ".!", ".", nullptr};
+  const char *syms[] = {".!", ".", nullptr};
   for (int i = 0; syms[i] != nullptr; i++) {
     position_t p = lexer_test_pos(syms[i]);
     token_t *tok = lexer_read_symbol(a, &p, "test.clux");
