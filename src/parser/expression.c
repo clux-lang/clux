@@ -86,6 +86,47 @@ static node_t *read_keyword_symbol(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 后缀一元运算符表（白皮书 5.3 优先级 25）。 */
+static const char *postfix_operators[] = {".&", ".*", ".!", ".?", NULL};
+
+/* 若当前 token 是后缀一元运算符则返回其文本，否则返回 NULL。 */
+static const char *peek_postfix_operator(parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  for (size_t idx = 0; postfix_operators[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_SYMBOL, postfix_operators[idx])) {
+      return postfix_operators[idx];
+    }
+  }
+  return NULL;
+}
+
+node_t *parser_read_expression_postfix(allocator_t *allocator,
+                                       parser_t *parser) {
+  node_t *operand = parser_read_literal(allocator, parser);
+  if (!operand) {
+    return NULL;
+  }
+  /* 后缀左结合：p.*.& 解析为 (p.*).&，循环累积。 */
+  for (;;) {
+    size_t after_operand = parser_get_position(parser);
+    parser_skip_trivia(parser);
+    const char *op = peek_postfix_operator(parser);
+    if (!op) {
+      /* 不是后缀运算符：回退游标到操作数之后，不吞掉后续 trivia。 */
+      parser_set_position(parser, after_operand);
+      return operand;
+    }
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
+    node_t *symbol = parser_read_symbol(allocator, parser);
+    node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+    /* RIGHT 保持 NULL：后缀形态复用二元节点，靠 RIGHT 缺失区分。 */
+    node_set_location_span(
+        expr, node_get_location(operand), node_get_location(symbol));
+    operand = expr;
+  }
+}
 /* 前缀一元运算符表（白皮书 5.3 优先级 23）。 */
 static const char *unary_operators[] = {"!", "~", "+", "-", NULL};
 
@@ -103,9 +144,10 @@ static const char *peek_unary_operator(parser_t *parser) {
 node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser) {
   const char *op = peek_unary_operator(parser);
   if (!op) {
-    return parser_read_literal(allocator, parser);
+    return parser_read_expression_postfix(allocator, parser);
   }
-  /* 前缀运算符右绑定：操作数递归到本层，支持 !!a、--a 等叠加。 */
+  /* 前缀运算符右绑定：操作数递归到本层，支持 !!a、--a 等叠加。
+     无前缀运算符时落到后缀层，因此 -p.* 解析为 -(p.*)。 */
   node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   /* LEFT 保持 NULL：一元形态复用二元节点，靠 LEFT 缺失区分。 */

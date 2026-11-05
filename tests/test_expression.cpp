@@ -2017,3 +2017,280 @@ TEST(ExpressionUnaryTest, NoLeakOnUnary) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= 后缀一元表达式 =================
+   .& .* .! .? 与一元层镜像：LEFT 存操作数，SYMBOL 存运算符，RIGHT 为 NULL。 */
+
+static node_t *parse_postfix(allocator_t *a, parser_t **p, const char *src) {
+  *p = create_parser(a, "test.clux", src);
+  return parser_read_expression_postfix(a, *p);
+}
+
+/* 断言后缀节点的形状。 */
+static void
+expect_postfix(node_t *expr, const char *op, node_kind_t operand_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_kind(operand), operand_kind);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)strlen(op));
+  /* 后缀形态的关键特征：RIGHT 缺失 */
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+}
+
+TEST(ExpressionPostfixTest, AllOperators) {
+  const char *ops[] = {".&", ".*", ".!", ".?", nullptr};
+  for (size_t i = 0; ops[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    char src[16];
+    snprintf(src, sizeof(src), "a%s", ops[i]);
+    node_t *expr = parse_postfix(a, &p, src);
+    expect_postfix(expr, ops[i], CLUX_NODE_LITERAL_IDENTIFIER);
+    EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "op=" << ops[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+TEST(ExpressionPostfixTest, OperandCanBeNumeric) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "42.!");
+  expect_postfix(expr, ".!", CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 后缀左结合：p.*.& => (p.*).& */
+TEST(ExpressionPostfixTest, LeftAssociativeChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "p.*.&");
+  ASSERT_NE(expr, nullptr);
+  expect_postfix(expr, ".&", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_postfix(inner, ".*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, FourOperandChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.!.!.!.!");
+  ASSERT_NE(expr, nullptr);
+  node_t *cur = expr;
+  int depth = 0;
+  while (cur && node_get_kind(cur) == CLUX_NODE_EXPRESSION_BINARY) {
+    depth++;
+    cur = node_get_child(cur, CLUX_EXPR_BINARY_LEFT);
+  }
+  EXPECT_EQ(depth, 4);
+  EXPECT_EQ(node_get_kind(cur), CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, TriviaAfterOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.! /* c */ ");
+  expect_postfix(expr, ".!", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 无后缀运算符时直接返回 literal。 */
+TEST(ExpressionPostfixTest, FallsBackToLiteralWithoutOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, FallbackDoesNotConsumeTrailingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 单独的 '.' 是成员访问前缀，不是后缀运算符，不应被消费。 */
+TEST(ExpressionPostfixTest, FallsBackOnBareDot) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, ReturnsNullOnNonLiteral) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_postfix(a, &p, ".!"), nullptr);
+  EXPECT_EQ(parser_get_position(p), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_postfix(a, &p, ""), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 与一元/二元层的关系 ---- */
+
+/* 后缀优先级高于前缀：-p.* => -(p.*) */
+TEST(ExpressionPostfixTest, PostfixBindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-p.*");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_postfix(operand, ".*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 后缀优先级高于所有二元层：a * b.! => a * (b.!) */
+TEST(ExpressionPostfixTest, PostfixBindsTighterThanBinary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a * b.!");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_postfix(right, ".!", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 后缀优先级高于 as/is：a.! as b => (a.!) as b */
+TEST(ExpressionPostfixTest, PostfixBindsTighterThanAsIs) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a.! as b");
+  node_t *expr = parser_read_expression_as_is(a, p);
+  expect_top_operator(expr, "as");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_postfix(left, ".!", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 子节点 parent 未自动挂载 ---- */
+
+TEST(ExpressionPostfixTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "a.!");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 后缀区间 = 操作数起点 .. 运算符终点，不含前后 trivia。 */
+TEST(ExpressionPostfixTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a.!";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a.!");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionPostfixTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  a  .!  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  a  .!  ", "a  .!");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 链式区间：外层覆盖整条链，内层覆盖被嵌套的那一段。 */
+TEST(ExpressionPostfixTest, ChainSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "a.*.&";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "a.*.&");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_location_span(inner, src, "a.*");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionPostfixTest, NoLeakOnPostfix) {
+  const char *sources[] = {"a.&",
+                           "a.*",
+                           "a.!",
+                           "a.?",
+                           "42.!",
+                           "p.*.&",
+                           "a.!.!.!.!",
+                           "a.! /* c */ ",
+                           "a",
+                           "a.b",
+                           "-p.*",
+                           "a * b.!",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

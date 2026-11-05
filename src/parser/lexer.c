@@ -251,21 +251,20 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
 }
 
 /* ---- numeric ----
-   C 风格数字字面量：
+   数字字面量：
      十六进制: 0x[0-9a-fA-F]*
      八进制:   0[0-7]*
      十进制:   [0-9]+
-     浮点:     [0-9]+.[0-9]*([eE][+-]?[0-9]+)?
-              .[0-9]+([eE][+-]?[0-9]+)?
+     浮点:     [0-9]+.[0-9]+([eE][+-]?[0-9]+)?
+   clux 禁止浮点的两种简写：`.123`（省略整数部分）和 `123.`（省略小数部分）。
+   因此点号只有在其后紧跟数字时才属于数字字面量，否则留给后续 token——
+   `123.!` 切分为 `123` + `.!`，`a.123` 切分为 `a` + `.` + `123`。
    非数字开头返回 NULL。内容合法性（如 0x 后无数字）由 parser 校验。 */
 token_t *lexer_read_numeric(allocator_t *allocator,
                             position_t *position,
                             const char *filename) {
   char c0 = position->offset[0];
-  if (!((c0 >= '0' && c0 <= '9') || c0 == '.')) return NULL;
-  /* 单独的 '.' 不是数字 */
-  if (c0 == '.' && !(position->offset[1] >= '0' && position->offset[1] <= '9'))
-    return NULL;
+  if (!(c0 >= '0' && c0 <= '9')) return NULL;
 
   position_t begin = *position;
   position_t current = *position;
@@ -294,8 +293,9 @@ token_t *lexer_read_numeric(allocator_t *allocator,
     while (*current.offset >= '0' && *current.offset <= '9') {
       position_next(&current);
     }
-    /* 小数部分 */
-    if (*current.offset == '.') {
+    /* 小数部分：点号后必须紧跟数字，否则不属于本字面量（禁止 `123.` 简写）。 */
+    if (*current.offset == '.' && current.offset[1] >= '0' &&
+        current.offset[1] <= '9') {
       position_next(&current); /* '.' */
       while (*current.offset >= '0' && *current.offset <= '9') {
         position_next(&current);
@@ -332,10 +332,10 @@ token_t *lexer_read_numeric(allocator_t *allocator,
 
 static const char *symbols[] = {
     "...", "||=", "&&=", ">>=", "<<=", "==", "!=", ">=", "<=", ">>", "<<",
-    "&&",  "||",  ".?",  ".!",  "+=",  "-=", "/=", "*=", "%=", "&=", "|=",
-    "~=",  "^=",  "->",  "[[",  "]]",  "+",  "-",  "*",  "/",  "%",  "&",
-    "|",   "!",   "=",   "(",   ")",   "[",  "]",  "{",  "}",  "~",  "^",
-    ".",   ",",   "?",   ":",   ";",   ">",  "<",  NULL};
+    "&&",  "||",  ".?",  ".!",  ".*",  ".&", "+=", "-=", "/=", "*=", "%=",
+    "&=",  "|=",  "~=",  "^=",  "->",  "[[", "]]", "+",  "-",  "*",  "/",
+    "%",   "&",   "|",   "!",   "=",   "(",  ")",  "[",  "]",  "{",  "}",
+    "~",   "^",   ".",   ",",   "?",   ":",  ";",  ">",  "<",  NULL};
 
 token_t *lexer_read_symbol(allocator_t *allocator,
                            position_t *position,

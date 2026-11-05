@@ -29,6 +29,10 @@ node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser);
 /* 前缀一元运算符（白皮书 5.3 优先级 23）：! ~ + -。
    复用二元节点形态，LEFT 为 NULL，SYMBOL 存运算符，RIGHT 存操作数。 */
 node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser);
+/* 后缀一元运算符（白皮书 5.3 优先级 25）：.& .* .! .?
+   与一元层镜像：LEFT 存操作数，SYMBOL 存运算符，RIGHT 为 NULL。 */
+node_t *parser_read_expression_postfix(allocator_t *allocator,
+                                       parser_t *parser);
 
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0

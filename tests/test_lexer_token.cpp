@@ -612,15 +612,15 @@ TEST(LexerNumericTest, FloatUppercaseExponent) {
   delete_allocator(&a);
 }
 
-TEST(LexerNumericTest, FloatStartsWithDot) {
+/* clux 禁止 `.123` 简写：点号开头不是数字字面量。 */
+TEST(LexerNumericTest, FloatStartsWithDotIsRejected) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = ".5";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_numeric(a, &p, "test.clux");
-  ASSERT_NE(tok, nullptr);
-  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
-  EXPECT_EQ(p.offset, src + 2);
-  delete_token(&tok);
+  EXPECT_EQ(tok, nullptr);
+  /* 游标不动，'.' 留给后续 token */
+  EXPECT_EQ(p.offset, src);
   delete_allocator(&a);
 }
 
@@ -754,16 +754,36 @@ TEST(LexerNumericCoverageTest, ZeroNotFollowedByOctalOrHex) {
   delete_allocator(&a);
 }
 
-TEST(LexerNumericCoverageTest, FloatDotNoFraction) {
+/* clux 禁止 `123.` 简写：点号后无数字时不算小数部分，只消费整数部分。 */
+TEST(LexerNumericCoverageTest, FloatDotNoFractionStopsAtDot) {
   allocator_t *a = create_allocator(malloc, free);
-  /* "1." 小数部分为空 */
   const char *src = "1.";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  /* 只消费 "1"，'.' 留给后续 token */
+  EXPECT_EQ(p.offset, src + 1);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+/* 点号后紧跟数字才属于小数部分，因此 `42.!` 切分为 `42` + `.!`，
+   后缀解包运算符得以紧跟数字字面量。 */
+TEST(LexerNumericCoverageTest, NumericStopsBeforePostfixOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "42.!";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_numeric(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
   EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
   EXPECT_EQ(p.offset, src + 2);
   delete_token(&tok);
+  /* 紧随其后的是 .! 后缀运算符 */
+  token_t *postfix = lexer_read_symbol(a, &p, "test.clux");
+  ASSERT_NE(postfix, nullptr);
+  EXPECT_EQ(p.offset, src + 4);
+  delete_token(&postfix);
   delete_allocator(&a);
 }
 
