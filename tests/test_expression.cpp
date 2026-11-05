@@ -1003,6 +1003,9 @@ static const BinaryLevel kBinaryLevels[] = {
     {"Shr", parser_read_expression_shift, ">>", "<", false},
     {"Add", parser_read_expression_additive, "+", "<<", false},
     {"Sub", parser_read_expression_additive, "-", "<<", false},
+    {"Mul", parser_read_expression_multiplicative, "*", "+", false},
+    {"Div", parser_read_expression_multiplicative, "/", "+", false},
+    {"Mod", parser_read_expression_multiplicative, "%", "+", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1420,6 +1423,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"EqRel", parser_read_expression_equality, "==", "<"},
     {"RelShift", parser_read_expression_relational, "<", "<<"},
     {"ShiftAdd", parser_read_expression_shift, "<<", "+"},
+    {"AddMul", parser_read_expression_additive, "+", "*"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1470,12 +1474,12 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f == g < h << i + j
-   =>  a || (b && (c | (d ^ (e & (f == (g < (h << (i + j)))))))) */
+/* a || b && c | d ^ e & f == g < h << i + j * k
+   =>  a || (b && (c | (d ^ (e & (f == (g < (h << (i + (j * k))))))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(
-      a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j");
+      a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j * k");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1494,6 +1498,21 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(shift_expr, "<<");
   node_t *add_expr = node_get_child(shift_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(add_expr, "+");
+  node_t *mul_expr = node_get_child(add_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(mul_expr, "*");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 三个乘除运算符同级，混用按左结合：(a % b) / c */
+TEST(ExpressionPrecedenceTest, MultiplicativeOperatorsShareLevel) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a % b / c");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "/");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "%");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
