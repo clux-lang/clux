@@ -25,6 +25,7 @@ node_t *parser_read_expression_additive(allocator_t *allocator,
                                         parser_t *parser);
 node_t *parser_read_expression_multiplicative(allocator_t *allocator,
                                               parser_t *parser);
+node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser);
 
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0

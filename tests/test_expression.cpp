@@ -995,6 +995,7 @@ static const BinaryLevel kBinaryLevels[] = {
     {"And", parser_read_expression_and, "&", "^", true},
     {"Eq", parser_read_expression_equality, "==", "&", false},
     {"Ne", parser_read_expression_equality, "!=", "&", false},
+    {"Extends", parser_read_expression_equality, "extends", "&", false},
     {"Ge", parser_read_expression_relational, ">=", "==", false},
     {"Le", parser_read_expression_relational, "<=", "==", false},
     {"Gt", parser_read_expression_relational, ">", "==", false},
@@ -1006,6 +1007,8 @@ static const BinaryLevel kBinaryLevels[] = {
     {"Mul", parser_read_expression_multiplicative, "*", "+", false},
     {"Div", parser_read_expression_multiplicative, "/", "+", false},
     {"Mod", parser_read_expression_multiplicative, "%", "+", false},
+    {"As", parser_read_expression_as_is, "as", "*", false},
+    {"Is", parser_read_expression_as_is, "is", "*", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1424,6 +1427,7 @@ static const PrecedencePair kPrecedencePairs[] = {
     {"RelShift", parser_read_expression_relational, "<", "<<"},
     {"ShiftAdd", parser_read_expression_shift, "<<", "+"},
     {"AddMul", parser_read_expression_additive, "+", "*"},
+    {"MulAs", parser_read_expression_multiplicative, "*", "as"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1474,12 +1478,12 @@ INSTANTIATE_TEST_SUITE_P(AdjacentLevels,
                          ExpressionPrecedencePairTest,
                          ::testing::ValuesIn(kPrecedencePairs));
 
-/* a || b && c | d ^ e & f == g < h << i + j * k
-   =>  a || (b && (c | (d ^ (e & (f == (g < (h << (i + (j * k))))))))) */
+/* a || b && c | d ^ e & f == g < h << i + j * k as l
+   =>  a || (b && (c | (d ^ (e & (f == (g < (h << (i + (j * (k as l)))))))))) */
 TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(
-      a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j * k");
+      a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j * k as l");
   node_t *expr = parser_read_expression_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
@@ -1500,6 +1504,51 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   expect_top_operator(add_expr, "+");
   node_t *mul_expr = node_get_child(add_expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(mul_expr, "*");
+  node_t *as_expr = node_get_child(mul_expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_top_operator(as_expr, "as");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* as/is 是关键字，SYMBOL 子节点同样记录其文本。 */
+TEST(ExpressionPrecedenceTest, KeywordOperatorsProduceSymbolNodes) {
+  const char *sources[] = {"a as b", "a is b", nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression_as_is(a, p);
+    ASSERT_NE(expr, nullptr) << "src=" << sources[i];
+    node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+    ASSERT_NE(symbol, nullptr);
+    EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* extends 与 ==/!= 同级，混用按左结合：(a == b) extends c */
+TEST(ExpressionPrecedenceTest, ExtendsSharesLevelWithEquality) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a == b extends c");
+  node_t *expr = parser_read_expression_equality(a, p);
+  expect_top_operator(expr, "extends");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "==");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* as/is 左结合：a as b is c => (a as b) is c */
+TEST(ExpressionPrecedenceTest, AsIsLeftAssociative) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a as b is c");
+  node_t *expr = parser_read_expression_as_is(a, p);
+  expect_top_operator(expr, "is");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_top_operator(left, "as");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);

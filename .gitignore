@@ -12,6 +12,14 @@ CMakeFiles/
 .cache
 .vscode
 
+# Visual Studio generator output (produced when cmake runs in the source tree)
+*.vcxproj
+*.vcxproj.filters
+*.slnx
+CTestTestfile.cmake
+*_include.cmake
+_deps/
+
 # ICU local archives (drop into third_party/icu/download/ for offline builds)
 third_party/icu/download/
 

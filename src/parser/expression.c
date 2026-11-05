@@ -75,6 +75,76 @@ static const char *peek_additive_operator(parser_t *parser) {
   return NULL;
 }
 
+/* as/is/extends 是关键字而非符号，消费后同样产出 SYMBOL 节点。
+   调用方已通过 peek_* 确认当前 token 是目标关键字，无需再校验。 */
+static node_t *read_keyword_symbol(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  location_t loc = *token_get_location(token);
+  parser_next(parser);
+  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* as/is 运算符表：同一优先级（白皮书 5.3 优先级 21）。 */
+static const char *as_is_operators[] = {"as", "is", NULL};
+
+/* 若当前 token 是 as/is 则返回其文本，否则返回 NULL。 */
+static const char *peek_as_is_operator(parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  for (size_t idx = 0; as_is_operators[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_KEYWORD, as_is_operators[idx])) {
+      return as_is_operators[idx];
+    }
+  }
+  return NULL;
+}
+
+node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_literal(allocator, parser);
+  if (!left) {
+    return NULL;
+  }
+  /* as/is 左结合（白皮书 5.3）。右值按下一级解析，与 +/- 等二元层一致：
+     `a as b + c` 得 `(a as b) + c`。右值实际是类型，语法阶段不做语义
+     检查，交给 sema 判定。 */
+  for (;;) {
+    size_t after_left = parser_get_position(parser);
+    parser_skip_trivia(parser);
+    const char *op = peek_as_is_operator(parser);
+    if (!op) {
+      /* 不是 as/is：回退游标到左操作数之后，不吞掉后续 trivia。 */
+      parser_set_position(parser, after_left);
+      return left;
+    }
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
+    node_t *symbol = read_keyword_symbol(allocator, parser);
+    node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+    size_t after_symbol = parser_get_position(parser);
+    node_set_location_span(
+        expr, node_get_location(left), node_get_location(symbol));
+    parser_skip_trivia(parser);
+    node_t *right = parser_read_literal(allocator, parser);
+    if (!right) {
+      /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
+         同时记录错误，由调用方决定是否中止。 */
+      /* 错误位置先取：此时游标仍停在坏 token 上（若已到流末尾则退化）。 */
+      location_t loc =
+          expression_error_location(parser, node_get_location(symbol));
+      parser_set_position(parser, after_symbol);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected expression after '%s'", op));
+      return expr;
+    }
+    node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, right);
+    node_set_location_span(
+        expr, node_get_location(left), node_get_location(right));
+    left = expr;
+  }
+}
 /* 乘除运算符表：同一优先级。 */
 static const char *multiplicative_operators[] = {"*", "/", "%", NULL};
 
@@ -91,7 +161,7 @@ static const char *peek_multiplicative_operator(parser_t *parser) {
 
 node_t *parser_read_expression_multiplicative(allocator_t *allocator,
                                               parser_t *parser) {
-  node_t *left = parser_read_literal(allocator, parser);
+  node_t *left = parser_read_expression_as_is(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -114,7 +184,8 @@ node_t *parser_read_expression_multiplicative(allocator_t *allocator,
     node_set_location_span(
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
-    node_t *right = parser_read_literal(allocator, parser);
+    /* 右操作数走更高优先级层，保证 a * b as c 解析为 a * (b as c)。 */
+    node_t *right = parser_read_expression_as_is(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -273,18 +344,23 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
   if (!left) {
     return NULL;
   }
-  /* == / != 左结合（白皮书 5.3）：a == b == c 解析为 (a == b) == c，
-     与右结合不等价，所以这里用循环累积而不是递归。 */
+  /* == / != / extends 左结合（白皮书 5.3）：a == b == c 解析为
+     (a == b) == c，与右结合不等价，所以这里用循环累积而不是递归。 */
   for (;;) {
     size_t after_left = parser_get_position(parser);
     parser_skip_trivia(parser);
     token_t *token = parser_peek_token(parser);
-    /* == 与 != 同级，先看是哪一个；都不是则回退。 */
+    /* 三个运算符同级，先看是哪一个；都不是则回退。
+       extends 是关键字，另两个是符号。 */
     const char *op;
+    bool keyword_op = false;
     if (token_is(token, CLUX_TOKEN_SYMBOL, "==")) {
       op = "==";
     } else if (token_is(token, CLUX_TOKEN_SYMBOL, "!=")) {
       op = "!=";
+    } else if (token_is(token, CLUX_TOKEN_KEYWORD, "extends")) {
+      op = "extends";
+      keyword_op = true;
     } else {
       /* 不是相等比较：回退游标到左操作数之后，不吞掉后续 trivia。 */
       parser_set_position(parser, after_left);
@@ -293,7 +369,8 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
     node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
-    node_t *symbol = parser_read_symbol(allocator, parser);
+    node_t *symbol = keyword_op ? read_keyword_symbol(allocator, parser)
+                                : parser_read_symbol(allocator, parser);
     node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
     size_t after_symbol = parser_get_position(parser);
     node_set_location_span(
