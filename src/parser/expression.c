@@ -86,6 +86,53 @@ static node_t *read_keyword_symbol(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 前缀一元运算符表（白皮书 5.3 优先级 23）。 */
+static const char *unary_operators[] = {"!", "~", "+", "-", NULL};
+
+/* 若当前 token 是前缀一元运算符则返回其文本，否则返回 NULL。 */
+static const char *peek_unary_operator(parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  for (size_t idx = 0; unary_operators[idx] != NULL; idx++) {
+    if (token_is(token, CLUX_TOKEN_SYMBOL, unary_operators[idx])) {
+      return unary_operators[idx];
+    }
+  }
+  return NULL;
+}
+
+node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser) {
+  const char *op = peek_unary_operator(parser);
+  if (!op) {
+    return parser_read_literal(allocator, parser);
+  }
+  /* 前缀运算符右绑定：操作数递归到本层，支持 !!a、--a 等叠加。 */
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  /* LEFT 保持 NULL：一元形态复用二元节点，靠 LEFT 缺失区分。 */
+  node_t *symbol = parser_read_symbol(allocator, parser);
+  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  size_t after_symbol = parser_get_position(parser);
+  node_set_location_span(
+      expr, node_get_location(symbol), node_get_location(symbol));
+  parser_skip_trivia(parser);
+  node_t *operand = parser_read_expression_unary(allocator, parser);
+  if (!operand) {
+    /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL），
+       同时记录错误，由调用方决定是否中止。 */
+    /* 错误位置先取：此时游标仍停在坏 token 上（若已到流末尾则退化）。 */
+    location_t loc =
+        expression_error_location(parser, node_get_location(symbol));
+    parser_set_position(parser, after_symbol);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression after '%s'", op));
+    return expr;
+  }
+  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  node_set_location_span(
+      expr, node_get_location(symbol), node_get_location(operand));
+  return expr;
+}
 /* as/is 运算符表：同一优先级（白皮书 5.3 优先级 21）。 */
 static const char *as_is_operators[] = {"as", "is", NULL};
 
@@ -101,7 +148,7 @@ static const char *peek_as_is_operator(parser_t *parser) {
 }
 
 node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_literal(allocator, parser);
+  node_t *left = parser_read_expression_unary(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -126,7 +173,8 @@ node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
     node_set_location_span(
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
-    node_t *right = parser_read_literal(allocator, parser);
+    /* 右操作数走一元层，保证 a as -b 解析为 a as (-b)。 */
+    node_t *right = parser_read_expression_unary(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */

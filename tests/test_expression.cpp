@@ -1189,10 +1189,26 @@ TEST(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
   }
 }
 
+/* 单独的运算符 token 无法构成二元表达式。例外：+ 和 - 同时是一元前缀
+   运算符，单独出现会进入一元层并按“缺操作数”容错，返回 RIGHT 为 NULL
+   的不完整节点并上报错误。 */
 TEST_P(ExpressionBinaryTest, ReturnsNullOnNonLiteral) {
   parser_t *p;
-  EXPECT_EQ(parse(&p, GetParam().op), nullptr);
-  EXPECT_EQ(parser_get_position(p), 0u);
+  bool is_unary =
+      strcmp(GetParam().op, "+") == 0 || strcmp(GetParam().op, "-") == 0;
+  if (!is_unary) {
+    EXPECT_EQ(parse(&p, GetParam().op), nullptr);
+    EXPECT_EQ(parser_get_position(p), 0u);
+    delete_parser(&p);
+    return;
+  }
+  node_t *expr = parse(&p, GetParam().op);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
 }
 
@@ -1661,4 +1677,343 @@ TEST(ExpressionPrecedenceTest, TernaryBranchesTakeLor) {
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
+}
+
+/* ================= 前缀一元表达式 =================
+   ! ~ + - 复用二元节点形态：LEFT 为 NULL，SYMBOL 存运算符，RIGHT 存操作数。 */
+
+static node_t *parse_unary(allocator_t *a, parser_t **p, const char *src) {
+  *p = create_parser(a, "test.clux", src);
+  return parser_read_expression_unary(a, *p);
+}
+
+/* 断言一元节点的形状。 */
+static void
+expect_unary(node_t *expr, const char *op, node_kind_t operand_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  /* 一元形态的关键特征：LEFT 缺失 */
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)strlen(op));
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_kind(operand), operand_kind);
+}
+
+TEST(ExpressionUnaryTest, AllOperators) {
+  const char *ops[] = {"!", "~", "+", "-", nullptr};
+  for (size_t i = 0; ops[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    char src[16];
+    snprintf(src, sizeof(src), "%sa", ops[i]);
+    node_t *expr = parse_unary(a, &p, src);
+    expect_unary(expr, ops[i], CLUX_NODE_LITERAL_IDENTIFIER);
+    EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "op=" << ops[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+TEST(ExpressionUnaryTest, OperandCanBeNumeric) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "-42");
+  expect_unary(expr, "-", CLUX_NODE_LITERAL_NUMERIC);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionUnaryTest, OperandCanBeParenthesizedLater) {
+  /* 括号尚未实现，用字符串/布尔等其他字面量验证操作数种类不受限。 */
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "!true");
+  expect_unary(expr, "!", CLUX_NODE_LITERAL_BOOLEAN);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 前缀运算符右绑定：!!a => !(!a) */
+TEST(ExpressionUnaryTest, StackedOperatorsAreRightBinding) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "!!a");
+  ASSERT_NE(expr, nullptr);
+  expect_unary(expr, "!", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(inner, "!", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 混合叠加：-~+a => - (~ (+ a)) */
+TEST(ExpressionUnaryTest, MixedStackedOperators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "-~+a");
+  ASSERT_NE(expr, nullptr);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *second = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(second, "~", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *third = node_get_child(second, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(third, "+", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionUnaryTest, TriviaAfterOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "! /* c */ a");
+  expect_unary(expr, "!", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 无运算符时直接返回下一级结果（literal）。 */
+TEST(ExpressionUnaryTest, FallsBackToLiteralWithoutOperator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionUnaryTest, ReturnsNullOnEmptyStream) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_unary(a, &p, ""), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺操作数：返回不完整节点（RIGHT 为 NULL），并上报错误。 */
+TEST(ExpressionUnaryTest, MissingOperandReturnsPartialNodeAndError) {
+  const char *ops[] = {"!", "~", "+", "-", nullptr};
+  for (size_t i = 0; ops[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *expr = parse_unary(a, &p, ops[i]);
+    ASSERT_NE(expr, nullptr) << "op=" << ops[i];
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+    EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+    EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+
+    vec_t *errors = parser_get_error(p);
+    ASSERT_EQ(vec_get_size(errors), 1u) << "op=" << ops[i];
+    clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+    char expected[64];
+    snprintf(
+        expected, sizeof(expected), "expected expression after '%s'", ops[i]);
+    EXPECT_STREQ(error_get_message(err), expected);
+    EXPECT_STREQ(error_get_location(err)->filename, "test.clux");
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 缺操作数且后面跟着无法解析的 token 时，错误位置指向该 token。 */
+TEST(ExpressionUnaryTest, MissingOperandErrorPointsAtBadToken) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "! )";
+  node_t *expr = parse_unary(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 2);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 叠加中内层缺操作数：只报一条。 */
+TEST(ExpressionUnaryTest, StackedMissingOperandReportsOnce) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "!!");
+  ASSERT_NE(expr, nullptr);
+  expect_unary(expr, "!", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(inner, nullptr);
+  EXPECT_EQ(node_get_child(inner, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 与二元层的关系 ---- */
+
+/* 一元优先级高于所有二元层：-a * b => (-a) * b */
+TEST(ExpressionUnaryTest, UnaryBindsTighterThanMultiplicative) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-a * b");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_unary(left, "-", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 一元优先级高于 as/is：-a as b => (-a) as b */
+TEST(ExpressionUnaryTest, UnaryBindsTighterThanAsIs) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-a as b");
+  node_t *expr = parser_read_expression_as_is(a, p);
+  expect_top_operator(expr, "as");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_unary(left, "-", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* as/is 右值可以是一元表达式：a as -b => a as (-b) */
+TEST(ExpressionUnaryTest, AsIsRightOperandCanBeUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a as -b");
+  node_t *expr = parser_read_expression_as_is(a, p);
+  expect_top_operator(expr, "as");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(right, "-", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 二元右操作数也可以是一元：a + -b => a + (-b) */
+TEST(ExpressionUnaryTest, AdditiveRightOperandCanBeUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a + -b");
+  node_t *expr = parser_read_expression_additive(a, p);
+  expect_top_operator(expr, "+");
+  node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(right, "-", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 子节点 parent 未自动挂载 ---- */
+
+TEST(ExpressionUnaryTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_unary(a, &p, "!a");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 一元区间 = 运算符起点 .. 操作数终点，不含前后 trivia。 */
+TEST(ExpressionUnaryTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "!a";
+  node_t *expr = parse_unary(a, &p, src);
+  expect_location_span(expr, src, "!a");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionUnaryTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  !  a  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_location_span(expr, "  !  a  ", "!  a");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionUnaryTest, StackedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "!!a";
+  node_t *expr = parse_unary(a, &p, src);
+  expect_location_span(expr, src, "!!a");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "!a");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺操作数：区间退化为运算符自身。 */
+TEST(ExpressionUnaryTest, SpanWhenOperandMissing) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "!";
+  node_t *expr = parse_unary(a, &p, src);
+  expect_location_span(expr, src, "!");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionUnaryTest, NoLeakOnUnary) {
+  const char *sources[] = {"!a",
+                           "~a",
+                           "+a",
+                           "-a",
+                           "-42",
+                           "!!a",
+                           "-~+a",
+                           "! /* c */ a",
+                           "a",
+                           "!",
+                           "!!",
+                           "-a * b",
+                           "a as -b",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
 }
