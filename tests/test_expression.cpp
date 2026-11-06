@@ -570,11 +570,16 @@ TEST(ExpressionTernaryTest, FallbackWhenFollowedByNonQuestionSymbol) {
   delete_allocator(&a);
 }
 
+/* 单独的 '?' 现在是 optional 类型前缀，按“缺操作数”容错返回不完整节点。 */
 TEST(ExpressionTernaryTest, ReturnsNullOnNonLiteral) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  EXPECT_EQ(parse_ternary(a, &p, "?"), nullptr);
-  EXPECT_EQ(parser_get_position(p), 0u);
+  node_t *expr = parse_ternary(a, &p, "?");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -722,17 +727,22 @@ TEST(ExpressionTernaryTest, MissingElseReturnsPartialNodeAndError) {
   delete_allocator(&a);
 }
 
+/* ':' 后是 '?' 时，'?' 作为 optional 类型前缀进入值层，缺操作数报错，
+   因此 else 分支是一个不完整的 optional 节点（三元本身不报错）。 */
 TEST(ExpressionTernaryTest, MissingElseErrorPointsAtBadToken) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   const char *src = "a ? b : ?";
   node_t *expr = parse_ternary(a, &p, src);
   ASSERT_NE(expr, nullptr);
-  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_TERNARY_ELSE), nullptr);
+  node_t *else_branch = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(node_get_child(else_branch, CLUX_EXPR_BINARY_RIGHT), nullptr);
   vec_t *errors = parser_get_error(p);
   ASSERT_EQ(vec_get_size(errors), 1u);
   clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
-  EXPECT_EQ(error_get_location(err)->begin.offset, src + 8);
+  /* '?' 已被消费，流已到末尾：错误位置退化为 '?' 之后的零宽区间。 */
+  EXPECT_EQ(error_get_location(err)->begin.offset, src + 9);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -6064,6 +6074,300 @@ TEST(ExpressionTupleTypeTest, NoLeakOnTupleType) {
                            "<a,>",
                            "<a",
                            "<",
+                           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= optional 类型前缀 =================
+   ?<postfix>：复用一元节点形态，LEFT 为 NULL，SYMBOL 存 '?'，RIGHT 存操作数。 */
+
+static void expect_optional_type(node_t *expr, node_kind_t operand_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)1);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_kind(operand), operand_kind);
+}
+
+TEST(ExpressionOptionalTypeTest, WrapsIdentifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?T");
+  expect_optional_type(expr, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionOptionalTypeTest, WrapsBuiltinTypeName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?i32");
+  expect_optional_type(expr, CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 操作数取后缀层：?a.b => ?(a.b) */
+TEST(ExpressionOptionalTypeTest, OperandTakesPostfixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?a.b");
+  expect_optional_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_member(operand, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 叠加：??T => ?(?T) */
+TEST(ExpressionOptionalTypeTest, NestedOptionals) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "??T");
+  expect_optional_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_optional_type(inner, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与指针组合：?*T => ?(*T) */
+TEST(ExpressionOptionalTypeTest, WrapsPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?*T");
+  expect_optional_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(operand, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 指针套 optional：*?T => *(?T) */
+TEST(ExpressionOptionalTypeTest, PointerWrapsOptional) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*?T");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_optional_type(operand, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与切片组合：?[]u8 => ?([]u8) */
+TEST(ExpressionOptionalTypeTest, WrapsSlice) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?[]u8");
+  expect_optional_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_slice_type(operand, CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与修饰组合：?const u8 => ?(const u8) */
+TEST(ExpressionOptionalTypeTest, WrapsQualifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?const u8");
+  expect_optional_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_qualifier(operand, "const", CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* optional 不吞乘法：?T * x => (?T) * x */
+TEST(ExpressionOptionalTypeTest, DoesNotSwallowMultiplication) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "?T * x");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_optional_type(left, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* optional 优先级高于前缀一元：-?T => -(?T) */
+TEST(ExpressionOptionalTypeTest, BindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-?T");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_optional_type(operand, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与三元不冲突：a ? b : c 中的 '?' 在左操作数之后，由三元层消费。 */
+TEST(ExpressionOptionalTypeTest, DoesNotConflictWithTernary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a ? b : c");
+  node_t *expr = parser_read_expression_ternary(a, p);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 三元分支里可以是 optional 类型：a ? ?T : ?U */
+TEST(ExpressionOptionalTypeTest, OptionalInsideTernaryBranch) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a ? ?T : ?U");
+  node_t *expr = parser_read_expression_ternary(a, p);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *then_branch = node_get_child(expr, CLUX_EXPR_TERNARY_THEN);
+  expect_optional_type(then_branch, CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *else_branch = node_get_child(expr, CLUX_EXPR_TERNARY_ELSE);
+  expect_optional_type(else_branch, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺操作数：单独的 '?' */
+TEST(ExpressionOptionalTypeTest, MissingOperandReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression after '?'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺操作数时游标回到 '?' 之后，不吞掉后续 trivia。 */
+TEST(ExpressionOptionalTypeTest, MissingOperandDoesNotConsumeTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = '?' 起点 .. 操作数终点，不含前后 trivia。 */
+TEST(ExpressionOptionalTypeTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "?a.b";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "?a.b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionOptionalTypeTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  ?   T  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  ?   T  ", "?   T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionOptionalTypeTest, NestedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "??T";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "??T");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "?T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionOptionalTypeTest, OperandParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "?T");
+  ASSERT_NE(expr, nullptr);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(operand, nullptr);
+  EXPECT_EQ(node_get_parent(operand), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionOptionalTypeTest, NoLeakOnOptionalType) {
+  const char *sources[] = {"?T",
+                           "?i32",
+                           "?a.b",
+                           "??T",
+                           "?*T",
+                           "*?T",
+                           "?[]u8",
+                           "?const u8",
+                           "?T * x",
+                           "-?T",
+                           "a ? b : c",
+                           "a ? ?T : ?U",
+                           "?",
+                           "?   ",
                            "",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
