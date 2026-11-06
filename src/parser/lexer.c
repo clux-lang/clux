@@ -116,13 +116,14 @@ token_t *lexer_read_string(allocator_t *allocator,
 }
 
 static const char *keywords[] = {
-    "var",    "func",    "cfunc",     "import", "export", "if",       "else",
-    "for",    "foreach", "while",     "do",     "break",  "continue", "return",
-    "using",  "const",   "volatile",  "bool",   "i8",     "i16",      "i32",
-    "i64",    "u8",      "u16",       "u32",    "u64",    "isize",    "usize",
-    "f32",    "f64",     "str",       "void",   "opaque", "struct",   "union",
-    "cunion", "enum",    "undefined", "none",   "nil",    "true",     "false",
-    "as",     "is",      "extends",   NULL,
+    "var",      "func",      "cfunc",   "import",   "export",   "if",
+    "else",     "for",       "foreach", "while",    "do",       "break",
+    "continue", "return",    "using",   "const",    "volatile", "bool",
+    "i8",       "i16",       "i32",     "i64",      "u8",       "u16",
+    "u32",      "u64",       "isize",   "usize",    "f32",      "f64",
+    "str",      "void",      "opaque",  "struct",   "union",    "cunion",
+    "enum",     "undefined", "none",    "nil",      "true",     "false",
+    "as",       "is",        "extends", "comptime", NULL,
 };
 
 /* ---- identifier ----
@@ -329,15 +330,15 @@ token_t *lexer_read_numeric(allocator_t *allocator,
   return token;
 }
 
-/* 注意：`<<` / `>>` / `.?` 故意不在此表中。它们在词法层有歧义
-   （`<<` / `>>` 与嵌套元组的尖括号冲突，`.?` 与 optional 构造冲突），
-   由 parser 在相邻字符位置按上下文组合。 */
+/* 注意：`<<` / `>>` / `.?` / `[[` / `]]` 故意不在此表中。它们在词法层
+   有歧义（`<<` / `>>` 与嵌套元组的尖括号冲突，`.?` 与 optional 构造冲突，
+   `[[` / `]]` 与嵌套下标冲突），由 parser 在相邻字符位置按上下文组合。 */
 static const char *symbols[] = {
-    "...", "||=", "&&=", ">>=", "<<=", "==", "!=", ">=", "<=", "&&", "||",
-    ".!",  ".*",  ".&",  "+=",  "-=",  "/=", "*=", "%=", "&=", "|=", "~=",
-    "^=",  "->",  "[[",  "]]",  "::",  "+",  "-",  "*",  "/",  "%",  "&",
-    "|",   "!",   "=",   "(",   ")",   "[",  "]",  "{",  "}",  "~",  "^",
-    ".",   ",",   "?",   ":",   ";",   ">",  "<",  NULL};
+    "...", "||=", "&&=", ">>=", "<<=", "==", "!=", ">=", "<=", "&&",
+    "||",  ".!",  ".*",  ".&",  "+=",  "-=", "/=", "*=", "%=", "&=",
+    "|=",  "~=",  "^=",  "->",  "::",  "+",  "-",  "*",  "/",  "%",
+    "&",   "|",   "!",   "=",   "(",   ")",  "[",  "]",  "{",  "}",
+    "~",   "^",   ".",   ",",   "?",   ":",  ";",  ">",  "<",  NULL};
 
 token_t *lexer_read_symbol(allocator_t *allocator,
                            position_t *position,

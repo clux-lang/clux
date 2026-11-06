@@ -49,6 +49,10 @@ enum _node_kind_t {
   CLUX_NODE_FUNC_PARAMS,
   /* 单个形参：NAME / TYPE / DEFAULT 均可为 NULL。 */
   CLUX_NODE_FUNC_PARAM,
+  /* 泛型参数列表 [T, U, ...]，children 为 CLUX_NODE_GENERIC_PARAM 或 rest。 */
+  CLUX_NODE_GENERIC_PARAMS,
+  /* 单个泛型参数：NAME 必有；TYPE / DEFAULT / CONSTRAINT 均可为 NULL。 */
+  CLUX_NODE_GENERIC_PARAM,
 
   CLUX_NODE_STMT_BLOCK,
   CLUX_NODE_STMT_EXPR,

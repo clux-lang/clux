@@ -78,7 +78,7 @@ node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser) {
 /* 表达式语句 expr ';'。缺少 ';' 时报错但不消费后续 token：
    表达式区间就是语句区间，游标停在表达式之后，由调用方决定如何恢复。 */
 node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser) {
-  node_t *expr = parser_read_expression(allocator, parser);
+  node_t *expr = parser_read_expr(allocator, parser);
   if (!expr) {
     return NULL;
   }

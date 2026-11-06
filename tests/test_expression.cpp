@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "parser/expression.h"
+#include "parser/function.h"
 #include "parser/literal.h"
 #include "parser/node.h"
 #include "parser/parser.h"
@@ -13,7 +14,7 @@
 
 static node_t *parse_expr(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_expression(a, *p);
+  return parser_read_expr(a, *p);
 }
 
 /* 断言 assign 节点的三个子节点形状。 */
@@ -62,7 +63,7 @@ TEST(ExpressionAssignTest, AssignWithSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  x   =   1  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression(a, p);
+  node_t *expr = parser_read_expr(a, p);
   expect_assign(expr, "x", "=", CLUX_NODE_LITERAL_NUMERIC);
   delete_node(&expr);
   delete_parser(&p);
@@ -382,7 +383,7 @@ TEST(ExpressionAssignTest, NoLeakOnAssign) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -394,7 +395,7 @@ TEST(ExpressionAssignTest, NoLeakOnAssign) {
 
 static node_t *parse_ternary(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_expression_ternary(a, *p);
+  return parser_read_expr_ternary(a, *p);
 }
 
 /* 断言三元节点的三个子节点形状。 */
@@ -809,7 +810,7 @@ TEST(ExpressionTernaryTest, NoLeakOnTernary) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -851,7 +852,7 @@ TEST(ExpressionLocationTest, AssignSpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  x   =   1  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression(a, p);
+  node_t *expr = parser_read_expr(a, p);
   expect_location_span(expr, "  x   =   1  ", "x   =   1");
   delete_node(&expr);
   delete_parser(&p);
@@ -909,7 +910,7 @@ TEST(ExpressionLocationTest, TernarySpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  a  ?  b  :  c  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_ternary(a, p);
+  node_t *expr = parser_read_expr_ternary(a, p);
   expect_location_span(expr, "  a  ?  b  :  c  ", "a  ?  b  :  c");
   delete_node(&expr);
   delete_parser(&p);
@@ -997,27 +998,27 @@ static void PrintTo(const BinaryLevel &level, std::ostream *os) {
 }
 
 static const BinaryLevel kBinaryLevels[] = {
-    {"Lor", parser_read_expression_lor, "||", "?", true},
-    {"Land", parser_read_expression_land, "&&", "||", true},
-    {"Or", parser_read_expression_or, "|", "&&", true},
-    {"Xor", parser_read_expression_xor, "^", "|", true},
-    {"And", parser_read_expression_and, "&", "^", true},
-    {"Eq", parser_read_expression_equality, "==", "&", false},
-    {"Ne", parser_read_expression_equality, "!=", "&", false},
-    {"Extends", parser_read_expression_equality, "extends", "&", false},
-    {"Ge", parser_read_expression_relational, ">=", "==", false},
-    {"Le", parser_read_expression_relational, "<=", "==", false},
-    {"Gt", parser_read_expression_relational, ">", "==", false},
-    {"Lt", parser_read_expression_relational, "<", "==", false},
-    {"Shl", parser_read_expression_shift, "<<", "<", false},
-    {"Shr", parser_read_expression_shift, ">>", "<", false},
-    {"Add", parser_read_expression_additive, "+", "<<", false},
-    {"Sub", parser_read_expression_additive, "-", "<<", false},
-    {"Mul", parser_read_expression_multiplicative, "*", "+", false},
-    {"Div", parser_read_expression_multiplicative, "/", "+", false},
-    {"Mod", parser_read_expression_multiplicative, "%", "+", false},
-    {"As", parser_read_expression_as_is, "as", "*", false},
-    {"Is", parser_read_expression_as_is, "is", "*", false},
+    {"Lor", parser_read_expr_lor, "||", "?", true},
+    {"Land", parser_read_expr_land, "&&", "||", true},
+    {"Or", parser_read_expr_or, "|", "&&", true},
+    {"Xor", parser_read_expr_xor, "^", "|", true},
+    {"And", parser_read_expr_and, "&", "^", true},
+    {"Eq", parser_read_expr_equality, "==", "&", false},
+    {"Ne", parser_read_expr_equality, "!=", "&", false},
+    {"Extends", parser_read_expr_equality, "extends", "&", false},
+    {"Ge", parser_read_expr_relational, ">=", "==", false},
+    {"Le", parser_read_expr_relational, "<=", "==", false},
+    {"Gt", parser_read_expr_relational, ">", "==", false},
+    {"Lt", parser_read_expr_relational, "<", "==", false},
+    {"Shl", parser_read_expr_shift, "<<", "<", false},
+    {"Shr", parser_read_expr_shift, ">>", "<", false},
+    {"Add", parser_read_expr_additive, "+", "<<", false},
+    {"Sub", parser_read_expr_additive, "-", "<<", false},
+    {"Mul", parser_read_expr_multiplicative, "*", "+", false},
+    {"Div", parser_read_expr_multiplicative, "/", "+", false},
+    {"Mod", parser_read_expr_multiplicative, "%", "+", false},
+    {"As", parser_read_expr_as_is, "as", "*", false},
+    {"Is", parser_read_expr_as_is, "is", "*", false},
 };
 
 class ExpressionBinaryTest : public ::testing::TestWithParam<BinaryLevel> {
@@ -1186,8 +1187,8 @@ TEST(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
     snprintf(src, sizeof(src), "a %s b", ops[i]);
     parser_t *p = create_parser(a, "test.clux", src);
     /* 从最高二元层进入：整条回退链都不应把复合赋值拆开。
-       注意不能用 parser_read_expression，那一层会把 `a ||= b` 当合法赋值。 */
-    node_t *expr = parser_read_expression_lor(a, p);
+       注意不能用 parser_read_expr，那一层会把 `a ||= b` 当合法赋值。 */
+    node_t *expr = parser_read_expr_lor(a, p);
     ASSERT_NE(expr, nullptr) << "op=" << ops[i];
     EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER)
         << "op=" << ops[i];
@@ -1327,7 +1328,7 @@ TEST_P(ExpressionBinaryTest, AssignWithBinaryValue) {
   char src[48];
   snprintf(src, sizeof(src), "x = a %s b", GetParam().op);
   p = create_parser(allocator_, "test.clux", src);
-  node_t *expr = parser_read_expression(allocator_, p);
+  node_t *expr = parser_read_expr(allocator_, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
   node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
@@ -1454,16 +1455,16 @@ static void PrintTo(const PrecedencePair &pair, std::ostream *os) {
 }
 
 static const PrecedencePair kPrecedencePairs[] = {
-    {"LorLand", parser_read_expression_lor, "||", "&&"},
-    {"LandOr", parser_read_expression_land, "&&", "|"},
-    {"OrXor", parser_read_expression_or, "|", "^"},
-    {"XorAnd", parser_read_expression_xor, "^", "&"},
-    {"AndEq", parser_read_expression_and, "&", "=="},
-    {"EqRel", parser_read_expression_equality, "==", "<"},
-    {"RelShift", parser_read_expression_relational, "<", "<<"},
-    {"ShiftAdd", parser_read_expression_shift, "<<", "+"},
-    {"AddMul", parser_read_expression_additive, "+", "*"},
-    {"MulAs", parser_read_expression_multiplicative, "*", "as"},
+    {"LorLand", parser_read_expr_lor, "||", "&&"},
+    {"LandOr", parser_read_expr_land, "&&", "|"},
+    {"OrXor", parser_read_expr_or, "|", "^"},
+    {"XorAnd", parser_read_expr_xor, "^", "&"},
+    {"AndEq", parser_read_expr_and, "&", "=="},
+    {"EqRel", parser_read_expr_equality, "==", "<"},
+    {"RelShift", parser_read_expr_relational, "<", "<<"},
+    {"ShiftAdd", parser_read_expr_shift, "<<", "+"},
+    {"AddMul", parser_read_expr_additive, "+", "*"},
+    {"MulAs", parser_read_expr_multiplicative, "*", "as"},
 };
 
 class ExpressionPrecedencePairTest
@@ -1520,7 +1521,7 @@ TEST(ExpressionPrecedenceTest, FullChain) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(
       a, "test.clux", "a || b && c | d ^ e & f == g < h << i + j * k as l");
-  node_t *expr = parser_read_expression_lor(a, p);
+  node_t *expr = parser_read_expr_lor(a, p);
   expect_top_operator(expr, "||");
   node_t *land_expr = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_top_operator(land_expr, "&&");
@@ -1553,7 +1554,7 @@ TEST(ExpressionPrecedenceTest, KeywordOperatorsProduceSymbolNodes) {
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression_as_is(a, p);
+    node_t *expr = parser_read_expr_as_is(a, p);
     ASSERT_NE(expr, nullptr) << "src=" << sources[i];
     node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
     ASSERT_NE(symbol, nullptr);
@@ -1568,7 +1569,7 @@ TEST(ExpressionPrecedenceTest, KeywordOperatorsProduceSymbolNodes) {
 TEST(ExpressionPrecedenceTest, ExtendsSharesLevelWithEquality) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a == b extends c");
-  node_t *expr = parser_read_expression_equality(a, p);
+  node_t *expr = parser_read_expr_equality(a, p);
   expect_top_operator(expr, "extends");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "==");
@@ -1581,7 +1582,7 @@ TEST(ExpressionPrecedenceTest, ExtendsSharesLevelWithEquality) {
 TEST(ExpressionPrecedenceTest, AsIsLeftAssociative) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a as b is c");
-  node_t *expr = parser_read_expression_as_is(a, p);
+  node_t *expr = parser_read_expr_as_is(a, p);
   expect_top_operator(expr, "is");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "as");
@@ -1594,7 +1595,7 @@ TEST(ExpressionPrecedenceTest, AsIsLeftAssociative) {
 TEST(ExpressionPrecedenceTest, MultiplicativeOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a % b / c");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "/");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "%");
@@ -1607,7 +1608,7 @@ TEST(ExpressionPrecedenceTest, MultiplicativeOperatorsShareLevel) {
 TEST(ExpressionPrecedenceTest, AdditiveOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a - b + c");
-  node_t *expr = parser_read_expression_additive(a, p);
+  node_t *expr = parser_read_expr_additive(a, p);
   expect_top_operator(expr, "+");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "-");
@@ -1620,7 +1621,7 @@ TEST(ExpressionPrecedenceTest, AdditiveOperatorsShareLevel) {
 TEST(ExpressionPrecedenceTest, ShiftOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a << b >> c");
-  node_t *expr = parser_read_expression_shift(a, p);
+  node_t *expr = parser_read_expr_shift(a, p);
   expect_top_operator(expr, ">>");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "<<");
@@ -1641,7 +1642,7 @@ TEST(ExpressionPrecedenceTest, ShiftRequiresAdjacentTokens) {
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression_shift(a, p);
+    node_t *expr = parser_read_expr_shift(a, p);
     ASSERT_NE(expr, nullptr) << "src=" << sources[i];
     /* 没有移位：移位层原样返回加法的结果（裸标识符）。 */
     EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER)
@@ -1656,7 +1657,7 @@ TEST(ExpressionPrecedenceTest, ShiftRequiresAdjacentTokens) {
 TEST(ExpressionPrecedenceTest, ShiftSymbolSpanCoversBothChars) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a << b");
-  node_t *expr = parser_read_expression_shift(a, p);
+  node_t *expr = parser_read_expr_shift(a, p);
   expect_top_operator(expr, "<<");
   node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
   ASSERT_NE(symbol, nullptr);
@@ -1672,7 +1673,7 @@ TEST(ExpressionPrecedenceTest, ShiftSymbolSpanCoversBothChars) {
 TEST(ExpressionPrecedenceTest, EqualityOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a == b != c");
-  node_t *expr = parser_read_expression_equality(a, p);
+  node_t *expr = parser_read_expr_equality(a, p);
   expect_top_operator(expr, "!=");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "==");
@@ -1685,7 +1686,7 @@ TEST(ExpressionPrecedenceTest, EqualityOperatorsShareLevel) {
 TEST(ExpressionPrecedenceTest, RelationalOperatorsShareLevel) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a < b >= c");
-  node_t *expr = parser_read_expression_relational(a, p);
+  node_t *expr = parser_read_expr_relational(a, p);
   expect_top_operator(expr, ">=");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_top_operator(left, "<");
@@ -1715,7 +1716,7 @@ TEST(ExpressionPrecedenceTest, LongestMatchWins) {
 TEST(ExpressionPrecedenceTest, TernaryConditionTakesWholeLor) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a || b ? c : d");
-  node_t *expr = parser_read_expression_ternary(a, p);
+  node_t *expr = parser_read_expr_ternary(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_TERNARY);
   node_t *condition = node_get_child(expr, CLUX_EXPR_TERNARY_CONDITION);
@@ -1729,7 +1730,7 @@ TEST(ExpressionPrecedenceTest, TernaryConditionTakesWholeLor) {
 TEST(ExpressionPrecedenceTest, TernaryBranchesTakeLor) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a ? b || c : d && e");
-  node_t *expr = parser_read_expression_ternary(a, p);
+  node_t *expr = parser_read_expr_ternary(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_TERNARY);
   expect_top_operator(node_get_child(expr, CLUX_EXPR_TERNARY_THEN), "||");
@@ -1744,7 +1745,7 @@ TEST(ExpressionPrecedenceTest, TernaryBranchesTakeLor) {
 
 static node_t *parse_unary(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_expression_unary(a, *p);
+  return parser_read_expr_unary(a, *p);
 }
 
 /* 断言一元节点的形状。 */
@@ -1934,7 +1935,7 @@ TEST(ExpressionUnaryTest, StackedMissingOperandReportsOnce) {
 TEST(ExpressionUnaryTest, UnaryBindsTighterThanMultiplicative) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-a * b");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_unary(left, "-", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -1947,7 +1948,7 @@ TEST(ExpressionUnaryTest, UnaryBindsTighterThanMultiplicative) {
 TEST(ExpressionUnaryTest, UnaryBindsTighterThanAsIs) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-a as b");
-  node_t *expr = parser_read_expression_as_is(a, p);
+  node_t *expr = parser_read_expr_as_is(a, p);
   expect_top_operator(expr, "as");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_unary(left, "-", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -1960,7 +1961,7 @@ TEST(ExpressionUnaryTest, UnaryBindsTighterThanAsIs) {
 TEST(ExpressionUnaryTest, AsIsRightOperandCanBeUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a as -b");
-  node_t *expr = parser_read_expression_as_is(a, p);
+  node_t *expr = parser_read_expr_as_is(a, p);
   expect_top_operator(expr, "as");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_unary(right, "-", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -1973,7 +1974,7 @@ TEST(ExpressionUnaryTest, AsIsRightOperandCanBeUnary) {
 TEST(ExpressionUnaryTest, AdditiveRightOperandCanBeUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a + -b");
-  node_t *expr = parser_read_expression_additive(a, p);
+  node_t *expr = parser_read_expr_additive(a, p);
   expect_top_operator(expr, "+");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_unary(right, "-", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -2015,7 +2016,7 @@ TEST(ExpressionUnaryTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  !  a  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_location_span(expr, "  !  a  ", "!  a");
   delete_node(&expr);
   delete_parser(&p);
@@ -2070,7 +2071,7 @@ TEST(ExpressionUnaryTest, NoLeakOnUnary) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -2083,7 +2084,7 @@ TEST(ExpressionUnaryTest, NoLeakOnUnary) {
 
 static node_t *parse_postfix(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_expression_postfix(a, *p);
+  return parser_read_expr_postfix(a, *p);
 }
 
 /* 断言后缀节点的形状。 */
@@ -2280,7 +2281,7 @@ TEST(ExpressionPostfixTest, ReturnsNullOnEmptyStream) {
 TEST(ExpressionPostfixTest, PostfixBindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-p.*");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_postfix(operand, ".*", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -2293,7 +2294,7 @@ TEST(ExpressionPostfixTest, PostfixBindsTighterThanPrefixUnary) {
 TEST(ExpressionPostfixTest, PostfixBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * b.!");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_postfix(right, ".!", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -2306,7 +2307,7 @@ TEST(ExpressionPostfixTest, PostfixBindsTighterThanBinary) {
 TEST(ExpressionPostfixTest, PostfixBindsTighterThanAsIs) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a.! as b");
-  node_t *expr = parser_read_expression_as_is(a, p);
+  node_t *expr = parser_read_expr_as_is(a, p);
   expect_top_operator(expr, "as");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_postfix(left, ".!", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -2348,7 +2349,7 @@ TEST(ExpressionPostfixTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  a  .!  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  a  .!  ", "a  .!");
   delete_node(&expr);
   delete_parser(&p);
@@ -2393,7 +2394,7 @@ TEST(ExpressionPostfixTest, NoLeakOnPostfix) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -2549,7 +2550,7 @@ TEST(ExpressionMemberTest, NumericIsNotAField) {
 TEST(ExpressionMemberTest, MemberBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * b.c");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_member(right, CLUX_NODE_LITERAL_IDENTIFIER, "c");
@@ -2562,7 +2563,7 @@ TEST(ExpressionMemberTest, MemberBindsTighterThanBinary) {
 TEST(ExpressionMemberTest, MemberBindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-a.b");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_member(operand, CLUX_NODE_LITERAL_IDENTIFIER, "b");
@@ -2588,7 +2589,7 @@ TEST(ExpressionMemberTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  a  .  b  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  a  .  b  ", "a  .  b");
   delete_node(&expr);
   delete_parser(&p);
@@ -2768,7 +2769,7 @@ TEST(ExpressionScopeTest, KeywordIsNotAScopeName) {
 TEST(ExpressionScopeTest, ScopeBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * b::c");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_scope(right, CLUX_NODE_LITERAL_IDENTIFIER, "c");
@@ -2794,7 +2795,7 @@ TEST(ExpressionScopeTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  a  ::  b  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  a  ::  b  ", "a  ::  b");
   delete_node(&expr);
   delete_parser(&p);
@@ -2850,7 +2851,7 @@ TEST(ExpressionScopeTest, NoLeakOnScope) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -3169,7 +3170,7 @@ TEST(ExpressionSubscriptTest, ValidSubscriptProducesNoError) {
 TEST(ExpressionSubscriptTest, SubscriptBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * b[i]");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_subscript(right, CLUX_NODE_LITERAL_IDENTIFIER, 1);
@@ -3182,7 +3183,7 @@ TEST(ExpressionSubscriptTest, SubscriptBindsTighterThanBinary) {
 TEST(ExpressionSubscriptTest, SubscriptBindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-a[i]");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_SUBSCRIPT);
   delete_node(&expr);
   delete_parser(&p);
@@ -3206,7 +3207,7 @@ TEST(ExpressionSubscriptTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  a  [  i  ]  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  a  [  i  ]  ", "a  [  i  ]");
   delete_node(&expr);
   delete_parser(&p);
@@ -3256,7 +3257,7 @@ TEST(ExpressionSubscriptTest, NoLeakOnSubscript) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -3269,7 +3270,7 @@ TEST(ExpressionSubscriptTest, NoLeakOnSubscript) {
 
 static node_t *parse_rest(allocator_t *a, parser_t **p, const char *src) {
   *p = create_parser(a, "test.clux", src);
-  return parser_read_expression_rest(a, *p);
+  return parser_read_expr_rest(a, *p);
 }
 
 TEST(ExpressionRestTest, BareRestHasNoChildren) {
@@ -3389,7 +3390,7 @@ TEST(ExpressionRestTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  ...  args  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_rest(a, p);
+  node_t *expr = parser_read_expr_rest(a, p);
   expect_location_span(expr, "  ...  args  ", "...  args");
   delete_node(&expr);
   delete_parser(&p);
@@ -3421,7 +3422,7 @@ TEST(ExpressionRestTest, NoLeakOnRest) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression_rest(a, p);
+    node_t *expr = parser_read_expr_rest(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -3692,7 +3693,7 @@ TEST(ExpressionCallTest, UnclosedEmptyCallReportsBothErrors) {
 TEST(ExpressionCallTest, CallBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * f(b)");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_call(right, CLUX_NODE_LITERAL_IDENTIFIER, 1);
@@ -3705,7 +3706,7 @@ TEST(ExpressionCallTest, CallBindsTighterThanBinary) {
 TEST(ExpressionCallTest, CallBindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-f(x)");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_CALL);
   delete_node(&expr);
   delete_parser(&p);
@@ -3730,7 +3731,7 @@ TEST(ExpressionCallTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  f  (  a  )  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  f  (  a  )  ", "f  (  a  )");
   delete_node(&expr);
   delete_parser(&p);
@@ -3785,7 +3786,7 @@ TEST(ExpressionCallTest, NoLeakOnCall) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -4112,7 +4113,7 @@ TEST(ExpressionConstructTest, MissingCloseBraceReportsError) {
 TEST(ExpressionConstructTest, ConstructBindsTighterThanBinary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a + .T{1}");
-  node_t *expr = parser_read_expression_additive(a, p);
+  node_t *expr = parser_read_expr_additive(a, p);
   expect_top_operator(expr, "+");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_construct(right, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
@@ -4125,7 +4126,7 @@ TEST(ExpressionConstructTest, ConstructBindsTighterThanBinary) {
 TEST(ExpressionConstructTest, ConstructBindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-.T{1}");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_CONSTRUCT);
   delete_node(&expr);
   delete_parser(&p);
@@ -4150,7 +4151,7 @@ TEST(ExpressionConstructTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  .  T  {  1  }  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  .  T  {  1  }  ", ".  T  {  1  }");
   delete_node(&expr);
   delete_parser(&p);
@@ -4220,7 +4221,7 @@ TEST(ExpressionConstructTest, NoLeakOnConstruct) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -4229,7 +4230,7 @@ TEST(ExpressionConstructTest, NoLeakOnConstruct) {
 }
 
 /* ================= 值表达式层 =================
-   与 literal 平级的构造统一从 parser_read_expression_value 进入。
+   与 literal 平级的构造统一从 parser_read_expr_value 进入。
    目前内部只有 literal 一个代理，后续陆续加入同级的运算符。 */
 
 TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
@@ -4248,7 +4249,7 @@ TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
   for (const Case &c : cases) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", c.src);
-    node_t *expr = parser_read_expression_value(a, p);
+    node_t *expr = parser_read_expr_value(a, p);
     ASSERT_NE(expr, nullptr) << "src=" << c.src;
     EXPECT_EQ(node_get_kind(expr), c.kind) << "src=" << c.src;
     EXPECT_EQ(parser_get_position(p), 1u) << "src=" << c.src;
@@ -4262,7 +4263,7 @@ TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
 TEST(ExpressionValueTest, DispatchesConstruct) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", ".T{1}");
-  node_t *expr = parser_read_expression_value(a, p);
+  node_t *expr = parser_read_expr_value(a, p);
   expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
   delete_node(&expr);
   delete_parser(&p);
@@ -4272,7 +4273,7 @@ TEST(ExpressionValueTest, DispatchesConstruct) {
 TEST(ExpressionValueTest, DispatchesAnonymousConstruct) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", ".{}");
-  node_t *expr = parser_read_expression_value(a, p);
+  node_t *expr = parser_read_expr_value(a, p);
   expect_construct(expr, false, CLUX_NODE_LITERAL_IDENTIFIER, 0);
   delete_node(&expr);
   delete_parser(&p);
@@ -4283,7 +4284,7 @@ TEST(ExpressionValueTest, DispatchesAnonymousConstruct) {
 TEST(ExpressionValueTest, DoesNotConsumeSuffixAfterConstruct) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", ".T{1}.field");
-  node_t *expr = parser_read_expression_value(a, p);
+  node_t *expr = parser_read_expr_value(a, p);
   expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 1);
   EXPECT_EQ(token_get_kind(parser_peek_token(p)), CLUX_TOKEN_SYMBOL);
   delete_node(&expr);
@@ -4296,8 +4297,7 @@ TEST(ExpressionValueTest, ReturnsNullOnNonValue) {
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    EXPECT_EQ(parser_read_expression_value(a, p), nullptr)
-        << "src=" << sources[i];
+    EXPECT_EQ(parser_read_expr_value(a, p), nullptr) << "src=" << sources[i];
     EXPECT_EQ(parser_get_position(p), 0u) << "src=" << sources[i];
     delete_parser(&p);
     delete_allocator(&a);
@@ -4307,7 +4307,7 @@ TEST(ExpressionValueTest, ReturnsNullOnNonValue) {
 TEST(ExpressionValueTest, ReturnsNullOnEmptyStream) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "");
-  EXPECT_EQ(parser_read_expression_value(a, p), nullptr);
+  EXPECT_EQ(parser_read_expr_value(a, p), nullptr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -4316,7 +4316,7 @@ TEST(ExpressionValueTest, ReturnsNullOnEmptyStream) {
 TEST(ExpressionValueTest, DoesNotConsumeSuffix) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a.b");
-  node_t *expr = parser_read_expression_value(a, p);
+  node_t *expr = parser_read_expr_value(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_LITERAL_IDENTIFIER);
   EXPECT_EQ(parser_get_position(p), 1u);
@@ -4347,7 +4347,7 @@ TEST(ExpressionValueTest, NoLeakOnValue) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression_value(a, p);
+    node_t *expr = parser_read_expr_value(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -4430,7 +4430,7 @@ TEST(ExpressionGroupTest, NestedGroups) {
 TEST(ExpressionGroupTest, ChangesPrecedence) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * (b + c)");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_group(right, CLUX_NODE_EXPR_BINARY);
@@ -4564,7 +4564,7 @@ TEST(ExpressionGroupTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  (  a  )  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  (  a  )  ", "(  a  )");
   delete_node(&expr);
   delete_parser(&p);
@@ -4623,7 +4623,7 @@ TEST(ExpressionGroupTest, NoLeakOnGroup) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -4699,7 +4699,7 @@ TEST(ExpressionPointerTest, WrapsGroup) {
 TEST(ExpressionPointerTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "*a * b");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_unary(left, "*", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -4715,7 +4715,7 @@ TEST(ExpressionPointerTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionPointerTest, PointerAsRightOperand) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a * *b");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *right = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_unary(right, "*", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -4728,7 +4728,7 @@ TEST(ExpressionPointerTest, PointerAsRightOperand) {
 TEST(ExpressionPointerTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-*a");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_unary(operand, "*", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -4801,7 +4801,7 @@ TEST(ExpressionPointerTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  *  a  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  *  a  ", "*  a");
   delete_node(&expr);
   delete_parser(&p);
@@ -4857,7 +4857,7 @@ TEST(ExpressionPointerTest, NoLeakOnPointer) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -4976,7 +4976,7 @@ TEST(ExpressionQualifierTest, StackedQualifiers) {
 TEST(ExpressionQualifierTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "const T * x");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_qualifier(left, "const", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -4989,7 +4989,7 @@ TEST(ExpressionQualifierTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionQualifierTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-const T");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_qualifier(operand, "const", CLUX_NODE_LITERAL_IDENTIFIER);
@@ -5063,7 +5063,7 @@ TEST(ExpressionQualifierTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  const   T  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  const   T  ", "const   T");
   delete_node(&expr);
   delete_parser(&p);
@@ -5121,7 +5121,7 @@ TEST(ExpressionQualifierTest, NoLeakOnQualifier) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -5241,7 +5241,7 @@ TEST(ExpressionSliceTypeTest, WrapsQualifier) {
 TEST(ExpressionSliceTypeTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "[]T * x");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_slice_type(left, CLUX_NODE_LITERAL_IDENTIFIER);
@@ -5254,7 +5254,7 @@ TEST(ExpressionSliceTypeTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionSliceTypeTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-[]T");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_slice_type(operand, CLUX_NODE_LITERAL_IDENTIFIER);
@@ -5270,7 +5270,7 @@ TEST(ExpressionSliceTypeTest, FallsBackOnNonEmptyBrackets) {
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression_value(a, p);
+    node_t *expr = parser_read_expr_value(a, p);
     ASSERT_NE(expr, nullptr) << "src=" << sources[i];
     EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr)
         << "src=" << sources[i];
@@ -5331,7 +5331,7 @@ TEST(ExpressionSliceTypeTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  []   T  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  []   T  ", "[]   T");
   delete_node(&expr);
   delete_parser(&p);
@@ -5389,7 +5389,7 @@ TEST(ExpressionSliceTypeTest, NoLeakOnSliceType) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -5561,7 +5561,7 @@ TEST(ExpressionArrayTypeTest, ArrayOfQualified) {
 TEST(ExpressionArrayTypeTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "[4]T * x");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_array_type(
@@ -5575,7 +5575,7 @@ TEST(ExpressionArrayTypeTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionArrayTypeTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-[4]T");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_array_type(
@@ -5679,7 +5679,7 @@ TEST(ExpressionArrayTypeTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  [ 4 ]   T  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  [ 4 ]   T  ", "[ 4 ]   T");
   delete_node(&expr);
   delete_parser(&p);
@@ -5731,7 +5731,7 @@ TEST(ExpressionArrayTypeTest, NoLeakOnArrayType) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -5881,7 +5881,7 @@ TEST(ExpressionTupleTypeTest, ElementsCanBeTypePrefixes) {
 TEST(ExpressionTupleTypeTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "<a, b> * x");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_tuple(left, 2);
@@ -5894,7 +5894,7 @@ TEST(ExpressionTupleTypeTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionTupleTypeTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-<a>");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_TUPLE);
   delete_node(&expr);
   delete_parser(&p);
@@ -5995,7 +5995,7 @@ TEST(ExpressionTupleTypeTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  < a >  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  < a >  ", "< a >");
   delete_node(&expr);
   delete_parser(&p);
@@ -6070,7 +6070,7 @@ TEST(ExpressionTupleTypeTest, NoLeakOnTupleType) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -6202,7 +6202,7 @@ TEST(ExpressionOptionalTypeTest, WrapsQualifier) {
 TEST(ExpressionOptionalTypeTest, DoesNotSwallowMultiplication) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "?T * x");
-  node_t *expr = parser_read_expression_multiplicative(a, p);
+  node_t *expr = parser_read_expr_multiplicative(a, p);
   expect_top_operator(expr, "*");
   node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
   expect_optional_type(left, CLUX_NODE_LITERAL_IDENTIFIER);
@@ -6215,7 +6215,7 @@ TEST(ExpressionOptionalTypeTest, DoesNotSwallowMultiplication) {
 TEST(ExpressionOptionalTypeTest, BindsTighterThanPrefixUnary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "-?T");
-  node_t *expr = parser_read_expression_unary(a, p);
+  node_t *expr = parser_read_expr_unary(a, p);
   expect_unary(expr, "-", CLUX_NODE_EXPR_BINARY);
   node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
   expect_optional_type(operand, CLUX_NODE_LITERAL_IDENTIFIER);
@@ -6228,7 +6228,7 @@ TEST(ExpressionOptionalTypeTest, BindsTighterThanPrefixUnary) {
 TEST(ExpressionOptionalTypeTest, DoesNotConflictWithTernary) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a ? b : c");
-  node_t *expr = parser_read_expression_ternary(a, p);
+  node_t *expr = parser_read_expr_ternary(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_TERNARY);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
@@ -6241,7 +6241,7 @@ TEST(ExpressionOptionalTypeTest, DoesNotConflictWithTernary) {
 TEST(ExpressionOptionalTypeTest, OptionalInsideTernaryBranch) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "a ? ?T : ?U");
-  node_t *expr = parser_read_expression_ternary(a, p);
+  node_t *expr = parser_read_expr_ternary(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_TERNARY);
   node_t *then_branch = node_get_child(expr, CLUX_EXPR_TERNARY_THEN);
@@ -6305,7 +6305,7 @@ TEST(ExpressionOptionalTypeTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  ?   T  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  ?   T  ", "?   T");
   delete_node(&expr);
   delete_parser(&p);
@@ -6364,7 +6364,7 @@ TEST(ExpressionOptionalTypeTest, NoLeakOnOptionalType) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
@@ -6732,7 +6732,7 @@ TEST(ExpressionFuncTest, AnonymousClosure) {
 TEST(ExpressionFuncTest, FuncAsAssignmentValue) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "f = func(x: i32): i32 { a; }");
-  node_t *expr = parser_read_expression(a, p);
+  node_t *expr = parser_read_expr(a, p);
   ASSERT_NE(expr, nullptr);
   EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ASSIGN);
   node_t *value = node_get_child(expr, CLUX_EXPR_ASSIGN_VALUE);
@@ -6974,7 +6974,7 @@ TEST(ExpressionFuncTest, SpanWithoutSurroundingTrivia) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "  func() -> void  ");
   parser_skip_trivia(p);
-  node_t *expr = parser_read_expression_postfix(a, p);
+  node_t *expr = parser_read_expr_postfix(a, p);
   expect_location_span(expr, "  func() -> void  ", "func() -> void");
   delete_node(&expr);
   delete_parser(&p);
@@ -7038,10 +7038,349 @@ TEST(ExpressionFuncTest, NoLeakOnFunc) {
     g_free_count = 0;
     allocator_t *a = create_allocator(counting_alloc, counting_free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    node_t *expr = parser_read_expression(a, p);
+    node_t *expr = parser_read_expr(a, p);
     delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
+}
+
+/* ================= 函数泛型参数 =================
+   泛型参数列表 [T, U, ...] 位于函数名之后、形参列表之前。
+   单个参数支持 T / N: comptime usize / W extends I / T = i32 / ...Args。 */
+
+static node_t *expect_generics(node_t *expr, size_t count) {
+  if (!expr) {
+    ADD_FAILURE() << "expected function node, got NULL";
+    return nullptr;
+  }
+  node_t *generics = node_get_child(expr, CLUX_EXPR_FUNC_GENERICS);
+  EXPECT_NE(generics, nullptr);
+  if (!generics) {
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(generics), CLUX_NODE_GENERIC_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(generics)), count);
+  return generics;
+}
+
+TEST(ExpressionFuncTest, GenericTypeParameter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func id[T](x: T): T { a; }");
+  expect_func(expr, "func");
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  node_t *param = node_get_child(generics, 0);
+  ASSERT_NE(param, nullptr);
+  EXPECT_EQ(node_get_kind(param), CLUX_NODE_GENERIC_PARAM);
+  EXPECT_NE(node_get_child(param, CLUX_GENERIC_PARAM_NAME), nullptr);
+  EXPECT_EQ(node_get_child(param, CLUX_GENERIC_PARAM_TYPE), nullptr);
+  EXPECT_EQ(node_get_child(param, CLUX_GENERIC_PARAM_CONSTRAINT), nullptr);
+  EXPECT_EQ(node_get_child(param, CLUX_GENERIC_PARAM_DEFAULT), nullptr);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionFuncTest, MultipleGenericParameters) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[T, U](x: T): T { a; }");
+  expect_func(expr, "func");
+  expect_generics(expr, 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 编译期值参数：N: comptime usize */
+TEST(ExpressionFuncTest, ComptimeValueParameter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func f[N: comptime usize](x: i32): i32 { a; }");
+  expect_func(expr, "func");
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  node_t *param = node_get_child(generics, 0);
+  ASSERT_NE(param, nullptr);
+  node_t *type = node_get_child(param, CLUX_GENERIC_PARAM_TYPE);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(node_get_kind(type), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 约束：W extends IWriter[W] */
+TEST(ExpressionFuncTest, GenericConstraint) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func f[W extends IWriter[W]](w: *W): void { a; }");
+  expect_func(expr, "func");
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  node_t *param = node_get_child(generics, 0);
+  ASSERT_NE(param, nullptr);
+  node_t *constraint = node_get_child(param, CLUX_GENERIC_PARAM_CONSTRAINT);
+  ASSERT_NE(constraint, nullptr);
+  EXPECT_EQ(node_get_kind(constraint), CLUX_NODE_EXPR_SUBSCRIPT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 默认值：T = i32 */
+TEST(ExpressionFuncTest, GenericDefaultValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[T = i32](): u64 { a; }");
+  expect_func(expr, "func");
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  node_t *param = node_get_child(generics, 0);
+  ASSERT_NE(param, nullptr);
+  node_t *def = node_get_child(param, CLUX_GENERIC_PARAM_DEFAULT);
+  ASSERT_NE(def, nullptr);
+  EXPECT_EQ(node_get_kind(def), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 参数包：...Args */
+TEST(ExpressionFuncTest, GenericParameterPack) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func first[...Args](args: ...Args): void { a; }");
+  expect_func(expr, "func");
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(generics, 0)), CLUX_NODE_EXPR_REST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型函数类型：func[T](T) -> T */
+TEST(ExpressionFuncTest, GenericFunctionType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func[T](T) -> T");
+  expect_func(expr, "func");
+  expect_generics(expr, 1);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_BODY), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型 + 捕获列表 + 函数名 + 形参：各段顺序固定。 */
+TEST(ExpressionFuncTest, GenericWithCapturesAndName) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func |(o: i32 = 1)| map[T](x: T): T { a; }");
+  expect_func(expr, "func");
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_CAPTURES), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_NAME), nullptr);
+  expect_generics(expr, 1);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_PARAMS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 无泛型参数时 GENERICS 为 NULL。 */
+TEST(ExpressionFuncTest, NoGenericsSlotIsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(): void {}");
+  expect_func(expr, "func");
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_GENERICS), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 泛型参数不是 identifier：func f[1](): void {} */
+TEST(ExpressionFuncTest, GenericParameterNotNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[1](): void {}");
+  expect_func(expr, "func");
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected generic parameter name");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型参数列表未闭合：func f[T(): void {} */
+TEST(ExpressionFuncTest, UnclosedGenericsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[T(): void {}");
+  expect_func(expr, "func");
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ']' to close generic parameters");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺编译期类型：func f[N:](): void {} */
+TEST(ExpressionFuncTest, MissingGenericTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[N:](): void {}");
+  expect_func(expr, "func");
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected generic parameter type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺约束：func f[W extends](): void {} */
+TEST(ExpressionFuncTest, MissingConstraintReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[W extends](): void {}");
+  expect_func(expr, "func");
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected constraint after 'extends'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺默认值：func f[T =](): void {} */
+TEST(ExpressionFuncTest, MissingGenericDefaultReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f[T =](): void {}");
+  expect_func(expr, "func");
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected generic default value");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 泛型参数列表区间 = '[' 起点 .. ']' 终点。 */
+TEST(ExpressionFuncTest, GenericsSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "func id[T, U](x: T): T { a; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  node_t *generics = expect_generics(expr, 2);
+  ASSERT_NE(generics, nullptr);
+  expect_location_span(generics, src, "[T, U]");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 单个泛型参数区间 = 名字起点 .. 最后一个非空子节点终点。 */
+TEST(ExpressionFuncTest, GenericParamSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "func f[W extends I[W]](w: *W): void { a; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  node_t *generics = expect_generics(expr, 1);
+  ASSERT_NE(generics, nullptr);
+  node_t *param = node_get_child(generics, 0);
+  expect_location_span(param, src, "W extends I[W]");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionFuncTest, NoLeakOnGenerics) {
+  const char *sources[] = {"func id[T](x: T): T { a; }",
+                           "func f[T, U](x: T): T { a; }",
+                           "func f[N: comptime usize](x: i32): i32 { a; }",
+                           "func f[W extends IWriter[W]](w: *W): void { a; }",
+                           "func f[T = i32](): u64 { a; }",
+                           "func first[...Args](args: ...Args): void { a; }",
+                           "func[T](T) -> T",
+                           "func |(o: i32 = 1)| map[T](x: T): T { a; }",
+                           "func f[T](): void {}",
+                           "func f[1](): void {}",
+                           "func f[T(): void {}",
+                           "func f[N:](): void {}",
+                           "func f[W extends](): void {}",
+                           "func f[T =](): void {}",
+                           "func f[](): void {}",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 函数解析的公共入口 =================
+   parser_read_expr_func 对外可见，可脱离表达式链单独调用。 */
+
+TEST(ExpressionFuncTest, PublicEntryParsesDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "func foo(a: i32): bool { a; }");
+  node_t *expr = parser_read_expr_func(a, p);
+  expect_func(expr, "func");
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_NAME), nullptr);
+  expect_params(node_get_child(expr, CLUX_EXPR_FUNC_PARAMS), 1);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_BODY), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionFuncTest, PublicEntryReturnsNullAndKeepsCursor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "123");
+  size_t before = parser_get_position(p);
+  node_t *expr = parser_read_expr_func(a, p);
+  EXPECT_EQ(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_parser(&p);
+  delete_allocator(&a);
 }

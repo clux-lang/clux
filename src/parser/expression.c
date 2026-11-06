@@ -5,7 +5,7 @@
 #include "parser/literal.h"
 #include "parser/node.h"
 #include "parser/parser.h"
-#include "parser/statement.h"
+#include "parser/function.h"
 
 /* 用首尾子节点的位置拼出表达式自身的区间：起点取 begin->begin，
    终点取 end->end。子节点位置本身不含前后 trivia，因此表达式区间
@@ -185,7 +185,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
   node_t *first = NULL;
   if (!token_is(token, CLUX_TOKEN_SYMBOL, ":") &&
       !token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
-    first = parser_read_expression(allocator, parser);
+    first = parser_read_expr(allocator, parser);
     parser_skip_trivia(parser);
   }
 
@@ -197,7 +197,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
     token = parser_peek_token(parser);
     node_t *hi = NULL;
     if (!token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
-      hi = parser_read_expression(allocator, parser);
+      hi = parser_read_expr(allocator, parser);
       parser_skip_trivia(parser);
     }
     location_t close_loc = open_loc;
@@ -241,7 +241,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
     }
     parser_next(parser); /* ',' */
     parser_skip_trivia(parser);
-    node_t *arg = parser_read_expression(allocator, parser);
+    node_t *arg = parser_read_expr(allocator, parser);
     if (!arg) {
       location_t loc = expression_error_location(parser, end_loc);
       parser_push_error(
@@ -291,9 +291,9 @@ read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
 
   for (;;) {
     /* 每个实参都可能是 rest 表达式。 */
-    node_t *arg = parser_read_expression_rest(allocator, parser);
+    node_t *arg = parser_read_expr_rest(allocator, parser);
     if (!arg) {
-      arg = parser_read_expression(allocator, parser);
+      arg = parser_read_expr(allocator, parser);
     }
     if (!arg) {
       location_t loc = expression_error_location(parser, end_loc);
@@ -344,7 +344,7 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
   node_t *type = NULL;
   token = parser_peek_token(parser);
   if (!token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
-    type = parser_read_expression_postfix(allocator, parser);
+    type = parser_read_expr_postfix(allocator, parser);
     if (!type) {
       /* '.' 后既不是 '{' 也不是表达式：不构成构造。 */
       parser_set_position(parser, start);
@@ -380,9 +380,9 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
 
   for (;;) {
     /* 每个元素都可能是 rest 表达式。 */
-    node_t *elem = parser_read_expression_rest(allocator, parser);
+    node_t *elem = parser_read_expr_rest(allocator, parser);
     if (!elem) {
-      elem = parser_read_expression(allocator, parser);
+      elem = parser_read_expr(allocator, parser);
     }
     if (!elem) {
       location_t loc = expression_error_location(parser, end_loc);
@@ -418,7 +418,7 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
 
 /* 解析括号表达式 ( expr )。调用前当前 token 不一定是 '('；
    不是 '(' 时返回 NULL 且游标不动。
-   括号内走顶层入口 parser_read_expression，因此赋值、三元等整条链都允许；
+   括号内走顶层入口 parser_read_expr，因此赋值、三元等整条链都允许；
    括号内是否为合法值由语义阶段判定，语法层不剥离。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 static node_t *read_group(allocator_t *allocator, parser_t *parser) {
@@ -434,7 +434,7 @@ static node_t *read_group(allocator_t *allocator, parser_t *parser) {
   node_resize_children(expr, 1);
   node_set_location_span(expr, &open_loc, &open_loc);
 
-  node_t *inner = parser_read_expression(allocator, parser);
+  node_t *inner = parser_read_expr(allocator, parser);
   if (!inner) {
     location_t loc = expression_error_location(parser, &open_loc);
     parser_push_error(
@@ -481,7 +481,7 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
 
   size_t after_star = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  node_t *operand = parser_read_expr_postfix(allocator, parser);
   if (!operand) {
     /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
     location_t loc = expression_error_location(parser, &star_loc);
@@ -519,7 +519,7 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
 
   size_t after_keyword = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  node_t *operand = parser_read_expr_postfix(allocator, parser);
   if (!operand) {
     /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
     location_t loc = expression_error_location(parser, &keyword_loc);
@@ -563,7 +563,7 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
 
   size_t after_bracket = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  node_t *operand = parser_read_expr_postfix(allocator, parser);
   if (!operand) {
     /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
     location_t loc = expression_error_location(parser, &bracket_loc);
@@ -597,7 +597,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_location_span(expr, &open_loc, &open_loc);
 
-  node_t *length = parser_read_expression(allocator, parser);
+  node_t *length = parser_read_expr(allocator, parser);
   if (!length) {
     location_t loc = expression_error_location(parser, &open_loc);
     parser_push_error(
@@ -630,7 +630,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
 
   size_t after_bracket = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *element = parser_read_expression_postfix(allocator, parser);
+  node_t *element = parser_read_expr_postfix(allocator, parser);
   if (!element) {
     /* 容错：缺元素仍返回不完整的节点（RIGHT 为 NULL）。 */
     location_t loc = expression_error_location(parser, &bracket_loc);
@@ -674,9 +674,9 @@ static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
 
   for (;;) {
     /* 每个元素都可能是 rest 表达式。 */
-    node_t *elem = parser_read_expression_rest(allocator, parser);
+    node_t *elem = parser_read_expr_rest(allocator, parser);
     if (!elem) {
-      elem = parser_read_expression_postfix(allocator, parser);
+      elem = parser_read_expr_postfix(allocator, parser);
     }
     if (!elem) {
       location_t loc = expression_error_location(parser, end_loc);
@@ -733,7 +733,7 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
 
   size_t after_question = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  node_t *operand = parser_read_expr_postfix(allocator, parser);
   if (!operand) {
     /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
     location_t loc = expression_error_location(parser, &question_loc);
@@ -747,265 +747,10 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
-/* 解析形参列表 ( param, ... )。调用前当前 token 不一定是 '('，
-   不是时返回 NULL 且游标不动。形参可以是 rest 表达式。
-   单个形参支持两种写法：
-     name: type          —— 有名字
-     type                —— 函数类型里的裸类型
-   allow_default 为 true 时额外接受 `name: type = expr`：只有闭包的捕获
-   列表允许默认值，函数参数一律不允许。
-   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
-static node_t *
-read_func_params(allocator_t *allocator, parser_t *parser, bool allow_default) {
-  token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, "(")) {
-    return NULL;
-  }
-  location_t open_loc = *token_get_location(token);
-  parser_next(parser); /* '(' */
-  parser_skip_trivia(parser);
-
-  node_t *params = create_node(allocator, CLUX_NODE_FUNC_PARAMS);
-  node_set_location_span(params, &open_loc, &open_loc);
-  const location_t *end_loc = &open_loc;
-
-  token = parser_peek_token(parser);
-  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
-    end_loc = token_get_location(token);
-    parser_next(parser);
-    node_set_location_span(params, &open_loc, end_loc);
-    return params;
-  }
-
-  for (;;) {
-    /* rest 形参：...Args */
-    node_t *param = parser_read_expression_rest(allocator, parser);
-    if (!param) {
-      node_t *first = parser_read_expression_postfix(allocator, parser);
-      if (!first) {
-        location_t loc = expression_error_location(parser, end_loc);
-        parser_push_error(
-            parser,
-            create_error(allocator, &loc, "expected parameter in function"));
-        break;
-      }
-      param = create_node(allocator, CLUX_NODE_FUNC_PARAM);
-      node_resize_children(param, CLUX_FUNC_PARAM_CHILDREN_SIZE);
-      parser_skip_trivia(parser);
-      token = parser_peek_token(parser);
-      if (token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
-        /* name: type */
-        node_set_child(param, CLUX_FUNC_PARAM_NAME, first);
-        parser_next(parser); /* ':' */
-        parser_skip_trivia(parser);
-        node_t *type = parser_read_expression(allocator, parser);
-        if (!type) {
-          location_t loc = expression_error_location(parser, &open_loc);
-          parser_push_error(
-              parser, create_error(allocator, &loc, "expected parameter type"));
-        } else {
-          node_set_child(param, CLUX_FUNC_PARAM_TYPE, type);
-        }
-      } else {
-        /* 裸类型（函数类型形参）。 */
-        node_set_child(param, CLUX_FUNC_PARAM_TYPE, first);
-      }
-      /* 捕获列表允许默认值；函数参数不允许。 */
-      parser_skip_trivia(parser);
-      token = parser_peek_token(parser);
-      if (allow_default && token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
-        parser_next(parser); /* '=' */
-        parser_skip_trivia(parser);
-        node_t *def = parser_read_expression(allocator, parser);
-        if (!def) {
-          location_t loc = expression_error_location(parser, &open_loc);
-          parser_push_error(
-              parser,
-              create_error(allocator, &loc, "expected capture default value"));
-        } else {
-          node_set_child(param, CLUX_FUNC_PARAM_DEFAULT, def);
-        }
-      }
-      /* 形参区间 = 名字/类型起点 .. 最后一个非空子节点终点。 */
-      node_t *param_last = node_get_child(param, CLUX_FUNC_PARAM_DEFAULT);
-      if (!param_last) {
-        param_last = node_get_child(param, CLUX_FUNC_PARAM_TYPE);
-      }
-      node_set_location_span(
-          param,
-          node_get_location(first),
-          node_get_location(param_last ? param_last : first));
-    }
-    node_add_child(params, param);
-    end_loc = node_get_location(param);
-    parser_skip_trivia(parser);
-    token = parser_peek_token(parser);
-    if (!token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
-      break;
-    }
-    parser_next(parser); /* ',' */
-    parser_skip_trivia(parser);
-  }
-
-  token = parser_peek_token(parser);
-  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
-    end_loc = token_get_location(token);
-    parser_next(parser);
-  } else {
-    location_t loc = expression_error_location(parser, end_loc);
-    parser_push_error(
-        parser,
-        create_error(allocator, &loc, "expected ')' to close parameters"));
-  }
-  node_set_location_span(params, &open_loc, end_loc);
-  return params;
-}
-
-/* 函数定义 / 函数类型 / 闭包（白皮书 §3.3、§2.7）。
-   语法不是前导可判定的：`func` 之后的捕获列表与函数名都是可选的，
-   真正的分歧点在形参括号之后——
-     ':'  → 函数定义，后接返回类型与函数体块
-     '->' → 函数类型，后接返回类型
-   `cfunc` 只能构成函数类型（C ABI，无捕获、无函数体）。
-   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
-static node_t *read_func(allocator_t *allocator, parser_t *parser) {
-  token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
-      !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
-    return NULL;
-  }
-  location_t keyword_loc = *token_get_location(token);
-  bool is_cfunc = token_is(token, CLUX_TOKEN_KEYWORD, "cfunc");
-  node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
-  node_set_location(keyword, &keyword_loc);
-  parser_next(parser); /* func / cfunc */
-
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_FUNC);
-  node_resize_children(expr, CLUX_EXPR_FUNC_CHILDREN_SIZE);
-  node_set_child(expr, CLUX_EXPR_FUNC_KEYWORD, keyword);
-  node_set_location_span(expr, &keyword_loc, &keyword_loc);
-  const location_t *end_loc = &keyword_loc;
-
-  parser_skip_trivia(parser);
-  token = parser_peek_token(parser);
-  /* 捕获列表 |( ... )|，仅 func 可用。 */
-  bool has_empty_captures =
-      !is_cfunc && token_is(token, CLUX_TOKEN_SYMBOL, "||");
-  if (has_empty_captures ||
-      (!is_cfunc && token_is(token, CLUX_TOKEN_SYMBOL, "|"))) {
-    location_t pipe_loc = *token_get_location(token);
-    parser_next(parser); /* '|' 或 '||' */
-    parser_skip_trivia(parser);
-    node_t *captures;
-    /* 空捕获列表：`||` 是单个 token，`| |` 是两个 token，都已在此闭合。 */
-    bool captures_closed = has_empty_captures;
-    token = parser_peek_token(parser);
-    if (has_empty_captures || token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
-      captures = create_node(allocator, CLUX_NODE_FUNC_PARAMS);
-      node_set_location_span(captures, &pipe_loc, &pipe_loc);
-      if (!has_empty_captures) {
-        parser_next(parser); /* 第二个 '|' */
-      }
-      captures_closed = true;
-    } else {
-      captures = read_func_params(allocator, parser, true);
-    }
-    if (captures) {
-      if (!captures_closed) {
-        parser_skip_trivia(parser);
-        token = parser_peek_token(parser);
-        if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
-          parser_next(parser); /* '|' */
-        } else {
-          location_t loc = expression_error_location(parser, &keyword_loc);
-          parser_push_error(
-              parser,
-              create_error(allocator, &loc, "expected '|' to close captures"));
-        }
-      }
-      node_set_child(expr, CLUX_EXPR_FUNC_CAPTURES, captures);
-      end_loc = node_get_location(captures);
-    } else {
-      location_t loc = expression_error_location(parser, &keyword_loc);
-      parser_push_error(
-          parser,
-          create_error(allocator, &loc, "expected '(' after '|' in captures"));
-    }
-    parser_skip_trivia(parser);
-    token = parser_peek_token(parser);
-  }
-  /* 函数名（可选；匿名函数与函数类型没有）。 */
-  if (!is_cfunc && token && token_get_kind(token) == CLUX_TOKEN_IDENTIFIER) {
-    node_t *name = parser_read_literal_identifier(allocator, parser);
-    node_set_child(expr, CLUX_EXPR_FUNC_NAME, name);
-    end_loc = node_get_location(name);
-    parser_skip_trivia(parser);
-    token = parser_peek_token(parser);
-  }
-  /* 形参列表。 */
-  node_t *params = read_func_params(allocator, parser, false);
-  if (!params) {
-    location_t loc = expression_error_location(parser, end_loc);
-    parser_push_error(
-        parser,
-        create_error(allocator, &loc, "expected '(' to start parameters"));
-    node_set_location_span(expr, &keyword_loc, end_loc);
-    return expr;
-  }
-  node_set_child(expr, CLUX_EXPR_FUNC_PARAMS, params);
-  end_loc = node_get_location(params);
-  node_set_location_span(expr, &keyword_loc, end_loc);
-
-  parser_skip_trivia(parser);
-  token = parser_peek_token(parser);
-  bool is_definition = token_is(token, CLUX_TOKEN_SYMBOL, ":");
-  bool is_type = token_is(token, CLUX_TOKEN_SYMBOL, "->");
-  if (!is_definition && !is_type) {
-    location_t loc = expression_error_location(parser, end_loc);
-    parser_push_error(
-        parser,
-        create_error(
-            allocator, &loc, "expected ':' or '->' after function parameters"));
-    return expr;
-  }
-  parser_next(parser); /* ':' / '->' */
-  parser_skip_trivia(parser);
-  node_t *ret = parser_read_expression(allocator, parser);
-  if (!ret) {
-    location_t loc = expression_error_location(parser, end_loc);
-    parser_push_error(parser,
-                      create_error(allocator,
-                                   &loc,
-                                   "expected return type after '%s'",
-                                   is_definition ? ":" : "->"));
-    return expr;
-  }
-  node_set_child(expr, CLUX_EXPR_FUNC_RETURN, ret);
-  end_loc = node_get_location(ret);
-  node_set_location_span(expr, &keyword_loc, end_loc);
-
-  if (!is_definition) {
-    /* 函数类型：到此结束。cfunc 只可能是类型。 */
-    return expr;
-  }
-  parser_skip_trivia(parser);
-  node_t *body = parser_read_stmt_block(allocator, parser);
-  if (!body) {
-    location_t loc = expression_error_location(parser, end_loc);
-    parser_push_error(
-        parser,
-        create_error(allocator, &loc, "expected '{' to start function body"));
-    return expr;
-  }
-  node_set_child(expr, CLUX_EXPR_FUNC_BODY, body);
-  node_set_location_span(expr, &keyword_loc, node_get_location(body));
-  return expr;
-}
-
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
    目前有构造、括号、指针类型、类型修饰、切片类型、数组类型、元组类型、
    optional 类型、函数与 literal 十个来源，后续陆续加入同级运算符。 */
-node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
+node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
     return node;
@@ -1038,16 +783,15 @@ node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
-  node = read_func(allocator, parser);
+  node = parser_read_expr_func(allocator, parser);
   if (node) {
     return node;
   }
   return parser_read_literal(allocator, parser);
 }
 
-node_t *parser_read_expression_postfix(allocator_t *allocator,
-                                       parser_t *parser) {
-  node_t *operand = parser_read_expression_value(allocator, parser);
+node_t *parser_read_expr_postfix(allocator_t *allocator, parser_t *parser) {
+  node_t *operand = parser_read_expr_value(allocator, parser);
   if (!operand) {
     return NULL;
   }
@@ -1124,10 +868,10 @@ static const char *peek_unary_operator(parser_t *parser) {
   return NULL;
 }
 
-node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser) {
+node_t *parser_read_expr_unary(allocator_t *allocator, parser_t *parser) {
   const char *op = peek_unary_operator(parser);
   if (!op) {
-    return parser_read_expression_postfix(allocator, parser);
+    return parser_read_expr_postfix(allocator, parser);
   }
   /* 前缀运算符右绑定：操作数递归到本层，支持 !!a、--a 等叠加。
      无前缀运算符时落到后缀层，因此 -p.* 解析为 -(p.*)。 */
@@ -1140,7 +884,7 @@ node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser) {
   node_set_location_span(
       expr, node_get_location(symbol), node_get_location(symbol));
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression_unary(allocator, parser);
+  node_t *operand = parser_read_expr_unary(allocator, parser);
   if (!operand) {
     /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1172,8 +916,8 @@ static const char *peek_as_is_operator(parser_t *parser) {
   return NULL;
 }
 
-node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_unary(allocator, parser);
+node_t *parser_read_expr_as_is(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_unary(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1199,7 +943,7 @@ node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走一元层，保证 a as -b 解析为 a as (-b)。 */
-    node_t *right = parser_read_expression_unary(allocator, parser);
+    node_t *right = parser_read_expr_unary(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1232,9 +976,9 @@ static const char *peek_multiplicative_operator(parser_t *parser) {
   return NULL;
 }
 
-node_t *parser_read_expression_multiplicative(allocator_t *allocator,
-                                              parser_t *parser) {
-  node_t *left = parser_read_expression_as_is(allocator, parser);
+node_t *parser_read_expr_multiplicative(allocator_t *allocator,
+                                        parser_t *parser) {
+  node_t *left = parser_read_expr_as_is(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1258,7 +1002,7 @@ node_t *parser_read_expression_multiplicative(allocator_t *allocator,
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走更高优先级层，保证 a * b as c 解析为 a * (b as c)。 */
-    node_t *right = parser_read_expression_as_is(allocator, parser);
+    node_t *right = parser_read_expr_as_is(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1277,9 +1021,8 @@ node_t *parser_read_expression_multiplicative(allocator_t *allocator,
     left = expr;
   }
 }
-node_t *parser_read_expression_additive(allocator_t *allocator,
-                                        parser_t *parser) {
-  node_t *left = parser_read_expression_multiplicative(allocator, parser);
+node_t *parser_read_expr_additive(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_multiplicative(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1303,7 +1046,7 @@ node_t *parser_read_expression_additive(allocator_t *allocator,
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走更高优先级层，保证 a + b * c 解析为 a + (b * c)。 */
-    node_t *right = parser_read_expression_multiplicative(allocator, parser);
+    node_t *right = parser_read_expr_multiplicative(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1322,8 +1065,8 @@ node_t *parser_read_expression_additive(allocator_t *allocator,
     left = expr;
   }
 }
-node_t *parser_read_expression_shift(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_additive(allocator, parser);
+node_t *parser_read_expr_shift(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_additive(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1347,7 +1090,7 @@ node_t *parser_read_expression_shift(allocator_t *allocator, parser_t *parser) {
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走更高优先级层，保证 a << b + c 解析为 a << (b + c)。 */
-    node_t *right = parser_read_expression_additive(allocator, parser);
+    node_t *right = parser_read_expr_additive(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1366,9 +1109,8 @@ node_t *parser_read_expression_shift(allocator_t *allocator, parser_t *parser) {
     left = expr;
   }
 }
-node_t *parser_read_expression_relational(allocator_t *allocator,
-                                          parser_t *parser) {
-  node_t *left = parser_read_expression_shift(allocator, parser);
+node_t *parser_read_expr_relational(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_shift(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1392,7 +1134,7 @@ node_t *parser_read_expression_relational(allocator_t *allocator,
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走更高优先级层，保证 a < b << c 解析为 a < (b << c)。 */
-    node_t *right = parser_read_expression_shift(allocator, parser);
+    node_t *right = parser_read_expr_shift(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1411,9 +1153,8 @@ node_t *parser_read_expression_relational(allocator_t *allocator,
     left = expr;
   }
 }
-node_t *parser_read_expression_equality(allocator_t *allocator,
-                                        parser_t *parser) {
-  node_t *left = parser_read_expression_relational(allocator, parser);
+node_t *parser_read_expr_equality(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_relational(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1450,7 +1191,7 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
         expr, node_get_location(left), node_get_location(symbol));
     parser_skip_trivia(parser);
     /* 右操作数走更高优先级层，保证 a == b < c 解析为 a == (b < c)。 */
-    node_t *right = parser_read_expression_relational(allocator, parser);
+    node_t *right = parser_read_expr_relational(allocator, parser);
     if (!right) {
       /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
          同时记录错误，由调用方决定是否中止。 */
@@ -1469,8 +1210,8 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
     left = expr;
   }
 }
-node_t *parser_read_expression_and(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_equality(allocator, parser);
+node_t *parser_read_expr_and(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_equality(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1492,7 +1233,7 @@ node_t *parser_read_expression_and(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(left), node_get_location(symbol));
   parser_skip_trivia(parser);
   /* 递归右结合：a & b & c 解析为 a & (b & c)。 */
-  node_t *right = parser_read_expression_and(allocator, parser);
+  node_t *right = parser_read_expr_and(allocator, parser);
   if (!right) {
     /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1509,8 +1250,8 @@ node_t *parser_read_expression_and(allocator_t *allocator, parser_t *parser) {
   }
   return expr;
 }
-node_t *parser_read_expression_xor(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_and(allocator, parser);
+node_t *parser_read_expr_xor(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_and(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1532,7 +1273,7 @@ node_t *parser_read_expression_xor(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(left), node_get_location(symbol));
   parser_skip_trivia(parser);
   /* 递归右结合：a ^ b ^ c 解析为 a ^ (b ^ c)。 */
-  node_t *right = parser_read_expression_xor(allocator, parser);
+  node_t *right = parser_read_expr_xor(allocator, parser);
   if (!right) {
     /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1549,8 +1290,8 @@ node_t *parser_read_expression_xor(allocator_t *allocator, parser_t *parser) {
   }
   return expr;
 }
-node_t *parser_read_expression_or(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_xor(allocator, parser);
+node_t *parser_read_expr_or(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_xor(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1572,7 +1313,7 @@ node_t *parser_read_expression_or(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(left), node_get_location(symbol));
   parser_skip_trivia(parser);
   /* 递归右结合：a | b | c 解析为 a | (b | c)。 */
-  node_t *right = parser_read_expression_or(allocator, parser);
+  node_t *right = parser_read_expr_or(allocator, parser);
   if (!right) {
     /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1589,8 +1330,8 @@ node_t *parser_read_expression_or(allocator_t *allocator, parser_t *parser) {
   }
   return expr;
 }
-node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_or(allocator, parser);
+node_t *parser_read_expr_land(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_or(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1612,7 +1353,7 @@ node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(left), node_get_location(symbol));
   parser_skip_trivia(parser);
   /* 递归右结合：a && b && c 解析为 a && (b && c)，与短路求值一致。 */
-  node_t *right = parser_read_expression_land(allocator, parser);
+  node_t *right = parser_read_expr_land(allocator, parser);
   if (!right) {
     /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1630,8 +1371,8 @@ node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser) {
   }
   return expr;
 }
-node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
-  node_t *left = parser_read_expression_land(allocator, parser);
+node_t *parser_read_expr_lor(allocator_t *allocator, parser_t *parser) {
+  node_t *left = parser_read_expr_land(allocator, parser);
   if (!left) {
     return NULL;
   }
@@ -1653,7 +1394,7 @@ node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
       expr, node_get_location(left), node_get_location(symbol));
   parser_skip_trivia(parser);
   /* 递归右结合：a || b || c 解析为 a || (b || c)，与短路求值一致。 */
-  node_t *right = parser_read_expression_lor(allocator, parser);
+  node_t *right = parser_read_expr_lor(allocator, parser);
   if (!right) {
     /* 容错：缺右操作数仍返回不完整的节点（RIGHT 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1671,9 +1412,8 @@ node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
   }
   return expr;
 }
-node_t *parser_read_expression_ternary(allocator_t *allocator,
-                                       parser_t *parser) {
-  node_t *condition = parser_read_expression_lor(allocator, parser);
+node_t *parser_read_expr_ternary(allocator_t *allocator, parser_t *parser) {
+  node_t *condition = parser_read_expr_lor(allocator, parser);
   if (!condition) {
     return NULL;
   }
@@ -1693,7 +1433,7 @@ node_t *parser_read_expression_ternary(allocator_t *allocator,
   node_set_child(expr, CLUX_EXPR_TERNARY_CONDITION, condition);
   node_set_location_span(
       expr, node_get_location(condition), node_get_location(condition));
-  node_t *then = parser_read_expression_ternary(allocator, parser);
+  node_t *then = parser_read_expr_ternary(allocator, parser);
   if (!then) {
     /* 容错：缺 then 分支仍返回不完整的节点（THEN/ELSE 为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1717,7 +1457,7 @@ node_t *parser_read_expression_ternary(allocator_t *allocator,
   location_t colon_loc = *token_get_location(token);
   parser_next(parser);
   parser_skip_trivia(parser);
-  node_t *else_ = parser_read_expression_ternary(allocator, parser);
+  node_t *else_ = parser_read_expr_ternary(allocator, parser);
   if (!else_) {
     location_t loc = expression_error_location(parser, &colon_loc);
     parser_push_error(
@@ -1729,8 +1469,7 @@ node_t *parser_read_expression_ternary(allocator_t *allocator,
       expr, node_get_location(condition), node_get_location(else_));
   return expr;
 }
-node_t *parser_read_expression_assign(allocator_t *allocator,
-                                      parser_t *parser) {
+node_t *parser_read_expr_assign(allocator_t *allocator, parser_t *parser) {
   size_t position = parser_get_position(parser);
   token_t *token = parser_peek_token(parser);
   if (!token || token_get_kind(token) != CLUX_TOKEN_IDENTIFIER) {
@@ -1765,7 +1504,7 @@ node_t *parser_read_expression_assign(allocator_t *allocator,
   node_t *symbol = parser_read_symbol(allocator, parser);
   node_set_child(expr, CLUX_EXPR_ASSIGN_SYMBOL, symbol);
   parser_skip_trivia(parser);
-  node_t *value = parser_read_expression_ternary(allocator, parser);
+  node_t *value = parser_read_expr_ternary(allocator, parser);
   if (!value) {
     /* 容错：缺右值仍返回不完整的节点（VALUE 子节点为 NULL），
        同时记录错误，由调用方决定是否中止。 */
@@ -1783,15 +1522,15 @@ node_t *parser_read_expression_assign(allocator_t *allocator,
   }
   return expr;
 next:
-  return parser_read_expression_ternary(allocator, parser);
+  return parser_read_expr_ternary(allocator, parser);
 }
-node_t *parser_read_expression(allocator_t *allocator, parser_t *parser) {
-  return parser_read_expression_assign(allocator, parser);
+node_t *parser_read_expr(allocator_t *allocator, parser_t *parser) {
+  return parser_read_expr_assign(allocator, parser);
 }
 
 /* rest 表达式 ...expr?，不在优先级链上，由构造/调用实参等位置显式调用。
    孤立 `...` 合法（无子节点），用于展开全部剩余元素。 */
-node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser) {
+node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   if (!token_is(token, CLUX_TOKEN_SYMBOL, "...")) {
     return NULL;
@@ -1802,7 +1541,7 @@ node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser) {
   /* 操作数可选：后面没有表达式时保持 children 为空。 */
   size_t after_rest = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expression(allocator, parser);
+  node_t *operand = parser_read_expr(allocator, parser);
   if (!operand) {
     /* 孤立 `...`：游标回到 '...' 之后，不吞掉后续 trivia。 */
     parser_set_position(parser, after_rest);
