@@ -533,9 +533,53 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 切片类型前缀 []<postfix>（白皮书 §2.4）。
+   与指针/修饰前缀同构：操作数只取后缀层，因此 []a.b 解析为 [](a.b)，
+   []T * x 解析为 ([]T) * x。复用一元节点形态：LEFT 为 NULL，
+   SYMBOL 存 '[]'，RIGHT 存操作数。
+   `[` 后必须紧跟 `]` 才构成切片类型；否则不消费任何 token 并返回 NULL，
+   把 `[` 留给调用方（数组类型 [N]T 等将来在此扩展）。 */
+static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
+  token_t *open = parser_peek_token(parser);
+  if (!token_is(open, CLUX_TOKEN_SYMBOL, "[")) {
+    return NULL;
+  }
+  token_t *close = peek_token_at(parser, 1);
+  if (!token_is(close, CLUX_TOKEN_SYMBOL, "]")) {
+    return NULL;
+  }
+  location_t bracket_loc = *token_get_location(open);
+  bracket_loc.end = token_get_location(close)->end;
+  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(symbol, &bracket_loc);
+  parser_next(parser); /* '[' */
+  parser_next(parser); /* ']' */
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_set_location_span(expr, &bracket_loc, &bracket_loc);
+
+  size_t after_bracket = parser_get_position(parser);
+  parser_skip_trivia(parser);
+  node_t *operand = parser_read_expression_postfix(allocator, parser);
+  if (!operand) {
+    /* 容错：缺操作数仍返回不完整的节点（RIGHT 为 NULL）。 */
+    location_t loc = expression_error_location(parser, &bracket_loc);
+    parser_set_position(parser, after_bracket);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression after '[]'"));
+    return expr;
+  }
+  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  node_set_location_span(expr, &bracket_loc, node_get_location(operand));
+  return expr;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
-   目前有构造、括号、指针类型、类型修饰与 literal 五个来源，后续陆续
-   加入元组等同级运算符。 */
+   目前有构造、括号、指针类型、类型修饰、切片类型与 literal 六个来源，
+   后续陆续加入元组等同级运算符。 */
 node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -550,6 +594,10 @@ node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = read_qualifier(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_slice_type(allocator, parser);
   if (node) {
     return node;
   }
