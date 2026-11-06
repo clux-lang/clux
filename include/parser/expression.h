@@ -74,6 +74,31 @@ node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser);
 #define CLUX_EXPR_CONSTRUCT_TYPE 0
 #define CLUX_EXPR_CONSTRUCT_FIRST_ELEM 1
 
+/* 函数定义 / 函数类型 / 闭包，统一为一个节点。
+   KEYWORD 区分 func 与 cfunc；NAME 为函数名（匿名函数与 cfunc 为 NULL）；
+   CAPTURES 为捕获列表（与形参列表同构，无捕获时为 NULL）；
+   PARAMS 为形参列表节点；RETURN 为返回类型表达式；
+   BODY 为函数体块，仅定义有值，函数类型为 NULL。
+   定义与类型的分歧点在形参括号之后：':' 走定义，'->' 走类型。 */
+#define CLUX_EXPR_FUNC_KEYWORD 0
+#define CLUX_EXPR_FUNC_NAME 1
+#define CLUX_EXPR_FUNC_CAPTURES 2
+#define CLUX_EXPR_FUNC_PARAMS 3
+#define CLUX_EXPR_FUNC_RETURN 4
+#define CLUX_EXPR_FUNC_BODY 5
+#define CLUX_EXPR_FUNC_CHILDREN_SIZE 6
+
+/* 形参列表：children 为 CLUX_NODE_FUNC_PARAM 或 rest 表达式，数量可变。 */
+
+/* 单个形参：NAME / TYPE / DEFAULT 均可为 NULL。
+   `name: type` 有 NAME；函数类型里的裸 `type` 只有 TYPE。
+   只有闭包的捕获列表允许 `= default`（DEFAULT 非 NULL），
+   函数参数没有默认值。 */
+#define CLUX_FUNC_PARAM_NAME 0
+#define CLUX_FUNC_PARAM_TYPE 1
+#define CLUX_FUNC_PARAM_DEFAULT 2
+#define CLUX_FUNC_PARAM_CHILDREN_SIZE 3
+
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
 #define CLUX_EXPR_TERNARY_THEN 1

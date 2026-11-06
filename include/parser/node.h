@@ -41,6 +41,14 @@ enum _node_kind_t {
   CLUX_NODE_EXPR_GROUP,
   /* 元组类型 <T, U, ...>；元素数量可变，可含 rest 表达式，也可为空。 */
   CLUX_NODE_EXPR_TUPLE,
+  /* 函数定义 / 函数类型 / 闭包，统一为一个节点。
+     定义与类型的区分点在参数括号之后：':' 走定义（后接函数体块），
+     '->' 走函数类型。语法阶段不做前导校验。 */
+  CLUX_NODE_EXPR_FUNC,
+  /* 形参列表，children 为 CLUX_NODE_FUNC_PARAM。 */
+  CLUX_NODE_FUNC_PARAMS,
+  /* 单个形参：NAME / TYPE / DEFAULT 均可为 NULL。 */
+  CLUX_NODE_FUNC_PARAM,
 
   CLUX_NODE_STMT_BLOCK,
   CLUX_NODE_STMT_EXPR,

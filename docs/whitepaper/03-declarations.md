@@ -47,7 +47,8 @@ func name(a: i32, b: str): bool {
 func <name> [<generic-params>] ( <params> ) : <return-type> { <block> }
 ```
 
-- 参数写作 `name: type`。
+- 参数写作 `name: type`；函数参数**没有默认值**（闭包的捕获列表可以写
+  `name: type = expr`，见下）。
 - 返回类型必须显式写出；无返回值写 `void`。
 - 函数体是块。
 - 函数值/匿名函数：
@@ -59,7 +60,15 @@ var f = func(x: i32): i32 { return x + 1; };
 - 带捕获的闭包（`|...|` 是捕获列表）：
 
 ```clux
-var f = func |(offset: i32 = 10)| add(x: i32): i32 {
+var f = func |(offset: i32)| add(x: i32): i32 {
+    return x + offset;
+};
+```
+
+捕获项可以带默认值（函数参数不可以）：
+
+```clux
+var g = func |(offset: i32 = 10)| add(x: i32): i32 {
     return x + offset;
 };
 ```
