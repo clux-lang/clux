@@ -577,9 +577,76 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 数组类型前缀 [<expr>]<postfix>（白皮书 §2.4）。
+   长度是任意表达式（走顶层入口，因此 a + 1、N * 2 等都合法），元素只取
+   后缀层，因此 [4]T * x 解析为 ([4]T) * x。
+   复用二元节点形态：LEFT 存长度，SYMBOL 存 '[]'（区间跨越方括号），
+   RIGHT 存元素。切片类型 []T 的 LEFT 为 NULL，两者靠 LEFT 是否缺失区分。
+   调用方保证 `[]` 已由 read_slice_type 消费，因此这里 `[` 后必有长度。 */
+static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
+  token_t *open = parser_peek_token(parser);
+  if (!token_is(open, CLUX_TOKEN_SYMBOL, "[")) {
+    return NULL;
+  }
+  location_t open_loc = *token_get_location(open);
+  parser_next(parser); /* '[' */
+  parser_skip_trivia(parser);
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_set_location_span(expr, &open_loc, &open_loc);
+
+  node_t *length = parser_read_expression(allocator, parser);
+  if (!length) {
+    location_t loc = expression_error_location(parser, &open_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression in array length"));
+  } else {
+    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, length);
+    node_set_location_span(expr, &open_loc, node_get_location(length));
+  }
+  parser_skip_trivia(parser);
+
+  /* 方括号区间：'[' 起点 .. ']' 终点。 */
+  location_t bracket_loc = open_loc;
+  token_t *token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+    bracket_loc.end = token_get_location(token)->end;
+    parser_next(parser); /* ']' */
+  } else {
+    const location_t *end_loc = length ? node_get_location(length) : &open_loc;
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ']' to close array type"));
+    bracket_loc.end = end_loc->end;
+  }
+  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(symbol, &bracket_loc);
+  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_set_location_span(expr, &open_loc, &bracket_loc);
+
+  size_t after_bracket = parser_get_position(parser);
+  parser_skip_trivia(parser);
+  node_t *element = parser_read_expression_postfix(allocator, parser);
+  if (!element) {
+    /* 容错：缺元素仍返回不完整的节点（RIGHT 为 NULL）。 */
+    location_t loc = expression_error_location(parser, &bracket_loc);
+    parser_set_position(parser, after_bracket);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected expression after array type"));
+    return expr;
+  }
+  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, element);
+  node_set_location_span(expr, &open_loc, node_get_location(element));
+  return expr;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
-   目前有构造、括号、指针类型、类型修饰、切片类型与 literal 六个来源，
-   后续陆续加入元组等同级运算符。 */
+   目前有构造、括号、指针类型、类型修饰、切片类型、数组类型与 literal
+   七个来源，后续陆续加入元组等同级运算符。 */
 node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -598,6 +665,10 @@ node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = read_slice_type(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_array_type(allocator, parser);
   if (node) {
     return node;
   }

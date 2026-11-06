@@ -5244,15 +5244,18 @@ TEST(ExpressionSliceTypeTest, BindsTighterThanPrefixUnary) {
   delete_allocator(&a);
 }
 
-/* `[` 后不是 `]` 时不构成切片类型，游标不动。 */
+/* `[` 后不是 `]` 时不构成切片类型，交给数组类型层处理：
+   结果不是切片形态（LEFT 非 NULL，存的是长度）。 */
 TEST(ExpressionSliceTypeTest, FallsBackOnNonEmptyBrackets) {
-  const char *sources[] = {"[T]", "[4]i32", "[", nullptr};
+  const char *sources[] = {"[T]", "[4]i32", nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     allocator_t *a = create_allocator(malloc, free);
     parser_t *p = create_parser(a, "test.clux", sources[i]);
-    EXPECT_EQ(parser_read_expression_value(a, p), nullptr)
+    node_t *expr = parser_read_expression_value(a, p);
+    ASSERT_NE(expr, nullptr) << "src=" << sources[i];
+    EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr)
         << "src=" << sources[i];
-    EXPECT_EQ(parser_get_position(p), 0u) << "src=" << sources[i];
+    delete_node(&expr);
     delete_parser(&p);
     delete_allocator(&a);
   }
@@ -5361,6 +5364,356 @@ TEST(ExpressionSliceTypeTest, NoLeakOnSliceType) {
                            "[T]",
                            "[",
                            "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 数组类型前缀 =================
+   [<expr>]<postfix>：LEFT 存长度（任意表达式），SYMBOL 存 '[]'，
+   RIGHT 存元素。切片 []T 的 LEFT 为 NULL，两者靠 LEFT 是否缺失区分。 */
+
+static void expect_array_type(node_t *expr,
+                              node_kind_t length_kind,
+                              node_kind_t elem_kind) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_t *length = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(length, nullptr);
+  EXPECT_EQ(node_get_kind(length), length_kind);
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_kind(symbol), CLUX_NODE_SYMBOL);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(elem, nullptr);
+  EXPECT_EQ(node_get_kind(elem), elem_kind);
+}
+
+TEST(ExpressionArrayTypeTest, NumericLength) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]i32");
+  expect_array_type(expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 长度是任意表达式：走顶层入口，二元运算合法。 */
+TEST(ExpressionArrayTypeTest, LengthCanBeExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[N + 1]T");
+  expect_array_type(
+      expr, CLUX_NODE_EXPRESSION_BINARY, CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 长度可以是赋值这类顶层表达式。 */
+TEST(ExpressionArrayTypeTest, LengthCanBeAssignment) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[n = 4]T");
+  expect_array_type(
+      expr, CLUX_NODE_EXPRESSION_ASSIGN, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 长度可以是调用。 */
+TEST(ExpressionArrayTypeTest, LengthCanBeCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[len(x)]T");
+  expect_array_type(
+      expr, CLUX_NODE_EXPRESSION_CALL, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元素取后缀层：[4]a.b => [4](a.b) */
+TEST(ExpressionArrayTypeTest, ElementTakesPostfixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]a.b");
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_member(elem, CLUX_NODE_LITERAL_IDENTIFIER, "b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套数组：[2][3]i32 => [2]([3]i32) */
+TEST(ExpressionArrayTypeTest, NestedArrays) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[2][3]i32");
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_array_type(inner, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 数组套切片：[4][]u8 => [4]([]u8) */
+TEST(ExpressionArrayTypeTest, ArrayOfSlice) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4][]u8");
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  EXPECT_EQ(node_get_child(elem, CLUX_EXPR_BINARY_LEFT), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 切片套数组：[] [4]u8 => []([4]u8) */
+TEST(ExpressionArrayTypeTest, SliceOfArray) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[][4]u8");
+  expect_slice_type(expr, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_array_type(elem, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 与指针组合：[4]*T => [4](*T) */
+TEST(ExpressionArrayTypeTest, ArrayOfPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]*T");
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_unary(elem, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 指针套数组：*[4]T => *([4]T) */
+TEST(ExpressionArrayTypeTest, PointerToArray) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*[4]T");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_array_type(
+      elem, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 数组套修饰：[4]const u8 => [4](const u8) */
+TEST(ExpressionArrayTypeTest, ArrayOfQualified) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]const u8");
+  expect_array_type(
+      expr, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_qualifier(elem, "const", CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 数组类型不吞乘法：[4]T * x => ([4]T) * x */
+TEST(ExpressionArrayTypeTest, DoesNotSwallowMultiplication) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[4]T * x");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_array_type(
+      left, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 数组类型优先级高于前缀一元：-[4]T => -([4]T) */
+TEST(ExpressionArrayTypeTest, BindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-[4]T");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_BINARY);
+  node_t *operand = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_array_type(
+      operand, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* [] 仍是切片类型，不被数组层吞掉。 */
+TEST(ExpressionArrayTypeTest, EmptyBracketsStaySlice) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[]T");
+  expect_slice_type(expr, CLUX_NODE_LITERAL_IDENTIFIER);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 缺长度：[ ]T => 长度缺失，仍返回不完整节点。 */
+TEST(ExpressionArrayTypeTest, MissingLengthReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[=]T");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in array length");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右方括号：[4T */
+TEST(ExpressionArrayTypeTest, MissingCloseBracketReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4T");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ']' to close array type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺元素：[4] */
+TEST(ExpressionArrayTypeTest, MissingElementReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression after array type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺元素时游标回到 ']' 之后，不吞掉后续 trivia。 */
+TEST(ExpressionArrayTypeTest, MissingElementDoesNotConsumeTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]   ");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), 3u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = '[' 起点 .. 元素终点，不含前后 trivia。 */
+TEST(ExpressionArrayTypeTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[4]a.b";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "[4]a.b");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionArrayTypeTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  [ 4 ]   T  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  [ 4 ]   T  ", "[ 4 ]   T");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionArrayTypeTest, NestedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[2][3]i32";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "[2][3]i32");
+  node_t *inner = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  expect_location_span(inner, src, "[3]i32");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionArrayTypeTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "[4]T");
+  ASSERT_NE(expr, nullptr);
+  node_t *length = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(length, nullptr);
+  EXPECT_EQ(node_get_parent(length), nullptr);
+  node_t *elem = node_get_child(expr, CLUX_EXPR_BINARY_RIGHT);
+  ASSERT_NE(elem, nullptr);
+  EXPECT_EQ(node_get_parent(elem), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionArrayTypeTest, NoLeakOnArrayType) {
+  const char *sources[] = {"[4]i32", "[N + 1]T",  "[n = 4]T",    "[len(x)]T",
+                           "[4]a.b", "[2][3]i32", "[4][]u8",     "[][4]u8",
+                           "[4]*T",  "*[4]T",     "[4]const u8", "[4]T * x",
+                           "-[4]T",  "[]T",       "[=]T",        "[4T",
+                           "[4]",    "[4]   ",    "[",           "",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;
