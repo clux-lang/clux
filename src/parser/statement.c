@@ -1,0 +1,114 @@
+#include "parser/statement.h"
+#include "core/allocator.h"
+#include "core/error.h"
+#include "core/location.h"
+#include "core/position.h"
+#include "parser/expression.h"
+#include "parser/lexer.h"
+#include "parser/node.h"
+#include "parser/parser.h"
+
+/* 错误位置：优先指向当前未消费的 token；已到流末尾时退化为
+   fallback 的终点（零宽区间）。 */
+static location_t stmt_error_location(parser_t *parser,
+                                      const location_t *fallback) {
+  token_t *bad = parser_peek_token(parser);
+  location_t loc;
+  if (bad) {
+    loc = *token_get_location(bad);
+  } else {
+    loc = *fallback;
+    loc.begin = fallback->end;
+  }
+  loc.filename = parser_get_filename(parser);
+  return loc;
+}
+
+/* 块语句 { stmt* }。调用前当前 token 不一定是 '{'，不是时返回 NULL 且游标不动。
+   语句之间不需要分隔符（表达式语句自带 ';'），块尾的 '}' 由本层消费。
+   块本身**不携带 ';'**：`{ ... };` 中的 ';' 留在块之后，属于后续要实现的
+   空语句；在空语句落地前，块内的孤立 ';' 按无法解析的语句报错。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
+    return NULL;
+  }
+  location_t open_loc = *token_get_location(token);
+  parser_next(parser); /* '{' */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_node(allocator, CLUX_NODE_STMT_BLOCK);
+  const location_t *end_loc = &open_loc;
+
+  for (;;) {
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token) {
+      /* 未闭合：保留已解析的语句，报错后结束。 */
+      location_t loc = stmt_error_location(parser, end_loc);
+      parser_push_error(
+          parser, create_error(allocator, &loc, "expected '}' to close block"));
+      break;
+    }
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "}")) {
+      end_loc = token_get_location(token);
+      parser_next(parser);
+      break;
+    }
+    node_t *stmt = parser_read_stmt(allocator, parser);
+    if (!stmt) {
+      /* 无法解析语句：报错并跳过该 token，避免在同一位置反复失败。 */
+      location_t loc = stmt_error_location(parser, end_loc);
+      parser_push_error(
+          parser, create_error(allocator, &loc, "expected statement in block"));
+      parser_next(parser);
+      continue;
+    }
+    node_add_child(node, stmt);
+    end_loc = node_get_location(stmt);
+  }
+
+  location_t loc = open_loc;
+  loc.end = end_loc->end;
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* 表达式语句 expr ';'。缺少 ';' 时报错但不消费后续 token：
+   表达式区间就是语句区间，游标停在表达式之后，由调用方决定如何恢复。 */
+node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser) {
+  node_t *expr = parser_read_expression(allocator, parser);
+  if (!expr) {
+    return NULL;
+  }
+  parser_skip_trivia(parser);
+  token_t *token = parser_peek_token(parser);
+  location_t loc = *node_get_location(expr);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+    loc.end = token_get_location(token)->end;
+    parser_next(parser);
+  } else {
+    location_t err = stmt_error_location(parser, node_get_location(expr));
+    parser_push_error(parser,
+                      create_error(allocator,
+                                   &err,
+                                   "expected ';' after expression statement"));
+  }
+  loc.filename = parser_get_filename(parser);
+
+  node_t *stmt = create_node(allocator, CLUX_NODE_STMT_EXPR);
+  node_resize_children(stmt, 1);
+  node_set_child(stmt, 0, expr);
+  node_set_location(stmt, &loc);
+  return stmt;
+}
+
+/* 语句分派。调用方负责清理前导 trivia。 */
+node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
+  node_t *node = parser_read_stmt_block(allocator, parser);
+  if (node) {
+    return node;
+  }
+  return parser_read_stmt_expr(allocator, parser);
+}

@@ -172,7 +172,7 @@ static node_t *read_postfix_symbol(allocator_t *allocator, parser_t *parser) {
 
 /* 解析方括号后缀。调用前已确认当前 token 是 '['。
    语法阶段无法区分下标与实例化（两者同形 base[expr, ...]），统一产出
-   CLUX_NODE_EXPRESSION_SUBSCRIPT；带冒号的切片产出 CLUX_NODE_EXPRESSION_SLICE。
+   CLUX_NODE_EXPR_SUBSCRIPT；带冒号的切片产出 CLUX_NODE_EXPR_SLICE。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 static node_t *
 read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
@@ -209,7 +209,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
       parser_push_error(
           parser, create_error(allocator, &loc, "expected ']' to close slice"));
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_SLICE);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_SLICE);
     node_resize_children(expr, CLUX_EXPR_SLICE_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_SLICE_BASE, base);
     node_set_child(expr, CLUX_EXPR_SLICE_LO, first);
@@ -219,7 +219,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
   }
 
   /* 下标或实例化：base[expr, expr, ...]。 */
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_SUBSCRIPT);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_SUBSCRIPT);
   node_resize_children(expr, CLUX_EXPR_SUBSCRIPT_FIRST_ARG);
   node_set_child(expr, CLUX_EXPR_SUBSCRIPT_BASE, base);
   const location_t *end_loc = node_get_location(base);
@@ -274,7 +274,7 @@ read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
   parser_next(parser); /* '(' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_CALL);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_CALL);
   node_resize_children(expr, CLUX_EXPR_CALL_FIRST_ARG);
   node_set_child(expr, CLUX_EXPR_CALL_CALLEE, callee);
   const location_t *end_loc = node_get_location(callee);
@@ -360,7 +360,7 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
   }
 
   const location_t *end_loc = type ? node_get_location(type) : &dot_loc;
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_CONSTRUCT);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_CONSTRUCT);
   node_resize_children(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
   node_set_child(expr, CLUX_EXPR_CONSTRUCT_TYPE, type);
   node_set_location_span(expr, &dot_loc, end_loc);
@@ -429,7 +429,7 @@ static node_t *read_group(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '(' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_GROUP);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_GROUP);
   node_resize_children(expr, 1);
   node_set_location_span(expr, &open_loc, &open_loc);
 
@@ -471,7 +471,7 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
   location_t star_loc = *token_get_location(token);
   parser_next(parser); /* '*' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
   node_set_location(symbol, &star_loc);
@@ -511,7 +511,7 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
   node_set_location(symbol, &keyword_loc);
   parser_next(parser); /* const / volatile */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
   node_set_location_span(expr, &keyword_loc, &keyword_loc);
@@ -555,7 +555,7 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '[' */
   parser_next(parser); /* ']' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
   node_set_location_span(expr, &bracket_loc, &bracket_loc);
@@ -592,7 +592,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '[' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_location_span(expr, &open_loc, &open_loc);
 
@@ -658,7 +658,7 @@ static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '<' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_TUPLE);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_TUPLE);
   node_set_location_span(expr, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -725,7 +725,7 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
   node_set_location(symbol, &question_loc);
   parser_next(parser); /* '?' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
   node_set_location_span(expr, &question_loc, &question_loc);
@@ -797,7 +797,7 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
     parser_skip_trivia(parser);
     const char *op = peek_postfix_operator(parser);
     if (op) {
-      node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+      node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
       node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
       node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
       node_t *symbol = read_postfix_symbol(allocator, parser);
@@ -824,7 +824,7 @@ node_t *parser_read_expression_postfix(allocator_t *allocator,
         parser_set_position(parser, after_operand);
         return operand;
       }
-      node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+      node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
       node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
       node_set_child(expr, CLUX_EXPR_BINARY_LEFT, operand);
       node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, separator);
@@ -871,7 +871,7 @@ node_t *parser_read_expression_unary(allocator_t *allocator, parser_t *parser) {
   }
   /* 前缀运算符右绑定：操作数递归到本层，支持 !!a、--a 等叠加。
      无前缀运算符时落到后缀层，因此 -p.* 解析为 -(p.*)。 */
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   /* LEFT 保持 NULL：一元形态复用二元节点，靠 LEFT 缺失区分。 */
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -929,7 +929,7 @@ node_t *parser_read_expression_as_is(allocator_t *allocator, parser_t *parser) {
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = read_keyword_symbol(allocator, parser);
@@ -988,7 +988,7 @@ node_t *parser_read_expression_multiplicative(allocator_t *allocator,
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1033,7 +1033,7 @@ node_t *parser_read_expression_additive(allocator_t *allocator,
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1077,7 +1077,7 @@ node_t *parser_read_expression_shift(allocator_t *allocator, parser_t *parser) {
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = read_shift_symbol(allocator, parser);
@@ -1122,7 +1122,7 @@ node_t *parser_read_expression_relational(allocator_t *allocator,
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1179,7 +1179,7 @@ node_t *parser_read_expression_equality(allocator_t *allocator,
       parser_set_position(parser, after_left);
       return left;
     }
-    node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+    node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
     node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
     node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
     node_t *symbol = keyword_op ? read_keyword_symbol(allocator, parser)
@@ -1222,7 +1222,7 @@ node_t *parser_read_expression_and(allocator_t *allocator, parser_t *parser) {
     parser_set_position(parser, after_left);
     return left;
   }
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1262,7 +1262,7 @@ node_t *parser_read_expression_xor(allocator_t *allocator, parser_t *parser) {
     parser_set_position(parser, after_left);
     return left;
   }
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1302,7 +1302,7 @@ node_t *parser_read_expression_or(allocator_t *allocator, parser_t *parser) {
     parser_set_position(parser, after_left);
     return left;
   }
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1342,7 +1342,7 @@ node_t *parser_read_expression_land(allocator_t *allocator, parser_t *parser) {
     parser_set_position(parser, after_left);
     return left;
   }
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1383,7 +1383,7 @@ node_t *parser_read_expression_lor(allocator_t *allocator, parser_t *parser) {
     parser_set_position(parser, after_left);
     return left;
   }
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_BINARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
   node_t *symbol = parser_read_symbol(allocator, parser);
@@ -1428,7 +1428,7 @@ node_t *parser_read_expression_ternary(allocator_t *allocator,
   location_t question_loc = *token_get_location(token);
   parser_next(parser);
   parser_skip_trivia(parser);
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_TERNARY);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_TERNARY);
   node_resize_children(expr, CLUX_EXPR_TERNARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_TERNARY_CONDITION, condition);
   node_set_location_span(
@@ -1497,7 +1497,7 @@ node_t *parser_read_expression_assign(allocator_t *allocator,
     goto next;
   }
   parser_set_position(parser, position);
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_ASSIGN);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_ASSIGN);
   node_resize_children(expr, CLUX_EXPR_ASSIGN_CHILDREN_SIZE);
   node_t *id = parser_read_literal_identifier(allocator, parser);
   node_set_child(expr, CLUX_EXPR_ASSIGN_ID, id);
@@ -1538,7 +1538,7 @@ node_t *parser_read_expression_rest(allocator_t *allocator, parser_t *parser) {
   }
   location_t loc = *token_get_location(token);
   parser_next(parser); /* '...' */
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_REST);
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_REST);
   /* 操作数可选：后面没有表达式时保持 children 为空。 */
   size_t after_rest = parser_get_position(parser);
   parser_skip_trivia(parser);

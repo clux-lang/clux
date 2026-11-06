@@ -55,6 +55,9 @@ node_t *node_set_child(node_t *self, size_t idx, node_t *child) {
 node_t *node_get_child(node_t *self, size_t idx) {
   return (node_t *)vec_get(self->children, idx);
 }
+void node_add_child(node_t *self, node_t *child) {
+  vec_push(self->children, child);
+}
 node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   if (!token || token_get_kind(token) != CLUX_TOKEN_SYMBOL) {

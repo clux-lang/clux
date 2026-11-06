@@ -1,5 +1,5 @@
-#ifndef _H_PARSER_EXPRESSION_
-#define _H_PARSER_EXPRESSION_
+#ifndef _H_PARSER_EXPR_
+#define _H_PARSER_EXPR_
 #include "core/allocator.h"
 #include "parser/node.h"
 #include "parser/parser.h"
