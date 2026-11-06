@@ -644,9 +644,74 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 元组类型 <T, U, ...>（白皮书 §2.2）。
+   元素只取后缀层，逗号分隔，数量可变，也可为空（<>）。
+   每个元素都可以是 rest 表达式，因此 <...Ts> 合法；孤立 `...` 由语义阶段报错。
+   `<<` / `>>` 不在词法表中，嵌套元组的 <a, <b>>> 逐层各消费一个 '>'。
+   元素从下标 0 起，children 长度 = 元素个数。 */
+static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "<")) {
+    return NULL;
+  }
+  location_t open_loc = *token_get_location(token);
+  parser_next(parser); /* '<' */
+  parser_skip_trivia(parser);
+
+  node_t *expr = create_node(allocator, CLUX_NODE_EXPRESSION_TUPLE);
+  node_set_location_span(expr, &open_loc, &open_loc);
+  const location_t *end_loc = &open_loc;
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ">")) {
+    /* 空元组 <> */
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(expr, &open_loc, end_loc);
+    return expr;
+  }
+
+  for (;;) {
+    /* 每个元素都可能是 rest 表达式。 */
+    node_t *elem = parser_read_expression_rest(allocator, parser);
+    if (!elem) {
+      elem = parser_read_expression_postfix(allocator, parser);
+    }
+    if (!elem) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected expression in tuple type"));
+      break;
+    }
+    vec_push(node_get_children(expr), elem);
+    end_loc = node_get_location(elem);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      break;
+    }
+    parser_next(parser); /* ',' */
+    parser_skip_trivia(parser);
+  }
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ">")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+  } else {
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected '>' to close tuple type"));
+  }
+  node_set_location_span(expr, &open_loc, end_loc);
+  return expr;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
-   目前有构造、括号、指针类型、类型修饰、切片类型、数组类型与 literal
-   七个来源，后续陆续加入元组等同级运算符。 */
+   目前有构造、括号、指针类型、类型修饰、切片类型、数组类型、元组类型
+   与 literal 八个来源，后续陆续加入同级运算符。 */
 node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -669,6 +734,10 @@ node_t *parser_read_expression_value(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = read_array_type(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_tuple_type(allocator, parser);
   if (node) {
     return node;
   }

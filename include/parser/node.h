@@ -39,6 +39,8 @@ enum _node_kind_t {
   CLUX_NODE_EXPRESSION_CONSTRUCT,
   /* 括号表达式 ( expr )，只有一个子节点，用于改变结合/优先级。 */
   CLUX_NODE_EXPRESSION_GROUP,
+  /* 元组类型 <T, U, ...>；元素数量可变，可含 rest 表达式，也可为空。 */
+  CLUX_NODE_EXPRESSION_TUPLE,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

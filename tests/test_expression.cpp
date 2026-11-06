@@ -1191,13 +1191,17 @@ TEST(ExpressionBinaryTest, FallsBackOnCompoundAssign) {
 
 /* 单独的运算符 token 无法构成二元表达式。例外：+ 和 - 同时是一元前缀
    运算符，* 同时是指针类型前缀，单独出现会进入对应前缀层并按“缺操作数”
-   容错，返回 RIGHT 为 NULL 的不完整节点并上报错误。 */
+   容错，返回 RIGHT 为 NULL 的不完整节点并上报错误；以 '<' 开头的运算符
+   会进入元组类型层，返回不完整元组节点并上报错误。 */
 TEST_P(ExpressionBinaryTest, ReturnsNullOnNonLiteral) {
   parser_t *p;
   bool is_unary = strcmp(GetParam().op, "+") == 0 ||
                   strcmp(GetParam().op, "-") == 0 ||
                   strcmp(GetParam().op, "*") == 0;
-  if (!is_unary) {
+  /* 只有裸 '<' 与组合出的 '<<' 会进入元组层；'<=' 是单个 token。 */
+  bool is_tuple =
+      strcmp(GetParam().op, "<") == 0 || strcmp(GetParam().op, "<<") == 0;
+  if (!is_unary && !is_tuple) {
     EXPECT_EQ(parse(&p, GetParam().op), nullptr);
     EXPECT_EQ(parser_get_position(p), 0u);
     delete_parser(&p);
@@ -1205,10 +1209,16 @@ TEST_P(ExpressionBinaryTest, ReturnsNullOnNonLiteral) {
   }
   node_t *expr = parse(&p, GetParam().op);
   ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  if (is_tuple) {
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TUPLE);
+    delete_node(&expr);
+    delete_parser(&p);
+    return;
+  }
   EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_LEFT), nullptr);
   EXPECT_NE(node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL), nullptr);
   EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 1u);
   delete_node(&expr);
   delete_parser(&p);
 }
@@ -5714,6 +5724,347 @@ TEST(ExpressionArrayTypeTest, NoLeakOnArrayType) {
                            "[4]*T",  "*[4]T",     "[4]const u8", "[4]T * x",
                            "-[4]T",  "[]T",       "[=]T",        "[4T",
                            "[4]",    "[4]   ",    "[",           "",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expression(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 元组类型 =================
+   <T, U, ...>：元素从下标 0 起，数量可变，可空，可含 rest 表达式。 */
+
+static void expect_tuple(node_t *expr, size_t elem_count) {
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TUPLE);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), elem_count);
+  for (size_t i = 0; i < elem_count; i++) {
+    EXPECT_NE(node_get_child(expr, i), nullptr) << "elem=" << i;
+  }
+}
+
+TEST(ExpressionTupleTypeTest, EmptyTuple) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<>");
+  expect_tuple(expr, 0);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTupleTypeTest, SingleElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<i32>");
+  expect_tuple(expr, 1);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTupleTypeTest, MultipleElements) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<i32, str, bool>");
+  expect_tuple(expr, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 1)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元素取后缀层：<a.b> => <(a.b)> */
+TEST(ExpressionTupleTypeTest, ElementsTakePostfixChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<a.b, c.d>");
+  expect_tuple(expr, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)),
+            CLUX_NODE_EXPRESSION_BINARY);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 1)),
+            CLUX_NODE_EXPRESSION_BINARY);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* rest 元素：<...Ts> */
+TEST(ExpressionTupleTypeTest, RestElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<...Ts>");
+  expect_tuple(expr, 1);
+  node_t *rest = node_get_child(expr, 0);
+  ASSERT_EQ(node_get_kind(rest), CLUX_NODE_EXPRESSION_REST);
+  ASSERT_EQ(vec_get_size(node_get_children(rest)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* rest 与普通元素混用：<i32, ...Ts, bool> */
+TEST(ExpressionTupleTypeTest, RestAmongElements) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<i32, ...Ts, bool>");
+  expect_tuple(expr, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 0)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 1)), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, 2)), CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 孤立 `...` 元素：语法合法、无子节点，语义阶段报错。 */
+TEST(ExpressionTupleTypeTest, BareRestElement) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<...>");
+  expect_tuple(expr, 1);
+  node_t *rest = node_get_child(expr, 0);
+  ASSERT_EQ(node_get_kind(rest), CLUX_NODE_EXPRESSION_REST);
+  EXPECT_EQ(vec_get_size(node_get_children(rest)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 嵌套元组：<<a, b>, c> —— 逐层各消费一个 '>'。 */
+TEST(ExpressionTupleTypeTest, NestedTuple) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<<a, b>, c>");
+  expect_tuple(expr, 2);
+  node_t *inner = node_get_child(expr, 0);
+  expect_tuple(inner, 2);
+  EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元素可以是其它类型前缀：<*T, []u8, [4]i32> */
+TEST(ExpressionTupleTypeTest, ElementsCanBeTypePrefixes) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<*T, []u8, [4]i32>");
+  expect_tuple(expr, 3);
+  node_t *ptr = node_get_child(expr, 0);
+  expect_unary(ptr, "*", CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *slice = node_get_child(expr, 1);
+  expect_slice_type(slice, CLUX_NODE_LITERAL_TYPE);
+  node_t *array = node_get_child(expr, 2);
+  expect_array_type(array, CLUX_NODE_LITERAL_NUMERIC, CLUX_NODE_LITERAL_TYPE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元组不吞乘法：<a, b> * x => (<a, b>) * x */
+TEST(ExpressionTupleTypeTest, DoesNotSwallowMultiplication) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "<a, b> * x");
+  node_t *expr = parser_read_expression_multiplicative(a, p);
+  expect_top_operator(expr, "*");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  expect_tuple(left, 2);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元组优先级高于前缀一元：-<a> => -(<a>) */
+TEST(ExpressionTupleTypeTest, BindsTighterThanPrefixUnary) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "-<a>");
+  node_t *expr = parser_read_expression_unary(a, p);
+  expect_unary(expr, "-", CLUX_NODE_EXPRESSION_TUPLE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元组作为其它类型前缀的操作数：*<a, b> => *(<a, b>) */
+TEST(ExpressionTupleTypeTest, TupleAsPointerOperand) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "*<a, b>");
+  expect_unary(expr, "*", CLUX_NODE_EXPRESSION_TUPLE);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 元组前后 trivia 不属于表达式区间。 */
+TEST(ExpressionTupleTypeTest, TriviaInsideAngles) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "< /* c */ a /* d */ , b >");
+  expect_tuple(expr, 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 元素缺失：<,> —— 缺元素与缺右尖括号各报一次。 */
+TEST(ExpressionTupleTypeTest, MissingElementReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<,>");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TUPLE);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 0u);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 2u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in tuple type");
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 1)),
+               "expected '>' to close tuple type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 逗号后缺元素：<a,> */
+TEST(ExpressionTupleTypeTest, TrailingCommaReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<a,>");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)), 1u);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression in tuple type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺右尖括号：<a */
+TEST(ExpressionTupleTypeTest, MissingCloseReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<a");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPRESSION_TUPLE);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '>' to close tuple type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- location ---- */
+
+/* 区间 = '<' 起点 .. '>' 终点，不含前后 trivia。 */
+TEST(ExpressionTupleTypeTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "<a, b>";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "<a, b>");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTupleTypeTest, SpanWithoutSurroundingTrivia) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "  < a >  ");
+  parser_skip_trivia(p);
+  node_t *expr = parser_read_expression_postfix(a, p);
+  expect_location_span(expr, "  < a >  ", "< a >");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTupleTypeTest, EmptyTupleSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "<>";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "<>");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionTupleTypeTest, NestedSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "<<a, b>, c>";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_location_span(expr, src, "<<a, b>, c>");
+  node_t *inner = node_get_child(expr, 0);
+  expect_location_span(inner, src, "<a, b>");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- parent ---- */
+
+TEST(ExpressionTupleTypeTest, ChildrenParentIsNotAutoSet) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "<a, b>");
+  ASSERT_NE(expr, nullptr);
+  for (size_t i = 0; i < 2; i++) {
+    node_t *elem = node_get_child(expr, i);
+    ASSERT_NE(elem, nullptr);
+    EXPECT_EQ(node_get_parent(elem), nullptr) << "elem=" << i;
+  }
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 泄漏检查 ---- */
+
+TEST(ExpressionTupleTypeTest, NoLeakOnTupleType) {
+  const char *sources[] = {"<>",
+                           "<i32>",
+                           "<i32, str, bool>",
+                           "<a.b, c.d>",
+                           "<...Ts>",
+                           "<i32, ...Ts, bool>",
+                           "<...>",
+                           "<<a, b>, c>",
+                           "<*T, []u8, [4]i32>",
+                           "<a, b> * x",
+                           "-<a>",
+                           "*<a, b>",
+                           "< /* c */ a , b >",
+                           "<,>",
+                           "<a,>",
+                           "<a",
+                           "<",
+                           "",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;
