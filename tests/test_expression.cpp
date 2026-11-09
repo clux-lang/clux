@@ -7522,3 +7522,375 @@ TEST(ExpressionFuncDeclTest, NoLeakOnFuncDecl) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= C union =================
+   cunion Name[generics] { field; ... }（白皮书 §3.8）。
+   字段节点 CLUX_NODE_FIELD 由 struct / tag union / cunion 共用，
+   因此不带具体类型前缀。 */
+
+/* 断言 cunion 节点形状：名字必存在，字段列表必存在。 */
+static node_t *expect_cunion(node_t *expr, const char *name) {
+  if (!expr) {
+    ADD_FAILURE() << "expected cunion node, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_CUNION);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_CUNION_CHILDREN_SIZE);
+  node_t *name_node = node_get_child(expr, CLUX_EXPR_CUNION_NAME);
+  if (!name_node) {
+    ADD_FAILURE() << "expected cunion name";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(name_node), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(name_node)->end.offset -
+                node_get_location(name_node)->begin.offset,
+            (ptrdiff_t)strlen(name));
+  node_t *body = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  if (!body) {
+    ADD_FAILURE() << "expected cunion body";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_FIELDS);
+  return expr;
+}
+
+/* 断言字段列表里第 idx 个字段是 name: type。 */
+static void expect_field(node_t *fields, size_t idx) {
+  node_t *field = node_get_child(fields, idx);
+  ASSERT_NE(field, nullptr);
+  EXPECT_EQ(node_get_kind(field), CLUX_NODE_FIELD);
+  EXPECT_NE(node_get_child(field, CLUX_FIELD_NAME), nullptr);
+  EXPECT_NE(node_get_child(field, CLUX_FIELD_TYPE), nullptr);
+}
+
+TEST(ExpressionCunionTest, BasicDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion Value { i: i32; f: f32; }");
+  expect_cunion(expr, "Value");
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(fields)), 2u);
+  expect_field(fields, 0);
+  expect_field(fields, 1);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_CUNION_GENERICS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion Empty {}");
+  expect_cunion(expr, "Empty");
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(fields)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 空字段 `;` 不允许：';' 必须严格跟随字段。 */
+TEST(ExpressionCunionTest, EmptySemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { ; i: i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected field in type body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 最后一个字段后必须写 ';'，不允许省略。 */
+TEST(ExpressionCunionTest, LastFieldWithoutSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after field");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 末尾多余的 ';' 同样不允许。 */
+TEST(ExpressionCunionTest, TrailingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32;; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected field in type body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型 cunion。 */
+TEST(ExpressionCunionTest, GenericDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V[T] { value: T; }");
+  expect_cunion(expr, "V");
+  node_t *generics = node_get_child(expr, CLUX_EXPR_CUNION_GENERICS);
+  ASSERT_NE(generics, nullptr);
+  EXPECT_EQ(node_get_kind(generics), CLUX_NODE_GENERIC_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(generics)), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段类型可以是复合类型。 */
+TEST(ExpressionCunionTest, CompositeFieldTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { p: *u8; s: []u8; }");
+  expect_cunion(expr, "V");
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(fields)), 2u);
+  expect_field(fields, 0);
+  expect_field(fields, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(ExpressionCunionTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion { i: i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected name after 'cunion'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start cunion body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, MissingFieldColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' after field name");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, MissingFieldTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i:; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected field type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, MissingFieldSeparatorReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32 f: f32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after field");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, UnclosedBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32;");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close fields");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非法字段起始（数字）：报错后跳到 ';' 继续。 */
+TEST(ExpressionCunionTest, InvalidFieldStartReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { 1: i32; j: i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected field in type body");
+  /* 跳过后仍解析出第二个字段。 */
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(fields)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非法字段起始直接到 EOF：容错循环安全退出。 */
+TEST(ExpressionCunionTest, InvalidFieldStartAtEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { 1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段分隔符错误直接到 EOF：容错循环安全退出。 */
+TEST(ExpressionCunionTest, MissingFieldSeparatorAtEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32 f");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非法字段起始后直接遇到 '}'：容错跳到 '}' 并正常闭合。 */
+TEST(ExpressionCunionTest, InvalidFieldStartBeforeClose) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { 1 }");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(fields)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段分隔符错误后直接遇到 '}'：容错跳到 '}' 并正常闭合。 */
+TEST(ExpressionCunionTest, MissingFieldSeparatorBeforeClose) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cunion V { i: i32 f }");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(fields)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 cunion 关键字到字段列表终点。 */
+TEST(ExpressionCunionTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "cunion V { i: i32; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_cunion(expr, "V");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段区间 = 名字起点 .. 类型终点。 */
+TEST(ExpressionCunionTest, FieldSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "cunion V { i: i32; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  node_t *fields = node_get_child(expr, CLUX_EXPR_CUNION_BODY);
+  ASSERT_NE(fields, nullptr);
+  node_t *field = node_get_child(fields, 0);
+  ASSERT_NE(field, nullptr);
+  const location_t *loc = node_get_location(field);
+  EXPECT_EQ(loc->begin.offset, src + strlen("cunion V { "));
+  EXPECT_EQ(loc->end.offset, src + strlen("cunion V { i: i32"));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionCunionTest, NoLeakOnCunion) {
+  const char *sources[] = {"cunion Value { i: i32; f: f32; }",
+                           "cunion Empty {}",
+                           "cunion V { ; i: i32; }",
+                           "cunion V { i: i32 }",
+                           "cunion V { i: i32;; }",
+                           "cunion V { i: i32 }",
+                           "cunion V[T] { value: T; }",
+                           "cunion V { p: *u8; s: []u8; }",
+                           "cunion { i: i32; }",
+                           "cunion V",
+                           "cunion V { i i32; }",
+                           "cunion V { i:; }",
+                           "cunion V { i: i32 f: f32; }",
+                           "cunion V { i: i32;",
+                           "cunion V { 1: i32; j: i32; }",
+                           "cunion",
+                           "cunion V[",
+                           "cunion V { 1",
+                           "cunion V { i: i32 f",
+                           "cunion V { 1 }",
+                           "cunion V { i: i32 f }",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
