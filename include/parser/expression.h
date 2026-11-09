@@ -94,13 +94,16 @@ node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser);
 #define CLUX_EXPR_FUNC_DECL_BODY 6
 #define CLUX_EXPR_FUNC_DECL_CHILDREN_SIZE 7
 
-/* C union 定义 cunion Name { field; ... }（白皮书 §3.8）。
+/* union 定义（白皮书 §3.7 tag union、§3.8 C union）。
+   tag union 与 cunion 在语法阶段完全相同，只有关键词不同，因此共用此节点：
+   KEYWORD 为 `union` 或 `cunion` 符号，语义差异（是否带 tag）留给语义阶段；
    NAME 为类型名；GENERICS 为泛型参数列表（无泛型时为 NULL）；
    BODY 为字段列表节点，children 为 CLUX_NODE_FIELD。 */
-#define CLUX_EXPR_CUNION_NAME 0
-#define CLUX_EXPR_CUNION_GENERICS 1
-#define CLUX_EXPR_CUNION_BODY 2
-#define CLUX_EXPR_CUNION_CHILDREN_SIZE 3
+#define CLUX_EXPR_UNION_KEYWORD 0
+#define CLUX_EXPR_UNION_NAME 1
+#define CLUX_EXPR_UNION_GENERICS 2
+#define CLUX_EXPR_UNION_BODY 3
+#define CLUX_EXPR_UNION_CHILDREN_SIZE 4
 
 /* 类型定义的字段 name: type。struct / tag union / cunion 共用。
    NAME 必有；TYPE 缺失时为 NULL（容错）。 */

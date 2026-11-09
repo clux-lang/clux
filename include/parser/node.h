@@ -52,8 +52,10 @@ enum _node_kind_t {
   CLUX_NODE_FUNC_PARAMS,
   /* 单个形参：NAME / TYPE / DEFAULT 均可为 NULL。 */
   CLUX_NODE_FUNC_PARAM,
-  /* C union 定义 cunion Name { field; ... }（白皮书 §3.8）。 */
-  CLUX_NODE_EXPR_CUNION,
+  /* union 定义：tag union `union Name { ... }`（白皮书 §3.7）与
+     C union `cunion Name { ... }`（§3.8）在语法阶段完全相同，
+     只有关键词不同，因此共用此节点，由 KEYWORD 槽区分。 */
+  CLUX_NODE_EXPR_UNION,
   /* 类型定义的字段 name: type。struct / tag union / cunion 共用，
      因此不带具体类型前缀。 */
   CLUX_NODE_FIELD,

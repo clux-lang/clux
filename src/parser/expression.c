@@ -1608,21 +1608,28 @@ static node_t *read_fields(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* C union 定义 cunion Name[generics] { field; ... }（白皮书 §3.8）。
-   与 func_decl 一样不是前导可判定的：首 token 是 cunion 时必然是定义，
-   任何不匹配都是硬错误。调用前当前 token 必须是 cunion。
+/* union 定义（白皮书 §3.7 tag union、§3.8 C union）。
+   tag union 与 cunion 在语法阶段完全相同，只有关键词不同，因此共用一条
+   解析路径，由 KEYWORD 槽区分，语义差异（是否带 tag）留给语义阶段。
+   与 func_decl 一样不是前导可判定的：首 token 是 union/cunion 时必然是
+   定义，任何不匹配都是硬错误。调用前当前 token 必须是 union 或 cunion。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
-static node_t *read_cunion(allocator_t *allocator, parser_t *parser) {
+static node_t *read_union(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_KEYWORD, "cunion")) {
+  bool is_cunion = token_is(token, CLUX_TOKEN_KEYWORD, "cunion");
+  if (!is_cunion && !token_is(token, CLUX_TOKEN_KEYWORD, "union")) {
     return NULL;
   }
   location_t keyword_loc = *token_get_location(token);
-  parser_next(parser); /* cunion */
+  const char *keyword_text = is_cunion ? "cunion" : "union";
+  node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(keyword, &keyword_loc);
+  parser_next(parser); /* union / cunion */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_EXPR_CUNION);
-  node_resize_children(node, CLUX_EXPR_CUNION_CHILDREN_SIZE);
+  node_t *node = create_node(allocator, CLUX_NODE_EXPR_UNION);
+  node_resize_children(node, CLUX_EXPR_UNION_CHILDREN_SIZE);
+  node_set_child(node, CLUX_EXPR_UNION_KEYWORD, keyword);
   node_set_location_span(node, &keyword_loc, &keyword_loc);
   const location_t *end_loc = &keyword_loc;
 
@@ -1631,10 +1638,12 @@ static node_t *read_cunion(allocator_t *allocator, parser_t *parser) {
   if (!name) {
     location_t loc = expression_error_location(parser, end_loc);
     parser_push_error(
-        parser, create_error(allocator, &loc, "expected name after 'cunion'"));
+        parser,
+        create_error(
+            allocator, &loc, "expected name after '%s'", keyword_text));
     return node;
   }
-  node_set_child(node, CLUX_EXPR_CUNION_NAME, name);
+  node_set_child(node, CLUX_EXPR_UNION_NAME, name);
   end_loc = node_get_location(name);
   node_set_location_span(node, &keyword_loc, end_loc);
   parser_skip_trivia(parser);
@@ -1643,7 +1652,7 @@ static node_t *read_cunion(allocator_t *allocator, parser_t *parser) {
   token = parser_peek_token(parser);
   if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
     node_t *generics = read_func_decl_generics(allocator, parser);
-    node_set_child(node, CLUX_EXPR_CUNION_GENERICS, generics);
+    node_set_child(node, CLUX_EXPR_UNION_GENERICS, generics);
     end_loc = node_get_location(generics);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -1655,18 +1664,19 @@ static node_t *read_cunion(allocator_t *allocator, parser_t *parser) {
     location_t loc = expression_error_location(parser, end_loc);
     parser_push_error(
         parser,
-        create_error(allocator, &loc, "expected '{' to start cunion body"));
+        create_error(
+            allocator, &loc, "expected '{' to start %s body", keyword_text));
     return node;
   }
   node_t *body = read_fields(allocator, parser);
-  node_set_child(node, CLUX_EXPR_CUNION_BODY, body);
+  node_set_child(node, CLUX_EXPR_UNION_BODY, body);
   node_set_location_span(node, &keyword_loc, node_get_location(body));
   return node;
 }
 
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
    目前有构造、括号、指针类型、类型修饰、切片类型、数组类型、元组类型、
-   optional 类型、函数类型、函数声明、cunion 与 literal 十二个来源。 */
+   optional 类型、函数类型、函数声明、union 与 literal 十二个来源。 */
 node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -1708,7 +1718,7 @@ node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
-  node = read_cunion(allocator, parser);
+  node = read_union(allocator, parser);
   if (node) {
     return node;
   }
