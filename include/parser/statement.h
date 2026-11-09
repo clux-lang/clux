@@ -38,6 +38,16 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 #define CLUX_STMT_VAR_FIRST_DECORATOR 4
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);
 
+/* 类型别名语句 <decorator>* type name [generics]? = expr;（白皮书 §3.11）。
+   NAME 为别名；GENERICS 为泛型参数列表（无泛型时为 NULL）；
+   VALUE 为别名指向的类型表达式；其后按源码顺序为装饰器，数量可变，
+   因此 children 长度 = CLUX_STMT_TYPE_FIRST_DECORATOR + 装饰器个数。 */
+#define CLUX_STMT_TYPE_NAME 0
+#define CLUX_STMT_TYPE_GENERICS 1
+#define CLUX_STMT_TYPE_VALUE 2
+#define CLUX_STMT_TYPE_FIRST_DECORATOR 3
+node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser);
+
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }

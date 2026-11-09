@@ -123,7 +123,7 @@ static const char *keywords[] = {
     "u32",      "u64",       "isize",   "usize",    "f32",      "f64",
     "str",      "void",      "opaque",  "struct",   "union",    "cunion",
     "enum",     "undefined", "none",    "nil",      "true",     "false",
-    "as",       "is",        "extends", "comptime", NULL,
+    "as",       "is",        "extends", "comptime", "type",     NULL,
 };
 
 /* ---- identifier ----

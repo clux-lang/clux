@@ -1188,6 +1188,307 @@ TEST(StmtVarTest, ReturnsNullOnNonVar) {
   delete_allocator(&a);
 }
 
+/* ================= 类型别名语句 =================
+   语法：<decorator>* type name = expr; */
+
+/* 断言类型语句节点：NAME / VALUE 必有。 */
+static node_t *expect_type_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected type statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TYPE);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_TYPE_FIRST_DECORATOR + decorator_count);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_TYPE_NAME), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_TYPE_VALUE), nullptr);
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_TYPE_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return node;
+}
+
+TEST(StmtTypeTest, SimpleAlias) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type UserId = u64;");
+  expect_type_stmt(node, 0);
+  node_t *name = node_get_child(node, CLUX_STMT_TYPE_NAME);
+  EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_TYPE_VALUE)),
+            CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 别名指向复合类型：切片、指针、函数类型。 */
+TEST(StmtTypeTest, CompositeAlias) {
+  const char *sources[] = {"type Buf = []u8;",
+                           "type P = *i32;",
+                           "type Handler = func(i32) -> void;",
+                           "type Opt = ?i32;",
+                           "type Tup = <i32, u8>;",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *node = parse_stmt(a, &p, sources[i]);
+    expect_type_stmt(node, 0);
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << sources[i];
+    delete_node(&node);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+TEST(StmtTypeTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] type UserId = u64;");
+  expect_type_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTypeTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] [[metadata(\"k\", 1)]] type U = u64;");
+  expect_type_stmt(node, 2);
+  node_t *first = node_get_child(node, CLUX_STMT_TYPE_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_TYPE_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型类型别名。 */
+TEST(StmtTypeTest, GenericAlias) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type Buffer[T] = []T;");
+  expect_type_stmt(node, 0);
+  node_t *generics = node_get_child(node, CLUX_STMT_TYPE_GENERICS);
+  ASSERT_NE(generics, nullptr);
+  EXPECT_EQ(node_get_kind(generics), CLUX_NODE_GENERIC_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(generics)), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 多参数、约束、默认值、参数包都走同一套泛型解析。 */
+TEST(StmtTypeTest, GenericAliasForms) {
+  const char *sources[] = {"type Pair[T, U] = <T, U>;",
+                           "type B[N: comptime usize] = [N]u8;",
+                           "type C[W extends IWriter[W]] = *W;",
+                           "type D[T = i32] = []T;",
+                           "type E[...Args] = <...Args>;",
+                           "type F[] = i32;",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *node = parse_stmt(a, &p, sources[i]);
+    expect_type_stmt(node, 0);
+    EXPECT_NE(node_get_child(node, CLUX_STMT_TYPE_GENERICS), nullptr)
+        << "src=" << sources[i];
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << sources[i];
+    delete_node(&node);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 无泛型时 GENERICS 槽为 NULL。 */
+TEST(StmtTypeTest, NoGenericsSlotIsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type U = u64;");
+  expect_type_stmt(node, 0);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_TYPE_GENERICS), nullptr);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型 + 装饰器。 */
+TEST(StmtTypeTest, GenericWithDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] type Buffer[T] = []T;");
+  expect_type_stmt(node, 1);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_TYPE_GENERICS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型参数错误路径。 */
+TEST(StmtTypeTest, GenericErrorsReported) {
+  const char *sources[] = {"type U[1] = i32;",
+                           "type U[T() = i32;",
+                           "type U[N:] = i32;",
+                           "type U[W extends] = i32;",
+                           "type U[T =] = i32;",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *node = parse_stmt(a, &p, sources[i]);
+    ASSERT_NE(node, nullptr);
+    EXPECT_GE(vec_get_size(parser_get_error(p)), 1u) << "src=" << sources[i];
+    delete_node(&node);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 装饰器引导类型语句时正确分派。 */
+TEST(StmtTypeTest, DecoratorDispatchesType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[a[b]]] type U = u64;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 块内可以混入类型语句。 */
+TEST(StmtTypeTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ var x = 1; type U = u64; }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_VAR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器/关键字起点到 ';'。 */
+TEST(StmtTypeTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] type U = u64;";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_type_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtTypeTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type = u64;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TYPE);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected type name in type statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTypeTest, MissingEqualsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type U u64;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '=' after type name");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTypeTest, MissingValueReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type U = ;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected type expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTypeTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "type U = u64");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after type statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 直接调用 type 入口且装饰器后不是 type：报错。 */
+TEST(StmtTypeTest, DecoratorFollowedByNonTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_type(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TYPE);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'type' in type statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTypeTest, ReturnsNullOnNonType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_type(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtTest, NoLeakOnStatements) {
   const char *sources[] = {
       "{}",

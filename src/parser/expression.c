@@ -1258,7 +1258,10 @@ node_t *parser_read_expr(allocator_t *allocator, parser_t *parser) {
 }
 
 /* rest 表达式 ...expr?，不在优先级链上，由构造/调用实参等位置显式调用。
-   孤立 `...` 合法（无子节点），用于展开全部剩余元素。 */
+   孤立 `...` 合法（无子节点），用于展开全部剩余元素。
+   操作数只取后缀层：rest 出现的位置常是列表元素（调用实参、元组元素、
+   形参类型），若走顶层入口，`<...Ts>` 里的 '>' 会被关系层当成比较运算符
+   吃掉，导致元组无法闭合。 */
 node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   if (!token_is(token, CLUX_TOKEN_SYMBOL, "...")) {
@@ -1270,7 +1273,7 @@ node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser) {
   /* 操作数可选：后面没有表达式时保持 children 为空。 */
   size_t after_rest = parser_get_position(parser);
   parser_skip_trivia(parser);
-  node_t *operand = parser_read_expr(allocator, parser);
+  node_t *operand = parser_read_expr_postfix(allocator, parser);
   if (!operand) {
     /* 孤立 `...`：游标回到 '...' 之后，不吞掉后续 trivia。 */
     parser_set_position(parser, after_rest);

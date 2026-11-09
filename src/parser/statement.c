@@ -399,8 +399,100 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 类型别名语句 <decorator>* type name [generics]? = expr;（白皮书 §3.11）。
+   调用前当前 token 不一定是装饰器或 type，不是时返回 NULL 且游标不动。
+   泛型参数列表复用函数声明的解析；别名指向的类型表达式走顶层入口。
+   出错时按容错约定返回不完整节点并 push_error。 */
+node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "type")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_node(allocator, CLUX_NODE_STMT_TYPE);
+  node_resize_children(node, CLUX_STMT_TYPE_FIRST_DECORATOR);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(allocator, parser, node);
+
+  /* type 关键字。 */
+  token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "type")) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected 'type' in type statement"));
+    return node;
+  }
+  location_t keyword_loc = *token_get_location(token);
+  parser_next(parser); /* type */
+  parser_skip_trivia(parser);
+
+  /* 别名。 */
+  node_t *name = parser_read_literal_identifier(allocator, parser);
+  if (!name) {
+    location_t loc = stmt_error_location(parser, &keyword_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected type name in type statement"));
+    return node;
+  }
+  node_set_child(node, CLUX_STMT_TYPE_NAME, name);
+  parser_skip_trivia(parser);
+
+  /* 泛型参数列表 [T, U]（可选）。 */
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
+    node_t *generics = parser_read_func_decl_generics(allocator, parser);
+    node_set_child(node, CLUX_STMT_TYPE_GENERICS, generics);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+  }
+
+  /* '='。 */
+  token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
+    location_t loc = stmt_error_location(parser, node_get_location(name));
+    parser_push_error(
+        parser, create_error(allocator, &loc, "expected '=' after type name"));
+    return node;
+  }
+  parser_next(parser); /* '=' */
+  parser_skip_trivia(parser);
+
+  /* 别名指向的类型表达式。 */
+  node_t *value = parser_read_expr(allocator, parser);
+  if (!value) {
+    location_t loc = stmt_error_location(parser, node_get_location(name));
+    parser_push_error(
+        parser, create_error(allocator, &loc, "expected type expression"));
+    return node;
+  }
+  node_set_child(node, CLUX_STMT_TYPE_VALUE, value);
+  location_t loc = begin_loc;
+  loc.end = node_get_location(value)->end;
+  parser_skip_trivia(parser);
+
+  /* 结尾 ';'。 */
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+    loc.end = token_get_location(token)->end;
+    parser_next(parser);
+  } else {
+    location_t err = stmt_error_location(parser, node_get_location(value));
+    parser_push_error(
+        parser,
+        create_error(allocator, &err, "expected ';' after type statement"));
+  }
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 语句分派。调用方负责清理前导 trivia。
-   装饰器既可能引导函数语句也可能引导变量语句，因此先跳过装饰器看关键字。 */
+   装饰器可能引导函数/变量/类型语句，因此先跳过装饰器看关键字。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
   if (node) {
@@ -412,9 +504,16 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
         token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
       return parser_read_stmt_var(allocator, parser);
     }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "type")) {
+      return parser_read_stmt_type(allocator, parser);
+    }
     return parser_read_stmt_func(allocator, parser);
   }
   node = parser_read_stmt_var(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_type(allocator, parser);
   if (node) {
     return node;
   }

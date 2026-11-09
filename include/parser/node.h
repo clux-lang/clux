@@ -87,6 +87,11 @@ enum _node_kind_t {
      （白皮书 §4.1、§4.12.1）。KEYWORD 区分 var 与 using，
      TYPE 可缺失（由初值推断），其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_VAR,
+
+  /* 类型别名语句 <decorator>* type name [generics]? = expr;（白皮书 §3.11）。
+     GENERICS 可缺失；VALUE 槽存别名指向的类型表达式，
+     其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_TYPE,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
