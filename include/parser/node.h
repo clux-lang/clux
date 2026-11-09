@@ -73,6 +73,11 @@ enum _node_kind_t {
   /* break; / continue; —— 无子节点。 */
   CLUX_NODE_STMT_BREAK,
   CLUX_NODE_STMT_CONTINUE,
+
+  /* 辅助节点：装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
+     不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，
+     作为它们的子节点挂载。 */
+  CLUX_NODE_DECORATOR,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
