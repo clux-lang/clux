@@ -6362,6 +6362,71 @@ TEST(ExpressionOptionalTypeTest, NoLeakOnOptionalType) {
   }
 }
 
+/* ================= 逻辑或的相邻组合 =================
+   `||` 不在词法表中（与空捕获列表冲突），由 parser 组合两个相邻的 '|'。 */
+
+/* `a || b` 解析为逻辑或，运算符节点区间跨越两个 '|'。 */
+TEST(ExpressionLorTest, CombinesAdjacentPipes) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "a || b");
+  expect_top_operator(expr, "||");
+  node_t *symbol = node_get_child(expr, CLUX_EXPR_BINARY_SYMBOL);
+  ASSERT_NE(symbol, nullptr);
+  EXPECT_EQ(node_get_location(symbol)->end.offset -
+                node_get_location(symbol)->begin.offset,
+            (ptrdiff_t)2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* `a | | b`（中间有空白）不是逻辑或：两个 '|' 各自是位或，无法解析右值。 */
+TEST(ExpressionLorTest, SeparatedPipesAreNotLor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "a | | b");
+  ASSERT_NE(expr, nullptr);
+  /* 顶层是位或，不是逻辑或。 */
+  expect_top_operator(expr, "|");
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* `a ||| b`：前两个 '|' 组合成逻辑或，右操作数从第三个 '|' 起解析失败，
+   因此顶层是逻辑或且 RIGHT 缺失，同时报错。 */
+TEST(ExpressionLorTest, TriplePipeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "a ||| b");
+  ASSERT_NE(expr, nullptr);
+  expect_top_operator(expr, "||");
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_BINARY_RIGHT), nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 位或层不能吃掉 `||` 的第一个 '|'。 */
+TEST(ExpressionLorTest, BitOrDoesNotConsumeLor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_expr(a, &p, "a | b || c");
+  ASSERT_NE(expr, nullptr);
+  expect_top_operator(expr, "||");
+  node_t *left = node_get_child(expr, CLUX_EXPR_BINARY_LEFT);
+  ASSERT_NE(left, nullptr);
+  expect_top_operator(left, "|");
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= 函数类型 =================
    func |captures|(params) -> ret（白皮书 §2.7）。
    不是前导可判定的：只有形参列表之后的 '->' 才确认是函数类型，

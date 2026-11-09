@@ -299,16 +299,29 @@ TEST(LexerSymbolTest, ShiftOperatorsAreNotMerged) {
   delete_allocator(&a);
 }
 
-TEST(LexerSymbolTest, LogicalOperators) {
+TEST(LexerSymbolTest, LogicalAnd) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *syms[] = {"&&", "||", nullptr};
-  for (int i = 0; syms[i] != nullptr; i++) {
-    position_t p = lexer_test_pos(syms[i]);
-    token_t *tok = lexer_read_symbol(a, &p, "test.clux");
-    ASSERT_NE(tok, nullptr) << "sym=" << syms[i];
-    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_SYMBOL) << "sym=" << syms[i];
-    delete_token(&tok);
-  }
+  const char *src = "&&";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_symbol(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_SYMBOL);
+  EXPECT_EQ(p.offset - src, (ptrdiff_t)2);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+/* `||` 在词法层有歧义（与空捕获列表 `||` 冲突），故意不合并：
+   词法只产出单个 '|'，由 parser 在相邻位置组合。 */
+TEST(LexerSymbolTest, LogicalOrIsNotMerged) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "||";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_symbol(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_SYMBOL);
+  EXPECT_EQ(p.offset - src, (ptrdiff_t)1);
+  delete_token(&tok);
   delete_allocator(&a);
 }
 

@@ -99,6 +99,33 @@ static node_t *read_shift_symbol(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 逻辑或 `||` 不在词法表中：它与空捕获列表 `||` 冲突，由 parser 在相邻
+   字符位置组合。返回运算符文本，否则 NULL。 */
+static const char *peek_lor_operator(parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  if (!token_is(first, CLUX_TOKEN_SYMBOL, "|")) {
+    return NULL;
+  }
+  /* 中间有空白/注释时第二个 token 是 trivia，不构成 `||`。 */
+  token_t *second = peek_token_at(parser, 1);
+  if (!token_is(second, CLUX_TOKEN_SYMBOL, "|")) {
+    return NULL;
+  }
+  return "||";
+}
+
+/* 消费相邻的两个 '|' token，产出一个跨越二者的 SYMBOL 节点。 */
+static node_t *read_lor_symbol(allocator_t *allocator, parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  location_t loc = *token_get_location(first);
+  parser_next(parser); /* 第一个 '|' */
+  loc.end = token_get_location(parser_peek_token(parser))->end;
+  parser_next(parser); /* 第二个 '|' */
+  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 加减运算符表：同一优先级。 */
 static const char *additive_operators[] = {"+", "-", NULL};
 
@@ -804,11 +831,8 @@ static bool is_func_type(parser_t *parser) {
   size_t start = parser_get_position(parser);
   token_t *token = parser_peek_token(parser);
   bool ok = false;
-  if (token_is(token, CLUX_TOKEN_SYMBOL, "||")) {
-    /* 空捕获列表是单个 token。 */
-    parser_next(parser);
-    parser_skip_trivia(parser);
-  } else if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+  /* 空捕获列表 `||` 是两个相邻的 '|'，skip_balanced 会立即闭合。 */
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
     if (!skip_balanced(parser, "|", "|")) {
       goto done;
     }
@@ -859,21 +883,25 @@ static node_t *read_func_type_capture(allocator_t *allocator,
   return node;
 }
 
-/* 捕获列表 |name: type, ...|（空列表写作 ||）。
-   调用前当前 token 必须是 '|' 或 '||'（由调用方保证）。 */
+/* 捕获列表 |name: type, ...|。空列表写作 `||`，即两个相邻的 '|'。
+   调用前当前 token 必须是 '|'（由调用方保证）。 */
 static node_t *read_func_type_captures(allocator_t *allocator,
                                        parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   location_t open_loc = *token_get_location(token);
-  bool empty = token_is(token, CLUX_TOKEN_SYMBOL, "||");
-  parser_next(parser); /* '|' 或 '||' */
+  parser_next(parser); /* 开头的 '|' */
   parser_skip_trivia(parser);
 
   node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURES);
   node_set_location_span(node, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
-  if (empty) {
+  /* 空捕获列表：紧跟闭合 '|'。 */
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(node, &open_loc, end_loc);
     return node;
   }
 
@@ -999,8 +1027,7 @@ static node_t *read_expr_func_type(allocator_t *allocator, parser_t *parser) {
   const location_t *end_loc = &keyword_loc;
 
   token = parser_peek_token(parser);
-  if (token_is(token, CLUX_TOKEN_SYMBOL, "|") ||
-      token_is(token, CLUX_TOKEN_SYMBOL, "||")) {
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
     node_t *captures = read_func_type_captures(allocator, parser);
     node_set_child(node, CLUX_EXPR_FUNC_TYPE_CAPTURES, captures);
     end_loc = node_get_location(captures);
@@ -1580,8 +1607,9 @@ node_t *parser_read_expr_or(allocator_t *allocator, parser_t *parser) {
   }
   size_t after_left = parser_get_position(parser);
   parser_skip_trivia(parser);
-  token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+  /* `||` 是两个相邻的 '|'，属于更高优先级的逻辑或层，这里不能吃掉第一个。 */
+  if (!token_is(parser_peek_token(parser), CLUX_TOKEN_SYMBOL, "|") ||
+      peek_lor_operator(parser)) {
     /* 不是位或：回退游标到左操作数之后，不吞掉后续 trivia。 */
     parser_set_position(parser, after_left);
     return left;
@@ -1661,8 +1689,7 @@ node_t *parser_read_expr_lor(allocator_t *allocator, parser_t *parser) {
   }
   size_t after_left = parser_get_position(parser);
   parser_skip_trivia(parser);
-  token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, "||")) {
+  if (!peek_lor_operator(parser)) {
     /* 不是逻辑或：回退游标到左操作数之后，不吞掉后续 trivia。 */
     parser_set_position(parser, after_left);
     return left;
@@ -1670,7 +1697,7 @@ node_t *parser_read_expr_lor(allocator_t *allocator, parser_t *parser) {
   node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
   node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
   node_set_child(expr, CLUX_EXPR_BINARY_LEFT, left);
-  node_t *symbol = parser_read_symbol(allocator, parser);
+  node_t *symbol = read_lor_symbol(allocator, parser);
   node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
   size_t after_symbol = parser_get_position(parser);
   node_set_location_span(
