@@ -42,6 +42,10 @@ enum _node_kind_t {
   /* 元组类型 <T, U, ...>；元素数量可变，可含 rest 表达式，也可为空。 */
   CLUX_NODE_EXPR_TUPLE,
   CLUX_NODE_EXPR_FUNC_TYPE,
+  /* 函数声明 / 函数定义 / 闭包（白皮书 §3.3）。是 func_type 的后退方案：
+     func_type 已确认不是类型时（形参括号后不是 '->'），首 token 为 func/cfunc
+     的构造必然是声明，任何不匹配都是硬错误。 */
+  CLUX_NODE_EXPR_FUNC_DECL,
   CLUX_NODE_FUNC_CAPTURES,
   CLUX_NODE_FUNC_CAPTURE,
   /* 形参列表，children 为 CLUX_NODE_FUNC_PARAM。 */

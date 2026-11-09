@@ -6628,41 +6628,41 @@ TEST(ExpressionFuncTypeTest, OnlyVariadicParameter) {
   delete_allocator(&a);
 }
 
-/* 没有 '->' 时不是函数类型：返回 NULL 且游标不动。 */
-TEST(ExpressionFuncTypeTest, NotFuncTypeWhenNoArrow) {
+/* 没有 '->' 时不是函数类型：回退到函数声明，按声明规则报错。 */
+TEST(ExpressionFuncTypeTest, NotFuncTypeFallsBackToDecl) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "func(x: i32)");
-  size_t before = parser_get_position(p);
   node_t *expr = parser_read_expr(a, p);
-  EXPECT_EQ(expr, nullptr);
-  EXPECT_EQ(parser_get_position(p), before);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
 
-/* 捕获列表未闭合：不构成函数类型，游标不动。 */
-TEST(ExpressionFuncTypeTest, UnclosedCapturesIsNotFuncType) {
+/* 捕获列表未闭合：不是函数类型，回退到函数声明后报错。 */
+TEST(ExpressionFuncTypeTest, UnclosedCapturesFallsBackToDecl) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "func |a: i32(i32) -> i32");
-  size_t before = parser_get_position(p);
   node_t *expr = parser_read_expr(a, p);
-  EXPECT_EQ(expr, nullptr);
-  EXPECT_EQ(parser_get_position(p), before);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
 
-/* 捕获列表之后缺形参列表：不构成函数类型，游标不动。 */
-TEST(ExpressionFuncTypeTest, MissingParamsAfterCapturesIsNotFuncType) {
+/* 捕获列表之后缺形参列表：不是函数类型，回退到函数声明后报错。 */
+TEST(ExpressionFuncTypeTest, MissingParamsAfterCapturesFallsBackToDecl) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "func |a: i32| -> i32");
-  size_t before = parser_get_position(p);
   node_t *expr = parser_read_expr(a, p);
-  EXPECT_EQ(expr, nullptr);
-  EXPECT_EQ(parser_get_position(p), before);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -6736,28 +6736,28 @@ TEST(ExpressionFuncTypeTest, BraceProtectsParenInParams) {
   delete_allocator(&a);
 }
 
-/* 未闭合的形参列表：不构成函数类型，游标不动。 */
-TEST(ExpressionFuncTypeTest, UnclosedParamsIsNotFuncType) {
+/* 未闭合的形参列表：不是函数类型，回退到函数声明后报错。 */
+TEST(ExpressionFuncTypeTest, UnclosedParamsFallsBackToDecl) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "func(i32 -> i32");
-  size_t before = parser_get_position(p);
   node_t *expr = parser_read_expr(a, p);
-  EXPECT_EQ(expr, nullptr);
-  EXPECT_EQ(parser_get_position(p), before);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
 
-/* 多余的闭合符号不会让深度回绕。 */
-TEST(ExpressionFuncTypeTest, ExtraCloseParenIsNotFuncType) {
+/* 多余的闭合符号不会让深度回绕；不是函数类型，回退到函数声明后报错。 */
+TEST(ExpressionFuncTypeTest, ExtraCloseParenFallsBackToDecl) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p = create_parser(a, "test.clux", "func()) -> i32");
-  size_t before = parser_get_position(p);
   node_t *expr = parser_read_expr(a, p);
-  EXPECT_EQ(expr, nullptr);
-  EXPECT_EQ(parser_get_position(p), before);
-  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -6918,6 +6918,597 @@ TEST(ExpressionFuncTypeTest, NoLeakOnFuncType) {
                            "func(,) -> i32",
                            "func(i32 str) -> i32",
                            "func(i32",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= 函数声明 / 函数定义 / 闭包 =================
+   func_decl 是 func_type 的后退方案：func_type 已确认不是类型时，
+   首 token 为 func/cfunc 的构造必然是声明，任何不匹配都是硬错误。
+   语法：func |captures| name[generics](params): ret {body} */
+
+/* 断言函数声明节点形状：关键字、形参列表、返回类型必存在。 */
+static node_t *expect_func_decl(node_t *expr, const char *keyword) {
+  if (!expr) {
+    ADD_FAILURE() << "expected function declaration node, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_FUNC_DECL_CHILDREN_SIZE);
+  node_t *kw = node_get_child(expr, CLUX_EXPR_FUNC_DECL_KEYWORD);
+  if (!kw) {
+    ADD_FAILURE() << "expected function keyword node";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(kw), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(kw)->end.offset -
+                node_get_location(kw)->begin.offset,
+            (ptrdiff_t)strlen(keyword));
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  if (!params) {
+    ADD_FAILURE() << "expected function parameter list";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(params), CLUX_NODE_FUNC_PARAMS);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_RETURN), nullptr);
+  return expr;
+}
+
+/* 断言形参列表里第 idx 个形参是 name: type。 */
+static void expect_named_param(node_t *params, size_t idx) {
+  node_t *param = node_get_child(params, idx);
+  ASSERT_NE(param, nullptr);
+  EXPECT_EQ(node_get_kind(param), CLUX_NODE_FUNC_PARAM);
+  EXPECT_NE(node_get_child(param, CLUX_FUNC_PARAM_NAME), nullptr);
+  EXPECT_NE(node_get_child(param, CLUX_FUNC_PARAM_TYPE), nullptr);
+  EXPECT_EQ(node_get_child(param, CLUX_FUNC_PARAM_DEFAULT), nullptr);
+}
+
+TEST(ExpressionFuncDeclTest, NamedDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "func foo(a: i32): bool { a; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_func_decl(expr, "func");
+  node_t *name = node_get_child(expr, CLUX_EXPR_FUNC_DECL_NAME);
+  ASSERT_NE(name, nullptr);
+  EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_IDENTIFIER);
+  expect_named_param(node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS), 0);
+  node_t *body = node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_GENERICS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 匿名函数值：没有名字。 */
+TEST(ExpressionFuncDeclTest, AnonymousDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func(x: i32): i32 { a; }");
+  expect_func_decl(expr, "func");
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_NAME), nullptr);
+  expect_named_param(node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS), 0);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionFuncDeclTest, NoParameters) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(): void {}");
+  expect_func_decl(expr, "func");
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(params)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionFuncDeclTest, MultipleParameters) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a: i32, b: str): bool {}");
+  expect_func_decl(expr, "func");
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  expect_named_param(params, 0);
+  expect_named_param(params, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 函数参数没有默认值：`=` 不被形参层消费，落到外层报错。 */
+TEST(ExpressionFuncDeclTest, ParameterDefaultValueIsRejected) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a: i32 = 10): void {}");
+  ASSERT_NE(expr, nullptr);
+  node_t *param =
+      node_get_child(node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS), 0);
+  ASSERT_NE(param, nullptr);
+  EXPECT_NE(node_get_child(param, CLUX_FUNC_PARAM_NAME), nullptr);
+  EXPECT_NE(node_get_child(param, CLUX_FUNC_PARAM_TYPE), nullptr);
+  EXPECT_EQ(node_get_child(param, CLUX_FUNC_PARAM_DEFAULT), nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 闭包的捕获列表允许默认值。 */
+TEST(ExpressionFuncDeclTest, CaptureDefaultValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func |(offset: i32 = 10)| f(): i32 { a; }");
+  expect_func_decl(expr, "func");
+  node_t *captures = node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  EXPECT_EQ(node_get_kind(captures), CLUX_NODE_FUNC_CAPTURES);
+  /* 捕获列表的唯一子节点是与形参列表同构的 FUNC_PARAMS。 */
+  ASSERT_EQ(vec_get_size(node_get_children(captures)), 1u);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(node_get_kind(params), CLUX_NODE_FUNC_PARAMS);
+  node_t *cap = node_get_child(params, 0);
+  ASSERT_NE(cap, nullptr);
+  EXPECT_EQ(node_get_kind(cap), CLUX_NODE_FUNC_PARAM);
+  EXPECT_NE(node_get_child(cap, CLUX_FUNC_PARAM_NAME), nullptr);
+  node_t *def = node_get_child(cap, CLUX_FUNC_PARAM_DEFAULT);
+  ASSERT_NE(def, nullptr);
+  EXPECT_EQ(node_get_kind(def), CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 空捕获列表 `||`。 */
+TEST(ExpressionFuncDeclTest, EmptyCaptures) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func || f(): void {}");
+  expect_func_decl(expr, "func");
+  node_t *captures = node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(captures)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型函数。 */
+TEST(ExpressionFuncDeclTest, GenericFunction) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func id[T](x: T): T { a; }");
+  expect_func_decl(expr, "func");
+  node_t *generics = node_get_child(expr, CLUX_EXPR_FUNC_DECL_GENERICS);
+  ASSERT_NE(generics, nullptr);
+  EXPECT_EQ(node_get_kind(generics), CLUX_NODE_GENERIC_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(generics)), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 捕获 + 名字 + 泛型 + 形参 + 返回类型 + 函数体。 */
+TEST(ExpressionFuncDeclTest, FullForm) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a, &p, "func |(o: i32 = 1)| map[T](x: T, y: i32): T { a; }");
+  expect_func_decl(expr, "func");
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_NAME), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_GENERICS), nullptr);
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(params)), 2u);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 参数包形参 `args: ...Args`。 */
+TEST(ExpressionFuncDeclTest, ParameterPack) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "func first[...Args](args: ...Args): void { a; }");
+  expect_func_decl(expr, "func");
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 1u);
+  node_t *param = node_get_child(params, 0);
+  ASSERT_NE(param, nullptr);
+  EXPECT_EQ(node_get_kind(param), CLUX_NODE_FUNC_PARAM);
+  node_t *type = node_get_child(param, CLUX_FUNC_PARAM_TYPE);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(node_get_kind(type), CLUX_NODE_EXPR_REST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* cfunc 在表达式上下文同样是定义，一样带函数体。 */
+TEST(ExpressionFuncDeclTest, CfuncDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc callback(x: i32): i32 { a; }");
+  expect_func_decl(expr, "cfunc");
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_NAME), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_GENERICS), nullptr);
+  node_t *body = node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* cfunc 缺函数体也按声明规则报错：语法层不区分 cfunc 的两种形态。 */
+TEST(ExpressionFuncDeclTest, CfuncWithoutBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc callback(x: i32): i32");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start function body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* cfunc 带捕获与泛型：语法层照常解析，限制留给语义检查。 */
+TEST(ExpressionFuncDeclTest, CfuncWithCapturesAndGenericsIsParsed) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc |(o: i32)| f[T](x: T): T { a; }");
+  expect_func_decl(expr, "cfunc");
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_CAPTURES), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_GENERICS), nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_FUNC_DECL_BODY), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型：编译期值参数、约束、默认值、多参数、参数包。 */
+TEST(ExpressionFuncDeclTest, GenericParameterForms) {
+  const char *sources[] = {"func f[T, U](x: T): T { a; }",
+                           "func f[N: comptime usize](x: i32): i32 { a; }",
+                           "func f[W extends IWriter[W]](w: *W): void { a; }",
+                           "func f[T = i32](): u64 { a; }",
+                           "func first[...Args](args: ...Args): void { a; }",
+                           "func f[](): void {}",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *expr = parse_postfix(a, &p, sources[i]);
+    expect_func_decl(expr, "func");
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << sources[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 无名字的 rest 形参 `...`（C FFI 变参）。 */
+TEST(ExpressionFuncDeclTest, BareRestParameter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc f(a: i32, ...): i32 { a; }");
+  expect_func_decl(expr, "cfunc");
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_DECL_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 1)), CLUX_NODE_EXPR_REST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+/* 形参缺名字。 */
+TEST(ExpressionFuncDeclTest, MissingParameterNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(: i32): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected parameter name in function");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 形参名后缺 ':'。 */
+TEST(ExpressionFuncDeclTest, MissingParameterColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a i32): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' after parameter name");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 形参缺类型。 */
+TEST(ExpressionFuncDeclTest, MissingParameterTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a:): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected parameter type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 形参之间缺分隔符。 */
+TEST(ExpressionFuncDeclTest, MissingParameterSeparatorReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a: i32 b: str): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ',' or ')' in parameters");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺形参列表。 */
+TEST(ExpressionFuncDeclTest, MissingParamsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f: void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' to start parameters");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺返回类型引导 ':'。 */
+TEST(ExpressionFuncDeclTest, MissingReturnColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f() void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' before return type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺返回类型。 */
+TEST(ExpressionFuncDeclTest, MissingReturnTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(): {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected return type after ':'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 缺函数体。 */
+TEST(ExpressionFuncDeclTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(): void");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start function body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 捕获列表缺 '('。 */
+TEST(ExpressionFuncDeclTest, MissingCaptureParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func |a: i32| f(): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after '|' in captures");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 捕获列表缺默认值。 */
+TEST(ExpressionFuncDeclTest, MissingCaptureDefaultReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func |(o: i32 =)| f(): i32 { a; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected capture default value");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 分隔符错误后直到 EOF 都没有闭合 ')'：容错循环安全退出。 */
+TEST(ExpressionFuncDeclTest, SeparatorErrorAtEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func f(a: i32 b");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 泛型参数错误路径。 */
+TEST(ExpressionFuncDeclTest, GenericErrorsReported) {
+  const char *sources[] = {"func f[1](): void {}",
+                           "func f[T(): void {}",
+                           "func f[N:](): void {}",
+                           "func f[W extends](): void {}",
+                           "func f[T =](): void {}",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    allocator_t *a = create_allocator(malloc, free);
+    parser_t *p;
+    node_t *expr = parse_postfix(a, &p, sources[i]);
+    ASSERT_NE(expr, nullptr);
+    EXPECT_GE(vec_get_size(parser_get_error(p)), 1u) << "src=" << sources[i];
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+  }
+}
+
+/* 捕获列表缺闭合 '|'。 */
+TEST(ExpressionFuncDeclTest, UnclosedCapturesReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func |(o: i32) f(): void {}");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '|' to close captures");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 func 关键字到函数体终点。 */
+TEST(ExpressionFuncDeclTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "func f(): void {}";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_func_decl(expr, "func");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 匿名函数没有名字，区间止于函数体。 */
+TEST(ExpressionFuncDeclTest, AnonymousSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "func(x: i32): i32 { a; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_func_decl(expr, "func");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionFuncDeclTest, NoLeakOnFuncDecl) {
+  const char *sources[] = {"func foo(a: i32): bool { a; }",
+                           "func(x: i32): i32 { a; }",
+                           "func f(): void {}",
+                           "func f(a: i32, b: str): bool {}",
+                           "func f(a: i32 = 10): void {}",
+                           "func |(offset: i32 = 10)| f(): i32 { a; }",
+                           "func || f(): void {}",
+                           "func id[T](x: T): T { a; }",
+                           "func |(o: i32 = 1)| map[T](x: T, y: i32): T { a; }",
+                           "func first[...Args](args: ...Args): void { a; }",
+                           "cfunc callback(x: i32): i32 { a; }",
+                           "cfunc callback(x: i32): i32",
+                           "cfunc |(o: i32)| f[T](x: T): T { a; }",
+                           "func f(: i32): void {}",
+                           "func f(a i32): void {}",
+                           "func f(a:): void {}",
+                           "func f(a: i32 b: str): void {}",
+                           "func f: void {}",
+                           "func f() void {}",
+                           "func f(): {}",
+                           "func f(): void",
+                           "func |a: i32| f(): void {}",
+                           "func |(o: i32 =)| f(): i32 { a; }",
+                           "func",
+                           "func f",
+                           "cfunc f(a: i32, ...): i32 { a; }",
+                           "func f[T, U](x: T): T { a; }",
+                           "func f[N: comptime usize](x: i32): i32 { a; }",
+                           "func f[W extends IWriter[W]](w: *W): void { a; }",
+                           "func f[T = i32](): u64 { a; }",
+                           "func f[](): void {}",
+                           "func f[1](): void {}",
+                           "func f[T(): void {}",
+                           "func f[N:](): void {}",
+                           "func f[W extends](): void {}",
+                           "func f[T =](): void {}",
+                           "func |(o: i32) f(): void {}",
+                           "func f(a: i32 b",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;
