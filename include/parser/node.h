@@ -82,6 +82,11 @@ enum _node_kind_t {
   /* 函数语句 <decorator>* <func_decl>（白皮书 §3.3）。
      FUNC_DECL 槽存函数声明节点，其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_FUNC,
+
+  /* 变量定义语句 <decorator>* (var|using) name [: type]? = expr;
+     （白皮书 §4.1、§4.12.1）。KEYWORD 区分 var 与 using，
+     TYPE 可缺失（由初值推断），其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_VAR,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

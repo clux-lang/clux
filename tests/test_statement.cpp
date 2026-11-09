@@ -848,6 +848,346 @@ TEST(StmtFuncTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
+/* ================= 变量定义语句 =================
+   语法：<decorator>* (var|using) name [: type]? = expr; */
+
+/* 断言变量语句节点：KEYWORD / NAME / VALUE 必有，TYPE 按需。 */
+static node_t *expect_var_stmt(node_t *node,
+                               const char *keyword,
+                               bool has_type,
+                               size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected variable statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_VAR_FIRST_DECORATOR + decorator_count);
+  node_t *kw = node_get_child(node, CLUX_STMT_VAR_KEYWORD);
+  if (!kw) {
+    ADD_FAILURE() << "expected variable keyword";
+    return node;
+  }
+  EXPECT_EQ(node_get_kind(kw), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(kw)->end.offset -
+                node_get_location(kw)->begin.offset,
+            (ptrdiff_t)strlen(keyword));
+  EXPECT_NE(node_get_child(node, CLUX_STMT_VAR_NAME), nullptr);
+  node_t *type = node_get_child(node, CLUX_STMT_VAR_TYPE);
+  if (has_type) {
+    EXPECT_NE(type, nullptr);
+  } else {
+    EXPECT_EQ(type, nullptr);
+  }
+  EXPECT_NE(node_get_child(node, CLUX_STMT_VAR_VALUE), nullptr);
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator = node_get_child(node, CLUX_STMT_VAR_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return node;
+}
+
+TEST(StmtVarTest, WithoutType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var y = 2;");
+  expect_var_stmt(node, "var", false, 0);
+  node_t *name = node_get_child(node, CLUX_STMT_VAR_NAME);
+  EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_VAR_VALUE)),
+            CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, WithType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x: i32 = 1;");
+  expect_var_stmt(node, "var", true, 0);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_VAR_TYPE)),
+            CLUX_NODE_LITERAL_TYPE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 类型只取后缀层：`var x: *i32 = p;` 的 `*i32` 是类型，`=` 不被吃掉。 */
+TEST(StmtVarTest, PointerType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x: *i32 = p;");
+  expect_var_stmt(node, "var", true, 0);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_VAR_TYPE)),
+            CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 初值走顶层入口：赋值、三元都允许。 */
+TEST(StmtVarTest, ComplexInitializer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x = a ? b : c;");
+  expect_var_stmt(node, "var", false, 0);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_VAR_VALUE)),
+            CLUX_NODE_EXPR_TERNARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, UsingWithoutType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "using a = expr;");
+  expect_var_stmt(node, "using", false, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, UsingWithType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "using b: T = expr;");
+  expect_var_stmt(node, "using", true, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] var x = 1;");
+  expect_var_stmt(node, "var", false, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] [[metadata(\"k\", 1)]] using a = e;");
+  expect_var_stmt(node, "using", false, 2);
+  node_t *first = node_get_child(node, CLUX_STMT_VAR_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_VAR_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器内部含方括号时，分派仍能正确找到 var/using 关键字。 */
+TEST(StmtVarTest, DecoratorWithSubscriptDispatchesVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[a[b]]] var x = 1;");
+  expect_var_stmt(node, "var", false, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器引导函数语句时仍走函数语句。 */
+TEST(StmtVarTest, DecoratorBeforeFuncStillDispatchesFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] func f(): void {}");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 块内可以混入变量语句。 */
+TEST(StmtVarTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ var x = 1; using y = e; }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_VAR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_VAR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器/关键字起点到 ';'。 */
+TEST(StmtVarTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] var x: i32 = 1;";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_var_stmt(node, "var", true, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtVarTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var = 1;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected variable name in variable statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, MissingTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x: = 1;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected type after ':'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, MissingEqualsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x: i32 1;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '=' before initializer");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, MissingInitializerReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x = ;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected initializer expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "var x = 1");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after variable statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后既不是 var/using 也不是 func/cfunc。 */
+TEST(StmtVarTest, DecoratorFollowedByNonDeclarationReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] a;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器未闭合（EOF）：分派扫描安全退出，按函数语句报错。 */
+TEST(StmtVarTest, UnclosedDecoratorAtEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace");
+  ASSERT_NE(node, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 只有装饰器、其后是 EOF：分派扫描安全退出。 */
+TEST(StmtVarTest, DecoratorsThenEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]]");
+  ASSERT_NE(node, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 直接调用 var 入口且装饰器后不是 var/using：报错。 */
+TEST(StmtVarTest, DecoratorFollowedByNonVarReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_var(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'var' or 'using' in variable statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, ReturnsNullOnNonVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtTest, NoLeakOnStatements) {
   const char *sources[] = {
       "{}",
