@@ -3,7 +3,9 @@
 #include "core/error.h"
 #include "core/location.h"
 #include "core/position.h"
+#include "parser/decorator.h"
 #include "parser/expression.h"
+#include "parser/expression_internal.h"
 #include "parser/lexer.h"
 #include "parser/node.h"
 #include "parser/parser.h"
@@ -194,9 +196,65 @@ node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser) {
   return read_jump_stmt(allocator, parser, "continue", CLUX_NODE_STMT_CONTINUE);
 }
 
+/* 当前 token 是否开启一个装饰器（`[[` 两个相邻的 '['）。 */
+static bool peek_decorator(parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  if (!token_is(first, CLUX_TOKEN_SYMBOL, "[")) {
+    return false;
+  }
+  return token_is(peek_token_at(parser, 1), CLUX_TOKEN_SYMBOL, "[");
+}
+
+/* 函数语句 <decorator>* <func_decl>（白皮书 §3.3）。
+   调用前当前 token 不一定是装饰器或 func/cfunc，不是时返回 NULL 且游标不动。
+   本阶段不做名字检查；装饰器按源码顺序挂在函数声明之后。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
+      !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_node(allocator, CLUX_NODE_STMT_FUNC);
+  node_resize_children(node, CLUX_STMT_FUNC_FIRST_DECORATOR);
+  node_set_location(node, &begin_loc);
+
+  /* 装饰器：0 个或多个。peek_decorator 已确认 `[[` 存在，必然解析成功。 */
+  while (peek_decorator(parser)) {
+    node_add_child(node, parser_read_decorator(allocator, parser));
+    parser_skip_trivia(parser);
+  }
+
+  /* 函数声明。 */
+  node_t *func_decl = parser_read_expr_func_decl(allocator, parser);
+  if (!func_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected function declaration in function statement"));
+    return node;
+  }
+  node_set_child(node, CLUX_STMT_FUNC_FUNC_DECL, func_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(func_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 语句分派。调用方负责清理前导 trivia。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_func(allocator, parser);
   if (node) {
     return node;
   }

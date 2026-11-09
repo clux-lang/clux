@@ -19,6 +19,13 @@ node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
 
+/* 函数语句 <decorator>* <func_decl>（白皮书 §3.3）。
+   FUNC_DECL 槽存函数声明；其后按源码顺序为装饰器，数量可变，
+   因此 children 长度 = CLUX_STMT_FUNC_FIRST_DECORATOR + 装饰器个数。 */
+#define CLUX_STMT_FUNC_FUNC_DECL 0
+#define CLUX_STMT_FUNC_FIRST_DECORATOR 1
+node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
+
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }

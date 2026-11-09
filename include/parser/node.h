@@ -78,6 +78,10 @@ enum _node_kind_t {
      不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，
      作为它们的子节点挂载。 */
   CLUX_NODE_DECORATOR,
+
+  /* 函数语句 <decorator>* <func_decl>（白皮书 §3.3）。
+     FUNC_DECL 槽存函数声明节点，其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_FUNC,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

@@ -3,6 +3,7 @@
 #include "core/error.h"
 #include "core/location.h"
 #include "core/vec.h"
+#include "parser/decorator.h"
 #include "parser/expression.h"
 #include "parser/node.h"
 #include "parser/parser.h"
@@ -672,35 +673,221 @@ TEST(StmtDispatchTest, MixedStatementsInBlock) {
   delete_allocator(&a);
 }
 
+/* ================= 函数语句 =================
+   语法：<decorator>* <func_decl>。本阶段不做名字检查。 */
+
+/* 断言函数语句节点：FUNC_DECL 槽存在，装饰器个数符合预期。 */
+static node_t *expect_func_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected function statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_FUNC_FIRST_DECORATOR + decorator_count);
+  node_t *func_decl = node_get_child(node, CLUX_STMT_FUNC_FUNC_DECL);
+  EXPECT_NE(func_decl, nullptr);
+  if (func_decl) {
+    EXPECT_EQ(node_get_kind(func_decl), CLUX_NODE_EXPR_FUNC_DECL);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_FUNC_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return func_decl;
+}
+
+TEST(StmtFuncTest, WithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "func f(): void {}");
+  expect_func_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] func f(): void {}");
+  expect_func_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a, &p, "[[trace]] [[metadata(\"role\", \"handler\")]] func f(): void {}");
+  expect_func_stmt(node, 2);
+  /* 第一个装饰器的表达式是标识符 trace，第二个是调用。 */
+  node_t *first = node_get_child(node, CLUX_STMT_FUNC_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_FUNC_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* cfunc 同样构成函数语句。 */
+TEST(StmtFuncTest, Cfunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "cfunc callback(x: i32): i32 { a; }");
+  expect_func_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 匿名函数声明也走函数语句。 */
+TEST(StmtFuncTest, Anonymous) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "func(x: i32): i32 { a; }");
+  expect_func_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 带捕获与泛型。 */
+TEST(StmtFuncTest, CapturesAndGenerics) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] func |(o: i32 = 1)| map[T](x: T): T { a; }");
+  expect_func_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 块内可以混入函数语句。 */
+TEST(StmtFuncTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; func f(): void {} }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器起点到函数声明终点。 */
+TEST(StmtFuncTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] func f(): void {}";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_func_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后缺函数声明。 */
+TEST(StmtFuncTest, MissingFuncDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] a;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FUNC_FUNC_DECL), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected function declaration in function statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非装饰器、非 func/cfunc 起始时返回 NULL 且游标不动。 */
+TEST(StmtFuncTest, ReturnsNullOnNonFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_func(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, ReturnsNullOnSingleBracket) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[trace] func f(): void {}");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_func(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtTest, NoLeakOnStatements) {
-  const char *sources[] = {"{}",
-                           "{ a; }",
-                           "{ a; b; c; }",
-                           "{ { a; } b; }",
-                           "{ /* c */ a; // x\n b; }",
-                           "a;",
-                           "x = 1;",
-                           "f(a);",
-                           "{ a;",
-                           "{",
-                           "{ ; a; }",
-                           "{ ; ; a; }",
-                           "a",
-                           "a b",
-                           ";",
-                           "}",
-                           "return;",
-                           "return x;",
-                           "return a + b;",
-                           "return x",
-                           "return }",
-                           "break;",
-                           "continue;",
-                           "break",
-                           "continue",
-                           "{ a; break; continue; return 1; }",
-                           "",
-                           nullptr};
+  const char *sources[] = {
+      "{}",
+      "{ a; }",
+      "{ a; b; c; }",
+      "{ { a; } b; }",
+      "{ /* c */ a; // x\n b; }",
+      "a;",
+      "x = 1;",
+      "f(a);",
+      "{ a;",
+      "{",
+      "{ ; a; }",
+      "{ ; ; a; }",
+      "a",
+      "a b",
+      ";",
+      "}",
+      "return;",
+      "return x;",
+      "return a + b;",
+      "return x",
+      "return }",
+      "break;",
+      "continue;",
+      "break",
+      "continue",
+      "{ a; break; continue; return 1; }",
+      "func f(): void {}",
+      "[[trace]] func f(): void {}",
+      "[[trace]] [[metadata(\"role\", \"handler\")]] func f(): void {}",
+      "cfunc callback(x: i32): i32 { a; }",
+      "func(x: i32): i32 { a; }",
+      "[[trace]] func |(o: i32 = 1)| map[T](x: T): T { a; }",
+      "{ a; func f(): void {} }",
+      "[[trace]] a;",
+      "[trace] func f(): void {}",
+      "[[trace]] func f(): void",
+      "",
+      nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;
     g_free_count = 0;
