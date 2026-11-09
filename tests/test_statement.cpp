@@ -426,6 +426,252 @@ TEST(StmtDispatchTest, ParsesStatementsSequentially) {
 
 /* ================= 泄漏检查 ================= */
 
+/* ================= return ================= */
+
+/* 断言 return 节点：无返回值时 VALUE 为 NULL。 */
+static void expect_return_stmt(node_t *node, bool has_value) {
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_RETURN);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_RETURN_CHILDREN_SIZE);
+  node_t *value = node_get_child(node, CLUX_STMT_RETURN_VALUE);
+  if (has_value) {
+    EXPECT_NE(value, nullptr);
+  } else {
+    EXPECT_EQ(value, nullptr);
+  }
+}
+
+TEST(StmtReturnTest, EmptyReturn) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return;");
+  expect_return_stmt(node, false);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, ReturnExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return x + 1;");
+  expect_return_stmt(node, true);
+  node_t *value = node_get_child(node, CLUX_STMT_RETURN_VALUE);
+  EXPECT_EQ(node_get_kind(value), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 返回表达式走顶层入口：赋值、三元等整条链都允许。 */
+TEST(StmtReturnTest, ReturnAssignmentExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return x = 1;");
+  expect_return_stmt(node, true);
+  EXPECT_EQ(node_get_kind(node_get_child(node, CLUX_STMT_RETURN_VALUE)),
+            CLUX_NODE_EXPR_ASSIGN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, SpanWithoutValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "return;";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_return_stmt(node, false);
+  expect_location_span(node, src, "return;");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, SpanWithValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "return a + b;";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_return_stmt(node, true);
+  expect_location_span(node, src, "return a + b;");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, ReturnsNullOnNonReturn) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "break;");
+  node_t *node = parser_read_stmt_return(a, p);
+  EXPECT_EQ(node, nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return x");
+  expect_return_stmt(node, true);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after return statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReturnTest, MissingExpressionReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return }");
+  expect_return_stmt(node, false);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression after 'return'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ================= break / continue ================= */
+
+TEST(StmtJumpTest, Break) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "break;";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BREAK);
+  EXPECT_EQ(vec_get_size(node_get_children(node)), 0u);
+  expect_location_span(node, src, "break;");
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtJumpTest, Continue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "continue;";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_CONTINUE);
+  EXPECT_EQ(vec_get_size(node_get_children(node)), 0u);
+  expect_location_span(node, src, "continue;");
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtJumpTest, BreakReturnsNullOnNonBreak) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "continue;");
+  node_t *node = parser_read_stmt_break(a, p);
+  EXPECT_EQ(node, nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtJumpTest, ContinueReturnsNullOnNonContinue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "break;");
+  node_t *node = parser_read_stmt_continue(a, p);
+  EXPECT_EQ(node, nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtJumpTest, BreakMissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "break");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BREAK);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after 'break'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtJumpTest, ContinueMissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "continue");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_CONTINUE);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after 'continue'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ================= 分派 ================= */
+
+TEST(StmtDispatchTest, DispatchesReturn) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "return;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_RETURN);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesBreak) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "break;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BREAK);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesContinue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "continue;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_CONTINUE);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 块内混合各类语句。 */
+TEST(StmtDispatchTest, MixedStatementsInBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; break; continue; return 1; }");
+  expect_block(node, 4);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_BREAK);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 2)), CLUX_NODE_STMT_CONTINUE);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 3)), CLUX_NODE_STMT_RETURN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtTest, NoLeakOnStatements) {
   const char *sources[] = {"{}",
                            "{ a; }",
@@ -443,6 +689,16 @@ TEST(StmtTest, NoLeakOnStatements) {
                            "a b",
                            ";",
                            "}",
+                           "return;",
+                           "return x;",
+                           "return a + b;",
+                           "return x",
+                           "return }",
+                           "break;",
+                           "continue;",
+                           "break",
+                           "continue",
+                           "{ a; break; continue; return 1; }",
                            "",
                            nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

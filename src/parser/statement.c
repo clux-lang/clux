@@ -104,9 +104,111 @@ node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser) {
   return stmt;
 }
 
+/* return; / return expr;（白皮书 §4.11）。
+   调用前当前 token 不一定是 return，不是时返回 NULL 且游标不动。
+   空返回值与带返回值都合法，返回表达式必须能转换为声明返回类型，
+   该检查属于语义阶段。出错时按容错约定返回不完整节点并 push_error。 */
+node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "return")) {
+    return NULL;
+  }
+  location_t keyword_loc = *token_get_location(token);
+  parser_next(parser); /* return */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_node(allocator, CLUX_NODE_STMT_RETURN);
+  node_resize_children(node, CLUX_STMT_RETURN_CHILDREN_SIZE);
+  node_set_location(node, &keyword_loc);
+
+  token = parser_peek_token(parser);
+  location_t loc = keyword_loc;
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+    /* return; */
+    loc.end = token_get_location(token)->end;
+    parser_next(parser);
+  } else {
+    node_t *value = parser_read_expr(allocator, parser);
+    if (!value) {
+      location_t err = stmt_error_location(parser, &keyword_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &err, "expected expression after 'return'"));
+      return node;
+    }
+    node_set_child(node, CLUX_STMT_RETURN_VALUE, value);
+    loc.end = node_get_location(value)->end;
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+      loc.end = token_get_location(token)->end;
+      parser_next(parser);
+    } else {
+      location_t err = stmt_error_location(parser, node_get_location(value));
+      parser_push_error(
+          parser,
+          create_error(allocator, &err, "expected ';' after return statement"));
+    }
+  }
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* break; / continue;（白皮书 §4.10）。两者语法相同，只有节点类型不同。
+   只作用于当前最近一层循环，该约束属于语义阶段。
+   调用前当前 token 不一定是 keyword，不是时返回 NULL 且游标不动。 */
+static node_t *read_jump_stmt(allocator_t *allocator,
+                              parser_t *parser,
+                              const char *keyword,
+                              node_kind_t kind) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, keyword)) {
+    return NULL;
+  }
+  location_t loc = *token_get_location(token);
+  parser_next(parser); /* break / continue */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_node(allocator, kind);
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+    loc.end = token_get_location(token)->end;
+    parser_next(parser);
+  } else {
+    location_t err = stmt_error_location(parser, &loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &err, "expected ';' after '%s'", keyword));
+  }
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
+node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser) {
+  return read_jump_stmt(allocator, parser, "break", CLUX_NODE_STMT_BREAK);
+}
+
+node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser) {
+  return read_jump_stmt(allocator, parser, "continue", CLUX_NODE_STMT_CONTINUE);
+}
+
 /* 语句分派。调用方负责清理前导 trivia。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_return(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_break(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_continue(allocator, parser);
   if (node) {
     return node;
   }

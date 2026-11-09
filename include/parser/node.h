@@ -68,6 +68,11 @@ enum _node_kind_t {
 
   CLUX_NODE_STMT_BLOCK,
   CLUX_NODE_STMT_EXPR,
+  /* return; / return expr; —— VALUE 槽在无返回值时为 NULL。 */
+  CLUX_NODE_STMT_RETURN,
+  /* break; / continue; —— 无子节点。 */
+  CLUX_NODE_STMT_BREAK,
+  CLUX_NODE_STMT_CONTINUE,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
