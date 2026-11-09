@@ -1,11 +1,12 @@
 #include "parser/expression.h"
+#include "core/allocator.h"
 #include "core/error.h"
 #include "core/location.h"
+#include "core/position.h"
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
 #include "parser/parser.h"
-#include "parser/function.h"
 
 /* 用首尾子节点的位置拼出表达式自身的区间：起点取 begin->begin，
    终点取 end->end。子节点位置本身不含前后 trivia，因此表达式区间
@@ -231,7 +232,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
         parser,
         create_error(allocator, &loc, "expected expression in subscript"));
   } else {
-    vec_push(node_get_children(expr), first);
+    node_add_child(expr, first);
     end_loc = node_get_location(first);
   }
   for (;;) {
@@ -249,7 +250,7 @@ read_bracket_suffix(allocator_t *allocator, parser_t *parser, node_t *base) {
           create_error(allocator, &loc, "expected expression after ','"));
       break;
     }
-    vec_push(node_get_children(expr), arg);
+    node_add_child(expr, arg);
     end_loc = node_get_location(arg);
     parser_skip_trivia(parser);
   }
@@ -301,7 +302,7 @@ read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
           parser, create_error(allocator, &loc, "expected expression in call"));
       break;
     }
-    vec_push(node_get_children(expr), arg);
+    node_add_child(expr, arg);
     end_loc = node_get_location(arg);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -391,7 +392,7 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
           create_error(allocator, &loc, "expected expression in construct"));
       break;
     }
-    vec_push(node_get_children(expr), elem);
+    node_add_child(expr, elem);
     end_loc = node_get_location(elem);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -685,7 +686,7 @@ static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
           create_error(allocator, &loc, "expected expression in tuple type"));
       break;
     }
-    vec_push(node_get_children(expr), elem);
+    node_add_child(expr, elem);
     end_loc = node_get_location(elem);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -747,6 +748,288 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
   return expr;
 }
 
+/* 跳过一段由 open/close 包围的内容（含两端）。期间嵌套的 ()/[]/{} 计入深度，
+   避免提前闭合。花括号必须计数：未来 struct 等内联类型可以带块，而块内的
+   attribute 初始化可能出现与 close 相同的字符（如捕获列表的 '|'）。
+   ')' / ']' / '}' 在正确语法下必然与同类的开符号平衡，因此共用一个深度计数；
+   出现多余的闭符号时计数变负，最终在 EOF 处返回 false。
+   当前 token 不是 open 时返回 false 且游标不动。 */
+static bool
+skip_balanced(parser_t *parser, const char *open, const char *close) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, open)) {
+    return false;
+  }
+  parser_next(parser); /* open */
+  parser_skip_trivia(parser);
+  /* 圆/方括号与花括号分开计数：块内可能出现与 close 相同的字符
+     （捕获列表的 '|'），花括号自身必须独立成对。 */
+  int level = 0;
+  int braces = 0;
+  for (;;) {
+    token = parser_peek_token(parser);
+    if (!token) {
+      return false;
+    }
+    if (token_get_kind(token) == CLUX_TOKEN_SYMBOL) {
+      if (level == 0 && braces == 0 &&
+          token_is(token, CLUX_TOKEN_SYMBOL, close)) {
+        parser_next(parser); /* close */
+        parser_skip_trivia(parser);
+        return true;
+      }
+      /* 花括号内的内容整体跳过：块里可能有任意符号，不参与圆/方括号计数。 */
+      if (token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
+        braces++;
+      } else if (token_is(token, CLUX_TOKEN_SYMBOL, "}")) {
+        braces--;
+      } else if (braces == 0) {
+        if (token_is(token, CLUX_TOKEN_SYMBOL, "(") ||
+            token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
+          level++;
+        } else if (token_is(token, CLUX_TOKEN_SYMBOL, ")") ||
+                   token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+          level--;
+        }
+      }
+    }
+    parser_next(parser);
+    parser_skip_trivia(parser);
+  }
+}
+
+/* 判断从当前位置起是否构成函数类型：可选捕获列表 |...|，随后 (params)，
+   最后必须是 '->'。只扫描不消费，结束后恢复游标。 */
+static bool is_func_type(parser_t *parser) {
+  size_t start = parser_get_position(parser);
+  token_t *token = parser_peek_token(parser);
+  bool ok = false;
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "||")) {
+    /* 空捕获列表是单个 token。 */
+    parser_next(parser);
+    parser_skip_trivia(parser);
+  } else if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+    if (!skip_balanced(parser, "|", "|")) {
+      goto done;
+    }
+  }
+  if (!skip_balanced(parser, "(", ")")) {
+    goto done;
+  }
+  token = parser_peek_token(parser);
+  ok = token_is(token, CLUX_TOKEN_SYMBOL, "->");
+done:
+  parser_set_position(parser, start);
+  return ok;
+}
+
+/* 单个捕获项 name: type。捕获项必须有名字与类型。 */
+static node_t *read_func_type_capture(allocator_t *allocator,
+                                      parser_t *parser) {
+  node_t *id = parser_read_literal_identifier(allocator, parser);
+  if (!id) {
+    return NULL;
+  }
+  location_t begin_loc = *node_get_location(id);
+  node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURE);
+  node_resize_children(node, CLUX_FUNC_CAPTURE_CHILDREN_SIZE);
+  node_set_child(node, CLUX_FUNC_CAPTURE_NAME, id);
+  node_set_location_span(node, &begin_loc, &begin_loc);
+
+  parser_skip_trivia(parser);
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
+    location_t loc = expression_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ':' after capture name"));
+    return node;
+  }
+  parser_next(parser); /* ':' */
+  parser_skip_trivia(parser);
+  node_t *type = parser_read_expr_postfix(allocator, parser);
+  if (!type) {
+    location_t loc = expression_error_location(parser, &begin_loc);
+    parser_push_error(parser,
+                      create_error(allocator, &loc, "expected capture type"));
+    return node;
+  }
+  node_set_child(node, CLUX_FUNC_CAPTURE_TYPE, type);
+  node_set_location_span(node, &begin_loc, node_get_location(type));
+  return node;
+}
+
+/* 捕获列表 |name: type, ...|（空列表写作 ||）。
+   调用前当前 token 必须是 '|' 或 '||'（由调用方保证）。 */
+static node_t *read_func_type_captures(allocator_t *allocator,
+                                       parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  location_t open_loc = *token_get_location(token);
+  bool empty = token_is(token, CLUX_TOKEN_SYMBOL, "||");
+  parser_next(parser); /* '|' 或 '||' */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURES);
+  node_set_location_span(node, &open_loc, &open_loc);
+  const location_t *end_loc = &open_loc;
+
+  if (empty) {
+    return node;
+  }
+
+  for (;;) {
+    node_t *capture = read_func_type_capture(allocator, parser);
+    if (!capture) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected capture in captures"));
+      break;
+    }
+    node_add_child(node, capture);
+    end_loc = node_get_location(capture);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+      end_loc = token_get_location(token);
+      parser_next(parser);
+      break;
+    }
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      parser_next(parser);
+      parser_skip_trivia(parser);
+      continue;
+    }
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ',' or '|' in captures"));
+    /* 容错：跳到闭合 '|'，让后续形参列表仍能解析。
+       is_func_type 已确认闭合 '|' 存在，因此这里必然能找到。 */
+    for (;;) {
+      token = parser_peek_token(parser);
+      if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
+        break;
+      }
+      parser_next(parser);
+    }
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    break;
+  }
+  node_set_location_span(node, &open_loc, end_loc);
+  return node;
+}
+
+/* 函数类型的形参列表 ( type, ... )。形参是裸类型表达式，不是 FUNC_PARAM。
+   调用前当前 token 必须是 '('（由 is_func_type 保证）。 */
+static node_t *read_func_type_params(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  location_t open_loc = *token_get_location(token);
+  parser_next(parser); /* '(' */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_node(allocator, CLUX_NODE_FUNC_PARAMS);
+  node_set_location_span(node, &open_loc, &open_loc);
+  const location_t *end_loc = &open_loc;
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(node, &open_loc, end_loc);
+    return node;
+  }
+
+  for (;;) {
+    node_t *param = parser_read_expr_postfix(allocator, parser);
+    if (!param) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(
+          parser,
+          create_error(allocator, &loc, "expected parameter type in function"));
+      break;
+    }
+    node_add_child(node, param);
+    end_loc = node_get_location(param);
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ")")) {
+      end_loc = token_get_location(token);
+      parser_next(parser);
+      break;
+    }
+    if (token_is(token, CLUX_TOKEN_SYMBOL, ",")) {
+      parser_next(parser);
+      parser_skip_trivia(parser);
+      continue;
+    }
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected ',' or ')' in parameters"));
+    break;
+  }
+  node_set_location_span(node, &open_loc, end_loc);
+  return node;
+}
+
+/* 函数类型 func |captures|(params) -> ret（白皮书 §2.7）。
+   不是前导可判定的：只有扫描到形参列表之后的 '->' 才确认是函数类型，
+   否则返回 NULL 且游标不动（留给函数定义等其它构造）。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+static node_t *read_expr_func_type(allocator_t *allocator, parser_t *parser) {
+  size_t start = parser_get_position(parser);
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
+      !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
+    return NULL;
+  }
+  location_t keyword_loc = *token_get_location(token);
+  parser_next(parser); /* func / cfunc */
+  parser_skip_trivia(parser);
+  if (!is_func_type(parser)) {
+    parser_set_position(parser, start);
+    return NULL;
+  }
+
+  node_t *node = create_node(allocator, CLUX_NODE_EXPR_FUNC_TYPE);
+  node_resize_children(node, CLUX_EXPR_FUNC_TYPE_CHILDREN_SIZE);
+  node_set_location_span(node, &keyword_loc, &keyword_loc);
+  const location_t *end_loc = &keyword_loc;
+
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_SYMBOL, "|") ||
+      token_is(token, CLUX_TOKEN_SYMBOL, "||")) {
+    node_t *captures = read_func_type_captures(allocator, parser);
+    node_set_child(node, CLUX_EXPR_FUNC_TYPE_CAPTURES, captures);
+    end_loc = node_get_location(captures);
+    node_set_location_span(node, &keyword_loc, end_loc);
+    parser_skip_trivia(parser);
+  }
+
+  /* is_func_type 已确认形参列表与 '->' 存在，这里不再重复校验。 */
+  node_t *params = read_func_type_params(allocator, parser);
+  node_set_child(node, CLUX_EXPR_FUNC_TYPE_PARAMS, params);
+  end_loc = node_get_location(params);
+  node_set_location_span(node, &keyword_loc, end_loc);
+
+  parser_skip_trivia(parser);
+  parser_next(parser); /* '->' */
+  parser_skip_trivia(parser);
+  node_t *ret = parser_read_expr_postfix(allocator, parser);
+  if (!ret) {
+    location_t loc = expression_error_location(parser, end_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator, &loc, "expected return type after '->'"));
+    return node;
+  }
+  node_set_child(node, CLUX_EXPR_FUNC_TYPE_RETURN, ret);
+  node_set_location_span(node, &keyword_loc, node_get_location(ret));
+  return node;
+}
+
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
    目前有构造、括号、指针类型、类型修饰、切片类型、数组类型、元组类型、
    optional 类型、函数与 literal 十个来源，后续陆续加入同级运算符。 */
@@ -783,7 +1066,7 @@ node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
-  node = parser_read_expr_func(allocator, parser);
+  node = read_expr_func_type(allocator, parser);
   if (node) {
     return node;
   }

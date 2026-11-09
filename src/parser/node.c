@@ -50,12 +50,17 @@ void node_resize_children(node_t *self, size_t size) {
   vec_resize(self->children, size);
 }
 node_t *node_set_child(node_t *self, size_t idx, node_t *child) {
+  /* 槽位允许为空（如切片省略某端、匿名构造无类型），空槽不建立父子关系。 */
+  if (child) {
+    child->parent = self;
+  }
   return (node_t *)vec_set(self->children, idx, child);
 }
 node_t *node_get_child(node_t *self, size_t idx) {
   return (node_t *)vec_get(self->children, idx);
 }
 void node_add_child(node_t *self, node_t *child) {
+  child->parent = self;
   vec_push(self->children, child);
 }
 node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser) {

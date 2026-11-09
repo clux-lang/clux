@@ -1,7 +1,6 @@
 #ifndef _H_PARSER_EXPR_
 #define _H_PARSER_EXPR_
 #include "core/allocator.h"
-#include "parser/function.h"
 #include "parser/node.h"
 #include "parser/parser.h"
 #ifdef __cplusplus
@@ -70,6 +69,22 @@ node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser);
    语法阶段类型就是普通表达式，按后缀层解析；元素可以是 rest 表达式。 */
 #define CLUX_EXPR_CONSTRUCT_TYPE 0
 #define CLUX_EXPR_CONSTRUCT_FIRST_ELEM 1
+
+/* 函数类型 func |captures|(params) -> ret（白皮书 §2.7）。
+   CAPTURES 为捕获列表（无捕获时为 NULL），PARAMS 为形参类型列表，
+   RETURN 为返回类型。形参是裸类型表达式，不是 FUNC_PARAM。 */
+#define CLUX_EXPR_FUNC_TYPE_CAPTURES 0
+#define CLUX_EXPR_FUNC_TYPE_PARAMS 1
+#define CLUX_EXPR_FUNC_TYPE_RETURN 2
+#define CLUX_EXPR_FUNC_TYPE_CHILDREN_SIZE 3
+
+/* 捕获列表 |name: type, ...|（空列表写作 ||），
+   children 为 CLUX_NODE_FUNC_CAPTURE。 */
+
+/* 单个捕获项：NAME 必有；TYPE 缺失时为 NULL（容错）。 */
+#define CLUX_FUNC_CAPTURE_NAME 0
+#define CLUX_FUNC_CAPTURE_TYPE 1
+#define CLUX_FUNC_CAPTURE_CHILDREN_SIZE 2
 
 #define CLUX_EXPR_TERNARY_CHILDREN_SIZE 3
 #define CLUX_EXPR_TERNARY_CONDITION 0
