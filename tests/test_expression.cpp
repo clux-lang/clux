@@ -6559,6 +6559,75 @@ TEST(ExpressionFuncTypeTest, CompositeParameterTypes) {
   delete_allocator(&a);
 }
 
+/* C FFI 变参：孤立 `...` 作为最后一个形参。 */
+TEST(ExpressionFuncTypeTest, VariadicParameter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc(i32, ...) -> i32");
+  expect_func_type(expr);
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 2u);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 0)), CLUX_NODE_LITERAL_TYPE);
+  node_t *rest = node_get_child(params, 1);
+  ASSERT_NE(rest, nullptr);
+  EXPECT_EQ(node_get_kind(rest), CLUX_NODE_EXPR_REST);
+  /* 孤立 `...` 没有操作数。 */
+  EXPECT_EQ(vec_get_size(node_get_children(rest)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 参数包形参 `...Args`。 */
+TEST(ExpressionFuncTypeTest, ParameterPack) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "func(...Args) -> void");
+  expect_func_type(expr);
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 1u);
+  node_t *rest = node_get_child(params, 0);
+  ASSERT_NE(rest, nullptr);
+  EXPECT_EQ(node_get_kind(rest), CLUX_NODE_EXPR_REST);
+  ASSERT_EQ(vec_get_size(node_get_children(rest)), 1u);
+  EXPECT_EQ(node_get_kind(node_get_child(rest, CLUX_EXPR_REST_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 变参只能出现在末尾；`..., i32` 语法上仍按列表解析，语义阶段再校验。 */
+TEST(ExpressionFuncTypeTest, VariadicNotLastIsParsed) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc(..., i32) -> i32");
+  expect_func_type(expr);
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(params)), 2u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 只有变参。 */
+TEST(ExpressionFuncTypeTest, OnlyVariadicParameter) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "cfunc(...) -> void");
+  expect_func_type(expr);
+  node_t *params = node_get_child(expr, CLUX_EXPR_FUNC_TYPE_PARAMS);
+  ASSERT_EQ(vec_get_size(node_get_children(params)), 1u);
+  EXPECT_EQ(node_get_kind(node_get_child(params, 0)), CLUX_NODE_EXPR_REST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* 没有 '->' 时不是函数类型：返回 NULL 且游标不动。 */
 TEST(ExpressionFuncTypeTest, NotFuncTypeWhenNoArrow) {
   allocator_t *a = create_allocator(malloc, free);
@@ -6842,6 +6911,10 @@ TEST(ExpressionFuncTypeTest, NoLeakOnFuncType) {
                            "func()) -> i32",
                            "func |a: {|}|(i32) -> i32",
                            "func({)}) -> i32",
+                           "cfunc(i32, ...) -> i32",
+                           "func(...Args) -> void",
+                           "cfunc(..., i32) -> i32",
+                           "cfunc(...) -> void",
                            "func(,) -> i32",
                            "func(i32 str) -> i32",
                            "func(i32",

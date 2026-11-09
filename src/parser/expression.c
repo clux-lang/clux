@@ -950,6 +950,7 @@ static node_t *read_func_type_captures(allocator_t *allocator,
 }
 
 /* 函数类型的形参列表 ( type, ... )。形参是裸类型表达式，不是 FUNC_PARAM。
+   形参可以是 rest 表达式（C FFI 的变参 `...`，或参数包 `...Args`）。
    调用前当前 token 必须是 '('（由 is_func_type 保证）。 */
 static node_t *read_func_type_params(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
@@ -970,7 +971,12 @@ static node_t *read_func_type_params(allocator_t *allocator, parser_t *parser) {
   }
 
   for (;;) {
-    node_t *param = parser_read_expr_postfix(allocator, parser);
+    /* 每个形参都可能是 rest 表达式：C FFI 的变参 `...`（孤立，无操作数）
+       或参数包 `...Args`。 */
+    node_t *param = parser_read_expr_rest(allocator, parser);
+    if (!param) {
+      param = parser_read_expr_postfix(allocator, parser);
+    }
     if (!param) {
       location_t loc = expression_error_location(parser, end_loc);
       parser_push_error(
