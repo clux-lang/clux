@@ -3,6 +3,7 @@
 #include "core/allocator.h"
 #include "parser/node.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
@@ -23,6 +24,7 @@ node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_defer(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

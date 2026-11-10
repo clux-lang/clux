@@ -1898,7 +1898,235 @@ TEST(StmtStructTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct 直接进入对应语句节点。 */
+/* ================= defer 语句 =================
+   语法：defer |captures|? { body }（白皮书 §4.12）。
+   捕获项复用 FUNC_PARAM：NAME 必有，DEFAULT 可缺失。 */
+
+/* 断言 defer 节点：BODY 必存在；captures 是否存在的期望由调用方检查。 */
+static node_t *expect_defer_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected defer statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_DEFER_CHILDREN_SIZE);
+  node_t *body = node_get_child(node, CLUX_STMT_DEFER_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  }
+  return body;
+}
+
+/* 断言捕获列表里第 idx 个捕获项是 name，默认值是否存在。 */
+static void
+expect_defer_capture(node_t *captures, size_t idx, bool has_default) {
+  ASSERT_NE(captures, nullptr);
+  EXPECT_EQ(node_get_kind(captures), CLUX_NODE_FUNC_CAPTURES);
+  ASSERT_EQ(vec_get_size(node_get_children(captures)), 1u);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(node_get_kind(params), CLUX_NODE_FUNC_PARAMS);
+  node_t *param = func_params_node_get_param(params, idx);
+  ASSERT_NE(param, nullptr);
+  EXPECT_NE(func_param_node_get_name(param), nullptr);
+  EXPECT_EQ(func_param_node_get_default(param) != nullptr, has_default);
+}
+
+TEST(StmtDeferTest, WithoutCaptures) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer { a; }");
+  expect_defer_stmt(node);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_DEFER_CAPTURES), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer {}");
+  node_t *body = expect_defer_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, BareCapture) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |captured| { a; }");
+  expect_defer_stmt(node);
+  expect_defer_capture(
+      node_get_child(node, CLUX_STMT_DEFER_CAPTURES), 0, false);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 裸列表形式的默认值停在闭合 '|' 之前。 */
+TEST(StmtDeferTest, BareCaptureWithDefault) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |pa = a.&| { a; }");
+  expect_defer_stmt(node);
+  expect_defer_capture(node_get_child(node, CLUX_STMT_DEFER_CAPTURES), 0, true);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, ParenthesizedCapture) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |(h = handle)| { a; }");
+  expect_defer_stmt(node);
+  expect_defer_capture(node_get_child(node, CLUX_STMT_DEFER_CAPTURES), 0, true);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, MultipleCaptures) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |a, b = 1| { }");
+  expect_defer_stmt(node);
+  node_t *captures = node_get_child(node, CLUX_STMT_DEFER_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  node_t *params = node_get_child(captures, 0);
+  ASSERT_NE(params, nullptr);
+  EXPECT_EQ(func_params_node_get_param_count(params), 2u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 空捕获列表 `||`：不产生 FUNC_PARAMS 子节点。 */
+TEST(StmtDeferTest, EmptyCaptureList) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer || { }");
+  expect_defer_stmt(node);
+  node_t *captures = node_get_child(node, CLUX_STMT_DEFER_CAPTURES);
+  ASSERT_NE(captures, nullptr);
+  EXPECT_EQ(node_get_kind(captures), CLUX_NODE_FUNC_CAPTURES);
+  EXPECT_EQ(vec_get_size(node_get_children(captures)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; defer { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 defer 关键字到块终点。 */
+TEST(StmtDeferTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "defer |x| { a; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_defer_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtDeferTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_DEFER_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start defer body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, MissingCaptureCloseReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |a { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '|' to close defer captures");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, MissingParenCloseReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |(a { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' to close defer captures");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, InvalidCaptureNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer |1| { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected capture name in defer");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDeferTest, ReturnsNullOnNonDefer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_defer(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -1941,6 +2169,18 @@ TEST(StmtDispatchTest, DispatchesStruct) {
   node_t *node = parse_stmt(a, &p, "struct S { x: i32; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDefer) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "defer { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -2042,6 +2282,18 @@ TEST(StmtTest, NoLeakOnStatements) {
       "struct S { 1: i32; }",
       "struct S",
       "[[trace]] struct",
+      "defer { a; }",
+      "defer {}",
+      "defer |captured| { a; }",
+      "defer |pa = a.&| { a; }",
+      "defer |(h = handle)| { a; }",
+      "defer |a, b = 1| { }",
+      "defer || { }",
+      "{ a; defer { b; } }",
+      "defer",
+      "defer |a { }",
+      "defer |(a { }",
+      "defer |1| { }",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

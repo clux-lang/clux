@@ -19,6 +19,7 @@
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
@@ -707,6 +708,29 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtDefer) {
+  node_t *n = create_stmt_defer_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_DEFER_CHILDREN_SIZE);
+  node_t *captures = create_func_captures_node(a);
+  node_t *body = create_stmt_block_node(a);
+  stmt_defer_node_set_captures(n, captures);
+  stmt_defer_node_set_body(n, body);
+  EXPECT_EQ(stmt_defer_node_get_captures(n), captures);
+  EXPECT_EQ(stmt_defer_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtDeferWithoutCaptures) {
+  node_t *n = create_stmt_defer_node(a);
+  stmt_defer_node_set_captures(n, nullptr);
+  stmt_defer_node_set_body(n, nullptr);
+  EXPECT_EQ(stmt_defer_node_get_captures(n), nullptr);
+  EXPECT_EQ(stmt_defer_node_get_body(n), nullptr);
   delete_node(&n);
 }
 

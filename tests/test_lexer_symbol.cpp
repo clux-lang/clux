@@ -97,8 +97,15 @@ TEST(LexerKeywordTest, StructUnionEnumAreKeywords) {
 
 TEST(LexerKeywordTest, ControlFlowKeywords) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *kws[] = {
-      "for", "foreach", "while", "do", "break", "continue", "return", nullptr};
+  const char *kws[] = {"for",
+                       "foreach",
+                       "while",
+                       "do",
+                       "break",
+                       "continue",
+                       "return",
+                       "defer",
+                       nullptr};
   for (int i = 0; kws[i] != nullptr; i++) {
     position_t p = lexer_test_pos(kws[i]);
     token_t *tok = lexer_read_identifier(a, &p, "test.clux");
