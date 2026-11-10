@@ -108,6 +108,9 @@ enum _node_kind_t {
      （白皮书 §4.9）。KEYWORD 为 var 符号（省略时为 NULL，表示只读）；
      NAME 为迭代变量；TYPE 可缺失；ITERABLE 为被迭代表达式；BODY 为块语句。 */
   CLUX_NODE_STMT_FOREACH,
+  /* do-while 语句 do { body } while (cond);（白皮书 §4.7）。
+     BODY 为块语句；CONDITION 为条件表达式；末尾 ';' 属于语句。 */
+  CLUX_NODE_STMT_DO_WHILE,
 
   /* 辅助节点：装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
      不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，
