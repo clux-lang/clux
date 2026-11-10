@@ -59,6 +59,15 @@ enum _node_kind_t {
   /* 枚举声明 enum Name: Underlying { Variant = value, ... }（白皮书 §3.6）。
      装饰器属于外层语句，不在本节点内。 */
   CLUX_NODE_EXPR_ENUM_DECL,
+  /* 结构体声明 struct Name [generics]? [implements ...]? { members }
+     （白皮书 §3.5）。装饰器属于外层语句，不在本节点内。 */
+  CLUX_NODE_EXPR_STRUCT_DECL,
+  /* struct 成员列表 { member ... }，children 为字段、语句声明或嵌入。 */
+  CLUX_NODE_STRUCT_MEMBERS,
+  /* 嵌入成员 ...Base;：TYPE 为被嵌入的类型。 */
+  CLUX_NODE_STRUCT_EMBED,
+  /* implements 列表 implements I[S] & J[S]，children 为接口类型表达式。 */
+  CLUX_NODE_IMPLEMENTS,
   /* 枚举成员 Variant = value：NAME 必有，VALUE 缺失时为 NULL（容错）。 */
   CLUX_NODE_ENUM_VARIANT,
   /* 枚举成员列表 { Variant = value, ... }，children 为 CLUX_NODE_ENUM_VARIANT。 */
@@ -107,6 +116,10 @@ enum _node_kind_t {
   /* union 语句 <decorator>* <union_decl>（白皮书 §3.7、§3.8）。
      UNION_DECL 槽存 union/cunion 声明，其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_UNION,
+
+  /* 结构体语句 <decorator>* <struct_decl>（白皮书 §3.5）。
+     STRUCT_DECL 槽存结构体声明，其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_STRUCT,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

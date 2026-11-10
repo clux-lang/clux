@@ -15,6 +15,7 @@
 #include "parser/node_func_type.h"
 #include "parser/node_generic_param.h"
 #include "parser/node_group.h"
+#include "parser/node_implements.h"
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
 #include "parser/node_stmt_block.h"
@@ -22,9 +23,12 @@
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_struct_decl.h"
+#include "parser/node_struct_member.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
 #include "parser/node_tuple.h"
@@ -736,6 +740,108 @@ TEST_F(NodeSemanticTest, StmtUnion) {
   EXPECT_EQ(stmt_union_node_get_decorator_count(n), 1u);
   EXPECT_EQ(stmt_union_node_get_decorator(n, 0), d0);
   EXPECT_EQ(stmt_union_node_get_decorator(n, 1), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtStruct) {
+  node_t *n = create_stmt_struct_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(stmt_struct_node_get_decorator_count(n), 0u);
+  node_t *decl = create_struct_decl_node(a);
+  stmt_struct_node_set_struct_decl(n, decl);
+  EXPECT_EQ(stmt_struct_node_get_struct_decl(n), decl);
+  node_t *d0 = create_decorator_node(a);
+  node_t *d1 = create_decorator_node(a);
+  stmt_struct_node_add_decorator(n, d0);
+  stmt_struct_node_add_decorator(n, d1);
+  EXPECT_EQ(stmt_struct_node_get_decorator_count(n), 2u);
+  EXPECT_EQ(stmt_struct_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(stmt_struct_node_get_decorator(n, 1), d1);
+  EXPECT_EQ(stmt_struct_node_get_decorator(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StructDecl) {
+  node_t *n = create_struct_decl_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_STRUCT_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_EXPR_STRUCT_DECL_CHILDREN_SIZE);
+  node_t *keyword = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *generics = make_leaf(a);
+  node_t *implements = make_leaf(a);
+  node_t *body = make_leaf(a);
+  struct_decl_node_set_keyword(n, keyword);
+  struct_decl_node_set_name(n, name);
+  struct_decl_node_set_generics(n, generics);
+  struct_decl_node_set_implements(n, implements);
+  struct_decl_node_set_body(n, body);
+  EXPECT_EQ(struct_decl_node_get_keyword(n), keyword);
+  EXPECT_EQ(struct_decl_node_get_name(n), name);
+  EXPECT_EQ(struct_decl_node_get_generics(n), generics);
+  EXPECT_EQ(struct_decl_node_get_implements(n), implements);
+  EXPECT_EQ(struct_decl_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StructDeclOptionalSlots) {
+  node_t *n = create_struct_decl_node(a);
+  struct_decl_node_set_generics(n, nullptr);
+  struct_decl_node_set_implements(n, nullptr);
+  EXPECT_EQ(struct_decl_node_get_generics(n), nullptr);
+  EXPECT_EQ(struct_decl_node_get_implements(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StructMembers) {
+  node_t *n = create_struct_members_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STRUCT_MEMBERS);
+  EXPECT_EQ(struct_members_node_get_member_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  struct_members_node_add_member(n, first);
+  struct_members_node_add_member(n, second);
+  EXPECT_EQ(struct_members_node_get_member_count(n), 2u);
+  EXPECT_EQ(struct_members_node_get_member(n, 0), first);
+  EXPECT_EQ(struct_members_node_get_member(n, 1), second);
+  EXPECT_EQ(struct_members_node_get_member(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StructEmbed) {
+  node_t *n = create_struct_embed_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STRUCT_EMBED);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STRUCT_EMBED_CHILDREN_SIZE);
+  node_t *type = make_leaf(a);
+  struct_embed_node_set_type(n, type);
+  EXPECT_EQ(struct_embed_node_get_type(n), type);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, Implements) {
+  node_t *n = create_implements_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_IMPLEMENTS);
+  EXPECT_EQ(implements_node_get_type_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  implements_node_add_type(n, first);
+  implements_node_add_type(n, second);
+  EXPECT_EQ(implements_node_get_type_count(n), 2u);
+  EXPECT_EQ(implements_node_get_type(n, 0), first);
+  EXPECT_EQ(implements_node_get_type(n, 1), second);
+  EXPECT_EQ(implements_node_get_type(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, FieldDecorators) {
+  node_t *n = create_field_node(a);
+  EXPECT_EQ(field_node_get_decorator_count(n), 0u);
+  node_t *d0 = create_decorator_node(a);
+  field_node_add_decorator(n, d0);
+  EXPECT_EQ(field_node_get_decorator_count(n), 1u);
+  EXPECT_EQ(field_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(field_node_get_decorator(n, 1), nullptr);
   delete_node(&n);
 }
 

@@ -22,6 +22,49 @@ static location_t decorator_error_location(parser_t *parser,
   return loc;
 }
 
+/* 当前 token 是否开启一个装饰器（`[[` 两个相邻的 '['）。 */
+bool parser_peek_decorator(parser_t *parser) {
+  token_t *first = parser_peek_token(parser);
+  if (!token_is(first, CLUX_TOKEN_SYMBOL, "[")) {
+    return false;
+  }
+  return token_is(peek_token_at(parser, 1), CLUX_TOKEN_SYMBOL, "[");
+}
+
+/* 跳过 0 个或多个装饰器，返回其后的 token（不消费任何 token）。
+   装饰器内部可能出现方括号，因此按 `[` / `]` 深度扫描，深度归零后的
+   下一个 token 即声明关键字。 */
+token_t *parser_peek_token_after_decorators(parser_t *parser) {
+  size_t start = parser_get_position(parser);
+  token_t *token = parser_peek_token(parser);
+  while (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
+    int depth = 0;
+    for (;;) {
+      token = parser_peek_token(parser);
+      if (!token) {
+        break;
+      }
+      if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
+        depth++;
+      } else if (token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
+        depth--;
+      }
+      parser_next(parser);
+      if (depth == 0) {
+        break;
+      }
+    }
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+    if (!token) {
+      break;
+    }
+  }
+  token_t *result = parser_peek_token(parser);
+  parser_set_position(parser, start);
+  return result;
+}
+
 /* 装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
    `[[` 与 `]]` 都不在词法表中（与嵌套下标冲突），这里按相邻字符位置组合。
    两个定界符都是整体：起始两个 '[' 与结束两个 ']' 都必须相邻，

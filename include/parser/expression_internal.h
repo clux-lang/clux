@@ -39,8 +39,17 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
 /* union 定义（tag union 与 cunion）。 */
 node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser);
 
+/* 单个字段 name: type;（struct / tag union / cunion 共用）。
+   allow_decorators 为 true 时读取前导装饰器（struct 字段允许）。 */
+node_t *parser_read_field(allocator_t *allocator,
+                          parser_t *parser,
+                          bool allow_decorators);
+
 /* 枚举声明 enum Name: Underlying { Variant = value, ... }。 */
 node_t *parser_read_expr_enum_decl(allocator_t *allocator, parser_t *parser);
+
+/* 结构体声明 struct Name [generics]? [implements ...]? { members }。 */
+node_t *parser_read_expr_struct_decl(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

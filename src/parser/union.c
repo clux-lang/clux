@@ -8,41 +8,6 @@
 #include "parser/node_symbol.h"
 #include "parser/parser.h"
 
-/* 单个字段 name: type;（白皮书 §3.5）。struct / tag union / cunion 共用。
-   调用前当前 token 不一定是标识符，不是时返回 NULL 且游标不动。
-   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
-static node_t *read_field(allocator_t *allocator, parser_t *parser) {
-  node_t *name = parser_read_literal_identifier(allocator, parser);
-  if (!name) {
-    return NULL;
-  }
-  location_t name_loc = *node_get_location(name);
-  node_t *node = create_field_node(allocator);
-  field_node_set_name(node, name);
-  node_set_location_span(node, &name_loc, &name_loc);
-
-  parser_skip_trivia(parser);
-  token_t *token = parser_peek_token(parser);
-  if (!token_is(token, CLUX_TOKEN_SYMBOL, ":")) {
-    location_t loc = expression_error_location(parser, &name_loc);
-    parser_push_error(
-        parser, create_error(allocator, &loc, "expected ':' after field name"));
-    return node;
-  }
-  parser_next(parser); /* ':' */
-  parser_skip_trivia(parser);
-  node_t *type = parser_read_expr(allocator, parser);
-  if (!type) {
-    location_t loc = expression_error_location(parser, &name_loc);
-    parser_push_error(parser,
-                      create_error(allocator, &loc, "expected field type"));
-    return node;
-  }
-  field_node_set_type(node, type);
-  node_set_location_span(node, &name_loc, node_get_location(type));
-  return node;
-}
-
 /* 字段列表 { field; ... }。当前 token 必须是 '{'。
    ';' 严格跟随字段：每个字段后必须写 ';'，不允许省略末尾分号，
    也不允许空字段 `;`。 */
@@ -70,7 +35,7 @@ static node_t *read_fields(allocator_t *allocator, parser_t *parser) {
       parser_next(parser);
       break;
     }
-    node_t *field = read_field(allocator, parser);
+    node_t *field = parser_read_field(allocator, parser, false);
     if (!field) {
       location_t loc = expression_error_location(parser, end_loc);
       parser_push_error(

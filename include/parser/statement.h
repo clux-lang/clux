@@ -8,6 +8,7 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
@@ -28,6 +29,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus

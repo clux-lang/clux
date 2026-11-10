@@ -1542,7 +1542,9 @@ TEST(StmtEnumTest, MultipleDecoratorsKeepSourceOrder) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *node = parse_stmt(
-      a, &p, "[[trace]] [[metadata(\"role\", \"handler\")]] enum E: u8 { A = 1 }");
+      a,
+      &p,
+      "[[trace]] [[metadata(\"role\", \"handler\")]] enum E: u8 { A = 1 }");
   expect_enum_stmt(node, 2);
   node_t *first = node_get_child(node, CLUX_STMT_ENUM_FIRST_DECORATOR);
   node_t *second = node_get_child(node, CLUX_STMT_ENUM_FIRST_DECORATOR + 1);
@@ -1760,7 +1762,143 @@ TEST(StmtUnionTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion 直接进入对应语句节点。 */
+/* ================= 结构体语句 =================
+   语法：<decorator>* <struct_decl>（白皮书 §3.5）。 */
+
+static node_t *expect_struct_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected struct statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_STRUCT_FIRST_DECORATOR + decorator_count);
+  node_t *struct_decl = node_get_child(node, CLUX_STMT_STRUCT_STRUCT_DECL);
+  EXPECT_NE(struct_decl, nullptr);
+  if (struct_decl) {
+    EXPECT_EQ(node_get_kind(struct_decl), CLUX_NODE_EXPR_STRUCT_DECL);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_STRUCT_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return struct_decl;
+}
+
+TEST(StmtStructTest, WithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "struct User { name: str; }");
+  expect_struct_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStructTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] struct User { name: str; }");
+  expect_struct_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStructTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a,
+      &p,
+      "[[trace]] [[metadata(\"role\", \"handler\")]] struct User { x: i32; }");
+  expect_struct_stmt(node, 2);
+  node_t *first = node_get_child(node, CLUX_STMT_STRUCT_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_STRUCT_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStructTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; struct S { x: i32; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器起点到结构体声明终点。 */
+TEST(StmtStructTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] struct S { x: i32; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_struct_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后缺结构体声明。 */
+TEST(StmtStructTest, MissingStructDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_struct(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_STRUCT_STRUCT_DECL), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected struct declaration in struct statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStructTest, ReturnsNullOnNonStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_struct(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStructTest, ReturnsNullOnSingleBracket) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[trace] struct S { x: i32; }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_struct(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -1791,6 +1929,30 @@ TEST(StmtDispatchTest, DispatchesCunion) {
   node_t *node = parse_stmt(a, &p, "cunion U { a: i32; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "struct S { x: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] struct S { x: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -1869,6 +2031,17 @@ TEST(StmtTest, NoLeakOnStatements) {
       "union U { a: i32 }",
       "union U",
       "[[trace]] union",
+      "struct S { x: i32; }",
+      "[[trace]] struct S { x: i32; }",
+      "[[trace]] [[metadata(\"role\", \"handler\")]] struct S { x: i32; }",
+      "{ a; struct S { x: i32; } }",
+      "struct S { var total: i32 = 0; x: i32; func f(self: *S): void {} "
+      "...Base; }",
+      "struct S { [[metadata(\"unit\", \"px\")]] x: i32; }",
+      "struct S { x: i32 }",
+      "struct S { 1: i32; }",
+      "struct S",
+      "[[trace]] struct",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

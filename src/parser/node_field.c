@@ -4,7 +4,7 @@
 
 node_t *create_field_node(allocator_t *allocator) {
   node_t *self = create_node(allocator, CLUX_NODE_FIELD);
-  node_resize_children(self, CLUX_FIELD_CHILDREN_SIZE);
+  node_resize_children(self, CLUX_FIELD_FIRST_DECORATOR);
   return self;
 }
 
@@ -22,6 +22,20 @@ void field_node_set_type(node_t *self, node_t *type) {
 
 node_t *field_node_get_type(node_t *self) {
   return node_get_child(self, CLUX_FIELD_TYPE);
+}
+
+void field_node_add_decorator(node_t *self, node_t *decorator) {
+  node_add_child(self, decorator);
+}
+
+size_t field_node_get_decorator_count(node_t *self) {
+  size_t size = vec_get_size(node_get_children(self));
+  return size > CLUX_FIELD_FIRST_DECORATOR ? size - CLUX_FIELD_FIRST_DECORATOR
+                                           : 0;
+}
+
+node_t *field_node_get_decorator(node_t *self, size_t idx) {
+  return node_get_child(self, CLUX_FIELD_FIRST_DECORATOR + idx);
 }
 
 node_t *create_fields_node(allocator_t *allocator) {

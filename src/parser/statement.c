@@ -197,25 +197,16 @@ node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser) {
       allocator, parser, "continue", create_stmt_continue_node);
 }
 
-/* 当前 token 是否开启一个装饰器（`[[` 两个相邻的 '['）。 */
-static bool peek_decorator(parser_t *parser) {
-  token_t *first = parser_peek_token(parser);
-  if (!token_is(first, CLUX_TOKEN_SYMBOL, "[")) {
-    return false;
-  }
-  return token_is(peek_token_at(parser, 1), CLUX_TOKEN_SYMBOL, "[");
-}
-
 /* 读取 0 个或多个前导装饰器，按源码顺序追加到 node 的 children。
    add 由调用方按语句类型提供，避免在这里按节点种类分派。
-   peek_decorator 已确认 `[[` 存在，因此每次必然解析成功。 */
+   parser_peek_decorator 已确认 `[[` 存在，因此每次必然解析成功。 */
 typedef void (*decorator_adder_t)(node_t *node, node_t *decorator);
 
 static void read_leading_decorators(allocator_t *allocator,
                                     parser_t *parser,
                                     node_t *node,
                                     decorator_adder_t add) {
-  while (peek_decorator(parser)) {
+  while (parser_peek_decorator(parser)) {
     add(node, parser_read_decorator(allocator, parser));
     parser_skip_trivia(parser);
   }
@@ -227,7 +218,7 @@ static void read_leading_decorators(allocator_t *allocator,
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  bool has_decorators = peek_decorator(parser);
+  bool has_decorators = parser_peek_decorator(parser);
   if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
       !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
     return NULL;
@@ -260,40 +251,6 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 跳过 0 个或多个装饰器，返回其后的 token（不消费任何 token）。
-   装饰器内部可能出现方括号，因此按 `[` / `]` 深度扫描，深度归零后的
-   下一个 token 即声明关键字。 */
-static token_t *peek_token_after_decorators(parser_t *parser) {
-  size_t start = parser_get_position(parser);
-  token_t *token = parser_peek_token(parser);
-  while (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
-    int depth = 0;
-    for (;;) {
-      token = parser_peek_token(parser);
-      if (!token) {
-        break;
-      }
-      if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
-        depth++;
-      } else if (token_is(token, CLUX_TOKEN_SYMBOL, "]")) {
-        depth--;
-      }
-      parser_next(parser);
-      if (depth == 0) {
-        break;
-      }
-    }
-    parser_skip_trivia(parser);
-    token = parser_peek_token(parser);
-    if (!token) {
-      break;
-    }
-  }
-  token_t *result = parser_peek_token(parser);
-  parser_set_position(parser, start);
-  return result;
-}
-
 /* 变量定义语句 <decorator>* (var|using) name [: type]? = expr;
    （白皮书 §4.1、§4.12.1）。
    调用前当前 token 不一定是装饰器或 var/using，不是时返回 NULL 且游标不动。
@@ -301,7 +258,7 @@ static token_t *peek_token_after_decorators(parser_t *parser) {
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  bool has_decorators = peek_decorator(parser);
+  bool has_decorators = parser_peek_decorator(parser);
   if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "var") &&
       !token_is(token, CLUX_TOKEN_KEYWORD, "using")) {
     return NULL;
@@ -408,7 +365,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
    出错时按容错约定返回不完整节点并 push_error。 */
 node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  bool has_decorators = peek_decorator(parser);
+  bool has_decorators = parser_peek_decorator(parser);
   if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "type")) {
     return NULL;
   }
@@ -500,7 +457,7 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  bool has_decorators = peek_decorator(parser);
+  bool has_decorators = parser_peek_decorator(parser);
   if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "enum")) {
     return NULL;
   }
@@ -518,9 +475,8 @@ node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
     location_t loc = stmt_error_location(parser, &begin_loc);
     parser_push_error(
         parser,
-        create_error(allocator,
-                     &loc,
-                     "expected enum declaration in enum statement"));
+        create_error(
+            allocator, &loc, "expected enum declaration in enum statement"));
     return node;
   }
   stmt_enum_node_set_enum_decl(node, enum_decl);
@@ -538,7 +494,7 @@ node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
-  bool has_decorators = peek_decorator(parser);
+  bool has_decorators = parser_peek_decorator(parser);
   if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "union") &&
       !token_is(token, CLUX_TOKEN_KEYWORD, "cunion")) {
     return NULL;
@@ -557,9 +513,8 @@ node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
     location_t loc = stmt_error_location(parser, &begin_loc);
     parser_push_error(
         parser,
-        create_error(allocator,
-                     &loc,
-                     "expected union declaration in union statement"));
+        create_error(
+            allocator, &loc, "expected union declaration in union statement"));
     return node;
   }
   stmt_union_node_set_union_decl(node, union_decl);
@@ -571,15 +526,54 @@ node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 结构体语句 <decorator>* <struct_decl>（白皮书 §3.5）。
+   调用前当前 token 不一定是装饰器或 struct，不是时返回 NULL 且游标不动。
+   装饰器按源码顺序挂在结构体声明之后。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = parser_peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "struct")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_stmt_struct_node(allocator);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(
+      allocator, parser, node, stmt_struct_node_add_decorator);
+
+  /* 结构体声明。 */
+  node_t *struct_decl = parser_read_expr_struct_decl(allocator, parser);
+  if (!struct_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected struct declaration in struct statement"));
+    return node;
+  }
+  stmt_struct_node_set_struct_decl(node, struct_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(struct_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 语句分派。调用方负责清理前导 trivia。
-   装饰器可能引导函数/变量/类型/枚举/union 语句，因此先跳过装饰器看关键字。 */
+   装饰器可能引导函数/变量/类型/枚举/union/结构体语句，因此先跳过装饰器
+   看关键字。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
   if (node) {
     return node;
   }
-  if (peek_decorator(parser)) {
-    token_t *keyword = peek_token_after_decorators(parser);
+  if (parser_peek_decorator(parser)) {
+    token_t *keyword = parser_peek_token_after_decorators(parser);
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var") ||
         token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
       return parser_read_stmt_var(allocator, parser);
@@ -593,6 +587,9 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "union") ||
         token_is(keyword, CLUX_TOKEN_KEYWORD, "cunion")) {
       return parser_read_stmt_union(allocator, parser);
+    }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "struct")) {
+      return parser_read_stmt_struct(allocator, parser);
     }
     return parser_read_stmt_func(allocator, parser);
   }
@@ -613,6 +610,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_stmt_union(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_struct(allocator, parser);
   if (node) {
     return node;
   }

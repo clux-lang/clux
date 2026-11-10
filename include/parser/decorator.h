@@ -14,6 +14,14 @@ extern "C" {
    中间有 trivia。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_decorator(allocator_t *allocator, parser_t *parser);
+
+/* 当前 token 是否开启一个装饰器（`[[` 两个相邻的 '['）。游标不动。 */
+bool parser_peek_decorator(parser_t *parser);
+
+/* 跳过 0 个或多个装饰器，返回其后的 token（不消费任何 token）。
+   装饰器内部可能出现方括号，因此按 `[` / `]` 深度扫描，深度归零后的
+   下一个 token 即声明关键字。 */
+token_t *parser_peek_token_after_decorators(parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

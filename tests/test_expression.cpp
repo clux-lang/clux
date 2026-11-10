@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "parser/expression.h"
 #include "parser/node.h"
+#include "parser/node_stmt_func.h"
 #include "parser/parser.h"
 #include "core/allocator.h"
 #include "core/error.h"
@@ -8125,8 +8126,8 @@ static void expect_variant(node_t *variants, size_t idx) {
 TEST(ExpressionEnumDeclTest, BasicDefinition) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *expr = parse_postfix(
-      a, &p, "enum Color: u8 { Red = 1, Green = 2, Blue = 4, }");
+  node_t *expr =
+      parse_postfix(a, &p, "enum Color: u8 { Red = 1, Green = 2, Blue = 4, }");
   expect_enum_decl(expr, "Color");
   node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
   ASSERT_EQ(vec_get_size(node_get_children(variants)), 3u);
@@ -8382,6 +8383,370 @@ TEST(ExpressionEnumDeclTest, NoLeakOnEnumDecl) {
                            "enum",
                            "enum E",
                            nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
+/* ================= struct 声明 =================
+   struct Name [generics]? [implements ...]? { members }（白皮书 §3.5）。
+   装饰器属于外层语句，本层只解析声明本身。 */
+
+/* 断言 struct 节点形状：名字与成员列表必存在。 */
+static node_t *expect_struct_decl(node_t *expr, const char *name) {
+  if (!expr) {
+    ADD_FAILURE() << "expected struct node, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_STRUCT_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_STRUCT_DECL_CHILDREN_SIZE);
+  node_t *kw = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_KEYWORD);
+  if (!kw) {
+    ADD_FAILURE() << "expected struct keyword";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(kw), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(kw)->end.offset -
+                node_get_location(kw)->begin.offset,
+            (ptrdiff_t)strlen("struct"));
+  node_t *name_node = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_NAME);
+  if (!name_node) {
+    ADD_FAILURE() << "expected struct name";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(name_node), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(name_node)->end.offset -
+                node_get_location(name_node)->begin.offset,
+            (ptrdiff_t)strlen(name));
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  if (!body) {
+    ADD_FAILURE() << "expected struct body";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_STRUCT_MEMBERS);
+  return expr;
+}
+
+TEST(ExpressionStructDeclTest, BasicDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct User { name: str; age: i32; }");
+  expect_struct_decl(expr, "User");
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_STRUCT_DECL_GENERICS), nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_STRUCT_DECL_IMPLEMENTS), nullptr);
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(body)), 2u);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 0)), CLUX_NODE_FIELD);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 1)), CLUX_NODE_FIELD);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct Empty {}");
+  expect_struct_decl(expr, "Empty");
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(body)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, GenericDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct Box[T] { value: T; }");
+  expect_struct_decl(expr, "Box");
+  node_t *generics = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_GENERICS);
+  ASSERT_NE(generics, nullptr);
+  EXPECT_EQ(node_get_kind(generics), CLUX_NODE_GENERIC_PARAMS);
+  EXPECT_EQ(vec_get_size(node_get_children(generics)), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, ImplementsSingle) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "struct Box implements Sized[Box] { n: i32; }");
+  expect_struct_decl(expr, "Box");
+  node_t *implements = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_IMPLEMENTS);
+  ASSERT_NE(implements, nullptr);
+  EXPECT_EQ(node_get_kind(implements), CLUX_NODE_IMPLEMENTS);
+  EXPECT_EQ(implements_node_get_type_count(implements), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, ImplementsMultiple) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a, &p, "struct S implements I[S] & J[S] { n: i32; }");
+  expect_struct_decl(expr, "S");
+  node_t *implements = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_IMPLEMENTS);
+  ASSERT_NE(implements, nullptr);
+  EXPECT_EQ(implements_node_get_type_count(implements), 2u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 成员可以是字段、var 语句、func 语句与嵌入。 */
+TEST(ExpressionStructDeclTest, MixedMembers) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a,
+      &p,
+      "struct Counter { var total: i32 = 0; value: i32; "
+      "func bump(self: *Counter, by: i32): void { a; } ...Base; }");
+  expect_struct_decl(expr, "Counter");
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(body)), 4u);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 0)), CLUX_NODE_STMT_VAR);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 1)), CLUX_NODE_FIELD);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 2)), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(node_get_kind(node_get_child(body, 3)), CLUX_NODE_STRUCT_EMBED);
+  node_t *embed = node_get_child(body, 3);
+  EXPECT_NE(struct_embed_node_get_type(embed), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段可以带装饰器。 */
+TEST(ExpressionStructDeclTest, FieldDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a, &p, "struct User { [[metadata(\"unit\", \"px\")]] x: i32; }");
+  expect_struct_decl(expr, "User");
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(body)), 1u);
+  node_t *field = node_get_child(body, 0);
+  ASSERT_NE(field, nullptr);
+  EXPECT_EQ(node_get_kind(field), CLUX_NODE_FIELD);
+  EXPECT_NE(field_node_get_name(field), nullptr);
+  EXPECT_NE(field_node_get_type(field), nullptr);
+  EXPECT_EQ(field_node_get_decorator_count(field), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 方法可以带装饰器。 */
+TEST(ExpressionStructDeclTest, MethodDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a, &p, "struct D { [[add100m]] func get(self: *D): i32 { a; } }");
+  expect_struct_decl(expr, "D");
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(body)), 1u);
+  node_t *method = node_get_child(body, 0);
+  ASSERT_NE(method, nullptr);
+  EXPECT_EQ(node_get_kind(method), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(stmt_func_node_get_decorator_count(method), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(ExpressionStructDeclTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct { }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected name after 'struct'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start struct body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, MissingFieldSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S { x: i32 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after field");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, InvalidMemberReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S { 1: i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected struct member");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, UnclosedBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S { x: i32;");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close struct body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, EmbedMissingTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S { ...; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected embedded type after '...'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, EmbedMissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S { ...Base }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after embedded type");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, ImplementsMissingTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "struct S implements { }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected interface type after 'implements'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 struct 关键字到成员列表终点。 */
+TEST(ExpressionStructDeclTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "struct User { name: str; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_struct_decl(expr, "User");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 字段区间 = 名字起点 .. 类型终点。 */
+TEST(ExpressionStructDeclTest, FieldSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "struct User { name: str; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  node_t *body = node_get_child(expr, CLUX_EXPR_STRUCT_DECL_BODY);
+  ASSERT_NE(body, nullptr);
+  node_t *field = node_get_child(body, 0);
+  ASSERT_NE(field, nullptr);
+  const location_t *loc = node_get_location(field);
+  EXPECT_EQ(loc->begin.offset, src + strlen("struct User { "));
+  EXPECT_EQ(loc->end.offset, src + strlen("struct User { name: str"));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionStructDeclTest, NoLeakOnStructDecl) {
+  const char *sources[] = {
+      "struct User { name: str; age: i32; }",
+      "struct Empty {}",
+      "struct Box[T] { value: T; }",
+      "struct Box implements Sized[Box] { n: i32; }",
+      "struct S implements I[S] & J[S] { n: i32; }",
+      "struct Counter { var total: i32 = 0; value: i32; "
+      "func bump(self: *Counter, by: i32): void { a; } "
+      "...Base; }",
+      "struct User { [[metadata(\"unit\", \"px\")]] x: i32; }",
+      "struct D { [[add100m]] func get(self: *D): i32 { a; } }",
+      "struct { }",
+      "struct S",
+      "struct S { x: i32 }",
+      "struct S { 1: i32; }",
+      "struct S { x: i32;",
+      "struct S { ...; }",
+      "struct S { ...Base }",
+      "struct S implements { }",
+      "struct S implements I[S] & { }",
+      "struct",
+      "struct S[",
+      nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;
     g_free_count = 0;
