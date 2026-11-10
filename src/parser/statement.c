@@ -9,6 +9,7 @@
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "parser/parser.h"
 
 /* 错误位置：优先指向当前未消费的 token；已到流末尾时退化为
@@ -162,7 +163,7 @@ node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser) {
 static node_t *read_jump_stmt(allocator_t *allocator,
                               parser_t *parser,
                               const char *keyword,
-                              node_kind_t kind) {
+                              node_t *(*create)(allocator_t *)) {
   token_t *token = parser_peek_token(parser);
   if (!token_is(token, CLUX_TOKEN_KEYWORD, keyword)) {
     return NULL;
@@ -171,7 +172,7 @@ static node_t *read_jump_stmt(allocator_t *allocator,
   parser_next(parser); /* break / continue */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, kind);
+  node_t *node = create(allocator);
   token = parser_peek_token(parser);
   if (token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
     loc.end = token_get_location(token)->end;
@@ -188,11 +189,12 @@ static node_t *read_jump_stmt(allocator_t *allocator,
 }
 
 node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser) {
-  return read_jump_stmt(allocator, parser, "break", CLUX_NODE_STMT_BREAK);
+  return read_jump_stmt(allocator, parser, "break", create_stmt_break_node);
 }
 
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser) {
-  return read_jump_stmt(allocator, parser, "continue", CLUX_NODE_STMT_CONTINUE);
+  return read_jump_stmt(
+      allocator, parser, "continue", create_stmt_continue_node);
 }
 
 /* 当前 token 是否开启一个装饰器（`[[` 两个相邻的 '['）。 */
@@ -324,7 +326,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   location_t keyword_loc = *token_get_location(token);
-  node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *keyword = create_symbol_node(allocator);
   node_set_location(keyword, &keyword_loc);
   stmt_var_node_set_keyword(node, keyword);
   parser_next(parser); /* var / using */

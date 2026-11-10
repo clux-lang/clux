@@ -4,6 +4,7 @@
 #include "parser/expression_internal.h"
 #include "parser/lexer.h"
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "parser/parser.h"
 
 /* 指针类型前缀 *<postfix>。操作数只取后缀层，因此 *a.b 解析为 *(a.b)，
@@ -18,7 +19,7 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '*' */
 
   node_t *expr = create_binary_node(allocator);
-  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *symbol = create_symbol_node(allocator);
   node_set_location(symbol, &star_loc);
   binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &star_loc, &star_loc);
@@ -52,7 +53,7 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
     return NULL;
   }
   location_t keyword_loc = *token_get_location(token);
-  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *symbol = create_symbol_node(allocator);
   node_set_location(symbol, &keyword_loc);
   parser_next(parser); /* const / volatile */
 
@@ -94,7 +95,7 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
   }
   location_t bracket_loc = *token_get_location(open);
   bracket_loc.end = token_get_location(close)->end;
-  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *symbol = create_symbol_node(allocator);
   node_set_location(symbol, &bracket_loc);
   parser_next(parser); /* '[' */
   parser_next(parser); /* ']' */
@@ -164,7 +165,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected ']' to close array type"));
     bracket_loc.end = end_loc->end;
   }
-  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *symbol = create_symbol_node(allocator);
   node_set_location(symbol, &bracket_loc);
   binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &open_loc, &bracket_loc);
@@ -263,7 +264,7 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
     return NULL;
   }
   location_t question_loc = *token_get_location(token);
-  node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *symbol = create_symbol_node(allocator);
   node_set_location(symbol, &question_loc);
   parser_next(parser); /* '?' */
 

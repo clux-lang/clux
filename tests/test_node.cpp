@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "core/allocator.h"
 #include "core/location.h"
 #include "core/vec.h"

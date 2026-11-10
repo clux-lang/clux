@@ -5,6 +5,7 @@
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "parser/parser.h"
 
 /* 单个字段 name: type;（白皮书 §3.5）。struct / tag union / cunion 共用。
@@ -134,7 +135,7 @@ node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser) {
   }
   location_t keyword_loc = *token_get_location(token);
   const char *keyword_text = is_cunion ? "cunion" : "union";
-  node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *keyword = create_symbol_node(allocator);
   node_set_location(keyword, &keyword_loc);
   parser_next(parser); /* union / cunion */
   parser_skip_trivia(parser);

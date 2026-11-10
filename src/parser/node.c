@@ -63,13 +63,3 @@ void node_add_child(node_t *self, node_t *child) {
   child->parent = self;
   vec_push(self->children, child);
 }
-node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser) {
-  token_t *token = parser_peek_token(parser);
-  if (!token || token_get_kind(token) != CLUX_TOKEN_SYMBOL) {
-    return NULL;
-  }
-  parser_next(parser);
-  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
-  node_set_location(node, token_get_location(token));
-  return node;
-}

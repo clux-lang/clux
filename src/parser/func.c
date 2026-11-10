@@ -5,6 +5,7 @@
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "parser/parser.h"
 #include "parser/statement.h"
 
@@ -632,7 +633,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
     return NULL;
   }
   location_t keyword_loc = *token_get_location(token);
-  node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *keyword = create_symbol_node(allocator);
   node_set_location(keyword, &keyword_loc);
   parser_next(parser); /* func / cfunc */
 

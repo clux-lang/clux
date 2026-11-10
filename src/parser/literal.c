@@ -2,20 +2,21 @@
 #include "core/location.h"
 #include "parser/lexer.h"
 #include "parser/node.h"
+#include "parser/node_literal.h"
 #include "parser/parser.h"
 
 /* 匹配当前 token 为指定 kind，成功则消费并返回新节点，否则返回 NULL。 */
 static node_t *read_simple(allocator_t *allocator,
                            parser_t *parser,
                            token_kind_t kind,
-                           node_kind_t node_kind) {
+                           node_t *(*create)(allocator_t *)) {
   token_t *token = parser_peek_token(parser);
   if (!token || token_get_kind(token) != kind) {
     return NULL;
   }
   location_t loc = *token_get_location(token);
   parser_next(parser);
-  node_t *node = create_node(allocator, node_kind);
+  node_t *node = create(allocator);
   node_set_location(node, &loc);
   return node;
 }
@@ -25,21 +26,21 @@ static node_t *read_simple_text(allocator_t *allocator,
                                 parser_t *parser,
                                 token_kind_t kind,
                                 const char *src,
-                                node_kind_t node_kind) {
+                                node_t *(*create)(allocator_t *)) {
   token_t *token = parser_peek_token(parser);
   if (!token || !token_is(token, kind, src)) {
     return NULL;
   }
   location_t loc = *token_get_location(token);
   parser_next(parser);
-  node_t *node = create_node(allocator, node_kind);
+  node_t *node = create(allocator);
   node_set_location(node, &loc);
   return node;
 }
 
 node_t *parser_read_literal_nil(allocator_t *allocator, parser_t *parser) {
   return read_simple_text(
-      allocator, parser, CLUX_TOKEN_KEYWORD, "nil", CLUX_NODE_LITERAL_NIL);
+      allocator, parser, CLUX_TOKEN_KEYWORD, "nil", create_literal_nil_node);
 }
 
 node_t *parser_read_literal_undefined(allocator_t *allocator,
@@ -48,35 +49,38 @@ node_t *parser_read_literal_undefined(allocator_t *allocator,
                           parser,
                           CLUX_TOKEN_KEYWORD,
                           "undefined",
-                          CLUX_NODE_LITERAL_UNDEFINED);
+                          create_literal_undefined_node);
 }
 
 node_t *parser_read_literal_string(allocator_t *allocator, parser_t *parser) {
   return read_simple(
-      allocator, parser, CLUX_TOKEN_STRING, CLUX_NODE_LITERAL_STRING);
+      allocator, parser, CLUX_TOKEN_STRING, create_literal_string_node);
 }
 
 node_t *parser_read_literal_character(allocator_t *allocator,
                                       parser_t *parser) {
   return read_simple(
-      allocator, parser, CLUX_TOKEN_CHARACTER, CLUX_NODE_LITERAL_CHARACTER);
+      allocator, parser, CLUX_TOKEN_CHARACTER, create_literal_character_node);
 }
 
 node_t *parser_read_literal_boolean(allocator_t *allocator, parser_t *parser) {
-  node_t *node = read_simple_text(
-      allocator, parser, CLUX_TOKEN_KEYWORD, "true", CLUX_NODE_LITERAL_BOOLEAN);
+  node_t *node = read_simple_text(allocator,
+                                  parser,
+                                  CLUX_TOKEN_KEYWORD,
+                                  "true",
+                                  create_literal_boolean_node);
   if (node) return node;
   return read_simple_text(allocator,
                           parser,
                           CLUX_TOKEN_KEYWORD,
                           "false",
-                          CLUX_NODE_LITERAL_BOOLEAN);
+                          create_literal_boolean_node);
 }
 
 node_t *parser_read_literal_identifier(allocator_t *allocator,
                                        parser_t *parser) {
   return read_simple(
-      allocator, parser, CLUX_TOKEN_IDENTIFIER, CLUX_NODE_LITERAL_IDENTIFIER);
+      allocator, parser, CLUX_TOKEN_IDENTIFIER, create_literal_identifier_node);
 }
 
 /* 内建类型名（白皮书 §2.1）。词法层把它们识别为关键字。 */
@@ -109,7 +113,7 @@ node_t *parser_read_literal_type(allocator_t *allocator, parser_t *parser) {
     if (token_is(token, CLUX_TOKEN_KEYWORD, type_names[idx])) {
       location_t loc = *token_get_location(token);
       parser_next(parser);
-      node_t *node = create_node(allocator, CLUX_NODE_LITERAL_TYPE);
+      node_t *node = create_literal_type_node(allocator);
       node_set_location(node, &loc);
       return node;
     }
@@ -159,7 +163,7 @@ node_t *parser_read_literal_numeric(allocator_t *allocator, parser_t *parser) {
     loc.end = token_get_location(suffix)->end;
     parser_next(parser);
   }
-  node_t *node = create_node(allocator, CLUX_NODE_LITERAL_NUMERIC);
+  node_t *node = create_literal_numeric_node(allocator);
   node_set_location(node, &loc);
   return node;
 }

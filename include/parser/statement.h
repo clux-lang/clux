@@ -5,6 +5,7 @@
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
+#include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_var.h"

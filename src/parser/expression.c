@@ -5,6 +5,7 @@
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
+#include "parser/node_symbol.h"
 #include "parser/parser.h"
 
 /* 用首尾子节点的位置拼出表达式自身的区间：起点取 begin->begin，
@@ -93,7 +94,7 @@ static node_t *read_shift_symbol(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* 第一个 '<' / '>' */
   loc.end = token_get_location(parser_peek_token(parser))->end;
   parser_next(parser); /* 第二个 */
-  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *node = create_symbol_node(allocator);
   node_set_location(node, &loc);
   return node;
 }
@@ -120,7 +121,7 @@ static node_t *read_lor_symbol(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* 第一个 '|' */
   loc.end = token_get_location(parser_peek_token(parser))->end;
   parser_next(parser); /* 第二个 '|' */
-  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *node = create_symbol_node(allocator);
   node_set_location(node, &loc);
   return node;
 }
@@ -145,7 +146,7 @@ static node_t *read_keyword_symbol(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   location_t loc = *token_get_location(token);
   parser_next(parser);
-  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *node = create_symbol_node(allocator);
   node_set_location(node, &loc);
   return node;
 }
@@ -193,7 +194,7 @@ static node_t *read_postfix_symbol(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '.' */
   loc.end = token_get_location(parser_peek_token(parser))->end;
   parser_next(parser); /* '?' */
-  node_t *node = create_node(allocator, CLUX_NODE_SYMBOL);
+  node_t *node = create_symbol_node(allocator);
   node_set_location(node, &loc);
   return node;
 }
