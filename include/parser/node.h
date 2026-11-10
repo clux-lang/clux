@@ -97,6 +97,9 @@ enum _node_kind_t {
      CONDITION 为条件表达式；THEN 为块语句；ELSE 可缺失，存在时为块语句
      或嵌套的 CLUX_NODE_STMT_IF（else if 链）。 */
   CLUX_NODE_STMT_IF,
+  /* while 语句 while (cond) { body }（白皮书 §4.6）。
+     CONDITION 为条件表达式；BODY 为块语句。 */
+  CLUX_NODE_STMT_WHILE,
 
   /* 辅助节点：装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
      不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，

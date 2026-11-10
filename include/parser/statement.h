@@ -14,6 +14,7 @@
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_stmt_while.h"
 #include "parser/parser.h"
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,7 @@ node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_defer(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_if(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_while(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

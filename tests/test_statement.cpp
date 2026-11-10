@@ -2349,7 +2349,166 @@ TEST(StmtIfTest, ReturnsNullOnNonIf) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct / defer / if 直接进入对应语句节点。 */
+/* ================= while 语句 =================
+   语法：while (cond) { body }（白皮书 §4.6）。 */
+
+/* 断言 while 节点：CONDITION 与 BODY 必存在。 */
+static node_t *expect_while_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected while statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_WHILE);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_WHILE_CHILDREN_SIZE);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_WHILE_CONDITION), nullptr);
+  node_t *body = node_get_child(node, CLUX_STMT_WHILE_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  }
+  return body;
+}
+
+TEST(StmtWhileTest, BasicWhile) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (x) { a; }");
+  node_t *body = expect_while_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (x) {}");
+  node_t *body = expect_while_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 条件可以是完整表达式。 */
+TEST(StmtWhileTest, ConditionExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (i < n && ok) { i = i + 1; }");
+  expect_while_stmt(node);
+  node_t *condition = node_get_child(node, CLUX_STMT_WHILE_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; while (x) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_WHILE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 while 关键字到循环体终点。 */
+TEST(StmtWhileTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "while (x) { a; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_while_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtWhileTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while x) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'while'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, MissingConditionReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while () { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected condition expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (x { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' after while condition");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (x)");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_WHILE_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start while body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtWhileTest, ReturnsNullOnNonWhile) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_while(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer / if / while
+   直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -2404,6 +2563,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesWhile) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "while (x) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_WHILE);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -2540,6 +2711,14 @@ TEST(StmtTest, NoLeakOnStatements) {
       "if (x { }",
       "if (x)",
       "if (x) { } else a;",
+      "while (x) { a; }",
+      "while (x) {}",
+      "while (i < n && ok) { i = i + 1; }",
+      "{ a; while (x) { b; } }",
+      "while x) { }",
+      "while () { }",
+      "while (x { }",
+      "while (x)",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

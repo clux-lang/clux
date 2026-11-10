@@ -29,6 +29,7 @@
 #include "parser/node_stmt_type.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
+#include "parser/node_stmt_while.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_struct_member.h"
 #include "parser/node_subscript.h"
@@ -709,6 +710,20 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtWhile) {
+  node_t *n = create_stmt_while_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_WHILE);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_WHILE_CHILDREN_SIZE);
+  node_t *condition = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_while_node_set_condition(n, condition);
+  stmt_while_node_set_body(n, body);
+  EXPECT_EQ(stmt_while_node_get_condition(n), condition);
+  EXPECT_EQ(stmt_while_node_get_body(n), body);
   delete_node(&n);
 }
 
