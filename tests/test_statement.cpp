@@ -3638,6 +3638,96 @@ TEST(StmtComptimeIfTest, ReturnsNullOnNonComptime) {
   delete_allocator(&a);
 }
 
+/* ================= comptime foreach 语句 =================
+   语法：comptime foreach (...) { ... }（白皮书 §4.15）。
+   槽布局与普通 foreach 相同，在编译期展开。 */
+
+TEST(StmtComptimeForeachTest, BasicComptimeForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime foreach (var x of seq) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_FOREACH);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_FOREACH_CHILDREN_SIZE);
+  EXPECT_NE(stmt_foreach_node_get_name(node), nullptr);
+  EXPECT_NE(stmt_foreach_node_get_iterable(node), nullptr);
+  node_t *body = stmt_foreach_node_get_body(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtComptimeForeachTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "{ a; comptime foreach (var x of seq) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)),
+            CLUX_NODE_STMT_COMPTIME_FOREACH);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 comptime 关键字到循环体终点。 */
+TEST(StmtComptimeForeachTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "comptime foreach (var x of seq) { a; }";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime 后接 foreach 才由本函数认领；comptime if 必须返回 NULL
+   且游标不动，交给 comptime if 语句。 */
+TEST(StmtComptimeForeachTest, DoesNotStealComptimeIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "comptime if (N) { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_comptime_foreach(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtComptimeForeachTest, ReturnsNullOnNonComptime) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "foreach (var x of seq) { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_comptime_foreach(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 头部错误走与普通 foreach 相同的容错路径。 */
+TEST(StmtComptimeForeachTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime foreach var x of seq) { }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_FOREACH);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'foreach'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* 语句分派：enum / union / cunion / struct / defer / if / comptime if /
    while / for / foreach / do-while / switch 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
@@ -3780,6 +3870,18 @@ TEST(StmtDispatchTest, DispatchesForeach) {
   node_t *node = parse_stmt(a, &p, "foreach (var v of a) { b; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FOREACH);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesComptimeForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime foreach (var x of seq) { b; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_FOREACH);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -4005,6 +4107,9 @@ TEST(StmtTest, NoLeakOnStatements) {
       "comptime if (a) { } else if (b) { } else { c; }",
       "{ a; comptime if (N) { b; } }",
       "comptime",
+      "comptime foreach (var x of seq) { a; }",
+      "{ a; comptime foreach (var x of seq) { b; } }",
+      "comptime foreach var x of seq) { }",
       "comptime var x = 1;",
       "comptime using a = e;",
       "[[trace]] comptime var x = 1;",

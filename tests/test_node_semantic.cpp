@@ -828,6 +828,23 @@ TEST_F(NodeSemanticTest, StmtForeach) {
   delete_node(&n);
 }
 
+TEST_F(NodeSemanticTest, StmtComptimeForeach) {
+  node_t *n = create_stmt_comptime_foreach_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_COMPTIME_FOREACH);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_FOREACH_CHILDREN_SIZE);
+  node_t *name = make_leaf(a);
+  node_t *iterable = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_foreach_node_set_name(n, name);
+  stmt_foreach_node_set_iterable(n, iterable);
+  stmt_foreach_node_set_body(n, body);
+  EXPECT_EQ(stmt_foreach_node_get_name(n), name);
+  EXPECT_EQ(stmt_foreach_node_get_iterable(n), iterable);
+  EXPECT_EQ(stmt_foreach_node_get_body(n), body);
+  delete_node(&n);
+}
+
 TEST_F(NodeSemanticTest, StmtForeachOptionalSlots) {
   node_t *n = create_stmt_foreach_node(a);
   stmt_foreach_node_set_keyword(n, nullptr);

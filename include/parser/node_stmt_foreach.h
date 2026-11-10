@@ -19,6 +19,8 @@ extern "C" {
 #define CLUX_STMT_FOREACH_CHILDREN_SIZE 5
 
 node_t *create_stmt_foreach_node(allocator_t *allocator);
+/* comptime foreach 与普通 foreach 槽布局相同，共用下列访问器。 */
+node_t *create_stmt_comptime_foreach_node(allocator_t *allocator);
 /* KEYWORD 允许为 NULL（未写 var，只读迭代）。 */
 void stmt_foreach_node_set_keyword(node_t *self, node_t *keyword);
 node_t *stmt_foreach_node_get_keyword(node_t *self);

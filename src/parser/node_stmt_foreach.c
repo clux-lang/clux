@@ -7,6 +7,12 @@ node_t *create_stmt_foreach_node(allocator_t *allocator) {
   return self;
 }
 
+node_t *create_stmt_comptime_foreach_node(allocator_t *allocator) {
+  node_t *self = create_node(allocator, CLUX_NODE_STMT_COMPTIME_FOREACH);
+  node_resize_children(self, CLUX_STMT_FOREACH_CHILDREN_SIZE);
+  return self;
+}
+
 void stmt_foreach_node_set_keyword(node_t *self, node_t *keyword) {
   node_set_child(self, CLUX_STMT_FOREACH_KEYWORD, keyword);
 }
