@@ -16,9 +16,8 @@ static node_t *read_field(allocator_t *allocator, parser_t *parser) {
     return NULL;
   }
   location_t name_loc = *node_get_location(name);
-  node_t *node = create_node(allocator, CLUX_NODE_FIELD);
-  node_resize_children(node, CLUX_FIELD_CHILDREN_SIZE);
-  node_set_child(node, CLUX_FIELD_NAME, name);
+  node_t *node = create_field_node(allocator);
+  field_node_set_name(node, name);
   node_set_location_span(node, &name_loc, &name_loc);
 
   parser_skip_trivia(parser);
@@ -38,7 +37,7 @@ static node_t *read_field(allocator_t *allocator, parser_t *parser) {
                       create_error(allocator, &loc, "expected field type"));
     return node;
   }
-  node_set_child(node, CLUX_FIELD_TYPE, type);
+  field_node_set_type(node, type);
   node_set_location_span(node, &name_loc, node_get_location(type));
   return node;
 }
@@ -52,7 +51,7 @@ static node_t *read_fields(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '{' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_FIELDS);
+  node_t *node = create_fields_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -90,7 +89,7 @@ static node_t *read_fields(allocator_t *allocator, parser_t *parser) {
       }
       continue;
     }
-    node_add_child(node, field);
+    fields_node_add_field(node, field);
     end_loc = node_get_location(field);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -140,9 +139,8 @@ node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* union / cunion */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_EXPR_UNION);
-  node_resize_children(node, CLUX_EXPR_UNION_CHILDREN_SIZE);
-  node_set_child(node, CLUX_EXPR_UNION_KEYWORD, keyword);
+  node_t *node = create_union_node(allocator);
+  union_node_set_keyword(node, keyword);
   node_set_location_span(node, &keyword_loc, &keyword_loc);
   const location_t *end_loc = &keyword_loc;
 
@@ -156,7 +154,7 @@ node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser) {
             allocator, &loc, "expected name after '%s'", keyword_text));
     return node;
   }
-  node_set_child(node, CLUX_EXPR_UNION_NAME, name);
+  union_node_set_name(node, name);
   end_loc = node_get_location(name);
   node_set_location_span(node, &keyword_loc, end_loc);
   parser_skip_trivia(parser);
@@ -165,7 +163,7 @@ node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser) {
   token = parser_peek_token(parser);
   if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
     node_t *generics = parser_read_func_decl_generics(allocator, parser);
-    node_set_child(node, CLUX_EXPR_UNION_GENERICS, generics);
+    union_node_set_generics(node, generics);
     end_loc = node_get_location(generics);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -182,7 +180,7 @@ node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node_t *body = read_fields(allocator, parser);
-  node_set_child(node, CLUX_EXPR_UNION_BODY, body);
+  union_node_set_body(node, body);
   node_set_location_span(node, &keyword_loc, node_get_location(body));
   return node;
 }

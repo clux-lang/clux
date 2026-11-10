@@ -43,8 +43,7 @@ node_t *parser_read_decorator(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* 第二个 '[' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_DECORATOR);
-  node_resize_children(node, CLUX_DECORATOR_CHILDREN_SIZE);
+  node_t *node = create_decorator_node(allocator);
   node_set_location(node, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -56,7 +55,7 @@ node_t *parser_read_decorator(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected expression in decorator"));
     return node;
   }
-  node_set_child(node, CLUX_DECORATOR_EXPR, expr);
+  decorator_node_set_expr(node, expr);
   end_loc = node_get_location(expr);
 
   parser_skip_trivia(parser);

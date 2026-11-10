@@ -41,7 +41,7 @@ node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '{' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_STMT_BLOCK);
+  node_t *node = create_stmt_block_node(allocator);
   const location_t *end_loc = &open_loc;
 
   for (;;) {
@@ -68,7 +68,7 @@ node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser) {
       parser_next(parser);
       continue;
     }
-    node_add_child(node, stmt);
+    stmt_block_node_add_stmt(node, stmt);
     end_loc = node_get_location(stmt);
   }
 
@@ -100,9 +100,8 @@ node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser) {
   }
   loc.filename = parser_get_filename(parser);
 
-  node_t *stmt = create_node(allocator, CLUX_NODE_STMT_EXPR);
-  node_resize_children(stmt, 1);
-  node_set_child(stmt, 0, expr);
+  node_t *stmt = create_stmt_expr_node(allocator);
+  stmt_expr_node_set_expr(stmt, expr);
   node_set_location(stmt, &loc);
   return stmt;
 }
@@ -120,8 +119,7 @@ node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* return */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_STMT_RETURN);
-  node_resize_children(node, CLUX_STMT_RETURN_CHILDREN_SIZE);
+  node_t *node = create_stmt_return_node(allocator);
   node_set_location(node, &keyword_loc);
 
   token = parser_peek_token(parser);
@@ -139,7 +137,7 @@ node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser) {
           create_error(allocator, &err, "expected expression after 'return'"));
       return node;
     }
-    node_set_child(node, CLUX_STMT_RETURN_VALUE, value);
+    stmt_return_node_set_value(node, value);
     loc.end = node_get_location(value)->end;
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -207,12 +205,16 @@ static bool peek_decorator(parser_t *parser) {
 }
 
 /* 读取 0 个或多个前导装饰器，按源码顺序追加到 node 的 children。
+   add 由调用方按语句类型提供，避免在这里按节点种类分派。
    peek_decorator 已确认 `[[` 存在，因此每次必然解析成功。 */
+typedef void (*decorator_adder_t)(node_t *node, node_t *decorator);
+
 static void read_leading_decorators(allocator_t *allocator,
                                     parser_t *parser,
-                                    node_t *node) {
+                                    node_t *node,
+                                    decorator_adder_t add) {
   while (peek_decorator(parser)) {
-    node_add_child(node, parser_read_decorator(allocator, parser));
+    add(node, parser_read_decorator(allocator, parser));
     parser_skip_trivia(parser);
   }
 }
@@ -230,11 +232,11 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   }
   location_t begin_loc = *token_get_location(token);
 
-  node_t *node = create_node(allocator, CLUX_NODE_STMT_FUNC);
-  node_resize_children(node, CLUX_STMT_FUNC_FIRST_DECORATOR);
+  node_t *node = create_stmt_func_node(allocator);
   node_set_location(node, &begin_loc);
 
-  read_leading_decorators(allocator, parser, node);
+  read_leading_decorators(
+      allocator, parser, node, stmt_func_node_add_decorator);
 
   /* 函数声明。 */
   node_t *func_decl = parser_read_expr_func_decl(allocator, parser);
@@ -247,7 +249,7 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
                      "expected function declaration in function statement"));
     return node;
   }
-  node_set_child(node, CLUX_STMT_FUNC_FUNC_DECL, func_decl);
+  stmt_func_node_set_func_decl(node, func_decl);
 
   location_t loc = begin_loc;
   loc.end = node_get_location(func_decl)->end;
@@ -304,11 +306,10 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   }
   location_t begin_loc = *token_get_location(token);
 
-  node_t *node = create_node(allocator, CLUX_NODE_STMT_VAR);
-  node_resize_children(node, CLUX_STMT_VAR_FIRST_DECORATOR);
+  node_t *node = create_stmt_var_node(allocator);
   node_set_location(node, &begin_loc);
 
-  read_leading_decorators(allocator, parser, node);
+  read_leading_decorators(allocator, parser, node, stmt_var_node_add_decorator);
 
   /* var / using 关键字。 */
   token = parser_peek_token(parser);
@@ -325,7 +326,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   location_t keyword_loc = *token_get_location(token);
   node_t *keyword = create_node(allocator, CLUX_NODE_SYMBOL);
   node_set_location(keyword, &keyword_loc);
-  node_set_child(node, CLUX_STMT_VAR_KEYWORD, keyword);
+  stmt_var_node_set_keyword(node, keyword);
   parser_next(parser); /* var / using */
   parser_skip_trivia(parser);
 
@@ -339,7 +340,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
             allocator, &loc, "expected variable name in variable statement"));
     return node;
   }
-  node_set_child(node, CLUX_STMT_VAR_NAME, name);
+  stmt_var_node_set_name(node, name);
   parser_skip_trivia(parser);
 
   /* 可选类型标注 : type。只取后缀层，`=` 留给初值。 */
@@ -354,7 +355,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
           parser, create_error(allocator, &loc, "expected type after ':'"));
       return node;
     }
-    node_set_child(node, CLUX_STMT_VAR_TYPE, type);
+    stmt_var_node_set_type(node, type);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
   }
@@ -377,7 +378,7 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected initializer expression"));
     return node;
   }
-  node_set_child(node, CLUX_STMT_VAR_VALUE, value);
+  stmt_var_node_set_value(node, value);
   /* 语句区间从首个装饰器/关键字起点开始，终点随 ';' 更新。 */
   location_t loc = begin_loc;
   loc.end = node_get_location(value)->end;
@@ -411,11 +412,11 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
   }
   location_t begin_loc = *token_get_location(token);
 
-  node_t *node = create_node(allocator, CLUX_NODE_STMT_TYPE);
-  node_resize_children(node, CLUX_STMT_TYPE_FIRST_DECORATOR);
+  node_t *node = create_stmt_type_node(allocator);
   node_set_location(node, &begin_loc);
 
-  read_leading_decorators(allocator, parser, node);
+  read_leading_decorators(
+      allocator, parser, node, stmt_type_node_add_decorator);
 
   /* type 关键字。 */
   token = parser_peek_token(parser);
@@ -439,14 +440,14 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected type name in type statement"));
     return node;
   }
-  node_set_child(node, CLUX_STMT_TYPE_NAME, name);
+  stmt_type_node_set_name(node, name);
   parser_skip_trivia(parser);
 
   /* 泛型参数列表 [T, U]（可选）。 */
   token = parser_peek_token(parser);
   if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
     node_t *generics = parser_read_func_decl_generics(allocator, parser);
-    node_set_child(node, CLUX_STMT_TYPE_GENERICS, generics);
+    stmt_type_node_set_generics(node, generics);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
   }
@@ -470,7 +471,7 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
         parser, create_error(allocator, &loc, "expected type expression"));
     return node;
   }
-  node_set_child(node, CLUX_STMT_TYPE_VALUE, value);
+  stmt_type_node_set_value(node, value);
   location_t loc = begin_loc;
   loc.end = node_get_location(value)->end;
   parser_skip_trivia(parser);

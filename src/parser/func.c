@@ -88,9 +88,8 @@ static node_t *read_func_type_capture(allocator_t *allocator,
     return NULL;
   }
   location_t begin_loc = *node_get_location(id);
-  node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURE);
-  node_resize_children(node, CLUX_FUNC_CAPTURE_CHILDREN_SIZE);
-  node_set_child(node, CLUX_FUNC_CAPTURE_NAME, id);
+  node_t *node = create_func_capture_node(allocator);
+  func_capture_node_set_name(node, id);
   node_set_location_span(node, &begin_loc, &begin_loc);
 
   parser_skip_trivia(parser);
@@ -111,7 +110,7 @@ static node_t *read_func_type_capture(allocator_t *allocator,
                       create_error(allocator, &loc, "expected capture type"));
     return node;
   }
-  node_set_child(node, CLUX_FUNC_CAPTURE_TYPE, type);
+  func_capture_node_set_type(node, type);
   node_set_location_span(node, &begin_loc, node_get_location(type));
   return node;
 }
@@ -125,7 +124,7 @@ static node_t *read_func_type_captures(allocator_t *allocator,
   parser_next(parser); /* 开头的 '|' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURES);
+  node_t *node = create_func_captures_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -147,7 +146,7 @@ static node_t *read_func_type_captures(allocator_t *allocator,
           create_error(allocator, &loc, "expected capture in captures"));
       break;
     }
-    node_add_child(node, capture);
+    func_captures_node_add_capture(node, capture);
     end_loc = node_get_location(capture);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -191,7 +190,7 @@ static node_t *read_func_type_params(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '(' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_FUNC_PARAMS);
+  node_t *node = create_func_params_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -217,7 +216,7 @@ static node_t *read_func_type_params(allocator_t *allocator, parser_t *parser) {
           create_error(allocator, &loc, "expected parameter type in function"));
       break;
     }
-    node_add_child(node, param);
+    func_params_node_add_param(node, param);
     end_loc = node_get_location(param);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -260,15 +259,14 @@ node_t *parser_read_expr_func_type(allocator_t *allocator, parser_t *parser) {
     return NULL;
   }
 
-  node_t *node = create_node(allocator, CLUX_NODE_EXPR_FUNC_TYPE);
-  node_resize_children(node, CLUX_EXPR_FUNC_TYPE_CHILDREN_SIZE);
+  node_t *node = create_func_type_node(allocator);
   node_set_location_span(node, &keyword_loc, &keyword_loc);
   const location_t *end_loc = &keyword_loc;
 
   token = parser_peek_token(parser);
   if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
     node_t *captures = read_func_type_captures(allocator, parser);
-    node_set_child(node, CLUX_EXPR_FUNC_TYPE_CAPTURES, captures);
+    func_type_node_set_captures(node, captures);
     end_loc = node_get_location(captures);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -276,7 +274,7 @@ node_t *parser_read_expr_func_type(allocator_t *allocator, parser_t *parser) {
 
   /* is_func_type 已确认形参列表与 '->' 存在，这里不再重复校验。 */
   node_t *params = read_func_type_params(allocator, parser);
-  node_set_child(node, CLUX_EXPR_FUNC_TYPE_PARAMS, params);
+  func_type_node_set_params(node, params);
   end_loc = node_get_location(params);
   node_set_location_span(node, &keyword_loc, end_loc);
 
@@ -291,7 +289,7 @@ node_t *parser_read_expr_func_type(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected return type after '->'"));
     return node;
   }
-  node_set_child(node, CLUX_EXPR_FUNC_TYPE_RETURN, ret);
+  func_type_node_set_return(node, ret);
   node_set_location_span(node, &keyword_loc, node_get_location(ret));
   return node;
 }
@@ -319,7 +317,7 @@ static void read_func_decl_param_list(allocator_t *allocator,
     /* rest 形参：...Args（参数包，无名字）。 */
     node_t *rest = parser_read_expr_rest(allocator, parser);
     if (rest) {
-      node_add_child(owner, rest);
+      func_params_node_add_param(owner, rest);
     } else {
       node_t *name = parser_read_literal_identifier(allocator, parser);
       if (!name) {
@@ -331,9 +329,8 @@ static void read_func_decl_param_list(allocator_t *allocator,
                                        "expected parameter name in function"));
         break;
       }
-      node_t *param = create_node(allocator, CLUX_NODE_FUNC_PARAM);
-      node_resize_children(param, CLUX_FUNC_PARAM_CHILDREN_SIZE);
-      node_set_child(param, CLUX_FUNC_PARAM_NAME, name);
+      node_t *param = create_func_param_node(allocator);
+      func_param_node_set_name(param, name);
       node_set_location_span(
           param, node_get_location(name), node_get_location(name));
 
@@ -345,7 +342,7 @@ static void read_func_decl_param_list(allocator_t *allocator,
         parser_push_error(
             parser,
             create_error(allocator, &loc, "expected ':' after parameter name"));
-        node_add_child(owner, param);
+        func_params_node_add_param(owner, param);
         break;
       }
       parser_next(parser); /* ':' */
@@ -361,10 +358,10 @@ static void read_func_decl_param_list(allocator_t *allocator,
             expression_error_location(parser, node_get_location(name));
         parser_push_error(
             parser, create_error(allocator, &loc, "expected parameter type"));
-        node_add_child(owner, param);
+        func_params_node_add_param(owner, param);
         break;
       }
-      node_set_child(param, CLUX_FUNC_PARAM_TYPE, type);
+      func_param_node_set_type(param, type);
       node_set_location_span(
           param, node_get_location(name), node_get_location(type));
 
@@ -382,12 +379,12 @@ static void read_func_decl_param_list(allocator_t *allocator,
               parser,
               create_error(allocator, &loc, "expected capture default value"));
         } else {
-          node_set_child(param, CLUX_FUNC_PARAM_DEFAULT, def);
+          func_param_node_set_default(param, def);
           node_set_location_span(
               param, node_get_location(name), node_get_location(def));
         }
       }
-      node_add_child(owner, param);
+      func_params_node_add_param(owner, param);
     }
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -428,13 +425,14 @@ static node_t *read_func_decl_params(allocator_t *allocator,
                                      bool allow_default) {
   token_t *token = parser_peek_token(parser);
   location_t open_loc = *token_get_location(token);
-  node_t *node = create_node(allocator, CLUX_NODE_FUNC_PARAMS);
+  node_t *node = create_func_params_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
   read_func_decl_param_list(allocator, parser, node, allow_default);
   /* 区间 = '(' 起点 .. 最后一个子节点终点；空列表时退化为 '(' 本身。 */
-  size_t count = vec_get_size(node_get_children(node));
+  size_t count = func_params_node_get_param_count(node);
   const location_t *end_loc =
-      count ? node_get_location(node_get_child(node, count - 1)) : &open_loc;
+      count ? node_get_location(func_params_node_get_param(node, count - 1))
+            : &open_loc;
   node_set_location_span(node, &open_loc, end_loc);
   return node;
 }
@@ -450,7 +448,7 @@ static node_t *read_func_decl_captures(allocator_t *allocator,
   parser_next(parser); /* 开头的 '|' */
   parser_skip_trivia(parser);
 
-  node_t *node = create_node(allocator, CLUX_NODE_FUNC_CAPTURES);
+  node_t *node = create_func_captures_node(allocator);
   node_set_location_span(node, &open_loc, &open_loc);
 
   /* 空捕获列表 `||`：紧跟闭合 '|'，没有形参列表节点。 */
@@ -471,7 +469,7 @@ static node_t *read_func_decl_captures(allocator_t *allocator,
     return node;
   }
   node_t *params = read_func_decl_params(allocator, parser, true);
-  node_add_child(node, params);
+  func_captures_node_add_capture(node, params);
   const location_t *end_loc = node_get_location(params);
 
   parser_skip_trivia(parser);
@@ -501,7 +499,7 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
   parser_next(parser); /* '[' */
   parser_skip_trivia(parser);
 
-  node_t *params = create_node(allocator, CLUX_NODE_GENERIC_PARAMS);
+  node_t *params = create_generic_params_node(allocator);
   node_set_location_span(params, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -525,9 +523,8 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
             create_error(allocator, &loc, "expected generic parameter name"));
         break;
       }
-      param = create_node(allocator, CLUX_NODE_GENERIC_PARAM);
-      node_resize_children(param, CLUX_GENERIC_PARAM_CHILDREN_SIZE);
-      node_set_child(param, CLUX_GENERIC_PARAM_NAME, name);
+      param = create_generic_param_node(allocator);
+      generic_param_node_set_name(param, name);
       parser_skip_trivia(parser);
       token = parser_peek_token(parser);
       /* 编译期值参数：N: comptime usize。
@@ -547,7 +544,7 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
               parser,
               create_error(allocator, &loc, "expected generic parameter type"));
         } else {
-          node_set_child(param, CLUX_GENERIC_PARAM_TYPE, type);
+          generic_param_node_set_type(param, type);
         }
         parser_skip_trivia(parser);
         token = parser_peek_token(parser);
@@ -564,7 +561,7 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
               create_error(
                   allocator, &loc, "expected constraint after 'extends'"));
         } else {
-          node_set_child(param, CLUX_GENERIC_PARAM_CONSTRAINT, constraint);
+          generic_param_node_set_constraint(param, constraint);
         }
         parser_skip_trivia(parser);
         token = parser_peek_token(parser);
@@ -580,22 +577,22 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
               parser,
               create_error(allocator, &loc, "expected generic default value"));
         } else {
-          node_set_child(param, CLUX_GENERIC_PARAM_DEFAULT, def);
+          generic_param_node_set_default(param, def);
         }
       }
       /* 区间 = 名字起点 .. 最后一个非空子节点终点。 */
-      node_t *param_last = node_get_child(param, CLUX_GENERIC_PARAM_DEFAULT);
+      node_t *param_last = generic_param_node_get_default(param);
       if (!param_last) {
-        param_last = node_get_child(param, CLUX_GENERIC_PARAM_CONSTRAINT);
+        param_last = generic_param_node_get_constraint(param);
       }
       if (!param_last) {
-        param_last = node_get_child(param, CLUX_GENERIC_PARAM_TYPE);
+        param_last = generic_param_node_get_type(param);
       }
       node_set_location_span(param,
                              node_get_location(name),
                              node_get_location(param_last ? param_last : name));
     }
-    node_add_child(params, param);
+    generic_params_node_add_param(params, param);
     end_loc = node_get_location(param);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -639,9 +636,8 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
   node_set_location(keyword, &keyword_loc);
   parser_next(parser); /* func / cfunc */
 
-  node_t *node = create_node(allocator, CLUX_NODE_EXPR_FUNC_DECL);
-  node_resize_children(node, CLUX_EXPR_FUNC_DECL_CHILDREN_SIZE);
-  node_set_child(node, CLUX_EXPR_FUNC_DECL_KEYWORD, keyword);
+  node_t *node = create_func_decl_node(allocator);
+  func_decl_node_set_keyword(node, keyword);
   node_set_location_span(node, &keyword_loc, &keyword_loc);
   const location_t *end_loc = &keyword_loc;
 
@@ -650,7 +646,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
   /* 捕获列表 |( ... )|。cfunc 不允许捕获，但该限制属于语义检查。 */
   if (token_is(token, CLUX_TOKEN_SYMBOL, "|")) {
     node_t *captures = read_func_decl_captures(allocator, parser);
-    node_set_child(node, CLUX_EXPR_FUNC_DECL_CAPTURES, captures);
+    func_decl_node_set_captures(node, captures);
     end_loc = node_get_location(captures);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -659,7 +655,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
   /* 函数名（可选；匿名函数没有）。 */
   if (token && token_get_kind(token) == CLUX_TOKEN_IDENTIFIER) {
     node_t *name = parser_read_literal_identifier(allocator, parser);
-    node_set_child(node, CLUX_EXPR_FUNC_DECL_NAME, name);
+    func_decl_node_set_name(node, name);
     end_loc = node_get_location(name);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -668,7 +664,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
   /* 泛型参数列表 [T, U]（可选）。cfunc 不允许泛型，同样留给语义检查。 */
   if (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
     node_t *generics = parser_read_func_decl_generics(allocator, parser);
-    node_set_child(node, CLUX_EXPR_FUNC_DECL_GENERICS, generics);
+    func_decl_node_set_generics(node, generics);
     end_loc = node_get_location(generics);
     node_set_location_span(node, &keyword_loc, end_loc);
     parser_skip_trivia(parser);
@@ -683,7 +679,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node_t *params = read_func_decl_params(allocator, parser, false);
-  node_set_child(node, CLUX_EXPR_FUNC_DECL_PARAMS, params);
+  func_decl_node_set_params(node, params);
   end_loc = node_get_location(params);
   node_set_location_span(node, &keyword_loc, end_loc);
 
@@ -707,7 +703,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected return type after ':'"));
     return node;
   }
-  node_set_child(node, CLUX_EXPR_FUNC_DECL_RETURN, ret);
+  func_decl_node_set_return(node, ret);
   end_loc = node_get_location(ret);
   node_set_location_span(node, &keyword_loc, end_loc);
 
@@ -721,7 +717,7 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node_t *body = parser_read_stmt_block(allocator, parser);
-  node_set_child(node, CLUX_EXPR_FUNC_DECL_BODY, body);
+  func_decl_node_set_body(node, body);
   node_set_location_span(node, &keyword_loc, node_get_location(body));
   return node;
 }

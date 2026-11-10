@@ -17,11 +17,10 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
   location_t star_loc = *token_get_location(token);
   parser_next(parser); /* '*' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
-  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_t *expr = create_binary_node(allocator);
   node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
   node_set_location(symbol, &star_loc);
-  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &star_loc, &star_loc);
 
   size_t after_star = parser_get_position(parser);
@@ -35,7 +34,7 @@ static node_t *read_pointer(allocator_t *allocator, parser_t *parser) {
         parser, create_error(allocator, &loc, "expected expression after '*'"));
     return expr;
   }
-  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  binary_node_set_right(expr, operand);
   node_set_location_span(expr, &star_loc, node_get_location(operand));
   return expr;
 }
@@ -57,9 +56,8 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
   node_set_location(symbol, &keyword_loc);
   parser_next(parser); /* const / volatile */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
-  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
-  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_t *expr = create_binary_node(allocator);
+  binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &keyword_loc, &keyword_loc);
 
   size_t after_keyword = parser_get_position(parser);
@@ -74,7 +72,7 @@ static node_t *read_qualifier(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected expression after qualifier"));
     return expr;
   }
-  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  binary_node_set_right(expr, operand);
   node_set_location_span(expr, &keyword_loc, node_get_location(operand));
   return expr;
 }
@@ -101,9 +99,8 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '[' */
   parser_next(parser); /* ']' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
-  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
-  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_t *expr = create_binary_node(allocator);
+  binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &bracket_loc, &bracket_loc);
 
   size_t after_bracket = parser_get_position(parser);
@@ -118,7 +115,7 @@ static node_t *read_slice_type(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected expression after '[]'"));
     return expr;
   }
-  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  binary_node_set_right(expr, operand);
   node_set_location_span(expr, &bracket_loc, node_get_location(operand));
   return expr;
 }
@@ -138,8 +135,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '[' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
-  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
+  node_t *expr = create_binary_node(allocator);
   node_set_location_span(expr, &open_loc, &open_loc);
 
   node_t *length = parser_read_expr(allocator, parser);
@@ -149,7 +145,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
         parser,
         create_error(allocator, &loc, "expected expression in array length"));
   } else {
-    node_set_child(expr, CLUX_EXPR_BINARY_LEFT, length);
+    binary_node_set_left(expr, length);
     node_set_location_span(expr, &open_loc, node_get_location(length));
   }
   parser_skip_trivia(parser);
@@ -170,7 +166,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
   }
   node_t *symbol = create_node(allocator, CLUX_NODE_SYMBOL);
   node_set_location(symbol, &bracket_loc);
-  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &open_loc, &bracket_loc);
 
   size_t after_bracket = parser_get_position(parser);
@@ -185,7 +181,7 @@ static node_t *read_array_type(allocator_t *allocator, parser_t *parser) {
         create_error(allocator, &loc, "expected expression after array type"));
     return expr;
   }
-  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, element);
+  binary_node_set_right(expr, element);
   node_set_location_span(expr, &open_loc, node_get_location(element));
   return expr;
 }
@@ -204,7 +200,7 @@ static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
   parser_next(parser); /* '<' */
   parser_skip_trivia(parser);
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_TUPLE);
+  node_t *expr = create_tuple_node(allocator);
   node_set_location_span(expr, &open_loc, &open_loc);
   const location_t *end_loc = &open_loc;
 
@@ -230,7 +226,7 @@ static node_t *read_tuple_type(allocator_t *allocator, parser_t *parser) {
           create_error(allocator, &loc, "expected expression in tuple type"));
       break;
     }
-    node_add_child(expr, elem);
+    tuple_node_add_elem(expr, elem);
     end_loc = node_get_location(elem);
     parser_skip_trivia(parser);
     token = parser_peek_token(parser);
@@ -271,9 +267,8 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
   node_set_location(symbol, &question_loc);
   parser_next(parser); /* '?' */
 
-  node_t *expr = create_node(allocator, CLUX_NODE_EXPR_BINARY);
-  node_resize_children(expr, CLUX_EXPR_BINARY_CHILDREN_SIZE);
-  node_set_child(expr, CLUX_EXPR_BINARY_SYMBOL, symbol);
+  node_t *expr = create_binary_node(allocator);
+  binary_node_set_symbol(expr, symbol);
   node_set_location_span(expr, &question_loc, &question_loc);
 
   size_t after_question = parser_get_position(parser);
@@ -287,7 +282,7 @@ static node_t *read_optional_type(allocator_t *allocator, parser_t *parser) {
         parser, create_error(allocator, &loc, "expected expression after '?'"));
     return expr;
   }
-  node_set_child(expr, CLUX_EXPR_BINARY_RIGHT, operand);
+  binary_node_set_right(expr, operand);
   node_set_location_span(expr, &question_loc, node_get_location(operand));
   return expr;
 }
