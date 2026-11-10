@@ -21,6 +21,7 @@
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
+#include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_for.h"
@@ -715,6 +716,13 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtEmpty) {
+  node_t *n = create_stmt_empty_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(vec_get_size(node_get_children(n)), 0u);
   delete_node(&n);
 }
 

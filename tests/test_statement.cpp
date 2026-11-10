@@ -235,7 +235,7 @@ TEST(StmtBlockTest, UnclosedEmptyBlockReportsError) {
 TEST(StmtBlockTest, UnparsableStatementIsSkipped) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *node = parse_stmt(a, &p, "{ ; a; }");
+  node_t *node = parse_stmt(a, &p, "{ ) a; }");
   expect_block(node, 1);
   vec_t *errors = parser_get_error(p);
   ASSERT_EQ(vec_get_size(errors), 1u);
@@ -246,17 +246,16 @@ TEST(StmtBlockTest, UnparsableStatementIsSkipped) {
   delete_allocator(&a);
 }
 
-/* 块内写成 `{ a; };` 时，块后的 ';' 是孤立分号：空语句尚未实现，
-   按无法解析的语句报错，块本身仍正常闭合。 */
-TEST(StmtBlockTest, SemicolonAfterNestedBlockIsUnparsableForNow) {
+/* 块内写成 `{ { a; }; b; }` 时，块后的 ';' 是独立的空语句。 */
+TEST(StmtBlockTest, SemicolonAfterNestedBlockIsEmptyStatement) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *node = parse_stmt(a, &p, "{ { a; }; b; }");
-  expect_block(node, 2);
-  vec_t *errors = parser_get_error(p);
-  ASSERT_EQ(vec_get_size(errors), 1u);
-  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
-               "expected statement in block");
+  expect_block(node, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 2)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
@@ -266,10 +265,66 @@ TEST(StmtBlockTest, SemicolonAfterNestedBlockIsUnparsableForNow) {
 TEST(StmtBlockTest, MultipleUnparsableStatements) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
-  node_t *node = parse_stmt(a, &p, "{ ; ; a; }");
+  node_t *node = parse_stmt(a, &p, "{ ) ) a; }");
   expect_block(node, 1);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 2u);
   delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ================= 空语句 =================
+   语法：`;`（白皮书 §4.14）。叶子节点，无子节点。 */
+
+TEST(StmtEmptyTest, SingleSemicolon) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = ";";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(vec_get_size(node_get_children(node)), 0u);
+  expect_location_span(node, src, src);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEmptyTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ ; a; }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEmptyTest, ConsecutiveSemicolons) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ ; ; a; }");
+  expect_block(node, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 2)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEmptyTest, ReturnsNullOnNonEmpty) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_empty(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
   delete_parser(&p);
   delete_allocator(&a);
 }
@@ -3464,6 +3519,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesEmpty) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, ";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EMPTY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesSwitch) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -3710,6 +3777,10 @@ TEST(StmtTest, NoLeakOnStatements) {
       "switch (v) { 1 -> { } }",
       "switch (v) { () -> { } }",
       "switch (v) { (1) -> { }",
+      ";",
+      "{ ; a; }",
+      "{ ; ; a; }",
+      "{ { a; }; b; }",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

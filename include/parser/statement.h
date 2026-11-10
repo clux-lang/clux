@@ -5,6 +5,7 @@
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
+#include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_for.h"
@@ -26,6 +27,9 @@ extern "C" {
 #endif
 node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser);
+
+/* 空语句 `;`（白皮书 §4.14）。 */
+node_t *parser_read_stmt_empty(allocator_t *allocator, parser_t *parser);
 
 /* break; / continue;（白皮书 §4.10）。无子节点。 */
 node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser);

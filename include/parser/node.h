@@ -86,6 +86,8 @@ enum _node_kind_t {
   CLUX_NODE_STMT_EXPR,
   /* return; / return expr; —— VALUE 槽在无返回值时为 NULL。 */
   CLUX_NODE_STMT_RETURN,
+  /* 空语句 `;`（白皮书 §4.14）—— 叶子节点，无子节点。 */
+  CLUX_NODE_STMT_EMPTY,
   /* break; / continue; —— 无子节点。 */
   CLUX_NODE_STMT_BREAK,
   CLUX_NODE_STMT_CONTINUE,

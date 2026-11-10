@@ -30,8 +30,8 @@ static location_t stmt_error_location(parser_t *parser,
 
 /* 块语句 { stmt* }。调用前当前 token 不一定是 '{'，不是时返回 NULL 且游标不动。
    语句之间不需要分隔符（表达式语句自带 ';'），块尾的 '}' 由本层消费。
-   块本身**不携带 ';'**：`{ ... };` 中的 ';' 留在块之后，属于后续要实现的
-   空语句；在空语句落地前，块内的孤立 ';' 按无法解析的语句报错。
+   块本身**不携带 ';'**：`{ ... };` 中的 ';' 留在块之后，作为独立的
+   空语句由语句分派解析。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_block(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
@@ -105,6 +105,21 @@ node_t *parser_read_stmt_expr(allocator_t *allocator, parser_t *parser) {
   stmt_expr_node_set_expr(stmt, expr);
   node_set_location(stmt, &loc);
   return stmt;
+}
+
+/* 空语句 `;`（白皮书 §4.14）。调用前当前 token 不是 ';' 时返回 NULL
+   且游标不动。空语句不产生操作，只占一个语句位置。 */
+node_t *parser_read_stmt_empty(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+    return NULL;
+  }
+  location_t loc = *token_get_location(token);
+  parser_next(parser); /* ';' */
+
+  node_t *node = create_stmt_empty_node(allocator);
+  node_set_location(node, &loc);
+  return node;
 }
 
 /* return; / return expr;（白皮书 §4.11）。
@@ -569,6 +584,10 @@ node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
    看关键字。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_empty(allocator, parser);
   if (node) {
     return node;
   }
