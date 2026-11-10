@@ -22,6 +22,7 @@
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_for.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_return.h"
@@ -710,6 +711,37 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtFor) {
+  node_t *n = create_stmt_for_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_FOR);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_FOR_CHILDREN_SIZE);
+  node_t *init = make_leaf(a);
+  node_t *condition = make_leaf(a);
+  node_t *update = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_for_node_set_init(n, init);
+  stmt_for_node_set_condition(n, condition);
+  stmt_for_node_set_update(n, update);
+  stmt_for_node_set_body(n, body);
+  EXPECT_EQ(stmt_for_node_get_init(n), init);
+  EXPECT_EQ(stmt_for_node_get_condition(n), condition);
+  EXPECT_EQ(stmt_for_node_get_update(n), update);
+  EXPECT_EQ(stmt_for_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtForOptionalSlots) {
+  node_t *n = create_stmt_for_node(a);
+  stmt_for_node_set_init(n, nullptr);
+  stmt_for_node_set_condition(n, nullptr);
+  stmt_for_node_set_update(n, nullptr);
+  EXPECT_EQ(stmt_for_node_get_init(n), nullptr);
+  EXPECT_EQ(stmt_for_node_get_condition(n), nullptr);
+  EXPECT_EQ(stmt_for_node_get_update(n), nullptr);
   delete_node(&n);
 }
 

@@ -100,6 +100,10 @@ enum _node_kind_t {
   /* while 语句 while (cond) { body }（白皮书 §4.6）。
      CONDITION 为条件表达式；BODY 为块语句。 */
   CLUX_NODE_STMT_WHILE,
+  /* for 语句 for (init; cond; update) { body }（白皮书 §4.8）。
+     INIT 为变量语句或表达式（可缺失）；CONDITION / UPDATE 为表达式（可缺失）；
+     BODY 为块语句。 */
+  CLUX_NODE_STMT_FOR,
 
   /* 辅助节点：装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
      不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，

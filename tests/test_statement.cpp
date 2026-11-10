@@ -2507,7 +2507,232 @@ TEST(StmtWhileTest, ReturnsNullOnNonWhile) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct / defer / if / while
+/* ================= for 语句 =================
+   语法：for (init; cond; update) { body }（白皮书 §4.8）。
+   初始化可以是变量语句或表达式，三段均可省略。 */
+
+/* 断言 for 节点：BODY 必存在，其余槽按需检查。 */
+static node_t *expect_for_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected for statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FOR);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_FOR_CHILDREN_SIZE);
+  node_t *body = node_get_child(node, CLUX_STMT_FOR_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  }
+  return body;
+}
+
+TEST(StmtForTest, BasicFor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 10; i += 1) { a; }");
+  node_t *body = expect_for_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 1u);
+  node_t *init = node_get_child(node, CLUX_STMT_FOR_INIT);
+  ASSERT_NE(init, nullptr);
+  EXPECT_EQ(node_get_kind(init), CLUX_NODE_STMT_VAR);
+  node_t *condition = node_get_child(node, CLUX_STMT_FOR_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  node_t *update = node_get_child(node, CLUX_STMT_FOR_UPDATE);
+  ASSERT_NE(update, nullptr);
+  EXPECT_EQ(node_get_kind(update), CLUX_NODE_EXPR_ASSIGN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 初始化也可以是表达式。 */
+TEST(StmtForTest, ExpressionInit) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (i = 0; i < 10; i += 1) { }");
+  expect_for_stmt(node);
+  node_t *init = node_get_child(node, CLUX_STMT_FOR_INIT);
+  ASSERT_NE(init, nullptr);
+  EXPECT_EQ(node_get_kind(init), CLUX_NODE_EXPR_ASSIGN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, EmptyInit) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (; i < 10; i += 1) { }");
+  expect_for_stmt(node);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_INIT), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_CONDITION), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_UPDATE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, EmptyCondition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; ; i += 1) { }");
+  expect_for_stmt(node);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_INIT), nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_CONDITION), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_UPDATE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, EmptyUpdate) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 10; ) { }");
+  expect_for_stmt(node);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_INIT), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOR_CONDITION), nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_UPDATE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, AllPartsEmpty) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (;;) { }");
+  expect_for_stmt(node);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_INIT), nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_CONDITION), nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_UPDATE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "{ a; for (var i = 0; i < 1; i += 1) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_FOR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 for 关键字到循环体终点。 */
+TEST(StmtForTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "for (var i = 0; i < 1; i += 1) { a; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_for_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtForTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for var i = 0; i < 1; i += 1) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'for'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, MissingInitializerSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (1 2; i < 1; i += 1) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after for initializer");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, MissingConditionSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 1 i += 1) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after for condition");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 1; i += 1 { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' after for update");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 1; i += 1)");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOR_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start for body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForTest, ReturnsNullOnNonFor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_for(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer / if / while / for
    直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
@@ -2563,6 +2788,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesFor) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "for (var i = 0; i < 1; i += 1) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FOR);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -2719,6 +2956,18 @@ TEST(StmtTest, NoLeakOnStatements) {
       "while () { }",
       "while (x { }",
       "while (x)",
+      "for (var i = 0; i < 10; i += 1) { a; }",
+      "for (i = 0; i < 10; i += 1) { }",
+      "for (; i < 10; i += 1) { }",
+      "for (var i = 0; ; i += 1) { }",
+      "for (var i = 0; i < 10; ) { }",
+      "for (;;) { }",
+      "{ a; for (var i = 0; i < 1; i += 1) { b; } }",
+      "for var i = 0; i < 1; i += 1) { }",
+      "for (1 2; i < 1; i += 1) { }",
+      "for (var i = 0; i < 1 i += 1) { }",
+      "for (var i = 0; i < 1; i += 1 { }",
+      "for (var i = 0; i < 1; i += 1)",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {
