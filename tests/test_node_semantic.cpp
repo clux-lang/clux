@@ -29,7 +29,9 @@
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
+#include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_type.h"
+#include "parser/node_switch_branch.h"
 #include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_stmt_while.h"
@@ -713,6 +715,66 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtSwitch) {
+  node_t *n = create_stmt_switch_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_SWITCH);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_SWITCH_CHILDREN_SIZE);
+  node_t *value = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_switch_node_set_value(n, value);
+  stmt_switch_node_set_body(n, body);
+  EXPECT_EQ(stmt_switch_node_get_value(n), value);
+  EXPECT_EQ(stmt_switch_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, SwitchBranch) {
+  node_t *n = create_switch_branch_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_SWITCH_BRANCH);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_SWITCH_BRANCH_CHILDREN_SIZE);
+  node_t *patterns = make_leaf(a);
+  node_t *body = make_leaf(a);
+  switch_branch_node_set_patterns(n, patterns);
+  switch_branch_node_set_body(n, body);
+  EXPECT_EQ(switch_branch_node_get_patterns(n), patterns);
+  EXPECT_EQ(switch_branch_node_get_body(n), body);
+  switch_branch_node_set_patterns(n, nullptr);
+  EXPECT_EQ(switch_branch_node_get_patterns(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, SwitchBranches) {
+  node_t *n = create_switch_branches_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_SWITCH_BRANCHES);
+  EXPECT_EQ(switch_branches_node_get_branch_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  switch_branches_node_add_branch(n, first);
+  switch_branches_node_add_branch(n, second);
+  EXPECT_EQ(switch_branches_node_get_branch_count(n), 2u);
+  EXPECT_EQ(switch_branches_node_get_branch(n, 0), first);
+  EXPECT_EQ(switch_branches_node_get_branch(n, 1), second);
+  EXPECT_EQ(switch_branches_node_get_branch(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, SwitchPatterns) {
+  node_t *n = create_switch_patterns_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_SWITCH_PATTERNS);
+  EXPECT_EQ(switch_patterns_node_get_pattern_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  switch_patterns_node_add_pattern(n, first);
+  switch_patterns_node_add_pattern(n, second);
+  EXPECT_EQ(switch_patterns_node_get_pattern_count(n), 2u);
+  EXPECT_EQ(switch_patterns_node_get_pattern(n, 0), first);
+  EXPECT_EQ(switch_patterns_node_get_pattern(n, 1), second);
+  EXPECT_EQ(switch_patterns_node_get_pattern(n, 2), nullptr);
   delete_node(&n);
 }
 

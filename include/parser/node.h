@@ -111,6 +111,16 @@ enum _node_kind_t {
   /* do-while 语句 do { body } while (cond);（白皮书 §4.7）。
      BODY 为块语句；CONDITION 为条件表达式；末尾 ';' 属于语句。 */
   CLUX_NODE_STMT_DO_WHILE,
+  /* switch 语句 switch (value) { branch... }（白皮书 §4.5）。
+     VALUE 为被匹配表达式；BODY 为分支列表（CLUX_NODE_SWITCH_BRANCHES）。 */
+  CLUX_NODE_STMT_SWITCH,
+  /* switch 分支列表 { branch... }，children 为 CLUX_NODE_SWITCH_BRANCH。 */
+  CLUX_NODE_SWITCH_BRANCHES,
+  /* 单个 switch 分支：PATTERNS 为模式列表（default 分支为 NULL）；
+     BODY 为块语句。 */
+  CLUX_NODE_SWITCH_BRANCH,
+  /* switch 模式列表 (pattern, ...)，children 为模式表达式。 */
+  CLUX_NODE_SWITCH_PATTERNS,
 
   /* 辅助节点：装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。
      不在主节点树上，由顶层声明、struct 字段/方法等特定语句主动调用，

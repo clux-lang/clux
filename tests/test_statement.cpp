@@ -3123,8 +3123,287 @@ TEST(StmtDoWhileTest, ReturnsNullOnNonDoWhile) {
   delete_allocator(&a);
 }
 
+/* ================= switch 语句 =================
+   语法：switch (value) { branch... }（白皮书 §4.5）。
+   分支写作 (pattern, ...) -> { ... } 或 default -> { ... }。 */
+
+/* 断言 switch 节点：VALUE 与 BODY 必存在。 */
+static node_t *expect_switch_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected switch statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_SWITCH);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_SWITCH_CHILDREN_SIZE);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_SWITCH_VALUE), nullptr);
+  node_t *body = node_get_child(node, CLUX_STMT_SWITCH_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_SWITCH_BRANCHES);
+  }
+  return body;
+}
+
+TEST(StmtSwitchTest, BasicSwitch) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a, &p, "switch (v) { (1) -> { a; } (2, 3) -> { b; } default -> { c; } }");
+  node_t *branches = expect_switch_stmt(node);
+  ASSERT_NE(branches, nullptr);
+  ASSERT_EQ(switch_branches_node_get_branch_count(branches), 3u);
+
+  node_t *first = switch_branches_node_get_branch(branches, 0);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(node_get_kind(first), CLUX_NODE_SWITCH_BRANCH);
+  node_t *first_patterns = switch_branch_node_get_patterns(first);
+  ASSERT_NE(first_patterns, nullptr);
+  EXPECT_EQ(switch_patterns_node_get_pattern_count(first_patterns), 1u);
+  EXPECT_NE(switch_branch_node_get_body(first), nullptr);
+
+  node_t *second = switch_branches_node_get_branch(branches, 1);
+  ASSERT_NE(second, nullptr);
+  node_t *second_patterns = switch_branch_node_get_patterns(second);
+  ASSERT_NE(second_patterns, nullptr);
+  EXPECT_EQ(switch_patterns_node_get_pattern_count(second_patterns), 2u);
+
+  node_t *default_branch = switch_branches_node_get_branch(branches, 2);
+  ASSERT_NE(default_branch, nullptr);
+  EXPECT_EQ(switch_branch_node_get_patterns(default_branch), nullptr);
+  EXPECT_NE(switch_branch_node_get_body(default_branch), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) {}");
+  node_t *branches = expect_switch_stmt(node);
+  ASSERT_NE(branches, nullptr);
+  EXPECT_EQ(switch_branches_node_get_branch_count(branches), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, SingleDefault) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { default -> { a; } }");
+  node_t *branches = expect_switch_stmt(node);
+  ASSERT_NE(branches, nullptr);
+  ASSERT_EQ(switch_branches_node_get_branch_count(branches), 1u);
+  node_t *branch = switch_branches_node_get_branch(branches, 0);
+  EXPECT_EQ(switch_branch_node_get_patterns(branch), nullptr);
+  EXPECT_NE(switch_branch_node_get_body(branch), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 匹配值可以是完整表达式。 */
+TEST(StmtSwitchTest, ExpressionValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (a + b) { (1) -> { } }");
+  expect_switch_stmt(node);
+  node_t *value = node_get_child(node, CLUX_STMT_SWITCH_VALUE);
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(node_get_kind(value), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; switch (v) { default -> { } } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_SWITCH);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 switch 关键字到分支列表终点。 */
+TEST(StmtSwitchTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "switch (v) { (1) -> { a; } }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_switch_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtSwitchTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch v) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'switch'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingValueReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch () { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected switch value expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' after switch value");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v)");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_SWITCH_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start switch body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingArrowReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { (1) { } }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '->' after switch branch");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingDefaultArrowReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { default { } }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '->' after switch branch");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, MissingBranchBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { (1) -> }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start switch branch body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, InvalidBranchStartReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { 1 -> { } }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected switch branch");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, EmptyPatternListReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { () -> { } }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected pattern in switch branch");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, UnclosedBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { (1) -> { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close switch body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtSwitchTest, ReturnsNullOnNonSwitch) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_switch(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* 语句分派：enum / union / cunion / struct / defer / if / while / for /
-   foreach / do-while 直接进入对应语句节点。 */
+   foreach / do-while / switch 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -3179,6 +3458,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesSwitch) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "switch (v) { default -> { } }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_SWITCH);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -3404,6 +3695,21 @@ TEST(StmtTest, NoLeakOnStatements) {
       "do { } while ();",
       "do { } while (x;",
       "do { } while (x)",
+      "switch (v) { (1) -> { a; } (2, 3) -> { b; } default -> { c; } }",
+      "switch (v) {}",
+      "switch (v) { default -> { a; } }",
+      "switch (a + b) { (1) -> { } }",
+      "{ a; switch (v) { default -> { } } }",
+      "switch v) { }",
+      "switch () { }",
+      "switch (v { }",
+      "switch (v)",
+      "switch (v) { (1) { } }",
+      "switch (v) { default { } }",
+      "switch (v) { (1) -> }",
+      "switch (v) { 1 -> { } }",
+      "switch (v) { () -> { } }",
+      "switch (v) { (1) -> { }",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

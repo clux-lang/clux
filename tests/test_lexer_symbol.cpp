@@ -95,6 +95,19 @@ TEST(LexerKeywordTest, StructUnionEnumAreKeywords) {
   delete_allocator(&a);
 }
 
+TEST(LexerKeywordTest, SwitchAndDefaultAreKeywords) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *kws[] = {"switch", "default", nullptr};
+  for (int i = 0; kws[i] != nullptr; i++) {
+    position_t p = lexer_test_pos(kws[i]);
+    token_t *tok = lexer_read_identifier(a, &p, "test.clux");
+    ASSERT_NE(tok, nullptr) << "kw=" << kws[i];
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_KEYWORD) << "kw=" << kws[i];
+    delete_token(&tok);
+  }
+  delete_allocator(&a);
+}
+
 TEST(LexerKeywordTest, OfIsKeyword) {
   allocator_t *a = create_allocator(malloc, free);
   position_t p = lexer_test_pos("of");
