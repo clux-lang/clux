@@ -1023,6 +1023,73 @@ TEST(StmtVarTest, UsingWithType) {
   delete_allocator(&a);
 }
 
+/* comptime var：comptime 记录在 COMPTIME 槽。 */
+TEST(StmtVarTest, ComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime var LIMIT: const u32 = 32;");
+  expect_var_stmt(node, "var", true, 0);
+  node_t *comptime = node_get_child(node, CLUX_STMT_VAR_COMPTIME);
+  ASSERT_NE(comptime, nullptr);
+  EXPECT_EQ(node_get_kind(comptime), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime using 语法上可解析，合法性留给语义阶段检查。 */
+TEST(StmtVarTest, ComptimeUsingParses) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime using a = e;");
+  expect_var_stmt(node, "using", false, 0);
+  node_t *comptime = node_get_child(node, CLUX_STMT_VAR_COMPTIME);
+  ASSERT_NE(comptime, nullptr);
+  EXPECT_EQ(node_get_kind(comptime), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtVarTest, DecoratedComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] comptime var x = 1;");
+  expect_var_stmt(node, "var", false, 1);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_VAR_COMPTIME), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime var 的区间从 comptime 起点到 ';'。 */
+TEST(StmtVarTest, ComptimeVarSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "comptime var x = 1;";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_var_stmt(node, "var", false, 0);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime 后接 if 时不认领为变量语句，游标不动。 */
+TEST(StmtVarTest, DoesNotStealComptimeIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "comptime if (N) { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtVarTest, SingleDecorator) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -3633,6 +3700,32 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime var x = 1;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_VAR_COMPTIME), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] comptime var x = 1;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_VAR_COMPTIME), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesComptimeIf) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -3912,6 +4005,9 @@ TEST(StmtTest, NoLeakOnStatements) {
       "comptime if (a) { } else if (b) { } else { c; }",
       "{ a; comptime if (N) { b; } }",
       "comptime",
+      "comptime var x = 1;",
+      "comptime using a = e;",
+      "[[trace]] comptime var x = 1;",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

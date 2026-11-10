@@ -22,6 +22,10 @@ bool parser_peek_decorator(parser_t *parser);
    装饰器内部可能出现方括号，因此按 `[` / `]` 深度扫描，深度归零后的
    下一个 token 即声明关键字。 */
 token_t *parser_peek_token_after_decorators(parser_t *parser);
+
+/* 跳过 0 个或多个装饰器后，返回其后的 token 在 token 流中的位置
+   （不消费任何 token）。用于需要继续前瞻关键字的场景。 */
+size_t parser_get_position_after_decorators(parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

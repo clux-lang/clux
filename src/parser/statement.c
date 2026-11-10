@@ -3,6 +3,7 @@
 #include "core/error.h"
 #include "core/location.h"
 #include "core/position.h"
+#include "core/vec.h"
 #include "parser/decorator.h"
 #include "parser/expression.h"
 #include "parser/expression_internal.h"
@@ -266,16 +267,50 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 变量定义语句 <decorator>* (var|using) name [: type]? = expr;
-   （白皮书 §4.1、§4.12.1）。
-   调用前当前 token 不一定是装饰器或 var/using，不是时返回 NULL 且游标不动。
+/* 返回 pos 之后第一个非 trivia token；越界返回 NULL。 */
+static token_t *peek_next_non_trivia(parser_t *parser, size_t pos) {
+  vec_t *tokens = parser_get_tokens(parser);
+  size_t count = vec_get_size(tokens);
+  while (pos < count) {
+    token_t *token = vec_get(tokens, pos);
+    token_kind_t kind = token_get_kind(token);
+    if (kind != CLUX_TOKEN_WHITESPACE && kind != CLUX_TOKEN_COMMENT &&
+        kind != CLUX_TOKEN_MULTILINE_COMMENT) {
+      return token;
+    }
+    pos++;
+  }
+  return NULL;
+}
+
+/* 变量定义语句 <decorator>* [comptime]? (var|using) name [: type]? = expr;
+   （白皮书 §4.1、§3.4、§4.12.1）。
+   调用前当前 token 不一定是装饰器、comptime 或 var/using，不是时返回 NULL
+   且游标不动。comptime 只有在后接 var/using 时才由本函数认领，
+   以便 `comptime if` 留给 comptime if 语句。
    类型只取后缀层，避免把 `=` 当作赋值运算符吃掉；初值走顶层入口。
+   `comptime using` 语法上可解析，是否合法由语义阶段检查。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "var") &&
-      !token_is(token, CLUX_TOKEN_KEYWORD, "using")) {
+
+  /* 跳过装饰器后看关键字；若是 comptime，再往后看一个非 trivia token。 */
+  token_t *lookahead =
+      has_decorators ? parser_peek_token_after_decorators(parser) : token;
+  bool is_var_stmt = token_is(lookahead, CLUX_TOKEN_KEYWORD, "var") ||
+                     token_is(lookahead, CLUX_TOKEN_KEYWORD, "using");
+  if (!is_var_stmt && token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime")) {
+    size_t comptime_pos = parser_get_position_after_decorators(parser);
+    token_t *after = peek_next_non_trivia(parser, comptime_pos + 1);
+    is_var_stmt = token_is(after, CLUX_TOKEN_KEYWORD, "var") ||
+                  token_is(after, CLUX_TOKEN_KEYWORD, "using");
+  }
+  /* 保留旧契约：装饰器后不是 var/using 时由本函数报错；但 comptime 后
+     不是 var/using（如 comptime if）必须返回 NULL，交给其他语句处理。 */
+  bool claim_anyway =
+      has_decorators && !token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime");
+  if (!is_var_stmt && !claim_anyway) {
     return NULL;
   }
   location_t begin_loc = *token_get_location(token);
@@ -284,6 +319,18 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   node_set_location(node, &begin_loc);
 
   read_leading_decorators(allocator, parser, node, stmt_var_node_add_decorator);
+
+  /* 可选 comptime 标记。 */
+  token = parser_peek_token(parser);
+  if (token_is(token, CLUX_TOKEN_KEYWORD, "comptime")) {
+    location_t comptime_loc = *token_get_location(token);
+    node_t *comptime = create_symbol_node(allocator);
+    node_set_location(comptime, &comptime_loc);
+    stmt_var_node_set_comptime(node, comptime);
+    parser_next(parser); /* comptime */
+    parser_skip_trivia(parser);
+    token = parser_peek_token(parser);
+  }
 
   /* var / using 关键字。 */
   token = parser_peek_token(parser);
@@ -596,6 +643,15 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var") ||
         token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
       return parser_read_stmt_var(allocator, parser);
+    }
+    /* 装饰器后可能是 comptime var / comptime using；若不是变量语句，
+       交给函数语句路径报错（装饰器不适用于 comptime if）。 */
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "comptime")) {
+      node_t *var_stmt = parser_read_stmt_var(allocator, parser);
+      if (var_stmt) {
+        return var_stmt;
+      }
+      return parser_read_stmt_func(allocator, parser);
     }
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "type")) {
       return parser_read_stmt_type(allocator, parser);

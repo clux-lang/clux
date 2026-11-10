@@ -40,6 +40,14 @@ node_t *stmt_var_node_get_value(node_t *self) {
   return node_get_child(self, CLUX_STMT_VAR_VALUE);
 }
 
+void stmt_var_node_set_comptime(node_t *self, node_t *comptime) {
+  node_set_child(self, CLUX_STMT_VAR_COMPTIME, comptime);
+}
+
+node_t *stmt_var_node_get_comptime(node_t *self) {
+  return node_get_child(self, CLUX_STMT_VAR_COMPTIME);
+}
+
 void stmt_var_node_add_decorator(node_t *self, node_t *decorator) {
   node_add_child(self, decorator);
 }

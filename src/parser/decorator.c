@@ -1,6 +1,7 @@
 #include "parser/decorator.h"
 #include "core/error.h"
 #include "core/location.h"
+#include "core/vec.h"
 #include "parser/expression.h"
 #include "parser/expression_internal.h"
 #include "parser/lexer.h"
@@ -31,10 +32,10 @@ bool parser_peek_decorator(parser_t *parser) {
   return token_is(peek_token_at(parser, 1), CLUX_TOKEN_SYMBOL, "[");
 }
 
-/* 跳过 0 个或多个装饰器，返回其后的 token（不消费任何 token）。
-   装饰器内部可能出现方括号，因此按 `[` / `]` 深度扫描，深度归零后的
-   下一个 token 即声明关键字。 */
-token_t *parser_peek_token_after_decorators(parser_t *parser) {
+/* 跳过 0 个或多个装饰器后，返回其后的 token 在 token 流中的位置
+   （不消费任何 token）。装饰器内部可能出现方括号，因此按 `[` / `]`
+   深度扫描，深度归零后的下一个 token 即声明关键字。 */
+size_t parser_get_position_after_decorators(parser_t *parser) {
   size_t start = parser_get_position(parser);
   token_t *token = parser_peek_token(parser);
   while (token_is(token, CLUX_TOKEN_SYMBOL, "[")) {
@@ -60,9 +61,19 @@ token_t *parser_peek_token_after_decorators(parser_t *parser) {
       break;
     }
   }
-  token_t *result = parser_peek_token(parser);
+  size_t result = parser_get_position(parser);
   parser_set_position(parser, start);
   return result;
+}
+
+/* 跳过 0 个或多个装饰器，返回其后的 token（不消费任何 token）。 */
+token_t *parser_peek_token_after_decorators(parser_t *parser) {
+  size_t pos = parser_get_position_after_decorators(parser);
+  vec_t *tokens = parser_get_tokens(parser);
+  if (pos >= vec_get_size(tokens)) {
+    return NULL;
+  }
+  return vec_get(tokens, pos);
 }
 
 /* 装饰器 [[ <expr> ]]（白皮书 §3.2、§9.1）。

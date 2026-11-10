@@ -668,14 +668,17 @@ TEST_F(NodeSemanticTest, StmtVar) {
   node_t *name = make_leaf(a);
   node_t *type = make_leaf(a);
   node_t *value = make_leaf(a);
+  node_t *comptime = make_leaf(a);
   stmt_var_node_set_keyword(n, keyword);
   stmt_var_node_set_name(n, name);
   stmt_var_node_set_type(n, type);
   stmt_var_node_set_value(n, value);
+  stmt_var_node_set_comptime(n, comptime);
   EXPECT_EQ(stmt_var_node_get_keyword(n), keyword);
   EXPECT_EQ(stmt_var_node_get_name(n), name);
   EXPECT_EQ(stmt_var_node_get_type(n), type);
   EXPECT_EQ(stmt_var_node_get_value(n), value);
+  EXPECT_EQ(stmt_var_node_get_comptime(n), comptime);
   node_t *d0 = create_decorator_node(a);
   stmt_var_node_add_decorator(n, d0);
   EXPECT_EQ(stmt_var_node_get_decorator_count(n), 1u);
@@ -687,7 +690,9 @@ TEST_F(NodeSemanticTest, StmtVar) {
 TEST_F(NodeSemanticTest, StmtVarWithoutType) {
   node_t *n = create_stmt_var_node(a);
   stmt_var_node_set_type(n, nullptr);
+  stmt_var_node_set_comptime(n, nullptr);
   EXPECT_EQ(stmt_var_node_get_type(n), nullptr);
+  EXPECT_EQ(stmt_var_node_get_comptime(n), nullptr);
   delete_node(&n);
 }
 
