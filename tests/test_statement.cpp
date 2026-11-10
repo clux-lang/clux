@@ -2732,8 +2732,213 @@ TEST(StmtForTest, ReturnsNullOnNonFor) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct / defer / if / while / for
-   直接进入对应语句节点。 */
+/* ================= foreach 语句 =================
+   语法：foreach ([var] name [: type]? of iterable) { body }（白皮书 §4.9）。 */
+
+/* 断言 foreach 节点：NAME / ITERABLE / BODY 必存在。 */
+static node_t *expect_foreach_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected foreach statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FOREACH);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_FOREACH_CHILDREN_SIZE);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOREACH_NAME), nullptr);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_FOREACH_ITERABLE), nullptr);
+  node_t *body = node_get_child(node, CLUX_STMT_FOREACH_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  }
+  return body;
+}
+
+TEST(StmtForeachTest, BasicForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of a) { b; }");
+  node_t *body = expect_foreach_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 1u);
+  node_t *keyword = node_get_child(node, CLUX_STMT_FOREACH_KEYWORD);
+  ASSERT_NE(keyword, nullptr);
+  EXPECT_EQ(node_get_kind(keyword), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOREACH_TYPE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 省略 var 表示只读迭代。 */
+TEST(StmtForeachTest, WithoutVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (v of a) { }");
+  expect_foreach_stmt(node);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOREACH_KEYWORD), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, TypedVariable) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var item: Item of items) { }");
+  expect_foreach_stmt(node);
+  node_t *type = node_get_child(node, CLUX_STMT_FOREACH_TYPE);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(node_get_kind(type), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 被迭代对象可以是表达式。 */
+TEST(StmtForeachTest, SliceIterable) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of a[1:3]) { }");
+  expect_foreach_stmt(node);
+  node_t *iterable = node_get_child(node, CLUX_STMT_FOREACH_ITERABLE);
+  ASSERT_NE(iterable, nullptr);
+  EXPECT_EQ(node_get_kind(iterable), CLUX_NODE_EXPR_SLICE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; foreach (var v of xs) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_FOREACH);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 foreach 关键字到循环体终点。 */
+TEST(StmtForeachTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "foreach (var v of a) { b; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_foreach_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtForeachTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach var v of a) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'foreach'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var of a) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected iteration variable name in foreach");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, MissingOfReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v a) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'of' in foreach");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, MissingIterableReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of ) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected iterable expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of a { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' after foreach iterable");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of a)");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_FOREACH_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start foreach body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtForeachTest, ReturnsNullOnNonForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_foreach(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer / if / while / for /
+   foreach 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -2788,6 +2993,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "foreach (var v of a) { b; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FOREACH);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -2968,6 +3185,17 @@ TEST(StmtTest, NoLeakOnStatements) {
       "for (var i = 0; i < 1 i += 1) { }",
       "for (var i = 0; i < 1; i += 1 { }",
       "for (var i = 0; i < 1; i += 1)",
+      "foreach (var v of a) { b; }",
+      "foreach (v of a) { }",
+      "foreach (var item: Item of items) { }",
+      "foreach (var v of a[1:3]) { }",
+      "{ a; foreach (var v of xs) { b; } }",
+      "foreach var v of a) { }",
+      "foreach (var of a) { }",
+      "foreach (var v a) { }",
+      "foreach (var v of ) { }",
+      "foreach (var v of a { }",
+      "foreach (var v of a)",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

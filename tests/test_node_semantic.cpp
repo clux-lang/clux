@@ -23,6 +23,7 @@
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_for.h"
+#include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_return.h"
@@ -711,6 +712,38 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtForeach) {
+  node_t *n = create_stmt_foreach_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_FOREACH);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_FOREACH_CHILDREN_SIZE);
+  node_t *keyword = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *type = make_leaf(a);
+  node_t *iterable = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_foreach_node_set_keyword(n, keyword);
+  stmt_foreach_node_set_name(n, name);
+  stmt_foreach_node_set_type(n, type);
+  stmt_foreach_node_set_iterable(n, iterable);
+  stmt_foreach_node_set_body(n, body);
+  EXPECT_EQ(stmt_foreach_node_get_keyword(n), keyword);
+  EXPECT_EQ(stmt_foreach_node_get_name(n), name);
+  EXPECT_EQ(stmt_foreach_node_get_type(n), type);
+  EXPECT_EQ(stmt_foreach_node_get_iterable(n), iterable);
+  EXPECT_EQ(stmt_foreach_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtForeachOptionalSlots) {
+  node_t *n = create_stmt_foreach_node(a);
+  stmt_foreach_node_set_keyword(n, nullptr);
+  stmt_foreach_node_set_type(n, nullptr);
+  EXPECT_EQ(stmt_foreach_node_get_keyword(n), nullptr);
+  EXPECT_EQ(stmt_foreach_node_get_type(n), nullptr);
   delete_node(&n);
 }
 
