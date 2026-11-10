@@ -7,6 +7,12 @@ node_t *create_stmt_if_node(allocator_t *allocator) {
   return self;
 }
 
+node_t *create_stmt_comptime_if_node(allocator_t *allocator) {
+  node_t *self = create_node(allocator, CLUX_NODE_STMT_COMPTIME_IF);
+  node_resize_children(self, CLUX_STMT_IF_CHILDREN_SIZE);
+  return self;
+}
+
 void stmt_if_node_set_condition(node_t *self, node_t *condition) {
   node_set_child(self, CLUX_STMT_IF_CONDITION, condition);
 }

@@ -894,6 +894,20 @@ TEST_F(NodeSemanticTest, StmtIf) {
   delete_node(&n);
 }
 
+TEST_F(NodeSemanticTest, StmtComptimeIf) {
+  node_t *n = create_stmt_comptime_if_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_COMPTIME_IF);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_IF_CHILDREN_SIZE);
+  node_t *condition = make_leaf(a);
+  node_t *then_branch = make_leaf(a);
+  stmt_if_node_set_condition(n, condition);
+  stmt_if_node_set_then(n, then_branch);
+  EXPECT_EQ(stmt_if_node_get_condition(n), condition);
+  EXPECT_EQ(stmt_if_node_get_then(n), then_branch);
+  delete_node(&n);
+}
+
 TEST_F(NodeSemanticTest, StmtIfWithoutElse) {
   node_t *n = create_stmt_if_node(a);
   stmt_if_node_set_else(n, nullptr);

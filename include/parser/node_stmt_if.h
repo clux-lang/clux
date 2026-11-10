@@ -15,6 +15,8 @@ extern "C" {
 #define CLUX_STMT_IF_CHILDREN_SIZE 3
 
 node_t *create_stmt_if_node(allocator_t *allocator);
+/* comptime if 与普通 if 槽布局相同，共用下列访问器。 */
+node_t *create_stmt_comptime_if_node(allocator_t *allocator);
 /* CONDITION / THEN 容错时可为 NULL。 */
 void stmt_if_node_set_condition(node_t *self, node_t *condition);
 node_t *stmt_if_node_get_condition(node_t *self);

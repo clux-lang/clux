@@ -656,6 +656,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
+  node = parser_read_stmt_comptime_if(allocator, parser);
+  if (node) {
+    return node;
+  }
   node = parser_read_stmt_while(allocator, parser);
   if (node) {
     return node;

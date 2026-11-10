@@ -37,6 +37,7 @@ node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_defer(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_if(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_comptime_if(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_while(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_for(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_foreach(allocator_t *allocator, parser_t *parser);

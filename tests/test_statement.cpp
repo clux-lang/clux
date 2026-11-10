@@ -3457,8 +3457,122 @@ TEST(StmtSwitchTest, ReturnsNullOnNonSwitch) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct / defer / if / while / for /
-   foreach / do-while / switch 直接进入对应语句节点。 */
+/* ================= comptime if 语句 =================
+   语法：comptime if (cond) { ... }（白皮书 §4.15）。
+   槽布局与普通 if 相同，else if 链保持 comptime 语义。 */
+
+TEST(StmtComptimeIfTest, BasicComptimeIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime if (N == 3) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_IF);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_IF_CHILDREN_SIZE);
+  node_t *condition = stmt_if_node_get_condition(node);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  node_t *then_branch = stmt_if_node_get_then(node);
+  ASSERT_NE(then_branch, nullptr);
+  EXPECT_EQ(node_get_kind(then_branch), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(stmt_if_node_get_else(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtComptimeIfTest, WithElse) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime if (N) { } else { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_IF);
+  node_t *else_branch = stmt_if_node_get_else(node);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(node_get_kind(else_branch), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* else if 链中的嵌套节点也必须是 comptime if。 */
+TEST(StmtComptimeIfTest, ElseIfChainStaysComptime) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "comptime if (a) { } else if (b) { } else { c; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_IF);
+  node_t *else_branch = stmt_if_node_get_else(node);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(node_get_kind(else_branch), CLUX_NODE_STMT_COMPTIME_IF);
+  node_t *nested_else = stmt_if_node_get_else(else_branch);
+  ASSERT_NE(nested_else, nullptr);
+  EXPECT_EQ(node_get_kind(nested_else), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtComptimeIfTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; comptime if (N) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_COMPTIME_IF);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 comptime 关键字到分支终点。 */
+TEST(StmtComptimeIfTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "comptime if (N) { a; } else { b; }";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime 后缺 if。 */
+TEST(StmtComptimeIfTest, MissingIfReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_IF);
+  EXPECT_EQ(stmt_if_node_get_condition(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'if' after 'comptime'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtComptimeIfTest, ReturnsNullOnNonComptime) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_comptime_if(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer / if / comptime if /
+   while / for / foreach / do-while / switch 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -3513,6 +3627,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesComptimeIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime if (N) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_COMPTIME_IF);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -3781,6 +3907,11 @@ TEST(StmtTest, NoLeakOnStatements) {
       "{ ; a; }",
       "{ ; ; a; }",
       "{ { a; }; b; }",
+      "comptime if (N == 3) { a; }",
+      "comptime if (N) { } else { a; }",
+      "comptime if (a) { } else if (b) { } else { c; }",
+      "{ a; comptime if (N) { b; } }",
+      "comptime",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

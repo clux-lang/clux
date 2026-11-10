@@ -99,6 +99,10 @@ enum _node_kind_t {
      CONDITION 为条件表达式；THEN 为块语句；ELSE 可缺失，存在时为块语句
      或嵌套的 CLUX_NODE_STMT_IF（else if 链）。 */
   CLUX_NODE_STMT_IF,
+  /* comptime if 语句 comptime if (cond) { ... }（白皮书 §4.15）。
+     槽布局与 CLUX_NODE_STMT_IF 完全相同，条件在编译期求值；
+     else if 链中的嵌套节点同样是本类型。 */
+  CLUX_NODE_STMT_COMPTIME_IF,
   /* while 语句 while (cond) { body }（白皮书 §4.6）。
      CONDITION 为条件表达式；BODY 为块语句。 */
   CLUX_NODE_STMT_WHILE,
