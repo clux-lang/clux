@@ -494,8 +494,85 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 枚举语句 <decorator>* <enum_decl>（白皮书 §3.6）。
+   调用前当前 token 不一定是装饰器或 enum，不是时返回 NULL 且游标不动。
+   装饰器按源码顺序挂在枚举声明之后。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "enum")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_stmt_enum_node(allocator);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(
+      allocator, parser, node, stmt_enum_node_add_decorator);
+
+  /* 枚举声明。 */
+  node_t *enum_decl = parser_read_expr_enum_decl(allocator, parser);
+  if (!enum_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected enum declaration in enum statement"));
+    return node;
+  }
+  stmt_enum_node_set_enum_decl(node, enum_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(enum_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* union 语句 <decorator>* <union_decl>（白皮书 §3.7、§3.8）。
+   tag union 与 cunion 共用同一节点，由声明内的 KEYWORD 槽区分。
+   调用前当前 token 不一定是装饰器或 union/cunion，不是时返回 NULL 且游标不动。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "union") &&
+      !token_is(token, CLUX_TOKEN_KEYWORD, "cunion")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_stmt_union_node(allocator);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(
+      allocator, parser, node, stmt_union_node_add_decorator);
+
+  /* union / cunion 声明。 */
+  node_t *union_decl = parser_read_expr_union(allocator, parser);
+  if (!union_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected union declaration in union statement"));
+    return node;
+  }
+  stmt_union_node_set_union_decl(node, union_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(union_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 语句分派。调用方负责清理前导 trivia。
-   装饰器可能引导函数/变量/类型语句，因此先跳过装饰器看关键字。 */
+   装饰器可能引导函数/变量/类型/枚举/union 语句，因此先跳过装饰器看关键字。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
   if (node) {
@@ -510,6 +587,13 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "type")) {
       return parser_read_stmt_type(allocator, parser);
     }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "enum")) {
+      return parser_read_stmt_enum(allocator, parser);
+    }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "union") ||
+        token_is(keyword, CLUX_TOKEN_KEYWORD, "cunion")) {
+      return parser_read_stmt_union(allocator, parser);
+    }
     return parser_read_stmt_func(allocator, parser);
   }
   node = parser_read_stmt_var(allocator, parser);
@@ -521,6 +605,14 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_stmt_func(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_enum(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_union(allocator, parser);
   if (node) {
     return node;
   }

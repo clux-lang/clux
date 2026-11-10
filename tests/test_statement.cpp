@@ -1489,6 +1489,333 @@ TEST(StmtTypeTest, ReturnsNullOnNonType) {
   delete_allocator(&a);
 }
 
+/* ================= 枚举语句 =================
+   语法：<decorator>* <enum_decl>（白皮书 §3.6）。 */
+
+static node_t *expect_enum_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected enum statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ENUM);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_ENUM_FIRST_DECORATOR + decorator_count);
+  node_t *enum_decl = node_get_child(node, CLUX_STMT_ENUM_ENUM_DECL);
+  EXPECT_NE(enum_decl, nullptr);
+  if (enum_decl) {
+    EXPECT_EQ(node_get_kind(enum_decl), CLUX_NODE_EXPR_ENUM_DECL);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_ENUM_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return enum_decl;
+}
+
+TEST(StmtEnumTest, WithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "enum Color: u8 { Red = 1, Green = 2 }");
+  expect_enum_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEnumTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] enum E: u8 { A = 1 }");
+  expect_enum_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEnumTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a, &p, "[[trace]] [[metadata(\"role\", \"handler\")]] enum E: u8 { A = 1 }");
+  expect_enum_stmt(node, 2);
+  node_t *first = node_get_child(node, CLUX_STMT_ENUM_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_ENUM_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEnumTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; enum E: u8 { A = 1 } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_ENUM);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器起点到枚举声明终点。 */
+TEST(StmtEnumTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] enum E: u8 { A = 1 }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_enum_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后缺枚举声明。 */
+TEST(StmtEnumTest, MissingEnumDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_enum(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ENUM);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_ENUM_ENUM_DECL), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected enum declaration in enum statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEnumTest, ReturnsNullOnNonEnum) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_enum(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtEnumTest, ReturnsNullOnSingleBracket) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[trace] enum E: u8 { A = 1 }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_enum(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ================= union 语句 =================
+   语法：<decorator>* <union_decl>（白皮书 §3.7、§3.8）。
+   tag union 与 cunion 共用同一节点，由声明内的 KEYWORD 槽区分。 */
+
+static node_t *expect_union_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected union statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_UNION_FIRST_DECORATOR + decorator_count);
+  node_t *union_decl = node_get_child(node, CLUX_STMT_UNION_UNION_DECL);
+  EXPECT_NE(union_decl, nullptr);
+  if (union_decl) {
+    EXPECT_EQ(node_get_kind(union_decl), CLUX_NODE_EXPR_UNION);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_UNION_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return union_decl;
+}
+
+TEST(StmtUnionTest, UnionWithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "union Shape { circle: Circle; }");
+  expect_union_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, CunionWithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "cunion Value { i: i32; f: f32; }");
+  expect_union_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] union Shape { a: i32; }");
+  expect_union_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, DecoratedCunion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] cunion Value { i: i32; }");
+  expect_union_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; union U { x: i32; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器起点到 union 声明终点。 */
+TEST(StmtUnionTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] union Shape { a: i32; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_union_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后缺 union 声明。 */
+TEST(StmtUnionTest, MissingUnionDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_union(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_UNION_UNION_DECL), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected union declaration in union statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, ReturnsNullOnNonUnion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_union(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtUnionTest, ReturnsNullOnSingleBracket) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[trace] union U { a: i32; }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_union(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion 直接进入对应语句节点。 */
+TEST(StmtDispatchTest, DispatchesEnum) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "enum E: u8 { A = 1 }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ENUM);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesUnion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "union U { a: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesCunion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "cunion U { a: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedEnumAndUnion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] enum E: u8 { A = 1 }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ENUM);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+
+  a = create_allocator(malloc, free);
+  node = parse_stmt(a, &p, "[[trace]] union U { a: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_UNION);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtTest, NoLeakOnStatements) {
   const char *sources[] = {
       "{}",
@@ -1527,6 +1854,21 @@ TEST(StmtTest, NoLeakOnStatements) {
       "[[trace]] a;",
       "[trace] func f(): void {}",
       "[[trace]] func f(): void",
+      "enum E: u8 { A = 1 }",
+      "[[trace]] enum E: u8 { A = 1 }",
+      "[[trace]] [[metadata(\"role\", \"handler\")]] enum E: u8 { A = 1 }",
+      "{ a; enum E: u8 { A = 1 } }",
+      "enum E: u8 { A = }",
+      "enum E: u8 { A = 1",
+      "[[trace]] enum",
+      "union U { a: i32; }",
+      "cunion U { a: i32; }",
+      "[[trace]] union U { a: i32; }",
+      "[[trace]] cunion U { a: i32; }",
+      "{ a; union U { a: i32; } }",
+      "union U { a: i32 }",
+      "union U",
+      "[[trace]] union",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

@@ -3,11 +3,13 @@
 #include "core/allocator.h"
 #include "parser/node.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_type.h"
+#include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/parser.h"
 #ifdef __cplusplus
@@ -24,6 +26,8 @@ node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus

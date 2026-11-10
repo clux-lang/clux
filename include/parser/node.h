@@ -99,6 +99,14 @@ enum _node_kind_t {
      GENERICS 可缺失；VALUE 槽存别名指向的类型表达式，
      其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_TYPE,
+
+  /* 枚举语句 <decorator>* <enum_decl>（白皮书 §3.6）。
+     ENUM_DECL 槽存枚举声明，其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_ENUM,
+
+  /* union 语句 <decorator>* <union_decl>（白皮书 §3.7、§3.8）。
+     UNION_DECL 槽存 union/cunion 声明，其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_UNION,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

@@ -18,10 +18,12 @@
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
 #include "parser/node_stmt_block.h"
+#include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_type.h"
+#include "parser/node_stmt_union.h"
 #include "parser/node_stmt_var.h"
 #include "parser/node_subscript.h"
 #include "parser/node_ternary.h"
@@ -701,6 +703,39 @@ TEST_F(NodeSemanticTest, StmtTypeWithoutGenerics) {
   node_t *n = create_stmt_type_node(a);
   stmt_type_node_set_generics(n, nullptr);
   EXPECT_EQ(stmt_type_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtEnum) {
+  node_t *n = create_stmt_enum_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_ENUM);
+  EXPECT_EQ(stmt_enum_node_get_decorator_count(n), 0u);
+  node_t *decl = create_enum_decl_node(a);
+  stmt_enum_node_set_enum_decl(n, decl);
+  EXPECT_EQ(stmt_enum_node_get_enum_decl(n), decl);
+  node_t *d0 = create_decorator_node(a);
+  node_t *d1 = create_decorator_node(a);
+  stmt_enum_node_add_decorator(n, d0);
+  stmt_enum_node_add_decorator(n, d1);
+  EXPECT_EQ(stmt_enum_node_get_decorator_count(n), 2u);
+  EXPECT_EQ(stmt_enum_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(stmt_enum_node_get_decorator(n, 1), d1);
+  EXPECT_EQ(stmt_enum_node_get_decorator(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtUnion) {
+  node_t *n = create_stmt_union_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_UNION);
+  EXPECT_EQ(stmt_union_node_get_decorator_count(n), 0u);
+  node_t *decl = create_union_node(a);
+  stmt_union_node_set_union_decl(n, decl);
+  EXPECT_EQ(stmt_union_node_get_union_decl(n), decl);
+  node_t *d0 = create_decorator_node(a);
+  stmt_union_node_add_decorator(n, d0);
+  EXPECT_EQ(stmt_union_node_get_decorator_count(n), 1u);
+  EXPECT_EQ(stmt_union_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(stmt_union_node_get_decorator(n, 1), nullptr);
   delete_node(&n);
 }
 
