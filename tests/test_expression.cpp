@@ -8071,3 +8071,326 @@ TEST(ExpressionUnionTest, NoLeakOnUnion) {
     EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
+
+/* ================= enum 声明 =================
+   enum Name: Underlying { Variant = value, ... }（白皮书 §3.6）。
+   装饰器属于外层语句，本层只解析声明本身。 */
+
+/* 断言 enum 节点形状：名字、底层类型、成员列表必存在。 */
+static node_t *expect_enum_decl(node_t *expr, const char *name) {
+  if (!expr) {
+    ADD_FAILURE() << "expected enum node, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_ENUM_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_ENUM_DECL_CHILDREN_SIZE);
+  node_t *kw = node_get_child(expr, CLUX_EXPR_ENUM_DECL_KEYWORD);
+  if (!kw) {
+    ADD_FAILURE() << "expected enum keyword";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(kw), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(node_get_location(kw)->end.offset -
+                node_get_location(kw)->begin.offset,
+            (ptrdiff_t)strlen("enum"));
+  node_t *name_node = node_get_child(expr, CLUX_EXPR_ENUM_DECL_NAME);
+  if (!name_node) {
+    ADD_FAILURE() << "expected enum name";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(name_node), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(name_node)->end.offset -
+                node_get_location(name_node)->begin.offset,
+            (ptrdiff_t)strlen(name));
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_ENUM_DECL_UNDERLYING), nullptr);
+  node_t *body = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  if (!body) {
+    ADD_FAILURE() << "expected enum body";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(body), CLUX_NODE_ENUM_VARIANTS);
+  return expr;
+}
+
+/* 断言成员列表里第 idx 个成员是 name = value。 */
+static void expect_variant(node_t *variants, size_t idx) {
+  node_t *variant = node_get_child(variants, idx);
+  ASSERT_NE(variant, nullptr);
+  EXPECT_EQ(node_get_kind(variant), CLUX_NODE_ENUM_VARIANT);
+  EXPECT_NE(node_get_child(variant, CLUX_ENUM_VARIANT_NAME), nullptr);
+  EXPECT_NE(node_get_child(variant, CLUX_ENUM_VARIANT_VALUE), nullptr);
+}
+
+TEST(ExpressionEnumDeclTest, BasicDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a, &p, "enum Color: u8 { Red = 1, Green = 2, Blue = 4, }");
+  expect_enum_decl(expr, "Color");
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(variants)), 3u);
+  expect_variant(variants, 0);
+  expect_variant(variants, 1);
+  expect_variant(variants, 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 末尾逗号可选。 */
+TEST(ExpressionEnumDeclTest, NoTrailingComma) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u32 { A = 0, B = 1 }");
+  expect_enum_decl(expr, "E");
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(variants)), 2u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum Empty: u8 {}");
+  expect_enum_decl(expr, "Empty");
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  EXPECT_EQ(vec_get_size(node_get_children(variants)), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 成员值可以是编译期表达式，语法层不限制。 */
+TEST(ExpressionEnumDeclTest, ExpressionValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { A = 1 << 2, B = A + 1 }");
+  expect_enum_decl(expr, "E");
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(variants)), 2u);
+  expect_variant(variants, 0);
+  expect_variant(variants, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(ExpressionEnumDeclTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum : u8 { A = 1 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected name after 'enum'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingUnderlyingColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E u8 { A = 1 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' after enum name");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingUnderlyingReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: { A = 1 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected underlying type after ':'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start enum body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingEqualsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { A }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '=' after enum variant name");
+  /* 容错：成员仍保留名字，值为 NULL。 */
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(variants)), 1u);
+  node_t *variant = node_get_child(variants, 0);
+  EXPECT_EQ(node_get_child(variant, CLUX_ENUM_VARIANT_VALUE), nullptr);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingValueReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { A = }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected enum variant value after '='");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, MissingSeparatorReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { A = 1 B = 2 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ',' or '}' after enum variant");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非法成员起始（数字）：报错后跳到 ',' / '}' 继续。 */
+TEST(ExpressionEnumDeclTest, InvalidVariantStartReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { 1 = 2, B = 3 }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected enum variant in enum body");
+  /* 跳过后仍解析出第二个成员。 */
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_EQ(vec_get_size(node_get_children(variants)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, UnclosedBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { A = 1,");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close enum body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 非法成员起始直接到 EOF：容错循环安全退出。 */
+TEST(ExpressionEnumDeclTest, InvalidVariantStartAtEofReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "enum E: u8 { 1");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_GE(vec_get_size(parser_get_error(p)), 1u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 enum 关键字到成员列表终点。 */
+TEST(ExpressionEnumDeclTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "enum Color: u8 { Red = 1, }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_enum_decl(expr, "Color");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 成员区间 = 名字起点 .. 值终点。 */
+TEST(ExpressionEnumDeclTest, VariantSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "enum Color: u8 { Red = 1; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  node_t *variants = node_get_child(expr, CLUX_EXPR_ENUM_DECL_BODY);
+  ASSERT_NE(variants, nullptr);
+  node_t *variant = node_get_child(variants, 0);
+  ASSERT_NE(variant, nullptr);
+  const location_t *loc = node_get_location(variant);
+  EXPECT_EQ(loc->begin.offset, src + strlen("enum Color: u8 { "));
+  EXPECT_EQ(loc->end.offset, src + strlen("enum Color: u8 { Red = 1"));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionEnumDeclTest, NoLeakOnEnumDecl) {
+  const char *sources[] = {"enum Color: u8 { Red = 1, Green = 2, Blue = 4, }",
+                           "enum E: u32 { A = 0, B = 1 }",
+                           "enum Empty: u8 {}",
+                           "enum E: u8 { A = 1 << 2, B = A + 1 }",
+                           "enum : u8 { A = 1 }",
+                           "enum E u8 { A = 1 }",
+                           "enum E: { A = 1 }",
+                           "enum E: u8",
+                           "enum E: u8 { A }",
+                           "enum E: u8 { A = }",
+                           "enum E: u8 { A = 1 B = 2 }",
+                           "enum E: u8 { 1 = 2, B = 3 }",
+                           "enum E: u8 { A = 1,",
+                           "enum E: u8 { 1",
+                           "enum",
+                           "enum E",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}

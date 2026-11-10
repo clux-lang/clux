@@ -38,6 +38,9 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
 
 /* union 定义（tag union 与 cunion）。 */
 node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser);
+
+/* 枚举声明 enum Name: Underlying { Variant = value, ... }。 */
+node_t *parser_read_expr_enum_decl(allocator_t *allocator, parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

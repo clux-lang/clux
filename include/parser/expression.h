@@ -6,6 +6,8 @@
 #include "parser/node_binary.h"
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
+#include "parser/node_enum_decl.h"
+#include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"

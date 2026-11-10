@@ -486,7 +486,7 @@ static node_t *read_group(allocator_t *allocator, parser_t *parser) {
 
 /* 值表达式层：最低一级优先级，与 literal 平级的构造都从这一层进入。
    目前有构造、括号、指针类型、类型修饰、切片类型、数组类型、元组类型、
-   optional 类型、函数类型、函数声明、union 与 literal 十二个来源。 */
+   optional 类型、函数类型、函数声明、union、enum 声明与 literal 十三个来源。 */
 node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   node_t *node = read_construct(allocator, parser);
   if (node) {
@@ -509,6 +509,10 @@ node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_expr_union(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_expr_enum_decl(allocator, parser);
   if (node) {
     return node;
   }

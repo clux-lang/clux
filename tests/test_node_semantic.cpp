@@ -6,6 +6,8 @@
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
 #include "parser/node_decorator.h"
+#include "parser/node_enum_decl.h"
+#include "parser/node_enum_variant.h"
 #include "parser/node_field.h"
 #include "parser/node_func_capture.h"
 #include "parser/node_func_decl.h"
@@ -353,6 +355,64 @@ TEST_F(NodeSemanticTest, UnionWithoutGenerics) {
   node_t *n = create_union_node(a);
   union_node_set_generics(n, nullptr);
   EXPECT_EQ(union_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+/* ---- enum ---- */
+
+TEST_F(NodeSemanticTest, EnumDecl) {
+  node_t *n = create_enum_decl_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_ENUM_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_EXPR_ENUM_DECL_CHILDREN_SIZE);
+  node_t *keyword = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *underlying = make_leaf(a);
+  node_t *body = make_leaf(a);
+  enum_decl_node_set_keyword(n, keyword);
+  enum_decl_node_set_name(n, name);
+  enum_decl_node_set_underlying(n, underlying);
+  enum_decl_node_set_body(n, body);
+  EXPECT_EQ(enum_decl_node_get_keyword(n), keyword);
+  EXPECT_EQ(enum_decl_node_get_name(n), name);
+  EXPECT_EQ(enum_decl_node_get_underlying(n), underlying);
+  EXPECT_EQ(enum_decl_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, EnumVariant) {
+  node_t *n = create_enum_variant_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_ENUM_VARIANT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_ENUM_VARIANT_CHILDREN_SIZE);
+  node_t *name = make_leaf(a);
+  node_t *value = make_leaf(a);
+  enum_variant_node_set_name(n, name);
+  enum_variant_node_set_value(n, value);
+  EXPECT_EQ(enum_variant_node_get_name(n), name);
+  EXPECT_EQ(enum_variant_node_get_value(n), value);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, EnumVariantWithoutValue) {
+  node_t *n = create_enum_variant_node(a);
+  enum_variant_node_set_value(n, nullptr);
+  EXPECT_EQ(enum_variant_node_get_value(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, EnumVariants) {
+  node_t *n = create_enum_variants_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_ENUM_VARIANTS);
+  EXPECT_EQ(enum_variants_node_get_variant_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  enum_variants_node_add_variant(n, first);
+  enum_variants_node_add_variant(n, second);
+  EXPECT_EQ(enum_variants_node_get_variant_count(n), 2u);
+  EXPECT_EQ(enum_variants_node_get_variant(n, 0), first);
+  EXPECT_EQ(enum_variants_node_get_variant(n, 1), second);
+  EXPECT_EQ(enum_variants_node_get_variant(n, 2), nullptr);
   delete_node(&n);
 }
 

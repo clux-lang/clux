@@ -56,6 +56,13 @@ enum _node_kind_t {
      C union `cunion Name { ... }`（§3.8）在语法阶段完全相同，
      只有关键词不同，因此共用此节点，由 KEYWORD 槽区分。 */
   CLUX_NODE_EXPR_UNION,
+  /* 枚举声明 enum Name: Underlying { Variant = value, ... }（白皮书 §3.6）。
+     装饰器属于外层语句，不在本节点内。 */
+  CLUX_NODE_EXPR_ENUM_DECL,
+  /* 枚举成员 Variant = value：NAME 必有，VALUE 缺失时为 NULL（容错）。 */
+  CLUX_NODE_ENUM_VARIANT,
+  /* 枚举成员列表 { Variant = value, ... }，children 为 CLUX_NODE_ENUM_VARIANT。 */
+  CLUX_NODE_ENUM_VARIANTS,
   /* 类型定义的字段 name: type。struct / tag union / cunion 共用，
      因此不带具体类型前缀。 */
   CLUX_NODE_FIELD,
