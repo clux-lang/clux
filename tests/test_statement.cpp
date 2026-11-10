@@ -2126,7 +2126,230 @@ TEST(StmtDeferTest, ReturnsNullOnNonDefer) {
   delete_allocator(&a);
 }
 
-/* 语句分派：enum / union / cunion / struct / defer 直接进入对应语句节点。 */
+/* ================= if 语句 =================
+   语法：if (cond) { then } [else { else } | else if ...]（白皮书 §4.4）。 */
+
+/* 断言 if 节点：CONDITION 与 THEN 必存在。 */
+static node_t *expect_if_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected if statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_IF);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_IF_CHILDREN_SIZE);
+  EXPECT_NE(node_get_child(node, CLUX_STMT_IF_CONDITION), nullptr);
+  node_t *then_branch = node_get_child(node, CLUX_STMT_IF_THEN);
+  EXPECT_NE(then_branch, nullptr);
+  if (then_branch) {
+    EXPECT_EQ(node_get_kind(then_branch), CLUX_NODE_STMT_BLOCK);
+  }
+  return then_branch;
+}
+
+TEST(StmtIfTest, BasicIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x) { a; }");
+  node_t *then_branch = expect_if_stmt(node);
+  ASSERT_NE(then_branch, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(then_branch), 1u);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_IF_ELSE), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, IfElse) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x) { a; } else { b; }");
+  expect_if_stmt(node);
+  node_t *else_branch = node_get_child(node, CLUX_STMT_IF_ELSE);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(node_get_kind(else_branch), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(else_branch), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* else if 递归为嵌套 if 语句。 */
+TEST(StmtIfTest, ElseIfChain) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (a) { } else if (b) { } else { c; }");
+  expect_if_stmt(node);
+  node_t *else_branch = node_get_child(node, CLUX_STMT_IF_ELSE);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(node_get_kind(else_branch), CLUX_NODE_STMT_IF);
+  node_t *nested_else = node_get_child(else_branch, CLUX_STMT_IF_ELSE);
+  ASSERT_NE(nested_else, nullptr);
+  EXPECT_EQ(node_get_kind(nested_else), CLUX_NODE_STMT_BLOCK);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, EmptyBodies) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x) {} else {}");
+  node_t *then_branch = expect_if_stmt(node);
+  ASSERT_NE(then_branch, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(then_branch), 0u);
+  node_t *else_branch = node_get_child(node, CLUX_STMT_IF_ELSE);
+  ASSERT_NE(else_branch, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(else_branch), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 条件可以是完整表达式。 */
+TEST(StmtIfTest, ConditionExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (a + b > 0) { }");
+  expect_if_stmt(node);
+  node_t *condition = node_get_child(node, CLUX_STMT_IF_CONDITION);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; if (x) { b; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_IF);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 if 关键字到 then 分支终点。 */
+TEST(StmtIfTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "if (x) { a; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_if_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 有 else 时区间延伸到 else 分支终点。 */
+TEST(StmtIfTest, SpanWithElse) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "if (x) { a; } else { b; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_if_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ---- 错误路径 ---- */
+
+TEST(StmtIfTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if x) { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'if'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, MissingConditionReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if () { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected condition expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x { }");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' after if condition");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, MissingThenBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x)");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_IF_THEN), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start if body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, InvalidElseReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x) { } else a;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_child(node, CLUX_STMT_IF_ELSE), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' or 'if' after 'else'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtIfTest, ReturnsNullOnNonIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_if(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 语句分派：enum / union / cunion / struct / defer / if 直接进入对应语句节点。 */
 TEST(StmtDispatchTest, DispatchesEnum) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -2181,6 +2404,18 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   node_t *node = parse_stmt(a, &p, "defer { a; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_DEFER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "if (x) { a; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_IF);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
@@ -2294,6 +2529,17 @@ TEST(StmtTest, NoLeakOnStatements) {
       "defer |a { }",
       "defer |(a { }",
       "defer |1| { }",
+      "if (x) { a; }",
+      "if (x) { a; } else { b; }",
+      "if (a) { } else if (b) { } else { c; }",
+      "if (x) {} else {}",
+      "if (a + b > 0) { }",
+      "{ a; if (x) { b; } }",
+      "if x) { }",
+      "if () { }",
+      "if (x { }",
+      "if (x)",
+      "if (x) { } else a;",
       "",
       nullptr};
   for (size_t i = 0; sources[i] != nullptr; i++) {

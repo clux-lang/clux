@@ -633,5 +633,9 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
+  node = parser_read_stmt_if(allocator, parser);
+  if (node) {
+    return node;
+  }
   return parser_read_stmt_expr(allocator, parser);
 }

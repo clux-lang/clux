@@ -7,6 +7,7 @@
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
 #include "parser/node_stmt_func.h"
+#include "parser/node_stmt_if.h"
 #include "parser/node_stmt_jump.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
@@ -25,6 +26,7 @@ node_t *parser_read_stmt_return(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_break(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_continue(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_defer(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_if(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);
