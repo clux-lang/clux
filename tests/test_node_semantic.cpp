@@ -27,6 +27,7 @@
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_extern_lib.h"
 #include "parser/node_stmt_for.h"
 #include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
@@ -1104,6 +1105,24 @@ TEST_F(NodeSemanticTest, StmtReexport) {
   EXPECT_EQ(stmt_reexport_node_get_path(n), path);
   stmt_reexport_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_reexport_node_get_path(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtExternLib) {
+  node_t *n = create_stmt_extern_lib_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_EXTERN_LIB);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_EXTERN_LIB_CHILDREN_SIZE);
+  node_t *alias = make_leaf(a);
+  node_t *path = make_leaf(a);
+  stmt_extern_lib_node_set_alias(n, alias);
+  stmt_extern_lib_node_set_path(n, path);
+  EXPECT_EQ(stmt_extern_lib_node_get_alias(n), alias);
+  EXPECT_EQ(stmt_extern_lib_node_get_path(n), path);
+  stmt_extern_lib_node_set_alias(n, nullptr);
+  stmt_extern_lib_node_set_path(n, nullptr);
+  EXPECT_EQ(stmt_extern_lib_node_get_alias(n), nullptr);
+  EXPECT_EQ(stmt_extern_lib_node_get_path(n), nullptr);
   delete_node(&n);
 }
 

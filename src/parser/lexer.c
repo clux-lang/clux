@@ -125,7 +125,7 @@ static const char *keywords[] = {
     "cunion",   "enum",   "undefined", "none",    "nil",        "true",
     "false",    "as",     "is",        "extends", "implements", "comptime",
     "type",     "of",     "switch",    "default", "bitfield",   "from",
-    NULL,
+    "extern",   "lib",    NULL,
 };
 
 /* ---- identifier ----

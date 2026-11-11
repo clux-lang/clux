@@ -185,6 +185,10 @@ enum _node_kind_t {
   /* 重新导出语句 export * from "<path>";（白皮书 §8.4）。
      PATH 为字符串字面量路径。 */
   CLUX_NODE_STMT_REEXPORT,
+
+  /* 动态库声明 extern lib <alias> from "<path>";（白皮书 §8.8）。
+     ALIAS 为库别名标识符；PATH 为字符串字面量（"*" 表示当前进程）。 */
+  CLUX_NODE_STMT_EXTERN_LIB,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

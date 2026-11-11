@@ -2606,6 +2606,137 @@ TEST(StmtReexportTest, ReturnsNullOnNonExport) {
   delete_allocator(&a);
 }
 
+/* ================= extern lib 语句 =================
+   语法：extern lib <alias> from "<path>";（白皮书 §8.8）。 */
+
+TEST(StmtExternLibTest, BasicExternLib) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib crt from \"c\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_LIB);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_EXTERN_LIB_CHILDREN_SIZE);
+  node_t *alias = stmt_extern_lib_node_get_alias(node);
+  ASSERT_NE(alias, nullptr);
+  EXPECT_EQ(node_get_kind(alias), CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *path = stmt_extern_lib_node_get_path(node);
+  ASSERT_NE(path, nullptr);
+  EXPECT_EQ(node_get_kind(path), CLUX_NODE_LITERAL_STRING);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* "*" 表示当前进程已链接的符号。 */
+TEST(StmtExternLibTest, WildcardPath) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib self from \"*\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_LIB);
+  EXPECT_NE(stmt_extern_lib_node_get_path(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 extern 到结尾 ';'。 */
+TEST(StmtExternLibTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "extern lib crt from \"c\";";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternLibTest, MissingAliasReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib from \"c\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(stmt_extern_lib_node_get_alias(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected library alias after 'extern lib'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternLibTest, MissingFromReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib crt \"c\";");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'from' after library alias");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternLibTest, MissingPathReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib crt from ;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(stmt_extern_lib_node_get_path(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected library path string after 'from'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternLibTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib crt from \"c\"");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after extern lib statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* extern 后不是 lib 时不认领，留给其他 extern 形式。 */
+TEST(StmtExternLibTest, ReturnsNullOnExternNonLib) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "extern cfunc f(): i32;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_extern_lib(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternLibTest, ReturnsNullOnNonExtern) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_extern_lib(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4507,6 +4638,18 @@ TEST(StmtDispatchTest, DispatchesReexport) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesExternLib) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern lib crt from \"c\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_LIB);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesExportFunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4855,6 +4998,12 @@ TEST(StmtTest, NoLeakOnStatements) {
       "export * \"other.cx\";",
       "export * from ;",
       "export * from \"other.cx\"",
+      "extern lib crt from \"c\";",
+      "extern lib self from \"*\";",
+      "extern lib from \"c\";",
+      "extern lib crt \"c\";",
+      "extern lib crt from ;",
+      "extern lib crt from \"c\"",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",
