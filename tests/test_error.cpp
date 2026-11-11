@@ -2,7 +2,23 @@
 #include "core/error.h"
 #include "core/allocator.h"
 #include "core/location.h"
+#include "core/string.h"
+#include <stdlib.h>
 #include <string.h>
+#include <string>
+
+static size_t g_alloc_count;
+static size_t g_free_count;
+
+static void *counting_alloc(size_t size) {
+  g_alloc_count++;
+  return malloc(size);
+}
+
+static void counting_free(void *ptr) {
+  g_free_count++;
+  free(ptr);
+}
 
 static location_t make_loc(const char *src, size_t begin_off, size_t end_off) {
   location_t loc;
@@ -75,6 +91,139 @@ TEST(ErrorTest, GetLocationReturnsBorrowedPointer) {
   EXPECT_STREQ(got->filename, "test.clux");
   delete_error(&err);
   delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, RendersSingleLineWithCaret) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "var x = ;\n";
+  location_t loc = make_loc(src, 8, 9);
+  clux_error_t *err = create_error(a, &loc, "unexpected token");
+  error_set_source(err, src);
+  EXPECT_STREQ(error_get_source(err), src);
+
+  string_t *out = error_to_string(err, a);
+  std::string expected = "error: unexpected token\n"
+                         " --> test.clux:1:9\n"
+                         "  |\n"
+                         "1 | var x = ;\n"
+                         "  | " +
+                         std::string(8, ' ') + "^\n";
+  EXPECT_STREQ(string_get_data(out), expected.c_str());
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, RendersSecondLineAndSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "line one\nline two\n";
+  location_t loc = make_loc(src, 14, 17);
+  clux_error_t *err = create_error(a, &loc, "bad name");
+  error_set_source(err, src);
+
+  string_t *out = error_to_string(err, a);
+  std::string expected = "error: bad name\n"
+                         " --> test.clux:2:6\n"
+                         "  |\n"
+                         "2 | line two\n"
+                         "  | " +
+                         std::string(5, ' ') + "^^^\n";
+  EXPECT_STREQ(string_get_data(out), expected.c_str());
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, ExpandsTabsInSourceAndCaret) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "\tvar x = ;\n";
+  location_t loc = make_loc(src, 9, 10);
+  clux_error_t *err = create_error(a, &loc, "syntax");
+  error_set_source(err, src);
+
+  string_t *out = error_to_string(err, a);
+  std::string expected = "error: syntax\n"
+                         " --> test.clux:1:13\n"
+                         "  |\n"
+                         "1 |     var x = ;\n"
+                         "  | " +
+                         std::string(12, ' ') + "^\n";
+  EXPECT_STREQ(string_get_data(out), expected.c_str());
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, MultiLineSpanStopsAtLineEnd) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "abc\ndef\n";
+  location_t loc = make_loc(src, 1, 5);
+  loc.end.line = 2;
+  clux_error_t *err = create_error(a, &loc, "span");
+  error_set_source(err, src);
+
+  string_t *out = error_to_string(err, a);
+  std::string expected = "error: span\n"
+                         " --> test.clux:1:2\n"
+                         "  |\n"
+                         "1 | abc\n"
+                         "  |  ^^\n";
+  EXPECT_STREQ(string_get_data(out), expected.c_str());
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, WithoutSourcePrintsHeaderOnly) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "abc";
+  location_t loc = make_loc(src, 0, 1);
+  loc.begin.line = 0;
+  loc.begin.column = 0;
+  clux_error_t *err = create_error(a, &loc, "no source");
+
+  string_t *out = error_to_string(err, a);
+  std::string expected = "error: no source\n --> test.clux:1:1\n";
+  EXPECT_STREQ(string_get_data(out), expected.c_str());
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, MissingFilenameUsesPlaceholder) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "abc";
+  location_t loc = make_loc(src, 0, 1);
+  loc.filename = nullptr;
+  clux_error_t *err = create_error(a, &loc, "no file");
+  error_set_source(err, src);
+
+  string_t *out = error_to_string(err, a);
+  EXPECT_NE(strstr(string_get_data(out), " --> <unknown>:1:1\n"), nullptr);
+
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+}
+
+TEST(ErrorDiagnosticTest, NoLeak) {
+  g_alloc_count = 0;
+  g_free_count = 0;
+  allocator_t *a = create_allocator(counting_alloc, counting_free);
+  const char *src = "abc\n";
+  location_t loc = make_loc(src, 0, 1);
+  clux_error_t *err = create_error(a, &loc, "leak check");
+  error_set_source(err, src);
+  string_t *out = error_to_string(err, a);
+  delete_string(&out);
+  delete_error(&err);
+  delete_allocator(&a);
+  EXPECT_EQ(g_alloc_count, g_free_count);
 }
 
 TEST(ErrorTest, DeleteNullIsNoop) {

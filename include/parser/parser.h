@@ -22,6 +22,8 @@ size_t parser_get_position(parser_t *self);
 bool parser_set_position(parser_t *self, size_t size);
 void parser_push_error(parser_t *self, clux_error_t *error);
 const char *parser_get_filename(parser_t *self);
+/* 借用创建 parser 时传入的源码。 */
+const char *parser_get_source(parser_t *self);
 #ifdef __cplusplus
 }
 #endif

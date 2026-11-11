@@ -2,12 +2,14 @@
 #include "core/allocator.h"
 #include "core/error.h"
 #include "core/location.h"
+#include "core/string.h"
 #include "core/vec.h"
 #include "parser/node.h"
 #include "parser/node_program.h"
 #include "parser/parser.h"
 #include "parser/program.h"
 #include <stdlib.h>
+#include <string.h>
 
 static size_t g_alloc_count;
 static size_t g_free_count;
@@ -94,6 +96,25 @@ TEST(ProgramTest, ErrorRecoveryAlwaysAdvances) {
   /* export 错误节点 + a; 表达式语句。 */
   EXPECT_EQ(program_node_get_stmt_count(node), 2u);
   EXPECT_GE(vec_get_size(parser_get_error(p)), 3u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* parser 产生的错误自动携带源码，可直接渲染为带源码行的诊断。 */
+TEST(ProgramTest, ErrorsCarrySourceForDiagnostics) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_program(a, &p, "var x = ;\n");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  clux_error_t *err = (clux_error_t *)vec_get(errors, 0);
+  EXPECT_NE(error_get_source(err), nullptr);
+  string_t *text = error_to_string(err, a);
+  EXPECT_NE(strstr(string_get_data(text), "1 | var x = ;"), nullptr);
+  EXPECT_NE(strstr(string_get_data(text), "^"), nullptr);
+  delete_string(&text);
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);

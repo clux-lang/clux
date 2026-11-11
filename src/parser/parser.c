@@ -10,6 +10,7 @@ struct _parser_t {
   vec_t *errors;
   size_t position;
   const char *filename;
+  const char *source;
 };
 parser_t *create_parser(allocator_t *allocator,
                         const char *filename,
@@ -22,6 +23,7 @@ parser_t *create_parser(allocator_t *allocator,
   self->tokens = tokens;
   self->errors = errors;
   self->filename = filename;
+  self->source = source;
   position_t position = {
       .column = 0,
       .line = 0,
@@ -80,6 +82,10 @@ parser_t *create_parser(allocator_t *allocator,
         allocator, &loc, "unexpected character '%c'", *position.offset);
     vec_push(errors, error);
   }
+  /* 词法阶段直接入队的错误也要带上源码，供诊断渲染。 */
+  for (size_t idx = 0; idx < vec_get_size(errors); idx++) {
+    error_set_source(vec_get(errors, idx), source);
+  }
   return self;
 }
 void delete_parser(parser_t **parser) {
@@ -136,6 +142,8 @@ bool parser_set_position(parser_t *self, size_t size) {
   return true;
 }
 void parser_push_error(parser_t *self, clux_error_t *error) {
+  error_set_source(error, self->source);
   vec_push(self->errors, error);
 }
 const char *parser_get_filename(parser_t *self) { return self->filename; }
+const char *parser_get_source(parser_t *self) { return self->source; }
