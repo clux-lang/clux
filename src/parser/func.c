@@ -438,6 +438,11 @@ static node_t *read_func_decl_params(allocator_t *allocator,
   return node;
 }
 
+/* 函数声明的形参列表，供 extern cfunc 等外部声明复用。 */
+node_t *parser_read_func_decl_params(allocator_t *allocator, parser_t *parser) {
+  return read_func_decl_params(allocator, parser, false);
+}
+
 /* 函数声明的捕获列表 |( name: type = expr, ... )|（白皮书 §3.3）。
    与函数类型的捕获列表不同，这里带圆括号，且允许默认值。
    children 只有一个 CLUX_NODE_FUNC_PARAMS，与形参列表同构。

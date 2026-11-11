@@ -36,6 +36,10 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_func_decl_generics(allocator_t *allocator,
                                        parser_t *parser);
 
+/* 函数声明的形参列表 ( name: type, ... )，不含默认值。
+   调用前当前 token 必须是 '('。 */
+node_t *parser_read_func_decl_params(allocator_t *allocator, parser_t *parser);
+
 /* union 定义（tag union 与 cunion）。 */
 node_t *parser_read_expr_union(allocator_t *allocator, parser_t *parser);
 

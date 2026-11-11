@@ -27,7 +27,9 @@
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_extern_cfunc.h"
 #include "parser/node_stmt_extern_lib.h"
+#include "parser/node_stmt_extern_var.h"
 #include "parser/node_stmt_for.h"
 #include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
@@ -1123,6 +1125,49 @@ TEST_F(NodeSemanticTest, StmtExternLib) {
   stmt_extern_lib_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_extern_lib_node_get_alias(n), nullptr);
   EXPECT_EQ(stmt_extern_lib_node_get_path(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtExternCfunc) {
+  node_t *n = create_stmt_extern_cfunc_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_EXTERN_CFUNC);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_EXTERN_CFUNC_CHILDREN_SIZE);
+  node_t *export_node = make_leaf(a);
+  node_t *lib = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *params = make_leaf(a);
+  node_t *ret = make_leaf(a);
+  stmt_extern_cfunc_node_set_export(n, export_node);
+  stmt_extern_cfunc_node_set_lib(n, lib);
+  stmt_extern_cfunc_node_set_name(n, name);
+  stmt_extern_cfunc_node_set_params(n, params);
+  stmt_extern_cfunc_node_set_return(n, ret);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_export(n), export_node);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_lib(n), lib);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_name(n), name);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_params(n), params);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_return(n), ret);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtExternVar) {
+  node_t *n = create_stmt_extern_var_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_EXTERN_VAR);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_EXTERN_VAR_CHILDREN_SIZE);
+  node_t *export_node = make_leaf(a);
+  node_t *lib = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *type = make_leaf(a);
+  stmt_extern_var_node_set_export(n, export_node);
+  stmt_extern_var_node_set_lib(n, lib);
+  stmt_extern_var_node_set_name(n, name);
+  stmt_extern_var_node_set_type(n, type);
+  EXPECT_EQ(stmt_extern_var_node_get_export(n), export_node);
+  EXPECT_EQ(stmt_extern_var_node_get_lib(n), lib);
+  EXPECT_EQ(stmt_extern_var_node_get_name(n), name);
+  EXPECT_EQ(stmt_extern_var_node_get_type(n), type);
   delete_node(&n);
 }
 

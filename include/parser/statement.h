@@ -9,7 +9,9 @@
 #include "parser/node_stmt_empty.h"
 #include "parser/node_stmt_enum.h"
 #include "parser/node_stmt_expr.h"
+#include "parser/node_stmt_extern_cfunc.h"
 #include "parser/node_stmt_extern_lib.h"
+#include "parser/node_stmt_extern_var.h"
 #include "parser/node_stmt_for.h"
 #include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
@@ -55,6 +57,8 @@ node_t *parser_read_stmt_test(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_import(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_reexport(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_extern_lib(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_extern_cfunc(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_extern_var(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

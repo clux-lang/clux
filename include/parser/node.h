@@ -189,6 +189,15 @@ enum _node_kind_t {
   /* 动态库声明 extern lib <alias> from "<path>";（白皮书 §8.8）。
      ALIAS 为库别名标识符；PATH 为字符串字面量（"*" 表示当前进程）。 */
   CLUX_NODE_STMT_EXTERN_LIB,
+
+  /* 外部 C 函数声明 [export]? extern cfunc <lib>::<name>(params): ret;
+     （白皮书 §8.9）。EXPORT 可缺失；LIB / NAME 为限定名的两段；
+     PARAMS 为形参列表；RETURN 为返回类型。 */
+  CLUX_NODE_STMT_EXTERN_CFUNC,
+
+  /* 外部变量声明 [export]? extern var <lib>::<name>: type;（白皮书 §8.10）。
+     EXPORT 可缺失；LIB / NAME 为限定名的两段；TYPE 为变量类型。 */
+  CLUX_NODE_STMT_EXTERN_VAR,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

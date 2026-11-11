@@ -2737,6 +2737,257 @@ TEST(StmtExternLibTest, ReturnsNullOnNonExtern) {
   delete_allocator(&a);
 }
 
+/* ================= extern cfunc / extern var 声明 =================
+   语法：[export]? extern cfunc <lib>::<name>(params): ret;
+         [export]? extern var <lib>::<name>: type;（白皮书 §8.9、§8.10）。 */
+
+TEST(StmtExternDeclTest, BasicExternCfunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "extern cfunc libc::malloc(size: usize): opaque;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_CFUNC);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_EXTERN_CFUNC_CHILDREN_SIZE);
+  EXPECT_EQ(stmt_extern_cfunc_node_get_export(node), nullptr);
+  EXPECT_NE(stmt_extern_cfunc_node_get_lib(node), nullptr);
+  EXPECT_NE(stmt_extern_cfunc_node_get_name(node), nullptr);
+  EXPECT_NE(stmt_extern_cfunc_node_get_params(node), nullptr);
+  EXPECT_NE(stmt_extern_cfunc_node_get_return(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, BasicExternVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern var crt::errno: i32;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_VAR);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_EXTERN_VAR_CHILDREN_SIZE);
+  EXPECT_EQ(stmt_extern_var_node_get_export(node), nullptr);
+  EXPECT_NE(stmt_extern_var_node_get_lib(node), nullptr);
+  EXPECT_NE(stmt_extern_var_node_get_name(node), nullptr);
+  EXPECT_NE(stmt_extern_var_node_get_type(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, ExportExternCfunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "export extern cfunc zlib::zlibVersion(): str;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_CFUNC);
+  EXPECT_NE(stmt_extern_cfunc_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, ExportExternVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export extern var zlib::zlib_errno: i32;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_VAR);
+  EXPECT_NE(stmt_extern_var_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 export/extern 起点到结尾 ';'。 */
+TEST(StmtExternDeclTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "extern cfunc crt::puts(s: *const u8): i32;";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingLibraryNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc ::puts(): i32;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected library name after 'extern cfunc'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingScopeOperatorReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt puts(): i32;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '::' after library name");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingSymbolNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt::(): i32;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected symbol name after '::'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingParamsReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt::puts: i32;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' to start parameters");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingReturnColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt::puts()");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' before return type");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingReturnTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt::puts(): ;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected return type after ':'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingCfuncSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern cfunc crt::puts(): i32");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after extern cfunc declaration");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingVarColonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern var crt::errno i32;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ':' before variable type");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingVarTypeReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern var crt::errno: ;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected variable type after ':'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, MissingVarSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern var crt::errno: i32");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after extern var declaration");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* extern 后不是 cfunc/var 时不认领。 */
+TEST(StmtExternDeclTest, ReturnsNullOnExternLib) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "extern lib crt from \"c\";");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_extern_cfunc(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  node = parser_read_stmt_extern_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExternDeclTest, ReturnsNullOnNonExtern) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_extern_cfunc(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  node = parser_read_stmt_extern_var(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4650,6 +4901,45 @@ TEST(StmtDispatchTest, DispatchesExternLib) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesExternCfunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "extern cfunc crt::puts(s: *const u8): i32;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_CFUNC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExternVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "extern var crt::errno: i32;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_VAR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExportExternCfunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "export extern cfunc zlib::zlibVersion(): str;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXTERN_CFUNC);
+  EXPECT_NE(stmt_extern_cfunc_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesExportFunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -5004,6 +5294,20 @@ TEST(StmtTest, NoLeakOnStatements) {
       "extern lib crt \"c\";",
       "extern lib crt from ;",
       "extern lib crt from \"c\"",
+      "extern cfunc crt::puts(s: *const u8): i32;",
+      "extern var crt::errno: i32;",
+      "export extern cfunc zlib::zlibVersion(): str;",
+      "export extern var zlib::zlib_errno: i32;",
+      "extern cfunc ::puts(): i32;",
+      "extern cfunc crt puts(): i32;",
+      "extern cfunc crt::(): i32;",
+      "extern cfunc crt::puts: i32;",
+      "extern cfunc crt::puts()",
+      "extern cfunc crt::puts(): ;",
+      "extern cfunc crt::puts(): i32",
+      "extern var crt::errno i32;",
+      "extern var crt::errno: ;",
+      "extern var crt::errno: i32",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",
