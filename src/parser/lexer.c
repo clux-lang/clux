@@ -320,18 +320,18 @@ token_t *lexer_read_numeric(allocator_t *allocator,
     }
   } else if (c0 == '0' &&
              (position->offset[1] == 'o' || position->offset[1] == 'O')) {
-    /* 八进制 0o。前缀后无数字属于内容错误，留给 parser 报。 */
+    /* 八进制 0o。消费全部十进制数字，非法数字由 parser 报。 */
     position_next(&current); /* '0' */
     position_next(&current); /* 'o'/'O' */
-    while (*current.offset >= '0' && *current.offset <= '7') {
+    while (*current.offset >= '0' && *current.offset <= '9') {
       position_next(&current);
     }
   } else if (c0 == '0' &&
              (position->offset[1] == 'b' || position->offset[1] == 'B')) {
-    /* 二进制 0b。前缀后无数字属于内容错误，留给 parser 报。 */
+    /* 二进制 0b。消费全部十进制数字，非法数字由 parser 报。 */
     position_next(&current); /* '0' */
     position_next(&current); /* 'b'/'B' */
-    while (*current.offset == '0' || *current.offset == '1') {
+    while (*current.offset >= '0' && *current.offset <= '9') {
       position_next(&current);
     }
   } else if (c0 == '0' && position->offset[1] >= '0' &&

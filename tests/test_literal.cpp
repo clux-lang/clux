@@ -4,6 +4,8 @@
 #include "parser/node.h"
 #include "parser/parser.h"
 #include "core/allocator.h"
+#include "core/error.h"
+#include "core/vec.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -108,6 +110,124 @@ TEST(LiteralCharacterTest, MatchesEscapeCharacter) {
   node_t *node = parser_read_literal_character(a, p);
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_CHARACTER);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralStringTest, AcceptsValidEscapes) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p =
+      create_parser(a, "test.clux", "\"\\n\\t\\r\\\\\\'\\\"\\0\\x41\"");
+  node_t *node = parser_read_literal_string(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralStringTest, RejectsInvalidEscape) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "\"\\q\"");
+  node_t *node = parser_read_literal_string(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "invalid escape sequence '\\q'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralStringTest, RejectsHexEscapeWithoutDigits) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "\"\\x\"");
+  node_t *node = parser_read_literal_string(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected hex digits after '\\x'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralStringTest, AcceptsOneDigitHexEscape) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "\"\\x4\"");
+  node_t *node = parser_read_literal_string(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralStringTest, RejectsRawNewline) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "\"a\nb\"");
+  node_t *node = parser_read_literal_string(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "string literal cannot span lines");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralCharacterTest, RejectsEmpty) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "''");
+  node_t *node = parser_read_literal_character(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "character literal cannot be empty");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralCharacterTest, RejectsMultipleCharacters) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "'ab'");
+  node_t *node = parser_read_literal_character(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "character literal must contain exactly one u8 character");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralCharacterTest, RejectsOutOfU8Range) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "'你'");
+  node_t *node = parser_read_literal_character(a, p);
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "character literal value out of u8 range");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralCharacterTest, AcceptsHexEscape) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "'\\x41'");
+  node_t *node = parser_read_literal_character(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
   delete_allocator(&a);
@@ -253,6 +373,97 @@ TEST(LiteralNumericTest, OctalAndBinarySuffix) {
             node_get_location(node)->begin.offset + 9);
   delete_node(&node);
   delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, RejectsBasePrefixWithoutDigits) {
+  const char *srcs[] = {"0x", "0o", "0b", nullptr};
+  const char *messages[] = {"expected digits after '0x'",
+                            "expected digits after '0o'",
+                            "expected digits after '0b'",
+                            nullptr};
+  allocator_t *a = create_allocator(malloc, free);
+  for (size_t i = 0; srcs[i] != nullptr; i++) {
+    parser_t *p;
+    node_t *node = read_numeric(a, &p, srcs[i]);
+    ASSERT_NE(node, nullptr) << "src=" << srcs[i];
+    vec_t *errors = parser_get_error(p);
+    ASSERT_EQ(vec_get_size(errors), 1u) << "src=" << srcs[i];
+    EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+                 messages[i]);
+    delete_node(&node);
+    delete_parser(&p);
+  }
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, RejectsInvalidOctalDigit) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = read_numeric(a, &p, "0o8");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "invalid digit '8' in octal literal");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, RejectsInvalidBinaryDigit) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = read_numeric(a, &p, "0b102");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "invalid digit '2' in binary literal");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, RejectsIntegerSuffixOnFloat) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = read_numeric(a, &p, "1.5i32");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "floating literal requires 'f32' or 'f64' suffix");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, RejectsFloatSuffixOnInteger) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = read_numeric(a, &p, "1f32");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_EQ(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "integer literal cannot use floating suffix");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, AcceptsMatchingSuffixes) {
+  const char *srcs[] = {"1u8", "1.5f32", "0x1f32", "0o755i32", nullptr};
+  allocator_t *a = create_allocator(malloc, free);
+  for (size_t i = 0; srcs[i] != nullptr; i++) {
+    parser_t *p;
+    node_t *node = read_numeric(a, &p, srcs[i]);
+    ASSERT_NE(node, nullptr) << "src=" << srcs[i];
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << srcs[i];
+    delete_node(&node);
+    delete_parser(&p);
+  }
   delete_allocator(&a);
 }
 
