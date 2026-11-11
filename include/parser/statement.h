@@ -3,6 +3,7 @@
 #include "core/allocator.h"
 #include "parser/node.h"
 #include "parser/node_stmt_bitfield.h"
+#include "parser/node_stmt_assert.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
@@ -21,6 +22,7 @@
 #include "parser/node_stmt_reexport.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
+#include "parser/node_stmt_static_assert.h"
 #include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_test.h"
 #include "parser/node_stmt_type.h"
@@ -59,6 +61,9 @@ node_t *parser_read_stmt_reexport(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_extern_lib(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_extern_cfunc(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_extern_var(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_static_assert(allocator_t *allocator,
+                                       parser_t *parser);
+node_t *parser_read_stmt_assert(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

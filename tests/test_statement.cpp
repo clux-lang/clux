@@ -2988,6 +2988,255 @@ TEST(StmtExternDeclTest, ReturnsNullOnNonExtern) {
   delete_allocator(&a);
 }
 
+/* ================= static_assert =================
+   语法：static_assert(cond, "msg");（白皮书 §4.16）。
+   SOURCE 为条件表达式源码片段，location 指向原文区间。 */
+
+TEST(StmtStaticAssertTest, BasicStaticAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a,
+      &p,
+      "static_assert(sizeof(i64) == 8 as u64, \"expected 64-bit i64\");");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STATIC_ASSERT);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_STATIC_ASSERT_CHILDREN_SIZE);
+  node_t *condition = stmt_static_assert_node_get_condition(node);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  node_t *message = stmt_static_assert_node_get_message(node);
+  ASSERT_NE(message, nullptr);
+  EXPECT_EQ(node_get_kind(message), CLUX_NODE_LITERAL_STRING);
+  node_t *source = stmt_static_assert_node_get_source(node);
+  ASSERT_NE(source, nullptr);
+  EXPECT_EQ(node_get_kind(source), CLUX_NODE_SOURCE_TEXT);
+  /* 源码片段区间与条件表达式完全一致。 */
+  EXPECT_EQ(node_get_location(source)->begin.offset,
+            node_get_location(condition)->begin.offset);
+  EXPECT_EQ(node_get_location(source)->end.offset,
+            node_get_location(condition)->end.offset);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 static_assert 到结尾 ';'。 */
+TEST(StmtStaticAssertTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "static_assert(true, \"m\");";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert true, \"m\");");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after 'static_assert'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingConditionReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(, \"m\");");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected condition expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingCommaReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(true \"m\");");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ',' after static_assert condition");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingMessageReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(true, );");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected message string after ','");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(true, \"m\";");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' to close static_assert");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(true, \"m\")");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after static_assert statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtStaticAssertTest, ReturnsNullOnNonStaticAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_static_assert(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* ================= assert =================
+   语法：assert(expr);（白皮书 §11.3）。
+   assert 不是关键字，只有后接 '(' 时才按断言语句解析。 */
+
+TEST(StmtAssertTest, BasicAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "assert(x == 4);");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ASSERT);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_ASSERT_CHILDREN_SIZE);
+  node_t *condition = stmt_assert_node_get_condition(node);
+  ASSERT_NE(condition, nullptr);
+  EXPECT_EQ(node_get_kind(condition), CLUX_NODE_EXPR_BINARY);
+  node_t *source = stmt_assert_node_get_source(node);
+  ASSERT_NE(source, nullptr);
+  EXPECT_EQ(node_get_kind(source), CLUX_NODE_SOURCE_TEXT);
+  EXPECT_EQ(node_get_location(source)->begin.offset,
+            node_get_location(condition)->begin.offset);
+  EXPECT_EQ(node_get_location(source)->end.offset,
+            node_get_location(condition)->end.offset);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 assert 到结尾 ';'。 */
+TEST(StmtAssertTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "assert(x == 4);";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtAssertTest, MissingConditionReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "assert();");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected condition expression");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtAssertTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "assert(x;");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' to close assert");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtAssertTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "assert(x)");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after assert statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* assert 后不是 '(' 时不是断言语句，交回表达式语句。 */
+TEST(StmtAssertTest, ReturnsNullWithoutParen) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "assert;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_assert(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtAssertTest, ReturnsNullOnNonAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "foo(x);");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_assert(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4940,6 +5189,30 @@ TEST(StmtDispatchTest, DispatchesExportExternCfunc) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesStaticAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "static_assert(true, \"m\");");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STATIC_ASSERT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesAssert) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "assert(x == 4);");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ASSERT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesExportFunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -5308,6 +5581,19 @@ TEST(StmtTest, NoLeakOnStatements) {
       "extern var crt::errno i32;",
       "extern var crt::errno: ;",
       "extern var crt::errno: i32",
+      "static_assert(true, \"m\");",
+      "static_assert(sizeof(i64) == 8 as u64, \"expected 64-bit i64\");",
+      "static_assert true, \"m\");",
+      "static_assert(, \"m\");",
+      "static_assert(true \"m\");",
+      "static_assert(true, );",
+      "static_assert(true, \"m\";",
+      "static_assert(true, \"m\")",
+      "assert(x == 4);",
+      "assert();",
+      "assert(x;",
+      "assert(x)",
+      "assert;",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",

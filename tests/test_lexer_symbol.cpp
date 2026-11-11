@@ -141,8 +141,14 @@ TEST(LexerKeywordTest, ControlFlowKeywords) {
 
 TEST(LexerKeywordTest, ImportExportUsingAreKeywords) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *kws[] = {
-      "import", "export", "using", "from", "extern", "lib", nullptr};
+  const char *kws[] = {"import",
+                       "export",
+                       "using",
+                       "from",
+                       "extern",
+                       "lib",
+                       "static_assert",
+                       nullptr};
   for (int i = 0; kws[i] != nullptr; i++) {
     position_t p = lexer_test_pos(kws[i]);
     token_t *tok = lexer_read_identifier(a, &p, "test.clux");

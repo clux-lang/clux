@@ -21,6 +21,10 @@ enum _node_kind_t {
   /* 内建类型名（i8..f64、isize/usize、bool/str/void/opaque）。
      语法阶段与 literal 同级，就是普通表达式。 */
   CLUX_NODE_LITERAL_TYPE,
+  /* 源码原文片段：叶子节点，location 指向源码中的原始文本区间，
+     文本内容即该区间（不复制、不转义）。供 static_assert / assert
+     在编译期引用表达式源码。 */
+  CLUX_NODE_SOURCE_TEXT,
 
   CLUX_NODE_EXPR_ASSIGN,
   CLUX_NODE_EXPR_TERNARY,
@@ -198,6 +202,16 @@ enum _node_kind_t {
   /* 外部变量声明 [export]? extern var <lib>::<name>: type;（白皮书 §8.10）。
      EXPORT 可缺失；LIB / NAME 为限定名的两段；TYPE 为变量类型。 */
   CLUX_NODE_STMT_EXTERN_VAR,
+
+  /* 编译期断言 static_assert(cond, "msg");（白皮书 §4.16）。
+     CONDITION 为条件表达式；MESSAGE 为字符串字面量；
+     SOURCE 为条件表达式源码片段（CLUX_NODE_SOURCE_TEXT）。 */
+  CLUX_NODE_STMT_STATIC_ASSERT,
+
+  /* 测试断言 assert(expr);（白皮书 §11.3）。
+     CONDITION 为断言表达式；SOURCE 为表达式源码片段
+     （CLUX_NODE_SOURCE_TEXT），失败诊断直接引用。 */
+  CLUX_NODE_STMT_ASSERT,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

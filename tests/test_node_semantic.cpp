@@ -20,6 +20,8 @@
 #include "parser/node_implements.h"
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
+#include "parser/node_source_text.h"
+#include "parser/node_stmt_assert.h"
 #include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
@@ -37,6 +39,7 @@
 #include "parser/node_stmt_import.h"
 #include "parser/node_stmt_reexport.h"
 #include "parser/node_stmt_return.h"
+#include "parser/node_stmt_static_assert.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_test.h"
@@ -1168,6 +1171,44 @@ TEST_F(NodeSemanticTest, StmtExternVar) {
   EXPECT_EQ(stmt_extern_var_node_get_lib(n), lib);
   EXPECT_EQ(stmt_extern_var_node_get_name(n), name);
   EXPECT_EQ(stmt_extern_var_node_get_type(n), type);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, SourceText) {
+  node_t *n = create_source_text_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_SOURCE_TEXT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)), 0u);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtStaticAssert) {
+  node_t *n = create_stmt_static_assert_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_STATIC_ASSERT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_STATIC_ASSERT_CHILDREN_SIZE);
+  node_t *condition = make_leaf(a);
+  node_t *message = make_leaf(a);
+  node_t *source = make_leaf(a);
+  stmt_static_assert_node_set_condition(n, condition);
+  stmt_static_assert_node_set_message(n, message);
+  stmt_static_assert_node_set_source(n, source);
+  EXPECT_EQ(stmt_static_assert_node_get_condition(n), condition);
+  EXPECT_EQ(stmt_static_assert_node_get_message(n), message);
+  EXPECT_EQ(stmt_static_assert_node_get_source(n), source);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtAssert) {
+  node_t *n = create_stmt_assert_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_ASSERT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_ASSERT_CHILDREN_SIZE);
+  node_t *condition = make_leaf(a);
+  node_t *source = make_leaf(a);
+  stmt_assert_node_set_condition(n, condition);
+  stmt_assert_node_set_source(n, source);
+  EXPECT_EQ(stmt_assert_node_get_condition(n), condition);
+  EXPECT_EQ(stmt_assert_node_get_source(n), source);
   delete_node(&n);
 }
 

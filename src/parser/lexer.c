@@ -116,16 +116,18 @@ token_t *lexer_read_string(allocator_t *allocator,
 }
 
 static const char *keywords[] = {
-    "var",      "func",   "cfunc",     "import",  "export",     "if",
-    "else",     "for",    "foreach",   "while",   "do",         "break",
-    "continue", "return", "using",     "const",   "volatile",   "bool",
-    "defer",    "i8",     "i16",       "i32",     "i64",        "u8",
-    "u16",      "u32",    "u64",       "isize",   "usize",      "f32",
-    "f64",      "str",    "void",      "opaque",  "struct",     "union",
-    "cunion",   "enum",   "undefined", "none",    "nil",        "true",
-    "false",    "as",     "is",        "extends", "implements", "comptime",
-    "type",     "of",     "switch",    "default", "bitfield",   "from",
-    "extern",   "lib",    NULL,
+    "var",     "func",          "cfunc",    "import",    "export",
+    "if",      "else",          "for",      "foreach",   "while",
+    "do",      "break",         "continue", "return",    "using",
+    "const",   "volatile",      "bool",     "defer",     "i8",
+    "i16",     "i32",           "i64",      "u8",        "u16",
+    "u32",     "u64",           "isize",    "usize",     "f32",
+    "f64",     "str",           "void",     "opaque",    "struct",
+    "union",   "cunion",        "enum",     "undefined", "none",
+    "nil",     "true",          "false",    "as",        "is",
+    "extends", "implements",    "comptime", "type",      "of",
+    "switch",  "default",       "bitfield", "from",      "extern",
+    "lib",     "static_assert", NULL,
 };
 
 /* ---- identifier ----

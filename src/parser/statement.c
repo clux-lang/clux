@@ -970,6 +970,14 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
+  node = parser_read_stmt_static_assert(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_assert(allocator, parser);
+  if (node) {
+    return node;
+  }
   node = parser_read_stmt_test(allocator, parser);
   if (node) {
     return node;
