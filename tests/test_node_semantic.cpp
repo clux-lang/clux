@@ -32,6 +32,7 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_import.h"
+#include "parser/node_stmt_reexport.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_switch.h"
@@ -1089,6 +1090,20 @@ TEST_F(NodeSemanticTest, StmtImport) {
   stmt_import_node_set_path(n, nullptr);
   EXPECT_EQ(stmt_import_node_get_alias(n), nullptr);
   EXPECT_EQ(stmt_import_node_get_path(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtReexport) {
+  node_t *n = create_stmt_reexport_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_REEXPORT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_REEXPORT_CHILDREN_SIZE);
+  EXPECT_EQ(stmt_reexport_node_get_path(n), nullptr);
+  node_t *path = make_leaf(a);
+  stmt_reexport_node_set_path(n, path);
+  EXPECT_EQ(stmt_reexport_node_get_path(n), path);
+  stmt_reexport_node_set_path(n, nullptr);
+  EXPECT_EQ(stmt_reexport_node_get_path(n), nullptr);
   delete_node(&n);
 }
 

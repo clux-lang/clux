@@ -834,6 +834,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
+  node = parser_read_stmt_reexport(allocator, parser);
+  if (node) {
+    return node;
+  }
   token_t *first = parser_peek_token(parser);
   if (parser_peek_decorator(parser) ||
       token_is(first, CLUX_TOKEN_KEYWORD, "export")) {

@@ -2506,6 +2506,106 @@ TEST(StmtImportTest, ReturnsNullOnNonImport) {
   delete_allocator(&a);
 }
 
+/* ================= 重新导出语句 =================
+   语法：export * from "<path>";（白皮书 §8.4）。 */
+
+TEST(StmtReexportTest, BasicReexport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export * from \"other.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_REEXPORT);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_REEXPORT_CHILDREN_SIZE);
+  node_t *path = stmt_reexport_node_get_path(node);
+  ASSERT_NE(path, nullptr);
+  EXPECT_EQ(node_get_kind(path), CLUX_NODE_LITERAL_STRING);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 export 到结尾 ';'。 */
+TEST(StmtReexportTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "export * from \"other.cx\";";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReexportTest, MissingFromReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export * \"other.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_REEXPORT);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'from' after 'export *'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReexportTest, MissingPathReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export * from ;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(stmt_reexport_node_get_path(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected module path string after 'from'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReexportTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export * from \"other.cx\"");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after re-export statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* export 后不是 '*' 时不是重新导出，交给声明语句。 */
+TEST(StmtReexportTest, ReturnsNullOnExportDecl) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "export func f(): void {}");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_reexport(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtReexportTest, ReturnsNullOnNonExport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_reexport(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4395,6 +4495,18 @@ TEST(StmtDispatchTest, DispatchesImport) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesReexport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export * from \"other.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_REEXPORT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesExportFunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4739,6 +4851,10 @@ TEST(StmtTest, NoLeakOnStatements) {
       "import math \"math.cx\";",
       "import math from ;",
       "import math from \"math.cx\"",
+      "export * from \"other.cx\";",
+      "export * \"other.cx\";",
+      "export * from ;",
+      "export * from \"other.cx\"",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",

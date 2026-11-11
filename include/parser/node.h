@@ -181,6 +181,10 @@ enum _node_kind_t {
   /* 导入语句 import <alias> from "<path>";（白皮书 §8.2）。
      ALIAS 为模块别名标识符；PATH 为字符串字面量路径。 */
   CLUX_NODE_STMT_IMPORT,
+
+  /* 重新导出语句 export * from "<path>";（白皮书 §8.4）。
+     PATH 为字符串字面量路径。 */
+  CLUX_NODE_STMT_REEXPORT,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;
