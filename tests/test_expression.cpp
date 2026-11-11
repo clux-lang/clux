@@ -8990,6 +8990,217 @@ TEST(ExpressionBitfieldDeclTest, NoLeakOnBitfieldDecl) {
   }
 }
 
+/* ================= interface 声明 =================
+   interface Name[generics]? { func signature; ... }（白皮书 §3.10、§6.9）。
+   装饰器与 export 属于外层语句，本层只解析声明本身。 */
+
+/* 断言 interface 节点形状：名字与成员列表必存在。 */
+static node_t *expect_interface_decl(node_t *expr, const char *name) {
+  if (!expr) {
+    ADD_FAILURE() << "expected interface node, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_INTERFACE_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(expr)),
+            (size_t)CLUX_EXPR_INTERFACE_DECL_CHILDREN_SIZE);
+  node_t *kw = node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_KEYWORD);
+  if (!kw) {
+    ADD_FAILURE() << "expected interface keyword";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(kw), CLUX_NODE_SYMBOL);
+  node_t *name_node = node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_NAME);
+  if (!name_node) {
+    ADD_FAILURE() << "expected interface name";
+    return expr;
+  }
+  EXPECT_EQ(node_get_kind(name_node), CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_location(name_node)->end.offset -
+                node_get_location(name_node)->begin.offset,
+            (ptrdiff_t)strlen(name));
+  node_t *body = node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_BODY);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_INTERFACE_MEMBERS);
+  }
+  return body;
+}
+
+TEST(ExpressionInterfaceDeclTest, BasicDefinition) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(
+      a,
+      &p,
+      "interface IWriter[W] { func write(self: *W, data: []u8): void; }");
+  node_t *body = expect_interface_decl(expr, "IWriter");
+  ASSERT_NE(body, nullptr);
+  EXPECT_NE(node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_GENERICS), nullptr);
+  ASSERT_EQ(vec_get_size(node_get_children(body)), 1u);
+  node_t *member = node_get_child(body, 0);
+  ASSERT_NE(member, nullptr);
+  EXPECT_EQ(node_get_kind(member), CLUX_NODE_EXPR_FUNC_DECL);
+  EXPECT_EQ(node_get_child(member, CLUX_EXPR_FUNC_DECL_BODY), nullptr);
+  EXPECT_NE(node_get_child(member, CLUX_EXPR_FUNC_DECL_PARAMS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface Empty { }");
+  node_t *body = expect_interface_decl(expr, "Empty");
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(body)), 0u);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_GENERICS), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, MultipleMethods) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr =
+      parse_postfix(a,
+                    &p,
+                    "interface Sized[T] { func size_of(self: *T): usize; "
+                    "func empty(self: *T): bool; }");
+  node_t *body = expect_interface_decl(expr, "Sized");
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(vec_get_size(node_get_children(body)), 2u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 interface 关键字到成员列表终点。 */
+TEST(ExpressionInterfaceDeclTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "interface I { func f(): void; }";
+  node_t *expr = parse_postfix(a, &p, src);
+  expect_interface_decl(expr, "I");
+  const location_t *loc = node_get_location(expr);
+  EXPECT_EQ(loc->begin.offset, src);
+  EXPECT_EQ(loc->end.offset, src + strlen(src));
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, MissingNameReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface { }");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_INTERFACE_DECL);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected name after 'interface'");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface I");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_child(expr, CLUX_EXPR_INTERFACE_DECL_BODY), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start interface body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, MissingSignatureSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface I { func f(): void }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after function signature");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, InvalidMemberReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface I { x: i32; }");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected function signature in interface body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, UnclosedBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "interface I { func f(): void;");
+  ASSERT_NE(expr, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '}' to close interface body");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, ReturnsNullOnNonInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *expr = parser_read_expr_interface_decl(a, p);
+  EXPECT_EQ(expr, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionInterfaceDeclTest, NoLeakOnInterfaceDecl) {
+  const char *sources[] = {
+      "interface IWriter[W] { func write(self: *W, data: []u8): void; }",
+      "interface Empty { }",
+      "interface { }",
+      "interface I",
+      "interface I { func f(): void }",
+      "interface I { x: i32; }",
+      "interface I { func f(): void;",
+      "interface",
+      nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p = create_parser(a, "test.clux", sources[i]);
+    node_t *expr = parser_read_expr(a, p);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
+  }
+}
+
 TEST(ExpressionStructDeclTest, NoLeakOnStructDecl) {
   const char *sources[] = {
       "struct User { name: str; age: i32; }",

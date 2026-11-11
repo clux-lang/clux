@@ -32,6 +32,10 @@ node_t *parser_read_expr_func_type(allocator_t *allocator, parser_t *parser);
 /* 函数声明 / 定义 / 闭包。 */
 node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser);
 
+/* 接口成员签名 func name(params): ret;，没有函数体。 */
+node_t *parser_read_expr_func_signature(allocator_t *allocator,
+                                        parser_t *parser);
+
 /* 泛型参数列表 [T, U, ...]，函数声明与 union 定义共用。 */
 node_t *parser_read_func_decl_generics(allocator_t *allocator,
                                        parser_t *parser);
@@ -58,6 +62,10 @@ node_t *parser_read_expr_struct_decl(allocator_t *allocator, parser_t *parser);
 /* 位域声明 bitfield Name: Underlying { field: width; ... }。 */
 node_t *parser_read_expr_bitfield_decl(allocator_t *allocator,
                                        parser_t *parser);
+
+/* 接口声明 interface Name[generics]? { func signature; ... }。 */
+node_t *parser_read_expr_interface_decl(allocator_t *allocator,
+                                        parser_t *parser);
 #ifdef __cplusplus
 }
 #endif

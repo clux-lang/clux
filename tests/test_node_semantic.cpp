@@ -18,6 +18,7 @@
 #include "parser/node_generic_param.h"
 #include "parser/node_group.h"
 #include "parser/node_implements.h"
+#include "parser/node_interface_decl.h"
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
 #include "parser/node_source_text.h"
@@ -37,6 +38,7 @@
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
 #include "parser/node_stmt_import.h"
+#include "parser/node_stmt_interface.h"
 #include "parser/node_stmt_reexport.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_static_assert.h"
@@ -1078,6 +1080,62 @@ TEST_F(NodeSemanticTest, StructDeclOptionalSlots) {
   struct_decl_node_set_implements(n, nullptr);
   EXPECT_EQ(struct_decl_node_get_generics(n), nullptr);
   EXPECT_EQ(struct_decl_node_get_implements(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, InterfaceDecl) {
+  node_t *n = create_interface_decl_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_INTERFACE_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_EXPR_INTERFACE_DECL_CHILDREN_SIZE);
+  node_t *keyword = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *generics = make_leaf(a);
+  node_t *body = make_leaf(a);
+  interface_decl_node_set_keyword(n, keyword);
+  interface_decl_node_set_name(n, name);
+  interface_decl_node_set_generics(n, generics);
+  interface_decl_node_set_body(n, body);
+  EXPECT_EQ(interface_decl_node_get_keyword(n), keyword);
+  EXPECT_EQ(interface_decl_node_get_name(n), name);
+  EXPECT_EQ(interface_decl_node_get_generics(n), generics);
+  EXPECT_EQ(interface_decl_node_get_body(n), body);
+  interface_decl_node_set_generics(n, nullptr);
+  EXPECT_EQ(interface_decl_node_get_generics(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, InterfaceMembers) {
+  node_t *n = create_interface_members_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_INTERFACE_MEMBERS);
+  EXPECT_EQ(interface_members_node_get_member_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  interface_members_node_add_member(n, first);
+  interface_members_node_add_member(n, second);
+  EXPECT_EQ(interface_members_node_get_member_count(n), 2u);
+  EXPECT_EQ(interface_members_node_get_member(n, 0), first);
+  EXPECT_EQ(interface_members_node_get_member(n, 1), second);
+  EXPECT_EQ(interface_members_node_get_member(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtInterface) {
+  node_t *n = create_stmt_interface_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_EQ(stmt_interface_node_get_decorator_count(n), 0u);
+  node_t *decl = create_interface_decl_node(a);
+  stmt_interface_node_set_interface_decl(n, decl);
+  EXPECT_EQ(stmt_interface_node_get_interface_decl(n), decl);
+  EXPECT_EQ(stmt_interface_node_get_export(n), nullptr);
+  node_t *export_node = make_leaf(a);
+  stmt_interface_node_set_export(n, export_node);
+  EXPECT_EQ(stmt_interface_node_get_export(n), export_node);
+  node_t *d0 = create_decorator_node(a);
+  stmt_interface_node_add_decorator(n, d0);
+  EXPECT_EQ(stmt_interface_node_get_decorator_count(n), 1u);
+  EXPECT_EQ(stmt_interface_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(stmt_interface_node_get_decorator(n, 1), nullptr);
   delete_node(&n);
 }
 

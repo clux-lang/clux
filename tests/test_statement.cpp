@@ -2988,6 +2988,141 @@ TEST(StmtExternDeclTest, ReturnsNullOnNonExtern) {
   delete_allocator(&a);
 }
 
+/* ================= interface 语句 =================
+   语法：<decorator>* [export]? interface Name[generics]? { ... }
+   （白皮书 §3.10、§6.9）。 */
+
+/* 断言 interface 语句节点：声明槽必存在，装饰器个数符合预期。 */
+static node_t *expect_interface_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected interface statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_EQ(stmt_interface_node_get_decorator_count(node), decorator_count);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_INTERFACE_FIRST_DECORATOR + decorator_count);
+  node_t *decl = stmt_interface_node_get_interface_decl(node);
+  EXPECT_NE(decl, nullptr);
+  if (decl) {
+    EXPECT_EQ(node_get_kind(decl), CLUX_NODE_EXPR_INTERFACE_DECL);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_INTERFACE_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return decl;
+}
+
+TEST(StmtInterfaceTest, WithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a,
+      &p,
+      "interface IWriter[W] { func write(self: *W, data: []u8): void; }");
+  expect_interface_stmt(node, 0);
+  EXPECT_EQ(stmt_interface_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtInterfaceTest, ExportInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(
+      a, &p, "export interface Sized[T] { func size_of(self: *T): usize; }");
+  expect_interface_stmt(node, 0);
+  EXPECT_NE(stmt_interface_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtInterfaceTest, DecoratedExportInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] export interface I { func f(): void; }");
+  expect_interface_stmt(node, 1);
+  EXPECT_NE(stmt_interface_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtInterfaceTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; interface I { func f(): void; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器/export 起点到接口声明终点。 */
+TEST(StmtInterfaceTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "export interface I { func f(): void; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_interface_stmt(node, 0);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器/export 后缺接口声明。 */
+TEST(StmtInterfaceTest, MissingInterfaceDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_interface(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_EQ(stmt_interface_node_get_interface_decl(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected interface declaration in interface statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtInterfaceTest, ReturnsNullOnNonInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_interface(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtInterfaceTest, ReturnsNullOnExportNonInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "export func f(): void {}");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_interface(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= static_assert =================
    语法：static_assert(cond, "msg");（白皮书 §4.16）。
    SOURCE 为条件表达式源码片段，location 指向原文区间。 */
@@ -5189,6 +5324,31 @@ TEST(StmtDispatchTest, DispatchesExportExternCfunc) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "interface I { func f(): void; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExportInterface) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export interface I { func f(): void; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_INTERFACE);
+  EXPECT_NE(stmt_interface_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesStaticAssert) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -5581,6 +5741,14 @@ TEST(StmtTest, NoLeakOnStatements) {
       "extern var crt::errno i32;",
       "extern var crt::errno: ;",
       "extern var crt::errno: i32",
+      "interface IWriter[W] { func write(self: *W, data: []u8): void; }",
+      "export interface Sized[T] { func size_of(self: *T): usize; }",
+      "[[trace]] export interface I { func f(): void; }",
+      "{ a; interface I { func f(): void; } }",
+      "interface I { func f(): void }",
+      "interface I { x: i32; }",
+      "interface I",
+      "[[trace]] interface",
       "static_assert(true, \"m\");",
       "static_assert(sizeof(i64) == 8 as u64, \"expected 64-bit i64\");",
       "static_assert true, \"m\");",

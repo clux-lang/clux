@@ -148,6 +148,7 @@ TEST(LexerKeywordTest, ImportExportUsingAreKeywords) {
                        "extern",
                        "lib",
                        "static_assert",
+                       "interface",
                        nullptr};
   for (int i = 0; kws[i] != nullptr; i++) {
     position_t p = lexer_test_pos(kws[i]);

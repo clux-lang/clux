@@ -19,6 +19,7 @@
 #include "parser/node_group.h"
 #include "parser/node_rest.h"
 #include "parser/node_implements.h"
+#include "parser/node_interface_decl.h"
 #include "parser/node_slice.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node_struct_member.h"

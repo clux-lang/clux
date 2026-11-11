@@ -784,6 +784,59 @@ node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 接口语句 <decorator>* [export]? <interface_decl>（白皮书 §3.10）。
+   调用前当前 token 不一定是装饰器、export 或 interface，不是时返回 NULL
+   且游标不动。装饰器按源码顺序挂在接口声明之后。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_interface(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = parser_peek_decorator(parser);
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "interface")) {
+      return NULL;
+    }
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_stmt_interface_node(allocator);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(
+      allocator, parser, node, stmt_interface_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_interface_node_set_export(node, export_node);
+  }
+
+  /* 接口声明。 */
+  node_t *interface_decl = parser_read_expr_interface_decl(allocator, parser);
+  if (!interface_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected interface declaration in interface statement"));
+    return node;
+  }
+  stmt_interface_node_set_interface_decl(node, interface_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(interface_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 位域语句 <decorator>* <bitfield_decl>（白皮书 §10）。
    调用前当前 token 不一定是装饰器或 bitfield，不是时返回 NULL 且游标不动。
    装饰器按源码顺序挂在位域声明之后。
@@ -880,6 +933,9 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "struct")) {
       return parser_read_stmt_struct(allocator, parser);
     }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "interface")) {
+      return parser_read_stmt_interface(allocator, parser);
+    }
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "bitfield")) {
       node_t *bitfield = parser_read_stmt_bitfield(allocator, parser);
       if (bitfield) {
@@ -919,6 +975,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_stmt_bitfield(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_interface(allocator, parser);
   if (node) {
     return node;
   }

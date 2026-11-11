@@ -69,6 +69,12 @@ enum _node_kind_t {
   /* 位域声明 bitfield Name: u8|u16|u32|u64 { field: width; ... }
      （白皮书 §10）。装饰器属于外层语句，不在本节点内。 */
   CLUX_NODE_EXPR_BITFIELD_DECL,
+  /* 接口声明 interface Name[generics]? { func signature; ... }
+     （白皮书 §3.10、§6.9）。装饰器属于外层语句，不在本节点内。 */
+  CLUX_NODE_EXPR_INTERFACE_DECL,
+  /* 接口成员列表 { func signature; ... }，children 为无函数体的
+     CLUX_NODE_EXPR_FUNC_DECL。 */
+  CLUX_NODE_INTERFACE_MEMBERS,
   /* struct 成员列表 { member ... }，children 为字段、语句声明或嵌入。 */
   CLUX_NODE_STRUCT_MEMBERS,
   /* 嵌入成员 ...Base;：TYPE 为被嵌入的类型。 */
@@ -212,6 +218,10 @@ enum _node_kind_t {
      CONDITION 为断言表达式；SOURCE 为表达式源码片段
      （CLUX_NODE_SOURCE_TEXT），失败诊断直接引用。 */
   CLUX_NODE_STMT_ASSERT,
+
+  /* 接口语句 <decorator>* [export]? <interface_decl>（白皮书 §3.10）。
+     INTERFACE_DECL 槽存接口声明；EXPORT 可缺失；其后为装饰器。 */
+  CLUX_NODE_STMT_INTERFACE,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

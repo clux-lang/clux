@@ -631,7 +631,8 @@ node_t *parser_read_func_decl_generics(allocator_t *allocator,
    `cfunc` 在表达式上下文同样是定义，一样带函数体；它不能有捕获与泛型，
    但该限制属于语义检查，语法层照常解析（纯 FFI 声明是独立的语句形式，
    不经过这里）。出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
-node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
+static node_t *
+read_func_decl(allocator_t *allocator, parser_t *parser, bool signature_only) {
   token_t *token = parser_peek_token(parser);
   if (!token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
       !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
@@ -715,6 +716,23 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
 
   parser_skip_trivia(parser);
   token = parser_peek_token(parser);
+
+  /* 接口成员只写签名，以 ';' 结束，没有函数体。 */
+  if (signature_only) {
+    if (!token_is(token, CLUX_TOKEN_SYMBOL, ";")) {
+      location_t loc = expression_error_location(parser, end_loc);
+      parser_push_error(parser,
+                        create_error(allocator,
+                                     &loc,
+                                     "expected ';' after function signature"));
+      return node;
+    }
+    end_loc = token_get_location(token);
+    parser_next(parser);
+    node_set_location_span(node, &keyword_loc, end_loc);
+    return node;
+  }
+
   if (!token_is(token, CLUX_TOKEN_SYMBOL, "{")) {
     location_t loc = expression_error_location(parser, end_loc);
     parser_push_error(
@@ -726,4 +744,14 @@ node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
   func_decl_node_set_body(node, body);
   node_set_location_span(node, &keyword_loc, node_get_location(body));
   return node;
+}
+
+node_t *parser_read_expr_func_decl(allocator_t *allocator, parser_t *parser) {
+  return read_func_decl(allocator, parser, false);
+}
+
+/* 接口成员签名 func name(params): ret;（白皮书 §3.10），没有函数体。 */
+node_t *parser_read_expr_func_signature(allocator_t *allocator,
+                                        parser_t *parser) {
+  return read_func_decl(allocator, parser, true);
 }

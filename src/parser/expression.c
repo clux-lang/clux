@@ -525,6 +525,10 @@ node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
+  node = parser_read_expr_interface_decl(allocator, parser);
+  if (node) {
+    return node;
+  }
   return parser_read_literal(allocator, parser);
 }
 
