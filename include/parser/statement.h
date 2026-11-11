@@ -17,6 +17,7 @@
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_switch.h"
+#include "parser/node_stmt_test.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_switch_branch.h"
 #include "parser/node_stmt_union.h"
@@ -47,6 +48,7 @@ node_t *parser_read_stmt_comptime_foreach(allocator_t *allocator,
 node_t *parser_read_stmt_do_while(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_switch(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_bitfield(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_test(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

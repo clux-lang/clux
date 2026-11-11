@@ -2159,6 +2159,125 @@ TEST(StmtBitfieldTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
+/* ================= test 语句 =================
+   语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
+   test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
+
+/* 断言 test 节点：NAME 为字符串字面量，BODY 为块。 */
+static node_t *expect_test_stmt(node_t *node) {
+  if (!node) {
+    ADD_FAILURE() << "expected test statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TEST);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_TEST_CHILDREN_SIZE);
+  node_t *name = stmt_test_node_get_name(node);
+  EXPECT_NE(name, nullptr);
+  if (name) {
+    EXPECT_EQ(node_get_kind(name), CLUX_NODE_LITERAL_STRING);
+  }
+  node_t *body = stmt_test_node_get_body(node);
+  EXPECT_NE(body, nullptr);
+  if (body) {
+    EXPECT_EQ(node_get_kind(body), CLUX_NODE_STMT_BLOCK);
+  }
+  return body;
+}
+
+TEST(StmtTestTest, BasicTestBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "test \"Suite.Case\" { assert(1 + 1 == 2); }");
+  node_t *body = expect_test_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 1u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTestTest, EmptyBody) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "test \"Suite.Empty\" {}");
+  node_t *body = expect_test_stmt(node);
+  ASSERT_NE(body, nullptr);
+  EXPECT_EQ(stmt_block_node_get_stmt_count(body), 0u);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 test 标识符到块终点。 */
+TEST(StmtTestTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "test \"Suite.Case\" { assert(x); }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_test_stmt(node);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* test 后不是字符串字面量时不是测试块，交回表达式语句。 */
+TEST(StmtTestTest, ReturnsNullWithoutString) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "test;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_test(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtTestTest, ReturnsNullOnNonTest) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "foo \"x\" {}");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_test(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* test 后缺块。 */
+TEST(StmtTestTest, MissingBodyReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "test \"Suite.Case\"");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TEST);
+  EXPECT_EQ(stmt_test_node_get_body(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '{' to start test body");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* test 作为普通标识符时仍走表达式语句。 */
+TEST(StmtTestTest, TestIdentifierStaysExpression) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "test;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= defer 语句 =================
    语法：defer |captures|? { body }（白皮书 §4.12）。
    捕获项复用 FUNC_PARAM：NAME 必有，DEFAULT 可缺失。 */
@@ -3941,6 +4060,18 @@ TEST(StmtDispatchTest, DispatchesDecoratedBitfield) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesTest) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "test \"Suite.Case\" { assert(x); }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_TEST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesDefer) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4190,6 +4321,10 @@ TEST(StmtTest, NoLeakOnStatements) {
       "bitfield F: u8 { 1: 1; }",
       "bitfield F: u8",
       "[[trace]] bitfield",
+      "test \"Suite.Case\" { assert(x); }",
+      "test \"Suite.Empty\" {}",
+      "test \"Suite.Case\"",
+      "test;",
       "defer { a; }",
       "defer {}",
       "defer |captured| { a; }",

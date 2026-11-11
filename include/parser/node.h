@@ -172,6 +172,11 @@ enum _node_kind_t {
   /* 位域语句 <decorator>* <bitfield_decl>（白皮书 §10）。
      BITFIELD_DECL 槽存位域声明，其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_BITFIELD,
+
+  /* 测试块 test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
+     NAME 为字符串字面量；BODY 为块语句。test 不是关键字，只在
+     `test` 后接字符串字面量与块时按测试块解析。 */
+  CLUX_NODE_STMT_TEST,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

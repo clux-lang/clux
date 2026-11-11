@@ -34,6 +34,7 @@
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_switch.h"
+#include "parser/node_stmt_test.h"
 #include "parser/node_stmt_type.h"
 #include "parser/node_switch_branch.h"
 #include "parser/node_stmt_union.h"
@@ -1043,6 +1044,22 @@ TEST_F(NodeSemanticTest, StructDeclOptionalSlots) {
   struct_decl_node_set_implements(n, nullptr);
   EXPECT_EQ(struct_decl_node_get_generics(n), nullptr);
   EXPECT_EQ(struct_decl_node_get_implements(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtTest) {
+  node_t *n = create_stmt_test_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_TEST);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_TEST_CHILDREN_SIZE);
+  node_t *name = make_leaf(a);
+  node_t *body = make_leaf(a);
+  stmt_test_node_set_name(n, name);
+  stmt_test_node_set_body(n, body);
+  EXPECT_EQ(stmt_test_node_get_name(n), name);
+  EXPECT_EQ(stmt_test_node_get_body(n), body);
+  stmt_test_node_set_body(n, nullptr);
+  EXPECT_EQ(stmt_test_node_get_body(n), nullptr);
   delete_node(&n);
 }
 
