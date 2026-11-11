@@ -45,6 +45,9 @@ parser_t *create_parser(allocator_t *allocator,
       token = lexer_read_whitespace(allocator, &position, filename);
     }
     if (!token) {
+      token = lexer_read_builtin(allocator, &position, filename);
+    }
+    if (!token) {
       token = lexer_read_identifier(allocator, &position, filename);
     }
     if (!token) {

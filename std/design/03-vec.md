@@ -24,7 +24,7 @@ struct Vec[T] {
 
 - **不变量**：`len <= cap`；`cap > 0 ⇒ ptr != nil`；`ptr[0..len]` 是已初始化元素，
   `ptr[len..cap]` 是未初始化区域（不得读取）。
-- 增长：`cap` 从 **8** 起，不足时**翻倍**；溢出检查（`cap * sizeof(T)` 溢出 → panic）。
+- 增长：`cap` 从 **8** 起，不足时**翻倍**；溢出检查（`cap * #sizeof(T)` 溢出 → panic）。
 - 元素移动：`push`/`insert`/`remove` 用**按值搬移**（`T` 的位拷贝 + 源置空语义由容器负责；
   对 move-only 元素，容器内部用 `__init_copy__` 语义搬运——实现层直接按字节搬移并视为已移出）。
 - `Vec[T]` 是 **move-only**：`__init_copy__` 移动（源清空）、`__dispose__` 释放缓冲 + 元素析构
@@ -81,7 +81,7 @@ func (v: *Vec[T]) __index__(self: *Vec[T], i: usize) -> *T
 | 分配失败（`push`/`reserve`/`from_slice`/`clone`） | panic `"out of memory"` |
 | `at`/`__index__`/`insert`/`remove`/`truncate` 越界 | panic，消息含索引与长度 |
 | `pop` 空 | `nil` |
-| 容量溢出（`cap * sizeof(T)` 溢出） | panic `"capacity overflow"` |
+| 容量溢出（`cap * #sizeof(T)` 溢出） | panic `"capacity overflow"` |
 | `__dispose__` 重复调用 | 幂等（清空后 `ptr = nil, len = cap = 0`） |
 
 ## 5. 确定性

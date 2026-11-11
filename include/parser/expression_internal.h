@@ -23,6 +23,9 @@ location_t expression_error_location(parser_t *parser,
 /* 取当前 token 之后第 offset 个 token（不移动游标）。 */
 token_t *peek_token_at(parser_t *parser, size_t offset);
 
+/* 编译器内建 #name(arg, ...)。 */
+node_t *parser_read_expr_builtin(allocator_t *allocator, parser_t *parser);
+
 /* 类型前缀层：指针、类型修饰、切片、数组、元组、optional。 */
 node_t *parser_read_expr_type(allocator_t *allocator, parser_t *parser);
 

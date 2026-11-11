@@ -241,7 +241,7 @@ comptime foreach (var x of seq) {
 ## 4.16 编译期断言
 
 ```clux
-static_assert(sizeof(i64) == 8 as u64, "expected 64-bit i64");
+static_assert(#sizeof(i64) == 8 as u64, "expected 64-bit i64");
 ```
 
 - `static_assert` 是标准语句，可出现在任何语句位置。

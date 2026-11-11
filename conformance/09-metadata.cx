@@ -73,8 +73,8 @@ enum Kind: i32 {A = 1, B = 2, C = 3}
 test "metadata.reflect.type" {
     assert(Meta.name == "Meta");
     assert(Meta.kind == "struct");
-    assert(Meta.size == sizeof(Meta));
-    assert(Meta.align == alignof(Meta));
+    assert(Meta.size == #sizeof(Meta));
+    assert(Meta.align == #alignof(Meta));
 }
 
 test "metadata.reflect.fields" {
@@ -87,7 +87,7 @@ test "metadata.reflect.fields" {
 
 test "metadata.reflect.methodsAndAttrs" {
     assert(Meta.method_count == 2usize);
-    assert(len(Meta.method_type("m").name) > 0usize);
+    assert(#len(Meta.method_type("m").name) > 0usize);
     assert(Meta.attribute_count == 1usize);
     assert(Meta.attribute_type(0).name == "i32");
 }

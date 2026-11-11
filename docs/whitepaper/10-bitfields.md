@@ -41,7 +41,7 @@ bitfield Big: u8 {
 bit 0..4    a
 bit 4..12   b
 bit 12..17  c
-sizeof(Big) == 3
+#sizeof(Big) == 3
 ```
 
 ## 10.4 构造
@@ -73,12 +73,12 @@ var p: *Flags = f.&;
 p.a = 4u32;
 ```
 
-## 10.6 sizeof / alignof
+## 10.6 #sizeof / #alignof
 
-`sizeof` / `alignof` 按隐藏存储数组计算：
+`#sizeof` / `#alignof` 按隐藏存储数组计算：
 
 ```clux
-var n: usize = sizeof(Flags);
+var n: usize = #sizeof(Flags);
 ```
 
 ## 10.7 限制

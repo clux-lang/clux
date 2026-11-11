@@ -13,10 +13,10 @@ bitfield Wide: u8 {
 
 test "bitfields.layout" {
     // a 占 bit 0..3、b 占 bit 3..8 → 总共 8 位，存 1 个 u32
-    assert(sizeof(Flags) == 4usize);
+    assert(#sizeof(Flags) == 4usize);
     // 4+8+5 = 17 位 → ceil(17/8) = 3 字节
-    assert(sizeof(Wide) == 3usize);
-    assert(alignof(Flags) == 4usize);
+    assert(#sizeof(Wide) == 3usize);
+    assert(#alignof(Flags) == 4usize);
 }
 
 test "bitfields.constructAndRead" {

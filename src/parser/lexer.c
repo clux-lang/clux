@@ -165,6 +165,37 @@ token_t *lexer_read_identifier(allocator_t *allocator,
   return token;
 }
 
+/* ---- builtin ----
+   `#name` 编译器内建。'#' 后必须紧跟标识符起始字符（含下划线），
+   否则返回 NULL，把 '#' 留给符号层。 */
+token_t *lexer_read_builtin(allocator_t *allocator,
+                            position_t *position,
+                            const char *filename) {
+  if (*position->offset != '#') return NULL;
+  position_t begin = *position;
+  position_t current = *position;
+  position_next(&current); /* '#' */
+
+  UChar32 c = peek_codepoint(&current);
+  if (c < 0 || !(c == '_' || u_isIDStart(c))) return NULL;
+  position_next(&current); /* 首字符 */
+
+  while (1) {
+    c = peek_codepoint(&current);
+    if (c < 0 || !u_isIDPart(c)) break;
+    position_next(&current);
+  }
+
+  location_t loc = {
+      .filename = filename,
+      .begin = begin,
+      .end = current,
+  };
+  token_t *token = create_token(allocator, CLUX_TOKEN_BUILTIN, loc);
+  *position = current;
+  return token;
+}
+
 /* ---- whitespace ----
    连续的 Unicode Whitespace 字符。非空白开头返回 NULL。 */
 token_t *lexer_read_whitespace(allocator_t *allocator,
@@ -343,7 +374,7 @@ static const char *symbols[] = {
     ".!",  ".*",  ".&",  "+=",  "-=",  "/=", "*=", "%=", "&=", "|=",
     "~=",  "^=",  "->",  "::",  "+",   "-",  "*",  "/",  "%",  "&",
     "|",   "!",   "=",   "(",   ")",   "[",  "]",  "{",  "}",  "~",
-    "^",   ".",   ",",   "?",   ":",   ";",  ">",  "<",  NULL};
+    "^",   ".",   ",",   "?",   ":",   ";",  ">",  "<",  "#",  NULL};
 
 token_t *lexer_read_symbol(allocator_t *allocator,
                            position_t *position,

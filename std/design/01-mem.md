@@ -5,7 +5,7 @@
 
 ## 1. 范围
 
-负责：`Allocator` 值类型、堆分配器、Arena、`sizeof/alignof` 相关约定、OOM 策略。
+负责：`Allocator` 值类型、堆分配器、Arena、`#sizeof/#alignof` 相关约定、OOM 策略。
 不负责：容器实现（见 `03-vec`/`02-str-string`）、文件/IO（见 `05-io-sys`）。
 
 ## 2. 设计原则
@@ -114,7 +114,7 @@ func Arena.__dispose__(self: *Arena): void        /* 归还全部块 */
 
 1. `Allocator` 的打印/诊断**不得**输出 `ctx` 或函数指针地址（只输出 `"std::mem.heap"` 这类名字）。
 2. `Arena` 的迭代/遍历顺序（目前没有）若将来加入，必须按分配顺序。
-3. 容器 `sizeof` 只依赖 `allocof`，不依赖分配地址。
+3. 容器 `#sizeof` 只依赖 `allocof`，不依赖分配地址。
 
 ## 7. 测试用例清单
 

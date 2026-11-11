@@ -43,14 +43,14 @@ test "lexical.integer.radix" {
 }
 
 test "lexical.integer.suffixTypes" {
-    assert(typeof(1i8).name == "i8");
-    assert(typeof(1u8).name == "u8");
-    assert(typeof(1i32).name == "i32");
-    assert(typeof(1u64).name == "u64");
-    assert(typeof(1usize).name == "usize");
-    assert(sizeof(1i8) == 1usize);
-    assert(sizeof(1i16) == 2usize);
-    assert(sizeof(1i64) == 8usize);
+    assert(#typeof(1i8).name == "i8");
+    assert(#typeof(1u8).name == "u8");
+    assert(#typeof(1i32).name == "i32");
+    assert(#typeof(1u64).name == "u64");
+    assert(#typeof(1usize).name == "usize");
+    assert(#sizeof(1i8) == 1usize);
+    assert(#sizeof(1i16) == 2usize);
+    assert(#sizeof(1i64) == 8usize);
 }
 
 test "lexical.float" {
@@ -60,8 +60,8 @@ test "lexical.float" {
     assert(3.5f64 == 3.5f64);
     assert(1e3 == 1000.0f64);
     assert(1.5e-2 == 0.015f64);
-    assert(typeof(1.5f32).name == "f32");
-    assert(typeof(1.5).name == "f64");
+    assert(#typeof(1.5f32).name == "f32");
+    assert(#typeof(1.5).name == "f64");
 }
 
 test "lexical.bool" {
@@ -81,7 +81,7 @@ test "lexical.char" {
     assert(backslash == 92u8);
     assert(quote == 39u8);
     assert(hex == 65u8);
-    assert(typeof('z').name == "u8");
+    assert(#typeof('z').name == "u8");
 }
 
 test "lexical.string.escapes" {
@@ -90,8 +90,8 @@ test "lexical.string.escapes" {
     var hex: str = "\x41\x42";
     var es: []const u8 = esc[:];
     var hs: []const u8 = hex[:];
-    assert(len(plain) == 4usize);
-    assert(len(esc) == 9usize);
+    assert(#len(plain) == 4usize);
+    assert(#len(esc) == 9usize);
     assert(es[1] == '\t');
     assert(es[3] == '\n');
     assert(hs[0] == 65u8);

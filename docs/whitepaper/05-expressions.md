@@ -94,12 +94,12 @@ a >= b
 方法调用（见 §3.5.1 的魔法表）：
 
 ```text
-a + b    ⇒  typeof(a)::__add__(a.&, b.&)
-a == b   ⇒  typeof(a)::__eq__(a.&, b.&)
-a != b   ⇒  !(typeof(a)::__eq__(a.&, b.&))
--a       ⇒  typeof(a)::__neg__(a.&)
-a[i]     ⇒  (typeof(a)::__index__(a.&, i)).*
-len(a)   ⇒  typeof(a)::__len__(a.&)
+a + b    ⇒  #typeof(a)::__add__(a.&, b.&)
+a == b   ⇒  #typeof(a)::__eq__(a.&, b.&)
+a != b   ⇒  !(#typeof(a)::__eq__(a.&, b.&))
+-a       ⇒  #typeof(a)::__neg__(a.&)
+a[i]     ⇒  (#typeof(a)::__index__(a.&, i)).*
+#len(a)  ⇒  #typeof(a)::__len__(a.&)
 ```
 
 - 内建类型（标量 / 数组 / 切片 / `str` / 元组 / enum / 指针）永远走内建
@@ -198,12 +198,12 @@ extern cfunc libc::malloc(size: usize): opaque;
 var raw: opaque = libc::malloc(16);
 var p: *User = raw as *User;
 
-// make 把“已有指针 + 长度”包成切片视图，不分配：
-var xs: []i32 = make(buf, len);
+// #slice 把“已有指针 + 长度”包成切片视图，不分配：
+var xs: []i32 = #slice(buf, n);
 ```
 
 - 指针生命周期照搬 C：分配与释放都由用户通过 FFI/库函数负责。
-- `make(pointer, len)` 只构造切片视图，缓冲区由调用方管理与释放。
+- `#slice(pointer, len)` 只构造切片视图，缓冲区由调用方管理与释放。
 
 ## 5.12 指针与解引用
 
@@ -238,9 +238,9 @@ opt.!
 ## 5.14 编译期类型运算
 
 ```clux
-sizeof(T)
-alignof(T)
-typeof(value)
+#sizeof(T)
+#alignof(T)
+#typeof(value)
 ```
 
 参数必须能确定类型；结果是编译期常量或类型值。
@@ -248,14 +248,20 @@ typeof(value)
 ## 5.15 内建序列操作
 
 ```clux
-len(x)
-data(x)
-cfunc_ptr(f)
+#len(x)
+#slice(pointer, len)
+#data(x)
+#cfunc_ptr(f)
+#take_opt(x)
+#panic(msg)
 ```
 
-- `len(x)` 返回数组、切片、元组或字符串的长度。
-- `data(x)` 返回序列首元素的 C 地址，用于 FFI。
-- `cfunc_ptr(f)` 把 clux 函数转换为 C 函数指针。
+- `#len(x)` 返回数组、切片、元组或字符串的长度；结构体可派发 `__len__`。
+- `#slice(pointer, len)` 把已有指针与长度包装成切片视图，不分配。
+- `#data(x)` 返回序列首元素的 C 地址，用于 FFI。
+- `#cfunc_ptr(f)` 把 clux 函数转换为 C 函数指针。
+- `#take_opt(x)` 移出 optional 载荷并把源置 `nil`。
+- `#panic(msg)` 是编译器内建的直接报错入口。
 
 ## 5.16 调用实参展开
 

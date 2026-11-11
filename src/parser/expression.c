@@ -489,7 +489,11 @@ static node_t *read_group(allocator_t *allocator, parser_t *parser) {
    optional 类型、函数类型、函数声明、union、enum 声明、struct 声明与
    literal 十四个来源。 */
 node_t *parser_read_expr_value(allocator_t *allocator, parser_t *parser) {
-  node_t *node = read_construct(allocator, parser);
+  node_t *node = parser_read_expr_builtin(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = read_construct(allocator, parser);
   if (node) {
     return node;
   }

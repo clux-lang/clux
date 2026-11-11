@@ -37,19 +37,22 @@
 ## 1.4 关键字
 
 ```text
-alignof  as       bitfield  bool      break     cfunc     comptime
-const    continue cunion    default   defer     do        else
-enum     export   extends   extern    f32       f64       false
-for      foreach  from      func      i8        i16       i32
-i64      if       implements import   interface is        len
-lib      make     nil       of        opaque    return    sizeof
-static_assert    str       struct    switch    true      type
-typeof   u8       u16       u32       u64       undefined union
-usize    var      void      volatile  while     using
+as       bitfield  bool      break     cfunc     comptime  const
+continue cunion    default   defer     do        else      enum
+export   extends   extern    f32       f64       false     for
+foreach  from      func      i8        i16       i32       i64
+if       implements import   interface is        lib       nil
+of       opaque    return    static_assert       str       struct
+switch   true      type      u8        u16       u32       u64
+undefined union    usize     var       void      volatile  while
+using
 ```
 
 `test` 不是全局关键字。只有顶层出现 `test "名称" { ... }` 时才按测试块解析；
 因此普通函数可以命名为 `test`。
+
+`#name`（如 `#sizeof`、`#len`）是编译器内建，不属于关键字，也不占用普通
+标识符命名空间。`#` 与名字之间不能有空白；内建名由语义阶段校验。
 
 ## 1.5 标点与运算符
 

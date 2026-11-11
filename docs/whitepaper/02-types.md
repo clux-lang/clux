@@ -1,7 +1,7 @@
 # 2. 类型
 
 clux 的类型是静态的。类型本身也是表达式：类型表达式可以出现在类型位置，
-也可以作为值参与 `typeof`、`sizeof`、泛型和编译期计算。
+也可以作为值参与 `#typeof`、`#sizeof`、泛型和编译期计算。
 
 ## 2.1 基础类型
 
@@ -131,7 +131,7 @@ cfunc(i32) -> i32
 
 - `func` 是 clux 函数值，可以带捕获环境。
 - `cfunc` 是 C ABI 函数指针，没有捕获环境。
-- 两者不隐式互通；需要 C 调用时使用 `cfunc(...)` 类型和 `cfunc_ptr(...)`。
+- 两者不隐式互通；需要 C 调用时使用 `cfunc(...)` 类型和 `#cfunc_ptr(...)`。
 
 ## 2.8 类型别名
 
@@ -168,18 +168,18 @@ clux 不进行隐式跨类型转换；整数和浮点字面量在上下文明确
 ## 2.11 类型运算
 
 ```clux
-sizeof(T)
-alignof(T)
-typeof(expr)
+#sizeof(T)
+#alignof(T)
+#typeof(expr)
 ```
 
-- `sizeof` / `alignof` 产生 `usize` 编译期值。
-- `typeof` 产生 `expr` 的类型值。
-- `sizeof` / `alignof` 的操作数可以是任意**类型表达式**，包括泛型实例：
-  `sizeof(Cell[i32])`、`sizeof(Matrix[i32, 3])`，以及泛型函数体内的
-  `sizeof(Cell[T])`（实例化之后它就是一个类型值）。
-- 类型前缀形态同样合法：`sizeof(*T)`、`sizeof(**T)`、`sizeof([]T)`、
-  `sizeof([N]T)`、`sizeof(?T)`、`sizeof(*const T)`、`sizeof(const T)`。
+- `#sizeof` / `#alignof` 产生 `usize` 编译期值。
+- `#typeof` 产生 `expr` 的类型值。
+- `#sizeof` / `#alignof` 的操作数可以是任意**类型表达式**，包括泛型实例：
+  `#sizeof(Cell[i32])`、`#sizeof(Matrix[i32, 3])`，以及泛型函数体内的
+  `#sizeof(Cell[T])`（实例化之后它就是一个类型值）。
+- 类型前缀形态同样合法：`#sizeof(*T)`、`#sizeof(**T)`、`#sizeof([]T)`、
+  `#sizeof([N]T)`、`#sizeof(?T)`、`#sizeof(*const T)`、`#sizeof(const T)`。
   （指针/切片/数组/optional 的宽度与对齐按目标平台，见 §2.12。）
 
 ## 2.12 布局

@@ -39,7 +39,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
 - **M2 — C-level expressiveness (minus pointers)**: `struct` / `enum` / tag `union` /
   `cunion`; static arrays `[N]T`; tuples `<T1,T2>` (with array↔tuple conversion);
   `switch` (no fallthrough); `do`/`while`; `type` aliases and compile-time type
-  computation (`extends`, `==`, `?:`); `sizeof` / `alignof` / `typeof`; function types
+  computation (`extends`, `==`, `?:`); `#sizeof` / `#alignof` / `#typeof`; function types
   `func(...)->T` and function literals; optional `?T` with `nil` (no path narrowing) and
   `.!` unwrap; `comptime var` / `comptime func`; `const` / `volatile` as real types;
   **`static_assert(cond, "msg")`** — standard compile-time assertion statement:
@@ -55,8 +55,8 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   feature: call `libc::malloc` / `libc::free` through FFI and initialize/free
   fields explicitly. Compile-time ownership was removed; the compiler only
   checks raw pointers. See `docs/whitepaper/02-types.md`.
-- **M4 — slices and strings**: `[]T` fat pointers, `make(pointer, len)` (a
-  non-allocating slice view), `len`, `s[a:b]` slicing, `str` slicing to
+- **M4 — slices and strings**: `[]T` fat pointers, `#slice(pointer, len)` (a
+  non-allocating slice view), `#len`, `s[a:b]` slicing, `str` slicing to
   `[] const u8`, bounds checks.
 - **M5 — modules**: `export` on global declarations, `import alias from "./mod"` with
   `alias::member` access, **relative path resolution against the importing file's
@@ -88,7 +88,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   structs); comptime value parameters (`N: comptime u64`, explicit / inferred
   from array lengths / defaulted) for functions and types; type parameter
   packs (`func f[...Args](args: ...Args)`, explicit or inferred, empty packs,
-  `len(args)` / `args[i]` over the entry tuple); `extends` structure
+  `#len(args)` / `args[i]` over the entry tuple); `extends` structure
   constraints with `?` / `<?>` / `?*?`, type/array/tuple/func/generic patterns
   and `&`/`|` composition; compile-time `interface` declarations,
   `struct ... implements I[...]` checking (attributes + method signatures),
@@ -98,7 +98,7 @@ constraints (`?`, `<?>`, `?*?`, `&`/`|`) and compile-time `interface` /
   parameter packs), cross-module instantiation (`mod::Box[i32]`,
   `mod::id[i32](...)`, generic methods, generic re-exports), interface
   composition with `&`, and comptime value parameter packs (`...N: comptime
-  u64` with `N[i]` / `len(N)`). Remaining M7 gaps are tracked in
+  u64` with `N[i]` / `#len(N)`). Remaining M7 gaps are tracked in
   `docs/whitepaper/06-generics.md`.
 - `clux build` (single-file C backend): generates C and invokes the host C
   compiler (`--emit-c[=PATH]` writes the C only). See

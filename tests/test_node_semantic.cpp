@@ -5,6 +5,7 @@
 #include "parser/node_assign.h"
 #include "parser/node_bitfield_decl.h"
 #include "parser/node_bitfield_field.h"
+#include "parser/node_builtin.h"
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
 #include "parser/node_decorator.h"
@@ -187,6 +188,24 @@ TEST_F(NodeSemanticTest, Call) {
   EXPECT_EQ(call_node_get_arg_count(n), 1u);
   EXPECT_EQ(call_node_get_arg(n, 0), arg);
   EXPECT_EQ(call_node_get_arg(n, 1), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, Builtin) {
+  node_t *n = create_builtin_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_BUILTIN);
+  EXPECT_EQ(builtin_node_get_arg_count(n), 0u);
+  node_t *name = make_leaf(a);
+  builtin_node_set_name(n, name);
+  EXPECT_EQ(builtin_node_get_name(n), name);
+  node_t *arg0 = make_leaf(a);
+  node_t *arg1 = make_leaf(a);
+  builtin_node_add_arg(n, arg0);
+  builtin_node_add_arg(n, arg1);
+  EXPECT_EQ(builtin_node_get_arg_count(n), 2u);
+  EXPECT_EQ(builtin_node_get_arg(n, 0), arg0);
+  EXPECT_EQ(builtin_node_get_arg(n, 1), arg1);
+  EXPECT_EQ(builtin_node_get_arg(n, 2), nullptr);
   delete_node(&n);
 }
 

@@ -243,7 +243,7 @@ test "statements.using" {
 /* ---- static_assert ---- */
 
 test "statements.staticAssert" {
-    static_assert(sizeof(i32) == 4usize, "i32 is 4 bytes");
+    static_assert(#sizeof(i32) == 4usize, "i32 is 4 bytes");
     static_assert(true, "trivially true");
     assert(true);
 }

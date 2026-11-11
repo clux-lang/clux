@@ -78,7 +78,7 @@ var level: i32 = get_metadata[S]("level");
 ## 9.5 泛型实例
 
 ```clux
-[[metadata("size", sizeof(T))]]
+[[metadata("size", #sizeof(T))]]
 struct Box[T] { value: T; }
 
 var a: usize = get_metadata[Box[i32]]("size");

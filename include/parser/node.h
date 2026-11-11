@@ -38,6 +38,9 @@ enum _node_kind_t {
   CLUX_NODE_EXPR_REST,
   /* 函数调用 callee(arg, ...)；实参可以是 rest 表达式。 */
   CLUX_NODE_EXPR_CALL,
+  /* 编译器内建 #name(arg, ...)，与普通调用在语法阶段即区分。
+     NAME 为去掉 '#' 的内建名；实参可以是 rest 表达式。 */
+  CLUX_NODE_EXPR_BUILTIN,
   /* 构造表达式 .type?{ elem, ... }；类型槽可为 NULL（匿名构造），
      元素一律是表达式或 rest 表达式。语法阶段不区分类型与普通表达式。 */
   CLUX_NODE_EXPR_CONSTRUCT,

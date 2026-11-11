@@ -14,6 +14,8 @@ enum _token_kind_t {
   CLUX_TOKEN_IDENTIFIER,
   CLUX_TOKEN_SYMBOL,
   CLUX_TOKEN_KEYWORD,
+  /* 编译器内建 `#name`，location 覆盖包括 '#' 在内的完整文本。 */
+  CLUX_TOKEN_BUILTIN,
   CLUX_TOKEN_WHITESPACE,
   CLUX_TOKEN_COMMENT,
   CLUX_TOKEN_MULTILINE_COMMENT,
@@ -35,6 +37,10 @@ token_t *lexer_read_string(allocator_t *allocator,
 token_t *lexer_read_identifier(allocator_t *allocator,
                                position_t *position,
                                const char *filename);
+/* 编译器内建 `#name`。'#' 后必须紧跟标识符起始字符，否则返回 NULL。 */
+token_t *lexer_read_builtin(allocator_t *allocator,
+                            position_t *position,
+                            const char *filename);
 token_t *lexer_read_whitespace(allocator_t *allocator,
                                position_t *position,
                                const char *filename);

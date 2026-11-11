@@ -6,6 +6,61 @@
 #include "lexer_test_util.h"
 #include <string.h>
 
+// ============================ builtin ============================
+
+TEST(LexerBuiltinTest, ReadsNameWithHash) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "#sizeof";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_builtin(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_BUILTIN);
+  EXPECT_EQ(p.offset, src + 7);
+  const location_t *loc = token_get_location(tok);
+  EXPECT_EQ(loc->end.offset - loc->begin.offset, (ptrdiff_t)7);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerBuiltinTest, ReadsUnderscoreAndUnicode) {
+  allocator_t *a = create_allocator(malloc, free);
+  {
+    const char *src = "#cfunc_ptr";
+    position_t p = lexer_test_pos(src);
+    token_t *tok = lexer_read_builtin(a, &p, "test.clux");
+    ASSERT_NE(tok, nullptr);
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_BUILTIN);
+    delete_token(&tok);
+  }
+  {
+    const char *src = "#类型";
+    position_t p = lexer_test_pos(src);
+    token_t *tok = lexer_read_builtin(a, &p, "test.clux");
+    ASSERT_NE(tok, nullptr);
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_BUILTIN);
+    delete_token(&tok);
+  }
+  delete_allocator(&a);
+}
+
+TEST(LexerBuiltinTest, HashWithoutNameReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "# 1";
+  position_t p = lexer_test_pos(src);
+  EXPECT_EQ(lexer_read_builtin(a, &p, "test.clux"), nullptr);
+  EXPECT_EQ(p.offset, src);
+  delete_allocator(&a);
+}
+
+TEST(LexerBuiltinTest, NonHashReturnsNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "sizeof";
+  position_t p = lexer_test_pos(src);
+  EXPECT_EQ(lexer_read_builtin(a, &p, "test.clux"), nullptr);
+  EXPECT_EQ(p.offset, src);
+  delete_allocator(&a);
+}
+
 // ============================ keyword ============================
 
 TEST(LexerKeywordTest, VarIsKeyword) {

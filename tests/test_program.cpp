@@ -101,24 +101,13 @@ TEST(ProgramTest, ErrorRecoveryAlwaysAdvances) {
 
 TEST(ProgramTest, MalformedInputsDoNotLeak) {
   const char *sources[] = {
-      "",
-      "   ",
-      "// only comment",
-      ")",
-      ") ) )",
-      "export",
-      "export )",
-      "[[trace]]",
-      "[[trace]] )",
-      "comptime",
-      "var",
-      "func",
-      "func f(",
-      "struct",
-      "bitfield",
-      "interface",
-      "a; b; c;",
-      nullptr,
+      "",          "   ",       "// only comment",
+      ")",         ") ) )",     "export",
+      "export )",  "[[trace]]", "[[trace]] )",
+      "comptime",  "var",       "func",
+      "func f(",   "struct",    "bitfield",
+      "interface", "#",         "#123",
+      "#sizeof",   "a; b; c;",  nullptr,
   };
   for (size_t i = 0; sources[i] != nullptr; i++) {
     g_alloc_count = 0;

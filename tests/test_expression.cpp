@@ -2,6 +2,8 @@
 #include "parser/expression.h"
 #include "parser/expression_internal.h"
 #include "parser/node.h"
+#include "parser/node_builtin.h"
+#include "parser/node_call.h"
 #include "parser/node_stmt_func.h"
 #include "parser/parser.h"
 #include "core/allocator.h"
@@ -3439,6 +3441,187 @@ expect_call(node_t *expr, node_kind_t callee_kind, size_t arg_count) {
   for (size_t i = 0; i < arg_count; i++) {
     EXPECT_NE(node_get_child(expr, CLUX_EXPR_CALL_FIRST_ARG + i), nullptr)
         << "arg=" << i;
+  }
+}
+
+/* ---- 编译器内建 #name(...) ---- */
+
+/* 断言 builtin 节点：名字与实参个数。 */
+static node_t *
+expect_builtin(node_t *expr, const char *name, size_t arg_count) {
+  if (!expr) {
+    ADD_FAILURE() << "expected builtin, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_BUILTIN);
+  EXPECT_EQ(builtin_node_get_arg_count(expr), arg_count);
+  node_t *name_node = builtin_node_get_name(expr);
+  EXPECT_NE(name_node, nullptr);
+  if (name_node) {
+    EXPECT_EQ(node_get_kind(name_node), CLUX_NODE_SYMBOL);
+    EXPECT_EQ(node_get_location(name_node)->end.offset -
+                  node_get_location(name_node)->begin.offset,
+              (ptrdiff_t)strlen(name));
+  }
+  for (size_t i = 0; i < arg_count; i++) {
+    EXPECT_NE(builtin_node_get_arg(expr, i), nullptr);
+  }
+  return expr;
+}
+
+TEST(ExpressionBuiltinTest, SizeofWithTypeArgument) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#sizeof(i32)");
+  expect_builtin(expr, "sizeof", 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, AllSupportedNames) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *srcs[] = {"#alignof(T)",
+                        "#typeof(x)",
+                        "#len(x)",
+                        "#slice(p, n)",
+                        "#data(x)",
+                        "#cfunc_ptr(f)",
+                        "#take_opt(x)",
+                        "#panic(\"boom\")",
+                        nullptr};
+  for (size_t i = 0; srcs[i] != nullptr; i++) {
+    parser_t *p;
+    node_t *expr = parse_postfix(a, &p, srcs[i]);
+    ASSERT_NE(expr, nullptr) << "src=" << srcs[i];
+    EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_BUILTIN) << "src=" << srcs[i];
+    EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u) << "src=" << srcs[i];
+    delete_node(&expr);
+    delete_parser(&p);
+  }
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, NoArguments) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#len()");
+  expect_builtin(expr, "len", 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, MultipleArgumentsAndRest) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#slice(p, ...args)");
+  expect_builtin(expr, "slice", 2);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, PostfixAppliesToBuiltinResult) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#typeof(x).name");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_BINARY);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_BINARY_LEFT)),
+            CLUX_NODE_EXPR_BUILTIN);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, SpanIncludesHash) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "#sizeof(i32)";
+  node_t *expr = parse_postfix(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  expect_location_span(expr, src, src);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, MissingOpenParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#sizeof");
+  expect_builtin(expr, "sizeof", 0);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected '(' after builtin name");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, MissingCloseParenReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "#sizeof(i32");
+  expect_builtin(expr, "sizeof", 1);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ')' to close builtin call");
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 裸名不再保留给内建，按普通调用解析。 */
+TEST(ExpressionBuiltinTest, BareNameIsOrdinaryCall) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, "sizeof(i32)");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(node_get_kind(call_node_get_callee(expr)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, HashAloneIsNotBuiltin) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  EXPECT_EQ(parse_postfix(a, &p, "#"), nullptr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionBuiltinTest, NoLeak) {
+  const char *sources[] = {"#sizeof(i32)",
+                           "#len()",
+                           "#slice(p, n)",
+                           "#slice(p, ...args)",
+                           "#typeof(x).name",
+                           "#sizeof",
+                           "#sizeof(i32",
+                           "#sizeof(,)",
+                           nullptr};
+  for (size_t i = 0; sources[i] != nullptr; i++) {
+    g_alloc_count = 0;
+    g_free_count = 0;
+    allocator_t *a = create_allocator(counting_alloc, counting_free);
+    parser_t *p;
+    node_t *expr = parse_postfix(a, &p, sources[i]);
+    delete_node(&expr);
+    delete_parser(&p);
+    delete_allocator(&a);
+    EXPECT_EQ(g_alloc_count, g_free_count) << "src=" << sources[i];
   }
 }
 

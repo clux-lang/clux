@@ -132,7 +132,7 @@ export struct Arena {
         if (want < need) {
             want = need;
         }
-        var hp: ?opaque = self.backing.alloc(sizeof(ArenaChunk), alignof(ArenaChunk));
+        var hp: ?opaque = self.backing.alloc(#sizeof(ArenaChunk), #alignof(ArenaChunk));
         if (hp == nil) {
             return false;
         }
@@ -170,7 +170,7 @@ export struct Arena {
         }
         a.used = off + size;
         var base: *u8 = a.cur.!;
-        var view: []u8 = make(base, a.cur_size);
+        var view: []u8 = #slice(base, a.cur_size);
         return view[off].&;
     }
 
@@ -205,7 +205,7 @@ test "mem.heapAllocFree" {
     var h: HeapAllocator = HeapAllocator::new();
     var p: ?opaque = h.alloc(32usize, 8usize);
     assert(p != nil);
-    var b: []u8 = make(p.! as *u8, 32usize);
+    var b: []u8 = #slice(p.! as *u8, 32usize);
     b[0] = 7 as u8;
     assert(b[0] == 7 as u8);
     h.free(p.!);
@@ -241,8 +241,8 @@ test "mem.arenaBump" {
     assert(p2 != nil);
     assert(p1.! != p2.!);
 
-    var b1: []u8 = make(p1.! as *u8, 16usize);
-    var b2: []u8 = make(p2.! as *u8, 16usize);
+    var b1: []u8 = #slice(p1.! as *u8, 16usize);
+    var b2: []u8 = #slice(p2.! as *u8, 16usize);
     b1[0] = 1 as u8;
     b2[0] = 2 as u8;
     assert(b1[0] == 1 as u8);
@@ -261,7 +261,7 @@ test "mem.arenaGrow" {
     while (i < 40usize) {
         var p: ?opaque = ar.alloc(32usize, 8usize);
         assert(p != nil);
-        var bv: []u8 = make(p.! as *u8, 32usize);
+        var bv: []u8 = #slice(p.! as *u8, 32usize);
         bv[0] = i as u8;
         assert(bv[0] == i as u8);
         i = i + 1usize;

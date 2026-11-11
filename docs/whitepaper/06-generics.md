@@ -20,7 +20,7 @@ type Buffer[T] = []T;
 
 ```clux
 func size_of[T = i32](): u64 {
-    return sizeof(T);
+    return #sizeof(T);
 }
 
 func f[T, U = i32](x: T): T { return x; }
@@ -114,7 +114,7 @@ struct File implements IWriter[File] {
 ## 6.11 泛型与元信息
 
 ```clux
-[[metadata("size", sizeof(T))]]
+[[metadata("size", #sizeof(T))]]
 struct Box[T] { value: T; }
 
 var n: usize = get_metadata[Box[i32]]("size");
