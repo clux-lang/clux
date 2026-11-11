@@ -16,6 +16,14 @@ node_t *stmt_bitfield_node_get_bitfield_decl(node_t *self) {
   return node_get_child(self, CLUX_STMT_BITFIELD_BITFIELD_DECL);
 }
 
+void stmt_bitfield_node_set_export(node_t *self, node_t *export_node) {
+  node_set_child(self, CLUX_STMT_BITFIELD_EXPORT, export_node);
+}
+
+node_t *stmt_bitfield_node_get_export(node_t *self) {
+  return node_get_child(self, CLUX_STMT_BITFIELD_EXPORT);
+}
+
 void stmt_bitfield_node_add_decorator(node_t *self, node_t *decorator) {
   node_add_child(self, decorator);
 }

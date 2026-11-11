@@ -43,6 +43,7 @@
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_static_assert.h"
 #include "parser/node_stmt_struct.h"
+#include "parser/node_symbol.h"
 #include "parser/node_stmt_switch.h"
 #include "parser/node_stmt_test.h"
 #include "parser/node_stmt_type.h"
@@ -1290,6 +1291,10 @@ TEST_F(NodeSemanticTest, StmtBitfield) {
   node_t *n = create_stmt_bitfield_node(a);
   EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_BITFIELD);
   EXPECT_EQ(stmt_bitfield_node_get_decorator_count(n), 0u);
+  EXPECT_EQ(stmt_bitfield_node_get_export(n), nullptr);
+  node_t *export_node = create_symbol_node(a);
+  stmt_bitfield_node_set_export(n, export_node);
+  EXPECT_EQ(stmt_bitfield_node_get_export(n), export_node);
   node_t *decl = create_bitfield_decl_node(a);
   stmt_bitfield_node_set_bitfield_decl(n, decl);
   EXPECT_EQ(stmt_bitfield_node_get_bitfield_decl(n), decl);

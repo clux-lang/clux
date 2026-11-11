@@ -837,15 +837,24 @@ node_t *parser_read_stmt_interface(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 位域语句 <decorator>* <bitfield_decl>（白皮书 §10）。
-   调用前当前 token 不一定是装饰器或 bitfield，不是时返回 NULL 且游标不动。
-   装饰器按源码顺序挂在位域声明之后。
+/* 位域语句 <decorator>* [export]? <bitfield_decl>（白皮书 §10）。
+   调用前当前 token 不一定是装饰器、export 或 bitfield，不是时返回 NULL
+   且游标不动。装饰器按源码顺序挂在位域声明之后。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_bitfield(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "bitfield")) {
-    return NULL;
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "bitfield")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -854,6 +863,12 @@ node_t *parser_read_stmt_bitfield(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_bitfield_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_bitfield_node_set_export(node, export_node);
+  }
 
   /* 位域声明。 */
   node_t *bitfield_decl = parser_read_expr_bitfield_decl(allocator, parser);
@@ -937,12 +952,7 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
       return parser_read_stmt_interface(allocator, parser);
     }
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "bitfield")) {
-      node_t *bitfield = parser_read_stmt_bitfield(allocator, parser);
-      if (bitfield) {
-        return bitfield;
-      }
-      /* export bitfield 暂不支持：交给函数语句路径报错。 */
-      return parser_read_stmt_func(allocator, parser);
+      return parser_read_stmt_bitfield(allocator, parser);
     }
     return parser_read_stmt_func(allocator, parser);
   }

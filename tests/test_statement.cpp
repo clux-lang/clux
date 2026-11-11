@@ -2358,6 +2358,32 @@ TEST(StmtExportTest, ExportStruct) {
   delete_allocator(&a);
 }
 
+TEST(StmtExportTest, ExportBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export bitfield Flags: u8 { a: 1; }");
+  expect_bitfield_stmt(node, 0);
+  EXPECT_NE(stmt_bitfield_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* export 位于装饰器之后。 */
+TEST(StmtExportTest, DecoratedExportBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] export bitfield Flags: u8 { a: 1; }");
+  expect_bitfield_stmt(node, 1);
+  EXPECT_NE(stmt_bitfield_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* 区间从 export 起点到声明终点。 */
 TEST(StmtExportTest, ExportSpan) {
   allocator_t *a = create_allocator(malloc, free);
@@ -5444,6 +5470,19 @@ TEST(StmtDispatchTest, DispatchesDecoratedBitfield) {
   node_t *node = parse_stmt(a, &p, "[[trace]] bitfield F: u8 { x: 1; }");
   ASSERT_NE(node, nullptr);
   EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExportBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export bitfield F: u8 { x: 1; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_NE(stmt_bitfield_node_get_export(node), nullptr);
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
   delete_node(&node);
   delete_parser(&p);
