@@ -230,6 +230,47 @@ static void read_leading_decorators(allocator_t *allocator,
 
 static token_t *peek_next_non_trivia(parser_t *parser, size_t pos);
 
+/* 返回 pos 起第一个非 trivia token 的位置；越界返回 token 总数。 */
+static size_t next_non_trivia_position(parser_t *parser, size_t pos) {
+  vec_t *tokens = parser_get_tokens(parser);
+  size_t count = vec_get_size(tokens);
+  while (pos < count) {
+    token_t *token = vec_get(tokens, pos);
+    token_kind_t kind = token_get_kind(token);
+    if (kind != CLUX_TOKEN_WHITESPACE && kind != CLUX_TOKEN_COMMENT &&
+        kind != CLUX_TOKEN_MULTILINE_COMMENT) {
+      return pos;
+    }
+    pos++;
+  }
+  return count;
+}
+
+/* 当前 token 是 export 时消费并返回符号节点；否则返回 NULL 且游标不动。 */
+static node_t *read_export(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "export")) {
+    return NULL;
+  }
+  location_t loc = *token_get_location(token);
+  parser_next(parser); /* export */
+  parser_skip_trivia(parser);
+  node_t *node = create_symbol_node(allocator);
+  node_set_location(node, &loc);
+  return node;
+}
+
+/* 跳过装饰器与可选 export 后返回声明关键字 token（不消费）。 */
+static token_t *peek_decl_keyword(parser_t *parser) {
+  size_t pos = parser_get_position_after_decorators(parser);
+  token_t *token = peek_next_non_trivia(parser, pos);
+  if (token_is(token, CLUX_TOKEN_KEYWORD, "export")) {
+    pos = next_non_trivia_position(parser, pos + 1);
+    token = peek_next_non_trivia(parser, pos);
+  }
+  return token;
+}
+
 /* 当前 token 是 comptime 且其后（跳过 trivia）是 func/cfunc。 */
 static bool comptime_starts_func(parser_t *parser) {
   token_t *token = parser_peek_token(parser);
@@ -242,16 +283,18 @@ static bool comptime_starts_func(parser_t *parser) {
          token_is(after, CLUX_TOKEN_KEYWORD, "cfunc");
 }
 
-/* 函数语句 <decorator>* [comptime]? <func_decl>（白皮书 §3.3、§3.4.1）。
-   调用前当前 token 不一定是装饰器、comptime 或 func/cfunc，不是时返回 NULL
-   且游标不动。comptime 只有在后接 func/cfunc 时才由本函数认领，
+/* 函数语句 <decorator>* [export]? [comptime]? <func_decl>
+   （白皮书 §3.3、§3.4.1、§8.1）。
+   调用前当前 token 不一定是装饰器、export、comptime 或 func/cfunc，不是时
+   返回 NULL 且游标不动。comptime 只有在后接 func/cfunc 时才由本函数认领，
    以便 `comptime if` / `comptime foreach` / `comptime var` 留给其他语句。
    本阶段不做名字检查；装饰器按源码顺序挂在函数声明之后。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators) {
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators && !has_export) {
     if (!comptime_starts_func(parser) &&
         !token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
         !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
@@ -265,6 +308,12 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_func_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后、comptime 之前。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_func_node_set_export(node, export_node);
+  }
 
   /* 可选 comptime 标记。装饰器后若不是 comptime func，保留 comptime
      不消费，交给函数声明路径报错（装饰器不适用于 comptime if/foreach）。 */
@@ -314,10 +363,10 @@ static token_t *peek_next_non_trivia(parser_t *parser, size_t pos) {
   return NULL;
 }
 
-/* 变量定义语句 <decorator>* [comptime]? (var|using) name [: type]? = expr;
-   （白皮书 §4.1、§3.4、§4.12.1）。
-   调用前当前 token 不一定是装饰器、comptime 或 var/using，不是时返回 NULL
-   且游标不动。comptime 只有在后接 var/using 时才由本函数认领，
+/* 变量定义语句 <decorator>* [export]? [comptime]? (var|using) name
+   [: type]? = expr;（白皮书 §4.1、§3.4、§4.12.1、§8.1）。
+   调用前当前 token 不一定是装饰器、export、comptime 或 var/using，不是时
+   返回 NULL 且游标不动。comptime 只有在后接 var/using 时才由本函数认领，
    以便 `comptime if` 留给 comptime if 语句。
    类型只取后缀层，避免把 `=` 当作赋值运算符吃掉；初值走顶层入口。
    `comptime using` 语法上可解析，是否合法由语义阶段检查。
@@ -326,21 +375,32 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
 
-  /* 跳过装饰器后看关键字；若是 comptime，再往后看一个非 trivia token。 */
+  /* 跳过装饰器后看关键字；若是 export 再往后看，若是 comptime 再往后看
+     一个非 trivia token。 */
+  size_t lookahead_pos = has_decorators
+                             ? parser_get_position_after_decorators(parser)
+                             : parser_get_position(parser);
   token_t *lookahead =
       has_decorators ? parser_peek_token_after_decorators(parser) : token;
+  bool has_export = token_is(lookahead, CLUX_TOKEN_KEYWORD, "export");
+  if (has_export) {
+    lookahead_pos = next_non_trivia_position(parser, lookahead_pos + 1);
+    lookahead = peek_next_non_trivia(parser, lookahead_pos);
+  }
   bool is_var_stmt = token_is(lookahead, CLUX_TOKEN_KEYWORD, "var") ||
                      token_is(lookahead, CLUX_TOKEN_KEYWORD, "using");
   if (!is_var_stmt && token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime")) {
-    size_t comptime_pos = parser_get_position_after_decorators(parser);
-    token_t *after = peek_next_non_trivia(parser, comptime_pos + 1);
+    size_t after_pos = next_non_trivia_position(parser, lookahead_pos + 1);
+    token_t *after = peek_next_non_trivia(parser, after_pos);
     is_var_stmt = token_is(after, CLUX_TOKEN_KEYWORD, "var") ||
                   token_is(after, CLUX_TOKEN_KEYWORD, "using");
   }
-  /* 保留旧契约：装饰器后不是 var/using 时由本函数报错；但 comptime 后
-     不是 var/using（如 comptime if）必须返回 NULL，交给其他语句处理。 */
-  bool claim_anyway =
-      has_decorators && !token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime");
+  /* 保留旧契约：装饰器后不是 var/using 时由本函数报错；但 comptime/export
+     后不是 var/using（如 comptime if、export func）必须返回 NULL，
+     交给其他语句处理。 */
+  bool claim_anyway = has_decorators &&
+                      !token_is(lookahead, CLUX_TOKEN_KEYWORD, "comptime") &&
+                      !has_export;
   if (!is_var_stmt && !claim_anyway) {
     return NULL;
   }
@@ -350,6 +410,12 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   node_set_location(node, &begin_loc);
 
   read_leading_decorators(allocator, parser, node, stmt_var_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后、comptime 之前。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_var_node_set_export(node, export_node);
+  }
 
   /* 可选 comptime 标记。 */
   token = parser_peek_token(parser);
@@ -452,15 +518,25 @@ node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 类型别名语句 <decorator>* type name [generics]? = expr;（白皮书 §3.11）。
-   调用前当前 token 不一定是装饰器或 type，不是时返回 NULL 且游标不动。
-   泛型参数列表复用函数声明的解析；别名指向的类型表达式走顶层入口。
+/* 类型别名语句 <decorator>* [export]? type name [generics]? = expr;
+   （白皮书 §3.11、§8.1）。
+   调用前当前 token 不一定是装饰器、export 或 type，不是时返回 NULL 且游标
+   不动。泛型参数列表复用函数声明的解析；别名指向的类型表达式走顶层入口。
    出错时按容错约定返回不完整节点并 push_error。 */
 node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "type")) {
-    return NULL;
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "type")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -469,6 +545,12 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_type_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_type_node_set_export(node, export_node);
+  }
 
   /* type 关键字。 */
   token = parser_peek_token(parser);
@@ -544,15 +626,24 @@ node_t *parser_read_stmt_type(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 枚举语句 <decorator>* <enum_decl>（白皮书 §3.6）。
-   调用前当前 token 不一定是装饰器或 enum，不是时返回 NULL 且游标不动。
-   装饰器按源码顺序挂在枚举声明之后。
+/* 枚举语句 <decorator>* [export]? <enum_decl>（白皮书 §3.6、§8.1）。
+   调用前当前 token 不一定是装饰器、export 或 enum，不是时返回 NULL 且游标
+   不动。装饰器按源码顺序挂在枚举声明之后。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "enum")) {
-    return NULL;
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "enum")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -561,6 +652,12 @@ node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_enum_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_enum_node_set_export(node, export_node);
+  }
 
   /* 枚举声明。 */
   node_t *enum_decl = parser_read_expr_enum_decl(allocator, parser);
@@ -581,16 +678,25 @@ node_t *parser_read_stmt_enum(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* union 语句 <decorator>* <union_decl>（白皮书 §3.7、§3.8）。
+/* union 语句 <decorator>* [export]? <union_decl>（白皮书 §3.7、§3.8、§8.1）。
    tag union 与 cunion 共用同一节点，由声明内的 KEYWORD 槽区分。
-   调用前当前 token 不一定是装饰器或 union/cunion，不是时返回 NULL 且游标不动。
-   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+   调用前当前 token 不一定是装饰器、export 或 union/cunion，不是时返回 NULL
+   且游标不动。出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "union") &&
-      !token_is(token, CLUX_TOKEN_KEYWORD, "cunion")) {
-    return NULL;
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "union") &&
+        !token_is(lookahead, CLUX_TOKEN_KEYWORD, "cunion")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -599,6 +705,12 @@ node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_union_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_union_node_set_export(node, export_node);
+  }
 
   /* union / cunion 声明。 */
   node_t *union_decl = parser_read_expr_union(allocator, parser);
@@ -619,15 +731,24 @@ node_t *parser_read_stmt_union(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
-/* 结构体语句 <decorator>* <struct_decl>（白皮书 §3.5）。
-   调用前当前 token 不一定是装饰器或 struct，不是时返回 NULL 且游标不动。
-   装饰器按源码顺序挂在结构体声明之后。
+/* 结构体语句 <decorator>* [export]? <struct_decl>（白皮书 §3.5、§8.1）。
+   调用前当前 token 不一定是装饰器、export 或 struct，不是时返回 NULL 且游标
+   不动。装饰器按源码顺序挂在结构体声明之后。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "struct")) {
-    return NULL;
+  bool has_export = token_is(token, CLUX_TOKEN_KEYWORD, "export");
+  if (!has_decorators) {
+    token_t *lookahead = token;
+    if (has_export) {
+      size_t pos =
+          next_non_trivia_position(parser, parser_get_position(parser) + 1);
+      lookahead = peek_next_non_trivia(parser, pos);
+    }
+    if (!token_is(lookahead, CLUX_TOKEN_KEYWORD, "struct")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -636,6 +757,12 @@ node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_struct_node_add_decorator);
+
+  /* 可选 export 标记，位于装饰器之后。 */
+  node_t *export_node = read_export(allocator, parser);
+  if (export_node) {
+    stmt_struct_node_set_export(node, export_node);
+  }
 
   /* 结构体声明。 */
   node_t *struct_decl = parser_read_expr_struct_decl(allocator, parser);
@@ -707,8 +834,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   if (node) {
     return node;
   }
-  if (parser_peek_decorator(parser)) {
-    token_t *keyword = parser_peek_token_after_decorators(parser);
+  token_t *first = parser_peek_token(parser);
+  if (parser_peek_decorator(parser) ||
+      token_is(first, CLUX_TOKEN_KEYWORD, "export")) {
+    token_t *keyword = peek_decl_keyword(parser);
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "var") ||
         token_is(keyword, CLUX_TOKEN_KEYWORD, "using")) {
       return parser_read_stmt_var(allocator, parser);
@@ -736,7 +865,12 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
       return parser_read_stmt_struct(allocator, parser);
     }
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "bitfield")) {
-      return parser_read_stmt_bitfield(allocator, parser);
+      node_t *bitfield = parser_read_stmt_bitfield(allocator, parser);
+      if (bitfield) {
+        return bitfield;
+      }
+      /* export bitfield 暂不支持：交给函数语句路径报错。 */
+      return parser_read_stmt_func(allocator, parser);
     }
     return parser_read_stmt_func(allocator, parser);
   }

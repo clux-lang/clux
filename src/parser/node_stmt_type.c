@@ -32,6 +32,14 @@ node_t *stmt_type_node_get_value(node_t *self) {
   return node_get_child(self, CLUX_STMT_TYPE_VALUE);
 }
 
+void stmt_type_node_set_export(node_t *self, node_t *export_node) {
+  node_set_child(self, CLUX_STMT_TYPE_EXPORT, export_node);
+}
+
+node_t *stmt_type_node_get_export(node_t *self) {
+  return node_get_child(self, CLUX_STMT_TYPE_EXPORT);
+}
+
 void stmt_type_node_add_decorator(node_t *self, node_t *decorator) {
   node_add_child(self, decorator);
 }

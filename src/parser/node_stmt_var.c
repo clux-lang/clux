@@ -40,6 +40,14 @@ node_t *stmt_var_node_get_value(node_t *self) {
   return node_get_child(self, CLUX_STMT_VAR_VALUE);
 }
 
+void stmt_var_node_set_export(node_t *self, node_t *export_node) {
+  node_set_child(self, CLUX_STMT_VAR_EXPORT, export_node);
+}
+
+node_t *stmt_var_node_get_export(node_t *self) {
+  return node_get_child(self, CLUX_STMT_VAR_EXPORT);
+}
+
 void stmt_var_node_set_comptime(node_t *self, node_t *comptime) {
   node_set_child(self, CLUX_STMT_VAR_COMPTIME, comptime);
 }

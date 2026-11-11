@@ -16,6 +16,14 @@ node_t *stmt_func_node_get_func_decl(node_t *self) {
   return node_get_child(self, CLUX_STMT_FUNC_FUNC_DECL);
 }
 
+void stmt_func_node_set_export(node_t *self, node_t *export_node) {
+  node_set_child(self, CLUX_STMT_FUNC_EXPORT, export_node);
+}
+
+node_t *stmt_func_node_get_export(node_t *self) {
+  return node_get_child(self, CLUX_STMT_FUNC_EXPORT);
+}
+
 void stmt_func_node_set_comptime(node_t *self, node_t *comptime) {
   node_set_child(self, CLUX_STMT_FUNC_COMPTIME, comptime);
 }

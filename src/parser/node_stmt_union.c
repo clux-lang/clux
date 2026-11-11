@@ -16,6 +16,14 @@ node_t *stmt_union_node_get_union_decl(node_t *self) {
   return node_get_child(self, CLUX_STMT_UNION_UNION_DECL);
 }
 
+void stmt_union_node_set_export(node_t *self, node_t *export_node) {
+  node_set_child(self, CLUX_STMT_UNION_EXPORT, export_node);
+}
+
+node_t *stmt_union_node_get_export(node_t *self) {
+  return node_get_child(self, CLUX_STMT_UNION_EXPORT);
+}
+
 void stmt_union_node_add_decorator(node_t *self, node_t *decorator) {
   node_add_child(self, decorator);
 }

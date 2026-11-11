@@ -2237,6 +2237,157 @@ TEST(StmtBitfieldTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
+/* ================= export 前缀 =================
+   语法：<decorator>* export? [comptime]? <decl>（白皮书 §8.1）。
+   export 位于装饰器之后、comptime 之前。 */
+
+TEST(StmtExportTest, ExportFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "export func add(a: i32, b: i32): i32 { a; }");
+  node_t *decl = expect_func_stmt(node, 0);
+  ASSERT_NE(decl, nullptr);
+  EXPECT_NE(stmt_func_node_get_export(node), nullptr);
+  EXPECT_EQ(stmt_func_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, DecoratedExportComptimeFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] export comptime func f(): void {}");
+  node_t *decl = expect_func_stmt(node, 1);
+  ASSERT_NE(decl, nullptr);
+  EXPECT_NE(stmt_func_node_get_export(node), nullptr);
+  EXPECT_NE(stmt_func_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export var x: i32 = 1;");
+  expect_var_stmt(node, "var", true, 0);
+  EXPECT_NE(stmt_var_node_get_export(node), nullptr);
+  EXPECT_EQ(stmt_var_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, DecoratedExportComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node =
+      parse_stmt(a, &p, "[[trace]] export comptime var LIMIT: const u32 = 32;");
+  expect_var_stmt(node, "var", true, 1);
+  EXPECT_NE(stmt_var_node_get_export(node), nullptr);
+  EXPECT_NE(stmt_var_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportType) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export type UserId = u64;");
+  expect_type_stmt(node, 0);
+  EXPECT_NE(stmt_type_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportEnum) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export enum E: u8 { A = 1 }");
+  expect_enum_stmt(node, 0);
+  EXPECT_NE(stmt_enum_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportUnion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export union U { a: i32; }");
+  expect_union_stmt(node, 0);
+  EXPECT_NE(stmt_union_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportCunion) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export cunion U { a: i32; }");
+  expect_union_stmt(node, 0);
+  EXPECT_NE(stmt_union_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtExportTest, ExportStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export struct User { name: str; }");
+  expect_struct_stmt(node, 0);
+  EXPECT_NE(stmt_struct_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间从 export 起点到声明终点。 */
+TEST(StmtExportTest, ExportSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "export func f(): void {}";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_func_stmt(node, 0);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* export 后缺声明：由函数语句路径报错。 */
+TEST(StmtExportTest, ExportWithoutDeclarationReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_EQ(stmt_func_node_get_func_decl(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected function declaration in function statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4114,6 +4265,59 @@ TEST(StmtDispatchTest, DispatchesStruct) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesExportFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export func f(): void {}");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_NE(stmt_func_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExportStruct) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export struct S { x: i32; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_STRUCT);
+  EXPECT_NE(stmt_struct_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesExportComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "export comptime var x = 1;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_VAR);
+  EXPECT_NE(stmt_var_node_get_export(node), nullptr);
+  EXPECT_NE(stmt_var_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedExportEnum) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] export enum E: u8 { A = 1 }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_ENUM);
+  EXPECT_NE(stmt_enum_node_get_export(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesBitfield) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4389,6 +4593,16 @@ TEST(StmtTest, NoLeakOnStatements) {
       "[[trace]] func |(o: i32 = 1)| map[T](x: T): T { a; }",
       "comptime func f(): void {}",
       "[[trace]] comptime func f(): void {}",
+      "export func f(): void {}",
+      "[[trace]] export comptime func f(): void {}",
+      "export var x: i32 = 1;",
+      "[[trace]] export comptime var LIMIT: const u32 = 32;",
+      "export type UserId = u64;",
+      "export enum E: u8 { A = 1 }",
+      "export union U { a: i32; }",
+      "export cunion U { a: i32; }",
+      "export struct S { x: i32; }",
+      "export",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",
