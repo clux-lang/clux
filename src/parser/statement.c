@@ -626,8 +626,46 @@ node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser) {
   return node;
 }
 
+/* 位域语句 <decorator>* <bitfield_decl>（白皮书 §10）。
+   调用前当前 token 不一定是装饰器或 bitfield，不是时返回 NULL 且游标不动。
+   装饰器按源码顺序挂在位域声明之后。
+   出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
+node_t *parser_read_stmt_bitfield(allocator_t *allocator, parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  bool has_decorators = parser_peek_decorator(parser);
+  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "bitfield")) {
+    return NULL;
+  }
+  location_t begin_loc = *token_get_location(token);
+
+  node_t *node = create_stmt_bitfield_node(allocator);
+  node_set_location(node, &begin_loc);
+
+  read_leading_decorators(
+      allocator, parser, node, stmt_bitfield_node_add_decorator);
+
+  /* 位域声明。 */
+  node_t *bitfield_decl = parser_read_expr_bitfield_decl(allocator, parser);
+  if (!bitfield_decl) {
+    location_t loc = stmt_error_location(parser, &begin_loc);
+    parser_push_error(
+        parser,
+        create_error(allocator,
+                     &loc,
+                     "expected bitfield declaration in bitfield statement"));
+    return node;
+  }
+  stmt_bitfield_node_set_bitfield_decl(node, bitfield_decl);
+
+  location_t loc = begin_loc;
+  loc.end = node_get_location(bitfield_decl)->end;
+  loc.filename = parser_get_filename(parser);
+  node_set_location(node, &loc);
+  return node;
+}
+
 /* 语句分派。调用方负责清理前导 trivia。
-   装饰器可能引导函数/变量/类型/枚举/union/结构体语句，因此先跳过装饰器
+   装饰器可能引导函数/变量/类型/枚举/union/结构体/位域语句，因此先跳过装饰器
    看关键字。 */
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   node_t *node = parser_read_stmt_block(allocator, parser);
@@ -666,6 +704,9 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     if (token_is(keyword, CLUX_TOKEN_KEYWORD, "struct")) {
       return parser_read_stmt_struct(allocator, parser);
     }
+    if (token_is(keyword, CLUX_TOKEN_KEYWORD, "bitfield")) {
+      return parser_read_stmt_bitfield(allocator, parser);
+    }
     return parser_read_stmt_func(allocator, parser);
   }
   node = parser_read_stmt_var(allocator, parser);
@@ -689,6 +730,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     return node;
   }
   node = parser_read_stmt_struct(allocator, parser);
+  if (node) {
+    return node;
+  }
+  node = parser_read_stmt_bitfield(allocator, parser);
   if (node) {
     return node;
   }

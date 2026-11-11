@@ -2,6 +2,7 @@
 #define _H_PARSER_STMT_
 #include "core/allocator.h"
 #include "parser/node.h"
+#include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
@@ -45,6 +46,7 @@ node_t *parser_read_stmt_comptime_foreach(allocator_t *allocator,
                                           parser_t *parser);
 node_t *parser_read_stmt_do_while(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_switch(allocator_t *allocator, parser_t *parser);
+node_t *parser_read_stmt_bitfield(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_var(allocator_t *allocator, parser_t *parser);

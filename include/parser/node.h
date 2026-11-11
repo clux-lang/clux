@@ -62,6 +62,9 @@ enum _node_kind_t {
   /* 结构体声明 struct Name [generics]? [implements ...]? { members }
      （白皮书 §3.5）。装饰器属于外层语句，不在本节点内。 */
   CLUX_NODE_EXPR_STRUCT_DECL,
+  /* 位域声明 bitfield Name: u8|u16|u32|u64 { field: width; ... }
+     （白皮书 §10）。装饰器属于外层语句，不在本节点内。 */
+  CLUX_NODE_EXPR_BITFIELD_DECL,
   /* struct 成员列表 { member ... }，children 为字段、语句声明或嵌入。 */
   CLUX_NODE_STRUCT_MEMBERS,
   /* 嵌入成员 ...Base;：TYPE 为被嵌入的类型。 */
@@ -77,6 +80,10 @@ enum _node_kind_t {
   CLUX_NODE_FIELD,
   /* 字段列表 { field; ... }，children 为 CLUX_NODE_FIELD。 */
   CLUX_NODE_FIELDS,
+  /* 位域字段 name: width：NAME 必有，WIDTH 缺失时为 NULL（容错）。 */
+  CLUX_NODE_BITFIELD_FIELD,
+  /* 位域字段列表 { name: width; ... }，children 为 CLUX_NODE_BITFIELD_FIELD。 */
+  CLUX_NODE_BITFIELD_FIELDS,
   /* 泛型参数列表 [T, U, ...]，children 为 CLUX_NODE_GENERIC_PARAM 或 rest。 */
   CLUX_NODE_GENERIC_PARAMS,
   /* 单个泛型参数：NAME 必有；TYPE / DEFAULT / CONSTRAINT 均可为 NULL。 */
@@ -161,6 +168,10 @@ enum _node_kind_t {
   /* 结构体语句 <decorator>* <struct_decl>（白皮书 §3.5）。
      STRUCT_DECL 槽存结构体声明，其后为按源码顺序排列的装饰器。 */
   CLUX_NODE_STMT_STRUCT,
+
+  /* 位域语句 <decorator>* <bitfield_decl>（白皮书 §10）。
+     BITFIELD_DECL 槽存位域声明，其后为按源码顺序排列的装饰器。 */
+  CLUX_NODE_STMT_BITFIELD,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

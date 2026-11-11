@@ -4,6 +4,8 @@
 #include "parser/node.h"
 #include "parser/node_assign.h"
 #include "parser/node_binary.h"
+#include "parser/node_bitfield_decl.h"
+#include "parser/node_bitfield_field.h"
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
 #include "parser/node_enum_decl.h"

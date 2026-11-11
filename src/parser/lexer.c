@@ -124,7 +124,7 @@ static const char *keywords[] = {
     "f64",      "str",    "void",      "opaque",  "struct",     "union",
     "cunion",   "enum",   "undefined", "none",    "nil",        "true",
     "false",    "as",     "is",        "extends", "implements", "comptime",
-    "type",     "of",     "switch",    "default", NULL,
+    "type",     "of",     "switch",    "default", "bitfield",   NULL,
 };
 
 /* ---- identifier ----

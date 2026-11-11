@@ -84,7 +84,7 @@ TEST(LexerKeywordTest, TypeKeywords) {
 TEST(LexerKeywordTest, StructUnionEnumAreKeywords) {
   allocator_t *a = create_allocator(malloc, free);
   const char *kws[] = {
-      "struct", "union", "cunion", "enum", "implements", nullptr};
+      "struct", "union", "cunion", "enum", "bitfield", "implements", nullptr};
   for (int i = 0; kws[i] != nullptr; i++) {
     position_t p = lexer_test_pos(kws[i]);
     token_t *tok = lexer_read_identifier(a, &p, "test.clux");

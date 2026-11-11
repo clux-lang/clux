@@ -2020,6 +2020,145 @@ TEST(StmtStructTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
+/* ================= bitfield 语句 =================
+   语法：<decorator>* bitfield Name: Underlying { field: width; ... }
+   （白皮书 §10）。 */
+
+/* 断言 bitfield 语句节点：声明槽必存在，装饰器个数符合预期。 */
+static node_t *expect_bitfield_stmt(node_t *node, size_t decorator_count) {
+  if (!node) {
+    ADD_FAILURE() << "expected bitfield statement, got NULL";
+    return nullptr;
+  }
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator_count(node), decorator_count);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_BITFIELD_FIRST_DECORATOR + decorator_count);
+  node_t *bitfield_decl = stmt_bitfield_node_get_bitfield_decl(node);
+  EXPECT_NE(bitfield_decl, nullptr);
+  if (bitfield_decl) {
+    EXPECT_EQ(node_get_kind(bitfield_decl), CLUX_NODE_EXPR_BITFIELD_DECL);
+  }
+  for (size_t i = 0; i < decorator_count; i++) {
+    node_t *decorator =
+        node_get_child(node, CLUX_STMT_BITFIELD_FIRST_DECORATOR + i);
+    EXPECT_NE(decorator, nullptr);
+    if (decorator) {
+      EXPECT_EQ(node_get_kind(decorator), CLUX_NODE_DECORATOR);
+    }
+  }
+  return bitfield_decl;
+}
+
+TEST(StmtBitfieldTest, WithoutDecorators) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "bitfield Flags: u32 { a: 3; }");
+  expect_bitfield_stmt(node, 0);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtBitfieldTest, SingleDecorator) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] bitfield Flags: u32 { a: 3; }");
+  expect_bitfield_stmt(node, 1);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtBitfieldTest, MultipleDecoratorsKeepSourceOrder) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a,
+                            &p,
+                            "[[trace]] [[metadata(\"role\", \"flags\")]] "
+                            "bitfield Flags: u8 { a: 1; }");
+  expect_bitfield_stmt(node, 2);
+  node_t *first = node_get_child(node, CLUX_STMT_BITFIELD_FIRST_DECORATOR);
+  node_t *second = node_get_child(node, CLUX_STMT_BITFIELD_FIRST_DECORATOR + 1);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(node_get_kind(node_get_child(first, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(node_get_child(second, CLUX_DECORATOR_EXPR)),
+            CLUX_NODE_EXPR_CALL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtBitfieldTest, InsideBlock) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "{ a; bitfield F: u8 { x: 1; } }");
+  expect_block(node, 2);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 0)), CLUX_NODE_STMT_EXPR);
+  EXPECT_EQ(node_get_kind(node_get_child(node, 1)), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖首个装饰器起点到位域声明终点。 */
+TEST(StmtBitfieldTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "[[trace]] bitfield F: u8 { x: 1; }";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_bitfield_stmt(node, 1);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 装饰器后缺位域声明。 */
+TEST(StmtBitfieldTest, MissingBitfieldDeclReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[[trace]] a;");
+  node_t *node = parser_read_stmt_bitfield(a, p);
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(stmt_bitfield_node_get_bitfield_decl(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected bitfield declaration in bitfield statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtBitfieldTest, ReturnsNullOnNonBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_bitfield(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtBitfieldTest, ReturnsNullOnSingleBracket) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "[trace] bitfield F: u8 { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_bitfield(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= defer 语句 =================
    语法：defer |captures|? { body }（白皮书 §4.12）。
    捕获项复用 FUNC_PARAM：NAME 必有，DEFAULT 可缺失。 */
@@ -3778,6 +3917,30 @@ TEST(StmtDispatchTest, DispatchesStruct) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "bitfield F: u8 { x: 1; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedBitfield) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] bitfield F: u8 { x: 1; }");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesDefer) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4019,6 +4182,14 @@ TEST(StmtTest, NoLeakOnStatements) {
       "struct S { 1: i32; }",
       "struct S",
       "[[trace]] struct",
+      "bitfield F: u8 { x: 1; }",
+      "[[trace]] bitfield F: u8 { x: 1; }",
+      "[[trace]] [[metadata(\"role\", \"flags\")]] bitfield F: u8 { x: 1; }",
+      "{ a; bitfield F: u8 { x: 1; } }",
+      "bitfield F: u8 { x: 1 }",
+      "bitfield F: u8 { 1: 1; }",
+      "bitfield F: u8",
+      "[[trace]] bitfield",
       "defer { a; }",
       "defer {}",
       "defer |captured| { a; }",

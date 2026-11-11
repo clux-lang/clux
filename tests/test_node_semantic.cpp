@@ -3,6 +3,8 @@
 #include "core/vec.h"
 #include "parser/node.h"
 #include "parser/node_assign.h"
+#include "parser/node_bitfield_decl.h"
+#include "parser/node_bitfield_field.h"
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
 #include "parser/node_decorator.h"
@@ -18,6 +20,7 @@
 #include "parser/node_implements.h"
 #include "parser/node_rest.h"
 #include "parser/node_slice.h"
+#include "parser/node_stmt_bitfield.h"
 #include "parser/node_stmt_block.h"
 #include "parser/node_stmt_defer.h"
 #include "parser/node_stmt_do_while.h"
@@ -1040,6 +1043,84 @@ TEST_F(NodeSemanticTest, StructDeclOptionalSlots) {
   struct_decl_node_set_implements(n, nullptr);
   EXPECT_EQ(struct_decl_node_get_generics(n), nullptr);
   EXPECT_EQ(struct_decl_node_get_implements(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtBitfield) {
+  node_t *n = create_stmt_bitfield_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_BITFIELD);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator_count(n), 0u);
+  node_t *decl = create_bitfield_decl_node(a);
+  stmt_bitfield_node_set_bitfield_decl(n, decl);
+  EXPECT_EQ(stmt_bitfield_node_get_bitfield_decl(n), decl);
+  node_t *d0 = create_decorator_node(a);
+  node_t *d1 = create_decorator_node(a);
+  stmt_bitfield_node_add_decorator(n, d0);
+  stmt_bitfield_node_add_decorator(n, d1);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator_count(n), 2u);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator(n, 0), d0);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator(n, 1), d1);
+  EXPECT_EQ(stmt_bitfield_node_get_decorator(n, 2), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, BitfieldDecl) {
+  node_t *n = create_bitfield_decl_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_BITFIELD_DECL);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_EXPR_BITFIELD_DECL_CHILDREN_SIZE);
+  node_t *keyword = make_leaf(a);
+  node_t *name = make_leaf(a);
+  node_t *underlying = make_leaf(a);
+  node_t *body = make_leaf(a);
+  bitfield_decl_node_set_keyword(n, keyword);
+  bitfield_decl_node_set_name(n, name);
+  bitfield_decl_node_set_underlying(n, underlying);
+  bitfield_decl_node_set_body(n, body);
+  EXPECT_EQ(bitfield_decl_node_get_keyword(n), keyword);
+  EXPECT_EQ(bitfield_decl_node_get_name(n), name);
+  EXPECT_EQ(bitfield_decl_node_get_underlying(n), underlying);
+  EXPECT_EQ(bitfield_decl_node_get_body(n), body);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, BitfieldDeclOptionalSlots) {
+  node_t *n = create_bitfield_decl_node(a);
+  bitfield_decl_node_set_underlying(n, nullptr);
+  bitfield_decl_node_set_body(n, nullptr);
+  EXPECT_EQ(bitfield_decl_node_get_underlying(n), nullptr);
+  EXPECT_EQ(bitfield_decl_node_get_body(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, BitfieldField) {
+  node_t *n = create_bitfield_field_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_BITFIELD_FIELD);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_BITFIELD_FIELD_CHILDREN_SIZE);
+  node_t *name = make_leaf(a);
+  node_t *width = make_leaf(a);
+  bitfield_field_node_set_name(n, name);
+  bitfield_field_node_set_width(n, width);
+  EXPECT_EQ(bitfield_field_node_get_name(n), name);
+  EXPECT_EQ(bitfield_field_node_get_width(n), width);
+  bitfield_field_node_set_width(n, nullptr);
+  EXPECT_EQ(bitfield_field_node_get_width(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, BitfieldFields) {
+  node_t *n = create_bitfield_fields_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_BITFIELD_FIELDS);
+  EXPECT_EQ(bitfield_fields_node_get_field_count(n), 0u);
+  node_t *first = make_leaf(a);
+  node_t *second = make_leaf(a);
+  bitfield_fields_node_add_field(n, first);
+  bitfield_fields_node_add_field(n, second);
+  EXPECT_EQ(bitfield_fields_node_get_field_count(n), 2u);
+  EXPECT_EQ(bitfield_fields_node_get_field(n, 0), first);
+  EXPECT_EQ(bitfield_fields_node_get_field(n, 1), second);
+  EXPECT_EQ(bitfield_fields_node_get_field(n, 2), nullptr);
   delete_node(&n);
 }
 

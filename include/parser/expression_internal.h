@@ -50,6 +50,10 @@ node_t *parser_read_expr_enum_decl(allocator_t *allocator, parser_t *parser);
 
 /* 结构体声明 struct Name [generics]? [implements ...]? { members }。 */
 node_t *parser_read_expr_struct_decl(allocator_t *allocator, parser_t *parser);
+
+/* 位域声明 bitfield Name: Underlying { field: width; ... }。 */
+node_t *parser_read_expr_bitfield_decl(allocator_t *allocator,
+                                       parser_t *parser);
 #ifdef __cplusplus
 }
 #endif
