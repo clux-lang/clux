@@ -228,16 +228,35 @@ static void read_leading_decorators(allocator_t *allocator,
   }
 }
 
-/* 函数语句 <decorator>* <func_decl>（白皮书 §3.3）。
-   调用前当前 token 不一定是装饰器或 func/cfunc，不是时返回 NULL 且游标不动。
+static token_t *peek_next_non_trivia(parser_t *parser, size_t pos);
+
+/* 当前 token 是 comptime 且其后（跳过 trivia）是 func/cfunc。 */
+static bool comptime_starts_func(parser_t *parser) {
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_KEYWORD, "comptime")) {
+    return false;
+  }
+  token_t *after =
+      peek_next_non_trivia(parser, parser_get_position(parser) + 1);
+  return token_is(after, CLUX_TOKEN_KEYWORD, "func") ||
+         token_is(after, CLUX_TOKEN_KEYWORD, "cfunc");
+}
+
+/* 函数语句 <decorator>* [comptime]? <func_decl>（白皮书 §3.3、§3.4.1）。
+   调用前当前 token 不一定是装饰器、comptime 或 func/cfunc，不是时返回 NULL
+   且游标不动。comptime 只有在后接 func/cfunc 时才由本函数认领，
+   以便 `comptime if` / `comptime foreach` / `comptime var` 留给其他语句。
    本阶段不做名字检查；装饰器按源码顺序挂在函数声明之后。
    出错时按容错约定返回不完整节点并 push_error，不返回 NULL。 */
 node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
   token_t *token = parser_peek_token(parser);
   bool has_decorators = parser_peek_decorator(parser);
-  if (!has_decorators && !token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
-      !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
-    return NULL;
+  if (!has_decorators) {
+    if (!comptime_starts_func(parser) &&
+        !token_is(token, CLUX_TOKEN_KEYWORD, "func") &&
+        !token_is(token, CLUX_TOKEN_KEYWORD, "cfunc")) {
+      return NULL;
+    }
   }
   location_t begin_loc = *token_get_location(token);
 
@@ -246,6 +265,18 @@ node_t *parser_read_stmt_func(allocator_t *allocator, parser_t *parser) {
 
   read_leading_decorators(
       allocator, parser, node, stmt_func_node_add_decorator);
+
+  /* 可选 comptime 标记。装饰器后若不是 comptime func，保留 comptime
+     不消费，交给函数声明路径报错（装饰器不适用于 comptime if/foreach）。 */
+  if (comptime_starts_func(parser)) {
+    token = parser_peek_token(parser);
+    location_t comptime_loc = *token_get_location(token);
+    node_t *comptime = create_symbol_node(allocator);
+    node_set_location(comptime, &comptime_loc);
+    stmt_func_node_set_comptime(node, comptime);
+    parser_next(parser); /* comptime */
+    parser_skip_trivia(parser);
+  }
 
   /* 函数声明。 */
   node_t *func_decl = parser_read_expr_func_decl(allocator, parser);

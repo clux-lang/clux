@@ -16,6 +16,14 @@ node_t *stmt_func_node_get_func_decl(node_t *self) {
   return node_get_child(self, CLUX_STMT_FUNC_FUNC_DECL);
 }
 
+void stmt_func_node_set_comptime(node_t *self, node_t *comptime) {
+  node_set_child(self, CLUX_STMT_FUNC_COMPTIME, comptime);
+}
+
+node_t *stmt_func_node_get_comptime(node_t *self) {
+  return node_get_child(self, CLUX_STMT_FUNC_COMPTIME);
+}
+
 void stmt_func_node_add_decorator(node_t *self, node_t *decorator) {
   node_add_child(self, decorator);
 }

@@ -903,6 +903,84 @@ TEST(StmtFuncTest, ReturnsNullOnSingleBracket) {
   delete_allocator(&a);
 }
 
+/* ---- comptime func ---- */
+
+TEST(StmtFuncTest, ComptimeFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime func f(): void {}");
+  node_t *decl = expect_func_stmt(node, 0);
+  ASSERT_NE(decl, nullptr);
+  node_t *comptime = stmt_func_node_get_comptime(node);
+  ASSERT_NE(comptime, nullptr);
+  EXPECT_EQ(node_get_kind(comptime), CLUX_NODE_SYMBOL);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, DecoratedComptimeFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] comptime func f(): void {}");
+  node_t *decl = expect_func_stmt(node, 1);
+  ASSERT_NE(decl, nullptr);
+  EXPECT_NE(stmt_func_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间从 comptime 起点到函数体终点。 */
+TEST(StmtFuncTest, ComptimeFuncSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "comptime func f(): void {}";
+  node_t *node = parse_stmt(a, &p, src);
+  expect_func_stmt(node, 0);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* comptime 后不是 func/cfunc 时不认领，交给其他 comptime 语句。 */
+TEST(StmtFuncTest, DoesNotStealComptimeIf) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "comptime if (N) { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_func(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, DoesNotStealComptimeForeach) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p =
+      create_parser(a, "test.clux", "comptime foreach (var x of seq) { }");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_func(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtFuncTest, DoesNotStealComptimeVar) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "comptime var x = 1;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_func(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= 变量定义语句 =================
    语法：<decorator>* (var|using) name [: type]? = expr; */
 
@@ -4084,6 +4162,32 @@ TEST(StmtDispatchTest, DispatchesDefer) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesComptimeFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "comptime func f(): void {}");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_NE(stmt_func_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtDispatchTest, DispatchesDecoratedComptimeFunc) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "[[trace]] comptime func f(): void {}");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_FUNC);
+  EXPECT_NE(stmt_func_node_get_comptime(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesComptimeVar) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4283,6 +4387,8 @@ TEST(StmtTest, NoLeakOnStatements) {
       "cfunc callback(x: i32): i32 { a; }",
       "func(x: i32): i32 { a; }",
       "[[trace]] func |(o: i32 = 1)| map[T](x: T): T { a; }",
+      "comptime func f(): void {}",
+      "[[trace]] comptime func f(): void {}",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",

@@ -653,6 +653,10 @@ TEST_F(NodeSemanticTest, StmtFunc) {
   node_t *decl = create_func_decl_node(a);
   stmt_func_node_set_func_decl(n, decl);
   EXPECT_EQ(stmt_func_node_get_func_decl(n), decl);
+  EXPECT_EQ(stmt_func_node_get_comptime(n), nullptr);
+  node_t *comptime = make_leaf(a);
+  stmt_func_node_set_comptime(n, comptime);
+  EXPECT_EQ(stmt_func_node_get_comptime(n), comptime);
   node_t *d0 = create_decorator_node(a);
   node_t *d1 = create_decorator_node(a);
   stmt_func_node_add_decorator(n, d0);
