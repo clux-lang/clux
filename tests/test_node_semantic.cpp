@@ -31,6 +31,7 @@
 #include "parser/node_stmt_foreach.h"
 #include "parser/node_stmt_func.h"
 #include "parser/node_stmt_if.h"
+#include "parser/node_stmt_import.h"
 #include "parser/node_stmt_return.h"
 #include "parser/node_stmt_struct.h"
 #include "parser/node_stmt_switch.h"
@@ -1070,6 +1071,24 @@ TEST_F(NodeSemanticTest, StructDeclOptionalSlots) {
   struct_decl_node_set_implements(n, nullptr);
   EXPECT_EQ(struct_decl_node_get_generics(n), nullptr);
   EXPECT_EQ(struct_decl_node_get_implements(n), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, StmtImport) {
+  node_t *n = create_stmt_import_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_STMT_IMPORT);
+  EXPECT_EQ(vec_get_size(node_get_children(n)),
+            (size_t)CLUX_STMT_IMPORT_CHILDREN_SIZE);
+  node_t *alias = make_leaf(a);
+  node_t *path = make_leaf(a);
+  stmt_import_node_set_alias(n, alias);
+  stmt_import_node_set_path(n, path);
+  EXPECT_EQ(stmt_import_node_get_alias(n), alias);
+  EXPECT_EQ(stmt_import_node_get_path(n), path);
+  stmt_import_node_set_alias(n, nullptr);
+  stmt_import_node_set_path(n, nullptr);
+  EXPECT_EQ(stmt_import_node_get_alias(n), nullptr);
+  EXPECT_EQ(stmt_import_node_get_path(n), nullptr);
   delete_node(&n);
 }
 

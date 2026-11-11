@@ -177,6 +177,10 @@ enum _node_kind_t {
      NAME 为字符串字面量；BODY 为块语句。test 不是关键字，只在
      `test` 后接字符串字面量与块时按测试块解析。 */
   CLUX_NODE_STMT_TEST,
+
+  /* 导入语句 import <alias> from "<path>";（白皮书 §8.2）。
+     ALIAS 为模块别名标识符；PATH 为字符串字面量路径。 */
+  CLUX_NODE_STMT_IMPORT,
 };
 typedef enum _node_kind_t node_kind_t;
 typedef struct _node_t node_t;

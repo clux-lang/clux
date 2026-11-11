@@ -2388,6 +2388,124 @@ TEST(StmtExportTest, ExportWithoutDeclarationReportsError) {
   delete_allocator(&a);
 }
 
+/* ================= import 语句 =================
+   语法：import <alias> from "<path>";（白皮书 §8.2）。 */
+
+TEST(StmtImportTest, BasicImport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import math from \"math.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_IMPORT);
+  EXPECT_EQ(vec_get_size(node_get_children(node)),
+            (size_t)CLUX_STMT_IMPORT_CHILDREN_SIZE);
+  node_t *alias = stmt_import_node_get_alias(node);
+  ASSERT_NE(alias, nullptr);
+  EXPECT_EQ(node_get_kind(alias), CLUX_NODE_LITERAL_IDENTIFIER);
+  node_t *path = stmt_import_node_get_path(node);
+  ASSERT_NE(path, nullptr);
+  EXPECT_EQ(node_get_kind(path), CLUX_NODE_LITERAL_STRING);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, RelativePath) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import app from \"app/main.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_IMPORT);
+  EXPECT_NE(stmt_import_node_get_path(node), nullptr);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+/* 区间覆盖 import 关键字到结尾 ';'。 */
+TEST(StmtImportTest, Span) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = "import math from \"math.cx\";";
+  node_t *node = parse_stmt(a, &p, src);
+  ASSERT_NE(node, nullptr);
+  expect_location_span(node, src, src);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, MissingAliasReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import from \"math.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(stmt_import_node_get_alias(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected module alias after 'import'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, MissingFromReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import math \"math.cx\";");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected 'from' after module alias");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, MissingPathReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import math from ;");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(stmt_import_node_get_path(node), nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected module path string after 'from'");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, MissingSemicolonReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import math from \"math.cx\"");
+  ASSERT_NE(node, nullptr);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected ';' after import statement");
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(StmtImportTest, ReturnsNullOnNonImport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p = create_parser(a, "test.clux", "a;");
+  size_t before = parser_get_position(p);
+  node_t *node = parser_read_stmt_import(a, p);
+  EXPECT_EQ(node, nullptr);
+  EXPECT_EQ(parser_get_position(p), before);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 /* ================= test 语句 =================
    语法：test "Suite.Name" { body }（白皮书 §3.14、§11.1）。
    test 不是关键字，只有后接字符串字面量时才按测试块解析。 */
@@ -4265,6 +4383,18 @@ TEST(StmtDispatchTest, DispatchesStruct) {
   delete_allocator(&a);
 }
 
+TEST(StmtDispatchTest, DispatchesImport) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = parse_stmt(a, &p, "import math from \"math.cx\";");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_STMT_IMPORT);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(StmtDispatchTest, DispatchesExportFunc) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
@@ -4603,6 +4733,12 @@ TEST(StmtTest, NoLeakOnStatements) {
       "export cunion U { a: i32; }",
       "export struct S { x: i32; }",
       "export",
+      "import math from \"math.cx\";",
+      "import app from \"app/main.cx\";",
+      "import from \"math.cx\";",
+      "import math \"math.cx\";",
+      "import math from ;",
+      "import math from \"math.cx\"",
       "{ a; func f(): void {} }",
       "[[trace]] a;",
       "[trace] func f(): void {}",

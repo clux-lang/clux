@@ -874,6 +874,10 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
     }
     return parser_read_stmt_func(allocator, parser);
   }
+  node = parser_read_stmt_import(allocator, parser);
+  if (node) {
+    return node;
+  }
   node = parser_read_stmt_var(allocator, parser);
   if (node) {
     return node;
