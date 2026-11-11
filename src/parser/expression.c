@@ -5,6 +5,7 @@
 #include "parser/lexer.h"
 #include "parser/literal.h"
 #include "parser/node.h"
+#include "parser/node_construct_field.h"
 #include "parser/node_symbol.h"
 #include "parser/parser.h"
 
@@ -350,6 +351,52 @@ read_call_suffix(allocator_t *allocator, parser_t *parser, node_t *callee) {
   return expr;
 }
 
+/* 具名构造字段 .name = value。调用前当前 token 不一定是 '.'；
+   只有 `.` + identifier + '=' 时才认领，否则返回 NULL 且游标不动，
+   把 `.` 留给构造类型、成员访问等其它路径。 */
+static node_t *read_construct_field(allocator_t *allocator, parser_t *parser) {
+  size_t start = parser_get_position(parser);
+  token_t *token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, ".")) {
+    return NULL;
+  }
+  location_t dot_loc = *token_get_location(token);
+  parser_next(parser); /* '.' */
+  parser_skip_trivia(parser);
+
+  node_t *name = parser_read_literal_identifier(allocator, parser);
+  if (!name) {
+    parser_set_position(parser, start);
+    return NULL;
+  }
+  parser_skip_trivia(parser);
+  token = parser_peek_token(parser);
+  if (!token_is(token, CLUX_TOKEN_SYMBOL, "=")) {
+    delete_node(&name);
+    parser_set_position(parser, start);
+    return NULL;
+  }
+  parser_next(parser); /* '=' */
+  parser_skip_trivia(parser);
+
+  node_t *node = create_construct_field_node(allocator);
+  construct_field_node_set_name(node, name);
+  node_set_location_span(node, &dot_loc, node_get_location(name));
+
+  node_t *value = parser_read_expr(allocator, parser);
+  if (!value) {
+    location_t loc = expression_error_location(parser, node_get_location(name));
+    parser_push_error(
+        parser,
+        create_error(
+            allocator, &loc, "expected expression after construct field '='"));
+    return node;
+  }
+  construct_field_node_set_value(node, value);
+  node_set_location_span(node, &dot_loc, node_get_location(value));
+  return node;
+}
+
 /* 解析构造表达式 .type?{ elem, ... }。调用前当前 token 不一定是 '.'；
    只有形如 `.` + 可选表达式 + `{` 时才构成构造，否则返回 NULL 且游标不动，
    把 '.' 留给调用方（成员访问 / 后缀运算符）。
@@ -403,8 +450,11 @@ static node_t *read_construct(allocator_t *allocator, parser_t *parser) {
   }
 
   for (;;) {
-    /* 每个元素都可能是 rest 表达式。 */
-    node_t *elem = parser_read_expr_rest(allocator, parser);
+    /* 元素可以是具名字段、rest 表达式或位置表达式。 */
+    node_t *elem = read_construct_field(allocator, parser);
+    if (!elem) {
+      elem = parser_read_expr_rest(allocator, parser);
+    }
     if (!elem) {
       elem = parser_read_expr(allocator, parser);
     }

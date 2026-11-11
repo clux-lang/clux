@@ -225,6 +225,37 @@ TEST(LiteralNumericTest, MatchesPlainInteger) {
   delete_allocator(&a);
 }
 
+TEST(LiteralNumericTest, OctalAndBinaryLiterals) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *srcs[] = {"0o755", "0O17", "0b1010", "0B101", nullptr};
+  for (size_t i = 0; srcs[i] != nullptr; i++) {
+    parser_t *p;
+    node_t *node = read_numeric(a, &p, srcs[i]);
+    ASSERT_NE(node, nullptr) << "src=" << srcs[i];
+    EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NUMERIC);
+    EXPECT_EQ(node_get_location(node)->end.offset,
+              node_get_location(node)->begin.offset +
+                  (ptrdiff_t)strlen(srcs[i]));
+    delete_node(&node);
+    delete_parser(&p);
+  }
+  delete_allocator(&a);
+}
+
+TEST(LiteralNumericTest, OctalAndBinarySuffix) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *node = read_numeric(a, &p, "0b1010u16");
+  ASSERT_NE(node, nullptr);
+  EXPECT_EQ(node_get_kind(node), CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(parser_get_position(p), 2u);
+  EXPECT_EQ(node_get_location(node)->end.offset,
+            node_get_location(node)->begin.offset + 9);
+  delete_node(&node);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
 TEST(LiteralNumericTest, AppliesEverySuffix) {
   const char *suffixes[] = {"i8",
                             "i16",

@@ -8,6 +8,7 @@
 #include "parser/node_builtin.h"
 #include "parser/node_call.h"
 #include "parser/node_construct.h"
+#include "parser/node_construct_field.h"
 #include "parser/node_decorator.h"
 #include "parser/node_enum_decl.h"
 #include "parser/node_enum_variant.h"
@@ -223,6 +224,18 @@ TEST_F(NodeSemanticTest, Construct) {
   EXPECT_EQ(construct_node_get_elem_count(n), 1u);
   EXPECT_EQ(construct_node_get_elem(n, 0), elem);
   EXPECT_EQ(construct_node_get_elem(n, 1), nullptr);
+  delete_node(&n);
+}
+
+TEST_F(NodeSemanticTest, ConstructField) {
+  node_t *n = create_construct_field_node(a);
+  EXPECT_EQ(node_get_kind(n), CLUX_NODE_EXPR_CONSTRUCT_FIELD);
+  node_t *name = make_leaf(a);
+  node_t *value = make_leaf(a);
+  construct_field_node_set_name(n, name);
+  construct_field_node_set_value(n, value);
+  EXPECT_EQ(construct_field_node_get_name(n), name);
+  EXPECT_EQ(construct_field_node_get_value(n), value);
   delete_node(&n);
 }
 

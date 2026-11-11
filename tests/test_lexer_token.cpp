@@ -552,6 +552,78 @@ TEST(LexerNumericTest, HexNoDigitsIsNumeric) {
   delete_allocator(&a);
 }
 
+TEST(LexerNumericTest, OctalPrefixed) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "0o755";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 5);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericTest, OctalPrefixedUppercase) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "0O17";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 4);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericTest, BinaryPrefixed) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "0b1010";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 6);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+TEST(LexerNumericTest, BinaryPrefixedUppercase) {
+  allocator_t *a = create_allocator(malloc, free);
+  const char *src = "0B101";
+  position_t p = lexer_test_pos(src);
+  token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+  ASSERT_NE(tok, nullptr);
+  EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+  EXPECT_EQ(p.offset, src + 5);
+  delete_token(&tok);
+  delete_allocator(&a);
+}
+
+/* 0o / 0b 后无数字同样只产出 NUMERIC，内容错误留给 parser。 */
+TEST(LexerNumericTest, BinaryAndOctalNoDigitsAreNumeric) {
+  allocator_t *a = create_allocator(malloc, free);
+  {
+    const char *src = "0b ";
+    position_t p = lexer_test_pos(src);
+    token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+    ASSERT_NE(tok, nullptr);
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+    EXPECT_EQ(p.offset, src + 2);
+    delete_token(&tok);
+  }
+  {
+    const char *src = "0o ";
+    position_t p = lexer_test_pos(src);
+    token_t *tok = lexer_read_numeric(a, &p, "test.clux");
+    ASSERT_NE(tok, nullptr);
+    EXPECT_EQ(token_get_kind(tok), CLUX_TOKEN_NUMERIC);
+    EXPECT_EQ(p.offset, src + 2);
+    delete_token(&tok);
+  }
+  delete_allocator(&a);
+}
+
 TEST(LexerNumericTest, OctalNumber) {
   allocator_t *a = create_allocator(malloc, free);
   const char *src = "0777";

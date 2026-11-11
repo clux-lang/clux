@@ -4,6 +4,7 @@
 #include "parser/node.h"
 #include "parser/node_builtin.h"
 #include "parser/node_call.h"
+#include "parser/node_construct_field.h"
 #include "parser/node_stmt_func.h"
 #include "parser/parser.h"
 #include "core/allocator.h"
@@ -3972,7 +3973,7 @@ TEST(ExpressionCallTest, NoLeakOnCall) {
 /* ================= 构造表达式 =================
    .type?{ elem, ... }：TYPE 存下标 0（匿名构造为 NULL），元素从下标 1 起。
    语法阶段类型就是普通表达式，按后缀层解析，与成员/调用/命名空间访问同级；
-   元素一律是表达式或 rest 表达式。 */
+   元素是表达式、rest 表达式或具名构造字段。 */
 
 /* 断言构造节点：type_kind 为 CLUX_NODE_SYMBOL 之外的任意节点类型；
    has_type 为 false 时 TYPE 必须为 NULL。 */
@@ -4004,6 +4005,81 @@ TEST(ExpressionConstructTest, EmptyNamed) {
   expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 0);
   EXPECT_EQ(parser_get_position(p), vec_get_size(parser_get_tokens(p)));
   EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, NamedFields) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".User{ .name = \"a\", .age = 1 }");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 2);
+  node_t *name_field = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 0);
+  ASSERT_NE(name_field, nullptr);
+  EXPECT_EQ(node_get_kind(name_field), CLUX_NODE_EXPR_CONSTRUCT_FIELD);
+  EXPECT_EQ(node_get_kind(construct_field_node_get_name(name_field)),
+            CLUX_NODE_LITERAL_IDENTIFIER);
+  EXPECT_EQ(node_get_kind(construct_field_node_get_value(name_field)),
+            CLUX_NODE_LITERAL_STRING);
+  node_t *age_field = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 1);
+  ASSERT_NE(age_field, nullptr);
+  EXPECT_EQ(node_get_kind(age_field), CLUX_NODE_EXPR_CONSTRUCT_FIELD);
+  EXPECT_EQ(node_get_kind(construct_field_node_get_value(age_field)),
+            CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, MixedPositionalNamedAndRest) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{ 1, .x = 2, ...base }");
+  expect_construct(expr, true, CLUX_NODE_LITERAL_IDENTIFIER, 3);
+  EXPECT_EQ(node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM)),
+            CLUX_NODE_LITERAL_NUMERIC);
+  EXPECT_EQ(
+      node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 1)),
+      CLUX_NODE_EXPR_CONSTRUCT_FIELD);
+  EXPECT_EQ(
+      node_get_kind(node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + 2)),
+      CLUX_NODE_EXPR_REST);
+  EXPECT_EQ(vec_get_size(parser_get_error(p)), 0u);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, NamedFieldSpan) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  const char *src = ".T{ .x = 1 + 2 }";
+  node_t *expr = parse_postfix(a, &p, src);
+  ASSERT_NE(expr, nullptr);
+  node_t *field = node_get_child(expr, CLUX_EXPR_CONSTRUCT_FIRST_ELEM);
+  ASSERT_NE(field, nullptr);
+  EXPECT_EQ(node_get_kind(field), CLUX_NODE_EXPR_CONSTRUCT_FIELD);
+  const location_t *loc = node_get_location(field);
+  ASSERT_NE(loc, nullptr);
+  EXPECT_EQ(loc->begin.offset, src + 4);
+  EXPECT_EQ(loc->end.offset, src + 14);
+  delete_node(&expr);
+  delete_parser(&p);
+  delete_allocator(&a);
+}
+
+TEST(ExpressionConstructTest, NamedFieldMissingValueReportsError) {
+  allocator_t *a = create_allocator(malloc, free);
+  parser_t *p;
+  node_t *expr = parse_postfix(a, &p, ".T{ .x = }");
+  ASSERT_NE(expr, nullptr);
+  EXPECT_EQ(node_get_kind(expr), CLUX_NODE_EXPR_CONSTRUCT);
+  vec_t *errors = parser_get_error(p);
+  ASSERT_GE(vec_get_size(errors), 1u);
+  EXPECT_STREQ(error_get_message((clux_error_t *)vec_get(errors, 0)),
+               "expected expression after construct field '='");
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -4378,6 +4454,11 @@ TEST(ExpressionConstructTest, NoLeakOnConstruct) {
                            ".T{...base, 2}",
                            ".T{...}",
                            ".T{.U{1}}",
+                           ".T{.x = 1}",
+                           ".T{.x = 1, .y = 2}",
+                           ".T{1, .x = 2, ...base}",
+                           ".T{.x = }",
+                           ".T{.x}",
                            ".T{1}.field",
                            ".T{1}[0]",
                            ".T{1}(x)",

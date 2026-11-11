@@ -288,7 +288,8 @@ token_t *lexer_read_multiline_comment(allocator_t *allocator,
 /* ---- numeric ----
    数字字面量：
      十六进制: 0x[0-9a-fA-F]*
-     八进制:   0[0-7]*
+     八进制:   0o[0-7]*（兼容 C 风格 0[0-7]*）
+     二进制:   0b[01]*
      十进制:   [0-9]+
      浮点:     [0-9]+.[0-9]+([eE][+-]?[0-9]+)?
    clux 禁止浮点的两种简写：`.123`（省略整数部分）和 `123.`（省略小数部分）。
@@ -317,9 +318,25 @@ token_t *lexer_read_numeric(allocator_t *allocator,
         break;
       }
     }
+  } else if (c0 == '0' &&
+             (position->offset[1] == 'o' || position->offset[1] == 'O')) {
+    /* 八进制 0o。前缀后无数字属于内容错误，留给 parser 报。 */
+    position_next(&current); /* '0' */
+    position_next(&current); /* 'o'/'O' */
+    while (*current.offset >= '0' && *current.offset <= '7') {
+      position_next(&current);
+    }
+  } else if (c0 == '0' &&
+             (position->offset[1] == 'b' || position->offset[1] == 'B')) {
+    /* 二进制 0b。前缀后无数字属于内容错误，留给 parser 报。 */
+    position_next(&current); /* '0' */
+    position_next(&current); /* 'b'/'B' */
+    while (*current.offset == '0' || *current.offset == '1') {
+      position_next(&current);
+    }
   } else if (c0 == '0' && position->offset[1] >= '0' &&
              position->offset[1] <= '7') {
-    /* 八进制 */
+    /* 兼容 C 风格八进制 0777 */
     while (*current.offset >= '0' && *current.offset <= '7') {
       position_next(&current);
     }

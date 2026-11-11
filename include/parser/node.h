@@ -42,8 +42,10 @@ enum _node_kind_t {
      NAME 为去掉 '#' 的内建名；实参可以是 rest 表达式。 */
   CLUX_NODE_EXPR_BUILTIN,
   /* 构造表达式 .type?{ elem, ... }；类型槽可为 NULL（匿名构造），
-     元素一律是表达式或 rest 表达式。语法阶段不区分类型与普通表达式。 */
+     元素是表达式、rest 表达式或具名构造字段。 */
   CLUX_NODE_EXPR_CONSTRUCT,
+  /* 具名构造字段 .name = value，只出现在构造元素位置。 */
+  CLUX_NODE_EXPR_CONSTRUCT_FIELD,
   /* 括号表达式 ( expr )，只有一个子节点，用于改变结合/优先级。 */
   CLUX_NODE_EXPR_GROUP,
   /* 元组类型 <T, U, ...>；元素数量可变，可含 rest 表达式，也可为空。 */
