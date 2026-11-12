@@ -22,7 +22,7 @@ static void collect_cb(uintptr_t key, void *value, void *user_data) {
 
 TEST(RbtreeTest, CreateAndDelete) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   EXPECT_NE(t, nullptr);
   EXPECT_EQ(rbtree_get_size(t), 0u);
   delete_rbtree(&t);
@@ -41,10 +41,11 @@ TEST(RbtreeTest, DeleteNullIsNoop) {
 
 TEST(RbtreeTest, InsertAndFind) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v1 = 100, v2 = 200;
-  EXPECT_EQ(rbtree_insert(t, 10, &v1), 1u);
-  EXPECT_EQ(rbtree_insert(t, 20, &v2), 2u);
+  EXPECT_EQ(rbtree_insert(t, 10, &v1), nullptr);
+  EXPECT_EQ(rbtree_insert(t, 20, &v2), nullptr);
+  EXPECT_EQ(rbtree_get_size(t), 2u);
   EXPECT_EQ(rbtree_find(t, 10), &v1);
   EXPECT_EQ(rbtree_find(t, 20), &v2);
   EXPECT_EQ(rbtree_find(t, 99), nullptr);
@@ -52,14 +53,13 @@ TEST(RbtreeTest, InsertAndFind) {
   delete_allocator(&a);
 }
 
-TEST(RbtreeTest, InsertDuplicateKeyReplacesValue) {
+TEST(RbtreeTest, InsertDuplicateKeyReplacesAndReturnsOldValue) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v1 = 100, v2 = 200;
-  rbtree_insert(t, 10, &v1);
+  EXPECT_EQ(rbtree_insert(t, 10, &v1), nullptr);
   EXPECT_EQ(rbtree_find(t, 10), &v1);
-  /* 重复 key 替换 */
-  rbtree_insert(t, 10, &v2);
+  EXPECT_EQ(rbtree_insert(t, 10, &v2), &v1);
   EXPECT_EQ(rbtree_find(t, 10), &v2);
   EXPECT_EQ(rbtree_get_size(t), 1u);
   delete_rbtree(&t);
@@ -68,8 +68,8 @@ TEST(RbtreeTest, InsertDuplicateKeyReplacesValue) {
 
 TEST(RbtreeTest, InsertNullValueReturnsError) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
-  EXPECT_EQ(rbtree_insert(t, 10, NULL), (size_t)-1);
+  rbtree_t *t = create_rbtree(a);
+  EXPECT_EQ(rbtree_insert(t, 10, NULL), nullptr);
   EXPECT_EQ(rbtree_get_size(t), 0u);
   delete_rbtree(&t);
   delete_allocator(&a);
@@ -79,11 +79,11 @@ TEST(RbtreeTest, InsertNullValueReturnsError) {
 
 TEST(RbtreeTest, InsertAscendingOrder) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[20];
   for (int i = 0; i < 20; i++) {
     vals[i] = i;
-    rbtree_insert(t, (uintptr_t)i, &vals[i]);
+    EXPECT_EQ(rbtree_insert(t, (uintptr_t)i, &vals[i]), nullptr);
   }
   EXPECT_EQ(rbtree_get_size(t), 20u);
   for (int i = 0; i < 20; i++) {
@@ -95,11 +95,11 @@ TEST(RbtreeTest, InsertAscendingOrder) {
 
 TEST(RbtreeTest, InsertDescendingOrder) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[20];
   for (int i = 19; i >= 0; i--) {
     vals[i] = i;
-    rbtree_insert(t, (uintptr_t)i, &vals[i]);
+    EXPECT_EQ(rbtree_insert(t, (uintptr_t)i, &vals[i]), nullptr);
   }
   EXPECT_EQ(rbtree_get_size(t), 20u);
   for (int i = 0; i < 20; i++) {
@@ -111,7 +111,7 @@ TEST(RbtreeTest, InsertDescendingOrder) {
 
 TEST(RbtreeTest, InsertRandomOrder) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[50];
   /* 固定种子保证可重现 */
   srand(42);
@@ -126,7 +126,7 @@ TEST(RbtreeTest, InsertRandomOrder) {
     vals[j] = tmp;
   }
   for (int i = 0; i < 50; i++) {
-    rbtree_insert(t, (uintptr_t)vals[i], &vals[vals[i]]);
+    EXPECT_EQ(rbtree_insert(t, (uintptr_t)vals[i], &vals[vals[i]]), nullptr);
   }
   EXPECT_EQ(rbtree_get_size(t), 50u);
   for (int i = 0; i < 50; i++) {
@@ -138,14 +138,15 @@ TEST(RbtreeTest, InsertRandomOrder) {
 
 /* ---- 删除 ---- */
 
-TEST(RbtreeTest, EraseExisting) {
+TEST(RbtreeTest, EraseExistingReturnsValue) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v1 = 100, v2 = 200, v3 = 300;
   rbtree_insert(t, 10, &v1);
   rbtree_insert(t, 20, &v2);
   rbtree_insert(t, 30, &v3);
-  EXPECT_EQ(rbtree_erase(t, 20), 2u);
+  EXPECT_EQ(rbtree_erase(t, 20), &v2);
+  EXPECT_EQ(rbtree_get_size(t), 2u);
   EXPECT_EQ(rbtree_find(t, 20), nullptr);
   EXPECT_EQ(rbtree_find(t, 10), &v1);
   EXPECT_EQ(rbtree_find(t, 30), &v3);
@@ -153,12 +154,12 @@ TEST(RbtreeTest, EraseExisting) {
   delete_allocator(&a);
 }
 
-TEST(RbtreeTest, EraseNonexistentReturnsError) {
+TEST(RbtreeTest, EraseNonexistentReturnsNull) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v = 1;
   rbtree_insert(t, 10, &v);
-  EXPECT_EQ(rbtree_erase(t, 99), (size_t)-1);
+  EXPECT_EQ(rbtree_erase(t, 99), nullptr);
   EXPECT_EQ(rbtree_get_size(t), 1u);
   delete_rbtree(&t);
   delete_allocator(&a);
@@ -166,14 +167,15 @@ TEST(RbtreeTest, EraseNonexistentReturnsError) {
 
 TEST(RbtreeTest, EraseAll) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[10];
   for (int i = 0; i < 10; i++) {
     vals[i] = i;
     rbtree_insert(t, (uintptr_t)i, &vals[i]);
   }
   for (int i = 0; i < 10; i++) {
-    EXPECT_EQ(rbtree_erase(t, (uintptr_t)i), (size_t)(9 - i));
+    EXPECT_EQ(rbtree_erase(t, (uintptr_t)i), &vals[i]);
+    EXPECT_EQ(rbtree_get_size(t), (size_t)(9 - i));
   }
   EXPECT_EQ(rbtree_get_size(t), 0u);
   delete_rbtree(&t);
@@ -182,13 +184,14 @@ TEST(RbtreeTest, EraseAll) {
 
 TEST(RbtreeTest, EraseRoot) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v1 = 1, v2 = 2, v3 = 3;
   rbtree_insert(t, 20, &v1);
   rbtree_insert(t, 10, &v2);
   rbtree_insert(t, 30, &v3);
   /* 删除根 */
-  EXPECT_EQ(rbtree_erase(t, 20), 2u);
+  EXPECT_EQ(rbtree_erase(t, 20), &v1);
+  EXPECT_EQ(rbtree_get_size(t), 2u);
   EXPECT_EQ(rbtree_find(t, 20), nullptr);
   EXPECT_EQ(rbtree_find(t, 10), &v2);
   EXPECT_EQ(rbtree_find(t, 30), &v3);
@@ -198,12 +201,12 @@ TEST(RbtreeTest, EraseRoot) {
 
 TEST(RbtreeTest, EraseAndReinsert) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v = 42;
   rbtree_insert(t, 10, &v);
-  rbtree_erase(t, 10);
+  EXPECT_EQ(rbtree_erase(t, 10), &v);
   EXPECT_EQ(rbtree_get_size(t), 0u);
-  rbtree_insert(t, 10, &v);
+  EXPECT_EQ(rbtree_insert(t, 10, &v), nullptr);
   EXPECT_EQ(rbtree_get_size(t), 1u);
   EXPECT_EQ(rbtree_find(t, 10), &v);
   delete_rbtree(&t);
@@ -214,7 +217,7 @@ TEST(RbtreeTest, EraseAndReinsert) {
 
 TEST(RbtreeTest, ForeachAscendingOrder) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[10];
   srand(123);
   for (int i = 0; i < 10; i++)
@@ -241,7 +244,7 @@ TEST(RbtreeTest, ForeachAscendingOrder) {
 
 TEST(RbtreeTest, ForeachEmptyTree) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   struct collect_ctx ctx = {0};
   rbtree_foreach(t, collect_cb, &ctx);
   EXPECT_EQ(ctx.count, 0u);
@@ -249,57 +252,63 @@ TEST(RbtreeTest, ForeachEmptyTree) {
   delete_allocator(&a);
 }
 
-/* ---- own 模式 ---- */
+/* ---- 调用方管理 value 生命周期 ---- */
 
-static void *dup_int(allocator_t *a, int v) {
-  int *p = (int *)allocator_alloc(a, sizeof(int));
-  *p = v;
-  return p;
+static size_t g_alloc_count;
+static size_t g_free_count;
+
+static void *counting_alloc(size_t size) {
+  g_alloc_count++;
+  return malloc(size);
 }
 
-TEST(RbtreeTest, OwnModeFreesValuesOnDelete) {
-  allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, true);
-  for (int i = 0; i < 10; i++) {
-    rbtree_insert(t, (uintptr_t)i, dup_int(a, i));
-  }
-  /* delete_rbtree 释放所有 value */
-  delete_rbtree(&t);
-  delete_allocator(&a);
-  SUCCEED();
+static void counting_free(void *ptr) {
+  g_free_count++;
+  free(ptr);
 }
 
-TEST(RbtreeTest, OwnModeFreesOldValueOnDuplicate) {
-  allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, true);
-  rbtree_insert(t, 10, dup_int(a, 100));
-  /* 重复 key 应释放旧值 */
-  rbtree_insert(t, 10, dup_int(a, 200));
-  EXPECT_EQ(*(int *)rbtree_find(t, 10), 200);
-  EXPECT_EQ(rbtree_get_size(t), 1u);
+TEST(RbtreeTest, CallerManagesReplacedAndRemovedValues) {
+  g_alloc_count = 0;
+  g_free_count = 0;
+  allocator_t *a = create_allocator(counting_alloc, counting_free);
+  rbtree_t *t = create_rbtree(a);
+  int *first = (int *)allocator_alloc(a, sizeof(int));
+  int *second = (int *)allocator_alloc(a, sizeof(int));
+  *first = 100;
+  *second = 200;
+
+  EXPECT_EQ(rbtree_insert(t, 10, first), nullptr);
+  EXPECT_EQ(rbtree_insert(t, 10, second), first);
+  allocator_free(a, (void **)&first);
+
+  int *removed = (int *)rbtree_erase(t, 10);
+  EXPECT_EQ(removed, second);
+  allocator_free(a, (void **)&removed);
+
   delete_rbtree(&t);
   delete_allocator(&a);
-  SUCCEED();
+  EXPECT_EQ(g_alloc_count, g_free_count);
 }
 
-TEST(RbtreeTest, OwnModeFreesValueOnErase) {
-  allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, true);
-  rbtree_insert(t, 10, dup_int(a, 100));
-  rbtree_insert(t, 20, dup_int(a, 200));
-  rbtree_erase(t, 10);
-  EXPECT_EQ(rbtree_find(t, 10), nullptr);
-  EXPECT_EQ(*(int *)rbtree_find(t, 20), 200);
+TEST(RbtreeTest, DeleteTreeDoesNotFreeValues) {
+  g_alloc_count = 0;
+  g_free_count = 0;
+  allocator_t *a = create_allocator(counting_alloc, counting_free);
+  rbtree_t *t = create_rbtree(a);
+  int *value = (int *)allocator_alloc(a, sizeof(int));
+  *value = 7;
+  rbtree_insert(t, 10, value);
   delete_rbtree(&t);
+  allocator_free(a, (void **)&value);
   delete_allocator(&a);
-  SUCCEED();
+  EXPECT_EQ(g_alloc_count, g_free_count);
 }
 
 /* ---- 边界：空树操作 ---- */
 
 TEST(RbtreeTest, FindOnEmptyTree) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   EXPECT_EQ(rbtree_find(t, 42), nullptr);
   delete_rbtree(&t);
   delete_allocator(&a);
@@ -307,8 +316,8 @@ TEST(RbtreeTest, FindOnEmptyTree) {
 
 TEST(RbtreeTest, EraseOnEmptyTree) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
-  EXPECT_EQ(rbtree_erase(t, 42), (size_t)-1);
+  rbtree_t *t = create_rbtree(a);
+  EXPECT_EQ(rbtree_erase(t, 42), nullptr);
   delete_rbtree(&t);
   delete_allocator(&a);
 }
@@ -317,7 +326,7 @@ TEST(RbtreeTest, EraseOnEmptyTree) {
 
 TEST(RbtreeTest, LargeInsertAndFindAll) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   static int vals[500];
   for (int i = 0; i < 500; i++) {
     vals[i] = i;
@@ -338,7 +347,8 @@ TEST(RbtreeTest, LargeInsertAndFindAll) {
   }
   /* 删除一半 */
   for (int i = 0; i < 250; i++) {
-    EXPECT_EQ(rbtree_erase(t, (uintptr_t)i), (size_t)(499 - i));
+    EXPECT_EQ(rbtree_erase(t, (uintptr_t)i), &vals[i]);
+    EXPECT_EQ(rbtree_get_size(t), (size_t)(499 - i));
   }
   EXPECT_EQ(rbtree_get_size(t), 250u);
   /* 剩余仍可查 */
@@ -353,7 +363,7 @@ TEST(RbtreeTest, LargeInsertAndFindAll) {
 
 TEST(RbtreeTest, ForeachAfterEraseStillAscending) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[20];
   for (int i = 0; i < 20; i++) {
     vals[i] = i;
@@ -380,13 +390,14 @@ TEST(RbtreeTest, ForeachAfterEraseStillAscending) {
 
 TEST(RbtreeCoverageTest, EraseNodeWithOnlyLeftChild) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int v1 = 1, v2 = 2;
   /* 先插 20 再插 10：10 成为 20 的左孩子，20 无右孩子 */
   rbtree_insert(t, 20, &v1);
   rbtree_insert(t, 10, &v2);
   /* 删除 20（只有左孩子）→ 走 z->right == nil 分支 */
-  EXPECT_EQ(rbtree_erase(t, 20), 1u);
+  EXPECT_EQ(rbtree_erase(t, 20), &v1);
+  EXPECT_EQ(rbtree_get_size(t), 1u);
   EXPECT_EQ(rbtree_find(t, 20), nullptr);
   EXPECT_EQ(rbtree_find(t, 10), &v2);
   delete_rbtree(&t);
@@ -395,7 +406,7 @@ TEST(RbtreeCoverageTest, EraseNodeWithOnlyLeftChild) {
 
 TEST(RbtreeCoverageTest, EraseNodeWithSuccessorDeeperInRightSubtree) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   int vals[7];
   for (int i = 0; i < 7; i++)
     vals[i] = i;
@@ -406,7 +417,8 @@ TEST(RbtreeCoverageTest, EraseNodeWithSuccessorDeeperInRightSubtree) {
   rbtree_insert(t, 25, &vals[3]);
   rbtree_insert(t, 22, &vals[4]);
   /* 删除 20：后继是 22（不是直接右孩子 30）→ 覆盖 y->parent != z 分支 */
-  EXPECT_EQ(rbtree_erase(t, 20), 4u);
+  EXPECT_EQ(rbtree_erase(t, 20), &vals[0]);
+  EXPECT_EQ(rbtree_get_size(t), 4u);
   EXPECT_EQ(rbtree_find(t, 20), nullptr);
   EXPECT_EQ(rbtree_find(t, 22), &vals[4]);
   EXPECT_EQ(rbtree_find(t, 30), &vals[2]);
@@ -416,7 +428,7 @@ TEST(RbtreeCoverageTest, EraseNodeWithSuccessorDeeperInRightSubtree) {
 
 TEST(RbtreeCoverageTest, EraseTriggersRightSideFixup) {
   allocator_t *a = create_allocator(malloc, free);
-  rbtree_t *t = create_rbtree(a, false);
+  rbtree_t *t = create_rbtree(a);
   static int vals[16];
   for (int i = 0; i < 16; i++)
     vals[i] = i;
@@ -425,7 +437,7 @@ TEST(RbtreeCoverageTest, EraseTriggersRightSideFixup) {
     rbtree_insert(t, (uintptr_t)i, &vals[i]);
   }
   for (int i = 1; i <= 7; i++) {
-    rbtree_erase(t, (uintptr_t)i);
+    EXPECT_EQ(rbtree_erase(t, (uintptr_t)i), &vals[i]);
   }
   EXPECT_EQ(rbtree_get_size(t), 8u);
   for (int i = 8; i <= 15; i++) {
@@ -443,7 +455,7 @@ TEST(RbtreeCoverageTest, EraseManyRandomOrders) {
   /* 多种插入/删除顺序，尽可能覆盖 delete_fixup 的所有对称分支 */
   unsigned seeds[] = {1, 7, 13, 42, 99, 123, 777, 2024};
   for (size_t s = 0; s < sizeof(seeds) / sizeof(seeds[0]); s++) {
-    rbtree_t *t = create_rbtree(a, false);
+    rbtree_t *t = create_rbtree(a);
     int order[128];
     for (int i = 0; i < 128; i++)
       order[i] = i;
@@ -465,7 +477,7 @@ TEST(RbtreeCoverageTest, EraseManyRandomOrders) {
       order[j] = tmp;
     }
     for (int i = 0; i < 128; i++) {
-      EXPECT_NE(rbtree_erase(t, (uintptr_t)order[i]), (size_t)-1);
+      EXPECT_NE(rbtree_erase(t, (uintptr_t)order[i]), nullptr);
     }
     EXPECT_EQ(rbtree_get_size(t), 0u);
     delete_rbtree(&t);

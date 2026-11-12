@@ -7,18 +7,18 @@
 extern "C" {
 #endif
 typedef struct _rbtree_t rbtree_t;
-rbtree_t *create_rbtree(allocator_t *allocator, bool own);
+/* 树只管理自身节点内存；key/value 的生命周期完全由调用方负责。 */
+rbtree_t *create_rbtree(allocator_t *allocator);
 void delete_rbtree(rbtree_t **tree);
 size_t rbtree_get_size(rbtree_t *self);
 /* 插入键值对，key 由调用方提供（按 uintptr_t 比较）。
-   若 key 已存在且 own 为真，旧值被释放，新值替换。
-   返回插入后的元素数，参数错误返回 (size_t)-1。 */
-size_t rbtree_insert(rbtree_t *self, uintptr_t key, void *value);
+   value 不能为 NULL。key 已存在时替换并返回被替换的旧值；
+   新 key 或参数错误返回 NULL。 */
+void *rbtree_insert(rbtree_t *self, uintptr_t key, void *value);
 /* 查找 key 对应的值，未找到返回 NULL。 */
 void *rbtree_find(rbtree_t *self, uintptr_t key);
-/* 删除 key 对应的节点，own 为真时释放关联值。
-   返回删除后的元素数，key 不存在返回 (size_t)-1。 */
-size_t rbtree_erase(rbtree_t *self, uintptr_t key);
+/* 删除 key 对应的节点并返回关联值；key 不存在返回 NULL。 */
+void *rbtree_erase(rbtree_t *self, uintptr_t key);
 /* 遍历：按 key 升序对每个元素调用 callback。 */
 typedef void (*rbtree_callback_t)(uintptr_t key, void *value, void *user_data);
 void rbtree_foreach(rbtree_t *self,

@@ -16,7 +16,6 @@ struct _rbtree_t {
   rbnode_t *nil; /* 哨兵节点 */
   size_t size;
   allocator_t *allocator;
-  bool own;
 };
 
 static rbnode_t *node_alloc(rbtree_t *tree, uintptr_t key, void *value) {
@@ -30,10 +29,9 @@ static rbnode_t *node_alloc(rbtree_t *tree, uintptr_t key, void *value) {
   return node;
 }
 
-rbtree_t *create_rbtree(allocator_t *allocator, bool own) {
+rbtree_t *create_rbtree(allocator_t *allocator) {
   rbtree_t *tree = allocator_alloc(allocator, sizeof(struct _rbtree_t));
   tree->allocator = allocator;
-  tree->own = own;
   tree->size = 0;
   /* 哨兵节点：黑色，所有叶子指向它 */
   rbnode_t *nil = allocator_alloc(allocator, sizeof(struct _rbnode_t));
@@ -48,14 +46,11 @@ rbtree_t *create_rbtree(allocator_t *allocator, bool own) {
   return tree;
 }
 
-/* 递归释放节点，own 模式释放 value */
+/* 只释放节点自身；value 归调用方所有。 */
 static void node_free(rbtree_t *tree, rbnode_t *node) {
   if (node == tree->nil) return;
   node_free(tree, node->left);
   node_free(tree, node->right);
-  if (tree->own) {
-    allocator_free(tree->allocator, &node->value);
-  }
   allocator_free(tree->allocator, (void **)&node);
 }
 
@@ -139,8 +134,8 @@ static void insert_fixup(rbtree_t *tree, rbnode_t *z) {
   tree->root->red = false;
 }
 
-size_t rbtree_insert(rbtree_t *self, uintptr_t key, void *value) {
-  if (value == NULL) return (size_t)-1;
+void *rbtree_insert(rbtree_t *self, uintptr_t key, void *value) {
+  if (value == NULL) return NULL;
   rbnode_t *z = node_alloc(self, key, value);
   rbnode_t *y = self->nil;
   rbnode_t *x = self->root;
@@ -151,13 +146,11 @@ size_t rbtree_insert(rbtree_t *self, uintptr_t key, void *value) {
     else if (key > x->key)
       x = x->right;
     else {
-      /* key 已存在：替换 value */
-      if (self->own) {
-        allocator_free(self->allocator, &x->value);
-      }
+      /* key 已存在：替换并交还旧值，由调用方负责释放。 */
+      void *old_value = x->value;
       x->value = value;
       allocator_free(self->allocator, (void **)&z);
-      return self->size;
+      return old_value;
     }
   }
   z->parent = y;
@@ -169,7 +162,7 @@ size_t rbtree_insert(rbtree_t *self, uintptr_t key, void *value) {
     y->right = z;
   self->size++;
   insert_fixup(self, z);
-  return self->size;
+  return NULL;
 }
 
 /* ---- 查找 ---- */
@@ -260,7 +253,7 @@ static void rb_transplant(rbtree_t *tree, rbnode_t *u, rbnode_t *v) {
   v->parent = u->parent;
 }
 
-size_t rbtree_erase(rbtree_t *self, uintptr_t key) {
+void *rbtree_erase(rbtree_t *self, uintptr_t key) {
   rbnode_t *z = self->root;
   while (z != self->nil) {
     if (key < z->key)
@@ -270,7 +263,8 @@ size_t rbtree_erase(rbtree_t *self, uintptr_t key) {
     else
       break;
   }
-  if (z == self->nil) return (size_t)-1;
+  if (z == self->nil) return NULL;
+  void *value = z->value;
 
   rbnode_t *y = z;
   rbnode_t *x;
@@ -298,12 +292,9 @@ size_t rbtree_erase(rbtree_t *self, uintptr_t key) {
     y->red = z->red;
   }
   if (!y_orig_red) delete_fixup(self, x);
-  if (self->own) {
-    allocator_free(self->allocator, &z->value);
-  }
   allocator_free(self->allocator, (void **)&z);
   self->size--;
-  return self->size;
+  return value;
 }
 
 /* ---- 遍历（中序） ---- */
