@@ -1,5 +1,6 @@
 #include "cmd/build.h"
 #include "cmd/common.h"
+#include "cmd/perf.h"
 #include "core/error.h"
 #include "core/json.h"
 #include "core/string.h"
@@ -44,13 +45,17 @@ static int emit_ast(allocator_t *allocator,
     fprintf(stderr, "error: cannot read '%s'\n", input);
     return 1;
   }
+  perf_start(g_perf_state, g_perf_parse_name);
   parser_t *parser = create_parser(allocator, input, source);
   node_t *program = parser_read_program(allocator, parser);
+  perf_end(g_perf_state, g_perf_parse_name);
 
+  perf_start(g_perf_state, g_perf_json_name);
   json_writer_t *writer = create_json_writer(allocator, source);
   program_node_to_json(writer, program);
   string_t *json = json_writer_release(writer);
   delete_json_writer(&writer);
+  perf_end(g_perf_state, g_perf_json_name);
 
   int status = 0;
   vec_t *errors = parser_get_error(parser);
@@ -92,6 +97,9 @@ static int cmd_build(const cmdline_options_t *options, void *userdata) {
     fprintf(stderr, "error: build requires <file.cx>\n");
     return 2;
   }
+  if (cmdline_options_get_flag(options, "perf")) {
+    g_perf_report_enabled = true;
+  }
   if (cmdline_options_get_flag(options, "emit-ast")) {
     return emit_ast(allocator, options, input);
   }
@@ -99,6 +107,14 @@ static int cmd_build(const cmdline_options_t *options, void *userdata) {
 }
 
 static const cmdline_option_t build_options[] = {
+    {"perf",
+     0,
+     CMDLINE_OPTION_FLAG,
+     false,
+     false,
+     NULL,
+     "print performance samples after the command",
+     NULL},
     {"emit-ast",
      0,
      CMDLINE_OPTION_FLAG,
