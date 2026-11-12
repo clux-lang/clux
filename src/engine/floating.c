@@ -178,8 +178,90 @@ static const char *binary_op_symbol(clux_binary_op_t op) {
     return "<<";
   case CLUX_OP_SHR:
     return ">>";
+  case CLUX_OP_EQ:
+    return "==";
+  case CLUX_OP_NE:
+    return "!=";
+  case CLUX_OP_LT:
+    return "<";
+  case CLUX_OP_LE:
+    return "<=";
+  case CLUX_OP_GT:
+    return ">";
+  case CLUX_OP_GE:
+    return ">=";
   }
   return "<unknown>";
+}
+
+static clux_value_t *float_compare(clux_context_t *ctx,
+                                   clux_value_t *left,
+                                   clux_value_t *right,
+                                   clux_binary_op_t op) {
+  if (is_error_value(left)) {
+    return left;
+  }
+  if (is_error_value(right)) {
+    return right;
+  }
+  clux_type_t *left_type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (!floating_kind(clux_type_get_kind(right_type))) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "operator '%s' requires operands of the same type",
+        binary_op_symbol(op));
+  }
+  clux_type_t *target =
+      clux_type_get_size(left_type) >= clux_type_get_size(right_type)
+          ? left_type
+          : right_type;
+  clux_value_t *left_operand = left;
+  clux_value_t *right_operand = right;
+  if (left_type != target) {
+    left_operand = float_safe_cast(ctx, left, target);
+    if (is_error_value(left_operand)) {
+      return left_operand;
+    }
+  }
+  if (right_type != target) {
+    right_operand = float_safe_cast(ctx, right, target);
+    if (is_error_value(right_operand)) {
+      return right_operand;
+    }
+  }
+  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  if (clux_value_is_shadow(left_operand) ||
+      clux_value_is_shadow(right_operand)) {
+    return clux_context_create_shadow_value(ctx, bool_type);
+  }
+  double left_value = float_read(left_operand);
+  double right_value = float_read(right_operand);
+  bool result = false;
+  switch (op) {
+  case CLUX_OP_EQ:
+    result = left_value == right_value;
+    break;
+  case CLUX_OP_NE:
+    result = left_value != right_value;
+    break;
+  case CLUX_OP_LT:
+    result = left_value < right_value;
+    break;
+  case CLUX_OP_LE:
+    result = left_value <= right_value;
+    break;
+  case CLUX_OP_GT:
+    result = left_value > right_value;
+    break;
+  case CLUX_OP_GE:
+    result = left_value >= right_value;
+    break;
+  default:
+    return NULL;
+  }
+  return clux_context_create_bool(ctx, result, NULL, NULL);
 }
 
 static clux_value_t *float_binary(clux_context_t *ctx,
@@ -287,6 +369,30 @@ float_prefix(clux_context_t *ctx, clux_value_t *value, clux_prefix_op_t op) {
 }
 
 static clux_value_t *
+float_eq(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_EQ);
+}
+static clux_value_t *
+float_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_NE);
+}
+static clux_value_t *
+float_lt(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_LT);
+}
+static clux_value_t *
+float_le(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_LE);
+}
+static clux_value_t *
+float_gt(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_GT);
+}
+static clux_value_t *
+float_ge(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return float_compare(ctx, left, right, CLUX_OP_GE);
+}
+static clux_value_t *
 float_add(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return float_binary(ctx, left, right, CLUX_OP_ADD);
 }
@@ -316,6 +422,12 @@ static clux_vtable_t g_floating_vtable = {
     .div = float_div,
     .plus = float_plus,
     .negative = float_negative,
+    .eq = float_eq,
+    .ne = float_ne,
+    .lt = float_lt,
+    .le = float_le,
+    .gt = float_gt,
+    .ge = float_ge,
     .safe_cast = float_safe_cast,
     .cast = float_cast,
 };

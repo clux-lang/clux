@@ -53,8 +53,48 @@ str_add(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return clux_context_create_str_value(ctx, combined, NULL, NULL);
 }
 
+static clux_value_t *str_compare(clux_context_t *ctx,
+                                 clux_value_t *left,
+                                 clux_value_t *right,
+                                 clux_binary_op_t op) {
+  if (is_error_value(left)) {
+    return left;
+  }
+  if (is_error_value(right)) {
+    return right;
+  }
+  clux_type_t *left_type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (!str_kind(clux_type_get_kind(right_type))) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "operator '%s' requires operands of the same type",
+        op == CLUX_OP_EQ ? "==" : "!=");
+  }
+  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  if (clux_value_is_shadow(left) || clux_value_is_shadow(right)) {
+    return clux_context_create_shadow_value(ctx, bool_type);
+  }
+  int result = strcmp(str_read(left), str_read(right));
+  bool equal = result == 0;
+  return clux_context_create_bool(
+      ctx, op == CLUX_OP_EQ ? equal : !equal, NULL, NULL);
+}
+
+static clux_value_t *
+str_eq(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return str_compare(ctx, left, right, CLUX_OP_EQ);
+}
+static clux_value_t *
+str_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return str_compare(ctx, left, right, CLUX_OP_NE);
+}
+
 static clux_vtable_t g_str_vtable = {
     .add = str_add,
+    .eq = str_eq,
+    .ne = str_ne,
 };
 
 clux_vtable_t *get_clux_str_vtable(void) { return &g_str_vtable; }

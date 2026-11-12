@@ -190,8 +190,90 @@ static const char *binary_op_symbol(clux_binary_op_t op) {
     return "<<";
   case CLUX_OP_SHR:
     return ">>";
+  case CLUX_OP_EQ:
+    return "==";
+  case CLUX_OP_NE:
+    return "!=";
+  case CLUX_OP_LT:
+    return "<";
+  case CLUX_OP_LE:
+    return "<=";
+  case CLUX_OP_GT:
+    return ">";
+  case CLUX_OP_GE:
+    return ">=";
   }
   return "<unknown>";
+}
+
+static clux_value_t *integer_compare(clux_context_t *ctx,
+                                     clux_value_t *left,
+                                     clux_value_t *right,
+                                     clux_binary_op_t op) {
+  if (is_error_value(ctx, left)) {
+    return left;
+  }
+  if (is_error_value(ctx, right)) {
+    return right;
+  }
+  clux_type_t *left_type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (!integer_kind(clux_type_get_kind(right_type))) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "operator '%s' requires operands of the same type",
+        binary_op_symbol(op));
+  }
+  clux_type_t *target =
+      clux_type_get_size(left_type) >= clux_type_get_size(right_type)
+          ? left_type
+          : right_type;
+  clux_value_t *left_operand = left;
+  clux_value_t *right_operand = right;
+  if (left_type != target) {
+    left_operand = integer_safe_cast(ctx, left, target);
+    if (is_error_value(ctx, left_operand)) {
+      return left_operand;
+    }
+  }
+  if (right_type != target) {
+    right_operand = integer_safe_cast(ctx, right, target);
+    if (is_error_value(ctx, right_operand)) {
+      return right_operand;
+    }
+  }
+  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  if (clux_value_is_shadow(left_operand) ||
+      clux_value_is_shadow(right_operand)) {
+    return clux_context_create_shadow_value(ctx, bool_type);
+  }
+  int64_t left_value = integer_read(left_operand);
+  int64_t right_value = integer_read(right_operand);
+  bool result = false;
+  switch (op) {
+  case CLUX_OP_EQ:
+    result = left_value == right_value;
+    break;
+  case CLUX_OP_NE:
+    result = left_value != right_value;
+    break;
+  case CLUX_OP_LT:
+    result = left_value < right_value;
+    break;
+  case CLUX_OP_LE:
+    result = left_value <= right_value;
+    break;
+  case CLUX_OP_GT:
+    result = left_value > right_value;
+    break;
+  case CLUX_OP_GE:
+    result = left_value >= right_value;
+    break;
+  default:
+    return NULL;
+  }
+  return clux_context_create_bool(ctx, result, NULL, NULL);
 }
 
 static clux_value_t *integer_binary(clux_context_t *ctx,
@@ -327,6 +409,30 @@ integer_prefix(clux_context_t *ctx, clux_value_t *value, clux_prefix_op_t op) {
 }
 
 static clux_value_t *
+integer_eq(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_EQ);
+}
+static clux_value_t *
+integer_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_NE);
+}
+static clux_value_t *
+integer_lt(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_LT);
+}
+static clux_value_t *
+integer_le(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_LE);
+}
+static clux_value_t *
+integer_gt(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_GT);
+}
+static clux_value_t *
+integer_ge(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_compare(ctx, left, right, CLUX_OP_GE);
+}
+static clux_value_t *
 integer_add(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return integer_binary(ctx, left, right, CLUX_OP_ADD);
 }
@@ -388,6 +494,12 @@ static clux_vtable_t g_integer_vtable = {
     .bit_and = integer_bit_and,
     .bit_or = integer_bit_or,
     .bit_xor = integer_bit_xor,
+    .eq = integer_eq,
+    .ne = integer_ne,
+    .lt = integer_lt,
+    .le = integer_le,
+    .gt = integer_gt,
+    .ge = integer_ge,
     .plus = integer_plus,
     .negative = integer_negative,
     .bit_not = integer_bit_not,

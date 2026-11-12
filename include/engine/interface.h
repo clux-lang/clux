@@ -19,6 +19,12 @@ typedef enum _clux_binary_op_t {
   CLUX_OP_XOR,
   CLUX_OP_SHL,
   CLUX_OP_SHR,
+  CLUX_OP_EQ,
+  CLUX_OP_NE,
+  CLUX_OP_LT,
+  CLUX_OP_LE,
+  CLUX_OP_GT,
+  CLUX_OP_GE,
 } clux_binary_op_t;
 typedef enum _clux_prefix_op_t {
   CLUX_OP_PLUS,
@@ -92,6 +98,12 @@ struct _clux_vtable_t {
   clux_vt_binary_fn_t bit_and;
   clux_vt_binary_fn_t bit_or;
   clux_vt_binary_fn_t bit_xor;
+  clux_vt_binary_fn_t eq;
+  clux_vt_binary_fn_t ne;
+  clux_vt_binary_fn_t lt;
+  clux_vt_binary_fn_t le;
+  clux_vt_binary_fn_t gt;
+  clux_vt_binary_fn_t ge;
   clux_vt_prefix_fn_t plus;
   clux_vt_prefix_fn_t negative;
   clux_vt_prefix_fn_t bit_not;

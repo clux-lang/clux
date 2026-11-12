@@ -365,6 +365,18 @@ static const char *binary_op_name(clux_binary_op_t op) {
     return "<<";
   case CLUX_OP_SHR:
     return ">>";
+  case CLUX_OP_EQ:
+    return "==";
+  case CLUX_OP_NE:
+    return "!=";
+  case CLUX_OP_LT:
+    return "<";
+  case CLUX_OP_LE:
+    return "<=";
+  case CLUX_OP_GT:
+    return ">";
+  case CLUX_OP_GE:
+    return ">=";
   }
   return "<unknown>";
 }
@@ -404,6 +416,18 @@ static clux_vt_binary_fn_t binary_op_fn(clux_vtable_t *vt,
     return vt->shl;
   case CLUX_OP_SHR:
     return vt->shr;
+  case CLUX_OP_EQ:
+    return vt->eq;
+  case CLUX_OP_NE:
+    return vt->ne;
+  case CLUX_OP_LT:
+    return vt->lt;
+  case CLUX_OP_LE:
+    return vt->le;
+  case CLUX_OP_GT:
+    return vt->gt;
+  case CLUX_OP_GE:
+    return vt->ge;
   }
   return NULL;
 }

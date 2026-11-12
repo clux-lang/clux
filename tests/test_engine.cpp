@@ -147,6 +147,12 @@ TEST(EngineTest, BuiltinIntegerTypes) {
     EXPECT_NE(vt->bit_and, nullptr);
     EXPECT_NE(vt->bit_or, nullptr);
     EXPECT_NE(vt->bit_xor, nullptr);
+    EXPECT_NE(vt->eq, nullptr);
+    EXPECT_NE(vt->ne, nullptr);
+    EXPECT_NE(vt->lt, nullptr);
+    EXPECT_NE(vt->le, nullptr);
+    EXPECT_NE(vt->gt, nullptr);
+    EXPECT_NE(vt->ge, nullptr);
     EXPECT_NE(vt->plus, nullptr);
     EXPECT_NE(vt->negative, nullptr);
     EXPECT_NE(vt->bit_not, nullptr);
@@ -706,6 +712,12 @@ TEST(EngineTest, BuiltinUnsignedTypes) {
     EXPECT_NE(vt->bit_and, nullptr);
     EXPECT_NE(vt->bit_or, nullptr);
     EXPECT_NE(vt->bit_xor, nullptr);
+    EXPECT_NE(vt->eq, nullptr);
+    EXPECT_NE(vt->ne, nullptr);
+    EXPECT_NE(vt->lt, nullptr);
+    EXPECT_NE(vt->le, nullptr);
+    EXPECT_NE(vt->gt, nullptr);
+    EXPECT_NE(vt->ge, nullptr);
     EXPECT_NE(vt->plus, nullptr);
     EXPECT_NE(vt->negative, nullptr);
     EXPECT_NE(vt->bit_not, nullptr);
@@ -1292,6 +1304,12 @@ TEST(EngineTest, BuiltinBoolType) {
   EXPECT_EQ(vt->negative, nullptr);
   EXPECT_EQ(vt->bit_not, nullptr);
   EXPECT_NE(vt->logic_not, nullptr);
+  EXPECT_NE(vt->eq, nullptr);
+  EXPECT_NE(vt->ne, nullptr);
+  EXPECT_EQ(vt->lt, nullptr);
+  EXPECT_EQ(vt->le, nullptr);
+  EXPECT_EQ(vt->gt, nullptr);
+  EXPECT_EQ(vt->ge, nullptr);
   EXPECT_NE(vt->safe_cast, nullptr);
   EXPECT_NE(vt->cast, nullptr);
 
@@ -1462,6 +1480,12 @@ TEST(EngineTest, BuiltinStrType) {
   EXPECT_EQ(vt->negative, nullptr);
   EXPECT_EQ(vt->bit_not, nullptr);
   EXPECT_EQ(vt->logic_not, nullptr);
+  EXPECT_NE(vt->eq, nullptr);
+  EXPECT_NE(vt->ne, nullptr);
+  EXPECT_EQ(vt->lt, nullptr);
+  EXPECT_EQ(vt->le, nullptr);
+  EXPECT_EQ(vt->gt, nullptr);
+  EXPECT_EQ(vt->ge, nullptr);
   EXPECT_EQ(vt->safe_cast, nullptr);
   EXPECT_EQ(vt->cast, nullptr);
 
@@ -1568,6 +1592,179 @@ TEST(EngineTest, StrUnsupportedOps) {
       clux_context_cast(ctx, left, clux_context_get_i32_type(ctx), NULL);
   ASSERT_NE(cast, nullptr);
   EXPECT_STREQ(error_message_of(cast), "type 'str' cannot be cast to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, IntegerComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *small = clux_context_create_i8(ctx, 20, NULL, NULL);
+  clux_value_t *large = clux_context_create_i32(ctx, 22, NULL, NULL);
+  struct {
+    clux_binary_op_t op;
+    bool expected;
+  } cases[] = {
+      {CLUX_OP_EQ, false},
+      {CLUX_OP_NE, true},
+      {CLUX_OP_LT, true},
+      {CLUX_OP_LE, true},
+      {CLUX_OP_GT, false},
+      {CLUX_OP_GE, false},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, small, large, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(read_bool(result), c.expected);
+  }
+
+  clux_value_t *negative = clux_context_create_i8(ctx, -1, NULL, NULL);
+  clux_value_t *positive = clux_context_create_i8(ctx, 1, NULL, NULL);
+  clux_value_t *cmp =
+      clux_context_binary(ctx, CLUX_OP_LT, negative, positive, NULL);
+  ASSERT_NE(cmp, nullptr);
+  EXPECT_TRUE(read_bool(cmp));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *small = clux_context_create_u8(ctx, 5, NULL, NULL);
+  clux_value_t *large = clux_context_create_u32(ctx, 300, NULL, NULL);
+  clux_value_t *cmp = clux_context_binary(ctx, CLUX_OP_LT, small, large, NULL);
+  ASSERT_NE(cmp, nullptr);
+  EXPECT_EQ(clux_value_get_type(cmp), clux_context_get_bool_type(ctx));
+  EXPECT_TRUE(read_bool(cmp));
+
+  clux_value_t *max = clux_context_create_u8(ctx, 255, NULL, NULL);
+  clux_value_t *near_max = clux_context_create_u8(ctx, 254, NULL, NULL);
+  clux_value_t *ge = clux_context_binary(ctx, CLUX_OP_GE, max, near_max, NULL);
+  ASSERT_NE(ge, nullptr);
+  EXPECT_TRUE(read_bool(ge));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *small = clux_context_create_f64(ctx, 1.5, NULL, NULL);
+  clux_value_t *large = clux_context_create_f64(ctx, 2.5, NULL, NULL);
+  struct {
+    clux_binary_op_t op;
+    bool expected;
+  } cases[] = {
+      {CLUX_OP_EQ, false},
+      {CLUX_OP_NE, true},
+      {CLUX_OP_LT, true},
+      {CLUX_OP_LE, true},
+      {CLUX_OP_GT, false},
+      {CLUX_OP_GE, false},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, small, large, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(read_bool(result), c.expected);
+  }
+
+  clux_value_t *same_a = clux_context_create_f32(ctx, 2.5f, NULL, NULL);
+  clux_value_t *same_b = clux_context_create_f64(ctx, 2.5, NULL, NULL);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, same_a, same_b, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_TRUE(read_bool(eq));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *lie = clux_context_create_bool(ctx, false, NULL, NULL);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, truth, truth, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, truth, lie, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_TRUE(read_bool(ne));
+
+  clux_value_t *num = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, truth, num, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mixed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '==' requires operands of the same type");
+
+  clux_value_t *ordered =
+      clux_context_binary(ctx, CLUX_OP_LT, truth, lie, NULL);
+  ASSERT_NE(ordered, nullptr);
+  EXPECT_STREQ(error_message_of(ordered),
+               "type 'bool' does not support operator '<'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *abc = clux_context_create_str(ctx, "abc", NULL, NULL);
+  clux_value_t *abc2 = clux_context_create_str(ctx, "abc", NULL, NULL);
+  clux_value_t *abd = clux_context_create_str(ctx, "abd", NULL, NULL);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, abc, abc2, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, abc, abd, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_TRUE(read_bool(ne));
+
+  clux_value_t *num = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, abc, num, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mixed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '==' requires operands of the same type");
+
+  clux_value_t *ordered = clux_context_binary(ctx, CLUX_OP_LT, abc, abd, NULL);
+  ASSERT_NE(ordered, nullptr);
+  EXPECT_STREQ(error_message_of(ordered),
+               "type 'str' does not support operator '<'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, ComparisonShadowAndErrorPropagate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *shadow_cmp =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow, value, NULL);
+  ASSERT_NE(shadow_cmp, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_cmp));
+  EXPECT_EQ(clux_value_get_type(shadow_cmp), clux_context_get_bool_type(ctx));
+
+  clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, error, value, NULL), error);
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_LT, value, error, NULL), error);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

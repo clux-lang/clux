@@ -105,8 +105,49 @@ static clux_value_t *bool_logic_not(clux_context_t *ctx, clux_value_t *value) {
   return clux_context_create_bool(ctx, !bool_read(value), NULL, NULL);
 }
 
+static clux_value_t *bool_compare(clux_context_t *ctx,
+                                  clux_value_t *left,
+                                  clux_value_t *right,
+                                  clux_binary_op_t op) {
+  if (is_error_value(left)) {
+    return left;
+  }
+  if (is_error_value(right)) {
+    return right;
+  }
+  clux_type_t *left_type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (clux_type_get_kind(right_type) != CLUX_TYPE_BOOL) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "operator '%s' requires operands of the same type",
+        op == CLUX_OP_EQ ? "==" : "!=");
+  }
+  clux_type_t *bool_type = clux_context_get_bool_type(ctx);
+  if (clux_value_is_shadow(left) || clux_value_is_shadow(right)) {
+    return clux_context_create_shadow_value(ctx, bool_type);
+  }
+  bool left_value = bool_read(left);
+  bool right_value = bool_read(right);
+  bool result =
+      op == CLUX_OP_EQ ? left_value == right_value : left_value != right_value;
+  return clux_context_create_bool(ctx, result, NULL, NULL);
+}
+
+static clux_value_t *
+bool_eq(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return bool_compare(ctx, left, right, CLUX_OP_EQ);
+}
+static clux_value_t *
+bool_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return bool_compare(ctx, left, right, CLUX_OP_NE);
+}
+
 static clux_vtable_t g_bool_vtable = {
     .logic_not = bool_logic_not,
+    .eq = bool_eq,
+    .ne = bool_ne,
     .safe_cast = bool_safe_cast,
     .cast = bool_cast,
 };
