@@ -35,6 +35,7 @@ static clux_vtable_t g_error_vtable = {
     .negative = error_prefix,
     .bit_not = error_prefix,
     .safe_cast = error_safe_cast,
+    .cast = error_safe_cast,
 };
 
 clux_vtable_t *get_clux_error_vtable(void) { return &g_error_vtable; }

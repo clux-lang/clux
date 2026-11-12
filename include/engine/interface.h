@@ -38,6 +38,12 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_I16,
   CLUX_TYPE_I32,
   CLUX_TYPE_I64,
+  CLUX_TYPE_U8,
+  CLUX_TYPE_U16,
+  CLUX_TYPE_U32,
+  CLUX_TYPE_U64,
+  CLUX_TYPE_F32,
+  CLUX_TYPE_F64,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -89,6 +95,7 @@ struct _clux_vtable_t {
   clux_vt_prefix_fn_t bit_not;
   clux_vt_prefix_fn_t logic_not;
   clux_vt_safe_cast_fn_t safe_cast;
+  clux_vt_cast_fn_t cast;
 };
 #ifdef __cplusplus
 }

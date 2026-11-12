@@ -8,6 +8,7 @@
 #include "engine/interface.h"
 #include "engine/scope.h"
 #include "engine/type.h"
+#include "engine/unsigned.h"
 #include "engine/value.h"
 #include <stdarg.h>
 #include <stdint.h>
@@ -15,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine/error.h"
+#include "engine/floating.h"
 struct _clux_context_t {
   allocator_t *allocator;
   safe_allocator_t *safe_allocator;
@@ -27,6 +29,12 @@ struct _clux_context_t {
     clux_type_t *type_i16;
     clux_type_t *type_i32;
     clux_type_t *type_i64;
+    clux_type_t *type_u8;
+    clux_type_t *type_u16;
+    clux_type_t *type_u32;
+    clux_type_t *type_u64;
+    clux_type_t *type_f32;
+    clux_type_t *type_f64;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -67,6 +75,42 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                  sizeof(int64_t),
                                                  alignof(int64_t),
                                                  get_clux_i64_vtable());
+  ctx->builtin_types.type_u8 = create_clux_type(allocator,
+                                                CLUX_TYPE_U8,
+                                                "u8",
+                                                sizeof(uint8_t),
+                                                alignof(uint8_t),
+                                                get_clux_u8_vtable());
+  ctx->builtin_types.type_u16 = create_clux_type(allocator,
+                                                 CLUX_TYPE_U16,
+                                                 "u16",
+                                                 sizeof(uint16_t),
+                                                 alignof(uint16_t),
+                                                 get_clux_u16_vtable());
+  ctx->builtin_types.type_u32 = create_clux_type(allocator,
+                                                 CLUX_TYPE_U32,
+                                                 "u32",
+                                                 sizeof(uint32_t),
+                                                 alignof(uint32_t),
+                                                 get_clux_u32_vtable());
+  ctx->builtin_types.type_u64 = create_clux_type(allocator,
+                                                 CLUX_TYPE_U64,
+                                                 "u64",
+                                                 sizeof(uint64_t),
+                                                 alignof(uint64_t),
+                                                 get_clux_u64_vtable());
+  ctx->builtin_types.type_f32 = create_clux_type(allocator,
+                                                 CLUX_TYPE_F32,
+                                                 "f32",
+                                                 sizeof(float),
+                                                 alignof(float),
+                                                 get_clux_f32_vtable());
+  ctx->builtin_types.type_f64 = create_clux_type(allocator,
+                                                 CLUX_TYPE_F64,
+                                                 "f64",
+                                                 sizeof(double),
+                                                 alignof(double),
+                                                 get_clux_f64_vtable());
   return ctx;
 }
 void delete_clux_context(clux_context_t **self) {
@@ -83,6 +127,12 @@ void delete_clux_context(clux_context_t **self) {
     delete_error(&err);
   }
   delete_vec(&ctx->errors);
+  delete_clux_type(&ctx->builtin_types.type_f64);
+  delete_clux_type(&ctx->builtin_types.type_f32);
+  delete_clux_type(&ctx->builtin_types.type_u64);
+  delete_clux_type(&ctx->builtin_types.type_u32);
+  delete_clux_type(&ctx->builtin_types.type_u16);
+  delete_clux_type(&ctx->builtin_types.type_u8);
   delete_clux_type(&ctx->builtin_types.type_i64);
   delete_clux_type(&ctx->builtin_types.type_i32);
   delete_clux_type(&ctx->builtin_types.type_i16);
@@ -164,6 +214,48 @@ clux_value_t *clux_context_create_i64(clux_context_t *self,
                                       location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_i64, &value, name, loc);
+}
+clux_value_t *clux_context_create_u8(clux_context_t *self,
+                                     uint8_t value,
+                                     const char *name,
+                                     location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_u8, &value, name, loc);
+}
+clux_value_t *clux_context_create_u16(clux_context_t *self,
+                                      uint16_t value,
+                                      const char *name,
+                                      location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_u16, &value, name, loc);
+}
+clux_value_t *clux_context_create_u32(clux_context_t *self,
+                                      uint32_t value,
+                                      const char *name,
+                                      location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_u32, &value, name, loc);
+}
+clux_value_t *clux_context_create_u64(clux_context_t *self,
+                                      uint64_t value,
+                                      const char *name,
+                                      location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_u64, &value, name, loc);
+}
+clux_value_t *clux_context_create_f32(clux_context_t *self,
+                                      float value,
+                                      const char *name,
+                                      location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_f32, &value, name, loc);
+}
+clux_value_t *clux_context_create_f64(clux_context_t *self,
+                                      double value,
+                                      const char *name,
+                                      location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_f64, &value, name, loc);
 }
 void clux_context_push_scope(clux_context_t *self) {
   clux_scope_t *scope = create_clux_scope(self->allocator, self->current_scope);
@@ -293,6 +385,28 @@ clux_value_t *clux_context_safe_cast(clux_context_t *self,
       source_name ? source_name : "<unknown>",
       target_name ? target_name : "<unknown>");
 }
+clux_value_t *clux_context_cast(clux_context_t *self,
+                                clux_value_t *value,
+                                clux_type_t *target,
+                                location_t *loc) {
+  if (!value || !target) {
+    return clux_context_create_error_message(
+        self, loc, "cast requires a value and a target type");
+  }
+  clux_type_t *source = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(source);
+  if (vt && vt->cast) {
+    return vt->cast(self, value, target);
+  }
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' cannot be cast to '%s'",
+      source_name ? source_name : "<unknown>",
+      target_name ? target_name : "<unknown>");
+}
 clux_value_t *clux_context_binary(clux_context_t *self,
                                   clux_binary_op_t op,
                                   clux_value_t *left,
@@ -359,6 +473,24 @@ clux_type_t *clux_context_get_i32_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_i64_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_i64;
+}
+clux_type_t *clux_context_get_u8_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_u8;
+}
+clux_type_t *clux_context_get_u16_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_u16;
+}
+clux_type_t *clux_context_get_u32_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_u32;
+}
+clux_type_t *clux_context_get_u64_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_u64;
+}
+clux_type_t *clux_context_get_f32_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_f32;
+}
+clux_type_t *clux_context_get_f64_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_f64;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;

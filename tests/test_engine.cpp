@@ -6,9 +6,11 @@
 #include "engine/interface.h"
 #include "engine/type.h"
 #include "engine/value.h"
+#include <cmath>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 
 static size_t g_alloc_count;
 static size_t g_free_count;
@@ -41,6 +43,36 @@ static int32_t read_i32(clux_value_t *value) {
 static int64_t read_i64(clux_value_t *value) {
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
   return raw ? *(int64_t *)raw : 0;
+}
+
+static uint8_t read_u8(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(uint8_t *)raw : 0;
+}
+
+static uint16_t read_u16(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(uint16_t *)raw : 0;
+}
+
+static uint32_t read_u32(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(uint32_t *)raw : 0;
+}
+
+static uint64_t read_u64(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(uint64_t *)raw : 0;
+}
+
+static float read_f32(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(float *)raw : 0;
+}
+
+static double read_f64(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(double *)raw : 0;
 }
 
 static const char *error_message_of(clux_value_t *value) {
@@ -110,6 +142,7 @@ TEST(EngineTest, BuiltinIntegerTypes) {
     EXPECT_NE(vt->bit_not, nullptr);
     EXPECT_EQ(vt->logic_not, nullptr);
     EXPECT_NE(vt->safe_cast, nullptr);
+    EXPECT_NE(vt->cast, nullptr);
   }
 
   delete_clux_context(&ctx);
@@ -627,6 +660,599 @@ TEST(EngineTest, ShadowStillChecksOperatorSupport) {
 
   delete_clux_context(&ctx);
   delete_clux_type(&custom);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BuiltinUnsignedTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  struct {
+    clux_type_t *type;
+    clux_type_kind_t kind;
+    const char *name;
+    size_t size;
+  } cases[] = {
+      {clux_context_get_u8_type(ctx), CLUX_TYPE_U8, "u8", sizeof(uint8_t)},
+      {clux_context_get_u16_type(ctx), CLUX_TYPE_U16, "u16", sizeof(uint16_t)},
+      {clux_context_get_u32_type(ctx), CLUX_TYPE_U32, "u32", sizeof(uint32_t)},
+      {clux_context_get_u64_type(ctx), CLUX_TYPE_U64, "u64", sizeof(uint64_t)},
+  };
+  for (const auto &c : cases) {
+    ASSERT_NE(c.type, nullptr);
+    EXPECT_EQ(clux_type_get_kind(c.type), c.kind);
+    EXPECT_STREQ(clux_type_get_name(c.type), c.name);
+    EXPECT_EQ(clux_type_get_size(c.type), c.size);
+    EXPECT_EQ(clux_type_get_align(c.type), c.size);
+    clux_vtable_t *vt = clux_type_get_vtable(c.type);
+    ASSERT_NE(vt, nullptr);
+    EXPECT_NE(vt->add, nullptr);
+    EXPECT_NE(vt->sub, nullptr);
+    EXPECT_NE(vt->mul, nullptr);
+    EXPECT_NE(vt->div, nullptr);
+    EXPECT_NE(vt->mod, nullptr);
+    EXPECT_NE(vt->shl, nullptr);
+    EXPECT_NE(vt->shr, nullptr);
+    EXPECT_NE(vt->bit_and, nullptr);
+    EXPECT_NE(vt->bit_or, nullptr);
+    EXPECT_NE(vt->bit_xor, nullptr);
+    EXPECT_NE(vt->plus, nullptr);
+    EXPECT_NE(vt->negative, nullptr);
+    EXPECT_NE(vt->bit_not, nullptr);
+    EXPECT_EQ(vt->logic_not, nullptr);
+    EXPECT_NE(vt->safe_cast, nullptr);
+    EXPECT_NE(vt->cast, nullptr);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CreateUnsignedValuesAndAdd) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *u8_left = clux_context_create_u8(ctx, 200, NULL, NULL);
+  clux_value_t *u8_right = clux_context_create_u8(ctx, 55, NULL, NULL);
+  clux_value_t *u8_sum = clux_context_add(ctx, u8_left, u8_right, NULL);
+  ASSERT_NE(u8_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u8_sum), clux_context_get_u8_type(ctx));
+  EXPECT_EQ(read_u8(u8_sum), 255);
+
+  clux_value_t *u16_left = clux_context_create_u16(ctx, 60000, NULL, NULL);
+  clux_value_t *u16_right = clux_context_create_u16(ctx, 5000, NULL, NULL);
+  clux_value_t *u16_sum = clux_context_add(ctx, u16_left, u16_right, NULL);
+  ASSERT_NE(u16_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u16_sum), clux_context_get_u16_type(ctx));
+  EXPECT_EQ(read_u16(u16_sum), 65000);
+
+  clux_value_t *u32_left =
+      clux_context_create_u32(ctx, UINT32_C(4000000000), NULL, NULL);
+  clux_value_t *u32_right = clux_context_create_u32(ctx, 200, NULL, NULL);
+  clux_value_t *u32_sum = clux_context_add(ctx, u32_left, u32_right, NULL);
+  ASSERT_NE(u32_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u32_sum), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(read_u32(u32_sum), UINT32_C(4000000200));
+
+  clux_value_t *u64_left =
+      clux_context_create_u64(ctx, UINT64_C(10000000000), NULL, NULL);
+  clux_value_t *u64_right =
+      clux_context_create_u64(ctx, UINT64_C(20000000000), NULL, NULL);
+  clux_value_t *u64_sum = clux_context_add(ctx, u64_left, u64_right, NULL);
+  ASSERT_NE(u64_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u64_sum), clux_context_get_u64_type(ctx));
+  EXPECT_EQ(read_u64(u64_sum), UINT64_C(30000000000));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedWidensIntegerOperands) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *u8_value = clux_context_create_u8(ctx, 20, NULL, NULL);
+  clux_value_t *u16_value = clux_context_create_u16(ctx, 300, NULL, NULL);
+  clux_value_t *u16_sum =
+      clux_context_binary(ctx, CLUX_OP_ADD, u8_value, u16_value, NULL);
+  ASSERT_NE(u16_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u16_sum), clux_context_get_u16_type(ctx));
+  EXPECT_EQ(read_u16(u16_sum), 320);
+
+  clux_value_t *u32_value = clux_context_create_u32(ctx, 100, NULL, NULL);
+  clux_value_t *u64_value =
+      clux_context_create_u64(ctx, UINT64_C(4000000000), NULL, NULL);
+  clux_value_t *u64_sum =
+      clux_context_binary(ctx, CLUX_OP_ADD, u32_value, u64_value, NULL);
+  ASSERT_NE(u64_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(u64_sum), clux_context_get_u64_type(ctx));
+  EXPECT_EQ(read_u64(u64_sum), UINT64_C(4000000100));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedArithmeticAndBitwiseOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *zero = clux_context_create_u8(ctx, 0, NULL, NULL);
+  clux_value_t *one = clux_context_create_u8(ctx, 1, NULL, NULL);
+  clux_value_t *wrapped =
+      clux_context_binary(ctx, CLUX_OP_SUB, zero, one, NULL);
+  ASSERT_NE(wrapped, nullptr);
+  EXPECT_EQ(read_u8(wrapped), 255);
+
+  clux_value_t *left = clux_context_create_u32(ctx, 12, NULL, NULL);
+  clux_value_t *right = clux_context_create_u32(ctx, 10, NULL, NULL);
+  struct {
+    clux_binary_op_t op;
+    uint32_t expected;
+  } cases[] = {
+      {CLUX_OP_AND, 8},
+      {CLUX_OP_OR, 14},
+      {CLUX_OP_XOR, 6},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, left, right, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(read_u32(result), c.expected);
+  }
+
+  clux_value_t *shift = clux_context_create_u32(ctx, 2, NULL, NULL);
+  clux_value_t *shl = clux_context_binary(ctx, CLUX_OP_SHL, left, shift, NULL);
+  ASSERT_NE(shl, nullptr);
+  EXPECT_EQ(read_u32(shl), 48);
+  clux_value_t *high = clux_context_create_u8(ctx, 0x80, NULL, NULL);
+  clux_value_t *shr = clux_context_binary(ctx, CLUX_OP_SHR, high, one, NULL);
+  ASSERT_NE(shr, nullptr);
+  EXPECT_EQ(read_u8(shr), 0x40);
+
+  clux_value_t *negative =
+      clux_context_prefix(ctx, CLUX_OP_NEGATIVE, one, NULL);
+  ASSERT_NE(negative, nullptr);
+  EXPECT_EQ(read_u8(negative), 255);
+  clux_value_t *bit_not = clux_context_prefix(ctx, CLUX_OP_NOT, one, NULL);
+  ASSERT_NE(bit_not, nullptr);
+  EXPECT_EQ(read_u8(bit_not), 254);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedSafeCast) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *u8_value = clux_context_create_u8(ctx, 200, NULL, NULL);
+  clux_value_t *widened = clux_context_safe_cast(
+      ctx, u8_value, clux_context_get_u32_type(ctx), NULL);
+  ASSERT_NE(widened, nullptr);
+  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(read_u32(widened), 200);
+
+  clux_value_t *narrowed =
+      clux_context_safe_cast(ctx, widened, clux_context_get_u8_type(ctx), NULL);
+  ASSERT_NE(narrowed, nullptr);
+  EXPECT_EQ(clux_value_get_type(narrowed), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(narrowed), "narrowing conversion"),
+            nullptr);
+
+  clux_value_t *to_signed = clux_context_safe_cast(
+      ctx, u8_value, clux_context_get_i64_type(ctx), NULL);
+  ASSERT_NE(to_signed, nullptr);
+  EXPECT_EQ(clux_value_get_type(to_signed), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(to_signed), "cannot safely cast 'u8'"),
+            nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, MixedSignedAndUnsignedProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *u32_value = clux_context_create_u32(ctx, 1, NULL, NULL);
+  clux_value_t *left_signed =
+      clux_context_binary(ctx, CLUX_OP_ADD, i32_value, u32_value, NULL);
+  ASSERT_NE(left_signed, nullptr);
+  EXPECT_EQ(clux_value_get_type(left_signed), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(left_signed),
+                   "requires operands of the same type"),
+            nullptr);
+
+  clux_value_t *left_unsigned =
+      clux_context_binary(ctx, CLUX_OP_ADD, u32_value, i32_value, NULL);
+  ASSERT_NE(left_unsigned, nullptr);
+  EXPECT_EQ(clux_value_get_type(left_unsigned),
+            clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(left_unsigned),
+                   "requires operands of the same type"),
+            nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedShadowPropagates) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_u8_type(ctx));
+  clux_value_t *value = clux_context_create_u16(ctx, 2, NULL, NULL);
+  clux_value_t *result =
+      clux_context_binary(ctx, CLUX_OP_ADD, shadow, value, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_u16_type(ctx));
+  EXPECT_TRUE(clux_value_is_shadow(result));
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsignedDivisionByZeroProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *one = clux_context_create_u32(ctx, 1, NULL, NULL);
+  clux_value_t *zero = clux_context_create_u32(ctx, 0, NULL, NULL);
+  clux_value_t *result = clux_context_binary(ctx, CLUX_OP_DIV, one, zero, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(result), "division by zero"), nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastNarrowsAndCrossesSignedness) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 42, NULL, NULL);
+  clux_value_t *as_i8 =
+      clux_context_cast(ctx, i32_value, clux_context_get_i8_type(ctx), NULL);
+  ASSERT_NE(as_i8, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_i8), clux_context_get_i8_type(ctx));
+  EXPECT_EQ(read_i8(as_i8), 42);
+
+  clux_value_t *minus_one = clux_context_create_i32(ctx, -1, NULL, NULL);
+  clux_value_t *as_u8 =
+      clux_context_cast(ctx, minus_one, clux_context_get_u8_type(ctx), NULL);
+  ASSERT_NE(as_u8, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_u8), clux_context_get_u8_type(ctx));
+  EXPECT_EQ(read_u8(as_u8), 255);
+
+  clux_value_t *as_u32 =
+      clux_context_cast(ctx, minus_one, clux_context_get_u32_type(ctx), NULL);
+  ASSERT_NE(as_u32, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_u32), clux_context_get_u32_type(ctx));
+  EXPECT_EQ(read_u32(as_u32), UINT32_MAX);
+
+  clux_value_t *u8_value = clux_context_create_u8(ctx, 255, NULL, NULL);
+  clux_value_t *as_i8_from_u8 =
+      clux_context_cast(ctx, u8_value, clux_context_get_i8_type(ctx), NULL);
+  ASSERT_NE(as_i8_from_u8, nullptr);
+  EXPECT_EQ(read_i8(as_i8_from_u8), -1);
+
+  clux_value_t *u32_value =
+      clux_context_create_u32(ctx, UINT32_C(300), NULL, NULL);
+  clux_value_t *as_u8_from_u32 =
+      clux_context_cast(ctx, u32_value, clux_context_get_u8_type(ctx), NULL);
+  ASSERT_NE(as_u8_from_u32, nullptr);
+  EXPECT_EQ(read_u8(as_u8_from_u32), 44);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastShadowPropagates) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_i8_type(ctx));
+  clux_value_t *result =
+      clux_context_cast(ctx, shadow, clux_context_get_u64_type(ctx), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_u64_type(ctx));
+  EXPECT_TRUE(clux_value_is_shadow(result));
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastPropagatesErrorValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_error_t *error = create_error(a, NULL, "boom");
+  clux_value_t *value = clux_context_create_error(ctx, error);
+  clux_value_t *result =
+      clux_context_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  EXPECT_EQ(result, value);
+  EXPECT_NE(strstr(error_message_of(result), "boom"), nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastNonIntegerTargetProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *result =
+      clux_context_cast(ctx, value, clux_context_get_error_type(ctx), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(result), "cannot cast 'i32' to 'error'"),
+            nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastNullInputsProduceError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+
+  clux_value_t *no_value =
+      clux_context_cast(ctx, NULL, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(no_value, nullptr);
+  EXPECT_EQ(clux_value_get_type(no_value), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(no_value),
+                   "cast requires a value and a target type"),
+            nullptr);
+
+  clux_value_t *no_target = clux_context_cast(ctx, value, NULL, NULL);
+  ASSERT_NE(no_target, nullptr);
+  EXPECT_EQ(clux_value_get_type(no_target), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(no_target),
+                   "cast requires a value and a target type"),
+            nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CastIdentityReturnsSameValue) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *result =
+      clux_context_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  EXPECT_EQ(result, value);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BuiltinFloatingTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  struct {
+    clux_type_t *type;
+    clux_type_kind_t kind;
+    const char *name;
+    size_t size;
+  } cases[] = {
+      {clux_context_get_f32_type(ctx), CLUX_TYPE_F32, "f32", sizeof(float)},
+      {clux_context_get_f64_type(ctx), CLUX_TYPE_F64, "f64", sizeof(double)},
+  };
+  for (const auto &c : cases) {
+    ASSERT_NE(c.type, nullptr);
+    EXPECT_EQ(clux_type_get_kind(c.type), c.kind);
+    EXPECT_STREQ(clux_type_get_name(c.type), c.name);
+    EXPECT_EQ(clux_type_get_size(c.type), c.size);
+    EXPECT_EQ(clux_type_get_align(c.type), c.size);
+    clux_vtable_t *vt = clux_type_get_vtable(c.type);
+    ASSERT_NE(vt, nullptr);
+    EXPECT_NE(vt->add, nullptr);
+    EXPECT_NE(vt->sub, nullptr);
+    EXPECT_NE(vt->mul, nullptr);
+    EXPECT_NE(vt->div, nullptr);
+    EXPECT_EQ(vt->mod, nullptr);
+    EXPECT_NE(vt->plus, nullptr);
+    EXPECT_NE(vt->negative, nullptr);
+    EXPECT_EQ(vt->shl, nullptr);
+    EXPECT_EQ(vt->shr, nullptr);
+    EXPECT_EQ(vt->bit_and, nullptr);
+    EXPECT_EQ(vt->bit_or, nullptr);
+    EXPECT_EQ(vt->bit_xor, nullptr);
+    EXPECT_EQ(vt->bit_not, nullptr);
+    EXPECT_EQ(vt->logic_not, nullptr);
+    EXPECT_NE(vt->safe_cast, nullptr);
+    EXPECT_NE(vt->cast, nullptr);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatingArithmeticOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *f32_left = clux_context_create_f32(ctx, 1.5f, NULL, NULL);
+  clux_value_t *f32_right = clux_context_create_f32(ctx, 2.25f, NULL, NULL);
+  clux_value_t *f32_sum = clux_context_add(ctx, f32_left, f32_right, NULL);
+  ASSERT_NE(f32_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(f32_sum), clux_context_get_f32_type(ctx));
+  EXPECT_FLOAT_EQ(read_f32(f32_sum), 3.75f);
+
+  clux_value_t *f64_left = clux_context_create_f64(ctx, 7.5, NULL, NULL);
+  clux_value_t *f64_right = clux_context_create_f64(ctx, 2.5, NULL, NULL);
+  struct {
+    clux_binary_op_t op;
+    double expected;
+  } cases[] = {
+      {CLUX_OP_SUB, 5.0},
+      {CLUX_OP_MUL, 18.75},
+      {CLUX_OP_DIV, 3.0},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result =
+        clux_context_binary(ctx, c.op, f64_left, f64_right, nullptr);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_f64_type(ctx));
+    EXPECT_DOUBLE_EQ(read_f64(result), c.expected);
+  }
+
+  clux_value_t *negative =
+      clux_context_prefix(ctx, CLUX_OP_NEGATIVE, f64_left, NULL);
+  ASSERT_NE(negative, nullptr);
+  EXPECT_DOUBLE_EQ(read_f64(negative), -7.5);
+  clux_value_t *plus = clux_context_prefix(ctx, CLUX_OP_PLUS, f64_left, NULL);
+  ASSERT_NE(plus, nullptr);
+  EXPECT_DOUBLE_EQ(read_f64(plus), 7.5);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatWidensToDouble) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *f32_value = clux_context_create_f32(ctx, 1.5f, NULL, NULL);
+  clux_value_t *f64_value = clux_context_create_f64(ctx, 2.25, NULL, NULL);
+  clux_value_t *sum = clux_context_add(ctx, f32_value, f64_value, NULL);
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(sum), clux_context_get_f64_type(ctx));
+  EXPECT_DOUBLE_EQ(read_f64(sum), 3.75);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatDivisionByZeroFollowsIEEE) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *left = clux_context_create_f64(ctx, 1.0, NULL, NULL);
+  clux_value_t *right = clux_context_create_f64(ctx, 0.0, NULL, NULL);
+  clux_value_t *quotient =
+      clux_context_binary(ctx, CLUX_OP_DIV, left, right, NULL);
+  ASSERT_NE(quotient, nullptr);
+  EXPECT_EQ(clux_value_get_type(quotient), clux_context_get_f64_type(ctx));
+  EXPECT_TRUE(std::isinf(read_f64(quotient)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatSafeCastWidensOnly) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *f32_value = clux_context_create_f32(ctx, 1.5f, NULL, NULL);
+  clux_value_t *widened = clux_context_safe_cast(
+      ctx, f32_value, clux_context_get_f64_type(ctx), NULL);
+  ASSERT_NE(widened, nullptr);
+  EXPECT_EQ(clux_value_get_type(widened), clux_context_get_f64_type(ctx));
+  EXPECT_DOUBLE_EQ(read_f64(widened), 1.5);
+
+  clux_value_t *f64_value = clux_context_create_f64(ctx, 1.5, NULL, NULL);
+  clux_value_t *narrowed = clux_context_safe_cast(
+      ctx, f64_value, clux_context_get_f32_type(ctx), NULL);
+  ASSERT_NE(narrowed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(narrowed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(narrowed),
+               "cannot safely cast 'f64' to 'f32': narrowing conversion");
+
+  clux_value_t *to_int = clux_context_safe_cast(
+      ctx, f64_value, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(to_int, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(to_int)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(to_int), "cannot safely cast 'f64' to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatCastCrossesCategories) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *f64_value = clux_context_create_f64(ctx, 2.5, NULL, NULL);
+  clux_value_t *to_i32 =
+      clux_context_cast(ctx, f64_value, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(to_i32, nullptr);
+  EXPECT_EQ(clux_value_get_type(to_i32), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(read_i32(to_i32), 2);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 7, NULL, NULL);
+  clux_value_t *to_f64 =
+      clux_context_cast(ctx, i32_value, clux_context_get_f64_type(ctx), NULL);
+  ASSERT_NE(to_f64, nullptr);
+  EXPECT_EQ(clux_value_get_type(to_f64), clux_context_get_f64_type(ctx));
+  EXPECT_DOUBLE_EQ(read_f64(to_f64), 7.0);
+
+  clux_value_t *u8_value = clux_context_create_u8(ctx, 255, NULL, NULL);
+  clux_value_t *u8_to_f32 =
+      clux_context_cast(ctx, u8_value, clux_context_get_f32_type(ctx), NULL);
+  ASSERT_NE(u8_to_f32, nullptr);
+  EXPECT_EQ(clux_value_get_type(u8_to_f32), clux_context_get_f32_type(ctx));
+  EXPECT_FLOAT_EQ(read_f32(u8_to_f32), 255.0f);
+
+  clux_value_t *narrowed =
+      clux_context_cast(ctx, f64_value, clux_context_get_f32_type(ctx), NULL);
+  ASSERT_NE(narrowed, nullptr);
+  EXPECT_EQ(clux_value_get_type(narrowed), clux_context_get_f32_type(ctx));
+  EXPECT_FLOAT_EQ(read_f32(narrowed), 2.5f);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatShadowAndErrorPropagate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *shadow_f32 =
+      clux_context_create_shadow_value(ctx, clux_context_get_f32_type(ctx));
+  clux_value_t *f64_value = clux_context_create_f64(ctx, 1.0, NULL, NULL);
+  clux_value_t *sum = clux_context_add(ctx, shadow_f32, f64_value, NULL);
+  ASSERT_NE(sum, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(sum));
+  EXPECT_EQ(clux_value_get_type(sum), clux_context_get_f64_type(ctx));
+
+  clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
+  clux_value_t *propagated = clux_context_add(ctx, error, f64_value, NULL);
+  EXPECT_EQ(propagated, error);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, FloatModBitwiseAndShiftUnsupported) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *left = clux_context_create_f64(ctx, 3.0, NULL, NULL);
+  clux_value_t *right = clux_context_create_f64(ctx, 1.0, NULL, NULL);
+  struct {
+    clux_binary_op_t op;
+    const char *symbol;
+  } cases[] = {
+      {CLUX_OP_MOD, "%"},
+      {CLUX_OP_AND, "&"},
+      {CLUX_OP_OR, "|"},
+      {CLUX_OP_XOR, "^"},
+      {CLUX_OP_SHL, "<<"},
+      {CLUX_OP_SHR, ">>"},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, left, right, nullptr);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_type_get_kind(clux_value_get_type(result)), CLUX_TYPE_ERROR);
+    std::string expected =
+        "type 'f64' does not support operator '" + std::string(c.symbol) + "'";
+    EXPECT_STREQ(error_message_of(result), expected.c_str());
+  }
+
+  clux_value_t *bit_not = clux_context_prefix(ctx, CLUX_OP_NOT, left, NULL);
+  ASSERT_NE(bit_not, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bit_not)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bit_not),
+               "type 'f64' does not support operator '~'");
+
+  delete_clux_context(&ctx);
   delete_allocator(&a);
 }
 

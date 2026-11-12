@@ -20,6 +20,24 @@ static bool integer_kind(clux_type_kind_t kind) {
   }
 }
 
+static bool numeric_kind(clux_type_kind_t kind) {
+  switch (kind) {
+  case CLUX_TYPE_I8:
+  case CLUX_TYPE_I16:
+  case CLUX_TYPE_I32:
+  case CLUX_TYPE_I64:
+  case CLUX_TYPE_U8:
+  case CLUX_TYPE_U16:
+  case CLUX_TYPE_U32:
+  case CLUX_TYPE_U64:
+  case CLUX_TYPE_F32:
+  case CLUX_TYPE_F64:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static bool is_error_value(clux_context_t *ctx, clux_value_t *value) {
   (void)ctx;
   return clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR;
@@ -94,6 +112,57 @@ static clux_value_t *integer_safe_cast(clux_context_t *ctx,
     return clux_context_create_shadow_value(ctx, target);
   }
   return integer_create(ctx, target_kind, integer_read(value));
+}
+
+static clux_value_t *
+integer_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
+  clux_type_t *source = clux_value_get_type(value);
+  clux_type_kind_t source_kind = clux_type_get_kind(source);
+  clux_type_kind_t target_kind = clux_type_get_kind(target);
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  if (source_kind == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (!numeric_kind(target_kind)) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "cannot cast '%s' to '%s'",
+        source_name ? source_name : "<unknown>",
+        target_name ? target_name : "<unknown>");
+  }
+  if (source == target) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
+  int64_t input = integer_read(value);
+  switch (target_kind) {
+  case CLUX_TYPE_I8:
+    return clux_context_create_i8(ctx, (int8_t)input, NULL, NULL);
+  case CLUX_TYPE_I16:
+    return clux_context_create_i16(ctx, (int16_t)input, NULL, NULL);
+  case CLUX_TYPE_I32:
+    return clux_context_create_i32(ctx, (int32_t)input, NULL, NULL);
+  case CLUX_TYPE_I64:
+    return clux_context_create_i64(ctx, input, NULL, NULL);
+  case CLUX_TYPE_U8:
+    return clux_context_create_u8(ctx, (uint8_t)input, NULL, NULL);
+  case CLUX_TYPE_U16:
+    return clux_context_create_u16(ctx, (uint16_t)input, NULL, NULL);
+  case CLUX_TYPE_U32:
+    return clux_context_create_u32(ctx, (uint32_t)input, NULL, NULL);
+  case CLUX_TYPE_U64:
+    return clux_context_create_u64(ctx, (uint64_t)input, NULL, NULL);
+  case CLUX_TYPE_F32:
+    return clux_context_create_f32(ctx, (float)input, NULL, NULL);
+  case CLUX_TYPE_F64:
+    return clux_context_create_f64(ctx, (double)input, NULL, NULL);
+  default:
+    return NULL;
+  }
 }
 
 static const char *binary_op_symbol(clux_binary_op_t op) {
@@ -320,6 +389,7 @@ static clux_vtable_t g_integer_vtable = {
     .negative = integer_negative,
     .bit_not = integer_bit_not,
     .safe_cast = integer_safe_cast,
+    .cast = integer_cast,
 };
 
 clux_vtable_t *get_clux_i8_vtable(void) { return &g_integer_vtable; }
