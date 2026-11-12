@@ -80,6 +80,11 @@ static bool read_bool(clux_value_t *value) {
   return raw ? *(bool *)raw : false;
 }
 
+static const char *read_str(clux_value_t *value) {
+  char **raw = (char **)ptr_to_raw(clux_value_get_data(value), 0);
+  return (raw && *raw) ? *raw : "";
+}
+
 static const char *error_message_of(clux_value_t *value) {
   clux_error_t **stored =
       (clux_error_t **)ptr_to_raw(clux_value_get_data(value), 0);
@@ -1431,6 +1436,143 @@ TEST(EngineTest, BoolShadowAndErrorPropagate) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, BuiltinStrType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *type = clux_context_get_str_type(ctx);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_STR);
+  EXPECT_STREQ(clux_type_get_name(type), "str");
+  EXPECT_EQ(clux_type_get_size(type), sizeof(char *));
+  EXPECT_EQ(clux_type_get_align(type), alignof(char *));
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  ASSERT_NE(vt, nullptr);
+  EXPECT_NE(vt->add, nullptr);
+  EXPECT_EQ(vt->sub, nullptr);
+  EXPECT_EQ(vt->mul, nullptr);
+  EXPECT_EQ(vt->div, nullptr);
+  EXPECT_EQ(vt->mod, nullptr);
+  EXPECT_EQ(vt->shl, nullptr);
+  EXPECT_EQ(vt->shr, nullptr);
+  EXPECT_EQ(vt->bit_and, nullptr);
+  EXPECT_EQ(vt->bit_or, nullptr);
+  EXPECT_EQ(vt->bit_xor, nullptr);
+  EXPECT_EQ(vt->plus, nullptr);
+  EXPECT_EQ(vt->negative, nullptr);
+  EXPECT_EQ(vt->bit_not, nullptr);
+  EXPECT_EQ(vt->logic_not, nullptr);
+  EXPECT_EQ(vt->safe_cast, nullptr);
+  EXPECT_EQ(vt->cast, nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrCreateAndConcat) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *hello = clux_context_create_str(ctx, "hello ", NULL, NULL);
+  ASSERT_NE(hello, nullptr);
+  EXPECT_EQ(clux_value_get_type(hello), clux_context_get_str_type(ctx));
+  EXPECT_STREQ(read_str(hello), "hello ");
+
+  clux_value_t *world = clux_context_create_str(ctx, "world", NULL, NULL);
+  clux_value_t *joined = clux_context_add(ctx, hello, world, NULL);
+  ASSERT_NE(joined, nullptr);
+  EXPECT_EQ(clux_value_get_type(joined), clux_context_get_str_type(ctx));
+  EXPECT_STREQ(read_str(joined), "hello world");
+
+  clux_value_t *bang = clux_context_create_str(ctx, "!", NULL, NULL);
+  clux_value_t *chained = clux_context_add(ctx, joined, bang, NULL);
+  ASSERT_NE(chained, nullptr);
+  EXPECT_STREQ(read_str(chained), "hello world!");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrConcatWithEmpty) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *empty = clux_context_create_str(ctx, "", NULL, NULL);
+  clux_value_t *text = clux_context_create_str(ctx, "x", NULL, NULL);
+  clux_value_t *right = clux_context_add(ctx, empty, text, NULL);
+  ASSERT_NE(right, nullptr);
+  EXPECT_STREQ(read_str(right), "x");
+  clux_value_t *left = clux_context_add(ctx, text, empty, NULL);
+  ASSERT_NE(left, nullptr);
+  EXPECT_STREQ(read_str(left), "x");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrAddRequiresStrOperands) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *text = clux_context_create_str(ctx, "x", NULL, NULL);
+  clux_value_t *num = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *mixed = clux_context_add(ctx, text, num, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mixed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '+' requires operands of the same type");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrShadowAndErrorPropagate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_str_type(ctx));
+  clux_value_t *text = clux_context_create_str(ctx, "x", NULL, NULL);
+  clux_value_t *shadow_joined = clux_context_add(ctx, shadow, text, NULL);
+  ASSERT_NE(shadow_joined, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_joined));
+  EXPECT_EQ(clux_value_get_type(shadow_joined), clux_context_get_str_type(ctx));
+
+  clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_add(ctx, error, text, NULL), error);
+  EXPECT_EQ(clux_context_add(ctx, text, error, NULL), error);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StrUnsupportedOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *left = clux_context_create_str(ctx, "a", NULL, NULL);
+  clux_value_t *right = clux_context_create_str(ctx, "b", NULL, NULL);
+  clux_value_t *sub = clux_context_binary(ctx, CLUX_OP_SUB, left, right, NULL);
+  ASSERT_NE(sub, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(sub)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(sub),
+               "type 'str' does not support operator '-'");
+
+  clux_value_t *safe =
+      clux_context_safe_cast(ctx, left, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(safe, nullptr);
+  EXPECT_STREQ(error_message_of(safe),
+               "type 'str' cannot be safely cast to 'i32'");
+
+  clux_value_t *cast =
+      clux_context_cast(ctx, left, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(cast, nullptr);
+  EXPECT_STREQ(error_message_of(cast), "type 'str' cannot be cast to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, CreateI32ValueAndReadData) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1586,6 +1728,9 @@ TEST(EngineTest, NoLeak) {
   clux_context_push_scope(ctx);
   clux_context_create_i32(ctx, 3, "a", NULL);
   clux_context_pop_scope(ctx);
+  clux_value_t *text = clux_context_create_str(ctx, "str", NULL, NULL);
+  clux_value_t *joined = clux_context_add(ctx, text, text, NULL);
+  ASSERT_NE(joined, nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

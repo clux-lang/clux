@@ -2,6 +2,7 @@
 #include "core/allocator.h"
 #include "core/error.h"
 #include "core/location.h"
+#include "core/rbtree.h"
 #include "core/safe_alloc.h"
 #include "core/vec.h"
 #include "engine/integer.h"
@@ -18,10 +19,12 @@
 #include "engine/bool.h"
 #include "engine/error.h"
 #include "engine/floating.h"
+#include "engine/str.h"
 struct _clux_context_t {
   allocator_t *allocator;
   safe_allocator_t *safe_allocator;
   vec_t *errors;
+  rbtree_t *strs;
   clux_scope_t *global_scope;
   clux_scope_t *current_scope;
   struct {
@@ -37,6 +40,7 @@ struct _clux_context_t {
     clux_type_t *type_f32;
     clux_type_t *type_f64;
     clux_type_t *type_bool;
+    clux_type_t *type_str;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -45,6 +49,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->allocator = allocator;
   ctx->safe_allocator = create_safe_allocator(allocator);
   ctx->errors = create_vec(allocator);
+  ctx->strs = create_rbtree(allocator);
   ctx->global_scope = create_clux_scope(allocator, NULL);
   ctx->current_scope = ctx->global_scope;
   ctx->builtin_types.type_error = create_clux_type(allocator,
@@ -119,7 +124,17 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                   sizeof(bool),
                                                   alignof(bool),
                                                   get_clux_bool_vtable());
+  ctx->builtin_types.type_str = create_clux_type(allocator,
+                                                 CLUX_TYPE_STR,
+                                                 "str",
+                                                 sizeof(char *),
+                                                 alignof(char *),
+                                                 get_clux_str_vtable());
   return ctx;
+}
+static void strs_dispose(uintptr_t key, char *str, allocator_t *allocator) {
+  (void)key;
+  allocator_free(allocator, (void **)&str);
 }
 void delete_clux_context(clux_context_t **self) {
   if (!self || !*self) {
@@ -134,7 +149,7 @@ void delete_clux_context(clux_context_t **self) {
     clux_error_t *err = vec_get(ctx->errors, idx);
     delete_error(&err);
   }
-  delete_vec(&ctx->errors);
+  delete_clux_type(&ctx->builtin_types.type_str);
   delete_clux_type(&ctx->builtin_types.type_bool);
   delete_clux_type(&ctx->builtin_types.type_f64);
   delete_clux_type(&ctx->builtin_types.type_f32);
@@ -147,6 +162,9 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_i16);
   delete_clux_type(&ctx->builtin_types.type_i8);
   delete_clux_type(&ctx->builtin_types.type_error);
+  delete_vec(&ctx->errors);
+  rbtree_foreach(ctx->strs, (rbtree_callback_t)strs_dispose, ctx->allocator);
+  delete_rbtree(&ctx->strs);
   delete_safe_allocator(&ctx->safe_allocator);
   allocator_free(ctx->allocator, (void **)self);
 }
@@ -272,6 +290,30 @@ clux_value_t *clux_context_create_bool(clux_context_t *self,
                                        location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_bool, &value, name, loc);
+}
+char *clux_context_alloc_str(clux_context_t *self, size_t len) {
+  char *str = allocator_alloc(self->allocator, len + 1);
+  str[len] = '\0';
+  (void)rbtree_insert(self->strs, (uintptr_t)str, str);
+  return str;
+}
+clux_value_t *clux_context_create_str(clux_context_t *self,
+                                      const char *value,
+                                      const char *name,
+                                      location_t *loc) {
+  size_t len = value ? strlen(value) : 0;
+  char *str = clux_context_alloc_str(self, len);
+  if (value) {
+    (void)memcpy(str, value, len);
+  }
+  return clux_context_create_str_value(self, str, name, loc);
+}
+clux_value_t *clux_context_create_str_value(clux_context_t *self,
+                                            char *str,
+                                            const char *name,
+                                            location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_str, &str, name, loc);
 }
 void clux_context_push_scope(clux_context_t *self) {
   clux_scope_t *scope = create_clux_scope(self->allocator, self->current_scope);
@@ -510,6 +552,9 @@ clux_type_t *clux_context_get_f64_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_bool_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_bool;
+}
+clux_type_t *clux_context_get_str_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_str;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;
