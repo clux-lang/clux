@@ -20,15 +20,30 @@ void clux_context_push_scope(clux_context_t *self);
 void clux_context_pop_scope(clux_context_t *self);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
+clux_value_t *clux_context_create_i8(clux_context_t *self,
+                                     int8_t value,
+                                     const char *name,
+                                     location_t *loc);
+clux_value_t *clux_context_create_i16(clux_context_t *self,
+                                      int16_t value,
+                                      const char *name,
+                                      location_t *loc);
 clux_value_t *clux_context_create_i32(clux_context_t *self,
                                       int32_t value,
+                                      const char *name,
+                                      location_t *loc);
+clux_value_t *clux_context_create_i64(clux_context_t *self,
+                                      int64_t value,
                                       const char *name,
                                       location_t *loc);
 clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,
                                location_t *loc);
+clux_type_t *clux_context_get_i8_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_i16_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_i32_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_i64_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx);
 #ifdef __cplusplus
 }

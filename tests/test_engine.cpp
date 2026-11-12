@@ -23,9 +23,24 @@ static void counting_free(void *ptr) {
   free(ptr);
 }
 
+static int8_t read_i8(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(int8_t *)raw : 0;
+}
+
+static int16_t read_i16(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(int16_t *)raw : 0;
+}
+
 static int32_t read_i32(clux_value_t *value) {
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
   return raw ? *(int32_t *)raw : 0;
+}
+
+static int64_t read_i64(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(int64_t *)raw : 0;
 }
 
 TEST(EngineTest, ContextAndBuiltinTypes) {
@@ -48,6 +63,84 @@ TEST(EngineTest, ContextAndBuiltinTypes) {
 
   delete_clux_context(&ctx);
   EXPECT_EQ(ctx, nullptr);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BuiltinIntegerTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  struct {
+    clux_type_t *type;
+    clux_type_kind_t kind;
+    const char *name;
+    size_t size;
+  } cases[] = {
+      {clux_context_get_i8_type(ctx), CLUX_TYPE_I8, "i8", sizeof(int8_t)},
+      {clux_context_get_i16_type(ctx), CLUX_TYPE_I16, "i16", sizeof(int16_t)},
+      {clux_context_get_i32_type(ctx), CLUX_TYPE_I32, "i32", sizeof(int32_t)},
+      {clux_context_get_i64_type(ctx), CLUX_TYPE_I64, "i64", sizeof(int64_t)},
+  };
+  for (const auto &c : cases) {
+    ASSERT_NE(c.type, nullptr);
+    EXPECT_EQ(clux_type_get_kind(c.type), c.kind);
+    EXPECT_STREQ(clux_type_get_name(c.type), c.name);
+    EXPECT_EQ(clux_type_get_size(c.type), c.size);
+    EXPECT_EQ(clux_type_get_align(c.type), c.size);
+    EXPECT_NE(clux_type_get_vtable(c.type), nullptr);
+    EXPECT_NE(clux_type_get_vtable(c.type)->add, nullptr);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CreateI8I16I64ValuesAndAdd) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i8_left = clux_context_create_i8(ctx, 20, NULL, NULL);
+  clux_value_t *i8_right = clux_context_create_i8(ctx, 22, NULL, NULL);
+  clux_value_t *i8_sum = clux_context_add(ctx, i8_left, i8_right, NULL);
+  ASSERT_NE(i8_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i8_sum), clux_context_get_i8_type(ctx));
+  EXPECT_EQ(read_i8(i8_sum), 42);
+
+  clux_value_t *i16_left = clux_context_create_i16(ctx, 200, NULL, NULL);
+  clux_value_t *i16_right = clux_context_create_i16(ctx, 300, NULL, NULL);
+  clux_value_t *i16_sum = clux_context_add(ctx, i16_left, i16_right, NULL);
+  ASSERT_NE(i16_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i16_sum), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(read_i16(i16_sum), 500);
+
+  clux_value_t *i64_left =
+      clux_context_create_i64(ctx, INT64_C(4000000000), NULL, NULL);
+  clux_value_t *i64_right =
+      clux_context_create_i64(ctx, INT64_C(2000000000), NULL, NULL);
+  clux_value_t *i64_sum = clux_context_add(ctx, i64_left, i64_right, NULL);
+  ASSERT_NE(i64_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i64_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(read_i64(i64_sum), INT64_C(6000000000));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, AddMismatchedIntegerTypesProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *left = clux_context_create_i8(ctx, 1, NULL, NULL);
+  clux_value_t *right = clux_context_create_i16(ctx, 2, NULL, NULL);
+  clux_value_t *result = clux_context_add(ctx, left, right, NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
+  clux_error_t **stored =
+      (clux_error_t **)ptr_to_raw(clux_value_get_data(result), 0);
+  ASSERT_NE(stored, nullptr);
+  EXPECT_NE(
+      strstr(error_get_message(*stored), "requires operands of the same type"),
+      nullptr);
+  delete_clux_context(&ctx);
   delete_allocator(&a);
 }
 

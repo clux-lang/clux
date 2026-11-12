@@ -34,7 +34,10 @@ typedef enum _clux_postfix_op_t {
 } clux_postfix_op_t;
 typedef enum _clux_type_kind_t {
   CLUX_TYPE_ERROR,
+  CLUX_TYPE_I8,
+  CLUX_TYPE_I16,
   CLUX_TYPE_I32,
+  CLUX_TYPE_I64,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

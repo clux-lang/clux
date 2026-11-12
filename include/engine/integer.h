@@ -5,7 +5,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+clux_vtable_t *get_clux_i8_vtable(void);
+clux_vtable_t *get_clux_i16_vtable(void);
 clux_vtable_t *get_clux_i32_vtable(void);
+clux_vtable_t *get_clux_i64_vtable(void);
 #ifdef __cplusplus
 }
 #endif
