@@ -57,6 +57,19 @@ TEST(StringTest, AppendCstrAndChar) {
   delete_allocator(&a);
 }
 
+/* 逐字节追加必须按几何增长扩容，避免每次 append 都精确重分配导致 O(n^2)。 */
+TEST(StringTest, AppendGrowsGeometrically) {
+  allocator_t *a = create_allocator(malloc, free);
+  string_t *s = create_string(a);
+  for (size_t i = 0; i < 10000; i++) {
+    ASSERT_EQ(string_append_char(s, 'x'), i + 1);
+  }
+  EXPECT_EQ(string_get_size(s), 10000u);
+  EXPECT_GT(string_get_capacity(s), string_get_size(s) + 1);
+  delete_string(&s);
+  delete_allocator(&a);
+}
+
 TEST(StringTest, AppendNull) {
   allocator_t *a = create_allocator(malloc, free);
   string_t *s = create_string(a);

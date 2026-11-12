@@ -115,7 +115,19 @@ size_t string_append(string_t *self, const char *data, size_t len) {
   }
   bool alias = string_data_aliases(self, data);
   size_t offset = alias ? (size_t)(data - self->data) : 0;
-  string_reserve(self, self->size + len + 1);
+  size_t needed = self->size + len + 1;
+  if (needed > self->capacity) {
+    /* 按几何增长扩容，避免逐字节追加退化为 O(n^2)。 */
+    size_t new_capacity = self->capacity;
+    while (new_capacity < needed) {
+      if (new_capacity > (size_t)-1 / 2) {
+        new_capacity = needed;
+        break;
+      }
+      new_capacity *= 2;
+    }
+    string_reserve(self, new_capacity);
+  }
   if (alias) {
     data = self->data + offset;
   }
