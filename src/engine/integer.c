@@ -32,6 +32,7 @@ static bool numeric_kind(clux_type_kind_t kind) {
   case CLUX_TYPE_U64:
   case CLUX_TYPE_F32:
   case CLUX_TYPE_F64:
+  case CLUX_TYPE_BOOL:
     return true;
   default:
     return false;
@@ -160,6 +161,8 @@ integer_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
     return clux_context_create_f32(ctx, (float)input, NULL, NULL);
   case CLUX_TYPE_F64:
     return clux_context_create_f64(ctx, (double)input, NULL, NULL);
+  case CLUX_TYPE_BOOL:
+    return clux_context_create_bool(ctx, input != 0, NULL, NULL);
   default:
     return NULL;
   }

@@ -75,6 +75,11 @@ static double read_f64(clux_value_t *value) {
   return raw ? *(double *)raw : 0;
 }
 
+static bool read_bool(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(bool *)raw : false;
+}
+
 static const char *error_message_of(clux_value_t *value) {
   clux_error_t **stored =
       (clux_error_t **)ptr_to_raw(clux_value_get_data(value), 0);
@@ -1251,6 +1256,176 @@ TEST(EngineTest, FloatModBitwiseAndShiftUnsupported) {
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bit_not)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(bit_not),
                "type 'f64' does not support operator '~'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BuiltinBoolType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *type = clux_context_get_bool_type(ctx);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(type), CLUX_TYPE_BOOL);
+  EXPECT_STREQ(clux_type_get_name(type), "bool");
+  EXPECT_EQ(clux_type_get_size(type), sizeof(bool));
+  EXPECT_EQ(clux_type_get_align(type), alignof(bool));
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  ASSERT_NE(vt, nullptr);
+  EXPECT_EQ(vt->add, nullptr);
+  EXPECT_EQ(vt->sub, nullptr);
+  EXPECT_EQ(vt->mul, nullptr);
+  EXPECT_EQ(vt->div, nullptr);
+  EXPECT_EQ(vt->mod, nullptr);
+  EXPECT_EQ(vt->shl, nullptr);
+  EXPECT_EQ(vt->shr, nullptr);
+  EXPECT_EQ(vt->bit_and, nullptr);
+  EXPECT_EQ(vt->bit_or, nullptr);
+  EXPECT_EQ(vt->bit_xor, nullptr);
+  EXPECT_EQ(vt->plus, nullptr);
+  EXPECT_EQ(vt->negative, nullptr);
+  EXPECT_EQ(vt->bit_not, nullptr);
+  EXPECT_NE(vt->logic_not, nullptr);
+  EXPECT_NE(vt->safe_cast, nullptr);
+  EXPECT_NE(vt->cast, nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolLogicNot) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *negated = clux_context_prefix(ctx, CLUX_OP_LNOT, truth, NULL);
+  ASSERT_NE(negated, nullptr);
+  EXPECT_EQ(clux_value_get_type(negated), clux_context_get_bool_type(ctx));
+  EXPECT_FALSE(read_bool(negated));
+
+  clux_value_t *again = clux_context_prefix(ctx, CLUX_OP_LNOT, negated, NULL);
+  ASSERT_NE(again, nullptr);
+  EXPECT_TRUE(read_bool(again));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolCastToNumeric) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *to_i32 =
+      clux_context_cast(ctx, truth, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(to_i32, nullptr);
+  EXPECT_EQ(read_i32(to_i32), 1);
+
+  clux_value_t *lie = clux_context_create_bool(ctx, false, NULL, NULL);
+  clux_value_t *to_u8 =
+      clux_context_cast(ctx, lie, clux_context_get_u8_type(ctx), NULL);
+  ASSERT_NE(to_u8, nullptr);
+  EXPECT_EQ(read_u8(to_u8), 0);
+
+  clux_value_t *to_f64 =
+      clux_context_cast(ctx, truth, clux_context_get_f64_type(ctx), NULL);
+  ASSERT_NE(to_f64, nullptr);
+  EXPECT_DOUBLE_EQ(read_f64(to_f64), 1.0);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, NumericCastToBool) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  struct {
+    clux_value_t *value;
+    bool expected;
+  } cases[] = {
+      {clux_context_create_i32(ctx, 0, NULL, NULL), false},
+      {clux_context_create_i32(ctx, 5, NULL, NULL), true},
+      {clux_context_create_i32(ctx, -1, NULL, NULL), true},
+      {clux_context_create_u8(ctx, 0, NULL, NULL), false},
+      {clux_context_create_u8(ctx, 1, NULL, NULL), true},
+      {clux_context_create_f64(ctx, 0.0, NULL, NULL), false},
+      {clux_context_create_f64(ctx, 2.5, NULL, NULL), true},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result =
+        clux_context_cast(ctx, c.value, clux_context_get_bool_type(ctx), NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_bool_type(ctx));
+    EXPECT_EQ(read_bool(result), c.expected);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolSafeCastStrict) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *truth = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *identity =
+      clux_context_safe_cast(ctx, truth, clux_context_get_bool_type(ctx), NULL);
+  EXPECT_EQ(identity, truth);
+
+  clux_value_t *to_i32 =
+      clux_context_safe_cast(ctx, truth, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(to_i32, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(to_i32)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(to_i32), "cannot safely cast 'bool' to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolUnsupportedOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *left = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *right = clux_context_create_bool(ctx, false, NULL, NULL);
+  clux_value_t *sum = clux_context_add(ctx, left, right, NULL);
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(sum)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(sum),
+               "type 'bool' does not support operator '+'");
+
+  clux_value_t *bit_and =
+      clux_context_binary(ctx, CLUX_OP_AND, left, right, NULL);
+  ASSERT_NE(bit_and, nullptr);
+  EXPECT_STREQ(error_message_of(bit_and),
+               "type 'bool' does not support operator '&'");
+
+  clux_value_t *bit_not = clux_context_prefix(ctx, CLUX_OP_NOT, left, NULL);
+  ASSERT_NE(bit_not, nullptr);
+  EXPECT_STREQ(error_message_of(bit_not),
+               "type 'bool' does not support operator '~'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BoolShadowAndErrorPropagate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_bool_type(ctx));
+  clux_value_t *negated = clux_context_prefix(ctx, CLUX_OP_LNOT, shadow, NULL);
+  ASSERT_NE(negated, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(negated));
+  EXPECT_EQ(clux_value_get_type(negated), clux_context_get_bool_type(ctx));
+
+  clux_value_t *error = clux_context_create_error_message(ctx, NULL, "boom");
+  clux_value_t *propagated =
+      clux_context_prefix(ctx, CLUX_OP_LNOT, error, NULL);
+  EXPECT_EQ(propagated, error);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

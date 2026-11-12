@@ -44,6 +44,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_U64,
   CLUX_TYPE_F32,
   CLUX_TYPE_F64,
+  CLUX_TYPE_BOOL,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

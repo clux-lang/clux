@@ -34,6 +34,7 @@ static clux_vtable_t g_error_vtable = {
     .plus = error_prefix,
     .negative = error_prefix,
     .bit_not = error_prefix,
+    .logic_not = error_prefix,
     .safe_cast = error_safe_cast,
     .cast = error_safe_cast,
 };

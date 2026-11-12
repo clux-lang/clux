@@ -5,6 +5,7 @@
 #include "core/location.h"
 #include "core/safe_alloc.h"
 #include "engine/interface.h"
+#include <stdbool.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -62,6 +63,10 @@ clux_value_t *clux_context_create_f64(clux_context_t *self,
                                       double value,
                                       const char *name,
                                       location_t *loc);
+clux_value_t *clux_context_create_bool(clux_context_t *self,
+                                       bool value,
+                                       const char *name,
+                                       location_t *loc);
 clux_value_t *clux_context_create_error_message(clux_context_t *self,
                                                 location_t *loc,
                                                 const char *fmt,
@@ -97,6 +102,7 @@ clux_type_t *clux_context_get_u32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_u64_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f64_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx);
 #ifdef __cplusplus
 }

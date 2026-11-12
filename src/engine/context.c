@@ -15,6 +15,7 @@
 #include <stdalign.h>
 #include <stdio.h>
 #include <string.h>
+#include "engine/bool.h"
 #include "engine/error.h"
 #include "engine/floating.h"
 struct _clux_context_t {
@@ -35,6 +36,7 @@ struct _clux_context_t {
     clux_type_t *type_u64;
     clux_type_t *type_f32;
     clux_type_t *type_f64;
+    clux_type_t *type_bool;
   } builtin_types;
 };
 clux_context_t *create_clux_context(allocator_t *allocator) {
@@ -111,6 +113,12 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                  sizeof(double),
                                                  alignof(double),
                                                  get_clux_f64_vtable());
+  ctx->builtin_types.type_bool = create_clux_type(allocator,
+                                                  CLUX_TYPE_BOOL,
+                                                  "bool",
+                                                  sizeof(bool),
+                                                  alignof(bool),
+                                                  get_clux_bool_vtable());
   return ctx;
 }
 void delete_clux_context(clux_context_t **self) {
@@ -127,6 +135,7 @@ void delete_clux_context(clux_context_t **self) {
     delete_error(&err);
   }
   delete_vec(&ctx->errors);
+  delete_clux_type(&ctx->builtin_types.type_bool);
   delete_clux_type(&ctx->builtin_types.type_f64);
   delete_clux_type(&ctx->builtin_types.type_f32);
   delete_clux_type(&ctx->builtin_types.type_u64);
@@ -256,6 +265,13 @@ clux_value_t *clux_context_create_f64(clux_context_t *self,
                                       location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_f64, &value, name, loc);
+}
+clux_value_t *clux_context_create_bool(clux_context_t *self,
+                                       bool value,
+                                       const char *name,
+                                       location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_bool, &value, name, loc);
 }
 void clux_context_push_scope(clux_context_t *self) {
   clux_scope_t *scope = create_clux_scope(self->allocator, self->current_scope);
@@ -491,6 +507,9 @@ clux_type_t *clux_context_get_f32_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_f64_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_f64;
+}
+clux_type_t *clux_context_get_bool_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_bool;
 }
 clux_type_t *clux_context_get_error_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_error;
