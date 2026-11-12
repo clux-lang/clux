@@ -20,6 +20,8 @@ void clux_context_push_scope(clux_context_t *self);
 void clux_context_pop_scope(clux_context_t *self);
 clux_value_t *clux_context_create_error(clux_context_t *self,
                                         clux_error_t *error);
+clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
+                                               clux_type_t *type);
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
                                      const char *name,

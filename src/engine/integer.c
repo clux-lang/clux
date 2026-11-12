@@ -8,119 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-static clux_value_t *integer_safe_cast(clux_context_t *ctx,
-                                       clux_value_t *value,
-                                       clux_type_t *target);
-
-#define CLUX_DEFINE_INTEGER(suffix, ctype, bits)                               \
-  static ctype suffix##_read(clux_value_t *value) {                            \
-    void *raw = ptr_to_raw(clux_value_get_data(value), 0);                     \
-    return raw ? *(ctype *)raw : 0;                                            \
-  }                                                                            \
-  static clux_value_t *suffix##_make(clux_context_t *ctx, ctype value) {       \
-    return clux_context_create_##suffix(ctx, value, NULL, NULL);               \
-  }                                                                            \
-  static clux_value_t *suffix##_add(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) + suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_sub(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) - suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_mul(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) * suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_div(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    ctype divisor = suffix##_read(right);                                      \
-    if (divisor == 0) {                                                        \
-      return clux_context_create_error_message(ctx, NULL, "division by zero"); \
-    }                                                                          \
-    return suffix##_make(ctx, (ctype)(suffix##_read(left) / divisor));         \
-  }                                                                            \
-  static clux_value_t *suffix##_mod(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    ctype divisor = suffix##_read(right);                                      \
-    if (divisor == 0) {                                                        \
-      return clux_context_create_error_message(ctx, NULL, "division by zero"); \
-    }                                                                          \
-    return suffix##_make(ctx, (ctype)(suffix##_read(left) % divisor));         \
-  }                                                                            \
-  static clux_value_t *suffix##_shl(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    ctype count = suffix##_read(right);                                        \
-    if (count < 0 || (unsigned)count >= (bits)) {                              \
-      return clux_context_create_error_message(                                \
-          ctx, NULL, "shift count out of range");                              \
-    }                                                                          \
-    return suffix##_make(                                                      \
-        ctx, (ctype)((uint64_t)(ctype)suffix##_read(left) << count));          \
-  }                                                                            \
-  static clux_value_t *suffix##_shr(                                           \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    ctype count = suffix##_read(right);                                        \
-    if (count < 0 || (unsigned)count >= (bits)) {                              \
-      return clux_context_create_error_message(                                \
-          ctx, NULL, "shift count out of range");                              \
-    }                                                                          \
-    return suffix##_make(ctx, (ctype)(suffix##_read(left) >> count));          \
-  }                                                                            \
-  static clux_value_t *suffix##_bit_and(                                       \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) & suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_bit_or(                                        \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) | suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_bit_xor(                                       \
-      clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {          \
-    return suffix##_make(ctx,                                                  \
-                         (ctype)(suffix##_read(left) ^ suffix##_read(right))); \
-  }                                                                            \
-  static clux_value_t *suffix##_plus(clux_context_t *ctx, clux_value_t *v) {   \
-    return suffix##_make(ctx, suffix##_read(v));                               \
-  }                                                                            \
-  static clux_value_t *suffix##_negative(clux_context_t *ctx,                  \
-                                         clux_value_t *v) {                    \
-    return suffix##_make(ctx, (ctype)(-(uint64_t)suffix##_read(v)));           \
-  }                                                                            \
-  static clux_value_t *suffix##_bit_not(clux_context_t *ctx,                   \
-                                        clux_value_t *v) {                     \
-    return suffix##_make(ctx, (ctype)(~suffix##_read(v)));                     \
-  }                                                                            \
-  static clux_vtable_t g_##suffix##_vtable = {                                 \
-      .add = suffix##_add,                                                     \
-      .sub = suffix##_sub,                                                     \
-      .mul = suffix##_mul,                                                     \
-      .div = suffix##_div,                                                     \
-      .mod = suffix##_mod,                                                     \
-      .shl = suffix##_shl,                                                     \
-      .shr = suffix##_shr,                                                     \
-      .bit_and = suffix##_bit_and,                                             \
-      .bit_or = suffix##_bit_or,                                               \
-      .bit_xor = suffix##_bit_xor,                                             \
-      .plus = suffix##_plus,                                                   \
-      .negative = suffix##_negative,                                           \
-      .bit_not = suffix##_bit_not,                                             \
-      .safe_cast = integer_safe_cast,                                          \
-  };                                                                           \
-  clux_vtable_t *get_clux_##suffix##_vtable(void) {                            \
-    return &g_##suffix##_vtable;                                               \
-  }
-
-CLUX_DEFINE_INTEGER(i8, int8_t, 8)
-CLUX_DEFINE_INTEGER(i16, int16_t, 16)
-CLUX_DEFINE_INTEGER(i32, int32_t, 32)
-CLUX_DEFINE_INTEGER(i64, int64_t, 64)
-
 static bool integer_kind(clux_type_kind_t kind) {
   switch (kind) {
   case CLUX_TYPE_I8:
@@ -133,16 +20,25 @@ static bool integer_kind(clux_type_kind_t kind) {
   }
 }
 
+static bool is_error_value(clux_context_t *ctx, clux_value_t *value) {
+  (void)ctx;
+  return clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR;
+}
+
 static int64_t integer_read(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  if (!raw) {
+    return 0;
+  }
   switch (clux_type_get_kind(clux_value_get_type(value))) {
   case CLUX_TYPE_I8:
-    return i8_read(value);
+    return *(int8_t *)raw;
   case CLUX_TYPE_I16:
-    return i16_read(value);
+    return *(int16_t *)raw;
   case CLUX_TYPE_I32:
-    return i32_read(value);
+    return *(int32_t *)raw;
   case CLUX_TYPE_I64:
-    return i64_read(value);
+    return *(int64_t *)raw;
   default:
     return 0;
   }
@@ -168,9 +64,13 @@ static clux_value_t *integer_safe_cast(clux_context_t *ctx,
                                        clux_value_t *value,
                                        clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
+  clux_type_kind_t source_kind = clux_type_get_kind(source);
   clux_type_kind_t target_kind = clux_type_get_kind(target);
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
+  if (source_kind == CLUX_TYPE_ERROR) {
+    return value;
+  }
   if (!integer_kind(target_kind)) {
     return clux_context_create_error_message(
         ctx,
@@ -187,5 +87,242 @@ static clux_value_t *integer_safe_cast(clux_context_t *ctx,
         source_name ? source_name : "<unknown>",
         target_name ? target_name : "<unknown>");
   }
+  if (source == target) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
   return integer_create(ctx, target_kind, integer_read(value));
 }
+
+static const char *binary_op_symbol(clux_binary_op_t op) {
+  switch (op) {
+  case CLUX_OP_ADD:
+    return "+";
+  case CLUX_OP_SUB:
+    return "-";
+  case CLUX_OP_MUL:
+    return "*";
+  case CLUX_OP_DIV:
+    return "/";
+  case CLUX_OP_MOD:
+    return "%";
+  case CLUX_OP_AND:
+    return "&";
+  case CLUX_OP_OR:
+    return "|";
+  case CLUX_OP_XOR:
+    return "^";
+  case CLUX_OP_SHL:
+    return "<<";
+  case CLUX_OP_SHR:
+    return ">>";
+  }
+  return "<unknown>";
+}
+
+static clux_value_t *integer_binary(clux_context_t *ctx,
+                                    clux_value_t *left,
+                                    clux_value_t *right,
+                                    clux_binary_op_t op) {
+  if (is_error_value(ctx, left)) {
+    return left;
+  }
+  if (is_error_value(ctx, right)) {
+    return right;
+  }
+  clux_type_t *left_type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (!integer_kind(clux_type_get_kind(right_type))) {
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "operator '%s' requires operands of the same type",
+        binary_op_symbol(op));
+  }
+  clux_type_t *target =
+      clux_type_get_size(left_type) >= clux_type_get_size(right_type)
+          ? left_type
+          : right_type;
+  clux_value_t *left_operand = left;
+  clux_value_t *right_operand = right;
+  if (left_type != target) {
+    left_operand = integer_safe_cast(ctx, left, target);
+    if (is_error_value(ctx, left_operand)) {
+      return left_operand;
+    }
+  }
+  if (right_type != target) {
+    right_operand = integer_safe_cast(ctx, right, target);
+    if (is_error_value(ctx, right_operand)) {
+      return right_operand;
+    }
+  }
+  if (clux_value_is_shadow(left_operand) ||
+      clux_value_is_shadow(right_operand)) {
+    return clux_context_create_shadow_value(ctx, target);
+  }
+
+  int64_t left_value = integer_read(left_operand);
+  int64_t right_value = integer_read(right_operand);
+  int64_t result = 0;
+  switch (op) {
+  case CLUX_OP_ADD:
+    result = (int64_t)((uint64_t)left_value + (uint64_t)right_value);
+    break;
+  case CLUX_OP_SUB:
+    result = (int64_t)((uint64_t)left_value - (uint64_t)right_value);
+    break;
+  case CLUX_OP_MUL:
+    result = (int64_t)((uint64_t)left_value * (uint64_t)right_value);
+    break;
+  case CLUX_OP_DIV:
+    if (right_value == 0) {
+      return clux_context_create_error_message(ctx, NULL, "division by zero");
+    }
+    if (left_value == INT64_MIN && right_value == -1) {
+      result = INT64_MIN;
+    } else {
+      result = left_value / right_value;
+    }
+    break;
+  case CLUX_OP_MOD:
+    if (right_value == 0) {
+      return clux_context_create_error_message(ctx, NULL, "division by zero");
+    }
+    if (left_value == INT64_MIN && right_value == -1) {
+      result = 0;
+    } else {
+      result = left_value % right_value;
+    }
+    break;
+  case CLUX_OP_AND:
+    result = left_value & right_value;
+    break;
+  case CLUX_OP_OR:
+    result = left_value | right_value;
+    break;
+  case CLUX_OP_XOR:
+    result = left_value ^ right_value;
+    break;
+  case CLUX_OP_SHL:
+  case CLUX_OP_SHR:
+    if (right_value < 0 ||
+        (uint64_t)right_value >= clux_type_get_size(target) * 8) {
+      return clux_context_create_error_message(
+          ctx, NULL, "shift count out of range");
+    }
+    if (op == CLUX_OP_SHL) {
+      result = (int64_t)((uint64_t)left_value << right_value);
+    } else {
+      result = left_value >> right_value;
+    }
+    break;
+  }
+  return integer_create(ctx, clux_type_get_kind(target), result);
+}
+
+static clux_value_t *
+integer_prefix(clux_context_t *ctx, clux_value_t *value, clux_prefix_op_t op) {
+  if (is_error_value(ctx, value)) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(ctx, type);
+  }
+  int64_t input = integer_read(value);
+  int64_t result = 0;
+  switch (op) {
+  case CLUX_OP_PLUS:
+    result = input;
+    break;
+  case CLUX_OP_NEGATIVE:
+    result = (int64_t)(0 - (uint64_t)input);
+    break;
+  case CLUX_OP_NOT:
+    result = ~input;
+    break;
+  case CLUX_OP_LNOT:
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "type '%s' does not support operator '!'",
+        clux_type_get_name(type));
+  }
+  return integer_create(ctx, clux_type_get_kind(type), result);
+}
+
+static clux_value_t *
+integer_add(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_ADD);
+}
+static clux_value_t *
+integer_sub(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_SUB);
+}
+static clux_value_t *
+integer_mul(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_MUL);
+}
+static clux_value_t *
+integer_div(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_DIV);
+}
+static clux_value_t *
+integer_mod(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_MOD);
+}
+static clux_value_t *
+integer_shl(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_SHL);
+}
+static clux_value_t *
+integer_shr(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_SHR);
+}
+static clux_value_t *
+integer_bit_and(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_AND);
+}
+static clux_value_t *
+integer_bit_or(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_OR);
+}
+static clux_value_t *
+integer_bit_xor(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
+  return integer_binary(ctx, left, right, CLUX_OP_XOR);
+}
+static clux_value_t *integer_plus(clux_context_t *ctx, clux_value_t *value) {
+  return integer_prefix(ctx, value, CLUX_OP_PLUS);
+}
+static clux_value_t *integer_negative(clux_context_t *ctx,
+                                      clux_value_t *value) {
+  return integer_prefix(ctx, value, CLUX_OP_NEGATIVE);
+}
+static clux_value_t *integer_bit_not(clux_context_t *ctx, clux_value_t *value) {
+  return integer_prefix(ctx, value, CLUX_OP_NOT);
+}
+
+static clux_vtable_t g_integer_vtable = {
+    .add = integer_add,
+    .sub = integer_sub,
+    .mul = integer_mul,
+    .div = integer_div,
+    .mod = integer_mod,
+    .shl = integer_shl,
+    .shr = integer_shr,
+    .bit_and = integer_bit_and,
+    .bit_or = integer_bit_or,
+    .bit_xor = integer_bit_xor,
+    .plus = integer_plus,
+    .negative = integer_negative,
+    .bit_not = integer_bit_not,
+    .safe_cast = integer_safe_cast,
+};
+
+clux_vtable_t *get_clux_i8_vtable(void) { return &g_integer_vtable; }
+clux_vtable_t *get_clux_i16_vtable(void) { return &g_integer_vtable; }
+clux_vtable_t *get_clux_i32_vtable(void) { return &g_integer_vtable; }
+clux_vtable_t *get_clux_i64_vtable(void) { return &g_integer_vtable; }

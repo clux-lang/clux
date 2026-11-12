@@ -10,7 +10,6 @@
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdalign.h>
 #include <stdio.h>
@@ -133,6 +132,10 @@ static clux_value_t *create_integer_value(clux_context_t *self,
   void *raw = ptr_to_raw(data, 0);
   (void)memcpy(raw, value, size);
   return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_create_shadow_value(clux_context_t *self,
+                                               clux_type_t *type) {
+  return clux_context_create_value(self, type, 0, NULL, NULL);
 }
 clux_value_t *clux_context_create_i8(clux_context_t *self,
                                      int8_t value,
@@ -268,20 +271,6 @@ static clux_vt_prefix_fn_t prefix_op_fn(clux_vtable_t *vt,
   }
   return NULL;
 }
-static bool type_is_integer(clux_type_t *type) {
-  switch (clux_type_get_kind(type)) {
-  case CLUX_TYPE_I8:
-  case CLUX_TYPE_I16:
-  case CLUX_TYPE_I32:
-  case CLUX_TYPE_I64:
-    return true;
-  default:
-    return false;
-  }
-}
-static bool value_is_error(clux_context_t *self, clux_value_t *value) {
-  return clux_value_get_type(value) == self->builtin_types.type_error;
-}
 clux_value_t *clux_context_safe_cast(clux_context_t *self,
                                      clux_value_t *value,
                                      clux_type_t *target,
@@ -291,12 +280,9 @@ clux_value_t *clux_context_safe_cast(clux_context_t *self,
         self, loc, "safe cast requires a value and a target type");
   }
   clux_type_t *source = clux_value_get_type(value);
-  if (source == target) {
-    return value;
-  }
-  clux_vt_safe_cast_fn_t fn = clux_type_get_vtable(source)->safe_cast;
-  if (fn) {
-    return fn(self, value, target);
+  clux_vtable_t *vt = clux_type_get_vtable(source);
+  if (vt && vt->safe_cast) {
+    return vt->safe_cast(self, value, target);
   }
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
@@ -318,33 +304,8 @@ clux_value_t *clux_context_binary(clux_context_t *self,
         self, loc, "operator '%s' requires two operands", op_name);
   }
   clux_type_t *type = clux_value_get_type(left);
-  clux_type_t *right_type = clux_value_get_type(right);
-  if (type != right_type) {
-    if (!type_is_integer(type) || !type_is_integer(right_type)) {
-      return clux_context_create_error_message(
-          self,
-          loc,
-          "operator '%s' requires operands of the same type",
-          op_name);
-    }
-    clux_type_t *target =
-        clux_type_get_size(type) >= clux_type_get_size(right_type) ? type
-                                                                   : right_type;
-    if (type != target) {
-      left = clux_context_safe_cast(self, left, target, loc);
-      if (value_is_error(self, left)) {
-        return left;
-      }
-    }
-    if (right_type != target) {
-      right = clux_context_safe_cast(self, right, target, loc);
-      if (value_is_error(self, right)) {
-        return right;
-      }
-    }
-    type = target;
-  }
-  clux_vt_binary_fn_t fn = binary_op_fn(clux_type_get_vtable(type), op);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  clux_vt_binary_fn_t fn = vt ? binary_op_fn(vt, op) : NULL;
   if (fn) {
     return fn(self, left, right);
   }
@@ -367,7 +328,8 @@ clux_value_t *clux_context_prefix(clux_context_t *self,
         self, loc, "operator '%s' requires one operand", op_name);
   }
   clux_type_t *type = clux_value_get_type(value);
-  clux_vt_prefix_fn_t fn = prefix_op_fn(clux_type_get_vtable(type), op);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  clux_vt_prefix_fn_t fn = vt ? prefix_op_fn(vt, op) : NULL;
   if (fn) {
     return fn(self, value);
   }
