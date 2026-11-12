@@ -1,5 +1,6 @@
 #include "engine/scope.h"
 #include "core/allocator.h"
+#include "core/hash.h"
 #include "core/rbtree.h"
 #include "core/vec.h"
 #include "engine/interface.h"
@@ -18,14 +19,6 @@ struct _clux_scope_t {
   vec_t *values;          /* clux_slot_t*，按定义顺序持有所有值 */
   rbtree_t *named_values; /* hash -> vec_t*，桶内按名字精确匹配 */
 };
-
-static uint32_t hash(const char *str) {
-  uint32_t hash = 0;
-  while (*str) {
-    hash = (*str++) + (hash << 6) + (hash << 16) - hash;
-  }
-  return hash;
-}
 
 static char *copy_name(allocator_t *allocator, const char *name) {
   size_t len = strlen(name);
@@ -109,7 +102,7 @@ clux_scope_define(clux_scope_t *self, const char *name, clux_value_t *value) {
   slot->value = value;
 
   if (name) {
-    uint32_t key = hash(name);
+    uint32_t key = hash_sdb(name);
     vec_t *bucket = rbtree_find(self->named_values, key);
     if (!bucket) {
       bucket = create_vec(self->allocator);
@@ -133,7 +126,7 @@ clux_value_t *clux_scope_get(clux_scope_t *self, const char *name) {
     return NULL;
   }
   for (clux_scope_t *scope = self; scope; scope = scope->parent) {
-    vec_t *bucket = rbtree_find(scope->named_values, hash(name));
+    vec_t *bucket = rbtree_find(scope->named_values, hash_sdb(name));
     if (!bucket) {
       continue;
     }
