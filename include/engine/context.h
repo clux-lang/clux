@@ -36,6 +36,23 @@ clux_value_t *clux_context_create_i64(clux_context_t *self,
                                       int64_t value,
                                       const char *name,
                                       location_t *loc);
+clux_value_t *clux_context_create_error_message(clux_context_t *self,
+                                                location_t *loc,
+                                                const char *fmt,
+                                                ...);
+clux_value_t *clux_context_safe_cast(clux_context_t *self,
+                                     clux_value_t *value,
+                                     clux_type_t *target,
+                                     location_t *loc);
+clux_value_t *clux_context_binary(clux_context_t *self,
+                                  clux_binary_op_t op,
+                                  clux_value_t *left,
+                                  clux_value_t *right,
+                                  location_t *loc);
+clux_value_t *clux_context_prefix(clux_context_t *self,
+                                  clux_prefix_op_t op,
+                                  clux_value_t *value,
+                                  location_t *loc);
 clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,

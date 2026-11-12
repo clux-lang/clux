@@ -9,8 +9,11 @@
 #include "engine/scope.h"
 #include "engine/type.h"
 #include "engine/value.h"
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdalign.h>
+#include <stdio.h>
 #include <string.h>
 #include "engine/error.h"
 struct _clux_context_t {
@@ -171,33 +174,217 @@ void clux_context_pop_scope(clux_context_t *self) {
   delete_clux_scope(&self->current_scope);
   self->current_scope = parent;
 }
+clux_value_t *clux_context_create_error_message(clux_context_t *self,
+                                                location_t *loc,
+                                                const char *fmt,
+                                                ...) {
+  va_list args;
+  va_start(args, fmt);
+  size_t len = vsnprintf(NULL, 0, fmt, args);
+  va_end(args);
+  char *msg = allocator_alloc(self->allocator, len + 1);
+  va_start(args, fmt);
+  (void)vsnprintf(msg, len + 1, fmt, args);
+  va_end(args);
+  clux_error_t *err = create_error(self->allocator, loc, "%s", msg);
+  allocator_free(self->allocator, (void **)&msg);
+  return clux_context_create_error(self, err);
+}
+static const char *binary_op_name(clux_binary_op_t op) {
+  switch (op) {
+  case CLUX_OP_ADD:
+    return "+";
+  case CLUX_OP_SUB:
+    return "-";
+  case CLUX_OP_MUL:
+    return "*";
+  case CLUX_OP_DIV:
+    return "/";
+  case CLUX_OP_MOD:
+    return "%";
+  case CLUX_OP_AND:
+    return "&";
+  case CLUX_OP_OR:
+    return "|";
+  case CLUX_OP_XOR:
+    return "^";
+  case CLUX_OP_SHL:
+    return "<<";
+  case CLUX_OP_SHR:
+    return ">>";
+  }
+  return "<unknown>";
+}
+static const char *prefix_op_name(clux_prefix_op_t op) {
+  switch (op) {
+  case CLUX_OP_PLUS:
+    return "+";
+  case CLUX_OP_NEGATIVE:
+    return "-";
+  case CLUX_OP_NOT:
+    return "~";
+  case CLUX_OP_LNOT:
+    return "!";
+  }
+  return "<unknown>";
+}
+static clux_vt_binary_fn_t binary_op_fn(clux_vtable_t *vt,
+                                        clux_binary_op_t op) {
+  switch (op) {
+  case CLUX_OP_ADD:
+    return vt->add;
+  case CLUX_OP_SUB:
+    return vt->sub;
+  case CLUX_OP_MUL:
+    return vt->mul;
+  case CLUX_OP_DIV:
+    return vt->div;
+  case CLUX_OP_MOD:
+    return vt->mod;
+  case CLUX_OP_AND:
+    return vt->bit_and;
+  case CLUX_OP_OR:
+    return vt->bit_or;
+  case CLUX_OP_XOR:
+    return vt->bit_xor;
+  case CLUX_OP_SHL:
+    return vt->shl;
+  case CLUX_OP_SHR:
+    return vt->shr;
+  }
+  return NULL;
+}
+static clux_vt_prefix_fn_t prefix_op_fn(clux_vtable_t *vt,
+                                        clux_prefix_op_t op) {
+  switch (op) {
+  case CLUX_OP_PLUS:
+    return vt->plus;
+  case CLUX_OP_NEGATIVE:
+    return vt->negative;
+  case CLUX_OP_NOT:
+    return vt->bit_not;
+  case CLUX_OP_LNOT:
+    return vt->logic_not;
+  }
+  return NULL;
+}
+static bool type_is_integer(clux_type_t *type) {
+  switch (clux_type_get_kind(type)) {
+  case CLUX_TYPE_I8:
+  case CLUX_TYPE_I16:
+  case CLUX_TYPE_I32:
+  case CLUX_TYPE_I64:
+    return true;
+  default:
+    return false;
+  }
+}
+static bool value_is_error(clux_context_t *self, clux_value_t *value) {
+  return clux_value_get_type(value) == self->builtin_types.type_error;
+}
+clux_value_t *clux_context_safe_cast(clux_context_t *self,
+                                     clux_value_t *value,
+                                     clux_type_t *target,
+                                     location_t *loc) {
+  if (!value || !target) {
+    return clux_context_create_error_message(
+        self, loc, "safe cast requires a value and a target type");
+  }
+  clux_type_t *source = clux_value_get_type(value);
+  if (source == target) {
+    return value;
+  }
+  clux_vt_safe_cast_fn_t fn = clux_type_get_vtable(source)->safe_cast;
+  if (fn) {
+    return fn(self, value, target);
+  }
+  const char *source_name = clux_type_get_name(source);
+  const char *target_name = clux_type_get_name(target);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' cannot be safely cast to '%s'",
+      source_name ? source_name : "<unknown>",
+      target_name ? target_name : "<unknown>");
+}
+clux_value_t *clux_context_binary(clux_context_t *self,
+                                  clux_binary_op_t op,
+                                  clux_value_t *left,
+                                  clux_value_t *right,
+                                  location_t *loc) {
+  const char *op_name = binary_op_name(op);
+  if (!left || !right) {
+    return clux_context_create_error_message(
+        self, loc, "operator '%s' requires two operands", op_name);
+  }
+  clux_type_t *type = clux_value_get_type(left);
+  clux_type_t *right_type = clux_value_get_type(right);
+  if (type != right_type) {
+    if (!type_is_integer(type) || !type_is_integer(right_type)) {
+      return clux_context_create_error_message(
+          self,
+          loc,
+          "operator '%s' requires operands of the same type",
+          op_name);
+    }
+    clux_type_t *target =
+        clux_type_get_size(type) >= clux_type_get_size(right_type) ? type
+                                                                   : right_type;
+    if (type != target) {
+      left = clux_context_safe_cast(self, left, target, loc);
+      if (value_is_error(self, left)) {
+        return left;
+      }
+    }
+    if (right_type != target) {
+      right = clux_context_safe_cast(self, right, target, loc);
+      if (value_is_error(self, right)) {
+        return right;
+      }
+    }
+    type = target;
+  }
+  clux_vt_binary_fn_t fn = binary_op_fn(clux_type_get_vtable(type), op);
+  if (fn) {
+    return fn(self, left, right);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support operator "
+      "'%s'",
+      type_name ? type_name : "<unknown>",
+      op_name);
+}
+clux_value_t *clux_context_prefix(clux_context_t *self,
+                                  clux_prefix_op_t op,
+                                  clux_value_t *value,
+                                  location_t *loc) {
+  const char *op_name = prefix_op_name(op);
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "operator '%s' requires one operand", op_name);
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vt_prefix_fn_t fn = prefix_op_fn(clux_type_get_vtable(type), op);
+  if (fn) {
+    return fn(self, value);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support operator "
+      "'%s'",
+      type_name ? type_name : "<unknown>",
+      op_name);
+}
 clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,
                                location_t *loc) {
-  if (!left || !right) {
-    clux_error_t *err = create_error(
-        self->allocator, loc, "operator '+' requires two operands");
-    return clux_context_create_error(self, err);
-  }
-  clux_type_t *type = clux_value_get_type(left);
-  if (type != clux_value_get_type(right)) {
-    clux_error_t *err =
-        create_error(self->allocator,
-                     loc,
-                     "operator '+' requires operands of the same type");
-    return clux_context_create_error(self, err);
-  }
-  clux_vtable_t *vt = clux_type_get_vtable(type);
-  if (vt->add) {
-    return vt->add(self, left, CLUX_OP_ADD, right);
-  }
-  const char *type_name = clux_type_get_name(type);
-  clux_error_t *err = create_error(self->allocator,
-                                   loc,
-                                   "type '%s' does not support operator '+'",
-                                   type_name ? type_name : "<unknown>");
-  return clux_context_create_error(self, err);
+  return clux_context_binary(self, CLUX_OP_ADD, left, right, loc);
 }
 clux_type_t *clux_context_get_i8_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_i8;

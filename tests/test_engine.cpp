@@ -43,6 +43,12 @@ static int64_t read_i64(clux_value_t *value) {
   return raw ? *(int64_t *)raw : 0;
 }
 
+static const char *error_message_of(clux_value_t *value) {
+  clux_error_t **stored =
+      (clux_error_t **)ptr_to_raw(clux_value_get_data(value), 0);
+  return stored ? error_get_message(*stored) : nullptr;
+}
+
 TEST(EngineTest, ContextAndBuiltinTypes) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -87,8 +93,23 @@ TEST(EngineTest, BuiltinIntegerTypes) {
     EXPECT_STREQ(clux_type_get_name(c.type), c.name);
     EXPECT_EQ(clux_type_get_size(c.type), c.size);
     EXPECT_EQ(clux_type_get_align(c.type), c.size);
-    EXPECT_NE(clux_type_get_vtable(c.type), nullptr);
-    EXPECT_NE(clux_type_get_vtable(c.type)->add, nullptr);
+    clux_vtable_t *vt = clux_type_get_vtable(c.type);
+    ASSERT_NE(vt, nullptr);
+    EXPECT_NE(vt->add, nullptr);
+    EXPECT_NE(vt->sub, nullptr);
+    EXPECT_NE(vt->mul, nullptr);
+    EXPECT_NE(vt->div, nullptr);
+    EXPECT_NE(vt->mod, nullptr);
+    EXPECT_NE(vt->shl, nullptr);
+    EXPECT_NE(vt->shr, nullptr);
+    EXPECT_NE(vt->bit_and, nullptr);
+    EXPECT_NE(vt->bit_or, nullptr);
+    EXPECT_NE(vt->bit_xor, nullptr);
+    EXPECT_NE(vt->plus, nullptr);
+    EXPECT_NE(vt->negative, nullptr);
+    EXPECT_NE(vt->bit_not, nullptr);
+    EXPECT_EQ(vt->logic_not, nullptr);
+    EXPECT_NE(vt->safe_cast, nullptr);
   }
 
   delete_clux_context(&ctx);
@@ -126,20 +147,348 @@ TEST(EngineTest, CreateI8I16I64ValuesAndAdd) {
   delete_allocator(&a);
 }
 
-TEST(EngineTest, AddMismatchedIntegerTypesProducesError) {
+TEST(EngineTest, BinaryWidensIntegerOperands) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
-  clux_value_t *left = clux_context_create_i8(ctx, 1, NULL, NULL);
-  clux_value_t *right = clux_context_create_i16(ctx, 2, NULL, NULL);
-  clux_value_t *result = clux_context_add(ctx, left, right, NULL);
+
+  clux_value_t *i8_value = clux_context_create_i8(ctx, 20, NULL, NULL);
+  clux_value_t *i16_value = clux_context_create_i16(ctx, 300, NULL, NULL);
+  clux_value_t *i16_sum =
+      clux_context_binary(ctx, CLUX_OP_ADD, i8_value, i16_value, NULL);
+  ASSERT_NE(i16_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i16_sum), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(read_i16(i16_sum), 320);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 100, NULL, NULL);
+  clux_value_t *i64_value =
+      clux_context_create_i64(ctx, INT64_C(4000000000), NULL, NULL);
+  clux_value_t *i64_sum =
+      clux_context_binary(ctx, CLUX_OP_ADD, i32_value, i64_value, NULL);
+  ASSERT_NE(i64_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i64_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(read_i64(i64_sum), INT64_C(4000000100));
+
+  clux_value_t *i64_left =
+      clux_context_create_i64(ctx, INT64_C(4000000000), NULL, NULL);
+  clux_value_t *i32_right = clux_context_create_i32(ctx, 100, NULL, NULL);
+  clux_value_t *i64_right_sum =
+      clux_context_binary(ctx, CLUX_OP_ADD, i64_left, i32_right, NULL);
+  ASSERT_NE(i64_right_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(i64_right_sum), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(read_i64(i64_right_sum), INT64_C(4000000100));
+
+  clux_value_t *shift_count = clux_context_create_i16(ctx, 2, NULL, NULL);
+  clux_value_t *shifted =
+      clux_context_binary(ctx, CLUX_OP_SHL, i8_value, shift_count, NULL);
+  ASSERT_NE(shifted, nullptr);
+  EXPECT_EQ(clux_value_get_type(shifted), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(read_i16(shifted), 80);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SafeCastWidensIntegers) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *i8_value = clux_context_create_i8(ctx, -5, NULL, NULL);
+  clux_value_t *as_i16 = clux_context_safe_cast(
+      ctx, i8_value, clux_context_get_i16_type(ctx), NULL);
+  ASSERT_NE(as_i16, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_i16), clux_context_get_i16_type(ctx));
+  EXPECT_EQ(read_i16(as_i16), -5);
+
+  clux_value_t *as_i32 = clux_context_safe_cast(
+      ctx, i8_value, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(as_i32, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_i32), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(read_i32(as_i32), -5);
+
+  clux_value_t *as_i64 = clux_context_safe_cast(
+      ctx, i8_value, clux_context_get_i64_type(ctx), NULL);
+  ASSERT_NE(as_i64, nullptr);
+  EXPECT_EQ(clux_value_get_type(as_i64), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(read_i64(as_i64), -5);
+
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 123456, NULL, NULL);
+  clux_value_t *i32_as_i64 = clux_context_safe_cast(
+      ctx, i32_value, clux_context_get_i64_type(ctx), NULL);
+  ASSERT_NE(i32_as_i64, nullptr);
+  EXPECT_EQ(clux_value_get_type(i32_as_i64), clux_context_get_i64_type(ctx));
+  EXPECT_EQ(read_i64(i32_as_i64), 123456);
+
+  clux_value_t *identity = clux_context_safe_cast(
+      ctx, i32_value, clux_context_get_i32_type(ctx), NULL);
+  EXPECT_EQ(identity, i32_value);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SafeCastNarrowingProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  struct {
+    clux_value_t *value;
+    clux_type_t *target;
+  } cases[] = {
+      {clux_context_create_i16(ctx, 1, NULL, NULL),
+       clux_context_get_i8_type(ctx)},
+      {clux_context_create_i32(ctx, 1, NULL, NULL),
+       clux_context_get_i16_type(ctx)},
+      {clux_context_create_i64(ctx, 1, NULL, NULL),
+       clux_context_get_i32_type(ctx)},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_safe_cast(ctx, c.value, c.target, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
+    EXPECT_NE(strstr(error_message_of(result), "narrowing conversion"),
+              nullptr);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SafeCastToNonIntegerProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *result = clux_context_safe_cast(
+      ctx, value, clux_context_get_error_type(ctx), NULL);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
-  clux_error_t **stored =
-      (clux_error_t **)ptr_to_raw(clux_value_get_data(result), 0);
-  ASSERT_NE(stored, nullptr);
+  EXPECT_NE(strstr(error_message_of(result), "cannot safely cast 'i32'"),
+            nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SafeCastUnsupportedSourceProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_error_t *error = create_error(a, NULL, "boom");
+  clux_value_t *value = clux_context_create_error(ctx, error);
+  clux_value_t *result =
+      clux_context_safe_cast(ctx, value, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(clux_value_get_type(result), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(result),
+                   "type 'error' cannot be safely cast to 'i32'"),
+            nullptr);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SafeCastNullInputsProduceError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+
+  clux_value_t *no_value =
+      clux_context_safe_cast(ctx, NULL, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(no_value, nullptr);
+  EXPECT_EQ(clux_value_get_type(no_value), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(no_value),
+                   "safe cast requires a value and a target type"),
+            nullptr);
+
+  clux_value_t *no_target = clux_context_safe_cast(ctx, value, NULL, NULL);
+  ASSERT_NE(no_target, nullptr);
+  EXPECT_EQ(clux_value_get_type(no_target), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(no_target),
+                   "safe cast requires a value and a target type"),
+            nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BinaryArithmeticOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *left = clux_context_create_i32(ctx, 20, NULL, NULL);
+  clux_value_t *right = clux_context_create_i32(ctx, 6, NULL, NULL);
+
+  struct {
+    clux_binary_op_t op;
+    int32_t expected;
+  } cases[] = {
+      {CLUX_OP_ADD, 26},
+      {CLUX_OP_SUB, 14},
+      {CLUX_OP_MUL, 120},
+      {CLUX_OP_DIV, 3},
+      {CLUX_OP_MOD, 2},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, left, right, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(clux_value_get_type(result), clux_context_get_i32_type(ctx));
+    EXPECT_EQ(read_i32(result), c.expected);
+  }
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, BinaryBitwiseOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *left = clux_context_create_i32(ctx, 12, NULL, NULL);
+  clux_value_t *right = clux_context_create_i32(ctx, 10, NULL, NULL);
+
+  struct {
+    clux_binary_op_t op;
+    int32_t expected;
+  } cases[] = {
+      {CLUX_OP_AND, 8},
+      {CLUX_OP_OR, 14},
+      {CLUX_OP_XOR, 6},
+  };
+  for (const auto &c : cases) {
+    clux_value_t *result = clux_context_binary(ctx, c.op, left, right, NULL);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(read_i32(result), c.expected);
+  }
+
+  clux_value_t *shift = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *shl = clux_context_binary(ctx, CLUX_OP_SHL, left, shift, NULL);
+  ASSERT_NE(shl, nullptr);
+  EXPECT_EQ(read_i32(shl), 48);
+  clux_value_t *shr = clux_context_binary(ctx, CLUX_OP_SHR, left, shift, NULL);
+  ASSERT_NE(shr, nullptr);
+  EXPECT_EQ(read_i32(shr), 3);
+
+  clux_value_t *negative = clux_context_create_i32(ctx, -8, NULL, NULL);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *arithmetic =
+      clux_context_binary(ctx, CLUX_OP_SHR, negative, one, NULL);
+  ASSERT_NE(arithmetic, nullptr);
+  EXPECT_EQ(read_i32(arithmetic), -4);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PrefixOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+
+  clux_value_t *plus = clux_context_prefix(ctx, CLUX_OP_PLUS, five, NULL);
+  ASSERT_NE(plus, nullptr);
+  EXPECT_EQ(read_i32(plus), 5);
+  clux_value_t *negative =
+      clux_context_prefix(ctx, CLUX_OP_NEGATIVE, five, NULL);
+  ASSERT_NE(negative, nullptr);
+  EXPECT_EQ(read_i32(negative), -5);
+  clux_value_t *bit_not = clux_context_prefix(ctx, CLUX_OP_NOT, five, NULL);
+  ASSERT_NE(bit_not, nullptr);
+  EXPECT_EQ(read_i32(bit_not), ~5);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, DivisionByZeroProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *left = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *zero = clux_context_create_i32(ctx, 0, NULL, NULL);
+
+  clux_value_t *div = clux_context_binary(ctx, CLUX_OP_DIV, left, zero, NULL);
+  ASSERT_NE(div, nullptr);
+  EXPECT_EQ(clux_value_get_type(div), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(div), "division by zero"), nullptr);
+
+  clux_value_t *mod = clux_context_binary(ctx, CLUX_OP_MOD, left, zero, NULL);
+  ASSERT_NE(mod, nullptr);
+  EXPECT_EQ(clux_value_get_type(mod), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(mod), "division by zero"), nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, ShiftCountOutOfRangeProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *too_large = clux_context_create_i32(ctx, 32, NULL, NULL);
+  clux_value_t *negative = clux_context_create_i32(ctx, -1, NULL, NULL);
+
+  clux_value_t *shl =
+      clux_context_binary(ctx, CLUX_OP_SHL, one, too_large, NULL);
+  ASSERT_NE(shl, nullptr);
+  EXPECT_EQ(clux_value_get_type(shl), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(shl), "shift count out of range"), nullptr);
+
+  clux_value_t *shr =
+      clux_context_binary(ctx, CLUX_OP_SHR, one, negative, NULL);
+  ASSERT_NE(shr, nullptr);
+  EXPECT_EQ(clux_value_get_type(shr), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(shr), "shift count out of range"), nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, UnsupportedOpsProduceError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  location_t loc;
+  memset(&loc, 0, sizeof(loc));
+  loc.filename = "test.cx";
+  clux_error_t *left_error = create_error(a, &loc, "boom");
+  clux_error_t *right_error = create_error(a, &loc, "bang");
+  clux_value_t *left = clux_context_create_error(ctx, left_error);
+  clux_value_t *right = clux_context_create_error(ctx, right_error);
+
+  clux_value_t *sub = clux_context_binary(ctx, CLUX_OP_SUB, left, right, &loc);
+  ASSERT_NE(sub, nullptr);
+  EXPECT_EQ(clux_value_get_type(sub), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(sub), "does not support operator '-'"),
+            nullptr);
+
+  clux_value_t *negative =
+      clux_context_prefix(ctx, CLUX_OP_NEGATIVE, left, &loc);
+  ASSERT_NE(negative, nullptr);
+  EXPECT_EQ(clux_value_get_type(negative), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(negative), "does not support operator '-'"),
+            nullptr);
+
+  /* 严格类型：'!' 仅适用于 bool，整数类型不支持。 */
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *logic_not =
+      clux_context_prefix(ctx, CLUX_OP_LNOT, i32_value, &loc);
+  ASSERT_NE(logic_not, nullptr);
+  EXPECT_EQ(clux_value_get_type(logic_not), clux_context_get_error_type(ctx));
   EXPECT_NE(
-      strstr(error_get_message(*stored), "requires operands of the same type"),
+      strstr(error_message_of(logic_not), "does not support operator '!'"),
       nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, NullOperandsProduceError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+
+  clux_value_t *binary = clux_context_binary(ctx, CLUX_OP_ADD, NULL, one, NULL);
+  ASSERT_NE(binary, nullptr);
+  EXPECT_EQ(clux_value_get_type(binary), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(binary), "requires two operands"), nullptr);
+
+  clux_value_t *prefix = clux_context_prefix(ctx, CLUX_OP_NEGATIVE, NULL, NULL);
+  ASSERT_NE(prefix, nullptr);
+  EXPECT_EQ(clux_value_get_type(prefix), clux_context_get_error_type(ctx));
+  EXPECT_NE(strstr(error_message_of(prefix), "requires one operand"), nullptr);
+
   delete_clux_context(&ctx);
   delete_allocator(&a);
 }

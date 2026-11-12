@@ -41,14 +41,9 @@ typedef enum _clux_type_kind_t {
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
-                                             clux_binary_op_t,
                                              clux_value_t *);
-typedef clux_value_t *(*clux_vt_prefix_fn_t)(clux_context_t *,
-                                             clux_prefix_op_t,
-                                             clux_value_t *);
-typedef clux_value_t *(*clux_vt_postfix_fn_t)(clux_context_t *,
-                                              clux_postfix_op_t,
-                                              clux_value_t *);
+typedef clux_value_t *(*clux_vt_prefix_fn_t)(clux_context_t *, clux_value_t *);
+typedef clux_value_t *(*clux_vt_postfix_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_get_field_fn_t)(clux_context_t *,
                                                 clux_value_t *,
                                                 const char *);
@@ -80,6 +75,20 @@ typedef clux_value_t *(*clux_vt_cast_fn_t)(clux_context_t *,
                                            clux_type_t *);
 struct _clux_vtable_t {
   clux_vt_binary_fn_t add;
+  clux_vt_binary_fn_t sub;
+  clux_vt_binary_fn_t mul;
+  clux_vt_binary_fn_t div;
+  clux_vt_binary_fn_t mod;
+  clux_vt_binary_fn_t shl;
+  clux_vt_binary_fn_t shr;
+  clux_vt_binary_fn_t bit_and;
+  clux_vt_binary_fn_t bit_or;
+  clux_vt_binary_fn_t bit_xor;
+  clux_vt_prefix_fn_t plus;
+  clux_vt_prefix_fn_t negative;
+  clux_vt_prefix_fn_t bit_not;
+  clux_vt_prefix_fn_t logic_not;
+  clux_vt_safe_cast_fn_t safe_cast;
 };
 #ifdef __cplusplus
 }
