@@ -14,3 +14,9 @@ void group_node_set_expr(node_t *self, node_t *expr) {
 node_t *group_node_get_expr(node_t *self) {
   return node_get_child(self, CLUX_EXPR_GROUP_EXPR);
 }
+
+void group_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprGroup");
+  node_json_field(writer, "expr", group_node_get_expr(self), expr_to_json);
+  node_json_end(writer);
+}

@@ -16,3 +16,9 @@ node_t *parser_read_symbol(allocator_t *allocator, parser_t *parser) {
   node_set_location(node, token_get_location(token));
   return node;
 }
+
+void symbol_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "Symbol");
+  node_json_text(writer, self);
+  node_json_end(writer);
+}

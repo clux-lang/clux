@@ -29,3 +29,16 @@ size_t builtin_node_get_arg_count(node_t *self) {
 node_t *builtin_node_get_arg(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_EXPR_BUILTIN_FIRST_ARG + idx);
 }
+
+void builtin_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprBuiltin");
+  node_json_field(
+      writer, "name", builtin_node_get_name(self), symbol_node_to_json);
+  json_writer_key(writer, "args");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < builtin_node_get_arg_count(self); i++) {
+    expr_to_json(writer, builtin_node_get_arg(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

@@ -63,3 +63,37 @@ void node_add_child(node_t *self, node_t *child) {
   child->parent = self;
   vec_push(self->children, child);
 }
+void node_json_begin(json_writer_t *writer, node_t *node, const char *kind) {
+  json_writer_begin_object(writer);
+  json_writer_field_string(writer, "kind", kind);
+  json_writer_field_span(writer, node_get_location(node));
+}
+void node_json_end(json_writer_t *writer) { json_writer_end_object(writer); }
+void node_json_text(json_writer_t *writer, node_t *node) {
+  json_writer_field_text(writer, node_get_location(node));
+}
+void node_json_field(json_writer_t *writer,
+                     const char *key,
+                     node_t *child,
+                     node_json_fn_t write) {
+  json_writer_key(writer, key);
+  if (child) {
+    write(writer, child);
+  } else {
+    json_writer_null(writer);
+  }
+}
+void node_json_children(json_writer_t *writer,
+                        const char *key,
+                        node_t *node,
+                        size_t start,
+                        node_json_fn_t write) {
+  json_writer_key(writer, key);
+  json_writer_begin_array(writer);
+  vec_t *children = node_get_children(node);
+  size_t count = vec_get_size(children);
+  for (size_t idx = start; idx < count; idx++) {
+    write(writer, (node_t *)vec_get(children, idx));
+  }
+  json_writer_end_array(writer);
+}

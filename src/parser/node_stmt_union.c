@@ -38,3 +38,19 @@ size_t stmt_union_node_get_decorator_count(node_t *self) {
 node_t *stmt_union_node_get_decorator(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_STMT_UNION_FIRST_DECORATOR + idx);
 }
+
+void stmt_union_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtUnion");
+  node_json_field(writer,
+                  "union_decl",
+                  stmt_union_node_get_union_decl(self),
+                  union_node_to_json);
+  node_json_field(
+      writer, "export", stmt_union_node_get_export(self), symbol_node_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_STMT_UNION_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}

@@ -38,3 +38,21 @@ size_t stmt_bitfield_node_get_decorator_count(node_t *self) {
 node_t *stmt_bitfield_node_get_decorator(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_STMT_BITFIELD_FIRST_DECORATOR + idx);
 }
+
+void stmt_bitfield_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtBitfield");
+  node_json_field(writer,
+                  "bitfield_decl",
+                  stmt_bitfield_node_get_bitfield_decl(self),
+                  bitfield_decl_node_to_json);
+  node_json_field(writer,
+                  "export",
+                  stmt_bitfield_node_get_export(self),
+                  symbol_node_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_STMT_BITFIELD_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}

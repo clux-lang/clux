@@ -22,3 +22,12 @@ void stmt_extern_lib_node_set_path(node_t *self, node_t *path) {
 node_t *stmt_extern_lib_node_get_path(node_t *self) {
   return node_get_child(self, CLUX_STMT_EXTERN_LIB_PATH);
 }
+
+void stmt_extern_lib_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtExternLib");
+  node_json_field(
+      writer, "alias", stmt_extern_lib_node_get_alias(self), expr_to_json);
+  node_json_field(
+      writer, "path", stmt_extern_lib_node_get_path(self), expr_to_json);
+  node_json_end(writer);
+}

@@ -22,3 +22,12 @@ void stmt_assert_node_set_source(node_t *self, node_t *source) {
 node_t *stmt_assert_node_get_source(node_t *self) {
   return node_get_child(self, CLUX_STMT_ASSERT_SOURCE);
 }
+
+void stmt_assert_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtAssert");
+  node_json_field(
+      writer, "condition", stmt_assert_node_get_condition(self), expr_to_json);
+  node_json_field(
+      writer, "source", stmt_assert_node_get_source(self), expr_to_json);
+  node_json_end(writer);
+}

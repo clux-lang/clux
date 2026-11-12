@@ -16,3 +16,9 @@ void rest_node_set_expr(node_t *self, node_t *expr) {
 node_t *rest_node_get_expr(node_t *self) {
   return node_get_child(self, CLUX_EXPR_REST_EXPR);
 }
+
+void rest_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprRest");
+  node_json_field(writer, "expr", rest_node_get_expr(self), expr_to_json);
+  node_json_end(writer);
+}

@@ -30,3 +30,11 @@ void slice_node_set_hi(node_t *self, node_t *hi) {
 node_t *slice_node_get_hi(node_t *self) {
   return node_get_child(self, CLUX_EXPR_SLICE_HI);
 }
+
+void slice_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprSlice");
+  node_json_field(writer, "base", slice_node_get_base(self), expr_to_json);
+  node_json_field(writer, "lo", slice_node_get_lo(self), expr_to_json);
+  node_json_field(writer, "hi", slice_node_get_hi(self), expr_to_json);
+  node_json_end(writer);
+}

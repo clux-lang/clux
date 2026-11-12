@@ -38,3 +38,18 @@ void stmt_extern_var_node_set_type(node_t *self, node_t *type) {
 node_t *stmt_extern_var_node_get_type(node_t *self) {
   return node_get_child(self, CLUX_STMT_EXTERN_VAR_TYPE);
 }
+
+void stmt_extern_var_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtExternVar");
+  node_json_field(writer,
+                  "export",
+                  stmt_extern_var_node_get_export(self),
+                  symbol_node_to_json);
+  node_json_field(
+      writer, "lib", stmt_extern_var_node_get_lib(self), expr_to_json);
+  node_json_field(
+      writer, "name", stmt_extern_var_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "type", stmt_extern_var_node_get_type(self), expr_to_json);
+  node_json_end(writer);
+}

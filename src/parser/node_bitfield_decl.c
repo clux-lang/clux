@@ -38,3 +38,22 @@ void bitfield_decl_node_set_body(node_t *self, node_t *body) {
 node_t *bitfield_decl_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_EXPR_BITFIELD_DECL_BODY);
 }
+
+void bitfield_decl_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprBitfieldDecl");
+  node_json_field(writer,
+                  "keyword",
+                  bitfield_decl_node_get_keyword(self),
+                  symbol_node_to_json);
+  node_json_field(
+      writer, "name", bitfield_decl_node_get_name(self), expr_to_json);
+  node_json_field(writer,
+                  "underlying",
+                  bitfield_decl_node_get_underlying(self),
+                  expr_to_json);
+  node_json_field(writer,
+                  "body",
+                  bitfield_decl_node_get_body(self),
+                  bitfield_fields_node_to_json);
+  node_json_end(writer);
+}

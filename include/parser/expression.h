@@ -59,6 +59,9 @@ node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_expr_ternary(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_expr_assign(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_expr(allocator_t *allocator, parser_t *parser);
+
+/* 表达式类节点的 JSON 分派；node 为 NULL 时写 null。 */
+void expr_to_json(json_writer_t *writer, node_t *node);
 #ifdef __cplusplus
 }
 #endif

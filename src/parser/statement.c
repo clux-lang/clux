@@ -1054,3 +1054,108 @@ node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser) {
   }
   return parser_read_stmt_expr(allocator, parser);
 }
+
+void stmt_to_json(json_writer_t *writer, node_t *node) {
+  if (!node) {
+    json_writer_null(writer);
+    return;
+  }
+  switch (node_get_kind(node)) {
+  case CLUX_NODE_STMT_BLOCK:
+    stmt_block_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_EXPR:
+    stmt_expr_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_RETURN:
+    stmt_return_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_EMPTY:
+    stmt_empty_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_BREAK:
+    stmt_break_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_CONTINUE:
+    stmt_continue_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_DEFER:
+    stmt_defer_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_IF:
+    stmt_if_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_COMPTIME_IF:
+    stmt_comptime_if_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_WHILE:
+    stmt_while_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_FOR:
+    stmt_for_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_FOREACH:
+    stmt_foreach_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_COMPTIME_FOREACH:
+    stmt_comptime_foreach_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_DO_WHILE:
+    stmt_do_while_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_SWITCH:
+    stmt_switch_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_BITFIELD:
+    stmt_bitfield_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_TEST:
+    stmt_test_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_IMPORT:
+    stmt_import_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_REEXPORT:
+    stmt_reexport_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_EXTERN_LIB:
+    stmt_extern_lib_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_EXTERN_CFUNC:
+    stmt_extern_cfunc_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_EXTERN_VAR:
+    stmt_extern_var_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_STATIC_ASSERT:
+    stmt_static_assert_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_ASSERT:
+    stmt_assert_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_FUNC:
+    stmt_func_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_VAR:
+    stmt_var_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_TYPE:
+    stmt_type_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_ENUM:
+    stmt_enum_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_UNION:
+    stmt_union_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_STRUCT:
+    stmt_struct_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STMT_INTERFACE:
+    stmt_interface_node_to_json(writer, node);
+    break;
+  default:
+    json_writer_null(writer);
+    break;
+  }
+}

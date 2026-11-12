@@ -30,3 +30,15 @@ size_t construct_node_get_elem_count(node_t *self) {
 node_t *construct_node_get_elem(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_EXPR_CONSTRUCT_FIRST_ELEM + idx);
 }
+
+void construct_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprConstruct");
+  node_json_field(writer, "type", construct_node_get_type(self), expr_to_json);
+  json_writer_key(writer, "elements");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < construct_node_get_elem_count(self); i++) {
+    expr_to_json(writer, construct_node_get_elem(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

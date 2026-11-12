@@ -70,3 +70,24 @@ size_t stmt_var_node_get_decorator_count(node_t *self) {
 node_t *stmt_var_node_get_decorator(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_STMT_VAR_FIRST_DECORATOR + idx);
 }
+
+void stmt_var_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtVar");
+  node_json_field(
+      writer, "keyword", stmt_var_node_get_keyword(self), symbol_node_to_json);
+  node_json_field(writer, "name", stmt_var_node_get_name(self), expr_to_json);
+  node_json_field(writer, "type", stmt_var_node_get_type(self), expr_to_json);
+  node_json_field(writer, "value", stmt_var_node_get_value(self), expr_to_json);
+  node_json_field(
+      writer, "export", stmt_var_node_get_export(self), symbol_node_to_json);
+  node_json_field(writer,
+                  "comptime",
+                  stmt_var_node_get_comptime(self),
+                  symbol_node_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_STMT_VAR_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}

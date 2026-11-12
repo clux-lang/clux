@@ -46,3 +46,23 @@ size_t stmt_func_node_get_decorator_count(node_t *self) {
 node_t *stmt_func_node_get_decorator(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_STMT_FUNC_FIRST_DECORATOR + idx);
 }
+
+void stmt_func_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtFunc");
+  node_json_field(writer,
+                  "func_decl",
+                  stmt_func_node_get_func_decl(self),
+                  func_decl_node_to_json);
+  node_json_field(
+      writer, "export", stmt_func_node_get_export(self), symbol_node_to_json);
+  node_json_field(writer,
+                  "comptime",
+                  stmt_func_node_get_comptime(self),
+                  symbol_node_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_STMT_FUNC_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}

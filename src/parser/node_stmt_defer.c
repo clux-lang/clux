@@ -22,3 +22,14 @@ void stmt_defer_node_set_body(node_t *self, node_t *body) {
 node_t *stmt_defer_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_STMT_DEFER_BODY);
 }
+
+void stmt_defer_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtDefer");
+  node_json_field(writer,
+                  "captures",
+                  stmt_defer_node_get_captures(self),
+                  func_captures_node_to_json);
+  node_json_field(
+      writer, "body", stmt_defer_node_get_body(self), stmt_block_node_to_json);
+  node_json_end(writer);
+}

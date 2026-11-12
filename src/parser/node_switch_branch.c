@@ -55,3 +55,39 @@ size_t switch_patterns_node_get_pattern_count(node_t *self) {
 node_t *switch_patterns_node_get_pattern(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void switch_branches_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "SwitchBranches");
+  json_writer_key(writer, "branches");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < switch_branches_node_get_branch_count(self); i++) {
+    switch_branch_node_to_json(writer,
+                               switch_branches_node_get_branch(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}
+
+void switch_branch_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "SwitchBranch");
+  node_json_field(writer,
+                  "patterns",
+                  switch_branch_node_get_patterns(self),
+                  switch_patterns_node_to_json);
+  node_json_field(writer,
+                  "body",
+                  switch_branch_node_get_body(self),
+                  stmt_block_node_to_json);
+  node_json_end(writer);
+}
+
+void switch_patterns_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "SwitchPatterns");
+  json_writer_key(writer, "patterns");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < switch_patterns_node_get_pattern_count(self); i++) {
+    expr_to_json(writer, switch_patterns_node_get_pattern(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

@@ -39,3 +39,28 @@ size_t func_captures_node_get_capture_count(node_t *self) {
 node_t *func_captures_node_get_capture(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void func_capture_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "FuncCapture");
+  node_json_field(
+      writer, "name", func_capture_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "type", func_capture_node_get_type(self), expr_to_json);
+  node_json_end(writer);
+}
+
+void func_captures_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "FuncCaptures");
+  json_writer_key(writer, "captures");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < func_captures_node_get_capture_count(self); i++) {
+    node_t *capture = func_captures_node_get_capture(self, i);
+    if (node_get_kind(capture) == CLUX_NODE_FUNC_PARAMS) {
+      func_params_node_to_json(writer, capture);
+    } else {
+      func_capture_node_to_json(writer, capture);
+    }
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

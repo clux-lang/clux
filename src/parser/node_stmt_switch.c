@@ -22,3 +22,14 @@ void stmt_switch_node_set_body(node_t *self, node_t *body) {
 node_t *stmt_switch_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_STMT_SWITCH_BODY);
 }
+
+void stmt_switch_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtSwitch");
+  node_json_field(
+      writer, "value", stmt_switch_node_get_value(self), expr_to_json);
+  node_json_field(writer,
+                  "body",
+                  stmt_switch_node_get_body(self),
+                  switch_branches_node_to_json);
+  node_json_end(writer);
+}

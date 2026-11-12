@@ -17,3 +17,9 @@ size_t program_node_get_stmt_count(node_t *self) {
 node_t *program_node_get_stmt(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void program_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "Program");
+  node_json_children(writer, "stmts", self, 0, stmt_to_json);
+  node_json_end(writer);
+}

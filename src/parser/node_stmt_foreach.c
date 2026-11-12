@@ -52,3 +52,31 @@ void stmt_foreach_node_set_body(node_t *self, node_t *body) {
 node_t *stmt_foreach_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_STMT_FOREACH_BODY);
 }
+
+static void
+write_foreach(json_writer_t *writer, node_t *self, const char *kind) {
+  node_json_begin(writer, self, kind);
+  node_json_field(writer,
+                  "keyword",
+                  stmt_foreach_node_get_keyword(self),
+                  symbol_node_to_json);
+  node_json_field(
+      writer, "name", stmt_foreach_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "type", stmt_foreach_node_get_type(self), expr_to_json);
+  node_json_field(
+      writer, "iterable", stmt_foreach_node_get_iterable(self), expr_to_json);
+  node_json_field(writer,
+                  "body",
+                  stmt_foreach_node_get_body(self),
+                  stmt_block_node_to_json);
+  node_json_end(writer);
+}
+
+void stmt_foreach_node_to_json(json_writer_t *writer, node_t *self) {
+  write_foreach(writer, self, "StmtForeach");
+}
+
+void stmt_comptime_foreach_node_to_json(json_writer_t *writer, node_t *self) {
+  write_foreach(writer, self, "StmtComptimeForeach");
+}

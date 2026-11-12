@@ -44,3 +44,12 @@ void binary_node_set_right(node_t *self, node_t *right) {
 node_t *binary_node_get_right(node_t *self) {
   return node_get_child(self, CLUX_EXPR_BINARY_RIGHT);
 }
+
+void binary_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprBinary");
+  node_json_field(writer, "left", binary_node_get_left(self), expr_to_json);
+  node_json_field(
+      writer, "symbol", binary_node_get_symbol(self), symbol_node_to_json);
+  node_json_field(writer, "right", binary_node_get_right(self), expr_to_json);
+  node_json_end(writer);
+}

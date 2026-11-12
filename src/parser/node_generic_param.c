@@ -55,3 +55,34 @@ size_t generic_params_node_get_param_count(node_t *self) {
 node_t *generic_params_node_get_param(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void generic_param_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "GenericParam");
+  node_json_field(
+      writer, "name", generic_param_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "type", generic_param_node_get_type(self), expr_to_json);
+  node_json_field(writer,
+                  "constraint",
+                  generic_param_node_get_constraint(self),
+                  expr_to_json);
+  node_json_field(
+      writer, "default", generic_param_node_get_default(self), expr_to_json);
+  node_json_end(writer);
+}
+
+void generic_params_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "GenericParams");
+  json_writer_key(writer, "params");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < generic_params_node_get_param_count(self); i++) {
+    node_t *param = generic_params_node_get_param(self, i);
+    if (node_get_kind(param) == CLUX_NODE_GENERIC_PARAM) {
+      generic_param_node_to_json(writer, param);
+    } else {
+      expr_to_json(writer, param);
+    }
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

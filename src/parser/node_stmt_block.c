@@ -17,3 +17,14 @@ size_t stmt_block_node_get_stmt_count(node_t *self) {
 node_t *stmt_block_node_get_stmt(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void stmt_block_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtBlock");
+  json_writer_key(writer, "stmts");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < stmt_block_node_get_stmt_count(self); i++) {
+    stmt_to_json(writer, stmt_block_node_get_stmt(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

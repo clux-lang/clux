@@ -22,3 +22,12 @@ void stmt_import_node_set_path(node_t *self, node_t *path) {
 node_t *stmt_import_node_get_path(node_t *self) {
   return node_get_child(self, CLUX_STMT_IMPORT_PATH);
 }
+
+void stmt_import_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtImport");
+  node_json_field(
+      writer, "alias", stmt_import_node_get_alias(self), expr_to_json);
+  node_json_field(
+      writer, "path", stmt_import_node_get_path(self), expr_to_json);
+  node_json_end(writer);
+}

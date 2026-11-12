@@ -1,3 +1,4 @@
+#include "parser/node_struct_member.h"
 #include "parser/node_struct_decl.h"
 #include "parser/node.h"
 
@@ -45,4 +46,62 @@ void struct_decl_node_set_body(node_t *self, node_t *body) {
 
 node_t *struct_decl_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_EXPR_STRUCT_DECL_BODY);
+}
+
+void struct_decl_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprStructDecl");
+  node_json_field(writer,
+                  "keyword",
+                  struct_decl_node_get_keyword(self),
+                  symbol_node_to_json);
+  node_json_field(
+      writer, "name", struct_decl_node_get_name(self), expr_to_json);
+  node_json_field(writer,
+                  "generics",
+                  struct_decl_node_get_generics(self),
+                  generic_params_node_to_json);
+  node_json_field(writer,
+                  "implements",
+                  struct_decl_node_get_implements(self),
+                  implements_node_to_json);
+  node_json_field(writer,
+                  "body",
+                  struct_decl_node_get_body(self),
+                  struct_members_node_to_json);
+  node_json_end(writer);
+}
+
+void struct_members_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StructMembers");
+  json_writer_key(writer, "members");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < struct_members_node_get_member_count(self); i++) {
+    node_t *member = struct_members_node_get_member(self, i);
+    switch (node_get_kind(member)) {
+    case CLUX_NODE_FIELD:
+      field_node_to_json(writer, member);
+      break;
+    case CLUX_NODE_STMT_VAR:
+      stmt_var_node_to_json(writer, member);
+      break;
+    case CLUX_NODE_STMT_FUNC:
+      stmt_func_node_to_json(writer, member);
+      break;
+    case CLUX_NODE_STRUCT_EMBED:
+      struct_embed_node_to_json(writer, member);
+      break;
+    default:
+      json_writer_null(writer);
+      break;
+    }
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}
+
+void struct_embed_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StructEmbed");
+  node_json_field(
+      writer, "type", struct_embed_node_get_type(self), expr_to_json);
+  node_json_end(writer);
 }

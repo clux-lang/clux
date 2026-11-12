@@ -14,3 +14,10 @@ void stmt_reexport_node_set_path(node_t *self, node_t *path) {
 node_t *stmt_reexport_node_get_path(node_t *self) {
   return node_get_child(self, CLUX_STMT_REEXPORT_PATH);
 }
+
+void stmt_reexport_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtReexport");
+  node_json_field(
+      writer, "path", stmt_reexport_node_get_path(self), expr_to_json);
+  node_json_end(writer);
+}

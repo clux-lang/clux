@@ -30,3 +30,12 @@ void assign_node_set_value(node_t *self, node_t *value) {
 node_t *assign_node_get_value(node_t *self) {
   return node_get_child(self, CLUX_EXPR_ASSIGN_VALUE);
 }
+
+void assign_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprAssign");
+  node_json_field(writer, "id", assign_node_get_id(self), expr_to_json);
+  node_json_field(
+      writer, "symbol", assign_node_get_symbol(self), symbol_node_to_json);
+  node_json_field(writer, "value", assign_node_get_value(self), expr_to_json);
+  node_json_end(writer);
+}

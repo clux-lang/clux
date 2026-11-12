@@ -75,6 +75,9 @@ node_t *parser_read_stmt_struct(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_stmt_interface(allocator_t *allocator, parser_t *parser);
 
 node_t *parser_read_stmt(allocator_t *allocator, parser_t *parser);
+
+/* 语句类节点的 JSON 分派；node 为 NULL 时写 null。 */
+void stmt_to_json(json_writer_t *writer, node_t *node);
 #ifdef __cplusplus
 }
 #endif

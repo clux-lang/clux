@@ -54,3 +54,22 @@ size_t stmt_type_node_get_decorator_count(node_t *self) {
 node_t *stmt_type_node_get_decorator(node_t *self, size_t idx) {
   return node_get_child(self, CLUX_STMT_TYPE_FIRST_DECORATOR + idx);
 }
+
+void stmt_type_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtType");
+  node_json_field(writer, "name", stmt_type_node_get_name(self), expr_to_json);
+  node_json_field(writer,
+                  "generics",
+                  stmt_type_node_get_generics(self),
+                  generic_params_node_to_json);
+  node_json_field(
+      writer, "value", stmt_type_node_get_value(self), expr_to_json);
+  node_json_field(
+      writer, "export", stmt_type_node_get_export(self), symbol_node_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_STMT_TYPE_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}

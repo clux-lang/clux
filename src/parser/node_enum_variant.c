@@ -39,3 +39,23 @@ size_t enum_variants_node_get_variant_count(node_t *self) {
 node_t *enum_variants_node_get_variant(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void enum_variant_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "EnumVariant");
+  node_json_field(
+      writer, "name", enum_variant_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "value", enum_variant_node_get_value(self), expr_to_json);
+  node_json_end(writer);
+}
+
+void enum_variants_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "EnumVariants");
+  json_writer_key(writer, "variants");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < enum_variants_node_get_variant_count(self); i++) {
+    enum_variant_node_to_json(writer, enum_variants_node_get_variant(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

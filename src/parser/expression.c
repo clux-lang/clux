@@ -1335,3 +1335,154 @@ node_t *parser_read_expr_rest(allocator_t *allocator, parser_t *parser) {
   node_set_location_span(expr, &loc, node_get_location(operand));
   return expr;
 }
+
+void expr_to_json(json_writer_t *writer, node_t *node) {
+  if (!node) {
+    json_writer_null(writer);
+    return;
+  }
+  switch (node_get_kind(node)) {
+  case CLUX_NODE_SYMBOL:
+    symbol_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_NIL:
+    literal_nil_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_UNDEFINED:
+    literal_undefined_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_STRING:
+    literal_string_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_CHARACTER:
+    literal_character_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_NUMERIC:
+    literal_numeric_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_BOOLEAN:
+    literal_boolean_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_IDENTIFIER:
+    literal_identifier_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_LITERAL_TYPE:
+    literal_type_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_SOURCE_TEXT:
+    source_text_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_ASSIGN:
+    assign_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_TERNARY:
+    ternary_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_BINARY:
+  case CLUX_NODE_EXPR_UNARY:
+    binary_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_SUBSCRIPT:
+    subscript_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_SLICE:
+    slice_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_REST:
+    rest_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_CALL:
+    call_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_BUILTIN:
+    builtin_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_CONSTRUCT:
+    construct_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_CONSTRUCT_FIELD:
+    construct_field_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_GROUP:
+    group_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_TUPLE:
+    tuple_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_FUNC_TYPE:
+    func_type_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_FUNC_DECL:
+    func_decl_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FUNC_CAPTURES:
+    func_captures_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FUNC_CAPTURE:
+    func_capture_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FUNC_PARAMS:
+    func_params_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FUNC_PARAM:
+    func_param_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_UNION:
+    union_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_ENUM_DECL:
+    enum_decl_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_STRUCT_DECL:
+    struct_decl_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_BITFIELD_DECL:
+    bitfield_decl_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_EXPR_INTERFACE_DECL:
+    interface_decl_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_INTERFACE_MEMBERS:
+    interface_members_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STRUCT_MEMBERS:
+    struct_members_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_STRUCT_EMBED:
+    struct_embed_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_IMPLEMENTS:
+    implements_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_ENUM_VARIANT:
+    enum_variant_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_ENUM_VARIANTS:
+    enum_variants_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FIELD:
+    field_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_FIELDS:
+    fields_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_BITFIELD_FIELD:
+    bitfield_field_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_BITFIELD_FIELDS:
+    bitfield_fields_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_GENERIC_PARAMS:
+    generic_params_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_GENERIC_PARAM:
+    generic_param_node_to_json(writer, node);
+    break;
+  case CLUX_NODE_DECORATOR:
+    decorator_node_to_json(writer, node);
+    break;
+  default:
+    json_writer_null(writer);
+    break;
+  }
+}

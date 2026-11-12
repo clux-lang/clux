@@ -47,3 +47,28 @@ size_t func_params_node_get_param_count(node_t *self) {
 node_t *func_params_node_get_param(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void func_param_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "FuncParam");
+  node_json_field(writer, "name", func_param_node_get_name(self), expr_to_json);
+  node_json_field(writer, "type", func_param_node_get_type(self), expr_to_json);
+  node_json_field(
+      writer, "default", func_param_node_get_default(self), expr_to_json);
+  node_json_end(writer);
+}
+
+void func_params_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "FuncParams");
+  json_writer_key(writer, "params");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < func_params_node_get_param_count(self); i++) {
+    node_t *param = func_params_node_get_param(self, i);
+    if (node_get_kind(param) == CLUX_NODE_FUNC_PARAM) {
+      func_param_node_to_json(writer, param);
+    } else {
+      expr_to_json(writer, param);
+    }
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

@@ -62,3 +62,27 @@ void func_decl_node_set_body(node_t *self, node_t *body) {
 node_t *func_decl_node_get_body(node_t *self) {
   return node_get_child(self, CLUX_EXPR_FUNC_DECL_BODY);
 }
+
+void func_decl_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprFuncDecl");
+  node_json_field(
+      writer, "keyword", func_decl_node_get_keyword(self), symbol_node_to_json);
+  node_json_field(writer, "name", func_decl_node_get_name(self), expr_to_json);
+  node_json_field(writer,
+                  "generics",
+                  func_decl_node_get_generics(self),
+                  generic_params_node_to_json);
+  node_json_field(writer,
+                  "captures",
+                  func_decl_node_get_captures(self),
+                  func_captures_node_to_json);
+  node_json_field(writer,
+                  "params",
+                  func_decl_node_get_params(self),
+                  func_params_node_to_json);
+  node_json_field(
+      writer, "return", func_decl_node_get_return(self), expr_to_json);
+  node_json_field(
+      writer, "body", func_decl_node_get_body(self), stmt_block_node_to_json);
+  node_json_end(writer);
+}

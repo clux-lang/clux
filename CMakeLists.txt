@@ -95,10 +95,16 @@ if(BUILD_TESTS)
   # (CONFIGURE_DEPENDS re-runs globbing on each configure when the filesystem changes).
   file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
 
+  # 测试临时文件统一放在构建目录下的 tmp，避免依赖操作系统临时目录。
+  set(CLUX_TEST_TMP_DIR "${CMAKE_CURRENT_BINARY_DIR}/tmp")
+  file(MAKE_DIRECTORY "${CLUX_TEST_TMP_DIR}")
+
   add_executable(clux_test ${TEST_SOURCES} ${CORE_SOURCE} ${PARSER_SOURCE})
   target_include_directories(clux_test PRIVATE include)
   target_include_directories(clux_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
-  target_compile_definitions(clux_test PRIVATE U_DISABLE_VERSION_SUFFIX=1)
+  target_compile_definitions(clux_test PRIVATE
+      U_DISABLE_VERSION_SUFFIX=1
+      CLUX_TEST_TMP_DIR="${CLUX_TEST_TMP_DIR}")
   target_link_libraries(clux_test PRIVATE icu_data_init ICU::data ICU::uc GTest::gtest)
   clux_target_warnings(clux_test)
   clux_enable_coverage(clux_test)

@@ -22,3 +22,16 @@ void stmt_do_while_node_set_condition(node_t *self, node_t *condition) {
 node_t *stmt_do_while_node_get_condition(node_t *self) {
   return node_get_child(self, CLUX_STMT_DO_WHILE_CONDITION);
 }
+
+void stmt_do_while_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtDoWhile");
+  node_json_field(writer,
+                  "body",
+                  stmt_do_while_node_get_body(self),
+                  stmt_block_node_to_json);
+  node_json_field(writer,
+                  "condition",
+                  stmt_do_while_node_get_condition(self),
+                  expr_to_json);
+  node_json_end(writer);
+}

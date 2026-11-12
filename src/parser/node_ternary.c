@@ -30,3 +30,12 @@ void ternary_node_set_else(node_t *self, node_t *else_) {
 node_t *ternary_node_get_else(node_t *self) {
   return node_get_child(self, CLUX_EXPR_TERNARY_ELSE);
 }
+
+void ternary_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprTernary");
+  node_json_field(
+      writer, "condition", ternary_node_get_condition(self), expr_to_json);
+  node_json_field(writer, "then", ternary_node_get_then(self), expr_to_json);
+  node_json_field(writer, "else", ternary_node_get_else(self), expr_to_json);
+  node_json_end(writer);
+}

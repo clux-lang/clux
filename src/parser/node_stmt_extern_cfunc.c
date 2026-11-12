@@ -46,3 +46,22 @@ void stmt_extern_cfunc_node_set_return(node_t *self, node_t *ret) {
 node_t *stmt_extern_cfunc_node_get_return(node_t *self) {
   return node_get_child(self, CLUX_STMT_EXTERN_CFUNC_RETURN);
 }
+
+void stmt_extern_cfunc_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtExternCfunc");
+  node_json_field(writer,
+                  "export",
+                  stmt_extern_cfunc_node_get_export(self),
+                  symbol_node_to_json);
+  node_json_field(
+      writer, "lib", stmt_extern_cfunc_node_get_lib(self), expr_to_json);
+  node_json_field(
+      writer, "name", stmt_extern_cfunc_node_get_name(self), expr_to_json);
+  node_json_field(writer,
+                  "params",
+                  stmt_extern_cfunc_node_get_params(self),
+                  func_params_node_to_json);
+  node_json_field(
+      writer, "return", stmt_extern_cfunc_node_get_return(self), expr_to_json);
+  node_json_end(writer);
+}

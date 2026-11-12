@@ -39,3 +39,24 @@ size_t bitfield_fields_node_get_field_count(node_t *self) {
 node_t *bitfield_fields_node_get_field(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void bitfield_field_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "BitfieldField");
+  node_json_field(
+      writer, "name", bitfield_field_node_get_name(self), expr_to_json);
+  node_json_field(
+      writer, "width", bitfield_field_node_get_width(self), expr_to_json);
+  node_json_end(writer);
+}
+
+void bitfield_fields_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "BitfieldFields");
+  json_writer_key(writer, "fields");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < bitfield_fields_node_get_field_count(self); i++) {
+    bitfield_field_node_to_json(writer,
+                                bitfield_fields_node_get_field(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}

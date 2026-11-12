@@ -30,3 +30,18 @@ void func_type_node_set_return(node_t *self, node_t *ret) {
 node_t *func_type_node_get_return(node_t *self) {
   return node_get_child(self, CLUX_EXPR_FUNC_TYPE_RETURN);
 }
+
+void func_type_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "ExprFuncType");
+  node_json_field(writer,
+                  "captures",
+                  func_type_node_get_captures(self),
+                  func_captures_node_to_json);
+  node_json_field(writer,
+                  "params",
+                  func_type_node_get_params(self),
+                  func_params_node_to_json);
+  node_json_field(
+      writer, "return", func_type_node_get_return(self), expr_to_json);
+  node_json_end(writer);
+}

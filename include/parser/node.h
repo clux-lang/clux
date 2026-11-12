@@ -1,6 +1,7 @@
 #ifndef _H_PARSER_NODE_
 #define _H_PARSER_NODE_
 #include "core/allocator.h"
+#include "core/json.h"
 #include "core/location.h"
 #include "core/vec.h"
 #include "parser.h"
@@ -242,6 +243,110 @@ void node_resize_children(node_t *self, size_t size);
 node_t *node_set_child(node_t *self, size_t idx, node_t *child);
 node_t *node_get_child(node_t *self, size_t idx);
 void node_add_child(node_t *self, node_t *child);
+
+/* JSON 输出辅助：节点自己的 to_json 传入具体的子节点写出函数，
+   由调用方按 child 的类型白名单决定用哪个函数。 */
+typedef void (*node_json_fn_t)(json_writer_t *writer, node_t *node);
+void node_json_begin(json_writer_t *writer, node_t *node, const char *kind);
+void node_json_end(json_writer_t *writer);
+void node_json_text(json_writer_t *writer, node_t *node);
+void node_json_field(json_writer_t *writer,
+                     const char *key,
+                     node_t *child,
+                     node_json_fn_t write);
+void node_json_children(json_writer_t *writer,
+                        const char *key,
+                        node_t *node,
+                        size_t start,
+                        node_json_fn_t write);
+
+/* 各节点自己的 JSON 实现（定义在对应 node_*.c）。
+   父节点按 child 的实际类型选择其中一个函数，不做通用分派。 */
+void symbol_node_to_json(json_writer_t *writer, node_t *self);
+void program_node_to_json(json_writer_t *writer, node_t *self);
+void literal_nil_node_to_json(json_writer_t *writer, node_t *self);
+void literal_undefined_node_to_json(json_writer_t *writer, node_t *self);
+void literal_string_node_to_json(json_writer_t *writer, node_t *self);
+void literal_character_node_to_json(json_writer_t *writer, node_t *self);
+void literal_numeric_node_to_json(json_writer_t *writer, node_t *self);
+void literal_boolean_node_to_json(json_writer_t *writer, node_t *self);
+void literal_identifier_node_to_json(json_writer_t *writer, node_t *self);
+void literal_type_node_to_json(json_writer_t *writer, node_t *self);
+void source_text_node_to_json(json_writer_t *writer, node_t *self);
+void assign_node_to_json(json_writer_t *writer, node_t *self);
+void ternary_node_to_json(json_writer_t *writer, node_t *self);
+void binary_node_to_json(json_writer_t *writer, node_t *self);
+void subscript_node_to_json(json_writer_t *writer, node_t *self);
+void slice_node_to_json(json_writer_t *writer, node_t *self);
+void rest_node_to_json(json_writer_t *writer, node_t *self);
+void call_node_to_json(json_writer_t *writer, node_t *self);
+void builtin_node_to_json(json_writer_t *writer, node_t *self);
+void construct_node_to_json(json_writer_t *writer, node_t *self);
+void construct_field_node_to_json(json_writer_t *writer, node_t *self);
+void group_node_to_json(json_writer_t *writer, node_t *self);
+void tuple_node_to_json(json_writer_t *writer, node_t *self);
+void func_type_node_to_json(json_writer_t *writer, node_t *self);
+void func_decl_node_to_json(json_writer_t *writer, node_t *self);
+void func_captures_node_to_json(json_writer_t *writer, node_t *self);
+void func_capture_node_to_json(json_writer_t *writer, node_t *self);
+void func_params_node_to_json(json_writer_t *writer, node_t *self);
+void func_param_node_to_json(json_writer_t *writer, node_t *self);
+void union_node_to_json(json_writer_t *writer, node_t *self);
+void enum_decl_node_to_json(json_writer_t *writer, node_t *self);
+void struct_decl_node_to_json(json_writer_t *writer, node_t *self);
+void bitfield_decl_node_to_json(json_writer_t *writer, node_t *self);
+void interface_decl_node_to_json(json_writer_t *writer, node_t *self);
+void interface_members_node_to_json(json_writer_t *writer, node_t *self);
+void struct_members_node_to_json(json_writer_t *writer, node_t *self);
+void struct_embed_node_to_json(json_writer_t *writer, node_t *self);
+void implements_node_to_json(json_writer_t *writer, node_t *self);
+void enum_variant_node_to_json(json_writer_t *writer, node_t *self);
+void enum_variants_node_to_json(json_writer_t *writer, node_t *self);
+void field_node_to_json(json_writer_t *writer, node_t *self);
+void fields_node_to_json(json_writer_t *writer, node_t *self);
+void bitfield_field_node_to_json(json_writer_t *writer, node_t *self);
+void bitfield_fields_node_to_json(json_writer_t *writer, node_t *self);
+void generic_params_node_to_json(json_writer_t *writer, node_t *self);
+void generic_param_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_block_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_expr_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_return_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_empty_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_break_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_continue_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_defer_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_if_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_comptime_if_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_while_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_for_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_foreach_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_comptime_foreach_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_do_while_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_switch_node_to_json(json_writer_t *writer, node_t *self);
+void switch_branches_node_to_json(json_writer_t *writer, node_t *self);
+void switch_branch_node_to_json(json_writer_t *writer, node_t *self);
+void switch_patterns_node_to_json(json_writer_t *writer, node_t *self);
+void decorator_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_func_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_var_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_type_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_enum_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_union_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_struct_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_bitfield_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_test_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_import_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_reexport_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_extern_lib_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_extern_cfunc_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_extern_var_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_static_assert_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_assert_node_to_json(json_writer_t *writer, node_t *self);
+void stmt_interface_node_to_json(json_writer_t *writer, node_t *self);
+
+/* 类别分派（实现见 expression.c / statement.c），供父节点按槽位类型调用。 */
+void expr_to_json(json_writer_t *writer, node_t *node);
+void stmt_to_json(json_writer_t *writer, node_t *node);
 #ifdef __cplusplus
 }
 #endif

@@ -14,3 +14,10 @@ void stmt_return_node_set_value(node_t *self, node_t *value) {
 node_t *stmt_return_node_get_value(node_t *self) {
   return node_get_child(self, CLUX_STMT_RETURN_VALUE);
 }
+
+void stmt_return_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "StmtReturn");
+  node_json_field(
+      writer, "value", stmt_return_node_get_value(self), expr_to_json);
+  node_json_end(writer);
+}

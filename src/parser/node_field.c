@@ -53,3 +53,26 @@ size_t fields_node_get_field_count(node_t *self) {
 node_t *fields_node_get_field(node_t *self, size_t idx) {
   return node_get_child(self, idx);
 }
+
+void field_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "Field");
+  node_json_field(writer, "name", field_node_get_name(self), expr_to_json);
+  node_json_field(writer, "type", field_node_get_type(self), expr_to_json);
+  node_json_children(writer,
+                     "decorators",
+                     self,
+                     CLUX_FIELD_FIRST_DECORATOR,
+                     decorator_node_to_json);
+  node_json_end(writer);
+}
+
+void fields_node_to_json(json_writer_t *writer, node_t *self) {
+  node_json_begin(writer, self, "Fields");
+  json_writer_key(writer, "fields");
+  json_writer_begin_array(writer);
+  for (size_t i = 0; i < fields_node_get_field_count(self); i++) {
+    field_node_to_json(writer, fields_node_get_field(self, i));
+  }
+  json_writer_end_array(writer);
+  node_json_end(writer);
+}
