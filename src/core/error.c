@@ -29,7 +29,11 @@ clux_error_t *create_error(allocator_t *allocator,
   va_end(args);
   clux_error_t *err = allocator_alloc(allocator, sizeof(struct _clux_error_t));
   err->msg = msg;
-  err->loc = *loc;
+  if (loc) {
+    err->loc = *loc;
+  } else {
+    memset(&err->loc, 0, sizeof(err->loc));
+  }
   err->source = NULL;
   err->allocator = allocator;
   return err;
