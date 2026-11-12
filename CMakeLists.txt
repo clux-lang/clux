@@ -32,6 +32,7 @@ add_subdirectory(third_party/icu)
 
 aux_source_directory(src/core CORE_SOURCE)
 aux_source_directory(src/parser PARSER_SOURCE)
+aux_source_directory(src/cmd CMD_SOURCE)
 
 # ---------------------------------------------------------------------------
 # Code coverage (opt-in)
@@ -62,7 +63,7 @@ function(clux_enable_coverage target)
   target_link_options(${target} PRIVATE -fprofile-instr-generate)
 endfunction()
 
-add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE})
+add_executable(clux src/main.c ${CORE_SOURCE} ${PARSER_SOURCE} ${CMD_SOURCE})
 clux_target_warnings(clux)
 clux_enable_coverage(clux)
 
