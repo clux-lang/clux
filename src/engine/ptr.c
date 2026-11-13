@@ -166,8 +166,14 @@ static clux_vtable_t g_ptr_vtable = {
 
 clux_vtable_t *get_clux_ptr_vtable(void) { return &g_ptr_vtable; }
 
+static bool ptr_child_base_matches(clux_type_t *child, void *user_data) {
+  clux_ptr_meta_t *meta = clux_type_get_meta(child);
+  return meta && meta->base == (clux_type_t *)user_data;
+}
+
 clux_type_t *clux_type_get_ptr_type(clux_type_t *base) {
-  clux_type_t *existing = clux_type_find_child(base, CLUX_TYPE_PTR);
+  clux_type_t *existing =
+      clux_type_find_child(base, CLUX_TYPE_PTR, ptr_child_base_matches, base);
   if (existing) {
     return existing;
   }

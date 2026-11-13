@@ -1,6 +1,7 @@
 #include "engine/type.h"
 #include "core/allocator.h"
 #include "core/rbtree.h"
+#include "core/vec.h"
 #include "engine/interface.h"
 #include <stddef.h>
 #include <string.h>
@@ -12,7 +13,7 @@ struct _clux_type_t {
   size_t align;
   clux_vtable_t *vtable;
   void *meta;
-  rbtree_t *children; /* value 为拥有的 child clux_type_t*，key 为 kind */
+  rbtree_t *children; /* key 为 kind，value 为拥有 child 的桶 vec_t */
 };
 clux_type_t *create_clux_type(allocator_t *allocator,
                               clux_type_kind_t kind,
@@ -34,17 +35,22 @@ clux_type_t *create_clux_type(allocator_t *allocator,
   type->children = create_rbtree(allocator);
   return type;
 }
-static void delete_child(uintptr_t kind, clux_type_t *child, void *user_data) {
+static void
+delete_child_bucket(uintptr_t kind, vec_t *bucket, void *user_data) {
   (void)kind;
   (void)user_data;
-  delete_clux_type(&child);
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_type_t *child = vec_get(bucket, idx);
+    delete_clux_type(&child);
+  }
+  delete_vec(&bucket);
 }
 void delete_clux_type(clux_type_t **self) {
   if (!self || !*self) {
     return;
   }
   clux_type_t *type = *self;
-  rbtree_foreach(type->children, (rbtree_callback_t)delete_child, NULL);
+  rbtree_foreach(type->children, (rbtree_callback_t)delete_child_bucket, NULL);
   delete_rbtree(&type->children);
   allocator_free(type->allocator, &type->meta);
   allocator_free(type->allocator, (void **)&type->name);
@@ -66,11 +72,29 @@ void *clux_type_create_meta(clux_type_t *self, size_t meta_size) {
   return self->meta;
 }
 void *clux_type_get_meta(clux_type_t *self) { return self->meta; }
-clux_type_t *clux_type_find_child(clux_type_t *self, clux_type_kind_t kind) {
-  return rbtree_find(self->children, (uintptr_t)kind);
+clux_type_t *clux_type_find_child(clux_type_t *self,
+                                  clux_type_kind_t kind,
+                                  clux_type_child_pred_t pred,
+                                  void *user_data) {
+  vec_t *bucket = rbtree_find(self->children, (uintptr_t)kind);
+  if (!bucket) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < vec_get_size(bucket); idx++) {
+    clux_type_t *child = vec_get(bucket, idx);
+    if (!pred || pred(child, user_data)) {
+      return child;
+    }
+  }
+  return NULL;
 }
 void clux_type_add_child(clux_type_t *self,
                          clux_type_kind_t kind,
                          clux_type_t *child) {
-  (void)rbtree_insert(self->children, (uintptr_t)kind, child);
+  vec_t *bucket = rbtree_find(self->children, (uintptr_t)kind);
+  if (!bucket) {
+    bucket = create_vec(self->allocator);
+    (void)rbtree_insert(self->children, (uintptr_t)kind, bucket);
+  }
+  (void)vec_push(bucket, child);
 }

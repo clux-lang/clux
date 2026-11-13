@@ -1846,7 +1846,8 @@ TEST(EngineTest, PtrToPtrType) {
   EXPECT_EQ(clux_value_get_type(p), ptr_i32);
   EXPECT_EQ(clux_value_get_type(pp), ptr_ptr_i32);
   EXPECT_STREQ(clux_type_get_name(ptr_ptr_i32), "**i32");
-  EXPECT_EQ(clux_type_find_child(ptr_i32, CLUX_TYPE_PTR), ptr_ptr_i32);
+  EXPECT_EQ(clux_type_find_child(ptr_i32, CLUX_TYPE_PTR, NULL, NULL),
+            ptr_ptr_i32);
 
   /* 解引用一层拿到指针副本，指向同一目标。 */
   clux_value_t *deref = clux_context_deref_get(ctx, pp, NULL);
@@ -1990,6 +1991,35 @@ TEST(EngineTest, PtrUnsupportedOps) {
                "type '*i32' cannot be safely cast to 'i32'");
 
   delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+static bool child_name_is(clux_type_t *child, void *user_data) {
+  return strcmp(clux_type_get_name(child), (const char *)user_data) == 0;
+}
+
+TEST(EngineTest, ChildBucketsHoldMultipleSameKind) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_type_t *parent =
+      create_clux_type(a, CLUX_TYPE_I32, "parent", 4, 4, NULL);
+  clux_type_t *first = create_clux_type(a, CLUX_TYPE_PTR, "first", 8, 8, NULL);
+  clux_type_t *second =
+      create_clux_type(a, CLUX_TYPE_PTR, "second", 8, 8, NULL);
+  clux_type_add_child(parent, CLUX_TYPE_PTR, first);
+  clux_type_add_child(parent, CLUX_TYPE_PTR, second);
+
+  EXPECT_EQ(clux_type_find_child(parent, CLUX_TYPE_I64, NULL, NULL), nullptr);
+  /* pred 为 NULL 取桶首。 */
+  EXPECT_EQ(clux_type_find_child(parent, CLUX_TYPE_PTR, NULL, NULL), first);
+  /* 谓词在桶内按语义判别。 */
+  EXPECT_EQ(clux_type_find_child(
+                parent, CLUX_TYPE_PTR, child_name_is, (void *)"second"),
+            second);
+  EXPECT_EQ(clux_type_find_child(
+                parent, CLUX_TYPE_PTR, child_name_is, (void *)"nope"),
+            nullptr);
+  /* 递归销毁带走桶内全部 child。 */
+  delete_clux_type(&parent);
   delete_allocator(&a);
 }
 
