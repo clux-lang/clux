@@ -72,6 +72,26 @@ void *clux_type_create_meta(clux_type_t *self, size_t meta_size) {
   return self->meta;
 }
 void *clux_type_get_meta(clux_type_t *self) { return self->meta; }
+bool clux_type_equal(clux_type_t *self, clux_type_t *other) {
+  if (!self || !other) {
+    return false;
+  }
+  if (self == other) {
+    return true;
+  }
+  clux_vtable_t *vt = clux_type_get_vtable(self);
+  return vt && vt->type_equal && vt->type_equal(self, other);
+}
+bool clux_type_extends(clux_type_t *self, clux_type_t *base) {
+  if (!self || !base) {
+    return false;
+  }
+  if (self == base) {
+    return true;
+  }
+  clux_vtable_t *vt = clux_type_get_vtable(self);
+  return vt && vt->type_extends && vt->type_extends(self, base);
+}
 clux_type_t *clux_type_find_child(clux_type_t *self,
                                   clux_type_kind_t kind,
                                   clux_type_child_pred_t pred,

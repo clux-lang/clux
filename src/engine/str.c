@@ -91,10 +91,20 @@ str_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return str_compare(ctx, left, right, CLUX_OP_NE);
 }
 
+static bool str_type_equal(clux_type_t *self, clux_type_t *other) {
+  return clux_type_get_kind(self) == clux_type_get_kind(other);
+}
+
+static bool str_type_extends(clux_type_t *self, clux_type_t *base) {
+  return clux_type_get_kind(self) == clux_type_get_kind(base);
+}
+
 static clux_vtable_t g_str_vtable = {
     .add = str_add,
     .eq = str_eq,
     .ne = str_ne,
+    .type_equal = str_type_equal,
+    .type_extends = str_type_extends,
 };
 
 clux_vtable_t *get_clux_str_vtable(void) { return &g_str_vtable; }

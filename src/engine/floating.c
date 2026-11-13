@@ -416,6 +416,14 @@ static clux_value_t *float_negative(clux_context_t *ctx, clux_value_t *value) {
   return float_prefix(ctx, value, CLUX_OP_NEGATIVE);
 }
 
+static bool floating_type_equal(clux_type_t *self, clux_type_t *other) {
+  return clux_type_get_kind(self) == clux_type_get_kind(other);
+}
+
+static bool floating_type_extends(clux_type_t *self, clux_type_t *base) {
+  return clux_type_get_kind(self) == clux_type_get_kind(base);
+}
+
 static clux_vtable_t g_floating_vtable = {
     .add = float_add,
     .sub = float_sub,
@@ -431,6 +439,8 @@ static clux_vtable_t g_floating_vtable = {
     .ge = float_ge,
     .safe_cast = float_safe_cast,
     .cast = float_cast,
+    .type_equal = floating_type_equal,
+    .type_extends = floating_type_extends,
 };
 
 clux_vtable_t *get_clux_f32_vtable(void) { return &g_floating_vtable; }

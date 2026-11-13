@@ -3,6 +3,7 @@
 #include "core/error.h"
 #include "core/safe_alloc.h"
 #include "engine/context.h"
+#include "engine/integer.h"
 #include "engine/interface.h"
 #include "engine/ptr.h"
 #include "engine/type.h"
@@ -2020,6 +2021,84 @@ TEST(EngineTest, ChildBucketsHoldMultipleSameKind) {
             nullptr);
   /* 递归销毁带走桶内全部 child。 */
   delete_clux_type(&parent);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, TypeEqualByKind) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_context_t *other_ctx = create_clux_context(a);
+
+  clux_type_t *i32 = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_b = clux_context_get_i32_type(other_ctx);
+  clux_type_t *i64 = clux_context_get_i64_type(ctx);
+  clux_type_t *str = clux_context_get_str_type(ctx);
+  /* 同指针与 kind 判等两个路径都为 true。 */
+  EXPECT_TRUE(clux_type_equal(i32, i32));
+  EXPECT_TRUE(clux_type_equal(i32, i32_b));
+  EXPECT_FALSE(clux_type_equal(i32, i64));
+  EXPECT_FALSE(clux_type_equal(str, i32));
+  EXPECT_FALSE(clux_type_equal(i32, NULL));
+  EXPECT_FALSE(clux_type_equal(NULL, i32));
+
+  /* 无 vtable 的裸类型走指针判等 fallback。 */
+  clux_type_t *bare1 = create_clux_type(a, CLUX_TYPE_I32, "bare", 4, 4, NULL);
+  clux_type_t *bare2 = create_clux_type(a, CLUX_TYPE_I32, "bare", 4, 4, NULL);
+  EXPECT_TRUE(clux_type_equal(bare1, bare1));
+  EXPECT_FALSE(clux_type_equal(bare1, bare2));
+  EXPECT_FALSE(clux_type_equal(bare1, i32));
+  delete_clux_type(&bare1);
+  delete_clux_type(&bare2);
+
+  EXPECT_TRUE(clux_type_extends(i32, i32));
+  EXPECT_TRUE(clux_type_extends(i32, i32_b));
+  EXPECT_FALSE(clux_type_extends(i32, i64));
+
+  delete_clux_context(&other_ctx);
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PtrTypeEqualAndExtendsRecursive) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+  clux_context_t *other_ctx = create_clux_context(a);
+
+  clux_type_t *i32 = clux_context_get_i32_type(ctx);
+  clux_type_t *i32_b = clux_context_get_i32_type(other_ctx);
+  clux_type_t *ptr_i32 = clux_type_get_ptr_type(i32_b);
+  clux_type_t *ptr_i32_b = clux_type_get_ptr_type(i32);
+  clux_type_t *ptr_i64 = clux_type_get_ptr_type(clux_context_get_i64_type(ctx));
+
+  /* 递归判等：不同实例同 kind 同 base。 */
+  EXPECT_TRUE(clux_type_equal(ptr_i32, ptr_i32_b));
+  EXPECT_FALSE(clux_type_equal(ptr_i32, ptr_i64));
+  EXPECT_FALSE(clux_type_equal(ptr_i32, i32));
+  /* 协变 extends：*T extends *U 当且仅当 T extends U。 */
+  EXPECT_TRUE(clux_type_extends(ptr_i32, ptr_i32_b));
+  EXPECT_FALSE(clux_type_extends(ptr_i32, ptr_i64));
+  EXPECT_FALSE(clux_type_extends(ptr_i32, i32));
+  EXPECT_FALSE(clux_type_extends(i32, ptr_i32));
+
+  /* 两层递归：**i32 vs **i32。 */
+  clux_type_t *ptr_ptr_i32 = clux_type_get_ptr_type(ptr_i32);
+  clux_type_t *ptr_ptr_i32_b = clux_type_get_ptr_type(ptr_i32_b);
+  EXPECT_TRUE(clux_type_equal(ptr_ptr_i32, ptr_ptr_i32_b));
+  EXPECT_FALSE(clux_type_equal(ptr_ptr_i32, ptr_i32));
+  EXPECT_TRUE(clux_type_extends(ptr_ptr_i32, ptr_ptr_i32_b));
+  EXPECT_FALSE(clux_type_extends(ptr_ptr_i32, ptr_i64));
+
+  /* 桶去重判据：kind 判等的不同 base 实例，其 ptr 类型语义相等，
+     find-child 谓词据此命中。 */
+  clux_type_t *fake_i32 =
+      create_clux_type(a, CLUX_TYPE_I32, "i32", 4, 4, get_clux_i32_vtable());
+  clux_type_t *fake_ptr_i32 = clux_type_get_ptr_type(fake_i32);
+  EXPECT_TRUE(clux_type_equal(fake_ptr_i32, ptr_i32));
+  EXPECT_TRUE(clux_type_extends(fake_ptr_i32, ptr_i32_b));
+  delete_clux_type(&fake_i32);
+
+  delete_clux_context(&other_ctx);
+  delete_clux_context(&ctx);
   delete_allocator(&a);
 }
 

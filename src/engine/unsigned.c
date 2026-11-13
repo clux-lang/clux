@@ -478,6 +478,14 @@ static clux_value_t *uint_bit_not(clux_context_t *ctx, clux_value_t *value) {
   return uint_prefix(ctx, value, CLUX_OP_NOT);
 }
 
+static bool unsigned_type_equal(clux_type_t *self, clux_type_t *other) {
+  return clux_type_get_kind(self) == clux_type_get_kind(other);
+}
+
+static bool unsigned_type_extends(clux_type_t *self, clux_type_t *base) {
+  return clux_type_get_kind(self) == clux_type_get_kind(base);
+}
+
 static clux_vtable_t g_unsigned_vtable = {
     .add = uint_add,
     .sub = uint_sub,
@@ -500,6 +508,8 @@ static clux_vtable_t g_unsigned_vtable = {
     .bit_not = uint_bit_not,
     .safe_cast = uint_safe_cast,
     .cast = uint_cast,
+    .type_equal = unsigned_type_equal,
+    .type_extends = unsigned_type_extends,
 };
 
 clux_vtable_t *get_clux_u8_vtable(void) { return &g_unsigned_vtable; }

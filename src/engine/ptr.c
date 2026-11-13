@@ -157,18 +157,47 @@ ptr_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return ptr_compare(ctx, left, right, CLUX_OP_NE);
 }
 
+static bool ptr_type_equal(clux_type_t *self, clux_type_t *other) {
+  if (clux_type_get_kind(other) != CLUX_TYPE_PTR) {
+    return false;
+  }
+  clux_ptr_meta_t *self_meta = clux_type_get_meta(self);
+  clux_ptr_meta_t *other_meta = clux_type_get_meta(other);
+  if (!self_meta || !other_meta) {
+    return false;
+  }
+  return clux_type_equal(self_meta->base, other_meta->base);
+}
+
+/* 指针协变：*T extends *U 当且仅当 T extends U。 */
+static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
+  if (clux_type_get_kind(base) != CLUX_TYPE_PTR) {
+    return false;
+  }
+  clux_ptr_meta_t *self_meta = clux_type_get_meta(self);
+  clux_ptr_meta_t *base_meta = clux_type_get_meta(base);
+  if (!self_meta || !base_meta) {
+    return false;
+  }
+  return clux_type_extends(self_meta->base, base_meta->base);
+}
+
 static clux_vtable_t g_ptr_vtable = {
     .eq = ptr_eq,
     .ne = ptr_ne,
     .deref_get = ptr_deref_get,
     .deref_set = ptr_deref_set,
+    .type_equal = ptr_type_equal,
+    .type_extends = ptr_type_extends,
 };
 
 clux_vtable_t *get_clux_ptr_vtable(void) { return &g_ptr_vtable; }
 
+/* 桶去重判据：base 语义相等即视为同一 ptr 类型（跨实例、递归复合均命中），
+   由 clux_type_equal 回答。 */
 static bool ptr_child_base_matches(clux_type_t *child, void *user_data) {
   clux_ptr_meta_t *meta = clux_type_get_meta(child);
-  return meta && meta->base == (clux_type_t *)user_data;
+  return meta && clux_type_equal(meta->base, (clux_type_t *)user_data);
 }
 
 clux_type_t *clux_type_get_ptr_type(clux_type_t *base) {

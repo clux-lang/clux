@@ -490,6 +490,14 @@ static clux_value_t *integer_bit_not(clux_context_t *ctx, clux_value_t *value) {
   return integer_prefix(ctx, value, CLUX_OP_NOT);
 }
 
+static bool integer_type_equal(clux_type_t *self, clux_type_t *other) {
+  return clux_type_get_kind(self) == clux_type_get_kind(other);
+}
+
+static bool integer_type_extends(clux_type_t *self, clux_type_t *base) {
+  return clux_type_get_kind(self) == clux_type_get_kind(base);
+}
+
 static clux_vtable_t g_integer_vtable = {
     .add = integer_add,
     .sub = integer_sub,
@@ -512,6 +520,8 @@ static clux_vtable_t g_integer_vtable = {
     .bit_not = integer_bit_not,
     .safe_cast = integer_safe_cast,
     .cast = integer_cast,
+    .type_equal = integer_type_equal,
+    .type_extends = integer_type_extends,
 };
 
 clux_vtable_t *get_clux_i8_vtable(void) { return &g_integer_vtable; }

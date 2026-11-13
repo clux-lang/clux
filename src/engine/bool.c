@@ -115,7 +115,6 @@ static clux_value_t *bool_compare(clux_context_t *ctx,
   if (is_error_value(right)) {
     return right;
   }
-  clux_type_t *left_type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
   if (clux_type_get_kind(right_type) != CLUX_TYPE_BOOL) {
     return clux_context_create_error_message(
@@ -144,12 +143,22 @@ bool_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return bool_compare(ctx, left, right, CLUX_OP_NE);
 }
 
+static bool bool_type_equal(clux_type_t *self, clux_type_t *other) {
+  return clux_type_get_kind(self) == clux_type_get_kind(other);
+}
+
+static bool bool_type_extends(clux_type_t *self, clux_type_t *base) {
+  return clux_type_get_kind(self) == clux_type_get_kind(base);
+}
+
 static clux_vtable_t g_bool_vtable = {
     .logic_not = bool_logic_not,
     .eq = bool_eq,
     .ne = bool_ne,
     .safe_cast = bool_safe_cast,
     .cast = bool_cast,
+    .type_equal = bool_type_equal,
+    .type_extends = bool_type_extends,
 };
 
 clux_vtable_t *get_clux_bool_vtable(void) { return &g_bool_vtable; }

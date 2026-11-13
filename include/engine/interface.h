@@ -1,5 +1,7 @@
 #ifndef _H_ENGINE_INTERFACE_
 #define _H_ENGINE_INTERFACE_
+#include <stdbool.h>
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -93,6 +95,10 @@ typedef clux_value_t *(*clux_vt_deref_get_fn_t)(clux_context_t *,
 typedef clux_value_t *(*clux_vt_deref_set_fn_t)(clux_context_t *,
                                                 clux_value_t *,
                                                 clux_value_t *);
+/* 类型判等与兼容由类型自身的 vtable 回答，签名不带 context：这是纯类型
+   层知识（ptr 需要递归比较 base）。 */
+typedef bool (*clux_vt_type_equal_fn_t)(clux_type_t *self, clux_type_t *other);
+typedef bool (*clux_vt_type_extends_fn_t)(clux_type_t *self, clux_type_t *base);
 struct _clux_vtable_t {
   clux_vt_binary_fn_t add;
   clux_vt_binary_fn_t sub;
@@ -118,6 +124,8 @@ struct _clux_vtable_t {
   clux_vt_cast_fn_t cast;
   clux_vt_deref_get_fn_t deref_get;
   clux_vt_deref_set_fn_t deref_set;
+  clux_vt_type_equal_fn_t type_equal;
+  clux_vt_type_extends_fn_t type_extends;
 };
 #ifdef __cplusplus
 }
