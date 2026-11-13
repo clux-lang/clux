@@ -63,7 +63,6 @@ static clux_value_t *str_compare(clux_context_t *ctx,
   if (is_error_value(right)) {
     return right;
   }
-  clux_type_t *left_type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
   if (!str_kind(clux_type_get_kind(right_type))) {
     return clux_context_create_error_message(

@@ -39,6 +39,8 @@ struct _clux_context_t {
     clux_type_t *type_u16;
     clux_type_t *type_u32;
     clux_type_t *type_u64;
+    clux_type_t *type_isize;
+    clux_type_t *type_usize;
     clux_type_t *type_f32;
     clux_type_t *type_f64;
     clux_type_t *type_bool;
@@ -108,6 +110,18 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
                                                  sizeof(uint64_t),
                                                  alignof(uint64_t),
                                                  get_clux_u64_vtable());
+  ctx->builtin_types.type_isize = create_clux_type(allocator,
+                                                   CLUX_TYPE_ISIZE,
+                                                   "isize",
+                                                   sizeof(intptr_t),
+                                                   alignof(intptr_t),
+                                                   get_clux_isize_vtable());
+  ctx->builtin_types.type_usize = create_clux_type(allocator,
+                                                   CLUX_TYPE_USIZE,
+                                                   "usize",
+                                                   sizeof(size_t),
+                                                   alignof(size_t),
+                                                   get_clux_usize_vtable());
   ctx->builtin_types.type_f32 = create_clux_type(allocator,
                                                  CLUX_TYPE_F32,
                                                  "f32",
@@ -156,6 +170,8 @@ void delete_clux_context(clux_context_t **self) {
   delete_clux_type(&ctx->builtin_types.type_f64);
   delete_clux_type(&ctx->builtin_types.type_f32);
   delete_clux_type(&ctx->builtin_types.type_u64);
+  delete_clux_type(&ctx->builtin_types.type_usize);
+  delete_clux_type(&ctx->builtin_types.type_isize);
   delete_clux_type(&ctx->builtin_types.type_u32);
   delete_clux_type(&ctx->builtin_types.type_u16);
   delete_clux_type(&ctx->builtin_types.type_u8);
@@ -271,6 +287,20 @@ clux_value_t *clux_context_create_u64(clux_context_t *self,
                                       location_t *loc) {
   return create_integer_value(
       self, self->builtin_types.type_u64, &value, name, loc);
+}
+clux_value_t *clux_context_create_isize(clux_context_t *self,
+                                        intptr_t value,
+                                        const char *name,
+                                        location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_isize, &value, name, loc);
+}
+clux_value_t *clux_context_create_usize(clux_context_t *self,
+                                        size_t value,
+                                        const char *name,
+                                        location_t *loc) {
+  return create_integer_value(
+      self, self->builtin_types.type_usize, &value, name, loc);
 }
 clux_value_t *clux_context_create_f32(clux_context_t *self,
                                       float value,
@@ -647,6 +677,12 @@ clux_type_t *clux_context_get_u32_type(clux_context_t *ctx) {
 }
 clux_type_t *clux_context_get_u64_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_u64;
+}
+clux_type_t *clux_context_get_isize_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_isize;
+}
+clux_type_t *clux_context_get_usize_type(clux_context_t *ctx) {
+  return ctx->builtin_types.type_usize;
 }
 clux_type_t *clux_context_get_f32_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_f32;

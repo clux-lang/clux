@@ -67,6 +67,16 @@ static uint64_t read_u64(clux_value_t *value) {
   return raw ? *(uint64_t *)raw : 0;
 }
 
+static intptr_t read_isize(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(intptr_t *)raw : 0;
+}
+
+static size_t read_usize(clux_value_t *value) {
+  void *raw = ptr_to_raw(clux_value_get_data(value), 0);
+  return raw ? *(size_t *)raw : 0;
+}
+
 static float read_f32(clux_value_t *value) {
   void *raw = ptr_to_raw(clux_value_get_data(value), 0);
   return raw ? *(float *)raw : 0;
@@ -193,6 +203,107 @@ TEST(EngineTest, CreateI8I16I64ValuesAndAdd) {
   ASSERT_NE(i64_sum, nullptr);
   EXPECT_EQ(clux_value_get_type(i64_sum), clux_context_get_i64_type(ctx));
   EXPECT_EQ(read_i64(i64_sum), INT64_C(6000000000));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PlatformIsizeAndUsizeTypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* 元信息：宽度跟随平台指针宽度 */
+  clux_type_t *isize_type = clux_context_get_isize_type(ctx);
+  clux_type_t *usize_type = clux_context_get_usize_type(ctx);
+  ASSERT_NE(isize_type, nullptr);
+  ASSERT_NE(usize_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(isize_type), CLUX_TYPE_ISIZE);
+  EXPECT_EQ(clux_type_get_kind(usize_type), CLUX_TYPE_USIZE);
+  EXPECT_STREQ(clux_type_get_name(isize_type), "isize");
+  EXPECT_STREQ(clux_type_get_name(usize_type), "usize");
+  EXPECT_EQ(clux_type_get_size(isize_type), sizeof(intptr_t));
+  EXPECT_EQ(clux_type_get_size(usize_type), sizeof(size_t));
+  EXPECT_EQ(clux_type_get_align(isize_type), sizeof(intptr_t));
+  EXPECT_EQ(clux_type_get_align(usize_type), sizeof(size_t));
+  EXPECT_EQ(clux_context_get_isize_type(ctx), isize_type);
+  EXPECT_EQ(clux_context_get_usize_type(ctx), usize_type);
+
+  /* 算术：同类型相加保类型 */
+  clux_value_t *isize_left = clux_context_create_isize(ctx, -100, NULL, NULL);
+  clux_value_t *isize_right = clux_context_create_isize(ctx, 142, NULL, NULL);
+  clux_value_t *isize_sum =
+      clux_context_add(ctx, isize_left, isize_right, NULL);
+  ASSERT_NE(isize_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(isize_sum), isize_type);
+  EXPECT_EQ(read_isize(isize_sum), 42);
+
+  clux_value_t *usize_left =
+      clux_context_create_usize(ctx, (size_t)3000000000, NULL, NULL);
+  clux_value_t *usize_right =
+      clux_context_create_usize(ctx, (size_t)1000000000, NULL, NULL);
+  clux_value_t *usize_sum =
+      clux_context_add(ctx, usize_left, usize_right, NULL);
+  ASSERT_NE(usize_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(usize_sum), usize_type);
+  if (sizeof(size_t) > 4) {
+    EXPECT_EQ(read_usize(usize_sum), (size_t)4000000000);
+  }
+
+  /* 混合协商：i32 与 isize 运算取宽者 isize */
+  clux_value_t *i32_value = clux_context_create_i32(ctx, 20, NULL, NULL);
+  clux_value_t *mixed_sum = clux_context_add(ctx, i32_value, isize_left, NULL);
+  ASSERT_NE(mixed_sum, nullptr);
+  EXPECT_EQ(clux_value_get_type(mixed_sum), isize_type);
+  EXPECT_EQ(read_isize(mixed_sum), -80);
+
+  /* safe_cast：同宽互转可行，narrowing 拒绝 */
+  clux_value_t *i64_value = clux_context_create_i64(ctx, 12345, NULL, NULL);
+  clux_value_t *to_isize =
+      clux_context_safe_cast(ctx, i64_value, isize_type, NULL);
+  ASSERT_NE(to_isize, nullptr);
+  EXPECT_EQ(clux_value_get_type(to_isize), isize_type);
+  EXPECT_EQ(read_isize(to_isize), 12345);
+
+  clux_value_t *narrowed = clux_context_safe_cast(
+      ctx, isize_left, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(narrowed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(narrowed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(narrowed),
+               "cannot safely cast 'isize' to 'i32': narrowing conversion");
+
+  /* cast 矩阵：bool→usize、f64→isize、usize→u32 显式截断 */
+  clux_value_t *bool_value = clux_context_create_bool(ctx, true, NULL, NULL);
+  clux_value_t *bool_to_usize =
+      clux_context_cast(ctx, bool_value, usize_type, NULL);
+  ASSERT_NE(bool_to_usize, nullptr);
+  EXPECT_EQ(clux_value_get_type(bool_to_usize), usize_type);
+  EXPECT_EQ(read_usize(bool_to_usize), (size_t)1);
+
+  clux_value_t *f64_value = clux_context_create_f64(ctx, -3.75, NULL, NULL);
+  clux_value_t *f64_to_isize =
+      clux_context_cast(ctx, f64_value, isize_type, NULL);
+  ASSERT_NE(f64_to_isize, nullptr);
+  EXPECT_EQ(clux_value_get_type(f64_to_isize), isize_type);
+  EXPECT_EQ(read_isize(f64_to_isize), -3);
+
+  clux_value_t *usize_to_u32 =
+      clux_context_cast(ctx, usize_left, clux_context_get_u32_type(ctx), NULL);
+  ASSERT_NE(usize_to_u32, nullptr);
+  EXPECT_EQ(read_u32(usize_to_u32), (uint32_t)3000000000u);
+
+  /* 关系运算 */
+  clux_value_t *cmp =
+      clux_context_binary(ctx, CLUX_OP_LT, isize_left, isize_right, NULL);
+  ASSERT_NE(cmp, nullptr);
+  EXPECT_EQ(read_bool(cmp), true);
+
+  /* 非数值混合报错 */
+  clux_value_t *str_value = clux_context_create_str(ctx, "x", NULL, NULL);
+  clux_value_t *bad = clux_context_add(ctx, isize_left, str_value, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "operator '+' requires operands of the same type");
 
   delete_clux_context(&ctx);
   delete_allocator(&a);

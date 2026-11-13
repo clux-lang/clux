@@ -9,6 +9,7 @@ clux_vtable_t *get_clux_u8_vtable(void);
 clux_vtable_t *get_clux_u16_vtable(void);
 clux_vtable_t *get_clux_u32_vtable(void);
 clux_vtable_t *get_clux_u64_vtable(void);
+clux_vtable_t *get_clux_usize_vtable(void);
 #ifdef __cplusplus
 }
 #endif

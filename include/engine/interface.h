@@ -55,6 +55,8 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_BOOL,
   CLUX_TYPE_STR,
   CLUX_TYPE_PTR,
+  CLUX_TYPE_ISIZE,
+  CLUX_TYPE_USIZE,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,

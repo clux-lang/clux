@@ -84,6 +84,10 @@ bool_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
     return clux_context_create_f32(ctx, input ? 1.0f : 0.0f, NULL, NULL);
   case CLUX_TYPE_F64:
     return clux_context_create_f64(ctx, input ? 1.0 : 0.0, NULL, NULL);
+  case CLUX_TYPE_ISIZE:
+    return clux_context_create_isize(ctx, input ? 1 : 0, NULL, NULL);
+  case CLUX_TYPE_USIZE:
+    return clux_context_create_usize(ctx, input ? 1 : 0, NULL, NULL);
   default:
     return clux_context_create_error_message(
         ctx,

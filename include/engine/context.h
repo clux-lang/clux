@@ -55,6 +55,14 @@ clux_value_t *clux_context_create_u64(clux_context_t *self,
                                       uint64_t value,
                                       const char *name,
                                       location_t *loc);
+clux_value_t *clux_context_create_isize(clux_context_t *self,
+                                        intptr_t value,
+                                        const char *name,
+                                        location_t *loc);
+clux_value_t *clux_context_create_usize(clux_context_t *self,
+                                        size_t value,
+                                        const char *name,
+                                        location_t *loc);
 clux_value_t *clux_context_create_f32(clux_context_t *self,
                                       float value,
                                       const char *name,
@@ -128,6 +136,8 @@ clux_type_t *clux_context_get_u8_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_u16_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_u32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_u64_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_isize_type(clux_context_t *ctx);
+clux_type_t *clux_context_get_usize_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f32_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_f64_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_bool_type(clux_context_t *ctx);
