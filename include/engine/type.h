@@ -5,6 +5,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/* 类型无运行期 delete：生命周期与 context 相同，delete_clux_type 仅作
+   teardown 递归入口。name 由类型对象持有（create 拷贝副本）。 */
 clux_type_t *create_clux_type(allocator_t *allocator,
                               clux_type_kind_t kind,
                               const char *name,
@@ -17,8 +19,15 @@ size_t clux_type_get_size(clux_type_t *self);
 size_t clux_type_get_align(clux_type_t *self);
 const char *clux_type_get_name(clux_type_t *self);
 clux_vtable_t *clux_type_get_vtable(clux_type_t *self);
+allocator_t *clux_type_get_allocator(clux_type_t *self);
 void *clux_type_create_meta(clux_type_t *self, size_t meta_size);
 void *clux_type_get_meta(clux_type_t *self);
+/* children：基于本类型构造的复合类型，按 kind 索引（同一 base 同一 kind
+   至多一个 child），父类型拥有 child，递归销毁时统一释放。 */
+clux_type_t *clux_type_find_child(clux_type_t *self, clux_type_kind_t kind);
+void clux_type_add_child(clux_type_t *self,
+                         clux_type_kind_t kind,
+                         clux_type_t /* transfer */ *child);
 #ifdef __cplusplus
 }
 #endif

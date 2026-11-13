@@ -72,6 +72,25 @@ clux_value_t *clux_context_create_str(clux_context_t *self,
                                       const char *value,
                                       const char *name,
                                       location_t *loc);
+clux_value_t *clux_context_create_ptr(clux_context_t *self,
+                                      clux_type_t *type,
+                                      ptr_handle_t value,
+                                      const char *name,
+                                      location_t *loc);
+/* 取指向 value 的指针：error 自传播，shadow 产出 "*<base>" 类型的 shadow。
+   任意类型可用，不经过 vtable。 */
+clux_value_t *
+clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc);
+clux_value_t *clux_context_deref_get(clux_context_t *self,
+                                     clux_value_t *ptr,
+                                     location_t *loc);
+clux_value_t *clux_context_deref_set(clux_context_t *self,
+                                     clux_value_t *ptr,
+                                     clux_value_t *value,
+                                     location_t *loc);
+/* 按 base 取 "*<base>" 指针类型：children 表 find-or-create，同一 base 恒等
+   返回同一实例。 */
+clux_type_t *clux_context_get_ptr_type(clux_context_t *self, clux_type_t *base);
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
                                             const char *name,

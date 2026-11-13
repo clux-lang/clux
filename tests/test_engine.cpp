@@ -4,6 +4,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/ptr.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <cmath>
@@ -1770,6 +1771,228 @@ TEST(EngineTest, ComparisonShadowAndErrorPropagate) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, PtrTypeIsInternedByBase) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32 = clux_context_get_i32_type(ctx);
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32);
+  ASSERT_NE(ptr_i32, nullptr);
+  EXPECT_EQ(clux_context_get_ptr_type(ctx, i32), ptr_i32);
+  EXPECT_STREQ(clux_type_get_name(ptr_i32), "*i32");
+  EXPECT_EQ(clux_type_get_kind(ptr_i32), CLUX_TYPE_PTR);
+  EXPECT_EQ(clux_type_get_size(ptr_i32), sizeof(void *));
+  clux_vtable_t *vt = clux_type_get_vtable(ptr_i32);
+  ASSERT_NE(vt, nullptr);
+  EXPECT_EQ(vt, get_clux_ptr_vtable());
+  EXPECT_NE(vt->eq, nullptr);
+  EXPECT_NE(vt->ne, nullptr);
+  EXPECT_NE(vt->deref_get, nullptr);
+  EXPECT_NE(vt->deref_set, nullptr);
+  EXPECT_EQ(vt->add, nullptr);
+  EXPECT_EQ(vt->safe_cast, nullptr);
+  EXPECT_EQ(vt->cast, nullptr);
+
+  clux_type_t *ptr_f64 =
+      clux_context_get_ptr_type(ctx, clux_context_get_f64_type(ctx));
+  ASSERT_NE(ptr_f64, nullptr);
+  EXPECT_NE(ptr_f64, ptr_i32);
+  EXPECT_STREQ(clux_type_get_name(ptr_f64), "*f64");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, RefAndDerefRoundTrip) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 42, "x", NULL);
+  clux_value_t *p = clux_context_ref(ctx, x, NULL);
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(clux_value_get_type(p),
+            clux_context_get_ptr_type(ctx, clux_context_get_i32_type(ctx)));
+  EXPECT_FALSE(clux_value_is_shadow(p));
+
+  clux_value_t *read = clux_context_deref_get(ctx, p, NULL);
+  ASSERT_NE(read, nullptr);
+  EXPECT_EQ(clux_value_get_type(read), clux_context_get_i32_type(ctx));
+  EXPECT_EQ(read_i32(read), 42);
+
+  clux_value_t *n = clux_context_create_i32(ctx, 99, NULL, NULL);
+  clux_value_t *assigned = clux_context_deref_set(ctx, p, n, NULL);
+  EXPECT_EQ(assigned, n);
+  clux_value_t *reread = clux_context_deref_get(ctx, p, NULL);
+  ASSERT_NE(reread, nullptr);
+  EXPECT_EQ(read_i32(reread), 99);
+  /* 写穿透：目标值本体同步更新。 */
+  EXPECT_EQ(read_i32(x), 99);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PtrToPtrType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 7, NULL, NULL);
+  clux_value_t *p = clux_context_ref(ctx, x, NULL);
+  clux_value_t *pp = clux_context_ref(ctx, p, NULL);
+  ASSERT_NE(pp, nullptr);
+  clux_type_t *ptr_i32 =
+      clux_context_get_ptr_type(ctx, clux_context_get_i32_type(ctx));
+  clux_type_t *ptr_ptr_i32 = clux_context_get_ptr_type(ctx, ptr_i32);
+  EXPECT_EQ(clux_value_get_type(p), ptr_i32);
+  EXPECT_EQ(clux_value_get_type(pp), ptr_ptr_i32);
+  EXPECT_STREQ(clux_type_get_name(ptr_ptr_i32), "**i32");
+  EXPECT_EQ(clux_type_find_child(ptr_i32, CLUX_TYPE_PTR), ptr_ptr_i32);
+
+  /* 解引用一层拿到指针副本，指向同一目标。 */
+  clux_value_t *deref = clux_context_deref_get(ctx, pp, NULL);
+  ASSERT_NE(deref, nullptr);
+  EXPECT_EQ(clux_value_get_type(deref), ptr_i32);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, deref, p, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_TRUE(read_bool(eq));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, RefOfShadowAndErrorPropagate) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *p_shadow = clux_context_ref(ctx, shadow, NULL);
+  ASSERT_NE(p_shadow, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(p_shadow));
+  EXPECT_STREQ(clux_type_get_name(clux_value_get_type(p_shadow)), "*i32");
+  clux_value_t *shadow_read = clux_context_deref_get(ctx, p_shadow, NULL);
+  ASSERT_NE(shadow_read, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_read));
+  EXPECT_EQ(clux_value_get_type(shadow_read), clux_context_get_i32_type(ctx));
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *shadow_set = clux_context_deref_set(ctx, p_shadow, x, NULL);
+  ASSERT_NE(shadow_set, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_set));
+  EXPECT_EQ(clux_value_get_type(shadow_set), clux_context_get_i32_type(ctx));
+
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_ref(ctx, err, NULL), err);
+  EXPECT_EQ(clux_context_deref_get(ctx, err, NULL), err);
+  EXPECT_EQ(clux_context_deref_set(ctx, err, x, NULL), err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PtrComparisonOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *y = clux_context_create_i32(ctx, 2, NULL, NULL);
+  clux_value_t *px = clux_context_ref(ctx, x, NULL);
+  clux_value_t *px2 = clux_context_ref(ctx, x, NULL);
+  clux_value_t *py = clux_context_ref(ctx, y, NULL);
+
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, px, px2, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_EQ(clux_value_get_type(eq), clux_context_get_bool_type(ctx));
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, px, py, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_TRUE(read_bool(ne));
+  clux_value_t *eq_diff = clux_context_binary(ctx, CLUX_OP_EQ, px, py, NULL);
+  ASSERT_NE(eq_diff, nullptr);
+  EXPECT_FALSE(read_bool(eq_diff));
+
+  clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, px, x, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mixed)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '==' requires operands of the same type");
+
+  clux_value_t *shadow_px = clux_context_ref(
+      ctx,
+      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx)),
+      NULL);
+  clux_value_t *shadow_cmp =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow_px, px, NULL);
+  ASSERT_NE(shadow_cmp, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_cmp));
+  EXPECT_EQ(clux_value_get_type(shadow_cmp), clux_context_get_bool_type(ctx));
+
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, err, px, NULL), err);
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_NE, px, err, NULL), err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PtrDerefSetRequiresBaseType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *p = clux_context_ref(ctx, x, NULL);
+  clux_value_t *wide = clux_context_create_i64(ctx, 2, NULL, NULL);
+  clux_value_t *mismatch = clux_context_deref_set(ctx, p, wide, NULL);
+  ASSERT_NE(mismatch, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mismatch)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mismatch),
+               "cannot assign 'i64' through a pointer to 'i32'");
+  /* 失败的赋值不改变目标值。 */
+  EXPECT_EQ(read_i32(x), 1);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, PtrUnsupportedOps) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *p = clux_context_ref(ctx, x, NULL);
+
+  clux_value_t *add = clux_context_binary(ctx, CLUX_OP_ADD, p, p, NULL);
+  ASSERT_NE(add, nullptr);
+  EXPECT_STREQ(error_message_of(add),
+               "type '*i32' does not support operator '+'");
+  clux_value_t *lt = clux_context_binary(ctx, CLUX_OP_LT, p, p, NULL);
+  ASSERT_NE(lt, nullptr);
+  EXPECT_STREQ(error_message_of(lt),
+               "type '*i32' does not support operator '<'");
+  clux_value_t *lnot = clux_context_prefix(ctx, CLUX_OP_LNOT, p, NULL);
+  ASSERT_NE(lnot, nullptr);
+  EXPECT_STREQ(error_message_of(lnot),
+               "type '*i32' does not support operator '!'");
+
+  clux_value_t *deref_of_value = clux_context_deref_get(ctx, x, NULL);
+  ASSERT_NE(deref_of_value, nullptr);
+  EXPECT_STREQ(error_message_of(deref_of_value),
+               "type 'i32' does not support operator '*'");
+  clux_value_t *deref_set_of_value = clux_context_deref_set(ctx, x, x, NULL);
+  ASSERT_NE(deref_set_of_value, nullptr);
+  EXPECT_STREQ(error_message_of(deref_set_of_value),
+               "type 'i32' does not support operator '*'");
+
+  clux_value_t *safe_cast =
+      clux_context_safe_cast(ctx, p, clux_context_get_i32_type(ctx), NULL);
+  ASSERT_NE(safe_cast, nullptr);
+  EXPECT_STREQ(error_message_of(safe_cast),
+               "type '*i32' cannot be safely cast to 'i32'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, CreateI32ValueAndReadData) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
@@ -1928,6 +2151,18 @@ TEST(EngineTest, NoLeak) {
   clux_value_t *text = clux_context_create_str(ctx, "str", NULL, NULL);
   clux_value_t *joined = clux_context_add(ctx, text, text, NULL);
   ASSERT_NE(joined, nullptr);
+  clux_value_t *ptr = clux_context_ref(ctx, left, NULL);
+  ASSERT_NE(ptr, nullptr);
+  clux_value_t *deref = clux_context_deref_get(ctx, ptr, NULL);
+  ASSERT_NE(deref, nullptr);
+  EXPECT_EQ(clux_context_deref_set(ctx, ptr, right, NULL), right);
+  clux_value_t *same = clux_context_binary(ctx, CLUX_OP_EQ, ptr, ptr, NULL);
+  ASSERT_NE(same, nullptr);
+  clux_value_t *ptr_shadow = clux_context_ref(
+      ctx,
+      clux_context_create_shadow_value(ctx, clux_context_get_str_type(ctx)),
+      NULL);
+  ASSERT_NE(ptr_shadow, nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

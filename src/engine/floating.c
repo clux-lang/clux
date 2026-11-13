@@ -328,6 +328,7 @@ static clux_value_t *float_binary(clux_context_t *ctx,
   case CLUX_OP_XOR:
   case CLUX_OP_SHL:
   case CLUX_OP_SHR:
+  default:
     return clux_context_create_error_message(
         ctx,
         NULL,

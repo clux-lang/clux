@@ -362,6 +362,13 @@ static clux_value_t *uint_binary(clux_context_t *ctx,
       result = left_value >> right_value;
     }
     break;
+  default:
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "type '%s' does not support operator '%s'",
+        clux_type_get_name(target),
+        binary_op_symbol(op));
   }
   return uint_create(ctx, clux_type_get_kind(target), result);
 }

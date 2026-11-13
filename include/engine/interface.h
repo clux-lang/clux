@@ -52,6 +52,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_F64,
   CLUX_TYPE_BOOL,
   CLUX_TYPE_STR,
+  CLUX_TYPE_PTR,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -87,6 +88,11 @@ typedef clux_value_t *(*clux_vt_safe_cast_fn_t)(clux_context_t *,
 typedef clux_value_t *(*clux_vt_cast_fn_t)(clux_context_t *,
                                            clux_value_t *,
                                            clux_type_t *);
+typedef clux_value_t *(*clux_vt_deref_get_fn_t)(clux_context_t *,
+                                                clux_value_t *);
+typedef clux_value_t *(*clux_vt_deref_set_fn_t)(clux_context_t *,
+                                                clux_value_t *,
+                                                clux_value_t *);
 struct _clux_vtable_t {
   clux_vt_binary_fn_t add;
   clux_vt_binary_fn_t sub;
@@ -110,6 +116,8 @@ struct _clux_vtable_t {
   clux_vt_prefix_fn_t logic_not;
   clux_vt_safe_cast_fn_t safe_cast;
   clux_vt_cast_fn_t cast;
+  clux_vt_deref_get_fn_t deref_get;
+  clux_vt_deref_set_fn_t deref_set;
 };
 #ifdef __cplusplus
 }

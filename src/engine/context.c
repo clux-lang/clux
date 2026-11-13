@@ -19,7 +19,9 @@
 #include "engine/bool.h"
 #include "engine/error.h"
 #include "engine/floating.h"
+#include "engine/ptr.h"
 #include "engine/str.h"
+
 struct _clux_context_t {
   allocator_t *allocator;
   safe_allocator_t *safe_allocator;
@@ -307,6 +309,84 @@ clux_value_t *clux_context_create_str(clux_context_t *self,
     (void)memcpy(str, value, len);
   }
   return clux_context_create_str_value(self, str, name, loc);
+}
+
+clux_value_t *clux_context_create_ptr(clux_context_t *self,
+                                      clux_type_t *type,
+                                      ptr_handle_t value,
+                                      const char *name,
+                                      location_t *loc) {
+  ptr_handle_t data =
+      safe_alloc(self->safe_allocator, sizeof(ptr_handle_t), loc);
+  ptr_handle_t *raw = ptr_to_raw(data, 0);
+  *raw = value;
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_type_t *clux_context_get_ptr_type(clux_context_t *self,
+                                       clux_type_t *base) {
+  (void)self;
+  return base ? clux_type_get_ptr_type(base) : NULL;
+}
+clux_value_t *
+clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(self, loc, "ref requires a value");
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  if (clux_type_get_kind(type) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *ptr_type = clux_context_get_ptr_type(self, type);
+  if (!ptr_type) {
+    return clux_context_create_error_message(
+        self, loc, "ref requires a typed value");
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(self, ptr_type);
+  }
+  return clux_context_create_ptr(
+      self, ptr_type, clux_value_get_data(value), NULL, loc);
+}
+clux_value_t *clux_context_deref_get(clux_context_t *self,
+                                     clux_value_t *ptr,
+                                     location_t *loc) {
+  if (!ptr) {
+    return clux_context_create_error_message(
+        self, loc, "operator '*' requires an operand");
+  }
+  clux_type_t *type = clux_value_get_type(ptr);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->deref_get) {
+    return vt->deref_get(self, ptr);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support operator "
+      "'*'",
+      type_name ? type_name : "<unknown>");
+}
+clux_value_t *clux_context_deref_set(clux_context_t *self,
+                                     clux_value_t *ptr,
+                                     clux_value_t *value,
+                                     location_t *loc) {
+  if (!ptr || !value) {
+    return clux_context_create_error_message(
+        self, loc, "operator '*' requires a pointer and a value");
+  }
+  clux_type_t *type = clux_value_get_type(ptr);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->deref_set) {
+    return vt->deref_set(self, ptr, value);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support operator "
+      "'*'",
+      type_name ? type_name : "<unknown>");
 }
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
