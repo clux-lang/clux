@@ -7,6 +7,7 @@
 #include "engine/interface.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
+#include "engine/slice.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <cmath>
@@ -2705,6 +2706,148 @@ TEST(EngineTest, DerefThroughVolatilePointer) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, SliceTypeInterningAndMeta) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *slice_i32 = clux_context_get_slice_type(ctx, i32_type);
+  ASSERT_NE(slice_i32, nullptr);
+  EXPECT_EQ(clux_type_get_kind(slice_i32), CLUX_TYPE_SLICE);
+  EXPECT_STREQ(clux_type_get_name(slice_i32), "[]i32");
+  EXPECT_EQ(clux_context_get_slice_type(ctx, i32_type), slice_i32);
+  EXPECT_EQ(clux_type_get_size(slice_i32), sizeof(clux_slice_data_t));
+  EXPECT_EQ(clux_type_get_align(slice_i32), alignof(clux_slice_data_t));
+
+  /* 不同 base 产出不同实例；判等由 vtable 递归回答 */
+  clux_type_t *slice_i64 =
+      clux_context_get_slice_type(ctx, clux_context_get_i64_type(ctx));
+  ASSERT_NE(slice_i64, nullptr);
+  EXPECT_NE(slice_i64, slice_i32);
+  EXPECT_TRUE(clux_type_equal(slice_i32, slice_i32));
+  EXPECT_FALSE(clux_type_equal(slice_i32, slice_i64));
+  EXPECT_TRUE(clux_type_extends(slice_i32, slice_i32));
+  EXPECT_FALSE(clux_type_extends(slice_i32, slice_i64));
+  /* 与指针类型互不相等 */
+  clux_type_t *ptr_i32 = clux_context_get_ptr_type(ctx, i32_type);
+  EXPECT_FALSE(clux_type_equal(slice_i32, ptr_i32));
+  EXPECT_FALSE(clux_type_extends(slice_i32, ptr_i32));
+
+  /* 元素类型带限定：[]const i32 与 []i32 区分 */
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *slice_const = clux_context_get_slice_type(ctx, const_i32);
+  ASSERT_NE(slice_const, nullptr);
+  EXPECT_STREQ(clux_type_get_name(slice_const), "[]const i32");
+  EXPECT_FALSE(clux_type_equal(slice_const, slice_i32));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SliceCreateAndLen) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *slice_i32 =
+      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *x = clux_context_create_i32(ctx, 42, NULL, NULL);
+  clux_value_t *slice = clux_context_create_slice(
+      ctx, slice_i32, clux_value_get_data(x), 4, "s", NULL);
+  ASSERT_NE(slice, nullptr);
+  EXPECT_EQ(clux_value_get_type(slice), slice_i32);
+
+  /* data 布局：{ ptr, len }，ptr 借用 x 的内存 */
+  clux_slice_data_t *raw =
+      (clux_slice_data_t *)ptr_to_raw(clux_value_get_data(slice), 0);
+  ASSERT_NE(raw, nullptr);
+  EXPECT_EQ(raw->ptr, clux_value_get_data(x));
+  EXPECT_EQ(raw->len, 4u);
+
+  /* len 读出为 usize */
+  clux_value_t *len = clux_context_slice_len(ctx, slice, NULL);
+  ASSERT_NE(len, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(len)), CLUX_TYPE_USIZE);
+  EXPECT_EQ(read_usize(len), 4u);
+
+  /* shadow 切片：len 产出 shadow usize */
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, slice_i32);
+  clux_value_t *shadow_len = clux_context_slice_len(ctx, shadow, NULL);
+  ASSERT_NE(shadow_len, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_len));
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow_len)),
+            CLUX_TYPE_USIZE);
+
+  /* 非切片类型报 error */
+  clux_value_t *bad = clux_context_slice_len(ctx, x, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "type 'i32' is not a slice");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, SliceCompareAndCloneAssign) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *slice_i32 =
+      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *x = clux_context_create_i32(ctx, 42, NULL, NULL);
+  ptr_handle_t target = clux_value_get_data(x);
+  clux_value_t *s1 =
+      clux_context_create_slice(ctx, slice_i32, target, 4, NULL, NULL);
+  clux_value_t *s2 =
+      clux_context_create_slice(ctx, slice_i32, target, 4, NULL, NULL);
+  clux_value_t *s3 =
+      clux_context_create_slice(ctx, slice_i32, target, 8, NULL, NULL);
+
+  /* ptr 与 len 全等才相等 */
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, s1, s2, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, s1, s3, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_TRUE(read_bool(ne));
+
+  /* 右操作数非切片报 error */
+  clux_value_t *bad = clux_context_binary(ctx, CLUX_OP_EQ, s1, x, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "operator '==' requires operands of the same type");
+
+  /* shadow 切片比较产出 shadow bool */
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, slice_i32);
+  clux_value_t *shadow_eq =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow, s1, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
+
+  /* clone：通用 memcpy 路径产出独立 data 块，字段一致 */
+  clux_value_t *copy = clux_context_clone(ctx, s1, NULL);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(clux_value_get_type(copy), slice_i32);
+  EXPECT_NE(clux_value_get_data(copy), clux_value_get_data(s1));
+  clux_slice_data_t *copy_raw =
+      (clux_slice_data_t *)ptr_to_raw(clux_value_get_data(copy), 0);
+  EXPECT_EQ(copy_raw->ptr, target);
+  EXPECT_EQ(copy_raw->len, 4u);
+
+  /* assign：位图整体写穿，目标字段更新为右值字段 */
+  clux_value_t *receiver =
+      clux_context_create_slice(ctx, slice_i32, 0, 0, "r", NULL);
+  EXPECT_EQ(clux_context_assign(ctx, receiver, s3, NULL), receiver);
+  clux_slice_data_t *receiver_raw =
+      (clux_slice_data_t *)ptr_to_raw(clux_value_get_data(receiver), 0);
+  EXPECT_EQ(receiver_raw->ptr, target);
+  EXPECT_EQ(receiver_raw->len, 8u);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -2751,6 +2894,14 @@ TEST(EngineTest, NoLeak) {
                               NULL),
       NULL);
   ASSERT_NE(qualified_read, nullptr);
+  clux_type_t *slice_type =
+      clux_context_get_slice_type(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *slice = clux_context_create_slice(
+      ctx, slice_type, clux_value_get_data(left), 4, NULL, NULL);
+  ASSERT_NE(slice, nullptr);
+  ASSERT_NE(clux_context_slice_len(ctx, slice, NULL), nullptr);
+  ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, slice, slice, NULL), nullptr);
+  ASSERT_NE(clux_context_clone(ctx, slice, NULL), nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

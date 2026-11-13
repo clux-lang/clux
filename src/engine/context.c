@@ -21,6 +21,7 @@
 #include "engine/floating.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
+#include "engine/slice.h"
 #include "engine/str.h"
 
 struct _clux_context_t {
@@ -358,6 +359,54 @@ clux_type_t *clux_context_get_ptr_type(clux_context_t *self,
   (void)self;
   return base ? clux_type_get_ptr_type(base) : NULL;
 }
+clux_type_t *clux_context_get_slice_type(clux_context_t *self,
+                                         clux_type_t *base) {
+  (void)self;
+  return base ? clux_type_get_slice_type(base) : NULL;
+}
+clux_value_t *clux_context_create_slice(clux_context_t *self,
+                                        clux_type_t *type,
+                                        ptr_handle_t ptr,
+                                        size_t len,
+                                        const char *name,
+                                        location_t *loc) {
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  void *raw = ptr_to_raw(data, 0);
+  (void)memcpy(raw, &(clux_slice_data_t){ptr, len}, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_slice_len(clux_context_t *self,
+                                     clux_value_t *slice,
+                                     location_t *loc) {
+  if (!slice) {
+    return clux_context_create_error_message(
+        self, loc, "slice length requires a slice");
+  }
+  clux_type_t *type = clux_value_get_type(slice);
+  if (clux_type_get_kind(type) == CLUX_TYPE_ERROR) {
+    return slice;
+  }
+  if (clux_type_get_kind(type) != CLUX_TYPE_SLICE) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(self,
+                                             loc,
+                                             "type '%s' is not a slice",
+                                             type_name ? type_name
+                                                       : "<unknown>");
+  }
+  if (clux_value_is_shadow(slice)) {
+    return clux_context_create_shadow_value(self,
+                                            self->builtin_types.type_usize);
+  }
+  ptr_handle_t data = clux_value_get_data(slice);
+  clux_slice_data_t *raw = ptr_to_raw(data, 0);
+  if (!raw) {
+    return clux_context_create_error_message(
+        self, loc, "cannot read length of an invalid slice");
+  }
+  return clux_context_create_usize(self, raw->len, NULL, loc);
+}
 clux_value_t *
 clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
   if (!value) {
@@ -679,7 +728,11 @@ clux_value_t *clux_context_assign(clux_context_t *self,
         "cannot assign to a value of type '%s'",
         target_name ? target_name : "<unknown>");
   }
-  clux_value_t *casted = clux_context_safe_cast(self, value, target_type, loc);
+  /* 同类型无需转换：复合类型（slice/ptr 等）没有 safe_cast，恒等直接 memcpy */
+  clux_value_t *casted = value;
+  if (!clux_type_equal(target_type, clux_value_get_type(value))) {
+    casted = clux_context_safe_cast(self, value, target_type, loc);
+  }
   clux_type_t *casted_type = clux_value_get_type(casted);
   if (clux_type_get_kind(casted_type) == CLUX_TYPE_ERROR) {
     return casted;

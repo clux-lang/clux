@@ -99,6 +99,23 @@ clux_value_t *clux_context_deref_set(clux_context_t *self,
 /* 按 base 取 "*<base>" 指针类型：children 表 find-or-create，同一 base 恒等
    返回同一实例。 */
 clux_type_t *clux_context_get_ptr_type(clux_context_t *self, clux_type_t *base);
+/* 按 base 取 "[]<base>" 切片类型：children 表 find-or-create，同一 base
+   恒等返回同一实例。 */
+clux_type_t *clux_context_get_slice_type(clux_context_t *self,
+                                         clux_type_t *base);
+/* 创建胖指针切片值：data 布局为 { ptr, len }，借用 ptr 指向的内存。
+   type 须是 CLUX_TYPE_SLICE（由调用方保证）。 */
+clux_value_t *clux_context_create_slice(clux_context_t *self,
+                                        clux_type_t *type,
+                                        ptr_handle_t ptr,
+                                        size_t len,
+                                        const char *name,
+                                        location_t *loc);
+/* 读取切片长度：产出 usize 值；非切片类型返回 error，shadow 切片产出
+   shadow usize。 */
+clux_value_t *clux_context_slice_len(clux_context_t *self,
+                                     clux_value_t *slice,
+                                     location_t *loc);
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
                                             const char *name,
