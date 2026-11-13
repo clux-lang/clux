@@ -60,6 +60,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_CONST,
   CLUX_TYPE_VOLATILE,
   CLUX_TYPE_SLICE,
+  CLUX_TYPE_ARRAY,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -73,13 +74,14 @@ typedef clux_value_t *(*clux_vt_set_field_fn_t)(clux_context_t *,
                                                 clux_value_t *,
                                                 const char *,
                                                 clux_value_t *);
-typedef clux_value_t *(*clux_vt_get_index_fn_t)(clux_context_t *,
-                                                clux_value_t *,
-                                                clux_value_t *);
-typedef clux_value_t *(*clux_vt_set_index_fn_t)(clux_context_t *,
-                                                clux_value_t *,
-                                                clux_value_t *,
-                                                clux_value_t *);
+/* deref 与 index 是两个语义清晰的"借引用"读原语：deref 是指针解引用
+   （*p），index 是数组/切片下标取项。两者均返回 base 类型的 view
+   （内存共享、天然携带引用属性），写入由通用 assign 写穿 view 完成，
+   赋值给具名变量时也经 assign 的 memcpy 自动失去引用属性。 */
+typedef clux_value_t *(*clux_vt_deref_fn_t)(clux_context_t *, clux_value_t *);
+typedef clux_value_t *(*clux_vt_index_fn_t)(clux_context_t *,
+                                            clux_value_t *,
+                                            clux_value_t *);
 typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_invoke_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -95,11 +97,6 @@ typedef clux_value_t *(*clux_vt_safe_cast_fn_t)(clux_context_t *,
 typedef clux_value_t *(*clux_vt_cast_fn_t)(clux_context_t *,
                                            clux_value_t *,
                                            clux_type_t *);
-typedef clux_value_t *(*clux_vt_deref_get_fn_t)(clux_context_t *,
-                                                clux_value_t *);
-typedef clux_value_t *(*clux_vt_deref_set_fn_t)(clux_context_t *,
-                                                clux_value_t *,
-                                                clux_value_t *);
 /* 类型判等与兼容由类型自身的 vtable 回答，签名不带 context：这是纯类型
    层知识（ptr 需要递归比较 base）。 */
 typedef bool (*clux_vt_type_equal_fn_t)(clux_type_t *self, clux_type_t *other);
@@ -127,8 +124,8 @@ struct _clux_vtable_t {
   clux_vt_prefix_fn_t logic_not;
   clux_vt_safe_cast_fn_t safe_cast;
   clux_vt_cast_fn_t cast;
-  clux_vt_deref_get_fn_t deref_get;
-  clux_vt_deref_set_fn_t deref_set;
+  clux_vt_deref_fn_t deref;
+  clux_vt_index_fn_t index;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };

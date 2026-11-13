@@ -159,13 +159,13 @@ qual_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   return clux_context_cast(ctx, qualified_view(ctx, value), target, NULL);
 }
 
-static clux_value_t *qual_deref_get(clux_context_t *ctx, clux_value_t *ptr) {
-  return clux_context_deref_get(ctx, qualified_view(ctx, ptr), NULL);
+static clux_value_t *qual_deref(clux_context_t *ctx, clux_value_t *ptr) {
+  return clux_context_deref(ctx, qualified_view(ctx, ptr), NULL);
 }
 
 static clux_value_t *
-qual_deref_set(clux_context_t *ctx, clux_value_t *ptr, clux_value_t *value) {
-  return clux_context_deref_set(ctx, qualified_view(ctx, ptr), value, NULL);
+qual_index(clux_context_t *ctx, clux_value_t *aggregate, clux_value_t *index) {
+  return clux_context_index(ctx, qualified_view(ctx, aggregate), index, NULL);
 }
 
 static clux_vtable_t g_qualifier_vtable = {
@@ -191,8 +191,8 @@ static clux_vtable_t g_qualifier_vtable = {
     .logic_not = qual_logic_not,
     .safe_cast = qual_safe_cast,
     .cast = qual_cast,
-    .deref_get = qual_deref_get,
-    .deref_set = qual_deref_set,
+    .deref = qual_deref,
+    .index = qual_index,
     .type_equal = qualifier_type_equal,
     .type_extends = qualifier_type_extends,
 };

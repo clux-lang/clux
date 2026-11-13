@@ -2,7 +2,6 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
-#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -43,7 +42,9 @@ static bool ptr_read(clux_value_t *value, ptr_handle_t *out) {
   return true;
 }
 
-static clux_value_t *ptr_deref_get(clux_context_t *ctx, clux_value_t *ptr) {
+/* 解引用（*p）：返回 base 类型的 view（与目标内存共享），
+   写入由通用 assign 完成。 */
+static clux_value_t *ptr_deref(clux_context_t *ctx, clux_value_t *ptr) {
   clux_type_t *type = clux_value_get_type(ptr);
   clux_type_t *base = ptr_base_type(type);
   if (!base) {
@@ -67,54 +68,8 @@ static clux_value_t *ptr_deref_get(clux_context_t *ctx, clux_value_t *ptr) {
         "cannot dereference a value of type '%s'",
         type_name ? type_name : "<unknown>");
   }
-  size_t size = clux_type_get_size(base);
-  ptr_handle_t data =
-      safe_alloc(clux_context_get_safe_allocator(ctx), size, NULL);
-  (void)memcpy(ptr_to_raw(data, 0), ptr_to_raw(target, 0), size);
-  return clux_context_create_value(ctx, base, data, NULL, NULL);
-}
-
-static clux_value_t *
-ptr_deref_set(clux_context_t *ctx, clux_value_t *ptr, clux_value_t *value) {
-  clux_type_t *type = clux_value_get_type(ptr);
-  clux_type_t *base = ptr_base_type(type);
-  if (!base) {
-    const char *type_name = clux_type_get_name(type);
-    return clux_context_create_error_message(
-        ctx,
-        NULL,
-        "pointer type '%s' has no base type",
-        type_name ? type_name : "<unknown>");
-  }
-  /* const 是静态性质：即便操作数是 shadow 也照常拒绝写入 */
-  if (clux_type_is_const(base)) {
-    const char *type_name = clux_type_get_name(type);
-    return clux_context_create_error_message(
-        ctx,
-        NULL,
-        "cannot assign through a pointer to '%s'",
-        type_name ? type_name : "<unknown>");
-  }
-  if (clux_value_is_shadow(ptr) || clux_value_is_shadow(value)) {
-    return clux_context_create_shadow_value(ctx, base);
-  }
-  clux_type_t *value_type = clux_value_get_type(value);
-  /* 类型比较放宽到 unwrap 后的 base：通过 *volatile T 允许写入裸 T 值，
-     裸指针接受带限定类型（const 来源）的值（volatile 目标同理）。 */
-  if (value_type != base &&
-      !clux_type_equal(clux_type_unwrap(value_type), clux_type_unwrap(base))) {
-    const char *value_name = clux_type_get_name(value_type);
-    const char *base_name = clux_type_get_name(base);
-    return clux_context_create_error_message(
-        ctx,
-        NULL,
-        "cannot assign '%s' through a pointer to '%s'",
-        value_name ? value_name : "<unknown>",
-        base_name ? base_name : "<unknown>");
-  }
-  ptr_handle_t target = 0;
-  if (!ptr_read(ptr, &target) || !ptr_is_valid(target) ||
-      ptr_get_size(target) < clux_type_get_size(base)) {
+  ptr_handle_t view = ptr_offset(target, 0);
+  if (!view) {
     const char *type_name = clux_type_get_name(type);
     return clux_context_create_error_message(
         ctx,
@@ -122,10 +77,7 @@ ptr_deref_set(clux_context_t *ctx, clux_value_t *ptr, clux_value_t *value) {
         "cannot dereference a value of type '%s'",
         type_name ? type_name : "<unknown>");
   }
-  size_t size = clux_type_get_size(base);
-  (void)memcpy(
-      ptr_to_raw(target, 0), ptr_to_raw(clux_value_get_data(value), 0), size);
-  return value;
+  return clux_context_create_value(ctx, base, view, NULL, NULL);
 }
 
 static clux_value_t *ptr_compare(clux_context_t *ctx,
@@ -198,8 +150,7 @@ static bool ptr_type_extends(clux_type_t *self, clux_type_t *base) {
 static clux_vtable_t g_ptr_vtable = {
     .eq = ptr_eq,
     .ne = ptr_ne,
-    .deref_get = ptr_deref_get,
-    .deref_set = ptr_deref_set,
+    .deref = ptr_deref,
     .type_equal = ptr_type_equal,
     .type_extends = ptr_type_extends,
 };

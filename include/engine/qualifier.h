@@ -6,8 +6,9 @@
 extern "C" {
 #endif
 /* const/volatile 限定复合类型：挂在 base 的 children 表中按 kind 分桶
-   interning（与 ptr 同模式）。size/align 承接 base；值运算一律按 unwrap 后
-   的 base 分派，限定语义只在写入点（assign/deref_set）生效：
+   interning（与 ptr 同模式）。size/align 承接 base；vtable 是静态委托：
+   每个操作基于左值创建 base 类型的 view（内存共享）后走标准入口，
+   嵌套限定经递归 view 自然解开。限定语义只在写入点（通用 assign）生效：
    const 阻断写入，volatile 阻断优化但不阻断读写。 */
 clux_type_t *clux_type_get_qualified_type(clux_type_t *base,
                                           clux_type_kind_t qualifier);

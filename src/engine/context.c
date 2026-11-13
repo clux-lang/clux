@@ -1,4 +1,5 @@
 #include "engine/context.h"
+#include "engine/array.h"
 #include "core/allocator.h"
 #include "core/error.h"
 #include "core/location.h"
@@ -407,6 +408,121 @@ clux_value_t *clux_context_slice_len(clux_context_t *self,
   }
   return clux_context_create_usize(self, raw->len, NULL, loc);
 }
+clux_type_t *clux_context_get_array_type(clux_context_t *self,
+                                         clux_type_t *base,
+                                         size_t len) {
+  (void)self;
+  return base ? clux_type_get_array_type(base, len) : NULL;
+}
+clux_value_t *clux_context_create_array(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        location_t *loc) {
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *
+clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {
+  if (!ptr) {
+    return clux_context_create_error_message(
+        self, loc, "deref requires a pointer");
+  }
+  if (clux_type_get_kind(clux_value_get_type(ptr)) == CLUX_TYPE_ERROR) {
+    return ptr;
+  }
+  clux_type_t *type = clux_value_get_type(ptr);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->deref) {
+    return vt->deref(self, ptr);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support operator '*'",
+      type_name ? type_name : "<unknown>");
+}
+clux_value_t *clux_context_index(clux_context_t *self,
+                                 clux_value_t *aggregate,
+                                 clux_value_t *index,
+                                 location_t *loc) {
+  if (!aggregate || !index) {
+    return clux_context_create_error_message(
+        self, loc, "index requires an aggregate and an index");
+  }
+  if (clux_type_get_kind(clux_value_get_type(aggregate)) == CLUX_TYPE_ERROR) {
+    return aggregate;
+  }
+  if (clux_type_get_kind(clux_value_get_type(index)) == CLUX_TYPE_ERROR) {
+    return index;
+  }
+  clux_type_t *type = clux_value_get_type(aggregate);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->index) {
+    return vt->index(self, aggregate, index);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support indexing",
+      type_name ? type_name : "<unknown>");
+}
+clux_value_t *clux_context_index_to_i64(clux_context_t *self,
+                                        clux_value_t *index,
+                                        int64_t *out) {
+  clux_type_kind_t kind = clux_type_get_kind(clux_value_get_type(index));
+  void *raw = ptr_to_raw(clux_value_get_data(index), 0);
+  if (!raw) {
+    return clux_context_create_error_message(
+        self, NULL, "cannot read an invalid index");
+  }
+  int64_t value = 0;
+  switch (kind) {
+  case CLUX_TYPE_I8:
+    value = *(int8_t *)raw;
+    break;
+  case CLUX_TYPE_I16:
+    value = *(int16_t *)raw;
+    break;
+  case CLUX_TYPE_I32:
+    value = *(int32_t *)raw;
+    break;
+  case CLUX_TYPE_I64:
+    value = *(int64_t *)raw;
+    break;
+  case CLUX_TYPE_ISIZE:
+    value = *(intptr_t *)raw;
+    break;
+  case CLUX_TYPE_U8:
+    value = *(uint8_t *)raw;
+    break;
+  case CLUX_TYPE_U16:
+    value = *(uint16_t *)raw;
+    break;
+  case CLUX_TYPE_U32:
+    value = *(uint32_t *)raw;
+    break;
+  case CLUX_TYPE_U64:
+    value = (int64_t)*(uint64_t *)raw;
+    break;
+  case CLUX_TYPE_USIZE:
+    value = (int64_t)*(size_t *)raw;
+    break;
+  default: {
+    const char *type_name = clux_type_get_name(clux_value_get_type(index));
+    return clux_context_create_error_message(
+        self,
+        NULL,
+        "index must be an integer, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  }
+  *out = value;
+  return NULL;
+}
 clux_value_t *
 clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
   if (!value) {
@@ -426,47 +542,6 @@ clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc) {
   }
   return clux_context_create_ptr(
       self, ptr_type, clux_value_get_data(value), NULL, loc);
-}
-clux_value_t *clux_context_deref_get(clux_context_t *self,
-                                     clux_value_t *ptr,
-                                     location_t *loc) {
-  if (!ptr) {
-    return clux_context_create_error_message(
-        self, loc, "operator '*' requires an operand");
-  }
-  clux_type_t *type = clux_value_get_type(ptr);
-  clux_vtable_t *vt = clux_type_get_vtable(type);
-  if (vt && vt->deref_get) {
-    return vt->deref_get(self, ptr);
-  }
-  const char *type_name = clux_type_get_name(type);
-  return clux_context_create_error_message(
-      self,
-      loc,
-      "type '%s' does not support operator "
-      "'*'",
-      type_name ? type_name : "<unknown>");
-}
-clux_value_t *clux_context_deref_set(clux_context_t *self,
-                                     clux_value_t *ptr,
-                                     clux_value_t *value,
-                                     location_t *loc) {
-  if (!ptr || !value) {
-    return clux_context_create_error_message(
-        self, loc, "operator '*' requires a pointer and a value");
-  }
-  clux_type_t *type = clux_value_get_type(ptr);
-  clux_vtable_t *vt = clux_type_get_vtable(type);
-  if (vt && vt->deref_set) {
-    return vt->deref_set(self, ptr, value);
-  }
-  const char *type_name = clux_type_get_name(type);
-  return clux_context_create_error_message(
-      self,
-      loc,
-      "type '%s' does not support operator "
-      "'*'",
-      type_name ? type_name : "<unknown>");
 }
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,

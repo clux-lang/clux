@@ -2,6 +2,7 @@
 #include "core/allocator.h"
 #include "core/error.h"
 #include "core/safe_alloc.h"
+#include "engine/array.h"
 #include "engine/context.h"
 #include "engine/integer.h"
 #include "engine/interface.h"
@@ -1901,8 +1902,8 @@ TEST(EngineTest, PtrTypeIsInternedByBase) {
   EXPECT_EQ(vt, get_clux_ptr_vtable());
   EXPECT_NE(vt->eq, nullptr);
   EXPECT_NE(vt->ne, nullptr);
-  EXPECT_NE(vt->deref_get, nullptr);
-  EXPECT_NE(vt->deref_set, nullptr);
+  EXPECT_NE(vt->deref, nullptr);
+  EXPECT_EQ(vt->index, nullptr);
   EXPECT_EQ(vt->add, nullptr);
   EXPECT_EQ(vt->safe_cast, nullptr);
   EXPECT_EQ(vt->cast, nullptr);
@@ -1928,18 +1929,31 @@ TEST(EngineTest, RefAndDerefRoundTrip) {
             clux_context_get_ptr_type(ctx, clux_context_get_i32_type(ctx)));
   EXPECT_FALSE(clux_value_is_shadow(p));
 
-  clux_value_t *read = clux_context_deref_get(ctx, p, NULL);
+  /* 解引用：deref 返回 base 类型的 view（与目标内存共享） */
+  clux_value_t *read = clux_context_deref(ctx, p, NULL);
   ASSERT_NE(read, nullptr);
   EXPECT_EQ(clux_value_get_type(read), clux_context_get_i32_type(ctx));
   EXPECT_EQ(read_i32(read), 42);
 
+  /* 写入走通用 assign：写穿 view 即写穿透到目标值本体 */
   clux_value_t *n = clux_context_create_i32(ctx, 99, NULL, NULL);
-  clux_value_t *assigned = clux_context_deref_set(ctx, p, n, NULL);
-  EXPECT_EQ(assigned, n);
-  clux_value_t *reread = clux_context_deref_get(ctx, p, NULL);
+  clux_value_t *assigned = clux_context_assign(ctx, read, n, NULL);
+  EXPECT_EQ(assigned, read);
+  clux_value_t *reread = clux_context_deref(ctx, p, NULL);
   ASSERT_NE(reread, nullptr);
   EXPECT_EQ(read_i32(reread), 99);
-  /* 写穿透：目标值本体同步更新。 */
+  EXPECT_EQ(read_i32(x), 99);
+
+  /* view 与底层内存别名：读穿 view 可见本体变化 */
+  EXPECT_EQ(read_i32(read), 99);
+
+  /* 赋值给具名变量经 memcpy 自动失去引用属性：后续写入不回写本体 */
+  clux_value_t *named = clux_context_create_i32(ctx, 0, "named", NULL);
+  EXPECT_EQ(clux_context_assign(ctx, named, reread, NULL), named);
+  EXPECT_EQ(read_i32(named), 99);
+  clux_value_t *m = clux_context_create_i32(ctx, 7, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, named, m, NULL), named);
+  EXPECT_EQ(read_i32(named), 7);
   EXPECT_EQ(read_i32(x), 99);
 
   delete_clux_context(&ctx);
@@ -1963,8 +1977,8 @@ TEST(EngineTest, PtrToPtrType) {
   EXPECT_EQ(clux_type_find_child(ptr_i32, CLUX_TYPE_PTR, NULL, NULL),
             ptr_ptr_i32);
 
-  /* 解引用一层拿到指针副本，指向同一目标。 */
-  clux_value_t *deref = clux_context_deref_get(ctx, pp, NULL);
+  /* 解引用一层拿到 *i32 的 view，指向同一目标。 */
+  clux_value_t *deref = clux_context_deref(ctx, pp, NULL);
   ASSERT_NE(deref, nullptr);
   EXPECT_EQ(clux_value_get_type(deref), ptr_i32);
   clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, deref, p, NULL);
@@ -1985,21 +1999,21 @@ TEST(EngineTest, RefOfShadowAndErrorPropagate) {
   ASSERT_NE(p_shadow, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(p_shadow));
   EXPECT_STREQ(clux_type_get_name(clux_value_get_type(p_shadow)), "*i32");
-  clux_value_t *shadow_read = clux_context_deref_get(ctx, p_shadow, NULL);
+  clux_value_t *shadow_read = clux_context_deref(ctx, p_shadow, NULL);
   ASSERT_NE(shadow_read, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_read));
   EXPECT_EQ(clux_value_get_type(shadow_read), clux_context_get_i32_type(ctx));
 
   clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
-  clux_value_t *shadow_set = clux_context_deref_set(ctx, p_shadow, x, NULL);
+  clux_value_t *shadow_set = clux_context_assign(ctx, shadow_read, x, NULL);
   ASSERT_NE(shadow_set, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_set));
   EXPECT_EQ(clux_value_get_type(shadow_set), clux_context_get_i32_type(ctx));
 
   clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
   EXPECT_EQ(clux_context_ref(ctx, err, NULL), err);
-  EXPECT_EQ(clux_context_deref_get(ctx, err, NULL), err);
-  EXPECT_EQ(clux_context_deref_set(ctx, err, x, NULL), err);
+  EXPECT_EQ(clux_context_deref(ctx, err, NULL), err);
+  EXPECT_EQ(clux_context_assign(ctx, err, x, NULL), err);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -2050,18 +2064,20 @@ TEST(EngineTest, PtrComparisonOps) {
   delete_allocator(&a);
 }
 
-TEST(EngineTest, PtrDerefSetRequiresBaseType) {
+TEST(EngineTest, PtrAssignThroughViewRequiresBaseType) {
   allocator_t *a = create_allocator(malloc, free);
   clux_context_t *ctx = create_clux_context(a);
 
   clux_value_t *x = clux_context_create_i32(ctx, 1, NULL, NULL);
   clux_value_t *p = clux_context_ref(ctx, x, NULL);
+  clux_value_t *view = clux_context_deref(ctx, p, NULL);
+  ASSERT_NE(view, nullptr);
   clux_value_t *wide = clux_context_create_i64(ctx, 2, NULL, NULL);
-  clux_value_t *mismatch = clux_context_deref_set(ctx, p, wide, NULL);
+  clux_value_t *mismatch = clux_context_assign(ctx, view, wide, NULL);
   ASSERT_NE(mismatch, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mismatch)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(mismatch),
-               "cannot assign 'i64' through a pointer to 'i32'");
+               "cannot safely cast 'i64' to 'i32': narrowing conversion");
   /* 失败的赋值不改变目标值。 */
   EXPECT_EQ(read_i32(x), 1);
 
@@ -2089,14 +2105,17 @@ TEST(EngineTest, PtrUnsupportedOps) {
   EXPECT_STREQ(error_message_of(lnot),
                "type '*i32' does not support operator '!'");
 
-  clux_value_t *deref_of_value = clux_context_deref_get(ctx, x, NULL);
+  /* deref 非指针类型：无 deref 槽位 */
+  clux_value_t *deref_of_value = clux_context_deref(ctx, x, NULL);
   ASSERT_NE(deref_of_value, nullptr);
   EXPECT_STREQ(error_message_of(deref_of_value),
                "type 'i32' does not support operator '*'");
-  clux_value_t *deref_set_of_value = clux_context_deref_set(ctx, x, x, NULL);
-  ASSERT_NE(deref_set_of_value, nullptr);
-  EXPECT_STREQ(error_message_of(deref_set_of_value),
-               "type 'i32' does not support operator '*'");
+  /* index 语义是数组/切片取项：指针不提供下标 */
+  clux_value_t *index_of_ptr = clux_context_index(
+      ctx, p, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(index_of_ptr, nullptr);
+  EXPECT_STREQ(error_message_of(index_of_ptr),
+               "type '*i32' does not support indexing");
 
   clux_value_t *safe_cast =
       clux_context_safe_cast(ctx, p, clux_context_get_i32_type(ctx), NULL);
@@ -2634,22 +2653,22 @@ TEST(EngineTest, DerefThroughConstPointer) {
       ctx, ptr_const, clux_value_get_data(x), NULL, NULL);
   ASSERT_NE(pcx, nullptr);
 
-  /* deref_get 放行：返回带限定的 base 类型的值 */
-  clux_value_t *read = clux_context_deref_get(ctx, pcx, NULL);
+  /* 解引用放行：返回带限定的 base 类型的 view */
+  clux_value_t *read = clux_context_deref(ctx, pcx, NULL);
   ASSERT_NE(read, nullptr);
   EXPECT_EQ(clux_value_get_type(read), const_i32);
   EXPECT_EQ(read_i32(read), 10);
 
-  /* deref_set 拒绝：const 是静态性质，shadow 右值也不例外 */
+  /* 经 view 写入拒绝：const 是静态性质，shadow 右值也不例外 */
   clux_value_t *value = clux_context_create_i32(ctx, 99, NULL, NULL);
-  clux_value_t *bad = clux_context_deref_set(ctx, pcx, value, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, read, value, NULL);
   ASSERT_NE(bad, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(bad),
-               "cannot assign through a pointer to '*const i32'");
+               "cannot assign to a value of type 'const i32'");
 
   clux_value_t *shadow = clux_context_create_shadow_value(ctx, i32_type);
-  clux_value_t *shadow_bad = clux_context_deref_set(ctx, pcx, shadow, NULL);
+  clux_value_t *shadow_bad = clux_context_assign(ctx, read, shadow, NULL);
   ASSERT_NE(shadow_bad, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow_bad)),
             CLUX_TYPE_ERROR);
@@ -2691,15 +2710,15 @@ TEST(EngineTest, DerefThroughVolatilePointer) {
   ASSERT_NE(pvx, nullptr);
 
   /* volatile 不阻断读 */
-  clux_value_t *read = clux_context_deref_get(ctx, pvx, NULL);
+  clux_value_t *read = clux_context_deref(ctx, pvx, NULL);
   ASSERT_NE(read, nullptr);
   EXPECT_EQ(clux_value_get_type(read), volatile_i32);
   EXPECT_EQ(read_i32(read), 10);
 
-  /* volatile 不阻断写：裸 i32 右值按 unwrap 比较放行并写穿别名 */
+  /* volatile 不阻断写：经 view 的通用 assign 放行并写穿别名 */
   clux_value_t *value = clux_context_create_i32(ctx, 42, NULL, NULL);
-  clux_value_t *written = clux_context_deref_set(ctx, pvx, value, NULL);
-  EXPECT_EQ(written, value);
+  clux_value_t *written = clux_context_assign(ctx, read, value, NULL);
+  EXPECT_EQ(written, read);
   EXPECT_EQ(read_i32(x), 42);
 
   delete_clux_context(&ctx);
@@ -2848,6 +2867,199 @@ TEST(EngineTest, SliceCompareAndCloneAssign) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, ArrayTypeInterningAndMeta) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *arr3 = clux_context_get_array_type(ctx, i32_type, 3);
+  ASSERT_NE(arr3, nullptr);
+  EXPECT_EQ(clux_type_get_kind(arr3), CLUX_TYPE_ARRAY);
+  EXPECT_STREQ(clux_type_get_name(arr3), "[3]i32");
+  EXPECT_EQ(clux_type_get_size(arr3), 3 * sizeof(int32_t));
+  EXPECT_EQ(clux_type_get_align(arr3), alignof(int32_t));
+  EXPECT_EQ(clux_context_get_array_type(ctx, i32_type, 3), arr3);
+
+  /* 不同长度/不同 base 均为不同实例 */
+  clux_type_t *arr4 = clux_context_get_array_type(ctx, i32_type, 4);
+  clux_type_t *arr3_i64 =
+      clux_context_get_array_type(ctx, clux_context_get_i64_type(ctx), 3);
+  EXPECT_NE(arr4, arr3);
+  EXPECT_NE(arr3_i64, arr3);
+  EXPECT_FALSE(clux_type_equal(arr3, arr4));
+  EXPECT_FALSE(clux_type_equal(arr3, arr3_i64));
+  EXPECT_TRUE(clux_type_equal(arr3, arr3));
+  EXPECT_TRUE(clux_type_extends(arr3, arr3));
+  EXPECT_FALSE(clux_type_extends(arr3, arr4));
+
+  /* 元素带限定与裸元素区分 */
+  clux_type_t *arr3_const = clux_context_get_array_type(
+      ctx, clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST), 3);
+  ASSERT_NE(arr3_const, nullptr);
+  EXPECT_STREQ(clux_type_get_name(arr3_const), "[3]const i32");
+  EXPECT_FALSE(clux_type_equal(arr3_const, arr3));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, ArrayIndexReadWrite) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 3);
+  clux_value_t *arr = clux_context_create_array(ctx, arr_type, "arr", NULL);
+  ASSERT_NE(arr, nullptr);
+  EXPECT_EQ(clux_value_get_type(arr), arr_type);
+
+  /* 零初始化 */
+  for (size_t i = 0; i < 3; i++) {
+    clux_value_t *elem = clux_context_index(
+        ctx, arr, clux_context_create_usize(ctx, i, NULL, NULL), NULL);
+    ASSERT_NE(elem, nullptr);
+    EXPECT_EQ(read_i32(elem), 0);
+  }
+
+  /* 写入并读回：读是 view，写入走通用 assign（返回 view 本身） */
+  clux_value_t *v10 = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *v20 = clux_context_create_i32(ctx, 20, NULL, NULL);
+  clux_value_t *view1 = clux_context_index(
+      ctx, arr, clux_context_create_i32(ctx, 1, NULL, NULL), NULL);
+  ASSERT_NE(view1, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, view1, v10, NULL), view1);
+  clux_value_t *view2 = clux_context_index(
+      ctx, arr, clux_context_create_u8(ctx, 2, NULL, NULL), NULL);
+  ASSERT_NE(view2, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, view2, v20, NULL), view2);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, arr, clux_context_create_i64(ctx, 1, NULL, NULL), NULL)),
+            10);
+  EXPECT_EQ(read_i32(clux_context_index(
+                ctx, arr, clux_context_create_usize(ctx, 2, NULL, NULL), NULL)),
+            20);
+
+  /* view 与数组内联块别名：写穿 view 后原数组可见变化 */
+  EXPECT_EQ(read_i32(view1), 10);
+  EXPECT_EQ(clux_context_assign(ctx, view1, v20, NULL), view1);
+  EXPECT_EQ(read_i32(view1), 20);
+
+  /* 越界与负下标 */
+  clux_value_t *oob = clux_context_index(
+      ctx, arr, clux_context_create_usize(ctx, 3, NULL, NULL), NULL);
+  ASSERT_NE(oob, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(oob)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(oob),
+               "index 3 is out of bounds for array of length 3");
+  clux_value_t *neg = clux_context_index(
+      ctx, arr, clux_context_create_i32(ctx, -1, NULL, NULL), NULL);
+  ASSERT_NE(neg, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(neg)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(neg),
+               "index -1 is out of bounds for array of length 3");
+
+  /* 非整数下标 */
+  clux_value_t *bad_idx = clux_context_index(
+      ctx, arr, clux_context_create_bool(ctx, true, NULL, NULL), NULL);
+  ASSERT_NE(bad_idx, nullptr);
+  EXPECT_STREQ(error_message_of(bad_idx),
+               "index must be an integer, got 'bool'");
+
+  /* 类型不符的写入 */
+  clux_value_t *bad_val = clux_context_assign(
+      ctx,
+      clux_context_index(
+          ctx, arr, clux_context_create_usize(ctx, 0, NULL, NULL), NULL),
+      clux_context_create_str(ctx, "x", NULL, NULL),
+      NULL);
+  ASSERT_NE(bad_val, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_val)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_val),
+               "type 'str' cannot be safely cast to 'i32'");
+
+  /* shadow：下标读产出 base 类型的 shadow，经 assign 写入仍为 shadow */
+  clux_value_t *arr_shadow = clux_context_create_shadow_value(ctx, arr_type);
+  clux_value_t *shadow_get = clux_context_index(
+      ctx, arr_shadow, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(shadow_get, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_get));
+  EXPECT_EQ(clux_value_get_type(shadow_get), i32_type);
+  clux_value_t *shadow_set = clux_context_assign(ctx, shadow_get, v10, NULL);
+  ASSERT_NE(shadow_set, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_set));
+
+  /* 不支持索引的类型 */
+  clux_value_t *not_indexable = clux_context_index(
+      ctx, v10, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(not_indexable, nullptr);
+  EXPECT_STREQ(error_message_of(not_indexable),
+               "type 'i32' does not support indexing");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, ArrayConstElementAndCompareAndClone) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *const_arr = clux_context_get_array_type(ctx, const_i32, 2);
+
+  /* const 元素数组：读放行，经 view 的写入静态拒绝（shadow 右值也不例外） */
+  clux_value_t *carr = clux_context_create_array(ctx, const_arr, NULL, NULL);
+  clux_value_t *read = clux_context_index(
+      ctx, carr, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(read, nullptr);
+  EXPECT_EQ(clux_value_get_type(read), const_i32);
+  clux_value_t *v = clux_context_create_i32(ctx, 9, NULL, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, read, v, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot assign to a value of type 'const i32'");
+
+  /* 裸元素接受带限定来源（safe_cast 经 unwrap 解包） */
+  clux_type_t *arr_type = clux_context_get_array_type(ctx, i32_type, 2);
+  clux_value_t *arr = clux_context_create_array(ctx, arr_type, NULL, NULL);
+  clux_value_t *slot0 = clux_context_index(
+      ctx, arr, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(slot0, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, slot0, read, NULL), slot0);
+
+  /* eq/ne：整块内容比较 */
+  clux_value_t *same1 = clux_context_create_array(ctx, arr_type, NULL, NULL);
+  clux_value_t *same2 = clux_context_create_array(ctx, arr_type, NULL, NULL);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, same1, same2, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_TRUE(read_bool(eq));
+  clux_value_t *v7 = clux_context_create_i32(ctx, 7, NULL, NULL);
+  (void)clux_context_assign(
+      ctx,
+      clux_context_index(
+          ctx, same2, clux_context_create_usize(ctx, 1, NULL, NULL), NULL),
+      v7,
+      NULL);
+  clux_value_t *ne = clux_context_binary(ctx, CLUX_OP_NE, same1, same2, NULL);
+  ASSERT_NE(ne, nullptr);
+  EXPECT_TRUE(read_bool(ne));
+
+  /* clone：独立内联块，内容一致 */
+  clux_value_t *copy = clux_context_clone(ctx, same2, NULL);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(clux_value_get_type(copy), arr_type);
+  EXPECT_NE(clux_value_get_data(copy), clux_value_get_data(same2));
+  EXPECT_EQ(
+      read_i32(clux_context_index(
+          ctx, copy, clux_context_create_usize(ctx, 1, NULL, NULL), NULL)),
+      7);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -2870,9 +3082,9 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(joined, nullptr);
   clux_value_t *ptr = clux_context_ref(ctx, left, NULL);
   ASSERT_NE(ptr, nullptr);
-  clux_value_t *deref = clux_context_deref_get(ctx, ptr, NULL);
+  clux_value_t *deref = clux_context_deref(ctx, ptr, NULL);
   ASSERT_NE(deref, nullptr);
-  EXPECT_EQ(clux_context_deref_set(ctx, ptr, right, NULL), right);
+  EXPECT_EQ(clux_context_assign(ctx, deref, right, NULL), deref);
   clux_value_t *same = clux_context_binary(ctx, CLUX_OP_EQ, ptr, ptr, NULL);
   ASSERT_NE(same, nullptr);
   clux_value_t *ptr_shadow = clux_context_ref(
@@ -2885,7 +3097,7 @@ TEST(EngineTest, NoLeak) {
   clux_type_t *volatile_const_type =
       clux_type_get_qualified_type(const_type, CLUX_TYPE_VOLATILE);
   ASSERT_NE(volatile_const_type, nullptr);
-  clux_value_t *qualified_read = clux_context_deref_get(
+  clux_value_t *qualified_read = clux_context_deref(
       ctx,
       clux_context_create_ptr(ctx,
                               clux_context_get_ptr_type(ctx, const_type),
@@ -2902,6 +3114,16 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_slice_len(ctx, slice, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, slice, slice, NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, slice, NULL), nullptr);
+  clux_type_t *array_type =
+      clux_context_get_array_type(ctx, clux_context_get_i32_type(ctx), 3);
+  clux_value_t *array = clux_context_create_array(ctx, array_type, NULL, NULL);
+  ASSERT_NE(array, nullptr);
+  clux_value_t *array_zero = clux_context_index(
+      ctx, array, clux_context_create_usize(ctx, 0, NULL, NULL), NULL);
+  ASSERT_NE(array_zero, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, array_zero, left, NULL), array_zero);
+  ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, array, array, NULL), nullptr);
+  ASSERT_NE(clux_context_clone(ctx, array, NULL), nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

@@ -15,6 +15,10 @@ typedef struct _clux_slice_meta_t {
   clux_type_t *base;
 } clux_slice_meta_t;
 
+static clux_slice_meta_t *slice_meta(clux_type_t *type) {
+  return clux_type_get_meta(type);
+}
+
 static bool is_error_value(clux_value_t *value) {
   return clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR;
 }
@@ -38,6 +42,49 @@ slice_read(clux_value_t *value, ptr_handle_t *out_ptr, size_t *out_len) {
   *out_ptr = data->ptr;
   *out_len = data->len;
   return true;
+}
+
+/* 下标取项：按存储的 len 做边界检查，返回 base 类型的 view（与指向内存
+   共享），写入由通用 assign 写穿 view 完成。 */
+static clux_value_t *
+slice_index(clux_context_t *ctx, clux_value_t *slice, clux_value_t *index) {
+  clux_type_t *base = slice_meta(clux_value_get_type(slice))->base;
+  if (is_error_value(index)) {
+    return index;
+  }
+  if (clux_value_is_shadow(slice) || clux_value_is_shadow(index)) {
+    return clux_context_create_shadow_value(ctx, base);
+  }
+  ptr_handle_t target = 0;
+  size_t len = 0;
+  if (!slice_read(slice, &target, &len) || !ptr_is_valid(target)) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot index an invalid slice");
+  }
+  int64_t idx = 0;
+  clux_value_t *idx_err = clux_context_index_to_i64(ctx, index, &idx);
+  if (idx_err) {
+    return idx_err;
+  }
+  if (idx < 0 || (uint64_t)idx >= len) {
+    return clux_context_create_error_message(ctx,
+                                             NULL,
+                                             "index %lld is out of bounds "
+                                             "for slice of length %zu",
+                                             (long long)idx,
+                                             len);
+  }
+  size_t elem_size = clux_type_get_size(base);
+  if (ptr_get_size(target) < ((size_t)idx + 1) * elem_size) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot index an invalid slice");
+  }
+  ptr_handle_t view = ptr_offset(target, (size_t)idx * elem_size);
+  if (!view) {
+    return clux_context_create_error_message(
+        ctx, NULL, "cannot index an invalid slice");
+  }
+  return clux_context_create_value(ctx, base, view, NULL, NULL);
 }
 
 static clux_value_t *slice_compare(clux_context_t *ctx,
@@ -113,6 +160,7 @@ static bool slice_type_extends(clux_type_t *self, clux_type_t *base) {
 static clux_vtable_t g_slice_vtable = {
     .eq = slice_eq,
     .ne = slice_ne,
+    .index = slice_index,
     .type_equal = slice_type_equal,
     .type_extends = slice_type_extends,
 };

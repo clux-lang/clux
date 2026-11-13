@@ -89,13 +89,6 @@ clux_value_t *clux_context_create_ptr(clux_context_t *self,
    任意类型可用，不经过 vtable。 */
 clux_value_t *
 clux_context_ref(clux_context_t *self, clux_value_t *value, location_t *loc);
-clux_value_t *clux_context_deref_get(clux_context_t *self,
-                                     clux_value_t *ptr,
-                                     location_t *loc);
-clux_value_t *clux_context_deref_set(clux_context_t *self,
-                                     clux_value_t *ptr,
-                                     clux_value_t *value,
-                                     location_t *loc);
 /* 按 base 取 "*<base>" 指针类型：children 表 find-or-create，同一 base 恒等
    返回同一实例。 */
 clux_type_t *clux_context_get_ptr_type(clux_context_t *self, clux_type_t *base);
@@ -116,6 +109,34 @@ clux_value_t *clux_context_create_slice(clux_context_t *self,
 clux_value_t *clux_context_slice_len(clux_context_t *self,
                                      clux_value_t *slice,
                                      location_t *loc);
+/* 按 (base, len) 取 "[len]<base>" 定长数组类型：children 表 find-or-create，
+   同一 (base, len) 恒等返回同一实例。 */
+clux_type_t *clux_context_get_array_type(clux_context_t *self,
+                                         clux_type_t *base,
+                                         size_t len);
+/* 创建数组值：N 个元素的连续内联块零初始化。type 须是
+   CLUX_TYPE_ARRAY（由调用方保证）。 */
+clux_value_t *clux_context_create_array(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        location_t *loc);
+/* 指针解引用（*p）：返回 base 类型的 view（内存共享、携带引用属性），
+   指针无效报 error，shadow 指针产出 base 类型的 shadow。
+   写入由通用 assign 写穿 view 完成。 */
+clux_value_t *
+clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc);
+/* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
+   越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
+   写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */
+clux_value_t *clux_context_index(clux_context_t *self,
+                                 clux_value_t *aggregate,
+                                 clux_value_t *index,
+                                 location_t *loc);
+/* 下标值归一化为 int64：仅做整数类校验（负数与越界由调用方判定）。
+   成功返回 NULL 并写入 *out，否则返回 error 值。 */
+clux_value_t *clux_context_index_to_i64(clux_context_t *self,
+                                        clux_value_t *index,
+                                        int64_t *out);
 clux_value_t *clux_context_create_str_value(clux_context_t *self,
                                             char *str,
                                             const char *name,
