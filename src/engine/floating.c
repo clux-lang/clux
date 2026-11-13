@@ -2,6 +2,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -48,7 +49,7 @@ static double float_read(clux_value_t *value) {
   if (!raw) {
     return 0;
   }
-  switch (clux_type_get_kind(clux_value_get_type(value))) {
+  switch (clux_type_kind_unwrap(clux_value_get_type(value))) {
   case CLUX_TYPE_F32:
     return *(float *)raw;
   case CLUX_TYPE_F64:
@@ -74,7 +75,7 @@ static clux_value_t *
 float_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
   clux_type_kind_t source_kind = clux_type_get_kind(source);
-  clux_type_kind_t target_kind = clux_type_get_kind(target);
+  clux_type_kind_t target_kind = clux_type_kind_unwrap(target);
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
   if (source_kind == CLUX_TYPE_ERROR) {
@@ -109,7 +110,7 @@ static clux_value_t *
 float_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
   clux_type_kind_t source_kind = clux_type_get_kind(source);
-  clux_type_kind_t target_kind = clux_type_get_kind(target);
+  clux_type_kind_t target_kind = clux_type_kind_unwrap(target);
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
   if (source_kind == CLUX_TYPE_ERROR) {
@@ -212,7 +213,7 @@ static clux_value_t *float_compare(clux_context_t *ctx,
   }
   clux_type_t *left_type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
-  if (!floating_kind(clux_type_get_kind(right_type))) {
+  if (!floating_kind(clux_type_kind_unwrap(right_type))) {
     return clux_context_create_error_message(
         ctx,
         NULL,
@@ -282,7 +283,7 @@ static clux_value_t *float_binary(clux_context_t *ctx,
   }
   clux_type_t *left_type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
-  if (!floating_kind(clux_type_get_kind(right_type))) {
+  if (!floating_kind(clux_type_kind_unwrap(right_type))) {
     return clux_context_create_error_message(
         ctx,
         NULL,
@@ -342,7 +343,7 @@ static clux_value_t *float_binary(clux_context_t *ctx,
         clux_type_get_name(target),
         binary_op_symbol(op));
   }
-  return float_create(ctx, clux_type_get_kind(target), result);
+  return float_create(ctx, clux_type_kind_unwrap(target), result);
 }
 
 static clux_value_t *
@@ -372,7 +373,7 @@ float_prefix(clux_context_t *ctx, clux_value_t *value, clux_prefix_op_t op) {
         clux_type_get_name(type),
         op == CLUX_OP_NOT ? "~" : "!");
   }
-  return float_create(ctx, clux_type_get_kind(type), result);
+  return float_create(ctx, clux_type_kind_unwrap(type), result);
 }
 
 static clux_value_t *

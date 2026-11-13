@@ -2,6 +2,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -21,13 +22,12 @@ static clux_value_t *
 bool_safe_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
   clux_type_kind_t source_kind = clux_type_get_kind(source);
-  clux_type_kind_t target_kind = clux_type_get_kind(target);
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
   if (source_kind == CLUX_TYPE_ERROR) {
     return value;
   }
-  if (target_kind != CLUX_TYPE_BOOL) {
+  if (clux_type_kind_unwrap(target) != CLUX_TYPE_BOOL) {
     return clux_context_create_error_message(
         ctx,
         NULL,
@@ -48,7 +48,6 @@ static clux_value_t *
 bool_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
   clux_type_t *source = clux_value_get_type(value);
   clux_type_kind_t source_kind = clux_type_get_kind(source);
-  clux_type_kind_t target_kind = clux_type_get_kind(target);
   const char *source_name = clux_type_get_name(source);
   const char *target_name = clux_type_get_name(target);
   if (source_kind == CLUX_TYPE_ERROR) {
@@ -61,7 +60,7 @@ bool_cast(clux_context_t *ctx, clux_value_t *value, clux_type_t *target) {
     return clux_context_create_shadow_value(ctx, target);
   }
   bool input = bool_read(value);
-  switch (target_kind) {
+  switch (clux_type_kind_unwrap(target)) {
   case CLUX_TYPE_BOOL:
     return clux_context_create_bool(ctx, input, NULL, NULL);
   case CLUX_TYPE_I8:
@@ -120,7 +119,7 @@ static clux_value_t *bool_compare(clux_context_t *ctx,
     return right;
   }
   clux_type_t *right_type = clux_value_get_type(right);
-  if (clux_type_get_kind(right_type) != CLUX_TYPE_BOOL) {
+  if (clux_type_kind_unwrap(right_type) != CLUX_TYPE_BOOL) {
     return clux_context_create_error_message(
         ctx,
         NULL,

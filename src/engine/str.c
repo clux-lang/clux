@@ -2,6 +2,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -36,7 +37,7 @@ str_add(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   }
   clux_type_t *left_type = clux_value_get_type(left);
   clux_type_t *right_type = clux_value_get_type(right);
-  if (!str_kind(clux_type_get_kind(right_type))) {
+  if (!str_kind(clux_type_kind_unwrap(right_type))) {
     return clux_context_create_error_message(
         ctx, NULL, "operator '+' requires operands of the same type");
   }
@@ -64,7 +65,7 @@ static clux_value_t *str_compare(clux_context_t *ctx,
     return right;
   }
   clux_type_t *right_type = clux_value_get_type(right);
-  if (!str_kind(clux_type_get_kind(right_type))) {
+  if (!str_kind(clux_type_kind_unwrap(right_type))) {
     return clux_context_create_error_message(
         ctx,
         NULL,

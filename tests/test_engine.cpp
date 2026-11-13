@@ -6,6 +6,7 @@
 #include "engine/integer.h"
 #include "engine/interface.h"
 #include "engine/ptr.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <cmath>
@@ -2499,6 +2500,211 @@ TEST(EngineTest, ClonePropagatesErrorShadowAndNull) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, QualifiedTypeMetaAndInterning) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  ASSERT_NE(const_i32, nullptr);
+  EXPECT_EQ(clux_type_get_kind(const_i32), CLUX_TYPE_CONST);
+  EXPECT_STREQ(clux_type_get_name(const_i32), "const i32");
+  EXPECT_EQ(clux_type_get_size(const_i32), sizeof(int32_t));
+  EXPECT_EQ(clux_type_get_align(const_i32), sizeof(int32_t));
+
+  /* interning：同一 base 同一限定符恒等返回同一实例 */
+  EXPECT_EQ(clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST), const_i32);
+
+  /* volatile 独立成桶 */
+  clux_type_t *volatile_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_i32, nullptr);
+  EXPECT_EQ(clux_type_get_kind(volatile_i32), CLUX_TYPE_VOLATILE);
+  EXPECT_STREQ(clux_type_get_name(volatile_i32), "volatile i32");
+  EXPECT_NE(volatile_i32, const_i32);
+
+  /* 嵌套：volatile const i32 */
+  clux_type_t *volatile_const_i32 =
+      clux_type_get_qualified_type(const_i32, CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_const_i32, nullptr);
+  EXPECT_STREQ(clux_type_get_name(volatile_const_i32), "volatile const i32");
+
+  /* unwrap / is_const */
+  EXPECT_EQ(clux_type_unwrap(const_i32), i32_type);
+  EXPECT_EQ(clux_type_unwrap(volatile_const_i32), i32_type);
+  EXPECT_TRUE(clux_type_is_const(const_i32));
+  EXPECT_TRUE(clux_type_is_const(volatile_const_i32));
+  EXPECT_FALSE(clux_type_is_const(volatile_i32));
+  EXPECT_FALSE(clux_type_is_const(i32_type));
+  EXPECT_EQ(clux_type_kind_unwrap(volatile_const_i32), CLUX_TYPE_I32);
+  EXPECT_EQ(clux_type_kind_unwrap(i32_type), CLUX_TYPE_I32);
+
+  /* 非法限定符入参返回 NULL */
+  EXPECT_EQ(clux_type_get_qualified_type(i32_type, CLUX_TYPE_PTR), nullptr);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, QualifiedTypeEqualAndExtends) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *volatile_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
+
+  /* 判等：限定不同即不同类型 */
+  EXPECT_TRUE(clux_type_equal(const_i32, const_i32));
+  EXPECT_TRUE(clux_type_equal(volatile_i32, volatile_i32));
+  EXPECT_FALSE(clux_type_equal(const_i32, i32_type));
+  EXPECT_FALSE(clux_type_equal(i32_type, const_i32));
+  EXPECT_FALSE(clux_type_equal(const_i32, volatile_i32));
+
+  /* extends：加限定是收紧，限定类型 extends 裸类型成立，反向不成立 */
+  EXPECT_TRUE(clux_type_extends(const_i32, i32_type));
+  EXPECT_TRUE(clux_type_extends(volatile_i32, i32_type));
+  EXPECT_TRUE(clux_type_extends(const_i32, const_i32));
+  EXPECT_FALSE(clux_type_extends(i32_type, const_i32));
+  EXPECT_FALSE(clux_type_extends(i32_type, volatile_i32));
+  EXPECT_FALSE(clux_type_extends(volatile_i32, const_i32));
+
+  /* 限定类型上的指针：*const i32 与 *i32 是不同的指针类型 */
+  clux_type_t *ptr_const = clux_context_get_ptr_type(ctx, const_i32);
+  clux_type_t *ptr_plain = clux_context_get_ptr_type(ctx, i32_type);
+  ASSERT_NE(ptr_const, nullptr);
+  ASSERT_NE(ptr_plain, nullptr);
+  EXPECT_FALSE(clux_type_equal(ptr_const, ptr_plain));
+  EXPECT_TRUE(clux_type_equal(ptr_const, ptr_const));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, AssignRespectsConstQualifier) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *const_i32 = clux_type_get_qualified_type(
+      clux_context_get_i32_type(ctx), CLUX_TYPE_CONST);
+  clux_type_t *volatile_i32 = clux_type_get_qualified_type(
+      clux_context_get_i32_type(ctx), CLUX_TYPE_VOLATILE);
+
+  /* const 目标：直接建值并赋值被拒绝 */
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  (void)x;
+  clux_value_t *const_target = clux_context_create_shadow_value(ctx, const_i32);
+  clux_value_t *value = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, const_target, value, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot assign to a value of type 'const i32'");
+
+  /* volatile 目标：不阻断写入 */
+  clux_value_t *volatile_target =
+      clux_context_create_shadow_value(ctx, volatile_i32);
+  clux_value_t *ok = clux_context_assign(ctx, volatile_target, value, NULL);
+  EXPECT_EQ(ok, volatile_target);
+
+  /* const 目标即便右值是 error 也先走 error 传播 */
+  clux_value_t *err = clux_context_assign(ctx, NULL, NULL, NULL);
+  ASSERT_NE(err, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, const_target, err, NULL), err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, DerefThroughConstPointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *const_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST);
+  clux_type_t *ptr_const = clux_context_get_ptr_type(ctx, const_i32);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *pcx = clux_context_create_ptr(
+      ctx, ptr_const, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(pcx, nullptr);
+
+  /* deref_get 放行：返回带限定的 base 类型的值 */
+  clux_value_t *read = clux_context_deref_get(ctx, pcx, NULL);
+  ASSERT_NE(read, nullptr);
+  EXPECT_EQ(clux_value_get_type(read), const_i32);
+  EXPECT_EQ(read_i32(read), 10);
+
+  /* deref_set 拒绝：const 是静态性质，shadow 右值也不例外 */
+  clux_value_t *value = clux_context_create_i32(ctx, 99, NULL, NULL);
+  clux_value_t *bad = clux_context_deref_set(ctx, pcx, value, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot assign through a pointer to '*const i32'");
+
+  clux_value_t *shadow = clux_context_create_shadow_value(ctx, i32_type);
+  clux_value_t *shadow_bad = clux_context_deref_set(ctx, pcx, shadow, NULL);
+  ASSERT_NE(shadow_bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(shadow_bad)),
+            CLUX_TYPE_ERROR);
+  /* 原值未被写穿 */
+  EXPECT_EQ(read_i32(x), 10);
+
+  /* 带限定类型的值参与运算：unwrap 分派，产出裸类型结果 */
+  clux_value_t *doubled = clux_context_add(ctx, read, read, NULL);
+  ASSERT_NE(doubled, nullptr);
+  EXPECT_EQ(clux_value_get_type(doubled), i32_type);
+  EXPECT_EQ(read_i32(doubled), 20);
+
+  clux_value_t *mixed = clux_context_add(ctx, x, read, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_EQ(clux_value_get_type(mixed), i32_type);
+  EXPECT_EQ(read_i32(mixed), 20);
+
+  /* const 值作为赋值右值合法 */
+  clux_value_t *target = clux_context_create_i32(ctx, 0, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, target, read, NULL), target);
+  EXPECT_EQ(read_i32(target), 10);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, DerefThroughVolatilePointer) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *volatile_i32 =
+      clux_type_get_qualified_type(i32_type, CLUX_TYPE_VOLATILE);
+  clux_type_t *ptr_volatile = clux_context_get_ptr_type(ctx, volatile_i32);
+
+  clux_value_t *x = clux_context_create_i32(ctx, 10, NULL, NULL);
+  clux_value_t *pvx = clux_context_create_ptr(
+      ctx, ptr_volatile, clux_value_get_data(x), NULL, NULL);
+  ASSERT_NE(pvx, nullptr);
+
+  /* volatile 不阻断读 */
+  clux_value_t *read = clux_context_deref_get(ctx, pvx, NULL);
+  ASSERT_NE(read, nullptr);
+  EXPECT_EQ(clux_value_get_type(read), volatile_i32);
+  EXPECT_EQ(read_i32(read), 10);
+
+  /* volatile 不阻断写：裸 i32 右值按 unwrap 比较放行并写穿别名 */
+  clux_value_t *value = clux_context_create_i32(ctx, 42, NULL, NULL);
+  clux_value_t *written = clux_context_deref_set(ctx, pvx, value, NULL);
+  EXPECT_EQ(written, value);
+  EXPECT_EQ(read_i32(x), 42);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -2531,6 +2737,20 @@ TEST(EngineTest, NoLeak) {
       clux_context_create_shadow_value(ctx, clux_context_get_str_type(ctx)),
       NULL);
   ASSERT_NE(ptr_shadow, nullptr);
+  clux_type_t *const_type = clux_type_get_qualified_type(
+      clux_context_get_i32_type(ctx), CLUX_TYPE_CONST);
+  clux_type_t *volatile_const_type =
+      clux_type_get_qualified_type(const_type, CLUX_TYPE_VOLATILE);
+  ASSERT_NE(volatile_const_type, nullptr);
+  clux_value_t *qualified_read = clux_context_deref_get(
+      ctx,
+      clux_context_create_ptr(ctx,
+                              clux_context_get_ptr_type(ctx, const_type),
+                              clux_value_get_data(left),
+                              NULL,
+                              NULL),
+      NULL);
+  ASSERT_NE(qualified_read, nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

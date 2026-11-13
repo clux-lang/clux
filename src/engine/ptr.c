@@ -2,6 +2,7 @@
 #include "core/safe_alloc.h"
 #include "engine/context.h"
 #include "engine/interface.h"
+#include "engine/qualifier.h"
 #include "engine/type.h"
 #include "engine/value.h"
 #include <stdbool.h>
@@ -85,11 +86,23 @@ ptr_deref_set(clux_context_t *ctx, clux_value_t *ptr, clux_value_t *value) {
         "pointer type '%s' has no base type",
         type_name ? type_name : "<unknown>");
   }
+  /* const 是静态性质：即便操作数是 shadow 也照常拒绝写入 */
+  if (clux_type_is_const(base)) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        ctx,
+        NULL,
+        "cannot assign through a pointer to '%s'",
+        type_name ? type_name : "<unknown>");
+  }
   if (clux_value_is_shadow(ptr) || clux_value_is_shadow(value)) {
     return clux_context_create_shadow_value(ctx, base);
   }
   clux_type_t *value_type = clux_value_get_type(value);
-  if (value_type != base) {
+  /* 类型比较放宽到 unwrap 后的 base：通过 *volatile T 允许写入裸 T 值，
+     裸指针接受带限定类型（const 来源）的值（volatile 目标同理）。 */
+  if (value_type != base &&
+      !clux_type_equal(clux_type_unwrap(value_type), clux_type_unwrap(base))) {
     const char *value_name = clux_type_get_name(value_type);
     const char *base_name = clux_type_get_name(base);
     return clux_context_create_error_message(

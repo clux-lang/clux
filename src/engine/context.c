@@ -20,6 +20,7 @@
 #include "engine/error.h"
 #include "engine/floating.h"
 #include "engine/ptr.h"
+#include "engine/qualifier.h"
 #include "engine/str.h"
 
 struct _clux_context_t {
@@ -668,6 +669,15 @@ clux_value_t *clux_context_assign(clux_context_t *self,
   }
   if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
     return value;
+  }
+  /* const 是静态性质：目标限定链含 const 即拒绝写入（volatile 放行） */
+  if (clux_type_is_const(target_type)) {
+    const char *target_name = clux_type_get_name(target_type);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "cannot assign to a value of type '%s'",
+        target_name ? target_name : "<unknown>");
   }
   clux_value_t *casted = clux_context_safe_cast(self, value, target_type, loc);
   clux_type_t *casted_type = clux_value_get_type(casted);
