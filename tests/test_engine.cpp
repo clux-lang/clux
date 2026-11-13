@@ -2351,6 +2351,154 @@ TEST(EngineTest, TypeMetaLifecycle) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, AssignSafeCastsRightToLeftType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* 右值 safe_cast 成左值类型后 memcpy 穿透，返回左值本身 */
+  clux_value_t *target = clux_context_create_i32(ctx, 0, "x", NULL);
+  clux_value_t *right = clux_context_create_i8(ctx, 42, NULL, NULL);
+  clux_value_t *result = clux_context_assign(ctx, target, right, NULL);
+  EXPECT_EQ(result, target);
+  EXPECT_EQ(read_i32(target), 42);
+
+  /* 同类型恒等路径 */
+  clux_value_t *other = clux_context_create_i32(ctx, 7, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, target, other, NULL), target);
+  EXPECT_EQ(read_i32(target), 7);
+
+  /* 非整数目标拒绝赋值 */
+  clux_value_t *bool_target = clux_context_create_bool(ctx, false, NULL, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, bool_target, other, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad), "cannot safely cast 'i32' to 'bool'");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, AssignNarrowingProducesError) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_value_t *target = clux_context_create_i32(ctx, 0, NULL, NULL);
+  clux_value_t *right = clux_context_create_i64(ctx, 123456789012, NULL, NULL);
+  clux_value_t *bad = clux_context_assign(ctx, target, right, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot safely cast 'i64' to 'i32': narrowing conversion");
+  /* 左值保持原值 */
+  EXPECT_EQ(read_i32(target), 0);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, AssignPropagatesErrorShadowAndNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* error 自传播：右值 */
+  clux_value_t *target = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *err_right =
+      clux_context_assign(ctx, target, NULL, NULL); /* 先拿一个 error */
+  ASSERT_NE(err_right, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(err_right)),
+            CLUX_TYPE_ERROR);
+  clux_value_t *propagated = clux_context_assign(ctx, target, err_right, NULL);
+  EXPECT_EQ(propagated, err_right);
+
+  /* error 自传播：左值 */
+  clux_value_t *value = clux_context_create_i32(ctx, 2, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, err_right, value, NULL), err_right);
+
+  /* shadow 左值：返回左值 shadow 本身，不发生写入 */
+  clux_value_t *shadow_target =
+      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *shadow_result =
+      clux_context_assign(ctx, shadow_target, value, NULL);
+  EXPECT_EQ(shadow_result, shadow_target);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_target));
+
+  /* 右值 shadow：返回左值，数据不变 */
+  clux_value_t *shadow_right =
+      clux_context_create_shadow_value(ctx, clux_context_get_i32_type(ctx));
+  clux_value_t *mixed = clux_context_assign(ctx, target, shadow_right, NULL);
+  EXPECT_EQ(mixed, target);
+  EXPECT_EQ(read_i32(target), 1);
+
+  /* NULL 入口 */
+  clux_value_t *bad = clux_context_assign(ctx, NULL, value, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "assignment requires a target and a value");
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, CloneCopiesTrivialData) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* 数值克隆：同类型、同值、数据块独立 */
+  clux_value_t *orig = clux_context_create_i32(ctx, 42, NULL, NULL);
+  clux_value_t *copy = clux_context_clone(ctx, orig, NULL);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_NE(copy, orig);
+  EXPECT_EQ(clux_value_get_type(copy), clux_value_get_type(orig));
+  EXPECT_EQ(read_i32(copy), 42);
+  EXPECT_NE(clux_value_get_data(copy), clux_value_get_data(orig));
+
+  /* 改写原值不影响克隆 */
+  clux_value_t *other = clux_context_create_i32(ctx, 100, NULL, NULL);
+  ASSERT_NE(clux_context_assign(ctx, orig, other, NULL), nullptr);
+  EXPECT_EQ(read_i32(copy), 42);
+
+  /* str 克隆：借用指针平凡拷贝，内容相等 */
+  clux_value_t *text = clux_context_create_str(ctx, "hello", NULL, NULL);
+  clux_value_t *text_copy = clux_context_clone(ctx, text, NULL);
+  ASSERT_NE(text_copy, nullptr);
+  EXPECT_EQ(clux_value_get_type(text_copy), clux_value_get_type(text));
+  EXPECT_STREQ(read_str(text_copy), "hello");
+
+  /* ptr 克隆：handle 平凡拷贝，判等成立 */
+  clux_value_t *ptr = clux_context_ref(ctx, orig, NULL);
+  clux_value_t *ptr_copy = clux_context_clone(ctx, ptr, NULL);
+  ASSERT_NE(ptr_copy, nullptr);
+  clux_value_t *eq = clux_context_binary(ctx, CLUX_OP_EQ, ptr, ptr_copy, NULL);
+  ASSERT_NE(eq, nullptr);
+  EXPECT_EQ(read_bool(eq), true);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, ClonePropagatesErrorShadowAndNull) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  /* error 自传播：克隆 error 返回自身 */
+  clux_value_t *bad = clux_context_clone(ctx, NULL, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_EQ(clux_context_clone(ctx, bad, NULL), bad);
+
+  /* shadow 克隆为同类型 shadow */
+  clux_value_t *shadow =
+      clux_context_create_shadow_value(ctx, clux_context_get_i64_type(ctx));
+  clux_value_t *shadow_copy = clux_context_clone(ctx, shadow, NULL);
+  ASSERT_NE(shadow_copy, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_copy));
+  EXPECT_EQ(clux_value_get_type(shadow_copy), clux_context_get_i64_type(ctx));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;

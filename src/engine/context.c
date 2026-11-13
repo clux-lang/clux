@@ -654,6 +654,61 @@ clux_value_t *clux_context_add(clux_context_t *self,
                                location_t *loc) {
   return clux_context_binary(self, CLUX_OP_ADD, left, right, loc);
 }
+clux_value_t *clux_context_assign(clux_context_t *self,
+                                  clux_value_t *target,
+                                  clux_value_t *value,
+                                  location_t *loc) {
+  if (!target || !value) {
+    return clux_context_create_error_message(
+        self, loc, "assignment requires a target and a value");
+  }
+  clux_type_t *target_type = clux_value_get_type(target);
+  if (clux_type_get_kind(target_type) == CLUX_TYPE_ERROR) {
+    return target;
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_value_t *casted = clux_context_safe_cast(self, value, target_type, loc);
+  clux_type_t *casted_type = clux_value_get_type(casted);
+  if (clux_type_get_kind(casted_type) == CLUX_TYPE_ERROR) {
+    return casted;
+  }
+  if (clux_value_is_shadow(target) || clux_value_is_shadow(casted)) {
+    return target;
+  }
+  /* value 的 data 是平凡位图：右值 safe_cast 成左值类型后整体 memcpy 穿透 */
+  size_t size = clux_type_get_size(target_type);
+  void *dst = ptr_to_raw(clux_value_get_data(target), 0);
+  void *src = ptr_to_raw(clux_value_get_data(casted), 0);
+  if (dst && src) {
+    (void)memcpy(dst, src, size);
+  }
+  return target;
+}
+clux_value_t *
+clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "clone requires a value");
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  if (clux_type_get_kind(type) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(self, type);
+  }
+  /* value 的 data 是平凡位图：新分配同尺寸块整体拷贝即可 */
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  void *dst = ptr_to_raw(data, 0);
+  void *src = ptr_to_raw(clux_value_get_data(value), 0);
+  if (dst && src) {
+    (void)memcpy(dst, src, size);
+  }
+  return clux_context_create_value(self, type, data, NULL, NULL);
+}
 clux_type_t *clux_context_get_i8_type(clux_context_t *ctx) {
   return ctx->builtin_types.type_i8;
 }

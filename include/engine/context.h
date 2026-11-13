@@ -128,6 +128,16 @@ clux_value_t *clux_context_add(clux_context_t *self,
                                clux_value_t *left,
                                clux_value_t *right,
                                location_t *loc);
+/* 通用赋值（不经 vtable）：右值 safe_cast 成左值类型后 memcpy 穿透写入左值。
+   返回左值本身；cast 失败返回 error，任一操作数为 error 自传播。 */
+clux_value_t *clux_context_assign(clux_context_t *self,
+                                  clux_value_t *target,
+                                  clux_value_t *value,
+                                  location_t *loc);
+/* 通用克隆（不经 vtable）：data 是平凡位图，按类型尺寸新分配块整体拷贝。
+   shadow 克隆为同类型 shadow，error 自传播。 */
+clux_value_t *
+clux_context_clone(clux_context_t *self, clux_value_t *value, location_t *loc);
 clux_type_t *clux_context_get_i8_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_i16_type(clux_context_t *ctx);
 clux_type_t *clux_context_get_i32_type(clux_context_t *ctx);
