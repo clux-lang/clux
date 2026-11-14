@@ -69,13 +69,13 @@ typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *);
 typedef clux_value_t *(*clux_vt_prefix_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_postfix_fn_t)(clux_context_t *, clux_value_t *);
+/* field 是具名成员的"借引用"读原语（x.field）：返回成员类型的读写双向
+   view（内存共享、天然携带引用属性），读取与写入均由通用 assign 完成
+   （写穿 view，赋值给具名变量时经 assign 的 memcpy 自动失去引用属性）。
+   只有具名成员的类型（当前为 cunion）绑定该槽位。 */
 typedef clux_value_t *(*clux_vt_get_field_fn_t)(clux_context_t *,
                                                 clux_value_t *,
                                                 const char *);
-typedef clux_value_t *(*clux_vt_set_field_fn_t)(clux_context_t *,
-                                                clux_value_t *,
-                                                const char *,
-                                                clux_value_t *);
 /* deref 与 index 是两个语义清晰的"借引用"读原语：deref 是指针解引用
    （*p），index 是数组/切片下标取项。两者均返回 base 类型的 view
    （内存共享、天然携带引用属性），写入由通用 assign 写穿 view 完成，
@@ -139,7 +139,6 @@ struct _clux_vtable_t {
   clux_vt_is_none_fn_t is_none;
   clux_vt_take_fn_t take;
   clux_vt_get_field_fn_t get_field;
-  clux_vt_set_field_fn_t set_field;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };

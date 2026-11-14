@@ -58,8 +58,8 @@ const clux_cunion_member_t *clux_cunion_find_member(clux_type_t *type,
   return NULL;
 }
 
-/* 成员读取（p.field / x.field 前半）：返回成员类型的 view，与 union 内存
-   共享偏移 0（所有成员重叠）。写入由通用 assign 写穿 view 完成，
+/* 成员读取（x.field）：返回成员类型的读写双向 view，与 union 内存共享
+   偏移 0（所有成员重叠）。写入由通用 assign 写穿 view 完成，
    写入即重新解释同一段内存（C union 语义）。 */
 static clux_value_t *
 cunion_get_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
