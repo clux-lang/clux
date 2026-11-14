@@ -251,19 +251,36 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
                                   size_t argc,
                                   clux_value_t *argv[],
                                   location_t *loc);
-/* 创建具名 struct 类型（白皮书 §3-declarations，第一阶段仅字段）：
-   字段按声明序顺序平铺（C 布局），所有字段同时有效。字段表整体拷入
-   meta，字段名经 strs 驻留。结构判等（字段名+类型按声明序一致即同一
-   类型）：已存在结构相同的实例时恒等返回之，类型由 context 的具名
-   类型表托管释放。入参非法（缺名/空字段表/字段缺名缺类型/重名）返回
-   NULL 并记录 error。 */
+/* 创建具名 struct 类型（白皮书 §3.5）：声明体一次性传入——字段表必填，
+   attribute（含 method 本体）/method 名单/subtype 三表可选。字段按声明
+   序顺序平铺（C 布局），所有字段同时有效；attribute/method/subtype 是
+   类型命名空间成员，不参与 Data 布局。声明表整体拷入 meta，各名字经
+   strs 驻留。结构判等（四张表按声明序：字段名+类型、attribute 名+值类
+   型、method 名单、subtype 名+类型）：已存在结构相同的实例时恒等返回
+   之，类型由 context 的具名类型表托管释放。入参非法（缺名/空字段表/字
+   段缺名缺类型/重名/attribute 缺名缺值/重名/method 缺名/重名/不在
+   attribute 表/对应值非 func/subtype 缺名缺类型/重名）返回 NULL 并记录
+   error。 */
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
-                                             const clux_struct_field_t *fields,
-                                             size_t count);
+                                             const clux_struct_decl_t *decl);
 /* 创建 struct 零值（memset 清零，全部字段同时有效）：type 须是
    CLUX_TYPE_STRUCT。字段读写走通用 field（写穿 view）。 */
 clux_value_t *clux_context_create_struct(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc);
+/* attribute/method 读取（T::a / a.b 的类型命名空间形态）：返回成员值本
+   身（借用，不拷贝）——method 也是 func 值，拿到后经 clux_context_invoke
+   调用并自行将 receiver 作首参（白皮书 §3.5.1：实例调用 a.b(args) 是
+   T::b(a, args) 的语法糖）。非 struct 类型或未知成员返回语义化 error。 */
+clux_value_t *clux_context_struct_attr(clux_context_t *self,
+                                       clux_type_t *type,
+                                       const char *name,
+                                       location_t *loc);
+/* subtype 读取（T::S）：返回嵌套类型本体（借用）。非 struct 类型或未知
+   成员返回 NULL 并记录 error。 */
+clux_type_t *clux_context_struct_subtype(clux_context_t *self,
                                          clux_type_t *type,
                                          const char *name,
                                          location_t *loc);

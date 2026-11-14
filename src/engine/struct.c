@@ -8,9 +8,17 @@
 #include <stddef.h>
 #include <string.h>
 
+/* meta 连体单块布局：meta 本体 | 字段表 | attribute 表 | method 名单 |
+   subtype 表，delete_clux_type 释放 meta 本体即整块释放。 */
 typedef struct _clux_struct_meta_t {
   clux_struct_field_t *fields;
   size_t count;
+  clux_struct_attr_t *attrs;
+  size_t attr_count;
+  const char **methods;
+  size_t method_count;
+  clux_struct_subtype_t *subtypes;
+  size_t subtype_count;
 } clux_struct_meta_t;
 
 static clux_struct_meta_t *struct_meta(clux_type_t *type) {
@@ -100,7 +108,8 @@ struct_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
 }
 
 /* 同类型比较（白皮书 §5.5）：按声明序逐字段递归比较（复用字段类型
-   vtable 的 eq 槽位，padding 不参与比较）。 */
+   vtable 的 eq 槽位，padding 不参与比较）。attribute/method/subtype 是
+   类型命名空间成员，不属于实例数据，不参与实例比较。 */
 static clux_value_t *struct_compare(clux_context_t *ctx,
                                     clux_value_t *left,
                                     clux_value_t *right,
@@ -174,40 +183,190 @@ struct_ne(clux_context_t *ctx, clux_value_t *left, clux_value_t *right) {
   return struct_compare(ctx, left, right, CLUX_OP_NE);
 }
 
-/* 结构相等核心：字段数、字段名与字段类型按声明序一一对应即相等，
-   类型名不参与判等（白皮书：结构兼容的不同具名类型可以比较）。 */
-static bool fields_equal(clux_struct_meta_t *self,
-                         const clux_struct_field_t *fields,
-                         size_t count) {
-  if (!self || self->count != count) {
+size_t clux_struct_attr_count(clux_type_t *type) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  return meta ? meta->attr_count : 0;
+}
+
+const clux_struct_attr_t *clux_struct_get_attr(clux_type_t *type, size_t idx) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  if (!meta || idx >= meta->attr_count) {
+    return NULL;
+  }
+  return &meta->attrs[idx];
+}
+
+const clux_struct_attr_t *clux_struct_find_attr(clux_type_t *type,
+                                                const char *name) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  if (!meta || !name) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < meta->attr_count; idx++) {
+    if (strcmp(meta->attrs[idx].name, name) == 0) {
+      return &meta->attrs[idx];
+    }
+  }
+  return NULL;
+}
+
+bool clux_struct_is_method(clux_type_t *type, const char *name) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  if (!meta || !name) {
+    return false;
+  }
+  for (size_t idx = 0; idx < meta->method_count; idx++) {
+    if (strcmp(meta->methods[idx], name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t clux_struct_subtype_count(clux_type_t *type) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  return meta ? meta->subtype_count : 0;
+}
+
+const clux_struct_subtype_t *clux_struct_get_subtype(clux_type_t *type,
+                                                     size_t idx) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  if (!meta || idx >= meta->subtype_count) {
+    return NULL;
+  }
+  return &meta->subtypes[idx];
+}
+
+const clux_struct_subtype_t *clux_struct_find_subtype(clux_type_t *type,
+                                                      const char *name) {
+  clux_struct_meta_t *meta = type ? struct_meta(type) : NULL;
+  if (!meta || !name) {
+    return NULL;
+  }
+  for (size_t idx = 0; idx < meta->subtype_count; idx++) {
+    if (strcmp(meta->subtypes[idx].name, name) == 0) {
+      return &meta->subtypes[idx];
+    }
+  }
+  return NULL;
+}
+
+/* 结构判等子例程：四张表按声明序逐项比较。attribute 参与判等的身份是
+   （名, 值类型）——attr 值本体是运行期对象，值恒等不可行（同名同类型的
+   声明即视为同一结构成员）。可选表 count 为 0 时只看 count（meta 内
+   段指针恒指向连体块内位置，不以 NULL 判缺席）。 */
+static bool fields_segment_equal(const clux_struct_field_t *self,
+                                 const clux_struct_field_t *fields,
+                                 size_t count) {
+  if (!self || !fields || count == 0) {
     return false;
   }
   for (size_t idx = 0; idx < count; idx++) {
-    if (strcmp(self->fields[idx].name, fields[idx].name) != 0 ||
-        !clux_type_equal(self->fields[idx].type, fields[idx].type)) {
+    if (strcmp(self[idx].name, fields[idx].name) != 0 ||
+        !clux_type_equal(self[idx].type, fields[idx].type)) {
       return false;
     }
   }
   return true;
 }
 
-bool clux_struct_fields_equal(clux_type_t *self,
-                              const clux_struct_field_t *fields,
-                              size_t count) {
-  if (!struct_kind(clux_type_get_kind(self))) {
+static bool attrs_segment_equal(const clux_struct_attr_t *self,
+                                const clux_struct_attr_t *attrs,
+                                size_t count) {
+  if (count == 0) {
+    return true;
+  }
+  if (!self || !attrs) {
     return false;
   }
-  return fields_equal(struct_meta(self), fields, count);
+  for (size_t idx = 0; idx < count; idx++) {
+    if (strcmp(self[idx].name, attrs[idx].name) != 0 ||
+        !clux_type_equal(clux_value_get_type(self[idx].value),
+                         clux_value_get_type(attrs[idx].value))) {
+      return false;
+    }
+  }
+  return true;
 }
 
+static bool methods_segment_equal(const char **self,
+                                  const char *const *methods,
+                                  size_t count) {
+  if (count == 0) {
+    return true;
+  }
+  if (!self || !methods) {
+    return false;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (strcmp(self[idx], methods[idx]) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool subtypes_segment_equal(const clux_struct_subtype_t *self,
+                                   const clux_struct_subtype_t *subtypes,
+                                   size_t count) {
+  if (count == 0) {
+    return true;
+  }
+  if (!self || !subtypes) {
+    return false;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (strcmp(self[idx].name, subtypes[idx].name) != 0 ||
+        !clux_type_equal(self[idx].type, subtypes[idx].type)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool decls_segment_equal(const clux_struct_meta_t *self,
+                                const clux_struct_decl_t *decl) {
+  if (self->attr_count != decl->attr_count ||
+      self->method_count != decl->method_count ||
+      self->subtype_count != decl->subtype_count ||
+      !fields_segment_equal(self->fields, decl->fields, decl->field_count)) {
+    return false;
+  }
+  return attrs_segment_equal(self->attrs, decl->attrs, decl->attr_count) &&
+         methods_segment_equal(
+             self->methods, decl->methods, decl->method_count) &&
+         subtypes_segment_equal(
+             self->subtypes, decl->subtypes, decl->subtype_count);
+}
+
+bool clux_struct_decls_equal(clux_type_t *self,
+                             const clux_struct_decl_t *decl) {
+  if (!decl || !struct_kind(clux_type_get_kind(self))) {
+    return false;
+  }
+  return decls_segment_equal(struct_meta(self), decl);
+}
+
+/* 类型相等核心：类型名不参与判等（白皮书：结构兼容的不同具名类型可以
+   比较），四张声明表按声明序一一对应即相等。 */
 static bool struct_type_equal(clux_type_t *self, clux_type_t *other) {
   if (!struct_kind(clux_type_get_kind(other))) {
     return false;
   }
+  clux_struct_meta_t *self_meta = struct_meta(self);
   clux_struct_meta_t *other_meta = struct_meta(other);
-  return fields_equal(struct_meta(self),
-                      other_meta ? other_meta->fields : NULL,
-                      other_meta ? other_meta->count : 0);
+  clux_struct_decl_t other_decl = {
+      other_meta->fields,
+      other_meta->count,
+      other_meta->attrs,
+      other_meta->attr_count,
+      /* C 不允许 const char** 隐式转 const char*const*，显式转型消除 */
+      (const char *const *)other_meta->methods,
+      other_meta->method_count,
+      other_meta->subtypes,
+      other_meta->subtype_count,
+  };
+  return decls_segment_equal(self_meta, &other_decl);
 }
 
 static clux_vtable_t g_struct_vtable = {
@@ -221,32 +380,62 @@ clux_vtable_t *get_clux_struct_vtable(void) { return &g_struct_vtable; }
 
 clux_type_t *create_clux_struct_type(allocator_t *allocator,
                                      const char *name,
-                                     const clux_struct_field_t *fields,
-                                     size_t count) {
+                                     const clux_struct_decl_t *decl) {
   /* 字段按声明序顺序平铺（各自按自身对齐取偏移）：
-     align = max(字段 align)，size = round_up(平铺末尾, align)。 */
+     align = max(字段 align)，size = round_up(平铺末尾, align)。
+     attribute/method/subtype 是类型命名空间成员，不参与 Data 布局。 */
   size_t align = 1;
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t field_align = clux_type_get_align(fields[idx].type);
+  for (size_t idx = 0; idx < decl->field_count; idx++) {
+    size_t field_align = clux_type_get_align(decl->fields[idx].type);
     if (field_align > align) {
       align = field_align;
     }
   }
   size_t end = 0;
-  for (size_t idx = 0; idx < count; idx++) {
-    size_t field_align = clux_type_get_align(fields[idx].type);
-    size_t field_size = clux_type_get_size(fields[idx].type);
+  for (size_t idx = 0; idx < decl->field_count; idx++) {
+    size_t field_align = clux_type_get_align(decl->fields[idx].type);
+    size_t field_size = clux_type_get_size(decl->fields[idx].type);
     end = (end + field_align - 1) / field_align * field_align + field_size;
   }
   size_t size = (end + align - 1) / align * align;
   clux_type_t *type = create_clux_type(
       allocator, CLUX_TYPE_STRUCT, name, size, align, get_clux_struct_vtable());
-  /* meta 与字段表连体成单块分配：delete_clux_type 释放 meta 本体即整块释放 */
-  clux_struct_meta_t *meta = clux_type_create_meta(
-      type, sizeof(clux_struct_meta_t) + sizeof(clux_struct_field_t) * count);
-  meta->fields =
-      (clux_struct_field_t *)((char *)meta + sizeof(clux_struct_meta_t));
-  (void)memcpy(meta->fields, fields, sizeof(clux_struct_field_t) * count);
-  meta->count = count;
+  /* meta 与四张表连体成单块分配：delete_clux_type 释放 meta 本体即整块释放 */
+  size_t bytes = sizeof(clux_struct_meta_t) +
+                 sizeof(clux_struct_field_t) * decl->field_count +
+                 sizeof(clux_struct_attr_t) * decl->attr_count +
+                 sizeof(const char *) * decl->method_count +
+                 sizeof(clux_struct_subtype_t) * decl->subtype_count;
+  clux_struct_meta_t *meta = clux_type_create_meta(type, bytes);
+  char *cursor = (char *)meta + sizeof(clux_struct_meta_t);
+  meta->fields = (clux_struct_field_t *)cursor;
+  cursor += sizeof(clux_struct_field_t) * decl->field_count;
+  (void)memcpy(meta->fields,
+               decl->fields,
+               sizeof(clux_struct_field_t) * decl->field_count);
+  meta->count = decl->field_count;
+  meta->attrs = (clux_struct_attr_t *)cursor;
+  cursor += sizeof(clux_struct_attr_t) * decl->attr_count;
+  if (decl->attr_count > 0) {
+    (void)memcpy(meta->attrs,
+                 decl->attrs,
+                 sizeof(clux_struct_attr_t) * decl->attr_count);
+  }
+  meta->attr_count = decl->attr_count;
+  meta->methods = (const char **)cursor;
+  cursor += sizeof(const char *) * decl->method_count;
+  if (decl->method_count > 0) {
+    (void)memcpy(meta->methods,
+                 decl->methods,
+                 sizeof(const char *) * decl->method_count);
+  }
+  meta->method_count = decl->method_count;
+  meta->subtypes = (clux_struct_subtype_t *)cursor;
+  if (decl->subtype_count > 0) {
+    (void)memcpy(meta->subtypes,
+                 decl->subtypes,
+                 sizeof(clux_struct_subtype_t) * decl->subtype_count);
+  }
+  meta->subtype_count = decl->subtype_count;
   return type;
 }

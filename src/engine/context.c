@@ -920,15 +920,14 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
 }
 clux_type_t *clux_context_create_struct_type(clux_context_t *self,
                                              const char *name,
-                                             const clux_struct_field_t *fields,
-                                             size_t count) {
-  if (!name || !fields || count == 0) {
+                                             const clux_struct_decl_t *decl) {
+  if (!name || !decl || !decl->fields || decl->field_count == 0) {
     (void)clux_context_create_error_message(
         self, NULL, "struct requires a name and at least one field");
     return NULL;
   }
-  for (size_t idx = 0; idx < count; idx++) {
-    if (!fields[idx].name || !fields[idx].type) {
+  for (size_t idx = 0; idx < decl->field_count; idx++) {
+    if (!decl->fields[idx].name || !decl->fields[idx].type) {
       (void)clux_context_create_error_message(
           self,
           NULL,
@@ -938,34 +937,159 @@ clux_type_t *clux_context_create_struct_type(clux_context_t *self,
       return NULL;
     }
     for (size_t prev = 0; prev < idx; prev++) {
-      if (strcmp(fields[idx].name, fields[prev].name) == 0) {
+      if (strcmp(decl->fields[idx].name, decl->fields[prev].name) == 0) {
         (void)clux_context_create_error_message(
             self,
             NULL,
             "struct '%s' has duplicate field '%s'",
             name,
-            fields[idx].name);
+            decl->fields[idx].name);
         return NULL;
       }
     }
   }
-  /* 结构去重：已存在字段名+类型按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < decl->attr_count; idx++) {
+    if (!decl->attrs || !decl->attrs[idx].name || !decl->attrs[idx].value) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' attribute %zu requires a name and a value",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(decl->attrs[idx].name, decl->attrs[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate attribute '%s'",
+            name,
+            decl->attrs[idx].name);
+        return NULL;
+      }
+    }
+  }
+  for (size_t idx = 0; idx < decl->method_count; idx++) {
+    const char *method = decl->methods ? decl->methods[idx] : NULL;
+    if (!method) {
+      (void)clux_context_create_error_message(
+          self, NULL, "struct '%s' method %zu requires a name", name, idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(method, decl->methods[prev]) == 0) {
+        (void)clux_context_create_error_message(
+            self, NULL, "struct '%s' has duplicate method '%s'", name, method);
+        return NULL;
+      }
+    }
+    /* method 判定看声明形式：名单里的名字须有同名 attribute 且值为 func
+       （var fn = func(...){...} 是 attr 不是 method，不进名单）。 */
+    const clux_struct_attr_t *attr = NULL;
+    for (size_t pos = 0; pos < decl->attr_count; pos++) {
+      if (strcmp(decl->attrs[pos].name, method) == 0) {
+        attr = &decl->attrs[pos];
+        break;
+      }
+    }
+    if (!attr) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' method '%s' is not declared as an attribute",
+          name,
+          method);
+      return NULL;
+    }
+    if (clux_type_get_kind(clux_value_get_type(attr->value)) !=
+        CLUX_TYPE_FUNC) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' method '%s' requires a func value",
+          name,
+          method);
+      return NULL;
+    }
+  }
+  for (size_t idx = 0; idx < decl->subtype_count; idx++) {
+    if (!decl->subtypes || !decl->subtypes[idx].name ||
+        !decl->subtypes[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' subtype %zu requires a name and a type",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(decl->subtypes[idx].name, decl->subtypes[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate subtype '%s'",
+            name,
+            decl->subtypes[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在四张声明表一致的实例时恒等返回。 */
   for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
     clux_type_t *existing = vec_get(self->named_types, idx);
-    if (clux_struct_fields_equal(existing, fields, count)) {
+    if (clux_struct_decls_equal(existing, decl)) {
       return existing;
     }
   }
-  /* 字段名经 strs 驻留（随 context 释放），字段表由类型 meta 持有。 */
-  clux_struct_field_t interned[count];
-  for (size_t idx = 0; idx < count; idx++) {
-    char *field_name = clux_context_alloc_str(self, strlen(fields[idx].name));
-    (void)memcpy(field_name, fields[idx].name, strlen(fields[idx].name));
-    interned[idx].name = field_name;
-    interned[idx].type = fields[idx].type;
+  /* 各名字经 strs 驻留（随 context 释放），声明表由类型 meta 持有；
+     零长度 VLA 是 UB，count 为 0 的表占位 1 个槽位（不会被读取）。 */
+  clux_struct_field_t interned_fields[decl->field_count];
+  for (size_t idx = 0; idx < decl->field_count; idx++) {
+    char *field_name =
+        clux_context_alloc_str(self, strlen(decl->fields[idx].name));
+    (void)memcpy(
+        field_name, decl->fields[idx].name, strlen(decl->fields[idx].name));
+    interned_fields[idx].name = field_name;
+    interned_fields[idx].type = decl->fields[idx].type;
   }
-  clux_type_t *type =
-      create_clux_struct_type(self->allocator, name, interned, count);
+  clux_struct_attr_t interned_attrs[decl->attr_count ? decl->attr_count : 1];
+  for (size_t idx = 0; idx < decl->attr_count; idx++) {
+    char *attr_name =
+        clux_context_alloc_str(self, strlen(decl->attrs[idx].name));
+    (void)memcpy(
+        attr_name, decl->attrs[idx].name, strlen(decl->attrs[idx].name));
+    interned_attrs[idx].name = attr_name;
+    interned_attrs[idx].value = decl->attrs[idx].value;
+  }
+  const char *interned_methods[decl->method_count ? decl->method_count : 1];
+  for (size_t idx = 0; idx < decl->method_count; idx++) {
+    char *method_name =
+        clux_context_alloc_str(self, strlen(decl->methods[idx]));
+    (void)memcpy(method_name, decl->methods[idx], strlen(decl->methods[idx]));
+    interned_methods[idx] = method_name;
+  }
+  clux_struct_subtype_t
+      interned_subtypes[decl->subtype_count ? decl->subtype_count : 1];
+  for (size_t idx = 0; idx < decl->subtype_count; idx++) {
+    char *subtype_name =
+        clux_context_alloc_str(self, strlen(decl->subtypes[idx].name));
+    (void)memcpy(subtype_name,
+                 decl->subtypes[idx].name,
+                 strlen(decl->subtypes[idx].name));
+    interned_subtypes[idx].name = subtype_name;
+    interned_subtypes[idx].type = decl->subtypes[idx].type;
+  }
+  clux_struct_decl_t interned = {interned_fields,
+                                 decl->field_count,
+                                 decl->attr_count ? interned_attrs : NULL,
+                                 decl->attr_count,
+                                 decl->method_count ? interned_methods : NULL,
+                                 decl->method_count,
+                                 decl->subtype_count ? interned_subtypes : NULL,
+                                 decl->subtype_count};
+  clux_type_t *type = create_clux_struct_type(self->allocator, name, &interned);
   (void)vec_push(self->named_types, type);
   return type;
 }
@@ -981,6 +1105,67 @@ clux_value_t *clux_context_create_struct(clux_context_t *self,
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   memset(ptr_to_raw(data, 0), 0, size);
   return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_struct_attr(clux_context_t *self,
+                                       clux_type_t *type,
+                                       const char *name,
+                                       location_t *loc) {
+  if (!type || !name) {
+    return clux_context_create_error_message(
+        self, loc, "attribute access requires a struct type and a name");
+  }
+  if (clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "attribute access requires a struct type, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  /* attribute/method 是类型命名空间成员：借用返回值本体（不拷贝）。
+     method 也是 func 值，调用方经 clux_context_invoke 调用并自行组
+     receiver 首参（白皮书 §3.5.1 实例调用是语法糖）。 */
+  const clux_struct_attr_t *found = clux_struct_find_attr(type, name);
+  if (!found) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "struct '%s' has no attribute '%s'",
+        type_name ? type_name : "<unknown>",
+        name);
+  }
+  return found->value;
+}
+clux_type_t *clux_context_struct_subtype(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc) {
+  if (!type || !name) {
+    (void)clux_context_create_error_message(
+        self, loc, "subtype access requires a struct type and a name");
+    return NULL;
+  }
+  if (clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
+    const char *type_name = clux_type_get_name(type);
+    (void)clux_context_create_error_message(
+        self,
+        loc,
+        "subtype access requires a struct type, got '%s'",
+        type_name ? type_name : "<unknown>");
+    return NULL;
+  }
+  const clux_struct_subtype_t *found = clux_struct_find_subtype(type, name);
+  if (!found) {
+    const char *type_name = clux_type_get_name(type);
+    (void)clux_context_create_error_message(self,
+                                            loc,
+                                            "struct '%s' has no subtype '%s'",
+                                            type_name ? type_name : "<unknown>",
+                                            name);
+    return NULL;
+  }
+  return found->type;
 }
 clux_value_t *
 clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {

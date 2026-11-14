@@ -3880,8 +3880,9 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
       {"a", i32_type},
       {"b", i64_type},
   };
+  clux_struct_decl_t decl = {fields, 2, NULL, 0, NULL, 0, NULL, 0};
   clux_type_t *point_type =
-      clux_context_create_struct_type(ctx, "Point", fields, 2);
+      clux_context_create_struct_type(ctx, "Point", &decl);
   ASSERT_NE(point_type, nullptr);
   EXPECT_EQ(clux_type_get_kind(point_type), CLUX_TYPE_STRUCT);
   EXPECT_STREQ(clux_type_get_name(point_type), "Point");
@@ -3895,36 +3896,42 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
   EXPECT_EQ(clux_struct_field_offset(point_type, 0), 0u);
   EXPECT_EQ(clux_struct_field_offset(point_type, 1), 8u);
 
-  /* 结构去重：字段名+类型按声明序一致即恒等返回 */
+  /* 结构去重：四张声明表一致即恒等返回 */
   clux_struct_field_t same[] = {
       {"a", i32_type},
       {"b", i64_type},
   };
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "Other", same, 2), point_type);
+  clux_struct_decl_t same_decl = {same, 2, NULL, 0, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Other", &same_decl),
+            point_type);
   clux_struct_field_t swapped[] = {
       {"b", i64_type},
       {"a", i32_type},
   };
+  clux_struct_decl_t swapped_decl = {swapped, 2, NULL, 0, NULL, 0, NULL, 0};
   clux_type_t *swapped_type =
-      clux_context_create_struct_type(ctx, "Swapped", swapped, 2);
+      clux_context_create_struct_type(ctx, "Swapped", &swapped_decl);
   ASSERT_NE(swapped_type, nullptr);
   EXPECT_NE(swapped_type, point_type);
   EXPECT_FALSE(clux_type_equal(point_type, swapped_type));
 
-  /* 非法入参：缺名、空字段表、字段缺类型、重名 */
-  EXPECT_EQ(clux_context_create_struct_type(ctx, NULL, fields, 2), nullptr);
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", fields, 0), nullptr);
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", NULL, 2), nullptr);
+  /* 非法入参：缺名、空字段表、空声明体、字段缺类型、重名 */
+  EXPECT_EQ(clux_context_create_struct_type(ctx, NULL, &decl), nullptr);
+  clux_struct_decl_t empty_decl = {fields, 0, NULL, 0, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", &empty_decl), nullptr);
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", NULL), nullptr);
   clux_struct_field_t bad[] = {
       {"a", i32_type},
       {"x", NULL},
   };
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "Bad", bad, 2), nullptr);
+  clux_struct_decl_t bad_decl = {bad, 2, NULL, 0, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Bad", &bad_decl), nullptr);
   clux_struct_field_t dup[] = {
       {"a", i32_type},
       {"a", i64_type},
   };
-  EXPECT_EQ(clux_context_create_struct_type(ctx, "Dup", dup, 2), nullptr);
+  clux_struct_decl_t dup_decl = {dup, 2, NULL, 0, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Dup", &dup_decl), nullptr);
 
   /* 零值创建 + 字段读写（通用 field，写穿 view，全部字段同时有效） */
   clux_value_t *p = clux_context_create_struct(ctx, point_type, "p", NULL);
@@ -4008,6 +4015,182 @@ TEST(EngineTest, StructTypeFieldsAndEquality) {
   EXPECT_EQ(read_i32(clux_context_field(ctx, copy, "a", NULL)), 5);
   EXPECT_EQ(read_i64(clux_context_field(ctx, copy, "b", NULL)), 7);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, p, NULL)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, StructAttributesMethodsSubtypes) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+
+  /* method 本体：func(i32, i32) -> i32，挂 AST */
+  clux_type_t *param_types[] = {i32_type, i32_type};
+  clux_type_t *method_fn_type = clux_context_create_func_type(
+      ctx, "func(i32,i32)->i32", NULL, 0, param_types, 2, i32_type);
+  ASSERT_NE(method_fn_type, nullptr);
+  static int dummy_body;
+  clux_value_t *scale =
+      clux_context_create_func(ctx, method_fn_type, "scale", NULL);
+  ASSERT_NE(scale, nullptr);
+  ASSERT_EQ(clux_context_func_set_ast(ctx, scale, &dummy_body, NULL), scale);
+  /* 静态变量 attr（var count: i32 = 0） */
+  clux_value_t *count = clux_context_create_i32(ctx, 0, "count", NULL);
+  ASSERT_NE(count, nullptr);
+  /* var fn = func(...){...} 不是 method，只是 attr */
+  clux_value_t *plain_fn =
+      clux_context_create_func(ctx, method_fn_type, "plain_fn", NULL);
+  ASSERT_NE(plain_fn, nullptr);
+
+  clux_struct_field_t fields[] = {{"x", i32_type}};
+  clux_struct_attr_t attrs[] = {
+      {"scale", scale},
+      {"count", count},
+      {"plain_fn", plain_fn},
+  };
+  const char *methods[] = {"scale"};
+  clux_struct_subtype_t subtypes[] = {{"Tag", i32_type}};
+  clux_struct_decl_t decl = {fields, 1, attrs, 3, methods, 1, subtypes, 1};
+  clux_type_t *box_type = clux_context_create_struct_type(ctx, "Box", &decl);
+  ASSERT_NE(box_type, nullptr);
+
+  /* Data 布局只由字段决定（attribute/subtype 不占实例空间） */
+  EXPECT_EQ(clux_type_get_size(box_type), 4u);
+  EXPECT_EQ(clux_type_get_align(box_type), 4u);
+  EXPECT_EQ(clux_struct_attr_count(box_type), 3u);
+  EXPECT_EQ(clux_struct_get_attr(box_type, 1)->value, count);
+  EXPECT_EQ(clux_struct_get_attr(box_type, 3), nullptr);
+  EXPECT_NE(clux_struct_find_attr(box_type, "plain_fn"), nullptr);
+  EXPECT_EQ(clux_struct_subtype_count(box_type), 1u);
+  EXPECT_EQ(clux_struct_get_subtype(box_type, 1), nullptr);
+  EXPECT_EQ(clux_struct_find_subtype(box_type, "Tag")->type, i32_type);
+
+  /* method 判定看声明形式：名单里的名字才是 method */
+  EXPECT_TRUE(clux_struct_is_method(box_type, "scale"));
+  EXPECT_FALSE(clux_struct_is_method(box_type, "count"));
+  EXPECT_FALSE(clux_struct_is_method(box_type, "plain_fn"));
+  EXPECT_FALSE(clux_struct_is_method(box_type, "missing"));
+
+  /* 读取分形态：attr/method 借用返回值本体，subtype 返回类型 */
+  EXPECT_EQ(clux_context_struct_attr(ctx, box_type, "scale", NULL), scale);
+  EXPECT_EQ(clux_context_struct_attr(ctx, box_type, "count", NULL), count);
+  clux_value_t *missing_attr =
+      clux_context_struct_attr(ctx, box_type, "y", NULL);
+  ASSERT_NE(missing_attr, nullptr);
+  EXPECT_STREQ(error_message_of(missing_attr),
+               "struct 'Box' has no attribute 'y'");
+  clux_value_t *bad_attr = clux_context_struct_attr(ctx, i32_type, "x", NULL);
+  ASSERT_NE(bad_attr, nullptr);
+  EXPECT_STREQ(error_message_of(bad_attr),
+               "attribute access requires a struct type, got 'i32'");
+  EXPECT_EQ(clux_context_struct_subtype(ctx, box_type, "Tag", NULL), i32_type);
+  EXPECT_EQ(clux_context_struct_subtype(ctx, box_type, "Other", NULL), nullptr);
+  EXPECT_EQ(clux_context_struct_subtype(ctx, i32_type, "Tag", NULL), nullptr);
+
+  /* method 经 invoke 调用：实参按签名校验（receiver 作首参是语法糖
+     a.scale(3) ⇒ T::scale(a, 3) 的展开约定，属 parser/编译层职责），
+     真函数校验通过报无可执行环境（AST 执行由编译流水线后端接线） */
+  clux_value_t *three = clux_context_create_i32(ctx, 3, NULL, NULL);
+  clux_value_t *method_args[] = {three, three};
+  clux_value_t *called = clux_context_invoke(
+      ctx,
+      clux_context_struct_attr(ctx, box_type, "scale", NULL),
+      2,
+      method_args,
+      NULL);
+  ASSERT_NE(called, nullptr);
+  EXPECT_STREQ(error_message_of(called),
+               "function call has no executable environment attached");
+  /* shadow 方法产出返回类型 shadow */
+  clux_value_t *shadow_fn =
+      clux_context_create_shadow_value(ctx, method_fn_type);
+  clux_value_t *shadow_call =
+      clux_context_invoke(ctx, shadow_fn, 2, method_args, NULL);
+  ASSERT_NE(shadow_call, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_call));
+  EXPECT_EQ(clux_value_get_type(shadow_call), i32_type);
+
+  /* 去重：四张声明表一致即恒等返回（attr 按名+值类型判等，值本体不参与） */
+  clux_value_t *other_scale =
+      clux_context_create_func(ctx, method_fn_type, NULL, NULL);
+  clux_value_t *other_count = clux_context_create_i32(ctx, 9, NULL, NULL);
+  clux_value_t *other_fn =
+      clux_context_create_func(ctx, method_fn_type, NULL, NULL);
+  clux_struct_attr_t same_attrs[] = {
+      {"scale", other_scale},
+      {"count", other_count},
+      {"plain_fn", other_fn},
+  };
+  clux_struct_decl_t same_decl = {
+      fields, 1, same_attrs, 3, methods, 1, subtypes, 1};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Same", &same_decl), box_type);
+  /* 差一个 attr 即不同 */
+  clux_struct_decl_t less_attr_decl = {
+      fields, 1, same_attrs, 2, methods, 1, subtypes, 1};
+  clux_type_t *less_type =
+      clux_context_create_struct_type(ctx, "Less", &less_attr_decl);
+  ASSERT_NE(less_type, nullptr);
+  EXPECT_NE(less_type, box_type);
+  EXPECT_FALSE(clux_type_equal(box_type, less_type));
+  /* method 名单差一项即不同（plain_fn 升 method） */
+  const char *more_methods[] = {"scale", "plain_fn"};
+  clux_struct_decl_t more_method_decl = {
+      fields, 1, same_attrs, 3, more_methods, 2, subtypes, 1};
+  clux_type_t *more_type =
+      clux_context_create_struct_type(ctx, "More", &more_method_decl);
+  ASSERT_NE(more_type, nullptr);
+  EXPECT_NE(more_type, box_type);
+  EXPECT_FALSE(clux_type_equal(box_type, more_type));
+  /* subtype 差一项即不同 */
+  clux_struct_decl_t no_subtype_decl = {
+      fields, 1, same_attrs, 3, methods, 1, NULL, 0};
+  clux_type_t *flat_type =
+      clux_context_create_struct_type(ctx, "Flat", &no_subtype_decl);
+  ASSERT_NE(flat_type, nullptr);
+  EXPECT_NE(flat_type, box_type);
+  EXPECT_FALSE(clux_type_equal(box_type, flat_type));
+
+  /* 非法声明：method 不在 attribute 表、method 值非 func、attr 缺值、
+     attr/method/subtype 重名、subtype 缺类型 */
+  const char *ghost_methods[] = {"ghost"};
+  clux_struct_decl_t ghost_decl = {
+      fields, 1, attrs, 3, ghost_methods, 1, subtypes, 1};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Ghost", &ghost_decl),
+            nullptr);
+  const char *count_methods[] = {"count"};
+  clux_struct_decl_t not_fn_decl = {
+      fields, 1, attrs, 3, count_methods, 1, subtypes, 1};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "NotFn", &not_fn_decl),
+            nullptr);
+  clux_struct_attr_t valueless[] = {{"scale", NULL}};
+  clux_struct_decl_t valueless_decl = {
+      fields, 1, valueless, 1, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "NoValue", &valueless_decl),
+            nullptr);
+  clux_struct_attr_t dup_attrs[] = {{"scale", scale}, {"scale", scale}};
+  clux_struct_decl_t dup_attr_decl = {
+      fields, 1, dup_attrs, 2, NULL, 0, NULL, 0};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "DupAttr", &dup_attr_decl),
+            nullptr);
+  const char *dup_methods[] = {"scale", "scale"};
+  clux_struct_decl_t dup_method_decl = {
+      fields, 1, attrs, 3, dup_methods, 2, subtypes, 1};
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "DupMethod", &dup_method_decl),
+            nullptr);
+  clux_struct_subtype_t bad_subtypes[] = {{"Tag", i32_type}, {"V", NULL}};
+  clux_struct_decl_t bad_subtype_decl = {
+      fields, 1, attrs, 3, methods, 1, bad_subtypes, 2};
+  EXPECT_EQ(
+      clux_context_create_struct_type(ctx, "BadSubtype", &bad_subtype_decl),
+      nullptr);
+  clux_struct_subtype_t dup_subtypes[] = {{"Tag", i32_type}, {"Tag", i32_type}};
+  clux_struct_decl_t dup_subtype_decl = {
+      fields, 1, attrs, 3, methods, 1, dup_subtypes, 2};
+  EXPECT_EQ(
+      clux_context_create_struct_type(ctx, "DupSubtype", &dup_subtype_decl),
+      nullptr);
 
   delete_clux_context(&ctx);
   delete_allocator(&a);
@@ -4152,8 +4335,10 @@ TEST(EngineTest, NoLeak) {
       {"a", clux_context_get_i32_type(ctx)},
       {"b", clux_context_get_i64_type(ctx)},
   };
+  clux_struct_decl_t struct_decl = {
+      struct_fields, 2, NULL, 0, NULL, 0, NULL, 0};
   clux_type_t *struct_type =
-      clux_context_create_struct_type(ctx, "Point", struct_fields, 2);
+      clux_context_create_struct_type(ctx, "Point", &struct_decl);
   ASSERT_NE(struct_type, nullptr);
   clux_value_t *point =
       clux_context_create_struct(ctx, struct_type, NULL, NULL);
@@ -4162,6 +4347,35 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_field(ctx, point, "x", NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, point, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, point, point, NULL), nullptr);
+  clux_struct_attr_t membered_attrs[] = {
+      {"m",
+       clux_context_create_func(
+           ctx,
+           clux_context_create_func_type(
+               ctx, "fn", NULL, 0, NULL, 0, clux_context_get_i32_type(ctx)),
+           NULL,
+           NULL)},
+  };
+  const char *membered_methods[] = {"m"};
+  clux_struct_subtype_t membered_subtypes[] = {
+      {"T", clux_context_get_i32_type(ctx)}};
+  clux_struct_decl_t membered_decl = {struct_fields,
+                                      2,
+                                      membered_attrs,
+                                      1,
+                                      membered_methods,
+                                      1,
+                                      membered_subtypes,
+                                      1};
+  clux_type_t *membered_type =
+      clux_context_create_struct_type(ctx, "Membered", &membered_decl);
+  ASSERT_NE(membered_type, nullptr);
+  ASSERT_NE(clux_context_struct_attr(ctx, membered_type, "m", NULL), nullptr);
+  ASSERT_NE(clux_context_struct_attr(ctx, membered_type, "x", NULL), nullptr);
+  ASSERT_NE(clux_context_struct_subtype(ctx, membered_type, "T", NULL),
+            nullptr);
+  EXPECT_EQ(clux_context_struct_subtype(ctx, membered_type, "U", NULL),
+            nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);
