@@ -4,6 +4,7 @@
 #include "core/safe_alloc.h"
 #include "engine/array.h"
 #include "engine/context.h"
+#include "engine/func.h"
 #include "engine/integer.h"
 #include "engine/interface.h"
 #include "engine/optional.h"
@@ -3625,6 +3626,247 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, FuncTypeInvokeAndCaptures) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+
+  /* 创建：头部 AST 指针在偏移 0，捕获字段从对齐处平铺
+     （align = max(8, 4, 8) = 8；a 偏移 8，b 偏移 round_up(12, 8) = 16，
+     末尾 16 + 8 = 24 已对齐，size = 24） */
+  clux_func_capture_t captures[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+  };
+  clux_type_t *params[] = {i32_type, i32_type};
+  clux_type_t *func_type = clux_context_create_func_type(
+      ctx, "func|a:i32,b:i64|(i32,i32)->i32", captures, 2, params, 2, i32_type);
+  ASSERT_NE(func_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(func_type), CLUX_TYPE_FUNC);
+  EXPECT_STREQ(clux_type_get_name(func_type),
+               "func|a:i32,b:i64|(i32,i32)->i32");
+  EXPECT_EQ(clux_type_get_size(func_type), 24u);
+  EXPECT_EQ(clux_type_get_align(func_type), 8u);
+  EXPECT_EQ(clux_func_ast_offset(), 0u);
+  EXPECT_EQ(clux_func_capture_count(func_type), 2u);
+  EXPECT_EQ(clux_func_get_capture(func_type, 1)->type, i64_type);
+  EXPECT_EQ(clux_func_get_capture(func_type, 2), nullptr);
+  EXPECT_NE(clux_func_find_capture(func_type, "b"), nullptr);
+  EXPECT_EQ(clux_func_find_capture(func_type, "x"), nullptr);
+  EXPECT_EQ(clux_func_capture_offset(func_type, 0), 8u);
+  EXPECT_EQ(clux_func_capture_offset(func_type, 1), 16u);
+  EXPECT_EQ(clux_func_param_count(func_type), 2u);
+  EXPECT_EQ(clux_func_get_param(func_type, 1), i32_type);
+  EXPECT_EQ(clux_func_get_param(func_type, 2), nullptr);
+  EXPECT_EQ(clux_func_get_return_type(func_type), i32_type);
+
+  /* 结构去重：捕获表+参数序列+返回类型按声明序一致即恒等返回 */
+  EXPECT_EQ(clux_context_create_func_type(
+                ctx, "Other", captures, 2, params, 2, i32_type),
+            func_type);
+  /* 无捕获（func(i32,i32)->i32）与带捕获是不同类型（无闭包擦除） */
+  clux_type_t *plain_type = clux_context_create_func_type(
+      ctx, "func(i32,i32)->i32", NULL, 0, params, 2, i32_type);
+  ASSERT_NE(plain_type, nullptr);
+  EXPECT_NE(plain_type, func_type);
+  EXPECT_FALSE(clux_type_equal(func_type, plain_type));
+  EXPECT_EQ(clux_type_get_size(plain_type), 8u); /* 头部指针即全部 */
+  /* 捕获类型不同 / 捕获名不同 / 捕获序不同 / 参数不同 / 返回不同 */
+  clux_func_capture_t cap_i64[] = {{"a", i64_type}};
+  EXPECT_NE(
+      clux_context_create_func_type(ctx, "C1", cap_i64, 1, params, 2, i32_type),
+      func_type);
+  clux_func_capture_t cap_renamed[] = {{"c", i32_type}};
+  EXPECT_NE(clux_context_create_func_type(
+                ctx, "C2", cap_renamed, 1, params, 2, i32_type),
+            func_type);
+  clux_func_capture_t cap_swapped[] = {
+      {"b", i64_type},
+      {"a", i32_type},
+  };
+  EXPECT_NE(clux_context_create_func_type(
+                ctx, "C3", cap_swapped, 2, params, 2, i32_type),
+            func_type);
+  clux_type_t *swapped_params[] = {i64_type, i32_type};
+  EXPECT_NE(clux_context_create_func_type(
+                ctx, "C4", captures, 2, swapped_params, 2, i32_type),
+            func_type);
+  EXPECT_NE(clux_context_create_func_type(
+                ctx, "C5", captures, 2, params, 2, i64_type),
+            func_type);
+
+  /* 非法入参：缺名、缺返回类型、捕获缺名缺类型、重名、参数缺类型 */
+  EXPECT_EQ(clux_context_create_func_type(
+                ctx, NULL, captures, 2, params, 2, i32_type),
+            nullptr);
+  EXPECT_EQ(
+      clux_context_create_func_type(ctx, "E", captures, 2, params, 2, NULL),
+      nullptr);
+  clux_func_capture_t cap_bad[] = {
+      {"a", i32_type},
+      {"x", NULL},
+  };
+  EXPECT_EQ(clux_context_create_func_type(
+                ctx, "Bad", cap_bad, 2, params, 2, i32_type),
+            nullptr);
+  clux_func_capture_t cap_dup[] = {
+      {"a", i32_type},
+      {"a", i64_type},
+  };
+  EXPECT_EQ(clux_context_create_func_type(
+                ctx, "Dup", cap_dup, 2, params, 2, i32_type),
+            nullptr);
+  clux_type_t *bad_params[] = {i32_type, NULL};
+  EXPECT_EQ(clux_context_create_func_type(
+                ctx, "BadP", captures, 2, bad_params, 2, i32_type),
+            nullptr);
+
+  /* 零值创建：AST 指针 NULL，捕获字段清零；set_ast 挂接函数体 */
+  static int dummy_body;
+  clux_value_t *f = clux_context_create_func(ctx, func_type, "f", NULL);
+  ASSERT_NE(f, nullptr);
+  EXPECT_EQ(clux_value_get_type(f), func_type);
+  EXPECT_EQ(clux_func_get_ast(f), nullptr);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, f, &dummy_body, NULL), f);
+  EXPECT_EQ(clux_func_get_ast(f), &dummy_body);
+
+  /* 捕获读取：独立 API 返回双向 view，写穿 view */
+  clux_value_t *cap_a = clux_context_func_capture(ctx, f, "a", NULL);
+  ASSERT_NE(cap_a, nullptr);
+  EXPECT_EQ(clux_value_get_type(cap_a), i32_type);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, cap_a, five, NULL), cap_a);
+  EXPECT_EQ(read_i32(clux_context_func_capture(ctx, f, "a", NULL)), 5);
+  clux_value_t *cap_b = clux_context_func_capture(ctx, f, "b", NULL);
+  ASSERT_NE(cap_b, nullptr);
+  clux_value_t *seven = clux_context_create_i64(ctx, 7, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, cap_b, seven, NULL), cap_b);
+  EXPECT_EQ(read_i64(clux_context_func_capture(ctx, f, "b", NULL)), 7);
+
+  /* 未知捕获名 */
+  clux_value_t *missing = clux_context_func_capture(ctx, f, "x", NULL);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_STREQ(error_message_of(missing),
+               "func 'func|a:i32,b:i64|(i32,i32)->i32' has no capture 'x'");
+
+  /* invoke：argc 不匹配 */
+  clux_value_t *one = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *args1[] = {one};
+  clux_value_t *too_few = clux_context_invoke(ctx, f, 1, args1, NULL);
+  ASSERT_NE(too_few, nullptr);
+  EXPECT_STREQ(error_message_of(too_few),
+               "function expects 2 arguments, got 1");
+  clux_value_t *too_many = clux_context_invoke(ctx, f, 0, NULL, NULL);
+  ASSERT_NE(too_many, nullptr);
+  EXPECT_STREQ(error_message_of(too_many),
+               "function expects 2 arguments, got 0");
+  /* invoke：实参类型不匹配 */
+  clux_value_t *args_bad[] = {seven, one};
+  clux_value_t *bad_arg = clux_context_invoke(ctx, f, 2, args_bad, NULL);
+  ASSERT_NE(bad_arg, nullptr);
+  EXPECT_STREQ(error_message_of(bad_arg),
+               "function argument 0 requires type 'i32', got 'i64'");
+  /* invoke：error 实参自传播 */
+  clux_value_t *err = clux_context_func_capture(ctx, f, "x", NULL);
+  clux_value_t *args_err[] = {err, one};
+  EXPECT_EQ(clux_context_invoke(ctx, f, 2, args_err, NULL), err);
+  /* invoke：shadow 实参产出返回类型 shadow */
+  clux_value_t *shadow_i32 = clux_context_create_shadow_value(ctx, i32_type);
+  clux_value_t *args_shadow[] = {shadow_i32, one};
+  clux_value_t *shadow_result =
+      clux_context_invoke(ctx, f, 2, args_shadow, NULL);
+  ASSERT_NE(shadow_result, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_result));
+  EXPECT_EQ(clux_value_get_type(shadow_result), i32_type);
+  /* invoke：校验通过的真函数无可执行环境是运行期 error */
+  clux_value_t *args_ok[] = {one, five};
+  clux_value_t *no_env = clux_context_invoke(ctx, f, 2, args_ok, NULL);
+  ASSERT_NE(no_env, nullptr);
+  EXPECT_STREQ(error_message_of(no_env),
+               "function call has no executable environment attached");
+
+  /* shadow：func_capture 产出捕获 shadow，invoke 产出返回类型 shadow，
+     set_ast 原样返回 */
+  clux_value_t *shadow_func = clux_context_create_shadow_value(ctx, func_type);
+  clux_value_t *shadow_cap =
+      clux_context_func_capture(ctx, shadow_func, "a", NULL);
+  ASSERT_NE(shadow_cap, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_cap));
+  EXPECT_EQ(clux_value_get_type(shadow_cap), i32_type);
+  clux_value_t *shadow_call =
+      clux_context_invoke(ctx, shadow_func, 2, args_ok, NULL);
+  ASSERT_NE(shadow_call, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_call));
+  EXPECT_EQ(clux_value_get_type(shadow_call), i32_type);
+  EXPECT_EQ(clux_context_func_set_ast(ctx, shadow_func, &dummy_body, NULL),
+            shadow_func);
+
+  /* 非 func 类型的兜底报错 */
+  clux_value_t *plain = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *bad_create =
+      clux_context_create_func(ctx, i32_type, NULL, NULL);
+  ASSERT_NE(bad_create, nullptr);
+  EXPECT_STREQ(error_message_of(bad_create),
+               "function value creation requires a func type");
+  clux_value_t *bad_capture = clux_context_func_capture(ctx, plain, "a", NULL);
+  ASSERT_NE(bad_capture, nullptr);
+  EXPECT_STREQ(error_message_of(bad_capture),
+               "capture access requires a func value, got 'i32'");
+  clux_value_t *bad_ast =
+      clux_context_func_set_ast(ctx, plain, &dummy_body, NULL);
+  ASSERT_NE(bad_ast, nullptr);
+  EXPECT_STREQ(error_message_of(bad_ast),
+               "setting a function body requires a func value, got 'i32'");
+  clux_value_t *bad_invoke = clux_context_invoke(ctx, plain, 0, NULL, NULL);
+  ASSERT_NE(bad_invoke, nullptr);
+  EXPECT_STREQ(error_message_of(bad_invoke),
+               "invoke requires a function value, got 'i32'");
+
+  /* eq/ne：函数身份是 AST 指针，捕获环境按字段递归比较 */
+  clux_value_t *g = clux_context_create_func(ctx, func_type, "g", NULL);
+  ASSERT_NE(g, nullptr);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
+  EXPECT_EQ(clux_context_func_set_ast(ctx, g, &dummy_body, NULL), g);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
+  clux_value_t *g_cap_a = clux_context_func_capture(ctx, g, "a", NULL);
+  EXPECT_EQ(clux_context_assign(ctx, g_cap_a, five, NULL), g_cap_a);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
+  clux_value_t *g_cap_b = clux_context_func_capture(ctx, g, "b", NULL);
+  EXPECT_EQ(clux_context_assign(ctx, g_cap_b, seven, NULL), g_cap_b);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, f, g, NULL)));
+  clux_value_t *eight = clux_context_create_i64(ctx, 8, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, g_cap_b, eight, NULL), g_cap_b);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, f, g, NULL)));
+  clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, f, plain, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '==' requires operands of the same type");
+  /* 跨签名：无捕获函数与带捕获函数不可比（同类型比较才有效） */
+  clux_value_t *plain_func =
+      clux_context_create_func(ctx, plain_type, NULL, NULL);
+  ASSERT_NE(plain_func, nullptr);
+  clux_value_t *cross =
+      clux_context_binary(ctx, CLUX_OP_EQ, f, plain_func, NULL);
+  ASSERT_NE(cross, nullptr);
+  EXPECT_STREQ(error_message_of(cross),
+               "operator '==' requires operands of the same type");
+
+  /* 同类型 assign 整体拷贝（AST 指针+捕获字段）+ clone */
+  EXPECT_EQ(clux_func_get_ast(clux_context_assign(ctx, g, f, NULL)),
+            &dummy_body);
+  EXPECT_EQ(read_i64(clux_context_func_capture(ctx, g, "b", NULL)), 7);
+  clux_value_t *copy = clux_context_clone(ctx, f, NULL);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(clux_func_get_ast(copy), &dummy_body);
+  EXPECT_EQ(read_i32(clux_context_func_capture(ctx, copy, "a", NULL)), 5);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, f, NULL)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -3734,6 +3976,32 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_clone(ctx, tagged, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, tagged, tagged, NULL),
             nullptr);
+  clux_func_capture_t func_captures[] = {
+      {"a", clux_context_get_i32_type(ctx)},
+      {"b", clux_context_get_i64_type(ctx)},
+  };
+  clux_type_t *func_params[] = {clux_context_get_i32_type(ctx),
+                                clux_context_get_i32_type(ctx)};
+  clux_type_t *func_type =
+      clux_context_create_func_type(ctx,
+                                    "func|a:i32,b:i64|(i32,i32)->i32",
+                                    func_captures,
+                                    2,
+                                    func_params,
+                                    2,
+                                    clux_context_get_i32_type(ctx));
+  ASSERT_NE(func_type, nullptr);
+  clux_value_t *func = clux_context_create_func(ctx, func_type, NULL, NULL);
+  ASSERT_NE(func, nullptr);
+  ASSERT_NE(clux_context_func_set_ast(ctx, func, (void *)&func_type, NULL),
+            nullptr);
+  ASSERT_NE(clux_context_func_capture(ctx, func, "a", NULL), nullptr);
+  ASSERT_NE(clux_context_func_capture(ctx, func, "x", NULL), nullptr);
+  clux_value_t *func_args[] = {left, left};
+  ASSERT_NE(clux_context_invoke(ctx, func, 2, func_args, NULL), nullptr);
+  ASSERT_NE(clux_context_invoke(ctx, func, 1, func_args, NULL), nullptr);
+  ASSERT_NE(clux_context_clone(ctx, func, NULL), nullptr);
+  ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, func, func, NULL), nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

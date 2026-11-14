@@ -21,6 +21,7 @@
 #include "engine/cunion.h"
 #include "engine/error.h"
 #include "engine/floating.h"
+#include "engine/func.h"
 #include "engine/optional.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
@@ -731,6 +732,189 @@ clux_value_t *clux_context_field(clux_context_t *self,
       self,
       loc,
       "type '%s' does not support field access",
+      type_name ? type_name : "<unknown>");
+}
+clux_type_t *clux_context_create_func_type(clux_context_t *self,
+                                           const char *name,
+                                           const clux_func_capture_t *captures,
+                                           size_t capture_count,
+                                           clux_type_t **params,
+                                           size_t param_count,
+                                           clux_type_t *return_type) {
+  if (!name || !return_type) {
+    (void)clux_context_create_error_message(
+        self, NULL, "func type requires a name and a return type");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < capture_count; idx++) {
+    if (!captures || !captures[idx].name || !captures[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "func '%s' capture %zu requires a name and a type",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(captures[idx].name, captures[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "func '%s' has duplicate capture '%s'",
+            name,
+            captures[idx].name);
+        return NULL;
+      }
+    }
+  }
+  for (size_t idx = 0; idx < param_count; idx++) {
+    if (!params || !params[idx]) {
+      (void)clux_context_create_error_message(
+          self, NULL, "func '%s' parameter %zu requires a type", name, idx);
+      return NULL;
+    }
+  }
+  /* 结构去重：已存在捕获表+参数序列+返回类型按声明序一致的实例时恒等
+     返回——捕获列表是类型签名的一部分，func|a:i32|(i32)->i32 与
+     func(i32)->i32 是不同类型。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_func_signature_equal(existing,
+                                  captures,
+                                  capture_count,
+                                  params,
+                                  param_count,
+                                  return_type)) {
+      return existing;
+    }
+  }
+  /* 捕获名经 strs 驻留（随 context 释放），捕获表由类型 meta 持有。 */
+  clux_func_capture_t interned[capture_count];
+  for (size_t idx = 0; idx < capture_count; idx++) {
+    char *capture_name =
+        clux_context_alloc_str(self, strlen(captures[idx].name));
+    (void)memcpy(capture_name, captures[idx].name, strlen(captures[idx].name));
+    interned[idx].name = capture_name;
+    interned[idx].type = captures[idx].type;
+  }
+  clux_type_t *type = create_clux_func_type(self->allocator,
+                                            name,
+                                            interned,
+                                            capture_count,
+                                            params,
+                                            param_count,
+                                            return_type);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+clux_value_t *clux_context_create_func(clux_context_t *self,
+                                       clux_type_t *type,
+                                       const char *name,
+                                       location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_FUNC) {
+    return clux_context_create_error_message(
+        self, loc, "function value creation requires a func type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_func_set_ast(clux_context_t *self,
+                                        clux_value_t *value,
+                                        void *ast,
+                                        location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "setting a function body requires a function value");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) != CLUX_TYPE_FUNC) {
+    const char *type_name = clux_type_get_name(clux_value_get_type(value));
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "setting a function body requires a func value, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  if (clux_value_is_shadow(value)) {
+    return value;
+  }
+  clux_func_set_ast(value, ast);
+  return value;
+}
+clux_value_t *clux_context_func_capture(clux_context_t *self,
+                                        clux_value_t *value,
+                                        const char *capture,
+                                        location_t *loc) {
+  if (!value || !capture) {
+    return clux_context_create_error_message(
+        self, loc, "capture access requires a value and a capture name");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  if (clux_type_get_kind(type) != CLUX_TYPE_FUNC) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "capture access requires a func value, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  /* func 捕获走独立 API（不占 field 槽位）：返回捕获类型的读写双向
+     view，写入由通用 assign 写穿 view 完成。 */
+  const clux_func_capture_t *found = clux_func_find_capture(type, capture);
+  if (!found) {
+    const char *type_name = clux_type_get_name(type);
+    return clux_context_create_error_message(self,
+                                             NULL,
+                                             "func '%s' has no capture '%s'",
+                                             type_name ? type_name
+                                                       : "<unknown>",
+                                             capture);
+  }
+  if (clux_value_is_shadow(value)) {
+    return clux_context_create_shadow_value(self, found->type);
+  }
+  size_t offset = clux_func_capture_offset(
+      type, (size_t)(found - clux_func_get_capture_table(type)));
+  ptr_handle_t view = ptr_offset(clux_value_get_data(value), offset);
+  if (!view) {
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "cannot access capture '%s' of an invalid function",
+        capture);
+  }
+  return clux_context_create_value(self, found->type, view, NULL, NULL);
+}
+clux_value_t *clux_context_invoke(clux_context_t *self,
+                                  clux_value_t *value,
+                                  size_t argc,
+                                  clux_value_t *argv[],
+                                  location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "invoke requires a function value");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->invoke) {
+    return vt->invoke(self, value, argc, argv);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "invoke requires a function value, got '%s'",
       type_name ? type_name : "<unknown>");
 }
 clux_value_t *

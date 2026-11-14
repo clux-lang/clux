@@ -5,6 +5,7 @@
 #include "core/location.h"
 #include "core/safe_alloc.h"
 #include "engine/cunion.h"
+#include "engine/func.h"
 #include "engine/interface.h"
 #include "engine/union.h"
 #include <stdbool.h>
@@ -207,6 +208,48 @@ clux_value_t *clux_context_is_member(clux_context_t *self,
                                      clux_value_t *value,
                                      const char *member,
                                      location_t *loc);
+/* 创建 func 类型（白皮书 §2.7）：签名 = 捕获表 + 参数类型序列 + 返回
+   类型。捕获列表是类型的一部分——func|a:i32|(i32)->i32 与
+   func(i32)->i32 是不同类型；捕获项默认值属于函数体（AST），不参与
+   类型判等。结构去重：捕获表+参数序列+返回类型一致时恒等返回，类型由
+   context 的具名类型表托管释放。入参非法（缺名/缺返回类型/捕获缺名缺
+   类型/重名/参数缺类型）返回 NULL 并记录 error。 */
+clux_type_t *clux_context_create_func_type(clux_context_t *self,
+                                           const char *name,
+                                           const clux_func_capture_t *captures,
+                                           size_t capture_count,
+                                           clux_type_t **params,
+                                           size_t param_count,
+                                           clux_type_t *return_type);
+/* 创建 func 零值（函数体 AST 指针为 NULL，捕获字段清零）：type 须是
+   CLUX_TYPE_FUNC。函数体经 clux_context_func_set_ast 挂接。 */
+clux_value_t *clux_context_create_func(clux_context_t *self,
+                                       clux_type_t *type,
+                                       const char *name,
+                                       location_t *loc);
+/* 挂接函数体 AST 指针（借用，不拥有）：返回原值；非 func 返回语义化
+   error，shadow 值原样返回（无数据可变）。 */
+clux_value_t *clux_context_func_set_ast(clux_context_t *self,
+                                        clux_value_t *value,
+                                        void *ast,
+                                        location_t *loc);
+/* 捕获读取（f.capture）：func 捕获走独立 API（不占 field 槽位语义），
+   返回捕获类型的读写双向 view（内存共享、携带引用属性），写入由通用
+   assign 写穿 view 完成；未知捕获返回语义化 error，shadow 值产出
+   捕获类型的 shadow。仅 func 支持，其余类型返回 error。 */
+clux_value_t *clux_context_func_capture(clux_context_t *self,
+                                        clux_value_t *value,
+                                        const char *capture,
+                                        location_t *loc);
+/* 调用（f(args)）：按签名校验实参个数与类型，error 自传播；shadow
+   函数或任一 shadow 实参产出返回类型的 shadow；校验通过的真函数没有
+   可执行环境（AST 体的执行由编译流水线后端接线）是运行期 error。
+   仅 func 支持（vtable invoke 槽位），其余类型返回 error。 */
+clux_value_t *clux_context_invoke(clux_context_t *self,
+                                  clux_value_t *value,
+                                  size_t argc,
+                                  clux_value_t *argv[],
+                                  location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */

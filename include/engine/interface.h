@@ -64,6 +64,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_OPTIONAL,
   CLUX_TYPE_CUNION,
   CLUX_TYPE_UNION,
+  CLUX_TYPE_FUNC,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -99,11 +100,14 @@ typedef clux_value_t *(*clux_vt_take_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_is_member_fn_t)(clux_context_t *,
                                                 clux_value_t *,
                                                 const char *);
-typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
+/* invoke 是函数值的调用原语（f(args)）：按签名校验实参个数与类型，
+   返回调用结果。shadow 函数产出返回类型的 shadow；实际执行（AST 体）
+   由可执行环境接线，未接线是运行期 error。只有 func 绑定该槽位。 */
 typedef clux_value_t *(*clux_vt_invoke_fn_t)(clux_context_t *,
                                              clux_value_t *,
                                              size_t,
                                              clux_value_t *[]);
+typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_slice_fn_t)(clux_context_t *,
                                             clux_value_t *,
                                             clux_value_t *,
@@ -147,6 +151,7 @@ struct _clux_vtable_t {
   clux_vt_take_fn_t take;
   clux_vt_field_fn_t field;
   clux_vt_is_member_fn_t is_member;
+  clux_vt_invoke_fn_t invoke;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };
