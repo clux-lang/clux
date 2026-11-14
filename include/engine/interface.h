@@ -65,6 +65,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_CUNION,
   CLUX_TYPE_UNION,
   CLUX_TYPE_FUNC,
+  CLUX_TYPE_STRUCT,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -74,7 +75,7 @@ typedef clux_value_t *(*clux_vt_postfix_fn_t)(clux_context_t *, clux_value_t *);
 /* field 是具名成员的"借引用"读原语（x.field）：返回成员类型的读写双向
    view（内存共享、天然携带引用属性），读取与写入均由通用 assign 完成
    （写穿 view，赋值给具名变量时经 assign 的 memcpy 自动失去引用属性）。
-   只有具名成员的类型（当前为 cunion 与 tag union）绑定该槽位。 */
+   只有具名成员的类型（当前为 cunion、tag union 与 struct）绑定该槽位。 */
 typedef clux_value_t *(*clux_vt_field_fn_t)(clux_context_t *,
                                             clux_value_t *,
                                             const char *);

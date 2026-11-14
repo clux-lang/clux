@@ -7,6 +7,7 @@
 #include "engine/cunion.h"
 #include "engine/func.h"
 #include "engine/interface.h"
+#include "engine/struct.h"
 #include "engine/union.h"
 #include <stdbool.h>
 #ifdef __cplusplus
@@ -250,6 +251,22 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
                                   size_t argc,
                                   clux_value_t *argv[],
                                   location_t *loc);
+/* 创建具名 struct 类型（白皮书 §3-declarations，第一阶段仅字段）：
+   字段按声明序顺序平铺（C 布局），所有字段同时有效。字段表整体拷入
+   meta，字段名经 strs 驻留。结构判等（字段名+类型按声明序一致即同一
+   类型）：已存在结构相同的实例时恒等返回之，类型由 context 的具名
+   类型表托管释放。入参非法（缺名/空字段表/字段缺名缺类型/重名）返回
+   NULL 并记录 error。 */
+clux_type_t *clux_context_create_struct_type(clux_context_t *self,
+                                             const char *name,
+                                             const clux_struct_field_t *fields,
+                                             size_t count);
+/* 创建 struct 零值（memset 清零，全部字段同时有效）：type 须是
+   CLUX_TYPE_STRUCT。字段读写走通用 field（写穿 view）。 */
+clux_value_t *clux_context_create_struct(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */

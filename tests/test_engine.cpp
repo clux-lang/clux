@@ -3867,6 +3867,152 @@ TEST(EngineTest, FuncTypeInvokeAndCaptures) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, StructTypeFieldsAndEquality) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *i64_type = clux_context_get_i64_type(ctx);
+
+  /* 创建：字段按声明序 C 布局平铺
+     （a 偏移 0，b 偏移 round_up(4, 8) = 8，size = round_up(16, 8) = 16） */
+  clux_struct_field_t fields[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+  };
+  clux_type_t *point_type =
+      clux_context_create_struct_type(ctx, "Point", fields, 2);
+  ASSERT_NE(point_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(point_type), CLUX_TYPE_STRUCT);
+  EXPECT_STREQ(clux_type_get_name(point_type), "Point");
+  EXPECT_EQ(clux_type_get_size(point_type), 16u);
+  EXPECT_EQ(clux_type_get_align(point_type), 8u);
+  EXPECT_EQ(clux_struct_field_count(point_type), 2u);
+  EXPECT_EQ(clux_struct_get_field(point_type, 1)->type, i64_type);
+  EXPECT_EQ(clux_struct_get_field(point_type, 2), nullptr);
+  EXPECT_NE(clux_struct_find_field(point_type, "b"), nullptr);
+  EXPECT_EQ(clux_struct_find_field(point_type, "x"), nullptr);
+  EXPECT_EQ(clux_struct_field_offset(point_type, 0), 0u);
+  EXPECT_EQ(clux_struct_field_offset(point_type, 1), 8u);
+
+  /* 结构去重：字段名+类型按声明序一致即恒等返回 */
+  clux_struct_field_t same[] = {
+      {"a", i32_type},
+      {"b", i64_type},
+  };
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Other", same, 2), point_type);
+  clux_struct_field_t swapped[] = {
+      {"b", i64_type},
+      {"a", i32_type},
+  };
+  clux_type_t *swapped_type =
+      clux_context_create_struct_type(ctx, "Swapped", swapped, 2);
+  ASSERT_NE(swapped_type, nullptr);
+  EXPECT_NE(swapped_type, point_type);
+  EXPECT_FALSE(clux_type_equal(point_type, swapped_type));
+
+  /* 非法入参：缺名、空字段表、字段缺类型、重名 */
+  EXPECT_EQ(clux_context_create_struct_type(ctx, NULL, fields, 2), nullptr);
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", fields, 0), nullptr);
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "E", NULL, 2), nullptr);
+  clux_struct_field_t bad[] = {
+      {"a", i32_type},
+      {"x", NULL},
+  };
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Bad", bad, 2), nullptr);
+  clux_struct_field_t dup[] = {
+      {"a", i32_type},
+      {"a", i64_type},
+  };
+  EXPECT_EQ(clux_context_create_struct_type(ctx, "Dup", dup, 2), nullptr);
+
+  /* 零值创建 + 字段读写（通用 field，写穿 view，全部字段同时有效） */
+  clux_value_t *p = clux_context_create_struct(ctx, point_type, "p", NULL);
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(clux_value_get_type(p), point_type);
+  clux_value_t *a_field = clux_context_field(ctx, p, "a", NULL);
+  ASSERT_NE(a_field, nullptr);
+  EXPECT_EQ(clux_value_get_type(a_field), i32_type);
+  EXPECT_EQ(read_i32(a_field), 0);
+  clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, a_field, five, NULL), a_field);
+  clux_value_t *b_field = clux_context_field(ctx, p, "b", NULL);
+  ASSERT_NE(b_field, nullptr);
+  clux_value_t *seven = clux_context_create_i64(ctx, 7, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, b_field, seven, NULL), b_field);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, p, "a", NULL)), 5);
+  EXPECT_EQ(read_i64(clux_context_field(ctx, p, "b", NULL)), 7);
+
+  /* 未知字段 */
+  clux_value_t *missing = clux_context_field(ctx, p, "x", NULL);
+  ASSERT_NE(missing, nullptr);
+  EXPECT_STREQ(error_message_of(missing), "struct 'Point' has no field 'x'");
+
+  /* shadow：field 产出字段 shadow，eq 产出 bool shadow */
+  clux_value_t *shadow_struct =
+      clux_context_create_shadow_value(ctx, point_type);
+  clux_value_t *shadow_field =
+      clux_context_field(ctx, shadow_struct, "a", NULL);
+  ASSERT_NE(shadow_field, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_field));
+  EXPECT_EQ(clux_value_get_type(shadow_field), i32_type);
+  clux_value_t *shadow_eq =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow_struct, p, NULL);
+  ASSERT_NE(shadow_eq, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_eq));
+  EXPECT_EQ(clux_value_get_type(shadow_eq), clux_context_get_bool_type(ctx));
+
+  /* eq/ne 逐字段递归（白皮书 §5.5） */
+  clux_value_t *q = clux_context_create_struct(ctx, point_type, NULL, NULL);
+  ASSERT_NE(q, nullptr);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, p, q, NULL)));
+  clux_value_t *q_a = clux_context_field(ctx, q, "a", NULL);
+  ASSERT_NE(q_a, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, q_a, five, NULL), q_a);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, p, q, NULL)));
+  clux_value_t *q_b = clux_context_field(ctx, q, "b", NULL);
+  ASSERT_NE(q_b, nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, q_b, seven, NULL), q_b);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, p, q, NULL)));
+  clux_value_t *other =
+      clux_context_create_struct(ctx, swapped_type, NULL, NULL);
+  ASSERT_NE(other, nullptr);
+  clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, p, other, NULL);
+  ASSERT_NE(mixed, nullptr);
+  EXPECT_STREQ(error_message_of(mixed),
+               "operator '==' requires operands of the same type");
+  clux_value_t *plain = clux_context_create_i32(ctx, 1, NULL, NULL);
+  clux_value_t *mixed_plain =
+      clux_context_binary(ctx, CLUX_OP_EQ, p, plain, NULL);
+  ASSERT_NE(mixed_plain, nullptr);
+  EXPECT_STREQ(error_message_of(mixed_plain),
+               "operator '==' requires operands of the same type");
+
+  /* 非 struct 类型的兜底报错 */
+  clux_value_t *bad_create =
+      clux_context_create_struct(ctx, i32_type, NULL, NULL);
+  ASSERT_NE(bad_create, nullptr);
+  EXPECT_STREQ(error_message_of(bad_create),
+               "struct value creation requires a struct type");
+  clux_value_t *bad_field = clux_context_field(ctx, plain, "a", NULL);
+  ASSERT_NE(bad_field, nullptr);
+  EXPECT_STREQ(error_message_of(bad_field),
+               "type 'i32' does not support field access");
+
+  /* 同类型 assign 整体拷贝 + clone */
+  EXPECT_EQ(read_i64(clux_context_field(
+                ctx, clux_context_assign(ctx, q, p, NULL), "b", NULL)),
+            7);
+  clux_value_t *copy = clux_context_clone(ctx, p, NULL);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, copy, "a", NULL)), 5);
+  EXPECT_EQ(read_i64(clux_context_field(ctx, copy, "b", NULL)), 7);
+  EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, p, NULL)));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -4002,6 +4148,20 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(clux_context_invoke(ctx, func, 1, func_args, NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, func, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, func, func, NULL), nullptr);
+  clux_struct_field_t struct_fields[] = {
+      {"a", clux_context_get_i32_type(ctx)},
+      {"b", clux_context_get_i64_type(ctx)},
+  };
+  clux_type_t *struct_type =
+      clux_context_create_struct_type(ctx, "Point", struct_fields, 2);
+  ASSERT_NE(struct_type, nullptr);
+  clux_value_t *point =
+      clux_context_create_struct(ctx, struct_type, NULL, NULL);
+  ASSERT_NE(point, nullptr);
+  ASSERT_NE(clux_context_field(ctx, point, "a", NULL), nullptr);
+  ASSERT_NE(clux_context_field(ctx, point, "x", NULL), nullptr);
+  ASSERT_NE(clux_context_clone(ctx, point, NULL), nullptr);
+  ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, point, point, NULL), nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

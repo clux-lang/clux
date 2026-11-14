@@ -27,6 +27,7 @@
 #include "engine/qualifier.h"
 #include "engine/slice.h"
 #include "engine/str.h"
+#include "engine/struct.h"
 #include "engine/union.h"
 
 struct _clux_context_t {
@@ -916,6 +917,70 @@ clux_value_t *clux_context_invoke(clux_context_t *self,
       loc,
       "invoke requires a function value, got '%s'",
       type_name ? type_name : "<unknown>");
+}
+clux_type_t *clux_context_create_struct_type(clux_context_t *self,
+                                             const char *name,
+                                             const clux_struct_field_t *fields,
+                                             size_t count) {
+  if (!name || !fields || count == 0) {
+    (void)clux_context_create_error_message(
+        self, NULL, "struct requires a name and at least one field");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!fields[idx].name || !fields[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "struct '%s' field %zu requires a name and a type",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(fields[idx].name, fields[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "struct '%s' has duplicate field '%s'",
+            name,
+            fields[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在字段名+类型按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_struct_fields_equal(existing, fields, count)) {
+      return existing;
+    }
+  }
+  /* 字段名经 strs 驻留（随 context 释放），字段表由类型 meta 持有。 */
+  clux_struct_field_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    char *field_name = clux_context_alloc_str(self, strlen(fields[idx].name));
+    (void)memcpy(field_name, fields[idx].name, strlen(fields[idx].name));
+    interned[idx].name = field_name;
+    interned[idx].type = fields[idx].type;
+  }
+  clux_type_t *type =
+      create_clux_struct_type(self->allocator, name, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+clux_value_t *clux_context_create_struct(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_STRUCT) {
+    return clux_context_create_error_message(
+        self, loc, "struct value creation requires a struct type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
 }
 clux_value_t *
 clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {
