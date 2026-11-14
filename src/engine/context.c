@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "engine/bool.h"
+#include "engine/cunion.h"
 #include "engine/error.h"
 #include "engine/floating.h"
 #include "engine/optional.h"
@@ -33,6 +34,9 @@ struct _clux_context_t {
   rbtree_t *strs;
   clux_scope_t *global_scope;
   clux_scope_t *current_scope;
+  /* 具名复合类型（cunion 等）托管表：无 base 可挂 children，
+     由 context 按创建逆序统一释放。 */
+  vec_t *named_types;
   struct {
     clux_type_t *type_error;
     clux_type_t *type_i8;
@@ -60,6 +64,7 @@ clux_context_t *create_clux_context(allocator_t *allocator) {
   ctx->strs = create_rbtree(allocator);
   ctx->global_scope = create_clux_scope(allocator, NULL);
   ctx->current_scope = ctx->global_scope;
+  ctx->named_types = create_vec(allocator);
   ctx->builtin_types.type_error = create_clux_type(allocator,
                                                    CLUX_TYPE_ERROR,
                                                    "error",
@@ -165,6 +170,11 @@ void delete_clux_context(clux_context_t **self) {
     clux_context_pop_scope(ctx);
   }
   delete_clux_scope(&ctx->global_scope);
+  for (size_t idx = vec_get_size(ctx->named_types); idx > 0; idx--) {
+    clux_type_t *type = vec_get(ctx->named_types, idx - 1);
+    delete_clux_type(&type);
+  }
+  delete_vec(&ctx->named_types);
   for (size_t idx = 0; idx < vec_get_size(ctx->errors); idx++) {
     clux_error_t *err = vec_get(ctx->errors, idx);
     delete_error(&err);
@@ -521,6 +531,94 @@ clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc) {
       self,
       loc,
       "#take requires an optional value, got '%s'",
+      type_name ? type_name : "<unknown>");
+}
+clux_type_t *
+clux_context_create_cunion_type(clux_context_t *self,
+                                const char *name,
+                                const clux_cunion_member_t *members,
+                                size_t count) {
+  if (!name || !members || count == 0) {
+    (void)clux_context_create_error_message(
+        self, NULL, "cunion requires a name and at least one member");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!members[idx].name || !members[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "cunion '%s' member %zu requires a name and a type",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(members[idx].name, members[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "cunion '%s' has duplicate member '%s'",
+            name,
+            members[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_cunion_members_equal(existing, members, count)) {
+      return existing;
+    }
+  }
+  /* 成员名经 strs 驻留（随 context 释放），成员表由类型 meta 持有。 */
+  clux_cunion_member_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    char *member_name = clux_context_alloc_str(self, strlen(members[idx].name));
+    (void)memcpy(member_name, members[idx].name, strlen(members[idx].name));
+    interned[idx].name = member_name;
+    interned[idx].type = members[idx].type;
+  }
+  clux_type_t *type =
+      create_clux_cunion_type(self->allocator, name, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+clux_value_t *clux_context_create_cunion(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_CUNION) {
+    return clux_context_create_error_message(
+        self, loc, "cunion value creation requires a cunion type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_get_field(clux_context_t *self,
+                                     clux_value_t *value,
+                                     const char *field,
+                                     location_t *loc) {
+  if (!value || !field) {
+    return clux_context_create_error_message(
+        self, loc, "field access requires a value and a field name");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->get_field) {
+    return vt->get_field(self, value, field);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "type '%s' does not support field access",
       type_name ? type_name : "<unknown>");
 }
 clux_value_t *

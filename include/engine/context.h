@@ -4,6 +4,7 @@
 #include "core/error.h"
 #include "core/location.h"
 #include "core/safe_alloc.h"
+#include "engine/cunion.h"
 #include "engine/interface.h"
 #include <stdbool.h>
 #ifdef __cplusplus
@@ -152,6 +153,29 @@ clux_value_t *clux_context_is_none(clux_context_t *self,
    支持（vtable take 槽位），其余类型返回 error。 */
 clux_value_t *
 clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc);
+/* 创建具名 C union 类型（白皮书 §3.8）：无 tag，所有成员共享偏移 0，
+   size/align 取成员最大值（C ABI 布局）。成员表整体拷入 meta，成员名经
+   strs 驻留。结构判等（成员名+类型按声明序一致即同一类型）：已存在
+   结构相同的实例时恒等返回之，类型由 context 的具名类型表托管释放。
+   入参非法（缺名/空成员表/成员缺名缺类型/重名）返回 NULL 并记录 error。 */
+clux_type_t *
+clux_context_create_cunion_type(clux_context_t *self,
+                                const char *name,
+                                const clux_cunion_member_t *members,
+                                size_t count);
+/* 创建 cunion 零值（memset 清零）：type 须是 CLUX_TYPE_CUNION。 */
+clux_value_t *clux_context_create_cunion(clux_context_t *self,
+                                         clux_type_t *type,
+                                         const char *name,
+                                         location_t *loc);
+/* 成员读取（x.field）：返回成员类型的 view（内存共享、携带引用属性），
+   未知成员报 error，shadow 值产出成员类型的 shadow。写入由通用 assign
+   写穿 view 完成。仅绑定 get_field 槽位的类型支持（当前仅 cunion），
+   其余类型返回 error。 */
+clux_value_t *clux_context_get_field(clux_context_t *self,
+                                     clux_value_t *value,
+                                     const char *field,
+                                     location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */

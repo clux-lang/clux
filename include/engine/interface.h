@@ -62,6 +62,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_SLICE,
   CLUX_TYPE_ARRAY,
   CLUX_TYPE_OPTIONAL,
+  CLUX_TYPE_CUNION,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -137,6 +138,8 @@ struct _clux_vtable_t {
   clux_vt_index_fn_t index;
   clux_vt_is_none_fn_t is_none;
   clux_vt_take_fn_t take;
+  clux_vt_get_field_fn_t get_field;
+  clux_vt_set_field_fn_t set_field;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };
