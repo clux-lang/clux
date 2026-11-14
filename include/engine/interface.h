@@ -61,6 +61,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_VOLATILE,
   CLUX_TYPE_SLICE,
   CLUX_TYPE_ARRAY,
+  CLUX_TYPE_OPTIONAL,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -82,6 +83,14 @@ typedef clux_value_t *(*clux_vt_deref_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_index_fn_t)(clux_context_t *,
                                             clux_value_t *,
                                             clux_value_t *);
+/* is_none 是 optional 的判空查询（内置函数 #is_none）：
+   返回 bool 值，none 为 true。只有 optional 绑定该槽位，
+   其余类型由 context 兜底报不支持。 */
+typedef clux_value_t *(*clux_vt_is_none_fn_t)(clux_context_t *, clux_value_t *);
+/* take 是 optional 的断言取值（内置函数 #take）：some 返回载荷 base
+   类型的借引用 view，none 是运行期 error；`.!` 是编译为 #take 的
+   语法糖。只有 optional 绑定该槽位，其余类型由 context 兜底报不支持。 */
+typedef clux_value_t *(*clux_vt_take_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_invoke_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -126,6 +135,8 @@ struct _clux_vtable_t {
   clux_vt_cast_fn_t cast;
   clux_vt_deref_fn_t deref;
   clux_vt_index_fn_t index;
+  clux_vt_is_none_fn_t is_none;
+  clux_vt_take_fn_t take;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };

@@ -26,7 +26,6 @@ TEST_F(NodeLeafTest, LiteralFactories) {
     node_t *(*create)(allocator_t *);
     node_kind_t kind;
   } cases[] = {
-      {create_literal_nil_node, CLUX_NODE_LITERAL_NIL},
       {create_literal_undefined_node, CLUX_NODE_LITERAL_UNDEFINED},
       {create_literal_string_node, CLUX_NODE_LITERAL_STRING},
       {create_literal_character_node, CLUX_NODE_LITERAL_CHARACTER},

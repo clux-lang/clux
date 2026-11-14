@@ -8,7 +8,6 @@ extern "C" {
 
 /* 字面量节点全部是叶子：无子节点，值由 location 指向的源码文本决定。
    每种字面量一个工厂，避免调用方用裸 kind 直接 create_node。 */
-node_t *create_literal_nil_node(allocator_t *allocator);
 node_t *create_literal_undefined_node(allocator_t *allocator);
 node_t *create_literal_string_node(allocator_t *allocator);
 node_t *create_literal_character_node(allocator_t *allocator);

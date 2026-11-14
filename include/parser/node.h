@@ -12,7 +12,6 @@ enum _node_kind_t {
   CLUX_NODE_SYMBOL,
   CLUX_NODE_PROGRAM,
   CLUX_NODE_STATEMENT_EXPRESSION,
-  CLUX_NODE_LITERAL_NIL,
   CLUX_NODE_LITERAL_UNDEFINED,
   CLUX_NODE_LITERAL_STRING,
   CLUX_NODE_LITERAL_CHARACTER,
@@ -264,7 +263,6 @@ void node_json_children(json_writer_t *writer,
    父节点按 child 的实际类型选择其中一个函数，不做通用分派。 */
 void symbol_node_to_json(json_writer_t *writer, node_t *self);
 void program_node_to_json(json_writer_t *writer, node_t *self);
-void literal_nil_node_to_json(json_writer_t *writer, node_t *self);
 void literal_undefined_node_to_json(json_writer_t *writer, node_t *self);
 void literal_string_node_to_json(json_writer_t *writer, node_t *self);
 void literal_character_node_to_json(json_writer_t *writer, node_t *self);

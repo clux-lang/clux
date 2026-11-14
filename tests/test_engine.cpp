@@ -6,6 +6,7 @@
 #include "engine/context.h"
 #include "engine/integer.h"
 #include "engine/interface.h"
+#include "engine/optional.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
 #include "engine/slice.h"
@@ -3060,6 +3061,258 @@ TEST(EngineTest, ArrayConstElementAndCompareAndClone) {
   delete_allocator(&a);
 }
 
+TEST(EngineTest, OptionalTypeInterningAndMeta) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+  ASSERT_NE(opt_i32, nullptr);
+  EXPECT_EQ(clux_type_get_kind(opt_i32), CLUX_TYPE_OPTIONAL);
+  EXPECT_STREQ(clux_type_get_name(opt_i32), "?i32");
+  /* 布局：首字节 present 标志 + 按 base 对齐的 payload */
+  EXPECT_EQ(clux_type_get_size(opt_i32), 4 + sizeof(int32_t));
+  EXPECT_EQ(clux_type_get_align(opt_i32), alignof(int32_t));
+  EXPECT_EQ(clux_context_get_optional_type(ctx, i32_type), opt_i32);
+  EXPECT_EQ(clux_type_get_optional_base(opt_i32), i32_type);
+
+  /* 不同 base / 带限定载荷均为不同实例 */
+  clux_type_t *opt_i64 =
+      clux_context_get_optional_type(ctx, clux_context_get_i64_type(ctx));
+  clux_type_t *opt_const = clux_context_get_optional_type(
+      ctx, clux_type_get_qualified_type(i32_type, CLUX_TYPE_CONST));
+  ASSERT_NE(opt_i64, nullptr);
+  ASSERT_NE(opt_const, nullptr);
+  EXPECT_STREQ(clux_type_get_name(opt_const), "?const i32");
+  EXPECT_NE(opt_i64, opt_i32);
+  EXPECT_NE(opt_const, opt_i32);
+  EXPECT_TRUE(clux_type_equal(opt_i32, opt_i32));
+  EXPECT_FALSE(clux_type_equal(opt_i32, opt_i64));
+  EXPECT_TRUE(clux_type_extends(opt_i32, opt_i32));
+  EXPECT_FALSE(clux_type_extends(opt_i32, opt_i64));
+
+  /* optional 嵌套：??T 的载荷是 ?T */
+  clux_type_t *opt_opt = clux_context_get_optional_type(ctx, opt_i32);
+  ASSERT_NE(opt_opt, nullptr);
+  EXPECT_STREQ(clux_type_get_name(opt_opt), "??i32");
+  EXPECT_EQ(clux_type_get_optional_base(opt_opt), opt_i32);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OptionalSomeNoneAndUnwrap) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+  clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *some =
+      clux_context_create_optional_some(ctx, i32_type, v5, "some", NULL);
+  ASSERT_NE(some, nullptr);
+  EXPECT_EQ(clux_value_get_type(some), opt_i32);
+  EXPECT_FALSE(clux_value_is_shadow(some));
+
+  /* #take（.!）返回 base 类型的 view */
+  clux_value_t *payload = clux_context_take(ctx, some, NULL);
+  ASSERT_NE(payload, nullptr);
+  EXPECT_EQ(clux_value_get_type(payload), i32_type);
+  EXPECT_EQ(read_i32(payload), 5);
+
+  /* take 是借引用：写穿 view 更新 optional 载荷 */
+  clux_value_t *v9 = clux_context_create_i32(ctx, 9, NULL, NULL);
+  EXPECT_EQ(clux_context_assign(ctx, payload, v9, NULL), payload);
+  EXPECT_EQ(read_i32(clux_context_take(ctx, some, NULL)), 9);
+
+  /* none 的 take 是运行期错误 */
+  clux_value_t *none =
+      clux_context_create_optional_none(ctx, i32_type, NULL, NULL);
+  ASSERT_NE(none, nullptr);
+  clux_value_t *bad = clux_context_take(ctx, none, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "cannot take a value from a none optional of type '?i32'");
+
+  /* deref 槽位回归指针专属：optional 走 *p 解引用报不支持 */
+  clux_value_t *deref_opt = clux_context_deref(ctx, some, NULL);
+  ASSERT_NE(deref_opt, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(deref_opt)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(deref_opt),
+               "type '?i32' does not support operator '*'");
+
+  /* shadow：take 产出载荷类型的 shadow */
+  clux_value_t *shadow_opt = clux_context_create_shadow_value(ctx, opt_i32);
+  clux_value_t *shadow_take = clux_context_take(ctx, shadow_opt, NULL);
+  ASSERT_NE(shadow_take, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_take));
+  EXPECT_EQ(clux_value_get_type(shadow_take), i32_type);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OptionalIsNoneQuery) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+  clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *some =
+      clux_context_create_optional_some(ctx, i32_type, v5, NULL, NULL);
+  clux_value_t *none =
+      clux_context_create_optional_none(ctx, i32_type, NULL, NULL);
+
+  /* #is_none：none 为真 */
+  EXPECT_FALSE(read_bool(clux_context_is_none(ctx, some, NULL)));
+  EXPECT_TRUE(read_bool(clux_context_is_none(ctx, none, NULL)));
+
+  /* 非 optional 类型不支持 */
+  clux_value_t *bad = clux_context_is_none(ctx, v5, NULL);
+  ASSERT_NE(bad, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad),
+               "#is_none requires an optional value, got 'i32'");
+
+  /* shadow 产出 bool shadow，error 自传播 */
+  clux_value_t *shadow_opt = clux_context_create_shadow_value(ctx, opt_i32);
+  clux_value_t *shadow_result = clux_context_is_none(ctx, shadow_opt, NULL);
+  ASSERT_NE(shadow_result, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_result));
+  EXPECT_EQ(clux_value_get_type(shadow_result),
+            clux_context_get_bool_type(ctx));
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_is_none(ctx, err, NULL), err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OptionalCompareSameType) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+  clux_value_t *v5 = clux_context_create_i32(ctx, 5, NULL, NULL);
+  clux_value_t *some5 =
+      clux_context_create_optional_some(ctx, i32_type, v5, NULL, NULL);
+  clux_value_t *some5b =
+      clux_context_create_optional_some(ctx, i32_type, v5, NULL, NULL);
+  clux_value_t *some7 = clux_context_create_optional_some(
+      ctx, i32_type, clux_context_create_i32(ctx, 7, NULL, NULL), NULL, NULL);
+  clux_value_t *none =
+      clux_context_create_optional_none(ctx, i32_type, NULL, NULL);
+
+  /* 同类型比较：present + payload */
+  EXPECT_TRUE(
+      read_bool(clux_context_binary(ctx, CLUX_OP_EQ, some5, some5b, NULL)));
+  EXPECT_FALSE(
+      read_bool(clux_context_binary(ctx, CLUX_OP_EQ, some5, some7, NULL)));
+  EXPECT_TRUE(
+      read_bool(clux_context_binary(ctx, CLUX_OP_NE, some5, some7, NULL)));
+  EXPECT_FALSE(
+      read_bool(clux_context_binary(ctx, CLUX_OP_EQ, some5, none, NULL)));
+  EXPECT_TRUE(
+      read_bool(clux_context_binary(ctx, CLUX_OP_EQ, none, none, NULL)));
+
+  /* 类型不匹配 */
+  clux_type_t *opt_i64 =
+      clux_context_get_optional_type(ctx, clux_context_get_i64_type(ctx));
+  EXPECT_STREQ(clux_type_get_name(opt_i64), "?i64");
+  clux_value_t *some64 = clux_context_create_optional_some(
+      ctx,
+      clux_context_get_i64_type(ctx),
+      clux_context_create_i64(ctx, 1, NULL, NULL),
+      NULL,
+      NULL);
+  clux_value_t *mixed_value =
+      clux_context_binary(ctx, CLUX_OP_EQ, some5, v5, NULL);
+  ASSERT_NE(mixed_value, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(mixed_value)),
+            CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(mixed_value),
+               "operator '==' requires operands of the same type");
+  clux_value_t *mixed_optional =
+      clux_context_binary(ctx, CLUX_OP_EQ, some5, some64, NULL);
+  ASSERT_NE(mixed_optional, nullptr);
+  EXPECT_STREQ(error_message_of(mixed_optional),
+               "operator '==' requires operands of the same type");
+
+  /* shadow 与 error 传播 */
+  clux_value_t *shadow_opt = clux_context_create_shadow_value(ctx, opt_i32);
+  clux_value_t *shadow_cmp =
+      clux_context_binary(ctx, CLUX_OP_EQ, shadow_opt, some5, NULL);
+  ASSERT_NE(shadow_cmp, nullptr);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_cmp));
+  clux_value_t *err = clux_context_create_error_message(ctx, NULL, "boom");
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, err, some5, NULL), err);
+  EXPECT_EQ(clux_context_binary(ctx, CLUX_OP_EQ, some5, err, NULL), err);
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
+TEST(EngineTest, OptionalConstructionAndAssign) {
+  allocator_t *a = create_allocator(malloc, free);
+  clux_context_t *ctx = create_clux_context(a);
+
+  clux_type_t *i32_type = clux_context_get_i32_type(ctx);
+  clux_type_t *opt_i32 = clux_context_get_optional_type(ctx, i32_type);
+
+  /* #none(i32)：载荷类型入参，产出 ?T{none}（零值） */
+  clux_value_t *opt =
+      clux_context_create_optional_none(ctx, i32_type, "o", NULL);
+  ASSERT_NE(opt, nullptr);
+  EXPECT_EQ(clux_value_get_type(opt), opt_i32);
+  EXPECT_TRUE(read_bool(clux_context_is_none(ctx, opt, NULL)));
+
+  /* #some(i32, v)：产出 ?T{v} */
+  clux_value_t *v7 = clux_context_create_i32(ctx, 7, NULL, NULL);
+  clux_value_t *some =
+      clux_context_create_optional_some(ctx, i32_type, v7, NULL, NULL);
+  ASSERT_NE(some, nullptr);
+  EXPECT_EQ(clux_value_get_type(some), opt_i32);
+  EXPECT_FALSE(read_bool(clux_context_is_none(ctx, some, NULL)));
+  EXPECT_EQ(read_i32(clux_context_take(ctx, some, NULL)), 7);
+
+  /* #some 的 value 类型自检 */
+  clux_value_t *bad_some = clux_context_create_optional_some(
+      ctx, i32_type, clux_context_create_i64(ctx, 1, NULL, NULL), NULL, NULL);
+  ASSERT_NE(bad_some, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_some)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_some),
+               "#some requires a value of type 'i32', got 'i64'");
+
+  /* 同类型 optional 赋值：整体拷贝（含 present 标志） */
+  EXPECT_EQ(clux_context_assign(ctx, opt, some, NULL), opt);
+  EXPECT_FALSE(read_bool(clux_context_is_none(ctx, opt, NULL)));
+  EXPECT_EQ(read_i32(clux_context_take(ctx, opt, NULL)), 7);
+
+  /* base 值不经 assign 隐式包装：走 safe_cast 错误 */
+  clux_value_t *no_wrap = clux_context_assign(ctx, opt, v7, NULL);
+  ASSERT_NE(no_wrap, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(no_wrap)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(no_wrap), "cannot safely cast 'i32' to '?i32'");
+  clux_value_t *bad_type = clux_context_assign(
+      ctx, opt, clux_context_create_str(ctx, "x", NULL, NULL), NULL);
+  ASSERT_NE(bad_type, nullptr);
+  EXPECT_EQ(clux_type_get_kind(clux_value_get_type(bad_type)), CLUX_TYPE_ERROR);
+  EXPECT_STREQ(error_message_of(bad_type),
+               "type 'str' cannot be safely cast to '?i32'");
+
+  /* shadow 通道：不产出现值 */
+  clux_value_t *shadow_opt = clux_context_create_shadow_value(ctx, opt_i32);
+  EXPECT_EQ(clux_context_assign(ctx, shadow_opt, some, NULL), shadow_opt);
+  EXPECT_TRUE(clux_value_is_shadow(shadow_opt));
+
+  delete_clux_context(&ctx);
+  delete_allocator(&a);
+}
+
 TEST(EngineTest, NoLeak) {
   g_alloc_count = 0;
   g_free_count = 0;
@@ -3124,6 +3377,18 @@ TEST(EngineTest, NoLeak) {
   EXPECT_EQ(clux_context_assign(ctx, array_zero, left, NULL), array_zero);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, array, array, NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, array, NULL), nullptr);
+  clux_value_t *some = clux_context_create_optional_some(
+      ctx, clux_context_get_i32_type(ctx), left, NULL, NULL);
+  ASSERT_NE(some, nullptr);
+  ASSERT_NE(clux_context_take(ctx, some, NULL), nullptr);
+  ASSERT_NE(clux_context_is_none(ctx, some, NULL), nullptr);
+  clux_value_t *none = clux_context_create_optional_none(
+      ctx, clux_context_get_i32_type(ctx), NULL, NULL);
+  ASSERT_NE(none, nullptr);
+  ASSERT_NE(clux_context_is_none(ctx, none, NULL), nullptr);
+  EXPECT_EQ(clux_context_assign(ctx, none, some, NULL), none);
+  ASSERT_NE(clux_context_clone(ctx, some, NULL), nullptr);
+  ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, some, some, NULL), nullptr);
   delete_clux_context(&ctx);
   delete_allocator(&a);
   EXPECT_EQ(g_alloc_count, g_free_count);

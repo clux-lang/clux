@@ -125,6 +125,33 @@ clux_value_t *clux_context_create_array(clux_context_t *self,
    写入由通用 assign 写穿 view 完成。 */
 clux_value_t *
 clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc);
+/* 按载荷 base 取 "?<base>" 可选类型：children 表 find-or-create，
+   同一 base 恒等返回同一实例。 */
+clux_type_t *clux_context_get_optional_type(clux_context_t *self,
+                                            clux_type_t *base);
+/* #some(T, v) -> ?T{v}：T 是载荷类型，内部提升为 ?T。
+   value 类型须与 T 语义相等，error 自传播，不满足返回语义化 error。
+   适用于返回值/字段/参数/变量等任何初始化位置。 */
+clux_value_t *clux_context_create_optional_some(clux_context_t *self,
+                                                clux_type_t *base,
+                                                clux_value_t *value,
+                                                const char *name,
+                                                location_t *loc);
+/* #none(T) -> ?T{none}：T 是载荷类型，内部提升为 ?T（零值）。 */
+clux_value_t *clux_context_create_optional_none(clux_context_t *self,
+                                                clux_type_t *base,
+                                                const char *name,
+                                                location_t *loc);
+/* 判空查询（内置函数 #is_none）：none 返回 true。仅 optional 类型
+   支持（vtable is_none 槽位），其余类型返回 error。 */
+clux_value_t *clux_context_is_none(clux_context_t *self,
+                                   clux_value_t *value,
+                                   location_t *loc);
+/* 断言取值（内置函数 #take，`.!` 语法糖编译为此调用）：some 返回
+   载荷 base 类型的借引用 view，none 是运行期 error。仅 optional 类型
+   支持（vtable take 槽位），其余类型返回 error。 */
+clux_value_t *
+clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。
    写入由通用 assign 写穿 view 完成（无独立下标写原语）。 */

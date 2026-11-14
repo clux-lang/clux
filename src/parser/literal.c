@@ -40,11 +40,6 @@ static node_t *read_simple_text(allocator_t *allocator,
   return node;
 }
 
-node_t *parser_read_literal_nil(allocator_t *allocator, parser_t *parser) {
-  return read_simple_text(
-      allocator, parser, CLUX_TOKEN_KEYWORD, "nil", create_literal_nil_node);
-}
-
 node_t *parser_read_literal_undefined(allocator_t *allocator,
                                       parser_t *parser) {
   return read_simple_text(allocator,
@@ -445,10 +440,6 @@ node_t *parser_read_literal_numeric(allocator_t *allocator, parser_t *parser) {
 
 node_t *parser_read_literal(allocator_t *allocator, parser_t *parser) {
   node_t *node = NULL;
-  node = parser_read_literal_nil(allocator, parser);
-  if (node) {
-    return node;
-  }
   node = parser_read_literal_undefined(allocator, parser);
   if (node) {
     return node;

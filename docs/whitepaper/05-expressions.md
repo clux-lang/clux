@@ -8,9 +8,10 @@
 true
 "text"
 'a'
-nil
 undefined
 ```
+
+optional 没有字面量：构造用 `#none(T)` / `#some(T, v)`。
 
 ## 5.2 标识符与命名空间
 
@@ -229,14 +230,20 @@ p.* = v    // 解引用写
 ## 5.13 optional 操作
 
 ```clux
-opt.!
+#none(T)   // ?T{none}
+#some(T, v) // ?T{v}
+#is_none(x) // none 返回 true
+#take(x)    // 断言取载荷，x.! 是它的语法糖
 ```
 
-- `opt.!` 断言有值；无值时运行期错误（先判空再解包：
-  `if (x != nil) { var v = x.!; }`）。
-- optional **只支持 `.!`**；`.?`（try）不在 optional 上提供——它只用于
-  result-like 结构体（`ok()` / `value()` / `error()` 方法）。需要分支时
-  自己写 `if (x == nil) { ... }`。
+- 构造：`#none(T)` 产出零值 none，`#some(T, v)` 装入载荷（`v` 的类型
+  必须与 `T` 语义相等）。
+- 判空走 `#is_none(x)`（语言没有 `nil` 字面量，也没有 `== nil` 比较）：
+  `if (#is_none(x)) { ... }`。
+- `#take(x)` / `x.!` 断言有值并返回载荷；none 是运行期错误（先判空再取：
+  `if (!#is_none(x)) { var v = #take(x); }`）。
+- `.?`（try）不在 optional 上提供——它只用于 result-like 结构体
+  （`ok()` / `value()` / `error()` 方法）。
 
 ## 5.14 编译期类型运算
 
@@ -263,7 +270,7 @@ opt.!
 - `#slice(pointer, len)` 把已有指针与长度包装成切片视图，不分配。
 - `#data(x)` 返回序列首元素的 C 地址，用于 FFI。
 - `#cfunc_ptr(f)` 把 clux 函数转换为 C 函数指针。
-- `#take_opt(x)` 移出 optional 载荷并把源置 `nil`。
+- `#take_opt(x)` 移出 optional 载荷并把源置 none。
 - `#panic(msg)` 是编译器内建的直接报错入口。
 
 ## 5.16 调用实参展开

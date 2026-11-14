@@ -80,33 +80,31 @@ volatile u32
 ?T
 ```
 
-`?T` 要么是 `nil`，要么包含一个 `T`。
+`?T` 要么是 none（零值），要么包含一个 `T`。
 
 ```clux
-var x: ?i32 = nil;
-var y: ?i32 = 3;
+var x = #none(i32);   // x is ?i32{none}
+var y = #some(i32, 3); // y is ?i32{3}
 ```
 
-`?T` 支持**直接值构造**：`T` 值在需要 `?T` 的位置自动成为 some，
-`nil` 直接成为 none。所有初始化位置都适用（变量初始化、实参、返回值、
-字段初始化、位置构造字段），不需要写构造语法：
+optional 的构造与查询全部通过内建函数完成：
 
 ```clux
-func take(o: ?i32): i32 { return o.!; }
-take(3);                     // 实参
-func give(): ?i32 { return 7; }
-var s: S = .S{ .o = 5 };      // 字段
+#none(T)          // ?T{none}：构造无值（零值）
+#some(T, v)       // ?T{v}：v 的类型必须与 T 语义相等
+#is_none(x)       // 判空：none 返回 true
+#take(x)          // 断言取值：some 返回载荷，none 是运行期错误
 ```
 
-显式构造 `.?T{x}` / `.?T{nil}` 仍然合法（用于需要写出目标类型的位置，例如
-无上下文的自变量），但不再是必需形式。
-
-解包语法：
+四个内建兼顾所有初始化位置（变量初始化、实参、返回值、字段初始化）：
 
 ```clux
-x.!     // 断言有值，无值则运行期错误
-x.?     // 可选安全解包，上下文必须能处理无值
+func take(o: ?i32): i32 { return #take(o); }
+take(#some(i32, 3));          // 实参
+func give(): ?i32 { return #none(i32); }
 ```
+
+`x.!` 是 `#take(x)` 的语法糖；`x.?` 是可选安全解包，上下文必须能处理无值。
 
 ## 2.6 元组
 

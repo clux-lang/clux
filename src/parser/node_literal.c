@@ -1,10 +1,6 @@
 #include "parser/node_literal.h"
 #include "parser/node.h"
 
-node_t *create_literal_nil_node(allocator_t *allocator) {
-  return create_node(allocator, CLUX_NODE_LITERAL_NIL);
-}
-
 node_t *create_literal_undefined_node(allocator_t *allocator) {
   return create_node(allocator, CLUX_NODE_LITERAL_UNDEFINED);
 }
@@ -40,9 +36,6 @@ write_literal(json_writer_t *writer, node_t *self, const char *kind) {
   node_json_end(writer);
 }
 
-void literal_nil_node_to_json(json_writer_t *writer, node_t *self) {
-  write_literal(writer, self, "LiteralNil");
-}
 void literal_undefined_node_to_json(json_writer_t *writer, node_t *self) {
   write_literal(writer, self, "LiteralUndefined");
 }

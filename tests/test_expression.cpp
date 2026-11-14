@@ -125,11 +125,12 @@ TEST(ExpressionAssignTest, AssignBooleanValue) {
   delete_allocator(&a);
 }
 
-TEST(ExpressionAssignTest, AssignNilValue) {
+/* nil 已淘汰：按普通标识符解析。 */
+TEST(ExpressionAssignTest, AssignNilAsIdentifier) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_expr(a, &p, "n = nil");
-  expect_assign(expr, "n", "=", CLUX_NODE_LITERAL_NIL);
+  expect_assign(expr, "n", "=", CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -471,14 +472,14 @@ TEST(ExpressionTernaryTest, MixedLiteralKinds) {
   delete_allocator(&a);
 }
 
-TEST(ExpressionTernaryTest, NilAndUndefinedBranches) {
+TEST(ExpressionTernaryTest, NilIsIdentifierInBranches) {
   allocator_t *a = create_allocator(malloc, free);
   parser_t *p;
   node_t *expr = parse_ternary(a, &p, "nil ? undefined : nil");
   expect_ternary(expr,
-                 CLUX_NODE_LITERAL_NIL,
+                 CLUX_NODE_LITERAL_IDENTIFIER,
                  CLUX_NODE_LITERAL_UNDEFINED,
-                 CLUX_NODE_LITERAL_NIL);
+                 CLUX_NODE_LITERAL_IDENTIFIER);
   delete_node(&expr);
   delete_parser(&p);
   delete_allocator(&a);
@@ -4494,8 +4495,7 @@ TEST(ExpressionValueTest, DispatchesEveryLiteralKind) {
     const char *src;
     node_kind_t kind;
   };
-  const Case cases[] = {{"nil", CLUX_NODE_LITERAL_NIL},
-                        {"undefined", CLUX_NODE_LITERAL_UNDEFINED},
+  const Case cases[] = {{"undefined", CLUX_NODE_LITERAL_UNDEFINED},
                         {"true", CLUX_NODE_LITERAL_BOOLEAN},
                         {"i32", CLUX_NODE_LITERAL_TYPE},
                         {"'a'", CLUX_NODE_LITERAL_CHARACTER},

@@ -370,36 +370,36 @@ TEST(LexerStringTest, IllegalUtf8InStringIsError) {
 
 TEST(TokenIsTest, MatchesKindAndText) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *src = "nil";
+  const char *src = "none";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_identifier(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_KEYWORD, "nil"));
+  EXPECT_TRUE(token_is(tok, CLUX_TOKEN_KEYWORD, "none"));
   delete_token(&tok);
   delete_allocator(&a);
 }
 
 TEST(TokenIsTest, RejectsWrongKind) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *src = "nil";
+  const char *src = "none";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_identifier(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "nil"));
-  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_STRING, "nil"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_IDENTIFIER, "none"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_STRING, "none"));
   delete_token(&tok);
   delete_allocator(&a);
 }
 
 TEST(TokenIsTest, RejectsWrongText) {
   allocator_t *a = create_allocator(malloc, free);
-  const char *src = "nil";
+  const char *src = "none";
   position_t p = lexer_test_pos(src);
   token_t *tok = lexer_read_identifier(a, &p, "test.clux");
   ASSERT_NE(tok, nullptr);
-  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "none"));
-  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "ni"));
-  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "nilx"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "nil"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "non"));
+  EXPECT_FALSE(token_is(tok, CLUX_TOKEN_KEYWORD, "nonex"));
   delete_token(&tok);
   delete_allocator(&a);
 }

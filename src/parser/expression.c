@@ -1345,9 +1345,6 @@ void expr_to_json(json_writer_t *writer, node_t *node) {
   case CLUX_NODE_SYMBOL:
     symbol_node_to_json(writer, node);
     break;
-  case CLUX_NODE_LITERAL_NIL:
-    literal_nil_node_to_json(writer, node);
-    break;
   case CLUX_NODE_LITERAL_UNDEFINED:
     literal_undefined_node_to_json(writer, node);
     break;

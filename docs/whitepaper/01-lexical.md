@@ -41,7 +41,7 @@ as       bitfield  bool      break     cfunc     comptime  const
 continue cunion    default   defer     do        else      enum
 export   extends   extern    f32       f64       false     for
 foreach  from      func      i8        i16       i32       i64
-if       implements import   interface is        lib       nil
+if       implements import   interface is        lib
 of       opaque    return    static_assert       str       struct
 switch   true      type      u8        u16       u32       u64
 undefined union    usize     var       void      volatile  while
@@ -66,7 +66,7 @@ using
 在其他位置分别解释为尖括号。`...` 是单独的三字符符号。
 
 `.?` 同样不在词法层合并：`.` 与 `?` 分别产出，解析器只在后缀位置（`x.?`）
-把相邻二者组合为 try 运算符，从而不与 optional 构造 `.?T{...}` 冲突。
+把相邻二者组合为 try 运算符。`.!` 与之同理，是 `#take(x)` 的语法糖。
 
 ## 1.6 整数字面量
 
@@ -132,15 +132,15 @@ false
 字符字面量恰好包含一个范围在 `u8` 内的字符，类型是 `u8`。
 字符字面量不用于 Unicode 标量值；需要字符串时使用 `str`。
 
-## 1.10 空值字面量
+## 1.10 未初始化字面量
 
 ```clux
-nil
 undefined
 ```
 
-- `nil` 是 optional 的“无值”字面量。
 - `undefined` 表示未初始化；它只能出现在允许未初始化语义的位置。
+- 语言没有 nil 字面量：optional 的“无值”由 `#none(T)` 构造，判空用
+  `#is_none(x)`。
 
 ## 1.11 源文件结构
 

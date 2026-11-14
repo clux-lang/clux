@@ -9,7 +9,6 @@ extern "C" {
 /* 各 literal 读取器：匹配成功则消费 token 并返回新节点，否则返回 NULL
    且不移动游标。调用方负责按优先级依次尝试（boolean 在 identifier 之前）。 */
 
-node_t *parser_read_literal_nil(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_literal_undefined(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_literal_string(allocator_t *allocator, parser_t *parser);
 node_t *parser_read_literal_character(allocator_t *allocator, parser_t *parser);

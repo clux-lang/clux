@@ -5,7 +5,7 @@
 ```clux
 var x: i32 = 1;
 var y = 2;
-var z: ?i32 = nil;
+var z = #none(i32);
 ```
 
 规则见[声明](03-declarations.md)。局部变量属于当前块作用域。

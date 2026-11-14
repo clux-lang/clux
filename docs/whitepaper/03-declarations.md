@@ -107,7 +107,7 @@ struct Counter {
 ```clux
 var x: i32 = 1;
 var y = 2;              // 类型推断
-var z: ?i32 = nil;
+var z = #none(i32);
 var u: i32 = undefined; // 未初始化
 ```
 
@@ -139,10 +139,10 @@ comptime var LIMIT: const u32 = 32;
 
 - 标量、`str`、数组、元组、`struct`、tag `union`、`cunion`、`?T`、切片；
 - 字段读写（含嵌套字段与指针自动解引用 `p.field`）、tag `union` 的 `is`
-  判定与成员读取、`?T` 的 `.!` 解包与 `nil` 比较；
+  判定与成员读取、`?T` 的 `#take` 解包与 `#is_none` 判空；
 - `x.&` / `p.*`、数组 / 切片 / `str` 的切片表达式 `a[lo:hi]`、
   `#slice(ptr, len)`（切片视图）、`#data(x)`（首元素指针）与 `#take_opt(x)`
-  （移出 optional 载荷并把源置 `nil`）；
+  （移出 optional 载荷并把源置 none）；
 - 实例方法调用（含泛型方法）与静态方法调用：值接收者得到副本，`*T` 接收者直接
   修改接收者的存储；
 - 错误处理语法糖 `x.?` / `x.!`（result struct 协议 `ok()` / `value()` /
@@ -483,11 +483,11 @@ var mid: []i32 = w[1:3];   // ⇒ w.__slice__(1, 3)
       }
       func __assign__(self: *Fatal[T], other: *Fatal[T]): void {
           self.ptr = other.ptr;
-          other.ptr = nil;          // 赋值 = move
+          other.ptr = #none(*T);    // 赋值 = move
       }
   }
-  var a: Fatal[T] = b;   // 合法：__init_copy__ 把 b 置 nil（move）
-  a = b;                 // 合法：__assign__ 把 b 置 nil（move）
+  var a: Fatal[T] = b;   // 合法：__init_copy__ 把 b 置 none（move）
+  a = b;                 // 合法：__assign__ 把 b 置 none（move）
   // 没有 __init_copy__ 时：var a: Fatal[T] = b; 报"不可 copy"
   ```
 

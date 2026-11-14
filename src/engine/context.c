@@ -20,6 +20,7 @@
 #include "engine/bool.h"
 #include "engine/error.h"
 #include "engine/floating.h"
+#include "engine/optional.h"
 #include "engine/ptr.h"
 #include "engine/qualifier.h"
 #include "engine/slice.h"
@@ -423,6 +424,105 @@ clux_value_t *clux_context_create_array(clux_context_t *self,
   memset(ptr_to_raw(data, 0), 0, size);
   return clux_context_create_value(self, type, data, name, loc);
 }
+clux_type_t *clux_context_get_optional_type(clux_context_t *self,
+                                            clux_type_t *base) {
+  (void)self;
+  return base ? clux_type_get_optional_type(base) : NULL;
+}
+/* #some(T, v) -> ?T{v}：T 是载荷类型，内部提升为 ?T。
+   value 类型须与 T 语义相等，不满足时返回语义化 error。 */
+clux_value_t *clux_context_create_optional_some(clux_context_t *self,
+                                                clux_type_t *base,
+                                                clux_value_t *value,
+                                                const char *name,
+                                                location_t *loc) {
+  if (!base || !value) {
+    return clux_context_create_error_message(
+        self, loc, "#some requires a type and a value");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (!clux_type_equal(base, clux_value_get_type(value))) {
+    const char *base_name = clux_type_get_name(base);
+    const char *value_name = clux_type_get_name(clux_value_get_type(value));
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "#some requires a value of type '%s', got '%s'",
+        base_name ? base_name : "<unknown>",
+        value_name ? value_name : "<unknown>");
+  }
+  clux_type_t *type = clux_type_get_optional_type(base);
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  *(bool *)ptr_to_raw(data, 0) = true;
+  void *src = ptr_to_raw(clux_value_get_data(value), 0);
+  void *dst = ptr_to_raw(data, clux_optional_payload_offset(base));
+  if (src && dst) {
+    (void)memcpy(dst, src, clux_type_get_size(base));
+  }
+  return clux_context_create_value(self, type, data, name, loc);
+}
+/* #none(T) -> ?T{none}：T 是载荷类型，内部提升为 ?T（零值）。 */
+clux_value_t *clux_context_create_optional_none(clux_context_t *self,
+                                                clux_type_t *base,
+                                                const char *name,
+                                                location_t *loc) {
+  if (!base) {
+    return clux_context_create_error_message(
+        self, loc, "#none requires a type");
+  }
+  clux_type_t *type = clux_type_get_optional_type(base);
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_is_none(clux_context_t *self,
+                                   clux_value_t *value,
+                                   location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "#is_none requires an optional value");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->is_none) {
+    return vt->is_none(self, value);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "#is_none requires an optional value, got '%s'",
+      type_name ? type_name : "<unknown>");
+}
+clux_value_t *
+clux_context_take(clux_context_t *self, clux_value_t *value, location_t *loc) {
+  if (!value) {
+    return clux_context_create_error_message(
+        self, loc, "#take requires an optional value");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->take) {
+    return vt->take(self, value);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "#take requires an optional value, got '%s'",
+      type_name ? type_name : "<unknown>");
+}
 clux_value_t *
 clux_context_deref(clux_context_t *self, clux_value_t *ptr, location_t *loc) {
   if (!ptr) {
@@ -803,7 +903,10 @@ clux_value_t *clux_context_assign(clux_context_t *self,
         "cannot assign to a value of type '%s'",
         target_name ? target_name : "<unknown>");
   }
-  /* 同类型无需转换：复合类型（slice/ptr 等）没有 safe_cast，恒等直接 memcpy */
+  /* 同类型无需转换：复合类型（slice/ptr/optional 等）没有 safe_cast，
+     恒等直接 memcpy。optional 的 some/none 构造不经 assign：some 走显式
+     create_optional_some（#some），none 是零值。 */
+
   clux_value_t *casted = value;
   if (!clux_type_equal(target_type, clux_value_get_type(value))) {
     casted = clux_context_safe_cast(self, value, target_type, loc);
