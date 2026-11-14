@@ -6,6 +6,7 @@
 #include "core/safe_alloc.h"
 #include "engine/cunion.h"
 #include "engine/interface.h"
+#include "engine/union.h"
 #include <stdbool.h>
 #ifdef __cplusplus
 extern "C" {
@@ -175,6 +176,36 @@ clux_value_t *clux_context_create_cunion(clux_context_t *self,
 clux_value_t *clux_context_get_field(clux_context_t *self,
                                      clux_value_t *value,
                                      const char *field,
+                                     location_t *loc);
+/* 创建具名 tag union 类型（白皮书 §3.7）：tag 为定宽 u32（偏移 0），
+   payload 从类型对齐处开始，同一时刻只有一个 member 有效。成员表整体
+   拷入 meta，成员名经 strs 驻留。结构判等（成员名+类型按声明序一致即
+   同一类型）：已存在结构相同的实例时恒等返回之，类型由 context 的具名
+   类型表托管释放。入参非法（缺名/空成员表/成员缺名缺类型/重名）返回
+   NULL 并记录 error。 */
+clux_type_t *clux_context_create_union_type(clux_context_t *self,
+                                            const char *name,
+                                            const clux_union_member_t *members,
+                                            size_t count);
+/* 创建 tag union 零值（memset 清零，tag=0 即第一个成员）：type 须是
+   CLUX_TYPE_UNION。切换成员走 clux_context_union_set_member。 */
+clux_value_t *clux_context_create_union(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        location_t *loc);
+/* 激活成员：切换 tag 为该成员声明序号并清零 payload，返回原值；未知
+   成员返回语义化 error，shadow 值原样返回（无数据可变）。仅 tag union
+   支持，其余类型返回 error。 */
+clux_value_t *clux_context_union_set_member(clux_context_t *self,
+                                            clux_value_t *value,
+                                            const char *member,
+                                            location_t *loc);
+/* is 判定（value is Member，白皮书 §5.7）：当前 tag 即该成员声明序号时
+   为 true，结果为 bool。仅 tag union 支持（vtable is_member 槽位），
+   其余类型返回 error。 */
+clux_value_t *clux_context_is_member(clux_context_t *self,
+                                     clux_value_t *value,
+                                     const char *member,
                                      location_t *loc);
 /* 数组/切片下标取项：返回 base 类型的 view（内存共享、携带引用属性）；
    越界/非整数下标报 error，任一操作数为 shadow 产出 base 类型的 shadow。

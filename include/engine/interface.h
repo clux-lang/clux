@@ -63,6 +63,7 @@ typedef enum _clux_type_kind_t {
   CLUX_TYPE_ARRAY,
   CLUX_TYPE_OPTIONAL,
   CLUX_TYPE_CUNION,
+  CLUX_TYPE_UNION,
 } clux_type_kind_t;
 typedef clux_value_t *(*clux_vt_binary_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -92,6 +93,12 @@ typedef clux_value_t *(*clux_vt_is_none_fn_t)(clux_context_t *, clux_value_t *);
    类型的借引用 view，none 是运行期 error；`.!` 是编译为 #take 的
    语法糖。只有 optional 绑定该槽位，其余类型由 context 兜底报不支持。 */
 typedef clux_value_t *(*clux_vt_take_fn_t)(clux_context_t *, clux_value_t *);
+/* is_member 是 tag union 的成员判定（is 运算）：判断 value 当前 tag 是否
+   为具名成员，返回 bool 值；未知成员报语义化 error。只有 tag union 绑定
+   该槽位，其余类型由 context 兜底报不支持。 */
+typedef clux_value_t *(*clux_vt_is_member_fn_t)(clux_context_t *,
+                                                clux_value_t *,
+                                                const char *);
 typedef clux_value_t *(*clux_vt_get_len_fn_t)(clux_context_t *, clux_value_t *);
 typedef clux_value_t *(*clux_vt_invoke_fn_t)(clux_context_t *,
                                              clux_value_t *,
@@ -139,6 +146,7 @@ struct _clux_vtable_t {
   clux_vt_is_none_fn_t is_none;
   clux_vt_take_fn_t take;
   clux_vt_get_field_fn_t get_field;
+  clux_vt_is_member_fn_t is_member;
   clux_vt_type_equal_fn_t type_equal;
   clux_vt_type_extends_fn_t type_extends;
 };

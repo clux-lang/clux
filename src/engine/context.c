@@ -26,6 +26,7 @@
 #include "engine/qualifier.h"
 #include "engine/slice.h"
 #include "engine/str.h"
+#include "engine/union.h"
 
 struct _clux_context_t {
   allocator_t *allocator;
@@ -597,6 +598,117 @@ clux_value_t *clux_context_create_cunion(clux_context_t *self,
   ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
   memset(ptr_to_raw(data, 0), 0, size);
   return clux_context_create_value(self, type, data, name, loc);
+}
+clux_type_t *clux_context_create_union_type(clux_context_t *self,
+                                            const char *name,
+                                            const clux_union_member_t *members,
+                                            size_t count) {
+  if (!name || !members || count == 0) {
+    (void)clux_context_create_error_message(
+        self, NULL, "union requires a name and at least one member");
+    return NULL;
+  }
+  for (size_t idx = 0; idx < count; idx++) {
+    if (!members[idx].name || !members[idx].type) {
+      (void)clux_context_create_error_message(
+          self,
+          NULL,
+          "union '%s' member %zu requires a name and a type",
+          name,
+          idx);
+      return NULL;
+    }
+    for (size_t prev = 0; prev < idx; prev++) {
+      if (strcmp(members[idx].name, members[prev].name) == 0) {
+        (void)clux_context_create_error_message(
+            self,
+            NULL,
+            "union '%s' has duplicate member '%s'",
+            name,
+            members[idx].name);
+        return NULL;
+      }
+    }
+  }
+  /* 结构去重：已存在成员名+类型按声明序一致的实例时恒等返回。 */
+  for (size_t idx = 0; idx < vec_get_size(self->named_types); idx++) {
+    clux_type_t *existing = vec_get(self->named_types, idx);
+    if (clux_union_members_equal(existing, members, count)) {
+      return existing;
+    }
+  }
+  /* 成员名经 strs 驻留（随 context 释放），成员表由类型 meta 持有。 */
+  clux_union_member_t interned[count];
+  for (size_t idx = 0; idx < count; idx++) {
+    char *member_name = clux_context_alloc_str(self, strlen(members[idx].name));
+    (void)memcpy(member_name, members[idx].name, strlen(members[idx].name));
+    interned[idx].name = member_name;
+    interned[idx].type = members[idx].type;
+  }
+  clux_type_t *type =
+      create_clux_union_type(self->allocator, name, interned, count);
+  (void)vec_push(self->named_types, type);
+  return type;
+}
+clux_value_t *clux_context_create_union(clux_context_t *self,
+                                        clux_type_t *type,
+                                        const char *name,
+                                        location_t *loc) {
+  if (!type || clux_type_get_kind(type) != CLUX_TYPE_UNION) {
+    return clux_context_create_error_message(
+        self, loc, "union value creation requires a union type");
+  }
+  size_t size = clux_type_get_size(type);
+  ptr_handle_t data = safe_alloc(self->safe_allocator, size, loc);
+  memset(ptr_to_raw(data, 0), 0, size);
+  return clux_context_create_value(self, type, data, name, loc);
+}
+clux_value_t *clux_context_union_set_member(clux_context_t *self,
+                                            clux_value_t *value,
+                                            const char *member,
+                                            location_t *loc) {
+  if (!value || !member) {
+    return clux_context_create_error_message(
+        self, loc, "member activation requires a value and a member name");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) != CLUX_TYPE_UNION) {
+    const char *type_name = clux_type_get_name(clux_value_get_type(value));
+    return clux_context_create_error_message(
+        self,
+        loc,
+        "member activation requires a union value, got '%s'",
+        type_name ? type_name : "<unknown>");
+  }
+  if (clux_value_is_shadow(value)) {
+    return value;
+  }
+  return clux_union_set_member(self, value, member);
+}
+clux_value_t *clux_context_is_member(clux_context_t *self,
+                                     clux_value_t *value,
+                                     const char *member,
+                                     location_t *loc) {
+  if (!value || !member) {
+    return clux_context_create_error_message(
+        self, loc, "operator 'is' requires a value and a member name");
+  }
+  if (clux_type_get_kind(clux_value_get_type(value)) == CLUX_TYPE_ERROR) {
+    return value;
+  }
+  clux_type_t *type = clux_value_get_type(value);
+  clux_vtable_t *vt = clux_type_get_vtable(type);
+  if (vt && vt->is_member) {
+    return vt->is_member(self, value, member);
+  }
+  const char *type_name = clux_type_get_name(type);
+  return clux_context_create_error_message(
+      self,
+      loc,
+      "operator 'is' requires a tag union value, got '%s'",
+      type_name ? type_name : "<unknown>");
 }
 clux_value_t *clux_context_get_field(clux_context_t *self,
                                      clux_value_t *value,
