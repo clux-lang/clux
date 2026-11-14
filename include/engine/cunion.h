@@ -6,7 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* cunion 成员：声明序参与结构判等与 get_field 查找，全部共享偏移 0。 */
+/* cunion 成员：声明序参与结构判等与 field 查找，全部共享偏移 0。 */
 typedef struct _clux_cunion_member_t {
   const char *name; /* 借用调用方的驻留字符串，类型不拷贝不释放 */
   clux_type_t *type;

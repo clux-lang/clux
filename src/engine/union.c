@@ -85,7 +85,7 @@ static size_t member_index(clux_type_t *type,
    （与 payload 内存共享），tag 不匹配是运行期 error（先 is 判定再读取）。
    写入由通用 assign 写穿 view 完成。 */
 static clux_value_t *
-union_get_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
+union_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
   clux_type_t *type = clux_value_get_type(value);
   const clux_union_member_t *member = clux_union_find_member(type, name);
   if (!member) {
@@ -269,7 +269,7 @@ static bool union_type_equal(clux_type_t *self, clux_type_t *other) {
 }
 
 /* 激活成员（set_member）：切换 tag 并清零 payload，返回原值。
-   get_field 的 tag 检查保证读取只会命中已激活的成员。 */
+   field 的 tag 检查保证读取只会命中已激活的成员。 */
 clux_value_t *clux_union_set_member(clux_context_t *ctx,
                                     clux_value_t *value,
                                     const char *name) {
@@ -302,7 +302,7 @@ clux_value_t *clux_union_set_member(clux_context_t *ctx,
 static clux_vtable_t g_union_vtable = {
     .eq = union_eq,
     .ne = union_ne,
-    .get_field = union_get_field,
+    .field = union_field,
     .is_member = union_is_member,
     .type_equal = union_type_equal,
 };

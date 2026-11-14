@@ -710,10 +710,10 @@ clux_value_t *clux_context_is_member(clux_context_t *self,
       "operator 'is' requires a tag union value, got '%s'",
       type_name ? type_name : "<unknown>");
 }
-clux_value_t *clux_context_get_field(clux_context_t *self,
-                                     clux_value_t *value,
-                                     const char *field,
-                                     location_t *loc) {
+clux_value_t *clux_context_field(clux_context_t *self,
+                                 clux_value_t *value,
+                                 const char *field,
+                                 location_t *loc) {
   if (!value || !field) {
     return clux_context_create_error_message(
         self, loc, "field access requires a value and a field name");
@@ -723,8 +723,8 @@ clux_value_t *clux_context_get_field(clux_context_t *self,
   }
   clux_type_t *type = clux_value_get_type(value);
   clux_vtable_t *vt = clux_type_get_vtable(type);
-  if (vt && vt->get_field) {
-    return vt->get_field(self, value, field);
+  if (vt && vt->field) {
+    return vt->field(self, value, field);
   }
   const char *type_name = clux_type_get_name(type);
   return clux_context_create_error_message(

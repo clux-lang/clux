@@ -62,7 +62,7 @@ const clux_cunion_member_t *clux_cunion_find_member(clux_type_t *type,
    偏移 0（所有成员重叠）。写入由通用 assign 写穿 view 完成，
    写入即重新解释同一段内存（C union 语义）。 */
 static clux_value_t *
-cunion_get_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
+cunion_field(clux_context_t *ctx, clux_value_t *value, const char *name) {
   clux_type_t *type = clux_value_get_type(value);
   const clux_cunion_member_t *member = clux_cunion_find_member(type, name);
   if (!member) {
@@ -170,7 +170,7 @@ static bool cunion_type_equal(clux_type_t *self, clux_type_t *other) {
 static clux_vtable_t g_cunion_vtable = {
     .eq = cunion_eq,
     .ne = cunion_ne,
-    .get_field = cunion_get_field,
+    .field = cunion_field,
     .type_equal = cunion_type_equal,
 };
 

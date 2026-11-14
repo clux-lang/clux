@@ -3373,18 +3373,18 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
   clux_value_t *v = clux_context_create_cunion(ctx, value_type, "v", NULL);
   ASSERT_NE(v, nullptr);
   EXPECT_EQ(clux_value_get_type(v), value_type);
-  EXPECT_EQ(read_i32(clux_context_get_field(ctx, v, "i", NULL)), 0);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, v, "i", NULL)), 0);
 
-  /* get_field 返回偏移 0 的成员 view：写穿 view 即写 union 内存 */
-  clux_value_t *i_field = clux_context_get_field(ctx, v, "i", NULL);
+  /* field 返回偏移 0 的成员 view：写穿 view 即写 union 内存 */
+  clux_value_t *i_field = clux_context_field(ctx, v, "i", NULL);
   ASSERT_NE(i_field, nullptr);
   EXPECT_EQ(clux_value_get_type(i_field), i32_type);
   clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
   EXPECT_EQ(clux_context_assign(ctx, i_field, five, NULL), i_field);
-  EXPECT_EQ(read_i32(clux_context_get_field(ctx, v, "i", NULL)), 5);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, v, "i", NULL)), 5);
 
   /* 成员重叠：写 l 后 i 读到低 4 字节 */
-  clux_value_t *l_field = clux_context_get_field(ctx, v, "l", NULL);
+  clux_value_t *l_field = clux_context_field(ctx, v, "l", NULL);
   ASSERT_NE(l_field, nullptr);
   EXPECT_EQ(clux_value_get_type(l_field), i64_type);
   clux_value_t *big = clux_context_create_i64(ctx, 0x100000005LL, NULL, NULL);
@@ -3392,14 +3392,14 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
   EXPECT_EQ(read_i32(i_field), 5);
 
   /* 未知成员 */
-  clux_value_t *missing = clux_context_get_field(ctx, v, "x", NULL);
+  clux_value_t *missing = clux_context_field(ctx, v, "x", NULL);
   ASSERT_NE(missing, nullptr);
   EXPECT_EQ(clux_type_get_kind(clux_value_get_type(missing)), CLUX_TYPE_ERROR);
   EXPECT_STREQ(error_message_of(missing), "cunion 'Value' has no member 'x'");
 
   /* 非 cunion 类型不支持 field 访问 */
   clux_value_t *plain = clux_context_create_i32(ctx, 1, NULL, NULL);
-  clux_value_t *no_field = clux_context_get_field(ctx, plain, "i", NULL);
+  clux_value_t *no_field = clux_context_field(ctx, plain, "i", NULL);
   ASSERT_NE(no_field, nullptr);
   EXPECT_STREQ(error_message_of(no_field),
                "type 'i32' does not support field access");
@@ -3411,11 +3411,10 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
   EXPECT_STREQ(error_message_of(bad_value),
                "cunion value creation requires a cunion type");
 
-  /* shadow：get_field 产出成员类型的 shadow */
+  /* shadow：field 产出成员类型的 shadow */
   clux_value_t *shadow_union =
       clux_context_create_shadow_value(ctx, value_type);
-  clux_value_t *shadow_field =
-      clux_context_get_field(ctx, shadow_union, "i", NULL);
+  clux_value_t *shadow_field = clux_context_field(ctx, shadow_union, "i", NULL);
   ASSERT_NE(shadow_field, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_field));
   EXPECT_EQ(clux_value_get_type(shadow_field), i32_type);
@@ -3425,10 +3424,10 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
   clux_value_t *other = clux_context_create_cunion(ctx, value_type, NULL, NULL);
   ASSERT_NE(other, nullptr);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, v, other, NULL)));
-  clux_value_t *other_l = clux_context_get_field(ctx, other, "l", NULL);
+  clux_value_t *other_l = clux_context_field(ctx, other, "l", NULL);
   EXPECT_EQ(clux_context_assign(ctx, other_l, big, NULL), other_l);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, v, other, NULL)));
-  clux_value_t *other_i = clux_context_get_field(ctx, other, "i", NULL);
+  clux_value_t *other_i = clux_context_field(ctx, other, "i", NULL);
   EXPECT_EQ(
       clux_context_assign(
           ctx, other_i, clux_context_create_i32(ctx, 6, NULL, NULL), NULL),
@@ -3440,12 +3439,12 @@ TEST(EngineTest, CunionTypeAndFieldAccess) {
                "operator '==' requires operands of the same type");
 
   /* 同类型 assign 整体拷贝 + clone */
-  EXPECT_EQ(read_i32(clux_context_get_field(
+  EXPECT_EQ(read_i32(clux_context_field(
                 ctx, clux_context_assign(ctx, other, v, NULL), "i", NULL)),
             5);
   clux_value_t *copy = clux_context_clone(ctx, v, NULL);
   ASSERT_NE(copy, nullptr);
-  EXPECT_EQ(read_i32(clux_context_get_field(ctx, copy, "i", NULL)), 5);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, copy, "i", NULL)), 5);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, v, NULL)));
 
   delete_clux_context(&ctx);
@@ -3517,16 +3516,16 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   EXPECT_TRUE(read_bool(clux_context_is_member(ctx, v, "a", NULL)));
   EXPECT_FALSE(read_bool(clux_context_is_member(ctx, v, "b", NULL)));
 
-  /* get_field：tag 匹配时返回 payload 的成员 view，写穿 view */
-  clux_value_t *a_field = clux_context_get_field(ctx, v, "a", NULL);
+  /* field：tag 匹配时返回 payload 的成员 view，写穿 view */
+  clux_value_t *a_field = clux_context_field(ctx, v, "a", NULL);
   ASSERT_NE(a_field, nullptr);
   EXPECT_EQ(clux_value_get_type(a_field), i32_type);
   clux_value_t *five = clux_context_create_i32(ctx, 5, NULL, NULL);
   EXPECT_EQ(clux_context_assign(ctx, a_field, five, NULL), a_field);
-  EXPECT_EQ(read_i32(clux_context_get_field(ctx, v, "a", NULL)), 5);
+  EXPECT_EQ(read_i32(clux_context_field(ctx, v, "a", NULL)), 5);
 
   /* tag 不匹配报运行期 error（先 is 判定再读取） */
-  clux_value_t *wrong = clux_context_get_field(ctx, v, "b", NULL);
+  clux_value_t *wrong = clux_context_field(ctx, v, "b", NULL);
   ASSERT_NE(wrong, nullptr);
   EXPECT_STREQ(error_message_of(wrong),
                "union is not 'b': current member is 'a', test with 'is' first");
@@ -3535,19 +3534,19 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   EXPECT_EQ(clux_context_union_set_member(ctx, v, "b", NULL), v);
   EXPECT_FALSE(read_bool(clux_context_is_member(ctx, v, "a", NULL)));
   EXPECT_TRUE(read_bool(clux_context_is_member(ctx, v, "b", NULL)));
-  clux_value_t *b_field = clux_context_get_field(ctx, v, "b", NULL);
+  clux_value_t *b_field = clux_context_field(ctx, v, "b", NULL);
   ASSERT_NE(b_field, nullptr);
   EXPECT_EQ(read_i64(b_field), 0);
   clux_value_t *seven = clux_context_create_i64(ctx, 7, NULL, NULL);
   EXPECT_EQ(clux_context_assign(ctx, b_field, seven, NULL), b_field);
-  EXPECT_EQ(read_i64(clux_context_get_field(ctx, v, "b", NULL)), 7);
-  clux_value_t *now_wrong = clux_context_get_field(ctx, v, "a", NULL);
+  EXPECT_EQ(read_i64(clux_context_field(ctx, v, "b", NULL)), 7);
+  clux_value_t *now_wrong = clux_context_field(ctx, v, "a", NULL);
   ASSERT_NE(now_wrong, nullptr);
   EXPECT_STREQ(error_message_of(now_wrong),
                "union is not 'a': current member is 'b', test with 'is' first");
 
-  /* 未知成员：get_field / is_member / set_member 三路报同样的名 */
-  clux_value_t *missing = clux_context_get_field(ctx, v, "x", NULL);
+  /* 未知成员：field / is_member / set_member 三路报同样的名 */
+  clux_value_t *missing = clux_context_field(ctx, v, "x", NULL);
   ASSERT_NE(missing, nullptr);
   EXPECT_STREQ(error_message_of(missing), "union 'Value' has no member 'x'");
   clux_value_t *missing_is = clux_context_is_member(ctx, v, "x", NULL);
@@ -3574,12 +3573,11 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   EXPECT_STREQ(error_message_of(bad_set),
                "member activation requires a union value, got 'i32'");
 
-  /* shadow：get_field 产出成员 shadow，is_member 产出 bool shadow，
+  /* shadow：field 产出成员 shadow，is_member 产出 bool shadow，
      set_member 原样返回 */
   clux_value_t *shadow_union =
       clux_context_create_shadow_value(ctx, value_type);
-  clux_value_t *shadow_field =
-      clux_context_get_field(ctx, shadow_union, "a", NULL);
+  clux_value_t *shadow_field = clux_context_field(ctx, shadow_union, "a", NULL);
   ASSERT_NE(shadow_field, nullptr);
   EXPECT_TRUE(clux_value_is_shadow(shadow_field));
   EXPECT_EQ(clux_value_get_type(shadow_field), i32_type);
@@ -3597,12 +3595,12 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, v, other, NULL)));
   EXPECT_EQ(clux_context_union_set_member(ctx, other, "b", NULL), other);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, v, other, NULL)));
-  clux_value_t *other_b = clux_context_get_field(ctx, other, "b", NULL);
+  clux_value_t *other_b = clux_context_field(ctx, other, "b", NULL);
   EXPECT_EQ(clux_context_assign(ctx, other_b, seven, NULL), other_b);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, v, other, NULL)));
   /* tag 不同即不等，即使 payload 位相同 */
   EXPECT_EQ(clux_context_union_set_member(ctx, other, "a", NULL), other);
-  clux_value_t *other_a = clux_context_get_field(ctx, other, "a", NULL);
+  clux_value_t *other_a = clux_context_field(ctx, other, "a", NULL);
   EXPECT_EQ(clux_context_assign(ctx, other_a, five, NULL), other_a);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_NE, v, other, NULL)));
   clux_value_t *mixed = clux_context_binary(ctx, CLUX_OP_EQ, v, plain, NULL);
@@ -3614,13 +3612,13 @@ TEST(EngineTest, TagUnionTypeAndIsMember) {
 
   /* 同类型 assign 整体拷贝（tag+payload）+ clone */
   EXPECT_EQ(clux_context_union_set_member(ctx, other, "b", NULL), other);
-  EXPECT_EQ(read_i64(clux_context_get_field(
+  EXPECT_EQ(read_i64(clux_context_field(
                 ctx, clux_context_assign(ctx, other, v, NULL), "b", NULL)),
             7);
   clux_value_t *copy = clux_context_clone(ctx, v, NULL);
   ASSERT_NE(copy, nullptr);
   EXPECT_TRUE(read_bool(clux_context_is_member(ctx, copy, "b", NULL)));
-  EXPECT_EQ(read_i64(clux_context_get_field(ctx, copy, "b", NULL)), 7);
+  EXPECT_EQ(read_i64(clux_context_field(ctx, copy, "b", NULL)), 7);
   EXPECT_TRUE(read_bool(clux_context_binary(ctx, CLUX_OP_EQ, copy, v, NULL)));
 
   delete_clux_context(&ctx);
@@ -3713,10 +3711,10 @@ TEST(EngineTest, NoLeak) {
   clux_value_t *boxed =
       clux_context_create_cunion(ctx, cunion_type, NULL, NULL);
   ASSERT_NE(boxed, nullptr);
-  clux_value_t *boxed_i = clux_context_get_field(ctx, boxed, "i", NULL);
+  clux_value_t *boxed_i = clux_context_field(ctx, boxed, "i", NULL);
   ASSERT_NE(boxed_i, nullptr);
   EXPECT_EQ(clux_context_assign(ctx, boxed_i, left, NULL), boxed_i);
-  ASSERT_NE(clux_context_get_field(ctx, boxed, "x", NULL), nullptr);
+  ASSERT_NE(clux_context_field(ctx, boxed, "x", NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, boxed, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, boxed, boxed, NULL), nullptr);
   clux_union_member_t union_members[] = {
@@ -3730,8 +3728,8 @@ TEST(EngineTest, NoLeak) {
   ASSERT_NE(tagged, nullptr);
   ASSERT_NE(clux_context_is_member(ctx, tagged, "i", NULL), nullptr);
   ASSERT_NE(clux_context_union_set_member(ctx, tagged, "l", NULL), nullptr);
-  ASSERT_NE(clux_context_get_field(ctx, tagged, "l", NULL), nullptr);
-  ASSERT_NE(clux_context_get_field(ctx, tagged, "x", NULL), nullptr);
+  ASSERT_NE(clux_context_field(ctx, tagged, "l", NULL), nullptr);
+  ASSERT_NE(clux_context_field(ctx, tagged, "x", NULL), nullptr);
   ASSERT_NE(clux_context_is_member(ctx, tagged, "x", NULL), nullptr);
   ASSERT_NE(clux_context_clone(ctx, tagged, NULL), nullptr);
   ASSERT_NE(clux_context_binary(ctx, CLUX_OP_EQ, tagged, tagged, NULL),

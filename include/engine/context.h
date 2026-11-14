@@ -171,12 +171,12 @@ clux_value_t *clux_context_create_cunion(clux_context_t *self,
                                          location_t *loc);
 /* 成员读取（x.field）：返回成员类型的 view（内存共享、携带引用属性），
    未知成员报 error，shadow 值产出成员类型的 shadow。写入由通用 assign
-   写穿 view 完成。仅绑定 get_field 槽位的类型支持（当前仅 cunion），
-   其余类型返回 error。 */
-clux_value_t *clux_context_get_field(clux_context_t *self,
-                                     clux_value_t *value,
-                                     const char *field,
-                                     location_t *loc);
+   写穿 view 完成。仅绑定 field 槽位的类型支持（当前 cunion 与 tag
+   union），其余类型返回 error。 */
+clux_value_t *clux_context_field(clux_context_t *self,
+                                 clux_value_t *value,
+                                 const char *field,
+                                 location_t *loc);
 /* 创建具名 tag union 类型（白皮书 §3.7）：tag 为定宽 u32（偏移 0），
    payload 从类型对齐处开始，同一时刻只有一个 member 有效。成员表整体
    拷入 meta，成员名经 strs 驻留。结构判等（成员名+类型按声明序一致即
